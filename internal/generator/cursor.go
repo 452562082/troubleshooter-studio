@@ -10,7 +10,9 @@ import (
 // GenerateCursor 输出 Cursor IDE 格式：
 //   - .cursorrules（合并排障知识，Cursor 自动读取）
 //   - .cursor/rules/（每个 skill 单独一个 .mdc 文件，Cursor project rules）
+//   - skills/（映射表 + 脚本）
 //   - scripts/（辅助脚本）
+//   - install.sh（把上述产物一键安装到指定项目根）
 func (g *Generator) GenerateCursor() error {
 	outDir := g.OutputDir + "-cursor"
 	if err := os.RemoveAll(outDir); err != nil {
@@ -82,7 +84,76 @@ func (g *Generator) GenerateCursor() error {
 		}
 	}
 
+	// 5) install.sh
+	if err := os.WriteFile(filepath.Join(outDir, "install.sh"), []byte(cursorInstallSh(g.Ctx)), 0o755); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+func cursorInstallSh(ctx *Context) string {
+	return fmt.Sprintf(`#!/usr/bin/env bash
+# %s 排障机器人 — Cursor IDE 一键安装
+# 由 troubleshooter-factory 生成
+#
+# 用法：
+#   bash install.sh [target-project-dir]
+#   bash install.sh ~/code/my-app
+#   bash install.sh              # 默认当前目录
+set -euo pipefail
+
+SRC="$(cd "$(dirname "$0")" && pwd)"
+DST="${1:-.}"
+
+if [ ! -d "$DST" ]; then
+  echo "错误：目标目录不存在：$DST" >&2
+  exit 1
+fi
+
+DST="$(cd "$DST" && pwd)"
+TS="$(date +%%Y%%m%%d-%%H%%M%%S)"
+
+echo "→ 安装到：$DST"
+
+# 1. .cursorrules —— 已存在则备份
+if [ -f "$DST/.cursorrules" ]; then
+  cp "$DST/.cursorrules" "$DST/.cursorrules.bak.$TS"
+  echo "  · 已备份原 .cursorrules → .cursorrules.bak.$TS"
+fi
+cp "$SRC/.cursorrules" "$DST/.cursorrules"
+echo "  · .cursorrules"
+
+# 2. .cursor/rules/ —— 合并（同名 .mdc 覆盖，其余保留）
+mkdir -p "$DST/.cursor/rules"
+if [ -d "$SRC/.cursor/rules" ]; then
+  for f in "$SRC/.cursor/rules/"*.mdc; do
+    [ -f "$f" ] || continue
+    cp "$f" "$DST/.cursor/rules/"
+    echo "  · .cursor/rules/$(basename "$f")"
+  done
+fi
+
+# 3. skills/ —— 合并（同名子目录整体覆盖，其余保留）
+mkdir -p "$DST/skills"
+for d in "$SRC/skills/"*/; do
+  [ -d "$d" ] || continue
+  name="$(basename "$d")"
+  rm -rf "$DST/skills/$name"
+  cp -R "$d" "$DST/skills/$name"
+  echo "  · skills/$name"
+done
+
+# 4. scripts/ —— 合并
+if [ -d "$SRC/scripts" ]; then
+  mkdir -p "$DST/scripts"
+  cp -R "$SRC/scripts/"* "$DST/scripts/" 2>/dev/null || true
+  echo "  · scripts/"
+fi
+
+echo ""
+echo "✓ 安装完成。用 Cursor 打开 $DST 即可加载规则。"
+`, ctx.System.Name)
 }
 
 func buildCursorRules(wsRoot string, ctx *Context) (string, error) {

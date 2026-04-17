@@ -13,7 +13,10 @@ import (
 //   - scripts/（辅助脚本）
 //   - server.py（最小化 Python 聊天服务，调 Claude/OpenAI API）
 //   - index.html（简单聊天前端）
+//   - requirements.txt（Python 依赖）
+//   - Dockerfile（容器镜像定义）
 //   - docker-compose.yaml（一键启动）
+//   - install.sh（本机一键安装：venv + pip install + 启动提示）
 //   - README.md（使用说明）
 func (g *Generator) GenerateStandalone() error {
 	outDir := g.OutputDir + "-standalone"
@@ -72,12 +75,27 @@ func (g *Generator) GenerateStandalone() error {
 		return err
 	}
 
-	// 5) docker-compose.yaml
+	// 5) requirements.txt
+	if err := os.WriteFile(filepath.Join(outDir, "requirements.txt"), []byte(requirementsTxt()), 0o644); err != nil {
+		return err
+	}
+
+	// 6) Dockerfile
+	if err := os.WriteFile(filepath.Join(outDir, "Dockerfile"), []byte(dockerfile()), 0o644); err != nil {
+		return err
+	}
+
+	// 7) docker-compose.yaml
 	if err := os.WriteFile(filepath.Join(outDir, "docker-compose.yaml"), []byte(dockerCompose(g.Ctx)), 0o644); err != nil {
 		return err
 	}
 
-	// 6) README.md
+	// 8) install.sh（本机一键安装）
+	if err := os.WriteFile(filepath.Join(outDir, "install.sh"), []byte(standaloneInstallSh(g.Ctx)), 0o755); err != nil {
+		return err
+	}
+
+	// 9) README.md
 	if err := os.WriteFile(filepath.Join(outDir, "README.md"), []byte(standaloneReadme(g.Ctx)), 0o644); err != nil {
 		return err
 	}
@@ -251,7 +269,7 @@ function addMsg(role, text) {
 
 func dockerCompose(ctx *Context) string {
 	return fmt.Sprintf(`# %s 排障机器人 — 独立部署
-# 用法：LLM_API_KEY=your-key docker compose up
+# 用法：LLM_API_KEY=your-key docker compose up --build
 version: "3.8"
 services:
   troubleshooter:
@@ -264,6 +282,80 @@ services:
     volumes:
       - ./skills:/app/skills:ro
       - ./scripts:/app/scripts:ro
+    restart: unless-stopped
+`, ctx.System.Name)
+}
+
+func dockerfile() string {
+	return `# 由 troubleshooter-factory 生成
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# 先装依赖，利用层缓存
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 拷贝代码、prompt、资产
+COPY server.py index.html system-prompt.md ./
+COPY skills ./skills
+COPY scripts ./scripts
+
+EXPOSE 3000
+
+CMD ["python3", "server.py"]
+`
+}
+
+func requirementsTxt() string {
+	return `# troubleshooter-factory standalone runtime
+flask>=3.0
+anthropic>=0.34
+`
+}
+
+func standaloneInstallSh(ctx *Context) string {
+	return fmt.Sprintf(`#!/usr/bin/env bash
+# %s 排障机器人 — 本机一键安装（venv + pip install）
+# 由 troubleshooter-factory 生成
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "错误：未找到 python3，请先安装 Python 3.9+" >&2
+  exit 1
+fi
+
+VENV=".venv"
+if [ ! -d "$VENV" ]; then
+  echo "→ 创建虚拟环境 $VENV"
+  python3 -m venv "$VENV"
+fi
+
+# shellcheck disable=SC1091
+source "$VENV/bin/activate"
+
+echo "→ 升级 pip"
+pip install --quiet --upgrade pip
+
+echo "→ 安装依赖 (flask + anthropic)"
+pip install --quiet -r requirements.txt
+
+echo ""
+echo "✓ 安装完成。下一步："
+echo ""
+echo "  1. 设置 LLM API key："
+echo "       export LLM_API_KEY=<your-anthropic-api-key>"
+echo ""
+echo "  2. 激活 venv 并启动："
+echo "       source $VENV/bin/activate"
+echo "       python3 server.py"
+echo ""
+echo "  → 访问 http://localhost:3000"
+echo ""
+echo "  或使用 Docker："
+echo "       LLM_API_KEY=<your-key> docker compose up --build"
 `, ctx.System.Name)
 }
 
@@ -272,24 +364,20 @@ func standaloneReadme(ctx *Context) string {
 
 由 troubleshooter-factory 生成。不依赖 OpenClaw / Claude Code / Cursor，只需一个 LLM API key。
 
-## 快速启动
+## 快速启动（本机 venv，一键）
 
 `+"```"+`bash
-# 安装依赖
-pip install flask anthropic
-
-# 设置 API key
+bash install.sh                         # 自动建 venv + pip install
 export LLM_API_KEY=your-anthropic-api-key
-
-# 启动
-python3 server.py
+source .venv/bin/activate && python3 server.py
 # → http://localhost:3000
 `+"```"+`
 
-## Docker 部署
+## Docker 部署（一键）
 
 `+"```"+`bash
-LLM_API_KEY=your-key docker compose up
+LLM_API_KEY=your-key docker compose up --build
+# → http://localhost:3000
 `+"```"+`
 
 ## 文件说明
@@ -299,6 +387,9 @@ LLM_API_KEY=your-key docker compose up
 - scripts/ — 辅助脚本（resolve_runtime 等）
 - server.py — Flask 聊天服务（调 Claude API）
 - index.html — 聊天前端
+- requirements.txt — Python 依赖清单
+- Dockerfile — 容器镜像定义
 - docker-compose.yaml — 容器化部署
+- install.sh — 本机一键安装脚本
 `, ctx.System.Name)
 }

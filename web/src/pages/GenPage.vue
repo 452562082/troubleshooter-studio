@@ -118,12 +118,12 @@ async function runGen() {
 
     <div class="info-box">
       <div class="info-box-title">使用说明</div>
-      <div>执行生成：根据 system.yaml 的 <code>generation.targets</code> 产出排障机器人部署包，可一次生成四种形态：</div>
+      <div>执行生成：根据 system.yaml 的 <code>generation.targets</code> 产出排障机器人部署包，可一次生成四种形态，<strong>每种都带 <code>install.sh</code> 一键部署</strong>：</div>
       <ul class="info-box-list">
-        <li><code>openclaw</code> — install.sh + self-test.sh + workspace 模板（<code>bash install.sh</code> 部署）</li>
-        <li><code>claude-code</code> — CLAUDE.md + skills/（放到项目根即用）</li>
-        <li><code>cursor</code> — .cursorrules + .cursor/rules/*.mdc + skills/（Cursor 自动读取）</li>
-        <li><code>standalone</code> — server.py + index.html + docker-compose（自带聊天界面，仅需 LLM API key）</li>
+        <li><code>openclaw</code> — <code>bash install.sh</code> 部署到 OpenClaw（含 self-test.sh + workspace 模板）</li>
+        <li><code>claude-code</code> — <code>bash install.sh &lt;project-dir&gt;</code> 把 CLAUDE.md + skills/ 装入项目根</li>
+        <li><code>cursor</code> — <code>bash install.sh &lt;project-dir&gt;</code> 把 .cursorrules + .cursor/rules/ + skills/ 装入项目根</li>
+        <li><code>standalone</code> — <code>bash install.sh</code> 建 venv + 装依赖；或 <code>docker compose up --build</code> 一键起容器</li>
       </ul>
       <div class="info-box-warn">&#x26A0; 注意：此操作会写盘到 output_dir 目录（多 target 会产出 <code>&lt;id&gt;-&lt;target&gt;/</code> 兄弟目录）</div>
     </div>

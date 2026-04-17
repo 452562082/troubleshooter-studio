@@ -12,8 +12,9 @@ import (
 //   - CLAUDE.md（合并 SOUL + IDENTITY + AGENTS + CHECKLIST + TOOLS）
 //   - skills/（原样保留所有 skill 目录）
 //   - scripts/（辅助脚本保留）
+//   - install.sh（把上述产物一键安装到指定项目根）
 //
-// 不生成 install.sh / self-test.sh / uninstall.sh / .clawhub / README 等 OpenClaw 特有文件
+// 不生成 self-test.sh / uninstall.sh / .clawhub 等 OpenClaw 特有文件
 func (g *Generator) GenerateClaudeCode() error {
 	outDir := g.OutputDir + "-claude-code"
 	if err := os.RemoveAll(outDir); err != nil {
@@ -65,7 +66,66 @@ func (g *Generator) GenerateClaudeCode() error {
 		}
 	}
 
+	// 5) install.sh
+	if err := os.WriteFile(filepath.Join(outDir, "install.sh"), []byte(claudeCodeInstallSh(g.Ctx)), 0o755); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+func claudeCodeInstallSh(ctx *Context) string {
+	return fmt.Sprintf(`#!/usr/bin/env bash
+# %s 排障机器人 — Claude Code 一键安装
+# 由 troubleshooter-factory 生成
+#
+# 用法：
+#   bash install.sh [target-project-dir]
+#   bash install.sh ~/code/my-app
+#   bash install.sh              # 默认当前目录
+set -euo pipefail
+
+SRC="$(cd "$(dirname "$0")" && pwd)"
+DST="${1:-.}"
+
+if [ ! -d "$DST" ]; then
+  echo "错误：目标目录不存在：$DST" >&2
+  exit 1
+fi
+
+DST="$(cd "$DST" && pwd)"
+TS="$(date +%%Y%%m%%d-%%H%%M%%S)"
+
+echo "→ 安装到：$DST"
+
+# 1. CLAUDE.md —— 已存在则备份
+if [ -f "$DST/CLAUDE.md" ]; then
+  cp "$DST/CLAUDE.md" "$DST/CLAUDE.md.bak.$TS"
+  echo "  · 已备份原 CLAUDE.md → CLAUDE.md.bak.$TS"
+fi
+cp "$SRC/CLAUDE.md" "$DST/CLAUDE.md"
+echo "  · CLAUDE.md"
+
+# 2. skills/ —— 合并（同名子目录整体覆盖，其余保留）
+mkdir -p "$DST/skills"
+for d in "$SRC/skills/"*/; do
+  [ -d "$d" ] || continue
+  name="$(basename "$d")"
+  rm -rf "$DST/skills/$name"
+  cp -R "$d" "$DST/skills/$name"
+  echo "  · skills/$name"
+done
+
+# 3. scripts/ —— 合并
+if [ -d "$SRC/scripts" ]; then
+  mkdir -p "$DST/scripts"
+  cp -R "$SRC/scripts/"* "$DST/scripts/" 2>/dev/null || true
+  echo "  · scripts/"
+fi
+
+echo ""
+echo "✓ 安装完成。在 $DST 下执行 claude 即可加载机器人。"
+`, ctx.System.Name)
 }
 
 func buildClaudeMD(wsRoot string, ctx *Context) (string, error) {

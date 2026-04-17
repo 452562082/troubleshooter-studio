@@ -6,12 +6,12 @@
 
 为任意业务系统生成一个定制化的 **AI 排障机器人一键部署包**。
 
-输入一份 `system.yaml`（系统身份 / 环境清单 / 仓库列表 / 基础组件配置），一键产出四种部署形态的机器人包：
+输入一份 `system.yaml`（系统身份 / 环境清单 / 仓库列表 / 基础组件配置），一键产出四种部署形态的机器人包，**每种都自带 `install.sh` 一键部署**：
 
-- **OpenClaw 安装包** — `bash install.sh` 部署到 OpenClaw（工作区 + 脚本 + MCP 配置）
-- **Claude Code** — `CLAUDE.md` + `skills/`，放到项目根目录即用
-- **Cursor IDE** — `.cursorrules` + `.cursor/rules/*.mdc` + `skills/`，Cursor 自动读取
-- **Standalone Web 聊天** — `server.py` + `index.html` + `docker-compose`，不依赖任何 AI 平台，自带聊天界面
+- **OpenClaw 安装包** — `bash install.sh` 部署到 OpenClaw（工作区 + self-test.sh + MCP 配置）
+- **Claude Code** — `bash install.sh <project-dir>` 将 `CLAUDE.md` + `skills/` 装入项目根
+- **Cursor IDE** — `bash install.sh <project-dir>` 将 `.cursorrules` + `.cursor/rules/` + `skills/` 装入项目根
+- **Standalone Web 聊天** — `bash install.sh`（venv + pip install）或 `docker compose up --build`，不依赖任何 AI 平台，自带聊天界面
 
 按需在 `generation.targets` 里勾选，一次 `gen` 全部生成。
 
@@ -132,12 +132,12 @@ generation:
 # → dist/<id>-standalone/  独立 Web 聊天
 ```
 
-| 目标 | 核心产物 | 使用方式 |
+| 目标 | 核心产物 | 一键部署 |
 |---|---|---|
-| `openclaw` | install.sh + workspace 模板 | `bash install.sh` → 部署到 OpenClaw |
-| `claude-code` | CLAUDE.md + skills/ | 放到项目根目录，`claude` 命令直接用 |
-| `cursor` | .cursorrules + .cursor/rules/*.mdc + skills/ | 放到项目根目录，Cursor 自动读取 |
-| `standalone` | server.py + index.html + docker-compose | `python3 server.py` 或 `docker compose up` |
+| `openclaw` | install.sh + self-test.sh + workspace 模板 | `bash install.sh` → 部署到 OpenClaw |
+| `claude-code` | CLAUDE.md + skills/ + **install.sh** | `bash install.sh <project-dir>`（自动备份已存在的 CLAUDE.md） |
+| `cursor` | .cursorrules + .cursor/rules/*.mdc + skills/ + **install.sh** | `bash install.sh <project-dir>`（自动备份已存在的 .cursorrules） |
+| `standalone` | server.py + index.html + Dockerfile + requirements.txt + docker-compose + **install.sh** | 本机：`bash install.sh`；或容器：`docker compose up --build` |
 
 standalone 模式不依赖任何 AI 平台——只需一个 LLM API key（Claude / OpenAI），自带聊天界面和 Docker 部署。
 

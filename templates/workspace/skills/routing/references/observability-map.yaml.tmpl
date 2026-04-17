@@ -1,0 +1,32 @@
+# observability-map.yaml
+# 由 troubleshooter-factory 生成 — 监控默认数据源与优先指标
+{{- if .Infrastructure.Observability.Prometheus.Enabled}}
+default_datasource: prometheus
+{{- else if .Infrastructure.Observability.Loki.Enabled}}
+default_datasource: loki
+{{- else}}
+default_datasource: ""
+{{- end}}
+
+grafana:
+  enabled: {{.Infrastructure.Observability.Grafana.Enabled}}
+  {{- if .Infrastructure.Observability.Grafana.Enabled}}
+  url_by_env:
+  {{- range $env, $url := .Infrastructure.Observability.Grafana.URLByEnv}}
+    {{$env}}: {{$url | printf "%q"}}
+  {{- end}}
+  {{- end}}
+
+loki:
+  enabled: {{.Infrastructure.Observability.Loki.Enabled}}
+  via_grafana: {{.Infrastructure.Observability.Loki.ViaGrafana}}
+
+prometheus:
+  enabled: {{.Infrastructure.Observability.Prometheus.Enabled}}
+  via_grafana: {{.Infrastructure.Observability.Prometheus.ViaGrafana}}
+  {{- if .Infrastructure.Observability.Prometheus.PreferredMetrics}}
+  preferred_metrics:
+  {{- range .Infrastructure.Observability.Prometheus.PreferredMetrics}}
+    - {{. | printf "%q"}}
+  {{- end}}
+  {{- end}}

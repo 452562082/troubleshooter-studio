@@ -1,0 +1,379 @@
+package generator
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/xiaolong/troubleshooter-factory/internal/config"
+)
+
+// projectRoot 返回 troubleshooter-factory 仓库根目录（便于测试定位 templates/ 与 examples/）
+func projectRoot(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// tests live in internal/generator, so root is ../..
+	return filepath.Clean(filepath.Join(wd, "..", ".."))
+}
+
+func loadCfg(t *testing.T, rel string) *config.SystemConfig {
+	t.Helper()
+	cfg, err := config.Load(filepath.Join(projectRoot(t), rel))
+	if err != nil {
+		t.Fatalf("load %s: %v", rel, err)
+	}
+	return cfg
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(data)
+}
+
+func loadConfigMap(t *testing.T, path string) map[string]map[string]map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var root struct {
+		Environments map[string]map[string]map[string]any `yaml:"environments"`
+	}
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	return root.Environments
+}
+
+func TestGenerate_Nacos_Shop(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-system.yaml")
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+
+	g := New(cfg, tr, out)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	// 结构断言
+	wsRoot := filepath.Join(out, "templates", "workspace-template")
+	must := []string{
+		"SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "CHECKLIST.md", "TOOLS.md",
+		"skills/routing/SKILL.md",
+		"skills/routing/references/env-branch-map.yaml",
+		"skills/routing/references/env-domain-map.yaml",
+		"skills/routing/references/config-map.yaml",
+		"skills/routing/references/repo-stack-map.yaml",
+		"skills/config-executor/SKILL.md",
+		"skills/redis-runtime-query/SKILL.md",
+		"skills/mongodb-runtime-query/SKILL.md",
+		"skills/es-runtime-query/SKILL.md",
+		"skills/diagram-generator/SKILL.md",
+	}
+	for _, rel := range must {
+		if _, err := os.Stat(filepath.Join(wsRoot, rel)); err != nil {
+			t.Errorf("expected file missing: %s (%v)", rel, err)
+		}
+	}
+
+	// 脚本存在 + 可执行
+	for _, name := range []string{"install.sh", "self-test.sh", "uninstall.sh"} {
+		p := filepath.Join(out, "scripts", name)
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Errorf("expected script missing: %s", name)
+			continue
+		}
+		if info.Mode()&0o111 == 0 {
+			t.Errorf("%s not executable", name)
+		}
+	}
+
+	// config-map 应标 config_center: nacos
+	cm := readFile(t, filepath.Join(wsRoot, "skills/routing/references/config-map.yaml"))
+	if !strings.Contains(cm, "config_center: nacos") {
+		t.Errorf("config-map should declare nacos center:\n%s", cm)
+	}
+
+	// Q: config-map 每行必须带 mcp_server，且按 env 区分
+	for _, env := range []string{"dev", "staging", "prod"} {
+		want := "mcp_server: \"nacos-mcp-server-" + env + "\""
+		if !strings.Contains(cm, want) {
+			t.Errorf("config-map missing per-env mcp_server %q", want)
+		}
+	}
+
+	// Q: install.sh 每个 env 都应注册独立 MCP
+	installSh := readFile(t, filepath.Join(out, "scripts/install.sh"))
+	for _, env := range []string{"dev", "staging", "prod"} {
+		want := "nacos-mcp-server-" + env
+		if !strings.Contains(installSh, want) {
+			t.Errorf("install.sh missing per-env MCP %q", want)
+		}
+	}
+
+	// mysql 和 kafka 现在已在 shop-system 中启用，验证它们存在
+	for _, s := range []string{"mysql-runtime-query", "kafka-runtime-query"} {
+		if _, err := os.Stat(filepath.Join(wsRoot, "skills", s)); err != nil {
+			t.Errorf("skill %s should be generated: %v", s, err)
+		}
+	}
+}
+
+// Q': per-env credentials 模式
+func TestGenerate_PerEnvCredentials(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-per-env.yaml")
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+	if err := New(cfg, tr, out).Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	installSh := readFile(t, filepath.Join(out, "scripts/install.sh"))
+
+	// 应该按 env 分别问 nacos 用户名/密码
+	for _, env := range []string{"DEV", "PROD"} {
+		for _, v := range []string{"CC_USER_" + env, "CC_PASS_" + env, "GRAFANA_USER_" + env, "GRAFANA_PASS_" + env} {
+			if !strings.Contains(installSh, v) {
+				t.Errorf("per-env install.sh missing var %s", v)
+			}
+		}
+	}
+	// MCP 注入应用各 env 独立变量，而不是共享变量
+	if !strings.Contains(installSh, "'NACOS_USERNAME': os.environ.get('CC_USER_DEV', '')") {
+		t.Errorf("per-env nacos-mcp-server-dev should use CC_USER_DEV")
+	}
+	if !strings.Contains(installSh, "'NACOS_USERNAME': os.environ.get('CC_USER_PROD', '')") {
+		t.Errorf("per-env nacos-mcp-server-prod should use CC_USER_PROD")
+	}
+	// 不应再出现共享变量的 prompt 行
+	if strings.Contains(installSh, "所有 env 共用") {
+		t.Errorf("per-env mode should not prompt for shared credentials")
+	}
+}
+
+// Q': shared 模式（未开 per_env_credentials）保持原行为
+func TestGenerate_SharedCredentials_Default(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-system.yaml")
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+	if err := New(cfg, tr, out).Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	installSh := readFile(t, filepath.Join(out, "scripts/install.sh"))
+	if !strings.Contains(installSh, "所有 env 共用") {
+		t.Errorf("default mode should prompt shared credentials")
+	}
+	if strings.Contains(installSh, "CC_USER_DEV") {
+		t.Errorf("default mode should not emit CC_USER_<env>")
+	}
+	// MCP 注入用共享变量
+	if !strings.Contains(installSh, "os.environ.get('CONFIG_CENTER_USERNAME', '')") {
+		t.Errorf("default mode should use CONFIG_CENTER_USERNAME")
+	}
+}
+
+func TestGenerate_Apollo(t *testing.T) {
+	cfg := loadCfg(t, "examples/apollo-system.yaml")
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+	if err := New(cfg, tr, out).Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	cm := readFile(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/config-map.yaml"))
+	if !strings.Contains(cm, "config_center: apollo") {
+		t.Errorf("config-map should declare apollo")
+	}
+	if !strings.Contains(cm, "appId:") || !strings.Contains(cm, "namespaces:") {
+		t.Errorf("apollo config-map missing expected fields")
+	}
+
+	// C5: Apollo 走 HTTP 脚本，产物必须含 apollo_config.py
+	if _, err := os.Stat(filepath.Join(out, "templates/workspace-template/skills/config-executor/scripts/apollo_config.py")); err != nil {
+		t.Errorf("apollo_config.py should exist: %v", err)
+	}
+	// C5: install.sh 必须提示 Apollo meta URL + 写 creds.json
+	installSh := readFile(t, filepath.Join(out, "scripts/install.sh"))
+	if !strings.Contains(installSh, "APOLLO_META_DEV") || !strings.Contains(installSh, "APOLLO_META_PROD") {
+		t.Errorf("apollo install.sh missing per-env meta URL prompts")
+	}
+	if !strings.Contains(installSh, "creds['apollo']") {
+		t.Errorf("apollo install.sh missing creds.json write block")
+	}
+	// apollo 系统不应该注册 nacos MCP（只看 put(...) 调用，不算注释）
+	if strings.Contains(installSh, "put('nacos-mcp-server") {
+		t.Errorf("apollo install.sh should not register nacos MCP")
+	}
+	// SKILL.md 必须指向脚本
+	skillMD := readFile(t, filepath.Join(out, "templates/workspace-template/skills/config-executor/SKILL.md"))
+	if !strings.Contains(skillMD, "apollo_config.py") {
+		t.Errorf("config-executor SKILL.md should reference apollo_config.py")
+	}
+}
+
+func TestGenerate_Consul(t *testing.T) {
+	cfg := loadCfg(t, "examples/consul-system.yaml")
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+	if err := New(cfg, tr, out).Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	cm := readFile(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/config-map.yaml"))
+	if !strings.Contains(cm, "config_center: consul") {
+		t.Errorf("config-map should declare consul")
+	}
+	if !strings.Contains(cm, "kv_prefix:") || !strings.Contains(cm, "default_context:") {
+		t.Errorf("consul config-map missing expected fields")
+	}
+
+	// C5: Consul 走 HTTP 脚本
+	if _, err := os.Stat(filepath.Join(out, "templates/workspace-template/skills/config-executor/scripts/consul_config.py")); err != nil {
+		t.Errorf("consul_config.py should exist: %v", err)
+	}
+	installSh := readFile(t, filepath.Join(out, "scripts/install.sh"))
+	if !strings.Contains(installSh, "CONSUL_HOST_") {
+		t.Errorf("consul install.sh missing per-env host prompts")
+	}
+	if !strings.Contains(installSh, "creds['consul']") {
+		t.Errorf("consul install.sh missing creds.json write block")
+	}
+	skillMD := readFile(t, filepath.Join(out, "templates/workspace-template/skills/config-executor/SKILL.md"))
+	if !strings.Contains(skillMD, "consul_config.py") {
+		t.Errorf("config-executor SKILL.md should reference consul_config.py")
+	}
+}
+
+func TestGenerate_ClawhubLock(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-system.yaml")
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+	if err := New(cfg, tr, out).Generate(); err != nil {
+		t.Fatal(err)
+	}
+
+	lockPath := filepath.Join(out, "templates/workspace-template/.clawhub/lock.json")
+	data, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("lock.json missing: %v", err)
+	}
+	var lock struct {
+		Version int `json:"version"`
+		Skills  map[string]struct {
+			Version     string `json:"version"`
+			InstalledAt int64  `json:"installedAt"`
+		} `json:"skills"`
+	}
+	if err := json.Unmarshal(data, &lock); err != nil {
+		t.Fatalf("parse lock.json: %v", err)
+	}
+	if lock.Version != 1 {
+		t.Errorf("lock.version expected 1, got %d", lock.Version)
+	}
+	// shop-system.yaml 的 skills_whitelist 列了 8 个 skills
+	wantSkills := []string{"routing", "config-executor", "redis-runtime-query", "mongodb-runtime-query", "es-runtime-query", "mysql-runtime-query", "kafka-runtime-query", "diagram-generator"}
+	for _, s := range wantSkills {
+		entry, ok := lock.Skills[s]
+		if !ok {
+			t.Errorf("lock.json missing skill %q", s)
+			continue
+		}
+		if entry.InstalledAt == 0 {
+			t.Errorf("%s.installedAt should be non-zero", s)
+		}
+		if entry.Version == "" {
+			t.Errorf("%s.version should be non-empty", s)
+		}
+	}
+	// 不在白名单里的 skill 不应出现
+	for _, s := range []string{"nonexistent-skill"} {
+		if _, ok := lock.Skills[s]; ok {
+			t.Errorf("lock.json should not contain disabled skill %q", s)
+		}
+	}
+}
+
+func TestGenerate_ClawhubLock_EmptySkills(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-system.yaml")
+	// 清空白名单 + 禁用所有 data stores，还要清掉 config center，
+	// 确保没有 skills 目录会被生成
+	cfg.Generation.SkillsWhitelist = []string{"__none__"}
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+	if err := New(cfg, tr, out).Generate(); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(out, "templates/workspace-template/.clawhub/lock.json")
+	data, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("lock.json should exist even with no skills: %v", err)
+	}
+	var lock struct {
+		Version int                    `json:"version"`
+		Skills  map[string]interface{} `json:"skills"`
+	}
+	if err := json.Unmarshal(data, &lock); err != nil {
+		t.Fatal(err)
+	}
+	if lock.Version != 1 {
+		t.Errorf("version expected 1, got %d", lock.Version)
+	}
+	if len(lock.Skills) != 0 {
+		t.Errorf("expected empty skills, got %v", lock.Skills)
+	}
+}
+
+func TestGenerate_WithAnalysis_UpgradesInferredToVerified(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-system.yaml")
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+
+	g := New(cfg, tr, out)
+
+	// 注入合成 finding：给 order-worker 填充具体值，走 LoadAnalysis 正规路径
+	analysisJSON := `{
+  "schema_version": "0.1",
+  "config_center": "nacos",
+  "repos": [{
+    "name": "order-service",
+    "stack": "go",
+    "service_names": ["order-service", "order-worker"],
+    "findings": [{
+      "config_center": "nacos",
+      "source_file": "synthetic.yaml",
+      "data_id": "order-worker.yaml",
+      "group": "SHOP_ORDER",
+      "namespace_id": "shop-dev"
+    }],
+    "verified": true
+  }]
+}`
+	ap := filepath.Join(t.TempDir(), "analysis.json")
+	if err := os.WriteFile(ap, []byte(analysisJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.LoadAnalysis(ap); err != nil {
+		t.Fatalf("load analysis: %v", err)
+	}
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	rows := loadConfigMap(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/config-map.yaml"))
+	row := rows["dev"]["order-worker"]
+	if row["status"] != "verified" {
+		t.Errorf("order-worker/dev status expected verified, got %v", row["status"])
+	}
+	if row["dataId"] != "order-worker.yaml" {
+		t.Errorf("order-worker/dev dataId expected order-worker.yaml, got %v", row["dataId"])
+	}
+}

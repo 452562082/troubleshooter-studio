@@ -1,0 +1,71 @@
+---
+name: tracing-query
+description: 通过 Jaeger 查询分布式链路追踪。按 trace ID、service name、时间范围查询 span，定位跨服务延迟与错误传播路径。排障时的核心取证手段。
+---
+
+# Tracing Query（Jaeger）
+
+## 何时使用
+
+- 用户反馈接口慢 / 超时 / 报错，需要看请求在各服务间的流转
+- 有 trace ID（从日志或响应头中获取）需要展开查看
+- 需要对比正常请求与异常请求的 span 差异
+
+## 执行流程
+
+1. 确认 env（通过 `routing`）。
+2. 获取 Jaeger UI URL：
+{{- range .Environments}}
+   - `{{.ID}}` → config 中声明的 Jaeger URL
+{{- end}}
+3. 按场景选择查询方式：
+   - **有 trace ID**：直接查 → `/api/traces/{traceID}`
+   - **无 trace ID**：按 service + operation + 时间范围搜索 → `/api/traces?service=X&operation=Y&start=...&end=...`
+4. 分析 span 树：找到耗时最长的 span、错误 span、跨服务调用链。
+
+## Jaeger HTTP API
+
+### 按 trace ID 查询
+
+```bash
+curl "$JAEGER_URL/api/traces/<traceID>" | python3 -m json.tool
+```
+
+### 按 service + 时间范围搜索
+
+```bash
+curl "$JAEGER_URL/api/traces?service=<service>&start=<epoch_us>&end=<epoch_us>&limit=20"
+```
+
+### 列出所有 service
+
+```bash
+curl "$JAEGER_URL/api/services"
+```
+
+### 查看某 service 的 operation 列表
+
+```bash
+curl "$JAEGER_URL/api/services/<service>/operations"
+```
+
+> 时间戳单位：微秒（epoch × 1000000）
+
+## 输出要求
+
+- 先结论：链路是否异常（是/否）
+- 再证据：
+  - trace ID
+  - span 数量 + 总耗时
+  - 耗时 TOP 3 span（service + operation + duration）
+  - 错误 span（若有：service + error tag + 日志）
+- 最后归因：
+  - 哪个服务是瓶颈
+  - 是网络延迟 / 下游超时 / 自身处理慢
+  - 建议排查方向
+
+## 硬约束
+
+- 仅只读查询；不修改 trace 数据。
+- 必须先通过 `routing` 确认 env，再用对应 env 的 Jaeger URL。
+- 展示 span 详情时对敏感 tag（token、password）做脱敏。

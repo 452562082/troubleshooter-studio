@@ -1,0 +1,86 @@
+---
+name: tempo-query
+description: 通过 Grafana Tempo HTTP API 查询分布式链路追踪。按 trace ID 或 tag 搜索 trace，通常经 Grafana datasource 或直接访问 Tempo API，定位跨服务延迟与错误传播路径。
+---
+
+# Tempo Query（Grafana Tempo）
+
+## 何时使用
+
+- 用户反馈接口慢 / 超时 / 报错，需要看请求在各服务间的流转
+- 有 trace ID（从日志或响应头中获取）需要展开查看
+- 需要按 tag（service.name、http.status_code 等）搜索相关 trace
+
+## 执行流程
+
+1. 确认 env（通过 `routing`）。
+2. 获取 Tempo URL：
+{{- range .Environments}}
+   - `{{.ID}}` → config 中声明的 Tempo / Grafana URL
+{{- end}}
+3. 按场景选择查询方式：
+   - **有 trace ID**：直接查询 → `/api/traces/{traceID}`
+   - **无 trace ID**：按 TraceQL 搜索 → `/api/search`
+4. 分析 span 树：找到耗时最长的 span、错误 span、跨服务调用链。
+
+## Tempo HTTP API
+
+### 按 trace ID 查询
+
+```bash
+curl -s "$TEMPO_URL/api/traces/<traceID>" \
+  -H "Accept: application/json" \
+  | python3 -m json.tool
+```
+
+### 通过 Grafana Datasource 查询 trace
+
+```bash
+curl -s "$GRAFANA_URL/api/datasources/proxy/uid/<tempo_ds_uid>/api/traces/<traceID>" \
+  -H "Authorization: Bearer $GRAFANA_TOKEN" \
+  | python3 -m json.tool
+```
+
+### 按 tag 搜索 trace（TraceQL）
+
+```bash
+curl -s "$TEMPO_URL/api/search" \
+  --data-urlencode "q={ resource.service.name=\"<service>\" && status=error }" \
+  --data-urlencode "limit=20" \
+  --data-urlencode "start=$(date -d '1 hour ago' +%s)" \
+  --data-urlencode "end=$(date +%s)" \
+  | python3 -m json.tool
+```
+
+### 按 tag 搜索（简单模式）
+
+```bash
+curl -s "$TEMPO_URL/api/search?tags=service.name%3D<service>&limit=20&start=$(date -d '1 hour ago' +%s)&end=$(date +%s)" \
+  | python3 -m json.tool
+```
+
+### 查看 tag 可选值
+
+```bash
+curl -s "$TEMPO_URL/api/search/tags" | python3 -m json.tool
+curl -s "$TEMPO_URL/api/search/tag/service.name/values" | python3 -m json.tool
+```
+
+## 输出要求
+
+- 先结论：链路是否异常（是/否）
+- 再证据：
+  - trace ID + span 数量 + 总耗时
+  - 耗时 TOP 3 span（service + operation + duration）
+  - 错误 span（若有：service + status + attributes）
+- 最后归因：
+  - 哪个服务是瓶颈
+  - 是网络延迟 / 下游超时 / 自身处理慢
+  - 建议排查方向
+
+## 硬约束
+
+- 仅只读查询；不修改 trace 数据。
+- 必须先通过 `routing` 确认 env，再用对应 env 的 Tempo/Grafana URL。
+- 展示 span 详情时对敏感 attribute（token、password）做脱敏。
+- 若通过 Grafana 代理访问，需提供有效 Bearer token。

@@ -1,0 +1,92 @@
+---
+name: rocketmq-runtime-query
+description: 通过环境动态查询 RocketMQ 集群状态。先通过 routing 获取环境映射，再按配置源读取并解析 NameServer 地址，最后通过 mqadmin CLI 执行只读诊断。
+---
+
+# RocketMQ Runtime Query
+
+## 执行流程（固定）
+
+1. 先确认目标环境与服务；环境映射统一通过 `routing` 获取。
+{{- if or (eq .Infrastructure.ConfigCenter.Type "nacos") (eq .Infrastructure.ConfigCenter.Type "apollo") (eq .Infrastructure.ConfigCenter.Type "consul")}}
+2. 通过配置中心获取该环境配置文本。
+{{- else if eq .Infrastructure.ConfigCenter.Type "env-vars"}}
+2. 通过 `resolve_runtime_static.py --agent-id {{.AgentID}} --env <env>` 读取静态连接信息。
+{{- else if eq .Infrastructure.ConfigCenter.Type "kubernetes"}}
+2. 通过 `resolve_runtime_k8s.py --agent-id {{.AgentID}} --env <env>` 从 K8s ConfigMap/Secret 解析连接信息。
+{{- end}}
+3. 解析配置中的 RocketMQ NameServer 地址（NAMESRV_ADDR）。
+4. 使用 mqadmin CLI 执行只读诊断命令。
+5. 返回证据：topic 列表、消费进度、集群状态、消息查询结果。
+
+## 连接解析
+
+优先复用：
+{{- if or (eq .Infrastructure.ConfigCenter.Type "nacos") (eq .Infrastructure.ConfigCenter.Type "apollo") (eq .Infrastructure.ConfigCenter.Type "consul")}}
+- `skills/config-executor/scripts/resolve_runtime_from_nacos.py`
+{{- end}}
+{{- if eq .Infrastructure.ConfigCenter.Type "env-vars"}}
+- `skills/config-executor/scripts/resolve_runtime_static.py`（从 creds.json 读静态连接串）
+{{- end}}
+{{- if eq .Infrastructure.ConfigCenter.Type "kubernetes"}}
+- `skills/config-executor/scripts/resolve_runtime_k8s.py`（从 K8s ConfigMap/Secret 解析）
+{{- end}}
+
+## 诊断命令模板
+
+### 查看集群状态
+
+```bash
+mqadmin clusterList -n $NAMESRV_ADDR
+```
+
+### 列出所有 topic
+
+```bash
+mqadmin topicList -n $NAMESRV_ADDR
+```
+
+### 查看 topic 详细路由
+
+```bash
+mqadmin topicRoute -n $NAMESRV_ADDR -t <topic_name>
+```
+
+### 查看消费者组消费进度（积压）
+
+```bash
+mqadmin consumerProgress -n $NAMESRV_ADDR -g <consumer_group>
+```
+
+### 按 key 查询消息
+
+```bash
+mqadmin queryMsgByKey -n $NAMESRV_ADDR -t <topic_name> -k <message_key>
+```
+
+### 按消息 ID 查询
+
+```bash
+mqadmin queryMsgById -n $NAMESRV_ADDR -i <msg_id>
+```
+
+### 查看死信队列
+
+```bash
+mqadmin topicList -n $NAMESRV_ADDR | grep -i "DLQ\|RETRY"
+```
+
+## 输出要求
+
+- 先结论：是否有消费积压/死信/broker 异常
+- 再证据：
+  - consumer-group + topic + 当前消费位点 / 最大位点 / 积压量
+  - 死信 topic 消息条数
+  - 消息内容摘要（脱敏）
+- 最后归因：消费端处理慢 / 生产端异常 / broker 故障 / 网络问题
+
+## 硬约束
+
+- 仅只读诊断；禁止 updateTopic、deleteTopic、resetOffsetByTime 等写操作。
+- 不直接猜测 NameServer 地址；必须来自 config-executor 的 resolve_runtime 解析结果。
+- 查看消息内容时对敏感字段做脱敏处理。

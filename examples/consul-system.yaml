@@ -1,0 +1,70 @@
+# 示例：使用 Consul KV 作为配置中心的假想系统
+system:
+  id: iot
+  name: "IoT Platform"
+
+agent:
+  name: "IoT排障机器人"
+  workspace_name: "IoT排障机器人"
+  model: openai-codex/gpt-5.3-codex
+
+environments:
+  - id: dev
+    api_domain: api-dev.iot.example.com
+    is_prod: false
+  - id: prod
+    api_domain: api.iot.example.com
+    is_prod: true
+
+repos:
+  - name: device-gateway
+    url: git@github.com:iot/device-gateway.git
+    role: backend
+    stack: java
+    service_names:
+      - device-gateway
+    env_branches:
+      dev: develop
+      prod: main
+
+infrastructure:
+  config_center:
+    type: consul
+    endpoints:
+      - env: dev
+        addr: "{{CONFIG_CENTER_ADDR_DEV}}"
+      - env: prod
+        addr: "{{CONFIG_CENTER_ADDR_PROD}}"
+    auth:
+      username_placeholder: "{{CONFIG_CENTER_USERNAME}}"
+      password_placeholder: "{{CONFIG_CENTER_PASSWORD}}"
+
+  observability:
+    grafana:
+      enabled: false
+    loki:
+      enabled: false
+    prometheus:
+      enabled: false
+
+  data_stores:
+    - type: redis
+      enabled: false
+    - type: mongodb
+      enabled: false
+    - type: elasticsearch
+      enabled: false
+
+  messaging: []
+  project_tracking: []
+
+generation:
+  target_host: openclaw
+  output_dir: ./dist/iot
+  skills_whitelist:
+    - routing
+    - config-executor
+    - diagram-generator
+
+meta:
+  schema_version: "0.1"

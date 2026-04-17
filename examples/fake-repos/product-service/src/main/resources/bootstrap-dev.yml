@@ -1,0 +1,8 @@
+spring:
+  cloud:
+    nacos:
+      config:
+        server-addr: nacos-dev.internal:8848
+        namespace: shop-dev-ns
+        group: SHOP_PRODUCT
+        data-id: product-service-dev.yaml

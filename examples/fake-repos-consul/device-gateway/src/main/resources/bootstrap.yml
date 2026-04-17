@@ -1,0 +1,12 @@
+spring:
+  application:
+    name: device-gateway
+  cloud:
+    consul:
+      host: consul-prod.iot.internal
+      port: 8500
+      config:
+        enabled: true
+        prefix: config
+        default-context: device-gateway
+        profile-separator: /

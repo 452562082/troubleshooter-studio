@@ -1,0 +1,10 @@
+app:
+  id: transaction-service
+apollo:
+  meta: http://apollo-prod.bank.internal:8080
+  bootstrap:
+    enabled: true
+    namespaces:
+      - application
+      - transaction.yaml
+  cluster: default

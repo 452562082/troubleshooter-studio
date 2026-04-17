@@ -1,0 +1,47 @@
+# CHECKLIST.md - {{.Agent.Name}}开工自检
+
+每次排障开工前先过一遍。未完成项需在首条技术回复里说明阻塞。
+
+## 1) 环境确认
+- [ ] 已确认目标环境（{{range $i, $e := .Environments}}{{if $i}}/{{end}}{{$e.ID}}{{end}}）或明确为"全部环境"
+- [ ] 已确认并记录实测域名
+
+## 2) 代码基线确认
+- [ ] 已执行 `git fetch --all --prune`
+- [ ] 已通过 `routing` 确认目标分支
+- [ ] 已切到目标分支并 `git pull --ff-only`
+- [ ] 已记录分析基线 commit hash
+
+## 3) 取证链路确认
+{{- if or (eq .Infrastructure.ConfigCenter.Type "nacos") (eq .Infrastructure.ConfigCenter.Type "apollo") (eq .Infrastructure.ConfigCenter.Type "consul")}}
+- [ ] {{.Infrastructure.ConfigCenter.Type}} 场景已先用 `routing` 解析配置标识
+- [ ] 已按 `config-executor` 执行读取/历史/对比
+{{- end}}
+{{- if eq .Infrastructure.ConfigCenter.Type "env-vars"}}
+- [ ] 确认 `resolve_runtime_static.py --env <env>` 能正确输出数据层连接串
+{{- end}}
+{{- if eq .Infrastructure.ConfigCenter.Type "kubernetes"}}
+- [ ] 确认 `kubectl get configmap/secret` 可达且有 RBAC 权限
+- [ ] 确认 `resolve_runtime_k8s.py --env <env>` 能正确输出数据层连接串
+{{- end}}
+- [ ] 已按链路执行：{{if or (eq .Infrastructure.ConfigCenter.Type "nacos") (eq .Infrastructure.ConfigCenter.Type "apollo") (eq .Infrastructure.ConfigCenter.Type "consul")}}配置中心/{{end}}可观测性走可用 MCP；数据层走对应 skill（{{$first := true}}{{range .Infrastructure.DataStores}}{{if .Enabled}}{{if not $first}}、{{end}}{{$first = false}}{{dataStoreSkill .Type}}{{end}}{{end}}）
+- [ ] 任一步骤不可用时，已明确阻塞点并给出可执行兜底链路
+
+## 4) 配置与鉴权确认
+- [ ] 已确认关键配置项（开关、路由、下游地址）
+
+{{- if .Infrastructure.Observability.Jaeger.Enabled}}
+
+## 4.5) 链路追踪确认
+- [ ] 已尝试获取 trace ID（从日志 / 响应头 / 用户反馈中）
+- [ ] 若有 trace ID，已通过 `tracing-query` 展开 span 树
+- [ ] 若无 trace ID，已按 service + 时间范围搜索
+{{- end}}
+
+## 5) 证据链确认
+- [ ] 至少一种证据已就位：真实日志 / 实测请求返回 / 代码定位{{if .Infrastructure.Observability.Jaeger.Enabled}} / trace 链路{{end}}
+- [ ] 涉及接口返回时，已保留请求体与关键响应字段
+
+## 6) 结论质量确认
+- [ ] 结论可复现、可验证
+- [ ] 已区分"现象 / 根因 / 建议动作"

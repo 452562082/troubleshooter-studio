@@ -1,0 +1,14 @@
+# env-branch-map.yaml
+# 由 troubleshooter-factory 生成 — 可手工覆盖
+# 结构：environments.<env>.repos.<repo>: <branch_or_tag>
+environments:
+{{- range .Environments}}
+  {{.ID}}:
+    repos:
+    {{- $envID := .ID}}
+    {{- range $.Repos}}
+      {{- if index .EnvBranches $envID}}
+      {{.Name}}: {{index .EnvBranches $envID | printf "%q"}}
+      {{- end}}
+    {{- end}}
+{{- end}}

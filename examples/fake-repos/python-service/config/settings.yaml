@@ -1,0 +1,7 @@
+server:
+  port: 8000
+nacos:
+  server-addr: nacos-dev:8848
+  namespace-id: shop-dev-yaml
+  group: SHOP_PYTHON_YAML
+  data-id: python-service-yaml.yaml

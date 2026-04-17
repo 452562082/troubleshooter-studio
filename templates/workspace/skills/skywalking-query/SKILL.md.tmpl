@@ -1,0 +1,82 @@
+---
+name: skywalking-query
+description: 通过 SkyWalking GraphQL API 查询分布式链路追踪与服务拓扑。按 trace ID、service name、endpoint 查询 span 与指标，定位跨服务延迟与错误传播路径。
+---
+
+# SkyWalking Query
+
+## 何时使用
+
+- 用户反馈接口慢 / 超时 / 报错，需要看请求在各服务间的流转
+- 有 trace ID 需要展开查看 span 详情
+- 需要查看服务拓扑、endpoint 性能指标、慢端点排名
+
+## 执行流程
+
+1. 确认 env（通过 `routing`）。
+2. 获取 SkyWalking OAP URL：
+{{- range .Environments}}
+   - `{{.ID}}` → config 中声明的 SkyWalking URL
+{{- end}}
+3. 按场景选择查询方式：
+   - **有 trace ID**：直接查询 trace 详情
+   - **无 trace ID**：按 service + endpoint + 时间范围搜索
+   - **看全局拓扑**：查询 service topology
+
+## SkyWalking GraphQL API（端口 12800）
+
+### 按 trace ID 查询
+
+```bash
+curl -s "$SKYWALKING_URL/graphql" -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"query":"query { queryTrace(traceId: \"<traceID>\") { spans { traceId spanId parentSpanId serviceCode operationName duration isError tags { key value } logs { time data { key value } } } } }"}' \
+  | python3 -m json.tool
+```
+
+### 列出所有 service
+
+```bash
+curl -s "$SKYWALKING_URL/graphql" -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"query":"query { getAllServices(duration: {start: \"<yyyy-MM-dd HHmm>\", end: \"<yyyy-MM-dd HHmm>\", step: MINUTE}) { key: id label: name } }"}' \
+  | python3 -m json.tool
+```
+
+### 查询慢端点 TOP N
+
+```bash
+curl -s "$SKYWALKING_URL/graphql" -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"query":"query { getEndpointTopN(serviceId: \"<serviceId>\", duration: {start: \"<start>\", end: \"<end>\", step: MINUTE}, name: \"endpoint_avg\", topN: 10, order: DES) { key: id value } }"}' \
+  | python3 -m json.tool
+```
+
+### 查询服务拓扑
+
+```bash
+curl -s "$SKYWALKING_URL/graphql" -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"query":"query { getGlobalTopology(duration: {start: \"<start>\", end: \"<end>\", step: MINUTE}) { nodes { id name type isReal } calls { id source target detectPoints } } }"}' \
+  | python3 -m json.tool
+```
+
+## 输出要求
+
+- 先结论：链路是否异常（是/否）
+- 再证据：
+  - trace ID + span 数量 + 总耗时
+  - 耗时 TOP 3 span（service + operation + duration）
+  - 错误 span（若有：service + isError + tags + logs）
+  - 服务拓扑中的异常调用边
+- 最后归因：
+  - 哪个服务是瓶颈
+  - 是网络延迟 / 下游超时 / 自身处理慢
+  - 建议排查方向
+
+## 硬约束
+
+- 仅只读查询；不修改任何 SkyWalking 数据。
+- 必须先通过 `routing` 确认 env，再用对应 env 的 SkyWalking URL。
+- 展示 span 详情时对敏感 tag（token、password、credentials）做脱敏。
+- 时间参数格式为 `yyyy-MM-dd HHmm`，step 可选 MINUTE/HOUR/DAY。

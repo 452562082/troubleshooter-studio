@@ -1,0 +1,18 @@
+# repo-stack-map.yaml
+# 由 troubleshooter-factory 生成 — 技术栈与角色速查
+repos:
+{{- range .Repos}}
+  {{.Name}}:
+    url: {{.URL | printf "%q"}}
+    role: {{.Role}}
+    stack: {{.Stack}}
+    {{- if .Framework}}
+    framework: {{.Framework | printf "%q"}}
+    {{- end}}
+    {{- if .ServiceNames}}
+    service_names:
+    {{- range .ServiceNames}}
+      - {{. | printf "%q"}}
+    {{- end}}
+    {{- end}}
+{{- end}}

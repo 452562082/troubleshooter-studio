@@ -1,0 +1,7 @@
+nacos:
+  server-addr: nacos-dev:8848
+  namespace-id: mall-dev
+  group: MALL_ORDER
+  data-id: mall-order.yaml
+server:
+  port: 8080

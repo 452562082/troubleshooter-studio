@@ -1,0 +1,25 @@
+# log-app-map.yaml
+# 由 troubleshooter-factory 生成骨架 — verified 字段需按实际 Loki/ES 索引校对
+# 结构：environments.<env>.<service>: { verifiedApp, appCandidates, status }
+environments:
+{{- range .Environments}}
+  {{.ID}}:
+    {{- $envID := .ID}}
+    {{- range $.Repos}}
+      {{- $repo := .}}
+      {{- range .ServiceNames}}
+      {{.}}:
+        verifiedApp: ""
+        appCandidates:
+          - {{. | printf "%q"}}
+        status: inferred
+      {{- end}}
+      {{- if not $repo.ServiceNames}}
+      {{$repo.Name}}:
+        verifiedApp: ""
+        appCandidates:
+          - {{$repo.Name | printf "%q"}}
+        status: inferred
+      {{- end}}
+    {{- end}}
+{{- end}}

@@ -1,0 +1,55 @@
+---
+name: es-runtime-query
+description: 通过环境动态查询 Elasticsearch 数据。先通过 routing 获取环境映射，再按配置源读取并解析 ES 连接信息，最后通过 mcporter 临时拉起 Elasticsearch MCP（只读）执行查询。
+---
+
+# ES Runtime Query
+
+## 执行流程（固定）
+
+1. 先确认目标环境与服务；环境映射统一通过 `routing` 获取。
+{{- if or (eq .Infrastructure.ConfigCenter.Type "nacos") (eq .Infrastructure.ConfigCenter.Type "apollo") (eq .Infrastructure.ConfigCenter.Type "consul")}}
+2. 通过配置中心获取该环境配置文本。
+{{- else if eq .Infrastructure.ConfigCenter.Type "env-vars"}}
+2. 通过 `resolve_runtime_static.py --agent-id {{.AgentID}} --env <env>` 读取静态连接信息。
+{{- else if eq .Infrastructure.ConfigCenter.Type "kubernetes"}}
+2. 通过 `resolve_runtime_k8s.py --agent-id {{.AgentID}} --env <env>` 从 K8s ConfigMap/Secret 解析连接信息。
+{{- end}}
+3. 解析配置中的 ES 连接信息（hosts）。
+4. 用 mcporter 以 ad-hoc 方式临时启动 Elasticsearch MCP（只读）。
+5. 执行查询并返回证据：索引、DSL、命中数量、关键字段样例。
+
+## 连接解析
+
+优先复用：
+{{- if or (eq .Infrastructure.ConfigCenter.Type "nacos") (eq .Infrastructure.ConfigCenter.Type "apollo") (eq .Infrastructure.ConfigCenter.Type "consul")}}
+- `skills/config-executor/scripts/resolve_runtime_from_nacos.py`
+{{- end}}
+{{- if eq .Infrastructure.ConfigCenter.Type "env-vars"}}
+- `skills/config-executor/scripts/resolve_runtime_static.py`（从 creds.json 读静态连接串）
+{{- end}}
+{{- if eq .Infrastructure.ConfigCenter.Type "kubernetes"}}
+- `skills/config-executor/scripts/resolve_runtime_k8s.py`（从 K8s ConfigMap/Secret 解析）
+{{- end}}
+
+## mcporter 调用模板（只读）
+
+```bash
+mcporter list \
+  --stdio "npx" \
+  --stdio-arg "-y" \
+  --stdio-arg "@elastic/mcp-server-elasticsearch" \
+  --env "ES_URL=$ES_URL" \
+  --schema
+```
+
+## 输出要求
+
+- 先结论：是否命中异常（是/否）
+- 再证据：index + DSL + 命中数量 + 关键文档字段
+- 最后归因：配置问题 / 索引数据问题 / 查询条件问题
+
+## 硬约束
+
+- 仅只读查询；禁止写操作。
+- 不直接猜测地址；必须来自 config-executor 的 resolve_runtime 解析结果。

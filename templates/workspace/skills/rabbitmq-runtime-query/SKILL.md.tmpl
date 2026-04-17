@@ -1,0 +1,86 @@
+---
+name: rabbitmq-runtime-query
+description: 通过环境动态查询 RabbitMQ 状态。先通过 routing 获取环境映射，再按配置源读取并解析 RabbitMQ Management API 连接信息，最后通过 rabbitmqadmin CLI 或 HTTP API 执行只读诊断。
+---
+
+# RabbitMQ Runtime Query
+
+## 执行流程（固定）
+
+1. 先确认目标环境与服务；环境映射统一通过 `routing` 获取。
+{{- if or (eq .Infrastructure.ConfigCenter.Type "nacos") (eq .Infrastructure.ConfigCenter.Type "apollo") (eq .Infrastructure.ConfigCenter.Type "consul")}}
+2. 通过配置中心获取该环境配置文本。
+{{- else if eq .Infrastructure.ConfigCenter.Type "env-vars"}}
+2. 通过 `resolve_runtime_static.py --agent-id {{.AgentID}} --env <env>` 读取静态连接信息。
+{{- else if eq .Infrastructure.ConfigCenter.Type "kubernetes"}}
+2. 通过 `resolve_runtime_k8s.py --agent-id {{.AgentID}} --env <env>` 从 K8s ConfigMap/Secret 解析连接信息。
+{{- end}}
+3. 解析配置中的 RabbitMQ Management 连接信息（URL/user/password）。
+4. 通过 rabbitmqadmin CLI 或 HTTP Management API（端口 15672）执行只读诊断。
+5. 返回证据：队列状态、消息堆积量、消费者数量、exchange 绑定关系。
+
+## 连接解析
+
+优先复用：
+{{- if or (eq .Infrastructure.ConfigCenter.Type "nacos") (eq .Infrastructure.ConfigCenter.Type "apollo") (eq .Infrastructure.ConfigCenter.Type "consul")}}
+- `skills/config-executor/scripts/resolve_runtime_from_nacos.py`
+{{- end}}
+{{- if eq .Infrastructure.ConfigCenter.Type "env-vars"}}
+- `skills/config-executor/scripts/resolve_runtime_static.py`（从 creds.json 读静态连接串）
+{{- end}}
+{{- if eq .Infrastructure.ConfigCenter.Type "kubernetes"}}
+- `skills/config-executor/scripts/resolve_runtime_k8s.py`（从 K8s ConfigMap/Secret 解析）
+{{- end}}
+
+## 诊断命令模板
+
+### 列出所有队列及消息数量
+
+```bash
+curl -s -u $RABBITMQ_USER:$RABBITMQ_PASS "$RABBITMQ_URL/api/queues?columns=name,messages,messages_ready,messages_unacknowledged,consumers" | python3 -m json.tool
+```
+
+### 查看单个队列详情
+
+```bash
+curl -s -u $RABBITMQ_USER:$RABBITMQ_PASS "$RABBITMQ_URL/api/queues/%2F/<queue_name>" | python3 -m json.tool
+```
+
+### 列出所有 exchange
+
+```bash
+curl -s -u $RABBITMQ_USER:$RABBITMQ_PASS "$RABBITMQ_URL/api/exchanges?columns=name,type,durable" | python3 -m json.tool
+```
+
+### 查看 exchange 绑定
+
+```bash
+curl -s -u $RABBITMQ_USER:$RABBITMQ_PASS "$RABBITMQ_URL/api/exchanges/%2F/<exchange_name>/bindings/source" | python3 -m json.tool
+```
+
+### 列出所有消费者
+
+```bash
+curl -s -u $RABBITMQ_USER:$RABBITMQ_PASS "$RABBITMQ_URL/api/consumers" | python3 -c "import sys,json; [print(f\"{c['queue']['name']} -> {c['consumer_tag']}\") for c in json.load(sys.stdin)]"
+```
+
+### 集群节点健康检查
+
+```bash
+curl -s -u $RABBITMQ_USER:$RABBITMQ_PASS "$RABBITMQ_URL/api/nodes" | python3 -c "import sys,json; [print(f\"{n['name']}: running={n['running']}, mem={n['mem_used']//1048576}MB\") for n in json.load(sys.stdin)]"
+```
+
+## 输出要求
+
+- 先结论：是否有消息堆积/消费者掉线/节点异常
+- 再证据：
+  - 队列名 + messages_ready / messages_unacknowledged / consumers 数
+  - 堆积最严重的 TOP 5 队列
+  - 死信队列消息条数（若配置了 DLX）
+- 最后归因：消费端处理慢 / 生产端写入异常 / 绑定配置错误 / 节点故障
+
+## 硬约束
+
+- 仅只读诊断；禁止 purge queue、delete queue/exchange、publish 消息。
+- 不直接猜测地址；必须来自 config-executor 的 resolve_runtime 解析结果。
+- URL 中 vhost 默认为 `%2F`（即 `/`），如有自定义 vhost 需从配置中获取。

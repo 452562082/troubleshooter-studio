@@ -1,0 +1,104 @@
+---
+name: elk-log-query
+description: 通过 ELK（Elasticsearch + Kibana）查询日志。按 service、时间、关键词、trace ID 搜索日志，作为 Loki 的替代方案（二选一或共存）。
+---
+
+# ELK Log Query
+
+## 何时使用
+
+- 系统使用 ELK（Elasticsearch + Logstash/Filebeat + Kibana）而非 Loki 做日志
+- 需要按关键词 / trace ID / error level / 时间范围搜索日志
+- 需要统计错误数量趋势
+
+## 执行流程
+
+1. 确认 env（通过 `routing`）。
+2. 获取 Kibana/ES URL：
+{{- range .Environments}}
+   - `{{.ID}}` → config 中声明的 Kibana 或 ES URL
+{{- end}}
+3. 构造查询：
+   - 简单搜索 → Kibana Discover 或 ES `_search` API
+   - 精确搜索 → ES DSL（bool query + range + match）
+4. 分析结果：错误日志聚合 → 时间线 → 关键异常栈。
+
+## Elasticsearch API 查询
+
+### 按关键词 + 时间范围搜索
+
+```bash
+curl -X POST "$ES_URL/{{if .Infrastructure.Observability.ELK.DefaultIndex}}{{.Infrastructure.Observability.ELK.DefaultIndex}}{{else}}app-logs-*{{end}}/_search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": {
+      "bool": {
+        "must": [
+          {"match": {"message": "<keyword>"}},
+          {"match": {"service": "<service>"}},
+          {"range": {"@timestamp": {"gte": "now-1h", "lte": "now"}}}
+        ]
+      }
+    },
+    "sort": [{"@timestamp": "desc"}],
+    "size": 20
+  }'
+```
+
+### 按 trace ID 精确查
+
+```bash
+curl -X POST "$ES_URL/{{if .Infrastructure.Observability.ELK.DefaultIndex}}{{.Infrastructure.Observability.ELK.DefaultIndex}}{{else}}app-logs-*{{end}}/_search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": {"match": {"trace_id": "<traceID>"}},
+    "sort": [{"@timestamp": "asc"}],
+    "size": 100
+  }'
+```
+
+### 错误日志聚合（最近 1 小时 TOP 错误）
+
+```bash
+curl -X POST "$ES_URL/{{if .Infrastructure.Observability.ELK.DefaultIndex}}{{.Infrastructure.Observability.ELK.DefaultIndex}}{{else}}app-logs-*{{end}}/_search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": {
+      "bool": {
+        "must": [
+          {"match": {"level": "ERROR"}},
+          {"range": {"@timestamp": {"gte": "now-1h"}}}
+        ]
+      }
+    },
+    "aggs": {
+      "top_errors": {
+        "terms": {"field": "message.keyword", "size": 10}
+      }
+    },
+    "size": 0
+  }'
+```
+
+### Kibana 快捷方式
+
+如果有 Kibana URL，也可直接构造 Discover 链接让用户在浏览器中查看：
+```
+$KIBANA_URL/app/discover#/?_a=(query:(language:lucene,query:'service:<svc> AND level:ERROR'))
+```
+
+## 输出要求
+
+- 先结论：是否发现异常日志
+- 再证据：
+  - 搜索条件（index / query / time range）
+  - 命中条数
+  - TOP 错误消息（出现次数 + 样例）
+  - 关键日志行（时间 + trace_id + 消息摘要）
+- 最后归因：代码异常 / 外部依赖超时 / 配置错误
+
+## 硬约束
+
+- 仅只读查询（`_search` / `_count`）；禁止写操作（`_delete` / `_bulk`）。
+- 必须先通过 `routing` 确认 env，再用对应 env 的 ES/Kibana URL。
+- 日志内容可能含敏感信息，输出时对 token/password/身份证号做脱敏。

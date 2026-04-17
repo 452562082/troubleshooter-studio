@@ -1,0 +1,262 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 850" width="960" height="850">
+  <defs>
+    <linearGradient id="blue" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3B82F6"/><stop offset="100%" stop-color="#2563EB"/>
+    </linearGradient>
+    <linearGradient id="purple" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#8B5CF6"/><stop offset="100%" stop-color="#7C3AED"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F59E0B"/><stop offset="100%" stop-color="#D97706"/>
+    </linearGradient>
+    <linearGradient id="green" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#10B981"/><stop offset="100%" stop-color="#059669"/>
+    </linearGradient>
+    <linearGradient id="red" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#EF4444"/><stop offset="100%" stop-color="#DC2626"/>
+    </linearGradient>
+    <linearGradient id="cyan" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#06B6D4"/><stop offset="100%" stop-color="#0891B2"/>
+    </linearGradient>
+    <linearGradient id="gray" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#64748B"/><stop offset="100%" stop-color="#475569"/>
+    </linearGradient>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#94A3B8"/>
+    </marker>
+    <marker id="arr-r" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#EF4444"/>
+    </marker>
+    <marker id="arr-c" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#06B6D4"/>
+    </marker>
+    <marker id="arr-g" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#10B981"/>
+    </marker>
+  </defs>
+  <style>
+    text { font-family: system-ui, -apple-system, sans-serif; }
+    .title { font-size: 18px; font-weight: 700; fill: #1E293B; }
+    .subtitle { font-size: 12px; fill: #64748B; }
+    .box-label { font-size: 12px; font-weight: 600; fill: white; }
+    .box-sub { font-size: 9px; fill: rgba(255,255,255,0.85); }
+    .note { font-size: 10px; fill: #64748B; }
+    .tag { font-size: 8px; font-family: monospace; }
+    .pattern-title { font-size: 12px; font-weight: 700; fill: #1E293B; }
+    .pattern-desc { font-size: 9px; fill: #64748B; }
+  </style>
+
+  <!-- Title -->
+  <text x="480" y="24" text-anchor="middle" class="title">支持的系统架构（灵活组合，非固定分层）</text>
+  <text x="480" y="42" text-anchor="middle" class="subtitle">repos[].role 自由搭配：frontend / gateway / backend / infra / shared — 以下为 6 种常见模式</text>
+
+  <!-- ==================== 6 种架构模式 ==================== -->
+
+  <!-- 模式 1：前端+BFF+后端 -->
+  <rect x="30" y="58" width="290" height="95" rx="8" fill="white" stroke="#E2E8F0" stroke-width="1.5"/>
+  <text x="40" y="76" class="pattern-title">A. 前端 + BFF + 后端微服务</text>
+  <text x="40" y="88" class="pattern-desc">电商 / 社交 / SaaS — 最完整的三层架构</text>
+  <rect x="45" y="96" width="58" height="22" rx="4" fill="url(#blue)"/><text x="74" y="111" text-anchor="middle" class="box-sub" fill="white" font-size="9" font-weight="600">frontend</text>
+  <line x1="103" y1="107" x2="113" y2="107" stroke="#94A3B8" stroke-width="1" marker-end="url(#arr)"/>
+  <rect x="115" y="96" width="58" height="22" rx="4" fill="url(#purple)"/><text x="144" y="111" text-anchor="middle" class="box-sub" fill="white" font-size="9" font-weight="600">gateway</text>
+  <line x1="173" y1="107" x2="183" y2="107" stroke="#94A3B8" stroke-width="1" marker-end="url(#arr)"/>
+  <rect x="185" y="96" width="58" height="22" rx="4" fill="url(#green)"/><text x="214" y="111" text-anchor="middle" class="box-sub" fill="white" font-size="9" font-weight="600">backend</text>
+  <rect x="250" y="96" width="24" height="22" rx="4" fill="url(#green)" opacity="0.5"/><text x="262" y="111" text-anchor="middle" class="box-sub" fill="white" font-size="9">×N</text>
+  <rect x="45" y="124" width="90" height="16" rx="3" fill="#F1F5F9"/><text x="90" y="136" text-anchor="middle" class="tag" fill="#475569">React/Vue/Next</text>
+  <rect x="145" y="124" width="65" height="16" rx="3" fill="#F1F5F9"/><text x="177" y="136" text-anchor="middle" class="tag" fill="#475569">PHP/Node</text>
+  <rect x="220" y="124" width="80" height="16" rx="3" fill="#F1F5F9"/><text x="260" y="136" text-anchor="middle" class="tag" fill="#475569">Go/Java/Python</text>
+
+  <!-- 模式 2：前端+后端（无BFF） -->
+  <rect x="340" y="58" width="290" height="95" rx="8" fill="white" stroke="#E2E8F0" stroke-width="1.5"/>
+  <text x="350" y="76" class="pattern-title">B. 前端 + 后端（无 BFF）</text>
+  <text x="350" y="88" class="pattern-desc">中小系统 / 内部工具 — 前端直连后端 API</text>
+  <rect x="355" y="96" width="75" height="22" rx="4" fill="url(#blue)"/><text x="392" y="111" text-anchor="middle" class="box-sub" fill="white" font-size="9" font-weight="600">frontend</text>
+  <line x1="430" y1="107" x2="460" y2="107" stroke="#94A3B8" stroke-width="1" marker-end="url(#arr)"/>
+  <rect x="462" y="96" width="75" height="22" rx="4" fill="url(#green)"/><text x="499" y="111" text-anchor="middle" class="box-sub" fill="white" font-size="9" font-weight="600">backend</text>
+  <rect x="544" y="96" width="24" height="22" rx="4" fill="url(#green)" opacity="0.5"/><text x="556" y="111" text-anchor="middle" class="box-sub" fill="white" font-size="9">×N</text>
+  <rect x="355" y="124" width="90" height="16" rx="3" fill="#F1F5F9"/><text x="400" y="136" text-anchor="middle" class="tag" fill="#475569">React/Vue/Next</text>
+  <rect x="462" y="124" width="100" height="16" rx="3" fill="#F1F5F9"/><text x="512" y="136" text-anchor="middle" class="tag" fill="#475569">Go/Java/PHP/Python</text>
+
+  <!-- 模式 3：纯后端 API -->
+  <rect x="650" y="58" width="280" height="95" rx="8" fill="white" stroke="#E2E8F0" stroke-width="1.5"/>
+  <text x="660" y="76" class="pattern-title">C. 纯后端 API（无前端）</text>
+  <text x="660" y="88" class="pattern-desc">B2B 接口 / 内部微服务集群 / 数据管道</text>
+  <rect x="670" y="96" width="70" height="22" rx="4" fill="url(#green)"/><text x="705" y="111" text-anchor="middle" class="box-sub" fill="white" font-size="9" font-weight="600">backend A</text>
+  <rect x="748" y="96" width="70" height="22" rx="4" fill="url(#green)"/><text x="783" y="111" text-anchor="middle" class="box-sub" fill="white" font-size="9" font-weight="600">backend B</text>
+  <rect x="826" y="96" width="70" height="22" rx="4" fill="url(#green)"/><text x="861" y="111" text-anchor="middle" class="box-sub" fill="white" font-size="9" font-weight="600">backend C</text>
+  <line x1="740" y1="107" x2="748" y2="107" stroke="#94A3B8" stroke-width="1" marker-end="url(#arr)"/>
+  <line x1="818" y1="107" x2="826" y2="107" stroke="#94A3B8" stroke-width="1" marker-end="url(#arr)"/>
+  <rect x="670" y="124" width="226" height="16" rx="3" fill="#F1F5F9"/><text x="783" y="136" text-anchor="middle" class="tag" fill="#475569">Go / Java / PHP / Python — 服务间 RPC 或 HTTP</text>
+
+  <!-- 模式 4：网关+微服务 -->
+  <rect x="30" y="163" width="290" height="95" rx="8" fill="white" stroke="#E2E8F0" stroke-width="1.5"/>
+  <text x="40" y="181" class="pattern-title">D. API 网关 + 微服务</text>
+  <text x="40" y="193" class="pattern-desc">Kong / APISIX / Nginx 统一入口</text>
+  <rect x="45" y="201" width="70" height="22" rx="4" fill="url(#purple)"/><text x="80" y="216" text-anchor="middle" class="box-sub" fill="white" font-size="9" font-weight="600">gateway</text>
+  <line x1="115" y1="212" x2="128" y2="200" stroke="#94A3B8" stroke-width="1" marker-end="url(#arr)"/>
+  <line x1="115" y1="212" x2="128" y2="212" stroke="#94A3B8" stroke-width="1" marker-end="url(#arr)"/>
+  <line x1="115" y1="212" x2="128" y2="224" stroke="#94A3B8" stroke-width="1" marker-end="url(#arr)"/>
+  <rect x="130" y="196" width="55" height="16" rx="4" fill="url(#green)"/><text x="157" y="208" text-anchor="middle" class="box-sub" fill="white" font-size="8" font-weight="600">svc A</text>
+  <rect x="130" y="214" width="55" height="16" rx="4" fill="url(#green)"/><text x="157" y="226" text-anchor="middle" class="box-sub" fill="white" font-size="8" font-weight="600">svc B</text>
+  <rect x="195" y="196" width="55" height="16" rx="4" fill="url(#green)"/><text x="222" y="208" text-anchor="middle" class="box-sub" fill="white" font-size="8" font-weight="600">svc C</text>
+  <rect x="195" y="214" width="55" height="16" rx="4" fill="url(#green)"/><text x="222" y="226" text-anchor="middle" class="box-sub" fill="white" font-size="8" font-weight="600">svc D</text>
+  <rect x="45" y="236" width="90" height="14" rx="3" fill="#F1F5F9"/><text x="90" y="247" text-anchor="middle" class="tag" fill="#475569">Kong/APISIX</text>
+
+  <!-- 模式 5：monorepo -->
+  <rect x="340" y="163" width="290" height="95" rx="8" fill="white" stroke="#E2E8F0" stroke-width="1.5"/>
+  <text x="350" y="181" class="pattern-title">E. Monorepo（单仓多服务）</text>
+  <text x="350" y="193" class="pattern-desc">一个 repo 产出多个 service_names</text>
+  <rect x="355" y="201" width="90" height="40" rx="6" fill="url(#gray)"/>
+  <text x="400" y="218" text-anchor="middle" class="box-sub" fill="white" font-size="9" font-weight="600">1 repo</text>
+  <text x="400" y="232" text-anchor="middle" class="box-sub" fill="white" font-size="8">monorepo</text>
+  <line x1="445" y1="212" x2="462" y2="204" stroke="#94A3B8" stroke-width="1" marker-end="url(#arr)"/>
+  <line x1="445" y1="221" x2="462" y2="221" stroke="#94A3B8" stroke-width="1" marker-end="url(#arr)"/>
+  <line x1="445" y1="230" x2="462" y2="238" stroke="#94A3B8" stroke-width="1" marker-end="url(#arr)"/>
+  <rect x="464" y="198" width="70" height="14" rx="3" fill="url(#green)"/><text x="499" y="209" text-anchor="middle" class="box-sub" fill="white" font-size="8">user-api</text>
+  <rect x="464" y="215" width="70" height="14" rx="3" fill="url(#green)"/><text x="499" y="226" text-anchor="middle" class="box-sub" fill="white" font-size="8">order-api</text>
+  <rect x="464" y="232" width="70" height="14" rx="3" fill="url(#green)"/><text x="499" y="243" text-anchor="middle" class="box-sub" fill="white" font-size="8">pay-worker</text>
+
+  <!-- 模式 6：事件驱动 -->
+  <rect x="650" y="163" width="280" height="95" rx="8" fill="white" stroke="#E2E8F0" stroke-width="1.5"/>
+  <text x="660" y="181" class="pattern-title">F. 事件驱动（MQ 串联）</text>
+  <text x="660" y="193" class="pattern-desc">服务间无直接调用，通过消息队列通信</text>
+  <rect x="665" y="201" width="55" height="22" rx="4" fill="url(#green)"/><text x="692" y="216" text-anchor="middle" class="box-sub" fill="white" font-size="8" font-weight="600">producer</text>
+  <line x1="720" y1="212" x2="740" y2="212" stroke="#F59E0B" stroke-width="2" marker-end="url(#arr)"/>
+  <rect x="742" y="201" width="55" height="22" rx="4" fill="url(#orange)"/><text x="769" y="216" text-anchor="middle" class="box-sub" fill="white" font-size="8" font-weight="600">Kafka</text>
+  <line x1="797" y1="212" x2="817" y2="212" stroke="#F59E0B" stroke-width="2" marker-end="url(#arr)"/>
+  <rect x="819" y="201" width="62" height="22" rx="4" fill="url(#green)"/><text x="850" y="216" text-anchor="middle" class="box-sub" fill="white" font-size="8" font-weight="600">consumer</text>
+  <rect x="665" y="236" width="216" height="14" rx="3" fill="#F1F5F9"/><text x="773" y="247" text-anchor="middle" class="tag" fill="#475569">Kafka / RocketMQ / RabbitMQ 串联，无同步 RPC</text>
+
+  <!-- ==================== 基础设施层 ==================== -->
+  <rect x="30" y="275" width="900" height="92" rx="8" fill="#F8FAFC" stroke="#E2E8F0"/>
+  <text x="40" y="293" class="note" font-weight="600" font-size="11" fill="#1E293B">基础设施层（所有架构模式共享）</text>
+
+  <!-- 可观测 7 项 -->
+  <rect x="50" y="300" width="410" height="28" rx="5" fill="url(#orange)"/>
+  <text x="60" y="318" class="box-label">可观测性（7 项）</text>
+  <g transform="translate(168, 308)" font-family="monospace" font-size="8">
+    <rect width="42" height="13" rx="2" fill="rgba(255,255,255,0.3)"/><text x="21" y="10" text-anchor="middle" fill="white">Grafana</text>
+    <rect x="46" width="32" height="13" rx="2" fill="rgba(255,255,255,0.3)"/><text x="62" y="10" text-anchor="middle" fill="white">Loki</text>
+    <rect x="82" width="28" height="13" rx="2" fill="rgba(255,255,255,0.3)"/><text x="96" y="10" text-anchor="middle" fill="white">Prom</text>
+    <rect x="114" width="38" height="13" rx="2" fill="rgba(255,255,255,0.3)"/><text x="133" y="10" text-anchor="middle" fill="white">Jaeger</text>
+    <rect x="156" width="28" height="13" rx="2" fill="rgba(255,255,255,0.3)"/><text x="170" y="10" text-anchor="middle" fill="white">ELK</text>
+    <rect x="188" width="50" height="13" rx="2" fill="rgba(255,255,255,0.3)"/><text x="213" y="10" text-anchor="middle" fill="white">SkyWalking</text>
+    <rect x="242" width="38" height="13" rx="2" fill="rgba(255,255,255,0.3)"/><text x="261" y="10" text-anchor="middle" fill="white">Tempo</text>
+  </g>
+
+  <!-- 数据层 9 项 -->
+  <rect x="470" y="300" width="450" height="28" rx="5" fill="url(#blue)"/>
+  <text x="480" y="318" class="box-label">数据层（9 项）</text>
+  <g transform="translate(560, 308)" font-family="monospace" font-size="8">
+    <rect width="30" height="13" rx="2" fill="rgba(255,255,255,0.3)"/><text x="15" y="10" text-anchor="middle" fill="white">Redis</text>
+    <rect x="34" width="38" height="13" rx="2" fill="rgba(255,255,255,0.3)"/><text x="53" y="10" text-anchor="middle" fill="white">Mongo</text>
+    <rect x="76" width="22" height="13" rx="2" fill="rgba(255,255,255,0.3)"/><text x="87" y="10" text-anchor="middle" fill="white">ES</text>
+    <rect x="102" width="34" height="13" rx="2" fill="rgba(255,255,255,0.3)"/><text x="119" y="10" text-anchor="middle" fill="white">MySQL</text>
+    <rect x="140" width="22" height="13" rx="2" fill="rgba(255,255,255,0.3)"/><text x="151" y="10" text-anchor="middle" fill="white">PG</text>
+    <rect x="166" width="32" height="13" rx="2" fill="rgba(255,255,255,0.3)"/><text x="182" y="10" text-anchor="middle" fill="white">Kafka</text>
+    <rect x="202" width="46" height="13" rx="2" fill="rgba(255,255,255,0.3)"/><text x="225" y="10" text-anchor="middle" fill="white">RocketMQ</text>
+    <rect x="252" width="44" height="13" rx="2" fill="rgba(255,255,255,0.3)"/><text x="274" y="10" text-anchor="middle" fill="white">RabbitMQ</text>
+    <rect x="300" width="52" height="13" rx="2" fill="rgba(255,255,255,0.3)"/><text x="326" y="10" text-anchor="middle" fill="white">ClickHouse</text>
+  </g>
+
+  <!-- 配置源 5 种 -->
+  <rect x="50" y="336" width="870" height="22" rx="5" fill="#F1F5F9" stroke="#E2E8F0"/>
+  <text x="60" y="351" font-size="10" fill="#475569" font-weight="600">配置源</text>
+  <g transform="translate(110, 340)" font-family="monospace" font-size="9">
+    <rect width="45" height="14" rx="3" fill="#FEE2E2"/><text x="22" y="11" text-anchor="middle" fill="#DC2626">nacos</text>
+    <rect x="50" width="45" height="14" rx="3" fill="#EDE9FE"/><text x="72" y="11" text-anchor="middle" fill="#7C3AED">apollo</text>
+    <rect x="100" width="45" height="14" rx="3" fill="#D1FAE5"/><text x="122" y="11" text-anchor="middle" fill="#059669">consul</text>
+    <rect x="150" width="72" height="14" rx="3" fill="#CFFAFE"/><text x="186" y="11" text-anchor="middle" fill="#0891B2">kubernetes</text>
+    <rect x="228" width="55" height="14" rx="3" fill="#F0FDF4"/><text x="255" y="11" text-anchor="middle" fill="#16A34A">env-vars</text>
+  </g>
+
+  <!-- ==================== 三种配置源排障链路 ==================== -->
+  <text x="480" y="390" text-anchor="middle" class="title" font-size="15">排障链路（因配置源而异）</text>
+
+  <!-- 模式 A：配置中心 -->
+  <rect x="30" y="405" width="290" height="200" rx="10" fill="white" stroke="#FCA5A5" stroke-width="2"/>
+  <rect x="30" y="405" width="290" height="30" rx="10" fill="url(#red)"/>
+  <rect x="30" y="425" width="290" height="10" fill="url(#red)"/>
+  <text x="175" y="425" text-anchor="middle" class="box-label" font-size="12">配置中心（nacos / apollo / consul）</text>
+  <rect x="55" y="445" width="240" height="24" rx="5" fill="#FEF2F2" stroke="#FECACA"/>
+  <text x="175" y="461" text-anchor="middle" font-size="10" fill="#991B1B">① routing → env + mcp_server</text>
+  <line x1="175" y1="469" x2="175" y2="478" stroke="#EF4444" stroke-width="1.5" marker-end="url(#arr-r)"/>
+  <rect x="55" y="480" width="240" height="24" rx="5" fill="#FEF2F2" stroke="#FECACA"/>
+  <text x="175" y="496" text-anchor="middle" font-size="10" fill="#991B1B">② MCP / 脚本读远程配置</text>
+  <line x1="175" y1="504" x2="175" y2="513" stroke="#EF4444" stroke-width="1.5" marker-end="url(#arr-r)"/>
+  <rect x="55" y="515" width="240" height="24" rx="5" fill="#FEF2F2" stroke="#FECACA"/>
+  <text x="175" y="531" text-anchor="middle" font-size="10" fill="#991B1B">③ resolve_runtime → 连接串</text>
+  <line x1="175" y1="539" x2="175" y2="548" stroke="#EF4444" stroke-width="1.5" marker-end="url(#arr-r)"/>
+  <rect x="55" y="550" width="240" height="24" rx="5" fill="#FEF2F2" stroke="#FECACA"/>
+  <text x="175" y="566" text-anchor="middle" font-size="10" fill="#991B1B">④ runtime-query 查数据层</text>
+  <text x="175" y="593" text-anchor="middle" class="note">最完整：配置可读 / 可对比 / 可追历史</text>
+
+  <!-- 模式 B：Kubernetes -->
+  <rect x="340" y="405" width="290" height="200" rx="10" fill="white" stroke="#06B6D4" stroke-width="2"/>
+  <rect x="340" y="405" width="290" height="30" rx="10" fill="url(#cyan)"/>
+  <rect x="340" y="425" width="290" height="10" fill="url(#cyan)"/>
+  <text x="485" y="425" text-anchor="middle" class="box-label" font-size="12">Kubernetes（ConfigMap / Secret）</text>
+  <rect x="365" y="445" width="240" height="24" rx="5" fill="#ECFEFF" stroke="#A5F3FC"/>
+  <text x="485" y="461" text-anchor="middle" font-size="10" fill="#0E7490">① routing → env</text>
+  <line x1="485" y1="469" x2="485" y2="478" stroke="#06B6D4" stroke-width="1.5" marker-end="url(#arr-c)"/>
+  <rect x="365" y="480" width="240" height="24" rx="5" fill="#ECFEFF" stroke="#A5F3FC"/>
+  <text x="485" y="496" text-anchor="middle" font-size="10" fill="#0E7490">② kubectl get configmap / secret</text>
+  <line x1="485" y1="504" x2="485" y2="513" stroke="#06B6D4" stroke-width="1.5" marker-end="url(#arr-c)"/>
+  <rect x="365" y="515" width="240" height="24" rx="5" fill="#ECFEFF" stroke="#A5F3FC"/>
+  <text x="485" y="531" text-anchor="middle" font-size="10" fill="#0E7490">③ resolve_runtime_k8s → 连接串</text>
+  <line x1="485" y1="539" x2="485" y2="548" stroke="#06B6D4" stroke-width="1.5" marker-end="url(#arr-c)"/>
+  <rect x="365" y="550" width="240" height="24" rx="5" fill="#ECFEFF" stroke="#A5F3FC"/>
+  <text x="485" y="566" text-anchor="middle" font-size="10" fill="#0E7490">④ runtime-query 查数据层</text>
+  <text x="485" y="593" text-anchor="middle" class="note">需要 kubectl + RBAC 权限</text>
+
+  <!-- 模式 C：env-vars -->
+  <rect x="650" y="405" width="280" height="200" rx="10" fill="white" stroke="#10B981" stroke-width="2"/>
+  <rect x="650" y="405" width="280" height="30" rx="10" fill="url(#green)"/>
+  <rect x="650" y="425" width="280" height="10" fill="url(#green)"/>
+  <text x="790" y="425" text-anchor="middle" class="box-label" font-size="12">环境变量（.env / Docker env）</text>
+  <rect x="675" y="445" width="230" height="24" rx="5" fill="#ECFDF5" stroke="#A7F3D0"/>
+  <text x="790" y="461" text-anchor="middle" font-size="10" fill="#047857">① routing → env</text>
+  <line x1="790" y1="469" x2="790" y2="478" stroke="#10B981" stroke-width="1.5" marker-end="url(#arr-g)"/>
+  <rect x="675" y="480" width="230" height="24" rx="5" fill="#ECFDF5" stroke="#A7F3D0" stroke-dasharray="4"/>
+  <text x="790" y="496" text-anchor="middle" font-size="10" fill="#047857">② 跳过（无远程配置源）</text>
+  <line x1="790" y1="504" x2="790" y2="513" stroke="#10B981" stroke-width="1.5" marker-end="url(#arr-g)"/>
+  <rect x="675" y="515" width="230" height="24" rx="5" fill="#ECFDF5" stroke="#A7F3D0"/>
+  <text x="790" y="531" text-anchor="middle" font-size="10" fill="#047857">③ resolve_runtime_static → 连接串</text>
+  <line x1="790" y1="539" x2="790" y2="548" stroke="#10B981" stroke-width="1.5" marker-end="url(#arr-g)"/>
+  <rect x="675" y="550" width="230" height="24" rx="5" fill="#ECFDF5" stroke="#A7F3D0"/>
+  <text x="790" y="566" text-anchor="middle" font-size="10" fill="#047857">④ runtime-query 查数据层</text>
+  <text x="790" y="593" text-anchor="middle" class="note">最轻量：安装时直接填连接串</text>
+
+  <!-- ==================== 底部能力 ==================== -->
+  <rect x="30" y="620" width="900" height="220" rx="8" fill="#F8FAFC" stroke="#E2E8F0"/>
+  <text x="40" y="640" class="note" font-weight="700" font-size="12" fill="#1E293B">共享排障基础能力（19 个可选 skill + 10 个 CLI 子命令）</text>
+
+  <g transform="translate(50, 654)" font-size="10" fill="#475569">
+    <rect width="170" height="20" rx="4" fill="#DBEAFE"/><text x="85" y="14" text-anchor="middle" fill="#1E40AF" font-weight="600">routing skill（6 张映射表）</text>
+    <text x="180" y="14" fill="#64748B">env → branch / domain / config-map / log-app / observability / repo-stack</text>
+  </g>
+  <g transform="translate(50, 678)" font-size="10" fill="#475569">
+    <rect width="170" height="20" rx="4" fill="#FEF3C7"/><text x="85" y="14" text-anchor="middle" fill="#92400E" font-weight="600">可观测性（7 项 skill）</text>
+    <text x="180" y="14" fill="#64748B">Grafana / Loki / Prometheus MCP + Jaeger trace + ELK 日志 + SkyWalking APM + Tempo trace</text>
+  </g>
+  <g transform="translate(50, 702)" font-size="10" fill="#475569">
+    <rect width="170" height="20" rx="4" fill="#D1FAE5"/><text x="85" y="14" text-anchor="middle" fill="#065F46" font-weight="600">数据层（9 项 skill）</text>
+    <text x="180" y="14" fill="#64748B">Redis / MongoDB / ES / MySQL / PG / Kafka / RocketMQ / RabbitMQ / ClickHouse（全只读）</text>
+  </g>
+  <g transform="translate(50, 726)" font-size="10" fill="#475569">
+    <rect width="170" height="20" rx="4" fill="#EDE9FE"/><text x="85" y="14" text-anchor="middle" fill="#5B21B6" font-weight="600">代码分析（5 栈 × 5 配置源）</text>
+    <text x="180" y="14" fill="#64748B">Go / Java / PHP / Python / Node(React/Vue) — service name + 配置字段 + 前端 API URL</text>
+  </g>
+  <g transform="translate(50, 750)" font-size="10" fill="#475569">
+    <rect width="170" height="20" rx="4" fill="#FEE2E2"/><text x="85" y="14" text-anchor="middle" fill="#991B1B" font-weight="600">config-executor（5 种后端）</text>
+    <text x="180" y="14" fill="#64748B">Nacos MCP / Apollo HTTP / Consul HTTP / K8s kubectl / env-vars static</text>
+  </g>
+  <g transform="translate(50, 774)" font-size="10" fill="#475569">
+    <rect width="170" height="20" rx="4" fill="#F1F5F9"/><text x="85" y="14" text-anchor="middle" fill="#334155" font-weight="600">生命周期（10 个子命令）</text>
+    <text x="180" y="14" fill="#64748B">init / validate / analyze / doctor / plan / watch / gen / diff / upgrade / skill new</text>
+  </g>
+
+  <!-- 底部重点说明 -->
+  <rect x="50" y="802" width="870" height="28" rx="5" fill="#DBEAFE" stroke="#93C5FD"/>
+  <text x="480" y="820" text-anchor="middle" font-size="11" fill="#1E40AF" font-weight="600">架构不固定：repos[].role 自由搭配（frontend / gateway / backend / infra / shared），可选 skill 按需启用，未用的不生成</text>
+</svg>

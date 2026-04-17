@@ -1,0 +1,15 @@
+# env-domain-map.yaml
+# 由 troubleshooter-factory 生成 — 可手工覆盖
+# 每条记录对应一个环境的入口域名与生产标识
+environments:
+{{- range .Environments}}
+  {{.ID}}:
+    {{- if .Aliases}}
+    aliases: [{{range $i, $a := .Aliases}}{{if $i}}, {{end}}{{$a}}{{end}}]
+    {{- end}}
+    api_domain: {{.APIDomain | printf "%q"}}
+    {{- if .WebDomain}}
+    web_domain: {{.WebDomain | printf "%q"}}
+    {{- end}}
+    is_prod: {{.IsProd}}
+{{- end}}

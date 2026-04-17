@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# 由 troubleshooter-factory 生成 —— 系统: {{.System.Name}}
+# 多环境 MCP 自检：required 列表与探活按 env 循环展开
+set -euo pipefail
+
+WS_DIR="$HOME/.openclaw/workspace/{{.Agent.WorkspaceName}}"
+CFG="$HOME/.openclaw/openclaw.json"
+TMP_IMG="/tmp/{{.AgentID}}-selftest-$(date +%s).png"
+
+fail() { echo "  FAIL: $1"; exit 1; }
+pass() { echo "  PASS: $1"; }
+
+echo "[check] workspace"
+[[ -d "$WS_DIR" ]] && pass "$WS_DIR" || fail "workspace missing"
+
+echo "[check] config + mcp list"
+AGENT_ID="{{.AgentID}}" python3 - <<'PYEOF'
+import json, os, sys
+cfg = os.path.expanduser('~/.openclaw/openclaw.json')
+with open(cfg, 'r', encoding='utf-8') as f:
+    data = json.load(f)
+agents = data.get('agents', {}).get('list', [])
+aid = os.environ['AGENT_ID']
+if any(a.get('id') == aid for a in agents):
+    print(f'  PASS: {aid} exists in openclaw.json')
+else:
+    print(f'  FAIL: {aid} not found in openclaw.json')
+    sys.exit(1)
+
+servers = data.get('mcp', {}).get('servers', {})
+required = [
+{{- if eq .Infrastructure.ConfigCenter.Type "nacos"}}
+{{- range .Environments}}
+    'nacos-mcp-server-{{.ID}}',
+{{- end}}
+{{- end}}
+{{- if .Infrastructure.Observability.Grafana.Enabled}}
+{{- range .Environments}}
+    'grafana-mcp-server-{{.ID}}',
+{{- end}}
+{{- end}}
+{{- if .Infrastructure.Observability.Loki.Enabled}}
+{{- range .Environments}}
+    'loki-mcp-server-{{.ID}}',
+{{- end}}
+{{- end}}
+{{- range .Infrastructure.Messaging}}{{if and .Enabled (eq .Platform "lark")}}
+    'lark-openapi',
+{{- end}}{{end}}
+{{- range .Infrastructure.ProjectTracking}}{{if and .Enabled (eq .Platform "feishu_project")}}
+    'FeishuProjectMcp',
+{{- end}}{{end}}
+]
+missing = [x for x in required if x not in servers]
+if missing:
+    print('  FAIL: missing mcp servers:', ', '.join(missing))
+    sys.exit(1)
+print(f'  PASS: all {len(required)} required mcp server configs present')
+PYEOF
+
+echo "[check] mcp connectivity preflight (per-env)"
+python3 - <<'PYEOF'
+import json, os, sys, socket, urllib.request, base64
+cfg = os.path.expanduser('~/.openclaw/openclaw.json')
+with open(cfg, 'r', encoding='utf-8') as f:
+    data = json.load(f)
+servers = data.get('mcp', {}).get('servers', {})
+envs = [{{range $i, $e := .Environments}}{{if $i}}, {{end}}{{printf "%q" $e.ID}}{{end}}]
+
+{{if eq .Infrastructure.ConfigCenter.Type "nacos" -}}
+for env in envs:
+    key = f'nacos-mcp-server-{env}'
+    addr = servers.get(key, {}).get('env', {}).get('NACOS_ADDR', '')
+    if ':' not in addr:
+        print(f'  WARN: {key} NACOS_ADDR missing, skip tcp probe')
+        continue
+    host, port = addr.split(':', 1)
+    try:
+        s = socket.create_connection((host, int(port)), timeout=4)
+        s.close()
+        print(f'  PASS: {key} tcp reachable ({addr})')
+    except Exception as e:
+        print(f'  FAIL: {key} tcp unreachable ({addr}): {e}')
+        sys.exit(1)
+{{- end}}
+
+{{if .Infrastructure.Observability.Grafana.Enabled -}}
+prefixes = ['grafana-mcp-server'{{if .Infrastructure.Observability.Loki.Enabled}}, 'loki-mcp-server'{{end}}]
+for pfx in prefixes:
+    for env in envs:
+        key = f'{pfx}-{env}'
+        e = servers.get(key, {}).get('env', {})
+        url = e.get('GRAFANA_URL', '').rstrip('/') + '/api/health'
+        user = e.get('GRAFANA_USERNAME', '')
+        pwd = e.get('GRAFANA_PASSWORD', '')
+        if not url.startswith('http'):
+            print(f'  WARN: {key} GRAFANA_URL missing, skip probe')
+            continue
+        req = urllib.request.Request(url)
+        if user or pwd:
+            token = base64.b64encode(f'{user}:{pwd}'.encode()).decode()
+            req.add_header('Authorization', f'Basic {token}')
+        try:
+            with urllib.request.urlopen(req, timeout=6) as r:
+                if r.status in (200, 401, 403):
+                    print(f'  PASS: {key} reachable (HTTP {r.status})')
+                else:
+                    print(f'  FAIL: {key} unexpected HTTP {r.status}')
+                    sys.exit(1)
+        except Exception as ex:
+            print(f'  FAIL: {key} unreachable: {ex}')
+            sys.exit(1)
+{{- end}}
+PYEOF
+
+{{if hasSkill . "diagram-generator" -}}
+echo "[check] diagram generation"
+DGEN="$WS_DIR/skills/diagram-generator/scripts/mermaid-to-image.js"
+[[ -f "$DGEN" ]] || fail "mermaid-to-image.js missing"
+printf 'flowchart LR\nA[Test]-->B[Pass]\n' | node "$DGEN" - "$TMP_IMG" >/tmp/{{.AgentID}}-mermaid.log 2>&1 \
+  && [[ -s "$TMP_IMG" ]] && pass "diagram image generated: $TMP_IMG" \
+  || { cat /tmp/{{.AgentID}}-mermaid.log; fail "diagram generation failed"; }
+{{- end}}
+
+echo "[done] self-test passed"

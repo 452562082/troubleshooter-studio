@@ -1,0 +1,198 @@
+# 示例：一个假想的电商系统，用于端到端验证 factory 生成器
+# 仅用于测试，凭证全部占位符
+
+system:
+  id: shop
+  name: "Shop"
+  description: "电商中台（订单/商品/用户/库存）"
+
+agent:
+  name: "Shop排障机器人"
+  workspace_name: "Shop排障机器人"
+  model: openai-codex/gpt-5.3-codex
+  style:
+    tone: direct
+    verbosity: terse
+
+environments:
+  - id: dev
+    aliases: [dev, develop]
+    api_domain: api-dev.shop.example.com
+    web_domain: www-dev.shop.example.com
+    is_prod: false
+  - id: staging
+    aliases: [stg, pre]
+    api_domain: api-stg.shop.example.com
+    web_domain: www-stg.shop.example.com
+    is_prod: false
+  - id: prod
+    api_domain: api.shop.example.com
+    web_domain: www.shop.example.com
+    is_prod: true
+
+repos:
+  - name: order-service
+    url: git@github.com:shop/order-service.git
+    role: backend
+    stack: go
+    framework: ""
+    service_names:
+      - order-service
+      - order-worker
+    env_branches:
+      dev: develop
+      staging: staging
+      prod: main
+    analysis:
+      enabled: true
+      shallow_depth: 50
+
+  - name: product-service
+    url: git@github.com:shop/product-service.git
+    role: backend
+    stack: java
+    framework: spring-boot
+    service_names:
+      - product-service
+    env_branches:
+      dev: develop
+      staging: staging
+      prod: main
+
+  - name: web-frontend
+    url: git@github.com:shop/web-frontend.git
+    role: frontend
+    stack: node
+    framework: next.js
+    env_branches:
+      dev: develop
+      staging: staging
+      prod: main
+
+  - name: php-service
+    url: git@github.com:shop/php-service.git
+    role: backend
+    stack: php
+    framework: laravel
+    service_names:
+      - php-service
+    env_branches:
+      dev: develop
+      staging: staging
+      prod: main
+
+infrastructure:
+  config_center:
+    type: nacos
+    endpoints:
+      - env: dev
+        addr: "{{CONFIG_CENTER_ADDR_DEV}}"
+        namespace_hint: "dev"
+      - env: staging
+        addr: "{{CONFIG_CENTER_ADDR_STAGING}}"
+        namespace_hint: "staging"
+      - env: prod
+        addr: "{{CONFIG_CENTER_ADDR_PROD}}"
+        namespace_hint: "prod"
+    auth:
+      username_placeholder: "{{CONFIG_CENTER_USERNAME}}"
+      password_placeholder: "{{CONFIG_CENTER_PASSWORD}}"
+    dataid_patterns:
+      - "{service}.yaml"
+      - "{service}-{env}.yaml"
+
+  observability:
+    grafana:
+      enabled: true
+      url_by_env:
+        dev: "{{GRAFANA_DEV_URL}}"
+        prod: "{{GRAFANA_PROD_URL}}"
+      auth:
+        username_placeholder: "{{GRAFANA_USERNAME}}"
+        password_placeholder: "{{GRAFANA_PASSWORD}}"
+    loki:
+      enabled: true
+      via_grafana: true
+    prometheus:
+      enabled: true
+      via_grafana: true
+      preferred_metrics:
+        - http_server_requests_seconds_count
+        - process_resident_memory_bytes
+    jaeger:
+      enabled: true
+      url_by_env:
+        dev: "{{JAEGER_DEV_URL}}"
+        prod: "{{JAEGER_PROD_URL}}"
+    elk:
+      enabled: true
+      default_index: "shop-logs-*"
+      kibana_by_env:
+        dev: "{{KIBANA_DEV_URL}}"
+        prod: "{{KIBANA_PROD_URL}}"
+      es_by_env:
+        dev: "{{ELK_ES_DEV_URL}}"
+        prod: "{{ELK_ES_PROD_URL}}"
+
+  data_stores:
+    - type: redis
+      enabled: true
+      discovery: from_config_center
+      readonly_enforced: true
+    - type: mongodb
+      enabled: true
+      discovery: from_config_center
+      readonly_enforced: true
+    - type: elasticsearch
+      enabled: true
+      discovery: from_config_center
+      readonly_enforced: true
+    - type: mysql
+      enabled: true
+      discovery: from_config_center
+      readonly_enforced: true
+    - type: kafka
+      enabled: true
+      discovery: from_config_center
+      readonly_enforced: true
+
+  messaging:
+    - platform: lark
+      enabled: true
+      credentials:
+        app_id_placeholder: "{{MESSAGING_APP_ID}}"
+        app_secret_placeholder: "{{MESSAGING_APP_SECRET}}"
+      attachment_send: true
+
+  project_tracking:
+    - platform: feishu_project
+      enabled: true
+      credentials:
+        user_token_placeholder: "{{MCP_USER_TOKEN}}"
+
+generation:
+  target_host: openclaw
+  output_dir: ./dist/shop
+  skills_whitelist:
+    - routing
+    - config-executor
+    - redis-runtime-query
+    - mongodb-runtime-query
+    - es-runtime-query
+    - mysql-runtime-query
+    - kafka-runtime-query
+    - tracing-query
+    - elk-log-query
+    - diagram-generator
+  verified_only: false
+  mapping_review_mode: strict
+  preserve_on_regenerate:
+    - SOUL.md
+    - USER.md
+    - CHECKLIST.md
+
+meta:
+  schema_version: "0.1"
+  factory_template_ref:
+    repo: troubleshooter-factory
+    ref: main

@@ -1,0 +1,185 @@
+# ============================================================================
+# system.yaml —— 排障机器人工厂的输入契约
+#
+# 字段约定：
+#   - 必填字段标 [required]，选填标 [optional]
+#   - 凭证一律用 {{PLACEHOLDER}}，实际值由 install.sh 交互式输入、不进入 LLM 上下文
+#   - 本文件既是 schema 说明，也是字段级注释，用户可按需裁剪生成自己的 system.yaml
+#
+# 命名原则（系统无关）：
+#   生成产物使用通用文件名，不带系统前缀。工作区本身已按 workspace_name 隔离。
+#     env-domain-map.yaml
+#     env-branch-map.yaml
+#     config-map.yaml
+#     log-app-map.yaml
+#     observability-map.yaml
+#     repo-stack-map.yaml
+#   生成的 skill 名也不带系统语义（routing / config-executor / redis-runtime-query ...）
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# 1. 系统元信息 —— 决定生成产物的命名与工作区路径
+# ---------------------------------------------------------------------------
+system:
+  id: my-system                      # [required] 短标识，[a-z0-9-]，用于 agent-id 派生
+  name: "My System"                  # [required] 系统显示名
+  description: "示例系统，替换为你的业务描述"   # [optional] 一句话描述，写入 IDENTITY.md
+
+# ---------------------------------------------------------------------------
+# 2. Agent 画像 —— 决定生成的机器人人格与部署身份
+# ---------------------------------------------------------------------------
+agent:
+  name: "AI排障机器人"                 # [required] 机器人显示名
+  workspace_name: "AI排障机器人"       # [required] ~/.openclaw/workspace/<name>
+  model: openai-codex/gpt-5.3-codex  # [required] OpenClaw agents.list 中的 model 标识
+  style:                              # [optional] 人格倾向，SOUL.md 生成输入
+    tone: direct                      # direct / gentle / playful
+    verbosity: terse                  # terse / balanced / thorough
+
+# ---------------------------------------------------------------------------
+# 3. 环境清单 —— 生成 env-domain-map.yaml
+# is_prod 决定 CHECKLIST.md 中的风险分级提示
+# ---------------------------------------------------------------------------
+environments:
+  - id: dev                          # [required] 环境短 id
+    aliases: [dev, develop]          # [optional] 用户口语里的叫法
+    api_domain: api-dev.example.com  # [required if applicable] 主 API 入口
+    web_domain: www-dev.example.com  # [optional]
+    is_prod: false                   # [required]
+  - id: prod
+    api_domain: api.example.com
+    web_domain: www.example.com
+    is_prod: true
+
+# ---------------------------------------------------------------------------
+# 4. 代码仓库清单 —— 生成 env-branch-map.yaml / repo-stack-map.yaml
+# 同时是代码分析层输入：扫描语言/框架/服务名/配置文件
+# ---------------------------------------------------------------------------
+repos:
+  - name: user-service               # [required] 仓库短名，作为 map key
+    url: git@github.com:org/user-service.git   # [required]
+    role: backend                    # [required] backend / frontend / infra / shared / gateway
+    stack: go                        # [required] go / java / node / php / python / rust / ...
+    framework: ""                    # [optional] 留空时由分析层推断
+    service_names:                   # [optional] 一仓多服务时显式列出，提升路由映射准确度
+      - user-service
+    env_branches:                    # [required] 每个环境对应的分支或 tag
+      dev: develop
+      prod: main
+    analysis:                        # [optional] 代码分析控制
+      enabled: true
+      shallow_depth: 50
+      include_paths: []              # 留空=默认扫全部；填则仅扫这些路径
+
+# ---------------------------------------------------------------------------
+# 5. 基础组件 —— 决定 mcp.servers.json 和 skills/ 生成内容
+# 每类组件独立开关，按需生成对应 skill 与 MCP server
+# ---------------------------------------------------------------------------
+infrastructure:
+
+  # 5.1 配置源 —— 决定 config-executor skill 使用的后端协议
+  config_center:
+    type: nacos                      # [required] nacos / apollo / consul / env-vars / kubernetes / none
+    per_env_credentials: false       # [optional] true = install.sh 按 env 单独询问凭证（默认 false = env 间共用）
+    endpoints:                       # [required for nacos/apollo/consul] 每环境一套（env-vars/kubernetes 不需要）
+      - env: dev
+        addr: "{{CONFIG_CENTER_DEV_ADDR}}"
+        namespace_hint: "dev"        # [optional] 辅助路由推断
+      - env: prod
+        addr: "{{CONFIG_CENTER_PROD_ADDR}}"
+        namespace_hint: "prod"
+    auth:
+      username_placeholder: "{{CONFIG_CENTER_USERNAME}}"
+      password_placeholder: "{{CONFIG_CENTER_PASSWORD}}"
+    dataid_patterns:                 # [optional] 命名习惯，帮 AI 提升 config-map 准确率
+      - "{service}.yaml"
+      - "{service}-{env}.yaml"
+
+  # 5.2 可观测性 —— 决定 grafana / loki / prometheus MCP 是否生成
+  observability:
+    grafana:
+      enabled: true
+      per_env_credentials: false     # [optional] true = install.sh 按 env 单独询问 Grafana 凭证
+      url_by_env:
+        dev: "{{GRAFANA_DEV_URL}}"
+        prod: "{{GRAFANA_PROD_URL}}"
+      auth:
+        username_placeholder: "{{GRAFANA_USERNAME}}"
+        password_placeholder: "{{GRAFANA_PASSWORD}}"
+    loki:
+      enabled: true
+      via_grafana: true              # true=复用 grafana 凭证，false=独立 endpoint
+    prometheus:
+      enabled: true
+      via_grafana: true
+      preferred_metrics: []          # [optional] 写入 observability-map.yaml
+
+  # 5.3 数据层 —— 决定是否生成对应 runtime-query skill
+  # discovery:
+  #   - from_config_center: 从配置中心解析连接串
+  #   - static: 走下方 static_endpoints
+  #   - both: 优先 config_center，兜底 static
+  data_stores:
+    - type: redis                    # redis / mongodb / elasticsearch / mysql / kafka / ...
+      enabled: true
+      discovery: from_config_center
+      readonly_enforced: true        # 必须 true，生成的 skill 禁止写
+      static_endpoints: []           # discovery=static/both 时用（legacy flat list）
+      endpoints_by_env:              # [optional] 按 env 声明静态连接串（env-vars/kubernetes 模式常用）
+        dev: "redis-dev:6379"
+        prod: "redis-prod:6379"
+    - type: mongodb
+      enabled: true
+      discovery: from_config_center
+      readonly_enforced: true
+    - type: elasticsearch
+      enabled: true
+      discovery: from_config_center
+      readonly_enforced: true
+    - type: mysql
+      enabled: false
+    - type: kafka
+      enabled: false
+
+  # 5.4 消息/IM 通道 —— 决定附件发送链路走哪个 MCP
+  messaging:
+    - platform: lark                 # lark / slack / dingtalk / telegram / wechat-work
+      enabled: true
+      credentials:
+        app_id_placeholder: "{{MESSAGING_APP_ID}}"
+        app_secret_placeholder: "{{MESSAGING_APP_SECRET}}"
+      attachment_send: true          # 是否用于发送图类附件（mermaid 产物）
+
+  # 5.5 项目/需求管理 —— 决定是否生成对应 MCP
+  project_tracking:
+    - platform: none                 # feishu_project / jira / linear / none
+      enabled: false
+
+# ---------------------------------------------------------------------------
+# 6. 生成偏好 —— 控制产物形态、部署目标、再生成策略
+# ---------------------------------------------------------------------------
+generation:
+  target_host: openclaw              # [required] MVP 仅 openclaw；后续 claude-code / cursor
+  output_dir: ./dist                 # [optional] 生成包输出位置
+  skills_whitelist:                  # [optional] 覆盖默认全量 skills
+    - routing                        # 环境/服务路由映射
+    - config-executor                # 配置中心读/历史/对比
+    - redis-runtime-query
+    - mongodb-runtime-query
+    - es-runtime-query
+    - diagram-generator              # 对标 mermaid-image-generator，改名以避免绑定实现
+  verified_only: false               # true = self-test 在有 inferred 未校验行时阻塞
+  mapping_review_mode: strict        # strict / loose —— inferred 行是否必须人工确认
+  preserve_on_regenerate:            # 二次生成时保留不覆盖（保留用户手工修改）
+    - SOUL.md
+    - USER.md
+    - CHECKLIST.md
+
+# ---------------------------------------------------------------------------
+# 7. 元数据 —— 生成器自身的版本管理
+# ---------------------------------------------------------------------------
+meta:
+  schema_version: "0.1"              # [required] 随 factory 演进
+  factory_template_ref:              # [optional] 基于哪个骨架模板版本生成
+    repo: troubleshooter-factory
+    ref: main

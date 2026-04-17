@@ -1,0 +1,92 @@
+# 示例：K8s 原生配置管理（ConfigMap + Secret）
+# 典型场景：Kubernetes 微服务，配置不在 Nacos/Apollo
+system:
+  id: k8s-app
+  name: "K8sApp"
+  description: "K8s 原生微服务系统"
+
+agent:
+  name: "K8sApp排障机器人"
+  workspace_name: "K8sApp排障机器人"
+  model: openai-codex/gpt-5.3-codex
+
+environments:
+  - id: staging
+    api_domain: api-stg.k8s.example.com
+    is_prod: false
+  - id: prod
+    api_domain: api.k8s.example.com
+    is_prod: true
+
+repos:
+  - name: user-api
+    url: git@github.com:k8s/user-api.git
+    role: backend
+    stack: go
+    service_names: [user-api]
+    env_branches:
+      staging: staging
+      prod: main
+  - name: order-api
+    url: git@github.com:k8s/order-api.git
+    role: backend
+    stack: java
+    service_names: [order-api]
+    env_branches:
+      staging: staging
+      prod: main
+
+infrastructure:
+  config_center:
+    type: kubernetes   # ← K8s ConfigMap/Secret
+
+  observability:
+    grafana:
+      enabled: true
+      url_by_env:
+        staging: "{{GRAFANA_STG_URL}}"
+        prod: "{{GRAFANA_PROD_URL}}"
+    loki:
+      enabled: true
+      via_grafana: true
+    prometheus:
+      enabled: true
+      via_grafana: true
+
+  data_stores:
+    - type: redis
+      enabled: true
+      discovery: static
+      readonly_enforced: true
+    - type: mongodb
+      enabled: true
+      discovery: static
+      readonly_enforced: true
+    - type: elasticsearch
+      enabled: false
+
+  messaging:
+    - platform: lark
+      enabled: true
+      credentials:
+        app_id_placeholder: "{{MESSAGING_APP_ID}}"
+        app_secret_placeholder: "{{MESSAGING_APP_SECRET}}"
+      attachment_send: true
+
+  project_tracking: []
+
+generation:
+  target_host: openclaw
+  output_dir: ./dist/k8s-app
+  skills_whitelist:
+    - routing
+    - config-executor
+    - redis-runtime-query
+    - mongodb-runtime-query
+    - diagram-generator
+  preserve_on_regenerate:
+    - SOUL.md
+    - USER.md
+
+meta:
+  schema_version: "0.1"

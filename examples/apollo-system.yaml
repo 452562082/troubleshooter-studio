@@ -1,0 +1,99 @@
+# 示例：一个使用 Apollo 配置中心的假想系统
+system:
+  id: bank
+  name: "Bank"
+  description: "银行中台（账户/交易/风控）"
+
+agent:
+  name: "Bank排障机器人"
+  workspace_name: "Bank排障机器人"
+  model: openai-codex/gpt-5.3-codex
+
+environments:
+  - id: dev
+    api_domain: api-dev.bank.example.com
+    is_prod: false
+  - id: prod
+    api_domain: api.bank.example.com
+    is_prod: true
+
+repos:
+  - name: account-service
+    url: git@github.com:bank/account-service.git
+    role: backend
+    stack: java
+    framework: spring-boot
+    service_names:
+      - account-service
+    env_branches:
+      dev: develop
+      prod: main
+
+  - name: transaction-service
+    url: git@github.com:bank/transaction-service.git
+    role: backend
+    stack: java
+    service_names:
+      - transaction-service
+    env_branches:
+      dev: develop
+      prod: main
+
+infrastructure:
+  config_center:
+    type: apollo
+    endpoints:
+      - env: dev
+        addr: "{{CONFIG_CENTER_ADDR_DEV}}"
+        namespace_hint: "dev"
+      - env: prod
+        addr: "{{CONFIG_CENTER_ADDR_PROD}}"
+    auth:
+      username_placeholder: "{{CONFIG_CENTER_USERNAME}}"
+      password_placeholder: "{{CONFIG_CENTER_PASSWORD}}"
+
+  observability:
+    grafana:
+      enabled: true
+      url_by_env:
+        prod: "{{GRAFANA_PROD_URL}}"
+    loki:
+      enabled: true
+      via_grafana: true
+    prometheus:
+      enabled: true
+      via_grafana: true
+
+  data_stores:
+    - type: redis
+      enabled: true
+      discovery: from_config_center
+      readonly_enforced: true
+    - type: mongodb
+      enabled: false
+    - type: elasticsearch
+      enabled: false
+
+  messaging:
+    - platform: lark
+      enabled: true
+      credentials:
+        app_id_placeholder: "{{MESSAGING_APP_ID}}"
+        app_secret_placeholder: "{{MESSAGING_APP_SECRET}}"
+      attachment_send: true
+
+  project_tracking:
+    - platform: none
+      enabled: false
+
+generation:
+  target_host: openclaw
+  output_dir: ./dist/bank
+  skills_whitelist:
+    - routing
+    - config-executor
+    - redis-runtime-query
+    - diagram-generator
+
+meta:
+  schema_version: "0.1"

@@ -1,0 +1,83 @@
+---
+name: kafka-runtime-query
+description: 通过环境动态查询 Kafka 集群状态。先通过 routing 获取环境映射，再按配置源读取并解析 Kafka broker 列表，最后通过 kafka CLI 或 mcporter 查看 topic/consumer-group/积压。
+---
+
+# Kafka Runtime Query
+
+## 执行流程（固定）
+
+1. 先确认目标环境与服务；环境映射统一通过 `routing` 获取。
+{{- if or (eq .Infrastructure.ConfigCenter.Type "nacos") (eq .Infrastructure.ConfigCenter.Type "apollo") (eq .Infrastructure.ConfigCenter.Type "consul")}}
+2. 通过配置中心获取该环境配置文本。
+{{- else if eq .Infrastructure.ConfigCenter.Type "env-vars"}}
+2. 通过 `resolve_runtime_static.py --agent-id {{.AgentID}} --env <env>` 读取静态连接信息。
+{{- else if eq .Infrastructure.ConfigCenter.Type "kubernetes"}}
+2. 通过 `resolve_runtime_k8s.py --agent-id {{.AgentID}} --env <env>` 从 K8s ConfigMap/Secret 解析连接信息。
+{{- end}}
+3. 解析配置中的 Kafka 连接信息（broker 地址列表）。
+4. 使用 kafka CLI 工具或 mcporter 执行只读诊断。
+5. 返回证据：topic 列表、partition 分配、consumer-group 消费位点、积压量。
+
+## 连接解析
+
+优先复用：
+{{- if or (eq .Infrastructure.ConfigCenter.Type "nacos") (eq .Infrastructure.ConfigCenter.Type "apollo") (eq .Infrastructure.ConfigCenter.Type "consul")}}
+- `skills/config-executor/scripts/resolve_runtime_from_nacos.py`
+{{- end}}
+{{- if eq .Infrastructure.ConfigCenter.Type "env-vars"}}
+- `skills/config-executor/scripts/resolve_runtime_static.py`（从 creds.json 读静态连接串）
+{{- end}}
+{{- if eq .Infrastructure.ConfigCenter.Type "kubernetes"}}
+- `skills/config-executor/scripts/resolve_runtime_k8s.py`（从 K8s ConfigMap/Secret 解析）
+{{- end}}
+
+## 诊断命令模板
+
+### 列出所有 topic
+
+```bash
+kafka-topics.sh --bootstrap-server $KAFKA_BROKERS --list
+```
+
+### 查看 topic 详情
+
+```bash
+kafka-topics.sh --bootstrap-server $KAFKA_BROKERS --describe --topic <topic_name>
+```
+
+### 查看 consumer group 状态与积压
+
+```bash
+kafka-consumer-groups.sh --bootstrap-server $KAFKA_BROKERS --describe --group <group_id>
+```
+
+### 消费最新 N 条消息（取证）
+
+```bash
+kafka-console-consumer.sh --bootstrap-server $KAFKA_BROKERS \
+  --topic <topic_name> --from-latest --max-messages 5 --timeout-ms 10000
+```
+
+### 查看死信 / 重试 topic
+
+```bash
+kafka-topics.sh --bootstrap-server $KAFKA_BROKERS --list | grep -E "DLQ|RETRY|dead"
+```
+
+> 如果 kafka CLI 不可用，可通过 mcporter 拉起 Kafka MCP（若有可用的 MCP 包），命令模式同上。
+
+## 输出要求
+
+- 先结论：是否有消费积压/死信/分区不均
+- 再证据：
+  - consumer-group + topic + partition 对应的 current-offset / log-end-offset / lag
+  - 死信 topic 消息条数
+  - 最近 N 条消息的 key/value 摘要（脱敏）
+- 最后归因：消费端处理慢 / 生产端写入异常 / 分区分配不均 / 网络问题
+
+## 硬约束
+
+- 仅只读诊断；禁止修改 topic 配置、删除 consumer group offset、清除消息。
+- 不直接猜测 broker 地址；必须来自 config-executor 的 resolve_runtime 解析结果。
+- consumer 查看消息时必须加 `--max-messages` 和 `--timeout-ms` 限制，防止无限消费。

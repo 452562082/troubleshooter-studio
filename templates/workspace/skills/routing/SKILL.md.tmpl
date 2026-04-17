@@ -1,0 +1,75 @@
+---
+name: routing
+description: 用于 {{.System.Name}} 排障时的路由映射决策。适用于环境到仓库分支、环境到 API/Web 域名、环境+服务到配置中心标识、以及环境+服务到日志 app 的快速映射查询。优先基于映射表返回确定性答案，避免猜测。
+---
+
+# {{.System.Name}} 路由映射
+
+用于快速、确定地回答：
+
+- 环境 → 仓库分支
+- 环境 → API/Web 域名
+- 环境 + 服务 → 配置中心标识（namespace/group/dataId）
+- 环境 + 服务 → 日志 app
+- 监控查询默认数据源与优先指标
+- 仓库技术栈信息（repo → language/framework/role）
+
+## 执行步骤
+
+1. 先识别问题类型：分支映射 / 环境域名 / 配置定位 / 日志 app。
+2. 按问题类型读取最小必要映射文件（不要固定全读）：
+   - 分支映射：`references/env-branch-map.yaml`
+   - 环境域名：`references/env-domain-map.yaml`
+   - 配置定位：`references/config-map.yaml`
+   - 日志 app：`references/log-app-map.yaml`
+   - 监控数据源/优先指标：`references/observability-map.yaml`
+   - 仓库技术栈：`references/repo-stack-map.yaml`
+3. 若一个问题同时涉及多类映射，再按需串行读取多个文件。
+4. 日志映射优先使用 `verifiedApp`；若无则按 `appCandidates` 顺序返回。
+5. 若缺少环境或服务信息，只追问一个最小澄清问题。
+
+## 输出规则
+
+- 输出简洁、结构化。
+- 明确标注来源文件（env-branch-map / env-domain-map / config-map / log-app-map / observability-map / repo-stack-map）。
+- 每条结果必须附带 `status: verified | inferred`。
+- 未经用户要求，不做超出映射表的推断。
+
+## 最小输出模板
+
+### 环境 → 分支/仓库
+
+- environment: `<env>`
+- repos:
+  - `<repo>`: `<branch_or_tag>`
+- source: `skills/routing/references/env-branch-map.yaml`
+
+### 环境 → API/Web 域名
+
+- environment: `<env>`
+- api_domain: `<apiDomain>`
+- web_domain: `<webDomain>`
+- source: `skills/routing/references/env-domain-map.yaml`
+
+### 环境+服务 → 配置中心标识
+
+- environment: `<env>`
+- service: `<service>`
+- namespaceId: `<namespaceId>`（nacos）/ appId+cluster+namespaces（apollo）/ kv_prefix+default_context（consul）
+- group: `<group>`（仅 nacos）
+- dataId: `<dataId>`（仅 nacos）
+- **mcp_server: `<实例名>`** ← 工具调用必须用此名字（例：`nacos-mcp-server-prod`）
+- status: `verified|inferred`
+- source: `skills/routing/references/config-map.yaml`
+
+> ⚠️ 多环境 MCP：本系统按环境注册独立 MCP 实例。`mcp_server` 字段是本行对应环境的 MCP 名，
+> agent 后续调用 `config-executor` 或任何配置中心工具时，**必须使用该字段值**而不是猜测或拼接。
+
+### 环境+服务 → 日志 app
+
+- environment: `<env>`
+- service: `<service>`
+- status: `verified|inferred`
+- preferred_app: `<verifiedApp 或首个 appCandidate>`
+- candidates: `[ ... ]`
+- source: `skills/routing/references/log-app-map.yaml`

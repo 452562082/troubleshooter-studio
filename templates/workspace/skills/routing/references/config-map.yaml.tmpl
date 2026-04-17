@@ -1,0 +1,120 @@
+# config-map.yaml
+# 由 troubleshooter-factory 生成。config-center: {{.Infrastructure.ConfigCenter.Type}}
+# - status: verified → 来自代码分析或上轮人工沉淀
+# - status: inferred → 骨架，需人工校对后改为 verified
+# - mcp_server：本行对应的配置中心 MCP 实例名，agent 必须按此字段选择工具（不得拼名）
+# 优先级：analyzer finding > prior manual override > inferred skeleton
+{{- $cc := .Infrastructure.ConfigCenter.Type}}
+{{- $patterns := .Infrastructure.ConfigCenter.DataIDPatterns}}
+{{- $endpoints := .Infrastructure.ConfigCenter.Endpoints}}
+{{- $ctx := .}}
+config_center: {{$cc}}
+environments:
+{{- range .Environments}}
+  {{.ID}}:
+    {{- $envID := .ID}}
+    {{- $nsHint := ""}}
+    {{- $mcp := printf "%s-mcp-server-%s" $cc $envID}}
+    {{- range $endpoints}}{{if eq .Env $envID}}{{$nsHint = .NamespaceHint}}{{end}}{{end}}
+    {{- range $.Repos}}
+      {{- $repo := .}}
+      {{- $serviceNames := .ServiceNames}}
+      {{- if not $serviceNames}}{{$serviceNames = list .Name}}{{end}}
+      {{- range $serviceNames}}
+        {{- $svc := .}}
+        {{- $f := findConfig $ctx $svc $envID}}
+        {{- $p := findPrior $ctx $svc $envID}}
+      {{$svc}}:
+        {{- if eq $cc "nacos"}}
+        {{- if $f}}
+        namespaceId: {{if $f.NamespaceID}}{{$f.NamespaceID | printf "%q"}}{{else}}{{$nsHint | printf "%q"}}{{end}}
+        group: {{if $f.Group}}{{$f.Group | printf "%q"}}{{else}}"DEFAULT_GROUP"{{end}}
+        dataId: {{$f.DataID | printf "%q"}}
+        mcp_server: {{$mcp | printf "%q"}}
+        status: verified
+        source: {{$f.SourceFile | printf "%q"}}
+        {{- else if $p}}
+        namespaceId: {{$p.NamespaceID | printf "%q"}}
+        group: {{if $p.Group}}{{$p.Group | printf "%q"}}{{else}}"DEFAULT_GROUP"{{end}}
+        dataId: {{$p.DataID | printf "%q"}}
+        mcp_server: {{$mcp | printf "%q"}}
+        status: verified
+        {{- else}}
+        namespaceId: {{$nsHint | printf "%q"}}
+        group: "DEFAULT_GROUP"
+        dataId: {{if $patterns}}{{index $patterns 0 | printf "%q"}}{{else}}""{{end}}
+        mcp_server: {{$mcp | printf "%q"}}
+        status: inferred
+        {{- end}}
+        {{- else if eq $cc "apollo"}}
+        {{- if $f}}
+        appId: {{if $f.AppID}}{{$f.AppID | printf "%q"}}{{else}}{{$svc | printf "%q"}}{{end}}
+        cluster: {{if $f.Cluster}}{{$f.Cluster | printf "%q"}}{{else}}"default"{{end}}
+        namespaces:
+        {{- if $f.Namespaces}}
+          {{- range $f.Namespaces}}
+          - {{. | printf "%q"}}
+          {{- end}}
+        {{- else}}
+          - "application"
+        {{- end}}
+        {{- if $f.ServerAddr}}
+        meta: {{$f.ServerAddr | printf "%q"}}
+        {{- end}}
+        mcp_server: {{$mcp | printf "%q"}}
+        status: verified
+        source: {{$f.SourceFile | printf "%q"}}
+        {{- else if $p}}
+        appId: {{if $p.AppID}}{{$p.AppID | printf "%q"}}{{else}}{{$svc | printf "%q"}}{{end}}
+        cluster: {{if $p.Cluster}}{{$p.Cluster | printf "%q"}}{{else}}"default"{{end}}
+        namespaces:
+        {{- if $p.Namespaces}}
+          {{- range $p.Namespaces}}
+          - {{. | printf "%q"}}
+          {{- end}}
+        {{- else}}
+          - "application"
+        {{- end}}
+        {{- if $p.ServerAddr}}
+        meta: {{$p.ServerAddr | printf "%q"}}
+        {{- end}}
+        mcp_server: {{$mcp | printf "%q"}}
+        status: verified
+        {{- else}}
+        appId: {{$svc | printf "%q"}}
+        cluster: "default"
+        namespaces:
+          - "application"
+        mcp_server: {{$mcp | printf "%q"}}
+        status: inferred
+        {{- end}}
+        {{- else if eq $cc "consul"}}
+        {{- if $f}}
+        kv_prefix: {{if $f.KVPrefix}}{{$f.KVPrefix | printf "%q"}}{{else}}"config"{{end}}
+        default_context: {{if $f.DefaultContext}}{{$f.DefaultContext | printf "%q"}}{{else}}{{$svc | printf "%q"}}{{end}}
+        {{- if $f.ServerAddr}}
+        host: {{$f.ServerAddr | printf "%q"}}
+        {{- end}}
+        mcp_server: {{$mcp | printf "%q"}}
+        status: verified
+        source: {{$f.SourceFile | printf "%q"}}
+        {{- else if $p}}
+        kv_prefix: {{if $p.KVPrefix}}{{$p.KVPrefix | printf "%q"}}{{else}}"config"{{end}}
+        default_context: {{if $p.DefaultContext}}{{$p.DefaultContext | printf "%q"}}{{else}}{{$svc | printf "%q"}}{{end}}
+        {{- if $p.ServerAddr}}
+        host: {{$p.ServerAddr | printf "%q"}}
+        {{- end}}
+        mcp_server: {{$mcp | printf "%q"}}
+        status: verified
+        {{- else}}
+        kv_prefix: "config"
+        default_context: {{$svc | printf "%q"}}
+        mcp_server: {{$mcp | printf "%q"}}
+        status: inferred
+        {{- end}}
+        {{- else}}
+        status: unsupported_config_center
+        {{- end}}
+      {{- end}}
+    {{- end}}
+{{- end}}

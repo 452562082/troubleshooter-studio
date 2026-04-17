@@ -1,0 +1,185 @@
+---
+name: config-executor
+description: 通用配置中心执行技能（后端：{{.Infrastructure.ConfigCenter.Type}}）。负责按 namespace/group/dataId 读取配置、查看历史、提取配置块、对比差异与风险摘要；不负责项目/环境路由，路由由 `routing` 技能动态提供。
+---
+
+# Config Executor（{{.Infrastructure.ConfigCenter.Type}}）
+
+本技能只负责配置层执行：
+- 读取配置
+- 查看历史
+- 配置对比
+- 结构化摘要与风险提示
+
+本技能**不**负责：项目识别 / 环境语义判断 / 服务别名解析 / 环境到 namespace/dataId 映射。这些信息应由 `routing` 提供。
+
+## 多环境硬约束（必读）
+
+本系统每个环境有**独立的后端实例**：
+{{- range .Environments}}
+- `{{.ID}}` → `{{$.Infrastructure.ConfigCenter.Type}}-mcp-server-{{.ID}}`（nacos）或 `scripts/*_config.py --env {{.ID}}`（apollo/consul）
+{{- end}}
+
+**规则**：
+1. 永远以 `routing` 返回的 `mcp_server` 字段为准，**不得自行拼名或猜测**。
+2. 如果未拿到 `mcp_server`，先回去调 `routing` 补齐；不要用默认值。
+3. 跨 env 对比场景（prod vs dev）需要**分别**调用对应 env 的后端，不能只查一个。
+
+## 后端分路径（按 config_center.type）
+
+{{- if eq .Infrastructure.ConfigCenter.Type "nacos"}}
+
+### 当前后端：Nacos（走 MCP）
+
+install.sh 已为每个 env 注册 `nacos-mcp-server-<env>` MCP：
+{{- range .Environments}}
+- `nacos-mcp-server-{{.ID}}`
+{{- end}}
+
+执行步骤：
+1. `routing` 返回 `mcp_server=nacos-mcp-server-<env>` + `namespaceId/group/dataId`
+2. 调用该 MCP 的 `get_config` / `list_config_history` 等工具
+3. 需要跨 env 对比时：本地保存两份 text → `python3 scripts/nacos_diff.py --left-text ... --right-text ...`
+
+**运行时参数解析**（按 env 切换 Redis/Mongo/ES）：
+1. 先通过对应 env 的 Nacos MCP 读配置文本
+2. `python3 scripts/resolve_runtime_from_nacos.py --stdin < config.txt` 提取
+3. 输出契约：
+   - `runtime.redis`: `{host, port, resolved}`
+   - `runtime.mongo`: `{uri, hosts, resolved}`
+   - `runtime.elasticsearch`: `{hosts: string[], resolved}`
+   - `resolved=false` 时不得猜测；显式标注"未解析"
+{{- end}}
+
+{{- if eq .Infrastructure.ConfigCenter.Type "apollo"}}
+
+### 当前后端：Apollo（走 HTTP 脚本，生态暂无稳定 MCP 包）
+
+install.sh 已把 `meta_url + token` 按 env 写入 `~/.openclaw/{{.AgentID}}-creds.json`（0600）。
+
+读取 namespace：
+```bash
+python3 scripts/apollo_config.py get \
+  --agent-id {{.AgentID}} --env <env> \
+  --app-id <appId> --cluster <cluster> --namespace <namespace>
+```
+
+列 namespace 清单：
+```bash
+python3 scripts/apollo_config.py list-namespaces \
+  --agent-id {{.AgentID}} --env <env> \
+  --app-id <appId> --cluster default
+```
+
+`routing` 会返回 `appId / cluster / namespaces[] / mcp_server`；**以 `--env` 精确传入**，不要拼接字符串。
+`--env-label` 可覆盖 Apollo 侧大写环境标签（如 DEV/FAT/UAT），默认用 `--env` 的 upper。
+{{- end}}
+
+{{- if eq .Infrastructure.ConfigCenter.Type "consul"}}
+
+### 当前后端：Consul（走 HTTP 脚本，生态暂无稳定 MCP 包）
+
+install.sh 已把 `host + token` 按 env 写入 `~/.openclaw/{{.AgentID}}-creds.json`（0600）。
+
+读取单个 KV：
+```bash
+python3 scripts/consul_config.py get \
+  --agent-id {{.AgentID}} --env <env> --key <key>
+```
+
+列 prefix 下所有 key：
+```bash
+python3 scripts/consul_config.py list \
+  --agent-id {{.AgentID}} --env <env> --prefix <prefix>
+```
+
+`routing` 会返回 `kv_prefix / default_context / host`；组装 key 时形如 `<kv_prefix>/<default_context>` 或按实际约定。
+{{- end}}
+
+{{- if eq .Infrastructure.ConfigCenter.Type "env-vars"}}
+
+### 当前后端：env-vars（无远程配置中心）
+
+本系统不使用远程配置中心。运行时配置通过 `.env` 文件或容器环境变量传入。
+数据层连接串（Redis/Mongo/ES）已在安装时按 env 写入 `~/.openclaw/{{.AgentID}}-creds.json`。
+
+读取连接信息：
+```bash
+python3 scripts/resolve_runtime_static.py --agent-id {{.AgentID}} --env <env>
+```
+
+输出与 `resolve_runtime_from_nacos.py` 格式完全一致（`runtime.redis` / `runtime.mongo` / `runtime.elasticsearch`）。
+
+**排障流程**：
+1. `routing` 确认 env
+2. `resolve_runtime_static.py --env <env>` 拿连接串
+3. 按需调 runtime-query skills（redis/mongo/es）
+4. 无"读配置"步骤——没有远程配置中心可查
+
+如需查看应用实际加载的配置，可直接读仓库代码中的 `.env` / `config/*.yaml` 文件。
+{{- end}}
+
+{{- if eq .Infrastructure.ConfigCenter.Type "kubernetes"}}
+
+### 当前后端：Kubernetes（ConfigMap / Secret）
+
+本系统配置通过 K8s ConfigMap 和 Secret 管理。
+install.sh 已把 context/namespace/configmap/secret 按 env 写入 `~/.openclaw/{{.AgentID}}-creds.json`。
+
+读取 ConfigMap 并解析数据层连接信息：
+```bash
+python3 scripts/resolve_runtime_k8s.py --agent-id {{.AgentID}} --env <env> --resource configmap
+```
+
+读取 Secret：
+```bash
+python3 scripts/resolve_runtime_k8s.py --agent-id {{.AgentID}} --env <env> --resource secret
+```
+
+也可直接用 kubectl 查看完整配置（需要对应 context 权限）：
+```bash
+kubectl get configmap <name> -n <namespace> --context <context> -o yaml
+```
+
+**排障流程**：
+1. `routing` 确认 env
+2. `resolve_runtime_k8s.py --env <env>` 拿连接串
+3. 按需调 runtime-query skills（redis/mongo/es）
+4. 需要看配置全文：`kubectl get configmap/secret` 直接查
+
+需要：kubectl 已安装且有对应 context 的 RBAC 访问权限。
+{{- end}}
+
+## 参考文件
+
+{{- if eq .Infrastructure.ConfigCenter.Type "nacos"}}
+- `scripts/resolve_runtime_from_nacos.py`（Redis/Mongo/ES 连接提取）
+- `scripts/nacos_diff.py`（两份配置对比）
+- `scripts/nacos_config.py`（本地命令行读写工具）
+- `references/nacos-api-notes.md`（协议与联调注意事项）
+{{- end}}
+{{- if eq .Infrastructure.ConfigCenter.Type "apollo"}}
+- `scripts/apollo_config.py`（Open API HTTP 客户端）
+{{- end}}
+{{- if eq .Infrastructure.ConfigCenter.Type "consul"}}
+- `scripts/consul_config.py`（KV HTTP 客户端）
+{{- end}}
+{{- if eq .Infrastructure.ConfigCenter.Type "env-vars"}}
+- `scripts/resolve_runtime_static.py`（从 creds.json 读静态连接串）
+{{- end}}
+{{- if eq .Infrastructure.ConfigCenter.Type "kubernetes"}}
+- `scripts/resolve_runtime_k8s.py`（kubectl get configmap/secret → 解析连接串）
+{{- end}}
+
+## 默认输出
+
+先结论后证据：
+- 是否命中
+- 定位坐标（nacos: namespace/group/dataId；apollo: appId/cluster/namespace；consul: key）
+- 关键依赖（Redis/Kafka/Mongo/ES/MySQL）
+- 关键风险（明文敏感字段、localhost/公网IP 硬编码、debug 开关异常）
+- 差异摘要（对比场景）
+
+## 安全脱敏字段
+
+password / passwd / pwd / secret / token / accessKey / secretKey / ak / sk / privateKey / jdbc.password / api_key / apiKey / master_key

@@ -1,0 +1,58 @@
+# 同 shop 系统，但输出目标为 Claude Code
+system:
+  id: shop
+  name: "Shop"
+  description: "电商中台（订单/商品/用户/库存）"
+
+agent:
+  name: "Shop排障机器人"
+  workspace_name: "Shop排障机器人"
+  model: openai-codex/gpt-5.3-codex
+
+environments:
+  - {id: dev, api_domain: api-dev.shop.example.com, is_prod: false}
+  - {id: prod, api_domain: api.shop.example.com, is_prod: true}
+
+repos:
+  - name: order-service
+    url: git@github.com:shop/order-service.git
+    role: backend
+    stack: go
+    service_names: [order-service]
+    env_branches: {dev: develop, prod: main}
+
+infrastructure:
+  config_center:
+    type: nacos
+    endpoints:
+      - {env: dev, addr: nacos-dev:8848, namespace_hint: dev}
+      - {env: prod, addr: nacos-prod:8848, namespace_hint: prod}
+  observability:
+    grafana: {enabled: true, url_by_env: {dev: x, prod: y}}
+    loki: {enabled: true, via_grafana: true}
+    prometheus: {enabled: true, via_grafana: true}
+    jaeger: {enabled: true, url_by_env: {dev: x, prod: y}}
+  data_stores:
+    - {type: redis, enabled: true, discovery: from_config_center, readonly_enforced: true}
+    - {type: mongodb, enabled: false}
+    - {type: elasticsearch, enabled: false}
+    - {type: mysql, enabled: true, discovery: from_config_center, readonly_enforced: true}
+    - {type: kafka, enabled: false}
+  messaging: []
+  project_tracking: []
+
+generation:
+  targets:
+    - claude-code
+  output_dir: ./dist/shop
+  skills_whitelist:
+    - routing
+    - config-executor
+    - redis-runtime-query
+    - mysql-runtime-query
+    - tracing-query
+    - diagram-generator
+  preserve_on_regenerate: [SOUL.md]
+
+meta:
+  schema_version: "0.1"

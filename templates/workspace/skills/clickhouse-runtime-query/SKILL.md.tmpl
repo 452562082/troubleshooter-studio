@@ -1,0 +1,75 @@
+---
+name: clickhouse-runtime-query
+description: 通过环境动态查询 ClickHouse 数据。先通过 routing 获取环境映射，再按配置源读取并解析 ClickHouse 连接信息，最后通过 clickhouse-client CLI 或 HTTP API 执行只读查询。
+---
+
+# ClickHouse Runtime Query
+
+## 执行流程（固定）
+
+1. 先确认目标环境与服务；环境映射统一通过 `routing` 获取。
+{{- if or (eq .Infrastructure.ConfigCenter.Type "nacos") (eq .Infrastructure.ConfigCenter.Type "apollo") (eq .Infrastructure.ConfigCenter.Type "consul")}}
+2. 通过配置中心获取该环境配置文本。
+{{- else if eq .Infrastructure.ConfigCenter.Type "env-vars"}}
+2. 通过 `resolve_runtime_static.py --agent-id {{.AgentID}} --env <env>` 读取静态连接信息。
+{{- else if eq .Infrastructure.ConfigCenter.Type "kubernetes"}}
+2. 通过 `resolve_runtime_k8s.py --agent-id {{.AgentID}} --env <env>` 从 K8s ConfigMap/Secret 解析连接信息。
+{{- end}}
+3. 解析配置中的 ClickHouse 连接信息（host/port/database/user/password）。
+4. 使用 clickhouse-client CLI 或 HTTP API（端口 8123）执行只读查询。
+5. 执行查询并返回证据：表名、SQL、命中行数、关键字段样例。
+
+## 连接解析
+
+优先复用：
+{{- if or (eq .Infrastructure.ConfigCenter.Type "nacos") (eq .Infrastructure.ConfigCenter.Type "apollo") (eq .Infrastructure.ConfigCenter.Type "consul")}}
+- `skills/config-executor/scripts/resolve_runtime_from_nacos.py`
+{{- end}}
+{{- if eq .Infrastructure.ConfigCenter.Type "env-vars"}}
+- `skills/config-executor/scripts/resolve_runtime_static.py`（从 creds.json 读静态连接串）
+{{- end}}
+{{- if eq .Infrastructure.ConfigCenter.Type "kubernetes"}}
+- `skills/config-executor/scripts/resolve_runtime_k8s.py`（从 K8s ConfigMap/Secret 解析）
+{{- end}}
+
+## clickhouse-client CLI 调用
+
+```bash
+clickhouse-client --host $CH_HOST --port $CH_PORT --user $CH_USER --password $CH_PASS \
+  --database $CH_DB --readonly=1 \
+  --query "SELECT * FROM <table> WHERE <condition> LIMIT 50 FORMAT Pretty"
+```
+
+## HTTP API 调用
+
+```bash
+curl -s "http://$CH_HOST:8123/?database=$CH_DB&readonly=1" \
+  --user "$CH_USER:$CH_PASS" \
+  --data-binary "SELECT * FROM <table> WHERE <condition> LIMIT 50 FORMAT JSON"
+```
+
+### 常用诊断 SQL
+
+```sql
+-- 列出所有表及行数估算
+SELECT name, total_rows, formatReadableSize(total_bytes) AS size FROM system.tables WHERE database = currentDatabase();
+-- 查看分区信息
+SELECT table, partition, sum(rows) AS rows, formatReadableSize(sum(bytes_on_disk)) AS size FROM system.parts WHERE database = currentDatabase() GROUP BY table, partition ORDER BY table, partition;
+-- 查看正在执行的查询
+SELECT query_id, user, elapsed, query FROM system.processes;
+-- 近期慢查询
+SELECT query, query_duration_ms, read_rows, result_rows FROM system.query_log WHERE type = 'QueryFinish' ORDER BY query_duration_ms DESC LIMIT 10;
+```
+
+## 输出要求
+
+- 先结论：是否命中异常（是/否）
+- 再证据：表名 + SQL + 命中行数 + 关键字段
+- 最后归因：数据问题 / 配置问题 / 分区/MergeTree 性能问题
+
+## 硬约束
+
+- 仅只读查询（SELECT + readonly=1）；禁止 INSERT/ALTER/DROP/TRUNCATE。
+- 不直接猜测地址；必须来自 config-executor 的 resolve_runtime 解析结果。
+- 涉及敏感数据时做脱敏处理。
+- 查询必须加 LIMIT，防止大表全扫描。

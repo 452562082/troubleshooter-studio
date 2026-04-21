@@ -4,6 +4,7 @@ import type { ApplyResult, DiscoveredBot } from '../types/wails'
 import {
   applyBot,
   discoverBots,
+  exportYAML,
   gen as bridgeGen,
   isDesktop as bridgeIsDesktop,
 } from '../lib/bridge'
@@ -74,6 +75,29 @@ function toggleEditor(b: DiscoveredBot) {
   editingKey.value = k
   editorDraft.value = b.meta.system_yaml
   delete applyState[k]
+}
+
+// 每张卡片的导出状态（避免影响 apply / regen 区）
+const exportState = reactive<Record<string, { ok?: string; err?: string }>>({})
+
+async function doExport(b: DiscoveredBot) {
+  const k = regenKey(b)
+  exportState[k] = {}
+  try {
+    const yamlText = b.meta.system_yaml
+    if (!yamlText) throw new Error('这个机器人没有嵌入 system_yaml（老产物）')
+    // 用编辑器里的草稿（如果当前在编辑）优先导，否则导存盘版本
+    const payload = editingKey.value === k ? editorDraft.value : yamlText
+    const filename = `${b.meta.system_id || 'system'}.yaml`
+    const savedTo = await exportYAML(filename, payload)
+    if (!savedTo) {
+      exportState[k] = {} // user canceled, no message
+      return
+    }
+    exportState[k] = { ok: `已导出到 ${savedTo}` }
+  } catch (e: any) {
+    exportState[k] = { err: String(e?.message || e) }
+  }
 }
 
 async function runApply(b: DiscoveredBot, dryRun: boolean) {
@@ -190,10 +214,19 @@ onMounted(scan)
             <button class="btn btn-regen" :title="'编辑 yaml + 应用到活 workspace'" @click="toggleEditor(b)">
               {{ editingKey === regenKey(b) ? '收起' : '编辑配置' }}
             </button>
+            <button
+              class="btn btn-regen"
+              :title="editingKey === regenKey(b) ? '导出当前编辑中的草稿' : '导出活 workspace 的 system.yaml'"
+              @click="doExport(b)"
+            >
+              导出 yaml
+            </button>
           </div>
         </footer>
         <p v-if="regenState[regenKey(b)]?.ok" class="regen-ok">✓ {{ regenState[regenKey(b)]?.ok }}</p>
         <p v-if="regenState[regenKey(b)]?.err" class="regen-err">⚠ {{ regenState[regenKey(b)]?.err }}</p>
+        <p v-if="exportState[regenKey(b)]?.ok" class="regen-ok">✓ {{ exportState[regenKey(b)]?.ok }}</p>
+        <p v-if="exportState[regenKey(b)]?.err" class="regen-err">⚠ {{ exportState[regenKey(b)]?.err }}</p>
 
         <section v-if="editingKey === regenKey(b)" class="editor">
           <label class="editor-label">system.yaml（改完先「预演」看改动列表，再「应用」写盘）</label>

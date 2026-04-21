@@ -51,6 +51,7 @@ declare global {
           Validate(yamlText: string): Promise<ValidateResult>
           Gen(yamlText: string, outputDir: string): Promise<Record<string, unknown>>
           ApplyBot(agentPath: string, newYamlText: string, dryRun: boolean): Promise<ApplyResult>
+          SaveYAML(defaultFilename: string, yamlText: string): Promise<string>
         }
       }
     }

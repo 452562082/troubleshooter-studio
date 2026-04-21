@@ -65,3 +65,23 @@ export async function applyBot(
   if (!app) throw new Error('ApplyBot 只在桌面 app 里可用')
   return app.ApplyBot(agentPath, newYamlText, dryRun)
 }
+
+/** exportYAML 弹原生保存对话框导出 yaml 到任意路径。
+ *  桌面 app 走 Wails SaveFileDialog；浏览器走 Blob 下载。
+ *  返回值：桌面 app 下为保存路径（或用户取消时空串）；浏览器下为下载文件名。
+ */
+export async function exportYAML(defaultFilename: string, yamlText: string): Promise<string> {
+  const app = desktopApp()
+  if (app) return app.SaveYAML(defaultFilename, yamlText)
+  // 浏览器回退：触发 blob 下载
+  const blob = new Blob([yamlText], { type: 'text/yaml;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = defaultFilename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+  return defaultFilename
+}

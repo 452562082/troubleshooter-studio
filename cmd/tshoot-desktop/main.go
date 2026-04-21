@@ -12,6 +12,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
 	tsf "github.com/xiaolong/troubleshooter-studio"
 	"github.com/xiaolong/troubleshooter-studio/api"
@@ -43,6 +45,15 @@ type App struct {
 	// templateRoot 是 gen 流水线用的模板源（templates/ 所在路径）；
 	// 每个涉及 gen 的 binding（Gen / 未来的 Plan）都要它。
 	templateRoot string
+
+	// ctx 是 Wails 运行时 ctx，在 startup 阶段注入。所有需要原生能力（SaveFileDialog /
+	// OpenDirectoryDialog / WindowShow 等）的 binding 都用这个。
+	ctx context.Context
+}
+
+// startup 由 Wails 在窗口创建完成时调用，注入 runtime ctx。私有也能被 Wails 识别。
+func (a *App) startup(ctx context.Context) {
+	a.ctx = ctx
 }
 
 // Version 前端可调：window.go.main.App.Version()
@@ -143,6 +154,32 @@ func (a *App) ApplyBot(agentPath, newYamlText string, dryRun bool) (*agent.Resul
 	})
 }
 
+// SaveYAML 弹原生保存对话框让用户选路径，把 yamlText 写到那里。
+// defaultFilename 是对话框里预填的文件名（"shop.yaml" 之类）。
+// 返回值：
+//   - ok 时返回真实保存路径（含用户改过名字的情况）
+//   - 用户取消时返回空字符串 + nil error
+func (a *App) SaveYAML(defaultFilename, yamlText string) (string, error) {
+	path, err := wailsruntime.SaveFileDialog(a.ctx, wailsruntime.SaveDialogOptions{
+		Title:           "导出 system.yaml",
+		DefaultFilename: defaultFilename,
+		Filters: []wailsruntime.FileFilter{
+			{DisplayName: "YAML", Pattern: "*.yaml;*.yml"},
+			{DisplayName: "All files", Pattern: "*"},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("save dialog: %w", err)
+	}
+	if path == "" {
+		return "", nil // user canceled
+	}
+	if err := os.WriteFile(path, []byte(yamlText), 0o644); err != nil {
+		return "", fmt.Errorf("write %s: %w", path, err)
+	}
+	return path, nil
+}
+
 func main() {
 	tr := resolveTemplateDir()
 	srv := &api.Server{TemplateRoot: tr}
@@ -168,7 +205,8 @@ func main() {
 			},
 		},
 
-		Bind: []any{appState},
+		Bind:      []any{appState},
+		OnStartup: appState.startup,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "wails run:", err)

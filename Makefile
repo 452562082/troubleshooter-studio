@@ -60,6 +60,18 @@ release: web
 	@ls -lh dist/bin/
 	@echo "✓ release artifacts in dist/bin/"
 
+# ── app 图标:从 assets/app-icon.svg 重渲染 cmd/tshoot-desktop/build/appicon.png ──
+# macOS 自带的 qlmanage 能渲染 SVG,免装额外工具。改完 svg 要跑 make icon 刷新 png,
+# 再 make desktop-app 时 scripts/package-macos.sh 会 sips + iconutil 转成 .icns。
+.PHONY: icon
+icon:
+	@echo "▶ rendering assets/app-icon.svg → cmd/tshoot-desktop/build/appicon.png (1024x1024)"
+	@tmp=$$(mktemp -d); \
+	 qlmanage -t -s 1024 -o $$tmp assets/app-icon.svg >/dev/null 2>&1; \
+	 cp $$tmp/app-icon.svg.png cmd/tshoot-desktop/build/appicon.png; \
+	 rm -rf $$tmp
+	@echo "✓ cmd/tshoot-desktop/build/appicon.png ready"
+
 # ── 桌面 app (Wails v2):单独 target,不影响 CLI 构建 ──────────────
 # Wails v2 构建踩坑提醒:
 #  1. build tags `desktop production` 必须带,不然 wails.Run 会主动拒跑,

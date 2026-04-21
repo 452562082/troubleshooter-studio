@@ -23,6 +23,14 @@ export interface DiscoveredBot {
   targets?: string[]
 }
 
+export interface ValidateResult {
+  valid: boolean
+  system: string
+  name: string
+  envs: number
+  repos: number
+}
+
 declare global {
   interface Window {
     go?: {
@@ -30,6 +38,8 @@ declare global {
         App: {
           Version(): Promise<string>
           DiscoverBots(extraRoots: string[]): Promise<DiscoveredBot[]>
+          Validate(yamlText: string): Promise<ValidateResult>
+          Gen(yamlText: string, outputDir: string): Promise<Record<string, unknown>>
         }
       }
     }

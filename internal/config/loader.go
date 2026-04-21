@@ -15,12 +15,16 @@ func Load(path string) (*SystemConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
+	return LoadFromBytes(data)
+}
 
+// LoadFromBytes 从内存里的 yaml 内容解析 + 校验 + 套默认值。
+// 用途：桌面 app 的 Wails binding、API handler、内存管线都不想为每次校验写临时文件。
+func LoadFromBytes(data []byte) (*SystemConfig, error) {
 	var cfg SystemConfig
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse yaml: %w", err)
 	}
-
 	if err := Validate(&cfg); err != nil {
 		return nil, fmt.Errorf("validate: %w", err)
 	}

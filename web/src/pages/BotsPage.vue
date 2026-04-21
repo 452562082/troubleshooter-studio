@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, onMounted, reactive } from 'vue'
 import type { DiscoveredBot } from '../types/wails'
+import { discoverBots, gen as bridgeGen, isDesktop as bridgeIsDesktop } from '../lib/bridge'
 
 const bots = ref<DiscoveredBot[]>([])
 const loading = ref(false)
@@ -8,22 +9,43 @@ const error = ref<string | null>(null)
 const extraRoots = ref<string[]>([])
 const newRootInput = ref('')
 
-const isDesktop = computed(() => typeof window !== 'undefined' && !!window.go?.main?.App?.DiscoverBots)
+// 每张卡片的"重 gen"状态：key = path|target
+const regenState = reactive<Record<string, { loading: boolean; ok?: string; err?: string }>>({})
+
+const isDesktop = bridgeIsDesktop
 
 async function scan() {
-  if (!isDesktop.value) {
+  if (!isDesktop()) {
     error.value = '需要在桌面 app 里打开此页面（window.go 不可用）'
     return
   }
   loading.value = true
   error.value = null
   try {
-    bots.value = await window.go!.main.App.DiscoverBots(extraRoots.value)
+    bots.value = await discoverBots(extraRoots.value)
   } catch (e: any) {
     error.value = String(e?.message || e)
     bots.value = []
   } finally {
     loading.value = false
+  }
+}
+
+function regenKey(b: DiscoveredBot) {
+  return `${b.path}|${b.meta.target}`
+}
+
+async function regen(b: DiscoveredBot) {
+  const k = regenKey(b)
+  regenState[k] = { loading: true }
+  try {
+    const yamlText = b.meta.system_yaml
+    if (!yamlText) throw new Error('这个机器人的 .tshoot.json 里没有 system_yaml（老产物？）')
+    const res = await bridgeGen(yamlText, '')
+    const outDir = String(res?.output_dir || '未知输出路径')
+    regenState[k] = { loading: false, ok: `产物已写入 ${outDir}` }
+  } catch (e: any) {
+    regenState[k] = { loading: false, err: String(e?.message || e) }
   }
 }
 
@@ -88,7 +110,7 @@ onMounted(scan)
     </section>
 
     <div v-if="error" class="alert error">⚠️ {{ error }}</div>
-    <div v-else-if="!isDesktop" class="alert info">
+    <div v-else-if="!isDesktop()" class="alert info">
       这个页面需要在桌面 app 里打开。浏览器模式暂不可用。
     </div>
     <div v-else-if="loading" class="empty">扫描中…</div>
@@ -113,7 +135,17 @@ onMounted(scan)
         </ul>
         <footer class="bot-foot">
           <span class="bot-time">最近更新：{{ b.mod_time }}</span>
+          <button
+            class="btn btn-regen"
+            :disabled="regenState[regenKey(b)]?.loading"
+            :title="b.meta.system_yaml ? '' : '.tshoot.json 里没保存 system_yaml，无法原地重 gen'"
+            @click="regen(b)"
+          >
+            {{ regenState[regenKey(b)]?.loading ? '生成中…' : '重新生成' }}
+          </button>
         </footer>
+        <p v-if="regenState[regenKey(b)]?.ok" class="regen-ok">✓ {{ regenState[regenKey(b)]?.ok }}</p>
+        <p v-if="regenState[regenKey(b)]?.err" class="regen-err">⚠ {{ regenState[regenKey(b)]?.err }}</p>
       </article>
     </div>
   </div>
@@ -187,5 +219,16 @@ onMounted(scan)
 .bot-stats { list-style: none; display: flex; gap: 14px; padding: 10px 0; border-top: 1px solid #f1f5f9; font-size: 12px; color: #64748b; }
 .bot-stats strong { color: #0f172a; font-weight: 600; margin-right: 2px; }
 
-.bot-foot { border-top: 1px solid #f1f5f9; padding-top: 8px; font-size: 11px; color: #94a3b8; }
+.bot-foot {
+  border-top: 1px solid #f1f5f9; padding-top: 8px; font-size: 11px; color: #94a3b8;
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+}
+.btn-regen {
+  font-size: 11px; padding: 4px 10px; border-radius: 4px;
+  background: #f1f5f9; border: 1px solid #cbd5e1; color: #334155;
+}
+.btn-regen:hover:not(:disabled) { background: #e2e8f0; }
+
+.regen-ok { margin-top: 8px; font-size: 11px; color: #059669; word-break: break-all; }
+.regen-err { margin-top: 8px; font-size: 11px; color: #b91c1c; word-break: break-all; }
 </style>

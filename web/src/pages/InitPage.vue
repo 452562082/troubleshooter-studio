@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch } from 'vue'
 import yaml from 'js-yaml'
+import { validate as bridgeValidate } from '../lib/bridge'
 
 // ── Draft persistence (survives route switches and reloads) ──
 const STORAGE_KEY = 'tsf-init-wizard-v1'
@@ -611,14 +612,13 @@ async function validateYAML() {
   validateLoading.value = true
   validateResult.value = null
   try {
-    const response = await fetch('/api/validate', {
-      method: 'POST',
-      body: yamlOutput.value,
-    })
-    const data = await response.json()
-    validateResult.value = { ok: response.ok, message: data.message || (response.ok ? '验证通过' : '验证失败') }
+    const r = await bridgeValidate(yamlOutput.value)
+    validateResult.value = {
+      ok: true,
+      message: `验证通过：${r.name || r.system}（${r.envs} 环境 / ${r.repos} 仓库）`,
+    }
   } catch (err: any) {
-    validateResult.value = { ok: false, message: `请求失败: ${err.message}` }
+    validateResult.value = { ok: false, message: `验证失败：${err.message || err}` }
   } finally {
     validateLoading.value = false
   }

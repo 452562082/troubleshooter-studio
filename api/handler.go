@@ -116,20 +116,7 @@ func loadConfigFromBody(r *http.Request) (*config.SystemConfig, error) {
 		return nil, fmt.Errorf("read body: %w", err)
 	}
 	defer r.Body.Close()
-
-	// 写到临时文件再 Load（复用已有的校验逻辑）
-	tmp, err := os.CreateTemp("", "tshoot-api-*.yaml")
-	if err != nil {
-		return nil, err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return nil, err
-	}
-	tmp.Close()
-
-	return config.Load(tmp.Name())
+	return config.LoadFromBytes(data)
 }
 
 func jsonOK(w http.ResponseWriter, data any) {

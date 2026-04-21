@@ -24,7 +24,9 @@ import (
 
 	tsf "github.com/xiaolong/troubleshooter-studio"
 	"github.com/xiaolong/troubleshooter-studio/api"
+	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
+	"github.com/xiaolong/troubleshooter-studio/internal/generator"
 	"github.com/xiaolong/troubleshooter-studio/internal/webui"
 )
 
@@ -34,9 +36,13 @@ var (
 	commit  = ""
 )
 
-// App 是暴露给前端的对象。现阶段只有 Version() —— 一个 smoke test，
-// 证明 Wails binding 管道通。后续可加 native 能力（原生文件对话框 / 系统通知）。
-type App struct{}
+// App 是暴露给前端的对象。每个导出方法自动成为一个 Wails binding，
+// 前端可通过 window.go.main.App.* 调用。
+type App struct {
+	// templateRoot 是 gen 流水线用的模板源（templates/ 所在路径）；
+	// 每个涉及 gen 的 binding（Gen / 未来的 Plan）都要它。
+	templateRoot string
+}
 
 // Version 前端可调：window.go.main.App.Version()
 func (a *App) Version() string {
@@ -55,12 +61,61 @@ func (a *App) DiscoverBots(extraRoots []string) ([]discover.DiscoveredAgent, err
 	return discover.Scan(roots)
 }
 
+// ValidateResult 与 /api/validate 返回形状对齐，前端已有依赖。
+type ValidateResult struct {
+	Valid  bool   `json:"valid"`
+	System string `json:"system"`
+	Name   string `json:"name"`
+	Envs   int    `json:"envs"`
+	Repos  int    `json:"repos"`
+}
+
+// Validate 校验 system.yaml 内容，解析失败返回 error；成功返回概要。
+func (a *App) Validate(yamlText string) (*ValidateResult, error) {
+	cfg, err := config.LoadFromBytes([]byte(yamlText))
+	if err != nil {
+		return nil, err
+	}
+	return &ValidateResult{
+		Valid:  true,
+		System: cfg.System.ID,
+		Name:   cfg.System.Name,
+		Envs:   len(cfg.Environments),
+		Repos:  len(cfg.Repos),
+	}, nil
+}
+
+// Gen 按 system.yaml 实际落盘生成部署包。
+// outputDir 为空时用 yaml 里的 generation.output_dir；相对路径解析成绝对路径，
+// 让 UI 能稳定展示"产物在 /abs/path/xxx"。
+func (a *App) Gen(yamlText, outputDir string) (*generator.GenSummary, error) {
+	cfg, err := config.LoadFromBytes([]byte(yamlText))
+	if err != nil {
+		return nil, err
+	}
+	if outputDir == "" {
+		outputDir = cfg.Generation.OutputDir
+	}
+	if outputDir == "" {
+		outputDir = "./dist"
+	}
+	if !filepath.IsAbs(outputDir) {
+		abs, _ := filepath.Abs(outputDir)
+		outputDir = abs
+	}
+	g := generator.New(cfg, a.templateRoot, outputDir)
+	if err := g.Generate(); err != nil {
+		return nil, err
+	}
+	return g.Summary, nil
+}
+
 func main() {
 	tr := resolveTemplateDir()
 	srv := &api.Server{TemplateRoot: tr}
 	router := api.NewRouter(srv, webui.Distribution())
 
-	appState := &App{}
+	appState := &App{templateRoot: tr}
 
 	err := wails.Run(&options.App{
 		Title:  "Troubleshooter Studio",

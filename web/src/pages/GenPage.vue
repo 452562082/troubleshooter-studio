@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import { gen as bridgeGen } from '../lib/bridge'
 
 interface GenSummary {
   system: string
@@ -89,13 +90,7 @@ async function runGen() {
   summary.value = null
   statCards.value = []
   try {
-    const resp = await fetch('/api/gen', {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/yaml' },
-      body: yaml.value,
-    })
-    const data = await resp.json()
-    if (!resp.ok) throw new Error(data.error || '请求失败')
+    const data = (await bridgeGen(yaml.value)) as unknown as GenSummary
     summary.value = data
     statCards.value = [
       { label: 'Skills 数量', value: data.skills_included_count, color: '#3b82f6' },

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"github.com/wailsapp/wails/v2"
@@ -28,6 +29,7 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/api"
 	"github.com/xiaolong/troubleshooter-studio/internal/agent"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
+	"github.com/xiaolong/troubleshooter-studio/internal/deploy"
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 	"github.com/xiaolong/troubleshooter-studio/internal/generator"
 	"github.com/xiaolong/troubleshooter-studio/internal/webui"
@@ -152,6 +154,102 @@ func (a *App) ApplyBot(agentPath, newYamlText string, dryRun bool) (*agent.Resul
 		TshootVersion: version,
 		DryRun:        dryRun,
 	})
+}
+
+// OpenYAML 弹原生打开对话框让用户选一个 yaml 文件，返回 {path, content}。
+// 用户取消返回 ({"", "", nil)。前端据此驱动'导入 yaml 部署机器人'流程。
+type OpenYAMLResult struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+func (a *App) OpenYAML() (*OpenYAMLResult, error) {
+	path, err := wailsruntime.OpenFileDialog(a.ctx, wailsruntime.OpenDialogOptions{
+		Title: "选择 system.yaml",
+		Filters: []wailsruntime.FileFilter{
+			{DisplayName: "YAML", Pattern: "*.yaml;*.yml"},
+			{DisplayName: "All files", Pattern: "*"},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("open dialog: %w", err)
+	}
+	if path == "" {
+		return &OpenYAMLResult{}, nil // 用户取消
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	return &OpenYAMLResult{Path: path, Content: string(data)}, nil
+}
+
+// OpenDir 弹原生目录选择对话框（用于选部署目标路径 destPath）。用户取消返回 ""。
+func (a *App) OpenDir(title string) (string, error) {
+	return wailsruntime.OpenDirectoryDialog(a.ctx, wailsruntime.OpenDialogOptions{
+		Title: title,
+	})
+}
+
+// ImportAndDeploy 把 yaml 直接部署成新机器人（agent.ImportAndApply 的 UI 封装）。
+// target: openclaw / claude-code / cursor / standalone
+// destPath: 部署目标路径。openclaw 下是产物目录（含 install.sh）；其它 target 下是目标项目根。
+func (a *App) ImportAndDeploy(yamlText, target, destPath string) (*agent.Result, error) {
+	return agent.ImportAndApply([]byte(yamlText), target, destPath, agent.ApplyOptions{
+		TemplateRoot:  a.templateRoot,
+		TshootVersion: version,
+	})
+}
+
+// ScanInstallPrompts 解析 outputDir/scripts/install.sh，把所有 read_var 调用列出来，
+// UI 拿去渲染凭证表单。
+func (a *App) ScanInstallPrompts(outputDir string) ([]deploy.Prompt, error) {
+	return deploy.ParseInstallPrompts(outputDir)
+}
+
+// ReadEnv 把 outputDir/scripts/.env 读回（如果存在）。UI 做"已有凭证预填"用。
+func (a *App) ReadEnv(outputDir string) (map[string]string, error) {
+	m, err := deploy.ReadEnvFile(outputDir)
+	if err != nil {
+		return nil, err
+	}
+	if m == nil {
+		return map[string]string{}, nil
+	}
+	return m, nil
+}
+
+// RunInstall 先把 creds 写进 outputDir/scripts/.env，再 shell-out bash install.sh，
+// 返回合并日志。前端拿去展示在模态框里。
+type RunInstallResult struct {
+	Log      string `json:"log"`
+	ExitCode int    `json:"exit_code"`
+	OK       bool   `json:"ok"`
+}
+
+func (a *App) RunInstall(outputDir string, creds map[string]string) (*RunInstallResult, error) {
+	if err := deploy.WriteEnvFile(outputDir, creds); err != nil {
+		return nil, err
+	}
+	log, err := deploy.RunInstall(outputDir)
+	res := &RunInstallResult{Log: log, OK: err == nil}
+	if err != nil {
+		// exit code 提取（bash 脚本的非零退出）
+		if ee, ok := err.(*exec.ExitError); ok {
+			res.ExitCode = ee.ExitCode()
+		} else {
+			res.ExitCode = -1
+		}
+		// 不包装成 error 返回：前端要看到日志，即使 install 失败
+		return res, nil
+	}
+	return res, nil
+}
+
+// RevealInFinder 在 Finder / Explorer 里打开 path（不是打开文件，是打开所在目录并高亮）。
+// macOS 用 `open -R <path>`；Windows 未来需要分支。
+func (a *App) RevealInFinder(path string) error {
+	return exec.Command("open", "-R", path).Run()
 }
 
 // SaveYAML 弹原生保存对话框让用户选路径，把 yamlText 写到那里。

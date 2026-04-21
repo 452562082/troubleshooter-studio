@@ -4,7 +4,14 @@
 //
 // 新页面写代码只调 bridge.*，不要直接摸 fetch 或 window.go，省得未来改通路到处改。
 
-import type { ApplyResult, DiscoveredBot, ValidateResult } from '../types/wails'
+import type {
+  ApplyResult,
+  DiscoveredBot,
+  InstallPrompt,
+  OpenYAMLResult,
+  RunInstallResult,
+  ValidateResult,
+} from '../types/wails'
 
 function desktopApp() {
   if (typeof window === 'undefined') return null
@@ -64,6 +71,64 @@ export async function applyBot(
   const app = desktopApp()
   if (!app) throw new Error('ApplyBot 只在桌面 app 里可用')
   return app.ApplyBot(agentPath, newYamlText, dryRun)
+}
+
+/** 原生文件对话框：选一个 yaml 文件，返回 {path, content}；取消返回空对象 */
+export async function openYAML(): Promise<OpenYAMLResult> {
+  const app = desktopApp()
+  if (!app) throw new Error('OpenYAML 只在桌面 app 里可用')
+  return app.OpenYAML()
+}
+
+/** 原生目录对话框：选一个目录（用于部署目标路径 destPath），返回路径；取消返回空串 */
+export async function openDir(title: string): Promise<string> {
+  const app = desktopApp()
+  if (!app) throw new Error('OpenDir 只在桌面 app 里可用')
+  return app.OpenDir(title)
+}
+
+/** 把 yaml 直接部署成一个新机器人（agent.ImportAndApply 的 UI 封装）
+ *  target: openclaw / claude-code / cursor / standalone；destPath 是部署目标路径
+ */
+export async function importAndDeploy(
+  yamlText: string,
+  target: string,
+  destPath: string,
+): Promise<ApplyResult> {
+  const app = desktopApp()
+  if (!app) throw new Error('ImportAndDeploy 只在桌面 app 里可用')
+  return app.ImportAndDeploy(yamlText, target, destPath)
+}
+
+/** 扫 install.sh 里所有 read_var 调用，给 UI 渲染凭证表单 */
+export async function scanInstallPrompts(outputDir: string): Promise<InstallPrompt[]> {
+  const app = desktopApp()
+  if (!app) throw new Error('ScanInstallPrompts 只在桌面 app 里可用')
+  return app.ScanInstallPrompts(outputDir)
+}
+
+/** 读 scripts/.env 现存值（用于预填表单） */
+export async function readEnv(outputDir: string): Promise<Record<string, string>> {
+  const app = desktopApp()
+  if (!app) return {}
+  return app.ReadEnv(outputDir)
+}
+
+/** 写凭证到 scripts/.env 后 shell-out bash install.sh，返回合并日志 */
+export async function runInstall(
+  outputDir: string,
+  creds: Record<string, string>,
+): Promise<RunInstallResult> {
+  const app = desktopApp()
+  if (!app) throw new Error('RunInstall 只在桌面 app 里可用')
+  return app.RunInstall(outputDir, creds)
+}
+
+/** 在 Finder / Explorer 里展示（不是打开）指定路径 */
+export async function revealInFinder(path: string): Promise<void> {
+  const app = desktopApp()
+  if (!app) return
+  return app.RevealInFinder(path)
 }
 
 /** exportYAML 弹原生保存对话框导出 yaml 到任意路径。

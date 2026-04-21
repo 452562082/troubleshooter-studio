@@ -17,8 +17,10 @@ import (
 
 	tsf "github.com/xiaolong/troubleshooter-studio"
 	"github.com/xiaolong/troubleshooter-studio/api"
+	"github.com/xiaolong/troubleshooter-studio/internal/agent"
 	"github.com/xiaolong/troubleshooter-studio/internal/analyzer"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
+	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 	"github.com/xiaolong/troubleshooter-studio/internal/doctor"
 	"github.com/xiaolong/troubleshooter-studio/internal/generator"
 	"github.com/xiaolong/troubleshooter-studio/internal/gitclone"
@@ -111,6 +113,16 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
+	case "discover":
+		if err := runDiscover(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+	case "apply":
+		if err := runApply(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -163,6 +175,8 @@ func usage() {
   tshoot serve [--port 8080] [-t <template_dir>]              # 启动 Web UI
   tshoot demo [--keep]                                         # 零配置试跑（用内置 examples 走完整流程）
   tshoot validate -i <system.yaml>
+  tshoot discover [--roots <p1>,<p2>] [--format text|json]    # 扫本机已装机器人
+  tshoot apply -i <new.yaml> --path <agent-path> [--dry-run]  # 用新 yaml 原地更新已装机器人
 
 子命令:
   init       交互式问答生成一份最小可用 system.yaml
@@ -176,7 +190,9 @@ func usage() {
   serve      启动 Web UI（HTTP API + 前端界面）
   skill      skill 脚手架（skill new <name> 在模板库里生成新 skill 骨架）
   demo       零配置试跑：用内置 examples/shop-system.yaml + examples/fake-repos 跑完整 pipeline
-  validate   仅校验 system.yaml`)
+  validate   仅校验 system.yaml
+  discover   扫本机 .tshoot.json 锚点，列出已装机器人
+  apply      拿新 yaml 重 render + rsync 回已装 workspace（preserve_on_regenerate 文件保留）`)
 }
 
 func runGen(args []string) error {
@@ -1486,4 +1502,133 @@ func extractEmbeddedFS(fsys embed.FS, rootSubdir, tmpPrefix string) (string, err
 		return "", fmt.Errorf("extract embed %s: %w", rootSubdir, err)
 	}
 	return tmp, nil
+}
+
+// ── discover：扫本机已装机器人 ───────────────────────────────────
+// tshoot discover [--roots <path1>,<path2>] [--format text|json]
+// 默认扫 ~/.openclaw/workspace + CWD(discover.DefaultRoots 的语义)。
+func runDiscover(args []string) error {
+	fs := flag.NewFlagSet("discover", flag.ExitOnError)
+	rootsFlag := fs.String("roots", "", "逗号分隔的额外扫描路径，追加到默认 roots 后")
+	format := fs.String("format", "text", "text | json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	roots := discover.DefaultRoots()
+	if *rootsFlag != "" {
+		for _, r := range strings.Split(*rootsFlag, ",") {
+			r = strings.TrimSpace(r)
+			if r != "" {
+				roots = append(roots, r)
+			}
+		}
+	}
+
+	bots, err := discover.Scan(roots)
+	if err != nil {
+		return err
+	}
+
+	if *format == "json" {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(bots)
+	}
+
+	if len(bots) == 0 {
+		fmt.Printf("没发现已装机器人（扫描的路径：%s）\n", strings.Join(roots, ", "))
+		fmt.Println("可能原因：1) 没装过；2) 装到别处（用 --roots 指定）；3) 老产物没 .tshoot.json 锚点")
+		return nil
+	}
+
+	fmt.Printf("发现 %d 个已装机器人\n\n", len(bots))
+	fmt.Printf("%-20s  %-12s  %-12s  %3s envs  %3s repos  %3s skills  %s\n",
+		"SYSTEM_ID", "TARGET", "MODIFIED", " ", " ", " ", "PATH")
+	for _, b := range bots {
+		fmt.Printf("%-20s  %-12s  %-12s  %5d      %5d       %5d      %s\n",
+			b.Meta.SystemID, b.Meta.Target,
+			strings.Split(b.ModTime, " ")[0], // 只显示日期部分
+			b.EnvCount, b.RepoCount, b.SkillCount, b.Path)
+	}
+	return nil
+}
+
+// ── apply：用新 yaml 应用到已装机器人 ────────────────────────────
+// tshoot apply -i <new.yaml> --path <agent-path> [--dry-run] [--format text|json]
+// 流程：读 new yaml → 根据 agent.Path 的 .tshoot.json 识别 target → 重 render → rsync 回 path
+//     preserve_on_regenerate 里的用户手改自动保留。
+func runApply(args []string) error {
+	fs := flag.NewFlagSet("apply", flag.ExitOnError)
+	input := fs.String("i", "", "新 system.yaml 路径（必填）")
+	path := fs.String("path", "", "目标已装机器人的 workspace 路径（必填，含 .tshoot.json 的那一层）")
+	tmplDir := fs.String("t", "", "模板根（默认：可执行文件旁的 templates/ 或 embed 解压）")
+	dryRun := fs.Bool("dry-run", false, "只预演不写盘")
+	format := fs.String("format", "text", "text | json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *input == "" || *path == "" {
+		fs.Usage()
+		return fmt.Errorf("-i and --path required")
+	}
+
+	yamlBytes, err := os.ReadFile(*input)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", *input, err)
+	}
+
+	// 从 path 回读 agent：用 Scan 当 1 层扫描即可拿到 DiscoveredAgent
+	found, err := discover.Scan([]string{*path})
+	if err != nil {
+		return fmt.Errorf("scan %s: %w", *path, err)
+	}
+	if len(found) == 0 {
+		return fmt.Errorf("no .tshoot.json under %s（确认路径对，或该机器人是老版本产物）", *path)
+	}
+	// 最短路径那个（最贴近 path 根）
+	ag := found[0]
+	for _, cand := range found[1:] {
+		if len(cand.Path) < len(ag.Path) {
+			ag = cand
+		}
+	}
+
+	tr := *tmplDir
+	if tr == "" {
+		tr = resolveTemplateDir()
+	}
+
+	res, err := agent.Apply(ag, agent.ApplyOptions{
+		NewYAML:       yamlBytes,
+		TemplateRoot:  tr,
+		TshootVersion: version,
+		DryRun:        *dryRun,
+	})
+	if err != nil {
+		return err
+	}
+
+	if *format == "json" {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(res)
+	}
+
+	verb := "应用"
+	if *dryRun {
+		verb = "预演"
+	}
+	fmt.Printf("%s完成：%s (%s)\n", verb, res.AgentPath, res.Target)
+	fmt.Printf("  写入文件：%d\n", res.FilesWritten)
+	if len(res.FilesPreserved) > 0 {
+		fmt.Printf("  保留（用户手改）：%s\n", strings.Join(res.FilesPreserved, ", "))
+	}
+	if len(res.FilesRemoved) > 0 {
+		fmt.Printf("  移除（陈旧产物）：%s\n", strings.Join(res.FilesRemoved, ", "))
+	}
+	if res.NeedsRestartHint != "" {
+		fmt.Printf("\n💡 %s\n", res.NeedsRestartHint)
+	}
+	return nil
 }

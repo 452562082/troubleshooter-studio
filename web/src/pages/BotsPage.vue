@@ -6,8 +6,16 @@ import {
   discoverBots,
   exportYAML,
   gen as bridgeGen,
+  importAndDeploy,
   isDesktop as bridgeIsDesktop,
+  openDir,
+  openYAML,
+  readEnv,
+  revealInFinder,
+  runInstall,
+  scanInstallPrompts,
 } from '../lib/bridge'
+import type { InstallPrompt } from '../types/wails'
 
 const bots = ref<DiscoveredBot[]>([])
 const loading = ref(false)
@@ -139,6 +147,109 @@ function targetLabel(t: string): string {
   return map[t] ?? t
 }
 
+// ── 导入 yaml → 部署 流程状态机 ──────────────────────────────────
+// idle → picked → deploying → deployed → installing → done
+type ImportStage = 'idle' | 'picked' | 'deploying' | 'deployed' | 'installing' | 'done'
+const importStage = ref<ImportStage>('idle')
+const importYAMLText = ref('')
+const importYAMLPath = ref('')
+const importTarget = ref<'openclaw' | 'claude-code' | 'cursor' | 'standalone'>('openclaw')
+const importDestPath = ref('')
+const importError = ref<string | null>(null)
+const importedOutputDir = ref('') // agent.Result.agent_path 返回的实际落盘位置
+const installPrompts = ref<InstallPrompt[]>([])
+const installCreds = ref<Record<string, string>>({})
+const installLog = ref('')
+const installOK = ref<boolean | null>(null)
+
+async function pickYAML() {
+  importError.value = null
+  try {
+    const r = await openYAML()
+    if (!r.path) return // 用户取消
+    importYAMLPath.value = r.path
+    importYAMLText.value = r.content
+    importStage.value = 'picked'
+    // 默认 destPath：claude-code/cursor 建议选项目根，openclaw 建议 ./dist/<system-id>
+    importDestPath.value = ''
+  } catch (e: any) {
+    importError.value = String(e?.message || e)
+  }
+}
+
+async function pickDestDir() {
+  try {
+    const p = await openDir('选择部署目标路径')
+    if (p) importDestPath.value = p
+  } catch (e: any) {
+    importError.value = String(e?.message || e)
+  }
+}
+
+async function runImportDeploy() {
+  if (!importDestPath.value.trim()) {
+    importError.value = '需要 destPath'
+    return
+  }
+  importError.value = null
+  importStage.value = 'deploying'
+  try {
+    const res = await importAndDeploy(importYAMLText.value, importTarget.value, importDestPath.value)
+    importedOutputDir.value = res.agent_path
+    if (importTarget.value === 'openclaw') {
+      // 进入凭证表单阶段
+      const [prompts, existing] = await Promise.all([
+        scanInstallPrompts(res.agent_path),
+        readEnv(res.agent_path),
+      ])
+      installPrompts.value = prompts
+      installCreds.value = { ...existing } // 预填已有
+      // 保证每个 prompt 都有一个 key（哪怕空）
+      for (const p of prompts) {
+        if (!(p.name in installCreds.value)) installCreds.value[p.name] = ''
+      }
+      importStage.value = 'deployed'
+    } else {
+      // claude-code / cursor / standalone：ImportAndApply 已经做了 rsync，齐活
+      installOK.value = true
+      importStage.value = 'done'
+      await scan() // 列表刷新
+    }
+  } catch (e: any) {
+    importError.value = String(e?.message || e)
+    importStage.value = 'picked' // 让用户改了重来
+  }
+}
+
+async function runDeployInstall() {
+  importError.value = null
+  importStage.value = 'installing'
+  installLog.value = ''
+  try {
+    const r = await runInstall(importedOutputDir.value, installCreds.value)
+    installLog.value = r.log
+    installOK.value = r.ok
+    importStage.value = 'done'
+    await scan()
+  } catch (e: any) {
+    importError.value = String(e?.message || e)
+    importStage.value = 'deployed'
+  }
+}
+
+function resetImport() {
+  importStage.value = 'idle'
+  importYAMLText.value = ''
+  importYAMLPath.value = ''
+  importDestPath.value = ''
+  importedOutputDir.value = ''
+  installPrompts.value = []
+  installCreds.value = {}
+  installLog.value = ''
+  installOK.value = null
+  importError.value = null
+}
+
 onMounted(scan)
 </script>
 
@@ -149,10 +260,110 @@ onMounted(scan)
         <h1>已装机器人</h1>
         <p class="subtitle">扫描本机 .tshoot.json 锚点，列出已经部署到 AI 平台的排障机器人。</p>
       </div>
-      <button class="btn primary" :disabled="loading" @click="scan">
-        {{ loading ? '扫描中…' : '刷新' }}
-      </button>
+      <div class="page-actions">
+        <button class="btn" :disabled="importStage !== 'idle'" @click="pickYAML">
+          导入 yaml 部署
+        </button>
+        <button class="btn primary" :disabled="loading" @click="scan">
+          {{ loading ? '扫描中…' : '刷新' }}
+        </button>
+      </div>
     </header>
+
+    <!-- ── 导入 yaml → 部署 向导面板 ───────────────────────────── -->
+    <section v-if="importStage !== 'idle'" class="deploy-panel">
+      <div class="deploy-head">
+        <strong>导入并部署</strong>
+        <span class="deploy-path">{{ importYAMLPath }}</span>
+        <button class="btn btn-regen" @click="resetImport">关闭</button>
+      </div>
+
+      <!-- Step 1: 选 target + destPath -->
+      <div v-if="importStage === 'picked' || importStage === 'deploying'" class="deploy-step">
+        <div class="deploy-field">
+          <label>目标平台</label>
+          <select v-model="importTarget" :disabled="importStage === 'deploying'">
+            <option value="openclaw">OpenClaw（需要填凭证）</option>
+            <option value="claude-code">Claude Code（装到项目根）</option>
+            <option value="cursor">Cursor IDE（装到项目根）</option>
+            <option value="standalone">Standalone（本机 venv / Docker）</option>
+          </select>
+        </div>
+        <div class="deploy-field">
+          <label>部署目标路径</label>
+          <div class="path-row">
+            <input
+              v-model="importDestPath"
+              :placeholder="importTarget === 'openclaw' ? '如 ./dist/shop（会创建产物目录）' : '项目根或工作目录'"
+              :disabled="importStage === 'deploying'"
+            />
+            <button class="btn" :disabled="importStage === 'deploying'" @click="pickDestDir">
+              选目录…
+            </button>
+          </div>
+        </div>
+        <div class="deploy-actions">
+          <button
+            class="btn primary"
+            :disabled="importStage === 'deploying' || !importDestPath.trim()"
+            @click="runImportDeploy"
+          >
+            {{ importStage === 'deploying' ? '部署中…' : '部署' }}
+          </button>
+        </div>
+      </div>
+
+      <!-- Step 2: openclaw 凭证表单 -->
+      <div v-if="importStage === 'deployed' || importStage === 'installing'" class="deploy-step">
+        <p class="deploy-tip">
+          产物已写到 <code>{{ importedOutputDir }}</code>。
+          install.sh 需要下面 {{ installPrompts.length }} 个凭证字段；已存在的
+          <code>.env</code> 值自动预填。<strong>有 * 的是 password 型</strong>。
+        </p>
+        <div v-if="installPrompts.length === 0" class="deploy-tip">
+          install.sh 里没声明任何交互字段，可以直接安装。
+        </div>
+        <div class="creds-grid">
+          <div v-for="p in installPrompts" :key="p.name" class="cred-field">
+            <label :for="'cred-' + p.name">
+              {{ p.name }}
+              <span v-if="p.secret" class="secret-mark">*</span>
+            </label>
+            <input
+              :id="'cred-' + p.name"
+              v-model="installCreds[p.name]"
+              :type="p.secret ? 'password' : 'text'"
+              :placeholder="p.prompt"
+              :disabled="importStage === 'installing'"
+            />
+          </div>
+        </div>
+        <div class="deploy-actions">
+          <button class="btn" @click="revealInFinder(importedOutputDir)">在 Finder 中显示</button>
+          <button
+            class="btn primary"
+            :disabled="importStage === 'installing'"
+            @click="runDeployInstall"
+          >
+            {{ importStage === 'installing' ? '运行 install.sh 中…' : '写 .env 并运行 install.sh' }}
+          </button>
+        </div>
+      </div>
+
+      <!-- Step 3: 日志 / 完成 -->
+      <div v-if="importStage === 'done'" class="deploy-step">
+        <div class="deploy-result" :class="installOK ? 'ok' : 'err'">
+          {{ installOK ? '✓ 部署完成' : '⚠ install.sh 非零退出' }}
+        </div>
+        <pre v-if="installLog" class="deploy-log">{{ installLog }}</pre>
+        <div class="deploy-actions">
+          <button class="btn" @click="revealInFinder(importedOutputDir)">在 Finder 中显示</button>
+          <button class="btn primary" @click="resetImport">完成</button>
+        </div>
+      </div>
+
+      <div v-if="importError" class="alert error">⚠ {{ importError }}</div>
+    </section>
 
     <section class="roots">
       <div class="roots-head">
@@ -371,4 +582,46 @@ onMounted(scan)
 .apply-result code { background: rgba(15, 23, 42, 0.05); padding: 1px 4px; border-radius: 2px; margin-right: 4px; font-family: inherit; }
 .apply-hint { margin-top: 6px; padding-top: 6px; border-top: 1px dashed #bbf7d0; color: #166534; }
 .apply-err { margin-top: 10px; padding: 8px 12px; background: #fef2f2; border: 1px solid #fecaca; border-radius: 4px; font-size: 11px; color: #991b1b; }
+
+.page-actions { display: flex; gap: 8px; }
+
+.deploy-panel {
+  margin-bottom: 20px; padding: 16px 18px; background: #fff;
+  border: 2px solid #0f172a; border-radius: 10px;
+}
+.deploy-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.deploy-head strong { font-size: 14px; color: #0f172a; }
+.deploy-path { flex: 1; font-family: monospace; font-size: 11px; color: #64748b; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.deploy-step { display: flex; flex-direction: column; gap: 12px; }
+.deploy-field { display: flex; flex-direction: column; gap: 6px; }
+.deploy-field label { font-size: 12px; font-weight: 600; color: #334155; }
+.deploy-field select, .deploy-field input {
+  padding: 7px 10px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 13px;
+}
+.path-row { display: flex; gap: 8px; }
+.path-row input { flex: 1; }
+
+.deploy-tip { font-size: 12px; color: #64748b; line-height: 1.6; }
+.deploy-tip code { background: #f1f5f9; padding: 1px 4px; border-radius: 3px; }
+.deploy-tip strong { color: #c2410c; }
+
+.creds-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; }
+.cred-field { display: flex; flex-direction: column; gap: 4px; }
+.cred-field label { font-size: 11px; font-family: monospace; color: #334155; font-weight: 600; }
+.secret-mark { color: #c2410c; }
+.cred-field input { padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 12px; font-family: monospace; }
+
+.deploy-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+.deploy-result {
+  padding: 10px 12px; border-radius: 4px; font-size: 13px; font-weight: 600;
+}
+.deploy-result.ok { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
+.deploy-result.err { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+.deploy-log {
+  background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 6px;
+  font-family: 'SFMono-Regular', Menlo, monospace; font-size: 11px;
+  max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-all;
+}
 </style>

@@ -41,6 +41,23 @@ export interface ApplyResult {
   needs_restart_hint?: string
 }
 
+export interface OpenYAMLResult {
+  path: string
+  content: string
+}
+
+export interface InstallPrompt {
+  name: string
+  prompt: string
+  secret: boolean
+}
+
+export interface RunInstallResult {
+  log: string
+  exit_code: number
+  ok: boolean
+}
+
 declare global {
   interface Window {
     go?: {
@@ -52,6 +69,13 @@ declare global {
           Gen(yamlText: string, outputDir: string): Promise<Record<string, unknown>>
           ApplyBot(agentPath: string, newYamlText: string, dryRun: boolean): Promise<ApplyResult>
           SaveYAML(defaultFilename: string, yamlText: string): Promise<string>
+          OpenYAML(): Promise<OpenYAMLResult>
+          OpenDir(title: string): Promise<string>
+          ImportAndDeploy(yamlText: string, target: string, destPath: string): Promise<ApplyResult>
+          ScanInstallPrompts(outputDir: string): Promise<InstallPrompt[]>
+          ReadEnv(outputDir: string): Promise<Record<string, string>>
+          RunInstall(outputDir: string, creds: Record<string, string>): Promise<RunInstallResult>
+          RevealInFinder(path: string): Promise<void>
         }
       }
     }

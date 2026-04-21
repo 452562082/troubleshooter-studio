@@ -7,11 +7,10 @@
 bin/
 dist/bin/
 
-# Wails / 桌面端本地产物
-factory-desktop
-tshoot-desktop
+# Wails / 桌面端本地产物（bin/ 已被上面兜住，这里只管 app bundle 和生成物）
+/factory-desktop
 cmd/tshoot-desktop/build/bin/
-web/wailsjs/
+web/wailsjs/go/
 
 # 本地 demo 产物(非 templates/ 下的真实模板)
 dist/

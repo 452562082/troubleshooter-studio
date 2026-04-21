@@ -1,0 +1,159 @@
+// Command tshoot-desktop 是 tshoot 的真桌面 app 入口（Wails v2）。
+//
+// 设计策略：Wails 负责原生窗口 + WebView + 打包；所有 HTTP 请求（前端 fetch /api/*
+// 和 SPA 静态资源）全部 forward 到现有 api.NewRouter —— 所以 Vue 前端代码完全不用改，
+// 跟 `tshoot serve` 的 Web UI 行为一致，只是换了个宿主。
+//
+// 跟 `tshoot serve`（路线 B）的区别：
+//   - 路线 B：用户系统浏览器打开 http://localhost:<port>/；占端口、需要浏览器
+//   - 路线 A（本文件）：原生 WKWebView / WebView2 窗口；不占公网端口、没浏览器地址栏
+//
+// 后端逻辑（discover / agent apply / gen / serve）100% 复用 internal/ 各包。
+package main
+
+import (
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+
+	"github.com/wailsapp/wails/v2"
+	"github.com/wailsapp/wails/v2/pkg/options"
+	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/options/mac"
+
+	tsf "github.com/xiaolong/troubleshooter-studio"
+	"github.com/xiaolong/troubleshooter-studio/api"
+	"github.com/xiaolong/troubleshooter-studio/internal/discover"
+	"github.com/xiaolong/troubleshooter-studio/internal/webui"
+)
+
+// 版本信息跟 cmd/tshoot 同样由 -ldflags 注入（make desktop 会传）
+var (
+	version = "dev"
+	commit  = ""
+)
+
+// App 是暴露给前端的对象。现阶段只有 Version() —— 一个 smoke test，
+// 证明 Wails binding 管道通。后续可加 native 能力（原生文件对话框 / 系统通知）。
+type App struct{}
+
+// Version 前端可调：window.go.main.App.Version()
+func (a *App) Version() string {
+	if commit != "" {
+		return fmt.Sprintf("%s (%s)", version, commit)
+	}
+	return version
+}
+
+// DiscoverBots 扫描本机已安装的排障机器人（.tshoot.json 锚点）。
+// 默认只扫 ~/.openclaw/workspace/（桌面 app 的 CWD 没意义，不同于 CLI 的 DefaultRoots）。
+// extraRoots 是 UI 侧让用户追加的项目根（用于找 claude-code / cursor 装进去的机器人）。
+// 前端调用：window.go.main.App.DiscoverBots([]) or DiscoverBots(["/path/to/project"]).
+func (a *App) DiscoverBots(extraRoots []string) ([]discover.DiscoveredAgent, error) {
+	roots := append([]string{"~/.openclaw/workspace"}, extraRoots...)
+	return discover.Scan(roots)
+}
+
+func main() {
+	tr := resolveTemplateDir()
+	srv := &api.Server{TemplateRoot: tr}
+	router := api.NewRouter(srv, webui.Distribution())
+
+	appState := &App{}
+
+	err := wails.Run(&options.App{
+		Title:  "Troubleshooter Studio",
+		Width:  1280,
+		Height: 860,
+
+		// AssetServer.Handler = 所有 HTTP 请求（静态 SPA 资源 + /api/*）走这里。
+		// 不设 Assets，让 router 一肩挑（NewRouter 里已经做了 SPA fallback + CORS）。
+		AssetServer: &assetserver.Options{
+			Handler: router,
+		},
+
+		Mac: &mac.Options{
+			About: &mac.AboutInfo{
+				Title:   "Troubleshooter Studio",
+				Message: fmt.Sprintf("AI 排障机器人桌面管理客户端\n版本: %s", appState.Version()),
+			},
+		},
+
+		Bind: []any{appState},
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "wails run:", err)
+		os.Exit(1)
+	}
+}
+
+// resolveTemplateDir 按优先级找 templates/：
+//  1. 可执行文件旁（dev 模式：`wails dev` / 手动 `go run`）
+//  2. macOS .app 里的 Contents/Resources/templates/（`wails build` 的产物布局）
+//  3. CWD/templates/（从仓库根跑）
+//  4. embed fallback：解压 tsf.TemplatesFS 到 ~/.tshoot/templates/
+//
+// 桌面 app 场景下通常走 (4)，因为 app 被拷到 /Applications/ 后 CWD = /。
+func resolveTemplateDir() string {
+	if exe, err := os.Executable(); err == nil {
+		base := filepath.Dir(exe)
+		for _, rel := range []string{"templates", "../Resources/templates"} {
+			p := filepath.Clean(filepath.Join(base, rel))
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+	}
+	if wd, err := os.Getwd(); err == nil {
+		p := filepath.Join(wd, "templates")
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	// embed extract —— 桌面 app 里最常走的路径
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	dst := filepath.Join(home, ".tshoot", "templates")
+	_ = os.RemoveAll(dst) // 每次启动重建，确保跟当前 app 内嵌的一致
+	if err := extractEmbedded(tsf.TemplatesFS, "templates", dst); err != nil {
+		fmt.Fprintf(os.Stderr, "[warn] 解压 embed templates 失败: %v\n", err)
+		return ""
+	}
+	return dst
+}
+
+// extractEmbedded 把 embed.FS 里 rootSub 下的内容平铺到 dst（跳过 .DS_Store，
+// .sh/.py 自动给 0755 执行位）。跟 cmd/tshoot/main.go 的同名逻辑一致。
+func extractEmbedded(src fs.FS, rootSub, dst string) error {
+	return fs.WalkDir(src, rootSub, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(rootSub, p)
+		if rel == "." {
+			return nil
+		}
+		if filepath.Base(rel) == ".DS_Store" {
+			return nil
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		data, err := fs.ReadFile(src, p)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		mode := os.FileMode(0o644)
+		if ext := filepath.Ext(rel); ext == ".sh" || ext == ".py" {
+			mode = 0o755
+		}
+		return os.WriteFile(target, data, mode)
+	})
+}

@@ -7,6 +7,7 @@ const currentPath = computed(() => route.path)
 
 const navItems = [
   { path: '/', icon: '🏠', label: '首页', desc: '概览 + 下一步推荐' },
+  { path: '/bots', icon: '🤖', label: '已装机器人', desc: '扫描本机已部署的机器人' },
   { path: '/init', icon: '🧙', label: '创建向导', desc: '生成 system.yaml' },
   { path: '/editor', icon: '📝', label: '编辑器', desc: '编辑 / 验证 / 生成' },
   { path: '/analyze', icon: '🔍', label: '仓库分析', desc: '扫描代码抽取配置' },
@@ -21,8 +22,8 @@ const navItems = [
   <div class="layout">
     <aside class="sidebar">
       <div class="sidebar-header">
-        <div class="sidebar-title">排障机器人工厂</div>
-        <div class="sidebar-subtitle">troubleshooter-factory</div>
+        <div class="sidebar-title">Troubleshooter Studio</div>
+        <div class="sidebar-subtitle">troubleshooter-studio</div>
       </div>
       <nav>
         <router-link
@@ -37,7 +38,7 @@ const navItems = [
             <span class="nav-label">{{ item.label }}</span>
             <span class="nav-desc">{{ item.desc }}</span>
           </span>
-          <span v-if="i === 1" class="nav-badge">推荐</span>
+          <span v-if="i === 2" class="nav-badge">推荐</span>
         </router-link>
       </nav>
       <div class="sidebar-footer">

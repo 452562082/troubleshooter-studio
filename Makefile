@@ -85,6 +85,20 @@ desktop-dev: web
 	  go build -tags "desktop dev" -ldflags "$(LDFLAGS)" -o $(DESKTOP_BIN)-dev ./cmd/tshoot-desktop
 	@echo "✓ $(DESKTOP_BIN)-dev ready"
 
+# ── .app bundle(macOS):双击不再弹 Terminal ──────────────────────
+# 裸二进制在 Finder 双击会被 macOS 用 Terminal 启动(弹出终端窗口);
+# .app 包里有 Info.plist + MacOS/ 目录,macOS 认它是 GUI app,直接起 WebView 窗口。
+# 打包细节走 scripts/package-macos.sh(Makefile recipe 跨 shell 行做 heredoc 麻烦)
+BUNDLE_NAME  := TroubleshooterStudio
+BUNDLE_DIR   := dist/$(BUNDLE_NAME).app
+BUNDLE_ID    := studio.troubleshooter.desktop
+.PHONY: desktop-app
+desktop-app: desktop
+	@BIN=$(DESKTOP_BIN) BUNDLE_DIR=$(BUNDLE_DIR) BUNDLE_NAME=$(BUNDLE_NAME) \
+	 BUNDLE_ID=$(BUNDLE_ID) VERSION=$(VERSION) \
+	 ICON_SRC=cmd/tshoot-desktop/build/appicon.png \
+	 bash scripts/package-macos.sh
+
 # ── 快速试跑:build 后立即 demo ──────────────────────────────────
 .PHONY: demo
 demo: build

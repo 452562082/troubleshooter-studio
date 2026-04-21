@@ -8,9 +8,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/xiaolong/troubleshooter-factory/internal/config"
-	"github.com/xiaolong/troubleshooter-factory/internal/doctor"
-	"github.com/xiaolong/troubleshooter-factory/internal/generator"
+	"github.com/xiaolong/troubleshooter-studio/internal/config"
+	"github.com/xiaolong/troubleshooter-studio/internal/doctor"
+	"github.com/xiaolong/troubleshooter-studio/internal/generator"
 )
 
 // Server 封装 Web API 的依赖
@@ -41,7 +41,7 @@ func (s *Server) HandlePlan(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	outDir, err := os.MkdirTemp("", "factory-plan-*")
+	outDir, err := os.MkdirTemp("", "tshoot-plan-*")
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -118,7 +118,7 @@ func loadConfigFromBody(r *http.Request) (*config.SystemConfig, error) {
 	defer r.Body.Close()
 
 	// 写到临时文件再 Load（复用已有的校验逻辑）
-	tmp, err := os.CreateTemp("", "factory-api-*.yaml")
+	tmp, err := os.CreateTemp("", "tshoot-api-*.yaml")
 	if err != nil {
 		return nil, err
 	}

@@ -1,17 +1,30 @@
-# macOS
+# macOS / 编辑器
 .DS_Store
+.idea/
+.vscode/
 
-# 本地构建产物
+# Go 本地构建产物
 bin/
 dist/bin/
+
+# Wails / 桌面端本地产物
+factory-desktop
+tshoot-desktop
+cmd/tshoot-desktop/build/bin/
+web/wailsjs/
 
 # 本地 demo 产物(非 templates/ 下的真实模板)
 dist/
 
-# web 构建产物(embed 目标单独管;此处忽略源目录的 dist)
+# Web 构建与依赖
 web/dist/
 web/node_modules/
 
 # 本机凭证草稿(init wizard / install.sh 自动生成)
 scripts/.env
-.factory/
+.tshoot/
+
+# 本机工具链个人配置(不应入库)
+.claude/settings.local.json
+.opencode/node_modules/
+.opencode/bun.lock

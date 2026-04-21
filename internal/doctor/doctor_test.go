@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xiaolong/troubleshooter-factory/internal/config"
-	"github.com/xiaolong/troubleshooter-factory/internal/gitclone"
+	"github.com/xiaolong/troubleshooter-studio/internal/config"
+	"github.com/xiaolong/troubleshooter-studio/internal/gitclone"
 )
 
 func projectRoot(t *testing.T) string {

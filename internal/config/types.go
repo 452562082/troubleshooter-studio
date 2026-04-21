@@ -174,14 +174,14 @@ func (g Generation) ResolvedTargets() []string {
 	return []string{"openclaw"}
 }
 
-type FactoryTemplateRef struct {
+type TshootTemplateRef struct {
 	Repo string `yaml:"repo"`
 	Ref  string `yaml:"ref"`
 }
 
 type Meta struct {
-	SchemaVersion      string             `yaml:"schema_version"`
-	FactoryTemplateRef FactoryTemplateRef `yaml:"factory_template_ref"`
+	SchemaVersion     string            `yaml:"schema_version"`
+	TshootTemplateRef TshootTemplateRef `yaml:"tshoot_template_ref"`
 }
 
 type SystemConfig struct {

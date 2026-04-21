@@ -7,7 +7,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/xiaolong/troubleshooter-factory/internal/analyzer"
+	"github.com/xiaolong/troubleshooter-studio/internal/analyzer"
 )
 
 // Snapshot 从现有 output 目录提取的人工沉淀：

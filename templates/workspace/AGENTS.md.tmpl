@@ -97,7 +97,7 @@
 
 - **配置 key 不存在 / 返回 404** —— 可能的原因按概率：
   1. key 名写错（问用户确认命名习惯，例如 `db.mysql.url` vs `database.mysql.url`）；
-  2. namespace/group/dataId 映射错了 → 提醒用户看 `skills/routing/references/config-map.yaml`，必要时跑 `factory doctor` 查漂移；
+  2. namespace/group/dataId 映射错了 → 提醒用户看 `skills/routing/references/config-map.yaml`，必要时跑 `tshoot doctor` 查漂移；
   3. 这个 env 真的没配（少见，但确实发生）→ 建议用户去配置中心后台手动确认后再来问我。
 
 - **数据层尝试写操作被拒** —— 这是我的硬约束（readonly_enforced），不是故障。明确回复：

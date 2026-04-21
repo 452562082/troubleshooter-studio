@@ -11,8 +11,8 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/xiaolong/troubleshooter-factory/internal/analyzer"
-	"github.com/xiaolong/troubleshooter-factory/internal/config"
+	"github.com/xiaolong/troubleshooter-studio/internal/analyzer"
+	"github.com/xiaolong/troubleshooter-studio/internal/config"
 )
 
 type Context struct {
@@ -31,7 +31,7 @@ type Generator struct {
 	Summary      *GenSummary
 	// SharedStaging 当非空时，GenerateClaudeCode/Cursor/Standalone 跳过各自
 	// 内部的 workspace 临时渲染，直接复用该目录下已渲染好的
-	// templates/workspace-template/ 作为 wsRoot。调用方（cmd/factory/main.go）
+	// templates/workspace-template/ 作为 wsRoot。调用方（cmd/tshoot/main.go）
 	// 负责在多 target 生成时先跑一次 Generate() 到此目录、或把 openclaw 产物挪过来。
 	SharedStaging string
 }
@@ -103,7 +103,7 @@ func (g *Generator) resolveWorkspace() (wsRoot string, cleanup func(), err error
 		return wsRoot, func() {}, nil
 	}
 
-	tmpDir, err := os.MkdirTemp("", "factory-stage-*")
+	tmpDir, err := os.MkdirTemp("", "tshoot-stage-*")
 	if err != nil {
 		return "", func() {}, err
 	}
@@ -242,7 +242,7 @@ func (g *Generator) writeClawhubLock() error {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		skills[e.Name()] = skillEntry{Version: "0.0.0-factory", InstalledAt: now}
+		skills[e.Name()] = skillEntry{Version: "0.0.0-tshoot", InstalledAt: now}
 	}
 	lock := struct {
 		Version int                   `json:"version"`
@@ -391,7 +391,7 @@ func (g *Generator) writeReadme() error {
 	var sb strings.Builder
 
 	fmt.Fprintf(&sb, "# %s Troubleshooter Agent\n\n", ctx.System.Name)
-	fmt.Fprintf(&sb, "由 troubleshooter-factory 生成。系统：%s (`%s`)\n\n", ctx.System.Name, ctx.System.ID)
+	fmt.Fprintf(&sb, "由 troubleshooter-studio 生成。系统：%s (`%s`)\n\n", ctx.System.Name, ctx.System.ID)
 	if ctx.System.Description != "" {
 		fmt.Fprintf(&sb, "> %s\n\n", ctx.System.Description)
 	}
@@ -418,7 +418,7 @@ func (g *Generator) writeReadme() error {
 
 	// ── 升级 / 卸载 ──
 	sb.WriteString("## 升级与卸载\n\n")
-	sb.WriteString("- **升级**（factory 或 system.yaml 改过后）：在 factory 仓库里跑 `factory upgrade -i system.yaml`，会自动备份旧产物到 `<output_dir>.bak.<ts>/` 再重 gen，最后打印 diff。\n")
+	sb.WriteString("- **升级**（tshoot 或 system.yaml 改过后）：在 tshoot 仓库里跑 `tshoot upgrade -i system.yaml`，会自动备份旧产物到 `<output_dir>.bak.<ts>/` 再重 gen，最后打印 diff。\n")
 	sb.WriteString("- **卸载**：`bash scripts/uninstall.sh`（移除工作区 + 从 openclaw.json 清理 agent + MCP）。\n")
 	sb.WriteString("- **回滚**：`mv <output_dir>.bak.<ts> <output_dir>` 然后重跑 `bash scripts/install.sh`。\n\n")
 
@@ -565,13 +565,13 @@ func readmeFAQSection(ctx *Context) string {
 
 	if ctx.Infrastructure.ConfigCenter.Type != "" && ctx.Infrastructure.ConfigCenter.Type != "none" {
 		sb.WriteString("**Q: 某个 env 的配置查不到？**\n")
-		sb.WriteString("A: (1) 检查 `scripts/.env` 里该 env 的地址/凭证；(2) 对比 `templates/workspace-template/skills/routing/references/config-map.yaml` 里的 namespace/dataId/group 是否对；(3) 在 factory 仓库跑 `factory doctor -i system.yaml --repos-root <dir>` 看声明与实态是否漂移。\n\n")
+		sb.WriteString("A: (1) 检查 `scripts/.env` 里该 env 的地址/凭证；(2) 对比 `templates/workspace-template/skills/routing/references/config-map.yaml` 里的 namespace/dataId/group 是否对；(3) 在 tshoot 仓库跑 `tshoot doctor -i system.yaml --repos-root <dir>` 看声明与实态是否漂移。\n\n")
 	}
 
 	sb.WriteString("**Q: 改了 system.yaml，怎么更新部署？**\n")
-	sb.WriteString("A: 在 factory 仓库里跑 `factory upgrade -i system.yaml` —— 自动备份 + 重 gen + 打印 diff。然后来本目录 `bash scripts/install.sh` 应用到 OpenClaw。\n\n")
+	sb.WriteString("A: 在 tshoot 仓库里跑 `tshoot upgrade -i system.yaml` —— 自动备份 + 重 gen + 打印 diff。然后来本目录 `bash scripts/install.sh` 应用到 OpenClaw。\n\n")
 
 	sb.WriteString("**Q: 想把机器人部署到别的平台（Claude Code / Cursor / Standalone）？**\n")
-	sb.WriteString("A: 在 `system.yaml` 的 `generation.targets` 里加上对应名字再 `factory gen`，会生成 `<output_dir>-claude-code/` / `-cursor/` / `-standalone/` 兄弟目录，各自带 install.sh。\n")
+	sb.WriteString("A: 在 `system.yaml` 的 `generation.targets` 里加上对应名字再 `tshoot gen`，会生成 `<output_dir>-claude-code/` / `-cursor/` / `-standalone/` 兄弟目录，各自带 install.sh。\n")
 	return sb.String()
 }

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xiaolong/troubleshooter-factory/internal/config"
+	"github.com/xiaolong/troubleshooter-studio/internal/config"
 )
 
 // 顺序追踪：answers 按 Run() 提问顺序给，空串 = 接受默认

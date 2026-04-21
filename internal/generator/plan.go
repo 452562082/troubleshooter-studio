@@ -11,7 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Plan 描述一次 gen 将要产生的变化与决策，供 `factory plan` 输出
+// Plan 描述一次 gen 将要产生的变化与决策，供 `tshoot plan` 输出
 type Plan struct {
 	System         string              `json:"system"`
 	ConfigCenter   string              `json:"config_center"`
@@ -52,7 +52,7 @@ type ConfigMapProjection struct {
 // BuildPlan 基于现有产物 existingDir 干跑一次 gen 到临时目录，回读产出整理出 Plan
 // existingDir 为空或不存在时 → 以"首次生成"视角出计划
 func (g *Generator) BuildPlan(existingDir string) (*Plan, error) {
-	tmp, err := os.MkdirTemp("", "factory-plan-*")
+	tmp, err := os.MkdirTemp("", "tshoot-plan-*")
 	if err != nil {
 		return nil, err
 	}

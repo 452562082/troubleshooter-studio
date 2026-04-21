@@ -45,7 +45,7 @@ description: %s
 
 # %s
 
-> 由 factory skill new 生成，请按实际需求补全。
+> 由 tshoot skill new 生成，请按实际需求补全。
 
 ## 执行流程（固定）
 
@@ -80,7 +80,7 @@ description: %s
 			return "", err
 		}
 		placeholder := fmt.Sprintf("# %s scripts\n\n在此目录放置该 skill 的辅助脚本（.py / .js / .sh 等）。\n"+
-			"静态文件会被 factory 原样拷贝到生成产物。\n", opts.Name)
+			"静态文件会被 tshoot 原样拷贝到生成产物。\n", opts.Name)
 		if err := os.WriteFile(filepath.Join(dst, "scripts", "README.md"), []byte(placeholder), 0o644); err != nil {
 			return "", err
 		}

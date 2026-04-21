@@ -26,7 +26,7 @@ type Issue struct {
 	Target   string `json:"target"`
 	Message  string `json:"message"`
 	Suggest  string `json:"suggest,omitempty"`
-	// FixKey + FixValue 让 `factory doctor --fix` 能机器化地修该条 issue；
+	// FixKey + FixValue 让 `tshoot doctor --fix` 能机器化地修该条 issue；
 	// 空串表示该条只能人工处理（如 missing-repo / origin-mismatch）。
 	// 当前支持的 FixKey 语义见 internal/doctor/fixer.go 的 Fix()。
 	FixKey   string `json:"fix_key,omitempty"`

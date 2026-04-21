@@ -71,7 +71,7 @@ func buildClaudeMD(wsRoot string, ctx *Context) (string, error) {
 	var sb strings.Builder
 
 	fmt.Fprintf(&sb, "# %s 排障机器人\n\n", ctx.System.Name)
-	sb.WriteString("> 由 troubleshooter-factory 生成，目标平台：Claude Code\n\n")
+	sb.WriteString("> 由 troubleshooter-studio 生成，目标平台：Claude Code\n\n")
 
 	// SOUL
 	if data, err := os.ReadFile(filepath.Join(wsRoot, "SOUL.md")); err == nil {

@@ -1,5 +1,5 @@
 # observability-map.yaml
-# 由 troubleshooter-factory 生成 — 监控默认数据源与优先指标
+# 由 troubleshooter-studio 生成 — 监控默认数据源与优先指标
 {{- if .Infrastructure.Observability.Prometheus.Enabled}}
 default_datasource: prometheus
 {{- else if .Infrastructure.Observability.Loki.Enabled}}

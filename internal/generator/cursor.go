@@ -89,7 +89,7 @@ func buildCursorRules(wsRoot string, ctx *Context) (string, error) {
 	var sb strings.Builder
 
 	fmt.Fprintf(&sb, "# %s 排障机器人\n\n", ctx.System.Name)
-	sb.WriteString("# 由 troubleshooter-factory 生成，目标平台：Cursor\n")
+	sb.WriteString("# 由 troubleshooter-studio 生成，目标平台：Cursor\n")
 	sb.WriteString("# 本文件会被 Cursor 自动读取作为项目上下文\n\n")
 
 	// 读取各 MD 文件合并

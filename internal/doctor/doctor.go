@@ -7,9 +7,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/xiaolong/troubleshooter-factory/internal/analyzer"
-	"github.com/xiaolong/troubleshooter-factory/internal/config"
-	"github.com/xiaolong/troubleshooter-factory/internal/gitclone"
+	"github.com/xiaolong/troubleshooter-studio/internal/analyzer"
+	"github.com/xiaolong/troubleshooter-studio/internal/config"
+	"github.com/xiaolong/troubleshooter-studio/internal/gitclone"
 )
 
 // Check 按 system.yaml 与 reposRoot 做漂移检测
@@ -186,7 +186,7 @@ func checkConfigCenterDrift(r *Report, repo config.Repo, ra *analyzer.RepoAnalys
 				Category: CatConfigCenterDrift,
 				Target:   fmt.Sprintf("repos[%s] %s", repo.Name, f.SourceFile),
 				Message:  fmt.Sprintf("该文件看起来包含 %s 配置，但 system.yaml 声明 %s", f.ConfigCenter, declared),
-				Suggest: fmt.Sprintf("确认实际配置类型：若应为 %s，将 infrastructure.config_center.type 改为 %s 后跑 factory upgrade；否则清理该文件或在 repos[*].analysis.include_paths 中排除",
+				Suggest: fmt.Sprintf("确认实际配置类型：若应为 %s，将 infrastructure.config_center.type 改为 %s 后跑 tshoot upgrade；否则清理该文件或在 repos[*].analysis.include_paths 中排除",
 					f.ConfigCenter, f.ConfigCenter),
 			})
 		}

@@ -11,7 +11,7 @@ import (
 // 做行级替换时不破坏原格式。
 func writeYAML(t *testing.T) string {
 	t.Helper()
-	src := `# 由 factory init 生成，可手工调整
+	src := `# 由 tshoot init 生成，可手工调整
 system:
   id: shop                    # 机器可读标识
   name: "Shop"
@@ -197,7 +197,7 @@ func TestApplyAndWrite_BitPerfect(t *testing.T) {
 	}
 
 	// 注释 / 空行 保留
-	if !strings.Contains(string(newContent), "# 由 factory init 生成") {
+	if !strings.Contains(string(newContent), "# 由 tshoot init 生成") {
 		t.Errorf("top-of-file comment lost")
 	}
 	if !strings.Contains(string(newContent), "# repos: 所有纳入排障范围") {

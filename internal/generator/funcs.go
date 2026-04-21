@@ -5,7 +5,7 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/xiaolong/troubleshooter-factory/internal/analyzer"
+	"github.com/xiaolong/troubleshooter-studio/internal/analyzer"
 )
 
 func toFindingView(f analyzer.Finding) *findingView {

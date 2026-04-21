@@ -1,4 +1,4 @@
-# 示例：一个假想的电商系统，用于端到端验证 factory 生成器
+# 示例：一个假想的电商系统，用于端到端验证 tshoot 生成器
 # 仅用于测试，凭证全部占位符
 
 system:
@@ -193,6 +193,6 @@ generation:
 
 meta:
   schema_version: "0.1"
-  factory_template_ref:
-    repo: troubleshooter-factory
+  tshoot_template_ref:
+    repo: troubleshooter-studio
     ref: main

@@ -15,18 +15,18 @@ import (
 
 	"net/http"
 
-	tsf "github.com/xiaolong/troubleshooter-factory"
-	"github.com/xiaolong/troubleshooter-factory/api"
-	"github.com/xiaolong/troubleshooter-factory/internal/analyzer"
-	"github.com/xiaolong/troubleshooter-factory/internal/config"
-	"github.com/xiaolong/troubleshooter-factory/internal/doctor"
-	"github.com/xiaolong/troubleshooter-factory/internal/generator"
-	"github.com/xiaolong/troubleshooter-factory/internal/gitclone"
-	"github.com/xiaolong/troubleshooter-factory/internal/initwizard"
-	"github.com/xiaolong/troubleshooter-factory/internal/skillscaffold"
-	"github.com/xiaolong/troubleshooter-factory/internal/upgrade"
-	"github.com/xiaolong/troubleshooter-factory/internal/webui"
-	"github.com/xiaolong/troubleshooter-factory/internal/watcher"
+	tsf "github.com/xiaolong/troubleshooter-studio"
+	"github.com/xiaolong/troubleshooter-studio/api"
+	"github.com/xiaolong/troubleshooter-studio/internal/analyzer"
+	"github.com/xiaolong/troubleshooter-studio/internal/config"
+	"github.com/xiaolong/troubleshooter-studio/internal/doctor"
+	"github.com/xiaolong/troubleshooter-studio/internal/generator"
+	"github.com/xiaolong/troubleshooter-studio/internal/gitclone"
+	"github.com/xiaolong/troubleshooter-studio/internal/initwizard"
+	"github.com/xiaolong/troubleshooter-studio/internal/skillscaffold"
+	"github.com/xiaolong/troubleshooter-studio/internal/upgrade"
+	"github.com/xiaolong/troubleshooter-studio/internal/webui"
+	"github.com/xiaolong/troubleshooter-studio/internal/watcher"
 )
 
 // 通过 -ldflags "-X main.version=v0.2.0 -X main.commit=abcdef" 注入；未注入时保持 dev
@@ -44,9 +44,9 @@ func main() {
 	switch os.Args[1] {
 	case "--version", "-v", "version":
 		if commit != "" {
-			fmt.Printf("factory %s (%s)\n", version, commit)
+			fmt.Printf("tshoot %s (%s)\n", version, commit)
 		} else {
-			fmt.Printf("factory %s\n", version)
+			fmt.Printf("tshoot %s\n", version)
 		}
 		return
 	case "gen", "generate":
@@ -120,49 +120,49 @@ func main() {
 	}
 }
 
-// printWelcome 在 `factory`（无参）时打印，给第一次接触的人一个清晰的起点。
+// printWelcome 在 `tshoot`（无参）时打印，给第一次接触的人一个清晰的起点。
 // 跟 usage() 不同：usage 是完整命令手册，welcome 只告诉用户下一步该做什么。
 func printWelcome() {
-	fmt.Printf(`troubleshooter-factory — 排障机器人生成器  (version %s)
+	fmt.Printf(`troubleshooter-studio — 排障机器人生成器  (version %s)
 
 第一次使用？三种上手方式（按推荐顺序）：
   1) 零配置试跑（看产物长啥样，30 秒）：
-       factory demo
+       tshoot demo
 
   2) 可视化 Web UI（有交互向导 + YAML 编辑器）：
-       factory serve --port 8080
+       tshoot serve --port 8080
 
   3) 命令行向导生成一份 system.yaml，然后 gen：
-       factory init -o system.yaml
-       factory gen  -i system.yaml
+       tshoot init -o system.yaml
+       tshoot gen  -i system.yaml
 
 已有 system.yaml？常用命令：
-  factory validate -i system.yaml          # 校验格式
-  factory plan     -i system.yaml          # 预览会生成什么
-  factory gen      -i system.yaml          # 真落盘
-  factory doctor   -i system.yaml          # 检查声明 vs 实态漂移
+  tshoot validate -i system.yaml          # 校验格式
+  tshoot plan     -i system.yaml          # 预览会生成什么
+  tshoot gen      -i system.yaml          # 真落盘
+  tshoot doctor   -i system.yaml          # 检查声明 vs 实态漂移
 
-完整命令列表：factory --help
-版本信息：    factory --version
+完整命令列表：tshoot --help
+版本信息：    tshoot --version
 `, version)
 }
 
 func usage() {
-	fmt.Println(`troubleshooter-factory — 排障机器人生成器
+	fmt.Println(`troubleshooter-studio — 排障机器人生成器
 
 用法:
-  factory init [-o <system.yaml>]                          # 交互向导生成 system.yaml
-  factory gen -i <system.yaml> [-o <output_dir>] [-t <template_dir>] [--analysis <analysis.json>]
-  factory plan -i <system.yaml> [--analysis <analysis.json>] [--against <dir>] [--format=text|json]
-  factory watch -i <system.yaml> [--analysis <analysis.json>] [--interval 1s]
-  factory analyze -i <system.yaml> --repos-root <dir> [-o <analysis.json>] [--auto-clone] [--branch <name>]
-  factory doctor -i <system.yaml> [--repos-root <dir>] [--format=text|json]
-  factory diff -i <system.yaml> [--analysis <analysis.json>] [--against <dir>]
-  factory upgrade -i <system.yaml> [--analysis <analysis.json>] [--format=text|json]
-  factory skill new <name> [-t <template_dir>] [--description "..."] [--with-scripts] [--with-references]
-  factory serve [--port 8080] [-t <template_dir>]              # 启动 Web UI
-  factory demo [--keep]                                         # 零配置试跑（用内置 examples 走完整流程）
-  factory validate -i <system.yaml>
+  tshoot init [-o <system.yaml>]                          # 交互向导生成 system.yaml
+  tshoot gen -i <system.yaml> [-o <output_dir>] [-t <template_dir>] [--analysis <analysis.json>]
+  tshoot plan -i <system.yaml> [--analysis <analysis.json>] [--against <dir>] [--format=text|json]
+  tshoot watch -i <system.yaml> [--analysis <analysis.json>] [--interval 1s]
+  tshoot analyze -i <system.yaml> --repos-root <dir> [-o <analysis.json>] [--auto-clone] [--branch <name>]
+  tshoot doctor -i <system.yaml> [--repos-root <dir>] [--format=text|json]
+  tshoot diff -i <system.yaml> [--analysis <analysis.json>] [--against <dir>]
+  tshoot upgrade -i <system.yaml> [--analysis <analysis.json>] [--format=text|json]
+  tshoot skill new <name> [-t <template_dir>] [--description "..."] [--with-scripts] [--with-references]
+  tshoot serve [--port 8080] [-t <template_dir>]              # 启动 Web UI
+  tshoot demo [--keep]                                         # 零配置试跑（用内置 examples 走完整流程）
+  tshoot validate -i <system.yaml>
 
 子命令:
   init       交互式问答生成一份最小可用 system.yaml
@@ -238,7 +238,7 @@ func runGen(args []string) error {
 		}
 	}
 	if hasOther && !hasOpenclaw {
-		stagingDir, err := os.MkdirTemp("", "factory-shared-*")
+		stagingDir, err := os.MkdirTemp("", "tshoot-shared-*")
 		if err != nil {
 			return fmt.Errorf("create staging: %w", err)
 		}
@@ -300,7 +300,7 @@ func runGen(args []string) error {
 	if hasOpenclaw {
 		fmt.Printf("[ok] generated to %s\n", outDir)
 		fmt.Printf("下一步：cd '%s' && bash scripts/install.sh\n", outDir)
-		fmt.Printf("     或：先看变化 factory diff -i <system.yaml>\n")
+		fmt.Printf("     或：先看变化 tshoot diff -i <system.yaml>\n")
 	} else {
 		// openclaw 未在 targets 中：outDir 本身不会被创建，只有 <outDir>-<target>/ 兄弟目录
 		fmt.Printf("[ok] generation complete (openclaw target not requested)\n")
@@ -427,8 +427,8 @@ func runAnalyze(args []string) error {
 		fmt.Println(string(out))
 	} else {
 		fmt.Printf("[ok] analysis written to %s\n", *output)
-		fmt.Printf("下一步：factory plan -i %s --analysis %s   # 预览 findings 如何应用\n", *input, *output)
-		fmt.Printf("     或：factory gen  -i %s --analysis %s   # 直接应用并落盘\n", *input, *output)
+		fmt.Printf("下一步：tshoot plan -i %s --analysis %s   # 预览 findings 如何应用\n", *input, *output)
+		fmt.Printf("     或：tshoot gen  -i %s --analysis %s   # 直接应用并落盘\n", *input, *output)
 	}
 	return nil
 }
@@ -466,7 +466,7 @@ func runDiff(args []string) error {
 		tr = resolveTemplateDir()
 	}
 
-	tmp, err := os.MkdirTemp("", "factory-diff-*")
+	tmp, err := os.MkdirTemp("", "tshoot-diff-*")
 	if err != nil {
 		return err
 	}
@@ -503,7 +503,7 @@ func runDiff(args []string) error {
 	if len(rep.Files) == 0 && len(rep.ConfigMapChanges) == 0 {
 		fmt.Println("\n下一步：产物已是最新，无需 gen")
 	} else {
-		fmt.Printf("\n下一步：满意就 factory gen -i %s 应用；不满意继续改 system.yaml\n", *input)
+		fmt.Printf("\n下一步：满意就 tshoot gen -i %s 应用；不满意继续改 system.yaml\n", *input)
 	}
 	return nil
 }
@@ -598,16 +598,16 @@ func runPlan(args []string) error {
 		fmt.Println(string(data))
 	default:
 		printPlanText(plan)
-		fmt.Println("\n下一步：满意就 factory gen -i", *input, "真落盘")
+		fmt.Println("\n下一步：满意就 tshoot gen -i", *input, "真落盘")
 		if len(plan.FilesModify) > 0 || len(plan.FilesRemove) > 0 {
-			fmt.Println("     或：先看行级 diff — factory diff -i", *input)
+			fmt.Println("     或：先看行级 diff — tshoot diff -i", *input)
 		}
 	}
 	return nil
 }
 
 func printPlanText(p *generator.Plan) {
-	fmt.Printf("# factory plan — system: %s (config_center=%s)\n\n", p.System, p.ConfigCenter)
+	fmt.Printf("# tshoot plan — system: %s (config_center=%s)\n\n", p.System, p.ConfigCenter)
 
 	fmt.Printf("Skills included (%d):\n", len(p.SkillsIncluded))
 	for _, s := range p.SkillsIncluded {
@@ -746,7 +746,7 @@ func applyDoctorFixes(yamlPath string, issues []doctor.Issue, skipConfirm bool) 
 		return fmt.Errorf("write %s: %w", yamlPath, err)
 	}
 	fmt.Printf("[ok] 已写回 %s（%d 项）；备份 %s\n", yamlPath, len(patches), backup)
-	fmt.Println("下一步：factory validate -i " + yamlPath + " 确认无误，再 factory upgrade 重生成")
+	fmt.Println("下一步：tshoot validate -i " + yamlPath + " 确认无误，再 tshoot upgrade 重生成")
 	return nil
 }
 
@@ -754,7 +754,7 @@ func printDoctorText(rep *doctor.Report) {
 	errs, warns, infos := rep.Counts()
 	if len(rep.Issues) == 0 {
 		fmt.Println("[ok] 无漂移 — system.yaml 与代码一致")
-		fmt.Println("下一步：放心 factory gen 生成部署包")
+		fmt.Println("下一步：放心 tshoot gen 生成部署包")
 		return
 	}
 	for _, i := range rep.Issues {
@@ -776,11 +776,11 @@ func printDoctorText(rep *doctor.Report) {
 	fmt.Printf("\n合计：%d error / %d warning / %d info\n", errs, warns, infos)
 	switch {
 	case errs > 0:
-		fmt.Println("下一步：按每条 ↳ 建议修正 system.yaml，然后 factory upgrade 重跑 + 对比 diff")
+		fmt.Println("下一步：按每条 ↳ 建议修正 system.yaml，然后 tshoot upgrade 重跑 + 对比 diff")
 	case warns > 0:
-		fmt.Println("下一步：可选修正上述 warning（或暂时忽略），factory gen 仍可照常进行")
+		fmt.Println("下一步：可选修正上述 warning（或暂时忽略），tshoot gen 仍可照常进行")
 	default:
-		fmt.Println("下一步：info 级别无需处理；factory gen 正常")
+		fmt.Println("下一步：info 级别无需处理；tshoot gen 正常")
 	}
 }
 
@@ -805,7 +805,7 @@ func runInit(args []string) error {
 
 	w := initwizard.New(os.Stdin, os.Stdout)
 
-	// 预填来源优先级：-i > ~/.factory/init-draft.yaml > 无
+	// 预填来源优先级：-i > ~/.tshoot/init-draft.yaml > 无
 	draftPath := filepath.Join(initDraftDir(), "init-draft.yaml")
 	if *input != "" {
 		cfg, err := config.Load(*input)
@@ -844,7 +844,7 @@ func runInit(args []string) error {
 			if f, err := os.Create(draftPath); err == nil {
 				_ = snap.WriteYAML(f)
 				_ = f.Close()
-				fmt.Fprintf(os.Stderr, "\n[中断] 已保存草稿 → %s\n  下次 factory init 会询问是否继续\n", draftPath)
+				fmt.Fprintf(os.Stderr, "\n[中断] 已保存草稿 → %s\n  下次 tshoot init 会询问是否继续\n", draftPath)
 			}
 		} else {
 			fmt.Fprintln(os.Stderr, "\n[中断]")
@@ -869,16 +869,16 @@ func runInit(args []string) error {
 	}
 	fmt.Printf("\n[ok] wrote %s\n", *output)
 	fmt.Println("下一步:")
-	fmt.Printf("  factory validate -i %s\n", *output)
-	fmt.Printf("  factory gen -i %s\n", *output)
+	fmt.Printf("  tshoot validate -i %s\n", *output)
+	fmt.Printf("  tshoot gen -i %s\n", *output)
 	return nil
 }
 
 func initDraftDir() string {
 	if h, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(h, ".factory")
+		return filepath.Join(h, ".tshoot")
 	}
-	return filepath.Join(os.TempDir(), "factory")
+	return filepath.Join(os.TempDir(), "tshoot")
 }
 
 func humanSince(t time.Time) string {
@@ -1045,7 +1045,7 @@ func runServe(args []string) error {
 
 // runDemo 是"零配置试跑":用内置 examples/shop-system.yaml + examples/fake-repos 跑完整
 // pipeline（validate → analyze → plan → gen），产出一个临时目录，打印产物树 + 关键下一步。
-// 目的是让新用户 30 秒内看到 factory 能干什么，无需准备任何输入。
+// 目的是让新用户 30 秒内看到 tshoot 能干什么，无需准备任何输入。
 func runDemo(args []string) error {
 	fs := flag.NewFlagSet("demo", flag.ExitOnError)
 	keep := fs.Bool("keep", false, "保留 demo 目录，不自动清理")
@@ -1073,7 +1073,7 @@ func runDemo(args []string) error {
 		return fmt.Errorf("demo repos-root 未找到: %s (%w)", reposRoot, err)
 	}
 
-	demoDir, err := os.MkdirTemp("", "factory-demo-*")
+	demoDir, err := os.MkdirTemp("", "tshoot-demo-*")
 	if err != nil {
 		return err
 	}
@@ -1084,7 +1084,7 @@ func runDemo(args []string) error {
 		}()
 	}
 
-	fmt.Println("=== factory demo ===")
+	fmt.Println("=== tshoot demo ===")
 	fmt.Printf("  system.yaml: %s\n", sysPath)
 	fmt.Printf("  repos-root:  %s\n", reposRoot)
 	fmt.Printf("  demo out:    %s\n", demoDir)
@@ -1123,7 +1123,7 @@ func runDemo(args []string) error {
 	printTree(outDir, "", 2)
 
 	// 打开指引
-	fmt.Println("\n── 看看 factory 做了什么 ────────────────────────────────────────")
+	fmt.Println("\n── 看看 tshoot 做了什么 ────────────────────────────────────────")
 	fmt.Printf("  cat '%s/scripts/install.sh' | head -80       # 安装脚本\n", outDir)
 	fmt.Printf("  cat '%s/templates/workspace-template/IDENTITY.md'   # 机器人身份 + 典型求助示例\n", outDir)
 	fmt.Printf("  cat '%s/templates/workspace-template/skills/routing/SKILL.md'  # 主 skill\n", outDir)
@@ -1132,7 +1132,7 @@ func runDemo(args []string) error {
 	fmt.Printf("    %s analyze -i %s --repos-root %s\n", os.Args[0], sysPath, reposRoot)
 	fmt.Println()
 	fmt.Println("  想看 multi-target（claude-code/cursor/standalone）各长啥样：")
-	fmt.Println("    在自己的 system.yaml 的 generation.targets 里加上它们，再跑 factory gen")
+	fmt.Println("    在自己的 system.yaml 的 generation.targets 里加上它们，再跑 tshoot gen")
 	_ = reposRoot // 预留给未来 analyze/doctor 集成
 	return nil
 }
@@ -1164,7 +1164,7 @@ func printTree(root, prefix string, depth int) {
 
 func runSkill(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: factory skill new <name> [flags]")
+		return fmt.Errorf("usage: tshoot skill new <name> [flags]")
 	}
 	switch args[0] {
 	case "new":
@@ -1176,7 +1176,7 @@ func runSkill(args []string) error {
 
 func runSkillNew(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("skill name required: factory skill new <name> [flags]")
+		return fmt.Errorf("skill name required: tshoot skill new <name> [flags]")
 	}
 	name := args[0]
 	fs := flag.NewFlagSet("skill new", flag.ExitOnError)
@@ -1205,7 +1205,7 @@ func runSkillNew(args []string) error {
 	fmt.Println("下一步:")
 	fmt.Println("  1) 编辑 SKILL.md.tmpl 补全描述与执行流程")
 	fmt.Printf("  2) 在 system.yaml 的 generation.skills_whitelist 中加入 \"%s\"\n", name)
-	fmt.Println("  3) factory plan -i system.yaml 预览")
+	fmt.Println("  3) tshoot plan -i system.yaml 预览")
 	return nil
 }
 
@@ -1311,8 +1311,8 @@ func runValidate(args []string) error {
 		return err
 	}
 	fmt.Println("[ok] system.yaml is valid")
-	fmt.Printf("下一步：factory plan -i %s                 # 预览会生成什么\n", *input)
-	fmt.Printf("     或：factory gen  -i %s                 # 直接落盘\n", *input)
+	fmt.Printf("下一步：tshoot plan -i %s                 # 预览会生成什么\n", *input)
+	fmt.Printf("     或：tshoot gen  -i %s                 # 直接落盘\n", *input)
 	return nil
 }
 
@@ -1417,7 +1417,7 @@ func extractEmbeddedTemplates() (string, error) {
 			return embeddedTemplatesDir, nil
 		}
 	}
-	dir, err := extractEmbeddedFS(tsf.TemplatesFS, "templates", "factory-templates-")
+	dir, err := extractEmbeddedFS(tsf.TemplatesFS, "templates", "tshoot-templates-")
 	if err != nil {
 		return "", err
 	}
@@ -1431,7 +1431,7 @@ func extractEmbeddedExamples() (string, error) {
 			return embeddedExamplesDir, nil
 		}
 	}
-	dir, err := extractEmbeddedFS(tsf.ExamplesFS, "examples", "factory-examples-")
+	dir, err := extractEmbeddedFS(tsf.ExamplesFS, "examples", "tshoot-examples-")
 	if err != nil {
 		return "", err
 	}

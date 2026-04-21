@@ -9,10 +9,10 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/xiaolong/troubleshooter-factory/internal/config"
+	"github.com/xiaolong/troubleshooter-studio/internal/config"
 )
 
-// projectRoot 返回 troubleshooter-factory 仓库根目录（便于测试定位 templates/ 与 examples/）
+// projectRoot 返回 troubleshooter-studio 仓库根目录（便于测试定位 templates/ 与 examples/）
 func projectRoot(t *testing.T) string {
 	t.Helper()
 	wd, err := os.Getwd()

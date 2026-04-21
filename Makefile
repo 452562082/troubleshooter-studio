@@ -1,13 +1,14 @@
-# troubleshooter-factory — 一键构建 / 测试 / 发布
+# troubleshooter-studio — 一键构建 / 测试 / 发布
 #
 # 常用:
 #   make              # 同 `make build` —— 开发模式(不重构前端,适合改 Go)
 #   make web          # 构建前端 + 拷到 embed 目标
-#   make build        # 出单平台二进制 bin/factory,version 从 git 读
-#   make release      # 交叉编译出 dist/bin/factory-<os>-<arch>
+#   make build        # 出单平台 CLI 二进制 bin/tshoot,version 从 git 读
+#   make desktop      # 出 Wails 桌面 app (cmd/tshoot-desktop)
+#   make release      # 交叉编译出 dist/bin/tshoot-<os>-<arch>
 #   make test         # 全量 go test,含 race
 #   make lint         # go vet + gofmt -l
-#   make demo         # make build 后立即 ./bin/factory demo
+#   make demo         # make build 后立即 ./bin/tshoot demo
 #   make clean        # 清临时产物
 
 SHELL := /bin/bash
@@ -17,7 +18,7 @@ VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)
 
-BIN     ?= bin/factory
+BIN     ?= bin/tshoot
 WEB_SRC := web
 WEB_DIST := internal/webui/dist
 
@@ -41,7 +42,7 @@ web:
 .PHONY: build
 build:
 	@echo "▶ go build $(BIN) (version=$(VERSION) commit=$(COMMIT))"
-	go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/factory
+	go build -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/tshoot
 	@echo "✓ $(BIN) ready"
 
 # ── 发布构建:先 web,再多平台交叉编译 ─────────────────────────────
@@ -51,13 +52,21 @@ release: web
 	@mkdir -p dist/bin
 	@for p in $(PLATFORMS); do \
 	  os=$${p%/*}; arch=$${p#*/}; \
-	  out="dist/bin/factory-$(VERSION)-$$os-$$arch"; \
+	  out="dist/bin/tshoot-$(VERSION)-$$os-$$arch"; \
 	  echo "  → $$out"; \
 	  GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 \
-	    go build -ldflags "$(LDFLAGS)" -o "$$out" ./cmd/factory || exit 1; \
+	    go build -ldflags "$(LDFLAGS)" -o "$$out" ./cmd/tshoot || exit 1; \
 	done
 	@ls -lh dist/bin/
 	@echo "✓ release artifacts in dist/bin/"
+
+# ── 桌面 app (Wails v2):单独 target,不影响 CLI 构建 ──────────────
+DESKTOP_BIN ?= bin/tshoot-desktop
+.PHONY: desktop
+desktop:
+	@echo "▶ building desktop app ($(DESKTOP_BIN))"
+	go build -ldflags "$(LDFLAGS)" -o $(DESKTOP_BIN) ./cmd/tshoot-desktop
+	@echo "✓ $(DESKTOP_BIN) ready"
 
 # ── 快速试跑:build 后立即 demo ──────────────────────────────────
 .PHONY: demo

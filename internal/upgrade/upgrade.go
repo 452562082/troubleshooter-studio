@@ -7,11 +7,11 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/xiaolong/troubleshooter-factory/internal/config"
-	"github.com/xiaolong/troubleshooter-factory/internal/generator"
+	"github.com/xiaolong/troubleshooter-studio/internal/config"
+	"github.com/xiaolong/troubleshooter-studio/internal/generator"
 )
 
-// CurrentSchemaVersion 当前 factory 支持的 system.yaml schema 版本
+// CurrentSchemaVersion 当前 tshoot 支持的 system.yaml schema 版本
 const CurrentSchemaVersion = "0.1"
 
 // Result upgrade 操作的结果，供 CLI 展示
@@ -47,7 +47,7 @@ func Run(opts Options) (*Result, error) {
 		return nil, fmt.Errorf("OutputDir required")
 	}
 	if info, err := os.Stat(opts.OutputDir); err != nil || !info.IsDir() {
-		return nil, fmt.Errorf("existing output not found at %s; run `factory gen` first", opts.OutputDir)
+		return nil, fmt.Errorf("existing output not found at %s; run `tshoot gen` first", opts.OutputDir)
 	}
 
 	res := &Result{

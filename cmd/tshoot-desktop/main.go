@@ -201,7 +201,7 @@ func main() {
 		Mac: &mac.Options{
 			About: &mac.AboutInfo{
 				Title:   "Troubleshooter Studio",
-				Message: fmt.Sprintf("AI 排障机器人桌面管理客户端\n版本: %s", appState.Version()),
+				Message: fmt.Sprintf("AI 排障机器人工作台 (桌面端入口)\n版本: %s", appState.Version()),
 			},
 		},
 

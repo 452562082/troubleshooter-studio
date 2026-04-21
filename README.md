@@ -4,11 +4,23 @@
 
 # troubleshooter-studio
 
-**AI 排障机器人的桌面管理客户端**（Wails 桌面 app + 配套 CLI）。
+**AI 排障机器人工作台**：建模 / 生成 / 部署 / 管理一站式。
 
-核心场景：在桌面 app 里一站式完成排障机器人的**配置 / 部署 / 管理**——
-扫本机已装机器人、编辑它们的 `system.yaml` 并原地应用更改、新建机器人并一键部署到 4 种 AI 平台（OpenClaw / Claude Code / Cursor / Standalone）、yaml 导入/导出。
-机器人本体仍然是离线产物（4 种目标，每种自带 `install.sh`），可以脱离 studio 独立运行。
+这是个两层的项目：
+
+**上层（这个仓库）—— 排障机器人研制环境**
+- 建模：`system.yaml` schema（系统 / 环境 / 仓库 / 配置源 / 可观测 / 数据层）+ init 向导 + 编辑器
+- 分析：仓库 analyzer（5 技术栈 × 5 配置源）反推 service_names / config 映射
+- 校验：validate / doctor（8 种漂移规则 + actionable `--fix`）/ plan
+- 生成：generator（4 target × 模板渲染 + preserve 人工行 + diff）
+- 管理：discover 扫本机装好的机器人、agent.Apply 原地改配置直接生效、导出/导入 yaml
+- 三种入口：**CLI**（脚本 / CI 场景） / **桌面 app**（Wails v2，一站式管理） / **HTTP API**（`tshoot serve`）
+
+**下层（gen 产出的机器人）—— 完整的 AI 排障能力**
+- **Skills 库** 10+ 个：routing（按 env 路由到配置中心）/ config-executor（nacos/apollo/consul/k8s/env-vars 五后端）/ redis / mongodb / mysql / es / kafka runtime-query / tracing-query（Jaeger）/ elk-log-query / diagram-generator
+- **运行时**：MCP 或 HTTP 脚本读远程配置中心 → 解析连接串 → 查数据层 / trace / 日志，按环境分支切换
+- **话术库**：首次自我介绍动态列 skill / 7 类故障标准回复（MCP 连不上、K8s RBAC、凭证失效、key 缺失、写拒、Grafana 403、trace 找不到）/ 每 skill 自检示例
+- **部署到 4 种 AI 平台**，每种自带 `install.sh`：
 
 | 目标形态 | 产物核心 | 一键部署 |
 |---|---|---|
@@ -17,7 +29,7 @@
 | **Cursor IDE** | `.cursorrules` + `.cursor/rules/*.mdc` + `skills/` + `install.sh` | `bash install.sh <project-dir>` |
 | **Standalone Web 聊天** | `server.py` + `index.html` + `Dockerfile` + docker-compose + `install.sh` | `bash install.sh` 或 `docker compose up --build` |
 
-在 `system.yaml` 的 `generation.targets` 里勾选需要的形态，一次 gen 全出。
+在 `system.yaml` 的 `generation.targets` 里勾选需要的形态，一次 gen 全出。机器人本体脱离 studio 可独立运行。
 
 ## 30 秒试跑
 

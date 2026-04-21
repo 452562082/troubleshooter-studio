@@ -61,12 +61,29 @@ release: web
 	@echo "✓ release artifacts in dist/bin/"
 
 # ── 桌面 app (Wails v2):单独 target,不影响 CLI 构建 ──────────────
+# Wails v2 构建踩坑提醒:
+#  1. build tags `desktop production` 必须带,不然 wails.Run 会主动拒跑,
+#     提示 "Wails applications will not build without the correct build tags."
+#  2. cgo 必须开启(WKWebView / WebView2 绑定)
+#  3. macOS 下 Wails 用 UTType(UniformTypeIdentifiers.framework),要在 CGO_LDFLAGS
+#     里显式加 -framework;wails build 会自动注入,go build 要自己带。
+#     -mmacosx-version-min=10.13 保证同时兼容老系统(UTType 在运行时做 availability 判断)。
 DESKTOP_BIN ?= bin/tshoot-desktop
+DESKTOP_CGO_LDFLAGS_DARWIN := -framework UniformTypeIdentifiers -mmacosx-version-min=10.13
 .PHONY: desktop
-desktop:
+desktop: web
 	@echo "▶ building desktop app ($(DESKTOP_BIN))"
-	go build -ldflags "$(LDFLAGS)" -o $(DESKTOP_BIN) ./cmd/tshoot-desktop
+	CGO_ENABLED=1 CGO_LDFLAGS="$(DESKTOP_CGO_LDFLAGS_DARWIN)" \
+	  go build -tags "desktop production" -ldflags "$(LDFLAGS)" -o $(DESKTOP_BIN) ./cmd/tshoot-desktop
 	@echo "✓ $(DESKTOP_BIN) ready"
+
+# ── 桌面 app 开发模式(dev tag,允许 Vite hot-reload + devtools):备用 ────────
+.PHONY: desktop-dev
+desktop-dev: web
+	@echo "▶ building desktop app with dev tag ($(DESKTOP_BIN)-dev)"
+	CGO_ENABLED=1 CGO_LDFLAGS="$(DESKTOP_CGO_LDFLAGS_DARWIN)" \
+	  go build -tags "desktop dev" -ldflags "$(LDFLAGS)" -o $(DESKTOP_BIN)-dev ./cmd/tshoot-desktop
+	@echo "✓ $(DESKTOP_BIN)-dev ready"
 
 # ── 快速试跑:build 后立即 demo ──────────────────────────────────
 .PHONY: demo

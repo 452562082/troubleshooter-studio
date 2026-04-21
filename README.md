@@ -71,20 +71,38 @@ factory demo
 ### 方式 A：Web UI（推荐新用户）
 
 **生产模式（单二进制，一条命令就能用）：**
+
 ```bash
-cd web && npm install && npm run build
-cp -R dist/. ../internal/webui/dist/
-cd .. && go build -o bin/factory ./cmd/factory
-./bin/factory serve --port 8080      # 同一进程提供 /api/* 和前端，浏览器访问 http://localhost:8080
+make web && make build
+./bin/factory serve --port 8080
 ```
 
-未执行前端构建时 `serve` 仍可启动，首页会显示"请先构建前端"占位提示（/api 仍可用）。
+`make web` 负责构建前端并拷到 embed 目标，`make build` 负责 go build。若要多平台交叉编译出 `dist/bin/factory-<os>-<arch>`，用 `make release`。
+
+或手动四步（不用 Makefile 时）：
+
+```bash
+cd web && npm install && npm run build
+cd ..
+rm -rf internal/webui/dist/assets internal/webui/dist/index.html
+cp -R web/dist/* internal/webui/dist/
+go build -o bin/factory ./cmd/factory
+./bin/factory serve --port 8080
+```
+
+启动后浏览器访问 `http://localhost:8080` 就能看到前端，同一进程也提供 `/api/*`。
+
+未执行前端构建时 `serve` 仍可启动，首页会显示"请先构建前端"占位提示（`/api` 仍可用）。
 
 **开发模式（两个进程、热重载）：**
+
 ```bash
+# 终端 1：Go API
 go build -o bin/factory ./cmd/factory
-./bin/factory serve --port 8080      # Go API
-cd web && npm install && npm run dev # Vite 前端；自动把 /api 代理到 :8080
+./bin/factory serve --port 8080
+
+# 终端 2：Vite 前端（自动把 /api 代理到 :8080）
+cd web && npm install && npm run dev
 ```
 
 8 个可视化页面覆盖完整工作流：

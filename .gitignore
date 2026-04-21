@@ -12,8 +12,11 @@ dist/bin/
 cmd/tshoot-desktop/build/bin/
 web/wailsjs/go/
 
-# 本地 demo 产物(非 templates/ 下的真实模板)
-dist/
+# 本地 demo 产物(非 templates/ 下的真实模板)；锚到仓库根，不误杀 internal/webui/dist/ 等
+/dist/
+# internal/webui/dist/ 是 npm build 后 cp 进来的 embed 目标，也不入库；
+# 没执行 cp 时 webui.Distribution() 会回退到 placeholder/（见 internal/webui/webui.go）
+/internal/webui/dist/
 
 # Web 构建与依赖
 web/dist/

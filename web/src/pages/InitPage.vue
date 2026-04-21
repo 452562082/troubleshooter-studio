@@ -40,8 +40,52 @@ const system = reactive({
 const agent = reactive({
   name: saved?.agent?.name ?? '',
   workspace_name: saved?.agent?.workspace_name ?? '',
-  model: saved?.agent?.model ?? 'openai-codex/gpt-5.3-codex',
+  model: saved?.agent?.model ?? 'anthropic/claude-sonnet-4-6',
 })
+
+// ── Model presets ──────────────────────────────────────────────
+// 按提供商分组；自定义项让用户填任意字符串（保留企业内部网关 / 新模型的灵活性）。
+interface ModelOption { value: string; label: string; hint?: string }
+interface ModelGroup { group: string; items: ModelOption[] }
+const MODEL_CUSTOM = '__custom__'
+const modelGroups: ModelGroup[] = [
+  {
+    group: 'Anthropic（4 种 target 都支持）',
+    items: [
+      { value: 'anthropic/claude-opus-4-7',   label: 'Claude Opus 4.7 — 最强、偏贵' },
+      { value: 'anthropic/claude-sonnet-4-6', label: 'Claude Sonnet 4.6 — 默认推荐，性价比最高' },
+      { value: 'anthropic/claude-haiku-4-5',  label: 'Claude Haiku 4.5 — 便宜、快，适合高频轻量' },
+    ],
+  },
+  {
+    group: 'OpenAI（openclaw 直用；standalone 会回落到 Claude Sonnet 4.6）',
+    items: [
+      { value: 'openai/gpt-5-codex', label: 'GPT-5 Codex' },
+      { value: 'openai/gpt-4o',      label: 'GPT-4o' },
+      { value: 'openai/o3',          label: 'o3' },
+    ],
+  },
+  {
+    group: '国内',
+    items: [
+      { value: 'qwen/qwen3-max',    label: '通义千问 Qwen3 Max' },
+      { value: 'deepseek/deepseek-v3', label: 'DeepSeek V3' },
+    ],
+  },
+]
+const allPresetModels = modelGroups.flatMap(g => g.items.map(i => i.value))
+const modelSelectValue = computed({
+  get: () => allPresetModels.includes(agent.model) ? agent.model : MODEL_CUSTOM,
+  set: (v: string) => {
+    if (v === MODEL_CUSTOM) {
+      // 切到自定义时，若当前 model 已在 preset 列表里，清空方便用户输入
+      if (allPresetModels.includes(agent.model)) agent.model = ''
+    } else {
+      agent.model = v
+    }
+  },
+})
+const modelIsCustom = computed(() => !allPresetModels.includes(agent.model))
 
 // Auto-derive defaults when system name changes
 watch(() => system.name, (val) => {
@@ -746,11 +790,20 @@ const configTypeDescriptions: Record<string, string> = {
       </div>
       <div class="form-group">
         <label>模型 <span class="required">*</span>
-          <span class="help-icon" title="LLM model id。OpenClaw 会把它传给平台；Standalone target 另外读 LLM_MODEL 环境变量覆盖。非 anthropic/claude 模型在 standalone 里会自动回落到 claude-sonnet-4-6。">?</span>
+          <span class="help-icon" title="agent.model 主要给 OpenClaw 网关路由用（<provider>/<model-id>）。Claude Code / Cursor 只作为文档记录；Standalone 只能直连 Anthropic，非 claude-* 会自动回落到 claude-sonnet-4-6（可用 LLM_MODEL 环境变量覆盖）。">?</span>
         </label>
+        <select v-model="modelSelectValue" :class="{ error: hasError('agent.model') }">
+          <optgroup v-for="g in modelGroups" :key="g.group" :label="g.group">
+            <option v-for="m in g.items" :key="m.value" :value="m.value">{{ m.label }}</option>
+          </optgroup>
+          <option :value="MODEL_CUSTOM">自定义 / 企业内部网关 / 新模型 …</option>
+        </select>
         <input
+          v-if="modelIsCustom"
           v-model="agent.model"
           type="text"
+          placeholder="填任意 model id，如 openai-compat/my-gateway/some-model"
+          style="margin-top: 6px"
           :class="{ error: hasError('agent.model') }"
         />
       </div>

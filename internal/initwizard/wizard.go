@@ -76,11 +76,11 @@ func (w *Wizard) Run() (*Answers, error) {
 	if err != nil {
 		return nil, err
 	}
-	modelDef := "openai-codex/gpt-5.3-codex"
+	modelDef := "anthropic/claude-sonnet-4-6"
 	if d != nil {
 		modelDef = defaultOr(d.AgentModel, modelDef)
 	}
-	a.AgentModel, err = w.ask("Agent 模型", modelDef)
+	a.AgentModel, err = w.askModel(modelDef)
 	if err != nil {
 		return nil, err
 	}

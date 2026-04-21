@@ -115,3 +115,81 @@ func (w *Wizard) askChoice(label string, choices []string, defaultVal string) (s
 func (w *Wizard) section(title string) {
 	w.printf("\n== %s ==\n", title)
 }
+
+// modelPresets 是推荐的 model id 列表，按提供商分组展示。
+// 选择编号 = 用对应 value；回车 = 默认；输入任意字符串 = 自定义（老用户 / 企业网关）。
+var modelPresets = []struct {
+	group string
+	items []struct{ value, desc string }
+}{
+	{
+		group: "Anthropic（4 种 target 都支持）",
+		items: []struct{ value, desc string }{
+			{"anthropic/claude-opus-4-7", "Claude Opus 4.7 — 最强、偏贵"},
+			{"anthropic/claude-sonnet-4-6", "Claude Sonnet 4.6 — 默认推荐"},
+			{"anthropic/claude-haiku-4-5", "Claude Haiku 4.5 — 便宜、快"},
+		},
+	},
+	{
+		group: "OpenAI（openclaw 直用；standalone 会回落到 Claude Sonnet 4.6）",
+		items: []struct{ value, desc string }{
+			{"openai/gpt-5-codex", "GPT-5 Codex"},
+			{"openai/gpt-4o", "GPT-4o"},
+			{"openai/o3", "o3"},
+		},
+	},
+	{
+		group: "国内",
+		items: []struct{ value, desc string }{
+			{"qwen/qwen3-max", "通义千问 Qwen3 Max"},
+			{"deepseek/deepseek-v3", "DeepSeek V3"},
+		},
+	},
+}
+
+// askModel 让用户按编号选预设 model，或直接输入自定义字符串。
+// 回车 = defaultVal；纯数字 = 对应预设；其他字符串 = 自定义 model id。
+func (w *Wizard) askModel(defaultVal string) (string, error) {
+	w.printf("  Agent 模型（回车=默认；数字=选预设；或直接填 model id）\n")
+	// 按顺序编号打印
+	idx := 0
+	flat := []string{}
+	for _, grp := range modelPresets {
+		w.printf("    [%s]\n", grp.group)
+		for _, it := range grp.items {
+			idx++
+			marker := " "
+			if it.value == defaultVal {
+				marker = "*"
+			}
+			w.printf("      %s %d) %-35s  %s\n", marker, idx, it.value, it.desc)
+			flat = append(flat, it.value)
+		}
+	}
+	w.printf("    [自定义]\n      %d) 手填任意 model id（企业内部网关 / 新模型）\n", idx+1)
+	customIdx := idx + 1
+
+	// 前缀多少空格跟 ask() 的 "  " 缩进保持一致
+	w.printf("  选择或输入 [%s]: ", defaultVal)
+	line, err := w.in.ReadString('\n')
+	if err != nil && (err != io.EOF || line == "") {
+		return defaultVal, err
+	}
+	s := strings.TrimSpace(line)
+	if s == "" {
+		return defaultVal, nil
+	}
+	// 纯数字：按预设编号
+	var n int
+	if _, errNum := fmt.Sscanf(s, "%d", &n); errNum == nil && fmt.Sprintf("%d", n) == s {
+		if n >= 1 && n <= len(flat) {
+			return flat[n-1], nil
+		}
+		if n == customIdx {
+			return w.ask("  自定义 model id", defaultVal)
+		}
+		w.printf("    ! 编号 %d 越界（1-%d），用输入的原文作 model id\n", n, customIdx)
+	}
+	// 非数字：当作自定义 model id 直接用
+	return s, nil
+}

@@ -18,15 +18,22 @@
 ## 30 秒试跑
 
 ```bash
-# 方式 A: clone 仓库后本地构建
-go build -o bin/factory ./cmd/factory && ./bin/factory demo
-
-# 方式 B: 直接 go install，任意目录跑（templates + examples 已经 embed 进二进制）
-go install github.com/xiaolong/troubleshooter-factory/cmd/factory@latest
-factory demo
+# clone 仓库后本地构建（templates + examples 已经 embed 进二进制，bin/factory 可以拷到任何位置用）
+git clone <此仓库> && cd troubleshooter-factory
+go build -o bin/factory ./cmd/factory
+./bin/factory demo
 ```
 
-看清 factory 能出什么再决定要不要接入自己的系统。无需任何凭证 / 仓库。
+或本地装到 `$GOPATH/bin`：
+
+```bash
+cd troubleshooter-factory
+go install ./cmd/factory         # $GOBIN/factory（任意目录跑 `factory demo`）
+```
+
+看清 factory 能出什么再决定要不要接入自己的系统。无需任何凭证 / 仓库 checkout。
+
+> 仓库发布到 GitHub 后，可以用 `go install github.com/<owner>/troubleshooter-factory/cmd/factory@latest` 一行装；目前是本地仓库，请走上面两种方式。
 
 ## 适配的系统架构
 
@@ -122,7 +129,7 @@ cd web && npm install && npm run dev
 
 ```bash
 go build -o bin/factory ./cmd/factory
-# 或 go install github.com/xiaolong/troubleshooter-factory/cmd/factory@latest
+# 或在仓库根 `go install ./cmd/factory` 装到 $GOBIN/factory
 
 # 1. 交互向导生成 system.yaml（支持 -i 从已有 yaml 预填；Ctrl+C 会把草稿保存到 ~/.factory/init-draft.yaml）
 ./bin/factory init -o system.yaml                   # 从零开始

@@ -64,6 +64,9 @@ func (g *Generator) GenerateClaudeCode() error {
 		return err
 	}
 
+	if err := g.writeTshootMeta(outDir, "claude-code"); err != nil {
+		return fmt.Errorf("write tshoot meta: %w", err)
+	}
 	return nil
 }
 

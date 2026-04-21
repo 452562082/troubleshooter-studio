@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { ref, onMounted, reactive } from 'vue'
-import type { DiscoveredBot } from '../types/wails'
-import { discoverBots, gen as bridgeGen, isDesktop as bridgeIsDesktop } from '../lib/bridge'
+import type { ApplyResult, DiscoveredBot } from '../types/wails'
+import {
+  applyBot,
+  discoverBots,
+  gen as bridgeGen,
+  isDesktop as bridgeIsDesktop,
+} from '../lib/bridge'
 
 const bots = ref<DiscoveredBot[]>([])
 const loading = ref(false)
@@ -11,6 +16,13 @@ const newRootInput = ref('')
 
 // 每张卡片的"重 gen"状态：key = path|target
 const regenState = reactive<Record<string, { loading: boolean; ok?: string; err?: string }>>({})
+
+// 编辑器状态（展开哪张卡片、草稿 yaml、应用结果）：
+const editingKey = ref<string | null>(null)
+const editorDraft = ref('')
+const applyState = reactive<
+  Record<string, { loading: boolean; result?: ApplyResult; err?: string; mode?: 'dry' | 'real' }>
+>({})
 
 const isDesktop = bridgeIsDesktop
 
@@ -46,6 +58,37 @@ async function regen(b: DiscoveredBot) {
     regenState[k] = { loading: false, ok: `产物已写入 ${outDir}` }
   } catch (e: any) {
     regenState[k] = { loading: false, err: String(e?.message || e) }
+  }
+}
+
+function toggleEditor(b: DiscoveredBot) {
+  const k = regenKey(b)
+  if (editingKey.value === k) {
+    editingKey.value = null
+    return
+  }
+  if (!b.meta.system_yaml) {
+    error.value = '这个机器人没有嵌入 system_yaml，无法编辑（老产物）'
+    return
+  }
+  editingKey.value = k
+  editorDraft.value = b.meta.system_yaml
+  delete applyState[k]
+}
+
+async function runApply(b: DiscoveredBot, dryRun: boolean) {
+  const k = regenKey(b)
+  applyState[k] = { loading: true, mode: dryRun ? 'dry' : 'real' }
+  try {
+    const res = await applyBot(b.path, editorDraft.value, dryRun)
+    applyState[k] = { loading: false, result: res, mode: dryRun ? 'dry' : 'real' }
+    if (!dryRun) {
+      // 真应用后刷新列表：时间戳 / preserved 等可能变
+      await scan()
+      editingKey.value = null
+    }
+  } catch (e: any) {
+    applyState[k] = { loading: false, err: String(e?.message || e), mode: dryRun ? 'dry' : 'real' }
   }
 }
 
@@ -135,17 +178,58 @@ onMounted(scan)
         </ul>
         <footer class="bot-foot">
           <span class="bot-time">最近更新：{{ b.mod_time }}</span>
-          <button
-            class="btn btn-regen"
-            :disabled="regenState[regenKey(b)]?.loading"
-            :title="b.meta.system_yaml ? '' : '.tshoot.json 里没保存 system_yaml，无法原地重 gen'"
-            @click="regen(b)"
-          >
-            {{ regenState[regenKey(b)]?.loading ? '生成中…' : '重新生成' }}
-          </button>
+          <div class="bot-actions">
+            <button
+              class="btn btn-regen"
+              :disabled="regenState[regenKey(b)]?.loading"
+              :title="b.meta.system_yaml ? '' : '.tshoot.json 里没保存 system_yaml，无法原地重 gen'"
+              @click="regen(b)"
+            >
+              {{ regenState[regenKey(b)]?.loading ? '生成中…' : '重新生成' }}
+            </button>
+            <button class="btn btn-regen" :title="'编辑 yaml + 应用到活 workspace'" @click="toggleEditor(b)">
+              {{ editingKey === regenKey(b) ? '收起' : '编辑配置' }}
+            </button>
+          </div>
         </footer>
         <p v-if="regenState[regenKey(b)]?.ok" class="regen-ok">✓ {{ regenState[regenKey(b)]?.ok }}</p>
         <p v-if="regenState[regenKey(b)]?.err" class="regen-err">⚠ {{ regenState[regenKey(b)]?.err }}</p>
+
+        <section v-if="editingKey === regenKey(b)" class="editor">
+          <label class="editor-label">system.yaml（改完先「预演」看改动列表，再「应用」写盘）</label>
+          <textarea v-model="editorDraft" class="editor-textarea" spellcheck="false" />
+          <div class="editor-actions">
+            <button
+              class="btn"
+              :disabled="applyState[regenKey(b)]?.loading"
+              @click="runApply(b, true)"
+            >
+              {{ applyState[regenKey(b)]?.loading && applyState[regenKey(b)]?.mode === 'dry' ? '预演中…' : '预演' }}
+            </button>
+            <button
+              class="btn primary"
+              :disabled="applyState[regenKey(b)]?.loading"
+              @click="runApply(b, false)"
+            >
+              {{ applyState[regenKey(b)]?.loading && applyState[regenKey(b)]?.mode === 'real' ? '应用中…' : '应用到活 workspace' }}
+            </button>
+          </div>
+          <div v-if="applyState[regenKey(b)]?.result" class="apply-result">
+            <div class="apply-row"><strong>写入文件：</strong>{{ applyState[regenKey(b)]!.result!.files_written }}</div>
+            <div v-if="applyState[regenKey(b)]!.result!.files_preserved?.length" class="apply-row">
+              <strong>保留（用户手改）：</strong>
+              <code v-for="f in applyState[regenKey(b)]!.result!.files_preserved" :key="f">{{ f }}</code>
+            </div>
+            <div v-if="applyState[regenKey(b)]!.result!.files_removed?.length" class="apply-row removed">
+              <strong>移除（陈旧产物）：</strong>
+              <code v-for="f in applyState[regenKey(b)]!.result!.files_removed" :key="f">{{ f }}</code>
+            </div>
+            <div v-if="applyState[regenKey(b)]!.result!.needs_restart_hint" class="apply-hint">
+              💡 {{ applyState[regenKey(b)]!.result!.needs_restart_hint }}
+            </div>
+          </div>
+          <div v-if="applyState[regenKey(b)]?.err" class="apply-err">⚠ {{ applyState[regenKey(b)]?.err }}</div>
+        </section>
       </article>
     </div>
   </div>
@@ -231,4 +315,27 @@ onMounted(scan)
 
 .regen-ok { margin-top: 8px; font-size: 11px; color: #059669; word-break: break-all; }
 .regen-err { margin-top: 8px; font-size: 11px; color: #b91c1c; word-break: break-all; }
+
+.bot-actions { display: flex; gap: 6px; }
+
+.editor {
+  margin-top: 12px; padding-top: 12px; border-top: 1px dashed #cbd5e1;
+}
+.editor-label { display: block; font-size: 11px; color: #64748b; margin-bottom: 6px; }
+.editor-textarea {
+  width: 100%; min-height: 240px; font-family: 'SFMono-Regular', 'Menlo', monospace;
+  font-size: 11px; padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 4px;
+  resize: vertical; line-height: 1.5; background: #f8fafc; color: #0f172a;
+}
+.editor-actions { display: flex; gap: 8px; margin-top: 8px; }
+
+.apply-result {
+  margin-top: 10px; padding: 10px 12px; background: #f0fdf4; border: 1px solid #bbf7d0;
+  border-radius: 4px; font-size: 11px; color: #166534;
+}
+.apply-result .apply-row { margin-bottom: 4px; line-height: 1.6; }
+.apply-result .apply-row.removed { color: #9a3412; }
+.apply-result code { background: rgba(15, 23, 42, 0.05); padding: 1px 4px; border-radius: 2px; margin-right: 4px; font-family: inherit; }
+.apply-hint { margin-top: 6px; padding-top: 6px; border-top: 1px dashed #bbf7d0; color: #166534; }
+.apply-err { margin-top: 10px; padding: 8px 12px; background: #fef2f2; border: 1px solid #fecaca; border-radius: 4px; font-size: 11px; color: #991b1b; }
 </style>

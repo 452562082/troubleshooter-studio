@@ -4,7 +4,7 @@
 //
 // 新页面写代码只调 bridge.*，不要直接摸 fetch 或 window.go，省得未来改通路到处改。
 
-import type { DiscoveredBot, ValidateResult } from '../types/wails'
+import type { ApplyResult, DiscoveredBot, ValidateResult } from '../types/wails'
 
 function desktopApp() {
   if (typeof window === 'undefined') return null
@@ -53,4 +53,15 @@ export async function discoverBots(extraRoots: string[] = []): Promise<Discovere
   const app = desktopApp()
   if (!app) return []
   return app.DiscoverBots(extraRoots)
+}
+
+/** ApplyBot 把新 yaml 应用到已装机器人的活 workspace（含 preserve 保留用户手改） */
+export async function applyBot(
+  agentPath: string,
+  newYamlText: string,
+  dryRun: boolean,
+): Promise<ApplyResult> {
+  const app = desktopApp()
+  if (!app) throw new Error('ApplyBot 只在桌面 app 里可用')
+  return app.ApplyBot(agentPath, newYamlText, dryRun)
 }

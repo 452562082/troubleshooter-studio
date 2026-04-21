@@ -65,6 +65,9 @@ func (g *Generator) GenerateStandalone() error {
 		}
 	}
 
+	if err := g.writeTshootMeta(outDir, "standalone"); err != nil {
+		return fmt.Errorf("write tshoot meta: %w", err)
+	}
 	return nil
 }
 

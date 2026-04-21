@@ -1,9 +1,3 @@
-//go:build ignore
-// +build ignore
-
-// 说明：本文件依赖的 config.LoadFromBytes / generator.FactoryVersion / SystemYAMLSource
-// 尚未在对应包里实现，构建暂时禁用。补齐缺失 API 后删掉上面的 build tag 即可启用。
-
 // Package agent 实现阶段 2 的"读-改-部署闭环"：
 // 从 discover 识别到的机器人 (.tshoot.json) 出发，用新的 system.yaml 重新渲染产物，
 // rsync 回活的 workspace 路径，保留 preserve_on_regenerate 列表中的用户手改。
@@ -34,8 +28,8 @@ type ApplyOptions struct {
 	NewYAML []byte
 	// TemplateRoot 是 tshoot 模板根（tshoot discover 所在的同一个 tshoot）。
 	TemplateRoot string
-	// FactoryVersion 写回 .tshoot.json 的 tshoot_version 字段。
-	FactoryVersion string
+	// TshootVersion 写回 .tshoot.json 的 tshoot_version 字段。
+	TshootVersion string
 	// DryRun 为 true 时只渲染 + 打印会变的文件列表，不真写 workspace。
 	DryRun bool
 }
@@ -74,7 +68,7 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 
 	baseOut := filepath.Join(parent, "out")
 	g := generator.New(cfg, opts.TemplateRoot, baseOut)
-	g.FactoryVersion = opts.FactoryVersion
+	g.TshootVersion = opts.TshootVersion
 	g.SystemYAMLSource = opts.NewYAML
 
 	// 按 target 渲染
@@ -159,7 +153,7 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 	// 刷 .tshoot.json
 	tsfUpdated := false
 	if !opts.DryRun {
-		if err := writeTSFMeta(ag.Path, ag.Meta.Target, cfg, opts.NewYAML, opts.FactoryVersion); err != nil {
+		if err := writeTSFMeta(ag.Path, ag.Meta.Target, cfg, opts.NewYAML, opts.TshootVersion); err != nil {
 			return nil, fmt.Errorf("refresh .tshoot.json: %w", err)
 		}
 		tsfUpdated = true
@@ -206,7 +200,7 @@ func ImportAndApply(yamlBytes []byte, target, destPath string, opts ApplyOptions
 			}, nil
 		}
 		g := generator.New(cfg, opts.TemplateRoot, destPath)
-		g.FactoryVersion = opts.FactoryVersion
+		g.TshootVersion = opts.TshootVersion
 		g.SystemYAMLSource = yamlBytes
 		if err := g.Generate(); err != nil {
 			return nil, fmt.Errorf("openclaw gen: %w", err)

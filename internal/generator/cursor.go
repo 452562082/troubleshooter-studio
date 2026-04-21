@@ -82,6 +82,9 @@ func (g *Generator) GenerateCursor() error {
 		return err
 	}
 
+	if err := g.writeTshootMeta(outDir, "cursor"); err != nil {
+		return fmt.Errorf("write tshoot meta: %w", err)
+	}
 	return nil
 }
 

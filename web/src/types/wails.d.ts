@@ -31,6 +31,16 @@ export interface ValidateResult {
   repos: number
 }
 
+export interface ApplyResult {
+  agent_path: string
+  target: string
+  files_written: number
+  files_preserved?: string[]
+  files_removed?: string[]
+  tsf_json_updated: boolean
+  needs_restart_hint?: string
+}
+
 declare global {
   interface Window {
     go?: {
@@ -40,6 +50,7 @@ declare global {
           DiscoverBots(extraRoots: string[]): Promise<DiscoveredBot[]>
           Validate(yamlText: string): Promise<ValidateResult>
           Gen(yamlText: string, outputDir: string): Promise<Record<string, unknown>>
+          ApplyBot(agentPath: string, newYamlText: string, dryRun: boolean): Promise<ApplyResult>
         }
       }
     }

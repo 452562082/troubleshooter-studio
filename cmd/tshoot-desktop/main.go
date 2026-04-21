@@ -24,6 +24,7 @@ import (
 
 	tsf "github.com/xiaolong/troubleshooter-studio"
 	"github.com/xiaolong/troubleshooter-studio/api"
+	"github.com/xiaolong/troubleshooter-studio/internal/agent"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 	"github.com/xiaolong/troubleshooter-studio/internal/generator"
@@ -104,10 +105,42 @@ func (a *App) Gen(yamlText, outputDir string) (*generator.GenSummary, error) {
 		outputDir = abs
 	}
 	g := generator.New(cfg, a.templateRoot, outputDir)
+	g.TshootVersion = version
+	g.SystemYAMLSource = []byte(yamlText)
 	if err := g.Generate(); err != nil {
 		return nil, err
 	}
 	return g.Summary, nil
+}
+
+// ApplyBot 把新的 system.yaml 应用到已装机器人的活 workspace：
+// 重新渲染产物 → rsync 到 agentPath → 更新 .tshoot.json。
+// preserve_on_regenerate 列表里的文件保留用户手改不覆盖。
+//
+// 前置：agentPath 下必须有可读的 .tshoot.json（由 discover 识别到的路径）。
+// dryRun=true 时只预演，不真写盘，用于 UI 先给用户看"会变什么"。
+func (a *App) ApplyBot(agentPath, newYamlText string, dryRun bool) (*agent.Result, error) {
+	// 从活 workspace 回读 DiscoveredAgent（避免 UI 传整个结构体过来，省序列化）
+	found, err := discover.Scan([]string{agentPath})
+	if err != nil {
+		return nil, fmt.Errorf("read agent at %s: %w", agentPath, err)
+	}
+	if len(found) == 0 {
+		return nil, fmt.Errorf("no .tshoot.json found under %s", agentPath)
+	}
+	// 同一目录下可能有多个 target 的 .tshoot.json；选路径最短（最贴近 agentPath 根）那个
+	ag := found[0]
+	for _, cand := range found[1:] {
+		if len(cand.Path) < len(ag.Path) {
+			ag = cand
+		}
+	}
+	return agent.Apply(ag, agent.ApplyOptions{
+		NewYAML:       []byte(newYamlText),
+		TemplateRoot:  a.templateRoot,
+		TshootVersion: version,
+		DryRun:        dryRun,
+	})
 }
 
 func main() {

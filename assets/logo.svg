@@ -10,27 +10,29 @@
     </linearGradient>
   </defs>
 
-  <!-- Factory building icon -->
-  <g transform="translate(30, 20)">
-    <rect x="20" y="10" width="16" height="40" rx="3" fill="url(#g1)" opacity="0.8"/>
-    <rect x="50" y="0" width="16" height="50" rx="3" fill="url(#g1)" opacity="0.9"/>
-    <circle cx="28" cy="8" r="5" fill="#94A3B8" opacity="0.4"/>
-    <circle cx="22" cy="2" r="4" fill="#94A3B8" opacity="0.25"/>
-    <circle cx="58" cy="-4" r="6" fill="#94A3B8" opacity="0.4"/>
-    <circle cx="52" cy="-12" r="4" fill="#94A3B8" opacity="0.25"/>
-    <rect x="0" y="50" width="140" height="100" rx="8" fill="url(#g1)"/>
-    <rect x="15" y="65" width="24" height="20" rx="3" fill="#DBEAFE" opacity="0.9"/>
-    <rect x="50" y="65" width="24" height="20" rx="3" fill="#DBEAFE" opacity="0.9"/>
-    <rect x="85" y="65" width="24" height="20" rx="3" fill="#DBEAFE" opacity="0.9"/>
-    <rect x="50" y="110" width="30" height="40" rx="4" fill="#1E40AF"/>
-    <g transform="translate(70, 100)" fill="url(#g2)">
-      <circle cx="0" cy="0" r="12" fill="none" stroke="url(#g2)" stroke-width="3"/>
-      <circle cx="0" cy="0" r="5" fill="url(#g2)"/>
-      <rect x="-2" y="-16" width="4" height="8" rx="1"/>
-      <rect x="-2" y="8" width="4" height="8" rx="1"/>
-      <rect x="-16" y="-2" width="8" height="4" rx="1"/>
-      <rect x="8" y="-2" width="8" height="4" rx="1"/>
-    </g>
+  <!-- Studio / desktop app window（顶部 title bar + traffic lights + 内容区） -->
+  <g transform="translate(30, 30)">
+    <!-- 窗口整体 -->
+    <rect x="0" y="0" width="140" height="140" rx="10" fill="url(#g1)"/>
+    <!-- title bar -->
+    <rect x="0" y="0" width="140" height="22" rx="10" fill="#1E293B" opacity="0.35"/>
+    <rect x="0" y="14" width="140" height="8" fill="#1E293B" opacity="0.35"/>
+    <!-- traffic lights -->
+    <circle cx="11" cy="11" r="3.5" fill="#EF4444"/>
+    <circle cx="22" cy="11" r="3.5" fill="#F59E0B"/>
+    <circle cx="33" cy="11" r="3.5" fill="#22C55E"/>
+    <!-- 内容：模拟机器人管理卡片列表 -->
+    <rect x="15" y="38" width="110" height="16" rx="3" fill="#DBEAFE" opacity="0.9"/>
+    <rect x="15" y="58" width="110" height="16" rx="3" fill="#DBEAFE" opacity="0.85"/>
+    <rect x="15" y="78" width="110" height="16" rx="3" fill="#DBEAFE" opacity="0.8"/>
+    <!-- 卡片上的状态点（"已装机器人"列表的意象） -->
+    <circle cx="22" cy="46" r="3" fill="#22C55E"/>
+    <circle cx="22" cy="66" r="3" fill="#22C55E"/>
+    <circle cx="22" cy="86" r="3" fill="#F59E0B"/>
+    <!-- 底部 CTA 按钮 -->
+    <rect x="40" y="108" width="60" height="20" rx="4" fill="url(#g2)"/>
+    <rect x="54" y="115" width="32" height="2" rx="1" fill="white" opacity="0.9"/>
+    <rect x="50" y="120" width="40" height="2" rx="1" fill="white" opacity="0.7"/>
   </g>
 
   <!-- Arrow -->
@@ -61,10 +63,10 @@
       troubleshooter
     </text>
     <text y="48" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="42" font-weight="700" fill="url(#g1)">
-      factory
+      studio
     </text>
     <text y="78" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="15" fill="#64748B">
-      多架构 AI 排障机器人生成器
+      AI 排障机器人桌面管理客户端
     </text>
   </g>
 
@@ -121,7 +123,7 @@
     <text x="260" y="13" text-anchor="middle" fill="#475569">diff</text>
     <rect x="278" width="52" height="18" rx="4" fill="#F1F5F9"/>
     <text x="304" y="13" text-anchor="middle" fill="#475569">upgrade</text>
-    <rect x="334" width="42" height="18" rx="4" fill="#F1F5F9"/>
-    <text x="355" y="13" text-anchor="middle" fill="#475569">watch</text>
+    <rect x="334" width="42" height="18" rx="4" fill="#EDE9FE"/>
+    <text x="355" y="13" text-anchor="middle" fill="#7C3AED">apply</text>
   </g>
 </svg>

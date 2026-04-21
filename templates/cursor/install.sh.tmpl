@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# {{ .System.Name }} 排障机器人 — Cursor IDE 一键安装
+# 由 troubleshooter-factory 生成
+#
+# 用法：
+#   bash install.sh [target-project-dir]
+#   bash install.sh ~/code/my-app
+#   bash install.sh              # 默认当前目录
+set -euo pipefail
+
+SRC="$(cd "$(dirname "$0")" && pwd)"
+DST="${1:-.}"
+
+if [ ! -d "$DST" ]; then
+  echo "错误：目标目录不存在：$DST" >&2
+  exit 1
+fi
+
+DST="$(cd "$DST" && pwd)"
+TS="$(date +%Y%m%d-%H%M%S)"
+
+echo "→ 安装到：$DST"
+
+# 1. .cursorrules —— 已存在则备份
+if [ -f "$DST/.cursorrules" ]; then
+  cp "$DST/.cursorrules" "$DST/.cursorrules.bak.$TS"
+  echo "  · 已备份原 .cursorrules → .cursorrules.bak.$TS"
+fi
+cp "$SRC/.cursorrules" "$DST/.cursorrules"
+echo "  · .cursorrules"
+
+# 2. .cursor/rules/ —— 合并（同名 .mdc 覆盖，其余保留）
+mkdir -p "$DST/.cursor/rules"
+if [ -d "$SRC/.cursor/rules" ]; then
+  for f in "$SRC/.cursor/rules/"*.mdc; do
+    [ -f "$f" ] || continue
+    cp "$f" "$DST/.cursor/rules/"
+    echo "  · .cursor/rules/$(basename "$f")"
+  done
+fi
+
+# 3. skills/ —— 合并（同名子目录整体覆盖，其余保留）
+mkdir -p "$DST/skills"
+for d in "$SRC/skills/"*/; do
+  [ -d "$d" ] || continue
+  name="$(basename "$d")"
+  rm -rf "$DST/skills/$name"
+  cp -R "$d" "$DST/skills/$name"
+  echo "  · skills/$name"
+done
+
+# 4. scripts/ —— 合并
+if [ -d "$SRC/scripts" ]; then
+  mkdir -p "$DST/scripts"
+  cp -R "$SRC/scripts/"* "$DST/scripts/" 2>/dev/null || true
+  echo "  · scripts/"
+fi
+
+echo ""
+echo "✓ 安装完成。"
+echo ""
+echo "── 下一步：首次对话 ───────────────────────────────────────────"
+echo "  1. 用 Cursor 打开目标项目："
+echo "       cursor $DST    # 或在 Cursor 里 File → Open Folder"
+echo "  2. 打开 Cursor AI 侧栏（右上角图标 / Cmd+L）"
+echo "  3. 项目规则会自动生效（.cursorrules + .cursor/rules/*.mdc）"
+echo "  4. 直接粘贴以下任一示例问题："
+{{- $firstEnv := "" -}}
+{{- range $i, $e := .Environments -}}{{- if eq $i 0 -}}{{- $firstEnv = $e.ID -}}{{- end -}}{{- end -}}
+{{- $prodEnv := $firstEnv -}}
+{{- range .Environments -}}{{- if .IsProd -}}{{- $prodEnv = .ID -}}{{- end -}}{{- end }}
+{{- $firstRepo := "" -}}
+{{- range $i, $r := .Repos -}}{{- if eq $i 0 -}}{{- $firstRepo = $r.Name -}}{{- end -}}{{- end }}
+echo "       · {{$firstEnv}} 环境 {{if $firstRepo}}{{$firstRepo}}{{else}}<service>{{end}} 接口 500 突增，帮我看下"
+echo "       · {{$prodEnv}} 订单 #20250417XXX 用户说付了钱但没发货"
+echo "       · {{$firstEnv}} 的 {{if $firstRepo}}{{$firstRepo}}{{else}}<service>{{end}} 为什么连不上下游？"

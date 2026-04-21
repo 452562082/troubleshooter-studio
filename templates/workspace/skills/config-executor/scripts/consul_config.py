@@ -103,9 +103,38 @@ def main() -> int:
     args = p.parse_args()
     try:
         return args.func(args)
-    except (FileNotFoundError, ValueError, RuntimeError) as e:
-        print(f"[error] {e}", file=sys.stderr)
-        return 2
+    except FileNotFoundError as e:
+        return _error_out(
+            str(e),
+            "creds.json 不存在。请先跑 `bash scripts/install.sh`，它会引导你填 Consul host 和 ACL token。",
+        )
+    except ValueError as e:
+        return _error_out(
+            str(e),
+            f"`{args.env}` 的 Consul 凭证不全。编辑 `scripts/.env` 的 `CONSUL_HOST_{args.env.upper()}`（+ `CONSUL_TOKEN` 若启用 ACL），或重跑 install.sh。",
+        )
+    except RuntimeError as e:
+        msg = str(e)
+        hint = "Consul KV API 调用失败。"
+        if "403" in msg or "forbidden" in msg.lower():
+            hint += " ACL token 无效或无权限：Consul UI 里查 token 的 policy，确认允许读目标 KV 前缀。"
+        elif "404" in msg:
+            hint += " Key 不存在：先用 `list --prefix <前缀>` 看 KV 树实际结构，或确认 prefix 拼写。"
+        elif "connection" in msg.lower() or "refused" in msg.lower():
+            hint += " Consul 地址不通：`scripts/.env` 的 `CONSUL_HOST_*` 是否正确？是否需要 http:// 前缀？"
+        else:
+            hint += " 先用 `curl http://$CONSUL_HOST/v1/kv/<key>?token=$CONSUL_TOKEN` 直连验证。"
+        return _error_out(msg, hint)
+    except Exception as e:
+        return _error_out(f"{type(e).__name__}: {e}", "脚本内部异常，请反馈。")
+
+
+def _error_out(msg: str, hint: str = "") -> int:
+    payload = {"error": msg}
+    if hint:
+        payload["hint"] = hint
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 2
 
 
 if __name__ == "__main__":

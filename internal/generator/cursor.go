@@ -22,22 +22,11 @@ func (g *Generator) GenerateCursor() error {
 		return fmt.Errorf("create output: %w", err)
 	}
 
-	// 先渲染到临时目录
-	tmpDir, err := os.MkdirTemp("", "factory-cursor-*")
+	wsRoot, cleanup, err := g.resolveWorkspace()
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(tmpDir)
-
-	origOut := g.OutputDir
-	g.OutputDir = tmpDir
-	if err := g.Generate(); err != nil {
-		g.OutputDir = origOut
-		return fmt.Errorf("render templates: %w", err)
-	}
-	g.OutputDir = origOut
-
-	wsRoot := filepath.Join(tmpDir, "templates", "workspace-template")
+	defer cleanup()
 
 	// 1) 生成 .cursorrules（核心排障知识合并）
 	cursorRules, err := buildCursorRules(wsRoot, g.Ctx)
@@ -84,82 +73,22 @@ func (g *Generator) GenerateCursor() error {
 		}
 	}
 
-	// 5) install.sh
-	if err := os.WriteFile(filepath.Join(outDir, "install.sh"), []byte(cursorInstallSh(g.Ctx)), 0o755); err != nil {
+	// 5) install.sh —— 从 templates/cursor/install.sh.tmpl 渲染
+	installSrc := filepath.Join(g.TemplateRoot, "cursor", "install.sh.tmpl")
+	if err := g.renderFile(installSrc, filepath.Join(outDir, "install.sh")); err != nil {
+		return fmt.Errorf("install.sh: %w", err)
+	}
+	if err := os.Chmod(filepath.Join(outDir, "install.sh"), 0o755); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func cursorInstallSh(ctx *Context) string {
-	return fmt.Sprintf(`#!/usr/bin/env bash
-# %s 排障机器人 — Cursor IDE 一键安装
-# 由 troubleshooter-factory 生成
-#
-# 用法：
-#   bash install.sh [target-project-dir]
-#   bash install.sh ~/code/my-app
-#   bash install.sh              # 默认当前目录
-set -euo pipefail
-
-SRC="$(cd "$(dirname "$0")" && pwd)"
-DST="${1:-.}"
-
-if [ ! -d "$DST" ]; then
-  echo "错误：目标目录不存在：$DST" >&2
-  exit 1
-fi
-
-DST="$(cd "$DST" && pwd)"
-TS="$(date +%%Y%%m%%d-%%H%%M%%S)"
-
-echo "→ 安装到：$DST"
-
-# 1. .cursorrules —— 已存在则备份
-if [ -f "$DST/.cursorrules" ]; then
-  cp "$DST/.cursorrules" "$DST/.cursorrules.bak.$TS"
-  echo "  · 已备份原 .cursorrules → .cursorrules.bak.$TS"
-fi
-cp "$SRC/.cursorrules" "$DST/.cursorrules"
-echo "  · .cursorrules"
-
-# 2. .cursor/rules/ —— 合并（同名 .mdc 覆盖，其余保留）
-mkdir -p "$DST/.cursor/rules"
-if [ -d "$SRC/.cursor/rules" ]; then
-  for f in "$SRC/.cursor/rules/"*.mdc; do
-    [ -f "$f" ] || continue
-    cp "$f" "$DST/.cursor/rules/"
-    echo "  · .cursor/rules/$(basename "$f")"
-  done
-fi
-
-# 3. skills/ —— 合并（同名子目录整体覆盖，其余保留）
-mkdir -p "$DST/skills"
-for d in "$SRC/skills/"*/; do
-  [ -d "$d" ] || continue
-  name="$(basename "$d")"
-  rm -rf "$DST/skills/$name"
-  cp -R "$d" "$DST/skills/$name"
-  echo "  · skills/$name"
-done
-
-# 4. scripts/ —— 合并
-if [ -d "$SRC/scripts" ]; then
-  mkdir -p "$DST/scripts"
-  cp -R "$SRC/scripts/"* "$DST/scripts/" 2>/dev/null || true
-  echo "  · scripts/"
-fi
-
-echo ""
-echo "✓ 安装完成。用 Cursor 打开 $DST 即可加载规则。"
-`, ctx.System.Name)
-}
-
 func buildCursorRules(wsRoot string, ctx *Context) (string, error) {
 	var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("# %s 排障机器人\n\n", ctx.System.Name))
+	fmt.Fprintf(&sb, "# %s 排障机器人\n\n", ctx.System.Name)
 	sb.WriteString("# 由 troubleshooter-factory 生成，目标平台：Cursor\n")
 	sb.WriteString("# 本文件会被 Cursor 自动读取作为项目上下文\n\n")
 
@@ -185,14 +114,14 @@ func buildCursorRules(wsRoot string, ctx *Context) (string, error) {
 		skillMD := filepath.Join(skillsDir, e.Name(), "SKILL.md")
 		desc := ""
 		if data, err := os.ReadFile(skillMD); err == nil {
-			for _, line := range strings.Split(string(data), "\n") {
-				if strings.HasPrefix(line, "description:") {
-					desc = strings.TrimSpace(strings.TrimPrefix(line, "description:"))
+			for line := range strings.SplitSeq(string(data), "\n") {
+				if rest, ok := strings.CutPrefix(line, "description:"); ok {
+					desc = strings.TrimSpace(rest)
 					break
 				}
 			}
 		}
-		sb.WriteString(fmt.Sprintf("- **%s** — %s\n", e.Name(), desc))
+		fmt.Fprintf(&sb, "- **%s** — %s\n", e.Name(), desc)
 	}
 
 	return sb.String(), nil

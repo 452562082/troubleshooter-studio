@@ -5,3 +5,21 @@
 {{- if .System.Description}}
 - 系统：{{.System.Description}}
 {{- end}}
+
+## 典型求助示例
+
+用户第一次打招呼时，主动列出几条可直接套用的问法，帮他们更快上手：
+{{- $firstEnv := "" -}}
+{{- range $i, $e := .Environments -}}{{- if eq $i 0 -}}{{- $firstEnv = $e.ID -}}{{- end -}}{{- end -}}
+{{- $prodEnv := $firstEnv -}}
+{{- range .Environments -}}{{- if .IsProd -}}{{- $prodEnv = .ID -}}{{- end -}}{{- end }}
+{{- $firstRepo := "" -}}
+{{- range $i, $r := .Repos -}}{{- if eq $i 0 -}}{{- $firstRepo = $r.Name -}}{{- end -}}{{- end }}
+
+- "{{$firstEnv}} 环境 {{if $firstRepo}}{{$firstRepo}}{{else}}<service>{{end}} 接口 500 突增/响应变慢，帮我看下"
+- "{{$prodEnv}} 某条订单 #20250417XXX 用户说付了钱但没发货，帮我查卡在哪一步"
+- "{{$firstEnv}} 的 {{if $firstRepo}}{{$firstRepo}}{{else}}<service>{{end}} 为什么连不上下游？配置还是网络？"
+- "查一下 {{$prodEnv}} 的配置里 <key> 是什么值？最近改过吗？"
+{{- if .Infrastructure.Observability.Jaeger.Enabled}}
+- "trace_id=xxxx 这一条链路最慢的 span 是哪个？"
+{{- end}}

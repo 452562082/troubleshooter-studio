@@ -151,16 +151,25 @@ def main() -> int:
     ap.add_argument('--stdin', action='store_true')
     args = ap.parse_args()
 
-    text = args.text
-    if args.stdin:
-        text = sys.stdin.read()
-    if not text:
-        print(json.dumps({"ok": False, "error": "empty input"}, ensure_ascii=False))
-        return 1
-
-    data = resolve(text)
-    print(json.dumps({"ok": True, "runtime": data}, ensure_ascii=False, indent=2))
-    return 0
+    try:
+        text = args.text
+        if args.stdin:
+            text = sys.stdin.read()
+        if not text:
+            print(json.dumps({
+                "error": "empty input",
+                "hint": "没有配置文本可解析。通常链路是：先让 Nacos MCP 读 dataId 拿到原始内容，再把那段文本通过 --text 或 stdin 喂给本脚本。检查上一步 Nacos 读取是否返回了空值。",
+            }, ensure_ascii=False, indent=2))
+            return 1
+        data = resolve(text)
+        print(json.dumps({"ok": True, "runtime": data}, ensure_ascii=False, indent=2))
+        return 0
+    except Exception as e:
+        print(json.dumps({
+            "error": f"{type(e).__name__}: {e}",
+            "hint": "解析配置文本时异常。可能输入不是合法 YAML/JSON/properties，先 cat 一下文本看是否被截断。",
+        }, ensure_ascii=False, indent=2))
+        return 2
 
 
 if __name__ == '__main__':

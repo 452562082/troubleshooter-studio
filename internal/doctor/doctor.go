@@ -56,6 +56,8 @@ func Check(cfg *config.SystemConfig, reposRoot string) (*Report, error) {
 					Target:   "repos[" + repo.Name + "].stack",
 					Message:  fmt.Sprintf("声明 stack=%q，但检测到 %q（根据标记文件）", repo.Stack, detected),
 					Suggest:  fmt.Sprintf("将 system.yaml 中该仓库的 stack 改为 %q", detected),
+					FixKey:   "repo." + repo.Name + ".stack",
+					FixValue: detected,
 				})
 			}
 
@@ -85,6 +87,8 @@ func Check(cfg *config.SystemConfig, reposRoot string) (*Report, error) {
 			Target:   "infrastructure.config_center",
 			Message:  fmt.Sprintf("声明 config_center=%q，但在所有扫描的仓库里都没发现相关配置", ccType),
 			Suggest:  "如果系统确实不用配置中心，改为 type: none",
+			FixKey:   "config-center.type",
+			FixValue: "none",
 		})
 	}
 	checkDataStoreReferences(report, cfg, allFindings, anyRepoScanned)
@@ -182,6 +186,8 @@ func checkConfigCenterDrift(r *Report, repo config.Repo, ra *analyzer.RepoAnalys
 				Category: CatConfigCenterDrift,
 				Target:   fmt.Sprintf("repos[%s] %s", repo.Name, f.SourceFile),
 				Message:  fmt.Sprintf("该文件看起来包含 %s 配置，但 system.yaml 声明 %s", f.ConfigCenter, declared),
+				Suggest: fmt.Sprintf("确认实际配置类型：若应为 %s，将 infrastructure.config_center.type 改为 %s 后跑 factory upgrade；否则清理该文件或在 repos[*].analysis.include_paths 中排除",
+					f.ConfigCenter, f.ConfigCenter),
 			})
 		}
 	}

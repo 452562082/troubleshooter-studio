@@ -1,0 +1,15 @@
+# {{ .System.Name }} 排障机器人 — 独立部署
+# 用法：LLM_API_KEY=your-key docker compose up --build
+version: "3.8"
+services:
+  troubleshooter:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - LLM_API_KEY=${LLM_API_KEY}
+      - PORT=3000
+    volumes:
+      - ./skills:/app/skills:ro
+      - ./scripts:/app/scripts:ro
+    restart: unless-stopped

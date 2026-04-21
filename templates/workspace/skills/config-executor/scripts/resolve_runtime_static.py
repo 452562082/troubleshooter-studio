@@ -130,6 +130,15 @@ def resolve(endpoints: dict) -> dict:
     return {"runtime": runtime}
 
 
+def error_out(msg: str, hint: str = "") -> int:
+    """stdout 输出结构化错误 JSON，方便机器人把 hint 直接复述给用户。"""
+    payload = {"error": msg}
+    if hint:
+        payload["hint"] = hint
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 2
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="从 creds.json 读取静态数据层连接（env-vars 模式）")
     p.add_argument("--agent-id", required=True)
@@ -140,9 +149,21 @@ def main() -> int:
         result = resolve(endpoints)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
-    except (FileNotFoundError, ValueError) as e:
-        print(f"[error] {e}", file=sys.stderr)
-        return 2
+    except FileNotFoundError as e:
+        return error_out(
+            str(e),
+            "creds.json 不存在。请先跑 `bash scripts/install.sh`，它会引导你填每个 env 的数据层连接串。",
+        )
+    except ValueError as e:
+        return error_out(
+            str(e),
+            f"env-vars 模式下 `{args.env}` 环境的连接串没填。编辑 `scripts/.env` 里以 `STATIC_*_{args.env.upper()}` 开头的变量，或重跑 `bash scripts/install.sh`（已设的项不会重问）。",
+        )
+    except Exception as e:
+        return error_out(
+            f"{type(e).__name__}: {e}",
+            "脚本内部异常。请把命令行和完整错误反馈给 system.yaml 的维护者。",
+        )
 
 
 if __name__ == "__main__":

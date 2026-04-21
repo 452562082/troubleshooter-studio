@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch } from 'vue'
+import yaml from 'js-yaml'
 
 // ── Draft persistence (survives route switches and reloads) ──
 const STORAGE_KEY = 'tsf-init-wizard-v1'
@@ -139,6 +140,19 @@ const enabledDataStores = reactive<Record<string, boolean>>({
   ...(saved?.enabledDataStores ?? {}),
 })
 
+// ── Step 7: 输出目标 ──
+const targetOptions = ['openclaw', 'claude-code', 'cursor', 'standalone'] as const
+const targetDescriptions: Record<string, string> = {
+  'openclaw': 'OpenClaw 安装包（bash install.sh 部署）',
+  'claude-code': 'Claude Code（CLAUDE.md + skills/ 放到项目根即用）',
+  'cursor': 'Cursor IDE（.cursorrules + .cursor/rules/）',
+  'standalone': '独立 Web 聊天（server.py + docker-compose）',
+}
+const enabledTargets = reactive<Record<string, boolean>>({
+  ...Object.fromEntries(targetOptions.map(k => [k, true])),
+  ...(saved?.enabledTargets ?? {}),
+})
+
 // Auto-save all form state so navigating away doesn't lose the draft
 watch(
   () => ({
@@ -150,6 +164,7 @@ watch(
     configCenterType: configCenterType.value,
     enabledObservability,
     enabledDataStores,
+    enabledTargets,
   }),
   (val) => {
     try {
@@ -169,6 +184,121 @@ function clearDraft() {
     // ignore
   }
   location.reload()
+}
+
+// ── Import existing system.yaml into the wizard ──
+const showImportDialog = ref(false)
+const importText = ref('')
+const importError = ref('')
+
+function openImportDialog() {
+  importText.value = ''
+  importError.value = ''
+  showImportDialog.value = true
+}
+
+function closeImportDialog() {
+  showImportDialog.value = false
+}
+
+function handleImportFile(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  const reader = new FileReader()
+  reader.onload = () => {
+    importText.value = String(reader.result || '')
+  }
+  reader.readAsText(file)
+}
+
+function applyImport() {
+  importError.value = ''
+  let parsed: any
+  try {
+    parsed = yaml.load(importText.value)
+  } catch (err: any) {
+    importError.value = `YAML 解析失败：${err.message}`
+    return
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    importError.value = '内容为空或不是合法的 system.yaml'
+    return
+  }
+
+  // system
+  if (parsed.system && typeof parsed.system === 'object') {
+    system.id = parsed.system.id ?? ''
+    system.name = parsed.system.name ?? ''
+    system.description = parsed.system.description ?? ''
+  }
+
+  // agent
+  if (parsed.agent && typeof parsed.agent === 'object') {
+    agent.name = parsed.agent.name ?? ''
+    agent.workspace_name = parsed.agent.workspace_name ?? ''
+    agent.model = parsed.agent.model ?? agent.model
+  }
+
+  // environments
+  if (Array.isArray(parsed.environments) && parsed.environments.length) {
+    environments.splice(0, environments.length, ...parsed.environments.map((e: any) => ({
+      id: e?.id ?? '',
+      api_domain: e?.api_domain ?? '',
+      is_prod: Boolean(e?.is_prod),
+    })))
+  }
+
+  // repos
+  if (Array.isArray(parsed.repos) && parsed.repos.length) {
+    repos.splice(0, repos.length, ...parsed.repos.map((r: any) => {
+      const branches: Record<string, string> = {}
+      for (const env of environments) {
+        if (env.id) branches[env.id] = r?.env_branches?.[env.id] ?? ''
+      }
+      const svcNames = Array.isArray(r?.service_names)
+        ? r.service_names.join(', ')
+        : (r?.service_names ?? '')
+      return {
+        name: r?.name ?? '',
+        url: r?.url ?? '',
+        role: r?.role ?? 'backend',
+        stack: r?.stack ?? 'go',
+        framework: r?.framework ?? '',
+        service_names: svcNames,
+        env_branches: branches,
+      }
+    }))
+  }
+
+  // config center
+  const cc = parsed.infrastructure?.config_center?.type
+  if (typeof cc === 'string') configCenterType.value = cc
+
+  // observability
+  const obs = parsed.infrastructure?.observability
+  if (obs && typeof obs === 'object') {
+    for (const key of Object.keys(enabledObservability)) {
+      enabledObservability[key] = Boolean(obs?.[key]?.enabled)
+    }
+  }
+
+  // data stores
+  const ds = parsed.infrastructure?.data_stores
+  if (Array.isArray(ds)) {
+    for (const key of Object.keys(enabledDataStores)) {
+      enabledDataStores[key] = false
+    }
+    for (const entry of ds) {
+      const t = entry?.type
+      if (typeof t === 'string' && t in enabledDataStores && entry?.enabled !== false) {
+        enabledDataStores[t] = true
+      }
+    }
+  }
+
+  currentStep.value = 1
+  showImportDialog.value = false
 }
 
 // ── Step 7: Preview / generate ──
@@ -191,11 +321,6 @@ function deriveSkillsWhitelist(): string[] {
 }
 
 // ── YAML generation ──
-function indent(text: string, spaces: number): string {
-  const pad = ' '.repeat(spaces)
-  return text.split('\n').map(l => l ? pad + l : l).join('\n')
-}
-
 function yamlStr(val: string): string {
   if (!val) return '""'
   if (/[:{}\[\],&*?|>!%#@`'"\n]/.test(val) || val.startsWith(' ') || val.endsWith(' ')) {
@@ -207,49 +332,56 @@ function yamlStr(val: string): string {
 function generateYAML(): string {
   const lines: string[] = []
 
+  // 顶部导言注释(解析时被忽略,只给用户看)
+  lines.push('# 由初始化向导生成，可手工调整。字段说明：schema/system.schema.yaml')
+  lines.push('# 以下行尾 # 注释仅为提示，YAML 解析时会被忽略。')
+
   // system
   lines.push('system:')
-  lines.push(`  id: ${system.id || 'my-system'}`)
-  lines.push(`  name: ${yamlStr(system.name || 'My System')}`)
+  lines.push(`  id: ${system.id || 'my-system'}                    # 机器可读标识，仅 [a-z0-9-]；用作 output_dir / agent id 前缀`)
+  lines.push(`  name: ${yamlStr(system.name || 'My System')}          # 用户可见名称（中/英均可）`)
   if (system.description) lines.push(`  description: ${yamlStr(system.description)}`)
 
   // agent
   lines.push('')
   lines.push('agent:')
   lines.push(`  name: ${yamlStr(agent.name || agentNameDefault.value)}`)
-  lines.push(`  workspace_name: ${yamlStr(agent.workspace_name || agent.name || agentNameDefault.value)}`)
-  lines.push(`  model: ${agent.model}`)
+  lines.push(`  workspace_name: ${yamlStr(agent.workspace_name || agent.name || agentNameDefault.value)}    # OpenClaw 工作区目录名（~/.openclaw/workspace/<这里>）`)
+  lines.push(`  model: ${agent.model}    # LLM model id；standalone 可用 LLM_MODEL 环境变量覆盖`)
   lines.push('  style:')
   lines.push('    tone: direct')
   lines.push('    verbosity: terse')
 
   // environments
   lines.push('')
+  lines.push('# environments：声明系统的所有环境。每个 env 会注册一套独立的 MCP 实例')
+  lines.push('# （如 nacos-mcp-server-dev / -prod），机器人按 is_prod 调整谨慎度。')
   lines.push('environments:')
   for (const env of environments) {
     lines.push(`  - id: ${env.id || 'env'}`)
-    if (env.api_domain) lines.push(`    api_domain: ${env.api_domain}`)
-    lines.push(`    is_prod: ${env.is_prod}`)
+    if (env.api_domain) lines.push(`    api_domain: ${env.api_domain}     # 本 env 的对外访问域名，用于接口实测`)
+    lines.push(`    is_prod: ${env.is_prod}         # 生产环境标记：true 时机器人默认更保守、查询前二次确认`)
   }
 
   // repos
   lines.push('')
+  lines.push('# repos：所有纳入排障范围的代码仓库。role/stack 决定 analyzer 与 skill 策略。')
   lines.push('repos:')
   for (const repo of repos) {
     lines.push(`  - name: ${repo.name || 'my-service'}`)
     lines.push(`    url: ${repo.url || 'git@github.com:org/repo.git'}`)
-    lines.push(`    role: ${repo.role}`)
-    lines.push(`    stack: ${repo.stack}`)
+    lines.push(`    role: ${repo.role}         # backend/frontend/gateway/infra/shared`)
+    lines.push(`    stack: ${repo.stack}             # go/java/node/php/python，决定用哪种配置扫描器`)
     if (repo.framework) lines.push(`    framework: ${repo.framework}`)
     if (repo.service_names.trim()) {
-      lines.push('    service_names:')
+      lines.push('    service_names:       # 本 repo 实际部署出来的 service 名（config-map 以此为 key）')
       for (const sn of repo.service_names.split(',').map(s => s.trim()).filter(Boolean)) {
         lines.push(`      - ${sn}`)
       }
     }
     const branchEntries = Object.entries(repo.env_branches).filter(([, v]) => v)
     if (branchEntries.length) {
-      lines.push('    env_branches:')
+      lines.push('    env_branches:        # 每个 env 对应的长期分支；routing skill 据此切换代码')
       for (const [eid, branch] of branchEntries) {
         lines.push(`      ${eid}: ${branch}`)
       }
@@ -261,7 +393,7 @@ function generateYAML(): string {
   lines.push('infrastructure:')
 
   // config_center
-  lines.push('  config_center:')
+  lines.push('  config_center:        # 配置中心：nacos/apollo/consul/kubernetes/env-vars/none')
   lines.push(`    type: ${configCenterType.value}`)
   if (configCenterType.value !== 'none' && configCenterType.value !== 'env-vars' && configCenterType.value !== 'kubernetes') {
     lines.push('    endpoints:')
@@ -327,12 +459,14 @@ function generateYAML(): string {
   const enabledDS = Object.entries(enabledDataStores).filter(([, on]) => on)
   if (enabledDS.length) {
     lines.push('')
-    lines.push('  data_stores:')
+    lines.push('  data_stores:          # 启用的数据层：每个会生成对应 runtime-query skill（只读）')
     for (const [dsType] of enabledDS) {
       lines.push(`    - type: ${dsType}`)
       lines.push('      enabled: true')
-      lines.push(`      discovery: ${configCenterType.value !== 'none' ? 'from_config_center' : 'static'}`)
-      lines.push('      readonly_enforced: true')
+      const disc = configCenterType.value !== 'none' ? 'from_config_center' : 'static'
+      const discComment = disc === 'from_config_center' ? '# 运行时通过配置中心拿连接串' : '# install.sh 交互时直接收集连接串'
+      lines.push(`      discovery: ${disc}   ${discComment}`)
+      lines.push('      readonly_enforced: true    # 强制只读；generator 拒绝写操作')
     }
   }
 
@@ -340,15 +474,21 @@ function generateYAML(): string {
   const skills = deriveSkillsWhitelist()
   lines.push('')
   lines.push('generation:')
-  lines.push('  target_host: openclaw')
-  lines.push(`  output_dir: ./dist/${system.id || 'my-system'}`)
-  lines.push('  skills_whitelist:')
+  lines.push('  target_host: openclaw                # 兼容字段；实际 target 由 targets 列表决定')
+  lines.push(`  output_dir: ./dist/${system.id || 'my-system'}          # 产物目录；多 target 会额外产出 <output_dir>-<target>/`)
+  const selectedTargets = targetOptions.filter(t => enabledTargets[t])
+  const targetList = selectedTargets.length ? selectedTargets : ['openclaw']
+  lines.push('  targets:                             # 每个 target 产出一份部署包（同一份 system.yaml）')
+  for (const t of targetList) {
+    lines.push(`    - ${t}`)
+  }
+  lines.push('  skills_whitelist:                    # 只有列出的 skill 会进工作区；未列入的模板不会渲染')
   for (const s of skills) {
     lines.push(`    - ${s}`)
   }
   lines.push('  verified_only: false')
   lines.push('  mapping_review_mode: strict')
-  lines.push('  preserve_on_regenerate:')
+  lines.push('  preserve_on_regenerate:              # 这些文件在下次 gen 时整体保留（让用户的手改不丢）')
   lines.push('    - SOUL.md')
   lines.push('    - USER.md')
   lines.push('    - CHECKLIST.md')
@@ -489,7 +629,41 @@ const configTypeDescriptions: Record<string, string> = {
         <h1>初始化向导</h1>
         <p class="subtitle">通过可视化表单生成 system.yaml 配置文件（草稿会自动保存到本地）</p>
       </div>
-      <button class="btn-link" @click="clearDraft">清空草稿</button>
+      <div class="header-actions">
+        <button class="btn-link" @click="openImportDialog">导入 YAML</button>
+        <button class="btn-link" @click="clearDraft">清空草稿</button>
+      </div>
+    </div>
+
+    <!-- Import YAML modal -->
+    <div v-if="showImportDialog" class="modal-mask" @click.self="closeImportDialog">
+      <div class="modal">
+        <div class="modal-header">
+          <span>导入已有 system.yaml</span>
+          <button class="btn-icon close" @click="closeImportDialog">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="help-text" style="margin-bottom: 10px;">
+            上传或粘贴现有 system.yaml 内容，字段会自动反填到各步骤。
+          </p>
+          <label class="btn-secondary file-label">
+            选择文件...
+            <input type="file" accept=".yaml,.yml" @change="handleImportFile" style="display:none" />
+          </label>
+          <textarea
+            v-model="importText"
+            rows="14"
+            placeholder="或直接粘贴 system.yaml 的 YAML 内容…"
+            class="import-textarea"
+            spellcheck="false"
+          />
+          <div v-if="importError" class="error-text" style="margin-top: 6px;">{{ importError }}</div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn-secondary" @click="closeImportDialog">取消</button>
+          <button class="btn-primary" :disabled="!importText.trim()" @click="applyImport">反填到向导</button>
+        </div>
+      </div>
     </div>
 
     <!-- Guidance info box -->
@@ -520,7 +694,9 @@ const configTypeDescriptions: Record<string, string> = {
     <div v-if="currentStep === 1" class="card">
       <h2>系统基本信息</h2>
       <div class="form-group">
-        <label>系统 ID <span class="required">*</span></label>
+        <label>系统 ID <span class="required">*</span>
+          <span class="help-icon" title="机器可读标识，仅允许 [a-z0-9-]。会用作 output_dir、agent id 前缀、MCP 实例名前缀。一般用产品英文缩写，如 shop / mall / order。">?</span>
+        </label>
         <input
           v-model="system.id"
           type="text"
@@ -558,7 +734,9 @@ const configTypeDescriptions: Record<string, string> = {
         />
       </div>
       <div class="form-group">
-        <label>工作区名称 <span class="required">*</span></label>
+        <label>工作区名称 <span class="required">*</span>
+          <span class="help-icon" title="OpenClaw 会在 ~/.openclaw/workspace/<这里>/ 创建目录。一般跟机器人名同名即可；如果多个 agent 并存，用不同工作区名避免覆盖。">?</span>
+        </label>
         <input
           v-model="agent.workspace_name"
           type="text"
@@ -567,7 +745,9 @@ const configTypeDescriptions: Record<string, string> = {
         />
       </div>
       <div class="form-group">
-        <label>模型 <span class="required">*</span></label>
+        <label>模型 <span class="required">*</span>
+          <span class="help-icon" title="LLM model id。OpenClaw 会把它传给平台；Standalone target 另外读 LLM_MODEL 环境变量覆盖。非 anthropic/claude 模型在 standalone 里会自动回落到 claude-sonnet-4-6。">?</span>
+        </label>
         <input
           v-model="agent.model"
           type="text"
@@ -583,7 +763,9 @@ const configTypeDescriptions: Record<string, string> = {
       <div v-for="(env, i) in environments" :key="i" class="dynamic-row">
         <div class="row-fields">
           <div class="form-group compact">
-            <label>环境 ID</label>
+            <label>环境 ID
+              <span class="help-icon" title="环境短标识（dev/test/staging/prod）。每个 env 会注册一套独立的 MCP 实例：nacos-mcp-server-<ID>、grafana-mcp-server-<ID> 等。">?</span>
+            </label>
             <input
               v-model="env.id"
               type="text"
@@ -601,9 +783,10 @@ const configTypeDescriptions: Record<string, string> = {
             />
           </div>
           <div class="form-group compact checkbox-group">
-            <label>
+            <label :title="'is_prod=true 时机器人更保守：执行写入/重启类动作前会二次确认；OpenClaw 客户端 UI 也会标红。'">
               <input type="checkbox" v-model="env.is_prod" />
               生产环境
+              <span class="help-icon">?</span>
             </label>
           </div>
           <button class="btn-icon remove" @click="removeEnv(i)" :disabled="environments.length <= 1" title="删除">
@@ -662,11 +845,15 @@ const configTypeDescriptions: Record<string, string> = {
           </div>
         </div>
         <div class="form-group">
-          <label>服务名 (逗号分隔)</label>
+          <label>服务名 (逗号分隔)
+            <span class="help-icon" title="本仓库实际部署出来的服务名（= K8s deployment / Nacos 的 data_id 前缀），可能与仓库名不同。一个仓库跑多个服务常见：order-repo → order-service, order-worker。留空则默认用仓库名。">?</span>
+          </label>
           <input v-model="repo.service_names" type="text" placeholder="order-service, order-worker" />
         </div>
         <div class="form-group">
-          <label>环境分支映射</label>
+          <label>环境分支映射
+            <span class="help-icon" title="每个 env 对应的长期分支。routing skill 会据此帮用户切到正确的代码分支再做代码定位。例：dev=develop / prod=main。">?</span>
+          </label>
           <div class="branch-grid">
             <div v-for="env in environments" :key="env.id" class="branch-item">
               <span class="branch-env">{{ env.id || '?' }}</span>
@@ -721,6 +908,15 @@ const configTypeDescriptions: Record<string, string> = {
     <!-- Step 7 -->
     <div v-if="currentStep === 7" class="card">
       <h2>预览 + 生成</h2>
+      <h3 style="margin-top:0">输出目标（勾选要产出的部署形态）</h3>
+      <p class="help-text">默认全部 4 种；运行 <code>factory gen</code> 时会一次性生成 <code>&lt;output_dir&gt;-&lt;target&gt;/</code> 兄弟目录。</p>
+      <div class="checkbox-grid">
+        <label v-for="t in targetOptions" :key="t" class="check-label" :title="targetDescriptions[t]">
+          <input type="checkbox" v-model="enabledTargets[t]" @change="yamlOutput = generateYAML()" />
+          <span>{{ t }}</span>
+          <span style="color:#94a3b8;font-size:11px;margin-left:4px">— {{ targetDescriptions[t] }}</span>
+        </label>
+      </div>
       <div class="yaml-preview">
         <pre><code>{{ yamlOutput }}</code></pre>
       </div>
@@ -775,6 +971,81 @@ const configTypeDescriptions: Record<string, string> = {
 
 .page-header .subtitle {
   margin-bottom: 0;
+}
+
+.header-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+  margin-top: 4px;
+}
+
+/* Import modal */
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.modal {
+  background: #fff;
+  border-radius: 10px;
+  width: min(720px, 92vw);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.18);
+}
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 18px;
+  border-bottom: 1px solid #e2e8f0;
+  font-weight: 600;
+  color: #1e293b;
+}
+.modal-header .close {
+  background: none;
+  color: #64748b;
+  width: 28px;
+  height: 28px;
+  font-size: 20px;
+  border: none;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.modal-header .close:hover {
+  background: #f1f5f9;
+  color: #1e293b;
+}
+.modal-body {
+  padding: 16px 18px;
+  overflow-y: auto;
+}
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 12px 18px;
+  border-top: 1px solid #e2e8f0;
+}
+.import-textarea {
+  width: 100%;
+  margin-top: 10px;
+  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+  font-size: 12.5px;
+  padding: 10px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  resize: vertical;
+}
+.file-label {
+  display: inline-block;
+  cursor: pointer;
 }
 
 .btn-link {
@@ -911,6 +1182,27 @@ const configTypeDescriptions: Record<string, string> = {
 
 .required {
   color: #ef4444;
+}
+
+.help-icon {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  line-height: 14px;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 700;
+  color: #64748b;
+  background: #e2e8f0;
+  border-radius: 50%;
+  margin-left: 4px;
+  cursor: help;
+  vertical-align: middle;
+  transition: all 0.15s;
+}
+.help-icon:hover {
+  background: #3b82f6;
+  color: #fff;
 }
 
 input[type="text"],

@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+
+# 本地构建产物
+bin/
+dist/bin/
+
+# 本地 demo 产物(非 templates/ 下的真实模板)
+dist/
+
+# web 构建产物(embed 目标单独管;此处忽略源目录的 dist)
+web/dist/
+web/node_modules/
+
+# 本机凭证草稿(init wizard / install.sh 自动生成)
+scripts/.env
+.factory/

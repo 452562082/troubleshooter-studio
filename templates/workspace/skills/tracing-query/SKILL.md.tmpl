@@ -69,3 +69,14 @@ curl "$JAEGER_URL/api/services/<service>/operations"
 - 仅只读查询；不修改 trace 数据。
 - 必须先通过 `routing` 确认 env，再用对应 env 的 Jaeger URL。
 - 展示 span 详情时对敏感 tag（token、password）做脱敏。
+
+## 自检示例
+
+**Q1（有 trace_id）**：`trace_id=abc123 这条链路最慢的 span 是哪个？`
+- 期望：调 `<JAEGER_URL>/api/traces/abc123` → 解析 spans，按 duration 排序 → TOP 3 span 的 `service + operation + duration`，结尾说清楚 trace 覆盖的时间段和总耗时。
+
+**Q2（无 trace_id）**：`prod 的 order-service 创建订单接口最近 5 分钟 p99 怎么样？`
+- 期望：按 service + time range 搜 trace（`/api/traces?service=order-service&start=...&end=...`）→ 统计 p99，附命中 trace 数；若样本 < 10 提示采样率低。
+
+**Q3（trace 找不到）**：用户给的 trace_id 不存在。
+- 期望：按 AGENTS.md "找不到 trace / span" 段回复（采样率 / 时间窗 / trace 头传递是否断在 gateway），不要只说"没找到"。

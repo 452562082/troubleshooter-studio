@@ -5,16 +5,52 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 )
 
 // Wizard 封装问答原语：所有交互都走 in/out，便于测试注入脚本
 type Wizard struct {
 	in  *bufio.Reader
 	out io.Writer
+
+	// Defaults 可选：启动时从已有 system.yaml 预填；每个 ask 优先用其中对应字段作为默认值
+	Defaults *Answers
+
+	// current 实时追踪已回答到哪一步的 Answers 快照，供外部(signal handler)读取保存草稿
+	mu      sync.Mutex
+	current *Answers
 }
 
 func New(in io.Reader, out io.Writer) *Wizard {
 	return &Wizard{in: bufio.NewReader(in), out: out}
+}
+
+// Snapshot 返回当前进行中的 Answers 深拷贝（用于 Ctrl+C 时把草稿落盘）。
+// 没开始前返回 nil。
+func (w *Wizard) Snapshot() *Answers {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.current == nil {
+		return nil
+	}
+	// 浅拷贝对主用途(导出 yaml)已够；列表字段在 Run 中每步重建，不会被后续改写
+	snap := *w.current
+	return &snap
+}
+
+// setCurrent 由 wizard.Run 在每步结束时调用。
+func (w *Wizard) setCurrent(a *Answers) {
+	w.mu.Lock()
+	w.current = a
+	w.mu.Unlock()
+}
+
+// defaultOr 返回 preferred（如非空）或 fallback；用来让 Run 里的 ask 带预填
+func defaultOr(preferred, fallback string) string {
+	if strings.TrimSpace(preferred) != "" {
+		return preferred
+	}
+	return fallback
 }
 
 func (w *Wizard) printf(format string, args ...any) {

@@ -332,6 +332,131 @@ func TestGenerate_ClawhubLock_EmptySkills(t *testing.T) {
 	}
 }
 
+// assertExists 检查一组相对路径都存在于 base 下，否则报告缺失。
+func assertExists(t *testing.T, base string, rels []string) {
+	t.Helper()
+	for _, rel := range rels {
+		if _, err := os.Stat(filepath.Join(base, rel)); err != nil {
+			t.Errorf("expected %s under %s (%v)", rel, base, err)
+		}
+	}
+}
+
+// TestGenerate_MultiTargets_All 覆盖 4 target 全开的共享 staging 路径：
+// openclaw 跑完后，其产物目录被复用为 SharedStaging，后续 target 不再重复渲染 workspace。
+// 对每个 target 目录断言关键产物存在。
+func TestGenerate_MultiTargets_All(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-system.yaml")
+	out := filepath.Join(t.TempDir(), "sys")
+	tr := filepath.Join(projectRoot(t), "templates")
+
+	g := New(cfg, tr, out)
+
+	// openclaw
+	if err := g.Generate(); err != nil {
+		t.Fatalf("openclaw: %v", err)
+	}
+	g.SharedStaging = g.OutputDir
+
+	// non-openclaw targets 复用 staging
+	if err := g.GenerateClaudeCode(); err != nil {
+		t.Fatalf("claude-code: %v", err)
+	}
+	if err := g.GenerateCursor(); err != nil {
+		t.Fatalf("cursor: %v", err)
+	}
+	if err := g.GenerateStandalone(); err != nil {
+		t.Fatalf("standalone: %v", err)
+	}
+
+	assertExists(t, out, []string{
+		"templates/workspace-template/SOUL.md",
+		"scripts/install.sh",
+	})
+	assertExists(t, out+"-claude-code", []string{
+		"CLAUDE.md",
+		"install.sh",
+		"skills/routing/SKILL.md",
+	})
+	assertExists(t, out+"-cursor", []string{
+		".cursorrules",
+		"install.sh",
+		".cursor/rules/routing.mdc",
+		"skills/routing/SKILL.md",
+	})
+	assertExists(t, out+"-standalone", []string{
+		"server.py",
+		"index.html",
+		"Dockerfile",
+		"requirements.txt",
+		"docker-compose.yaml",
+		"install.sh",
+		"system-prompt.md",
+		"skills/routing/SKILL.md",
+	})
+
+	// install.sh 们都应该可执行
+	for _, p := range []string{
+		out + "-claude-code/install.sh",
+		out + "-cursor/install.sh",
+		out + "-standalone/install.sh",
+	} {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode()&0o111 == 0 {
+			t.Errorf("%s not executable", p)
+		}
+	}
+
+	// standalone server.py 应注入 DEFAULT_MODEL（而非硬编码旧模型）
+	serverPy := readFile(t, out+"-standalone/server.py")
+	if !strings.Contains(serverPy, "DEFAULT_MODEL = \"") {
+		t.Errorf("server.py should define DEFAULT_MODEL constant")
+	}
+	if strings.Contains(serverPy, "claude-sonnet-4-20250514") {
+		t.Errorf("server.py still contains legacy hard-coded model id")
+	}
+}
+
+// TestGenerate_MultiTargets_NoOpenclaw 覆盖"非 openclaw 独占"路径：
+// 调用方先把 workspace 渲染到一个临时 staging，再跑各 target。
+// openclaw 产物目录不会被创建。
+func TestGenerate_MultiTargets_NoOpenclaw(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-system.yaml")
+	out := filepath.Join(t.TempDir(), "sys")
+	tr := filepath.Join(projectRoot(t), "templates")
+
+	g := New(cfg, tr, out)
+
+	// 建 staging，跑一次 Generate 到里面
+	staging := t.TempDir()
+	origOut := g.OutputDir
+	g.OutputDir = staging
+	if err := g.Generate(); err != nil {
+		t.Fatalf("stage workspace: %v", err)
+	}
+	g.OutputDir = origOut
+	g.SharedStaging = staging
+
+	if err := g.GenerateClaudeCode(); err != nil {
+		t.Fatalf("claude-code: %v", err)
+	}
+	if err := g.GenerateStandalone(); err != nil {
+		t.Fatalf("standalone: %v", err)
+	}
+
+	// openclaw 目录不应存在
+	if _, err := os.Stat(out); err == nil {
+		t.Errorf("openclaw output dir %s should NOT exist when openclaw not in targets", out)
+	}
+
+	// 其它 target 产物存在
+	assertExists(t, out+"-claude-code", []string{"CLAUDE.md", "install.sh"})
+	assertExists(t, out+"-standalone", []string{"server.py", "Dockerfile"})
+}
+
 func TestGenerate_WithAnalysis_UpgradesInferredToVerified(t *testing.T) {
 	cfg := loadCfg(t, "examples/shop-system.yaml")
 	out := t.TempDir()

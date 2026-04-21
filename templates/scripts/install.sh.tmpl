@@ -44,6 +44,36 @@ install_dep node
 install_dep npx
 install_dep uvx || true
 
+# ── preflight：凭证复用机制 ─────────────────────────────────────────────
+# 同目录下的 .env（首次 install 后自动生成）会被 source 进来；
+# 下面的 read_var 只在变量"仍为空"时才问用户——所以第二次跑 install 不会
+# 再追问一遍。若想重新输入，删除 .env 或手动编辑它。
+ENV_FILE="$ROOT_DIR/scripts/.env"
+if [[ -f "$ENV_FILE" ]]; then
+  echo "[preflight] 加载已有凭证 $ENV_FILE（删除它可重新交互输入）"
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+fi
+
+# read_var VAR "prompt" [secret]
+#   - 如果 VAR 已有非空值（来自 .env 或调用方 export），直接跳过不问
+#   - 否则按 prompt 交互读取；secret=true 时不回显
+read_var() {
+  local var="$1" prompt="$2" secret="${3:-}"
+  if [[ -n "${!var:-}" ]]; then
+    echo "  [cached] $var"
+    return 0
+  fi
+  if [[ "$secret" == "secret" ]]; then
+    read -r -s -p "  $prompt" "$var"
+    echo ""
+  else
+    read -r -p "  $prompt" "$var"
+  fi
+}
+
 AGENT_ID="${AGENT_ID:-{{.AgentID}}}"
 AGENT_NAME="${AGENT_NAME:-{{.Agent.Name}}}"
 WORKSPACE_NAME="${WORKSPACE_NAME:-{{.Agent.WorkspaceName}}}"
@@ -64,18 +94,18 @@ echo ""
 # Nacos：per_env_credentials=true，每个 env 独立用户名/密码
 {{range .Environments}}
 echo "--- Nacos 凭证 ({{.ID}}) ---"
-read -r -p "NACOS 地址 ({{.ID}}) [host:port]: " CC_ADDR_{{.ID | upper}}
-read -r -p "NACOS 用户名 ({{.ID}}) []: " CC_USER_{{.ID | upper}}
-read -r -s -p "NACOS 密码 ({{.ID}}) []: " CC_PASS_{{.ID | upper}}
+read_var CC_ADDR_{{.ID | upper}} "NACOS 地址 ({{.ID}}) [host:port]: "
+read_var CC_USER_{{.ID | upper}} "NACOS 用户名 ({{.ID}}) []: "
+read_var CC_PASS_{{.ID | upper}} "NACOS 密码 ({{.ID}}) []: " secret
 echo ""
 {{- end}}
 {{- else -}}
 # Nacos：用户名/密码 env 间共用
-read -r -p "NACOS 用户名（所有 env 共用）[]: " CONFIG_CENTER_USERNAME
-read -r -s -p "NACOS 密码（所有 env 共用）[]: " CONFIG_CENTER_PASSWORD
+read_var CONFIG_CENTER_USERNAME "NACOS 用户名（所有 env 共用）[]: "
+read_var CONFIG_CENTER_PASSWORD "NACOS 密码（所有 env 共用）[]: " secret
 echo ""
 {{range .Environments}}
-read -r -p "NACOS 地址 ({{.ID}}) [host:port]: " CC_ADDR_{{.ID | upper}}
+read_var CC_ADDR_{{.ID | upper}} "NACOS 地址 ({{.ID}}) [host:port]: "
 {{- end}}
 {{- end}}
 {{- end}}
@@ -86,15 +116,15 @@ echo "Apollo 配置"
 {{if .Infrastructure.ConfigCenter.PerEnvCredentials -}}
 # per_env_credentials=true：每个 env 独立 token
 {{range .Environments}}
-read -r -p "Apollo meta URL ({{.ID}}) [http://apollo-xxx:8080]: " APOLLO_META_{{.ID | upper}}
-read -r -s -p "Apollo Open API token ({{.ID}}) []: " APOLLO_TOKEN_{{.ID | upper}}
+read_var APOLLO_META_{{.ID | upper}} "Apollo meta URL ({{.ID}}) [http://apollo-xxx:8080]: "
+read_var APOLLO_TOKEN_{{.ID | upper}} "Apollo Open API token ({{.ID}}) []: " secret
 echo ""
 {{- end}}
 {{- else -}}
-read -r -s -p "Apollo Open API token（所有 env 共用，留空=未开启鉴权）[]: " APOLLO_TOKEN
+read_var APOLLO_TOKEN "Apollo Open API token（所有 env 共用，留空=未开启鉴权）[]: " secret
 echo ""
 {{range .Environments}}
-read -r -p "Apollo meta URL ({{.ID}}) [http://apollo-xxx:8080]: " APOLLO_META_{{.ID | upper}}
+read_var APOLLO_META_{{.ID | upper}} "Apollo meta URL ({{.ID}}) [http://apollo-xxx:8080]: "
 {{- end}}
 {{- end}}
 {{- end}}
@@ -104,15 +134,15 @@ read -r -p "Apollo meta URL ({{.ID}}) [http://apollo-xxx:8080]: " APOLLO_META_{{
 echo "Consul 配置"
 {{if .Infrastructure.ConfigCenter.PerEnvCredentials -}}
 {{range .Environments}}
-read -r -p "Consul host ({{.ID}}) [host:port 或 http://host:port]: " CONSUL_HOST_{{.ID | upper}}
-read -r -s -p "Consul ACL token ({{.ID}}) []: " CONSUL_TOKEN_{{.ID | upper}}
+read_var CONSUL_HOST_{{.ID | upper}} "Consul host ({{.ID}}) [host:port 或 http://host:port]: "
+read_var CONSUL_TOKEN_{{.ID | upper}} "Consul ACL token ({{.ID}}) []: " secret
 echo ""
 {{- end}}
 {{- else -}}
-read -r -s -p "Consul ACL token（所有 env 共用，留空=无 ACL）[]: " CONSUL_TOKEN
+read_var CONSUL_TOKEN "Consul ACL token（所有 env 共用，留空=无 ACL）[]: " secret
 echo ""
 {{range .Environments}}
-read -r -p "Consul host ({{.ID}}) [host:port 或 http://host:port]: " CONSUL_HOST_{{.ID | upper}}
+read_var CONSUL_HOST_{{.ID | upper}} "Consul host ({{.ID}}) [host:port 或 http://host:port]: "
 {{- end}}
 {{- end}}
 {{- end}}
@@ -124,7 +154,7 @@ echo "=== 数据层静态连接串（按 env 填写）==="
 {{$envID := .ID -}}
 echo "--- {{$envID}} 环境 ---"
 {{range $.Infrastructure.DataStores}}{{if .Enabled -}}
-read -r -p "{{.Type}} 地址 ({{$envID}}) [host:port 或 URI]: " STATIC_{{.Type | upper}}_{{$envID | upper}}
+read_var STATIC_{{.Type | upper}}_{{$envID | upper}} "{{.Type}} 地址 ({{$envID}}) [host:port 或 URI]: "
 {{end}}{{end}}
 {{- end}}
 {{- end}}
@@ -134,10 +164,10 @@ read -r -p "{{.Type}} 地址 ({{$envID}}) [host:port 或 URI]: " STATIC_{{.Type 
 echo "=== K8s 配置（按 env 填写）==="
 {{range .Environments -}}
 echo "--- {{.ID}} 环境 ---"
-read -r -p "K8s context ({{.ID}}) [留空=当前 context]: " K8S_CONTEXT_{{.ID | upper}}
-read -r -p "K8s namespace ({{.ID}}) [default]: " K8S_NAMESPACE_{{.ID | upper}}
-read -r -p "ConfigMap 名称 ({{.ID}}) [app-config]: " K8S_CONFIGMAP_{{.ID | upper}}
-read -r -p "Secret 名称 ({{.ID}}) [留空=不用]: " K8S_SECRET_{{.ID | upper}}
+read_var K8S_CONTEXT_{{.ID | upper}} "K8s context ({{.ID}}) [留空=当前 context]: "
+read_var K8S_NAMESPACE_{{.ID | upper}} "K8s namespace ({{.ID}}) [default]: "
+read_var K8S_CONFIGMAP_{{.ID | upper}} "ConfigMap 名称 ({{.ID}}) [app-config]: "
+read_var K8S_SECRET_{{.ID | upper}} "Secret 名称 ({{.ID}}) [留空=不用]: "
 {{- end}}
 {{- end}}
 
@@ -146,18 +176,18 @@ read -r -p "Secret 名称 ({{.ID}}) [留空=不用]: " K8S_SECRET_{{.ID | upper}
 # Grafana：per_env_credentials=true，每 env 独立凭证
 {{range .Environments}}
 echo "--- Grafana 凭证 ({{.ID}}) ---"
-read -r -p "Grafana URL ({{.ID}}) []: " GRAFANA_URL_{{.ID | upper}}
-read -r -p "Grafana 用户名 ({{.ID}}) []: " GRAFANA_USER_{{.ID | upper}}
-read -r -s -p "Grafana 密码 ({{.ID}}) []: " GRAFANA_PASS_{{.ID | upper}}
+read_var GRAFANA_URL_{{.ID | upper}} "Grafana URL ({{.ID}}) []: "
+read_var GRAFANA_USER_{{.ID | upper}} "Grafana 用户名 ({{.ID}}) []: "
+read_var GRAFANA_PASS_{{.ID | upper}} "Grafana 密码 ({{.ID}}) []: " secret
 echo ""
 {{- end}}
 {{- else -}}
 # Grafana：用户名/密码 env 间共用
-read -r -p "Grafana 用户名（所有 env 共用）[]: " GRAFANA_USERNAME
-read -r -s -p "Grafana 密码（所有 env 共用）[]: " GRAFANA_PASSWORD
+read_var GRAFANA_USERNAME "Grafana 用户名（所有 env 共用）[]: "
+read_var GRAFANA_PASSWORD "Grafana 密码（所有 env 共用）[]: " secret
 echo ""
 {{range .Environments}}
-read -r -p "Grafana URL ({{.ID}}) []: " GRAFANA_URL_{{.ID | upper}}
+read_var GRAFANA_URL_{{.ID | upper}} "Grafana URL ({{.ID}}) []: "
 {{- end}}
 {{- end}}
 {{- end}}
@@ -165,33 +195,33 @@ read -r -p "Grafana URL ({{.ID}}) []: " GRAFANA_URL_{{.ID | upper}}
 {{if .Infrastructure.Observability.Jaeger.Enabled -}}
 # Jaeger 链路追踪
 {{range .Environments}}
-read -r -p "Jaeger URL ({{.ID}}) [http://jaeger-xxx:16686]: " JAEGER_URL_{{.ID | upper}}
+read_var JAEGER_URL_{{.ID | upper}} "Jaeger URL ({{.ID}}) [http://jaeger-xxx:16686]: "
 {{- end}}
 {{- end}}
 
 {{if .Infrastructure.Observability.ELK.Enabled -}}
 # ELK 日志
-read -r -p "ELK 用户名（共用，留空=无鉴权）[]: " ELK_USERNAME
-read -r -s -p "ELK 密码（共用）[]: " ELK_PASSWORD
+read_var ELK_USERNAME "ELK 用户名（共用，留空=无鉴权）[]: "
+read_var ELK_PASSWORD "ELK 密码（共用）[]: " secret
 echo ""
 {{range .Environments}}
-read -r -p "Kibana URL ({{.ID}}) [留空=不用]: " KIBANA_URL_{{.ID | upper}}
-read -r -p "Elasticsearch URL ({{.ID}}) [http://es-xxx:9200]: " ELK_ES_URL_{{.ID | upper}}
+read_var KIBANA_URL_{{.ID | upper}} "Kibana URL ({{.ID}}) [留空=不用]: "
+read_var ELK_ES_URL_{{.ID | upper}} "Elasticsearch URL ({{.ID}}) [http://es-xxx:9200]: "
 {{- end}}
 {{- end}}
 
-read -r -p "Agent 模型 [{{.Agent.Model}}]: " MODEL
+read_var MODEL "Agent 模型 [{{.Agent.Model}}]: "
 MODEL="${MODEL:-{{.Agent.Model}}}"
 echo ""
 
 {{range .Infrastructure.Messaging}}{{if and .Enabled (eq .Platform "lark") -}}
-read -r -p "Lark APP_ID []: " LARK_APP_ID
-read -r -s -p "Lark APP_SECRET []: " LARK_APP_SECRET
+read_var LARK_APP_ID "Lark APP_ID []: "
+read_var LARK_APP_SECRET "Lark APP_SECRET []: " secret
 echo ""
 {{- end}}{{end}}
 
 {{range .Infrastructure.ProjectTracking}}{{if and .Enabled (eq .Platform "feishu_project") -}}
-read -r -p "Feishu MCP User Token []: " MCP_USER_TOKEN
+read_var MCP_USER_TOKEN "Feishu MCP User Token []: "
 {{- end}}{{end}}
 
 mkdir -p "$OC_HOME/workspace"
@@ -440,5 +470,27 @@ else
   echo "[warn] openclaw CLI not found, reload service manually"
 fi
 
+# ── 把交互收集的凭证持久化到 .env，下次 install 自动复用 ────────────────
+mkdir -p "$(dirname "$ENV_FILE")"
+{
+  echo "# Generated by install.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "# 删除本文件可重新交互输入所有凭证"
+  env | grep -E '^(CC_|CONFIG_CENTER_|GRAFANA_|APOLLO_|CONSUL_|JAEGER_|KIBANA_|ELK_|K8S_|STATIC_|LARK_|MCP_|AGENT_ID|AGENT_NAME|WORKSPACE_NAME|MODEL)=' | sort
+} > "$ENV_FILE"
+chmod 600 "$ENV_FILE"
+echo "[ok] 凭证已保存到 $ENV_FILE (mode 0600) — 下次 install 将自动复用"
+
+echo ""
 echo "[done] install complete"
-echo "Next: bash '$ROOT_DIR/scripts/self-test.sh'"
+echo ""
+echo "── 下一步 ─────────────────────────────────────────────────────────────"
+echo "  1. 自检：bash '$ROOT_DIR/scripts/self-test.sh'"
+echo "  2. 首次使用 {{ .System.Name }} 排障机器人："
+echo "     · OpenClaw 工作区: $WS_DIR"
+echo "     · 打开 OpenClaw 客户端，在 agent 列表选择 \"$AGENT_NAME\" 对话"
+echo "     · 或 CLI: openclaw chat --agent $AGENT_ID"
+echo "  3. 可直接粘贴的示例问题："
+echo "     · \"dev 环境 order-service 接口 500 突增，帮我看下\""
+echo "     · \"prod 某条订单 #20250417XXX 用户说付了钱但没发货\""
+echo "     · \"查一下 prod 的 Redis 里 user:12345 的 session TTL\""
+echo ""

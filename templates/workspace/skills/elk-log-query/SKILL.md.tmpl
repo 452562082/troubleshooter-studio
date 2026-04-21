@@ -102,3 +102,17 @@ $KIBANA_URL/app/discover#/?_a=(query:(language:lucene,query:'service:<svc> AND l
 - 仅只读查询（`_search` / `_count`）；禁止写操作（`_delete` / `_bulk`）。
 - 必须先通过 `routing` 确认 env，再用对应 env 的 ES/Kibana URL。
 - 日志内容可能含敏感信息，输出时对 token/password/身份证号做脱敏。
+
+## 自检示例
+
+**Q1（按 trace_id 搜日志）**：`dev 的 order-service 最近 1 小时 trace_id=abc123 的日志`
+- 期望：routing 拿 log-app → ES `_search`，query `trace_id: "abc123" AND service: "order-service"` + `range` 最近 1h → 返回按时间排序的日志，附时间戳、level、message 摘要。
+
+**Q2（错误关键字搜索）**：`prod 最近 10 分钟 xxx 服务有哪些 ERROR？`
+- 期望：query `level: ERROR AND service: "xxx"` + 时间窗 10m → 按错误聚类（用 `logger` / 前 80 字符 hash 分组），返回 Top 3 错误模板 + 次数。
+
+**Q3（时间窗不对 / 无结果）**：用户问"30 秒前挂的，查日志"但默认查 1h 就可能空。
+- 期望：按 AGENTS.md "Grafana/Loki/Jaeger/ELK 查询返回空或 403" 段处置——提示时间窗可能过粗，建议 `@timestamp:["now-2m" TO "now"]`，并让用户确认时区（UTC vs CST）。
+
+**Q4（403 / 凭证失效）**：脚本返回 `{"error":"403 Forbidden", "hint":"..."}`。
+- 期望：复述 hint，不糊堆栈。

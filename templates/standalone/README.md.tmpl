@@ -1,0 +1,31 @@
+# {{ .System.Name }} 排障机器人（独立部署版）
+
+由 troubleshooter-factory 生成。不依赖 OpenClaw / Claude Code / Cursor，只需一个 LLM API key。
+
+## 快速启动（本机 venv，一键）
+
+```bash
+bash install.sh                         # 自动建 venv + pip install
+export LLM_API_KEY=your-anthropic-api-key
+source .venv/bin/activate && python3 server.py
+# → http://localhost:3000
+```
+
+## Docker 部署（一键）
+
+```bash
+LLM_API_KEY=your-key docker compose up --build
+# → http://localhost:3000
+```
+
+## 文件说明
+
+- system-prompt.md — LLM 的 system prompt（排障知识合并）
+- skills/ — 路由映射表 + 各 skill 的 SKILL.md
+- scripts/ — 辅助脚本（resolve_runtime 等）
+- server.py — Flask 聊天服务（调 Claude API）
+- index.html — 聊天前端
+- requirements.txt — Python 依赖清单
+- Dockerfile — 容器镜像定义
+- docker-compose.yaml — 容器化部署
+- install.sh — 本机一键安装脚本

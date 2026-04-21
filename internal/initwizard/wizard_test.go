@@ -49,6 +49,7 @@ func TestRun_MinimalAllDefaults(t *testing.T) {
 		"",          // lark attachment default y
 		"",          // feishu project default n
 		"",          // output_dir default ./dist/shop
+		"",          // targets default (all 4)
 	)
 	var out bytes.Buffer
 	w := New(in, &out)
@@ -105,6 +106,7 @@ func TestRun_FullWithOneRepo(t *testing.T) {
 		"n", // lark disabled
 		"",  // feishu project default n
 		"",  // output_dir default
+		"",  // targets default (all 4)
 	)
 	var out bytes.Buffer
 	ans, err := New(in, &out).Run()
@@ -147,6 +149,7 @@ func TestWriteYAML_ProducesValidSystemYaml(t *testing.T) {
 		"",
 		"",
 		"",
+		"", // targets default (all 4)
 	)
 	var out bytes.Buffer
 	ans, err := New(in, &out).Run()
@@ -199,6 +202,7 @@ func TestRun_BadIDReprompts(t *testing.T) {
 		"", // lark attachment default
 		"", // feishu default
 		"", // output dir default
+		"", // targets default (all 4)
 	)
 	var out bytes.Buffer
 	ans, err := New(in, &out).Run()

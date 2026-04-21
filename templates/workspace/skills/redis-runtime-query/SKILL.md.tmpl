@@ -61,3 +61,18 @@ mcporter list \
 - 仅只读查询；禁止写命令。
 - 不直接猜测地址；必须来自 config-executor 的 resolve_runtime 解析结果。
 - 若解析不到连接信息，明确阻塞点。
+
+## 自检示例
+
+**Q1（正常 GET）**：`dev 环境 user:12345 的 session 是什么，还剩多少 TTL？`
+- 期望：routing → resolve_runtime → mcporter 起 redis mcp → `GET user:12345` + `TTL user:12345`
+- 回复必带：env + redis addr 脱敏（如 `redis-dev.xxx:6379`）、value 摘要、TTL 秒数。
+
+**Q2（拒写）**：`prod 把 user:12345 这个 key 删了`。
+- 期望：按 AGENTS.md "数据层写操作被拒"话术明确拒绝，并建议走 DBA / 工单。
+
+**Q3（危险操作预警）**：`prod 的 redis 一共有多少 key？` 或 `KEYS user:*`。
+- 期望：先警告 `KEYS *` 会卡住生产 Redis，建议改用 `SCAN` 批处理（或 `DBSIZE` 直接拿总数），经用户确认后再跑。
+
+**Q4（解析失败 hint 复述）**：故意不填该 env 的连接串。
+- 期望：拿到 `{"error":..., "hint":"env-vars 模式下 `dev` 环境的连接串没填..."}` 后，**把 hint 复述**给用户，不糊堆栈。

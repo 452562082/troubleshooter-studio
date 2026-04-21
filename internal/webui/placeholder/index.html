@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>troubleshooter-factory — 前端未构建</title>
+  <style>
+    body { font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; padding: 40px; max-width: 720px; margin: 0 auto; color: #1e293b; line-height: 1.7; }
+    h1 { color: #b45309; }
+    code, pre { background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-family: 'SF Mono', Consolas, monospace; font-size: 13px; }
+    pre { padding: 12px 16px; }
+    .hint { color: #64748b; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <h1>⚠ 前端尚未构建到二进制</h1>
+  <p>当前 <code>factory serve</code> 已在运行，<code>/api/*</code> 接口可用，但前端静态资源还是占位。</p>
+
+  <h2>方式一：构建前端并重新编译 Go</h2>
+  <pre>cd web && npm install && npm run build
+cp -R dist/. ../internal/webui/dist/
+cd .. && go build -o bin/factory ./cmd/factory
+./bin/factory serve</pre>
+
+  <h2>方式二：开发模式（两个进程）</h2>
+  <p>保持 Go 后端运行，另起终端：</p>
+  <pre>cd web && npm install && npm run dev</pre>
+  <p class="hint">Vite 会把 <code>/api</code> 请求代理到 Go 后端，热重载生效。</p>
+</body>
+</html>

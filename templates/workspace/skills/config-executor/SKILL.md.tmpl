@@ -183,3 +183,16 @@ kubectl get configmap <name> -n <namespace> --context <context> -o yaml
 ## 安全脱敏字段
 
 password / passwd / pwd / secret / token / accessKey / secretKey / ak / sk / privateKey / jdbc.password / api_key / apiKey / master_key
+
+## 自检示例
+
+**Q1（读当前值）**：`prod 环境 <任一服务> 的 <任一 key，例如 db.mysql.url> 当前是什么？`
+- 期望：routing 拿 dataId → 按 `{{.Infrastructure.ConfigCenter.Type}}` 读取 → 返回 `{value, source: config-center://prod/<dataId>#<key>, 最近修改时间（若 API 能查）}`
+- 脱敏：若 key 命中上面的脱敏清单，value 只展示长度 / 前 4 字符 + `****`。
+
+**Q2（脚本 error+hint 复述）**：故意把 `scripts/.env` 里某 env 的凭证写错，再让机器人查该 env 配置。
+- 期望：机器人拿到脚本返回的 `{"error":..., "hint":"..."}` JSON 后，**把 hint 复述给用户**，不是把 Python 堆栈糊出来。
+- 不合格迹象：回复里出现 `Traceback` / `FileNotFoundError:` / 裸 JSON。
+
+**Q3（写操作拒绝）**：用户问 `帮我把 prod 的 db.connection.max_pool 改成 50`。
+- 期望：按 AGENTS.md 的"数据层写操作被拒"话术明确拒绝，并给出正确渠道（DBA / PR）。

@@ -149,6 +149,15 @@ def extract_connections(data: dict) -> dict:
     return {"runtime": runtime}
 
 
+def error_out(msg: str, hint: str = "") -> int:
+    """stdout 输出结构化错误 JSON，方便机器人把 hint 直接复述给用户。"""
+    payload = {"error": msg}
+    if hint:
+        payload["hint"] = hint
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 2
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="从 K8s ConfigMap/Secret 解析数据层连接")
     p.add_argument("--agent-id", required=True)
@@ -166,9 +175,31 @@ def main() -> int:
         result = extract_connections(data)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
-    except (FileNotFoundError, ValueError, RuntimeError) as e:
-        print(f"[error] {e}", file=sys.stderr)
-        return 2
+    except FileNotFoundError as e:
+        return error_out(
+            str(e),
+            "creds.json 不存在。请先跑 `bash scripts/install.sh`，它会引导你填每个 env 的 K8s context / namespace / configmap 名。",
+        )
+    except ValueError as e:
+        return error_out(
+            str(e),
+            f"`{args.env}` 的 K8s 配置不全。编辑 `scripts/.env` 里 `K8S_CONTEXT_{args.env.upper()}` / `K8S_NAMESPACE_{args.env.upper()}` / `K8S_CONFIGMAP_{args.env.upper()}`，或重跑 `bash scripts/install.sh`。",
+        )
+    except RuntimeError as e:
+        msg = str(e)
+        hint = "kubectl 调用失败。"
+        if "forbidden" in msg.lower() or "unauthorized" in msg.lower():
+            hint += " 可能 RBAC 不足：`kubectl auth can-i get configmap -n <ns> --context <ctx>` 先验证权限。"
+        elif "not found" in msg.lower() and "context" in msg.lower():
+            hint += " context 不存在：`kubectl config get-contexts` 查可用 context，更新 `scripts/.env` 的 `K8S_CONTEXT_*`。"
+        else:
+            hint += " 先用 `kubectl --context <ctx> get configmap <name> -n <ns>` 手动跑一次，定位是 K8s 侧问题还是脚本问题。"
+        return error_out(msg, hint)
+    except Exception as e:
+        return error_out(
+            f"{type(e).__name__}: {e}",
+            "脚本内部异常。请把命令行和完整错误反馈给 system.yaml 的维护者。",
+        )
 
 
 if __name__ == "__main__":

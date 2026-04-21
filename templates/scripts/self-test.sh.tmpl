@@ -122,4 +122,22 @@ printf 'flowchart LR\nA[Test]-->B[Pass]\n' | node "$DGEN" - "$TMP_IMG" >/tmp/{{.
   || { cat /tmp/{{.AgentID}}-mermaid.log; fail "diagram generation failed"; }
 {{- end}}
 
+# ── 端到端 smoke（可选，如果环境里有 openclaw chat 能力就自动跑一次 ping） ──
+echo "[check] end-to-end smoke"
+if command -v openclaw >/dev/null 2>&1 && openclaw chat --help >/dev/null 2>&1; then
+  SMOKE_OUT=$(echo "ping" | openclaw chat --agent "{{.AgentID}}" --non-interactive 2>&1 || true)
+  if [[ -n "$SMOKE_OUT" ]]; then
+    pass "agent 回话了 (${#SMOKE_OUT} 字节)"
+  else
+    echo "  WARN: agent 没有回话（LLM key 未配置或网络问题？不影响 MCP 就位）"
+  fi
+else
+  echo "  SKIP: 未找到 'openclaw chat' 子命令；请手动验证："
+  echo "        1) 打开 OpenClaw 客户端，选择 agent \"{{.Agent.Name}}\""
+  echo "        2) 发送 'ping' — 若有回话，说明 LLM + MCP + skills 整条链路活着"
+  echo "        3) 再发一条真实问题（见 ~/.openclaw/workspace/{{.Agent.WorkspaceName}}/IDENTITY.md 的「典型求助示例」）"
+fi
+
 echo "[done] self-test passed"
+echo ""
+echo "组件就位 ≠ 机器人能用 —— 上面若是 SKIP，务必按步骤手动验证一次。"

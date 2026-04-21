@@ -1,14 +1,16 @@
 package api
 
 import (
-	"embed"
+	"io"
 	"io/fs"
 	"net/http"
+	"strings"
 )
 
 // NewRouter 创建 HTTP 路由：/api/* → Go handler，其他 → 前端静态文件
-// webFS 是 embed 的前端 dist 目录；传 nil 时只提供 API（开发模式由 Vite proxy 处理前端）
-func NewRouter(srv *Server, webFS *embed.FS) http.Handler {
+// webFS 的根下应直接包含 index.html + assets/*（已经 fs.Sub 过的 dist）；
+// 传 nil 时只提供 API（开发模式由 Vite dev server 提供前端并 proxy /api）
+func NewRouter(srv *Server, webFS fs.FS) http.Handler {
 	mux := http.NewServeMux()
 
 	// API routes
@@ -20,22 +22,42 @@ func NewRouter(srv *Server, webFS *embed.FS) http.Handler {
 
 	// 前端静态文件（生产模式：embed；开发模式：Vite dev server proxy）
 	if webFS != nil {
-		distFS, err := fs.Sub(webFS, "web/dist")
-		if err == nil {
-			fileServer := http.FileServer(http.FS(distFS))
-			mux.Handle("/", spaHandler(fileServer))
-		}
+		mux.Handle("/", spaHandler(webFS))
 	}
 
 	return corsMiddleware(mux)
 }
 
-// spaHandler 让所有非 /api 且非静态文件的请求回退到 index.html（SPA 路由）
-func spaHandler(fileServer http.Handler) http.Handler {
+// spaHandler 处理 SPA 路由：命中静态文件直接返回，未命中的非 /api 路径回退到 index.html
+// 让 Vue Router 在前端接管路径。/api/* 不会到达这里（ServeMux 前半段已经匹配）。
+func spaHandler(distFS fs.FS) http.Handler {
+	fileServer := http.FileServer(http.FS(distFS))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 先尝试静态文件
+		p := strings.TrimPrefix(r.URL.Path, "/")
+		if p == "" {
+			serveIndex(w, distFS)
+			return
+		}
+		// 尝试打开请求的文件；若不存在（SPA 客户端路由），回退 index.html
+		if f, err := distFS.Open(p); err != nil {
+			serveIndex(w, distFS)
+			return
+		} else {
+			_ = f.Close()
+		}
 		fileServer.ServeHTTP(w, r)
 	})
+}
+
+func serveIndex(w http.ResponseWriter, distFS fs.FS) {
+	f, err := distFS.Open("index.html")
+	if err != nil {
+		http.Error(w, "index.html not found in embedded dist", http.StatusNotImplemented)
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = io.Copy(w, f)
 }
 
 // corsMiddleware 开发模式允许 Vite dev server 跨域

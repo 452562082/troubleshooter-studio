@@ -103,9 +103,36 @@ def main() -> int:
     args = p.parse_args()
     try:
         return args.func(args)
-    except (FileNotFoundError, ValueError, RuntimeError) as e:
-        print(f"[error] {e}", file=sys.stderr)
-        return 2
+    except FileNotFoundError as e:
+        return _error_out(
+            str(e),
+            "creds.json 不存在。请先跑 `bash scripts/install.sh`，它会引导你填 Apollo meta URL 和 token。",
+        )
+    except ValueError as e:
+        return _error_out(
+            str(e),
+            f"`{args.env}` 的 Apollo 凭证不全。编辑 `scripts/.env` 的 `APOLLO_META_{args.env.upper()}` / `APOLLO_TOKEN_{args.env.upper()}`（或共用的 `APOLLO_TOKEN`），或重跑 install.sh。",
+        )
+    except RuntimeError as e:
+        msg = str(e)
+        hint = "Apollo Open API 调用失败。"
+        if "401" in msg or "403" in msg or "unauthorized" in msg.lower() or "forbidden" in msg.lower():
+            hint += " Token 无效或过期：登 Apollo portal 查 user token，更新 `scripts/.env`。"
+        elif "404" in msg:
+            hint += " appId / cluster / namespace 不存在：先用 list-namespaces 子命令确认可用 namespace。"
+        else:
+            hint += " 先用 `curl $APOLLO_META/configs/{appId}/{cluster}/{namespace}?token=$APOLLO_TOKEN` 直连验证，定位是 Apollo 侧还是脚本问题。"
+        return _error_out(msg, hint)
+    except Exception as e:
+        return _error_out(f"{type(e).__name__}: {e}", "脚本内部异常，请反馈。")
+
+
+def _error_out(msg: str, hint: str = "") -> int:
+    payload = {"error": msg}
+    if hint:
+        payload["hint"] = hint
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 2
 
 
 if __name__ == "__main__":

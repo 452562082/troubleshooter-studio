@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""
+{{ .System.Name }} 排障机器人 — 独立 Web 聊天服务
+由 troubleshooter-factory 生成
+
+用法：
+  export LLM_API_KEY=your-api-key
+  export LLM_MODEL={{ anthropicModel .Agent.Model }}       # 覆盖默认模型（可选）
+  python3 server.py
+
+依赖：pip install anthropic flask
+"""
+import json
+import os
+from pathlib import Path
+
+try:
+    from flask import Flask, Response, jsonify, request, send_file, stream_with_context
+except ImportError:
+    print("请安装依赖：pip install flask anthropic")
+    exit(1)
+
+try:
+    import anthropic
+except ImportError:
+    anthropic = None
+
+app = Flask(__name__)
+
+SYSTEM_NAME = "{{ .System.Name }}"
+
+# 加载 system prompt
+PROMPT_PATH = Path(__file__).parent / "system-prompt.md"
+SYSTEM_PROMPT = PROMPT_PATH.read_text(encoding="utf-8") if PROMPT_PATH.exists() else "你是一个排障机器人。"
+
+# 合法 env 白名单（来自 system.yaml）。前端通过 X-Default-Env 头传默认环境，
+# 命中白名单才拼入 prompt；防止前端注入任意字符串到 system prompt。
+VALID_ENVS = {
+{{- range .Environments }}
+    "{{ .ID }}",
+{{- end }}
+}
+
+# 模型：默认使用 system.yaml 中 agent.model（仅保留 anthropic 风格的 model id）；
+# 可通过 LLM_MODEL 环境变量覆盖。
+DEFAULT_MODEL = "{{ anthropicModel .Agent.Model }}"
+MODEL = os.environ.get("LLM_MODEL", DEFAULT_MODEL)
+MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "4096"))
+
+@app.route("/")
+def index():
+    return send_file("index.html")
+
+def _sse(obj):
+    return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
+
+@app.route("/api/chat", methods=["POST"])
+def chat():
+    """流式聊天：以 SSE (text/event-stream) 逐 token 推送。
+    客户端收到 {"delta": "..."} 追加显示，{"done": true} 表示结束，
+    {"error": "..."} 表示错误（可能出现在流开头或中途）。
+    """
+    data = request.json or {}
+    messages = data.get("messages", [])
+
+    api_key = os.environ.get("LLM_API_KEY", "")
+    if not api_key:
+        return jsonify({"error": "请设置 LLM_API_KEY 环境变量"}), 400
+    if not anthropic:
+        return jsonify({"error": "请安装 anthropic SDK：pip install anthropic"}), 500
+
+    # 默认环境：从 X-Default-Env 头取，白名单校验后才拼入 system prompt
+    default_env = request.headers.get("X-Default-Env", "").strip()
+    if default_env in VALID_ENVS:
+        effective_prompt = (
+            f"# 用户当前默认环境: {default_env}\n"
+            f"除非用户在具体问题里指定了别的环境，否则都按 {default_env} 环境操作。\n\n"
+            + SYSTEM_PROMPT
+        )
+    else:
+        effective_prompt = SYSTEM_PROMPT
+
+    def generate():
+        try:
+            client = anthropic.Anthropic(api_key=api_key)
+            with client.messages.stream(
+                model=MODEL,
+                max_tokens=MAX_TOKENS,
+                system=effective_prompt,
+                messages=messages,
+            ) as stream:
+                for text in stream.text_stream:
+                    if text:
+                        yield _sse({"delta": text})
+            yield _sse({"done": True, "model": MODEL, "default_env": default_env if default_env in VALID_ENVS else None})
+        except Exception as e:
+            yield _sse({"error": f"{type(e).__name__}: {e}"})
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 3000))
+    print(f"{SYSTEM_NAME} 排障机器人启动：http://localhost:{port}  (model={MODEL})")
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

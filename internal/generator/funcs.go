@@ -1,6 +1,7 @@
 package generator
 
 import (
+	"slices"
 	"strings"
 	"text/template"
 
@@ -39,14 +40,13 @@ func funcMap() template.FuncMap {
 		"upper":          strings.ToUpper,
 		"lower":          strings.ToLower,
 		"dataStoreSkill": dataStoreSkillName,
+		"anthropicModel": anthropicDefaultModel,
 		"list":           func(items ...string) []string { return items },
 		"hasSkill": func(ctx *Context, name string) bool {
-			for _, s := range ctx.Generation.SkillsWhitelist {
-				if s == name {
-					return true
-				}
+			if len(ctx.Generation.SkillsWhitelist) == 0 {
+				return true
 			}
-			return len(ctx.Generation.SkillsWhitelist) == 0
+			return slices.Contains(ctx.Generation.SkillsWhitelist, name)
 		},
 		// findConfig 返回给定 service+env 的 analyzer finding 视图；命中优先级：精确 env > 无 env 默认 > nil
 		"findConfig": func(ctx *Context, service, env string) *findingView {

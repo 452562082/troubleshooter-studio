@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
+import yaml from 'js-yaml'
 import { useRouter } from 'vue-router'
 import {
   importAndDeploy,
@@ -9,6 +10,7 @@ import {
   validate as bridgeValidate,
 } from '../lib/bridge'
 import { toast } from '../lib/toast'
+import { useDeployPath } from '../lib/useDeployPath'
 
 const router = useRouter()
 
@@ -128,6 +130,20 @@ const deployTarget = ref<'openclaw' | 'claude-code' | 'cursor' | 'standalone'>('
 const deployDestPath = ref('')
 const deployLoading = ref(false)
 const deployError = ref<string | null>(null)
+
+// 从编辑器里的 yaml 解出 system.id 当默认路径计算基准。解析失败兜空串。
+const systemIdFromYaml = computed<string>(() => {
+  try {
+    const parsed: any = yaml.load(yamlContent.value)
+    return parsed?.system?.id || ''
+  } catch { return '' }
+})
+
+const { isManagedTarget, customPathExpanded, autoDefaultPath, resetCustomPath } = useDeployPath(
+  deployTarget,
+  systemIdFromYaml,
+  deployDestPath,
+)
 
 async function pickDeployDestPath() {
   if (!isDesktop()) { deployError.value = '选目录需要桌面 app 环境'; return }
@@ -265,13 +281,24 @@ async function runOneClickDeploy() {
             <option value="standalone">Standalone</option>
           </select>
         </div>
-        <div class="deploy-inline-field flex">
-          <label>部署目标路径</label>
+        <!-- standalone/openclaw:Studio 托管,显示默认路径 + 折叠"自定义" -->
+        <div v-if="isManagedTarget && !customPathExpanded" class="deploy-inline-field flex auto-path-field">
+          <label>部署位置 <span class="auto-tag">自动管理</span></label>
+          <div class="auto-path-display">
+            <code>{{ autoDefaultPath || '…' }}</code>
+            <button type="button" class="btn-link" @click="customPathExpanded = true">自定义 →</button>
+          </div>
+        </div>
+        <div v-else class="deploy-inline-field flex">
+          <label>
+            部署目标路径
+            <button v-if="isManagedTarget" type="button" class="btn-link" @click="resetCustomPath">恢复默认</button>
+          </label>
           <div class="deploy-inline-path">
             <input
               v-model="deployDestPath"
               type="text"
-              placeholder="./dist/my-system 或项目根路径"
+              :placeholder="isManagedTarget ? autoDefaultPath : '项目根路径(如 ~/my-project)'"
               :disabled="deployLoading"
             />
             <button type="button" class="btn" :disabled="deployLoading" @click="pickDeployDestPath">选目录…</button>
@@ -322,6 +349,28 @@ async function runOneClickDeploy() {
 .deploy-inline-path input { flex: 1; font-family: monospace; }
 .deploy-inline-actions { display: flex; justify-content: flex-end; }
 .help-text { color: var(--c-muted); font-size: var(--fs-sm); line-height: 1.6; }
+
+/* standalone/openclaw 自动路径展示,跟 InitPage Step 7 同款 */
+.auto-path-field label { display: flex; align-items: center; gap: 6px; }
+.auto-tag {
+  font-size: 10px; font-weight: 500; color: #065f46;
+  background: #d1fae5; padding: 1px 6px; border-radius: 8px; letter-spacing: 0.2px;
+}
+.auto-path-display {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 10px; background: var(--c-surf-3); border-radius: 6px;
+  border: 1px dashed var(--c-line-2);
+}
+.auto-path-display code {
+  flex: 1; font-size: 12px; color: #1e40af; background: transparent; padding: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.btn-link {
+  padding: 0; border: none; background: transparent; color: #1e40af;
+  font-size: 11px; font-weight: 500; cursor: pointer; font-family: inherit;
+  text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px;
+}
+.btn-link:hover { color: #1e3a8a; }
 
 .yaml-editor {
   width: 100%;

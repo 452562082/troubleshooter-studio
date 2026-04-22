@@ -1,4 +1,5 @@
-// bindings_apply.go —— 改装已装机器人 workspace 的 binding：ApplyBot / ImportAndDeploy。
+// bindings_apply.go —— 改装已装机器人 workspace 的 binding：ApplyBot / ImportAndDeploy /
+// DefaultDestPath。
 //
 // 跟 bindings_core.go 的区别是这些方法会真写盘到机器人活 workspace（rsync 产物 /
 // 更新 tshoot.json），所以单独归一档方便 reviewer 检查对权限与副作用的处理。
@@ -6,6 +7,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/agent"
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
@@ -49,4 +52,35 @@ func (a *App) ImportAndDeploy(yamlText, target, destPath string) (*agent.Result,
 		TemplateRoot:  a.templateRoot,
 		TshootVersion: version,
 	})
+}
+
+// DefaultDestPath 给不同 target 推荐默认部署路径,UI 据此决定要不要让用户手填。
+//
+// 设计:
+//   - standalone:产物只是"Studio 内嵌对话的素材"(system-prompt.md / skills),
+//     用户从不直接 cd 进去。默认到 ~/.tshoot/standalone/<id>/,UI 隐藏路径输入。
+//   - openclaw:产物是 install.sh 用的中间包,最终 rsync 到 workspace_name 目录,
+//     中间位置对用户也没意义。默认到 ~/.tshoot/openclaw/<id>/,UI 隐藏输入。
+//   - claude-code / cursor:装到"用户已有项目根"里(CLAUDE.md + skills/ 注进项目)。
+//     Studio 不知道用户想装哪个项目,必须用户选。返回空串,UI 强制必填。
+//
+// 空 systemID 时回退到 "default"(UI 初始化时 system.id 可能还空,给个兜底)。
+func (a *App) DefaultDestPath(target, systemID string) (string, error) {
+	switch target {
+	case "standalone", "openclaw":
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("read home: %w", err)
+		}
+		id := systemID
+		if id == "" {
+			id = "default"
+		}
+		return filepath.Join(home, ".tshoot", target, id), nil
+	case "claude-code", "cursor":
+		// 空串 = 让用户必选,UI 会保持输入框可见
+		return "", nil
+	default:
+		return "", fmt.Errorf("unknown target: %q", target)
+	}
 }

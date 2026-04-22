@@ -21,6 +21,8 @@ export function ChatSend(arg1:main.ChatSendInput):Promise<string>;
 
 export function ChatStop(arg1:string):Promise<boolean>;
 
+export function DefaultDestPath(arg1:string,arg2:string):Promise<string>;
+
 export function Diff(arg1:string,arg2:string):Promise<generator.Plan>;
 
 export function DiscoverBots(arg1:Array<string>):Promise<Array<discover.DiscoveredAgent>>;

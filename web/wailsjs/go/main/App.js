@@ -26,6 +26,10 @@ export function ChatStop(arg1) {
   return window['go']['main']['App']['ChatStop'](arg1);
 }
 
+export function DefaultDestPath(arg1, arg2) {
+  return window['go']['main']['App']['DefaultDestPath'](arg1, arg2);
+}
+
 export function Diff(arg1, arg2) {
   return window['go']['main']['App']['Diff'](arg1, arg2);
 }

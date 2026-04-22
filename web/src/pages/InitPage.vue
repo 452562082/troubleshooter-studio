@@ -5,6 +5,7 @@ import { useRouter } from 'vue-router'
 import { analyze as bridgeAnalyze, importAndDeploy, isDesktop, openDir, validate as bridgeValidate } from '../lib/bridge'
 import { confirmDialog } from '../lib/confirm'
 import { toast } from '../lib/toast'
+import { useDeployPath } from '../lib/useDeployPath'
 
 const router = useRouter()
 
@@ -802,17 +803,27 @@ function downloadYAML() {
 // 之前走完向导只能下 yaml → 跳 BotsPage → 导入 → 选 target → 填路径,4 步。
 // 现在在 Step 7 直接选 target + 目标路径一键部署:调 importAndDeploy(复用
 // BotsPage 那条闭环),成功后跳 /bots 看刚装好的卡。
+//
+// target 分两类(useDeployPath 判):
+//   - standalone/openclaw:Studio 替用户管路径(~/.tshoot/<target>/<id>/),默认隐路径 input
+//   - claude-code/cursor:必须选项目根,保持 input 可见
 const deployTarget = ref<'openclaw' | 'claude-code' | 'cursor' | 'standalone'>('openclaw')
 const deployDestPath = ref('')
 const deployLoading = ref(false)
 const deployError = ref<string | null>(null)
 
+const { isManagedTarget, customPathExpanded, autoDefaultPath, resetCustomPath } = useDeployPath(
+  deployTarget,
+  () => system.id,
+  deployDestPath,
+)
+
 const deployTargetHint = computed(() => {
   switch (deployTarget.value) {
-    case 'openclaw': return '如 ./dist/' + (system.id || 'my-system') + ',会创建产物目录 + 可选跑 install.sh'
+    case 'openclaw': return 'Studio 托管产物(→ install.sh 装到 ~/.openclaw/workspace/<workspace_name>/)'
     case 'claude-code': return '装到项目根:会写 CLAUDE.md + skills/ + install.sh'
     case 'cursor': return '装到项目根:会写 .cursorrules + .cursor/rules/ + skills/'
-    case 'standalone': return '会创建独立 Web 聊天目录(server.py + venv)'
+    case 'standalone': return 'Studio 托管产物;对话直接在工作台内开(Go 直连 Anthropic)'
   }
   return ''
 })
@@ -1253,14 +1264,32 @@ const configTypeDescriptions: Record<string, string> = {
               <option value="cursor">Cursor IDE</option>
               <option value="standalone">Standalone</option>
             </select>
+            <span class="deploy-hint">{{ deployTargetHint }}</span>
           </div>
-          <div class="deploy-inline-field flex">
-            <label>部署目标路径 <span class="deploy-hint">— {{ deployTargetHint }}</span></label>
+          <!-- standalone/openclaw:默认路径不露 input,用户不用操心;要改点"自定义"展开 -->
+          <div v-if="isManagedTarget && !customPathExpanded" class="deploy-inline-field flex auto-path-field">
+            <label>部署位置 <span class="auto-tag">自动管理</span></label>
+            <div class="auto-path-display">
+              <code>{{ autoDefaultPath || '…' }}</code>
+              <button type="button" class="btn-link" @click="customPathExpanded = true">自定义 →</button>
+            </div>
+          </div>
+          <!-- claude-code/cursor 必选,或 standalone/openclaw 展开"自定义"后的 input -->
+          <div v-else class="deploy-inline-field flex">
+            <label>
+              部署目标路径
+              <button
+                v-if="isManagedTarget"
+                type="button"
+                class="btn-link"
+                @click="resetCustomPath"
+              >恢复默认</button>
+            </label>
             <div class="deploy-inline-path">
               <input
                 v-model="deployDestPath"
                 type="text"
-                placeholder="./dist/my-system 或项目根路径"
+                :placeholder="isManagedTarget ? autoDefaultPath : '项目根路径(如 ~/my-project)'"
                 :disabled="deployLoading"
               />
               <button type="button" class="btn" :disabled="deployLoading" @click="pickDeployDestPath">选目录…</button>
@@ -1798,6 +1827,28 @@ textarea.error {
 .deploy-inline-path { display: flex; gap: 6px; }
 .deploy-inline-path input { flex: 1; font-family: monospace; }
 .deploy-inline-actions { display: flex; justify-content: flex-end; }
+
+/* standalone/openclaw 的"自动管理"展示 */
+.auto-path-field label { display: flex; align-items: center; gap: 6px; }
+.auto-tag {
+  font-size: 10px; font-weight: 500; color: #065f46;
+  background: #d1fae5; padding: 1px 6px; border-radius: 8px; letter-spacing: 0.2px;
+}
+.auto-path-display {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 10px; background: var(--c-surf-3); border-radius: 6px;
+  border: 1px dashed var(--c-line-2);
+}
+.auto-path-display code {
+  flex: 1; font-size: 12px; color: #1e40af; background: transparent; padding: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.btn-link {
+  padding: 0; border: none; background: transparent; color: #1e40af;
+  font-size: 11px; font-weight: 500; cursor: pointer; font-family: inherit;
+  text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px;
+}
+.btn-link:hover { color: #1e3a8a; }
 
 /* .btn / .btn.primary / .info-box 来自全局 design.css */
 

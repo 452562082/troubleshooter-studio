@@ -138,6 +138,14 @@ export async function importAndDeploy(
   return App.ImportAndDeploy(yamlText, target, destPath)
 }
 
+/** 给 target 推荐默认部署路径。standalone/openclaw 返回 ~/.tshoot/<target>/<id>/
+ *  (UI 据此不让用户手填 destPath);claude-code/cursor 返回空串(UI 强制必填)。
+ *  浏览器模式直接返回空,浏览器模式本来就没 home dir 概念。 */
+export async function defaultDestPath(target: string, systemId: string): Promise<string> {
+  if (!isDesktop()) return ''
+  return App.DefaultDestPath(target, systemId)
+}
+
 /** 扫 install.sh 里所有 read_var 调用,给 UI 渲染凭证表单 */
 export async function scanInstallPrompts(outputDir: string): Promise<InstallPrompt[]> {
   if (!isDesktop()) throw new Error('ScanInstallPrompts 只在桌面 app 里可用')

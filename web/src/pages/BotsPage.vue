@@ -21,6 +21,8 @@ import {
   runInstall,
   scanInstallPrompts,
 } from '../lib/bridge'
+import yaml from 'js-yaml'
+import { useDeployPath } from '../lib/useDeployPath'
 
 const router = useRouter()
 import type { ApplyResult, DiscoveredBot, InstallPrompt } from '../lib/bridge'
@@ -295,6 +297,21 @@ const importYAMLPath = ref('')
 const importTarget = ref<'openclaw' | 'claude-code' | 'cursor' | 'standalone'>('openclaw')
 const importDestPath = ref('')
 const importError = ref<string | null>(null)
+
+// 跟 InitPage / EditorPage 一致,拿 yaml 里的 system.id 当默认路径基准。
+// importYAMLText 每次选文件都会变,computed 实时跟着算。
+const importSystemId = computed<string>(() => {
+  try {
+    const parsed: any = yaml.load(importYAMLText.value)
+    return parsed?.system?.id || ''
+  } catch { return '' }
+})
+const {
+  isManagedTarget: importIsManagedTarget,
+  customPathExpanded: importCustomPathExpanded,
+  autoDefaultPath: importAutoDefaultPath,
+  resetCustomPath: importResetCustomPath,
+} = useDeployPath(importTarget, importSystemId, importDestPath)
 const importedOutputDir = ref('') // agent.Result.agent_path 返回的实际落盘位置
 const installPrompts = ref<InstallPrompt[]>([])
 const installCreds = ref<Record<string, string>>({})
@@ -534,23 +551,36 @@ onUnmounted(() => {
         <button class="btn btn-regen" @click="resetImport">关闭</button>
       </div>
 
-      <!-- Step 1: 选 target + destPath -->
+      <!-- Step 1: 选 target + destPath。standalone/openclaw 自动路径,其它要选 -->
       <div v-if="importStage === 'picked' || importStage === 'deploying'" class="deploy-step">
         <div class="deploy-field">
           <label>目标平台</label>
           <select v-model="importTarget" :disabled="importStage === 'deploying'">
-            <option value="openclaw">OpenClaw（需要填凭证）</option>
+            <option value="openclaw">OpenClaw（Studio 托管,需填凭证）</option>
             <option value="claude-code">Claude Code（装到项目根）</option>
             <option value="cursor">Cursor IDE（装到项目根）</option>
-            <option value="standalone">Standalone（本机 venv / Docker）</option>
+            <option value="standalone">Standalone（Studio 托管,工作台内开对话）</option>
           </select>
         </div>
-        <div class="deploy-field">
-          <label>部署目标路径</label>
+        <!-- standalone/openclaw 自动管理路径,折叠;用户点"自定义"才露 input -->
+        <div v-if="importIsManagedTarget && !importCustomPathExpanded" class="deploy-field">
+          <label>部署位置 <span class="auto-tag">自动管理</span></label>
+          <div class="auto-path-display">
+            <code>{{ importAutoDefaultPath || '…' }}</code>
+            <button type="button" class="btn-link" @click="importCustomPathExpanded = true">自定义 →</button>
+          </div>
+        </div>
+        <div v-else class="deploy-field">
+          <label>
+            部署目标路径
+            <button v-if="importIsManagedTarget" type="button" class="btn-link" @click="importResetCustomPath">
+              恢复默认
+            </button>
+          </label>
           <div class="path-row">
             <input
               v-model="importDestPath"
-              :placeholder="importTarget === 'openclaw' ? '如 ./dist/shop（会创建产物目录）' : '项目根或工作目录'"
+              :placeholder="importIsManagedTarget ? importAutoDefaultPath : '项目根或工作目录'"
               :disabled="importStage === 'deploying'"
             />
             <button class="btn" :disabled="importStage === 'deploying'" @click="pickDestDir">
@@ -1024,6 +1054,27 @@ onUnmounted(() => {
 }
 .path-row { display: flex; gap: 8px; }
 .path-row input { flex: 1; }
+/* standalone/openclaw 的自动路径展示 */
+.deploy-field label { display: flex; align-items: center; gap: 6px; }
+.auto-tag {
+  font-size: 10px; font-weight: 500; color: #065f46;
+  background: #d1fae5; padding: 1px 6px; border-radius: 8px; letter-spacing: 0.2px;
+}
+.auto-path-display {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 10px; background: #f1f5f9; border-radius: 4px;
+  border: 1px dashed #cbd5e1;
+}
+.auto-path-display code {
+  flex: 1; font-size: 12px; color: #1e40af; background: transparent; padding: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.btn-link {
+  padding: 0; border: none; background: transparent; color: #1e40af;
+  font-size: 11px; font-weight: 500; cursor: pointer; font-family: inherit;
+  text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px;
+}
+.btn-link:hover { color: #1e3a8a; }
 
 .deploy-tip { font-size: 12px; color: #64748b; line-height: 1.6; }
 .deploy-tip code { background: #f1f5f9; padding: 1px 4px; border-radius: 3px; }

@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch } from 'vue'
 import yaml from 'js-yaml'
-import { analyze as bridgeAnalyze, isDesktop, openDir, validate as bridgeValidate } from '../lib/bridge'
+import { useRouter } from 'vue-router'
+import { analyze as bridgeAnalyze, importAndDeploy, isDesktop, openDir, validate as bridgeValidate } from '../lib/bridge'
 import { confirmDialog } from '../lib/confirm'
 import { toast } from '../lib/toast'
+
+const router = useRouter()
 
 // ── Draft persistence (survives route switches and reloads) ──
 const STORAGE_KEY = 'tsf-init-wizard-v1'
@@ -291,6 +294,7 @@ const enabledTargets = reactive<Record<string, boolean>>({
 })
 
 // Auto-save all form state so navigating away doesn't lose the draft
+const lastSavedAt = ref<number | null>(null) // unix ms;null = 本会话还没保存过(首次读取态)
 watch(
   () => ({
     currentStep: currentStep.value,
@@ -306,12 +310,26 @@ watch(
   (val) => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(val))
+      lastSavedAt.value = Date.now()
     } catch {
       // quota / privacy-mode failures: skip silently
     }
   },
   { deep: true }
 )
+
+// "X 秒前"计时 —— 让徽章文案能随时间流动,用户看得到 Auto-save 真的在跑。
+// 刷 500ms 够用;不用 setInterval 精确到毫秒,UI 节省 re-render。
+const nowTick = ref(Date.now())
+setInterval(() => { nowTick.value = Date.now() }, 1000)
+const savedAgoLabel = computed<string>(() => {
+  if (!lastSavedAt.value) return '进入页面尚未改动'
+  const diffSec = Math.max(0, Math.floor((nowTick.value - lastSavedAt.value) / 1000))
+  if (diffSec < 3) return '刚刚保存'
+  if (diffSec < 60) return `${diffSec} 秒前保存`
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分钟前保存`
+  return `${Math.floor(diffSec / 3600)} 小时前保存`
+})
 
 async function clearDraft() {
   // 不用 window.confirm:Wails 的 WKWebView 默认吞掉 JS 原生对话框(避免阻塞
@@ -780,6 +798,69 @@ function downloadYAML() {
   URL.revokeObjectURL(url)
 }
 
+// ── 一键部署 ──
+// 之前走完向导只能下 yaml → 跳 BotsPage → 导入 → 选 target → 填路径,4 步。
+// 现在在 Step 7 直接选 target + 目标路径一键部署:调 importAndDeploy(复用
+// BotsPage 那条闭环),成功后跳 /bots 看刚装好的卡。
+const deployTarget = ref<'openclaw' | 'claude-code' | 'cursor' | 'standalone'>('openclaw')
+const deployDestPath = ref('')
+const deployLoading = ref(false)
+const deployError = ref<string | null>(null)
+
+const deployTargetHint = computed(() => {
+  switch (deployTarget.value) {
+    case 'openclaw': return '如 ./dist/' + (system.id || 'my-system') + ',会创建产物目录 + 可选跑 install.sh'
+    case 'claude-code': return '装到项目根:会写 CLAUDE.md + skills/ + install.sh'
+    case 'cursor': return '装到项目根:会写 .cursorrules + .cursor/rules/ + skills/'
+    case 'standalone': return '会创建独立 Web 聊天目录(server.py + venv)'
+  }
+  return ''
+})
+
+async function pickDeployDestPath() {
+  if (!isDesktop()) {
+    deployError.value = '选目录需要桌面 app 环境'
+    return
+  }
+  try {
+    const p = await openDir('选择部署目标路径')
+    if (p) deployDestPath.value = p
+  } catch (e: any) {
+    deployError.value = String(e?.message || e)
+  }
+}
+
+async function runOneClickDeploy() {
+  deployError.value = null
+  if (!deployDestPath.value.trim()) {
+    deployError.value = '请填部署目标路径'
+    return
+  }
+  if (!isDesktop()) {
+    deployError.value = '一键部署只在桌面 app 可用;浏览器模式请下载 yaml 去 BotsPage 或用 CLI'
+    return
+  }
+  // 部署前校一把 yaml,失败就不提交到后端兜错
+  try {
+    await bridgeValidate(yamlOutput.value)
+  } catch (e: any) {
+    deployError.value = `yaml 校验失败:${String(e?.message || e)};请先点"✓ 验证"修复`
+    return
+  }
+  deployLoading.value = true
+  try {
+    await importAndDeploy(yamlOutput.value, deployTarget.value, deployDestPath.value)
+    toast.success(`部署完成,已写到 ${deployDestPath.value}`)
+    // 跳已装机器人页让用户看到新装的卡;openclaw 还要跑 install.sh,BotsPage
+    // "导入 yaml 一键部署"流程那边已经做过,这里新用户的第一印象是"看到卡就算成功"。
+    router.push('/bots')
+  } catch (e: any) {
+    deployError.value = String(e?.message || e)
+  } finally {
+    deployLoading.value = false
+  }
+}
+
 const roleOptions = ['backend', 'frontend', 'gateway', 'infra', 'shared']
 const stackOptions = ['go', 'java', 'node', 'php', 'python']
 const configTypeOptions = ['nacos', 'apollo', 'consul', 'env-vars', 'kubernetes', 'none']
@@ -802,6 +883,12 @@ const configTypeDescriptions: Record<string, string> = {
         <p class="subtitle">通过可视化表单生成 system.yaml 配置文件（草稿会自动保存到本地）</p>
       </div>
       <div class="header-actions">
+        <!-- 自动保存徽章:让用户感知到"改动一直在存"(类似 Notion/Google Docs 的风格),
+             lastSavedAt=null = 首次进入无改动(徽章灰态),有值 = 蓝态 + 计时刷新 -->
+        <span class="autosave-badge" :class="{ idle: lastSavedAt === null }" :title="lastSavedAt === null ? '尚未触发自动保存;做任何改动后会自动保存到浏览器 localStorage' : '草稿存在浏览器 localStorage,切换页面不丢;清空草稿按钮可重置'">
+          <span class="autosave-dot" />
+          {{ lastSavedAt === null ? '草稿空' : `✓ 自动保存 · ${savedAgoLabel}` }}
+        </span>
         <button class="btn link" @click="openImportDialog" title="把已有 yaml 反填到向导各步骤,继续编辑调整">导入 YAML 到向导编辑</button>
         <button class="btn link" @click="clearDraft">清空草稿</button>
       </div>
@@ -1150,6 +1237,48 @@ const configTypeDescriptions: Record<string, string> = {
       <div v-if="validateResult" class="validate-result" :class="{ success: validateResult.ok, fail: !validateResult.ok }">
         {{ validateResult.message }}
       </div>
+
+      <!-- 一键部署:yaml 预览完直接装,省 BotsPage 那一圈 -->
+      <div class="deploy-inline">
+        <div class="deploy-inline-title">🚀 一键部署到已装机器人</div>
+        <p class="help-text" style="margin-bottom:10px;">
+          跳过"下载 yaml → BotsPage 导入"的来回,直接选 target + 目标路径部署。部署完会跳到「已装机器人」页。
+        </p>
+        <div class="deploy-inline-row">
+          <div class="deploy-inline-field">
+            <label>目标平台</label>
+            <select v-model="deployTarget" :disabled="deployLoading">
+              <option value="openclaw">OpenClaw</option>
+              <option value="claude-code">Claude Code</option>
+              <option value="cursor">Cursor IDE</option>
+              <option value="standalone">Standalone</option>
+            </select>
+          </div>
+          <div class="deploy-inline-field flex">
+            <label>部署目标路径 <span class="deploy-hint">— {{ deployTargetHint }}</span></label>
+            <div class="deploy-inline-path">
+              <input
+                v-model="deployDestPath"
+                type="text"
+                placeholder="./dist/my-system 或项目根路径"
+                :disabled="deployLoading"
+              />
+              <button type="button" class="btn" :disabled="deployLoading" @click="pickDeployDestPath">选目录…</button>
+            </div>
+          </div>
+        </div>
+        <div class="deploy-inline-actions">
+          <button
+            type="button"
+            class="btn primary"
+            :disabled="deployLoading || !deployDestPath.trim()"
+            @click="runOneClickDeploy"
+          >
+            {{ deployLoading ? '部署中…' : '一键部署' }}
+          </button>
+        </div>
+        <div v-if="deployError" class="alert error">{{ deployError }}</div>
+      </div>
     </div>
 
     <!-- Navigation buttons -->
@@ -1193,9 +1322,29 @@ const configTypeDescriptions: Record<string, string> = {
 
 .header-actions {
   display: flex;
-  gap: 4px;
+  gap: 8px;
+  align-items: center;
   flex-shrink: 0;
   margin-top: 4px;
+}
+
+/* 自动保存徽章:默认蓝态(在跑),idle = 灰态(还没触发过)。跟 header 其它 link 按钮并排放,不抢眼。 */
+.autosave-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; color: #1e40af; background: #eff6ff;
+  padding: 3px 10px; border-radius: 10px; border: 1px solid #bfdbfe;
+  cursor: default; user-select: none;
+  font-variant-numeric: tabular-nums; /* 秒数跳变时数字不抖 */
+  white-space: nowrap;
+}
+.autosave-badge.idle { color: #64748b; background: #f1f5f9; border-color: #e2e8f0; }
+.autosave-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.2);
+}
+.autosave-badge.idle .autosave-dot {
+  background: #94a3b8; box-shadow: none;
 }
 
 /* Import modal */
@@ -1626,6 +1775,29 @@ textarea.error {
   color: #991b1b;
   border: 1px solid #fecaca;
 }
+
+/* ── Step 7 一键部署块 ── */
+.deploy-inline {
+  margin-top: 18px; padding: 16px 18px;
+  background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px;
+}
+.deploy-inline-title {
+  font-weight: 600; color: #1e40af; margin-bottom: 4px; font-size: 14px;
+}
+.deploy-inline-row {
+  display: flex; gap: 12px; margin-bottom: 10px; flex-wrap: wrap;
+}
+.deploy-inline-field { display: flex; flex-direction: column; gap: 4px; min-width: 180px; }
+.deploy-inline-field.flex { flex: 1; }
+.deploy-inline-field label { font-size: 12px; font-weight: 600; color: #334155; }
+.deploy-hint { color: #64748b; font-weight: 400; }
+.deploy-inline-field select,
+.deploy-inline-path input {
+  padding: 7px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px;
+}
+.deploy-inline-path { display: flex; gap: 6px; }
+.deploy-inline-path input { flex: 1; font-family: monospace; }
+.deploy-inline-actions { display: flex; justify-content: flex-end; }
 
 /* .btn / .btn.primary / .info-box 来自全局 design.css */
 

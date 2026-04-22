@@ -84,6 +84,30 @@ function doctorClassForSeverity(s: string): string {
   return 'doctor-info'
 }
 
+// ── 卡片"更多"菜单 ──
+// 一张卡之前外露 5 个按钮挤一行(打开对话 / 重生成 / 编辑 / 诊断 / 导出),
+// 小屏溢出,视觉也乱。保留"打开对话"+ "诊断"两个高频操作外露,其余(重生成
+// /编辑/导出)塞进 ⋯ 下拉。menuOpenKey = 当前打开菜单的 card key;null = 都收起。
+const menuOpenKey = ref<string | null>(null)
+function toggleMenu(key: string) {
+  menuOpenKey.value = menuOpenKey.value === key ? null : key
+}
+function closeMenu() { menuOpenKey.value = null }
+// 点菜单外空白区关闭。mount 时挂全局 click 监听,unmount 时摘,避免内存泄漏。
+onMounted(() => {
+  document.addEventListener('click', onDocClickForMenu)
+})
+onUnmounted(() => {
+  document.removeEventListener('click', onDocClickForMenu)
+})
+function onDocClickForMenu(e: MouseEvent) {
+  if (menuOpenKey.value === null) return
+  // 点击发生在菜单或触发按钮内不关(靠 stopPropagation 实现不现实,这里用 closest)
+  const t = e.target as HTMLElement | null
+  if (t && t.closest('.bot-more-wrap')) return
+  menuOpenKey.value = null
+}
+
 const isDesktop = bridgeIsDesktop
 
 async function scan() {
@@ -619,9 +643,7 @@ onUnmounted(() => {
         <footer class="bot-foot">
           <span class="bot-time">最近更新：{{ b.mod_time }}</span>
           <div class="bot-actions">
-            <!-- 所有 target 都支持:Studio 原生对话(Go 直连 Anthropic,不经 Flask/iframe)。
-                 llmchat.ReadSystemPrompt 三档兜底:
-                  standalone → system-prompt.md / openclaw → 拼 SOUL+IDENTITY+... / claude-code → CLAUDE.md -->
+            <!-- 外露:高频操作(对话 + 诊断),用绿色强调 -->
             <button
               class="btn btn-regen btn-chat"
               title="在 Studio 内跟机器人对话(Go 直连 Anthropic API,不依赖 python/flask)"
@@ -631,30 +653,32 @@ onUnmounted(() => {
             </button>
             <button
               class="btn btn-regen"
-              :disabled="regenState[regenKey(b)]?.loading"
-              :title="b.meta.system_yaml ? '' : 'tshoot.json 里没保存 system_yaml，无法原地重 gen'"
-              @click="regen(b)"
-            >
-              {{ regenState[regenKey(b)]?.loading ? '生成中…' : '重新生成' }}
-            </button>
-            <button class="btn btn-regen" :title="'编辑 yaml + 应用到活 workspace'" @click="toggleEditor(b)">
-              {{ editingKey === regenKey(b) ? '收起' : '编辑配置' }}
-            </button>
-            <button
-              class="btn btn-regen"
               :disabled="doctorState[regenKey(b)]?.loading"
               :title="'跑一次 doctor:对比 yaml 声明跟代码仓库实态(本地跑,只做声明级检查;想加 reposRoot 做深度扫描请去「健康检查」独立页)'"
               @click="runDoctor(b)"
             >
               {{ doctorState[regenKey(b)]?.loading ? '诊断中…' : '🩺 诊断' }}
             </button>
-            <button
-              class="btn btn-regen"
-              :title="editingKey === regenKey(b) ? '导出当前编辑中的草稿' : '导出活 workspace 的 system.yaml'"
-              @click="doExport(b)"
-            >
-              导出 yaml
-            </button>
+            <!-- ⋯ 更多:低频/管理类操作折进下拉,省卡片版面 + 降视觉噪声 -->
+            <div class="bot-more-wrap">
+              <button class="btn btn-regen btn-more" :title="'更多操作'" @click.stop="toggleMenu(regenKey(b))">⋯</button>
+              <div v-if="menuOpenKey === regenKey(b)" class="bot-menu" role="menu">
+                <button
+                  class="menu-item"
+                  :disabled="regenState[regenKey(b)]?.loading"
+                  :title="b.meta.system_yaml ? '' : 'tshoot.json 里没保存 system_yaml，无法原地重 gen'"
+                  @click="closeMenu(); regen(b)"
+                >
+                  {{ regenState[regenKey(b)]?.loading ? '生成中…' : '♻ 重新生成' }}
+                </button>
+                <button class="menu-item" @click="closeMenu(); toggleEditor(b)">
+                  {{ editingKey === regenKey(b) ? '收起编辑器' : '✎ 编辑配置' }}
+                </button>
+                <button class="menu-item" @click="closeMenu(); doExport(b)">
+                  {{ editingKey === regenKey(b) ? '⇩ 导出草稿' : '⇩ 导出 yaml' }}
+                </button>
+              </div>
+            </div>
           </div>
         </footer>
 
@@ -798,6 +822,26 @@ onUnmounted(() => {
   background: #d1fae5; border-color: #86efac; color: #065f46; font-weight: 600;
 }
 .btn-chat:hover:not(:disabled) { background: #a7f3d0; border-color: #4ade80; }
+
+/* ⋯ 更多菜单:外露只留高频,管理类折进来让卡片不拥挤 */
+.bot-more-wrap { position: relative; }
+.btn-more {
+  font-size: 14px; line-height: 1; padding: 4px 10px;
+}
+.bot-menu {
+  position: absolute; top: calc(100% + 4px); right: 0; z-index: 10;
+  min-width: 140px; padding: 4px 0;
+  background: #fff; border: 1px solid var(--c-line-2); border-radius: 6px;
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.12);
+  display: flex; flex-direction: column;
+}
+.bot-menu .menu-item {
+  text-align: left; padding: 7px 14px; font-size: 12px;
+  border: none; background: transparent; color: var(--c-text); cursor: pointer;
+  font-family: inherit;
+}
+.bot-menu .menu-item:hover:not(:disabled) { background: var(--c-surf-3); }
+.bot-menu .menu-item:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* Doctor 诊断结果面板 */
 .doctor-panel {

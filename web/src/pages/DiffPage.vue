@@ -326,6 +326,10 @@ async function runDiff() {
   border-radius: 6px;
   background: #f8fafc;
   color: #1e293b;
+  /* 后面紧跟"执行对比"按钮,不留气会跟 input 贴一起。跟 .label-mt 的 14px
+   * 节奏一致(label 往上留 14px,input 往下也留 14px,动作按钮单独成一节)。
+   * .text-input 本页只这一处用,不用担心波及别处。 */
+  margin-bottom: 14px;
 }
 .text-input:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.1); }
 

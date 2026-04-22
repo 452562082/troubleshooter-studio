@@ -39,6 +39,12 @@ type RepoSummary struct {
 	ServiceNameCount int    `json:"service_name_count"`
 	FindingCount     int    `json:"finding_count"`
 	Error            string `json:"error,omitempty"`
+	// DetectedStack 是 analyzer.DetectStack 从仓库根文件猜出来的技术栈
+	// (go / java / python / node / php;空串 = 没匹配到任何 marker)。
+	// InitPage Step 4 的"扫一下"会把这个值反填到 repos[].stack,让用户不用手选。
+	// 即使 yaml 里已填了 stack,这个字段也会独立反映探测结果,UI 可以提示
+	// "你声明 go 但看起来是 java"。
+	DetectedStack string `json:"detected_stack,omitempty"`
 }
 
 // Result 是 Run 的完整结果:analyzer.Report(可以 Marshal 成 analysis.json) + 每仓库摘要。
@@ -98,9 +104,25 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 			status = "cloned-then-analyzed"
 		}
 
-		a, err := reg.Get(repo.Stack)
+		// 不管 yaml 里 repo.stack 填没填,都跑一次 DetectStack 探测,作为信号告诉
+		// InitPage Step 4 能不能自动反填;yaml 已填时也可以用来做"声明 vs 实态"冲突提示。
+		detectedStack := analyzer.DetectStack(repoPath)
+
+		// 跑实际 analyzer:优先用 yaml 里声明的 stack;yaml 没填时回落到 detected。
+		// 两个都空就没法分析了,标 skipped。
+		effectiveStack := repo.Stack
+		if effectiveStack == "" {
+			effectiveStack = detectedStack
+		}
+
+		a, err := reg.Get(effectiveStack)
 		if err != nil {
-			perRepo = append(perRepo, RepoSummary{Name: repo.Name, Status: "skipped", Error: err.Error()})
+			perRepo = append(perRepo, RepoSummary{
+				Name:          repo.Name,
+				Status:        "skipped",
+				Error:         err.Error(),
+				DetectedStack: detectedStack,
+			})
 			progress(fmt.Sprintf("[skip] %s: %v", repo.Name, err))
 			continue
 		}
@@ -115,9 +137,10 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 			Status:           status,
 			ServiceNameCount: len(ra.ServiceNames),
 			FindingCount:     len(ra.Findings),
+			DetectedStack:    detectedStack,
 		})
-		progress(fmt.Sprintf("[ok] analyzed %s: %d service_names, %d findings",
-			repo.Name, len(ra.ServiceNames), len(ra.Findings)))
+		progress(fmt.Sprintf("[ok] analyzed %s (stack=%s): %d service_names, %d findings",
+			repo.Name, effectiveStack, len(ra.ServiceNames), len(ra.Findings)))
 	}
 
 	return &Result{Report: report, PerRepo: perRepo}, nil

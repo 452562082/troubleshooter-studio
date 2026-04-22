@@ -150,6 +150,7 @@ export namespace analyzerpipe {
 	    service_name_count: number;
 	    finding_count: number;
 	    error?: string;
+	    detected_stack?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new RepoSummary(source);
@@ -162,6 +163,7 @@ export namespace analyzerpipe {
 	        this.service_name_count = source["service_name_count"];
 	        this.finding_count = source["finding_count"];
 	        this.error = source["error"];
+	        this.detected_stack = source["detected_stack"];
 	    }
 	}
 	export class Result {

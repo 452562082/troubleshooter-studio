@@ -253,29 +253,70 @@ async function runAnalyzeForRepos() {
   try {
     const yamlText = generateYAML() // 复用 Step 7 的 yaml 构造器,当前向导状态够跑一次分析
     const r = (await bridgeAnalyze(yamlText, reposRootInput.value, false)) as {
-      per_repo?: Array<{ name: string; service_names?: string[]; status: string; error?: string }>
-      report?: { config_center?: string; repos?: Array<{ name: string; service_names?: string[] }> }
-    }
-    // 反填 service_names:per_repo 里每条去 repos 里按 name 找对应,把 service_names 数组改成逗号串
-    let filled = 0
-    const perRepo = r.per_repo || []
-    for (const hit of perRepo) {
-      if (!hit.service_names?.length) continue
-      const target = repos.find(rp => rp.name === hit.name)
-      if (!target) continue
-      const joined = hit.service_names.join(', ')
-      if (target.service_names !== joined) {
-        target.service_names = joined
-        filled++
+      per_repo?: Array<{
+        name: string
+        status: string
+        error?: string
+        detected_stack?: string   // 根文件 marker 探测(go.mod / package.json / ...)
+      }>
+      // 真实的 service_names 在 report.repos[i].service_names 里(per_repo 只给 count)
+      report?: {
+        config_center?: string
+        repos?: Array<{ name: string; service_names?: string[] }>
       }
     }
+
+    const perRepo = r.per_repo || []
+    const reportRepos = r.report?.repos || []
+    let filledServices = 0
+    let filledStacks = 0
+    const stackConflicts: string[] = []
+
+    for (const hit of perRepo) {
+      const target = repos.find(rp => rp.name === hit.name)
+      if (!target) continue
+
+      // (1) 反填 service_names(从 report.repos 按 name 找对应的 ServiceNames 数组)
+      const rpt = reportRepos.find(rr => rr.name === hit.name)
+      if (rpt?.service_names?.length) {
+        const joined = rpt.service_names.join(', ')
+        if (target.service_names !== joined) {
+          target.service_names = joined
+          filledServices++
+        }
+      }
+
+      // (2) 反填 / 对比 detected_stack
+      if (hit.detected_stack) {
+        if (!target.stack || target.stack === 'go') {
+          // "go" 是 makeEmptyRepo 的默认值;视作"用户没显式填"一起覆盖
+          if (target.stack !== hit.detected_stack) {
+            target.stack = hit.detected_stack
+            filledStacks++
+          }
+        } else if (target.stack !== hit.detected_stack) {
+          // 用户显式填过且跟探测冲突,不静默改,toast 告警让用户决定
+          stackConflicts.push(`${hit.name}: yaml=${target.stack} vs 探测=${hit.detected_stack}`)
+        }
+      }
+    }
+
     // 配置中心建议给 toast,避免 Step 5 静默被改
     const ccHint = r.report?.config_center && r.report.config_center !== 'unknown'
       ? `;识别到配置中心类型:${r.report.config_center}(Step 5 可据此选)`
       : ''
-    analyzeSummary.value = `扫描完成:${filled} 个仓库反填了 service_names${ccHint}`
-    if (filled > 0) toast.success(analyzeSummary.value)
-    else toast.info(`扫描完成但没抓到 service_names;手填也行${ccHint}`)
+    const parts: string[] = []
+    if (filledServices > 0) parts.push(`${filledServices} 个仓库反填 service_names`)
+    if (filledStacks > 0) parts.push(`${filledStacks} 个仓库反填技术栈`)
+    if (parts.length === 0) parts.push('未反填任何字段')
+    analyzeSummary.value = `扫描完成:${parts.join(' · ')}${ccHint}`
+
+    if (filledServices > 0 || filledStacks > 0) toast.success(analyzeSummary.value)
+    else toast.info(analyzeSummary.value)
+
+    if (stackConflicts.length > 0) {
+      toast.error(`技术栈冲突(已保留你的选择):\n` + stackConflicts.join('\n'))
+    }
   } catch (e: any) {
     analyzeError.value = String(e?.message || e)
   } finally {

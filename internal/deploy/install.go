@@ -150,9 +150,14 @@ func ReadEnvFile(dir string) (map[string]string, error) {
 		}
 		key := strings.TrimSpace(line[:eq])
 		val := strings.TrimSpace(line[eq+1:])
-		// 去掉外层引号
+		// 去掉外层引号,并反向解码 WriteEnvFile 里的单引号转义 '\'' → '
 		if len(val) >= 2 && (val[0] == '\'' || val[0] == '"') && val[len(val)-1] == val[0] {
+			quote := val[0]
 			val = val[1 : len(val)-1]
+			if quote == '\'' {
+				// bash 单引号字符串里 '\'' 是唯一一种转义,表示字面量单引号
+				val = strings.ReplaceAll(val, `'\''`, `'`)
+			}
 		}
 		out[key] = val
 	}

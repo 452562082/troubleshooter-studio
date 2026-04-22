@@ -41,14 +41,20 @@ onMounted(() => {
   loadLastYaml()
 })
 
-const cards = [
-  { path: '/init', icon: '🧙', label: '创建向导', desc: '7 步生成 system.yaml（支持导入已有 yaml 继续编辑）', tag: '推荐新用户' },
-  { path: '/editor', icon: '📝', label: 'YAML 编辑器', desc: '直接手写 / 粘贴 system.yaml，一键验证、plan、gen' },
-  { path: '/analyze', icon: '🔍', label: '仓库分析', desc: '扫描代码抽取 service_names 与配置中心线索（可选）' },
-  { path: '/plan', icon: '📋', label: '计划预览', desc: '干跑一次 gen，看会生成哪些 skill / 文件 / 保留' },
-  { path: '/gen', icon: '🚀', label: '生成产物', desc: '按 generation.targets 真落盘 4 种形态的机器人产物（OpenClaw / Claude Code / Cursor / Standalone）' },
-  { path: '/doctor', icon: '🩺', label: '健康检查', desc: '对比声明 vs 代码实态，给 actionable 的修复建议' },
-  { path: '/diff', icon: '🔀', label: '差异对比', desc: '精确到行级的新旧产物 diff，review 用' },
+// 主路径卡片:80% 用户的核心工作流。顺序按"新用户第一次打开 → 老用户管理"设计,
+// 已装机器人放 #2 是因为"我已有 yaml 想直接部署"和"查看/改已装"都在那页。
+const primaryCards = [
+  { path: '/init',   icon: '🧙', label: '创建向导',      desc: '7 步生成 system.yaml（支持导入已有 yaml 继续编辑）', tag: '推荐新用户' },
+  { path: '/bots',   icon: '🤖', label: '已装机器人',    desc: '扫本机已部署的 / 导入 yaml 一键部署到 4 平台 / 原地更新已装' },
+  { path: '/editor', icon: '📝', label: 'YAML 编辑器',   desc: '直接手写 / 粘贴 system.yaml，一键验证 / plan / gen' },
+  { path: '/gen',    icon: '🚀', label: '生成产物',      desc: '按 generation.targets 真落盘 4 种形态的机器人产物' },
+]
+// 高级 / 诊断工具:不是每次都用,视觉上弱化一档。
+const advancedCards = [
+  { path: '/analyze', icon: '🔍', label: '仓库分析',  desc: '扫描代码抽取 service_names 与配置中心线索（可选，补充 yaml）' },
+  { path: '/plan',    icon: '📋', label: '计划预览',  desc: '干跑一次 gen，看会生成哪些 skill / 文件 / 保留' },
+  { path: '/doctor',  icon: '🩺', label: '健康检查',  desc: '对比声明 vs 代码实态，给 actionable 的修复建议' },
+  { path: '/diff',    icon: '🔀', label: '差异对比',  desc: '精确到行级的新旧产物 diff，review 用' },
 ]
 
 // 推荐下一步逻辑
@@ -86,16 +92,29 @@ const nextStep = computed(() => {
       <button class="next-cta" @click="router.push(nextStep.path)">{{ nextStep.cta }}</button>
     </div>
 
-    <!-- 能力概览 -->
-    <h2 class="section-title">工作流</h2>
-    <p class="section-hint">典型顺序：创建 → 编辑 → 分析（可选）→ 预览 → 生成并部署 → 健康检查。每个页面都可独立使用。</p>
+    <!-- 主路径 -->
+    <h2 class="section-title">主路径</h2>
+    <p class="section-hint">典型流:创建 yaml → 编辑 / 生成 → 导入或部署到机器人。每个页面可独立使用。</p>
     <div class="nav-card-grid">
-      <div v-for="(c, i) in cards" :key="c.path" class="nav-card" @click="router.push(c.path)">
+      <div v-for="(c, i) in primaryCards" :key="c.path" class="nav-card primary" @click="router.push(c.path)">
         <div class="nav-card-head">
           <span class="nav-card-idx">{{ i + 1 }}</span>
           <span class="nav-card-icon">{{ c.icon }}</span>
           <span class="nav-card-label">{{ c.label }}</span>
           <span v-if="c.tag" class="nav-card-tag">{{ c.tag }}</span>
+        </div>
+        <div class="nav-card-desc">{{ c.desc }}</div>
+      </div>
+    </div>
+
+    <!-- 高级 / 诊断:折叠入口弱化,避免跟主路径抢视觉焦点 -->
+    <h2 class="section-title secondary">高级 · 诊断</h2>
+    <p class="section-hint">可选工具:仓库扫描补全 yaml、plan/diff review 产物差异、doctor 检测漂移。</p>
+    <div class="nav-card-grid compact">
+      <div v-for="c in advancedCards" :key="c.path" class="nav-card advanced" @click="router.push(c.path)">
+        <div class="nav-card-head">
+          <span class="nav-card-icon">{{ c.icon }}</span>
+          <span class="nav-card-label">{{ c.label }}</span>
         </div>
         <div class="nav-card-desc">{{ c.desc }}</div>
       </div>
@@ -134,46 +153,66 @@ const nextStep = computed(() => {
 .hero h1 { font-size: 26px; color: var(--c-ink); margin-bottom: 6px; font-weight: 600; }
 .tagline { color: var(--c-muted); font-size: var(--fs-md); margin-bottom: var(--sp-6); line-height: 1.6; }
 
-/* 下一步推荐 */
+/* 下一步推荐:首屏的主 CTA。之前是浅蓝渐变,跟普通 info 框视觉优先级打平,
+ * 非程序员首次打开看不出主路径。现在改深蓝 + 白字 + 更明显阴影,
+ * CTA 按钮反色(白底蓝字)制造层级对比,一眼抓住视线。 */
 .next-panel {
-  background: linear-gradient(90deg, #eff6ff 0%, #f0f9ff 100%);
-  border: 1px solid #bfdbfe;
-  border-left: 4px solid var(--c-accent);
-  border-radius: 10px;
-  padding: var(--sp-4) var(--sp-5);
-  margin-bottom: 32px;
+  background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
+  border: none;
+  border-radius: 12px;
+  padding: 20px 24px;
+  margin-bottom: 36px;
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2);
+  gap: var(--sp-3);
+  box-shadow: 0 6px 18px rgba(37, 99, 235, 0.25), 0 2px 4px rgba(37, 99, 235, 0.15);
 }
 .next-head { display: flex; align-items: center; gap: var(--sp-2); }
-.next-icon { color: var(--c-accent); font-weight: 700; font-size: var(--fs-md); }
-.next-title { font-weight: 600; color: #1e40af; font-size: var(--fs-md); }
-.next-body { color: var(--c-ink); font-size: var(--fs-md); line-height: 1.6; }
+.next-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; border-radius: 50%;
+  background: rgba(255, 255, 255, 0.2); color: #fff; font-weight: 700; font-size: var(--fs-md);
+}
+.next-title { font-weight: 600; color: #fff; font-size: var(--fs-md); letter-spacing: 0.3px; }
+.next-body { color: #f1f5f9; font-size: var(--fs-md); line-height: 1.6; }
 .next-cta {
   align-self: flex-start;
-  background: var(--c-accent); color: #fff; border: none;
-  padding: 8px 18px; border-radius: var(--r-md); font-size: var(--fs-md); font-weight: 500;
-  cursor: pointer; transition: background 0.15s;
+  background: #fff; color: #1d4ed8; border: none;
+  padding: 10px 20px; border-radius: var(--r-md); font-size: var(--fs-md); font-weight: 600;
+  cursor: pointer; transition: transform 0.15s, box-shadow 0.15s;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
 }
-.next-cta:hover { background: var(--c-accent-hover); }
+.next-cta:hover { transform: translateY(-1px); box-shadow: 0 4px 8px rgba(0, 0, 0, 0.12); }
+.next-cta:active { transform: translateY(0); }
 
 /* sections */
 .section-title { font-size: var(--fs-lg); color: var(--c-ink); margin: var(--sp-3) 0 6px; font-weight: 600; }
+.section-title.secondary { font-size: var(--fs-md); color: var(--c-muted); font-weight: 500; margin-top: 36px; }
 .section-hint { color: var(--c-muted); font-size: var(--fs-base); margin-bottom: var(--sp-3); }
 
 /* 工作流卡片网格 */
 .nav-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--sp-3); margin-bottom: 32px; }
+/* compact:高级/诊断用小一号密度,视觉上让开主路径 */
+.nav-card-grid.compact { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--sp-2); }
 .nav-card {
   border: 1px solid var(--c-line); border-radius: var(--r-lg); padding: var(--sp-3) var(--sp-4);
   background: var(--c-surf); cursor: pointer; transition: all 0.15s;
   display: flex; flex-direction: column; gap: 6px;
 }
 .nav-card:hover { border-color: var(--c-accent); box-shadow: 0 2px 6px rgba(59,130,246,0.1); transform: translateY(-1px); }
+/* primary:主路径卡片,边框略深 + hover 动效更明显。 */
+.nav-card.primary { border-color: var(--c-line-2); }
+.nav-card.primary:hover { box-shadow: 0 4px 10px rgba(59,130,246,0.15); }
+/* advanced:高级/诊断卡片,内边距减一档 + 文字色弱化,划分层级但仍可点 */
+.nav-card.advanced { padding: var(--sp-2) var(--sp-3); background: var(--c-surf-2); }
+.nav-card.advanced .nav-card-label { color: var(--c-text); font-weight: 500; }
+.nav-card.advanced .nav-card-desc { font-size: var(--fs-xs); color: var(--c-muted); }
+.nav-card.advanced:hover { background: var(--c-surf); }
+
 .nav-card-head { display: flex; align-items: center; gap: var(--sp-2); }
 .nav-card-idx {
-  width: 20px; height: 20px; border-radius: 50%;
-  background: var(--c-line); color: #475569; font-size: var(--fs-xs); font-weight: 700;
+  width: 22px; height: 22px; border-radius: 50%;
+  background: #dbeafe; color: #1e40af; font-size: var(--fs-xs); font-weight: 700;
   display: flex; align-items: center; justify-content: center; flex-shrink: 0;
 }
 .nav-card-icon { font-size: var(--fs-lg); }

@@ -24,6 +24,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -51,6 +52,14 @@ type App struct {
 	// ctx 是 Wails 运行时 ctx，在 startup 阶段注入。所有需要原生能力（SaveFileDialog /
 	// OpenDirectoryDialog / WindowShow / EventsEmit 等）的 binding 都用这个。
 	ctx context.Context
+
+	// installMu 保护 installCancel 字段；install 和 cancel 是不同 Wails goroutine
+	// 过来的,没锁会 race。
+	installMu sync.Mutex
+	// installCancel 是当前正在跑的 install.sh 的 cancel 函数,nil=没有 install 在跑。
+	// RunInstall 赋值并 defer 清空;CancelInstall 读取并调用。同一时刻只允许一个
+	// install 跑,前端 UI 会禁用"部署"按钮避免并发。
+	installCancel context.CancelFunc
 }
 
 // startup 由 Wails 在窗口创建完成时调用，注入 runtime ctx。私有也能被 Wails 识别。

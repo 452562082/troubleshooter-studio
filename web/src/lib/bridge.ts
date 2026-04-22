@@ -166,6 +166,13 @@ export async function runInstall(
   return App.RunInstall(outputDir, creds)
 }
 
+/** 取消正在跑的 install.sh(SIGKILL 给 bash 进程组)。返回 true=成功取消,
+ *  false=当前没 install 在跑(UI 可忽略)。浏览器模式无 install,直接 false。 */
+export async function cancelInstall(): Promise<boolean> {
+  if (!isDesktop()) return false
+  return App.CancelInstall()
+}
+
 /** 在 Finder / Explorer 里展示(不是打开)指定路径 */
 export async function revealInFinder(path: string): Promise<void> {
   if (!isDesktop()) return

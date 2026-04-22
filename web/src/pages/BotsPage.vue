@@ -6,6 +6,7 @@ import { ref, computed, nextTick, onMounted, onUnmounted, reactive, watch } from
 import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
 import {
   applyBot,
+  cancelInstall,
   discoverBots,
   exportYAML,
   gen as bridgeGen,
@@ -276,21 +277,65 @@ async function runImportDeploy() {
   }
 }
 
+// installStartTime / installElapsed:把"已运行 X 秒 · Y 行日志"摆到按钮旁,
+// 非程序员看到计时在动就知道"app 没卡,只是 install.sh 在跑"。
+// setInterval 每秒更新;installing 结束清掉。
+const installStartTime = ref<number | null>(null)
+const installElapsed = ref(0)
+let installTimer: number | null = null
+// installCanceling:用户点了取消但 SIGKILL 还没 Go 端返回的短暂窗口,
+// 禁用按钮避免重复点击。
+const installCanceling = ref(false)
+
 async function runDeployInstall() {
   importError.value = null
   importStage.value = 'installing'
   installLog.value = ''
+  installCanceling.value = false
+  // 开始计时(秒表)
+  installStartTime.value = Date.now()
+  installElapsed.value = 0
+  if (installTimer) clearInterval(installTimer)
+  installTimer = window.setInterval(() => {
+    if (installStartTime.value) {
+      installElapsed.value = Math.floor((Date.now() - installStartTime.value) / 1000)
+    }
+  }, 1000)
   try {
     // installLog 从 install:log 事件流已经累积;这里 r.log 是 Go 端兜底的完整文本,
     // 如果事件丢行(理论上不会)或用户刷新页面后 Go 已跑完才回来,用 r.log 补齐
     const r = await runInstall(importedOutputDir.value, installCreds.value)
     if (installLog.value === '' && r.log) installLog.value = r.log
-    installOK.value = r.ok
+    // exit_code === -2:Go 端约定"用户取消",UI 显示"已取消"而不是"失败"
+    if (r.exit_code === -2) {
+      installOK.value = false
+      installLog.value += '\n[已取消] 由用户触发,install.sh 进程组已被 SIGKILL。\n'
+    } else {
+      installOK.value = r.ok
+    }
     importStage.value = 'done'
     await scan()
   } catch (e: any) {
     importError.value = String(e?.message || e)
     importStage.value = 'deployed'
+  } finally {
+    // 停秒表
+    if (installTimer) { clearInterval(installTimer); installTimer = null }
+    installStartTime.value = null
+    installCanceling.value = false
+  }
+}
+
+// abortInstall:用户点"取消安装"触发。后端 SIGKILL 进程组后,runInstall promise
+// 会 resolve 一个 exit_code=-2 的结果,由 runDeployInstall 的 try 块正常处理收尾。
+async function abortInstall() {
+  if (installCanceling.value) return // 防重复
+  installCanceling.value = true
+  try {
+    await cancelInstall()
+  } catch (e: any) {
+    toast.error(`取消失败: ${String(e?.message || e)}`)
+    installCanceling.value = false
   }
 }
 
@@ -432,6 +477,21 @@ onUnmounted(() => {
           >
             {{ importStage === 'installing' ? '运行 install.sh 中…' : (installPrompts.length > 0 ? '写 .env 并运行 install.sh' : '运行 install.sh') }}
           </button>
+          <!-- 取消按钮只在 installing 时出现。SIGKILL 给 bash 进程组,brew/npm 子进程也连带杀 -->
+          <button
+            v-if="importStage === 'installing'"
+            class="btn btn-cancel"
+            :disabled="installCanceling"
+            @click="abortInstall"
+          >
+            {{ installCanceling ? '取消中…' : '取消安装' }}
+          </button>
+        </div>
+        <!-- 运行时秒表 + 日志行数:让用户知道 app 没卡,install.sh 还在跑 -->
+        <div v-if="importStage === 'installing'" class="install-progress">
+          <span class="install-spinner" aria-hidden="true"></span>
+          <span class="install-elapsed">已运行 {{ installElapsed }}s</span>
+          <span class="install-loglines">· {{ installLog.split('\n').length - 1 }} 行日志</span>
         </div>
         <!-- installing 阶段实时滚出 install.sh 的 stdout+stderr,避免用户盯静默黑屏 -->
         <pre v-if="importStage === 'installing' && installLog" ref="liveLogRef" class="deploy-log live">{{ installLog }}</pre>
@@ -701,6 +761,28 @@ onUnmounted(() => {
 .cred-field input { padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 12px; font-family: monospace; }
 
 .deploy-actions { display: flex; gap: 8px; justify-content: flex-end; }
+/* Cancel 按钮用危险色(红)区分于 primary(黑),提示"这是破坏性操作" */
+.btn-cancel {
+  background: #fef2f2; border-color: #fecaca; color: #991b1b;
+}
+.btn-cancel:hover:not(:disabled) { background: #fee2e2; border-color: #fca5a5; }
+.btn-cancel:disabled { opacity: 0.6; }
+
+/* 运行中进度指示:spinner + 秒表 + 日志行数,告诉用户 app 没卡 */
+.install-progress {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; background: #eff6ff; border: 1px solid #bfdbfe;
+  border-radius: 6px; font-size: 12px; color: #1e40af;
+  font-variant-numeric: tabular-nums; /* 秒数跳变时数字不抖 */
+}
+.install-spinner {
+  width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid #bfdbfe; border-top-color: #2563eb;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.install-elapsed { font-weight: 600; }
+.install-loglines { color: #64748b; }
 
 .deploy-result {
   padding: 10px 12px; border-radius: 4px; font-size: 13px; font-weight: 600;

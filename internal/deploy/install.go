@@ -9,6 +9,7 @@ package deploy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -174,19 +175,32 @@ func ReadEnvFile(dir string) (map[string]string, error) {
 // 注意:install.sh 里某些依赖检查(brew install node 之类)如果需要 sudo,也会 hang。
 // UI 侧应该提前引导用户装好 node / python3 / uvx。
 func RunInstall(dir string) (string, error) {
-	return RunInstallStreaming(dir, nil)
+	return RunInstallStreaming(context.Background(), dir, nil)
 }
 
 // RunInstallStreaming 同 RunInstall,但额外把 stdout+stderr 逐行 callback 出去,
 // 便于 UI 实时展示而不是等脚本跑完一次性吐。onLine 可以是 nil(退化成 RunInstall)。
 // 返回的完整 log 仍然保留(前端刷新 / 持久化用),跟回调并行写入。
-func RunInstallStreaming(dir string, onLine func(line string)) (string, error) {
+//
+// ctx 用于取消:桌面端用户点"取消安装"时,传入的 ctx 被 cancel,exec.CommandContext
+// 会发 SIGKILL 给 install.sh 进程(及其子进程组,见下面 Setpgid)。cancel 后 cmd.Run
+// 返回 context-cancelled 风格的 error,调用方据此知道是用户主动 abort 而非 install.sh
+// 自身 exit 非零。ctx=nil 时用 context.Background()(相当于不可取消)。
+func RunInstallStreaming(ctx context.Context, dir string, onLine func(line string)) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	installSh, err := FindInstallSh(dir)
 	if err != nil {
 		return "", fmt.Errorf("install.sh not found under %s: %w", dir, err)
 	}
-	cmd := exec.Command("bash", installSh)
+	cmd := exec.CommandContext(ctx, "bash", installSh)
 	cmd.Dir = filepath.Dir(installSh)
+	// 让 install.sh 自己 fork 出来的 brew / npm / pip 子进程跟脚本同属一个进程组,
+	// 我们 cancel 时 exec.CommandContext 只会 kill pid 本身,子进程会变孤儿继续跑。
+	// 用 Setpgid + 后面手动 kill -pgid 保证干净收尾,见 killProcessGroup。
+	setProcessGroup(cmd)
+
 	// 把 stdin 接到 /dev/null —— 如果 install.sh 真遇到了未喂的 read_var,立即 EOF 而不是挂死
 	if devnull, err := os.Open(os.DevNull); err == nil {
 		cmd.Stdin = devnull
@@ -199,10 +213,32 @@ func RunInstallStreaming(dir string, onLine func(line string)) (string, error) {
 	cmd.Stdout = pw
 	cmd.Stderr = pw
 
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("start install.sh: %w", err)
+	}
+
+	// ctx cancel 时杀整个进程组,否则 bash 退了子孙进程还在跑。
+	// Wait 返回(无论是正常 exit 还是被 kill)后让这个 goroutine 自然退出。
+	waitDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			killProcessGroup(cmd)
+		case <-waitDone:
+		}
+	}()
+
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- cmd.Run()
+		err := cmd.Wait()
+		close(waitDone)
 		_ = pw.Close()
+		// 被 ctx 杀掉时 Wait 会返回 "signal: killed" 之类,把 ctx.Err 覆盖回来更清晰
+		if ctx.Err() != nil {
+			errCh <- ctx.Err()
+		} else {
+			errCh <- err
+		}
 	}()
 
 	var buf bytes.Buffer

@@ -1,5 +1,5 @@
 // bindings_deploy.go —— 跑 install.sh / 写凭证到 .env 的 binding:
-// ScanInstallPrompts / ReadEnv / RunInstall / RevealInFinder。
+// ScanInstallPrompts / ReadEnv / RunInstall / CancelInstall / RevealInFinder。
 //
 // 这些是"部署 openclaw 产物时的凭证表单闭环"：解析 install.sh 的 read_var 提示 →
 // 预填已存的 .env → 前端让用户补/改 → 回写 .env → shell-out 跑 install.sh →
@@ -7,6 +7,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"os/exec"
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -41,27 +43,71 @@ type RunInstallResult struct {
 
 // RunInstall 先把 creds 写进 outputDir/scripts/.env，再 shell-out bash install.sh，
 // 返回合并日志。前端拿去展示在模态框里。
+//
+// 取消支持:前端点"取消安装"会调 CancelInstall(),cancel 当前 ctx,内部
+// exec.CommandContext 发 SIGKILL 给 bash 进程组(见 deploy/process_unix.go)。
+// Cancel 后此函数仍返回 Result(不是 error);res.ExitCode == -2 表示用户主动取消。
 func (a *App) RunInstall(outputDir string, creds map[string]string) (*RunInstallResult, error) {
 	if err := deploy.WriteEnvFile(outputDir, creds); err != nil {
 		return nil, err
 	}
-	// 流式把每行输出推到前端 "install:log" 事件。前端 BotsPage 挂着监听,
-	// 追加到 installLog 让用户实时看到进度,不用盯静默黑屏。
-	log, err := deploy.RunInstallStreaming(outputDir, func(line string) {
+
+	// 每次 install 建独立 cancellable ctx(父 = Wails runtime ctx,app 退出顺带 cancel),
+	// 存进 App 让 CancelInstall 能触发。
+	runCtx, cancel := context.WithCancel(a.ctx)
+	a.installMu.Lock()
+	if a.installCancel != nil {
+		// 理论上前端会禁用"部署"按钮防并发,走到这里说明 UI 有 bug;先干掉上一个
+		// 避免日志流相互串扰。
+		a.installCancel()
+	}
+	a.installCancel = cancel
+	a.installMu.Unlock()
+
+	defer func() {
+		a.installMu.Lock()
+		a.installCancel = nil
+		a.installMu.Unlock()
+		cancel() // 保证 ctx 被 cancel,避免 goroutine 泄漏
+	}()
+
+	// 流式把每行输出推到前端 "install:log" 事件。前端 BotsPage 挂监听,
+	// 追加到 installLog 让用户实时看到进度。
+	log, err := deploy.RunInstallStreaming(runCtx, outputDir, func(line string) {
 		wailsruntime.EventsEmit(a.ctx, "install:log", line)
 	})
 	res := &RunInstallResult{Log: log, OK: err == nil}
 	if err != nil {
+		// 用户 cancel:ExitCode = -2,UI 展示"已取消"而不是"失败"。
+		if errors.Is(err, context.Canceled) {
+			res.ExitCode = -2
+			res.OK = false
+			return res, nil
+		}
 		// exit code 提取（bash 脚本的非零退出）
 		if ee, ok := err.(*exec.ExitError); ok {
 			res.ExitCode = ee.ExitCode()
 		} else {
 			res.ExitCode = -1
 		}
-		// 不包装成 error 返回：前端要看到日志，即使 install 失败
+		// 不包装成 error:前端要看到日志,即使 install 失败
 		return res, nil
 	}
 	return res, nil
+}
+
+// CancelInstall 前端"取消安装"按钮调:触发当前 install ctx cancel,
+// 底层 exec.CommandContext 会 SIGKILL bash + 整个进程组。没有 install 在跑时
+// 返回 false(UI 忽略),有的话返回 true。
+func (a *App) CancelInstall() bool {
+	a.installMu.Lock()
+	defer a.installMu.Unlock()
+	if a.installCancel == nil {
+		return false
+	}
+	a.installCancel()
+	a.installCancel = nil
+	return true
 }
 
 // RevealInFinder 在 Finder / Explorer 里打开 path（不是打开文件，是打开所在目录并高亮）。

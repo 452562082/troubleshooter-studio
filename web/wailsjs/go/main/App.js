@@ -10,6 +10,10 @@ export function ApplyBot(arg1, arg2, arg3) {
   return window['go']['main']['App']['ApplyBot'](arg1, arg2, arg3);
 }
 
+export function CancelInstall() {
+  return window['go']['main']['App']['CancelInstall']();
+}
+
 export function Diff(arg1, arg2) {
   return window['go']['main']['App']['Diff'](arg1, arg2);
 }

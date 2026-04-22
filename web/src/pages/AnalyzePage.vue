@@ -83,6 +83,11 @@ function loadFile(e: Event) {
 
 // analyze:log 事件流(analyzerpipe.OnProgress 每行 EventsEmit)
 const progressLog = ref('')
+// 跑 analyze 是长任务(大仓库 + auto-clone 可能跑分钟级),秒表让用户知道没卡。
+// 目前 analyzerpipe 没 ctx 支持,不给 cancel 按钮(避免假承诺),只展示进度。
+const analyzeStartTime = ref<number | null>(null)
+const analyzeElapsed = ref(0)
+let analyzeTimer: number | null = null
 
 async function runAnalyze() {
   if (!yamlContent.value.trim()) { error.value = '请先填写或加载 system.yaml'; return }
@@ -95,6 +100,14 @@ async function runAnalyze() {
   error.value = ''
   result.value = null
   progressLog.value = ''
+  analyzeStartTime.value = Date.now()
+  analyzeElapsed.value = 0
+  if (analyzeTimer) clearInterval(analyzeTimer)
+  analyzeTimer = window.setInterval(() => {
+    if (analyzeStartTime.value) {
+      analyzeElapsed.value = Math.floor((Date.now() - analyzeStartTime.value) / 1000)
+    }
+  }, 1000)
   try {
     const r = (await bridgeAnalyze(yamlContent.value, reposRoot.value, autoClone.value)) as AnalyzeResult
     result.value = r
@@ -104,6 +117,8 @@ async function runAnalyze() {
     toast.error(`analyze 失败: ${e.message || e}`)
   } finally {
     loading.value = false
+    if (analyzeTimer) { clearInterval(analyzeTimer); analyzeTimer = null }
+    analyzeStartTime.value = null
   }
 }
 
@@ -114,6 +129,7 @@ onMounted(() => {
 })
 onUnmounted(() => {
   EventsOff('analyze:log')
+  if (analyzeTimer) { clearInterval(analyzeTimer); analyzeTimer = null }
 })
 </script>
 
@@ -154,6 +170,12 @@ onUnmounted(() => {
 
     <div v-if="error" class="alert error">{{ error }}</div>
 
+    <!-- 运行时秒表 + 进度行数:跑大仓库 + autoClone 可能分钟级,让用户确信没卡 -->
+    <div v-if="loading" class="analyze-progress">
+      <span class="analyze-spinner" aria-hidden="true"></span>
+      <span class="analyze-elapsed">已运行 {{ analyzeElapsed }}s</span>
+      <span class="analyze-loglines">· {{ progressLog.split('\n').length - 1 }} 行进度</span>
+    </div>
     <!-- 实时进度日志(analyze:log 事件) -->
     <pre v-if="loading && progressLog" class="progress-log">{{ progressLog }}</pre>
 
@@ -277,6 +299,22 @@ textarea.err { border-color: #ef4444; }
 
 .detail.warn { color: #92400e; }
 .warn-line { font-size: 12px; padding: 2px 0; }
+
+/* 运行时秒表 —— 跟 BotsPage install 的进度条视觉对齐 */
+.analyze-progress {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 12px; padding: 8px 12px; background: #eff6ff; border: 1px solid #bfdbfe;
+  border-radius: 6px; font-size: 12px; color: #1e40af;
+  font-variant-numeric: tabular-nums;
+}
+.analyze-spinner {
+  width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid #bfdbfe; border-top-color: #2563eb;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.analyze-elapsed { font-weight: 600; }
+.analyze-loglines { color: #64748b; }
 
 /* 新增:实时进度日志 + 每仓库摘要 grid */
 .progress-log {

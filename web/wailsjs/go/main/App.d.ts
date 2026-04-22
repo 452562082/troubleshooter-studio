@@ -12,6 +12,8 @@ export function Analyze(arg1:string,arg2:string,arg3:boolean):Promise<analyzerpi
 
 export function ApplyBot(arg1:string,arg2:string,arg3:boolean):Promise<agent.Result>;
 
+export function CancelInstall():Promise<boolean>;
+
 export function Diff(arg1:string,arg2:string):Promise<generator.Plan>;
 
 export function DiscoverBots(arg1:Array<string>):Promise<Array<discover.DiscoveredAgent>>;

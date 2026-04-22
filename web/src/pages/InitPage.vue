@@ -328,7 +328,35 @@ async function clearDraft() {
   } catch {
     // ignore
   }
-  location.reload()
+  // 原来用 location.reload() 让 Vue 重新读 localStorage 挂状态,但 Wails
+  // WKWebView 在 reload 的卸载阶段会把 Vue watcher 触发的任何 throw 向外报成
+  // "Script error. at :0:0"(跨 origin 风格的匿名错),用户看到一脸懵。
+  // 改成原地重置各 reactive 状态,把向导拉回 Step 1 —— 视觉等价,且没有 reload 副作用。
+  currentStep.value = 1
+  validationErrors.value = new Set()
+  system.id = ''
+  system.name = ''
+  system.description = ''
+  agent.name = ''
+  agent.workspace_name = ''
+  agent.model = 'anthropic/claude-sonnet-4-6'
+  // 环境 / 仓库回到初始 1 条
+  environments.splice(0, environments.length,
+    { id: 'dev', api_domain: '', is_prod: false },
+    { id: 'prod', api_domain: '', is_prod: true },
+  )
+  repos.splice(0, repos.length, makeEmptyRepo())
+  // 配置源
+  configCenterType.value = 'nacos'
+  // 可观测 / 数据层:全关
+  for (const k of observabilityOptions) enabledObservability[k] = false
+  for (const k of dataStoreOptions) enabledDataStores[k] = false
+  // targets:默认 4 个都开
+  for (const k of targetOptions) enabledTargets[k] = true
+  // Analyze 块的瞬态也清(reposRoot 输入 / 错误信息 / 上次扫描总结)
+  reposRootInput.value = ''
+  analyzeError.value = null
+  analyzeSummary.value = null
 }
 
 // ── Import existing system.yaml into the wizard ──

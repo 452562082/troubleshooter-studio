@@ -76,10 +76,11 @@ jobs:
       - name: npm ci
         run: npm ci
 
-      # npm run build = vue-tsc --noEmit && vite build，
-      # 同时覆盖类型检查和实际产物构建。之前 null.length 崩页 regression
-      # vue-tsc 能抓住一部分(拿到 null 的类型要写准),vite build 的 runtime
-      # 错则靠前端单测,暂未补。
+      # vitest:bridge / toast 等 lib 层单测。null.length 崩页 regression guard 在这里。
+      - name: vitest
+        run: npm test
+
+      # npm run build = vue-tsc --noEmit && vite build,类型检查 + 产物构建
       - name: vue-tsc + vite build
         run: npm run build
 

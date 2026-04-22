@@ -77,6 +77,8 @@ web:
   script:
     - cd web
     - npm ci --prefer-offline --no-audit --no-fund
+    # vitest: bridge / toast lib 层单测(regression guard)
+    - npm test
     # npm run build 实际跑 vue-tsc --noEmit && vite build
     # 类型检查 + 产物构建一把,能抓类型漂移 + rollup 打包失败
     - npm run build

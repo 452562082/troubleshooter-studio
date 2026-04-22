@@ -1538,7 +1538,7 @@ func runDiscover(args []string) error {
 
 	if len(bots) == 0 {
 		fmt.Printf("没发现已装机器人（扫描的路径：%s）\n", strings.Join(roots, ", "))
-		fmt.Println("可能原因：1) 没装过；2) 装到别处（用 --roots 指定）；3) 老产物没 tshoot.json 锚点")
+		fmt.Println("可能原因：1) 没装过；2) 装到别处（用 --roots 指定扫描根）")
 		return nil
 	}
 
@@ -1584,7 +1584,7 @@ func runApply(args []string) error {
 		return fmt.Errorf("scan %s: %w", *path, err)
 	}
 	if len(found) == 0 {
-		return fmt.Errorf("no tshoot.json under %s（确认路径对，或该机器人是老版本产物）", *path)
+		return fmt.Errorf("no tshoot.json under %s（确认路径对）", *path)
 	}
 	// 最短路径那个（最贴近 path 根）
 	ag := found[0]

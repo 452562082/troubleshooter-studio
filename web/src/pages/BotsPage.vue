@@ -61,7 +61,7 @@ async function regen(b: DiscoveredBot) {
   regenState[k] = { loading: true }
   try {
     const yamlText = b.meta.system_yaml
-    if (!yamlText) throw new Error('这个机器人的 tshoot.json 里没有 system_yaml（老产物？）')
+    if (!yamlText) throw new Error('这个机器人的 tshoot.json 里没有 system_yaml（缺 system_yaml 字段，无法原地重 gen）')
     const res = await bridgeGen(yamlText, '')
     const outDir = String(res?.output_dir || '未知输出路径')
     regenState[k] = { loading: false, ok: `产物已写入 ${outDir}` }
@@ -77,7 +77,7 @@ function toggleEditor(b: DiscoveredBot) {
     return
   }
   if (!b.meta.system_yaml) {
-    error.value = '这个机器人没有嵌入 system_yaml，无法编辑（老产物）'
+    error.value = '这个机器人没有嵌入 system_yaml，无法编辑（缺 system_yaml 字段）'
     return
   }
   editingKey.value = k
@@ -93,7 +93,7 @@ async function doExport(b: DiscoveredBot) {
   exportState[k] = {}
   try {
     const yamlText = b.meta.system_yaml
-    if (!yamlText) throw new Error('这个机器人没有嵌入 system_yaml（老产物）')
+    if (!yamlText) throw new Error('这个机器人没有嵌入 system_yaml（缺 system_yaml 字段）')
     // 用编辑器里的草稿（如果当前在编辑）优先导，否则导存盘版本
     const payload = editingKey.value === k ? editorDraft.value : yamlText
     const filename = `${b.meta.system_id || 'system'}.yaml`
@@ -393,8 +393,7 @@ onMounted(scan)
     </div>
     <div v-else-if="loading" class="empty">扫描中…</div>
     <div v-else-if="bots.length === 0" class="empty">
-      没找到已安装的机器人。可能原因：<br />
-      1) OpenClaw 工作区为空；2) 机器人装在别处（点上面「添加扫描路径」）；3) 安装时没写 <code>tshoot.json</code>（老版本产物）
+      还没部署过机器人。点右上角「<strong>导入 yaml 部署</strong>」拿已有 yaml 直接装；或去「<strong>创建向导</strong>」从头建一份。
     </div>
 
     <div v-else class="bot-grid">

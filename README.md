@@ -103,8 +103,7 @@ go build -o bin/tshoot ./cmd/tshoot    # 或 go install ./cmd/tshoot
 | **4. 导出 yaml** | 🤖 已装机器人 → 导出 yaml | Wails 原生 SaveFileDialog 选路径存盘 |
 | **5. 新建机器人** | 🧙 创建向导 | 7 步表单生成 `system.yaml`（草稿存 localStorage，切页刷新不丢）；生成完可直接 gen |
 
-机器人靠产物根目录的 `tshoot.json` 锚点识别（gen 时自动写入，含完整 `system_yaml` 原文）。
-老版本没 `tshoot.json` 的产物扫不到——重跑一次 `tshoot gen` 升级到新版本就行。
+机器人靠产物根目录的 `tshoot.json` 锚点识别（gen 时自动写入，含完整 `system_yaml` 原文）。macOS 下通过 Spotlight 全盘扫 `tshoot.json`，standalone / claude-code / cursor 散落在任意目录的机器人都能零配置找到。
 
 Gen 只产生产物目录；**真正装到 OpenClaw / Claude Code 等平台仍需走产物里的 `install.sh`**（首次收凭证）。把 install.sh 的交互搬进桌面 app 是下一个迭代项。
 

@@ -196,24 +196,27 @@ async function runImportDeploy() {
   try {
     const res = await importAndDeploy(importYAMLText.value, importTarget.value, importDestPath.value)
     importedOutputDir.value = res.agent_path
-    if (importTarget.value === 'openclaw') {
-      // 进入凭证表单阶段
+    // 各 target 是否需要 install.sh 步骤:
+    //   openclaw:有交互凭证,必须跑,UI 展示字段表单
+    //   standalone:无凭证但要跑 venv setup,UI 简化成"直接安装"按钮
+    //   claude-code / cursor:ImportAndApply 已 rsync,install.sh 无附加动作,直接齐活
+    const needsInstall = importTarget.value === 'openclaw' || importTarget.value === 'standalone'
+    if (needsInstall) {
       const [prompts, existing] = await Promise.all([
         scanInstallPrompts(res.agent_path),
         readEnv(res.agent_path),
       ])
       installPrompts.value = prompts
       installCreds.value = { ...existing } // 预填已有
-      // 保证每个 prompt 都有一个 key（哪怕空）
       for (const p of prompts) {
         if (!(p.name in installCreds.value)) installCreds.value[p.name] = ''
       }
       importStage.value = 'deployed'
     } else {
-      // claude-code / cursor / standalone：ImportAndApply 已经做了 rsync，齐活
+      // claude-code / cursor:ImportAndApply 已 rsync 产物到目标 project,完事
       installOK.value = true
       importStage.value = 'done'
-      await scan() // 列表刷新
+      await scan()
     }
   } catch (e: any) {
     importError.value = String(e?.message || e)
@@ -313,17 +316,18 @@ onMounted(scan)
         </div>
       </div>
 
-      <!-- Step 2: openclaw 凭证表单 -->
+      <!-- Step 2: install.sh 阶段 -->
       <div v-if="importStage === 'deployed' || importStage === 'installing'" class="deploy-step">
-        <p class="deploy-tip">
+        <p v-if="installPrompts.length > 0" class="deploy-tip">
           产物已写到 <code>{{ importedOutputDir }}</code>。
           install.sh 需要下面 {{ installPrompts.length }} 个凭证字段；已存在的
           <code>.env</code> 值自动预填。<strong>有 * 的是 password 型</strong>。
         </p>
-        <div v-if="installPrompts.length === 0" class="deploy-tip">
-          install.sh 里没声明任何交互字段，可以直接安装。
-        </div>
-        <div class="creds-grid">
+        <p v-else class="deploy-tip">
+          产物已写到 <code>{{ importedOutputDir }}</code>。
+          install.sh 不需要凭证（{{ importTarget === 'standalone' ? 'venv 设置 + pip install' : '纯文件安装' }}），点下面按钮直接安装。
+        </p>
+        <div v-if="installPrompts.length > 0" class="creds-grid">
           <div v-for="p in installPrompts" :key="p.name" class="cred-field">
             <label :for="'cred-' + p.name">
               {{ p.name }}
@@ -345,7 +349,7 @@ onMounted(scan)
             :disabled="importStage === 'installing'"
             @click="runDeployInstall"
           >
-            {{ importStage === 'installing' ? '运行 install.sh 中…' : '写 .env 并运行 install.sh' }}
+            {{ importStage === 'installing' ? '运行 install.sh 中…' : (installPrompts.length > 0 ? '写 .env 并运行 install.sh' : '运行 install.sh') }}
           </button>
         </div>
       </div>

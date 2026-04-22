@@ -29,11 +29,30 @@ type Prompt struct {
 // install.sh.tmpl 里生成的格式固定，允许少量空白差异。
 var reReadVar = regexp.MustCompile(`read_var\s+([A-Za-z_][A-Za-z0-9_]*)\s+"([^"]*)"(\s+secret)?`)
 
-// ParseInstallPrompts 扫 <dir>/scripts/install.sh 里所有 read_var 调用，
-// 按文件内出现顺序返回，**去重**：同一变量只保留第一次出现（install.sh 里不会真正重复，
-// 但保险起见）。install.sh 不存在或解析失败都返回 error。
+// FindInstallSh 找产物目录里的 install.sh。openclaw target 在 <dir>/scripts/install.sh,
+// claude-code / cursor / standalone 在 <dir>/install.sh。返回绝对路径,找不到返回
+// ("", os.ErrNotExist)。
+func FindInstallSh(dir string) (string, error) {
+	for _, rel := range []string{"scripts/install.sh", "install.sh"} {
+		p := filepath.Join(dir, rel)
+		if _, err := os.Stat(p); err == nil {
+			return p, nil
+		}
+	}
+	return "", os.ErrNotExist
+}
+
+// ParseInstallPrompts 扫 install.sh(scripts/install.sh 或 root install.sh)里所有
+// read_var 调用,按文件内出现顺序返回,**去重**:同一变量只保留第一次出现。
+// install.sh 不存在返回 (nil, nil) 表示"无 install 步骤";解析失败返回 error。
 func ParseInstallPrompts(dir string) ([]Prompt, error) {
-	path := filepath.Join(dir, "scripts", "install.sh")
+	path, err := FindInstallSh(dir)
+	if err != nil {
+		if err == os.ErrNotExist {
+			return nil, nil
+		}
+		return nil, err
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
@@ -75,7 +94,11 @@ func ParseInstallPrompts(dir string) ([]Prompt, error) {
 // value 里的单引号会被转义（双 '' 写法，bash 兼容）。空 value 的键依然写出来
 // （install.sh 的 read_var 看到空就会 prompt；这里写出来是为了让用户在 UI 上
 // 看到完整列表，决定哪些需要 prompt）。
+// kv 为空时直接 no-op（non-openclaw target 没有凭证,不需要 .env,也避免建空 scripts/ 子目录）。
 func WriteEnvFile(dir string, kv map[string]string) error {
+	if len(kv) == 0 {
+		return nil
+	}
 	envDir := filepath.Join(dir, "scripts")
 	if err := os.MkdirAll(envDir, 0o755); err != nil {
 		return err
@@ -136,19 +159,21 @@ func ReadEnvFile(dir string) (map[string]string, error) {
 	return out, sc.Err()
 }
 
-// RunInstall shell-out 跑 <dir>/scripts/install.sh，同步捕获 stdout+stderr 合并回来。
-// 前提：.env 已被 WriteEnvFile 填好（否则 install.sh 会卡在 stdin 上 prompt，
-// 没人输就永久 hang）。返回合并的日志和退出错误。
+// RunInstall shell-out 跑 install.sh(auto-locate:scripts/install.sh 或 root),
+// 同步捕获 stdout+stderr 合并回来。cmd.Dir 设为 install.sh 所在目录(让脚本里
+// 的相对路径 / $(dirname "$0") 能正常 work)。
+// 前提:.env 已被 WriteEnvFile 填好(否则 install.sh 会卡在 stdin 上 prompt,
+// 没人输就永久 hang)。返回合并的日志和退出错误。
 //
-// 注意：install.sh 里某些依赖检查（brew install node 之类）如果需要 sudo，也会 hang。
+// 注意:install.sh 里某些依赖检查(brew install node 之类)如果需要 sudo,也会 hang。
 // UI 侧应该提前引导用户装好 node / python3 / uvx。
 func RunInstall(dir string) (string, error) {
-	installSh := filepath.Join(dir, "scripts", "install.sh")
-	if _, err := os.Stat(installSh); err != nil {
-		return "", fmt.Errorf("install.sh not found at %s: %w", installSh, err)
+	installSh, err := FindInstallSh(dir)
+	if err != nil {
+		return "", fmt.Errorf("install.sh not found under %s: %w", dir, err)
 	}
 	cmd := exec.Command("bash", installSh)
-	cmd.Dir = dir
+	cmd.Dir = filepath.Dir(installSh)
 	// 把 stdin 接到 /dev/null —— 如果 install.sh 真遇到了未喂的 read_var，立即 EOF 而不是挂死
 	if devnull, err := os.Open(os.DevNull); err == nil {
 		cmd.Stdin = devnull

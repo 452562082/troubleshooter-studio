@@ -10,7 +10,8 @@ dist/bin/
 # Wails / 桌面端本地产物（bin/ 已被上面兜住，这里只管 app bundle 和生成物）
 /factory-desktop
 cmd/tshoot-desktop/build/bin/
-web/wailsjs/go/
+# web/wailsjs/go/ 入库(由 wails generate module 生成,跟 Go App 方法同步更新,
+# 入库省去 clone 后首次 build 还要先跑生成;改了 Go binding 后跑 make wails-gen 刷新)
 
 # 本地 demo 产物(非 templates/ 下的真实模板)；锚到仓库根，不误杀 internal/webui/dist/ 等
 /dist/

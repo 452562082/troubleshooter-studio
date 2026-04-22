@@ -72,6 +72,15 @@ icon:
 	 rm -rf $$tmp
 	@echo "✓ cmd/tshoot-desktop/build/appicon.png ready"
 
+# ── 按 cmd/tshoot-desktop/App 的方法生成前端绑定:web/wailsjs/go/main/App.{d.ts,js}
+# + web/wailsjs/go/models.ts。改了 Go 端 binding 或引用类型后跑一下。
+# 需要 wails CLI(go install github.com/wailsapp/wails/v2/cmd/wails@latest)
+.PHONY: wails-gen
+wails-gen:
+	@echo "▶ wails generate module (从 cmd/tshoot-desktop/ 扫 App methods)"
+	@cd cmd/tshoot-desktop && wails generate module
+	@echo "✓ web/wailsjs/go/ 更新完成,记得 git add"
+
 # ── 桌面 app (Wails v2):单独 target,不影响 CLI 构建 ──────────────
 # Wails v2 构建踩坑提醒:
 #  1. build tags `desktop production` 必须带,不然 wails.Run 会主动拒跑,

@@ -1,32 +1,31 @@
-// bridge 把 "桌面 Wails binding" 和 "tshoot serve HTTP" 两种通路封到同一个函数。
-// 桌面 app 里 window.go 存在 → 直接调 Go 方法，零 HTTP 开销；
-// 浏览器里 → 回退到原来的 fetch('/api/*')。
+// bridge 把 "桌面 Wails binding" 和 "tshoot serve HTTP" 两种通路封到同一组函数。
+// 桌面 app 里 window.go 存在 → 直接调 Go 方法（由 wails generate module 自动产出
+// wailsjs/go/main/App.ts 绑定）；浏览器里 → 回退到原来的 fetch('/api/*')。
 //
-// 新页面写代码只调 bridge.*，不要直接摸 fetch 或 window.go，省得未来改通路到处改。
+// 新页面写代码只调 bridge.*，不要直接 import wailsjs 或摸 window.go，省得未来改
+// 通路到处改。类型从 wailsjs/go/models 来，Go 端改了 struct 跑 make wails-gen 同步。
 
-import type {
-  ApplyResult,
-  DiscoveredBot,
-  InstallPrompt,
-  OpenYAMLResult,
-  RunInstallResult,
-  ValidateResult,
-} from '../types/wails'
+import * as App from '../../wailsjs/go/main/App'
+import { agent, deploy, discover, generator, main } from '../../wailsjs/go/models'
 
-function desktopApp() {
-  if (typeof window === 'undefined') return null
-  return window.go?.main?.App ?? null
-}
+export type DiscoveredBot = discover.DiscoveredAgent
+export type ApplyResult = agent.Result
+export type InstallPrompt = deploy.Prompt
+export type OpenYAMLResult = main.OpenYAMLResult
+export type RunInstallResult = main.RunInstallResult
+export type ValidateResult = main.ValidateResult
+export type GenSummary = generator.GenSummary
+export type Plan = generator.Plan
+export type DoctorReport = Record<string, unknown> // doctor.Report 字段较多且业务后续会扩,先 loose
 
 /** 桌面 app 模式下为 true，浏览器 / dev 模式下为 false */
 export function isDesktop(): boolean {
-  return desktopApp() !== null
+  return typeof window !== 'undefined' && window.go != null
 }
 
 /** Validate system.yaml；失败抛 Error（message 已带解析原因） */
 export async function validate(yamlText: string): Promise<ValidateResult> {
-  const app = desktopApp()
-  if (app) return app.Validate(yamlText)
+  if (isDesktop()) return App.Validate(yamlText)
   const resp = await fetch('/api/validate', {
     method: 'POST',
     headers: { 'Content-Type': 'text/yaml' },
@@ -38,9 +37,8 @@ export async function validate(yamlText: string): Promise<ValidateResult> {
 }
 
 /** Plan 干跑 gen,返回 skills / files / config-map 分布;不落盘 */
-export async function plan(yamlText: string): Promise<Record<string, unknown>> {
-  const app = desktopApp()
-  if (app) return (await app.Plan(yamlText)) as Record<string, unknown>
+export async function plan(yamlText: string): Promise<Plan> {
+  if (isDesktop()) return App.Plan(yamlText)
   const resp = await fetch('/api/plan', {
     method: 'POST',
     headers: { 'Content-Type': 'text/yaml' },
@@ -48,25 +46,22 @@ export async function plan(yamlText: string): Promise<Record<string, unknown>> {
   })
   const body = await resp.json()
   if (!resp.ok) throw new Error(body?.error || `plan failed: ${resp.status}`)
-  return body
+  return body as Plan
 }
 
 /** Diff 预览新 yaml vs existingDir 现有产物的文件级 create/modify/remove 变化。
- *  浏览器模式下没有对应 API 端点(目前 api/handler.go 没 HandleDiff),只能桌面用。
+ *  浏览器模式没有对应 API 端点(api/handler.go 没 HandleDiff),只能桌面用。
  */
-export async function diff(yamlText: string, existingDir: string): Promise<Record<string, unknown>> {
-  const app = desktopApp()
-  if (app) return (await app.Diff(yamlText, existingDir)) as Record<string, unknown>
-  throw new Error('Diff 在浏览器模式下不可用(tshoot serve 未实现 /api/diff),请在桌面 app 里使用')
+export async function diff(yamlText: string, existingDir: string): Promise<Plan> {
+  if (!isDesktop()) {
+    throw new Error('Diff 在浏览器模式下不可用(tshoot serve 未实现 /api/diff),请在桌面 app 里使用')
+  }
+  return App.Diff(yamlText, existingDir)
 }
 
 /** Doctor 对比声明 vs 代码实态,reposRoot 留空只校验声明一致性 */
-export async function doctor(
-  yamlText: string,
-  reposRoot = '',
-): Promise<Record<string, unknown>> {
-  const app = desktopApp()
-  if (app) return (await app.Doctor(yamlText, reposRoot)) as Record<string, unknown>
+export async function doctor(yamlText: string, reposRoot = ''): Promise<DoctorReport> {
+  if (isDesktop()) return (await App.Doctor(yamlText, reposRoot)) as unknown as DoctorReport
   const qs = reposRoot ? `?repos_root=${encodeURIComponent(reposRoot)}` : ''
   const resp = await fetch(`/api/doctor${qs}`, {
     method: 'POST',
@@ -79,13 +74,8 @@ export async function doctor(
 }
 
 /** Gen 真落盘；outputDir 空字符串 = 用 yaml 里的 generation.output_dir（推荐） */
-export interface GenSummary {
-  output_dir: string
-  [k: string]: unknown // 具体字段见 internal/generator.GenSummary；先 loose 接着
-}
 export async function gen(yamlText: string, outputDir = ''): Promise<GenSummary> {
-  const app = desktopApp()
-  if (app) return (await app.Gen(yamlText, outputDir)) as GenSummary
+  if (isDesktop()) return App.Gen(yamlText, outputDir)
   const resp = await fetch('/api/gen', {
     method: 'POST',
     headers: { 'Content-Type': 'text/yaml' },
@@ -98,10 +88,9 @@ export async function gen(yamlText: string, outputDir = ''): Promise<GenSummary>
 
 /** DiscoverBots 扫描已装机器人；只在桌面 app 下有意义，浏览器下返回 [] */
 export async function discoverBots(extraRoots: string[] = []): Promise<DiscoveredBot[]> {
-  const app = desktopApp()
-  if (!app) return []
+  if (!isDesktop()) return []
   // Go 端 nil slice 会被 JSON 编成 null；强制兜成数组
-  const r = await app.DiscoverBots(extraRoots)
+  const r = await App.DiscoverBots(extraRoots)
   return Array.isArray(r) ? r : []
 }
 
@@ -111,77 +100,67 @@ export async function applyBot(
   newYamlText: string,
   dryRun: boolean,
 ): Promise<ApplyResult> {
-  const app = desktopApp()
-  if (!app) throw new Error('ApplyBot 只在桌面 app 里可用')
-  return app.ApplyBot(agentPath, newYamlText, dryRun)
+  if (!isDesktop()) throw new Error('ApplyBot 只在桌面 app 里可用')
+  return App.ApplyBot(agentPath, newYamlText, dryRun)
 }
 
-/** 原生文件对话框：选一个 yaml 文件，返回 {path, content}；取消返回空对象 */
+/** 原生文件对话框：选一个 yaml 文件,返回 {path, content};取消返回空对象 */
 export async function openYAML(): Promise<OpenYAMLResult> {
-  const app = desktopApp()
-  if (!app) throw new Error('OpenYAML 只在桌面 app 里可用')
-  return app.OpenYAML()
+  if (!isDesktop()) throw new Error('OpenYAML 只在桌面 app 里可用')
+  return App.OpenYAML()
 }
 
 /** 原生目录对话框：选一个目录（用于部署目标路径 destPath），返回路径；取消返回空串 */
 export async function openDir(title: string): Promise<string> {
-  const app = desktopApp()
-  if (!app) throw new Error('OpenDir 只在桌面 app 里可用')
-  return app.OpenDir(title)
+  if (!isDesktop()) throw new Error('OpenDir 只在桌面 app 里可用')
+  return App.OpenDir(title)
 }
 
-/** 把 yaml 直接部署成一个新机器人（agent.ImportAndApply 的 UI 封装）
- *  target: openclaw / claude-code / cursor / standalone；destPath 是部署目标路径
- */
+/** 把 yaml 直接部署成一个新机器人（agent.ImportAndApply 的 UI 封装） */
 export async function importAndDeploy(
   yamlText: string,
   target: string,
   destPath: string,
 ): Promise<ApplyResult> {
-  const app = desktopApp()
-  if (!app) throw new Error('ImportAndDeploy 只在桌面 app 里可用')
-  return app.ImportAndDeploy(yamlText, target, destPath)
+  if (!isDesktop()) throw new Error('ImportAndDeploy 只在桌面 app 里可用')
+  return App.ImportAndDeploy(yamlText, target, destPath)
 }
 
-/** 扫 install.sh 里所有 read_var 调用，给 UI 渲染凭证表单 */
+/** 扫 install.sh 里所有 read_var 调用,给 UI 渲染凭证表单 */
 export async function scanInstallPrompts(outputDir: string): Promise<InstallPrompt[]> {
-  const app = desktopApp()
-  if (!app) throw new Error('ScanInstallPrompts 只在桌面 app 里可用')
-  return app.ScanInstallPrompts(outputDir)
+  if (!isDesktop()) throw new Error('ScanInstallPrompts 只在桌面 app 里可用')
+  const r = await App.ScanInstallPrompts(outputDir)
+  return Array.isArray(r) ? r : []
 }
 
-/** 读 scripts/.env 现存值（用于预填表单） */
+/** 读 scripts/.env 现存值(用于预填表单) */
 export async function readEnv(outputDir: string): Promise<Record<string, string>> {
-  const app = desktopApp()
-  if (!app) return {}
-  return app.ReadEnv(outputDir)
+  if (!isDesktop()) return {}
+  return App.ReadEnv(outputDir)
 }
 
-/** 写凭证到 scripts/.env 后 shell-out bash install.sh，返回合并日志 */
+/** 写凭证到 scripts/.env 后 shell-out bash install.sh,返回合并日志 */
 export async function runInstall(
   outputDir: string,
   creds: Record<string, string>,
 ): Promise<RunInstallResult> {
-  const app = desktopApp()
-  if (!app) throw new Error('RunInstall 只在桌面 app 里可用')
-  return app.RunInstall(outputDir, creds)
+  if (!isDesktop()) throw new Error('RunInstall 只在桌面 app 里可用')
+  return App.RunInstall(outputDir, creds)
 }
 
-/** 在 Finder / Explorer 里展示（不是打开）指定路径 */
+/** 在 Finder / Explorer 里展示(不是打开)指定路径 */
 export async function revealInFinder(path: string): Promise<void> {
-  const app = desktopApp()
-  if (!app) return
-  return app.RevealInFinder(path)
+  if (!isDesktop()) return
+  return App.RevealInFinder(path)
 }
 
 /** exportYAML 弹原生保存对话框导出 yaml 到任意路径。
- *  桌面 app 走 Wails SaveFileDialog；浏览器走 Blob 下载。
- *  返回值：桌面 app 下为保存路径（或用户取消时空串）；浏览器下为下载文件名。
+ *  桌面 app 走 Wails SaveFileDialog;浏览器走 Blob 下载。
+ *  返回值:桌面 app 下为保存路径(或用户取消时空串);浏览器下为下载文件名。
  */
 export async function exportYAML(defaultFilename: string, yamlText: string): Promise<string> {
-  const app = desktopApp()
-  if (app) return app.SaveYAML(defaultFilename, yamlText)
-  // 浏览器回退：触发 blob 下载
+  if (isDesktop()) return App.SaveYAML(defaultFilename, yamlText)
+  // 浏览器回退:触发 blob 下载
   const blob = new Blob([yamlText], { type: 'text/yaml;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')

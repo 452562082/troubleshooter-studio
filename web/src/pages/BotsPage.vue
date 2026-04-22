@@ -4,7 +4,6 @@ import { ref, computed, nextTick, onMounted, onUnmounted, reactive, watch } from
 // 注意 runtime.js 是 Wails 打进 app 的全局脚本,浏览器里 import 的效果是
 // 引用 window.runtime.*;`tshoot serve` 模式下这些函数不会真实推事件(无源)。
 import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
-import type { ApplyResult, DiscoveredBot } from '../types/wails'
 import {
   applyBot,
   discoverBots,
@@ -19,7 +18,7 @@ import {
   runInstall,
   scanInstallPrompts,
 } from '../lib/bridge'
-import type { InstallPrompt } from '../types/wails'
+import type { ApplyResult, DiscoveredBot, InstallPrompt } from '../lib/bridge'
 
 const bots = ref<DiscoveredBot[]>([])
 const loading = ref(false)

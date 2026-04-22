@@ -1,4 +1,4 @@
-// bindings_chat.go —— 桌面端原生 LLM 对话 binding。取代老 standalone(现 embedded) target
+// bindings_chat.go —— 桌面端原生 LLM 对话 binding。embedded target
 // 的 Flask server.py 方案,Studio 进程直接拿 Anthropic Go SDK 跟模型流式对话,
 // token delta 通过 Wails EventsEmit 推给前端 BotsChat.vue。
 //

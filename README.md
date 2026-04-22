@@ -27,7 +27,7 @@
 | **OpenClaw 安装包** | `install.sh` + workspace 模板 + MCP 配置 + `self-test.sh` | `bash install.sh` 装到 OpenClaw |
 | **Claude Code** | `CLAUDE.md` + `skills/` + `install.sh` | `bash install.sh <project-dir>` |
 | **Cursor IDE** | `.cursorrules` + `.cursor/rules/*.mdc` + `skills/` + `install.sh` | `bash install.sh <project-dir>` |
-| **Embedded 内嵌对话**（老名 `standalone`） | `system-prompt.md` + `skills/` + `scripts/` | Studio 桌面端扫到即用,"💬 打开对话"直连 LLM(支持 Anthropic/OpenAI/DeepSeek/Qwen/MiniMax/Moonshot/智谱/Ollama 8 家) |
+| **Embedded 内嵌对话** | `system-prompt.md` + `skills/` + `scripts/` | Studio 桌面端扫到即用,"💬 打开对话"直连 LLM(支持 Anthropic/OpenAI/DeepSeek/Qwen/MiniMax/Moonshot/智谱/Ollama 8 家) |
 
 在 `system.yaml` 的 `generation.targets` 里勾选需要的形态，一次 gen 全出。机器人本体脱离 studio 可独立运行。
 
@@ -151,7 +151,7 @@ generation:
     - openclaw       # OpenClaw 安装包（install.sh + workspace）
     - claude-code    # Claude Code（CLAUDE.md + skills/）
     - cursor         # Cursor IDE（.cursorrules + .cursor/rules/*.mdc）
-    - embedded       # Studio 桌面端内嵌对话（system-prompt.md + skills/）;"standalone" 是历史别名
+    - embedded       # Studio 桌面端内嵌对话（system-prompt.md + skills/）
 ```
 
 一次生成四种格式：
@@ -171,15 +171,15 @@ generation:
 | `cursor` | .cursorrules + .cursor/rules/*.mdc + skills/ + **install.sh** | `bash install.sh <project-dir>`（自动备份已存在的 .cursorrules） |
 | `embedded` | system-prompt.md + skills/ + scripts/ + tshoot.json | Studio 桌面端扫到即用,"💬 打开对话"直连 LLM |
 
-embedded 模式走桌面端 Studio 原生 chat 协议（OpenAI 兼容 API），支持 Anthropic / OpenAI / DeepSeek / Qwen / MiniMax / Moonshot / 智谱 / Ollama 8 家 provider（按 `agent.model` 前缀路由）。不再维护独立部署路径（老名 `standalone` 在 `config.LoadFromBytes` 被自动归一成 `embedded`）。
+embedded 模式走桌面端 Studio 原生 chat 协议（OpenAI 兼容 API），支持 Anthropic / OpenAI / DeepSeek / Qwen / MiniMax / Moonshot / 智谱 / Ollama 8 家 provider（按 `agent.model` 前缀路由）。
 
 所有 CLI 命令都支持 `--format=json`，便于 CI/CD 管道消费。
 
 每份产物目录都自带 `README.md`（能力清单 / 部署前凭证 / 常见问题 / 升级卸载），部署前 `cat README.md` 就有路标。
 
-### Embedded 内嵌对话（桌面端 Studio 原生;老名 standalone）
+### Embedded 内嵌对话（桌面端 Studio 原生）
 
-`embedded` target（历史名 `standalone`）不再独立部署 —— 产物只是 Studio 内嵌对话用的素材
+`embedded` target 的产物就是 Studio 内嵌对话用的素材
 （`system-prompt.md` + `skills/` + `scripts/` + `tshoot.json`）。桌面 app 打开"已装机器人"页
 点 **💬 打开对话** 即可跟机器人聊，细节：
 

@@ -21,9 +21,6 @@ func TestParseTargets(t *testing.T) {
 		{"mixed sep + padding", "  openclaw , cursor ", []string{"openclaw", "cursor"}},
 		{"case insensitive", "OPENCLAW Cursor", []string{"openclaw", "cursor"}},
 		{"dedup", "openclaw openclaw embedded", []string{"openclaw", "embedded"}},
-		// 老别名兼容
-		{"alias standalone → embedded", "openclaw standalone", []string{"openclaw", "embedded"}},
-		{"alias dedup against embedded", "embedded standalone", []string{"embedded"}},
 		{"all unknown → fallback openclaw", "bogus unknown", []string{"openclaw"}},
 		{"partial unknown filtered", "openclaw bogus cursor", []string{"openclaw", "cursor"}},
 	}

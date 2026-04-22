@@ -313,7 +313,6 @@ reposDone:
 
 // parseTargets 把用户输入的 "openclaw claude-code" / "openclaw, embedded" / ""
 // 解析成合法 target 列表；空输入 = 全部 4 种；未知 token 忽略并在 UI 层由 ask 流程已打印提示。
-// 兼容:老别名 "standalone" 自动归一到 "embedded"(target 重命名的向后兼容)。
 func parseTargets(raw string) []string {
 	valid := map[string]bool{"openclaw": true, "claude-code": true, "cursor": true, "embedded": true}
 	order := []string{"openclaw", "claude-code", "cursor", "embedded"}
@@ -325,10 +324,6 @@ func parseTargets(raw string) []string {
 	var out []string
 	for _, tok := range strings.FieldsFunc(raw, func(r rune) bool { return r == ' ' || r == ',' || r == ';' }) {
 		tok = strings.ToLower(strings.TrimSpace(tok))
-		// 老名 standalone 当作 embedded 别名(跟 config.LoadFromBytes 的 alias 对齐)
-		if tok == "standalone" {
-			tok = "embedded"
-		}
 		if valid[tok] && !seen[tok] {
 			out = append(out, tok)
 			seen[tok] = true

@@ -5,7 +5,6 @@
 //   - embedded / openclaw:Studio 替用户管路径,默认塞 ~/.tshoot/<target>/<id>/
 //     UI 显示"将部署到 <path>"+ 折叠"自定义"入口;用户点自定义才露 input
 //   - claude-code / cursor:用户必填(装到某个项目根),UI 保持 input 可见
-// "standalone" 作为 embedded 的历史别名被接住,老 UI state 还写着 standalone 时不崩
 //
 // composable 接收 3 个 ref:
 //   target      — 当前选的 target(v-model 绑的)
@@ -13,8 +12,8 @@
 //   destPath    — 外部维护的 path 值(v-model 绑的),composable 会按 target 自动填/清
 //
 // 返回一组 reactive:
-//   isManagedTarget      — true = standalone/openclaw(Studio 管路径)
-//   customPathExpanded   — 用户是否展开了"自定义"; standalone/openclaw 下有意义
+//   isManagedTarget      — true = embedded/openclaw(Studio 管路径)
+//   customPathExpanded   — 用户是否展开了"自定义"; embedded/openclaw 下有意义
 //   autoDefaultPath      — 当前 target+id 算出的默认路径(纯展示)
 //   resetCustomPath      — 折回默认值(展开时的"用默认"按钮调)
 
@@ -27,7 +26,7 @@ export function useDeployPath(
   destPath: Ref<string>,
 ) {
   const isManagedTarget = computed(
-    () => target.value === 'embedded' || target.value === 'standalone' || target.value === 'openclaw',
+    () => target.value === 'embedded' || target.value === 'openclaw',
   )
   const customPathExpanded = ref(false)
   const autoDefaultPath = ref('')

@@ -56,7 +56,7 @@ const messagesBox = ref<HTMLDivElement | null>(null)
 
 // session-level key 缓存,跟旧 iframe 版保持一致:window 全局,app 关就没。
 // 也支持读系统 LLM_API_KEY env(通过 Studio 进程继承),避免填第二次
-const sessionKeyStore = ((window as any).__tshootStandaloneKeys__ ??= {}) as Record<string, string>
+const sessionKeyStore = ((window as any).__tshootChatKeys__ ??= {}) as Record<string, string>
 
 function storageKey(kind: 'msgs' | 'env'): string {
   return `ts-native-chat:${kind}:${botPath.value}`

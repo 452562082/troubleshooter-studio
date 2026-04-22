@@ -45,7 +45,7 @@ type Answers struct {
 	OutputDir string
 
 	// Targets 是 generation.targets 的显式列表：openclaw / claude-code / cursor / embedded
-	// 空表示 fallback 到 [openclaw]。"standalone" 是 "embedded" 的历史别名,LoadFromBytes 自动归一
+	// 空表示 fallback 到 [openclaw]
 	Targets []string
 }
 

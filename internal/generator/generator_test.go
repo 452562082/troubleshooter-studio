@@ -384,7 +384,7 @@ func TestGenerate_MultiTargets_All(t *testing.T) {
 		".cursor/rules/routing.mdc",
 		"skills/routing/SKILL.md",
 	})
-	// embedded(原 standalone)产物精简:桌面端原生 chat 接管后,server.py / Dockerfile /
+	// embedded 产物就是 Studio 内嵌对话的素材:
 	// install.sh / docker-compose 等独立部署资产已删。只剩 Studio 内嵌所需的素材。
 	assertExists(t, out+"-embedded", []string{
 		"system-prompt.md",

@@ -40,7 +40,6 @@ func funcMap() template.FuncMap {
 		"upper":          strings.ToUpper,
 		"lower":          strings.ToLower,
 		"dataStoreSkill": dataStoreSkillName,
-		"anthropicModel": anthropicDefaultModel,
 		"list":           func(items ...string) []string { return items },
 		"hasSkill": func(ctx *Context, name string) bool {
 			if len(ctx.Generation.SkillsWhitelist) == 0 {

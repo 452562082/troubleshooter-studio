@@ -217,10 +217,8 @@ export async function chatStop(reqId: string): Promise<boolean> {
   return App.ChatStop(reqId)
 }
 
-// 注:早期 standalone 走 Flask + server.py 独立部署,桌面端通过 iframe 嵌
-// localhost:<port> 实现内嵌对话。现在改成 Studio 原生 chat(直连 LLM API),
-// 对应的 StartStandalone/StopStandalone/StandaloneStatus binding + iframe 路径
-// 全部移除。BotsChat.vue 现在完全用 chatSend/chatStop 驱动。
+// embedded target 的对话走 chatSend/chatStop(原生 chat,直连 LLM API,见上面)。
+// BotsChat.vue 用这套流式 API,前端无 iframe / 无 HTTP 中转。
 
 /** 在 Finder / Explorer 里展示(不是打开)指定路径 */
 export async function revealInFinder(path: string): Promise<void> {

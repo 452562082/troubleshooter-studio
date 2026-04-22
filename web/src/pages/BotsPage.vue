@@ -284,7 +284,6 @@ function targetLabel(t: string): string {
     'claude-code': 'Claude Code',
     cursor: 'Cursor',
     embedded: 'Embedded (内嵌对话)',
-    standalone: 'Embedded (内嵌对话)', // 历史 tshoot.json 里可能还写着 standalone,展示统一成 Embedded
   }
   return map[t] ?? t
 }
@@ -923,8 +922,7 @@ onUnmounted(() => {
 .bot-target[data-target="openclaw"] { background: #fce7f3; color: #9f1239; }
 .bot-target[data-target="claude-code"] { background: #fef3c7; color: #92400e; }
 .bot-target[data-target="cursor"] { background: #dbeafe; color: #1e40af; }
-.bot-target[data-target="embedded"],
-.bot-target[data-target="standalone"] { background: #d1fae5; color: #065f46; } /* standalone 是 embedded 的老别名,保 CSS 兼容 */
+.bot-target[data-target="embedded"] { background: #d1fae5; color: #065f46; }
 .bot-ver { font-size: 11px; color: #94a3b8; font-family: monospace; }
 
 .bot-name { font-size: 16px; font-weight: 600; color: #0f172a; margin-bottom: 4px; }
@@ -944,8 +942,7 @@ onUnmounted(() => {
   background: #f1f5f9; border: 1px solid #cbd5e1; color: #334155;
 }
 .btn-regen:hover:not(:disabled) { background: #e2e8f0; }
-/* embedded target(老名 standalone)的"打开对话"按钮:绿色强调,区分于管理类操作;
- * 现在所有 target 都有对话能力,不再是 embedded 专属,但绿色按钮样式保留。 */
+/* "打开对话"按钮:所有 target 都支持(走 Studio 原生 chat),绿色强调跟管理类操作区分 */
 .btn-chat {
   background: #d1fae5; border-color: #86efac; color: #065f46; font-weight: 600;
 }

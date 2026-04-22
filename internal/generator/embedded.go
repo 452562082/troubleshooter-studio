@@ -7,23 +7,14 @@ import (
 	"strings"
 )
 
-// GenerateEmbedded 输出"桌面端内嵌对话"用的素材集合。
-//
-// 历史:这个 target 原来叫 "standalone",走 Flask + Docker 独立部署路径,会生成
-// server.py / index.html / Dockerfile / docker-compose / install.sh 等一整套。
-// "桌面端原生 chat"上线后独立部署不再维护,名字"standalone"(独立)也不准确了 ——
-// 实际上产物完全依附 Studio 桌面端跑,是"内嵌"。target 重命名为 "embedded" 后
-// 产物目录也改成 <out>-embedded/。老 yaml 写 "standalone" 的值在 config
-// LoadFromBytes 阶段被 aliasStandaloneToEmbedded 归一到 "embedded",向后兼容。
-//
-// 现在 embedded 产物就是:
+// GenerateEmbedded 输出"桌面端内嵌对话"用的素材集合:
 //   - system-prompt.md  —— 合并所有 SOUL/IDENTITY/AGENTS/CHECKLIST/TOOLS + skill 知识
 //   - skills/           —— 路由 / 映射表 / SKILL.md(内嵌对话的 prompt 拼接源)
 //   - scripts/          —— config-executor 等辅助脚本(桌面端当前不跑它们,
 //     保留是因为 system-prompt 里引用得到,删了会报"找不到")
 //   - tshoot.json       —— discover 锚点,让 Studio 扫得到这台机器人
 //
-// Studio 内嵌 chat 读 system-prompt.md + 直连 LLM(llmchat 包)直接对话。
+// Studio 内嵌 chat 读 system-prompt.md + 直连 LLM(internal/llmchat 包)对话。
 func (g *Generator) GenerateEmbedded() error {
 	outDir := g.OutputDir + "-embedded"
 	if err := os.RemoveAll(outDir); err != nil {
@@ -96,17 +87,4 @@ func buildSystemPrompt(wsRoot string, ctx *Context) (string, error) {
 	}
 
 	return sb.String(), nil
-}
-
-// anthropicDefaultModel 原本是 server.py 里 Python 兼容层的 model id 归一器,
-// server.py 删后只剩一个残留引用点:generator/funcs.go 里作为模板函数 anthropicModel
-// 暴露给可能还存在的 templates/standalone/README.md.tmpl 等。但 README.md.tmpl 已删,
-// 现在没有调用方。保留一个薄 pass-through 避免 funcs.go 里模板 map 报 undefined —— 等
-// generator/funcs.go 清掉 anthropicModel 注册后这里也能删。
-func anthropicDefaultModel(raw string) string {
-	s := strings.TrimSpace(raw)
-	if s == "" {
-		return "anthropic/claude-sonnet-4-6"
-	}
-	return s
 }

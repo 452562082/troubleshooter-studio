@@ -27,7 +27,6 @@ type Meta struct {
 	SystemName string `json:"system_name"`
 
 	// Target 是本产物的部署形态：openclaw / claude-code / cursor / embedded
-	// (老 bot 的 tshoot.json 可能还是 "standalone",agent.Apply 里按别名处理)
 	Target string `json:"target"`
 
 	// GeneratedAt RFC3339 时间戳

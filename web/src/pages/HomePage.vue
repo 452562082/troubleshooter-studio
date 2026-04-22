@@ -52,11 +52,12 @@ const primaryCards = [
   { path: '/editor', icon: '📝', label: 'YAML 编辑器',   desc: '直接手写 / 粘贴 system.yaml，一键验证 / plan' },
 ]
 // 高级 / 诊断工具:不是每次都用,视觉上弱化一档。
+// Plan/Diff 已删(跟 BotsPage 预演重叠 / 是死码),剩下 Analyze 和 Doctor。
+// Analyze 短期会被融入 InitPage 第 4 步,但独立入口保留做"对任意 yaml 扫描"。
+// Doctor 同理,BotsPage 卡片上有按钮,这里保留独立入口。
 const advancedCards = [
-  { path: '/analyze', icon: '🔍', label: '仓库分析',  desc: '扫描代码抽取 service_names 与配置中心线索（可选，补充 yaml）' },
-  { path: '/plan',    icon: '📋', label: '计划预览',  desc: '干跑一次 gen，看会生成哪些 skill / 文件 / 保留' },
-  { path: '/doctor',  icon: '🩺', label: '健康检查',  desc: '对比声明 vs 代码实态，给 actionable 的修复建议' },
-  { path: '/diff',    icon: '🔀', label: '差异对比',  desc: '精确到行级的新旧产物 diff，review 用' },
+  { path: '/analyze', icon: '🔍', label: '仓库分析', desc: '扫代码抽 service_names 与配置中心线索（可独立用,也被 InitPage 第 4 步集成）' },
+  { path: '/doctor',  icon: '🩺', label: '健康检查', desc: '对比声明 vs 代码实态,给 actionable 的修复建议（BotsPage 卡片也能触发）' },
 ]
 
 // 推荐下一步逻辑
@@ -111,7 +112,7 @@ const nextStep = computed(() => {
 
     <!-- 高级 / 诊断:折叠入口弱化,避免跟主路径抢视觉焦点 -->
     <h2 class="section-title secondary">高级 · 诊断</h2>
-    <p class="section-hint">可选工具:仓库扫描补全 yaml、plan/diff review 产物差异、doctor 检测漂移。</p>
+    <p class="section-hint">可选工具:仓库扫描补全 yaml(也集成在 InitPage 第 4 步)、doctor 检测声明漂移。</p>
     <div class="nav-card-grid compact">
       <div v-for="c in advancedCards" :key="c.path" class="nav-card advanced" @click="router.push(c.path)">
         <div class="nav-card-head">

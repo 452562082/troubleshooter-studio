@@ -67,15 +67,9 @@ export async function analyze(
   return App.Analyze(yamlText, reposRoot, autoClone)
 }
 
-/** Diff 预览新 yaml vs existingDir 现有产物的文件级 create/modify/remove 变化。
- *  浏览器模式没有对应 API 端点(api/handler.go 没 HandleDiff),只能桌面用。
- */
-export async function diff(yamlText: string, existingDir: string): Promise<Plan> {
-  if (!isDesktop()) {
-    throw new Error('Diff 在浏览器模式下不可用(tshoot serve 未实现 /api/diff),请在桌面 app 里使用')
-  }
-  return App.Diff(yamlText, existingDir)
-}
+// 注:曾经的 diff() bridge + DiffPage 已删 —— 功能被 BotsPage 的"编辑配置 → 预演"
+// 完全覆盖(而且那个给的是 target-aware 真实 diff,带 preserve/remove 列表)。
+// 后端 App.Diff binding 暂留做 CLI 调用兼容,UI 不再经过 bridge.
 
 /** Doctor 对比声明 vs 代码实态,reposRoot 留空只校验声明一致性 */
 export async function doctor(yamlText: string, reposRoot = ''): Promise<DoctorReport> {

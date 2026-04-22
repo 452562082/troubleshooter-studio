@@ -11,10 +11,8 @@ const navItems = [
   { path: '/bots', icon: '🤖', label: '已装机器人', desc: '扫描本机已部署的机器人' },
   { path: '/init', icon: '🧙', label: '创建向导', desc: '生成 system.yaml' },
   { path: '/editor', icon: '📝', label: '编辑器', desc: '编辑 / 验证 / 生成' },
-  { path: '/analyze', icon: '🔍', label: '仓库分析', desc: '扫描代码抽取配置' },
-  { path: '/plan', icon: '📋', label: '计划预览', desc: '预览将生成什么' },
+  { path: '/analyze', icon: '🔍', label: '仓库分析', desc: '扫代码抽 service_names / 配置中心' },
   { path: '/doctor', icon: '🩺', label: '健康检查', desc: '检测声明与代码漂移' },
-  { path: '/diff', icon: '🔀', label: '差异对比', desc: '新旧产物 diff' },
 ]
 </script>
 

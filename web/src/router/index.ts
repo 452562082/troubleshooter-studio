@@ -36,19 +36,9 @@ const router = createRouter({
       component: () => import('../pages/AnalyzePage.vue'),
     },
     {
-      path: '/plan',
-      name: 'Plan',
-      component: () => import('../pages/PlanPage.vue'),
-    },
-    {
       path: '/doctor',
       name: 'Doctor',
       component: () => import('../pages/DoctorPage.vue'),
-    },
-    {
-      path: '/diff',
-      name: 'Diff',
-      component: () => import('../pages/DiffPage.vue'),
     },
   ],
 })

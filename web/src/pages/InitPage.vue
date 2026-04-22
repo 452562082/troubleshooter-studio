@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch } from 'vue'
 import yaml from 'js-yaml'
-import { validate as bridgeValidate } from '../lib/bridge'
+import { analyze as bridgeAnalyze, isDesktop, openDir, validate as bridgeValidate } from '../lib/bridge'
 import { confirmDialog } from '../lib/confirm'
+import { toast } from '../lib/toast'
 
 // ── Draft persistence (survives route switches and reloads) ──
 const STORAGE_KEY = 'tsf-init-wizard-v1'
@@ -185,6 +186,80 @@ watch(
   },
   { deep: true }
 )
+
+// ── Step 4 Analyze 集成 ──
+// 让用户在填 repos 时一键扫描本机代码,反填 service_names(+ 给 Step 5 配置中心
+// 类型一个建议)。不强制:reposRoot 空就不跑,repos 没名字扫不出东西。
+// 保持范围克制:只改 service_names 字段,configCenter 建议作为 toast 提示,
+// 不自动改 Step 5 选项(avoid silent 覆盖用户选择)。
+const reposRootInput = ref('')
+const analyzeLoading = ref(false)
+const analyzeError = ref<string | null>(null)
+const analyzeSummary = ref<string | null>(null) // 成功后给个一句话总结
+
+async function pickReposRoot() {
+  if (!isDesktop()) {
+    analyzeError.value = '选目录需要桌面 app 环境;浏览器模式请手动输入路径'
+    return
+  }
+  try {
+    const p = await openDir('选择仓库根目录(含各个 repo.name 子目录)')
+    if (p) reposRootInput.value = p
+  } catch (e: any) {
+    analyzeError.value = String(e?.message || e)
+  }
+}
+
+async function runAnalyzeForRepos() {
+  analyzeError.value = null
+  analyzeSummary.value = null
+  if (!reposRootInput.value.trim()) {
+    analyzeError.value = '请先填仓库根目录'
+    return
+  }
+  // 至少要一个 repo.name,不然 analyzerpipe 没东西可匹配
+  const namedRepos = repos.filter(r => r.name.trim())
+  if (namedRepos.length === 0) {
+    analyzeError.value = '请先填至少一个仓库名'
+    return
+  }
+  if (!isDesktop()) {
+    analyzeError.value = 'Analyze 仅在桌面 app 可用(浏览器模式请用 CLI:tshoot analyze)'
+    return
+  }
+  analyzeLoading.value = true
+  try {
+    const yamlText = generateYAML() // 复用 Step 7 的 yaml 构造器,当前向导状态够跑一次分析
+    const r = (await bridgeAnalyze(yamlText, reposRootInput.value, false)) as {
+      per_repo?: Array<{ name: string; service_names?: string[]; status: string; error?: string }>
+      report?: { config_center?: string; repos?: Array<{ name: string; service_names?: string[] }> }
+    }
+    // 反填 service_names:per_repo 里每条去 repos 里按 name 找对应,把 service_names 数组改成逗号串
+    let filled = 0
+    const perRepo = r.per_repo || []
+    for (const hit of perRepo) {
+      if (!hit.service_names?.length) continue
+      const target = repos.find(rp => rp.name === hit.name)
+      if (!target) continue
+      const joined = hit.service_names.join(', ')
+      if (target.service_names !== joined) {
+        target.service_names = joined
+        filled++
+      }
+    }
+    // 配置中心建议给 toast,避免 Step 5 静默被改
+    const ccHint = r.report?.config_center && r.report.config_center !== 'unknown'
+      ? `;识别到配置中心类型:${r.report.config_center}(Step 5 可据此选)`
+      : ''
+    analyzeSummary.value = `扫描完成:${filled} 个仓库反填了 service_names${ccHint}`
+    if (filled > 0) toast.success(analyzeSummary.value)
+    else toast.info(`扫描完成但没抓到 service_names;手填也行${ccHint}`)
+  } catch (e: any) {
+    analyzeError.value = String(e?.message || e)
+  } finally {
+    analyzeLoading.value = false
+  }
+}
 
 // ── Step 5: 配置源 ──
 const configCenterType = ref<string>(saved?.configCenterType ?? 'nacos')
@@ -879,6 +954,43 @@ const configTypeDescriptions: Record<string, string> = {
     <div v-if="currentStep === 4" class="card lg">
       <h2>代码仓库</h2>
       <p class="help-text">每个仓库对应一个代码仓库。role 描述角色（backend=后端、frontend=前端、gateway=网关/BFF）</p>
+
+      <!-- Analyze 集成:输入仓库根目录 + 已填仓库名 → 一键扫描反填 service_names。
+           折叠在最上面,用户不关心时也不挡视线。-->
+      <details class="analyze-block">
+        <summary>
+          <span>🔍 扫代码自动填 service_names(可选)</span>
+          <span class="analyze-hint">需要先填仓库名,并填本机已 clone 的仓库根目录</span>
+        </summary>
+        <div class="analyze-body">
+          <div class="analyze-row">
+            <input
+              v-model="reposRootInput"
+              type="text"
+              placeholder="例:~/code/all-repos 或绝对路径 /Users/xxx/repos"
+            />
+            <button type="button" class="btn" :disabled="analyzeLoading" @click="pickReposRoot">
+              选目录…
+            </button>
+            <button
+              type="button"
+              class="btn primary"
+              :disabled="analyzeLoading || !reposRootInput.trim()"
+              @click="runAnalyzeForRepos"
+            >
+              {{ analyzeLoading ? '扫描中…' : '扫描并反填' }}
+            </button>
+          </div>
+          <div v-if="analyzeError" class="alert error">{{ analyzeError }}</div>
+          <div v-else-if="analyzeSummary" class="alert success">{{ analyzeSummary }}</div>
+          <p class="help-text" style="margin-top: 8px;">
+            analyzer 会按 repo.name 匹配 <code>&lt;仓库根&gt;/&lt;repo.name&gt;/</code> 子目录,
+            扫出 service_names(K8s deployment / Nacos data_id 前缀)+ 配置中心类型线索。
+            命中后会覆盖对应仓库的 service_names 字段;不命中的保持手填不动。
+          </p>
+        </div>
+      </details>
+
       <div v-for="(repo, i) in repos" :key="i" class="repo-block">
         <div class="repo-header">
           <span class="repo-badge">仓库 {{ i + 1 }}</span>
@@ -1348,6 +1460,26 @@ textarea.error {
 }
 
 /* ── Repo block ── */
+/* Analyze 集成块:折叠在 Step 4 顶部,不打扰不关心它的用户 */
+.analyze-block {
+  margin-bottom: 14px; padding: 10px 14px;
+  background: #eff6ff; border: 1px solid #bfdbfe;
+  border-radius: 8px; font-size: 13px;
+}
+.analyze-block summary {
+  cursor: pointer; display: flex; align-items: baseline; gap: 10px;
+  user-select: none; font-weight: 500; color: #1e40af;
+}
+.analyze-block[open] summary { margin-bottom: 10px; }
+.analyze-hint { font-size: 11px; color: #64748b; font-weight: 400; }
+.analyze-body { display: flex; flex-direction: column; gap: 8px; }
+.analyze-row { display: flex; gap: 8px; align-items: center; }
+.analyze-row input[type="text"] {
+  flex: 1; padding: 7px 10px; border: 1px solid #cbd5e1; border-radius: 6px;
+  font-size: 13px; font-family: monospace;
+}
+.analyze-row input[type="text"]:focus { outline: none; border-color: #3b82f6; }
+
 .repo-block {
   border: 1px solid #e2e8f0;
   border-radius: 8px;

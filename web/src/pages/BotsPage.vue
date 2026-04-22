@@ -9,6 +9,7 @@ import {
   applyBot,
   cancelInstall,
   discoverBots,
+  doctor as bridgeDoctor,
   exportYAML,
   gen as bridgeGen,
   importAndDeploy,
@@ -41,6 +42,47 @@ const editorDraft = ref('')
 const applyState = reactive<
   Record<string, { loading: boolean; result?: ApplyResult; err?: string; mode?: 'dry' | 'real' }>
 >({})
+
+// Doctor 诊断状态。key = regenKey(b)。
+// 设计:只跑声明级诊断(不填 reposRoot),够 80% 场景;想做代码漂移检测去独立 DoctorPage。
+// 展开的卡片默认收起,点按钮才跑;issues 空 = 无漂移。
+interface DoctorIssue {
+  severity: string
+  category: string
+  target: string
+  message: string
+  suggest?: string
+}
+const doctorState = reactive<
+  Record<string, { loading: boolean; issues?: DoctorIssue[]; err?: string; open?: boolean }>
+>({})
+
+async function runDoctor(b: DiscoveredBot) {
+  const k = regenKey(b)
+  if (!b.meta.system_yaml) {
+    toast.error(`${b.meta.system_id}: tshoot.json 缺 system_yaml,无法诊断`)
+    return
+  }
+  doctorState[k] = { loading: true, open: true }
+  try {
+    const data = (await bridgeDoctor(b.meta.system_yaml, '')) as { issues?: DoctorIssue[] }
+    doctorState[k] = { loading: false, open: true, issues: data.issues || [] }
+  } catch (e: any) {
+    doctorState[k] = { loading: false, open: true, err: String(e?.message || e) }
+  }
+}
+
+function doctorSeverityIcon(s: string): string {
+  if (s === 'error') return '✖'
+  if (s === 'warning') return '⚠'
+  return 'ℹ'
+}
+
+function doctorClassForSeverity(s: string): string {
+  if (s === 'error') return 'doctor-err'
+  if (s === 'warning') return 'doctor-warn'
+  return 'doctor-info'
+}
 
 const isDesktop = bridgeIsDesktop
 
@@ -600,6 +642,14 @@ onUnmounted(() => {
             </button>
             <button
               class="btn btn-regen"
+              :disabled="doctorState[regenKey(b)]?.loading"
+              :title="'跑一次 doctor:对比 yaml 声明跟代码仓库实态(本地跑,只做声明级检查;想加 reposRoot 做深度扫描请去「健康检查」独立页)'"
+              @click="runDoctor(b)"
+            >
+              {{ doctorState[regenKey(b)]?.loading ? '诊断中…' : '🩺 诊断' }}
+            </button>
+            <button
+              class="btn btn-regen"
               :title="editingKey === regenKey(b) ? '导出当前编辑中的草稿' : '导出活 workspace 的 system.yaml'"
               @click="doExport(b)"
             >
@@ -607,6 +657,37 @@ onUnmounted(() => {
             </button>
           </div>
         </footer>
+
+        <!-- Doctor 诊断结果:按卡展开,issues 空 = 一切正常。 -->
+        <section v-if="doctorState[regenKey(b)]?.open" class="doctor-panel">
+          <div class="doctor-head">
+            <strong>🩺 诊断结果</strong>
+            <button class="btn btn-regen" @click="doctorState[regenKey(b)].open = false">收起</button>
+          </div>
+          <div v-if="doctorState[regenKey(b)]?.err" class="alert error">
+            {{ doctorState[regenKey(b)]!.err }}
+          </div>
+          <div v-else-if="doctorState[regenKey(b)]?.issues?.length === 0" class="alert success">
+            ✓ 未发现声明漂移。想做代码实态深度扫描(对比 yaml vs git 仓库)去独立「健康检查」页填 reposRoot。
+          </div>
+          <ul v-else-if="doctorState[regenKey(b)]?.issues" class="doctor-list">
+            <li
+              v-for="(iss, i) in doctorState[regenKey(b)]!.issues"
+              :key="i"
+              :class="doctorClassForSeverity(iss.severity)"
+            >
+              <span class="doctor-icon">{{ doctorSeverityIcon(iss.severity) }}</span>
+              <div class="doctor-body">
+                <div class="doctor-line">
+                  <span class="doctor-cat">{{ iss.category }}</span>
+                  <span v-if="iss.target" class="doctor-target">→ {{ iss.target }}</span>
+                </div>
+                <div class="doctor-msg">{{ iss.message }}</div>
+                <div v-if="iss.suggest" class="doctor-sug">建议:{{ iss.suggest }}</div>
+              </div>
+            </li>
+          </ul>
+        </section>
 
         <section v-if="editingKey === regenKey(b)" class="editor">
           <label class="editor-label">system.yaml（改完先「预演」看改动列表，再「应用」写盘）</label>
@@ -717,6 +798,33 @@ onUnmounted(() => {
   background: #d1fae5; border-color: #86efac; color: #065f46; font-weight: 600;
 }
 .btn-chat:hover:not(:disabled) { background: #a7f3d0; border-color: #4ade80; }
+
+/* Doctor 诊断结果面板 */
+.doctor-panel {
+  margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--c-line-2);
+}
+.doctor-head {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 8px; font-size: var(--fs-sm); color: var(--c-ink);
+}
+.doctor-list {
+  list-style: none; padding: 0; margin: 0;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.doctor-list li {
+  display: flex; gap: 10px; padding: 8px 10px;
+  border-radius: var(--r-sm); font-size: var(--fs-xs);
+}
+.doctor-err  { background: var(--c-danger-bg);  border: 1px solid var(--c-danger-border); color: var(--c-danger); }
+.doctor-warn { background: #fffbeb;            border: 1px solid #fde68a;             color: var(--c-warn); }
+.doctor-info { background: #eff6ff;            border: 1px solid #bfdbfe;             color: #1e40af; }
+.doctor-icon { font-size: 14px; flex-shrink: 0; line-height: 1.4; }
+.doctor-body { flex: 1; line-height: 1.5; }
+.doctor-line { font-weight: 600; margin-bottom: 2px; }
+.doctor-cat { font-family: monospace; }
+.doctor-target { margin-left: 4px; opacity: 0.85; }
+.doctor-msg { opacity: 0.92; }
+.doctor-sug { margin-top: 4px; opacity: 0.8; font-style: italic; }
 
 
 .bot-actions { display: flex; gap: 6px; }

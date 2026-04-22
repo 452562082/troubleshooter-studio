@@ -39,12 +39,13 @@ type RepoSummary struct {
 	ServiceNameCount int    `json:"service_name_count"`
 	FindingCount     int    `json:"finding_count"`
 	Error            string `json:"error,omitempty"`
-	// DetectedStack 是 analyzer.DetectStack 从仓库根文件猜出来的技术栈
-	// (go / java / python / node / php;空串 = 没匹配到任何 marker)。
-	// InitPage Step 4 的"扫一下"会把这个值反填到 repos[].stack,让用户不用手选。
-	// 即使 yaml 里已填了 stack,这个字段也会独立反映探测结果,UI 可以提示
-	// "你声明 go 但看起来是 java"。
-	DetectedStack string `json:"detected_stack,omitempty"`
+	// DetectedStack / DetectedRole / DetectedFramework 分别是三个启发式 detector
+	// 对仓库的探测结果。InitPage Step 4 把 role / stack / framework 做成只读 badge,
+	// 这三个字段是唯一数据源,用户只能看不能改(想改就手动编辑 yaml 或重写 repo URL
+	// 重新扫描)。都可能是空字符串 —— 仓库不在本地 / 不是 git / manifest 不认识。
+	DetectedStack     string `json:"detected_stack,omitempty"`
+	DetectedRole      string `json:"detected_role,omitempty"`
+	DetectedFramework string `json:"detected_framework,omitempty"`
 	// Branches 是仓库的所有分支名(本地 + 远端,去重 + 字母序)。
 	// InitPage Step 4 的 env_branches input 用 <datalist> 挂上去,用户点
 	// 下拉就能从真实分支里选,不用手敲。仓库不存在 / 不是 git repo 时为空。
@@ -108,10 +109,11 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 			status = "cloned-then-analyzed"
 		}
 
-		// 不管 yaml 里 repo.stack 填没填,都跑一次 DetectStack 探测,作为信号告诉
-		// InitPage Step 4 能不能自动反填;yaml 已填时也可以用来做"声明 vs 实态"冲突提示。
+		// 四项仓库元信息探测,跟 yaml 里声明值独立;Step 4 UI 以探测值为准。
+		// 都轻量(只读根文件 / git for-each-ref),不会显著拖慢 analyze 流程。
 		detectedStack := analyzer.DetectStack(repoPath)
-		// 列真实 git 分支,给 UI 的 env_branches 下拉用;非 git 仓库返回空不报错
+		detectedRole := analyzer.DetectRole(repoPath)
+		detectedFramework := analyzer.DetectFramework(repoPath, detectedStack)
 		branches := analyzer.ListBranches(repoPath)
 
 		// 跑实际 analyzer:优先用 yaml 里声明的 stack;yaml 没填时回落到 detected。
@@ -124,11 +126,13 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 		a, err := reg.Get(effectiveStack)
 		if err != nil {
 			perRepo = append(perRepo, RepoSummary{
-				Name:          repo.Name,
-				Status:        "skipped",
-				Error:         err.Error(),
-				DetectedStack: detectedStack,
-				Branches:      branches,
+				Name:              repo.Name,
+				Status:            "skipped",
+				Error:             err.Error(),
+				DetectedStack:     detectedStack,
+				DetectedRole:      detectedRole,
+				DetectedFramework: detectedFramework,
+				Branches:          branches,
 			})
 			progress(fmt.Sprintf("[skip] %s: %v", repo.Name, err))
 			continue
@@ -140,12 +144,14 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 		ra.Name = repo.Name
 		report.Repos = append(report.Repos, *ra)
 		perRepo = append(perRepo, RepoSummary{
-			Name:             repo.Name,
-			Status:           status,
-			ServiceNameCount: len(ra.ServiceNames),
-			FindingCount:     len(ra.Findings),
-			DetectedStack:    detectedStack,
-			Branches:         branches,
+			Name:              repo.Name,
+			Status:            status,
+			ServiceNameCount:  len(ra.ServiceNames),
+			FindingCount:      len(ra.Findings),
+			DetectedStack:     detectedStack,
+			DetectedRole:      detectedRole,
+			DetectedFramework: detectedFramework,
+			Branches:          branches,
 		})
 		progress(fmt.Sprintf("[ok] analyzed %s (stack=%s): %d service_names, %d findings",
 			repo.Name, effectiveStack, len(ra.ServiceNames), len(ra.Findings)))

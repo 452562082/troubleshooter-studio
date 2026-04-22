@@ -182,7 +182,9 @@ function makeEmptyRepo(): RepoItem {
   for (const e of environments) {
     if (e.id) branches[e.id] = ''
   }
-  return { name: '', url: '', role: 'backend', stack: 'go', framework: '', service_names: '', env_branches: branches }
+  // role/stack 空字符串占位:UI 把它们做成只读 badge,扫描后才有值;
+  // Step 7 generateYAML 写盘时给 "backend"/"go" 兜底,保证 yaml schema 合法。
+  return { name: '', url: '', role: '', stack: '', framework: '', service_names: '', env_branches: branches }
 }
 
 const repos = reactive<RepoItem[]>(
@@ -207,6 +209,40 @@ function deriveRepoName(url: string): string {
 function onRepoUrlInput(r: RepoItem) {
   if (r._nameManual) return
   r.name = deriveRepoName(r.url)
+}
+
+// 启发式:根据 env id / is_prod 从 branches 里挑一个最可能的长期分支。
+// 映射顺序(命中优先):精确匹配 env.id → 常见别名 → 按 prod/non-prod 分组 fallback。
+// 所有都不中返回 ''(UI 不填)。
+function pickBranchForEnv(env: EnvItem, branches: string[]): string {
+  if (!branches.length) return ''
+  const has = (n: string) => branches.includes(n)
+  const eid = (env.id || '').toLowerCase()
+
+  // 1) env.id 本身就是分支名
+  if (has(eid)) return eid
+
+  // 2) env.id 的常见别名
+  const aliases: Record<string, string[]> = {
+    dev: ['develop', 'dev', 'development'],
+    prod: ['main', 'master', 'prod', 'production', 'release'],
+    test: ['test', 'testing', 'qa'],
+    staging: ['staging', 'stage', 'pre', 'preview', 'uat'],
+    pre: ['pre', 'preview', 'staging', 'uat'],
+  }
+  for (const cand of aliases[eid] || []) {
+    if (has(cand)) return cand
+  }
+
+  // 3) 按 is_prod 分组 fallback:
+  //    prod → main/master/release,非 prod → develop/dev/main
+  const prodFallbacks = ['main', 'master', 'release', 'prod', 'production']
+  const nonProdFallbacks = ['develop', 'dev', 'main']
+  const pool = env.is_prod ? prodFallbacks : nonProdFallbacks
+  for (const cand of pool) {
+    if (has(cand)) return cand
+  }
+  return ''
 }
 
 // 用户在 name 输入框里动手就算"手改过",记录下来避免被 URL 再覆盖。
@@ -297,8 +333,10 @@ async function runAnalyzeForRepos() {
         name: string
         status: string
         error?: string
-        detected_stack?: string   // 根文件 marker 探测(go.mod / package.json / ...)
-        branches?: string[]       // 真实 git 分支名,env_branches datalist 用
+        detected_stack?: string
+        detected_role?: string
+        detected_framework?: string
+        branches?: string[]
       }>
       // 真实的 service_names 在 report.repos[i].service_names 里(per_repo 只给 count)
       report?: {
@@ -309,16 +347,15 @@ async function runAnalyzeForRepos() {
 
     const perRepo = r.per_repo || []
     const reportRepos = r.report?.repos || []
-    let filledServices = 0
-    let filledStacks = 0
-    const stackConflicts: string[] = []
-
-    let branchesFilled = 0
+    // Step 4 简化后,除 name 之外所有字段都由 scan 决定,用户不能手改。
+    // 探测到就覆盖;没探测到保留空串,generateYAML 到 Step 7 会给 backend/go 兜底。
+    let filledServices = 0, filledStacks = 0, filledRoles = 0, filledFrameworks = 0
+    let branchesFilled = 0, branchesMapped = 0
     for (const hit of perRepo) {
       const target = repos.find(rp => rp.name === hit.name)
       if (!target) continue
 
-      // (1) 反填 service_names(从 report.repos 按 name 找对应的 ServiceNames 数组)
+      // (1) service_names
       const rpt = reportRepos.find(rr => rr.name === hit.name)
       if (rpt?.service_names?.length) {
         const joined = rpt.service_names.join(', ')
@@ -328,24 +365,32 @@ async function runAnalyzeForRepos() {
         }
       }
 
-      // (2) 反填 / 对比 detected_stack
-      if (hit.detected_stack) {
-        if (!target.stack || target.stack === 'go') {
-          // "go" 是 makeEmptyRepo 的默认值;视作"用户没显式填"一起覆盖
-          if (target.stack !== hit.detected_stack) {
-            target.stack = hit.detected_stack
-            filledStacks++
-          }
-        } else if (target.stack !== hit.detected_stack) {
-          // 用户显式填过且跟探测冲突,不静默改,toast 告警让用户决定
-          stackConflicts.push(`${hit.name}: yaml=${target.stack} vs 探测=${hit.detected_stack}`)
-        }
+      // (2) stack / role / framework —— 探测到直接覆盖,没探测到不动
+      if (hit.detected_stack && target.stack !== hit.detected_stack) {
+        target.stack = hit.detected_stack
+        filledStacks++
+      }
+      if (hit.detected_role && target.role !== hit.detected_role) {
+        target.role = hit.detected_role
+        filledRoles++
+      }
+      if (hit.detected_framework && target.framework !== hit.detected_framework) {
+        target.framework = hit.detected_framework
+        filledFrameworks++
       }
 
-      // (3) 仓库的真实分支列表放进 map,env_branches input 的 datalist 读它
+      // (3) 分支列表 + env 自动映射(启发式:dev→develop/dev,prod→main/master,...)
       if (hit.branches?.length) {
         repoBranchesMap.value[hit.name] = hit.branches
         branchesFilled++
+        for (const env of environments) {
+          if (!env.id) continue
+          const mapped = pickBranchForEnv(env, hit.branches)
+          if (mapped && target.env_branches[env.id] !== mapped) {
+            target.env_branches[env.id] = mapped
+            branchesMapped++
+          }
+        }
       }
     }
 
@@ -354,18 +399,18 @@ async function runAnalyzeForRepos() {
       ? `;识别到配置中心类型:${r.report.config_center}(Step 5 可据此选)`
       : ''
     const parts: string[] = []
-    if (filledServices > 0) parts.push(`${filledServices} 个仓库反填 service_names`)
-    if (filledStacks > 0) parts.push(`${filledStacks} 个仓库反填技术栈`)
-    if (branchesFilled > 0) parts.push(`${branchesFilled} 个仓库加载了分支下拉`)
-    if (parts.length === 0) parts.push('未反填任何字段')
-    analyzeSummary.value = `扫描完成:${parts.join(' · ')}${ccHint}`
+    if (filledStacks > 0) parts.push(`${filledStacks} 栈`)
+    if (filledRoles > 0) parts.push(`${filledRoles} 角色`)
+    if (filledFrameworks > 0) parts.push(`${filledFrameworks} 框架`)
+    if (filledServices > 0) parts.push(`${filledServices} 服务名`)
+    if (branchesMapped > 0) parts.push(`${branchesMapped} 分支映射`)
+    if (branchesFilled > 0) parts.push(`${branchesFilled} 仓库加载了分支下拉`)
+    analyzeSummary.value = parts.length > 0
+      ? `扫描完成:自动填了 ${parts.join(' / ')}${ccHint}`
+      : `扫描完成:未识别任何字段(仓库可能不在本地,或 marker 文件不认识)${ccHint}`
 
-    if (filledServices > 0 || filledStacks > 0 || branchesFilled > 0) toast.success(analyzeSummary.value)
+    if (parts.length > 0) toast.success(analyzeSummary.value)
     else toast.info(analyzeSummary.value)
-
-    if (stackConflicts.length > 0) {
-      toast.error(`技术栈冲突(已保留你的选择):\n` + stackConflicts.join('\n'))
-    }
   } catch (e: any) {
     analyzeError.value = String(e?.message || e)
   } finally {
@@ -668,10 +713,13 @@ function generateYAML(): string {
   lines.push('# repos：所有纳入排障范围的代码仓库。role/stack 决定 analyzer 与 skill 策略。')
   lines.push('repos:')
   for (const repo of repos) {
+    // role / stack 若没扫到,兜底成 backend/go,保证 yaml schema 合法;
+    // 这两个字段 Step 4 UI 是 readonly 自动识别 badge,用户如果对兜底不满意,
+    // 预览这里改或回 Step 4 点"扫一下"。
     lines.push(`  - name: ${repo.name || 'my-service'}`)
     lines.push(`    url: ${repo.url || 'git@github.com:org/repo.git'}`)
-    lines.push(`    role: ${repo.role}         # backend/frontend/gateway/infra/shared`)
-    lines.push(`    stack: ${repo.stack}             # go/java/node/php/python，决定用哪种配置扫描器`)
+    lines.push(`    role: ${repo.role || 'backend'}         # backend/frontend/gateway/infra/shared`)
+    lines.push(`    stack: ${repo.stack || 'go'}             # go/java/node/php/python，决定用哪种配置扫描器`)
     if (repo.framework) lines.push(`    framework: ${repo.framework}`)
     if (repo.service_names.trim()) {
       lines.push('    service_names:       # 本 repo 实际部署出来的 service 名（config-map 以此为 key）')
@@ -980,8 +1028,12 @@ async function runOneClickDeploy() {
   }
 }
 
-const roleOptions = ['backend', 'frontend', 'gateway', 'infra', 'shared']
-const stackOptions = ['go', 'java', 'node', 'php', 'python']
+// role / stack 的枚举集合:原本给 Step 4 的下拉 select 用,现在改成自动识别
+// readonly badge 后没 UI 消费点了,但 generateYAML 写注释时还提示合法值,
+// 留着当"文档"引用。未来补"手改覆盖"功能时也能直接复用。
+const _roleOptions = ['backend', 'frontend', 'gateway', 'infra', 'shared']
+const _stackOptions = ['go', 'java', 'node', 'php', 'python']
+void _roleOptions; void _stackOptions
 const configTypeOptions = ['nacos', 'apollo', 'consul', 'env-vars', 'kubernetes', 'none']
 
 const configTypeDescriptions: Record<string, string> = {
@@ -1253,75 +1305,68 @@ const configTypeDescriptions: Record<string, string> = {
           />
         </div>
 
-        <div class="row-fields">
-          <div class="form-group compact">
-            <label>
-              仓库名
-              <span v-if="!repo._nameManual" class="auto-tag">自动从 URL 推出</span>
-              <span v-else class="field-hint">(已手改;清空可回到自动推)</span>
-            </label>
-            <input
-              v-model="repo.name"
-              type="text"
-              placeholder="自动从仓库地址推出"
-              :class="{ error: hasError(`repo.${i}.name`) }"
-              @input="onRepoNameInput(repo)"
-            />
-          </div>
-          <div class="form-group compact">
-            <label>角色</label>
-            <select v-model="repo.role">
-              <option v-for="r in roleOptions" :key="r" :value="r">{{ r }}</option>
-            </select>
-          </div>
-        </div>
-        <div class="row-fields">
-          <div class="form-group compact">
-            <label>
-              技术栈
-              <span class="field-hint">(扫一下自动识别;go.mod/package.json/pom.xml 等 marker)</span>
-            </label>
-            <select v-model="repo.stack">
-              <option v-for="s in stackOptions" :key="s" :value="s">{{ s }}</option>
-            </select>
-          </div>
-          <div class="form-group compact">
-            <label>框架（可选）</label>
-            <input v-model="repo.framework" type="text" placeholder="spring-boot" />
-          </div>
-        </div>
+        <!-- 仓库名:唯一用户可改的字段(默认从 URL 推) -->
         <div class="form-group">
-          <label>服务名 (逗号分隔)
-            <span class="help-icon" title="本仓库实际部署出来的服务名（= K8s deployment / Nacos 的 data_id 前缀），可能与仓库名不同。一个仓库跑多个服务常见：order-repo → order-service, order-worker。留空则默认用仓库名。">?</span>
-            <span class="field-hint">(扫一下自动填 analyzer 找到的服务名)</span>
+          <label>
+            仓库名
+            <span v-if="!repo._nameManual" class="auto-tag">自动从 URL 推出</span>
+            <span v-else class="field-hint">(已手改;清空可回到自动推)</span>
           </label>
-          <input v-model="repo.service_names" type="text" placeholder="自动填,也可以手敲(例 order-service, order-worker)" />
+          <input
+            v-model="repo.name"
+            type="text"
+            placeholder="自动从仓库地址推出"
+            :class="{ error: hasError(`repo.${i}.name`) }"
+            @input="onRepoNameInput(repo)"
+          />
         </div>
+
+        <!-- 自动识别结果:角色/技术栈/框架/服务名 全部只读。用户要改?动 yaml(Step 7)。 -->
         <div class="form-group">
-          <label>环境分支映射
-            <span class="help-icon" title="每个 env 对应的长期分支。routing skill 会据此帮用户切到正确的代码分支再做代码定位。例:dev=develop / prod=main。">?</span>
+          <label>
+            自动识别
+            <span class="field-hint">(扫一下后自动填,只读;想改请在 Step 7 预览里改 yaml)</span>
+          </label>
+          <div class="auto-summary">
+            <span class="auto-pill" :class="{ empty: !repo.role }">
+              <span class="auto-label">角色</span>
+              <span class="auto-val">{{ repo.role || '—' }}</span>
+            </span>
+            <span class="auto-pill" :class="{ empty: !repo.stack }">
+              <span class="auto-label">技术栈</span>
+              <span class="auto-val">{{ repo.stack || '—' }}</span>
+            </span>
+            <span class="auto-pill" :class="{ empty: !repo.framework }">
+              <span class="auto-label">框架</span>
+              <span class="auto-val">{{ repo.framework || '—' }}</span>
+            </span>
+            <span class="auto-pill wide" :class="{ empty: !repo.service_names }" :title="repo.service_names">
+              <span class="auto-label">服务名</span>
+              <span class="auto-val">{{ repo.service_names || '—' }}</span>
+            </span>
+          </div>
+        </div>
+
+        <!-- env_branches 也是自动映射(启发式 pickBranchForEnv),展示只读。
+             没分支数据时占位 "—" 提示还没扫。 -->
+        <div class="form-group">
+          <label>
+            环境 → 分支映射
+            <span class="help-icon" title="routing skill 根据此映射切到正确代码分支做代码定位。扫描仓库时按 env.id/is_prod 跟真实分支名做启发式匹配(dev→develop, prod→main/master,..)。">?</span>
             <span v-if="repoBranchesMap[repo.name]?.length" class="field-hint">
-              — ✓ 已加载 {{ repoBranchesMap[repo.name]!.length }} 个真实分支,input 点一下见下拉
+              — ✓ 从 {{ repoBranchesMap[repo.name]!.length }} 个真实分支里挑的
             </span>
-            <span v-else class="field-hint">
-              (扫一下自动从 git 读真实分支建议)
-            </span>
+            <span v-else class="field-hint">(扫一下自动映射)</span>
           </label>
-          <div class="branch-grid">
-            <div v-for="env in environments" :key="env.id" class="branch-item">
+          <div class="branch-readonly-grid">
+            <div v-for="env in environments" :key="env.id" class="branch-readonly-item">
               <span class="branch-env">{{ env.id || '?' }}</span>
-              <!-- HTML5 <datalist>:给 input 挂个下拉建议;用户还能自由手敲(eg. 长期分支叫 release/2024-q3) -->
-              <input
-                v-model="repo.env_branches[env.id]"
-                type="text"
-                :placeholder="env.is_prod ? 'main' : 'develop'"
-                :list="repoBranchesMap[repo.name]?.length ? `branches-${i}` : undefined"
-              />
+              <span class="branch-arrow">→</span>
+              <span class="branch-value" :class="{ empty: !repo.env_branches[env.id] }">
+                {{ repo.env_branches[env.id] || '—' }}
+              </span>
             </div>
           </div>
-          <datalist v-if="repoBranchesMap[repo.name]?.length" :id="`branches-${i}`">
-            <option v-for="b in repoBranchesMap[repo.name]" :key="b" :value="b" />
-          </datalist>
         </div>
       </div>
       <button class="btn" @click="addRepo">+ 添加仓库</button>
@@ -1874,6 +1919,48 @@ textarea.error {
 .branch-item input {
   width: 160px;
 }
+
+/* ── Step 4 自动识别 readonly 展示 ── */
+.auto-summary {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  padding: 10px 12px; background: #f8fafc;
+  border: 1px dashed #cbd5e1; border-radius: 6px;
+}
+.auto-pill {
+  display: flex; align-items: baseline; gap: 6px;
+  padding: 4px 10px; background: #eff6ff;
+  border: 1px solid #bfdbfe; border-radius: 6px;
+  font-size: 12px; color: #1e40af;
+}
+.auto-pill.empty { background: #f1f5f9; border-color: #e2e8f0; color: #94a3b8; }
+.auto-pill.wide { min-width: 200px; flex: 1; }
+.auto-pill .auto-label {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.3px;
+  color: inherit; opacity: 0.7; font-weight: 500;
+}
+.auto-pill .auto-val { font-weight: 600; font-family: monospace; }
+.auto-pill:not(.empty) .auto-val { color: #0f172a; }
+.auto-pill.empty .auto-val { color: #94a3b8; font-family: inherit; }
+
+.branch-readonly-grid {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 10px 12px; background: #f8fafc;
+  border: 1px dashed #cbd5e1; border-radius: 6px;
+}
+.branch-readonly-item {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 10px; background: #fff;
+  border: 1px solid #e2e8f0; border-radius: 6px;
+  font-size: 12px;
+}
+.branch-readonly-item .branch-env {
+  min-width: auto; font-weight: 600; color: #334155;
+}
+.branch-readonly-item .branch-arrow { color: #94a3b8; }
+.branch-readonly-item .branch-value {
+  font-family: monospace; color: #1e40af; font-weight: 500;
+}
+.branch-readonly-item .branch-value.empty { color: #94a3b8; font-family: inherit; }
 
 /* ── Checkboxes ── */
 .checkbox-grid {

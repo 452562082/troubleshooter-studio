@@ -151,6 +151,8 @@ export namespace analyzerpipe {
 	    finding_count: number;
 	    error?: string;
 	    detected_stack?: string;
+	    detected_role?: string;
+	    detected_framework?: string;
 	    branches?: string[];
 	
 	    static createFrom(source: any = {}) {
@@ -165,6 +167,8 @@ export namespace analyzerpipe {
 	        this.finding_count = source["finding_count"];
 	        this.error = source["error"];
 	        this.detected_stack = source["detected_stack"];
+	        this.detected_role = source["detected_role"];
+	        this.detected_framework = source["detected_framework"];
 	        this.branches = source["branches"];
 	    }
 	}

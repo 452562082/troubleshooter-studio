@@ -88,15 +88,31 @@ const modelSelectValue = computed({
 })
 const modelIsCustom = computed(() => !allPresetModels.includes(agent.model))
 
-// Auto-derive defaults when system name changes
-watch(() => system.name, (val) => {
-  if (!agent.name || agent.name === agentNameDefault.value.replace(val, '')) {
+// 自动派生默认值:
+//   - agent.name   跟着 system.name 走(中文友好,用户可见)
+//   - agent.workspace_name 跟着 system.id 走(ASCII 小写,目录名友好)
+//
+// 分成两个 watch:
+//   - 之前把 workspace_name 设成跟 agent.name 一样,结果默认变成"shop排障机器人"
+//     这种 CJK 目录名,macOS 能 work 但 cd 要引号、ls 显示乱、部分 shell 补全
+//     踩坑。改成以 system.id 为基准 + "-bot" 后缀,保证 ASCII。
+//   - 只在字段"还是上一次由对应基准自动生成的默认"时才覆盖,用户手改过就别动。
+watch(() => system.name, (val, old) => {
+  const prevDefault = `${old || ''}排障机器人`
+  if (!agent.name || agent.name === prevDefault) {
     agent.name = `${val}排障机器人`
-    agent.workspace_name = agent.name
+  }
+})
+watch(() => system.id, (val, old) => {
+  const prevDefault = old ? `${old}-bot` : ''
+  if (!agent.workspace_name || agent.workspace_name === prevDefault) {
+    agent.workspace_name = val ? `${val}-bot` : ''
   }
 })
 
 const agentNameDefault = computed(() => `${system.name}排障机器人`)
+// ${id}-bot 做目录默认;id 空时 placeholder 用占位字符,避免只显示 "-bot"
+const workspaceNameDefault = computed(() => (system.id ? `${system.id}-bot` : 'my-system-bot'))
 
 // ── Step 3: 环境列表 ──
 interface EnvItem {
@@ -391,7 +407,7 @@ function generateYAML(): string {
   lines.push('')
   lines.push('agent:')
   lines.push(`  name: ${yamlStr(agent.name || agentNameDefault.value)}`)
-  lines.push(`  workspace_name: ${yamlStr(agent.workspace_name || agent.name || agentNameDefault.value)}    # OpenClaw 工作区目录名（~/.openclaw/workspace/<这里>）`)
+  lines.push(`  workspace_name: ${yamlStr(agent.workspace_name || workspaceNameDefault.value)}    # OpenClaw 工作区目录名（~/.openclaw/workspace/<这里>）；推荐 ASCII 小写避免 CJK 目录名`)
   lines.push(`  model: ${agent.model}    # LLM model id；standalone 可用 LLM_MODEL 环境变量覆盖`)
   lines.push('  style:')
   lines.push('    tone: direct')
@@ -779,12 +795,12 @@ const configTypeDescriptions: Record<string, string> = {
       </div>
       <div class="form-group">
         <label>工作区名称 <span class="required">*</span>
-          <span class="help-icon" title="OpenClaw 会在 ~/.openclaw/workspace/<这里>/ 创建目录。一般跟机器人名同名即可；如果多个 agent 并存，用不同工作区名避免覆盖。">?</span>
+          <span class="help-icon" title="OpenClaw 会在 ~/.openclaw/workspace/<这里>/ 创建目录。推荐 ASCII 小写（如 shop-bot）:CJK 目录名在 cd/ls/tab 补全时要引号比较烦。多个 agent 并存时每个用不同名字避免覆盖。">?</span>
         </label>
         <input
           v-model="agent.workspace_name"
           type="text"
-          :placeholder="agent.name"
+          :placeholder="workspaceNameDefault"
           :class="{ error: hasError('agent.workspace_name') }"
         />
       </div>

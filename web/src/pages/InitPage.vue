@@ -1271,10 +1271,15 @@ const configTypeDescriptions: Record<string, string> = {
               :disabled="analyzeLoading || !reposRootInput.trim()"
               @click="runAnalyzeForRepos"
             >
-              {{ analyzeLoading ? '扫描中…' : '扫描并反填' }}
+              <span v-if="analyzeLoading" class="scan-spinner" aria-hidden="true"></span>
+              {{ analyzeLoading ? '扫描中…' : '🔍 开始扫描' }}
             </button>
           </div>
-          <div v-if="analyzeError" class="alert error">{{ analyzeError }}</div>
+          <div v-if="analyzeLoading" class="analyze-progress-row">
+            <span class="scan-spinner-mini"></span>
+            <span>扫描中:遍历 yaml 里每个 repo,clone-miss 的会跳过(未勾 autoClone 时),git 仓库会跑 DetectStack/Role/Framework + for-each-ref 取分支。大仓库可能几秒。</span>
+          </div>
+          <div v-else-if="analyzeError" class="alert error">{{ analyzeError }}</div>
           <div v-else-if="analyzeSummary" class="alert success">{{ analyzeSummary }}</div>
           <p class="help-text" style="margin-top: 8px;">
             analyzer 会按 repo.name 匹配 <code>&lt;仓库根&gt;/&lt;repo.name&gt;/</code> 子目录,
@@ -1325,24 +1330,35 @@ const configTypeDescriptions: Record<string, string> = {
         <div class="form-group">
           <label>
             自动识别
-            <span class="field-hint">(扫一下后自动填,只读;想改请在 Step 7 预览里改 yaml)</span>
+            <span class="field-hint">(需要先 clone 到本地 + 扫描;只读,想改去 Step 7 预览改 yaml)</span>
           </label>
+          <!-- 扫描中:pill 全部显示 spinner + "扫描中";
+               未扫描且 URL 填了:显示一条醒目 banner 提示"光 URL 不够,要填父目录 + 点扫描";
+               扫描完:各 pill 显示识别到的值,未识别的 "—"(代码里没对应 marker) -->
+          <div v-if="repo.url.trim() && !repo.role && !repo.stack && !repo.framework && !analyzeLoading" class="auto-scan-hint">
+            ⚠ 光填 URL 识别不了角色/技术栈,还需要仓库 clone 到本地 +
+            <strong>填下方"仓库父目录" → 点"🔍 开始扫描"</strong>
+          </div>
           <div class="auto-summary">
-            <span class="auto-pill" :class="{ empty: !repo.role }">
+            <span class="auto-pill" :class="{ empty: !repo.role, scanning: analyzeLoading }">
               <span class="auto-label">角色</span>
-              <span class="auto-val">{{ repo.role || '—' }}</span>
+              <span v-if="analyzeLoading" class="auto-scanning"><span class="scan-spinner-mini"></span>扫描中</span>
+              <span v-else class="auto-val">{{ repo.role || '—' }}</span>
             </span>
-            <span class="auto-pill" :class="{ empty: !repo.stack }">
+            <span class="auto-pill" :class="{ empty: !repo.stack, scanning: analyzeLoading }">
               <span class="auto-label">技术栈</span>
-              <span class="auto-val">{{ repo.stack || '—' }}</span>
+              <span v-if="analyzeLoading" class="auto-scanning"><span class="scan-spinner-mini"></span>扫描中</span>
+              <span v-else class="auto-val">{{ repo.stack || '—' }}</span>
             </span>
-            <span class="auto-pill" :class="{ empty: !repo.framework }">
+            <span class="auto-pill" :class="{ empty: !repo.framework, scanning: analyzeLoading }">
               <span class="auto-label">框架</span>
-              <span class="auto-val">{{ repo.framework || '—' }}</span>
+              <span v-if="analyzeLoading" class="auto-scanning"><span class="scan-spinner-mini"></span>扫描中</span>
+              <span v-else class="auto-val">{{ repo.framework || '—' }}</span>
             </span>
-            <span class="auto-pill wide" :class="{ empty: !repo.service_names }" :title="repo.service_names">
+            <span class="auto-pill wide" :class="{ empty: !repo.service_names, scanning: analyzeLoading }" :title="repo.service_names">
               <span class="auto-label">服务名</span>
-              <span class="auto-val">{{ repo.service_names || '—' }}</span>
+              <span v-if="analyzeLoading" class="auto-scanning"><span class="scan-spinner-mini"></span>扫描中</span>
+              <span v-else class="auto-val">{{ repo.service_names || '—' }}</span>
             </span>
           </div>
         </div>
@@ -1921,10 +1937,53 @@ textarea.error {
 }
 
 /* ── Step 4 自动识别 readonly 展示 ── */
+/* "扫一下才能识别"引导 banner,URL 填了但还没扫时显示 */
+.auto-scan-hint {
+  padding: 8px 12px; margin-bottom: 8px;
+  background: #fffbeb; border: 1px solid #fde68a; border-left: 3px solid #f59e0b;
+  border-radius: 6px; font-size: 12px; color: #78350f; line-height: 1.5;
+}
+.auto-scan-hint strong { color: #92400e; }
+
+/* 扫描按钮里的 spinner + pill 内的迷你 spinner */
+@keyframes scan-spin { to { transform: rotate(360deg); } }
+.scan-spinner {
+  display: inline-block; width: 12px; height: 12px;
+  border: 2px solid rgba(255,255,255,0.35);
+  border-top-color: #fff;
+  border-radius: 50%; margin-right: 4px;
+  animation: scan-spin 0.7s linear infinite;
+  vertical-align: -2px;
+}
+.scan-spinner-mini {
+  display: inline-block; width: 10px; height: 10px;
+  border: 2px solid #dbeafe; border-top-color: #3b82f6;
+  border-radius: 50%; margin-right: 4px;
+  animation: scan-spin 0.7s linear infinite;
+  vertical-align: -1px;
+}
+
 .auto-summary {
   display: flex; flex-wrap: wrap; gap: 8px;
   padding: 10px 12px; background: #f8fafc;
   border: 1px dashed #cbd5e1; border-radius: 6px;
+}
+.auto-pill.scanning {
+  background: #eff6ff !important; border-color: #bfdbfe !important;
+  color: #1e40af !important;
+}
+.auto-pill.scanning .auto-label { opacity: 0.6; }
+.auto-scanning {
+  display: inline-flex; align-items: center;
+  font-weight: 500; font-size: 11px; color: #1e40af;
+}
+
+/* analyze-block 内的"进行中"提示,比 alert 样式更轻,跟 scan-spinner 搭配 */
+.analyze-progress-row {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 8px; padding: 8px 12px;
+  background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px;
+  font-size: 12px; color: #1e40af; line-height: 1.5;
 }
 .auto-pill {
   display: flex; align-items: baseline; gap: 6px;

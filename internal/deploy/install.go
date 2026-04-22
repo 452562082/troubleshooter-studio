@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -173,17 +174,47 @@ func ReadEnvFile(dir string) (map[string]string, error) {
 // 注意:install.sh 里某些依赖检查(brew install node 之类)如果需要 sudo,也会 hang。
 // UI 侧应该提前引导用户装好 node / python3 / uvx。
 func RunInstall(dir string) (string, error) {
+	return RunInstallStreaming(dir, nil)
+}
+
+// RunInstallStreaming 同 RunInstall,但额外把 stdout+stderr 逐行 callback 出去,
+// 便于 UI 实时展示而不是等脚本跑完一次性吐。onLine 可以是 nil(退化成 RunInstall)。
+// 返回的完整 log 仍然保留(前端刷新 / 持久化用),跟回调并行写入。
+func RunInstallStreaming(dir string, onLine func(line string)) (string, error) {
 	installSh, err := FindInstallSh(dir)
 	if err != nil {
 		return "", fmt.Errorf("install.sh not found under %s: %w", dir, err)
 	}
 	cmd := exec.Command("bash", installSh)
 	cmd.Dir = filepath.Dir(installSh)
-	// 把 stdin 接到 /dev/null —— 如果 install.sh 真遇到了未喂的 read_var，立即 EOF 而不是挂死
+	// 把 stdin 接到 /dev/null —— 如果 install.sh 真遇到了未喂的 read_var,立即 EOF 而不是挂死
 	if devnull, err := os.Open(os.DevNull); err == nil {
 		cmd.Stdin = devnull
 		defer devnull.Close()
 	}
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+
+	// stdout 和 stderr 合并到同一个 pipe,保证输出顺序跟用户实际看到的 shell 一致。
+	// io.Pipe 让 Scanner 阻塞等待下一行,进程退出时由 goroutine 关 writer,Scanner 自然结束。
+	pr, pw := io.Pipe()
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- cmd.Run()
+		_ = pw.Close()
+	}()
+
+	var buf bytes.Buffer
+	sc := bufio.NewScanner(pr)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 留 1MB 给长行(一般 install.sh 不至于)
+	for sc.Scan() {
+		line := sc.Text()
+		buf.WriteString(line)
+		buf.WriteByte('\n')
+		if onLine != nil {
+			onLine(line)
+		}
+	}
+	return buf.String(), <-errCh
 }

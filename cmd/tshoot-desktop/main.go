@@ -273,7 +273,11 @@ func (a *App) RunInstall(outputDir string, creds map[string]string) (*RunInstall
 	if err := deploy.WriteEnvFile(outputDir, creds); err != nil {
 		return nil, err
 	}
-	log, err := deploy.RunInstall(outputDir)
+	// 流式把每行输出推到前端 "install:log" 事件。前端 BotsPage 挂着监听,
+	// 追加到 installLog 让用户实时看到进度,不用盯静默黑屏。
+	log, err := deploy.RunInstallStreaming(outputDir, func(line string) {
+		wailsruntime.EventsEmit(a.ctx, "install:log", line)
+	})
 	res := &RunInstallResult{Log: log, OK: err == nil}
 	if err != nil {
 		// exit code 提取（bash 脚本的非零退出）

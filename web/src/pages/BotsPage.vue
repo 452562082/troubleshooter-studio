@@ -1,5 +1,9 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, reactive } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, reactive, watch } from 'vue'
+// Wails 运行时事件 API:Go 端 EventsEmit 推过来,这里 EventsOn 订阅。
+// 注意 runtime.js 是 Wails 打进 app 的全局脚本,浏览器里 import 的效果是
+// 引用 window.runtime.*;`tshoot serve` 模式下这些函数不会真实推事件(无源)。
+import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
 import type { ApplyResult, DiscoveredBot } from '../types/wails'
 import {
   applyBot,
@@ -161,6 +165,16 @@ const installPrompts = ref<InstallPrompt[]>([])
 const installCreds = ref<Record<string, string>>({})
 const installLog = ref('')
 const installOK = ref<boolean | null>(null)
+const liveLogRef = ref<HTMLPreElement | null>(null)
+
+// 新行推进来时把 <pre> 滚到底,模拟 tail -f 体验
+watch(installLog, () => {
+  nextTick(() => {
+    if (liveLogRef.value) {
+      liveLogRef.value.scrollTop = liveLogRef.value.scrollHeight
+    }
+  })
+})
 
 // 按变量名前缀分组,让 25 字段不至于一次铺平眼花。每组顺序固定,
 // 未命中的"其他"垫底。分组 key 直接作为折叠面板标题。
@@ -271,8 +285,10 @@ async function runDeployInstall() {
   importStage.value = 'installing'
   installLog.value = ''
   try {
+    // installLog 从 install:log 事件流已经累积;这里 r.log 是 Go 端兜底的完整文本,
+    // 如果事件丢行(理论上不会)或用户刷新页面后 Go 已跑完才回来,用 r.log 补齐
     const r = await runInstall(importedOutputDir.value, installCreds.value)
-    installLog.value = r.log
+    if (installLog.value === '' && r.log) installLog.value = r.log
     installOK.value = r.ok
     importStage.value = 'done'
     await scan()
@@ -295,7 +311,18 @@ function resetImport() {
   importError.value = null
 }
 
-onMounted(scan)
+// install:log 事件流:Go 端 RunInstallStreaming 每行推一次,这里追加到 installLog。
+// 仅在"installing"阶段有意义,但订阅从 mount 持续到 unmount,Go 端静默时不会推。
+// 多次安装之间 installLog 在 runDeployInstall 开头清空,所以跨会话不会脏。
+onMounted(() => {
+  scan()
+  EventsOn('install:log', (line: string) => {
+    installLog.value += line + '\n'
+  })
+})
+onUnmounted(() => {
+  EventsOff('install:log')
+})
 </script>
 
 <template>
@@ -410,6 +437,8 @@ onMounted(scan)
             {{ importStage === 'installing' ? '运行 install.sh 中…' : (installPrompts.length > 0 ? '写 .env 并运行 install.sh' : '运行 install.sh') }}
           </button>
         </div>
+        <!-- installing 阶段实时滚出 install.sh 的 stdout+stderr,避免用户盯静默黑屏 -->
+        <pre v-if="importStage === 'installing' && installLog" ref="liveLogRef" class="deploy-log live">{{ installLog }}</pre>
       </div>
 
       <!-- Step 3: 日志 / 完成 -->
@@ -705,5 +734,12 @@ onMounted(scan)
   background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 6px;
   font-family: 'SFMono-Regular', Menlo, monospace; font-size: 11px;
   max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-all;
+  margin-top: 10px;
+}
+/* 流式中的日志框加个脉动左边框,视觉提示'还在动' */
+.deploy-log.live { border-left: 3px solid #22c55e; animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse {
+  0%, 100% { border-left-color: #22c55e; }
+  50%      { border-left-color: #4ade80; }
 }
 </style>

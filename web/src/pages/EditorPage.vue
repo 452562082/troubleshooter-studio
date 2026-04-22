@@ -123,18 +123,18 @@ async function apiCall(endpoint: 'validate' | 'plan' | 'gen', label: string) {
     </div>
 
     <div class="toolbar">
-      <label class="btn btn-secondary">
+      <label class="btn">
         加载文件
         <input type="file" accept=".yaml,.yml" hidden @change="loadFile" />
       </label>
-      <button class="btn btn-secondary" @click="loadExample">加载示例</button>
-      <button class="btn btn-primary" :disabled="!!loading" @click="apiCall('validate', '验证')">
+      <button class="btn" @click="loadExample">加载示例</button>
+      <button class="btn primary" :disabled="!!loading" @click="apiCall('validate', '验证')">
         {{ loading === '验证' ? '验证中...' : '验证' }}
       </button>
-      <button class="btn btn-primary" :disabled="!!loading" @click="apiCall('plan', '生成计划')">
+      <button class="btn primary" :disabled="!!loading" @click="apiCall('plan', '生成计划')">
         {{ loading === '生成计划' ? '计划中...' : '生成计划' }}
       </button>
-      <button class="btn btn-accent" :disabled="!!loading" @click="apiCall('gen', '执行生成')">
+      <button class="btn accent" :disabled="!!loading" @click="apiCall('gen', '执行生成')">
         {{ loading === '执行生成' ? '生成中...' : '执行生成' }}
       </button>
     </div>
@@ -213,69 +213,12 @@ async function apiCall(endpoint: 'validate' | 'plan' | 'gen', label: string) {
 </template>
 
 <style scoped>
-.page h1 {
-  font-size: 24px;
-  margin-bottom: 12px;
-  color: #1e293b;
-}
-
-.info-box {
-  background: #eff6ff;
-  border: 1px solid #bfdbfe;
-  border-radius: 8px;
-  padding: 12px 16px;
-  margin-bottom: 16px;
-  font-size: 14px;
-  color: #1e40af;
-  line-height: 1.6;
-}
-.info-box-title {
-  font-weight: 600;
-  margin-bottom: 4px;
-}
 
 .toolbar {
   display: flex;
   gap: 8px;
   margin-bottom: 12px;
   flex-wrap: wrap;
-}
-
-.btn {
-  display: inline-flex;
-  align-items: center;
-  padding: 8px 16px;
-  border: none;
-  border-radius: 6px;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-.btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-.btn-primary {
-  background: #3b82f6;
-  color: #fff;
-}
-.btn-primary:hover:not(:disabled) {
-  background: #2563eb;
-}
-.btn-secondary {
-  background: #e2e8f0;
-  color: #334155;
-}
-.btn-secondary:hover {
-  background: #cbd5e1;
-}
-.btn-accent {
-  background: #10b981;
-  color: #fff;
-}
-.btn-accent:hover:not(:disabled) {
-  background: #059669;
 }
 
 .yaml-editor {

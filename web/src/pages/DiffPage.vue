@@ -132,7 +132,7 @@ async function runDiff() {
     <div class="input-section">
       <div class="input-header">
         <label class="label">system.yaml</label>
-        <button class="btn-example" @click="loadExample">加载示例</button>
+        <button class="btn small" @click="loadExample">加载示例</button>
       </div>
       <textarea
         v-model="yaml"
@@ -149,7 +149,7 @@ async function runDiff() {
         placeholder="已有输出目录的绝对路径，例如 /path/to/dist"
       />
 
-      <button class="btn-primary" :disabled="loading || !yaml.trim() || !targetDir.trim()" @click="runDiff">
+      <button class="btn primary" :disabled="loading || !yaml.trim() || !targetDir.trim()" @click="runDiff">
         {{ loading ? '对比中...' : '执行对比' }}
       </button>
     </div>
@@ -282,38 +282,12 @@ async function runDiff() {
 </template>
 
 <style scoped>
-.page h1 { font-size: 24px; margin-bottom: 12px; color: #1e293b; }
-
-.info-box {
-  background: #eff6ff;
-  border: 1px solid #bfdbfe;
-  border-radius: 8px;
-  padding: 12px 16px;
-  margin-bottom: 20px;
-  font-size: 14px;
-  color: #1e40af;
-  line-height: 1.6;
-}
-.info-box-title {
-  font-weight: 600;
-  margin-bottom: 4px;
-}
 
 .input-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
 }
-.btn-example {
-  padding: 4px 12px;
-  background: #f1f5f9;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 12px;
-  color: #475569;
-}
-.btn-example:hover { background: #e2e8f0; }
 .label-mt { margin-top: 14px; }
 
 .input-section { margin-bottom: 24px; }
@@ -351,21 +325,6 @@ async function runDiff() {
   color: #1e293b;
 }
 .text-input:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.1); }
-
-.btn-primary {
-  margin-top: 14px;
-  padding: 8px 20px;
-  background: #3b82f6;
-  color: #fff;
-  border: none;
-  border-radius: 6px;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-.btn-primary:hover:not(:disabled) { background: #2563eb; }
-.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .error-banner {
   background: #fef2f2;

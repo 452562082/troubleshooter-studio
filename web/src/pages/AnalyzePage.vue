@@ -131,8 +131,8 @@ onUnmounted(() => {
       <div class="label-row">
         <label>system.yaml</label>
         <div class="label-row-actions">
-          <label class="file-btn">加载文件 <input type="file" accept=".yaml,.yml" @change="loadFile" hidden /></label>
-          <button class="file-btn" @click="loadExample">加载示例</button>
+          <label class="btn small">加载文件 <input type="file" accept=".yaml,.yml" @change="loadFile" hidden /></label>
+          <button class="btn small" @click="loadExample">加载示例</button>
         </div>
       </div>
       <textarea v-model="yamlContent" placeholder="粘贴 system.yaml 内容..." spellcheck="false" :class="{ err: error }" />
@@ -227,11 +227,8 @@ onUnmounted(() => {
 .form-section { margin-bottom: var(--sp-4); }
 .label-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
 .label-row label { font-weight: 600; color: var(--c-text); font-size: var(--fs-md); }
-.file-btn {
-  padding: 5px var(--sp-3); background: var(--c-surf-3); border: 1px solid var(--c-line-2);
-  border-radius: var(--r-md); cursor: pointer; font-size: var(--fs-sm); color: var(--c-text); font-weight: 400;
-}
-.file-btn:hover { background: var(--c-line); }
+/* 文件 input 用 <label class="btn small"> 当触发器,需要 overflow/display 让嵌套 input hidden 不影响布局 */
+label.btn { cursor: pointer; }
 
 textarea {
   width: 100%; min-height: 180px; padding: 10px var(--sp-3); border: 1px solid var(--c-line); border-radius: var(--r-md);

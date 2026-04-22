@@ -141,11 +141,11 @@ function severityIcon(s: string) {
     <div class="form-group">
       <label class="form-label">system.yaml</label>
       <div class="toolbar">
-        <label class="btn btn-secondary">
+        <label class="btn">
           加载文件
           <input type="file" accept=".yaml,.yml" hidden @change="loadFile" />
         </label>
-        <button class="btn btn-secondary" @click="loadExample">加载示例</button>
+        <button class="btn" @click="loadExample">加载示例</button>
       </div>
       <textarea
         v-model="yamlContent"
@@ -165,7 +165,7 @@ function severityIcon(s: string) {
       />
     </div>
 
-    <button class="btn btn-primary" :disabled="loading" @click="runDoctor">
+    <button class="btn primary" :disabled="loading" @click="runDoctor">
       {{ loading ? '诊断中...' : '运行诊断' }}
     </button>
 
@@ -202,26 +202,6 @@ function severityIcon(s: string) {
 </template>
 
 <style scoped>
-.page h1 {
-  font-size: 24px;
-  margin-bottom: 12px;
-  color: #1e293b;
-}
-
-.info-box {
-  background: #eff6ff;
-  border: 1px solid #bfdbfe;
-  border-radius: 8px;
-  padding: 12px 16px;
-  margin-bottom: 20px;
-  font-size: 14px;
-  color: #1e40af;
-  line-height: 1.6;
-}
-.info-box-title {
-  font-weight: 600;
-  margin-bottom: 4px;
-}
 
 .form-group {
   margin-bottom: 16px;
@@ -275,36 +255,6 @@ function severityIcon(s: string) {
 }
 .text-input:focus {
   border-color: #3b82f6;
-}
-
-.btn {
-  display: inline-flex;
-  align-items: center;
-  padding: 8px 16px;
-  border: none;
-  border-radius: 6px;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-.btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-.btn-primary {
-  background: #3b82f6;
-  color: #fff;
-}
-.btn-primary:hover:not(:disabled) {
-  background: #2563eb;
-}
-.btn-secondary {
-  background: #e2e8f0;
-  color: #334155;
-}
-.btn-secondary:hover {
-  background: #cbd5e1;
 }
 
 .banner {

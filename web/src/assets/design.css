@@ -114,6 +114,19 @@
   padding: 4px 10px;
   font-size: var(--fs-xs);
 }
+/* link 变体:无边框 + 下划线;用作行内链接式按钮(如 InitPage 的"导入已有 yaml") */
+.btn.link {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--c-accent);
+  font-weight: 500;
+  text-decoration: underline;
+}
+.btn.link:hover:not(:disabled) {
+  background: transparent;
+  color: var(--c-accent-hover);
+}
 
 /* ── Info box(多页面用的说明框) ──────────────────────── */
 .info-box {

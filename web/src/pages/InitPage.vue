@@ -674,8 +674,8 @@ const configTypeDescriptions: Record<string, string> = {
         <p class="subtitle">通过可视化表单生成 system.yaml 配置文件（草稿会自动保存到本地）</p>
       </div>
       <div class="header-actions">
-        <button class="btn-link" @click="openImportDialog">导入 YAML</button>
-        <button class="btn-link" @click="clearDraft">清空草稿</button>
+        <button class="btn link" @click="openImportDialog">导入 YAML</button>
+        <button class="btn link" @click="clearDraft">清空草稿</button>
       </div>
     </div>
 
@@ -690,7 +690,7 @@ const configTypeDescriptions: Record<string, string> = {
           <p class="help-text" style="margin-bottom: 10px;">
             上传或粘贴现有 system.yaml 内容，字段会自动反填到各步骤。
           </p>
-          <label class="btn-secondary file-label">
+          <label class="btn file-label">
             选择文件...
             <input type="file" accept=".yaml,.yml" @change="handleImportFile" style="display:none" />
           </label>
@@ -704,8 +704,8 @@ const configTypeDescriptions: Record<string, string> = {
           <div v-if="importError" class="error-text" style="margin-top: 6px;">{{ importError }}</div>
         </div>
         <div class="modal-footer">
-          <button class="btn-secondary" @click="closeImportDialog">取消</button>
-          <button class="btn-primary" :disabled="!importText.trim()" @click="applyImport">反填到向导</button>
+          <button class="btn" @click="closeImportDialog">取消</button>
+          <button class="btn primary" :disabled="!importText.trim()" @click="applyImport">反填到向导</button>
         </div>
       </div>
     </div>
@@ -847,7 +847,7 @@ const configTypeDescriptions: Record<string, string> = {
           </button>
         </div>
       </div>
-      <button class="btn-secondary" @click="addEnv">+ 添加环境</button>
+      <button class="btn" @click="addEnv">+ 添加环境</button>
     </div>
 
     <!-- Step 4 -->
@@ -919,7 +919,7 @@ const configTypeDescriptions: Record<string, string> = {
           </div>
         </div>
       </div>
-      <button class="btn-secondary" @click="addRepo">+ 添加仓库</button>
+      <button class="btn" @click="addRepo">+ 添加仓库</button>
     </div>
 
     <!-- Step 5 -->
@@ -974,13 +974,13 @@ const configTypeDescriptions: Record<string, string> = {
         <pre><code>{{ yamlOutput }}</code></pre>
       </div>
       <div class="action-bar">
-        <button class="btn-primary" @click="validateYAML" :disabled="validateLoading">
+        <button class="btn primary" @click="validateYAML" :disabled="validateLoading">
           {{ validateLoading ? '验证中...' : '✓ 验证' }}
         </button>
-        <button class="btn-secondary" @click="copyYAML">
+        <button class="btn" @click="copyYAML">
           {{ copySuccess ? '已复制 ✓' : '📋 复制到剪贴板' }}
         </button>
-        <button class="btn-secondary" @click="downloadYAML">⬇ 下载 system.yaml</button>
+        <button class="btn" @click="downloadYAML">⬇ 下载 system.yaml</button>
       </div>
       <div v-if="validateResult" class="validate-result" :class="{ success: validateResult.ok, fail: !validateResult.ok }">
         {{ validateResult.message }}
@@ -989,9 +989,9 @@ const configTypeDescriptions: Record<string, string> = {
 
     <!-- Navigation buttons -->
     <div class="nav-buttons">
-      <button v-if="currentStep > 1" class="btn-secondary" @click="prevStep">上一步</button>
+      <button v-if="currentStep > 1" class="btn" @click="prevStep">上一步</button>
       <span v-else />
-      <button v-if="currentStep < totalSteps" class="btn-primary" @click="nextStep">下一步</button>
+      <button v-if="currentStep < totalSteps" class="btn primary" @click="nextStep">下一步</button>
     </div>
   </div>
 </template>
@@ -1101,22 +1101,7 @@ const configTypeDescriptions: Record<string, string> = {
   cursor: pointer;
 }
 
-.btn-link {
-  background: none;
-  border: none;
-  color: #64748b;
-  font-size: 13px;
-  cursor: pointer;
-  padding: 4px 8px;
-  border-radius: 4px;
-  flex-shrink: 0;
-  margin-top: 4px;
-}
-
-.btn-link:hover {
-  color: #ef4444;
-  background: #fef2f2;
-}
+/* .btn / .btn.link 来自全局 design.css */
 
 /* ── Step indicator ── */
 .step-indicator {
@@ -1475,44 +1460,7 @@ textarea.error {
   border: 1px solid #fecaca;
 }
 
-/* ── Buttons ── */
-.btn-primary {
-  padding: 9px 24px;
-  background: #3b82f6;
-  color: #fff;
-  border: none;
-  border-radius: 6px;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.btn-primary:hover:not(:disabled) {
-  background: #2563eb;
-}
-
-.btn-primary:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.btn-secondary {
-  padding: 9px 24px;
-  background: #fff;
-  color: #374151;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-
-.btn-secondary:hover {
-  background: #f9fafb;
-  border-color: #9ca3af;
-}
+/* .btn / .btn.primary / .info-box 来自全局 design.css */
 
 .nav-buttons {
   display: flex;
@@ -1520,30 +1468,10 @@ textarea.error {
   margin-top: 8px;
 }
 
-/* ── Info box ── */
-.info-box {
-  background: #eff6ff;
-  border: 1px solid #bfdbfe;
-  border-left: 4px solid #3b82f6;
-  border-radius: 8px;
-  padding: 16px 20px;
-  margin-bottom: 28px;
-  color: #1e40af;
-  font-size: 14px;
-  line-height: 1.7;
-}
-
-.info-box p {
-  margin: 0;
-}
-
-.info-box p + p {
-  margin-top: 4px;
-}
-
-.info-box strong {
-  font-size: 15px;
-}
+/* info-box 里的 <p> 组合 InitPage 独有,保留 */
+.info-box p { margin: 0; }
+.info-box p + p { margin-top: 4px; }
+.info-box strong { font-size: var(--fs-md); }
 
 /* ── Help text ── */
 .help-text {

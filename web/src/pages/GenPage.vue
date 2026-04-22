@@ -126,7 +126,7 @@ async function runGen() {
     <div class="input-section">
       <div class="input-header">
         <label class="label">system.yaml</label>
-        <button class="btn-example" @click="loadExample">加载示例</button>
+        <button class="btn small" @click="loadExample">加载示例</button>
       </div>
       <textarea
         v-model="yaml"
@@ -134,7 +134,7 @@ async function runGen() {
         placeholder="粘贴 system.yaml 内容..."
         spellcheck="false"
       />
-      <button class="btn-primary" :disabled="loading || !yaml.trim()" @click="runGen">
+      <button class="btn primary" :disabled="loading || !yaml.trim()" @click="runGen">
         {{ loading ? '生成中...' : '执行生成' }}
       </button>
     </div>
@@ -177,31 +177,11 @@ async function runGen() {
 </template>
 
 <style scoped>
-.page h1 { font-size: 24px; margin-bottom: 12px; color: #1e293b; }
 
-.info-box {
-  background: #eff6ff;
-  border: 1px solid #bfdbfe;
-  border-radius: 8px;
-  padding: 12px 16px;
-  margin-bottom: 20px;
-  font-size: 14px;
-  color: #1e40af;
-  line-height: 1.6;
-}
-.info-box-title {
-  font-weight: 600;
-  margin-bottom: 4px;
-}
 .info-box-warn {
   margin-top: 6px;
   color: #b45309;
   font-weight: 500;
-}
-.info-box-list {
-  margin: 6px 0 6px 18px;
-  padding: 0;
-  line-height: 1.7;
 }
 .info-box-list li {
   margin: 2px 0;
@@ -219,16 +199,6 @@ async function runGen() {
   justify-content: space-between;
   align-items: center;
 }
-.btn-example {
-  padding: 4px 12px;
-  background: #f1f5f9;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 12px;
-  color: #475569;
-}
-.btn-example:hover { background: #e2e8f0; }
 
 .input-section { margin-bottom: 24px; }
 
@@ -254,21 +224,6 @@ async function runGen() {
   line-height: 1.5;
 }
 .yaml-input:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.1); }
-
-.btn-primary {
-  margin-top: 12px;
-  padding: 8px 20px;
-  background: #3b82f6;
-  color: #fff;
-  border: none;
-  border-radius: 6px;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-.btn-primary:hover:not(:disabled) { background: #2563eb; }
-.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .error-banner {
   display: flex;

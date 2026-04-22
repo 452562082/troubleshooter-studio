@@ -66,6 +66,18 @@ export function ScanInstallPrompts(arg1) {
   return window['go']['main']['App']['ScanInstallPrompts'](arg1);
 }
 
+export function StandaloneStatus(arg1) {
+  return window['go']['main']['App']['StandaloneStatus'](arg1);
+}
+
+export function StartStandalone(arg1, arg2) {
+  return window['go']['main']['App']['StartStandalone'](arg1, arg2);
+}
+
+export function StopStandalone(arg1) {
+  return window['go']['main']['App']['StopStandalone'](arg1);
+}
+
 export function Validate(arg1) {
   return window['go']['main']['App']['Validate'](arg1);
 }

@@ -14,6 +14,13 @@ const router = createRouter({
       component: () => import('../pages/BotsPage.vue'),
     },
     {
+      // 嵌入式 chat:iframe 指向 standalone server.py 的 localhost:<port>。
+      // 路径名 "/bots/chat" + query.path=<产物绝对目录>,reload/书签也能恢复 —— 只要对应 runner 还活着。
+      path: '/bots/chat',
+      name: 'BotsChat',
+      component: () => import('../pages/BotsChat.vue'),
+    },
+    {
       path: '/init',
       name: 'Init',
       component: () => import('../pages/InitPage.vue'),

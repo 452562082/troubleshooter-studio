@@ -33,6 +33,7 @@ import (
 
 	tshoot "github.com/xiaolong/troubleshooter-studio"
 	"github.com/xiaolong/troubleshooter-studio/api"
+	"github.com/xiaolong/troubleshooter-studio/internal/standalone"
 	"github.com/xiaolong/troubleshooter-studio/internal/webui"
 )
 
@@ -60,6 +61,13 @@ type App struct {
 	// RunInstall 赋值并 defer 清空;CancelInstall 读取并调用。同一时刻只允许一个
 	// install 跑,前端 UI 会禁用"部署"按钮避免并发。
 	installCancel context.CancelFunc
+
+	// standaloneMu 保护 standaloneRunners map。
+	standaloneMu sync.Mutex
+	// standaloneRunners 是当前托管着的 standalone 机器人进程集合,key=产物目录绝对路径。
+	// 同一个机器人不会跑两份(StartStandalone 发现已在跑直接返回现有 port)。
+	// app 退出时 main 的 defer 会 Stop 所有。
+	standaloneRunners map[string]*standalone.Runner
 }
 
 // startup 由 Wails 在窗口创建完成时调用，注入 runtime ctx。私有也能被 Wails 识别。
@@ -72,7 +80,13 @@ func main() {
 	srv := &api.Server{TemplateRoot: tr}
 	router := api.NewRouter(srv, webui.Distribution())
 
-	appState := &App{templateRoot: tr}
+	appState := &App{
+		templateRoot:      tr,
+		standaloneRunners: map[string]*standalone.Runner{},
+	}
+	// app 退出(不管正常还是异常)时把所有在跑的 standalone server.py 清掉,
+	// 不然 python 进程会变孤儿继续占端口 + 继续烧 LLM API key。
+	defer appState.stopAllStandalones()
 
 	err := wails.Run(&options.App{
 		Title:  "Troubleshooter Studio",

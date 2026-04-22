@@ -4,6 +4,7 @@ import { ref, computed, nextTick, onMounted, onUnmounted, reactive, watch } from
 // 注意 runtime.js 是 Wails 打进 app 的全局脚本,浏览器里 import 的效果是
 // 引用 window.runtime.*;`tshoot serve` 模式下这些函数不会真实推事件(无源)。
 import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
+import { useRouter } from 'vue-router'
 import {
   applyBot,
   cancelInstall,
@@ -19,6 +20,8 @@ import {
   runInstall,
   scanInstallPrompts,
 } from '../lib/bridge'
+
+const router = useRouter()
 import type { ApplyResult, DiscoveredBot, InstallPrompt } from '../lib/bridge'
 import { toast } from '../lib/toast'
 
@@ -136,6 +139,15 @@ function addRoot() {
 function removeRoot(r: string) {
   extraRoots.value = extraRoots.value.filter((x) => x !== r)
   scan()
+}
+
+// openChat:跳转到嵌入式 chat 页,真正的 StartStandalone 在那边做
+// (那里有 key 表单 + spinner + 错误处理;这里不抢业务逻辑)。
+function openChat(b: DiscoveredBot) {
+  router.push({
+    path: '/bots/chat',
+    query: { path: b.path, name: b.meta.system_name || b.meta.system_id },
+  })
 }
 
 function targetLabel(t: string): string {
@@ -565,6 +577,15 @@ onUnmounted(() => {
         <footer class="bot-foot">
           <span class="bot-time">最近更新：{{ b.mod_time }}</span>
           <div class="bot-actions">
+            <!-- standalone 专属:在 Studio 内嵌启动聊天(跳到 /bots/chat?path=...) -->
+            <button
+              v-if="b.meta.target === 'standalone'"
+              class="btn btn-regen btn-chat"
+              title="在 Studio 内直接启动 server.py + 嵌入式 chat(不开浏览器)"
+              @click="openChat(b)"
+            >
+              💬 打开对话
+            </button>
             <button
               class="btn btn-regen"
               :disabled="regenState[regenKey(b)]?.loading"
@@ -690,6 +711,11 @@ onUnmounted(() => {
   background: #f1f5f9; border: 1px solid #cbd5e1; color: #334155;
 }
 .btn-regen:hover:not(:disabled) { background: #e2e8f0; }
+/* standalone 专属"打开对话"按钮:绿色强调,区分于管理类操作 */
+.btn-chat {
+  background: #d1fae5; border-color: #86efac; color: #065f46; font-weight: 600;
+}
+.btn-chat:hover:not(:disabled) { background: #a7f3d0; border-color: #4ade80; }
 
 
 .bot-actions { display: flex; gap: 6px; }

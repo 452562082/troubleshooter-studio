@@ -2,9 +2,10 @@
 // 三处部署 UI(InitPage Step 7 / EditorPage 一键部署 / BotsPage 导入部署)共用。
 //
 // 核心逻辑:
-//   - standalone / openclaw:Studio 替用户管路径,默认塞 ~/.tshoot/<target>/<id>/
+//   - embedded / openclaw:Studio 替用户管路径,默认塞 ~/.tshoot/<target>/<id>/
 //     UI 显示"将部署到 <path>"+ 折叠"自定义"入口;用户点自定义才露 input
 //   - claude-code / cursor:用户必填(装到某个项目根),UI 保持 input 可见
+// "standalone" 作为 embedded 的历史别名被接住,老 UI state 还写着 standalone 时不崩
 //
 // composable 接收 3 个 ref:
 //   target      — 当前选的 target(v-model 绑的)
@@ -26,7 +27,7 @@ export function useDeployPath(
   destPath: Ref<string>,
 ) {
   const isManagedTarget = computed(
-    () => target.value === 'standalone' || target.value === 'openclaw',
+    () => target.value === 'embedded' || target.value === 'standalone' || target.value === 'openclaw',
   )
   const customPathExpanded = ref(false)
   const autoDefaultPath = ref('')

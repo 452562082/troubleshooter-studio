@@ -48,7 +48,7 @@ type Result struct {
 // Apply 用 NewYAML 替换 agent 的活配置，重新 render 并 rsync 到 agent.Path。
 // agent 来自 discover.Scan() 的结果；agent.Path 是 workspace 根（含 tshoot.json 的那一层）。
 //
-// 支持 4 种 target：openclaw / claude-code / cursor / standalone。
+// 支持 4 种 target：openclaw / claude-code / cursor / embedded(老别名: standalone)。
 // 每种 target 走各自的 generator 方法，然后把相应的产物子树 rsync 到 agent.Path。
 func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 	if len(opts.NewYAML) == 0 {
@@ -79,8 +79,9 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 		err = g.GenerateClaudeCode()
 	case "cursor":
 		err = g.GenerateCursor()
-	case "standalone":
-		err = g.GenerateStandalone()
+	case "embedded", "standalone":
+		// "standalone" 是历史名;老 tshoot.json 里可能还写着,一并接住。新产物用 embedded。
+		err = g.GenerateEmbedded()
 	default:
 		return nil, fmt.Errorf("unsupported target: %q", ag.Meta.Target)
 	}
@@ -176,7 +177,7 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 // 语义分两种：
 //   - target=openclaw：产出完整 dist 包（含 scripts/install.sh），用户仍需手动跑一次
 //     install.sh 完成 agent 注册 + MCP 装配 + 凭证收集（这步 apply 不代替）。
-//   - target in {claude-code, cursor, standalone}：直接 rsync 产物到 dest，可立即使用。
+//   - target in {claude-code, cursor, embedded}：直接 rsync 产物到 dest，可立即使用。
 func ImportAndApply(yamlBytes []byte, target, destPath string, opts ApplyOptions) (*Result, error) {
 	if destPath == "" {
 		return nil, fmt.Errorf("dest_path required")
@@ -254,9 +255,12 @@ func resolveApplySource(baseOut, target string) (src, hint string) {
 	case "cursor":
 		src = baseOut + "-cursor"
 		hint = "Cursor 自动感知 .cursorrules + .cursor/rules/*.mdc 变动；下一个新建的 AI 对话就会用新规则。"
-	case "standalone":
-		src = baseOut + "-standalone"
-		hint = "本机 venv 跑的：Ctrl+C 停掉 server.py 再重启 `python3 server.py` 即可。Docker 跑的：`docker compose down && docker compose up --build`。"
+	case "embedded", "standalone":
+		// 老 bot target 可能还是 "standalone";产物目录 tshoot 新版本统一用 -embedded。
+		// agent.Path 可能是 <out>-standalone(老 bot apply 时会把这个当 dst,不会切路径),
+		// 我们只算 src(生成位置);dst 由 Apply 层用 ag.Path 决定,不受这里影响。
+		src = baseOut + "-embedded"
+		hint = "桌面端内嵌对话:在 Studio 里重新打开这个机器人的对话页即可用上新 prompt;不用重启 app。"
 	}
 	return
 }
@@ -297,13 +301,12 @@ func looksLikeFactoryArtifact(rel, target string) bool {
 		prefixes = append(prefixes, "CLAUDE.md", "install.sh")
 	case "cursor":
 		prefixes = append(prefixes, ".cursorrules", ".cursor/", "install.sh")
-	case "standalone":
+	case "embedded", "standalone":
 		// 当前 tshoot 只生成 system-prompt.md + skills/ + scripts/ + tshoot.json
 		// (独立部署的 server.py/Dockerfile/install.sh/docker-compose/requirements.txt/
-		// README.md/index.html 已移除 —— 见 templates/standalone 空了)。
-		// 历史文件仍列在这里,作用是:老版本装的 standalone bot 在 apply 时,
-		// 这些文件跟新产物对不上,会被识别为"tshoot 管辖的陈旧产物"并被清理,
-		// 不然会一直留在用户 workspace 里。
+		// README.md/index.html 已移除,target 也重命名 standalone → embedded)。
+		// 历史文件仍列在这里,作用是:老版本装的 bot 在 apply 时,这些文件跟新产物
+		// 对不上,会被识别为"tshoot 管辖的陈旧产物"并被清理,不然会一直留在用户 workspace 里。
 		prefixes = append(prefixes, "server.py", "index.html", "Dockerfile",
 			"docker-compose.yaml", "requirements.txt", "system-prompt.md",
 			"install.sh", "README.md", ".venv/")

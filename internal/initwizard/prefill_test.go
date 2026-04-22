@@ -13,14 +13,17 @@ func TestParseTargets(t *testing.T) {
 		in   string
 		want []string
 	}{
-		{"empty → all 4", "", []string{"openclaw", "claude-code", "cursor", "standalone"}},
+		{"empty → all 4", "", []string{"openclaw", "claude-code", "cursor", "embedded"}},
 		{"single", "openclaw", []string{"openclaw"}},
 		{"space sep", "openclaw cursor", []string{"openclaw", "cursor"}},
-		{"comma sep", "openclaw,standalone", []string{"openclaw", "standalone"}},
-		{"semicolon sep", "openclaw;standalone", []string{"openclaw", "standalone"}},
+		{"comma sep", "openclaw,embedded", []string{"openclaw", "embedded"}},
+		{"semicolon sep", "openclaw;embedded", []string{"openclaw", "embedded"}},
 		{"mixed sep + padding", "  openclaw , cursor ", []string{"openclaw", "cursor"}},
 		{"case insensitive", "OPENCLAW Cursor", []string{"openclaw", "cursor"}},
-		{"dedup", "openclaw openclaw standalone", []string{"openclaw", "standalone"}},
+		{"dedup", "openclaw openclaw embedded", []string{"openclaw", "embedded"}},
+		// 老别名兼容
+		{"alias standalone → embedded", "openclaw standalone", []string{"openclaw", "embedded"}},
+		{"alias dedup against embedded", "embedded standalone", []string{"embedded"}},
 		{"all unknown → fallback openclaw", "bogus unknown", []string{"openclaw"}},
 		{"partial unknown filtered", "openclaw bogus cursor", []string{"openclaw", "cursor"}},
 	}

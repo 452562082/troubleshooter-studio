@@ -120,7 +120,7 @@ func (w *Wizard) section(title string) {
 // 选择编号 = 用对应 value；回车 = 默认；输入任意字符串 = 自定义（老用户 / 企业网关）。
 // 预设跟 web/src/pages/InitPage.vue 的 modelGroups 对齐(要改同步改),provider 列表
 // 跟 internal/llmchat/providers.go 一致。4 种 target 都走 OpenAI 兼容协议 + base_url
-// 切换,所有 provider 都能直连,没有"standalone 回落到 Claude"这种局限。
+// 切换,所有 provider 都能直连,没有"embedded 回落到 Claude"这种局限。
 var modelPresets = []struct {
 	group string
 	items []struct{ value, desc string }

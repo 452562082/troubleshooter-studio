@@ -7,13 +7,16 @@ import (
 	"strings"
 )
 
-// GenerateStandalone 输出"桌面端内嵌对话"用的素材集合。
+// GenerateEmbedded 输出"桌面端内嵌对话"用的素材集合。
 //
-// 历史:早期 standalone 还走 Flask + Docker 独立部署路径,会生成 server.py /
-// index.html / Dockerfile / docker-compose.yaml / install.sh / README.md /
-// requirements.txt 一整套。从"桌面端原生 chat"上线(见 internal/llmchat)后,
-// 独立部署不再维护 —— 删了 templates/standalone/ 下的所有部署文件,现在 standalone
-// 产物就是:
+// 历史:这个 target 原来叫 "standalone",走 Flask + Docker 独立部署路径,会生成
+// server.py / index.html / Dockerfile / docker-compose / install.sh 等一整套。
+// "桌面端原生 chat"上线后独立部署不再维护,名字"standalone"(独立)也不准确了 ——
+// 实际上产物完全依附 Studio 桌面端跑,是"内嵌"。target 重命名为 "embedded" 后
+// 产物目录也改成 <out>-embedded/。老 yaml 写 "standalone" 的值在 config
+// LoadFromBytes 阶段被 aliasStandaloneToEmbedded 归一到 "embedded",向后兼容。
+//
+// 现在 embedded 产物就是:
 //   - system-prompt.md  —— 合并所有 SOUL/IDENTITY/AGENTS/CHECKLIST/TOOLS + skill 知识
 //   - skills/           —— 路由 / 映射表 / SKILL.md(内嵌对话的 prompt 拼接源)
 //   - scripts/          —— config-executor 等辅助脚本(桌面端当前不跑它们,
@@ -21,8 +24,8 @@ import (
 //   - tshoot.json       —— discover 锚点,让 Studio 扫得到这台机器人
 //
 // Studio 内嵌 chat 读 system-prompt.md + 直连 LLM(llmchat 包)直接对话。
-func (g *Generator) GenerateStandalone() error {
-	outDir := g.OutputDir + "-standalone"
+func (g *Generator) GenerateEmbedded() error {
+	outDir := g.OutputDir + "-embedded"
 	if err := os.RemoveAll(outDir); err != nil {
 		return fmt.Errorf("clean output: %w", err)
 	}
@@ -58,7 +61,7 @@ func (g *Generator) GenerateStandalone() error {
 	}
 
 	// 3) tshoot.json 锚点,让 discover 扫得到
-	if err := g.writeTshootMeta(outDir, "standalone"); err != nil {
+	if err := g.writeTshootMeta(outDir, "embedded"); err != nil {
 		return fmt.Errorf("write tshoot meta: %w", err)
 	}
 	return nil

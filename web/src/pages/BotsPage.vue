@@ -283,7 +283,8 @@ function targetLabel(t: string): string {
     openclaw: 'OpenClaw',
     'claude-code': 'Claude Code',
     cursor: 'Cursor',
-    standalone: 'Standalone',
+    embedded: 'Embedded (内嵌对话)',
+    standalone: 'Embedded (内嵌对话)', // 历史 tshoot.json 里可能还写着 standalone,展示统一成 Embedded
   }
   return map[t] ?? t
 }
@@ -294,7 +295,7 @@ type ImportStage = 'idle' | 'picked' | 'deploying' | 'deployed' | 'installing' |
 const importStage = ref<ImportStage>('idle')
 const importYAMLText = ref('')
 const importYAMLPath = ref('')
-const importTarget = ref<'openclaw' | 'claude-code' | 'cursor' | 'standalone'>('openclaw')
+const importTarget = ref<'openclaw' | 'claude-code' | 'cursor' | 'embedded'>('openclaw')
 const importDestPath = ref('')
 const importError = ref<string | null>(null)
 
@@ -407,7 +408,7 @@ async function runImportDeploy() {
     // 各 target 是否需要 install.sh 步骤:
     //   openclaw:有交互凭证,必须跑,UI 展示字段表单
     //   claude-code / cursor:ImportAndApply 已 rsync,install.sh 无附加动作
-    //   standalone:桌面端内嵌对话,没有 install.sh,产物写完直接齐活
+    //   embedded:桌面端内嵌对话,没有 install.sh,产物写完直接齐活
     const needsInstall = importTarget.value === 'openclaw'
     if (needsInstall) {
       const [prompts, existing] = await Promise.all([
@@ -559,7 +560,7 @@ onUnmounted(() => {
             <option value="openclaw">OpenClaw（Studio 托管,需填凭证）</option>
             <option value="claude-code">Claude Code（装到项目根）</option>
             <option value="cursor">Cursor IDE（装到项目根）</option>
-            <option value="standalone">Standalone（Studio 托管,工作台内开对话）</option>
+            <option value="embedded">Embedded (内嵌对话,Studio 托管)</option>
           </select>
         </div>
         <!-- standalone/openclaw 自动管理路径,折叠;用户点"自定义"才露 input -->
@@ -922,7 +923,8 @@ onUnmounted(() => {
 .bot-target[data-target="openclaw"] { background: #fce7f3; color: #9f1239; }
 .bot-target[data-target="claude-code"] { background: #fef3c7; color: #92400e; }
 .bot-target[data-target="cursor"] { background: #dbeafe; color: #1e40af; }
-.bot-target[data-target="standalone"] { background: #d1fae5; color: #065f46; }
+.bot-target[data-target="embedded"],
+.bot-target[data-target="standalone"] { background: #d1fae5; color: #065f46; } /* standalone 是 embedded 的老别名,保 CSS 兼容 */
 .bot-ver { font-size: 11px; color: #94a3b8; font-family: monospace; }
 
 .bot-name { font-size: 16px; font-weight: 600; color: #0f172a; margin-bottom: 4px; }

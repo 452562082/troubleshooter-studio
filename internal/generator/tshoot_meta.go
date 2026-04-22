@@ -12,7 +12,7 @@ import (
 
 // writeTshootMeta 写产物根下的 tshoot.json 锚点，discover 靠这个文件识别机器人。
 // dir 是"产物根"——对 openclaw 是 <OutputDir>/templates/workspace-template/，
-// 对 claude-code/cursor/standalone 是各自的输出目录。
+// 对 claude-code/cursor/embedded 是各自的输出目录。
 //
 // 字段取自 g.Ctx（system.id / name）+ g.TshootVersion + g.SystemYAMLSource。
 // SystemYAMLSource 为空时字段留空字符串，不影响 JSON 结构，只影响后续 apply 能不能找到"真源"。

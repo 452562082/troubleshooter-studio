@@ -96,7 +96,7 @@ func runDemo(args []string) error {
 	fmt.Println("  想看 analyze 从 fake-repos 抽到什么配置线索：")
 	fmt.Printf("    %s analyze -i %s --repos-root %s\n", os.Args[0], sysPath, reposRoot)
 	fmt.Println()
-	fmt.Println("  想看 multi-target（claude-code/cursor/standalone）各长啥样：")
+	fmt.Println("  想看 multi-target（claude-code/cursor/embedded）各长啥样：")
 	fmt.Println("    在自己的 system.yaml 的 generation.targets 里加上它们，再跑 tshoot gen")
 	_ = reposRoot // 预留给未来 analyze/doctor 集成
 	return nil

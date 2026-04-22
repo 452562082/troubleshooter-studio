@@ -45,7 +45,7 @@ func (a *App) ApplyBot(agentPath, newYamlText string, dryRun bool) (*agent.Resul
 }
 
 // ImportAndDeploy 把 yaml 直接部署成新机器人（agent.ImportAndApply 的 UI 封装）。
-// target: openclaw / claude-code / cursor / standalone
+// target: openclaw / claude-code / cursor / embedded(老别名: standalone)
 // destPath: 部署目标路径。openclaw 下是产物目录（含 install.sh）；其它 target 下是目标项目根。
 func (a *App) ImportAndDeploy(yamlText, target, destPath string) (*agent.Result, error) {
 	return agent.ImportAndApply([]byte(yamlText), target, destPath, agent.ApplyOptions{
@@ -57,17 +57,18 @@ func (a *App) ImportAndDeploy(yamlText, target, destPath string) (*agent.Result,
 // DefaultDestPath 给不同 target 推荐默认部署路径,UI 据此决定要不要让用户手填。
 //
 // 设计:
-//   - standalone:产物只是"Studio 内嵌对话的素材"(system-prompt.md / skills),
-//     用户从不直接 cd 进去。默认到 ~/.tshoot/standalone/<id>/,UI 隐藏路径输入。
+//   - embedded:产物只是"Studio 内嵌对话的素材"(system-prompt.md / skills),
+//     用户从不直接 cd 进去。默认到 ~/.tshoot/embedded/<id>/,UI 隐藏路径输入。
 //   - openclaw:产物是 install.sh 用的中间包,最终 rsync 到 workspace_name 目录,
 //     中间位置对用户也没意义。默认到 ~/.tshoot/openclaw/<id>/,UI 隐藏输入。
 //   - claude-code / cursor:装到"用户已有项目根"里(CLAUDE.md + skills/ 注进项目)。
 //     Studio 不知道用户想装哪个项目,必须用户选。返回空串,UI 强制必填。
 //
 // 空 systemID 时回退到 "default"(UI 初始化时 system.id 可能还空,给个兜底)。
+// "standalone" 作为 "embedded" 的历史别名被接住,向后兼容老 yaml / UI。
 func (a *App) DefaultDestPath(target, systemID string) (string, error) {
 	switch target {
-	case "standalone", "openclaw":
+	case "embedded", "standalone", "openclaw":
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", fmt.Errorf("read home: %w", err)
@@ -76,7 +77,13 @@ func (a *App) DefaultDestPath(target, systemID string) (string, error) {
 		if id == "" {
 			id = "default"
 		}
-		return filepath.Join(home, ".tshoot", target, id), nil
+		// 目录归一:老别名 "standalone" 也走 ~/.tshoot/embedded/<id>/,
+		// 不再产生两套目录(standalone/ + embedded/)
+		dirName := target
+		if dirName == "standalone" {
+			dirName = "embedded"
+		}
+		return filepath.Join(home, ".tshoot", dirName, id), nil
 	case "claude-code", "cursor":
 		// 空串 = 让用户必选,UI 会保持输入框可见
 		return "", nil

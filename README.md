@@ -103,7 +103,7 @@ go build -o bin/tshoot ./cmd/tshoot    # 或 go install ./cmd/tshoot
 | **4. 导出 yaml** | 🤖 已装机器人 → 导出 yaml | Wails 原生 SaveFileDialog 选路径存盘 |
 | **5. 新建机器人** | 🧙 创建向导 | 7 步表单生成 `system.yaml`（草稿存 localStorage，切页刷新不丢）；生成完可直接 gen |
 
-机器人靠产物根目录的 `tshoot.json` 锚点识别（gen 时自动写入，含完整 `system_yaml` 原文）。macOS 下通过 Spotlight 全盘扫 `tshoot.json`，standalone / claude-code / cursor 散落在任意目录的机器人都能零配置找到。
+机器人靠产物根目录的 `tshoot.json` 锚点识别（gen 时自动写入，含完整 `system_yaml` 原文）。macOS 下通过 Spotlight 全盘扫 `tshoot.json`，embedded / claude-code / cursor 散落在任意目录的机器人都能零配置找到。
 
 Gen 只产生产物目录；**真正装到 OpenClaw / Claude Code 等平台仍需走产物里的 `install.sh`**（首次收凭证）。把 install.sh 的交互搬进桌面 app 是下一个迭代项。
 
@@ -151,7 +151,7 @@ generation:
     - openclaw       # OpenClaw 安装包（install.sh + workspace）
     - claude-code    # Claude Code（CLAUDE.md + skills/）
     - cursor         # Cursor IDE（.cursorrules + .cursor/rules/*.mdc）
-    - standalone     # 独立 Web 聊天（server.py + index.html + docker-compose）
+    - embedded       # Studio 桌面端内嵌对话（system-prompt.md + skills/）;"standalone" 是历史别名
 ```
 
 一次生成四种格式：
@@ -161,7 +161,7 @@ generation:
 # → dist/<id>/             OpenClaw 安装包
 # → dist/<id>-claude-code/ Claude Code
 # → dist/<id>-cursor/      Cursor IDE
-# → dist/<id>-standalone/  独立 Web 聊天
+# → dist/<id>-embedded/    Studio 桌面端内嵌对话
 ```
 
 | 目标 | 核心产物 | 一键部署 |
@@ -169,17 +169,17 @@ generation:
 | `openclaw` | install.sh + self-test.sh + workspace 模板 | `bash install.sh` → 部署到 OpenClaw |
 | `claude-code` | CLAUDE.md + skills/ + **install.sh** | `bash install.sh <project-dir>`（自动备份已存在的 CLAUDE.md） |
 | `cursor` | .cursorrules + .cursor/rules/*.mdc + skills/ + **install.sh** | `bash install.sh <project-dir>`（自动备份已存在的 .cursorrules） |
-| `standalone` | server.py + index.html + Dockerfile + requirements.txt + docker-compose + **install.sh** | 本机：`bash install.sh`；或容器：`docker compose up --build` |
+| `embedded` | system-prompt.md + skills/ + scripts/ + tshoot.json | Studio 桌面端扫到即用,"💬 打开对话"直连 LLM |
 
-standalone 模式不依赖任何 AI 平台——只需一个 LLM API key（Claude / OpenAI），自带聊天界面和 Docker 部署。每个 target 的 `install.sh` 末尾都会打印具体的「首次对话」指引 + 3 条可粘贴的示例问题。
+embedded 模式走桌面端 Studio 原生 chat 协议（OpenAI 兼容 API），支持 Anthropic / OpenAI / DeepSeek / Qwen / MiniMax / Moonshot / 智谱 / Ollama 8 家 provider（按 `agent.model` 前缀路由）。不再维护独立部署路径（老名 `standalone` 在 `config.LoadFromBytes` 被自动归一成 `embedded`）。
 
 所有 CLI 命令都支持 `--format=json`，便于 CI/CD 管道消费。
 
 每份产物目录都自带 `README.md`（能力清单 / 部署前凭证 / 常见问题 / 升级卸载），部署前 `cat README.md` 就有路标。
 
-### Standalone 内嵌对话（桌面端 Studio 原生）
+### Embedded 内嵌对话（桌面端 Studio 原生;老名 standalone）
 
-`standalone` target 不再独立部署 —— 产物只是 Studio 内嵌对话用的素材
+`embedded` target（历史名 `standalone`）不再独立部署 —— 产物只是 Studio 内嵌对话用的素材
 （`system-prompt.md` + `skills/` + `scripts/` + `tshoot.json`）。桌面 app 打开"已装机器人"页
 点 **💬 打开对话** 即可跟机器人聊，细节：
 
@@ -404,7 +404,7 @@ internal/
 scripts/
   package-macos.sh          # make desktop-app 的打包脚本（sips + iconutil → .icns，写 Info.plist）
 templates/                  # .tmpl 模板；按 target 分组：
-                            #   workspace/  scripts/  claude-code/  cursor/  standalone/
+                            #   workspace/  scripts/  claude-code/  cursor/  embedded/
 examples/                   # system.yaml 示例 × 11 覆盖不同配置源和架构模式:
                             #   shop-* (nacos + BFF+后端) / three-tier (前后端+gateway) /
                             #   apollo / consul / env-vars / k8s (配置源差异)

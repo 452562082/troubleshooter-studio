@@ -25,11 +25,34 @@ func LoadFromBytes(data []byte) (*SystemConfig, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse yaml: %w", err)
 	}
+	// 老 yaml 把 target 写成 "standalone" —— 功能已重命名为 "embedded"(桌面端内嵌对话),
+	// 这里做一次 alias 归一,不强制用户改 yaml。deduplicate 避免 "standalone + embedded"
+	// 同时出现导致重复 gen。
+	aliasStandaloneToEmbedded(&cfg)
 	if err := Validate(&cfg); err != nil {
 		return nil, fmt.Errorf("validate: %w", err)
 	}
 	applyDefaults(&cfg)
 	return &cfg, nil
+}
+
+// aliasStandaloneToEmbedded 把 generation.targets 里的老 target 名 "standalone" 替换为
+// 新名 "embedded",保留其它目标顺序不变;已有 "embedded" 不重复加。
+// Meta 里 schema_version 这类字段不处理 —— 只是 targets 层面做了一次重命名。
+func aliasStandaloneToEmbedded(c *SystemConfig) {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(c.Generation.Targets))
+	for _, t := range c.Generation.Targets {
+		if t == "standalone" {
+			t = "embedded"
+		}
+		if seen[t] {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
+	}
+	c.Generation.Targets = out
 }
 
 func Validate(c *SystemConfig) error {
@@ -108,11 +131,13 @@ func Validate(c *SystemConfig) error {
 		}
 	}
 
-	validTargets := map[string]bool{"openclaw": true, "claude-code": true, "cursor": true, "standalone": true}
+	// 注:"standalone" 已重命名为 "embedded",aliasStandaloneToEmbedded 在 LoadFromBytes
+	// 里把老值替成新值后才走到 Validate。这里只接受新名。
+	validTargets := map[string]bool{"openclaw": true, "claude-code": true, "cursor": true, "embedded": true}
 	targets := c.Generation.ResolvedTargets()
 	for _, t := range targets {
 		if !validTargets[t] {
-			return fmt.Errorf("generation.targets: %q not supported (valid: openclaw, claude-code, cursor, standalone)", t)
+			return fmt.Errorf("generation.targets: %q not supported (valid: openclaw, claude-code, cursor, embedded)", t)
 		}
 	}
 

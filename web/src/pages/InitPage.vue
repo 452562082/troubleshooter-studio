@@ -300,12 +300,12 @@ const enabledDataStores = reactive<Record<string, boolean>>({
 })
 
 // ── Step 7: 输出目标 ──
-const targetOptions = ['openclaw', 'claude-code', 'cursor', 'standalone'] as const
+const targetOptions = ['openclaw', 'claude-code', 'cursor', 'embedded'] as const
 const targetDescriptions: Record<string, string> = {
   'openclaw': 'OpenClaw 安装包（bash install.sh 部署）',
   'claude-code': 'Claude Code（CLAUDE.md + skills/ 放到项目根即用）',
   'cursor': 'Cursor IDE（.cursorrules + .cursor/rules/）',
-  'standalone': '桌面端内嵌对话(直连 LLM,8 个 provider 通吃)',
+  'embedded': '桌面端内嵌对话(直连 LLM,8 个 provider 通吃)',
 }
 const enabledTargets = reactive<Record<string, boolean>>({
   ...Object.fromEntries(targetOptions.map(k => [k, true])),
@@ -557,7 +557,7 @@ function generateYAML(): string {
   lines.push('agent:')
   lines.push(`  name: ${yamlStr(agent.name || agentNameDefault.value)}`)
   lines.push(`  workspace_name: ${yamlStr(agent.workspace_name || workspaceNameDefault.value)}    # OpenClaw 工作区目录名（~/.openclaw/workspace/<这里>）；推荐 ASCII 小写避免 CJK 目录名`)
-  lines.push(`  model: ${agent.model}    # LLM model id；standalone 可用 LLM_MODEL 环境变量覆盖`)
+  lines.push(`  model: ${agent.model}    # LLM model id;前缀决定 provider(anthropic/openai/deepseek/qwen/minimax/moonshot/zhipu/ollama)`)
   lines.push('  style:')
   lines.push('    tone: direct')
   lines.push('    verbosity: terse')
@@ -823,9 +823,9 @@ function downloadYAML() {
 // BotsPage 那条闭环),成功后跳 /bots 看刚装好的卡。
 //
 // target 分两类(useDeployPath 判):
-//   - standalone/openclaw:Studio 替用户管路径(~/.tshoot/<target>/<id>/),默认隐路径 input
+//   - embedded/openclaw:Studio 替用户管路径(~/.tshoot/<target>/<id>/),默认隐路径 input
 //   - claude-code/cursor:必须选项目根,保持 input 可见
-const deployTarget = ref<'openclaw' | 'claude-code' | 'cursor' | 'standalone'>('openclaw')
+const deployTarget = ref<'openclaw' | 'claude-code' | 'cursor' | 'embedded'>('openclaw')
 const deployDestPath = ref('')
 const deployLoading = ref(false)
 const deployError = ref<string | null>(null)
@@ -841,7 +841,7 @@ const deployTargetHint = computed(() => {
     case 'openclaw': return 'Studio 托管产物(→ install.sh 装到 ~/.openclaw/workspace/<workspace_name>/)'
     case 'claude-code': return '装到项目根:会写 CLAUDE.md + skills/ + install.sh'
     case 'cursor': return '装到项目根:会写 .cursorrules + .cursor/rules/ + skills/'
-    case 'standalone': return 'Studio 托管产物;对话直接在工作台内开(直连 model 对应 provider 的 LLM API)'
+    case 'embedded': return 'Studio 托管产物;对话直接在工作台内开(直连 model 对应 provider 的 LLM API)'
   }
   return ''
 })
@@ -1280,7 +1280,7 @@ const configTypeDescriptions: Record<string, string> = {
               <option value="openclaw">OpenClaw</option>
               <option value="claude-code">Claude Code</option>
               <option value="cursor">Cursor IDE</option>
-              <option value="standalone">Standalone</option>
+              <option value="embedded">Embedded (内嵌对话)</option>
             </select>
             <span class="deploy-hint">{{ deployTargetHint }}</span>
           </div>

@@ -44,8 +44,8 @@ type Answers struct {
 
 	OutputDir string
 
-	// Targets 是 generation.targets 的显式列表：openclaw / claude-code / cursor / standalone
-	// 空表示 fallback 到 [openclaw]
+	// Targets 是 generation.targets 的显式列表：openclaw / claude-code / cursor / embedded
+	// 空表示 fallback 到 [openclaw]。"standalone" 是 "embedded" 的历史别名,LoadFromBytes 自动归一
 	Targets []string
 }
 
@@ -66,7 +66,7 @@ func (a *Answers) WriteYAML(out io.Writer) error {
 	p("\nagent:\n")
 	p("  name: %q\n", a.AgentName)
 	p("  workspace_name: %q    # OpenClaw 工作区目录名（~/.openclaw/workspace/<这里>）\n", a.WorkspaceName)
-	p("  model: %s              # LLM model id；standalone 可用 LLM_MODEL 环境变量覆盖\n", a.AgentModel)
+	p("  model: %s              # LLM model id;前缀决定 provider(anthropic/openai/deepseek/qwen/minimax/moonshot/zhipu/ollama)\n", a.AgentModel)
 
 	p("\n# environments：声明系统的所有环境。每个 env 会注册一套独立的 MCP 实例\n")
 	p("# （如 nacos-mcp-server-dev / -prod），机器人按 is_prod 调整谨慎度。\n")

@@ -70,7 +70,7 @@ func runGen(args []string) error {
 		switch t {
 		case "openclaw":
 			hasOpenclaw = true
-		case "claude-code", "cursor", "standalone":
+		case "claude-code", "cursor", "embedded":
 			hasOther = true
 		}
 	}
@@ -108,11 +108,11 @@ func runGen(args []string) error {
 				return err
 			}
 			fmt.Printf("[ok] cursor output → %s-cursor\n", outDir)
-		case "standalone":
-			if err := g.GenerateStandalone(); err != nil {
+		case "embedded":
+			if err := g.GenerateEmbedded(); err != nil {
 				return err
 			}
-			fmt.Printf("[ok] standalone output → %s-standalone\n", outDir)
+			fmt.Printf("[ok] embedded output → %s-embedded\n", outDir)
 		}
 	}
 

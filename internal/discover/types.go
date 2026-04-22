@@ -9,7 +9,7 @@ package discover
 // 客户端（discover / agent-edit）靠找这个文件识别机器人。
 //
 // 注意:刻意不带开头的点,因为 macOS Spotlight (mdfind) 默认跳过 dotfile,
-// 这会让桌面 app 无法零配置扫出 standalone / claude-code / cursor 散落在
+// 这会让桌面 app 无法零配置扫出 embedded / claude-code / cursor 散落在
 // 用户目录的机器人。用 tshoot.json(无点) 换来 Spotlight 全盘索引,
 // 代价是这个文件会出现在 ls / Finder 里 —— 可接受。
 const MetaFilename = "tshoot.json"
@@ -26,7 +26,8 @@ type Meta struct {
 	SystemID   string `json:"system_id"`
 	SystemName string `json:"system_name"`
 
-	// Target 是本产物的部署形态：openclaw / claude-code / cursor / standalone
+	// Target 是本产物的部署形态：openclaw / claude-code / cursor / embedded
+	// (老 bot 的 tshoot.json 可能还是 "standalone",agent.Apply 里按别名处理)
 	Target string `json:"target"`
 
 	// GeneratedAt RFC3339 时间戳

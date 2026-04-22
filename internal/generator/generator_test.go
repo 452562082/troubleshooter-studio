@@ -365,8 +365,8 @@ func TestGenerate_MultiTargets_All(t *testing.T) {
 	if err := g.GenerateCursor(); err != nil {
 		t.Fatalf("cursor: %v", err)
 	}
-	if err := g.GenerateStandalone(); err != nil {
-		t.Fatalf("standalone: %v", err)
+	if err := g.GenerateEmbedded(); err != nil {
+		t.Fatalf("embedded: %v", err)
 	}
 
 	assertExists(t, out, []string{
@@ -384,9 +384,9 @@ func TestGenerate_MultiTargets_All(t *testing.T) {
 		".cursor/rules/routing.mdc",
 		"skills/routing/SKILL.md",
 	})
-	// standalone 产物精简:桌面端原生 chat 接管后,server.py / Dockerfile /
+	// embedded(原 standalone)产物精简:桌面端原生 chat 接管后,server.py / Dockerfile /
 	// install.sh / docker-compose 等独立部署资产已删。只剩 Studio 内嵌所需的素材。
-	assertExists(t, out+"-standalone", []string{
+	assertExists(t, out+"-embedded", []string{
 		"system-prompt.md",
 		"skills/routing/SKILL.md",
 		"tshoot.json",
@@ -430,8 +430,8 @@ func TestGenerate_MultiTargets_NoOpenclaw(t *testing.T) {
 	if err := g.GenerateClaudeCode(); err != nil {
 		t.Fatalf("claude-code: %v", err)
 	}
-	if err := g.GenerateStandalone(); err != nil {
-		t.Fatalf("standalone: %v", err)
+	if err := g.GenerateEmbedded(); err != nil {
+		t.Fatalf("embedded: %v", err)
 	}
 
 	// openclaw 目录不应存在
@@ -441,7 +441,7 @@ func TestGenerate_MultiTargets_NoOpenclaw(t *testing.T) {
 
 	// 其它 target 产物存在
 	assertExists(t, out+"-claude-code", []string{"CLAUDE.md", "install.sh"})
-	assertExists(t, out+"-standalone", []string{"system-prompt.md", "skills"})
+	assertExists(t, out+"-embedded", []string{"system-prompt.md", "skills"})
 }
 
 func TestGenerate_WithAnalysis_UpgradesInferredToVerified(t *testing.T) {

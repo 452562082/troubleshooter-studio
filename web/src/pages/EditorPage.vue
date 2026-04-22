@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import { validate as bridgeValidate, plan as bridgePlan, gen as bridgeGen } from '../lib/bridge'
 
 const exampleYaml = `system:
   id: demo
@@ -86,7 +87,7 @@ function loadFile(event: Event) {
   input.value = ''
 }
 
-async function apiCall(endpoint: string, label: string) {
+async function apiCall(endpoint: 'validate' | 'plan' | 'gen', label: string) {
   errorMsg.value = ''
   successMsg.value = ''
   resultData.value = null
@@ -94,24 +95,18 @@ async function apiCall(endpoint: string, label: string) {
   loading.value = label
 
   try {
-    const res = await fetch(`/api/${endpoint}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/yaml' },
-      body: yamlContent.value,
-    })
-    const data = await res.json()
-    if (!res.ok) {
-      errorMsg.value = data.error || `HTTP ${res.status}`
-      return
-    }
     if (endpoint === 'validate') {
-      successMsg.value = `验证通过！系统: ${data.system} (${data.name}) | ${data.envs} 个环境 | ${data.repos} 个仓库`
+      const r = await bridgeValidate(yamlContent.value)
+      successMsg.value = `验证通过！系统: ${r.system} (${r.name}) | ${r.envs} 个环境 | ${r.repos} 个仓库`
+    } else if (endpoint === 'plan') {
+      resultTitle.value = label
+      resultData.value = await bridgePlan(yamlContent.value)
     } else {
       resultTitle.value = label
-      resultData.value = data
+      resultData.value = await bridgeGen(yamlContent.value, '')
     }
   } catch (e: any) {
-    errorMsg.value = e.message || '网络错误'
+    errorMsg.value = e.message || String(e)
   } finally {
     loading.value = ''
   }

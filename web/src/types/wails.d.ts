@@ -67,6 +67,9 @@ declare global {
           DiscoverBots(extraRoots: string[]): Promise<DiscoveredBot[]>
           Validate(yamlText: string): Promise<ValidateResult>
           Gen(yamlText: string, outputDir: string): Promise<Record<string, unknown>>
+          Plan(yamlText: string): Promise<Record<string, unknown>>
+          Doctor(yamlText: string, reposRoot: string): Promise<Record<string, unknown>>
+          Diff(yamlText: string, existingDir: string): Promise<Record<string, unknown>>
           ApplyBot(agentPath: string, newYamlText: string, dryRun: boolean): Promise<ApplyResult>
           SaveYAML(defaultFilename: string, yamlText: string): Promise<string>
           OpenYAML(): Promise<OpenYAMLResult>

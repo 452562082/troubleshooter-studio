@@ -80,22 +80,16 @@ function loadFile(e: Event) {
 
 async function runAnalyze() {
   if (!yamlContent.value.trim()) { error.value = '请先填写或加载 system.yaml'; return }
-  if (!reposRoot.value.trim()) { error.value = '请填写仓库根目录路��'; return }
-  loading.value = true
-  error.value = ''
-  result.value = null
-  try {
-    const params = new URLSearchParams({ repos_root: reposRoot.value })
-    if (autoClone.value) params.set('auto_clone', 'true')
-    const resp = await fetch(`/api/analyze?${params}`, { method: 'POST', body: yamlContent.value })
-    const data = await resp.json()
-    if (!resp.ok) { error.value = data.error || `HTTP ${resp.status}`; return }
-    result.value = data
-  } catch (e: any) {
-    error.value = e.message || '请求失败'
-  } finally {
-    loading.value = false
-  }
+  if (!reposRoot.value.trim()) { error.value = '请填写仓库根目录路径'; return }
+  // analyzer 功能目前没桥接到 GUI —— 需要 Go 端 App.Analyze binding + 重新组装 analyzer 流水线
+  // (仓库遍历 / auto-clone / registry 构造),较大。先在 UI 里直引 CLI 用法。
+  error.value = [
+    '该能力暂未接入桌面端。请在终端跑:',
+    '',
+    `  tshoot analyze -i <system.yaml> --repos-root ${reposRoot.value}${autoClone.value ? ' --auto-clone' : ''} -o analysis.json`,
+    '',
+    '生成的 analysis.json 可以在生成步骤里通过 --analysis 传给 gen。',
+  ].join('\n')
 }
 </script>
 

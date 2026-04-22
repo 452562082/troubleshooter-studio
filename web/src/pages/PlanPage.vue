@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import { plan as bridgePlan } from '../lib/bridge'
 
 interface SkillDecision {
   name: string
@@ -131,16 +132,9 @@ async function runPlan() {
   error.value = ''
   plan.value = null
   try {
-    const resp = await fetch('/api/plan', {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/yaml' },
-      body: yaml.value,
-    })
-    const data = await resp.json()
-    if (!resp.ok) throw new Error(data.error || '请求失败')
-    plan.value = data
+    plan.value = (await bridgePlan(yaml.value)) as unknown as typeof plan.value
   } catch (e: any) {
-    error.value = e.message
+    error.value = e.message || String(e)
   } finally {
     loading.value = false
   }

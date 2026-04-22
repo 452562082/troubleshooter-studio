@@ -33,6 +33,7 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/deploy"
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
+	"github.com/xiaolong/troubleshooter-studio/internal/doctor"
 	"github.com/xiaolong/troubleshooter-studio/internal/generator"
 	"github.com/xiaolong/troubleshooter-studio/internal/webui"
 )
@@ -127,6 +128,51 @@ func (a *App) Gen(yamlText, outputDir string) (*generator.GenSummary, error) {
 		return nil, err
 	}
 	return g.Summary, nil
+}
+
+// Plan 干跑一次 gen,返回 Plan 结构(skills / files 分布 / config-map 投影)。
+// 等价 POST /api/plan。不落盘(generator 写到临时目录后清掉)。
+func (a *App) Plan(yamlText string) (*generator.Plan, error) {
+	cfg, err := config.LoadFromBytes([]byte(yamlText))
+	if err != nil {
+		return nil, err
+	}
+	outDir, err := os.MkdirTemp("", "tshoot-plan-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(outDir)
+
+	g := generator.New(cfg, a.templateRoot, outDir)
+	return g.BuildPlan("")
+}
+
+// Diff 跟 Plan 用同一个底层(generator.BuildPlan),区别是传入 existingDir,
+// 让底层 diffFileSets 给出 create / modify / remove 三类文件差异,用于新产物
+// vs 现有产物的对比预览。existingDir 为空时等价 Plan。
+func (a *App) Diff(yamlText, existingDir string) (*generator.Plan, error) {
+	cfg, err := config.LoadFromBytes([]byte(yamlText))
+	if err != nil {
+		return nil, err
+	}
+	outDir, err := os.MkdirTemp("", "tshoot-diff-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(outDir)
+
+	g := generator.New(cfg, a.templateRoot, outDir)
+	return g.BuildPlan(existingDir)
+}
+
+// Doctor 对比声明 vs 代码实态,返回漂移报告。等价 POST /api/doctor?repos_root=...
+// reposRoot 留空则只校验声明的一致性,不扫代码。
+func (a *App) Doctor(yamlText, reposRoot string) (*doctor.Report, error) {
+	cfg, err := config.LoadFromBytes([]byte(yamlText))
+	if err != nil {
+		return nil, err
+	}
+	return doctor.Check(cfg, reposRoot)
 }
 
 // ApplyBot 把新的 system.yaml 应用到已装机器人的活 workspace：

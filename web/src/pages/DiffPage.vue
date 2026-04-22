@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import { diff as bridgeDiff, isDesktop } from '../lib/bridge'
 
 interface FileChange {
   path: string
@@ -106,24 +107,13 @@ async function runDiff() {
   diffResult.value = null
   apiNotReady.value = false
   try {
-    const resp = await fetch('/api/diff', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        yaml: yaml.value,
-        target_dir: targetDir.value,
-      }),
-    })
-    if (resp.status === 404 || resp.status === 501) {
+    if (!isDesktop()) {
       apiNotReady.value = true
       return
     }
-    const data = await resp.json()
-    if (!resp.ok) throw new Error(data.error || '请求失败')
-    diffResult.value = data
+    diffResult.value = (await bridgeDiff(yaml.value, targetDir.value)) as unknown as typeof diffResult.value
   } catch (e: any) {
-    // Likely 404 — API not implemented yet
-    apiNotReady.value = true
+    error.value = e.message || String(e)
   } finally {
     loading.value = false
   }

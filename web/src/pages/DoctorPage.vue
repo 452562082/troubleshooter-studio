@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import { doctor as bridgeDoctor } from '../lib/bridge'
 
 interface Issue {
   severity: string
@@ -109,21 +110,13 @@ async function runDoctor() {
   loading.value = true
 
   try {
-    const params = reposRoot.value ? `?repos_root=${encodeURIComponent(reposRoot.value)}` : ''
-    const res = await fetch(`/api/doctor${params}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/yaml' },
-      body: yamlContent.value,
-    })
-    const data = await res.json()
-    if (!res.ok) {
-      errorMsg.value = data.error || `HTTP ${res.status}`
-      return
+    const data = (await bridgeDoctor(yamlContent.value, reposRoot.value)) as {
+      issues?: Issue[]
     }
     issues.value = data.issues || []
     hasResult.value = true
   } catch (e: any) {
-    errorMsg.value = e.message || '网络错误'
+    errorMsg.value = e.message || String(e)
   } finally {
     loading.value = false
   }

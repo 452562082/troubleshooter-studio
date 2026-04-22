@@ -37,6 +37,47 @@ export async function validate(yamlText: string): Promise<ValidateResult> {
   return body as ValidateResult
 }
 
+/** Plan 干跑 gen,返回 skills / files / config-map 分布;不落盘 */
+export async function plan(yamlText: string): Promise<Record<string, unknown>> {
+  const app = desktopApp()
+  if (app) return (await app.Plan(yamlText)) as Record<string, unknown>
+  const resp = await fetch('/api/plan', {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/yaml' },
+    body: yamlText,
+  })
+  const body = await resp.json()
+  if (!resp.ok) throw new Error(body?.error || `plan failed: ${resp.status}`)
+  return body
+}
+
+/** Diff 预览新 yaml vs existingDir 现有产物的文件级 create/modify/remove 变化。
+ *  浏览器模式下没有对应 API 端点(目前 api/handler.go 没 HandleDiff),只能桌面用。
+ */
+export async function diff(yamlText: string, existingDir: string): Promise<Record<string, unknown>> {
+  const app = desktopApp()
+  if (app) return (await app.Diff(yamlText, existingDir)) as Record<string, unknown>
+  throw new Error('Diff 在浏览器模式下不可用(tshoot serve 未实现 /api/diff),请在桌面 app 里使用')
+}
+
+/** Doctor 对比声明 vs 代码实态,reposRoot 留空只校验声明一致性 */
+export async function doctor(
+  yamlText: string,
+  reposRoot = '',
+): Promise<Record<string, unknown>> {
+  const app = desktopApp()
+  if (app) return (await app.Doctor(yamlText, reposRoot)) as Record<string, unknown>
+  const qs = reposRoot ? `?repos_root=${encodeURIComponent(reposRoot)}` : ''
+  const resp = await fetch(`/api/doctor${qs}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/yaml' },
+    body: yamlText,
+  })
+  const body = await resp.json()
+  if (!resp.ok) throw new Error(body?.error || `doctor failed: ${resp.status}`)
+  return body
+}
+
 /** Gen 真落盘；outputDir 空字符串 = 用 yaml 里的 generation.output_dir（推荐） */
 export interface GenSummary {
   output_dir: string

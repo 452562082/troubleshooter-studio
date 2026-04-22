@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
-import { analyze as bridgeAnalyze, isDesktop, type AnalyzeResult } from '../lib/bridge'
+import { analyze as bridgeAnalyze, isDesktop, openDir, type AnalyzeResult } from '../lib/bridge'
 import { toast } from '../lib/toast'
 import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
 
@@ -89,6 +89,16 @@ const analyzeStartTime = ref<number | null>(null)
 const analyzeElapsed = ref(0)
 let analyzeTimer: number | null = null
 
+async function pickReposRoot() {
+  if (!isDesktop()) { error.value = '选目录需要桌面 app 环境'; return }
+  try {
+    const p = await openDir('选择仓库根目录(含多个 repo.name 子目录)')
+    if (p) reposRoot.value = p
+  } catch (e: any) {
+    error.value = String(e?.message || e)
+  }
+}
+
 async function runAnalyze() {
   if (!yamlContent.value.trim()) { error.value = '请先填写或加载 system.yaml'; return }
   if (!reposRoot.value.trim()) { error.value = '请填写仓库根目录路径'; return }
@@ -139,8 +149,15 @@ onUnmounted(() => {
 
     <div class="info-box">
       <div class="info-box-title">使用说明</div>
-      <div>输入 system.yaml + 仓库根目录路径，分析器会扫描每个仓库抽取 service name 和配置中心线索。结果会标记 verified（机械确认）</div>
-      <div class="info-box-note">注意：analyze 需要仓库代码实际存在于指定路径下</div>
+      <div>
+        输入 system.yaml + <strong>仓库父目录</strong>(含多个 repo.name 子目录),
+        分析器会按 yaml 里每个 <code>repos[].name</code> 去匹配
+        <code>&lt;父目录&gt;/&lt;name&gt;/</code>,扫所有匹配到的仓库,抽 service_names
+        + 配置中心线索,结果标 verified(机械确认)。<br/>
+        示例:yaml 里 repos=[<code>order-service</code>, <code>pay-service</code>],父目录 <code>~/code</code>,
+        会扫 <code>~/code/order-service/</code> 和 <code>~/code/pay-service/</code> 两个仓库。
+      </div>
+      <div class="info-box-note">注意:缺失的仓库会标 skipped;勾"自动 clone"缺失仓库会从 url 浅克隆(需 git + 凭证)</div>
     </div>
 
     <div class="form-section">
@@ -156,8 +173,11 @@ onUnmounted(() => {
 
     <div class="form-row">
       <div class="field">
-        <label>仓库根目录（repos-root）</label>
-        <input v-model="reposRoot" type="text" placeholder="例：./repos 或 /home/user/repos" />
+        <label>仓库父目录 <span class="field-hint">(含多个仓库子目录,不是某一个仓库的根)</span></label>
+        <div class="path-row">
+          <input v-model="reposRoot" type="text" placeholder="例:~/code 或 /Users/xxx/repos;analyzer 会按 yaml 里每个 repo.name 找子目录" />
+          <button type="button" class="btn" :disabled="loading" @click="pickReposRoot">选目录…</button>
+        </div>
       </div>
       <div class="field check">
         <label><input type="checkbox" v-model="autoClone" /> 自动 clone 缺失仓库</label>
@@ -281,6 +301,11 @@ textarea.err { border-color: #ef4444; }
 .field input[type="text"]:focus { outline: none; border-color: var(--c-accent); }
 .field.check { flex: none; }
 .field.check label { font-weight: 400; font-size: var(--fs-md); color: var(--c-text); cursor: pointer; display: flex; align-items: center; gap: 6px; }
+/* "父目录,不是单仓库根" 这类轻提示放 label 旁,font-weight 400 + 灰色不抢主 label */
+.field-hint { font-size: var(--fs-sm); font-weight: 400; color: var(--c-muted); margin-left: 6px; }
+/* 输入框 + "选目录…"按钮同行 */
+.path-row { display: flex; gap: 6px; }
+.path-row input[type="text"] { flex: 1; }
 
 /* banner 用旧 class 名,但样式等价于 .alert.error;保留 class 避免改 template */
 .banner { margin-top: var(--sp-3); padding: 10px var(--sp-3); border-radius: var(--r-md); font-size: var(--fs-base); }

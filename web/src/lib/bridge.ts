@@ -6,7 +6,7 @@
 // 通路到处改。类型从 wailsjs/go/models 来，Go 端改了 struct 跑 make wails-gen 同步。
 
 import * as App from '../../wailsjs/go/main/App'
-import { agent, deploy, discover, generator, main } from '../../wailsjs/go/models'
+import { agent, analyzerpipe, deploy, discover, generator, main } from '../../wailsjs/go/models'
 
 export type DiscoveredBot = discover.DiscoveredAgent
 export type ApplyResult = agent.Result
@@ -16,6 +16,8 @@ export type RunInstallResult = main.RunInstallResult
 export type ValidateResult = main.ValidateResult
 export type GenSummary = generator.GenSummary
 export type Plan = generator.Plan
+export type AnalyzeResult = analyzerpipe.Result
+export type RepoSummary = analyzerpipe.RepoSummary
 export type DoctorReport = Record<string, unknown> // doctor.Report 字段较多且业务后续会扩,先 loose
 
 /** 桌面 app 模式下为 true，浏览器 / dev 模式下为 false */
@@ -47,6 +49,22 @@ export async function plan(yamlText: string): Promise<Plan> {
   const body = await resp.json()
   if (!resp.ok) throw new Error(body?.error || `plan failed: ${resp.status}`)
   return body as Plan
+}
+
+/** Analyze 扫 reposRoot 下每个仓库,抽 service_names + 配置中心线索。
+ *  autoClone=true 时缺失仓库自动 shallow clone(需要 git + 凭证)。
+ *  进度通过 Wails 'analyze:log' event 推流,前端订阅后展示。
+ *  浏览器模式下(tshoot serve)目前没对应 handler,只能桌面用。
+ */
+export async function analyze(
+  yamlText: string,
+  reposRoot: string,
+  autoClone = false,
+): Promise<AnalyzeResult> {
+  if (!isDesktop()) {
+    throw new Error('Analyze 仅在桌面 app 可用,浏览器模式请用 CLI: tshoot analyze')
+  }
+  return App.Analyze(yamlText, reposRoot, autoClone)
 }
 
 /** Diff 预览新 yaml vs existingDir 现有产物的文件级 create/modify/remove 变化。

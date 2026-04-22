@@ -27,6 +27,178 @@ export namespace agent {
 
 }
 
+export namespace analyzer {
+	
+	export class Finding {
+	    config_center: string;
+	    source_file: string;
+	    env_profile?: string;
+	    server_addr?: string;
+	    data_id?: string;
+	    group?: string;
+	    namespace_id?: string;
+	    app_id?: string;
+	    namespaces?: string[];
+	    cluster?: string;
+	    kv_prefix?: string;
+	    default_context?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Finding(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.config_center = source["config_center"];
+	        this.source_file = source["source_file"];
+	        this.env_profile = source["env_profile"];
+	        this.server_addr = source["server_addr"];
+	        this.data_id = source["data_id"];
+	        this.group = source["group"];
+	        this.namespace_id = source["namespace_id"];
+	        this.app_id = source["app_id"];
+	        this.namespaces = source["namespaces"];
+	        this.cluster = source["cluster"];
+	        this.kv_prefix = source["kv_prefix"];
+	        this.default_context = source["default_context"];
+	    }
+	}
+	export class RepoAnalysis {
+	    name: string;
+	    stack: string;
+	    repo_path: string;
+	    service_names?: string[];
+	    findings?: Finding[];
+	    warnings?: string[];
+	    verified: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new RepoAnalysis(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.stack = source["stack"];
+	        this.repo_path = source["repo_path"];
+	        this.service_names = source["service_names"];
+	        this.findings = this.convertValues(source["findings"], Finding);
+	        this.warnings = source["warnings"];
+	        this.verified = source["verified"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class Report {
+	    schema_version: string;
+	    config_center: string;
+	    repos: RepoAnalysis[];
+	
+	    static createFrom(source: any = {}) {
+	        return new Report(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.schema_version = source["schema_version"];
+	        this.config_center = source["config_center"];
+	        this.repos = this.convertValues(source["repos"], RepoAnalysis);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+
+}
+
+export namespace analyzerpipe {
+	
+	export class RepoSummary {
+	    name: string;
+	    status: string;
+	    service_name_count: number;
+	    finding_count: number;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new RepoSummary(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.status = source["status"];
+	        this.service_name_count = source["service_name_count"];
+	        this.finding_count = source["finding_count"];
+	        this.error = source["error"];
+	    }
+	}
+	export class Result {
+	    report: analyzer.Report;
+	    per_repo: RepoSummary[];
+	
+	    static createFrom(source: any = {}) {
+	        return new Result(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.report = this.convertValues(source["report"], analyzer.Report);
+	        this.per_repo = this.convertValues(source["per_repo"], RepoSummary);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+
+}
+
 export namespace deploy {
 	
 	export class Prompt {

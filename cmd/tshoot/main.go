@@ -18,12 +18,11 @@ import (
 	tsf "github.com/xiaolong/troubleshooter-studio"
 	"github.com/xiaolong/troubleshooter-studio/api"
 	"github.com/xiaolong/troubleshooter-studio/internal/agent"
-	"github.com/xiaolong/troubleshooter-studio/internal/analyzer"
+	"github.com/xiaolong/troubleshooter-studio/internal/analyzerpipe"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 	"github.com/xiaolong/troubleshooter-studio/internal/doctor"
 	"github.com/xiaolong/troubleshooter-studio/internal/generator"
-	"github.com/xiaolong/troubleshooter-studio/internal/gitclone"
 	"github.com/xiaolong/troubleshooter-studio/internal/initwizard"
 	"github.com/xiaolong/troubleshooter-studio/internal/skillscaffold"
 	"github.com/xiaolong/troubleshooter-studio/internal/upgrade"
@@ -353,80 +352,23 @@ func runAnalyze(args []string) error {
 	if err != nil {
 		return err
 	}
-	if *autoClone {
-		if err := os.MkdirAll(*reposRoot, 0o755); err != nil {
-			return fmt.Errorf("mkdir repos-root: %w", err)
-		}
-	}
 
-	reg := analyzer.NewRegistry(cfg.Infrastructure.ConfigCenter.Type)
-	report := analyzer.Report{SchemaVersion: "0.1", ConfigCenter: cfg.Infrastructure.ConfigCenter.Type}
-	type repoSummary struct {
-		Name             string `json:"name"`
-		Status           string `json:"status"` // analyzed / cloned-then-analyzed / skipped / clone-failed
-		ServiceNameCount int    `json:"service_name_count"`
-		FindingCount     int    `json:"finding_count"`
-		Error            string `json:"error,omitempty"`
-	}
-	var perRepo []repoSummary
 	text := *format != "json"
-
-	for _, repo := range cfg.Repos {
-		repoPath := filepath.Join(*reposRoot, repo.Name)
-		status := "analyzed"
-		if _, err := os.Stat(repoPath); err != nil {
-			if !*autoClone {
-				perRepo = append(perRepo, repoSummary{Name: repo.Name, Status: "skipped", Error: "not-found"})
-				if text {
-					fmt.Fprintf(os.Stderr, "[skip] repo %s not found at %s (use --auto-clone to fetch)\n", repo.Name, repoPath)
-				}
-				continue
-			}
-			branch := pickCloneBranch(*cloneBranch, repo, cfg.Environments)
-			if text {
-				fmt.Printf("[clone] %s → %s (branch=%s, depth=%d)\n", repo.URL, repoPath, orDefault(branch, "<default>"), repo.Analysis.ShallowDepth)
-			}
-			if err := gitclone.Clone(gitclone.Options{
-				URL:    repo.URL,
-				Dest:   repoPath,
-				Branch: branch,
-				Depth:  repo.Analysis.ShallowDepth,
-				Stderr: os.Stderr,
-			}); err != nil {
-				perRepo = append(perRepo, repoSummary{Name: repo.Name, Status: "clone-failed", Error: err.Error()})
-				if text {
-					fmt.Fprintf(os.Stderr, "[skip] clone %s failed: %v\n", repo.Name, err)
-				}
-				continue
-			}
-			status = "cloned-then-analyzed"
-		}
-		a, err := reg.Get(repo.Stack)
-		if err != nil {
-			perRepo = append(perRepo, repoSummary{Name: repo.Name, Status: "skipped", Error: err.Error()})
-			if text {
-				fmt.Fprintf(os.Stderr, "[skip] %s: %v\n", repo.Name, err)
-			}
-			continue
-		}
-		ra, err := a.Analyze(repoPath, repo.Analysis.IncludePaths)
-		if err != nil {
-			return fmt.Errorf("analyze %s: %w", repo.Name, err)
-		}
-		ra.Name = repo.Name
-		report.Repos = append(report.Repos, *ra)
-		perRepo = append(perRepo, repoSummary{
-			Name: repo.Name, Status: status,
-			ServiceNameCount: len(ra.ServiceNames),
-			FindingCount:     len(ra.Findings),
-		})
-		if text {
-			fmt.Printf("[ok] analyzed %s: %d service_names, %d findings\n",
-				repo.Name, len(ra.ServiceNames), len(ra.Findings))
-		}
+	var onProgress func(string)
+	if text {
+		onProgress = func(msg string) { fmt.Fprintln(os.Stderr, msg) }
+	}
+	result, err := analyzerpipe.Run(cfg, analyzerpipe.Options{
+		ReposRoot:   *reposRoot,
+		AutoClone:   *autoClone,
+		CloneBranch: *cloneBranch,
+		OnProgress:  onProgress,
+	})
+	if err != nil {
+		return err
 	}
 
-	data, err := json.MarshalIndent(report, "", "  ")
+	data, err := json.MarshalIndent(result.Report, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -438,7 +380,7 @@ func runAnalyze(args []string) error {
 		summary := map[string]any{
 			"output":        *output,
 			"config_center": cfg.Infrastructure.ConfigCenter.Type,
-			"repos":         perRepo,
+			"repos":         result.PerRepo,
 		}
 		out, err := json.MarshalIndent(summary, "", "  ")
 		if err != nil {
@@ -1334,26 +1276,6 @@ func runValidate(args []string) error {
 	fmt.Printf("下一步：tshoot plan -i %s                 # 预览会生成什么\n", *input)
 	fmt.Printf("     或：tshoot gen  -i %s                 # 直接落盘\n", *input)
 	return nil
-}
-
-// pickCloneBranch 按优先级选分支：CLI 显式 > 第一个 env 的 branch > "" (=远端默认)
-func pickCloneBranch(cliBranch string, repo config.Repo, envs []config.Environment) string {
-	if cliBranch != "" {
-		return cliBranch
-	}
-	for _, env := range envs {
-		if b, ok := repo.EnvBranches[env.ID]; ok && b != "" {
-			return b
-		}
-	}
-	return ""
-}
-
-func orDefault(s, def string) string {
-	if s == "" {
-		return def
-	}
-	return s
 }
 
 func copyDir(src, dst string) error {

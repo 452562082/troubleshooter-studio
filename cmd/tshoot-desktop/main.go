@@ -30,6 +30,7 @@ import (
 	tsf "github.com/xiaolong/troubleshooter-studio"
 	"github.com/xiaolong/troubleshooter-studio/api"
 	"github.com/xiaolong/troubleshooter-studio/internal/agent"
+	"github.com/xiaolong/troubleshooter-studio/internal/analyzerpipe"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/deploy"
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
@@ -163,6 +164,24 @@ func (a *App) Diff(yamlText, existingDir string) (*generator.Plan, error) {
 
 	g := generator.New(cfg, a.templateRoot, outDir)
 	return g.BuildPlan(existingDir)
+}
+
+// Analyze 扫描 reposRoot 下的所有仓库(按 repos[].name 匹配子目录),抽 service_names
+// 和配置中心线索,返回完整 report + 每仓库摘要。
+// autoClone=true 时缺失的仓库会自动 shallow clone(需要 git + 凭证);默认 false,
+// 缺失的仓库标 "skipped"。进度日志通过 Wails EventsEmit "analyze:log" 推到前端。
+func (a *App) Analyze(yamlText, reposRoot string, autoClone bool) (*analyzerpipe.Result, error) {
+	cfg, err := config.LoadFromBytes([]byte(yamlText))
+	if err != nil {
+		return nil, err
+	}
+	return analyzerpipe.Run(cfg, analyzerpipe.Options{
+		ReposRoot: reposRoot,
+		AutoClone: autoClone,
+		OnProgress: func(msg string) {
+			wailsruntime.EventsEmit(a.ctx, "analyze:log", msg)
+		},
+	})
 }
 
 // Doctor 对比声明 vs 代码实态,返回漂移报告。等价 POST /api/doctor?repos_root=...

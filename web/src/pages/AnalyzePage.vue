@@ -1,5 +1,8 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
+import { analyze as bridgeAnalyze, isDesktop, type AnalyzeResult } from '../lib/bridge'
+import { toast } from '../lib/toast'
+import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
 
 const exampleYaml = `system:
   id: demo
@@ -78,19 +81,40 @@ function loadFile(e: Event) {
   reader.readAsText(file)
 }
 
+// analyze:log 事件流(analyzerpipe.OnProgress 每行 EventsEmit)
+const progressLog = ref('')
+
 async function runAnalyze() {
   if (!yamlContent.value.trim()) { error.value = '请先填写或加载 system.yaml'; return }
   if (!reposRoot.value.trim()) { error.value = '请填写仓库根目录路径'; return }
-  // analyzer 功能目前没桥接到 GUI —— 需要 Go 端 App.Analyze binding + 重新组装 analyzer 流水线
-  // (仓库遍历 / auto-clone / registry 构造),较大。先在 UI 里直引 CLI 用法。
-  error.value = [
-    '该能力暂未接入桌面端。请在终端跑:',
-    '',
-    `  tshoot analyze -i <system.yaml> --repos-root ${reposRoot.value}${autoClone.value ? ' --auto-clone' : ''} -o analysis.json`,
-    '',
-    '生成的 analysis.json 可以在生成步骤里通过 --analysis 传给 gen。',
-  ].join('\n')
+  if (!isDesktop()) {
+    error.value = 'Analyze 仅在桌面 app 可用;浏览器 tshoot serve 模式请改用 CLI:\n  tshoot analyze -i <yaml> --repos-root ... -o analysis.json'
+    return
+  }
+  loading.value = true
+  error.value = ''
+  result.value = null
+  progressLog.value = ''
+  try {
+    const r = (await bridgeAnalyze(yamlContent.value, reposRoot.value, autoClone.value)) as AnalyzeResult
+    result.value = r
+    toast.success(`analyze 完成: ${r.per_repo?.length ?? 0} 个仓库,共 ${r.report?.repos?.length ?? 0} 条 report`)
+  } catch (e: any) {
+    error.value = e.message || String(e)
+    toast.error(`analyze 失败: ${e.message || e}`)
+  } finally {
+    loading.value = false
+  }
 }
+
+onMounted(() => {
+  EventsOn('analyze:log', (line: string) => {
+    progressLog.value += line + '\n'
+  })
+})
+onUnmounted(() => {
+  EventsOff('analyze:log')
+})
 </script>
 
 <template>
@@ -130,19 +154,39 @@ async function runAnalyze() {
 
     <div v-if="error" class="banner red">{{ error }}</div>
 
+    <!-- 实时进度日志(analyze:log 事件) -->
+    <pre v-if="loading && progressLog" class="progress-log">{{ progressLog }}</pre>
+
     <!-- 分析结果 -->
     <div v-if="result" class="results">
       <div class="summary-bar">
-        <span class="tag blue">config_center: {{ result.config_center || '-' }}</span>
-        <span class="tag green">{{ result.repos?.length || 0 }} 个仓库</span>
+        <span class="tag blue">config_center: {{ result.report?.config_center || '-' }}</span>
+        <span class="tag green">{{ result.report?.repos?.length || 0 }} 个仓库有 findings</span>
+        <span class="tag gray">{{ result.per_repo?.length || 0 }} 个仓库处理过</span>
       </div>
 
-      <div v-for="repo in result.repos" :key="repo.name" class="card">
+      <!-- 每仓库状态摘要(per_repo) -->
+      <div v-if="result.per_repo?.length" class="per-repo-grid">
+        <div
+          v-for="rs in result.per_repo"
+          :key="rs.name"
+          class="repo-status"
+          :class="rs.status"
+        >
+          <span class="name">{{ rs.name }}</span>
+          <span class="status-tag">{{ rs.status }}</span>
+          <span v-if="rs.service_name_count" class="muted">{{ rs.service_name_count }} svc</span>
+          <span v-if="rs.finding_count" class="muted">{{ rs.finding_count }} findings</span>
+          <span v-if="rs.error" class="err">{{ rs.error }}</span>
+        </div>
+      </div>
+
+      <!-- 详细 findings(report.repos) -->
+      <div v-for="repo in result.report?.repos || []" :key="repo.name" class="card">
         <div class="card-header">
           <span class="name">{{ repo.name }}</span>
-          <span class="tag gray">{{ repo.stack }}</span>
+          <span v-if="repo.stack" class="tag gray">{{ repo.stack }}</span>
           <span v-if="repo.verified" class="tag green">verified</span>
-          <span v-if="repo.status" class="tag" :class="repo.status === 'analyzed' ? 'blue' : 'orange'">{{ repo.status }}</span>
         </div>
 
         <div v-if="repo.service_names?.length" class="detail">
@@ -272,4 +316,29 @@ textarea.err { border-color: #ef4444; }
 
 .detail.warn { color: #92400e; }
 .warn-line { font-size: 12px; padding: 2px 0; }
+
+/* 新增:实时进度日志 + 每仓库摘要 grid */
+.progress-log {
+  background: #0f172a; color: #e2e8f0; padding: 10px 12px; border-radius: 6px;
+  font-family: 'SFMono-Regular', Menlo, monospace; font-size: 11px;
+  max-height: 240px; overflow: auto; white-space: pre-wrap; word-break: break-all;
+  margin-top: 12px; border-left: 3px solid #22c55e;
+}
+.per-repo-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px; margin: 12px 0;
+}
+.repo-status {
+  display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+  padding: 6px 10px; border-radius: 4px; font-size: 12px;
+  background: #f8fafc; border: 1px solid #e2e8f0;
+}
+.repo-status .name { font-weight: 600; flex: 1; }
+.repo-status .status-tag { font-family: monospace; font-size: 10px; padding: 1px 6px; background: #e2e8f0; border-radius: 3px; }
+.repo-status .muted { color: #64748b; font-size: 11px; }
+.repo-status .err { color: #b91c1c; font-size: 11px; }
+.repo-status.analyzed { border-color: #86efac; }
+.repo-status.cloned-then-analyzed { border-color: #60a5fa; }
+.repo-status.skipped { opacity: 0.7; }
+.repo-status.clone-failed { background: #fef2f2; border-color: #fecaca; }
 </style>

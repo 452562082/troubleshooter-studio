@@ -147,8 +147,8 @@ async function apiCall(endpoint: 'validate' | 'plan' | 'gen', label: string) {
       spellcheck="false"
     />
 
-    <div v-if="successMsg" class="banner banner-success">{{ successMsg }}</div>
-    <div v-if="errorMsg" class="banner banner-error">{{ errorMsg }}</div>
+    <div v-if="successMsg" class="alert success">{{ successMsg }}</div>
+    <div v-if="errorMsg" class="alert error">{{ errorMsg }}</div>
 
     <!-- Plan result -->
     <div v-if="resultData && resultTitle === '生成计划'" class="result-card">
@@ -241,24 +241,6 @@ async function apiCall(endpoint: 'validate' | 'plan' | 'gen', label: string) {
 }
 .yaml-editor.has-error {
   border-color: #ef4444;
-}
-
-.banner {
-  margin-top: 12px;
-  padding: 10px 16px;
-  border-radius: 6px;
-  font-size: 14px;
-  font-weight: 500;
-}
-.banner-success {
-  background: #ecfdf5;
-  color: #065f46;
-  border: 1px solid #a7f3d0;
-}
-.banner-error {
-  background: #fef2f2;
-  color: #991b1b;
-  border: 1px solid #fecaca;
 }
 
 .result-card {

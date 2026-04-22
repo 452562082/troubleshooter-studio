@@ -166,7 +166,7 @@ async function runPlan() {
       </button>
     </div>
 
-    <div v-if="error" class="error-banner">{{ error }}</div>
+    <div v-if="error" class="alert error">{{ error }}</div>
 
     <div v-if="plan" class="results">
       <!-- System info -->
@@ -324,38 +324,7 @@ async function runPlan() {
 }
 .yaml-input:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.1); }
 
-.error-banner {
-  background: #fef2f2;
-  border: 1px solid #fecaca;
-  color: #dc2626;
-  padding: 10px 14px;
-  border-radius: 6px;
-  font-size: 14px;
-  margin-bottom: 20px;
-}
-
 .results { display: flex; flex-direction: column; gap: 16px; }
-
-.card {
-  background: #fff;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  padding: 16px 20px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
-}
-
-.card-title {
-  font-size: 15px;
-  font-weight: 600;
-  color: #1e293b;
-  margin-bottom: 12px;
-}
-.card-subtitle {
-  font-size: 13px;
-  font-weight: 400;
-  color: #94a3b8;
-  margin-left: 8px;
-}
 
 .info-row { display: flex; gap: 12px; margin-bottom: 6px; font-size: 14px; }
 .info-label { color: #64748b; min-width: 120px; }

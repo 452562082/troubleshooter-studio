@@ -155,7 +155,7 @@ async function runDiff() {
     </div>
 
     <!-- API not ready placeholder -->
-    <div v-if="apiNotReady" class="placeholder-banner">
+    <div v-if="apiNotReady" class="alert info">
       <span class="placeholder-icon">&#x1F6A7;</span>
       <div>
         <div class="placeholder-title">API 开发中</div>
@@ -164,7 +164,7 @@ async function runDiff() {
     </div>
 
     <!-- Error -->
-    <div v-if="error && !apiNotReady" class="error-banner">{{ error }}</div>
+    <div v-if="error && !apiNotReady" class="alert error">{{ error }}</div>
 
     <!-- Preview: show sample layout when API not ready or when we have results -->
     <div v-if="apiNotReady" class="results preview-mode">
@@ -326,46 +326,8 @@ async function runDiff() {
 }
 .text-input:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.1); }
 
-.error-banner {
-  background: #fef2f2;
-  border: 1px solid #fecaca;
-  color: #dc2626;
-  padding: 10px 14px;
-  border-radius: 6px;
-  font-size: 14px;
-  margin-bottom: 20px;
-}
-
-.placeholder-banner {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  background: #fffbeb;
-  border: 1px solid #fde68a;
-  padding: 16px 20px;
-  border-radius: 8px;
-  margin-bottom: 20px;
-}
-.placeholder-icon { font-size: 28px; }
-.placeholder-title { font-size: 15px; font-weight: 600; color: #92400e; }
-.placeholder-desc { font-size: 13px; color: #a16207; margin-top: 2px; }
-
 .results { display: flex; flex-direction: column; gap: 16px; }
 .preview-mode { opacity: 0.75; }
-
-.card {
-  background: #fff;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  padding: 16px 20px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
-}
-.card-title {
-  font-size: 15px;
-  font-weight: 600;
-  color: #1e293b;
-  margin-bottom: 12px;
-}
 
 .file-change {
   display: flex;

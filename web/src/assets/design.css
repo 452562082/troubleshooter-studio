@@ -183,11 +183,15 @@
 
 /* ── 提示 / 错误 banner ────────────────────────────── */
 .alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
   padding: 10px var(--sp-3);
   border-radius: var(--r-md);
   font-size: var(--fs-base);
-  margin-bottom: var(--sp-4);
+  margin: var(--sp-3) 0;
   line-height: 1.5;
+  word-break: break-word;
 }
 .alert.error {
   background: var(--c-danger-bg);
@@ -203,6 +207,41 @@
   background: var(--c-success-bg);
   border: 1px solid var(--c-success-border);
   color: var(--c-success);
+}
+.alert.warn {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  color: var(--c-warn);
+}
+
+/* ── Card:信息容器(非可点击) ────────────────────────── */
+.card {
+  background: var(--c-surf);
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-lg);
+  padding: var(--sp-4) var(--sp-5);
+  margin-bottom: var(--sp-3);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+.card-title {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--c-ink);
+  margin-bottom: var(--sp-2);
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+.card-subtitle {
+  font-size: var(--fs-sm);
+  color: var(--c-muted);
+  font-weight: 400;
+}
+/* Card 大尺寸变体:InitPage 向导步骤用 */
+.card.lg {
+  padding: 28px;
+  border-radius: 10px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 
 /* ── 基本代码样式 ─────────────────────────────────── */

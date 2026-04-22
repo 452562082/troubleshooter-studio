@@ -169,7 +169,7 @@ function severityIcon(s: string) {
       {{ loading ? '诊断中...' : '运行诊断' }}
     </button>
 
-    <div v-if="errorMsg" class="banner banner-error">{{ errorMsg }}</div>
+    <div v-if="errorMsg" class="alert error">{{ errorMsg }}</div>
 
     <div v-if="loading" class="loading-bar">
       <div class="loading-track"><div class="loading-fill" /></div>
@@ -183,7 +183,7 @@ function severityIcon(s: string) {
         <span class="summary-badge badge-blue">{{ counts.infos }} 个提示</span>
       </div>
 
-      <div v-if="issues.length === 0" class="banner banner-success">
+      <div v-if="issues.length === 0" class="alert success">
         未发现问题，系统配置正常！
       </div>
 
@@ -255,24 +255,6 @@ function severityIcon(s: string) {
 }
 .text-input:focus {
   border-color: #3b82f6;
-}
-
-.banner {
-  margin-top: 16px;
-  padding: 10px 16px;
-  border-radius: 6px;
-  font-size: 14px;
-  font-weight: 500;
-}
-.banner-success {
-  background: #ecfdf5;
-  color: #065f46;
-  border: 1px solid #a7f3d0;
-}
-.banner-error {
-  background: #fef2f2;
-  color: #991b1b;
-  border: 1px solid #fecaca;
 }
 
 .loading-bar {

@@ -152,7 +152,7 @@ onUnmounted(() => {
       {{ loading ? '分析中...' : '运行分析' }}
     </button>
 
-    <div v-if="error" class="banner red">{{ error }}</div>
+    <div v-if="error" class="alert error">{{ error }}</div>
 
     <!-- 实时进度日志(analyze:log 事件) -->
     <pre v-if="loading && progressLog" class="progress-log">{{ progressLog }}</pre>
@@ -251,7 +251,6 @@ textarea.err { border-color: #ef4444; }
 
 /* banner 用旧 class 名,但样式等价于 .alert.error;保留 class 避免改 template */
 .banner { margin-top: var(--sp-3); padding: 10px var(--sp-3); border-radius: var(--r-md); font-size: var(--fs-base); }
-.banner.red { background: var(--c-danger-bg); border: 1px solid var(--c-danger-border); color: var(--c-danger); }
 
 .results { margin-top: var(--sp-5); }
 .summary-bar { display: flex; gap: var(--sp-2); margin-bottom: var(--sp-4); }
@@ -264,10 +263,6 @@ textarea.err { border-color: #ef4444; }
 .tag.orange { background: #fef3c7; color: #92400e; }
 .tag.gray { background: #f1f5f9; color: #475569; }
 
-.card {
-  background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px 18px; margin-bottom: 12px;
-}
-.card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .name { font-weight: 700; color: #1e293b; font-size: 15px; }
 
 .detail { margin-bottom: 8px; font-size: 13px; color: #475569; }

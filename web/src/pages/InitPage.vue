@@ -735,7 +735,7 @@ const configTypeDescriptions: Record<string, string> = {
     </div>
 
     <!-- Step 1 -->
-    <div v-if="currentStep === 1" class="card">
+    <div v-if="currentStep === 1" class="card lg">
       <h2>系统基本信息</h2>
       <div class="form-group">
         <label>系统 ID <span class="required">*</span>
@@ -766,7 +766,7 @@ const configTypeDescriptions: Record<string, string> = {
     </div>
 
     <!-- Step 2 -->
-    <div v-if="currentStep === 2" class="card">
+    <div v-if="currentStep === 2" class="card lg">
       <h2>机器人身份</h2>
       <div class="form-group">
         <label>机器人名称 <span class="required">*</span></label>
@@ -810,7 +810,7 @@ const configTypeDescriptions: Record<string, string> = {
     </div>
 
     <!-- Step 3 -->
-    <div v-if="currentStep === 3" class="card">
+    <div v-if="currentStep === 3" class="card lg">
       <h2>环境列表</h2>
       <p class="help-text">常见环境：dev（开发）、test（测试）、staging（预发布）、prod（生产）</p>
       <div v-for="(env, i) in environments" :key="i" class="dynamic-row">
@@ -851,7 +851,7 @@ const configTypeDescriptions: Record<string, string> = {
     </div>
 
     <!-- Step 4 -->
-    <div v-if="currentStep === 4" class="card">
+    <div v-if="currentStep === 4" class="card lg">
       <h2>代码仓库</h2>
       <p class="help-text">每个仓库对应一个代码仓库。role 描述角色（backend=后端、frontend=前端、gateway=网关/BFF）</p>
       <div v-for="(repo, i) in repos" :key="i" class="repo-block">
@@ -923,7 +923,7 @@ const configTypeDescriptions: Record<string, string> = {
     </div>
 
     <!-- Step 5 -->
-    <div v-if="currentStep === 5" class="card">
+    <div v-if="currentStep === 5" class="card lg">
       <h2>配置源</h2>
       <div class="form-group">
         <label>配置中心类型</label>
@@ -940,7 +940,7 @@ const configTypeDescriptions: Record<string, string> = {
     </div>
 
     <!-- Step 6 -->
-    <div v-if="currentStep === 6" class="card">
+    <div v-if="currentStep === 6" class="card lg">
       <h2>可观测性 + 数据层</h2>
       <h3>可观测性组件</h3>
       <div class="checkbox-grid">
@@ -959,7 +959,7 @@ const configTypeDescriptions: Record<string, string> = {
     </div>
 
     <!-- Step 7 -->
-    <div v-if="currentStep === 7" class="card">
+    <div v-if="currentStep === 7" class="card lg">
       <h2>预览 + 生成</h2>
       <h3 style="margin-top:0">输出目标（勾选要产出的部署形态）</h3>
       <p class="help-text">默认全部 4 种；运行 <code>tshoot gen</code> 时会一次性生成 <code>&lt;output_dir&gt;-&lt;target&gt;/</code> 兄弟目录。</p>
@@ -1185,24 +1185,6 @@ const configTypeDescriptions: Record<string, string> = {
   padding: 28px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
   margin-bottom: 20px;
-}
-
-.card h2 {
-  font-size: 18px;
-  color: #1e293b;
-  margin-bottom: 20px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid #f1f5f9;
-}
-
-.card h3 {
-  font-size: 15px;
-  color: #334155;
-  margin: 20px 0 12px;
-}
-
-.card h3:first-of-type {
-  margin-top: 0;
 }
 
 /* ── Form elements ── */

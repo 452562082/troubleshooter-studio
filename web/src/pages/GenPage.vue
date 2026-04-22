@@ -140,14 +140,14 @@ async function runGen() {
     </div>
 
     <!-- Error state -->
-    <div v-if="error" class="error-banner">
+    <div v-if="error" class="alert error">
       <span class="error-icon">&#x2716;</span>
       <span>{{ error }}</span>
     </div>
 
     <!-- Success state -->
     <div v-if="summary" class="results">
-      <div class="success-banner">
+      <div class="alert success">
         <span class="success-icon">&#x2714;</span>
         <div>
           <div class="success-title">生成成功</div>
@@ -225,39 +225,7 @@ async function runGen() {
 }
 .yaml-input:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,0.1); }
 
-.error-banner {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  background: #fef2f2;
-  border: 1px solid #fecaca;
-  color: #dc2626;
-  padding: 12px 16px;
-  border-radius: 8px;
-  font-size: 14px;
-  margin-bottom: 20px;
-}
-.error-icon { font-size: 18px; }
-
 .results { display: flex; flex-direction: column; gap: 20px; }
-
-.success-banner {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  background: #f0fdf4;
-  border: 1px solid #bbf7d0;
-  padding: 16px 20px;
-  border-radius: 8px;
-}
-.success-icon { font-size: 28px; color: #16a34a; }
-.success-title { font-size: 16px; font-weight: 600; color: #166534; }
-.success-path {
-  font-size: 13px;
-  color: #4ade80;
-  margin-top: 4px;
-  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
-}
 
 .sys-info { display: flex; gap: 10px; }
 .sys-chip {

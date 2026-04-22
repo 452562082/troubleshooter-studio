@@ -72,7 +72,7 @@ const nextStep = computed(() => {
 <template>
   <div class="home-page">
     <div class="hero">
-      <h1>Troubleshooter Studio</h1>
+      <h1>AI 排障机器人工作台</h1>
       <p class="tagline">AI 排障机器人工作台：为你的业务系统建模 → 生成 → 一键部署 → 后续管理。4 种 AI 平台（OpenClaw / Claude Code / Cursor / Standalone），一份 system.yaml 全覆盖。</p>
     </div>
 
@@ -89,15 +89,15 @@ const nextStep = computed(() => {
     <!-- 能力概览 -->
     <h2 class="section-title">工作流</h2>
     <p class="section-hint">典型顺序：创建 → 编辑 → 分析（可选）→ 预览 → 生成并部署 → 健康检查。每个页面都可独立使用。</p>
-    <div class="card-grid">
-      <div v-for="(c, i) in cards" :key="c.path" class="card" @click="router.push(c.path)">
-        <div class="card-head">
-          <span class="card-idx">{{ i + 1 }}</span>
-          <span class="card-icon">{{ c.icon }}</span>
-          <span class="card-label">{{ c.label }}</span>
-          <span v-if="c.tag" class="card-tag">{{ c.tag }}</span>
+    <div class="nav-card-grid">
+      <div v-for="(c, i) in cards" :key="c.path" class="nav-card" @click="router.push(c.path)">
+        <div class="nav-card-head">
+          <span class="nav-card-idx">{{ i + 1 }}</span>
+          <span class="nav-card-icon">{{ c.icon }}</span>
+          <span class="nav-card-label">{{ c.label }}</span>
+          <span v-if="c.tag" class="nav-card-tag">{{ c.tag }}</span>
         </div>
-        <div class="card-desc">{{ c.desc }}</div>
+        <div class="nav-card-desc">{{ c.desc }}</div>
       </div>
     </div>
 
@@ -163,23 +163,23 @@ const nextStep = computed(() => {
 .section-hint { color: var(--c-muted); font-size: var(--fs-base); margin-bottom: var(--sp-3); }
 
 /* 工作流卡片网格 */
-.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--sp-3); margin-bottom: 32px; }
-.card {
+.nav-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--sp-3); margin-bottom: 32px; }
+.nav-card {
   border: 1px solid var(--c-line); border-radius: var(--r-lg); padding: var(--sp-3) var(--sp-4);
   background: var(--c-surf); cursor: pointer; transition: all 0.15s;
   display: flex; flex-direction: column; gap: 6px;
 }
-.card:hover { border-color: var(--c-accent); box-shadow: 0 2px 6px rgba(59,130,246,0.1); transform: translateY(-1px); }
-.card-head { display: flex; align-items: center; gap: var(--sp-2); }
-.card-idx {
+.nav-card:hover { border-color: var(--c-accent); box-shadow: 0 2px 6px rgba(59,130,246,0.1); transform: translateY(-1px); }
+.nav-card-head { display: flex; align-items: center; gap: var(--sp-2); }
+.nav-card-idx {
   width: 20px; height: 20px; border-radius: 50%;
   background: var(--c-line); color: #475569; font-size: var(--fs-xs); font-weight: 700;
   display: flex; align-items: center; justify-content: center; flex-shrink: 0;
 }
-.card-icon { font-size: var(--fs-lg); }
-.card-label { font-weight: 600; color: var(--c-ink); font-size: var(--fs-md); flex: 1; }
-.card-tag { font-size: 10px; font-weight: 700; color: var(--c-ink); background: #f59e0b; padding: 2px 7px; border-radius: var(--r-lg); }
-.card-desc { color: var(--c-muted); font-size: var(--fs-sm); line-height: 1.55; }
+.nav-card-icon { font-size: var(--fs-lg); }
+.nav-card-label { font-weight: 600; color: var(--c-ink); font-size: var(--fs-md); flex: 1; }
+.nav-card-tag { font-size: 10px; font-weight: 700; color: var(--c-ink); background: #f59e0b; padding: 2px 7px; border-radius: var(--r-lg); }
+.nav-card-desc { color: var(--c-muted); font-size: var(--fs-sm); line-height: 1.55; }
 
 /* info cards */
 .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-4); margin-bottom: 32px; }

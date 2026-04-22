@@ -248,7 +248,18 @@ onUnmounted(() => {
 .label-row-actions { display: flex; gap: 6px; }
 .form-section { margin-bottom: var(--sp-4); }
 .label-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-.label-row label { font-weight: 600; color: var(--c-text); font-size: var(--fs-md); }
+/* 必须用 `>`(直接子)而非后代选择器:
+ * 结构是
+ *   .label-row
+ *     <label>system.yaml</label>           ← 表单 label,要 600 粗 + 14px
+ *     .label-row-actions
+ *       <label class="btn small">加载文件  ← 这也是 label,但走按钮样式
+ *       <button class="btn small">加载示例
+ * `.label-row label`(后代)会把里面的 <label class="btn small"> 也抓上,
+ * 按 CSS 特异性它 (0,1,1) 赢过 .btn (0,1,0) 的 font-weight:500,结果"加载
+ * 文件"变 600 粗,"加载示例"还是 500 —— 两个按钮字形看起来就不一样了。
+ * 用 `>` 只命中直接子 label,不泄漏到 .label-row-actions 里的 .btn。 */
+.label-row > label { font-weight: 600; color: var(--c-text); font-size: var(--fs-md); }
 /* 文件 input 用 <label class="btn small"> 当触发器,需要 overflow/display 让嵌套 input hidden 不影响布局 */
 label.btn { cursor: pointer; }
 

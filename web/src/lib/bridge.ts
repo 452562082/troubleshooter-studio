@@ -59,7 +59,9 @@ export async function gen(yamlText: string, outputDir = ''): Promise<GenSummary>
 export async function discoverBots(extraRoots: string[] = []): Promise<DiscoveredBot[]> {
   const app = desktopApp()
   if (!app) return []
-  return app.DiscoverBots(extraRoots)
+  // Go 端 nil slice 会被 JSON 编成 null；强制兜成数组
+  const r = await app.DiscoverBots(extraRoots)
+  return Array.isArray(r) ? r : []
 }
 
 /** ApplyBot 把新 yaml 应用到已装机器人的活 workspace（含 preserve 保留用户手改） */

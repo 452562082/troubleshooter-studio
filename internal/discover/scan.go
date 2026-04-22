@@ -20,7 +20,9 @@ import (
 // 返回结果按 Meta.SystemID 稳定排序。
 func Scan(roots []string) ([]DiscoveredAgent, error) {
 	seen := map[string]bool{} // systemID|target → 去重 key
-	var out []DiscoveredAgent
+	// 初始化成空切片(不是 nil),确保 JSON 编码出 [] 而不是 null。
+	// 否则前端 `bots.value = await DiscoverBots()` 会拿到 null,后续 .length 访问崩溃。
+	out := []DiscoveredAgent{}
 
 	for _, root := range roots {
 		root = expandHome(root)

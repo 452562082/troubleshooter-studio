@@ -1,0 +1,115 @@
+# GitLab CI 等价于 .github/workflows/ci.yml,主要 gitlab 实例跑这份。
+# 三个 job:
+#   go      — go vet / fmt / mod tidy / test -race -cover         (Docker)
+#   web     — npm ci + vue-tsc --noEmit + vite build               (Docker)
+#   desktop — make desktop-app 校验 Wails + .app 打包链            (需要 macos runner)
+#
+# desktop job 需要一台带 `macos` tag 的 gitlab-runner;公司内部如果没有,
+# 当前是 allow_failure: true + when: manual,手动触发且失败不阻塞主 pipeline,
+# 有 runner 后可以改成自动跑 + strict。
+
+stages:
+  - test
+  - build
+
+variables:
+  # 缓存到 project 下让 gitlab 的 cache: 抓得到
+  GOCACHE: "$CI_PROJECT_DIR/.cache/go-build"
+  GOMODCACHE: "$CI_PROJECT_DIR/.cache/go-mod"
+  # Vite 在 CI 环境不要尝试打开浏览器 / 色彩输出
+  CI: "true"
+  FORCE_COLOR: "0"
+
+# ── Go:vet / fmt / mod tidy / build / test + 覆盖率 ─────────────────────
+go:
+  stage: test
+  image: golang:1.25
+  cache:
+    key:
+      files:
+        - go.sum
+    paths:
+      - .cache/go-build
+      - .cache/go-mod
+  script:
+    - go vet ./...
+    - |
+      out=$(gofmt -l .)
+      if [ -n "$out" ]; then
+        echo "unformatted files detected:"
+        echo "$out"
+        echo ""
+        echo "请在本地运行: gofmt -w ."
+        exit 1
+      fi
+    - |
+      go mod tidy
+      if ! git diff --exit-code go.mod go.sum; then
+        echo "go.mod/go.sum 与源码不一致,请在本地运行: go mod tidy"
+        exit 1
+      fi
+    - go build ./...
+    - go test -race -cover -coverprofile=coverage.out ./...
+    - go tool cover -func=coverage.out | tail -1
+  # 覆盖率 % 抽到 GitLab UI 显示(总覆盖率那行是 "total: (statements) XX.X%")
+  coverage: '/total:\s+\(statements\)\s+(\d+\.\d+)%/'
+  artifacts:
+    when: always
+    paths:
+      - coverage.out
+    expire_in: 1 week
+
+# ── Web:vue-tsc 类型检查 + vite 产物构建 ─────────────────────────────────
+web:
+  stage: test
+  image: node:20
+  cache:
+    key:
+      files:
+        - web/package-lock.json
+    paths:
+      - web/node_modules
+  script:
+    - cd web
+    - npm ci --prefer-offline --no-audit --no-fund
+    # npm run build 实际跑 vue-tsc --noEmit && vite build
+    # 类型检查 + 产物构建一把,能抓类型漂移 + rollup 打包失败
+    - npm run build
+  artifacts:
+    when: on_success
+    paths:
+      - web/dist
+    expire_in: 1 week
+
+# ── Desktop:macOS .app 打包 ──────────────────────────────────────────────
+# 需要打了 `macos` tag 的 gitlab-runner(shared runner 默认没有,需要私有部署)。
+# 没 runner 时 allow_failure + when: manual 让它不阻塞主 pipeline。
+desktop:
+  stage: build
+  tags:
+    - macos
+  rules:
+    # merge request 上手动触发一次,main push 自动触发
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: manual
+      allow_failure: true
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual # 没 runner 时改 on_success 时需要手动触发,有 runner 可以去掉这行
+      allow_failure: true
+  # macos runner 要预装 Xcode Command Line Tools + Go + Node。
+  # Wails cgo 链接需要 UniformTypeIdentifiers.framework,Makefile 里已经硬编码 CGO_LDFLAGS。
+  script:
+    - go version
+    - node --version
+    - make desktop-app
+    # 校验 .app bundle 三件套(可执行二进制 / Info.plist / icon.icns)
+    - test -f dist/TroubleshooterStudio.app/Contents/MacOS/TroubleshooterStudio
+    - test -f dist/TroubleshooterStudio.app/Contents/Info.plist
+    - test -f dist/TroubleshooterStudio.app/Contents/Resources/icon.icns
+    - file dist/TroubleshooterStudio.app/Contents/MacOS/TroubleshooterStudio
+    - echo "✓ .app bundle structure OK"
+  artifacts:
+    when: on_success
+    paths:
+      - dist/TroubleshooterStudio.app
+    expire_in: 1 week

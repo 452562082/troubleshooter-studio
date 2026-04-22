@@ -181,7 +181,7 @@ standalone 模式不依赖任何 AI 平台——只需一个 LLM API key（Claud
 
 `standalone/index.html` 是 tshoot 唯一直接管到 UI 层的部署形态，自带这些体验：
 
-- **SSE 流式输出** — 后端 `server.py` 用 `anthropic.messages.stream` 逐 token 推送，前端边收边渲染
+- **SSE 流式输出** — 后端 `server.py` 走 OpenAI 兼容 `/chat/completions` stream 逐 token 推送（支持 Anthropic / OpenAI / DeepSeek / Qwen / MiniMax / Moonshot / 智谱 / Ollama 8 家，按 `agent.model` 前缀路由），前端边收边渲染
 - **Markdown 渲染** — 无外部依赖的最小 parser：代码块（带「复制」按钮）/ inline code / bold / 有序无序列表 / 链接 / heading；XSS 已转义
 - **对话历史持久化** — `localStorage` 按 `system.id` 分 key 保存 messages；刷新 / 关闭浏览器再打开不丢
 - **流式中止** — 发送按钮在流式期间变红色「停止」，点击调 `AbortController.abort()`，已收到的内容保留并标记 `_[已停止]_`

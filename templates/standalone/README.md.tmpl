@@ -1,14 +1,36 @@
 # {{ .System.Name }} 排障机器人（独立部署版）
 
 由 troubleshooter-studio 生成。不依赖 OpenClaw / Claude Code / Cursor，只需一个 LLM API key。
+支持 **8 个 LLM provider**（走 OpenAI 兼容协议）：Anthropic / OpenAI / DeepSeek / Qwen / MiniMax / Moonshot / 智谱 / Ollama。
 
 ## 快速启动（本机 venv，一键）
 
 ```bash
-bash install.sh                         # 自动建 venv + pip install
-export LLM_API_KEY=your-anthropic-api-key
+bash install.sh                         # 自动建 venv + pip install (flask + openai)
+export LLM_API_KEY=your-key             # 对应 model 前缀 provider 的 key
 source .venv/bin/activate && python3 server.py
 # → http://localhost:3000
+```
+
+model 在 `system.yaml` 的 `agent.model` 设置，前缀决定 provider：
+
+```yaml
+agent:
+  model: anthropic/claude-sonnet-4-6   # Anthropic
+  # model: openai/gpt-4o                # OpenAI
+  # model: deepseek/deepseek-chat       # DeepSeek
+  # model: qwen/qwen-max                # 通义千问
+  # model: minimax/abab6.5s-chat        # MiniMax
+  # model: moonshot/moonshot-v1-8k      # Kimi
+  # model: zhipu/glm-4                  # 智谱
+  # model: ollama/llama3.1              # 本地 Ollama
+```
+
+也可运行时用环境变量覆盖：
+
+```bash
+export LLM_MODEL=minimax/abab6.5s-chat    # 覆盖 agent.model
+export LLM_BASE_URL=https://your-gateway  # 覆盖 provider endpoint（企业内网关用）
 ```
 
 ## Docker 部署（一键）
@@ -23,9 +45,9 @@ LLM_API_KEY=your-key docker compose up --build
 - system-prompt.md — LLM 的 system prompt（排障知识合并）
 - skills/ — 路由映射表 + 各 skill 的 SKILL.md
 - scripts/ — 辅助脚本（resolve_runtime 等）
-- server.py — Flask 聊天服务（调 Claude API）
+- server.py — Flask 聊天服务（走 OpenAI 兼容 /chat/completions SSE 流式）
 - index.html — 聊天前端
-- requirements.txt — Python 依赖清单
+- requirements.txt — Python 依赖清单（flask + openai）
 - Dockerfile — 容器镜像定义
 - docker-compose.yaml — 容器化部署
 - install.sh — 本机一键安装脚本

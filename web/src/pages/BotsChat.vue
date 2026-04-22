@@ -1,5 +1,6 @@
 <script setup lang="ts">
-// 桌面端原生 chat:Studio 自己拿 Anthropic SDK 跟模型对话,无 Flask、无 iframe、
+// 桌面端原生 chat:Studio 自己用 OpenAI 兼容协议跟多 provider(Anthropic/OpenAI/
+// DeepSeek/Qwen/MiniMax/Moonshot/智谱/Ollama)流式对话,无 Flask、无 iframe、
 // 无 localhost 端口。token delta 通过 Wails event 回流,UI 跟其他页面同一壳。
 //
 // 状态机:

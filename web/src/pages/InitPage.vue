@@ -305,7 +305,7 @@ const targetDescriptions: Record<string, string> = {
   'openclaw': 'OpenClaw 安装包（bash install.sh 部署）',
   'claude-code': 'Claude Code（CLAUDE.md + skills/ 放到项目根即用）',
   'cursor': 'Cursor IDE（.cursorrules + .cursor/rules/）',
-  'standalone': '桌面端内嵌对话(Go 直连 Anthropic);也支持独立 server.py + docker 部署',
+  'standalone': '桌面端内嵌对话(直连 LLM,8 个 provider 通吃);也支持独立 server.py + docker 部署',
 }
 const enabledTargets = reactive<Record<string, boolean>>({
   ...Object.fromEntries(targetOptions.map(k => [k, true])),
@@ -841,7 +841,7 @@ const deployTargetHint = computed(() => {
     case 'openclaw': return 'Studio 托管产物(→ install.sh 装到 ~/.openclaw/workspace/<workspace_name>/)'
     case 'claude-code': return '装到项目根:会写 CLAUDE.md + skills/ + install.sh'
     case 'cursor': return '装到项目根:会写 .cursorrules + .cursor/rules/ + skills/'
-    case 'standalone': return 'Studio 托管产物;对话直接在工作台内开(Go 直连 Anthropic)'
+    case 'standalone': return 'Studio 托管产物;对话直接在工作台内开(直连 model 对应 provider 的 LLM API)'
   }
   return ''
 })

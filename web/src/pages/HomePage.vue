@@ -129,7 +129,7 @@ const nextStep = computed(() => {
           <li><code>openclaw</code> — Studio 托管产物,bash install.sh 装到 <code>~/.openclaw/workspace/</code></li>
           <li><code>claude-code</code> — 装到项目根:CLAUDE.md + skills/(Claude Code CLI 自动读)</li>
           <li><code>cursor</code> — 装到项目根:.cursorrules + .cursor/rules/(Cursor IDE 自动读)</li>
-          <li><code>standalone</code> — 桌面端内嵌对话(Go 直连 Anthropic);也支持独立部署(server.py + Docker)</li>
+          <li><code>standalone</code> — 桌面端内嵌对话(直连 LLM,支持 Anthropic/OpenAI/DeepSeek/Qwen/MiniMax/Moonshot/智谱/Ollama 等);也支持独立部署(server.py + Docker)</li>
         </ul>
       </div>
       <div class="info-card">

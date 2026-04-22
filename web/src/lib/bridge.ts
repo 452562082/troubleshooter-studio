@@ -175,7 +175,7 @@ export async function cancelInstall(): Promise<boolean> {
   return App.CancelInstall()
 }
 
-// ── 原生 chat(桌面端直接跟 Anthropic 流式对话,不经 Flask) ─────────────
+// ── 原生 chat(桌面端直接跟多 provider LLM 流式对话,不经 Flask) ─────────────
 
 export interface ChatMessage {
   role: 'user' | 'assistant'

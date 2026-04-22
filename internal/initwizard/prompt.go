@@ -118,12 +118,15 @@ func (w *Wizard) section(title string) {
 
 // modelPresets 是推荐的 model id 列表，按提供商分组展示。
 // 选择编号 = 用对应 value；回车 = 默认；输入任意字符串 = 自定义（老用户 / 企业网关）。
+// 预设跟 web/src/pages/InitPage.vue 的 modelGroups 对齐(要改同步改),provider 列表
+// 跟 internal/llmchat/providers.go 一致。4 种 target 都走 OpenAI 兼容协议 + base_url
+// 切换,所有 provider 都能直连,没有"standalone 回落到 Claude"这种局限。
 var modelPresets = []struct {
 	group string
 	items []struct{ value, desc string }
 }{
 	{
-		group: "Anthropic（4 种 target 都支持）",
+		group: "Anthropic (Claude 系列)",
 		items: []struct{ value, desc string }{
 			{"anthropic/claude-opus-4-7", "Claude Opus 4.7 — 最强、偏贵"},
 			{"anthropic/claude-sonnet-4-6", "Claude Sonnet 4.6 — 默认推荐"},
@@ -131,7 +134,7 @@ var modelPresets = []struct {
 		},
 	},
 	{
-		group: "OpenAI（openclaw 直用；standalone 会回落到 Claude Sonnet 4.6）",
+		group: "OpenAI",
 		items: []struct{ value, desc string }{
 			{"openai/gpt-5-codex", "GPT-5 Codex"},
 			{"openai/gpt-4o", "GPT-4o"},
@@ -139,10 +142,25 @@ var modelPresets = []struct {
 		},
 	},
 	{
-		group: "国内",
+		group: "国产大模型",
 		items: []struct{ value, desc string }{
-			{"qwen/qwen3-max", "通义千问 Qwen3 Max"},
-			{"deepseek/deepseek-v3", "DeepSeek V3"},
+			{"deepseek/deepseek-chat", "DeepSeek Chat"},
+			{"deepseek/deepseek-reasoner", "DeepSeek Reasoner (推理)"},
+			{"qwen/qwen-max", "通义千问 Qwen Max"},
+			{"qwen/qwen-plus", "通义千问 Qwen Plus"},
+			{"minimax/abab6.5s-chat", "MiniMax abab6.5s"},
+			{"minimax/abab6.5-chat", "MiniMax abab6.5 (长上下文)"},
+			{"moonshot/moonshot-v1-8k", "Moonshot Kimi v1-8k"},
+			{"moonshot/moonshot-v1-128k", "Moonshot Kimi v1-128k"},
+			{"zhipu/glm-4", "智谱 GLM-4"},
+			{"zhipu/glm-4-plus", "智谱 GLM-4 Plus"},
+		},
+	},
+	{
+		group: "本地 / 自部署",
+		items: []struct{ value, desc string }{
+			{"ollama/llama3.1", "Ollama llama3.1 (本地)"},
+			{"ollama/qwen2.5", "Ollama qwen2.5 (本地)"},
 		},
 	},
 }

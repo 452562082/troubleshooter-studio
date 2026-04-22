@@ -109,7 +109,7 @@ const nextStep = computed(() => {
 
     <!-- 高级 / 诊断:折叠入口弱化,避免跟主路径抢视觉焦点 -->
     <h2 class="section-title secondary">高级 · 诊断</h2>
-    <p class="section-hint">可选工具:仓库扫描补全 yaml(也集成在 InitPage 第 4 步)、doctor 检测声明漂移。</p>
+    <p class="section-hint">可选工具:YAML 调试器(粘贴 yaml 验证+plan)、仓库扫描补全 yaml(也集成在创建向导第 4 步)。Doctor 诊断已合进「已装机器人」每张卡片,点卡片上的 🩺 诊断按钮即可。</p>
     <div class="nav-card-grid compact">
       <div v-for="c in advancedCards" :key="c.path" class="nav-card advanced" @click="router.push(c.path)">
         <div class="nav-card-head">

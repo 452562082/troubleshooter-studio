@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, reactive } from 'vue'
+import { ref, computed, onMounted, reactive } from 'vue'
 import type { ApplyResult, DiscoveredBot } from '../types/wails'
 import {
   applyBot,
@@ -161,6 +161,48 @@ const installPrompts = ref<InstallPrompt[]>([])
 const installCreds = ref<Record<string, string>>({})
 const installLog = ref('')
 const installOK = ref<boolean | null>(null)
+
+// 按变量名前缀分组,让 25 字段不至于一次铺平眼花。每组顺序固定,
+// 未命中的"其他"垫底。分组 key 直接作为折叠面板标题。
+const GROUP_ORDER = [
+  '配置中心',
+  'Grafana',
+  'Jaeger',
+  'Prometheus',
+  'Loki',
+  'ELK',
+  '消息平台',
+  'MCP',
+  '其他',
+] as const
+
+function classifyPrompt(name: string): string {
+  if (name.startsWith('CC_') || name.startsWith('CONFIG_CENTER_')) return '配置中心'
+  if (name.startsWith('GRAFANA_')) return 'Grafana'
+  if (name.startsWith('JAEGER_')) return 'Jaeger'
+  if (name.startsWith('PROMETHEUS_')) return 'Prometheus'
+  if (name.startsWith('LOKI_')) return 'Loki'
+  if (name.startsWith('KIBANA_') || name.startsWith('ELK_') || name.startsWith('ES_')) return 'ELK'
+  if (name.startsWith('MESSAGING_')) return '消息平台'
+  if (name.startsWith('MCP_')) return 'MCP'
+  return '其他'
+}
+
+const groupedPrompts = computed<{ group: string; prompts: InstallPrompt[] }[]>(() => {
+  const buckets: Record<string, InstallPrompt[]> = {}
+  for (const p of installPrompts.value) {
+    const g = classifyPrompt(p.name)
+    ;(buckets[g] ||= []).push(p)
+  }
+  return GROUP_ORDER.filter((g) => buckets[g]?.length).map((g) => ({
+    group: g,
+    prompts: buckets[g]!,
+  }))
+})
+
+function filledCount(prompts: InstallPrompt[]): number {
+  return prompts.filter((p) => (installCreds.value[p.name] ?? '').trim() !== '').length
+}
 
 async function pickYAML() {
   importError.value = null
@@ -327,20 +369,36 @@ onMounted(scan)
           产物已写到 <code>{{ importedOutputDir }}</code>。
           install.sh 不需要凭证（{{ importTarget === 'standalone' ? 'venv 设置 + pip install' : '纯文件安装' }}），点下面按钮直接安装。
         </p>
-        <div v-if="installPrompts.length > 0" class="creds-grid">
-          <div v-for="p in installPrompts" :key="p.name" class="cred-field">
-            <label :for="'cred-' + p.name">
-              {{ p.name }}
-              <span v-if="p.secret" class="secret-mark">*</span>
-            </label>
-            <input
-              :id="'cred-' + p.name"
-              v-model="installCreds[p.name]"
-              :type="p.secret ? 'password' : 'text'"
-              :placeholder="p.prompt"
-              :disabled="importStage === 'installing'"
-            />
-          </div>
+        <div v-if="installPrompts.length > 0" class="cred-groups">
+          <details
+            v-for="grp in groupedPrompts"
+            :key="grp.group"
+            class="cred-group"
+            open
+          >
+            <summary>
+              <span class="cred-group-name">{{ grp.group }}</span>
+              <span
+                class="cred-group-count"
+                :class="{ complete: filledCount(grp.prompts) === grp.prompts.length }"
+              >{{ filledCount(grp.prompts) }} / {{ grp.prompts.length }} 已填</span>
+            </summary>
+            <div class="creds-grid">
+              <div v-for="p in grp.prompts" :key="p.name" class="cred-field">
+                <label :for="'cred-' + p.name">
+                  {{ p.name }}
+                  <span v-if="p.secret" class="secret-mark">*</span>
+                </label>
+                <input
+                  :id="'cred-' + p.name"
+                  v-model="installCreds[p.name]"
+                  :type="p.secret ? 'password' : 'text'"
+                  :placeholder="p.prompt"
+                  :disabled="importStage === 'installing'"
+                />
+              </div>
+            </div>
+          </details>
         </div>
         <div class="deploy-actions">
           <button class="btn" @click="revealInFinder(importedOutputDir)">在 Finder 中显示</button>
@@ -609,7 +667,28 @@ onMounted(scan)
 .deploy-tip code { background: #f1f5f9; padding: 1px 4px; border-radius: 3px; }
 .deploy-tip strong { color: #c2410c; }
 
-.creds-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; }
+.cred-groups { display: flex; flex-direction: column; gap: 8px; }
+.cred-group {
+  border: 1px solid #e2e8f0; border-radius: 6px; background: #f8fafc;
+}
+.cred-group summary {
+  cursor: pointer; padding: 8px 12px; display: flex; justify-content: space-between;
+  align-items: center; font-size: 12px; font-weight: 600; color: #334155;
+  user-select: none;
+}
+.cred-group summary:hover { background: #f1f5f9; }
+.cred-group[open] summary { border-bottom: 1px solid #e2e8f0; background: #fff; }
+.cred-group-name { display: flex; align-items: center; gap: 6px; }
+.cred-group-count {
+  font-size: 11px; font-weight: 500; color: #94a3b8;
+  padding: 1px 6px; background: #f1f5f9; border-radius: 3px;
+}
+.cred-group-count.complete { background: #d1fae5; color: #065f46; }
+
+.creds-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px; padding: 10px 12px;
+}
 .cred-field { display: flex; flex-direction: column; gap: 4px; }
 .cred-field label { font-size: 11px; font-family: monospace; color: #334155; font-weight: 600; }
 .secret-mark { color: #c2410c; }

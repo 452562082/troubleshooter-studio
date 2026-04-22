@@ -19,6 +19,7 @@ import {
   scanInstallPrompts,
 } from '../lib/bridge'
 import type { ApplyResult, DiscoveredBot, InstallPrompt } from '../lib/bridge'
+import { toast } from '../lib/toast'
 
 const bots = ref<DiscoveredBot[]>([])
 const loading = ref(false)
@@ -27,7 +28,8 @@ const extraRoots = ref<string[]>([])
 const newRootInput = ref('')
 
 // 每张卡片的"重 gen"状态：key = path|target
-const regenState = reactive<Record<string, { loading: boolean; ok?: string; err?: string }>>({})
+// 只留 loading 让按钮禁用;结果反馈走 toast,不留 inline 文案
+const regenState = reactive<Record<string, { loading: boolean }>>({})
 
 // 编辑器状态（展开哪张卡片、草稿 yaml、应用结果）：
 const editingKey = ref<string | null>(null)
@@ -64,12 +66,14 @@ async function regen(b: DiscoveredBot) {
   regenState[k] = { loading: true }
   try {
     const yamlText = b.meta.system_yaml
-    if (!yamlText) throw new Error('这个机器人的 tshoot.json 里没有 system_yaml（缺 system_yaml 字段，无法原地重 gen）')
+    if (!yamlText) throw new Error('tshoot.json 里没 system_yaml 字段,无法原地重 gen')
     const res = await bridgeGen(yamlText, '')
     const outDir = String(res?.output_dir || '未知输出路径')
-    regenState[k] = { loading: false, ok: `产物已写入 ${outDir}` }
+    toast.success(`${b.meta.system_id}: 产物已写入 ${outDir}`)
   } catch (e: any) {
-    regenState[k] = { loading: false, err: String(e?.message || e) }
+    toast.error(`${b.meta.system_id} 重 gen 失败: ${String(e?.message || e)}`)
+  } finally {
+    regenState[k] = { loading: false }
   }
 }
 
@@ -80,7 +84,7 @@ function toggleEditor(b: DiscoveredBot) {
     return
   }
   if (!b.meta.system_yaml) {
-    error.value = '这个机器人没有嵌入 system_yaml，无法编辑（缺 system_yaml 字段）'
+    toast.error(`${b.meta.system_id}: tshoot.json 缺 system_yaml 字段,无法编辑`)
     return
   }
   editingKey.value = k
@@ -88,26 +92,19 @@ function toggleEditor(b: DiscoveredBot) {
   delete applyState[k]
 }
 
-// 每张卡片的导出状态（避免影响 apply / regen 区）
-const exportState = reactive<Record<string, { ok?: string; err?: string }>>({})
-
 async function doExport(b: DiscoveredBot) {
   const k = regenKey(b)
-  exportState[k] = {}
   try {
     const yamlText = b.meta.system_yaml
-    if (!yamlText) throw new Error('这个机器人没有嵌入 system_yaml（缺 system_yaml 字段）')
+    if (!yamlText) throw new Error('tshoot.json 里没 system_yaml 字段')
     // 用编辑器里的草稿（如果当前在编辑）优先导，否则导存盘版本
     const payload = editingKey.value === k ? editorDraft.value : yamlText
     const filename = `${b.meta.system_id || 'system'}.yaml`
     const savedTo = await exportYAML(filename, payload)
-    if (!savedTo) {
-      exportState[k] = {} // user canceled, no message
-      return
-    }
-    exportState[k] = { ok: `已导出到 ${savedTo}` }
+    if (!savedTo) return // 用户取消,不弹 toast
+    toast.success(`已导出 ${b.meta.system_id} 到 ${savedTo}`)
   } catch (e: any) {
-    exportState[k] = { err: String(e?.message || e) }
+    toast.error(`导出 ${b.meta.system_id} 失败: ${String(e?.message || e)}`)
   }
 }
 
@@ -523,10 +520,6 @@ onUnmounted(() => {
             </button>
           </div>
         </footer>
-        <p v-if="regenState[regenKey(b)]?.ok" class="regen-ok">✓ {{ regenState[regenKey(b)]?.ok }}</p>
-        <p v-if="regenState[regenKey(b)]?.err" class="regen-err">⚠ {{ regenState[regenKey(b)]?.err }}</p>
-        <p v-if="exportState[regenKey(b)]?.ok" class="regen-ok">✓ {{ exportState[regenKey(b)]?.ok }}</p>
-        <p v-if="exportState[regenKey(b)]?.err" class="regen-err">⚠ {{ exportState[regenKey(b)]?.err }}</p>
 
         <section v-if="editingKey === regenKey(b)" class="editor">
           <label class="editor-label">system.yaml（改完先「预演」看改动列表，再「应用」写盘）</label>
@@ -646,8 +639,6 @@ onUnmounted(() => {
 }
 .btn-regen:hover:not(:disabled) { background: #e2e8f0; }
 
-.regen-ok { margin-top: 8px; font-size: 11px; color: #059669; word-break: break-all; }
-.regen-err { margin-top: 8px; font-size: 11px; color: #b91c1c; word-break: break-all; }
 
 .bot-actions { display: flex; gap: 6px; }
 

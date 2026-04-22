@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
+import ToastContainer from './components/ToastContainer.vue'
 
 const route = useRoute()
 const currentPath = computed(() => route.path)
@@ -52,6 +53,8 @@ const navItems = [
         </keep-alive>
       </router-view>
     </main>
+    <!-- 全局 toast,右上角浮窗,按需 import { toast } from '@/lib/toast' 推 -->
+    <ToastContainer />
   </div>
 </template>
 

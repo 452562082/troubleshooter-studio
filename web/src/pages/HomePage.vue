@@ -43,11 +43,13 @@ onMounted(() => {
 
 // 主路径卡片:80% 用户的核心工作流。顺序按"新用户第一次打开 → 老用户管理"设计,
 // 已装机器人放 #2 是因为"我已有 yaml 想直接部署"和"查看/改已装"都在那页。
+// 注:不再列"生成产物"独立页。桌面端的完整流已经是:
+//   创建向导(产 yaml) → 已装机器人(导入 yaml 一键部署 + 原地管理)
+// 纯落盘产物需求走 CLI:`tshoot gen -i system.yaml -o ./dist/<id>`
 const primaryCards = [
   { path: '/init',   icon: '🧙', label: '创建向导',      desc: '7 步生成 system.yaml（支持导入已有 yaml 继续编辑）', tag: '推荐新用户' },
   { path: '/bots',   icon: '🤖', label: '已装机器人',    desc: '扫本机已部署的 / 导入 yaml 一键部署到 4 平台 / 原地更新已装' },
-  { path: '/editor', icon: '📝', label: 'YAML 编辑器',   desc: '直接手写 / 粘贴 system.yaml，一键验证 / plan / gen' },
-  { path: '/gen',    icon: '🚀', label: '生成产物',      desc: '按 generation.targets 真落盘 4 种形态的机器人产物' },
+  { path: '/editor', icon: '📝', label: 'YAML 编辑器',   desc: '直接手写 / 粘贴 system.yaml，一键验证 / plan' },
 ]
 // 高级 / 诊断工具:不是每次都用,视觉上弱化一档。
 const advancedCards = [

@@ -111,25 +111,34 @@ func main() {
 func printWelcome() {
 	fmt.Printf(`troubleshooter-studio — AI 排障机器人工作台  (version %s)
 
-第一次使用？三种上手方式（按推荐顺序）：
-  1) 零配置试跑（看产物长啥样，30 秒）：
+第一次使用？推荐路径:
+
+  ★ 桌面 app(推荐,非程序员友好):
+       make desktop-app                       # 仓库根跑
+       open dist/TroubleshooterStudio.app     # 或 Finder 双击
+       # 桌面端里一站式:扫已装机器人 / 创建向导 / 导入 yaml 部署 / 编辑应用
+
+  ● 零配置试跑(30 秒看看产物长啥样):
        tshoot demo
 
-  2) 可视化 Web UI（有交互向导 + YAML 编辑器）：
-       tshoot serve --port 8080
+  ● CLI 全流程(脚本化 / CI 场景):
+       tshoot init -o system.yaml    # 交互向导生成 yaml
+       tshoot gen  -i system.yaml    # 生成产物
+       cd dist/<id> && bash scripts/install.sh   # 部署到 OpenClaw
 
-  3) 命令行向导生成一份 system.yaml，然后 gen：
-       tshoot init -o system.yaml
-       tshoot gen  -i system.yaml
-
-已有 system.yaml？常用命令：
+已有 system.yaml 的常用命令:
   tshoot validate -i system.yaml          # 校验格式
   tshoot plan     -i system.yaml          # 预览会生成什么
   tshoot gen      -i system.yaml          # 真落盘
   tshoot doctor   -i system.yaml          # 检查声明 vs 实态漂移
+  tshoot discover                         # 扫本机已装机器人
+  tshoot apply -i new.yaml --path <p>     # 原地更新已装机器人
 
-完整命令列表：tshoot --help
-版本信息：    tshoot --version
+tshoot serve --port 8080 起 Web UI 也行(桌面 app 的 legacy HTTP 版本,
+功能等价但需要浏览器打开 http://localhost:8080)。
+
+完整命令列表:tshoot --help
+版本信息:    tshoot --version
 `, version)
 }
 

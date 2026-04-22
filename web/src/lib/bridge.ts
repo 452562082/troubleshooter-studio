@@ -173,7 +173,47 @@ export async function cancelInstall(): Promise<boolean> {
   return App.CancelInstall()
 }
 
-// ── Standalone 嵌入桌面端:启动 / 停止 / 状态查询 ─────────────────────────
+// ── 原生 chat(桌面端直接跟 Anthropic 流式对话,不经 Flask) ─────────────
+
+export interface ChatMessage {
+  role: 'user' | 'assistant'
+  content: string
+}
+export interface ChatContext {
+  system_id: string
+  system_name: string
+  model: string
+  envs: string[]
+}
+export interface ChatSendInput {
+  bot_path: string
+  api_key: string
+  messages: ChatMessage[]
+  default_env: string
+}
+
+/** 读 bot 目录下的 system-prompt + model + env 列表,UI 初始化 chat 页用 */
+export async function chatContextFor(botPath: string): Promise<ChatContext> {
+  if (!isDesktop()) throw new Error('ChatContextFor 只在桌面 app 里可用')
+  return App.ChatContextFor(botPath)
+}
+
+/** 起一次流式对话,返回 reqId。前端监听 EventsOn('chat:delta:'+reqId / 'chat:done:' / 'chat:error:') 消费。
+ *  NOTE: wailsjs 生成的 App.ChatSend 要求 main.ChatSendInput 类实例而不是裸对象,
+ *  我们用 as any 穿透:Wails 最终都 JSON 序列化走,类型无所谓,只差 TS 编译检查。 */
+export async function chatSend(in_: ChatSendInput): Promise<string> {
+  if (!isDesktop()) throw new Error('ChatSend 只在桌面 app 里可用')
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return App.ChatSend(in_ as any)
+}
+
+/** 取消对应 reqId 的流(用户点停止按钮)。未知 reqId 返回 false。 */
+export async function chatStop(reqId: string): Promise<boolean> {
+  if (!isDesktop()) return false
+  return App.ChatStop(reqId)
+}
+
+// ── Standalone 嵌入桌面端:启动 / 停止 / 状态查询(旧 iframe 方案,保留以备 fallback) ─────
 // 把 standalone target 机器人的 server.py 托管在 Studio 进程里,
 // 前端 iframe 指 localhost:<port>,用户不用开浏览器。
 

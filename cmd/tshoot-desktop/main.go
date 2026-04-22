@@ -68,6 +68,9 @@ type App struct {
 	// 同一个机器人不会跑两份(StartStandalone 发现已在跑直接返回现有 port)。
 	// app 退出时 main 的 defer 会 Stop 所有。
 	standaloneRunners map[string]*standalone.Runner
+
+	// chatStreams 是原生 chat(bindings_chat.go)进行中的流注册表。
+	chatStreams chatStreamRegistry
 }
 
 // startup 由 Wails 在窗口创建完成时调用，注入 runtime ctx。私有也能被 Wails 识别。
@@ -87,6 +90,8 @@ func main() {
 	// app 退出(不管正常还是异常)时把所有在跑的 standalone server.py 清掉,
 	// 不然 python 进程会变孤儿继续占端口 + 继续烧 LLM API key。
 	defer appState.stopAllStandalones()
+	// 原生 chat 的 stream:app 退出时 cancel 所有在跑的,避免 SDK http 长连泄漏。
+	defer appState.stopAllChats()
 
 	err := wails.Run(&options.App{
 		Title:  "Troubleshooter Studio",

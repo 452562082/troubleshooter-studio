@@ -171,6 +171,10 @@ interface RepoItem {
   framework: string
   service_names: string
   env_branches: Record<string, string>
+  // _nameManual 标记用户是否手动编辑过 name;true 时 URL 变化不会再覆盖 name。
+  // 下划线前缀表示"内部 UI 状态",不参与 yaml 序列化(generateYAML 里不读它),
+  // 但会跟着 localStorage auto-save 持久化 —— 跨次刷新用户的手改意图不丢。
+  _nameManual?: boolean
 }
 
 function makeEmptyRepo(): RepoItem {
@@ -184,6 +188,38 @@ function makeEmptyRepo(): RepoItem {
 const repos = reactive<RepoItem[]>(
   Array.isArray(saved?.repos) && saved.repos.length ? saved.repos : [makeEmptyRepo()]
 )
+
+// 从 URL 推导仓库名。支持三种常见格式:
+//   git@github.com:org/order-service.git    → order-service
+//   https://github.com/org/order-service.git → order-service
+//   https://gitlab.com/group/sub/order-svc   → order-svc
+function deriveRepoName(url: string): string {
+  const s = (url || '').trim()
+  if (!s) return ''
+  // 从末尾抓最后一段 path / colon-separated segment,去 .git 后缀
+  const m = s.match(/[:/]([^/:]+?)(?:\.git)?\/?$/)
+  return m ? m[1] : ''
+}
+
+// URL 输入时触发:如果没被手改过,把 name 改成新 URL 的推导结果。
+// _nameManual 放在 RepoItem 上是因为 WeakSet 不是 Vue 的 reactive 源,
+// 模板里 v-if="..." 读 WeakSet 状态不会重新渲染 —— 放 repo 本身就自然响应。
+function onRepoUrlInput(r: RepoItem) {
+  if (r._nameManual) return
+  r.name = deriveRepoName(r.url)
+}
+
+// 用户在 name 输入框里动手就算"手改过",记录下来避免被 URL 再覆盖。
+// 但如果用户把 name 清空,视作"回到自动推",清除标记。
+function onRepoNameInput(r: RepoItem) {
+  if (!r.name.trim()) {
+    r._nameManual = false
+    // 立即用当前 URL 重填
+    r.name = deriveRepoName(r.url)
+    return
+  }
+  r._nameManual = true
+}
 
 function addRepo() {
   repos.push(makeEmptyRepo())
@@ -1151,14 +1187,21 @@ const configTypeDescriptions: Record<string, string> = {
     <!-- Step 4 -->
     <div v-if="currentStep === 4" class="card lg">
       <h2>代码仓库</h2>
-      <p class="help-text">每个仓库对应一个代码仓库。role 描述角色（backend=后端、frontend=前端、gateway=网关/BFF）</p>
+      <p class="help-text">
+        填仓库地址,<strong>其它字段都靠"扫一下自动填"</strong>:<br/>
+        • <strong>仓库名</strong> → 从 URL 推(git@host:org/<u>order-service</u>.git)<br/>
+        • <strong>技术栈</strong> → 扫根文件 marker(go.mod / package.json / pom.xml)<br/>
+        • <strong>分支下拉</strong> → git for-each-ref 读真实分支<br/>
+        • <strong>服务名</strong> → analyzer 从代码里抽(K8s deployment / Nacos dataId 前缀)<br/>
+        都可以事后手改覆盖。
+      </p>
 
-      <!-- Analyze 集成:输入仓库根目录 + 已填仓库名 → 一键扫描反填 service_names。
-           折叠在最上面,用户不关心时也不挡视线。-->
-      <details class="analyze-block">
+      <!-- Analyze 集成:一键扫所有仓库,反填 stack / service_names / branches。
+           默认展开,是 Step 4 最主要的动作。-->
+      <details class="analyze-block" open>
         <summary>
-          <span>🔍 扫代码自动填 service_names(可选)</span>
-          <span class="analyze-hint">需要先填仓库名,并填本机已 clone 的仓库根目录</span>
+          <span>🔍 扫描本机仓库,自动填下面所有字段</span>
+          <span class="analyze-hint">先填每个仓库的 URL(name 自动推),再填下面"仓库父目录"扫一下</span>
         </summary>
         <div class="analyze-body">
           <div class="analyze-row">
@@ -1194,35 +1237,50 @@ const configTypeDescriptions: Record<string, string> = {
           <span class="repo-badge">仓库 {{ i + 1 }}</span>
           <button class="btn-icon remove" @click="removeRepo(i)" :disabled="repos.length <= 1">&times;</button>
         </div>
+        <!-- URL 是这个块里唯一真正必填的字段,放最顶 + 占满一行;
+             name 从 URL 自动推出(git@host:org/order-service.git → order-service),
+             stack / 服务名 / 分支都靠"扫描并反填"按钮自动填。 -->
+        <div class="form-group">
+          <label>仓库地址 <span class="required">*</span>
+            <span class="field-hint">— 仓库名、技术栈、分支、服务名都靠它自动推 / 扫一下填</span>
+          </label>
+          <input
+            v-model="repo.url"
+            type="text"
+            placeholder="git@github.com:org/order-service.git"
+            :class="{ error: hasError(`repo.${i}.url`) }"
+            @input="onRepoUrlInput(repo)"
+          />
+        </div>
+
         <div class="row-fields">
           <div class="form-group compact">
-            <label>仓库名 <span class="required">*</span></label>
+            <label>
+              仓库名
+              <span v-if="!repo._nameManual" class="auto-tag">自动从 URL 推出</span>
+              <span v-else class="field-hint">(已手改;清空可回到自动推)</span>
+            </label>
             <input
               v-model="repo.name"
               type="text"
-              placeholder="order-service"
+              placeholder="自动从仓库地址推出"
               :class="{ error: hasError(`repo.${i}.name`) }"
+              @input="onRepoNameInput(repo)"
             />
           </div>
-          <div class="form-group compact">
-            <label>仓库地址 <span class="required">*</span></label>
-            <input
-              v-model="repo.url"
-              type="text"
-              placeholder="git@github.com:org/repo.git"
-              :class="{ error: hasError(`repo.${i}.url`) }"
-            />
-          </div>
-        </div>
-        <div class="row-fields">
           <div class="form-group compact">
             <label>角色</label>
             <select v-model="repo.role">
               <option v-for="r in roleOptions" :key="r" :value="r">{{ r }}</option>
             </select>
           </div>
+        </div>
+        <div class="row-fields">
           <div class="form-group compact">
-            <label>技术栈</label>
+            <label>
+              技术栈
+              <span class="field-hint">(扫一下自动识别;go.mod/package.json/pom.xml 等 marker)</span>
+            </label>
             <select v-model="repo.stack">
               <option v-for="s in stackOptions" :key="s" :value="s">{{ s }}</option>
             </select>
@@ -1235,14 +1293,18 @@ const configTypeDescriptions: Record<string, string> = {
         <div class="form-group">
           <label>服务名 (逗号分隔)
             <span class="help-icon" title="本仓库实际部署出来的服务名（= K8s deployment / Nacos 的 data_id 前缀），可能与仓库名不同。一个仓库跑多个服务常见：order-repo → order-service, order-worker。留空则默认用仓库名。">?</span>
+            <span class="field-hint">(扫一下自动填 analyzer 找到的服务名)</span>
           </label>
-          <input v-model="repo.service_names" type="text" placeholder="order-service, order-worker" />
+          <input v-model="repo.service_names" type="text" placeholder="自动填,也可以手敲(例 order-service, order-worker)" />
         </div>
         <div class="form-group">
           <label>环境分支映射
-            <span class="help-icon" title="每个 env 对应的长期分支。routing skill 会据此帮用户切到正确的代码分支再做代码定位。例：dev=develop / prod=main。扫一下仓库后下面 input 带下拉,从真实分支里选就行。">?</span>
+            <span class="help-icon" title="每个 env 对应的长期分支。routing skill 会据此帮用户切到正确的代码分支再做代码定位。例:dev=develop / prod=main。">?</span>
             <span v-if="repoBranchesMap[repo.name]?.length" class="field-hint">
-              — 已加载 {{ repoBranchesMap[repo.name]!.length }} 个真实分支,input 点一下见下拉
+              — ✓ 已加载 {{ repoBranchesMap[repo.name]!.length }} 个真实分支,input 点一下见下拉
+            </span>
+            <span v-else class="field-hint">
+              (扫一下自动从 git 读真实分支建议)
             </span>
           </label>
           <div class="branch-grid">
@@ -1913,6 +1975,12 @@ textarea.error {
 .auto-tag {
   font-size: 10px; font-weight: 500; color: #065f46;
   background: #d1fae5; padding: 1px 6px; border-radius: 8px; letter-spacing: 0.2px;
+  margin-left: 4px;
+}
+/* "(扫一下自动填)" 这种轻提示,比 .auto-tag 再弱一档;跟 label 同行不抢视觉 */
+.field-hint {
+  font-size: 11px; font-weight: 400; color: var(--c-muted);
+  margin-left: 6px;
 }
 .auto-path-display {
   display: flex; align-items: center; gap: 10px;

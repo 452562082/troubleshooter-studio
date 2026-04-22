@@ -49,7 +49,7 @@ onMounted(() => {
 const primaryCards = [
   { path: '/init',   icon: '🧙', label: '创建向导',      desc: '7 步生成 system.yaml（支持导入已有 yaml 继续编辑）', tag: '推荐新用户' },
   { path: '/bots',   icon: '🤖', label: '已装机器人',    desc: '扫本机已部署的 / 导入 yaml 一键部署到 4 平台 / 原地更新已装' },
-  { path: '/editor', icon: '📝', label: 'YAML 编辑器',   desc: '直接手写 / 粘贴 system.yaml，一键验证 / plan' },
+  { path: '/editor', icon: '📝', label: 'YAML 调试器',   desc: '粘贴 yaml 做快速验证 / plan 预演（不部署,部署走已装机器人或向导）' },
 ]
 // 高级 / 诊断工具:只剩 Analyze 独立页(对游离 yaml 扫)。Doctor 已完全并进
 // BotsPage 卡片(声明级 + 深度扫两档),独立页删掉,不再保留"对任意 yaml"那个入口 ——

@@ -10,7 +10,7 @@ const navItems = [
   { path: '/', icon: '🏠', label: '首页', desc: '概览 + 下一步推荐' },
   { path: '/bots', icon: '🤖', label: '已装机器人', desc: '扫描本机已部署的机器人' },
   { path: '/init', icon: '🧙', label: '创建向导', desc: '生成 system.yaml' },
-  { path: '/editor', icon: '📝', label: '编辑器', desc: '编辑 / 验证 / 生成' },
+  { path: '/editor', icon: '📝', label: 'YAML 调试器', desc: '粘贴 yaml 验证语法 + 干跑 plan' },
   { path: '/analyze', icon: '🔍', label: '仓库分析', desc: '扫代码抽 service_names / 配置中心' },
 ]
 </script>

@@ -1,18 +1,18 @@
 <script setup lang="ts">
+// EditorPage 定位:YAML 调试沙盒。只做两件事:
+//   1. 验证:检查 yaml 语法 + 字段合法性,错误指出行/字段
+//   2. 生成计划:干跑 gen,看会生成什么 skill/文件/config-map 投影
+//
+// 不做:
+//   - 不做"执行生成"(桌面端 CWD = .app bundle 里,产物写进 bundle 下次被覆盖,坑)
+//   - 不做"一键部署"(BotsPage 的"导入 YAML 一键部署"已经覆盖相同场景,这里重复就删了)
+// 真要部署:在 BotsPage 导入 yaml 或去创建向导走 Step 7 一键部署。
+//
+// 验证错误显示增强:原先只把 raw error 字符串丢出去,用户看"parse yaml: yaml: line 5: ..."
+// 不友好。现在解析错误文本:yaml 语法错按"第 N 行"高亮,schema 错按"字段 xxx"高亮,
+// 并且把当前行源码截一段展示,让用户更快定位到问题。
 import { computed, ref } from 'vue'
-import yaml from 'js-yaml'
-import { useRouter } from 'vue-router'
-import {
-  importAndDeploy,
-  isDesktop,
-  openDir,
-  plan as bridgePlan,
-  validate as bridgeValidate,
-} from '../lib/bridge'
-import { toast } from '../lib/toast'
-import { useDeployPath } from '../lib/useDeployPath'
-
-const router = useRouter()
+import { plan as bridgePlan, validate as bridgeValidate } from '../lib/bridge'
 
 const exampleYaml = `system:
   id: demo
@@ -21,8 +21,8 @@ const exampleYaml = `system:
 
 agent:
   name: "Demo排障机器人"
-  workspace_name: "Demo排障机器人"
-  model: openai-codex/gpt-5.3-codex
+  workspace_name: demo-bot
+  model: anthropic/claude-sonnet-4-6
 
 environments:
   - id: dev
@@ -121,75 +121,103 @@ async function apiCall(endpoint: 'validate' | 'plan', label: string) {
   }
 }
 
-// ── 一键部署 ──
-// 之前这里还有个"执行生成"按钮调 gen(yaml, '') 写到 ./dist/<id>-<target>。
-// 桌面端的坑:.app bundle 启动时 CWD 是 MacOS/ 目录,产物会写进 bundle 里
-// 下次 make desktop-app 就被覆盖,用户找不到产物。删那个按钮,改成跟 InitPage
-// Step 7 同款的一键部署:显式选 target + destPath,走 importAndDeploy,部署后跳 /bots。
-const deployTarget = ref<'openclaw' | 'claude-code' | 'cursor' | 'standalone'>('openclaw')
-const deployDestPath = ref('')
-const deployLoading = ref(false)
-const deployError = ref<string | null>(null)
-
-// 从编辑器里的 yaml 解出 system.id 当默认路径计算基准。解析失败兜空串。
-const systemIdFromYaml = computed<string>(() => {
-  try {
-    const parsed: any = yaml.load(yamlContent.value)
-    return parsed?.system?.id || ''
-  } catch { return '' }
-})
-
-const { isManagedTarget, customPathExpanded, autoDefaultPath, resetCustomPath } = useDeployPath(
-  deployTarget,
-  systemIdFromYaml,
-  deployDestPath,
-)
-
-async function pickDeployDestPath() {
-  if (!isDesktop()) { deployError.value = '选目录需要桌面 app 环境'; return }
-  try {
-    const p = await openDir('选择部署目标路径')
-    if (p) deployDestPath.value = p
-  } catch (e: any) {
-    deployError.value = String(e?.message || e)
-  }
+// ── 错误诊断 ──
+// config.LoadFromBytes 返回的错误格式大概三档:
+//   1. "parse yaml: yaml: line 5: mapping values are not allowed in this context"
+//      → 语法错,可以抽出 line N
+//   2. "validate: system.id required" / "validate: repos[shop].url required"
+//      → schema 错,抽出字段路径
+//   3. "validate: system.id must match [a-z0-9][a-z0-9-]*, got \"Shop\""
+//      → 格式错,带当前值
+//
+// 把这三档识别出来分别展示,比甩一串英文给用户友好得多。
+interface ParsedError {
+  kind: 'yaml-syntax' | 'field-missing' | 'field-invalid' | 'unknown'
+  lineNumber?: number  // yaml-syntax 有
+  fieldPath?: string   // field-* 有 (如 "system.id" / "repos[shop].url")
+  detail: string       // 原始错误消息(翻译友好点)
+  sourceLine?: string  // yaml-syntax 的上下文,从 yamlContent 里截第 N 行
 }
 
-async function runOneClickDeploy() {
-  deployError.value = null
-  if (!yamlContent.value.trim()) { deployError.value = '请先填 yaml'; return }
-  if (!deployDestPath.value.trim()) { deployError.value = '请选部署目标路径'; return }
-  if (!isDesktop()) {
-    deployError.value = '一键部署只在桌面 app 可用;浏览器模式请去已装机器人页导入'
-    return
+const parsedError = computed<ParsedError | null>(() => {
+  if (!errorMsg.value) return null
+  const raw = errorMsg.value
+
+  // 档 1:yaml 语法错
+  const yamlLineMatch = raw.match(/yaml:\s*line\s+(\d+):\s*(.+)/)
+  if (yamlLineMatch) {
+    const lineNum = parseInt(yamlLineMatch[1], 10)
+    const lines = yamlContent.value.split('\n')
+    return {
+      kind: 'yaml-syntax',
+      lineNumber: lineNum,
+      detail: translateYamlError(yamlLineMatch[2]),
+      // yaml 库报的行号是 1-based,array 是 0-based
+      sourceLine: lines[lineNum - 1] || '',
+    }
   }
-  // 先 validate,让失败落在前端 toast 而不是后端半路爆
-  try {
-    await bridgeValidate(yamlContent.value)
-  } catch (e: any) {
-    deployError.value = `yaml 校验失败: ${String(e?.message || e)};先点"验证"修复`
-    return
+
+  // 档 2 & 3:validate: <field> required / must match / ...
+  const validateMatch = raw.match(/validate:\s*(.+)/)
+  if (validateMatch) {
+    const body = validateMatch[1]
+    // field 路径:system.id / agent.name / repos[0].name / repos[shop].url /
+    //           environments[0].id / ...
+    const pathMatch = body.match(/^([\w.[\]-]+)\s+(.*)$/)
+    if (pathMatch) {
+      const field = pathMatch[1]
+      const rest = pathMatch[2]
+      if (rest.startsWith('required')) {
+        return { kind: 'field-missing', fieldPath: field, detail: translateSchemaError(rest) }
+      }
+      return { kind: 'field-invalid', fieldPath: field, detail: translateSchemaError(rest) }
+    }
+    // "duplicate environment id: dev" 这种,没有 field 前缀
+    return { kind: 'field-invalid', detail: translateSchemaError(body) }
   }
-  deployLoading.value = true
-  try {
-    await importAndDeploy(yamlContent.value, deployTarget.value, deployDestPath.value)
-    toast.success(`部署完成,已写到 ${deployDestPath.value}`)
-    router.push('/bots')
-  } catch (e: any) {
-    deployError.value = String(e?.message || e)
-  } finally {
-    deployLoading.value = false
+
+  return { kind: 'unknown', detail: raw }
+})
+
+function translateYamlError(msg: string): string {
+  // yaml 库的几条常见错信息翻译成人话
+  if (msg.includes('mapping values are not allowed in this context')) {
+    return '缩进或冒号错位:这一行前面可能少了 `-`(数组项)或多了空格'
   }
+  if (msg.includes('did not find expected key')) {
+    return '缺少字段名或缩进不对齐:检查上下行的对齐'
+  }
+  if (msg.includes('could not find expected')) {
+    return '语法截断:引号 / 方括号 / 花括号没闭合'
+  }
+  if (msg.includes('found character that cannot start any token')) {
+    return '有非法字符:可能是全角符号或多余的制表符'
+  }
+  return msg
+}
+
+function translateSchemaError(msg: string): string {
+  if (msg === 'required') return '是必填字段,请补上'
+  if (msg.startsWith('must match')) return `格式不合法 —— ${msg}`
+  if (msg.startsWith('duplicate')) return `重复的 id/name ${msg}`
+  if (msg.includes('references unknown env')) return `引用了不存在的 env(检查 environments 里有没有对应 id)`
+  return msg
 }
 </script>
 
 <template>
   <div class="page">
-    <h1>System YAML 编辑器</h1>
+    <h1>System YAML 调试器</h1>
 
     <div class="info-box">
-      <div class="info-box-title">YAML 沙盒 — 调试用</div>
-      <div>拿来快速试改 yaml:验证语法 + 预演 gen 结果(skill 列表 / 文件变化 / config-map 投影)。真要部署到机器人用下方「一键部署」,或去 <router-link to="/bots">已装机器人</router-link> 导入。</div>
+      <div class="info-box-title">YAML 调试沙盒</div>
+      <div>
+        粘贴 / 加载 yaml 做快速校验与预演,不落盘、不部署。
+        <strong>验证</strong> 会找出语法错、必填字段缺失、格式不合法;
+        <strong>生成计划</strong> 展示会启用的 skill / 文件变化 / config-map 投影。<br/>
+        想真正部署到机器人走 <router-link to="/bots">已装机器人</router-link> 的"导入 YAML 一键部署",
+        或从 <router-link to="/init">创建向导</router-link> 走完 7 步在 Step 7 一键部署。
+      </div>
     </div>
 
     <div class="toolbar">
@@ -199,14 +227,11 @@ async function runOneClickDeploy() {
       </label>
       <button class="btn" @click="loadExample">加载示例</button>
       <button class="btn primary" :disabled="!!loading" @click="apiCall('validate', '验证')">
-        {{ loading === '验证' ? '验证中...' : '验证' }}
+        {{ loading === '验证' ? '验证中...' : '✓ 验证' }}
       </button>
       <button class="btn primary" :disabled="!!loading" @click="apiCall('plan', '生成计划')">
-        {{ loading === '生成计划' ? '计划中...' : '生成计划' }}
+        {{ loading === '生成计划' ? '计划中...' : '📋 生成计划' }}
       </button>
-      <!-- 原有的"执行生成"已删 —— 它调 gen(yaml, '') 写到 ./dist/<id>,桌面端 CWD 是
-           .app bundle 里的 MacOS/,产物进 bundle 下次 make desktop-app 就覆盖,用户找不到。
-           想真落盘部署走下面的"一键部署",显式选 destPath 避免 CWD 坑。 -->
     </div>
 
     <textarea
@@ -218,7 +243,29 @@ async function runOneClickDeploy() {
     />
 
     <div v-if="successMsg" class="alert success">{{ successMsg }}</div>
-    <div v-if="errorMsg" class="alert error">{{ errorMsg }}</div>
+
+    <!-- 错误卡片:分档展示,比裸 raw error 友好 -->
+    <div v-if="parsedError" class="err-card" :class="'kind-' + parsedError.kind">
+      <div class="err-header">
+        <span class="err-icon">✖</span>
+        <span class="err-kind-label">
+          {{
+            parsedError.kind === 'yaml-syntax' ? 'YAML 语法错' :
+            parsedError.kind === 'field-missing' ? '字段缺失' :
+            parsedError.kind === 'field-invalid' ? '字段非法' : '验证失败'
+          }}
+        </span>
+        <span v-if="parsedError.lineNumber" class="err-locator">第 {{ parsedError.lineNumber }} 行</span>
+        <span v-else-if="parsedError.fieldPath" class="err-locator">字段 <code>{{ parsedError.fieldPath }}</code></span>
+      </div>
+      <div class="err-body">{{ parsedError.detail }}</div>
+      <!-- yaml 语法错把问题行截出来给用户看上下文 -->
+      <pre v-if="parsedError.sourceLine" class="err-source"><code>{{ parsedError.lineNumber }} | {{ parsedError.sourceLine }}</code></pre>
+      <details class="err-raw">
+        <summary>原始错误信息</summary>
+        <pre><code>{{ errorMsg }}</code></pre>
+      </details>
+    </div>
 
     <!-- Plan result -->
     <div v-if="resultData && resultTitle === '生成计划'" class="result-card">
@@ -264,59 +311,6 @@ async function runOneClickDeploy() {
         </div>
       </div>
     </div>
-
-    <!-- 一键部署:替代原"执行生成"。显式选 target + destPath,绕开 CWD 坑 -->
-    <div class="deploy-inline">
-      <div class="deploy-inline-title">🚀 一键部署</div>
-      <p class="help-text" style="margin-bottom:10px;">
-        调通 yaml 后直接装到机器人。跟「已装机器人页 → 导入 yaml 一键部署」走同一条后端,装完跳到那里看新装的卡。
-      </p>
-      <div class="deploy-inline-row">
-        <div class="deploy-inline-field">
-          <label>目标平台</label>
-          <select v-model="deployTarget" :disabled="deployLoading">
-            <option value="openclaw">OpenClaw</option>
-            <option value="claude-code">Claude Code</option>
-            <option value="cursor">Cursor IDE</option>
-            <option value="standalone">Standalone</option>
-          </select>
-        </div>
-        <!-- standalone/openclaw:Studio 托管,显示默认路径 + 折叠"自定义" -->
-        <div v-if="isManagedTarget && !customPathExpanded" class="deploy-inline-field flex auto-path-field">
-          <label>部署位置 <span class="auto-tag">自动管理</span></label>
-          <div class="auto-path-display">
-            <code>{{ autoDefaultPath || '…' }}</code>
-            <button type="button" class="btn-link" @click="customPathExpanded = true">自定义 →</button>
-          </div>
-        </div>
-        <div v-else class="deploy-inline-field flex">
-          <label>
-            部署目标路径
-            <button v-if="isManagedTarget" type="button" class="btn-link" @click="resetCustomPath">恢复默认</button>
-          </label>
-          <div class="deploy-inline-path">
-            <input
-              v-model="deployDestPath"
-              type="text"
-              :placeholder="isManagedTarget ? autoDefaultPath : '项目根路径(如 ~/my-project)'"
-              :disabled="deployLoading"
-            />
-            <button type="button" class="btn" :disabled="deployLoading" @click="pickDeployDestPath">选目录…</button>
-          </div>
-        </div>
-      </div>
-      <div class="deploy-inline-actions">
-        <button
-          type="button"
-          class="btn primary"
-          :disabled="deployLoading || !deployDestPath.trim() || !yamlContent.trim()"
-          @click="runOneClickDeploy"
-        >
-          {{ deployLoading ? '部署中…' : '一键部署' }}
-        </button>
-      </div>
-      <div v-if="deployError" class="alert error">{{ deployError }}</div>
-    </div>
   </div>
 </template>
 
@@ -328,49 +322,6 @@ async function runOneClickDeploy() {
   margin-bottom: 12px;
   flex-wrap: wrap;
 }
-
-/* ── 一键部署块(跟 InitPage Step 7 同款样式) ── */
-.deploy-inline {
-  margin-top: 18px; padding: 16px 18px;
-  background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px;
-}
-.deploy-inline-title {
-  font-weight: 600; color: #1e40af; margin-bottom: 4px; font-size: 14px;
-}
-.deploy-inline-row { display: flex; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
-.deploy-inline-field { display: flex; flex-direction: column; gap: 4px; min-width: 180px; }
-.deploy-inline-field.flex { flex: 1; }
-.deploy-inline-field label { font-size: 12px; font-weight: 600; color: #334155; }
-.deploy-inline-field select,
-.deploy-inline-path input {
-  padding: 7px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px;
-}
-.deploy-inline-path { display: flex; gap: 6px; }
-.deploy-inline-path input { flex: 1; font-family: monospace; }
-.deploy-inline-actions { display: flex; justify-content: flex-end; }
-.help-text { color: var(--c-muted); font-size: var(--fs-sm); line-height: 1.6; }
-
-/* standalone/openclaw 自动路径展示,跟 InitPage Step 7 同款 */
-.auto-path-field label { display: flex; align-items: center; gap: 6px; }
-.auto-tag {
-  font-size: 10px; font-weight: 500; color: #065f46;
-  background: #d1fae5; padding: 1px 6px; border-radius: 8px; letter-spacing: 0.2px;
-}
-.auto-path-display {
-  display: flex; align-items: center; gap: 10px;
-  padding: 7px 10px; background: var(--c-surf-3); border-radius: 6px;
-  border: 1px dashed var(--c-line-2);
-}
-.auto-path-display code {
-  flex: 1; font-size: 12px; color: #1e40af; background: transparent; padding: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.btn-link {
-  padding: 0; border: none; background: transparent; color: #1e40af;
-  font-size: 11px; font-weight: 500; cursor: pointer; font-family: inherit;
-  text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px;
-}
-.btn-link:hover { color: #1e3a8a; }
 
 .yaml-editor {
   width: 100%;
@@ -392,6 +343,58 @@ async function runOneClickDeploy() {
 }
 .yaml-editor.has-error {
   border-color: #ef4444;
+}
+
+/* ── 错误诊断卡片 ── */
+.err-card {
+  margin-top: 12px;
+  padding: 14px 16px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-left: 4px solid #dc2626;
+  border-radius: 6px;
+  color: #7f1d1d;
+}
+.err-header {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 8px;
+  font-size: 13px; font-weight: 600;
+}
+.err-icon { color: #dc2626; font-size: 15px; }
+.err-kind-label { color: #991b1b; }
+.err-locator {
+  margin-left: auto; padding: 2px 8px;
+  background: #fee2e2; border-radius: 10px;
+  font-size: 11px; font-weight: 500; color: #7f1d1d;
+  font-variant-numeric: tabular-nums;
+}
+.err-locator code {
+  background: transparent; padding: 0; color: inherit;
+  font-family: 'SF Mono', monospace;
+}
+.err-body {
+  color: #7f1d1d; font-size: 13px; line-height: 1.6;
+  margin-bottom: 8px;
+}
+.err-source {
+  background: #1e293b; color: #fbbf24;
+  padding: 10px 12px; border-radius: 4px;
+  font-family: 'SF Mono', monospace; font-size: 12px;
+  margin-bottom: 8px;
+  white-space: pre-wrap; word-break: break-all;
+}
+.err-raw {
+  font-size: 11px; color: #991b1b;
+}
+.err-raw summary {
+  cursor: pointer; user-select: none;
+  font-weight: 500; padding: 4px 0;
+}
+.err-raw pre {
+  background: #fff; border: 1px solid #fecaca; border-radius: 4px;
+  padding: 8px 10px; font-family: 'SF Mono', monospace;
+  white-space: pre-wrap; word-break: break-all;
+  margin-top: 4px; color: #7f1d1d;
 }
 
 .result-card {

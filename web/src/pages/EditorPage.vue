@@ -11,7 +11,7 @@
 // 验证错误显示增强:原先只把 raw error 字符串丢出去,用户看"parse yaml: yaml: line 5: ..."
 // 不友好。现在解析错误文本:yaml 语法错按"第 N 行"高亮,schema 错按"字段 xxx"高亮,
 // 并且把当前行源码截一段展示,让用户更快定位到问题。
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { plan as bridgePlan, validate as bridgeValidate } from '../lib/bridge'
 
 const exampleYaml = `system:
@@ -76,6 +76,43 @@ const errorMsg = ref('')
 const successMsg = ref('')
 const resultTitle = ref('')
 const resultData = ref<any>(null)
+
+// ── 行号 gutter ──
+// textarea 本身不支持行号,左边做个 <div class="gutter"> 同步滚动显示行号。
+// 错误行高亮 + 验证失败时自动滚到那行。
+const textareaRef = ref<HTMLTextAreaElement | null>(null)
+const gutterRef = ref<HTMLDivElement | null>(null)
+
+const lineCount = computed<number>(() => {
+  // 至少 1 行(空 yaml 也显示 "1")。split('\n') 在末尾有换行时会多出空元素,
+  // 这不影响行号显示,但我们要保证数量跟 textarea 里的行数一致。
+  const text = yamlContent.value
+  if (!text) return 1
+  return text.split('\n').length
+})
+
+function onTextareaScroll() {
+  if (textareaRef.value && gutterRef.value) {
+    gutterRef.value.scrollTop = textareaRef.value.scrollTop
+  }
+}
+
+// 当验证失败时,自动滚 textarea 到出错行,让用户不用手动找。
+// computed parsedError 改变时触发(见下方)。
+watch(
+  () => errorMsg.value,
+  async () => {
+    await nextTick()
+    if (!textareaRef.value || !parsedError.value?.lineNumber) return
+    const line = parsedError.value.lineNumber
+    // 19.5 = font-size 13px * line-height 1.5。粗糙估算,只要落在视口内就好。
+    const lineHeight = 19.5
+    // 定位到错误行 - 3 让它出现在视口上沿附近,别贴顶,留点上下文
+    const targetTop = Math.max(0, (line - 3) * lineHeight)
+    textareaRef.value.scrollTop = targetTop
+    if (gutterRef.value) gutterRef.value.scrollTop = targetTop
+  },
+)
 
 function loadExample() {
   yamlContent.value = exampleYaml
@@ -234,13 +271,24 @@ function translateSchemaError(msg: string): string {
       </button>
     </div>
 
-    <textarea
-      v-model="yamlContent"
-      class="yaml-editor"
-      :class="{ 'has-error': errorMsg }"
-      placeholder="# 在此粘贴或加载 system.yaml 内容..."
-      spellcheck="false"
-    />
+    <div class="editor-wrap" :class="{ 'has-error': errorMsg }">
+      <div ref="gutterRef" class="gutter" aria-hidden="true">
+        <div
+          v-for="n in lineCount"
+          :key="n"
+          class="gutter-line"
+          :class="{ err: n === parsedError?.lineNumber }"
+        >{{ n }}</div>
+      </div>
+      <textarea
+        ref="textareaRef"
+        v-model="yamlContent"
+        class="yaml-editor"
+        placeholder="# 在此粘贴或加载 system.yaml 内容..."
+        spellcheck="false"
+        @scroll="onTextareaScroll"
+      />
+    </div>
 
     <div v-if="successMsg" class="alert success">{{ successMsg }}</div>
 
@@ -323,26 +371,61 @@ function translateSchemaError(msg: string): string {
   flex-wrap: wrap;
 }
 
-.yaml-editor {
-  width: 100%;
+/* ── 编辑器 + 行号 gutter ── */
+/* 结构:.editor-wrap 横向 flex, .gutter 固定宽, textarea 占剩余空间
+ * 两者 line-height + font-size 必须完全一致,gutter 滚动跟着 textarea 同步
+ * (onTextareaScroll 做的),这样行号跟正文对齐。 */
+.editor-wrap {
+  display: flex;
   min-height: 500px;
   background: #f8fafc;
   border: 1px solid #e2e8f0;
   border-radius: 6px;
+  overflow: hidden;              /* 让 gutter 圆角跟随外框 */
+  transition: border-color 0.15s;
+  resize: vertical;
+  /* Firefox/Chrome 都能让 flex 容器 resize */
+  min-height: 500px;
+}
+.editor-wrap:focus-within { border-color: #3b82f6; }
+.editor-wrap.has-error { border-color: #ef4444; }
+
+.gutter {
+  flex: 0 0 auto;
+  min-width: 40px;
+  padding: 12px 8px 12px 10px;
+  background: #f1f5f9;
+  border-right: 1px solid #e2e8f0;
+  color: #94a3b8;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: right;
+  user-select: none;
+  overflow: hidden;              /* scrollTop 通过 JS 同步,不自己滚 */
+  font-variant-numeric: tabular-nums;
+}
+.gutter-line {
+  height: 1.5em;                 /* 跟 textarea line-height 对齐 */
+  white-space: nowrap;
+}
+.gutter-line.err {
+  color: #991b1b; font-weight: 700; background: #fee2e2;
+  margin: 0 -8px 0 -10px; padding: 0 8px 0 10px;  /* 背景吃满 gutter 宽度 */
+}
+
+.yaml-editor {
+  flex: 1;
+  min-height: 500px;
+  background: transparent;
+  border: none;
   padding: 12px 16px;
   font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
   font-size: 13px;
   line-height: 1.5;
   color: #1e293b;
-  resize: vertical;
+  resize: none;
   outline: none;
-  transition: border-color 0.15s;
-}
-.yaml-editor:focus {
-  border-color: #3b82f6;
-}
-.yaml-editor.has-error {
-  border-color: #ef4444;
 }
 
 /* ── 错误诊断卡片 ── */

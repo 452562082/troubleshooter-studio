@@ -297,7 +297,14 @@ async function runPlan() {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  /* 给 label+按钮行和下方 textarea 留 6px 气,跟 AnalyzePage .label-row 一致;
+   * 之前漏了这句,.label 的 margin-bottom 被困在 flex 内部不往下传,
+   * textarea 几乎贴着按钮底。 */
+  margin-bottom: 6px;
 }
+/* flex 容器里的 .label 不再自己管底间距 —— 交给外层 .input-header 统一,
+ * 省得 label 多出 6px margin 让自己跟按钮中心线错位 3px(视觉小瑕疵)。 */
+.input-header .label { margin-bottom: 0; }
 
 .input-section { margin-bottom: 24px; }
 

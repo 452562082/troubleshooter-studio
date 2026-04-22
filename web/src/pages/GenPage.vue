@@ -198,7 +198,10 @@ async function runGen() {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  /* 同 PlanPage:给 header 行到 textarea 留 6px,参考 AnalyzePage .label-row */
+  margin-bottom: 6px;
 }
+.input-header .label { margin-bottom: 0; }
 
 .input-section { margin-bottom: 24px; }
 

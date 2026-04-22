@@ -217,7 +217,10 @@ function severityIcon(s: string) {
 }
 
 .toolbar {
-  margin-bottom: 8px;
+  /* 8px 按钮到 textarea 偏紧,用户反馈"贴在一起"。跟 EditorPage / AnalyzePage
+   * 的视觉间距看齐;Doctor 这里 toolbar 跟 label 分行,比同行版(Plan/Gen/Diff)
+   * 需要多一点气,设 10px。 */
+  margin-bottom: 10px;
   display: flex;
   gap: 8px;
 }

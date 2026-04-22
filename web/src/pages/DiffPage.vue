@@ -287,7 +287,10 @@ async function runDiff() {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  /* 同 PlanPage:给 header 行到 textarea 留 6px,参考 AnalyzePage .label-row */
+  margin-bottom: 6px;
 }
+.input-header .label { margin-bottom: 0; }
 .label-mt { margin-top: 14px; }
 
 .input-section { margin-bottom: 24px; }

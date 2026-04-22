@@ -374,8 +374,13 @@ onUnmounted(() => {
         <p class="subtitle">扫描本机 tshoot.json 锚点，列出已经部署到 AI 平台的排障机器人。</p>
       </div>
       <div class="page-actions">
-        <button class="btn" :disabled="importStage !== 'idle'" @click="pickYAML">
-          导入 yaml 部署
+        <button
+          class="btn"
+          :disabled="importStage !== 'idle'"
+          title="选 yaml + target + 部署路径,跳过编辑直接装;跟创建向导的'导入到向导编辑'不同"
+          @click="pickYAML"
+        >
+          导入 YAML 一键部署
         </button>
         <button class="btn primary" :disabled="loading" @click="scan">
           {{ loading ? '扫描中…' : '刷新' }}
@@ -540,7 +545,7 @@ onUnmounted(() => {
     </div>
     <div v-else-if="loading" class="empty">扫描中…</div>
     <div v-else-if="bots.length === 0" class="empty">
-      还没部署过机器人。点右上角「<strong>导入 yaml 部署</strong>」拿已有 yaml 直接装；或去「<strong>创建向导</strong>」从头建一份。
+      还没部署过机器人。点右上角「<strong>导入 YAML 一键部署</strong>」拿已有 yaml 直接装；或去「<strong>创建向导</strong>」从头建一份。
     </div>
 
     <div v-else class="bot-grid">

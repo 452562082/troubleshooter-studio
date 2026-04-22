@@ -674,7 +674,7 @@ const configTypeDescriptions: Record<string, string> = {
         <p class="subtitle">通过可视化表单生成 system.yaml 配置文件（草稿会自动保存到本地）</p>
       </div>
       <div class="header-actions">
-        <button class="btn link" @click="openImportDialog">导入 YAML</button>
+        <button class="btn link" @click="openImportDialog" title="把已有 yaml 反填到向导各步骤,继续编辑调整">导入 YAML 到向导编辑</button>
         <button class="btn link" @click="clearDraft">清空草稿</button>
       </div>
     </div>

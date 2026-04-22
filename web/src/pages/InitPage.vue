@@ -218,6 +218,10 @@ const reposRootInput = ref('')
 const analyzeLoading = ref(false)
 const analyzeError = ref<string | null>(null)
 const analyzeSummary = ref<string | null>(null) // 成功后给个一句话总结
+// repoName -> 真实 git 分支列表;扫描完填充,env_branches input 用 <datalist> 挂。
+// 用 ref<Record> 而不是 per-repo 属性,避免跟 saved yaml 结构污染(env_branches
+// 已经在 RepoItem 上了,再加个 branches 会影响序列化)。
+const repoBranchesMap = ref<Record<string, string[]>>({})
 
 async function pickReposRoot() {
   if (!isDesktop()) {
@@ -258,6 +262,7 @@ async function runAnalyzeForRepos() {
         status: string
         error?: string
         detected_stack?: string   // 根文件 marker 探测(go.mod / package.json / ...)
+        branches?: string[]       // 真实 git 分支名,env_branches datalist 用
       }>
       // 真实的 service_names 在 report.repos[i].service_names 里(per_repo 只给 count)
       report?: {
@@ -272,6 +277,7 @@ async function runAnalyzeForRepos() {
     let filledStacks = 0
     const stackConflicts: string[] = []
 
+    let branchesFilled = 0
     for (const hit of perRepo) {
       const target = repos.find(rp => rp.name === hit.name)
       if (!target) continue
@@ -299,6 +305,12 @@ async function runAnalyzeForRepos() {
           stackConflicts.push(`${hit.name}: yaml=${target.stack} vs 探测=${hit.detected_stack}`)
         }
       }
+
+      // (3) 仓库的真实分支列表放进 map,env_branches input 的 datalist 读它
+      if (hit.branches?.length) {
+        repoBranchesMap.value[hit.name] = hit.branches
+        branchesFilled++
+      }
     }
 
     // 配置中心建议给 toast,避免 Step 5 静默被改
@@ -308,10 +320,11 @@ async function runAnalyzeForRepos() {
     const parts: string[] = []
     if (filledServices > 0) parts.push(`${filledServices} 个仓库反填 service_names`)
     if (filledStacks > 0) parts.push(`${filledStacks} 个仓库反填技术栈`)
+    if (branchesFilled > 0) parts.push(`${branchesFilled} 个仓库加载了分支下拉`)
     if (parts.length === 0) parts.push('未反填任何字段')
     analyzeSummary.value = `扫描完成:${parts.join(' · ')}${ccHint}`
 
-    if (filledServices > 0 || filledStacks > 0) toast.success(analyzeSummary.value)
+    if (filledServices > 0 || filledStacks > 0 || branchesFilled > 0) toast.success(analyzeSummary.value)
     else toast.info(analyzeSummary.value)
 
     if (stackConflicts.length > 0) {
@@ -1227,18 +1240,26 @@ const configTypeDescriptions: Record<string, string> = {
         </div>
         <div class="form-group">
           <label>环境分支映射
-            <span class="help-icon" title="每个 env 对应的长期分支。routing skill 会据此帮用户切到正确的代码分支再做代码定位。例：dev=develop / prod=main。">?</span>
+            <span class="help-icon" title="每个 env 对应的长期分支。routing skill 会据此帮用户切到正确的代码分支再做代码定位。例：dev=develop / prod=main。扫一下仓库后下面 input 带下拉,从真实分支里选就行。">?</span>
+            <span v-if="repoBranchesMap[repo.name]?.length" class="field-hint">
+              — 已加载 {{ repoBranchesMap[repo.name]!.length }} 个真实分支,input 点一下见下拉
+            </span>
           </label>
           <div class="branch-grid">
             <div v-for="env in environments" :key="env.id" class="branch-item">
               <span class="branch-env">{{ env.id || '?' }}</span>
+              <!-- HTML5 <datalist>:给 input 挂个下拉建议;用户还能自由手敲(eg. 长期分支叫 release/2024-q3) -->
               <input
                 v-model="repo.env_branches[env.id]"
                 type="text"
                 :placeholder="env.is_prod ? 'main' : 'develop'"
+                :list="repoBranchesMap[repo.name]?.length ? `branches-${i}` : undefined"
               />
             </div>
           </div>
+          <datalist v-if="repoBranchesMap[repo.name]?.length" :id="`branches-${i}`">
+            <option v-for="b in repoBranchesMap[repo.name]" :key="b" :value="b" />
+          </datalist>
         </div>
       </div>
       <button class="btn" @click="addRepo">+ 添加仓库</button>

@@ -45,6 +45,10 @@ type RepoSummary struct {
 	// 即使 yaml 里已填了 stack,这个字段也会独立反映探测结果,UI 可以提示
 	// "你声明 go 但看起来是 java"。
 	DetectedStack string `json:"detected_stack,omitempty"`
+	// Branches 是仓库的所有分支名(本地 + 远端,去重 + 字母序)。
+	// InitPage Step 4 的 env_branches input 用 <datalist> 挂上去,用户点
+	// 下拉就能从真实分支里选,不用手敲。仓库不存在 / 不是 git repo 时为空。
+	Branches []string `json:"branches,omitempty"`
 }
 
 // Result 是 Run 的完整结果:analyzer.Report(可以 Marshal 成 analysis.json) + 每仓库摘要。
@@ -107,6 +111,8 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 		// 不管 yaml 里 repo.stack 填没填,都跑一次 DetectStack 探测,作为信号告诉
 		// InitPage Step 4 能不能自动反填;yaml 已填时也可以用来做"声明 vs 实态"冲突提示。
 		detectedStack := analyzer.DetectStack(repoPath)
+		// 列真实 git 分支,给 UI 的 env_branches 下拉用;非 git 仓库返回空不报错
+		branches := analyzer.ListBranches(repoPath)
 
 		// 跑实际 analyzer:优先用 yaml 里声明的 stack;yaml 没填时回落到 detected。
 		// 两个都空就没法分析了,标 skipped。
@@ -122,6 +128,7 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 				Status:        "skipped",
 				Error:         err.Error(),
 				DetectedStack: detectedStack,
+				Branches:      branches,
 			})
 			progress(fmt.Sprintf("[skip] %s: %v", repo.Name, err))
 			continue
@@ -138,6 +145,7 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 			ServiceNameCount: len(ra.ServiceNames),
 			FindingCount:     len(ra.Findings),
 			DetectedStack:    detectedStack,
+			Branches:         branches,
 		})
 		progress(fmt.Sprintf("[ok] analyzed %s (stack=%s): %d service_names, %d findings",
 			repo.Name, effectiveStack, len(ra.ServiceNames), len(ra.Findings)))

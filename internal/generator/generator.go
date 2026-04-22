@@ -29,7 +29,7 @@ type Generator struct {
 	OutputDir    string
 	Ctx          *Context
 	Summary      *GenSummary
-	// SharedStaging 当非空时，GenerateClaudeCode/Cursor/Standalone 跳过各自
+	// SharedStaging 当非空时，GenerateClaudeCode/Cursor/Embedded 跳过各自
 	// 内部的 workspace 临时渲染，直接复用该目录下已渲染好的
 	// templates/workspace-template/ 作为 wsRoot。调用方（cmd/tshoot/main.go）
 	// 负责在多 target 生成时先跑一次 Generate() 到此目录、或把 openclaw 产物挪过来。
@@ -586,7 +586,7 @@ func readmeFAQSection(ctx *Context) string {
 	sb.WriteString("**Q: 改了 system.yaml，怎么更新部署？**\n")
 	sb.WriteString("A: 在 tshoot 仓库里跑 `tshoot upgrade -i system.yaml` —— 自动备份 + 重 gen + 打印 diff。然后来本目录 `bash scripts/install.sh` 应用到 OpenClaw。\n\n")
 
-	sb.WriteString("**Q: 想把机器人部署到别的平台（Claude Code / Cursor / Standalone）？**\n")
-	sb.WriteString("A: 在 `system.yaml` 的 `generation.targets` 里加上对应名字再 `tshoot gen`，会生成 `<output_dir>-claude-code/` / `-cursor/` / `-standalone/` 兄弟目录，各自带 install.sh。\n")
+	sb.WriteString("**Q: 想把机器人部署到别的平台（Claude Code / Cursor / Embedded 内嵌对话）？**\n")
+	sb.WriteString("A: 在 `system.yaml` 的 `generation.targets` 里加上对应名字再 `tshoot gen`，会生成 `<output_dir>-claude-code/` / `-cursor/` / `-embedded/` 兄弟目录；前两个带 install.sh 装到项目根，embedded 不用安装,Studio 扫到 tshoot.json 直接开对话。\n")
 	return sb.String()
 }

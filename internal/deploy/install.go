@@ -32,7 +32,8 @@ type Prompt struct {
 var reReadVar = regexp.MustCompile(`read_var\s+([A-Za-z_][A-Za-z0-9_]*)\s+"([^"]*)"(\s+secret)?`)
 
 // FindInstallSh 找产物目录里的 install.sh。openclaw target 在 <dir>/scripts/install.sh,
-// claude-code / cursor / standalone 在 <dir>/install.sh。返回绝对路径,找不到返回
+// claude-code / cursor 在 <dir>/install.sh;embedded 没 install.sh(内嵌对话不用装)。
+// 返回绝对路径,找不到返回
 // ("", os.ErrNotExist)。
 func FindInstallSh(dir string) (string, error) {
 	for _, rel := range []string{"scripts/install.sh", "install.sh"} {

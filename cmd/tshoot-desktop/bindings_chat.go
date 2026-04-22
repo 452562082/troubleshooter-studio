@@ -1,4 +1,4 @@
-// bindings_chat.go —— 桌面端原生 LLM 对话 binding。取代 standalone target
+// bindings_chat.go —— 桌面端原生 LLM 对话 binding。取代老 standalone(现 embedded) target
 // 的 Flask server.py 方案,Studio 进程直接拿 Anthropic Go SDK 跟模型流式对话,
 // token delta 通过 Wails EventsEmit 推给前端 BotsChat.vue。
 //
@@ -37,7 +37,7 @@ type ChatContext struct {
 }
 
 // 进行中的 chat streams。key = reqId(字符串,前端传进来当"本次会话的句柄")。
-// chatStreams 的锁跟 install / standalone 的 mu 分开,Chat 相对独立不争资源。
+// chatStreams 的锁跟 install 的 mu 分开,Chat 相对独立不争资源。
 type chatStreamRegistry struct {
 	mu      sync.Mutex
 	streams map[string]*llmchat.Stream
@@ -186,7 +186,7 @@ func (a *App) ChatStop(reqID string) bool {
 }
 
 // stopAllChats app 退出时由 main defer 调,cancel 所有未结束的 stream。
-// 跟 stopAllStandalones 类似:虽然 ctx cancel 会级联,但显式 Stop 让前端也能收到
+// 虽然 ctx cancel 会级联,但显式 Stop 让前端也能收到
 // 最后的 error 事件(前端订阅要卸载了倒是没所谓,但保险)。
 func (a *App) stopAllChats() {
 	a.chatStreams.mu.Lock()

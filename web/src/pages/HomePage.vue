@@ -79,7 +79,7 @@ const nextStep = computed(() => {
   <div class="home-page">
     <div class="hero">
       <h1>AI 排障机器人工作台</h1>
-      <p class="tagline">AI 排障机器人工作台：为你的业务系统建模 → 生成 → 一键部署 → 后续管理。4 种 AI 平台（OpenClaw / Claude Code / Cursor / Standalone），一份 system.yaml 全覆盖。</p>
+      <p class="tagline">AI 排障机器人工作台：为你的业务系统建模 → 生成 → 一键部署 → 后续管理。4 种部署形态（OpenClaw / Claude Code / Cursor / Embedded 内嵌对话），一份 system.yaml 全覆盖。</p>
     </div>
 
     <!-- 推荐下一步面板 -->

@@ -28,7 +28,7 @@ func Scan(roots []string) ([]DiscoveredAgent, error) {
 	out := []DiscoveredAgent{}
 
 	// macOS Spotlight 全盘找 tshoot.json；零配置命中任意位置的
-	// claude-code / cursor / standalone 机器人。找到的路径合并进 roots
+	// claude-code / cursor / embedded 机器人。找到的路径合并进 roots
 	// （重复的靠 systemID|target dedup 兜住）。非 macOS 或 Spotlight 用不了
 	// 自动 no-op，不影响现有 roots 扫描。
 	roots = append(roots, systemLocateAgents()...)
@@ -63,7 +63,7 @@ func Scan(roots []string) ([]DiscoveredAgent, error) {
 
 // DefaultRoots 返回 discover 默认扫描的位置：
 //   - ~/.openclaw/workspace/（OpenClaw 装完的机器人工作区；每个 agent 一个子目录）
-//   - CWD（claude-code / cursor / standalone 常直接装在项目根）
+//   - CWD（claude-code / cursor 常直接装在项目根；embedded 通常在 ~/.tshoot/embedded/）
 func DefaultRoots() []string {
 	roots := []string{"~/.openclaw/workspace"}
 	if wd, err := os.Getwd(); err == nil {

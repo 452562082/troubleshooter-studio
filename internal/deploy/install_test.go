@@ -34,7 +34,7 @@ func TestFindInstallSh(t *testing.T) {
 		}
 	})
 
-	t.Run("root 兜底(standalone/claude-code/cursor layout)", func(t *testing.T) {
+	t.Run("root 兜底(claude-code/cursor layout)", func(t *testing.T) {
 		dir := t.TempDir()
 		rootInstall := filepath.Join(dir, "install.sh")
 		if err := os.WriteFile(rootInstall, []byte("#!/bin/bash\n"), 0o644); err != nil {

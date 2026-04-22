@@ -56,7 +56,7 @@ interface ModelOption { value: string; label: string; hint?: string }
 interface ModelGroup { group: string; items: ModelOption[] }
 const MODEL_CUSTOM = '__custom__'
 // 模型预设:4 种 target 现在都走 OpenAI 兼容协议,每个 provider 都能直连,不再有
-// "standalone 回落到 Claude" 的局限。跟 internal/llmchat/providers.go 注册表对齐,
+// "embedded 回落到 Claude" 这种历史局限。跟 internal/llmchat/providers.go 注册表对齐,
 // 新加 provider:这里 + internal/llmchat/providers.go 注册表同步一条(server.py.tmpl 已删)。
 const modelGroups: ModelGroup[] = [
   {
@@ -1034,7 +1034,7 @@ const configTypeDescriptions: Record<string, string> = {
       </div>
       <div class="form-group">
         <label>模型 <span class="required">*</span>
-          <span class="help-icon" title="agent.model 主要给 OpenClaw 网关路由用（<provider>/<model-id>）。Claude Code / Cursor 只作为文档记录；Standalone 只能直连 Anthropic，非 claude-* 会自动回落到 claude-sonnet-4-6（可用 LLM_MODEL 环境变量覆盖）。">?</span>
+          <span class="help-icon" title="agent.model 格式 <provider>/<model-id>,前缀决定路由到哪家 LLM(anthropic/openai/deepseek/qwen/minimax/moonshot/zhipu/ollama)。OpenClaw 走 gateway;Claude Code / Cursor 只作为文档记录;Embedded 内嵌对话由 Studio 直连 provider(不依赖 anthropic SDK)。">?</span>
         </label>
         <select v-model="modelSelectValue" :class="{ error: hasError('agent.model') }">
           <optgroup v-for="g in modelGroups" :key="g.group" :label="g.group">
@@ -1284,7 +1284,7 @@ const configTypeDescriptions: Record<string, string> = {
             </select>
             <span class="deploy-hint">{{ deployTargetHint }}</span>
           </div>
-          <!-- standalone/openclaw:默认路径不露 input,用户不用操心;要改点"自定义"展开 -->
+          <!-- embedded/openclaw:默认路径不露 input,用户不用操心;要改点"自定义"展开 -->
           <div v-if="isManagedTarget && !customPathExpanded" class="deploy-inline-field flex auto-path-field">
             <label>部署位置 <span class="auto-tag">自动管理</span></label>
             <div class="auto-path-display">
@@ -1292,7 +1292,7 @@ const configTypeDescriptions: Record<string, string> = {
               <button type="button" class="btn-link" @click="customPathExpanded = true">自定义 →</button>
             </div>
           </div>
-          <!-- claude-code/cursor 必选,或 standalone/openclaw 展开"自定义"后的 input -->
+          <!-- claude-code/cursor 必选,或 embedded/openclaw 展开"自定义"后的 input -->
           <div v-else class="deploy-inline-field flex">
             <label>
               部署目标路径
@@ -1846,7 +1846,7 @@ textarea.error {
 .deploy-inline-path input { flex: 1; font-family: monospace; }
 .deploy-inline-actions { display: flex; justify-content: flex-end; }
 
-/* standalone/openclaw 的"自动管理"展示 */
+/* embedded/openclaw 的"自动管理"展示 */
 .auto-path-field label { display: flex; align-items: center; gap: 6px; }
 .auto-tag {
   font-size: 10px; font-weight: 500; color: #065f46;

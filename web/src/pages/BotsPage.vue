@@ -269,8 +269,8 @@ function removeRoot(r: string) {
   scan()
 }
 
-// openChat:跳转到嵌入式 chat 页,真正的 StartStandalone 在那边做
-// (那里有 key 表单 + spinner + 错误处理;这里不抢业务逻辑)。
+// openChat:跳转到内嵌 chat 页(BotsChat.vue);那边走 Studio 原生 chat 协议
+// 直连 LLM,不依赖 server.py。key 表单/spinner/错误处理都在那里。
 function openChat(b: DiscoveredBot) {
   router.push({
     path: '/bots/chat',
@@ -552,7 +552,7 @@ onUnmounted(() => {
         <button class="btn btn-regen" @click="resetImport">关闭</button>
       </div>
 
-      <!-- Step 1: 选 target + destPath。standalone/openclaw 自动路径,其它要选 -->
+      <!-- Step 1: 选 target + destPath。embedded/openclaw 自动路径,其它要选 -->
       <div v-if="importStage === 'picked' || importStage === 'deploying'" class="deploy-step">
         <div class="deploy-field">
           <label>目标平台</label>
@@ -563,7 +563,7 @@ onUnmounted(() => {
             <option value="embedded">Embedded (内嵌对话,Studio 托管)</option>
           </select>
         </div>
-        <!-- standalone/openclaw 自动管理路径,折叠;用户点"自定义"才露 input -->
+        <!-- embedded/openclaw 自动管理路径,折叠;用户点"自定义"才露 input -->
         <div v-if="importIsManagedTarget && !importCustomPathExpanded" class="deploy-field">
           <label>部署位置 <span class="auto-tag">自动管理</span></label>
           <div class="auto-path-display">
@@ -944,7 +944,8 @@ onUnmounted(() => {
   background: #f1f5f9; border: 1px solid #cbd5e1; color: #334155;
 }
 .btn-regen:hover:not(:disabled) { background: #e2e8f0; }
-/* standalone 专属"打开对话"按钮:绿色强调,区分于管理类操作 */
+/* embedded target(老名 standalone)的"打开对话"按钮:绿色强调,区分于管理类操作;
+ * 现在所有 target 都有对话能力,不再是 embedded 专属,但绿色按钮样式保留。 */
 .btn-chat {
   background: #d1fae5; border-color: #86efac; color: #065f46; font-weight: 600;
 }
@@ -1056,7 +1057,7 @@ onUnmounted(() => {
 }
 .path-row { display: flex; gap: 8px; }
 .path-row input { flex: 1; }
-/* standalone/openclaw 的自动路径展示 */
+/* embedded/openclaw 的自动路径展示 */
 .deploy-field label { display: flex; align-items: center; gap: 6px; }
 .auto-tag {
   font-size: 10px; font-weight: 500; color: #065f46;

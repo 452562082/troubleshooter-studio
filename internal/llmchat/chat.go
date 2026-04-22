@@ -10,8 +10,9 @@
 // 路由:ResolveModel("anthropic/claude-sonnet-4-6") → Provider{...} + "claude-sonnet-4-6"
 // 用 openai.NewClientWithConfig + ClientConfig.BaseURL 指向对应 provider 即可。
 //
-// 本包 standalone target 的 server.py.tmpl 用的是 Python 版 openai SDK,但行为跟
-// 这里一致 —— agent.model 同一前缀约定,ResolveModel 的逻辑在两边都复刻一份。
+// 本包给"embedded"target 的机器人用 —— Studio 扫到 tshoot.json 打开对话页时,
+// 读 system-prompt.md + agent.model,走 ResolveModel 按前缀路由到对应 provider
+// 的 OpenAI 兼容 endpoint。
 package llmchat
 
 import (
@@ -177,8 +178,8 @@ func Start(parentCtx context.Context, opt ChatOptions) (*Stream, error) {
 }
 
 // ReadSystemPrompt 读 bot 产物目录的 system prompt。分三档兜底,让所有 target
-// 都能原生 chat,不只限 standalone:
-//  1. <botPath>/system-prompt.md(standalone target 合并版)
+// 都能原生 chat,不只限 embedded target:
+//  1. <botPath>/system-prompt.md(embedded target 生成的合并版)
 //  2. 拼 SOUL/IDENTITY/AGENTS/CHECKLIST/TOOLS + skills/*/SKILL.md (openclaw 风格)
 //  3. <botPath>/CLAUDE.md (claude-code/cursor 风格)
 //  4. 默认兜底

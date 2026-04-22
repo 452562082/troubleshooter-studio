@@ -27,7 +27,7 @@
 | **OpenClaw 安装包** | `install.sh` + workspace 模板 + MCP 配置 + `self-test.sh` | `bash install.sh` 装到 OpenClaw |
 | **Claude Code** | `CLAUDE.md` + `skills/` + `install.sh` | `bash install.sh <project-dir>` |
 | **Cursor IDE** | `.cursorrules` + `.cursor/rules/*.mdc` + `skills/` + `install.sh` | `bash install.sh <project-dir>` |
-| **Standalone Web 聊天** | `server.py` + `index.html` + `Dockerfile` + docker-compose + `install.sh` | `bash install.sh` 或 `docker compose up --build` |
+| **Embedded 内嵌对话**（老名 `standalone`） | `system-prompt.md` + `skills/` + `scripts/` | Studio 桌面端扫到即用,"💬 打开对话"直连 LLM(支持 Anthropic/OpenAI/DeepSeek/Qwen/MiniMax/Moonshot/智谱/Ollama 8 家) |
 
 在 `system.yaml` 的 `generation.targets` 里勾选需要的形态，一次 gen 全出。机器人本体脱离 studio 可独立运行。
 

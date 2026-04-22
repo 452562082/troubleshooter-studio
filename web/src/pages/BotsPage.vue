@@ -44,8 +44,11 @@ const applyState = reactive<
 >({})
 
 // Doctor 诊断状态。key = regenKey(b)。
-// 设计:只跑声明级诊断(不填 reposRoot),够 80% 场景;想做代码漂移检测去独立 DoctorPage。
-// 展开的卡片默认收起,点按钮才跑;issues 空 = 无漂移。
+// 两档:
+//   1. 声明级(reposRoot=空):只校验 yaml 内部一致性,秒级返回,默认入口
+//   2. 深度扫(reposRoot=某目录):对比 yaml 声明 vs 代码仓库实态,8 种漂移检测,
+//      可能跑几秒(要 walk 目录)。用户点"加 reposRoot 深度扫"展开填路径 + 重跑。
+// 深度扫合并到这里后,独立 DoctorPage 就没存在必要了(之前保留它就是为了带 reposRoot 的场景)。
 interface DoctorIssue {
   severity: string
   category: string
@@ -54,22 +57,79 @@ interface DoctorIssue {
   suggest?: string
 }
 const doctorState = reactive<
-  Record<string, { loading: boolean; issues?: DoctorIssue[]; err?: string; open?: boolean }>
+  Record<string, {
+    loading: boolean
+    issues?: DoctorIssue[]
+    err?: string
+    open?: boolean
+    reposRoot?: string  // 深度扫用,空 = 声明级
+    showReposRootInput?: boolean // 用户点了"深度扫"展开 input 填路径
+  }>
 >({})
 
-async function runDoctor(b: DiscoveredBot) {
+async function runDoctor(b: DiscoveredBot, reposRoot = '') {
   const k = regenKey(b)
   if (!b.meta.system_yaml) {
     toast.error(`${b.meta.system_id}: tshoot.json 缺 system_yaml,无法诊断`)
     return
   }
-  doctorState[k] = { loading: true, open: true }
-  try {
-    const data = (await bridgeDoctor(b.meta.system_yaml, '')) as { issues?: DoctorIssue[] }
-    doctorState[k] = { loading: false, open: true, issues: data.issues || [] }
-  } catch (e: any) {
-    doctorState[k] = { loading: false, open: true, err: String(e?.message || e) }
+  const prev = doctorState[k]
+  doctorState[k] = {
+    loading: true,
+    open: true,
+    reposRoot,
+    showReposRootInput: prev?.showReposRootInput ?? false,
   }
+  try {
+    const data = (await bridgeDoctor(b.meta.system_yaml, reposRoot)) as { issues?: DoctorIssue[] }
+    doctorState[k] = {
+      loading: false,
+      open: true,
+      issues: data.issues || [],
+      reposRoot,
+      showReposRootInput: prev?.showReposRootInput ?? false,
+    }
+  } catch (e: any) {
+    doctorState[k] = {
+      loading: false,
+      open: true,
+      err: String(e?.message || e),
+      reposRoot,
+      showReposRootInput: prev?.showReposRootInput ?? false,
+    }
+  }
+}
+
+// "加 reposRoot 深度扫"按钮:展开 input + 选目录。用户填完直接跑(再点诊断冗余)。
+function toggleDoctorDeepScan(b: DiscoveredBot) {
+  const k = regenKey(b)
+  const s = doctorState[k]
+  if (!s) return // 主面板还没开,别让深度扫独行
+  s.showReposRootInput = !s.showReposRootInput
+  if (!s.showReposRootInput) {
+    // 关起来也清掉用户半填的 reposRoot,避免下次误以为在跑深度扫
+    s.reposRoot = ''
+  }
+}
+
+async function pickDoctorReposRoot(b: DiscoveredBot) {
+  const k = regenKey(b)
+  try {
+    const p = await openDir('选择仓库根目录(含各个 repo.name 子目录)')
+    if (p && doctorState[k]) doctorState[k].reposRoot = p
+  } catch (e: any) {
+    if (doctorState[k]) doctorState[k].err = String(e?.message || e)
+  }
+}
+
+async function runDoctorDeep(b: DiscoveredBot) {
+  const k = regenKey(b)
+  const r = doctorState[k]?.reposRoot?.trim()
+  if (!r) {
+    toast.error('请先填仓库根目录(或选目录)')
+    return
+  }
+  await runDoctor(b, r)
 }
 
 function doctorSeverityIcon(s: string): string {
@@ -654,7 +714,7 @@ onUnmounted(() => {
             <button
               class="btn btn-regen"
               :disabled="doctorState[regenKey(b)]?.loading"
-              :title="'跑一次 doctor:对比 yaml 声明跟代码仓库实态(本地跑,只做声明级检查;想加 reposRoot 做深度扫描请去「健康检查」独立页)'"
+              :title="'跑一次 doctor 声明级诊断;想做代码实态深度扫描,面板展开后点「+ 深度扫描代码」填 reposRoot'"
               @click="runDoctor(b)"
             >
               {{ doctorState[regenKey(b)]?.loading ? '诊断中…' : '🩺 诊断' }}
@@ -682,17 +742,52 @@ onUnmounted(() => {
           </div>
         </footer>
 
-        <!-- Doctor 诊断结果:按卡展开,issues 空 = 一切正常。 -->
+        <!-- Doctor 诊断结果:按卡展开。两档:声明级(默认) / 深度扫(加 reposRoot)。 -->
         <section v-if="doctorState[regenKey(b)]?.open" class="doctor-panel">
           <div class="doctor-head">
             <strong>🩺 诊断结果</strong>
-            <button class="btn btn-regen" @click="doctorState[regenKey(b)].open = false">收起</button>
+            <span v-if="doctorState[regenKey(b)]?.reposRoot" class="doctor-mode deep">
+              深度扫 · {{ doctorState[regenKey(b)]!.reposRoot }}
+            </span>
+            <span v-else class="doctor-mode">声明级</span>
+            <div class="doctor-head-actions">
+              <button
+                class="btn btn-regen"
+                :title="'填 reposRoot 做代码实态深度扫描(检测 8 种漂移)'"
+                @click="toggleDoctorDeepScan(b)"
+              >
+                {{ doctorState[regenKey(b)]?.showReposRootInput ? '收起深度扫' : '+ 深度扫描代码' }}
+              </button>
+              <button class="btn btn-regen" @click="doctorState[regenKey(b)].open = false">收起</button>
+            </div>
           </div>
+
+          <!-- 深度扫输入行,用户填仓库根然后重诊断 -->
+          <div v-if="doctorState[regenKey(b)]?.showReposRootInput" class="doctor-deep-row">
+            <input
+              v-model="doctorState[regenKey(b)]!.reposRoot"
+              type="text"
+              placeholder="~/code/all-repos 或绝对路径 /Users/xxx/repos"
+              :disabled="doctorState[regenKey(b)]?.loading"
+              class="doctor-deep-input"
+            />
+            <button class="btn btn-regen" :disabled="doctorState[regenKey(b)]?.loading" @click="pickDoctorReposRoot(b)">
+              选目录…
+            </button>
+            <button
+              class="btn primary"
+              :disabled="doctorState[regenKey(b)]?.loading || !doctorState[regenKey(b)]?.reposRoot?.trim()"
+              @click="runDoctorDeep(b)"
+            >
+              {{ doctorState[regenKey(b)]?.loading ? '扫描中…' : '跑深度扫描' }}
+            </button>
+          </div>
+
           <div v-if="doctorState[regenKey(b)]?.err" class="alert error">
             {{ doctorState[regenKey(b)]!.err }}
           </div>
           <div v-else-if="doctorState[regenKey(b)]?.issues?.length === 0" class="alert success">
-            ✓ 未发现声明漂移。想做代码实态深度扫描(对比 yaml vs git 仓库)去独立「健康检查」页填 reposRoot。
+            ✓ {{ doctorState[regenKey(b)]?.reposRoot ? '深度扫描未发现漂移' : '未发现声明漂移。想对比代码实态(检测 8 种漂移),点上方「+ 深度扫描代码」填仓库根' }}
           </div>
           <ul v-else-if="doctorState[regenKey(b)]?.issues" class="doctor-list">
             <li
@@ -848,9 +943,26 @@ onUnmounted(() => {
   margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--c-line-2);
 }
 .doctor-head {
-  display: flex; justify-content: space-between; align-items: center;
+  display: flex; align-items: center; gap: 10px;
   margin-bottom: 8px; font-size: var(--fs-sm); color: var(--c-ink);
+  flex-wrap: wrap;
 }
+.doctor-mode {
+  font-size: var(--fs-xs); color: var(--c-muted);
+  background: var(--c-surf-3); padding: 2px 8px; border-radius: 10px;
+}
+.doctor-mode.deep { background: #e0e7ff; color: #3730a3; font-family: monospace; }
+.doctor-head-actions { margin-left: auto; display: flex; gap: 6px; }
+
+.doctor-deep-row {
+  display: flex; gap: 6px; margin-bottom: 8px;
+  padding: 8px 10px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px;
+}
+.doctor-deep-input {
+  flex: 1; padding: 6px 10px; font-size: 12px; font-family: monospace;
+  border: 1px solid #cbd5e1; border-radius: 4px;
+}
+.doctor-deep-input:focus { outline: none; border-color: #3b82f6; }
 .doctor-list {
   list-style: none; padding: 0; margin: 0;
   display: flex; flex-direction: column; gap: 6px;

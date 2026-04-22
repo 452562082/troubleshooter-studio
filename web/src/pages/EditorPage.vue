@@ -1,6 +1,16 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { validate as bridgeValidate, plan as bridgePlan, gen as bridgeGen } from '../lib/bridge'
+import { useRouter } from 'vue-router'
+import {
+  importAndDeploy,
+  isDesktop,
+  openDir,
+  plan as bridgePlan,
+  validate as bridgeValidate,
+} from '../lib/bridge'
+import { toast } from '../lib/toast'
+
+const router = useRouter()
 
 const exampleYaml = `system:
   id: demo
@@ -87,7 +97,7 @@ function loadFile(event: Event) {
   input.value = ''
 }
 
-async function apiCall(endpoint: 'validate' | 'plan' | 'gen', label: string) {
+async function apiCall(endpoint: 'validate' | 'plan', label: string) {
   errorMsg.value = ''
   successMsg.value = ''
   resultData.value = null
@@ -98,17 +108,61 @@ async function apiCall(endpoint: 'validate' | 'plan' | 'gen', label: string) {
     if (endpoint === 'validate') {
       const r = await bridgeValidate(yamlContent.value)
       successMsg.value = `验证通过！系统: ${r.system} (${r.name}) | ${r.envs} 个环境 | ${r.repos} 个仓库`
-    } else if (endpoint === 'plan') {
-      resultTitle.value = label
-      resultData.value = await bridgePlan(yamlContent.value)
     } else {
       resultTitle.value = label
-      resultData.value = await bridgeGen(yamlContent.value, '')
+      resultData.value = await bridgePlan(yamlContent.value)
     }
   } catch (e: any) {
     errorMsg.value = e.message || String(e)
   } finally {
     loading.value = ''
+  }
+}
+
+// ── 一键部署 ──
+// 之前这里还有个"执行生成"按钮调 gen(yaml, '') 写到 ./dist/<id>-<target>。
+// 桌面端的坑:.app bundle 启动时 CWD 是 MacOS/ 目录,产物会写进 bundle 里
+// 下次 make desktop-app 就被覆盖,用户找不到产物。删那个按钮,改成跟 InitPage
+// Step 7 同款的一键部署:显式选 target + destPath,走 importAndDeploy,部署后跳 /bots。
+const deployTarget = ref<'openclaw' | 'claude-code' | 'cursor' | 'standalone'>('openclaw')
+const deployDestPath = ref('')
+const deployLoading = ref(false)
+const deployError = ref<string | null>(null)
+
+async function pickDeployDestPath() {
+  if (!isDesktop()) { deployError.value = '选目录需要桌面 app 环境'; return }
+  try {
+    const p = await openDir('选择部署目标路径')
+    if (p) deployDestPath.value = p
+  } catch (e: any) {
+    deployError.value = String(e?.message || e)
+  }
+}
+
+async function runOneClickDeploy() {
+  deployError.value = null
+  if (!yamlContent.value.trim()) { deployError.value = '请先填 yaml'; return }
+  if (!deployDestPath.value.trim()) { deployError.value = '请选部署目标路径'; return }
+  if (!isDesktop()) {
+    deployError.value = '一键部署只在桌面 app 可用;浏览器模式请去已装机器人页导入'
+    return
+  }
+  // 先 validate,让失败落在前端 toast 而不是后端半路爆
+  try {
+    await bridgeValidate(yamlContent.value)
+  } catch (e: any) {
+    deployError.value = `yaml 校验失败: ${String(e?.message || e)};先点"验证"修复`
+    return
+  }
+  deployLoading.value = true
+  try {
+    await importAndDeploy(yamlContent.value, deployTarget.value, deployDestPath.value)
+    toast.success(`部署完成,已写到 ${deployDestPath.value}`)
+    router.push('/bots')
+  } catch (e: any) {
+    deployError.value = String(e?.message || e)
+  } finally {
+    deployLoading.value = false
   }
 }
 </script>
@@ -118,8 +172,8 @@ async function apiCall(endpoint: 'validate' | 'plan' | 'gen', label: string) {
     <h1>System YAML 编辑器</h1>
 
     <div class="info-box">
-      <div class="info-box-title">使用说明</div>
-      <div>在此编辑 system.yaml，支持「验证」「预览计划」「执行生成」三种操作</div>
+      <div class="info-box-title">YAML 沙盒 — 调试用</div>
+      <div>拿来快速试改 yaml:验证语法 + 预演 gen 结果(skill 列表 / 文件变化 / config-map 投影)。真要部署到机器人用下方「一键部署」,或去 <router-link to="/bots">已装机器人</router-link> 导入。</div>
     </div>
 
     <div class="toolbar">
@@ -134,9 +188,9 @@ async function apiCall(endpoint: 'validate' | 'plan' | 'gen', label: string) {
       <button class="btn primary" :disabled="!!loading" @click="apiCall('plan', '生成计划')">
         {{ loading === '生成计划' ? '计划中...' : '生成计划' }}
       </button>
-      <button class="btn accent" :disabled="!!loading" @click="apiCall('gen', '执行生成')">
-        {{ loading === '执行生成' ? '生成中...' : '执行生成' }}
-      </button>
+      <!-- 原有的"执行生成"已删 —— 它调 gen(yaml, '') 写到 ./dist/<id>,桌面端 CWD 是
+           .app bundle 里的 MacOS/,产物进 bundle 下次 make desktop-app 就覆盖,用户找不到。
+           想真落盘部署走下面的"一键部署",显式选 destPath 避免 CWD 坑。 -->
     </div>
 
     <textarea
@@ -195,19 +249,46 @@ async function apiCall(endpoint: 'validate' | 'plan' | 'gen', label: string) {
       </div>
     </div>
 
-    <!-- Gen result -->
-    <div v-if="resultData && resultTitle === '执行生成'" class="result-card">
-      <h2>生成结果摘要</h2>
-      <table class="mini-table">
-        <tr><td>系统</td><td>{{ resultData.system }}</td></tr>
-        <tr><td>配置中心</td><td>{{ resultData.config_center }}</td></tr>
-        <tr><td>输出目录</td><td><code>{{ resultData.output_dir }}</code></td></tr>
-        <tr><td>包含 Skills</td><td>{{ resultData.skills_included_count }}</td></tr>
-        <tr><td>写入文件数</td><td>{{ resultData.files_written }}</td></tr>
-        <tr><td>保留文件数</td><td>{{ resultData.preserved_count }}</td></tr>
-        <tr><td>Prior Overrides</td><td>{{ resultData.prior_overrides_count }}</td></tr>
-        <tr><td>Analyzer Hits</td><td>{{ resultData.analyzer_hits_count }}</td></tr>
-      </table>
+    <!-- 一键部署:替代原"执行生成"。显式选 target + destPath,绕开 CWD 坑 -->
+    <div class="deploy-inline">
+      <div class="deploy-inline-title">🚀 一键部署</div>
+      <p class="help-text" style="margin-bottom:10px;">
+        调通 yaml 后直接装到机器人。跟「已装机器人页 → 导入 yaml 一键部署」走同一条后端,装完跳到那里看新装的卡。
+      </p>
+      <div class="deploy-inline-row">
+        <div class="deploy-inline-field">
+          <label>目标平台</label>
+          <select v-model="deployTarget" :disabled="deployLoading">
+            <option value="openclaw">OpenClaw</option>
+            <option value="claude-code">Claude Code</option>
+            <option value="cursor">Cursor IDE</option>
+            <option value="standalone">Standalone</option>
+          </select>
+        </div>
+        <div class="deploy-inline-field flex">
+          <label>部署目标路径</label>
+          <div class="deploy-inline-path">
+            <input
+              v-model="deployDestPath"
+              type="text"
+              placeholder="./dist/my-system 或项目根路径"
+              :disabled="deployLoading"
+            />
+            <button type="button" class="btn" :disabled="deployLoading" @click="pickDeployDestPath">选目录…</button>
+          </div>
+        </div>
+      </div>
+      <div class="deploy-inline-actions">
+        <button
+          type="button"
+          class="btn primary"
+          :disabled="deployLoading || !deployDestPath.trim() || !yamlContent.trim()"
+          @click="runOneClickDeploy"
+        >
+          {{ deployLoading ? '部署中…' : '一键部署' }}
+        </button>
+      </div>
+      <div v-if="deployError" class="alert error">{{ deployError }}</div>
     </div>
   </div>
 </template>
@@ -220,6 +301,27 @@ async function apiCall(endpoint: 'validate' | 'plan' | 'gen', label: string) {
   margin-bottom: 12px;
   flex-wrap: wrap;
 }
+
+/* ── 一键部署块(跟 InitPage Step 7 同款样式) ── */
+.deploy-inline {
+  margin-top: 18px; padding: 16px 18px;
+  background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px;
+}
+.deploy-inline-title {
+  font-weight: 600; color: #1e40af; margin-bottom: 4px; font-size: 14px;
+}
+.deploy-inline-row { display: flex; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+.deploy-inline-field { display: flex; flex-direction: column; gap: 4px; min-width: 180px; }
+.deploy-inline-field.flex { flex: 1; }
+.deploy-inline-field label { font-size: 12px; font-weight: 600; color: #334155; }
+.deploy-inline-field select,
+.deploy-inline-path input {
+  padding: 7px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px;
+}
+.deploy-inline-path { display: flex; gap: 6px; }
+.deploy-inline-path input { flex: 1; font-family: monospace; }
+.deploy-inline-actions { display: flex; justify-content: flex-end; }
+.help-text { color: var(--c-muted); font-size: var(--fs-sm); line-height: 1.6; }
 
 .yaml-editor {
   width: 100%;

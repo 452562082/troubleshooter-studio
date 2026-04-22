@@ -51,13 +51,11 @@ const primaryCards = [
   { path: '/bots',   icon: '🤖', label: '已装机器人',    desc: '扫本机已部署的 / 导入 yaml 一键部署到 4 平台 / 原地更新已装' },
   { path: '/editor', icon: '📝', label: 'YAML 编辑器',   desc: '直接手写 / 粘贴 system.yaml，一键验证 / plan' },
 ]
-// 高级 / 诊断工具:不是每次都用,视觉上弱化一档。
-// Plan/Diff 已删(跟 BotsPage 预演重叠 / 是死码),剩下 Analyze 和 Doctor。
-// Analyze 短期会被融入 InitPage 第 4 步,但独立入口保留做"对任意 yaml 扫描"。
-// Doctor 同理,BotsPage 卡片上有按钮,这里保留独立入口。
+// 高级 / 诊断工具:只剩 Analyze 独立页(对游离 yaml 扫)。Doctor 已完全并进
+// BotsPage 卡片(声明级 + 深度扫两档),独立页删掉,不再保留"对任意 yaml"那个入口 ——
+// 那种场景其实很少见,粘 yaml 去 EditorPage 做验证 + plan 就够了。
 const advancedCards = [
-  { path: '/analyze', icon: '🔍', label: '仓库分析', desc: '扫代码抽 service_names 与配置中心线索（可独立用,也被 InitPage 第 4 步集成）' },
-  { path: '/doctor',  icon: '🩺', label: '健康检查', desc: '对比声明 vs 代码实态,给 actionable 的修复建议（BotsPage 卡片也能触发）' },
+  { path: '/analyze', icon: '🔍', label: '仓库分析', desc: '扫代码抽 service_names 与配置中心线索（InitPage 第 4 步也集成了这个）' },
 ]
 
 // 推荐下一步逻辑

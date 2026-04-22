@@ -12,7 +12,6 @@ const navItems = [
   { path: '/init', icon: '🧙', label: '创建向导', desc: '生成 system.yaml' },
   { path: '/editor', icon: '📝', label: '编辑器', desc: '编辑 / 验证 / 生成' },
   { path: '/analyze', icon: '🔍', label: '仓库分析', desc: '扫代码抽 service_names / 配置中心' },
-  { path: '/doctor', icon: '🩺', label: '健康检查', desc: '检测声明与代码漂移' },
 ]
 </script>
 

@@ -755,7 +755,7 @@ onUnmounted(() => {
             <!-- 外露:高频操作(对话 + 诊断),用绿色强调 -->
             <button
               class="btn btn-regen btn-chat"
-              title="在 Studio 内跟机器人对话(Go 直连 Anthropic API,不依赖 python/flask)"
+              title="在 Studio 内跟机器人对话(直连 LLM API,支持 8 家 provider:Anthropic/OpenAI/DeepSeek/Qwen/MiniMax/Moonshot/智谱/Ollama)"
               @click="openChat(b)"
             >
               💬 打开对话

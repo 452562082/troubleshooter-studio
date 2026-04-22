@@ -1,5 +1,5 @@
-// bindings_chat.go —— 桌面端原生 LLM 对话 binding。embedded target
-// 的 Flask server.py 方案,Studio 进程直接拿 Anthropic Go SDK 跟模型流式对话,
+// bindings_chat.go —— 桌面端原生 LLM 对话 binding(embedded target 用)。
+// Studio 进程直接拿 OpenAI 兼容协议跟多 provider 流式对话(见 internal/llmchat),
 // token delta 通过 Wails EventsEmit 推给前端 BotsChat.vue。
 //
 // 流程:
@@ -34,6 +34,8 @@ type ChatContext struct {
 	ProviderID   string   `json:"provider_id"`   // 识别出的 provider id (如 "anthropic"),UI 按这个问"该填谁家 API key"
 	ProviderName string   `json:"provider_name"` // provider 展示名(如 "Anthropic (Claude 系列)")
 	Envs         []string `json:"envs"`          // env id 列表,UI 下拉选用
+	PromptChars  int      `json:"prompt_chars"`  // system-prompt 字符数
+	PromptTokens int      `json:"prompt_tokens"` // 估算 token 数(见 llmchat.EstimateTokens)
 }
 
 // 进行中的 chat streams。key = reqId(字符串,前端传进来当"本次会话的句柄")。
@@ -98,11 +100,15 @@ func (a *App) ChatContextFor(botPath string) (*ChatContext, error) {
 	for _, e := range cfg.Environments {
 		envs = append(envs, e.ID)
 	}
+	// 顺手读 system-prompt 算大小,UI 可以提示"prompt 已 Xk tokens,接近 Y 家模型上限"
+	sysPrompt := llmchat.ReadSystemPrompt(ag.Path)
 	ctx := &ChatContext{
-		SystemID:   cfg.System.ID,
-		SystemName: cfg.System.Name,
-		Model:      cfg.Agent.Model,
-		Envs:       envs,
+		SystemID:     cfg.System.ID,
+		SystemName:   cfg.System.Name,
+		Model:        cfg.Agent.Model,
+		Envs:         envs,
+		PromptChars:  len(sysPrompt),
+		PromptTokens: llmchat.EstimateTokens(sysPrompt),
 	}
 	// 解析 model 前缀识别 provider;解析失败不报错,前端 chat 页会在发消息时收到
 	// 更精准的 "model 未识别" 提示。这里只补展示字段方便 UI 先画 badge。
@@ -173,6 +179,22 @@ func (a *App) ChatSend(in ChatSendInput) (string, error) {
 	}()
 
 	return reqID, nil
+}
+
+// ChatCheckKey 拿 (apiKey, botPath) 做一次 provider auth 预检,让用户在填 key
+// 时立即知道 key 能不能用,而不是等发了第一条消息再收到 401。
+//
+// 从 bot 目录里读 agent.model 作为 provider 判定依据(同 ChatSend)。成功返回
+// 空串 + nil error;失败返回 error(前端 try/catch 显示)。
+func (a *App) ChatCheckKey(botPath, apiKey string) error {
+	if apiKey == "" {
+		return fmt.Errorf("apiKey 必填")
+	}
+	ctx, err := a.ChatContextFor(botPath)
+	if err != nil {
+		return err
+	}
+	return llmchat.CheckKey(a.ctx, apiKey, ctx.Model)
 }
 
 // ChatStop 前端点"停止"触发;cancel 对应的 stream。未知 reqId 静默 false,UI 可忽略。

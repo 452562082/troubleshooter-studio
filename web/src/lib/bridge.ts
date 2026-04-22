@@ -188,6 +188,8 @@ export interface ChatContext {
   provider_id: string     // "anthropic" / "openai" / "minimax" / ... 空串 = 未识别
   provider_name: string   // "Anthropic (Claude 系列)" 之类展示名
   envs: string[]
+  prompt_chars: number    // system-prompt.md 字符数
+  prompt_tokens: number   // 估算 token 数,用户据此判断是不是快爆 context
 }
 export interface ChatSendInput {
   bot_path: string
@@ -215,6 +217,14 @@ export async function chatSend(in_: ChatSendInput): Promise<string> {
 export async function chatStop(reqId: string): Promise<boolean> {
   if (!isDesktop()) return false
   return App.ChatStop(reqId)
+}
+
+/** 验证 API key 是否有效 + endpoint 可达(最小 1-token 请求);
+ *  进入 chat 前调用,避免用户填错 key 问了半天才收到 401。
+ *  成功 resolve void;失败 reject 带人话错误消息。 */
+export async function chatCheckKey(botPath: string, apiKey: string): Promise<void> {
+  if (!isDesktop()) throw new Error('ChatCheckKey 只在桌面 app 里可用')
+  await App.ChatCheckKey(botPath, apiKey)
 }
 
 // embedded target 的对话走 chatSend/chatStop(原生 chat,直连 LLM API,见上面)。

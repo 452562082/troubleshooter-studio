@@ -523,6 +523,8 @@ export namespace main {
 	    provider_id: string;
 	    provider_name: string;
 	    envs: string[];
+	    prompt_chars: number;
+	    prompt_tokens: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new ChatContext(source);
@@ -536,6 +538,8 @@ export namespace main {
 	        this.provider_id = source["provider_id"];
 	        this.provider_name = source["provider_name"];
 	        this.envs = source["envs"];
+	        this.prompt_chars = source["prompt_chars"];
+	        this.prompt_tokens = source["prompt_tokens"];
 	    }
 	}
 	export class ChatSendInput {

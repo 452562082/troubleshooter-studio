@@ -14,6 +14,8 @@ export function ApplyBot(arg1:string,arg2:string,arg3:boolean):Promise<agent.Res
 
 export function CancelInstall():Promise<boolean>;
 
+export function ChatCheckKey(arg1:string,arg2:string):Promise<void>;
+
 export function ChatContextFor(arg1:string):Promise<main.ChatContext>;
 
 export function ChatSend(arg1:main.ChatSendInput):Promise<string>;

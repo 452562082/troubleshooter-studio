@@ -15,7 +15,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { EventsOff, EventsOn } from '../../wailsjs/runtime/runtime'
 import type { ChatContext, ChatMessage } from '../lib/bridge'
-import { chatContextFor, chatSend, chatStop, isDesktop, revealInFinder } from '../lib/bridge'
+import { chatCheckKey, chatContextFor, chatSend, chatStop, isDesktop, revealInFinder } from '../lib/bridge'
 import { confirmDialog } from '../lib/confirm'
 import { toast } from '../lib/toast'
 import { marked } from 'marked'
@@ -113,13 +113,27 @@ async function init() {
   stage.value = 'need-key'
 }
 
-function submitKey() {
+const keyChecking = ref(false)
+
+async function submitKey() {
   const k = apiKeyInput.value.trim()
   if (!k) { errMsg.value = 'API key 不能空'; return }
-  if (rememberKey.value) sessionKeyStore[botPath.value] = k
-  // 也存到 window 的 "立即用"槽,即使没勾 remember 也当前会话内保留
-  ;(window as any).__tshootChatCurrentKey = k
+  // 预检:先向 provider 发最小请求(max_tokens=1)验证 key 能用,避免用户填完
+  // 发消息才收到 401 这种"先填半天再翻车"体验。ollama 本地之类不需要 key
+  // 的场景预检会直接放行(CheckKey 里对空 key 会 reject,但 ollama 用户填
+  // 任意字符串都能过它家 /chat/completions 的 auth)。
+  keyChecking.value = true
   errMsg.value = null
+  try {
+    await chatCheckKey(botPath.value, k)
+  } catch (e: any) {
+    errMsg.value = `key 预检失败:${String(e?.message || e)}`
+    keyChecking.value = false
+    return
+  }
+  keyChecking.value = false
+  if (rememberKey.value) sessionKeyStore[botPath.value] = k
+  ;(window as any).__tshootChatCurrentKey = k
   stage.value = 'ready'
   apiKeyInput.value = ''
 }
@@ -254,6 +268,15 @@ onBeforeUnmount(() => {
       <span v-if="chatCtx" class="chat-model" :title="chatCtx.provider_name ? 'provider: ' + chatCtx.provider_name : 'provider 未识别'">
         {{ chatCtx.model }}{{ chatCtx.provider_id ? ' · ' + chatCtx.provider_id : '' }}
       </span>
+      <span
+        v-if="chatCtx && chatCtx.prompt_tokens > 0"
+        class="prompt-size"
+        :class="{ warn: chatCtx.prompt_tokens > 8000 }"
+        :title="`system prompt ${chatCtx.prompt_chars} 字符 ≈ ${chatCtx.prompt_tokens} tokens。大部分模型 context window ≥ 32k,Moonshot v1-8k / MiniMax abab5.5 等小 context 模型超过 8k 可能截断`"
+      >
+        prompt ≈ {{ chatCtx.prompt_tokens > 1000 ? (chatCtx.prompt_tokens / 1000).toFixed(1) + 'k' : chatCtx.prompt_tokens }} tokens
+        <span v-if="chatCtx.prompt_tokens > 8000"> ⚠</span>
+      </span>
       <span v-if="chatCtx?.envs?.length" class="env-wrap">
         <span class="env-label">默认环境:</span>
         <select v-model="defaultEnv" class="env-sel" @change="onEnvChange">
@@ -296,7 +319,9 @@ onBeforeUnmount(() => {
         <div v-if="errMsg" class="alert error">{{ errMsg }}</div>
         <div class="gate-actions">
           <button class="btn" @click="router.push('/bots')">取消</button>
-          <button class="btn primary" :disabled="!apiKeyInput.trim()" @click="submitKey">开始对话</button>
+          <button class="btn primary" :disabled="!apiKeyInput.trim() || keyChecking" @click="submitKey">
+            {{ keyChecking ? '验证 key…' : '开始对话' }}
+          </button>
         </div>
       </div>
     </div>
@@ -382,6 +407,14 @@ onBeforeUnmount(() => {
 .chat-model {
   font-family: monospace; font-size: var(--fs-xs); color: #065f46;
   background: #d1fae5; padding: 2px 6px; border-radius: var(--r-sm);
+}
+.prompt-size {
+  font-size: var(--fs-xs); color: #1e40af; background: #eff6ff;
+  padding: 2px 6px; border-radius: var(--r-sm); font-variant-numeric: tabular-nums;
+  cursor: help;
+}
+.prompt-size.warn {
+  color: var(--c-warn); background: #fffbeb; border: 1px solid #fde68a;
 }
 .env-wrap { display: flex; align-items: center; gap: 4px; color: var(--c-muted); }
 .env-label { font-size: var(--fs-xs); }

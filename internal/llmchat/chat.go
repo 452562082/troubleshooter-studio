@@ -234,6 +234,54 @@ func composeFromWorkspace(botPath string) string {
 	return sb.String()
 }
 
+// CheckKey 跟 provider 做一次最小交互,验证 apiKey 是否有效 + endpoint 可达。
+// 不消耗/消耗极少 token:请求 max_tokens=1 + 一句 "hi"。成功返回 nil;
+// 失败返回用户能看懂的原因(401/429/等),前端 key 表单拿这个信息决定要不要换 key。
+//
+// 为什么不用 Models.List:有的 provider (比如 ollama) 没暴露这个 endpoint,
+// 但所有 provider 都有 /chat/completions,一试 1 token 统一。
+func CheckKey(ctx context.Context, apiKey, model string) error {
+	if apiKey == "" {
+		return fmt.Errorf("apiKey 为空")
+	}
+	provider, modelID, ok := ResolveModel(model)
+	if !ok {
+		return fmt.Errorf("未识别的 model %q:需要形如 anthropic/claude-sonnet-4-6 或已知前缀", model)
+	}
+	cfg := openai.DefaultConfig(apiKey)
+	cfg.BaseURL = provider.BaseURL
+	client := openai.NewClientWithConfig(cfg)
+	_, err := client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
+		Model:     modelID,
+		MaxTokens: 1,
+		Messages:  []openai.ChatCompletionMessage{{Role: openai.ChatMessageRoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		return errors.New(friendlyErr(err))
+	}
+	return nil
+}
+
+// EstimateTokens 粗略估算 text 的 token 数。不用 tiktoken 避免引入依赖,
+// 用混合启发式:ASCII 字符按 4:1 比例(英文 token 平均长度),CJK 等多字节
+// 字符按 1:1(中文基本一字一 token 或更糟)。结果误差 ±25%,够 UI 给用户
+// 一个"是不是快爆 context"的大致指引。
+func EstimateTokens(text string) int {
+	if text == "" {
+		return 0
+	}
+	var ascii, other int
+	for _, r := range text {
+		if r < 128 {
+			ascii++
+		} else {
+			other++
+		}
+	}
+	// 估算 = ascii/4(英文 ~4 字符 1 token) + other*1(中文 ~1:1,稍保守)
+	return ascii/4 + other
+}
+
 // ModelDisplay 给 UI 渲染用:从 rawModel 抽出对用户友好的显示形式。
 // 如果解析成功,返回 "claude-sonnet-4-6 · Anthropic";否则原样返回。
 func ModelDisplay(rawModel string) string {

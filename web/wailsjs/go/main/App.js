@@ -14,6 +14,10 @@ export function CancelInstall() {
   return window['go']['main']['App']['CancelInstall']();
 }
 
+export function ChatCheckKey(arg1, arg2) {
+  return window['go']['main']['App']['ChatCheckKey'](arg1, arg2);
+}
+
 export function ChatContextFor(arg1) {
   return window['go']['main']['App']['ChatContextFor'](arg1);
 }

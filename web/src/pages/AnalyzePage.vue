@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import yaml from 'js-yaml'
 import { analyze as bridgeAnalyze, isDesktop, openDir, type AnalyzeResult } from '../lib/bridge'
 import { toast } from '../lib/toast'
 import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
@@ -11,8 +12,8 @@ const exampleYaml = `system:
 
 agent:
   name: "Demo排障机器人"
-  workspace_name: "Demo排障机器人"
-  model: openai-codex/gpt-5.3-codex
+  workspace_name: demo-bot
+  model: anthropic/claude-sonnet-4-6
 
 environments:
   - id: dev
@@ -81,6 +82,92 @@ function loadFile(e: Event) {
   reader.readAsText(file)
 }
 
+// ── yaml vs 代码实态 diff ──
+// 跑完 analyze 用户最想知道的是"跟我 yaml 里写的比,差了啥":
+//   - new:代码里有 service_names 但 yaml 没声明(可能漏配,复制 yaml 片段提醒用户加)
+//   - missing:yaml 声明了但 analyzer 没扫到(可能写错仓库名 / service 不存在了 / 代码没 clone)
+//   - config-center 冲突:yaml 说 nacos,代码扫出 apollo
+// 纯前端算:yaml 用 js-yaml parse,result.report.repos 按 name 匹配,集合运算。
+interface YamlVsCodeDiffItem {
+  name: string
+  yamlServices: string[]
+  codeServices: string[]
+  newInCode: string[]       // 代码有 yaml 无
+  missingInCode: string[]   // yaml 有代码无
+}
+interface YamlVsCodeDiff {
+  repos: YamlVsCodeDiffItem[]
+  configCenterYaml: string
+  configCenterCode: string
+  configCenterMismatch: boolean
+  totalNew: number          // 所有仓库加起来 new 数
+  totalMissing: number
+}
+
+const diff = computed<YamlVsCodeDiff | null>(() => {
+  if (!result.value) return null
+  let yamlCfg: any = {}
+  try { yamlCfg = yaml.load(yamlContent.value) || {} } catch { return null }
+  const yamlRepos = Array.isArray(yamlCfg.repos) ? yamlCfg.repos : []
+  const codeRepos = result.value.report?.repos || []
+  const out: YamlVsCodeDiffItem[] = []
+  let totalNew = 0
+  let totalMissing = 0
+  for (const yRepo of yamlRepos) {
+    const yName = yRepo.name as string
+    // yaml 里 service_names 可能是 "a, b" 字符串或 ["a", "b"] 数组,归一
+    const yServicesRaw = yRepo.service_names
+    const yServices: string[] = Array.isArray(yServicesRaw)
+      ? yServicesRaw.map((s: any) => String(s).trim()).filter(Boolean)
+      : typeof yServicesRaw === 'string'
+      ? yServicesRaw.split(',').map((s: string) => s.trim()).filter(Boolean)
+      : []
+    // yaml 里没写 service_names 时,约定用 repo.name 兜底(跟 generator 对齐)
+    const effectiveYaml = yServices.length > 0 ? yServices : [yName]
+    const codeEntry = codeRepos.find((r: any) => r.name === yName)
+    const cServices: string[] = codeEntry?.service_names || []
+    const ySet = new Set(effectiveYaml)
+    const cSet = new Set(cServices)
+    const newIn = cServices.filter((s) => !ySet.has(s))
+    const miss = effectiveYaml.filter((s) => !cSet.has(s))
+    totalNew += newIn.length
+    totalMissing += miss.length
+    out.push({
+      name: yName,
+      yamlServices: effectiveYaml,
+      codeServices: cServices,
+      newInCode: newIn,
+      missingInCode: miss,
+    })
+  }
+  const configCenterYaml = String(yamlCfg.infrastructure?.config_center?.type || '')
+  const configCenterCode = String(result.value.report?.config_center || '')
+  return {
+    repos: out,
+    configCenterYaml,
+    configCenterCode,
+    configCenterMismatch:
+      configCenterYaml !== '' && configCenterCode !== '' &&
+      configCenterCode !== 'unknown' && configCenterYaml !== configCenterCode,
+    totalNew,
+    totalMissing,
+  }
+})
+
+// 一键复制 yaml 片段:方便用户粘到自己 yaml 里更新 service_names
+function copySuggestedYamlSnippet() {
+  if (!diff.value) return
+  const lines: string[] = ['# 建议更新 repos[].service_names (基于分析器发现):']
+  for (const r of diff.value.repos) {
+    if (r.codeServices.length === 0) continue
+    lines.push(`  - name: ${r.name}`)
+    lines.push(`    service_names: [${r.codeServices.map((s) => `"${s}"`).join(', ')}]`)
+  }
+  navigator.clipboard.writeText(lines.join('\n'))
+    .then(() => toast.success('片段已复制到剪贴板,粘到你的 yaml 对应 repo 下'))
+    .catch(() => toast.error('复制失败'))
+}
+
 // analyze:log 事件流(analyzerpipe.OnProgress 每行 EventsEmit)
 const progressLog = ref('')
 // 跑 analyze 是长任务(大仓库 + auto-clone 可能跑分钟级),秒表让用户知道没卡。
@@ -145,7 +232,7 @@ onUnmounted(() => {
 
 <template>
   <div class="page">
-    <h1>系统分析</h1>
+    <h1>仓库分析</h1>
 
     <div class="info-box">
       <div class="info-box-title">使用说明</div>
@@ -220,6 +307,50 @@ onUnmounted(() => {
           <span v-if="rs.service_name_count" class="muted">{{ rs.service_name_count }} svc</span>
           <span v-if="rs.finding_count" class="muted">{{ rs.finding_count }} findings</span>
           <span v-if="rs.error" class="err">{{ rs.error }}</span>
+        </div>
+      </div>
+
+      <!-- yaml vs 代码实态 diff:这是用户真正想看的"发现了啥没在 yaml 里" -->
+      <div v-if="diff" class="card diff-card">
+        <div class="card-header">
+          <span class="name">⚖️ 跟 yaml 声明对比</span>
+          <span v-if="diff.totalNew > 0" class="tag green">{{ diff.totalNew }} 处新发现</span>
+          <span v-if="diff.totalMissing > 0" class="tag orange">{{ diff.totalMissing }} 处声明但没扫到</span>
+          <span v-if="diff.configCenterMismatch" class="tag red">config_center 不一致</span>
+          <span v-if="diff.totalNew === 0 && diff.totalMissing === 0 && !diff.configCenterMismatch" class="tag green">完全一致</span>
+          <button
+            v-if="diff.totalNew > 0"
+            class="btn small"
+            title="复制建议的 yaml 片段到剪贴板,粘进自己 system.yaml 的 repos 下就能补全 service_names"
+            @click="copySuggestedYamlSnippet"
+            style="margin-left:auto"
+          >
+            📋 复制建议 yaml 片段
+          </button>
+        </div>
+
+        <div v-if="diff.configCenterMismatch" class="detail warn">
+          <strong>⚠ 配置中心类型冲突:</strong>
+          yaml 声明 <code>{{ diff.configCenterYaml || '(空)' }}</code>,代码扫出 <code>{{ diff.configCenterCode }}</code>。
+          检查 infrastructure.config_center.type 是否要改。
+        </div>
+
+        <div v-for="r in diff.repos" :key="r.name" class="diff-row">
+          <div class="diff-row-head">
+            <strong>{{ r.name }}</strong>
+            <span class="muted">yaml 声明 {{ r.yamlServices.length }} · 代码扫出 {{ r.codeServices.length }}</span>
+          </div>
+          <div v-if="r.newInCode.length" class="detail">
+            <span class="tag green" style="min-width: 80px;">代码有 yaml 无</span>
+            <span v-for="s in r.newInCode" :key="s" class="tag blue">{{ s }}</span>
+          </div>
+          <div v-if="r.missingInCode.length" class="detail">
+            <span class="tag orange" style="min-width: 80px;">yaml 有但没扫到</span>
+            <span v-for="s in r.missingInCode" :key="s" class="tag gray">{{ s }}</span>
+          </div>
+          <div v-if="r.newInCode.length === 0 && r.missingInCode.length === 0" class="detail muted">
+            ✓ 一致
+          </div>
         </div>
       </div>
 
@@ -335,6 +466,26 @@ textarea.err { border-color: #ef4444; }
 
 .detail.warn { color: #92400e; }
 .warn-line { font-size: 12px; padding: 2px 0; }
+
+/* yaml vs 代码 diff 卡片:红框不合适(不是错),用蓝色强调,tag 并排展示差异 */
+.diff-card {
+  border-left: 4px solid #3b82f6;
+  background: #eff6ff;
+}
+.diff-card .card-header {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.tag.red { background: #fee2e2; color: #991b1b; }
+.diff-row {
+  margin-top: 10px; padding-top: 10px;
+  border-top: 1px dashed #bfdbfe;
+}
+.diff-row-head {
+  display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px;
+}
+.diff-row-head strong { color: #1e40af; }
+.diff-row-head .muted { font-size: 12px; color: #64748b; }
+.diff-row .detail { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
 
 /* 运行时秒表 —— 跟 BotsPage install 的进度条视觉对齐 */
 .analyze-progress {

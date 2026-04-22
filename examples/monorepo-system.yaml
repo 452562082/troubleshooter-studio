@@ -1,0 +1,118 @@
+# 示例：Monorepo 架构 —— 一个仓库里跑多个服务。
+#
+# 这种架构常见于大厂中后台(一个 go-monorepo 里塞 5-10 个 service),或早期快速迭代
+# 的中小业务。tshoot 的处理方式:repos 只声明 1 条,通过 service_names 列出这个仓库
+# 对外暴露的所有独立服务名。config-executor skill 会按 service_name 去拉各服务的
+# 配置;routing skill 会让机器人"从请求/错误线索定位到具体 service"。
+
+system:
+  id: central-platform
+  name: "中台服务"
+  description: "10+ 微服务共享一个 monorepo(Go + Kratos),共享 proto/contract/lib,
+    各自独立部署但同仓发布"
+
+agent:
+  name: "中台排障机器人"
+  workspace_name: "中台排障机器人"
+  model: anthropic/claude-sonnet-4-6
+  style:
+    tone: direct
+    verbosity: normal
+
+environments:
+  - id: dev
+    api_domain: api-dev.internal.example.com
+    is_prod: false
+  - id: prod
+    api_domain: api.internal.example.com
+    is_prod: true
+
+# 关键:只一条 repo,但 service_names 列全部服务。
+# routing/config-executor 会按 service_name 在同一个 repo 的 cmd/<service>/ 下
+# 查找入口,按 services/*.yaml 查配置。
+repos:
+  - name: central-platform
+    url: git@github.com:example/central-platform.git
+    role: backend
+    stack: go
+    framework: kratos
+    service_names:
+      - user-service
+      - order-service
+      - payment-service
+      - inventory-service
+      - notification-service
+      - search-service
+      - analytics-service
+    env_branches:
+      dev: develop
+      prod: master
+    analysis:
+      enabled: true
+      shallow_depth: 100
+      # include_paths 可以指定子目录来缩小 analyzer 扫描范围;
+      # monorepo 尤其有用,避免扫 vendor / third_party
+      include_paths:
+        - services
+        - cmd
+
+infrastructure:
+  config_center:
+    type: nacos
+    endpoints:
+      - env: dev
+        addr: "{{CONFIG_CENTER_ADDR_DEV}}"
+      - env: prod
+        addr: "{{CONFIG_CENTER_ADDR_PROD}}"
+    auth:
+      username_placeholder: "{{CONFIG_CENTER_USERNAME}}"
+      password_placeholder: "{{CONFIG_CENTER_PASSWORD}}"
+    # monorepo 一个仓多服务,dataid 模式一般带 {service} 占位符
+    dataid_patterns:
+      - "{service}.yaml"
+      - "{service}-{env}.yaml"
+
+  observability:
+    grafana:
+      enabled: true
+      url_by_env:
+        dev: "{{GRAFANA_DEV_URL}}"
+        prod: "{{GRAFANA_PROD_URL}}"
+      auth:
+        username_placeholder: "{{GRAFANA_USERNAME}}"
+        password_placeholder: "{{GRAFANA_PASSWORD}}"
+    prometheus:
+      enabled: true
+      via_grafana: true
+    jaeger:
+      enabled: true
+      url_by_env:
+        dev: "{{JAEGER_DEV_URL}}"
+        prod: "{{JAEGER_PROD_URL}}"
+
+  data_stores:
+    - type: mysql
+      enabled: true
+      discovery: from_config_center
+      readonly_enforced: true
+    - type: redis
+      enabled: true
+      discovery: from_config_center
+      readonly_enforced: true
+
+generation:
+  target_host: openclaw
+  output_dir: ./dist/central-platform
+  skills_whitelist:
+    - routing
+    - config-executor
+    - redis-runtime-query
+    - mysql-runtime-query
+    - tracing-query
+    - diagram-generator
+
+meta:
+  schema_version: "0.1"
+  tshoot_template_ref:
+    repo: troubleshooter-studio
+    ref: main

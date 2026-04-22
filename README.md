@@ -402,7 +402,12 @@ scripts/
   package-macos.sh          # make desktop-app 的打包脚本（sips + iconutil → .icns，写 Info.plist）
 templates/                  # .tmpl 模板；按 target 分组：
                             #   workspace/  scripts/  claude-code/  cursor/  standalone/
-examples/                   # system.yaml 示例 × 7 + fake repos × 5
+examples/                   # system.yaml 示例 × 11 覆盖不同配置源和架构模式:
+                            #   shop-* (nacos + BFF+后端) / three-tier (前后端+gateway) /
+                            #   apollo / consul / env-vars / k8s (配置源差异)
+                            #   monorepo (单仓多服务) / event-driven (MQ 串联) /
+                            #   b2b-api (纯后端集群,无前端)
+                            # + fake-repos-* × 5 配套的假仓库用于端到端测试
 schema/system.schema.yaml   # 带完整注释的 schema 参考
 assets/                     # logo.svg + architecture.svg
 .github/workflows/ci.yml    # CI 门禁

@@ -1,0 +1,131 @@
+# 示例:纯后端 API(无前端) —— B2B / 内部微服务集群。
+#
+# 场景:对外暴露 REST/gRPC API 给外部客户或内部其他团队,没有自己的前端页面。
+# 常见于:
+#   - 支付网关(只提供 HTTP 接口,前端是集成商各自实现)
+#   - 数据中台(提供 query API 给 BI 团队)
+#   - 内部微服务平台(HR / 权限 / 审计 等横向服务)
+#
+# 跟全栈架构的区别:
+#   - repos 全 role: backend,无 frontend / gateway
+#   - 排障时机器人 focus 是 API 错误码/延迟/依赖,不需要查前端
+#   - routing skill 会绕过"前端 → BFF → 后端"的三层推理,直接 service → env → config
+
+system:
+  id: internal-apis
+  name: "内部 API 平台"
+  description: "给内部其他团队用的 B2B API 集群(权限/审计/用户/计费 4 大块)"
+
+agent:
+  name: "API 平台排障机器人"
+  workspace_name: "API 平台排障机器人"
+  model: anthropic/claude-sonnet-4-6
+  style:
+    tone: direct
+    verbosity: terse
+
+environments:
+  - id: staging
+    api_domain: api-staging.internal.example.com
+    is_prod: false
+  - id: prod
+    api_domain: api.internal.example.com
+    is_prod: true
+
+# 纯后端:全部 role=backend,不同 stack 混搭很正常(历史演进留下的)
+repos:
+  - name: auth-api
+    url: git@github.com:example/auth-api.git
+    role: backend
+    stack: go
+    service_names: [auth-api]
+    env_branches: {staging: staging, prod: main}
+
+  - name: audit-api
+    url: git@github.com:example/audit-api.git
+    role: backend
+    stack: java
+    framework: spring-boot
+    service_names: [audit-api]
+    env_branches: {staging: staging, prod: main}
+
+  - name: user-api
+    url: git@github.com:example/user-api.git
+    role: backend
+    stack: python
+    framework: fastapi
+    service_names: [user-api]
+    env_branches: {staging: staging, prod: main}
+
+  - name: billing-api
+    url: git@github.com:example/billing-api.git
+    role: backend
+    stack: go
+    service_names: [billing-api]
+    env_branches: {staging: staging, prod: main}
+
+infrastructure:
+  config_center:
+    type: nacos
+    endpoints:
+      - env: staging
+        addr: "{{CONFIG_CENTER_ADDR_STAGING}}"
+      - env: prod
+        addr: "{{CONFIG_CENTER_ADDR_PROD}}"
+    auth:
+      username_placeholder: "{{CONFIG_CENTER_USERNAME}}"
+      password_placeholder: "{{CONFIG_CENTER_PASSWORD}}"
+
+  observability:
+    grafana:
+      enabled: true
+      url_by_env: {staging: "{{GRAFANA_STAGING_URL}}", prod: "{{GRAFANA_PROD_URL}}"}
+    prometheus:
+      enabled: true
+      via_grafana: true
+      # API 系统重点看延迟分位数 + 错误率
+      preferred_metrics:
+        - http_server_requests_seconds_count
+        - http_server_requests_seconds_bucket
+        - http_server_errors_total
+    jaeger:
+      enabled: true
+      url_by_env: {staging: "{{JAEGER_STAGING_URL}}", prod: "{{JAEGER_PROD_URL}}"}
+    # B2B 系统日志格外重要,客户投诉时靠 trace_id 串
+    elk:
+      enabled: true
+      default_index: "api-logs-*"
+      kibana_by_env: {staging: "{{KIBANA_STAGING_URL}}", prod: "{{KIBANA_PROD_URL}}"}
+      es_by_env: {staging: "{{ELK_ES_STAGING_URL}}", prod: "{{ELK_ES_PROD_URL}}"}
+
+  data_stores:
+    - type: mysql
+      enabled: true
+      discovery: from_config_center
+      readonly_enforced: true
+    - type: postgresql
+      enabled: true
+      discovery: from_config_center
+      readonly_enforced: true
+    - type: redis
+      enabled: true
+      discovery: from_config_center
+      readonly_enforced: true
+
+generation:
+  target_host: openclaw
+  output_dir: ./dist/internal-apis
+  skills_whitelist:
+    - routing
+    - config-executor
+    - mysql-runtime-query
+    - redis-runtime-query
+    - tracing-query
+    - elk-log-query
+    - diagram-generator
+
+meta:
+  schema_version: "0.1"
+  tshoot_template_ref:
+    repo: troubleshooter-studio
+    ref: main

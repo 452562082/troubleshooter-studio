@@ -258,10 +258,28 @@ async function runApply(b: DiscoveredBot, dryRun: boolean) {
 
 function addRoot() {
   const v = newRootInput.value.trim()
-  if (!v) return
-  if (!extraRoots.value.includes(v)) extraRoots.value.push(v)
+  if (!v) {
+    // 之前空 input 点按钮静默 return,用户以为按钮坏了。给个 toast 指路。
+    toast.info('请先填路径或点"选目录…"选个目录')
+    return
+  }
+  if (extraRoots.value.includes(v)) {
+    toast.info(`${v} 已在扫描路径里,无需重复添加`)
+    return
+  }
+  extraRoots.value.push(v)
   newRootInput.value = ''
   scan()
+}
+
+async function pickExtraRoot() {
+  // 跟 InitPage Step 4 / import 流程同款:避免用户手敲绝对路径(容易敲错)。
+  try {
+    const p = await openDir('选一个包含机器人产物的目录(含 tshoot.json)')
+    if (p) newRootInput.value = p
+  } catch (e: any) {
+    toast.error(`选目录失败: ${String(e?.message || e)}`)
+  }
 }
 
 function removeRoot(r: string) {
@@ -700,10 +718,11 @@ onUnmounted(() => {
       <div class="root-add">
         <input
           v-model="newRootInput"
-          placeholder="/path/to/project 或 ~/my-repo"
+          placeholder="/path/to/project 或 ~/my-repo(或点右侧选目录)"
           @keyup.enter="addRoot"
         />
-        <button class="btn" @click="addRoot">添加并扫描</button>
+        <button type="button" class="btn" @click="pickExtraRoot">选目录…</button>
+        <button class="btn primary" @click="addRoot">添加并扫描</button>
       </div>
     </section>
 

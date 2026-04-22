@@ -7,7 +7,6 @@ import {generator} from '../models';
 import {discover} from '../models';
 import {doctor} from '../models';
 import {deploy} from '../models';
-import {standalone} from '../models';
 
 export function Analyze(arg1:string,arg2:string,arg3:boolean):Promise<analyzerpipe.Result>;
 
@@ -48,12 +47,6 @@ export function RunInstall(arg1:string,arg2:Record<string, string>):Promise<main
 export function SaveYAML(arg1:string,arg2:string):Promise<string>;
 
 export function ScanInstallPrompts(arg1:string):Promise<Array<deploy.Prompt>>;
-
-export function StandaloneStatus(arg1:string):Promise<standalone.Status>;
-
-export function StartStandalone(arg1:string,arg2:string):Promise<main.StartStandaloneResult>;
-
-export function StopStandalone(arg1:string):Promise<boolean>;
 
 export function Validate(arg1:string):Promise<main.ValidateResult>;
 

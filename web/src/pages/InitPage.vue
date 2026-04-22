@@ -57,7 +57,7 @@ interface ModelGroup { group: string; items: ModelOption[] }
 const MODEL_CUSTOM = '__custom__'
 // 模型预设:4 种 target 现在都走 OpenAI 兼容协议,每个 provider 都能直连,不再有
 // "standalone 回落到 Claude" 的局限。跟 internal/llmchat/providers.go 注册表对齐,
-// 新加 provider:这里 + providers.go + server.py.tmpl 的 PROVIDERS 表同步一条。
+// 新加 provider:这里 + internal/llmchat/providers.go 注册表同步一条(server.py.tmpl 已删)。
 const modelGroups: ModelGroup[] = [
   {
     group: 'Anthropic (Claude 系列)',
@@ -305,7 +305,7 @@ const targetDescriptions: Record<string, string> = {
   'openclaw': 'OpenClaw 安装包（bash install.sh 部署）',
   'claude-code': 'Claude Code（CLAUDE.md + skills/ 放到项目根即用）',
   'cursor': 'Cursor IDE（.cursorrules + .cursor/rules/）',
-  'standalone': '桌面端内嵌对话(直连 LLM,8 个 provider 通吃);也支持独立 server.py + docker 部署',
+  'standalone': '桌面端内嵌对话(直连 LLM,8 个 provider 通吃)',
 }
 const enabledTargets = reactive<Record<string, boolean>>({
   ...Object.fromEntries(targetOptions.map(k => [k, true])),

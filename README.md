@@ -177,16 +177,19 @@ standalone 模式不依赖任何 AI 平台——只需一个 LLM API key（Claud
 
 每份产物目录都自带 `README.md`（能力清单 / 部署前凭证 / 常见问题 / 升级卸载），部署前 `cat README.md` 就有路标。
 
-### Standalone 聊天前端的 UX（仅 standalone target）
+### Standalone 内嵌对话（桌面端 Studio 原生）
 
-`standalone/index.html` 是 tshoot 唯一直接管到 UI 层的部署形态，自带这些体验：
+`standalone` target 不再独立部署 —— 产物只是 Studio 内嵌对话用的素材
+（`system-prompt.md` + `skills/` + `scripts/` + `tshoot.json`）。桌面 app 打开"已装机器人"页
+点 **💬 打开对话** 即可跟机器人聊，细节：
 
-- **SSE 流式输出** — 后端 `server.py` 走 OpenAI 兼容 `/chat/completions` stream 逐 token 推送（支持 Anthropic / OpenAI / DeepSeek / Qwen / MiniMax / Moonshot / 智谱 / Ollama 8 家，按 `agent.model` 前缀路由），前端边收边渲染
-- **Markdown 渲染** — 无外部依赖的最小 parser：代码块（带「复制」按钮）/ inline code / bold / 有序无序列表 / 链接 / heading；XSS 已转义
-- **对话历史持久化** — `localStorage` 按 `system.id` 分 key 保存 messages；刷新 / 关闭浏览器再打开不丢
-- **流式中止** — 发送按钮在流式期间变红色「停止」，点击调 `AbortController.abort()`，已收到的内容保留并标记 `_[已停止]_`
-- **清空对话** — 顶部一键重置当前系统的历史
-- **默认环境下拉** — 从 `system.yaml` 的 environments 动态渲染；选定后以 `X-Default-Env` 头注入到 system prompt（服务端白名单校验防注入），机器人不用每次反问"哪个环境"
+- **多 provider 直连** — Go 端 `internal/llmchat`（走 OpenAI 兼容协议 + `base_url` 切换），
+  按 `agent.model` 前缀路由到 Anthropic / OpenAI / DeepSeek / Qwen / MiniMax / Moonshot / 智谱 / Ollama
+- **流式输出** — Wails `EventsEmit` 逐 token 推到前端，自带停止按钮（cancel SDK ctx 断 http）
+- **Markdown 渲染** — 前端 `marked` 库，代码块高亮 + 禁 raw html 防 prompt injection
+- **对话历史持久化** — `localStorage` 按 bot path 分 key；切机器人 / 重启 app 不丢
+- **默认环境下拉** — 从 yaml 的 environments 动态渲染；选定后拼到 system prompt（白名单防注入），机器人不用每次反问"哪个环境"
+- **API key 本会话缓存** — `window` 级内存，app 关了就清，不落盘
 
 ### 机器人回答质量的通用增强（4 target 共享）
 

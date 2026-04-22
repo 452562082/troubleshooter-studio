@@ -33,7 +33,6 @@ import (
 
 	tshoot "github.com/xiaolong/troubleshooter-studio"
 	"github.com/xiaolong/troubleshooter-studio/api"
-	"github.com/xiaolong/troubleshooter-studio/internal/standalone"
 	"github.com/xiaolong/troubleshooter-studio/internal/webui"
 )
 
@@ -62,13 +61,6 @@ type App struct {
 	// install 跑,前端 UI 会禁用"部署"按钮避免并发。
 	installCancel context.CancelFunc
 
-	// standaloneMu 保护 standaloneRunners map。
-	standaloneMu sync.Mutex
-	// standaloneRunners 是当前托管着的 standalone 机器人进程集合,key=产物目录绝对路径。
-	// 同一个机器人不会跑两份(StartStandalone 发现已在跑直接返回现有 port)。
-	// app 退出时 main 的 defer 会 Stop 所有。
-	standaloneRunners map[string]*standalone.Runner
-
 	// chatStreams 是原生 chat(bindings_chat.go)进行中的流注册表。
 	chatStreams chatStreamRegistry
 }
@@ -84,12 +76,8 @@ func main() {
 	router := api.NewRouter(srv, webui.Distribution())
 
 	appState := &App{
-		templateRoot:      tr,
-		standaloneRunners: map[string]*standalone.Runner{},
+		templateRoot: tr,
 	}
-	// app 退出(不管正常还是异常)时把所有在跑的 standalone server.py 清掉,
-	// 不然 python 进程会变孤儿继续占端口 + 继续烧 LLM API key。
-	defer appState.stopAllStandalones()
 	// 原生 chat 的 stream:app 退出时 cancel 所有在跑的,避免 SDK http 长连泄漏。
 	defer appState.stopAllChats()
 

@@ -406,9 +406,9 @@ async function runImportDeploy() {
     importedOutputDir.value = res.agent_path
     // 各 target 是否需要 install.sh 步骤:
     //   openclaw:有交互凭证,必须跑,UI 展示字段表单
-    //   standalone:无凭证但要跑 venv setup,UI 简化成"直接安装"按钮
-    //   claude-code / cursor:ImportAndApply 已 rsync,install.sh 无附加动作,直接齐活
-    const needsInstall = importTarget.value === 'openclaw' || importTarget.value === 'standalone'
+    //   claude-code / cursor:ImportAndApply 已 rsync,install.sh 无附加动作
+    //   standalone:桌面端内嵌对话,没有 install.sh,产物写完直接齐活
+    const needsInstall = importTarget.value === 'openclaw'
     if (needsInstall) {
       const [prompts, existing] = await Promise.all([
         scanInstallPrompts(res.agent_path),
@@ -608,7 +608,7 @@ onUnmounted(() => {
         </p>
         <p v-else class="deploy-tip">
           产物已写到 <code>{{ importedOutputDir }}</code>。
-          install.sh 不需要凭证（{{ importTarget === 'standalone' ? 'venv 设置 + pip install' : '纯文件安装' }}），点下面按钮直接安装。
+          install.sh 不需要凭证(纯文件安装),点下面按钮直接安装。
         </p>
         <div v-if="installPrompts.length > 0" class="cred-groups">
           <details

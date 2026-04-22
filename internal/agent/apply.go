@@ -298,9 +298,15 @@ func looksLikeFactoryArtifact(rel, target string) bool {
 	case "cursor":
 		prefixes = append(prefixes, ".cursorrules", ".cursor/", "install.sh")
 	case "standalone":
+		// 当前 tshoot 只生成 system-prompt.md + skills/ + scripts/ + tshoot.json
+		// (独立部署的 server.py/Dockerfile/install.sh/docker-compose/requirements.txt/
+		// README.md/index.html 已移除 —— 见 templates/standalone 空了)。
+		// 历史文件仍列在这里,作用是:老版本装的 standalone bot 在 apply 时,
+		// 这些文件跟新产物对不上,会被识别为"tshoot 管辖的陈旧产物"并被清理,
+		// 不然会一直留在用户 workspace 里。
 		prefixes = append(prefixes, "server.py", "index.html", "Dockerfile",
 			"docker-compose.yaml", "requirements.txt", "system-prompt.md",
-			"install.sh", "README.md")
+			"install.sh", "README.md", ".venv/")
 	default:
 		return false
 	}

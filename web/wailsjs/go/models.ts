@@ -604,20 +604,6 @@ export namespace main {
 	        this.ok = source["ok"];
 	    }
 	}
-	export class StartStandaloneResult {
-	    port: number;
-	    pid: number;
-	
-	    static createFrom(source: any = {}) {
-	        return new StartStandaloneResult(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.port = source["port"];
-	        this.pid = source["pid"];
-	    }
-	}
 	export class ValidateResult {
 	    valid: boolean;
 	    system: string;
@@ -636,29 +622,6 @@ export namespace main {
 	        this.name = source["name"];
 	        this.envs = source["envs"];
 	        this.repos = source["repos"];
-	    }
-	}
-
-}
-
-export namespace standalone {
-	
-	export class Status {
-	    running: boolean;
-	    port?: number;
-	    pid?: number;
-	    last_err?: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new Status(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.running = source["running"];
-	        this.port = source["port"];
-	        this.pid = source["pid"];
-	        this.last_err = source["last_err"];
 	    }
 	}
 

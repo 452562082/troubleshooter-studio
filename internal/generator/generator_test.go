@@ -384,22 +384,18 @@ func TestGenerate_MultiTargets_All(t *testing.T) {
 		".cursor/rules/routing.mdc",
 		"skills/routing/SKILL.md",
 	})
+	// standalone 产物精简:桌面端原生 chat 接管后,server.py / Dockerfile /
+	// install.sh / docker-compose 等独立部署资产已删。只剩 Studio 内嵌所需的素材。
 	assertExists(t, out+"-standalone", []string{
-		"server.py",
-		"index.html",
-		"Dockerfile",
-		"requirements.txt",
-		"docker-compose.yaml",
-		"install.sh",
 		"system-prompt.md",
 		"skills/routing/SKILL.md",
+		"tshoot.json",
 	})
 
-	// install.sh 们都应该可执行
+	// install.sh 们都应该可执行(只剩 claude-code / cursor)
 	for _, p := range []string{
 		out + "-claude-code/install.sh",
 		out + "-cursor/install.sh",
-		out + "-standalone/install.sh",
 	} {
 		info, err := os.Stat(p)
 		if err != nil {
@@ -408,15 +404,6 @@ func TestGenerate_MultiTargets_All(t *testing.T) {
 		if info.Mode()&0o111 == 0 {
 			t.Errorf("%s not executable", p)
 		}
-	}
-
-	// standalone server.py 应注入 DEFAULT_MODEL（而非硬编码旧模型）
-	serverPy := readFile(t, out+"-standalone/server.py")
-	if !strings.Contains(serverPy, "DEFAULT_MODEL = \"") {
-		t.Errorf("server.py should define DEFAULT_MODEL constant")
-	}
-	if strings.Contains(serverPy, "claude-sonnet-4-20250514") {
-		t.Errorf("server.py still contains legacy hard-coded model id")
 	}
 }
 
@@ -454,7 +441,7 @@ func TestGenerate_MultiTargets_NoOpenclaw(t *testing.T) {
 
 	// 其它 target 产物存在
 	assertExists(t, out+"-claude-code", []string{"CLAUDE.md", "install.sh"})
-	assertExists(t, out+"-standalone", []string{"server.py", "Dockerfile"})
+	assertExists(t, out+"-standalone", []string{"system-prompt.md", "skills"})
 }
 
 func TestGenerate_WithAnalysis_UpgradesInferredToVerified(t *testing.T) {

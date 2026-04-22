@@ -217,40 +217,10 @@ export async function chatStop(reqId: string): Promise<boolean> {
   return App.ChatStop(reqId)
 }
 
-// ── Standalone 嵌入桌面端:启动 / 停止 / 状态查询(旧 iframe 方案,保留以备 fallback) ─────
-// 把 standalone target 机器人的 server.py 托管在 Studio 进程里,
-// 前端 iframe 指 localhost:<port>,用户不用开浏览器。
-
-export interface StandaloneStartResult {
-  port: number
-  pid: number
-}
-export interface StandaloneStatus {
-  running: boolean
-  port?: number
-  pid?: number
-  last_err?: string
-}
-
-/** 启动 standalone 机器人的 server.py,返回实际绑定的端口(UI 用来 iframe src)。
- *  apiKey 空串时 fallback 到 Studio 启动时的 LLM_API_KEY env;两者都空会 reject,
- *  UI 要引导用户填。同一 path 已在跑的会幂等返回现有 port。 */
-export async function startStandalone(path: string, apiKey = ''): Promise<StandaloneStartResult> {
-  if (!isDesktop()) throw new Error('StartStandalone 只在桌面 app 里可用')
-  return App.StartStandalone(path, apiKey)
-}
-
-/** 停掉 path 对应的 runner。没在跑时返回 false,UI 可忽略。 */
-export async function stopStandalone(path: string): Promise<boolean> {
-  if (!isDesktop()) return false
-  return App.StopStandalone(path)
-}
-
-/** 查状态:画"运行中 / 已停止"徽章,进 chat 页时先探活。 */
-export async function standaloneStatus(path: string): Promise<StandaloneStatus> {
-  if (!isDesktop()) return { running: false }
-  return App.StandaloneStatus(path)
-}
+// 注:早期 standalone 走 Flask + server.py 独立部署,桌面端通过 iframe 嵌
+// localhost:<port> 实现内嵌对话。现在改成 Studio 原生 chat(直连 LLM API),
+// 对应的 StartStandalone/StopStandalone/StandaloneStatus binding + iframe 路径
+// 全部移除。BotsChat.vue 现在完全用 chatSend/chatStop 驱动。
 
 /** 在 Finder / Explorer 里展示(不是打开)指定路径 */
 export async function revealInFinder(path: string): Promise<void> {

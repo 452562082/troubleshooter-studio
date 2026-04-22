@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: test / vet / fmt
+  go:
+    name: Go (vet / fmt / test)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -50,3 +50,62 @@ jobs:
 
       - name: coverage summary
         run: go tool cover -func=coverage.out | tail -1
+
+  web:
+    name: Web (vue-tsc / vite build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: npm ci
+        run: npm ci
+
+      # npm run build = vue-tsc --noEmit && vite build，
+      # 同时覆盖类型检查和实际产物构建。之前 null.length 崩页 regression
+      # vue-tsc 能抓住一部分(拿到 null 的类型要写准),vite build 的 runtime
+      # 错则靠前端单测,暂未补。
+      - name: vue-tsc + vite build
+        run: npm run build
+
+  desktop:
+    name: Desktop (macOS .app build)
+    # macOS runner 慢且配额贵,只在 push main / PR 上跑是可接受的。
+    # .app 打包包括:web 构建 + Go(+cgo WebKit/UniformTypeIdentifiers) + sips/iconutil
+    # 做 .icns + Info.plist。任何一步在代码改动后坏掉这里会第一时间发现。
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: make desktop-app
+        run: make desktop-app
+
+      # 校验 .app bundle 三件套齐全(可执行二进制 / Info.plist / icon.icns)。
+      # 不做启动测试(GitHub macOS runner 没 GUI),只确认打包正确。
+      - name: verify .app bundle structure
+        run: |
+          set -e
+          test -f dist/TroubleshooterStudio.app/Contents/MacOS/TroubleshooterStudio
+          test -f dist/TroubleshooterStudio.app/Contents/Info.plist
+          test -f dist/TroubleshooterStudio.app/Contents/Resources/icon.icns
+          file dist/TroubleshooterStudio.app/Contents/MacOS/TroubleshooterStudio
+          echo "✓ .app bundle structure OK"

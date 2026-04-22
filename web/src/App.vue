@@ -2,6 +2,10 @@
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import ToastContainer from './components/ToastContainer.vue'
+// Vite URL import:assets/app-icon.svg 会被打进 bundle,<img src> 直接用。
+// 用 app-icon(方形,1024×1024 viewBox) 而不是 logo.svg(宽 780×220)当侧边栏品牌
+// 标记——侧边栏宽 220px,方形 icon 挤一下更合适。
+import brandIcon from './assets/app-icon.svg'
 
 const route = useRoute()
 const currentPath = computed(() => route.path)
@@ -23,6 +27,7 @@ const navItems = [
   <div class="layout">
     <aside class="sidebar">
       <div class="sidebar-header">
+        <img :src="brandIcon" class="sidebar-logo" alt="Troubleshooter Studio" />
         <div class="sidebar-title">AI 排障机器人工作台</div>
         <div class="sidebar-subtitle">troubleshooter-studio</div>
       </div>
@@ -70,9 +75,15 @@ html, body, #app { height: 100%; font-family: -apple-system, BlinkMacSystemFont,
 }
 .sidebar-header {
   padding: 20px 18px 14px; border-bottom: 1px solid #334155;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
 }
-.sidebar-title { font-size: 16px; font-weight: 700; color: #f8fafc; }
-.sidebar-subtitle { font-size: 11px; color: #64748b; margin-top: 2px; font-family: monospace; }
+.sidebar-logo {
+  width: 44px; height: 44px; border-radius: 10px; margin-bottom: 4px;
+  /* svg 里有深色 backdrop;侧边栏也是深色,靠阴影跟底色拉开 */
+  box-shadow: 0 2px 8px rgba(59,130,246,0.25), 0 0 0 1px rgba(148,163,184,0.12);
+}
+.sidebar-title { font-size: 15px; font-weight: 700; color: #f8fafc; line-height: 1.3; }
+.sidebar-subtitle { font-size: 11px; color: #64748b; font-family: monospace; }
 
 nav { display: flex; flex-direction: column; padding: 8px 0; flex: 1; }
 

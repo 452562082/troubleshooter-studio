@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import yaml from 'js-yaml'
+import brandLogo from '../assets/logo.svg'
 
 const router = useRouter()
 
@@ -78,7 +79,7 @@ const nextStep = computed(() => {
 <template>
   <div class="home-page">
     <div class="hero">
-      <h1>AI 排障机器人工作台</h1>
+      <img :src="brandLogo" class="hero-logo" alt="Troubleshooter Studio" />
       <p class="tagline">AI 排障机器人工作台：为你的业务系统建模 → 生成 → 一键部署 → 后续管理。4 种部署形态（OpenClaw / Claude Code / Cursor / Embedded 内嵌对话），一份 system.yaml 全覆盖。</p>
     </div>
 
@@ -149,8 +150,13 @@ const nextStep = computed(() => {
 <style scoped>
 .home-page { max-width: 920px; margin: 0 auto; padding: var(--sp-6) 28px; }
 
-/* h1 用 tokens 基准 xl;hero 需要再大一档,单独调 */
-.hero h1 { font-size: 26px; color: var(--c-ink); margin-bottom: 6px; font-weight: 600; }
+/* hero 品牌 logo:full 宽 svg(780×220)当页面顶部主视觉;max-height 压到 110px
+ * 避免首屏被 logo 占满。保持 auto width,让 svg 内部 viewBox 自然缩放。 */
+.hero-logo {
+  display: block;
+  height: 110px; width: auto; max-width: 100%;
+  margin-bottom: 8px; margin-left: -6px;  /* logo svg 左侧有 30px 内边距,往左拉一点跟正文对齐 */
+}
 .tagline { color: var(--c-muted); font-size: var(--fs-md); margin-bottom: var(--sp-6); line-height: 1.6; }
 
 /* 下一步推荐:首屏的主 CTA。之前是浅蓝渐变,跟普通 info 框视觉优先级打平,

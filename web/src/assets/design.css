@@ -1,0 +1,194 @@
+/* Design tokens + 公共基类。所有页面 scoped style 只写个性化部分,跟这里一致的声明能删就删。 */
+
+:root {
+  /* 字号:4-5 级够用 */
+  --fs-xs: 11px;   /* 徽章 / 小标 */
+  --fs-sm: 12px;   /* 次要信息 / 表单 label */
+  --fs-base: 13px; /* 正文默认 */
+  --fs-md: 14px;   /* 按钮 / 强调 */
+  --fs-lg: 18px;   /* 区块 h2 */
+  --fs-xl: 22px;   /* 页面 h1 */
+
+  /* 颜色:slate 灰阶 + 业务色 */
+  --c-ink: #0f172a;      /* 主标题 */
+  --c-text: #334155;     /* 正文 */
+  --c-muted: #64748b;    /* 次要文字 */
+  --c-hint: #94a3b8;     /* 弱提示 */
+  --c-line: #e2e8f0;     /* 分隔线 */
+  --c-line-2: #cbd5e1;   /* input / border 重一档 */
+  --c-surf: #ffffff;     /* 卡片白 */
+  --c-surf-2: #f8fafc;   /* 次级底 */
+  --c-surf-3: #f1f5f9;   /* 第三级底 / hover */
+
+  --c-primary: #0f172a;
+  --c-primary-hover: #1e293b;
+  --c-accent: #3b82f6;
+  --c-accent-hover: #2563eb;
+  --c-success: #166534;
+  --c-success-bg: #f0fdf4;
+  --c-success-border: #bbf7d0;
+  --c-warn: #c2410c;
+  --c-danger: #991b1b;
+  --c-danger-bg: #fef2f2;
+  --c-danger-border: #fecaca;
+
+  /* 圆角 */
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 8px;
+
+  /* 间距基准(部分组件用) */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+}
+
+/* ── 页面容器 ─────────────────────────────────────────── */
+.page {
+  padding: var(--sp-6) 28px;
+  max-width: 1100px;
+}
+.page > h1,
+.page-header h1 {
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  color: var(--c-ink);
+  margin-bottom: var(--sp-2);
+  line-height: 1.3;
+}
+.page > .subtitle,
+.page-header .subtitle {
+  font-size: var(--fs-base);
+  color: var(--c-muted);
+  margin-top: var(--sp-1);
+  margin-bottom: var(--sp-5);
+  line-height: 1.5;
+}
+
+/* ── 按钮 ─────────────────────────────────────────────── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  font-size: var(--fs-base);
+  font-weight: 500;
+  line-height: 1.2;
+  border: 1px solid var(--c-line-2);
+  border-radius: var(--r-md);
+  background: var(--c-surf);
+  color: var(--c-text);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+}
+.btn:hover:not(:disabled) {
+  background: var(--c-surf-3);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn.primary {
+  background: var(--c-primary);
+  border-color: var(--c-primary);
+  color: #fff;
+}
+.btn.primary:hover:not(:disabled) {
+  background: var(--c-primary-hover);
+  border-color: var(--c-primary-hover);
+}
+.btn.accent {
+  background: var(--c-accent);
+  border-color: var(--c-accent);
+  color: #fff;
+}
+.btn.accent:hover:not(:disabled) {
+  background: var(--c-accent-hover);
+  border-color: var(--c-accent-hover);
+}
+.btn.small {
+  padding: 4px 10px;
+  font-size: var(--fs-xs);
+}
+
+/* ── Info box(多页面用的说明框) ──────────────────────── */
+.info-box {
+  background: var(--c-surf-2);
+  border: 1px solid var(--c-line);
+  border-left: 3px solid var(--c-accent);
+  border-radius: var(--r-md);
+  padding: var(--sp-3) var(--sp-4);
+  margin-bottom: var(--sp-5);
+  font-size: var(--fs-base);
+  color: var(--c-text);
+  line-height: 1.6;
+}
+.info-box-title {
+  font-weight: 600;
+  color: var(--c-ink);
+  margin-bottom: 6px;
+}
+.info-box-note {
+  margin-top: 6px;
+  font-size: var(--fs-sm);
+  color: var(--c-muted);
+}
+.info-box-list {
+  margin: 6px 0 0 0;
+  padding-left: 20px;
+}
+
+/* ── 通用 tag / badge ────────────────────────────────── */
+.tag {
+  display: inline-block;
+  padding: 1px 8px;
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  border-radius: var(--r-sm);
+  background: var(--c-surf-3);
+  color: var(--c-text);
+  line-height: 1.6;
+}
+.tag.blue  { background: #dbeafe; color: #1e40af; }
+.tag.green { background: #d1fae5; color: #065f46; }
+.tag.orange{ background: #fed7aa; color: #9a3412; }
+.tag.red   { background: #fee2e2; color: #991b1b; }
+.tag.gray  { background: #f1f5f9; color: #334155; }
+
+/* ── 提示 / 错误 banner ────────────────────────────── */
+.alert {
+  padding: 10px var(--sp-3);
+  border-radius: var(--r-md);
+  font-size: var(--fs-base);
+  margin-bottom: var(--sp-4);
+  line-height: 1.5;
+}
+.alert.error {
+  background: var(--c-danger-bg);
+  border: 1px solid var(--c-danger-border);
+  color: var(--c-danger);
+}
+.alert.info {
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #1e40af;
+}
+.alert.success {
+  background: var(--c-success-bg);
+  border: 1px solid var(--c-success-border);
+  color: var(--c-success);
+}
+
+/* ── 基本代码样式 ─────────────────────────────────── */
+code {
+  background: var(--c-surf-3);
+  padding: 1px 5px;
+  border-radius: var(--r-sm);
+  font-family: 'SFMono-Regular', 'Menlo', 'Consolas', monospace;
+  font-size: 0.92em;
+  color: var(--c-text);
+}

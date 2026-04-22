@@ -562,19 +562,8 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.page { padding: 24px 28px; max-width: 1100px; }
+/* .page / .page-header h1 / .subtitle / .btn / .btn.primary / .alert 来自 design.css */
 .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
-.page-header h1 { font-size: 22px; font-weight: 600; color: #0f172a; }
-.subtitle { font-size: 13px; color: #64748b; margin-top: 4px; }
-
-.btn {
-  padding: 8px 16px; border: 1px solid #cbd5e1; border-radius: 6px;
-  background: #fff; color: #334155; font-size: 13px; cursor: pointer;
-}
-.btn:hover { background: #f1f5f9; }
-.btn.primary { background: #0f172a; color: #fff; border-color: #0f172a; }
-.btn.primary:hover { background: #1e293b; }
-.btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .roots { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px 16px; margin-bottom: 20px; }
 .roots-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
@@ -596,9 +585,7 @@ onUnmounted(() => {
 .root-add { display: flex; gap: 8px; }
 .root-add input { flex: 1; padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 13px; }
 
-.alert { padding: 12px 14px; border-radius: 6px; font-size: 13px; margin-bottom: 16px; }
-.alert.error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
-.alert.info { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; }
+/* .alert.error / .alert.info 来自 design.css */
 
 .empty { text-align: center; padding: 48px 24px; color: #94a3b8; font-size: 14px; line-height: 1.8; }
 .empty code { background: #f1f5f9; padding: 1px 4px; border-radius: 3px; }

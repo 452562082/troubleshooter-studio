@@ -23,7 +23,7 @@ const navItems = [
   <div class="layout">
     <aside class="sidebar">
       <div class="sidebar-header">
-        <div class="sidebar-title">Troubleshooter Studio</div>
+        <div class="sidebar-title">AI 排障机器人工作台</div>
         <div class="sidebar-subtitle">troubleshooter-studio</div>
       </div>
       <nav>

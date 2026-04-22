@@ -148,7 +148,7 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <button class="btn-primary" @click="runAnalyze" :disabled="loading">
+    <button class="btn accent" @click="runAnalyze" :disabled="loading">
       {{ loading ? '分析中...' : '运行分析' }}
     </button>
 
@@ -221,74 +221,43 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.page { max-width: 900px; }
-h1 { color: #1e293b; margin-bottom: 12px; }
+/* .page / .btn / .info-box* 来自 design.css;这里只写个性化 */
 
-.info-box {
-  background: #eff6ff;
-  border: 1px solid #bfdbfe;
-  border-radius: 8px;
-  padding: 12px 16px;
-  margin-bottom: 20px;
-  font-size: 14px;
-  color: #1e40af;
-  line-height: 1.6;
-}
-.info-box-title {
-  font-weight: 600;
-  margin-bottom: 4px;
-}
-.info-box-note {
-  margin-top: 6px;
-  font-size: 13px;
-  color: #3b82f6;
-  font-style: italic;
-}
-
-.label-row-actions {
-  display: flex;
-  gap: 6px;
-}
-
-.form-section { margin-bottom: 16px; }
+.label-row-actions { display: flex; gap: 6px; }
+.form-section { margin-bottom: var(--sp-4); }
 .label-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-.label-row label { font-weight: 600; color: #334155; font-size: 14px; }
+.label-row label { font-weight: 600; color: var(--c-text); font-size: var(--fs-md); }
 .file-btn {
-  padding: 5px 12px; background: #f1f5f9; border: 1px solid #d1d5db;
-  border-radius: 6px; cursor: pointer; font-size: 12px; color: #475569; font-weight: 400;
+  padding: 5px var(--sp-3); background: var(--c-surf-3); border: 1px solid var(--c-line-2);
+  border-radius: var(--r-md); cursor: pointer; font-size: var(--fs-sm); color: var(--c-text); font-weight: 400;
 }
-.file-btn:hover { background: #e2e8f0; }
+.file-btn:hover { background: var(--c-line); }
 
 textarea {
-  width: 100%; min-height: 180px; padding: 10px 14px; border: 1px solid #e2e8f0; border-radius: 6px;
-  font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; line-height: 1.5;
-  background: #f8fafc; resize: vertical; box-sizing: border-box;
+  width: 100%; min-height: 180px; padding: 10px var(--sp-3); border: 1px solid var(--c-line); border-radius: var(--r-md);
+  font-family: 'SF Mono', 'Fira Code', monospace; font-size: var(--fs-base); line-height: 1.5;
+  background: var(--c-surf-2); resize: vertical; box-sizing: border-box;
 }
-textarea:focus { outline: none; border-color: #3b82f6; }
+textarea:focus { outline: none; border-color: var(--c-accent); }
 textarea.err { border-color: #ef4444; }
 
-.form-row { display: flex; gap: 16px; margin-bottom: 16px; align-items: flex-end; }
+.form-row { display: flex; gap: var(--sp-4); margin-bottom: var(--sp-4); align-items: flex-end; }
 .field { flex: 1; }
-.field label { display: block; font-weight: 600; color: #334155; margin-bottom: 6px; font-size: 14px; }
+.field label { display: block; font-weight: 600; color: var(--c-text); margin-bottom: 6px; font-size: var(--fs-md); }
 .field input[type="text"] {
-  width: 100%; padding: 8px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; box-sizing: border-box;
+  width: 100%; padding: 8px var(--sp-3); border: 1px solid var(--c-line-2); border-radius: var(--r-md);
+  font-size: var(--fs-md); box-sizing: border-box;
 }
-.field input[type="text"]:focus { outline: none; border-color: #3b82f6; }
+.field input[type="text"]:focus { outline: none; border-color: var(--c-accent); }
 .field.check { flex: none; }
-.field.check label { font-weight: 400; font-size: 14px; color: #475569; cursor: pointer; display: flex; align-items: center; gap: 6px; }
+.field.check label { font-weight: 400; font-size: var(--fs-md); color: var(--c-text); cursor: pointer; display: flex; align-items: center; gap: 6px; }
 
-.btn-primary {
-  padding: 10px 24px; background: #3b82f6; color: white; border: none; border-radius: 6px;
-  font-size: 14px; font-weight: 600; cursor: pointer;
-}
-.btn-primary:hover { background: #2563eb; }
-.btn-primary:disabled { background: #94a3b8; cursor: not-allowed; }
+/* banner 用旧 class 名,但样式等价于 .alert.error;保留 class 避免改 template */
+.banner { margin-top: var(--sp-3); padding: 10px var(--sp-3); border-radius: var(--r-md); font-size: var(--fs-base); }
+.banner.red { background: var(--c-danger-bg); border: 1px solid var(--c-danger-border); color: var(--c-danger); }
 
-.banner { margin-top: 12px; padding: 10px 14px; border-radius: 6px; font-size: 13px; }
-.banner.red { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
-
-.results { margin-top: 20px; }
-.summary-bar { display: flex; gap: 8px; margin-bottom: 16px; }
+.results { margin-top: var(--sp-5); }
+.summary-bar { display: flex; gap: var(--sp-2); margin-bottom: var(--sp-4); }
 
 .tag {
   display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 500;

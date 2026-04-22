@@ -158,15 +158,72 @@ func Start(parentCtx context.Context, opt ChatOptions) (*Stream, error) {
 	return &Stream{events: events, cancel: cancel}, nil
 }
 
-// ReadSystemPrompt 读 bot 产物目录下的 system-prompt.md。找不到就返回默认提示,
-// 跟 server.py 一样不报错(有默认兜底意味着即使 prompt 文件被误删对话也能跑)。
+// ReadSystemPrompt 读 bot 产物目录的 system prompt。分三档兜底,让所有 target
+// 都能原生 chat,不只限 standalone:
+//
+//  1. 直接读 <botPath>/system-prompt.md(standalone target 生成的完整合并版)
+//  2. 读不到 → 在运行时拼一个,跟 generator.buildSystemPrompt 逻辑一致:
+//     SOUL.md + IDENTITY.md + AGENTS.md + CHECKLIST.md + TOOLS.md + skills/*/SKILL.md
+//     (openclaw target 的 ~/.openclaw/workspace/<bot>/ 布局)
+//  3. 还没凑出文字 → claude-code 的 CLAUDE.md 或默认兜底
+//     (claude-code / cursor target 把知识写到这一个文件里)
 func ReadSystemPrompt(botPath string) string {
-	p := filepath.Join(botPath, "system-prompt.md")
-	data, err := os.ReadFile(p)
-	if err != nil {
-		return "你是一个排障机器人。"
+	// Case 1: standalone 的合并文件
+	if data, err := os.ReadFile(filepath.Join(botPath, "system-prompt.md")); err == nil {
+		return string(data)
 	}
-	return string(data)
+	// Case 2: openclaw workspace 风格(多 .md 散落)
+	if s := composeFromWorkspace(botPath); s != "" {
+		return s
+	}
+	// Case 3: claude-code 的 CLAUDE.md
+	if data, err := os.ReadFile(filepath.Join(botPath, "CLAUDE.md")); err == nil {
+		return string(data)
+	}
+	return "你是一个排障机器人。"
+}
+
+// composeFromWorkspace 把 openclaw/claude-code/cursor 风格机器人目录里的
+// SOUL/IDENTITY/AGENTS/CHECKLIST/TOOLS + skills/*/SKILL.md 拼成一份 prompt。
+// 跟 generator.buildSystemPrompt 的顺序保持一致,保证 chat 行为跟 standalone target 等价。
+// 任何一份都没命中返回空串,让调用方走下一档兜底。
+func composeFromWorkspace(botPath string) string {
+	var sb strings.Builder
+	written := 0
+	for _, name := range []string{"SOUL.md", "IDENTITY.md", "AGENTS.md", "CHECKLIST.md", "TOOLS.md"} {
+		if data, err := os.ReadFile(filepath.Join(botPath, name)); err == nil {
+			sb.Write(data)
+			sb.WriteString("\n\n---\n\n")
+			written++
+		}
+	}
+	// skills/*/SKILL.md 叠加上去,跟 standalone 的拼法一致
+	skillsDir := filepath.Join(botPath, "skills")
+	if entries, err := os.ReadDir(skillsDir); err == nil {
+		var skillsWritten int
+		var skillsBuf strings.Builder
+		for _, e := range entries {
+			if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
+			skillMD := filepath.Join(skillsDir, e.Name(), "SKILL.md")
+			if data, err := os.ReadFile(skillMD); err == nil {
+				fmt.Fprintf(&skillsBuf, "## skill: %s\n\n", e.Name())
+				skillsBuf.Write(data)
+				skillsBuf.WriteString("\n\n---\n\n")
+				skillsWritten++
+			}
+		}
+		if skillsWritten > 0 {
+			sb.WriteString("# Skills 详细说明\n\n")
+			sb.WriteString(skillsBuf.String())
+			written += skillsWritten
+		}
+	}
+	if written == 0 {
+		return ""
+	}
+	return sb.String()
 }
 
 // AnthropicDefaultModel 跟 generator.anthropicDefaultModel 保持一致逻辑:把

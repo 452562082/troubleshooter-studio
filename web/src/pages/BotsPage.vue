@@ -577,11 +577,12 @@ onUnmounted(() => {
         <footer class="bot-foot">
           <span class="bot-time">最近更新：{{ b.mod_time }}</span>
           <div class="bot-actions">
-            <!-- standalone 专属:在 Studio 内嵌启动聊天(跳到 /bots/chat?path=...) -->
+            <!-- 所有 target 都支持:Studio 原生对话(Go 直连 Anthropic,不经 Flask/iframe)。
+                 llmchat.ReadSystemPrompt 三档兜底:
+                  standalone → system-prompt.md / openclaw → 拼 SOUL+IDENTITY+... / claude-code → CLAUDE.md -->
             <button
-              v-if="b.meta.target === 'standalone'"
               class="btn btn-regen btn-chat"
-              title="在 Studio 内直接启动 server.py + 嵌入式 chat(不开浏览器)"
+              title="在 Studio 内跟机器人对话(Go 直连 Anthropic API,不依赖 python/flask)"
               @click="openChat(b)"
             >
               💬 打开对话

@@ -18,6 +18,12 @@ export function ChatCheckKey(arg1:string,arg2:string):Promise<void>;
 
 export function ChatContextFor(arg1:string):Promise<main.ChatContext>;
 
+export function ChatDeleteKey(arg1:string):Promise<void>;
+
+export function ChatLoadKey(arg1:string):Promise<main.ChatLoadKeyResult>;
+
+export function ChatSaveKey(arg1:string,arg2:string):Promise<void>;
+
 export function ChatSend(arg1:main.ChatSendInput):Promise<string>;
 
 export function ChatStop(arg1:string):Promise<boolean>;

@@ -227,6 +227,33 @@ export async function chatCheckKey(botPath: string, apiKey: string): Promise<voi
   await App.ChatCheckKey(botPath, apiKey)
 }
 
+// ── API key 持久化:系统钥匙串(Keychain / libsecret / Credential Manager) ──
+// 之前 key 只活在 window 内存,app 关就没。现在存 OS 原生钥匙串,加密 + 持久化。
+export interface ChatLoadKeyResult {
+  api_key: string
+  ok: boolean         // false = 没存过 / 读取失败
+  err?: string        // 失败时的原因,UI 可酌情展示
+}
+
+/** 把 key 存到系统钥匙串(service=tshoot-studio-chat, user=botPath)。
+ *  同一 botPath 重复 save 直接覆盖。 */
+export async function chatSaveKey(botPath: string, apiKey: string): Promise<void> {
+  if (!isDesktop()) throw new Error('ChatSaveKey 只在桌面 app 里可用')
+  await App.ChatSaveKey(botPath, apiKey)
+}
+
+/** 从钥匙串读 key。ok=false 表示"没存过"或"读取失败",UI 按"需要填"处理即可。 */
+export async function chatLoadKey(botPath: string): Promise<ChatLoadKeyResult> {
+  if (!isDesktop()) return { api_key: '', ok: false }
+  return App.ChatLoadKey(botPath)
+}
+
+/** 删掉钥匙串里的 key。用户点"重置 API key"时调。没存过也幂等。 */
+export async function chatDeleteKey(botPath: string): Promise<void> {
+  if (!isDesktop()) return
+  await App.ChatDeleteKey(botPath)
+}
+
 // embedded target 的对话走 chatSend/chatStop(原生 chat,直连 LLM API,见上面)。
 // BotsChat.vue 用这套流式 API,前端无 iframe / 无 HTTP 中转。
 

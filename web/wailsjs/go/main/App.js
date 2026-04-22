@@ -22,6 +22,18 @@ export function ChatContextFor(arg1) {
   return window['go']['main']['App']['ChatContextFor'](arg1);
 }
 
+export function ChatDeleteKey(arg1) {
+  return window['go']['main']['App']['ChatDeleteKey'](arg1);
+}
+
+export function ChatLoadKey(arg1) {
+  return window['go']['main']['App']['ChatLoadKey'](arg1);
+}
+
+export function ChatSaveKey(arg1, arg2) {
+  return window['go']['main']['App']['ChatSaveKey'](arg1, arg2);
+}
+
 export function ChatSend(arg1) {
   return window['go']['main']['App']['ChatSend'](arg1);
 }

@@ -15,7 +15,17 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { EventsOff, EventsOn } from '../../wailsjs/runtime/runtime'
 import type { ChatContext, ChatMessage } from '../lib/bridge'
-import { chatCheckKey, chatContextFor, chatSend, chatStop, isDesktop, revealInFinder } from '../lib/bridge'
+import {
+  chatCheckKey,
+  chatContextFor,
+  chatDeleteKey,
+  chatLoadKey,
+  chatSaveKey,
+  chatSend,
+  chatStop,
+  isDesktop,
+  revealInFinder,
+} from '../lib/bridge'
 import { confirmDialog } from '../lib/confirm'
 import { toast } from '../lib/toast'
 import { marked } from 'marked'
@@ -54,9 +64,15 @@ const defaultEnv = ref('')
 const currentReqID = ref<string | null>(null) // streaming 期间非空
 const messagesBox = ref<HTMLDivElement | null>(null)
 
-// session-level key 缓存,跟旧 iframe 版保持一致:window 全局,app 关就没。
-// 也支持读系统 LLM_API_KEY env(通过 Studio 进程继承),避免填第二次
+// key 存储策略(优先级从高到低):
+//   1. window 级 session store(__tshootChatKeys__):当前进程里已读出来的内存缓存
+//      —— 发消息/预检时能直接拿,不用每次都去打扰系统钥匙串(钥匙串每次读都可能弹
+//      macOS 的"允许"对话框,体验差)
+//   2. 系统钥匙串(chatLoadKey):跨 app 重启持久,第一次打开 chat 页从这儿读回来
+//      填进 session store。用户勾"保存"的话,submitKey 会写回这儿。
+// sessionKeyStore 只是优化层,权威数据源是钥匙串。
 const sessionKeyStore = ((window as any).__tshootChatKeys__ ??= {}) as Record<string, string>
+const keySavedInKeychain = ref(false) // 当前 bot 的 key 是否从钥匙串读出来的;true 时 header 显示"重置 API key"
 
 function storageKey(kind: 'msgs' | 'env'): string {
   return `ts-native-chat:${kind}:${botPath.value}`
@@ -105,10 +121,22 @@ async function init() {
     saveEnv('')
   }
 
-  // 已有 key 直接就绪,不弹表单
+  // key 查找顺序:session store(本次进程缓存) > 系统钥匙串(持久)
   if (sessionKeyStore[botPath.value]) {
     stage.value = 'ready'
     return
+  }
+  try {
+    const r = await chatLoadKey(botPath.value)
+    if (r.ok && r.api_key) {
+      sessionKeyStore[botPath.value] = r.api_key
+      keySavedInKeychain.value = true
+      stage.value = 'ready'
+      return
+    }
+  } catch {
+    // keychain 读失败(比如 Linux 没 libsecret):静默,fallback 到 need-key,
+    // 不打扰用户。用户填完 key 时如果 keychain 写入也失败,会给 toast 明说。
   }
   stage.value = 'need-key'
 }
@@ -132,10 +160,36 @@ async function submitKey() {
     return
   }
   keyChecking.value = false
-  if (rememberKey.value) sessionKeyStore[botPath.value] = k
-  ;(window as any).__tshootChatCurrentKey = k
+  sessionKeyStore[botPath.value] = k
+  if (rememberKey.value) {
+    try {
+      await chatSaveKey(botPath.value, k)
+      keySavedInKeychain.value = true
+    } catch (e: any) {
+      // keychain 写入失败(Linux 没 libsecret / macOS 用户拒了访问对话框)
+      // fallback 到会话级,明确告诉用户为什么
+      toast.error(`保存到系统钥匙串失败:${String(e?.message || e)}。key 仅本会话有效。`)
+    }
+  }
   stage.value = 'ready'
   apiKeyInput.value = ''
+}
+
+async function resetApiKey() {
+  const ok = await confirmDialog({
+    title: '重置 API key',
+    message: '从系统钥匙串和当前会话里删除这台机器人的 API key。下次打开对话需要重新填。',
+    confirmText: '重置',
+    danger: true,
+  })
+  if (!ok) return
+  delete sessionKeyStore[botPath.value]
+  try {
+    await chatDeleteKey(botPath.value)
+  } catch { /* 本来就没存过 / 访问不到钥匙串,无所谓 */ }
+  keySavedInKeychain.value = false
+  toast.success('已重置 API key,下次打开对话会重新询问')
+  stage.value = 'need-key'
 }
 
 function currentKey(): string {
@@ -288,6 +342,15 @@ onBeforeUnmount(() => {
       <button v-if="stage === 'ready' || stage === 'streaming'" class="btn small" @click="revealInFinder(botPath)">
         在 Finder 显示
       </button>
+      <button
+        v-if="keySavedInKeychain && (stage === 'ready' || stage === 'streaming')"
+        class="btn small btn-clear"
+        :disabled="stage === 'streaming'"
+        title="从系统钥匙串和当前会话里删除这台机器人的 API key"
+        @click="resetApiKey"
+      >
+        🔑 重置 API key
+      </button>
       <button v-if="stage === 'ready' || stage === 'streaming'" class="btn small btn-clear" :disabled="stage === 'streaming'" @click="clearHistory">
         清空对话
       </button>
@@ -300,7 +363,7 @@ onBeforeUnmount(() => {
         <p class="gate-desc">
           当前模型 <code>{{ chatCtx?.model || '—' }}</code>
           <span v-if="chatCtx?.provider_name">(provider: <strong>{{ chatCtx.provider_name }}</strong>)</span>。
-          请填入该 provider 的 API key。本会话记住后 app 关闭即清,不会落盘。
+          请填入该 provider 的 API key。勾选"保存"后会加密存到系统钥匙串(macOS Keychain / Linux libsecret / Windows Credential Manager),下次打开对话自动读回来,不用再填。
         </p>
         <p v-if="!chatCtx?.provider_id" class="alert warn" style="font-size:12px;">
           ⚠ model 前缀未识别,可能发消息时报 "model 未识别" 错。要改 model 去创建向导或 yaml 调试器。
@@ -314,7 +377,7 @@ onBeforeUnmount(() => {
         />
         <label class="remember">
           <input type="checkbox" v-model="rememberKey" />
-          本会话记住(不落盘)
+          保存到系统钥匙串(加密,跨 app 重启持久;想清除用头部"重置 API key"按钮)
         </label>
         <div v-if="errMsg" class="alert error">{{ errMsg }}</div>
         <div class="gate-actions">

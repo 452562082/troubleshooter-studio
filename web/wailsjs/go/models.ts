@@ -542,6 +542,22 @@ export namespace main {
 	        this.prompt_tokens = source["prompt_tokens"];
 	    }
 	}
+	export class ChatLoadKeyResult {
+	    api_key: string;
+	    ok: boolean;
+	    err?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ChatLoadKeyResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.api_key = source["api_key"];
+	        this.ok = source["ok"];
+	        this.err = source["err"];
+	    }
+	}
 	export class ChatSendInput {
 	    bot_path: string;
 	    api_key: string;

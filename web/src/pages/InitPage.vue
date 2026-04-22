@@ -287,7 +287,7 @@ const targetDescriptions: Record<string, string> = {
   'openclaw': 'OpenClaw 安装包（bash install.sh 部署）',
   'claude-code': 'Claude Code（CLAUDE.md + skills/ 放到项目根即用）',
   'cursor': 'Cursor IDE（.cursorrules + .cursor/rules/）',
-  'standalone': '独立 Web 聊天（server.py + docker-compose）',
+  'standalone': '桌面端内嵌对话(Go 直连 Anthropic);也支持独立 server.py + docker 部署',
 }
 const enabledTargets = reactive<Record<string, boolean>>({
   ...Object.fromEntries(targetOptions.map(k => [k, true])),

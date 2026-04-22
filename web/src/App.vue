@@ -6,10 +6,14 @@ import ToastContainer from './components/ToastContainer.vue'
 const route = useRoute()
 const currentPath = computed(() => route.path)
 
+// 侧边栏分主路径 + 诊断工具两档。诊断工具(YAML 调试器 / 仓库分析)放主路径
+// 后面让新用户视线先扫过去,不进诊断也无感。路径本身没有视觉分组,只是顺序靠后;
+// 将来需要的话再加分隔线。
 const navItems = [
   { path: '/', icon: '🏠', label: '首页', desc: '概览 + 下一步推荐' },
   { path: '/bots', icon: '🤖', label: '已装机器人', desc: '扫描本机已部署的机器人' },
   { path: '/init', icon: '🧙', label: '创建向导', desc: '生成 system.yaml' },
+  // ── 诊断工具(下面两项) ──
   { path: '/editor', icon: '📝', label: 'YAML 调试器', desc: '粘贴 yaml 验证语法 + 干跑 plan' },
   { path: '/analyze', icon: '🔍', label: '仓库分析', desc: '扫代码抽 service_names / 配置中心' },
 ]

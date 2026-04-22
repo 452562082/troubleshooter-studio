@@ -47,15 +47,14 @@ onMounted(() => {
 //   创建向导(产 yaml) → 已装机器人(导入 yaml 一键部署 + 原地管理)
 // 纯落盘产物需求走 CLI:`tshoot gen -i system.yaml -o ./dist/<id>`
 const primaryCards = [
-  { path: '/init',   icon: '🧙', label: '创建向导',      desc: '7 步生成 system.yaml（支持导入已有 yaml 继续编辑）', tag: '推荐新用户' },
-  { path: '/bots',   icon: '🤖', label: '已装机器人',    desc: '扫本机已部署的 / 导入 yaml 一键部署到 4 平台 / 原地更新已装' },
-  { path: '/editor', icon: '📝', label: 'YAML 调试器',   desc: '粘贴 yaml 做快速验证 / plan 预演（不部署,部署走已装机器人或向导）' },
+  { path: '/init', icon: '🧙', label: '创建向导', desc: '7 步生成 system.yaml（支持导入已有 yaml 继续编辑）', tag: '推荐新用户' },
+  { path: '/bots', icon: '🤖', label: '已装机器人', desc: '扫本机已部署的 / 导入 yaml 一键部署到 4 平台 / 原地更新已装' },
 ]
-// 高级 / 诊断工具:只剩 Analyze 独立页(对游离 yaml 扫)。Doctor 已完全并进
-// BotsPage 卡片(声明级 + 深度扫两档),独立页删掉,不再保留"对任意 yaml"那个入口 ——
-// 那种场景其实很少见,粘 yaml 去 EditorPage 做验证 + plan 就够了。
+// 诊断工具:YAML 调试器 + 仓库分析。都不是主路径(新用户不会用),用户自己要调试
+// yaml / 扫代码补全字段时才来。Doctor 已合进 BotsPage 卡片,独立页已删。
 const advancedCards = [
-  { path: '/analyze', icon: '🔍', label: '仓库分析', desc: '扫代码抽 service_names 与配置中心线索（InitPage 第 4 步也集成了这个）' },
+  { path: '/editor',  icon: '📝', label: 'YAML 调试器', desc: '粘贴 yaml 做快速验证 + plan 预演(带行号 + 错误高亮,不部署)' },
+  { path: '/analyze', icon: '🔍', label: '仓库分析',   desc: '扫代码抽 service_names 与配置中心线索（InitPage 第 4 步也集成了这个）' },
 ]
 
 // 推荐下一步逻辑
@@ -127,10 +126,10 @@ const nextStep = computed(() => {
       <div class="info-card">
         <div class="info-head">4 种部署形态</div>
         <ul>
-          <li><code>openclaw</code> — bash install.sh 部署到 OpenClaw</li>
-          <li><code>claude-code</code> — CLAUDE.md + skills/ 装到项目根</li>
-          <li><code>cursor</code> — .cursorrules + .cursor/rules/</li>
-          <li><code>standalone</code> — Flask + Docker 独立 Web 聊天</li>
+          <li><code>openclaw</code> — Studio 托管产物,bash install.sh 装到 <code>~/.openclaw/workspace/</code></li>
+          <li><code>claude-code</code> — 装到项目根:CLAUDE.md + skills/(Claude Code CLI 自动读)</li>
+          <li><code>cursor</code> — 装到项目根:.cursorrules + .cursor/rules/(Cursor IDE 自动读)</li>
+          <li><code>standalone</code> — 桌面端内嵌对话(Go 直连 Anthropic);也支持独立部署(server.py + Docker)</li>
         </ul>
       </div>
       <div class="info-card">

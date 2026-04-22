@@ -74,9 +74,13 @@
   align-items: center;
   gap: 6px;
   padding: 8px 16px;
+  /* font 显式继承父级:button 有 UA 默认 font-family(比如 Helvetica),
+     label 又继承父级,两个在同一 class 下字形不同看起来不齐。强制一致。 */
+  font-family: inherit;
   font-size: var(--fs-base);
   font-weight: 500;
   line-height: 1.2;
+  box-sizing: border-box;
   border: 1px solid var(--c-line-2);
   border-radius: var(--r-md);
   background: var(--c-surf);
@@ -84,6 +88,11 @@
   cursor: pointer;
   user-select: none;
   transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+  /* button 元素的 UA margin/outline 也消掉 */
+  margin: 0;
+  outline: none;
+  text-decoration: none;
+  white-space: nowrap;
 }
 .btn:hover:not(:disabled) {
   background: var(--c-surf-3);

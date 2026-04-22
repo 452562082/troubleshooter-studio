@@ -1,15 +1,20 @@
 // Package discover 负责从本机文件系统反向识别已安装的排障机器人。
 //
-// 核心锚点是各 target 产物根下的 .tshoot.json —— tshoot 在 gen 时写入它，
-// install.sh 会把它拷到最终部署路径（~/.openclaw/workspace/<name>/.tshoot.json
+// 核心锚点是各 target 产物根下的 tshoot.json —— tshoot 在 gen 时写入它，
+// install.sh 会把它拷到最终部署路径（~/.openclaw/workspace/<name>/tshoot.json
 // 或目标项目根）。discover 扫到这个文件 = 这是 Troubleshooter Studio 生成的机器人。
 package discover
 
 // MetaFilename 是 tshoot 写到每个产物根的元数据文件名。
 // 客户端（discover / agent-edit）靠找这个文件识别机器人。
-const MetaFilename = ".tshoot.json"
+//
+// 注意:刻意不带开头的点,因为 macOS Spotlight (mdfind) 默认跳过 dotfile,
+// 这会让桌面 app 无法零配置扫出 standalone / claude-code / cursor 散落在
+// 用户目录的机器人。用 tshoot.json(无点) 换来 Spotlight 全盘索引,
+// 代价是这个文件会出现在 ls / Finder 里 —— 可接受。
+const MetaFilename = "tshoot.json"
 
-// Meta 是 .tshoot.json 的 schema。字段尽量稳定，新增字段要向后兼容。
+// Meta 是 tshoot.json 的 schema。字段尽量稳定，新增字段要向后兼容。
 type Meta struct {
 	// SchemaVersion 让未来扩字段时不破坏旧机器人的 discover
 	SchemaVersion int `json:"schema_version"`
@@ -38,13 +43,13 @@ type Meta struct {
 
 // DiscoveredAgent 是 Scan() 返回的单个发现结果。
 type DiscoveredAgent struct {
-	// Meta 来自解析 .tshoot.json
+	// Meta 来自解析 tshoot.json
 	Meta Meta `json:"meta"`
 
-	// Path 是产物根目录绝对路径（含 .tshoot.json 的那一层）
+	// Path 是产物根目录绝对路径（含 tshoot.json 的那一层）
 	Path string `json:"path"`
 
-	// ModTime 是 .tshoot.json 的修改时间，近似反映"最近一次 apply/install 的时间"
+	// ModTime 是 tshoot.json 的修改时间，近似反映"最近一次 apply/install 的时间"
 	ModTime string `json:"mod_time"`
 
 	// 快速概览字段（从 SystemYAML 解析填充），方便 UI 不用再解析一次

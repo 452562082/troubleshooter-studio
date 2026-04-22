@@ -1,5 +1,5 @@
 // Package agent 实现阶段 2 的"读-改-部署闭环"：
-// 从 discover 识别到的机器人 (.tshoot.json) 出发，用新的 system.yaml 重新渲染产物，
+// 从 discover 识别到的机器人 (tshoot.json) 出发，用新的 system.yaml 重新渲染产物，
 // rsync 回活的 workspace 路径，保留 preserve_on_regenerate 列表中的用户手改。
 //
 // 这个包刻意**不**调 install.sh —— install.sh 的职责是"首次 bootstrap + 收凭证"，
@@ -28,7 +28,7 @@ type ApplyOptions struct {
 	NewYAML []byte
 	// TemplateRoot 是 tshoot 模板根（tshoot discover 所在的同一个 tshoot）。
 	TemplateRoot string
-	// TshootVersion 写回 .tshoot.json 的 tshoot_version 字段。
+	// TshootVersion 写回 tshoot.json 的 tshoot_version 字段。
 	TshootVersion string
 	// DryRun 为 true 时只渲染 + 打印会变的文件列表，不真写 workspace。
 	DryRun bool
@@ -46,7 +46,7 @@ type Result struct {
 }
 
 // Apply 用 NewYAML 替换 agent 的活配置，重新 render 并 rsync 到 agent.Path。
-// agent 来自 discover.Scan() 的结果；agent.Path 是 workspace 根（含 .tshoot.json 的那一层）。
+// agent 来自 discover.Scan() 的结果；agent.Path 是 workspace 根（含 tshoot.json 的那一层）。
 //
 // 支持 4 种 target：openclaw / claude-code / cursor / standalone。
 // 每种 target 走各自的 generator 方法，然后把相应的产物子树 rsync 到 agent.Path。
@@ -113,7 +113,7 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 
 	// src → dst
 	for _, rel := range srcFiles {
-		// 来自 generator 的 .tshoot.json 不直接覆盖 —— 我们最后在 step 3 单独写，
+		// 来自 generator 的 tshoot.json 不直接覆盖 —— 我们最后在 step 3 单独写，
 		// 否则 generator 写的 generated_at 会先覆盖一次，再被我们这里覆盖一次，冗余。
 		if rel == discover.MetaFilename {
 			continue
@@ -150,11 +150,11 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 		}
 	}
 
-	// 刷 .tshoot.json
+	// 刷 tshoot.json
 	tsfUpdated := false
 	if !opts.DryRun {
 		if err := writeTSFMeta(ag.Path, ag.Meta.Target, cfg, opts.NewYAML, opts.TshootVersion); err != nil {
-			return nil, fmt.Errorf("refresh .tshoot.json: %w", err)
+			return nil, fmt.Errorf("refresh tshoot.json: %w", err)
 		}
 		tsfUpdated = true
 	}
@@ -170,7 +170,7 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 	}, nil
 }
 
-// ImportAndApply 是"首次部署"路径：没有现存 .tshoot.json，直接按 yaml + target + dest
+// ImportAndApply 是"首次部署"路径：没有现存 tshoot.json，直接按 yaml + target + dest
 // 渲染产物 + 写到 dest。定位是"给已有 yaml 的人跳过 Init 向导 7 步"。
 //
 // 语义分两种：
@@ -210,7 +210,7 @@ func ImportAndApply(yamlBytes []byte, target, destPath string, opts ApplyOptions
 			AgentPath:        destPath,
 			Target:           target,
 			FilesWritten:     written,
-			TSFJSONUpdated:   true, // g.Generate 尾部会写 .tshoot.json
+			TSFJSONUpdated:   true, // g.Generate 尾部会写 tshoot.json
 			NeedsRestartHint: "已生成 openclaw 部署包。下一步：cd '" + destPath + "' && bash scripts/install.sh 注册 MCP + 填凭证，再 `openclaw gateway restart`",
 		}, nil
 	}

@@ -10,7 +10,7 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 )
 
-// writeTshootMeta 写产物根下的 .tshoot.json 锚点，discover 靠这个文件识别机器人。
+// writeTshootMeta 写产物根下的 tshoot.json 锚点，discover 靠这个文件识别机器人。
 // dir 是"产物根"——对 openclaw 是 <OutputDir>/templates/workspace-template/，
 // 对 claude-code/cursor/standalone 是各自的输出目录。
 //
@@ -28,7 +28,7 @@ func (g *Generator) writeTshootMeta(dir, target string) error {
 	}
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal .tshoot.json: %w", err)
+		return fmt.Errorf("marshal tshoot.json: %w", err)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)

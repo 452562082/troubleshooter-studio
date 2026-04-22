@@ -66,7 +66,7 @@ func (a *App) Version() string {
 	return version
 }
 
-// DiscoverBots 扫描本机已安装的排障机器人（.tshoot.json 锚点）。
+// DiscoverBots 扫描本机已安装的排障机器人（tshoot.json 锚点）。
 // 默认只扫 ~/.openclaw/workspace/（桌面 app 的 CWD 没意义，不同于 CLI 的 DefaultRoots）。
 // extraRoots 是 UI 侧让用户追加的项目根（用于找 claude-code / cursor 装进去的机器人）。
 // 前端调用：window.go.main.App.DiscoverBots([]) or DiscoverBots(["/path/to/project"]).
@@ -127,10 +127,10 @@ func (a *App) Gen(yamlText, outputDir string) (*generator.GenSummary, error) {
 }
 
 // ApplyBot 把新的 system.yaml 应用到已装机器人的活 workspace：
-// 重新渲染产物 → rsync 到 agentPath → 更新 .tshoot.json。
+// 重新渲染产物 → rsync 到 agentPath → 更新 tshoot.json。
 // preserve_on_regenerate 列表里的文件保留用户手改不覆盖。
 //
-// 前置：agentPath 下必须有可读的 .tshoot.json（由 discover 识别到的路径）。
+// 前置：agentPath 下必须有可读的 tshoot.json（由 discover 识别到的路径）。
 // dryRun=true 时只预演，不真写盘，用于 UI 先给用户看"会变什么"。
 func (a *App) ApplyBot(agentPath, newYamlText string, dryRun bool) (*agent.Result, error) {
 	// 从活 workspace 回读 DiscoveredAgent（避免 UI 传整个结构体过来，省序列化）
@@ -139,9 +139,9 @@ func (a *App) ApplyBot(agentPath, newYamlText string, dryRun bool) (*agent.Resul
 		return nil, fmt.Errorf("read agent at %s: %w", agentPath, err)
 	}
 	if len(found) == 0 {
-		return nil, fmt.Errorf("no .tshoot.json found under %s", agentPath)
+		return nil, fmt.Errorf("no tshoot.json found under %s", agentPath)
 	}
-	// 同一目录下可能有多个 target 的 .tshoot.json；选路径最短（最贴近 agentPath 根）那个
+	// 同一目录下可能有多个 target 的 tshoot.json；选路径最短（最贴近 agentPath 根）那个
 	ag := found[0]
 	for _, cand := range found[1:] {
 		if len(cand.Path) < len(ag.Path) {

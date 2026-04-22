@@ -61,7 +61,7 @@ async function regen(b: DiscoveredBot) {
   regenState[k] = { loading: true }
   try {
     const yamlText = b.meta.system_yaml
-    if (!yamlText) throw new Error('这个机器人的 .tshoot.json 里没有 system_yaml（老产物？）')
+    if (!yamlText) throw new Error('这个机器人的 tshoot.json 里没有 system_yaml（老产物？）')
     const res = await bridgeGen(yamlText, '')
     const outDir = String(res?.output_dir || '未知输出路径')
     regenState[k] = { loading: false, ok: `产物已写入 ${outDir}` }
@@ -258,7 +258,7 @@ onMounted(scan)
     <header class="page-header">
       <div>
         <h1>已装机器人</h1>
-        <p class="subtitle">扫描本机 .tshoot.json 锚点，列出已经部署到 AI 平台的排障机器人。</p>
+        <p class="subtitle">扫描本机 tshoot.json 锚点，列出已经部署到 AI 平台的排障机器人。</p>
       </div>
       <div class="page-actions">
         <button class="btn" :disabled="importStage !== 'idle'" @click="pickYAML">
@@ -394,7 +394,7 @@ onMounted(scan)
     <div v-else-if="loading" class="empty">扫描中…</div>
     <div v-else-if="bots.length === 0" class="empty">
       没找到已安装的机器人。可能原因：<br />
-      1) OpenClaw 工作区为空；2) 机器人装在别处（点上面「添加扫描路径」）；3) 安装时没写 <code>.tshoot.json</code>（老版本产物）
+      1) OpenClaw 工作区为空；2) 机器人装在别处（点上面「添加扫描路径」）；3) 安装时没写 <code>tshoot.json</code>（老版本产物）
     </div>
 
     <div v-else class="bot-grid">
@@ -417,7 +417,7 @@ onMounted(scan)
             <button
               class="btn btn-regen"
               :disabled="regenState[regenKey(b)]?.loading"
-              :title="b.meta.system_yaml ? '' : '.tshoot.json 里没保存 system_yaml，无法原地重 gen'"
+              :title="b.meta.system_yaml ? '' : 'tshoot.json 里没保存 system_yaml，无法原地重 gen'"
               @click="regen(b)"
             >
               {{ regenState[regenKey(b)]?.loading ? '生成中…' : '重新生成' }}

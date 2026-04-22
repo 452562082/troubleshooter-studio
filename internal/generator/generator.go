@@ -35,13 +35,13 @@ type Generator struct {
 	// 负责在多 target 生成时先跑一次 Generate() 到此目录、或把 openclaw 产物挪过来。
 	SharedStaging string
 
-	// TshootVersion 写入产物 .tshoot.json 的 tshoot_version 字段
+	// TshootVersion 写入产物 tshoot.json 的 tshoot_version 字段
 	// （由 cmd/tshoot / cmd/tshoot-desktop 的 main.version 注入）。留空即空字符串。
 	TshootVersion string
 
-	// SystemYAMLSource 是原始 system.yaml 内容（含注释），塞进 .tshoot.json.system_yaml。
+	// SystemYAMLSource 是原始 system.yaml 内容（含注释），塞进 tshoot.json.system_yaml。
 	// 这是 discover / agent apply 的"真源"：二次修改时从这里读。
-	// 调用方应在 Generate 前设好；为空时 .tshoot.json 里该字段为空串。
+	// 调用方应在 Generate 前设好；为空时 tshoot.json 里该字段为空串。
 	SystemYAMLSource []byte
 }
 
@@ -191,7 +191,7 @@ func (g *Generator) Generate() error {
 		return fmt.Errorf("restore preserved: %w", err)
 	}
 
-	// 写 .tshoot.json 到真正的 workspace 根（install.sh 会 cp -R 这个目录到 ~/.openclaw/workspace/）
+	// 写 tshoot.json 到真正的 workspace 根（install.sh 会 cp -R 这个目录到 ~/.openclaw/workspace/）
 	wsDir := filepath.Join(g.OutputDir, "templates", "workspace-template")
 	if err := g.writeTshootMeta(wsDir, "openclaw"); err != nil {
 		return fmt.Errorf("write tshoot meta: %w", err)

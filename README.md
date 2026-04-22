@@ -103,8 +103,8 @@ go build -o bin/tshoot ./cmd/tshoot    # 或 go install ./cmd/tshoot
 | **4. 导出 yaml** | 🤖 已装机器人 → 导出 yaml | Wails 原生 SaveFileDialog 选路径存盘 |
 | **5. 新建机器人** | 🧙 创建向导 | 7 步表单生成 `system.yaml`（草稿存 localStorage，切页刷新不丢）；生成完可直接 gen |
 
-机器人靠产物根目录的 `.tshoot.json` 锚点识别（gen 时自动写入，含完整 `system_yaml` 原文）。
-老版本没 `.tshoot.json` 的产物扫不到——重跑一次 `tshoot gen` 升级到新版本就行。
+机器人靠产物根目录的 `tshoot.json` 锚点识别（gen 时自动写入，含完整 `system_yaml` 原文）。
+老版本没 `tshoot.json` 的产物扫不到——重跑一次 `tshoot gen` 升级到新版本就行。
 
 Gen 只产生产物目录；**真正装到 OpenClaw / Claude Code 等平台仍需走产物里的 `install.sh`**（首次收凭证）。把 install.sh 的交互搬进桌面 app 是下一个迭代项。
 
@@ -206,7 +206,7 @@ standalone 模式不依赖任何 AI 平台——只需一个 LLM API key（Claud
 | `doctor` | 对比声明 vs 代码实态，报告漂移 | 定期体检 |
 | `plan` | 干跑 gen，展示 skills / files / overrides / config-map 分布 | gen 前预览 |
 | `watch` | 文件变化时自动重跑 plan | 开发时持续反馈 |
-| `gen` | 实际生成部署包（自带 preserve 保护人工行 + 写 `.tshoot.json` 锚点） | 正式落盘 |
+| `gen` | 实际生成部署包（自带 preserve 保护人工行 + 写 `tshoot.json` 锚点） | 正式落盘 |
 | `diff` | 精确到文件 + 行级的新旧产物对比 | review 变更 |
 | `upgrade` | 备份 + 重 gen + diff 一把过 | tshoot 版本升级后 |
 | `serve` | 启动 Web UI（HTTP API + 前端界面） | 脚本化访问 / 无桌面环境 |
@@ -345,7 +345,7 @@ make lint         # go vet + gofmt -l + vue-tsc --noEmit
 make clean        # 清 bin/ dist/bin/ 和 embed 的 dist 目标
 ```
 
-版本号自动注入：`git describe --tags --abbrev=0` + `git rev-parse --short HEAD` → `tshoot --version` 打印 `tshoot v0.2.0 (abcdef)`，桌面 app 用同样版本号写入 `.tshoot.json.tshoot_version` + macOS bundle 的 `CFBundleVersion`。
+版本号自动注入：`git describe --tags --abbrev=0` + `git rev-parse --short HEAD` → `tshoot --version` 打印 `tshoot v0.2.0 (abcdef)`，桌面 app 用同样版本号写入 `tshoot.json.tshoot_version` + macOS bundle 的 `CFBundleVersion`。
 
 `templates/` 和 `examples/` 通过仓库根的 `embed.go` 用 `//go:embed` 打进二进制（CLI 和桌面 app 共用）—— 这样 `go install` 出来的 tshoot 在任何目录都能跑 demo / gen，无需 clone 仓库。运行时优先用磁盘上的 `templates/` / `examples/`（存在则用），否则从 embed 解压到 `os.TempDir()` 复用。
 
@@ -389,8 +389,8 @@ internal/
   config/                   # system.yaml 加载与校验（Load / LoadFromBytes）
   analyzer/                 # 仓库扫描：Go / Java / Node / PHP / Python × 5 种配置源
   generator/                # 模板渲染 + preserve + diff + plan（多 target 共享 staging）
-                            # 末尾写 .tshoot.json 锚点（discover / apply 依赖这个）
-  discover/                 # 扫 .tshoot.json 识别本机已装机器人（DiscoveredAgent + Scan）
+                            # 末尾写 tshoot.json 锚点（discover / apply 依赖这个）
+  discover/                 # 扫 tshoot.json 识别本机已装机器人（DiscoveredAgent + Scan）
   agent/                    # 读-改-部署闭环：agent.Apply(new yaml) 原地 render + rsync
   doctor/                   # 声明 vs 实态漂移检测 + actionable --fix（yaml 行级 bit-perfect 替换）
   upgrade/                  # 备份 + 重 gen + diff

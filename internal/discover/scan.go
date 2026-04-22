@@ -4,17 +4,20 @@ import (
 	"encoding/json"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
-// Scan 在给定目录里寻找 .tshoot.json 锚点。每个命中 = 一个已安装机器人。
+// Scan 在给定目录里寻找 tshoot.json 锚点。每个命中 = 一个已安装机器人。
 //
 // 搜索策略：
 //   - roots 传入的是候选根目录（例如 ~/.openclaw/workspace/、指定项目根）
-//   - 每个 root 下最多下探 2 层寻找 .tshoot.json，避免把用户硬盘全扫一遍
+//   - 每个 root 下最多下探 2 层寻找 tshoot.json，避免把用户硬盘全扫一遍
 //   - 同一个 Meta.SystemID + Target 的机器人在 roots 里出现多次，只保留第一条
 //
 // 返回结果按 Meta.SystemID 稳定排序。
@@ -23,6 +26,12 @@ func Scan(roots []string) ([]DiscoveredAgent, error) {
 	// 初始化成空切片(不是 nil),确保 JSON 编码出 [] 而不是 null。
 	// 否则前端 `bots.value = await DiscoverBots()` 会拿到 null,后续 .length 访问崩溃。
 	out := []DiscoveredAgent{}
+
+	// macOS Spotlight 全盘找 tshoot.json；零配置命中任意位置的
+	// claude-code / cursor / standalone 机器人。找到的路径合并进 roots
+	// （重复的靠 systemID|target dedup 兜住）。非 macOS 或 Spotlight 用不了
+	// 自动 no-op，不影响现有 roots 扫描。
+	roots = append(roots, systemLocateAgents()...)
 
 	for _, root := range roots {
 		root = expandHome(root)
@@ -63,7 +72,7 @@ func DefaultRoots() []string {
 	return roots
 }
 
-// scanOne 从 root 开始 BFS 寻找 .tshoot.json，最深 maxDepth 层（root 算 0）。
+// scanOne 从 root 开始 BFS 寻找 tshoot.json，最深 maxDepth 层（root 算 0）。
 func scanOne(root string, maxDepth int) ([]DiscoveredAgent, error) {
 	var out []DiscoveredAgent
 	rootAbs, _ := filepath.Abs(root)
@@ -95,7 +104,7 @@ func scanOne(root string, maxDepth int) ([]DiscoveredAgent, error) {
 	return out, err
 }
 
-// readAgent 读并解析单个 .tshoot.json，派生统计字段。
+// readAgent 读并解析单个 tshoot.json，派生统计字段。
 func readAgent(metaPath string) (DiscoveredAgent, error) {
 	data, err := os.ReadFile(metaPath)
 	if err != nil {
@@ -155,6 +164,43 @@ func depthOf(rel string) int {
 		}
 	}
 	return n
+}
+
+// systemLocateAgents 用 OS 自带的索引工具（macOS: mdfind / Linux: locate）
+// 找所有名为 tshoot.json 的文件，返回它们所在目录（作为 Scan 的额外 roots）。
+// 失败 / 工具不存在 / 非支持平台都返回空切片，不抛错——它本来就是最大努力优化。
+//
+// macOS 默认索引用户 home + /Applications 等常见目录；被 Spotlight 排除的位置（比如
+// Time Machine 备份、某些加密卷）会扫不到，这些都不是排障机器人常驻的地方，可接受。
+func systemLocateAgents() []string {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("mdfind", "-name", "tshoot.json")
+	case "linux":
+		// locate 依赖 updatedb；可能没装，没装的话 Output() 就报错，我们返回空
+		if _, err := exec.LookPath("locate"); err != nil {
+			return nil
+		}
+		cmd = exec.Command("locate", "--basename", "tshoot.json")
+	default:
+		return nil // Windows 没通用索引工具；靠 roots 参数 + 用户手动加路径
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	var dirs []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// mdfind 可能命中 backup/旧产物，Scan 每个 root 都会 os.Stat + DFS，
+		// 不存在的自然跳过；基本正确的就进去。
+		dirs = append(dirs, filepath.Dir(line))
+	}
+	return dirs
 }
 
 func expandHome(p string) string {

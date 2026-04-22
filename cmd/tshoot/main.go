@@ -191,7 +191,7 @@ func usage() {
   skill      skill 脚手架（skill new <name> 在模板库里生成新 skill 骨架）
   demo       零配置试跑：用内置 examples/shop-system.yaml + examples/fake-repos 跑完整 pipeline
   validate   仅校验 system.yaml
-  discover   扫本机 .tshoot.json 锚点，列出已装机器人
+  discover   扫本机 tshoot.json 锚点，列出已装机器人
   apply      拿新 yaml 重 render + rsync 回已装 workspace（preserve_on_regenerate 文件保留）`)
 }
 
@@ -1538,7 +1538,7 @@ func runDiscover(args []string) error {
 
 	if len(bots) == 0 {
 		fmt.Printf("没发现已装机器人（扫描的路径：%s）\n", strings.Join(roots, ", "))
-		fmt.Println("可能原因：1) 没装过；2) 装到别处（用 --roots 指定）；3) 老产物没 .tshoot.json 锚点")
+		fmt.Println("可能原因：1) 没装过；2) 装到别处（用 --roots 指定）；3) 老产物没 tshoot.json 锚点")
 		return nil
 	}
 
@@ -1556,12 +1556,12 @@ func runDiscover(args []string) error {
 
 // ── apply：用新 yaml 应用到已装机器人 ────────────────────────────
 // tshoot apply -i <new.yaml> --path <agent-path> [--dry-run] [--format text|json]
-// 流程：读 new yaml → 根据 agent.Path 的 .tshoot.json 识别 target → 重 render → rsync 回 path
+// 流程：读 new yaml → 根据 agent.Path 的 tshoot.json 识别 target → 重 render → rsync 回 path
 //     preserve_on_regenerate 里的用户手改自动保留。
 func runApply(args []string) error {
 	fs := flag.NewFlagSet("apply", flag.ExitOnError)
 	input := fs.String("i", "", "新 system.yaml 路径（必填）")
-	path := fs.String("path", "", "目标已装机器人的 workspace 路径（必填，含 .tshoot.json 的那一层）")
+	path := fs.String("path", "", "目标已装机器人的 workspace 路径（必填，含 tshoot.json 的那一层）")
 	tmplDir := fs.String("t", "", "模板根（默认：可执行文件旁的 templates/ 或 embed 解压）")
 	dryRun := fs.Bool("dry-run", false, "只预演不写盘")
 	format := fs.String("format", "text", "text | json")
@@ -1584,7 +1584,7 @@ func runApply(args []string) error {
 		return fmt.Errorf("scan %s: %w", *path, err)
 	}
 	if len(found) == 0 {
-		return fmt.Errorf("no .tshoot.json under %s（确认路径对，或该机器人是老版本产物）", *path)
+		return fmt.Errorf("no tshoot.json under %s（确认路径对，或该机器人是老版本产物）", *path)
 	}
 	// 最短路径那个（最贴近 path 根）
 	ag := found[0]

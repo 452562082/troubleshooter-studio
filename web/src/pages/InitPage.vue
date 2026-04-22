@@ -523,7 +523,7 @@ function generateYAML(): string {
   lines.push(`  output_dir: ./dist/${system.id || 'my-system'}          # 产物目录；多 target 会额外产出 <output_dir>-<target>/`)
   const selectedTargets = targetOptions.filter(t => enabledTargets[t])
   const targetList = selectedTargets.length ? selectedTargets : ['openclaw']
-  lines.push('  targets:                             # 每个 target 产出一份部署包（同一份 system.yaml）')
+  lines.push('  targets:                             # 每个 target 产出一份机器人产物（同一份 system.yaml）')
   for (const t of targetList) {
     lines.push(`    - ${t}`)
   }
@@ -542,8 +542,8 @@ function generateYAML(): string {
   lines.push('')
   lines.push('meta:')
   lines.push('  schema_version: "0.1"')
-  lines.push('  factory_template_ref:')
-  lines.push('    repo: troubleshooter-factory')
+  lines.push('  tshoot_template_ref:')
+  lines.push('    repo: troubleshooter-studio')
   lines.push('    ref: main')
 
   return lines.join('\n') + '\n'
@@ -713,7 +713,7 @@ const configTypeDescriptions: Record<string, string> = {
     <!-- Guidance info box -->
     <div class="info-box">
       <p><strong>本向导帮助你快速生成 system.yaml 配置文件</strong></p>
-      <p>system.yaml 描述你的系统架构（仓库、环境、配置中心、基础组件），factory 根据它生成定制化的 AI 排障机器人部署包</p>
+      <p>system.yaml 描述你的系统架构（仓库、环境、配置中心、基础组件），tshoot 据此生成并部署定制化的 AI 排障机器人</p>
       <p>完成后可「验证」确保格式正确，然后「下载」到本地</p>
     </div>
 
@@ -962,7 +962,7 @@ const configTypeDescriptions: Record<string, string> = {
     <div v-if="currentStep === 7" class="card">
       <h2>预览 + 生成</h2>
       <h3 style="margin-top:0">输出目标（勾选要产出的部署形态）</h3>
-      <p class="help-text">默认全部 4 种；运行 <code>factory gen</code> 时会一次性生成 <code>&lt;output_dir&gt;-&lt;target&gt;/</code> 兄弟目录。</p>
+      <p class="help-text">默认全部 4 种；运行 <code>tshoot gen</code> 时会一次性生成 <code>&lt;output_dir&gt;-&lt;target&gt;/</code> 兄弟目录。</p>
       <div class="checkbox-grid">
         <label v-for="t in targetOptions" :key="t" class="check-label" :title="targetDescriptions[t]">
           <input type="checkbox" v-model="enabledTargets[t]" @change="yamlOutput = generateYAML()" />

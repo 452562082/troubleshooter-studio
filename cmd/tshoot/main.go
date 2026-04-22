@@ -135,7 +135,7 @@ func main() {
 // printWelcome 在 `tshoot`（无参）时打印，给第一次接触的人一个清晰的起点。
 // 跟 usage() 不同：usage 是完整命令手册，welcome 只告诉用户下一步该做什么。
 func printWelcome() {
-	fmt.Printf(`troubleshooter-studio — 排障机器人生成器  (version %s)
+	fmt.Printf(`troubleshooter-studio — AI 排障机器人工作台  (version %s)
 
 第一次使用？三种上手方式（按推荐顺序）：
   1) 零配置试跑（看产物长啥样，30 秒）：
@@ -160,7 +160,7 @@ func printWelcome() {
 }
 
 func usage() {
-	fmt.Println(`troubleshooter-studio — 排障机器人生成器
+	fmt.Println(`troubleshooter-studio — AI 排障机器人工作台
 
 用法:
   tshoot init [-o <system.yaml>]                          # 交互向导生成 system.yaml
@@ -180,7 +180,7 @@ func usage() {
 
 子命令:
   init       交互式问答生成一份最小可用 system.yaml
-  gen        基于 system.yaml 生成部署包（保留 preserve_on_regenerate 文件与人工 verified 行）
+  gen        基于 system.yaml 生成机器人产物（保留 preserve_on_regenerate 文件与人工 verified 行）
   plan       干跑一次 gen，展示将生成/保留/应用的内容与 config-map 分布（不写盘）
   watch      文件变化时自动重跑 plan（system.yaml / templates/ / analysis.json）
   analyze    扫描已 clone 的仓库，抽取 service_names 与配置中心线索
@@ -774,7 +774,7 @@ func printDoctorText(rep *doctor.Report) {
 	errs, warns, infos := rep.Counts()
 	if len(rep.Issues) == 0 {
 		fmt.Println("[ok] 无漂移 — system.yaml 与代码一致")
-		fmt.Println("下一步：放心 tshoot gen 生成部署包")
+		fmt.Println("下一步：放心 tshoot gen 生成机器人产物")
 		return
 	}
 	for _, i := range rep.Issues {

@@ -46,7 +46,7 @@ const cards = [
   { path: '/editor', icon: '📝', label: 'YAML 编辑器', desc: '直接手写 / 粘贴 system.yaml，一键验证、plan、gen' },
   { path: '/analyze', icon: '🔍', label: '仓库分析', desc: '扫描代码抽取 service_names 与配置中心线索（可选）' },
   { path: '/plan', icon: '📋', label: '计划预览', desc: '干跑一次 gen，看会生成哪些 skill / 文件 / 保留' },
-  { path: '/gen', icon: '🚀', label: '执行生成', desc: '真落盘产出 4 种部署包（依 generation.targets）' },
+  { path: '/gen', icon: '🚀', label: '生成产物', desc: '按 generation.targets 真落盘 4 种形态的机器人产物（OpenClaw / Claude Code / Cursor / Standalone）' },
   { path: '/doctor', icon: '🩺', label: '健康检查', desc: '对比声明 vs 代码实态，给 actionable 的修复建议' },
   { path: '/diff', icon: '🔀', label: '差异对比', desc: '精确到行级的新旧产物 diff，review 用' },
 ]
@@ -72,8 +72,8 @@ const nextStep = computed(() => {
 <template>
   <div class="home-page">
     <div class="hero">
-      <h1>troubleshooter-factory</h1>
-      <p class="tagline">为你的业务系统生成一个定制化的 AI 排障机器人部署包 —— 4 种部署形态，一份 system.yaml。</p>
+      <h1>Troubleshooter Studio</h1>
+      <p class="tagline">AI 排障机器人工作台：为你的业务系统建模 → 生成 → 一键部署 → 后续管理。4 种 AI 平台（OpenClaw / Claude Code / Cursor / Standalone），一份 system.yaml 全覆盖。</p>
     </div>
 
     <!-- 推荐下一步面板 -->
@@ -88,7 +88,7 @@ const nextStep = computed(() => {
 
     <!-- 能力概览 -->
     <h2 class="section-title">工作流</h2>
-    <p class="section-hint">典型顺序：创建 → 编辑 → 分析（可选）→ 预览 → 生成 → 健康检查。每个页面都可独立使用。</p>
+    <p class="section-hint">典型顺序：创建 → 编辑 → 分析（可选）→ 预览 → 生成并部署 → 健康检查。每个页面都可独立使用。</p>
     <div class="card-grid">
       <div v-for="(c, i) in cards" :key="c.path" class="card" @click="router.push(c.path)">
         <div class="card-head">
@@ -116,11 +116,11 @@ const nextStep = computed(() => {
       <div class="info-card">
         <div class="info-head">CLI 命令速查</div>
         <ul>
-          <li><code>factory demo</code> — 零配置试跑（30 秒看产物）</li>
-          <li><code>factory init -o system.yaml</code> — 命令行向导</li>
-          <li><code>factory validate -i ...</code> — 校验 yaml</li>
-          <li><code>factory gen -i ...</code> — 真生成</li>
-          <li><code>factory upgrade -i ...</code> — 升级重生成 + diff</li>
+          <li><code>tshoot demo</code> — 零配置试跑（30 秒看产物）</li>
+          <li><code>tshoot init -o system.yaml</code> — 命令行向导</li>
+          <li><code>tshoot discover</code> — 扫本机已装机器人</li>
+          <li><code>tshoot gen -i ...</code> — 生成产物</li>
+          <li><code>tshoot apply -i new.yaml --path ...</code> — 原地更新已装的机器人</li>
         </ul>
       </div>
     </div>

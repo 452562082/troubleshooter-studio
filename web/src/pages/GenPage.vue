@@ -113,7 +113,7 @@ async function runGen() {
 
     <div class="info-box">
       <div class="info-box-title">使用说明</div>
-      <div>执行生成：根据 system.yaml 的 <code>generation.targets</code> 产出排障机器人部署包，可一次生成四种形态，<strong>每种都带 <code>install.sh</code> 一键部署</strong>：</div>
+      <div>生成机器人产物：根据 system.yaml 的 <code>generation.targets</code> 产出，可一次生成四种形态，<strong>每种都带 <code>install.sh</code> 可部署到对应 AI 平台</strong>：</div>
       <ul class="info-box-list">
         <li><code>openclaw</code> — <code>bash install.sh</code> 部署到 OpenClaw（含 self-test.sh + workspace 模板）</li>
         <li><code>claude-code</code> — <code>bash install.sh &lt;project-dir&gt;</code> 把 CLAUDE.md + skills/ 装入项目根</li>

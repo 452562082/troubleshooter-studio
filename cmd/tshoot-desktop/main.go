@@ -101,7 +101,8 @@ func (a *App) Validate(yamlText string) (*ValidateResult, error) {
 	}, nil
 }
 
-// Gen 按 system.yaml 实际落盘生成部署包。
+// Gen 按 system.yaml 实际落盘生成机器人产物（写到 outputDir；后续要部署还得走
+// ImportAndDeploy 或 RunInstall 把产物装到 AI 平台）。
 // outputDir 为空时用 yaml 里的 generation.output_dir；相对路径解析成绝对路径，
 // 让 UI 能稳定展示"产物在 /abs/path/xxx"。
 func (a *App) Gen(yamlText, outputDir string) (*generator.GenSummary, error) {

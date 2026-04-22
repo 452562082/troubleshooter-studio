@@ -12,7 +12,7 @@ const navItems = [
   { path: '/editor', icon: '📝', label: '编辑器', desc: '编辑 / 验证 / 生成' },
   { path: '/analyze', icon: '🔍', label: '仓库分析', desc: '扫描代码抽取配置' },
   { path: '/plan', icon: '📋', label: '计划预览', desc: '预览将生成什么' },
-  { path: '/gen', icon: '🚀', label: '执行生成', desc: '生成部署包' },
+  { path: '/gen', icon: '🚀', label: '生成产物', desc: '按 targets 生成机器人产物' },
   { path: '/doctor', icon: '🩺', label: '健康检查', desc: '检测声明与代码漂移' },
   { path: '/diff', icon: '🔀', label: '差异对比', desc: '新旧产物 diff' },
 ]

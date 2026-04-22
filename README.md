@@ -129,7 +129,7 @@ go build -o bin/tshoot ./cmd/tshoot
 # 4. 预览将生成什么（不落盘）
 ./bin/tshoot plan -i system.yaml --analysis analysis.json
 
-# 5. 生成部署包
+# 5. 生成机器人产物
 ./bin/tshoot gen -i system.yaml --analysis analysis.json
 
 # 6. 部署到 OpenClaw
@@ -205,7 +205,7 @@ standalone 模式不依赖任何 AI 平台——只需一个 LLM API key（Claud
 | `doctor` | 对比声明 vs 代码实态，报告漂移 | 定期体检 |
 | `plan` | 干跑 gen，展示 skills / files / overrides / config-map 分布 | gen 前预览 |
 | `watch` | 文件变化时自动重跑 plan | 开发时持续反馈 |
-| `gen` | 实际生成部署包（自带 preserve 保护人工行 + 写 `tshoot.json` 锚点） | 正式落盘 |
+| `gen` | 生成机器人产物（自带 preserve 保护人工行 + 写 `tshoot.json` 锚点） | 正式落盘 |
 | `diff` | 精确到文件 + 行级的新旧产物对比 | review 变更 |
 | `upgrade` | 备份 + 重 gen + diff 一把过 | tshoot 版本升级后 |
 | `serve` | 启动 Web UI（HTTP API + 前端界面） | 脚本化访问 / 无桌面环境 |

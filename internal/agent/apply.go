@@ -196,7 +196,7 @@ func ImportAndApply(yamlBytes []byte, target, destPath string, opts ApplyOptions
 				AgentPath: destPath,
 				Target:    target,
 				FilesWritten: 0,
-				NeedsRestartHint: "dry-run：会生成 openclaw 完整部署包到 " + destPath + "，然后需要 cd 过去跑 bash scripts/install.sh 完成注册 + 填凭证",
+				NeedsRestartHint: "dry-run：会生成 openclaw 产物到 " + destPath + "；真部署时桌面端会走 install.sh 自动化收凭证 + 注册 MCP",
 			}, nil
 		}
 		g := generator.New(cfg, opts.TemplateRoot, destPath)
@@ -211,7 +211,7 @@ func ImportAndApply(yamlBytes []byte, target, destPath string, opts ApplyOptions
 			Target:           target,
 			FilesWritten:     written,
 			TSFJSONUpdated:   true, // g.Generate 尾部会写 tshoot.json
-			NeedsRestartHint: "已生成 openclaw 部署包。下一步：cd '" + destPath + "' && bash scripts/install.sh 注册 MCP + 填凭证，再 `openclaw gateway restart`",
+			NeedsRestartHint: "已生成 openclaw 产物。桌面端下一步会调 RunInstall 写凭证并跑 install.sh；CLI 用户请 cd '" + destPath + "' && bash scripts/install.sh，再 `openclaw gateway restart`",
 		}, nil
 	}
 

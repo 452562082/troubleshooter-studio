@@ -187,7 +187,7 @@ func (a *Answers) WriteYAML(out io.Writer) error {
 	if len(targets) == 0 {
 		targets = []string{"openclaw"}
 	}
-	p("  targets:                             # 每个 target 产出一份部署包（同一份 system.yaml）\n")
+	p("  targets:                             # 每个 target 产出一份机器人产物（同一份 system.yaml）\n")
 	for _, t := range targets {
 		p("    - %s\n", t)
 	}

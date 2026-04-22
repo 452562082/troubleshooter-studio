@@ -92,7 +92,7 @@ func ParseInstallPrompts(dir string) ([]Prompt, error) {
 }
 
 // WriteEnvFile 把 kv 写成 KEY='value' 格式到 <dir>/scripts/.env，mode 0600。
-// value 里的单引号会被转义（双 '' 写法，bash 兼容）。空 value 的键依然写出来
+// value 里的单引号会被转义（双 ” 写法，bash 兼容）。空 value 的键依然写出来
 // （install.sh 的 read_var 看到空就会 prompt；这里写出来是为了让用户在 UI 上
 // 看到完整列表，决定哪些需要 prompt）。
 // kv 为空时直接 no-op（non-openclaw target 没有凭证,不需要 .env,也避免建空 scripts/ 子目录）。

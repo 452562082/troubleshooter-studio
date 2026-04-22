@@ -176,8 +176,8 @@ func TestExtractAPIURLs(t *testing.T) {
 func TestNodeAnalyzer_DotEnvConfigCenter(t *testing.T) {
 	dir := t.TempDir()
 	// 构造一个罕见场景：前端直连 Nacos
-	os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"test-fe"}`), 0o644)
-	os.WriteFile(filepath.Join(dir, ".env"), []byte(`
+	_ = os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"test-fe"}`), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, ".env"), []byte(`
 NACOS_ADDR=nacos:8848
 NACOS_DATA_ID=fe-config.yaml
 NEXT_PUBLIC_API_URL=http://api.test.com

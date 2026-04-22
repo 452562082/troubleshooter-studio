@@ -48,7 +48,7 @@ func (n nodeAnalyzer) Analyze(repoPath string, includePaths []string) (*RepoAnal
 	data, err := os.ReadFile(pkgPath)
 	if err != nil {
 		ra.Warnings = append(ra.Warnings, "read package.json: "+err.Error())
-		return ra, nil
+		return ra, nil //nolint:nilerr // 只读 package.json 失败不致命,继续用 ra
 	}
 	var pkg packageJSONFull
 	if err := json.Unmarshal(data, &pkg); err == nil && pkg.Name != "" {

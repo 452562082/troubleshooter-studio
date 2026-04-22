@@ -94,7 +94,7 @@ func TestApplyRealWritesAndPreserves(t *testing.T) {
 
 	soulPath := filepath.Join(agentPath, "SOUL.md")
 	userEdit := "# user custom soul\n"
-	os.WriteFile(soulPath, []byte(userEdit), 0o644)
+	_ = os.WriteFile(soulPath, []byte(userEdit), 0o644)
 
 	ag := discover.DiscoveredAgent{
 		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "openclaw"},

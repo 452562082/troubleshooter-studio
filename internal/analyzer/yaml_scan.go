@@ -16,7 +16,7 @@ func ScanYAML(absPath, relPath, configCenter string) (*Finding, error) {
 	}
 	var root any
 	if err := yaml.Unmarshal(data, &root); err != nil {
-		return nil, nil // 解析失败不致命
+		return nil, nil //nolint:nilerr // yaml 解析失败(比如非合法 yaml)归为无 finding,不报错
 	}
 	f := &Finding{ConfigCenter: configCenter, SourceFile: relPath}
 	var hit bool

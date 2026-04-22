@@ -79,7 +79,7 @@ func Diff(oldDir, newDir string) (*DiffReport, error) {
 func listFiles(root string) (map[string]string, error) {
 	out := map[string]string{}
 	if info, err := os.Stat(root); err != nil || !info.IsDir() {
-		return out, nil
+		return out, nil //nolint:nilerr // 读不到忽略继续
 	}
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {

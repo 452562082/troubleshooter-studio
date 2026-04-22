@@ -66,14 +66,14 @@ func (w *Watcher) signature() string {
 		var entries []string
 		_ = filepath.WalkDir(p, func(sub string, d fs.DirEntry, err error) error {
 			if err != nil {
-				return nil
+				return nil //nolint:nilerr // 监控目录的 stat 失败跳过该条不中断整体
 			}
 			if d.IsDir() {
 				return nil
 			}
 			info, err := d.Info()
 			if err != nil {
-				return nil
+				return nil //nolint:nilerr // 同上
 			}
 			entries = append(entries, fmt.Sprintf("%s:%d:%d", sub, info.ModTime().UnixNano(), info.Size()))
 			return nil

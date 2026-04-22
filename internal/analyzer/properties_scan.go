@@ -44,17 +44,17 @@ func ScanProperties(absPath, relPath, configCenter string) (*Finding, error) {
 				hit = true
 			}
 		case CenterApollo:
-			switch {
-			case key == "app.id":
+			switch key {
+			case "app.id":
 				f.AppID = val
 				hit = true
-			case key == "apollo.meta":
+			case "apollo.meta":
 				f.ServerAddr = val
 				hit = true
-			case key == "apollo.bootstrap.namespaces":
+			case "apollo.bootstrap.namespaces":
 				f.Namespaces = splitCSV(val)
 				hit = true
-			case key == "apollo.cluster":
+			case "apollo.cluster":
 				f.Cluster = val
 				hit = true
 			}

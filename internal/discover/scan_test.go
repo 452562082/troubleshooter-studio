@@ -133,8 +133,8 @@ func TestScanSkipsInvalidMeta(t *testing.T) {
 	// 缺 systemID 的
 	writeMeta(t, filepath.Join(root, "bad2"), Meta{SchemaVersion: 1, Target: "openclaw"})
 	// 直接垃圾 JSON
-	os.MkdirAll(filepath.Join(root, "garbage"), 0o755)
-	os.WriteFile(filepath.Join(root, "garbage", MetaFilename), []byte("not json"), 0o644)
+	_ = os.MkdirAll(filepath.Join(root, "garbage"), 0o755)
+	_ = os.WriteFile(filepath.Join(root, "garbage", MetaFilename), []byte("not json"), 0o644)
 
 	agents, err := Scan([]string{root})
 	if err != nil {

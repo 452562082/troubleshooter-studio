@@ -15,7 +15,7 @@ import (
 
 	"net/http"
 
-	tsf "github.com/xiaolong/troubleshooter-studio"
+	tshoot "github.com/xiaolong/troubleshooter-studio"
 	"github.com/xiaolong/troubleshooter-studio/api"
 	"github.com/xiaolong/troubleshooter-studio/internal/agent"
 	"github.com/xiaolong/troubleshooter-studio/internal/analyzerpipe"
@@ -26,8 +26,8 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/initwizard"
 	"github.com/xiaolong/troubleshooter-studio/internal/skillscaffold"
 	"github.com/xiaolong/troubleshooter-studio/internal/upgrade"
-	"github.com/xiaolong/troubleshooter-studio/internal/webui"
 	"github.com/xiaolong/troubleshooter-studio/internal/watcher"
+	"github.com/xiaolong/troubleshooter-studio/internal/webui"
 )
 
 // 通过 -ldflags "-X main.version=v0.2.0 -X main.commit=abcdef" 注入；未注入时保持 dev
@@ -1359,7 +1359,7 @@ func extractEmbeddedTemplates() (string, error) {
 			return embeddedTemplatesDir, nil
 		}
 	}
-	dir, err := extractEmbeddedFS(tsf.TemplatesFS, "templates", "tshoot-templates-")
+	dir, err := extractEmbeddedFS(tshoot.TemplatesFS, "templates", "tshoot-templates-")
 	if err != nil {
 		return "", err
 	}
@@ -1373,7 +1373,7 @@ func extractEmbeddedExamples() (string, error) {
 			return embeddedExamplesDir, nil
 		}
 	}
-	dir, err := extractEmbeddedFS(tsf.ExamplesFS, "examples", "tshoot-examples-")
+	dir, err := extractEmbeddedFS(tshoot.ExamplesFS, "examples", "tshoot-examples-")
 	if err != nil {
 		return "", err
 	}
@@ -1479,7 +1479,8 @@ func runDiscover(args []string) error {
 // ── apply：用新 yaml 应用到已装机器人 ────────────────────────────
 // tshoot apply -i <new.yaml> --path <agent-path> [--dry-run] [--format text|json]
 // 流程：读 new yaml → 根据 agent.Path 的 tshoot.json 识别 target → 重 render → rsync 回 path
-//     preserve_on_regenerate 里的用户手改自动保留。
+//
+//	preserve_on_regenerate 里的用户手改自动保留。
 func runApply(args []string) error {
 	fs := flag.NewFlagSet("apply", flag.ExitOnError)
 	input := fs.String("i", "", "新 system.yaml 路径（必填）")

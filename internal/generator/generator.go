@@ -458,22 +458,22 @@ func readmeSkillsSection(ctx *Context) string {
 		return sb.String()
 	}
 	skillDesc := map[string]string{
-		"routing":             "根据 service + env 定位代码路径、域名、分支、配置标识",
-		"config-executor":     "从配置中心读取/对比配置值，支持历史版本",
-		"redis-runtime-query": "查询 Redis key / TTL / 值（只读）",
-		"mongodb-runtime-query": "MongoDB query / aggregate / count（只读）",
-		"es-runtime-query":    "Elasticsearch _search（只读）",
-		"mysql-runtime-query": "MySQL 只读 SELECT（数据一致性 / 慢查询）",
+		"routing":                  "根据 service + env 定位代码路径、域名、分支、配置标识",
+		"config-executor":          "从配置中心读取/对比配置值，支持历史版本",
+		"redis-runtime-query":      "查询 Redis key / TTL / 值（只读）",
+		"mongodb-runtime-query":    "MongoDB query / aggregate / count（只读）",
+		"es-runtime-query":         "Elasticsearch _search（只读）",
+		"mysql-runtime-query":      "MySQL 只读 SELECT（数据一致性 / 慢查询）",
 		"postgresql-runtime-query": "PostgreSQL 只读查询（pg_stat / 连接数 / 表大小）",
-		"kafka-runtime-query": "Kafka topic / 消费积压 / 死信",
-		"rocketmq-runtime-query": "RocketMQ topic / consumer / 积压 / DLQ",
-		"rabbitmq-runtime-query": "RabbitMQ queue / exchange / 消息数",
+		"kafka-runtime-query":      "Kafka topic / 消费积压 / 死信",
+		"rocketmq-runtime-query":   "RocketMQ topic / consumer / 积压 / DLQ",
+		"rabbitmq-runtime-query":   "RabbitMQ queue / exchange / 消息数",
 		"clickhouse-runtime-query": "ClickHouse 只读 OLAP 查询 / 分区 / 慢查询日志",
-		"diagram-generator":   "生成架构图 / 流程图 / 链路拓扑",
-		"tracing-query":       "Jaeger trace_id → span 树 / 耗时 TOP / 错误 span",
-		"tempo-query":         "Tempo trace 查询（Grafana 生态）",
-		"skywalking-query":    "SkyWalking APM：服务拓扑 + trace + 慢端点",
-		"elk-log-query":       "ELK 日志搜索（ES _search + Kibana）",
+		"diagram-generator":        "生成架构图 / 流程图 / 链路拓扑",
+		"tracing-query":            "Jaeger trace_id → span 树 / 耗时 TOP / 错误 span",
+		"tempo-query":              "Tempo trace 查询（Grafana 生态）",
+		"skywalking-query":         "SkyWalking APM：服务拓扑 + trace + 慢端点",
+		"elk-log-query":            "ELK 日志搜索（ES _search + Kibana）",
 	}
 	for _, s := range ctx.Generation.SkillsWhitelist {
 		desc, ok := skillDesc[s]

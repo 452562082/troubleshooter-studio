@@ -33,6 +33,11 @@ go:
       - .cache/go-mod
   script:
     - go vet ./...
+    # golangci-lint(走 .golangci.yml 配置):抓 errcheck/ineffassign/unused/misspell 等
+    - |
+      GOLANGCI_VERSION=v2.0.2
+      wget -qO- "https://github.com/golangci/golangci-lint/releases/download/${GOLANGCI_VERSION}/golangci-lint-${GOLANGCI_VERSION#v}-linux-amd64.tar.gz" | tar xz
+      ./golangci-lint-${GOLANGCI_VERSION#v}-linux-amd64/golangci-lint run --timeout=3m
     - |
       out=$(gofmt -l .)
       if [ -n "$out" ]; then

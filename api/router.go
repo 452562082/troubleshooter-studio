@@ -55,7 +55,7 @@ func serveIndex(w http.ResponseWriter, distFS fs.FS) {
 		http.Error(w, "index.html not found in embedded dist", http.StatusNotImplemented)
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = io.Copy(w, f)
 }
@@ -66,8 +66,8 @@ func corsMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(204)
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		next.ServeHTTP(w, r)

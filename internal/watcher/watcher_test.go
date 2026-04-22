@@ -66,7 +66,7 @@ func TestWatcher_Loop_StopsOnChange(t *testing.T) {
 	// 不测 Loop 的 goroutine 语义（阻塞），但验证 onChange 触发路径
 	dir := t.TempDir()
 	f := filepath.Join(dir, "x.txt")
-	os.WriteFile(f, []byte("a"), 0o644)
+	_ = os.WriteFile(f, []byte("a"), 0o644)
 
 	w := New([]string{f}, 20*time.Millisecond)
 	changes := make(chan struct{}, 1)
@@ -91,7 +91,7 @@ func TestWatcher_Loop_StopsOnChange(t *testing.T) {
 	}()
 
 	time.Sleep(30 * time.Millisecond)
-	os.WriteFile(f, []byte("abc"), 0o644)
+	_ = os.WriteFile(f, []byte("abc"), 0o644)
 
 	select {
 	case <-changes:

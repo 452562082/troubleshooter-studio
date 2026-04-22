@@ -27,7 +27,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
-	tsf "github.com/xiaolong/troubleshooter-studio"
+	tshoot "github.com/xiaolong/troubleshooter-studio"
 	"github.com/xiaolong/troubleshooter-studio/api"
 	"github.com/xiaolong/troubleshooter-studio/internal/agent"
 	"github.com/xiaolong/troubleshooter-studio/internal/analyzerpipe"
@@ -434,7 +434,7 @@ func main() {
 //  1. 可执行文件旁（dev 模式：`wails dev` / 手动 `go run`）
 //  2. macOS .app 里的 Contents/Resources/templates/（`wails build` 的产物布局）
 //  3. CWD/templates/（从仓库根跑）
-//  4. embed fallback：解压 tsf.TemplatesFS 到 ~/.tshoot/templates/
+//  4. embed fallback：解压 tshoot.TemplatesFS 到 ~/.tshoot/templates/
 //
 // 桌面 app 场景下通常走 (4)，因为 app 被拷到 /Applications/ 后 CWD = /。
 func resolveTemplateDir() string {
@@ -460,7 +460,7 @@ func resolveTemplateDir() string {
 	}
 	dst := filepath.Join(home, ".tshoot", "templates")
 	_ = os.RemoveAll(dst) // 每次启动重建，确保跟当前 app 内嵌的一致
-	if err := extractEmbedded(tsf.TemplatesFS, "templates", dst); err != nil {
+	if err := extractEmbedded(tshoot.TemplatesFS, "templates", dst); err != nil {
 		fmt.Fprintf(os.Stderr, "[warn] 解压 embed templates 失败: %v\n", err)
 		return ""
 	}

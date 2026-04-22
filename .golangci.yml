@@ -1,0 +1,55 @@
+# golangci-lint 配置。本项目重注重可读性 + 实用正确性,不追求覆盖全 linter(噪音大)。
+# 跑法:golangci-lint run ./...  (本地);CI 里 .gitlab-ci.yml / .github/workflows/ci.yml 的 go job 会跑
+
+version: "2"
+
+run:
+  timeout: 3m
+  go: "1.25"
+
+linters:
+  # 保守配置:只抓真 bug,不刷风格噪音。revive / gocritic 这类"建议型"留给人工 review。
+  default: none
+  enable:
+    - errcheck         # 检查错误被处理,但下面 settings 里排除 defer close 等惯用
+    - govet            # 官方静态检查
+    - ineffassign      # 赋值未使用
+    - misspell         # 注释/字符串拼写
+    - nilerr           # 返回 nil 但 err != nil(真 bug)
+    - staticcheck      # 聚合了大量实用检查
+    - unconvert        # 无用类型转换
+    - unused           # 未使用的内部声明(导出的默认不算)
+    - usestdlibvars    # "GET"/"POST" → net/http 常量
+  settings:
+    errcheck:
+      # Go 里这些返回值约定不检查,加到白名单避免误报
+      exclude-functions:
+        - (io.Closer).Close
+        - (*os.File).Close
+        - (io.ReadCloser).Close
+        - os.RemoveAll
+        - os.Remove
+        - fmt.Scanln        # 交互 init wizard 空行直接回车是正常流
+        - (net/http.ResponseWriter).Write
+        - (*encoding/json.Encoder).Encode
+        # 写到 hash.Writer / strings.Builder / 已校验的 os.Stdout 错误几乎不可能
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Fprint
+  exclusions:
+    generated: lax
+    paths:
+      - dist/
+      - web/
+      - internal/webui/dist/
+      - web/wailsjs/
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    paths:
+      - dist/
+      - web/
+      - web/wailsjs/

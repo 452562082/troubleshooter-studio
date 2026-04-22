@@ -85,9 +85,9 @@ func TestRun_Prefill(t *testing.T) {
 	in := script(
 		"", "", "", // system
 		"", "", "", // agent
-		"", // envs 复用
-		"", // repos 复用
-		"", // config center
+		"",         // envs 复用
+		"",         // repos 复用
+		"",         // config center
 		"", "", "", // obs
 		"", "", "", "", "", // data stores
 		"", // lark
@@ -154,9 +154,9 @@ func TestWizard_Snapshot_AfterCompletedRun(t *testing.T) {
 		"shop", "Shop", "", // system
 		"", "", "", // agent
 		"dev", "api-dev", "", // env 1
-		"", // env 2 empty → end
-		"", // repo empty → end
-		"", // config center
+		"",         // env 2 empty → end
+		"",         // repo empty → end
+		"",         // config center
 		"", "", "", // obs
 		"", "", "", "", "", // data stores
 		"", "", // lark + attachment

@@ -27,7 +27,7 @@ func SnapshotExisting(outputDir string, preserveList []string) (*Snapshot, error
 	}
 	info, err := os.Stat(outputDir)
 	if err != nil || !info.IsDir() {
-		return snap, nil
+		return snap, nil //nolint:nilerr // 读不到 preserve 文件算作无
 	}
 
 	wsRoot := filepath.Join(outputDir, "templates", "workspace-template")

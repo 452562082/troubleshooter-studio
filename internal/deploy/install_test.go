@@ -63,8 +63,8 @@ func TestParseInstallPrompts(t *testing.T) {
 	t.Run("抓 read_var 基本用法", func(t *testing.T) {
 		dir := t.TempDir()
 		sh := filepath.Join(dir, "scripts", "install.sh")
-		os.MkdirAll(filepath.Dir(sh), 0o755)
-		os.WriteFile(sh, []byte(`#!/usr/bin/env bash
+		_ = os.MkdirAll(filepath.Dir(sh), 0o755)
+		_ = os.WriteFile(sh, []byte(`#!/usr/bin/env bash
 read_var CC_ADDR_DEV "NACOS 地址 (dev): "
 read_var CC_PASS_DEV "NACOS 密码 (dev): " secret
 read_var GRAFANA_URL "Grafana URL: "
@@ -90,7 +90,7 @@ read_var GRAFANA_URL "Grafana URL: "
 	t.Run("去重(同名变量只留第一次)", func(t *testing.T) {
 		dir := t.TempDir()
 		sh := filepath.Join(dir, "install.sh") // 测 root 位置
-		os.WriteFile(sh, []byte(`#!/usr/bin/env bash
+		_ = os.WriteFile(sh, []byte(`#!/usr/bin/env bash
 read_var TOKEN "first prompt: "
 read_var OTHER "xxx: "
 read_var TOKEN "second prompt (should be ignored): "
@@ -121,7 +121,7 @@ read_var TOKEN "second prompt (should be ignored): "
 	t.Run("跳过注释行里的 read_var", func(t *testing.T) {
 		dir := t.TempDir()
 		sh := filepath.Join(dir, "install.sh")
-		os.WriteFile(sh, []byte(`#!/usr/bin/env bash
+		_ = os.WriteFile(sh, []byte(`#!/usr/bin/env bash
 # 这是注释: read_var FAKE "这个不能被解析"
 read_var REAL "真的: "
 `), 0o644)
@@ -195,9 +195,9 @@ func TestReadEnvFileMissing(t *testing.T) {
 
 func TestReadEnvFileParsesQuotedVariants(t *testing.T) {
 	dir := t.TempDir()
-	os.MkdirAll(filepath.Join(dir, "scripts"), 0o755)
+	_ = os.MkdirAll(filepath.Join(dir, "scripts"), 0o755)
 	// 手写几种 bash env 常见形式
-	os.WriteFile(filepath.Join(dir, "scripts", ".env"), []byte(`# 注释行
+	_ = os.WriteFile(filepath.Join(dir, "scripts", ".env"), []byte(`# 注释行
 EMPTY=
 SINGLE='hello'
 DOUBLE="world"

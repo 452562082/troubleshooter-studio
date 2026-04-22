@@ -33,7 +33,7 @@ type Options struct {
 
 // RepoSummary 是 Run 返回每仓库一条的简略状态。前端展示卡片用。
 type RepoSummary struct {
-	Name             string `json:"name"`
+	Name string `json:"name"`
 	// analyzed / cloned-then-analyzed / skipped / clone-failed
 	Status           string `json:"status"`
 	ServiceNameCount int    `json:"service_name_count"`

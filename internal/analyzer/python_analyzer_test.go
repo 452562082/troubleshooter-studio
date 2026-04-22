@@ -70,7 +70,7 @@ func TestReadPyprojectName(t *testing.T) {
 	for input, want := range cases {
 		dir := t.TempDir()
 		p := filepath.Join(dir, "pyproject.toml")
-		os.WriteFile(p, []byte(input), 0o644)
+		_ = os.WriteFile(p, []byte(input), 0o644)
 		got := readPyprojectName(p)
 		if got != want {
 			t.Errorf("readPyprojectName(%q) = %q, want %q", input, got, want)
@@ -81,7 +81,7 @@ func TestReadPyprojectName(t *testing.T) {
 func TestReadSetupPyName(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "setup.py")
-	os.WriteFile(p, []byte(`from setuptools import setup\nsetup(name="legacy-svc", version="1.0")`), 0o644)
+	_ = os.WriteFile(p, []byte(`from setuptools import setup\nsetup(name="legacy-svc", version="1.0")`), 0o644)
 	got := readSetupPyName(p)
 	if got != "legacy-svc" {
 		t.Errorf("got %q, want legacy-svc", got)
@@ -105,10 +105,10 @@ func TestDetectPythonFramework(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			if tc.req != "" {
-				os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte(tc.req), 0o644)
+				_ = os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte(tc.req), 0o644)
 			}
 			if tc.manage {
-				os.WriteFile(filepath.Join(dir, "manage.py"), []byte("# django"), 0o644)
+				_ = os.WriteFile(filepath.Join(dir, "manage.py"), []byte("# django"), 0o644)
 			}
 			got := detectPythonFramework(dir)
 			if got != tc.want {

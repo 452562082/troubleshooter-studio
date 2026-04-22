@@ -193,9 +193,9 @@ func ImportAndApply(yamlBytes []byte, target, destPath string, opts ApplyOptions
 	if target == "openclaw" {
 		if opts.DryRun {
 			return &Result{
-				AgentPath: destPath,
-				Target:    target,
-				FilesWritten: 0,
+				AgentPath:        destPath,
+				Target:           target,
+				FilesWritten:     0,
 				NeedsRestartHint: "dry-run：会生成 openclaw 产物到 " + destPath + "；真部署时桌面端会走 install.sh 自动化收凭证 + 注册 MCP",
 			}, nil
 		}
@@ -332,11 +332,11 @@ func writeTSFMeta(dir, target string, cfg *config.SystemConfig, yamlSrc []byte, 
 	meta := map[string]any{
 		"schema_version": 1,
 		"tshoot_version": version,
-		"system_id":       cfg.System.ID,
-		"system_name":     cfg.System.Name,
-		"target":          target,
-		"generated_at":    time.Now().UTC().Format(time.RFC3339),
-		"system_yaml":     string(yamlSrc),
+		"system_id":      cfg.System.ID,
+		"system_name":    cfg.System.Name,
+		"target":         target,
+		"generated_at":   time.Now().UTC().Format(time.RFC3339),
+		"system_yaml":    string(yamlSrc),
 	}
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {

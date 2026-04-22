@@ -17,7 +17,7 @@ func walkFiles(root string, include []string, match func(path string) bool) ([]s
 	}
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil // 跳过无法访问
+			return nil //nolint:nilerr // 遍历遇权限错/符号链接失效,跳过该文件不中断
 		}
 		if d.IsDir() {
 			if skipDirs[d.Name()] {

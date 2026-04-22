@@ -81,7 +81,7 @@ func scanOne(root string, maxDepth int) ([]DiscoveredAgent, error) {
 
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			return nil // 权限错等静默跳过
+			return nil //nolint:nilerr // 扫用户目录遇权限拒绝静默跳过,而非让整个 scan 失败
 		}
 		rel, _ := filepath.Rel(root, p)
 		depth := depthOf(rel)
@@ -133,7 +133,7 @@ func readAgent(metaPath string) (DiscoveredAgent, error) {
 }
 
 type yamlProbe struct {
-	Environments []struct{ ID string } `yaml:"environments"`
+	Environments []struct{ ID string }   `yaml:"environments"`
 	Repos        []struct{ Name string } `yaml:"repos"`
 	Generation   struct {
 		SkillsWhitelist []string `yaml:"skills_whitelist"`

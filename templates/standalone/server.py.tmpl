@@ -3,12 +3,26 @@
 {{ .System.Name }} 排障机器人 — 独立 Web 聊天服务
 由 troubleshooter-studio 生成
 
-用法：
-  export LLM_API_KEY=your-api-key
-  export LLM_MODEL={{ anthropicModel .Agent.Model }}       # 覆盖默认模型（可选）
+用法:
+  export LLM_API_KEY=your-api-key                 # 对应 model 的 provider 的 key
+  export LLM_MODEL={{ anthropicModel .Agent.Model }}   # 覆盖默认模型(可选)
+  export LLM_BASE_URL=https://...                 # 覆盖 provider 端点(可选,自定义网关用)
   python3 server.py
 
-依赖：pip install anthropic flask
+model 前缀决定用哪家 provider 的 base_url:
+  anthropic/*  → https://api.anthropic.com/v1
+  openai/*     → https://api.openai.com/v1
+  deepseek/*   → https://api.deepseek.com/v1
+  qwen/*       → https://dashscope.aliyuncs.com/compatible-mode/v1
+  minimax/*    → https://api.minimaxi.chat/v1
+  moonshot/*   → https://api.moonshot.cn/v1
+  zhipu/*      → https://open.bigmodel.cn/api/paas/v4
+  ollama/*     → http://localhost:11434/v1
+
+model 无前缀时按常见命名约定识别(claude-*/gpt-*/deepseek-*/qwen*/abab*/moonshot-*/glm-*)。
+所有 provider 都走同一个 OpenAI 兼容 /v1/chat/completions SSE streaming 协议。
+
+依赖: pip install flask openai
 """
 import json
 import os
@@ -17,13 +31,13 @@ from pathlib import Path
 try:
     from flask import Flask, Response, jsonify, request, send_file, stream_with_context
 except ImportError:
-    print("请安装依赖：pip install flask anthropic")
+    print("请安装依赖: pip install flask openai")
     exit(1)
 
 try:
-    import anthropic
+    from openai import OpenAI
 except ImportError:
-    anthropic = None
+    OpenAI = None
 
 app = Flask(__name__)
 
@@ -33,43 +47,114 @@ SYSTEM_NAME = "{{ .System.Name }}"
 PROMPT_PATH = Path(__file__).parent / "system-prompt.md"
 SYSTEM_PROMPT = PROMPT_PATH.read_text(encoding="utf-8") if PROMPT_PATH.exists() else "你是一个排障机器人。"
 
-# 合法 env 白名单（来自 system.yaml）。前端通过 X-Default-Env 头传默认环境，
-# 命中白名单才拼入 prompt；防止前端注入任意字符串到 system prompt。
+# 合法 env 白名单(来自 system.yaml)。前端通过 X-Default-Env 头传,命中白名单才拼 prompt;
+# 防前端注入任意字符串到 system prompt。
 VALID_ENVS = {
 {{- range .Environments }}
     "{{ .ID }}",
 {{- end }}
 }
 
-# 模型：默认使用 system.yaml 中 agent.model（仅保留 anthropic 风格的 model id）；
-# 可通过 LLM_MODEL 环境变量覆盖。
+# ── Provider 路由 ───────────────────────────────────────────────
+# 跟 Go 端 internal/llmchat/providers.go 同一份清单;model 前缀解析也对齐。
+# 新加 provider:两边同步加一条。
+PROVIDERS = {
+    "anthropic": ("https://api.anthropic.com/v1", "claude-sonnet-4-6"),
+    "openai":    ("https://api.openai.com/v1", "gpt-4o"),
+    "deepseek":  ("https://api.deepseek.com/v1", "deepseek-chat"),
+    "qwen":      ("https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-max"),
+    "minimax":   ("https://api.minimaxi.chat/v1", "abab6.5s-chat"),
+    "moonshot":  ("https://api.moonshot.cn/v1", "moonshot-v1-8k"),
+    "zhipu":     ("https://open.bigmodel.cn/api/paas/v4", "glm-4"),
+    "ollama":    ("http://localhost:11434/v1", "llama3.1"),
+}
+
+
+def resolve_model(raw_model: str):
+    """
+    把 agent.model 解析成 (base_url, model_id)。
+
+      anthropic/claude-opus-4-7 → ("https://api.anthropic.com/v1", "claude-opus-4-7")
+      claude-sonnet-4-6         → ("https://api.anthropic.com/v1", "claude-sonnet-4-6")
+      gpt-4o                    → ("https://api.openai.com/v1", "gpt-4o")
+
+    无法识别时返回 (None, raw_model),由调用方报错。
+    """
+    s = (raw_model or "").strip()
+    if not s:
+        return None, ""
+    # 带 provider 前缀
+    if "/" in s:
+        prefix, rest = s.split("/", 1)
+        prefix = prefix.lower()
+        if prefix in PROVIDERS:
+            base_url, fallback = PROVIDERS[prefix]
+            return base_url, (rest or fallback)
+        return None, s
+    # 无前缀:按模型 ID 约定识别(跟 Go ResolveModel 对齐)
+    lower = s.lower()
+    if lower.startswith("claude-"):
+        return PROVIDERS["anthropic"][0], s
+    if lower.startswith("gpt-") or lower.startswith("o3") or lower.startswith("o1"):
+        return PROVIDERS["openai"][0], s
+    if lower.startswith("deepseek-"):
+        return PROVIDERS["deepseek"][0], s
+    if lower.startswith("qwen"):
+        return PROVIDERS["qwen"][0], s
+    if lower.startswith("abab") or "minimax" in lower:
+        return PROVIDERS["minimax"][0], s
+    if lower.startswith("moonshot") or lower.startswith("kimi"):
+        return PROVIDERS["moonshot"][0], s
+    if lower.startswith("glm-"):
+        return PROVIDERS["zhipu"][0], s
+    return None, s
+
+
+# 模型:默认用 yaml 里 agent.model 原样;LLM_MODEL 环境变量可覆盖。
 DEFAULT_MODEL = "{{ anthropicModel .Agent.Model }}"
 MODEL = os.environ.get("LLM_MODEL", DEFAULT_MODEL)
 MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "4096"))
+
+# BASE_URL:优先 LLM_BASE_URL 环境变量(企业内网关 / 自部署代理用),
+# 其次从 resolve_model 路由。
+_resolved_base, _resolved_model = resolve_model(MODEL)
+BASE_URL = os.environ.get("LLM_BASE_URL") or _resolved_base
+EFFECTIVE_MODEL = _resolved_model
+
 
 @app.route("/")
 def index():
     return send_file("index.html")
 
+
 def _sse(obj):
     return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
+
 @app.route("/api/chat", methods=["POST"])
 def chat():
-    """流式聊天：以 SSE (text/event-stream) 逐 token 推送。
-    客户端收到 {"delta": "..."} 追加显示，{"done": true} 表示结束，
-    {"error": "..."} 表示错误（可能出现在流开头或中途）。
+    """流式聊天: OpenAI 兼容 /chat/completions stream,按 SSE 逐 token 推送到前端。
+    客户端收到 {"delta": "..."} 追加显示,{"done": true} 表示结束,
+    {"error": "..."} 表示错误(可能出现在流开头或中途)。
     """
     data = request.json or {}
     messages = data.get("messages", [])
 
     api_key = os.environ.get("LLM_API_KEY", "")
     if not api_key:
-        return jsonify({"error": "请设置 LLM_API_KEY 环境变量"}), 400
-    if not anthropic:
-        return jsonify({"error": "请安装 anthropic SDK：pip install anthropic"}), 500
+        return jsonify({"error": "请设置 LLM_API_KEY 环境变量(对应 model 的 provider 的 key)"}), 400
+    if OpenAI is None:
+        return jsonify({"error": "请安装 openai SDK: pip install openai"}), 500
+    if not BASE_URL:
+        return jsonify({
+            "error": (
+                f"未识别的 model {MODEL!r}: 需要形如 'anthropic/claude-sonnet-4-6' 或已知前缀"
+                f"(claude-*/gpt-*/deepseek-*/qwen*/abab*/moonshot-*/glm-*)"
+                f";或用 LLM_BASE_URL 环境变量覆盖"
+            ),
+        }), 400
 
-    # 默认环境：从 X-Default-Env 头取，白名单校验后才拼入 system prompt
+    # 默认环境:从 X-Default-Env 头取,白名单校验后才拼入 system prompt
     default_env = request.headers.get("X-Default-Env", "").strip()
     if default_env in VALID_ENVS:
         effective_prompt = (
@@ -80,21 +165,43 @@ def chat():
     else:
         effective_prompt = SYSTEM_PROMPT
 
+    # 把 system prompt 塞在 messages 前面(OpenAI 兼容协议的标准做法)
+    full_messages = [{"role": "system", "content": effective_prompt}] + [
+        {"role": m["role"], "content": m.get("content", "")} for m in messages if m.get("role") in ("user", "assistant")
+    ]
+
     def generate():
         try:
-            client = anthropic.Anthropic(api_key=api_key)
-            with client.messages.stream(
-                model=MODEL,
+            client = OpenAI(api_key=api_key, base_url=BASE_URL)
+            stream = client.chat.completions.create(
+                model=EFFECTIVE_MODEL,
                 max_tokens=MAX_TOKENS,
-                system=effective_prompt,
-                messages=messages,
-            ) as stream:
-                for text in stream.text_stream:
-                    if text:
-                        yield _sse({"delta": text})
-            yield _sse({"done": True, "model": MODEL, "default_env": default_env if default_env in VALID_ENVS else None})
+                messages=full_messages,
+                stream=True,
+            )
+            for chunk in stream:
+                # chunk.choices[0].delta.content 是这次 token 的文本
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                text = getattr(delta, "content", None)
+                if text:
+                    yield _sse({"delta": text})
+            yield _sse({
+                "done": True,
+                "model": EFFECTIVE_MODEL,
+                "base_url": BASE_URL,
+                "default_env": default_env if default_env in VALID_ENVS else None,
+            })
         except Exception as e:
-            yield _sse({"error": f"{type(e).__name__}: {e}"})
+            # openai SDK 的 APIError 里带 status_code / message,格式化友好点
+            status = getattr(e, "status_code", None) or getattr(e, "http_status", None)
+            msg = str(e)
+            if status == 401:
+                msg = "API key 无效或已失效 (401);检查 LLM_API_KEY 是否是 " + (BASE_URL or "该 provider") + " 的 key"
+            elif status == 429:
+                msg = "限流或余额不足 (429),稍后重试或充值"
+            yield _sse({"error": f"{type(e).__name__}: {msg}"})
 
     return Response(
         stream_with_context(generate()),
@@ -105,7 +212,10 @@ def chat():
         },
     )
 
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
-    print(f"{SYSTEM_NAME} 排障机器人启动：http://localhost:{port}  (model={MODEL})")
+    print(f"{SYSTEM_NAME} 排障机器人启动: http://localhost:{port}")
+    print(f"  model: {EFFECTIVE_MODEL}")
+    print(f"  base_url: {BASE_URL or '(未识别,请设 LLM_BASE_URL)'}")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

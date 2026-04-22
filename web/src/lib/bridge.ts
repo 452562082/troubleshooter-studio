@@ -185,6 +185,8 @@ export interface ChatContext {
   system_id: string
   system_name: string
   model: string
+  provider_id: string     // "anthropic" / "openai" / "minimax" / ... 空串 = 未识别
+  provider_name: string   // "Anthropic (Claude 系列)" 之类展示名
   envs: string[]
 }
 export interface ChatSendInput {

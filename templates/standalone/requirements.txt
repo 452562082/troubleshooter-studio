@@ -1,3 +1,5 @@
-# troubleshooter-factory standalone runtime
+# troubleshooter-studio standalone runtime
 flask>=3.0
-anthropic>=0.34
+# openai SDK 支持 base_url 切换,能通吃绝大多数 LLM provider 的 OpenAI 兼容端点:
+# Anthropic / OpenAI / DeepSeek / Qwen / MiniMax / Moonshot / 智谱 / Ollama 等
+openai>=1.40

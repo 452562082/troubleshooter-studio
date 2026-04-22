@@ -55,9 +55,12 @@ const agent = reactive({
 interface ModelOption { value: string; label: string; hint?: string }
 interface ModelGroup { group: string; items: ModelOption[] }
 const MODEL_CUSTOM = '__custom__'
+// 模型预设:4 种 target 现在都走 OpenAI 兼容协议,每个 provider 都能直连,不再有
+// "standalone 回落到 Claude" 的局限。跟 internal/llmchat/providers.go 注册表对齐,
+// 新加 provider:这里 + providers.go + server.py.tmpl 的 PROVIDERS 表同步一条。
 const modelGroups: ModelGroup[] = [
   {
-    group: 'Anthropic（4 种 target 都支持）',
+    group: 'Anthropic (Claude 系列)',
     items: [
       { value: 'anthropic/claude-opus-4-7',   label: 'Claude Opus 4.7 — 最强、偏贵' },
       { value: 'anthropic/claude-sonnet-4-6', label: 'Claude Sonnet 4.6 — 默认推荐，性价比最高' },
@@ -65,7 +68,7 @@ const modelGroups: ModelGroup[] = [
     ],
   },
   {
-    group: 'OpenAI（openclaw 直用；standalone 会回落到 Claude Sonnet 4.6）',
+    group: 'OpenAI',
     items: [
       { value: 'openai/gpt-5-codex', label: 'GPT-5 Codex' },
       { value: 'openai/gpt-4o',      label: 'GPT-4o' },
@@ -73,10 +76,25 @@ const modelGroups: ModelGroup[] = [
     ],
   },
   {
-    group: '国内',
+    group: '国产大模型',
     items: [
-      { value: 'qwen/qwen3-max',    label: '通义千问 Qwen3 Max' },
-      { value: 'deepseek/deepseek-v3', label: 'DeepSeek V3' },
+      { value: 'deepseek/deepseek-chat',   label: 'DeepSeek Chat' },
+      { value: 'deepseek/deepseek-reasoner', label: 'DeepSeek Reasoner (推理)' },
+      { value: 'qwen/qwen-max',            label: '通义千问 Qwen Max' },
+      { value: 'qwen/qwen-plus',           label: '通义千问 Qwen Plus' },
+      { value: 'minimax/abab6.5s-chat',    label: 'MiniMax abab6.5s' },
+      { value: 'minimax/abab6.5-chat',     label: 'MiniMax abab6.5 (长上下文)' },
+      { value: 'moonshot/moonshot-v1-8k',  label: 'Moonshot Kimi v1-8k' },
+      { value: 'moonshot/moonshot-v1-128k', label: 'Moonshot Kimi v1-128k' },
+      { value: 'zhipu/glm-4',              label: '智谱 GLM-4' },
+      { value: 'zhipu/glm-4-plus',         label: '智谱 GLM-4 Plus' },
+    ],
+  },
+  {
+    group: '本地 / 自部署',
+    items: [
+      { value: 'ollama/llama3.1',   label: 'Ollama llama3.1 (本地)' },
+      { value: 'ollama/qwen2.5',    label: 'Ollama qwen2.5 (本地)' },
     ],
   },
 ]

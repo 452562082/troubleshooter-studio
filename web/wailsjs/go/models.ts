@@ -520,6 +520,8 @@ export namespace main {
 	    system_id: string;
 	    system_name: string;
 	    model: string;
+	    provider_id: string;
+	    provider_name: string;
 	    envs: string[];
 	
 	    static createFrom(source: any = {}) {
@@ -531,6 +533,8 @@ export namespace main {
 	        this.system_id = source["system_id"];
 	        this.system_name = source["system_name"];
 	        this.model = source["model"];
+	        this.provider_id = source["provider_id"];
+	        this.provider_name = source["provider_name"];
 	        this.envs = source["envs"];
 	    }
 	}

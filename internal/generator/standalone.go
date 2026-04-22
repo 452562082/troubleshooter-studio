@@ -102,24 +102,16 @@ func buildSystemPrompt(wsRoot string, ctx *Context) (string, error) {
 	return sb.String(), nil
 }
 
-// anthropicDefaultModel 从 system.yaml 的 agent.model 里挑出一个可直接喂给
-// anthropic SDK 的 model id。system.yaml 允许 "openai-codex/gpt-5.3-codex"
-// 这类厂家前缀，但 standalone 的 server.py 目前只支持 Anthropic SDK，
-// 所以非 anthropic 风格的值会回落到一个合理的默认。
-// 用户始终可以通过 LLM_MODEL 环境变量覆盖。也作为模板函数暴露给 server.py.tmpl。
+// anthropicDefaultModel 已废弃;改成 standalone 的 server.py 支持多 provider 后,
+// template 直接透传 yaml 里的 agent.model 字符串,server.py 自己解析前缀。
+// 为避免改模板函数名波及别的引用,这里保留函数名但行为改成"原样返回,空值给 fallback"。
+// 真正的 provider 路由见 internal/llmchat/providers.go + templates/standalone/server.py.tmpl。
 func anthropicDefaultModel(raw string) string {
-	const fallback = "claude-sonnet-4-6"
 	s := strings.TrimSpace(raw)
 	if s == "" {
-		return fallback
+		return "anthropic/claude-sonnet-4-6"
 	}
-	if rest, ok := strings.CutPrefix(s, "anthropic/"); ok {
-		s = rest
-	}
-	if strings.HasPrefix(s, "claude-") {
-		return s
-	}
-	return fallback
+	return s
 }
 
 func fileExists(p string) bool {

@@ -28,10 +28,12 @@ import (
 // ChatContext 对应 bot 目录里能读出来的聊天相关元信息:system prompt + model + env 列表。
 // 让前端"打开对话"页初始化时一次拿到,不用自己解 tshoot.json。
 type ChatContext struct {
-	SystemID   string   `json:"system_id"`
-	SystemName string   `json:"system_name"`
-	Model      string   `json:"model"` // 归一后可直接用的 Anthropic model id
-	Envs       []string `json:"envs"`  // env id 列表,UI 下拉选用
+	SystemID     string   `json:"system_id"`
+	SystemName   string   `json:"system_name"`
+	Model        string   `json:"model"`         // 原始 model id (如 "anthropic/claude-sonnet-4-6" 或带约定前缀的 "gpt-4o")
+	ProviderID   string   `json:"provider_id"`   // 识别出的 provider id (如 "anthropic"),UI 按这个问"该填谁家 API key"
+	ProviderName string   `json:"provider_name"` // provider 展示名(如 "Anthropic (Claude 系列)")
+	Envs         []string `json:"envs"`          // env id 列表,UI 下拉选用
 }
 
 // 进行中的 chat streams。key = reqId(字符串,前端传进来当"本次会话的句柄")。
@@ -96,12 +98,19 @@ func (a *App) ChatContextFor(botPath string) (*ChatContext, error) {
 	for _, e := range cfg.Environments {
 		envs = append(envs, e.ID)
 	}
-	return &ChatContext{
+	ctx := &ChatContext{
 		SystemID:   cfg.System.ID,
 		SystemName: cfg.System.Name,
-		Model:      llmchat.AnthropicDefaultModel(cfg.Agent.Model),
+		Model:      cfg.Agent.Model,
 		Envs:       envs,
-	}, nil
+	}
+	// 解析 model 前缀识别 provider;解析失败不报错,前端 chat 页会在发消息时收到
+	// 更精准的 "model 未识别" 提示。这里只补展示字段方便 UI 先画 badge。
+	if p, ok := llmchat.ProviderFor(cfg.Agent.Model); ok {
+		ctx.ProviderID = p.ID
+		ctx.ProviderName = p.DisplayName
+	}
+	return ctx, nil
 }
 
 // ChatSendInput 前端传进来的一次请求,跟 server.py /api/chat 的语义一一对应。

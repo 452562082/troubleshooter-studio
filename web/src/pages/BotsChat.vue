@@ -32,6 +32,21 @@ const apiKeyInput = ref('')
 const rememberKey = ref(true)
 const errMsg = ref<string | null>(null)
 
+// key placeholder 按 provider 定制,给用户"该拿哪家 key"的强信号
+const keyPlaceholder = computed(() => {
+  switch (chatCtx.value?.provider_id) {
+    case 'anthropic': return 'sk-ant-api03-...'
+    case 'openai':    return 'sk-...'
+    case 'deepseek':  return 'sk-... (DeepSeek)'
+    case 'qwen':      return 'sk-... (DashScope)'
+    case 'minimax':   return 'eyJ... (MiniMax JWT)'
+    case 'moonshot':  return 'sk-... (Moonshot)'
+    case 'zhipu':     return '智谱 API Key'
+    case 'ollama':    return '(本地 Ollama 不需要 key,随便填)'
+    default:          return '对应 provider 的 API key'
+  }
+})
+
 const messages = ref<ChatMessage[]>([])
 const inputText = ref('')
 const defaultEnv = ref('')
@@ -235,7 +250,9 @@ onBeforeUnmount(() => {
     <header class="chat-head">
       <button class="btn small" @click="router.push('/bots')">← 返回</button>
       <span class="chat-title">{{ botName }}</span>
-      <span v-if="chatCtx" class="chat-model">{{ chatCtx.model }}</span>
+      <span v-if="chatCtx" class="chat-model" :title="chatCtx.provider_name ? 'provider: ' + chatCtx.provider_name : 'provider 未识别'">
+        {{ chatCtx.model }}{{ chatCtx.provider_id ? ' · ' + chatCtx.provider_id : '' }}
+      </span>
       <span v-if="chatCtx?.envs?.length" class="env-wrap">
         <span class="env-label">默认环境:</span>
         <select v-model="defaultEnv" class="env-sel" @change="onEnvChange">
@@ -257,14 +274,18 @@ onBeforeUnmount(() => {
       <div class="gate-box">
         <h2>{{ botName }} 需要 API key</h2>
         <p class="gate-desc">
-          桌面端直接调用 Anthropic API,请填入 <code>LLM_API_KEY</code>。本会话记住后
-          app 关闭即清,不会落盘。
+          当前模型 <code>{{ chatCtx?.model || '—' }}</code>
+          <span v-if="chatCtx?.provider_name">(provider: <strong>{{ chatCtx.provider_name }}</strong>)</span>。
+          请填入该 provider 的 API key。本会话记住后 app 关闭即清,不会落盘。
+        </p>
+        <p v-if="!chatCtx?.provider_id" class="alert warn" style="font-size:12px;">
+          ⚠ model 前缀未识别,可能发消息时报 "model 未识别" 错。要改 model 去创建向导或 yaml 调试器。
         </p>
         <input
           v-model="apiKeyInput"
           type="password"
           class="key-input"
-          placeholder="sk-ant-api03-..."
+          :placeholder="keyPlaceholder"
           @keyup.enter="submitKey"
         />
         <label class="remember">

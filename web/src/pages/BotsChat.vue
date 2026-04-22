@@ -15,6 +15,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { EventsOff, EventsOn } from '../../wailsjs/runtime/runtime'
 import type { ChatContext, ChatMessage } from '../lib/bridge'
 import { chatContextFor, chatSend, chatStop, isDesktop, revealInFinder } from '../lib/bridge'
+import { confirmDialog } from '../lib/confirm'
 import { toast } from '../lib/toast'
 import { marked } from 'marked'
 
@@ -186,9 +187,16 @@ async function stopStreaming() {
   // 等 done/error 事件回来自然走 cleanup;这里不清 currentReqID,避免 race
 }
 
-function clearHistory() {
+async function clearHistory() {
   if (messages.value.length === 0) return
-  if (!confirm('清空当前对话历史?(不可恢复)')) return
+  // 同 InitPage.clearDraft:Wails WebView 吞 window.confirm,改用自建 modal
+  const ok = await confirmDialog({
+    title: '清空对话',
+    message: '清空当前对话历史?localStorage 里存的这个机器人的聊天记录会全部删除,不可恢复。',
+    confirmText: '清空',
+    danger: true,
+  })
+  if (!ok) return
   messages.value = []
   saveMessages()
 }

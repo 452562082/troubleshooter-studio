@@ -2,6 +2,7 @@
 import { ref, reactive, computed, watch } from 'vue'
 import yaml from 'js-yaml'
 import { validate as bridgeValidate } from '../lib/bridge'
+import { confirmDialog } from '../lib/confirm'
 
 // ── Draft persistence (survives route switches and reloads) ──
 const STORAGE_KEY = 'tsf-init-wizard-v1'
@@ -237,8 +238,16 @@ watch(
   { deep: true }
 )
 
-function clearDraft() {
-  if (!confirm('确定清空当前草稿并重置向导吗？')) return
+async function clearDraft() {
+  // 不用 window.confirm:Wails 的 WKWebView 默认吞掉 JS 原生对话框(避免阻塞
+  // UI 线程),结果 confirm 永远返回 false。用自建 modal。
+  const ok = await confirmDialog({
+    title: '清空草稿',
+    message: '确定清空当前草稿并重置向导吗?localStorage 里存的 7 步进度会全部删除,不可恢复。',
+    confirmText: '清空',
+    danger: true,
+  })
+  if (!ok) return
   try {
     localStorage.removeItem(STORAGE_KEY)
   } catch {

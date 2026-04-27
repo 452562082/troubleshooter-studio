@@ -261,9 +261,19 @@ onUnmounted(() => {
     <div class="form-row">
       <div class="field">
         <label>仓库父目录 <span class="field-hint">(含多个仓库子目录,不是某一个仓库的根)</span></label>
+        <!-- readonly + 按钮:跟 wizard 所有路径字段一致的强约束,避免用户手写打错 / 路径不存在 -->
         <div class="path-row">
-          <input v-model="reposRoot" type="text" placeholder="例:~/code 或 /Users/xxx/repos;analyzer 会按 yaml 里每个 repo.name 找子目录" />
-          <button type="button" class="btn" :disabled="loading" @click="pickReposRoot">选目录…</button>
+          <input
+            :value="reposRoot"
+            type="text"
+            placeholder="点右侧按钮选「多个仓库的父目录」(如 ~/code),analyzer 按 yaml 里每个 repo.name 找子目录"
+            readonly
+            class="path-readonly"
+            :title="reposRoot"
+          />
+          <button type="button" class="btn" :disabled="loading" @click="pickReposRoot">
+            {{ reposRoot ? '重新选…' : '选目录…' }}
+          </button>
         </div>
       </div>
       <div class="field check">
@@ -437,6 +447,13 @@ textarea.err { border-color: #ef4444; }
 /* 输入框 + "选目录…"按钮同行 */
 .path-row { display: flex; gap: 6px; }
 .path-row input[type="text"] { flex: 1; }
+/* readonly 路径:灰底 + 默认鼠标,跟 wizard 其它路径字段视觉统一 */
+input.path-readonly {
+  background: #f8fafc !important;
+  color: #475569 !important;
+  cursor: default;
+  text-overflow: ellipsis;
+}
 
 /* banner 用旧 class 名,但样式等价于 .alert.error;保留 class 避免改 template */
 .banner { margin-top: var(--sp-3); padding: 10px var(--sp-3); border-radius: var(--r-md); font-size: var(--fs-base); }

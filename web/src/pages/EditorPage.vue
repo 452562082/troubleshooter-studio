@@ -264,10 +264,10 @@ function translateSchemaError(msg: string): string {
       </label>
       <button class="btn" @click="loadExample">加载示例</button>
       <button class="btn primary" :disabled="!!loading" @click="apiCall('validate', '验证')">
-        {{ loading === '验证' ? '验证中...' : '✓ 验证' }}
+        ✓ 验证
       </button>
       <button class="btn primary" :disabled="!!loading" @click="apiCall('plan', '生成计划')">
-        {{ loading === '生成计划' ? '计划中...' : '📋 生成计划' }}
+        📋 生成计划
       </button>
     </div>
 
@@ -370,6 +370,7 @@ function translateSchemaError(msg: string): string {
   margin-bottom: 12px;
   flex-wrap: wrap;
 }
+
 
 /* ── 编辑器 + 行号 gutter ── */
 /* 结构:.editor-wrap 横向 flex, .gutter 固定宽, textarea 占剩余空间

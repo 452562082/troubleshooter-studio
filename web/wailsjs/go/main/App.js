@@ -6,6 +6,10 @@ export function Analyze(arg1, arg2, arg3) {
   return window['go']['main']['App']['Analyze'](arg1, arg2, arg3);
 }
 
+export function AnalyzeV2(arg1) {
+  return window['go']['main']['App']['AnalyzeV2'](arg1);
+}
+
 export function ApplyBot(arg1, arg2, arg3) {
   return window['go']['main']['App']['ApplyBot'](arg1, arg2, arg3);
 }
@@ -14,36 +18,44 @@ export function CancelInstall() {
   return window['go']['main']['App']['CancelInstall']();
 }
 
-export function ChatCheckKey(arg1, arg2) {
-  return window['go']['main']['App']['ChatCheckKey'](arg1, arg2);
-}
-
-export function ChatContextFor(arg1) {
-  return window['go']['main']['App']['ChatContextFor'](arg1);
-}
-
 export function ChatDeleteKey(arg1) {
   return window['go']['main']['App']['ChatDeleteKey'](arg1);
+}
+
+export function ChatDeleteProviderKey(arg1) {
+  return window['go']['main']['App']['ChatDeleteProviderKey'](arg1);
 }
 
 export function ChatLoadKey(arg1) {
   return window['go']['main']['App']['ChatLoadKey'](arg1);
 }
 
+export function ChatLoadProviderKey(arg1) {
+  return window['go']['main']['App']['ChatLoadProviderKey'](arg1);
+}
+
 export function ChatSaveKey(arg1, arg2) {
   return window['go']['main']['App']['ChatSaveKey'](arg1, arg2);
 }
 
-export function ChatSend(arg1) {
-  return window['go']['main']['App']['ChatSend'](arg1);
-}
-
-export function ChatStop(arg1) {
-  return window['go']['main']['App']['ChatStop'](arg1);
+export function ChatSaveProviderKey(arg1, arg2) {
+  return window['go']['main']['App']['ChatSaveProviderKey'](arg1, arg2);
 }
 
 export function DefaultDestPath(arg1, arg2) {
   return window['go']['main']['App']['DefaultDestPath'](arg1, arg2);
+}
+
+export function DeleteInfraCred(arg1) {
+  return window['go']['main']['App']['DeleteInfraCred'](arg1);
+}
+
+export function DetectAITools() {
+  return window['go']['main']['App']['DetectAITools']();
+}
+
+export function DetectOpenClawModels(arg1) {
+  return window['go']['main']['App']['DetectOpenClawModels'](arg1);
 }
 
 export function Diff(arg1, arg2) {
@@ -58,12 +70,44 @@ export function Doctor(arg1, arg2) {
   return window['go']['main']['App']['Doctor'](arg1, arg2);
 }
 
+export function FetchConfigContent(arg1) {
+  return window['go']['main']['App']['FetchConfigContent'](arg1);
+}
+
+export function FetchConfigContentBatch(arg1) {
+  return window['go']['main']['App']['FetchConfigContentBatch'](arg1);
+}
+
 export function Gen(arg1, arg2) {
   return window['go']['main']['App']['Gen'](arg1, arg2);
 }
 
-export function ImportAndDeploy(arg1, arg2, arg3) {
-  return window['go']['main']['App']['ImportAndDeploy'](arg1, arg2, arg3);
+export function GetRemoteURL(arg1) {
+  return window['go']['main']['App']['GetRemoteURL'](arg1);
+}
+
+export function GetUserConfig() {
+  return window['go']['main']['App']['GetUserConfig']();
+}
+
+export function ImportAndDeploy(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['ImportAndDeploy'](arg1, arg2, arg3, arg4);
+}
+
+export function ListGrafanaDatasources(arg1) {
+  return window['go']['main']['App']['ListGrafanaDatasources'](arg1);
+}
+
+export function ListLokiLabelValues(arg1, arg2, arg3) {
+  return window['go']['main']['App']['ListLokiLabelValues'](arg1, arg2, arg3);
+}
+
+export function ListLokiLabels(arg1) {
+  return window['go']['main']['App']['ListLokiLabels'](arg1);
+}
+
+export function LoadInfraCred(arg1) {
+  return window['go']['main']['App']['LoadInfraCred'](arg1);
 }
 
 export function OpenDir(arg1) {
@@ -78,6 +122,22 @@ export function Plan(arg1) {
   return window['go']['main']['App']['Plan'](arg1);
 }
 
+export function PreloadConfigCenter(arg1) {
+  return window['go']['main']['App']['PreloadConfigCenter'](arg1);
+}
+
+export function ProbeDataStore(arg1) {
+  return window['go']['main']['App']['ProbeDataStore'](arg1);
+}
+
+export function ProbeURL(arg1) {
+  return window['go']['main']['App']['ProbeURL'](arg1);
+}
+
+export function ProbeURLAuth(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['ProbeURLAuth'](arg1, arg2, arg3, arg4);
+}
+
 export function ReadEnv(arg1) {
   return window['go']['main']['App']['ReadEnv'](arg1);
 }
@@ -90,12 +150,24 @@ export function RunInstall(arg1, arg2) {
   return window['go']['main']['App']['RunInstall'](arg1, arg2);
 }
 
+export function SaveInfraCred(arg1, arg2) {
+  return window['go']['main']['App']['SaveInfraCred'](arg1, arg2);
+}
+
+export function SaveInfraCredBatch(arg1) {
+  return window['go']['main']['App']['SaveInfraCredBatch'](arg1);
+}
+
 export function SaveYAML(arg1, arg2) {
   return window['go']['main']['App']['SaveYAML'](arg1, arg2);
 }
 
 export function ScanInstallPrompts(arg1) {
   return window['go']['main']['App']['ScanInstallPrompts'](arg1);
+}
+
+export function SetDefaultReposRoot(arg1) {
+  return window['go']['main']['App']['SetDefaultReposRoot'](arg1);
 }
 
 export function Validate(arg1) {

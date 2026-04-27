@@ -32,6 +32,10 @@ type ApplyOptions struct {
 	TshootVersion string
 	// DryRun 为 true 时只渲染 + 打印会变的文件列表，不真写 workspace。
 	DryRun bool
+	// RepoLocalPaths 仓库名 → 本机绝对路径,生成 repo-path-map.yaml 用。
+	// system.yaml 不含此信息(可分享性),由 wizard / CLI 调用方额外传入。
+	// 空 map 时产物里的 repo-path-map.yaml 是占位样子(提示用户跑向导)。
+	RepoLocalPaths map[string]string
 }
 
 // Result 是 apply 的摘要，给 CLI 用来打印下一步。
@@ -70,6 +74,7 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 	g := generator.New(cfg, opts.TemplateRoot, baseOut)
 	g.TshootVersion = opts.TshootVersion
 	g.SystemYAMLSource = opts.NewYAML
+	g.RepoLocalPaths = opts.RepoLocalPaths
 
 	// 按 target 渲染
 	switch ag.Meta.Target {
@@ -79,8 +84,6 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 		err = g.GenerateClaudeCode()
 	case "cursor":
 		err = g.GenerateCursor()
-	case "embedded":
-		err = g.GenerateEmbedded()
 	default:
 		return nil, fmt.Errorf("unsupported target: %q", ag.Meta.Target)
 	}
@@ -203,6 +206,7 @@ func ImportAndApply(yamlBytes []byte, target, destPath string, opts ApplyOptions
 		g := generator.New(cfg, opts.TemplateRoot, destPath)
 		g.TshootVersion = opts.TshootVersion
 		g.SystemYAMLSource = yamlBytes
+		g.RepoLocalPaths = opts.RepoLocalPaths
 		if err := g.Generate(); err != nil {
 			return nil, fmt.Errorf("openclaw gen: %w", err)
 		}
@@ -251,13 +255,10 @@ func resolveApplySource(baseOut, target string) (src, hint string) {
 		hint = "若本次新增了 env / 切换了配置中心类型，重跑 `bash scripts/install.sh` 注册新 MCP + 填凭证，再 `openclaw gateway restart`；只是改映射不用动。"
 	case "claude-code":
 		src = baseOut + "-claude-code"
-		hint = "Claude Code 会在下次对话启动时重新读 CLAUDE.md + skills/；正在开的 session 需要 `/clear` 或重启 `claude` CLI 才能吃到新版。"
+		hint = "Claude Code 下次启动会自动加载用户级 ~/.claude/agents/<name>.md;正在开的 session 需要 `/clear` 或重启 `claude` CLI 才能吃到新版 subagent。"
 	case "cursor":
 		src = baseOut + "-cursor"
-		hint = "Cursor 自动感知 .cursorrules + .cursor/rules/*.mdc 变动；下一个新建的 AI 对话就会用新规则。"
-	case "embedded":
-		src = baseOut + "-embedded"
-		hint = "桌面端内嵌对话:在 Studio 里重新打开这个机器人的对话页即可用上新 prompt;不用重启 app。"
+		hint = "Cursor 下次打开 AI 侧栏时会重新扫 ~/.cursor/agents/<name>.md;新建对话即可选到更新后的 Custom Agent。"
 	}
 	return
 }
@@ -295,12 +296,9 @@ func looksLikeFactoryArtifact(rel, target string) bool {
 		prefixes = append(prefixes, "SOUL.md", "IDENTITY.md", "AGENTS.md", "USER.md",
 			"CHECKLIST.md", "TOOLS.md", ".clawhub/")
 	case "claude-code":
-		prefixes = append(prefixes, "CLAUDE.md", "install.sh")
+		prefixes = append(prefixes, "agents/", "install.sh")
 	case "cursor":
-		prefixes = append(prefixes, ".cursorrules", ".cursor/", "install.sh")
-	case "embedded":
-		// embedded 产物 = system-prompt.md + skills/ + scripts/ + tshoot.json。
-		prefixes = append(prefixes, "system-prompt.md")
+		prefixes = append(prefixes, "agents/", "install.sh")
 	default:
 		return false
 	}

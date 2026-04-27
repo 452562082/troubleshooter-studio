@@ -108,11 +108,11 @@ func Validate(c *SystemConfig) error {
 		}
 	}
 
-	validTargets := map[string]bool{"openclaw": true, "claude-code": true, "cursor": true, "embedded": true}
+	validTargets := map[string]bool{"openclaw": true, "claude-code": true, "cursor": true}
 	targets := c.Generation.ResolvedTargets()
 	for _, t := range targets {
 		if !validTargets[t] {
-			return fmt.Errorf("generation.targets: %q not supported (valid: openclaw, claude-code, cursor, embedded)", t)
+			return fmt.Errorf("generation.targets: %q not supported (valid: openclaw, claude-code, cursor)", t)
 		}
 	}
 

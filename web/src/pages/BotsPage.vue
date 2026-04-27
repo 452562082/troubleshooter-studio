@@ -4,7 +4,6 @@ import { ref, computed, nextTick, onMounted, onUnmounted, reactive, watch } from
 // 注意 runtime.js 是 Wails 打进 app 的全局脚本,浏览器里 import 的效果是
 // 引用 window.runtime.*;`tshoot serve` 模式下这些函数不会真实推事件(无源)。
 import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
-import { useRouter } from 'vue-router'
 import {
   applyBot,
   cancelInstall,
@@ -23,8 +22,6 @@ import {
 } from '../lib/bridge'
 import yaml from 'js-yaml'
 import { useDeployPath } from '../lib/useDeployPath'
-
-const router = useRouter()
 import type { ApplyResult, DiscoveredBot, InstallPrompt } from '../lib/bridge'
 import { toast } from '../lib/toast'
 
@@ -287,21 +284,11 @@ function removeRoot(r: string) {
   scan()
 }
 
-// openChat:跳转到内嵌 chat 页(BotsChat.vue);那边走 Studio 原生 chat 协议
-// 直连 LLM,不依赖 server.py。key 表单/spinner/错误处理都在那里。
-function openChat(b: DiscoveredBot) {
-  router.push({
-    path: '/bots/chat',
-    query: { path: b.path, name: b.meta.system_name || b.meta.system_id },
-  })
-}
-
 function targetLabel(t: string): string {
   const map: Record<string, string> = {
     openclaw: 'OpenClaw',
     'claude-code': 'Claude Code',
     cursor: 'Cursor',
-    embedded: 'Embedded (内嵌对话)',
   }
   return map[t] ?? t
 }
@@ -312,7 +299,7 @@ type ImportStage = 'idle' | 'picked' | 'deploying' | 'deployed' | 'installing' |
 const importStage = ref<ImportStage>('idle')
 const importYAMLText = ref('')
 const importYAMLPath = ref('')
-const importTarget = ref<'openclaw' | 'claude-code' | 'cursor' | 'embedded'>('openclaw')
+const importTarget = ref<'openclaw' | 'claude-code' | 'cursor'>('openclaw')
 const importDestPath = ref('')
 const importError = ref<string | null>(null)
 
@@ -323,6 +310,43 @@ const importSystemId = computed<string>(() => {
     const parsed: any = yaml.load(importYAMLText.value)
     return parsed?.system?.id || ''
   } catch { return '' }
+})
+
+// 从 import yaml 里抽仓库列表,给下面"本地路径配置"UI 用。
+// system.yaml 里只有 name/url,没有本地路径 —— 用户必须在这里手动补上才能部署,
+// 因为 bot 运行时要靠本地路径做代码分析。
+interface ImportRepoLite { name: string; url: string }
+const importRepoList = computed<ImportRepoLite[]>(() => {
+  try {
+    const parsed: any = yaml.load(importYAMLText.value)
+    if (!Array.isArray(parsed?.repos)) return []
+    return parsed.repos
+      .filter((r: any) => typeof r?.name === 'string' && r.name.trim())
+      .map((r: any) => ({ name: String(r.name).trim(), url: String(r.url || '').trim() }))
+  } catch { return [] }
+})
+// 每个仓库的本机绝对路径;部署时传进 importAndDeploy,后端烤进 repo-path-map.yaml。
+// key = repo.name。用户不填就不让部署。
+const importRepoPaths = reactive<Record<string, string>>({})
+// yaml 变动时重置:新 yaml 里的仓库可能完全不一样
+watch(() => importYAMLText.value, () => {
+  for (const k of Object.keys(importRepoPaths)) delete importRepoPaths[k]
+})
+async function pickRepoPath(name: string) {
+  try {
+    const p = await openDir(`选择 ${name} 的本地目录`)
+    if (p) importRepoPaths[name] = p
+  } catch (e: any) {
+    importError.value = String(e?.message || e)
+  }
+}
+// 所有仓库路径都填了才能部署;没仓库(repos: [])时也允许(纯基础设施 yaml)
+const importRepoPathsReady = computed(() => {
+  if (importRepoList.value.length === 0) return true
+  return importRepoList.value.every(r => (importRepoPaths[r.name] || '').trim() !== '')
+})
+const importMissingRepoCount = computed(() => {
+  return importRepoList.value.filter(r => !(importRepoPaths[r.name] || '').trim()).length
 })
 const {
   isManagedTarget: importIsManagedTarget,
@@ -417,15 +441,24 @@ async function runImportDeploy() {
     importError.value = '需要 destPath'
     return
   }
+  if (!importRepoPathsReady.value) {
+    importError.value = `还有 ${importMissingRepoCount.value} 个仓库没指定本地路径;不填本地路径 bot 运行时无法分析代码`
+    return
+  }
   importError.value = null
   importStage.value = 'deploying'
   try {
-    const res = await importAndDeploy(importYAMLText.value, importTarget.value, importDestPath.value)
+    // 每个 repo 的本机绝对路径,作为 repo-path-map.yaml 的原料
+    const paths: Record<string, string> = {}
+    for (const r of importRepoList.value) {
+      const p = (importRepoPaths[r.name] || '').trim()
+      if (p) paths[r.name] = p
+    }
+    const res = await importAndDeploy(importYAMLText.value, importTarget.value, importDestPath.value, paths)
     importedOutputDir.value = res.agent_path
     // 各 target 是否需要 install.sh 步骤:
     //   openclaw:有交互凭证,必须跑,UI 展示字段表单
     //   claude-code / cursor:ImportAndApply 已 rsync,install.sh 无附加动作
-    //   embedded:桌面端内嵌对话,没有 install.sh,产物写完直接齐活
     const needsInstall = importTarget.value === 'openclaw'
     if (needsInstall) {
       const [prompts, existing] = await Promise.all([
@@ -569,7 +602,7 @@ onUnmounted(() => {
         <button class="btn btn-regen" @click="resetImport">关闭</button>
       </div>
 
-      <!-- Step 1: 选 target + destPath。embedded/openclaw 自动路径,其它要选 -->
+      <!-- Step 1: 选 target + destPath。openclaw 自动路径,其它要选 -->
       <div v-if="importStage === 'picked' || importStage === 'deploying'" class="deploy-step">
         <div class="deploy-field">
           <label>目标平台</label>
@@ -577,10 +610,9 @@ onUnmounted(() => {
             <option value="openclaw">OpenClaw（Studio 托管,需填凭证）</option>
             <option value="claude-code">Claude Code（装到项目根）</option>
             <option value="cursor">Cursor IDE（装到项目根）</option>
-            <option value="embedded">Embedded (内嵌对话,Studio 托管)</option>
           </select>
         </div>
-        <!-- embedded/openclaw 自动管理路径,折叠;用户点"自定义"才露 input -->
+        <!-- openclaw 自动管理路径,折叠;用户点"自定义"才露 input -->
         <div v-if="importIsManagedTarget && !importCustomPathExpanded" class="deploy-field">
           <label>部署位置 <span class="auto-tag">自动管理</span></label>
           <div class="auto-path-display">
@@ -595,25 +627,71 @@ onUnmounted(() => {
               恢复默认
             </button>
           </label>
+          <!-- readonly input,只能通过按钮选 —— 跟 wizard 里所有路径字段统一约束 -->
           <div class="path-row">
             <input
-              v-model="importDestPath"
-              :placeholder="importIsManagedTarget ? importAutoDefaultPath : '项目根或工作目录'"
+              :value="importDestPath"
+              :placeholder="importIsManagedTarget ? importAutoDefaultPath : '点右侧按钮选择项目根路径'"
               :disabled="importStage === 'deploying'"
+              readonly
+              class="path-readonly"
+              :title="importDestPath"
             />
             <button class="btn" :disabled="importStage === 'deploying'" @click="pickDestDir">
-              选目录…
+              {{ importDestPath ? '重新选…' : '选目录…' }}
             </button>
+          </div>
+        </div>
+        <!-- 仓库本地路径配置:system.yaml 里没有这个信息(故意的 —— 跨机器可分享),
+             部署到这台机器上的 bot 要靠每个仓库的本机绝对路径做代码分析,所以必须
+             用户在这里手动补全。跑过 init 向导的流程那边路径是 wizard 自动攒的,
+             这里 import yaml 没经过向导,用户显式指路径 —— 不然 bot 跑起来啥代码
+             也找不到。 -->
+        <div v-if="importRepoList.length > 0" class="deploy-field import-repo-paths">
+          <label>
+            仓库本地路径 <span class="required">*</span>
+            <span class="field-hint">
+              — system.yaml 不含本地路径,请为每个仓库指定本机绝对路径(bot 要读代码)
+              <span v-if="importMissingRepoCount > 0" class="path-pending">
+                · 还差 {{ importMissingRepoCount }} 个
+              </span>
+              <span v-else class="path-ready">· ✓ 全部配好</span>
+            </span>
+          </label>
+          <div
+            v-for="repo in importRepoList"
+            :key="repo.name"
+            class="import-repo-row"
+          >
+            <span class="import-repo-name">{{ repo.name }}</span>
+            <input
+              :value="importRepoPaths[repo.name]"
+              type="text"
+              :placeholder="repo.url ? `${repo.url} 对应的本机目录(点右侧选)` : '点右侧按钮选目录'"
+              :disabled="importStage === 'deploying'"
+              readonly
+              class="path-readonly"
+              :title="importRepoPaths[repo.name] || ''"
+            />
+            <button
+              type="button"
+              class="btn"
+              :disabled="importStage === 'deploying'"
+              @click="pickRepoPath(repo.name)"
+            >{{ importRepoPaths[repo.name] ? '重新选…' : '选目录…' }}</button>
           </div>
         </div>
         <div class="deploy-actions">
           <button
             class="btn primary"
-            :disabled="importStage === 'deploying' || !importDestPath.trim()"
+            :disabled="importStage === 'deploying' || !importDestPath.trim() || !importRepoPathsReady"
             @click="runImportDeploy"
           >
             {{ importStage === 'deploying' ? '部署中…' : '部署' }}
           </button>
+          <span v-if="!importRepoPathsReady" class="deploy-block-hint">
+            先把 {{ importMissingRepoCount }} 个仓库的本地路径补齐才能部署
+          </span>
         </div>
       </div>
 
@@ -715,14 +793,21 @@ onUnmounted(() => {
           <button class="root-remove" @click="removeRoot(r)">×</button>
         </span>
       </div>
+      <!-- readonly 输入框,路径一律走"选目录"按钮。Enter 保留作"提交"快捷键(输入框
+           已经从 picker 填值后用户能回车一键加) -->
       <div class="root-add">
         <input
-          v-model="newRootInput"
-          placeholder="/path/to/project 或 ~/my-repo(或点右侧选目录)"
+          :value="newRootInput"
+          readonly
+          class="path-readonly"
+          placeholder="点右侧按钮选一个包含机器人产物的目录"
+          :title="newRootInput"
           @keyup.enter="addRoot"
         />
-        <button type="button" class="btn" @click="pickExtraRoot">选目录…</button>
-        <button class="btn primary" @click="addRoot">添加并扫描</button>
+        <button type="button" class="btn" @click="pickExtraRoot">
+          {{ newRootInput ? '重新选…' : '选目录…' }}
+        </button>
+        <button class="btn primary" :disabled="!newRootInput.trim()" @click="addRoot">添加并扫描</button>
       </div>
     </section>
 
@@ -752,14 +837,6 @@ onUnmounted(() => {
         <footer class="bot-foot">
           <span class="bot-time">最近更新：{{ b.mod_time }}</span>
           <div class="bot-actions">
-            <!-- 外露:高频操作(对话 + 诊断),用绿色强调 -->
-            <button
-              class="btn btn-regen btn-chat"
-              title="在 Studio 内跟机器人对话(直连 LLM API,支持 8 家 provider:Anthropic/OpenAI/DeepSeek/Qwen/MiniMax/Moonshot/智谱/Ollama)"
-              @click="openChat(b)"
-            >
-              💬 打开对话
-            </button>
             <button
               class="btn btn-regen"
               :disabled="doctorState[regenKey(b)]?.loading"
@@ -811,17 +888,19 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <!-- 深度扫输入行,用户填仓库根然后重诊断 -->
+          <!-- 深度扫输入行:readonly,只走"选目录"按钮 -->
           <div v-if="doctorState[regenKey(b)]?.showReposRootInput" class="doctor-deep-row">
             <input
-              v-model="doctorState[regenKey(b)]!.reposRoot"
+              :value="doctorState[regenKey(b)]!.reposRoot"
               type="text"
-              placeholder="~/code/all-repos 或绝对路径 /Users/xxx/repos"
+              placeholder="点右侧选仓库父目录(含 repo.name 子目录的那层)"
               :disabled="doctorState[regenKey(b)]?.loading"
-              class="doctor-deep-input"
+              readonly
+              class="doctor-deep-input path-readonly"
+              :title="doctorState[regenKey(b)]?.reposRoot || ''"
             />
             <button class="btn btn-regen" :disabled="doctorState[regenKey(b)]?.loading" @click="pickDoctorReposRoot(b)">
-              选目录…
+              {{ doctorState[regenKey(b)]?.reposRoot ? '重新选…' : '选目录…' }}
             </button>
             <button
               class="btn primary"
@@ -941,7 +1020,6 @@ onUnmounted(() => {
 .bot-target[data-target="openclaw"] { background: #fce7f3; color: #9f1239; }
 .bot-target[data-target="claude-code"] { background: #fef3c7; color: #92400e; }
 .bot-target[data-target="cursor"] { background: #dbeafe; color: #1e40af; }
-.bot-target[data-target="embedded"] { background: #d1fae5; color: #065f46; }
 .bot-ver { font-size: 11px; color: #94a3b8; font-family: monospace; }
 
 .bot-name { font-size: 16px; font-weight: 600; color: #0f172a; margin-bottom: 4px; }
@@ -961,12 +1039,6 @@ onUnmounted(() => {
   background: #f1f5f9; border: 1px solid #cbd5e1; color: #334155;
 }
 .btn-regen:hover:not(:disabled) { background: #e2e8f0; }
-/* "打开对话"按钮:所有 target 都支持(走 Studio 原生 chat),绿色强调跟管理类操作区分 */
-.btn-chat {
-  background: #d1fae5; border-color: #86efac; color: #065f46; font-weight: 600;
-}
-.btn-chat:hover:not(:disabled) { background: #a7f3d0; border-color: #4ade80; }
-
 /* ⋯ 更多菜单:外露只留高频,管理类折进来让卡片不拥挤 */
 .bot-more-wrap { position: relative; }
 .btn-more {
@@ -1073,6 +1145,14 @@ onUnmounted(() => {
 }
 .path-row { display: flex; gap: 8px; }
 .path-row input { flex: 1; }
+/* 统一的只读路径样式:跟 InitPage 保持一致 */
+.path-readonly {
+  background: #f8fafc; color: #475569; cursor: default;
+  text-overflow: ellipsis;
+}
+.import-repo-row input.path-readonly {
+  background: #f8fafc; color: #475569; cursor: default;
+}
 /* embedded/openclaw 的自动路径展示 */
 .deploy-field label { display: flex; align-items: center; gap: 6px; }
 .auto-tag {
@@ -1126,7 +1206,30 @@ onUnmounted(() => {
 .secret-mark { color: #c2410c; }
 .cred-field input { padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 12px; font-family: monospace; }
 
-.deploy-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.deploy-actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
+.deploy-block-hint {
+  font-size: 11px; color: #b45309; margin-right: auto;
+}
+
+/* 导入 yaml 时让用户为每个仓库指定本机路径 */
+.import-repo-paths .path-pending { color: #b45309; font-weight: 500; }
+.import-repo-paths .path-ready { color: #047857; font-weight: 500; }
+.import-repo-row {
+  display: grid;
+  grid-template-columns: 120px 1fr auto;
+  gap: 8px; align-items: center;
+  padding: 4px 0;
+}
+.import-repo-row .import-repo-name {
+  font-family: monospace; font-size: 12px; color: #1e293b;
+  font-weight: 500;
+}
+.import-repo-row input {
+  padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 4px;
+  font-size: 12px; font-family: monospace;
+}
+.import-repo-row input:focus { outline: none; border-color: #3b82f6; }
+.import-repo-row .required { color: #dc2626; }
 /* Cancel 按钮用危险色(红)区分于 primary(黑),提示"这是破坏性操作" */
 .btn-cancel {
   background: #fef2f2; border-color: #fecaca; color: #991b1b;

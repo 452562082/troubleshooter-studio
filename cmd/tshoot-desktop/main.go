@@ -60,9 +60,6 @@ type App struct {
 	// RunInstall 赋值并 defer 清空;CancelInstall 读取并调用。同一时刻只允许一个
 	// install 跑,前端 UI 会禁用"部署"按钮避免并发。
 	installCancel context.CancelFunc
-
-	// chatStreams 是原生 chat(bindings_chat.go)进行中的流注册表。
-	chatStreams chatStreamRegistry
 }
 
 // startup 由 Wails 在窗口创建完成时调用，注入 runtime ctx。私有也能被 Wails 识别。
@@ -78,8 +75,6 @@ func main() {
 	appState := &App{
 		templateRoot: tr,
 	}
-	// 原生 chat 的 stream:app 退出时 cancel 所有在跑的,避免 SDK http 长连泄漏。
-	defer appState.stopAllChats()
 
 	err := wails.Run(&options.App{
 		Title:  "Troubleshooter Studio",

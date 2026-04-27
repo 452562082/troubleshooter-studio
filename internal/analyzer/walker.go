@@ -8,19 +8,30 @@ import (
 )
 
 // walkFiles 遍历仓库，按 include 过滤 + 跳过 .git/node_modules/vendor/target 等
+//
+// 目录跳过规则:
+//   - 以 . 开头的目录整体跳(.git / .cache / .vscode / .gradle / .idea / .goroot...)
+//     truss 这种仓库把 Go module cache 放 content/.cache/go-mod/,不跳会把几百个
+//     vendored module 的 go.mod 当成子服务误报成 service_names。
+//   - 明确的源码忽略目录:node_modules / vendor / target / build / dist / testdata
 func walkFiles(root string, include []string, match func(path string) bool) ([]string, error) {
 	var out []string
 	skipDirs := map[string]bool{
-		".git": true, "node_modules": true, "vendor": true,
+		"node_modules": true, "vendor": true,
 		"target": true, "build": true, "dist": true,
-		".idea": true, ".vscode": true, ".gradle": true,
+		"testdata": true, "third_party": true,
 	}
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil //nolint:nilerr // 遍历遇权限错/符号链接失效,跳过该文件不中断
 		}
 		if d.IsDir() {
-			if skipDirs[d.Name()] {
+			name := d.Name()
+			// 跳所有 . 开头的目录(但根本身可能叫 .foo,不要把自己跳掉)
+			if p != root && strings.HasPrefix(name, ".") {
+				return fs.SkipDir
+			}
+			if skipDirs[name] {
 				return fs.SkipDir
 			}
 			return nil

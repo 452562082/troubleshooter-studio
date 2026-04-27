@@ -94,6 +94,17 @@ infrastructure:
     dataid_patterns:                 # [optional] 命名习惯，帮 AI 提升 config-map 准确率
       - "{service}.yaml"
       - "{service}-{env}.yaml"
+    service_map:                     # [optional] 向导 Step 5 的"预加载 + 下拉"产物：每个环境的每个服务对应哪条配置
+      dev:                           # key = env.id
+        user:                        # key = service 名称（需与 repos[].service_names 对齐）
+          namespace: "go-truss-dev"  # nacos namespaceId / apollo envId / consul kv prefix
+          group: "DEFAULT_GROUP"     # nacos 独有，其他类型留空
+          data_id: "user.yaml"       # nacos dataId / consul 完整 kv key（apollo 用 app_id 字段）
+      prod:
+        user:
+          namespace: "go-truss-prod"
+          group: "DEFAULT_GROUP"
+          data_id: "user.yaml"
 
   # 5.2 可观测性 —— 决定 grafana / loki / prometheus MCP 是否生成
   observability:

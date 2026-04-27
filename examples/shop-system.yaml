@@ -8,7 +8,7 @@ system:
 
 agent:
   name: "Shop排障机器人"
-  workspace_name: "Shop排障机器人"
+  workspace_name: "shop-bot"
   model: openai-codex/gpt-5.3-codex
   style:
     tone: direct

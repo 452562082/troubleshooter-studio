@@ -210,8 +210,10 @@ read_var ELK_ES_URL_{{.ID | upper}} "Elasticsearch URL ({{.ID}}) [http://es-xxx:
 {{- end}}
 {{- end}}
 
-read_var MODEL "Agent 模型 [{{.Agent.Model}}]: "
-MODEL="${MODEL:-{{.Agent.Model}}}"
+{{- /* openclaw install.sh 用 target_models.openclaw(优先) 或 agent.model 兜底 */}}
+{{- $openclawModel := .Agent.ModelForTarget "openclaw"}}
+read_var MODEL "Agent 模型 [{{$openclawModel}}]: "
+MODEL="${MODEL:-{{$openclawModel}}}"
 echo ""
 
 {{range .Infrastructure.Messaging}}{{if and .Enabled (eq .Platform "lark") -}}

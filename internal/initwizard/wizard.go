@@ -300,7 +300,7 @@ reposDone:
 		tgtDef = strings.Join(d.Targets, " ")
 	}
 	targetsRaw, err := w.ask(
-		"输出目标 [openclaw/claude-code/cursor/embedded,空格分隔,回车=全部]",
+		"输出目标 [openclaw/claude-code/cursor,空格分隔,回车=全部]",
 		tgtDef)
 	if err != nil {
 		return nil, err
@@ -311,11 +311,11 @@ reposDone:
 	return a, nil
 }
 
-// parseTargets 把用户输入的 "openclaw claude-code" / "openclaw, embedded" / ""
-// 解析成合法 target 列表；空输入 = 全部 4 种；未知 token 忽略并在 UI 层由 ask 流程已打印提示。
+// parseTargets 把用户输入的 "openclaw claude-code" / "openclaw, cursor" / ""
+// 解析成合法 target 列表；空输入 = 全部 3 种；未知 token 忽略并在 UI 层由 ask 流程已打印提示。
 func parseTargets(raw string) []string {
-	valid := map[string]bool{"openclaw": true, "claude-code": true, "cursor": true, "embedded": true}
-	order := []string{"openclaw", "claude-code", "cursor", "embedded"}
+	valid := map[string]bool{"openclaw": true, "claude-code": true, "cursor": true}
+	order := []string{"openclaw", "claude-code", "cursor"}
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return append([]string{}, order...)

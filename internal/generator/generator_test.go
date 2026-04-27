@@ -75,6 +75,7 @@ func TestGenerate_Nacos_Shop(t *testing.T) {
 		"skills/routing/references/env-domain-map.yaml",
 		"skills/routing/references/config-map.yaml",
 		"skills/routing/references/repo-stack-map.yaml",
+		"skills/routing/references/repo-path-map.yaml",
 		"skills/config-executor/SKILL.md",
 		"skills/redis-runtime-query/SKILL.md",
 		"skills/mongodb-runtime-query/SKILL.md",
@@ -365,31 +366,21 @@ func TestGenerate_MultiTargets_All(t *testing.T) {
 	if err := g.GenerateCursor(); err != nil {
 		t.Fatalf("cursor: %v", err)
 	}
-	if err := g.GenerateEmbedded(); err != nil {
-		t.Fatalf("embedded: %v", err)
-	}
 
 	assertExists(t, out, []string{
 		"templates/workspace-template/SOUL.md",
 		"scripts/install.sh",
 	})
+	// examples/shop-system.yaml 的 agent.workspace_name = "shop-bot",直接做 slug
 	assertExists(t, out+"-claude-code", []string{
-		"CLAUDE.md",
+		"agents/shop-bot.md",
 		"install.sh",
 		"skills/routing/SKILL.md",
 	})
 	assertExists(t, out+"-cursor", []string{
-		".cursorrules",
+		"agents/shop-bot.md",
 		"install.sh",
-		".cursor/rules/routing.mdc",
 		"skills/routing/SKILL.md",
-	})
-	// embedded 产物就是 Studio 内嵌对话的素材:
-	// install.sh / docker-compose 等独立部署资产已删。只剩 Studio 内嵌所需的素材。
-	assertExists(t, out+"-embedded", []string{
-		"system-prompt.md",
-		"skills/routing/SKILL.md",
-		"tshoot.json",
 	})
 
 	// install.sh 们都应该可执行(只剩 claude-code / cursor)
@@ -430,9 +421,6 @@ func TestGenerate_MultiTargets_NoOpenclaw(t *testing.T) {
 	if err := g.GenerateClaudeCode(); err != nil {
 		t.Fatalf("claude-code: %v", err)
 	}
-	if err := g.GenerateEmbedded(); err != nil {
-		t.Fatalf("embedded: %v", err)
-	}
 
 	// openclaw 目录不应存在
 	if _, err := os.Stat(out); err == nil {
@@ -440,8 +428,7 @@ func TestGenerate_MultiTargets_NoOpenclaw(t *testing.T) {
 	}
 
 	// 其它 target 产物存在
-	assertExists(t, out+"-claude-code", []string{"CLAUDE.md", "install.sh"})
-	assertExists(t, out+"-embedded", []string{"system-prompt.md", "skills"})
+	assertExists(t, out+"-claude-code", []string{"agents/shop-bot.md", "install.sh"})
 }
 
 func TestGenerate_WithAnalysis_UpgradesInferredToVerified(t *testing.T) {

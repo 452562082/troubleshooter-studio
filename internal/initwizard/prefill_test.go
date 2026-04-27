@@ -13,14 +13,14 @@ func TestParseTargets(t *testing.T) {
 		in   string
 		want []string
 	}{
-		{"empty → all 4", "", []string{"openclaw", "claude-code", "cursor", "embedded"}},
+		{"empty → all 3", "", []string{"openclaw", "claude-code", "cursor"}},
 		{"single", "openclaw", []string{"openclaw"}},
 		{"space sep", "openclaw cursor", []string{"openclaw", "cursor"}},
-		{"comma sep", "openclaw,embedded", []string{"openclaw", "embedded"}},
-		{"semicolon sep", "openclaw;embedded", []string{"openclaw", "embedded"}},
+		{"comma sep", "openclaw,cursor", []string{"openclaw", "cursor"}},
+		{"semicolon sep", "openclaw;cursor", []string{"openclaw", "cursor"}},
 		{"mixed sep + padding", "  openclaw , cursor ", []string{"openclaw", "cursor"}},
 		{"case insensitive", "OPENCLAW Cursor", []string{"openclaw", "cursor"}},
-		{"dedup", "openclaw openclaw embedded", []string{"openclaw", "embedded"}},
+		{"dedup", "openclaw openclaw cursor", []string{"openclaw", "cursor"}},
 		{"all unknown → fallback openclaw", "bogus unknown", []string{"openclaw"}},
 		{"partial unknown filtered", "openclaw bogus cursor", []string{"openclaw", "cursor"}},
 	}

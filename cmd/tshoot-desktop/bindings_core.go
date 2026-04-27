@@ -12,11 +12,13 @@ import (
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"github.com/xiaolong/troubleshooter-studio/internal/analyzer"
 	"github.com/xiaolong/troubleshooter-studio/internal/analyzerpipe"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 	"github.com/xiaolong/troubleshooter-studio/internal/doctor"
 	"github.com/xiaolong/troubleshooter-studio/internal/generator"
+	"github.com/xiaolong/troubleshooter-studio/internal/userconfig"
 )
 
 // Version 前端可调：window.go.main.App.Version()
@@ -133,12 +135,53 @@ func (a *App) Analyze(yamlText, reposRoot string, autoClone bool) (*analyzerpipe
 		return nil, err
 	}
 	return analyzerpipe.Run(cfg, analyzerpipe.Options{
-		ReposRoot: reposRoot,
+		ReposRoot: userconfig.ExpandHome(reposRoot),
 		AutoClone: autoClone,
 		OnProgress: func(msg string) {
 			wailsruntime.EventsEmit(a.ctx, "analyze:log", msg)
 		},
 	})
+}
+
+// AnalyzeInput 给 AnalyzeV2 的入参:比 Analyze 多了 RepoPaths 允许 per-repo 指定
+// 本地绝对路径(InitPage Step 4 的"本地 vs 远程"混合模式)。
+type AnalyzeInput struct {
+	YAMLText  string            `json:"yaml_text"`
+	ReposRoot string            `json:"repos_root"`           // 远程 clone 的默认父目录
+	RepoPaths map[string]string `json:"repo_paths,omitempty"` // key=repo.name, value=本地绝对路径(本地模式)
+	AutoClone bool              `json:"auto_clone"`
+	RepoName  string            `json:"repo_name,omitempty"` // 非空则只扫这一个仓库(单仓库 inline 扫描)
+}
+
+// AnalyzeV2 混合来源版:允许给部分仓库指定本地路径(不走 ReposRoot/Name 默认拼法)。
+// 前端 InitPage Step 4 用这个;CLI 的 analyze 继续用 Analyze。
+// 所有来自前端的路径过 ExpandHome,支持用户输入 ~/foo 这种写法。
+func (a *App) AnalyzeV2(in AnalyzeInput) (*analyzerpipe.Result, error) {
+	cfg, err := config.LoadFromBytes([]byte(in.YAMLText))
+	if err != nil {
+		return nil, err
+	}
+	// 路径里可能夹带 ~(用户手输 / 从 UI displayPath 保留的写法),统一展开
+	expandedPaths := make(map[string]string, len(in.RepoPaths))
+	for k, v := range in.RepoPaths {
+		expandedPaths[k] = userconfig.ExpandHome(v)
+	}
+	return analyzerpipe.Run(cfg, analyzerpipe.Options{
+		ReposRoot: userconfig.ExpandHome(in.ReposRoot),
+		RepoPaths: expandedPaths,
+		AutoClone: in.AutoClone,
+		RepoName:  in.RepoName,
+		OnProgress: func(msg string) {
+			wailsruntime.EventsEmit(a.ctx, "analyze:log", msg)
+		},
+	})
+}
+
+// GetRemoteURL 本地模式下,前端选了一个仓库目录,想反填 yaml.repos[].url 字段时用。
+// 返回 `git -C <path> remote get-url origin` 的结果;不是 git 仓库 / 没 origin 返回空串。
+// 用户可能输入 ~/code/foo(手输场景),展开后再交给 git CLI。
+func (a *App) GetRemoteURL(repoPath string) string {
+	return analyzer.GetRemoteURL(userconfig.ExpandHome(repoPath))
 }
 
 // Doctor 对比声明 vs 代码实态,返回漂移报告。等价 POST /api/doctor?repos_root=...

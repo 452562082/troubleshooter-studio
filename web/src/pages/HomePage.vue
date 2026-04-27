@@ -48,14 +48,14 @@ onMounted(() => {
 //   创建向导(产 yaml) → 已装机器人(导入 yaml 一键部署 + 原地管理)
 // 纯落盘产物需求走 CLI:`tshoot gen -i system.yaml -o ./dist/<id>`
 const primaryCards = [
-  { path: '/init', icon: '🧙', label: '创建向导', desc: '7 步生成 system.yaml（支持导入已有 yaml 继续编辑）', tag: '推荐新用户' },
-  { path: '/bots', icon: '🤖', label: '已装机器人', desc: '扫本机已部署的 / 导入 yaml 一键部署到 4 平台 / 原地更新已装' },
+  { path: '/init', icon: '🧙', label: '创建向导', desc: '一步步带你创建一个新的排障机器人', tag: '推荐新用户' },
+  { path: '/bots', icon: '🤖', label: '已装机器人', desc: '管理已部署的机器人,新建、更新或重新部署' },
 ]
 // 诊断工具:YAML 调试器 + 仓库分析。都不是主路径(新用户不会用),用户自己要调试
 // yaml / 扫代码补全字段时才来。Doctor 已合进 BotsPage 卡片,独立页已删。
 const advancedCards = [
-  { path: '/editor',  icon: '📝', label: 'YAML 调试器', desc: '粘贴 yaml 做快速验证 + plan 预演(带行号 + 错误高亮,不部署)' },
-  { path: '/analyze', icon: '🔍', label: '仓库分析',   desc: '扫代码抽 service_names 与配置中心线索（InitPage 第 4 步也集成了这个）' },
+  { path: '/editor',  icon: '📝', label: 'YAML 调试器', desc: '粘贴配置做语法检查和预览' },
+  { path: '/analyze', icon: '🔍', label: '仓库分析',   desc: '扫一下代码,自动识别有哪些服务和配置中心' },
 ]
 
 // 推荐下一步逻辑
@@ -64,7 +64,7 @@ const nextStep = computed(() => {
     return { text: '从「创建向导」开始，30 秒生成第一份 system.yaml', path: '/init', cta: '开始向导 →' }
   }
   if (wizardDraft.value && draftStep.value && draftStep.value < 7) {
-    return { text: `向导进行到第 ${draftStep.value} / 7 步（${draftSystemName.value || '未命名'}），回去继续？`, path: '/init', cta: '继续向导 →' }
+    return { text: `向导进行到第 ${draftStep.value} / 8 步（${draftSystemName.value || '未命名'}），回去继续？`, path: '/init', cta: '继续向导 →' }
   }
   if (wizardDraft.value && draftStep.value === 7) {
     return { text: `向导已到预览步骤，下一步是下载 yaml 并去 Editor / Gen 执行`, path: '/init', cta: '查看向导预览 →' }
@@ -80,7 +80,7 @@ const nextStep = computed(() => {
   <div class="home-page">
     <div class="hero">
       <img :src="brandLogo" class="hero-logo" alt="Troubleshooter Studio" />
-      <p class="tagline">AI 排障机器人工作台：为你的业务系统建模 → 生成 → 一键部署 → 后续管理。4 种部署形态（OpenClaw / Claude Code / Cursor / Embedded 内嵌对话），一份 system.yaml 全覆盖。</p>
+      <p class="tagline">为你的业务系统快速生成并部署 AI 排障机器人。</p>
     </div>
 
     <!-- 推荐下一步面板 -->
@@ -110,7 +110,7 @@ const nextStep = computed(() => {
 
     <!-- 高级 / 诊断:折叠入口弱化,避免跟主路径抢视觉焦点 -->
     <h2 class="section-title secondary">高级 · 诊断</h2>
-    <p class="section-hint">可选工具:YAML 调试器(粘贴 yaml 验证+plan)、仓库扫描补全 yaml(也集成在创建向导第 4 步)。Doctor 诊断已合进「已装机器人」每张卡片,点卡片上的 🩺 诊断按钮即可。</p>
+    <p class="section-hint">辅助工具:YAML 调试器(校验配置)、仓库扫描(从代码自动补全配置)。</p>
     <div class="nav-card-grid compact">
       <div v-for="c in advancedCards" :key="c.path" class="nav-card advanced" @click="router.push(c.path)">
         <div class="nav-card-head">
@@ -125,12 +125,11 @@ const nextStep = computed(() => {
     <h2 class="section-title">想了解更多</h2>
     <div class="info-grid">
       <div class="info-card">
-        <div class="info-head">4 种部署形态</div>
+        <div class="info-head">3 种部署形态</div>
         <ul>
           <li><code>openclaw</code> — Studio 托管产物,bash install.sh 装到 <code>~/.openclaw/workspace/</code></li>
-          <li><code>claude-code</code> — 装到项目根:CLAUDE.md + skills/(Claude Code CLI 自动读)</li>
-          <li><code>cursor</code> — 装到项目根:.cursorrules + .cursor/rules/(Cursor IDE 自动读)</li>
-          <li><code>embedded</code> — 桌面端内嵌对话(直连 LLM,支持 Anthropic/OpenAI/DeepSeek/Qwen/MiniMax/Moonshot/智谱/Ollama 等 8 家 provider)</li>
+          <li><code>claude-code</code> — 用户级 subagent:<code>~/.claude/agents/&lt;name&gt;.md</code>,所有项目里 @&lt;name&gt; 调用</li>
+          <li><code>cursor</code> — 用户级 Custom Agent:<code>~/.cursor/agents/&lt;name&gt;.md</code>,AI 侧栏选用</li>
         </ul>
       </div>
       <div class="info-card">

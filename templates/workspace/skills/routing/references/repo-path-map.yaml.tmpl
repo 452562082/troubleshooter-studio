@@ -1,0 +1,27 @@
+# repo-path-map.yaml
+# 由 troubleshooter-studio 生成 — 仓库名 → 本机绝对路径
+#
+# ⚠ MACHINE-LOCAL:此文件跟当前这台机器绑定,不要 commit / push / 跟同事分享。
+#    同事装这个机器人时应当自己跑一次 init 向导生成自己机器的版本。
+#    配套的 system.yaml 是可分享的(不含本地路径),通过 tshoot.json.system_yaml 可
+#    随时回放出来。
+#
+# bot 运行时(routing skill / code-locator)读这里找"truss 这个 repo 在哪"做代码
+# 分析。本文件缺失或某个 repo 的 local_path 为空时,应当提示用户跑向导补齐,而不是
+# 在代码里静默跳过。
+{{- if not .RepoLocalPaths}}
+#
+# 当前无任何仓库路径 —— 导入 system.yaml 的新用户默认没路径,需要在向导里
+# 选"本地已有目录"或远程 clone 后才能生成本文件的有效内容。
+{{- end}}
+repos:
+{{- range .Repos}}
+  {{.Name}}:
+    {{- $path := index $.RepoLocalPaths .Name}}
+    {{- if $path}}
+    local_path: {{$path | printf "%q"}}
+    {{- else}}
+    local_path: "" # 未配置本地路径 —— 跑一次向导或手动填绝对路径
+    {{- end}}
+    url: {{.URL | printf "%q"}}
+{{- end}}

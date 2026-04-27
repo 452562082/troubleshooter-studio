@@ -12,7 +12,8 @@ func TestPHPAnalyzer_FakeRepo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("analyze: %v", err)
 	}
-	// composer.json → "shop/php-service" → service name "php-service"
+	// 服务名取目录 basename("php-service"),不读 composer.json "name" 字段
+	// (hyperf-skeleton / laravel 这种框架模板名会误导)
 	if len(ra.ServiceNames) != 1 || ra.ServiceNames[0] != "php-service" {
 		t.Errorf("ServiceNames: got %v, want [php-service]", ra.ServiceNames)
 	}
@@ -52,31 +53,34 @@ func TestPHPAnalyzer_NoConfigCenter(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(ra.ServiceNames) != 1 {
-		t.Errorf("should still get name from composer.json, got %v", ra.ServiceNames)
+		t.Errorf("should get service name from dir basename, got %v", ra.ServiceNames)
 	}
 	if len(ra.Findings) != 0 {
 		t.Errorf("config_center=none should not scan .env, got %d findings", len(ra.Findings))
 	}
 }
 
-func TestReadComposerName(t *testing.T) {
-	cases := map[string]string{
-		`{"name": "shop/php-service"}`:    "php-service",
-		`{"name": "php-service"}`:         "php-service",
-		`{"name": "vendor/package-name"}`: "package-name",
-		`{"name": ""}`:                    "",
-		`{}`:                              "",
+// composer.json "name" 字段是 Packagist 包名,多为框架 skeleton(hyperf-skeleton /
+// laravel / symfony/skeleton)—— 不适合当服务名。新版改用目录 basename。这条测试
+// 用一个 "name": "hyperf/hyperf-skeleton" 的 composer.json,验证服务名仍然是
+// 目录名 "my-service" 而不是 "hyperf-skeleton"。
+func TestPHPAnalyzer_IgnoresSkeletonComposerName(t *testing.T) {
+	dir := t.TempDir()
+	repoDir := filepath.Join(dir, "my-service")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatal(err)
 	}
-	for input, want := range cases {
-		dir := t.TempDir()
-		p := filepath.Join(dir, "composer.json")
-		if err := os.WriteFile(p, []byte(input), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		got := readComposerName(p)
-		if got != want {
-			t.Errorf("readComposerName(%q) = %q, want %q", input, got, want)
-		}
+	if err := os.WriteFile(filepath.Join(repoDir, "composer.json"),
+		[]byte(`{"name": "hyperf/hyperf-skeleton"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := NewPHPAnalyzer("none")
+	ra, err := a.Analyze(repoDir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ra.ServiceNames) != 1 || ra.ServiceNames[0] != "my-service" {
+		t.Errorf("ServiceNames: got %v, want [my-service] (dir basename, not composer name)", ra.ServiceNames)
 	}
 }
 

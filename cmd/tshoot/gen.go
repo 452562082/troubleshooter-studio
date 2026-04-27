@@ -108,11 +108,6 @@ func runGen(args []string) error {
 				return err
 			}
 			fmt.Printf("[ok] cursor output → %s-cursor\n", outDir)
-		case "embedded":
-			if err := g.GenerateEmbedded(); err != nil {
-				return err
-			}
-			fmt.Printf("[ok] embedded output → %s-embedded\n", outDir)
 		}
 	}
 

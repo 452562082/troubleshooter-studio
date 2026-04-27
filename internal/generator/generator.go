@@ -22,6 +22,10 @@ type Context struct {
 	Findings map[string]map[string]analyzer.Finding
 	// PriorOverrides[service][env] -> Finding；来自上次生成产物中的人工 verified 行
 	PriorOverrides map[string]map[string]analyzer.Finding
+	// RepoLocalPaths 仓库名 → 本机绝对路径,生成 repo-path-map.yaml 用。
+	// 系统 yaml 不含路径(跨机器不可分享),部署时由 wizard/CLI 注入到产物里。
+	// 键必须匹配 cfg.Repos[i].Name。
+	RepoLocalPaths map[string]string
 }
 
 type Generator struct {
@@ -43,6 +47,14 @@ type Generator struct {
 	// 这是 discover / agent apply 的"真源"：二次修改时从这里读。
 	// 调用方应在 Generate 前设好；为空时 tshoot.json 里该字段为空串。
 	SystemYAMLSource []byte
+
+	// RepoLocalPaths 仓库名 → 本机绝对路径,部署时由调用方(桌面端向导 / CLI --repo-path
+	// 参数)填进来。system.yaml 故意不含此信息(路径跟机器绑定,不可分享),但部署后
+	// 的机器人需要知道"仓库在我这台机器上 checkout 到哪了"才能做代码分析 ——
+	// 所以把这份数据烤进 routing skill 的 references/repo-path-map.yaml(只存在于产物里,
+	// 不进 system.yaml)。键必须匹配 cfg.Repos[i].Name;未匹配的仓库不写 local_path 行。
+	// 为空 map 时模板会生成 "# 无本地路径"的占位 yaml 提示用户补齐。
+	RepoLocalPaths map[string]string
 }
 
 // GenSummary 描述一次 Generate 的实际产出结构，便于 CLI 以 text / json 等格式展示
@@ -131,6 +143,10 @@ func (g *Generator) resolveWorkspace() (wsRoot string, cleanup func(), err error
 }
 
 func (g *Generator) Generate() error {
+	// 把 Generator 上的 RepoLocalPaths 同步到 Context(模板只从 Ctx 取;
+	// 保持 Generator 字段为"外部可配",Context 为"模板可见"的分层)
+	g.Ctx.RepoLocalPaths = g.RepoLocalPaths
+
 	// 1) 从现有产物提取 preserved 文件内容 + config-map 人工行
 	snap, err := SnapshotExisting(g.OutputDir, g.Ctx.Generation.PreserveOnRegenerate)
 	if err != nil {
@@ -144,6 +160,28 @@ func (g *Generator) Generate() error {
 			}
 			for env, f := range byEnv {
 				g.Ctx.PriorOverrides[svc][env] = f
+			}
+		}
+	}
+	// 向导 Step 5 里用户通过下拉挑的 "env → service → (namespace, group, data_id)" 映射,
+	// 以 prior override 的形式注入(优先级介于 analyzer finding 与 inferred 之间 —
+	// 在模板里 findPrior 会命中这一层)。不覆盖 snapshot 里已有的人工行(用户在
+	// 产物里手改过就更权威)。
+	for env, svcMap := range g.Ctx.Infrastructure.ConfigCenter.ServiceMap {
+		for svc, rec := range svcMap {
+			if g.Ctx.PriorOverrides[svc] == nil {
+				g.Ctx.PriorOverrides[svc] = map[string]analyzer.Finding{}
+			}
+			if _, exists := g.Ctx.PriorOverrides[svc][env]; exists {
+				continue // 产物 snapshot 已有同 env 的人工行,尊重它
+			}
+			g.Ctx.PriorOverrides[svc][env] = analyzer.Finding{
+				ConfigCenter: g.Ctx.Infrastructure.ConfigCenter.Type,
+				DataID:       rec.DataID,
+				Group:        rec.Group,
+				NamespaceID:  rec.Namespace,
+				AppID:        rec.AppID,
+				SourceFile:   "wizard:service_map",
 			}
 		}
 	}

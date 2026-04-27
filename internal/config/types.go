@@ -14,8 +14,32 @@ type AgentStyle struct {
 type Agent struct {
 	Name          string     `yaml:"name"`
 	WorkspaceName string     `yaml:"workspace_name"`
-	Model         string     `yaml:"model"`
-	Style         AgentStyle `yaml:"style"`
+	// Model 是"默认"模型 id(provider/modelID 格式);
+	// 只有 openclaw 和 embedded 两个 target 实际消费模型:
+	//   - openclaw:写进 install.sh 的 MODEL 默认值,gateway 读它路由
+	//   - embedded:Studio 内嵌对话直连这个 provider / model
+	// claude-code / cursor 不消费 —— 用户在这两家客户端自己挑模型,本字段仅作文档
+	Model string `yaml:"model"`
+	// TargetModels 为 target 级别的模型覆盖(可选)。同时勾 openclaw + embedded
+	// 但想给它俩用不同 provider / 不同模型时用:
+	//   target_models:
+	//     openclaw: anthropic/claude-sonnet-4-6
+	//     embedded: deepseek/deepseek-chat
+	// 没指定时该 target 回落到上面的 agent.model。
+	// claude-code / cursor 写在这里也会被忽略(那俩 target 不消费模型)。
+	TargetModels map[string]string `yaml:"target_models,omitempty"`
+	Style        AgentStyle        `yaml:"style"`
+}
+
+// ModelForTarget 给 target-aware 消费点(install.sh 模板 / llmchat)提供的便捷访问:
+// 优先 target_models[target],回落到 agent.model。target 为空串时直接返回 agent.model。
+func (a Agent) ModelForTarget(target string) string {
+	if target != "" {
+		if m, ok := a.TargetModels[target]; ok && m != "" {
+			return m
+		}
+	}
+	return a.Model
 }
 
 type Environment struct {
@@ -60,6 +84,19 @@ type ConfigCenter struct {
 	Auth              CredentialAuth         `yaml:"auth"`
 	DataIDPatterns    []string               `yaml:"dataid_patterns"`
 	PerEnvCredentials bool                   `yaml:"per_env_credentials"` // true = install.sh 按 env 单独问凭证
+	// ServiceMap 是向导 Step 5 用户通过下拉挑出来的"每个环境每个服务对应哪条配置"
+	// 外层 key = env.id，内层 key = service 名称(跟 repos[].service_names 对齐)。
+	// 生成时作为 prior override 注入到 config-map.yaml —— 优先级: analyzer finding > ServiceMap > inferred。
+	ServiceMap map[string]map[string]ServiceMapEntry `yaml:"service_map,omitempty"`
+}
+
+// ServiceMapEntry 一条 (env, service) → 配置中心定位的映射(nacos / apollo / consul 共用字段,不相关留空)。
+type ServiceMapEntry struct {
+	// Namespace = nacos namespaceId / apollo envId / consul kv prefix
+	Namespace string `yaml:"namespace,omitempty"`
+	Group     string `yaml:"group,omitempty"`   // nacos 独有
+	DataID    string `yaml:"data_id,omitempty"` // nacos dataId / consul full kv key
+	AppID     string `yaml:"app_id,omitempty"`  // apollo 独有
 }
 
 type Grafana struct {

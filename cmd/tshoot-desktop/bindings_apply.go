@@ -12,6 +12,7 @@ import (
 
 	"github.com/xiaolong/troubleshooter-studio/internal/agent"
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
+	"github.com/xiaolong/troubleshooter-studio/internal/userconfig"
 )
 
 // ApplyBot 把新的 system.yaml 应用到已装机器人的活 workspace：
@@ -47,27 +48,36 @@ func (a *App) ApplyBot(agentPath, newYamlText string, dryRun bool) (*agent.Resul
 // ImportAndDeploy 把 yaml 直接部署成新机器人（agent.ImportAndApply 的 UI 封装）。
 // target: openclaw / claude-code / cursor / embedded
 // destPath: 部署目标路径。openclaw 下是产物目录（含 install.sh）；其它 target 下是目标项目根。
-func (a *App) ImportAndDeploy(yamlText, target, destPath string) (*agent.Result, error) {
+// repoPaths: 仓库名 → 本机绝对路径,烤进产物 skills/routing/references/repo-path-map.yaml。
+// 前端从 wizard 里抽出每个 repo 的 _localPath / _cloneTarget 传过来;system.yaml
+// 里不含路径(故意的,保持可分享),这里是唯一的路径传入口。
+func (a *App) ImportAndDeploy(yamlText, target, destPath string, repoPaths map[string]string) (*agent.Result, error) {
+	// 用户可能传 ~/foo,统一展开成绝对路径
+	expanded := make(map[string]string, len(repoPaths))
+	for k, v := range repoPaths {
+		if v != "" {
+			expanded[k] = userconfig.ExpandHome(v)
+		}
+	}
 	return agent.ImportAndApply([]byte(yamlText), target, destPath, agent.ApplyOptions{
-		TemplateRoot:  a.templateRoot,
-		TshootVersion: version,
+		TemplateRoot:   a.templateRoot,
+		TshootVersion:  version,
+		RepoLocalPaths: expanded,
 	})
 }
 
 // DefaultDestPath 给不同 target 推荐默认部署路径,UI 据此决定要不要让用户手填。
 //
-// 设计:
-//   - embedded:产物只是"Studio 内嵌对话的素材"(system-prompt.md / skills),
-//     用户从不直接 cd 进去。默认到 ~/.tshoot/embedded/<id>/,UI 隐藏路径输入。
-//   - openclaw:产物是 install.sh 用的中间包,最终 rsync 到 workspace_name 目录,
-//     中间位置对用户也没意义。默认到 ~/.tshoot/openclaw/<id>/,UI 隐藏输入。
-//   - claude-code / cursor:装到"用户已有项目根"里(CLAUDE.md + skills/ 注进项目)。
-//     Studio 不知道用户想装哪个项目,必须用户选。返回空串,UI 强制必填。
+// 设计:三种 target 都是 Studio 托管的中间包,装到 ~/.tshoot/<target>/<id>/。
+// install.sh 跑完后再各自分发到用户级的真实位置:
+//   - openclaw     ~/.openclaw/workspace/<workspace_name>/
+//   - claude-code  ~/.claude/agents/<name>.md  + ~/.claude/skills/<name>/
+//   - cursor       ~/.cursor/agents/<name>.md  + ~/.cursor/skills/<name>/
 //
 // 空 systemID 时回退到 "default"(UI 初始化时 system.id 可能还空,给个兜底)。
 func (a *App) DefaultDestPath(target, systemID string) (string, error) {
 	switch target {
-	case "embedded", "openclaw":
+	case "openclaw", "claude-code", "cursor":
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", fmt.Errorf("read home: %w", err)
@@ -77,9 +87,6 @@ func (a *App) DefaultDestPath(target, systemID string) (string, error) {
 			id = "default"
 		}
 		return filepath.Join(home, ".tshoot", target, id), nil
-	case "claude-code", "cursor":
-		// 空串 = 让用户必选,UI 会保持输入框可见
-		return "", nil
 	default:
 		return "", fmt.Errorf("unknown target: %q", target)
 	}

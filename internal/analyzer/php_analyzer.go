@@ -1,8 +1,6 @@
 package analyzer
 
 import (
-	"encoding/json"
-	"os"
 	"path/filepath"
 	"strings"
 )
@@ -17,10 +15,6 @@ func NewPHPAnalyzer(configCenter string) Analyzer {
 
 func (phpAnalyzer) Stack() string { return "php" }
 
-type composerJSON struct {
-	Name string `json:"name"`
-}
-
 func (p phpAnalyzer) Analyze(repoPath string, includePaths []string) (*RepoAnalysis, error) {
 	ra := &RepoAnalysis{
 		Name:     filepath.Base(repoPath),
@@ -29,12 +23,15 @@ func (p phpAnalyzer) Analyze(repoPath string, includePaths []string) (*RepoAnaly
 		Verified: true,
 	}
 
-	// 1) composer.json → name
+	// 服务名直接用目录 basename(api-truss / order-service 这种)。
+	// 不从 composer.json "name" 字段读 —— 那个字段是 Packagist 包名(vendor/package),
+	// PHP 项目多用框架 skeleton 模板(hyperf/hyperf-skeleton、laravel/laravel、
+	// symfony/skeleton),很多开发者不改就直接用,读出来会把"框架 skeleton 名"
+	// 当成服务名,误导 config-map / 部署名匹配。Go 语言 module path 最后一段通常
+	// 等于服务名是 Go 社区约定,PHP 没这个习惯。
 	composerPath := filepath.Join(repoPath, "composer.json")
 	if fileExists(composerPath) {
-		if name := readComposerName(composerPath); name != "" {
-			ra.ServiceNames = append(ra.ServiceNames, name)
-		}
+		ra.ServiceNames = append(ra.ServiceNames, filepath.Base(repoPath))
 	} else {
 		ra.Warnings = append(ra.Warnings, "composer.json not found")
 	}
@@ -82,25 +79,4 @@ func (p phpAnalyzer) Analyze(repoPath string, includePaths []string) (*RepoAnaly
 	}
 
 	return ra, nil
-}
-
-// readComposerName 从 composer.json 的 "name" 字段取服务名
-// 格式通常是 "vendor/package"，取 package 部分
-func readComposerName(path string) string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	var c composerJSON
-	if err := json.Unmarshal(data, &c); err != nil {
-		return ""
-	}
-	name := strings.TrimSpace(c.Name)
-	if name == "" {
-		return ""
-	}
-	if idx := strings.LastIndex(name, "/"); idx >= 0 {
-		return name[idx+1:]
-	}
-	return name
 }

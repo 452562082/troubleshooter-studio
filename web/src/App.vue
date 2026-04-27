@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import ToastContainer from './components/ToastContainer.vue'
+import { setupGlobalLogBridges, useLogStore } from './lib/logStore'
 // Vite URL import:assets/app-icon.svg 会被打进 bundle,<img src> 直接用。
 // 用 app-icon(方形,1024×1024 viewBox) 而不是 logo.svg(宽 780×220)当侧边栏品牌
 // 标记——侧边栏宽 220px,方形 icon 挤一下更合适。
@@ -10,16 +11,24 @@ import brandIcon from './assets/app-icon.svg'
 const route = useRoute()
 const currentPath = computed(() => route.path)
 
-// 侧边栏分主路径 + 诊断工具两档。诊断工具(YAML 调试器 / 仓库分析)放主路径
+// 全局日志收集:install:log / analyze:log 等事件桥接进 logStore,所有页面都能往里塞,
+// LogsPage 统一展示。App 启动挂一次。
+onMounted(() => setupGlobalLogBridges())
+
+// 日志条数 —— 侧栏"日志"项右侧小徽章显示,让用户看到有新内容产生
+const { count: logCount } = useLogStore()
+
+// 侧边栏分主路径 + 诊断工具两档。诊断工具(YAML 调试器 / 仓库分析 / 日志)放主路径
 // 后面让新用户视线先扫过去,不进诊断也无感。路径本身没有视觉分组,只是顺序靠后;
 // 将来需要的话再加分隔线。
 const navItems = [
   { path: '/', icon: '🏠', label: '首页', desc: '概览 + 下一步推荐' },
-  { path: '/bots', icon: '🤖', label: '已装机器人', desc: '扫描本机已部署的机器人' },
-  { path: '/init', icon: '🧙', label: '创建向导', desc: '生成 system.yaml' },
-  // ── 诊断工具(下面两项) ──
-  { path: '/editor', icon: '📝', label: 'YAML 调试器', desc: '粘贴 yaml 验证语法 + 干跑 plan' },
-  { path: '/analyze', icon: '🔍', label: '仓库分析', desc: '扫代码抽 service_names / 配置中心' },
+  { path: '/bots', icon: '🤖', label: '已装机器人', desc: '管理已部署的机器人' },
+  { path: '/init', icon: '🧙', label: '创建向导', desc: '一步步创建一个新机器人' },
+  // ── 诊断工具(下面几项) ──
+  { path: '/editor', icon: '📝', label: 'YAML 调试器', desc: '校验配置文件语法' },
+  { path: '/analyze', icon: '🔍', label: '仓库分析', desc: '扫代码识别服务和配置中心' },
+  { path: '/logs', icon: '📜', label: '日志', desc: '全工作台过程日志 / 安装流' },
 ]
 </script>
 
@@ -45,6 +54,10 @@ const navItems = [
             <span class="nav-desc">{{ item.desc }}</span>
           </span>
           <span v-if="i === 2" class="nav-badge">推荐</span>
+          <span
+            v-else-if="item.path === '/logs' && logCount > 0"
+            class="nav-badge nav-badge-count"
+          >{{ logCount > 999 ? '999+' : logCount }}</span>
         </router-link>
       </nav>
       <div class="sidebar-footer">
@@ -105,6 +118,8 @@ nav { display: flex; flex-direction: column; padding: 8px 0; flex: 1; }
   background: #f59e0b; color: #1e293b; font-size: 9px; font-weight: 700;
   padding: 1px 6px; border-radius: 8px;
 }
+.nav-badge-count { background: #64748b; color: #f1f5f9; min-width: 22px; text-align: center; }
+.nav-link.active .nav-badge-count { background: rgba(255,255,255,0.3); color: #fff; }
 
 .sidebar-footer {
   padding: 12px 16px; border-top: 1px solid #334155;

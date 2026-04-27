@@ -23,13 +23,19 @@ func DetectRole(repoPath string) string {
 	if fi, err := os.Stat(repoPath); err != nil || !fi.IsDir() {
 		return ""
 	}
+	// monorepo 支持:如果根目录没 stack marker,回落到 depth-1 子目录里第一个有 marker 的。
+	// 这样 truss/ 这种"根没 go.mod 但 commerce/ 下有"的仓库也能识别 role。
+	effectiveRoot, _ := findStackRoot(repoPath)
+	if effectiveRoot == "" {
+		effectiveRoot = repoPath
+	}
 	exists := func(p string) bool {
-		_, err := os.Stat(filepath.Join(repoPath, p))
+		_, err := os.Stat(filepath.Join(effectiveRoot, p))
 		return err == nil
 	}
 
 	// 1) 前端识别:package.json + 前端框架 dep
-	if pkgPath := filepath.Join(repoPath, "package.json"); fileExists(pkgPath) {
+	if pkgPath := filepath.Join(effectiveRoot, "package.json"); fileExists(pkgPath) {
 		if isFrontendPackageJSON(pkgPath) {
 			return "frontend"
 		}

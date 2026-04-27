@@ -27,6 +27,29 @@ export namespace agent {
 
 }
 
+export namespace aitools {
+	
+	export class Result {
+	    installed: boolean;
+	    version?: string;
+	    path?: string;
+	    note?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Result(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.installed = source["installed"];
+	        this.version = source["version"];
+	        this.path = source["path"];
+	        this.note = source["note"];
+	    }
+	}
+
+}
+
 export namespace analyzer {
 	
 	export class Finding {
@@ -207,6 +230,186 @@ export namespace analyzerpipe {
 
 }
 
+export namespace cchub {
+	
+	export class Entry {
+	    locator: string;
+	    group?: string;
+	    tenant?: string;
+	    type?: string;
+	    app_id?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Entry(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.locator = source["locator"];
+	        this.group = source["group"];
+	        this.tenant = source["tenant"];
+	        this.type = source["type"];
+	        this.app_id = source["app_id"];
+	    }
+	}
+	export class FetchBatchItem {
+	    key: string;
+	    namespace?: string;
+	    group?: string;
+	    data_id: string;
+	    app_id?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new FetchBatchItem(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.key = source["key"];
+	        this.namespace = source["namespace"];
+	        this.group = source["group"];
+	        this.data_id = source["data_id"];
+	        this.app_id = source["app_id"];
+	    }
+	}
+	export class FetchContentResult {
+	    content: string;
+	    format?: string;
+	    notes?: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new FetchContentResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.content = source["content"];
+	        this.format = source["format"];
+	        this.notes = source["notes"];
+	    }
+	}
+	export class FetchBatchItemResult {
+	    key: string;
+	    ok: boolean;
+	    result?: FetchContentResult;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new FetchBatchItemResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.key = source["key"];
+	        this.ok = source["ok"];
+	        this.result = this.convertValues(source["result"], FetchContentResult);
+	        this.error = source["error"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class FetchBatchResult {
+	    items: FetchBatchItemResult[];
+	    notes?: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new FetchBatchResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.items = this.convertValues(source["items"], FetchBatchItemResult);
+	        this.notes = source["notes"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	export class Namespace {
+	    id: string;
+	    show_name: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Namespace(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.show_name = source["show_name"];
+	    }
+	}
+	export class Result {
+	    type: string;
+	    entries: Entry[];
+	    namespaces?: Namespace[];
+	    notes?: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new Result(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.type = source["type"];
+	        this.entries = this.convertValues(source["entries"], Entry);
+	        this.namespaces = this.convertValues(source["namespaces"], Namespace);
+	        this.notes = source["notes"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+
+}
+
 export namespace deploy {
 	
 	export class Prompt {
@@ -360,6 +563,29 @@ export namespace doctor {
 
 }
 
+export namespace dsprobe {
+	
+	export class Result {
+	    ok: boolean;
+	    latency?: string;
+	    detail?: string;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Result(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.ok = source["ok"];
+	        this.latency = source["latency"];
+	        this.detail = source["detail"];
+	        this.error = source["error"];
+	    }
+	}
+
+}
+
 export namespace generator {
 	
 	export class AnalyzerHitRef {
@@ -503,20 +729,58 @@ export namespace generator {
 
 }
 
-export namespace llmchat {
+export namespace labelprobe {
 	
-	export class Message {
-	    role: string;
-	    content: string;
+	export class Datasource {
+	    uid: string;
+	    name: string;
+	    type: string;
+	    url?: string;
+	    is_loki: boolean;
+	    default?: boolean;
 	
 	    static createFrom(source: any = {}) {
-	        return new Message(source);
+	        return new Datasource(source);
 	    }
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.role = source["role"];
-	        this.content = source["content"];
+	        this.uid = source["uid"];
+	        this.name = source["name"];
+	        this.type = source["type"];
+	        this.url = source["url"];
+	        this.is_loki = source["is_loki"];
+	        this.default = source["default"];
+	    }
+	}
+	export class LabelsResult {
+	    labels: string[];
+	    notes?: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new LabelsResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.labels = source["labels"];
+	        this.notes = source["notes"];
+	    }
+	}
+	export class ValuesResult {
+	    key: string;
+	    values: string[];
+	    notes?: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ValuesResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.key = source["key"];
+	        this.values = source["values"];
+	        this.notes = source["notes"];
 	    }
 	}
 
@@ -524,30 +788,150 @@ export namespace llmchat {
 
 export namespace main {
 	
-	export class ChatContext {
-	    system_id: string;
-	    system_name: string;
-	    model: string;
-	    provider_id: string;
-	    provider_name: string;
-	    envs: string[];
-	    prompt_chars: number;
-	    prompt_tokens: number;
+	export class AIToolsDetectResult {
+	    claude_code?: aitools.Result;
+	    cursor?: aitools.Result;
 	
 	    static createFrom(source: any = {}) {
-	        return new ChatContext(source);
+	        return new AIToolsDetectResult(source);
 	    }
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.system_id = source["system_id"];
-	        this.system_name = source["system_name"];
-	        this.model = source["model"];
-	        this.provider_id = source["provider_id"];
-	        this.provider_name = source["provider_name"];
-	        this.envs = source["envs"];
-	        this.prompt_chars = source["prompt_chars"];
-	        this.prompt_tokens = source["prompt_tokens"];
+	        this.claude_code = this.convertValues(source["claude_code"], aitools.Result);
+	        this.cursor = this.convertValues(source["cursor"], aitools.Result);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class AnalyzeInput {
+	    yaml_text: string;
+	    repos_root: string;
+	    repo_paths?: Record<string, string>;
+	    auto_clone: boolean;
+	    repo_name?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new AnalyzeInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.yaml_text = source["yaml_text"];
+	        this.repos_root = source["repos_root"];
+	        this.repo_paths = source["repo_paths"];
+	        this.auto_clone = source["auto_clone"];
+	        this.repo_name = source["repo_name"];
+	    }
+	}
+	export class CCHubFetchBatchInput {
+	    type: string;
+	    addr: string;
+	    username?: string;
+	    password?: string;
+	    token?: string;
+	    items: cchub.FetchBatchItem[];
+	
+	    static createFrom(source: any = {}) {
+	        return new CCHubFetchBatchInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.type = source["type"];
+	        this.addr = source["addr"];
+	        this.username = source["username"];
+	        this.password = source["password"];
+	        this.token = source["token"];
+	        this.items = this.convertValues(source["items"], cchub.FetchBatchItem);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class CCHubFetchContentInput {
+	    type: string;
+	    addr: string;
+	    username?: string;
+	    password?: string;
+	    token?: string;
+	    namespace?: string;
+	    group?: string;
+	    data_id: string;
+	    app_id?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CCHubFetchContentInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.type = source["type"];
+	        this.addr = source["addr"];
+	        this.username = source["username"];
+	        this.password = source["password"];
+	        this.token = source["token"];
+	        this.namespace = source["namespace"];
+	        this.group = source["group"];
+	        this.data_id = source["data_id"];
+	        this.app_id = source["app_id"];
+	    }
+	}
+	export class CCHubPreloadInput {
+	    type: string;
+	    addr: string;
+	    username?: string;
+	    password?: string;
+	    token?: string;
+	    namespace?: string;
+	    app_id?: string;
+	    namespaces_only?: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new CCHubPreloadInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.type = source["type"];
+	        this.addr = source["addr"];
+	        this.username = source["username"];
+	        this.password = source["password"];
+	        this.token = source["token"];
+	        this.namespace = source["namespace"];
+	        this.app_id = source["app_id"];
+	        this.namespaces_only = source["namespaces_only"];
 	    }
 	}
 	export class ChatLoadKeyResult {
@@ -566,22 +950,80 @@ export namespace main {
 	        this.err = source["err"];
 	    }
 	}
-	export class ChatSendInput {
-	    bot_path: string;
-	    api_key: string;
-	    messages: llmchat.Message[];
-	    default_env: string;
+	export class DSProbeInput {
+	    type: string;
+	    fields: Record<string, string>;
 	
 	    static createFrom(source: any = {}) {
-	        return new ChatSendInput(source);
+	        return new DSProbeInput(source);
 	    }
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.bot_path = source["bot_path"];
+	        this.type = source["type"];
+	        this.fields = source["fields"];
+	    }
+	}
+	export class InfraCredBatchInput {
+	    entries: Record<string, string>;
+	
+	    static createFrom(source: any = {}) {
+	        return new InfraCredBatchInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.entries = source["entries"];
+	    }
+	}
+	export class LokiAuthInput {
+	    grafana_url?: string;
+	    loki_url?: string;
+	    ds_uid?: string;
+	    api_key?: string;
+	    user?: string;
+	    pass?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new LokiAuthInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.grafana_url = source["grafana_url"];
+	        this.loki_url = source["loki_url"];
+	        this.ds_uid = source["ds_uid"];
 	        this.api_key = source["api_key"];
-	        this.messages = this.convertValues(source["messages"], llmchat.Message);
-	        this.default_env = source["default_env"];
+	        this.user = source["user"];
+	        this.pass = source["pass"];
+	    }
+	}
+	export class OpenClawDetectResult {
+	    ok: boolean;
+	    installed: boolean;
+	    installed_but_empty: boolean;
+	    install_dir?: string;
+	    config_path?: string;
+	    version?: string;
+	    models?: openclaw.ModelEntry[];
+	    auth_providers?: string[];
+	    err?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new OpenClawDetectResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.ok = source["ok"];
+	        this.installed = source["installed"];
+	        this.installed_but_empty = source["installed_but_empty"];
+	        this.install_dir = source["install_dir"];
+	        this.config_path = source["config_path"];
+	        this.version = source["version"];
+	        this.models = this.convertValues(source["models"], openclaw.ModelEntry);
+	        this.auth_providers = source["auth_providers"];
+	        this.err = source["err"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -632,6 +1074,22 @@ export namespace main {
 	        this.ok = source["ok"];
 	    }
 	}
+	export class UserConfigResult {
+	    default_repos_root: string;
+	    resolved_repos_root: string;
+	    home_dir: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new UserConfigResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.default_repos_root = source["default_repos_root"];
+	        this.resolved_repos_root = source["resolved_repos_root"];
+	        this.home_dir = source["home_dir"];
+	    }
+	}
 	export class ValidateResult {
 	    valid: boolean;
 	    system: string;
@@ -650,6 +1108,31 @@ export namespace main {
 	        this.name = source["name"];
 	        this.envs = source["envs"];
 	        this.repos = source["repos"];
+	    }
+	}
+
+}
+
+export namespace openclaw {
+	
+	export class ModelEntry {
+	    id: string;
+	    provider?: string;
+	    label?: string;
+	    source?: string;
+	    primary?: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new ModelEntry(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.provider = source["provider"];
+	        this.label = source["label"];
+	        this.source = source["source"];
+	        this.primary = source["primary"];
 	    }
 	}
 

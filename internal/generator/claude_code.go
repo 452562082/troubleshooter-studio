@@ -8,13 +8,14 @@ import (
 	"strings"
 )
 
-// GenerateClaudeCode 输出 Claude Code 格式：
-//   - CLAUDE.md（合并 SOUL + IDENTITY + AGENTS + CHECKLIST + TOOLS）
-//   - skills/（原样保留所有 skill 目录）
-//   - scripts/（辅助脚本保留）
-//   - install.sh（把上述产物一键安装到指定项目根）
+// GenerateClaudeCode 输出 Claude Code 用户级 subagent 格式：
+//   - agents/<workspace_name>.md  (subagent 定义文件,带 frontmatter:name/description/tools/model)
+//   - skills/                      (原样保留所有 skill 目录,subagent 内会引用)
+//   - scripts/                     (辅助脚本)
+//   - install.sh                   (把 agent .md 装到 ~/.claude/agents/,skills 装到 ~/.claude/skills/)
 //
-// 不生成 self-test.sh / uninstall.sh / .clawhub 等 OpenClaw 特有文件
+// frontmatter.name = workspace_name(ASCII kebab-case),用户在 Claude Code 里用 @<name> 调用;
+// frontmatter.description = system.name (中文友好,IDE 列表里显示)。
 func (g *Generator) GenerateClaudeCode() error {
 	outDir := g.OutputDir + "-claude-code"
 	if err := os.RemoveAll(outDir); err != nil {
@@ -30,23 +31,28 @@ func (g *Generator) GenerateClaudeCode() error {
 	}
 	defer cleanup()
 
-	// 2) 合并 CLAUDE.md
-	claudeMD, err := buildClaudeMD(wsRoot, g.Ctx)
+	// 1) 生成 agents/<workspace_name>.md (subagent 定义)
+	agentName := agentSlug(g.Ctx)
+	agentMD, err := buildClaudeAgentMD(wsRoot, g.Ctx, agentName)
 	if err != nil {
-		return fmt.Errorf("build CLAUDE.md: %w", err)
+		return fmt.Errorf("build agent .md: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(outDir, "CLAUDE.md"), []byte(claudeMD), 0o644); err != nil {
+	agentsDir := filepath.Join(outDir, "agents")
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(agentsDir, agentName+".md"), []byte(agentMD), 0o644); err != nil {
 		return err
 	}
 
-	// 3) 拷贝 skills/
+	// 2) 拷贝 skills/ (subagent 内通过路径引用)
 	skillsSrc := filepath.Join(wsRoot, "skills")
 	skillsDst := filepath.Join(outDir, "skills")
 	if err := copyDirRecursive(skillsSrc, skillsDst); err != nil {
 		return fmt.Errorf("copy skills: %w", err)
 	}
 
-	// 4) 拷贝辅助脚本到 scripts/（resolve_runtime 等）
+	// 3) 拷贝辅助脚本到 scripts/(resolve_runtime 等)
 	scriptsSrc := filepath.Join(wsRoot, "skills", "config-executor", "scripts")
 	scriptsDst := filepath.Join(outDir, "scripts")
 	if _, err := os.Stat(scriptsSrc); err == nil {
@@ -55,7 +61,7 @@ func (g *Generator) GenerateClaudeCode() error {
 		}
 	}
 
-	// 5) install.sh —— 从 templates/claude-code/install.sh.tmpl 渲染
+	// 4) install.sh —— 装到用户级 ~/.claude/agents/
 	installSrc := filepath.Join(g.TemplateRoot, "claude-code", "install.sh.tmpl")
 	if err := g.renderFile(installSrc, filepath.Join(outDir, "install.sh")); err != nil {
 		return fmt.Errorf("install.sh: %w", err)
@@ -70,11 +76,37 @@ func (g *Generator) GenerateClaudeCode() error {
 	return nil
 }
 
-func buildClaudeMD(wsRoot string, ctx *Context) (string, error) {
+// agentSlug 取 agent.workspace_name 作 subagent 文件名 / @name slug。
+// 向导强制 ASCII 小写 kebab-case;空时回退 system.id(也强制 ASCII)。
+func agentSlug(ctx *Context) string {
+	if s := strings.TrimSpace(ctx.Agent.WorkspaceName); s != "" {
+		return s
+	}
+	if s := strings.TrimSpace(ctx.System.ID); s != "" {
+		return s
+	}
+	return "tshoot-agent"
+}
+
+// buildClaudeAgentMD 拼一份 Claude Code subagent 定义。带 YAML frontmatter:
+//   name: <slug>
+//   description: <中文显示名>
+//   tools: 不限制(默认全工具)
+//   model: <agent.model>
+// body 是 SOUL+IDENTITY+AGENTS+CHECKLIST+TOOLS+skills 索引的合并 prompt。
+func buildClaudeAgentMD(wsRoot string, ctx *Context, agentName string) (string, error) {
 	var sb strings.Builder
+	// frontmatter
+	sb.WriteString("---\n")
+	fmt.Fprintf(&sb, "name: %s\n", agentName)
+	fmt.Fprintf(&sb, "description: %s\n", ctx.System.Name)
+	if m := strings.TrimSpace(ctx.Agent.Model); m != "" {
+		fmt.Fprintf(&sb, "model: %s\n", m)
+	}
+	sb.WriteString("---\n\n")
 
 	fmt.Fprintf(&sb, "# %s 排障机器人\n\n", ctx.System.Name)
-	sb.WriteString("> 由 troubleshooter-studio 生成，目标平台：Claude Code\n\n")
+	sb.WriteString("> 由 troubleshooter-studio 生成,目标平台:Claude Code subagent\n\n")
 
 	// SOUL
 	if data, err := os.ReadFile(filepath.Join(wsRoot, "SOUL.md")); err == nil {

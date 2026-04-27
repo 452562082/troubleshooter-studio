@@ -67,6 +67,52 @@ export async function analyze(
   return App.Analyze(yamlText, reposRoot, autoClone)
 }
 
+/** AnalyzeV2:混合来源版,允许 per-repo 指定本地绝对路径(走 RepoPaths),
+ *  没指定的仓库回落到 ReposRoot+Name 默认拼法。InitPage Step 4 的"本地 / 远程
+ *  混合"模式专用。 */
+export async function analyzeV2(
+  yamlText: string,
+  reposRoot: string,
+  repoPaths: Record<string, string>,
+  autoClone: boolean,
+  repoName?: string,
+): Promise<AnalyzeResult> {
+  if (!isDesktop()) throw new Error('AnalyzeV2 仅在桌面 app 可用')
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return App.AnalyzeV2({
+    yaml_text: yamlText,
+    repos_root: reposRoot,
+    repo_paths: repoPaths,
+    auto_clone: autoClone,
+    repo_name: repoName ?? '',
+  } as any)
+}
+
+/** 从本地已 clone 的仓库目录里反查 origin remote URL,用于"本地模式"反填 yaml.repos[].url */
+export async function getRemoteURL(repoPath: string): Promise<string> {
+  if (!isDesktop()) return ''
+  return App.GetRemoteURL(repoPath)
+}
+
+// ── 用户级配置(~/.tshoot/config.json) ───────────────────────────
+export interface UserConfigResult {
+  default_repos_root: string    // 用户显式设过的;空串 = 没设
+  resolved_repos_root: string   // 空时 fallback 到 ~/.tshoot/repos;永远非空,UI 展示用
+  home_dir: string              // 当前用户 $HOME;前端据此把绝对路径折成 ~/... 展示
+}
+
+/** 读用户级配置(默认 clone 目录等)。没设过也不会 reject,返空串 + fallback。 */
+export async function getUserConfig(): Promise<UserConfigResult> {
+  if (!isDesktop()) return { default_repos_root: '', resolved_repos_root: '', home_dir: '' }
+  return App.GetUserConfig()
+}
+
+/** 保存默认 clone 父目录。空串清除用户设置,回落到内置 fallback。 */
+export async function setDefaultReposRoot(path: string): Promise<void> {
+  if (!isDesktop()) return
+  await App.SetDefaultReposRoot(path)
+}
+
 // 注:曾经的 diff() bridge + DiffPage 已删 —— 功能被 BotsPage 的"编辑配置 → 预演"
 // 完全覆盖(而且那个给的是 target-aware 真实 diff,带 preserve/remove 列表)。
 // 后端 App.Diff binding 暂留做 CLI 调用兼容,UI 不再经过 bridge.
@@ -128,14 +174,21 @@ export async function openDir(title: string): Promise<string> {
   return App.OpenDir(title)
 }
 
-/** 把 yaml 直接部署成一个新机器人（agent.ImportAndApply 的 UI 封装） */
+/** 把 yaml 直接部署成一个新机器人（agent.ImportAndApply 的 UI 封装）
+ *
+ *  repoPaths: 仓库名 → 本机绝对路径,产物里会写进 repo-path-map.yaml。
+ *  system.yaml 本身不含这些路径(故意的,跨机器可分享),只有通过这里把路径送进
+ *  产物。想按"仓库"部署但不关心路径的场景(比如 CLI 跑 smoke test)传空 map 即可 ——
+ *  产物里的 repo-path-map.yaml 就是"未配置"占位,bot 运行时会提示用户补齐。
+ */
 export async function importAndDeploy(
   yamlText: string,
   target: string,
   destPath: string,
+  repoPaths: Record<string, string> = {},
 ): Promise<ApplyResult> {
   if (!isDesktop()) throw new Error('ImportAndDeploy 只在桌面 app 里可用')
-  return App.ImportAndDeploy(yamlText, target, destPath)
+  return App.ImportAndDeploy(yamlText, target, destPath, repoPaths)
 }
 
 /** 给 target 推荐默认部署路径。embedded/openclaw 返回 ~/.tshoot/<target>/<id>/
@@ -175,83 +228,257 @@ export async function cancelInstall(): Promise<boolean> {
   return App.CancelInstall()
 }
 
-// ── 原生 chat(桌面端直接跟多 provider LLM 流式对话,不经 Flask) ─────────────
-
-export interface ChatMessage {
-  role: 'user' | 'assistant'
-  content: string
-}
-export interface ChatContext {
-  system_id: string
-  system_name: string
-  model: string
-  provider_id: string     // "anthropic" / "openai" / "minimax" / ... 空串 = 未识别
-  provider_name: string   // "Anthropic (Claude 系列)" 之类展示名
-  envs: string[]
-  prompt_chars: number    // system-prompt.md 字符数
-  prompt_tokens: number   // 估算 token 数,用户据此判断是不是快爆 context
-}
-export interface ChatSendInput {
-  bot_path: string
+// ── Infra 凭证(配置中心 / 可观测性 / 消息平台...) ─────────────────────
+// key 格式建议 "<type>:<env>:<field>",例 "nacos:dev:addr"。部署前端从钥匙串读,
+// 映射成 install.sh 认的 env var(CC_ADDR_DEV 等),install.sh read_var 跳过交互。
+export interface InfraCredLoadResult {
   api_key: string
-  messages: ChatMessage[]
-  default_env: string
+  ok: boolean
+  err?: string
 }
-
-/** 读 bot 目录下的 system-prompt + model + env 列表,UI 初始化 chat 页用 */
-export async function chatContextFor(botPath: string): Promise<ChatContext> {
-  if (!isDesktop()) throw new Error('ChatContextFor 只在桌面 app 里可用')
-  return App.ChatContextFor(botPath)
+export async function saveInfraCred(key: string, value: string): Promise<void> {
+  if (!isDesktop()) throw new Error('SaveInfraCred 只在桌面 app 可用')
+  await App.SaveInfraCred(key, value)
 }
-
-/** 起一次流式对话,返回 reqId。前端监听 EventsOn('chat:delta:'+reqId / 'chat:done:' / 'chat:error:') 消费。
- *  NOTE: wailsjs 生成的 App.ChatSend 要求 main.ChatSendInput 类实例而不是裸对象,
- *  我们用 as any 穿透:Wails 最终都 JSON 序列化走,类型无所谓,只差 TS 编译检查。 */
-export async function chatSend(in_: ChatSendInput): Promise<string> {
-  if (!isDesktop()) throw new Error('ChatSend 只在桌面 app 里可用')
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return App.ChatSend(in_ as any)
-}
-
-/** 取消对应 reqId 的流(用户点停止按钮)。未知 reqId 返回 false。 */
-export async function chatStop(reqId: string): Promise<boolean> {
-  if (!isDesktop()) return false
-  return App.ChatStop(reqId)
-}
-
-/** 验证 API key 是否有效 + endpoint 可达(最小 1-token 请求);
- *  进入 chat 前调用,避免用户填错 key 问了半天才收到 401。
- *  成功 resolve void;失败 reject 带人话错误消息。 */
-export async function chatCheckKey(botPath: string, apiKey: string): Promise<void> {
-  if (!isDesktop()) throw new Error('ChatCheckKey 只在桌面 app 里可用')
-  await App.ChatCheckKey(botPath, apiKey)
-}
-
-// ── API key 持久化:系统钥匙串(Keychain / libsecret / Credential Manager) ──
-// 之前 key 只活在 window 内存,app 关就没。现在存 OS 原生钥匙串,加密 + 持久化。
-export interface ChatLoadKeyResult {
-  api_key: string
-  ok: boolean         // false = 没存过 / 读取失败
-  err?: string        // 失败时的原因,UI 可酌情展示
-}
-
-/** 把 key 存到系统钥匙串(service=tshoot-studio-chat, user=botPath)。
- *  同一 botPath 重复 save 直接覆盖。 */
-export async function chatSaveKey(botPath: string, apiKey: string): Promise<void> {
-  if (!isDesktop()) throw new Error('ChatSaveKey 只在桌面 app 里可用')
-  await App.ChatSaveKey(botPath, apiKey)
-}
-
-/** 从钥匙串读 key。ok=false 表示"没存过"或"读取失败",UI 按"需要填"处理即可。 */
-export async function chatLoadKey(botPath: string): Promise<ChatLoadKeyResult> {
+export async function loadInfraCred(key: string): Promise<InfraCredLoadResult> {
   if (!isDesktop()) return { api_key: '', ok: false }
-  return App.ChatLoadKey(botPath)
+  return App.LoadInfraCred(key)
+}
+export async function deleteInfraCred(key: string): Promise<void> {
+  if (!isDesktop()) return
+  await App.DeleteInfraCred(key)
+}
+/** 批量保存/删(一次 RPC),value 为空串 = 删 */
+export async function saveInfraCredBatch(entries: Record<string, string>): Promise<void> {
+  if (!isDesktop()) throw new Error('SaveInfraCredBatch 只在桌面 app 可用')
+  await App.SaveInfraCredBatch({ entries } as { entries: Record<string, string> })
 }
 
-/** 删掉钥匙串里的 key。用户点"重置 API key"时调。没存过也幂等。 */
-export async function chatDeleteKey(botPath: string): Promise<void> {
-  if (!isDesktop()) return
-  await App.ChatDeleteKey(botPath)
+// ── 配置中心预加载(真实 HTTP 调用,非 mock) ─────────────────────────
+// Nacos → /nacos/v1/auth/login + /nacos/v1/cs/configs
+// Apollo → /openapi/v1/apps + /envs/<env>/apps/<appId>/clusters/...
+// Consul → /v1/kv/<prefix>?recurse=true&keys=true
+export interface CCHubEntry {
+  locator: string    // dataId(nacos) / namespace name(apollo) / full kv key(consul)
+  group?: string     // nacos 独有;apollo 复用此字段表 cluster
+  tenant?: string    // namespace
+  type?: string      // yaml / properties / json / ...
+  app_id?: string    // apollo 独有
+}
+export interface CCHubNamespace {
+  id: string         // namespace UUID(public 为空串)
+  show_name: string  // 友好名,UI 下拉选项用
+}
+export interface CCHubResult {
+  type: string
+  entries: CCHubEntry[]
+  namespaces?: CCHubNamespace[]  // nacos / apollo:给 UI 下拉用
+  notes?: string[]
+}
+export interface CCHubPreloadInput {
+  type: 'nacos' | 'apollo' | 'consul'
+  addr: string
+  username?: string
+  password?: string
+  token?: string
+  namespace?: string
+  app_id?: string
+  namespaces_only?: boolean  // true = 轻量模式,只列 namespaces 不拉 configs
+}
+/** 连目标配置中心拉清单。失败 reject 带人话错误(网络 / 鉴权 / 参数等)。 */
+export async function preloadConfigCenter(input: CCHubPreloadInput): Promise<CCHubResult> {
+  if (!isDesktop()) throw new Error('PreloadConfigCenter 只在桌面 app 可用')
+  return App.PreloadConfigCenter(input as any) as Promise<CCHubResult>
+}
+
+// 拉单条配置内容(给"数据层自动识别"用:Step 7 从已挑的 dataId 拉原文,js-yaml 解析出数据层)
+export interface CCHubFetchContentInput {
+  type: 'nacos' | 'apollo' | 'consul'
+  addr: string
+  username?: string
+  password?: string
+  token?: string
+  namespace?: string
+  group?: string
+  data_id: string
+  app_id?: string
+}
+export interface CCHubFetchContentResult {
+  content: string
+  format?: string  // yaml / json / properties
+  notes?: string[]
+}
+export async function fetchConfigContent(input: CCHubFetchContentInput): Promise<CCHubFetchContentResult> {
+  if (!isDesktop()) throw new Error('FetchConfigContent 只在桌面 app 可用')
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return App.FetchConfigContent(input as any) as Promise<CCHubFetchContentResult>
+}
+
+// 批量拉取:nacos 会复用一次 probe+login,省 N-1 次登录开销。单条失败不中断整批。
+export interface CCHubFetchBatchItem {
+  key: string          // 前端自定义的映射 key(如 "dev::user-service")
+  namespace?: string
+  group?: string
+  data_id: string
+  app_id?: string
+}
+export interface CCHubFetchBatchInput {
+  type: 'nacos' | 'apollo' | 'consul'
+  addr: string
+  username?: string
+  password?: string
+  token?: string
+  items: CCHubFetchBatchItem[]
+}
+export interface CCHubFetchBatchItemResult {
+  key: string
+  ok: boolean
+  result?: CCHubFetchContentResult
+  error?: string
+}
+export interface CCHubFetchBatchResult {
+  items: CCHubFetchBatchItemResult[]
+  notes?: string[]
+}
+export async function fetchConfigContentBatch(input: CCHubFetchBatchInput): Promise<CCHubFetchBatchResult> {
+  if (!isDesktop()) throw new Error('FetchConfigContentBatch 只在桌面 app 可用')
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return App.FetchConfigContentBatch(input as any) as Promise<CCHubFetchBatchResult>
+}
+
+// 数据层连通性探测:轻量 TCP dial + 最小协议握手,5s 超时,不读不写数据
+export interface DSProbeInput {
+  type: string                          // redis / mysql / mongodb / ...
+  fields: Record<string, string>        // url / dsn / host / port / brokers / user / pass ...
+}
+export interface DSProbeResult {
+  ok: boolean
+  latency?: string                      // "120ms"
+  detail?: string                       // 成功时的服务版本 / 握手 banner
+  error?: string                        // 失败时的人话原因
+}
+export async function probeDataStore(input: DSProbeInput): Promise<DSProbeResult> {
+  if (!isDesktop()) throw new Error('ProbeDataStore 只在桌面 app 可用')
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return App.ProbeDataStore(input as any) as Promise<DSProbeResult>
+}
+
+// 给 Step 3 环境列表的 api_domain / web_domain 自动测试用。GET 一下 URL,
+// < 500 都算可达(404/401/403 也算通);DNS 失败 / 拒连 / 超时 / 5xx 算不通。
+export async function probeURL(url: string): Promise<DSProbeResult> {
+  if (!isDesktop()) throw new Error('ProbeURL 只在桌面 app 可用')
+  return App.ProbeURL(url) as Promise<DSProbeResult>
+}
+
+// 给 Step 7 可观测性工具用:可选 basic auth + 可选 Bearer / API Key。
+export async function probeURLAuth(url: string, user: string, pass: string, apiKey: string): Promise<DSProbeResult> {
+  if (!isDesktop()) throw new Error('ProbeURLAuth 只在桌面 app 可用')
+  return App.ProbeURLAuth(url, user, pass, apiKey) as Promise<DSProbeResult>
+}
+
+// ── Loki 标签映射(Step 7 可观测性下的 grafana/loki 子区) ────────────────
+export interface LokiAuthInput {
+  grafana_url?: string
+  loki_url?: string
+  ds_uid?: string
+  api_key?: string
+  user?: string
+  pass?: string
+}
+export interface GrafanaDatasource {
+  uid: string
+  name: string
+  type: string
+  url?: string
+  is_loki: boolean
+  default?: boolean
+}
+export interface LokiLabelsResult {
+  labels: string[]
+  notes?: string[]
+}
+export interface LokiLabelValuesResult {
+  key: string
+  values: string[]
+  notes?: string[]
+}
+export async function listGrafanaDatasources(input: LokiAuthInput): Promise<GrafanaDatasource[]> {
+  if (!isDesktop()) throw new Error('ListGrafanaDatasources 只在桌面 app 可用')
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const r = await App.ListGrafanaDatasources(input as any)
+  return Array.isArray(r) ? r : []
+}
+export async function listLokiLabels(input: LokiAuthInput): Promise<LokiLabelsResult> {
+  if (!isDesktop()) throw new Error('ListLokiLabels 只在桌面 app 可用')
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return App.ListLokiLabels(input as any) as Promise<LokiLabelsResult>
+}
+// query 可选(LogQL 选择器);用于"已选 namespace 后只拉该 namespace 下的 app"等场景
+export async function listLokiLabelValues(input: LokiAuthInput, labelKey: string, query = ''): Promise<LokiLabelValuesResult> {
+  if (!isDesktop()) throw new Error('ListLokiLabelValues 只在桌面 app 可用')
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return App.ListLokiLabelValues(input as any, labelKey, query) as Promise<LokiLabelValuesResult>
+}
+
+// ── OpenClaw 模型探测 ──────────────────────────────────────────────────
+// 读本机 ~/.openclaw/openclaw.json(真实 schema,从真实 install 反推),
+// 把 agents.defaults.model.primary / agents.defaults.models / agents.list[].model
+// 聚合成"可用模型"清单给向导 OpenClaw 卡用。
+// 三种状态:
+//   installed=false      → 没装(openclaw.json 缺失),让用户装完再来 / 手选目录
+//   installed_but_empty  → openclaw.json 存在但无任何 model 字段,让用户先装个 agent
+//   ok + models          → 正常展示下拉
+export interface OpenClawModelEntry {
+  id: string               // "openai-codex/gpt-5.4"
+  provider?: string        // "openai-codex"
+  label?: string           // id 或 "id (默认)"
+  source?: string          // 来自 openclaw.json 哪个字段
+  primary?: boolean        // 是否 defaults.model.primary
+}
+export interface OpenClawDetectResult {
+  ok: boolean
+  installed: boolean
+  installed_but_empty?: boolean
+  install_dir?: string
+  config_path?: string
+  version?: string
+  models?: OpenClawModelEntry[]
+  auth_providers?: string[]
+  err?: string
+}
+/** 探测 installDir 下的 OpenClaw 配置;installDir 为空 = 用 ~/.openclaw 默认路径 */
+export async function detectOpenClawModels(installDir: string): Promise<OpenClawDetectResult> {
+  if (!isDesktop()) return { ok: false, installed: false, err: '浏览器模式不支持' }
+  return App.DetectOpenClawModels(installDir)
+}
+
+// ── Claude Code / Cursor 安装探测 ─────────────────────────────────────
+// 给 wizard Step 2 的 claude-code / cursor 卡片显示"✓ 已装 vX.Y / ⚠ 未装"徽标用。
+// 跟 openclaw 不一样:这俩 target 不从本地读模型,只做"装了没 + 版本"信息展示。
+export interface AIToolResult {
+  installed: boolean
+  version?: string
+  path?: string
+  note?: string
+}
+export interface AIToolsDetectResult {
+  claude_code: AIToolResult
+  cursor: AIToolResult
+}
+export async function detectAITools(): Promise<AIToolsDetectResult> {
+  if (!isDesktop()) {
+    return {
+      claude_code: { installed: false, note: '浏览器模式不支持' },
+      cursor: { installed: false, note: '浏览器模式不支持' },
+    }
+  }
+  // Wails 生成的类型把 nested 字段标成 optional,但 Go 侧永远返回非 nil;
+  // 做一次防御性兜底,前端收到 undefined 时降级为 not-installed。
+  const r = await App.DetectAITools()
+  return {
+    claude_code: (r.claude_code as AIToolResult) || { installed: false },
+    cursor:      (r.cursor      as AIToolResult) || { installed: false },
+  }
 }
 
 // embedded target 的对话走 chatSend/chatStop(原生 chat,直连 LLM API,见上面)。

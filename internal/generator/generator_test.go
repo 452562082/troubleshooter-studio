@@ -88,17 +88,10 @@ func TestGenerate_Nacos_Shop(t *testing.T) {
 		}
 	}
 
-	// 脚本存在 + 可执行
-	for _, name := range []string{"install.sh", "self-test.sh", "uninstall.sh"} {
-		p := filepath.Join(out, "scripts", name)
-		info, err := os.Stat(p)
-		if err != nil {
-			t.Errorf("expected script missing: %s", name)
-			continue
-		}
-		if info.Mode()&0o111 == 0 {
-			t.Errorf("%s not executable", name)
-		}
+	// scripts/ 目录已不再生成 —— install / self-test / uninstall 全部由原生 Go
+	// 实现(agent.InstallNativeOpenclaw / SelfTestOpenclaw / UninstallNativeOpenclaw)
+	if _, err := os.Stat(filepath.Join(out, "scripts")); err == nil {
+		t.Errorf("scripts/ 目录不应存在(install/self-test/uninstall 已 port 到 Go)")
 	}
 
 	// config-map 应标 config_center: nacos
@@ -115,12 +108,12 @@ func TestGenerate_Nacos_Shop(t *testing.T) {
 		}
 	}
 
-	// Q: install.sh 每个 env 都应注册独立 MCP
-	installSh := readFile(t, filepath.Join(out, "scripts/install.sh"))
+	// MCP 注入逻辑搬到 agent.InstallNativeOpenclaw 内部,这里的 staging 产物里
+	// 不再有 install.sh,只能从 config-map 间接验证 per-env MCP 拼对了名字。
 	for _, env := range []string{"dev", "staging", "prod"} {
 		want := "nacos-mcp-server-" + env
-		if !strings.Contains(installSh, want) {
-			t.Errorf("install.sh missing per-env MCP %q", want)
+		if !strings.Contains(cm, want) {
+			t.Errorf("config-map missing per-env mcp ref %q", want)
 		}
 	}
 
@@ -132,57 +125,11 @@ func TestGenerate_Nacos_Shop(t *testing.T) {
 	}
 }
 
-// Q': per-env credentials 模式
-func TestGenerate_PerEnvCredentials(t *testing.T) {
-	cfg := loadCfg(t, "examples/shop-per-env.yaml")
-	out := t.TempDir()
-	tr := filepath.Join(projectRoot(t), "templates")
-	if err := New(cfg, tr, out).Generate(); err != nil {
-		t.Fatalf("generate: %v", err)
-	}
-	installSh := readFile(t, filepath.Join(out, "scripts/install.sh"))
+// per_env_credentials 模式的 prompt 派生由 agent.DerivePrompts 验证,
+// 见 internal/agent/install_prompts_test.go。这里只确保 generator 端
+// 没漏写 cfg.Infrastructure.ConfigCenter.PerEnvCredentials → workspace 文件。
 
-	// 应该按 env 分别问 nacos 用户名/密码
-	for _, env := range []string{"DEV", "PROD"} {
-		for _, v := range []string{"CC_USER_" + env, "CC_PASS_" + env, "GRAFANA_USER_" + env, "GRAFANA_PASS_" + env} {
-			if !strings.Contains(installSh, v) {
-				t.Errorf("per-env install.sh missing var %s", v)
-			}
-		}
-	}
-	// MCP 注入应用各 env 独立变量，而不是共享变量
-	if !strings.Contains(installSh, "'NACOS_USERNAME': os.environ.get('CC_USER_DEV', '')") {
-		t.Errorf("per-env nacos-mcp-server-dev should use CC_USER_DEV")
-	}
-	if !strings.Contains(installSh, "'NACOS_USERNAME': os.environ.get('CC_USER_PROD', '')") {
-		t.Errorf("per-env nacos-mcp-server-prod should use CC_USER_PROD")
-	}
-	// 不应再出现共享变量的 prompt 行
-	if strings.Contains(installSh, "所有 env 共用") {
-		t.Errorf("per-env mode should not prompt for shared credentials")
-	}
-}
-
-// Q': shared 模式（未开 per_env_credentials）保持原行为
-func TestGenerate_SharedCredentials_Default(t *testing.T) {
-	cfg := loadCfg(t, "examples/shop-system.yaml")
-	out := t.TempDir()
-	tr := filepath.Join(projectRoot(t), "templates")
-	if err := New(cfg, tr, out).Generate(); err != nil {
-		t.Fatalf("generate: %v", err)
-	}
-	installSh := readFile(t, filepath.Join(out, "scripts/install.sh"))
-	if !strings.Contains(installSh, "所有 env 共用") {
-		t.Errorf("default mode should prompt shared credentials")
-	}
-	if strings.Contains(installSh, "CC_USER_DEV") {
-		t.Errorf("default mode should not emit CC_USER_<env>")
-	}
-	// MCP 注入用共享变量
-	if !strings.Contains(installSh, "os.environ.get('CONFIG_CENTER_USERNAME', '')") {
-		t.Errorf("default mode should use CONFIG_CENTER_USERNAME")
-	}
-}
+// shared 模式同上,具体 prompt 集合见 install_prompts_test.go。
 
 func TestGenerate_Apollo(t *testing.T) {
 	cfg := loadCfg(t, "examples/apollo-system.yaml")
@@ -203,18 +150,8 @@ func TestGenerate_Apollo(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(out, "templates/workspace-template/skills/config-executor/scripts/apollo_config.py")); err != nil {
 		t.Errorf("apollo_config.py should exist: %v", err)
 	}
-	// C5: install.sh 必须提示 Apollo meta URL + 写 creds.json
-	installSh := readFile(t, filepath.Join(out, "scripts/install.sh"))
-	if !strings.Contains(installSh, "APOLLO_META_DEV") || !strings.Contains(installSh, "APOLLO_META_PROD") {
-		t.Errorf("apollo install.sh missing per-env meta URL prompts")
-	}
-	if !strings.Contains(installSh, "creds['apollo']") {
-		t.Errorf("apollo install.sh missing creds.json write block")
-	}
-	// apollo 系统不应该注册 nacos MCP（只看 put(...) 调用，不算注释）
-	if strings.Contains(installSh, "put('nacos-mcp-server") {
-		t.Errorf("apollo install.sh should not register nacos MCP")
-	}
+	// install.sh 已被 InstallNativeOpenclaw 替换;Apollo 的 prompt / creds.json
+	// 写入由 install_prompts_test.go 和 install_native_openclaw_test.go 覆盖。
 	// SKILL.md 必须指向脚本
 	skillMD := readFile(t, filepath.Join(out, "templates/workspace-template/skills/config-executor/SKILL.md"))
 	if !strings.Contains(skillMD, "apollo_config.py") {
@@ -241,13 +178,8 @@ func TestGenerate_Consul(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(out, "templates/workspace-template/skills/config-executor/scripts/consul_config.py")); err != nil {
 		t.Errorf("consul_config.py should exist: %v", err)
 	}
-	installSh := readFile(t, filepath.Join(out, "scripts/install.sh"))
-	if !strings.Contains(installSh, "CONSUL_HOST_") {
-		t.Errorf("consul install.sh missing per-env host prompts")
-	}
-	if !strings.Contains(installSh, "creds['consul']") {
-		t.Errorf("consul install.sh missing creds.json write block")
-	}
+	// Consul 的 prompt 集合 / creds.json 由 agent 包测试覆盖,这里只验证
+	// generator 仍出脚本素材
 	skillMD := readFile(t, filepath.Join(out, "templates/workspace-template/skills/config-executor/SKILL.md"))
 	if !strings.Contains(skillMD, "consul_config.py") {
 		t.Errorf("config-executor SKILL.md should reference consul_config.py")
@@ -369,33 +301,18 @@ func TestGenerate_MultiTargets_All(t *testing.T) {
 
 	assertExists(t, out, []string{
 		"templates/workspace-template/SOUL.md",
-		"scripts/install.sh",
+		"templates/workspace-template/tshoot.json",
 	})
 	// examples/shop-system.yaml 的 agent.workspace_name = "shop-bot",直接做 slug
+	// install.sh 已删除 —— 装到 ~/.claude|cursor/ 现在由 agent.InstallNative 完成
 	assertExists(t, out+"-claude-code", []string{
 		"agents/shop-bot.md",
-		"install.sh",
 		"skills/routing/SKILL.md",
 	})
 	assertExists(t, out+"-cursor", []string{
 		"agents/shop-bot.md",
-		"install.sh",
 		"skills/routing/SKILL.md",
 	})
-
-	// install.sh 们都应该可执行(只剩 claude-code / cursor)
-	for _, p := range []string{
-		out + "-claude-code/install.sh",
-		out + "-cursor/install.sh",
-	} {
-		info, err := os.Stat(p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if info.Mode()&0o111 == 0 {
-			t.Errorf("%s not executable", p)
-		}
-	}
 }
 
 // TestGenerate_MultiTargets_NoOpenclaw 覆盖"非 openclaw 独占"路径：
@@ -427,8 +344,8 @@ func TestGenerate_MultiTargets_NoOpenclaw(t *testing.T) {
 		t.Errorf("openclaw output dir %s should NOT exist when openclaw not in targets", out)
 	}
 
-	// 其它 target 产物存在
-	assertExists(t, out+"-claude-code", []string{"agents/shop-bot.md", "install.sh"})
+	// 其它 target 产物存在(install.sh 已挪到 InstallNative,产物里只剩纯素材)
+	assertExists(t, out+"-claude-code", []string{"agents/shop-bot.md"})
 }
 
 func TestGenerate_WithAnalysis_UpgradesInferredToVerified(t *testing.T) {

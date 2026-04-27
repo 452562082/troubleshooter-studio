@@ -97,6 +97,21 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
+	case "install":
+		if err := runInstall(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+	case "self-test":
+		if err := runSelfTest(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+	case "uninstall":
+		if err := runUninstall(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -122,17 +137,20 @@ func printWelcome() {
        tshoot demo
 
   ● CLI 全流程(脚本化 / CI 场景):
-       tshoot init -o system.yaml    # 交互向导生成 yaml
-       tshoot gen  -i system.yaml    # 生成产物
-       cd dist/<id> && bash scripts/install.sh   # 部署到 OpenClaw
+       tshoot init    -o system.yaml             # 交互向导生成 yaml
+       tshoot gen     -i system.yaml             # 生成 staging
+       tshoot install --path dist/<id> --target openclaw    # 部署(原生 Go,无 bash)
 
 已有 system.yaml 的常用命令:
-  tshoot validate -i system.yaml          # 校验格式
-  tshoot plan     -i system.yaml          # 预览会生成什么
-  tshoot gen      -i system.yaml          # 真落盘
-  tshoot doctor   -i system.yaml          # 检查声明 vs 实态漂移
-  tshoot discover                         # 扫本机已装机器人
-  tshoot apply -i new.yaml --path <p>     # 原地更新已装机器人
+  tshoot validate -i system.yaml                 # 校验格式
+  tshoot plan     -i system.yaml                 # 预览会生成什么
+  tshoot gen      -i system.yaml                 # 真落盘 staging
+  tshoot install  --path <staging> --target X    # 部署到本机(openclaw / claude-code / cursor)
+  tshoot self-test --path <staging>              # openclaw 部署后自检
+  tshoot uninstall --path <staging>              # 卸载 openclaw agent
+  tshoot doctor   -i system.yaml                 # 检查声明 vs 实态漂移
+  tshoot discover                                # 扫本机已装机器人
+  tshoot apply -i new.yaml --path <p>            # 原地更新已装机器人
 
 tshoot serve --port 8080 起 Web UI 也行(桌面 app 的 legacy HTTP 版本,
 功能等价但需要浏览器打开 http://localhost:8080)。
@@ -160,6 +178,9 @@ func usage() {
   tshoot validate -i <system.yaml>
   tshoot discover [--roots <p1>,<p2>] [--format text|json]    # 扫本机已装机器人
   tshoot apply -i <new.yaml> --path <agent-path> [--dry-run]  # 用新 yaml 原地更新已装机器人
+  tshoot install --path <staging> --target <openclaw|claude-code|cursor> [--env-file <.env>] [--skip-gateway-restart]
+  tshoot self-test --path <staging>                           # openclaw 部署后自检
+  tshoot uninstall --path <staging>                           # 卸载 openclaw agent
 
 子命令:
   init       交互式问答生成一份最小可用 system.yaml
@@ -175,5 +196,11 @@ func usage() {
   demo       零配置试跑：用内置 examples/shop-system.yaml + examples/fake-repos 跑完整 pipeline
   validate   仅校验 system.yaml
   discover   扫本机 tshoot.json 锚点，列出已装机器人
-  apply      拿新 yaml 重 render + rsync 回已装 workspace（preserve_on_regenerate 文件保留）`)
+  apply      拿新 yaml 重 render + rsync 回已装 workspace（preserve_on_regenerate 文件保留）
+  install    把 staging 装到本机最终位置(原生 Go,无 bash 依赖):
+             - openclaw:   ~/.openclaw/workspace/<name>/ + 注入 openclaw.json
+             - claude-code: ~/.claude/agents/<name>.md  + skills/scripts namespace 子目录
+             - cursor:     ~/.cursor/agents/<name>.md   + skills/scripts namespace 子目录
+  self-test  openclaw 部署后自检(workspace / openclaw.json / mcp.servers / TCP+HTTP 探活)
+  uninstall  卸载 openclaw agent(workspace 移到 ~/.Trash + 摘 openclaw.json + 清 creds.json)`)
 }

@@ -1,25 +1,92 @@
-// bindings_deploy.go —— 跑 install.sh / 写凭证到 .env 的 binding:
-// ScanInstallPrompts / ReadEnv / RunInstall / CancelInstall / RevealInFinder。
+// bindings_deploy.go —— openclaw 部署 binding:解析需要的凭证字段、写 .env、原生
+// Go 跑安装、流式日志推送。
 //
-// 这些是"部署 openclaw 产物时的凭证表单闭环"：解析 install.sh 的 read_var 提示 →
-// 预填已存的 .env → 前端让用户补/改 → 回写 .env → shell-out 跑 install.sh →
-// 流式推日志到前端。独立成档是因为涉及 shell exec，权限与错误处理需单独审。
+// 历史:之前 RunInstall 是 shell-out `bash scripts/install.sh`,~500 行 bash + 嵌入
+// Python。现在改成原生 Go(internal/agent.InstallNativeOpenclaw),好处:
+//   - 桌面端不再依赖 bash / Python 进程,跨平台行为一致
+//   - 取消逻辑统一走 ctx.cancel,不用 Setpgid + SIGKILL 进程组那套
+//   - 凭证 prompts 直接照 system.yaml 派生,跟模板的 read_var 1:1 对齐(由
+//     agent.DerivePrompts 生成,不再扫脚本)
+//
+// 接口形态保留:UI 还是先 ScanInstallPrompts → 渲染表单 → ReadEnv 预填 →
+// RunInstall 收集后跑;ScanInstallPrompts 改读 tshoot.json 里的 system.yaml。
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"github.com/xiaolong/troubleshooter-studio/internal/agent"
+	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/deploy"
+	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 )
 
-// ScanInstallPrompts 解析 outputDir/scripts/install.sh，把所有 read_var 调用列出来，
-// UI 拿去渲染凭证表单。
+// ScanInstallPrompts 推导 outputDir 这份 openclaw 产物需要的凭证字段。
+// 数据源:<outputDir>/tshoot.json 的 SystemYAML(install.sh 没了不能再扫脚本)。
+// 非 openclaw target / 没 tshoot.json → 返回 nil(无 install 步骤)。
 func (a *App) ScanInstallPrompts(outputDir string) ([]deploy.Prompt, error) {
-	return deploy.ParseInstallPrompts(outputDir)
+	cfg, target, err := loadStagingConfig(outputDir)
+	if err != nil {
+		// tshoot.json 不存在 → 没装步骤,返回空列表;别的错往上抛
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	// 只有 openclaw 走凭证表单 install 流程;其它 target 在 ImportAndApply 内部
+	// 已经 native install 完,UI 不需要再问一次。
+	if target != "openclaw" {
+		return nil, nil
+	}
+	return agent.DerivePrompts(cfg), nil
+}
+
+// loadStagingConfig 读 staging 目录的 tshoot.json,返回 cfg + target。
+// 两个候选位置(谁先存在用谁):
+//   - <outputDir>/tshoot.json                              ← claude-code / cursor staging
+//   - <outputDir>/templates/workspace-template/tshoot.json ← openclaw staging
+//
+// openclaw 之所以放子目录:那个子树会被 cp 到 ~/.openclaw/workspace/<name>/
+// 当成 discover 锚点,如果在 staging 根再写一份会被 discover 扫成重复卡。
+func loadStagingConfig(outputDir string) (*config.SystemConfig, string, error) {
+	candidates := []string{
+		filepath.Join(outputDir, discover.MetaFilename),
+		filepath.Join(outputDir, "templates", "workspace-template", discover.MetaFilename),
+	}
+	var (
+		data []byte
+		err  error
+	)
+	for _, p := range candidates {
+		data, err = os.ReadFile(p)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, "", err
+		}
+	}
+	if err != nil {
+		return nil, "", err // 最后一个 not-exist
+	}
+	var meta discover.Meta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil, "", fmt.Errorf("parse tshoot.json: %w", err)
+	}
+	cfg, err := config.LoadFromBytes([]byte(meta.SystemYAML))
+	if err != nil {
+		return nil, meta.Target, fmt.Errorf("system.yaml in tshoot.json invalid: %w", err)
+	}
+	return cfg, meta.Target, nil
 }
 
 // ReadEnv 把 outputDir/scripts/.env 读回（如果存在）。UI 做"已有凭证预填"用。
@@ -34,31 +101,32 @@ func (a *App) ReadEnv(outputDir string) (map[string]string, error) {
 	return m, nil
 }
 
-// RunInstallResult 等同 deploy 层的 install 结果，额外含 ExitCode 便于 UI 区分失败类型。
+// RunInstallResult 等同之前 shell-out 时代的结构,UI 字段不变。
 type RunInstallResult struct {
 	Log      string `json:"log"`
 	ExitCode int    `json:"exit_code"`
 	OK       bool   `json:"ok"`
 }
 
-// RunInstall 先把 creds 写进 outputDir/scripts/.env，再 shell-out bash install.sh，
-// 返回合并日志。前端拿去展示在模态框里。
+// RunInstall 跑 openclaw 原生 install:
+//  1. 把 creds 写进 outputDir/scripts/.env(每次都覆盖,UI 表单值是权威源)
+//  2. 调 agent.InstallNativeOpenclaw 完成 workspace 安装 + openclaw.json 注入 +
+//     creds.json 写入 + gateway 重启
+//  3. 流式日志通过 "install:log" event 推 UI(跟 shell-out 时代行为一致)
 //
-// 取消支持:前端点"取消安装"会调 CancelInstall(),cancel 当前 ctx,内部
-// exec.CommandContext 发 SIGKILL 给 bash 进程组(见 deploy/process_unix.go)。
-// Cancel 后此函数仍返回 Result(不是 error);res.ExitCode == -2 表示用户主动取消。
+// 取消支持:ctx 被 CancelInstall 触发时,InstallNativeOpenclaw 内只在调用
+// `openclaw gateway restart` 时受 ctx 影响;其它纯文件操作快速返回。语义跟
+// 老版"SIGKILL bash 进程组"略弱(纯 IO 步骤不可中断),但实际跑完只要几秒,
+// 用户体验差异不大。
 func (a *App) RunInstall(outputDir string, creds map[string]string) (*RunInstallResult, error) {
 	if err := deploy.WriteEnvFile(outputDir, creds); err != nil {
 		return nil, err
 	}
 
-	// 每次 install 建独立 cancellable ctx(父 = Wails runtime ctx,app 退出顺带 cancel),
-	// 存进 App 让 CancelInstall 能触发。
 	runCtx, cancel := context.WithCancel(a.ctx)
 	a.installMu.Lock()
 	if a.installCancel != nil {
-		// 理论上前端会禁用"部署"按钮防并发,走到这里说明 UI 有 bug;先干掉上一个
-		// 避免日志流相互串扰。
+		// 上一个还没结束,先取消(UI 应该禁了按钮防并发,走到这里是 UI bug)
 		a.installCancel()
 	}
 	a.installCancel = cancel
@@ -68,37 +136,38 @@ func (a *App) RunInstall(outputDir string, creds map[string]string) (*RunInstall
 		a.installMu.Lock()
 		a.installCancel = nil
 		a.installMu.Unlock()
-		cancel() // 保证 ctx 被 cancel,避免 goroutine 泄漏
+		cancel()
 	}()
 
-	// 流式把每行输出推到前端 "install:log" 事件。前端 BotsPage 挂监听,
-	// 追加到 installLog 让用户实时看到进度。
-	log, err := deploy.RunInstallStreaming(runCtx, outputDir, func(line string) {
+	var logBuf strings.Builder
+	onLog := func(line string) {
+		logBuf.WriteString(line)
+		logBuf.WriteByte('\n')
 		wailsruntime.EventsEmit(a.ctx, "install:log", line)
+	}
+
+	err := agent.InstallNativeOpenclaw(runCtx, outputDir, agent.InstallOpenclawOptions{
+		Creds: creds,
+		OnLog: onLog,
 	})
-	res := &RunInstallResult{Log: log, OK: err == nil}
+	res := &RunInstallResult{Log: logBuf.String(), OK: err == nil}
 	if err != nil {
-		// 用户 cancel:ExitCode = -2,UI 展示"已取消"而不是"失败"。
 		if errors.Is(err, context.Canceled) {
 			res.ExitCode = -2
 			res.OK = false
 			return res, nil
 		}
-		// exit code 提取（bash 脚本的非零退出）
-		if ee, ok := err.(*exec.ExitError); ok {
-			res.ExitCode = ee.ExitCode()
-		} else {
-			res.ExitCode = -1
-		}
-		// 不包装成 error:前端要看到日志,即使 install 失败
+		res.ExitCode = -1
+		// 错误同时进 log,UI 上能看到完整原因
+		logBuf.WriteString("[error] " + err.Error() + "\n")
+		res.Log = logBuf.String()
 		return res, nil
 	}
 	return res, nil
 }
 
-// CancelInstall 前端"取消安装"按钮调:触发当前 install ctx cancel,
-// 底层 exec.CommandContext 会 SIGKILL bash + 整个进程组。没有 install 在跑时
-// 返回 false(UI 忽略),有的话返回 true。
+// CancelInstall 前端"取消安装"按钮调:目前只能在 gateway restart 阶段生效,
+// 其它纯 Go IO 步骤不可中断。UI 上仍然显示"已取消"避免用户困惑。
 func (a *App) CancelInstall() bool {
 	a.installMu.Lock()
 	defer a.installMu.Unlock()
@@ -114,4 +183,16 @@ func (a *App) CancelInstall() bool {
 // macOS 用 `open -R <path>`；Windows 未来需要分支。
 func (a *App) RevealInFinder(path string) error {
 	return exec.Command("open", "-R", path).Run()
+}
+
+// SelfTestAgent 跑 openclaw 自检(替代 scripts/self-test.sh)。dir 是 staging
+// 或已部署 workspace 都行;返回各项检查结果给 UI 渲染。
+func (a *App) SelfTestAgent(dir string) (*agent.SelfTestResult, error) {
+	return agent.SelfTestOpenclaw(a.ctx, dir)
+}
+
+// UninstallAgent 卸载 openclaw agent(替代 scripts/uninstall.sh)。dir 同上,
+// 移走 workspace + 从 openclaw.json 摘 agent + 清 creds.json。
+func (a *App) UninstallAgent(dir string) (*agent.UninstallOpenclawResult, error) {
+	return agent.UninstallNativeOpenclaw(dir)
 }

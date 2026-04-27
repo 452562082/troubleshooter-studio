@@ -67,6 +67,11 @@ func runDemo(args []string) error {
 
 	// 2) plan（干跑，不写盘，展示将生成什么）
 	g := generator.New(cfg, tmplRoot, outDir)
+	// 写到 staging 的 tshoot.json 里要能反读出原 yaml,后续 tshoot install
+	// 走 InstallNativeOpenclaw 时会用。demo 没 -i 显式 yaml,直接读 sysPath。
+	if data, err := os.ReadFile(sysPath); err == nil {
+		g.SystemYAMLSource = data
+	}
 	planRes, err := g.BuildPlan("")
 	if err != nil {
 		return fmt.Errorf("[2/3] plan: %w", err)
@@ -89,15 +94,17 @@ func runDemo(args []string) error {
 
 	// 打开指引
 	fmt.Println("\n── 看看 tshoot 做了什么 ────────────────────────────────────────")
-	fmt.Printf("  cat '%s/scripts/install.sh' | head -80       # 安装脚本\n", outDir)
 	fmt.Printf("  cat '%s/templates/workspace-template/IDENTITY.md'   # 机器人身份 + 典型求助示例\n", outDir)
 	fmt.Printf("  cat '%s/templates/workspace-template/skills/routing/SKILL.md'  # 主 skill\n", outDir)
 	fmt.Println()
 	fmt.Println("  想看 analyze 从 fake-repos 抽到什么配置线索：")
 	fmt.Printf("    %s analyze -i %s --repos-root %s\n", os.Args[0], sysPath, reposRoot)
 	fmt.Println()
-	fmt.Println("  想看 multi-target（claude-code/cursor/embedded）各长啥样：")
+	fmt.Println("  想看 multi-target（claude-code / cursor）各长啥样：")
 	fmt.Println("    在自己的 system.yaml 的 generation.targets 里加上它们，再跑 tshoot gen")
+	fmt.Println()
+	fmt.Println("  真装到本机(原生 Go,无 bash):")
+	fmt.Printf("    %s install --path %s --target openclaw\n", os.Args[0], outDir)
 	_ = reposRoot // 预留给未来 analyze/doctor 集成
 	return nil
 }

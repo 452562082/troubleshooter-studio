@@ -152,7 +152,9 @@ async function apiCall(endpoint: 'validate' | 'plan', label: string) {
       resultData.value = await bridgePlan(yamlContent.value)
     }
   } catch (e: any) {
-    errorMsg.value = e.message || String(e)
+    // 控制台打全栈,方便用户截图给我看;errorMsg 给 UI 展示
+    console.error('[EditorPage]', endpoint, '调用失败:', e)
+    errorMsg.value = e?.message || String(e) || `${endpoint} 调用失败,请看控制台`
   } finally {
     loading.value = ''
   }
@@ -249,11 +251,11 @@ function translateSchemaError(msg: string): string {
     <div class="info-box">
       <div class="info-box-title">YAML 调试沙盒</div>
       <div>
-        粘贴 / 加载 yaml 做快速校验与预演,不落盘、不部署。
-        <strong>验证</strong> 会找出语法错、必填字段缺失、格式不合法;
-        <strong>生成计划</strong> 展示会启用的 skill / 文件变化 / config-map 投影。<br/>
-        想真正部署到机器人走 <router-link to="/bots">已装机器人</router-link> 的"导入 YAML 一键部署",
-        或从 <router-link to="/init">创建向导</router-link> 走完 7 步在 Step 7 一键部署。
+        把已有的 system.yaml 粘进来做快速检查 —— 不会真生成、也不会装到机器人。<br/>
+        <strong>✓ 验证</strong>:语法 / 必填字段 / 格式问题,出错时直接定位到行号或字段;
+        <strong>📋 生成计划</strong>:试着跑一遍生成,看会启用哪些技能、产出多少文件、配置中心映射几条。<br/>
+        想真装到机器人?去 <router-link to="/bots">已装机器人</router-link> 导入 yaml 部署,
+        或从 <router-link to="/init">创建向导</router-link> 末步一键部署。
       </div>
     </div>
 
@@ -317,10 +319,10 @@ function translateSchemaError(msg: string): string {
 
     <!-- Plan result -->
     <div v-if="resultData && resultTitle === '生成计划'" class="result-card">
-      <h2>生成计划: {{ resultData.system }}</h2>
+      <h2>生成计划:{{ resultData.system }}</h2>
       <div class="result-grid">
         <div class="result-section">
-          <h3>已包含 Skills ({{ resultData.skills_included?.length || 0 }})</h3>
+          <h3>会启用的技能 ({{ resultData.skills_included?.length || 0 }})</h3>
           <ul v-if="resultData.skills_included?.length">
             <li v-for="s in resultData.skills_included" :key="s.name">
               <strong>{{ s.name }}</strong>
@@ -330,7 +332,7 @@ function translateSchemaError(msg: string): string {
           <p v-else class="sub-text">无</p>
         </div>
         <div class="result-section">
-          <h3>已跳过 Skills ({{ resultData.skills_skipped?.length || 0 }})</h3>
+          <h3>会跳过的技能 ({{ resultData.skills_skipped?.length || 0 }})</h3>
           <ul v-if="resultData.skills_skipped?.length">
             <li v-for="s in resultData.skills_skipped" :key="s.name">
               <strong>{{ s.name }}</strong>
@@ -342,18 +344,18 @@ function translateSchemaError(msg: string): string {
       </div>
       <div class="result-grid">
         <div class="result-section">
-          <h3>文件变化</h3>
-          <p><span class="badge badge-green">创建: {{ resultData.files_create?.length || 0 }}</span></p>
-          <p><span class="badge badge-blue">修改: {{ resultData.files_modify?.length || 0 }}</span></p>
-          <p><span class="badge badge-red">删除: {{ resultData.files_remove?.length || 0 }}</span></p>
-          <p><span class="badge badge-gray">保留: {{ resultData.preserved?.length || 0 }}</span></p>
+          <h3>会产出的文件</h3>
+          <p><span class="badge badge-green">新建 {{ resultData.files_create?.length || 0 }}</span></p>
+          <p><span class="badge badge-blue">改动 {{ resultData.files_modify?.length || 0 }}</span></p>
+          <p><span class="badge badge-red">删除 {{ resultData.files_remove?.length || 0 }}</span></p>
+          <p><span class="badge badge-gray">保留 {{ resultData.preserved?.length || 0 }}</span></p>
         </div>
         <div class="result-section">
-          <h3>Config-Map 投影</h3>
+          <h3>配置中心映射条数</h3>
           <table class="mini-table">
-            <tr><td>来自分析器</td><td>{{ resultData.config_map_projection?.verified_from_analyzer ?? 0 }}</td></tr>
-            <tr><td>来自 Prior</td><td>{{ resultData.config_map_projection?.verified_from_prior ?? 0 }}</td></tr>
-            <tr><td>推断</td><td>{{ resultData.config_map_projection?.inferred ?? 0 }}</td></tr>
+            <tr><td>仓库扫描得到</td><td>{{ resultData.config_map_projection?.verified_from_analyzer ?? 0 }}</td></tr>
+            <tr><td>用户手填</td><td>{{ resultData.config_map_projection?.verified_from_prior ?? 0 }}</td></tr>
+            <tr><td>规则推断</td><td>{{ resultData.config_map_projection?.inferred ?? 0 }}</td></tr>
             <tr><td><strong>总计</strong></td><td><strong>{{ resultData.config_map_projection?.total ?? 0 }}</strong></td></tr>
           </table>
         </div>

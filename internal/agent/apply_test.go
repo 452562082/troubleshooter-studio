@@ -177,8 +177,10 @@ func TestApplyUnknownTarget(t *testing.T) {
 	}
 }
 
-func TestImportAndApply_OpenclawProducesInstallSh(t *testing.T) {
-	// 场景:从零 import 到 openclaw target,产物应该齐全,含 install.sh。
+func TestImportAndApply_OpenclawProducesStaging(t *testing.T) {
+	// 场景:从零 import 到 openclaw target,产物应该是 staging 包(workspace
+	// 模板 + tshoot.json + self-test/uninstall 辅助脚本)。
+	// 注:install.sh 已迁到 InstallNativeOpenclaw,不在产物里。
 	dest := t.TempDir()
 	yamlBytes, err := os.ReadFile(filepath.Join(projectRoot(t), "examples", "shop-system.yaml"))
 	if err != nil {
@@ -194,11 +196,8 @@ func TestImportAndApply_OpenclawProducesInstallSh(t *testing.T) {
 	if res.AgentPath != dest {
 		t.Errorf("agent_path:want %s got %s", dest, res.AgentPath)
 	}
-	// 产物应该有 scripts/install.sh
-	if _, err := os.Stat(filepath.Join(dest, "scripts", "install.sh")); err != nil {
-		t.Errorf("scripts/install.sh 没生成: %v", err)
-	}
-	// workspace-template 下应该有 tshoot.json
+	// workspace-template 下应该有 tshoot.json(InstallNativeOpenclaw 既从这里
+	// 反读 cfg,也是 cp 过去后被 discover.Scan 识别的锚点)
 	meta := filepath.Join(dest, "templates", "workspace-template", "tshoot.json")
 	if _, err := os.Stat(meta); err != nil {
 		t.Errorf("tshoot.json 没生成: %v", err)

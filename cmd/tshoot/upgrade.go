@@ -83,7 +83,7 @@ func runUpgrade(args []string) error {
 	if res.FilesChanged == 0 && res.ConfigMapChanges == 0 {
 		fmt.Println("下一步：产物已同步，无需部署动作")
 	} else {
-		fmt.Printf("下一步：cd '%s' && bash scripts/install.sh   # 部署新版\n", outDir)
+		fmt.Printf("下一步：tshoot install --path '%s' --target openclaw   # 部署新版\n", outDir)
 		fmt.Printf("   回滚：rm -rf '%s' && mv '%s' '%s'\n", outDir, res.BackupPath, outDir)
 	}
 	return nil

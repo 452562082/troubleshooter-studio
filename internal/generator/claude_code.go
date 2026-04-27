@@ -12,7 +12,10 @@ import (
 //   - agents/<workspace_name>.md  (subagent 定义文件,带 frontmatter:name/description/tools/model)
 //   - skills/                      (原样保留所有 skill 目录,subagent 内会引用)
 //   - scripts/                     (辅助脚本)
-//   - install.sh                   (把 agent .md 装到 ~/.claude/agents/,skills 装到 ~/.claude/skills/)
+//
+// 这是"中间包"产物,对应的"装到 ~/.claude/{agents,skills,scripts}/" 步骤已挪到
+// internal/agent.InstallNative()(原生 Go,Apply / ImportAndApply 内部自动调一次,
+// 替代之前的 install.sh shell-out)。
 //
 // frontmatter.name = workspace_name(ASCII kebab-case),用户在 Claude Code 里用 @<name> 调用;
 // frontmatter.description = system.name (中文友好,IDE 列表里显示)。
@@ -59,15 +62,6 @@ func (g *Generator) GenerateClaudeCode() error {
 		if err := copyDirRecursive(scriptsSrc, scriptsDst); err != nil {
 			return fmt.Errorf("copy scripts: %w", err)
 		}
-	}
-
-	// 4) install.sh —— 装到用户级 ~/.claude/agents/
-	installSrc := filepath.Join(g.TemplateRoot, "claude-code", "install.sh.tmpl")
-	if err := g.renderFile(installSrc, filepath.Join(outDir, "install.sh")); err != nil {
-		return fmt.Errorf("install.sh: %w", err)
-	}
-	if err := os.Chmod(filepath.Join(outDir, "install.sh"), 0o755); err != nil {
-		return err
 	}
 
 	if err := g.writeTshootMeta(outDir, "claude-code"); err != nil {

@@ -11,7 +11,10 @@ import (
 //   - agents/<workspace_name>.md  (Cursor agent 定义,带 frontmatter:name/description)
 //   - skills/                      (映射表 + 脚本)
 //   - scripts/                     (辅助脚本)
-//   - install.sh                   (把 agent .md 装到 ~/.cursor/agents/,skills 装到 ~/.cursor/skills/)
+//
+// 这是"中间包"产物,对应的"装到 ~/.cursor/{agents,skills,scripts}/" 步骤已挪到
+// internal/agent.InstallNative()(原生 Go,Apply / ImportAndApply 内部自动调一次,
+// 替代之前的 install.sh shell-out)。
 //
 // frontmatter.name 用 ASCII kebab-case (workspace_name);description 可中文(system.name)。
 func (g *Generator) GenerateCursor() error {
@@ -55,15 +58,6 @@ func (g *Generator) GenerateCursor() error {
 		if err := copyDirRecursive(scriptsSrc, filepath.Join(outDir, "scripts")); err != nil {
 			return fmt.Errorf("copy scripts: %w", err)
 		}
-	}
-
-	// 4) install.sh —— 装到用户级 ~/.cursor/agents/
-	installSrc := filepath.Join(g.TemplateRoot, "cursor", "install.sh.tmpl")
-	if err := g.renderFile(installSrc, filepath.Join(outDir, "install.sh")); err != nil {
-		return fmt.Errorf("install.sh: %w", err)
-	}
-	if err := os.Chmod(filepath.Join(outDir, "install.sh"), 0o755); err != nil {
-		return err
 	}
 
 	if err := g.writeTshootMeta(outDir, "cursor"); err != nil {

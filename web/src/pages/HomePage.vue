@@ -125,11 +125,11 @@ const nextStep = computed(() => {
     <h2 class="section-title">想了解更多</h2>
     <div class="info-grid">
       <div class="info-card">
-        <div class="info-head">3 种部署形态</div>
+        <div class="info-head">部署形态</div>
         <ul>
-          <li><code>openclaw</code> — Studio 托管产物,bash install.sh 装到 <code>~/.openclaw/workspace/</code></li>
-          <li><code>claude-code</code> — 用户级 subagent:<code>~/.claude/agents/&lt;name&gt;.md</code>,所有项目里 @&lt;name&gt; 调用</li>
-          <li><code>cursor</code> — 用户级 Custom Agent:<code>~/.cursor/agents/&lt;name&gt;.md</code>,AI 侧栏选用</li>
+          <li><code>openclaw</code> — 装到 <code>~/.openclaw/workspace/</code>,在 OpenClaw 客户端里选 agent 对话</li>
+          <li><code>claude-code</code> — 装到 <code>~/.claude/agents/</code>,任意项目里 @&lt;name&gt; 调用</li>
+          <li><code>cursor</code> — 装到 <code>~/.cursor/agents/</code>,Cursor AI 侧栏选用</li>
         </ul>
       </div>
       <div class="info-card">
@@ -137,8 +137,9 @@ const nextStep = computed(() => {
         <ul>
           <li><code>tshoot demo</code> — 零配置试跑（30 秒看产物）</li>
           <li><code>tshoot init -o system.yaml</code> — 命令行向导</li>
+          <li><code>tshoot gen -i ...</code> — 生成 staging 产物</li>
+          <li><code>tshoot install --path ... --target ...</code> — 装到本机(原生 Go,无 bash)</li>
           <li><code>tshoot discover</code> — 扫本机已装机器人</li>
-          <li><code>tshoot gen -i ...</code> — 生成产物</li>
           <li><code>tshoot apply -i new.yaml --path ...</code> — 原地更新已装的机器人</li>
         </ul>
       </div>
@@ -149,12 +150,13 @@ const nextStep = computed(() => {
 <style scoped>
 .home-page { max-width: 920px; margin: 0 auto; padding: var(--sp-6) 28px; }
 
-/* hero 品牌 logo:full 宽 svg(780×220)当页面顶部主视觉;max-height 压到 110px
- * 避免首屏被 logo 占满。保持 auto width,让 svg 内部 viewBox 自然缩放。 */
+/* hero 品牌 logo:简化版 svg(560×140,studio icon + 箭头 + 机器人 + 双行 wordmark);
+ * height 控制视觉密度,缩小到 84px 让首屏内容更靠上。viewBox 内左侧已有 16px
+ * 内边距,这里 margin-left 不再硬拉,跟正文文本同左缘对齐即可。 */
 .hero-logo {
   display: block;
-  height: 110px; width: auto; max-width: 100%;
-  margin-bottom: 8px; margin-left: -6px;  /* logo svg 左侧有 30px 内边距,往左拉一点跟正文对齐 */
+  height: 84px; width: auto; max-width: 100%;
+  margin-bottom: 4px;
 }
 .tagline { color: var(--c-muted); font-size: var(--fs-md); margin-bottom: var(--sp-6); line-height: 1.6; }
 

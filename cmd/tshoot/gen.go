@@ -131,7 +131,7 @@ func runGen(args []string) error {
 	}
 	if hasOpenclaw {
 		fmt.Printf("[ok] generated to %s\n", outDir)
-		fmt.Printf("下一步：cd '%s' && bash scripts/install.sh\n", outDir)
+		fmt.Printf("下一步：tshoot install --path '%s' --target openclaw [--env-file <.env>]\n", outDir)
 		fmt.Printf("     或：先看变化 tshoot diff -i <system.yaml>\n")
 	} else {
 		// openclaw 未在 targets 中：outDir 本身不会被创建，只有 <outDir>-<target>/ 兄弟目录
@@ -140,7 +140,7 @@ func runGen(args []string) error {
 			if t == "openclaw" {
 				continue
 			}
-			fmt.Printf("下一步（%s）：bash '%s-%s/install.sh'\n", t, outDir, t)
+			fmt.Printf("下一步（%s）：tshoot install --path '%s-%s' --target %s\n", t, outDir, t, t)
 		}
 	}
 	return nil

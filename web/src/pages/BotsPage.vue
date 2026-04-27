@@ -457,8 +457,9 @@ async function runImportDeploy() {
     const res = await importAndDeploy(importYAMLText.value, importTarget.value, importDestPath.value, paths)
     importedOutputDir.value = res.agent_path
     // 各 target 是否需要 install.sh 步骤:
-    //   openclaw:有交互凭证,必须跑,UI 展示字段表单
-    //   claude-code / cursor:ImportAndApply 已 rsync,install.sh 无附加动作
+    //   openclaw:有交互凭证(scripts/install.sh),必须跑,UI 展示字段表单
+    //   claude-code / cursor:ImportAndApply 内部已 native install 到 ~/.claude|cursor/,
+    //                        无 install.sh 也无凭证收集
     const needsInstall = importTarget.value === 'openclaw'
     if (needsInstall) {
       const [prompts, existing] = await Promise.all([

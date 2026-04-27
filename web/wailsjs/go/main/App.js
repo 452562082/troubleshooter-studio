@@ -166,8 +166,16 @@ export function ScanInstallPrompts(arg1) {
   return window['go']['main']['App']['ScanInstallPrompts'](arg1);
 }
 
+export function SelfTestAgent(arg1) {
+  return window['go']['main']['App']['SelfTestAgent'](arg1);
+}
+
 export function SetDefaultReposRoot(arg1) {
   return window['go']['main']['App']['SetDefaultReposRoot'](arg1);
+}
+
+export function UninstallAgent(arg1) {
+  return window['go']['main']['App']['UninstallAgent'](arg1);
 }
 
 export function Validate(arg1) {

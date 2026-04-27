@@ -4,6 +4,7 @@ import yaml from 'js-yaml'
 import { useRouter } from 'vue-router'
 import {
   analyzeV2 as bridgeAnalyzeV2,
+  defaultDestPath,
   detectAITools,
   detectOpenClawModels,
   fetchConfigContentBatch,
@@ -26,7 +27,6 @@ import type { AIToolResult, CCHubEntry, CCHubNamespace, GrafanaDatasource, OpenC
 import { confirmDialog } from '../lib/confirm'
 import { pushLog } from '../lib/logStore'
 import { toast } from '../lib/toast'
-import { useDeployPath } from '../lib/useDeployPath'
 
 const router = useRouter()
 
@@ -2340,7 +2340,7 @@ function parseProperties(text: string): Record<string, any> {
 //  会被忽略,生成 yaml / 校验都不再考虑它)
 const targetOptions = ['openclaw', 'claude-code', 'cursor'] as const
 const targetDescriptions: Record<string, string> = {
-  'openclaw': 'OpenClaw 安装包（bash install.sh 部署）',
+  'openclaw': 'OpenClaw agent（~/.openclaw/workspace/<workspace_name>/，OpenClaw 内选 agent 切换）',
   'claude-code': 'Claude Code 用户级 subagent（~/.claude/agents/<name>.md，@<name> 调用）',
   'cursor': 'Cursor 用户级 Custom Agent（~/.cursor/agents/<name>.md，AI 侧栏选用）',
 }
@@ -2787,6 +2787,47 @@ function yamlStr(val: string): string {
   return `"${val}"`
 }
 
+// hasAnyLokiMapping 当前 environments 是否有任意 env 配过完整的 Loki 标签映射(envLabelKey + serviceLabelKey)。
+// 用作 yaml 是否输出 loki.label_mapping_by_env 节的开关。
+function hasAnyLokiMapping(): boolean {
+  return environments.some(env => {
+    if (!env.id) return false
+    const lm = lokiMappingByEnv[env.id]
+    return !!(lm && lm.envLabelKey && lm.serviceLabelKey)
+  })
+}
+
+// emitLokiLabelMapping 输出 label_mapping_by_env 块到给定 lines。
+// indent 是父字段的缩进(eg "      " 6 空格表 loki: 字段),内部按 +2 空格逐层缩进。
+// 给 yaml 生成两处复用(loki 启用时的 loki 块下 / loki 未启用但有映射时的兜底块下)。
+function emitLokiLabelMapping(lines: string[], indent: string): void {
+  const lmEnvs = environments.filter(env => env.id && lokiMappingByEnv[env.id]
+    && lokiMappingByEnv[env.id].envLabelKey && lokiMappingByEnv[env.id].serviceLabelKey)
+  if (lmEnvs.length === 0) return
+  lines.push(`${indent}label_mapping_by_env:    # routing skill 拼 LogQL 时按 (env, service) 注入 label 过滤器`)
+  for (const env of lmEnvs) {
+    const lm = lokiMappingByEnv[env.id]!
+    lines.push(`${indent}  ${env.id}:`)
+    lines.push(`${indent}    env_label: ${yamlStr(lm.envLabelKey)}`)
+    lines.push(`${indent}    service_label: ${yamlStr(lm.serviceLabelKey)}`)
+    if (lm.dsUID) lines.push(`${indent}    grafana_ds_uid: ${yamlStr(lm.dsUID)}`)
+    if (lm.envValue) {
+      lines.push(`${indent}    ${lm.envLabelKey}: ${yamlStr(lm.envValue)}`)
+    }
+    const svcLines: string[] = []
+    for (const svc of allServiceNames.value) {
+      const v = (lm.serviceValues || {})[svc]
+      if (!v) continue
+      svcLines.push(`${indent}      ${yamlStr(svc)}:`)
+      svcLines.push(`${indent}        ${lm.serviceLabelKey}: ${yamlStr(v)}`)
+    }
+    if (svcLines.length > 0) {
+      lines.push(`${indent}    service_map:`)
+      lines.push(...svcLines)
+    }
+  }
+}
+
 function generateYAML(): string {
   const lines: string[] = []
 
@@ -2931,7 +2972,9 @@ function generateYAML(): string {
   // observability:对每个勾选的工具写 endpoints(按 env 列连接字段,跟 Step 5 同样的策略)。
   // 用户填过的值直接进 yaml;空字段不输出。保留 loki/prometheus via_grafana 标志
   // (这俩常见"通过 Grafana 代理访问"的用法,在选 Grafana 时自动标 true 给 routing skill 参考)。
-  const anyObs = Object.values(enabledObservability).some(Boolean)
+  // 即使没勾任何工具,只要 Loki 标签映射有数据也要输出 observability.loki.label_mapping_by_env
+  // (用户可能只用 grafana,loki 走代理但 mapping 仍要进 yaml)
+  const anyObs = Object.values(enabledObservability).some(Boolean) || hasAnyLokiMapping()
   if (anyObs) {
     lines.push('')
     lines.push('  observability:        # ⚠ 含明文凭证,仅团队私密范围分享')
@@ -2945,34 +2988,9 @@ function generateYAML(): string {
       if (spec.key === 'elk') {
         lines.push(`      default_index: "${system.id || 'my-system'}-logs-*"`)
       }
-      // Loki 标签映射:per-env(每个 env 自己的 envLabelKey / serviceLabelKey / dsUID / 选中值)
+      // Loki 标签映射(per-env)在 loki 块下输出。indent="      " 表 6 空格(loki: 字段缩进)
       if (spec.key === 'loki') {
-        const lmEnvs = environments.filter(env => env.id && lokiMappingByEnv[env.id]
-          && lokiMappingByEnv[env.id].envLabelKey && lokiMappingByEnv[env.id].serviceLabelKey)
-        if (lmEnvs.length > 0) {
-          lines.push('      label_mapping_by_env:    # routing skill 拼 LogQL 时按 (env, service) 注入 label 过滤器')
-          for (const env of lmEnvs) {
-            const lm = lokiMappingByEnv[env.id]!
-            lines.push(`        ${env.id}:`)
-            lines.push(`          env_label: ${yamlStr(lm.envLabelKey)}`)
-            lines.push(`          service_label: ${yamlStr(lm.serviceLabelKey)}`)
-            if (lm.dsUID) lines.push(`          grafana_ds_uid: ${yamlStr(lm.dsUID)}`)
-            if (lm.envValue) {
-              lines.push(`          ${lm.envLabelKey}: ${yamlStr(lm.envValue)}`)
-            }
-            const svcLines: string[] = []
-            for (const svc of allServiceNames.value) {
-              const v = (lm.serviceValues || {})[svc]
-              if (!v) continue
-              svcLines.push(`            ${yamlStr(svc)}:`)
-              svcLines.push(`              ${lm.serviceLabelKey}: ${yamlStr(v)}`)
-            }
-            if (svcLines.length > 0) {
-              lines.push('          service_map:')
-              lines.push(...svcLines)
-            }
-          }
-        }
+        emitLokiLabelMapping(lines, '      ')
       }
       // 按 env 列填过的字段
       const envRows: string[] = []
@@ -2996,6 +3014,15 @@ function generateYAML(): string {
         lines.push('      endpoints:')
         lines.push(...envRows)
       }
+    }
+    // 兜底:用户只勾了 grafana(没勾 loki)但配过 Loki 标签映射。
+    // 写一个只含 enabled:false + via_grafana:true + label_mapping_by_env 的 loki 节点,
+    // 让 routing skill 仍能拿到映射。
+    if (!enabledObservability.loki && hasAnyLokiMapping()) {
+      lines.push('    loki:')
+      lines.push('      enabled: false      # 仅承载标签映射,实际通过 Grafana 代理查询')
+      lines.push('      via_grafana: true')
+      emitLokiLabelMapping(lines, '      ')
     }
   }
 
@@ -3328,61 +3355,62 @@ function downloadYAML() {
 
 // ── 一键部署 ──
 // 之前走完向导只能下 yaml → 跳 BotsPage → 导入 → 选 target → 填路径,4 步。
-// 现在在 Step 7 直接选 target + 目标路径一键部署:调 importAndDeploy(复用
-// BotsPage 那条闭环),成功后跳 /bots 看刚装好的卡。
-//
-// target 分两类(useDeployPath 判):
-//   - embedded/openclaw:Studio 替用户管路径(~/.tshoot/<target>/<id>/),默认隐路径 input
-//   - claude-code/cursor:必须选项目根,保持 input 可见
-const deployTarget = ref<'openclaw' | 'claude-code' | 'cursor'>('openclaw')
-// Step 1 里 enabledTargets 变动后,如果当前 deployTarget 已经不在勾选列表里,
-// 自动切到第一个还在勾选的 target,避免 Step 7 下拉显示空选项。
-watch(() => ({ ...enabledTargets }), (cur) => {
-  if (!cur[deployTarget.value]) {
-    const next = targetOptions.find(t => cur[t])
-    if (next) deployTarget.value = next
-  }
-}, { deep: true })
-const deployDestPath = ref('')
+// 现在 Step 8 直接遍历 Step 2 已勾选的所有 target 一键部署:每个 target 走
+// importAndDeploy(复用 BotsPage 那条闭环)装到自动路径 ~/.tshoot/<target>/<id>/,
+// 全部成功后跳 /bots 看刚装好的卡。
 const deployLoading = ref(false)
 const deployError = ref<string | null>(null)
 
-const { isManagedTarget, customPathExpanded, autoDefaultPath, resetCustomPath } = useDeployPath(
-  deployTarget,
-  () => system.id,
-  deployDestPath,
-)
+// 部署路径展示:Step 2 卡片要让用户看到"AI 平台最终从哪儿读 agent",
+// 因此这里展示的是 install.sh 跑完后的最终落地路径,不是中间包路径。
+//   - openclaw     ~/.openclaw/workspace/<workspace_name>/
+//   - claude-code  ~/.claude/agents/<name>.md(<name> = workspace_name 兜底 system.id-bot)
+//   - cursor       ~/.cursor/agents/<name>.md
+// 中间包 ~/.tshoot/<target>/<id>/ 由 defaultDestPath 给后端用,这里只为 UI 提示。
+// homeDir 已在前面声明(getUserConfig 拿的),空字符串时回退 "~" 给用户看。
 
-const deployTargetHint = computed(() => {
-  switch (deployTarget.value) {
-    case 'openclaw': return 'Studio 托管产物(→ install.sh 装到 ~/.openclaw/workspace/<workspace_name>/)'
-    case 'claude-code': return '装到 ~/.claude/agents/<name>.md(用户级 subagent,所有项目共享)'
-    case 'cursor': return '装到 ~/.cursor/agents/<name>.md(用户级 Custom Agent,所有项目共享)'
+// agent 名:workspace_name 优先,否则 system.id-bot 兜底,否则 my-system-bot
+const agentNameForPath = computed(() => (
+  agent.workspace_name.trim() || (system.id ? `${system.id}-bot` : 'my-system-bot')
+))
+
+const targetDeployPaths = computed<Record<string, string>>(() => {
+  const home = homeDir.value || '~'
+  const wsName = agentNameForPath.value
+  return {
+    'openclaw': `${home}/.openclaw/workspace/${wsName}/`,
+    'claude-code': `${home}/.claude/agents/${wsName}.md`,
+    'cursor': `${home}/.cursor/agents/${wsName}.md`,
   }
-  return ''
 })
 
-async function pickDeployDestPath() {
-  if (!isDesktop()) {
-    deployError.value = '选目录需要桌面 app 环境'
-    return
-  }
-  try {
-    const p = await openDir('选择部署目标路径')
-    if (p) deployDestPath.value = p
-  } catch (e: any) {
-    deployError.value = String(e?.message || e)
-  }
+// 鼠标悬停"自动"标签时提示:这个路径是该 AI 平台官方约定的 agent 读取位置,
+// 不是 Studio 自己塞的;改路径只能改 workspace_name(回 Step 1 改 system.id)。
+const targetDeployPathHints: Record<string, string> = {
+  'openclaw': 'OpenClaw 启动时扫 ~/.openclaw/workspace/* 列出可用 agent,选一个进入。',
+  'claude-code': 'Claude Code 启动时读 ~/.claude/agents/*.md(用户级 subagent),所有项目都能 @<name> 调用。',
+  'cursor': 'Cursor 启动时读 ~/.cursor/agents/*.md(用户级 Custom Agent),侧栏选用。',
 }
 
+// Step 8 一键部署摘要:Step 2 勾了哪些 target → 渲染对应路径
+const deploySummary = computed(() =>
+  targetOptions
+    .filter(t => enabledTargets[t])
+    .map(t => ({ target: t, label: targetLabels[t] || t, path: targetDeployPaths.value[t] || '' })),
+)
+
+// 一键部署:遍历 Step 2 已勾选的所有 target,各自走 importAndDeploy。
+// 路径全自动,无需用户在 Step 8 再选 target / 选目录(都用 ~/.tshoot/<target>/<id>/)。
+// 任一 target 部署失败 → 整体停下保留已成功的,error 里显示是哪个 target 倒了。
 async function runOneClickDeploy() {
   deployError.value = null
-  if (!deployDestPath.value.trim()) {
-    deployError.value = '请填部署目标路径'
-    return
-  }
   if (!isDesktop()) {
     deployError.value = '一键部署只在桌面 app 可用;浏览器模式请下载 yaml 去 BotsPage 或用 CLI'
+    return
+  }
+  const enabled = targetOptions.filter(t => enabledTargets[t])
+  if (enabled.length === 0) {
+    deployError.value = 'Step 2 没勾选任何部署目标'
     return
   }
   // 部署前校一把 yaml,失败就不提交到后端兜错
@@ -3394,12 +3422,7 @@ async function runOneClickDeploy() {
   }
   deployLoading.value = true
   try {
-    // 构造 repoPaths:每个仓库算一下本机绝对路径,后端会烤进
-    // 产物 skills/routing/references/repo-path-map.yaml。system.yaml 本身不含这些
-    // 路径(故意的,保持可分享)。
-    //   - local 模式:用 _localPath(用户选的已有目录)
-    //   - remote 模式:优先 _cloneTarget(自定义),回落到 <默认>/<name>
-    //   - 名字空或算不出路径的跳过(后端模板会留空提示用户补齐)
+    // 构造 repoPaths(三个 target 共用同一份本机仓库路径表)
     const repoPaths: Record<string, string> = {}
     const effectiveRoot = reposRootInput.value.trim() || resolvedReposRoot.value
     for (const r of repos) {
@@ -3415,10 +3438,24 @@ async function runOneClickDeploy() {
       }
       if (path) repoPaths[r.name] = path
     }
-    await importAndDeploy(yamlOutput.value, deployTarget.value, deployDestPath.value, repoPaths)
-    toast.success(`部署完成,已写到 ${deployDestPath.value}`)
-    // 跳已装机器人页让用户看到新装的卡;openclaw 还要跑 install.sh,BotsPage
-    // "导入 yaml 一键部署"流程那边已经做过,这里新用户的第一印象是"看到卡就算成功"。
+
+    // 每个勾选的 target:
+    //   - claude-code / cursor:importAndDeploy 内部已 native install 到 ~/.claude|cursor/,
+    //     跑完即生效,无须二次操作
+    //   - openclaw:只到中间包(scripts/install.sh 有交互凭证表单),跳 BotsPage 填字段
+    const installedTargets: string[] = []
+    const stagedOnly: string[] = []
+    for (const t of enabled) {
+      const dest = await defaultDestPath(t, system.id || '')
+      await importAndDeploy(yamlOutput.value, t, dest, repoPaths)
+      if (t === 'claude-code' || t === 'cursor') installedTargets.push(t)
+      else stagedOnly.push(t)
+    }
+    if (stagedOnly.length > 0) {
+      toast.success(`已就绪:${installedTargets.join(' / ') || '无'};待填凭证:${stagedOnly.join(' / ')}(BotsPage 上完成)`)
+    } else {
+      toast.success(`部署完成,共 ${installedTargets.length} 个目标已生效:${installedTargets.join(' / ')}`)
+    }
     router.push('/bots')
   } catch (e: any) {
     deployError.value = String(e?.message || e)
@@ -3523,8 +3560,7 @@ const configTypeDescriptions: Record<string, string> = {
     <div v-if="currentStep === 1" class="card lg">
       <h2>系统基本信息</h2>
       <p class="help-text" style="margin-bottom:14px">
-        这里填"给哪摊业务打工"的信息 — 系统的业务名、ID、一句话描述。
-        机器人自己叫什么、装哪些平台、用什么模型到下一步配。
+        填一下机器人服务的业务系统:展示名、ID、一句话描述。
       </p>
 
       <div class="form-group">
@@ -3589,8 +3625,7 @@ const configTypeDescriptions: Record<string, string> = {
     <div v-if="currentStep === 2" class="card lg">
       <h2>机器人身份</h2>
       <p class="help-text" style="margin-bottom:14px">
-        这里定义"机器人自己"—— 叫什么、装到哪些 AI 平台、用什么模型。
-        部署目标决定后面 Step 4 / Step 7 等几步的字段按需展开。
+        给机器人起个名字,选要部署到哪些 AI 平台。
       </p>
       <div class="form-group">
         <label>机器人名称 <span class="required">*</span></label>
@@ -3599,6 +3634,23 @@ const configTypeDescriptions: Record<string, string> = {
           type="text"
           :placeholder="agentNameDefault"
           :class="{ error: hasError('agent.name') }"
+        />
+      </div>
+
+      <!-- 标识符(自动派生):subagent slug / OpenClaw workspace 目录名 / @<name> 调用前缀都用它。
+           只读展示,跟着 system.id + "-bot" 自动生成,用户改 system.id 它跟着变。 -->
+      <div class="form-group">
+        <label>
+          标识符
+          <span class="help-icon" title="自动从系统 ID 派生(<system.id>-bot)。subagent 文件名 / OpenClaw workspace 目录 / Claude Code 的 @<name> 调用都用它,要求 ASCII 小写。改它请回 Step 1 改 system.id。">?</span>
+          <span class="auto-tag">自动派生</span>
+        </label>
+        <input
+          :value="agent.workspace_name || workspaceNameDefault"
+          type="text"
+          readonly
+          class="readonly-input"
+          title="只读;跟随 system.id 自动派生"
         />
       </div>
 
@@ -3658,6 +3710,13 @@ const configTypeDescriptions: Record<string, string> = {
               </span>
             </label>
             <div class="target-hint">{{ targetDescriptions[t] }}</div>
+            <!-- 勾选后展示 install.sh 跑完后的最终落地位置 —— AI 平台从这里读 agent。
+                 路径长时省略号截断,鼠标悬停看完整;Step 8 一键部署也不再问路径。 -->
+            <div v-if="enabledTargets[t]" class="target-deploy-path">
+              <span class="target-deploy-path-label">部署位置</span>
+              <span class="auto-tag" :title="targetDeployPathHints[t]">自动</span>
+              <code :title="targetDeployPaths[t]">{{ targetDeployPaths[t] || '…' }}</code>
+            </div>
 
             <!-- 勾选后才展开下面配置区。claude-code / cursor 没有要配的字段,
                  直接不渲染 target-body,免得露出空白容器很难看 -->
@@ -3734,19 +3793,6 @@ const configTypeDescriptions: Record<string, string> = {
                 </div>
               </template>
 
-              <!-- openclaw 独有:工作区目录名 -->
-              <div v-if="t === 'openclaw'" class="target-field">
-                <label class="target-field-label">
-                  工作区目录名
-                  <span class="help-icon" title="~/.openclaw/workspace/<这里>/ 创建目录。推荐 ASCII 小写(如 shop-bot)。多个 agent 并存时每个用不同名字避免覆盖。">?</span>
-                </label>
-                <input
-                  v-model="agent.workspace_name"
-                  type="text"
-                  :placeholder="workspaceNameDefault"
-                  :class="{ error: hasError('agent.workspace_name') }"
-                />
-              </div>
             </div>
           </div>
         </div>
@@ -3760,10 +3806,7 @@ const configTypeDescriptions: Record<string, string> = {
     <div v-if="currentStep === 3" class="card lg">
       <h2>环境列表</h2>
       <p class="help-text">
-        常见环境:dev(开发) / test(测试) / staging(预发布) / prod(生产)。
-        每行两个域名 —— API 域名(后端接口)、Web 域名(前端入口,选填)。<br/>
-        <strong>推荐带上 http/https 前缀</strong> —— bot 要实际发请求时 Studio 不替你猜协议
-        (内部 dev 常是 http、公网 prod 多是 https)。不带前缀也接受,下游会按 https 兜底。
+        填业务系统的运行环境(如 dev / test / prod),每个环境填后端 API 域名,可选填前端 Web 域名。建议带上 http/https 前缀。
       </p>
       <div v-for="(env, i) in environments" :key="i" class="dynamic-row">
         <div class="row-fields">
@@ -3849,10 +3892,7 @@ const configTypeDescriptions: Record<string, string> = {
     <div v-if="currentStep === 4" class="card lg">
       <h2>代码仓库</h2>
       <p class="help-text">
-        每个仓库可选 <strong>本地已有目录</strong> 或 <strong>远程 URL</strong>:<br/>
-        • <strong>本地</strong> → 选目录即 <strong>自动扫描</strong>(读 <code>git remote</code> + 探测技术栈 + 列分支)<br/>
-        • <strong>远程</strong> → 填 URL + 目标目录后点 <strong>"🔄 同步到本地并扫描"</strong>(先 clone 再扫)<br/>
-        • 技术栈 / 服务名 / 分支 从扫描结果读(role 用 yaml 里的默认 <code>backend</code>,想改去 Step 7 手改)。
+        填业务的代码仓库:可以选本地已 clone 的目录,也可以填远程 URL 让 Studio 帮你拉下来。扫描后会自动识别技术栈、服务名和分支。
       </p>
 
       <!-- 全局默认 clone 目录:一次性设置,跨向导持久 -->
@@ -4189,25 +4229,11 @@ const configTypeDescriptions: Record<string, string> = {
           <span class="field-hint">— 按环境维度填写,保存后写入 system.yaml,部署时注入目标平台 MCP Server 配置</span>
         </label>
         <div class="cc-share-warn">
-          <div class="cc-share-warn-title">⚠ 数据流与共享范围</div>
+          <div class="cc-share-warn-title">⚠ 凭证与共享提醒</div>
           <ul class="cc-share-warn-list">
-            <li>
-              本页填写的所有字段(含密码、token 等凭证)将保存至
-              <code>system.yaml</code>。
-            </li>
-            <li>
-              部署阶段,生成器会把对应值注入目标 AI 平台的 MCP Server 环境变量
-              (OpenClaw / Claude Code / Cursor / 桌面内嵌对话;每项字段旁标注了对应的
-              环境变量名)。
-            </li>
-            <li>
-              <strong>system.yaml 含明文凭证</strong>,请仅在可信范围内分享
-              (团队私有仓库 / 内部协作渠道),<strong>避免提交至公开代码仓库或公开社区</strong>。
-            </li>
-            <li>
-              留空的字段不会写入 yaml;部署 OpenClaw 时由
-              <code>install.sh</code> 引导交互式补充。
-            </li>
+            <li>这里填的账号密码会以明文保存进 <code>system.yaml</code>,部署时注入到机器人的 MCP Server。</li>
+            <li>分享 yaml 请限团队内部 / 私有仓库,<strong>不要提交到公开代码仓库</strong>。</li>
+            <li>留空的字段不会写入 yaml,后续可在部署时补填。</li>
           </ul>
         </div>
         <div v-for="env in environments" :key="env.id" class="cc-env-block">
@@ -4400,9 +4426,7 @@ const configTypeDescriptions: Record<string, string> = {
     <div v-if="currentStep === 7" class="card lg">
       <h2>可观测性</h2>
       <p class="help-text">
-        勾选本系统依赖的可观测性组件(Grafana / Loki / Prometheus / Jaeger 等)。
-        勾中后展开,按环境填写连接信息。所填值写入 <code>system.yaml</code>,部署时
-        注入各 AI 平台的 MCP server 配置。留空的字段不进 yaml。
+        勾选系统用到的可观测性组件(Grafana / Loki / Prometheus / Jaeger 等),按环境填上连接地址,机器人查日志 / 指标时会用。
       </p>
 
       <!-- 共享警告:同 Step 5 ,提醒密码会进 yaml -->
@@ -4671,9 +4695,7 @@ const configTypeDescriptions: Record<string, string> = {
     <div v-if="currentStep === 6" class="card lg">
       <h2>数据层</h2>
       <p class="help-text">
-        点「📥 从配置中心读取」会拉 Step 5 已挑的各服务配置,扫描里面的
-        redis / mysql / mongodb / kafka / ... 配置块。本页按 <strong>环境 → 服务 → 数据层组件</strong>
-        展示识别结果,字段可直接编辑(明文修改,不会影响源配置中心)。
+        从配置中心读取各服务配置,自动识别用到的数据层(Redis / MySQL / MongoDB 等),按 <strong>环境 → 服务 → 组件</strong> 展示。字段可直接编辑,改的是本地副本,不会回写配置中心。
       </p>
 
       <div class="cc-share-warn" style="margin-bottom:18px">
@@ -4906,66 +4928,26 @@ const configTypeDescriptions: Record<string, string> = {
       <div class="deploy-inline">
         <div class="deploy-inline-title">🚀 一键部署到已装机器人</div>
         <p class="help-text" style="margin-bottom:10px;">
-          跳过"下载 yaml → BotsPage 导入"的来回,直接选 target + 目标路径部署。部署完会跳到「已装机器人」页。
+          按 Step 2 勾选的 AI 平台一次性部署。Claude Code / Cursor 跑完即生效;
+          OpenClaw 还需要在「已装机器人」页填一次配置中心 / 可观测性凭证才能跑起来。
         </p>
-        <div class="deploy-inline-row">
-          <div class="deploy-inline-field">
-            <label>目标平台</label>
-            <!-- 只列 Step 1 勾选的 target,避免让用户在这里部署一个没生成的平台产物 -->
-            <select v-model="deployTarget" :disabled="deployLoading">
-              <option
-                v-for="t in targetOptions"
-                v-show="enabledTargets[t]"
-                :key="t"
-                :value="t"
-              >{{ targetLabels[t] }}</option>
-            </select>
-            <span class="deploy-hint">{{ deployTargetHint }}</span>
-          </div>
-          <!-- embedded/openclaw:默认路径不露 input,用户不用操心;要改点"自定义"展开 -->
-          <div v-if="isManagedTarget && !customPathExpanded" class="deploy-inline-field flex auto-path-field">
-            <label>部署位置 <span class="auto-tag">自动管理</span></label>
-            <div class="auto-path-display">
-              <code>{{ autoDefaultPath || '…' }}</code>
-              <button type="button" class="btn-link" @click="customPathExpanded = true">自定义 →</button>
-            </div>
-          </div>
-          <!-- claude-code/cursor 必选,或 embedded/openclaw 展开"自定义"后的 input -->
-          <div v-else class="deploy-inline-field flex">
-            <label>
-              部署目标路径
-              <button
-                v-if="isManagedTarget"
-                type="button"
-                class="btn-link"
-                @click="resetCustomPath"
-              >恢复默认</button>
-            </label>
-            <!-- readonly input,只能通过按钮选 —— 所有路径输入框统一约束 -->
-            <div class="deploy-inline-path">
-              <input
-                :value="deployDestPath"
-                type="text"
-                :placeholder="isManagedTarget ? autoDefaultPath : '点右侧按钮选择项目根路径'"
-                :disabled="deployLoading"
-                readonly
-                class="path-readonly"
-                :title="deployDestPath"
-              />
-              <button type="button" class="btn" :disabled="deployLoading" @click="pickDeployDestPath">
-                {{ deployDestPath ? '重新选…' : '选目录…' }}
-              </button>
-            </div>
-          </div>
+        <div v-if="deploySummary.length === 0" class="alert warn">
+          Step 2 没勾选任何部署目标,无法一键部署。请回 Step 2 至少勾选一个 AI 平台。
+        </div>
+        <div v-else class="deploy-targets-line">
+          将部署到:
+          <span v-for="(item, i) in deploySummary" :key="item.target">
+            <span class="deploy-target-chip">{{ item.label }}</span><span v-if="i < deploySummary.length - 1">、</span>
+          </span>
         </div>
         <div class="deploy-inline-actions">
           <button
             type="button"
             class="btn primary"
-            :disabled="deployLoading || !deployDestPath.trim()"
+            :disabled="deployLoading || deploySummary.length === 0"
             @click="runOneClickDeploy"
           >
-            {{ deployLoading ? '部署中…' : '一键部署' }}
+            {{ deployLoading ? '部署中…' : `一键部署${deploySummary.length > 0 ? `(${deploySummary.length} 个目标)` : ''}` }}
           </button>
         </div>
         <div v-if="deployError" class="alert error">{{ deployError }}</div>
@@ -4995,6 +4977,15 @@ const configTypeDescriptions: Record<string, string> = {
   max-width: 860px;
   margin: 0 auto;
 }
+
+/* 标识符等只读字段:灰底 + 鼠标 default,跟普通 input 视觉拉开 */
+.readonly-input {
+  background: #f1f5f9 !important;
+  color: #475569;
+  cursor: default;
+  font-family: monospace;
+}
+.readonly-input:focus { outline: none; border-color: #cbd5e1; }
 
 .init-page h1 {
   font-size: 24px;
@@ -5199,6 +5190,17 @@ const configTypeDescriptions: Record<string, string> = {
   padding: 28px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
   margin-bottom: 20px;
+}
+/* 每步卡片标题 + 说明 + 表单之间留出呼吸空间,避免标题贴下面 help-text */
+.card h2 {
+  font-size: 20px;
+  font-weight: 600;
+  color: #1e293b;
+  margin: 0 0 14px 0;
+  line-height: 1.3;
+}
+.card .help-text {
+  margin-bottom: 18px;
 }
 
 /* ── Form elements ── */
@@ -5481,6 +5483,18 @@ input.path-readonly {
 }
 .target-card .target-hint {
   font-size: 11px; color: #64748b; padding-left: 22px; line-height: 1.4;
+}
+/* 勾选后展示的部署位置一行,跟 target-hint 一档缩进 */
+.target-card .target-deploy-path {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 6px; padding: 6px 10px 6px 22px;
+  font-size: 11px; line-height: 1.4;
+}
+.target-card .target-deploy-path-label { font-weight: 600; color: #334155; }
+.target-card .target-deploy-path code {
+  flex: 1; min-width: 0; font-size: 11px; color: #1e40af;
+  background: var(--c-surf-3); padding: 2px 6px; border-radius: 4px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .target-card .target-body {
   margin-top: 4px; padding: 10px 12px;
@@ -6259,9 +6273,14 @@ input.path-readonly {
 
 .yaml-preview pre {
   margin: 0;
+  background: transparent !important;
 }
 
 .yaml-preview code {
+  /* 显式禁掉全局 code 的浅色 user-agent / 全局背景(否则深色面板上每行都浮一片白条) */
+  background: transparent !important;
+  padding: 0 !important;
+  border: none !important;
   font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
   font-size: 13px;
   line-height: 1.6;
@@ -6302,41 +6321,26 @@ input.path-readonly {
 .deploy-inline-title {
   font-weight: 600; color: #1e40af; margin-bottom: 4px; font-size: 14px;
 }
-.deploy-inline-row {
-  display: flex; gap: 12px; margin-bottom: 10px; flex-wrap: wrap;
-}
-.deploy-inline-field { display: flex; flex-direction: column; gap: 4px; min-width: 180px; }
-.deploy-inline-field.flex { flex: 1; }
-.deploy-inline-field label { font-size: 12px; font-weight: 600; color: #334155; }
-.deploy-hint { color: #64748b; font-weight: 400; }
-.deploy-inline-field select,
-.deploy-inline-path input {
-  padding: 7px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px;
-}
-.deploy-inline-path { display: flex; gap: 6px; }
-.deploy-inline-path input { flex: 1; font-family: monospace; }
 .deploy-inline-actions { display: flex; justify-content: flex-end; }
 
-/* embedded/openclaw 的"自动管理"展示 */
-.auto-path-field label { display: flex; align-items: center; gap: 6px; }
+/* 部署摘要一行:Step 8 简短列出"将部署到 X、Y、Z",路径在 Step 2 卡上看 */
+.deploy-targets-line {
+  font-size: 12px; color: #334155; margin-bottom: 12px; line-height: 1.7;
+}
+.deploy-target-chip {
+  display: inline-block; padding: 2px 8px; margin: 0 2px;
+  background: #e0e7ff; color: #1e40af; border-radius: 10px; font-weight: 600;
+}
+
 .auto-tag {
   font-size: 10px; font-weight: 500; color: #065f46;
   background: #d1fae5; padding: 1px 6px; border-radius: 8px; letter-spacing: 0.2px;
   margin-left: 4px;
 }
-/* "(扫一下自动填)" 这种轻提示,比 .auto-tag 再弱一档;跟 label 同行不抢视觉 */
+/* "(扫一下自动填)" 这种轻提示,跟 label 同行不抢视觉 */
 .field-hint {
   font-size: 11px; font-weight: 400; color: var(--c-muted);
   margin-left: 6px;
-}
-.auto-path-display {
-  display: flex; align-items: center; gap: 10px;
-  padding: 7px 10px; background: var(--c-surf-3); border-radius: 6px;
-  border: 1px dashed var(--c-line-2);
-}
-.auto-path-display code {
-  flex: 1; font-size: 12px; color: #1e40af; background: transparent; padding: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .btn-link {
   padding: 0; border: none; background: transparent; color: #1e40af;

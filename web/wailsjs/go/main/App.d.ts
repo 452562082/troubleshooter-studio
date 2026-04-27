@@ -93,7 +93,11 @@ export function SaveYAML(arg1:string,arg2:string):Promise<string>;
 
 export function ScanInstallPrompts(arg1:string):Promise<Array<deploy.Prompt>>;
 
+export function SelfTestAgent(arg1:string):Promise<agent.SelfTestResult>;
+
 export function SetDefaultReposRoot(arg1:string):Promise<void>;
+
+export function UninstallAgent(arg1:string):Promise<agent.UninstallOpenclawResult>;
 
 export function Validate(arg1:string):Promise<main.ValidateResult>;
 

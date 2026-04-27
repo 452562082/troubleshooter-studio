@@ -200,12 +200,9 @@ func (g *Generator) Generate() error {
 		return fmt.Errorf("workspace: %w", err)
 	}
 
-	// scripts → scripts/
-	scSrc := filepath.Join(g.TemplateRoot, "scripts")
-	scDst := filepath.Join(g.OutputDir, "scripts")
-	if err := g.walkAndRender(scSrc, scDst); err != nil {
-		return fmt.Errorf("scripts: %w", err)
-	}
+	// scripts/ 已不再生成 —— install / self-test / uninstall 全部由
+	// internal/agent.{InstallNativeOpenclaw, SelfTestOpenclaw, UninstallNativeOpenclaw}
+	// 原生 Go 实现,不再用 bash + 嵌入式 Python。staging 目录瘦身。
 
 	if err := g.writeReadme(); err != nil {
 		return fmt.Errorf("readme: %w", err)
@@ -216,20 +213,15 @@ func (g *Generator) Generate() error {
 		return fmt.Errorf("clawhub lock: %w", err)
 	}
 
-	// mark shell scripts executable
-	for _, name := range []string{"install.sh", "self-test.sh", "uninstall.sh"} {
-		p := filepath.Join(g.OutputDir, "scripts", name)
-		if _, err := os.Stat(p); err == nil {
-			_ = os.Chmod(p, 0o755)
-		}
-	}
-
 	// 还原 preserved 文件（覆盖刚渲染的默认版本）
 	if err := snap.Restore(g.OutputDir); err != nil {
 		return fmt.Errorf("restore preserved: %w", err)
 	}
 
-	// 写 tshoot.json 到真正的 workspace 根（install.sh 会 cp -R 这个目录到 ~/.openclaw/workspace/）
+	// 写 tshoot.json 到真正的 workspace 根（agent.InstallNativeOpenclaw cp 它到
+	// ~/.openclaw/workspace/<name>/,被 discover.Scan 反向识别）
+	// 注意:刻意不在 staging 根再写一份 —— 否则 discover 会扫到两份,UI 出重复
+	// 卡片。ScanInstallPrompts 直接去 templates/workspace-template/tshoot.json 找。
 	wsDir := filepath.Join(g.OutputDir, "templates", "workspace-template")
 	if err := g.writeTshootMeta(wsDir, "openclaw"); err != nil {
 		return fmt.Errorf("write tshoot meta: %w", err)
@@ -461,8 +453,9 @@ func (g *Generator) writeReadme() error {
 
 	// ── 快速开始 ──
 	sb.WriteString("## 快速开始\n\n")
-	sb.WriteString("```bash\ncd \"$(dirname \"$0\")\"\nbash scripts/install.sh        # 交互填凭证，自动保存到 scripts/.env\nbash scripts/self-test.sh      # 验证 MCP 注册 + 端到端连通\n```\n\n")
-	sb.WriteString("install.sh 开头会 source `scripts/.env`，所以**第二次重跑不会重复问凭证**。要改某个值：手动编辑 `.env` 再跑。想完全重问：`rm scripts/.env && bash scripts/install.sh`。\n\n")
+	sb.WriteString("Studio 桌面端打开本目录:点 **部署** 即可(原生 Go,跑完会装 workspace + 注入 MCP + 重启 gateway,无 bash 依赖)。\n")
+	sb.WriteString("CLI 用户可走同一份逻辑(由 `tshoot` 桌面端的 `RunInstall` binding 调 `agent.InstallNativeOpenclaw`)。\n\n")
+	sb.WriteString("凭证持久化在 `scripts/.env`,删它即等同重置(下次部署不再预填)。\n\n")
 
 	// ── FAQ ──
 	sb.WriteString("## 常见问题\n\n")
@@ -472,8 +465,8 @@ func (g *Generator) writeReadme() error {
 	// ── 升级 / 卸载 ──
 	sb.WriteString("## 升级与卸载\n\n")
 	sb.WriteString("- **升级**（tshoot 或 system.yaml 改过后）：在 tshoot 仓库里跑 `tshoot upgrade -i system.yaml`，会自动备份旧产物到 `<output_dir>.bak.<ts>/` 再重 gen，最后打印 diff。\n")
-	sb.WriteString("- **卸载**：`bash scripts/uninstall.sh`（移除工作区 + 从 openclaw.json 清理 agent + MCP）。\n")
-	sb.WriteString("- **回滚**：`mv <output_dir>.bak.<ts> <output_dir>` 然后重跑 `bash scripts/install.sh`。\n\n")
+	sb.WriteString("- **卸载**:Studio 桌面端 BotsPage 上点对应卡的卸载按钮(走 `agent.UninstallNativeOpenclaw`,移走 workspace + 从 openclaw.json 摘 agent)。\n")
+	sb.WriteString("- **回滚**：`mv <output_dir>.bak.<ts> <output_dir>` 然后再点一次部署。\n\n")
 
 	// ── 安装位置 ──
 	sb.WriteString("## 安装位置\n\n")
@@ -545,11 +538,11 @@ func readmeCredentialsSection(ctx *Context) string {
 		}
 	}
 	if !hasCreds {
-		sb.WriteString("本系统未启用任何需要凭证的外部组件（配置中心 / 可观测性 / 消息 / 项目管理），直接 `bash scripts/install.sh` 即可。\n")
+		sb.WriteString("本系统未启用任何需要凭证的外部组件（配置中心 / 可观测性 / 消息 / 项目管理），点部署即跑完。\n")
 		return sb.String()
 	}
 
-	sb.WriteString("`install.sh` 会交互式地问你下面这些值，准备好可以加快安装：\n\n")
+	sb.WriteString("Studio 部署时会问下面这些值（按 system.yaml 自动派生），准备好可以加快流程：\n\n")
 	perEnvCC := ctx.Infrastructure.ConfigCenter.PerEnvCredentials
 	switch cc {
 	case "nacos":
@@ -611,10 +604,10 @@ func readmeCredentialsSection(ctx *Context) string {
 func readmeFAQSection(ctx *Context) string {
 	var sb strings.Builder
 	sb.WriteString("**Q: 机器人回答里说 MCP 连不上 / timeout？**\n")
-	sb.WriteString("A: 凭证过期或网络不通。打开 `scripts/.env` 找对应 env 的变量手动改，再跑一次 `bash scripts/install.sh`（已设的项不会重问）。\n\n")
+	sb.WriteString("A: 凭证过期或网络不通。改 `scripts/.env` 里对应 env 的变量,或回 BotsPage 重新填表 → 再点部署(走 InstallNativeOpenclaw,已设的不重问)。\n\n")
 
 	sb.WriteString("**Q: 装完后没看到 agent？**\n")
-	sb.WriteString("A: 检查 `~/.openclaw/openclaw.json` 里有没有 `agents.list[...]` 包含 `" + ctx.AgentID + "`；没有就再跑一次 install.sh。OpenClaw 客户端可能也需要重启 gateway：`openclaw gateway restart`。\n\n")
+	sb.WriteString("A: 检查 `~/.openclaw/openclaw.json` 里有没有 `agents.list[...]` 包含 `" + ctx.AgentID + "`；没有就回 BotsPage 重新部署。OpenClaw 客户端可能也需要重启 gateway：`openclaw gateway restart`。\n\n")
 
 	if ctx.Infrastructure.ConfigCenter.Type != "" && ctx.Infrastructure.ConfigCenter.Type != "none" {
 		sb.WriteString("**Q: 某个 env 的配置查不到？**\n")
@@ -622,9 +615,9 @@ func readmeFAQSection(ctx *Context) string {
 	}
 
 	sb.WriteString("**Q: 改了 system.yaml，怎么更新部署？**\n")
-	sb.WriteString("A: 在 tshoot 仓库里跑 `tshoot upgrade -i system.yaml` —— 自动备份 + 重 gen + 打印 diff。然后来本目录 `bash scripts/install.sh` 应用到 OpenClaw。\n\n")
+	sb.WriteString("A: 在 tshoot 仓库里跑 `tshoot upgrade -i system.yaml` —— 自动备份 + 重 gen + 打印 diff。然后回 BotsPage 重新部署(走 InstallNativeOpenclaw)应用到 OpenClaw。\n\n")
 
 	sb.WriteString("**Q: 想把机器人部署到别的平台（Claude Code / Cursor / Embedded 内嵌对话）？**\n")
-	sb.WriteString("A: 在 `system.yaml` 的 `generation.targets` 里加上对应名字再 `tshoot gen`，会生成 `<output_dir>-claude-code/` / `-cursor/` / `-embedded/` 兄弟目录；前两个带 install.sh 装到项目根，embedded 不用安装,Studio 扫到 tshoot.json 直接开对话。\n")
+	sb.WriteString("A: 在 `system.yaml` 的 `generation.targets` 里加上对应名字再 `tshoot gen`，会生成 `<output_dir>-claude-code/` / `-cursor/` 兄弟目录；Studio 部署 → 自动装到 `~/.claude/agents/` 或 `~/.cursor/agents/`(走 agent.InstallNative,无 bash)。\n")
 	return sb.String()
 }

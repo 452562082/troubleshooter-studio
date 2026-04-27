@@ -219,6 +219,19 @@ async function runAnalyze() {
   }
 }
 
+// 把 backend status enum 翻译成人话(原始值留在 title 里方便排查)。
+// 跟 .repo-status.<status> 的 CSS class 对应,enum 改了两边都得跟。
+function statusZh(s: string): string {
+  switch (s) {
+    case 'analyzed': return '已扫描'
+    case 'cloned-then-analyzed': return '已 clone + 扫描'
+    case 'skipped': return '跳过(本机没有)'
+    case 'clone-failed': return 'clone 失败'
+    case 'analyze-failed': return '扫描出错'
+    default: return s
+  }
+}
+
 onMounted(() => {
   EventsOn('analyze:log', (line: string) => {
     progressLog.value += line + '\n'
@@ -235,16 +248,13 @@ onUnmounted(() => {
     <h1>仓库分析</h1>
 
     <div class="info-box">
-      <div class="info-box-title">使用说明</div>
+      <div class="info-box-title">仓库分析</div>
       <div>
-        输入 system.yaml + <strong>仓库父目录</strong>(含多个 repo.name 子目录),
-        分析器会按 yaml 里每个 <code>repos[].name</code> 去匹配
-        <code>&lt;父目录&gt;/&lt;name&gt;/</code>,扫所有匹配到的仓库,抽 service_names
-        + 配置中心线索,结果标 verified(机械确认)。<br/>
-        示例:yaml 里 repos=[<code>order-service</code>, <code>pay-service</code>],父目录 <code>~/code</code>,
-        会扫 <code>~/code/order-service/</code> 和 <code>~/code/pay-service/</code> 两个仓库。
+        从已 clone 到本机的代码里扫出每个仓库提供的服务名,以及配置中心(Nacos / Apollo / Consul)用的 dataId、namespace 等线索;
+        把扫到的结果跟 yaml 声明对比,缺什么、多什么一目了然,一键生成补丁片段贴回 yaml。<br/>
+        填两样东西就行:<strong>system.yaml</strong>(粘贴或加载文件) + <strong>仓库父目录</strong>(下面那些 <code>repos[].name</code> 共同的爹,通常是 <code>~/code</code> 这种)。
       </div>
-      <div class="info-box-note">注意:缺失的仓库会标 skipped;勾"自动 clone"缺失仓库会从 url 浅克隆(需 git + 凭证)</div>
+      <div class="info-box-note">本机没下载的仓库会跳过;勾上"自动 clone"会按 yaml 里的 url 浅克隆下来再扫(要有 git + 凭证)。</div>
     </div>
 
     <div class="form-section">
@@ -255,18 +265,18 @@ onUnmounted(() => {
           <button class="btn small" @click="loadExample">加载示例</button>
         </div>
       </div>
-      <textarea v-model="yamlContent" placeholder="粘贴 system.yaml 内容..." spellcheck="false" :class="{ err: error }" />
+      <textarea v-model="yamlContent" placeholder="把 system.yaml 内容粘到这里,或点上面「加载文件」选本机文件…" spellcheck="false" :class="{ err: error }" />
     </div>
 
     <div class="form-row">
       <div class="field">
-        <label>仓库父目录 <span class="field-hint">(含多个仓库子目录,不是某一个仓库的根)</span></label>
+        <label>仓库父目录 <span class="field-hint">(选含多个仓库子目录的那一层,不是单个仓库的根)</span></label>
         <!-- readonly + 按钮:跟 wizard 所有路径字段一致的强约束,避免用户手写打错 / 路径不存在 -->
         <div class="path-row">
           <input
             :value="reposRoot"
             type="text"
-            placeholder="点右侧按钮选「多个仓库的父目录」(如 ~/code),analyzer 按 yaml 里每个 repo.name 找子目录"
+            placeholder="点右边按钮选,通常是 ~/code 这种装着多个仓库的目录"
             readonly
             class="path-readonly"
             :title="reposRoot"
@@ -277,12 +287,12 @@ onUnmounted(() => {
         </div>
       </div>
       <div class="field check">
-        <label><input type="checkbox" v-model="autoClone" /> 自动 clone 缺失仓库</label>
+        <label><input type="checkbox" v-model="autoClone" /> 本机没有的仓库,自动 clone</label>
       </div>
     </div>
 
     <button class="btn accent" @click="runAnalyze" :disabled="loading">
-      {{ loading ? '分析中...' : '运行分析' }}
+      {{ loading ? '正在扫…' : '🔍 开始扫描' }}
     </button>
 
     <div v-if="error" class="alert error">{{ error }}</div>
@@ -290,8 +300,8 @@ onUnmounted(() => {
     <!-- 运行时秒表 + 进度行数:跑大仓库 + autoClone 可能分钟级,让用户确信没卡 -->
     <div v-if="loading" class="analyze-progress">
       <span class="analyze-spinner" aria-hidden="true"></span>
-      <span class="analyze-elapsed">已运行 {{ analyzeElapsed }}s</span>
-      <span class="analyze-loglines">· {{ progressLog.split('\n').length - 1 }} 行进度</span>
+      <span class="analyze-elapsed">已扫 {{ analyzeElapsed }} 秒</span>
+      <span class="analyze-loglines">· 进度日志 {{ progressLog.split('\n').length - 1 }} 行</span>
     </div>
     <!-- 实时进度日志(analyze:log 事件) -->
     <pre v-if="loading && progressLog" class="progress-log">{{ progressLog }}</pre>
@@ -299,9 +309,9 @@ onUnmounted(() => {
     <!-- 分析结果 -->
     <div v-if="result" class="results">
       <div class="summary-bar">
-        <span class="tag blue">config_center: {{ result.report?.config_center || '-' }}</span>
-        <span class="tag green">{{ result.report?.repos?.length || 0 }} 个仓库有 findings</span>
-        <span class="tag gray">{{ result.per_repo?.length || 0 }} 个仓库处理过</span>
+        <span class="tag blue">配置中心:{{ result.report?.config_center || '-' }}</span>
+        <span class="tag green">扫到线索 {{ result.report?.repos?.length || 0 }} 个仓库</span>
+        <span class="tag gray">共扫 {{ result.per_repo?.length || 0 }} 个仓库</span>
       </div>
 
       <!-- 每仓库状态摘要(per_repo) -->
@@ -313,9 +323,9 @@ onUnmounted(() => {
           :class="rs.status"
         >
           <span class="name">{{ rs.name }}</span>
-          <span class="status-tag">{{ rs.status }}</span>
-          <span v-if="rs.service_name_count" class="muted">{{ rs.service_name_count }} svc</span>
-          <span v-if="rs.finding_count" class="muted">{{ rs.finding_count }} findings</span>
+          <span class="status-tag" :title="rs.status">{{ statusZh(rs.status) }}</span>
+          <span v-if="rs.service_name_count" class="muted">服务 {{ rs.service_name_count }} 个</span>
+          <span v-if="rs.finding_count" class="muted">线索 {{ rs.finding_count }} 条</span>
           <span v-if="rs.error" class="err">{{ rs.error }}</span>
         </div>
       </div>
@@ -323,43 +333,43 @@ onUnmounted(() => {
       <!-- yaml vs 代码实态 diff:这是用户真正想看的"发现了啥没在 yaml 里" -->
       <div v-if="diff" class="card diff-card">
         <div class="card-header">
-          <span class="name">⚖️ 跟 yaml 声明对比</span>
-          <span v-if="diff.totalNew > 0" class="tag green">{{ diff.totalNew }} 处新发现</span>
-          <span v-if="diff.totalMissing > 0" class="tag orange">{{ diff.totalMissing }} 处声明但没扫到</span>
-          <span v-if="diff.configCenterMismatch" class="tag red">config_center 不一致</span>
+          <span class="name">⚖️ 对照 system.yaml</span>
+          <span v-if="diff.totalNew > 0" class="tag green">代码有但 yaml 没写 {{ diff.totalNew }} 项</span>
+          <span v-if="diff.totalMissing > 0" class="tag orange">yaml 写了但代码没扫到 {{ diff.totalMissing }} 项</span>
+          <span v-if="diff.configCenterMismatch" class="tag red">配置中心对不上</span>
           <span v-if="diff.totalNew === 0 && diff.totalMissing === 0 && !diff.configCenterMismatch" class="tag green">完全一致</span>
           <button
             v-if="diff.totalNew > 0"
             class="btn small"
-            title="复制建议的 yaml 片段到剪贴板,粘进自己 system.yaml 的 repos 下就能补全 service_names"
+            title="把建议的 yaml 片段复制到剪贴板,贴回 system.yaml 的 repos 下就能补全 service_names"
             @click="copySuggestedYamlSnippet"
             style="margin-left:auto"
           >
-            📋 复制建议 yaml 片段
+            📋 复制补丁片段
           </button>
         </div>
 
         <div v-if="diff.configCenterMismatch" class="detail warn">
-          <strong>⚠ 配置中心类型冲突:</strong>
-          yaml 声明 <code>{{ diff.configCenterYaml || '(空)' }}</code>,代码扫出 <code>{{ diff.configCenterCode }}</code>。
-          检查 infrastructure.config_center.type 是否要改。
+          <strong>⚠ 配置中心类型对不上:</strong>
+          yaml 写的是 <code>{{ diff.configCenterYaml || '(空)' }}</code>,代码里实际扫到 <code>{{ diff.configCenterCode }}</code>。
+          回 yaml 把 <code>infrastructure.config_center.type</code> 改一下。
         </div>
 
         <div v-for="r in diff.repos" :key="r.name" class="diff-row">
           <div class="diff-row-head">
             <strong>{{ r.name }}</strong>
-            <span class="muted">yaml 声明 {{ r.yamlServices.length }} · 代码扫出 {{ r.codeServices.length }}</span>
+            <span class="muted">yaml 写了 {{ r.yamlServices.length }} 个服务 · 代码里扫到 {{ r.codeServices.length }} 个</span>
           </div>
           <div v-if="r.newInCode.length" class="detail">
-            <span class="tag green" style="min-width: 80px;">代码有 yaml 无</span>
+            <span class="tag green" style="min-width: 110px;">代码里多出来的</span>
             <span v-for="s in r.newInCode" :key="s" class="tag blue">{{ s }}</span>
           </div>
           <div v-if="r.missingInCode.length" class="detail">
-            <span class="tag orange" style="min-width: 80px;">yaml 有但没扫到</span>
+            <span class="tag orange" style="min-width: 110px;">yaml 写了但没扫到</span>
             <span v-for="s in r.missingInCode" :key="s" class="tag gray">{{ s }}</span>
           </div>
           <div v-if="r.newInCode.length === 0 && r.missingInCode.length === 0" class="detail muted">
-            ✓ 一致
+            ✓ 完全一致
           </div>
         </div>
       </div>
@@ -373,30 +383,30 @@ onUnmounted(() => {
         </div>
 
         <div v-if="repo.service_names?.length" class="detail">
-          <strong>Services：</strong>
+          <strong>扫到的服务名:</strong>
           <span v-for="s in repo.service_names" :key="s" class="tag blue">{{ s }}</span>
         </div>
 
         <div v-if="repo.findings?.length" class="detail">
-          <strong>Findings（{{ repo.findings.length }}）：</strong>
+          <strong>配置中心线索({{ repo.findings.length }} 条):</strong>
           <div v-for="(f, i) in repo.findings" :key="i" class="finding">
             <span class="src">{{ f.source_file }}</span>
             <span v-if="f.data_id" class="kv">dataId={{ f.data_id }}</span>
-            <span v-if="f.namespace_id" class="kv">ns={{ f.namespace_id }}</span>
+            <span v-if="f.namespace_id" class="kv">namespace={{ f.namespace_id }}</span>
             <span v-if="f.group" class="kv">group={{ f.group }}</span>
             <span v-if="f.app_id" class="kv">appId={{ f.app_id }}</span>
-            <span v-if="f.kv_prefix" class="kv">prefix={{ f.kv_prefix }}</span>
+            <span v-if="f.kv_prefix" class="kv">前缀={{ f.kv_prefix }}</span>
             <span v-if="f.env_profile" class="tag orange">{{ f.env_profile }}</span>
           </div>
         </div>
 
         <div v-if="repo.warnings?.length" class="detail warn">
-          <strong>Warnings：</strong>
+          <strong>提示:</strong>
           <div v-for="w in repo.warnings" :key="w" class="warn-line">{{ w }}</div>
         </div>
 
         <div v-if="!repo.findings?.length && !repo.warnings?.length" class="detail muted">
-          无 findings 和 warnings
+          没扫到配置中心线索,也没异常提示
         </div>
       </div>
     </div>

@@ -162,6 +162,16 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 		tsfUpdated = true
 	}
 
+	// claude-code / cursor 是"中间包 → 用户级目录"两段式部署:这里 staging 已 rsync,
+	// 紧接着原生装到 ~/.claude|cursor/。openclaw 仍交给自家 scripts/install.sh。
+	// 注意:本路径同时覆盖"重新 apply"(改了 yaml 后回写)的场景,避免活配置和用户级
+	// 目录脱节。
+	if !opts.DryRun && (ag.Meta.Target == "claude-code" || ag.Meta.Target == "cursor") {
+		if err := InstallNative(ag.Path, ag.Meta.Target); err != nil {
+			return nil, fmt.Errorf("native install (%s): %w", ag.Meta.Target, err)
+		}
+	}
+
 	return &Result{
 		AgentPath:        ag.Path,
 		Target:           ag.Meta.Target,
@@ -193,14 +203,15 @@ func ImportAndApply(yamlBytes []byte, target, destPath string, opts ApplyOptions
 		return nil, fmt.Errorf("create dest %s: %w", destPath, err)
 	}
 
-	// openclaw 走完整 gen，产物包含 scripts/install.sh（agent apply 的 src 子树里没它）
+	// openclaw 走完整 gen 出 staging 包(不含 install.sh,native 接管);凭证收集 +
+	// workspace 安装 + openclaw.json 注入由桌面端 RunInstall → InstallNativeOpenclaw 完成。
 	if target == "openclaw" {
 		if opts.DryRun {
 			return &Result{
 				AgentPath:        destPath,
 				Target:           target,
 				FilesWritten:     0,
-				NeedsRestartHint: "dry-run：会生成 openclaw 产物到 " + destPath + "；真部署时桌面端会走 install.sh 自动化收凭证 + 注册 MCP",
+				NeedsRestartHint: "dry-run：会生成 openclaw staging 到 " + destPath + "；真部署时桌面端 RunInstall 会调 InstallNativeOpenclaw 收凭证 + 注册 MCP",
 			}, nil
 		}
 		g := generator.New(cfg, opts.TemplateRoot, destPath)
@@ -215,8 +226,8 @@ func ImportAndApply(yamlBytes []byte, target, destPath string, opts ApplyOptions
 			AgentPath:        destPath,
 			Target:           target,
 			FilesWritten:     written,
-			TSFJSONUpdated:   true, // g.Generate 尾部会写 tshoot.json
-			NeedsRestartHint: "已生成 openclaw 产物。桌面端下一步会调 RunInstall 写凭证并跑 install.sh；CLI 用户请 cd '" + destPath + "' && bash scripts/install.sh，再 `openclaw gateway restart`",
+			TSFJSONUpdated:   true,
+			NeedsRestartHint: "已生成 openclaw staging。桌面端下一步会跑 RunInstall(原生 Go,无 bash 依赖)注入 ~/.openclaw/openclaw.json 并安装 workspace。",
 		}, nil
 	}
 
@@ -231,6 +242,7 @@ func ImportAndApply(yamlBytes []byte, target, destPath string, opts ApplyOptions
 		Path: destPath,
 	}
 	opts.NewYAML = yamlBytes
+	// Apply 内部会对 claude-code / cursor 自动跑 InstallNative,这里不再重复。
 	return Apply(fake, opts)
 }
 
@@ -252,7 +264,7 @@ func resolveApplySource(baseOut, target string) (src, hint string) {
 	case "openclaw":
 		// agent.Path 是 ~/.openclaw/workspace/<name>/；对应产物根下的 templates/workspace-template/
 		src = filepath.Join(baseOut, "templates", "workspace-template")
-		hint = "若本次新增了 env / 切换了配置中心类型，重跑 `bash scripts/install.sh` 注册新 MCP + 填凭证，再 `openclaw gateway restart`；只是改映射不用动。"
+		hint = "若新增了 env / 切了配置中心类型,回 BotsPage 重跑一次部署(走 InstallNativeOpenclaw 重新注册 MCP + 收凭证),再 `openclaw gateway restart`;只改映射不用动。"
 	case "claude-code":
 		src = baseOut + "-claude-code"
 		hint = "Claude Code 下次启动会自动加载用户级 ~/.claude/agents/<name>.md;正在开的 session 需要 `/clear` 或重启 `claude` CLI 才能吃到新版 subagent。"
@@ -296,9 +308,9 @@ func looksLikeFactoryArtifact(rel, target string) bool {
 		prefixes = append(prefixes, "SOUL.md", "IDENTITY.md", "AGENTS.md", "USER.md",
 			"CHECKLIST.md", "TOOLS.md", ".clawhub/")
 	case "claude-code":
-		prefixes = append(prefixes, "agents/", "install.sh")
+		prefixes = append(prefixes, "agents/")
 	case "cursor":
-		prefixes = append(prefixes, "agents/", "install.sh")
+		prefixes = append(prefixes, "agents/")
 	default:
 		return false
 	}

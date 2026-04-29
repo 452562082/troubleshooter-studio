@@ -23,20 +23,36 @@
 #   - 暂时手填,精度高于自学(LLM 不会去问没在依赖图里出现的服务)
 
 services:
+{{- $ctx := .}}
 {{- range .Repos}}
-  {{- range .ServiceNames}}
-  {{.}}:
-    upstream: []         # TODO: 谁调本服务,如 [api-gateway, web-bff]
-    downstream: []       # TODO: 本服务调谁,如 [user, auth, order]
-    data_stores: []      # TODO: 本服务依赖的数据层,如 ["mysql:order_db", "redis:session"]
-    critical: false      # TODO: 核心交易路径 → true
-  {{- end}}
-  {{- if not .ServiceNames}}
-  {{.Name}}:
-    upstream: []
-    downstream: []
-    data_stores: []
-    critical: false
+  {{- $repo := .}}
+  {{- $svcs := .ServiceNames}}
+  {{- if not $svcs}}{{$svcs = list .Name}}{{end}}
+  {{- range $svcs}}
+  {{- $svc := .}}
+  {{- $scannedDown := scannedDownstreamsForService $ctx $svc}}
+  {{- $scannedDS := scannedDataStoresForService $ctx $svc}}
+  {{$svc}}:
+    upstream: []         # 谁调本服务(扫不到 - 手填,如 [api-gateway, web-bff])
+    {{- if $scannedDown}}
+    # ↓ 从代码扫到的下游调用(http/grpc URL host / @FeignClient name);**精度 50-70%**,覆盖 50% 比 0% 强,可手动校正
+    downstream:
+    {{- range $scannedDown}}
+      - {{. | printf "%q"}}
+    {{- end}}
+    {{- else}}
+    downstream: []       # 没扫到下游调用;手填如 [user, auth, order]
+    {{- end}}
+    {{- if $scannedDS}}
+    # ↓ 从代码扫到的数据层(import / 客户端构造);":scanned" 占位需替换成真实逻辑名
+    data_stores:
+    {{- range $scannedDS}}
+      - {{. | printf "%q"}}
+    {{- end}}
+    {{- else}}
+    data_stores: []      # 没扫到数据层;手填如 ["mysql:order_db", "redis:session"]
+    {{- end}}
+    critical: false      # 核心交易路径 → true(手填)
   {{- end}}
 {{- end}}
 

@@ -30,15 +30,35 @@ type Finding struct {
 	DefaultContext string `json:"default_context,omitempty"`
 }
 
+// DownstreamCall 单次下游调用线索 —— "本仓库里这一行代码调用了哪个下游服务"。
+// 由 dependency_scan.go 各语言扫码产出,driver 各不相同(Go http.Get / Java @FeignClient / Python requests / ...)。
+// 同一 (caller,target) 多次调用会去重(callsite 取第一个)。
+type DownstreamCall struct {
+	Target   string `json:"target"`             // 推断出来的目标服务名(从 URL host 或 @FeignClient.name 取)
+	Driver   string `json:"driver"`             // http / grpc / mongo / redis / kafka / ...
+	Callsite string `json:"callsite,omitempty"` // 形如 "internal/service/user.go:42"
+	Hint     string `json:"hint,omitempty"`     // 原始字符串(URL / 调用表达式),给人核对用
+}
+
+// DataStoreUsage 单次数据层使用线索 —— "本仓库初始化了哪个数据层连接"。
+type DataStoreUsage struct {
+	Type     string `json:"type"`               // mysql / postgresql / redis / mongodb / elasticsearch / kafka / rocketmq / rabbitmq / clickhouse
+	Logical  string `json:"logical,omitempty"`  // 逻辑名(从配置 key / package 名推),如 "order_db" "session-cache"
+	Driver   string `json:"driver"`             // 库/驱动(go-redis / pymongo / @Autowired RedisTemplate)
+	Callsite string `json:"callsite,omitempty"`
+}
+
 // RepoAnalysis 单仓库分析产物
 type RepoAnalysis struct {
-	Name         string    `json:"name"`
-	Stack        string    `json:"stack"`
-	RepoPath     string    `json:"repo_path"`
-	ServiceNames []string  `json:"service_names,omitempty"`
-	Findings     []Finding `json:"findings,omitempty"`
-	Warnings     []string  `json:"warnings,omitempty"`
-	Verified     bool      `json:"verified"`
+	Name            string           `json:"name"`
+	Stack           string           `json:"stack"`
+	RepoPath        string           `json:"repo_path"`
+	ServiceNames    []string         `json:"service_names,omitempty"`
+	Findings        []Finding        `json:"findings,omitempty"`
+	DownstreamCalls []DownstreamCall `json:"downstream_calls,omitempty"`
+	DataStoreUsages []DataStoreUsage `json:"data_store_usages,omitempty"`
+	Warnings        []string         `json:"warnings,omitempty"`
+	Verified        bool             `json:"verified"`
 }
 
 // Report analyze 命令的聚合产物

@@ -203,6 +203,9 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 			return nil, fmt.Errorf("analyze %s: %w", repo.Name, err)
 		}
 		ra.Name = repo.Name
+		// 顺带扫"下游调用 + 数据层使用"——给 service-dependency-map.yaml 自动填种子值,
+		// 用户拿到种子改比从空白起强 10 倍。即使扫漏 50% 也比 0% 强,保守 best-effort。
+		ra.DownstreamCalls, ra.DataStoreUsages = analyzer.ScanDependencies(effectiveStack, repoPath, repo.Analysis.IncludePaths)
 		report.Repos = append(report.Repos, *ra)
 		perRepo = append(perRepo, RepoSummary{
 			Name:              repo.Name,

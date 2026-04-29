@@ -114,6 +114,75 @@ func funcMap() template.FuncMap {
 			}
 			return prefix + "-" + sourceID + "-" + envID
 		},
+		// scannedDownstreamsForService 给 service-dependency-map.yaml.tmpl 用:从 ctx 找指定服务名
+		// 对应 repo 的 DownstreamCalls,提取去重后的目标服务名列表。同 repo 多服务时复用 repo 的
+		// 下游列表(无法精确到 service 级,因为 dependency_scan 是 repo 级 regex 扫)。
+		"scannedDownstreamsForService": func(ctx *Context, svc string) []string {
+			seen := map[string]bool{}
+			var out []string
+			for _, repo := range ctx.Repos {
+				match := false
+				if repo.Name == svc {
+					match = true
+				}
+				for _, sn := range repo.ServiceNames {
+					if sn == svc {
+						match = true
+						break
+					}
+				}
+				if !match {
+					continue
+				}
+				calls := ctx.DownstreamCallsByRepo[repo.Name]
+				for _, c := range calls {
+					if c.Target == "" || seen[c.Target] {
+						continue
+					}
+					seen[c.Target] = true
+					out = append(out, c.Target)
+				}
+			}
+			return out
+		},
+		// scannedDataStoresForService 给 service-dependency-map.yaml.tmpl 用:类似上面,提数据层使用。
+		// 输出格式 "<type>:scanned"(没 logical 名字时占位 "scanned",用户填具体逻辑名)。
+		"scannedDataStoresForService": func(ctx *Context, svc string) []string {
+			seen := map[string]bool{}
+			var out []string
+			for _, repo := range ctx.Repos {
+				match := false
+				if repo.Name == svc {
+					match = true
+				}
+				for _, sn := range repo.ServiceNames {
+					if sn == svc {
+						match = true
+						break
+					}
+				}
+				if !match {
+					continue
+				}
+				usages := ctx.DataStoreUsagesByRepo[repo.Name]
+				for _, u := range usages {
+					if u.Type == "" {
+						continue
+					}
+					logical := u.Logical
+					if logical == "" {
+						logical = "scanned"
+					}
+					key := u.Type + ":" + logical
+					if seen[key] {
+						continue
+					}
+					seen[key] = true
+					out = append(out, key)
+				}
+			}
+			return out
+		},
 		// mcpKeyForAgentSource 跟 mcpKeyForAgent 镜像:加 agent-id 前缀,Claude Code/Cursor
 		// 共享 settings.json 池场景必备,避免多 system 同名 mcp 互相覆盖。OpenClaw 也走
 		// 这条路保持三平台命名统一(install_native_openclaw 同步用 mcpKeyForAgent)。

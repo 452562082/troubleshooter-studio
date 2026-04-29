@@ -26,6 +26,12 @@ type Context struct {
 	// 系统 yaml 不含路径(跨机器不可分享),部署时由 wizard/CLI 注入到产物里。
 	// 键必须匹配 cfg.Repos[i].Name。
 	RepoLocalPaths map[string]string
+	// DownstreamCallsByRepo[repoName] / DataStoreUsagesByRepo[repoName]
+	// dependency_scan.go 扫到的"本仓库的下游调用 + 数据层使用"种子值,
+	// 给 service-dependency-map.yaml.tmpl 渲染时自动填 downstream/data_stores 列表用。
+	// 键必须匹配 cfg.Repos[i].Name(跟 RepoLocalPaths 一样);没扫到的 repo 缺键即可。
+	DownstreamCallsByRepo  map[string][]analyzer.DownstreamCall
+	DataStoreUsagesByRepo  map[string][]analyzer.DataStoreUsage
 }
 
 type Generator struct {
@@ -74,10 +80,12 @@ func New(cfg *config.SystemConfig, templateRoot, outputDir string) *Generator {
 		TemplateRoot: templateRoot,
 		OutputDir:    outputDir,
 		Ctx: &Context{
-			SystemConfig:   cfg,
-			AgentID:        cfg.ResolveID(),
-			Findings:       map[string]map[string]analyzer.Finding{},
-			PriorOverrides: map[string]map[string]analyzer.Finding{},
+			SystemConfig:           cfg,
+			AgentID:                cfg.ResolveID(),
+			Findings:               map[string]map[string]analyzer.Finding{},
+			PriorOverrides:         map[string]map[string]analyzer.Finding{},
+			DownstreamCallsByRepo:  map[string][]analyzer.DownstreamCall{},
+			DataStoreUsagesByRepo:  map[string][]analyzer.DataStoreUsage{},
 		},
 	}
 }
@@ -93,18 +101,27 @@ func (g *Generator) LoadAnalysis(path string) error {
 		return fmt.Errorf("parse analysis: %w", err)
 	}
 	for _, ra := range report.Repos {
-		if len(ra.Findings) == 0 || len(ra.ServiceNames) == 0 {
-			continue
-		}
-		for _, svc := range ra.ServiceNames {
-			if g.Ctx.Findings[svc] == nil {
-				g.Ctx.Findings[svc] = map[string]analyzer.Finding{}
-			}
-			for _, nf := range ra.Findings {
-				env := nf.EnvProfile
-				if _, dup := g.Ctx.Findings[svc][env]; !dup {
-					g.Ctx.Findings[svc][env] = nf
+		// findings → ctx(老路径,只填有 findings 的)
+		if len(ra.Findings) > 0 && len(ra.ServiceNames) > 0 {
+			for _, svc := range ra.ServiceNames {
+				if g.Ctx.Findings[svc] == nil {
+					g.Ctx.Findings[svc] = map[string]analyzer.Finding{}
 				}
+				for _, nf := range ra.Findings {
+					env := nf.EnvProfile
+					if _, dup := g.Ctx.Findings[svc][env]; !dup {
+						g.Ctx.Findings[svc][env] = nf
+					}
+				}
+			}
+		}
+		// dependency scan → ctx,**给所有 repo**(没扫到的就空,模板侧 fallback)
+		if ra.Name != "" {
+			if len(ra.DownstreamCalls) > 0 {
+				g.Ctx.DownstreamCallsByRepo[ra.Name] = ra.DownstreamCalls
+			}
+			if len(ra.DataStoreUsages) > 0 {
+				g.Ctx.DataStoreUsagesByRepo[ra.Name] = ra.DataStoreUsages
 			}
 		}
 	}

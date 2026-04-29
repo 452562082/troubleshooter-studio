@@ -29,26 +29,40 @@ description: 通用配置中心执行技能（后端：{{.Infrastructure.Primary
 
 {{- if eq .Infrastructure.PrimaryConfigCenter.Type "nacos"}}
 
-### 当前后端：Nacos（走 MCP）
+### 当前后端：Nacos（走 MCP；MCP 失败时 fallback 到脚本）
 
-install.sh 已为每个 env 注册 `nacos-mcp-server-<env>` MCP：
+部署时已为每个 env 注册 `{{.AgentID}}-nacos-mcp-server-<env>` MCP：
 {{- range .Environments}}
-- `nacos-mcp-server-{{.ID}}`
+- `{{$.AgentID}}-nacos-mcp-server-{{.ID}}`
 {{- end}}
 
 执行步骤：
-1. `routing` 返回 `mcp_server=nacos-mcp-server-<env>` + `namespaceId/group/dataId`
+1. `routing` 返回 `mcp_server={{.AgentID}}-nacos-mcp-server-<env>` + `namespaceId/group/dataId`
 2. 调用该 MCP 的 `get_config` / `list_config_history` 等工具
 3. 需要跨 env 对比时：本地保存两份 text → `python3 scripts/nacos_diff.py --left-text ... --right-text ...`
 
-**运行时参数解析**（按 env 切换 Redis/Mongo/ES）：
-1. 先通过对应 env 的 Nacos MCP 读配置文本
+**MCP 启动失败时 fallback**(凡是 tool error 包含 `connection / not found / unable to spawn / uvx not found / ENOENT` 的情况):
+
+不要放弃 —— 直接走 Python 脚本(同等能力,只是没 LLM tool 装饰):
+
+```bash
+# 读单条配置
+python3 scripts/nacos_config.py get --server <NACOS_ADDR> --user <CC_USER> --pass <CC_PASS> \
+  --namespace <namespaceId> --group <group> --data-id <dataId>
+# 看历史
+python3 scripts/nacos_config.py history --server <...> --namespace ... --group ... --data-id ...
+```
+
+`<NACOS_ADDR>` 等参数从 `~/.openclaw/{{.AgentID}}-creds.json` 或对应平台的 creds.json 读;路径见 AGENTS.md "skills/scripts/references 路径速记"。失败仍报错时按 AGENTS.md "MCP 连不上"话术给用户。
+
+**运行时参数解析**(按 env 切换 Redis/Mongo/ES):
+1. 先通过对应 env 的 Nacos MCP(或 fallback 脚本)读配置文本
 2. `python3 scripts/resolve_runtime_from_nacos.py --stdin < config.txt` 提取
-3. 输出契约：
+3. 输出契约:
    - `runtime.redis`: `{host, port, resolved}`
    - `runtime.mongo`: `{uri, hosts, resolved}`
    - `runtime.elasticsearch`: `{hosts: string[], resolved}`
-   - `resolved=false` 时不得猜测；显式标注"未解析"
+   - `resolved=false` 时不得猜测;显式标注"未解析"
 {{- end}}
 
 {{- if eq .Infrastructure.PrimaryConfigCenter.Type "apollo"}}

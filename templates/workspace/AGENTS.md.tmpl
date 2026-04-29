@@ -88,6 +88,14 @@ cat ~/.cursor/skills/{{.AgentID}}/routing/references/config-map.yaml
 - **图类**(架构图 / 链路 / 拓扑):按"图类输出规范"。
 - **澄清反问**:一句话问完所有缺失信息(env + entity ID + 时间窗一起问),不要分多轮一个一个问。
 
+## 长流程必用 TodoWrite 维持步骤(Claude Code 专属)
+
+排障路径涉及 **3 步以上**(典型:routing → 配置中心查值 → grafana 查指标 → loki 查日志 → k8s pod → 故障快报)→ **第一步先调 `TodoWrite` 工具列出所有步骤**,每跑完一步 mark 完成。这是给自己的 checklist 也是给用户看的进度条,**避免跳步骤直接拍结论**。
+
+简单查询(1-2 步)不必用 TodoWrite,免得反客为主。
+
+OpenClaw / Cursor 没 TodoWrite → 在每条回复开头打 `[已完成: routing ✓ / 配置查 ✓ / 当前: 拉 grafana 指标]` 一行字纯文本进度条,效果一样。
+
 ## Python 依赖
 
 部分 skill 脚本(目前只有 `k8s-runtime-query/scripts/k8s_query.py`)依赖 `requests`,
@@ -155,7 +163,15 @@ python3 -m pip install --user -r <工作区根>/requirements.txt
 
 ## 运行时错误应对（工具报错时的第一反应）
 
-遇到下方错误不要直接把堆栈丢给用户——按对应话术主动给出诊断 + 可执行的修复步骤：
+遇到下方错误不要直接把堆栈丢给用户——按对应话术主动给出诊断 + 可执行的修复步骤。
+
+> **首选自检**:任何 MCP 连不上 / 凭证类错误 / 工具找不到 → **先建议用户跑一次 self-test**:
+> - OpenClaw / 桌面 Studio 用户:打开 Studio → 已装机器人页 → 点对应 agent 的"🩺 自检"按钮
+> - CLI 用户:`tshoot agent self-test ~/.openclaw/workspace/{{.AgentID}}`
+>
+> self-test 会逐条 ping nacos/grafana/loki/jaeger/k8s 端点 + which uvx/npx,五分钟内能看出"是哪一类问题",比让 agent 在 chat 里反复试管用得多。
+
+> **MCP 启动失败时 fallback 到脚本**:tool error 含 `connection refused / unable to spawn / uvx not found / ENOENT / npx not found` 这类——MCP 进程没起来。**不要放弃整条排障**,直接走 `scripts/*_config.py` Python 兜底版(脚本能力跟 MCP 等同,只是没 LLM tool 装饰)。具体调用模板见对应 SKILL.md 的"MCP 启动失败时 fallback"段。
 {{- if or (eq .Infrastructure.PrimaryConfigCenter.Type "nacos") (eq .Infrastructure.PrimaryConfigCenter.Type "apollo") (eq .Infrastructure.PrimaryConfigCenter.Type "consul") }}
 
 - **MCP 连不上 / timeout / auth failed** —— 配置中心 MCP 调用失败。先确认：

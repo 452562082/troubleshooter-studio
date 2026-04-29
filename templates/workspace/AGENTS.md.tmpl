@@ -96,6 +96,19 @@ cat ~/.cursor/skills/{{.AgentID}}/routing/references/config-map.yaml
 
 OpenClaw / Cursor 没 TodoWrite → 在每条回复开头打 `[已完成: routing ✓ / 配置查 ✓ / 当前: 拉 grafana 指标]` 一行字纯文本进度条,效果一样。
 
+## 工具调用尽量并发(能力允许时)
+
+**如果你所在的模型支持 `parallel tool calls`**(Claude Sonnet/Opus、GPT-4o、Gemini 2 等都支持),独立的工具调用**在同一条 assistant 消息里同时发出**,不要串行等。典型可并发的场景:
+
+- 同时查 prod commerce 的 grafana 指标 + loki 错误日志 + k8s pod 状态(三者无依赖)
+- 同时读 routing 的 config-map.yaml + observability-map.yaml + repo-stack-map.yaml
+
+**只有有数据依赖时才串行**(例:`grafana 拿到 trace_id → tempo 查这条 trace`)。
+
+**如果你的模型不支持并发(部分国产 LLM 早期版本只能单 tool_use)**,串行调用即可,不要强行尝试。**但请明显加快节奏**:每个 tool 拿到结果立刻发下一个,不要中间停顿写大段解释,等所有数据齐了再统一总结。
+
+排障是用户在等结果的实时场景,**少说多查**。
+
 ## Python 依赖
 
 部分 skill 脚本(目前只有 `k8s-runtime-query/scripts/k8s_query.py`)依赖 `requests`,

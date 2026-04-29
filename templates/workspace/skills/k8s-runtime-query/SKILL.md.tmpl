@@ -55,7 +55,7 @@ agent 看到这条 **复述给用户** 让其装一下。
 
 | action | 用途 | 何时用 |
 |--|--|--|
-| `pod-snapshot` | 一站式:pod 列表 + 每 pod events + 主容器 logs(current/previous,前 5 个 pod) | **首选**,排障第一调用 |
+| `pod-snapshot` | 一站式:pod 列表 + 每 pod events + 主容器 logs(current/previous,前 5 个 pod) | **首选**,排障第一调用。**加 `--summary` 只返关键信号**(state/reason/exit_code + logs 最后 5-8 行 + 命中的 known-errors),token 砍 80% |
 | `list-pods` | 仅 pod 状态列表(不带日志/事件) | 只想快速扫一遍"在不在跑" |
 | `get-pod-logs` | 单 pod 单容器日志(--tail 默认 200,--previous 取上次容器) | snapshot 截不够,要看更多 / 要看特定容器 |
 | `list-events` | 命名空间事件流(--field-selector 锁定 pod / --only-warnings) | "整个 ns 最近有什么异常事件" |
@@ -66,8 +66,8 @@ agent 看到这条 **复述给用户** 让其装一下。
 调用模板(三件套必给:`--env / --cluster / --namespace`,routing 解析后给):
 
 ```bash
-# 一站式快照
-python3 scripts/k8s_query.py --env <env> --cluster <cluster> pod-snapshot --namespace <ns> --label-selector app=<svc>
+# 一站式快照(默认全量,排障日常用 --summary 省 token)
+python3 scripts/k8s_query.py --env <env> --cluster <cluster> pod-snapshot --namespace <ns> --label-selector app=<svc> --summary
 
 # 单 pod 上次崩溃日志
 python3 scripts/k8s_query.py --env <env> --cluster <cluster> get-pod-logs --namespace <ns> --pod <pod> --previous --tail 100

@@ -437,14 +437,44 @@ def cmd_get_pod_logs(args: argparse.Namespace, kc: KuboardClient) -> dict[str, A
     return {'pod': args.pod, 'container': args.container, 'previous': args.previous, 'tail_lines': args.tail, 'logs': text}
 
 
+_KNOWN_ERROR_PATTERNS = (
+    'OOMKilled', 'CrashLoopBackOff', 'ImagePullBackOff', 'ErrImagePull',
+    'FailedScheduling', 'Evicted', 'panic:', 'OutOfMemoryError',
+    'connection refused', 'context deadline exceeded', 'no route to host',
+    'Too many connections', 'Lock wait timeout',
+)
+
+
+def _last_n_lines(text: str, n: int) -> str:
+    if not text:
+        return ''
+    lines = text.splitlines()
+    return '\n'.join(lines[-n:]) if len(lines) > n else text
+
+
+def _grep_known_errors(text: str) -> list[str]:
+    """从一段 logs 里挑 known-errors.yaml 里的关键词命中(简单子串匹配,顺序保留)。"""
+    if not text:
+        return []
+    found = []
+    for p in _KNOWN_ERROR_PATTERNS:
+        if p in text and p not in found:
+            found.append(p)
+    return found
+
+
 def cmd_pod_snapshot(args: argparse.Namespace, kc: KuboardClient) -> dict[str, Any]:
-    """一站式:pods 列表 + 每 pod events + 主容器 logs(current + previous,若有 restart)。"""
+    """一站式:pods 列表 + 每 pod events + 主容器 logs(current + previous,若有 restart)。
+
+    --summary 模式:每个 pod 只返关键信号(restart/state/wait_reason/term_reason/exit_code
+    + logs 最后 5 行 + grep 命中的 known-errors 模式),省 token + 提速。默认非 summary 返完整快照。
+    """
     pods_res = cmd_list_pods(args, kc)
     pods = pods_res['pods']
     snap_pods = []
-    for p in pods[:5]:  # 最多 5 个 pod 详细取,避免炸上下文
+    summary_mode = getattr(args, 'summary', False)
+    for p in pods[:5]:
         info = dict(p)
-        # events
         ev = cmd_list_events(argparse.Namespace(
             namespace=args.namespace,
             field_selector=f"involvedObject.name={p['name']}",
@@ -452,13 +482,44 @@ def cmd_pod_snapshot(args: argparse.Namespace, kc: KuboardClient) -> dict[str, A
             limit=10,
         ), kc)
         info['events'] = ev['events']
-        # 主容器(第一个)logs:current 一定取,previous 仅在有 restart 时
         main_c = (p.get('containers') or [{}])[0].get('name', '')
-        info['logs_current'] = kc.get_pod_logs(args.namespace, p['name'], main_c, 100, False)
+        log_current = kc.get_pod_logs(args.namespace, p['name'], main_c, 100, False)
+        info['logs_current'] = log_current
         if (p.get('restart_count') or 0) > 0:
-            info['logs_previous'] = kc.get_pod_logs(args.namespace, p['name'], main_c, 100, True)
-        snap_pods.append(info)
-    return {'pods': snap_pods, 'total_pod_count': pods_res['count'], 'truncated': pods_res['count'] > 5}
+            log_prev = kc.get_pod_logs(args.namespace, p['name'], main_c, 100, True)
+            info['logs_previous'] = log_prev
+        else:
+            log_prev = ''
+
+        if summary_mode:
+            # 砍体积:logs 只留最后 5 行 + grep 命中的 known-errors
+            cs = (info.get('containers') or [{}])[0]
+            slim = {
+                'name': info.get('name'),
+                'phase': info.get('phase'),
+                'restart_count': info.get('restart_count'),
+                'container_state': cs.get('state'),
+                'wait_reason': cs.get('wait_reason'),
+                'term_reason': cs.get('term_reason'),
+                'term_exit_code': cs.get('term_exit_code'),
+                'reason': info.get('reason'),
+                'message': info.get('message'),
+                'events_warning': [e for e in (info.get('events') or []) if e.get('type') == 'Warning'][:3],
+                'logs_current_tail': _last_n_lines(log_current, 5),
+                'known_errors': _grep_known_errors(log_current + '\n' + log_prev),
+            }
+            if log_prev:
+                slim['logs_previous_tail'] = _last_n_lines(log_prev, 8)  # previous 是崩溃栈,多留几行
+            snap_pods.append(slim)
+        else:
+            snap_pods.append(info)
+
+    return {
+        'pods': snap_pods,
+        'total_pod_count': pods_res['count'],
+        'truncated': pods_res['count'] > 5,
+        'mode': 'summary' if summary_mode else 'full',
+    }
 
 
 def main() -> None:
@@ -506,6 +567,7 @@ def main() -> None:
     sp.add_argument('--namespace', required=True)
     sp.add_argument('--label-selector', default='')
     sp.add_argument('--name-filter', default='')
+    sp.add_argument('--summary', action='store_true', help='只返关键信号(state/reason/exit_code + logs 最后 5 行 + 命中的 known-errors),省 token')
 
     args = p.parse_args()
 

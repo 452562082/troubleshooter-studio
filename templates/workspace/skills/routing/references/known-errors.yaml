@@ -1,0 +1,201 @@
+# known-errors.yaml —— 经典错误模式速查
+#
+# 作用:agent 看到日志/异常文本时先 grep 这里的 pattern,命中即按 next_actions 走,
+# 避免 LLM 凭脑子推典型根因(常见 80% 故障都是这些)。
+#
+# 字段约定:
+#   pattern        : 关键字 / 子串 / 简单正则,grep 语义。多写几个 alias 增加命中率。
+#   category       : k8s / rpc / db / mq / fs / network / app
+#   severity       : low / medium / high / critical (用户可见严重度,不是 root cause 难度)
+#   typical_cause  : 一句话最常见根因
+#   next_actions   : 按优先级排,agent 命中后按顺序走
+#   mitigation     : P0 止血动作(立即可执行)
+#
+# routing skill 用法:看到任何日志 / 异常 / tool error 文本,先扫这里。
+
+errors:
+  # ── K8s / 容器运行时 ───────────────────────────────────────────
+  - pattern: "OOMKilled"
+    category: k8s
+    severity: high
+    typical_cause: "容器内存超 limits"
+    next_actions:
+      - "k8s_query.py rollout-history --deployment <svc> 看是否最近改过镜像/配置(导致内存峰值)"
+      - "k8s_query.py list-deployments 看 spec.containers.resources.limits.memory 是否过紧"
+      - "看应用启动日志:是否有大字典/缓存预热导致瞬时高峰(常见 Java -Xmx 漏配 / Go 启动加载全表)"
+    mitigation: "临时调大 limits.memory(常见 +50%);彻底解决需看应用真实使用 baseline"
+
+  - pattern: "CrashLoopBackOff"
+    category: k8s
+    severity: critical
+    typical_cause: "容器反复启动失败,K8s 退避重试"
+    next_actions:
+      - "k8s_query.py get-pod-logs --previous=true(取上次崩溃栈,这是关键)"
+      - "k8s_query.py list-events --field-selector involvedObject.name=<pod> --only-warnings"
+      - "若日志里 panic/Error 在启动期 → 配置错;若运行中 → 业务 bug 或下游不可用"
+    mitigation: "先回滚到上一个 RS:k8s_query.py rollout-history 看 revision,kubectl rollout undo 或 Kuboard 后台回滚"
+
+  - pattern: "ImagePullBackOff"
+    category: k8s
+    severity: high
+    typical_cause: "镜像拉不下来:tag 写错 / 没推上去 / pullSecrets 失效"
+    next_actions:
+      - "k8s_query.py list-events 看 'manifest unknown' / 'unauthorized' / 'i/o timeout'"
+      - "确认 deployment.spec.containers.image 的 tag 正确性(对照 CI 输出)"
+      - "若 'unauthorized' → 检查 imagePullSecrets 是否存在 + 在该 ns"
+    mitigation: "回退到上一个能拉到的 image tag"
+
+  - pattern: "FailedScheduling"
+    category: k8s
+    severity: high
+    typical_cause: "调度失败:资源不足 / nodeSelector / taint 不匹配"
+    next_actions:
+      - "k8s_query.py list-events 看 '0/N nodes are available' 后面的具体原因"
+      - "若 'Insufficient cpu/memory' → 集群资源吃紧,扩节点或调小 requests"
+      - "若 'pod has unbound immediate PersistentVolumeClaims' → PVC/StorageClass 问题"
+
+  - pattern: "Evicted"
+    category: k8s
+    severity: high
+    typical_cause: "节点资源压力(磁盘/内存)驱逐 pod"
+    next_actions:
+      - "k8s_query.py list-events 看 'DiskPressure' / 'MemoryPressure'"
+      - "看节点磁盘:常见日志/缓存写爆 root volume"
+
+  # ── RPC / 网络 ─────────────────────────────────────────────────
+  - pattern: "context deadline exceeded"
+    category: rpc
+    severity: high
+    typical_cause: "RPC 超时:下游慢 / 网络丢包 / 限流命中"
+    next_actions:
+      - "trace 看具体哪个 span 超时(走 tracing-query 或 tempo-query)"
+      - "PromQL 看下游服务 p99 是否突变:`histogram_quantile(0.99, rate(http_server_requests_seconds_bucket{...}[5m]))`"
+      - "看下游服务 K8s pod 是否健康(k8s-runtime-query),pod restart 常导致瞬时超时"
+
+  - pattern: "connection refused"
+    category: network
+    severity: critical
+    typical_cause: "目标服务没起 / 端口错 / 防火墙阻断"
+    next_actions:
+      - "k8s_query.py list-pods 看目标 service 后端 pod 是否 Running + Ready"
+      - "k8s_query.py list-services 看 selector 是否匹配 pod label / targetPort 跟容器监听端口一致"
+      - "若都对,查 NetworkPolicy / Service Mesh sidecar"
+
+  - pattern: "Connection reset by peer"
+    category: network
+    severity: medium
+    typical_cause: "对端主动断开(常见 keep-alive 超时 / 对端 OOM 重启)"
+    next_actions:
+      - "看对端服务是否最近重启(k8s_query.py rollout-history)"
+      - "看连接池配置:keep-alive timeout / max-idle-time 是否短于 LB 超时"
+
+  - pattern: "no route to host"
+    category: network
+    severity: high
+    typical_cause: "目标 IP 不可达:网络分区 / 防火墙 / DNS 解析到错的 IP"
+    next_actions:
+      - "看 Service ClusterIP / Endpoints 是否对(k8s-runtime-query list-services)"
+      - "看 NetworkPolicy ingress/egress 规则"
+
+  # ── 数据库 / 数据层 ────────────────────────────────────────────
+  - pattern: "Too many connections"
+    category: db
+    severity: critical
+    typical_cause: "MySQL 连接池打满"
+    next_actions:
+      - "看应用 max-pool-size 配置 vs MySQL max_connections"
+      - "看慢查询是否堆积占连接:`SHOW PROCESSLIST` (走 mysql-runtime-query)"
+      - "应用是否有连接泄漏(连接未 close)"
+    mitigation: "立即重启实例释放连接(谨慎,只解症状不解根因);长期看 max_connections 调优"
+
+  - pattern: "Lock wait timeout exceeded"
+    category: db
+    severity: high
+    typical_cause: "MySQL 行锁等待超时,有长事务持锁"
+    next_actions:
+      - "看 INFORMATION_SCHEMA.INNODB_TRX 找长事务"
+      - "看应用是否有未提交的事务(常见 try-finally 漏 commit)"
+
+  - pattern: "Deadlock found"
+    category: db
+    severity: medium
+    typical_cause: "MySQL 死锁,业务逻辑访问顺序不一致"
+    next_actions:
+      - "看 SHOW ENGINE INNODB STATUS 末尾的 LATEST DETECTED DEADLOCK"
+      - "梳理触发死锁的两条 SQL,统一加锁顺序"
+
+  - pattern: "WRONGTYPE Operation against a key"
+    category: db
+    severity: medium
+    typical_cause: "Redis key 类型用错(对 list 跑 HGET 之类)"
+    next_actions:
+      - "redis-runtime-query TYPE <key> 确认实际类型"
+      - "看代码:同一个 key 是否被多处用不同类型写入"
+
+  # ── 消息队列 ──────────────────────────────────────────────────
+  - pattern: "REBALANCE_IN_PROGRESS"
+    category: mq
+    severity: medium
+    typical_cause: "Kafka 消费者组重平衡中,临时不可消费"
+    next_actions:
+      - "稳定:看是否最近频繁加减消费者实例,或 max.poll.interval.ms 太短被踢出"
+
+  - pattern: "MessageTooLargeError"
+    category: mq
+    severity: high
+    typical_cause: "消息超 Kafka broker max.message.bytes 限制"
+    next_actions:
+      - "看消息大小分布(business 端是否传了大字段如完整图片 base64)"
+      - "broker 端 message.max.bytes / 客户端 max.request.size 调一致"
+
+  # ── 应用通用 ──────────────────────────────────────────────────
+  - pattern: "panic:"
+    category: app
+    severity: critical
+    typical_cause: "Go 程序崩溃,通常 nil pointer / 数组越界 / 类型断言失败"
+    next_actions:
+      - "logs_previous 取上次崩溃栈,定位具体文件:行号"
+      - "rollout-history 看是否最近发版引入(对比 image tag 的 git commit)"
+
+  - pattern: "java.lang.OutOfMemoryError"
+    category: app
+    severity: critical
+    typical_cause: "JVM 堆耗尽"
+    next_actions:
+      - "看是 Heap / Metaspace / Direct Buffer 哪种(错误副标题)"
+      - "Heap → 看是否最近改了大对象处理逻辑(批量 / 缓存)"
+      - "若同时 K8s OOMKilled → -Xmx 已经吃光容器 limits.memory"
+
+  - pattern: "502 Bad Gateway"
+    category: rpc
+    severity: high
+    typical_cause: "上游 Nginx/Gateway 拿不到后端响应:后端崩 / 重启 / 超 keepalive"
+    next_actions:
+      - "看后端 service 对应 pod 状态(k8s_query.py list-pods)"
+      - "看 Gateway 日志(loki)的 upstream addr,定位具体后端节点"
+
+  - pattern: "504 Gateway Timeout"
+    category: rpc
+    severity: high
+    typical_cause: "后端响应慢超过 Gateway proxy_read_timeout"
+    next_actions:
+      - "trace 看具体慢的 span"
+      - "PromQL 看后端 p99 / p99.9 是否突变"
+
+  # ── 鉴权 ──────────────────────────────────────────────────────
+  - pattern: "401 Unauthorized"
+    category: auth
+    severity: medium
+    typical_cause: "凭证失效 / token 过期 / 算签错"
+    next_actions:
+      - "看请求头 Authorization 格式(Bearer / Basic / 自定义)"
+      - "看 token 过期时间(JWT 解析 exp)"
+      - "看密钥是否最近轮换(配置中心 history)"
+
+  - pattern: "403 Forbidden"
+    category: auth
+    severity: medium
+    typical_cause: "鉴权通过但无权限"
+    next_actions:
+      - "看 RBAC 配置(K8s ServiceAccount / 业务系统的角色表)"
+      - "看 IP 白名单 / 限流策略"

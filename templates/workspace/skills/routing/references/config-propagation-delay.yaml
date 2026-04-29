@@ -1,0 +1,84 @@
+# config-propagation-delay.yaml
+# 各配置中心 / K8s configmap 的"改动 → 业务实际生效"延迟典型值。
+#
+# 作用:incident-investigator Step 2(时间轴对齐)的扩展。timeline.py 默认 ±5 分钟内算
+# correlated,但配置改动跟故障开始**实际可能差 1-3 分钟**(propagation 中)。agent 看到
+# "配置 14:18 改了,故障 14:23 开始"时不要直接判"无关",**先看本表的 typical_propagation
+# 是否覆盖这个差距**——nacos 改完到生效 30s-2m 是正常区间,5 分钟差距完全可解释。
+#
+# 字段:
+#   typical_propagation : 改动到客户端真正使用新值的延迟范围(秒/分钟级)
+#   long_poll_period   : 客户端轮询周期(只对 polling 模型有意义)
+#   notes              : 关键 caveat(reload 是否需要重启 / kubelet sync 周期等)
+#
+# agent 在 timeline 里看到 nacos / apollo / configmap 类 correlated 事件时,
+# **判断"是否引发故障"时把 propagation 延迟加上**:
+#   配置改动时间 + typical_propagation 范围 ⊆ 故障时间 ±5 分钟 → 强相关
+# 比单纯"事件时间 == 故障时间 ±5 分钟"准。
+
+centers:
+  nacos:
+    typical_propagation: "30s-2m"
+    long_poll_period: "30s"
+    notes: |
+      Nacos 客户端默认 long-poll 30s 拿新版本,然后 reload 业务的 @RefreshScope bean。
+      Spring Cloud 项目用 @ConfigurationProperties 不带 @RefreshScope 时**需要重启服务才生效**;
+      Go 客户端 nacos-sdk-go 一般 callback 监听,延迟更短(秒级)。
+      Reload 时若有大对象重建(连接池 / 缓存),业务感知到新值可能再慢 30s-1m。
+
+  apollo:
+    typical_propagation: "10s-30s"
+    long_poll_period: "60s"
+    notes: |
+      Apollo 用 long-poll 60s + meta server 推送,变更通知秒级到达;
+      但 @ApolloConfig 注入的 bean 字段更新需要走 ApolloConfigChangeListener 重新绑定,
+      实际生效 10-30s。Spring 默认 @Value 字段不会自动更新,**需要 @ApolloConfigChangeListener 显式处理**。
+
+  consul:
+    typical_propagation: "1s-5s"
+    long_poll_period: "blocking-query"
+    notes: |
+      Consul KV 变更走 blocking query,客户端几乎实时收到通知。
+      业务侧重新读取 + reload 一般 1-5s 内,是三大配置中心里**最快**的。
+
+  kuboard:
+    typical_propagation: "30s-90s"
+    notes: |
+      Kuboard 改 ConfigMap 实际是改 K8s ConfigMap,生效路径走 K8s 而非 Kuboard 自己。
+      参考 k8s_configmap 段。
+
+centers_kubernetes:
+  k8s_configmap:
+    typical_propagation: "30s-90s"
+    notes: |
+      K8s ConfigMap 通过 projected volume mount 进 pod 时:
+        - kubelet sync period 默认 60s(会把更新写入 pod 文件系统)
+        - 应用层是否会重新读文件取决于实现:大多数应用启动期读一次后就缓存,**改 ConfigMap 不会生效**
+        - SubPath 挂载的文件**根本不会更新**(K8s 已知限制)
+      所以 ConfigMap 改完 30-90s 内文件系统会更新,但**业务感知到**还需应用主动重读 / 滚动更新 pod。
+
+  k8s_secret:
+    typical_propagation: "30s-90s"
+    notes: |
+      跟 ConfigMap 一样的 projected volume 路径。
+      业务通常缓存敏感凭证(避免反复读 fs),所以 Secret 改了**几乎一定要滚动重启 pod**才生效。
+
+  k8s_deployment:
+    typical_propagation: "立即"
+    notes: |
+      K8s Deployment 改 spec → 立即触发新 ReplicaSet 创建。
+      但**新 pod 启动到 ready** 还要看 readiness probe(常见 30s-2m),业务真正切到新版本看 traffic 路由策略。
+
+# ── agent 用法示例 ──
+#
+# timeline.py 输出:
+#   {ts: 14:18, source: nacos, summary: "...", correlated: true (因为 ±5min)}
+#   {ts: 14:23, source: incident_start}
+#
+# agent 看到这两个 event,差距 5 分钟。查本表:
+#   nacos.typical_propagation = "30s-2m"
+#   → 14:18 改完,2m 后是 14:20,完全可能 14:23 业务才感知到 → **强相关**
+#
+# 反例:
+#   nacos 改在 13:50,故障 14:23 → 差 33 分钟,远超 typical_propagation
+#   → **弱相关 / 不相关**(除非业务是 1h 后才 reload 的特殊场景)

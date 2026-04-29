@@ -65,6 +65,31 @@ description: 排障主线 skill。把"症状 → 时间轴 → 横向广度 → 
 
 **这步 30 秒,但能省半小时无效排障**。
 
+#### 1.3 历史故障 grep(同症状是不是上次复发)
+
+症状真实后,**还要扫一眼历史 incident 归档**(每次走完 Step 6 都会 append 一条)。文件路径:
+
+| 平台 | 路径 |
+|--|--|
+| OpenClaw | `~/.openclaw/workspace/{{.AgentID}}/incident-log.jsonl` |
+| Claude Code | `~/.claude/skills/{{.AgentID}}/incident-log.jsonl` |
+| Cursor | `~/.cursor/skills/{{.AgentID}}/incident-log.jsonl` |
+
+每行一条 JSON,字段:`{ts, env, service, symptom_keywords, root_cause, confidence, p0_action}`。
+
+```bash
+# 命中条件:env + service 相同 + symptom_keywords 至少 1 个相同
+grep -E '"env":"prod".*"service":"commerce"' \
+  ~/.openclaw/workspace/{{.AgentID}}/incident-log.jsonl | tail -10
+```
+
+**判断**:
+- 命中 1 条以上历史 → 提示用户"过去 90 天有 N 次同症状,**上次根因是 X**(置信度 Y),先验证是否又是 X" → **置信度上限调高一档**(因为有历史数据支撑)
+- 命中 0 条 → 全新故障,正常走 Step 2-6
+- 文件不存在(首次部署 / 没归档过)→ 跳过本步
+
+历史归档让常见重复故障(超时阈值改了 / 限流配置错了 / 数据库主从切换没通知)**几分钟内识别出来**,不用每次重头查。
+
 ### Step 2:时间轴对齐(必跑,这是最高 ROI 的一步)
 
 跑 `recent-changes` skill 的 `timeline.py`,**并发拉**三处:
@@ -232,6 +257,26 @@ Q1: 故障开始时间是否在某次 deploy / 配置改动后 5 分钟内?(看 
 - **P0 止血**:从决策树挑出来的具体动作 + 命令 + 预期效果(10 分钟内可执行)
 - **P1 修复**:`<代码改哪里 / 配置改什么>` + 测试方法
 - **P2 预防**:监控 / 告警 / 健康检查 / 灰度策略 / SLO 调整
+
+#### 6.5 归档到 incident-log(给下次同症状故障复用)
+
+故障快报输出后,**必须 append 一条到 `<工作区根>/incident-log.jsonl`**(Step 1.3 grep 的就是这个文件):
+
+```bash
+# 例:OpenClaw 部署
+echo '{"ts":"2025-04-29T14:35:00Z","env":"prod","service":"commerce","symptom_keywords":["5xx","突增","timeout"],"root_cause":"14:18 nacos 把 downstream.user.timeout 从 30s 改成 3s,inventory 调 user 全超时引发 commerce 5xx","confidence":"high","p0_action":"nacos 把 timeout 改回 30s"}' \
+  >> ~/.openclaw/workspace/{{.AgentID}}/incident-log.jsonl
+```
+
+字段约定:
+- `ts` (ISO 时间)
+- `env`、`service`(主角)
+- `symptom_keywords[]`(用户首问的关键词,2-5 个)
+- `root_cause`(一句话,完整能让下次直接对比)
+- `confidence`(high / medium / low,跟 Step 6 标尺一致)
+- `p0_action`(止血动作的简短描述,下次同症状时立刻可参考)
+
+下次有人问 "prod commerce 5xx 突增"时,Step 1.3 grep 命中本条 → 立刻提示"上次同症状根因是这个,先验证"。**这是把团队过去的排障经验沉淀成 agent 知识的关键机制**,务必落实。
 
 ## 执行示例(给作者验证用,机器人按这个走)
 

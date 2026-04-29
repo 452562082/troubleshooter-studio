@@ -60,6 +60,9 @@ jaeger:
     {{$env}}: {{$uid | printf "%q"}}
   {{- end}}
   {{- end}}
+  # 采样率(用户手填,默认 0.1 = 10%):agent 看到"trace_id 找不到"时必查这个
+  # 字段。低采样率时根 trace 没采到很正常,不要下"trace 不存在 / 用户给错了"结论。
+  sampling_rate: 0.1   # 1.0=100%(全采) / 0.1=10% / 0.01=1%(默认头采样)
   # 服务名 → Jaeger service 名约定。Jaeger 用 service.name(OpenTelemetry SDK 注入)直接索引,
   # 通常等于 wizard 服务名;不一致时(如代码里手动写了 "shop-order")在 yaml 里 manually 加 service_name_by_service 覆盖。
   # 默认按 wizard 服务名查,查不到再试 K8s workload 名。

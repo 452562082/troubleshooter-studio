@@ -62,6 +62,7 @@ agent 看到这条 **复述给用户** 让其装一下。
 | `list-services` | Service + Ports + Selector | "Service 后面挂了哪些 pod"(对照 selector 反查 pod) |
 | `list-deployments` | Deployment 副本/滚动状态 + Conditions | "Deployment 在滚动吗 / 新 RS 起没起来" |
 | `rollout-history` | 指定 Deployment 的 ReplicaSet 历史(revision + 镜像 + 副本数 + 创建时间,倒序) | "什么时候上的这版 / 上一个 revision 是哪个镜像" |
+| `ns-snapshot` | 整 namespace 的 pod 状态分布:健康/异常计数 + verdict(healthy/isolated/widespread) + 异常 pod 列表 + known-errors 分布 | **incident-investigator Step 3(横向扫)用**;5 秒判断"孤立故障 vs 广播故障 vs 基础设施问题" |
 
 调用模板(三件套必给:`--env / --cluster / --namespace`,routing 解析后给):
 

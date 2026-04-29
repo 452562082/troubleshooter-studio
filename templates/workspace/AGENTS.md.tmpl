@@ -9,6 +9,12 @@
 3. 证据优先：日志 / 实测 / 配置 / 代码，多证据交叉验证。
 4. 输出可执行建议，不直接落地修改。
 
+## 排障默认入口:`incident-investigator`
+
+任何排障关键词("5xx 突增 / 报错 / 超时 / 慢 / 不通 / 排查 / 故障 / 定位 / 为什么 / 失败 / 卡住")→ **第一个 Read 的 SKILL.md 是 `incident-investigator/SKILL.md`**,按它的 6 步流程图谱编排其它 skill。**不要直接跳到 routing / k8s-runtime-query / config-executor 等具体 skill** —— 那只查到表象,经常漏关联(时间轴上的变更 / 横向兄弟服务 / 沿依赖图的下游)。
+
+简单查询(`prod grafana 地址是啥` / 不含排障关键词)直接读 routing,不必走 incident-investigator。
+
 ## 范围与环境
 - 不设默认项目，按当前问题动态收敛。
 - 全链路视角（按问题裁剪）：先定位故障层级，再按需沿链路扩展取证（入口 → 服务 → 配置/依赖 → 数据层 → 下游），避免无关层面过度排查。

@@ -1,0 +1,80 @@
+---
+name: recent-changes
+description: 故障窗口"最近变更"聚合查询。一次拉 K8s rollout history + 配置中心 history + git log 按时间倒序合并,标"故障时间 ±5 分钟内强相关变更"。incident-investigator Step 2(时间轴对齐)的核心工具,排障第一原则"先看最近改了什么"的实现。
+---
+
+# Recent Changes(最近变更聚合)
+
+## 何时使用
+
+- **incident-investigator Step 2 必跑**:任何排障问题先看变更
+- 用户主动问 "最近 X 服务有什么变化 / 上次发版改了啥 / 是否撞上配置改动"
+- 故障定位陷入死胡同时(常见根因是某次未注意的小改动)
+
+## 调用方式
+
+```bash
+python3 scripts/timeline.py --env <env> --service <service> --since 1h \
+    [--cluster <c>] [--namespace <ns>] \
+    [--incident-time "2025-04-29 14:23"]
+```
+
+参数:
+- `--env / --service`:必给,定位变更对象
+- `--since 1h`:回看窗口,典型 1h(响应慢可放 6h);格式支持 `30m / 2d / 300s`
+- `--cluster / --namespace`:K8s rollout 用;**没给则跳过 K8s 这一路**(只看代码 + 配置)。常规走 routing service-map 拿
+- `--incident-time`:故障开始 ISO 时间(`2025-04-29 14:23` 或 `2025-04-29T14:23:00Z`),给了之后输出会在 ±5 分钟相关变更上加 `correlated: true` 标记
+- `--repo-path`:本地仓库路径覆盖(默认从 routing/references/repo-path-map.yaml 读)
+
+## 输出契约
+
+```json
+{
+  "env": "prod",
+  "service": "commerce",
+  "since": "1h",
+  "incident_time": "2025-04-29T14:23:00Z",
+  "event_count": 4,
+  "events": [
+    {"ts":"2025-04-29T14:25:12Z","source":"k8s","kind":"rollout","summary":"rollout to revision 8 (image=commerce:v1.23)","correlated":true},
+    {"ts":"2025-04-29T14:18:33Z","source":"nacos","kind":"U","summary":"prod-ns/DEFAULT_GROUP/application.yaml U by alice","correlated":true},
+    {"ts":"2025-04-29T14:10:01Z","source":"git","kind":"commit","summary":"alice: feat: 加 user 调用超时控制 (abc12345)"},
+    {"ts":"2025-04-29T13:30:11Z","source":"git","kind":"commit","summary":"bob: chore: bump dep (def54321)"}
+  ],
+  "notes": [
+    "[git] (空表示拉成功了,有失败时会写错误信息)"
+  ]
+}
+```
+
+`correlated: true` 是 incident-investigator Step 2 的关键输入 —— **故障开始时间 ±5 分钟内的变更几乎一定是嫌疑**,优先怀疑、先回滚验证。
+
+## 三路数据来源
+
+| source | 含义 | 怎么拉 |
+|--|--|--|
+| `git` | 代码合并 | `git log --since` 在仓库本地路径(走 routing repo-path-map.yaml) |
+| `k8s` | Deployment 滚动 | 委托 `k8s_query.py rollout-history`(同包内的 K8s skill) |
+| `nacos` | 配置改动 | 委托 `nacos_config.py history`(config-executor skill);其它后端目前未实现 |
+
+任一来源失败不阻塞其它 —— 错误信息进 `notes` 字段,events 仍按拉到的合并。
+
+## 解读建议
+
+`correlated: true` 的事件按时间逆序往前看:
+1. **rollout** + correlated → 大概率新版本引起,先看 P0 止血:`kubectl rollout undo` 或 Kuboard 回滚
+2. **nacos U** + correlated → 配置改动引起,nacos 后台回滚到上一版本
+3. **git commit** + correlated 但没 rollout → 代码合了但还没部署,**不太可能是它**(除非走 GitOps Argo 自动部署)
+4. 多个 correlated → 按"k8s > nacos > git"重要度逆序排,但实战常常是"先改配置 → 推代码 → rollout"链式发生,3 件全 correlated 也正常
+
+## 跨 skill 协作
+
+本 skill **不**是排障编排者(那是 incident-investigator),只是一个数据聚合工具。incident-investigator Step 2 跑完本脚本后:
+- 结果送给 LLM 推断"这些变更是否解释当前症状"
+- 每条 correlated event 后续可能 trigger 更深的查证(nacos history → 拉具体配置 diff;git commit → 看具体改动文件)
+
+## 硬约束
+
+- 只读 —— 任何变更平台(nacos / k8s / git)只查 history,不改任何东西
+- 凭证敏感:nacos 凭证从 `~/.openclaw/<agent-id>-creds.json` 或 env vars 自动读;脚本不会把 token 打进输出
+- 时间统一 UTC ISO 格式,避免不同来源时区混乱

@@ -1,0 +1,163 @@
+---
+name: incident-investigator
+description: 排障主线 skill。把"症状 → 时间轴 → 横向广度 → 纵向深度 → 三向交叉 → 根因标注"固化成 6 步流程图谱,强制 agent 按图谱走完所有关联,不漏关键证据。任何用户问"X 报错/慢/不通/突增/失败"类问题时都先用本 skill 编排其它 skill。
+---
+
+# Incident Investigator(排障主线 skill)
+
+## 何时使用
+
+**默认入口**:用户用了任何排障关键词 —— "5xx 突增 / 报错 / 超时 / 慢 / 不通 / 排查 / 故障 / 定位 / 为什么 / 失败 / 卡住"——**不要**直接跳进 routing / k8s-runtime-query / config-executor 等具体 skill,**先按本 skill 的 6 步流程编排**,所有具体 skill 当作工具用。
+
+## 反模式(看到下面这些回复立刻警觉,自己别犯)
+
+- 拿到"prod commerce 5xx" 就开始查 commerce 的 pod / log / metric,**没看时间轴上的变更、没扫横向兄弟服务、没沿依赖图追下游** → 经常停在表象、漏真因
+- 看完一个 skill 的输出就下结论 —— 单一证据不能下根因
+- 把所有 skill 全跑一遍但不交叉关联 —— 等同没查
+- 时间窗模糊就开始查 —— 没有 ±5 分钟窗口对齐就没"突变前后撞上变更"的能判断
+
+## 6 步流程图谱(强约束,逐步走完)
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│ Step 1:收齐前提(entity ID + 时间窗 + env + service + 接口)         │
+│ Step 2:时间轴对齐 → recent-changes 一次拉"故障时间 ±5 分钟内变更" │
+│ Step 3:横向扫 → 同 ns 其它服务是否也异常?(孤立 vs 广播判断)        │
+│ Step 4:纵向沿依赖图追 → 下游所有服务一口气并发查                     │
+│ Step 5:三向交叉 → trace + log + metric 在异常时刻交叉验证           │
+│ Step 6:根因标注 → 直接根因 / 深层根因 / 置信度,然后 P0/P1/P2 建议  │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### Step 1:收齐前提
+
+按 SOUL.md 顶部"最高原则"+ AGENTS.md "首问反射":
+
+- entity ID(订单号 / 用户 ID / trace_id / request_id 任一即可)
+- 时间窗(精确到分钟最好,至少给"什么时候开始 / 什么时候结束")
+- env(dev/prod 哪一个)
+- service / 接口名
+
+**任一缺失只反问这一个澄清问题,一次问完不要分多轮**。
+
+### Step 2:时间轴对齐(必跑,这是最高 ROI 的一步)
+
+跑 `recent-changes` skill 的 `timeline.py`,**并发拉**三处:
+
+```bash
+python3 scripts/timeline.py --env <env> --service <svc> --since 1h
+```
+
+输出格式按时间倒序合并:
+```
+14:25 [k8s] commerce-service rollout to revision 8 (image: commerce:v1.23)
+14:23 [故障开始] 用户反馈 5xx 突增
+14:18 [nacos] commerce/dev/application.yaml 改了 downstream.user.timeout 30s→3s
+14:10 [git] commerce-service main: feat: 加 user 调用超时控制 (auth/abc123)
+```
+
+**判断**:
+- 故障时间 ±5 分钟内有变更 → **强相关**,优先怀疑该变更
+- 故障时间是变更后的几秒到几分钟内突变 → **大概率因果**,先回滚验证
+- 时间窗内无变更 → 进 Step 3 看是否广播
+
+### Step 3:横向扫(孤立 vs 广播)
+
+跑 `k8s-runtime-query` 的 `ns-snapshot`:
+
+```bash
+python3 scripts/k8s_query.py --env <env> --cluster <c> ns-snapshot --namespace <ns>
+```
+
+输出每个 pod 的状态分布(健康/重启/Pending/CrashLoop)+ 异常 pod 列表 + 命中的 known-errors 类型计数。
+
+**判断**:
+- 只 commerce 的 pod 异常,其它服务健康 → **孤立故障**(应用问题),回 Step 4 沿依赖追根
+- 多个不相关服务一起异常 → **广播故障**(基础设施 / 集群 / 网络 / 共享 DB),立刻看 cluster events / kube-system 节点
+
+### Step 4:纵向沿依赖图追
+
+读 `routing/references/service-dependency-map.yaml` 拿当前服务的 downstream 列表(下游)+ data_stores(数据层依赖)。
+
+**对每个下游 service / data store 并发查**(支持并发的模型 → 同消息发出多个 tool_use):
+
+- 下游 K8s pod 健康(`k8s_query.py list-pods --label-selector app=<下游>`)
+- 下游 service 同窗口指标(`PromQL` 走 `selector_chain`)
+- 下游服务的错误日志(`LogQL` 走 `logql_selector_chain`)
+- 数据层连接 / 慢查询(对应 data-store skill)
+
+**判断**:
+- 某下游同窗口异常 → **真因可能在下游**,递归回 Step 4 把那个下游当主角再追
+- 所有下游都正常 → 真因在当前服务自身,进 Step 5 自身代码 / 配置层面
+
+### Step 5:三向交叉(trace + log + metric)
+
+异常时刻**同时**拉三个数据源:
+
+- **trace**:走 `tracing-query` / `tempo-query` / `skywalking-query`(看 `observability-map.yaml` 的 `default_tracing` 决定),按 trace_id 或 service+时间范围拉,找耗时 TOP / 错误 span
+- **log**:走 Loki / ELK,LogQL/ES 用 `selector_chain` 第一条命中,grep `known-errors.yaml` 的 pattern 提取已知模式
+- **metric**:走 Prometheus,QPS / p99 / 错误率 同窗口对比,看突变点是否吻合 deploy 时间(对照 Step 2)
+
+三者**互相佐证**:
+- trace 慢点指向 service X,log X 报 OOMKilled,metric X 内存 100% → **三向一致,直接根因**
+- trace 慢但 log 没错,metric 网络丢包 → 网络层问题
+- log 报错但 trace / metric 正常 → 单点偶发,可能是用户特定数据触发
+
+### Step 6:根因标注 + 建议(故障快报模板)
+
+按 AGENTS.md 的故障快报模板输出。**根因质量分级**:
+
+- **直接根因**:有明确证据(具体 pod / 具体 SQL / 具体配置项 / 具体 commit),可重现
+- **深层根因**:推断(为什么这个 pod 会 OOM:加载逻辑 / 流量峰值 / GC 配置)
+- **置信度**:
+  - 高 = 三向交叉一致 + 时间轴对得上 + 沿依赖图能解释症状
+  - 中 = 两向证据,缺一向
+  - 低 = 单证据 / 推断 / 无法重现
+
+**P0 止血**:`<回滚到 revision N / 临时调大 limit / 限流 / 降级路由>`,10 分钟内可执行
+**P1 修复**:具体代码 / 配置改动建议
+**P2 预防**:监控 / 告警 / 健康检查兜底改进
+
+## 执行示例(给作者验证用,机器人按这个走)
+
+**Q**:"prod commerce 接口 14:23 开始 5xx 突增,trace_id=abc123 用户付不了款"
+
+按 6 步:
+1. ✓ 信息齐(prod / commerce / 14:23 / trace_id 都有)
+2. **timeline.py prod commerce --since 1h** → 发现 14:20 commerce 部署 v1.23 + 14:18 nacos 改了 downstream.user.timeout 30s→3s。强相关。
+3. **ns-snapshot prod base-prod ns** → 只 commerce-3 个 pod 重启过,其它服务健康 → **孤立**,继续 Step 4。
+4. 读 dependency-map → commerce 下游 user / order / inventory + mysql:order_db。**并发查**:
+   - user pod / metric / log 全正常
+   - order pod / metric / log 全正常
+   - inventory pod 50% 重启过,关联 known-errors:"context deadline exceeded"
+5. 三向交叉 inventory:
+   - trace abc123 → inventory call 超时 8s
+   - log inventory 报 "rpc to user timeout 3s"
+   - metric inventory p99 10s
+   → 三向一致,**确认 inventory 因调 user 超时阈值改成 3s 后,user 的 p99 是 5s,所以全部超时**
+6. 根因:14:18 把 downstream.user.timeout 从 30s 改成 3s,但 user p99 实际 5s → inventory 调 user 全超时 → 上游 commerce 全 5xx
+   - 直接根因:配置项 `downstream.user.timeout=3s` 过严
+   - 深层根因:改超时阈值前没看 user 真实 p99 baseline
+   - 置信度:**高**(时间轴 + 横向 + 纵向 + 三向交叉全对得上)
+   - P0 止血:nacos 把 timeout 改回 30s 或 5s 看 user p99
+   - P1 修复:代码侧加超时退避;监控加 user p99 告警
+   - P2 预防:配置改动走灰度,改完 5 分钟看 dashboard
+
+**这个流程跑完用户拿到的不是"commerce 报错了你看下"**,是直接可处置的 P0 命令。
+
+## 跨 skill 协作
+
+本 skill 是**编排者**,不直接调 HTTP API。所有具体能力走子 skill:
+- `routing` 拿映射(env/service → ns/cluster/mcp/dataId)
+- `recent-changes` 拉时间轴
+- `k8s-runtime-query` 拉 K8s 状态
+- `config-executor` 查配置
+- `tracing-query` / `tempo-query` / `skywalking-query` 查 trace
+- 数据层 skill 查 redis / mongo / es / mysql 等
+
+## 硬约束
+
+- **6 步不可跳过**(简单查询走简单查询路径,但只要用户用了排障关键词就走完整流程)
+- **Step 2 时间轴必跑** —— 这是最高 ROI 的一步,没看变更就下结论几乎一定漏真因
+- **Step 4 必读 dependency-map** —— 没读就下"是 X 服务自己的问题"是不负责任的
+- **Step 6 置信度必须标** —— 给用户判断要不要相信你的根因

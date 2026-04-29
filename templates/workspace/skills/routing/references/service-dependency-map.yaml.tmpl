@@ -1,0 +1,64 @@
+# service-dependency-map.yaml
+# 服务依赖图(谁调谁 + 用什么数据层)。incident-investigator Step 4(纵向沿依赖追)的核心数据。
+#
+# **当前由 wizard 生成时仅占位**(没有自动从 trace 学的能力):
+# - 模板根据 repos[].service_names 列出服务名,upstream/downstream/data_stores 留空
+# - 维护者按团队真实服务依赖关系填进去 — 哪怕只填 1 个核心服务的下游链,排障准确度都明显提升
+#
+# 字段说明:
+#   <service>:
+#     upstream    : 调用本服务的上游(谁会受我影响)
+#     downstream  : 本服务调用的下游(我挂了谁不一定挂,但我挂常因为他们)
+#     data_stores : 本服务用的数据层,格式 "<type>:<logical-name>"(如 "mysql:order_db" / "redis:session" / "kafka:order-events")
+#     critical    : 关键路径标记;true=核心交易服务,P0 故障要更谨慎诊断 + 严格止血策略
+#
+# 用法(给 incident-investigator):
+#   1. 拿到主角服务 X(用户问的那个)
+#   2. 读 X.downstream → 并发查每个下游(K8s pod / metric / log)看哪个异常 → 真因可能在那
+#   3. 读 X.data_stores → 并发查每个数据层(对应 data-store skill)
+#   4. 必要时再递归到 downstream.downstream(深 2 层基本够,再深就是基础设施)
+#
+# 长期演进:
+#   - wizard 将来可加"从 7 天 Tempo / SkyWalking trace 自动学 service map" 按钮,产出本文件
+#   - 暂时手填,精度高于自学(LLM 不会去问没在依赖图里出现的服务)
+
+services:
+{{- range .Repos}}
+  {{- range .ServiceNames}}
+  {{.}}:
+    upstream: []         # TODO: 谁调本服务,如 [api-gateway, web-bff]
+    downstream: []       # TODO: 本服务调谁,如 [user, auth, order]
+    data_stores: []      # TODO: 本服务依赖的数据层,如 ["mysql:order_db", "redis:session"]
+    critical: false      # TODO: 核心交易路径 → true
+  {{- end}}
+  {{- if not .ServiceNames}}
+  {{.Name}}:
+    upstream: []
+    downstream: []
+    data_stores: []
+    critical: false
+  {{- end}}
+{{- end}}
+
+# ── 示例(参考填法,正式产出可删掉) ─────────────────────────────────
+# commerce:
+#   upstream: [api-gateway, web-bff]
+#   downstream: [user, order, inventory]
+#   data_stores:
+#     - "mysql:order_db"
+#     - "redis:session"
+#     - "kafka:order-events"
+#   critical: true
+# user:
+#   upstream: [commerce, gateway]
+#   downstream: [auth, profile-svc]
+#   data_stores:
+#     - "mysql:user_db"
+#     - "redis:user-cache"
+#   critical: true
+# auth:
+#   upstream: [user, gateway]
+#   downstream: [idp]                  # 第三方
+#   data_stores:
+#     - "redis:token-cache"
+#   critical: true

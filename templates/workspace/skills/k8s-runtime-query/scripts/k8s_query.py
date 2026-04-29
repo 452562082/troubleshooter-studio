@@ -463,6 +463,78 @@ def _grep_known_errors(text: str) -> list[str]:
     return found
 
 
+def cmd_ns_snapshot(args: argparse.Namespace, kc: KuboardClient) -> dict[str, Any]:
+    """整 namespace 的 pod 状态分布,用来快速判断"孤立故障 vs 广播故障"。
+
+    输出每个 pod 的简化状态 + 异常计数 + 命中的 known-errors 模式列表。
+    incident-investigator Step 3(横向扫)用:5 秒看出"是 commerce 一家挂了还是 ns 全瘫了"。
+    """
+    pods_res = cmd_list_pods(args, kc)
+    pods = pods_res['pods']
+
+    # 按状态分类统计
+    healthy: list[str] = []
+    degraded: list[dict[str, Any]] = []  # 异常 pod 详情(短)
+    state_counts: dict[str, int] = {}
+    error_patterns_seen: dict[str, int] = {}  # known-errors → 命中 pod 数
+
+    for p in pods:
+        name = p.get('name') or '?'
+        phase = p.get('phase') or 'Unknown'
+        restarts = p.get('restart_count') or 0
+        state_counts[phase] = state_counts.get(phase, 0) + 1
+        cs = (p.get('containers') or [{}])[0]
+        cs_state = cs.get('state') or 'unknown'
+        wait_reason = cs.get('wait_reason') or ''
+        term_reason = cs.get('term_reason') or ''
+        ready = cs.get('ready', False)
+
+        is_unhealthy = (
+            phase != 'Running' or
+            not ready or
+            restarts > 0 or
+            wait_reason in ('CrashLoopBackOff', 'ImagePullBackOff', 'ErrImagePull') or
+            term_reason in ('OOMKilled', 'Error')
+        )
+        if is_unhealthy:
+            issue = []
+            if phase != 'Running':
+                issue.append(f'phase={phase}')
+            if not ready and phase == 'Running':
+                issue.append('not-ready')
+            if restarts > 0:
+                issue.append(f'restart={restarts}')
+            if wait_reason:
+                issue.append(f'wait={wait_reason}')
+                error_patterns_seen[wait_reason] = error_patterns_seen.get(wait_reason, 0) + 1
+            if term_reason:
+                issue.append(f'term={term_reason}')
+                error_patterns_seen[term_reason] = error_patterns_seen.get(term_reason, 0) + 1
+            degraded.append({
+                'name': name,
+                'phase': phase,
+                'issues': issue,
+                'reason': p.get('reason'),
+                'message': (p.get('message') or '')[:200],
+            })
+        else:
+            healthy.append(name)
+
+    return {
+        'namespace': args.namespace,
+        'total': pods_res['count'],
+        'healthy_count': len(healthy),
+        'degraded_count': len(degraded),
+        'phase_distribution': state_counts,
+        'known_error_distribution': error_patterns_seen,
+        'degraded_pods': degraded[:30],  # 截断:大 ns 异常 pod 一长串没意义
+        'healthy_pods_sample': healthy[:10],
+        'verdict': 'healthy' if not degraded else (
+            'isolated' if len(degraded) <= max(3, len(pods) // 10) else 'widespread'
+        ),
+    }
+
+
 def cmd_pod_snapshot(args: argparse.Namespace, kc: KuboardClient) -> dict[str, Any]:
     """一站式:pods 列表 + 每 pod events + 主容器 logs(current + previous,若有 restart)。
 
@@ -569,6 +641,11 @@ def main() -> None:
     sp.add_argument('--name-filter', default='')
     sp.add_argument('--summary', action='store_true', help='只返关键信号(state/reason/exit_code + logs 最后 5 行 + 命中的 known-errors),省 token')
 
+    sp = sub.add_parser('ns-snapshot')
+    sp.add_argument('--namespace', required=True)
+    sp.add_argument('--label-selector', default='', help='可选:只看部分 pod')
+    sp.add_argument('--name-filter', default='')
+
     args = p.parse_args()
 
     creds = load_creds(args.env, args.agent_id, args.agent_dir)
@@ -592,6 +669,7 @@ def main() -> None:
         'list-events': cmd_list_events,
         'get-pod-logs': cmd_get_pod_logs,
         'pod-snapshot': cmd_pod_snapshot,
+        'ns-snapshot': cmd_ns_snapshot,
     }
     fn = handlers[args.action]
     result = fn(args, kc)

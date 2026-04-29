@@ -4092,7 +4092,9 @@ const DS_SKILL_NAME: Record<string, string> = {
   elasticsearch: 'es-runtime-query',
 }
 function deriveSkillsWhitelist(): string[] {
-  const skills: string[] = ['routing']
+  // routing / incident-investigator / recent-changes 是"编排者 / 路由"三大基础 skill,
+  // 跟具体后端无关,任何启用配置都需要它们;前者给数据,后两者把数据串成排障流程。
+  const skills: string[] = ['routing', 'incident-investigator', 'recent-changes']
   if (configCenterType.value !== 'none') skills.push('config-executor')
   for (const [key, on] of Object.entries(enabledDataStores)) {
     if (on) skills.push(DS_SKILL_NAME[key] || `${key}-runtime-query`)

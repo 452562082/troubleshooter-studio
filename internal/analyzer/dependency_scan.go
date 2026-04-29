@@ -119,6 +119,12 @@ var (
 	reGoKafka = regexp.MustCompile(`(?:kafka\.New|sarama\.New)`)
 	// elasticsearch / olivere/elastic
 	reGoES = regexp.MustCompile(`(?:elasticsearch\.NewClient|elastic\.NewClient|opensearch)`)
+	// rocketmq-client-go
+	reGoRocketMQ = regexp.MustCompile(`(?:rocketmq\.New|primitive\.NewMessage)|"github\.com/apache/rocketmq-client-go`)
+	// rabbitmq: amqp.Dial / streadway-amqp
+	reGoRabbitMQ = regexp.MustCompile(`(?:amqp\.Dial|streadway/amqp)`)
+	// clickhouse-go / clickhouse driver
+	reGoClickHouse = regexp.MustCompile(`(?:clickhouse\.Open|ClickHouse\{|"github\.com/ClickHouse/clickhouse-go)`)
 )
 
 func scanGoDeps(repoPath string, include []string) ([]DownstreamCall, []DataStoreUsage) {
@@ -169,6 +175,15 @@ func scanGoDeps(repoPath string, include []string) ([]DownstreamCall, []DataStor
 		if reGoES.MatchString(text) {
 			usages = append(usages, DataStoreUsage{Type: "elasticsearch", Driver: "go-es", Callsite: rel})
 		}
+		if reGoRocketMQ.MatchString(text) {
+			usages = append(usages, DataStoreUsage{Type: "rocketmq", Driver: "rocketmq-client-go", Callsite: rel})
+		}
+		if reGoRabbitMQ.MatchString(text) {
+			usages = append(usages, DataStoreUsage{Type: "rabbitmq", Driver: "amqp091/streadway", Callsite: rel})
+		}
+		if reGoClickHouse.MatchString(text) {
+			usages = append(usages, DataStoreUsage{Type: "clickhouse", Driver: "clickhouse-go", Callsite: rel})
+		}
 	}
 	return dedupeCalls(calls), dedupeUsages(usages)
 }
@@ -185,6 +200,12 @@ var (
 	reJavaSpringKafka = regexp.MustCompile(`@Autowired\s+(?:private\s+)?KafkaTemplate`)
 	reJavaJpa         = regexp.MustCompile(`(?:JpaRepository|CrudRepository|MybatisPlus|@Mapper)`)
 	reJavaES          = regexp.MustCompile(`(?:ElasticsearchClient|RestHighLevelClient|ElasticsearchOperations)`)
+	// RocketMQ:DefaultMQProducer / RocketMQTemplate(spring-rocketmq)
+	reJavaRocketMQ    = regexp.MustCompile(`(?:DefaultMQ(?:Producer|PushConsumer|PullConsumer)|RocketMQTemplate|@RocketMQMessageListener)`)
+	// RabbitMQ:RabbitTemplate(spring) / Connection/Channel(amqp-client)
+	reJavaRabbitMQ    = regexp.MustCompile(`(?:RabbitTemplate|com\.rabbitmq\.client\.Connection|@RabbitListener)`)
+	// ClickHouse:JDBC + clickhouse-jdbc
+	reJavaClickHouse  = regexp.MustCompile(`(?:clickhouse-jdbc|ClickHouseDataSource|com\.clickhouse)`)
 )
 
 func scanJavaDeps(repoPath string, include []string) ([]DownstreamCall, []DataStoreUsage) {
@@ -229,6 +250,15 @@ func scanJavaDeps(repoPath string, include []string) ([]DownstreamCall, []DataSt
 		if reJavaES.MatchString(text) {
 			usages = append(usages, DataStoreUsage{Type: "elasticsearch", Driver: "spring-data-es", Callsite: rel})
 		}
+		if reJavaRocketMQ.MatchString(text) {
+			usages = append(usages, DataStoreUsage{Type: "rocketmq", Driver: "spring-rocketmq", Callsite: rel})
+		}
+		if reJavaRabbitMQ.MatchString(text) {
+			usages = append(usages, DataStoreUsage{Type: "rabbitmq", Driver: "spring-amqp", Callsite: rel})
+		}
+		if reJavaClickHouse.MatchString(text) {
+			usages = append(usages, DataStoreUsage{Type: "clickhouse", Driver: "clickhouse-jdbc", Callsite: rel})
+		}
 	}
 	return dedupeCalls(calls), dedupeUsages(usages)
 }
@@ -242,6 +272,9 @@ var (
 	rePySQL      = regexp.MustCompile(`(?:sqlalchemy|peewee|tortoise|databases\.Database|psycopg|pymysql)`)
 	rePyKafka    = regexp.MustCompile(`(?:kafka-python|confluent_kafka|aiokafka)`)
 	rePyES       = regexp.MustCompile(`(?:elasticsearch|opensearchpy)\.`)
+	rePyRocketMQ = regexp.MustCompile(`(?:rocketmq[-_]client[-_]python|rocketmq\.client\.)`)
+	rePyRabbitMQ = regexp.MustCompile(`(?:pika\.|aio_pika|kombu\.)`)
+	rePyClickHouse = regexp.MustCompile(`(?:clickhouse[-_]driver|clickhouse[-_]connect)`)
 )
 
 func scanPythonDeps(repoPath string, include []string) ([]DownstreamCall, []DataStoreUsage) {
@@ -290,6 +323,15 @@ func scanPythonDeps(repoPath string, include []string) ([]DownstreamCall, []Data
 		if rePyES.MatchString(text) {
 			usages = append(usages, DataStoreUsage{Type: "elasticsearch", Driver: "elasticsearch-py", Callsite: rel})
 		}
+		if rePyRocketMQ.MatchString(text) {
+			usages = append(usages, DataStoreUsage{Type: "rocketmq", Driver: "rocketmq-client-python", Callsite: rel})
+		}
+		if rePyRabbitMQ.MatchString(text) {
+			usages = append(usages, DataStoreUsage{Type: "rabbitmq", Driver: "pika/aio_pika/kombu", Callsite: rel})
+		}
+		if rePyClickHouse.MatchString(text) {
+			usages = append(usages, DataStoreUsage{Type: "clickhouse", Driver: "clickhouse-driver", Callsite: rel})
+		}
 	}
 	return dedupeCalls(calls), dedupeUsages(usages)
 }
@@ -303,6 +345,9 @@ var (
 	reJsSQL      = regexp.MustCompile(`(?:typeorm|prisma|sequelize|mysql2|pg\.Pool)`)
 	reJsKafka    = regexp.MustCompile(`(?:kafkajs|node-rdkafka)`)
 	reJsES       = regexp.MustCompile(`(?:@elastic/elasticsearch|@opensearch-project)`)
+	reJsRocketMQ = regexp.MustCompile(`(?:rocketmq-client-nodejs|@apache/rocketmq)`)
+	reJsRabbitMQ = regexp.MustCompile(`(?:amqplib|amqp-connection-manager)`)
+	reJsClickHouse = regexp.MustCompile(`(?:@clickhouse/client|clickhouse)`)
 )
 
 func scanNodeDeps(repoPath string, include []string) ([]DownstreamCall, []DataStoreUsage) {
@@ -345,6 +390,15 @@ func scanNodeDeps(repoPath string, include []string) ([]DownstreamCall, []DataSt
 		}
 		if reJsES.MatchString(text) {
 			usages = append(usages, DataStoreUsage{Type: "elasticsearch", Driver: "@elastic/elasticsearch", Callsite: rel})
+		}
+		if reJsRocketMQ.MatchString(text) {
+			usages = append(usages, DataStoreUsage{Type: "rocketmq", Driver: "rocketmq-client-nodejs", Callsite: rel})
+		}
+		if reJsRabbitMQ.MatchString(text) {
+			usages = append(usages, DataStoreUsage{Type: "rabbitmq", Driver: "amqplib", Callsite: rel})
+		}
+		if reJsClickHouse.MatchString(text) {
+			usages = append(usages, DataStoreUsage{Type: "clickhouse", Driver: "@clickhouse/client", Callsite: rel})
 		}
 	}
 	return dedupeCalls(calls), dedupeUsages(usages)

@@ -88,6 +88,26 @@ errors:
       check_upstream_for: ["context deadline exceeded"]
       explanation: "DB 连接打满时所有调 DB 的服务都会 cascade fail"
 
+  # ── MQ ────────────────────────────────────────────
+  - pattern: "REBALANCE_IN_PROGRESS|GroupRebalancing|RebalanceInProgress"
+    typical_cause: "Kafka 消费者组重平衡中,临时不可消费"
+    next_actions:
+      - "看是否最近频繁加减消费者实例 / max.poll.interval.ms 太短被踢出"
+      - "session.timeout.ms / heartbeat.interval.ms 是否合理"
+
+  - pattern: "MessageTooLargeError|RecordTooLargeException"
+    typical_cause: "消息超 broker max.message.bytes / 客户端 max.request.size"
+    next_actions:
+      - "看消息大小分布(业务是否传了大字段如完整图片 base64)"
+      - "broker message.max.bytes 跟客户端 max.request.size 调一致"
+
+  # ── Redis ────────────────────────────────────────
+  - pattern: "WRONGTYPE Operation"
+    typical_cause: "对 key 用了错误类型操作(对 list 跑 HGET / 对 string 跑 ZADD)"
+    next_actions:
+      - "redis-runtime-query TYPE <key> 确认实际类型"
+      - "看代码:同一个 key 是否被多处用不同类型写入"
+
   # ── 应用 ──────────────────────────────────────────
   - pattern: "panic:|java.lang.OutOfMemoryError"
     typical_cause: "应用崩溃:Go panic / Java OOM"

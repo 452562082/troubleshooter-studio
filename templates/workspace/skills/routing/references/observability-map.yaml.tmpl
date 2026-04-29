@@ -120,3 +120,22 @@ prometheus:
     - '{namespace="<env>",app="<service>"}'                        # prometheus-operator 默认 app label
     - '{namespace="<env>",app_kubernetes_io_name="<service>"}'    # K8s recommended label(打了点)
     - '{job=~".*<service>.*"}'                                     # 最后兜底:job 名子串匹配
+
+elk:
+  enabled: {{.Infrastructure.Observability.ELK.Enabled}}
+  # ── ES DSL query_template_chain ──
+  # 跟 prometheus selector_chain / loki logql_selector_chain 同款:fallback 链按顺序试,命中
+  # N 行即停。占位符 <env> / <service> / <k8s.namespace> / <k8s.workload> 按当前上下文解析,
+  # 占位符无对应数据则跳过该条。ELK 字段名因 logstash/filebeat 配置而异,所以模板覆盖几种最常见。
+  # agent 可在 query_string 里附加业务条件 + 时间窗(@timestamp range)。
+  query_template_chain:
+    # K8s + filebeat ECS 兼容字段
+    - '{"query":{"bool":{"must":[{"term":{"kubernetes.namespace.keyword":"<k8s.namespace>"}},{"term":{"kubernetes.container.name.keyword":"<k8s.workload>"}}]}}}'
+    # K8s + ECS 标准字段
+    - '{"query":{"bool":{"must":[{"term":{"kubernetes.namespace_name.keyword":"<k8s.namespace>"}},{"term":{"kubernetes.container_name.keyword":"<k8s.workload>"}}]}}}'
+    # logstash 默认:app + env 顶级字段
+    - '{"query":{"bool":{"must":[{"term":{"app.keyword":"<service>"}},{"term":{"env.keyword":"<env>"}}]}}}'
+    # service 顶级字段(spring-boot 默认)
+    - '{"query":{"bool":{"must":[{"term":{"service.keyword":"<service>"}}]}}}'
+    # 全索引子串(最后兜底,扫描成本高)
+    - '{"query":{"query_string":{"query":"*<service>*"}}}'

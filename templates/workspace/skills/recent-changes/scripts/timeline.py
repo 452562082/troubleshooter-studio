@@ -168,16 +168,27 @@ def collect_k8s_rollouts(env: str, service: str, cluster: str, namespace: str,
 
 def collect_config_history(env: str, service: str, ws_root: Path,
                             since: timedelta) -> tuple[list[dict[str, Any]], str]:
-    """根据 routing/references/config-map.yaml 找 namespace/dataId,然后调对应 config_history。
+    """根据 routing/references/config-map.yaml 找配置后端类型 + namespace/dataId,
+    分发到对应 config_history 脚本(nacos / apollo / consul)。
 
-    简化实现:只支持 nacos(占主流),其它后端先返空 + note 说明。
-    nacos history:走 scripts/nacos_config.py history(stdlib 实现的)。"""
+    nacos:nacos_config.py history(走 namespace/group/dataId)
+    apollo:apollo_config.py history(走 appId/cluster/namespace)
+    consul:consul_config.py history(走 kv_prefix + key)
+    其它后端(env-vars / kubernetes ConfigMap)无原生 history,返空 + note。"""
     cm = ws_root / 'skills' / 'routing' / 'references' / 'config-map.yaml'
     if not cm.exists():
         return [], 'config-map.yaml 不存在,跳过配置 history'
     text = cm.read_text(encoding='utf-8', errors='ignore')
-    if 'config_center: nacos' not in text:
-        return [], '当前后端非 nacos,跳过(其它后端 history 暂不实现)'
+    cc_type = ''
+    for marker in ('nacos', 'apollo', 'consul'):
+        if f'config_center: {marker}' in text:
+            cc_type = marker
+            break
+    if cc_type == '':
+        return [], '当前后端非 nacos/apollo/consul,跳过(env-vars/k8s ConfigMap 无原生 history)'
+    if cc_type != 'nacos':
+        # 走通用解析:apollo / consul history
+        return _collect_apollo_consul_history(env, service, ws_root, since, cc_type, text)
     # 找 environments.<env>.<service>.{namespaceId,group,dataId}
     # 简单状态机解析,不引 PyYAML
     ns_id, group, data_id = '', '', ''
@@ -400,6 +411,121 @@ def _classify_diff_risks(diff_text: str) -> list[dict[str, str]]:
                 }
                 break
     return list(hits.values())
+
+
+def _collect_apollo_consul_history(env: str, service: str, ws_root: Path,
+                                    since: timedelta, cc_type: str,
+                                    cm_text: str) -> tuple[list[dict[str, Any]], str]:
+    """apollo / consul history。两种后端的 routing config-map.yaml 结构不同,
+    分别按文本解析抽 (env, service) 对应的字段(apollo: appId/cluster/namespace;
+    consul: kv_prefix + key),然后调对应 _config.py history。"""
+    script_name = f'{cc_type}_config.py'
+    cfg_script = ws_root / 'skills' / 'config-executor' / 'scripts' / script_name
+    if not cfg_script.exists():
+        return [], f'{script_name} 不存在'
+
+    up = env.upper().replace('-', '_')
+    # 凭证:nacos/apollo/consul 共用 CC_*_<ENV> 命名约定;具体走 creds.json fallback 也在
+    # 各 _config.py 里实现;timeline 这层只传 server 必需值。
+    server_var = {
+        'apollo': 'APOLLO_META_' + up,
+        'consul': 'CONSUL_HOST_' + up,
+    }.get(cc_type, '')
+    server = os.environ.get(server_var, '') or os.environ.get(f'CC_ADDR_{up}', '')
+    token = os.environ.get(f'{cc_type.upper()}_TOKEN_{up}', '') or os.environ.get(f'CC_TOKEN_{up}', '')
+
+    # 解析 config-map.yaml 找 (env, service) 配置标识
+    in_env, in_svc, indent_env, indent_svc = False, False, -1, -1
+    apollo_app, apollo_cluster, apollo_ns = '', '', ''
+    consul_key = ''
+    for raw in cm_text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith('#'):
+            continue
+        ind = len(raw) - len(raw.lstrip())
+        s = raw.strip()
+        if s == f'{env}:' or s.startswith(f'{env}:'):
+            in_env, in_svc, indent_env = True, False, ind
+            continue
+        if in_env and ind <= indent_env and ':' in s and not s.startswith(env):
+            in_env = False
+        if in_env:
+            if s.startswith(f'{service}:'):
+                in_svc, indent_svc = True, ind
+                continue
+            if in_svc and ind <= indent_svc and ':' in s and not s.startswith(service):
+                in_svc = False
+            if in_svc:
+                if cc_type == 'apollo':
+                    if m := re.match(r'(appId|cluster|namespaces?):\s*["\']?([^"\'\[\]]+)', s):
+                        if m.group(1) == 'appId':
+                            apollo_app = m.group(2).strip()
+                        elif m.group(1) == 'cluster':
+                            apollo_cluster = m.group(2).strip()
+                        elif m.group(1).startswith('namespace'):
+                            apollo_ns = m.group(2).strip()
+                if cc_type == 'consul':
+                    if m := re.match(r'(kv_prefix|key|kvPath):\s*["\']?([^"\'\s]+)', s):
+                        if not consul_key:
+                            consul_key = m.group(2).strip()
+
+    if not server:
+        return [], f'{server_var} / CC_ADDR_{up} 缺失,跳过 {cc_type} history'
+
+    args: list[str]
+    if cc_type == 'apollo':
+        if not (apollo_app and apollo_ns):
+            return [], f'apollo:{env}/{service} 没在 config-map 里找到 appId/namespaces'
+        args = [sys.executable, str(cfg_script), 'history',
+                '--meta-url', server, '--app-id', apollo_app,
+                '--cluster', apollo_cluster or 'default',
+                '--namespace', apollo_ns, '--env', env]
+        if token:
+            args += ['--token', token]
+    else:  # consul
+        if not consul_key:
+            return [], f'consul:{env}/{service} 没在 config-map 里找到 kv_prefix/key'
+        args = [sys.executable, str(cfg_script), 'history',
+                '--host', server, '--key', consul_key]
+        if token:
+            args += ['--token', token]
+
+    try:
+        out = subprocess.check_output(args, stderr=subprocess.STDOUT, timeout=20).decode('utf-8', errors='ignore')
+        data = json.loads(out)
+    except subprocess.CalledProcessError as e:
+        return [], f'{script_name} history failed: {e.output.decode("utf-8", errors="ignore")[:200]}'
+    except Exception as e:
+        return [], f'{cc_type} history error: {e}'
+
+    items = data.get('items') or data.get('history') or data.get('releases') or []
+    cutoff = datetime.now(timezone.utc) - since
+    events = []
+    for it in items:
+        ts = it.get('lastModifiedTime') or it.get('modifiedTime') or it.get('time') or it.get('ModifyIndex')
+        if not ts:
+            continue
+        try:
+            if isinstance(ts, (int, float)) or (isinstance(ts, str) and ts.isdigit()):
+                t = datetime.fromtimestamp(int(ts) / 1000 if int(ts) > 1e10 else int(ts), tz=timezone.utc)
+                ts_iso = t.isoformat()
+            else:
+                t = datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
+                ts_iso = str(ts)
+        except Exception:
+            continue
+        if t < cutoff:
+            continue
+        if cc_type == 'apollo':
+            summary = f"{apollo_app}/{apollo_cluster}/{apollo_ns} {it.get('opType', 'change')} by {it.get('dataChangeLastModifiedBy', '?')}"
+        else:
+            summary = f"{consul_key} change by {it.get('Session', '?')}"
+        events.append({
+            'ts': ts_iso,
+            'source': cc_type,
+            'kind': it.get('opType') or it.get('Operation') or 'change',
+            'summary': summary,
+        })
+    return events, ''
 
 
 def _fetch_nacos_diff(env: str, event: dict[str, Any], ws_root: Path) -> str | None:

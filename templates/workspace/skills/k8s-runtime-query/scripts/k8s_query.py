@@ -310,6 +310,45 @@ def cmd_list_services(args: argparse.Namespace, kc: KuboardClient) -> dict[str, 
     return {'services': out, 'count': len(out)}
 
 
+def cmd_rollout_history(args: argparse.Namespace, kc: KuboardClient) -> dict[str, Any]:
+    """列指定 Deployment 的 ReplicaSet 序列(按 metadata.creationTimestamp 倒序),用来看滚动历史:
+    哪个 revision 什么时候上的 / 当时镜像 / 副本数 / 是否还有活 pod。
+    Kuboard v4 的 ReplicaSet 在 apps/v1 下,跟 Deployment 同 cluster-cache 分页接口。
+    """
+    items = kc.list_paginated('apps', 'replicasets', args.namespace)
+    out = []
+    for it in items:
+        d = it.get('data') if isinstance(it.get('data'), dict) else it
+        meta = d.get('metadata') or {}
+        spec = d.get('spec') or {}
+        status = d.get('status') or {}
+        # 过滤:只留 owner = 指定 deployment 的 RS
+        owners = meta.get('ownerReferences') or []
+        owner_match = any(
+            (o.get('kind') == 'Deployment' and o.get('name') == args.deployment) for o in owners
+        )
+        if not owner_match:
+            continue
+        annotations = meta.get('annotations') or {}
+        revision = annotations.get('deployment.kubernetes.io/revision', '')
+        change_cause = annotations.get('kubernetes.io/change-cause', '')
+        containers = ((spec.get('template') or {}).get('spec') or {}).get('containers') or []
+        images = [c.get('image', '') for c in containers]
+        out.append({
+            'name': meta.get('name'),
+            'revision': revision,
+            'created_at': meta.get('creationTimestamp'),
+            'replicas_desired': spec.get('replicas', 0),
+            'replicas_ready': status.get('readyReplicas', 0),
+            'replicas_available': status.get('availableReplicas', 0),
+            'images': images,
+            'change_cause': change_cause,
+        })
+    # 按 created_at 倒序,最近的 RS 在前
+    out.sort(key=lambda x: x.get('created_at') or '', reverse=True)
+    return {'deployment': args.deployment, 'revisions': out, 'count': len(out)}
+
+
 def cmd_list_deployments(args: argparse.Namespace, kc: KuboardClient) -> dict[str, Any]:
     items = kc.list_paginated('apps', 'deployments', args.namespace)
     out = []
@@ -412,6 +451,10 @@ def main() -> None:
     sp = sub.add_parser('list-deployments')
     sp.add_argument('--namespace', required=True)
 
+    sp = sub.add_parser('rollout-history')
+    sp.add_argument('--namespace', required=True)
+    sp.add_argument('--deployment', required=True)
+
     sp = sub.add_parser('list-events')
     sp.add_argument('--namespace', required=True)
     sp.add_argument('--field-selector', default='')
@@ -449,6 +492,7 @@ def main() -> None:
         'list-pods': cmd_list_pods,
         'list-services': cmd_list_services,
         'list-deployments': cmd_list_deployments,
+        'rollout-history': cmd_rollout_history,
         'list-events': cmd_list_events,
         'get-pod-logs': cmd_get_pod_logs,
         'pod-snapshot': cmd_pod_snapshot,

@@ -23,6 +23,7 @@ import {
   kuboardListDeployments,
   kuboardFetchConfigMaps,
   runInstall,
+  selfTestAgent,
   isDesktop,
   openDir,
   preloadConfigCenter,
@@ -5098,10 +5099,38 @@ async function runOneClickDeploy() {
         pushLog('install', 'warn', `[${t}] auto-install 异常,保留中间包: ${String(e?.message || e)}`)
       }
     }
+    // 部署完自动跑一次 self-test,把端点 ping 结果反馈给用户(只对 openclaw 跑;
+    // claude-code/cursor 的 self-test 还没适配,跳过避免误报"openclaw.json 缺失")。
+    const openclawDest = installedTargets.includes('openclaw')
+      ? await defaultDestPath('openclaw', system.id || '')
+      : ''
+    let selfTestSummary = ''
+    if (openclawDest) {
+      try {
+        const st = await selfTestAgent(openclawDest)
+        const failCount = (st.checks || []).filter(c => c.status === 'FAIL').length
+        const warnCount = (st.checks || []).filter(c => c.status === 'WARN').length
+        const passCount = (st.checks || []).filter(c => c.status === 'PASS').length
+        if (failCount > 0) {
+          const fails = (st.checks || []).filter(c => c.status === 'FAIL')
+            .map(c => `${c.name}: ${c.detail?.slice(0, 60) || ''}`).join('; ')
+          selfTestSummary = `🩺 自检 ${passCount}✓ ${warnCount}⚠ ${failCount}✗ → ${fails}`
+          pushLog('install', 'error', `[self-test] ${failCount} 项失败: ${fails}`)
+        } else if (warnCount > 0) {
+          selfTestSummary = `🩺 自检 ${passCount}✓ ${warnCount}⚠ 0✗(警告项不阻塞)`
+        } else {
+          selfTestSummary = `🩺 自检 ${passCount}✓ 全绿`
+        }
+      } catch (e: any) {
+        pushLog('install', 'warn', `[self-test] 跑不起来: ${String(e?.message || e)}`)
+      }
+    }
+
     if (stagedOnly.length > 0) {
       toast.success(`已就绪:${installedTargets.join(' / ') || '无'};需补凭证:${stagedOnly.join(' / ')}(到「已装机器人」页完成)`)
     } else {
-      toast.success(`部署完成,共 ${installedTargets.length} 个目标已生效:${installedTargets.join(' / ')}`)
+      const tail = selfTestSummary ? `\n${selfTestSummary}` : ''
+      toast.success(`部署完成,共 ${installedTargets.length} 个目标已生效:${installedTargets.join(' / ')}${tail}`)
     }
     router.push('/bots')
   } catch (e: any) {

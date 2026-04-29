@@ -356,6 +356,15 @@ export async function runInstall(
   return App.RunInstall(outputDir, creds)
 }
 
+/** 跑一次 self-test:校验 agent 安装完整性 + ping 各 env 配置中心/可观测性端点。
+ *  返回 ok 标志 + checks 明细;部署完自动触发,把 fail/warn 摘要弹给用户。 */
+export type SelfTestCheck = { name: string; status: string; detail?: string }
+export type SelfTestResult = { ok: boolean; checks: SelfTestCheck[] }
+export async function selfTestAgent(dir: string): Promise<SelfTestResult> {
+  if (!isDesktop()) throw new Error('SelfTestAgent 只在桌面 app 里可用')
+  return App.SelfTestAgent(dir) as any
+}
+
 /** 取消正在跑的 install.sh(SIGKILL 给 bash 进程组)。返回 true=成功取消,
  *  false=当前没 install 在跑(UI 可忽略)。浏览器模式无 install,直接 false。 */
 export async function cancelInstall(): Promise<boolean> {

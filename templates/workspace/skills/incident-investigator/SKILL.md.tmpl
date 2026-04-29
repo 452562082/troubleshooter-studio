@@ -92,16 +92,60 @@ python3 scripts/k8s_query.py --env <env> --cluster <c> ns-snapshot --namespace <
 
 ### Step 5:三向交叉(trace + log + metric)
 
-异常时刻**同时**拉三个数据源:
+异常时刻**同时**拉三个数据源,然后**用 `triangulate.py` 做客观对齐**(不要让 LLM 心算时间差和相关性):
+
+#### 5.1 三路独立拉数据(并发)
 
 - **trace**:走 `tracing-query` / `tempo-query` / `skywalking-query`(看 `observability-map.yaml` 的 `default_tracing` 决定),按 trace_id 或 service+时间范围拉,找耗时 TOP / 错误 span
-- **log**:走 Loki / ELK,LogQL/ES 用 `selector_chain` 第一条命中,grep `known-errors.yaml` 的 pattern 提取已知模式
-- **metric**:走 Prometheus,QPS / p99 / 错误率 同窗口对比,看突变点是否吻合 deploy 时间(对照 Step 2)
+- **log**:走 Loki / ELK,LogQL/ES 用 `selector_chain` 第一条命中,**grep `known-errors.yaml` 的 pattern 标命中类型**
+- **metric**:走 Prometheus,QPS / p99 / 错误率 同窗口对比,**对比 24h 前同时段 baseline**(`<expr> offset 24h`),给出 baseline / actual / delta
 
-三者**互相佐证**:
-- trace 慢点指向 service X,log X 报 OOMKilled,metric X 内存 100% → **三向一致,直接根因**
-- trace 慢但 log 没错,metric 网络丢包 → 网络层问题
-- log 报错但 trace / metric 正常 → 单点偶发,可能是用户特定数据触发
+#### 5.2 喂给 triangulate.py 做客观对齐
+
+把三路结果拼成统一 schema 的 JSON,通过 stdin 喂给:
+
+```bash
+cat <<EOF | python3 scripts/triangulate.py --from-stdin
+{
+  "incident_window": "2025-04-29 14:20 ~ 14:30",
+  "metric_anomalies": [
+    {"metric":"p99","target_service":"inventory","baseline":"500ms","actual":"5s","delta":"+10x","start_ts":"2025-04-29T14:23:00Z"}
+  ],
+  "log_pattern_hits": [
+    {"pattern":"context deadline exceeded","target_service":"inventory","count":847,"first_seen":"2025-04-29T14:23:12Z","last_seen":"2025-04-29T14:29:55Z"}
+  ],
+  "trace_outliers": [
+    {"trace_id":"abc123","target_service":"commerce","duration_ms":8200,"critical_span":{"service":"inventory","operation":"getStock","duration_ms":7800},"start_ts":"2025-04-29T14:23:15Z"}
+  ]
+}
+EOF
+```
+
+不带 `--from-stdin` 跑,脚本会输出 schema 模板让你照着拼。
+
+#### 5.3 解读 correlation 字段(直接照搬,不再主观推理)
+
+triangulate.py 输出的 `correlation` 节给客观结论:
+
+```json
+"correlation": {
+  "metric_log_aligned": true,        // metric 突变窗口和 log error 窗口 ±60s 内重合
+  "log_trace_aligned": true,         // log error 窗口和 trace 异常窗口 ±60s 内重合
+  "trace_metric_aligned": true,      // 同上
+  "aligned_count": 3,                // 0-3,几向对齐
+  "consensus_service": "inventory",  // 三向同时指向哪个服务(关键!)
+  "consensus_window": "...",
+  "confidence": "high",              // high=三向 + 共识 / medium=两向 / low=单证据
+  "verdict": "三向高度一致,共识指向服务 inventory,..."
+}
+```
+
+**confidence 字段直接对应 Step 6 置信度量化标尺**——不要在快报里写"我觉得 90% 是 inventory",写 `triangulate.py` 给的 `high/medium/low`。
+
+#### 反模式
+
+- 三路独立看完,"我觉得他们都指向 X" → 这是主观推理,**必须经过 triangulate.py 做时间窗对齐 + service 集合交集运算后再下"三向一致"结论**
+- 时间格式不统一就喂(混 UTC+8 / UTC) → triangulate.py 解析失败会进 notes,自查格式
 
 ### Step 6:根因标注 + 建议(故障快报模板)
 
@@ -109,14 +153,49 @@ python3 scripts/k8s_query.py --env <env> --cluster <c> ns-snapshot --namespace <
 
 - **直接根因**:有明确证据(具体 pod / 具体 SQL / 具体配置项 / 具体 commit),可重现
 - **深层根因**:推断(为什么这个 pod 会 OOM:加载逻辑 / 流量峰值 / GC 配置)
-- **置信度**:
-  - 高 = 三向交叉一致 + 时间轴对得上 + 沿依赖图能解释症状
-  - 中 = 两向证据,缺一向
-  - 低 = 单证据 / 推断 / 无法重现
 
-**P0 止血**:`<回滚到 revision N / 临时调大 limit / 限流 / 降级路由>`,10 分钟内可执行
-**P1 修复**:具体代码 / 配置改动建议
-**P2 预防**:监控 / 告警 / 健康检查兜底改进
+#### 置信度量化标尺(必须按规则判,不要主观吹"高")
+
+| 等级 | 严格判定条件(全满足才算) | 用例 |
+|--|--|--|
+| **高** | ① Step 5 三向交叉一致(metric 突变 / log error 模式 / trace 慢 span 都指向同一服务+同一时刻)<br>② Step 2 时间轴 ±5 分钟内有 correlated 变更<br>③ Step 4 依赖图能解释症状传导路径 | "14:18 nacos 改超时阈值 → inventory 调 user 全超时 → commerce 5xx",三向都对 |
+| **中** | 任一缺失但其余两条满足 | 三向交叉只有 metric+log 一致,trace 没采到对应链路;或者三向一致但没找到时间轴变更(可能是流量峰值) |
+| **低** | 单证据 / 仅 LLM 推断 / 无法重现 | 只看到 log 报错,metric 和 trace 正常;或者根因纯属"应该是 XX" |
+
+**写在快报里要明示判定理由**,例:`置信度: 中(metric+log 一致指向 inventory,但 trace 数据缺失,无法验证调用链路)`,这样用户知道哪一环弱。
+
+#### 处置建议:回滚 vs 热修 决策树
+
+不要默认建"P0 回滚"或"P0 热修",按下面决策:
+
+```
+Q1: 故障开始时间是否在某次 deploy / 配置改动后 5 分钟内?(看 Step 2 timeline 的 correlated 标记)
+├── 是
+│   └── Q2: 旧 revision 还活吗?(rollout-history 看上一个 RS 的 replicas_available)
+│       ├── 活 → P0: **强烈回滚**(`kubectl rollout undo` / Kuboard 回滚 / nacos 改回旧值)
+│       └── 不活(已被新 RS 完全替代)→ Q3: 故障已持续多久?
+│           ├── < 10 分钟 → P0: **回滚 + 接受短暂全断**
+│           └── > 10 分钟 → P0: **热修上线**(回滚再起新 pod 时间窗 vs 热修打 patch 时间窗,后者快)
+└── 否(跟 deploy/配置无关)
+    └── Q4: 是否能在 < 5 分钟内写出 patch?
+        ├── 能(单点改 1-2 行)→ P0: **热修**
+        └── 不能(涉及业务逻辑) → Q5: 是否有降级路径?
+            ├── 有(限流 / 降级开关 / 切走流量)→ P0: **降级**先止血,P1 慢慢修
+            └── 没有 → P0: **扩容/重启**先续命,P1 紧急代码修复
+```
+
+特殊情况:
+- **业务峰值期**(prod 上下班高峰 / 大促):回滚成本可能 > 热修;偏向降级 + 限流先扛过峰值
+- **数据已经写脏**(订单 / 支付状态错):**禁止盲目回滚**,回滚后旧版本读新数据可能再错;先 P0 阻止继续写错(限流入口),再分析数据修复策略
+- **无法重现**:不要乱建 P0 改动,先加监控 + 重现路径,免得反向引入新问题
+
+#### 输出格式
+
+故障快报模板第 5 节"处置建议"按这个填:
+
+- **P0 止血**:从决策树挑出来的具体动作 + 命令 + 预期效果(10 分钟内可执行)
+- **P1 修复**:`<代码改哪里 / 配置改什么>` + 测试方法
+- **P2 预防**:监控 / 告警 / 健康检查 / 灰度策略 / SLO 调整
 
 ## 执行示例(给作者验证用,机器人按这个走)
 

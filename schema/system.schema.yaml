@@ -101,7 +101,7 @@ infrastructure:
           group: "DEFAULT_GROUP"
           data_id: "user.yaml"
 
-  # 5.2 可观测性 —— 决定 grafana / loki / prometheus MCP 是否生成
+  # 5.2 可观测性 —— 决定 grafana / loki / prometheus / jaeger / elk / k8s_runtime MCP 与 skill 是否生成
   observability:
     grafana:
       enabled: true
@@ -113,11 +113,63 @@ infrastructure:
         password_placeholder: "{{GRAFANA_PASSWORD}}"
     loki:
       enabled: true
-      via_grafana: true              # true=复用 grafana 凭证，false=独立 endpoint
+      via_grafana: true              # true=走 Grafana 代理(用 datasource_uid_by_env);false=直连 endpoint
+      datasource_uid_by_env:         # [optional] via_grafana 模式记录每 env 选中的 Loki datasource UID
+        dev: "<loki-ds-uid-dev>"
+        prod: "<loki-ds-uid-prod>"
     prometheus:
       enabled: true
       via_grafana: true
       preferred_metrics: []          # [optional] 写入 observability-map.yaml
+      datasource_uid_by_env:         # [optional] 同上,Prometheus 在 Grafana 里的 ds UID
+        dev: "<prom-ds-uid-dev>"
+        prod: "<prom-ds-uid-prod>"
+    jaeger:
+      enabled: false                 # [optional] 用 Jaeger 时打开
+      url_by_env:
+        dev: "{{JAEGER_DEV_URL}}"
+        prod: "{{JAEGER_PROD_URL}}"
+      datasource_uid_by_env: {}      # [optional] via_grafana 时填
+    elk:
+      enabled: false                 # [optional] 用 ELK 时打开
+      kibana_by_env:
+        dev: "{{KIBANA_DEV_URL}}"
+        prod: "{{KIBANA_PROD_URL}}"
+      es_by_env:
+        dev: "{{ELK_ES_DEV_URL}}"
+        prod: "{{ELK_ES_PROD_URL}}"
+      default_index: "my-system-logs-*"
+      auth:
+        username_placeholder: "{{ELK_USERNAME}}"
+        password_placeholder: "{{ELK_PASSWORD}}"
+      datasource_uid_by_env: {}
+    skywalking:
+      enabled: false
+      url_by_env:
+        dev: "{{SKYWALKING_DEV_URL}}"
+    tempo:
+      enabled: false
+      url_by_env:
+        dev: "{{TEMPO_DEV_URL}}"
+      via_grafana: true
+      datasource_uid_by_env: {}
+    # 5.2.1 K8s 运行时 —— 通过 Kuboard v4 API 查 pod / events / logs / deployment;
+    # 跟"配置源 kuboard"正交,用户从 nacos 读配置仍可在这里查 K8s 运行时。
+    k8s_runtime:
+      enabled: false
+      url_by_env:
+        dev: "{{KUBOARD_DEV_URL}}"
+        prod: "{{KUBOARD_PROD_URL}}"
+      auth:
+        username_placeholder: "{{KUBOARD_USERNAME}}"
+        password_placeholder: "{{KUBOARD_PASSWORD}}"
+      service_map:                   # [optional] (env, service) → cluster/namespace/workload/label_selector
+        - env: dev                   # routing skill 解析时用,workload+selector 至少有一个
+          service: user
+          cluster: dev-cluster
+          namespace: shop-dev
+          workload: user-service     # Deployment 名
+          label_selector: app=user-service  # 自动从 spec.selector.matchLabels 取
 
   # 5.3 数据层 —— 决定是否生成对应 runtime-query skill
   # discovery:

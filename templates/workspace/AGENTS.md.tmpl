@@ -21,6 +21,42 @@
 - 回复必须标注实测入口（域名/IP/服务名）。
 - 结论必须附证据来源（日志/请求/代码位置）。
 
+## skills / scripts 路径速记
+
+各 SKILL.md 引用的脚本路径(`scripts/xxx.py`)是**相对工作区根**的，agent 拼绝对路径时按以下规则:
+
+| 部署平台 | 工作区根 |
+|--|--|
+| OpenClaw | `~/.openclaw/workspace/<workspace_name>/` |
+| Claude Code | `~/.claude/skills/<agent-name>/` |
+| Cursor | `~/.cursor/skills/<agent-name>/` |
+
+`<workspace_name>` / `<agent-name>` 取本 agent 的 frontmatter `name` 字段(就是 `{{.AgentID}}`)。
+
+调脚本时**必须用绝对路径**:
+
+```bash
+# OpenClaw
+python3 ~/.openclaw/workspace/{{.AgentID}}/skills/<skill>/scripts/<file>.py ...
+# Claude Code
+python3 ~/.claude/skills/{{.AgentID}}/<skill>/scripts/<file>.py ...
+# Cursor
+python3 ~/.cursor/skills/{{.AgentID}}/<skill>/scripts/<file>.py ...
+```
+
+直接 `python3 scripts/x.py` 在 Claude Code / Cursor 下 cwd 不是工作区根,会找不到文件。
+
+## Python 依赖
+
+部分 skill 脚本(目前只有 `k8s-runtime-query/scripts/k8s_query.py`)依赖 `requests`,
+工作区根有 `requirements.txt`。第一次跑这类脚本前装一次:
+
+```bash
+python3 -m pip install --user -r <工作区根>/requirements.txt
+```
+
+其它脚本(nacos / apollo / consul / redis / mongo / es 配置 etc.)只用 stdlib,免装。
+
 ## 首次打招呼时的自我介绍
 
 当用户的第一条消息只是打招呼（"hi" / "你好" / "ping" / 空表情）或明确问 "你能干什么" / "你会什么" / "怎么用" 时，**主动**按下面这个模板介绍能力，不要只回一句"你好"：

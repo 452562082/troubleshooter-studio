@@ -1,0 +1,7 @@
+# Python 依赖 —— skills/*/scripts/*.py 共用
+# 部署后第一次跑 k8s-runtime-query 之类用 HTTP API 的脚本前装一次:
+#   python3 -m pip install --user -r requirements.txt
+# 其它脚本(nacos/apollo/consul/redis/mongo 等)只用 Python 3 标准库,免装。
+requests>=2.31.0
+# PyYAML 暂不强依赖;后续若有 skill 脚本要解 yaml,统一从这里取
+PyYAML>=6.0

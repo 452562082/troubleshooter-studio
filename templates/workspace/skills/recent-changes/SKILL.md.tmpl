@@ -49,6 +49,38 @@ python3 scripts/timeline.py --env <env> --service <service> --since 1h \
 
 `correlated: true` 是 incident-investigator Step 2 的关键输入 —— **故障开始时间 ±5 分钟内的变更几乎一定是嫌疑**,优先怀疑、先回滚验证。
 
+## diff_risks(危险变更自动分类)
+
+correlated 的 nacos events 拉到 diff 后,脚本会扫"已知危险变更模式" 给 `event.diff_risks` 数组:
+
+```json
+{
+  "source": "nacos",
+  "summary": "...",
+  "correlated": true,
+  "diff": "-downstream.user.timeout: 30s\n+downstream.user.timeout: 3s\n",
+  "diff_risks": [
+    {"risk": "timeout_decreased", "severity": "high", "hint": "RPC/HTTP 超时阈值变小,如果新值比下游真实 p99 小,上游会全 timeout 引发 5xx 雪崩"}
+  ]
+}
+```
+
+risk 类型库(覆盖 12 类常见危险变更):
+- `timeout_decreased` — 超时变小
+- `rate_limit_decreased` — 限流变小
+- `pool_size_changed` — 连接池改
+- `replicas_decreased` — 副本数减少
+- `resource_limit_decreased` — 资源 limit 变小
+- `downstream_url_changed` — 下游地址改
+- `database_endpoint_changed` — DB 连接串改(severity: critical)
+- `auth_changed` — 鉴权凭证改
+- `feature_flag_toggled` — 功能开关改
+- `retry_changed` — 重试次数改
+- `circuit_breaker_changed` — 熔断/降级改
+- `hpa_changed` — 弹性伸缩改
+
+agent 看到 `diff_risks` 直接知道**这变更是危险类型**,对应 hint 已经说明"为什么危险 / 用户怎么处理"。incident-investigator Step 6 处置建议直接基于这些 risk 给 P0 止血(几乎都是"回滚到上一版本")。
+
 ## 三路数据来源
 
 | source | 含义 | 怎么拉 |

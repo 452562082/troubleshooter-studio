@@ -267,6 +267,141 @@ def collect_config_history(env: str, service: str, ws_root: Path,
     return events, ''
 
 
+# ── 危险变更模式库 ──────────────────────────────────────────────────────
+# diff 文本扫这些 regex,命中给 event.diff_risks 字段标 risk 类型 + severity。
+# agent 拿到 diff_risks 直接知道这是危险变更,不用 LLM 心算"超时变小风险有多大"。
+_DIFF_RISK_PATTERNS: list[dict[str, Any]] = [
+    # ── RPC / HTTP 超时变小 → 上游全 timeout ──
+    {
+        'risk': 'timeout_decreased',
+        'severity': 'high',
+        # 匹配 -timeout: <bigger>\n+timeout: <smaller>(基础形态;同时支持 read-timeout / connect-timeout / rpc.timeout 等)
+        'patterns': [
+            r'-\s*([\w\._]*timeout[\w\._]*)\s*:\s*([\d\.]+)(s|ms|m|h)?',
+            r'-\s*([\w\._]*Timeout[\w\._]*)\s*:\s*([\d\.]+)(s|ms|m|h)?',
+        ],
+        'hint': 'RPC/HTTP 超时阈值变小,如果新值比下游真实 p99 小,上游会全 timeout 引发 5xx 雪崩',
+    },
+    # ── 限流 / QPS 阈值改小 ──
+    {
+        'risk': 'rate_limit_decreased',
+        'severity': 'high',
+        'patterns': [
+            r'-\s*([\w\._]*(?:rate[\-_]?limit|qps[\-_]?limit|tps|max[\-_]?qps)[\w\._]*)\s*:\s*\d+',
+        ],
+        'hint': '限流阈值变小,业务流量超过新阈值就会被拒;先看流量基线再调',
+    },
+    # ── 连接池 / 最大连接数改 ──
+    {
+        'risk': 'pool_size_changed',
+        'severity': 'medium',
+        'patterns': [
+            r'-\s*([\w\._]*(?:max[\-_]?(?:pool|connection|idle)|pool[\-_]?size)[\w\._]*)\s*:\s*\d+',
+            r'-\s*([\w\._]*max[\-_]?conn[\w\._]*)\s*:\s*\d+',
+        ],
+        'hint': '连接池配置改;池太小会 Too many connections,太大会 DB 打满',
+    },
+    # ── K8s replicas 改少 ──
+    {
+        'risk': 'replicas_decreased',
+        'severity': 'high',
+        'patterns': [
+            r'-\s*replicas\s*:\s*(\d+)',
+        ],
+        'hint': '副本数减少,容量下降;高峰期可能扛不住流量',
+    },
+    # ── 资源 limit 改小 ──
+    {
+        'risk': 'resource_limit_decreased',
+        'severity': 'medium',
+        'patterns': [
+            r'-\s*(memory|cpu)\s*:\s*[\d\.]+(Mi|Gi|m)',
+        ],
+        'hint': '资源 limit 减小,可能引发 OOMKilled / CPU throttle',
+    },
+    # ── 路由 / 下游地址改 ──
+    {
+        'risk': 'downstream_url_changed',
+        'severity': 'high',
+        'patterns': [
+            r'-\s*([\w\._]*(?:url|endpoint|host|addr|target)[\w\._]*)\s*:\s*["\']?https?://',
+        ],
+        'hint': '下游服务地址改了;新地址不可达时调用全失败',
+    },
+    # ── 数据库 DSN / 主从切换 ──
+    {
+        'risk': 'database_endpoint_changed',
+        'severity': 'critical',
+        'patterns': [
+            r'-\s*([\w\._]*(?:dsn|jdbc[\-_]?url|database[\-_]?url|mongo[\-_]?uri|redis[\-_]?url)[\w\._]*)\s*:',
+        ],
+        'hint': '数据库连接串改;主从切换 / 库迁移场景常见,可能引发数据不一致 / 连接失败',
+    },
+    # ── 鉴权 / 密钥改 ──
+    {
+        'risk': 'auth_changed',
+        'severity': 'high',
+        'patterns': [
+            r'-\s*([\w\._]*(?:secret|api[\-_]?key|token|password|appkey)[\w\._]*)\s*:',
+        ],
+        'hint': '鉴权凭证改;旧 token 没轮换的服务全部 401',
+    },
+    # ── 功能开关 / feature flag ──
+    {
+        'risk': 'feature_flag_toggled',
+        'severity': 'medium',
+        'patterns': [
+            r'-\s*([\w\._]*(?:enabled|enable|disable|switch|flag)[\w\._]*)\s*:\s*(true|false)',
+        ],
+        'hint': '开关类配置改;突然开启/关闭某能力可能影响业务行为',
+    },
+    # ── 重试次数改 ──
+    {
+        'risk': 'retry_changed',
+        'severity': 'medium',
+        'patterns': [
+            r'-\s*([\w\._]*(?:retry|retries|max[\-_]?retry)[\w\._]*)\s*:\s*\d+',
+        ],
+        'hint': '重试次数改;变小易 5xx,变大可能放大下游故障',
+    },
+    # ── 熔断 / 降级 阈值改 ──
+    {
+        'risk': 'circuit_breaker_changed',
+        'severity': 'medium',
+        'patterns': [
+            r'-\s*([\w\._]*(?:circuit[\-_]?breaker|fallback|fuse|degrad)[\w\._]*)\s*:',
+        ],
+        'hint': '熔断/降级配置改;不当配置会放大失败传播',
+    },
+    # ── HPA / 弹性伸缩 改 ──
+    {
+        'risk': 'hpa_changed',
+        'severity': 'medium',
+        'patterns': [
+            r'-\s*(min[\-_]?replicas|max[\-_]?replicas|targetCPU|targetMemory)\s*:',
+        ],
+        'hint': 'HPA 配置改;扩缩容策略变化会影响容量响应',
+    },
+]
+
+
+def _classify_diff_risks(diff_text: str) -> list[dict[str, str]]:
+    """diff 文本扫所有危险模式,返回命中的 risk 列表(去重)。"""
+    if not diff_text:
+        return []
+    hits: dict[str, dict[str, str]] = {}
+    for entry in _DIFF_RISK_PATTERNS:
+        for pat in entry['patterns']:
+            if re.search(pat, diff_text, re.MULTILINE | re.IGNORECASE):
+                hits[entry['risk']] = {
+                    'risk': entry['risk'],
+                    'severity': entry['severity'],
+                    'hint': entry['hint'],
+                }
+                break
+    return list(hits.values())
+
+
 def _fetch_nacos_diff(env: str, event: dict[str, Any], ws_root: Path) -> str | None:
     """correlated nacos history event → 拉前后两版 content 算 unified diff,塞进 event.diff。
 
@@ -408,6 +543,10 @@ def main() -> None:
             diff = _fetch_nacos_diff(args.env, e, ws_root)
             if diff:
                 e['diff'] = diff
+                # 危险变更分类:diff 里 grep 危险模式,命中给 diff_risks 数组
+                risks = _classify_diff_risks(diff)
+                if risks:
+                    e['diff_risks'] = risks
             elif diff is None:
                 notes.append(f'[nacos-diff] 无法对比 {e.get("summary", "")} 前后版本(脚本不可用 / API 不返历史 content)')
 

@@ -4,12 +4,20 @@
 # 避免 LLM 凭脑子推典型根因(常见 80% 故障都是这些)。
 #
 # 字段约定:
-#   pattern        : 关键字 / 子串 / 简单正则,grep 语义。多写几个 alias 增加命中率。
-#   category       : k8s / rpc / db / mq / fs / network / app
-#   severity       : low / medium / high / critical (用户可见严重度,不是 root cause 难度)
-#   typical_cause  : 一句话最常见根因
-#   next_actions   : 按优先级排,agent 命中后按顺序走
-#   mitigation     : P0 止血动作(立即可执行)
+#   pattern          : 关键字 / 子串 / 简单正则,grep 语义。多写几个 alias 增加命中率。
+#   category         : k8s / rpc / db / mq / fs / network / app
+#   severity         : low / medium / high / critical (用户可见严重度,不是 root cause 难度)
+#   typical_cause    : 一句话最常见根因
+#   next_actions     : 按优先级排,agent 命中后按顺序走
+#   mitigation       : P0 止血动作(立即可执行)
+#   causation_chain  : 上下游联动模式(可选)。标"命中本 pattern 时,应主动去查下游/上游
+#                      是否同时出现什么 pattern",形态:
+#                        check_downstream_for: [pattern1, pattern2]   # 沿依赖图向下
+#                        check_upstream_for:   [pattern1]             # 沿依赖图向上(罕用)
+#                        explanation: 简短解释为什么这俩相关
+#                      agent 命中本 pattern 后,**主动调 cascade_check.py / 看下游 ns-snapshot
+#                      的 known_error_distribution**,看 check_downstream_for 列出的模式
+#                      是否同时出现 → 共同出现强烈暗示真因在下游。
 #
 # routing skill 用法:看到任何日志 / 异常 / tool error 文本,先扫这里。
 
@@ -24,6 +32,9 @@ errors:
       - "k8s_query.py list-deployments 看 spec.containers.resources.limits.memory 是否过紧"
       - "看应用启动日志:是否有大字典/缓存预热导致瞬时高峰(常见 Java -Xmx 漏配 / Go 启动加载全表)"
     mitigation: "临时调大 limits.memory(常见 +50%);彻底解决需看应用真实使用 baseline"
+    causation_chain:
+      check_upstream_for: ["context deadline exceeded", "connection refused", "502 Bad Gateway"]
+      explanation: "如果本服务 OOM,上游服务一定会 timeout/连不上;反过来上游 timeout 时也要查下游有没有 OOM"
 
   - pattern: "CrashLoopBackOff"
     category: k8s
@@ -71,6 +82,9 @@ errors:
       - "trace 看具体哪个 span 超时(走 tracing-query 或 tempo-query)"
       - "PromQL 看下游服务 p99 是否突变:`histogram_quantile(0.99, rate(http_server_requests_seconds_bucket{...}[5m]))`"
       - "看下游服务 K8s pod 是否健康(k8s-runtime-query),pod restart 常导致瞬时超时"
+    causation_chain:
+      check_downstream_for: ["OOMKilled", "CrashLoopBackOff", "Too many connections", "Lock wait timeout"]
+      explanation: "上游 timeout 常因下游慢/崩;沿依赖链向下一层查到下游对应错误时,真因几乎一定在下游"
 
   - pattern: "connection refused"
     category: network
@@ -80,6 +94,9 @@ errors:
       - "k8s_query.py list-pods 看目标 service 后端 pod 是否 Running + Ready"
       - "k8s_query.py list-services 看 selector 是否匹配 pod label / targetPort 跟容器监听端口一致"
       - "若都对,查 NetworkPolicy / Service Mesh sidecar"
+    causation_chain:
+      check_downstream_for: ["CrashLoopBackOff", "ImagePullBackOff", "OOMKilled", "FailedScheduling"]
+      explanation: "拒连接最常见原因:下游 pod 没起来(起不来 / 反复重启),所以**先沿依赖图查下游 pod 状态**"
 
   - pattern: "Connection reset by peer"
     category: network
@@ -107,6 +124,9 @@ errors:
       - "看慢查询是否堆积占连接:`SHOW PROCESSLIST` (走 mysql-runtime-query)"
       - "应用是否有连接泄漏(连接未 close)"
     mitigation: "立即重启实例释放连接(谨慎,只解症状不解根因);长期看 max_connections 调优"
+    causation_chain:
+      check_upstream_for: ["context deadline exceeded", "Lock wait timeout"]
+      explanation: "DB 连接打满时上游所有 SQL 都会 timeout,所有调 DB 的服务都会 cascade fail"
 
   - pattern: "Lock wait timeout exceeded"
     category: db
@@ -173,6 +193,9 @@ errors:
     next_actions:
       - "看后端 service 对应 pod 状态(k8s_query.py list-pods)"
       - "看 Gateway 日志(loki)的 upstream addr,定位具体后端节点"
+    causation_chain:
+      check_downstream_for: ["OOMKilled", "CrashLoopBackOff", "panic:", "OutOfMemoryError"]
+      explanation: "Gateway 502 几乎一定是后端服务挂了 — 沿 Gateway 看到的 upstream service 名,查它的 pod 状态 + 应用错误"
 
   - pattern: "504 Gateway Timeout"
     category: rpc

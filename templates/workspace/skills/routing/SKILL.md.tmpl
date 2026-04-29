@@ -44,6 +44,32 @@ agent 每次拿到日志 / 异常文本 / tool error 输出时,**第一步**就 
 3. 按 next_actions 顺序:跑 rollout-history → 看 limits.memory → 看启动期内存峰值
 4. 给 mitigation:临时调大 limits.memory +50%
 
+## causation_chain(上下游联动模式 → 真因往往不在出错的那个服务)
+
+每条 known-errors 项可能带 `causation_chain` 字段(可选),标"命中本 pattern 时,应主动去**下游/上游**查什么 pattern":
+
+```yaml
+- pattern: "context deadline exceeded"
+  causation_chain:
+    check_downstream_for: ["OOMKilled", "CrashLoopBackOff", "Too many connections"]
+    explanation: "上游 timeout 常因下游慢/崩"
+```
+
+agent **命中带 causation_chain 的 pattern 后必须主动**:
+
+1. 跑 `cascade_check.py` 拉本服务的所有下游(从 `service-dependency-map.yaml`)
+2. 看每个下游的 `known_error_distribution`(ns-snapshot 已带)是否出现 `check_downstream_for` 列表里的模式
+3. **如果命中** → **真因几乎一定在那个下游**,把它当主角递归 incident-investigator 6 步流程
+4. **如果不命中** → 真因可能不在直接下游(网络 / 共享 DB / 上游本身),按 next_actions 走
+
+例:agent 看到 commerce 报 `context deadline exceeded`(命中 pattern)
+1. 读 causation_chain.check_downstream_for: `[OOMKilled, CrashLoopBackOff, Too many connections, Lock wait timeout]`
+2. 跑 `cascade_check.py --service commerce` → 看每个下游的 known_error_distribution
+3. 发现 inventory 服务的 known_error_distribution 里有 `OOMKilled: 5` → **真因在 inventory OOM**
+4. 把 inventory 当主角再走 6 步,根因是 inventory 内存不够 → 处理 inventory 才能修 commerce 5xx
+
+**没 causation_chain 的 pattern 直接按 next_actions 走;有的话先做联动追溯**(节省一大半排错时间,避免在错误服务上反复挖)。
+
 ## 输出规则
 
 - 输出简洁、结构化。

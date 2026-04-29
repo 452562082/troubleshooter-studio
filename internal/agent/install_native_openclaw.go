@@ -294,12 +294,17 @@ func injectAgent(root map[string]any, id, name, model, workspace string) error {
 
 // injectMCPServers 按 cfg 的 infra 开关往 mcp.servers map 里塞每条 MCP 配置。
 // 全量重写匹配前缀的旧条目(避免 env 删了 / 切了 config-center 类型留下死引用)。
+//
+// 命名加 agent-id 前缀(如 truss-bot-nacos-mcp-server-prod),跟 Claude Code/Cursor 的
+// install_native_mcp.buildMCPServersForCfg 三平台命名统一,routing config-map.yaml 里
+// mcp_server 字段三平台共用同一个值。多个 system 共存同一台机器不撞名。
 func injectMCPServers(
 	root map[string]any,
 	cfg *config.SystemConfig,
 	get func(string) string,
 	log func(string),
 ) error {
+	agentID := cfg.ResolveID()
 	mcp, _ := root["mcp"].(map[string]any)
 	if mcp == nil {
 		mcp = map[string]any{}
@@ -325,7 +330,7 @@ func injectMCPServers(
 				"NACOS_USERNAME": get(envVar("CC_USER", cc.ID, e.ID)),
 				"NACOS_PASSWORD": get(envVar("CC_PASS", cc.ID, e.ID)),
 			}
-			servers[mcpKey("nacos-mcp-server", cc.ID, e.ID)] = map[string]any{
+			servers[mcpKeyForAgent(agentID, "nacos-mcp-server", cc.ID, e.ID)] = map[string]any{
 				"command": "uvx",
 				"args":    []any{"nacos-mcp-router@latest"},
 				"env":     env,
@@ -343,7 +348,7 @@ func injectMCPServers(
 				"GRAFANA_USERNAME": get("GRAFANA_USER_" + up),
 				"GRAFANA_PASSWORD": get("GRAFANA_PASS_" + up),
 			}
-			servers["grafana-mcp-server-"+e.ID] = map[string]any{
+			servers[mcpKeyForAgent(agentID, "grafana-mcp-server", "", e.ID)] = map[string]any{
 				"command": "npx",
 				"args": []any{
 					"-y", "@leval/mcp-grafana",
@@ -364,7 +369,7 @@ func injectMCPServers(
 				"GRAFANA_USERNAME": get("GRAFANA_USER_" + up),
 				"GRAFANA_PASSWORD": get("GRAFANA_PASS_" + up),
 			}
-			servers["loki-mcp-server-"+e.ID] = map[string]any{
+			servers[mcpKeyForAgent(agentID, "loki-mcp-server", "", e.ID)] = map[string]any{
 				"command": "npx",
 				"args": []any{
 					"-y", "@leval/mcp-grafana",
@@ -381,7 +386,7 @@ func injectMCPServers(
 	if cfg.Infrastructure.Observability.Jaeger.Enabled {
 		for _, e := range envs {
 			up := strings.ToUpper(e.ID)
-			servers["jaeger-"+e.ID] = map[string]any{
+			servers[mcpKeyForAgent(agentID, "jaeger", "", e.ID)] = map[string]any{
 				"command": "curl",
 				"args":    []any{},
 				"env": map[string]any{
@@ -396,7 +401,7 @@ func injectMCPServers(
 	if cfg.Infrastructure.Observability.ELK.Enabled {
 		for _, e := range envs {
 			up := strings.ToUpper(e.ID)
-			servers["elk-"+e.ID] = map[string]any{
+			servers[mcpKeyForAgent(agentID, "elk", "", e.ID)] = map[string]any{
 				"command": "curl",
 				"args":    []any{},
 				"env": map[string]any{
@@ -413,7 +418,11 @@ func injectMCPServers(
 	// messaging:lark
 	for _, m := range cfg.Infrastructure.Messaging {
 		if m.Enabled && m.Platform == "lark" {
-			servers["lark-openapi"] = map[string]any{
+			lk := "lark-openapi"
+			if agentID != "" {
+				lk = agentID + "-" + lk
+			}
+			servers[lk] = map[string]any{
 				"command": "npx",
 				"args":    []any{"-y", "@larksuite/lark-openapi-mcp"},
 				"env": map[string]any{
@@ -428,7 +437,11 @@ func injectMCPServers(
 	// project tracking:feishu_project
 	for _, p := range cfg.Infrastructure.ProjectTracking {
 		if p.Enabled && p.Platform == "feishu_project" {
-			servers["FeishuProjectMcp"] = map[string]any{
+			fk := "FeishuProjectMcp"
+			if agentID != "" {
+				fk = agentID + "-" + fk
+			}
+			servers[fk] = map[string]any{
 				"command": "npx",
 				"args":    []any{"-y", "@lark-project/mcp", "--domain", "https://project.feishu.cn"},
 				"env": map[string]any{

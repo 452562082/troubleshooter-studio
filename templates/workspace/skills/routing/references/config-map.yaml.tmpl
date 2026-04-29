@@ -31,7 +31,7 @@ environments:
         {{- $endpoints := $src.Endpoints}}
         {{- $nsHint := ""}}
         {{- range $endpoints}}{{if eq .Env $envID}}{{$nsHint = .NamespaceHint}}{{end}}{{end}}
-        {{- $mcp := mcpKeyForSource (printf "%s-mcp-server" $cc) $sourceID $envID}}
+        {{- $mcp := mcpKeyForAgentSource $ctx.AgentID (printf "%s-mcp-server" $cc) $sourceID $envID}}
         {{- $f := findConfig $ctx $svc $envID}}
         {{- $p := findPrior $ctx $svc $envID}}
       {{$svc}}:

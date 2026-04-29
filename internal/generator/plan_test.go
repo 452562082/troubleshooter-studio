@@ -81,8 +81,8 @@ func TestBuildPlan_WithPriorOverridesAndPreserved(t *testing.T) {
 	cmPath := filepath.Join(existing, "templates/workspace-template/skills/routing/references/config-map.yaml")
 	orig := readFile(t, cmPath)
 	mut := strings.Replace(orig,
-		"      order-worker:\n        namespaceId: \"dev\"\n        group: \"DEFAULT_GROUP\"\n        dataId: \"{service}.yaml\"\n        mcp_server: \"nacos-mcp-server-dev\"\n        status: inferred",
-		"      order-worker:\n        namespaceId: \"shop-dev\"\n        group: \"WORKER\"\n        dataId: \"worker.yaml\"\n        mcp_server: \"nacos-mcp-server-dev\"\n        status: verified",
+		"      order-worker:\n        namespaceId: \"dev\"\n        group: \"DEFAULT_GROUP\"\n        dataId: \"{service}.yaml\"\n        mcp_server: \"shop-bot-nacos-mcp-server-dev\"\n        status: inferred",
+		"      order-worker:\n        namespaceId: \"shop-dev\"\n        group: \"WORKER\"\n        dataId: \"worker.yaml\"\n        mcp_server: \"shop-bot-nacos-mcp-server-dev\"\n        status: verified",
 		1)
 	if mut == orig {
 		t.Fatalf("could not mutate config-map")

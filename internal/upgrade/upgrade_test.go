@@ -59,7 +59,7 @@ func TestRun_BackupAndPreserve(t *testing.T) {
 	cmPath := filepath.Join(existing, "templates/workspace-template/skills/routing/references/config-map.yaml")
 	data, _ := os.ReadFile(cmPath)
 	mut := strings.Replace(string(data),
-		"      order-worker:\n        namespaceId: \"dev\"\n        group: \"DEFAULT_GROUP\"\n        dataId: \"{service}.yaml\"\n        mcp_server: \"nacos-mcp-server-dev\"\n        status: inferred",
+		"      order-worker:\n        namespaceId: \"dev\"\n        group: \"DEFAULT_GROUP\"\n        dataId: \"{service}.yaml\"\n        mcp_server: \"shop-bot-nacos-mcp-server-dev\"\n        status: inferred",
 		"      order-worker:\n        namespaceId: \"shop-dev\"\n        group: \"WORKER\"\n        dataId: \"worker.yaml\"\n        status: verified",
 		1)
 	if mut == string(data) {

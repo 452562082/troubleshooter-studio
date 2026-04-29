@@ -129,15 +129,15 @@ func TestInstallNativeOpenclaw_FreshInstall(t *testing.T) {
 	// mcp.servers per env
 	servers := getMap(data, "mcp", "servers")
 	for _, key := range []string{
-		"nacos-mcp-server-dev", "nacos-mcp-server-prod",
-		"grafana-mcp-server-dev", "grafana-mcp-server-prod",
+		"shop-troubleshooter-nacos-mcp-server-dev", "shop-troubleshooter-nacos-mcp-server-prod",
+		"shop-troubleshooter-grafana-mcp-server-dev", "shop-troubleshooter-grafana-mcp-server-prod",
 	} {
 		if _, ok := servers[key]; !ok {
 			t.Errorf("mcp.servers missing %s", key)
 		}
 	}
 	// per-env addr 注入正确
-	nacDev := servers["nacos-mcp-server-dev"].(map[string]any)["env"].(map[string]any)
+	nacDev := servers["shop-troubleshooter-nacos-mcp-server-dev"].(map[string]any)["env"].(map[string]any)
 	if nacDev["NACOS_ADDR"] != "nacos-dev.example.com:8848" {
 		t.Errorf("nacos-mcp-server-dev addr wrong: %v", nacDev["NACOS_ADDR"])
 	}
@@ -323,7 +323,7 @@ func TestInstallNativeOpenclaw_MultiSourceMix(t *testing.T) {
 	cfgPath := filepath.Join(fakeHome, ".openclaw", "openclaw.json")
 	data := readJSON(t, cfgPath)
 	servers := getMap(data, "mcp", "servers")
-	for _, key := range []string{"nacos-mcp-server-main-nacos-dev", "nacos-mcp-server-main-nacos-prod"} {
+	for _, key := range []string{"shop-troubleshooter-nacos-mcp-server-main-nacos-dev", "shop-troubleshooter-nacos-mcp-server-main-nacos-prod"} {
 		if _, ok := servers[key]; !ok {
 			t.Errorf("缺多源 nacos MCP key %s; servers=%v", key, mapKeys(servers))
 		}
@@ -414,7 +414,7 @@ func TestInstallNativeOpenclaw_PreservesExistingAgents(t *testing.T) {
 	if _, ok := servers["unrelated-mcp"]; !ok {
 		t.Errorf("install 不应清掉无关的 unrelated-mcp")
 	}
-	if _, ok := servers["nacos-mcp-server-dev"]; !ok {
+	if _, ok := servers["shop-troubleshooter-nacos-mcp-server-dev"]; !ok {
 		t.Errorf("install 应注入 nacos-mcp-server-dev")
 	}
 }

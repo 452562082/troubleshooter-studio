@@ -49,19 +49,24 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 		servers = map[string]any{}
 	}
 
-	// 1) 删旧:Studio 管理的前缀全清,避免环境删了 / 切了配置中心后留死引用
-	stripStudioManagedKeys(servers)
-
-	// 2) 写新:用 buildMCPServersForCfg 派生。get 返回空串表示"没值",
+	// 1) 写新:用 buildMCPServersForCfg 派生。get 返回空串表示"没值",
 	// buildMCPServersForCfg 内部对空值字段直接 omit(不写进 env block),
 	// 否则 IDE 启 MCP 时会把 "{{NACOS_ADDR_DEV}}" 这种字面值传给 nacos 进程导致连接失败。
+	// 命名带 agent-id 前缀(如 "truss-bot-nacos-mcp-server-prod"),保证多 system 共存时不撞名。
 	get := func(k string) string {
 		if creds == nil {
 			return ""
 		}
 		return creds[k]
 	}
-	new := buildMCPServersForCfg(cfg, get)
+	new := buildMCPServersForCfg(cfg, cfg.ResolveID(), get)
+
+	// 2) 删旧:**精确**只删本次实际生成的同名 key(替换式更新)。不再前缀通配,
+	// 避免误伤用户手加的同前缀别人家 agent 的 server。环境删了 / 切了配置中心后
+	// 不再生成的旧 key 会留下,需要用户手清(可接受 —— 比误删重要 server 强)。
+	for k := range new {
+		delete(servers, k)
+	}
 	for k, v := range new {
 		servers[k] = v
 	}
@@ -85,9 +90,21 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 // get(envVarName) 返回 cred 值;**返回空串的字段会从 env block 里 omit**(不写 key),
 // 避免 IDE 启 MCP 时把 "{{XXX}}" 占位字符串当真传给后端进程造成无效连接。
 // 用户事后可以在 IDE settings.json 手填该字段。
-func buildMCPServersForCfg(cfg *config.SystemConfig, get func(string) string) map[string]any {
+//
+// agentID 加到所有 key 前缀(如 "truss-bot-nacos-mcp-server-prod"),保证 Claude Code/Cursor
+// 用户级共享 settings.json 池里多 system 共存不撞名。空字符串则不加前缀(单 agent 场景)。
+func buildMCPServersForCfg(cfg *config.SystemConfig, agentID string, get func(string) string) map[string]any {
 	servers := map[string]any{}
 	envs := cfg.Environments
+	keyFor := func(prefix, sourceID, envID string) string {
+		return mcpKeyForAgent(agentID, prefix, sourceID, envID)
+	}
+	keyFixed := func(name string) string {
+		if agentID == "" {
+			return name
+		}
+		return agentID + "-" + name
+	}
 
 	// 把 envMap 里 value=="" 的 entry 删掉,空字段不进 settings.json
 	pruneEmpty := func(m map[string]any) map[string]any {
@@ -110,7 +127,7 @@ func buildMCPServersForCfg(cfg *config.SystemConfig, get func(string) string) ma
 				"NACOS_USERNAME": get(envVar("CC_USER", cc.ID, e.ID)),
 				"NACOS_PASSWORD": get(envVar("CC_PASS", cc.ID, e.ID)),
 			})
-			servers[mcpKey("nacos-mcp-server", cc.ID, e.ID)] = map[string]any{
+			servers[keyFor("nacos-mcp-server", cc.ID, e.ID)] = map[string]any{
 				"command": "uvx",
 				"args":    []any{"nacos-mcp-router@latest"},
 				"env":     env,
@@ -126,7 +143,7 @@ func buildMCPServersForCfg(cfg *config.SystemConfig, get func(string) string) ma
 				"GRAFANA_USERNAME": get("GRAFANA_USER_" + up),
 				"GRAFANA_PASSWORD": get("GRAFANA_PASS_" + up),
 			})
-			servers["grafana-mcp-server-"+e.ID] = map[string]any{
+			servers[keyFor("grafana-mcp-server", "", e.ID)] = map[string]any{
 				"command": "npx",
 				"args": []any{
 					"-y", "@leval/mcp-grafana",
@@ -146,7 +163,7 @@ func buildMCPServersForCfg(cfg *config.SystemConfig, get func(string) string) ma
 				"GRAFANA_USERNAME": get("GRAFANA_USER_" + up),
 				"GRAFANA_PASSWORD": get("GRAFANA_PASS_" + up),
 			})
-			servers["loki-mcp-server-"+e.ID] = map[string]any{
+			servers[keyFor("loki-mcp-server", "", e.ID)] = map[string]any{
 				"command": "npx",
 				"args": []any{
 					"-y", "@leval/mcp-grafana",
@@ -162,7 +179,7 @@ func buildMCPServersForCfg(cfg *config.SystemConfig, get func(string) string) ma
 	// messaging:lark
 	for _, m := range cfg.Infrastructure.Messaging {
 		if m.Enabled && m.Platform == "lark" {
-			servers["lark-openapi"] = map[string]any{
+			servers[keyFixed("lark-openapi")] = map[string]any{
 				"command": "npx",
 				"args":    []any{"-y", "@larksuite/lark-openapi-mcp"},
 				"env": pruneEmpty(map[string]any{
@@ -177,7 +194,7 @@ func buildMCPServersForCfg(cfg *config.SystemConfig, get func(string) string) ma
 	// project tracking:feishu_project
 	for _, p := range cfg.Infrastructure.ProjectTracking {
 		if p.Enabled && p.Platform == "feishu_project" {
-			servers["FeishuProjectMcp"] = map[string]any{
+			servers[keyFixed("FeishuProjectMcp")] = map[string]any{
 				"command": "npx",
 				"args":    []any{"-y", "@lark-project/mcp", "--domain", "https://project.feishu.cn"},
 				"env": pruneEmpty(map[string]any{
@@ -191,27 +208,3 @@ func buildMCPServersForCfg(cfg *config.SystemConfig, get func(string) string) ma
 	return servers
 }
 
-// stripStudioManagedKeys 把 Studio 管理的固定前缀 / 固定 key 从 servers map 里删掉。
-// 用户手加的(自定义前缀)不动,保留它们的现有配置。
-func stripStudioManagedKeys(servers map[string]any) {
-	prefixes := []string{
-		"nacos-mcp-server-", "nacos-mcp-server", // 含 source-id 时形如 nacos-mcp-server-<id>-<env>
-		"grafana-mcp-server-",
-		"loki-mcp-server-",
-	}
-	fixedKeys := []string{"lark-openapi", "FeishuProjectMcp"}
-	for k := range servers {
-		for _, p := range prefixes {
-			if strings.HasPrefix(k, p) {
-				delete(servers, k)
-				break
-			}
-		}
-		for _, f := range fixedKeys {
-			if k == f {
-				delete(servers, k)
-				break
-			}
-		}
-	}
-}

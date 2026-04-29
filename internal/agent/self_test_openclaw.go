@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -80,7 +81,7 @@ func SelfTestOpenclaw(ctx context.Context, dir string) (*SelfTestResult, error) 
 	}
 
 	servers := getMCPServers(ocData)
-	required := requiredMCPKeys(cfg)
+	required := requiredMCPKeys(cfg, agentID)
 	var missing []string
 	for _, k := range required {
 		if _, ok := servers[k]; !ok {
@@ -99,7 +100,7 @@ func SelfTestOpenclaw(ctx context.Context, dir string) (*SelfTestResult, error) 
 			continue
 		}
 		for _, e := range cfg.Environments {
-			key := mcpKey("nacos-mcp-server", cc.ID, e.ID)
+			key := mcpKeyForAgent(agentID, "nacos-mcp-server", cc.ID, e.ID)
 			addr := mcpEnv(servers, key, "NACOS_ADDR")
 			label := "nacos TCP " + e.ID
 			if cc.ID != "" && cc.ID != "default" {
@@ -147,10 +148,10 @@ func SelfTestOpenclaw(ctx context.Context, dir string) (*SelfTestResult, error) 
 	// 可观测性 HTTP 探活(/api/health 200/401/403 都视作"reachable",
 	// 401/403 = 站点活着但鉴权对不上;FAIL 仅给真不通的)
 	if cfg.Infrastructure.Observability.Grafana.Enabled {
-		probeGrafanaLike(ctx, servers, cfg.Environments, "grafana-mcp-server", add)
+		probeGrafanaLike(ctx, servers, cfg.Environments, "grafana-mcp-server", agentID, add)
 	}
 	if cfg.Infrastructure.Observability.Loki.Enabled {
-		probeGrafanaLike(ctx, servers, cfg.Environments, "loki-mcp-server", add)
+		probeGrafanaLike(ctx, servers, cfg.Environments, "loki-mcp-server", agentID, add)
 	}
 	if cfg.Infrastructure.Observability.Jaeger.Enabled {
 		probeURLByEnv(ctx, cfg.Environments,
@@ -170,7 +171,52 @@ func SelfTestOpenclaw(ctx context.Context, dir string) (*SelfTestResult, error) 
 		probeURLByEnv(ctx, cfg.Environments,
 			cfg.Infrastructure.Observability.K8sRuntime.URLByEnv, "kuboard-runtime", "/", add)
 	}
+
+	// 工具链探活:nacos/grafana/loki/lark MCP 都靠 uvx / npx 起子进程,本机缺这俩 PATH
+	// 时所有 MCP 调用都跑不起来。装完一眼看出来比 Day 1 调 MCP 第一次失败再排好。
+	checkToolchain(cfg, add)
+
 	return res, nil
+}
+
+// checkToolchain 看 cfg 里哪些 MCP 用 uvx / npx,逐个 which 探活;缺则 FAIL + 给 brew/nvm 安装提示。
+func checkToolchain(cfg *config.SystemConfig, add func(name, status, detail string)) {
+	needUvx := false
+	for _, cc := range cfg.Infrastructure.ConfigCenters {
+		if cc.Type == "nacos" {
+			needUvx = true
+			break
+		}
+	}
+	needNpx := cfg.Infrastructure.Observability.Grafana.Enabled ||
+		cfg.Infrastructure.Observability.Loki.Enabled
+	for _, m := range cfg.Infrastructure.Messaging {
+		if m.Enabled && m.Platform == "lark" {
+			needNpx = true
+			break
+		}
+	}
+	for _, p := range cfg.Infrastructure.ProjectTracking {
+		if p.Enabled && p.Platform == "feishu_project" {
+			needNpx = true
+			break
+		}
+	}
+
+	if needUvx {
+		if path, err := exec.LookPath("uvx"); err == nil {
+			add("uvx 可用", "PASS", path)
+		} else {
+			add("uvx 可用", "FAIL", "PATH 里没找到 uvx;装 uv:`brew install uv` 或 `curl -LsSf https://astral.sh/uv/install.sh | sh`(nacos-mcp 跑不起来)")
+		}
+	}
+	if needNpx {
+		if path, err := exec.LookPath("npx"); err == nil {
+			add("npx 可用", "PASS", path)
+		} else {
+			add("npx 可用", "FAIL", "PATH 里没找到 npx;装 Node:`brew install node` 或 `nvm install --lts`(grafana/loki/lark MCP 跑不起来)")
+		}
+	}
 }
 
 // probeURLByEnv 通用 HTTP 探活:遍历每个 env,GET <urls[envID]><pathSuffix>;
@@ -212,35 +258,42 @@ func probeURLByEnv(
 
 // requiredMCPKeys 跟 injectMCPServers 的注入逻辑保持镜像:cfg 开关哪些 MCP,
 // 这里就要哪些 key。任一缺失视为部署不完整。多源场景每个 nacos 源 × env 都要有。
-func requiredMCPKeys(cfg *config.SystemConfig) []string {
+// agentID 加在所有 key 前缀,跟 injectMCPServers / install_native_mcp 三平台命名统一。
+func requiredMCPKeys(cfg *config.SystemConfig, agentID string) []string {
+	withAgent := func(name string) string {
+		if agentID == "" {
+			return name
+		}
+		return agentID + "-" + name
+	}
 	var out []string
 	for _, cc := range cfg.Infrastructure.ConfigCenters {
 		if cc.Type != "nacos" {
 			continue
 		}
 		for _, e := range cfg.Environments {
-			out = append(out, mcpKey("nacos-mcp-server", cc.ID, e.ID))
+			out = append(out, mcpKeyForAgent(agentID, "nacos-mcp-server", cc.ID, e.ID))
 		}
 	}
 	if cfg.Infrastructure.Observability.Grafana.Enabled {
 		for _, e := range cfg.Environments {
-			out = append(out, "grafana-mcp-server-"+e.ID)
+			out = append(out, withAgent("grafana-mcp-server-"+e.ID))
 		}
 	}
 	if cfg.Infrastructure.Observability.Loki.Enabled {
 		for _, e := range cfg.Environments {
-			out = append(out, "loki-mcp-server-"+e.ID)
+			out = append(out, withAgent("loki-mcp-server-"+e.ID))
 		}
 	}
 	for _, m := range cfg.Infrastructure.Messaging {
 		if m.Enabled && m.Platform == "lark" {
-			out = append(out, "lark-openapi")
+			out = append(out, withAgent("lark-openapi"))
 			break
 		}
 	}
 	for _, p := range cfg.Infrastructure.ProjectTracking {
 		if p.Enabled && p.Platform == "feishu_project" {
-			out = append(out, "FeishuProjectMcp")
+			out = append(out, withAgent("FeishuProjectMcp"))
 			break
 		}
 	}
@@ -305,11 +358,15 @@ func probeGrafanaLike(
 	servers map[string]any,
 	envs []config.Environment,
 	prefix string,
+	agentID string,
 	add func(name, status, detail string),
 ) {
 	client := &http.Client{Timeout: 6 * time.Second}
 	for _, e := range envs {
 		key := prefix + "-" + e.ID
+		if agentID != "" {
+			key = agentID + "-" + key
+		}
 		url := strings.TrimRight(mcpEnv(servers, key, "GRAFANA_URL"), "/")
 		if !strings.HasPrefix(url, "http") {
 			add(prefix+" "+e.ID, "WARN", "GRAFANA_URL 缺失,跳过探活")

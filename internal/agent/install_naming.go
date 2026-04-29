@@ -11,11 +11,31 @@ import "strings"
 // mcpKey 拼出 openclaw.json 里某个 source × env 对应的 MCP server key。
 //   - 老 single-source 迁移路径(sourceID=="default"):返回 "<prefix>-<env>" 不破老结构
 //   - 显式多源(sourceID!="default"):返回 "<prefix>-<sourceID>-<env>"
+//
+// **注**:这是"未带 agent-id 前缀"的形态,只剩 OpenClaw 老 mcp 注册路径在用(它的 mcp.servers 是
+// 项目级的,有 agents.list[i].id 隔离调用,key 重名也能各取各的)。Claude Code / Cursor 走 MCP
+// 时是用户级 settings.json 共享池,key 必须加 agent-id 前缀避免多 system 同名 mcp 互相覆盖,
+// 走 mcpKeyForAgent(agentID, prefix, sourceID, envID)。
 func mcpKey(prefix, sourceID, envID string) string {
 	if sourceID == "" || sourceID == "default" {
 		return prefix + "-" + envID
 	}
 	return prefix + "-" + sourceID + "-" + envID
+}
+
+// mcpKeyForAgent 在 mcpKey 基础上加 <agent-id> 前缀,Claude Code / Cursor 用。
+// 例:agent-id=truss-bot,prefix=nacos-mcp-server,sourceID=default,envID=prod
+//
+//	→ "truss-bot-nacos-mcp-server-prod"
+//
+// 这样多个 system 的 agent 装到同一台 IDE 不会因 prefix 重名互相覆盖。agentID 强制大写转小写
+// 不动(保持跟 system.id 形态一致,routing config-map.yaml 里 mcp_server 字段才能拼对)。
+func mcpKeyForAgent(agentID, prefix, sourceID, envID string) string {
+	base := mcpKey(prefix, sourceID, envID)
+	if agentID == "" {
+		return base
+	}
+	return agentID + "-" + base
 }
 
 // envVar 拼出 .env / 凭证表单字段的环境变量名。约定:

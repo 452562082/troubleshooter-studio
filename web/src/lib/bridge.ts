@@ -320,9 +320,10 @@ export async function importAndDeploy(
   target: string,
   destPath: string,
   repoPaths: Record<string, string> = {},
+  ideCreds: Record<string, string> = {},
 ): Promise<ApplyResult> {
   if (!isDesktop()) throw new Error('ImportAndDeploy 只在桌面 app 里可用')
-  return App.ImportAndDeploy(yamlText, target, destPath, repoPaths)
+  return App.ImportAndDeploy(yamlText, target, destPath, repoPaths, ideCreds)
 }
 
 /** 给 target 推荐默认部署路径。embedded/openclaw 返回 ~/.tshoot/<target>/<id>/

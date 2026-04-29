@@ -59,7 +59,7 @@ export function GetRepoPathsForSystem(arg1:string):Promise<Record<string, string
 
 export function GetUserConfig():Promise<main.UserConfigResult>;
 
-export function ImportAndDeploy(arg1:string,arg2:string,arg3:string,arg4:Record<string, string>):Promise<agent.Result>;
+export function ImportAndDeploy(arg1:string,arg2:string,arg3:string,arg4:Record<string, string>,arg5:Record<string, string>):Promise<agent.Result>;
 
 export function KuboardFetchConfigMaps(arg1:main.KuboardFetchBatchInput):Promise<main.KuboardFetchBatchResult>;
 

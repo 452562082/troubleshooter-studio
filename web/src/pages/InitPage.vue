@@ -5077,7 +5077,9 @@ async function runOneClickDeploy() {
     const openclawCreds = buildOpenclawCreds()
     for (const t of enabled) {
       const dest = await defaultDestPath(t, system.id || '')
-      await importAndDeploy(yamlOutput.value, t, dest, repoPaths)
+      // 同一份 creds 顺带传给 claude-code/cursor:installNative 走完文件拷贝后会用它
+      // 注入 ~/.claude/settings.json / ~/.cursor/mcp.json 的 mcpServers,装完即可用 MCP 工具。
+      await importAndDeploy(yamlOutput.value, t, dest, repoPaths, openclawCreds)
       if (t === 'claude-code' || t === 'cursor') {
         installedTargets.push(t)
         continue

@@ -98,8 +98,8 @@ export function GetUserConfig() {
   return window['go']['main']['App']['GetUserConfig']();
 }
 
-export function ImportAndDeploy(arg1, arg2, arg3, arg4) {
-  return window['go']['main']['App']['ImportAndDeploy'](arg1, arg2, arg3, arg4);
+export function ImportAndDeploy(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['ImportAndDeploy'](arg1, arg2, arg3, arg4, arg5);
 }
 
 export function KuboardFetchConfigMaps(arg1) {

@@ -65,7 +65,7 @@ func (a *App) ApplyBot(agentPath, newYamlText string, dryRun bool) (*agent.Resul
 //
 // 副作用:把 repoPaths 按 system.id 持久化到 ~/.tshoot/config.json,后续 BotsPage
 // 重新部署同一 system 时,ApplyBot 自动读这份,不必再跑一次 wizard。
-func (a *App) ImportAndDeploy(yamlText, target, destPath string, repoPaths map[string]string) (*agent.Result, error) {
+func (a *App) ImportAndDeploy(yamlText, target, destPath string, repoPaths map[string]string, ideCreds map[string]string) (*agent.Result, error) {
 	// 用户可能传 ~/foo,统一展开成绝对路径
 	expanded := make(map[string]string, len(repoPaths))
 	for k, v := range repoPaths {
@@ -81,6 +81,7 @@ func (a *App) ImportAndDeploy(yamlText, target, destPath string, repoPaths map[s
 		TemplateRoot:   a.templateRoot,
 		TshootVersion:  version,
 		RepoLocalPaths: expanded,
+		IDECreds:       ideCreds, // claude-code/cursor 装完直接注入 mcpServers 用
 	})
 }
 

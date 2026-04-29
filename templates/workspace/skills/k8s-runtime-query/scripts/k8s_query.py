@@ -70,7 +70,41 @@ def fail(error: str, hint: str = '') -> None:
     sys.exit(1)
 
 
-def load_creds(env: str, agent_dir: str | None) -> dict[str, str]:
+def detect_creds_path(agent_id: str | None) -> Path:
+    """检测部署上下文,定位 creds.json 实际路径。
+
+    OpenClaw:脚本路径含 `.openclaw/workspace/<ws>/`,creds.json 在 `~/.openclaw/<agent-id>-creds.json`(平级,不在 workspace 内)。
+    Claude Code / Cursor:`~/.claude|cursor/skills/<agent-id>/`,creds.json 在工作区根 `~/.claude|cursor/skills/<agent-id>/creds.json`。
+    本地 dev:脚本路径不在三个 IDE 路径下,创建假定 creds.json 跟脚本平 4 级。
+    """
+    here = Path(__file__).resolve()
+    parts = here.parts
+    # OpenClaw 模式:回到 ~/.openclaw/<agent-id>-creds.json(从 path 抽 workspace 名当 agent-id)
+    if '.openclaw' in parts and 'workspace' in parts:
+        try:
+            ws_idx = parts.index('workspace')
+            ws_name = parts[ws_idx + 1]
+            id_or_ws = agent_id or ws_name
+            return Path.home() / '.openclaw' / f'{id_or_ws}-creds.json'
+        except (ValueError, IndexError):
+            pass
+    # Claude Code / Cursor 模式:`<root>/skills/<agent-id>/k8s-runtime-query/scripts/k8s_query.py`
+    # 工作区根 = 脚本路径上推到 skills/<agent-id>/ 的父级
+    for marker in ('.claude', '.cursor'):
+        if marker in parts:
+            try:
+                idx = parts.index(marker)
+                # parts[idx+1] = "skills", parts[idx+2] = agent-id
+                if parts[idx + 1] == 'skills':
+                    workspace_root = Path(*parts[: idx + 3])
+                    return workspace_root / 'creds.json'
+            except (ValueError, IndexError):
+                pass
+    # fallback:本地 dev / 未识别上下文 → 脚本 4 级祖父目录
+    return here.parent.parent.parent.parent / 'creds.json'
+
+
+def load_creds(env: str, agent_id: str | None, agent_dir: str | None) -> dict[str, str]:
     """优先 env vars(KUBOARD_*_<ENV>),次 creds.json,返回 {url, access_key, username, password}。"""
     up = env.upper().replace('-', '_')
     creds = {
@@ -81,12 +115,11 @@ def load_creds(env: str, agent_dir: str | None) -> dict[str, str]:
     }
     if any(creds.values()):
         return creds
-    # creds.json fallback
+    # creds.json fallback:--agent-dir 显式优先,否则按部署上下文自动定位
     if agent_dir:
         cred_path = Path(agent_dir) / 'creds.json'
     else:
-        # 默认:scripts 在 skills/k8s-runtime-query/scripts/,往上三级到工作区根
-        cred_path = Path(__file__).resolve().parent.parent.parent.parent / 'creds.json'
+        cred_path = detect_creds_path(agent_id)
     if not cred_path.exists():
         return creds
     try:
@@ -431,7 +464,8 @@ def cmd_pod_snapshot(args: argparse.Namespace, kc: KuboardClient) -> dict[str, A
 def main() -> None:
     p = argparse.ArgumentParser(prog='k8s_query.py')
     p.add_argument('--env', required=True, help='环境名(dev/prod 等)')
-    p.add_argument('--agent-dir', default=None, help='工作区根目录,默认从脚本路径推')
+    p.add_argument('--agent-id', default=None, help='agent 标识(OpenClaw 下用于定位 ~/.openclaw/<agent-id>-creds.json)')
+    p.add_argument('--agent-dir', default=None, help='工作区根目录,默认从脚本路径自动检测')
     p.add_argument('--url', default='', help='覆盖 Kuboard URL')
     p.add_argument('--access-key', default='', help='覆盖 access key')
     p.add_argument('--username', default='', help='覆盖用户名')
@@ -475,7 +509,7 @@ def main() -> None:
 
     args = p.parse_args()
 
-    creds = load_creds(args.env, args.agent_dir)
+    creds = load_creds(args.env, args.agent_id, args.agent_dir)
     url = args.url or creds.get('url') or ''
     if not url:
         fail('no-url', f'env={args.env} 没找到 KUBOARD_URL_<ENV> 也没在 creds.json kuboard 节里;先回 wizard 填 K8s 运行时 URL')

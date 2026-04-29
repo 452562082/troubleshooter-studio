@@ -52,15 +52,14 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 	// 1) 删旧:Studio 管理的前缀全清,避免环境删了 / 切了配置中心后留死引用
 	stripStudioManagedKeys(servers)
 
-	// 2) 写新:用 buildMCPServersForCfg 派生
+	// 2) 写新:用 buildMCPServersForCfg 派生。get 返回空串表示"没值",
+	// buildMCPServersForCfg 内部对空值字段直接 omit(不写进 env block),
+	// 否则 IDE 启 MCP 时会把 "{{NACOS_ADDR_DEV}}" 这种字面值传给 nacos 进程导致连接失败。
 	get := func(k string) string {
 		if creds == nil {
-			return "{{" + k + "}}"
+			return ""
 		}
-		if v, ok := creds[k]; ok {
-			return v
-		}
-		return "{{" + k + "}}"
+		return creds[k]
 	}
 	new := buildMCPServersForCfg(cfg, get)
 	for k, v := range new {
@@ -83,10 +82,22 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 
 // buildMCPServersForCfg 从 cfg 派生 mcpServers map,跟 injectMCPServers 行为对齐
 // (实质是同一份 schema,只是这里返回扁平 map 而不是写到 root["mcp"]["servers"])。
-// get(envVarName) 返回 cred 值;创建/编辑 IDE settings.json 后续直接用。
+// get(envVarName) 返回 cred 值;**返回空串的字段会从 env block 里 omit**(不写 key),
+// 避免 IDE 启 MCP 时把 "{{XXX}}" 占位字符串当真传给后端进程造成无效连接。
+// 用户事后可以在 IDE settings.json 手填该字段。
 func buildMCPServersForCfg(cfg *config.SystemConfig, get func(string) string) map[string]any {
 	servers := map[string]any{}
 	envs := cfg.Environments
+
+	// 把 envMap 里 value=="" 的 entry 删掉,空字段不进 settings.json
+	pruneEmpty := func(m map[string]any) map[string]any {
+		for k, v := range m {
+			if s, ok := v.(string); ok && s == "" {
+				delete(m, k)
+			}
+		}
+		return m
+	}
 
 	// nacos per (source × env):多源 + 每 env 一个独立 MCP 实例
 	for _, cc := range cfg.Infrastructure.ConfigCenters {
@@ -94,14 +105,15 @@ func buildMCPServersForCfg(cfg *config.SystemConfig, get func(string) string) ma
 			continue
 		}
 		for _, e := range envs {
+			env := pruneEmpty(map[string]any{
+				"NACOS_ADDR":     get(envVar("CC_ADDR", cc.ID, e.ID)),
+				"NACOS_USERNAME": get(envVar("CC_USER", cc.ID, e.ID)),
+				"NACOS_PASSWORD": get(envVar("CC_PASS", cc.ID, e.ID)),
+			})
 			servers[mcpKey("nacos-mcp-server", cc.ID, e.ID)] = map[string]any{
 				"command": "uvx",
 				"args":    []any{"nacos-mcp-router@latest"},
-				"env": map[string]any{
-					"NACOS_ADDR":     get(envVar("CC_ADDR", cc.ID, e.ID)),
-					"NACOS_USERNAME": get(envVar("CC_USER", cc.ID, e.ID)),
-					"NACOS_PASSWORD": get(envVar("CC_PASS", cc.ID, e.ID)),
-				},
+				"env":     env,
 			}
 		}
 	}
@@ -109,6 +121,11 @@ func buildMCPServersForCfg(cfg *config.SystemConfig, get func(string) string) ma
 	if cfg.Infrastructure.Observability.Grafana.Enabled {
 		for _, e := range envs {
 			up := strings.ToUpper(e.ID)
+			env := pruneEmpty(map[string]any{
+				"GRAFANA_URL":      get("GRAFANA_URL_" + up),
+				"GRAFANA_USERNAME": get("GRAFANA_USER_" + up),
+				"GRAFANA_PASSWORD": get("GRAFANA_PASS_" + up),
+			})
 			servers["grafana-mcp-server-"+e.ID] = map[string]any{
 				"command": "npx",
 				"args": []any{
@@ -116,11 +133,7 @@ func buildMCPServersForCfg(cfg *config.SystemConfig, get func(string) string) ma
 					"--disable-incident", "--disable-alerting", "--disable-oncall",
 					"--disable-admin", "--disable-sift", "--disable-pyroscope",
 				},
-				"env": map[string]any{
-					"GRAFANA_URL":      get("GRAFANA_URL_" + up),
-					"GRAFANA_USERNAME": get("GRAFANA_USER_" + up),
-					"GRAFANA_PASSWORD": get("GRAFANA_PASS_" + up),
-				},
+				"env": env,
 			}
 		}
 	}
@@ -128,6 +141,11 @@ func buildMCPServersForCfg(cfg *config.SystemConfig, get func(string) string) ma
 	if cfg.Infrastructure.Observability.Loki.Enabled {
 		for _, e := range envs {
 			up := strings.ToUpper(e.ID)
+			env := pruneEmpty(map[string]any{
+				"GRAFANA_URL":      get("GRAFANA_URL_" + up),
+				"GRAFANA_USERNAME": get("GRAFANA_USER_" + up),
+				"GRAFANA_PASSWORD": get("GRAFANA_PASS_" + up),
+			})
 			servers["loki-mcp-server-"+e.ID] = map[string]any{
 				"command": "npx",
 				"args": []any{
@@ -136,11 +154,7 @@ func buildMCPServersForCfg(cfg *config.SystemConfig, get func(string) string) ma
 					"--disable-incident", "--disable-alerting", "--disable-oncall",
 					"--disable-admin", "--disable-sift", "--disable-pyroscope",
 				},
-				"env": map[string]any{
-					"GRAFANA_URL":      get("GRAFANA_URL_" + up),
-					"GRAFANA_USERNAME": get("GRAFANA_USER_" + up),
-					"GRAFANA_PASSWORD": get("GRAFANA_PASS_" + up),
-				},
+				"env": env,
 			}
 		}
 	}
@@ -151,10 +165,10 @@ func buildMCPServersForCfg(cfg *config.SystemConfig, get func(string) string) ma
 			servers["lark-openapi"] = map[string]any{
 				"command": "npx",
 				"args":    []any{"-y", "@larksuite/lark-openapi-mcp"},
-				"env": map[string]any{
+				"env": pruneEmpty(map[string]any{
 					"APP_ID":     get("LARK_APP_ID"),
 					"APP_SECRET": get("LARK_APP_SECRET"),
-				},
+				}),
 			}
 			break
 		}
@@ -166,9 +180,9 @@ func buildMCPServersForCfg(cfg *config.SystemConfig, get func(string) string) ma
 			servers["FeishuProjectMcp"] = map[string]any{
 				"command": "npx",
 				"args":    []any{"-y", "@lark-project/mcp", "--domain", "https://project.feishu.cn"},
-				"env": map[string]any{
+				"env": pruneEmpty(map[string]any{
 					"MCP_USER_TOKEN": get("MCP_USER_TOKEN"),
-				},
+				}),
 			}
 			break
 		}

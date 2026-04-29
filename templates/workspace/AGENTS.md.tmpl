@@ -21,9 +21,9 @@
 - 回复必须标注实测入口（域名/IP/服务名）。
 - 结论必须附证据来源（日志/请求/代码位置）。
 
-## skills / scripts 路径速记
+## skills / scripts / references 路径速记
 
-各 SKILL.md 引用的脚本路径(`scripts/xxx.py`)是**相对工作区根**的，agent 拼绝对路径时按以下规则:
+工作区根因部署平台不同:
 
 | 部署平台 | 工作区根 |
 |--|--|
@@ -33,18 +33,35 @@
 
 `<workspace_name>` / `<agent-name>` 取本 agent 的 frontmatter `name` 字段(就是 `{{.AgentID}}`)。
 
-调脚本时**必须用绝对路径**:
+工作区内三类文件的相对位置:
+
+| 类型 | 相对路径 | 用途 |
+|--|--|--|
+| skill 文档 | `skills/<skill-name>/SKILL.md` | 执行流程,**用任一 skill 前必须 Read 它的 SKILL.md** |
+| skill 脚本 | `skills/<skill-name>/scripts/<file>.py` | Bash 调,实际取数 |
+| skill 引用映射 | `skills/<skill-name>/references/<file>.yaml` | env/服务/分支/配置/MCP 等映射查询 |
+
+**调脚本 / Read 引用文件时必须用绝对路径**(直接 `python3 scripts/x.py` 在 Claude Code/Cursor 下 cwd 不是工作区根,会找不到):
 
 ```bash
 # OpenClaw
 python3 ~/.openclaw/workspace/{{.AgentID}}/skills/<skill>/scripts/<file>.py ...
+cat ~/.openclaw/workspace/{{.AgentID}}/skills/routing/references/config-map.yaml
+
 # Claude Code
 python3 ~/.claude/skills/{{.AgentID}}/<skill>/scripts/<file>.py ...
+cat ~/.claude/skills/{{.AgentID}}/routing/references/config-map.yaml
+
 # Cursor
 python3 ~/.cursor/skills/{{.AgentID}}/<skill>/scripts/<file>.py ...
+cat ~/.cursor/skills/{{.AgentID}}/routing/references/config-map.yaml
 ```
 
-直接 `python3 scripts/x.py` 在 Claude Code / Cursor 下 cwd 不是工作区根,会找不到文件。
+## skill 用法硬规则
+
+- **用任一 skill 前必须先 Read 它的 `SKILL.md`**,不要基于 skill 名 / 简短描述凭空推执行流程。SKILL.md 里的"执行流程""硬约束""自检示例"是排障准确率的关键。
+- 脚本/工具返回 `{"error":..., "hint":...}` 时,**第一时间把 hint 复述给用户**,不要自己琢磨重试或塞 stack trace。
+- routing 给的 `selector_chain` 是 fallback **链**(不是穷举):**按顺序逐条试,命中即停**;占位符解析失败的条目跳过;整链全 0 命中才能下"查不到"结论。
 
 ## Python 依赖
 

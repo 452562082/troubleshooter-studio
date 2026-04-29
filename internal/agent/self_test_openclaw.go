@@ -117,7 +117,34 @@ func SelfTestOpenclaw(ctx context.Context, dir string) (*SelfTestResult, error) 
 		}
 	}
 
-	// grafana / loki HTTP 探活(/api/health 200/401/403 都视作"reachable",
+	// 配置源 HTTP 探活:apollo / consul / kuboard 都是 HTTP API。URL 取自
+	// cc.Endpoints[].Addr —— Addr 可能裸 host:port 或带 scheme,统一兜底成 https://
+	for _, cc := range cfg.Infrastructure.ConfigCenters {
+		urls := map[string]string{}
+		for _, ep := range cc.Endpoints {
+			a := strings.TrimSpace(ep.Addr)
+			if a == "" {
+				continue
+			}
+			if !strings.HasPrefix(a, "http") {
+				a = "https://" + a // 裸 host[:port] 兜底
+			}
+			urls[ep.Env] = a
+		}
+		switch cc.Type {
+		case "apollo":
+			probeURLByEnv(ctx, cfg.Environments, urls,
+				"apollo "+cc.ID, "/services/config", add)
+		case "consul":
+			probeURLByEnv(ctx, cfg.Environments, urls,
+				"consul "+cc.ID, "/v1/status/leader", add)
+		case "kuboard":
+			probeURLByEnv(ctx, cfg.Environments, urls,
+				"kuboard "+cc.ID, "/", add)
+		}
+	}
+
+	// 可观测性 HTTP 探活(/api/health 200/401/403 都视作"reachable",
 	// 401/403 = 站点活着但鉴权对不上;FAIL 仅给真不通的)
 	if cfg.Infrastructure.Observability.Grafana.Enabled {
 		probeGrafanaLike(ctx, servers, cfg.Environments, "grafana-mcp-server", add)
@@ -125,7 +152,62 @@ func SelfTestOpenclaw(ctx context.Context, dir string) (*SelfTestResult, error) 
 	if cfg.Infrastructure.Observability.Loki.Enabled {
 		probeGrafanaLike(ctx, servers, cfg.Environments, "loki-mcp-server", add)
 	}
+	if cfg.Infrastructure.Observability.Jaeger.Enabled {
+		probeURLByEnv(ctx, cfg.Environments,
+			cfg.Infrastructure.Observability.Jaeger.URLByEnv, "jaeger", "/", add)
+	}
+	if cfg.Infrastructure.Observability.Prometheus.Enabled &&
+		!cfg.Infrastructure.Observability.Prometheus.ViaGrafana {
+		// 只在直连模式下单独探活;走 Grafana 代理时 grafana 探活已覆盖
+		probeURLByEnv(ctx, cfg.Environments,
+			map[string]string{}, "prometheus", "/-/healthy", add)
+	}
+	if cfg.Infrastructure.Observability.ELK.Enabled {
+		probeURLByEnv(ctx, cfg.Environments,
+			cfg.Infrastructure.Observability.ELK.KibanaByEnv, "kibana", "/api/status", add)
+	}
+	if cfg.Infrastructure.Observability.K8sRuntime.Enabled {
+		probeURLByEnv(ctx, cfg.Environments,
+			cfg.Infrastructure.Observability.K8sRuntime.URLByEnv, "kuboard-runtime", "/", add)
+	}
 	return res, nil
+}
+
+// probeURLByEnv 通用 HTTP 探活:遍历每个 env,GET <urls[envID]><pathSuffix>;
+// urls 缺该 env → SKIP;HTTP <500 视为 reachable(401/403/404 都算站点活);≥500 才 FAIL。
+// apollo / consul / kuboard / jaeger / elk / k8s_runtime / prometheus 共用。
+func probeURLByEnv(
+	ctx context.Context,
+	envs []config.Environment,
+	urls map[string]string,
+	label, pathSuffix string,
+	add func(name, status, detail string),
+) {
+	client := &http.Client{Timeout: 6 * time.Second}
+	for _, e := range envs {
+		url := strings.TrimRight(urls[e.ID], "/")
+		if !strings.HasPrefix(url, "http") {
+			add(label+" "+e.ID, "SKIP", "URL 缺失,跳过探活")
+			continue
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url+pathSuffix, nil)
+		if err != nil {
+			add(label+" "+e.ID, "FAIL", err.Error())
+			continue
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			add(label+" "+e.ID, "FAIL", err.Error())
+			continue
+		}
+		_ = resp.Body.Close()
+		switch {
+		case resp.StatusCode < 500:
+			add(label+" "+e.ID, "PASS", fmt.Sprintf("HTTP %d", resp.StatusCode))
+		default:
+			add(label+" "+e.ID, "FAIL", fmt.Sprintf("HTTP %d", resp.StatusCode))
+		}
+	}
 }
 
 // requiredMCPKeys 跟 injectMCPServers 的注入逻辑保持镜像:cfg 开关哪些 MCP,

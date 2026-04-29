@@ -20,13 +20,77 @@ grafana:
 loki:
   enabled: {{.Infrastructure.Observability.Loki.Enabled}}
   via_grafana: {{.Infrastructure.Observability.Loki.ViaGrafana}}
+  {{- if .Infrastructure.Observability.Loki.DatasourceUIDByEnv}}
+  datasource_uid_by_env:
+  {{- range $env, $uid := .Infrastructure.Observability.Loki.DatasourceUIDByEnv}}
+    {{$env}}: {{$uid | printf "%q"}}
+  {{- end}}
+  {{- end}}
+  # ── LogQL selector 拼接链(routing skill 用) ──
+  # 跟 prometheus.selector_chain 思路一致:
+  #   1) 优先用 wizard 已挑的 env_label / service_label 配对(loki.label_mapping_by_env)
+  #      ——这是用户实测过的标签,最准。
+  #   2) 没有 mapping / 标签找不到时再退到通用约定。
+  # routing skill 按顺序拼,第一条命中 N 行日志即返回,后面只在前面查不到时尝试。
+  # 注:`<lm.envLabel>` / `<lm.envValue>` / `<lm.serviceLabel>` 由 routing 从 system.yaml
+  # observability.loki.label_mapping_by_env.<env> 解析;`<k8s.namespace>` / `<k8s.workload>`
+  # 来自 observability.k8s_runtime.service_map[env+service]。
+  logql_selector_chain:
+    # 优先复用 wizard 已挑的 (env_label, service_label) —— 同时填了才走这条
+    - '{<lm.envLabel>="<lm.envValue>",<lm.serviceLabel>="<service>"}'
+    # K8s + Loki 常见(promtail/fluent-bit 默认 namespace/container 标签)
+    - '{namespace="<k8s.namespace>",container="<k8s.workload>"}'
+    - '{namespace="<k8s.namespace>",pod=~"<k8s.workload>-.*"}'
+    # 通用兜底(没启用 K8s 运行时时)
+    - '{namespace="<env>",app="<service>"}'
+    - '{namespace="<env>",service="<service>"}'
+    - '{job=~".*<service>.*"}'
+
+jaeger:
+  enabled: {{.Infrastructure.Observability.Jaeger.Enabled}}
+  {{- if .Infrastructure.Observability.Jaeger.URLByEnv}}
+  url_by_env:
+  {{- range $env, $url := .Infrastructure.Observability.Jaeger.URLByEnv}}
+    {{$env}}: {{$url | printf "%q"}}
+  {{- end}}
+  {{- end}}
+  {{- if .Infrastructure.Observability.Jaeger.DatasourceUIDByEnv}}
+  datasource_uid_by_env:
+  {{- range $env, $uid := .Infrastructure.Observability.Jaeger.DatasourceUIDByEnv}}
+    {{$env}}: {{$uid | printf "%q"}}
+  {{- end}}
+  {{- end}}
+  # 服务名 → Jaeger service 名约定。Jaeger 用 service.name(OpenTelemetry SDK 注入)直接索引,
+  # 通常等于 wizard 服务名;不一致时(如代码里手动写了 "shop-order")在 yaml 里 manually 加 service_name_by_service 覆盖。
+  # 默认按 wizard 服务名查,查不到再试 K8s workload 名。
+  service_name_chain:
+    - '<service>'             # wizard 服务名(常见命中)
+    - '<k8s.workload>'        # 没命中再试 K8s Deployment 名
+    - '*<service>*'            # 最后兜底:子串模糊匹配
 
 prometheus:
   enabled: {{.Infrastructure.Observability.Prometheus.Enabled}}
   via_grafana: {{.Infrastructure.Observability.Prometheus.ViaGrafana}}
+  {{- if .Infrastructure.Observability.Prometheus.DatasourceUIDByEnv}}
+  datasource_uid_by_env:
+  {{- range $env, $uid := .Infrastructure.Observability.Prometheus.DatasourceUIDByEnv}}
+    {{$env}}: {{$uid | printf "%q"}}
+  {{- end}}
+  {{- end}}
   {{- if .Infrastructure.Observability.Prometheus.PreferredMetrics}}
   preferred_metrics:
   {{- range .Infrastructure.Observability.Prometheus.PreferredMetrics}}
     - {{. | printf "%q"}}
   {{- end}}
   {{- end}}
+  # ── 服务 → PromQL selector 映射约定(routing skill 用) ──
+  # 大多数 K8s + prometheus-operator 项目把 env 放进 namespace、服务身份放进 container/app 标签。
+  # 没有"完美默认",所以按下面这个优先级链查。第一条命中即返回,后面只在前面查不到时尝试。
+  selector_chain:
+    # 优先复用 K8s 运行时的 namespace + workload(用户已在 wizard 选过的 Deployment/容器名,最准)
+    - '{namespace="<k8s.namespace>",container="<k8s.workload>"}'   # K8s 容器名 = Deployment 名(typical)
+    - '{namespace="<k8s.namespace>",pod=~"<k8s.workload>-.*"}'    # 兜底:pod 名前缀匹配 Deployment 名
+    # 回退到通用约定(没启用 K8s 运行时 / 没挑 workload 时用)
+    - '{namespace="<env>",app="<service>"}'                        # prometheus-operator 默认 app label
+    - '{namespace="<env>",app_kubernetes_io_name="<service>"}'    # K8s recommended label(打了点)
+    - '{job=~".*<service>.*"}'                                     # 最后兜底:job 名子串匹配

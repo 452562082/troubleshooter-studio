@@ -53,6 +53,9 @@
 {{- if .Infrastructure.Observability.Tempo.Enabled }}
 > - 🔗 Tempo 链路查询（`tempo-query`）
 {{- end }}
+{{- if hasSkill . "k8s-runtime-query" }}
+> - ☸️ K8s 运行时:pod 状态 / events / 容器日志 / Deployment 滚动状态(`k8s-runtime-query`)
+{{- end }}
 {{- if hasSkill . "diagram-generator" }}
 > - 🖼 架构图 / 流程图 / 链路拓扑图生成
 {{- end }}

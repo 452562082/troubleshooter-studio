@@ -78,9 +78,6 @@ func TestRun_MinimalAllDefaults(t *testing.T) {
 	if !ans.DataStoresEnabled["redis"] || ans.DataStoresEnabled["mysql"] {
 		t.Errorf("data store defaults wrong: %+v", ans.DataStoresEnabled)
 	}
-	if ans.OutputDir != "./dist/shop" {
-		t.Errorf("OutputDir: got %q", ans.OutputDir)
-	}
 }
 
 func TestRun_FullWithOneRepo(t *testing.T) {

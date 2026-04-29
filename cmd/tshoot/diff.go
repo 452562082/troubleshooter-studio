@@ -15,7 +15,7 @@ import (
 func runDiff(args []string) error {
 	fs := flag.NewFlagSet("diff", flag.ExitOnError)
 	input := fs.String("i", "", "system.yaml 路径 (必填)")
-	against := fs.String("against", "", "既有产物目录 (默认使用 system.yaml 中 generation.output_dir)")
+	against := fs.String("against", "", "既有产物目录 (默认 ./dist)")
 	analysisFile := fs.String("analysis", "", "可选 analysis.json")
 	tmplDir := fs.String("t", "", "模板根目录 (默认: 可执行文件旁的 templates/)")
 	format := fs.String("format", "text", "text / json")
@@ -31,7 +31,7 @@ func runDiff(args []string) error {
 	}
 	existingDir := *against
 	if existingDir == "" {
-		existingDir = cfg.Generation.OutputDir
+		existingDir = "./dist"
 	}
 	if !filepath.IsAbs(existingDir) {
 		existingDir, _ = filepath.Abs(existingDir)

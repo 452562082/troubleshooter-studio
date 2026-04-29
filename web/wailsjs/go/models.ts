@@ -240,7 +240,6 @@ export namespace analyzerpipe {
 	    finding_count: number;
 	    error?: string;
 	    detected_stack?: string;
-	    detected_role?: string;
 	    detected_framework?: string;
 	    branches?: string[];
 	
@@ -256,7 +255,6 @@ export namespace analyzerpipe {
 	        this.finding_count = source["finding_count"];
 	        this.error = source["error"];
 	        this.detected_stack = source["detected_stack"];
-	        this.detected_role = source["detected_role"];
 	        this.detected_framework = source["detected_framework"];
 	        this.branches = source["branches"];
 	    }
@@ -1030,6 +1028,66 @@ export namespace main {
 	        this.fields = source["fields"];
 	    }
 	}
+	export class GenPreviewFile {
+	    path: string;
+	    size: number;
+	    binary: boolean;
+	    truncated: boolean;
+	    content?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new GenPreviewFile(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.size = source["size"];
+	        this.binary = source["binary"];
+	        this.truncated = source["truncated"];
+	        this.content = source["content"];
+	    }
+	}
+	export class GenPreviewResult {
+	    system: string;
+	    config_center: string;
+	    targets: string[];
+	    skills_included: generator.SkillDecision[];
+	    skills_skipped: generator.SkillDecision[];
+	    files: GenPreviewFile[];
+	
+	    static createFrom(source: any = {}) {
+	        return new GenPreviewResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.system = source["system"];
+	        this.config_center = source["config_center"];
+	        this.targets = source["targets"];
+	        this.skills_included = this.convertValues(source["skills_included"], generator.SkillDecision);
+	        this.skills_skipped = this.convertValues(source["skills_skipped"], generator.SkillDecision);
+	        this.files = this.convertValues(source["files"], GenPreviewFile);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class InfraCredBatchInput {
 	    entries: Record<string, string>;
 	
@@ -1040,6 +1098,524 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.entries = source["entries"];
+	    }
+	}
+	export class KuboardNamespace {
+	    name: string;
+	    configmaps: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new KuboardNamespace(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.configmaps = source["configmaps"];
+	    }
+	}
+	export class KuboardCluster {
+	    name: string;
+	    namespaces: KuboardNamespace[];
+	
+	    static createFrom(source: any = {}) {
+	        return new KuboardCluster(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.namespaces = this.convertValues(source["namespaces"], KuboardNamespace);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class KuboardContainerStat {
+	    name: string;
+	    image: string;
+	    ready: boolean;
+	    restart_count: number;
+	    state: string;
+	    wait_reason?: string;
+	    term_reason?: string;
+	    term_exit_code?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new KuboardContainerStat(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.image = source["image"];
+	        this.ready = source["ready"];
+	        this.restart_count = source["restart_count"];
+	        this.state = source["state"];
+	        this.wait_reason = source["wait_reason"];
+	        this.term_reason = source["term_reason"];
+	        this.term_exit_code = source["term_exit_code"];
+	    }
+	}
+	export class KuboardDeploymentInfo {
+	    name: string;
+	    namespace: string;
+	    replicas: number;
+	    updated_replicas: number;
+	    ready_replicas: number;
+	    available_replicas: number;
+	    strategy: string;
+	    conditions?: string[];
+	    selector?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new KuboardDeploymentInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.namespace = source["namespace"];
+	        this.replicas = source["replicas"];
+	        this.updated_replicas = source["updated_replicas"];
+	        this.ready_replicas = source["ready_replicas"];
+	        this.available_replicas = source["available_replicas"];
+	        this.strategy = source["strategy"];
+	        this.conditions = source["conditions"];
+	        this.selector = source["selector"];
+	    }
+	}
+	export class KuboardEvent {
+	    type: string;
+	    reason: string;
+	    message: string;
+	    involved_object: string;
+	    count: number;
+	    first_timestamp: string;
+	    last_timestamp: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new KuboardEvent(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.type = source["type"];
+	        this.reason = source["reason"];
+	        this.message = source["message"];
+	        this.involved_object = source["involved_object"];
+	        this.count = source["count"];
+	        this.first_timestamp = source["first_timestamp"];
+	        this.last_timestamp = source["last_timestamp"];
+	    }
+	}
+	export class KuboardFetchBatchItem {
+	    key: string;
+	    cluster: string;
+	    namespace: string;
+	    configmap: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new KuboardFetchBatchItem(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.key = source["key"];
+	        this.cluster = source["cluster"];
+	        this.namespace = source["namespace"];
+	        this.configmap = source["configmap"];
+	    }
+	}
+	export class KuboardFetchBatchInput {
+	    url: string;
+	    access_key?: string;
+	    username?: string;
+	    password?: string;
+	    items: KuboardFetchBatchItem[];
+	
+	    static createFrom(source: any = {}) {
+	        return new KuboardFetchBatchInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.url = source["url"];
+	        this.access_key = source["access_key"];
+	        this.username = source["username"];
+	        this.password = source["password"];
+	        this.items = this.convertValues(source["items"], KuboardFetchBatchItem);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	export class KuboardFetchBatchItemResult {
+	    key: string;
+	    ok: boolean;
+	    content?: string;
+	    format?: string;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new KuboardFetchBatchItemResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.key = source["key"];
+	        this.ok = source["ok"];
+	        this.content = source["content"];
+	        this.format = source["format"];
+	        this.error = source["error"];
+	    }
+	}
+	export class KuboardFetchBatchResult {
+	    items: KuboardFetchBatchItemResult[];
+	    notes?: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new KuboardFetchBatchResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.items = this.convertValues(source["items"], KuboardFetchBatchItemResult);
+	        this.notes = source["notes"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class KuboardGetPodLogsInput {
+	    url: string;
+	    access_key?: string;
+	    username?: string;
+	    password?: string;
+	    cluster: string;
+	    namespace: string;
+	    pod_name: string;
+	    container?: string;
+	    tail_lines?: number;
+	    previous?: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new KuboardGetPodLogsInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.url = source["url"];
+	        this.access_key = source["access_key"];
+	        this.username = source["username"];
+	        this.password = source["password"];
+	        this.cluster = source["cluster"];
+	        this.namespace = source["namespace"];
+	        this.pod_name = source["pod_name"];
+	        this.container = source["container"];
+	        this.tail_lines = source["tail_lines"];
+	        this.previous = source["previous"];
+	    }
+	}
+	export class KuboardListEventsInput {
+	    url: string;
+	    access_key?: string;
+	    username?: string;
+	    password?: string;
+	    cluster: string;
+	    namespace: string;
+	    field_selector?: string;
+	    only_warnings?: boolean;
+	    limit?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new KuboardListEventsInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.url = source["url"];
+	        this.access_key = source["access_key"];
+	        this.username = source["username"];
+	        this.password = source["password"];
+	        this.cluster = source["cluster"];
+	        this.namespace = source["namespace"];
+	        this.field_selector = source["field_selector"];
+	        this.only_warnings = source["only_warnings"];
+	        this.limit = source["limit"];
+	    }
+	}
+	export class KuboardListPodsInput {
+	    url: string;
+	    access_key?: string;
+	    username?: string;
+	    password?: string;
+	    cluster: string;
+	    namespace: string;
+	    label_selector?: string;
+	    pod_name_filter?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new KuboardListPodsInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.url = source["url"];
+	        this.access_key = source["access_key"];
+	        this.username = source["username"];
+	        this.password = source["password"];
+	        this.cluster = source["cluster"];
+	        this.namespace = source["namespace"];
+	        this.label_selector = source["label_selector"];
+	        this.pod_name_filter = source["pod_name_filter"];
+	    }
+	}
+	
+	export class KuboardPodInfo {
+	    name: string;
+	    namespace: string;
+	    status: string;
+	    phase: string;
+	    node_name: string;
+	    pod_ip: string;
+	    start_time: string;
+	    restart_count: number;
+	    containers: KuboardContainerStat[];
+	    reason?: string;
+	    message?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new KuboardPodInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.namespace = source["namespace"];
+	        this.status = source["status"];
+	        this.phase = source["phase"];
+	        this.node_name = source["node_name"];
+	        this.pod_ip = source["pod_ip"];
+	        this.start_time = source["start_time"];
+	        this.restart_count = source["restart_count"];
+	        this.containers = this.convertValues(source["containers"], KuboardContainerStat);
+	        this.reason = source["reason"];
+	        this.message = source["message"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class KuboardPodSnapshotEntry {
+	    pod: KuboardPodInfo;
+	    events?: KuboardEvent[];
+	    logs_current?: string;
+	    logs_previous?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new KuboardPodSnapshotEntry(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.pod = this.convertValues(source["pod"], KuboardPodInfo);
+	        this.events = this.convertValues(source["events"], KuboardEvent);
+	        this.logs_current = source["logs_current"];
+	        this.logs_previous = source["logs_previous"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class KuboardPodSnapshotInput {
+	    url: string;
+	    access_key?: string;
+	    username?: string;
+	    password?: string;
+	    cluster: string;
+	    namespace: string;
+	    label_selector?: string;
+	    pod_name_filter?: string;
+	    tail_lines?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new KuboardPodSnapshotInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.url = source["url"];
+	        this.access_key = source["access_key"];
+	        this.username = source["username"];
+	        this.password = source["password"];
+	        this.cluster = source["cluster"];
+	        this.namespace = source["namespace"];
+	        this.label_selector = source["label_selector"];
+	        this.pod_name_filter = source["pod_name_filter"];
+	        this.tail_lines = source["tail_lines"];
+	    }
+	}
+	export class KuboardPodSnapshotResult {
+	    pods: KuboardPodSnapshotEntry[];
+	    notes?: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new KuboardPodSnapshotResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.pods = this.convertValues(source["pods"], KuboardPodSnapshotEntry);
+	        this.notes = source["notes"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class KuboardResources {
+	    clusters: KuboardCluster[];
+	    notes?: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new KuboardResources(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.clusters = this.convertValues(source["clusters"], KuboardCluster);
+	        this.notes = source["notes"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class KuboardServiceInfo {
+	    name: string;
+	    namespace: string;
+	    cluster_ip: string;
+	    type: string;
+	    ports: string[];
+	    selector?: Record<string, string>;
+	
+	    static createFrom(source: any = {}) {
+	        return new KuboardServiceInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.namespace = source["namespace"];
+	        this.cluster_ip = source["cluster_ip"];
+	        this.type = source["type"];
+	        this.ports = source["ports"];
+	        this.selector = source["selector"];
 	    }
 	}
 	export class LokiAuthInput {
@@ -1138,6 +1714,34 @@ export namespace main {
 	        this.log = source["log"];
 	        this.exit_code = source["exit_code"];
 	        this.ok = source["ok"];
+	    }
+	}
+	export class UninstallBotResult {
+	    target: string;
+	    workspace_moved_to?: string;
+	    openclaw_json_clean?: boolean;
+	    creds_removed?: boolean;
+	    staging_moved_to?: string;
+	    user_agent_md?: string;
+	    user_skills_dir?: string;
+	    user_scripts_dir?: string;
+	    log?: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new UninstallBotResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.target = source["target"];
+	        this.workspace_moved_to = source["workspace_moved_to"];
+	        this.openclaw_json_clean = source["openclaw_json_clean"];
+	        this.creds_removed = source["creds_removed"];
+	        this.staging_moved_to = source["staging_moved_to"];
+	        this.user_agent_md = source["user_agent_md"];
+	        this.user_skills_dir = source["user_skills_dir"];
+	        this.user_scripts_dir = source["user_scripts_dir"];
+	        this.log = source["log"];
 	    }
 	}
 	export class UserConfigResult {

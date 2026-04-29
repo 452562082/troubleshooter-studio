@@ -75,7 +75,7 @@ func (g *Generator) BuildPlan(existingDir string) (*Plan, error) {
 
 	plan := &Plan{
 		System:       g.Ctx.System.ID,
-		ConfigCenter: g.Ctx.Infrastructure.ConfigCenter.Type,
+		ConfigCenter: g.Ctx.Infrastructure.PrimaryConfigCenter().Type,
 	}
 
 	// skills included/skipped
@@ -175,7 +175,7 @@ func skipReason(g *Generator, skill string) string {
 		}
 	}
 	if skill == "config-executor" {
-		t := g.Ctx.Infrastructure.ConfigCenter.Type
+		t := g.Ctx.Infrastructure.PrimaryConfigCenter().Type
 		if t == "" || t == "none" {
 			return "config_center.type=none"
 		}

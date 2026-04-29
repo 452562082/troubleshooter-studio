@@ -97,10 +97,11 @@ func InstallNativeOpenclaw(ctx context.Context, stagingDir string, opts InstallO
 	}
 	get := func(k string) string { return creds[k] }
 
-	// 4) 安装 workspace
-	wsName := strings.TrimSpace(cfg.Agent.WorkspaceName)
+	// 4) 安装 workspace —— 优先用 yaml 显式 workspace_name(兼容老 yaml),
+	// 空时回落到 agent.id(新 wizard 不再单独 emit workspace_name,跟 agent.id 共用)
+	wsName := strings.TrimSpace(cfg.ResolveWorkspaceName())
 	if wsName == "" {
-		return fmt.Errorf("agent.workspace_name 为空,无法定位 ~/.openclaw/workspace/<name>/")
+		return fmt.Errorf("无法确定 workspace 目录名:agent.id / agent.workspace_name 至少要有一个非空")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -140,7 +141,7 @@ func InstallNativeOpenclaw(ctx context.Context, stagingDir string, opts InstallO
 	if err != nil {
 		return fmt.Errorf("read %s: %w", cfgPath, err)
 	}
-	agentID := cfg.System.ID + "-troubleshooter"
+	agentID := cfg.ResolveID()
 	model := get("MODEL")
 	if model == "" {
 		model = cfg.Agent.ModelForTarget("openclaw")
@@ -156,8 +157,15 @@ func InstallNativeOpenclaw(ctx context.Context, stagingDir string, opts InstallO
 	}
 	log(fmt.Sprintf("[ok] %s 已更新(agents.list + mcp.servers)", cfgPath))
 
-	// 6) creds.json(apollo/consul/env-vars/k8s)
-	if needsCreds(cfg.Infrastructure.ConfigCenter.Type) {
+	// 6) creds.json:多源场景下任一源属于 apollo/consul/env-vars/k8s 就要写
+	needsCredsFile := false
+	for _, cc := range cfg.Infrastructure.ConfigCenters {
+		if needsCreds(cc.Type) {
+			needsCredsFile = true
+			break
+		}
+	}
+	if needsCredsFile {
 		credsPath := filepath.Join(ocHome, agentID+"-creds.json")
 		credsData, _ := readJSONOrEmpty(credsPath) // 旧的合并而非覆盖,允许多 agent 共存
 		writeCredsByType(credsData, cfg, get)
@@ -303,24 +311,21 @@ func injectMCPServers(
 		mcp["servers"] = servers
 	}
 
-	cc := cfg.Infrastructure.ConfigCenter
 	envs := cfg.Environments
 
-	// nacos 配置中心 MCP per env
-	if cc.Type == "nacos" {
+	// 多源配置中心:nacos 类型逐源 × env 注册独立 MCP 实例。
+	// k8s/env-vars/apollo/consul 不走 MCP(走 creds.json + 配套 python 脚本)。
+	for _, cc := range cfg.Infrastructure.ConfigCenters {
+		if cc.Type != "nacos" {
+			continue
+		}
 		for _, e := range envs {
-			up := strings.ToUpper(e.ID)
 			env := map[string]any{
-				"NACOS_ADDR": get("CC_ADDR_" + up),
+				"NACOS_ADDR":     get(envVar("CC_ADDR", cc.ID, e.ID)),
+				"NACOS_USERNAME": get(envVar("CC_USER", cc.ID, e.ID)),
+				"NACOS_PASSWORD": get(envVar("CC_PASS", cc.ID, e.ID)),
 			}
-			if cc.PerEnvCredentials {
-				env["NACOS_USERNAME"] = get("CC_USER_" + up)
-				env["NACOS_PASSWORD"] = get("CC_PASS_" + up)
-			} else {
-				env["NACOS_USERNAME"] = get("CONFIG_CENTER_USERNAME")
-				env["NACOS_PASSWORD"] = get("CONFIG_CENTER_PASSWORD")
-			}
-			servers["nacos-mcp-server-"+e.ID] = map[string]any{
+			servers[mcpKey("nacos-mcp-server", cc.ID, e.ID)] = map[string]any{
 				"command": "uvx",
 				"args":    []any{"nacos-mcp-router@latest"},
 				"env":     env,
@@ -333,13 +338,10 @@ func injectMCPServers(
 	if gf.Enabled {
 		for _, e := range envs {
 			up := strings.ToUpper(e.ID)
-			env := map[string]any{"GRAFANA_URL": get("GRAFANA_URL_" + up)}
-			if gf.PerEnvCredentials {
-				env["GRAFANA_USERNAME"] = get("GRAFANA_USER_" + up)
-				env["GRAFANA_PASSWORD"] = get("GRAFANA_PASS_" + up)
-			} else {
-				env["GRAFANA_USERNAME"] = get("GRAFANA_USERNAME")
-				env["GRAFANA_PASSWORD"] = get("GRAFANA_PASSWORD")
+			env := map[string]any{
+				"GRAFANA_URL":      get("GRAFANA_URL_" + up),
+				"GRAFANA_USERNAME": get("GRAFANA_USER_" + up),
+				"GRAFANA_PASSWORD": get("GRAFANA_PASS_" + up),
 			}
 			servers["grafana-mcp-server-"+e.ID] = map[string]any{
 				"command": "npx",
@@ -357,13 +359,10 @@ func injectMCPServers(
 	if cfg.Infrastructure.Observability.Loki.Enabled {
 		for _, e := range envs {
 			up := strings.ToUpper(e.ID)
-			env := map[string]any{"GRAFANA_URL": get("GRAFANA_URL_" + up)}
-			if gf.PerEnvCredentials {
-				env["GRAFANA_USERNAME"] = get("GRAFANA_USER_" + up)
-				env["GRAFANA_PASSWORD"] = get("GRAFANA_PASS_" + up)
-			} else {
-				env["GRAFANA_USERNAME"] = get("GRAFANA_USERNAME")
-				env["GRAFANA_PASSWORD"] = get("GRAFANA_PASSWORD")
+			env := map[string]any{
+				"GRAFANA_URL":      get("GRAFANA_URL_" + up),
+				"GRAFANA_USERNAME": get("GRAFANA_USER_" + up),
+				"GRAFANA_PASSWORD": get("GRAFANA_PASS_" + up),
 			}
 			servers["loki-mcp-server-"+e.ID] = map[string]any{
 				"command": "npx",
@@ -444,81 +443,115 @@ func injectMCPServers(
 }
 
 // needsCreds 决定是否需要写 <agent_id>-creds.json:nacos 不需要(已经在 mcp 里),
-// 其它类型(apollo/consul/env-vars/k8s)需要,因为 agent 直读这份 json,不走 MCP。
+// 其它类型(apollo/consul/env-vars/kuboard)需要,因为 agent 直读这份 json,不走 MCP。
 func needsCreds(ccType string) bool {
 	switch ccType {
-	case "apollo", "consul", "env-vars", "kubernetes":
+	case "apollo", "consul", "env-vars", "kuboard":
 		return true
 	}
 	return false
 }
 
-// writeCredsByType 按 config_center 类型写 creds.json 的对应 section,
-// 已有同名 section 直接覆盖(让 yaml 改了 type 后旧 key 不残留)。
+// writeCredsByType 多源场景按"类型分顶层 section"组织 creds.json:
+//
+//	{
+//	  "apollo":     { "<source-id>": { "<env>": {meta_url,token} } },
+//	  "consul":     { "<source-id>": { "<env>": {host,token} } },
+//	  "static":     { "<source-id>": { "<env>": {redis,mysql,...} } },
+//	  "kubernetes": { "<source-id>": { "<env>": {context,namespace,...} } },
+//	}
+//
+// 同一类型多源会平铺到同 section 下,以 source.id 二级 key 区隔。
+// 单源迁移路径(source.id == "default")保留老两层结构 {<env>: ...} 兼容,
+// 让老 agent 脚本无感升级。
 func writeCredsByType(creds map[string]any, cfg *config.SystemConfig, get func(string) string) {
-	cc := cfg.Infrastructure.ConfigCenter
 	envs := cfg.Environments
 
-	switch cc.Type {
-	case "apollo":
-		section := map[string]any{}
-		for _, e := range envs {
-			up := strings.ToUpper(e.ID)
-			tokenKey := "APOLLO_TOKEN"
-			if cc.PerEnvCredentials {
-				tokenKey = "APOLLO_TOKEN_" + up
-			}
-			section[e.ID] = map[string]any{
-				"meta_url": get("APOLLO_META_" + up),
-				"token":    get(tokenKey),
-			}
-		}
-		creds["apollo"] = section
-	case "consul":
-		section := map[string]any{}
-		for _, e := range envs {
-			up := strings.ToUpper(e.ID)
-			tokenKey := "CONSUL_TOKEN"
-			if cc.PerEnvCredentials {
-				tokenKey = "CONSUL_TOKEN_" + up
-			}
-			section[e.ID] = map[string]any{
-				"host":  get("CONSUL_HOST_" + up),
-				"token": get(tokenKey),
-			}
-		}
-		creds["consul"] = section
-	case "env-vars":
-		section := map[string]any{}
-		for _, e := range envs {
-			eup := strings.ToUpper(e.ID)
-			envSection := map[string]any{}
-			for _, ds := range cfg.Infrastructure.DataStores {
-				if !ds.Enabled {
-					continue
+	for _, cc := range cfg.Infrastructure.ConfigCenters {
+		switch cc.Type {
+		case "apollo":
+			writeCredsSection(creds, "apollo", cc, envs, func(e config.Environment) map[string]any {
+				return map[string]any{
+					"meta_url": get(envVar("APOLLO_META", cc.ID, e.ID)),
+					"token":    get(envVar("APOLLO_TOKEN", cc.ID, e.ID)),
 				}
-				envSection[ds.Type] = get("STATIC_" + strings.ToUpper(ds.Type) + "_" + eup)
-			}
-			section[e.ID] = envSection
+			})
+		case "consul":
+			writeCredsSection(creds, "consul", cc, envs, func(e config.Environment) map[string]any {
+				return map[string]any{
+					"host":  get(envVar("CONSUL_HOST", cc.ID, e.ID)),
+					"token": get(envVar("CONSUL_TOKEN", cc.ID, e.ID)),
+				}
+			})
+		case "env-vars":
+			writeCredsSection(creds, "static", cc, envs, func(e config.Environment) map[string]any {
+				envSection := map[string]any{}
+				for _, ds := range cfg.Infrastructure.DataStores {
+					if !ds.Enabled {
+						continue
+					}
+					envSection[ds.Type] = get(envVar("STATIC_"+strings.ToUpper(ds.Type), cc.ID, e.ID))
+				}
+				return envSection
+			})
+		case "kuboard":
+			// kuboard:走 Kuboard HTTP API。每 env 一份连接凭证(url + 鉴权);
+			// 鉴权二选一:access_key(API 访问凭证,推荐)或 username+password。两条都写入 creds.json,
+			// 让 bot 运行时按"access_key 优先"取用。cluster/namespace/configmap 是 per-service,
+			// 从 cc.ServiceMap 落到 service_map 子字段。
+			writeCredsSection(creds, "kuboard", cc, envs, func(e config.Environment) map[string]any {
+				row := map[string]any{
+					"url":        get(envVar("KUBOARD_URL", cc.ID, e.ID)),
+					"username":   get(envVar("KUBOARD_USER", cc.ID, e.ID)),
+					"password":   get(envVar("KUBOARD_PASS", cc.ID, e.ID)),
+					"access_key": get(envVar("KUBOARD_ACCESS_KEY", cc.ID, e.ID)),
+				}
+				if envSvcMap, ok := cc.ServiceMap[e.ID]; ok && len(envSvcMap) > 0 {
+					svcMap := map[string]any{}
+					for svc, entry := range envSvcMap {
+						svcMap[svc] = map[string]any{
+							"cluster":   entry.Cluster,
+							"namespace": entry.Namespace,
+							"configmap": entry.ConfigMap,
+						}
+					}
+					row["service_map"] = svcMap
+				}
+				return row
+			})
 		}
-		creds["static"] = section
-	case "kubernetes":
+	}
+}
+
+// writeCredsSection 把一个源的 (env → fields) 写到 creds[topKey] 下。
+// 单源迁移(cc.id == "default"):保留老两层结构 creds[topKey][env] = fields(向后兼容)。
+// 显式多源:三层结构 creds[topKey][source.id][env] = fields。
+func writeCredsSection(
+	creds map[string]any,
+	topKey string,
+	cc config.ConfigCenter,
+	envs []config.Environment,
+	rowFn func(config.Environment) map[string]any,
+) {
+	if cc.ID == "" || cc.ID == "default" {
 		section := map[string]any{}
 		for _, e := range envs {
-			up := strings.ToUpper(e.ID)
-			ns := get("K8S_NAMESPACE_" + up)
-			if ns == "" {
-				ns = "default"
-			}
-			section[e.ID] = map[string]any{
-				"context":   get("K8S_CONTEXT_" + up),
-				"namespace": ns,
-				"configmap": get("K8S_CONFIGMAP_" + up),
-				"secret":    get("K8S_SECRET_" + up),
-			}
+			section[e.ID] = rowFn(e)
 		}
-		creds["kubernetes"] = section
+		creds[topKey] = section
+		return
 	}
+	// 多源:已有 section 合并(同 topKey 下不同源共存)
+	top, _ := creds[topKey].(map[string]any)
+	if top == nil {
+		top = map[string]any{}
+		creds[topKey] = top
+	}
+	bySource := map[string]any{}
+	for _, e := range envs {
+		bySource[e.ID] = rowFn(e)
+	}
+	top[cc.ID] = bySource
 }
 
 // copyDirAll:整目录拷贝,保留 mode。dst 必须不存在(由调用方保证)。

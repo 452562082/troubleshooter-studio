@@ -51,11 +51,31 @@ export function FetchConfigContentBatch(arg1:main.CCHubFetchBatchInput):Promise<
 
 export function Gen(arg1:string,arg2:string):Promise<generator.GenSummary>;
 
+export function GenPreview(arg1:string):Promise<main.GenPreviewResult>;
+
 export function GetRemoteURL(arg1:string):Promise<string>;
+
+export function GetRepoPathsForSystem(arg1:string):Promise<Record<string, string>>;
 
 export function GetUserConfig():Promise<main.UserConfigResult>;
 
 export function ImportAndDeploy(arg1:string,arg2:string,arg3:string,arg4:Record<string, string>):Promise<agent.Result>;
+
+export function KuboardFetchConfigMaps(arg1:main.KuboardFetchBatchInput):Promise<main.KuboardFetchBatchResult>;
+
+export function KuboardGetPodLogs(arg1:main.KuboardGetPodLogsInput):Promise<string>;
+
+export function KuboardListDeployments(arg1:main.KuboardListPodsInput):Promise<Array<main.KuboardDeploymentInfo>>;
+
+export function KuboardListEvents(arg1:main.KuboardListEventsInput):Promise<Array<main.KuboardEvent>>;
+
+export function KuboardListPods(arg1:main.KuboardListPodsInput):Promise<Array<main.KuboardPodInfo>>;
+
+export function KuboardListResources(arg1:string,arg2:string,arg3:string,arg4:string,arg5:string):Promise<main.KuboardResources>;
+
+export function KuboardListServices(arg1:main.KuboardListPodsInput):Promise<Array<main.KuboardServiceInfo>>;
+
+export function KuboardPodSnapshot(arg1:main.KuboardPodSnapshotInput):Promise<main.KuboardPodSnapshotResult>;
 
 export function ListGrafanaDatasources(arg1:main.LokiAuthInput):Promise<Array<labelprobe.Datasource>>;
 
@@ -89,6 +109,8 @@ export function SaveInfraCred(arg1:string,arg2:string):Promise<void>;
 
 export function SaveInfraCredBatch(arg1:main.InfraCredBatchInput):Promise<void>;
 
+export function SaveRepoPathsForSystem(arg1:string,arg2:Record<string, string>):Promise<void>;
+
 export function SaveYAML(arg1:string,arg2:string):Promise<string>;
 
 export function ScanInstallPrompts(arg1:string):Promise<Array<deploy.Prompt>>;
@@ -98,6 +120,8 @@ export function SelfTestAgent(arg1:string):Promise<agent.SelfTestResult>;
 export function SetDefaultReposRoot(arg1:string):Promise<void>;
 
 export function UninstallAgent(arg1:string):Promise<agent.UninstallOpenclawResult>;
+
+export function UninstallBot(arg1:string,arg2:string):Promise<main.UninstallBotResult>;
 
 export function Validate(arg1:string):Promise<main.ValidateResult>;
 

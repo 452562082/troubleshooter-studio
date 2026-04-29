@@ -10,9 +10,6 @@ agent:
   name: "Shop排障机器人"
   workspace_name: "shop-bot"
   model: openai-codex/gpt-5.3-codex
-  style:
-    tone: direct
-    verbosity: terse
 
 environments:
   - id: dev
@@ -33,7 +30,6 @@ environments:
 repos:
   - name: order-service
     url: git@github.com:shop/order-service.git
-    role: backend
     stack: go
     framework: ""
     service_names:
@@ -49,7 +45,6 @@ repos:
 
   - name: product-service
     url: git@github.com:shop/product-service.git
-    role: backend
     stack: java
     framework: spring-boot
     service_names:
@@ -61,7 +56,6 @@ repos:
 
   - name: web-frontend
     url: git@github.com:shop/web-frontend.git
-    role: frontend
     stack: node
     framework: next.js
     env_branches:
@@ -71,7 +65,6 @@ repos:
 
   - name: php-service
     url: git@github.com:shop/php-service.git
-    role: backend
     stack: php
     framework: laravel
     service_names:
@@ -171,8 +164,7 @@ infrastructure:
         user_token_placeholder: "{{MCP_USER_TOKEN}}"
 
 generation:
-  target_host: openclaw
-  output_dir: ./dist/shop
+  targets: [openclaw]
   skills_whitelist:
     - routing
     - config-executor
@@ -184,8 +176,6 @@ generation:
     - tracing-query
     - elk-log-query
     - diagram-generator
-  verified_only: false
-  mapping_review_mode: strict
   preserve_on_regenerate:
     - SOUL.md
     - USER.md

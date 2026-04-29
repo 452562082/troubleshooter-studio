@@ -16,7 +16,8 @@ import (
 // 如果 reposRoot 为 ""，只做仓库无关的静态检查（config_center 声明一致性等）
 func Check(cfg *config.SystemConfig, reposRoot string) (*Report, error) {
 	report := &Report{}
-	ccType := cfg.Infrastructure.ConfigCenter.Type
+	// doctor 目前用主源做漂移检测;多源细粒度规则(每源独立 drift)留给 stage 2。
+	ccType := cfg.Infrastructure.PrimaryConfigCenter().Type
 
 	// 按环境索引允许的 profile 名
 	declaredEnvs := map[string]bool{}

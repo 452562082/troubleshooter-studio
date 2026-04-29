@@ -65,6 +65,10 @@ const navItems = [
       </div>
     </aside>
     <main class="content">
+      <!-- 顶部 28px 拖动条:跟 sidebar 顶部留白对齐,让 traffic-lights 右边的整条
+           白色区域都能拖窗口。绝对定位浮在内容上,但 z-index 低于交互元素,
+           真有 input/button 的位置会被 no-drag 接管。 -->
+      <div class="content-drag-strip" />
       <router-view v-slot="{ Component }">
         <keep-alive>
           <component :is="Component" />
@@ -85,9 +89,22 @@ html, body, #app { height: 100%; font-family: -apple-system, BlinkMacSystemFont,
 .sidebar {
   width: 220px; min-width: 220px; background: #1e293b; color: #e2e8f0;
   display: flex; flex-direction: column; padding: 0;
+  /* macOS title bar 走 HiddenInset:traffic lights 浮在 sidebar 顶部,
+     给 38px 留白避让红黄绿按钮 + 跟 .content-drag-strip 对齐。整个 sidebar 设为拖动区
+     (Wails v2 标准写法),交互子元素再用 no-drag 排除 —— 跟 Electron 的
+     -webkit-app-region 概念类似。 */
+  padding-top: 38px;
+  --wails-draggable: drag;
+}
+/* 子元素中可点击 / 可输入的部分必须 no-drag,否则点击会被拖动手势吃掉 */
+.sidebar-header,
+.sidebar nav,
+.sidebar .nav-link,
+.sidebar-footer {
+  --wails-draggable: no-drag;
 }
 .sidebar-header {
-  padding: 20px 18px 14px; border-bottom: 1px solid #334155;
+  padding: 12px 18px 14px; border-bottom: 1px solid #334155;
   display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
 }
 .sidebar-logo {
@@ -127,4 +144,14 @@ nav { display: flex; flex-direction: column; padding: 8px 0; flex: 1; }
 .sidebar-tip { font-size: 11px; color: #64748b; }
 
 .content { flex: 1; background: #fff; padding: 32px; overflow-y: auto; }
+/* 顶部 28px 透明拖动条:固定定位在窗口顶部右侧(sidebar 之外),
+   --wails-draggable: drag 让该区域成为拖动手柄。z-index 9999 确保在所有内容
+   之上但低于 toast / modal(它们用更高 z-index)。 */
+.content-drag-strip {
+  position: fixed; top: 0; left: 220px; right: 0;
+  height: 38px;                /* 覆盖到 traffic-lights 按钮整体高度,跟 sidebar 顶部留白对齐 */
+  --wails-draggable: drag;
+  z-index: 9999;
+  background: transparent;
+}
 </style>

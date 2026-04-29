@@ -64,10 +64,7 @@ func (s *Server) HandleGen(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	outDir := cfg.Generation.OutputDir
-	if outDir == "" {
-		outDir = "./dist"
-	}
+	outDir := "./dist"
 	if !filepath.IsAbs(outDir) {
 		outDir, _ = filepath.Abs(outDir)
 	}

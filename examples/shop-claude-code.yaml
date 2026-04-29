@@ -16,7 +16,6 @@ environments:
 repos:
   - name: order-service
     url: git@github.com:shop/order-service.git
-    role: backend
     stack: go
     service_names: [order-service]
     env_branches: {dev: develop, prod: main}
@@ -44,7 +43,6 @@ infrastructure:
 generation:
   targets:
     - claude-code
-  output_dir: ./dist/shop
   skills_whitelist:
     - routing
     - config-executor

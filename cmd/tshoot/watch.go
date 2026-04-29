@@ -16,6 +16,7 @@ import (
 func runWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ExitOnError)
 	input := fs.String("i", "", "system.yaml 路径 (必填)")
+	output := fs.String("o", "", "现有产物目录 (默认 ./dist)")
 	analysisFile := fs.String("analysis", "", "可选 analysis.json")
 	tmplDir := fs.String("t", "", "模板根目录 (默认: 可执行文件旁的 templates/)")
 	interval := fs.Duration("interval", time.Second, "轮询间隔")
@@ -55,7 +56,10 @@ func runWatch(args []string) error {
 			emitErr("load", err)
 			return
 		}
-		existingDir := cfg.Generation.OutputDir
+		existingDir := *output
+		if existingDir == "" {
+			existingDir = "./dist"
+		}
 		if !filepath.IsAbs(existingDir) {
 			existingDir, _ = filepath.Abs(existingDir)
 		}

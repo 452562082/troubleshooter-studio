@@ -196,3 +196,53 @@ func (a *App) SelfTestAgent(dir string) (*agent.SelfTestResult, error) {
 func (a *App) UninstallAgent(dir string) (*agent.UninstallOpenclawResult, error) {
 	return agent.UninstallNativeOpenclaw(dir)
 }
+
+// UninstallBotResult 给前端的统一形状,涵盖 openclaw / claude-code / cursor 三种 target。
+// openclaw 字段(WorkspaceMovedTo / OpenclawJSONClean / CredsRemoved)只在 target=openclaw 时填。
+// native 字段(StagingMovedTo / UserAgentMD / UserSkillsDir / UserScriptsDir)在 claude-code / cursor 时填。
+type UninstallBotResult struct {
+	Target            string   `json:"target"`
+	WorkspaceMovedTo  string   `json:"workspace_moved_to,omitempty"`  // openclaw
+	OpenclawJSONClean bool     `json:"openclaw_json_clean,omitempty"` // openclaw
+	CredsRemoved      bool     `json:"creds_removed,omitempty"`       // openclaw
+	StagingMovedTo    string   `json:"staging_moved_to,omitempty"`    // claude-code / cursor
+	UserAgentMD       string   `json:"user_agent_md,omitempty"`
+	UserSkillsDir     string   `json:"user_skills_dir,omitempty"`
+	UserScriptsDir    string   `json:"user_scripts_dir,omitempty"`
+	Log               []string `json:"log,omitempty"`
+}
+
+// UninstallBot 按 target 分派到对应卸载实现。BotsPage 的"卸载"按钮调这个,
+// dir 一律传 BotsPage 列表里那条机器人的 path(中间包 / workspace 都接受 —— 各 target
+// 实现内部会自己解析 tshoot.json 找真实位置)。
+func (a *App) UninstallBot(dir, target string) (*UninstallBotResult, error) {
+	switch target {
+	case "openclaw":
+		r, err := agent.UninstallNativeOpenclaw(dir)
+		if err != nil {
+			return nil, err
+		}
+		return &UninstallBotResult{
+			Target:            target,
+			WorkspaceMovedTo:  r.WorkspaceMovedTo,
+			OpenclawJSONClean: r.OpenclawJSONClean,
+			CredsRemoved:      r.CredsRemoved,
+			Log:               r.Log,
+		}, nil
+	case "claude-code", "cursor":
+		r, err := agent.UninstallNative(dir, target)
+		if err != nil {
+			return nil, err
+		}
+		return &UninstallBotResult{
+			Target:         target,
+			StagingMovedTo: r.StagingMovedTo,
+			UserAgentMD:    r.UserAgentMD,
+			UserSkillsDir:  r.UserSkillsDir,
+			UserScriptsDir: r.UserScriptsDir,
+			Log:            r.Log,
+		}, nil
+	default:
+		return nil, fmt.Errorf("UninstallBot: unsupported target %q", target)
+	}
+}

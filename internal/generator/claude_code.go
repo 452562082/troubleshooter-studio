@@ -70,9 +70,15 @@ func (g *Generator) GenerateClaudeCode() error {
 	return nil
 }
 
-// agentSlug 取 agent.workspace_name 作 subagent 文件名 / @name slug。
-// 向导强制 ASCII 小写 kebab-case;空时回退 system.id(也强制 ASCII)。
+// agentSlug 取 ctx.AgentID 作 subagent 文件名 / @name slug。
+// 这个值由 cfg.ResolveID() 算出来:优先 agent.id,空时 <system.id>-troubleshooter。
+// 跟 OpenClaw agents.list[*].id 完全对齐 —— 一份标识贯穿所有 AI 平台。
+// (老代码用 workspace_name 兜底,但 wizard 已经不再 emit workspace_name,
+// 那条路径会回落到 system.id 而不带 -troubleshooter 后缀,跟其他 target 不一致。)
 func agentSlug(ctx *Context) string {
+	if s := strings.TrimSpace(ctx.AgentID); s != "" {
+		return s
+	}
 	if s := strings.TrimSpace(ctx.Agent.WorkspaceName); s != "" {
 		return s
 	}

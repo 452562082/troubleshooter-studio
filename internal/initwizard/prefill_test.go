@@ -56,7 +56,7 @@ func TestRun_Prefill(t *testing.T) {
 			{ID: "prod", APIDomain: "api.x", IsProd: true},
 		},
 		Repos: []RepoAnswer{
-			{Name: "svc", URL: "git@x:svc.git", Role: "backend", Stack: "go"},
+			{Name: "svc", URL: "git@x:svc.git", Stack: "go"},
 		},
 		ConfigCenterType:     "apollo",
 		GrafanaEnabled:       false,
@@ -66,7 +66,6 @@ func TestRun_Prefill(t *testing.T) {
 		LarkEnabled:          false,
 		LarkAttachment:       false,
 		FeishuProjectEnabled: true,
-		OutputDir:            "./dist/preshop",
 		Targets:              []string{"claude-code", "cursor"},
 	}
 
@@ -129,9 +128,6 @@ func TestRun_Prefill(t *testing.T) {
 	}
 	if !ans.FeishuProjectEnabled {
 		t.Errorf("feishu prefill=true should be kept on")
-	}
-	if ans.OutputDir != "./dist/preshop" {
-		t.Errorf("output dir prefill lost: %q", ans.OutputDir)
 	}
 	if len(ans.Targets) != 2 || ans.Targets[0] != "claude-code" {
 		t.Errorf("targets prefill lost: %v", ans.Targets)

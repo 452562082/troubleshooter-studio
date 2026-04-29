@@ -8,6 +8,79 @@
 import * as App from '../../wailsjs/go/main/App'
 import { agent, analyzerpipe, deploy, discover, generator, main } from '../../wailsjs/go/models'
 
+export type KuboardResources = main.KuboardResources
+
+/** Kuboard 资源拉取:登录 → 列 cluster/ns/cm 三层。仅桌面 app 可用。
+ *  鉴权:accessKey(免账密,Kuboard 后台个人中心→API 访问凭证创建)优先;
+ *  否则用 username+password 走 /login。loginPath 已废弃(v4 路径固定)。 */
+export async function kuboardListResources(
+  url: string, username: string, password: string, accessKey = '', loginPath = '',
+): Promise<KuboardResources> {
+  if (!isDesktop()) throw new Error('Kuboard 拉取只在桌面 app 里可用')
+  return App.KuboardListResources(url, username, password, accessKey, loginPath)
+}
+
+/** 批量拉 N 个 (cluster, namespace, configmap) 的 data 字段;
+ *  Step 6 数据层自动识别用,挂在 kuboard 源的服务通过这个把 cm 内容拉回来,
+ *  跟 nacos 一样跑 DS_MATCHERS 匹 redis/mysql/...。仅桌面 app。 */
+export type KuboardFetchBatchInput = {
+  url: string,
+  access_key?: string,
+  username?: string,
+  password?: string,
+  items: { key: string, cluster: string, namespace: string, configmap: string }[],
+}
+export type KuboardFetchBatchItemResult = {
+  key: string,
+  ok: boolean,
+  content?: string,
+  format?: string, // 固定 "yaml-multi"
+  error?: string,
+}
+export type KuboardFetchBatchResult = {
+  items: KuboardFetchBatchItemResult[],
+  notes?: string[],
+}
+export async function kuboardFetchConfigMaps(input: KuboardFetchBatchInput): Promise<KuboardFetchBatchResult> {
+  if (!isDesktop()) throw new Error('Kuboard 拉取只在桌面 app 里可用')
+  return App.KuboardFetchConfigMaps(input as any) as any
+}
+
+/** 列指定 (cluster, namespace) 下的 Deployments;返回 name + selector(matchLabels)等。
+ *  向导 Step 7 给 k8s 运行时配置服务 → workload 用,选完后从 selector 自动取 label_selector。 */
+export type KuboardListDeploymentsInput = {
+  url: string,
+  username?: string,
+  password?: string,
+  access_key?: string,
+  cluster: string,
+  namespace: string,
+}
+export type KuboardDeploymentInfo = {
+  name: string,
+  namespace: string,
+  replicas?: number,
+  updated_replicas?: number,
+  ready_replicas?: number,
+  available_replicas?: number,
+  strategy?: string,
+  conditions?: string[],
+  selector?: string,
+}
+export async function kuboardListDeployments(input: KuboardListDeploymentsInput): Promise<KuboardDeploymentInfo[]> {
+  if (!isDesktop()) throw new Error('Kuboard 拉取只在桌面 app 里可用')
+  // Wails 生成的 KuboardListPodsInput 用 snake_case(json tag),不是 Go 的 PascalCase。
+  // 传错 key Go 端会拿到空 url/access_key,直接报"鉴权:填 accessKey 或 用户名+密码"。
+  return App.KuboardListDeployments({
+    url: input.url,
+    username: input.username || '',
+    password: input.password || '',
+    access_key: input.access_key || '',
+    cluster: input.cluster,
+    namespace: input.namespace,
+  } as any) as any
+}
+
 export type DiscoveredBot = discover.DiscoveredAgent
 export type ApplyResult = agent.Result
 export type InstallPrompt = deploy.Prompt
@@ -113,6 +186,22 @@ export async function setDefaultReposRoot(path: string): Promise<void> {
   await App.SetDefaultReposRoot(path)
 }
 
+/** 读某 system.id 下的"仓库名 → 本地路径"映射。
+ *  yaml 不含本机路径,这份从 ~/.tshoot/config.json 来,wizard 部署时会 upsert。
+ *  没存过返回 {}。仅桌面 app 可用。 */
+export async function getRepoPathsForSystem(systemID: string): Promise<Record<string, string>> {
+  if (!isDesktop() || !systemID) return {}
+  const r = await App.GetRepoPathsForSystem(systemID)
+  return r || {}
+}
+
+/** 主动持久化"仓库名 → 本地路径"映射(空 map 清掉该 system 的所有路径)。
+ *  ImportAndDeploy 内部会自动调,这里给 wizard"改完不立刻部署也能存"用。 */
+export async function saveRepoPathsForSystem(systemID: string, paths: Record<string, string>): Promise<void> {
+  if (!isDesktop() || !systemID) return
+  await App.SaveRepoPathsForSystem(systemID, paths)
+}
+
 // 注:曾经的 diff() bridge + DiffPage 已删 —— 功能被 BotsPage 的"编辑配置 → 预演"
 // 完全覆盖(而且那个给的是 target-aware 真实 diff,带 preserve/remove 列表)。
 // 后端 App.Diff binding 暂留做 CLI 调用兼容,UI 不再经过 bridge.
@@ -152,6 +241,28 @@ export async function discoverBots(extraRoots: string[] = []): Promise<Discovere
   return Array.isArray(r) ? r : []
 }
 
+/** UninstallBot 卸载已装机器人:按 target 分派(openclaw / claude-code / cursor)。
+ *  - openclaw:workspace 移 ~/.Trash + 摘 openclaw.json agents.list + 清 creds.json
+ *  - claude-code / cursor:中间包移 ~/.Trash + 清 ~/.claude|cursor/{agents,skills,scripts}/<name>
+ *  返回结果含日志,前端展示给用户看动了哪些资源。仅桌面 app 可用。 */
+export type UninstallBotResult = {
+  target: string,
+  // openclaw 专属
+  workspace_moved_to?: string,
+  openclaw_json_clean?: boolean,
+  creds_removed?: boolean,
+  // claude-code / cursor 专属
+  staging_moved_to?: string,
+  user_agent_md?: string,
+  user_skills_dir?: string,
+  user_scripts_dir?: string,
+  log?: string[],
+}
+export async function uninstallBot(dir: string, target: string): Promise<UninstallBotResult> {
+  if (!isDesktop()) throw new Error('UninstallBot 只在桌面 app 里可用')
+  return App.UninstallBot(dir, target) as any
+}
+
 /** ApplyBot 把新 yaml 应用到已装机器人的活 workspace（含 preserve 保留用户手改） */
 export async function applyBot(
   agentPath: string,
@@ -166,6 +277,29 @@ export async function applyBot(
 export async function openYAML(): Promise<OpenYAMLResult> {
   if (!isDesktop()) throw new Error('OpenYAML 只在桌面 app 里可用')
   return App.OpenYAML()
+}
+
+/** 跑一次 gen 到 tmp 目录,返回所有产物文件(含内容)。
+ *  比 plan() 重(真实写盘 + 读回内容),给 EditorPage 的"📂 预览产物"按钮用,
+ *  让用户像文件浏览器一样点开看每个文件。仅桌面 app 可用。 */
+export type GenPreviewFile = {
+  path: string,
+  size: number,
+  binary: boolean,
+  truncated?: boolean,
+  content?: string,
+}
+export type GenPreviewResult = {
+  system: string,
+  config_center: string,
+  targets: string[],
+  skills_included: { name: string, reason?: string }[],
+  skills_skipped: { name: string, reason?: string }[],
+  files: GenPreviewFile[],
+}
+export async function genPreview(yamlText: string): Promise<GenPreviewResult> {
+  if (!isDesktop()) throw new Error('GenPreview 只在桌面 app 里可用')
+  return App.GenPreview(yamlText) as any
 }
 
 /** 原生目录对话框：选一个目录（用于部署目标路径 destPath），返回路径；取消返回空串 */

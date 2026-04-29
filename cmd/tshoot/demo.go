@@ -61,9 +61,8 @@ func runDemo(args []string) error {
 	}
 	fmt.Println("\n[1/3] validate ✓ system.yaml 结构合法")
 
-	// 改写 output_dir 到 demo 目录
+	// demo 目录里固定一份产物输出位置
 	outDir := filepath.Join(demoDir, "out")
-	cfg.Generation.OutputDir = outDir
 
 	// 2) plan（干跑，不写盘，展示将生成什么）
 	g := generator.New(cfg, tmplRoot, outDir)

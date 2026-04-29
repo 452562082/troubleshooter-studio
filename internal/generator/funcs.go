@@ -6,6 +6,7 @@ import (
 	"text/template"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/analyzer"
+	"github.com/xiaolong/troubleshooter-studio/internal/config"
 )
 
 func toFindingView(f analyzer.Finding) *findingView {
@@ -75,7 +76,74 @@ func funcMap() template.FuncMap {
 			}
 			return nil
 		},
+		// repoConfigSource 找到拥有 service 的 repo,返回它的 config_source。
+		// 没找到 / 没绑(单源场景):返回 "default"。
+		"repoConfigSource": func(ctx *Context, service string) string {
+			for _, r := range ctx.Repos {
+				names := r.ServiceNames
+				if len(names) == 0 {
+					names = []string{r.Name}
+				}
+				for _, sn := range names {
+					if sn == service {
+						if r.ConfigSource != "" {
+							return r.ConfigSource
+						}
+						return "default"
+					}
+				}
+			}
+			return "default"
+		},
+		// configSourceByID 按 id 找 ConfigCenters[] 里的源;找不到返回主源(兜底,
+		// 避免 yaml 引用不存在 id 时模板崩),配 doctor 检查给用户预警。
+		"configSourceByID": func(ctx *Context, id string) ConfigCenterView {
+			for _, cc := range ctx.Infrastructure.ConfigCenters {
+				if cc.ID == id {
+					return toConfigCenterView(cc)
+				}
+			}
+			return toConfigCenterView(ctx.Infrastructure.PrimaryConfigCenter())
+		},
+		// mcpKeyForSource 跟 internal/agent/install_naming.go 的 mcpKey 保持镜像:
+		//   sourceID=="default" 或空 → "<prefix>-<env>"(老命名,向后兼容)
+		//   显式多源 → "<prefix>-<sourceID>-<env>"
+		"mcpKeyForSource": func(prefix, sourceID, envID string) string {
+			if sourceID == "" || sourceID == "default" {
+				return prefix + "-" + envID
+			}
+			return prefix + "-" + sourceID + "-" + envID
+		},
 	}
+}
+
+// ConfigCenterView 模板侧可访问的 config_centers[] 单元素视图。
+// 字段子集来自 config.ConfigCenter,显式列出避免把 config 包整个泄漏到模板。
+type ConfigCenterView struct {
+	ID             string
+	Type           string
+	DataIDPatterns []string
+	Endpoints      []endpointView
+}
+
+type endpointView struct {
+	Env           string
+	Addr          string
+	NamespaceHint string
+}
+
+func toConfigCenterView(cc config.ConfigCenter) ConfigCenterView {
+	out := ConfigCenterView{
+		ID:             cc.ID,
+		Type:           cc.Type,
+		DataIDPatterns: cc.DataIDPatterns,
+	}
+	for _, ep := range cc.Endpoints {
+		out.Endpoints = append(out.Endpoints, endpointView{
+			Env: ep.Env, Addr: ep.Addr, NamespaceHint: ep.NamespaceHint,
+		})
+	}
+	return out
 }
 
 // findingView 是模板侧可访问的结构（复制自 analyzer.Finding，避免直接把 analyzer 包泄漏到模板）

@@ -15,7 +15,7 @@ import (
 func runGen(args []string) error {
 	fs := flag.NewFlagSet("gen", flag.ExitOnError)
 	input := fs.String("i", "", "system.yaml 路径 (必填)")
-	output := fs.String("o", "", "输出目录 (默认: system.yaml 中 generation.output_dir 或 ./dist)")
+	output := fs.String("o", "", "输出目录 (默认 ./dist)")
 	tmplDir := fs.String("t", "", "模板根目录 (默认: 可执行文件旁的 templates/)")
 	analysisFile := fs.String("analysis", "", "可选：analyzer 产出的 analysis.json，用于升级 config-map 的 inferred 行为 verified")
 	format := fs.String("format", "text", "text / json")
@@ -34,7 +34,7 @@ func runGen(args []string) error {
 
 	outDir := *output
 	if outDir == "" {
-		outDir = cfg.Generation.OutputDir
+		outDir = "./dist"
 	}
 	if !filepath.IsAbs(outDir) {
 		abs, _ := filepath.Abs(outDir)

@@ -51,7 +51,7 @@ func TestSelfTestOpenclaw_MissingWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 删掉 workspace 目录
-	if err := os.RemoveAll(filepath.Join(fakeHome, ".openclaw", "workspace", "shop-bot")); err != nil {
+	if err := os.RemoveAll(filepath.Join(fakeHome, ".openclaw", "workspace", "shop-troubleshooter")); err != nil {
 		t.Fatal(err)
 	}
 

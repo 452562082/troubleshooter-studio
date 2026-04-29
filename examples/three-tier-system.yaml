@@ -23,7 +23,6 @@ repos:
   # 前端：React (Next.js)
   - name: mall-web
     url: git@github.com:mall/mall-web.git
-    role: frontend
     stack: node
     framework: next.js
     env_branches:
@@ -33,7 +32,6 @@ repos:
   # 中间层：PHP (Laravel) BFF
   - name: mall-bff
     url: git@github.com:mall/mall-bff.git
-    role: gateway
     stack: php
     framework: laravel
     service_names:
@@ -45,7 +43,6 @@ repos:
   # 后端：Go 微服务
   - name: mall-order
     url: git@github.com:mall/mall-order.git
-    role: backend
     stack: go
     service_names:
       - mall-order
@@ -100,8 +97,7 @@ infrastructure:
   project_tracking: []
 
 generation:
-  target_host: openclaw
-  output_dir: ./dist/mall
+  targets: [openclaw]
   skills_whitelist:
     - routing
     - config-executor

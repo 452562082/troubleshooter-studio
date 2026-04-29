@@ -32,9 +32,6 @@ agent:
   name: "AI排障机器人"                 # [required] 机器人显示名
   workspace_name: "AI排障机器人"       # [required] ~/.openclaw/workspace/<name>
   model: openai-codex/gpt-5.3-codex  # [required] OpenClaw agents.list 中的 model 标识
-  style:                              # [optional] 人格倾向，SOUL.md 生成输入
-    tone: direct                      # direct / gentle / playful
-    verbosity: terse                  # terse / balanced / thorough
 
 # ---------------------------------------------------------------------------
 # 3. 环境清单 —— 生成 env-domain-map.yaml
@@ -58,7 +55,6 @@ environments:
 repos:
   - name: user-service               # [required] 仓库短名，作为 map key
     url: git@github.com:org/user-service.git   # [required]
-    role: backend                    # [required] backend / frontend / infra / shared / gateway
     stack: go                        # [required] go / java / node / php / python / rust / ...
     framework: ""                    # [optional] 留空时由分析层推断
     service_names:                   # [optional] 一仓多服务时显式列出，提升路由映射准确度
@@ -79,9 +75,8 @@ infrastructure:
 
   # 5.1 配置源 —— 决定 config-executor skill 使用的后端协议
   config_center:
-    type: nacos                      # [required] nacos / apollo / consul / env-vars / kubernetes / none
-    per_env_credentials: false       # [optional] true = install.sh 按 env 单独询问凭证（默认 false = env 间共用）
-    endpoints:                       # [required for nacos/apollo/consul] 每环境一套（env-vars/kubernetes 不需要）
+    type: nacos                      # [required] nacos / apollo / consul / kuboard / env-vars / none
+    endpoints:                       # [required for nacos/apollo/consul/kuboard] 每环境一套（env-vars 不需要）
       - env: dev
         addr: "{{CONFIG_CENTER_DEV_ADDR}}"
         namespace_hint: "dev"        # [optional] 辅助路由推断
@@ -110,7 +105,6 @@ infrastructure:
   observability:
     grafana:
       enabled: true
-      per_env_credentials: false     # [optional] true = install.sh 按 env 单独询问 Grafana 凭证
       url_by_env:
         dev: "{{GRAFANA_DEV_URL}}"
         prod: "{{GRAFANA_PROD_URL}}"
@@ -170,8 +164,8 @@ infrastructure:
 # 6. 生成偏好 —— 控制产物形态、部署目标、再生成策略
 # ---------------------------------------------------------------------------
 generation:
-  target_host: openclaw              # [required] MVP 仅 openclaw；后续 claude-code / cursor
-  output_dir: ./dist                 # [optional] 生成包输出位置
+  targets:                           # [required] 部署目标列表(openclaw / claude-code / cursor;可多选)
+    - openclaw
   skills_whitelist:                  # [optional] 覆盖默认全量 skills
     - routing                        # 环境/服务路由映射
     - config-executor                # 配置中心读/历史/对比
@@ -179,8 +173,6 @@ generation:
     - mongodb-runtime-query
     - es-runtime-query
     - diagram-generator              # 对标 mermaid-image-generator，改名以避免绑定实现
-  verified_only: false               # true = self-test 在有 inferred 未校验行时阻塞
-  mapping_review_mode: strict        # strict / loose —— inferred 行是否必须人工确认
   preserve_on_regenerate:            # 二次生成时保留不覆盖（保留用户手工修改）
     - SOUL.md
     - USER.md

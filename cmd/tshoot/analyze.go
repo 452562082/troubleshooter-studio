@@ -57,7 +57,7 @@ func runAnalyze(args []string) error {
 	if *format == "json" {
 		summary := map[string]any{
 			"output":        *output,
-			"config_center": cfg.Infrastructure.ConfigCenter.Type,
+			"config_center": cfg.Infrastructure.PrimaryConfigCenter().Type,
 			"repos":         result.PerRepo,
 		}
 		out, err := json.MarshalIndent(summary, "", "  ")

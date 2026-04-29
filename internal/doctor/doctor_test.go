@@ -114,8 +114,9 @@ func TestCheck_StackMismatch(t *testing.T) {
 func TestCheck_ConfigCenterUnused(t *testing.T) {
 	cfg := loadShop(t)
 	reposRoot := filepath.Join(projectRoot(t), "examples", "fake-repos")
-	// 改声明成 apollo，但 fake-repos 里是 nacos 配置 → registry 用 apollo scanner 扫不到
-	cfg.Infrastructure.ConfigCenter.Type = "apollo"
+	// 改声明成 apollo，但 fake-repos 里是 nacos 配置 → registry 用 apollo scanner 扫不到。
+	// 多源 schema:loadShop 已 migrate 老 yaml 到 ConfigCenters[0],改这里。
+	cfg.Infrastructure.ConfigCenters[0].Type = "apollo"
 	rep, err := Check(cfg, reposRoot)
 	if err != nil {
 		t.Fatal(err)
@@ -142,7 +143,7 @@ func TestCheck_UndeclaredProfile(t *testing.T) {
 func TestCheck_ConfigCenterNone_WithFindings(t *testing.T) {
 	cfg := loadShop(t)
 	reposRoot := filepath.Join(projectRoot(t), "examples", "fake-repos")
-	cfg.Infrastructure.ConfigCenter.Type = "none"
+	cfg.Infrastructure.ConfigCenters[0].Type = "none"
 	rep, err := Check(cfg, reposRoot)
 	if err != nil {
 		t.Fatal(err)
@@ -219,7 +220,7 @@ func TestCheck_OriginMatches(t *testing.T) {
 		Agent:        config.Agent{Name: "a", WorkspaceName: "a", Model: "m"},
 		Environments: []config.Environment{{ID: "dev", APIDomain: "x", IsProd: false}},
 		Repos: []config.Repo{{
-			Name: repoName, URL: origin, Role: "backend", Stack: "go",
+			Name: repoName, URL: origin, Stack: "go",
 			EnvBranches: map[string]string{"dev": "main"},
 		}},
 		Generation: config.Generation{TargetHost: "openclaw"},
@@ -249,7 +250,7 @@ func TestCheck_OriginMismatch(t *testing.T) {
 		Agent:        config.Agent{Name: "a", WorkspaceName: "a", Model: "m"},
 		Environments: []config.Environment{{ID: "dev", APIDomain: "x", IsProd: false}},
 		Repos: []config.Repo{{
-			Name: repoName, URL: declaredURL, Role: "backend", Stack: "go",
+			Name: repoName, URL: declaredURL, Stack: "go",
 			EnvBranches: map[string]string{"dev": "main"},
 		}},
 		Generation: config.Generation{TargetHost: "openclaw"},
@@ -287,7 +288,7 @@ func TestCheck_OriginCrossProtocolMatch(t *testing.T) {
 		Agent:        config.Agent{Name: "a", WorkspaceName: "a", Model: "m"},
 		Environments: []config.Environment{{ID: "dev", APIDomain: "x", IsProd: false}},
 		Repos: []config.Repo{{
-			Name: repoName, URL: declared, Role: "backend", Stack: "go",
+			Name: repoName, URL: declared, Stack: "go",
 			EnvBranches: map[string]string{"dev": "main"},
 		}},
 		Generation: config.Generation{TargetHost: "openclaw"},

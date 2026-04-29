@@ -33,7 +33,6 @@ environments:
 repos:
   - name: central-platform
     url: git@github.com:example/central-platform.git
-    role: backend
     stack: go
     framework: kratos
     service_names:
@@ -101,8 +100,7 @@ infrastructure:
       readonly_enforced: true
 
 generation:
-  target_host: openclaw
-  output_dir: ./dist/central-platform
+  targets: [openclaw]
   skills_whitelist:
     - routing
     - config-executor

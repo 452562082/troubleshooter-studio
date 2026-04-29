@@ -82,8 +82,16 @@ export function Gen(arg1, arg2) {
   return window['go']['main']['App']['Gen'](arg1, arg2);
 }
 
+export function GenPreview(arg1) {
+  return window['go']['main']['App']['GenPreview'](arg1);
+}
+
 export function GetRemoteURL(arg1) {
   return window['go']['main']['App']['GetRemoteURL'](arg1);
+}
+
+export function GetRepoPathsForSystem(arg1) {
+  return window['go']['main']['App']['GetRepoPathsForSystem'](arg1);
 }
 
 export function GetUserConfig() {
@@ -92,6 +100,38 @@ export function GetUserConfig() {
 
 export function ImportAndDeploy(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['ImportAndDeploy'](arg1, arg2, arg3, arg4);
+}
+
+export function KuboardFetchConfigMaps(arg1) {
+  return window['go']['main']['App']['KuboardFetchConfigMaps'](arg1);
+}
+
+export function KuboardGetPodLogs(arg1) {
+  return window['go']['main']['App']['KuboardGetPodLogs'](arg1);
+}
+
+export function KuboardListDeployments(arg1) {
+  return window['go']['main']['App']['KuboardListDeployments'](arg1);
+}
+
+export function KuboardListEvents(arg1) {
+  return window['go']['main']['App']['KuboardListEvents'](arg1);
+}
+
+export function KuboardListPods(arg1) {
+  return window['go']['main']['App']['KuboardListPods'](arg1);
+}
+
+export function KuboardListResources(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['KuboardListResources'](arg1, arg2, arg3, arg4, arg5);
+}
+
+export function KuboardListServices(arg1) {
+  return window['go']['main']['App']['KuboardListServices'](arg1);
+}
+
+export function KuboardPodSnapshot(arg1) {
+  return window['go']['main']['App']['KuboardPodSnapshot'](arg1);
 }
 
 export function ListGrafanaDatasources(arg1) {
@@ -158,6 +198,10 @@ export function SaveInfraCredBatch(arg1) {
   return window['go']['main']['App']['SaveInfraCredBatch'](arg1);
 }
 
+export function SaveRepoPathsForSystem(arg1, arg2) {
+  return window['go']['main']['App']['SaveRepoPathsForSystem'](arg1, arg2);
+}
+
 export function SaveYAML(arg1, arg2) {
   return window['go']['main']['App']['SaveYAML'](arg1, arg2);
 }
@@ -176,6 +220,10 @@ export function SetDefaultReposRoot(arg1) {
 
 export function UninstallAgent(arg1) {
   return window['go']['main']['App']['UninstallAgent'](arg1);
+}
+
+export function UninstallBot(arg1, arg2) {
+  return window['go']['main']['App']['UninstallBot'](arg1, arg2);
 }
 
 export function Validate(arg1) {

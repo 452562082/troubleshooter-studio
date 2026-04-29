@@ -159,10 +159,6 @@ envsDone:
 		if err != nil {
 			return nil, err
 		}
-		role, err := w.askChoice("  角色", []string{"backend", "frontend", "infra", "shared", "gateway"}, "backend")
-		if err != nil {
-			return nil, err
-		}
 		stack, err := w.askChoice("  技术栈", []string{"go", "java", "node", "python", "rust"}, "go")
 		if err != nil {
 			return nil, err
@@ -195,7 +191,7 @@ envsDone:
 			branches[e.ID] = b
 		}
 		a.Repos = append(a.Repos, RepoAnswer{
-			Name: name, URL: url, Role: role, Stack: stack, Framework: framework,
+			Name: name, URL: url, Stack: stack, Framework: framework,
 			ServiceNames: services, EnvBranches: branches,
 		})
 		w.setCurrent(a)
@@ -208,7 +204,7 @@ reposDone:
 	if d != nil {
 		ccDef = defaultOr(d.ConfigCenterType, ccDef)
 	}
-	a.ConfigCenterType, err = w.askChoice("类型", []string{"nacos", "apollo", "consul", "env-vars", "kubernetes", "none"}, ccDef)
+	a.ConfigCenterType, err = w.askChoice("类型", []string{"nacos", "apollo", "consul", "env-vars", "kuboard", "none"}, ccDef)
 	if err != nil {
 		return nil, err
 	}
@@ -283,18 +279,8 @@ reposDone:
 	}
 	w.setCurrent(a)
 
-	// 输出目录
-	w.section("输出")
-	outDef := "./dist/" + a.SystemID
-	if d != nil {
-		outDef = defaultOr(d.OutputDir, outDef)
-	}
-	a.OutputDir, err = w.ask("生成包输出目录", outDef)
-	if err != nil {
-		return nil, err
-	}
-
 	// 输出目标格式（一次选多种，回车=全部 4 种）
+	w.section("输出")
 	tgtDef := ""
 	if d != nil && len(d.Targets) > 0 {
 		tgtDef = strings.Join(d.Targets, " ")

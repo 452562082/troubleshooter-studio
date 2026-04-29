@@ -19,7 +19,6 @@ environments:
 repos:
   - name: device-gateway
     url: git@github.com:iot/device-gateway.git
-    role: backend
     stack: java
     service_names:
       - device-gateway
@@ -59,8 +58,7 @@ infrastructure:
   project_tracking: []
 
 generation:
-  target_host: openclaw
-  output_dir: ./dist/iot
+  targets: [openclaw]
   skills_whitelist:
     - routing
     - config-executor

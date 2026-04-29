@@ -75,7 +75,7 @@ func New(cfg *config.SystemConfig, templateRoot, outputDir string) *Generator {
 		OutputDir:    outputDir,
 		Ctx: &Context{
 			SystemConfig:   cfg,
-			AgentID:        cfg.System.ID + "-troubleshooter",
+			AgentID:        cfg.ResolveID(),
 			Findings:       map[string]map[string]analyzer.Finding{},
 			PriorOverrides: map[string]map[string]analyzer.Finding{},
 		},
@@ -152,8 +152,10 @@ func (g *Generator) Generate() error {
 	if err != nil {
 		return fmt.Errorf("snapshot: %w", err)
 	}
-	// 若 config_center 切换（nacos→apollo 等），不继承 prior overrides，避免字段错配
-	if snap.OriginalCenter == "" || snap.OriginalCenter == g.Ctx.Infrastructure.ConfigCenter.Type {
+	// 若主源 config_center 切换（nacos→apollo 等），不继承 prior overrides，避免字段错配。
+	// 多源场景下用主源 type 做这个判断(stage 1 简化;stage 2 可改 per-source 判断)。
+	primaryCCType := g.Ctx.Infrastructure.PrimaryConfigCenter().Type
+	if snap.OriginalCenter == "" || snap.OriginalCenter == primaryCCType {
 		for svc, byEnv := range snap.ConfigOverrides {
 			if g.Ctx.PriorOverrides[svc] == nil {
 				g.Ctx.PriorOverrides[svc] = map[string]analyzer.Finding{}
@@ -167,21 +169,24 @@ func (g *Generator) Generate() error {
 	// 以 prior override 的形式注入(优先级介于 analyzer finding 与 inferred 之间 —
 	// 在模板里 findPrior 会命中这一层)。不覆盖 snapshot 里已有的人工行(用户在
 	// 产物里手改过就更权威)。
-	for env, svcMap := range g.Ctx.Infrastructure.ConfigCenter.ServiceMap {
-		for svc, rec := range svcMap {
-			if g.Ctx.PriorOverrides[svc] == nil {
-				g.Ctx.PriorOverrides[svc] = map[string]analyzer.Finding{}
-			}
-			if _, exists := g.Ctx.PriorOverrides[svc][env]; exists {
-				continue // 产物 snapshot 已有同 env 的人工行,尊重它
-			}
-			g.Ctx.PriorOverrides[svc][env] = analyzer.Finding{
-				ConfigCenter: g.Ctx.Infrastructure.ConfigCenter.Type,
-				DataID:       rec.DataID,
-				Group:        rec.Group,
-				NamespaceID:  rec.Namespace,
-				AppID:        rec.AppID,
-				SourceFile:   "wizard:service_map",
+	// 多源:遍历所有源的 ServiceMap;同一服务出现在多源里以最后一个为准(罕见,生成时警告)。
+	for _, cc := range g.Ctx.Infrastructure.ConfigCenters {
+		for env, svcMap := range cc.ServiceMap {
+			for svc, rec := range svcMap {
+				if g.Ctx.PriorOverrides[svc] == nil {
+					g.Ctx.PriorOverrides[svc] = map[string]analyzer.Finding{}
+				}
+				if _, exists := g.Ctx.PriorOverrides[svc][env]; exists {
+					continue // 产物 snapshot 已有同 env 的人工行,尊重它
+				}
+				g.Ctx.PriorOverrides[svc][env] = analyzer.Finding{
+					ConfigCenter: cc.Type,
+					DataID:       rec.DataID,
+					Group:        rec.Group,
+					NamespaceID:  rec.Namespace,
+					AppID:        rec.AppID,
+					SourceFile:   "wizard:service_map",
+				}
 			}
 		}
 	}
@@ -230,7 +235,7 @@ func (g *Generator) Generate() error {
 	// 填 Summary：供 CLI 按 text/json 渲染；不再直接 Printf
 	g.Summary = &GenSummary{
 		System:              g.Ctx.System.ID,
-		ConfigCenter:        g.Ctx.Infrastructure.ConfigCenter.Type,
+		ConfigCenter:        g.Ctx.Infrastructure.PrimaryConfigCenter().Type,
 		OutputDir:           g.OutputDir,
 		SkillsIncludedCount: countSkills(g.OutputDir),
 		FilesWritten:        countFiles(g.OutputDir),
@@ -378,7 +383,7 @@ func (g *Generator) shouldSkipDir(rel string) bool {
 	}
 	// skip config-executor if no config center
 	if skillName == "config-executor" {
-		t := g.Ctx.Infrastructure.ConfigCenter.Type
+		t := g.Ctx.Infrastructure.PrimaryConfigCenter().Type
 		if t == "" || t == "none" {
 			return true
 		}
@@ -473,8 +478,8 @@ func (g *Generator) writeReadme() error {
 	fmt.Fprintf(&sb, "- Agent 工作区：`~/.openclaw/workspace/%s`\n", ctx.Agent.WorkspaceName)
 	sb.WriteString("- OpenClaw 全局配置：`~/.openclaw/openclaw.json`\n")
 	sb.WriteString("- 本次凭证（0600）：`scripts/.env`\n")
-	if ctx.Infrastructure.ConfigCenter.Type == "apollo" || ctx.Infrastructure.ConfigCenter.Type == "consul" ||
-		ctx.Infrastructure.ConfigCenter.Type == "env-vars" || ctx.Infrastructure.ConfigCenter.Type == "kubernetes" {
+	if ctx.Infrastructure.PrimaryConfigCenter().Type == "apollo" || ctx.Infrastructure.PrimaryConfigCenter().Type == "consul" ||
+		ctx.Infrastructure.PrimaryConfigCenter().Type == "env-vars" || ctx.Infrastructure.PrimaryConfigCenter().Type == "kuboard" {
 		fmt.Fprintf(&sb, "- 运行时凭证（0600）：`~/.openclaw/%s-troubleshooter-creds.json`\n", ctx.System.ID)
 	}
 
@@ -520,7 +525,7 @@ func readmeSkillsSection(ctx *Context) string {
 func readmeCredentialsSection(ctx *Context) string {
 	var sb strings.Builder
 
-	cc := ctx.Infrastructure.ConfigCenter.Type
+	cc := ctx.Infrastructure.PrimaryConfigCenter().Type
 	hasCreds := (cc != "" && cc != "none") ||
 		ctx.Infrastructure.Observability.Grafana.Enabled ||
 		ctx.Infrastructure.Observability.Jaeger.Enabled ||
@@ -543,42 +548,21 @@ func readmeCredentialsSection(ctx *Context) string {
 	}
 
 	sb.WriteString("Studio 部署时会问下面这些值（按 system.yaml 自动派生），准备好可以加快流程：\n\n")
-	perEnvCC := ctx.Infrastructure.ConfigCenter.PerEnvCredentials
 	switch cc {
 	case "nacos":
-		sb.WriteString("- **Nacos**：每个 env 的 `host:port`")
-		if perEnvCC {
-			sb.WriteString("；每个 env 独立用户名 + 密码\n")
-		} else {
-			sb.WriteString("；共用一对用户名 + 密码\n")
-		}
+		sb.WriteString("- **Nacos**：每个 env 的 `host:port` + 用户名 + 密码\n")
 	case "apollo":
-		sb.WriteString("- **Apollo**：每个 env 的 meta URL")
-		if perEnvCC {
-			sb.WriteString("；每个 env 独立 Open API token\n")
-		} else {
-			sb.WriteString("；共用 Open API token（若无鉴权可留空）\n")
-		}
+		sb.WriteString("- **Apollo**：每个 env 的 meta URL + Open API token（若无鉴权可留空）\n")
 	case "consul":
-		sb.WriteString("- **Consul**：每个 env 的 host")
-		if perEnvCC {
-			sb.WriteString("；每个 env 独立 ACL token\n")
-		} else {
-			sb.WriteString("；共用 ACL token（若无 ACL 可留空）\n")
-		}
-	case "kubernetes":
-		sb.WriteString("- **Kubernetes**：每个 env 的 context / namespace / ConfigMap / Secret 名\n")
+		sb.WriteString("- **Consul**：每个 env 的 host + ACL token（若无 ACL 可留空）\n")
+	case "kuboard":
+		sb.WriteString("- **Kuboard**：每个 env 的 Kuboard URL / 用户名 / 密码（cluster / namespace / ConfigMap 由 service_map 决定，无需 install 时输入）\n")
 	case "env-vars":
 		sb.WriteString("- **静态连接串**：每个 env 下每个数据层组件的地址（host:port 或 URI）\n")
 	}
 
 	if ctx.Infrastructure.Observability.Grafana.Enabled {
-		sb.WriteString("- **Grafana**：每个 env 的 URL")
-		if ctx.Infrastructure.Observability.Grafana.PerEnvCredentials {
-			sb.WriteString("；每个 env 独立用户名 + 密码\n")
-		} else {
-			sb.WriteString("；共用用户名 + 密码\n")
-		}
+		sb.WriteString("- **Grafana**：每个 env 的 URL + 用户名 + 密码\n")
 	}
 	if ctx.Infrastructure.Observability.Jaeger.Enabled {
 		sb.WriteString("- **Jaeger**：每个 env 的 URL（如 `http://jaeger-xxx:16686`）\n")
@@ -609,7 +593,7 @@ func readmeFAQSection(ctx *Context) string {
 	sb.WriteString("**Q: 装完后没看到 agent？**\n")
 	sb.WriteString("A: 检查 `~/.openclaw/openclaw.json` 里有没有 `agents.list[...]` 包含 `" + ctx.AgentID + "`；没有就回 BotsPage 重新部署。OpenClaw 客户端可能也需要重启 gateway：`openclaw gateway restart`。\n\n")
 
-	if ctx.Infrastructure.ConfigCenter.Type != "" && ctx.Infrastructure.ConfigCenter.Type != "none" {
+	if ctx.Infrastructure.PrimaryConfigCenter().Type != "" && ctx.Infrastructure.PrimaryConfigCenter().Type != "none" {
 		sb.WriteString("**Q: 某个 env 的配置查不到？**\n")
 		sb.WriteString("A: (1) 检查 `scripts/.env` 里该 env 的地址/凭证；(2) 对比 `templates/workspace-template/skills/routing/references/config-map.yaml` 里的 namespace/dataId/group 是否对；(3) 在 tshoot 仓库跑 `tshoot doctor -i system.yaml --repos-root <dir>` 看声明与实态是否漂移。\n\n")
 	}

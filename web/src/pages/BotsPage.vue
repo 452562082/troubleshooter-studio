@@ -19,6 +19,7 @@ import {
   revealInFinder,
   runInstall,
   scanInstallPrompts,
+  uninstallBot,
 } from '../lib/bridge'
 import yaml from 'js-yaml'
 import { useDeployPath } from '../lib/useDeployPath'
@@ -34,6 +35,8 @@ const newRootInput = ref('')
 // 每张卡片的"重 gen"状态：key = path|target
 // 只留 loading 让按钮禁用;结果反馈走 toast,不留 inline 文案
 const regenState = reactive<Record<string, { loading: boolean }>>({})
+// 卸载状态:跟 regenState 同结构,确保按钮在卸载过程中禁用 + 反复点击不重入
+const uninstallState = reactive<Record<string, { loading: boolean }>>({})
 
 // 编辑器状态（展开哪张卡片、草稿 yaml、应用结果）：
 const editingKey = ref<string | null>(null)
@@ -203,6 +206,31 @@ async function regen(b: DiscoveredBot) {
     toast.error(`${b.meta.system_id} 重 gen 失败: ${String(e?.message || e)}`)
   } finally {
     regenState[k] = { loading: false }
+  }
+}
+
+// 卸载机器人:按 target 分派,清两端(中间包 + AI 平台真实位置)。
+// 二次确认避免误删;成功后从 bots 列表移除该条,无需手动刷新。
+async function uninstall(b: DiscoveredBot) {
+  const k = regenKey(b)
+  const target = b.meta.target
+  const ok = window.confirm(
+    `确定卸载 "${b.meta.system_id}" (${target})?\n\n` +
+    (target === 'openclaw'
+      ? 'workspace 移到 ~/.Trash;摘掉 ~/.openclaw/openclaw.json 里的 agents.list 条目;清 creds.json。MCP servers(可能被多 agent 共享)保留。'
+      : `中间包 ${b.path} 移到 ~/.Trash;清掉 ~/${target === 'claude-code' ? '.claude' : '.cursor'}/{agents,skills,scripts}/<name>。`)
+  )
+  if (!ok) return
+  uninstallState[k] = { loading: true }
+  try {
+    const r = await uninstallBot(b.path, target)
+    // 从 bots 列表把这条摘掉(避免点完还残留 → 用户以为卸载没生效)
+    bots.value = bots.value.filter(x => regenKey(x) !== k)
+    toast.success(`${b.meta.system_id} (${target}) 已卸载;${(r.log || []).length} 项操作详见日志`)
+  } catch (e: any) {
+    toast.error(`卸载失败: ${String(e?.message || e)}`)
+  } finally {
+    uninstallState[k] = { loading: false }
   }
 }
 
@@ -785,10 +813,13 @@ onUnmounted(() => {
     <section class="roots">
       <div class="roots-head">
         <span class="roots-label">扫描路径</span>
-        <span class="hint">默认扫 <code>~/.openclaw/workspace</code>。如果机器人装在 Claude Code / Cursor 项目根里，把项目路径加进来。</span>
+        <span class="hint">默认扫 OpenClaw workspace + wizard 一键部署的中间包目录。Claude Code / Cursor 装在项目根里的,把项目路径加进来。</span>
       </div>
       <div class="root-list">
         <span class="root-item builtin">~/.openclaw/workspace <span class="tag">默认</span></span>
+        <span class="root-item builtin">~/.tshoot/openclaw <span class="tag">默认</span></span>
+        <span class="root-item builtin">~/.tshoot/claude-code <span class="tag">默认</span></span>
+        <span class="root-item builtin">~/.tshoot/cursor <span class="tag">默认</span></span>
         <span v-for="r in extraRoots" :key="r" class="root-item">
           {{ r }}
           <button class="root-remove" @click="removeRoot(r)">×</button>
@@ -863,6 +894,15 @@ onUnmounted(() => {
                 </button>
                 <button class="menu-item" @click="closeMenu(); doExport(b)">
                   {{ editingKey === regenKey(b) ? '⇩ 导出草稿' : '⇩ 导出 yaml' }}
+                </button>
+                <div class="menu-sep"></div>
+                <button
+                  class="menu-item menu-item-danger"
+                  :disabled="uninstallState[regenKey(b)]?.loading"
+                  :title="'卸载已部署的机器人:中间包移到 ~/.Trash,清掉 AI 平台对应位置(claude-code/cursor 清 ~/.claude|.cursor;openclaw 摘 openclaw.json + 清 creds)'"
+                  @click="closeMenu(); uninstall(b)"
+                >
+                  {{ uninstallState[regenKey(b)]?.loading ? '卸载中…' : '🗑 卸载机器人' }}
                 </button>
               </div>
             </div>
@@ -1059,6 +1099,10 @@ onUnmounted(() => {
 }
 .bot-menu .menu-item:hover:not(:disabled) { background: var(--c-surf-3); }
 .bot-menu .menu-item:disabled { opacity: 0.5; cursor: not-allowed; }
+/* 危险操作(卸载)用红色文字 + 顶上加分隔线,跟普通 menu item 视觉拉开,降低误点风险 */
+.bot-menu .menu-sep { height: 1px; background: var(--c-line-2); margin: 4px 0; }
+.bot-menu .menu-item-danger { color: #dc2626; }
+.bot-menu .menu-item-danger:hover:not(:disabled) { background: #fef2f2; color: #b91c1c; }
 
 /* Doctor 诊断结果面板 */
 .doctor-panel {

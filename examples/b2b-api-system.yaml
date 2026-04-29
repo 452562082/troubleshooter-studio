@@ -7,8 +7,7 @@
 #   - 内部微服务平台(HR / 权限 / 审计 等横向服务)
 #
 # 跟全栈架构的区别:
-#   - repos 全 role: backend,无 frontend / gateway
-#   - 排障时机器人 focus 是 API 错误码/延迟/依赖,不需要查前端
+#   - 没前端 repo,排障时机器人 focus 是 API 错误码/延迟/依赖,不需要查前端
 #   - routing skill 会绕过"前端 → BFF → 后端"的三层推理,直接 service → env → config
 
 system:
@@ -20,9 +19,6 @@ agent:
   name: "API 平台排障机器人"
   workspace_name: "API 平台排障机器人"
   model: anthropic/claude-sonnet-4-6
-  style:
-    tone: direct
-    verbosity: terse
 
 environments:
   - id: staging
@@ -32,18 +28,16 @@ environments:
     api_domain: api.internal.example.com
     is_prod: true
 
-# 纯后端:全部 role=backend,不同 stack 混搭很正常(历史演进留下的)
+# 纯后端,不同 stack 混搭很正常(历史演进留下的)
 repos:
   - name: auth-api
     url: git@github.com:example/auth-api.git
-    role: backend
     stack: go
     service_names: [auth-api]
     env_branches: {staging: staging, prod: main}
 
   - name: audit-api
     url: git@github.com:example/audit-api.git
-    role: backend
     stack: java
     framework: spring-boot
     service_names: [audit-api]
@@ -51,7 +45,6 @@ repos:
 
   - name: user-api
     url: git@github.com:example/user-api.git
-    role: backend
     stack: python
     framework: fastapi
     service_names: [user-api]
@@ -59,7 +52,6 @@ repos:
 
   - name: billing-api
     url: git@github.com:example/billing-api.git
-    role: backend
     stack: go
     service_names: [billing-api]
     env_branches: {staging: staging, prod: main}
@@ -113,8 +105,7 @@ infrastructure:
       readonly_enforced: true
 
 generation:
-  target_host: openclaw
-  output_dir: ./dist/internal-apis
+  targets: [openclaw]
   skills_whitelist:
     - routing
     - config-executor

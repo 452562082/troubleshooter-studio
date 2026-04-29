@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import yaml from 'js-yaml'
-import { analyze as bridgeAnalyze, isDesktop, openDir, type AnalyzeResult } from '../lib/bridge'
+import { analyze as bridgeAnalyze, isDesktop, openDir, openYAML, type AnalyzeResult } from '../lib/bridge'
 import { toast } from '../lib/toast'
 import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
 
@@ -52,8 +52,7 @@ infrastructure:
   project_tracking: []
 
 generation:
-  target_host: openclaw
-  output_dir: ./dist/demo
+  targets: [openclaw]
   skills_whitelist: [routing, config-executor, redis-runtime-query, diagram-generator]
   preserve_on_regenerate: [SOUL.md]
 
@@ -74,7 +73,18 @@ const loading = ref(false)
 const result = ref<any>(null)
 const error = ref('')
 
-function loadFile(e: Event) {
+// 桌面 app 走 Wails 原生 osascript 对话框(reliable on macOS WKWebView);
+// 浏览器模式回退 <input type="file"> + FileReader。
+async function loadFileNative() {
+  if (!isDesktop()) return
+  try {
+    const r = await openYAML()
+    if (r && r.path) yamlContent.value = r.content || ''
+  } catch (e: any) {
+    error.value = `加载文件失败: ${String(e?.message || e)}`
+  }
+}
+function loadFileBrowser(e: Event) {
   const file = (e.target as HTMLInputElement).files?.[0]
   if (!file) return
   const reader = new FileReader()
@@ -261,7 +271,8 @@ onUnmounted(() => {
       <div class="label-row">
         <label>system.yaml</label>
         <div class="label-row-actions">
-          <label class="btn small">加载文件 <input type="file" accept=".yaml,.yml" @change="loadFile" hidden /></label>
+          <button v-if="isDesktop()" class="btn small" @click="loadFileNative">加载文件</button>
+          <label v-else class="btn small">加载文件 <input type="file" accept=".yaml,.yml" @change="loadFileBrowser" hidden /></label>
           <button class="btn small" @click="loadExample">加载示例</button>
         </div>
       </div>

@@ -48,12 +48,11 @@ type RepoSummary struct {
 	ServiceNameCount int    `json:"service_name_count"`
 	FindingCount     int    `json:"finding_count"`
 	Error            string `json:"error,omitempty"`
-	// DetectedStack / DetectedRole / DetectedFramework 分别是三个启发式 detector
-	// 对仓库的探测结果。InitPage Step 4 把 role / stack / framework 做成只读 badge,
-	// 这三个字段是唯一数据源,用户只能看不能改(想改就手动编辑 yaml 或重写 repo URL
-	// 重新扫描)。都可能是空字符串 —— 仓库不在本地 / 不是 git / manifest 不认识。
+	// DetectedStack / DetectedFramework 是两个启发式 detector 对仓库的探测结果。
+	// InitPage Step 4 把 stack / framework 做成只读 badge,这两个字段是唯一数据源,
+	// 用户只能看不能改(想改就手动编辑 yaml 或重写 repo URL 重新扫描)。
+	// 都可能是空字符串 —— 仓库不在本地 / 不是 git / manifest 不认识。
 	DetectedStack     string `json:"detected_stack,omitempty"`
-	DetectedRole      string `json:"detected_role,omitempty"`
 	DetectedFramework string `json:"detected_framework,omitempty"`
 	// Branches 是仓库的所有分支名(本地 + 远端,去重 + 字母序)。
 	// InitPage Step 4 的 env_branches input 用 <datalist> 挂上去,用户点
@@ -86,10 +85,13 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 		progress = func(string) {}
 	}
 
-	reg := analyzer.NewRegistry(cfg.Infrastructure.ConfigCenter.Type)
+	// analyzer 目前是单源视角:多源场景下用 PrimaryConfigCenter() 作为"主源"扫,
+	// stage 2 再做 per-repo 按 config_source 路由的多源版本。
+	primaryCC := cfg.Infrastructure.PrimaryConfigCenter().Type
+	reg := analyzer.NewRegistry(primaryCC)
 	report := analyzer.Report{
 		SchemaVersion: "0.1",
-		ConfigCenter:  cfg.Infrastructure.ConfigCenter.Type,
+		ConfigCenter:  primaryCC,
 	}
 	perRepo := []RepoSummary{}
 
@@ -159,10 +161,10 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 			progress(fmt.Sprintf("[warn] expand branches %s: %v", repo.Name, brErr))
 		}
 
-		// 四项仓库元信息探测,跟 yaml 里声明值独立;Step 4 UI 以探测值为准。
+		// 三项仓库元信息探测,跟 yaml 里声明值独立;Step 4 UI 以探测值为准。
 		// 都轻量(只读根文件 / git for-each-ref),不会显著拖慢 analyze 流程。
+		// (role 启发式误报率太高,已下线;repo 角色由用户口头描述给机器人就行,不必入 yaml)
 		detectedStack := analyzer.DetectStack(repoPath)
-		detectedRole := analyzer.DetectRole(repoPath)
 		detectedFramework := analyzer.DetectFramework(repoPath, detectedStack)
 		branches := analyzer.ListBranches(repoPath)
 
@@ -190,7 +192,6 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 				Status:            "skipped",
 				Error:             err.Error(),
 				DetectedStack:     detectedStack,
-				DetectedRole:      detectedRole,
 				DetectedFramework: detectedFramework,
 				Branches:          branches,
 			})
@@ -209,7 +210,6 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 			ServiceNameCount:  len(ra.ServiceNames),
 			FindingCount:      len(ra.Findings),
 			DetectedStack:     detectedStack,
-			DetectedRole:      detectedRole,
 			DetectedFramework: detectedFramework,
 			Branches:          branches,
 		})

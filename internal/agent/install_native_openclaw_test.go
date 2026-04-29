@@ -60,9 +60,10 @@ func nacosCfg() *config.SystemConfig {
 	cfg := &config.SystemConfig{
 		System: config.System{ID: "shop", Name: "Shop"},
 		Agent: config.Agent{
-			Name:          "Shop Bot",
-			WorkspaceName: "shop-bot",
-			Model:         "openai/gpt-4",
+			// 不显式设 WorkspaceName / ID,让 ResolveID() 走 "<system.id>-troubleshooter"
+			// 兜底,跟新 wizard 默认行为一致(shop → shop-troubleshooter)。
+			Name:  "Shop Bot",
+			Model: "openai/gpt-4",
 		},
 		Environments: []config.Environment{
 			{ID: "dev"}, {ID: "prod"},
@@ -79,15 +80,19 @@ func TestInstallNativeOpenclaw_FreshInstall(t *testing.T) {
 	staging, fakeHome := setupOpenclawStaging(t, cfg)
 
 	creds := map[string]string{
-		"CC_ADDR_DEV":             "nacos-dev.example.com:8848",
-		"CC_ADDR_PROD":            "nacos-prod.example.com:8848",
-		"CONFIG_CENTER_USERNAME":  "nacos",
-		"CONFIG_CENTER_PASSWORD":  "nacos-pwd",
-		"GRAFANA_URL_DEV":         "http://grafana-dev.example.com",
-		"GRAFANA_URL_PROD":        "http://grafana-prod.example.com",
-		"GRAFANA_USERNAME":        "admin",
-		"GRAFANA_PASSWORD":        "admin-pwd",
-		"MODEL":                   "openai/gpt-5",
+		"CC_ADDR_DEV":      "nacos-dev.example.com:8848",
+		"CC_ADDR_PROD":     "nacos-prod.example.com:8848",
+		"CC_USER_DEV":      "nacos",
+		"CC_PASS_DEV":      "nacos-pwd",
+		"CC_USER_PROD":     "nacos",
+		"CC_PASS_PROD":     "nacos-pwd",
+		"GRAFANA_URL_DEV":  "http://grafana-dev.example.com",
+		"GRAFANA_URL_PROD": "http://grafana-prod.example.com",
+		"GRAFANA_USER_DEV": "admin",
+		"GRAFANA_PASS_DEV": "admin-pwd",
+		"GRAFANA_USER_PROD": "admin",
+		"GRAFANA_PASS_PROD": "admin-pwd",
+		"MODEL":            "openai/gpt-5",
 	}
 	err := InstallNativeOpenclaw(context.Background(), staging, InstallOpenclawOptions{Creds: creds, SkipGatewayRestart: true})
 	if err != nil {
@@ -95,7 +100,7 @@ func TestInstallNativeOpenclaw_FreshInstall(t *testing.T) {
 	}
 
 	// workspace 装到 ~/.openclaw/workspace/<name>/
-	wsDir := filepath.Join(fakeHome, ".openclaw", "workspace", "shop-bot")
+	wsDir := filepath.Join(fakeHome, ".openclaw", "workspace", "shop-troubleshooter")
 	if _, err := os.Stat(filepath.Join(wsDir, "SOUL.md")); err != nil {
 		t.Errorf("workspace SOUL.md missing: %v", err)
 	}
@@ -117,7 +122,7 @@ func TestInstallNativeOpenclaw_FreshInstall(t *testing.T) {
 	if a["model"] != "openai/gpt-5" {
 		t.Errorf("agent.model want openai/gpt-5(creds 优先), got %v", a["model"])
 	}
-	if !strings.HasSuffix(a["workspace"].(string), "/.openclaw/workspace/shop-bot") {
+	if !strings.HasSuffix(a["workspace"].(string), "/.openclaw/workspace/shop-troubleshooter") {
 		t.Errorf("agent.workspace path wrong: %v", a["workspace"])
 	}
 
@@ -137,7 +142,7 @@ func TestInstallNativeOpenclaw_FreshInstall(t *testing.T) {
 		t.Errorf("nacos-mcp-server-dev addr wrong: %v", nacDev["NACOS_ADDR"])
 	}
 	if nacDev["NACOS_USERNAME"] != "nacos" {
-		t.Errorf("nacos-mcp-server-dev username should fall back to shared CONFIG_CENTER_USERNAME, got %v", nacDev["NACOS_USERNAME"])
+		t.Errorf("nacos-mcp-server-dev username should be CC_USER_DEV(per-env), got %v", nacDev["NACOS_USERNAME"])
 	}
 
 	// .env 持久化
@@ -163,7 +168,7 @@ func TestInstallNativeOpenclaw_ReinstallBackupsWorkspace(t *testing.T) {
 	if err := InstallNativeOpenclaw(context.Background(), staging, InstallOpenclawOptions{SkipGatewayRestart: true}); err != nil {
 		t.Fatal(err)
 	}
-	wsDir := filepath.Join(fakeHome, ".openclaw", "workspace", "shop-bot")
+	wsDir := filepath.Join(fakeHome, ".openclaw", "workspace", "shop-troubleshooter")
 	userMark := filepath.Join(wsDir, "USER_EDIT.md")
 	if err := os.WriteFile(userMark, []byte("user kept this"), 0o644); err != nil {
 		t.Fatal(err)
@@ -214,7 +219,7 @@ func TestInstallNativeOpenclaw_CredsJSONForApollo(t *testing.T) {
 	cfg := &config.SystemConfig{
 		System: config.System{ID: "x", Name: "X"},
 		Agent: config.Agent{
-			Name: "X Bot", WorkspaceName: "x-bot", Model: "openai/gpt-4",
+			Name: "X Bot", Model: "openai/gpt-4",
 		},
 		Environments: []config.Environment{{ID: "dev"}},
 		Meta:         config.Meta{SchemaVersion: "0.1"},
@@ -223,8 +228,8 @@ func TestInstallNativeOpenclaw_CredsJSONForApollo(t *testing.T) {
 	staging, fakeHome := setupOpenclawStaging(t, cfg)
 
 	creds := map[string]string{
-		"APOLLO_META_DEV": "http://apollo-dev:8080",
-		"APOLLO_TOKEN":    "abc",
+		"APOLLO_META_DEV":  "http://apollo-dev:8080",
+		"APOLLO_TOKEN_DEV": "abc",
 	}
 	if err := InstallNativeOpenclaw(context.Background(), staging, InstallOpenclawOptions{Creds: creds, SkipGatewayRestart: true}); err != nil {
 		t.Fatal(err)
@@ -245,7 +250,7 @@ func TestInstallNativeOpenclaw_CredsJSONForApollo(t *testing.T) {
 		t.Errorf("apollo.dev.meta_url want http://apollo-dev:8080, got %v", dev["meta_url"])
 	}
 	if dev["token"] != "abc" {
-		t.Errorf("apollo.dev.token want abc(shared), got %v", dev["token"])
+		t.Errorf("apollo.dev.token want abc(per-env APOLLO_TOKEN_DEV), got %v", dev["token"])
 	}
 
 	// creds.json 必须 0600
@@ -269,6 +274,105 @@ func TestInstallNativeOpenclaw_NacosNoCredsFile(t *testing.T) {
 	if _, err := os.Stat(credsPath); !os.IsNotExist(err) {
 		t.Errorf("nacos cc 不应该写 creds.json, but got err=%v", err)
 	}
+}
+
+// 多源场景:nacos + kuboard 同时注册,MCP key 带 source.id 命名空间不冲突,
+// kuboard 走 creds.json 的三层结构(kuboard.<source>.<env>),nacos 走 mcp.servers
+func TestInstallNativeOpenclaw_MultiSourceMix(t *testing.T) {
+	cfg := nacosCfg() // 已带 nacos id="" + grafana enabled
+	// 替换为显式多源:main-nacos + legacy-kuboard;kuboard 的 cluster/ns/cm 走 service_map per-service
+	cfg.Infrastructure.ConfigCenters = []config.ConfigCenter{
+		{ID: "main-nacos", Type: "nacos"},
+		{
+			ID:   "legacy-kuboard",
+			Type: "kuboard",
+			ServiceMap: map[string]map[string]config.ServiceMapEntry{
+				"dev": {
+					"user": {Cluster: "dev-cluster", Namespace: "default", ConfigMap: "app-config"},
+				},
+				"prod": {
+					"user": {Cluster: "prod-cluster", Namespace: "prod", ConfigMap: "app-config"},
+				},
+			},
+		},
+	}
+	cfg.Infrastructure.ConfigCenter = config.ConfigCenter{} // 清掉避免重复 marshal
+	staging, fakeHome := setupOpenclawStaging(t, cfg)
+
+	creds := map[string]string{
+		"CC_ADDR_MAIN_NACOS_DEV":          "nacos-dev:8848",
+		"CC_ADDR_MAIN_NACOS_PROD":         "nacos-prod:8848",
+		"CC_USER_MAIN_NACOS_DEV":          "u",
+		"CC_PASS_MAIN_NACOS_DEV":          "p",
+		"CC_USER_MAIN_NACOS_PROD":         "u",
+		"CC_PASS_MAIN_NACOS_PROD":         "p",
+		"KUBOARD_URL_LEGACY_KUBOARD_DEV":  "https://kuboard-dev.example.com",
+		"KUBOARD_USER_LEGACY_KUBOARD_DEV": "admin",
+		"KUBOARD_PASS_LEGACY_KUBOARD_DEV": "secret",
+		"KUBOARD_URL_LEGACY_KUBOARD_PROD":  "https://kuboard-prod.example.com",
+		"KUBOARD_USER_LEGACY_KUBOARD_PROD": "admin",
+		"KUBOARD_PASS_LEGACY_KUBOARD_PROD": "secret",
+	}
+	if err := InstallNativeOpenclaw(context.Background(), staging, InstallOpenclawOptions{
+		Creds: creds, SkipGatewayRestart: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// nacos MCP key 带 source.id
+	cfgPath := filepath.Join(fakeHome, ".openclaw", "openclaw.json")
+	data := readJSON(t, cfgPath)
+	servers := getMap(data, "mcp", "servers")
+	for _, key := range []string{"nacos-mcp-server-main-nacos-dev", "nacos-mcp-server-main-nacos-prod"} {
+		if _, ok := servers[key]; !ok {
+			t.Errorf("缺多源 nacos MCP key %s; servers=%v", key, mapKeys(servers))
+		}
+	}
+	// legacy-kuboard 不应注册 MCP(kuboard 走 creds.json + python script)
+	for k := range servers {
+		if strings.Contains(k, "legacy-kuboard") {
+			t.Errorf("kuboard 不该走 MCP,但意外注册了 %s", k)
+		}
+	}
+
+	// kuboard 凭证写到 ~/.openclaw/<id>-troubleshooter-creds.json,顶层 kuboard 三层
+	credsPath := filepath.Join(fakeHome, ".openclaw", "shop-troubleshooter-creds.json")
+	cdata := readJSON(t, credsPath)
+	kbTop, ok := cdata["kuboard"].(map[string]any)
+	if !ok {
+		t.Fatalf("creds.json 缺 kuboard section: %+v", cdata)
+	}
+	bySource, ok := kbTop["legacy-kuboard"].(map[string]any)
+	if !ok {
+		t.Fatalf("creds.json kuboard.legacy-kuboard 缺失;got=%+v", kbTop)
+	}
+	dev, ok := bySource["dev"].(map[string]any)
+	if !ok {
+		t.Fatalf("creds.json kuboard.legacy-kuboard.dev 缺失;got=%+v", bySource)
+	}
+	if dev["url"] != "https://kuboard-dev.example.com" || dev["username"] != "admin" || dev["password"] != "secret" {
+		t.Errorf("kuboard creds 顶层字段错: %+v", dev)
+	}
+	// cluster/namespace/configmap 走 service_map per-service
+	svcMap, ok := dev["service_map"].(map[string]any)
+	if !ok {
+		t.Fatalf("kuboard creds.dev.service_map 缺失;got=%+v", dev)
+	}
+	user, ok := svcMap["user"].(map[string]any)
+	if !ok {
+		t.Fatalf("kuboard creds.dev.service_map.user 缺失;got=%+v", svcMap)
+	}
+	if user["cluster"] != "dev-cluster" || user["namespace"] != "default" || user["configmap"] != "app-config" {
+		t.Errorf("kuboard creds.dev.service_map.user 错: %+v", user)
+	}
+}
+
+func mapKeys(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 func TestInstallNativeOpenclaw_PreservesExistingAgents(t *testing.T) {

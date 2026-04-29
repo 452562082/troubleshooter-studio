@@ -26,6 +26,14 @@
 {{- end}}
 - [ ] 已按链路执行：{{if or (eq .Infrastructure.ConfigCenter.Type "nacos") (eq .Infrastructure.ConfigCenter.Type "apollo") (eq .Infrastructure.ConfigCenter.Type "consul")}}配置中心/{{end}}可观测性走可用 MCP；数据层走对应 skill（{{$first := true}}{{range .Infrastructure.DataStores}}{{if .Enabled}}{{if not $first}}、{{end}}{{$first = false}}{{dataStoreSkill .Type}}{{end}}{{end}}）
 - [ ] 任一步骤不可用时，已明确阻塞点并给出可执行兜底链路
+{{- if hasSkill . "k8s-runtime-query" }}
+
+## 3.5) K8s 运行时确认
+- [ ] 已通过 `routing` 解析得到目标 cluster + namespace + 服务的 label selector
+- [ ] 已用 `k8s-runtime-query::KuboardPodSnapshot` 拿一站式快照：pod 状态 + 最近 events + 主容器日志（current/previous）
+- [ ] 若 pod `restartCount > 0`，已查看 `logs_previous` 找上次崩溃栈
+- [ ] 若需要看 Deployment 滚动状态，已用 `KuboardListDeployments` 看 `availableReplicas / readyReplicas` 是否到位
+{{- end }}
 
 ## 4) 配置与鉴权确认
 - [ ] 已确认关键配置项（开关、路由、下游地址）

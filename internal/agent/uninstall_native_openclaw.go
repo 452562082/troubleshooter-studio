@@ -33,9 +33,9 @@ func UninstallNativeOpenclaw(installedDir string) (*UninstallOpenclawResult, err
 	if err != nil {
 		return nil, fmt.Errorf("read tshoot.json: %w", err)
 	}
-	wsName := strings.TrimSpace(cfg.Agent.WorkspaceName)
+	wsName := strings.TrimSpace(cfg.ResolveWorkspaceName())
 	if wsName == "" {
-		return nil, fmt.Errorf("agent.workspace_name 为空,无法定位 workspace")
+		return nil, fmt.Errorf("无法确定 workspace 目录名:agent.id / agent.workspace_name 至少要有一个非空")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -44,10 +44,11 @@ func UninstallNativeOpenclaw(installedDir string) (*UninstallOpenclawResult, err
 	res := &UninstallOpenclawResult{}
 	logf := func(format string, a ...any) { res.Log = append(res.Log, fmt.Sprintf(format, a...)) }
 
+	agentID := cfg.ResolveID()
 	wsDir := filepath.Join(home, ".openclaw", "workspace", wsName)
 	if _, err := os.Stat(wsDir); err == nil {
 		ts := time.Now().Format("20060102-150405")
-		bk := filepath.Join(home, ".Trash", cfg.System.ID+"-troubleshooter-workspace-uninstall-"+ts)
+		bk := filepath.Join(home, ".Trash", agentID+"-workspace-uninstall-"+ts)
 		if err := os.MkdirAll(filepath.Dir(bk), 0o755); err != nil {
 			return res, err
 		}
@@ -68,7 +69,6 @@ func UninstallNativeOpenclaw(installedDir string) (*UninstallOpenclawResult, err
 	// 摘 agents.list
 	cfgPath := filepath.Join(home, ".openclaw", "openclaw.json")
 	if data, err := readJSONOrEmpty(cfgPath); err == nil {
-		agentID := cfg.System.ID + "-troubleshooter"
 		if removeAgentEntry(data, agentID) {
 			if err := writeJSONFile(cfgPath, data, 0o644); err != nil {
 				return res, fmt.Errorf("write %s: %w", cfgPath, err)
@@ -81,7 +81,7 @@ func UninstallNativeOpenclaw(installedDir string) (*UninstallOpenclawResult, err
 	}
 
 	// 清 creds.json
-	credsPath := filepath.Join(home, ".openclaw", cfg.System.ID+"-troubleshooter-creds.json")
+	credsPath := filepath.Join(home, ".openclaw", agentID+"-creds.json")
 	if err := os.Remove(credsPath); err == nil {
 		res.CredsRemoved = true
 		logf("[ok] %s 已删除", credsPath)

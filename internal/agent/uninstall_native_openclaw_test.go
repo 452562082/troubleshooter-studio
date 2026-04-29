@@ -15,7 +15,7 @@ func TestUninstallNativeOpenclaw_HappyPath(t *testing.T) {
 	if err := InstallNativeOpenclaw(context.Background(), staging, InstallOpenclawOptions{SkipGatewayRestart: true}); err != nil {
 		t.Fatal(err)
 	}
-	wsDir := filepath.Join(fakeHome, ".openclaw", "workspace", "shop-bot")
+	wsDir := filepath.Join(fakeHome, ".openclaw", "workspace", "shop-troubleshooter")
 	if _, err := os.Stat(wsDir); err != nil {
 		t.Fatal("pre-condition: workspace should exist after install")
 	}
@@ -64,7 +64,7 @@ func TestUninstallNativeOpenclaw_NoWorkspaceStillCleansJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 提前手动删 workspace,模拟"用户已经 rm 了"
-	wsDir := filepath.Join(fakeHome, ".openclaw", "workspace", "shop-bot")
+	wsDir := filepath.Join(fakeHome, ".openclaw", "workspace", "shop-troubleshooter")
 	if err := os.RemoveAll(wsDir); err != nil {
 		t.Fatal(err)
 	}

@@ -59,7 +59,7 @@ func SelfTestOpenclaw(ctx context.Context, dir string) (*SelfTestResult, error) 
 	if err != nil {
 		return nil, err
 	}
-	wsDir := filepath.Join(home, ".openclaw", "workspace", strings.TrimSpace(cfg.Agent.WorkspaceName))
+	wsDir := filepath.Join(home, ".openclaw", "workspace", strings.TrimSpace(cfg.ResolveWorkspaceName()))
 	if _, err := os.Stat(wsDir); err == nil {
 		add("workspace 目录", "PASS", wsDir)
 	} else {
@@ -72,7 +72,7 @@ func SelfTestOpenclaw(ctx context.Context, dir string) (*SelfTestResult, error) 
 		add("openclaw.json", "FAIL", err.Error())
 		return res, nil
 	}
-	agentID := cfg.System.ID + "-troubleshooter"
+	agentID := cfg.ResolveID()
 	if hasAgentEntry(ocData, agentID) {
 		add(fmt.Sprintf("agents.list 含 %s", agentID), "PASS", cfgPath)
 	} else {
@@ -93,19 +93,26 @@ func SelfTestOpenclaw(ctx context.Context, dir string) (*SelfTestResult, error) 
 		add("mcp.servers 齐全", "FAIL", "缺失:"+strings.Join(missing, ", "))
 	}
 
-	// nacos TCP 探活
-	if cfg.Infrastructure.ConfigCenter.Type == "nacos" {
+	// nacos TCP 探活:多源逐个测
+	for _, cc := range cfg.Infrastructure.ConfigCenters {
+		if cc.Type != "nacos" {
+			continue
+		}
 		for _, e := range cfg.Environments {
-			key := "nacos-mcp-server-" + e.ID
+			key := mcpKey("nacos-mcp-server", cc.ID, e.ID)
 			addr := mcpEnv(servers, key, "NACOS_ADDR")
+			label := "nacos TCP " + e.ID
+			if cc.ID != "" && cc.ID != "default" {
+				label = "nacos TCP " + cc.ID + "/" + e.ID
+			}
 			if !strings.Contains(addr, ":") {
-				add("nacos TCP "+e.ID, "WARN", "NACOS_ADDR 缺失,跳过探活")
+				add(label, "WARN", "NACOS_ADDR 缺失,跳过探活")
 				continue
 			}
 			if err := tcpProbe(ctx, addr, 4*time.Second); err != nil {
-				add("nacos TCP "+e.ID, "FAIL", fmt.Sprintf("%s 不通:%v", addr, err))
+				add(label, "FAIL", fmt.Sprintf("%s 不通:%v", addr, err))
 			} else {
-				add("nacos TCP "+e.ID, "PASS", addr)
+				add(label, "PASS", addr)
 			}
 		}
 	}
@@ -121,13 +128,16 @@ func SelfTestOpenclaw(ctx context.Context, dir string) (*SelfTestResult, error) 
 	return res, nil
 }
 
-// requiredMCPKeys 跟 InjectMCPServers 的注入逻辑保持镜像:cfg 开关哪些 MCP,
-// 这里就要哪些 key。任一缺失视为部署不完整。
+// requiredMCPKeys 跟 injectMCPServers 的注入逻辑保持镜像:cfg 开关哪些 MCP,
+// 这里就要哪些 key。任一缺失视为部署不完整。多源场景每个 nacos 源 × env 都要有。
 func requiredMCPKeys(cfg *config.SystemConfig) []string {
 	var out []string
-	if cfg.Infrastructure.ConfigCenter.Type == "nacos" {
+	for _, cc := range cfg.Infrastructure.ConfigCenters {
+		if cc.Type != "nacos" {
+			continue
+		}
 		for _, e := range cfg.Environments {
-			out = append(out, "nacos-mcp-server-"+e.ID)
+			out = append(out, mcpKey("nacos-mcp-server", cc.ID, e.ID))
 		}
 	}
 	if cfg.Infrastructure.Observability.Grafana.Enabled {

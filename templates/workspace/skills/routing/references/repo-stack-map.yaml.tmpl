@@ -4,7 +4,6 @@ repos:
 {{- range .Repos}}
   {{.Name}}:
     url: {{.URL | printf "%q"}}
-    role: {{.Role}}
     stack: {{.Stack}}
     {{- if .Framework}}
     framework: {{.Framework | printf "%q"}}

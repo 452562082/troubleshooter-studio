@@ -15,7 +15,6 @@ type EnvAnswer struct {
 type RepoAnswer struct {
 	Name         string
 	URL          string
-	Role         string
 	Stack        string
 	Framework    string
 	ServiceNames []string
@@ -41,8 +40,6 @@ type Answers struct {
 	LarkAttachment bool
 
 	FeishuProjectEnabled bool
-
-	OutputDir string
 
 	// Targets 是 generation.targets 的显式列表：openclaw / claude-code / cursor / embedded
 	// 空表示 fallback 到 [openclaw]
@@ -85,7 +82,6 @@ func (a *Answers) WriteYAML(out io.Writer) error {
 		for _, r := range a.Repos {
 			p("  - name: %s\n", r.Name)
 			p("    url: %s\n", r.URL)
-			p("    role: %s         # backend/frontend/gateway/infra/shared\n", r.Role)
 			p("    stack: %s             # go/java/node/php/python，决定用哪种配置扫描器\n", r.Stack)
 			if r.Framework != "" {
 				p("    framework: %q\n", r.Framework)
@@ -108,7 +104,7 @@ func (a *Answers) WriteYAML(out io.Writer) error {
 	}
 
 	p("\ninfrastructure:\n")
-	p("  config_center:          # 配置中心：nacos/apollo/consul/kubernetes/env-vars/none\n")
+	p("  config_center:          # 配置中心：nacos/apollo/consul/env-vars/kuboard/none\n")
 	if a.ConfigCenterType == "" || a.ConfigCenterType == "none" {
 		p("    type: none            # 无配置中心；机器人不会尝试解析配置连接串\n")
 	} else {
@@ -181,8 +177,8 @@ func (a *Answers) WriteYAML(out io.Writer) error {
 	}
 
 	p("\ngeneration:\n")
-	p("  target_host: openclaw                # 兼容字段；实际 target 由 targets 列表决定\n")
-	p("  output_dir: %s          # 产物目录；多 target 会额外产出 <output_dir>-<target>/\n", a.OutputDir)
+	// output_dir 故意不写:CLI `tshoot gen` 才会读它,默认 ./dist;wizard 用户不需要,
+	// 真要 CLI 跑 gen 时手动加这一行覆盖默认即可。
 	targets := a.Targets
 	if len(targets) == 0 {
 		targets = []string{"openclaw"}

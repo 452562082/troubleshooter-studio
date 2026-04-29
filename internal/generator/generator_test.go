@@ -32,6 +32,61 @@ func loadCfg(t *testing.T, rel string) *config.SystemConfig {
 	return cfg
 }
 
+// TestGenerate_MultiSource_ConfigMapRoutesPerService 验证多源场景下 config-map.yaml
+// 每个服务的 mcp_server 字段按它所属 repo 的 config_source 选对应源的 MCP key,
+// 且副源服务多带一行 config_source 字段标记。
+func TestGenerate_MultiSource_ConfigMapRoutesPerService(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-system.yaml")
+	// 在 shop-system 基础上注入第二源 + 把 product-service 重路由到副源
+	cfg.Infrastructure.ConfigCenters = append(cfg.Infrastructure.ConfigCenters, config.ConfigCenter{
+		ID:   "legacy-nacos",
+		Type: "nacos",
+		Endpoints: []config.ConfigCenterEndpoint{
+			{Env: "dev", Addr: "legacy-nacos-dev:8848", NamespaceHint: "legacy-dev"},
+			{Env: "staging", Addr: "legacy-nacos-stg:8848", NamespaceHint: "legacy-stg"},
+			{Env: "prod", Addr: "legacy-nacos-prod:8848", NamespaceHint: "legacy-prod"},
+		},
+	})
+	for i := range cfg.Repos {
+		if cfg.Repos[i].Name == "product-service" {
+			cfg.Repos[i].ConfigSource = "legacy-nacos"
+		}
+	}
+
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+	if err := New(cfg, tr, out).Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	cm := readFile(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/config-map.yaml"))
+
+	// 主源服务(order-service)用老命名(无 source 中缀):nacos-mcp-server-<env>
+	for _, env := range []string{"dev", "staging", "prod"} {
+		want := `mcp_server: "nacos-mcp-server-` + env + `"`
+		if !strings.Contains(cm, want) {
+			t.Errorf("主源服务应有 %q,但 config-map 缺;\n%s", want, cm)
+		}
+	}
+
+	// 副源服务(product-service)用新命名:nacos-mcp-server-legacy-nacos-<env>
+	for _, env := range []string{"dev", "staging", "prod"} {
+		want := `mcp_server: "nacos-mcp-server-legacy-nacos-` + env + `"`
+		if !strings.Contains(cm, want) {
+			t.Errorf("副源服务应有 %q,但 config-map 缺;\n%s", want, cm)
+		}
+	}
+
+	// 副源服务多一行 config_source: "legacy-nacos"
+	if !strings.Contains(cm, `config_source: "legacy-nacos"`) {
+		t.Errorf("副源服务应带 config_source 字段标记")
+	}
+
+	// 多源块 sources: 应被声明
+	if !strings.Contains(cm, "sources:") {
+		t.Errorf("多源场景 config-map 应有 sources: 块")
+	}
+}
+
 func readFile(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -125,11 +180,8 @@ func TestGenerate_Nacos_Shop(t *testing.T) {
 	}
 }
 
-// per_env_credentials 模式的 prompt 派生由 agent.DerivePrompts 验证,
-// 见 internal/agent/install_prompts_test.go。这里只确保 generator 端
-// 没漏写 cfg.Infrastructure.ConfigCenter.PerEnvCredentials → workspace 文件。
-
-// shared 模式同上,具体 prompt 集合见 install_prompts_test.go。
+// 配置中心 prompt 派生由 agent.DerivePrompts 验证,
+// 见 internal/agent/install_prompts_test.go(每 env 独立凭证)。
 
 func TestGenerate_Apollo(t *testing.T) {
 	cfg := loadCfg(t, "examples/apollo-system.yaml")

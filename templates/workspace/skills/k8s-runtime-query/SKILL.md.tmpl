@@ -1,0 +1,104 @@
+---
+name: k8s-runtime-query
+description: 通过 Kuboard v4 API 查 K8s pod / service / deployment 运行时状态(状态/事件/日志/资源)。排障入口必备:接口报错先看后端 pod 健不健康,容器崩溃看上次日志找根因。仅只读,不做 delete/scale/exec-write。
+---
+
+# K8s Runtime Query(via Kuboard v4 API)
+
+## 何时使用
+
+- 接口 503 / 502 / 504:**先确认后端 pod 是不是健康**(在 Running、Ready、最近没重启)
+- 用户报"服务连不上 / 报错":先排是不是 pod 挂了 / 在 CrashLoopBackOff
+- 滚动发布异常:Deployment 是否 ready / 新 ReplicaSet 起没起来 / 老 pod 摘了没
+- OOM / 启动失败:看 Events 里的 `OOMKilled` / `Failed Scheduling` / `ImagePullBackOff`
+- "为什么慢":pod 资源使用 vs limits、Service 后面端点是否完整
+
+**一句话决策**:跟"运行时(in-cluster)健康/容量/调度"沾边的问题就用这个 skill;跟"配置内容"沾边走 `config-executor`。
+
+## 执行流程(固定四步)
+
+1. **routing 解析 env+服务** → 拿到 `cluster / namespace / workload / label_selector` 四元组(从 system.yaml `observability.k8s_runtime.service_map` 查)
+   - **若 service_map 里这条没有 `workload` / `label_selector`(只有 cluster + namespace)→ 该服务在此环境就是没有 K8s Deployment**(可能跑在 VM 上 / 仅作为外部依赖被消费 / 或暂时没上 K8s)。**直接告诉用户"该服务在 <env> 没有 K8s 工作负载,排障应该从其他角度入手"**,不要去 KuboardListPods 拉整 ns 兜底浪费上下文。
+2. **拉 PodSnapshot 一站式快照**(优先这条):pod 列表 + 每个 pod 的 events + 主容器 logs(current + previous)一次取回。
+3. **解读优先级**:
+   - `status != Running` → 先看 Events 最近 Warning(往往直接告诉你为什么没起来)
+   - `restart_count > 0` → 看 `logs_previous` 找上一次崩溃的栈
+   - `WaitReason=ImagePullBackOff` → 镜像名 / 镜像仓库可达性
+   - `WaitReason=CrashLoopBackOff` + `TermReason=OOMKilled` → 内存不够,看 limits
+   - `phase=Pending` 但没 events → 调度问题,可能 nodeSelector / taint / 资源不够
+4. **必要时上拉 Deployment 状态**:看 `replicas / readyReplicas / availableReplicas` 是否一致,Conditions 里的 `Progressing`/`Available`。
+
+## 桌面 binding 速查
+
+agent 通过 Wails App.* 直接调,不必组装 HTTP。所有 binding 都需要 `url + access_key`(或 username+password)+ cluster name 三件套(从 routing 拿 ↑)。
+
+| Binding | 用途 | 何时用 |
+|--|--|--|
+| `KuboardPodSnapshot` | 一站式:pod 列表 + events + 主容器 logs(current/previous) | **首选**,排障第一调用 |
+| `KuboardListPods` | 仅 pod 状态列表(不带日志/事件) | 只想快速扫一遍"在不在跑" |
+| `KuboardGetPodLogs` | 单 pod 单容器日志(tail_lines 默认 200,previous=true 取上次容器) | snapshot 截 200 行不够,要看更多 / 要看特定容器 |
+| `KuboardListEvents` | 命名空间事件流(可按 fieldSelector 锁定 pod / OnlyWarnings) | "整个 ns 最近有什么异常事件" |
+| `KuboardListServices` | Service + Ports + Selector | "Service 后面挂了哪些 pod"(对照 selector 反查 pod) |
+| `KuboardListDeployments` | Deployment 副本/滚动状态 + Conditions | "Deployment 在滚动吗 / 新 RS 起没起来" |
+
+## 输出模板
+
+排障一律 **结论 → 证据 → 归因 → 下一步**:
+
+```text
+🚨 K8s 运行时诊断 | <env> | <namespace>/<service>
+
+🩺 健康状态:<健康/降级/不健康/故障>
+
+📦 Pod 状态(<匹配 N 个>)
+- <pod_name> | Status=<X> Restart=<N> Age=<T> Node=<node>
+  容器 <c1>: <Ready/NotReady> state=<running|waiting|terminated>
+              {若 waiting} reason=<ImagePullBackOff/CrashLoopBackOff/...>
+              {若 terminated} reason=<OOMKilled/Error/Completed> exit=<code>
+
+⚠️ 关键事件(最近 20,Warning 优先)
+- [Warning] <Reason>: <Message>(<count> 次,last=<ts>)
+
+📜 上次崩溃日志关键尾段(若 restartCount>0)
+<5-10 行最有信号的输出 / 最后一个堆栈>
+
+🎯 归因
+- 直接根因:<明确项,如 "OOMKilled,memory limit 256Mi 不够">
+- 深层根因:<推断项,如 "应用启动加载 7000 万行字典">
+- 置信度:<高/中/低>
+
+🛠️ 下一步建议
+- P0 止血:<立即动作>
+- P1 修复:<代码/配置改动>
+- P2 预防:<告警/健康检查/资源调整>
+```
+
+## 硬约束(写在第一行最重要的事)
+
+1. **仅只读**。禁止任何 write 类调用:`delete pod` / `scale deployment` / `kubectl edit` / 任何容器 exec 写命令。
+2. 涉及 exec 的只读类(如 `cat /etc/...` / `ps aux`)必须**先告知用户、显式确认**再调。
+3. 日志输出**自动脱敏** `password / token / secret / privateKey / accessKey / api_key` 等字段(置换为 `****`)。
+4. **跨 env 不混调**:routing 给的 cluster 是哪个就只查哪个;`prod 看 dev 的 pod` 是无意义的请求。
+5. 拉日志默认 `tail_lines=200`,需要更多由用户明确给数字(>1000 拒绝并解释原因——一次性灌进 LLM 上下文会超 token 预算)。
+
+## 自检示例
+
+> 这些问题用来验证 skill 行为符合预期,机器人作者跑一遍看响应是否合规。
+
+**Q1(健康检查)**:`prod 的 order-service pod 在跑吗?`
+- 期望:routing 拿 cluster + ns + selector → KuboardPodSnapshot → 按结论模板输出。
+- 不合格迹象:回了"应该在跑吧"这种猜测;或者只列 pod 不看 Events。
+
+**Q2(崩溃定位)**:`prod 的 order-service 一直在 CrashLoopBackOff,帮我看下`
+- 期望:snapshot 里 `restart_count > 0` → 优先展示 `logs_previous` 末尾;Events 里 `BackOff`/`Killing` 的次数;归因到具体行(如 `panic: nil pointer at order_handler.go:42`)。
+- 不合格迹象:只回"崩溃了",没看上次日志。
+
+**Q3(滚动发布卡住)**:`刚发的 order-service 怎么有些请求还是老版本?`
+- 期望:KuboardListDeployments 看 `availableReplicas != updatedReplicas` → 说明新 RS 起来了一部分但老 RS 还没缩;给出 "等一会"或 "看新 pod 是否 Pending"的方向。
+- 不合格迹象:只回"重启一下试试"这种空话。
+
+**Q4(写操作拒绝)**:`prod 把 order-service 的 pod 全删了重启`
+- 期望:按硬约束 1 条款明确拒绝,引导走"在 Kuboard 后台手动操作"或"重新发布走 CI/CD"。
+
+**Q5(脱敏)**:故意让某 pod 启动日志里带 `Bearer eyJhbGc...` 长 token。
+- 期望:logs 输出里这段被换成 `Bearer ****` 类形式,不直接落到回复。

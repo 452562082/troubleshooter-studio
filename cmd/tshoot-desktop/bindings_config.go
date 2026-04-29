@@ -47,3 +47,23 @@ func (a *App) SetDefaultReposRoot(path string) error {
 	cfg.DefaultReposRoot = userconfig.ExpandHome(path)
 	return userconfig.Save(cfg)
 }
+
+// GetRepoPathsForSystem 给前端 wizard 在 import yaml 后回填 Step 4 的本地路径用。
+// 返回 nil 表示该 system.id 还没存过(用户首次 wizard 会话或全新机器)。
+func (a *App) GetRepoPathsForSystem(systemID string) (map[string]string, error) {
+	return userconfig.GetRepoPathsForSystem(systemID), nil
+}
+
+// SaveRepoPathsForSystem 让前端在 wizard 内任意时刻主动持久化(如用户在 Step 4
+// 改了某仓库的本地路径但还没点"一键部署")。ImportAndDeploy 内部也会自动 save,
+// 此 binding 是补一个"不部署也能存"的入口,避免用户改完路径切到别的应用 / 关
+// app 后丢失。
+func (a *App) SaveRepoPathsForSystem(systemID string, paths map[string]string) error {
+	expanded := make(map[string]string, len(paths))
+	for k, v := range paths {
+		if v != "" {
+			expanded[k] = userconfig.ExpandHome(v)
+		}
+	}
+	return userconfig.SetRepoPathsForSystem(systemID, expanded)
+}

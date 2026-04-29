@@ -37,21 +37,18 @@ environments:
 repos:
   - name: order-service
     url: git@github.com:example/order-service.git
-    role: backend
     stack: go
     service_names: [order-service]
     env_branches: {dev: develop, prod: main}
 
   - name: inventory-service
     url: git@github.com:example/inventory-service.git
-    role: backend
     stack: go
     service_names: [inventory-service]
     env_branches: {dev: develop, prod: main}
 
   - name: payment-service
     url: git@github.com:example/payment-service.git
-    role: backend
     stack: java
     framework: spring-boot
     service_names: [payment-service]
@@ -59,7 +56,6 @@ repos:
 
   - name: notification-service
     url: git@github.com:example/notification-service.git
-    role: backend
     stack: node
     service_names: [notification-service]
     env_branches: {dev: develop, prod: main}
@@ -111,8 +107,7 @@ infrastructure:
       readonly_enforced: true
 
 generation:
-  target_host: openclaw
-  output_dir: ./dist/async-commerce
+  targets: [openclaw]
   skills_whitelist:
     - routing
     - config-executor

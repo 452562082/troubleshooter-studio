@@ -87,7 +87,12 @@ func main() {
 			Handler: router,
 		},
 
+		// 背景色:跟左侧 sidebar 同 deep slate(#1e293b)。配合 TitleBarHiddenInsetUnified
+		// 让顶部 macOS title bar 跟 sidebar 融为一体,traffic lights 浮在 sidebar 上,
+		// 不再有那条灰色独立标题栏的视觉割裂。
+		BackgroundColour: &options.RGBA{R: 30, G: 41, B: 59, A: 255},
 		Mac: &mac.Options{
+			TitleBar: mac.TitleBarHiddenInset(),
 			About: &mac.AboutInfo{
 				Title:   "Troubleshooter Studio",
 				Message: fmt.Sprintf("AI 排障机器人工作台 (桌面端入口)\n版本: %s", appState.Version()),

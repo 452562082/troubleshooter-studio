@@ -21,7 +21,6 @@ environments:
 repos:
   - name: user-api
     url: git@github.com:k8s/user-api.git
-    role: backend
     stack: go
     service_names: [user-api]
     env_branches:
@@ -29,7 +28,6 @@ repos:
       prod: main
   - name: order-api
     url: git@github.com:k8s/order-api.git
-    role: backend
     stack: java
     service_names: [order-api]
     env_branches:
@@ -76,8 +74,7 @@ infrastructure:
   project_tracking: []
 
 generation:
-  target_host: openclaw
-  output_dir: ./dist/k8s-app
+  targets: [openclaw]
   skills_whitelist:
     - routing
     - config-executor

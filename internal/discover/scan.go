@@ -62,10 +62,18 @@ func Scan(roots []string) ([]DiscoveredAgent, error) {
 }
 
 // DefaultRoots 返回 discover 默认扫描的位置：
-//   - ~/.openclaw/workspace/（OpenClaw 装完的机器人工作区；每个 agent 一个子目录）
-//   - CWD（claude-code / cursor 常直接装在项目根；embedded 通常在 ~/.tshoot/embedded/）
+//   - ~/.openclaw/workspace/（OpenClaw workspace 目录,跟 OpenClaw 自身约定一致）
+//   - ~/.tshoot/<target>/（桌面 wizard 一键部署的中间包;DefaultDestPath 落在这里。
+//     openclaw / claude-code / cursor 都在这下面有 <system_id>/ 子目录,带 tshoot.json。
+//     不加这几条根 → wizard 装完 BotsPage 看不到刚部署的机器人。）
+//   - CWD（claude-code / cursor 也常直接装在项目根）
 func DefaultRoots() []string {
-	roots := []string{"~/.openclaw/workspace"}
+	roots := []string{
+		"~/.openclaw/workspace",
+		"~/.tshoot/openclaw",
+		"~/.tshoot/claude-code",
+		"~/.tshoot/cursor",
+	}
 	if wd, err := os.Getwd(); err == nil {
 		roots = append(roots, wd)
 	}

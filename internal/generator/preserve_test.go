@@ -156,7 +156,6 @@ func TestPreserve_ConfigCenterSwitch_DropsOverrides(t *testing.T) {
 
 	// 切换到 apollo（用同 output 目录，模拟人为切换 system.yaml）
 	apolloCfg := loadCfg(t, "examples/apollo-system.yaml")
-	apolloCfg.Generation.OutputDir = out // override
 	g := New(apolloCfg, tr, out)
 	if err := g.Generate(); err != nil {
 		t.Fatal(err)

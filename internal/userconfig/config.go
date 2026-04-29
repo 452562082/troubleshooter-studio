@@ -42,6 +42,16 @@ type Config struct {
 	// 默认父目录(clone 到 <here>/<repo.name>/)。空表示用内置 fallback:
 	// ~/.tshoot/repos/。
 	DefaultReposRoot string `json:"default_repos_root,omitempty"`
+
+	// RepoPathsBySystem 是"仓库本地路径"映射:<system.id> → <repo.name> → 本机绝对路径。
+	//
+	// 设计:system.yaml 必须保持可分享(团队私库 / 私密频道),不含任何本机路径;
+	// 部署时 generator 需要把仓库本地路径烤进 repo-path-map.yaml,这份映射就走这里。
+	// 流程:
+	//   - wizard 一键部署:每次 ImportAndDeploy 把 repoPaths upsert 进来。
+	//   - BotsPage 重新部署同一 system.id 的机器人:ApplyBot 自动按 system.id 读这份。
+	//   - 团队成员拿到同一 yaml 但本机路径不一样:他们自己跑 wizard 后这份就有了。
+	RepoPathsBySystem map[string]map[string]string `json:"repo_paths_by_system,omitempty"`
 }
 
 // configPath 返回 ~/.tshoot/config.json 的绝对路径。
@@ -89,6 +99,51 @@ func Save(cfg *Config) error {
 		return err
 	}
 	return os.WriteFile(p, data, 0o644)
+}
+
+// GetRepoPathsForSystem 返回某个 system.id 下"仓库名 → 本机绝对路径"映射。
+// 文件不存在 / 没存过 / system.id 不在映射里都返回 nil(调用方按"空 map"处理)。
+func GetRepoPathsForSystem(systemID string) map[string]string {
+	if systemID == "" {
+		return nil
+	}
+	cfg, err := Load()
+	if err != nil || cfg == nil || cfg.RepoPathsBySystem == nil {
+		return nil
+	}
+	return cfg.RepoPathsBySystem[systemID]
+}
+
+// SetRepoPathsForSystem upsert 某个 system.id 下的仓库路径映射。
+// 传空 map 视为"清掉这个 system.id 的所有路径";其他 system.id 不动。
+// 读 → 改 → 写,内部 merge 已处理。
+func SetRepoPathsForSystem(systemID string, paths map[string]string) error {
+	if systemID == "" {
+		return nil
+	}
+	cfg, err := Load()
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		cfg = &Config{}
+	}
+	if cfg.RepoPathsBySystem == nil {
+		cfg.RepoPathsBySystem = map[string]map[string]string{}
+	}
+	// 过滤空值,避免持久化 "" 路径
+	filtered := map[string]string{}
+	for k, v := range paths {
+		if v = strings.TrimSpace(v); v != "" {
+			filtered[k] = v
+		}
+	}
+	if len(filtered) == 0 {
+		delete(cfg.RepoPathsBySystem, systemID)
+	} else {
+		cfg.RepoPathsBySystem[systemID] = filtered
+	}
+	return Save(cfg)
 }
 
 // DefaultReposRootOrFallback 给 UI 一个保证非空的路径:优先 cfg 里存的,

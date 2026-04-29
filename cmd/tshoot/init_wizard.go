@@ -136,12 +136,11 @@ func answersFromConfig(cfg *config.SystemConfig) *initwizard.Answers {
 		AgentName:            cfg.Agent.Name,
 		AgentModel:           cfg.Agent.Model,
 		WorkspaceName:        cfg.Agent.WorkspaceName,
-		ConfigCenterType:     cfg.Infrastructure.ConfigCenter.Type,
+		ConfigCenterType:     cfg.Infrastructure.PrimaryConfigCenter().Type,
 		GrafanaEnabled:       cfg.Infrastructure.Observability.Grafana.Enabled,
 		LokiEnabled:          cfg.Infrastructure.Observability.Loki.Enabled,
 		PrometheusEnabled:    cfg.Infrastructure.Observability.Prometheus.Enabled,
 		DataStoresEnabled:    map[string]bool{},
-		OutputDir:            cfg.Generation.OutputDir,
 		Targets:              cfg.Generation.Targets,
 		FeishuProjectEnabled: false,
 	}
@@ -154,7 +153,7 @@ func answersFromConfig(cfg *config.SystemConfig) *initwizard.Answers {
 			branches[k] = v
 		}
 		a.Repos = append(a.Repos, initwizard.RepoAnswer{
-			Name: r.Name, URL: r.URL, Role: r.Role, Stack: r.Stack, Framework: r.Framework,
+			Name: r.Name, URL: r.URL, Stack: r.Stack, Framework: r.Framework,
 			ServiceNames: r.ServiceNames, EnvBranches: branches,
 		})
 	}

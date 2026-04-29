@@ -1,30 +1,43 @@
 # config-map.yaml
-# 由 troubleshooter-studio 生成。config-center: {{.Infrastructure.ConfigCenter.Type}}
+# 由 troubleshooter-studio 生成。多源配置:每个服务按 repos[].config_source 路由到对应源。
 # - status: verified → 来自代码分析或上轮人工沉淀
-# - status: inferred → 骨架，需人工校对后改为 verified
-# - mcp_server：本行对应的配置中心 MCP 实例名，agent 必须按此字段选择工具（不得拼名）
-# 优先级：analyzer finding > prior manual override > inferred skeleton
-{{- $cc := .Infrastructure.ConfigCenter.Type}}
-{{- $patterns := .Infrastructure.ConfigCenter.DataIDPatterns}}
-{{- $endpoints := .Infrastructure.ConfigCenter.Endpoints}}
+# - status: inferred → 骨架,需人工校对后改为 verified
+# - mcp_server:本行对应的配置中心 MCP 实例名;agent 必须按此字段选择工具(不得拼名)
+# 优先级:analyzer finding > prior manual override > inferred skeleton
 {{- $ctx := .}}
-config_center: {{$cc}}
+{{- $primaryCC := .Infrastructure.PrimaryConfigCenter.Type}}
+config_center: {{$primaryCC}}        # 主源类型;多源场景下其它源的 type 在 sources 块下展示
+{{- if gt (len .Infrastructure.ConfigCenters) 1}}
+sources:                           # 多源声明;每个 service 按下面 mcp_server 引用对应源的 MCP
+{{- range .Infrastructure.ConfigCenters}}
+  - id: {{.ID | printf "%q"}}
+    type: {{.Type | printf "%q"}}
+{{- end}}
+{{- end}}
 environments:
 {{- range .Environments}}
   {{.ID}}:
     {{- $envID := .ID}}
-    {{- $nsHint := ""}}
-    {{- $mcp := printf "%s-mcp-server-%s" $cc $envID}}
-    {{- range $endpoints}}{{if eq .Env $envID}}{{$nsHint = .NamespaceHint}}{{end}}{{end}}
     {{- range $.Repos}}
       {{- $repo := .}}
       {{- $serviceNames := .ServiceNames}}
       {{- if not $serviceNames}}{{$serviceNames = list .Name}}{{end}}
       {{- range $serviceNames}}
         {{- $svc := .}}
+        {{- $sourceID := repoConfigSource $ctx $svc}}
+        {{- $src := configSourceByID $ctx $sourceID}}
+        {{- $cc := $src.Type}}
+        {{- $patterns := $src.DataIDPatterns}}
+        {{- $endpoints := $src.Endpoints}}
+        {{- $nsHint := ""}}
+        {{- range $endpoints}}{{if eq .Env $envID}}{{$nsHint = .NamespaceHint}}{{end}}{{end}}
+        {{- $mcp := mcpKeyForSource (printf "%s-mcp-server" $cc) $sourceID $envID}}
         {{- $f := findConfig $ctx $svc $envID}}
         {{- $p := findPrior $ctx $svc $envID}}
       {{$svc}}:
+        {{- if ne $sourceID "default"}}
+        config_source: {{$sourceID | printf "%q"}}        # 多源:本服务走副源
+        {{- end}}
         {{- if eq $cc "nacos"}}
         {{- if $f}}
         namespaceId: {{if $f.NamespaceID}}{{$f.NamespaceID | printf "%q"}}{{else}}{{$nsHint | printf "%q"}}{{end}}
@@ -88,6 +101,12 @@ environments:
         mcp_server: {{$mcp | printf "%q"}}
         status: inferred
         {{- end}}
+        {{- else if eq $cc "kuboard"}}
+        # kuboard:走 Kuboard HTTP API,运行时凭证(URL/账密/集群/ns/cm)在 ~/.openclaw/<id>-troubleshooter-creds.json
+        # 实际配置定位由 resolve_runtime_kuboard.py 脚本根据 service 名 + namespace + cm 名读取
+        configmap_key: {{$svc | printf "%q"}}
+        mcp_server: {{$mcp | printf "%q"}}
+        status: inferred
         {{- else if eq $cc "consul"}}
         {{- if $f}}
         kv_prefix: {{if $f.KVPrefix}}{{$f.KVPrefix | printf "%q"}}{{else}}"config"{{end}}

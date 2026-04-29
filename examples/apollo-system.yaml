@@ -20,7 +20,6 @@ environments:
 repos:
   - name: account-service
     url: git@github.com:bank/account-service.git
-    role: backend
     stack: java
     framework: spring-boot
     service_names:
@@ -31,7 +30,6 @@ repos:
 
   - name: transaction-service
     url: git@github.com:bank/transaction-service.git
-    role: backend
     stack: java
     service_names:
       - transaction-service
@@ -87,8 +85,7 @@ infrastructure:
       enabled: false
 
 generation:
-  target_host: openclaw
-  output_dir: ./dist/bank
+  targets: [openclaw]
   skills_whitelist:
     - routing
     - config-executor

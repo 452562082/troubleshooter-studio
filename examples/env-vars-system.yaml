@@ -21,7 +21,6 @@ environments:
 repos:
   - name: simple-api
     url: git@github.com:simple/simple-api.git
-    role: backend
     stack: go
     service_names: [simple-api]
     env_branches:
@@ -61,8 +60,7 @@ infrastructure:
   project_tracking: []
 
 generation:
-  target_host: openclaw
-  output_dir: ./dist/simple-app
+  targets: [openclaw]
   skills_whitelist:
     - routing
     - config-executor

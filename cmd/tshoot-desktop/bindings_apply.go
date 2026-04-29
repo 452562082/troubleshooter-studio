@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/agent"
+	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 	"github.com/xiaolong/troubleshooter-studio/internal/userconfig"
 )
@@ -18,6 +19,10 @@ import (
 // ApplyBot 把新的 system.yaml 应用到已装机器人的活 workspace：
 // 重新渲染产物 → rsync 到 agentPath → 更新 tshoot.json。
 // preserve_on_regenerate 列表里的文件保留用户手改不覆盖。
+//
+// 仓库本地路径:不在 yaml 里(yaml 必须可分享),从 ~/.tshoot/config.json 按
+// system.id 自动查出来,生成 repo-path-map.yaml 用。没存过就空 map(产物里
+// repo-path-map.yaml 是占位,提示用户回 wizard 重跑)。
 //
 // 前置：agentPath 下必须有可读的 tshoot.json（由 discover 识别到的路径）。
 // dryRun=true 时只预演，不真写盘，用于 UI 先给用户看"会变什么"。
@@ -37,11 +42,17 @@ func (a *App) ApplyBot(agentPath, newYamlText string, dryRun bool) (*agent.Resul
 			ag = cand
 		}
 	}
+	// 按 system.id 查仓库本地路径表(失败 → 空 map,不阻塞)
+	var repoPaths map[string]string
+	if cfg, perr := config.LoadFromBytes([]byte(newYamlText)); perr == nil && cfg.System.ID != "" {
+		repoPaths = userconfig.GetRepoPathsForSystem(cfg.System.ID)
+	}
 	return agent.Apply(ag, agent.ApplyOptions{
-		NewYAML:       []byte(newYamlText),
-		TemplateRoot:  a.templateRoot,
-		TshootVersion: version,
-		DryRun:        dryRun,
+		NewYAML:        []byte(newYamlText),
+		TemplateRoot:   a.templateRoot,
+		TshootVersion:  version,
+		DryRun:         dryRun,
+		RepoLocalPaths: repoPaths,
 	})
 }
 
@@ -51,6 +62,9 @@ func (a *App) ApplyBot(agentPath, newYamlText string, dryRun bool) (*agent.Resul
 // repoPaths: 仓库名 → 本机绝对路径,烤进产物 skills/routing/references/repo-path-map.yaml。
 // 前端从 wizard 里抽出每个 repo 的 _localPath / _cloneTarget 传过来;system.yaml
 // 里不含路径(故意的,保持可分享),这里是唯一的路径传入口。
+//
+// 副作用:把 repoPaths 按 system.id 持久化到 ~/.tshoot/config.json,后续 BotsPage
+// 重新部署同一 system 时,ApplyBot 自动读这份,不必再跑一次 wizard。
 func (a *App) ImportAndDeploy(yamlText, target, destPath string, repoPaths map[string]string) (*agent.Result, error) {
 	// 用户可能传 ~/foo,统一展开成绝对路径
 	expanded := make(map[string]string, len(repoPaths))
@@ -58,6 +72,10 @@ func (a *App) ImportAndDeploy(yamlText, target, destPath string, repoPaths map[s
 		if v != "" {
 			expanded[k] = userconfig.ExpandHome(v)
 		}
+	}
+	// 持久化到 ~/.tshoot/config.json(按 system.id 索引);失败不阻塞部署,只记日志
+	if cfg, perr := config.LoadFromBytes([]byte(yamlText)); perr == nil && cfg.System.ID != "" && len(expanded) > 0 {
+		_ = userconfig.SetRepoPathsForSystem(cfg.System.ID, expanded)
 	}
 	return agent.ImportAndApply([]byte(yamlText), target, destPath, agent.ApplyOptions{
 		TemplateRoot:   a.templateRoot,

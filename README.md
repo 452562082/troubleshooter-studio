@@ -161,7 +161,7 @@ generation:
 | `kubernetes` | .env + YAML | `kubectl get`(`resolve_runtime_k8s.py`) |
 | `env-vars` | .env | 安装时直接填连接串(`resolve_runtime_static.py`) |
 
-每个 env 注册独立 MCP 实例(如 `nacos-mcp-server-dev` / `nacos-mcp-server-prod`),agent 通过 `config-map.yaml` 的 `mcp_server` 字段选实例,不需手动切换。`per_env_credentials: true` 可让每个 env 用独立用户名 / 密码。
+每个 env 注册独立 MCP 实例(如 `nacos-mcp-server-dev` / `nacos-mcp-server-prod`),agent 通过 `config-map.yaml` 的 `mcp_server` 字段选实例,不需手动切换。每个 env 都使用独立用户名 / 密码,install.sh 按 env 逐一询问。
 
 **可观测性**(7 项):Grafana / Prometheus(via Grafana) / Loki(via Grafana) / Jaeger / ELK / SkyWalking / Tempo。
 
@@ -275,4 +275,4 @@ assets/                     # logo.svg + app-icon.svg + architecture.svg
 - Apollo / Consul 走 HTTP 脚本而非 MCP(生态尚无稳定 MCP 包;Nacos 走 MCP)
 - Node 生态不扫配置中心(极少用 Nacos / Apollo / Consul)
 - 不自动推断服务调用拓扑(只做 per-repo 机械抽取)
-- `tshoot init` 暂不生成 `per_env_credentials` / `dataid_patterns` 等高级字段(高级用户手工补)
+- `tshoot init` 暂不生成 `dataid_patterns` 等高级字段(高级用户手工补)

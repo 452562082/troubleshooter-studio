@@ -90,6 +90,23 @@ agent 每次拿到日志 / 异常文本 / tool error 输出时,**第一步**就 
 - candidates: `[ ... ]`
 - source: `skills/routing/references/log-app-map.yaml`
 
+## baseline 比对(PromQL,任何"指标突变"都必须用)
+
+agent 看到任何指标"突变 / 异常 / 升高"时,**不能只看当前值**——必须跟 baseline 比才能下"真突变"结论。
+
+`observability-map.yaml > prometheus > baseline_query_templates` 给了 6 对 PromQL 模板:p99/qps/error_rate/cpu/memory 各对应 `_now` + `_baseline_24h`。用法:
+
+1. 从 `selector_chain` 命中的第一条 selector 代入 `<selector>`
+2. **同时**跑 `*_now` 和 `*_baseline_24h` 两个查询(并发)
+3. 算 delta:`actual / baseline`(指标值)或 `actual - baseline`(比例值)
+4. 判定:
+   - `>2x` 或 `+50%` → 真突变
+   - `<2x` → 在正常波动内,**不要拿这个当根因证据**
+
+baseline 选 `24h offset` 默认;**周末 / 大促 / 活动日**改用 `7d offset`(同一星期几同一时段);**渐变型故障**(慢慢恶化)用 `1h offset` 看是否还在恶化中。`baseline_offset_alternatives` 列了三种。
+
+例:agent 看到"prod commerce p99 是 5s",必须接着跑 baseline_24h 看正常是 500ms,delta 10x → 才算"真突变",才能往下追根因。
+
 ## selector_chain 的语义(PromQL / LogQL 通用)
 
 `observability-map.yaml` 里 `prometheus.selector_chain` 和 `loki.logql_selector_chain` 是 **fallback 链,不是穷举列表**。**必须按顺序逐条试,第一条命中 N 行(N>0)即返回**,后面的只在前面查不到时用。模板形态:

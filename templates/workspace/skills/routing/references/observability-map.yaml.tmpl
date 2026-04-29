@@ -83,6 +83,29 @@ prometheus:
     - {{. | printf "%q"}}
   {{- end}}
   {{- end}}
+  # ── PromQL baseline 比对模板 ──
+  # 看到指标"突变" 必须跟 baseline 比才知道是否真异常。最常用是"跟 24h 前同时段比"。
+  # agent 用法:把 selector_chain 第一条命中的 selector 代入 <selector>,跑两次:
+  #   1) 当前值(无 offset)
+  #   2) baseline(加 offset 24h)
+  # 算 delta 判断是否真突变(>2x / >50% 视为突变,具体阈值看业务习惯)。
+  baseline_query_templates:
+    p99_now: 'histogram_quantile(0.99, sum(rate(http_server_requests_seconds_bucket{<selector>}[5m])) by (le))'
+    p99_baseline_24h: 'histogram_quantile(0.99, sum(rate(http_server_requests_seconds_bucket{<selector>}[5m] offset 24h)) by (le))'
+    qps_now: 'sum(rate(http_server_requests_seconds_count{<selector>}[5m]))'
+    qps_baseline_24h: 'sum(rate(http_server_requests_seconds_count{<selector>}[5m] offset 24h))'
+    error_rate_now: 'sum(rate(http_server_requests_seconds_count{<selector>,status=~"5.."}[5m])) / sum(rate(http_server_requests_seconds_count{<selector>}[5m]))'
+    error_rate_baseline_24h: 'sum(rate(http_server_requests_seconds_count{<selector>,status=~"5.."}[5m] offset 24h)) / sum(rate(http_server_requests_seconds_count{<selector>}[5m] offset 24h))'
+    cpu_now: 'rate(container_cpu_usage_seconds_total{<selector>}[5m])'
+    cpu_baseline_24h: 'rate(container_cpu_usage_seconds_total{<selector>}[5m] offset 24h)'
+    memory_now: 'container_memory_working_set_bytes{<selector>}'
+    memory_baseline_24h: 'container_memory_working_set_bytes{<selector>} offset 24h'
+  # 周末 / 大促日不能跟 24h 前比 —— baseline 对照可以换成 7d offset(同一星期几同一时段)
+  baseline_offset_alternatives:
+    - "24h"   # 默认:跟昨天同时段
+    - "7d"    # 周末/活动日跟上周同时段
+    - "1h"    # 渐变型:跟 1 小时前比看是否还在恶化
+
   # ── 服务 → PromQL selector 映射约定(routing skill 用) ──
   # 大多数 K8s + prometheus-operator 项目把 env 放进 namespace、服务身份放进 container/app 标签。
   # 没有"完美默认",所以按下面这个优先级链查。第一条命中即返回,后面只在前面查不到时尝试。

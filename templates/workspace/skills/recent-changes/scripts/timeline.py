@@ -267,6 +267,81 @@ def collect_config_history(env: str, service: str, ws_root: Path,
     return events, ''
 
 
+def _fetch_nacos_diff(env: str, event: dict[str, Any], ws_root: Path) -> str | None:
+    """correlated nacos history event → 拉前后两版 content 算 unified diff,塞进 event.diff。
+
+    返回值:
+      - 字符串:成功的 diff(已 truncate 到前 100 行)
+      - None:脚本/API 不可用 / 拉不到历史 content / 不是 update 类型
+      - "":没差异(罕见,正常情况 nacos 改动一定有 diff)
+    """
+    summary = event.get('summary', '')
+    # summary 形如 "<ns>/<group>/<dataId> U by <user>",抽出 ns/group/dataId
+    m = re.match(r'(\S+?)/(\S+?)/(\S+?)\s+', summary)
+    if not m:
+        return None
+    ns_id, group, data_id = m.group(1), m.group(2), m.group(3)
+    nacos_script = ws_root / 'skills' / 'config-executor' / 'scripts' / 'nacos_config.py'
+    if not nacos_script.exists():
+        return None
+    up = env.upper().replace('-', '_')
+    server = os.environ.get(f'NACOS_ADDR_{up}', '') or os.environ.get(f'CC_ADDR_{up}', '')
+    user = os.environ.get(f'NACOS_USERNAME_{up}', '') or os.environ.get(f'CC_USER_{up}', '')
+    pwd = os.environ.get(f'NACOS_PASSWORD_{up}', '') or os.environ.get(f'CC_PASS_{up}', '')
+    if not server:
+        return None
+
+    base_args = [sys.executable, str(nacos_script), 'history',
+                 '--server', server, '--namespace', ns_id, '--group', group,
+                 '--data-id', data_id]
+    if user:
+        base_args += ['--user', user]
+    if pwd:
+        base_args += ['--pass', pwd]
+    try:
+        out = subprocess.check_output(base_args, stderr=subprocess.STDOUT, timeout=15).decode('utf-8', errors='ignore')
+        data = json.loads(out)
+    except Exception:
+        return None
+    items = data.get('items') or data.get('history') or []
+    if len(items) < 2:
+        return None  # 没有"前一版"
+    # items 按时间倒序假设(nacos history 默认这样);前一版 = items[1]
+    cur_id = items[0].get('id') or items[0].get('nid')
+    prev_id = items[1].get('id') or items[1].get('nid')
+    if not (cur_id and prev_id):
+        return None
+
+    def fetch_content(history_id: str) -> str:
+        args_get = [sys.executable, str(nacos_script), 'get-history',
+                    '--server', server, '--namespace', ns_id, '--group', group,
+                    '--data-id', data_id, '--id', str(history_id)]
+        if user:
+            args_get += ['--user', user]
+        if pwd:
+            args_get += ['--pass', pwd]
+        try:
+            o = subprocess.check_output(args_get, stderr=subprocess.STDOUT, timeout=10).decode('utf-8', errors='ignore')
+            d = json.loads(o)
+            return d.get('content') or d.get('data', {}).get('content') or ''
+        except Exception:
+            return ''
+
+    cur_content = fetch_content(str(cur_id))
+    prev_content = fetch_content(str(prev_id))
+    if not cur_content or not prev_content:
+        return None  # nacos history get-content 不支持 / 权限不够
+
+    import difflib
+    diff_lines = list(difflib.unified_diff(
+        prev_content.splitlines(), cur_content.splitlines(),
+        fromfile='prev', tofile='cur', lineterm='', n=2,
+    ))
+    if not diff_lines:
+        return ''
+    return '\n'.join(diff_lines[:100])
+
+
 def main() -> None:
     p = argparse.ArgumentParser(prog='timeline.py')
     p.add_argument('--env', required=True)
@@ -277,6 +352,7 @@ def main() -> None:
     p.add_argument('--repo-path', default='', help='本地仓库路径覆盖(默认从 repo-path-map.yaml 读)')
     p.add_argument('--branch', default='main', help='git branch')
     p.add_argument('--incident-time', default='', help='故障开始时间 ISO,用来标 ±5 分钟相关变更')
+    p.add_argument('--skip-nacos-diff', action='store_true', help='跳过 correlated nacos 事件的前后版本 diff 抓取(默认会抓)')
     args = p.parse_args()
 
     since_td = parse_since(args.since)
@@ -323,6 +399,17 @@ def main() -> None:
             t = parse_ts(e)
             if abs((t - incident_dt).total_seconds()) <= 300:
                 e['correlated'] = True
+
+    # correlated 的 nacos events 自动拉前后 diff:这一步把 agent 多一次 tool call 省掉
+    if incident_dt and not args.skip_nacos_diff:
+        for e in all_events:
+            if not e.get('correlated') or e.get('source') != 'nacos':
+                continue
+            diff = _fetch_nacos_diff(args.env, e, ws_root)
+            if diff:
+                e['diff'] = diff
+            elif diff is None:
+                notes.append(f'[nacos-diff] 无法对比 {e.get("summary", "")} 前后版本(脚本不可用 / API 不返历史 content)')
 
     print(json.dumps({
         'env': args.env,

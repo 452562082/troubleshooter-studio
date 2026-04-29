@@ -77,18 +77,29 @@ python3 scripts/k8s_query.py --env <env> --cluster <c> ns-snapshot --namespace <
 
 ### Step 4:纵向沿依赖图追
 
-读 `routing/references/service-dependency-map.yaml` 拿当前服务的 downstream 列表(下游)+ data_stores(数据层依赖)。
+跑 `cascade_check.py` —— 一条命令并发查所有下游的 K8s 状态层 + 列出要查的数据层 hints:
 
-**对每个下游 service / data store 并发查**(支持并发的模型 → 同消息发出多个 tool_use):
+```bash
+python3 scripts/cascade_check.py --env <env> --service <主角服务> \
+    --cluster <c> --namespace-default <ns>
+```
 
-- 下游 K8s pod 健康(`k8s_query.py list-pods --label-selector app=<下游>`)
-- 下游 service 同窗口指标(`PromQL` 走 `selector_chain`)
-- 下游服务的错误日志(`LogQL` 走 `logql_selector_chain`)
-- 数据层连接 / 慢查询(对应 data-store skill)
+输出 JSON 字段:
+- `results[]`:每个 downstream 服务的 verdict(healthy / degraded)+ phase 分布 + 异常 pod 列表 + 命中的 known-errors 模式
+- `data_store_hints[]`:列每个数据层依赖 + 对应该调的 skill,**agent 必须主动跑这些 skill**(脚本不直接查数据层因为各类型 schema 太不一样)
+- `summary.verdict_root_likely`:**第一个 degraded 的下游服务名,大概率是真因**
+- `summary.verdict`:`all_healthy / isolated_downstream / widespread_downstream / no_downstream_in_map`
 
 **判断**:
-- 某下游同窗口异常 → **真因可能在下游**,递归回 Step 4 把那个下游当主角再追
-- 所有下游都正常 → 真因在当前服务自身,进 Step 5 自身代码 / 配置层面
+- `verdict=isolated_downstream` + `verdict_root_likely=user` → 把 `user` 当主角**递归回 Step 4** 再追一层
+- `verdict=widespread_downstream`(多个下游同时异常)→ 共享依赖问题(数据库 / 网络 / 配置中心),不要继续递归
+- `verdict=all_healthy` → 真因在当前服务自身,进 Step 5 看代码 / 配置层面
+- `verdict=no_downstream_in_map` → **dependency-map 没填**,告诉用户去填 `service-dependency-map.yaml`,本轮排障跳过 Step 4(可能漏真因,**置信度上限 medium**)
+
+#### 反模式
+
+- 跳过 cascade_check 直接 LLM 推"应该是 X 服务问题" → 没数据支撑的猜测
+- depth > 1 不慎用 → 下游的下游 token 暴增,排障变成全集群扫描
 
 ### Step 5:三向交叉(trace + log + metric)
 

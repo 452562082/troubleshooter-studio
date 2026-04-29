@@ -183,6 +183,36 @@ func funcMap() template.FuncMap {
 			}
 			return out
 		},
+		// scannedSchemaTablesForService 给 data-schema-map.yaml.tmpl 用:从 ctx 找指定服务名
+		// 对应 repo 的 SchemaTables。同 repo 多服务时复用 repo 的 schema 列表。
+		"scannedSchemaTablesForService": func(ctx *Context, svc string) []analyzer.SchemaTable {
+			seen := map[string]bool{}
+			var out []analyzer.SchemaTable
+			for _, repo := range ctx.Repos {
+				match := false
+				if repo.Name == svc {
+					match = true
+				}
+				for _, sn := range repo.ServiceNames {
+					if sn == svc {
+						match = true
+						break
+					}
+				}
+				if !match {
+					continue
+				}
+				for _, t := range ctx.SchemaTablesByRepo[repo.Name] {
+					key := t.Name + "|" + t.Kind
+					if seen[key] {
+						continue
+					}
+					seen[key] = true
+					out = append(out, t)
+				}
+			}
+			return out
+		},
 		// mcpKeyForAgentSource 跟 mcpKeyForAgent 镜像:加 agent-id 前缀,Claude Code/Cursor
 		// 共享 settings.json 池场景必备,避免多 system 同名 mcp 互相覆盖。OpenClaw 也走
 		// 这条路保持三平台命名统一(install_native_openclaw 同步用 mcpKeyForAgent)。

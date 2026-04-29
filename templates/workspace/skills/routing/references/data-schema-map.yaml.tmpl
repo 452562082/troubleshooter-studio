@@ -1,0 +1,87 @@
+# data-schema-map.yaml
+# 业务数据 schema 映射 —— "X 服务用了哪些表/collection/缓存 prefix"。
+# agent 排障时拿到 entity ID(订单号 / 用户 ID)直接知道查哪张表。
+#
+# 自动扫描精度 50-70%(覆盖 Go GORM/Java JPA/Mybatis/Python SQLAlchemy/Django/
+# Node TypeORM/Sequelize/Prisma/Mongoose 主流 ORM + 通用 SQL 字符串匹配)。
+# **用户必须手动校验/补全**——冷门 ORM / 自定义命名约定 / 无 ORM 裸 SQL 漏掉的部分需要人工填。
+#
+# 字段:
+#   <service>:
+#     tables:                       # MySQL/PostgreSQL 表
+#       - name: orders              # 表名
+#         primary_key: order_id     # 主键(给"按 ID 反查"用)
+#         key_fields: [...]         # 常用查询字段(user_id/status/created_at 等)
+#         entity: Order             # 对应代码 struct/class 名(便于人核对)
+#         scanned_from: orm_annotation  # 命中策略(orm_annotation / orm_api_call / sql_literal / file_name)
+#     collections:                  # MongoDB
+#       - name: payment_history
+#         primary_key: _id
+#         key_fields: [user_id, created_at]
+#     cache_prefixes:               # Redis key prefix
+#       - prefix: "session:"
+#         note: "用户登录 session,key 形如 session:<user_id>"
+#
+# agent 用法:
+#   1. 用户问 "order #20250428001 状态" → 扫 services.<service>.tables 找含 "order" 的表
+#   2. 命中后调对应 mysql-runtime-query / mongodb-runtime-query 用 primary_key 查
+#   3. 找不到时反问用户"哪张表存订单"
+#
+# ── 如果你想要全自动判定服务跟实体的归属,可以让 wizard 重跑代码分析(`tshoot analyze`)
+# ── 在仓库 root 新加 / 改名 entity 文件后会重新扫一次。
+
+services:
+{{- $ctx := .}}
+{{- range .Repos}}
+  {{- $repo := .}}
+  {{- $svcs := .ServiceNames}}
+  {{- if not $svcs}}{{$svcs = list .Name}}{{end}}
+  {{- range $svcs}}
+  {{- $svc := .}}
+  {{- $tables := scannedSchemaTablesForService $ctx $svc}}
+  {{$svc}}:
+    {{- if $tables}}
+    # ↓ 从代码扫到的表/collection(精度 50-70%);entity / primary_key / key_fields 字段
+    # 是占位 —— 用户**必须**校验/补全才能让 agent 真按 ID 查表。
+    {{- $hasTable := false}}
+    {{- $hasColl := false}}
+    {{- range $tables}}
+      {{- if eq .Kind "table"}}{{$hasTable = true}}{{end}}
+      {{- if eq .Kind "collection"}}{{$hasColl = true}}{{end}}
+    {{- end}}
+    {{- if $hasTable}}
+    tables:
+    {{- range $tables}}
+      {{- if eq .Kind "table"}}
+      - name: {{.Name | printf "%q"}}
+        primary_key: id    # TODO 校验主键(常见 id / <name>_id / uuid)
+        key_fields: []     # TODO 列常用查询字段(user_id / status / created_at 等)
+        {{- if .EntityName}}
+        entity: {{.EntityName | printf "%q"}}
+        {{- end}}
+        scanned_from: {{.Strategy | printf "%q"}}
+      {{- end}}
+    {{- end}}
+    {{- end}}
+    {{- if $hasColl}}
+    collections:
+    {{- range $tables}}
+      {{- if eq .Kind "collection"}}
+      - name: {{.Name | printf "%q"}}
+        primary_key: _id
+        key_fields: []
+        {{- if .EntityName}}
+        entity: {{.EntityName | printf "%q"}}
+        {{- end}}
+        scanned_from: {{.Strategy | printf "%q"}}
+      {{- end}}
+    {{- end}}
+    {{- end}}
+    cache_prefixes: []   # TODO redis key 前缀手填,扫不到(每个团队约定不同)
+    {{- else}}
+    tables: []           # TODO 没扫到表/collection,可能 ORM 没识别;手填核心表(name / primary_key / key_fields)
+    collections: []
+    cache_prefixes: []
+    {{- end}}
+  {{- end}}
+{{- end}}

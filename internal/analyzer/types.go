@@ -48,6 +48,19 @@ type DataStoreUsage struct {
 	Callsite string `json:"callsite,omitempty"`
 }
 
+// SchemaTable 单条业务表 / collection / 缓存 prefix 命中——"本仓库代码 / 注解 / SQL 字面量
+// 提到了哪个表"。schema_scan.go 各语言多策略扫产出。给 routing data-schema-map.yaml 用,
+// agent 看到 "order #xxx" 时知道去哪个表查。
+type SchemaTable struct {
+	Name       string   `json:"name"`                  // 表名 / collection 名 / redis key 前缀
+	Kind       string   `json:"kind"`                  // table / collection / cache_prefix
+	Type       string   `json:"type,omitempty"`        // mysql / postgresql / mongodb / redis / 不确定时空
+	SourceFile string   `json:"source_file,omitempty"` // 命中的源文件相对路径
+	EntityName string   `json:"entity_name,omitempty"` // 对应的代码 struct/class 名(便于人核对)
+	Fields     []string `json:"fields,omitempty"`      // 主要字段(best effort,扫到啥算啥)
+	Strategy   string   `json:"strategy,omitempty"`    // 命中的扫描策略(orm_annotation / sql_literal / orm_api_call / file_name)
+}
+
 // RepoAnalysis 单仓库分析产物
 type RepoAnalysis struct {
 	Name            string           `json:"name"`
@@ -57,6 +70,7 @@ type RepoAnalysis struct {
 	Findings        []Finding        `json:"findings,omitempty"`
 	DownstreamCalls []DownstreamCall `json:"downstream_calls,omitempty"`
 	DataStoreUsages []DataStoreUsage `json:"data_store_usages,omitempty"`
+	SchemaTables    []SchemaTable    `json:"schema_tables,omitempty"`
 	Warnings        []string         `json:"warnings,omitempty"`
 	Verified        bool             `json:"verified"`
 }

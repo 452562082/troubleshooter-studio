@@ -8,11 +8,11 @@ description: 通过环境动态查询 MySQL 数据。先通过 routing 获取环
 ## 执行流程（固定）
 
 1. 先确认目标环境与服务；环境映射统一通过 `routing` 获取。
-{{- if or (eq .Infrastructure.ConfigCenter.Type "nacos") (eq .Infrastructure.ConfigCenter.Type "apollo") (eq .Infrastructure.ConfigCenter.Type "consul")}}
+{{- if or (eq .Infrastructure.PrimaryConfigCenter.Type "nacos") (eq .Infrastructure.PrimaryConfigCenter.Type "apollo") (eq .Infrastructure.PrimaryConfigCenter.Type "consul")}}
 2. 通过配置中心获取该环境配置文本。
-{{- else if eq .Infrastructure.ConfigCenter.Type "env-vars"}}
+{{- else if eq .Infrastructure.PrimaryConfigCenter.Type "env-vars"}}
 2. 通过 `resolve_runtime_static.py --agent-id {{.AgentID}} --env <env>` 读取静态连接信息。
-{{- else if eq .Infrastructure.ConfigCenter.Type "kubernetes"}}
+{{- else if eq .Infrastructure.PrimaryConfigCenter.Type "kubernetes"}}
 2. 通过 `resolve_runtime_k8s.py --agent-id {{.AgentID}} --env <env>` 从 K8s ConfigMap/Secret 解析连接信息。
 {{- end}}
 3. 解析配置中的 MySQL 连接信息（host/port/database/user/password 或 JDBC URL）。
@@ -22,13 +22,13 @@ description: 通过环境动态查询 MySQL 数据。先通过 routing 获取环
 ## 连接解析
 
 优先复用：
-{{- if or (eq .Infrastructure.ConfigCenter.Type "nacos") (eq .Infrastructure.ConfigCenter.Type "apollo") (eq .Infrastructure.ConfigCenter.Type "consul")}}
+{{- if or (eq .Infrastructure.PrimaryConfigCenter.Type "nacos") (eq .Infrastructure.PrimaryConfigCenter.Type "apollo") (eq .Infrastructure.PrimaryConfigCenter.Type "consul")}}
 - `skills/config-executor/scripts/resolve_runtime_from_nacos.py`
 {{- end}}
-{{- if eq .Infrastructure.ConfigCenter.Type "env-vars"}}
+{{- if eq .Infrastructure.PrimaryConfigCenter.Type "env-vars"}}
 - `skills/config-executor/scripts/resolve_runtime_static.py`（从 creds.json 读静态连接串）
 {{- end}}
-{{- if eq .Infrastructure.ConfigCenter.Type "kubernetes"}}
+{{- if eq .Infrastructure.PrimaryConfigCenter.Type "kubernetes"}}
 - `skills/config-executor/scripts/resolve_runtime_k8s.py`（从 K8s ConfigMap/Secret 解析）
 {{- end}}
 

@@ -1,9 +1,8 @@
 # TOOLS.md - {{.Agent.Name}}
 
-## 本地路径约定
-- 新问题相关临时诊断脚本与修复产物默认放到 `$HOME/go/src`。
-
 ## 权限边界
-- 禁写：`write / edit / apply_patch`（图类渲染仅允许在 `/tmp` 写入临时 `.mmd/.png` 文件）
-- exec 白名单：`/usr/bin/git`、`/opt/homebrew/bin/npx`、`/opt/homebrew/bin/mcporter`、`/usr/bin/python3`
-- 禁跨 agent / 跨会话调度
+- **禁写**:`write / edit / apply_patch`(图类渲染仅允许在 `/tmp` 写入临时 `.mmd/.png` 文件)
+- **禁跨 agent / 跨会话调度**
+
+## 输出建议
+- 排障产物(诊断脚本 / 临时报表)按用户要求落到指定路径,不要默认写到固定本地目录。

@@ -64,6 +64,30 @@ curl "$JAEGER_URL/api/services/<service>/operations"
   - 是网络延迟 / 下游超时 / 自身处理慢
   - 建议排查方向
 
+## 跨 skill 协作（找到嫌疑 span 后必走）
+
+trace 给的是"哪一段慢/错"，**真正根因**通常要再下钻一层。拿到嫌疑 span 后**主动**继续：
+
+1. **嫌疑 span 的 service + 时间窗 → Loki 拉错误日志**
+   - 走 routing `observability.loki.logql_selector_chain`,优先用 wizard 配过的 `(env_label, service_label)` 命中
+   - 时间范围：trace start ± 30s，避免遗漏前后关联日志
+{{- if hasSkill . "k8s-runtime-query" }}
+2. **嫌疑 span 的 service + 时间窗 → KuboardGetPodLogs / KuboardListEvents**
+   - 该 service 对应的 K8s workload(routing `observability.k8s_runtime.service_map[env+service]` 拿 cluster/namespace/label_selector)
+   - 看 trace 时间点附近有没有 OOMKilled / CrashLoopBackOff / 突发重启
+{{- end}}
+{{- if .Infrastructure.Observability.Prometheus.Enabled }}
+3. **嫌疑 span 的 service + 时间窗 → PromQL 同窗口指标**
+   - 走 routing `observability.prometheus.selector_chain` 拼 selector
+   - 关键指标：`rate(http_requests_total{...}[1m])` 看 QPS / `histogram_quantile(0.99, ...)` 看 p99 / 错误率 突变
+{{- end}}
+4. **该 service 最近 1h 变更**
+   - 同窗口 K8s `kubectl rollout history deployment/<name>`(看新 RS 是否刚上)
+   - 配置中心 history(看是否最近改了下游地址 / 超时阈值 / 限流参数)
+   - git log(看是否最近合并)
+
+**反模式**:trace 看完就停在"OK 是 X 服务慢"。这只是症状,根因是 X 服务的 pod / 配置 / 代码哪个出了问题,必须再走一步上面的协作链才能给出可处置的建议。
+
 ## 硬约束
 
 - 仅只读查询；不修改 trace 数据。

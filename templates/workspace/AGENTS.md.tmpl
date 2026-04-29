@@ -30,7 +30,7 @@
 > **我能做（只读，不落地修改）：**
 > - 🔍 把"环境 + 服务名"解析到代码分支 / 配置 dataId / 连接串（`routing`）
 {{- if hasSkill . "config-executor"}}
-> - ⚙️ 查 {{.Infrastructure.ConfigCenter.Type}} 配置：当前值 / 历史版本 / 跨 env 对比（`config-executor`）
+> - ⚙️ 查 {{.Infrastructure.PrimaryConfigCenter.Type}} 配置：当前值 / 历史版本 / 跨 env 对比（`config-executor`）
 {{- end }}
 {{- range .Infrastructure.DataStores }}{{- if .Enabled }}
 > - 💾 查 {{.Type}}：只读查询 / 统计（`{{dataStoreSkill .Type}}`）
@@ -78,7 +78,7 @@
 ## 运行时错误应对（工具报错时的第一反应）
 
 遇到下方错误不要直接把堆栈丢给用户——按对应话术主动给出诊断 + 可执行的修复步骤：
-{{- if or (eq .Infrastructure.ConfigCenter.Type "nacos") (eq .Infrastructure.ConfigCenter.Type "apollo") (eq .Infrastructure.ConfigCenter.Type "consul") }}
+{{- if or (eq .Infrastructure.PrimaryConfigCenter.Type "nacos") (eq .Infrastructure.PrimaryConfigCenter.Type "apollo") (eq .Infrastructure.PrimaryConfigCenter.Type "consul") }}
 
 - **MCP 连不上 / timeout / auth failed** —— 配置中心 MCP 调用失败。先确认：
   1. 用户当前问的 env 是哪一个；
@@ -86,14 +86,14 @@
   3. 建议兜底：`bash scripts/install.sh` 会读 `.env`、缺失的再问一次，重装不会丢已有凭证；
   4. 若仍失败，提示用户用 `curl` 直连配置中心地址确认网络/鉴权，再决定是机器人的问题还是后端的问题。
 {{- end }}
-{{- if eq .Infrastructure.ConfigCenter.Type "kubernetes" }}
+{{- if eq .Infrastructure.PrimaryConfigCenter.Type "kubernetes" }}
 
 - **kubectl 报 "context not found" / forbidden** —— K8s 鉴权问题。提示用户：
   1. `kubectl config current-context` 确认当前 context；
   2. `scripts/.env` 里 `K8S_CONTEXT_<ENV>` / `K8S_NAMESPACE_<ENV>` 是否匹配；
   3. RBAC 是否允许读 ConfigMap / Secret（`kubectl auth can-i get configmap -n <ns>`）。
 {{- end }}
-{{- if eq .Infrastructure.ConfigCenter.Type "env-vars" }}
+{{- if eq .Infrastructure.PrimaryConfigCenter.Type "env-vars" }}
 
 - **`resolve_runtime_static.py` 返回空** —— 用户在 env-vars 模式下没填这个 env 的连接串。提示：重跑 `bash scripts/install.sh` 并只在被问到的那个 env 处填新值（其它已有值会自动跳过）。
 {{- end }}

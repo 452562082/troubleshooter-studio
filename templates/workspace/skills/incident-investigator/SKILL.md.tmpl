@@ -1,323 +1,137 @@
 ---
 name: incident-investigator
-description: 排障主线 skill。把"症状 → 时间轴 → 横向广度 → 纵向深度 → 三向交叉 → 根因标注"固化成 6 步流程图谱,强制 agent 按图谱走完所有关联,不漏关键证据。任何用户问"X 报错/慢/不通/突增/失败"类问题时都先用本 skill 编排其它 skill。
+description: 排障主线 skill。固化"症状→时间轴→横向→纵向→三向交叉→根因"6 步流程,任何"X 报错/慢/不通/突增/失败"问题先用本 skill 编排其它 skill,不要直接跳具体 skill。
 ---
 
-# Incident Investigator(排障主线 skill)
-
-## 何时使用
-
-**默认入口**:用户用了任何排障关键词 —— "5xx 突增 / 报错 / 超时 / 慢 / 不通 / 排查 / 故障 / 定位 / 为什么 / 失败 / 卡住"——**不要**直接跳进 routing / k8s-runtime-query / config-executor 等具体 skill,**先按本 skill 的 6 步流程编排**,所有具体 skill 当作工具用。
-
-## 反模式(看到下面这些回复立刻警觉,自己别犯)
-
-- 拿到"prod commerce 5xx" 就开始查 commerce 的 pod / log / metric,**没看时间轴上的变更、没扫横向兄弟服务、没沿依赖图追下游** → 经常停在表象、漏真因
-- 看完一个 skill 的输出就下结论 —— 单一证据不能下根因
-- 把所有 skill 全跑一遍但不交叉关联 —— 等同没查
-- 时间窗模糊就开始查 —— 没有 ±5 分钟窗口对齐就没"突变前后撞上变更"的能判断
-
-## 6 步流程图谱(强约束,逐步走完)
+# Incident Investigator(6 步排障图谱)
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│ Step 1:收齐前提(entity ID + 时间窗 + env + service + 接口)         │
-│ Step 2:时间轴对齐 → recent-changes 一次拉"故障时间 ±5 分钟内变更" │
-│ Step 3:横向扫 → 同 ns 其它服务是否也异常?(孤立 vs 广播判断)        │
-│ Step 4:纵向沿依赖图追 → 下游所有服务一口气并发查                     │
-│ Step 5:三向交叉 → trace + log + metric 在异常时刻交叉验证           │
-│ Step 6:根因标注 → 直接根因 / 深层根因 / 置信度,然后 P0/P1/P2 建议  │
-└──────────────────────────────────────────────────────────────────────┘
+Step 1  收齐前提 + 症状先验证 + 历史 incident 复查
+Step 2  timeline → ±5 分钟内变更(deploy / 配置 / git)
+Step 3  ns-snapshot → 孤立 vs 广播
+Step 4  cascade_check → 沿依赖图追下游
+Step 5  triangulate → trace + log + metric 客观对齐
+Step 6  根因标注 + 决策树 + 故障快报
 ```
 
-### Step 1:收齐前提 + 症状先验证
+## Step 1:收齐前提 + 验证 + 历史 grep
 
-#### 1.1 收齐前提
+**1.1 前提**:`entity ID` + `时间窗` + `env` + `service`。任一缺失只反问**这一个**澄清。
 
-按 SOUL.md 顶部"最高原则"+ AGENTS.md "首问反射":
+**1.2 症状先验证**(30 秒,防无效排障):
+跑 `baseline_query_templates.error_rate_now` 看症状仍在?
+- 仍异常 → 继续
+- 已回 baseline → 问用户"已恢复,要复盘还是继续监控?"
+- selector 全 0 命中 → 服务名/env 拼写问题,反问
+- 拉不到指标 → 不阻塞,但记下来回头查
 
-- entity ID(订单号 / 用户 ID / trace_id / request_id 任一即可)
-- 时间窗(精确到分钟最好,至少给"什么时候开始 / 什么时候结束")
-- env(dev/prod 哪一个)
-- service / 接口名
-
-**任一缺失只反问这一个澄清问题,一次问完不要分多轮**。
-
-#### 1.2 症状先验证(防无效排障)
-
-收齐前提后**不要**直接开 Step 2 的时间轴查询。先用 30 秒**核对症状是否仍在**——
-用户的反馈可能:
-- 已经恢复了(用户半小时前反馈,等他过来时已经好了)
-- env 搞错(用户说 prod 其实是 dev)
-- 服务名记错(`commerce` 实际是 `commerce-canary`)
-
-跑一次轻量 PromQL 验证(走 routing `selector_chain` 第一条):
-
+**1.3 历史 grep**:
 ```bash
-# 例:验 prod commerce 最近 5 分钟 5xx 率是否仍 > baseline
-# 用 baseline_query_templates.error_rate_now (走 selector_chain 命中的 selector)
-```
-
-**判断**:
-- 5xx 率仍异常(明显高于 baseline)→ 症状真实,继续 Step 2
-- 5xx 率已经回到 baseline → 跟用户确认:"刚查了最近 5 分钟该服务 5xx 率已经正常,问题可能已恢复;是要我**复盘**(走时间轴看刚才发生了什么),还是**继续监控**(再观察 X 分钟)?"
-- selector_chain 全 0 命中 → 服务名 / env 拼写问题,反问用户
-- 拉不到指标(MCP 失败 / 网络)→ 直接进 Step 2(不阻塞,但回头要处理基础设施问题)
-
-**这步 30 秒,但能省半小时无效排障**。
-
-#### 1.3 历史故障 grep(同症状是不是上次复发)
-
-症状真实后,**还要扫一眼历史 incident 归档**(每次走完 Step 6 都会 append 一条)。文件路径:
-
-| 平台 | 路径 |
-|--|--|
-| OpenClaw | `~/.openclaw/workspace/{{.AgentID}}/incident-log.jsonl` |
-| Claude Code | `~/.claude/skills/{{.AgentID}}/incident-log.jsonl` |
-| Cursor | `~/.cursor/skills/{{.AgentID}}/incident-log.jsonl` |
-
-每行一条 JSON,字段:`{ts, env, service, symptom_keywords, root_cause, confidence, p0_action}`。
-
-```bash
-# 命中条件:env + service 相同 + symptom_keywords 至少 1 个相同
 grep -E '"env":"prod".*"service":"commerce"' \
-  ~/.openclaw/workspace/{{.AgentID}}/incident-log.jsonl | tail -10
+  <工作区根>/incident-log.jsonl | tail -10
 ```
+命中 → 提示"上次同症状根因是 X,先验证";**置信度上限调高一档**(有历史支撑)。
 
-**判断**:
-- 命中 1 条以上历史 → 提示用户"过去 90 天有 N 次同症状,**上次根因是 X**(置信度 Y),先验证是否又是 X" → **置信度上限调高一档**(因为有历史数据支撑)
-- 命中 0 条 → 全新故障,正常走 Step 2-6
-- 文件不存在(首次部署 / 没归档过)→ 跳过本步
-
-历史归档让常见重复故障(超时阈值改了 / 限流配置错了 / 数据库主从切换没通知)**几分钟内识别出来**,不用每次重头查。
-
-### Step 2:时间轴对齐(必跑,这是最高 ROI 的一步)
-
-跑 `recent-changes` skill 的 `timeline.py`,**并发拉**三处:
+## Step 2:时间轴对齐(最高 ROI 一步)
 
 ```bash
-python3 scripts/timeline.py --env <env> --service <svc> --since 1h
+python3 scripts/timeline.py --env <env> --service <svc> --since 1h \
+    --incident-time "<故障开始时间>"
 ```
 
-输出格式按时间倒序合并:
-```
-14:25 [k8s] commerce-service rollout to revision 8 (image: commerce:v1.23)
-14:23 [故障开始] 用户反馈 5xx 突增
-14:18 [nacos] commerce/dev/application.yaml 改了 downstream.user.timeout 30s→3s
-14:10 [git] commerce-service main: feat: 加 user 调用超时控制 (auth/abc123)
-```
+输出按时间倒序,`correlated:true` 标记 ±5 分钟内变更。**故障 ±5 分钟内有 deploy / 配置改 → 强相关,优先怀疑**。
+看 `event.diff_risks` —— `timeout_decreased / rate_limit_decreased / replicas_decreased` 等高危类型直接定型变更危险等级。
 
-**判断**:
-- 故障时间 ±5 分钟内有变更 → **强相关**,优先怀疑该变更
-- 故障时间是变更后的几秒到几分钟内突变 → **大概率因果**,先回滚验证
-- 时间窗内无变更 → 进 Step 3 看是否广播
-
-### Step 3:横向扫(孤立 vs 广播)
-
-跑 `k8s-runtime-query` 的 `ns-snapshot`:
+## Step 3:横向扫(孤立 vs 广播)
 
 ```bash
 python3 scripts/k8s_query.py --env <env> --cluster <c> ns-snapshot --namespace <ns>
 ```
 
-输出每个 pod 的状态分布(健康/重启/Pending/CrashLoop)+ 异常 pod 列表 + 命中的 known-errors 类型计数。
+- 只主角异常 → **孤立**,Step 4
+- 多服务一起异常 → **广播**(基础设施 / 网络 / 共享 DB),看 cluster events / kube-system
 
-**判断**:
-- 只 commerce 的 pod 异常,其它服务健康 → **孤立故障**(应用问题),回 Step 4 沿依赖追根
-- 多个不相关服务一起异常 → **广播故障**(基础设施 / 集群 / 网络 / 共享 DB),立刻看 cluster events / kube-system 节点
-
-### Step 4:纵向沿依赖图追
-
-跑 `cascade_check.py` —— 一条命令并发查所有下游的 K8s 状态层 + 列出要查的数据层 hints:
+## Step 4:沿依赖图追下游
 
 ```bash
-python3 scripts/cascade_check.py --env <env> --service <主角服务> \
+python3 scripts/cascade_check.py --env <env> --service <主角> \
     --cluster <c> --namespace-default <ns>
 ```
 
-输出 JSON 字段:
-- `results[]`:每个 downstream 服务的 verdict(healthy / degraded)+ phase 分布 + 异常 pod 列表 + 命中的 known-errors 模式
-- `data_store_hints[]`:列每个数据层依赖 + 对应该调的 skill,**agent 必须主动跑这些 skill**(脚本不直接查数据层因为各类型 schema 太不一样)
-- `summary.verdict_root_likely`:**第一个 degraded 的下游服务名,大概率是真因**
-- `summary.verdict`:`all_healthy / isolated_downstream / widespread_downstream / no_downstream_in_map`
+按 `summary.verdict` 走:
+- `isolated_downstream` + `verdict_root_likely=user` → 把 user 当主角递归 Step 4 再追一层
+- `widespread_downstream` → 共享依赖问题,不要继续递归
+- `all_healthy` → 真因在主角自身,Step 5
+- `no_downstream_in_map` → dependency-map 没填,提示用户去填;**置信度上限 medium**
 
-**判断**:
-- `verdict=isolated_downstream` + `verdict_root_likely=user` → 把 `user` 当主角**递归回 Step 4** 再追一层
-- `verdict=widespread_downstream`(多个下游同时异常)→ 共享依赖问题(数据库 / 网络 / 配置中心),不要继续递归
-- `verdict=all_healthy` → 真因在当前服务自身,进 Step 5 看代码 / 配置层面
-- `verdict=no_downstream_in_map` → **dependency-map 没填**,告诉用户去填 `service-dependency-map.yaml`,本轮排障跳过 Step 4(可能漏真因,**置信度上限 medium**)
+## Step 5:三向交叉(trace + log + metric)
 
-#### 反模式
-
-- 跳过 cascade_check 直接 LLM 推"应该是 X 服务问题" → 没数据支撑的猜测
-- depth > 1 不慎用 → 下游的下游 token 暴增,排障变成全集群扫描
-
-### Step 5:三向交叉(trace + log + metric)
-
-异常时刻**同时**拉三个数据源,然后**用 `triangulate.py` 做客观对齐**(不要让 LLM 心算时间差和相关性):
-
-#### 5.1 三路独立拉数据(并发)
-
-- **trace**:走 `tracing-query` / `tempo-query` / `skywalking-query`(看 `observability-map.yaml` 的 `default_tracing` 决定),按 trace_id 或 service+时间范围拉,找耗时 TOP / 错误 span
-- **log**:走 Loki / ELK,LogQL/ES 用 `selector_chain` 第一条命中,**grep `known-errors.yaml` 的 pattern 标命中类型**
-- **metric**:走 Prometheus,QPS / p99 / 错误率 同窗口对比,**对比 24h 前同时段 baseline**(`<expr> offset 24h`),给出 baseline / actual / delta
-
-#### 5.2 喂给 triangulate.py 做客观对齐
-
-把三路结果拼成统一 schema 的 JSON,通过 stdin 喂给:
+并发拉三处后**喂 triangulate.py 做客观对齐**(不要 LLM 心算):
 
 ```bash
 cat <<EOF | python3 scripts/triangulate.py --from-stdin
-{
-  "incident_window": "2025-04-29 14:20 ~ 14:30",
-  "metric_anomalies": [
-    {"metric":"p99","target_service":"inventory","baseline":"500ms","actual":"5s","delta":"+10x","start_ts":"2025-04-29T14:23:00Z"}
-  ],
-  "log_pattern_hits": [
-    {"pattern":"context deadline exceeded","target_service":"inventory","count":847,"first_seen":"2025-04-29T14:23:12Z","last_seen":"2025-04-29T14:29:55Z"}
-  ],
-  "trace_outliers": [
-    {"trace_id":"abc123","target_service":"commerce","duration_ms":8200,"critical_span":{"service":"inventory","operation":"getStock","duration_ms":7800},"start_ts":"2025-04-29T14:23:15Z"}
-  ]
-}
+{"incident_window":"...","metric_anomalies":[...],"log_pattern_hits":[...],"trace_outliers":[...]}
 EOF
 ```
 
-不带 `--from-stdin` 跑,脚本会输出 schema 模板让你照着拼。
+不带 `--from-stdin` 跑,脚本输出 schema 模板。
 
-#### 5.3 解读 correlation 字段(直接照搬,不再主观推理)
+`correlation` 字段直接给 `confidence: high/medium/low` + `consensus_service` —— **照搬,不要主观推**。
 
-triangulate.py 输出的 `correlation` 节给客观结论:
+`critical_span` 选取规则:① 优先 `status=error` 的最深 span;② 没 error 找 duration 最长的非根 span;③ 跳过纯网络/sidecar/lb 代理 span。
 
-```json
-"correlation": {
-  "metric_log_aligned": true,        // metric 突变窗口和 log error 窗口 ±60s 内重合
-  "log_trace_aligned": true,         // log error 窗口和 trace 异常窗口 ±60s 内重合
-  "trace_metric_aligned": true,      // 同上
-  "aligned_count": 3,                // 0-3,几向对齐
-  "consensus_service": "inventory",  // 三向同时指向哪个服务(关键!)
-  "consensus_window": "...",
-  "confidence": "high",              // high=三向 + 共识 / medium=两向 / low=单证据
-  "verdict": "三向高度一致,共识指向服务 inventory,..."
-}
-```
+## Step 6:根因标注 + 处置建议
 
-**confidence 字段直接对应 Step 6 置信度量化标尺**——不要在快报里写"我觉得 90% 是 inventory",写 `triangulate.py` 给的 `high/medium/low`。
+### 置信度量化(必须按规则判)
 
-#### 反模式
+| 等级 | 条件 |
+|--|--|
+| 高 | Step 5 三向一致 + Step 2 时间轴撞上变更 + Step 4 依赖图能解释传导(**全满足**) |
+| 中 | 三条任一缺 |
+| 低 | 单证据 / 仅推断 / 无法重现 |
 
-- 三路独立看完,"我觉得他们都指向 X" → 这是主观推理,**必须经过 triangulate.py 做时间窗对齐 + service 集合交集运算后再下"三向一致"结论**
-- 时间格式不统一就喂(混 UTC+8 / UTC) → triangulate.py 解析失败会进 notes,自查格式
+快报里**明示判定理由**(`置信度: 中(metric+log 一致,但 trace 数据缺失)`)。
 
-### Step 6:根因标注 + 建议(故障快报模板)
-
-按 AGENTS.md 的故障快报模板输出。**根因质量分级**:
-
-- **直接根因**:有明确证据(具体 pod / 具体 SQL / 具体配置项 / 具体 commit),可重现
-- **深层根因**:推断(为什么这个 pod 会 OOM:加载逻辑 / 流量峰值 / GC 配置)
-
-#### 置信度量化标尺(必须按规则判,不要主观吹"高")
-
-| 等级 | 严格判定条件(全满足才算) | 用例 |
-|--|--|--|
-| **高** | ① Step 5 三向交叉一致(metric 突变 / log error 模式 / trace 慢 span 都指向同一服务+同一时刻)<br>② Step 2 时间轴 ±5 分钟内有 correlated 变更<br>③ Step 4 依赖图能解释症状传导路径 | "14:18 nacos 改超时阈值 → inventory 调 user 全超时 → commerce 5xx",三向都对 |
-| **中** | 任一缺失但其余两条满足 | 三向交叉只有 metric+log 一致,trace 没采到对应链路;或者三向一致但没找到时间轴变更(可能是流量峰值) |
-| **低** | 单证据 / 仅 LLM 推断 / 无法重现 | 只看到 log 报错,metric 和 trace 正常;或者根因纯属"应该是 XX" |
-
-**写在快报里要明示判定理由**,例:`置信度: 中(metric+log 一致指向 inventory,但 trace 数据缺失,无法验证调用链路)`,这样用户知道哪一环弱。
-
-#### 处置建议:回滚 vs 热修 决策树
-
-不要默认建"P0 回滚"或"P0 热修",按下面决策:
+### 回滚 vs 热修 决策树
 
 ```
-Q1: 故障开始时间是否在某次 deploy / 配置改动后 5 分钟内?(看 Step 2 timeline 的 correlated 标记)
-├── 是
-│   └── Q2: 旧 revision 还活吗?(rollout-history 看上一个 RS 的 replicas_available)
-│       ├── 活 → P0: **强烈回滚**(`kubectl rollout undo` / Kuboard 回滚 / nacos 改回旧值)
-│       └── 不活(已被新 RS 完全替代)→ Q3: 故障已持续多久?
-│           ├── < 10 分钟 → P0: **回滚 + 接受短暂全断**
-│           └── > 10 分钟 → P0: **热修上线**(回滚再起新 pod 时间窗 vs 热修打 patch 时间窗,后者快)
-└── 否(跟 deploy/配置无关)
-    └── Q4: 是否能在 < 5 分钟内写出 patch?
-        ├── 能(单点改 1-2 行)→ P0: **热修**
-        └── 不能(涉及业务逻辑) → Q5: 是否有降级路径?
-            ├── 有(限流 / 降级开关 / 切走流量)→ P0: **降级**先止血,P1 慢慢修
-            └── 没有 → P0: **扩容/重启**先续命,P1 紧急代码修复
+故障在某次 deploy/配置 5 分钟内?
+├─ 是
+│  └─ 旧 revision 还活? → 强烈回滚 (kubectl rollout undo / nacos 改回)
+│      不活 → 持续 < 10 分钟回滚接受短暂全断;> 10 分钟热修
+└─ 否
+   └─ < 5 分钟能写 patch? → 热修
+      不能 → 有降级路径用降级,没有就扩容/重启续命
 ```
 
 特殊情况:
-- **业务峰值期**(prod 上下班高峰 / 大促):回滚成本可能 > 热修;偏向降级 + 限流先扛过峰值
-- **数据已经写脏**(订单 / 支付状态错):**禁止盲目回滚**,回滚后旧版本读新数据可能再错;先 P0 阻止继续写错(限流入口),再分析数据修复策略
-- **无法重现**:不要乱建 P0 改动,先加监控 + 重现路径,免得反向引入新问题
+- 业务峰值期 → 偏向降级 + 限流,不要回滚
+- **数据已写脏** → **禁止盲目回滚**,先限流入口阻止继续写错
+- 无法重现 → 不要乱建 P0,先加监控 / 重现路径
 
-#### 输出格式
+### P0 命令安全网(改 prod 类必须三段)
 
-故障快报模板第 5 节"处置建议"按这个填:
-
-- **P0 止血**:从决策树挑出来的具体动作 + 命令 + 预期效果(10 分钟内可执行)
-- **P1 修复**:`<代码改哪里 / 配置改什么>` + 测试方法
-- **P2 预防**:监控 / 告警 / 健康检查 / 灰度策略 / SLO 调整
-
-#### 6.5 归档到 incident-log(给下次同症状故障复用)
-
-故障快报输出后,**必须 append 一条到 `<工作区根>/incident-log.jsonl`**(Step 1.3 grep 的就是这个文件):
+`confidence=high` 可输出 P0 命令;`medium` 必须前置标"先验证再执行";**`low` 禁止给修改 prod 的命令**,改成"先抓 X/Y/Z 证据再升 confidence"。
 
 ```bash
-# 例:OpenClaw 部署
-echo '{"ts":"2025-04-29T14:35:00Z","env":"prod","service":"commerce","symptom_keywords":["5xx","突增","timeout"],"root_cause":"14:18 nacos 把 downstream.user.timeout 从 30s 改成 3s,inventory 调 user 全超时引发 commerce 5xx","confidence":"high","p0_action":"nacos 把 timeout 改回 30s"}' \
-  >> ~/.openclaw/workspace/{{.AgentID}}/incident-log.jsonl
+# === 1. PRE: 看现状(纯查) ===
+kubectl rollout history deployment/commerce -n base-prod
+# === 2. EXEC ===
+kubectl rollout undo deployment/commerce -n base-prod --to-revision=7
+# === 3. POST: 等 1-2 分钟验证 ===
+kubectl rollout status deployment/commerce -n base-prod
+# 拉 PromQL 看 5xx 是否回落
 ```
 
-字段约定:
-- `ts` (ISO 时间)
-- `env`、`service`(主角)
-- `symptom_keywords[]`(用户首问的关键词,2-5 个)
-- `root_cause`(一句话,完整能让下次直接对比)
-- `confidence`(high / medium / low,跟 Step 6 标尺一致)
-- `p0_action`(止血动作的简短描述,下次同症状时立刻可参考)
+不要连成一长串。
 
-下次有人问 "prod commerce 5xx 突增"时,Step 1.3 grep 命中本条 → 立刻提示"上次同症状根因是这个,先验证"。**这是把团队过去的排障经验沉淀成 agent 知识的关键机制**,务必落实。
+### 6.5 归档(下次复用)
 
-## 执行示例(给作者验证用,机器人按这个走)
+故障快报输出后**append 一条到 `<工作区根>/incident-log.jsonl`**:
 
-**Q**:"prod commerce 接口 14:23 开始 5xx 突增,trace_id=abc123 用户付不了款"
+```bash
+echo '{"ts":"...","env":"prod","service":"commerce","symptom_keywords":["5xx","突增"],"root_cause":"...","confidence":"high","p0_action":"..."}' \
+  >> <工作区根>/incident-log.jsonl
+```
 
-按 6 步:
-1. ✓ 信息齐(prod / commerce / 14:23 / trace_id 都有)
-2. **timeline.py prod commerce --since 1h** → 发现 14:20 commerce 部署 v1.23 + 14:18 nacos 改了 downstream.user.timeout 30s→3s。强相关。
-3. **ns-snapshot prod base-prod ns** → 只 commerce-3 个 pod 重启过,其它服务健康 → **孤立**,继续 Step 4。
-4. 读 dependency-map → commerce 下游 user / order / inventory + mysql:order_db。**并发查**:
-   - user pod / metric / log 全正常
-   - order pod / metric / log 全正常
-   - inventory pod 50% 重启过,关联 known-errors:"context deadline exceeded"
-5. 三向交叉 inventory:
-   - trace abc123 → inventory call 超时 8s
-   - log inventory 报 "rpc to user timeout 3s"
-   - metric inventory p99 10s
-   → 三向一致,**确认 inventory 因调 user 超时阈值改成 3s 后,user 的 p99 是 5s,所以全部超时**
-6. 根因:14:18 把 downstream.user.timeout 从 30s 改成 3s,但 user p99 实际 5s → inventory 调 user 全超时 → 上游 commerce 全 5xx
-   - 直接根因:配置项 `downstream.user.timeout=3s` 过严
-   - 深层根因:改超时阈值前没看 user 真实 p99 baseline
-   - 置信度:**高**(时间轴 + 横向 + 纵向 + 三向交叉全对得上)
-   - P0 止血:nacos 把 timeout 改回 30s 或 5s 看 user p99
-   - P1 修复:代码侧加超时退避;监控加 user p99 告警
-   - P2 预防:配置改动走灰度,改完 5 分钟看 dashboard
-
-**这个流程跑完用户拿到的不是"commerce 报错了你看下"**,是直接可处置的 P0 命令。
-
-## 跨 skill 协作
-
-本 skill 是**编排者**,不直接调 HTTP API。所有具体能力走子 skill:
-- `routing` 拿映射(env/service → ns/cluster/mcp/dataId)
-- `recent-changes` 拉时间轴
-- `k8s-runtime-query` 拉 K8s 状态
-- `config-executor` 查配置
-- `tracing-query` / `tempo-query` / `skywalking-query` 查 trace
-- 数据层 skill 查 redis / mongo / es / mysql 等
-
-## 硬约束
-
-- **6 步不可跳过**(简单查询走简单查询路径,但只要用户用了排障关键词就走完整流程)
-- **Step 2 时间轴必跑** —— 这是最高 ROI 的一步,没看变更就下结论几乎一定漏真因
-- **Step 4 必读 dependency-map** —— 没读就下"是 X 服务自己的问题"是不负责任的
-- **Step 6 置信度必须标** —— 给用户判断要不要相信你的根因
+下次同症状 Step 1.3 命中后立刻识别,**不务必落实就丢掉历史经验**。

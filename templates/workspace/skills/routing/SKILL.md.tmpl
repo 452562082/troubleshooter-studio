@@ -1,199 +1,70 @@
 ---
 name: routing
-description: 用于 {{.System.Name}} 排障时的路由映射决策。适用于环境到仓库分支、环境到 API/Web 域名、环境+服务到配置中心标识、以及环境+服务到日志 app 的快速映射查询。优先基于映射表返回确定性答案，避免猜测。
+description: {{.System.Name}} 排障路由映射:env→分支/域名/配置/日志 app/MCP 名/依赖图/数据库 schema/known-errors。优先映射表答案,不猜测。
 ---
 
 # {{.System.Name}} 路由映射
 
-用于快速、确定地回答：
+## 最高规则:`mcp_server` 字段原样调
 
-- 环境 → 仓库分支
-- 环境 → API/Web 域名
-- 环境 + 服务 → 配置中心标识（namespace/group/dataId）
-- 环境 + 服务 → 日志 app
-- 监控查询默认数据源与优先指标
-- 仓库技术栈信息（repo → language/framework）
+`mcp_server` 是部署期生成的精确名(如 `truss-bot-nacos-mcp-server-prod`),**原样调用**:不要拆 agent-id 前缀 / 不要改格式 / 不要推断"应该是 X"。多 system 共存时前缀是隔离 mcp 实例的关键。查不到先 self-test,不要自己改名试。
 
-## 最高优先级硬规则
+## 映射文件清单
 
-`mcp_server` 字段值是部署期生成的精确名字(形如 `truss-bot-nacos-mcp-server-prod`,带 agent-id 前缀):
+按问题类型 read 最小必要文件,**别全读**:
 
-- **原样调用**,不要自己删前缀(`nacos-mcp-server-prod` ❌)、不要改格式、不要推断"应该是 X"
-- 多个 system 共存同一台机器时,前缀是隔离不同 agent 的 mcp 实例的关键
-- 拼错了 IDE 找不到 MCP 实例,所有调用直接失败
+| 问题 | 文件 |
+|--|--|
+| 分支映射 | `references/env-branch-map.yaml` |
+| 域名映射 | `references/env-domain-map.yaml` |
+| 配置定位 | `references/config-map.yaml` |
+| 日志 app | `references/log-app-map.yaml` |
+| 监控 / 数据源 / selector_chain / baseline 模板 | `references/observability-map.yaml` |
+| 仓库技术栈 | `references/repo-stack-map.yaml` |
+| 服务依赖图(下游/数据层) | `references/service-dependency-map.yaml` |
+| 业务表 schema | `references/data-schema-map.yaml` |
+| 经典错误模式 | `references/known-errors.yaml` |
+| 配置生效延迟 | `references/config-propagation-delay.yaml` |
 
-如果 `mcp_server` 看起来"奇怪",**仍按原样调**;查不到时 **先核对部署是否完成**(self-test),不要自己改名字试。
+读大文件优先用 `grep` 精确取目标行,不是 `Read` 全文。
 
-## 执行步骤
+## 关键用法 4 条
 
-1. 先识别问题类型：分支映射 / 环境域名 / 配置定位 / 日志 app / **错误模式识别**。
-2. 按问题类型读取最小必要映射文件（不要固定全读）：
-   - 分支映射：`references/env-branch-map.yaml`
-   - 环境域名：`references/env-domain-map.yaml`
-   - 配置定位：`references/config-map.yaml`
-   - 日志 app：`references/log-app-map.yaml`
-   - 监控数据源/优先指标：`references/observability-map.yaml`
-   - 仓库技术栈：`references/repo-stack-map.yaml`
-   - **经典错误模式**:`references/known-errors.yaml` ← 看到任何日志/异常/tool error 时**第一时间扫这里**
-   - **服务依赖图**:`references/service-dependency-map.yaml` ← incident-investigator Step 4 沿依赖追下游必读;agent 看到"X 报错"时**先读 X 的 downstream 列表**,平铺查每个下游,真因常在下游
-   - **配置生效延迟**:`references/config-propagation-delay.yaml` ← 判断"配置改动是否引发当前故障"时必读;改动时间到业务感知有 30s-2m 延迟,5 分钟差距完全可解释(尤其 nacos / k8s configmap)
-   - **业务表 schema**:`references/data-schema-map.yaml` ← 用户给 entity ID(订单号/用户ID)时**必读**;直接告诉 agent 该服务用了哪些表/collection/redis prefix,按主键反查
-3. 若一个问题同时涉及多类映射，再按需读取多个文件(能并发就并发)。
-4. 日志映射优先使用 `verifiedApp`；若无则按 `appCandidates` 顺序返回。
-5. 若缺少环境或服务信息，只追问一个最小澄清问题。
+### 1. known-errors:看到日志/异常先 grep
 
-## 错误模式速查(known-errors.yaml 的用法)
+任何日志 / tool error → **第一时间 grep `known-errors.yaml` 的 pattern**。命中即按 `next_actions` 走,不要 LLM 自推典型根因。
 
-agent 每次拿到日志 / 异常文本 / tool error 输出时,**第一步**就 grep `references/known-errors.yaml` 的 `pattern` 字段(子串/正则两种都试):
+带 `causation_chain.check_downstream_for` 的 pattern:**主动跑 cascade_check** 看下游是否出现 chain 列出的模式。命中 → 真因在下游,把那个下游当主角递归 6 步;不命中 → 走 `next_actions`。
 
-- 命中 → 直接按 `next_actions` 走,**不要再让 LLM 自己推典型根因**(80% 故障是这些已知模式,LLM 自推容易漏 / 偏)
-- 命中后回复用户时,标注"识别为已知模式 `<pattern>`",让用户知道这是按经验路径走的而不是瞎猜
-- 没命中 → 才走自由推理路径
+### 2. selector_chain:按顺序试,命中即停
 
-例:用户贴一段 pod 日志含 "OOMKilled"
-1. grep known-errors.yaml → 命中 `pattern: "OOMKilled"`
-2. 直接告诉用户"识别为 OOMKilled,典型根因:容器内存超 limits"
-3. 按 next_actions 顺序:跑 rollout-history → 看 limits.memory → 看启动期内存峰值
-4. 给 mitigation:临时调大 limits.memory +50%
+`prometheus.selector_chain` / `loki.logql_selector_chain` 是 fallback 链,不是穷举:
 
-## causation_chain(上下游联动模式 → 真因往往不在出错的那个服务)
+1. 占位符(`<k8s.namespace>` / `<lm.envLabel>` / `<env>` / `<service>`)按当前上下文解析,失败的条目跳过
+2. 解析成功的按顺序发请求,**命中即停**(N>0 行就用这条,后面不试)
+3. 整链全 0 才告诉用户"查不到"
 
-每条 known-errors 项可能带 `causation_chain` 字段(可选),标"命中本 pattern 时,应主动去**下游/上游**查什么 pattern":
+把每条都跑一遍是反模式。
 
-```yaml
-- pattern: "context deadline exceeded"
-  causation_chain:
-    check_downstream_for: ["OOMKilled", "CrashLoopBackOff", "Too many connections"]
-    explanation: "上游 timeout 常因下游慢/崩"
-```
+### 3. baseline 比对:看到指标突变必须比基线
 
-agent **命中带 causation_chain 的 pattern 后必须主动**:
+任何指标"突变"必须用 `baseline_query_templates` 跟 24h 前同时段比。delta `>2x` 或 `+50%` 才算真突变,< 视为正常波动**不能当根因证据**。周末/大促换 `7d offset`,渐变型用 `1h offset`。
 
-1. 跑 `cascade_check.py` 拉本服务的所有下游(从 `service-dependency-map.yaml`)
-2. 看每个下游的 `known_error_distribution`(ns-snapshot 已带)是否出现 `check_downstream_for` 列表里的模式
-3. **如果命中** → **真因几乎一定在那个下游**,把它当主角递归 incident-investigator 6 步流程
-4. **如果不命中** → 真因可能不在直接下游(网络 / 共享 DB / 上游本身),按 next_actions 走
+### 4. trace 找不到先看采样率
 
-例:agent 看到 commerce 报 `context deadline exceeded`(命中 pattern)
-1. 读 causation_chain.check_downstream_for: `[OOMKilled, CrashLoopBackOff, Too many connections, Lock wait timeout]`
-2. 跑 `cascade_check.py --service commerce` → 看每个下游的 known_error_distribution
-3. 发现 inventory 服务的 known_error_distribution 里有 `OOMKilled: 5` → **真因在 inventory OOM**
-4. 把 inventory 当主角再走 6 步,根因是 inventory 内存不够 → 处理 inventory 才能修 commerce 5xx
+调 trace 拉不到 `trace_id` → **不要直接说"trace 不存在"**。先看 `observability-map.yaml > jaeger.sampling_rate`:
+- < 0.5 → "采样率 X%,大量 trace 没采到很正常,从日志找 `trace_id=` 字段"
+- = 1.0 仍找不到 → 才是真不存在(ID 错 / 时间窗外 / TTL 过期)
 
-**没 causation_chain 的 pattern 直接按 next_actions 走;有的话先做联动追溯**(节省一大半排错时间,避免在错误服务上反复挖)。
+## 配置改动是否引发故障?
 
-## 输出规则
+看 `config-propagation-delay.yaml` 的 typical_propagation:
+- nacos: 30s-2m / apollo: 10s-30s / consul: 1s-5s / k8s configmap: 30s-90s
 
-- 输出简洁、结构化。
-- 明确标注来源文件（env-branch-map / env-domain-map / config-map / log-app-map / observability-map / repo-stack-map）。
-- 每条结果必须附带 `status: verified | inferred`。
-- 未经用户要求，不做超出映射表的推断。
+故障 ±5 分钟内的配置改 → 强相关。配置改 - 故障 = 1-3 分钟差距时**不要直接判"无关"**,看 propagation 延迟是否覆盖。
 
-## 最小输出模板
+## 输出格式
 
-### 环境 → 分支/仓库
+每条结果附 `source: <file>` + `status: verified|inferred`,不做映射表外的推断。
 
-- environment: `<env>`
-- repos:
-  - `<repo>`: `<branch_or_tag>`
-- source: `skills/routing/references/env-branch-map.yaml`
-
-### 环境 → API/Web 域名
-
-- environment: `<env>`
-- api_domain: `<apiDomain>`
-- web_domain: `<webDomain>`
-- source: `skills/routing/references/env-domain-map.yaml`
-
-### 环境+服务 → 配置中心标识
-
-- environment: `<env>`
-- service: `<service>`
-- namespaceId: `<namespaceId>`（nacos）/ appId+cluster+namespaces（apollo）/ kv_prefix+default_context（consul）
-- group: `<group>`（仅 nacos）
-- dataId: `<dataId>`（仅 nacos）
-- **mcp_server: `<实例名>`** ← 工具调用必须用此名字（例：`nacos-mcp-server-prod`）
-- status: `verified|inferred`
-- source: `skills/routing/references/config-map.yaml`
-
-> ⚠️ 多环境 MCP：本系统按环境注册独立 MCP 实例。`mcp_server` 字段是本行对应环境的 MCP 名，
-> agent 后续调用 `config-executor` 或任何配置中心工具时，**必须使用该字段值**而不是猜测或拼接。
-
-### 环境+服务 → 日志 app
-
-- environment: `<env>`
-- service: `<service>`
-- status: `verified|inferred`
-- preferred_app: `<verifiedApp 或首个 appCandidate>`
-- candidates: `[ ... ]`
-- source: `skills/routing/references/log-app-map.yaml`
-
-## trace 找不到时先看采样率(防止误判"trace 不存在")
-
-agent 调 tracing-query / tempo-query / skywalking-query 拉指定 trace_id 拉不到 → **不要直接下"trace 不存在 / ID 错了"结论**。先看 `observability-map.yaml > jaeger/tempo/skywalking > sampling_rate`:
-
-- `1.0` (100%) → 全采,trace 真不存在(ID 错 / 时间窗外 / TTL 过期)
-- `0.1` (10%) → 默认头采样,**90% 的 trace 根本没采到**,找不到很正常
-- `0.01` (1%) → **绝大多数 trace 不存在很正常**
-
-正确反应:
-
-1. 看 sampling_rate < 0.5 时,告诉用户"trace 没采到很正常(采样率 X%),从日志里找 `trace_id=` 字段验证 trace 是否真存在(日志通常 100% 记录)"
-2. sampling_rate=1.0 仍找不到时,确认时间范围 + 检查 trace 头是否在入口 gateway 就被过滤
-3. 不要因 trace 找不到就放弃 Step 5 三向交叉,改用 metric + log + 日志中的 trace_id 字段三向
-
-## baseline 比对(PromQL,任何"指标突变"都必须用)
-
-agent 看到任何指标"突变 / 异常 / 升高"时,**不能只看当前值**——必须跟 baseline 比才能下"真突变"结论。
-
-`observability-map.yaml > prometheus > baseline_query_templates` 给了 6 对 PromQL 模板:p99/qps/error_rate/cpu/memory 各对应 `_now` + `_baseline_24h`。用法:
-
-1. 从 `selector_chain` 命中的第一条 selector 代入 `<selector>`
-2. **同时**跑 `*_now` 和 `*_baseline_24h` 两个查询(并发)
-3. 算 delta:`actual / baseline`(指标值)或 `actual - baseline`(比例值)
-4. 判定:
-   - `>2x` 或 `+50%` → 真突变
-   - `<2x` → 在正常波动内,**不要拿这个当根因证据**
-
-baseline 选 `24h offset` 默认;**周末 / 大促 / 活动日**改用 `7d offset`(同一星期几同一时段);**渐变型故障**(慢慢恶化)用 `1h offset` 看是否还在恶化中。`baseline_offset_alternatives` 列了三种。
-
-例:agent 看到"prod commerce p99 是 5s",必须接着跑 baseline_24h 看正常是 500ms,delta 10x → 才算"真突变",才能往下追根因。
-
-## selector_chain 的语义(PromQL / LogQL 通用)
-
-`observability-map.yaml` 里 `prometheus.selector_chain` 和 `loki.logql_selector_chain` 是 **fallback 链,不是穷举列表**。**必须按顺序逐条试,第一条命中 N 行(N>0)即返回**,后面的只在前面查不到时用。模板形态:
-
-```yaml
-prometheus:
-  selector_chain:
-    - '{namespace="<k8s.namespace>",container="<k8s.workload>"}'   # 优先:复用 wizard 选过的 K8s 工作负载
-    - '{namespace="<k8s.namespace>",pod=~"<k8s.workload>-.*"}'    # 兜底:pod 名前缀
-    - '{namespace="<env>",app="<service>"}'                        # 通用:prometheus-operator 默认
-    ...
-```
-
-**正确执行**:
-
-1. 先把链里每条 `<...>` 占位符按当前 (env, service) 解析:
-   - `<k8s.namespace>` / `<k8s.workload>` → 读 `system.yaml` 的 `observability.k8s_runtime.service_map[env+service]`(没启用 K8s 运行时则跳过这两条)
-   - `<lm.envLabel>` / `<lm.envValue>` / `<lm.serviceLabel>` → 读 `observability.loki.label_mapping_by_env.<env>`(没配过 Loki 标签映射则跳过)
-   - `<env>` / `<service>` → 直接代入
-2. 解析失败的条目(占位符没东西可代)**直接跳过**,试下一条
-3. 解析成功的条目按顺序发请求,**命中即停**(查到任何 N>0 行/样本就采用这条 selector,后面的不试)
-4. 整条链跑完都 0 命中,**告诉用户:用这些 selector 都查不到,可能 (a) 时间窗不对 (b) 服务名拼错 (c) 该 env 真的没数据**
-
-**反模式**:把链里每条都各跑一次然后输出"我用了 N 种 selector 全都试了"——这是搜索而非排障,浪费 token 且让用户搞不清楚到底命中没。
-
-## 自检示例
-
-> 作者或维护者发下面这些问题给机器人，检查 skill 是否按"执行步骤"走。
-
-**Q1（配置定位）**：`dev 环境 <任一服务> 的配置 dataId 是什么？`
-- 期望：读 `references/config-map.yaml` 的 `environments.dev.<service>` → 返回 namespaceId/group/dataId + mcp_server + status + source。
-- 不合格迹象：没标 source / 没标 status / 把 inferred 当 verified 吹 / 丢了 mcp_server 字段。
-
-**Q2（分支映射）**：`prod 环境用哪个分支？`
-- 期望：读 `references/env-branch-map.yaml` → 列每个 repo 对应的分支，附 source。
-
-**Q3（最小澄清）**：用户问 `order-service 的 dataId?` 但没说环境。
-- 期望：机器人**只追问一个**问题（"哪个环境？dev / staging / prod"），不一次问多个，不猜测。
+`mcp_server` 字段必须原样输出(见最高规则)。

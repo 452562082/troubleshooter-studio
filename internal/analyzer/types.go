@@ -61,6 +61,17 @@ type SchemaTable struct {
 	Strategy   string   `json:"strategy,omitempty"`    // 命中的扫描策略(orm_annotation / sql_literal / orm_api_call / file_name)
 }
 
+// RoleHint 是 RecommendRole 的输出:推荐 role + 命中规则的可读说明,
+// 给 wizard UI 显示"📍 推荐 frontend(检测到 react+vite,无后端框架)"。
+type RoleHint struct {
+	// Role 推荐角色(backend/frontend/gateway/middleware/common-lib/mobile/admin/infra/docs)
+	Role string `json:"role"`
+	// Reason 命中的判定证据,用人话写,UI 直接展示
+	Reason string `json:"reason"`
+}
+
+// (SubmoduleHint 在 monorepo_scan.go 里定义,见那个文件)
+
 // RepoAnalysis 单仓库分析产物
 type RepoAnalysis struct {
 	Name            string           `json:"name"`
@@ -71,6 +82,7 @@ type RepoAnalysis struct {
 	DownstreamCalls []DownstreamCall `json:"downstream_calls,omitempty"`
 	DataStoreUsages []DataStoreUsage `json:"data_store_usages,omitempty"`
 	SchemaTables    []SchemaTable    `json:"schema_tables,omitempty"`
+	RoleHint        *RoleHint        `json:"role_hint,omitempty"` // 自动推断的角色 + 理由(用户可改)
 	Warnings        []string         `json:"warnings,omitempty"`
 	Verified        bool             `json:"verified"`
 }

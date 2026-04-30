@@ -3,6 +3,7 @@
 import {analyzerpipe} from '../models';
 import {main} from '../models';
 import {agent} from '../models';
+import {analyzer} from '../models';
 import {generator} from '../models';
 import {discover} from '../models';
 import {doctor} from '../models';
@@ -39,6 +40,8 @@ export function DetectAITools():Promise<main.AIToolsDetectResult>;
 
 export function DetectOpenClawModels(arg1:string):Promise<main.OpenClawDetectResult>;
 
+export function DetectSubmodulesForRepo(arg1:string):Promise<Array<analyzer.SubmoduleHint>>;
+
 export function Diff(arg1:string,arg2:string):Promise<generator.Plan>;
 
 export function DiscoverBots(arg1:Array<string>):Promise<Array<discover.DiscoveredAgent>>;
@@ -53,13 +56,17 @@ export function Gen(arg1:string,arg2:string):Promise<generator.GenSummary>;
 
 export function GenPreview(arg1:string):Promise<main.GenPreviewResult>;
 
+export function GetCustomInstallRoots():Promise<Record<string, string>>;
+
+export function GetMissingRepoPaths(arg1:string):Promise<main.MissingRepoPathsResult>;
+
 export function GetRemoteURL(arg1:string):Promise<string>;
 
 export function GetRepoPathsForSystem(arg1:string):Promise<Record<string, string>>;
 
 export function GetUserConfig():Promise<main.UserConfigResult>;
 
-export function ImportAndDeploy(arg1:string,arg2:string,arg3:string,arg4:Record<string, string>,arg5:Record<string, string>):Promise<agent.Result>;
+export function ImportAndDeploy(arg1:string,arg2:string,arg3:string,arg4:Record<string, string>,arg5:Record<string, string>,arg6:string):Promise<agent.Result>;
 
 export function KuboardFetchConfigMaps(arg1:main.KuboardFetchBatchInput):Promise<main.KuboardFetchBatchResult>;
 
@@ -77,6 +84,8 @@ export function KuboardListServices(arg1:main.KuboardListPodsInput):Promise<Arra
 
 export function KuboardPodSnapshot(arg1:main.KuboardPodSnapshotInput):Promise<main.KuboardPodSnapshotResult>;
 
+export function ListBranchesForRepo(arg1:string):Promise<Array<string>>;
+
 export function ListGrafanaDatasources(arg1:main.LokiAuthInput):Promise<Array<labelprobe.Datasource>>;
 
 export function ListLokiLabelValues(arg1:main.LokiAuthInput,arg2:string,arg3:string):Promise<labelprobe.ValuesResult>;
@@ -91,6 +100,8 @@ export function OpenYAML():Promise<main.OpenYAMLResult>;
 
 export function Plan(arg1:string):Promise<generator.Plan>;
 
+export function PrefillCreds(arg1:string):Promise<Record<string, string>>;
+
 export function PreloadConfigCenter(arg1:main.CCHubPreloadInput):Promise<cchub.Result>;
 
 export function ProbeDataStore(arg1:main.DSProbeInput):Promise<dsprobe.Result>;
@@ -100,6 +111,8 @@ export function ProbeURL(arg1:string):Promise<dsprobe.Result>;
 export function ProbeURLAuth(arg1:string,arg2:string,arg3:string,arg4:string):Promise<dsprobe.Result>;
 
 export function ReadEnv(arg1:string):Promise<Record<string, string>>;
+
+export function RecommendRoleForRepo(arg1:string,arg2:string,arg3:string):Promise<analyzer.RoleHint>;
 
 export function RevealInFinder(arg1:string):Promise<void>;
 
@@ -116,6 +129,8 @@ export function SaveYAML(arg1:string,arg2:string):Promise<string>;
 export function ScanInstallPrompts(arg1:string):Promise<Array<deploy.Prompt>>;
 
 export function SelfTestAgent(arg1:string):Promise<agent.SelfTestResult>;
+
+export function SetCustomInstallRoot(arg1:string,arg2:string):Promise<void>;
 
 export function SetDefaultReposRoot(arg1:string):Promise<void>;
 

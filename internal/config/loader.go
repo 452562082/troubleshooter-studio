@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -27,11 +28,86 @@ func LoadFromBytes(data []byte) (*SystemConfig, error) {
 	}
 	// migrate 必须在 validate 之前 —— 老 yaml 单源 schema 走完 migrate 才符合新 schema。
 	migrateLegacyConfigCenter(&cfg)
+	migrateObservabilityEndpoints(&cfg)
 	if err := Validate(&cfg); err != nil {
 		return nil, fmt.Errorf("validate: %w", err)
 	}
 	applyDefaults(&cfg)
 	return &cfg, nil
+}
+
+// migrateObservabilityEndpoints 把 GUI wizard 写出来的 `endpoints: [{env, url, ...}]` 数组
+// 抽到老 schema 的 `*_by_env` map 里。模板渲染层目前只看 map(observability-map.yaml.tmpl),
+// 不做这步会让 routing skill 拿不到 Grafana / Jaeger / K8s Runtime / ELK 的 URL,
+// 装出来的机器人查指标 / trace / k8s 全部哑火。
+//
+// 也顺手把 loki.label_mapping_by_env.<env>.grafana_ds_uid 抽到 Loki.DatasourceUIDByEnv
+// (走 Grafana 代理 LogQL 时必需)。
+//
+// 规则:
+//   - 已有 *_by_env 的 key 不覆盖(用户手填优先于 endpoints[] 抽取)
+//   - 空 url 字段跳过
+//   - endpoints 自身保留(不清空),供 health check 或将来 per-env 凭证消费
+func migrateObservabilityEndpoints(cfg *SystemConfig) {
+	obs := &cfg.Infrastructure.Observability
+
+	fillURL := func(m *map[string]string, eps []ObsEndpoint) {
+		for _, ep := range eps {
+			if ep.Env == "" || ep.URL == "" {
+				continue
+			}
+			if *m == nil {
+				*m = map[string]string{}
+			}
+			if _, exists := (*m)[ep.Env]; !exists {
+				(*m)[ep.Env] = ep.URL
+			}
+		}
+	}
+
+	fillURL(&obs.Grafana.URLByEnv, obs.Grafana.Endpoints)
+	fillURL(&obs.Jaeger.URLByEnv, obs.Jaeger.Endpoints)
+	fillURL(&obs.SkyWalking.URLByEnv, obs.SkyWalking.Endpoints)
+	fillURL(&obs.Tempo.URLByEnv, obs.Tempo.Endpoints)
+	fillURL(&obs.K8sRuntime.URLByEnv, obs.K8sRuntime.Endpoints)
+	// Loki / Prometheus 没 URLByEnv map 字段(模板里它俩走 Grafana 代理只需要 datasource_uid_by_env);
+	// 即便用户填了 endpoints,目前没消费点,所以这里不动。
+
+	// ELK 的 url 在 endpoints 里以 kibana_url / es_url 区分(GUI wizard `web/src/pages/InitPage.vue:2068-2069`)
+	for _, ep := range obs.ELK.Endpoints {
+		if ep.Env == "" {
+			continue
+		}
+		if ep.KibanaURL != "" {
+			if obs.ELK.KibanaByEnv == nil {
+				obs.ELK.KibanaByEnv = map[string]string{}
+			}
+			if _, ok := obs.ELK.KibanaByEnv[ep.Env]; !ok {
+				obs.ELK.KibanaByEnv[ep.Env] = ep.KibanaURL
+			}
+		}
+		if ep.ESURL != "" {
+			if obs.ELK.ESByEnv == nil {
+				obs.ELK.ESByEnv = map[string]string{}
+			}
+			if _, ok := obs.ELK.ESByEnv[ep.Env]; !ok {
+				obs.ELK.ESByEnv[ep.Env] = ep.ESURL
+			}
+		}
+	}
+
+	// loki.label_mapping_by_env.<env>.grafana_ds_uid → Loki.DatasourceUIDByEnv
+	for env, lm := range obs.Loki.LabelMappingByEnv {
+		if env == "" || lm.GrafanaDSUID == "" {
+			continue
+		}
+		if obs.Loki.DatasourceUIDByEnv == nil {
+			obs.Loki.DatasourceUIDByEnv = map[string]string{}
+		}
+		if _, ok := obs.Loki.DatasourceUIDByEnv[env]; !ok {
+			obs.Loki.DatasourceUIDByEnv[env] = lm.GrafanaDSUID
+		}
+	}
 }
 
 // migrateLegacyConfigCenter 把老 schema 的 infrastructure.config_center(单数)
@@ -178,6 +254,24 @@ func Validate(c *SystemConfig) error {
 		if r.Stack == "" {
 			return fmt.Errorf("repos[%s].stack required", r.Name)
 		}
+		if r.Role != "" {
+			validRoles := map[string]bool{
+				RoleBackend: true, RoleFrontend: true, RoleGateway: true,
+				RoleMiddleware: true, RoleCommonLib: true, RoleMobile: true,
+				RoleAdmin: true, RoleInfra: true, RoleDocs: true,
+			}
+			if !validRoles[r.Role] {
+				return fmt.Errorf("repos[%s].role=%q invalid (valid: backend/frontend/gateway/middleware/common-lib/mobile/admin/infra/docs)", r.Name, r.Role)
+			}
+		}
+		if r.SubPath != "" {
+			if strings.HasPrefix(r.SubPath, "/") {
+				return fmt.Errorf("repos[%s].sub_path=%q must be relative (no leading slash)", r.Name, r.SubPath)
+			}
+			if strings.Contains(r.SubPath, "..") {
+				return fmt.Errorf("repos[%s].sub_path=%q must not contain '..' (no parent traversal)", r.Name, r.SubPath)
+			}
+		}
 		for envID := range r.EnvBranches {
 			if !envIDs[envID] {
 				return fmt.Errorf("repos[%s].env_branches references unknown env: %s", r.Name, envID)
@@ -189,7 +283,7 @@ func Validate(c *SystemConfig) error {
 		}
 	}
 
-	validTargets := map[string]bool{"openclaw": true, "claude-code": true, "cursor": true}
+	validTargets := map[string]bool{"openclaw": true, "claude-code": true, "cursor": true, "codex": true}
 	targets := c.Generation.ResolvedTargets()
 	for _, t := range targets {
 		if !validTargets[t] {

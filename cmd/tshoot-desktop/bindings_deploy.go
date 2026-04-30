@@ -119,6 +119,12 @@ type RunInstallResult struct {
 // 老版"SIGKILL bash 进程组"略弱(纯 IO 步骤不可中断),但实际跑完只要几秒,
 // 用户体验差异不大。
 func (a *App) RunInstall(outputDir string, creds map[string]string) (*RunInstallResult, error) {
+	// 从 outputDir/tshoot.json 读出嵌入的 system_yaml,抽 prefill 默认值,作为 user creds 的 fallback。
+	// 用户在 GUI 表单填的 creds 始终优先(MergeCredsWithPrefill 内部 user wins),
+	// 这里只兜底"用户没在表单填但 yaml 里写过"的字段(常见场景:Editor / BotsPage 导入路径)。
+	if cfg, _, err := loadStagingConfig(outputDir); err == nil && cfg != nil {
+		creds = agent.MergeCredsWithPrefill(creds, agent.PrefillCredsFromYAML(cfg))
+	}
 	if err := deploy.WriteEnvFile(outputDir, creds); err != nil {
 		return nil, err
 	}
@@ -229,7 +235,7 @@ func (a *App) UninstallBot(dir, target string) (*UninstallBotResult, error) {
 			CredsRemoved:      r.CredsRemoved,
 			Log:               r.Log,
 		}, nil
-	case "claude-code", "cursor":
+	case "claude-code", "cursor", "codex":
 		r, err := agent.UninstallNative(dir, target)
 		if err != nil {
 			return nil, err

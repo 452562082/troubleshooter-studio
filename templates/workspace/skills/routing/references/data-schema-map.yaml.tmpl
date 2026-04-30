@@ -54,8 +54,8 @@ services:
     {{- range $tables}}
       {{- if eq .Kind "table"}}
       - name: {{.Name | printf "%q"}}
-        primary_key: id    # TODO 校验主键(常见 id / <name>_id / uuid)
-        key_fields: []     # TODO 列常用查询字段(user_id / status / created_at 等)
+        primary_key: id    # 默认 id;按实际主键(<name>_id / uuid 等)校验
+        key_fields: []     # 常用查询字段(user_id / status / created_at 等),可后续按排障经验补
         {{- if .EntityName}}
         entity: {{.EntityName | printf "%q"}}
         {{- end}}
@@ -77,9 +77,12 @@ services:
       {{- end}}
     {{- end}}
     {{- end}}
-    cache_prefixes: []   # TODO redis key 前缀手填,扫不到(每个团队约定不同)
+    cache_prefixes: []   # redis key 前缀(每团队约定不同,扫不到);需要可手填
     {{- else}}
-    tables: []           # TODO 没扫到表/collection,可能 ORM 没识别;手填核心表(name / primary_key / key_fields)
+    # 没扫到表/collection。analyzer 没跑(本地无仓库路径)/ ORM 没识别 / repo 不是后端服务都会空。
+    # 修法:wizard Step 4 / BotsPage 部署时填本地仓库路径 → 重新部署即自动扫码反填(GORM/JPA/SQLAlchemy/TypeORM 主流 ORM 命中率 70%+)。
+    # 或者手填核心表(name / primary_key / key_fields)— 排障准确度比扫码再降一档。
+    tables: []
     collections: []
     cache_prefixes: []
     {{- end}}

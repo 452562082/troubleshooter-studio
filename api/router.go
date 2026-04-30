@@ -15,6 +15,7 @@ func NewRouter(srv *Server, webFS fs.FS) http.Handler {
 
 	// API routes
 	mux.HandleFunc("POST /api/validate", srv.HandleValidate)
+	mux.HandleFunc("POST /api/prefill-creds", srv.HandlePrefillCreds)
 	mux.HandleFunc("POST /api/plan", srv.HandlePlan)
 	mux.HandleFunc("POST /api/gen", srv.HandleGen)
 	mux.HandleFunc("POST /api/doctor", srv.HandleDoctor)

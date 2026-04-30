@@ -1,9 +1,16 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import yaml from 'js-yaml'
 import { analyze as bridgeAnalyze, isDesktop, openDir, openYAML, type AnalyzeResult } from '../lib/bridge'
 import { toast } from '../lib/toast'
 import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
+
+const router = useRouter()
+// 跟"YAML 沙盒"页对接的 localStorage key:在 EditorPage.vue 同名常量(两边手动同步)。
+// 用户在本页点"应用到 YAML 沙盒"时,把 patch 过的 yaml 写进 key,然后路由跳过去,
+// 沙盒页 onMounted 读取 + 自动填 + 显示 banner。读完即清。
+const PENDING_FROM_ANALYZE_KEY = 'tsf-pending-yaml-from-analyze'
 
 const exampleYaml = `system:
   id: demo
@@ -178,6 +185,67 @@ function copySuggestedYamlSnippet() {
     .catch(() => toast.error('复制失败'))
 }
 
+// applyDiffToYAMLAndOpen 把代码扫描发现的差异打进 yaml,然后跳到 YAML 沙盒。
+// 修改点:
+//   1. 每个 repo 的 service_names 用代码扫到的 union(yaml + code 取并集,信息从不丢)
+//   2. infrastructure.config_center.type 跟代码扫到不一致时,提醒(注释行),不强改
+//   完事写进 PENDING_FROM_ANALYZE_KEY → router.push('/editor') → 沙盒页接管。
+function applyDiffToYAMLAndOpen() {
+  if (!diff.value || !result.value) {
+    toast.error('请先成功跑一次扫描')
+    return
+  }
+  let cfg: any
+  try {
+    cfg = yaml.load(yamlContent.value) || {}
+  } catch (e: any) {
+    toast.error(`yaml 解析失败:${e?.message || e}`)
+    return
+  }
+  if (!Array.isArray(cfg.repos)) cfg.repos = []
+  // 按 repo.name 索引代码扫描结果,逐 repo 合并 service_names
+  const codeReposByName = new Map<string, any>()
+  for (const r of result.value.report?.repos || []) {
+    if (r?.name) codeReposByName.set(r.name, r)
+  }
+  let touchedRepos = 0
+  for (const yRepo of cfg.repos) {
+    const codeEntry = codeReposByName.get(yRepo.name)
+    if (!codeEntry) continue
+    const codeNames: string[] = codeEntry.service_names || []
+    if (codeNames.length === 0) continue
+    // yaml 里 service_names 可能是 string[] / "a,b" string,归一为 string[]
+    const yamlNames: string[] = Array.isArray(yRepo.service_names)
+      ? yRepo.service_names.map((s: any) => String(s).trim()).filter(Boolean)
+      : typeof yRepo.service_names === 'string'
+      ? yRepo.service_names.split(',').map((s: string) => s.trim()).filter(Boolean)
+      : []
+    const merged = Array.from(new Set([...yamlNames, ...codeNames]))
+    if (merged.length !== yamlNames.length) {
+      yRepo.service_names = merged
+      touchedRepos++
+    }
+  }
+  // config_center type 不同时,在文件顶部加一条注释行,不替换用户原值(可能是有意的)
+  let header = ''
+  if (diff.value.configCenterMismatch) {
+    header = `# 代码扫描发现 config_center.type=${diff.value.configCenterCode}, 跟 yaml 声明 (${diff.value.configCenterYaml}) 不一致,请人工核对\n`
+  }
+  const patchedYAML = header + yaml.dump(cfg, { lineWidth: 200, noRefs: true })
+  try {
+    localStorage.setItem(PENDING_FROM_ANALYZE_KEY, patchedYAML)
+  } catch (e: any) {
+    toast.error(`保存到 localStorage 失败:${e?.message || e}`)
+    return
+  }
+  if (touchedRepos === 0 && !diff.value.configCenterMismatch) {
+    toast.info('代码扫描跟 yaml 已对齐,无需变更;已把 yaml 带到沙盒做最终验证')
+  } else {
+    toast.success(`已合并 ${touchedRepos} 个仓库的 service_names 到 yaml,跳到沙盒验证`)
+  }
+  router.push('/editor')
+}
+
 // analyze:log 事件流(analyzerpipe.OnProgress 每行 EventsEmit)
 const progressLog = ref('')
 // 跑 analyze 是长任务(大仓库 + auto-clone 可能跑分钟级),秒表让用户知道没卡。
@@ -255,16 +323,17 @@ onUnmounted(() => {
 
 <template>
   <div class="page">
-    <h1>仓库分析</h1>
+    <h1>代码扫描</h1>
 
     <div class="info-box">
-      <div class="info-box-title">仓库分析</div>
+      <div class="info-box-title">代码扫描 — 从代码反推 yaml 应该怎么写</div>
       <div>
-        从已 clone 到本机的代码里扫出每个仓库提供的服务名,以及配置中心(Nacos / Apollo / Consul)用的 dataId、namespace 等线索;
-        把扫到的结果跟 yaml 声明对比,缺什么、多什么一目了然,一键生成补丁片段贴回 yaml。<br/>
-        填两样东西就行:<strong>system.yaml</strong>(粘贴或加载文件) + <strong>仓库父目录</strong>(下面那些 <code>repos[].name</code> 共同的爹,通常是 <code>~/code</code> 这种)。
+        扫已 clone 到本机的代码 → 识别每个仓库提供的服务名 + 配置中心(Nacos / Apollo / Consul / Kuboard)用的 dataId / namespace / configmap 等线索;
+        跟 yaml 声明对比,缺什么(missing)/ 多什么(extra)/ 已对齐(verified)一目了然,**可一键应用差异回 yaml** → 跳到
+        <router-link to="/editor">YAML 沙盒</router-link> 验证。<br/>
+        填两样东西:<strong>system.yaml</strong>(粘贴或加载) + <strong>仓库父目录</strong>(<code>repos[].name</code> 子目录的共同父目录,如 <code>~/code</code>)。
       </div>
-      <div class="info-box-note">本机没下载的仓库会跳过;勾上"自动 clone"会按 yaml 里的 url 浅克隆下来再扫(要有 git + 凭证)。</div>
+      <div class="info-box-note">本机没下载的仓库会跳过;勾上"自动 clone"按 yaml 的 url 浅克隆再扫(要有 git + 凭证)。</div>
     </div>
 
     <div class="form-section">
@@ -349,15 +418,23 @@ onUnmounted(() => {
           <span v-if="diff.totalMissing > 0" class="tag orange">yaml 写了但代码没扫到 {{ diff.totalMissing }} 项</span>
           <span v-if="diff.configCenterMismatch" class="tag red">配置中心对不上</span>
           <span v-if="diff.totalNew === 0 && diff.totalMissing === 0 && !diff.configCenterMismatch" class="tag green">完全一致</span>
-          <button
-            v-if="diff.totalNew > 0"
-            class="btn small"
-            title="把建议的 yaml 片段复制到剪贴板,贴回 system.yaml 的 repos 下就能补全 service_names"
-            @click="copySuggestedYamlSnippet"
-            style="margin-left:auto"
-          >
-            📋 复制补丁片段
-          </button>
+          <div class="apply-actions" style="margin-left:auto; display:flex; gap:6px;">
+            <button
+              v-if="diff.totalNew > 0"
+              class="btn small"
+              title="把建议的 yaml 片段复制到剪贴板,贴回 system.yaml 的 repos 下就能补全 service_names"
+              @click="copySuggestedYamlSnippet"
+            >
+              📋 复制补丁片段
+            </button>
+            <button
+              class="btn small primary"
+              title="把代码扫描发现的 service_names / config_center 差异合并到 yaml,跳到 YAML 沙盒做验证"
+              @click="applyDiffToYAMLAndOpen"
+            >
+              ✨ 应用到 YAML 沙盒
+            </button>
+          </div>
         </div>
 
         <div v-if="diff.configCenterMismatch" class="detail warn">

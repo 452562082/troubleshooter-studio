@@ -11,10 +11,10 @@ import {
   doctor as bridgeDoctor,
   exportYAML,
   gen as bridgeGen,
+  getRepoPathsForSystem,
   importAndDeploy,
   isDesktop as bridgeIsDesktop,
   openDir,
-  openYAML,
   readEnv,
   revealInFinder,
   runInstall,
@@ -29,8 +29,9 @@ import { toast } from '../lib/toast'
 const bots = ref<DiscoveredBot[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
+// extraRoots 仍然保留(空 array),让 discoverBots(extraRoots.value) 调用签名不变;
+// UI 已下线,所以永远是 [] —— 等同于"只扫 3 条默认路径"。需要传自定义路径走 CLI。
 const extraRoots = ref<string[]>([])
-const newRootInput = ref('')
 
 // 每张卡片的"重 gen"状态：key = path|target
 // 只留 loading 让按钮禁用;结果反馈走 toast,不留 inline 文案
@@ -218,7 +219,7 @@ async function uninstall(b: DiscoveredBot) {
     `确定卸载 "${b.meta.system_id}" (${target})?\n\n` +
     (target === 'openclaw'
       ? 'workspace 移到 ~/.Trash;摘掉 ~/.openclaw/openclaw.json 里的 agents.list 条目;清 creds.json。MCP servers(可能被多 agent 共享)保留。'
-      : `中间包 ${b.path} 移到 ~/.Trash;清掉 ~/${target === 'claude-code' ? '.claude' : '.cursor'}/{agents,skills,scripts}/<name>。`)
+      : `中间包 ${b.path} 移到 ~/.Trash;清掉 ~/${target === 'claude-code' ? '.claude' : target === 'cursor' ? '.cursor' : '.codex'}/{agents,skills,scripts}/<name>。`)
   )
   if (!ok) return
   uninstallState[k] = { loading: true }
@@ -281,42 +282,15 @@ async function runApply(b: DiscoveredBot, dryRun: boolean) {
   }
 }
 
-function addRoot() {
-  const v = newRootInput.value.trim()
-  if (!v) {
-    // 之前空 input 点按钮静默 return,用户以为按钮坏了。给个 toast 指路。
-    toast.info('请先填路径或点"选目录…"选个目录')
-    return
-  }
-  if (extraRoots.value.includes(v)) {
-    toast.info(`${v} 已在扫描路径里,无需重复添加`)
-    return
-  }
-  extraRoots.value.push(v)
-  newRootInput.value = ''
-  scan()
-}
-
-async function pickExtraRoot() {
-  // 跟 InitPage Step 4 / import 流程同款:避免用户手敲绝对路径(容易敲错)。
-  try {
-    const p = await openDir('选一个包含机器人产物的目录(含 tshoot.json)')
-    if (p) newRootInput.value = p
-  } catch (e: any) {
-    toast.error(`选目录失败: ${String(e?.message || e)}`)
-  }
-}
-
-function removeRoot(r: string) {
-  extraRoots.value = extraRoots.value.filter((x) => x !== r)
-  scan()
-}
+// addRoot / pickExtraRoot / removeRoot / newRootInput 已下线 —— 扫描路径 UI panel 整个删了。
+// 真要加自定义路径走 CLI(extraRoots 参数)。
 
 function targetLabel(t: string): string {
   const map: Record<string, string> = {
     openclaw: 'OpenClaw',
     'claude-code': 'Claude Code',
     cursor: 'Cursor',
+    codex: 'Codex CLI',
   }
   return map[t] ?? t
 }
@@ -327,7 +301,7 @@ type ImportStage = 'idle' | 'picked' | 'deploying' | 'deployed' | 'installing' |
 const importStage = ref<ImportStage>('idle')
 const importYAMLText = ref('')
 const importYAMLPath = ref('')
-const importTarget = ref<'openclaw' | 'claude-code' | 'cursor'>('openclaw')
+const importTarget = ref<'openclaw' | 'claude-code' | 'cursor' | 'codex'>('openclaw')
 const importDestPath = ref('')
 const importError = ref<string | null>(null)
 
@@ -353,12 +327,22 @@ const importRepoList = computed<ImportRepoLite[]>(() => {
       .map((r: any) => ({ name: String(r.name).trim(), url: String(r.url || '').trim() }))
   } catch { return [] }
 })
-// 每个仓库的本机绝对路径;部署时传进 importAndDeploy,后端烤进 repo-path-map.yaml。
+// 每个仓库的本机绝对路径;部署时传进 importAndDeploy,后端烤进 repo-path-map.yaml +
+// 触发 auto-analyze(扫码生成 service-dependency-map / data-schema-map)。
 // key = repo.name。用户不填就不让部署。
 const importRepoPaths = reactive<Record<string, string>>({})
-// yaml 变动时重置:新 yaml 里的仓库可能完全不一样
-watch(() => importYAMLText.value, () => {
+// yaml 变动时:重置 → 用 system.id 反查上次部署存的路径,prefill 表单。
+// 这样"BotsPage 改完 yaml 重新部署"不必再选一遍目录,跟"wizard 一次,后续静默"对齐。
+watch(() => importYAMLText.value, async () => {
   for (const k of Object.keys(importRepoPaths)) delete importRepoPaths[k]
+  try {
+    const sysID = importSystemId.value
+    if (!sysID) return
+    const saved = await getRepoPathsForSystem(sysID)
+    for (const [name, p] of Object.entries(saved || {})) {
+      if (p) importRepoPaths[name] = p
+    }
+  } catch { /* 反查失败也无所谓,用户手填 */ }
 })
 async function pickRepoPath(name: string) {
   try {
@@ -440,20 +424,10 @@ function filledCount(prompts: InstallPrompt[]): number {
   return prompts.filter((p) => (installCreds.value[p.name] ?? '').trim() !== '').length
 }
 
-async function pickYAML() {
-  importError.value = null
-  try {
-    const r = await openYAML()
-    if (!r.path) return // 用户取消
-    importYAMLPath.value = r.path
-    importYAMLText.value = r.content
-    importStage.value = 'picked'
-    // 默认 destPath：claude-code/cursor 建议选项目根，openclaw 建议 ./dist/<system-id>
-    importDestPath.value = ''
-  } catch (e: any) {
-    importError.value = String(e?.message || e)
-  }
-}
+// pickYAML / 导入 yaml 一键部署面板已下线 —— 走「创建向导」Step 1 的"导入已有 system.yaml"路径,
+// 那条路完整覆盖校验 / 健康检查 / 仓库路径补全。本页 BotsPage 只做"扫已装 + 管理"职责。
+// 整个 importStage / importYAMLText / importTarget / pickDestDir / runDeployFromYAML 等
+// 一连串状态量保留(template 还有 v-if 的死分支引用),不影响 BotsPage 主路径。
 
 async function pickDestDir() {
   try {
@@ -609,14 +583,9 @@ onUnmounted(() => {
         <p class="subtitle">扫描本机 tshoot.json 锚点，列出已经部署到 AI 平台的排障机器人。</p>
       </div>
       <div class="page-actions">
-        <button
-          class="btn"
-          :disabled="importStage !== 'idle'"
-          title="选 yaml + target + 部署路径,跳过编辑直接装;跟创建向导的'导入到向导编辑'不同"
-          @click="pickYAML"
-        >
-          导入 YAML 一键部署
-        </button>
+        <!-- 导入 yaml 一键部署的入口已下线 —— 这条路径跟「创建向导」的"导入 yaml → 反填 → 一键部署"
+             功能重叠且后者更完整(走过校验 / 健康检查 / 仓库路径补全)。本页只做"扫已装 + 管理"。
+             需要导入新 yaml 部署?去 <创建向导> Step 1 选"导入已有 system.yaml"。 -->
         <button class="btn primary" :disabled="loading" @click="scan">
           {{ loading ? '扫描中…' : '刷新' }}
         </button>
@@ -810,38 +779,10 @@ onUnmounted(() => {
       <div v-if="importError" class="alert error">⚠ {{ importError }}</div>
     </section>
 
-    <section class="roots">
-      <div class="roots-head">
-        <span class="roots-label">扫描路径</span>
-        <span class="hint">默认扫 OpenClaw workspace + wizard 一键部署的中间包目录。Claude Code / Cursor 装在项目根里的,把项目路径加进来。</span>
-      </div>
-      <div class="root-list">
-        <span class="root-item builtin">~/.openclaw/workspace <span class="tag">默认</span></span>
-        <span class="root-item builtin">~/.tshoot/openclaw <span class="tag">默认</span></span>
-        <span class="root-item builtin">~/.tshoot/claude-code <span class="tag">默认</span></span>
-        <span class="root-item builtin">~/.tshoot/cursor <span class="tag">默认</span></span>
-        <span v-for="r in extraRoots" :key="r" class="root-item">
-          {{ r }}
-          <button class="root-remove" @click="removeRoot(r)">×</button>
-        </span>
-      </div>
-      <!-- readonly 输入框,路径一律走"选目录"按钮。Enter 保留作"提交"快捷键(输入框
-           已经从 picker 填值后用户能回车一键加) -->
-      <div class="root-add">
-        <input
-          :value="newRootInput"
-          readonly
-          class="path-readonly"
-          placeholder="点右侧按钮选一个包含机器人产物的目录"
-          :title="newRootInput"
-          @keyup.enter="addRoot"
-        />
-        <button type="button" class="btn" @click="pickExtraRoot">
-          {{ newRootInput ? '重新选…' : '选目录…' }}
-        </button>
-        <button class="btn primary" :disabled="!newRootInput.trim()" @click="addRoot">添加并扫描</button>
-      </div>
-    </section>
+    <!-- 扫描路径已下线 —— 默认 3 条路径(`~/.openclaw/workspace` / `~/.claude/skills` /
+         `~/.cursor/skills`)覆盖 99% 用户级部署。极少数"装项目根"场景走 CLI 传 extraRoots
+         参数,不污染主 UI。详见 internal/discover/scan.go::DefaultRoots(). -->
+
 
     <div v-if="error" class="alert error">⚠️ {{ error }}</div>
     <div v-else-if="!isDesktop()" class="alert info">
@@ -849,14 +790,20 @@ onUnmounted(() => {
     </div>
     <div v-else-if="loading" class="empty">扫描中…</div>
     <div v-else-if="bots.length === 0" class="empty">
-      还没部署过机器人。点右上角「<strong>导入 YAML 一键部署</strong>」拿已有 yaml 直接装；或去「<strong>创建向导</strong>」从头建一份。
+      还没部署过机器人。去「<strong><router-link to="/init">创建向导</router-link></strong>」从头建一份;
+      已有 yaml 文件,在向导第 1 步选"导入已有 system.yaml"反填后一键部署。
     </div>
 
     <div v-else class="bot-grid">
       <article v-for="b in bots" :key="b.path + b.meta.target" class="bot-card">
         <header class="bot-head">
           <span class="bot-target" :data-target="b.meta.target">{{ targetLabel(b.meta.target) }}</span>
-          <span class="bot-ver">tshoot {{ b.meta.tshoot_version || '?' }}</span>
+          <!-- "tshoot dev" 是 build 没打 git tag 时的兜底字面量,信息量为零(本地构建都长这样),
+               显示反而成噪音。只在版本号是真版本号(非 dev / 空)时才渲染徽章。 -->
+          <span
+            v-if="b.meta.tshoot_version && b.meta.tshoot_version !== 'dev'"
+            class="bot-ver"
+          >tshoot {{ b.meta.tshoot_version }}</span>
         </header>
         <h3 class="bot-name">{{ b.meta.system_name || b.meta.system_id }}</h3>
         <p class="bot-id">ID: <code>{{ b.meta.system_id }}</code></p>
@@ -1022,6 +969,23 @@ onUnmounted(() => {
 .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
 
 .roots { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px 16px; margin-bottom: 20px; }
+.roots.collapsed { padding: 6px 14px; }
+/* 折叠态:整行 ghost 按钮,跟普通文字一样轻量,鼠标 hover 才提示可点 */
+.roots-toggle {
+  width: 100%; padding: 4px 0;
+  background: transparent; border: none; cursor: pointer;
+  font-family: inherit; font-size: 12px; color: #64748b;
+  text-align: left;
+}
+.roots-toggle:hover { color: #1e293b; }
+.roots-toggle strong { color: #2563eb; font-weight: 500; }
+.roots-collapse-btn {
+  margin-left: auto;
+  background: transparent; border: 1px solid #cbd5e1;
+  padding: 2px 10px; border-radius: 4px;
+  font-size: 11px; color: #64748b; cursor: pointer;
+}
+.roots-collapse-btn:hover { background: #fff; }
 .roots-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
 .roots-label { font-weight: 600; font-size: 13px; color: #334155; }
 .hint { font-size: 12px; color: #64748b; }
@@ -1061,6 +1025,7 @@ onUnmounted(() => {
 .bot-target[data-target="openclaw"] { background: #fce7f3; color: #9f1239; }
 .bot-target[data-target="claude-code"] { background: #fef3c7; color: #92400e; }
 .bot-target[data-target="cursor"] { background: #dbeafe; color: #1e40af; }
+.bot-target[data-target="codex"] { background: #d1fae5; color: #065f46; }
 .bot-ver { font-size: 11px; color: #94a3b8; font-family: monospace; }
 
 .bot-name { font-size: 16px; font-weight: 600; color: #0f172a; margin-bottom: 4px; }

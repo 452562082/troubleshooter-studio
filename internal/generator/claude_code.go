@@ -92,7 +92,14 @@ func agentSlug(ctx *Context) string {
 //   name: <slug>
 //   description: <中文显示名>
 //   tools: 不限制(默认全工具)
-//   model: <agent.model>
+//   model: 仅当用户显式给 claude-code 配了 target_models.claude-code 才写 ——
+//          否则 Claude Code 用 IDE 当前选的模型(用户偏好)。
+//
+// 历史 bug:之前直接写 ctx.Agent.Model,但 Agent.Model 是 OpenClaw gateway 专属的
+// LLM 路由 id(可能是 openai-codex/gpt-5.4 之类的非 Claude 模型)。Claude Code 拿到
+// 那个值会把"你以为它会用的 Claude 模型"替换成奇怪字符串(或者忽略 / 报错),用户
+// 体感是"OpenClaw 选什么 Claude Code 也跟着"。修法:Claude Code 只认 target_models.claude-code,
+// 没显式配就不写 model frontmatter。
 // body 是 SOUL+IDENTITY+AGENTS+CHECKLIST+TOOLS+skills 索引的合并 prompt。
 func buildClaudeAgentMD(wsRoot string, ctx *Context, agentName string) (string, error) {
 	var sb strings.Builder
@@ -100,7 +107,7 @@ func buildClaudeAgentMD(wsRoot string, ctx *Context, agentName string) (string, 
 	sb.WriteString("---\n")
 	fmt.Fprintf(&sb, "name: %s\n", agentName)
 	fmt.Fprintf(&sb, "description: %s\n", ctx.System.Name)
-	if m := strings.TrimSpace(ctx.Agent.Model); m != "" {
+	if m := strings.TrimSpace(ctx.Agent.TargetModels["claude-code"]); m != "" {
 		fmt.Fprintf(&sb, "model: %s\n", m)
 	}
 	sb.WriteString("---\n\n")

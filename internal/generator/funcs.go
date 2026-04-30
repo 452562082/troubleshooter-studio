@@ -105,6 +105,79 @@ func funcMap() template.FuncMap {
 			}
 			return toConfigCenterView(ctx.Infrastructure.PrimaryConfigCenter())
 		},
+		// yamlDataStoresForService 从 cfg.Infrastructure.DataStores[].Endpoints[].Service 抽
+		// 当前服务用了哪些数据层 type,返回 ["<type>:<type>"] 列表(逻辑名缺省用 type 自身,
+		// 用户可后续自己改,如 "mysql:mysql" → "mysql:order_db")。比 dependency_scan 走代码扫描
+		// 更准:wizard 已经收过 (env, service, endpoint) 三元组,直接拿来用。
+		"yamlDataStoresForService": func(ctx *Context, svc string) []string {
+			seen := map[string]bool{}
+			var out []string
+			for _, ds := range ctx.Infrastructure.DataStores {
+				if !ds.Enabled {
+					continue
+				}
+				for _, ep := range ds.Endpoints {
+					if ep.Service == svc {
+						key := ds.Type + ":" + ds.Type
+						if !seen[key] {
+							seen[key] = true
+							out = append(out, key)
+						}
+						break // 同 type 同 service 多 env 只算一次
+					}
+				}
+			}
+			return out
+		},
+		// upstreamForService 反推图:谁的 downstream 包含 svc → 那个就是 svc 的 upstream。
+		// 只要 analyzer 在部署期跑过(dependency_scan 填了 ctx.DownstreamCallsByRepo),或者
+		// 用户手填过任一服务的 downstream,本服务的 upstream 自动出来。
+		// 跟 scannedDownstreamsForService 一样基于 repo 级 regex 扫,精度 50-70%,可手动校正。
+		"upstreamForService": func(ctx *Context, svc string) []string {
+			seen := map[string]bool{}
+			var out []string
+			for _, repo := range ctx.Repos {
+				calls := ctx.DownstreamCallsByRepo[repo.Name]
+				hits := false
+				for _, c := range calls {
+					if c.Target == svc {
+						hits = true
+						break
+					}
+				}
+				if !hits {
+					continue
+				}
+				// repo 调用了 svc → repo 内每个 service 都视为 svc 的上游
+				names := repo.ServiceNames
+				if len(names) == 0 {
+					names = []string{repo.Name}
+				}
+				for _, n := range names {
+					if n == svc || seen[n] {
+						continue
+					}
+					seen[n] = true
+					out = append(out, n)
+				}
+			}
+			return out
+		},
+		// lokiAppForService 从 loki.label_mapping_by_env[env].service_map[service].app
+		// 抽出"用户在 wizard 里手挑过的 Loki app 名"。命中即返回真实 app 名,没填回空串。
+		// log-app-map.yaml 用这个填 verifiedApp,免得每条都让用户再手填一遍 ——
+		// wizard Step 7 已经收过同一份数据。
+		"lokiAppForService": func(ctx *Context, env, service string) string {
+			lm, ok := ctx.Infrastructure.Observability.Loki.LabelMappingByEnv[env]
+			if !ok {
+				return ""
+			}
+			svc, ok := lm.ServiceMap[service]
+			if !ok {
+				return ""
+			}
+			return svc["app"]
+		},
 		// mcpKeyForSource 跟 internal/agent/install_naming.go 的 mcpKey 保持镜像:
 		//   sourceID=="default" 或空 → "<prefix>-<env>"(老命名,向后兼容)
 		//   显式多源 → "<prefix>-<sourceID>-<env>"

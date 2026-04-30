@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onActivated } from 'vue'
 import { useRouter } from 'vue-router'
 import yaml from 'js-yaml'
 import brandLogo from '../assets/logo.svg'
+import { confirmDialog } from '../lib/confirm'
 
 const router = useRouter()
 
@@ -37,10 +38,57 @@ function loadLastYaml() {
   } catch { /* 解析失败不显示 */ }
 }
 
-onMounted(() => {
+// App.vue 用 <keep-alive> 缓存 router-view → HomePage 只 mount 一次,onMounted 只触发一次。
+// 用户在 InitPage 改了草稿(步号 / 系统名)再切回首页,不刷新就还是看到旧值。
+// 改用 onActivated:每次 keep-alive 重新激活本组件时重读 localStorage,所有派生
+// computed(draftStep / draftSystemName / nextStep)自动更新。
+function refreshDraftSnapshot() {
   loadWizard()
   loadLastYaml()
-})
+}
+onMounted(refreshDraftSnapshot)
+onActivated(refreshDraftSnapshot)
+
+// "创建向导"卡跟"下一步推荐.继续向导"语义不同:
+//   - 创建向导卡 = 想新建一个机器人(若有草稿,先问要不要清空重开)
+//   - 继续向导 = 接着上次草稿往下走(直接 router.push)
+// 之前两个按钮都只是 router.push('/init') 没区别,现在拆出来:
+//   - 卡片有草稿时弹 confirm 让用户挑"清空重开 / 继续之前的"
+//   - 卡片没草稿直接跳
+async function onPrimaryCardClick(card: { path: string; label: string }) {
+  if (card.path === '/init' && wizardDraft.value) {
+    // confirmText='清空重开'(危险红色按钮),cancelText='继续之前的'(安全侧)。
+    // defaultAction='cancel' 让自动聚焦 / Enter 命中"继续之前的",Esc / 点遮罩也落到
+    // 继续之前的一侧。用户必须用鼠标显式点红色按钮才会真清空,符合"危险动作要确认"。
+    const wipe = await confirmDialog({
+      title: '已有未完成的向导草稿',
+      message: `「${draftSystemName.value || '未命名'}」上次填到第 ${draftStepNormalized.value} / ${WIZARD_TOTAL_STEPS} 步,要继续吗?`,
+      confirmText: '清空重开',
+      cancelText: '继续之前的',
+      danger: true,
+      defaultAction: 'cancel',
+    })
+    if (wipe) {
+      // 二次确认:清空草稿是不可逆操作,误点代价是用户前面填的几步全丢。
+      // 默认动作仍是"取消"(safe by default),用户必须显式再点一次红色"确认清空"。
+      const reallyWipe = await confirmDialog({
+        title: '再确认一次',
+        message: '点击"确认清空"会丢弃当前草稿,无法恢复。',
+        confirmText: '确认清空',
+        cancelText: '不,我再想想',
+        danger: true,
+        defaultAction: 'cancel',
+      })
+      if (reallyWipe) {
+        try { localStorage.removeItem('tsf-init-wizard-v1') } catch { /* ignore */ }
+        wizardDraft.value = null
+      }
+    }
+    router.push(card.path)
+    return
+  }
+  router.push(card.path)
+}
 
 // 主路径卡片:80% 用户的核心工作流。顺序按"新用户第一次打开 → 老用户管理"设计,
 // 已装机器人放 #2 是因为"我已有 yaml 想直接部署"和"查看/改已装"都在那页。
@@ -51,26 +99,48 @@ const primaryCards = [
   { path: '/init', icon: '🧙', label: '创建向导', desc: '一步步带你创建一个新的排障机器人', tag: '推荐新用户' },
   { path: '/bots', icon: '🤖', label: '已装机器人', desc: '管理已部署的机器人,新建、更新或重新部署' },
 ]
-// 诊断工具:YAML 调试器 + 仓库分析。都不是主路径(新用户不会用),用户自己要调试
-// yaml / 扫代码补全字段时才来。Doctor 已合进 BotsPage 卡片,独立页已删。
+// 诊断工具:YAML 沙盒 + 代码扫描。两者职责对齐(2026-04-30):
+//   YAML 沙盒  → 操作 yaml 文件(验证/生成预览/产物预览)
+//   代码扫描  → 操作代码仓库(扫码反推 yaml,可应用差异回 yaml 形成闭环)
+// Doctor 已合进 BotsPage 卡片,独立页已删。
 const advancedCards = [
-  { path: '/editor',  icon: '📝', label: 'YAML 调试器', desc: '粘贴配置做语法检查和预览' },
-  { path: '/analyze', icon: '🔍', label: '仓库分析',   desc: '扫一下代码,自动识别有哪些服务和配置中心' },
+  { path: '/editor',  icon: '📝', label: 'YAML 沙盒', desc: '验证 yaml + 干跑生成 + 产物预览' },
+  { path: '/analyze', icon: '🔍', label: '代码扫描', desc: '扫仓库反推服务 / 配置,可应用回 yaml' },
 ]
+
+// InitPage 的步骤布局(2026-04-30 版,共 10 步):
+//   1=欢迎  2=系统  3=机器人  4=环境  5=仓库  6=配置源  7=数据层  8=可观测  9=预览生成  10=一键部署
+// 跟 InitPage.vue::totalSteps 同步。改 totalSteps 时这里要一起改。
+const WIZARD_TOTAL_STEPS = 10
+const WIZARD_PREVIEW_STEP = 9
+const WIZARD_DEPLOY_STEP = 10
+
+// draftStep 兼容老 saved:老版本(8/9 步制)的 saved.currentStep 没经过 wizardSchema=2 标记
+// 时 InitPage 加载会 +1 一次性迁移。本页只读不写,所以用 saved.wizardSchema 判断 → 老 saved
+// 显示的步号也跟着 +1,跟 InitPage 渲染保持一致。
+const draftStepNormalized = computed<number | null>(() => {
+  if (!wizardDraft.value || draftStep.value == null) return null
+  const schema = (wizardDraft.value.wizardSchema ?? 1) as number
+  return schema >= 2 ? draftStep.value : Math.min(draftStep.value + 1, WIZARD_TOTAL_STEPS)
+})
 
 // 推荐下一步逻辑
 const nextStep = computed(() => {
   if (!wizardDraft.value && !lastYamlSignature.value) {
     return { text: '从「创建向导」开始，30 秒生成第一份 system.yaml', path: '/init', cta: '开始向导 →' }
   }
-  if (wizardDraft.value && draftStep.value && draftStep.value < 7) {
-    return { text: `向导进行到第 ${draftStep.value} / 8 步（${draftSystemName.value || '未命名'}），回去继续？`, path: '/init', cta: '继续向导 →' }
+  const step = draftStepNormalized.value
+  if (wizardDraft.value && step != null && step < WIZARD_PREVIEW_STEP) {
+    return { text: `向导进行到第 ${step} / ${WIZARD_TOTAL_STEPS} 步（${draftSystemName.value || '未命名'}），回去继续？`, path: '/init', cta: '继续向导 →' }
   }
-  if (wizardDraft.value && draftStep.value === 7) {
-    return { text: `向导已到预览步骤，下一步是下载 yaml 并去 Editor / Gen 执行`, path: '/init', cta: '查看向导预览 →' }
+  if (wizardDraft.value && step === WIZARD_PREVIEW_STEP) {
+    return { text: '向导已到预览步骤，确认 yaml 后下一步即可一键部署', path: '/init', cta: '查看向导预览 →' }
+  }
+  if (wizardDraft.value && step === WIZARD_DEPLOY_STEP) {
+    return { text: '向导已到一键部署步,直接装机即可', path: '/init', cta: '继续部署 →' }
   }
   if (lastYamlSignature.value?.ok) {
-    return { text: `你最近编辑过 ${lastYamlSignature.value.name}（targets: ${lastYamlSignature.value.targets.join(', ')}），可以直接去 Editor 验证 / Gen 落盘`, path: '/editor', cta: '继续编辑 →' }
+    return { text: `你最近编辑过 ${lastYamlSignature.value.name}（targets: ${lastYamlSignature.value.targets.join(', ')}），可以直接去 YAML 沙盒验证 / 部署`, path: '/editor', cta: '继续编辑 →' }
   }
   return { text: '从「创建向导」开始', path: '/init', cta: '开始向导 →' }
 })
@@ -97,20 +167,31 @@ const nextStep = computed(() => {
     <h2 class="section-title">主路径</h2>
     <p class="section-hint">典型流:创建 yaml → 编辑 / 生成 → 导入或部署到机器人。每个页面可独立使用。</p>
     <div class="nav-card-grid">
-      <div v-for="(c, i) in primaryCards" :key="c.path" class="nav-card primary" @click="router.push(c.path)">
+      <div
+        v-for="(c, i) in primaryCards"
+        :key="c.path"
+        class="nav-card primary"
+        @click="onPrimaryCardClick(c)"
+      >
         <div class="nav-card-head">
           <span class="nav-card-idx">{{ i + 1 }}</span>
           <span class="nav-card-icon">{{ c.icon }}</span>
           <span class="nav-card-label">{{ c.label }}</span>
           <span v-if="c.tag" class="nav-card-tag">{{ c.tag }}</span>
         </div>
-        <div class="nav-card-desc">{{ c.desc }}</div>
+        <div class="nav-card-desc">
+          {{ c.desc }}
+          <!-- 创建向导卡上,有草稿时给"已有草稿"标识,让用户清楚点这个会进入"清空重开 / 继续"二选一 -->
+          <span v-if="c.path === '/init' && wizardDraft" class="nav-card-draft-badge">
+            · 已有草稿(第 {{ draftStepNormalized }} / {{ WIZARD_TOTAL_STEPS }} 步)
+          </span>
+        </div>
       </div>
     </div>
 
     <!-- 高级 / 诊断:折叠入口弱化,避免跟主路径抢视觉焦点 -->
     <h2 class="section-title secondary">高级 · 诊断</h2>
-    <p class="section-hint">辅助工具:YAML 调试器(校验配置)、仓库扫描(从代码自动补全配置)。</p>
+    <p class="section-hint">辅助工具:YAML 沙盒(yaml 文件验证/预览)、代码扫描(从代码反推配置,可应用回 yaml)。</p>
     <div class="nav-card-grid compact">
       <div v-for="c in advancedCards" :key="c.path" class="nav-card advanced" @click="router.push(c.path)">
         <div class="nav-card-head">
@@ -226,6 +307,16 @@ const nextStep = computed(() => {
 .nav-card-label { font-weight: 600; color: var(--c-ink); font-size: var(--fs-md); flex: 1; }
 .nav-card-tag { font-size: 10px; font-weight: 700; color: var(--c-ink); background: #f59e0b; padding: 2px 7px; border-radius: var(--r-lg); }
 .nav-card-desc { color: var(--c-muted); font-size: var(--fs-sm); line-height: 1.55; }
+.nav-card-draft-badge {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: #fef3c7;
+  color: #92400e;
+  font-size: 11px;
+  font-weight: 500;
+}
 
 /* info cards */
 .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-4); margin-bottom: 32px; }

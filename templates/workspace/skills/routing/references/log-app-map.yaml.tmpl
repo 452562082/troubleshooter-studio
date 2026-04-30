@@ -1,25 +1,36 @@
 # log-app-map.yaml
-# 由 troubleshooter-studio 生成骨架 — verified 字段需按实际 Loki/ES 索引校对
+# 由 troubleshooter-studio 生成 — verifiedApp 优先从 loki.label_mapping_by_env 抽
+# (用户已在 wizard Step 7 实测过的 app 名,最准);没填的留空走 inferred 分支,
+# routing skill 退到通用 (env, service) 命名约定。
 # 结构：environments.<env>.<service>: { verifiedApp, appCandidates, status }
 environments:
 {{- range .Environments}}
+  {{- $envID := .ID}}
   {{.ID}}:
-    {{- $envID := .ID}}
     {{- range $.Repos}}
       {{- $repo := .}}
       {{- range .ServiceNames}}
-      {{.}}:
-        verifiedApp: ""
+      {{- $svc := . }}
+      {{- $verified := lokiAppForService $ $envID $svc}}
+      {{$svc}}:
+        verifiedApp: {{$verified | printf "%q"}}
         appCandidates:
-          - {{. | printf "%q"}}
-        status: inferred
+          - {{$svc | printf "%q"}}
+          {{- if and $verified (ne $verified $svc)}}
+          - {{$verified | printf "%q"}}
+          {{- end}}
+        status: {{if $verified}}verified{{else}}inferred{{end}}
       {{- end}}
       {{- if not $repo.ServiceNames}}
+      {{- $verified := lokiAppForService $ $envID $repo.Name}}
       {{$repo.Name}}:
-        verifiedApp: ""
+        verifiedApp: {{$verified | printf "%q"}}
         appCandidates:
           - {{$repo.Name | printf "%q"}}
-        status: inferred
+          {{- if and $verified (ne $verified $repo.Name)}}
+          - {{$verified | printf "%q"}}
+          {{- end}}
+        status: {{if $verified}}verified{{else}}inferred{{end}}
       {{- end}}
     {{- end}}
 {{- end}}

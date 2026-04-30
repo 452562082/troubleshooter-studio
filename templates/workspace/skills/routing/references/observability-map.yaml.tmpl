@@ -26,6 +26,35 @@ loki:
     {{$env}}: {{$uid | printf "%q"}}
   {{- end}}
   {{- end}}
+  {{- if .Infrastructure.Observability.Loki.LabelMappingByEnv}}
+  # wizard 实测过的 (env_label, service_label, namespace) + per-service app 名映射,
+  # logql_selector_chain 第一条命中靠这块数据。
+  label_mapping_by_env:
+  {{- range $env, $lm := .Infrastructure.Observability.Loki.LabelMappingByEnv}}
+    {{$env}}:
+      {{- if $lm.EnvLabel}}
+      env_label: {{$lm.EnvLabel | printf "%q"}}
+      {{- end}}
+      {{- if $lm.ServiceLabel}}
+      service_label: {{$lm.ServiceLabel | printf "%q"}}
+      {{- end}}
+      {{- if $lm.GrafanaDSUID}}
+      grafana_ds_uid: {{$lm.GrafanaDSUID | printf "%q"}}
+      {{- end}}
+      {{- if $lm.Namespace}}
+      namespace: {{$lm.Namespace | printf "%q"}}
+      {{- end}}
+      {{- if $lm.ServiceMap}}
+      service_map:
+      {{- range $svc, $kv := $lm.ServiceMap}}
+        {{$svc | printf "%q"}}:
+        {{- range $k, $v := $kv}}
+          {{$k}}: {{$v | printf "%q"}}
+        {{- end}}
+      {{- end}}
+      {{- end}}
+  {{- end}}
+  {{- end}}
   # ── LogQL selector 拼接链(routing skill 用) ──
   # 跟 prometheus.selector_chain 思路一致:
   #   1) 优先用 wizard 已挑的 env_label / service_label 配对(loki.label_mapping_by_env)
@@ -60,9 +89,10 @@ jaeger:
     {{$env}}: {{$uid | printf "%q"}}
   {{- end}}
   {{- end}}
-  # 采样率(用户手填,默认 0.1 = 10%):agent 看到"trace_id 找不到"时必查这个
-  # 字段。低采样率时根 trace 没采到很正常,不要下"trace 不存在 / 用户给错了"结论。
-  sampling_rate: 0.1   # 1.0=100%(全采) / 0.1=10% / 0.01=1%(默认头采样)
+  # 采样率(从 system.yaml jaeger.sampling_rate 取;0 / 未设置 fallback 0.1 = 10%)。
+  # agent 看到"trace_id 找不到"时必查本字段:低采样率时根 trace 没采到很正常,
+  # 不要下"trace 不存在 / 用户给错了"结论。1.0=全采 / 0.1=10% / 0.01=1%。
+  sampling_rate: {{if .Infrastructure.Observability.Jaeger.SamplingRate}}{{.Infrastructure.Observability.Jaeger.SamplingRate}}{{else}}0.1{{end}}
   # 服务名 → Jaeger service 名约定。Jaeger 用 service.name(OpenTelemetry SDK 注入)直接索引,
   # 通常等于 wizard 服务名;不一致时(如代码里手动写了 "shop-order")在 yaml 里 manually 加 service_name_by_service 覆盖。
   # 默认按 wizard 服务名查,查不到再试 K8s workload 名。
@@ -120,6 +150,34 @@ prometheus:
     - '{namespace="<env>",app="<service>"}'                        # prometheus-operator 默认 app label
     - '{namespace="<env>",app_kubernetes_io_name="<service>"}'    # K8s recommended label(打了点)
     - '{job=~".*<service>.*"}'                                     # 最后兜底:job 名子串匹配
+
+k8s_runtime:
+  enabled: {{.Infrastructure.Observability.K8sRuntime.Enabled}}
+  {{- if .Infrastructure.Observability.K8sRuntime.URLByEnv}}
+  url_by_env:
+  {{- range $env, $url := .Infrastructure.Observability.K8sRuntime.URLByEnv}}
+    {{$env}}: {{$url | printf "%q"}}
+  {{- end}}
+  {{- end}}
+  {{- if .Infrastructure.Observability.K8sRuntime.ServiceMap}}
+  # routing skill 把 (env, service) 解析到 K8s 上的具体定位:
+  #   cluster + namespace 必有;workload 与 label_selector 至少一个 ——
+  #   优先 label_selector(更准),没有时退到 workload 名前缀匹配。
+  # k8s-runtime-query 的 ns-snapshot / get-pod-logs / list-events 直接用这块结果。
+  service_map:
+  {{- range .Infrastructure.Observability.K8sRuntime.ServiceMap}}
+    - env: {{.Env | printf "%q"}}
+      service: {{.Service | printf "%q"}}
+      cluster: {{.Cluster | printf "%q"}}
+      namespace: {{.Namespace | printf "%q"}}
+      {{- if .Workload}}
+      workload: {{.Workload | printf "%q"}}
+      {{- end}}
+      {{- if .LabelSelector}}
+      label_selector: {{.LabelSelector | printf "%q"}}
+      {{- end}}
+  {{- end}}
+  {{- end}}
 
 elk:
   enabled: {{.Infrastructure.Observability.ELK.Enabled}}

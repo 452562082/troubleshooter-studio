@@ -6,6 +6,12 @@
 //
 // 适用 target:claude-code、cursor。openclaw 仍走 scripts/install.sh —— 它有 brew/apt
 // 依赖装载、配置中心 MCP 注册、交互凭证收集,porting 工程量大,先不动。
+//
+// "已装机器人"判断标准对齐(2026-04-30):
+// 部署完顺手把 staging 的 tshoot.json 拷到 ~/.claude/skills/<name>/tshoot.json
+// 和 ~/.cursor/skills/<name>/tshoot.json,让 BotsPage 跟 OpenClaw 用同一个标准
+// (扫真实部署位置的 tshoot.json),不再扫 staging 中间包。staging 包能删 / 重置 /
+// 用户搬目录都不影响"已装"识别 —— 只要 ~/.claude / ~/.cursor 下还有,机器人就还在。
 package agent
 
 import (
@@ -16,11 +22,14 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 )
 
 // InstallNative 把 stagingDir 里的产物分发到用户级目录。target 决定 root:
 //   - claude-code → $HOME/.claude/{agents,skills,scripts}/
 //   - cursor      → $HOME/.cursor/{agents,skills,scripts}/
+//   - codex       → $HOME/.codex/{agents,skills,scripts}/
 //
 // 行为对齐原 install.sh.tmpl:
 //   - agents/<NAME>.md → <root>/agents/<NAME>.md(已存在则备份 .bak.YYYYMMDD-HHMMSS)
@@ -29,21 +38,35 @@ import (
 //
 // NAME 取自 stagingDir/agents/*.md 第一个文件名(.md 去除)。
 func InstallNative(stagingDir, target string) error {
+	return InstallNativeAt(stagingDir, target, "")
+}
+
+// InstallNativeAt 是 InstallNative 的"自定义根目录"变体:customRoot 非空时整体落到
+// <customRoot>/{agents,skills,scripts}/<NAME>/ 而不是 ~/.<target>/。给 wizard
+// "我已自行安装" 流程的"选安装目录"用 —— 用户把客户端装在非默认位置时仍能部署。
+func InstallNativeAt(stagingDir, target, customRoot string) error {
 	var rootName string
 	switch target {
 	case "claude-code":
 		rootName = ".claude"
 	case "cursor":
 		rootName = ".cursor"
+	case "codex":
+		rootName = ".codex"
 	default:
-		return fmt.Errorf("install_native: unsupported target %q (only claude-code / cursor)", target)
+		return fmt.Errorf("install_native: unsupported target %q (only claude-code / cursor / codex)", target)
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("read $HOME: %w", err)
+	var root string
+	if customRoot != "" {
+		root = customRoot
+	} else {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("read $HOME: %w", err)
+		}
+		root = filepath.Join(home, rootName)
 	}
-	root := filepath.Join(home, rootName)
 
 	// 1) 找 agents/<NAME>.md(只取第一个;generator 只生成一个)
 	agentFile, name, err := findAgentMD(filepath.Join(stagingDir, "agents"))
@@ -84,6 +107,18 @@ func InstallNative(stagingDir, target string) error {
 		filepath.Join(root, "scripts", name),
 	); err != nil {
 		return fmt.Errorf("install scripts: %w", err)
+	}
+
+	// 6) tshoot.json 锚点 → ~/<root>/skills/<NAME>/tshoot.json
+	// staging 那份通过 ImportAndApply / Apply 已经写好,这里只是 cp 一份到真实位置,
+	// 让 BotsPage 的 discover 能扫到"装在 ~/.claude / ~/.cursor 里的机器人"。
+	// 没有 staging tshoot.json(老路径 / 异常)就跳过,不阻塞主流程。
+	stagingMeta := filepath.Join(stagingDir, discover.MetaFilename)
+	if _, err := os.Stat(stagingMeta); err == nil {
+		dstMeta := filepath.Join(root, "skills", name, discover.MetaFilename)
+		if err := copyFileSimple(stagingMeta, dstMeta); err != nil {
+			return fmt.Errorf("install tshoot.json anchor: %w", err)
+		}
 	}
 
 	return nil

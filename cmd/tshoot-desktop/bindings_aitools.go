@@ -12,11 +12,13 @@ import (
 type AIToolsDetectResult struct {
 	ClaudeCode *aitools.Result `json:"claude_code"`
 	Cursor     *aitools.Result `json:"cursor"`
+	Codex      *aitools.Result `json:"codex"`
 }
 
 func (a *App) DetectAITools() *AIToolsDetectResult {
 	return &AIToolsDetectResult{
 		ClaudeCode: aitools.DetectClaudeCode(),
 		Cursor:     aitools.DetectCursor(),
+		Codex:      aitools.DetectCodex(),
 	}
 }

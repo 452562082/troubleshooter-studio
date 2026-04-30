@@ -1,47 +1,76 @@
 # service-dependency-map.yaml
 # 服务依赖图(谁调谁 + 用什么数据层)。incident-investigator Step 4(纵向沿依赖追)的核心数据。
 #
-# **当前由 wizard 生成时仅占位**(没有自动从 trace 学的能力):
-# - 模板根据 repos[].service_names 列出服务名,upstream/downstream/data_stores 留空
-# - 维护者按团队真实服务依赖关系填进去 — 哪怕只填 1 个核心服务的下游链,排障准确度都明显提升
+# 自动填来源(优先级):
+#   1. 部署期 analyzer 扫码(dependency_scan.go 抓 http/grpc/FeignClient 等)→ downstream
+#   2. downstream 图反推 → upstream(谁的 downstream 含我,谁就是我的 upstream)
+#   3. yaml data_stores[].endpoints[].service → data_stores
+#   4. repo.role 决定节点形态(下方"role hint"表)
+#   只要本机有仓库 clone 路径(ImportAndDeploy 时填过 / wizard Step 4),analyzer 自动跑,
+#   这三块都不必手填。装完即用。
+# 仍需可选手改的:
+#   - critical: 关键路径标记(P0 服务 → true,默认 false)。analyzer 不会推断重要性。
+#   - 数据层逻辑名:默认 "<type>:<type>"(如 mysql:mysql),想细分(mysql:order_db / mysql:user_db)
+#     可改 yaml data_stores 的 endpoints 加 logical 字段,或直接改本文件。
+#
+# role hint(给 incident-investigator 决定查询深度):
+#   backend / middleware  →  双向都查(主角 + 上下游)
+#   frontend / mobile / admin / gateway  →  自己没运行 endpoint 被调(无 upstream),
+#                                          但一定有 downstream(它调谁);
+#                                          排障"前端报错"时主角是这个,纵向追下游
+#   common-lib  →  不在依赖图(没运行 endpoint),只用作"哪些服务依赖了某 lib"对比
+#   infra / docs  →  完全跳过
 #
 # 字段说明:
 #   <service>:
+#     role        : 来自 repo.role(backend / frontend / gateway / ...)
 #     upstream    : 调用本服务的上游(谁会受我影响)
 #     downstream  : 本服务调用的下游(我挂了谁不一定挂,但我挂常因为他们)
-#     data_stores : 本服务用的数据层,格式 "<type>:<logical-name>"(如 "mysql:order_db" / "redis:session" / "kafka:order-events")
+#     data_stores : 本服务用的数据层,格式 "<type>:<logical-name>"
 #     critical    : 关键路径标记;true=核心交易服务,P0 故障要更谨慎诊断 + 严格止血策略
 #
 # 用法(给 incident-investigator):
 #   1. 拿到主角服务 X(用户问的那个)
-#   2. 读 X.downstream → 并发查每个下游(K8s pod / metric / log)看哪个异常 → 真因可能在那
-#   3. 读 X.data_stores → 并发查每个数据层(对应 data-store skill)
-#   4. 必要时再递归到 downstream.downstream(深 2 层基本够,再深就是基础设施)
-#
-# 长期演进:
-#   - wizard 将来可加"从 7 天 Tempo / SkyWalking trace 自动学 service map" 按钮,产出本文件
-#   - 暂时手填,精度高于自学(LLM 不会去问没在依赖图里出现的服务)
+#   2. 看 X.role —— frontend/mobile 主角时跳过 upstream(没人调它);common-lib 直接告诉用户"它不是运行节点"
+#   3. 读 X.downstream → 并发查每个下游(K8s pod / metric / log)看哪个异常 → 真因可能在那
+#   4. 读 X.data_stores → 并发查每个数据层(对应 data-store skill)
+#   5. 必要时再递归到 downstream.downstream(深 2 层基本够,再深就是基础设施)
 
 services:
 {{- $ctx := .}}
 {{- range .Repos}}
   {{- $repo := .}}
+  {{- if $repo.IsServiceNode}}
+  {{- $role := $repo.EffectiveRole}}
   {{- $svcs := .ServiceNames}}
   {{- if not $svcs}}{{$svcs = list .Name}}{{end}}
   {{- range $svcs}}
   {{- $svc := .}}
   {{- $scannedDown := scannedDownstreamsForService $ctx $svc}}
+  {{- $upstream := upstreamForService $ctx $svc}}
   {{- $scannedDS := scannedDataStoresForService $ctx $svc}}
+  {{- $yamlDS := yamlDataStoresForService $ctx $svc}}
   {{$svc}}:
-    upstream: []         # 谁调本服务(扫不到 - 手填,如 [api-gateway, web-bff])
+    role: {{$role | printf "%q"}}
+    {{- if $upstream}}
+    # ↓ 由 downstream 图反推(谁的 downstream 含我,谁就是我的上游);analyzer 跑过则自动得
+    upstream:
+    {{- range $upstream}}
+      - {{. | printf "%q"}}
+    {{- end}}
+    {{- else if (or (eq $role "frontend") (eq $role "mobile") (eq $role "admin") (eq $role "gateway"))}}
+    upstream: []         # role={{$role}}:本节点本身不被调(它是发起方),upstream 恒空
+    {{- else}}
+    upstream: []         # 没人在代码里调本服务(可能 analyzer 没跑 / 路径没填,或它确实是叶子服务)
+    {{- end}}
     {{- if $scannedDown}}
-    # ↓ 从代码扫到的下游调用(http/grpc URL host / @FeignClient name);**精度 50-70%**,覆盖 50% 比 0% 强,可手动校正
+    # ↓ 从代码扫到的下游调用(http/grpc URL host / @FeignClient name);精度 50-70%,可手动校正
     downstream:
     {{- range $scannedDown}}
       - {{. | printf "%q"}}
     {{- end}}
     {{- else}}
-    downstream: []       # 没扫到下游调用;手填如 [user, auth, order]
+    downstream: []       # 没扫到下游(analyzer 没跑或路径未填;wizard Step 4 / BotsPage 部署时填本地路径自动跑)
     {{- end}}
     {{- if $scannedDS}}
     # ↓ 从代码扫到的数据层(import / 客户端构造);":scanned" 占位需替换成真实逻辑名
@@ -49,10 +78,31 @@ services:
     {{- range $scannedDS}}
       - {{. | printf "%q"}}
     {{- end}}
+    {{- else if $yamlDS}}
+    # ↓ 从 system.yaml 的 data_stores[].endpoints 反推(用户在 wizard 已确认过本服务用哪些数据层);
+    # 逻辑名默认 = type,需要更精细分类(如 "mysql:order_db" / "mysql:user_db")时手改。
+    data_stores:
+    {{- range $yamlDS}}
+      - {{. | printf "%q"}}
+    {{- end}}
     {{- else}}
     data_stores: []      # 没扫到数据层;手填如 ["mysql:order_db", "redis:session"]
     {{- end}}
-    critical: false      # 核心交易路径 → true(手填)
+    critical: false      # P0 核心服务改 true,会让 incident-investigator 更谨慎(默认 false 安全)
+  {{- end}}
+  {{- end}}
+{{- end}}
+
+# ── 非服务节点(common-lib / infra / docs)──────────────────────────────
+# 这些 repo 不在依赖图节点上,但 routing 仍记录它们的 role,排障时用作:
+#   - 用户问"哪些服务用了 X 库" → grep 各服务 import,匹配 lib_repos.<name>
+#   - "infra 仓库改了,会影响哪些服务" → 跟主依赖图 cross-check
+lib_repos:
+{{- range .Repos}}
+  {{- if not .IsServiceNode}}
+  {{.Name}}:
+    role: {{.EffectiveRole | printf "%q"}}
+    stack: {{.Stack}}
   {{- end}}
 {{- end}}
 

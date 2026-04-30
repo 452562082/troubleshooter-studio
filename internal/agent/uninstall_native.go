@@ -10,12 +10,30 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 )
+
+// readSystemIDFromMeta 从 tshoot.json 读 system_id 字段。读不到返回空串(调用方 fallback)。
+func readSystemIDFromMeta(metaPath string) string {
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		return ""
+	}
+	var m struct {
+		SystemID string `json:"system_id"`
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return ""
+	}
+	return m.SystemID
+}
 
 // UninstallNativeResult 通用卸载结果(claude-code / cursor 共用一个)。
 type UninstallNativeResult struct {
@@ -27,13 +45,16 @@ type UninstallNativeResult struct {
 }
 
 // UninstallNative 卸载 claude-code / cursor 装的机器人。
-// installedDir = ~/.tshoot/<target>/<system_id>/(BotsPage 扫到的中间包路径)。
+// installedDir = ag.Path(BotsPage 扫到的真实部署目录,2026-04-30 起 = ~/.claude/skills/<name>/
+//                或 ~/.cursor/skills/<name>/,跟 OpenClaw 一样指向真实位置)。
 // target 必须是 "claude-code" 或 "cursor"。
 //
 // 流程:
-//  1. 中间包 → ~/.Trash(失败回退 RemoveAll)
-//  2. 推断出 agent name(读中间包 agents/*.md 文件名),清 ~/.claude|cursor/agents/<name>.md(及 .bak)
-//  3. 清 ~/.claude|cursor/skills/<name>/ 和 scripts/<name>/(都是命名空间隔离的,不会误删别 agent 的)
+//  1. 真实部署目录(skills/<name>/)→ ~/.Trash(失败回退 RemoveAll)
+//  2. agent name = installedDir basename;system_id 从 installedDir 里 tshoot.json 读
+//  3. 清 ~/.claude|cursor/agents/<name>.md(及 .bak)
+//  4. 清 ~/.claude|cursor/scripts/<name>/(skills/<name>/ 已在步骤 1 移走)
+//  5. 清 staging 中间包 ~/.tshoot/<target>/<system_id>/(deploy 完已无用,残留干扰)
 func UninstallNative(installedDir, target string) (*UninstallNativeResult, error) {
 	var rootName string
 	switch target {
@@ -41,6 +62,8 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 		rootName = ".claude"
 	case "cursor":
 		rootName = ".cursor"
+	case "codex":
+		rootName = ".codex"
 	default:
 		return nil, fmt.Errorf("uninstall_native: unsupported target %q", target)
 	}
@@ -54,32 +77,40 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 	res := &UninstallNativeResult{}
 	logf := func(format string, a ...any) { res.Log = append(res.Log, fmt.Sprintf(format, a...)) }
 
-	// 推断 agent name:从中间包 agents/*.md 找,跟 install_native.go::findAgentMD 同逻辑。
-	// 中间包不存在/没 .md 时降级用 installedDir 的 basename(<system_id>),让卸载流程不卡。
-	var agentName string
-	if name, err := findInstalledAgentName(installedDir); err == nil {
-		agentName = name
-	} else {
-		agentName = filepath.Base(installedDir)
-		logf("[warn] 中间包没找到 agents/*.md(%v),用目录名 %q 当 agent 名兜底", err, agentName)
-	}
+	// agent name = 真实部署目录的 basename(InstallNative 装的时候就是用这个名字)。
+	// system_id 单独从 tshoot.json 读 —— staging 用 system_id 命名,跟 agent name 不同
+	// (常见:agent name=truss-troubleshooter,system_id=truss)。
+	agentName := filepath.Base(installedDir)
+	systemID := readSystemIDFromMeta(filepath.Join(installedDir, discover.MetaFilename))
 
-	// 1) 中间包 → ~/.Trash(出错回退 RemoveAll)
+	// 1) 真实部署目录 → ~/.Trash(出错回退 RemoveAll)。从 Trash 走避免误删后无法恢复。
 	if _, err := os.Stat(installedDir); err == nil {
 		ts := time.Now().Format("20060102-150405")
 		bk := filepath.Join(home, ".Trash", agentName+"-"+target+"-uninstall-"+ts)
 		if mkErr := os.MkdirAll(filepath.Dir(bk), 0o755); mkErr == nil {
 			if err := os.Rename(installedDir, bk); err == nil {
 				res.StagingMovedTo = bk
-				logf("[ok] 中间包移到 %s", bk)
+				logf("[ok] 已装目录移到 %s", bk)
 			} else if rmErr := os.RemoveAll(installedDir); rmErr == nil {
-				logf("[ok] 中间包删除(rename to Trash 失败:%v,直接 rm)", err)
+				logf("[ok] 已装目录删除(rename to Trash 失败:%v,直接 rm)", err)
 			} else {
 				return res, fmt.Errorf("rename to Trash failed: %v; remove also failed: %v", err, rmErr)
 			}
 		}
 	} else {
-		logf("[skip] 中间包 %s 不存在", installedDir)
+		logf("[skip] 已装目录 %s 不存在", installedDir)
+	}
+
+	// 1b) staging 中间包(~/.tshoot/<target>/<system_id>/)— 部署中途临时落盘,装完已无用。
+	if systemID != "" {
+		stagingDir := filepath.Join(home, ".tshoot", target, systemID)
+		if _, err := os.Stat(stagingDir); err == nil {
+			if rmErr := os.RemoveAll(stagingDir); rmErr == nil {
+				logf("[ok] staging 中间包 %s 清掉", stagingDir)
+			} else {
+				logf("[warn] 清 staging %s 失败:%v", stagingDir, rmErr)
+			}
+		}
 	}
 
 	// 2) ~/.claude|cursor/agents/<name>.md(及备份)
@@ -118,9 +149,10 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 	return res, nil
 }
 
-// findInstalledAgentName 取中间包 agents/ 下第一个非 .bak 的 .md 文件名(去后缀)。
-// 跟 install_native.go::findAgentMD 同逻辑,提出来给 uninstall 复用,逻辑保持一致。
-func findInstalledAgentName(installedDir string) (string, error) {
+// findInstalledAgentName 老逻辑:从 staging 中间包 agents/ 下抽 agent 名。2026-04-30 起
+// uninstall 路径接收的是真实部署目录(~/.claude|cursor/skills/<name>/),agent 名直接 = basename,
+// 不再走这个 helper。保留代码以备 OpenClaw 卸载或 staging 路径走 fallback 时调用。
+func findInstalledAgentName(installedDir string) (string, error) { //nolint:unused
 	entries, err := os.ReadDir(filepath.Join(installedDir, "agents"))
 	if err != nil {
 		return "", err

@@ -11,9 +11,16 @@
 // 验证错误显示增强:原先只把 raw error 字符串丢出去,用户看"parse yaml: yaml: line 5: ..."
 // 不友好。现在解析错误文本:yaml 语法错按"第 N 行"高亮,schema 错按"字段 xxx"高亮,
 // 并且把当前行源码截一段展示,让用户更快定位到问题。
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { genPreview, isDesktop, openYAML, plan as bridgePlan, validate as bridgeValidate } from '../lib/bridge'
 import type { GenPreviewFile, GenPreviewResult } from '../lib/bridge'
+
+// 跟"代码扫描"页对接的 localStorage key:AnalyzePage 用户点"应用到 YAML 沙盒"时
+// 把改写过的 yaml 内容塞进这个 key 然后跳到本页;本页 onMounted 读出来 → 自动填进
+// textarea + 显示一行 banner 让用户知道是从代码扫描带过来的。读完即清,避免下次进来又弹。
+const PENDING_FROM_ANALYZE_KEY = 'tsf-pending-yaml-from-analyze'
+// 显示 banner:用户从代码扫描带过来的 yaml,告诉他"已应用",可以直接验证。
+const fromAnalyzeBanner = ref(false)
 
 const exampleYaml = `system:
   id: demo
@@ -71,11 +78,30 @@ meta:
 `
 
 const yamlContent = ref('')
+
+// 进页面时检查"代码扫描应用过来的 yaml":有就自动填 + 弹 banner。读完即清。
+onMounted(() => {
+  try {
+    const pending = localStorage.getItem(PENDING_FROM_ANALYZE_KEY)
+    if (pending) {
+      yamlContent.value = pending
+      fromAnalyzeBanner.value = true
+      localStorage.removeItem(PENDING_FROM_ANALYZE_KEY)
+    }
+  } catch { /* localStorage 异常不阻塞页面 */ }
+})
 const loading = ref('')
 const errorMsg = ref('')
 const successMsg = ref('')
 const resultTitle = ref('')
 const resultData = ref<any>(null)
+
+// 验证按钮的额外发现:HealthCheck 出来的 warn/info/error 列表,验证通过后展示。
+// 跟 errorMsg 不同,issues 不阻断后续操作,仅供配置完整度提醒。
+type HealthIssue = { severity: string, category: string, field?: string, message: string, hint?: string }
+const validateIssues = ref<HealthIssue[]>([])
+// 折叠状态:default 开,用户嫌长可以收起。按 category 折叠,粒度合适。
+const issuesCollapsed = ref<Set<string>>(new Set())
 
 // 产物预览状态:跑一次 GenPreview 把生成的所有文件读回来,UI 渲染成
 // "左侧文件树 + 右侧内容预览"。activePath 控制选中哪个文件。
@@ -124,6 +150,7 @@ function loadExample() {
   errorMsg.value = ''
   successMsg.value = ''
   resultData.value = null
+  validateIssues.value = []
 }
 
 // 桌面 app 走 Wails 原生 osascript 对话框(reliable on macOS WKWebView);
@@ -139,6 +166,7 @@ async function loadFileNative() {
     errorMsg.value = ''
     successMsg.value = ''
     resultData.value = null
+    validateIssues.value = []
   } catch (e: any) {
     errorMsg.value = `加载文件失败: ${String(e?.message || e)}`
   }
@@ -153,6 +181,7 @@ function loadFileBrowser(event: Event) {
     errorMsg.value = ''
     successMsg.value = ''
     resultData.value = null
+    validateIssues.value = []
   }
   reader.readAsText(file)
   input.value = ''
@@ -163,6 +192,7 @@ async function apiCall(endpoint: 'validate' | 'plan', label: string) {
   successMsg.value = ''
   resultData.value = null
   resultTitle.value = ''
+  validateIssues.value = []
   // 清掉产物预览,免得一份过期的内容跟新的 plan 结果同时显示
   previewResult.value = null
   previewActivePath.value = ''
@@ -171,7 +201,19 @@ async function apiCall(endpoint: 'validate' | 'plan', label: string) {
   try {
     if (endpoint === 'validate') {
       const r = await bridgeValidate(yamlContent.value)
-      successMsg.value = `验证通过！系统: ${r.system} (${r.name}) | ${r.envs} 个环境 | ${r.repos} 个仓库`
+      const errs = (r.issues || []).filter((i: HealthIssue) => i.severity === 'error').length
+      const warns = (r.issues || []).filter((i: HealthIssue) => i.severity === 'warn').length
+      const infos = (r.issues || []).filter((i: HealthIssue) => i.severity === 'info').length
+      let extra = ''
+      if (errs + warns + infos > 0) {
+        const parts: string[] = []
+        if (errs) parts.push(`${errs} 个矛盾`)
+        if (warns) parts.push(`${warns} 个缺口`)
+        if (infos) parts.push(`${infos} 条提示`)
+        extra = ` | 健康检查:${parts.join(' / ')}`
+      }
+      successMsg.value = `验证通过！系统: ${r.system} (${r.name}) | ${r.envs} 个环境 | ${r.repos} 个仓库${extra}`
+      validateIssues.value = (r.issues || []) as HealthIssue[]
     } else {
       resultTitle.value = label
       resultData.value = await bridgePlan(yamlContent.value)
@@ -239,6 +281,195 @@ function fmtSize(n: number): string {
   if (n < 1024) return `${n} B`
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
   return `${(n / 1024 / 1024).toFixed(2)} MB`
+}
+
+// ── Plan 文件目录树 ──
+// plan 返回 4 个扁平路径数组(files_create / files_modify / files_remove / preserved),
+// 用户原来只看到计数数字,看不到具体哪些文件、按目录怎么组织。这里把它们合成一棵树:
+//   - 中间层目录可折叠/展开(▼/▶),默认全展开
+//   - 每个目录显示子级文件数量徽标(+N 新增 / ~N 改 / −N 删 / N 保留)
+//   - 叶子节点显示文件名 + 状态徽标
+type PlanFileStatus = 'create' | 'modify' | 'remove' | 'preserved'
+interface PlanTreeNode {
+  kind: 'dir' | 'file'
+  name: string  // 末段
+  path: string  // 完整路径(作 key + 折叠态键)
+  depth: number
+  status?: PlanFileStatus  // file 才有
+  counts?: { create: number, modify: number, remove: number, preserved: number }  // dir 才有
+}
+
+// 折叠的目录路径集合;不在集合里的目录默认是展开的
+const planCollapsed = ref<Set<string>>(new Set())
+
+const planFlatTree = computed<PlanTreeNode[]>(() => {
+  if (!resultData.value) return []
+  const buckets: { paths: string[] | undefined, status: PlanFileStatus }[] = [
+    { paths: resultData.value.files_create, status: 'create' },
+    { paths: resultData.value.files_modify, status: 'modify' },
+    { paths: resultData.value.files_remove, status: 'remove' },
+    { paths: resultData.value.preserved, status: 'preserved' },
+  ]
+  // 同一路径可能在多个桶都出现(理论上不该,但 plan 数据没去重保证)。
+  // 用 Map<path, status> 让后出现的覆盖前出现的;create 优先级最高 / preserved 最低,
+  // 让"改动+保留"这种暧昧场景显示"改动",更符合用户预期。
+  const priority: Record<PlanFileStatus, number> = {
+    create: 4, modify: 3, remove: 2, preserved: 1,
+  }
+  const fileMap = new Map<string, PlanFileStatus>()
+  for (const b of buckets) {
+    if (!b.paths) continue
+    for (const p of b.paths) {
+      const cur = fileMap.get(p)
+      if (!cur || priority[b.status] > priority[cur]) fileMap.set(p, b.status)
+    }
+  }
+
+  // 构建嵌套 Tree:每层 dirs 是 Map(保留插入顺序但下面会排序),files 直接累加
+  type RawNode = { dirs: Map<string, RawNode>, files: { name: string, status: PlanFileStatus }[] }
+  const root: RawNode = { dirs: new Map(), files: [] }
+  for (const [path, status] of fileMap) {
+    const parts = path.split('/')
+    let cur = root
+    for (let i = 0; i < parts.length - 1; i++) {
+      const seg = parts[i]
+      let child = cur.dirs.get(seg)
+      if (!child) {
+        child = { dirs: new Map(), files: [] }
+        cur.dirs.set(seg, child)
+      }
+      cur = child
+    }
+    cur.files.push({ name: parts[parts.length - 1], status })
+  }
+
+  // DFS 摊平:每层 dirs 先(按 name 排序),files 后(按 name 排序);同时算每个 dir 的递归子级计数
+  const out: PlanTreeNode[] = []
+  function walk(node: RawNode, prefix: string, depth: number): { create: number, modify: number, remove: number, preserved: number } {
+    const total = { create: 0, modify: 0, remove: 0, preserved: 0 }
+    const sortedDirs = [...node.dirs.keys()].sort()
+    for (const dirName of sortedDirs) {
+      const dirPath = prefix ? `${prefix}/${dirName}` : dirName
+      // 占位:dir 节点先入栈,counts 在子树遍历完后回填(为了拿子树合计)
+      const idx = out.length
+      out.push({ kind: 'dir', name: dirName, path: dirPath, depth, counts: { create: 0, modify: 0, remove: 0, preserved: 0 } })
+      const sub = walk(node.dirs.get(dirName)!, dirPath, depth + 1)
+      out[idx].counts = sub
+      total.create += sub.create
+      total.modify += sub.modify
+      total.remove += sub.remove
+      total.preserved += sub.preserved
+    }
+    const sortedFiles = node.files.slice().sort((a, b) => a.name.localeCompare(b.name))
+    for (const f of sortedFiles) {
+      const fullPath = prefix ? `${prefix}/${f.name}` : f.name
+      out.push({ kind: 'file', name: f.name, path: fullPath, depth, status: f.status })
+      total[f.status]++
+    }
+    return total
+  }
+  walk(root, '', 0)
+  return out
+})
+
+// 应用折叠态后的可见节点列表:任一祖先目录被折叠就过滤掉
+const planVisibleNodes = computed<PlanTreeNode[]>(() => {
+  const all = planFlatTree.value
+  const collapsed = planCollapsed.value
+  if (collapsed.size === 0) return all
+  return all.filter(n => {
+    const parts = n.path.split('/')
+    // 只检查祖先(不含自己),所以 i < parts.length;n 自己被折叠时仍要显示(只是把子级隐藏)
+    for (let i = 1; i < parts.length; i++) {
+      const ancestor = parts.slice(0, i).join('/')
+      if (collapsed.has(ancestor)) return false
+    }
+    return true
+  })
+})
+
+const planTotalFiles = computed<number>(() => {
+  const r = resultData.value
+  if (!r) return 0
+  return (r.files_create?.length || 0) + (r.files_modify?.length || 0)
+    + (r.files_remove?.length || 0) + (r.preserved?.length || 0)
+})
+
+function planToggleDir(path: string) {
+  const s = planCollapsed.value
+  // 重新构造一个 Set 触发 ref 重算(直接 mutate 不会触发 computed)
+  const next = new Set(s)
+  if (next.has(path)) next.delete(path)
+  else next.add(path)
+  planCollapsed.value = next
+}
+
+function planExpandAll() {
+  planCollapsed.value = new Set()
+}
+
+function planCollapseAll() {
+  // 把所有 dir 节点都加进折叠集合
+  const next = new Set<string>()
+  for (const n of planFlatTree.value) {
+    if (n.kind === 'dir') next.add(n.path)
+  }
+  planCollapsed.value = next
+}
+
+// ── 健康检查面板 ──
+// validateIssues 来自 /api/validate 的 issues 字段:每条 {severity, category, field?, message, hint?}。
+// UI 按 category 分组(repo/observability/generation/config_center/data_stores/messaging),
+// 每组可折叠;组内按 severity 排序(error → warn → info)让最严重的先看到。
+const issuesByCategory = computed(() => {
+  const map: Record<string, HealthIssue[]> = {}
+  for (const it of validateIssues.value) {
+    if (!map[it.category]) map[it.category] = []
+    map[it.category].push(it)
+  }
+  // 组内按严重度排:error > warn > info
+  const order: Record<string, number> = { error: 0, warn: 1, info: 2 }
+  for (const k of Object.keys(map)) {
+    map[k].sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9))
+  }
+  // 组间也按"组内最严重的优先"排序,避免一堆 info 把 error 顶到底下
+  const ordered = Object.keys(map).sort((a, b) => {
+    const ma = Math.min(...map[a].map(i => order[i.severity] ?? 9))
+    const mb = Math.min(...map[b].map(i => order[i.severity] ?? 9))
+    if (ma !== mb) return ma - mb
+    return a.localeCompare(b)
+  })
+  return ordered.map(cat => ({ cat, issues: map[cat] }))
+})
+
+const categoryLabels: Record<string, string> = {
+  repo: '仓库 / 环境关系',
+  observability: '可观测性',
+  generation: '生成 / 技能',
+  config_center: '配置中心',
+  data_stores: '数据层',
+  messaging: '消息通知',
+  env: '环境',
+}
+function categoryLabel(cat: string): string { return categoryLabels[cat] || cat }
+
+function severityLabel(sev: string): string {
+  if (sev === 'error') return '矛盾'
+  if (sev === 'warn') return '缺口'
+  if (sev === 'info') return '提示'
+  return sev
+}
+function severityIcon(sev: string): string {
+  if (sev === 'error') return '✗'
+  if (sev === 'warn') return '!'
+  return 'ⓘ'
+}
+
+function toggleIssueCategory(cat: string) {
+  const next = new Set(issuesCollapsed.value)
+  if (next.has(cat)) next.delete(cat)
+  else next.add(cat)
+  issuesCollapsed.value = next
 }
 
 // ── 错误诊断 ──
@@ -327,16 +558,23 @@ function translateSchemaError(msg: string): string {
 
 <template>
   <div class="page">
-    <h1>System YAML 调试器</h1>
+    <h1>YAML 沙盒</h1>
+
+    <div v-if="fromAnalyzeBanner" class="alert success" style="margin-bottom: 12px;">
+      ✓ 已应用代码扫描的发现到下方 yaml(service_names / config-center 字段已更新)。
+      请点击"<strong>✓ 验证</strong>"确认无误后,从「创建向导」末步部署或导出。
+      <button type="button" class="btn-link" @click="fromAnalyzeBanner = false" style="float:right">知道了</button>
+    </div>
 
     <div class="info-box">
-      <div class="info-box-title">YAML 调试沙盒</div>
+      <div class="info-box-title">YAML 沙盒 — 只对 yaml 文件做事,不动代码也不装机器人</div>
       <div>
-        把已有的 system.yaml 粘进来做快速检查 —— 不会真生成、也不会装到机器人。<br/>
-        <strong>✓ 验证</strong>:语法 / 必填字段 / 格式问题,出错时直接定位到行号或字段;
-        <strong>📋 生成计划</strong>:试着跑一遍生成,看会启用哪些技能、产出多少文件、配置中心映射几条。<br/>
-        想真装到机器人?去 <router-link to="/bots">已装机器人</router-link> 导入 yaml 部署,
-        或从 <router-link to="/init">创建向导</router-link> 末步一键部署。
+        把 system.yaml 粘进来快速检查它"写得对不对、装出来啥样"。<br/>
+        <strong>✓ 验证</strong>:语法 / 必填字段 / 格式 + 配置健康检查(可观测性 wiring 是否齐、仓库是否覆盖所有 env、多源 config_source 是否指定、白名单 skill 是否会被静默跳过 等);
+        <strong>📋 生成计划</strong>:干跑一遍生成,看会启用哪些技能、产出多少文件、配置中心映射几条;
+        <strong>📂 预览产物</strong>:真跑一次生成器,看每个 skill / SKILL.md 的实际内容。<br/>
+        想"扫代码反推 yaml"?去 <router-link to="/analyze">代码扫描</router-link>;想真装到机器人?
+        去 <router-link to="/bots">已装机器人</router-link> 导入或从 <router-link to="/init">创建向导</router-link> 末步部署。
       </div>
     </div>
 
@@ -378,6 +616,61 @@ function translateSchemaError(msg: string): string {
     </div>
 
     <div v-if="successMsg" class="alert success">{{ successMsg }}</div>
+
+    <!-- 健康检查结果:验证通过后跑 HealthCheck 给出的语义层缺口/矛盾/提示。
+         不阻断后续操作,但用户可以一眼看到"我这 yaml 配齐了吗"。 -->
+    <div v-if="validateIssues.length" class="health-card">
+      <div class="health-card-head">
+        <span class="health-card-title">📋 配置健康检查 ({{ validateIssues.length }})</span>
+        <span class="sub-text">分类展示:✗ 矛盾必修 / ! 缺口建议补 / ⓘ 仅提示</span>
+      </div>
+      <div
+        v-for="g in issuesByCategory"
+        :key="g.cat"
+        class="health-group"
+        :class="'health-group-worst-' + g.issues[0].severity"
+      >
+        <button
+          type="button"
+          class="health-group-head"
+          @click="toggleIssueCategory(g.cat)"
+        >
+          <span class="health-group-toggle">{{ issuesCollapsed.has(g.cat) ? '▶' : '▼' }}</span>
+          <span class="health-group-cat">{{ categoryLabel(g.cat) }}</span>
+          <span class="health-group-counts">
+            <template v-for="sev in ['error', 'warn', 'info']" :key="sev">
+              <span
+                v-if="g.issues.some(i => i.severity === sev)"
+                class="badge"
+                :class="'badge-sev-' + sev"
+              >
+                {{ severityIcon(sev) }} {{ g.issues.filter(i => i.severity === sev).length }}
+              </span>
+            </template>
+          </span>
+        </button>
+        <div v-if="!issuesCollapsed.has(g.cat)" class="health-group-body">
+          <div
+            v-for="(it, i) in g.issues"
+            :key="g.cat + '-' + i"
+            class="health-issue"
+            :class="'health-issue-' + it.severity"
+          >
+            <span class="health-issue-icon">{{ severityIcon(it.severity) }}</span>
+            <div class="health-issue-body">
+              <div class="health-issue-msg">
+                <span class="health-issue-sev-tag">{{ severityLabel(it.severity) }}</span>
+                {{ it.message }}
+              </div>
+              <div v-if="it.field" class="health-issue-field">
+                <code>{{ it.field }}</code>
+              </div>
+              <div v-if="it.hint" class="health-issue-hint">建议:{{ it.hint }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <!-- 错误卡片:分档展示,比裸 raw error 友好 -->
     <div v-if="parsedError" class="err-card" :class="'kind-' + parsedError.kind">
@@ -443,6 +736,52 @@ function translateSchemaError(msg: string): string {
             <tr><td>规则推断</td><td>{{ resultData.config_map_projection?.inferred ?? 0 }}</td></tr>
             <tr><td><strong>总计</strong></td><td><strong>{{ resultData.config_map_projection?.total ?? 0 }}</strong></td></tr>
           </table>
+        </div>
+      </div>
+
+      <div v-if="planTotalFiles > 0" class="result-section result-section-full">
+        <div class="plan-tree-head">
+          <h3>文件目录树 ({{ planTotalFiles }} 个文件)</h3>
+          <div class="plan-tree-actions">
+            <button type="button" class="btn-link" @click="planExpandAll">全部展开</button>
+            <span class="sep">·</span>
+            <button type="button" class="btn-link" @click="planCollapseAll">全部折叠</button>
+          </div>
+        </div>
+        <div class="plan-tree">
+          <div
+            v-for="n in planVisibleNodes"
+            :key="n.kind + ':' + n.path"
+            class="plan-tree-row"
+            :class="[
+              'plan-tree-' + n.kind,
+              n.kind === 'file' && n.status ? 'plan-tree-status-' + n.status : '',
+            ]"
+            :style="{ paddingLeft: (8 + n.depth * 16) + 'px' }"
+            :role="n.kind === 'dir' ? 'button' : undefined"
+            @click="n.kind === 'dir' ? planToggleDir(n.path) : null"
+          >
+            <span v-if="n.kind === 'dir'" class="plan-tree-toggle">
+              {{ planCollapsed.has(n.path) ? '▶' : '▼' }}
+            </span>
+            <span v-else class="plan-tree-toggle plan-tree-toggle-spacer"></span>
+            <span class="plan-tree-icon">{{ n.kind === 'dir' ? '📁' : '📄' }}</span>
+            <span class="plan-tree-name">{{ n.name }}<span v-if="n.kind === 'dir'">/</span></span>
+            <span class="plan-tree-meta">
+              <template v-if="n.kind === 'dir' && n.counts">
+                <span v-if="n.counts.create" class="badge badge-green">+{{ n.counts.create }}</span>
+                <span v-if="n.counts.modify" class="badge badge-blue">~{{ n.counts.modify }}</span>
+                <span v-if="n.counts.remove" class="badge badge-red">−{{ n.counts.remove }}</span>
+                <span v-if="n.counts.preserved" class="badge badge-gray">{{ n.counts.preserved }}</span>
+              </template>
+              <template v-else-if="n.kind === 'file'">
+                <span v-if="n.status === 'create'" class="badge badge-green">新建</span>
+                <span v-else-if="n.status === 'modify'" class="badge badge-blue">改动</span>
+                <span v-else-if="n.status === 'remove'" class="badge badge-red">删除</span>
+                <span v-else-if="n.status === 'preserved'" class="badge badge-gray">保留</span>
+              </template>
+            </span>
+          </div>
         </div>
       </div>
     </div>
@@ -775,4 +1114,142 @@ function translateSchemaError(msg: string): string {
   border-radius: 3px;
   font-size: 12px;
 }
+
+/* ── Plan 文件目录树 ── */
+.result-section-full {
+  /* result-grid 用 grid-column 1fr 1fr;这里跨两列(放在 result-grid 外即天然全宽,
+     所以这条主要是跟前面块的间距) */
+  margin-top: 16px;
+}
+.plan-tree-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px;
+}
+.plan-tree-head h3 { margin-bottom: 0; }
+.plan-tree-actions { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.plan-tree-actions .sep { color: #cbd5e1; }
+.btn-link {
+  background: none; border: none; padding: 0; cursor: pointer;
+  color: #2563eb; font-size: 12px; font-family: inherit;
+}
+.btn-link:hover { text-decoration: underline; }
+
+.plan-tree {
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+  max-height: 480px;
+  overflow-y: auto;
+  padding: 4px 0;
+  font-size: 12.5px;
+}
+.plan-tree-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 3px 12px 3px 8px;
+  user-select: none;
+  white-space: nowrap;
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+}
+.plan-tree-dir { cursor: pointer; color: #1e293b; font-weight: 500; }
+.plan-tree-dir:hover { background: #e2e8f0; }
+.plan-tree-file { color: #334155; }
+.plan-tree-file:hover { background: #eef2f7; }
+.plan-tree-toggle {
+  flex-shrink: 0; width: 12px; text-align: center;
+  font-size: 9px; color: #64748b;
+}
+.plan-tree-toggle-spacer { visibility: hidden; }
+.plan-tree-icon { flex-shrink: 0; font-size: 12px; }
+.plan-tree-name {
+  flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis;
+}
+.plan-tree-meta {
+  flex-shrink: 0; display: flex; align-items: center; gap: 4px;
+}
+.plan-tree-meta .badge { padding: 1px 6px; font-size: 10.5px; }
+
+/* 状态色:删除文件用更弱的灰红色让人一眼看出是会减的 */
+.plan-tree-status-remove .plan-tree-name { color: #991b1b; text-decoration: line-through; opacity: 0.7; }
+.plan-tree-status-preserved .plan-tree-name { color: #64748b; font-style: italic; }
+
+/* ── 健康检查面板 ── */
+.health-card {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-top: 12px;
+  margin-bottom: 16px;
+}
+.health-card-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #e2e8f0;
+}
+.health-card-title {
+  font-size: 14px; font-weight: 600; color: #1e293b;
+}
+
+.health-group { margin-top: 8px; border-radius: 6px; overflow: hidden; }
+.health-group-worst-error { border-left: 3px solid #dc2626; }
+.health-group-worst-warn  { border-left: 3px solid #d97706; }
+.health-group-worst-info  { border-left: 3px solid #2563eb; }
+
+.health-group-head {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 8px 12px;
+  background: #f8fafc;
+  border: none; cursor: pointer; text-align: left;
+  font-family: inherit; font-size: 13px; color: #1e293b;
+}
+.health-group-head:hover { background: #f1f5f9; }
+.health-group-toggle {
+  flex-shrink: 0; width: 12px; text-align: center;
+  font-size: 9px; color: #64748b;
+}
+.health-group-cat { flex: 1 1 auto; font-weight: 600; }
+.health-group-counts { display: flex; gap: 4px; flex-shrink: 0; }
+.badge-sev-error { background: #fee2e2; color: #991b1b; }
+.badge-sev-warn  { background: #fef3c7; color: #92400e; }
+.badge-sev-info  { background: #dbeafe; color: #1e40af; }
+
+.health-group-body {
+  padding: 4px 0;
+  background: #fff;
+}
+.health-issue {
+  display: flex; gap: 10px;
+  padding: 8px 12px 8px 28px;
+  border-top: 1px solid #f1f5f9;
+}
+.health-issue:first-child { border-top: none; }
+.health-issue-icon {
+  flex-shrink: 0;
+  width: 18px; height: 18px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  font-size: 11px; font-weight: 700;
+}
+.health-issue-error .health-issue-icon { background: #fee2e2; color: #991b1b; }
+.health-issue-warn  .health-issue-icon { background: #fef3c7; color: #92400e; }
+.health-issue-info  .health-issue-icon { background: #dbeafe; color: #1e40af; }
+.health-issue-body { flex: 1 1 auto; min-width: 0; }
+.health-issue-msg { font-size: 13px; color: #1e293b; line-height: 1.5; }
+.health-issue-sev-tag {
+  display: inline-block;
+  padding: 1px 6px; margin-right: 6px;
+  border-radius: 3px;
+  font-size: 11px; font-weight: 600;
+}
+.health-issue-error .health-issue-sev-tag { background: #fee2e2; color: #991b1b; }
+.health-issue-warn  .health-issue-sev-tag { background: #fef3c7; color: #92400e; }
+.health-issue-info  .health-issue-sev-tag { background: #dbeafe; color: #1e40af; }
+.health-issue-field { margin-top: 3px; font-size: 11.5px; }
+.health-issue-field code {
+  background: #f1f5f9; color: #334155;
+  padding: 1px 5px; border-radius: 3px;
+  font-family: 'SF Mono', Menlo, monospace; font-size: 11px;
+}
+.health-issue-hint { margin-top: 4px; font-size: 12px; color: #64748b; font-style: italic; }
 </style>

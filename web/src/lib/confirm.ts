@@ -13,10 +13,20 @@ export interface ConfirmOptions {
   cancelText?: string
   /** 危险操作(红色按钮)。删 / 清空 / reset 之类场景。 */
   danger?: boolean
+  /**
+   * 控制"安全默认"落在哪一侧。决定:
+   *   - 哪个按钮自动获得焦点(Enter 命中它)
+   *   - Esc / 点遮罩外的"取消"语义对齐到哪一侧
+   * 默认 'confirm'(老行为,Enter = 确认)。
+   * 危险操作建议设 'cancel' —— 让"继续 / 不删"是默认动作,
+   * 用户必须显式点红色按钮才能执行破坏性操作。
+   */
+  defaultAction?: 'confirm' | 'cancel'
 }
 
 export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
   return new Promise((resolve) => {
+    const defaultAction = opts.defaultAction || 'confirm'
     const mask = document.createElement('div')
     mask.className = 'tshoot-confirm-mask'
     mask.innerHTML = `
@@ -34,21 +44,25 @@ export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
       mask.remove()
       resolve(answer)
     }
+    // Esc / 点遮罩外的"取消"语义跟着 defaultAction 走 ——
+    // 默认安全方在 cancel 时,Esc / 点外应当落到 cancel 一侧(返回 false);
+    // 默认安全方在 confirm 时,Esc / 点外其实没有"安全侧",仍按老行为返回 false。
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') cleanup(false)
-      else if (e.key === 'Enter') cleanup(true)
+      if (e.key === 'Escape') cleanup(false) // 仍是 false;defaultAction='cancel' 时 false=安全侧 ✓
+      else if (e.key === 'Enter') cleanup(defaultAction === 'confirm') // Enter 命中默认动作
     }
     mask.addEventListener('click', (e) => {
       const t = e.target as HTMLElement
-      if (t === mask) { cleanup(false); return } // 点遮罩 = 取消
+      if (t === mask) { cleanup(false); return } // 点遮罩 = false(同 Esc)
       const btn = t.closest('button[data-act]') as HTMLButtonElement | null
       if (btn) cleanup(btn.dataset.act === 'ok')
     })
     document.addEventListener('keydown', onKey)
     document.body.appendChild(mask)
-    // 自动聚焦到主按钮,Enter 直接确认
-    const primary = mask.querySelector('[data-act="ok"]') as HTMLElement | null
-    primary?.focus()
+    // 自动聚焦到默认动作那侧的按钮:Enter 默认命中它,视觉上也是高亮态。
+    const focusSel = defaultAction === 'cancel' ? '[data-act="cancel"]' : '[data-act="ok"]'
+    const focusBtn = mask.querySelector(focusSel) as HTMLElement | null
+    focusBtn?.focus()
   })
 }
 

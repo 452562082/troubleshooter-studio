@@ -41,6 +41,10 @@ type ApplyOptions struct {
 	// 桌面端 wizard 通过 buildOpenclawCreds() 拼出来传过来;CLI 没收集这个就传 nil,
 	// 注入的 env 字段值会变成 {{NACOS_ADDR_DEV}} 占位符让用户手填。
 	IDECreds map[string]string
+	// CustomInstallRoot 用户手选的 AI 平台安装根目录(claude-code/cursor/codex 三家专用,
+	// openclaw 走另一条 InstallNativeOpenclaw 路径)。空字符串 → 默认 ~/.<target>。
+	// 用于 wizard"我已自行安装"流程让用户指定非默认安装位置。
+	CustomInstallRoot string
 }
 
 // Result 是 apply 的摘要，给 CLI 用来打印下一步。
@@ -54,8 +58,15 @@ type Result struct {
 	NeedsRestartHint string   `json:"needs_restart_hint,omitempty"`
 }
 
-// Apply 用 NewYAML 替换 agent 的活配置，重新 render 并 rsync 到 agent.Path。
-// agent 来自 discover.Scan() 的结果；agent.Path 是 workspace 根（含 tshoot.json 的那一层）。
+// Apply 用 NewYAML 替换 agent 的活配置，重新 render 并 rsync 到工作目录。
+// agent 来自 discover.Scan() 的结果。
+//
+// 注意"显示路径" vs "工作目录":
+//   ag.Path = 真实部署位置(UI 卡片显示用,~/.claude/skills/<name>/ 之类)
+//   workDir = discover.WorkDirFor(ag) = 实际写产物的位置:
+//     OpenClaw → 跟 ag.Path 同(单段式)
+//     Claude Code/Cursor → ~/.tshoot/<target>/<system_id>/ staging 中间包
+//                          (Apply 写 staging,然后 InstallNative 同步到 ~/.claude / ~/.cursor)
 //
 // 支持 4 种 target：openclaw / claude-code / cursor / embedded。
 // 每种 target 走各自的 generator 方法，然后把相应的产物子树 rsync 到 agent.Path。
@@ -80,6 +91,14 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 	g.TshootVersion = opts.TshootVersion
 	g.SystemYAMLSource = opts.NewYAML
 	g.RepoLocalPaths = opts.RepoLocalPaths
+	// auto-analyze:同 ImportAndApply,有本地路径就跑一遍把 service-dependency-map +
+	// data-schema-map 填齐。失败 / 空路径都不阻塞。
+	if result, aerr := RunAutoAnalyze(RunAutoAnalyzeOptions{
+		Cfg:       cfg,
+		RepoPaths: opts.RepoLocalPaths,
+	}); aerr == nil && result != nil {
+		g.LoadAnalysisReport(result.Report)
+	}
 
 	// 按 target 渲染
 	switch ag.Meta.Target {
@@ -89,6 +108,8 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 		err = g.GenerateClaudeCode()
 	case "cursor":
 		err = g.GenerateCursor()
+	case "codex":
+		err = g.GenerateCodex()
 	default:
 		return nil, fmt.Errorf("unsupported target: %q", ag.Meta.Target)
 	}
@@ -117,7 +138,10 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	dstFiles, _ := listRel(ag.Path)
+	// workDir 是 Apply 的实际写产物目录(staging 中间包,Claude Code/Cursor 双段式必走;
+	// OpenClaw 单段式同 ag.Path)。注意:rsync 全在这里做,跟"卡片显示的 ag.Path"区分开。
+	workDir := discover.WorkDirFor(ag)
+	dstFiles, _ := listRel(workDir)
 
 	// src → dst
 	for _, rel := range srcFiles {
@@ -127,7 +151,7 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 			continue
 		}
 		if preserveSet[rel] {
-			if _, err := os.Stat(filepath.Join(ag.Path, rel)); err == nil {
+			if _, err := os.Stat(filepath.Join(workDir, rel)); err == nil {
 				preserved = append(preserved, rel)
 				continue
 			}
@@ -136,7 +160,7 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 			written++
 			continue
 		}
-		if err := copyFile(filepath.Join(src, rel), filepath.Join(ag.Path, rel)); err != nil {
+		if err := copyFile(filepath.Join(src, rel), filepath.Join(workDir, rel)); err != nil {
 			return nil, fmt.Errorf("write %s: %w", rel, err)
 		}
 		written++
@@ -153,15 +177,15 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 			}
 			removed = append(removed, rel)
 			if !opts.DryRun {
-				_ = os.Remove(filepath.Join(ag.Path, rel))
+				_ = os.Remove(filepath.Join(workDir, rel))
 			}
 		}
 	}
 
-	// 刷 tshoot.json
+	// 刷 tshoot.json(写到 workDir;Claude Code/Cursor 装步骤会再拷一份到 ag.Path 真实位置)
 	tsfUpdated := false
 	if !opts.DryRun {
-		if err := writeTSFMeta(ag.Path, ag.Meta.Target, cfg, opts.NewYAML, opts.TshootVersion); err != nil {
+		if err := writeTSFMeta(workDir, ag.Meta.Target, cfg, opts.NewYAML, opts.TshootVersion); err != nil {
 			return nil, fmt.Errorf("refresh tshoot.json: %w", err)
 		}
 		tsfUpdated = true
@@ -171,14 +195,14 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 	// 紧接着原生装到 ~/.claude|cursor/。openclaw 仍交给自家 scripts/install.sh。
 	// 注意:本路径同时覆盖"重新 apply"(改了 yaml 后回写)的场景,避免活配置和用户级
 	// 目录脱节。
-	if !opts.DryRun && (ag.Meta.Target == "claude-code" || ag.Meta.Target == "cursor") {
-		if err := InstallNative(ag.Path, ag.Meta.Target); err != nil {
+	if !opts.DryRun && (ag.Meta.Target == "claude-code" || ag.Meta.Target == "cursor" || ag.Meta.Target == "codex") {
+		if err := InstallNativeAt(workDir, ag.Meta.Target, opts.CustomInstallRoot); err != nil {
 			return nil, fmt.Errorf("native install (%s): %w", ag.Meta.Target, err)
 		}
 		// 顺带把 cfg 派生的 mcpServers 注入 IDE settings.json / mcp.json,让装完的 agent
 		// 能直接调到 nacos / grafana / loki 等 MCP。creds 走 opts.IDECreds(桌面端 wizard 传),
 		// 没有(CLI 装时)就用 {{ENV_VAR}} 占位符,用户事后自己填。
-		if err := MergeMCPIntoIDESettings(ag.Meta.Target, cfg, opts.IDECreds); err != nil {
+		if err := MergeMCPIntoIDESettingsAt(ag.Meta.Target, cfg, opts.IDECreds, opts.CustomInstallRoot); err != nil {
 			return nil, fmt.Errorf("merge mcp settings (%s): %w", ag.Meta.Target, err)
 		}
 	}
@@ -229,6 +253,15 @@ func ImportAndApply(yamlBytes []byte, target, destPath string, opts ApplyOptions
 		g.TshootVersion = opts.TshootVersion
 		g.SystemYAMLSource = yamlBytes
 		g.RepoLocalPaths = opts.RepoLocalPaths
+		// auto-analyze:用 RepoLocalPaths 跑一遍 dependency_scan / schema_scan,
+		// 把 service-dependency-map.upstream/downstream + data-schema-map.tables 自动填齐;
+		// 路径全空 / 跑失败都不阻塞 gen,只是这两份产物里的字段保持空骨架。
+		if result, aerr := RunAutoAnalyze(RunAutoAnalyzeOptions{
+			Cfg:       cfg,
+			RepoPaths: opts.RepoLocalPaths,
+		}); aerr == nil && result != nil {
+			g.LoadAnalysisReport(result.Report)
+		}
 		if err := g.Generate(); err != nil {
 			return nil, fmt.Errorf("openclaw gen: %w", err)
 		}
@@ -282,6 +315,9 @@ func resolveApplySource(baseOut, target string) (src, hint string) {
 	case "cursor":
 		src = baseOut + "-cursor"
 		hint = "Cursor 下次打开 AI 侧栏时会重新扫 ~/.cursor/agents/<name>.md;新建对话即可选到更新后的 Custom Agent。"
+	case "codex":
+		src = baseOut + "-codex"
+		hint = "Codex CLI 下次启动会读 ~/.codex/agents/<name>.md;正在开的 session 需要 `/clear` 或重启才能吃到新版 agent。"
 	}
 	return
 }
@@ -318,9 +354,7 @@ func looksLikeFactoryArtifact(rel, target string) bool {
 	case "openclaw":
 		prefixes = append(prefixes, "SOUL.md", "IDENTITY.md", "AGENTS.md", "USER.md",
 			"CHECKLIST.md", "TOOLS.md", ".clawhub/")
-	case "claude-code":
-		prefixes = append(prefixes, "agents/")
-	case "cursor":
+	case "claude-code", "cursor", "codex":
 		prefixes = append(prefixes, "agents/")
 	default:
 		return false

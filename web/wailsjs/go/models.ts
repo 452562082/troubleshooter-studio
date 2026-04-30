@@ -118,6 +118,42 @@ export namespace aitools {
 
 export namespace analyzer {
 	
+	export class DataStoreUsage {
+	    type: string;
+	    logical?: string;
+	    driver: string;
+	    callsite?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new DataStoreUsage(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.type = source["type"];
+	        this.logical = source["logical"];
+	        this.driver = source["driver"];
+	        this.callsite = source["callsite"];
+	    }
+	}
+	export class DownstreamCall {
+	    target: string;
+	    driver: string;
+	    callsite?: string;
+	    hint?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new DownstreamCall(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.target = source["target"];
+	        this.driver = source["driver"];
+	        this.callsite = source["callsite"];
+	        this.hint = source["hint"];
+	    }
+	}
 	export class Finding {
 	    config_center: string;
 	    source_file: string;
@@ -152,12 +188,54 @@ export namespace analyzer {
 	        this.default_context = source["default_context"];
 	    }
 	}
+	export class RoleHint {
+	    role: string;
+	    reason: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new RoleHint(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.role = source["role"];
+	        this.reason = source["reason"];
+	    }
+	}
+	export class SchemaTable {
+	    name: string;
+	    kind: string;
+	    type?: string;
+	    source_file?: string;
+	    entity_name?: string;
+	    fields?: string[];
+	    strategy?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SchemaTable(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.kind = source["kind"];
+	        this.type = source["type"];
+	        this.source_file = source["source_file"];
+	        this.entity_name = source["entity_name"];
+	        this.fields = source["fields"];
+	        this.strategy = source["strategy"];
+	    }
+	}
 	export class RepoAnalysis {
 	    name: string;
 	    stack: string;
 	    repo_path: string;
 	    service_names?: string[];
 	    findings?: Finding[];
+	    downstream_calls?: DownstreamCall[];
+	    data_store_usages?: DataStoreUsage[];
+	    schema_tables?: SchemaTable[];
+	    role_hint?: RoleHint;
 	    warnings?: string[];
 	    verified: boolean;
 	
@@ -172,6 +250,10 @@ export namespace analyzer {
 	        this.repo_path = source["repo_path"];
 	        this.service_names = source["service_names"];
 	        this.findings = this.convertValues(source["findings"], Finding);
+	        this.downstream_calls = this.convertValues(source["downstream_calls"], DownstreamCall);
+	        this.data_store_usages = this.convertValues(source["data_store_usages"], DataStoreUsage);
+	        this.schema_tables = this.convertValues(source["schema_tables"], SchemaTable);
+	        this.role_hint = this.convertValues(source["role_hint"], RoleHint);
 	        this.warnings = source["warnings"];
 	        this.verified = source["verified"];
 	    }
@@ -227,6 +309,30 @@ export namespace analyzer {
 		    }
 		    return a;
 		}
+	}
+	
+	
+	export class SubmoduleHint {
+	    name: string;
+	    sub_path: string;
+	    stack: string;
+	    role: string;
+	    reason: string;
+	    url?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SubmoduleHint(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.sub_path = source["sub_path"];
+	        this.stack = source["stack"];
+	        this.role = source["role"];
+	        this.reason = source["reason"];
+	        this.url = source["url"];
+	    }
 	}
 
 }
@@ -470,6 +576,31 @@ export namespace cchub {
 		    }
 		    return a;
 		}
+	}
+
+}
+
+export namespace config {
+	
+	export class HealthIssue {
+	    severity: string;
+	    category: string;
+	    field?: string;
+	    message: string;
+	    hint?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new HealthIssue(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.severity = source["severity"];
+	        this.category = source["category"];
+	        this.field = source["field"];
+	        this.message = source["message"];
+	        this.hint = source["hint"];
+	    }
 	}
 
 }
@@ -855,6 +986,7 @@ export namespace main {
 	export class AIToolsDetectResult {
 	    claude_code?: aitools.Result;
 	    cursor?: aitools.Result;
+	    codex?: aitools.Result;
 	
 	    static createFrom(source: any = {}) {
 	        return new AIToolsDetectResult(source);
@@ -864,6 +996,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.claude_code = this.convertValues(source["claude_code"], aitools.Result);
 	        this.cursor = this.convertValues(source["cursor"], aitools.Result);
+	        this.codex = this.convertValues(source["codex"], aitools.Result);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -1640,6 +1773,24 @@ export namespace main {
 	        this.pass = source["pass"];
 	    }
 	}
+	export class MissingRepoPathsResult {
+	    system_id: string;
+	    saved: Record<string, string>;
+	    missing: string[];
+	    suggest_repos_root: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new MissingRepoPathsResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.system_id = source["system_id"];
+	        this.saved = source["saved"];
+	        this.missing = source["missing"];
+	        this.suggest_repos_root = source["suggest_repos_root"];
+	    }
+	}
 	export class OpenClawDetectResult {
 	    ok: boolean;
 	    installed: boolean;
@@ -1766,6 +1917,7 @@ export namespace main {
 	    name: string;
 	    envs: number;
 	    repos: number;
+	    issues?: config.HealthIssue[];
 	
 	    static createFrom(source: any = {}) {
 	        return new ValidateResult(source);
@@ -1778,7 +1930,26 @@ export namespace main {
 	        this.name = source["name"];
 	        this.envs = source["envs"];
 	        this.repos = source["repos"];
+	        this.issues = this.convertValues(source["issues"], config.HealthIssue);
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 
 }

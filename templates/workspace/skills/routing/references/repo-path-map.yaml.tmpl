@@ -23,5 +23,9 @@ repos:
     {{- else}}
     local_path: "" # 未配置本地路径 —— 跑一次向导或手动填绝对路径
     {{- end}}
+    {{- if .SubPath}}
+    # monorepo:实际源码目录 = local_path + "/" + sub_path
+    sub_path: {{.SubPath | printf "%q"}}
+    {{- end}}
     url: {{.URL | printf "%q"}}
 {{- end}}

@@ -95,16 +95,23 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 	}
 	perRepo := []RepoSummary{}
 
+	// urlClonedTo 跟踪"同一 URL 已经 clone 到的目录",同 url 多 repo 条目(monorepo
+	// 拆分成多 service 时常见)只 clone 一次,后续 repo 直接复用同一 clone root,
+	// 各自 sub_path 决定 scan 子目录。key=URL,val=clone 落点(绝对路径)。
+	urlClonedTo := map[string]string{}
+
 	for _, repo := range cfg.Repos {
 		// RepoName filter:桌面 app 单仓库扫描用,其它仓库直接跳(不进 PerRepo)。
 		if opts.RepoName != "" && repo.Name != opts.RepoName {
 			continue
 		}
-		// 优先用 RepoPaths 显式指定的绝对路径(本地已有的仓库),回落到 ReposRoot/Name。
-		// 都没有就 skip,走下面 not-found 分支。
+		// 优先用 RepoPaths 显式指定的绝对路径(本地已有的仓库),回落到 ReposRoot/Name,
+		// 再回落到"同 URL 之前已 clone 到的根"(monorepo 多 service 共用 clone)。
 		var repoPath string
 		if p, ok := opts.RepoPaths[repo.Name]; ok && p != "" {
 			repoPath = p
+		} else if cloned, ok := urlClonedTo[repo.URL]; ok && cloned != "" {
+			repoPath = cloned
 		} else if opts.ReposRoot != "" {
 			repoPath = filepath.Join(opts.ReposRoot, repo.Name)
 		}
@@ -148,16 +155,33 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 			}
 			status = "cloned-then-analyzed"
 		}
+		// 记下"这个 URL 的 clone root",同 url 后续 repo 条目复用(monorepo 多 service)
+		urlClonedTo[repo.URL] = repoPath
+
+		// monorepo:repoPath 当前是 clone root;sub_path 非空时把 scan 路径定到子目录。
+		// 这样 stack 探测 / role-hint / dep-scan / schema-scan / Analyze 看到的都是
+		// 单服务的代码,不会被仓库根的"多服务混合"信号干扰(多个 main.go / 多个 package.json 等)。
+		// 留着 cloneRoot 给修复层(EnsureSubmodules/Branches 仍走 root level git 命令)。
+		cloneRoot := repoPath
+		if repo.SubPath != "" {
+			joined := filepath.Join(cloneRoot, repo.SubPath)
+			if _, err := os.Stat(joined); err == nil {
+				repoPath = joined
+			} else {
+				progress(fmt.Sprintf("[warn] repo %s sub_path=%q not found under %s, fallback 到 clone root", repo.Name, repo.SubPath, cloneRoot))
+			}
+		}
 
 		// 现有 clone 的修复层(兜底老版本留下的不完整状态):
 		//   - submodule umbrella(.gitmodules):之前没 recurse 的,服务目录是空的
 		//   - single-branch shallow clone:老 Clone() 没带 --no-single-branch,
 		//     shallow 下 git 只抓 HEAD 分支,ListBranches 只出 main 一条
 		// 两个都 idempotent,已 OK 的秒回,有问题的补齐。失败不中断整体扫描,记 warning。
-		if subErr := gitclone.EnsureSubmodules(repoPath); subErr != nil {
+		// 这两个修复要在 git 仓库根上跑,不是子目录(SubPath 模式下 repoPath 已被改成子目录)
+		if subErr := gitclone.EnsureSubmodules(cloneRoot); subErr != nil {
 			progress(fmt.Sprintf("[warn] submodule init %s: %v", repo.Name, subErr))
 		}
-		if brErr := gitclone.EnsureAllBranches(repoPath); brErr != nil {
+		if brErr := gitclone.EnsureAllBranches(cloneRoot); brErr != nil {
 			progress(fmt.Sprintf("[warn] expand branches %s: %v", repo.Name, brErr))
 		}
 
@@ -209,6 +233,10 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 		// 扫"业务表 / collection / 缓存 prefix"——给 data-schema-map.yaml 自动填种子值,
 		// 多策略叠加(orm_annotation > orm_api_call > sql_literal > file_name)同 (name,kind) 去重保最高优先级。
 		ra.SchemaTables = analyzer.ScanSchema(effectiveStack, repoPath, repo.Analysis.IncludePaths)
+		// role 推荐:基于仓库名 + 顶层目录 + stack 专属文件(package.json/pom.xml/go.mod/...)。
+		// 用户在 yaml 显式 set 了 role 时不覆盖(只是产物里仍记录 hint,UI 给"📍 推荐 vs 实际"对比)。
+		hint := analyzer.RecommendRole(effectiveStack, repo.Name, repoPath)
+		ra.RoleHint = &hint
 		report.Repos = append(report.Repos, *ra)
 		perRepo = append(perRepo, RepoSummary{
 			Name:              repo.Name,

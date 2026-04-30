@@ -1,5 +1,9 @@
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted, nextTick } from 'vue'
+
+// 给 App.vue 的 keep-alive `:exclude="['InitPage']"` 用,让本页不被缓存。
+// 跟 HomePage 的"清空重开"按钮配套:用户清掉 localStorage 后,InitPage 重 mount 取干净状态。
+defineOptions({ name: 'InitPage' })
 import yaml from 'js-yaml'
 import { useRouter } from 'vue-router'
 import {
@@ -26,9 +30,14 @@ import {
   selfTestAgent,
   isDesktop,
   openDir,
+  detectSubmodulesForRepo,
+  listBranchesForRepo,
   preloadConfigCenter,
+  recommendRoleForRepo,
   setDefaultReposRoot,
   validate as bridgeValidate,
+  getCustomInstallRoots,
+  setCustomInstallRoot,
 } from '../lib/bridge'
 import type { AIToolResult, CCHubEntry, CCHubNamespace, GrafanaDatasource, OpenClawModelEntry, KuboardFetchBatchResult } from '../lib/bridge'
 import { confirmDialog } from '../lib/confirm'
@@ -63,9 +72,20 @@ const saved = loadSavedDraft()
 const savedKuboardState = loadSavedKuboardState()
 
 // ── Step management ──
-const currentStep = ref<number>(saved?.currentStep ?? 1)
-const totalSteps = 8
+// currentStep 持久化:加了 Step 1=欢迎页后,旧 saved 1..9 → 新 2..10 步内容才对齐。
+// 用 saved.wizardSchema 标记本次 saved 是新 schema(>=2)还是老 schema(undefined / 1):
+//   - 老 saved(无 wizardSchema):currentStep + 1 一次性迁移,然后保存时写入 wizardSchema=2
+//   - 新 saved(wizardSchema=2):直接用 currentStep
+//   - 没 saved:默认 1(欢迎页)
+const _savedSchema: number = (saved?.wizardSchema ?? 1) as number
+const currentStep = ref<number>(
+  saved?.currentStep != null
+    ? Math.min(_savedSchema >= 2 ? saved.currentStep : saved.currentStep + 1, 10)
+    : 1,
+)
+const totalSteps = 10
 const stepTitles = [
+  '开始',          // Step 1:欢迎页(导入 yaml / 从零开始)
   '系统基本信息',
   '机器人身份',
   '环境列表',
@@ -74,6 +94,7 @@ const stepTitles = [
   '数据层',
   '可观测性',
   '预览 + 生成',
+  '一键部署',
 ]
 
 const validationErrors = ref<Set<string>>(new Set())
@@ -254,10 +275,60 @@ const openclawResolvedDir = ref<string>('') // backend 返回的实际路径(展
 const openclawVersion = ref<string>('') // openclaw.json meta.lastTouchedVersion
 const openclawAuthProviders = ref<string[]>([]) // auth.profiles 里出现的 provider 名字
 
-// Claude Code / Cursor 安装状态 —— 跟 openclaw 不同,这俩只做"装了没"信息展示,
-// 不影响卡片能不能被勾选。用户勾了但没装的话,部署后 claude/cursor 客户端需要自己装,
-// 产物只是 CLAUDE.md / .cursorrules 文件,不依赖桌面 app 能跑就行。
-const aitoolsResult = ref<{ claude_code: AIToolResult; cursor: AIToolResult } | null>(null)
+// Claude Code / Cursor / Codex 安装状态 —— 决定卡片能否被勾选:
+//   - 检测到 → 默认可勾,部署落到检测出的位置(~/.<target>/agents)
+//   - 未检测到 → checkbox 默认禁用,展示"未检测到"提示;用户可点"我已自行安装"
+//     强制启用(手填路径或确认默认 ~/.<target> 已存在),也可点"重新扫描"。
+const aitoolsResult = ref<{ claude_code: AIToolResult; cursor: AIToolResult; codex: AIToolResult } | null>(null)
+// 用户对未检测到的 target 强制启用("我自己装了" / "我会装") —— per-target bool。
+// 一旦置 true,checkbox 解锁,enabledTargets 才能勾上。持久化到 draft 跟其它字段一样。
+const forceEnableMissingTarget = reactive<Record<string, boolean>>({
+  ...(saved?.forceEnableMissingTarget ?? {}),
+})
+
+// customInstallRoots[t] —— 用户对未检测到的 target 手选的安装根目录(如 /opt/myclaude/);
+// 非空时部署位置从默认 `~/.<target>` 改成 `<customRoot>` 拼 agents/workspace 后缀。
+// openclaw 的自定义安装目录另有专用 UI(openclawInstallDir),不走这里。
+const customInstallRoots = reactive<Record<string, string>>({
+  ...(saved?.customInstallRoots ?? {}),
+})
+async function pickCustomInstallRoot(t: string) {
+  try {
+    const dir = await openDir(`选 ${t} 安装根目录(目录下应有 agents/ 子目录)`)
+    if (dir) {
+      customInstallRoots[t] = dir
+      forceEnableMissingTarget[t] = true
+      // 持久化到 ~/.tshoot/config.json,跨 wizard 会话和 BotsPage 扫描共用同一份
+      await setCustomInstallRoot(t, dir).catch((e: any) => {
+        pushLog('install', 'warn', `setCustomInstallRoot(${t}) 持久化失败: ${String(e?.message || e)}`)
+      })
+    }
+  } catch (e: any) {
+    pushLog('install', 'warn', `pickCustomInstallRoot(${t}) 失败: ${String(e?.message || e)}`)
+  }
+}
+async function clearCustomInstallRoot(t: string) {
+  delete customInstallRoots[t]
+  // 同步清掉本地文件里的覆盖,否则下次启动又被反填回来
+  await setCustomInstallRoot(t, '').catch((e: any) => {
+    pushLog('install', 'warn', `setCustomInstallRoot(${t}, '') 清除失败: ${String(e?.message || e)}`)
+  })
+}
+// 启动时从 ~/.tshoot/config.json 反填一次 customInstallRoots —— 优先于 saved draft,
+// 因为本地文件是"跨向导会话的权威";draft 里的值只是这次会话的快照,持久化口径以文件为准。
+onMounted(async () => {
+  try {
+    const m = await getCustomInstallRoots()
+    for (const [t, dir] of Object.entries(m || {})) {
+      if (dir) {
+        customInstallRoots[t] = dir
+        forceEnableMissingTarget[t] = true
+      }
+    }
+  } catch {
+    // 静默兜底:浏览器模式 / binding 还没跑 generate 都返空,不影响 UI
+  }
+})
 async function refreshAITools() {
   try {
     aitoolsResult.value = await detectAITools()
@@ -478,11 +549,33 @@ watch(() => currentStep.value, (s) => {
 // —— 实际挂在 2300 附近的 auto-save watch 旁(见下方).
 
 // ── Step 4: 代码仓库 ──
+// RepoRole 跟后端 internal/config/types.go 的 RepoRole 字符串字面量保持一致。
+// 仓库角色:决定 incident-investigator 看本 repo 的视角(主角 / 上下游 / 不入图)。
+type RepoRole =
+  | 'backend'      // 后端业务服务(默认)
+  | 'frontend'     // web 前端
+  | 'gateway'      // API 网关 / BFF
+  | 'middleware'   // 接入层 / worker / 调度器
+  | 'common-lib'   // 公共库;不入服务依赖图
+  | 'mobile'       // 移动端 app
+  | 'admin'        // 管理后台
+  | 'infra'        // 基础设施(k8s/terraform);不入图
+  | 'docs'         // 文档;不入图
+
 interface RepoItem {
   name: string
   url: string
   stack: string
   framework: string
+  // role:仓库角色。空 / 未设置时按 backend 兜底。
+  // wizard 里有自动推荐(基于 stack):php/go/java/python → backend;node 由用户手挑
+  // (前端 vs 后端 vs gateway/BFF 都是 node 常见用法,不能 stack 一刀切)。
+  role?: RepoRole
+  // sub_path:monorepo 子目录。多个服务在同一个 git 仓库不同子目录时,在 repos[] 添加
+  // 多个条目共用相同 url + 不同 sub_path,name 各取服务名。
+  // 例:truss 仓库下 services/commerce 是 Go 服务,web/admin 是 Node 后台 → 两个条目同 url 不同 sub_path。
+  // 空 = 整 repo 当一个服务对待(默认行为,大部分单服务仓库)。
+  sub_path?: string
   service_names: string
   env_branches: Record<string, string>
   // _nameManual: 用户手动编辑过 name,URL 变化不会再覆盖 name。
@@ -510,6 +603,19 @@ interface RepoItem {
   // ConfigSource:多源场景下本仓库引用哪个 config_centers[].id。空 = 默认源(default)。
   // 单源系统(extraConfigSources 空)下不暴露此字段;yaml 多源时 Step 4 会渲染下拉。
   config_source?: string
+  // _roleHint:最近一次 RecommendRoleForRepo 的结果(role + reason)。仅 UI 展示用,
+  // 让用户看到"扫描推荐什么 role + 理由",方便决定是否改默认值。不进 yaml。
+  _roleHint?: { role: string, reason: string }
+  _roleHintLoading?: boolean
+  // _submoduleHints:扫描后探测到的"这是 monorepo,有 N 个子模块"列表。
+  // 非空且长度 > 1 时,UI 在仓库 header 下方弹"一键拆成 N 行"banner。
+  // 用户点拆分后调 splitMonorepo,把当前 repo 替换成 N 个 RepoItem。
+  // url 字段非空时(.gitmodules 路径)→ 当独立仓库展开;空 → 当同仓子目录展开。
+  _submoduleHints?: { name: string, sub_path: string, stack: string, role: string, reason: string, url?: string }[]
+  // _submoduleSelection:per-hint 复选框状态(默认全选)。用户在 banner 里能去掉
+  // "这个不是真服务"的条目(典型:tools/lint-rules 这种带 go.mod 的工具子目录),
+  // 拆分时只展开勾选的那些。
+  _submoduleSelection?: Record<string, boolean>
   // 下划线前缀字段都是 UI 态;不参与 yaml 序列化(generateYAML 不读),但跟
   // localStorage auto-save 持久化,跨次刷新不丢。
 }
@@ -520,7 +626,10 @@ function makeEmptyRepo(): RepoItem {
     if (e.id) branches[e.id] = ''
   }
   return {
-    name: '', url: '', stack: '', framework: '', service_names: '', env_branches: branches,
+    name: '', url: '', stack: '', framework: '',
+    role: 'backend', // 兜底 backend(单服务/小项目 95% 是后端);node / 公共库需手挑
+    sub_path: '',    // 默认空 = 整仓当一个服务;monorepo 多服务 → 添加多条同 url 不同 sub_path
+    service_names: '', env_branches: branches,
     _source: 'remote', // 默认"远程 URL"模式(大部分用户从 GitHub/GitLab 起步)
   }
 }
@@ -618,11 +727,173 @@ function onRepoNameInput(r: RepoItem) {
     return
   }
   r._nameManual = true
+  // 名字改了 → 重新拿一次推荐(本地路径优先,无路径退化到名字+stack)
+  refreshRoleHint(r)
+}
+
+// refreshRoleHint 给 repo 拿一份"基于当前 name + stack + 本地路径"的 role 推荐,塞到 _roleHint。
+// UI 在下拉旁边渲染 "📍 推荐 X(理由)";命中跟当前 role 不一致时显示对比按钮"采用"。
+// 触发时机:onRepoNameInput / 仓库扫描完(stack 自动填好后)/ Step 4 进入时遍历刷一遍。
+async function refreshRoleHint(r: RepoItem) {
+  if (!r.name.trim()) {
+    r._roleHint = undefined
+    return
+  }
+  r._roleHintLoading = true
+  try {
+    let path = r._source === 'local' ? (r._localPath || '') : ''
+    // monorepo:把 sub_path 拼上,后端 RecommendRoleForRepo 会看子目录下的 package.json / pom.xml
+    if (path && r.sub_path && r.sub_path.trim()) {
+      path = path.replace(/\/+$/, '') + '/' + r.sub_path.trim().replace(/^\/+/, '')
+    }
+    const hint = await recommendRoleForRepo(r.stack || 'go', r.name, path)
+    r._roleHint = hint
+  } catch {
+    /* 推荐失败不阻塞用户填表 */
+  } finally {
+    r._roleHintLoading = false
+  }
+}
+
+// applyRoleHint 把推荐 role 落到 r.role(用户点"采用"按钮调)。
+function applyRoleHint(r: RepoItem) {
+  if (r._roleHint?.role) {
+    r.role = r._roleHint.role as RepoRole
+  }
+}
+
+// onRepoSubPathInput sub_path 改了 → role hint 重算(后端会进入子目录读 package.json/pom.xml 等)
+function onRepoSubPathInput(r: RepoItem) {
+  refreshRoleHint(r)
+}
+
+// toggleSubmodulePick 用户在 banner 里勾/取消勾某个子模块,影响后续 splitMonorepo 展开哪些。
+function toggleSubmodulePick(r: RepoItem, subPath: string, picked: boolean) {
+  if (!r._submoduleSelection) r._submoduleSelection = {}
+  r._submoduleSelection[subPath] = picked
+}
+
+// pickedSubmoduleCount banner 拆分按钮上显示数量 + disable 用
+function pickedSubmoduleCount(r: RepoItem): number {
+  if (!r._submoduleHints) return 0
+  const sel = r._submoduleSelection || {}
+  return r._submoduleHints.filter(h => sel[h.sub_path] !== false).length
+}
+
+// submodulePathFor 拼"父仓本地路径 + sub_path"得到子模块实际代码位置。
+// banner 列每条子模块时显示 + 已 split 的条目下方也显示,让用户能确认 routing skill 拿到的是哪个目录。
+function submodulePathFor(parent: RepoItem, subPath: string): string {
+  const base = (parent._localPath || '').replace(/\/+$/, '')
+  const rel = subPath.replace(/^\/+/, '')
+  if (!base) return rel
+  if (!rel) return base
+  return base + '/' + rel
+}
+
+// refreshSubmoduleHints 调后端扫 monorepo 信号(workspaces / pom modules / cmd 多入口 / services 子目录)
+// → 命中即把列表存到 r._submoduleHints,UI banner 显示"检测到 N 个子模块,一键拆分"。
+// 触发时机:scan 完成后(此时本地路径已就位)。0 命中 → 不弹 banner。
+async function refreshSubmoduleHints(r: RepoItem) {
+  // 本地模式直接用 _localPath;远程模式 clone 完成后落点 = resolveCloneDest(r),
+  // 也是个有效本地路径,送进 detectSubmodules 同样能扫。
+  let path = ''
+  if (r._source === 'local') {
+    path = r._localPath || ''
+  } else if (r._source === 'remote') {
+    const dest = resolveCloneDest(r)
+    if (dest) path = dest
+  }
+  if (!path) {
+    r._submoduleHints = []
+    r._submoduleSelection = {}
+    return
+  }
+  try {
+    const hints = await detectSubmodulesForRepo(path)
+    r._submoduleHints = hints
+    // 默认全选,用户能取消勾不想要的(如 tools/lint-rules)
+    const sel: Record<string, boolean> = {}
+    for (const h of hints) sel[h.sub_path] = true
+    r._submoduleSelection = sel
+  } catch {
+    r._submoduleHints = []
+    r._submoduleSelection = {}
+  }
+}
+
+// splitMonorepo 把当前 RepoItem 替换成 N 个 (同 url + 同本地路径,各自 sub_path) 条目。
+// 用户点 banner 上的"拆分"按钮调这个。
+function splitMonorepo(parentIdx: number) {
+  const parent = repos[parentIdx]
+  if (!parent || !parent._submoduleHints || parent._submoduleHints.length === 0) return
+  const branches = { ...parent.env_branches } // 共用父仓库的 env_branches(同一个 git 仓库分支策略一致)
+  const sel = parent._submoduleSelection || {}
+  // 只展开勾选了的子模块;空选状态(理论上不可能)兜底全选
+  const picked = parent._submoduleHints.filter(h => sel[h.sub_path] !== false)
+  if (picked.length === 0) return
+  const parentLocalBase = (parent._localPath || '').replace(/\/+$/, '')
+  const newRows: RepoItem[] = picked.map(h => {
+    // .gitmodules 路径下,h.url 非空 = 真"独立 git repo + 子目录共置";其它 monorepo 路径
+    // h.url 为空 = "同一仓库子目录"。两者展开后形态不同:
+    //   独立 git repo:每行用自己的 url + 自己的本地路径(父仓本地 + 子模块名)+ 无 sub_path
+    //   同仓子目录:每行用父仓 url + 父仓本地路径 + 各自 sub_path
+    const isIndependentRepo = !!h.url
+    const ownLocalPath = isIndependentRepo && parentLocalBase
+      ? parentLocalBase + '/' + h.sub_path.replace(/^\/+/, '')
+      : parent._localPath
+    return {
+      ...makeEmptyRepo(),
+      name: h.name,
+      url: isIndependentRepo ? (h.url as string) : parent.url,
+      stack: h.stack || parent.stack || 'go',
+      role: (h.role || 'backend') as RepoRole,
+      sub_path: isIndependentRepo ? '' : h.sub_path,
+      // service_names 默认 = 子模块名。"一个仓 / 一个子模块 = 一个服务"占 95%,留空让用户填
+      // 反而毫无信息量。需要细分时(monorepo 单子目录里多服务)再点 + 补。
+      service_names: h.name,
+      env_branches: { ...branches },
+      config_source: parent.config_source,
+      _source: parent._source,
+      _localPath: ownLocalPath,
+      _scanned: true,
+      _scannedSource: parent._scannedSource,
+      // 拆分后 role hint 已经从 monorepo_scan 拿到了,直接灌进去(用户一眼看到为啥推这 role)
+      _roleHint: { role: h.role, reason: h.reason },
+    }
+  })
+  // 用 N 行替换原来的 1 行;splice 第三参数起是要插入的元素
+  repos.splice(parentIdx, 1, ...newRows)
+  // 各新行的"环境 → 分支映射"下拉数据:并行调 listBranchesForRepo 拉每个子模块的真实分支,
+  // 落到 repoBranchesMap[hint.name] → UI 下拉立即可用。同时按已有 env_branches 做启发式
+  // 重映射(如 dev → develop / main 之类)。失败的子模块保持空(text input 兜底,跟原行为一致)。
+  for (const row of newRows) {
+    const path = row._localPath || ''
+    if (!path || !row.name) continue
+    const fullPath = row.sub_path
+      ? path.replace(/\/+$/, '') + '/' + row.sub_path.replace(/^\/+/, '')
+      : path
+    listBranchesForRepo(fullPath).then((branches) => {
+      if (!branches.length) return
+      repoBranchesMap.value[row.name] = branches
+      // 已经被 splitMonorepo 设过的 env_branches(从父仓继承)如果不在新分支列表里,
+      // 按启发式重新挑一次 —— 同 scanSingleRepo 的逻辑(pickBranchForEnv)。
+      for (const env of environments) {
+        if (!env.id) continue
+        const cur = (row.env_branches[env.id] || '').trim()
+        if (cur && branches.includes(cur)) continue // 当前值在真实列表里 → 保留
+        const mapped = pickBranchForEnv(env, branches)
+        if (mapped) row.env_branches[env.id] = mapped
+      }
+    }).catch(() => { /* 失败保持空,UI fallback text input */ })
+  }
 }
 
 function addRepo() {
   repos.push(makeEmptyRepo())
 }
+
+// (旧 addSubmodule 按钮已下线 —— 自动检测 monorepo + 一键拆分能覆盖所有真实场景。
+// 真有非典型布局漏检,用户可走"+ 添加仓库"再粘 url,行为等价。)
 
 function removeRepo(idx: number) {
   if (repos.length > 1) repos.splice(idx, 1)
@@ -762,6 +1033,8 @@ async function resolveLocalRepoPath(r: RepoItem, p: string) {
   r._nameManual = false
   r._scanned = false
   r._scannedSource = ''
+  // 清空旧 submodule hints,避免上个仓库的检测结果残留
+  r._submoduleHints = undefined
   try {
     const remote = await getRemoteURL(newPath)
     if (remote) {
@@ -773,6 +1046,9 @@ async function resolveLocalRepoPath(r: RepoItem, p: string) {
     const parts = newPath.split(/[\\/]/).filter(Boolean)
     r.name = parts[parts.length - 1] || ''
   }
+  // 选完路径立刻跑一次 monorepo 检测(不等 scanSingleRepo 跑完,monorepo 信号是文件结构,
+  // 跟 stack/分支扫描独立)。给用户即时反馈,如果是 monorepo,banner 立刻出现。
+  refreshSubmoduleHints(r)
   await scanSingleRepo(r)
 }
 
@@ -980,6 +1256,11 @@ async function scanSingleRepo(r: RepoItem) {
     const rpt = (res.report?.repos || []).find(rr => rr.name === r.name)
     if (rpt?.service_names?.length) {
       r.service_names = rpt.service_names.join(', ')
+    } else if (!r.service_names.trim() && r.name) {
+      // analyzer 没扫出 service_names(配置 key 不显式 / 单服务仓 / monorepo 子目录 等场景),
+      // 默认就用 repo.name 当服务名。"一个仓 = 一个服务"是 95% 用户的预期。
+      // 用户想覆盖直接改 chip;routing skill 用这个 key 命中 config-map / k8s_runtime.service_map。
+      r.service_names = r.name
     }
     if (hit.detected_stack) r.stack = hit.detected_stack
     if (hit.branches?.length) {
@@ -999,6 +1280,12 @@ async function scanSingleRepo(r: RepoItem) {
     r._scanned = true
     // 记下这次扫描对应的身份(URL 或本地目录),用户以后改了就判定结果过期
     r._scannedSource = r._source === 'local' ? (r._localPath || '') : r.url
+    // 扫完顺手刷一次 role 推荐 —— 此时 stack 已经识别出来,本地路径也已就位,
+    // 后端的 RecommendRoleForRepo 能进一步看 package.json/pom.xml/go.mod 的依赖,推得最准。
+    refreshRoleHint(r)
+    // monorepo 检测:看是不是 workspaces / multi-module pom / cmd 多入口 / services/ 多子目录。
+    // 命中 N>1 → UI 下面会弹"一键拆成 N 行"banner。
+    refreshSubmoduleHints(r)
   } catch (e: any) {
     r._scanError = String(e?.message || e)
   } finally {
@@ -3446,16 +3733,18 @@ function parseProperties(text: string): Record<string, any> {
 // ── Step 7: 输出目标 ──
 // (历史上有 embedded 这个 target,后已下线;若 saved draft 里残留 enabledTargets.embedded
 //  会被忽略,生成 yaml / 校验都不再考虑它)
-const targetOptions = ['openclaw', 'claude-code', 'cursor'] as const
+const targetOptions = ['openclaw', 'claude-code', 'cursor', 'codex'] as const
 const targetDescriptions: Record<string, string> = {
   'openclaw': 'OpenClaw agent（~/.openclaw/workspace/<workspace_name>/，OpenClaw 内选 agent 切换）',
   'claude-code': 'Claude Code 用户级 subagent（~/.claude/agents/<name>.md，@<name> 调用）',
   'cursor': 'Cursor 用户级 Custom Agent（~/.cursor/agents/<name>.md，AI 侧栏选用）',
+  'codex': 'OpenAI Codex CLI 用户级 agent（~/.codex/agents/<name>.md，CLI 内 @<name> 调用）',
 }
 const targetLabels: Record<string, string> = {
   'openclaw': 'OpenClaw',
   'claude-code': 'Claude Code',
   'cursor': 'Cursor IDE',
+  'codex': 'Codex CLI',
 }
 const enabledTargets = reactive<Record<string, boolean>>({
   ...Object.fromEntries(targetOptions.map(k => [k, true])),
@@ -3463,6 +3752,29 @@ const enabledTargets = reactive<Record<string, boolean>>({
 })
 // 任一目标勾选 / 无目标勾选:Step 1 校验 + 后续步骤按需隐藏字段
 const anyTargetSelected = computed(() => targetOptions.some(t => enabledTargets[t]))
+
+// targetDetectedInstalled(t) — 该 target 是否被本机探测到已装。
+//   openclaw     → openclawDetectStatus === 'ok'
+//   claude-code  → aitoolsResult.claude_code.installed
+//   cursor       → aitoolsResult.cursor.installed
+//   codex        → aitoolsResult.codex.installed
+// 探测还没跑(aitoolsResult / openclawDetectStatus 为初始) → 返回 null(unknown),
+// UI 据此显示"扫描中…"而不是"未检测到"。
+function targetDetectedInstalled(t: string): boolean | null {
+  if (t === 'openclaw') {
+    if (openclawDetectStatus.value === 'idle' || openclawDetectStatus.value === 'loading') return null
+    return openclawDetectStatus.value === 'ok'
+  }
+  if (!aitoolsResult.value) return null
+  if (t === 'claude-code') return !!aitoolsResult.value.claude_code?.installed
+  if (t === 'cursor') return !!aitoolsResult.value.cursor?.installed
+  if (t === 'codex') return !!aitoolsResult.value.codex?.installed
+  return null
+}
+// targetCanBeEnabled(t) — checkbox 是否能被勾选:已检测到 OR 用户强制启用过。
+function targetCanBeEnabled(t: string): boolean {
+  return targetDetectedInstalled(t) === true || forceEnableMissingTarget[t] === true
+}
 // openclaw 是唯一需要"工作区目录"概念的 target,其它 3 个都装到用户自选位置
 // (claude-code / cursor = 项目根,embedded = Studio 内嵌)。用 computed 单独暴露,
 // 模板里读这个 flag 判断要不要露 workspace_name 输入框。
@@ -3488,6 +3800,18 @@ onMounted(() => {
     runOpenClawDetect()
   }
 })
+
+// 探测结果回填后,把"未装且没强制启用"的 target 自动取消勾选 ——
+// 默认 enabledTargets 全 true 是"探测前先假设都装着",真探测出来未装就回退。
+// 只在探测刚返回时跑一次,后续用户手动操作不被覆盖。
+watch([aitoolsResult, openclawDetectStatus], () => {
+  for (const t of targetOptions) {
+    const det = targetDetectedInstalled(t)
+    if (det === false && !forceEnableMissingTarget[t] && enabledTargets[t]) {
+      enabledTargets[t] = false
+    }
+  }
+}, { flush: 'post' })
 
 // 环境列表变化 → 清掉不属于当前任何 env.id 的孤儿状态,防 draft 越攒越脏。
 // 用户改 env.id(重命名) / removeEnv 都会触发。
@@ -3548,9 +3872,16 @@ watch(configCenterType, (newType, oldType) => {
 })
 
 // Auto-save all form state so navigating away doesn't lose the draft
-const lastSavedAt = ref<number | null>(null) // unix ms;null = 本会话还没保存过(首次读取态)
+// lastSavedAt:页面右上角"自动保存"徽章用。null = "草稿空 / 尚未保存过"。
+// 之前一直 null 兜底,在 keep-alive 模式下没问题(切回保留 ref 值)。但 InitPage 现在
+// 不进 keep-alive(App.vue::exclude InitPage),每次进 /init 都重新 mount,如果本地
+// 已经有 saved 草稿(loadSavedDraft 命中),badge 应该立刻显示"✓ 自动保存"而不是"草稿空"。
+// 所以挂载时根据 saved 是否存在初始化:有 saved → Date.now() 占位(用户改任一字段后由
+// auto-save watch 覆盖成真实保存时间);无 saved → null。
+const lastSavedAt = ref<number | null>(saved ? Date.now() : null)
 watch(
   () => ({
+    wizardSchema: 2, // 见 currentStep 上方注释:标记本 draft 已是新 step 编号(欢迎页+9 配置步)
     currentStep: currentStep.value,
     system,
     agent,
@@ -3598,6 +3929,8 @@ watch(
     enabledObservability,
     enabledDataStores,
     enabledTargets,
+    forceEnableMissingTarget,
+    customInstallRoots,
     idManualOverride: idManualOverride.value,
     openclawInstallDir: openclawInstallDir.value,
   }),
@@ -3828,6 +4161,9 @@ async function applyImport() {
         url: r?.url ?? '',
         stack: r?.stack ?? 'go',
         framework: r?.framework ?? '',
+        // role:yaml 里有就保留,否则按 backend 兜底(老 yaml 兼容)
+        role: (typeof r?.role === 'string' && r.role.trim()) ? r.role.trim() : 'backend',
+        sub_path: typeof r?.sub_path === 'string' ? r.sub_path.trim() : '',
         service_names: svcNames,
         env_branches: branches,
         config_source: typeof r?.config_source === 'string' ? r.config_source : '',
@@ -4052,7 +4388,9 @@ async function applyImport() {
     }
   }
 
-  currentStep.value = 1
+  // 导入完直接跳到 Step 2(系统基本信息)— 反填的字段从这里展开,用户能逐步检查 / 改。
+  // 留在欢迎页(Step 1)没意义,反填的内容在那看不见。
+  currentStep.value = 2
   showImportDialog.value = false
 }
 
@@ -4065,25 +4403,38 @@ const copySuccess = ref(false)
 // 进入预览步骤就自动生成 yaml(不再依赖 nextStep / goToStep 的副作用):
 //   - 退出 app 后重启,currentStep 从 localStorage 恢复到 totalSteps,
 //     这时不再需要"上一步 → 下一步"才能看到预览。
-//   - immediate:true 让首次挂载时也触发(包括 saved.currentStep === totalSteps 的场景)。
 //
-// 关键:try/catch 不能丢 —— generateYAML 在某些 saved 状态下读到尚未初始化的字段
+// 关键 1:try/catch 不能丢 —— generateYAML 在某些 saved 状态下读到尚未初始化的字段
 // 抛错会直接让 Vue setup 失败,整个 InitPage 白屏。捕获后给个空字符串兜底,
 // 用户至少能看到 Step 8 容器框,顶上显示"yaml 生成失败,详见日志"。
-watch(
-  currentStep,
-  (s) => {
-    if (s !== totalSteps) return
+//
+// 关键 2:**不能用 immediate: true**。watch 同步触发会发生在 setup 流程中,
+// 此时 `const` 还在按顺序声明的过程中,generateYAML / 它的 helper 调用到的某个
+// 后置 const 就会撞 TDZ("Cannot access 'X' before initialization")。
+// 改用 onMounted 兜底首次触发(跟 line 2259-2260 的 triggerStep7Init 同款),
+// 这时所有 const 都已 ready。watch 自身只处理"用户 next 进 Step 8"的非首次情况。
+// Step 9 = yaml 预览(总步数最后一步是 Step 10 部署,所以 yaml 不再 ===  totalSteps)
+const YAML_PREVIEW_STEP = 9
+const runYAMLGen = (s: number) => {
+  // 进 Step 8 / Step 9 都触发(部署期也可能要看 yaml 内容);其它步直接 return
+  if (s !== YAML_PREVIEW_STEP && s !== totalSteps) return
+  try {
+    yamlOutput.value = generateYAML()
+  } catch (e) {
+    console.error('[generateYAML] failed:', e)
+    yamlOutput.value = `# yaml 生成失败,详见日志面板\n# error: ${String((e as any)?.message || e)}\n`
     try {
-      yamlOutput.value = generateYAML()
-    } catch (e) {
-      console.error('[generateYAML] failed:', e)
-      yamlOutput.value = `# yaml 生成失败,详见日志面板\n# error: ${String((e as any)?.message || e)}\n`
       pushLog('cchub', 'error', `yaml 生成失败: ${String((e as any)?.message || e)}`)
-    }
-  },
-  { immediate: true },
-)
+    } catch { /* pushLog 自身可能在 setup 期间还没初始化好,吞掉避免连锁失败 */ }
+  }
+}
+// watch 用 nextTick 包一层 —— 用户从 Step 7 → Step 8 切换时,setup 可能还在执行某些后续的
+// const 声明(影响 generateYAML 用到的 helper)。同步触发会撞已知的 TDZ;让它进 microtask
+// 队列,等当前 sync 调用栈结束、所有 const 都 ready 再跑。
+watch(currentStep, (s) => {
+  nextTick(() => runYAMLGen(s))
+})
+onMounted(() => runYAMLGen(currentStep.value))
 
 // ── Skills whitelist derivation ──
 // 数据层 enabledDataStores 的 key 跟 skill 目录名不是 1:1 对应:特例 elasticsearch → es-runtime-query。
@@ -4235,6 +4586,14 @@ function generateYAML(): string {
     lines.push(`  - name: ${repo.name || 'my-service'}`)
     lines.push(`    url: ${repo.url || 'git@github.com:org/repo.git'}`)
     lines.push(`    stack: ${repo.stack || 'go'}             # go/java/node/php/python，决定用哪种配置扫描器`)
+    // role 默认 backend 时不写出(老 yaml 兼容);非默认才 emit
+    if (repo.role && repo.role !== 'backend') {
+      lines.push(`    role: ${repo.role}             # 仓库角色:决定排障时是否进服务依赖图`)
+    }
+    // sub_path:monorepo 子目录,空时不写出
+    if (repo.sub_path && repo.sub_path.trim()) {
+      lines.push(`    sub_path: ${repo.sub_path.trim()}             # monorepo 子目录(本服务在仓库内的相对路径)`)
+    }
     if (repo.framework) lines.push(`    framework: ${repo.framework}`)
     if (repo.service_names.trim()) {
       lines.push('    service_names:       # 本 repo 实际部署出来的 service 名（config-map 以此为 key）')
@@ -4649,22 +5008,24 @@ const currentStepErrors = computed<Set<string>>(() => {
   const errs = new Set<string>()
   const step = currentStep.value
   if (step === 1) {
+    // Step 1 = 欢迎页(导入 yaml / 从零开始),无强制校验。任意一条路径走完都让 nextStep。
+  } else if (step === 2) {
     if (!system.id.trim()) errs.add('system.id')
     else if (!/^[a-z0-9][a-z0-9-]*$/.test(system.id)) errs.add('system.id')
     if (!system.name.trim()) errs.add('system.name')
-  } else if (step === 2) {
+  } else if (step === 3) {
     if (!agent.name.trim()) errs.add('agent.name')
     if (!anyTargetSelected.value) errs.add('targets.none')
     if (enabledTargets['openclaw']) {
       // workspace 目录名跟 agent.id 共用,system.id 非空就有自动派生值;不再单独校验
       if (!(targetModels['openclaw'] || '').trim()) errs.add('model.openclaw')
     }
-  } else if (step === 3) {
+  } else if (step === 4) {
     environments.forEach((e, i) => {
       if (!e.id.trim()) errs.add(`env.${i}.id`)
       if (!e.api_domain.trim()) errs.add(`env.${i}.api_domain`)
     })
-  } else if (step === 4) {
+  } else if (step === 5) {
     repos.forEach((r, i) => {
       if (!r.name.trim()) errs.add(`repo.${i}.name`)
       if (r._source === 'local') {
@@ -4673,7 +5034,7 @@ const currentStepErrors = computed<Set<string>>(() => {
         if (!r.url.trim()) errs.add(`repo.${i}.url`)
       }
     })
-  } else if (step === 5) {
+  } else if (step === 6) {
     // Step 5 校验 = 每个激活的源,只校验"有服务路由到本源"的 (env, svc) 组合。
     // 没服务挂上去的源/env 不强制填凭证(用户可以在 Step 4 把所有服务都挪到别的源)。
     // 多源场景下,任何服务都必须明确归属某个源(否则 Step 6 自动扫无从定位)。
@@ -4743,7 +5104,7 @@ const currentStepErrors = computed<Set<string>>(() => {
         }
       })
     }
-  } else if (step === 6) {
+  } else if (step === 7) {
     // 数据层校验:
     //   1) 配置拉取必须 ok / empty(skipped/error 拦);kuboard 也走自动扫(KuboardFetchConfigMaps),
     //      所以跟 nacos/apollo/consul 一样要求 ok|empty;env-vars/none 没自动扫,跳过此项校验。
@@ -4903,10 +5264,13 @@ const agentNameForPath = computed(() => (
 const targetDeployPaths = computed<Record<string, string>>(() => {
   const home = homeDir.value || '~'
   const wsName = agentNameForPath.value
+  // 用户手选的自定义根目录优先,没有就用默认 ~/.<target>
+  const rootFor = (t: string, def: string) => (customInstallRoots[t] || '').trim() || def
   return {
-    'openclaw': `${home}/.openclaw/workspace/${wsName}/`,
-    'claude-code': `${home}/.claude/agents/${wsName}.md`,
-    'cursor': `${home}/.cursor/agents/${wsName}.md`,
+    'openclaw': `${rootFor('openclaw', `${home}/.openclaw`)}/workspace/${wsName}/`,
+    'claude-code': `${rootFor('claude-code', `${home}/.claude`)}/agents/${wsName}.md`,
+    'cursor': `${rootFor('cursor', `${home}/.cursor`)}/agents/${wsName}.md`,
+    'codex': `${rootFor('codex', `${home}/.codex`)}/agents/${wsName}.md`,
   }
 })
 
@@ -4916,6 +5280,7 @@ const targetDeployPathHints: Record<string, string> = {
   'openclaw': 'OpenClaw 启动时扫 ~/.openclaw/workspace/* 列出可用 agent,选一个进入。',
   'claude-code': 'Claude Code 启动时读 ~/.claude/agents/*.md(用户级 subagent),所有项目都能 @<name> 调用。',
   'cursor': 'Cursor 启动时读 ~/.cursor/agents/*.md(用户级 Custom Agent),侧栏选用。',
+  'codex': 'OpenAI Codex CLI 启动时读 ~/.codex/agents/*.md,CLI 内 @<name> 调用。',
 }
 
 // Step 8 一键部署摘要:Step 2 勾了哪些 target → 渲染对应路径
@@ -5082,8 +5447,12 @@ async function runOneClickDeploy() {
       const dest = await defaultDestPath(t, system.id || '')
       // 同一份 creds 顺带传给 claude-code/cursor:installNative 走完文件拷贝后会用它
       // 注入 ~/.claude/settings.json / ~/.cursor/mcp.json 的 mcpServers,装完即可用 MCP 工具。
-      await importAndDeploy(yamlOutput.value, t, dest, repoPaths, openclawCreds)
-      if (t === 'claude-code' || t === 'cursor') {
+      // openclaw 的自定义目录走 openclawInstallDir 那条独立 UI;这里只对 ide 三家生效
+      const cir = (t === 'claude-code' || t === 'cursor' || t === 'codex')
+        ? (customInstallRoots[t] || '').trim()
+        : ''
+      await importAndDeploy(yamlOutput.value, t, dest, repoPaths, openclawCreds, cir)
+      if (t === 'claude-code' || t === 'cursor' || t === 'codex') {
         installedTargets.push(t)
         continue
       }
@@ -5175,7 +5544,6 @@ const configTypeDescriptions: Record<string, string> = {
             <span class="autosave-dot" />
             {{ lastSavedAt === null ? '草稿空' : `✓ 自动保存 · ${savedAgoLabel}` }}
           </span>
-          <button class="btn link" @click="openImportDialog" title="把已有 yaml 反填到向导各步骤,继续编辑调整">导入 YAML 到向导编辑</button>
           <button class="btn link" @click="clearDraft">清空草稿</button>
         </div>
       </div>
@@ -5236,8 +5604,41 @@ const configTypeDescriptions: Record<string, string> = {
       </div>
     </div>
 
-    <!-- Step 1 -->
-    <div v-if="currentStep === 1" class="card lg">
+    <!-- Step 1: 欢迎页 - 选导入 yaml 还是从零开始 -->
+    <div v-if="currentStep === 1" class="card lg welcome-card">
+      <h2>开始创建机器人</h2>
+      <p class="help-text" style="margin-bottom: 24px;">
+        本向导帮你生成 system.yaml 配置 + 一键部署到 OpenClaw / Claude Code / Cursor。
+        选下方任一方式开始 —— 草稿会自动保存,中途可关闭 app 下次继续。
+      </p>
+      <div class="welcome-choices">
+        <button
+          type="button"
+          class="welcome-choice"
+          @click="goToStep(2)"
+        >
+          <div class="welcome-choice-icon">✏️</div>
+          <div class="welcome-choice-text">
+            <strong>从零开始配置</strong>
+            <span>按表单一步步填,默认值已经按主流约定预设好</span>
+          </div>
+        </button>
+        <button
+          type="button"
+          class="welcome-choice"
+          @click="openImportDialog"
+        >
+          <div class="welcome-choice-icon">📥</div>
+          <div class="welcome-choice-text">
+            <strong>导入已有 system.yaml</strong>
+            <span>有 yaml 文件直接反填到向导,继续编辑调整</span>
+          </div>
+        </button>
+      </div>
+    </div>
+
+    <!-- Step 2: 系统基本信息(原 Step 1) -->
+    <div v-if="currentStep === 2" class="card lg">
       <h2>系统基本信息</h2>
       <p class="help-text" style="margin-bottom:14px">
         填一下机器人服务的业务系统:展示名、ID、一句话描述。
@@ -5302,7 +5703,7 @@ const configTypeDescriptions: Record<string, string> = {
     </div>
 
     <!-- Step 2 -->
-    <div v-if="currentStep === 2" class="card lg">
+    <div v-if="currentStep === 3" class="card lg">
       <h2>机器人身份</h2>
       <p class="help-text" style="margin-bottom:14px">
         给机器人起个名字,选要部署到哪些 AI 平台。
@@ -5348,19 +5749,21 @@ const configTypeDescriptions: Record<string, string> = {
             v-for="t in targetOptions"
             :key="t"
             class="target-card"
-            :class="{ selected: enabledTargets[t] }"
+            :class="{ selected: enabledTargets[t], 'target-disabled': targetDetectedInstalled(t) === false && !forceEnableMissingTarget[t] }"
           >
             <label class="target-card-head">
-              <input type="checkbox" v-model="enabledTargets[t]" />
+              <input
+                type="checkbox"
+                v-model="enabledTargets[t]"
+                :disabled="!targetCanBeEnabled(t)"
+                :title="!targetCanBeEnabled(t) ? '本机未检测到该 AI 平台,先安装或点下方「我已自行安装」再勾选' : ''"
+              />
               <span class="target-title">{{ targetLabels[t] }}</span>
-              <!-- claude-code / cursor 旁边挂"已装 vX / 未装"徽标,让用户一眼看到
-                   本机有没有对应客户端。openclaw 另有专门的探测 UI,不在这里重复;
-                   embedded 由 Studio 自己承载,也不需要外部客户端标。 -->
               <span
                 v-if="t === 'claude-code' && aitoolsResult"
                 class="target-install-badge"
                 :class="aitoolsResult.claude_code.installed ? 'ok' : 'miss'"
-                :title="aitoolsResult.claude_code.note || ''"
+                :title="aitoolsResult.claude_code.note || aitoolsResult.claude_code.path || ''"
               >
                 {{ aitoolsResult.claude_code.installed
                   ? `✓ v${aitoolsResult.claude_code.version || '?'}`
@@ -5370,13 +5773,22 @@ const configTypeDescriptions: Record<string, string> = {
                 v-else-if="t === 'cursor' && aitoolsResult"
                 class="target-install-badge"
                 :class="aitoolsResult.cursor.installed ? 'ok' : 'miss'"
-                :title="aitoolsResult.cursor.note || ''"
+                :title="aitoolsResult.cursor.note || aitoolsResult.cursor.path || ''"
               >
                 {{ aitoolsResult.cursor.installed
                   ? `✓ v${aitoolsResult.cursor.version || '?'}`
                   : '⚠ 未检测到' }}
               </span>
-              <!-- openclaw:onMounted 时已探一次,这里用 status === 'ok' + 版本号决定徽章 -->
+              <span
+                v-else-if="t === 'codex' && aitoolsResult"
+                class="target-install-badge"
+                :class="aitoolsResult.codex.installed ? 'ok' : 'miss'"
+                :title="aitoolsResult.codex.note || aitoolsResult.codex.path || ''"
+              >
+                {{ aitoolsResult.codex.installed
+                  ? `✓ v${aitoolsResult.codex.version || '?'}`
+                  : '⚠ 未检测到' }}
+              </span>
               <span
                 v-else-if="t === 'openclaw' && openclawDetectStatus !== 'idle'"
                 class="target-install-badge"
@@ -5391,6 +5803,37 @@ const configTypeDescriptions: Record<string, string> = {
               </span>
             </label>
             <div class="target-hint">{{ targetDescriptions[t] }}</div>
+            <!-- 未检测到 + 没强制启用 → 露出"我已自行安装/选目录/重新扫描"操作条;
+                 强制启用后 checkbox 解锁,部署位置改用 customInstallRoots[t] 拼接(若选了自定义)。 -->
+            <div
+              v-if="t !== 'openclaw' && targetDetectedInstalled(t) === false && !forceEnableMissingTarget[t]"
+              class="target-missing-actions"
+            >
+              <span>本机未找到 {{ targetLabels[t] }} —— 先安装,或</span>
+              <button type="button" class="btn-link" @click="forceEnableMissingTarget[t] = true">
+                我已自行安装,继续
+              </button>
+              <button type="button" class="btn-link" @click="pickCustomInstallRoot(t)">📁 选安装目录…</button>
+              <button type="button" class="btn-link" @click="refreshAITools">🔄 重新扫描</button>
+            </div>
+            <div
+              v-else-if="t !== 'openclaw' && targetDetectedInstalled(t) === false && forceEnableMissingTarget[t]"
+              class="target-missing-actions overridden"
+            >
+              <span v-if="customInstallRoots[t]">📁 自定义安装目录:</span>
+              <span v-else>⚠ 未检测到本机安装,已强制启用(默认部署 ~/.{{ t }})</span>
+              <code v-if="customInstallRoots[t]" :title="customInstallRoots[t]">{{ customInstallRoots[t] }}</code>
+              <button type="button" class="btn-link" @click="pickCustomInstallRoot(t)">
+                {{ customInstallRoots[t] ? '改目录…' : '📁 选安装目录…' }}
+              </button>
+              <button v-if="customInstallRoots[t]" type="button" class="btn-link" @click="clearCustomInstallRoot(t)">清除</button>
+              <button
+                type="button"
+                class="btn-link"
+                @click="() => { forceEnableMissingTarget[t] = false; enabledTargets[t] = false; clearCustomInstallRoot(t) }"
+              >撤销</button>
+              <button type="button" class="btn-link" @click="refreshAITools">🔄 重新扫描</button>
+            </div>
             <!-- 勾选后展示 install.sh 跑完后的最终落地位置 —— AI 平台从这里读 agent。
                  路径长时省略号截断,鼠标悬停看完整;Step 8 一键部署也不再问路径。 -->
             <div v-if="enabledTargets[t]" class="target-deploy-path">
@@ -5484,7 +5927,7 @@ const configTypeDescriptions: Record<string, string> = {
     </div>
 
     <!-- Step 3 -->
-    <div v-if="currentStep === 3" class="card lg">
+    <div v-if="currentStep === 4" class="card lg">
       <h2>环境列表</h2>
       <p class="help-text">
         填业务系统的运行环境(如 dev / test / prod),每个环境填后端 API 域名,可选填前端 Web 域名。建议带上 http/https 前缀。
@@ -5570,7 +6013,7 @@ const configTypeDescriptions: Record<string, string> = {
     </div>
 
     <!-- Step 4 -->
-    <div v-if="currentStep === 4" class="card lg">
+    <div v-if="currentStep === 5" class="card lg">
       <h2>代码仓库</h2>
       <p class="help-text">
         填业务的代码仓库:可以选本地已 clone 的目录,也可以填远程 URL 让 Studio 帮你拉下来。扫描后会自动识别技术栈、服务名和分支。
@@ -5612,6 +6055,9 @@ const configTypeDescriptions: Record<string, string> = {
       <div v-for="(repo, i) in repos" :key="i" class="repo-block">
         <div class="repo-header">
           <span class="repo-badge">仓库 {{ i + 1 }}</span>
+          <span v-if="repo.sub_path && repo.sub_path.trim()" class="submodule-tag" :title="`子目录: ${repo.sub_path}`">
+            📂 {{ repo.sub_path.trim() }}
+          </span>
           <button class="btn-icon remove" @click="removeRepo(i)" :disabled="repos.length <= 1">&times;</button>
         </div>
 
@@ -5794,6 +6240,140 @@ const configTypeDescriptions: Record<string, string> = {
           </div>
         </div>
 
+        <!-- monorepo 自动检测结果:始终展示(让用户清楚"有没有检测到 + 检测到啥")。
+             0 个子模块  → 绿色"单服务仓库"
+             1 个       → 灰色提示(边缘情况)
+             N>1        → 紫色 banner 列出每个子模块完整路径 + 一键拆分按钮 -->
+        <div
+          v-if="hasRepoSource(repo) && repo._submoduleHints !== undefined"
+          class="monorepo-banner"
+          :class="{
+            'monorepo-banner-mono': repo._submoduleHints.length > 1,
+            'monorepo-banner-single': repo._submoduleHints.length <= 1,
+          }"
+        >
+          <div v-if="repo._submoduleHints.length === 0" class="monorepo-banner-head ok">
+            ✓ 检测结果:单服务仓库(整仓当一个服务处理,无需拆分)
+          </div>
+          <div v-else-if="repo._submoduleHints.length === 1" class="monorepo-banner-head warn">
+            ⚠ 仅检测到 1 个子模块,看着不像 monorepo(整仓当一个服务也行)
+          </div>
+          <template v-else>
+            <div class="monorepo-banner-head">
+              🔍 检测到 monorepo,共 {{ repo._submoduleHints.length }} 个子模块(默认全选;不想拆的取消勾):
+            </div>
+            <div class="monorepo-banner-hint">
+              💡 <strong>不点"拆分"按钮就不影响</strong> —— 如果你认为这是单服务仓库,直接在下方"服务名"里手填即可,本面板纯展示。
+            </div>
+            <ul class="monorepo-banner-list">
+              <li v-for="h in repo._submoduleHints" :key="h.sub_path">
+                <label class="monorepo-row-check">
+                  <input
+                    type="checkbox"
+                    :checked="repo._submoduleSelection?.[h.sub_path] !== false"
+                    @change="toggleSubmodulePick(repo, h.sub_path, ($event.target as HTMLInputElement).checked)"
+                  />
+                  <div class="monorepo-row-content">
+                    <div class="monorepo-row-top">
+                      <strong>{{ h.name }}</strong>
+                      <span class="monorepo-stack">{{ h.stack }}</span>
+                      <span class="monorepo-role">{{ h.role }}</span>
+                    </div>
+                    <div class="monorepo-row-path">
+                      📂 <code>{{ submodulePathFor(repo, h.sub_path) }}</code>
+                    </div>
+                    <div v-if="h.url" class="monorepo-row-url" :title="h.url">
+                      🔗 <code>{{ h.url }}</code>
+                      <span class="field-hint">(独立 git repo)</span>
+                    </div>
+                    <div class="monorepo-row-reason">
+                      <span class="field-hint">{{ h.reason }}</span>
+                    </div>
+                  </div>
+                </label>
+              </li>
+            </ul>
+            <button
+              type="button"
+              class="btn primary monorepo-split-btn"
+              :disabled="pickedSubmoduleCount(repo) === 0"
+              @click="splitMonorepo(i)"
+            >
+              ✂ 拆成 {{ pickedSubmoduleCount(repo) }} 个独立条目(各自 sub_path / stack / role 自动填好)
+            </button>
+          </template>
+        </div>
+
+        <!-- 已 split 的子模块行:把"父仓本地路径 + sub_path"拼出来明确显示给用户看 -->
+        <div
+          v-if="hasRepoSource(repo) && repo.sub_path && repo.sub_path.trim() && repo._localPath"
+          class="submodule-path-display"
+        >
+          <span class="field-hint">本服务源码实际位置:</span>
+          <code>{{ submodulePathFor(repo, repo.sub_path) }}</code>
+        </div>
+
+        <!-- 子目录(monorepo):入口在仓库 header 的 +子模块 按钮 + 上方的"一键拆分"banner,
+             两条途径设进来后,sub_path 已有值,只在这里以"已设 + 可改"的方式展示;
+             否则整个表单隐藏(默认整仓单服务,99% 用户用不到本字段)。 -->
+        <div v-if="hasRepoSource(repo) && repo.sub_path && repo.sub_path.trim()" class="form-group form-group-subpath">
+          <label>
+            子目录
+            <span class="field-hint">(monorepo 子模块路径,跟 url 一起决定本服务源码位置)</span>
+          </label>
+          <input
+            v-model="repo.sub_path"
+            type="text"
+            class="subpath-input"
+            placeholder="services/commerce"
+            @input="onRepoSubPathInput(repo)"
+          />
+        </div>
+
+        <!-- 角色:决定 incident-investigator 看本 repo 的视角。stack 不能一刀切
+             (node 既能写前端也能写 BFF/服务),所以独立一个下拉给用户挑。
+             默认值在 makeEmptyRepo 兜底 backend;node/php 用户常需要改成 frontend / admin。 -->
+        <div v-if="hasRepoSource(repo)" class="form-group">
+          <label>
+            角色
+            <span class="field-hint">(影响 AI 排障时的依赖图分析方向)</span>
+          </label>
+          <select v-model="repo.role" class="role-select">
+            <option value="backend">后端服务 (backend) — 业务微服务,双向依赖图</option>
+            <option value="frontend">前端 (frontend) — web app,只调下游不被调</option>
+            <option value="gateway">网关 / BFF (gateway) — API 聚合层</option>
+            <option value="middleware">中间层 (middleware) — worker / 调度器 / 接入层</option>
+            <option value="mobile">移动端 (mobile) — iOS / Android</option>
+            <option value="admin">管理后台 (admin) — 内部运营系统</option>
+            <option value="common-lib">公共库 (common-lib) — 不入服务图,仅作版本对比</option>
+            <option value="infra">基础设施 (infra) — k8s manifest / terraform</option>
+            <option value="docs">文档 (docs) — 仅作背景资料</option>
+          </select>
+          <!-- role 推荐 chip:RecommendRoleForRepo 基于"仓库名 + 顶层目录 + stack 专属依赖文件"算出来。
+               跟当前选的 role 一致 → 显示绿色 ✓;不一致 → 显示橙色 + 一个"采用"按钮。
+               用户能看到推荐理由(如"package.json 含 react,无后端框架"),不是黑盒推断。 -->
+          <div v-if="repo._roleHintLoading" class="role-hint-loading">📍 推荐分析中…</div>
+          <div
+            v-else-if="repo._roleHint"
+            class="role-hint"
+            :class="{ matched: repo._roleHint.role === repo.role }"
+          >
+            <span v-if="repo._roleHint.role === repo.role" class="role-hint-icon">✓</span>
+            <span v-else class="role-hint-icon">📍</span>
+            <span class="role-hint-text">
+              <template v-if="repo._roleHint.role === repo.role">推荐:{{ repo._roleHint.role }}</template>
+              <template v-else>建议:<strong>{{ repo._roleHint.role }}</strong></template>
+              <span class="role-hint-reason">— {{ repo._roleHint.reason }}</span>
+            </span>
+            <button
+              v-if="repo._roleHint.role !== repo.role"
+              type="button"
+              class="role-hint-apply"
+              @click="applyRoleHint(repo)"
+            >采用</button>
+          </div>
+        </div>
+
         <!-- 服务名:自动识别出 chip 列表,每个右上角 ✕ 可删。monorepo 常见多服务,
              也支持用户"+" 手动补未识别到的。 -->
         <div v-if="hasRepoSource(repo)" class="form-group">
@@ -5886,7 +6466,7 @@ const configTypeDescriptions: Record<string, string> = {
     </div>
 
     <!-- Step 5 -->
-    <div v-if="currentStep === 5" class="card lg">
+    <div v-if="currentStep === 6" class="card lg">
       <h2>配置源</h2>
 
       <!-- 多源:顶部多选,勾哪些 type 就声明哪些源 -->
@@ -6544,7 +7124,7 @@ const configTypeDescriptions: Record<string, string> = {
     </div>
 
     <!-- Step 7:可观测性 -->
-    <div v-if="currentStep === 7" class="card lg">
+    <div v-if="currentStep === 8" class="card lg">
       <h2>可观测性</h2>
       <p class="help-text">
         勾选系统用到的可观测性组件(Grafana / Loki / Prometheus / Jaeger 等),按环境填上连接地址,机器人查日志 / 指标时会用。
@@ -6998,7 +7578,7 @@ const configTypeDescriptions: Record<string, string> = {
     </div>
 
     <!-- Step 6:数据层 —— 从配置源拉取各服务配置,按"环境 → 服务 → 数据层组件"展示识别结果 -->
-    <div v-if="currentStep === 6" class="card lg">
+    <div v-if="currentStep === 7" class="card lg">
       <h2>数据层</h2>
       <p class="help-text">
         从配置中心读取各服务配置,自动识别用到的数据层(Redis / MySQL / MongoDB 等),按 <strong>环境 → 服务 → 组件</strong> 展示。字段可直接编辑,改的是本地副本,不会回写配置中心。
@@ -7198,7 +7778,7 @@ const configTypeDescriptions: Record<string, string> = {
     </div>
 
     <!-- Step 8 -->
-    <div v-if="currentStep === 8" class="card lg">
+    <div v-if="currentStep === 9" class="card lg">
       <h2>预览 + 生成</h2>
       <!-- target 已在 Step 1 勾选;这里只读展示一下"会产出哪些平台",不让改。
            想改回去 Step 1。 -->
@@ -7229,18 +7809,20 @@ const configTypeDescriptions: Record<string, string> = {
       <div v-if="validateResult" class="validate-result" :class="{ success: validateResult.ok, fail: !validateResult.ok }">
         {{ validateResult.message }}
       </div>
+    </div>
 
-      <!-- 一键部署:yaml 预览完直接装,省 BotsPage 那一圈 -->
-      <div class="deploy-inline">
-        <div class="deploy-inline-title">🚀 一键部署到已装机器人</div>
-        <p class="help-text" style="margin-bottom:10px;">
-          按 Step 2 勾选的目标一次性部署,直接复用前面填的凭证,<strong>跑完即生效</strong>。
-          OpenClaw 若有字段前面没填,会回退到「已装机器人」页让你补齐。
-        </p>
-        <div v-if="deploySummary.length === 0" class="alert warn">
-          Step 2 没勾选任何部署目标,无法一键部署。请回 Step 2 至少勾选一个 AI 平台。
-        </div>
-        <div v-else class="deploy-targets-line">
+    <!-- Step 9: 一键部署 (流程末步) -->
+    <div v-if="currentStep === 10" class="card lg">
+      <h2>一键部署</h2>
+      <p class="help-text" style="margin-bottom:14px;">
+        按 Step 2 勾选的目标一次性部署,直接复用前面填的凭证,<strong>跑完即生效</strong>。
+        OpenClaw 若有字段前面没填,会回退到「已装机器人」页让你补齐。
+      </p>
+      <div v-if="deploySummary.length === 0" class="alert warn">
+        Step 2 没勾选任何部署目标,无法一键部署。请回 Step 2 至少勾选一个 AI 平台。
+      </div>
+      <div v-else class="deploy-final-block">
+        <div class="deploy-targets-line">
           将部署到:
           <span v-for="(item, i) in deploySummary" :key="item.target">
             <span class="deploy-target-chip">{{ item.label }}</span><span v-if="i < deploySummary.length - 1">、</span>
@@ -7249,21 +7831,21 @@ const configTypeDescriptions: Record<string, string> = {
         <div class="deploy-inline-actions">
           <button
             type="button"
-            class="btn primary"
+            class="btn primary deploy-final-btn"
             :disabled="deployLoading || deploySummary.length === 0"
             @click="runOneClickDeploy"
           >
-            {{ deployLoading ? '部署中…' : `一键部署${deploySummary.length > 0 ? `(${deploySummary.length} 个目标)` : ''}` }}
+            {{ deployLoading ? '部署中…' : `🚀 一键部署到 ${deploySummary.length} 个目标` }}
           </button>
         </div>
         <div v-if="deployError" class="alert error">{{ deployError }}</div>
       </div>
     </div>
 
-    <!-- Navigation buttons -->
-    <div class="nav-buttons">
-      <button v-if="currentStep > 1" class="btn" @click="prevStep">上一步</button>
-      <span v-else />
+    <!-- Navigation buttons - 欢迎页(Step 1)隐藏,因为它有两个大选择按钮做导航,
+         底部再加"下一步"会跟那两个 CTA 视觉混淆。-->
+    <div v-if="currentStep > 1" class="nav-buttons">
+      <button class="btn" @click="prevStep">上一步</button>
       <div v-if="currentStep < totalSteps" class="next-wrap">
         <!-- 未过校验时在按钮上方显示"还差什么",用户一眼看出要填啥 -->
         <div v-if="!canGoNext" class="next-block-hint">{{ nextBlockedHint }}</div>
@@ -7782,6 +8364,20 @@ input.path-readonly {
 .target-card.selected {
   border-color: #3b82f6; background: #eff6ff;
   box-shadow: 0 0 0 2px rgba(59,130,246,0.15);
+}
+.target-card.target-disabled {
+  background: #f8fafc; opacity: 0.78;
+}
+.target-card.target-disabled .target-card-head .target-title { color: #64748b; }
+.target-card .target-missing-actions {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 4px; padding: 6px 10px 6px 22px;
+  font-size: 11px; line-height: 1.4; color: #92400e;
+}
+.target-card .target-missing-actions.overridden { color: #b45309; }
+.target-card .target-missing-actions .btn-link {
+  background: none; border: none; padding: 0;
+  color: #2563eb; font-size: 11px; cursor: pointer; text-decoration: underline;
 }
 .target-card-head {
   display: flex; align-items: center; gap: 8px; cursor: pointer;
@@ -8501,6 +9097,170 @@ input.path-readonly {
 }
 .stack-display.empty { color: #94a3b8; }
 
+/* 角色下拉:跟普通 input 同尺寸,但加上下拉箭头 */
+.role-select {
+  width: 100%;
+  padding: 8px 12px; padding-right: 32px;
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-size: 13px;
+  appearance: none;
+  background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 12 12"><path fill="%2364748b" d="M2 4l4 4 4-4z"/></svg>');
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+.role-select:focus { outline: none; border-color: #2563eb; }
+
+/* role 推荐 chip:跟下拉同行下方,绿色=匹配,橙色=有更优推荐 */
+.role-hint-loading {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #94a3b8;
+}
+.role-hint {
+  margin-top: 6px;
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: #fff7ed; /* 默认橙色:有更优推荐 */
+  border: 1px solid #fdba74;
+  font-size: 12px;
+}
+.role-hint.matched {
+  background: #f0fdf4; /* 绿色:推荐 = 当前选的 */
+  border-color: #86efac;
+}
+.role-hint-icon { flex-shrink: 0; font-size: 13px; }
+.role-hint-text { flex: 1 1 auto; color: #1e293b; line-height: 1.4; }
+.role-hint-text strong { color: #d97706; font-weight: 600; }
+.role-hint.matched .role-hint-icon { color: #16a34a; }
+.role-hint-reason { color: #64748b; margin-left: 4px; }
+.role-hint-apply {
+  flex-shrink: 0;
+  padding: 3px 10px; border-radius: 4px;
+  border: 1px solid #d97706; background: #fff;
+  color: #d97706; font-size: 11px; font-weight: 600;
+  cursor: pointer;
+}
+.role-hint-apply:hover { background: #d97706; color: #fff; }
+
+/* sub_path 紫色 chip:已设 sub_path 的 repo header 显示,让用户一眼看出"这是 monorepo 拆出来的子条目" */
+.submodule-tag {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: #ede9fe;
+  color: #6d28d9;
+  font-size: 11px;
+  font-family: monospace;
+}
+
+/* monorepo 自动检测 banner */
+.monorepo-banner {
+  margin: 12px 0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid;
+}
+.monorepo-banner-mono { background: #f5f3ff; border-color: #c4b5fd; }
+.monorepo-banner-single { background: #f8fafc; border-color: #e2e8f0; padding: 8px 12px; }
+.monorepo-banner-head {
+  font-size: 13px; font-weight: 600; color: #5b21b6;
+  margin-bottom: 8px;
+}
+.monorepo-banner-head.ok { color: #166534; font-weight: 500; margin-bottom: 0; }
+.monorepo-banner-head.warn { color: #92400e; font-weight: 500; margin-bottom: 0; }
+.monorepo-banner-hint {
+  font-size: 11.5px; color: #475569;
+  margin-bottom: 8px;
+  padding: 5px 8px;
+  background: #fff;
+  border-radius: 4px;
+  line-height: 1.5;
+}
+.monorepo-banner-list {
+  list-style: none; padding: 0; margin: 0 0 10px 0;
+  font-size: 12px; color: #475569;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.monorepo-banner-list > li {
+  padding: 0;
+  background: #fff;
+  border: 1px solid #ddd6fe;
+  border-radius: 6px;
+}
+.monorepo-row-check {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.monorepo-row-check:hover { background: #f5f3ff; }
+.monorepo-row-check > input[type=checkbox] {
+  flex-shrink: 0;
+  margin-top: 2px;
+  cursor: pointer;
+}
+.monorepo-row-content { flex: 1 1 auto; min-width: 0; }
+.monorepo-split-btn:disabled {
+  background: #cbd5e1; cursor: not-allowed;
+}
+.monorepo-row-top {
+  display: flex; align-items: center; gap: 6px;
+  margin-bottom: 3px;
+}
+.monorepo-row-top strong { color: #1e293b; font-size: 13px; }
+.monorepo-row-path {
+  font-size: 11.5px; color: #475569;
+  margin-bottom: 3px;
+}
+.monorepo-row-path code {
+  background: #ede9fe; color: #6d28d9;
+  padding: 1px 6px; border-radius: 3px;
+  font-family: monospace; font-size: 11px;
+}
+.monorepo-row-url {
+  font-size: 11.5px; color: #475569;
+  margin-bottom: 3px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.monorepo-row-url code {
+  background: #dbeafe; color: #1e40af;
+  padding: 1px 6px; border-radius: 3px;
+  font-family: monospace; font-size: 11px;
+  margin-right: 4px;
+}
+.monorepo-row-reason { font-size: 11px; }
+.monorepo-stack, .monorepo-role {
+  display: inline-block;
+  padding: 0 6px; border-radius: 3px;
+  background: #f8fafc; border: 1px solid #cbd5e1;
+  font-size: 10.5px; color: #475569;
+}
+.monorepo-split-btn {
+  font-size: 12px; padding: 7px 16px;
+  background: #6d28d9; color: #fff; border: none; border-radius: 5px;
+  cursor: pointer; font-weight: 600;
+}
+.monorepo-split-btn:hover { background: #5b21b6; }
+
+/* 已拆分的子模块行下方,展示"实际代码位置 = 父路径 + sub_path" */
+.submodule-path-display {
+  margin: 6px 0 12px;
+  padding: 6px 12px;
+  background: #ede9fe;
+  border-left: 3px solid #6d28d9;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.submodule-path-display code {
+  margin-left: 4px;
+  background: transparent;
+  color: #5b21b6;
+  font-family: monospace; font-size: 11.5px;
+}
+
 /* 服务名 chip 列表:右上角 ✕ 可删单个 */
 .service-chips-row {
   display: flex; flex-wrap: wrap; gap: 6px;
@@ -8788,6 +9548,57 @@ input.path-readonly {
   font-weight: 600; color: #1e40af; margin-bottom: 4px; font-size: 14px;
 }
 .deploy-inline-actions { display: flex; justify-content: flex-end; }
+
+/* Step 9 一键部署主要 CTA:比内联版更醒目(独立 step,这是流程最终动作) */
+.deploy-final-block { padding: 6px 0; }
+.deploy-final-btn {
+  font-size: 15px; padding: 12px 28px;
+  font-weight: 600;
+}
+
+/* Step 1 欢迎页:两个大按钮选择"从零开始"或"导入 yaml" */
+.welcome-card { padding: 28px 32px; }
+.welcome-choices {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+.welcome-choice {
+  display: flex; align-items: center; gap: 14px;
+  padding: 20px 18px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+  transition: border-color .15s, background .15s, transform .1s;
+}
+.welcome-choice:hover {
+  border-color: #2563eb;
+  background: #eff6ff;
+}
+.welcome-choice:active { transform: translateY(1px); }
+.welcome-choice-icon {
+  flex-shrink: 0;
+  font-size: 32px;
+  width: 48px; height: 48px;
+  display: flex; align-items: center; justify-content: center;
+  background: #f1f5f9;
+  border-radius: 10px;
+}
+.welcome-choice-text {
+  display: flex; flex-direction: column; gap: 4px;
+}
+.welcome-choice-text strong {
+  font-size: 15px; color: #1e293b; font-weight: 600;
+}
+.welcome-choice-text span {
+  font-size: 12.5px; color: #64748b; line-height: 1.4;
+}
+@media (max-width: 700px) {
+  .welcome-choices { grid-template-columns: 1fr; }
+}
 
 /* 部署摘要一行:Step 8 简短列出"将部署到 X、Y、Z",路径在 Step 2 卡上看 */
 .deploy-targets-line {

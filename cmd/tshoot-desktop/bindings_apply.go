@@ -65,7 +65,7 @@ func (a *App) ApplyBot(agentPath, newYamlText string, dryRun bool) (*agent.Resul
 //
 // 副作用:把 repoPaths 按 system.id 持久化到 ~/.tshoot/config.json,后续 BotsPage
 // 重新部署同一 system 时,ApplyBot 自动读这份,不必再跑一次 wizard。
-func (a *App) ImportAndDeploy(yamlText, target, destPath string, repoPaths map[string]string, ideCreds map[string]string) (*agent.Result, error) {
+func (a *App) ImportAndDeploy(yamlText, target, destPath string, repoPaths map[string]string, ideCreds map[string]string, customInstallRoot string) (*agent.Result, error) {
 	// 用户可能传 ~/foo,统一展开成绝对路径
 	expanded := make(map[string]string, len(repoPaths))
 	for k, v := range repoPaths {
@@ -77,11 +77,20 @@ func (a *App) ImportAndDeploy(yamlText, target, destPath string, repoPaths map[s
 	if cfg, perr := config.LoadFromBytes([]byte(yamlText)); perr == nil && cfg.System.ID != "" && len(expanded) > 0 {
 		_ = userconfig.SetRepoPathsForSystem(cfg.System.ID, expanded)
 	}
+	// customInstallRoot 用户在 wizard"我已自行安装→选目录"里指定的非默认安装位置;
+	// 空字符串 → 走默认 ~/.<target>。展开 ~ 一致化处理 + 持久化到 ~/.tshoot/config.json,
+	// 让 BotsPage 的 DiscoverBots 也能扫到这里、下次进 wizard 也能反填默认值。
+	cir := ""
+	if customInstallRoot != "" {
+		cir = userconfig.ExpandHome(customInstallRoot)
+		_ = userconfig.SetCustomInstallRoot(target, cir)
+	}
 	return agent.ImportAndApply([]byte(yamlText), target, destPath, agent.ApplyOptions{
-		TemplateRoot:   a.templateRoot,
-		TshootVersion:  version,
-		RepoLocalPaths: expanded,
-		IDECreds:       ideCreds, // claude-code/cursor 装完直接注入 mcpServers 用
+		TemplateRoot:      a.templateRoot,
+		TshootVersion:     version,
+		RepoLocalPaths:    expanded,
+		IDECreds:          ideCreds, // claude-code/cursor 装完直接注入 mcpServers 用
+		CustomInstallRoot: cir,
 	})
 }
 
@@ -96,7 +105,7 @@ func (a *App) ImportAndDeploy(yamlText, target, destPath string, repoPaths map[s
 // 空 systemID 时回退到 "default"(UI 初始化时 system.id 可能还空,给个兜底)。
 func (a *App) DefaultDestPath(target, systemID string) (string, error) {
 	switch target {
-	case "openclaw", "claude-code", "cursor":
+	case "openclaw", "claude-code", "cursor", "codex":
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", fmt.Errorf("read home: %w", err)

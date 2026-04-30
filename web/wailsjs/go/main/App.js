@@ -58,6 +58,10 @@ export function DetectOpenClawModels(arg1) {
   return window['go']['main']['App']['DetectOpenClawModels'](arg1);
 }
 
+export function DetectSubmodulesForRepo(arg1) {
+  return window['go']['main']['App']['DetectSubmodulesForRepo'](arg1);
+}
+
 export function Diff(arg1, arg2) {
   return window['go']['main']['App']['Diff'](arg1, arg2);
 }
@@ -86,6 +90,14 @@ export function GenPreview(arg1) {
   return window['go']['main']['App']['GenPreview'](arg1);
 }
 
+export function GetCustomInstallRoots() {
+  return window['go']['main']['App']['GetCustomInstallRoots']();
+}
+
+export function GetMissingRepoPaths(arg1) {
+  return window['go']['main']['App']['GetMissingRepoPaths'](arg1);
+}
+
 export function GetRemoteURL(arg1) {
   return window['go']['main']['App']['GetRemoteURL'](arg1);
 }
@@ -98,8 +110,8 @@ export function GetUserConfig() {
   return window['go']['main']['App']['GetUserConfig']();
 }
 
-export function ImportAndDeploy(arg1, arg2, arg3, arg4, arg5) {
-  return window['go']['main']['App']['ImportAndDeploy'](arg1, arg2, arg3, arg4, arg5);
+export function ImportAndDeploy(arg1, arg2, arg3, arg4, arg5, arg6) {
+  return window['go']['main']['App']['ImportAndDeploy'](arg1, arg2, arg3, arg4, arg5, arg6);
 }
 
 export function KuboardFetchConfigMaps(arg1) {
@@ -134,6 +146,10 @@ export function KuboardPodSnapshot(arg1) {
   return window['go']['main']['App']['KuboardPodSnapshot'](arg1);
 }
 
+export function ListBranchesForRepo(arg1) {
+  return window['go']['main']['App']['ListBranchesForRepo'](arg1);
+}
+
 export function ListGrafanaDatasources(arg1) {
   return window['go']['main']['App']['ListGrafanaDatasources'](arg1);
 }
@@ -162,6 +178,10 @@ export function Plan(arg1) {
   return window['go']['main']['App']['Plan'](arg1);
 }
 
+export function PrefillCreds(arg1) {
+  return window['go']['main']['App']['PrefillCreds'](arg1);
+}
+
 export function PreloadConfigCenter(arg1) {
   return window['go']['main']['App']['PreloadConfigCenter'](arg1);
 }
@@ -180,6 +200,10 @@ export function ProbeURLAuth(arg1, arg2, arg3, arg4) {
 
 export function ReadEnv(arg1) {
   return window['go']['main']['App']['ReadEnv'](arg1);
+}
+
+export function RecommendRoleForRepo(arg1, arg2, arg3) {
+  return window['go']['main']['App']['RecommendRoleForRepo'](arg1, arg2, arg3);
 }
 
 export function RevealInFinder(arg1) {
@@ -212,6 +236,10 @@ export function ScanInstallPrompts(arg1) {
 
 export function SelfTestAgent(arg1) {
   return window['go']['main']['App']['SelfTestAgent'](arg1);
+}
+
+export function SetCustomInstallRoot(arg1, arg2) {
+  return window['go']['main']['App']['SetCustomInstallRoot'](arg1, arg2);
 }
 
 export function SetDefaultReposRoot(arg1) {

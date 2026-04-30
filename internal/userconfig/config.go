@@ -52,6 +52,16 @@ type Config struct {
 	//   - BotsPage 重新部署同一 system.id 的机器人:ApplyBot 自动按 system.id 读这份。
 	//   - 团队成员拿到同一 yaml 但本机路径不一样:他们自己跑 wizard 后这份就有了。
 	RepoPathsBySystem map[string]map[string]string `json:"repo_paths_by_system,omitempty"`
+
+	// CustomInstallRoots 是 AI 平台的自定义安装根目录:<target> → 绝对路径。
+	// target 取值:claude-code / cursor / codex / openclaw。
+	//
+	// 当用户在 wizard "我已自行安装→选目录" 里指定了非默认安装位置时持久化在这里。
+	// 后续:
+	//   - InitPage 启动:读这里反填 customInstallRoots reactive,UI 默认有值
+	//   - DiscoverBots 扫机器人:把这里的根目录作为额外扫描路径(挂在 ~/.<target> 旁边)
+	//   - ApplyBot:走 discover 找出来的 path 时,InstallNativeAt 直接落到原位置
+	CustomInstallRoots map[string]string `json:"custom_install_roots,omitempty"`
 }
 
 // configPath 返回 ~/.tshoot/config.json 的绝对路径。
@@ -142,6 +152,42 @@ func SetRepoPathsForSystem(systemID string, paths map[string]string) error {
 		delete(cfg.RepoPathsBySystem, systemID)
 	} else {
 		cfg.RepoPathsBySystem[systemID] = filtered
+	}
+	return Save(cfg)
+}
+
+// GetCustomInstallRoots 返回 target → 自定义安装根目录的整张表。
+// 文件不存在 / 没存过返回空 map(非 nil,方便调用方直接 range)。
+func GetCustomInstallRoots() map[string]string {
+	cfg, err := Load()
+	if err != nil || cfg == nil || cfg.CustomInstallRoots == nil {
+		return map[string]string{}
+	}
+	return cfg.CustomInstallRoots
+}
+
+// SetCustomInstallRoot upsert 单个 target 的自定义安装根目录。
+// dir 为空 → 视为"删除该 target 的覆盖"(回落到默认 ~/.<target>)。
+func SetCustomInstallRoot(target, dir string) error {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil
+	}
+	cfg, err := Load()
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		cfg = &Config{}
+	}
+	if cfg.CustomInstallRoots == nil {
+		cfg.CustomInstallRoots = map[string]string{}
+	}
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		delete(cfg.CustomInstallRoots, target)
+	} else {
+		cfg.CustomInstallRoots[target] = ExpandHome(dir)
 	}
 	return Save(cfg)
 }

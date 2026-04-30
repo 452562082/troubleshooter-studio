@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/xiaolong/troubleshooter-studio/internal/agent"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/doctor"
 	"github.com/xiaolong/troubleshooter-studio/internal/generator"
@@ -31,7 +32,19 @@ func (s *Server) HandleValidate(w http.ResponseWriter, r *http.Request) {
 		"name":   cfg.System.Name,
 		"envs":   len(cfg.Environments),
 		"repos":  len(cfg.Repos),
+		"issues": config.HealthCheck(cfg),
 	})
+}
+
+// HandlePrefillCreds POST /api/prefill-creds — body 为 system.yaml 内容,返回 env var key → value
+// (KUBOARD_URL_DEV 这种 install 阶段环境变量名)。空值字段不返。
+func (s *Server) HandlePrefillCreds(w http.ResponseWriter, r *http.Request) {
+	cfg, err := loadConfigFromBody(r)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	jsonOK(w, agent.PrefillCredsFromYAML(cfg))
 }
 
 // HandlePlan POST /api/plan — body 为 system.yaml 内容

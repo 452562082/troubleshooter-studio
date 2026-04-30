@@ -1,10 +1,20 @@
 # repo-stack-map.yaml
 # 由 troubleshooter-studio 生成 — 技术栈与角色速查
+#
+# role 用法:
+#   - backend / middleware  双向都进服务依赖图(主角 + 上下游)
+#   - frontend / mobile / admin / gateway  只作上游边的发起方(自身没运行 endpoint 被调)
+#   - common-lib / infra / docs  不进服务依赖图;排障时仅作"哪些服务依赖了某 lib"横向对比
+# routing skill 拼查询时按 role 决定从哪查 deployment / log / metric。
 repos:
 {{- range .Repos}}
   {{.Name}}:
     url: {{.URL | printf "%q"}}
     stack: {{.Stack}}
+    role: {{.EffectiveRole | printf "%q"}}
+    {{- if .SubPath}}
+    sub_path: {{.SubPath | printf "%q"}}     # monorepo 子目录:<clone-root>/<sub_path> 才是本服务源码根
+    {{- end}}
     {{- if .Framework}}
     framework: {{.Framework | printf "%q"}}
     {{- end}}

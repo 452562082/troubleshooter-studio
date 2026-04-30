@@ -70,7 +70,7 @@ func runGen(args []string) error {
 		switch t {
 		case "openclaw":
 			hasOpenclaw = true
-		case "claude-code", "cursor", "embedded":
+		case "claude-code", "cursor", "codex", "embedded":
 			hasOther = true
 		}
 	}
@@ -108,6 +108,11 @@ func runGen(args []string) error {
 				return err
 			}
 			fmt.Printf("[ok] cursor output → %s-cursor\n", outDir)
+		case "codex":
+			if err := g.GenerateCodex(); err != nil {
+				return err
+			}
+			fmt.Printf("[ok] codex output → %s-codex\n", outDir)
 		}
 	}
 

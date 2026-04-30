@@ -83,11 +83,55 @@ type RepoAnalysis struct {
 	IncludePaths []string `yaml:"include_paths"`
 }
 
+// RepoRole 仓库在系统里担的角色,给 incident-investigator 决定"沿依赖追"的方向 + 范围。
+//   backend     — 后端业务服务(典型 microservice),双向依赖图都有
+//   frontend    — 前端 / web app,只有 downstream(调 gateway / api),无 upstream
+//   gateway     — API 网关 / BFF,downstream 是后端,upstream 是 frontend / 移动端
+//   middleware  — 接入层 / 公共中间件(消息队列 worker / cron 调度器),双向依赖
+//   common-lib  — 公共库/SDK,自身不在依赖图节点上 —— 它被各个服务 import,
+//                 但不接受运行时调用(没有 service endpoint)。排障时不当主角看,
+//                 而是作为"哪些服务依赖了某 lib 的某版本"做横向比对。
+//   mobile      — 移动端 app(iOS/Android),只调 gateway,没 upstream
+//   admin       — 管理后台,典型只有 downstream(调 backend admin 接口)
+//   infra       — 基础设施配置仓库(k8s manifest / terraform),不在运行依赖图
+//   docs        — 文档仓库,仅作背景资料
+//
+// 留空时模板按 "backend" 兜底。GUI wizard 给一个下拉,默认按 stack 推荐:
+// go/java/python → backend, node 含 server → backend, node 纯前端 → frontend, php → backend...
+type RepoRole = string
+
+const (
+	RoleBackend    RepoRole = "backend"
+	RoleFrontend   RepoRole = "frontend"
+	RoleGateway    RepoRole = "gateway"
+	RoleMiddleware RepoRole = "middleware"
+	RoleCommonLib  RepoRole = "common-lib"
+	RoleMobile     RepoRole = "mobile"
+	RoleAdmin      RepoRole = "admin"
+	RoleInfra      RepoRole = "infra"
+	RoleDocs       RepoRole = "docs"
+)
+
 type Repo struct {
 	Name         string            `yaml:"name"`
 	URL          string            `yaml:"url"`
 	Stack        string            `yaml:"stack"`
 	Framework    string            `yaml:"framework"`
+	// Role 决定 incident-investigator 看本 repo 的视角:common-lib / docs / infra
+	// 不进服务依赖图(它们没运行 endpoint);frontend / mobile / admin 只算 upstream
+	// 边的发起方;backend / middleware 双向都参与;gateway 居中。
+	// 空字符串视为 backend(老 yaml 兼容)。
+	Role         RepoRole          `yaml:"role,omitempty"`
+	// SubPath 是 monorepo 场景:多个服务在同一个 git 仓库的不同子目录,本字段指定本条目对应
+	// 的子目录(相对仓库根,如 "services/commerce" / "packages/admin-web")。
+	// 用法:在 repos[] 里添加多个条目共用相同 url + 不同 sub_path,name 各取服务名。
+	// 例:
+	//   - {name: commerce, url: <truss>, stack: go, role: backend, sub_path: services/commerce}
+	//   - {name: admin-web, url: <truss>, stack: node, role: admin, sub_path: web/admin}
+	//   - {name: shared,    url: <truss>, stack: go, role: common-lib, sub_path: shared}
+	// clone 时按 url dedup(同 url 只 clone 一次),analyzer / role-hint / dep-scan
+	// 都在 <clone-root>/<sub_path> 这个子目录里跑。空时整 repo 当一个服务对待(默认行为)。
+	SubPath      string            `yaml:"sub_path,omitempty"`
 	ServiceNames []string          `yaml:"service_names"`
 	EnvBranches  map[string]string `yaml:"env_branches"`
 	Analysis     RepoAnalysis      `yaml:"analysis"`
@@ -97,10 +141,43 @@ type Repo struct {
 	ConfigSource string `yaml:"config_source,omitempty"`
 }
 
+// EffectiveRole 返回 repo 实际的 role:Role 显式给了就用,否则 fallback "backend"。
+// 给模板和 generator 用,统一处理空值。
+func (r Repo) EffectiveRole() RepoRole {
+	if r.Role != "" {
+		return r.Role
+	}
+	return RoleBackend
+}
+
+// IsServiceNode 返回 repo 是否进服务依赖图。common-lib / infra / docs 不进 ——
+// 它们没有运行 endpoint,排障时不会作为"主角服务"或"上下游节点"。
+func (r Repo) IsServiceNode() bool {
+	switch r.EffectiveRole() {
+	case RoleCommonLib, RoleInfra, RoleDocs:
+		return false
+	}
+	return true
+}
+
 type ConfigCenterEndpoint struct {
 	Env           string `yaml:"env"`
-	Addr          string `yaml:"addr"`
-	NamespaceHint string `yaml:"namespace_hint"`
+	Addr          string `yaml:"addr,omitempty"`
+	NamespaceHint string `yaml:"namespace_hint,omitempty"`
+
+	// GUI wizard 写出来的 per-env URL + 凭证(每个 type 用其中一个子集):
+	//   nacos:    addr + user + pass
+	//   apollo:   meta_url + token
+	//   consul:   host + token
+	//   kuboard:  url + (access_key | user + pass)
+	// install 阶段从这些字段抽出来当 .env 默认值,免得用户在 GUI 表单里再填一遍。
+	URL       string `yaml:"url,omitempty"`
+	User      string `yaml:"user,omitempty"`
+	Pass      string `yaml:"pass,omitempty"`
+	Token     string `yaml:"token,omitempty"`
+	MetaURL   string `yaml:"meta_url,omitempty"`
+	Host      string `yaml:"host,omitempty"`
+	AccessKey string `yaml:"access_key,omitempty"`
 }
 
 type CredentialAuth struct {
@@ -133,16 +210,58 @@ type ServiceMapEntry struct {
 	ConfigMap string `yaml:"configmap,omitempty"` // kuboard 独有:k8s ConfigMap 名
 }
 
+// ObsEndpoint 是 GUI wizard 写出来的 per-env 端点(grafana/loki/prom/jaeger/elk/sw/tempo/k8s_runtime
+// 共用一份字段超集)。每个 obs 组件实际用其中的一个子集:URL 必有,鉴权字段按组件类型挑用。
+//
+// 解析后由 migrateObservabilityEndpoints 走一遍,把 URL / Kibana / ES / DSUID 抽到对应的
+// `*_by_env` map(老 schema)。Endpoints 自身保留(往后真要 per-env 凭证时还能读),
+// 但模板渲染目前只看 *_by_env map。
+type ObsEndpoint struct {
+	Env string `yaml:"env"`
+	URL string `yaml:"url,omitempty"`
+
+	// Grafana / ELK 通用账密
+	User string `yaml:"user,omitempty"`
+	Pass string `yaml:"pass,omitempty"`
+	// Grafana API Key 鉴权
+	APIKey string `yaml:"api_key,omitempty"`
+
+	// ELK 专属:Kibana 与 Elasticsearch 直连
+	KibanaURL string `yaml:"kibana_url,omitempty"`
+	ESURL     string `yaml:"es_url,omitempty"`
+
+	// K8s Runtime (Kuboard) 专属:API 凭证 / 用户名密码
+	AccessKey string `yaml:"access_key,omitempty"`
+	Username  string `yaml:"username,omitempty"`
+	Password  string `yaml:"password,omitempty"`
+}
+
 type Grafana struct {
 	Enabled  bool              `yaml:"enabled"`
-	URLByEnv map[string]string `yaml:"url_by_env"`
+	URLByEnv map[string]string `yaml:"url_by_env,omitempty"`
 	Auth     CredentialAuth    `yaml:"auth"`
+	// Endpoints 是 GUI wizard 的 per-env 端点输出形式(含凭证)。loader 负责把
+	// 它的 url 抽到 URLByEnv,模板暂时仍读 URLByEnv 保持兼容。
+	Endpoints []ObsEndpoint `yaml:"endpoints,omitempty"`
+}
+
+// LokiLabelMappingPerEnv 对应 wizard 输出的 loki.label_mapping_by_env.<env> 整块,
+// 给 routing skill 在运行时拼 LogQL 用。loader 还会把 grafana_ds_uid 字段抽到
+// Loki.DatasourceUIDByEnv,确保走 Grafana 代理的 selector_chain 拿得到 ds uid。
+type LokiLabelMappingPerEnv struct {
+	EnvLabel      string                       `yaml:"env_label,omitempty"`
+	ServiceLabel  string                       `yaml:"service_label,omitempty"`
+	GrafanaDSUID  string                       `yaml:"grafana_ds_uid,omitempty"`
+	Namespace     string                       `yaml:"namespace,omitempty"`
+	ServiceMap    map[string]map[string]string `yaml:"service_map,omitempty"`
 }
 
 type Loki struct {
-	Enabled            bool              `yaml:"enabled"`
-	ViaGrafana         bool              `yaml:"via_grafana"`
-	DatasourceUIDByEnv map[string]string `yaml:"datasource_uid_by_env,omitempty"` // 走 Grafana 代理时本 env 用哪个 ds
+	Enabled            bool                              `yaml:"enabled"`
+	ViaGrafana         bool                              `yaml:"via_grafana"`
+	DatasourceUIDByEnv map[string]string                 `yaml:"datasource_uid_by_env,omitempty"` // 走 Grafana 代理时本 env 用哪个 ds
+	Endpoints          []ObsEndpoint                     `yaml:"endpoints,omitempty"`
+	LabelMappingByEnv  map[string]LokiLabelMappingPerEnv `yaml:"label_mapping_by_env,omitempty"`
 }
 
 type Prometheus struct {
@@ -150,42 +269,52 @@ type Prometheus struct {
 	ViaGrafana         bool              `yaml:"via_grafana"`
 	PreferredMetrics   []string          `yaml:"preferred_metrics"`
 	DatasourceUIDByEnv map[string]string `yaml:"datasource_uid_by_env,omitempty"`
+	Endpoints          []ObsEndpoint     `yaml:"endpoints,omitempty"`
 }
 
 type Jaeger struct {
 	Enabled            bool              `yaml:"enabled"`
-	URLByEnv           map[string]string `yaml:"url_by_env"` // env → Jaeger UI URL
+	URLByEnv           map[string]string `yaml:"url_by_env,omitempty"` // env → Jaeger UI URL
 	DatasourceUIDByEnv map[string]string `yaml:"datasource_uid_by_env,omitempty"`
+	Endpoints          []ObsEndpoint     `yaml:"endpoints,omitempty"`
+	// SamplingRate:Jaeger 头采样率(0.0-1.0)。agent 看到"trace_id 找不到"时按这个判断
+	// "采样率 X%,大量 trace 没采到很正常,从日志找 trace_id="还是"trace 真不存在"。
+	// 0 视为未设置(模板侧 fallback 0.1 = 10%);常见值:1.0 全采 / 0.1 头采样 / 0.01 重负载。
+	SamplingRate float64 `yaml:"sampling_rate,omitempty"`
 }
 
 type ELK struct {
 	Enabled            bool              `yaml:"enabled"`
-	KibanaByEnv        map[string]string `yaml:"kibana_by_env"` // env → Kibana URL
-	ESByEnv            map[string]string `yaml:"es_by_env"`     // env → Elasticsearch URL（直查）
-	DefaultIndex       string            `yaml:"default_index"` // 默认日志索引 pattern
+	KibanaByEnv        map[string]string `yaml:"kibana_by_env,omitempty"` // env → Kibana URL
+	ESByEnv            map[string]string `yaml:"es_by_env,omitempty"`     // env → Elasticsearch URL(直查)
+	DefaultIndex       string            `yaml:"default_index"`           // 默认日志索引 pattern
 	Auth               CredentialAuth    `yaml:"auth"`
 	DatasourceUIDByEnv map[string]string `yaml:"datasource_uid_by_env,omitempty"`
+	Endpoints          []ObsEndpoint     `yaml:"endpoints,omitempty"`
 }
 
 type SkyWalking struct {
-	Enabled  bool              `yaml:"enabled"`
-	URLByEnv map[string]string `yaml:"url_by_env"` // env → SkyWalking OAP GraphQL URL
+	Enabled   bool              `yaml:"enabled"`
+	URLByEnv  map[string]string `yaml:"url_by_env,omitempty"` // env → SkyWalking OAP GraphQL URL
+	Endpoints []ObsEndpoint     `yaml:"endpoints,omitempty"`
 }
 
 type Tempo struct {
 	Enabled            bool              `yaml:"enabled"`
-	URLByEnv           map[string]string `yaml:"url_by_env"` // env → Tempo API URL
+	URLByEnv           map[string]string `yaml:"url_by_env,omitempty"` // env → Tempo API URL
 	ViaGrafana         bool              `yaml:"via_grafana"`
 	DatasourceUIDByEnv map[string]string `yaml:"datasource_uid_by_env,omitempty"`
+	Endpoints          []ObsEndpoint     `yaml:"endpoints,omitempty"`
 }
 
 // K8sRuntime 走 Kuboard v4 API 查 pod / events / 日志 / deployment 状态。
 // 跟配置源 kuboard 的连接信息可以重合(同一个 Kuboard 实例),但开关独立 ——
 // 用户也可能从 nacos 读配置、同时只用 Kuboard 查运行时。
 type K8sRuntime struct {
-	Enabled    bool                       `yaml:"enabled"`
-	URLByEnv   map[string]string          `yaml:"url_by_env"` // env → Kuboard URL
-	Auth       CredentialAuth             `yaml:"auth"`
+	Enabled    bool                        `yaml:"enabled"`
+	URLByEnv   map[string]string           `yaml:"url_by_env,omitempty"` // env → Kuboard URL
+	Auth       CredentialAuth              `yaml:"auth"`
+	Endpoints  []ObsEndpoint               `yaml:"endpoints,omitempty"`
 	ServiceMap []K8sRuntimeServiceMapEntry `yaml:"service_map,omitempty"` // (env, service) → cluster/ns/workload/selector
 }
 
@@ -211,13 +340,29 @@ type Observability struct {
 	K8sRuntime K8sRuntime `yaml:"k8s_runtime"`
 }
 
+// DataStoreEndpoint 一条 (env, service) → 真实连接串。GUI wizard 写出来的形式。
+// 字段是各 type 的并集:redis/es 用 URL,mongodb 用 URI,mysql 用 DSN,kafka 用 Brokers。
+// generator 用这份数据反推 service-dependency-map 的 data_stores 字段(谁用了哪些数据层),
+// 不再让用户手填。
+type DataStoreEndpoint struct {
+	Env     string `yaml:"env"`
+	Service string `yaml:"service,omitempty"`
+	URL     string `yaml:"url,omitempty"`     // redis / elasticsearch / clickhouse
+	URI     string `yaml:"uri,omitempty"`     // mongodb
+	DSN     string `yaml:"dsn,omitempty"`     // mysql / postgresql
+	Brokers string `yaml:"brokers,omitempty"` // kafka / rocketmq
+	User    string `yaml:"user,omitempty"`
+	Pass    string `yaml:"pass,omitempty"`
+}
+
 type DataStore struct {
-	Type             string            `yaml:"type"`
-	Enabled          bool              `yaml:"enabled"`
-	Discovery        string            `yaml:"discovery"` // from_config_center / static / both
-	ReadonlyEnforced bool              `yaml:"readonly_enforced"`
-	StaticEndpoints  []string          `yaml:"static_endpoints"` // legacy flat list
-	EndpointsByEnv   map[string]string `yaml:"endpoints_by_env"` // env → "host:port" or "uri"
+	Type             string              `yaml:"type"`
+	Enabled          bool                `yaml:"enabled"`
+	Discovery        string              `yaml:"discovery,omitempty"` // from_config_center / static / both
+	ReadonlyEnforced bool                `yaml:"readonly_enforced"`
+	StaticEndpoints  []string            `yaml:"static_endpoints,omitempty"` // legacy flat list
+	EndpointsByEnv   map[string]string   `yaml:"endpoints_by_env,omitempty"` // env → "host:port" or "uri"
+	Endpoints        []DataStoreEndpoint `yaml:"endpoints,omitempty"`        // GUI 新 schema:per (env, service) 详情
 }
 
 type MessagingCredentials struct {

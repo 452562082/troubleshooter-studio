@@ -202,6 +202,62 @@ export async function saveRepoPathsForSystem(systemID: string, paths: Record<str
   await App.SaveRepoPathsForSystem(systemID, paths)
 }
 
+/** AI 平台自定义安装根目录(target → 绝对路径)。空 target 不返。
+ *  配套 ~/.tshoot/config.json 里的 custom_install_roots 字段。
+ *  InitPage 启动时调一次反填,DiscoverBots 内部也读这份合并扫描列表。 */
+export async function getCustomInstallRoots(): Promise<Record<string, string>> {
+  if (!isDesktop()) return {}
+  const m = await (App as any).GetCustomInstallRoots()
+  return (m as Record<string, string>) || {}
+}
+
+/** upsert 单个 target 的自定义安装根目录;dir='' → 删除该 target 覆盖。 */
+export async function setCustomInstallRoot(target: string, dir: string): Promise<void> {
+  if (!isDesktop() || !target) return
+  await (App as any).SetCustomInstallRoot(target, dir)
+}
+
+/** 子模块探测结果(monorepo 自动拆分用)。
+ *  url 仅在 .gitmodules 路径下非空 —— 那是真"独立 git repo + 子目录共置"场景,
+ *  每个 submodule 有自己的 git URL。 其它检测路径(workspaces / pom modules / cmd 多入口 /
+ *  顶层平铺多服务)是"同一仓库子目录",共用父仓 URL,本字段空。 */
+export interface SubmoduleHint {
+  name: string
+  sub_path: string
+  stack: string
+  role: string
+  reason: string
+  url?: string
+}
+
+/** 列分支(只列,不跑 stack 检测 / 依赖扫描)。
+ *  monorepo .gitmodules 拆分后给每个子模块行喂下拉用 —— 比完整 analyze 轻得多。
+ *  空路径或非 git 仓库返回空数组。 */
+export async function listBranchesForRepo(repoPath: string): Promise<string[]> {
+  if (!isDesktop() || !repoPath) return []
+  const r = await App.ListBranchesForRepo(repoPath)
+  return r || []
+}
+
+/** 检测仓库是不是 monorepo + 列出每个子模块。
+ *  返回空数组 = 不是 monorepo,UI 静默;返回 N>1 → "一键拆成 N 行"按钮。
+ *  支持的 monorepo 模式见 internal/analyzer/monorepo_scan.go。 */
+export async function detectSubmodulesForRepo(repoPath: string): Promise<SubmoduleHint[]> {
+  if (!isDesktop() || !repoPath) return []
+  const r = await App.DetectSubmodulesForRepo(repoPath)
+  return (r || []) as SubmoduleHint[]
+}
+
+/** 给 (stack, name, optionalLocalPath) 推荐一个 role + 理由说明。
+ *  wizard Step 4 在"扫描完成"或"用户改名/改 stack"时调一次,把推荐结果展示在 role 下拉旁边,
+ *  让用户能一眼看出"为啥推这个角色"。空路径时只看名字 + stack 兜底,有路径时进一步读
+ *  package.json / pom.xml / go.mod / composer.json 等。 */
+export async function recommendRoleForRepo(stack: string, name: string, path = ''): Promise<{ role: string, reason: string }> {
+  if (!isDesktop()) return { role: 'backend', reason: '默认' }
+  const r = await App.RecommendRoleForRepo(stack, name, path)
+  return { role: r?.role || 'backend', reason: r?.reason || '' }
+}
+
 // 注:曾经的 diff() bridge + DiffPage 已删 —— 功能被 BotsPage 的"编辑配置 → 预演"
 // 完全覆盖(而且那个给的是 target-aware 真实 diff,带 preserve/remove 列表)。
 // 后端 App.Diff binding 暂留做 CLI 调用兼容,UI 不再经过 bridge.
@@ -321,9 +377,11 @@ export async function importAndDeploy(
   destPath: string,
   repoPaths: Record<string, string> = {},
   ideCreds: Record<string, string> = {},
+  customInstallRoot: string = '',
 ): Promise<ApplyResult> {
   if (!isDesktop()) throw new Error('ImportAndDeploy 只在桌面 app 里可用')
-  return App.ImportAndDeploy(yamlText, target, destPath, repoPaths, ideCreds)
+  // Wails generate 跑慢一步时,新加的参数 backend 不认 —— 用 any 绕过 TS 严格签名校验
+  return (App.ImportAndDeploy as any)(yamlText, target, destPath, repoPaths, ideCreds, customInstallRoot)
 }
 
 /** 给 target 推荐默认部署路径。embedded/openclaw 返回 ~/.tshoot/<target>/<id>/
@@ -608,12 +666,14 @@ export interface AIToolResult {
 export interface AIToolsDetectResult {
   claude_code: AIToolResult
   cursor: AIToolResult
+  codex: AIToolResult
 }
 export async function detectAITools(): Promise<AIToolsDetectResult> {
   if (!isDesktop()) {
     return {
       claude_code: { installed: false, note: '浏览器模式不支持' },
       cursor: { installed: false, note: '浏览器模式不支持' },
+      codex: { installed: false, note: '浏览器模式不支持' },
     }
   }
   // Wails 生成的类型把 nested 字段标成 optional,但 Go 侧永远返回非 nil;
@@ -622,6 +682,7 @@ export async function detectAITools(): Promise<AIToolsDetectResult> {
   return {
     claude_code: (r.claude_code as AIToolResult) || { installed: false },
     cursor:      (r.cursor      as AIToolResult) || { installed: false },
+    codex:       ((r as any).codex as AIToolResult) || { installed: false },
   }
 }
 

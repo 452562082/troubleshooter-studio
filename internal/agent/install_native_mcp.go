@@ -26,25 +26,46 @@ import (
 // 桌面端 wizard 通过 buildOpenclawCreds() 拼出来传过来;CLI 没 creds 时传 nil,
 // 注入的 env 字段值会变成 {{ENV_VAR}} 占位符让用户手填。
 func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[string]string) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("read $HOME: %w", err)
+	return MergeMCPIntoIDESettingsAt(target, cfg, creds, "")
+}
+
+// MergeMCPIntoIDESettingsAt 跟 MergeMCPIntoIDESettings 同,只是允许指定 IDE 安装根目录。
+// customRoot 非空时 settings 落到 <customRoot>/settings.json (claude-code) 或
+// <customRoot>/mcp.json (cursor/codex);空字符串时回退默认 ~/.<target>。
+func MergeMCPIntoIDESettingsAt(target string, cfg *config.SystemConfig, creds map[string]string, customRoot string) error {
+	root := customRoot
+	if root == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("read $HOME: %w", err)
+		}
+		switch target {
+		case "claude-code":
+			root = filepath.Join(home, ".claude")
+		case "cursor":
+			root = filepath.Join(home, ".cursor")
+		case "codex":
+			root = filepath.Join(home, ".codex")
+		default:
+			return fmt.Errorf("MergeMCPIntoIDESettings: 不支持的 target %q(只接 claude-code / cursor / codex)", target)
+		}
 	}
 	var settingsPath string
 	switch target {
 	case "claude-code":
-		settingsPath = filepath.Join(home, ".claude", "settings.json")
-	case "cursor":
-		settingsPath = filepath.Join(home, ".cursor", "mcp.json")
+		settingsPath = filepath.Join(root, "settings.json")
+	case "cursor", "codex":
+		// Cursor 与 OpenAI Codex CLI 都走 mcp.json(顶层 mcpServers map)。
+		settingsPath = filepath.Join(root, "mcp.json")
 	default:
-		return fmt.Errorf("MergeMCPIntoIDESettings: 不支持的 target %q(只接 claude-code / cursor)", target)
+		return fmt.Errorf("MergeMCPIntoIDESettings: 不支持的 target %q(只接 claude-code / cursor / codex)", target)
 	}
 
-	root, err := readJSONOrEmpty(settingsPath)
+	settings, err := readJSONOrEmpty(settingsPath)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", settingsPath, err)
 	}
-	servers, _ := root["mcpServers"].(map[string]any)
+	servers, _ := settings["mcpServers"].(map[string]any)
 	if servers == nil {
 		servers = map[string]any{}
 	}
@@ -70,12 +91,12 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 	for k, v := range new {
 		servers[k] = v
 	}
-	root["mcpServers"] = servers
+	settings["mcpServers"] = servers
 
 	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", filepath.Dir(settingsPath), err)
 	}
-	data, err := json.MarshalIndent(root, "", "  ")
+	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}

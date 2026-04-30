@@ -94,16 +94,10 @@ func New(cfg *config.SystemConfig, templateRoot, outputDir string) *Generator {
 	}
 }
 
-// LoadAnalysis 合并 analyzer 产出的 findings 到 Context
-func (g *Generator) LoadAnalysis(path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read analysis: %w", err)
-	}
-	var report analyzer.Report
-	if err := json.Unmarshal(data, &report); err != nil {
-		return fmt.Errorf("parse analysis: %w", err)
-	}
+// LoadAnalysisReport 合并已经在内存里的 analyzer.Report 到 Context。
+// 跟 LoadAnalysis 区别:跳过磁盘 IO(部署期 auto-analyze 拿的 Result 直接传进来,
+// 不必先写 analysis.json 再读)。LoadAnalysis 走文件路径时复用本函数。
+func (g *Generator) LoadAnalysisReport(report analyzer.Report) {
 	for _, ra := range report.Repos {
 		// findings → ctx(老路径,只填有 findings 的)
 		if len(ra.Findings) > 0 && len(ra.ServiceNames) > 0 {
@@ -132,6 +126,19 @@ func (g *Generator) LoadAnalysis(path string) error {
 			}
 		}
 	}
+}
+
+// LoadAnalysis 合并 analyzer 产出的 findings 到 Context
+func (g *Generator) LoadAnalysis(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read analysis: %w", err)
+	}
+	var report analyzer.Report
+	if err := json.Unmarshal(data, &report); err != nil {
+		return fmt.Errorf("parse analysis: %w", err)
+	}
+	g.LoadAnalysisReport(report)
 	return nil
 }
 

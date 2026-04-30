@@ -18,16 +18,21 @@ onMounted(() => setupGlobalLogBridges())
 // 日志条数 —— 侧栏"日志"项右侧小徽章显示,让用户看到有新内容产生
 const { count: logCount } = useLogStore()
 
-// 侧边栏分主路径 + 诊断工具两档。诊断工具(YAML 调试器 / 仓库分析 / 日志)放主路径
+// 侧边栏分主路径 + 诊断工具两档。诊断工具(YAML 沙盒 / 代码扫描 / 日志)放主路径
 // 后面让新用户视线先扫过去,不进诊断也无感。路径本身没有视觉分组,只是顺序靠后;
 // 将来需要的话再加分隔线。
+//
+// 职责对齐(2026-04-30 重新切分,两者不再功能重叠):
+//   YAML 沙盒  → 操作 yaml 文件:验证 / 健康检查 / 干跑生成 / 产物预览(看会出什么 skill)
+//   代码扫描  → 操作代码仓库:扫码识别 service_names / 配置中心 finding,**结果可"应用回 yaml"**
+//                让两个工具形成闭环 — 扫码 → 应用 → 沙盒验证 → 部署
 const navItems = [
   { path: '/', icon: '🏠', label: '首页', desc: '概览 + 下一步推荐' },
   { path: '/bots', icon: '🤖', label: '已装机器人', desc: '管理已部署的机器人' },
   { path: '/init', icon: '🧙', label: '创建向导', desc: '一步步创建一个新机器人' },
   // ── 诊断工具(下面几项) ──
-  { path: '/editor', icon: '📝', label: 'YAML 调试器', desc: '校验配置文件语法' },
-  { path: '/analyze', icon: '🔍', label: '仓库分析', desc: '扫代码识别服务和配置中心' },
+  { path: '/editor', icon: '📝', label: 'YAML 沙盒', desc: '验证 yaml + 干跑生成 + 产物预览' },
+  { path: '/analyze', icon: '🔍', label: '代码扫描', desc: '扫仓库反推服务 / 配置,可应用回 yaml' },
   { path: '/logs', icon: '📜', label: '日志', desc: '全工作台过程日志 / 安装流' },
 ]
 </script>
@@ -69,9 +74,13 @@ const navItems = [
            白色区域都能拖窗口。绝对定位浮在内容上,但 z-index 低于交互元素,
            真有 input/button 的位置会被 no-drag 接管。 -->
       <div class="content-drag-strip" />
-      <router-view v-slot="{ Component }">
-        <keep-alive>
-          <component :is="Component" />
+      <!-- keep-alive 缓存所有页面让切回时秒开。Init 不缓存 —— 用户在首页"清空重开"
+           时要求一份全新草稿,缓存的 InitPage 实例里 reactive state 会让 reset 不到位
+           (localStorage 清了但 setup 已经跑过)。每次进 /init 重 mount → setup → 读
+           最新 localStorage → 拿到正确状态(干净 / 草稿)。重 mount 的代价 ms 级,可接受。 -->
+      <router-view v-slot="{ Component, route }">
+        <keep-alive :exclude="['InitPage']">
+          <component :is="Component" :key="route.path === '/init' ? route.fullPath : undefined" />
         </keep-alive>
       </router-view>
     </main>

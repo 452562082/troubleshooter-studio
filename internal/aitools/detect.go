@@ -94,6 +94,40 @@ func DetectCursor() *Result {
 	return res
 }
 
+// DetectCodex 查 PATH 里的 codex CLI(OpenAI Codex CLI 的入口)。
+// 跟 Claude Code 同款策略:LookPath + `codex --version` 抓版本;
+// fallback ~/.codex/ 目录存在也算装了(用户可能 alias 或手装)。
+func DetectCodex() *Result {
+	res := &Result{}
+	p, err := exec.LookPath("codex")
+	if err != nil {
+		home, herr := os.UserHomeDir()
+		if herr == nil {
+			if _, serr := os.Stat(filepath.Join(home, ".codex")); serr == nil {
+				res.Installed = true
+				res.Note = "PATH 里没找到 codex 二进制,但 ~/.codex 在,按已装处理"
+				return res
+			}
+		}
+		return res
+	}
+	res.Installed = true
+	res.Path = p
+	cmd := exec.Command(p, "--version")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err == nil {
+		line := strings.TrimSpace(out.String())
+		if line != "" {
+			fields := strings.Fields(line)
+			if len(fields) > 0 {
+				res.Version = fields[0]
+			}
+		}
+	}
+	return res
+}
+
 // readPlistStringKey 从一个 Info.plist 字节串里抠指定 key 的 string 值。
 // Info.plist 是 xml 格式:
 //

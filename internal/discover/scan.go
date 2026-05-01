@@ -27,12 +27,10 @@ func Scan(roots []string) ([]DiscoveredAgent, error) {
 	// 否则前端 `bots.value = await DiscoverBots()` 会拿到 null,后续 .length 访问崩溃。
 	out := []DiscoveredAgent{}
 
-	// macOS Spotlight 全盘找 tshoot.json；零配置命中任意位置的
-	// claude-code / cursor / embedded 机器人。找到的路径合并进 roots
-	// （重复的靠 systemID|target dedup 兜住）。非 macOS 或 Spotlight 用不了
-	// 自动 no-op，不影响现有 roots 扫描。
-	roots = append(roots, systemLocateAgents()...)
-
+	// 历史曾用 systemLocateAgents() 走 mdfind / locate 全盘扫,但误报太多:
+	// Studio 自家 dist/staging 输出 / examples/ / 用户老备份 / Time Machine 镜像
+	// 都会被命中。卸了真 bot 还能搜到一堆 staging tshoot.json,造成"卸载没生效"假象。
+	// 改回纯 roots 扫描:DefaultRoots 里 4 个真实部署根 + 用户显式传入的 extraRoots。
 	for _, root := range roots {
 		root = expandHome(root)
 		if _, err := os.Stat(root); err != nil {

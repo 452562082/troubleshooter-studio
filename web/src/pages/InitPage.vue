@@ -30,6 +30,7 @@ import {
   selfTestAgent,
   isDesktop,
   openDir,
+  openYAML,
   detectSubmodulesForRepo,
   listBranchesForRepo,
   preloadConfigCenter,
@@ -4378,6 +4379,7 @@ function closeImportDialog() {
   showImportDialog.value = false
 }
 
+// 浏览器模式 fallback:HTML5 file input 走 webview 原生 panel
 function handleImportFile(e: Event) {
   const input = e.target as HTMLInputElement
   const file = input.files?.[0]
@@ -4387,6 +4389,21 @@ function handleImportFile(e: Event) {
     importText.value = String(reader.result || '')
   }
   reader.readAsText(file)
+}
+
+// 桌面 app 模式:用 openYAML() 走 osascript 弹原生选择器,**不能**用 <input type="file">,
+// 因为 macOS 26 上 Wails v2.12 的 WebKit2 NSOpenPanel 出现即崩(整个 app 闪退)。
+// 跟 EditorPage / AnalyzePage 的 loadFileNative 一致,统一走 osascript 绕过这个 bug。
+async function pickImportYAMLNative() {
+  if (!isDesktop()) return
+  try {
+    const r = await openYAML()
+    if (r && r.path) {
+      importText.value = r.content || ''
+    }
+  } catch (err: any) {
+    importError.value = `加载文件失败:${String(err?.message || err)}`
+  }
 }
 
 async function applyImport() {
@@ -5959,7 +5976,12 @@ const configTypeDescriptions: Record<string, string> = {
           <p class="help-text" style="margin-bottom: 10px;">
             上传或粘贴现有 system.yaml 内容,字段会自动反填到各步骤。
           </p>
-          <label class="btn file-label">
+          <!-- 桌面 app 走 osascript 弹文件选择器(避开 macOS 26 上 WKWebView 原生 panel 闪退);
+               浏览器模式回退到 HTML5 input(type=file)。 -->
+          <button v-if="isDesktop()" type="button" class="btn file-label" @click="pickImportYAMLNative">
+            选择文件...
+          </button>
+          <label v-else class="btn file-label">
             选择文件...
             <input type="file" accept=".yaml,.yml" @change="handleImportFile" style="display:none" />
           </label>

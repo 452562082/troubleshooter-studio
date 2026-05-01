@@ -238,5 +238,7 @@ schema/system.schema.yaml
 ## 已知限制
 
 - 桌面 app 没代码签名 / 公证,macOS Gatekeeper 首次会拦
-- 服务依赖图(downstream)的 Go 扫描覆盖 truss / 老 kratos 的 `client.NewXxxClient(naming, XxxServiceName, ns)` 风格;go-zero / kratos v2 / kitex 等需要在沙盒里手补
-- 服务调用链路 / 数据 schema 自动扫描精度 50-70%,主流 ORM(GORM / JPA / SQLAlchemy / TypeORM / Mongoose)命中率较高,冷门 ORM 漏的部分需手填
+- 代码扫描精度依赖通用模式识别,**配置驱动 / 注解驱动 / 自定义包装层重的项目命中率会下降**,缺漏部分通过桌面 app 编辑器手补即可:
+  - 服务调用图(downstream):识别字面量 `http.Get`/`grpc.Dial(addr)` + 服务发现风格 `client.NewXxxClient(naming, XxxServiceName, ns)` + Java `@FeignClient` + Python `requests/httpx`;**配置文件驱动**(go-zero zrpc / kratos v2 endpoint URI / kitex registry)需要手补
+  - 数据 schema(表 / collection / cache prefix):识别主流 ORM(GORM / JPA / SQLAlchemy / TypeORM / Mongoose 等);裸 SQL 字符串 / 冷门 ORM / 自定义命名约定 漏的部分需要手补
+  - 各栈识别精度参考:Go 70-80% / Java 60-70% / Python 60% / Node 50%

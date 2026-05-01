@@ -546,7 +546,7 @@ onUnmounted(() => {
           </li>
           <li>
             <strong>🔗 服务依赖图 (downstream)</strong>
-            <span>—— Go 识别 <code>http.Get</code> / <code>grpc.Dial</code> 字面量调用 + truss 风格的 <code>client.NewXxxClient(naming, XxxServiceName, ns)</code> 服务发现模式;Java 识别 <code>@FeignClient</code> / RestTemplate;Python 识别 requests/httpx;扫到的下游写进 service-dependency-map 给排障"沿依赖图追"用</span>
+            <span>—— Go 识别字面量 <code>http.Get</code> / <code>grpc.Dial(addr)</code> + 服务发现风格的 <code>client.NewXxxClient(naming, XxxServiceName, ns)</code> 工厂调用 + ServiceName 常量交叉解析;Java 识别 <code>@FeignClient</code> / RestTemplate;Python 识别 requests/httpx;扫到的下游写进 service-dependency-map 给排障"沿依赖图追"用</span>
           </li>
           <li>
             <strong>🗄️ 数据层 + 业务表 schema</strong>

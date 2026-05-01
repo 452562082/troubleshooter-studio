@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -66,17 +67,45 @@ func UninstallNativeOpenclaw(installedDir string) (*UninstallOpenclawResult, err
 		logf("[skip] workspace %s 不存在", wsDir)
 	}
 
-	// 摘 agents.list
+	// 摘 agents.list + 清自家 MCP servers
 	cfgPath := filepath.Join(home, ".openclaw", "openclaw.json")
 	if data, err := readJSONOrEmpty(cfgPath); err == nil {
+		dirty := false
 		if removeAgentEntry(data, agentID) {
-			if err := writeJSONFile(cfgPath, data, 0o644); err != nil {
-				return res, fmt.Errorf("write %s: %w", cfgPath, err)
-			}
 			res.OpenclawJSONClean = true
+			dirty = true
 			logf("[ok] %s 里 agents.list 已摘掉 %s", cfgPath, agentID)
 		} else {
 			logf("[skip] openclaw.json 里没找到 %s,无需清理", agentID)
+		}
+		// 删自家 MCP server keys。从 cfg 推 key 集合,跟 install 时 inject 的同款规则,
+		// 用 system.id 当短前缀,不会跟别的 agent 撞名。改了 yaml 再装时残留的废 key
+		// 也会被这一步清掉(不止本次注册的那批,前缀模糊匹配)。
+		mcpPrefix := cfg.MCPKeyPrefix()
+		mcp, _ := data["mcp"].(map[string]any)
+		if mcp != nil {
+			servers, _ := mcp["servers"].(map[string]any)
+			if servers != nil {
+				removed := []string{}
+				for k := range servers {
+					// 严格匹配:必须是 "<system.id>-..." 形式才删,避免误伤别人。
+					// 老旧产物可能没改名,如果 prefix 跟 system.id 完全相等也删(罕见 corner case)。
+					if strings.HasPrefix(k, mcpPrefix+"-") || k == mcpPrefix {
+						delete(servers, k)
+						removed = append(removed, k)
+					}
+				}
+				if len(removed) > 0 {
+					sort.Strings(removed)
+					dirty = true
+					logf("[ok] mcp.servers 摘掉 %d 项: %s", len(removed), strings.Join(removed, ", "))
+				}
+			}
+		}
+		if dirty {
+			if err := writeJSONFile(cfgPath, data, 0o644); err != nil {
+				return res, fmt.Errorf("write %s: %w", cfgPath, err)
+			}
 		}
 	}
 
@@ -89,7 +118,7 @@ func UninstallNativeOpenclaw(installedDir string) (*UninstallOpenclawResult, err
 		logf("[warn] 删 %s 失败:%v", credsPath, err)
 	}
 
-	logf("[done] uninstall 完成。MCP servers (nacos-mcp-server-* 等) 保留,可能被其它 agent 共享。")
+	logf("[done] uninstall 完成。本 agent 的 MCP servers 已从 openclaw.json 摘掉,不留垃圾条目。")
 	return res, nil
 }
 

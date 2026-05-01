@@ -49,10 +49,10 @@ func TestUninstallNativeOpenclaw_HappyPath(t *testing.T) {
 		t.Errorf("OpenclawJSONClean want true(我们刚 install 过)")
 	}
 
-	// MCP servers 不动(可能跨 agent 共享)
+	// MCP servers 应被清(每个 system 用 system.id 短前缀,本就独立,卸载就清自己的避免残留垃圾)
 	servers := getMap(data, "mcp", "servers")
-	if _, ok := servers["shop-nacos-dev"]; !ok {
-		t.Errorf("MCP servers 不应被卸载清掉(共享资源),但 nacos-mcp-server-dev 没了")
+	if _, ok := servers["shop-nacos-dev"]; ok {
+		t.Errorf("MCP servers shop-nacos-dev 应该被卸载清掉,但还在:%+v", servers)
 	}
 }
 

@@ -5278,6 +5278,7 @@ function labelForErrorKey(k: string): string {
     const f = parts[2]
     if (f === 'localPath') return `仓库 #${i} 本地目录`
     if (f === 'url') return `仓库 #${i} URL`
+    if (f === 'cloneTarget') return `仓库 #${i} clone 落盘父目录(必填,远程仓库部署时 clone 到 <父目录>/${repos[i - 1]?.name || '<repo.name>'})`
     return `仓库 #${i} ${f}`
   }
   if (k.startsWith('cc.')) {
@@ -5345,12 +5346,19 @@ function computeStepErrors(): Set<string> {
       if (!e.api_domain.trim()) errs.add(`env.${i}.api_domain`)
     })
   } else if (step === 5) {
+    // 仓库本地路径硬性必填(无论 local / remote 模式),理由:
+    //   - 本地路径是产物里 repo-path-map.yaml / 排障 skill 跑代码扫描的 必读字段
+    //   - 部署后 BotsPage 诊断 / 代码扫描 都靠 ~/.tshoot/config.json 里这份路径
+    //   - 用 remote 模式时,_cloneTarget 是 "<父目录>/<repo.name>" 落盘位置,
+    //     必须显式声明,不允许"反正默认 clone 到 ~/.tshoot/repos"这种隐式行为
     repos.forEach((r, i) => {
       if (!r.name.trim()) errs.add(`repo.${i}.name`)
       if (r._source === 'local') {
         if (!(r._localPath || '').trim()) errs.add(`repo.${i}.localPath`)
       } else {
+        // remote 模式:url 必填(用来 clone) + _cloneTarget 也必填(显式落盘位置)
         if (!r.url.trim()) errs.add(`repo.${i}.url`)
+        if (!(r._cloneTarget || '').trim()) errs.add(`repo.${i}.cloneTarget`)
       }
     })
   } else if (step === 6) {
@@ -6494,11 +6502,10 @@ const configTypeDescriptions: Record<string, string> = {
           </div>
           <div class="form-group">
             <label>
-              Clone 父目录
-              <span class="auto-tag">可选</span>
+              Clone 父目录 <span class="required">*</span>
               <span class="field-hint">
-                — 选父目录,git clone 自动建 <code>/{{ repo.name || '&lt;repo.name&gt;' }}</code> 子目录;不填就用<strong>全局默认</strong>
-                <code>{{ displayPath(reposRootInput.trim() || resolvedReposRoot) }}/{{ repo.name || '&lt;repo.name&gt;' }}</code>
+                — 必填:选父目录,git clone 自动建 <code>/{{ repo.name || '&lt;repo.name&gt;' }}</code> 子目录。
+                **本地路径不允许走全局默认隐式回落**(产物里 repo-path-map.yaml 必须有显式路径才能跑代码扫描 / 排障)。
               </span>
             </label>
             <!-- 跟本地仓库目录一致:readonly,只能通过按钮选。

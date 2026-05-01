@@ -122,23 +122,32 @@ go build -o bin/tshoot ./cmd/tshoot
 
 ## 排障机器人具备什么能力(产出物)
 
-skill 集合**按 yaml 动态裁剪**,实际产出取决于你勾选的配置源 / 数据层 / 可观测性 / `generation.skills_whitelist`。能装的 skill 全集:
+skill 集合**按 yaml 动态裁剪**,且会随项目演进增减(加新数据层 / 配置源 / 可观测性后端会带新 skill 过来)。**当前产物的真源在 [`templates/workspace/skills/`](templates/workspace/skills/),部署后看产物里的 `AGENTS.md` 拿到这台机器实际启用了哪些**。
 
-| skill | 何时启用 | 干什么 |
-|---|---|---|
-| `routing` | 总是 | 11 张映射表(env → 域名 / 分支 / 配置 / 日志 app / MCP 名 / 依赖图 / 表 schema / known-errors),静态查表毫秒返回 |
-| `incident-investigator` | 总是 | 固化"症状 → 时间轴 → 横向 → 纵向 → 三向交叉 → 根因"6 步流程,任何报障先走这套 |
-| `recent-changes` | 总是 | 故障窗口 ±5min K8s rollout / 配置变更 / git log 三合一聚合 |
-| `config-executor` | 总是(后端按 yaml `infrastructure.config_centers` 动态切) | 5 种后端:nacos(MCP)/ apollo / consul / kuboard / 静态环境变量,按 namespace/group/dataId 读配置 + 历史 + diff |
-| `k8s-runtime-query` | `observability.k8s_runtime.enabled: true` | Kuboard v4 HTTP API 查 pod / service / deployment / events / logs(只读) |
-| `tracing-query` | `observability.jaeger.enabled: true`(或同类) | Jaeger 按 trace_id / service / 时间窗查 spans |
-| `redis-runtime-query` | `data_stores[type=redis].enabled: true` | 运行时按 entity ID 反查;连接串从配置中心动态解析,mcporter 临时拉起 ad-hoc MCP |
-| `mongodb-runtime-query` | `data_stores[type=mongodb].enabled: true` | 同上,query / aggregate / count / listCollections |
-| `es-runtime-query` | `data_stores[type=elasticsearch].enabled: true` | 同上 |
-| `kafka-runtime-query` | `data_stores[type=kafka].enabled: true` | 通过 kafka CLI 或 mcporter 看 topic / consumer-group / 积压 |
-| `diagram-generator` | 总是 | Mermaid 文本 → PNG/SVG(走 mermaid.ink) |
+按用途归类:
 
-未启用 / 未勾选的 skill **直接不生成**,产物里就没那个目录;`generation.skills_whitelist` 还能进一步收窄(已启用的 skill 也可以排除掉)。完整能力 + 限制说明见部署完成后产物里的 `AGENTS.md`。
+- **🎯 路由 + 主流程(始终启用)**
+  - `routing` —— 路由映射中枢:env → 域名 / 分支 / 配置 / 日志 app / MCP 名 / 依赖图 / 表 schema / known-errors,静态查表毫秒返回
+  - `incident-investigator` —— "症状 → 时间轴 → 横向 → 纵向 → 三向交叉 → 根因"6 步主流程,任何报障先走这套
+  - `recent-changes` —— 故障窗口 ±5min K8s rollout / 配置中心 history / git log 三合一聚合
+  - `diagram-generator` —— Mermaid 文本 → PNG/SVG(给排障产物画时间线 / 调用链路)
+
+- **⚙️ 配置中心查询(按 `infrastructure.config_centers` 动态切后端)**
+  - `config-executor` —— nacos(走 MCP) / apollo / consul / kuboard / 静态环境变量等多种后端;按 namespace/group/dataId 读配置 + 历史 + diff + 风险摘要
+
+- **📊 可观测性(按 `observability.<x>.enabled` 启用对应 skill)**
+  - `k8s-runtime-query` —— Kuboard v4 HTTP API 查 pod / service / deployment / events / logs(只读)
+  - `tracing-query` —— Jaeger 按 trace_id / service / 时间窗查 spans
+  - (其它可观测性后端按需补 skill,如 prometheus 直查 / skywalking 等)
+
+- **🗄 数据层运行时查询(按 `data_stores[type=X].enabled` 启用对应 skill)**
+  - `redis-runtime-query` / `mongodb-runtime-query` / `es-runtime-query` / `kafka-runtime-query` 等 —— 运行时按 entity ID 反查;连接串从配置中心动态解析,mcporter 临时拉起 ad-hoc MCP
+  - 数据层种类增加(rocketmq / clickhouse / postgresql 等)对应的 runtime-query 也会跟着加
+
+裁剪规则:
+- yaml 里没启用的能力 → **对应 skill 不生成**,产物里没那个目录
+- `generation.skills_whitelist` 是二次过滤,可在已启用基础上再剔除(比如关掉 diagram-generator)
+- 新增 skill 走 `tshoot skill new <name>` 在模板库脚手架,然后通过 yaml 启用条件接入
 
 ## HTTP API 用法
 

@@ -82,13 +82,17 @@ func WorkDirFor(ag DiscoveredAgent) string {
 	return ag.Path
 }
 
-// DefaultRoots 返回 discover 默认扫描的位置 —— 全是"真实部署位置"(2026-04-30 版):
+// DefaultRoots 返回 discover 默认扫描的位置 —— 全是"真实部署位置":
 //   - ~/.openclaw/workspace/    OpenClaw 真实部署根
 //   - ~/.claude/skills/         Claude Code 真实部署根(每个 agent 一个 skills/<name> 子目录,
 //                               里面有 InstallNative 写进去的 tshoot.json 锚点)
 //   - ~/.cursor/skills/         Cursor 真实部署根,同上
 //   - ~/.codex/skills/          OpenAI Codex CLI 真实部署根,同上
-//   - CWD                       claude-code / cursor / codex 也常直接装在项目根
+//
+// **不扫 CWD**:历史版本曾把当前工作目录加入扫描根,理由是"claude-code/cursor/codex
+// 也常装项目根"。但实际从未支持过项目级安装,这条只会误扫:Studio 自家 dist/staging 产物
+// 会被错认成已装 bot;用户在仓库根跑 desktop app,卸载真 bot 后那条 staging 误扫还在,
+// 看起来"卸载不生效"。CLI 真要扫自定义目录传 --roots 即可。
 //
 // 判断"已装"的标准统一为"真实部署位置存在 tshoot.json"。staging 中间包(~/.tshoot/<target>/)
 // 不再扫 —— 它只是 wizard 部署中途的临时落盘,装完成后真实位置才有锚点;扫 staging
@@ -98,16 +102,12 @@ func WorkDirFor(ag DiscoveredAgent) string {
 // scanOne 最深下探 2 层(见调用 `scanOne(root, 2)`),刚好够 ~/.claude/skills/<name>/tshoot.json
 // 这种"root + 1 层子目录 + tshoot.json 文件" 的结构。
 func DefaultRoots() []string {
-	roots := []string{
+	return []string{
 		"~/.openclaw/workspace",
 		"~/.claude/skills",
 		"~/.cursor/skills",
 		"~/.codex/skills",
 	}
-	if wd, err := os.Getwd(); err == nil {
-		roots = append(roots, wd)
-	}
-	return roots
 }
 
 // scanOne 从 root 开始 BFS 寻找 tshoot.json，最深 maxDepth 层（root 算 0）。

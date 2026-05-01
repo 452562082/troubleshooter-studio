@@ -289,9 +289,11 @@ func funcMap() template.FuncMap {
 		// mcpKeyForAgentSource 跟 mcpKeyForAgent 镜像:加 agent-id 前缀,Claude Code/Cursor
 		// 共享 settings.json 池场景必备,避免多 system 同名 mcp 互相覆盖。OpenClaw 也走
 		// 这条路保持三平台命名统一(install_native_openclaw 同步用 mcpKeyForAgent)。
+		// sourceID == prefix 时(用户没改 source.id 直接用 type)做去重,避免出现
+		// "truss-nacos-nacos-dev" 这种叠词。
 		"mcpKeyForAgentSource": func(agentID, prefix, sourceID, envID string) string {
 			base := prefix + "-" + envID
-			if sourceID != "" && sourceID != "default" {
+			if sourceID != "" && sourceID != "default" && sourceID != prefix {
 				base = prefix + "-" + sourceID + "-" + envID
 			}
 			if agentID == "" {

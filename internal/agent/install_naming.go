@@ -10,14 +10,17 @@ import "strings"
 
 // mcpKey 拼出 openclaw.json 里某个 source × env 对应的 MCP server key。
 //   - 老 single-source 迁移路径(sourceID=="default"):返回 "<prefix>-<env>" 不破老结构
-//   - 显式多源(sourceID!="default"):返回 "<prefix>-<sourceID>-<env>"
+//   - sourceID == prefix 时(用户没改名,id 直接 = type 如 nacos / kuboard 等):
+//     去重,返回 "<prefix>-<env>"(不再叠 "nacos-nacos-dev" 这种)
+//   - 显式多源,id 跟 type 不同(如 id=legacy-nacos / type=nacos):返回
+//     "<prefix>-<sourceID>-<env>" 区分多个 nacos 实例
 //
 // **注**:这是"未带 agent-id 前缀"的形态,只剩 OpenClaw 老 mcp 注册路径在用(它的 mcp.servers 是
 // 项目级的,有 agents.list[i].id 隔离调用,key 重名也能各取各的)。Claude Code / Cursor 走 MCP
 // 时是用户级 settings.json 共享池,key 必须加 agent-id 前缀避免多 system 同名 mcp 互相覆盖,
 // 走 mcpKeyForAgent(agentID, prefix, sourceID, envID)。
 func mcpKey(prefix, sourceID, envID string) string {
-	if sourceID == "" || sourceID == "default" {
+	if sourceID == "" || sourceID == "default" || sourceID == prefix {
 		return prefix + "-" + envID
 	}
 	return prefix + "-" + sourceID + "-" + envID

@@ -13,7 +13,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -35,12 +37,13 @@ func readSystemIDFromMeta(metaPath string) string {
 	return m.SystemID
 }
 
-// UninstallNativeResult 通用卸载结果(claude-code / cursor 共用一个)。
+// UninstallNativeResult 通用卸载结果(claude-code / cursor / codex 共用一个)。
 type UninstallNativeResult struct {
 	StagingMovedTo  string   // ~/.tshoot/<target>/<id>/ 移到 ~/.Trash/<...> 的路径;空 = 不存在或未动
-	UserAgentMD     string   // 删掉的 ~/.claude|cursor/agents/<name>.md(或空)
-	UserSkillsDir   string   // 删掉的 ~/.claude|cursor/skills/<name>/
-	UserScriptsDir  string   // 删掉的 ~/.claude|cursor/scripts/<name>/
+	UserAgentMD     string   // 删掉的 ~/.<target>/agents/<name>.md(或空)
+	UserSkillsDir   string   // 删掉的 ~/.<target>/skills/<name>/
+	UserScriptsDir  string   // 删掉的 ~/.<target>/scripts/<name>/
+	MCPRemoved      []string // 从 IDE 配置(settings.json/mcp.json/config.toml)清掉的 MCP server keys
 	Log             []string
 }
 
@@ -146,6 +149,15 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 		}
 	}
 
+	// 4) IDE 配置里的 MCP server keys —— 跟 openclaw uninstall 一致,清自家前缀
+	// (<system.id>-...)。这一步漏了之前用户卸载完 MCP 还在 IDE 里跑,占 tool 槽位 + 残留垃圾。
+	// 老产物用 ResolveID()+"-mcp-server-..." 形态,新前缀 system.id 也能命中(都以 systemID 开头),
+	// 适合迁移期顺手清理。
+	if systemID != "" {
+		removed := cleanIDEMCPServers(target, root, systemID, logf)
+		res.MCPRemoved = removed
+	}
+
 	logf("[done] uninstall(%s) 完成", target)
 	return res, nil
 }
@@ -178,6 +190,98 @@ func deriveInstallRoot(installedDir, target, home string) string {
 		return defaultRoot()
 	}
 	return filepath.Dir(parent)             // <root>
+}
+
+// cleanIDEMCPServers 从对应 IDE 配置文件里删本 system 名下的 MCP server keys。
+//   - claude-code:~/.claude/settings.json 的 mcpServers 字段(JSON map),按 prefix 删
+//   - cursor:    ~/.cursor/mcp.json 的 mcpServers 字段,同上
+//   - codex:     先列 codex mcp list 拿到本机所有 servers,匹配前缀的逐个 codex mcp remove
+//
+// 匹配规则跟 openclaw uninstall 一致(模糊前缀):删 "<systemID>-..." 和裸 "<systemID>"。
+// 老产物 ResolveID() 派生的 "<systemID>-troubleshooter-..." 也会命中(都是 systemID 前缀),
+// 适合迁移期顺手清。返回真删了哪些 keys 给 UI 展示。
+func cleanIDEMCPServers(target, root, systemID string, logf func(format string, a ...any)) []string {
+	prefix := systemID + "-"
+	// codex 走 CLI(它的真源在 config.toml,不要手 marshal TOML 破坏 [projects.*] 段)
+	if target == "codex" {
+		codexBin, err := exec.LookPath("codex")
+		if err != nil {
+			logf("[warn] 找不到 codex CLI,跳过清 ~/.codex/config.toml 里的 MCP servers")
+			return nil
+		}
+		out, err := exec.Command(codexBin, "mcp", "list").Output()
+		if err != nil {
+			logf("[warn] codex mcp list 失败: %v(skip 清理)", err)
+			return nil
+		}
+		// 第一行 header,后续每行第一列是 name
+		var removed []string
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 0 || fields[0] == "Name" {
+				continue
+			}
+			name := fields[0]
+			if name == systemID || strings.HasPrefix(name, prefix) {
+				if err := exec.Command(codexBin, "mcp", "remove", name).Run(); err == nil {
+					removed = append(removed, name)
+				}
+			}
+		}
+		if len(removed) > 0 {
+			sort.Strings(removed)
+			logf("[ok] codex config.toml 摘掉 %d 项 MCP: %s", len(removed), strings.Join(removed, ", "))
+		}
+		return removed
+	}
+
+	// claude-code / cursor:JSON 文件
+	var cfgFile string
+	switch target {
+	case "claude-code":
+		cfgFile = filepath.Join(root, "settings.json")
+	case "cursor":
+		cfgFile = filepath.Join(root, "mcp.json")
+	default:
+		return nil
+	}
+	data, err := os.ReadFile(cfgFile)
+	if err != nil {
+		// 没文件 = 没 MCP 注册过,不算错
+		return nil
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(data, &settings); err != nil {
+		logf("[warn] %s 解析失败:%v(skip 清理)", cfgFile, err)
+		return nil
+	}
+	servers, _ := settings["mcpServers"].(map[string]any)
+	if servers == nil {
+		return nil
+	}
+	var removed []string
+	for k := range servers {
+		if k == systemID || strings.HasPrefix(k, prefix) {
+			delete(servers, k)
+			removed = append(removed, k)
+		}
+	}
+	if len(removed) == 0 {
+		return nil
+	}
+	sort.Strings(removed)
+	settings["mcpServers"] = servers
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		logf("[warn] %s marshal 失败:%v", cfgFile, err)
+		return nil
+	}
+	if err := os.WriteFile(cfgFile, out, 0o644); err != nil {
+		logf("[warn] 写 %s 失败:%v", cfgFile, err)
+		return nil
+	}
+	logf("[ok] %s 摘掉 %d 项 MCP: %s", cfgFile, len(removed), strings.Join(removed, ", "))
+	return removed
 }
 
 // findInstalledAgentName 老逻辑:从 staging 中间包 agents/ 下抽 agent 名。2026-04-30 起

@@ -211,10 +211,11 @@ type UninstallBotResult struct {
 	WorkspaceMovedTo  string   `json:"workspace_moved_to,omitempty"`  // openclaw
 	OpenclawJSONClean bool     `json:"openclaw_json_clean,omitempty"` // openclaw
 	CredsRemoved      bool     `json:"creds_removed,omitempty"`       // openclaw
-	StagingMovedTo    string   `json:"staging_moved_to,omitempty"`    // claude-code / cursor
+	StagingMovedTo    string   `json:"staging_moved_to,omitempty"`    // claude-code / cursor / codex
 	UserAgentMD       string   `json:"user_agent_md,omitempty"`
 	UserSkillsDir     string   `json:"user_skills_dir,omitempty"`
 	UserScriptsDir    string   `json:"user_scripts_dir,omitempty"`
+	MCPRemoved        []string `json:"mcp_removed,omitempty"` // 从 IDE 配置清掉的 MCP server keys
 	Log               []string `json:"log,omitempty"`
 }
 
@@ -246,6 +247,7 @@ func (a *App) UninstallBot(dir, target string) (*UninstallBotResult, error) {
 			UserAgentMD:    r.UserAgentMD,
 			UserSkillsDir:  r.UserSkillsDir,
 			UserScriptsDir: r.UserScriptsDir,
+			MCPRemoved:     r.MCPRemoved,
 			Log:            r.Log,
 		}, nil
 	default:

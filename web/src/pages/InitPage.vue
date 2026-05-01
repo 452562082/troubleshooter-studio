@@ -4591,6 +4591,23 @@ async function applyImport() {
   }
 
   const cc = primarySource?.type
+
+  // 反填 serviceSourceMap:每个 service 归属哪个源(决定 Step 6 服务勾选清单的初始勾选态)。
+  // 来源:repos[].config_source(显式声明走副源)→ 服务归属该副源;否则归属主源 type。
+  // 不反填这一步,Step 6 所有 checkbox 都是空,用户以为"配置源没反填"。
+  if (cc && Array.isArray(parsed.repos)) {
+    for (const r of parsed.repos) {
+      const explicit = (typeof r?.config_source === 'string' && r.config_source.trim()) ? r.config_source.trim() : ''
+      const target = explicit || cc
+      const svcNames: string[] = Array.isArray(r?.service_names) && r.service_names.length > 0
+        ? r.service_names.filter((s: any) => typeof s === 'string')
+        : (typeof r?.name === 'string' ? [r.name] : [])
+      for (const svc of svcNames) {
+        if (svc) serviceSourceMap[svc] = target
+      }
+    }
+  }
+
   // 导入 yaml 里 endpoints[].<field> 回填到 ccCredInputs(所有字段,含 secret):
   // yaml 带明文是设计如此,同事导入就齐活。占位符 {{XXX}} 跳过不覆盖用户可能已填的值。
   // 注:ingestSource 已写到 sourceCreds,这里再写一份到 ccCredInputs 是为了让老 preload /

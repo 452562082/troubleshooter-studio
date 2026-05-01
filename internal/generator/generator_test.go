@@ -60,9 +60,9 @@ func TestGenerate_MultiSource_ConfigMapRoutesPerService(t *testing.T) {
 	}
 	cm := readFile(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/config-map.yaml"))
 
-	// 主源服务(order-service)用老命名(无 source 中缀):<agent-id>-nacos-mcp-server-<env>
+	// 主源服务(order-service)用老命名(无 source 中缀):<agent-id>-nacos-<env>
 	for _, env := range []string{"dev", "staging", "prod"} {
-		want := `mcp_server: "shop-nacos-mcp-server-` + env + `"`
+		want := `mcp_server: "shop-nacos-` + env + `"`
 		if !strings.Contains(cm, want) {
 			t.Errorf("主源服务应有 %q,但 config-map 缺;\n%s", want, cm)
 		}
@@ -70,7 +70,7 @@ func TestGenerate_MultiSource_ConfigMapRoutesPerService(t *testing.T) {
 
 	// 副源服务(product-service)用新命名:nacos-mcp-server-legacy-nacos-<env>
 	for _, env := range []string{"dev", "staging", "prod"} {
-		want := `mcp_server: "shop-nacos-mcp-server-legacy-nacos-` + env + `"`
+		want := `mcp_server: "shop-nacos-legacy-nacos-` + env + `"`
 		if !strings.Contains(cm, want) {
 			t.Errorf("副源服务应有 %q,但 config-map 缺;\n%s", want, cm)
 		}
@@ -157,7 +157,7 @@ func TestGenerate_Nacos_Shop(t *testing.T) {
 
 	// Q: config-map 每行必须带 mcp_server，且按 env 区分
 	for _, env := range []string{"dev", "staging", "prod"} {
-		want := "mcp_server: \"shop-nacos-mcp-server-" + env + "\""
+		want := "mcp_server: \"shop-nacos-" + env + "\""
 		if !strings.Contains(cm, want) {
 			t.Errorf("config-map missing per-env mcp_server %q", want)
 		}
@@ -166,7 +166,7 @@ func TestGenerate_Nacos_Shop(t *testing.T) {
 	// MCP 注入逻辑搬到 agent.InstallNativeOpenclaw 内部,这里的 staging 产物里
 	// 不再有 install.sh,只能从 config-map 间接验证 per-env MCP 拼对了名字。
 	for _, env := range []string{"dev", "staging", "prod"} {
-		want := "shop-nacos-mcp-server-" + env
+		want := "shop-nacos-" + env
 		if !strings.Contains(cm, want) {
 			t.Errorf("config-map missing per-env mcp ref %q", want)
 		}

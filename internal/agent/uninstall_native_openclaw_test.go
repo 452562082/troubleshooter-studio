@@ -51,7 +51,7 @@ func TestUninstallNativeOpenclaw_HappyPath(t *testing.T) {
 
 	// MCP servers 不动(可能跨 agent 共享)
 	servers := getMap(data, "mcp", "servers")
-	if _, ok := servers["shop-nacos-mcp-server-dev"]; !ok {
+	if _, ok := servers["shop-nacos-dev"]; !ok {
 		t.Errorf("MCP servers 不应被卸载清掉(共享资源),但 nacos-mcp-server-dev 没了")
 	}
 }

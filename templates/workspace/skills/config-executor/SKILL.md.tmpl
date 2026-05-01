@@ -31,13 +31,13 @@ description: 通用配置中心执行技能（后端：{{.Infrastructure.Primary
 
 ### 当前后端：Nacos（走 MCP；MCP 失败时 fallback 到脚本）
 
-部署时已为每个 env 注册 `{{.AgentID}}-nacos-mcp-server-<env>` MCP：
+部署时已为每个 env 注册 `{{.AgentID}}-nacos-<env>` MCP：
 {{- range .Environments}}
-- `{{$.AgentID}}-nacos-mcp-server-{{.ID}}`
+- `{{$.AgentID}}-nacos-{{.ID}}`
 {{- end}}
 
 执行步骤：
-1. `routing` 返回 `mcp_server={{.AgentID}}-nacos-mcp-server-<env>` + `namespaceId/group/dataId`
+1. `routing` 返回 `mcp_server={{.AgentID}}-nacos-<env>` + `namespaceId/group/dataId`
 2. 调用该 MCP 的 `get_config` / `list_config_history` 等工具
 3. 需要跨 env 对比时：本地保存两份 text → `python3 scripts/nacos_diff.py --left-text ... --right-text ...`
 

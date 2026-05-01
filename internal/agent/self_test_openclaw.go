@@ -101,7 +101,7 @@ func SelfTestOpenclaw(ctx context.Context, dir string) (*SelfTestResult, error) 
 			continue
 		}
 		for _, e := range cfg.Environments {
-			key := mcpKeyForAgent(mcpPrefix, "nacos-mcp-server", cc.ID, e.ID)
+			key := mcpKeyForAgent(mcpPrefix, "nacos", cc.ID, e.ID)
 			addr := mcpEnv(servers, key, "NACOS_ADDR")
 			label := "nacos TCP " + e.ID
 			if cc.ID != "" && cc.ID != "default" {
@@ -149,10 +149,10 @@ func SelfTestOpenclaw(ctx context.Context, dir string) (*SelfTestResult, error) 
 	// 可观测性 HTTP 探活(/api/health 200/401/403 都视作"reachable",
 	// 401/403 = 站点活着但鉴权对不上;FAIL 仅给真不通的)
 	if cfg.Infrastructure.Observability.Grafana.Enabled {
-		probeGrafanaLike(ctx, servers, cfg.Environments, "grafana-mcp-server", agentID, add)
+		probeGrafanaLike(ctx, servers, cfg.Environments, "grafana", agentID, add)
 	}
 	if cfg.Infrastructure.Observability.Loki.Enabled {
-		probeGrafanaLike(ctx, servers, cfg.Environments, "loki-mcp-server", agentID, add)
+		probeGrafanaLike(ctx, servers, cfg.Environments, "loki", agentID, add)
 	}
 	if cfg.Infrastructure.Observability.Jaeger.Enabled {
 		probeURLByEnv(ctx, cfg.Environments,
@@ -273,17 +273,17 @@ func requiredMCPKeys(cfg *config.SystemConfig, agentID string) []string {
 			continue
 		}
 		for _, e := range cfg.Environments {
-			out = append(out, mcpKeyForAgent(agentID, "nacos-mcp-server", cc.ID, e.ID))
+			out = append(out, mcpKeyForAgent(agentID, "nacos", cc.ID, e.ID))
 		}
 	}
 	if cfg.Infrastructure.Observability.Grafana.Enabled {
 		for _, e := range cfg.Environments {
-			out = append(out, withAgent("grafana-mcp-server-"+e.ID))
+			out = append(out, withAgent("grafana-"+e.ID))
 		}
 	}
 	if cfg.Infrastructure.Observability.Loki.Enabled {
 		for _, e := range cfg.Environments {
-			out = append(out, withAgent("loki-mcp-server-"+e.ID))
+			out = append(out, withAgent("loki-"+e.ID))
 		}
 	}
 	for _, m := range cfg.Infrastructure.Messaging {

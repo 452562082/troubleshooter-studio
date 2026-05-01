@@ -331,7 +331,7 @@ func injectMCPServers(
 				"NACOS_USERNAME": get(envVar("CC_USER", cc.ID, e.ID)),
 				"NACOS_PASSWORD": get(envVar("CC_PASS", cc.ID, e.ID)),
 			}
-			servers[mcpKeyForAgent(agentID, "nacos-mcp-server", cc.ID, e.ID)] = map[string]any{
+			servers[mcpKeyForAgent(agentID, "nacos", cc.ID, e.ID)] = map[string]any{
 				"command": "uvx",
 				"args":    []any{"nacos-mcp-router@latest"},
 				"env":     env,
@@ -349,7 +349,7 @@ func injectMCPServers(
 				"GRAFANA_USERNAME": get("GRAFANA_USER_" + up),
 				"GRAFANA_PASSWORD": get("GRAFANA_PASS_" + up),
 			}
-			servers[mcpKeyForAgent(agentID, "grafana-mcp-server", "", e.ID)] = map[string]any{
+			servers[mcpKeyForAgent(agentID, "grafana", "", e.ID)] = map[string]any{
 				"command": "npx",
 				"args": []any{
 					"-y", "@leval/mcp-grafana",
@@ -370,7 +370,7 @@ func injectMCPServers(
 				"GRAFANA_USERNAME": get("GRAFANA_USER_" + up),
 				"GRAFANA_PASSWORD": get("GRAFANA_PASS_" + up),
 			}
-			servers[mcpKeyForAgent(agentID, "loki-mcp-server", "", e.ID)] = map[string]any{
+			servers[mcpKeyForAgent(agentID, "loki", "", e.ID)] = map[string]any{
 				"command": "npx",
 				"args": []any{
 					"-y", "@leval/mcp-grafana",

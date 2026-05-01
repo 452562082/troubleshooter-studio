@@ -21,7 +21,7 @@ func TestPreserve_ConfigMapManualOverride(t *testing.T) {
 	// 手改：把 order-worker/dev 从 inferred 改为具体 verified 行（不带 source 字段）
 	original := readFile(t, cmPath)
 	mutated := strings.Replace(original,
-		"      order-worker:\n        namespaceId: \"dev\"\n        group: \"DEFAULT_GROUP\"\n        dataId: \"{service}.yaml\"\n        mcp_server: \"shop-nacos-mcp-server-dev\"\n        status: inferred",
+		"      order-worker:\n        namespaceId: \"dev\"\n        group: \"DEFAULT_GROUP\"\n        dataId: \"{service}.yaml\"\n        mcp_server: \"shop-nacos-dev\"\n        status: inferred",
 		"      order-worker:\n        namespaceId: \"shop-dev\"\n        group: \"SHOP_WORKER\"\n        dataId: \"order-worker.yaml\"\n        status: verified",
 		1)
 	if mutated == original {
@@ -85,7 +85,7 @@ func TestPreserve_AnalyzerWinsOverPriorOverride(t *testing.T) {
 	cmPath := filepath.Join(out, "templates/workspace-template/skills/routing/references/config-map.yaml")
 	orig := readFile(t, cmPath)
 	mut := strings.Replace(orig,
-		"      order-service:\n        namespaceId: \"dev\"\n        group: \"DEFAULT_GROUP\"\n        dataId: \"{service}.yaml\"\n        mcp_server: \"shop-nacos-mcp-server-dev\"\n        status: inferred",
+		"      order-service:\n        namespaceId: \"dev\"\n        group: \"DEFAULT_GROUP\"\n        dataId: \"{service}.yaml\"\n        mcp_server: \"shop-nacos-dev\"\n        status: inferred",
 		"      order-service:\n        namespaceId: \"MANUAL_NS\"\n        group: \"MANUAL_GROUP\"\n        dataId: \"manual.yaml\"\n        status: verified",
 		1)
 	if mut == orig {

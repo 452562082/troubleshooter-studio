@@ -5698,12 +5698,16 @@ function buildOpenclawCreds(): Record<string, string> {
       }
       switch (t) {
         case 'nacos':
+          // 表单 field key 是 user / pass(见 sourceTypeFields.nacos),不是 username / password。
+          // 之前用错 key 导致 putValue 永远 undefined → MCP env 块没 NACOS_USERNAME/PASSWORD →
+          // nacos-mcp-router 启动时 "ValueError: passwd must be a non-empty string"。
           put('CC_ADDR', envCreds.addr)
-          put('CC_USER', envCreds.username)
-          put('CC_PASS', envCreds.password)
+          put('CC_USER', envCreds.user)
+          put('CC_PASS', envCreds.pass)
           break
         case 'apollo':
-          put('APOLLO_META', envCreds.meta_url)
+          // 表单 field key 是 meta(见 sourceTypeFields.apollo),不是 meta_url。
+          put('APOLLO_META', envCreds.meta)
           put('APOLLO_TOKEN', envCreds.token)
           break
         case 'consul':

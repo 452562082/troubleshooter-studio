@@ -4457,6 +4457,10 @@ async function applyImport() {
     if (system.id) {
       try { savedRepoPaths = await getRepoPathsForSystem(system.id) } catch { /* 失败不阻塞 import */ }
     }
+    // 反填后异步并行拉每个 local repo 的真实分支列表,填进 repoBranchesMap;
+    // 这样 Step 5 的"环境 → 分支映射"会显示下拉(带真实分支),而不是文本输入。
+    // 不阻塞 UI:applyImport 同步返回 + 后端 ListBranchesForRepo 按需在后台填。
+    const localPathsToFetch: Array<{ name: string; path: string }> = []
     repos.splice(0, repos.length, ...parsed.repos.map((r: any) => {
       const branches: Record<string, string> = {}
       for (const env of environments) {
@@ -4467,6 +4471,9 @@ async function applyImport() {
         : (r?.service_names ?? '')
       const repoName = r?.name ?? ''
       const localPath = repoName ? (savedRepoPaths[repoName] || '') : ''
+      if (repoName && localPath) {
+        localPathsToFetch.push({ name: repoName, path: localPath })
+      }
       return {
         name: repoName,
         url: r?.url ?? '',
@@ -4487,6 +4494,28 @@ async function applyImport() {
         _submoduleHintsDismissed: typeof r?.service_entries === 'object' && r?.service_entries && Object.keys(r.service_entries).length > 0,
       }
     }))
+
+    // 异步拉真实分支(并行,不阻塞反填主流程):每个 repo 一个 git for-each-ref 调用,
+    // 拿到后塞进 repoBranchesMap,Step 5 模板会自动从 input 切到 select。
+    for (const { name, path } of localPathsToFetch) {
+      listBranchesForRepo(path).then((bs) => {
+        if (bs && bs.length > 0) {
+          repoBranchesMap.value[name] = bs
+          // 顺手用启发式给每个 env 自动选默认分支(同 scanSingleRepo 的逻辑)
+          const r = repos.find(x => x.name === name)
+          if (r) {
+            for (const env of environments) {
+              if (!env.id) continue
+              const cur = (r.env_branches[env.id] || '').trim()
+              // 已有值且在新分支列表里就不动;否则按 env 名做启发式映射
+              if (cur && bs.includes(cur)) continue
+              const mapped = pickBranchForEnv(env, bs)
+              if (mapped) r.env_branches[env.id] = mapped
+            }
+          }
+        }
+      }).catch(() => { /* 拉不到就保持文本输入,不阻塞 import */ })
+    }
   }
 
   // ── 配置中心:多源 schema(config_centers 数组) > 单源(config_center)──

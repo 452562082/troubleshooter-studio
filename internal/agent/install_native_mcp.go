@@ -1,18 +1,30 @@
-// install_native_mcp.go —— Claude Code / Cursor 的 MCP server 自动注入。
+// install_native_mcp.go —— Claude Code / Cursor / Codex CLI 的 MCP server 自动注入。
 //
 // 之前 InstallNative 只做文件拷贝(agent .md / skills/ / scripts/);MCP 服务器配置
 // 完全没动 IDE 的 settings.json,用户装完 agent 调任何 MCP 工具都失败。
 //
-// 这里补齐:从 cfg 推 mcpServers 配置,merge 进 ~/.claude/settings.json 或 ~/.cursor/mcp.json。
-// merge 策略:用 Studio 管理的固定前缀(nacos-mcp-server-* / grafana-mcp-server-* 等)
-// 全删后重写,避免改 yaml 后旧条目残留;用户手加的别名(其它前缀)保留。
+// 这里补齐:从 cfg 推 mcpServers 配置,merge 进对应 IDE 的配置文件。
+//
+// **不同 IDE 配置位置/格式不一样**(踩过坑,2026-05 修):
+//   - claude-code → ~/.claude/settings.json,顶层 "mcpServers" JSON 字段
+//   - cursor      → ~/.cursor/mcp.json,顶层 "mcpServers" JSON 字段
+//   - codex       → ~/.codex/config.toml,`[mcp_servers.<name>]` TOML 段;
+//                   **不读 mcp.json**(早期实现以为跟 cursor 一样写 mcp.json,装完
+//                   `codex mcp list` 0 条 truss-* 服务,排障 skill 全失效)。
+//                   走 `codex mcp add/remove` CLI 子命令注册,让 codex 自己管理 TOML
+//                   格式,避免我们手 marshal TOML 破坏 [projects.*] 等其它段。
+//
+// merge 策略:对 cfg 派生的 server key,先 remove 同名再 add(替换式),避免改 yaml 后
+// 旧条目残留;用户手加的别名(其它前缀)保留不动。
 package agent
 
 import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
@@ -33,6 +45,21 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 // customRoot 非空时 settings 落到 <customRoot>/settings.json (claude-code) 或
 // <customRoot>/mcp.json (cursor/codex);空字符串时回退默认 ~/.<target>。
 func MergeMCPIntoIDESettingsAt(target string, cfg *config.SystemConfig, creds map[string]string, customRoot string) error {
+	// creds=nil → 当前是 BotsPage 重新生成 / CLI install 无凭证场景,**直接跳过** MCP
+	// merge:不传 creds 走下去会拿空值覆盖掉初次 wizard 部署时已写入的真凭证(整个连接断掉)。
+	// 真正需要变更 MCP 的路径是 wizard 重跑(那里会带上凭证),不是 regen。
+	if creds == nil {
+		return nil
+	}
+	get := func(k string) string { return creds[k] }
+	servers := buildMCPServersForCfg(cfg, cfg.ResolveID(), get)
+
+	// codex 走 CLI 单独分支:写 ~/.codex/config.toml 的 [mcp_servers.*] 段
+	if target == "codex" {
+		return mergeMCPIntoCodexCLI(servers)
+	}
+
+	// claude-code / cursor 走 JSON 文件 merge
 	root := customRoot
 	if root == "" {
 		home, err := os.UserHomeDir()
@@ -44,8 +71,6 @@ func MergeMCPIntoIDESettingsAt(target string, cfg *config.SystemConfig, creds ma
 			root = filepath.Join(home, ".claude")
 		case "cursor":
 			root = filepath.Join(home, ".cursor")
-		case "codex":
-			root = filepath.Join(home, ".codex")
 		default:
 			return fmt.Errorf("MergeMCPIntoIDESettings: 不支持的 target %q(只接 claude-code / cursor / codex)", target)
 		}
@@ -54,8 +79,7 @@ func MergeMCPIntoIDESettingsAt(target string, cfg *config.SystemConfig, creds ma
 	switch target {
 	case "claude-code":
 		settingsPath = filepath.Join(root, "settings.json")
-	case "cursor", "codex":
-		// Cursor 与 OpenAI Codex CLI 都走 mcp.json(顶层 mcpServers map)。
+	case "cursor":
 		settingsPath = filepath.Join(root, "mcp.json")
 	default:
 		return fmt.Errorf("MergeMCPIntoIDESettings: 不支持的 target %q(只接 claude-code / cursor / codex)", target)
@@ -65,33 +89,20 @@ func MergeMCPIntoIDESettingsAt(target string, cfg *config.SystemConfig, creds ma
 	if err != nil {
 		return fmt.Errorf("read %s: %w", settingsPath, err)
 	}
-	servers, _ := settings["mcpServers"].(map[string]any)
-	if servers == nil {
-		servers = map[string]any{}
+	existing, _ := settings["mcpServers"].(map[string]any)
+	if existing == nil {
+		existing = map[string]any{}
 	}
 
-	// 1) 写新:用 buildMCPServersForCfg 派生。get 返回空串表示"没值",
-	// buildMCPServersForCfg 内部对空值字段直接 omit(不写进 env block),
-	// 否则 IDE 启 MCP 时会把 "{{NACOS_ADDR_DEV}}" 这种字面值传给 nacos 进程导致连接失败。
-	// 命名带 agent-id 前缀(如 "truss-bot-nacos-mcp-server-prod"),保证多 system 共存时不撞名。
-	get := func(k string) string {
-		if creds == nil {
-			return ""
-		}
-		return creds[k]
+	// 替换式更新:cfg 派生的同名 key 先删后写,用户手加的别名(其它前缀)保留。
+	// 环境删了 / 切了配置中心后不再生成的旧 key 会留下,需用户手清(可接受 —— 比误删重要 server 强)。
+	for k := range servers {
+		delete(existing, k)
 	}
-	new := buildMCPServersForCfg(cfg, cfg.ResolveID(), get)
-
-	// 2) 删旧:**精确**只删本次实际生成的同名 key(替换式更新)。不再前缀通配,
-	// 避免误伤用户手加的同前缀别人家 agent 的 server。环境删了 / 切了配置中心后
-	// 不再生成的旧 key 会留下,需要用户手清(可接受 —— 比误删重要 server 强)。
-	for k := range new {
-		delete(servers, k)
+	for k, v := range servers {
+		existing[k] = v
 	}
-	for k, v := range new {
-		servers[k] = v
-	}
-	settings["mcpServers"] = servers
+	settings["mcpServers"] = existing
 
 	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", filepath.Dir(settingsPath), err)
@@ -102,6 +113,69 @@ func MergeMCPIntoIDESettingsAt(target string, cfg *config.SystemConfig, creds ma
 	}
 	if err := os.WriteFile(settingsPath, data, 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", settingsPath, err)
+	}
+	return nil
+}
+
+// mergeMCPIntoCodexCLI 通过 `codex mcp remove` + `codex mcp add` 注册 servers 到
+// codex 的 ~/.codex/config.toml。让 codex 自己管理 TOML 格式,避免手 marshal 把
+// [projects.*] / [marketplaces.*] / 用户手加的 [mcp_servers.<别名>] 段搞坏。
+//
+// 行为:对每个 server 名先 remove(忽略 "not found" 错误)再 add,实现"替换式更新"。
+// codex CLI 必须在 PATH 里 —— wizard 部署到 codex 之前会过 aitools.DetectCodex,
+// 没装 codex 就不让选这个 target;走到这里仍找不到 binary 也直接报错给用户。
+func mergeMCPIntoCodexCLI(servers map[string]any) error {
+	codexBin, err := exec.LookPath("codex")
+	if err != nil {
+		return fmt.Errorf("找不到 codex CLI(PATH 里没 'codex'),无法注册 MCP 到 codex 的 config.toml;请先安装 codex(brew install codex)再重试: %w", err)
+	}
+	// 排序后注册,日志稳定可读(codex 会把同名先后写入 toml,顺序无业务影响)
+	keys := make([]string, 0, len(servers))
+	for k := range servers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, name := range keys {
+		spec, _ := servers[name].(map[string]any)
+		if spec == nil {
+			continue
+		}
+		// 先 remove 同名(注册过的会成功,没注册的报 "not found",非致命)
+		_ = exec.Command(codexBin, "mcp", "remove", name).Run()
+
+		args := []string{"mcp", "add", name}
+		// env vars 走 --env KEY=VALUE,可重复
+		if envMap, ok := spec["env"].(map[string]any); ok {
+			envKeys := make([]string, 0, len(envMap))
+			for k := range envMap {
+				envKeys = append(envKeys, k)
+			}
+			sort.Strings(envKeys)
+			for _, k := range envKeys {
+				v, _ := envMap[k].(string)
+				args = append(args, "--env", fmt.Sprintf("%s=%s", k, v))
+			}
+		}
+		// stdio:--  COMMAND ARGS...    HTTP:--url URL
+		if url, ok := spec["url"].(string); ok && url != "" {
+			args = append(args, "--url", url)
+		} else if cmd, ok := spec["command"].(string); ok && cmd != "" {
+			args = append(args, "--", cmd)
+			if rawArgs, ok := spec["args"].([]any); ok {
+				for _, a := range rawArgs {
+					if s, ok := a.(string); ok {
+						args = append(args, s)
+					}
+				}
+			}
+		} else {
+			// 既没 command 又没 url,跳过(理论上不会出现,buildMCPServersForCfg 都填了 command)
+			continue
+		}
+		out, runErr := exec.Command(codexBin, args...).CombinedOutput()
+		if runErr != nil {
+			return fmt.Errorf("codex mcp add %s 失败: %w\n%s", name, runErr, string(out))
+		}
 	}
 	return nil
 }

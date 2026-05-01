@@ -1886,8 +1886,10 @@ const CC_FIELDS_BY_TYPE = computed<Record<string, CredField[]>>(() => {
   return {
     nacos: [
       { key: 'addr', label: 'Nacos 地址 (host:port)', secret: false, envVar: (e) => `CC_ADDR_${e.toUpperCase()}`, placeholder: 'nacos.example.com:8848' },
-      { key: 'user', label: '用户名', secret: false, envVar: (e) => `CC_USER_${e.toUpperCase()}`, placeholder: 'nacos', optional: true },
-      { key: 'pass', label: '密码', secret: true, envVar: (e) => `CC_PASS_${e.toUpperCase()}`, optional: true },
+      // user/pass 标必填(nacos-mcp-router 强制非空,空字符串会抛 ValueError);默认值
+      // 不填留空,生成时会兜底 nacos/nacos(标准默认账号);用户实际不同时手填覆盖。
+      { key: 'user', label: '用户名', secret: false, envVar: (e) => `CC_USER_${e.toUpperCase()}`, placeholder: 'nacos(默认)' },
+      { key: 'pass', label: '密码', secret: true, envVar: (e) => `CC_PASS_${e.toUpperCase()}`, placeholder: 'nacos(默认)' },
     ],
     apollo: [
       { key: 'meta', label: 'Portal URL', secret: false, envVar: (e) => `APOLLO_META_${e.toUpperCase()}`, placeholder: 'http://apollo-portal:8070' },

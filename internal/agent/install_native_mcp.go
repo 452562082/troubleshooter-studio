@@ -214,15 +214,27 @@ func buildMCPServersForCfg(cfg *config.SystemConfig, agentID string, get func(st
 	}
 
 	// nacos per (source × env):多源 + 每 env 一个独立 MCP 实例
+	// 注:nacos-mcp-router 强制要求 NACOS_USERNAME/PASSWORD 非空字符串(空会抛
+	// ValueError: passwd must be a non-empty string,MCP server 起不来)。
+	// 用户没填的话回落到 nacos 部署的标准默认账号 "nacos/nacos",真实凭证不一致时
+	// 用户在 wizard / mcp.json env 字段手填覆盖即可,不让 MCP 整体起不来。
 	for _, cc := range cfg.Infrastructure.ConfigCenters {
 		if cc.Type != "nacos" {
 			continue
 		}
 		for _, e := range envs {
+			user := get(envVar("CC_USER", cc.ID, e.ID))
+			if strings.TrimSpace(user) == "" {
+				user = "nacos"
+			}
+			pass := get(envVar("CC_PASS", cc.ID, e.ID))
+			if strings.TrimSpace(pass) == "" {
+				pass = "nacos"
+			}
 			env := pruneEmpty(map[string]any{
 				"NACOS_ADDR":     get(envVar("CC_ADDR", cc.ID, e.ID)),
-				"NACOS_USERNAME": get(envVar("CC_USER", cc.ID, e.ID)),
-				"NACOS_PASSWORD": get(envVar("CC_PASS", cc.ID, e.ID)),
+				"NACOS_USERNAME": user,
+				"NACOS_PASSWORD": pass,
 			})
 			servers[keyFor("nacos", cc.ID, e.ID)] = map[string]any{
 				"command": "uvx",

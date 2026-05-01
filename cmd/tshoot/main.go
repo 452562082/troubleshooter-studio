@@ -145,7 +145,7 @@ func printWelcome() {
   tshoot validate -i system.yaml                 # 校验格式
   tshoot plan     -i system.yaml                 # 预览会生成什么
   tshoot gen      -i system.yaml                 # 真落盘 staging
-  tshoot install  --path <staging> --target X    # 部署到本机(openclaw / claude-code / cursor)
+  tshoot install  --path <staging> --target X    # 部署到本机(openclaw / claude-code / cursor / codex)
   tshoot self-test --path <staging>              # openclaw 部署后自检
   tshoot uninstall --path <staging>              # 卸载 openclaw agent
   tshoot doctor   -i system.yaml                 # 检查声明 vs 实态漂移

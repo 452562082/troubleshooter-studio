@@ -10,7 +10,7 @@
 
 - **上层(此仓库)**:研制环境,做 `system.yaml` 建模、仓库扫描、校验、生成、部署、管理。三个入口、能力不同:
   - **桌面 app(Wails)** —— 完整能力,含装机 / 已装管理 / 工作目录浏览
-  - **CLI** —— 完整 yaml 计算 + 装机能力(`install` 暂未支持 codex)
+  - **CLI** —— 完整 yaml 计算 + 装机能力(4 平台齐全)
   - **HTTP API(`tshoot serve`)** —— 仅 yaml 计算子集(validate / plan / gen / doctor / schema),给 CI 集成 / 浏览器模式 / 接到自家平台用,**有意不含装机**(改活 workspace 必须在产生它的机器上做)
 - **下层(产出物)**:完整可运行的 AI 排障机器人 —— **skill 集合按 yaml 配置动态裁剪**:固定核心(`routing` 路由 + `incident-investigator` 主流程 + `recent-changes` 变更聚合)+ 按你的配置源 / 数据层 / 可观测性勾选自动启用的 runtime-query 系列(redis / mongodb / es / kafka / k8s / tracing / 等)+ 多环境 MCP + 标准故障话术。脱离 studio 独立运行。
 
@@ -116,7 +116,7 @@ go build -o bin/tshoot ./cmd/tshoot
 ./bin/tshoot upgrade -i system.yaml                         # 备份 + 重 gen + diff
 ```
 
-`--format=json` 给 CI 消费;`tshoot --help` 列全部子命令。CLI 的 `install` 目前支持 `openclaw / claude-code / cursor`(codex 走桌面 app)。
+`--format=json` 给 CI 消费;`tshoot --help` 列全部子命令。CLI 的 `install` 支持 4 个平台:`openclaw / claude-code / cursor / codex`(claude-code/cursor/codex 平台传 `--env-file` 时会顺带把 MCP 服务器 + 凭证注入到对应 IDE 配置,跟桌面 app 一致)。
 
 ## 子命令速查
 
@@ -238,6 +238,5 @@ schema/system.schema.yaml
 ## 已知限制
 
 - 桌面 app 没代码签名 / 公证,macOS Gatekeeper 首次会拦
-- CLI 的 `install` 暂不支持 codex(桌面 app 已支持 codex 全套)
 - 服务依赖图(downstream)的 Go 扫描覆盖 truss / 老 kratos 的 `client.NewXxxClient(naming, XxxServiceName, ns)` 风格;go-zero / kratos v2 / kitex 等需要在沙盒里手补
 - 服务调用链路 / 数据 schema 自动扫描精度 50-70%,主流 ORM(GORM / JPA / SQLAlchemy / TypeORM / Mongoose)命中率较高,冷门 ORM 漏的部分需手填

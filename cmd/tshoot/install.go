@@ -2,31 +2,36 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/agent"
+	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/deploy"
+	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 )
 
 // runInstall 把 staging 包装到本机最终位置(原生 Go,无 bash 依赖)。
 //
-// 三种 target:
+// 四种 target:
 //   - openclaw     → ~/.openclaw/workspace/<name>/ + ~/.openclaw/openclaw.json 注入
-//   - claude-code  → ~/.claude/agents/<name>.md + ~/.claude/skills/<name>/...
-//   - cursor       → ~/.cursor/agents/<name>.md  + ~/.cursor/skills/<name>/...
+//   - claude-code  → ~/.claude/agents/<name>.md + ~/.claude/{skills,scripts}/<name>/...
+//   - cursor       → ~/.cursor/agents/<name>.md  + ~/.cursor/{skills,scripts}/<name>/...
+//   - codex        → ~/.codex/agents/<name>.md   + ~/.codex/{skills,scripts}/<name>/...
 //
-// 凭证收集策略(只 openclaw 需要):
-//   - --env-file 指向 .env(KEY=VAL 格式),逐行 export 进 creds map
-//   - 默认 staging 下的 scripts/.env 已存在 → 自动读
-//   - 没设 → 装出来的产物 NACOS_ADDR 等会是空,MCP server 起不来,但产物结构正确
-//     (适合脚本化场景,先生成完再用其它工具回填 .env 后重跑 install)
+// 凭证收集策略:
+//   - openclaw   :走 InstallNativeOpenclaw,凭证写到 ~/.openclaw/<id>-creds.json + 注入 MCP env
+//   - IDE 三家   :--env-file 非空时,凭证一并注入到对应 IDE 的 mcpServers env(claude-code 写
+//                 settings.json;cursor 写 mcp.json;codex 走 `codex mcp add` 写 config.toml),
+//                 同时镜像写 ~/.tshoot/<id>-creds.json 给 kuboard / apollo / consul / 静态环境变量
+//                 等"非 MCP 走脚本"的后端用。空凭证不阻塞 install,事后手填 .env 重跑即可。
 func runInstall(args []string) error {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 	stagingDir := fs.String("path", "", "staging 产物目录(必填,tshoot gen 的 -o 输出)")
-	target := fs.String("target", "", "openclaw | claude-code | cursor(必填)")
+	target := fs.String("target", "", "openclaw | claude-code | cursor | codex(必填)")
 	envFile := fs.String("env-file", "", "凭证 .env 文件;默认从 <staging>/scripts/.env 读")
 	skipGateway := fs.Bool("skip-gateway-restart", false, "跳过 openclaw gateway restart(本机没装 openclaw CLI 时用)")
 	if err := fs.Parse(args); err != nil {
@@ -45,13 +50,30 @@ func runInstall(args []string) error {
 	}
 
 	switch *target {
-	case "claude-code", "cursor":
-		// 纯文件分发,凭证用不上;一行 Go 调用搞定
+	case "claude-code", "cursor", "codex":
+		// 纯文件分发(agent.md / skills / scripts / tshoot.json 锚点)+ 顺带把 cfg 派生的
+		// MCP 服务器注入到对应 IDE 的配置文件 + 凭证镜像写 ~/.tshoot/<id>-creds.json 给
+		// kuboard / apollo / consul / 静态环境变量等非 MCP 后端用。
 		if err := agent.InstallNative(abs, *target); err != nil {
 			return err
 		}
-		fmt.Printf("[ok] %s 已装到用户级目录(~/.%s/agents/<name>.md 等)\n",
-			*target, claudeOrCursorDir(*target))
+		// 注入 MCP + 写通用 creds.json 走跟桌面 app 一致的路径(IDECreds=nil 时全部跳过,
+		// 不会拿空值覆盖已有凭证 —— 跟 BotsPage regen 同款防御)。
+		if creds, _ := loadIDECredsBestEffort(abs, *envFile); creds != nil {
+			if err := installIDESideEffects(*target, abs, creds); err != nil {
+				return err
+			}
+		}
+		dirName := iderootName(*target)
+		fmt.Printf("[ok] %s 已装到用户级目录(~/.%s/agents/<name>.md + skills/scripts/<name>/)\n",
+			*target, dirName)
+		if *target == "codex" {
+			fmt.Println("    · MCP 服务器走 `codex mcp add` 注册到 ~/.codex/config.toml")
+		} else if *target == "claude-code" {
+			fmt.Println("    · MCP 服务器写到 ~/.claude/settings.json (--env-file 提供凭证才注入)")
+		} else {
+			fmt.Println("    · MCP 服务器写到 ~/.cursor/mcp.json (--env-file 提供凭证才注入)")
+		}
 		return nil
 
 	case "openclaw":
@@ -76,8 +98,72 @@ func runInstall(args []string) error {
 		return nil
 
 	default:
-		return fmt.Errorf("unknown target: %s(支持 openclaw / claude-code / cursor)", *target)
+		return fmt.Errorf("unknown target: %s(支持 openclaw / claude-code / cursor / codex)", *target)
 	}
+}
+
+// loadIDECredsBestEffort 给 claude-code / cursor / codex 三家 install 走的凭证读取。
+// --env-file 优先,否则尝试 staging/scripts/.env。读不到返回 nil(让上层调用方据此跳过
+// MergeMCPIntoIDESettings/WriteIDECredsFile,避免空覆盖凭证)。失败也返回 nil:IDE 装机
+// 主流程已成功(agent.md / skills 文件已落盘),凭证 best-effort 不阻塞主流程。
+func loadIDECredsBestEffort(stagingDir, envFile string) (map[string]string, error) {
+	creds, err := loadInstallCreds(stagingDir, envFile)
+	if err != nil || len(creds) == 0 {
+		return nil, err
+	}
+	return creds, nil
+}
+
+// installIDESideEffects 装完 IDE 平台的文件之后,把 cfg 派生的 mcpServers 注入到对应
+// IDE 配置 + 把非 MCP 后端的凭证写到 ~/.tshoot/<id>-creds.json。跟桌面 app
+// agent.Apply 流程对齐,确保 CLI 装出来的机器人功能完整(包括 kuboard / k8s 查询等
+// 走脚本读 creds.json 的 skill)。
+func installIDESideEffects(target, stagingDir string, creds map[string]string) error {
+	cfg, err := loadStagingSystemConfig(stagingDir)
+	if err != nil {
+		return fmt.Errorf("read staging tshoot.json: %w", err)
+	}
+	if err := agent.MergeMCPIntoIDESettings(target, cfg, creds); err != nil {
+		return fmt.Errorf("merge mcp settings: %w", err)
+	}
+	if err := agent.WriteIDECredsFile(cfg, creds); err != nil {
+		return fmt.Errorf("write ide creds: %w", err)
+	}
+	return nil
+}
+
+// loadStagingSystemConfig 从 staging 目录的 tshoot.json 读出 system_yaml 段,parse 成
+// SystemConfig。CLI install 在 IDE 平台分支调它,把 cfg 喂给 MergeMCPIntoIDESettings 派生 MCP。
+// 两个候选位置(谁先存在用谁,跟桌面 app bindings_deploy.go::loadStagingConfig 同款逻辑):
+//   - <staging>/tshoot.json                              ← claude-code/cursor/codex staging
+//   - <staging>/templates/workspace-template/tshoot.json ← openclaw staging(本路径不会走到这,IDE 装机不读)
+func loadStagingSystemConfig(stagingDir string) (*config.SystemConfig, error) {
+	candidates := []string{
+		filepath.Join(stagingDir, discover.MetaFilename),
+		filepath.Join(stagingDir, "templates", "workspace-template", discover.MetaFilename),
+	}
+	var data []byte
+	var lastErr error
+	for _, p := range candidates {
+		b, err := os.ReadFile(p)
+		if err == nil {
+			data = b
+			break
+		}
+		lastErr = err
+	}
+	if data == nil {
+		return nil, lastErr
+	}
+	var meta discover.Meta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil, fmt.Errorf("parse tshoot.json: %w", err)
+	}
+	cfg, err := config.LoadFromBytes([]byte(meta.SystemYAML))
+	if err != nil {
+		return nil, fmt.Errorf("system.yaml in tshoot.json invalid: %w", err)
+	}
+	return cfg, nil
 }
 
 // runSelfTest 跑 openclaw 自检(claude-code/cursor 没自检概念,装完即用)。
@@ -158,10 +244,14 @@ func loadInstallCreds(stagingDir, envFile string) (map[string]string, error) {
 	return m, nil
 }
 
-// claudeOrCursorDir 仅用于 install 命令打印路径提示。
-func claudeOrCursorDir(target string) string {
-	if target == "cursor" {
+// iderootName 把 IDE target 映射到 ~/.<name>/ 的目录名,仅用于 install 命令打印路径提示。
+func iderootName(target string) string {
+	switch target {
+	case "cursor":
 		return "cursor"
+	case "codex":
+		return "codex"
+	default:
+		return "claude"
 	}
-	return "claude"
 }

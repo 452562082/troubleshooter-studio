@@ -6965,14 +6965,14 @@ const configTypeDescriptions: Record<string, string> = {
         <label>
           <code>{{ configCenterType }}</code> 连接配置
           <span v-if="isMultiSource" class="auto-tag" style="background:#dbeafe;color:#1e40af;">主源 · 完整 preload</span>
-          <span class="field-hint">— 按环境维度填写;部署时注入到目标平台的 MCP Server env 块(用户名/密码不会写进 system.yaml)</span>
+          <span class="field-hint">— 按环境维度填写,保存后写入 system.yaml(标 <code># ⚠ secret</code> 注释),部署时注入到目标平台的 MCP Server env 块</span>
         </label>
         <div class="cc-share-warn">
-          <div class="cc-share-warn-title">🔐 凭证存储说明</div>
+          <div class="cc-share-warn-title">⚠ 凭证与共享提醒</div>
           <ul class="cc-share-warn-list">
-            <li>账号密码<strong>不会进 system.yaml</strong>(yaml 故意可分享,不含本机密钥)。</li>
-            <li>实际写入位置:<code>~/.openclaw/&lt;agent-id&gt;-creds.json</code>(OpenClaw)+ <code>~/.tshoot/&lt;agent-id&gt;-creds.json</code>(IDE 通用)+ 各 IDE 的 mcpServers env 块(claude-code/cursor/codex)。这些都是**机器本地**文件,跟 yaml 分离。</li>
-            <li>nacos USERNAME/PASSWORD 留空时自动用 nacos 标准默认账号 <code>nacos / nacos</code>;真账号不一致就在这里填(避免部署后 MCP 起不来)。</li>
+            <li>这里填的账号密码会以明文写入 <code>system.yaml</code>(每条带 <code># ⚠ secret</code> 注释),并部署时注入到机器人 MCP Server 的 env 块 + <code>~/.tshoot/&lt;agent-id&gt;-creds.json</code>。</li>
+            <li>分享 yaml 请限**团队内部 / 私有仓库**,<strong>不要提交到公开代码仓库</strong>。</li>
+            <li>nacos USERNAME/PASSWORD 留空时自动回落到 nacos 标准默认账号 <code>nacos / nacos</code>(代码层兜底,避免 MCP 起不来);真账号不一致就在这里填。</li>
           </ul>
         </div>
         <div v-for="env in environments" :key="env.id" class="cc-env-block">

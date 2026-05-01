@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, onMounted, onUnmounted, reactive, watch } from 'vue'
+import { ref, computed, nextTick, onActivated, onMounted, onUnmounted, reactive, watch } from 'vue'
 // Wails 运行时事件 API:Go 端 EventsEmit 推过来,这里 EventsOn 订阅。
 // 注意 runtime.js 是 Wails 打进 app 的全局脚本,浏览器里 import 的效果是
 // 引用 window.runtime.*;`tshoot serve` 模式下这些函数不会真实推事件(无源)。
@@ -568,6 +568,12 @@ onMounted(() => {
   EventsOn('install:log', (line: string) => {
     installLog.value += line + '\n'
   })
+})
+// keep-alive 缓存了 BotsPage,InitPage 末步部署 → 切回 BotsPage 时组件不会重 mount,
+// onMounted 里的 scan() 不跑,卸载/重装的状态变更看不到。onActivated 是 keep-alive
+// 专属钩子,每次组件被激活(切回页面)都会触发 → 自动 rescan,卡片永远跟磁盘真态一致。
+onActivated(() => {
+  scan()
 })
 onUnmounted(() => {
   EventsOff('install:log')

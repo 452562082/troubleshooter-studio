@@ -321,25 +321,15 @@ func injectMCPServers(
 
 	// 多源配置中心:nacos 类型逐源 × env 注册独立 MCP 实例。
 	// k8s/env-vars/apollo/consul 不走 MCP(走 creds.json + 配套 python 脚本)。
-	// nacos-mcp-router 强制要求 USERNAME/PASSWORD 非空(空会抛 ValueError),
-	// 用户没填回落到标准默认账号 nacos/nacos,跟 install_native_mcp.go 的处理一致。
 	for _, cc := range cfg.Infrastructure.ConfigCenters {
 		if cc.Type != "nacos" {
 			continue
 		}
 		for _, e := range envs {
-			user := get(envVar("CC_USER", cc.ID, e.ID))
-			if strings.TrimSpace(user) == "" {
-				user = "nacos"
-			}
-			pass := get(envVar("CC_PASS", cc.ID, e.ID))
-			if strings.TrimSpace(pass) == "" {
-				pass = "nacos"
-			}
 			env := map[string]any{
 				"NACOS_ADDR":     get(envVar("CC_ADDR", cc.ID, e.ID)),
-				"NACOS_USERNAME": user,
-				"NACOS_PASSWORD": pass,
+				"NACOS_USERNAME": get(envVar("CC_USER", cc.ID, e.ID)),
+				"NACOS_PASSWORD": get(envVar("CC_PASS", cc.ID, e.ID)),
 			}
 			servers[mcpKeyForAgent(agentID, "nacos", cc.ID, e.ID)] = map[string]any{
 				"command": "uvx",

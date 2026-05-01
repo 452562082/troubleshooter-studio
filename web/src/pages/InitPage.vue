@@ -1886,10 +1886,8 @@ const CC_FIELDS_BY_TYPE = computed<Record<string, CredField[]>>(() => {
   return {
     nacos: [
       { key: 'addr', label: 'Nacos 地址 (host:port)', secret: false, envVar: (e) => `CC_ADDR_${e.toUpperCase()}`, placeholder: 'nacos.example.com:8848' },
-      // user/pass 标必填(nacos-mcp-router 强制非空,空字符串会抛 ValueError);默认值
-      // 不填留空,生成时会兜底 nacos/nacos(标准默认账号);用户实际不同时手填覆盖。
-      { key: 'user', label: '用户名', secret: false, envVar: (e) => `CC_USER_${e.toUpperCase()}`, placeholder: 'nacos(默认)' },
-      { key: 'pass', label: '密码', secret: true, envVar: (e) => `CC_PASS_${e.toUpperCase()}`, placeholder: 'nacos(默认)' },
+      { key: 'user', label: '用户名', secret: false, envVar: (e) => `CC_USER_${e.toUpperCase()}`, placeholder: 'nacos', optional: true },
+      { key: 'pass', label: '密码', secret: true, envVar: (e) => `CC_PASS_${e.toUpperCase()}`, optional: true },
     ],
     apollo: [
       { key: 'meta', label: 'Portal URL', secret: false, envVar: (e) => `APOLLO_META_${e.toUpperCase()}`, placeholder: 'http://apollo-portal:8070' },
@@ -6972,7 +6970,6 @@ const configTypeDescriptions: Record<string, string> = {
           <ul class="cc-share-warn-list">
             <li>这里填的账号密码会以明文写入 <code>system.yaml</code>(每条带 <code># ⚠ secret</code> 注释),并部署时注入到机器人 MCP Server 的 env 块 + <code>~/.tshoot/&lt;agent-id&gt;-creds.json</code>。</li>
             <li>分享 yaml 请限**团队内部 / 私有仓库**,<strong>不要提交到公开代码仓库</strong>。</li>
-            <li>nacos USERNAME/PASSWORD 留空时自动回落到 nacos 标准默认账号 <code>nacos / nacos</code>(代码层兜底,避免 MCP 起不来);真账号不一致就在这里填。</li>
           </ul>
         </div>
         <div v-for="env in environments" :key="env.id" class="cc-env-block">

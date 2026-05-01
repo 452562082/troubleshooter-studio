@@ -9,7 +9,7 @@
 两层项目:
 
 - **上层(此仓库)**:研制环境 —— 桌面 app(Wails) / CLI / HTTP API 三个入口,做 `system.yaml` 建模、仓库扫描、校验、生成、部署、管理。
-- **下层(产出物)**:完整可运行的 AI 排障机器人 —— `routing` / `incident-investigator` / `recent-changes` / `config-executor` / `redis-runtime-query` / `mongodb-runtime-query` / `es-runtime-query` / `kafka-runtime-query` / `k8s-runtime-query` / `tracing-query` / `diagram-generator` 共 11 个 skill + 多环境 MCP + 标准故障话术。脱离 studio 独立运行。
+- **下层(产出物)**:完整可运行的 AI 排障机器人 —— **skill 集合按 yaml 配置动态裁剪**:固定核心(`routing` 路由 + `incident-investigator` 主流程 + `recent-changes` 变更聚合)+ 按你的配置源 / 数据层 / 可观测性勾选自动启用的 runtime-query 系列(redis / mongodb / es / kafka / k8s / tracing / 等)+ 多环境 MCP + 标准故障话术。脱离 studio 独立运行。
 
 ## 部署到 4 个 AI 平台
 
@@ -122,16 +122,58 @@ go build -o bin/tshoot ./cmd/tshoot
 
 ## 排障机器人具备什么能力(产出物)
 
-- **routing**:11 张映射表(env → 域名 / 分支 / 配置 / 日志 app / MCP 名 / 依赖图 / 表 schema / known-errors),静态查表毫秒返回
-- **incident-investigator**:固化"症状 → 时间轴 → 横向 → 纵向 → 三向交叉 → 根因"6 步流程,任何报障先走这套
-- **recent-changes**:故障窗口 ±5min K8s rollout / 配置变更 / git log 三合一聚合
-- **config-executor**:nacos / apollo / consul / kuboard / 静态环境变量 5 种后端,按 namespace/group/dataId 读配置 + 历史 + diff
-- **k8s-runtime-query**:Kuboard v4 HTTP API 查 pod / service / deployment / events / logs(只读,不做 write/exec)
-- **tracing-query**:Jaeger 按 trace_id / service / 时间窗查 spans
-- **{redis,mongodb,es,kafka}-runtime-query**:运行时按 entity ID 反查;连接串从配置中心动态解析,mcporter 临时拉起 ad-hoc MCP
-- **diagram-generator**:Mermaid 文本 → PNG/SVG(走 mermaid.ink)
+skill 集合**按 yaml 动态裁剪**,实际产出取决于你勾选的配置源 / 数据层 / 可观测性 / `generation.skills_whitelist`。能装的 skill 全集:
 
-完整能力 + 限制说明见首页"想了解更多"卡片,以及部署完成后产物里的 `AGENTS.md`。
+| skill | 何时启用 | 干什么 |
+|---|---|---|
+| `routing` | 总是 | 11 张映射表(env → 域名 / 分支 / 配置 / 日志 app / MCP 名 / 依赖图 / 表 schema / known-errors),静态查表毫秒返回 |
+| `incident-investigator` | 总是 | 固化"症状 → 时间轴 → 横向 → 纵向 → 三向交叉 → 根因"6 步流程,任何报障先走这套 |
+| `recent-changes` | 总是 | 故障窗口 ±5min K8s rollout / 配置变更 / git log 三合一聚合 |
+| `config-executor` | 总是(后端按 yaml `infrastructure.config_centers` 动态切) | 5 种后端:nacos(MCP)/ apollo / consul / kuboard / 静态环境变量,按 namespace/group/dataId 读配置 + 历史 + diff |
+| `k8s-runtime-query` | `observability.k8s_runtime.enabled: true` | Kuboard v4 HTTP API 查 pod / service / deployment / events / logs(只读) |
+| `tracing-query` | `observability.jaeger.enabled: true`(或同类) | Jaeger 按 trace_id / service / 时间窗查 spans |
+| `redis-runtime-query` | `data_stores[type=redis].enabled: true` | 运行时按 entity ID 反查;连接串从配置中心动态解析,mcporter 临时拉起 ad-hoc MCP |
+| `mongodb-runtime-query` | `data_stores[type=mongodb].enabled: true` | 同上,query / aggregate / count / listCollections |
+| `es-runtime-query` | `data_stores[type=elasticsearch].enabled: true` | 同上 |
+| `kafka-runtime-query` | `data_stores[type=kafka].enabled: true` | 通过 kafka CLI 或 mcporter 看 topic / consumer-group / 积压 |
+| `diagram-generator` | 总是 | Mermaid 文本 → PNG/SVG(走 mermaid.ink) |
+
+未启用 / 未勾选的 skill **直接不生成**,产物里就没那个目录;`generation.skills_whitelist` 还能进一步收窄(已启用的 skill 也可以排除掉)。完整能力 + 限制说明见部署完成后产物里的 `AGENTS.md`。
+
+## HTTP API 用法
+
+`tshoot serve` 启动一个 HTTP server,等价 CLI 的"yaml 计算 + 校验"子集(不含部署 / 安装 / 扫机器),给 CI 集成 / 浏览器模式 / 接到自家平台用。
+
+```bash
+./bin/tshoot serve [--port 8080]
+# Web UI: http://localhost:8080
+# API:    http://localhost:8080/api/
+```
+
+| 端点 | 用法 |
+|---|---|
+| `POST /api/validate` | body=system.yaml(`Content-Type: text/yaml`),返回是否合规 + 错误位置 |
+| `POST /api/plan` | body=system.yaml,返回干跑 gen 摘要(skills / files / config-map 分布) |
+| `POST /api/gen` | body=system.yaml,真生成 staging 到默认 `./dist/<id>/` |
+| `POST /api/doctor` | body=system.yaml + query `?repos_root=<path>`,返回 8 类漂移 issue 列表 |
+| `POST /api/prefill-creds` | body=system.yaml,返回 install 时需要哪些 env var key |
+| `GET /api/schema` | 返回 `system.schema.yaml` 内容(给前端做字段提示用) |
+
+示例(在 CI 里把 yaml 当 lint 跑):
+
+```bash
+curl -fsS -X POST -H "Content-Type: text/yaml" \
+  --data-binary @system.yaml \
+  http://localhost:8080/api/validate
+
+# 漂移检测 + 代码扫描:
+curl -fsS -X POST -H "Content-Type: text/yaml" \
+  --data-binary @system.yaml \
+  "http://localhost:8080/api/doctor?repos_root=/path/to/code"
+```
+
+**HTTP API 不支持的**(只在桌面 app 走 Wails binding):
+`discover` 扫本机已装机器人 / `apply install uninstall` 装机操作 / 已装机器人配置编辑 + 工作目录浏览 + MCP 注册。HTTP 模式是"无副作用 / 跨机可用"的子集,这是有意为之 —— 改活 workspace 必须在产生它的机器上做,不通过网络远程操作。
 
 ## Doctor 漂移检测
 

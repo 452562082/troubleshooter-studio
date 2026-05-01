@@ -52,7 +52,9 @@ func MergeMCPIntoIDESettingsAt(target string, cfg *config.SystemConfig, creds ma
 		return nil
 	}
 	get := func(k string) string { return creds[k] }
-	servers := buildMCPServersForCfg(cfg, cfg.ResolveID(), get)
+	// 用 system.id 当 MCP key 前缀(短),不是 ResolveID()(常见 = system.id+"-troubleshooter",
+	// 长 13 字)—— 避免 server_key + tool_name 拼起来超过 IDE 60 字符的 tool 名限制。
+	servers := buildMCPServersForCfg(cfg, cfg.MCPKeyPrefix(), get)
 
 	// codex 走 CLI 单独分支:写 ~/.codex/config.toml 的 [mcp_servers.*] 段
 	if target == "codex" {

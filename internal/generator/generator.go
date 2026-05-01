@@ -18,6 +18,11 @@ import (
 type Context struct {
 	*config.SystemConfig
 	AgentID string
+	// MCPKeyPrefix 用于 MCP server key 的前缀(短形式,通常 = system.id),跟
+	// install_native_mcp.go::buildMCPServersForCfg 用的同一前缀对齐 ——
+	// config-map.yaml 模板里 mcp_server 字段拼出来的名字必须跟实际 mcp.json/config.toml
+	// 里注册的 server key 一致,机器人才调得到对应 MCP。
+	MCPKeyPrefix string
 	// Findings[service][env] -> Finding；env 为空串表示对所有环境生效
 	Findings map[string]map[string]analyzer.Finding
 	// PriorOverrides[service][env] -> Finding；来自上次生成产物中的人工 verified 行
@@ -85,6 +90,7 @@ func New(cfg *config.SystemConfig, templateRoot, outputDir string) *Generator {
 		Ctx: &Context{
 			SystemConfig:           cfg,
 			AgentID:                cfg.ResolveID(),
+			MCPKeyPrefix:           cfg.MCPKeyPrefix(),
 			Findings:               map[string]map[string]analyzer.Finding{},
 			PriorOverrides:         map[string]map[string]analyzer.Finding{},
 			DownstreamCallsByRepo:  map[string][]analyzer.DownstreamCall{},

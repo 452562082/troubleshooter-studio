@@ -85,7 +85,7 @@ func TestSelfTestOpenclaw_MissingMCPServer(t *testing.T) {
 	cfgPath := filepath.Join(fakeHome, ".openclaw", "openclaw.json")
 	data := readJSON(t, cfgPath)
 	servers := getMap(data, "mcp", "servers")
-	delete(servers, "shop-troubleshooter-grafana-mcp-server-prod")
+	delete(servers, "shop-grafana-mcp-server-prod")
 	mb, _ := json.MarshalIndent(data, "", "  ")
 	if err := os.WriteFile(cfgPath, mb, 0o644); err != nil {
 		t.Fatal(err)

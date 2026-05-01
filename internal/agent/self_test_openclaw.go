@@ -74,6 +74,7 @@ func SelfTestOpenclaw(ctx context.Context, dir string) (*SelfTestResult, error) 
 		return res, nil
 	}
 	agentID := cfg.ResolveID()
+	mcpPrefix := cfg.MCPKeyPrefix() // MCP server key 用短前缀(system.id),跟 inject/IDE 一致
 	if hasAgentEntry(ocData, agentID) {
 		add(fmt.Sprintf("agents.list 含 %s", agentID), "PASS", cfgPath)
 	} else {
@@ -81,7 +82,7 @@ func SelfTestOpenclaw(ctx context.Context, dir string) (*SelfTestResult, error) 
 	}
 
 	servers := getMCPServers(ocData)
-	required := requiredMCPKeys(cfg, agentID)
+	required := requiredMCPKeys(cfg, mcpPrefix)
 	var missing []string
 	for _, k := range required {
 		if _, ok := servers[k]; !ok {
@@ -100,7 +101,7 @@ func SelfTestOpenclaw(ctx context.Context, dir string) (*SelfTestResult, error) 
 			continue
 		}
 		for _, e := range cfg.Environments {
-			key := mcpKeyForAgent(agentID, "nacos-mcp-server", cc.ID, e.ID)
+			key := mcpKeyForAgent(mcpPrefix, "nacos-mcp-server", cc.ID, e.ID)
 			addr := mcpEnv(servers, key, "NACOS_ADDR")
 			label := "nacos TCP " + e.ID
 			if cc.ID != "" && cc.ID != "default" {

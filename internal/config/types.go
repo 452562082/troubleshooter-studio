@@ -58,6 +58,25 @@ func (s *SystemConfig) ResolveWorkspaceName() string {
 	return s.ResolveID()
 }
 
+// MCPKeyPrefix 返回 MCP server key 的前缀。
+//
+// 跟 ResolveID() 区别:ResolveID() 返回完整 agent 标识(如 "<system.id>-troubleshooter"),
+// 用于 agent.md 文件名 / skills 目录名 / openclaw agents.list[i].id 这些"用户可见标识符";
+// MCPKeyPrefix() 返回**短**标识(优先 system.id),用于 mcpServers 的 key 前缀,避免
+// "agent_id + server_type + env" 拼起来超过 IDE 60 字符 tool name 限制。
+//
+// 例:system.id=truss → MCP key 形如 "truss-grafana-mcp-server-dev"(20 字),
+// 留 40 字给 tool 名;若用 ResolveID() = "truss-troubleshooter" → 33 字 prefix,
+// grafana 的 get_dashboard_panel_queries(27 字)拼起来 60+ 超限。
+//
+// system.id 为空(理论上不该出现,Loader 强制必填)时回退 ResolveID,保证非空。
+func (s *SystemConfig) MCPKeyPrefix() string {
+	if id := s.System.ID; id != "" {
+		return id
+	}
+	return s.ResolveID()
+}
+
 // ModelForTarget 给 target-aware 消费点(install.sh 模板 / llmchat)提供的便捷访问:
 // 优先 target_models[target],回落到 agent.model。target 为空串时直接返回 agent.model。
 func (a Agent) ModelForTarget(target string) string {

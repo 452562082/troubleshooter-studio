@@ -304,7 +304,8 @@ func injectMCPServers(
 	get func(string) string,
 	log func(string),
 ) error {
-	agentID := cfg.ResolveID()
+	// MCP server key 用短 prefix(system.id),跟 IDE 平台对齐 + 避免 tool 名超 60 字限制。
+	agentID := cfg.MCPKeyPrefix()
 	mcp, _ := root["mcp"].(map[string]any)
 	if mcp == nil {
 		mcp = map[string]any{}

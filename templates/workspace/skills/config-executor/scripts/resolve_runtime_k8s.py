@@ -28,15 +28,28 @@ import subprocess
 import sys
 
 
+def _find_creds_file(agent_id: str) -> str:
+    """凭证文件双路径回退:
+       - ~/.openclaw/<id>-creds.json    OpenClaw 部署专用(install.sh 写)
+       - ~/.tshoot/<id>-creds.json      Claude Code / Cursor / Codex 通用(WriteIDECredsFile 写)
+       两份 schema 完全一致,谁先存在用谁。
+    """
+    for p in (f"~/.openclaw/{agent_id}-creds.json", f"~/.tshoot/{agent_id}-creds.json"):
+        ap = os.path.expanduser(p)
+        if os.path.isfile(ap):
+            return ap
+    raise FileNotFoundError(
+        f"creds file not found in any of: ~/.openclaw/{agent_id}-creds.json, ~/.tshoot/{agent_id}-creds.json"
+    )
+
+
 def load_k8s_config(agent_id: str, env: str) -> dict:
-    path = os.path.expanduser(f"~/.openclaw/{agent_id}-creds.json")
-    if not os.path.isfile(path):
-        raise FileNotFoundError(f"creds file missing: {path}")
+    path = _find_creds_file(agent_id)
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     k8s = data.get("kubernetes", {}).get(env)
     if not k8s:
-        raise ValueError(f"kubernetes.{env} missing in creds.json")
+        raise ValueError(f"kubernetes.{env} missing in {path}")
     return k8s
 
 

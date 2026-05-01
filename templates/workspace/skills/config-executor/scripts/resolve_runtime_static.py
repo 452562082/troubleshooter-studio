@@ -21,15 +21,24 @@ import os
 import sys
 
 
+def _find_creds_file(agent_id: str) -> str:
+    """凭证文件双路径回退:OpenClaw 优先 + ~/.tshoot 兜底(IDE 平台用)。"""
+    for p in (f"~/.openclaw/{agent_id}-creds.json", f"~/.tshoot/{agent_id}-creds.json"):
+        ap = os.path.expanduser(p)
+        if os.path.isfile(ap):
+            return ap
+    raise FileNotFoundError(
+        f"creds file not found in any of: ~/.openclaw/{agent_id}-creds.json, ~/.tshoot/{agent_id}-creds.json"
+    )
+
+
 def load_static(agent_id: str, env: str) -> dict:
-    path = os.path.expanduser(f"~/.openclaw/{agent_id}-creds.json")
-    if not os.path.isfile(path):
-        raise FileNotFoundError(f"creds file missing: {path}")
+    path = _find_creds_file(agent_id)
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     endpoints = data.get("static", {}).get(env)
     if not endpoints:
-        raise ValueError(f"static.{env} missing in creds.json")
+        raise ValueError(f"static.{env} missing in {path}")
     return endpoints
 
 

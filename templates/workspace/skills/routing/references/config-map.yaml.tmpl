@@ -102,10 +102,13 @@ environments:
         status: inferred
         {{- end}}
         {{- else if eq $cc "kuboard"}}
-        # kuboard:走 Kuboard HTTP API,运行时凭证(URL/账密/集群/ns/cm)在 ~/.openclaw/<id>-troubleshooter-creds.json
-        # 实际配置定位由 resolve_runtime_kuboard.py 脚本根据 service 名 + namespace + cm 名读取
+        # kuboard:**不通过 MCP**,走 Kuboard HTTP API + scripts/resolve_runtime_k8s.py 直读。
+        # 凭证(URL/access_key/cluster/namespace/configmap)按 agent_id 索引,优先级:
+        #   1. ~/.openclaw/<agent_id>-creds.json     (OpenClaw 部署专用)
+        #   2. ~/.tshoot/<agent_id>-creds.json       (Claude Code/Cursor/Codex 通用)
+        # agent 看到 runtime: kuboard-http 就 **不要** 尝试找 mcp_server,直接用脚本调 HTTP。
         configmap_key: {{$svc | printf "%q"}}
-        mcp_server: {{$mcp | printf "%q"}}
+        runtime: kuboard-http
         status: inferred
         {{- else if eq $cc "consul"}}
         {{- if $f}}

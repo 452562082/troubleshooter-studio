@@ -205,6 +205,15 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 		if err := MergeMCPIntoIDESettingsAt(ag.Meta.Target, cfg, opts.IDECreds, opts.CustomInstallRoot); err != nil {
 			return nil, fmt.Errorf("merge mcp settings (%s): %w", ag.Meta.Target, err)
 		}
+		// kuboard / apollo / consul / env-vars 类型走脚本读 creds.json,**不通过 MCP**。
+		// OpenClaw 写到 ~/.openclaw/<id>-creds.json;IDE 平台没有这文件,镜像写一份到
+		// ~/.tshoot/<id>-creds.json(平台无关位置),resolve_runtime_*.py 已加双路径回退。
+		// creds=nil(regen 等无凭证场景)同样跳过(避免空覆盖)。
+		if opts.IDECreds != nil {
+			if err := WriteIDECredsFile(cfg, opts.IDECreds); err != nil {
+				return nil, fmt.Errorf("write ide creds (%s): %w", ag.Meta.Target, err)
+			}
+		}
 	}
 
 	return &Result{

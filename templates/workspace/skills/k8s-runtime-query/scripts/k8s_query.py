@@ -70,38 +70,69 @@ def fail(error: str, hint: str = '') -> None:
     sys.exit(1)
 
 
-def detect_creds_path(agent_id: str | None) -> Path:
-    """检测部署上下文,定位 creds.json 实际路径。
+def detect_creds_paths(agent_id: str | None) -> list[Path]:
+    """检测部署上下文,返回按优先级排序的多条候选 creds.json 路径(返回的路径不一定都存在,
+    调用方按顺序试,首个 exists() 的胜出)。
 
-    OpenClaw:脚本路径含 `.openclaw/workspace/<ws>/`,creds.json 在 `~/.openclaw/<agent-id>-creds.json`(平级,不在 workspace 内)。
-    Claude Code / Cursor:`~/.claude|cursor/skills/<agent-id>/`,creds.json 在工作区根 `~/.claude|cursor/skills/<agent-id>/creds.json`。
-    本地 dev:脚本路径不在三个 IDE 路径下,创建假定 creds.json 跟脚本平 4 级。
+    优先级:
+      1. OpenClaw:`~/.openclaw/<agent-id>-creds.json`(install_native_openclaw 写)
+      2. Studio 通用:`~/.tshoot/<agent-id>-creds.json`(WriteIDECredsFile 写,
+         Claude Code / Cursor / Codex / 其它 IDE 共用)
+      3. IDE 工作区内嵌:`<root>/skills/<agent-id>/creds.json`(向后兼容老路径)
+      4. 本地 dev:脚本 4 级祖父目录
     """
     here = Path(__file__).resolve()
     parts = here.parts
-    # OpenClaw 模式:回到 ~/.openclaw/<agent-id>-creds.json(从 path 抽 workspace 名当 agent-id)
-    if '.openclaw' in parts and 'workspace' in parts:
-        try:
-            ws_idx = parts.index('workspace')
-            ws_name = parts[ws_idx + 1]
-            id_or_ws = agent_id or ws_name
-            return Path.home() / '.openclaw' / f'{id_or_ws}-creds.json'
-        except (ValueError, IndexError):
-            pass
-    # Claude Code / Cursor 模式:`<root>/skills/<agent-id>/k8s-runtime-query/scripts/k8s_query.py`
-    # 工作区根 = 脚本路径上推到 skills/<agent-id>/ 的父级
-    for marker in ('.claude', '.cursor'):
+    candidates: list[Path] = []
+
+    # 抽 agent-id:优先用传入,否则从路径推断
+    inferred_id: str | None = agent_id
+    if not inferred_id:
+        # OpenClaw 路径:.../.openclaw/workspace/<ws>/skills/<skill>/scripts/...
+        if '.openclaw' in parts and 'workspace' in parts:
+            try:
+                ws_idx = parts.index('workspace')
+                inferred_id = parts[ws_idx + 1]
+            except (ValueError, IndexError):
+                pass
+        else:
+            # IDE 路径:.../<root>/skills/<agent-id>/<skill>/scripts/...
+            for marker in ('.claude', '.cursor', '.codex'):
+                if marker in parts:
+                    try:
+                        idx = parts.index(marker)
+                        if parts[idx + 1] == 'skills':
+                            inferred_id = parts[idx + 2]
+                            break
+                    except (ValueError, IndexError):
+                        pass
+
+    if inferred_id:
+        candidates.append(Path.home() / '.openclaw' / f'{inferred_id}-creds.json')
+        candidates.append(Path.home() / '.tshoot' / f'{inferred_id}-creds.json')
+
+    # 老路径兼容:工作区根目录下的 creds.json
+    for marker in ('.claude', '.cursor', '.codex'):
         if marker in parts:
             try:
                 idx = parts.index(marker)
-                # parts[idx+1] = "skills", parts[idx+2] = agent-id
                 if parts[idx + 1] == 'skills':
-                    workspace_root = Path(*parts[: idx + 3])
-                    return workspace_root / 'creds.json'
+                    candidates.append(Path(*parts[: idx + 3]) / 'creds.json')
             except (ValueError, IndexError):
                 pass
-    # fallback:本地 dev / 未识别上下文 → 脚本 4 级祖父目录
-    return here.parent.parent.parent.parent / 'creds.json'
+
+    # 本地 dev 兜底
+    candidates.append(here.parent.parent.parent.parent / 'creds.json')
+    return candidates
+
+
+def detect_creds_path(agent_id: str | None) -> Path:
+    """从候选列表选第一个存在的;都不存在则返回首个候选(让调用方报错时给出最合理的提示路径)。"""
+    cands = detect_creds_paths(agent_id)
+    for c in cands:
+        if c.exists():
+            return c
+    return cands[0] if cands else Path.home() / '.tshoot' / 'creds.json'
 
 
 def load_creds(env: str, agent_id: str | None, agent_dir: str | None) -> dict[str, str]:

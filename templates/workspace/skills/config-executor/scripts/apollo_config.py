@@ -22,16 +22,25 @@ import urllib.error
 import urllib.request
 
 
+def _find_creds_file(agent_id: str) -> str:
+    """凭证文件双路径回退:OpenClaw 优先 + ~/.tshoot 兜底(Claude Code/Cursor/Codex 用)。"""
+    for p in (f"~/.openclaw/{agent_id}-creds.json", f"~/.tshoot/{agent_id}-creds.json"):
+        ap = os.path.expanduser(p)
+        if os.path.isfile(ap):
+            return ap
+    raise FileNotFoundError(
+        f"creds file not found in any of: ~/.openclaw/{agent_id}-creds.json, ~/.tshoot/{agent_id}-creds.json;请先跑 install.sh 或在 wizard 里补齐凭证再部署"
+    )
+
+
 def load_creds(agent_id: str, backend: str, env: str) -> dict:
-    path = os.path.expanduser(f"~/.openclaw/{agent_id}-creds.json")
-    if not os.path.isfile(path):
-        raise FileNotFoundError(f"creds file missing: {path}；请先跑 install.sh 或手工补齐")
+    path = _find_creds_file(agent_id)
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     backend_data = data.get(backend, {})
     env_data = backend_data.get(env)
     if not env_data:
-        raise ValueError(f"creds missing {backend}.{env}；已有: {list(backend_data.keys())}")
+        raise ValueError(f"creds missing {backend}.{env} (in {path});已有: {list(backend_data.keys())}")
     return env_data
 
 

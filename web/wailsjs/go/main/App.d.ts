@@ -84,6 +84,8 @@ export function KuboardListServices(arg1:main.KuboardListPodsInput):Promise<Arra
 
 export function KuboardPodSnapshot(arg1:main.KuboardPodSnapshotInput):Promise<main.KuboardPodSnapshotResult>;
 
+export function ListBotWorkspaceFiles(arg1:string):Promise<main.FileNode>;
+
 export function ListBranchesForRepo(arg1:string):Promise<Array<string>>;
 
 export function ListGrafanaDatasources(arg1:main.LokiAuthInput):Promise<Array<labelprobe.Datasource>>;
@@ -109,6 +111,8 @@ export function ProbeDataStore(arg1:main.DSProbeInput):Promise<dsprobe.Result>;
 export function ProbeURL(arg1:string):Promise<dsprobe.Result>;
 
 export function ProbeURLAuth(arg1:string,arg2:string,arg3:string,arg4:string):Promise<dsprobe.Result>;
+
+export function ReadBotWorkspaceFile(arg1:string,arg2:string):Promise<main.ReadFileResult>;
 
 export function ReadEnv(arg1:string):Promise<Record<string, string>>;
 
@@ -141,3 +145,5 @@ export function UninstallBot(arg1:string,arg2:string):Promise<main.UninstallBotR
 export function Validate(arg1:string):Promise<main.ValidateResult>;
 
 export function Version():Promise<string>;
+
+export function WriteBotWorkspaceFile(arg1:string,arg2:string,arg3:string):Promise<void>;

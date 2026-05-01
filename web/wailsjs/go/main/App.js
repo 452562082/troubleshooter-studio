@@ -146,6 +146,10 @@ export function KuboardPodSnapshot(arg1) {
   return window['go']['main']['App']['KuboardPodSnapshot'](arg1);
 }
 
+export function ListBotWorkspaceFiles(arg1) {
+  return window['go']['main']['App']['ListBotWorkspaceFiles'](arg1);
+}
+
 export function ListBranchesForRepo(arg1) {
   return window['go']['main']['App']['ListBranchesForRepo'](arg1);
 }
@@ -196,6 +200,10 @@ export function ProbeURL(arg1) {
 
 export function ProbeURLAuth(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['ProbeURLAuth'](arg1, arg2, arg3, arg4);
+}
+
+export function ReadBotWorkspaceFile(arg1, arg2) {
+  return window['go']['main']['App']['ReadBotWorkspaceFile'](arg1, arg2);
 }
 
 export function ReadEnv(arg1) {
@@ -260,4 +268,8 @@ export function Validate(arg1) {
 
 export function Version() {
   return window['go']['main']['App']['Version']();
+}
+
+export function WriteBotWorkspaceFile(arg1, arg2, arg3) {
+  return window['go']['main']['App']['WriteBotWorkspaceFile'](arg1, arg2, arg3);
 }

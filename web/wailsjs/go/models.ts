@@ -237,6 +237,7 @@ export namespace analyzer {
 	    schema_tables?: SchemaTable[];
 	    role_hint?: RoleHint;
 	    warnings?: string[];
+	    notes?: string[];
 	    verified: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -255,6 +256,7 @@ export namespace analyzer {
 	        this.schema_tables = this.convertValues(source["schema_tables"], SchemaTable);
 	        this.role_hint = this.convertValues(source["role_hint"], RoleHint);
 	        this.warnings = source["warnings"];
+	        this.notes = source["notes"];
 	        this.verified = source["verified"];
 	    }
 	
@@ -348,6 +350,7 @@ export namespace analyzerpipe {
 	    detected_stack?: string;
 	    detected_framework?: string;
 	    branches?: string[];
+	    role?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new RepoSummary(source);
@@ -363,6 +366,7 @@ export namespace analyzerpipe {
 	        this.detected_stack = source["detected_stack"];
 	        this.detected_framework = source["detected_framework"];
 	        this.branches = source["branches"];
+	        this.role = source["role"];
 	    }
 	}
 	export class Result {
@@ -1161,6 +1165,44 @@ export namespace main {
 	        this.fields = source["fields"];
 	    }
 	}
+	export class FileNode {
+	    name: string;
+	    path: string;
+	    is_dir: boolean;
+	    size?: number;
+	    children?: FileNode[];
+	
+	    static createFrom(source: any = {}) {
+	        return new FileNode(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.path = source["path"];
+	        this.is_dir = source["is_dir"];
+	        this.size = source["size"];
+	        this.children = this.convertValues(source["children"], FileNode);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class GenPreviewFile {
 	    path: string;
 	    size: number;
@@ -1849,6 +1891,24 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.path = source["path"];
 	        this.content = source["content"];
+	    }
+	}
+	export class ReadFileResult {
+	    content: string;
+	    is_binary: boolean;
+	    truncated?: boolean;
+	    size: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ReadFileResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.content = source["content"];
+	        this.is_binary = source["is_binary"];
+	        this.truncated = source["truncated"];
+	        this.size = source["size"];
 	    }
 	}
 	export class RunInstallResult {

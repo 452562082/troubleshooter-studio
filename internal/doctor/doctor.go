@@ -14,7 +14,30 @@ import (
 
 // Check 按 system.yaml 与 reposRoot 做漂移检测
 // 如果 reposRoot 为 ""，只做仓库无关的静态检查（config_center 声明一致性等）
+//
+// 用法分两种:
+//  1. 同一父目录布局(repos 都在 <reposRoot>/<repo.Name>/ 下) → 传 reposRoot
+//  2. 每个 repo 单独路径(子模块 / 自定义布局) → 用 CheckWithPaths
+//
+// 这里是 case 1 的便捷封装:把 reposRoot + repo.Name 拼成 map 后转给 CheckWithPaths。
 func Check(cfg *config.SystemConfig, reposRoot string) (*Report, error) {
+	if reposRoot == "" {
+		return CheckWithPaths(cfg, nil)
+	}
+	paths := make(map[string]string, len(cfg.Repos))
+	for _, repo := range cfg.Repos {
+		paths[repo.Name] = filepath.Join(reposRoot, repo.Name)
+	}
+	return CheckWithPaths(cfg, paths)
+}
+
+// CheckWithPaths 用 per-repo 路径表做诊断。repoPaths 为 nil/空 = 跳过深度扫描,
+// 只跑仓库无关的静态检查(等价 reposRoot="")。
+//
+// 桌面 app 的 Doctor binding 会优先从 ~/.tshoot/config.json 读 system.id 对应的
+// 仓库路径,直接调这个函数,用户不必再选 reposRoot 父目录(那个假设全部 repos
+// 同名同根布局,子模块 / 自定义路径 / 仓库目录名 ≠ repo.name 都会失效)。
+func CheckWithPaths(cfg *config.SystemConfig, repoPaths map[string]string) (*Report, error) {
 	report := &Report{}
 	// doctor 目前用主源做漂移检测;多源细粒度规则(每源独立 drift)留给 stage 2。
 	ccType := cfg.Infrastructure.PrimaryConfigCenter().Type
@@ -29,10 +52,17 @@ func Check(cfg *config.SystemConfig, reposRoot string) (*Report, error) {
 	var allFindings []analyzer.Finding
 	anyRepoScanned := false
 
-	if reposRoot != "" {
+	if len(repoPaths) > 0 {
+		report.ScannedRepoPaths = make(map[string]string, len(repoPaths))
 		reg := analyzer.NewRegistry(ccType)
 		for _, repo := range cfg.Repos {
-			repoPath := filepath.Join(reposRoot, repo.Name)
+			repoPath, hasPath := repoPaths[repo.Name]
+			if !hasPath || strings.TrimSpace(repoPath) == "" {
+				// 仓库没配置本地路径 → 不视为 missing-repo(可能用户故意只扫部分);
+				// UI 通过 ScannedRepoPaths 反推哪些没扫,提示用户补路径即可。
+				continue
+			}
+			report.ScannedRepoPaths[repo.Name] = repoPath
 			if _, err := os.Stat(repoPath); err != nil {
 				report.add(Issue{
 					Severity: SeverityError,
@@ -72,6 +102,11 @@ func Check(cfg *config.SystemConfig, reposRoot string) (*Report, error) {
 			if err != nil {
 				return nil, fmt.Errorf("analyze %s: %w", repo.Name, err)
 			}
+			// 跟 analyzerpipe 用同一份"cmd 入口展开 + <repo>- 前缀消歧义"逻辑,
+			// 否则 monorepo(truss/community/cmd/{grpc-server,queue,scheduler})
+			// 这种 ra.ServiceNames 只剩根 module 名 "community",跟 yaml 里
+			// "community-grpc-server / -queue / -scheduler" 对不上,误报 service-drift。
+			analyzer.ExpandCmdEntriesAsServiceNames(ra, repo.Name, repoPath)
 			allFindings = append(allFindings, ra.Findings...)
 
 			checkServiceDrift(report, repo, ra)

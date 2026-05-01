@@ -244,34 +244,10 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 			return nil, fmt.Errorf("analyze %s: %w", repo.Name, err)
 		}
 		ra.Name = repo.Name
-		// 把"同仓多入口"信号(cmd/<x>/main.go / services/<x>/ / pom modules / workspaces)
-		// 展开成服务名 —— wizard 走 mergeMonorepoIntoServices 时给每个 cmd entry
-		// 加 `<repo>-` 前缀消歧义,这里 analyzer 必须用同款命名才能跟 yaml 对齐。
-		// gitmodules 路径(hint.URL 非空)跳过 —— 它们是独立 git repo,不属于本仓 cmd 入口。
-		hints := analyzer.DetectSubmodules(repoPath)
-		var cmdHints []analyzer.SubmoduleHint
-		for _, h := range hints {
-			if h.URL == "" {
-				cmdHints = append(cmdHints, h)
-			}
-		}
-		if len(cmdHints) > 0 {
-			// 多入口仓:根 go.mod / package.json 的 module name 是共享代码库不是服务,
-			// 抛弃 ra.ServiceNames(那是 analyzer 从根 module 抽的),只用 cmd entries 加前缀。
-			// 否则会出现"content + content-grpc-server + content-scheduler ..."这种裸 module 名混进
-			// 服务列表的尴尬场景,误导 diff 报"代码里多出来的: content"。
-			mergedNames := []string{}
-			for _, h := range cmdHints {
-				qualified := qualifyServiceName(repo.Name, h.Name)
-				if qualified == "" {
-					continue
-				}
-				if !containsString(mergedNames, qualified) {
-					mergedNames = append(mergedNames, qualified)
-				}
-			}
-			ra.ServiceNames = mergedNames
-		}
+		// 把"同仓多入口"信号展开成服务名,跟 wizard mergeMonorepoIntoServices /
+		// doctor 的 service-drift 检测共享同一份命名规则(`<repo>-<entry>`)。
+		// 实现见 internal/analyzer/expand.go::ExpandCmdEntriesAsServiceNames。
+		analyzer.ExpandCmdEntriesAsServiceNames(ra, repo.Name, repoPath)
 		// 没有 cmd 入口信号:保留 ra.ServiceNames 原值(单仓单服务场景,go.mod 的 module 名就是服务名)
 		// 顺带扫"下游调用 + 数据层使用"——给 service-dependency-map.yaml 自动填种子值,
 		// 用户拿到种子改比从空白起强 10 倍。即使扫漏 50% 也比 0% 强,保守 best-effort。
@@ -283,6 +259,12 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 		// 用户在 yaml 显式 set 了 role 时不覆盖(只是产物里仍记录 hint,UI 给"📍 推荐 vs 实际"对比)。
 		hint := analyzer.RecommendRole(effectiveStack, repo.Name, repoPath)
 		ra.RoleHint = &hint
+		// 非业务服务角色(infra / common-lib / docs / frontend / mobile)本来就不要求"是个 go/maven module";
+		// 比如 mongodb-configs(role=infra)只是一堆 mongo 配置文件,扫"go.mod 没找到"是预期行为不是异常。
+		// 把这些 stack-missing-manifest 类警告降级,搬到 Notes 里 FYI,不再出现在异常提示里吓人。
+		if !repo.RequiresServiceNames() {
+			ra.Warnings, ra.Notes = filterStackManifestWarnings(ra.Warnings, ra.Notes)
+		}
 		report.Repos = append(report.Repos, *ra)
 		perRepo = append(perRepo, RepoSummary{
 			Name:              repo.Name,
@@ -314,38 +296,33 @@ func pickCloneBranch(cliBranch string, repo config.Repo, envs []config.Environme
 	return ""
 }
 
-// qualifyServiceName 跟前端 InitPage::qualifyServiceName 同款规则,给 cmd entry 名加
-// `<repo>-` 前缀消歧义。两端必须一致命名,不然 analyzer report 跟 yaml service_names 对不上。
-//
-//	entry == repo                   → 不重复加前缀(repo=order,cmd/order → order)
-//	entry 已带 repo 名作前/后缀     → 已消歧,直接用
-//	其它                            → `<repo>-<entry>`
-func qualifyServiceName(repoName, entryName string) string {
-	repo := strings.TrimSpace(repoName)
-	ent := strings.TrimSpace(entryName)
-	if repo == "" {
-		return ent
+// filterStackManifestWarnings 把"manifest 文件没找到"类警告从 Warnings 降级到 Notes。
+// 给非业务服务角色(infra / common-lib / docs / frontend / mobile)用 —— 它们本来就不必须
+// 是个 module(mongodb-configs 是一堆 yaml,docs 是一堆 .md),没 go.mod / package.json 不是 bug。
+// 命中条件:子串匹配预设关键字片段(不写完整提示,只匹核心关键词,避免分析器后续改文案就漏掉)。
+func filterStackManifestWarnings(warns, notes []string) (newWarns, newNotes []string) {
+	keywords := []string{
+		"go.mod not found",
+		"package.json not found",
+		"pom.xml not found",
+		"requirements.txt not found",
+		"build.gradle not found",
 	}
-	if ent == "" {
-		return repo
-	}
-	if ent == repo {
-		return ent
-	}
-	if strings.HasPrefix(ent, repo+"-") || strings.HasPrefix(ent, repo+"_") ||
-		strings.HasSuffix(ent, "-"+repo) || strings.HasSuffix(ent, "_"+repo) {
-		return ent
-	}
-	return repo + "-" + ent
-}
-
-func containsString(xs []string, s string) bool {
-	for _, x := range xs {
-		if x == s {
-			return true
+	for _, w := range warns {
+		matched := false
+		for _, k := range keywords {
+			if strings.Contains(w, k) {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			notes = append(notes, "(role 非业务服务,以下不算异常) "+w)
+		} else {
+			newWarns = append(newWarns, w)
 		}
 	}
-	return false
+	return newWarns, notes
 }
 
 // findInSiblingDirs 在 reposRoot 一层子目录里搜 <reposRoot>/<sibling>/<name>,

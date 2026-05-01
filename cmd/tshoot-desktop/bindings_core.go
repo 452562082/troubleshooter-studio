@@ -449,17 +449,34 @@ func (a *App) Diff(yamlText, existingDir string) (*generator.Plan, error) {
 	return g.BuildPlan(existingDir)
 }
 
-// Analyze 扫描 reposRoot 下的所有仓库(按 repos[].name 匹配子目录),抽 service_names
-// 和配置中心线索,返回完整 report + 每仓库摘要。
-// autoClone=true 时缺失的仓库会自动 shallow clone(需要 git + 凭证);默认 false,
-// 缺失的仓库标 "skipped"。进度日志通过 Wails EventsEmit "analyze:log" 推到前端。
+// Analyze 扫描仓库,抽 service_names / 配置中心线索 / 数据表 / 依赖图等。
+//
+// 路径来源优先级(同 Doctor):
+//  1. saved per-repo paths(~/.tshoot/config.json[system.id])—— 部署/Step 4 已记录;
+//     这部分按 repo.name 直接命中绝对路径,**优先于 reposRoot**。
+//  2. reposRoot 非空 —— saved 没记的 repo 用 <reposRoot>/<repo.name> 拼。
+//  3. 都没有 —— analyzerpipe 报错 "ReposRoot or RepoPaths required",前端引导补路径。
+//
+// autoClone=true 时缺失的仓库会自动 shallow clone(需要 git + 凭证 + reposRoot 兜底
+// 落盘位置);默认 false,缺失的仓库标 "skipped"。进度日志通过 Wails EventsEmit
+// "analyze:log" 推到前端。
+//
+// 这样 BotsPage / Editor 拿已部署机器人 yaml 直接跑分析时,不必再让用户选父目录;
+// 只在新建 / 第一次跑(saved paths 还没记)时才需要。
 func (a *App) Analyze(yamlText, reposRoot string, autoClone bool) (*analyzerpipe.Result, error) {
 	cfg, err := config.LoadFromBytes([]byte(yamlText))
 	if err != nil {
 		return nil, err
 	}
+	expanded := map[string]string{}
+	for k, v := range userconfig.GetRepoPathsForSystem(cfg.System.ID) {
+		if strings.TrimSpace(v) != "" {
+			expanded[k] = userconfig.ExpandHome(v)
+		}
+	}
 	return analyzerpipe.Run(cfg, analyzerpipe.Options{
 		ReposRoot: userconfig.ExpandHome(reposRoot),
+		RepoPaths: expanded,
 		AutoClone: autoClone,
 		OnProgress: func(msg string) {
 			wailsruntime.EventsEmit(a.ctx, "analyze:log", msg)
@@ -509,11 +526,38 @@ func (a *App) GetRemoteURL(repoPath string) string {
 }
 
 // Doctor 对比声明 vs 代码实态,返回漂移报告。等价 POST /api/doctor?repos_root=...
-// reposRoot 留空则只校验声明的一致性,不扫代码。
+//
+// 路径来源优先级(从高到低):
+//  1. reposRoot 非空(用户在 UI 选了同根目录):每个 repo.Name 拼成 <reposRoot>/<repo.Name>;
+//     **同时**会跟 userconfig 里的 saved 路径合并 —— 用户选了根但有些子模块单独存,
+//     已保存的路径会优先(reposRoot 路径只填 saved 没记的那部分)。
+//  2. 本地保存的 ~/.tshoot/config.json[system.id]:部署时记下的"每个 repo → 本机绝对路径"
+//     表(给 Gen / auto-analyzer 用)→ doctor 自动复用,用户不必再选父目录。
+//  3. 都没有(新机器人 / 第一次诊断):跳过深度扫,只跑静态检查。
+//
+// 这样用户在 BotsPage 点"诊断"默认就能拿到深度扫结果(部署时已记录路径),
+// 不必每次手选 reposRoot;只在子模块路径漂移 / 默认路径不对的时候才需要手动覆盖。
 func (a *App) Doctor(yamlText, reposRoot string) (*doctor.Report, error) {
 	cfg, err := config.LoadFromBytes([]byte(yamlText))
 	if err != nil {
 		return nil, err
 	}
-	return doctor.Check(cfg, reposRoot)
+	// 先取 saved per-repo paths(部署阶段已记录)
+	merged := map[string]string{}
+	for k, v := range userconfig.GetRepoPathsForSystem(cfg.System.ID) {
+		if strings.TrimSpace(v) != "" {
+			merged[k] = userconfig.ExpandHome(v)
+		}
+	}
+	// reposRoot 仅填补 saved 没记的 repo;saved 优先
+	if strings.TrimSpace(reposRoot) != "" {
+		root := userconfig.ExpandHome(reposRoot)
+		for _, repo := range cfg.Repos {
+			if _, ok := merged[repo.Name]; ok {
+				continue
+			}
+			merged[repo.Name] = filepath.Join(root, repo.Name)
+		}
+	}
+	return doctor.CheckWithPaths(cfg, merged)
 }

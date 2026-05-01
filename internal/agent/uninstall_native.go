@@ -44,26 +44,25 @@ type UninstallNativeResult struct {
 	Log             []string
 }
 
-// UninstallNative 卸载 claude-code / cursor 装的机器人。
-// installedDir = ag.Path(BotsPage 扫到的真实部署目录,2026-04-30 起 = ~/.claude/skills/<name>/
-//                或 ~/.cursor/skills/<name>/,跟 OpenClaw 一样指向真实位置)。
-// target 必须是 "claude-code" 或 "cursor"。
+// UninstallNative 卸载 claude-code / cursor / codex 装的机器人。
+// installedDir = ag.Path(BotsPage 扫到的真实部署目录,2026-04-30 起 = <root>/skills/<name>/,
+//                跟 OpenClaw 一样指向真实位置)。<root> 通常是 ~/.claude / ~/.cursor / ~/.codex,
+//                但如果用户在 wizard 里选了自定义安装目录,<root> 就是那个 custom dir。
+// target 必须是 "claude-code" / "cursor" / "codex"。
 //
 // 流程:
 //  1. 真实部署目录(skills/<name>/)→ ~/.Trash(失败回退 RemoveAll)
 //  2. agent name = installedDir basename;system_id 从 installedDir 里 tshoot.json 读
-//  3. 清 ~/.claude|cursor/agents/<name>.md(及 .bak)
-//  4. 清 ~/.claude|cursor/scripts/<name>/(skills/<name>/ 已在步骤 1 移走)
+//  3. 清 <root>/agents/<name>.md(及 .bak)
+//  4. 清 <root>/scripts/<name>/(skills/<name>/ 已在步骤 1 移走)
 //  5. 清 staging 中间包 ~/.tshoot/<target>/<system_id>/(deploy 完已无用,残留干扰)
+//
+// <root> 的推导:从 installedDir 反推(installedDir = <root>/skills/<name>),
+// 这样 default ~/.<target> 和 custom install root 都自动覆盖,不必额外传 customRoot。
 func UninstallNative(installedDir, target string) (*UninstallNativeResult, error) {
-	var rootName string
 	switch target {
-	case "claude-code":
-		rootName = ".claude"
-	case "cursor":
-		rootName = ".cursor"
-	case "codex":
-		rootName = ".codex"
+	case "claude-code", "cursor", "codex":
+		// ok
 	default:
 		return nil, fmt.Errorf("uninstall_native: unsupported target %q", target)
 	}
@@ -72,7 +71,9 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 	if err != nil {
 		return nil, fmt.Errorf("read $HOME: %w", err)
 	}
-	root := filepath.Join(home, rootName)
+	// <root> = installedDir 的祖父(installedDir = <root>/skills/<name>/);
+	// 兜底:如果反推出来路径异常(没有 skills 段,或为空),回退到 ~/.<target>。
+	root := deriveInstallRoot(installedDir, target, home)
 
 	res := &UninstallNativeResult{}
 	logf := func(format string, a ...any) { res.Log = append(res.Log, fmt.Sprintf(format, a...)) }
@@ -147,6 +148,36 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 
 	logf("[done] uninstall(%s) 完成", target)
 	return res, nil
+}
+
+// deriveInstallRoot 从 installedDir 反推 install root。
+// installedDir 形如 "<root>/skills/<name>/",祖父目录就是 <root>。
+// 如果反推不成立(installedDir 为空 / 没有 skills 段 / 非绝对路径),回退到 ~/.<target>。
+func deriveInstallRoot(installedDir, target, home string) string {
+	defaultRoot := func() string {
+		switch target {
+		case "claude-code":
+			return filepath.Join(home, ".claude")
+		case "cursor":
+			return filepath.Join(home, ".cursor")
+		case "codex":
+			return filepath.Join(home, ".codex")
+		}
+		return filepath.Join(home, "."+target)
+	}
+	if strings.TrimSpace(installedDir) == "" {
+		return defaultRoot()
+	}
+	abs, err := filepath.Abs(installedDir)
+	if err != nil {
+		return defaultRoot()
+	}
+	parent := filepath.Dir(abs)             // <root>/skills
+	if filepath.Base(parent) != "skills" {
+		// 不符合预期布局,不冒险动文件,走默认根
+		return defaultRoot()
+	}
+	return filepath.Dir(parent)             // <root>
 }
 
 // findInstalledAgentName 老逻辑:从 staging 中间包 agents/ 下抽 agent 名。2026-04-30 起

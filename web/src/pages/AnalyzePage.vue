@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import yaml from 'js-yaml'
-import { analyze as bridgeAnalyze, isDesktop, openDir, openYAML, type AnalyzeResult } from '../lib/bridge'
+import { analyzeV2 as bridgeAnalyzeV2, isDesktop, openDir, openYAML, getRepoPathsForSystem, saveRepoPathsForSystem, getUserConfig, type AnalyzeResult } from '../lib/bridge'
 import { toast } from '../lib/toast'
 import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
 
@@ -74,11 +74,140 @@ function loadExample() {
 }
 
 const yamlContent = ref('')
-const reposRoot = ref('')
 const autoClone = ref(false)
 const loading = ref(false)
 const result = ref<any>(null)
 const error = ref('')
+
+// cloneFallbackRoot:autoClone 时仓库落盘的父目录,后端 analyzerpipe 必须知道往哪个根 clone。
+// 不暴露给用户填 —— 默认用 userconfig.default_repos_root(没设就 fallback ~/.tshoot/repos)。
+// 想改默认 clone 位置去 Settings 改 defaultReposRoot,本页不重复占输入框。
+const cloneFallbackRoot = ref('')
+const cloneFallbackDisplay = computed(() => cloneFallbackRoot.value || '~/.tshoot/repos')
+async function loadCloneFallbackRoot() {
+  if (!isDesktop()) return
+  try {
+    const c = await getUserConfig()
+    cloneFallbackRoot.value = c.resolved_repos_root || '' // resolved 永远非空(后端 fallback ~/.tshoot/repos)
+  } catch { /* ignore;runAnalyze 时再容错 */ }
+}
+loadCloneFallbackRoot()
+
+// savedRepoPaths:从 ~/.tshoot/config.json 读到的"该 system 已部署时记下的仓库本地路径"。
+// 后端 App.Analyze 已经会自动 merge,这里只是为了 UI 上提示用户"已经有 N 个仓库自动用 saved 路径,
+// 你不必再选父目录"。yaml 内容变化时(粘新 yaml / load file)需要重新拉一次。
+const savedRepoPaths = ref<Record<string, string>>({})
+const yamlSystemID = computed(() => {
+  try {
+    const obj = yaml.load(yamlContent.value) as any
+    return obj?.system?.id || ''
+  } catch { return '' }
+})
+const yamlRepoNames = computed<string[]>(() => {
+  try {
+    const obj = yaml.load(yamlContent.value) as any
+    return Array.isArray(obj?.repos) ? obj.repos.map((r: any) => r?.name).filter(Boolean) : []
+  } catch { return [] }
+})
+// repoPathDrafts:用户在本页里手动填的 per-repo 本地路径,key=repo.name,value=绝对路径。
+// 优先级 = drafts > saved > <reposRoot>/<repo.name>(后端兜底)。
+// 切换 yaml(system_id 变)时会 refresh:saved 全部覆盖到 drafts(用户改前所见即所得),
+// 但用户后续手填会覆盖 saved。"💾 保存"按钮把 drafts 持久化进 ~/.tshoot/config.json。
+const repoPathDrafts = ref<Record<string, string>>({})
+
+// 综合解析路径:drafts 优先,然后 saved。展示用,不含 reposRoot 兜底(那部分在 runAnalyze 时合并)。
+const effectiveRepoPaths = computed<Record<string, string>>(() => {
+  const out: Record<string, string> = {}
+  for (const n of yamlRepoNames.value) {
+    const v = (repoPathDrafts.value[n] || '').trim() || (savedRepoPaths.value[n] || '').trim()
+    if (v) out[n] = v
+  }
+  return out
+})
+const reposCoveredByPaths = computed(() => yamlRepoNames.value.filter(n => !!effectiveRepoPaths.value[n]))
+const reposNeedingReposRoot = computed(() => yamlRepoNames.value.filter(n => !effectiveRepoPaths.value[n]))
+// 全部 repo 已有路径(drafts 或 saved)→ 不必填 reposRoot 即可跑;否则缺哪些列出来引导用户
+const allReposCovered = computed(() => yamlRepoNames.value.length > 0 && reposNeedingReposRoot.value.length === 0)
+// drafts 是否相对 saved 有改动(决定"💾 保存路径"按钮可用性)
+const draftsDirty = computed(() => {
+  for (const n of yamlRepoNames.value) {
+    const d = (repoPathDrafts.value[n] || '').trim()
+    const s = (savedRepoPaths.value[n] || '').trim()
+    if (d !== s) return true
+  }
+  return false
+})
+const showRepoPathPanel = ref(true) // 默认展开,让用户清楚"我可以挨个填"
+
+async function refreshSavedRepoPaths() {
+  if (!isDesktop()) { savedRepoPaths.value = {}; repoPathDrafts.value = {}; return }
+  const id = yamlSystemID.value
+  if (!id) { savedRepoPaths.value = {}; repoPathDrafts.value = {}; return }
+  try {
+    savedRepoPaths.value = await getRepoPathsForSystem(id) || {}
+  } catch {
+    savedRepoPaths.value = {}
+  }
+  // 切到新 system 时,drafts 重置为 saved 的副本 —— 用户看到的是"已存的路径",改完才 dirty
+  repoPathDrafts.value = { ...savedRepoPaths.value }
+}
+// yaml 改了 → 重拉(用户切换 system / 加载文件 / 编辑 system.id)
+import { watch } from 'vue'
+watch(yamlSystemID, refreshSavedRepoPaths, { immediate: true })
+
+async function pickRepoPath(repoName: string) {
+  if (!isDesktop()) { error.value = '选目录需要桌面 app 环境'; return }
+  try {
+    const p = await openDir(`选 ${repoName} 仓库本地目录`)
+    if (p) repoPathDrafts.value = { ...repoPathDrafts.value, [repoName]: p }
+  } catch (e: any) {
+    error.value = String(e?.message || e)
+  }
+}
+// 批量填充:用户挑一次父目录(如 ~/code),所有空格用 <父目录>/<repo.name> 自动填,
+// 已填的不动(避免覆盖手工选过的)。一键解决 11 个仓库都在同根下的常见场景。
+async function batchFillFromParent() {
+  if (!isDesktop()) { error.value = '选目录需要桌面 app 环境'; return }
+  try {
+    const parent = await openDir('选父目录(将用 <父目录>/<repo.name> 填补所有空格)')
+    if (!parent) return
+    const trimmed = parent.replace(/\/+$/, '')
+    const next = { ...repoPathDrafts.value }
+    let filled = 0
+    for (const name of yamlRepoNames.value) {
+      if ((next[name] || '').trim()) continue
+      next[name] = `${trimmed}/${name}`
+      filled++
+    }
+    repoPathDrafts.value = next
+    if (filled === 0) toast.info('所有仓库都已配置,本次没填新路径')
+    else toast.success(`✓ 用 ${trimmed} 填了 ${filled} 个空仓库`)
+  } catch (e: any) {
+    error.value = String(e?.message || e)
+  }
+}
+function clearRepoPath(repoName: string) {
+  const next = { ...repoPathDrafts.value }
+  delete next[repoName]
+  repoPathDrafts.value = next
+}
+async function saveDraftsToUserConfig() {
+  if (!isDesktop()) { toast.error('保存仅在桌面 app 可用'); return }
+  const id = yamlSystemID.value
+  if (!id) { toast.error('yaml 缺 system.id,无法保存'); return }
+  try {
+    // 只存非空的;空值 = 用户清掉
+    const filtered: Record<string, string> = {}
+    for (const [k, v] of Object.entries(repoPathDrafts.value)) {
+      if ((v || '').trim()) filtered[k] = v.trim()
+    }
+    await saveRepoPathsForSystem(id, filtered)
+    savedRepoPaths.value = filtered
+    toast.success(`✓ 已保存 ${Object.keys(filtered).length} 个仓库路径到 ~/.tshoot/config.json`)
+  } catch (e: any) {
+    toast.error(`保存失败: ${String(e?.message || e)}`)
+  }
+}
 
 // 桌面 app 走 Wails 原生 osascript 对话框(reliable on macOS WKWebView);
 // 浏览器模式回退 <input type="file"> + FileReader。
@@ -288,19 +417,16 @@ const analyzeStartTime = ref<number | null>(null)
 const analyzeElapsed = ref(0)
 let analyzeTimer: number | null = null
 
-async function pickReposRoot() {
-  if (!isDesktop()) { error.value = '选目录需要桌面 app 环境'; return }
-  try {
-    const p = await openDir('选择仓库根目录(含多个 repo.name 子目录)')
-    if (p) reposRoot.value = p
-  } catch (e: any) {
-    error.value = String(e?.message || e)
-  }
-}
 
 async function runAnalyze() {
   if (!yamlContent.value.trim()) { error.value = '请先填写或加载 system.yaml'; return }
-  if (!reposRoot.value.trim()) { error.value = '请填写仓库根目录路径'; return }
+  // 路径来源:effectiveRepoPaths(drafts > saved)。要么全部 repo 有路径,要么开 autoClone
+  // 让后端把缺的浅克隆到 cloneFallbackRoot;两者都不满足直接报错,提示用户用上方表格填或开 clone。
+  if (!allReposCovered.value && !autoClone.value) {
+    const missing = reposNeedingReposRoot.value
+    error.value = `还有 ${missing.length} 个仓库没本地路径 (${missing.slice(0,3).join(', ')}${missing.length>3?'…':''}),请在上方"仓库本地路径"挨个选(或点📁批量填),或勾"自动 clone"让后端自己 clone`
+    return
+  }
   if (!isDesktop()) {
     error.value = 'Analyze 仅在桌面 app 可用;浏览器 tshoot serve 模式请改用 CLI:\n  tshoot analyze -i <yaml> --repos-root ... -o analysis.json'
     return
@@ -318,7 +444,14 @@ async function runAnalyze() {
     }
   }, 1000)
   try {
-    const r = (await bridgeAnalyze(yamlContent.value, reposRoot.value, autoClone.value)) as AnalyzeResult
+    // 用 V2:per-repo paths(drafts ∪ saved)优先;autoClone 时把 cloneFallbackRoot 当落盘根。
+    // 没勾 autoClone 不传 reposRoot,后端只用 RepoPaths(已校验全覆盖,不会缺)。
+    const r = (await bridgeAnalyzeV2(
+      yamlContent.value,
+      autoClone.value ? cloneFallbackRoot.value : '',
+      effectiveRepoPaths.value,
+      autoClone.value,
+    )) as AnalyzeResult
     result.value = r
     toast.success(`analyze 完成: ${r.per_repo?.length ?? 0} 个仓库,共 ${r.report?.repos?.length ?? 0} 条 report`)
   } catch (e: any) {
@@ -396,14 +529,14 @@ onUnmounted(() => {
           </li>
         </ul>
         <div class="info-box-inputs">
-          <div class="info-box-inputs-title">📝 需要两样东西:</div>
+          <div class="info-box-inputs-title">📝 需要的输入:</div>
           <ul>
             <li><strong>system.yaml</strong> — 粘贴或从文件加载</li>
-            <li><strong>仓库父目录</strong> — 如 <code>~/code</code>,即 <code>repos[].name</code> 子目录的共同父目录</li>
+            <li><strong>仓库本地路径</strong> — yaml 加载后会出现表格,挨个选目录或一键📁批量填(已部署过的会自动用上次记下的)</li>
           </ul>
         </div>
         <p class="info-box-redirect">
-          ⚠️ 本机没下载的仓库会跳过;勾上「自动 clone」会按 yaml 里的 <code>url</code> 浅克隆再扫(需要本机有 git + 仓库访问凭证)。
+          ⚠️ 本机没下载的仓库会跳过扫描;勾「自动 clone 缺失仓库」会按 yaml 里的 <code>url</code> 浅克隆到默认 clone 目录再扫(需要 git + 凭证)。
         </p>
       </div>
     </div>
@@ -420,26 +553,99 @@ onUnmounted(() => {
       <textarea v-model="yamlContent" placeholder="把 system.yaml 内容粘到这里,或点上面「加载文件」选本机文件…" spellcheck="false" :class="{ err: error }" />
     </div>
 
-    <div class="form-row">
-      <div class="field">
-        <label>仓库父目录 <span class="field-hint">(选含多个仓库子目录的那一层,不是单个仓库的根)</span></label>
-        <!-- readonly + 按钮:跟 wizard 所有路径字段一致的强约束,避免用户手写打错 / 路径不存在 -->
-        <div class="path-row">
+    <!-- 仓库路径状态 banner -->
+    <div
+      v-if="yamlRepoNames.length > 0"
+      class="saved-paths-banner"
+      :class="allReposCovered ? 'all-covered' : reposCoveredByPaths.length > 0 ? 'partial' : 'none'"
+    >
+      <template v-if="allReposCovered">
+        ✓ 全部 {{ yamlRepoNames.length }} 个仓库都已配置本地路径(部署时记下的 + 你刚填的),可直接跑分析。
+      </template>
+      <template v-else-if="reposCoveredByPaths.length > 0">
+        ⓘ 已配置 {{ reposCoveredByPaths.length }}/{{ yamlRepoNames.length }} 个仓库本地路径
+        ;还有 {{ reposNeedingReposRoot.length }} 个 ({{ reposNeedingReposRoot.slice(0,3).join(', ') }}{{ reposNeedingReposRoot.length>3?'…':'' }}) 没填 —— 在下方挨个选,或填父目录兜底,或勾自动 clone。
+      </template>
+      <template v-else>
+        ⓘ 该 system 没保存仓库本地路径。可在下方"仓库本地路径"挨个选,或选父目录(repos 都在同根下)+ 选 autoClone 让后端自己 clone。
+      </template>
+    </div>
+
+    <!-- 仓库路径 per-repo 编辑面板 -->
+    <div v-if="yamlRepoNames.length > 0" class="repo-paths-card">
+      <header class="repo-paths-card-head">
+        <span class="repo-paths-title" @click="showRepoPathPanel = !showRepoPathPanel">📁 仓库本地路径</span>
+        <span class="repo-paths-progress" @click="showRepoPathPanel = !showRepoPathPanel">
+          <span class="repo-paths-progress-num">{{ reposCoveredByPaths.length }}</span>
+          <span class="repo-paths-progress-sep">/</span>
+          <span class="repo-paths-progress-total">{{ yamlRepoNames.length }}</span>
+          <span class="repo-paths-progress-label">已配置</span>
+        </span>
+        <button
+          v-if="showRepoPathPanel"
+          class="btn small"
+          :disabled="loading"
+          @click.stop="batchFillFromParent"
+          title="选一个父目录,所有空格用 <父目录>/<repo.name> 自动填(已填的不动)"
+        >
+          📁 批量填充…
+        </button>
+        <span class="repo-paths-collapse" :aria-expanded="showRepoPathPanel" @click="showRepoPathPanel = !showRepoPathPanel">{{ showRepoPathPanel ? '▴' : '▾' }}</span>
+      </header>
+      <div v-if="showRepoPathPanel" class="repo-paths-body">
+        <div v-for="name in yamlRepoNames" :key="name" class="repo-row" :class="{ 'is-empty': !repoPathDrafts[name] }">
+          <span class="repo-row-status" :class="repoPathDrafts[name] ? (savedRepoPaths[name] === repoPathDrafts[name] ? 'saved' : 'edited') : 'empty'">
+            <template v-if="repoPathDrafts[name] && savedRepoPaths[name] === repoPathDrafts[name]">✓</template>
+            <template v-else-if="repoPathDrafts[name]">✎</template>
+            <template v-else>·</template>
+          </span>
+          <span class="repo-row-name" :title="name">{{ name }}</span>
           <input
-            :value="reposRoot"
             type="text"
-            placeholder="点右边按钮选,通常是 ~/code 这种装着多个仓库的目录"
             readonly
-            class="path-readonly"
-            :title="reposRoot"
+            class="repo-row-path"
+            :value="repoPathDrafts[name] || ''"
+            :placeholder="savedRepoPaths[name] ? '已保存,点右侧改…' : '尚未配置,点右侧选目录'"
+            :title="repoPathDrafts[name] || savedRepoPaths[name] || ''"
           />
-          <button type="button" class="btn" :disabled="loading" @click="pickReposRoot">
-            {{ reposRoot ? '重新选…' : '选目录…' }}
-          </button>
+          <div class="repo-row-actions">
+            <button
+              class="icon-btn"
+              :disabled="loading"
+              @click="pickRepoPath(name)"
+              :title="repoPathDrafts[name] ? '更换目录' : '选择目录'"
+              aria-label="选择目录"
+            >📂</button>
+            <button
+              v-if="repoPathDrafts[name]"
+              class="icon-btn icon-btn-danger"
+              :disabled="loading"
+              @click="clearRepoPath(name)"
+              title="清除路径(留空让父目录兜底)"
+              aria-label="清除"
+            >✕</button>
+            <span v-else class="icon-btn-placeholder" aria-hidden="true"></span>
+          </div>
         </div>
-      </div>
-      <div class="field check">
-        <label><input type="checkbox" v-model="autoClone" /> 本机没有的仓库,自动 clone</label>
+
+        <footer class="repo-paths-footer">
+          <button
+            class="btn small primary"
+            :disabled="!draftsDirty || !yamlSystemID"
+            :title="!yamlSystemID ? 'yaml 缺 system.id 无法保存' : (draftsDirty ? '把上面的路径表持久化到 ~/.tshoot/config.json,下次诊断 / 部署 / 分析直接复用' : '当前路径表跟已保存的一致,无需重复保存')"
+            @click="saveDraftsToUserConfig"
+          >
+            💾 保存到本地配置
+          </button>
+          <label class="auto-clone-toggle" :title="autoClone ? `本机没有的仓库会浅克隆到 ${cloneFallbackDisplay}` : '勾上后,上方没填的仓库会按 yaml 里 url 自动 clone'">
+            <input type="checkbox" v-model="autoClone" />
+            自动 clone 缺失仓库
+            <span v-if="autoClone" class="auto-clone-dest">→ {{ cloneFallbackDisplay }}</span>
+          </label>
+          <span class="repo-paths-footer-hint">
+            不保存也能跑(仅本次会话);保存后 BotsPage 诊断 / 重新部署都能复用,免得重选。
+          </span>
+        </footer>
       </div>
     </div>
 
@@ -723,6 +929,169 @@ textarea.err { border-color: #ef4444; }
 .field.check label { font-weight: 400; font-size: var(--fs-md); color: var(--c-text); cursor: pointer; display: flex; align-items: center; gap: 6px; }
 /* "父目录,不是单仓库根" 这类轻提示放 label 旁,font-weight 400 + 灰色不抢主 label */
 .field-hint { font-size: var(--fs-sm); font-weight: 400; color: var(--c-muted); margin-left: 6px; }
+.saved-paths-banner {
+  font-size: var(--fs-sm); padding: 8px 12px; border-radius: 6px; margin-bottom: 8px;
+  border: 1px solid transparent; line-height: 1.5;
+}
+.saved-paths-banner.all-covered { background: #ecfdf5; color: #065f46; border-color: #a7f3d0; }
+.saved-paths-banner.partial { background: #fffbeb; color: #92400e; border-color: #fde68a; }
+.saved-paths-banner.none { background: #eff6ff; color: #1e40af; border-color: #bfdbfe; }
+.saved-paths-banner .muted { color: inherit; opacity: 0.7; margin-left: 8px; font-size: var(--fs-xs); }
+
+/* ── 仓库本地路径卡片 ────────────────────────────────────────────── */
+.repo-paths-card {
+  border: 1px solid var(--c-border, #e2e8f0);
+  border-radius: 8px;
+  margin-bottom: 16px;
+  background: #fff;
+  overflow: hidden;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+.repo-paths-card-head {
+  padding: 10px 16px;
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: linear-gradient(180deg, #fafbfc 0%, #f4f6f8 100%);
+  border-bottom: 1px solid var(--c-border, #e2e8f0);
+}
+.repo-paths-title { font-size: 14px; font-weight: 600; color: var(--c-ink, #0f172a); }
+.repo-paths-progress {
+  font-size: 12px; color: var(--c-muted, #64748b);
+  display: inline-flex; align-items: baseline; gap: 2px;
+}
+.repo-paths-progress-num { color: #16a34a; font-weight: 600; font-size: 13px; font-variant-numeric: tabular-nums; }
+.repo-paths-progress-sep { color: var(--c-muted, #94a3b8); }
+.repo-paths-progress-total { color: var(--c-muted, #64748b); font-variant-numeric: tabular-nums; }
+.repo-paths-progress-label { margin-left: 4px; }
+.repo-paths-collapse {
+  margin-left: auto;
+  color: var(--c-muted, #64748b);
+  font-size: 14px;
+  width: 20px; text-align: center;
+}
+
+.repo-paths-body { padding: 8px 12px 12px; }
+
+/* 每行:状态点 / 仓库名 / 路径输入 / 操作按钮 */
+.repo-row {
+  display: grid;
+  grid-template-columns: 18px 160px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: 6px;
+  transition: background 0.1s ease;
+}
+.repo-row:hover { background: #f8fafc; }
+.repo-row.is-empty { opacity: 0.85; }
+
+.repo-row-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px; height: 18px;
+  border-radius: 9px;
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 700;
+}
+.repo-row-status.saved { background: #dcfce7; color: #15803d; }
+.repo-row-status.edited { background: #fef3c7; color: #b45309; }
+.repo-row-status.empty { background: #f1f5f9; color: #cbd5e1; }
+
+.repo-row-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  color: var(--c-ink, #1e293b);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-weight: 500;
+}
+
+.repo-row-path {
+  flex: 1; min-width: 0; width: 100%;
+  padding: 6px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--c-ink, #475569);
+  background: #f8fafc;
+  border: 1px solid var(--c-border, #e2e8f0);
+  border-radius: 5px;
+  outline: none;
+}
+.repo-row-path:focus { border-color: #93c5fd; background: #fff; }
+.repo-row-path::placeholder { color: #94a3b8; font-style: italic; }
+.repo-row.is-empty .repo-row-path { background: #fafafa; }
+
+.repo-row-actions {
+  display: inline-flex; align-items: center; gap: 4px;
+  flex-shrink: 0;
+}
+
+/* 图标按钮:emoji + 圆角小方块,代替之前模糊的"换…/清"文字 */
+.icon-btn {
+  width: 30px; height: 30px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 14px;
+  background: #fff;
+  border: 1px solid var(--c-border, #e2e8f0);
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all 0.1s ease;
+  color: var(--c-ink, #475569);
+  padding: 0;
+}
+.icon-btn:hover:not(:disabled) {
+  background: #eff6ff; border-color: #93c5fd; color: #1d4ed8;
+}
+.icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.icon-btn-danger:hover:not(:disabled) {
+  background: #fef2f2; border-color: #fca5a5; color: #b91c1c;
+}
+.icon-btn-placeholder { display: inline-block; width: 30px; height: 30px; }
+
+.repo-paths-footer {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--c-border, #e2e8f0);
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+}
+.repo-paths-footer-hint {
+  font-size: 11.5px; color: var(--c-muted, #64748b);
+  flex: 1; min-width: 200px;
+  line-height: 1.4;
+}
+.auto-clone-toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12.5px; color: var(--c-ink, #475569);
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: 5px;
+  background: #f8fafc;
+  border: 1px solid var(--c-border, #e2e8f0);
+}
+.auto-clone-toggle:hover { background: #eff6ff; border-color: #93c5fd; }
+.auto-clone-toggle input { margin: 0; }
+.auto-clone-dest {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--c-muted, #64748b);
+  margin-left: 4px;
+  padding: 1px 6px;
+  background: #fff;
+  border-radius: 3px;
+  border: 1px solid var(--c-border, #e2e8f0);
+}
+
+/* primary 按钮在 footer 里 */
+.btn.primary {
+  background: #2563eb; color: #fff; border: 1px solid #2563eb;
+}
+.btn.primary:hover:not(:disabled) { background: #1d4ed8; border-color: #1d4ed8; }
+.btn.primary:disabled { background: #cbd5e1; border-color: #cbd5e1; }
+
 /* 输入框 + "选目录…"按钮同行 */
 .path-row { display: flex; gap: 6px; }
 .path-row input[type="text"] { flex: 1; }

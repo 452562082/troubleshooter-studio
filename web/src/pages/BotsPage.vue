@@ -10,7 +10,6 @@ import {
   discoverBots,
   doctor as bridgeDoctor,
   exportYAML,
-  gen as bridgeGen,
   getRepoPathsForSystem,
   importAndDeploy,
   isDesktop as bridgeIsDesktop,
@@ -25,10 +24,21 @@ import yaml from 'js-yaml'
 import { useDeployPath } from '../lib/useDeployPath'
 import type { ApplyResult, DiscoveredBot, InstallPrompt } from '../lib/bridge'
 import { toast } from '../lib/toast'
+import WorkspaceBrowser from '../components/WorkspaceBrowser.vue'
 
 const bots = ref<DiscoveredBot[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
+
+// 工作目录浏览器:点击卡片"📂 浏览工作目录"打开,modal 包一层 WorkspaceBrowser。
+// 一次只开一个,重选机器人时换 rootPath 即可,没必要多开。
+const browserBot = ref<DiscoveredBot | null>(null)
+function openBrowser(b: DiscoveredBot) {
+  browserBot.value = b
+}
+function closeBrowser() {
+  browserBot.value = null
+}
 // extraRoots 仍然保留(空 array),让 discoverBots(extraRoots.value) 调用签名不变;
 // UI 已下线,所以永远是 [] —— 等同于"只扫 3 条默认路径"。需要传自定义路径走 CLI。
 const extraRoots = ref<string[]>([])
@@ -59,80 +69,50 @@ interface DoctorIssue {
   message: string
   suggest?: string
 }
+// 诊断面板 state。
+//
+// BotsPage 卡片代表"已部署"的机器人 —— 部署流程必经 GetMissingRepoPaths 校验 +
+// SaveRepoPathsForSystem 落盘,所以这里 saved per-repo paths 一定存在。诊断后端会
+// 自动从 ~/.tshoot/config.json 拉这份路径表跑深度扫,UI 不再暴露任何"覆盖路径"入口
+// (代码扫描页另说,那里可能没部署过)。
+//
+// scannedRepoPaths:后端实际扫了哪几个仓库(repoName → absPath),banner 显示用。
 const doctorState = reactive<
   Record<string, {
     loading: boolean
     issues?: DoctorIssue[]
     err?: string
     open?: boolean
-    reposRoot?: string  // 深度扫用,空 = 声明级
-    showReposRootInput?: boolean // 用户点了"深度扫"展开 input 填路径
+    scannedRepoPaths?: Record<string, string>
   }>
 >({})
 
-async function runDoctor(b: DiscoveredBot, reposRoot = '') {
+async function runDoctor(b: DiscoveredBot) {
   const k = regenKey(b)
   if (!b.meta.system_yaml) {
     toast.error(`${b.meta.system_id}: tshoot.json 缺 system_yaml,无法诊断`)
     return
   }
-  const prev = doctorState[k]
-  doctorState[k] = {
-    loading: true,
-    open: true,
-    reposRoot,
-    showReposRootInput: prev?.showReposRootInput ?? false,
-  }
+  doctorState[k] = { loading: true, open: true }
   try {
-    const data = (await bridgeDoctor(b.meta.system_yaml, reposRoot)) as { issues?: DoctorIssue[] }
+    // reposRoot 永远传空 —— 后端走 saved paths,UI 不允许覆盖
+    const data = (await bridgeDoctor(b.meta.system_yaml, '')) as {
+      issues?: DoctorIssue[]
+      scanned_repo_paths?: Record<string, string>
+    }
     doctorState[k] = {
       loading: false,
       open: true,
       issues: data.issues || [],
-      reposRoot,
-      showReposRootInput: prev?.showReposRootInput ?? false,
+      scannedRepoPaths: data.scanned_repo_paths || undefined,
     }
   } catch (e: any) {
     doctorState[k] = {
       loading: false,
       open: true,
       err: String(e?.message || e),
-      reposRoot,
-      showReposRootInput: prev?.showReposRootInput ?? false,
     }
   }
-}
-
-// "加 reposRoot 深度扫"按钮:展开 input + 选目录。用户填完直接跑(再点诊断冗余)。
-function toggleDoctorDeepScan(b: DiscoveredBot) {
-  const k = regenKey(b)
-  const s = doctorState[k]
-  if (!s) return // 主面板还没开,别让深度扫独行
-  s.showReposRootInput = !s.showReposRootInput
-  if (!s.showReposRootInput) {
-    // 关起来也清掉用户半填的 reposRoot,避免下次误以为在跑深度扫
-    s.reposRoot = ''
-  }
-}
-
-async function pickDoctorReposRoot(b: DiscoveredBot) {
-  const k = regenKey(b)
-  try {
-    const p = await openDir('选择仓库根目录(含各个 repo.name 子目录)')
-    if (p && doctorState[k]) doctorState[k].reposRoot = p
-  } catch (e: any) {
-    if (doctorState[k]) doctorState[k].err = String(e?.message || e)
-  }
-}
-
-async function runDoctorDeep(b: DiscoveredBot) {
-  const k = regenKey(b)
-  const r = doctorState[k]?.reposRoot?.trim()
-  if (!r) {
-    toast.error('请先填仓库根目录(或选目录)')
-    return
-  }
-  await runDoctor(b, r)
 }
 
 function doctorSeverityIcon(s: string): string {
@@ -194,17 +174,29 @@ function regenKey(b: DiscoveredBot) {
   return `${b.path}|${b.meta.target}`
 }
 
+// 重新生成:用 tshoot.json 里现存的 system_yaml 重新渲染产物 + 刷到这张卡的真实部署目录,
+// 等同"用当前 yaml 跑一次 Apply"。preserve_on_regenerate 列表里的文件保留用户手改不覆盖。
+//
+// 跟"应用到活 workspace"的区别:那个走编辑器草稿(用户改完先 dry-run 确认再 apply),
+// 这个用存盘的 system_yaml 一键刷新,不需要进编辑器 —— 适合"模板更新了 / 想用最新版
+// generator 重出一遍产物"的场景。
 async function regen(b: DiscoveredBot) {
   const k = regenKey(b)
+  // 不弹 confirm:操作非破坏性(preserve_on_regenerate 文件保留),Wails WebView 里
+  // 弹 native confirm 偶发被遮挡 / 不响应。loading 态足够防抖,失败走 toast.error。
   regenState[k] = { loading: true }
+  toast.info(`${b.meta.system_id}: 开始刷新 ${b.path}…`)
   try {
     const yamlText = b.meta.system_yaml
-    if (!yamlText) throw new Error('tshoot.json 里没 system_yaml 字段,无法原地重 gen')
-    const res = await bridgeGen(yamlText, '')
-    const outDir = String(res?.output_dir || '未知输出路径')
-    toast.success(`${b.meta.system_id}: 产物已写入 ${outDir}`)
+    if (!yamlText) throw new Error('tshoot.json 里没 system_yaml 字段,无法重新生成')
+    // dryRun=false → 真写盘到 b.path(claude-code/cursor/codex 走 Apply,openclaw 同样)
+    const res = await applyBot(b.path, yamlText, false) as any
+    const written = res?.files_written ?? 0
+    const preserved = (res?.files_preserved || []).length
+    const removed = (res?.files_removed || []).length
+    toast.success(`${b.meta.system_id} 已刷新到 ${b.path}: 写 ${written} / 保留 ${preserved} / 清理 ${removed}`)
   } catch (e: any) {
-    toast.error(`${b.meta.system_id} 重 gen 失败: ${String(e?.message || e)}`)
+    toast.error(`${b.meta.system_id} 重新生成失败: ${String(e?.message || e)}`)
   } finally {
     regenState[k] = { loading: false }
   }
@@ -219,7 +211,7 @@ async function uninstall(b: DiscoveredBot) {
     `确定卸载 "${b.meta.system_id}" (${target})?\n\n` +
     (target === 'openclaw'
       ? 'workspace 移到 ~/.Trash;摘掉 ~/.openclaw/openclaw.json 里的 agents.list 条目;清 creds.json。MCP servers(可能被多 agent 共享)保留。'
-      : `中间包 ${b.path} 移到 ~/.Trash;清掉 ~/${target === 'claude-code' ? '.claude' : target === 'cursor' ? '.cursor' : '.codex'}/{agents,skills,scripts}/<name>。`)
+      : `已部署目录 ${b.path} 移到 ~/.Trash;同时清掉同根下的 agents/<name>.md 与 scripts/<name>/(自定义安装目录也会一并清);staging 中间包 ~/.tshoot/${target}/<id>/ 一并删除。`)
   )
   if (!ok) return
   uninstallState[k] = { loading: true }
@@ -824,6 +816,13 @@ onUnmounted(() => {
             >
               {{ doctorState[regenKey(b)]?.loading ? '诊断中…' : '🩺 诊断' }}
             </button>
+            <button
+              class="btn btn-regen"
+              :title="'打开机器人工作目录,树形浏览 + 文件编辑(改 SKILL.md / 脚本 / 变量做调试,不动 system.yaml)'"
+              @click="openBrowser(b)"
+            >
+              📂 浏览工作目录
+            </button>
             <!-- ⋯ 更多:低频/管理类操作折进下拉,省卡片版面 + 降视觉噪声 -->
             <div class="bot-more-wrap">
               <button class="btn btn-regen btn-more" :title="'更多操作'" @click.stop="toggleMenu(regenKey(b))">⋯</button>
@@ -831,10 +830,10 @@ onUnmounted(() => {
                 <button
                   class="menu-item"
                   :disabled="regenState[regenKey(b)]?.loading"
-                  :title="b.meta.system_yaml ? '' : 'tshoot.json 里没保存 system_yaml，无法原地重 gen'"
+                  :title="b.meta.system_yaml ? '用 tshoot.json 里保存的 yaml 重渲产物并直接刷到本机器人的活 workspace(preserve_on_regenerate 文件保留)' : 'tshoot.json 里没保存 system_yaml，无法重新生成'"
                   @click="closeMenu(); regen(b)"
                 >
-                  {{ regenState[regenKey(b)]?.loading ? '生成中…' : '♻ 重新生成' }}
+                  {{ regenState[regenKey(b)]?.loading ? '刷新中…' : '♻ 重新生成并刷新' }}
                 </button>
                 <button class="menu-item" @click="closeMenu(); toggleEditor(b)">
                   {{ editingKey === regenKey(b) ? '收起编辑器' : '✎ 编辑配置' }}
@@ -856,54 +855,31 @@ onUnmounted(() => {
           </div>
         </footer>
 
-        <!-- Doctor 诊断结果:按卡展开。两档:声明级(默认) / 深度扫(加 reposRoot)。 -->
+        <!-- Doctor 诊断结果:已部署机器人的 saved per-repo paths 由部署流程保证存在,
+             后端自动用这份路径跑深度扫描,UI 不暴露"覆盖路径"入口(代码扫描页才需要)。 -->
         <section v-if="doctorState[regenKey(b)]?.open" class="doctor-panel">
           <div class="doctor-head">
             <strong>🩺 诊断结果</strong>
-            <span v-if="doctorState[regenKey(b)]?.reposRoot" class="doctor-mode deep">
-              深度扫 · {{ doctorState[regenKey(b)]!.reposRoot }}
+            <span
+              v-if="doctorState[regenKey(b)]?.scannedRepoPaths && Object.keys(doctorState[regenKey(b)]!.scannedRepoPaths!).length"
+              class="doctor-mode deep"
+              :title="Object.entries(doctorState[regenKey(b)]!.scannedRepoPaths!).map(([n,p]) => `${n} → ${p}`).join('\n')"
+            >
+              深度扫 · {{ Object.keys(doctorState[regenKey(b)]!.scannedRepoPaths!).length }} 个仓库
             </span>
-            <span v-else class="doctor-mode">声明级</span>
+            <span v-else class="doctor-mode">仅静态检查 · 没找到本地仓库路径</span>
             <div class="doctor-head-actions">
-              <button
-                class="btn btn-regen"
-                :title="'填 reposRoot 做代码实态深度扫描(检测 8 种漂移)'"
-                @click="toggleDoctorDeepScan(b)"
-              >
-                {{ doctorState[regenKey(b)]?.showReposRootInput ? '收起深度扫' : '+ 深度扫描代码' }}
-              </button>
               <button class="btn btn-regen" @click="doctorState[regenKey(b)].open = false">收起</button>
             </div>
-          </div>
-
-          <!-- 深度扫输入行:readonly,只走"选目录"按钮 -->
-          <div v-if="doctorState[regenKey(b)]?.showReposRootInput" class="doctor-deep-row">
-            <input
-              :value="doctorState[regenKey(b)]!.reposRoot"
-              type="text"
-              placeholder="点右侧选仓库父目录(含 repo.name 子目录的那层)"
-              :disabled="doctorState[regenKey(b)]?.loading"
-              readonly
-              class="doctor-deep-input path-readonly"
-              :title="doctorState[regenKey(b)]?.reposRoot || ''"
-            />
-            <button class="btn btn-regen" :disabled="doctorState[regenKey(b)]?.loading" @click="pickDoctorReposRoot(b)">
-              {{ doctorState[regenKey(b)]?.reposRoot ? '重新选…' : '选目录…' }}
-            </button>
-            <button
-              class="btn primary"
-              :disabled="doctorState[regenKey(b)]?.loading || !doctorState[regenKey(b)]?.reposRoot?.trim()"
-              @click="runDoctorDeep(b)"
-            >
-              {{ doctorState[regenKey(b)]?.loading ? '扫描中…' : '跑深度扫描' }}
-            </button>
           </div>
 
           <div v-if="doctorState[regenKey(b)]?.err" class="alert error">
             {{ doctorState[regenKey(b)]!.err }}
           </div>
           <div v-else-if="doctorState[regenKey(b)]?.issues?.length === 0" class="alert success">
-            ✓ {{ doctorState[regenKey(b)]?.reposRoot ? '深度扫描未发现漂移' : '未发现声明漂移。想对比代码实态(检测 8 种漂移),点上方「+ 深度扫描代码」填仓库根' }}
+            ✓ {{ doctorState[regenKey(b)]?.scannedRepoPaths && Object.keys(doctorState[regenKey(b)]!.scannedRepoPaths!).length
+                ? '深度扫描未发现漂移'
+                : '静态检查未发现问题(本系统暂无本地仓库路径记录)' }}
           </div>
           <ul v-else-if="doctorState[regenKey(b)]?.issues" class="doctor-list">
             <li
@@ -961,6 +937,13 @@ onUnmounted(() => {
         </section>
       </article>
     </div>
+    <!-- 工作目录浏览器:点击卡片"📂 浏览工作目录"打开。 -->
+    <WorkspaceBrowser
+      v-if="browserBot"
+      :root-path="browserBot.path"
+      :bot="browserBot"
+      @close="closeBrowser"
+    />
   </div>
 </template>
 
@@ -1085,15 +1068,6 @@ onUnmounted(() => {
 .doctor-mode.deep { background: #e0e7ff; color: #3730a3; font-family: monospace; }
 .doctor-head-actions { margin-left: auto; display: flex; gap: 6px; }
 
-.doctor-deep-row {
-  display: flex; gap: 6px; margin-bottom: 8px;
-  padding: 8px 10px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px;
-}
-.doctor-deep-input {
-  flex: 1; padding: 6px 10px; font-size: 12px; font-family: monospace;
-  border: 1px solid #cbd5e1; border-radius: 4px;
-}
-.doctor-deep-input:focus { outline: none; border-color: #3b82f6; }
 .doctor-list {
   list-style: none; padding: 0; margin: 0;
   display: flex; flex-direction: column; gap: 6px;

@@ -24,6 +24,7 @@ import yaml from 'js-yaml'
 import { useDeployPath } from '../lib/useDeployPath'
 import type { ApplyResult, DiscoveredBot, InstallPrompt } from '../lib/bridge'
 import { toast } from '../lib/toast'
+import { confirmDialog } from '../lib/confirm'
 import WorkspaceBrowser from '../components/WorkspaceBrowser.vue'
 
 const bots = ref<DiscoveredBot[]>([])
@@ -203,16 +204,22 @@ async function regen(b: DiscoveredBot) {
 }
 
 // 卸载机器人:按 target 分派,清两端(中间包 + AI 平台真实位置)。
-// 二次确认避免误删;成功后从 bots 列表移除该条,无需手动刷新。
+// 用 confirmDialog 而不是 window.confirm —— Wails WKWebView 里 native confirm
+// 经常静默失败 / 自动 cancel,用户点了看着没反应。confirmDialog 走 Vue 模态稳定。
 async function uninstall(b: DiscoveredBot) {
   const k = regenKey(b)
   const target = b.meta.target
-  const ok = window.confirm(
-    `确定卸载 "${b.meta.system_id}" (${target})?\n\n` +
-    (target === 'openclaw'
-      ? 'workspace 移到 ~/.Trash;摘掉 ~/.openclaw/openclaw.json 里的 agents.list 条目;清 creds.json。MCP servers(可能被多 agent 共享)保留。'
-      : `已部署目录 ${b.path} 移到 ~/.Trash;同时清掉同根下的 agents/<name>.md 与 scripts/<name>/(自定义安装目录也会一并清);staging 中间包 ~/.tshoot/${target}/<id>/ 一并删除。`)
-  )
+  const message = target === 'openclaw'
+    ? `workspace 移到 ~/.Trash;摘掉 ~/.openclaw/openclaw.json 里的 agents.list 条目;清 creds.json。MCP servers(可能被多 agent 共享)保留。`
+    : `已部署目录 ${b.path} 移到 ~/.Trash;同时清掉同根下的 agents/<name>.md 与 scripts/<name>/(自定义安装目录也会一并清);staging 中间包 ~/.tshoot/${target}/<id>/ 一并删除。`
+  const ok = await confirmDialog({
+    title: `卸载 "${b.meta.system_id}" (${target})?`,
+    message,
+    confirmText: '确认卸载',
+    cancelText: '取消',
+    danger: true,
+    defaultAction: 'cancel',
+  })
   if (!ok) return
   uninstallState[k] = { loading: true }
   try {

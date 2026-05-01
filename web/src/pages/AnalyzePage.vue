@@ -69,8 +69,10 @@ meta:
 
 function loadExample() {
   yamlContent.value = exampleYaml
-  error.value = ''
+  // 加载示例 = 换 yaml,顺手清旧扫描结果(跟 loadFileNative / loadFileBrowser 一致)
   result.value = null
+  error.value = ''
+  progressLog.value = ''
 }
 
 const yamlContent = ref('')
@@ -153,7 +155,16 @@ async function refreshSavedRepoPaths() {
 }
 // yaml 改了 → 重拉(用户切换 system / 加载文件 / 编辑 system.id)
 import { watch } from 'vue'
-watch(yamlSystemID, refreshSavedRepoPaths, { immediate: true })
+watch(yamlSystemID, (newId, oldId) => {
+  refreshSavedRepoPaths()
+  // 切到不同 system(粘贴 / 加载新 yaml 改了 system.id),旧扫描结果跟新 yaml 错位,清掉。
+  // 仅在真正变更后清(immediate=true 首次 oldId=undefined 跳过)。
+  if (oldId !== undefined && newId !== oldId) {
+    result.value = null
+    error.value = ''
+    progressLog.value = ''
+  }
+}, { immediate: true })
 
 async function pickRepoPath(repoName: string) {
   if (!isDesktop()) { error.value = '选目录需要桌面 app 环境'; return }
@@ -209,13 +220,24 @@ async function saveDraftsToUserConfig() {
   }
 }
 
+// 重置上次扫描结果 —— 加载新 yaml 文件 / 系统 id 变化时调,避免旧结果跟新 yaml 错位。
+// 不动 yamlContent 本身(load 流程外面已经赋值);只清 result + error + progressLog。
+function clearScanResult() {
+  result.value = null
+  error.value = ''
+  progressLog.value = ''
+}
+
 // 桌面 app 走 Wails 原生 osascript 对话框(reliable on macOS WKWebView);
 // 浏览器模式回退 <input type="file"> + FileReader。
 async function loadFileNative() {
   if (!isDesktop()) return
   try {
     const r = await openYAML()
-    if (r && r.path) yamlContent.value = r.content || ''
+    if (r && r.path) {
+      yamlContent.value = r.content || ''
+      clearScanResult()
+    }
   } catch (e: any) {
     error.value = `加载文件失败: ${String(e?.message || e)}`
   }
@@ -224,7 +246,10 @@ function loadFileBrowser(e: Event) {
   const file = (e.target as HTMLInputElement).files?.[0]
   if (!file) return
   const reader = new FileReader()
-  reader.onload = () => { yamlContent.value = reader.result as string }
+  reader.onload = () => {
+    yamlContent.value = reader.result as string
+    clearScanResult()
+  }
   reader.readAsText(file)
 }
 
@@ -511,32 +536,40 @@ onUnmounted(() => {
     <h1>代码扫描</h1>
 
     <div class="info-box">
-      <div class="info-box-title">代码扫描 — 从源码反推 yaml 应该怎么写</div>
+      <div class="info-box-title">代码扫描 — 从源码反推 yaml 应该怎么写,顺带把依赖图 / 数据 schema 补齐</div>
       <div class="info-box-body">
-        <p class="info-box-lead">扫已 clone 到本机的代码,把"实际跑的样子"跟 yaml 声明对账,差异一键回填。</p>
+        <p class="info-box-lead">把已 clone 到本机的代码当真源,扫出"实际跑的样子",跟 yaml 声明对账;扫到的有用线索一并合并进 yaml + 排障映射表,跳沙盒做最终验证。</p>
         <ul class="info-box-actions">
           <li>
-            <strong>🔍 自动识别</strong>
-            <span>—— 每个仓库提供的服务名,以及配置中心(Nacos / Apollo / Consul / Kuboard)用到的 dataId / namespace / configmap 等线索</span>
+            <strong>🔍 服务名 + 配置中心线索</strong>
+            <span>—— 每个仓库提供的 service_names(go.mod / pom / package.json + monorepo cmd 入口加 <code>&lt;repo&gt;-</code> 前缀消歧义)+ Nacos / Apollo / Consul / Kuboard 用到的 dataId / namespace / configmap 等</span>
+          </li>
+          <li>
+            <strong>🔗 服务依赖图 (downstream)</strong>
+            <span>—— Go 识别 <code>http.Get</code> / <code>grpc.Dial</code> 字面量调用 + truss 风格的 <code>client.NewXxxClient(naming, XxxServiceName, ns)</code> 服务发现模式;Java 识别 <code>@FeignClient</code> / RestTemplate;Python 识别 requests/httpx;扫到的下游写进 service-dependency-map 给排障"沿依赖图追"用</span>
+          </li>
+          <li>
+            <strong>🗄️ 数据层 + 业务表 schema</strong>
+            <span>—— 识别 redis / mongodb / mysql / kafka / es / rocketmq / clickhouse 等客户端构造;主流 ORM(GORM / JPA / SQLAlchemy / TypeORM / Mongoose 等)抽出每服务用的表 / collection / cache prefix,写进 data-schema-map 给"按 entity ID 反查表"用</span>
           </li>
           <li>
             <strong>📊 差异对比</strong>
-            <span>—— 跟 yaml 声明逐项对照:<code>missing</code>(yaml 漏写)/ <code>extra</code>(yaml 多写)/ <code>verified</code>(已对齐)分类一目了然</span>
+            <span>—— 跟 yaml 声明逐项对照:<code>missing</code>(yaml 漏写)/ <code>extra</code>(yaml 多写)/ <code>verified</code>(已对齐)</span>
           </li>
           <li>
             <strong>↩️ 一键回填</strong>
-            <span>—— 把扫描出的差异合并回 yaml,自动跳到 <router-link to="/editor">YAML 沙盒</router-link> 做验证 + 健康检查</span>
+            <span>—— 把扫到的差异合并回 yaml,自动跳到 <router-link to="/editor">YAML 沙盒</router-link> 做验证 + 健康检查</span>
           </li>
         </ul>
         <div class="info-box-inputs">
           <div class="info-box-inputs-title">📝 需要的输入:</div>
           <ul>
             <li><strong>system.yaml</strong> — 粘贴或从文件加载</li>
-            <li><strong>仓库本地路径</strong> — yaml 加载后会出现表格,挨个选目录或一键📁批量填(已部署过的会自动用上次记下的)</li>
+            <li><strong>仓库本地路径</strong> — yaml 加载后会出现表格,挨个选目录或一键📁批量从父目录填(已部署过的系统会自动复用 <code>~/.tshoot/config.json</code> 里上次记下的路径)</li>
           </ul>
         </div>
         <p class="info-box-redirect">
-          ⚠️ 本机没下载的仓库会跳过扫描;勾「自动 clone 缺失仓库」会按 yaml 里的 <code>url</code> 浅克隆到默认 clone 目录再扫(需要 git + 凭证)。
+          ⚠️ 本机没下载的仓库默认跳过;勾「自动 clone 缺失仓库」会按 yaml <code>repos[].url</code> 浅克隆到默认 clone 目录再扫(需要 git + 凭证)。识别精度:Go 70-80% / Java 60-70% / Python 60% / Node 50%,用了非主流框架(go-zero / kratos v2 / kitex)的部分需要在沙盒里手补。
         </p>
       </div>
     </div>

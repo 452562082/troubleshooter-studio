@@ -155,7 +155,7 @@ const isDesktop = bridgeIsDesktop
 
 async function scan() {
   if (!isDesktop()) {
-    error.value = '需要在桌面 app 里打开此页面（window.go 不可用）'
+    error.value = '需要在桌面 app 里打开此页面(window.go 不可用)'
     return
   }
   loading.value = true
@@ -572,7 +572,7 @@ onUnmounted(() => {
     <header class="page-header">
       <div>
         <h1>已装机器人</h1>
-        <p class="subtitle">扫描本机 tshoot.json 锚点，列出已经部署到 AI 平台的排障机器人。</p>
+        <p class="subtitle">扫描本机各 AI 平台目录的 tshoot.json 锚点,列出已部署的排障机器人,并提供诊断 / 编辑 / 浏览工作目录 / 卸载等管理操作。</p>
       </div>
       <div class="page-actions">
         <!-- 导入 yaml 一键部署的入口已下线 —— 这条路径跟「创建向导」的"导入 yaml → 反填 → 一键部署"
@@ -597,9 +597,10 @@ onUnmounted(() => {
         <div class="deploy-field">
           <label>目标平台</label>
           <select v-model="importTarget" :disabled="importStage === 'deploying'">
-            <option value="openclaw">OpenClaw（Studio 托管,需填凭证）</option>
-            <option value="claude-code">Claude Code（装到项目根）</option>
-            <option value="cursor">Cursor IDE（装到项目根）</option>
+            <option value="openclaw">OpenClaw(Studio 托管,需填凭证)</option>
+            <option value="claude-code">Claude Code(CLI 用 @&lt;name&gt; 调)</option>
+            <option value="cursor">Cursor(AI 侧栏选 Custom Agent)</option>
+            <option value="codex">Codex CLI(用 @&lt;name&gt; 调)</option>
           </select>
         </div>
         <!-- openclaw 自动管理路径,折叠;用户点"自定义"才露 input -->
@@ -689,8 +690,8 @@ onUnmounted(() => {
       <div v-if="importStage === 'deployed' || importStage === 'installing'" class="deploy-step">
         <p v-if="installPrompts.length > 0" class="deploy-tip">
           产物已写到 <code>{{ importedOutputDir }}</code>。
-          install.sh 需要下面 {{ installPrompts.length }} 个凭证字段；已存在的
-          <code>.env</code> 值自动预填。<strong>有 * 的是 password 型</strong>。
+          install.sh 需要下面 {{ installPrompts.length }} 个凭证字段;已存在的
+          <code>.env</code> 值自动预填。<strong>带 * 的是密码型字段</strong>。
         </p>
         <p v-else class="deploy-tip">
           产物已写到 <code>{{ importedOutputDir }}</code>。
@@ -806,12 +807,12 @@ onUnmounted(() => {
           <li><strong>{{ b.skill_count }}</strong> skills</li>
         </ul>
         <footer class="bot-foot">
-          <span class="bot-time">最近更新：{{ b.mod_time }}</span>
+          <span class="bot-time">最近更新: {{ b.mod_time }}</span>
           <div class="bot-actions">
             <button
               class="btn btn-regen"
               :disabled="doctorState[regenKey(b)]?.loading"
-              :title="'跑一次 doctor 声明级诊断;想做代码实态深度扫描,面板展开后点「+ 深度扫描代码」填 reposRoot'"
+              :title="'用部署时记下的本地仓库路径自动深度扫描:对比 yaml 声明 vs 代码实态,挑 8 类漂移给修复建议'"
               @click="runDoctor(b)"
             >
               {{ doctorState[regenKey(b)]?.loading ? '诊断中…' : '🩺 诊断' }}
@@ -830,7 +831,7 @@ onUnmounted(() => {
                 <button
                   class="menu-item"
                   :disabled="regenState[regenKey(b)]?.loading"
-                  :title="b.meta.system_yaml ? '用 tshoot.json 里保存的 yaml 重渲产物并直接刷到本机器人的活 workspace(preserve_on_regenerate 文件保留)' : 'tshoot.json 里没保存 system_yaml，无法重新生成'"
+                  :title="b.meta.system_yaml ? '用 tshoot.json 里保存的 yaml 重渲产物并直接刷到本机器人的活 workspace(preserve_on_regenerate 文件保留)' : 'tshoot.json 里没保存 system_yaml,无法重新生成'"
                   @click="closeMenu(); regen(b)"
                 >
                   {{ regenState[regenKey(b)]?.loading ? '刷新中…' : '♻ 重新生成并刷新' }}
@@ -845,7 +846,7 @@ onUnmounted(() => {
                 <button
                   class="menu-item menu-item-danger"
                   :disabled="uninstallState[regenKey(b)]?.loading"
-                  :title="'卸载已部署的机器人:中间包移到 ~/.Trash,清掉 AI 平台对应位置(claude-code/cursor 清 ~/.claude|.cursor;openclaw 摘 openclaw.json + 清 creds)'"
+                  :title="'卸载已部署的机器人:claude-code/cursor/codex 清 ~/.<target>/{agents,skills,scripts}/<name> 移到 ~/.Trash;openclaw 摘 openclaw.json agents.list + 清 creds.json'"
                   @click="closeMenu(); uninstall(b)"
                 >
                   {{ uninstallState[regenKey(b)]?.loading ? '卸载中…' : '🗑 卸载机器人' }}
@@ -901,12 +902,13 @@ onUnmounted(() => {
         </section>
 
         <section v-if="editingKey === regenKey(b)" class="editor">
-          <label class="editor-label">system.yaml（改完先「预演」看改动列表，再「应用」写盘）</label>
+          <label class="editor-label">system.yaml(改完先「预演」看改动列表,再「应用到活 workspace」写盘 —— 仅刷新这一张卡所属平台)</label>
           <textarea v-model="editorDraft" class="editor-textarea" spellcheck="false" />
           <div class="editor-actions">
             <button
               class="btn"
               :disabled="applyState[regenKey(b)]?.loading"
+              :title="'干跑:渲染产物 + 算 diff,告诉你哪些会写 / 保留 / 删除,不实际写盘'"
               @click="runApply(b, true)"
             >
               {{ applyState[regenKey(b)]?.loading && applyState[regenKey(b)]?.mode === 'dry' ? '预演中…' : '预演' }}
@@ -914,19 +916,20 @@ onUnmounted(() => {
             <button
               class="btn primary"
               :disabled="applyState[regenKey(b)]?.loading"
+              :title="'真写盘到本机器人部署目录;preserve_on_regenerate 列表里的文件保留用户手改不覆盖'"
               @click="runApply(b, false)"
             >
               {{ applyState[regenKey(b)]?.loading && applyState[regenKey(b)]?.mode === 'real' ? '应用中…' : '应用到活 workspace' }}
             </button>
           </div>
           <div v-if="applyState[regenKey(b)]?.result" class="apply-result">
-            <div class="apply-row"><strong>写入文件：</strong>{{ applyState[regenKey(b)]!.result!.files_written }}</div>
+            <div class="apply-row"><strong>写入文件:</strong>{{ applyState[regenKey(b)]!.result!.files_written }}</div>
             <div v-if="applyState[regenKey(b)]!.result!.files_preserved?.length" class="apply-row">
-              <strong>保留（用户手改）：</strong>
+              <strong>保留(用户手改):</strong>
               <code v-for="f in applyState[regenKey(b)]!.result!.files_preserved" :key="f">{{ f }}</code>
             </div>
             <div v-if="applyState[regenKey(b)]!.result!.files_removed?.length" class="apply-row removed">
-              <strong>移除（陈旧产物）：</strong>
+              <strong>移除(陈旧产物):</strong>
               <code v-for="f in applyState[regenKey(b)]!.result!.files_removed" :key="f">{{ f }}</code>
             </div>
             <div v-if="applyState[regenKey(b)]!.result!.needs_restart_hint" class="apply-hint">

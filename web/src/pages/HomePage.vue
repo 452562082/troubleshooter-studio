@@ -127,20 +127,20 @@ const draftStepNormalized = computed<number | null>(() => {
 // 推荐下一步逻辑
 const nextStep = computed(() => {
   if (!wizardDraft.value && !lastYamlSignature.value) {
-    return { text: '从「创建向导」开始，30 秒生成第一份 system.yaml', path: '/init', cta: '开始向导 →' }
+    return { text: '从「创建向导」开始,几分钟生成你第一份 system.yaml + 可用的排障机器人', path: '/init', cta: '开始向导 →' }
   }
   const step = draftStepNormalized.value
   if (wizardDraft.value && step != null && step < WIZARD_PREVIEW_STEP) {
-    return { text: `向导进行到第 ${step} / ${WIZARD_TOTAL_STEPS} 步（${draftSystemName.value || '未命名'}），回去继续？`, path: '/init', cta: '继续向导 →' }
+    return { text: `向导进行到第 ${step} / ${WIZARD_TOTAL_STEPS} 步(${draftSystemName.value || '未命名'}),回去继续?`, path: '/init', cta: '继续向导 →' }
   }
   if (wizardDraft.value && step === WIZARD_PREVIEW_STEP) {
-    return { text: '向导已到预览步骤，确认 yaml 后下一步即可一键部署', path: '/init', cta: '查看向导预览 →' }
+    return { text: '向导已到预览步骤,确认 yaml 后下一步即可一键部署', path: '/init', cta: '查看向导预览 →' }
   }
   if (wizardDraft.value && step === WIZARD_DEPLOY_STEP) {
     return { text: '向导已到一键部署步,直接装机即可', path: '/init', cta: '继续部署 →' }
   }
   if (lastYamlSignature.value?.ok) {
-    return { text: `你最近编辑过 ${lastYamlSignature.value.name}（targets: ${lastYamlSignature.value.targets.join(', ')}），可以直接去 YAML 沙盒验证 / 部署`, path: '/editor', cta: '继续编辑 →' }
+    return { text: `你最近编辑过 ${lastYamlSignature.value.name}(targets: ${lastYamlSignature.value.targets.join(', ')}),可以直接去 YAML 沙盒验证 / 部署`, path: '/editor', cta: '继续编辑 →' }
   }
   return { text: '从「创建向导」开始', path: '/init', cta: '开始向导 →' }
 })
@@ -150,7 +150,7 @@ const nextStep = computed(() => {
   <div class="home-page">
     <div class="hero">
       <img :src="brandLogo" class="hero-logo" alt="Troubleshooter Studio" />
-      <p class="tagline">为你的业务系统快速生成并部署 AI 排障机器人。</p>
+      <p class="tagline">为你的业务系统快速生成并部署 AI 排障机器人 —— 跑在 OpenClaw / Claude Code / Cursor / Codex CLI</p>
     </div>
 
     <!-- 推荐下一步面板 -->
@@ -206,17 +206,43 @@ const nextStep = computed(() => {
     <h2 class="section-title">想了解更多</h2>
     <div class="info-grid">
       <div class="info-card">
-        <div class="info-head">部署形态</div>
+        <div class="info-head">部署形态(支持 4 个 AI 平台)</div>
         <ul>
-          <li><code>openclaw</code> — 装到 <code>~/.openclaw/workspace/</code>,在 OpenClaw 客户端里选 agent 对话</li>
-          <li><code>claude-code</code> — 装到 <code>~/.claude/agents/</code>,任意项目里 @&lt;name&gt; 调用</li>
-          <li><code>cursor</code> — 装到 <code>~/.cursor/agents/</code>,Cursor AI 侧栏选用</li>
+          <li>
+            <code>openclaw</code> —
+            产物 <code>~/.openclaw/workspace/&lt;name&gt;/</code> + 注册到
+            <code>openclaw.json</code>,在 <strong>OpenClaw 客户端</strong>里直接选 agent 对话
+          </li>
+          <li>
+            <code>claude-code</code> —
+            agent.md <code>~/.claude/agents/&lt;name&gt;.md</code> +
+            skills/scripts <code>~/.claude/{skills,scripts}/&lt;name&gt;/</code>,任意项目里
+            <strong>Claude Code</strong> CLI 用 <code>@&lt;name&gt;</code> 调用
+          </li>
+          <li>
+            <code>cursor</code> —
+            agent.md <code>~/.cursor/agents/&lt;name&gt;.md</code> +
+            skills/scripts <code>~/.cursor/{skills,scripts}/&lt;name&gt;/</code>,
+            <strong>Cursor</strong> AI 侧栏选 Custom Agent
+          </li>
+          <li>
+            <code>codex</code> —
+            agent.md <code>~/.codex/agents/&lt;name&gt;.md</code> +
+            skills/scripts <code>~/.codex/{skills,scripts}/&lt;name&gt;/</code>,
+            <strong>OpenAI Codex CLI</strong> 用 <code>@&lt;name&gt;</code> 调用
+          </li>
         </ul>
+        <div class="info-foot">
+          MCP 服务器:claude-code 写 <code>~/.claude/settings.json</code>;cursor 写
+          <code>~/.cursor/mcp.json</code>;codex 通过
+          <code>codex mcp add</code> 写 <code>~/.codex/config.toml</code>;openclaw 走
+          <code>openclaw.json</code> 自家注册流程。
+        </div>
       </div>
       <div class="info-card">
         <div class="info-head">CLI 命令速查</div>
         <ul>
-          <li><code>tshoot demo</code> — 零配置试跑（30 秒看产物）</li>
+          <li><code>tshoot demo</code> — 零配置试跑(秒级看产物)</li>
           <li><code>tshoot init -o system.yaml</code> — 命令行向导</li>
           <li><code>tshoot gen -i ...</code> — 生成 staging 产物</li>
           <li><code>tshoot install --path ... --target ...</code> — 装到本机(原生 Go,无 bash)</li>
@@ -324,6 +350,15 @@ const nextStep = computed(() => {
 .info-head { font-weight: 600; color: var(--c-ink); font-size: var(--fs-md); margin-bottom: var(--sp-2); }
 .info-card ul { margin: 0; padding-left: 18px; }
 .info-card li { color: #475569; font-size: var(--fs-base); line-height: 1.8; }
+.info-card li strong { color: #1e293b; font-weight: 600; }
+.info-foot {
+  margin-top: var(--sp-2);
+  padding-top: var(--sp-2);
+  border-top: 1px dashed var(--c-line);
+  font-size: var(--fs-sm);
+  color: var(--c-muted);
+  line-height: 1.65;
+}
 /* 这里的 code 想要蓝色强调,不走全局灰色 */
 .info-card code { background: rgba(0,0,0,0.06); color: #1e40af; }
 

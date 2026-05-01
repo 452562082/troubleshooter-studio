@@ -73,9 +73,9 @@ async function copyAll() {
 
 const SOURCE_LABELS: Record<LogSource, string> = {
   cchub: '配置中心',
-  install: '安装脚本',
+  install: '安装流程',
   analyze: '代码扫描',
-  system: '其他',
+  system: '其它',
 }
 </script>
 
@@ -84,8 +84,8 @@ const SOURCE_LABELS: Record<LogSource, string> = {
     <header class="logs-header">
       <h1>日志</h1>
       <p class="logs-sub">
-        全工作台过程日志:CCHub 预加载、install.sh、代码扫描、原生对话。
-        {{ entries.length }} 条(当前筛后 {{ filtered.length }} 条)。
+        全工作台过程日志:配置中心预加载、原生安装(install)、代码扫描(analyze)、其它系统事件。
+        共 {{ entries.length }} 条(当前过滤后 {{ filtered.length }} 条)。
       </p>
     </header>
 

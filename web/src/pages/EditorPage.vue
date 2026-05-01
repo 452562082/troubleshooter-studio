@@ -561,8 +561,8 @@ function translateSchemaError(msg: string): string {
     <h1>YAML 沙盒</h1>
 
     <div v-if="fromAnalyzeBanner" class="alert success" style="margin-bottom: 12px;">
-      ✓ 已应用代码扫描的发现到下方 yaml(service_names / config-center 字段已更新)。
-      请点击"<strong>✓ 验证</strong>"确认无误后,从「创建向导」末步部署或导出。
+      ✓ 已把代码扫描的发现合并到下方 yaml(service_names / config-center 字段已更新)。
+      请点击"<strong>✓ 验证</strong>"确认无误后,回「创建向导」末步部署,或在本页直接导出。
       <button type="button" class="btn-link" @click="fromAnalyzeBanner = false" style="float:right">知道了</button>
     </div>
 

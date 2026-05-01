@@ -5945,7 +5945,7 @@ const configTypeDescriptions: Record<string, string> = {
         </div>
         <div class="modal-body">
           <p class="help-text" style="margin-bottom: 10px;">
-            上传或粘贴现有 system.yaml 内容，字段会自动反填到各步骤。
+            上传或粘贴现有 system.yaml 内容,字段会自动反填到各步骤。
           </p>
           <label class="btn file-label">
             选择文件...
@@ -5996,7 +5996,7 @@ const configTypeDescriptions: Record<string, string> = {
     <div v-if="currentStep === 1" class="card lg welcome-card">
       <h2>开始创建机器人</h2>
       <p class="help-text" style="margin-bottom: 24px;">
-        本向导帮你生成 system.yaml 配置 + 一键部署到 OpenClaw / Claude Code / Cursor。
+        本向导帮你生成 system.yaml 配置 + 一键部署到 OpenClaw / Claude Code / Cursor / Codex CLI。
         选下方任一方式开始 —— 草稿会自动保存,中途可关闭 app 下次继续。
       </p>
       <div class="welcome-choices">
@@ -8242,11 +8242,11 @@ const configTypeDescriptions: Record<string, string> = {
       </div>
     </div>
 
-    <!-- Step 8 -->
+    <!-- Step 9: 预览 + 生成 -->
     <div v-if="currentStep === 9" class="card lg">
       <h2>预览 + 生成</h2>
-      <!-- target 已在 Step 1 勾选;这里只读展示一下"会产出哪些平台",不让改。
-           想改回去 Step 1。 -->
+      <!-- target 已在 Step 2 勾选;这里只读展示一下"会产出哪些平台",不让改。
+           想改回去 Step 2(机器人身份)那一步。 -->
       <div class="target-readonly-row">
         <span class="target-readonly-label">本次部署目标:</span>
         <span
@@ -8256,7 +8256,7 @@ const configTypeDescriptions: Record<string, string> = {
           class="target-readonly-chip"
         >{{ targetLabels[t] }}</span>
         <span v-if="!anyTargetSelected" class="error-text">
-          Step 1 没勾选任何部署目标,无法生成产物
+          Step 2 没勾选任何部署目标,无法生成产物
         </span>
       </div>
       <div class="yaml-preview">

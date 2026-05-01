@@ -1223,17 +1223,34 @@ function addServiceName(r: RepoItem, idx: number) {
   svcAddInputs[idx] = ''
 }
 
-// branchOptionsFor: 给分支 <select> 提供选项列表。
-//   - 扫到了真实分支(repoBranchesMap[r.name]) → 用那组
-//   - 没扫到(首次进入 / 用户手填的老 draft) → 只显示当前已选值,回落到 text input
+// branchOptionsFor: 给分支 <select> 提供选项列表。优先级:
+//   1. 扫到的真实分支(repoBranchesMap[r.name])—— 本地已 clone 走 git for-each-ref
+//   2. yaml env_branches 的 unique values —— 跨机器导入 + remote 模式没本地仓库时,
+//      至少把同事 yaml 里声明过的分支当作可选项,无需 clone 就能选 / 确认
+//   3. 都没有 —— 只显示当前已选值,模板会回落到 text input(给用户手敲)
 // 当前值不在列表里时(用户手改过 yaml),先把当前值插到最前,保证下拉也能选回原值。
 function branchOptionsFor(r: RepoItem, currentValue: string): string[] {
   const scanned = repoBranchesMap.value[r.name] || []
-  if (scanned.length === 0) return currentValue ? [currentValue] : []
-  if (currentValue && !scanned.includes(currentValue)) {
-    return [currentValue, ...scanned]
+  if (scanned.length > 0) {
+    if (currentValue && !scanned.includes(currentValue)) return [currentValue, ...scanned]
+    return scanned
   }
-  return scanned
+  // 真分支列表空 → fallback yaml 已声明的分支(去重 + 排序)
+  const yamlBranches = Array.from(new Set(
+    Object.values(r.env_branches || {}).filter(b => b && b.trim()),
+  )).sort()
+  if (yamlBranches.length > 0) {
+    if (currentValue && !yamlBranches.includes(currentValue)) return [currentValue, ...yamlBranches]
+    return yamlBranches
+  }
+  return currentValue ? [currentValue] : []
+}
+
+// branchHasOptions: 模板 v-if 判定是否走 <select>(否则 <input>)。
+// 跟 branchOptionsFor 同步:扫到真分支 ✓,或 yaml env_branches 有声明 ✓
+function branchHasOptions(r: RepoItem): boolean {
+  if ((repoBranchesMap.value[r.name] || []).length > 0) return true
+  return Object.values(r.env_branches || {}).some(b => b && b.trim())
 }
 
 function setRepoSource(r: RepoItem, src: 'local' | 'remote') {
@@ -6967,6 +6984,9 @@ const configTypeDescriptions: Record<string, string> = {
             <span v-if="repoBranchesMap[repo.name]?.length" class="field-hint">
               — ✓ 从 {{ repoBranchesMap[repo.name]!.length }} 个真实分支里挑(可改)
             </span>
+            <span v-else-if="branchHasOptions(repo)" class="field-hint">
+              — yaml 里声明的分支(本地未 clone,无法列全量真实分支;clone 完会刷新)
+            </span>
             <span v-else class="field-hint">(扫一下自动映射)</span>
           </label>
           <div class="branch-select-grid">
@@ -6974,7 +6994,7 @@ const configTypeDescriptions: Record<string, string> = {
               <span class="branch-env">{{ env.id || '?' }}</span>
               <span class="branch-arrow">→</span>
               <select
-                v-if="repoBranchesMap[repo.name]?.length"
+                v-if="branchHasOptions(repo)"
                 v-model="repo.env_branches[env.id]"
                 class="branch-select"
               >

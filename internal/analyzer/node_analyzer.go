@@ -55,13 +55,13 @@ func (n nodeAnalyzer) Analyze(repoPath string, includePaths []string) (*RepoAnal
 		ra.ServiceNames = append(ra.ServiceNames, pkg.Name)
 	}
 
-	// 框架识别
+	// 框架识别 → Notes(信息性发现,非异常)
 	framework, buildTool := detectFrontendFramework(pkg)
 	if framework != "" {
-		ra.Warnings = append(ra.Warnings, "frontend_framework="+framework)
+		ra.Notes = append(ra.Notes, "frontend_framework="+framework)
 	}
 	if buildTool != "" {
-		ra.Warnings = append(ra.Warnings, "build_tool="+buildTool)
+		ra.Notes = append(ra.Notes, "build_tool="+buildTool)
 	}
 
 	// .env.* 扫描：提取 API URL + 配置中心变量
@@ -77,10 +77,10 @@ func (n nodeAnalyzer) Analyze(repoPath string, includePaths []string) (*RepoAnal
 		}
 		kv := parseDotEnv(string(envData))
 
-		// 提取前端 API URL 变量
+		// 提取前端 API URL 变量 → Notes(扫描事实,不是警告)
 		apiURLs := extractAPIURLs(kv, framework)
 		for _, u := range apiURLs {
-			ra.Warnings = append(ra.Warnings, "api_url["+rel+"]="+u)
+			ra.Notes = append(ra.Notes, "api_url["+rel+"]="+u)
 		}
 
 		// 如果有配置中心变量（极少数前端直连 Nacos/Apollo），也抽取

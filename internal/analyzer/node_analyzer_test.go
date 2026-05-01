@@ -17,32 +17,32 @@ func TestNodeAnalyzer_FakeRepo_FrameworkAndAPI(t *testing.T) {
 		t.Errorf("ServiceNames: got %v", ra.ServiceNames)
 	}
 
-	// 框架识别
+	// 框架识别(信息性发现 → Notes)
 	hasFramework := false
-	for _, w := range ra.Warnings {
+	for _, w := range ra.Notes {
 		if w == "frontend_framework=next" {
 			hasFramework = true
 		}
 	}
 	if !hasFramework {
-		t.Errorf("expected frontend_framework=next in warnings: %v", ra.Warnings)
+		t.Errorf("expected frontend_framework=next in notes: %v", ra.Notes)
 	}
 
-	// build tool
+	// build tool(信息性发现 → Notes)
 	hasBuildTool := false
-	for _, w := range ra.Warnings {
+	for _, w := range ra.Notes {
 		if w == "build_tool=next" {
 			hasBuildTool = true
 		}
 	}
 	if !hasBuildTool {
-		t.Errorf("expected build_tool=next in warnings: %v", ra.Warnings)
+		t.Errorf("expected build_tool=next in notes: %v", ra.Notes)
 	}
 
-	// API URL 提取
+	// API URL 提取(信息性发现 → Notes)
 	hasDevAPI := false
 	hasProdAPI := false
-	for _, w := range ra.Warnings {
+	for _, w := range ra.Notes {
 		if strings.Contains(w, "api-dev.shop.example.com") {
 			hasDevAPI = true
 		}
@@ -51,10 +51,10 @@ func TestNodeAnalyzer_FakeRepo_FrameworkAndAPI(t *testing.T) {
 		}
 	}
 	if !hasDevAPI {
-		t.Errorf("expected dev API URL in warnings: %v", ra.Warnings)
+		t.Errorf("expected dev API URL in notes: %v", ra.Notes)
 	}
 	if !hasProdAPI {
-		t.Errorf("expected prod API URL in warnings: %v", ra.Warnings)
+		t.Errorf("expected prod API URL in notes: %v", ra.Notes)
 	}
 }
 
@@ -192,12 +192,12 @@ NEXT_PUBLIC_API_URL=http://api.test.com
 		t.Errorf("expected 1 finding (nacos from .env), got %d", len(ra.Findings))
 	}
 	hasAPI := false
-	for _, w := range ra.Warnings {
+	for _, w := range ra.Notes {
 		if strings.Contains(w, "api.test.com") {
 			hasAPI = true
 		}
 	}
 	if !hasAPI {
-		t.Errorf("expected API URL in warnings: %v", ra.Warnings)
+		t.Errorf("expected API URL in notes: %v", ra.Notes)
 	}
 }

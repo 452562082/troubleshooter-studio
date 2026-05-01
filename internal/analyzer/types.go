@@ -84,6 +84,11 @@ type RepoAnalysis struct {
 	SchemaTables    []SchemaTable    `json:"schema_tables,omitempty"`
 	RoleHint        *RoleHint        `json:"role_hint,omitempty"` // 自动推断的角色 + 理由(用户可改)
 	Warnings        []string         `json:"warnings,omitempty"`
+	// Notes 是"信息性扫描发现",非错误也非警告 —— frontend_framework=next、
+	// api_url[apps/...]=https://... 这种"顺手扫到的资料"。区别于 Warnings:
+	//   Warnings  → "go.mod not found" / "scan failed" 这类需要用户注意的异常
+	//   Notes     → 扫到的事实陈述,UI 用中性色展示,不让用户误以为出错
+	Notes []string `json:"notes,omitempty"`
 	Verified        bool             `json:"verified"`
 }
 

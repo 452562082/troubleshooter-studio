@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted, nextTick } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onErrorCaptured, nextTick } from 'vue'
 
 // 给 App.vue 的 keep-alive `:exclude="['InitPage']"` 用,让本页不被缓存。
 // 跟 HomePage 的"清空重开"按钮配套:用户清掉 localStorage 后,InitPage 重 mount 取干净状态。
@@ -562,6 +562,14 @@ type RepoRole =
   | 'infra'        // 基础设施(k8s/terraform);不入图
   | 'docs'         // 文档;不入图
 
+// 仅这 4 类角色对应"业务服务",需要识别 service_names 喂给配置中心 / 数据层
+// 扫描;其它角色(frontend / common-lib / mobile / infra / docs)不是服务,不参与
+// 服务名提取 —— 扫了也是噪音(前端没 nacos key、infra 仓没 service ID),反而
+// 误导用户后续步骤。
+function isServiceRole(role?: string): boolean {
+  return role === 'backend' || role === 'gateway' || role === 'middleware' || role === 'admin'
+}
+
 interface RepoItem {
   name: string
   url: string
@@ -607,9 +615,19 @@ interface RepoItem {
   // 让用户看到"扫描推荐什么 role + 理由",方便决定是否改默认值。不进 yaml。
   _roleHint?: { role: string, reason: string }
   _roleHintLoading?: boolean
+  // _serviceEntries:服务名 → 仓库内入口子目录(相对仓库根)。
+  // 给同仓多服务场景(cmd/<x>/main.go / services/<x>/ / workspaces / pom-modules)用 ——
+  // 这些不是 git submodule,不该拆成独立 repo,只把名字塞进 service_names + 入口路径
+  // 单独记录;routing skill 据此把 service → 源码入口对应起来。
+  // gitmodules 拆出的独立 repo 不用本字段(它们各自占一行,有自己的 sub_path / 本地路径)。
+  _serviceEntries?: Record<string, string>
+  // 用户已经合并过 monorepo hints 到 service_names,banner 应隐藏不再追问。
+  _submoduleHintsDismissed?: boolean
   // _submoduleHints:扫描后探测到的"这是 monorepo,有 N 个子模块"列表。
-  // 非空且长度 > 1 时,UI 在仓库 header 下方弹"一键拆成 N 行"banner。
-  // 用户点拆分后调 splitMonorepo,把当前 repo 替换成 N 个 RepoItem。
+  // 非空且长度 > 1 时,UI 在仓库 header 下方弹横幅:
+  //   - 全部来自 .gitmodules(每个 hint 都有 url)→ "拆成 N 个独立仓库"按钮
+  //   - 其余路径(workspaces / cmd-multi / services-dir / pom-modules)→ "合并为本仓 N 个服务名"按钮
+  // 真正拆 / 合并由 splitMonorepo / mergeMonorepoIntoServices 决定。
   // url 字段非空时(.gitmodules 路径)→ 当独立仓库展开;空 → 当同仓子目录展开。
   _submoduleHints?: { name: string, sub_path: string, stack: string, role: string, reason: string, url?: string }[]
   // _submoduleSelection:per-hint 复选框状态(默认全选)。用户在 banner 里能去掉
@@ -759,6 +777,20 @@ async function refreshRoleHint(r: RepoItem) {
 function applyRoleHint(r: RepoItem) {
   if (r._roleHint?.role) {
     r.role = r._roleHint.role as RepoRole
+    syncServiceNamesWithRole(r)
+  }
+}
+
+// syncServiceNamesWithRole role 改变后,按"是不是业务服务"调 service_names:
+//   service → 留着已有值;空时回填 repo.name 兜底
+//   非 service → 清空(避免污染后续配置中心 / 数据层 / k8s_runtime 扫描)
+function syncServiceNamesWithRole(r: RepoItem) {
+  if (isServiceRole(r.role)) {
+    if (!r.service_names.trim() && r.name) {
+      r.service_names = r.name
+    }
+  } else {
+    r.service_names = ''
   }
 }
 
@@ -815,10 +847,76 @@ async function refreshSubmoduleHints(r: RepoItem) {
     const sel: Record<string, boolean> = {}
     for (const h of hints) sel[h.sub_path] = true
     r._submoduleSelection = sel
+    // 重新扫了一次 → 老的"合并状态"作废,banner 重新出现给用户决定
+    r._submoduleHintsDismissed = false
   } catch {
     r._submoduleHints = []
     r._submoduleSelection = {}
   }
+}
+
+// isGitSubmodulesHints 一组 hints 是不是都来自 .gitmodules ——
+// 后端 DetectSubmodules 命中 .gitmodules 路径时每条 hint 都带 url,其它路径(workspaces /
+// cmd-multi / services-dir / pom-modules)hint.url 全空。简单按 url 区分两类。
+function isGitSubmodulesHints(hints?: Array<{ url?: string }>): boolean {
+  if (!hints || hints.length === 0) return false
+  return hints.every(h => !!h.url)
+}
+
+// qualifyServiceName 把 cmd 入口名加 `<repo>-` 前缀消歧义。
+//
+// 背景:Go 项目惯例 cmd/<x>/main.go 里 <x> 全是泛词(grpc-server / queue /
+// scheduler / worker / consumer / migrate / cron 等)。多个仓库各有同名入口,
+// 直接拿入口名当 service_names 会导致跨仓服务名重叠 —— 排障 routing /
+// service-dependency-map / config-map 都靠 service 名做 key,撞名全炸。
+//
+// 规则:
+//   - entry === repo  → 不重复加前缀(如 repo=order, cmd/order/main.go → order)
+//   - entry 已含 repo 名作前/后缀 → 已经消过歧,直接用
+//   - 其它 → `<repo>-<entry>`(grpc-server in interaction → interaction-grpc-server)
+//
+// .gitmodules 那条路径不走本函数(每个 submodule 是独立 git repo,展开成独立 repos[] 行);
+// node workspaces 的 hint.name 来自 package.json:name,通常已带 scope/独特命名,但仍走
+// 同一规则做兜底 —— 避免万一 fallback 到目录名(如纯 "admin")时撞名。
+function qualifyServiceName(repoName: string, entryName: string): string {
+  const repo = (repoName || '').trim()
+  const ent = (entryName || '').trim()
+  if (!repo) return ent
+  if (!ent) return repo
+  if (ent === repo) return ent
+  if (
+    ent.startsWith(repo + '-') || ent.startsWith(repo + '_') ||
+    ent.endsWith('-' + repo) || ent.endsWith('_' + repo)
+  ) {
+    return ent
+  }
+  return `${repo}-${ent}`
+}
+
+// mergeMonorepoIntoServices 把命中的"同仓多服务"hints 合并填进当前 repo 的 service_names,
+// 不拆成多行(因为它们本来就是一个 git 仓库,只是有多个入口)。
+// 同时把每个服务的入口子目录记录到 _serviceEntries,UI 上让用户看到映射,yaml emit 时也带上。
+// 用户点 banner 上的"合并到服务名"按钮调这个。
+function mergeMonorepoIntoServices(parentIdx: number) {
+  const parent = repos[parentIdx]
+  if (!parent || !parent._submoduleHints || parent._submoduleHints.length === 0) return
+  const sel = parent._submoduleSelection || {}
+  const picked = parent._submoduleHints.filter(h => sel[h.sub_path] !== false)
+  if (picked.length === 0) return
+  // 服务名:扫到的 N 个入口,带 `<repo>-` 前缀消歧义(去重保序)。仓库整体 role 保留
+  // 用户已选(默认 backend),不被入口的 role 推断覆盖 —— 入口的 role 只在 banner 上展示。
+  const names: string[] = []
+  parent._serviceEntries = {}
+  for (const h of picked) {
+    const qn = qualifyServiceName(parent.name, h.name)
+    if (!qn) continue
+    if (!names.includes(qn)) names.push(qn)
+    parent._serviceEntries[qn] = h.sub_path
+  }
+  parent.service_names = names.join(', ')
+  // 合并完关掉 banner —— 除非用户切目录重扫,否则不再追问。保留 hints 数据兜底,
+  // _submoduleHintsDismissed=true 让模板隐藏面板。
+  parent._submoduleHintsDismissed = true
 }
 
 // splitMonorepo 把当前 RepoItem 替换成 N 个 (同 url + 同本地路径,各自 sub_path) 条目。
@@ -848,9 +946,10 @@ function splitMonorepo(parentIdx: number) {
       stack: h.stack || parent.stack || 'go',
       role: (h.role || 'backend') as RepoRole,
       sub_path: isIndependentRepo ? '' : h.sub_path,
-      // service_names 默认 = 子模块名。"一个仓 / 一个子模块 = 一个服务"占 95%,留空让用户填
-      // 反而毫无信息量。需要细分时(monorepo 单子目录里多服务)再点 + 补。
-      service_names: h.name,
+      // service_names 默认 = 子模块名,但只对"业务服务"角色赋值;frontend / common-lib /
+      // mobile / infra / docs 这类不算服务,留空更准确(否则会被后续配置中心 / 数据层
+      // 扫描当成 service ID 误用)。
+      service_names: isServiceRole(h.role) ? h.name : '',
       env_branches: { ...branches },
       config_source: parent.config_source,
       _source: parent._source,
@@ -1251,16 +1350,23 @@ async function scanSingleRepo(r: RepoItem) {
       return
     }
 
-    // service_names 在 report.repos[i] 里,per_repo 只有 count。
-    // 只接 stack —— framework 启发式误报率高,不自动填(用户想改可在 yaml 里手改)。
+    // service_names 只对"业务服务"类角色(backend / gateway / middleware / admin)
+    // 反填 —— frontend / common-lib / mobile / infra / docs 这类不是服务,反填上服务
+    // 名只会污染 routing skill 和后续的配置中心 / 数据层扫描。role 还没识别出来时(空)
+    // 也按"业务服务"处理,等 refreshRoleHint 跑完再说。
     const rpt = (res.report?.repos || []).find(rr => rr.name === r.name)
-    if (rpt?.service_names?.length) {
-      r.service_names = rpt.service_names.join(', ')
-    } else if (!r.service_names.trim() && r.name) {
-      // analyzer 没扫出 service_names(配置 key 不显式 / 单服务仓 / monorepo 子目录 等场景),
-      // 默认就用 repo.name 当服务名。"一个仓 = 一个服务"是 95% 用户的预期。
-      // 用户想覆盖直接改 chip;routing skill 用这个 key 命中 config-map / k8s_runtime.service_map。
-      r.service_names = r.name
+    if (isServiceRole(r.role)) {
+      if (rpt?.service_names?.length) {
+        r.service_names = rpt.service_names.join(', ')
+      } else if (!r.service_names.trim() && r.name) {
+        // analyzer 没扫出 service_names(配置 key 不显式 / 单服务仓 / monorepo 子目录 等场景),
+        // 默认就用 repo.name 当服务名。"一个仓 = 一个服务"是 95% 用户的预期。
+        // 用户想覆盖直接改 chip;routing skill 用这个 key 命中 config-map / k8s_runtime.service_map。
+        r.service_names = r.name
+      }
+    } else {
+      // 非业务服务角色:即便 analyzer 扫到 service_names 也清掉(可能是误判)
+      r.service_names = ''
     }
     if (hit.detected_stack) r.stack = hit.detected_stack
     if (hit.branches?.length) {
@@ -1473,6 +1579,10 @@ async function runKuboardPreloadFromSource(sourceType: string, envID: string) {
     if (clusters.length === 0) {
       toast.info(`${envID}: 没拉到集群,看看账号在 Kuboard 里的权限`)
     } else {
+      // 顺手给本 env 下走 kuboard 源(主或副)的服务跑一次 auto-match,把 cluster/namespace/configmap
+      // 三级下拉自动填上 —— 跟 nacos autoFillSelections 行为对齐,免得用户每个服务手挑 3 次。
+      // 主源 vs 副源:这条入口走的是 sourceType,直接传它就行。
+      autoFillKuboardSelections(envID, sourceType)
       toast.success(`${envID}: 拉到 ${clusters.length} 个集群`)
     }
   } catch (e: any) {
@@ -1614,24 +1724,33 @@ async function loadK8sRtWorkloads(envID: string, cluster: string, ns: string) {
 }
 
 // 给本 env 下所有服务自动挑最匹配的 Deployment(不覆盖用户已经手动选过的)。
-// 匹配优先级:
-//   1) deployment 名 == 服务名
-//   2) deployment selector matchLabels.app == 服务名
-//   3) deployment selector matchLabels["app.kubernetes.io/name"] == 服务名
-//   4) deployment 名包含服务名(忽略大小写、忽略 -/_)
-//   5) 服务名包含 deployment 名(忽略大小写、忽略 -/_)
+// 匹配策略(由强到弱):
+//   1) deployment 名 == 服务名 / selector app=<服务名> 精确命中
+//   2) 候选退化(serviceMatchKeys)+ 段对齐前缀 + env 信号双约束 —— 适配 base-svc-dev / svc-dev 这类
+//   3) 候选退化 + 段对齐前缀(不含 env)
+//   4) 退化 + 边界中段命中(允许 base- / app- 前缀)
+//   5) 模糊兜底(归一化后双向 substring,老行为)
 function autoPickK8sRtWorkloads(envID: string, deployments: Array<{ name: string; selector: string }>) {
   if (deployments.length === 0) return
   const norm = (s: string) => s.toLowerCase().replace(/[-_]/g, '')
+  const envLower = envID.toLowerCase()
+  // boundaryHas 跟 loki / kuboard 一致:候选要么以 boundary 开头,要么以 -cand- / -cand 边界出现。
+  // 这样 deployment "base-admin-truss-dev" 能被候选 "admin-truss" 命中,但 "communityfeed-dev"
+  // 不会被候选 "community" 命中(community 没在 token 边界)。
+  const boundaryHas = (low: string, cand: string) =>
+    startsAtBoundary(low, cand) ||
+    low.includes('-' + cand + '-') || low.endsWith('-' + cand) ||
+    low.includes('_' + cand + '_') || low.endsWith('_' + cand)
   for (const svc of allServiceNames.value) {
     const sloc = ensureK8sRtSvcLoc(envID, svc)
     if (sloc.workload) continue // 用户已经手动选过,不动
     const svcLower = svc.toLowerCase()
     const svcNorm = norm(svc)
+    const candidates = serviceMatchKeys(svc)
     let pick: { name: string; selector: string } | undefined
-    // 1) 精确同名
+    // 1a) 精确同名
     pick = deployments.find(d => d.name === svc)
-    // 2) selector 标签命中
+    // 1b) selector 标签命中(app= / app.kubernetes.io/name=)
     if (!pick) {
       pick = deployments.find(d => {
         const sel = d.selector
@@ -1645,7 +1764,26 @@ function autoPickK8sRtWorkloads(envID: string, deployments: Array<{ name: string
         return false
       })
     }
-    // 3) 模糊包含(归一化后)
+    // 2) 候选退化 + 边界对齐 + 含 env —— 同 nacos / loki 套路。覆盖 community-grpc-server →
+    //    `community-dev` / `base-community-dev`(env 信号兜底,避免误中跨 env 同名 deployment)。
+    if (!pick) {
+      for (const cand of candidates) {
+        const m = deployments.find(d => {
+          const dl = d.name.toLowerCase()
+          return boundaryHas(dl, cand) && dl.includes(envLower)
+        })
+        if (m) { pick = m; break }
+      }
+    }
+    // 3) 候选退化 + 边界对齐(不含 env)—— 命名空间已经按 env 分时(base-dev / base-prod),
+    //    deployment 名常省略 env 后缀,此 pass 兜底。
+    if (!pick) {
+      for (const cand of candidates) {
+        const m = deployments.find(d => boundaryHas(d.name.toLowerCase(), cand))
+        if (m) { pick = m; break }
+      }
+    }
+    // 4) 模糊兜底:归一化后双向 substring(老行为,接非典型命名)
     if (!pick) pick = deployments.find(d => norm(d.name).includes(svcNorm))
     if (!pick) pick = deployments.find(d => svcNorm.includes(norm(d.name)))
     if (pick) {
@@ -2030,19 +2168,128 @@ function autoMatchNamespace(envID: string, list: CCHubNamespace[]): string {
 
 // 自动匹配 service → dataId:给定环境 + 服务名,在该 namespace 下的 entries 里
 // 找 locator 含服务名的;优先同时含 env 名。
+// serviceMatchKeys 给一个服务名生成"由具体到泛化"的候选键序列,用于 dataId 匹配。
+// 例:
+//   community-grpc-server → [community-grpc-server, community-grpc, community]
+//   api-truss             → [api-truss, api]
+//   order                 → [order]
+//
+// 背景:wizard 给同仓多入口加了 `<repo>-` 前缀做命名消歧(避免跨仓 cmd/grpc-server 撞名),
+// 但 nacos / apollo 的 dataId 经常只用 `<repo>` 这一级(`community-test.yaml`),
+// 不会带 cmd entry。如果死按完整服务名找,带前缀的 4 个 *-grpc-server 全部匹不到。
+// 退化策略:从最右段开始逐段砍,试更短的前缀,直到命中或剩 1 段。
+function serviceMatchKeys(svc: string): string[] {
+  const parts = svc.toLowerCase().split('-').filter(Boolean)
+  const out: string[] = []
+  for (let i = parts.length; i >= 1; i--) {
+    out.push(parts.slice(0, i).join('-'))
+  }
+  return out
+}
+
+// startsAtBoundary 段对齐"开头"判定:locator 等于 cand,或 locator 以 cand + 分隔符开头(- / _ / .)。
+// 这样 "community" 不会误命中 "communityfeed-test.yaml",但能命中 "community-test.yaml"。
+// 抽出来供 nacos / kuboard / 其它源的 auto-match 共享。
+function startsAtBoundary(loc: string, cand: string): boolean {
+  return loc === cand ||
+    loc.startsWith(cand + '-') ||
+    loc.startsWith(cand + '.') ||
+    loc.startsWith(cand + '_')
+}
+
 function autoMatchDataID(envID: string, svc: string, nsID: string): { dataId: string, group: string } {
   const entries = entriesForNamespace(envID, nsID)
-  const svcLower = svc.toLowerCase()
+  if (entries.length === 0) return { dataId: '', group: '' }
+  const candidates = serviceMatchKeys(svc)
   const envLower = envID.toLowerCase()
-  // 优先同时含 service + env
+
+  // Pass 1:locator 段对齐前缀 + 含 env 关键字 —— 最强信号(典型 nacos 命名 <service>-<env>.yaml)
+  for (const cand of candidates) {
+    const hit = entries.find(e => {
+      const loc = e.locator.toLowerCase()
+      return startsAtBoundary(loc, cand) && loc.includes(envLower)
+    })
+    if (hit) return { dataId: hit.locator, group: hit.group || '' }
+  }
+  // Pass 2:locator 段对齐前缀(不要求含 env)—— 适配 <service>.yaml 共享配置
+  for (const cand of candidates) {
+    const hit = entries.find(e => startsAtBoundary(e.locator.toLowerCase(), cand))
+    if (hit) return { dataId: hit.locator, group: hit.group || '' }
+  }
+  // Pass 3:遗留 fuzzy 兜底(完整服务名 substring)—— 老行为,接非常规命名
+  const svcLower = svc.toLowerCase()
   let hit = entries.find(e => {
     const loc = e.locator.toLowerCase()
     return loc.includes(svcLower) && loc.includes(envLower)
   })
-  // 退化:仅含 service
   if (!hit) hit = entries.find(e => e.locator.toLowerCase().includes(svcLower))
   if (hit) return { dataId: hit.locator, group: hit.group || '' }
   return { dataId: '', group: '' }
+}
+
+// autoMatchKuboardLocation 给 kuboard 源的服务找最匹配的 cluster/namespace/configmap。
+// 跟 autoMatchDataID 同一套退化策略:serviceMatchKeys 退化候选 + startsAtBoundary 段对齐 + 3-pass。
+// 返回 null 表示没找到,UI 保持空让用户手挑。
+function autoMatchKuboardLocation(envID: string, svc: string): { cluster: string, namespace: string, configmap: string } | null {
+  const state = kuboardStateByEnv[envID]
+  if (!state || state.status !== 'ok') return null
+  const candidates = serviceMatchKeys(svc)
+  const envLower = envID.toLowerCase()
+  // 把所有 cluster→namespace→configmap 三联拍平,方便扫描;按出现顺序保留(首个命中赢)。
+  const flat: Array<{ cluster: string, namespace: string, configmap: string }> = []
+  for (const c of state.clusters) {
+    for (const n of c.namespaces) {
+      for (const cm of n.configmaps) {
+        flat.push({ cluster: c.name, namespace: n.name, configmap: cm })
+      }
+    }
+  }
+  if (flat.length === 0) return null
+  // Pass 1:configmap 段对齐前缀 + (configmap 含 env 或 namespace 含 env)—— 最强信号
+  for (const cand of candidates) {
+    const hit = flat.find(x => {
+      const cmL = x.configmap.toLowerCase()
+      return startsAtBoundary(cmL, cand) && (cmL.includes(envLower) || x.namespace.toLowerCase().includes(envLower))
+    })
+    if (hit) return hit
+  }
+  // Pass 2:configmap 段对齐前缀(不要求含 env)—— 跨集群共享或 env 体现在 namespace
+  for (const cand of candidates) {
+    const hit = flat.find(x => startsAtBoundary(x.configmap.toLowerCase(), cand))
+    if (hit) return hit
+  }
+  // Pass 3:fuzzy 兜底(完整服务名 substring)
+  const svcLower = svc.toLowerCase()
+  let hit = flat.find(x => {
+    const cmL = x.configmap.toLowerCase()
+    return cmL.includes(svcLower) && (cmL.includes(envLower) || x.namespace.toLowerCase().includes(envLower))
+  })
+  if (!hit) hit = flat.find(x => x.configmap.toLowerCase().includes(svcLower))
+  return hit || null
+}
+
+// autoFillKuboardSelections 给某个 env 的所有"以 kuboard 为源的服务"自动填三联映射。
+// sourceType 决定从哪条服务源筛(主源走 configCenterType,副源走传入值,如 'kuboard')。
+// 行为跟 autoFillSelections 对齐:已有用户选择的格子不覆盖,只填空的。
+function autoFillKuboardSelections(envID: string, sourceType: string = 'kuboard') {
+  const state = kuboardStateByEnv[envID]
+  if (!state || state.status !== 'ok') return
+  for (const svc of allServiceNames.value) {
+    if (getServiceSource(svc) !== sourceType) continue
+    const k = svcKey(envID, svc)
+    const cur = kuboardSvcMap[k]
+    if (cur && cur.cluster && cur.namespace && cur.configmap) continue // 三联齐了 → 不动
+    const hit = autoMatchKuboardLocation(envID, svc)
+    if (!hit) continue
+    if (!cur) {
+      kuboardSvcMap[k] = { cluster: hit.cluster, namespace: hit.namespace, configmap: hit.configmap }
+    } else {
+      // 部分填:只补空字段,保留用户已挑的(如已选 cluster 想换 namespace)
+      if (!cur.cluster) cur.cluster = hit.cluster
+      if (!cur.namespace) cur.namespace = hit.namespace
+      if (!cur.configmap) cur.configmap = hit.configmap
+    }
+  }
 }
 
 // 预加载成功后触发一次:帮用户把 namespace + 每个服务的 dataId 猜一遍 —— 只填还没填的,
@@ -2564,6 +2811,10 @@ interface LokiMappingPerEnv {
   serviceLabelValues: string[]
   envValue: string
   serviceValues: Record<string, string>
+  // serviceMatchTried[svc] = true 表示 auto-match 已经跑过这个服务但没找到候选,
+  // UI 据此区分"未触发自动匹配(默认空)"vs"匹配过但没找到(应该提示用户)"。
+  // 用户手挑后 serviceValues[svc] 非空,UI 自然不再显示"未匹配"提示。
+  serviceMatchTried?: Record<string, boolean>
 }
 function makeEmptyLokiMappingPerEnv(): LokiMappingPerEnv {
   return {
@@ -2572,6 +2823,7 @@ function makeEmptyLokiMappingPerEnv(): LokiMappingPerEnv {
     envLabelKey: '', serviceLabelKey: '',
     envLabelValues: [], serviceLabelValues: [],
     envValue: '', serviceValues: {},
+    serviceMatchTried: {},
   }
 }
 const lokiMappingByEnv = reactive<Record<string, LokiMappingPerEnv>>(
@@ -2794,11 +3046,51 @@ function autoMatchLokiMapping(envID: string) {
     const hit = lm.envLabelValues.find(v => v.toLowerCase().includes(lower))
     if (hit) lm.envValue = hit
   }
+  // 服务 label 值匹配:跟 nacos / kuboard 同套退化策略 ——
+  // serviceMatchKeys 生成 [community-grpc-server, community-grpc, community] 候选,
+  // 段对齐前缀 + env 信号优先,逐级 fallback。loki app 标签常见命名:
+  //   <service>-<env>             如 community-scheduler-dev
+  //   base-<service>-<env>        如 base-admin-truss-dev
+  //   <repo>-<env>                如 community-dev(没区分 cmd entry 时)
+  // env 信号比 nacos 更强(loki 标签几乎一定带 env 后缀),所以 Pass 1 require env match。
+  const envLower = envID.toLowerCase()
+  const lmValuesLower = lm.serviceLabelValues.map(v => ({ raw: v, low: v.toLowerCase() }))
+  // boundaryWith:label 值要么以 cand 开头、要么含 -cand- / -cand 边界(允许前缀加 base- / app- 这种)。
+  // loki app 标签常有 base-/app- 前缀,纯 startsAtBoundary 太严会漏 base-admin-truss-dev → admin-truss。
+  const boundaryHas = (low: string, cand: string): boolean => {
+    if (startsAtBoundary(low, cand)) return true
+    return low.includes('-' + cand + '-') || low.endsWith('-' + cand) || low.includes('_' + cand + '_') || low.endsWith('_' + cand)
+  }
   for (const svc of allServiceNames.value) {
-    if (lm.serviceValues[svc]) continue
-    const sLower = svc.toLowerCase()
-    const hit = lm.serviceLabelValues.find(v => v.toLowerCase().includes(sLower))
-    if (hit) lm.serviceValues[svc] = hit
+    if (lm.serviceValues[svc]) continue // 已选(真实标签值)→ 不覆盖
+    const candidates = serviceMatchKeys(svc)
+    let hit: string | undefined
+    // Pass 1:候选 boundary + 含 env
+    for (const cand of candidates) {
+      const m = lmValuesLower.find(v => boundaryHas(v.low, cand) && v.low.includes(envLower))
+      if (m) { hit = m.raw; break }
+    }
+    // Pass 2:候选 boundary(不含 env)
+    if (!hit) {
+      for (const cand of candidates) {
+        const m = lmValuesLower.find(v => boundaryHas(v.low, cand))
+        if (m) { hit = m.raw; break }
+      }
+    }
+    // Pass 3:fuzzy 完整服务名 substring
+    if (!hit) {
+      const sLower = svc.toLowerCase()
+      const m = lmValuesLower.find(v => v.low.includes(sLower) && v.low.includes(envLower))
+        || lmValuesLower.find(v => v.low.includes(sLower))
+      if (m) hit = m.raw
+    }
+    if (hit) {
+      lm.serviceValues[svc] = hit
+    } else {
+      // 跑过没找到 → 标记给 UI 显示"未匹配"提示,跟"还没跑"区分开
+      if (!lm.serviceMatchTried) lm.serviceMatchTried = {}
+      lm.serviceMatchTried[svc] = true
+    }
   }
 }
 
@@ -2806,6 +3098,7 @@ async function onEnvLabelKeyChanged(envID: string, newKey: string) {
   const lm = getLokiMapping(envID)
   lm.envLabelKey = newKey
   lm.envValue = ''
+  lm.serviceMatchTried = {} // 切 envLabelKey 后重新匹配,清掉老 tried 标记
   await loadEnvLabelValues(envID)
   autoMatchLokiMapping(envID)
 }
@@ -2813,6 +3106,7 @@ async function onServiceLabelKeyChanged(envID: string, newKey: string) {
   const lm = getLokiMapping(envID)
   lm.serviceLabelKey = newKey
   lm.serviceValues = {}
+  lm.serviceMatchTried = {}
   await loadServiceLabelValues(envID)
   autoMatchLokiMapping(envID)
 }
@@ -4170,6 +4464,10 @@ async function applyImport() {
         // 有本地路径就默认进 'local' 模式;否则保持远程 clone 模式
         _source: localPath ? 'local' : 'remote',
         _localPath: localPath,
+        // service_entries:同仓多服务的入口路径,反填回 _serviceEntries
+        _serviceEntries: (typeof r?.service_entries === 'object' && r?.service_entries) ? { ...r.service_entries } : undefined,
+        // 已经是反填回来的(用户上次合并过),banner 默认收起,有需要再点"改"
+        _submoduleHintsDismissed: typeof r?.service_entries === 'object' && r?.service_entries && Object.keys(r.service_entries).length > 0,
       }
     }))
   }
@@ -4501,6 +4799,8 @@ function emitLokiLabelMapping(lines: string[], indent: string): void {
     const svcLines: string[] = []
     for (const svc of allServiceNames.value) {
       const v = (lm.serviceValues || {})[svc]
+      // 空值 = "无 / 不进 loki":不写 service 块进 service_map ——
+      // routing skill 拿不到该服务的 label 值就跳过 loki 查询。
       if (!v) continue
       svcLines.push(`${indent}      ${yamlStr(svc)}:`)
       svcLines.push(`${indent}        ${lm.serviceLabelKey}: ${yamlStr(v)}`)
@@ -4599,6 +4899,15 @@ function generateYAML(): string {
       lines.push('    service_names:       # 本 repo 实际部署出来的 service 名（config-map 以此为 key）')
       for (const sn of repo.service_names.split(',').map(s => s.trim()).filter(Boolean)) {
         lines.push(`      - ${sn}`)
+      }
+    }
+    // service_entries:同仓多服务时记录每个服务的入口子目录(routing skill 据此 grep 代码)。
+    // 只在 _serviceEntries 非空时 emit;独立 repo / 单服务仓不写。
+    if (repo._serviceEntries && Object.keys(repo._serviceEntries).length > 0) {
+      lines.push('    service_entries:     # 同仓多服务时,每个服务在仓库内的入口子目录')
+      for (const [name, entry] of Object.entries(repo._serviceEntries)) {
+        if (!name || !entry) continue
+        lines.push(`      ${name}: ${entry}`)
       }
     }
     const branchEntries = Object.entries(repo.env_branches).filter(([, v]) => v)
@@ -5005,6 +5314,16 @@ function labelForErrorKey(k: string): string {
 
 // 当前步骤的错误集合:computed,字段改了立即重算
 const currentStepErrors = computed<Set<string>>(() => {
+  try {
+    return computeStepErrors()
+  } catch (e) {
+    // 校验内部抛错(罕见,通常是某个 reactive 字段值异常)→ 返回空集合,避免阻塞用户。
+    // 错误进日志,模板上让用户能继续(自由前进总比白屏强)。
+    try { pushLog('cchub', 'error', `currentStepErrors 异常: ${String((e as any)?.message || e)}`) } catch {}
+    return new Set<string>()
+  }
+})
+function computeStepErrors(): Set<string> {
   const errs = new Set<string>()
   const step = currentStep.value
   if (step === 1) {
@@ -5142,7 +5461,7 @@ const currentStepErrors = computed<Set<string>>(() => {
     }
   }
   return errs
-})
+}
 
 // 能不能点"下一步":当前步无 error + 不是最后一步
 const canGoNext = computed(() => currentStepErrors.value.size === 0 && currentStep.value < totalSteps)
@@ -5165,26 +5484,82 @@ function hasError(field: string): boolean {
 
 // nextStep / goToStep 不再内联调 generateYAML —— 已被 watch(currentStep) 接管(见上面),
 // 那个 watch 带 try/catch 兜底,不会让一次抛错把整个 InitPage 渲染挂掉(老路径会白屏)。
+//
+// 越界保护:无论怎么进入,都把 currentStep 钳在 [1, totalSteps] —— 防止异常状态(比如 saved
+// draft 损坏)让 v-if 全部 false 导致内容区白屏。
+function clampCurrentStep() {
+  if (typeof currentStep.value !== 'number' || isNaN(currentStep.value)) {
+    currentStep.value = 1
+    return
+  }
+  if (currentStep.value < 1) currentStep.value = 1
+  else if (currentStep.value > totalSteps) currentStep.value = totalSteps
+}
+
 function nextStep() {
-  if (!canGoNext.value) return
-  if (currentStep.value < totalSteps) {
-    currentStep.value++
+  try {
+    if (!canGoNext.value) return
+    if (currentStep.value < totalSteps) {
+      currentStep.value++
+    }
+    clampCurrentStep()
+  } catch (e) {
+    pushLog('cchub', 'error', `nextStep 失败: ${String((e as any)?.message || e)}`)
+    clampCurrentStep()
   }
 }
 
 function prevStep() {
-  // 回退不校验,自由退
-  if (currentStep.value > 1) currentStep.value--
+  try {
+    // 回退不校验,自由退
+    if (currentStep.value > 1) currentStep.value--
+    clampCurrentStep()
+  } catch (e) {
+    pushLog('cchub', 'error', `prevStep 失败: ${String((e as any)?.message || e)}`)
+    clampCurrentStep()
+  }
 }
 
 function goToStep(step: number) {
-  // 倒退随意;前进必须当前步无 error
-  if (step < currentStep.value) {
-    currentStep.value = step
-  } else if (step > currentStep.value && canGoNext.value) {
-    // 允许跳多步,但中间每步都得满足(这里只检查当前步;严谨版可以逐步 validate,先简单化)
-    currentStep.value = step
+  try {
+    // 倒退随意;前进必须当前步无 error
+    if (step < currentStep.value) {
+      currentStep.value = step
+    } else if (step > currentStep.value && canGoNext.value) {
+      // 允许跳多步,但中间每步都得满足(这里只检查当前步;严谨版可以逐步 validate,先简单化)
+      currentStep.value = step
+    }
+    clampCurrentStep()
+  } catch (e) {
+    pushLog('cchub', 'error', `goToStep(${step}) 失败: ${String((e as any)?.message || e)}`)
+    clampCurrentStep()
   }
+}
+
+// 防白屏兜底:子组件 / step 模板渲染抛错时,Vue 默认把整个 InitPage 子树清空,
+// 用户只看见侧栏 + 一片白。捕获后展示明确错误 + 提供"回到 Step 1"按钮自救,
+// 同时把错误 push 到日志面板,便于事后排查。返回 false 阻止错误向上传播 unmount 父级。
+const renderError = ref<{ message: string, stack?: string, info?: string, step: number } | null>(null)
+onErrorCaptured((err: any, _vm, info) => {
+  const msg = String(err?.message || err)
+  console.error('[InitPage] render error captured:', err, 'info=', info)
+  renderError.value = {
+    message: msg,
+    stack: err?.stack ? String(err.stack).split('\n').slice(0, 8).join('\n') : undefined,
+    info: String(info || ''),
+    step: currentStep.value,
+  }
+  try { pushLog('cchub', 'error', `[InitPage step ${currentStep.value}] 渲染异常: ${msg}`) } catch {}
+  // 自动把 step 钳到合法范围,允许用户至少能看到下一次渲染
+  clampCurrentStep()
+  return false
+})
+function dismissRenderError() {
+  renderError.value = null
+}
+function recoverToStep1() {
+  renderError.value = null
+  currentStep.value = 1
 }
 
 // ── Step 7 actions ──
@@ -5529,6 +5904,19 @@ const configTypeDescriptions: Record<string, string> = {
 
 <template>
   <div class="init-page">
+    <!-- 渲染错误兜底:onErrorCaptured 抓到子组件 / step 模板抛错时,在向导顶部展示
+         明确的错误信息 + 自救按钮,而不是默认 Vue 行为(整页清空成白屏)。 -->
+    <div v-if="renderError" class="render-error-banner">
+      <div class="render-error-head">
+        ⚠ Step {{ renderError.step }} 渲染异常 — 已阻止白屏,可点下方按钮自救
+      </div>
+      <div class="render-error-msg">{{ renderError.message }}</div>
+      <pre v-if="renderError.stack" class="render-error-stack">{{ renderError.stack }}</pre>
+      <div class="render-error-actions">
+        <button type="button" class="btn" @click="recoverToStep1">↺ 回到 Step 1</button>
+        <button type="button" class="btn" @click="dismissRenderError">关闭(我知道了)</button>
+      </div>
+    </div>
     <!-- 顶部信息卡(标题 + 自动保存 + 简介 + 进度条)合并成一张 card,
          视觉风格跟下面 step 卡片一致(白底 + border + radius + padding),
          避免裸标题 + 裸 info-box + 裸进度条三段不齐的"散装"感。 -->
@@ -6245,7 +6633,7 @@ const configTypeDescriptions: Record<string, string> = {
              1 个       → 灰色提示(边缘情况)
              N>1        → 紫色 banner 列出每个子模块完整路径 + 一键拆分按钮 -->
         <div
-          v-if="hasRepoSource(repo) && repo._submoduleHints !== undefined"
+          v-if="hasRepoSource(repo) && repo._submoduleHints !== undefined && !repo._submoduleHintsDismissed"
           class="monorepo-banner"
           :class="{
             'monorepo-banner-mono': repo._submoduleHints.length > 1,
@@ -6256,14 +6644,16 @@ const configTypeDescriptions: Record<string, string> = {
             ✓ 检测结果:单服务仓库(整仓当一个服务处理,无需拆分)
           </div>
           <div v-else-if="repo._submoduleHints.length === 1" class="monorepo-banner-head warn">
-            ⚠ 仅检测到 1 个子模块,看着不像 monorepo(整仓当一个服务也行)
+            ⚠ 仅检测到 1 个入口,看着不像 monorepo(整仓当一个服务也行)
           </div>
-          <template v-else>
+          <template v-else-if="isGitSubmodulesHints(repo._submoduleHints)">
+            <!-- 分支 A:.gitmodules 路径 —— 每个 hint 都有自己的 git URL,真"独立 git repo + 子目录共置"
+                 这种才拆成独立条目;每行有自己的 url + 本地路径,后续配置中心 / 数据层映射独立。 -->
             <div class="monorepo-banner-head">
-              🔍 检测到 monorepo,共 {{ repo._submoduleHints.length }} 个子模块(默认全选;不想拆的取消勾):
+              🔍 检测到 .gitmodules 声明的 {{ repo._submoduleHints.length }} 个独立子模块(每个都是独立 git repo,默认全选):
             </div>
             <div class="monorepo-banner-hint">
-              💡 <strong>不点"拆分"按钮就不影响</strong> —— 如果你认为这是单服务仓库,直接在下方"服务名"里手填即可,本面板纯展示。
+              💡 <strong>不点"拆分"按钮就不影响</strong> —— 如果当成单仓处理,直接在下方"服务名"里手填即可。
             </div>
             <ul class="monorepo-banner-list">
               <li v-for="h in repo._submoduleHints" :key="h.sub_path">
@@ -6282,7 +6672,7 @@ const configTypeDescriptions: Record<string, string> = {
                     <div class="monorepo-row-path">
                       📂 <code>{{ submodulePathFor(repo, h.sub_path) }}</code>
                     </div>
-                    <div v-if="h.url" class="monorepo-row-url" :title="h.url">
+                    <div class="monorepo-row-url" :title="h.url">
                       🔗 <code>{{ h.url }}</code>
                       <span class="field-hint">(独立 git repo)</span>
                     </div>
@@ -6299,9 +6689,72 @@ const configTypeDescriptions: Record<string, string> = {
               :disabled="pickedSubmoduleCount(repo) === 0"
               @click="splitMonorepo(i)"
             >
-              ✂ 拆成 {{ pickedSubmoduleCount(repo) }} 个独立条目(各自 sub_path / stack / role 自动填好)
+              ✂ 拆成 {{ pickedSubmoduleCount(repo) }} 个独立仓库条目(各自 url / 本地路径 / role)
             </button>
           </template>
+          <template v-else>
+            <!-- 分支 B:同仓多入口(cmd/<x>/main.go / services/<x>/ / workspaces / pom-modules)
+                 这些**不是**独立 git repo,只是同一仓库下的多个服务入口 —— 不该拆成多条 repos[],
+                 而是合并到本仓的 service_names + 各自记录入口路径。 -->
+            <div class="monorepo-banner-head">
+              🔍 在本仓检测到 {{ repo._submoduleHints.length }} 个服务入口(同一 git 仓库,多服务模式):
+            </div>
+            <div class="monorepo-banner-hint">
+              💡 这些是<strong>同仓多服务</strong>(不是独立 git repo),建议合并到本仓的服务名列表 —— 每个服务自动加 <code>{{ repo.name || '&lt;repo&gt;' }}-</code> 前缀消歧义(避免跨仓重名,如 4 个仓都有 cmd/grpc-server 时撞成一团)。
+            </div>
+            <ul class="monorepo-banner-list">
+              <li v-for="h in repo._submoduleHints" :key="h.sub_path">
+                <label class="monorepo-row-check">
+                  <input
+                    type="checkbox"
+                    :checked="repo._submoduleSelection?.[h.sub_path] !== false"
+                    @change="toggleSubmodulePick(repo, h.sub_path, ($event.target as HTMLInputElement).checked)"
+                  />
+                  <div class="monorepo-row-content">
+                    <div class="monorepo-row-top">
+                      <strong>{{ qualifyServiceName(repo.name, h.name) }}</strong>
+                      <span v-if="qualifyServiceName(repo.name, h.name) !== h.name" class="field-hint">
+                        (原入口名:{{ h.name }})
+                      </span>
+                      <span class="monorepo-stack">{{ h.stack }}</span>
+                      <span class="monorepo-role">{{ h.role }}</span>
+                    </div>
+                    <div class="monorepo-row-path">
+                      📂 入口 <code>{{ submodulePathFor(repo, h.sub_path) }}</code>
+                    </div>
+                    <div class="monorepo-row-reason">
+                      <span class="field-hint">{{ h.reason }}</span>
+                    </div>
+                  </div>
+                </label>
+              </li>
+            </ul>
+            <button
+              type="button"
+              class="btn primary monorepo-split-btn"
+              :disabled="pickedSubmoduleCount(repo) === 0"
+              @click="mergeMonorepoIntoServices(i)"
+            >
+              ➕ 合并为本仓 {{ pickedSubmoduleCount(repo) }} 个服务名(自动加 <code>{{ repo.name || '&lt;repo&gt;' }}-</code> 前缀)
+            </button>
+          </template>
+        </div>
+
+        <!-- 已合并的"同仓多服务"展示 —— 用户合并完后这里露出 service → entry 映射作为提醒。
+             想重选时点"重新扫描"按钮就回到 banner 状态。 -->
+        <div
+          v-if="repo._serviceEntries && Object.keys(repo._serviceEntries).length > 0"
+          class="service-entries-display"
+        >
+          <div class="service-entries-head">
+            ✓ 本仓 {{ Object.keys(repo._serviceEntries).length }} 个服务的入口路径:
+            <button type="button" class="btn-link" @click="repo._submoduleHintsDismissed = false">改</button>
+          </div>
+          <ul class="service-entries-list">
+            <li v-for="(entry, name) in repo._serviceEntries" :key="name">
+              <strong>{{ name }}</strong> → <code>{{ entry }}</code>
+            </li>
+          </ul>
         </div>
 
         <!-- 已 split 的子模块行:把"父仓本地路径 + sub_path"拼出来明确显示给用户看 -->
@@ -6338,7 +6791,7 @@ const configTypeDescriptions: Record<string, string> = {
             角色
             <span class="field-hint">(影响 AI 排障时的依赖图分析方向)</span>
           </label>
-          <select v-model="repo.role" class="role-select">
+          <select v-model="repo.role" class="role-select" @change="syncServiceNamesWithRole(repo)">
             <option value="backend">后端服务 (backend) — 业务微服务,双向依赖图</option>
             <option value="frontend">前端 (frontend) — web app,只调下游不被调</option>
             <option value="gateway">网关 / BFF (gateway) — API 聚合层</option>
@@ -6375,8 +6828,10 @@ const configTypeDescriptions: Record<string, string> = {
         </div>
 
         <!-- 服务名:自动识别出 chip 列表,每个右上角 ✕ 可删。monorepo 常见多服务,
-             也支持用户"+" 手动补未识别到的。 -->
-        <div v-if="hasRepoSource(repo)" class="form-group">
+             也支持用户"+" 手动补未识别到的。
+             仅"业务服务"角色(backend / gateway / middleware / admin)显示这个块 ——
+             frontend / common-lib / mobile / infra / docs 不是服务,不需要服务名。 -->
+        <div v-if="hasRepoSource(repo) && isServiceRole(repo.role)" class="form-group">
           <label>
             服务名
             <span class="help-icon" title="config-map 以此为 key。扫描会自动识别(monorepo 列所有子模块);识别不全时点 + 手动补,不想要的点 ✕ 删。">?</span>
@@ -7351,7 +7806,7 @@ const configTypeDescriptions: Record<string, string> = {
                 >
                   <div class="cc-map-head">
                     <span class="cc-map-title">
-                      为每个服务挑对应的 Deployment(留空 = 该服务在本环境没上 K8s)
+                      服务 → Deployment 映射 <span class="field-hint">— 留空表示该服务未在本环境部署到 K8s,排障时跳过 pod / log / metric 查询</span>
                     </span>
                   </div>
                   <div class="cc-map-svc-list">
@@ -7368,10 +7823,10 @@ const configTypeDescriptions: Record<string, string> = {
                         style="min-width: 240px;"
                         @change="(e: any) => setK8sRtSvcWorkload(env.id, svc, e.target.value)"
                       >
-                        <option v-if="k8sRtWorkloadCache[k8sRtWorkloadKey(env.id, (k8sRuntimeEnvLoc[env.id] || {}).cluster || '', (k8sRuntimeEnvLoc[env.id] || {}).namespace || '')]?.status === 'loading'" value="">— 加载 Deployment 中… —</option>
-                        <option v-else-if="k8sRtWorkloadCache[k8sRtWorkloadKey(env.id, (k8sRuntimeEnvLoc[env.id] || {}).cluster || '', (k8sRuntimeEnvLoc[env.id] || {}).namespace || '')]?.status === 'error'" value="">— 加载失败,看日志 —</option>
-                        <option v-else-if="k8sRtWorkloadsFor(env.id, (k8sRuntimeEnvLoc[env.id] || {}).cluster || '', (k8sRuntimeEnvLoc[env.id] || {}).namespace || '').length === 0" value="">— ns 下没找到 Deployment —</option>
-                        <option v-else value="">— 选 Deployment(留空 = 该服务没有 Deployment) —</option>
+                        <option v-if="k8sRtWorkloadCache[k8sRtWorkloadKey(env.id, (k8sRuntimeEnvLoc[env.id] || {}).cluster || '', (k8sRuntimeEnvLoc[env.id] || {}).namespace || '')]?.status === 'loading'" value="">— 正在拉取 Deployment 列表… —</option>
+                        <option v-else-if="k8sRtWorkloadCache[k8sRtWorkloadKey(env.id, (k8sRuntimeEnvLoc[env.id] || {}).cluster || '', (k8sRuntimeEnvLoc[env.id] || {}).namespace || '')]?.status === 'error'" value="">— 拉取失败,详见日志面板 —</option>
+                        <option v-else-if="k8sRtWorkloadsFor(env.id, (k8sRuntimeEnvLoc[env.id] || {}).cluster || '', (k8sRuntimeEnvLoc[env.id] || {}).namespace || '').length === 0" value="">— 当前 namespace 下无可用 Deployment —</option>
+                        <option v-else value="">— 未部署 / 不在 K8s 内 —</option>
                         <option
                           v-for="d in k8sRtWorkloadsFor(env.id, (k8sRuntimeEnvLoc[env.id] || {}).cluster || '', (k8sRuntimeEnvLoc[env.id] || {}).namespace || '')"
                           :key="d.name" :value="d.name"
@@ -7557,8 +8012,18 @@ const configTypeDescriptions: Record<string, string> = {
                     <select
                       v-model="getLokiMapping(env.id).serviceValues[svc]"
                       class="cc-map-select"
+                      :class="{ 'cc-map-select-none': !getLokiMapping(env.id).serviceValues[svc] }"
+                      :title="!getLokiMapping(env.id).serviceValues[svc] && getLokiMapping(env.id).serviceMatchTried?.[svc] && getLokiMapping(env.id).serviceLabelValues.length > 0
+                        ? `自动匹配未找到候选(${getLokiMapping(env.id).serviceLabelValues.length} 个 label 都不含 ${svc} 任一前缀:${svc.split('-').filter(Boolean).join(' / ')})。本环境可能没部署该服务,留空即可。`
+                        : ''"
                     >
-                      <option value="">— 选 —</option>
+                      <option value="">{{
+                        !getLokiMapping(env.id).serviceValues[svc]
+                          && getLokiMapping(env.id).serviceMatchTried?.[svc]
+                          && getLokiMapping(env.id).serviceLabelValues.length > 0
+                          ? '— 无 / 不进 loki(未自动匹配到) —'
+                          : '— 无 / 不进 loki —'
+                      }}</option>
                       <option
                         v-for="v in getLokiMapping(env.id).serviceLabelValues"
                         :key="v" :value="v"
@@ -7861,6 +8326,21 @@ const configTypeDescriptions: Record<string, string> = {
 </template>
 
 <style scoped>
+.render-error-banner {
+  margin-bottom: 16px; padding: 14px 18px;
+  background: #fef2f2; border: 1px solid #fca5a5; border-radius: 8px;
+  color: #7f1d1d; font-size: 13px;
+}
+.render-error-head { font-weight: 700; margin-bottom: 6px; }
+.render-error-msg { font-family: monospace; font-size: 12px; margin-bottom: 6px; word-break: break-word; }
+.render-error-stack {
+  font-family: monospace; font-size: 11px; color: #991b1b;
+  background: #fff; border: 1px solid #fecaca; border-radius: 4px;
+  padding: 8px 10px; max-height: 160px; overflow: auto; white-space: pre-wrap;
+  margin-bottom: 8px;
+}
+.render-error-actions { display: flex; gap: 8px; }
+
 .init-page {
   max-width: 860px;
   margin: 0 auto;
@@ -8845,6 +9325,9 @@ input.path-readonly {
 }
 .cc-map-select:focus { outline: none; border-color: #3b82f6; }
 .cc-map-select.error { border-color: #dc2626; background: #fef2f2; }
+.cc-map-select.cc-map-select-none {
+  background: #f8fafc; color: #64748b; font-style: italic; border-color: #cbd5e1;
+}
 .cc-map-select-svc { flex: 1; }
 
 /* Step 7 数据层:自动导入按钮行 */
@@ -9166,6 +9649,21 @@ input.path-readonly {
 }
 .monorepo-banner-mono { background: #f5f3ff; border-color: #c4b5fd; }
 .monorepo-banner-single { background: #f8fafc; border-color: #e2e8f0; padding: 8px 12px; }
+.service-entries-display {
+  margin: 8px 0 12px; padding: 10px 14px;
+  border: 1px dashed #86efac; border-radius: 6px; background: #f0fdf4;
+}
+.service-entries-head {
+  font-size: 12px; color: #166534; font-weight: 600; margin-bottom: 6px;
+  display: flex; align-items: center; gap: 8px;
+}
+.service-entries-list {
+  list-style: none; padding-left: 0; margin: 0;
+  font-size: 12px; color: #1e293b; display: flex; flex-direction: column; gap: 4px;
+}
+.service-entries-list code {
+  background: #fff; padding: 1px 6px; border-radius: 3px; font-size: 11px;
+}
 .monorepo-banner-head {
   font-size: 13px; font-weight: 600; color: #5b21b6;
   margin-bottom: 8px;

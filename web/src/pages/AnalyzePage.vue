@@ -111,6 +111,10 @@ interface YamlVsCodeDiffItem {
   codeServices: string[]
   newInCode: string[]       // 代码有 yaml 无
   missingInCode: string[]   // yaml 有代码无
+  // role 决定是否需要 service_names 对账。infra / common-lib / docs / frontend / mobile
+  // 不是业务服务,本来就不该有 service_names —— diff 跳过 missing/new 检查,只展示一行说明。
+  isServiceRole: boolean
+  effectiveRole: string
 }
 interface YamlVsCodeDiff {
   repos: YamlVsCodeDiffItem[]
@@ -130,6 +134,10 @@ const diff = computed<YamlVsCodeDiff | null>(() => {
   const out: YamlVsCodeDiffItem[] = []
   let totalNew = 0
   let totalMissing = 0
+  // 业务服务角色判定 —— 跟前端 InitPage / 后端 RequiresServiceNames 一致。
+  // 仅这 4 类需要对账 service_names,其它角色(frontend / mobile / common-lib / infra / docs)
+  // 跳过 missing/new 计算 —— 它们本就不该有 service_names。
+  const SERVICE_ROLES = new Set(['backend', 'gateway', 'middleware', 'admin'])
   for (const yRepo of yamlRepos) {
     const yName = yRepo.name as string
     // yaml 里 service_names 可能是 "a, b" 字符串或 ["a", "b"] 数组,归一
@@ -139,14 +147,26 @@ const diff = computed<YamlVsCodeDiff | null>(() => {
       : typeof yServicesRaw === 'string'
       ? yServicesRaw.split(',').map((s: string) => s.trim()).filter(Boolean)
       : []
-    // yaml 里没写 service_names 时,约定用 repo.name 兜底(跟 generator 对齐)
-    const effectiveYaml = yServices.length > 0 ? yServices : [yName]
+    // role:yaml 显式给的优先,否则用 analyzer 推断的 role_hint(都没就当 backend 兜底)
     const codeEntry = codeRepos.find((r: any) => r.name === yName)
+    const yamlRole = (typeof yRepo.role === 'string' && yRepo.role.trim()) ? yRepo.role.trim() : ''
+    const hintedRole = (codeEntry?.role_hint?.role as string) || ''
+    const effectiveRole = yamlRole || hintedRole || 'backend'
+    const isServiceRole = SERVICE_ROLES.has(effectiveRole)
+    // yaml 里没写 service_names 时,业务服务用 repo.name 兜底,非业务服务保持空(它们本来就不需要)
+    const effectiveYaml = yServices.length > 0
+      ? yServices
+      : (isServiceRole ? [yName] : [])
     const cServices: string[] = codeEntry?.service_names || []
-    const ySet = new Set(effectiveYaml)
-    const cSet = new Set(cServices)
-    const newIn = cServices.filter((s) => !ySet.has(s))
-    const miss = effectiveYaml.filter((s) => !cSet.has(s))
+    let newIn: string[] = []
+    let miss: string[] = []
+    if (isServiceRole) {
+      // 只对业务服务跑 missing/new 对账
+      const ySet = new Set(effectiveYaml)
+      const cSet = new Set(cServices)
+      newIn = cServices.filter((s) => !ySet.has(s))
+      miss = effectiveYaml.filter((s) => !cSet.has(s))
+    }
     totalNew += newIn.length
     totalMissing += miss.length
     out.push({
@@ -155,6 +175,8 @@ const diff = computed<YamlVsCodeDiff | null>(() => {
       codeServices: cServices,
       newInCode: newIn,
       missingInCode: miss,
+      isServiceRole,
+      effectiveRole,
     })
   }
   const configCenterYaml = String(yamlCfg.infrastructure?.config_center?.type || '')
@@ -170,6 +192,18 @@ const diff = computed<YamlVsCodeDiff | null>(() => {
     totalMissing,
   }
 })
+
+// 非业务服务角色的解释文案 —— 不同 role 排障路径不同,提示也按 role 定制
+const NON_SERVICE_ROLE_HINTS: Record<string, string> = {
+  frontend: '前端 / 浏览器侧,排障从用户报告路径入手,不查后端配置中心或 k8s 部署',
+  mobile: '移动端 app,排障从崩溃日志 / 版本分布入手,不进服务依赖图',
+  'common-lib': '共享库 / SDK,作为版本对比目标存在,本身没有部署节点',
+  infra: '基础设施声明仓(k8s manifest / terraform / helm 等),AI 排障时仅作为配置定义来源被引用',
+  docs: '文档仓库,只作为背景资料,不参与运行时排障',
+}
+function nonServiceRoleHint(role: string): string {
+  return NON_SERVICE_ROLE_HINTS[role] || '该角色不参与服务依赖图,yaml 中是否声明 service_names 不影响排障'
+}
 
 // 一键复制 yaml 片段:方便用户粘到自己 yaml 里更新 service_names
 function copySuggestedYamlSnippet() {
@@ -310,6 +344,24 @@ function statusZh(s: string): string {
   }
 }
 
+// SERVICE_ROLES 与 yamlVsCode diff 共享:仅这 4 类业务服务才算"扫描失败 = 真问题"。
+// 其它角色(common-lib / frontend / mobile / infra / docs)本就不需要源码扫描,
+// status=skipped 是预期行为,不该刷红色 not-found。
+const SERVICE_ROLES_SET = new Set(['backend', 'gateway', 'middleware', 'admin'])
+function isSkippedNonService(rs: { status: string; role?: string }): boolean {
+  if (rs.status !== 'skipped') return false
+  const role = (rs.role || '').trim()
+  if (!role) return false
+  return !SERVICE_ROLES_SET.has(role)
+}
+function statusZhFor(rs: { status: string; role?: string }): string {
+  if (isSkippedNonService(rs)) {
+    // 把"跳过(本机没有)"的红色警告改成"无需扫描"的中性提示
+    return `无需扫描(${rs.role})`
+  }
+  return statusZh(rs.status)
+}
+
 onMounted(() => {
   EventsOn('analyze:log', (line: string) => {
     progressLog.value += line + '\n'
@@ -326,14 +378,34 @@ onUnmounted(() => {
     <h1>代码扫描</h1>
 
     <div class="info-box">
-      <div class="info-box-title">代码扫描 — 从代码反推 yaml 应该怎么写</div>
-      <div>
-        扫已 clone 到本机的代码 → 识别每个仓库提供的服务名 + 配置中心(Nacos / Apollo / Consul / Kuboard)用的 dataId / namespace / configmap 等线索;
-        跟 yaml 声明对比,缺什么(missing)/ 多什么(extra)/ 已对齐(verified)一目了然,**可一键应用差异回 yaml** → 跳到
-        <router-link to="/editor">YAML 沙盒</router-link> 验证。<br/>
-        填两样东西:<strong>system.yaml</strong>(粘贴或加载) + <strong>仓库父目录</strong>(<code>repos[].name</code> 子目录的共同父目录,如 <code>~/code</code>)。
+      <div class="info-box-title">代码扫描 — 从源码反推 yaml 应该怎么写</div>
+      <div class="info-box-body">
+        <p class="info-box-lead">扫已 clone 到本机的代码,把"实际跑的样子"跟 yaml 声明对账,差异一键回填。</p>
+        <ul class="info-box-actions">
+          <li>
+            <strong>🔍 自动识别</strong>
+            <span>—— 每个仓库提供的服务名,以及配置中心(Nacos / Apollo / Consul / Kuboard)用到的 dataId / namespace / configmap 等线索</span>
+          </li>
+          <li>
+            <strong>📊 差异对比</strong>
+            <span>—— 跟 yaml 声明逐项对照:<code>missing</code>(yaml 漏写)/ <code>extra</code>(yaml 多写)/ <code>verified</code>(已对齐)分类一目了然</span>
+          </li>
+          <li>
+            <strong>↩️ 一键回填</strong>
+            <span>—— 把扫描出的差异合并回 yaml,自动跳到 <router-link to="/editor">YAML 沙盒</router-link> 做验证 + 健康检查</span>
+          </li>
+        </ul>
+        <div class="info-box-inputs">
+          <div class="info-box-inputs-title">📝 需要两样东西:</div>
+          <ul>
+            <li><strong>system.yaml</strong> — 粘贴或从文件加载</li>
+            <li><strong>仓库父目录</strong> — 如 <code>~/code</code>,即 <code>repos[].name</code> 子目录的共同父目录</li>
+          </ul>
+        </div>
+        <p class="info-box-redirect">
+          ⚠️ 本机没下载的仓库会跳过;勾上「自动 clone」会按 yaml 里的 <code>url</code> 浅克隆再扫(需要本机有 git + 仓库访问凭证)。
+        </p>
       </div>
-      <div class="info-box-note">本机没下载的仓库会跳过;勾上"自动 clone"按 yaml 的 url 浅克隆再扫(要有 git + 凭证)。</div>
     </div>
 
     <div class="form-section">
@@ -394,19 +466,21 @@ onUnmounted(() => {
         <span class="tag gray">共扫 {{ result.per_repo?.length || 0 }} 个仓库</span>
       </div>
 
-      <!-- 每仓库状态摘要(per_repo) -->
+      <!-- 每仓库状态摘要(per_repo)。skipped 状态分两类显示:
+           - 业务服务角色(backend/gateway/middleware/admin)→ 红色 not-found 警告(真问题:本机没 clone)
+           - 非业务服务角色(infra/common-lib/frontend/mobile/docs)→ 灰色"无需扫描"(预期行为) -->
       <div v-if="result.per_repo?.length" class="per-repo-grid">
         <div
           v-for="rs in result.per_repo"
           :key="rs.name"
           class="repo-status"
-          :class="rs.status"
+          :class="[rs.status, isSkippedNonService(rs) ? 'skipped-nonservice' : '']"
         >
           <span class="name">{{ rs.name }}</span>
-          <span class="status-tag" :title="rs.status">{{ statusZh(rs.status) }}</span>
+          <span class="status-tag" :title="rs.status">{{ statusZhFor(rs) }}</span>
           <span v-if="rs.service_name_count" class="muted">服务 {{ rs.service_name_count }} 个</span>
           <span v-if="rs.finding_count" class="muted">线索 {{ rs.finding_count }} 条</span>
-          <span v-if="rs.error" class="err">{{ rs.error }}</span>
+          <span v-if="rs.error && !isSkippedNonService(rs)" class="err">{{ rs.error }}</span>
         </div>
       </div>
 
@@ -446,19 +520,32 @@ onUnmounted(() => {
         <div v-for="r in diff.repos" :key="r.name" class="diff-row">
           <div class="diff-row-head">
             <strong>{{ r.name }}</strong>
-            <span class="muted">yaml 写了 {{ r.yamlServices.length }} 个服务 · 代码里扫到 {{ r.codeServices.length }} 个</span>
+            <span v-if="r.isServiceRole" class="muted">yaml 写了 {{ r.yamlServices.length }} 个服务 · 代码里扫到 {{ r.codeServices.length }} 个</span>
+            <span v-else class="muted">
+              <span class="tag gray">{{ r.effectiveRole }}</span>
+              不参与服务对账
+            </span>
           </div>
-          <div v-if="r.newInCode.length" class="detail">
-            <span class="tag green" style="min-width: 110px;">代码里多出来的</span>
-            <span v-for="s in r.newInCode" :key="s" class="tag blue">{{ s }}</span>
-          </div>
-          <div v-if="r.missingInCode.length" class="detail">
-            <span class="tag orange" style="min-width: 110px;">yaml 写了但没扫到</span>
-            <span v-for="s in r.missingInCode" :key="s" class="tag gray">{{ s }}</span>
-          </div>
-          <div v-if="r.newInCode.length === 0 && r.missingInCode.length === 0" class="detail muted">
-            ✓ 完全一致
-          </div>
+          <!-- 业务服务才跑 missing/new 对账 -->
+          <template v-if="r.isServiceRole">
+            <div v-if="r.newInCode.length" class="detail">
+              <span class="tag green" style="min-width: 110px;">代码里多出来的</span>
+              <span v-for="s in r.newInCode" :key="s" class="tag blue">{{ s }}</span>
+            </div>
+            <div v-if="r.missingInCode.length" class="detail">
+              <span class="tag orange" style="min-width: 110px;">yaml 写了但没扫到</span>
+              <span v-for="s in r.missingInCode" :key="s" class="tag gray">{{ s }}</span>
+            </div>
+            <div v-if="r.newInCode.length === 0 && r.missingInCode.length === 0" class="detail muted">
+              ✓ 完全一致
+            </div>
+          </template>
+          <!-- 非业务服务:仅展示一行说明,不报"missing/extra" -->
+          <template v-else>
+            <div class="detail muted skip-row">
+              ℹ️ {{ nonServiceRoleHint(r.effectiveRole) }}
+            </div>
+          </template>
         </div>
       </div>
 
@@ -488,12 +575,19 @@ onUnmounted(() => {
           </div>
         </div>
 
+        <!-- Notes:扫描发现的中性事实(框架、API URL、build tool 等)。
+             跟 Warnings 分开渲染,避免把 frontend_framework=next 这种"FYI"信息误显示成红色错误。 -->
+        <div v-if="(repo as any).notes?.length" class="detail">
+          <strong>📋 扫描发现({{ (repo as any).notes.length }} 条):</strong>
+          <div v-for="n in (repo as any).notes" :key="n" class="note-line">{{ n }}</div>
+        </div>
+
         <div v-if="repo.warnings?.length" class="detail warn">
-          <strong>提示:</strong>
+          <strong>⚠ 异常提示:</strong>
           <div v-for="w in repo.warnings" :key="w" class="warn-line">{{ w }}</div>
         </div>
 
-        <div v-if="!repo.findings?.length && !repo.warnings?.length" class="detail muted">
+        <div v-if="!repo.findings?.length && !repo.warnings?.length && !(repo as any).notes?.length" class="detail muted">
           没扫到配置中心线索,也没异常提示
         </div>
       </div>
@@ -503,6 +597,93 @@ onUnmounted(() => {
 
 <style scoped>
 /* .page / .btn / .info-box* 来自 design.css;这里只写个性化 */
+
+.info-box-body {
+  font-size: 13px;
+  line-height: 1.65;
+}
+.info-box-lead {
+  margin: 0 0 10px;
+  color: var(--c-text);
+}
+.info-box-actions {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.info-box-actions li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
+}
+.info-box-actions li strong {
+  flex-shrink: 0;
+  min-width: 92px;
+  font-weight: 600;
+  color: var(--c-ink);
+}
+.info-box-actions li span {
+  color: var(--c-text);
+  font-size: 12.5px;
+}
+.info-box-actions li code {
+  background: var(--c-surf-3);
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 11.5px;
+}
+.info-box-actions li a { color: var(--c-accent); text-decoration: none; }
+.info-box-actions li a:hover { text-decoration: underline; }
+.info-box-inputs {
+  margin-bottom: 10px;
+  padding: 8px 12px;
+  background: var(--c-surf-3);
+  border-radius: var(--r-sm);
+  border-left: 2px solid var(--c-accent);
+}
+.info-box-inputs-title {
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--c-ink);
+  margin-bottom: 4px;
+}
+.info-box-inputs ul {
+  list-style: disc;
+  margin: 0;
+  padding-left: 20px;
+  font-size: 12.5px;
+}
+.info-box-inputs ul li { padding: 2px 0; }
+.info-box-inputs code {
+  background: var(--c-surf-2);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 11.5px;
+}
+.info-box-redirect {
+  margin: 0;
+  padding-top: 10px;
+  border-top: 1px dashed var(--c-line);
+  font-size: 12.5px;
+  color: var(--c-muted);
+}
+.info-box-redirect code {
+  background: var(--c-surf-3);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 11.5px;
+}
+
+.diff-row .skip-row {
+  font-size: 12px;
+  color: #64748b;
+  padding: 4px 0 2px;
+  font-style: italic;
+}
 
 .label-row-actions { display: flex; gap: 6px; }
 .form-section { margin-bottom: var(--sp-4); }
@@ -581,6 +762,10 @@ input.path-readonly {
 
 .detail.warn { color: #92400e; }
 .warn-line { font-size: 12px; padding: 2px 0; }
+.note-line {
+  font-size: 12px; padding: 2px 0;
+  color: #475569; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
 
 /* yaml vs 代码 diff 卡片:红框不合适(不是错),用蓝色强调,tag 并排展示差异 */
 .diff-card {
@@ -641,5 +826,14 @@ input.path-readonly {
 .repo-status.analyzed { border-color: #86efac; }
 .repo-status.cloned-then-analyzed { border-color: #60a5fa; }
 .repo-status.skipped { opacity: 0.7; }
+.repo-status.skipped-nonservice {
+  /* 非业务服务角色无需扫描 → 不刷红色 / 警告色,改为中性灰底浅蓝边,跟"已扫描"分开但不显眼 */
+  opacity: 1;
+  background: #f8fafc;
+  border-color: #cbd5e1;
+}
+.repo-status.skipped-nonservice .status-tag {
+  background: #e0e7ff; color: #3730a3; font-style: italic;
+}
 .repo-status.clone-failed { background: #fef2f2; border-color: #fecaca; }
 </style>

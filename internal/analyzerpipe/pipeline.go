@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/analyzer"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
@@ -58,6 +59,9 @@ type RepoSummary struct {
 	// InitPage Step 4 的 env_branches input 用 <datalist> 挂上去,用户点
 	// 下拉就能从真实分支里选,不用手敲。仓库不存在 / 不是 git repo 时为空。
 	Branches []string `json:"branches,omitempty"`
+	// Role 是 yaml 里声明的仓库角色(空时按 backend 兜底)。前端卡片用来区分
+	// "业务服务找不到 = 红色 not-found 警告"vs"非业务服务找不到 = 静默跳过"。
+	Role string `json:"role,omitempty"`
 }
 
 // Result 是 Run 的完整结果:analyzer.Report(可以 Marshal 成 analysis.json) + 每仓库摘要。
@@ -124,9 +128,21 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 				pathMissing = true
 			}
 		}
+		// Fallback:reposRoot 下找不到 → 往下扒一层 <reposRoot>/<X>/<repo.name>。
+		// 典型场景:用户 git clone --recurse-submodules <umbrella>,各子模块代码落在
+		// <umbrella>/<sub>/,而不是直接落在 reposRoot。为防误中:被找到的目录必须看
+		// 着像真代码(.git 或常见 manifest 文件),且**唯一**命中(多个 ambiguous 时退回 skip,
+		// 让用户显式提供路径)。
+		if pathMissing && opts.ReposRoot != "" {
+			if guess := findInSiblingDirs(opts.ReposRoot, repo.Name); guess != "" {
+				progress(fmt.Sprintf("[fallback] repo %s 在 %s 找不到,降级到 %s(可能是 git submodule)", repo.Name, repoPath, guess))
+				repoPath = guess
+				pathMissing = false
+			}
+		}
 		if pathMissing {
 			if !opts.AutoClone {
-				perRepo = append(perRepo, RepoSummary{Name: repo.Name, Status: "skipped", Error: "not-found"})
+				perRepo = append(perRepo, RepoSummary{Name: repo.Name, Status: "skipped", Error: "not-found", Role: string(repo.EffectiveRole())})
 				progress(fmt.Sprintf("[skip] repo %s not found at %s", repo.Name, repoPath))
 				continue
 			}
@@ -135,7 +151,7 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 			if repoPath == "" {
 				if opts.ReposRoot == "" {
 					perRepo = append(perRepo, RepoSummary{Name: repo.Name, Status: "skipped",
-						Error: "no path hint and no repos_root to auto-clone into"})
+						Error: "no path hint and no repos_root to auto-clone into", Role: string(repo.EffectiveRole())})
 					continue
 				}
 				repoPath = filepath.Join(opts.ReposRoot, repo.Name)
@@ -149,7 +165,7 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 				Branch: branch,
 				Depth:  repo.Analysis.ShallowDepth,
 			}); err != nil {
-				perRepo = append(perRepo, RepoSummary{Name: repo.Name, Status: "clone-failed", Error: err.Error()})
+				perRepo = append(perRepo, RepoSummary{Name: repo.Name, Status: "clone-failed", Error: err.Error(), Role: string(repo.EffectiveRole())})
 				progress(fmt.Sprintf("[skip] clone %s failed: %v", repo.Name, err))
 				continue
 			}
@@ -218,6 +234,7 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 				DetectedStack:     detectedStack,
 				DetectedFramework: detectedFramework,
 				Branches:          branches,
+				Role:              string(repo.EffectiveRole()),
 			})
 			progress(fmt.Sprintf("[skip] %s: %v", repo.Name, err))
 			continue
@@ -227,6 +244,35 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 			return nil, fmt.Errorf("analyze %s: %w", repo.Name, err)
 		}
 		ra.Name = repo.Name
+		// 把"同仓多入口"信号(cmd/<x>/main.go / services/<x>/ / pom modules / workspaces)
+		// 展开成服务名 —— wizard 走 mergeMonorepoIntoServices 时给每个 cmd entry
+		// 加 `<repo>-` 前缀消歧义,这里 analyzer 必须用同款命名才能跟 yaml 对齐。
+		// gitmodules 路径(hint.URL 非空)跳过 —— 它们是独立 git repo,不属于本仓 cmd 入口。
+		hints := analyzer.DetectSubmodules(repoPath)
+		var cmdHints []analyzer.SubmoduleHint
+		for _, h := range hints {
+			if h.URL == "" {
+				cmdHints = append(cmdHints, h)
+			}
+		}
+		if len(cmdHints) > 0 {
+			// 多入口仓:根 go.mod / package.json 的 module name 是共享代码库不是服务,
+			// 抛弃 ra.ServiceNames(那是 analyzer 从根 module 抽的),只用 cmd entries 加前缀。
+			// 否则会出现"content + content-grpc-server + content-scheduler ..."这种裸 module 名混进
+			// 服务列表的尴尬场景,误导 diff 报"代码里多出来的: content"。
+			mergedNames := []string{}
+			for _, h := range cmdHints {
+				qualified := qualifyServiceName(repo.Name, h.Name)
+				if qualified == "" {
+					continue
+				}
+				if !containsString(mergedNames, qualified) {
+					mergedNames = append(mergedNames, qualified)
+				}
+			}
+			ra.ServiceNames = mergedNames
+		}
+		// 没有 cmd 入口信号:保留 ra.ServiceNames 原值(单仓单服务场景,go.mod 的 module 名就是服务名)
 		// 顺带扫"下游调用 + 数据层使用"——给 service-dependency-map.yaml 自动填种子值,
 		// 用户拿到种子改比从空白起强 10 倍。即使扫漏 50% 也比 0% 强,保守 best-effort。
 		ra.DownstreamCalls, ra.DataStoreUsages = analyzer.ScanDependencies(effectiveStack, repoPath, repo.Analysis.IncludePaths)
@@ -246,6 +292,7 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 			DetectedStack:     detectedStack,
 			DetectedFramework: detectedFramework,
 			Branches:          branches,
+			Role:              string(repo.EffectiveRole()),
 		})
 		progress(fmt.Sprintf("[ok] analyzed %s (stack=%s): %d service_names, %d findings",
 			repo.Name, effectiveStack, len(ra.ServiceNames), len(ra.Findings)))
@@ -263,6 +310,100 @@ func pickCloneBranch(cliBranch string, repo config.Repo, envs []config.Environme
 		if b, ok := repo.EnvBranches[env.ID]; ok && b != "" {
 			return b
 		}
+	}
+	return ""
+}
+
+// qualifyServiceName 跟前端 InitPage::qualifyServiceName 同款规则,给 cmd entry 名加
+// `<repo>-` 前缀消歧义。两端必须一致命名,不然 analyzer report 跟 yaml service_names 对不上。
+//
+//	entry == repo                   → 不重复加前缀(repo=order,cmd/order → order)
+//	entry 已带 repo 名作前/后缀     → 已消歧,直接用
+//	其它                            → `<repo>-<entry>`
+func qualifyServiceName(repoName, entryName string) string {
+	repo := strings.TrimSpace(repoName)
+	ent := strings.TrimSpace(entryName)
+	if repo == "" {
+		return ent
+	}
+	if ent == "" {
+		return repo
+	}
+	if ent == repo {
+		return ent
+	}
+	if strings.HasPrefix(ent, repo+"-") || strings.HasPrefix(ent, repo+"_") ||
+		strings.HasSuffix(ent, "-"+repo) || strings.HasSuffix(ent, "_"+repo) {
+		return ent
+	}
+	return repo + "-" + ent
+}
+
+func containsString(xs []string, s string) bool {
+	for _, x := range xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+// findInSiblingDirs 在 reposRoot 一层子目录里搜 <reposRoot>/<sibling>/<name>,
+// 用于 git submodule 场景:用户 `git clone --recurse-submodules <umbrella>` 后,各子模块
+// 实际代码落在 <umbrella>/<sub>/,而不是直接落在 reposRoot 顶层。
+//
+// 命中条件(防误中):
+//   - 路径必须存在且是目录
+//   - 目录非空(有任意可见文件 / 子目录)—— 避免捡到 .gitmodules 声明但还没初始化的空目录;
+//     不再要求"代码信号"(.git / manifest),因为 infra 类配置仓(mongodb-configs / k8s-yaml /
+//     terraform 等)里只有 yaml/json/conf 文件,严要求会误漏。
+//   - 整个 reposRoot 范围内**唯一**命中(多个 ambiguous 时返空让上层 skip,避免误用)
+//
+// reposRoot 子目录里的 `.` 隐藏目录、node_modules、vendor 等通用排除项跳过。
+func findInSiblingDirs(reposRoot, name string) string {
+	entries, err := os.ReadDir(reposRoot)
+	if err != nil {
+		return ""
+	}
+	excluded := map[string]bool{
+		"node_modules": true, "vendor": true, "target": true, "build": true, "dist": true,
+		".git": true, ".svn": true, ".hg": true,
+	}
+	// 目录非空判定:有任意可见 entry 即视作"已初始化的真目录"。
+	// `.git` / `.gitkeep` 这种隐藏文件不算"内容",避免空 submodule 误命中。
+	dirNonEmpty := func(dir string) bool {
+		es, err := os.ReadDir(dir)
+		if err != nil {
+			return false
+		}
+		for _, e := range es {
+			if !strings.HasPrefix(e.Name(), ".") {
+				return true
+			}
+		}
+		return false
+	}
+	var matches []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		eName := e.Name()
+		if strings.HasPrefix(eName, ".") || excluded[eName] {
+			continue
+		}
+		candidate := filepath.Join(reposRoot, eName, name)
+		info, err := os.Stat(candidate)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		if !dirNonEmpty(candidate) {
+			continue
+		}
+		matches = append(matches, candidate)
+	}
+	if len(matches) == 1 {
+		return matches[0]
 	}
 	return ""
 }

@@ -567,14 +567,27 @@ function translateSchemaError(msg: string): string {
     </div>
 
     <div class="info-box">
-      <div class="info-box-title">YAML 沙盒 — 只对 yaml 文件做事,不动代码也不装机器人</div>
-      <div>
-        把 system.yaml 粘进来快速检查它"写得对不对、装出来啥样"。<br/>
-        <strong>✓ 验证</strong>:语法 / 必填字段 / 格式 + 配置健康检查(可观测性 wiring 是否齐、仓库是否覆盖所有 env、多源 config_source 是否指定、白名单 skill 是否会被静默跳过 等);
-        <strong>📋 生成计划</strong>:干跑一遍生成,看会启用哪些技能、产出多少文件、配置中心映射几条;
-        <strong>📂 预览产物</strong>:真跑一次生成器,看每个 skill / SKILL.md 的实际内容。<br/>
-        想"扫代码反推 yaml"?去 <router-link to="/analyze">代码扫描</router-link>;想真装到机器人?
-        去 <router-link to="/bots">已装机器人</router-link> 导入或从 <router-link to="/init">创建向导</router-link> 末步部署。
+      <div class="info-box-title">YAML 沙盒 — 只读校验 yaml,不动代码、不装机器人</div>
+      <div class="info-box-body">
+        <p class="info-box-lead">把 system.yaml 粘进来,快速判断「语法是否正确 / 部署后会是什么样」。</p>
+        <ul class="info-box-actions">
+          <li>
+            <strong>✓ 验证</strong>
+            <span>—— 语法 / 必填字段 / 格式校验,叠加配置健康检查(可观测性 wiring 完整性、仓库是否覆盖所有 env、多源 config_source 是否显式指定、被静默跳过的 skill 等)</span>
+          </li>
+          <li>
+            <strong>📋 生成计划</strong>
+            <span>—— 干跑一遍生成器,产出"会启用哪些 skill、多少个文件、配置中心映射几条"的摘要,不写盘</span>
+          </li>
+          <li>
+            <strong>📂 预览产物</strong>
+            <span>—— 真跑一次生成器到临时目录,逐文件展开 skill / SKILL.md / scripts 的实际内容</span>
+          </li>
+        </ul>
+        <p class="info-box-redirect">
+          想<strong>扫代码反推 yaml</strong>?去 <router-link to="/analyze">代码扫描</router-link>;
+          想<strong>真装到机器人</strong>?去 <router-link to="/bots">已装机器人</router-link> 导入,或在 <router-link to="/init">创建向导</router-link> 末步一键部署。
+        </p>
       </div>
     </div>
 
@@ -832,6 +845,49 @@ function translateSchemaError(msg: string): string {
 </template>
 
 <style scoped>
+
+.info-box-body {
+  font-size: 13px;
+  line-height: 1.65;
+}
+.info-box-lead {
+  margin: 0 0 10px;
+  color: var(--c-text);
+}
+.info-box-actions {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.info-box-actions li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
+}
+.info-box-actions li strong {
+  flex-shrink: 0;
+  min-width: 92px;
+  font-weight: 600;
+  color: var(--c-ink);
+}
+.info-box-actions li span {
+  color: var(--c-text);
+  font-size: 12.5px;
+}
+.info-box-redirect {
+  margin: 0;
+  padding-top: 10px;
+  border-top: 1px dashed var(--c-line);
+  font-size: 12.5px;
+  color: var(--c-muted);
+}
+.info-box-redirect strong { color: var(--c-text); }
+.info-box-redirect a { color: var(--c-accent); text-decoration: none; }
+.info-box-redirect a:hover { text-decoration: underline; }
 
 .toolbar {
   display: flex;

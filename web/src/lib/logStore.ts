@@ -8,12 +8,16 @@
 //   install:log / analyze:log 的每行都自动入库,同时保留各页面自己的 EventsOn 监听(它们
 //   还需要本地显示 running 状态)。
 //
-// 存储:单例 reactive ref,全局 import { useLogStore } 就能读/写;默认保留 2000 条,
-// 超了 FIFO 丢旧(日志页面关不常开,没必要无限增长)。内存实现,不进 localStorage ——
-// 日志是"本会话瞬态",关 app 就失效;需要排障的关键信息应落到后端文件日志,这个只是 UI。
+// 存储:单例 reactive,默认保留 2000 条 FIFO。**持久化到 localStorage** —— InitPage 渲染
+// 异常 / 用户切到别的页面 / 关 app 重开 都不丢,排障线索可以事后回看。
+//   STORAGE_KEY:tshoot-logs-v1
+//   写入策略:debounce 500ms 批量落盘,避免每条日志都触发 setItem(高频日志会卡)
+//   恢复策略:启动时一次性读回到 state.entries,nextID 接续最大 id+1
 
 import { reactive, computed, readonly } from 'vue'
 import { EventsOn } from '../../wailsjs/runtime/runtime'
+
+const STORAGE_KEY = 'tshoot-logs-v1'
 
 export type LogLevel = 'info' | 'warn' | 'error' | 'debug'
 // source 取值固定集合,UI 过滤下拉用;新增来源时在这里加
@@ -34,11 +38,74 @@ export interface LogEntry {
 
 const MAX_ENTRIES = 2000
 
-// 单一内存状态;reactive 让页面可响应
-const state = reactive<{ entries: LogEntry[]; nextID: number }>({
-  entries: [],
-  nextID: 1,
-})
+// 启动时尝试从 localStorage 拉回上次会话的日志;失败 / 解析不出来都安静兜底成空 state。
+function loadInitialState(): { entries: LogEntry[]; nextID: number } {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return { entries: [], nextID: 1 }
+    const data = JSON.parse(raw)
+    if (!data || !Array.isArray(data.entries)) return { entries: [], nextID: 1 }
+    // 防御:落盘时丢字段 / id 异常 → 跳过那条,接续 nextID
+    const entries: LogEntry[] = []
+    let maxID = 0
+    for (const e of data.entries) {
+      if (!e || typeof e.message !== 'string' || typeof e.ts !== 'number') continue
+      const id = typeof e.id === 'number' ? e.id : ++maxID
+      if (id > maxID) maxID = id
+      entries.push({
+        id,
+        ts: e.ts,
+        source: (e.source as LogSource) || 'system',
+        level: (e.level as LogLevel) || 'info',
+        message: e.message,
+        meta: (e.meta && typeof e.meta === 'object') ? e.meta : undefined,
+      })
+    }
+    // 越界保护:历史可能写入过 > MAX_ENTRIES,启动时一次性裁掉
+    if (entries.length > MAX_ENTRIES) entries.splice(0, entries.length - MAX_ENTRIES)
+    return { entries, nextID: maxID + 1 }
+  } catch {
+    return { entries: [], nextID: 1 }
+  }
+}
+
+// 单一内存状态;reactive 让页面可响应。初值从 localStorage 恢复(跨会话不丢日志)
+const state = reactive<{ entries: LogEntry[]; nextID: number }>(loadInitialState())
+
+// 落盘 debounce:每条日志都 setItem 太昂贵(MAX_ENTRIES=2000 时 JSON 序列化 + IO),
+// 累积 500ms 一次性写。配合 quota 兜底:超了就先砍前 500 条再重试。
+let persistTimer: ReturnType<typeof setTimeout> | null = null
+function schedulePersist() {
+  if (persistTimer) return
+  persistTimer = setTimeout(() => {
+    persistTimer = null
+    persistNow()
+  }, 500)
+}
+function persistNow() {
+  try {
+    const payload = JSON.stringify({ entries: state.entries, nextID: state.nextID })
+    localStorage.setItem(STORAGE_KEY, payload)
+  } catch (e: any) {
+    // quota 失败:砍前一半重试;还失败就放弃这次写,保留内存中数据
+    if (state.entries.length > 200) {
+      state.entries.splice(0, Math.floor(state.entries.length / 2))
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ entries: state.entries, nextID: state.nextID }))
+      } catch { /* 还是不行,放弃,内存中保留即可 */ }
+    }
+  }
+}
+// 退出 / 切走页面时强制 flush 一次,避免 debounce 排程错过
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', () => {
+    if (persistTimer) {
+      clearTimeout(persistTimer)
+      persistTimer = null
+      persistNow()
+    }
+  })
+}
 
 let bridgesInstalled = false
 
@@ -65,11 +132,20 @@ export function pushLog(
   if (state.entries.length > MAX_ENTRIES) {
     state.entries.splice(0, state.entries.length - MAX_ENTRIES)
   }
+  schedulePersist()
 }
 
 /** 清空(UI 上「清空」按钮用) */
 export function clearLogs(): void {
   state.entries.splice(0, state.entries.length)
+  // 立刻落盘清空状态,避免清空后立马关 app 又被恢复
+  if (persistTimer) {
+    clearTimeout(persistTimer)
+    persistTimer = null
+  }
+  try {
+    localStorage.removeItem(STORAGE_KEY)
+  } catch { /* ignore */ }
 }
 
 /** 给 UI 取只读视图 */

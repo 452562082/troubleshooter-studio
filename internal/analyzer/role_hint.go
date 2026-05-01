@@ -51,10 +51,15 @@ var nameRoleHints = []struct {
 func RecommendRole(stack, repoName, repoPath string) RoleHint {
 	lname := strings.ToLower(repoName)
 
-	// ── 1. 仓库名子串匹配(无 IO,最可靠)──
+	// ── 1. 仓库名锚点匹配(无 IO,最可靠)──
+	// 模式里的 `-` 是锚点不是字面量:`pc-` 表示"以 pc- 开头"或"有独立 pc 段",
+	// `-pc` 表示"以 -pc 结尾"或"有独立 pc 段"。这样 grpc-server 不会因为子串
+	// 含 "pc-" 被误判成 frontend(grpc 整体是一个 token,跟 pc 不等)。
+	// 不带 `-` 的模式(如 gateway / admin / worker)仍走 substring,因为这些词
+	// 即便嵌在长 token 里也大概率成立(microgateway / adminapi / workersvc)。
 	for _, h := range nameRoleHints {
 		for _, p := range h.patterns {
-			if strings.Contains(lname, p) {
+			if matchesNamePattern(lname, p) {
 				return RoleHint{Role: h.role, Reason: h.reason + " (含 " + p + ")"}
 			}
 		}
@@ -78,6 +83,48 @@ func RecommendRole(stack, repoName, repoPath string) RoleHint {
 
 	// ── 5. 兜底 ──
 	return RoleHint{Role: "backend", Reason: "默认(没命中名字 / 文件结构规则,大概率是后端服务)"}
+}
+
+// matchesNamePattern 按"-"锚点判断仓库名是否命中模式。
+//
+//	pat = "pc-"  → trailing dash:lname 以 "pc-" 开头,或某 token == "pc"
+//	pat = "-pc"  → leading dash :lname 以 "-pc" 结尾,或某 token == "pc"
+//	pat = "-pc-" → 两端 dash    :某 token == "pc"
+//	pat = "pc"   → 无 dash      :裸 substring(给 gateway/admin/worker 这类长词用)
+//
+// token 由分隔符 -, _, /, . 切出。grpc-server 切成 [grpc, server],"pc" ∉ tokens
+// 且 "pc-" 不是前缀 → 不命中 frontend 规则,符合直觉。
+func matchesNamePattern(lname, pat string) bool {
+	if pat == "" {
+		return false
+	}
+	leadingDash := strings.HasPrefix(pat, "-")
+	trailingDash := strings.HasSuffix(pat, "-")
+	core := strings.Trim(pat, "-")
+	if core == "" {
+		return false
+	}
+	tokens := strings.FieldsFunc(lname, func(r rune) bool {
+		return r == '-' || r == '_' || r == '/' || r == '.'
+	})
+	tokenEquals := func() bool {
+		for _, t := range tokens {
+			if t == core {
+				return true
+			}
+		}
+		return false
+	}
+	switch {
+	case leadingDash && trailingDash:
+		return tokenEquals()
+	case leadingDash:
+		return strings.HasSuffix(lname, "-"+core) || tokenEquals()
+	case trailingDash:
+		return strings.HasPrefix(lname, core+"-") || tokenEquals()
+	default:
+		return strings.Contains(lname, core)
+	}
 }
 
 // roleFromContentScan 看顶层文件扩展名分布:

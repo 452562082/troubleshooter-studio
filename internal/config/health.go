@@ -85,7 +85,10 @@ func checkEnvRepo(c *SystemConfig) []HealthIssue {
 				Hint:     "至少填一个 env→branch 映射(typical: dev: develop, prod: main)",
 			})
 		}
-		if len(r.ServiceNames) == 0 {
+		// 只对"业务服务"角色(backend / gateway / middleware / admin)校验 service_names ——
+		// frontend / mobile / common-lib / infra / docs 不需要 service_names(它们不挂配置中心 /
+		// 不进 k8s deployment / 不进日志聚合),用户特意把这些角色填空是符合预期的,不该刷信息。
+		if r.RequiresServiceNames() && len(r.ServiceNames) == 0 {
 			out = append(out, HealthIssue{
 				Severity: "info",
 				Category: "repo",

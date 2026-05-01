@@ -160,6 +160,21 @@ func (r Repo) IsServiceNode() bool {
 	return true
 }
 
+// RequiresServiceNames 返回是否需要 service_names。比 IsServiceNode 更严:只有
+// "业务服务"四类(backend / gateway / middleware / admin)需要 —— 它们对应 nacos
+// 配置 key、k8s deployment、loki app 标签。frontend / mobile 是"调用发起方"进图但
+// 没自己后端 endpoint(不挂在配置中心、不进 k8s 部署/不进日志聚合),没有 service_names
+// 概念;common-lib / infra / docs 干脆不进图。
+//
+// 健康检查 / wizard auto-fill / 模板 emit 都按这个判定决定要不要为该 repo 喂 service_names。
+func (r Repo) RequiresServiceNames() bool {
+	switch r.EffectiveRole() {
+	case RoleBackend, RoleGateway, RoleMiddleware, RoleAdmin:
+		return true
+	}
+	return false
+}
+
 type ConfigCenterEndpoint struct {
 	Env           string `yaml:"env"`
 	Addr          string `yaml:"addr,omitempty"`

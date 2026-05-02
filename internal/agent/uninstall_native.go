@@ -63,11 +63,9 @@ type UninstallNativeResult struct {
 // <root> 的推导:从 installedDir 反推(installedDir = <root>/skills/<name>),
 // 这样 default ~/.<target> 和 custom install root 都自动覆盖,不必额外传 customRoot。
 func UninstallNative(installedDir, target string) (*UninstallNativeResult, error) {
-	switch target {
-	case "claude-code", "cursor", "codex":
-		// ok
-	default:
-		return nil, fmt.Errorf("uninstall_native: unsupported target %q", target)
+	t, err := ParseIDETarget(target)
+	if err != nil {
+		return nil, err
 	}
 
 	home, err := os.UserHomeDir()
@@ -76,7 +74,7 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 	}
 	// <root> = installedDir 的祖父(installedDir = <root>/skills/<name>/);
 	// 兜底:如果反推出来路径异常(没有 skills 段,或为空),回退到 ~/.<target>。
-	root := deriveInstallRoot(installedDir, target, home)
+	root := deriveInstallRoot(installedDir, t, home)
 
 	res := &UninstallNativeResult{}
 	logf := func(format string, a ...any) { res.Log = append(res.Log, fmt.Sprintf(format, a...)) }
@@ -88,21 +86,20 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 	systemID := readSystemIDFromMeta(filepath.Join(installedDir, discover.MetaFilename))
 
 	// 1) 真实部署目录 → ~/.Trash(出错回退 RemoveAll)。从 Trash 走避免误删后无法恢复。
-	if _, err := os.Stat(installedDir); err == nil {
-		ts := time.Now().Format("20060102-150405")
-		bk := filepath.Join(home, ".Trash", agentName+"-"+target+"-uninstall-"+ts)
-		if mkErr := os.MkdirAll(filepath.Dir(bk), 0o755); mkErr == nil {
-			if err := os.Rename(installedDir, bk); err == nil {
-				res.StagingMovedTo = bk
-				logf("[ok] 已装目录移到 %s", bk)
-			} else if rmErr := os.RemoveAll(installedDir); rmErr == nil {
-				logf("[ok] 已装目录删除(rename to Trash 失败:%v,直接 rm)", err)
-			} else {
-				return res, fmt.Errorf("rename to Trash failed: %v; remove also failed: %v", err, rmErr)
-			}
-		}
-	} else {
+	ts := time.Now().Format("20060102-150405")
+	bk := filepath.Join(home, ".Trash", agentName+"-"+target+"-uninstall-"+ts)
+	movedTo, existed, mvErr := moveOutOrRemove(installedDir, bk)
+	if mvErr != nil {
+		return res, fmt.Errorf("uninstall installedDir: %w", mvErr)
+	}
+	switch {
+	case !existed:
 		logf("[skip] 已装目录 %s 不存在", installedDir)
+	case movedTo != "":
+		res.StagingMovedTo = movedTo
+		logf("[ok] 已装目录移到 %s", movedTo)
+	default:
+		logf("[ok] 已装目录已删除(rename to Trash 失败,直接 rm)")
 	}
 
 	// 1b) staging 中间包(~/.tshoot/<target>/<system_id>/)— 部署中途临时落盘,装完已无用。
@@ -149,12 +146,10 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 		}
 	}
 
-	// 4) IDE 配置里的 MCP server keys —— 跟 openclaw uninstall 一致,清自家前缀
-	// (<system.id>-...)。这一步漏了之前用户卸载完 MCP 还在 IDE 里跑,占 tool 槽位 + 残留垃圾。
-	// 老产物用 ResolveID()+"-mcp-server-..." 形态,新前缀 system.id 也能命中(都以 systemID 开头),
-	// 适合迁移期顺手清理。
+	// 4) IDE 配置里的 MCP server keys —— 清自家前缀("<system.id>-...")。
+	// 老产物 ResolveID()+"-mcp-server-..." 形态以 systemID 开头也能命中,迁移期顺手清。
 	if systemID != "" {
-		removed := cleanIDEMCPServers(target, root, systemID, logf)
+		removed := cleanIDEMCPServers(t, root, systemID, logf)
 		res.MCPRemoved = removed
 	}
 
@@ -162,48 +157,33 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 	return res, nil
 }
 
-// deriveInstallRoot 从 installedDir 反推 install root。
-// installedDir 形如 "<root>/skills/<name>/",祖父目录就是 <root>。
-// 如果反推不成立(installedDir 为空 / 没有 skills 段 / 非绝对路径),回退到 ~/.<target>。
-func deriveInstallRoot(installedDir, target, home string) string {
-	defaultRoot := func() string {
-		switch target {
-		case "claude-code":
-			return filepath.Join(home, ".claude")
-		case "cursor":
-			return filepath.Join(home, ".cursor")
-		case "codex":
-			return filepath.Join(home, ".codex")
-		}
-		return filepath.Join(home, "."+target)
-	}
+// deriveInstallRoot 从 installedDir(= "<root>/skills/<name>/")反推 <root> 祖父目录。
+// 路径异常(空 / 没 skills 段 / 非绝对路径)→ 回退默认 ~/.<target>/。
+func deriveInstallRoot(installedDir string, t IDETarget, home string) string {
+	defaultRoot := filepath.Join(home, t.DirName())
 	if strings.TrimSpace(installedDir) == "" {
-		return defaultRoot()
+		return defaultRoot
 	}
 	abs, err := filepath.Abs(installedDir)
 	if err != nil {
-		return defaultRoot()
+		return defaultRoot
 	}
-	parent := filepath.Dir(abs)             // <root>/skills
+	parent := filepath.Dir(abs) // <root>/skills
 	if filepath.Base(parent) != "skills" {
-		// 不符合预期布局,不冒险动文件,走默认根
-		return defaultRoot()
+		return defaultRoot
 	}
-	return filepath.Dir(parent)             // <root>
+	return filepath.Dir(parent)
 }
 
-// cleanIDEMCPServers 从对应 IDE 配置文件里删本 system 名下的 MCP server keys。
-//   - claude-code:~/.claude/settings.json 的 mcpServers 字段(JSON map),按 prefix 删
-//   - cursor:    ~/.cursor/mcp.json 的 mcpServers 字段,同上
-//   - codex:     先列 codex mcp list 拿到本机所有 servers,匹配前缀的逐个 codex mcp remove
+// cleanIDEMCPServers 从对应 IDE 配置里删本 system 名下的 MCP server keys。
+//   - claude-code/cursor:JSON 文件按 prefix 删
+//   - codex:codex mcp list → 匹配前缀逐个 codex mcp remove(不能手 marshal TOML 破坏其它段)
 //
-// 匹配规则跟 openclaw uninstall 一致(模糊前缀):删 "<systemID>-..." 和裸 "<systemID>"。
-// 老产物 ResolveID() 派生的 "<systemID>-troubleshooter-..." 也会命中(都是 systemID 前缀),
-// 适合迁移期顺手清。返回真删了哪些 keys 给 UI 展示。
-func cleanIDEMCPServers(target, root, systemID string, logf func(format string, a ...any)) []string {
+// 匹配 "<systemID>" 和 "<systemID>-..."(老产物 ResolveID 派生的 "<systemID>-troubleshooter-..."
+// 也命中,迁移期顺手清)。返回真删了哪些 keys 给 UI 展示。
+func cleanIDEMCPServers(t IDETarget, root, systemID string, logf func(format string, a ...any)) []string {
 	prefix := systemID + "-"
-	// codex 走 CLI(它的真源在 config.toml,不要手 marshal TOML 破坏 [projects.*] 段)
-	if target == "codex" {
+	if t == TargetCodex {
 		codexBin, err := exec.LookPath("codex")
 		if err != nil {
 			logf("[warn] 找不到 codex CLI,跳过清 ~/.codex/config.toml 里的 MCP servers")
@@ -214,7 +194,6 @@ func cleanIDEMCPServers(target, root, systemID string, logf func(format string, 
 			logf("[warn] codex mcp list 失败: %v(skip 清理)", err)
 			return nil
 		}
-		// 第一行 header,后续每行第一列是 name
 		var removed []string
 		for _, line := range strings.Split(string(out), "\n") {
 			fields := strings.Fields(line)
@@ -235,16 +214,7 @@ func cleanIDEMCPServers(target, root, systemID string, logf func(format string, 
 		return removed
 	}
 
-	// claude-code / cursor:JSON 文件
-	var cfgFile string
-	switch target {
-	case "claude-code":
-		cfgFile = filepath.Join(root, "settings.json")
-	case "cursor":
-		cfgFile = filepath.Join(root, "mcp.json")
-	default:
-		return nil
-	}
+	cfgFile := filepath.Join(root, t.SettingsFilename())
 	data, err := os.ReadFile(cfgFile)
 	if err != nil {
 		// 没文件 = 没 MCP 注册过,不算错
@@ -282,25 +252,4 @@ func cleanIDEMCPServers(target, root, systemID string, logf func(format string, 
 	}
 	logf("[ok] %s 摘掉 %d 项 MCP: %s", cfgFile, len(removed), strings.Join(removed, ", "))
 	return removed
-}
-
-// findInstalledAgentName 老逻辑:从 staging 中间包 agents/ 下抽 agent 名。2026-04-30 起
-// uninstall 路径接收的是真实部署目录(~/.claude|cursor/skills/<name>/),agent 名直接 = basename,
-// 不再走这个 helper。保留代码以备 OpenClaw 卸载或 staging 路径走 fallback 时调用。
-func findInstalledAgentName(installedDir string) (string, error) { //nolint:unused
-	entries, err := os.ReadDir(filepath.Join(installedDir, "agents"))
-	if err != nil {
-		return "", err
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		n := e.Name()
-		if !strings.HasSuffix(n, ".md") || strings.Contains(n, ".bak.") {
-			continue
-		}
-		return strings.TrimSuffix(n, ".md"), nil
-	}
-	return "", fmt.Errorf("no agents/*.md in %s", installedDir)
 }

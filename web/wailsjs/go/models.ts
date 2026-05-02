@@ -731,6 +731,7 @@ export namespace doctor {
 	}
 	export class Report {
 	    issues: Issue[];
+	    scanned_repo_paths?: Record<string, string>;
 	
 	    static createFrom(source: any = {}) {
 	        return new Report(source);
@@ -739,6 +740,7 @@ export namespace doctor {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.issues = this.convertValues(source["issues"], Issue);
+	        this.scanned_repo_paths = source["scanned_repo_paths"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -1936,6 +1938,7 @@ export namespace main {
 	    user_agent_md?: string;
 	    user_skills_dir?: string;
 	    user_scripts_dir?: string;
+	    mcp_removed?: string[];
 	    log?: string[];
 	
 	    static createFrom(source: any = {}) {
@@ -1952,6 +1955,7 @@ export namespace main {
 	        this.user_agent_md = source["user_agent_md"];
 	        this.user_skills_dir = source["user_skills_dir"];
 	        this.user_scripts_dir = source["user_scripts_dir"];
+	        this.mcp_removed = source["mcp_removed"];
 	        this.log = source["log"];
 	    }
 	}

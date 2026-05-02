@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted, onErrorCaptured, nextTick } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted, onErrorCaptured, nextTick } from 'vue'
 
 // 给 App.vue 的 keep-alive `:exclude="['InitPage']"` 用,让本页不被缓存。
 // 跟 HomePage 的"清空重开"按钮配套:用户清掉 localStorage 后,InitPage 重 mount 取干净状态。
@@ -44,6 +44,27 @@ import type { AIToolResult, CCHubEntry, CCHubNamespace, GrafanaDatasource, OpenC
 import { confirmDialog } from '../lib/confirm'
 import { pushLog } from '../lib/logStore'
 import { toast } from '../lib/toast'
+import { Target, type TargetId } from '../lib/constants'
+import type { URLProbeState } from '../lib/probeTypes'
+import type { CredField, KuboardResourceState } from '../lib/credFields'
+import EnvListItem from '../components/EnvListItem.vue'
+import CredentialField from '../components/CredentialField.vue'
+import TargetInstallBadge from '../components/TargetInstallBadge.vue'
+import PreloadButton from '../components/PreloadButton.vue'
+import DataStoreServiceBlock from '../components/DataStoreServiceBlock.vue'
+import ObservabilityToolBlock from '../components/ObservabilityToolBlock.vue'
+import NamespaceServiceMap from '../components/NamespaceServiceMap.vue'
+import KuboardServiceMap from '../components/KuboardServiceMap.vue'
+import LokiMappingStep from '../components/LokiMappingStep.vue'
+import K8sRuntimeBlock from '../components/K8sRuntimeBlock.vue'
+import RepoListItem from '../components/RepoListItem.vue'
+import CredsShareWarning from '../components/CredsShareWarning.vue'
+import ServiceChecklist from '../components/ServiceChecklist.vue'
+import SecondarySourcePanel from '../components/SecondarySourcePanel.vue'
+import { generateYAML as libGenerateYAML, type YAMLGenContext } from '../lib/yamlGenerator'
+import { computeStepErrors as libComputeStepErrors, labelForErrorKey as libLabelForErrorKey, type ValidatorContext } from '../lib/yamlValidator'
+import { applyParsedYAMLToWizardState, type ApplyImportContext } from '../lib/yamlImporter'
+import { copyToClipboard } from '../lib/clipboard'
 
 const router = useRouter()
 
@@ -73,11 +94,7 @@ const saved = loadSavedDraft()
 const savedKuboardState = loadSavedKuboardState()
 
 // ── Step management ──
-// currentStep 持久化:加了 Step 1=欢迎页后,旧 saved 1..9 → 新 2..10 步内容才对齐。
-// 用 saved.wizardSchema 标记本次 saved 是新 schema(>=2)还是老 schema(undefined / 1):
-//   - 老 saved(无 wizardSchema):currentStep + 1 一次性迁移,然后保存时写入 wizardSchema=2
-//   - 新 saved(wizardSchema=2):直接用 currentStep
-//   - 没 saved:默认 1(欢迎页)
+// wizardSchema=2 起 step 1 是欢迎页;老 saved(无 wizardSchema)的 currentStep 需 +1 迁移。
 const _savedSchema: number = (saved?.wizardSchema ?? 1) as number
 const currentStep = ref<number>(
   saved?.currentStep != null
@@ -123,13 +140,7 @@ const agent = reactive({
 const targetModels = reactive<Record<string, string>>({
   openclaw: saved?.agent?.target_models?.openclaw ?? (saved?.agent?.model ?? 'anthropic/claude-sonnet-4-6'),
 })
-const modelConsumingTargets = ['openclaw'] as const
-// 这俩 computed 在"合并到 Step 1 target 卡片"之后不再有 UI 消费点,但
-// scanSingleRepo / yaml 校验之类地方以后可能要查"有没有任一 model-consuming target",
-// 保留不删;以 _ 前缀避免 unused 告警。
-const _activeModelTargets = computed(() => modelConsumingTargets.filter(t => enabledTargets[t]))
-const _needsAnyModel = computed(() => _activeModelTargets.value.length > 0)
-void _activeModelTargets; void _needsAnyModel
+const modelConsumingTargets = [Target.Openclaw] as const
 
 // ── Model presets ──────────────────────────────────────────────
 // 按提供商分组；自定义项让用户填任意字符串（保留企业内部网关 / 新模型的灵活性）。
@@ -253,7 +264,7 @@ function onModelChange(t: string, e: Event) {
   }
   // 顺手更新 agent.model 作为"默认"(给 schema 的必填兜底):
   // openclaw 是唯一消费模型的 target;它的值覆盖 agent.model,保 yaml 里 agent.model 永远非空。
-  if (targetModels['openclaw']) agent.model = targetModels['openclaw']
+  if (targetModels[Target.Openclaw]) agent.model = targetModels[Target.Openclaw]
 }
 
 function currentModelFor(t: string): string {
@@ -262,12 +273,7 @@ function currentModelFor(t: string): string {
 void currentModelFor
 
 // ── OpenClaw 模型探测(只给 openclaw target 卡用) ──
-// 流程:
-//   1. 用户勾上 openclaw card → 触发一次 detect(空参 = 默认 ~/.openclaw)
-//   2. detect 成功 → 模型下拉从 openclawDetected 里选;用户选完 targetModels.openclaw 更新
-//   3. detect 失败(installed=false) → UI 展示"未检测到 OpenClaw 安装,选择目录 →"
-//      用户点"选目录"走 openDir → 拿绝对路径重试 detect
-//   4. 用户坚持走 hardcoded 模型列表:给个"用预设模型列表"开关回落到 modelGroups
+// 勾上 openclaw → detect(默认 ~/.openclaw 或用户选目录)→ 成功填模型下拉 / 失败给"选目录"按钮 / 兜底回落 hardcoded modelGroups
 const openclawInstallDir = ref<string>(saved?.openclawInstallDir ?? '') // localStorage 持久,换会话不用重试
 const openclawDetectStatus = ref<'idle' | 'loading' | 'ok' | 'not-installed' | 'error'>('idle')
 const openclawDetectedModels = ref<OpenClawModelEntry[]>([])
@@ -338,9 +344,6 @@ async function refreshAITools() {
   }
 }
 onMounted(() => { refreshAITools() })
-// (之前有 openclawManualInput 手填模式,已删 —— openclaw gateway 只认自己
-//  config.yaml 里声明的 model id,让用户手填一个它不认的 id 部署完就跑不动,
-//  不如直接"如实告知,去装 openclaw 并配好模型再回来扫描"。)
 
 async function runOpenClawDetect(dir: string = openclawInstallDir.value) {
   if (!isDesktop()) {
@@ -384,13 +387,8 @@ async function pickOpenClawInstallDir() {
 
 // 自动派生默认值:
 //   - agent.name   跟着 system.name 走(中文友好,用户可见)
-//   - agent.workspace_name 跟着 system.id 走(ASCII 小写,目录名友好)
-//
-// 分成两个 watch:
-//   - 之前把 workspace_name 设成跟 agent.name 一样,结果默认变成"shop排障机器人"
-//     这种 CJK 目录名,macOS 能 work 但 cd 要引号、ls 显示乱、部分 shell 补全
-//     踩坑。改成以 system.id 为基准 + "-bot" 后缀,保证 ASCII。
-//   - 只在字段"还是上一次由对应基准自动生成的默认"时才覆盖,用户手改过就别动。
+//   - agent.workspace_name 跟着 system.id 走 + "-bot"(ASCII,目录名友好;CJK 目录名 cd/ls 有踩坑)
+//   - 只在"字段还是上次自动生成的默认值"时才覆盖,用户手改过就不动。
 watch(() => system.name, (val, old) => {
   const prevDefault = `${old || ''}排障机器人`
   if (!agent.name || agent.name === prevDefault) {
@@ -508,7 +506,6 @@ function removeEnv(idx: number) {
 // ── Step 3 域名自动连通性测试 ─────────────────────────────────────────
 // 用户填 api_domain / web_domain 时,800ms 防抖触发 GET 探测;不显示按钮。
 // key = `${envIndex}:${kind}` (kind = api / web)。重新填 / 切 env 顺序都能正确刷新。
-interface URLProbeState { status: 'idle' | 'loading' | 'ok' | 'fail'; latency?: string; detail?: string; error?: string }
 const urlProbeResults = reactive<Record<string, URLProbeState>>({})
 const urlProbeTimers: Record<string, ReturnType<typeof setTimeout>> = {}
 function urlProbeKey(envIdx: number, kind: 'api' | 'web'): string {
@@ -930,16 +927,32 @@ function splitMonorepo(parentIdx: number) {
   // 只展开勾选了的子模块;空选状态(理论上不可能)兜底全选
   const picked = parent._submoduleHints.filter(h => sel[h.sub_path] !== false)
   if (picked.length === 0) return
-  const parentLocalBase = (parent._localPath || '').replace(/\/+$/, '')
+  // 父仓的真实磁盘路径:
+  //   - local 模式 → parent._localPath
+  //   - remote 模式 → scan 完只设 _scanned/_scannedSource,_localPath 为空,
+  //     用 resolveCloneDest 算 clone 落点(就是 git clone 完后子模块所在的根)
+  const parentLocalBase = ((parent._source === 'remote'
+    ? (resolveCloneDest(parent) || '')
+    : (parent._localPath || '')) || '').replace(/\/+$/, '')
   const newRows: RepoItem[] = picked.map(h => {
     // .gitmodules 路径下,h.url 非空 = 真"独立 git repo + 子目录共置";其它 monorepo 路径
     // h.url 为空 = "同一仓库子目录"。两者展开后形态不同:
     //   独立 git repo:每行用自己的 url + 自己的本地路径(父仓本地 + 子模块名)+ 无 sub_path
     //   同仓子目录:每行用父仓 url + 父仓本地路径 + 各自 sub_path
     const isIndependentRepo = !!h.url
+    // .gitmodules 子模块 → 父仓本地路径 + sub_path(代码已在磁盘);
+    // 同仓子目录 → 共用父仓的本地路径(parentLocalBase 已兼容 remote 模式的 resolveCloneDest)。
     const ownLocalPath = isIndependentRepo && parentLocalBase
       ? parentLocalBase + '/' + h.sub_path.replace(/^\/+/, '')
-      : parent._localPath
+      : (parent._localPath || parentLocalBase)
+    // 子模块的 source 模式:
+    //   - .gitmodules 真子模块(isIndependentRepo + parentLocalBase 非空):
+    //     父仓 clone 完后已通过 git submodule update --init 拉到 parentLocalBase/<sub>/
+    //     子模块的代码已经在磁盘上了,该行视为 'local' 模式(_localPath 已自动算好,
+    //     不需要再选 _cloneTarget,Step 5 校验门也按 local 路径走)。
+    //   - 同仓子目录(isIndependentRepo=false):跟父仓共用 _source / _localPath / url,
+    //     由 sub_path 区分,父仓什么模式继续什么模式。
+    const ownSource: 'local' | 'remote' = isIndependentRepo ? 'local' : (parent._source || 'remote')
     return {
       ...makeEmptyRepo(),
       name: h.name,
@@ -953,7 +966,7 @@ function splitMonorepo(parentIdx: number) {
       service_names: isServiceRole(h.role) ? h.name : '',
       env_branches: { ...branches },
       config_source: parent.config_source,
-      _source: parent._source,
+      _source: ownSource,
       _localPath: ownLocalPath,
       _scanned: true,
       _scannedSource: parent._scannedSource,
@@ -1476,12 +1489,25 @@ function toggleSourceType(t: string, checked: boolean) {
     const i = enabledSourceOrder.indexOf('none')
     if (i !== -1) enabledSourceOrder.splice(i, 1)
   }
+  // ── 单→多过渡保留:之前 activeSourceTypes 只有 1 个源,服务靠 getServiceSource
+  //   的默认 fallback 隐式归属那个源(map 里其实没记录)。一旦勾上第 2 个源,
+  //   getServiceSource 在多源模式下默认值变空,所有"隐式勾选"的 chip 会突然全失活。
+  //   这里在"切换前"把所有服务的隐式归属固化成显式 map 项,用户视觉上保持不变。
+  const willBeMulti = checked && t !== 'none' && !enabledSourceTypes[t]
+  const wasSingleSource = activeSourceTypes.value.length === 1 ? activeSourceTypes.value[0] : ''
   enabledSourceTypes[t] = checked
   const idx = enabledSourceOrder.indexOf(t)
   if (checked) {
     if (idx === -1) enabledSourceOrder.push(t) // 后勾的排到末尾
   } else {
     if (idx !== -1) enabledSourceOrder.splice(idx, 1)
+  }
+  if (willBeMulti && wasSingleSource && activeSourceTypes.value.length >= 2) {
+    for (const svc of allServiceNames.value) {
+      if (!(svc in serviceSourceMap)) {
+        serviceSourceMap[svc] = wasSingleSource
+      }
+    }
   }
 }
 
@@ -1534,15 +1560,7 @@ const isMultiSource = computed(() => activeSourceTypes.value.length > 1)
 // ── Kuboard 资源探测(每 env 独立 state)──
 // 用户填了 URL+账密后点"📥 拉取资源"会调 bridge.kuboardListResources,把
 // 集群 / namespace / configmap 三级目录拉回来,UI 渲染成级联下拉,免手填。
-type KuboardResourceState =
-  | { status: 'idle' }
-  | { status: 'loading' }
-  | { status: 'ok', clusters: KuboardClusterEntry[], notes?: string[] }
-  | { status: 'error', error: string }
-type KuboardClusterEntry = {
-  name: string
-  namespaces: { name: string; configmaps: string[] }[]
-}
+// 类型 KuboardResourceState / KuboardClusterEntry 见 lib/credFields.ts。
 // 跨会话恢复:优先吃独立的 KUBOARD_STATE_KEY,fallback 到大 draft blob 里的拷贝。
 // 只恢复 status==='ok' 的;loading/error 状态对历史无意义。
 const kuboardStateByEnv = reactive<Record<string, KuboardResourceState>>(
@@ -1665,11 +1683,48 @@ async function runK8sRtPreload(envID: string) {
     kuboardStateByEnv[envID] = { status: 'ok', clusters, notes: res.notes }
     persistKuboardState()
     toast.success(`${envID}: 拉到 ${clusters.length} 个集群`)
-    // 重新加载集群后,如果该 env 已选了 cluster + namespace,顺手把 deployment 列表也刷一次,
-    // 避免用户还要手动再点一遍 namespace 触发拉取。
+    // 拉到结果后给一组 env-aware 默认选择,免得用户每个 env 手点两次下拉。
+    //
+    // 集群挑选优先级(用户点"重新加载集群"是显式重评信号,允许覆盖含别 env 名的旧值):
+    //   1) 名字含 envID(如 ccs-aws-dev 命中 env=dev)→ 最准
+    //      - 若当前已选项不含 envID,被认为是"草稿里残留的错值",切到 env 命中
+    //      - 当前已选项含 envID(用户手选过且名字匹配)→ 不动
+    //   2) 当前为空 + 只有 1 个集群 → 直接定型
+    //   3) 多集群无 env 信号 + 当前为空 → 不自动选(让用户决定,免得选错触发下游 deployment 全空)
+    // namespace 同理。另外:cluster 切换后旧 namespace 可能在新 cluster 不存在 → 清掉再选。
+    if (!k8sRuntimeEnvLoc[envID]) k8sRuntimeEnvLoc[envID] = { cluster: '', namespace: '' }
     const eloc = k8sRuntimeEnvLoc[envID]
-    if (eloc?.cluster && eloc?.namespace) {
-      // 强制重拉:先清掉旧缓存
+    const envLower = envID.toLowerCase()
+    if (clusters.length > 0) {
+      // 草稿里的 cluster 在拉到的新列表里不存在了(集群重命名/账号换集群池)→ 当作空,免得卡死
+      const stillExists = !!eloc.cluster && clusters.some(c => c.name === eloc.cluster)
+      if (!stillExists) eloc.cluster = ''
+      const envHit = clusters.find(c => c.name.toLowerCase().includes(envLower))
+      const currentMatchesEnv = !!eloc.cluster && eloc.cluster.toLowerCase().includes(envLower)
+      if (envHit && !currentMatchesEnv) {
+        eloc.cluster = envHit.name
+      } else if (!eloc.cluster && clusters.length === 1) {
+        eloc.cluster = clusters[0].name
+      }
+    }
+    if (eloc.cluster) {
+      const c = clusters.find(c => c.name === eloc.cluster)
+      if (c && c.namespaces.length > 0) {
+        const nsExistsInCluster = !!eloc.namespace && c.namespaces.some(n => n.name === eloc.namespace)
+        if (!nsExistsInCluster) eloc.namespace = '' // cluster 换了/旧 ns 失效,先清掉再重挑
+        const envHit = c.namespaces.find(n => n.name.toLowerCase().includes(envLower))
+        const currentMatchesEnv = !!eloc.namespace && eloc.namespace.toLowerCase().includes(envLower)
+        if (envHit && !currentMatchesEnv) {
+          eloc.namespace = envHit.name
+        } else if (!eloc.namespace && c.namespaces.length === 1) {
+          eloc.namespace = c.namespaces[0].name
+        }
+      } else if (c && c.namespaces.length === 0) {
+        eloc.namespace = ''
+      }
+    }
+    // cluster + namespace 都齐了 → 立即拉 deployment 列表,服务行 workload 下拉直接有内容
+    if (eloc.cluster && eloc.namespace) {
       const cacheKey = k8sRtWorkloadKey(envID, eloc.cluster, eloc.namespace)
       delete k8sRtWorkloadCache[cacheKey]
       loadK8sRtWorkloads(envID, eloc.cluster, eloc.namespace)
@@ -1893,26 +1948,8 @@ const configCenterType = computed<string>({
   },
 })
 
-// 配置中心凭证:每个 type 对应一组字段;install.sh read_var 名规则对齐
-// (部署时 keychain 值会被导出成这些 env var → install.sh 跳过交互)。
-// Secret 字段用 password input + 钥匙串存,非 secret 也一并存钥匙串保持一致。
-//
-// envVar 是 install.sh 里 read_var 的变量名;Studio 部署逻辑会按规则从 keychain
-// 读 "cc:<type>:<env>:<key>" → 写成 env var <envVar> 喂给 install.sh。
-interface CredField {
-  key: string                         // keychain 子 key,例:"addr" "user" "pass"
-  label: string
-  secret: boolean
-  envVar: (env: string) => string    // install.sh read_var 的变量名
-  placeholder?: string
-  optional?: boolean
-  // options 非空 → 渲染成 <select>(枚举字段,如鉴权方式 access_key / username_password)
-  options?: Array<{ value: string; label: string }>
-  // showWhen 非空 → 仅当同 env 下某 sibling 字段值匹配时才显示(条件表单)
-  showWhen?: { field: string; equals: string }
-  // uiOnly:UI 状态字段,不参与 yaml emit / install 凭证收集(如 auth_mode)
-  uiOnly?: boolean
-}
+// 配置中心凭证字段定义:CredField interface 见 lib/credFields.ts。
+// 每个 type 对应一组字段;envVar 拼出来的名字部署时由 Studio 注入到各 AI 平台的 MCP env。
 // CC_FIELDS_BY_TYPE 是个 computed:
 //   - nacos / apollo / consul / kubernetes 是固定字段集
 //   - env-vars 字段集动态跟着 Step 6 enabledDataStores 走(每个启用的 data store 一条 STATIC_<TYPE>_<ENV> 字段)
@@ -2015,9 +2052,12 @@ function syncCcCredInputsFromSource() {
   }
 }
 syncCcCredInputsFromSource()
+// 用 deep:true 走 Vue 的细粒度 reactivity 而不是每次 JSON.stringify 整树:
+// 用户每改一个字段不用 O(n) 序列化,Vue 内部 proxy 钩子 O(变更字段数)。
 watch(
-  () => JSON.stringify({ s: sourceCreds, e: { ...enabledSourceTypes } }),
+  [sourceCreds, enabledSourceTypes],
   () => syncCcCredInputsFromSource(),
+  { deep: true },
 )
 // 反向 sync:主源表单 v-model 写 ccCredInputs → 同步回 sourceCreds(yaml emit 真源)。
 // diff check 防回环;forward sync 也同样 diff check,所以两边互改不会无限触发。
@@ -3016,9 +3056,22 @@ function scheduleObsProbe(toolKey: string, envID: string) {
     delete obsProbeResults[k]
     return
   }
-  const user = (toolInputs[toolKeyFor('obs', toolKey, envID, 'user')] || '').trim()
-  const pass = toolInputs[toolKeyFor('obs', toolKey, envID, 'pass')] || ''
-  const apiKey = toolInputs[toolKeyFor('obs', toolKey, envID, 'api_key')] || ''
+  // 仅当工具有 auth_mode 字段(grafana 类二选一鉴权)时按 mode 过滤,避免 stale draft
+  // 同时带上 api_key + user/pass 让后端 httpGet 走错鉴权路径(优先 Bearer)。其它工具
+  // (elk / clickhouse / kafka 等只有 user/pass 一种鉴权方式)按原行为透传。
+  const hasAuthMode = spec.fields.some(f => f.key === 'auth_mode')
+  let user = '', pass = '', apiKey = ''
+  if (hasAuthMode) {
+    const authMode = (toolInputs[toolKeyFor('obs', toolKey, envID, 'auth_mode')] || '').trim()
+    const useApiKey = authMode !== 'username_password'
+    apiKey = useApiKey ? (toolInputs[toolKeyFor('obs', toolKey, envID, 'api_key')] || '') : ''
+    user = useApiKey ? '' : (toolInputs[toolKeyFor('obs', toolKey, envID, 'user')] || '').trim()
+    pass = useApiKey ? '' : (toolInputs[toolKeyFor('obs', toolKey, envID, 'pass')] || '')
+  } else {
+    user = (toolInputs[toolKeyFor('obs', toolKey, envID, 'user')] || '').trim()
+    pass = toolInputs[toolKeyFor('obs', toolKey, envID, 'pass')] || ''
+    apiKey = toolInputs[toolKeyFor('obs', toolKey, envID, 'api_key')] || ''
+  }
   obsProbeTimers[k] = setTimeout(async () => {
     if (!isDesktop()) return
     obsProbeResults[k] = { status: 'loading' }
@@ -3047,11 +3100,23 @@ const triggerStep7Init = (s: number) => {
   }
   // k8s_runtime:进入 Step 7 时,把每个 env 已选的 (cluster, ns) 对应的 deployment 列表预拉一次,
   // 让服务行的 workload 下拉直接有内容、跟之前选过的 workload 匹配显示。
+  // 缓存已 'ok' 的(saved draft 恢复)跳过 fetch,但本 env 任一服务还没挑过 workload 时
+  // 仍跑一次 autoPickK8sRtWorkloads —— 避免"切回页面 deployment 列表在但服务都'未部署'"。
   if (enabledObservability['k8s_runtime']) {
     for (const [envID, loc] of Object.entries(k8sRuntimeEnvLoc)) {
       if (!loc?.cluster || !loc?.namespace) continue
       const cacheKey = k8sRtWorkloadKey(envID, loc.cluster, loc.namespace)
-      if (k8sRtWorkloadCache[cacheKey]?.status === 'ok') continue
+      const cached = k8sRtWorkloadCache[cacheKey]
+      if (cached?.status === 'ok') {
+        const anyUnmatched = allServiceNames.value.some(svc => {
+          const sloc = k8sRuntimeSvcMap[svcKey(envID, svc)]
+          return !sloc?.workload
+        })
+        if (anyUnmatched && cached.deployments.length > 0) {
+          autoPickK8sRtWorkloads(envID, cached.deployments)
+        }
+        continue
+      }
       loadK8sRtWorkloads(envID, loc.cluster, loc.namespace)
     }
   }
@@ -3195,11 +3260,16 @@ function obsGrafanaDsCandidates(envID: string, obsKey: string): GrafanaDatasourc
 
 function lokiAuthFor(envID: string) {
   const lm = getLokiMapping(envID)
+  // auth_mode 是 UI-only 选择(api_key 或 username_password);按它过滤掉对侧的残留值,
+  // 避免 stale draft 把 api_key 跟 user/pass 一起发给后端,后端按 apiKey 优先走 Bearer
+  // → 用错的 token 401。空 auth_mode 兜底走 options[0] = api_key(跟 CredentialField 视觉一致)。
+  const authMode = (toolInputs[toolKeyFor('obs', 'grafana', envID, 'auth_mode')] || 'api_key').trim()
+  const useApiKey = authMode === 'api_key'
   return {
     grafana_url: (toolInputs[toolKeyFor('obs', 'grafana', envID, 'url')] || '').trim(),
-    api_key: toolInputs[toolKeyFor('obs', 'grafana', envID, 'api_key')] || '',
-    user: (toolInputs[toolKeyFor('obs', 'grafana', envID, 'user')] || '').trim(),
-    pass: toolInputs[toolKeyFor('obs', 'grafana', envID, 'pass')] || '',
+    api_key: useApiKey ? (toolInputs[toolKeyFor('obs', 'grafana', envID, 'api_key')] || '') : '',
+    user: useApiKey ? '' : (toolInputs[toolKeyFor('obs', 'grafana', envID, 'user')] || '').trim(),
+    pass: useApiKey ? '' : (toolInputs[toolKeyFor('obs', 'grafana', envID, 'pass')] || ''),
     loki_url: (toolInputs[toolKeyFor('obs', 'loki', envID, 'url')] || '').trim(),
     ds_uid: lm.dsUID,
   }
@@ -4523,18 +4593,18 @@ function parseProperties(text: string): Record<string, any> {
 // ── Step 7: 输出目标 ──
 // (历史上有 embedded 这个 target,后已下线;若 saved draft 里残留 enabledTargets.embedded
 //  会被忽略,生成 yaml / 校验都不再考虑它)
-const targetOptions = ['openclaw', 'claude-code', 'cursor', 'codex'] as const
-const targetDescriptions: Record<string, string> = {
-  'openclaw': 'OpenClaw agent（~/.openclaw/workspace/<workspace_name>/，OpenClaw 内选 agent 切换）',
-  'claude-code': 'Claude Code 用户级 subagent（~/.claude/agents/<name>.md，@<name> 调用）',
-  'cursor': 'Cursor 用户级 Custom Agent（~/.cursor/agents/<name>.md，AI 侧栏选用）',
-  'codex': 'OpenAI Codex CLI 用户级 agent（~/.codex/agents/<name>.md，CLI 内 @<name> 调用）',
+const targetOptions: readonly TargetId[] = [Target.Openclaw, Target.ClaudeCode, Target.Cursor, Target.Codex]
+const targetDescriptions: Record<TargetId, string> = {
+  [Target.Openclaw]: 'OpenClaw agent(~/.openclaw/workspace/<workspace_name>/,OpenClaw 内选 agent 切换)',
+  [Target.ClaudeCode]: 'Claude Code 用户级 subagent(~/.claude/agents/<name>.md,@<name> 调用)',
+  [Target.Cursor]: 'Cursor 用户级 Custom Agent(~/.cursor/agents/<name>.md,AI 侧栏选用)',
+  [Target.Codex]: 'OpenAI Codex CLI 用户级 agent(~/.codex/agents/<name>.md,CLI 内 @<name> 调用)',
 }
-const targetLabels: Record<string, string> = {
-  'openclaw': 'OpenClaw',
-  'claude-code': 'Claude Code',
-  'cursor': 'Cursor IDE',
-  'codex': 'Codex CLI',
+const targetLabels: Record<TargetId, string> = {
+  [Target.Openclaw]: 'OpenClaw',
+  [Target.ClaudeCode]: 'Claude Code',
+  [Target.Cursor]: 'Cursor IDE',
+  [Target.Codex]: 'Codex CLI',
 }
 const enabledTargets = reactive<Record<string, boolean>>({
   ...Object.fromEntries(targetOptions.map(k => [k, true])),
@@ -4551,26 +4621,49 @@ const anyTargetSelected = computed(() => targetOptions.some(t => enabledTargets[
 // 探测还没跑(aitoolsResult / openclawDetectStatus 为初始) → 返回 null(unknown),
 // UI 据此显示"扫描中…"而不是"未检测到"。
 function targetDetectedInstalled(t: string): boolean | null {
-  if (t === 'openclaw') {
+  if (t === Target.Openclaw) {
     if (openclawDetectStatus.value === 'idle' || openclawDetectStatus.value === 'loading') return null
     return openclawDetectStatus.value === 'ok'
   }
   if (!aitoolsResult.value) return null
-  if (t === 'claude-code') return !!aitoolsResult.value.claude_code?.installed
-  if (t === 'cursor') return !!aitoolsResult.value.cursor?.installed
-  if (t === 'codex') return !!aitoolsResult.value.codex?.installed
+  if (t === Target.ClaudeCode) return !!aitoolsResult.value.claude_code?.installed
+  if (t === Target.Cursor) return !!aitoolsResult.value.cursor?.installed
+  if (t === Target.Codex) return !!aitoolsResult.value.codex?.installed
   return null
 }
 // targetCanBeEnabled(t) — checkbox 是否能被勾选:已检测到 OR 用户强制启用过。
 function targetCanBeEnabled(t: string): boolean {
   return targetDetectedInstalled(t) === true || forceEnableMissingTarget[t] === true
 }
+// targetBadgeProps(t) — 把 4 家 target 异构的 detect 结果归一成 <TargetInstallBadge> 三个 prop。
+// undefined detected = 完全不渲染 badge(对应原来 openclaw idle 不出徽章 + aitoolsResult 还没回的 ide 三家)。
+function targetBadgeProps(t: string): { detected: boolean | null | undefined; versionText?: string; title?: string } {
+  if (t === Target.Openclaw) {
+    if (openclawDetectStatus.value === 'idle') return { detected: undefined }
+    if (openclawDetectStatus.value === 'loading') return { detected: null, title: openclawDetectError.value || '' }
+    return {
+      detected: openclawDetectStatus.value === 'ok',
+      versionText: openclawDetectStatus.value === 'ok' ? openclawVersion.value : undefined,
+      title: openclawDetectError.value || '',
+    }
+  }
+  if (!aitoolsResult.value) return { detected: undefined }
+  const k = t === Target.ClaudeCode ? 'claude_code' : t === Target.Cursor ? 'cursor' : t === Target.Codex ? 'codex' : null
+  if (!k) return { detected: undefined }
+  const r = (aitoolsResult.value as any)[k] as { installed?: boolean; version?: string; note?: string; path?: string } | undefined
+  if (!r) return { detected: undefined }
+  return {
+    detected: !!r.installed,
+    versionText: r.installed ? (r.version || '?') : undefined,
+    title: r.note || r.path || '',
+  }
+}
 // openclaw 是唯一需要"工作区目录"概念的 target,其它 3 个都装到用户自选位置
 // (claude-code / cursor = 项目根,embedded = Studio 内嵌)。用 computed 单独暴露,
 // 模板里读这个 flag 判断要不要露 workspace_name 输入框。
 // workspace_name 现在直接在 Step 1 卡片里按 openclaw 勾选状态展开,这里留着
 // 给未来潜在消费点(BotsPage 显示 / 校验错误提示等);以 _ 前缀避免 unused 告警。
-const _needsWorkspaceName = computed(() => enabledTargets['openclaw'])
+const _needsWorkspaceName = computed(() => enabledTargets[Target.Openclaw])
 void _needsWorkspaceName
 
 // 勾上 openclaw 时触发一次 openclaw 配置探测(还没跑过 / 上次失败都重试)。
@@ -4578,13 +4671,13 @@ void _needsWorkspaceName
 // 会因 TDZ(Temporal Dead Zone)在 setup() 初始化时立即触发 getter,读还没声明的
 // enabledTargets 报 "Cannot access ... before initialization"。
 // openclawDetectStatus 等 ref 在文件上方已声明,跨位置 closure 引用无问题。
-watch(() => enabledTargets['openclaw'], (on) => {
+watch(() => enabledTargets[Target.Openclaw], (on) => {
   if (on && openclawDetectStatus.value === 'idle') {
     runOpenClawDetect()
   }
 })
 // 进入向导即探一次 OpenClaw,跟 detectAITools (claude-code/cursor) 一起填卡片头徽章。
-// 不依赖 enabledTargets['openclaw'] —— 即使没勾,头部也能看到"v2026.4.9 / ⚠ 未检测到"。
+// 不依赖 enabledTargets[Target.Openclaw] —— 即使没勾,头部也能看到"v2026.4.9 / ⚠ 未检测到"。
 onMounted(() => {
   if (openclawDetectStatus.value === 'idle') {
     runOpenClawDetect()
@@ -4786,9 +4879,9 @@ watch(
 )
 
 // "X 秒前"计时 —— 让徽章文案能随时间流动,用户看得到 Auto-save 真的在跑。
-// 刷 500ms 够用;不用 setInterval 精确到毫秒,UI 节省 re-render。
 const nowTick = ref(Date.now())
-setInterval(() => { nowTick.value = Date.now() }, 1000)
+const nowTickTimer = setInterval(() => { nowTick.value = Date.now() }, 1000)
+onUnmounted(() => clearInterval(nowTickTimer))
 const savedAgoLabel = computed<string>(() => {
   if (!lastSavedAt.value) return '进入页面尚未改动'
   const diffSec = Math.max(0, Math.floor((nowTick.value - lastSavedAt.value) / 1000))
@@ -4934,488 +5027,30 @@ async function applyImport() {
   // 期间禁用 configCenterType watcher 的破坏性清空(它会在 ingest 多源 type 期间
   // 触发,把我们刚反填的 envNamespaces / serviceConfigSel / ccHubStateByEnv 全删)。
   importInProgress.value = true
-
-  // system
-  if (parsed.system && typeof parsed.system === 'object') {
-    system.id = parsed.system.id ?? ''
-    system.name = parsed.system.name ?? ''
-    system.description = parsed.system.description ?? ''
+  // 同步反填主体在 lib/yamlImporter.ts;此处把 InitPage 闭包里的 reactive 引用 + helper +
+  // bridge 函数打包成一个 ctx 传进去。Vue 3 reactive proxy 跨组件边界仍然工作,lib 内
+  // 直接 obj[k]=v 等价于 InitPage 写 reactive。
+  const ctx: ApplyImportContext = {
+    system, agent, targetModels,
+    environments, repos,
+    enabledSourceTypes, enabledSourceOrder, sourceCreds,
+    serviceSourceMap, ccCredInputs,
+    envNamespaces, serviceConfigSel, serviceConfigGroup, ccHubStateByEnv,
+    enabledObservability, toolInputs, obsAccessModeMap, grafanaDsUidByObsEnv,
+    k8sRuntimeEnvLoc, k8sRuntimeSvcMap,
+    scannedDS, enabledDataStores, dsAutoFilled, dsScanState,
+    ALL_SOURCE_TYPES, VIA_GRAFANA_ELIGIBLE,
+    CC_FIELDS_BY_TYPE: CC_FIELDS_BY_TYPE.value,
+    allServiceNames: allServiceNames.value,
+    ensureKuboardLoc, getLokiMapping,
+    ccKeyFor, svcKey, scanStateKey, toolKeyFor,
+    obsAccessKey, obsGrafanaDsKey, toolSpecByKey,
+    pickBranchForEnv,
+    getRepoPathsForSystem, listBranchesForRepo,
+    setRepoBranches: (name, branches) => { repoBranchesMap.value[name] = branches },
   }
-
-  // agent
-  if (parsed.agent && typeof parsed.agent === 'object') {
-    agent.id = parsed.agent.id ?? ''
-    agent.name = parsed.agent.name ?? ''
-    agent.workspace_name = parsed.agent.workspace_name ?? ''
-    agent.model = parsed.agent.model ?? agent.model
-    // target_models 可选;没填的 target 回落到 agent.model
-    const tm = parsed.agent.target_models || {}
-    targetModels.openclaw = tm.openclaw || agent.model
-  }
-
-  // environments
-  if (Array.isArray(parsed.environments) && parsed.environments.length) {
-    environments.splice(0, environments.length, ...parsed.environments.map((e: any) => ({
-      id: e?.id ?? '',
-      api_domain: e?.api_domain ?? '',
-      web_domain: e?.web_domain ?? '',
-      is_prod: Boolean(e?.is_prod),
-    })))
-  }
-
-  // repos
-  if (Array.isArray(parsed.repos) && parsed.repos.length) {
-    // 仓库本地路径不在 yaml 里(可分享性约束),从 ~/.tshoot/config.json 按 system.id
-    // 查回来。同一台机器之前 wizard 部署过 → 这里拿到非空 map → 自动回填 _localPath,
-    // 用户在 Step 4 不必再点"选目录"。换台机器或全新机器 → 空 map,UI 还是要求用户挑。
-    let savedRepoPaths: Record<string, string> = {}
-    if (system.id) {
-      try { savedRepoPaths = await getRepoPathsForSystem(system.id) } catch { /* 失败不阻塞 import */ }
-    }
-    // 反填后异步并行拉每个 local repo 的真实分支列表,填进 repoBranchesMap;
-    // 这样 Step 5 的"环境 → 分支映射"会显示下拉(带真实分支),而不是文本输入。
-    // 不阻塞 UI:applyImport 同步返回 + 后端 ListBranchesForRepo 按需在后台填。
-    const localPathsToFetch: Array<{ name: string; path: string }> = []
-    repos.splice(0, repos.length, ...parsed.repos.map((r: any) => {
-      const branches: Record<string, string> = {}
-      for (const env of environments) {
-        if (env.id) branches[env.id] = r?.env_branches?.[env.id] ?? ''
-      }
-      const svcNames = Array.isArray(r?.service_names)
-        ? r.service_names.join(', ')
-        : (r?.service_names ?? '')
-      const repoName = r?.name ?? ''
-      const localPath = repoName ? (savedRepoPaths[repoName] || '') : ''
-      if (repoName && localPath) {
-        localPathsToFetch.push({ name: repoName, path: localPath })
-      }
-      return {
-        name: repoName,
-        url: r?.url ?? '',
-        stack: r?.stack ?? 'go',
-        framework: r?.framework ?? '',
-        // role:yaml 里有就保留,否则按 backend 兜底(老 yaml 兼容)
-        role: (typeof r?.role === 'string' && r.role.trim()) ? r.role.trim() : 'backend',
-        sub_path: typeof r?.sub_path === 'string' ? r.sub_path.trim() : '',
-        service_names: svcNames,
-        env_branches: branches,
-        config_source: typeof r?.config_source === 'string' ? r.config_source : '',
-        // 有本地路径就默认进 'local' 模式;否则保持远程 clone 模式
-        _source: localPath ? 'local' : 'remote',
-        _localPath: localPath,
-        // service_entries:同仓多服务的入口路径,反填回 _serviceEntries
-        _serviceEntries: (typeof r?.service_entries === 'object' && r?.service_entries) ? { ...r.service_entries } : undefined,
-        // 已经是反填回来的(用户上次合并过),banner 默认收起,有需要再点"改"
-        _submoduleHintsDismissed: typeof r?.service_entries === 'object' && r?.service_entries && Object.keys(r.service_entries).length > 0,
-      }
-    }))
-
-    // 异步拉真实分支(并行,不阻塞反填主流程):每个 repo 一个 git for-each-ref 调用,
-    // 拿到后塞进 repoBranchesMap,Step 5 模板会自动从 input 切到 select。
-    for (const { name, path } of localPathsToFetch) {
-      listBranchesForRepo(path).then((bs) => {
-        if (bs && bs.length > 0) {
-          repoBranchesMap.value[name] = bs
-          // 顺手用启发式给每个 env 自动选默认分支(同 scanSingleRepo 的逻辑)
-          const r = repos.find(x => x.name === name)
-          if (r) {
-            for (const env of environments) {
-              if (!env.id) continue
-              const cur = (r.env_branches[env.id] || '').trim()
-              // 已有值且在新分支列表里就不动;否则按 env 名做启发式映射
-              if (cur && bs.includes(cur)) continue
-              const mapped = pickBranchForEnv(env, bs)
-              if (mapped) r.env_branches[env.id] = mapped
-            }
-          }
-        }
-      }).catch(() => { /* 拉不到就保持文本输入,不阻塞 import */ })
-    }
-  }
-
-  // ── 配置中心:多源 schema(config_centers 数组) > 单源(config_center)──
-  // 多源:每个源 → enabledSourceTypes[type]=true + sourceCreds[type] 填表数据
-  // 单源:同上,只是 enabled 集合大小为 1
-  for (const t of ALL_SOURCE_TYPES) enabledSourceTypes[t] = false
-  enabledSourceTypes['none'] = false
-  for (const t of ALL_SOURCE_TYPES) sourceCreds[t] = { creds: {} }
-  // 重置 order:yaml import 时按 config_centers 数组顺序排,主源(第一个)排在 [0]
-  enabledSourceOrder.splice(0, enabledSourceOrder.length)
-
-  const ingestSource = (s: any, sourceID: string) => {
-    if (!s || typeof s.type !== 'string') return
-    const t = s.type
-    enabledSourceTypes[t] = true
-    if (!enabledSourceOrder.includes(t)) enabledSourceOrder.push(t)
-    // 必须先确保 sourceCreds[t] 有空骨架 —— 模板里 sourceCreds[t].creds.<env> 直接访问没 ?. 防御,
-    // t 没初始化(yaml 里出现了 ALL_SOURCE_TYPES 之外的 type)→ Step 6 副源块渲染抛 TypeError → 白屏。
-    if (!sourceCreds[t]) sourceCreds[t] = { creds: {} }
-    const fields = CC_FIELDS_BY_TYPE.value[t] || []
-    if (Array.isArray(s.endpoints)) {
-      for (const ep of s.endpoints) {
-        if (!ep || typeof ep.env !== 'string') continue
-        const envCreds: Record<string, string> = sourceCreds[t].creds[ep.env] || {}
-        for (const f of fields) {
-          const v = ep[f.key]
-          if (typeof v === 'string' && !(v.startsWith('{{') && v.endsWith('}}'))) {
-            envCreds[f.key] = v
-          }
-        }
-        // auth_mode 反推(同主源路径,UI-only 不进 yaml)
-        const authModeField = fields.find(f => f.key === 'auth_mode')
-        if (authModeField && authModeField.options && authModeField.options.length > 0) {
-          const has = (k: string) => {
-            const v = ep[k]
-            return typeof v === 'string' && v && !(v.startsWith('{{') && v.endsWith('}}'))
-          }
-          let mode = ''
-          if (authModeField.options.some(o => o.value === 'access_key') && has('access_key')) {
-            mode = 'access_key'
-          } else if (authModeField.options.some(o => o.value === 'api_key') && has('api_key')) {
-            mode = 'api_key'
-          } else if (authModeField.options.some(o => o.value === 'username_password')
-                     && (has('username') && has('password') || has('user') && has('pass'))) {
-            mode = 'username_password'
-          }
-          if (mode) envCreds['auth_mode'] = mode
-        }
-        if (Object.keys(envCreds).length > 0) sourceCreds[t].creds[ep.env] = envCreds
-      }
-    }
-    // kuboard 专属:把 service_map 回填到 kuboardSvcMap(cluster/namespace/configmap 三联)。
-    // 这样多源场景(主源 nacos + 副源 kuboard)下,kuboard 的 per-service 选项也能在 UI 复现。
-    if (t === 'kuboard' && s.service_map && typeof s.service_map === 'object') {
-      for (const [envID, svcs] of Object.entries(s.service_map as Record<string, unknown>)) {
-        if (!svcs || typeof svcs !== 'object') continue
-        for (const [svc, rec] of Object.entries(svcs as Record<string, unknown>)) {
-          if (!rec || typeof rec !== 'object') continue
-          const r = rec as { cluster?: string; namespace?: string; configmap?: string }
-          const loc = ensureKuboardLoc(envID, svc)
-          if (typeof r.cluster === 'string') loc.cluster = r.cluster
-          if (typeof r.namespace === 'string') loc.namespace = r.namespace
-          if (typeof r.configmap === 'string') loc.configmap = r.configmap
-        }
-      }
-    }
-    // 其它高级字段(auth / dataid_patterns 等)整块进 rawExtra round-trip 保留。
-    // service_map 一律排除:无论 nacos/apollo/consul 还是 kuboard,都已经被 applyImport
-    // 反填到结构化 reactive(envNamespaces+serviceConfigSel / kuboardSvcMap),emit 时
-    // emitSourceBody 自己会生成完整 service_map 块。如果 rawExtra 里再带一份,emit 会
-    // 在同一 source 对象下写两个 service_map: 键 → yaml 解析报
-    // "mapping key 'service_map' already defined" 直接挂掉(用户实测撞过)。
-    const rawExtra: Record<string, unknown> = {}
-    for (const [k, v] of Object.entries(s)) {
-      if (k === 'id' || k === 'type' || k === 'endpoints') continue
-      // 兼容老 yaml:per_env_credentials 字段已废弃,丢掉不回写
-      if (k === 'per_env_credentials') continue
-      if (k === 'service_map') continue
-      rawExtra[k] = v
-    }
-    if (Object.keys(rawExtra).length > 0) sourceCreds[t].rawExtra = rawExtra
-    void sourceID // reserved 给以后同 type 多源做 disambiguation
-  }
-
-  let primarySource: any = null
-  const ccArray = parsed.infrastructure?.config_centers
-  if (Array.isArray(ccArray) && ccArray.length > 0) {
-    for (const s of ccArray) {
-      ingestSource(s, typeof s?.id === 'string' ? s.id : '')
-    }
-    // 主源(用于 service_map 回填):取 id=default 的,没有就第一个
-    const defaultEntry = ccArray.find((s: any) => s?.id === 'default')
-    primarySource = defaultEntry || ccArray[0]
-  } else if (parsed.infrastructure?.config_center) {
-    ingestSource(parsed.infrastructure.config_center, 'default')
-    primarySource = parsed.infrastructure.config_center
-  }
-
-  const cc = primarySource?.type
-
-  // 反填 serviceSourceMap:每个 service 归属哪个源(决定 Step 6 服务勾选清单的初始勾选态)。
-  // 来源:repos[].config_source(显式声明走副源)→ 服务归属该副源;否则归属主源 type。
-  // 不反填这一步,Step 6 所有 checkbox 都是空,用户以为"配置源没反填"。
-  if (cc && Array.isArray(parsed.repos)) {
-    for (const r of parsed.repos) {
-      const explicit = (typeof r?.config_source === 'string' && r.config_source.trim()) ? r.config_source.trim() : ''
-      const target = explicit || cc
-      const svcNames: string[] = Array.isArray(r?.service_names) && r.service_names.length > 0
-        ? r.service_names.filter((s: any) => typeof s === 'string')
-        : (typeof r?.name === 'string' ? [r.name] : [])
-      for (const svc of svcNames) {
-        if (svc) serviceSourceMap[svc] = target
-      }
-    }
-  }
-
-  // 导入 yaml 里 endpoints[].<field> 回填到 ccCredInputs(所有字段,含 secret):
-  // yaml 带明文是设计如此,同事导入就齐活。占位符 {{XXX}} 跳过不覆盖用户可能已填的值。
-  // 注:ingestSource 已写到 sourceCreds,这里再写一份到 ccCredInputs 是为了让老 preload /
-  // 老命名空间下拉等代码继续用 ccKeyFor 拼 key。后面 syncCcCredInputsFromSource 会刷新。
-  const endpoints = primarySource?.endpoints
-  if (Array.isArray(endpoints) && typeof cc === 'string') {
-    const fields = CC_FIELDS_BY_TYPE.value[cc] || []
-    for (const ep of endpoints) {
-      const envID = ep?.env
-      if (!envID || typeof envID !== 'string') continue
-      for (const f of fields) {
-        const v = ep?.[f.key]
-        if (typeof v !== 'string') continue
-        if (v.startsWith('{{') && v.endsWith('}}')) continue // 占位符不回填
-        ccCredInputs[ccKeyFor(cc, envID, f.key)] = v
-      }
-      // auth_mode 反推(同 obs 路径,UI-only 不进 yaml,得按 yaml 实际填了哪个凭证字段反推)
-      const authModeField = fields.find(f => f.key === 'auth_mode')
-      if (authModeField && authModeField.options && authModeField.options.length > 0) {
-        const has = (k: string) => {
-          const v = ep?.[k]
-          return typeof v === 'string' && v && !(v.startsWith('{{') && v.endsWith('}}'))
-        }
-        let mode = ''
-        if (authModeField.options.some(o => o.value === 'access_key') && has('access_key')) {
-          mode = 'access_key'
-        } else if (authModeField.options.some(o => o.value === 'api_key') && has('api_key')) {
-          mode = 'api_key'
-        } else if (authModeField.options.some(o => o.value === 'username_password')
-                   && (has('username') && has('password') || has('user') && has('pass'))) {
-          mode = 'username_password'
-        }
-        if (mode) {
-          ccCredInputs[ccKeyFor(cc, envID, 'auth_mode')] = mode
-        }
-      }
-    }
-  }
-
-  // service_map:每个 env → 每个服务 → {namespace, group, data_id} 回填到
-  // envNamespaces + serviceConfigSel + serviceConfigGroup。用户之前在 Step 5
-  // 挑过的下拉选项都恢复。多源时只回填主源的;副源 service_map 在 extraConfigSources blob 里随源透传。
-  // kuboard 的 service_map 已在 ingestSource 里吃进 kuboardSvcMap,这里只处理 nacos/apollo/consul shape。
-  const svcMap = (cc !== 'kuboard') ? primarySource?.service_map : null
-  if (svcMap && typeof svcMap === 'object') {
-    // 同时合成 ccHubStateByEnv 的 namespaces / entries —— UI 的"per-env namespace + per-service dataId"
-    // 下拉块只在 ccHubStateByEnv[envID]?.status === 'ok' 时渲染(envScanned 守卫),否则用户得手动
-    // 点"拉取勾选服务的配置"才能看到映射 UI。但 yaml 已经带了完整 service_map,我们直接拿 yaml 里
-    // 的 namespace / data_id / group 凑出一个合成 preload 结果灌进 ccHubStateByEnv,使下拉选项立刻出现且
-    // 默认就选中 yaml 里写的值。用户如果想换条目可以再点"重新拉取"走真正的网络扫描。
-    const synthByEnv: Record<string, { ns: Map<string, string>; entries: Map<string, { locator: string; group?: string; tenant?: string }> }> = {}
-    for (const [envID, svcs] of Object.entries(svcMap)) {
-      if (!svcs || typeof svcs !== 'object') continue
-      for (const [svc, rec] of Object.entries(svcs as Record<string, unknown>)) {
-        if (!rec || typeof rec !== 'object') continue
-        const r = rec as { namespace?: string; group?: string; data_id?: string }
-        if (typeof r.namespace === 'string' && r.namespace) {
-          envNamespaces[envID] = r.namespace
-        }
-        if (typeof r.data_id === 'string' && r.data_id) {
-          serviceConfigSel[svcKey(envID, svc)] = r.data_id
-        }
-        if (typeof r.group === 'string' && r.group) {
-          serviceConfigGroup[svcKey(envID, svc)] = r.group
-        }
-        // 累积合成 preload 用的 namespaces / entries
-        if (!synthByEnv[envID]) synthByEnv[envID] = { ns: new Map(), entries: new Map() }
-        const bucket = synthByEnv[envID]
-        if (typeof r.namespace === 'string' && r.namespace) {
-          // namespace id == show_name —— yaml 里只有一个值,无法区分 UUID vs friendly name
-          bucket.ns.set(r.namespace, r.namespace)
-        }
-        if (typeof r.data_id === 'string' && r.data_id) {
-          // entries 用 locator+group 做去重 key,避免同 dataId 重复加;namespace 写进 tenant
-          const grp = (typeof r.group === 'string' && r.group) ? r.group : ''
-          const key = r.data_id + '@' + grp
-          bucket.entries.set(key, {
-            locator: r.data_id,
-            group: grp || undefined,
-            tenant: (typeof r.namespace === 'string' && r.namespace) ? r.namespace : undefined,
-          })
-        }
-      }
-    }
-    for (const [envID, bucket] of Object.entries(synthByEnv)) {
-      if (bucket.ns.size === 0 && bucket.entries.size === 0) continue
-      ccHubStateByEnv[envID] = {
-        status: 'ok',
-        namespaces: Array.from(bucket.ns.entries()).map(([id, show]) => ({ id, show_name: show })),
-        entries: Array.from(bucket.entries.values()),
-        notes: ['(基于导入的 system.yaml service_map 合成,后续会跑一次真实 preload 校验)'],
-        loadedAt: Date.now(),
-        synthesized: true,
-      }
-    }
-  }
-
-  // observability:勾选态 + 每个工具的 endpoints[].<field> 回填到 toolInputs
-  const obs = parsed.infrastructure?.observability
-  if (obs && typeof obs === 'object') {
-    for (const key of Object.keys(enabledObservability)) {
-      enabledObservability[key] = Boolean(obs?.[key]?.enabled)
-      // 回填 endpoints
-      const spec = toolSpecByKey('obs', key)
-      const endpoints = obs?.[key]?.endpoints
-      if (spec && Array.isArray(endpoints)) {
-        for (const ep of endpoints) {
-          const envID = ep?.env
-          if (!envID || typeof envID !== 'string') continue
-          for (const f of spec.fields) {
-            const v = ep?.[f.key]
-            if (typeof v !== 'string') continue
-            if (v.startsWith('{{') && v.endsWith('}}')) continue
-            toolInputs[toolKeyFor('obs', key, envID, f.key)] = v
-          }
-          // auth_mode 是 UI-only(uiOnly:true),不进 yaml,所以反填时要按 yaml 实际有哪类
-          // 凭证字段反推:有 access_key → 'access_key';有 api_key → 'api_key';
-          // 有 username+password / user+pass → 'username_password'。否则保留默认。
-          // 关系到 showWhen 隐藏字段判定,不反推就会显示成"鉴权方式"下拉空白(用户体感
-          // 'yaml 反填没识别出鉴权方式')。
-          const authModeField = spec.fields.find(f => f.key === 'auth_mode')
-          if (authModeField && authModeField.options && authModeField.options.length > 0) {
-            const has = (k: string) => {
-              const v = ep?.[k]
-              return typeof v === 'string' && v && !(v.startsWith('{{') && v.endsWith('}}'))
-            }
-            let mode = ''
-            // 优先级:access_key > api_key > username/password 组合(常见三套)
-            if (authModeField.options.some(o => o.value === 'access_key') && has('access_key')) {
-              mode = 'access_key'
-            } else if (authModeField.options.some(o => o.value === 'api_key') && has('api_key')) {
-              mode = 'api_key'
-            } else if (authModeField.options.some(o => o.value === 'username_password')
-                       && (has('username') && has('password') || has('user') && has('pass'))) {
-              mode = 'username_password'
-            }
-            if (mode) {
-              toolInputs[toolKeyFor('obs', key, envID, 'auth_mode')] = mode
-            }
-          }
-        }
-      }
-      // datasource_uid_by_env(prometheus/jaeger/tempo/elk 走 Grafana 代理时记录的 UID)
-      const uidMap = obs?.[key]?.datasource_uid_by_env
-      if (uidMap && typeof uidMap === 'object' && ['prometheus','jaeger','tempo','elk'].includes(key)) {
-        for (const [envID, uid] of Object.entries(uidMap)) {
-          if (typeof uid === 'string' && uid) {
-            grafanaDsUidByObsEnv[obsGrafanaDsKey(key, envID)] = uid
-          }
-        }
-      }
-      // 访问方式回填:依据 yaml 里 via_grafana 标志 + 是否有 endpoints/uid_map 推断每个 env 的模式。
-      // 没法从 yaml 反推 per-env 不同 mode(yaml 只有一个 via_grafana 全局值),按 yaml 标志全 env 同步设。
-      if ((VIA_GRAFANA_ELIGIBLE as readonly string[]).includes(key)) {
-        const viaGrafana = Boolean(obs?.[key]?.via_grafana)
-        for (const env of environments) {
-          if (!env.id) continue
-          obsAccessModeMap[obsAccessKey(key, env.id)] = viaGrafana ? 'via_grafana' : 'direct'
-        }
-      }
-    }
-    // loki.label_mapping_by_env 回填:emit 时是 yaml 的 obs.loki.label_mapping_by_env.<env> = {
-    //   env_label, service_label, grafana_ds_uid, <env_label_key>: <env_value>, service_map: {svc: <svc_label_value>}
-    // }。反填到 lokiMappingByEnv[env] —— 否则切走切回(InitPage 不进 keep-alive)的瞬间,
-    // mount 时虽然 toolInputs 里 grafana URL/api_key 已恢复但 dsUID/envLabelKey 等空,
-    // triggerStep7Init 重拉 datasources 后只有 dsList,labels / values / mapping 仍空,
-    // 用户感知"反填的可观测配置全没了"。
-    const lokiBlock = obs?.['loki']
-    const lokiLM = lokiBlock?.label_mapping_by_env
-    if (lokiLM && typeof lokiLM === 'object') {
-      for (const [envID, m] of Object.entries(lokiLM as Record<string, any>)) {
-        if (!envID || !m || typeof m !== 'object') continue
-        const lm = getLokiMapping(envID)
-        if (typeof m.env_label === 'string' && m.env_label) lm.envLabelKey = m.env_label
-        if (typeof m.service_label === 'string' && m.service_label) lm.serviceLabelKey = m.service_label
-        if (typeof m.grafana_ds_uid === 'string' && m.grafana_ds_uid) lm.dsUID = m.grafana_ds_uid
-        // env_label 对应的 value 用动态 key,从 m 里挑(排除已知 schema 字段)
-        if (lm.envLabelKey && typeof m[lm.envLabelKey] === 'string') {
-          lm.envValue = m[lm.envLabelKey]
-        }
-        // service_map: {svc: {<service_label>: <value>}} 或 {svc: <value>} 两种形态
-        const sm = m.service_map
-        if (sm && typeof sm === 'object') {
-          for (const [svc, val] of Object.entries(sm as Record<string, any>)) {
-            if (!svc) continue
-            let v = ''
-            if (typeof val === 'string') v = val
-            else if (val && typeof val === 'object' && lm.serviceLabelKey
-                     && typeof val[lm.serviceLabelKey] === 'string') {
-              v = val[lm.serviceLabelKey]
-            }
-            if (v) lm.serviceValues[svc] = v
-          }
-        }
-      }
-    }
-
-    // k8s_runtime.service_map 回填:cluster/ns 提到 env 级(envLoc),workload/selector 进服务级(svcMap)。
-    // 同 env 多行 cluster/ns 不一致时取第一条(向导本来也只允许 env 级单选)。
-    const k8sSvcMap = obs?.['k8s_runtime']?.service_map
-    if (Array.isArray(k8sSvcMap)) {
-      for (const k of Object.keys(k8sRuntimeSvcMap)) delete k8sRuntimeSvcMap[k]
-      for (const k of Object.keys(k8sRuntimeEnvLoc)) delete k8sRuntimeEnvLoc[k]
-      for (const entry of k8sSvcMap) {
-        const envID = entry?.env, svc = entry?.service
-        if (typeof envID !== 'string' || typeof svc !== 'string' || !envID || !svc) continue
-        if (!k8sRuntimeEnvLoc[envID]) {
-          k8sRuntimeEnvLoc[envID] = {
-            cluster: typeof entry?.cluster === 'string' ? entry.cluster : '',
-            namespace: typeof entry?.namespace === 'string' ? entry.namespace : '',
-          }
-        }
-        k8sRuntimeSvcMap[svcKey(envID, svc)] = {
-          workload: typeof entry?.workload === 'string' ? entry.workload : '',
-          label_selector: typeof entry?.label_selector === 'string' ? entry.label_selector : '',
-        }
-      }
-    }
-  }
-
-  // data stores:新 schema endpoints 里每条有 env + service + 字段,回填到 scannedDS。
-  // 兼容老 schema(没有 service 字段的 endpoints):视为 service="legacy",也能呈现给用户。
-  const ds = parsed.infrastructure?.data_stores
-  if (Array.isArray(ds)) {
-    for (const key of Object.keys(scannedDS)) delete scannedDS[key]
-    for (const entry of ds) {
-      const t = entry?.type
-      if (typeof t !== 'string' || entry?.enabled === false) continue
-      const spec = toolSpecByKey('ds', t)
-      const endpoints = entry?.endpoints
-      if (!spec || !Array.isArray(endpoints)) continue
-      // yaml 里 enabled !== false 即开启 → 同步打开 enabledDataStores 标记。
-      // 否则下次 emit yaml 时这个数据层被丢掉,skills_whitelist 里 <type>-runtime-query
-      // 也不会出现(跟 auto-import 漏写 enabledDataStores 同一个 bug)。
-      enabledDataStores[t] = true
-      for (const ep of endpoints) {
-        const envID = ep?.env
-        if (!envID || typeof envID !== 'string') continue
-        const svc = typeof ep?.service === 'string' && ep.service ? ep.service : 'legacy'
-        if (!scannedDS[envID]) scannedDS[envID] = {}
-        if (!scannedDS[envID][svc]) scannedDS[envID][svc] = {}
-        const fields: DSFieldMap = {}
-        for (const f of spec.fields) {
-          const v = ep?.[f.key]
-          if (typeof v !== 'string' || !v) continue
-          if (v.startsWith('{{') && v.endsWith('}}')) continue
-          fields[f.key] = v
-        }
-        if (Object.keys(fields).length > 0) {
-          scannedDS[envID][svc][t] = fields
-          dsAutoFilled[t] = true
-        }
-      }
-    }
-    // 反填 dsScanState:Step 7 校验"下一步"门用 scanStateOf(env, svc) 判断该 (env, svc) 是否
-    // 已 fetched + 解析。yaml import 路径下 autoImportDataStores 没跑过,如果不合成 state,
-    // 用户即便所有连通性都通过、数据层字段都齐全,Step 7 校验仍报"服务配置未拉取/解析成功"卡死。
-    // 规则:有数据层条目 → 'ok';没数据层但服务存在(yaml 没识别到任何 redis/mysql 等)→ 'empty'。
-    for (const env of environments) {
-      if (!env.id) continue
-      for (const svc of allServiceNames.value) {
-        const k = scanStateKey(env.id, svc)
-        const hasItems = scannedDS[env.id]?.[svc] && Object.keys(scannedDS[env.id][svc]).length > 0
-        dsScanState[k] = hasItems
-          ? { status: 'ok' }
-          : { status: 'empty', reason: 'yaml 未识别到该服务的数据层(可能是无 redis/mysql 等)' }
-      }
-    }
-  }
+  const { primaryConfigCenter } = await applyParsedYAMLToWizardState(parsed, ctx)
+  const cc = primaryConfigCenter
 
   // 导入完直接跳到 Step 2(系统基本信息)— 反填的字段从这里展开,用户能逐步检查 / 改。
   // 留在欢迎页(Step 1)没意义,反填的内容在那看不见。
@@ -5572,496 +5207,33 @@ function deriveSkillsWhitelist(): string[] {
 }
 
 // ── YAML generation ──
-function yamlStr(val: string): string {
-  if (!val) return '""'
-  if (/[:{}\[\],&*?|>!%#@`'"\n]/.test(val) || val.startsWith(' ') || val.endsWith(' ')) {
-    return `"${val.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
-  }
-  return `"${val}"`
-}
-
-// hasAnyLokiMapping 当前 environments 是否有任意 env 配过完整的 Loki 标签映射(envLabelKey + serviceLabelKey)。
-// 用作 yaml 是否输出 loki.label_mapping_by_env 节的开关。
-function hasAnyLokiMapping(): boolean {
-  return environments.some(env => {
-    if (!env.id) return false
-    const lm = lokiMappingByEnv[env.id]
-    return !!(lm && lm.envLabelKey && lm.serviceLabelKey)
-  })
-}
-
-// emitLokiLabelMapping 输出 label_mapping_by_env 块到给定 lines。
-// indent 是父字段的缩进(eg "      " 6 空格表 loki: 字段),内部按 +2 空格逐层缩进。
-// 给 yaml 生成两处复用(loki 启用时的 loki 块下 / loki 未启用但有映射时的兜底块下)。
-function emitLokiLabelMapping(lines: string[], indent: string): void {
-  const lmEnvs = environments.filter(env => env.id && lokiMappingByEnv[env.id]
-    && lokiMappingByEnv[env.id].envLabelKey && lokiMappingByEnv[env.id].serviceLabelKey)
-  if (lmEnvs.length === 0) return
-  lines.push(`${indent}label_mapping_by_env:    # routing skill 拼 LogQL 时按 (env, service) 注入 label 过滤器`)
-  for (const env of lmEnvs) {
-    const lm = lokiMappingByEnv[env.id]!
-    lines.push(`${indent}  ${env.id}:`)
-    lines.push(`${indent}    env_label: ${yamlStr(lm.envLabelKey)}`)
-    lines.push(`${indent}    service_label: ${yamlStr(lm.serviceLabelKey)}`)
-    if (lm.dsUID) lines.push(`${indent}    grafana_ds_uid: ${yamlStr(lm.dsUID)}`)
-    if (lm.envValue) {
-      lines.push(`${indent}    ${lm.envLabelKey}: ${yamlStr(lm.envValue)}`)
-    }
-    const svcLines: string[] = []
-    for (const svc of allServiceNames.value) {
-      const v = (lm.serviceValues || {})[svc]
-      // 空值 = "无 / 不进 loki":不写 service 块进 service_map ——
-      // routing skill 拿不到该服务的 label 值就跳过 loki 查询。
-      if (!v) continue
-      svcLines.push(`${indent}      ${yamlStr(svc)}:`)
-      svcLines.push(`${indent}        ${lm.serviceLabelKey}: ${yamlStr(v)}`)
-    }
-    if (svcLines.length > 0) {
-      lines.push(`${indent}    service_map:`)
-      lines.push(...svcLines)
-    }
-  }
-}
-
+// 整个 generateYAML 主体在 lib/yamlGenerator.ts;此处只负责把 setup() 里的 25+
+// 个 closure deps 打包成 YAMLGenContext 传进去。
 function generateYAML(): string {
-  // 出 yaml 之前先按 scannedDS 实时刷一次 enabledDataStores —— 这是 skills_whitelist
-  // 派生 + Step 5 env-vars 字段集 + 校验逻辑共同的"启用清单",必须跟用户 Step 6 实际看到的
-  // 数据层组件一致。否则:用户删了某 type 的最后一条 → enabledDataStores 还 true → 白名单
-  // 仍带 <type>-runtime-query → 部署后空跑;反之同理。
-  recomputeEnabledDataStoresFromScanned()
-  const lines: string[] = []
-
-  // 顶部导言注释(解析时被忽略,只给用户看)
-  lines.push('# 由初始化向导生成，可手工调整。字段说明：schema/system.schema.yaml')
-  lines.push('# 以下行尾 # 注释仅为提示，YAML 解析时会被忽略。')
-
-  // system
-  lines.push('system:')
-  lines.push(`  id: ${system.id || 'my-system'}                    # 机器可读标识，仅 [a-z0-9-]；用作 output_dir / agent id 前缀`)
-  lines.push(`  name: ${yamlStr(system.name || 'My System')}          # 用户可见名称（中/英均可）`)
-  if (system.description) lines.push(`  description: ${yamlStr(system.description)}`)
-
-  // agent
-  lines.push('')
-  lines.push('agent:')
-  // agent.id 是机器人在 AI 平台里的稳定标识(OpenClaw agents.list[*].id / Claude Code、Cursor 的 subagent 名)
-  // 用户没填就推导成 "<system.id>-troubleshooter",跟历史命名兼容。
-  const agentID = (agent.id || '').trim() || `${system.id || 'my-system'}-troubleshooter`
-  lines.push(`  id: ${agentID}            # AI 平台里的稳定标识(OpenClaw agents.list / Claude Code / Cursor subagent 名)`)
-  lines.push(`  name: ${yamlStr(agent.name || agentNameDefault.value)}`)
-  // model 是 openclaw 专属:claude-code / cursor 在客户端自己挑,没勾 openclaw 就不写。
-  // workspace_name 不再单独 emit —— Go 端 ResolveWorkspaceName() 会用 agent.id 当目录名,
-  // 跟 OpenClaw agents.list 共享同一标识,用户少看一个字段。
-  if (enabledTargets['openclaw']) {
-    lines.push(`  model: ${agent.model}    # OpenClaw gateway 路由用的 LLM model id`)
-    // target_models:仅在 openclaw 被勾选,且其模型跟 agent.model 不一致时才写出。
-    const tmEntries: [string, string][] = []
-    for (const t of modelConsumingTargets) {
-      if (!enabledTargets[t]) continue
-      const v = (targetModels[t] || '').trim()
-      if (v && v !== agent.model) tmEntries.push([t, v])
-    }
-    if (tmEntries.length > 0) {
-      lines.push('  target_models:     # per-target 模型覆盖;key 只认 openclaw(其它 target 不消费)')
-      for (const [t, m] of tmEntries) {
-        lines.push(`    ${t}: ${m}`)
-      }
-    }
+  const ctx: YAMLGenContext = {
+    system, agent, agentNameDefault: agentNameDefault.value,
+    targetModels, enabledTargets, enabledObservability,
+    environments: environments.map(e => ({ id: e.id, api_domain: e.api_domain, web_domain: e.web_domain, is_prod: e.is_prod })),
+    repos: repos.map(r => ({
+      name: r.name, url: r.url, stack: r.stack, framework: r.framework,
+      role: r.role, sub_path: r.sub_path,
+      service_names: r.service_names,
+      env_branches: r.env_branches,
+      _serviceEntries: r._serviceEntries,
+    })),
+    sourceCreds, serviceConfigSel, serviceConfigGroup, envNamespaces,
+    kuboardSvcMap, lokiMappingByEnv, toolInputs, grafanaDsUidByObsEnv,
+    k8sRuntimeEnvLoc, k8sRuntimeSvcMap, scannedDS,
+    activeSourceTypes: activeSourceTypes.value,
+    allServiceNames: allServiceNames.value,
+    isMultiSource: isMultiSource.value,
+    targetOptions, modelConsumingTargets,
+    OBS_TOOL_SPECS, CC_FIELDS_BY_TYPE: CC_FIELDS_BY_TYPE.value,
+    normalizeDomain, getServiceSource, isFieldHidden, isObsFieldHidden,
+    getObsAccessMode, obsGrafanaDsKey, svcKey, toolKeyFor, toolSpecByKey,
+    deriveSkillsWhitelist, recomputeEnabledDataStoresFromScanned,
   }
-
-  // environments
-  lines.push('')
-  lines.push('# environments：声明系统的所有环境。每个 env 会注册一套独立的 MCP 实例')
-  lines.push('# （如 nacos-mcp-server-dev / -prod），机器人按 is_prod 调整谨慎度。')
-  lines.push('environments:')
-  for (const env of environments) {
-    lines.push(`  - id: ${env.id || 'env'}`)
-    // 域名保留用户给的 scheme(http/https)—— 下游 bot 实际发请求时需要知道协议,
-    // 我们不替用户猜;只剥 path/query 保留 host[:port] 部分。裸 host(无 scheme)
-    // 也接受,下游按 https 兜底。
-    const apiD = normalizeDomain(env.api_domain)
-    const webD = normalizeDomain(env.web_domain)
-    // 带 scheme 的值(https://...)里含 ":",用 yamlStr 做 double-quote 转义防严格 parser 误解
-    if (apiD) lines.push(`    api_domain: ${yamlStr(apiD)}     # 后端接口(带 http/https 前缀更明确;不带视为 https)`)
-    if (webD) lines.push(`    web_domain: ${yamlStr(webD)}     # 前端入口(同上)`)
-    lines.push(`    is_prod: ${env.is_prod}         # 生产环境标记:true 时机器人默认更保守、查询前二次确认`)
-  }
-
-  // repos
-  lines.push('')
-  lines.push('# repos：所有纳入排障范围的代码仓库。stack 决定 analyzer 与 skill 策略。')
-  lines.push('repos:')
-  for (const repo of repos) {
-    // stack 若没扫到兜底成 go,保证 yaml schema 合法;Step 4 UI 是 readonly 自动识别 badge,
-    // 用户如果对兜底不满意,预览这里改或回 Step 4 点"扫一下"。
-    lines.push(`  - name: ${repo.name || 'my-service'}`)
-    lines.push(`    url: ${repo.url || 'git@github.com:org/repo.git'}`)
-    lines.push(`    stack: ${repo.stack || 'go'}             # go/java/node/php/python，决定用哪种配置扫描器`)
-    // role 默认 backend 时不写出(老 yaml 兼容);非默认才 emit
-    if (repo.role && repo.role !== 'backend') {
-      lines.push(`    role: ${repo.role}             # 仓库角色:决定排障时是否进服务依赖图`)
-    }
-    // sub_path:monorepo 子目录,空时不写出
-    if (repo.sub_path && repo.sub_path.trim()) {
-      lines.push(`    sub_path: ${repo.sub_path.trim()}             # monorepo 子目录(本服务在仓库内的相对路径)`)
-    }
-    if (repo.framework) lines.push(`    framework: ${repo.framework}`)
-    if (repo.service_names.trim()) {
-      lines.push('    service_names:       # 本 repo 实际部署出来的 service 名（config-map 以此为 key）')
-      for (const sn of repo.service_names.split(',').map(s => s.trim()).filter(Boolean)) {
-        lines.push(`      - ${sn}`)
-      }
-    }
-    // service_entries:同仓多服务时记录每个服务的入口子目录(routing skill 据此 grep 代码)。
-    // 只在 _serviceEntries 非空时 emit;独立 repo / 单服务仓不写。
-    if (repo._serviceEntries && Object.keys(repo._serviceEntries).length > 0) {
-      lines.push('    service_entries:     # 同仓多服务时,每个服务在仓库内的入口子目录')
-      for (const [name, entry] of Object.entries(repo._serviceEntries)) {
-        if (!name || !entry) continue
-        lines.push(`      ${name}: ${entry}`)
-      }
-    }
-    const branchEntries = Object.entries(repo.env_branches).filter(([, v]) => v)
-    if (branchEntries.length) {
-      lines.push('    env_branches:        # 每个 env 对应的长期分支；routing skill 据此切换代码')
-      for (const [eid, branch] of branchEntries) {
-        lines.push(`      ${eid}: ${branch}`)
-      }
-    }
-    // config_source:多源场景下显式声明本仓库走哪个源(从 repo 的服务们的源里取
-    // 第一个;单仓多服务用不同源是边角场景,一般同源)。单源场景不写。
-    if (isMultiSource.value) {
-      const svcs = repo.service_names.split(',').map(s => s.trim()).filter(Boolean)
-      const firstSvc = svcs[0] || repo.name
-      const src = getServiceSource(firstSvc)
-      if (src && src !== activeSourceTypes.value[0]) {
-        lines.push(`    config_source: ${src}    # 引用 infrastructure.config_centers[].id`)
-      }
-    }
-  }
-
-  // infrastructure
-  lines.push('')
-  lines.push('infrastructure:')
-
-  // config_center / config_centers
-  // 设计:**所有字段**(包括密码 / token)的填过的值**都写进 system.yaml**,让同事
-  // 导入后开箱即用,不用再问不用再填。没填的字段仍给 {{占位符}},让 install.sh 兜底。
-  //
-  // ⚠ 代价:yaml 带明文密码,分享范围必须可控(团队私有 git / 私密频道),**绝不能**
-  // push 到公开 github / 贴公开论坛。secret 字段旁边有"🔒"图标提醒。
-  //
-  // schema 选择:
-  //   - 单源(extraConfigSources 空):写老 config_center 单数(yaml 干净,跟现存项目兼容)
-  //   - 多源:写新 config_centers 数组,主源(default)+ 副源(从 yaml 透传 blob)
-  // emitSourceBody:把 endpoints + service_map 按指定缩进写到 lines。
-  // type 决定字段集;sourceID 给"主源 vs 副源"显示提示用(影响 placeholder 命名)。
-  // includeServiceMap 仅主源(default 或单源 type)写,副源的 service_map 走 rawExtra。
-  const emitSourceBody = (out: string[], baseIndent: string, type: string, sourceID: string, includeServiceMap: boolean) => {
-    const data = sourceCreds[type] || { creds: {} }
-    const fields = CC_FIELDS_BY_TYPE.value[type] || []
-    // kuboard:cluster/namespace/configmap 不是连接凭证,改成 per-service service_map 输出。
-    // endpoints 段只写 url + auth 类字段(剩下的 fields)。
-    const isKuboard = type === 'kuboard'
-    const endpointFields = isKuboard
-      ? fields.filter(f => f.key !== 'cluster' && f.key !== 'namespace' && f.key !== 'configmap')
-      : fields
-    if (endpointFields.length > 0) {
-      out.push(`${baseIndent}endpoints:     # ⚠ 含明文凭证,仅团队私密范围分享,别 commit 公开 git`)
-      for (const env of environments) {
-        if (!env.id) continue
-        out.push(`${baseIndent}  - env: ${env.id}`)
-        const envCreds = data.creds[env.id] || {}
-        for (const f of endpointFields) {
-          if (f.uiOnly) continue // UI-only(如 auth_mode)不进 yaml
-          // showWhen 命中(如 kuboard 的 access_key / username+password 二选一)→
-          // UI 隐藏的字段就别 emit,不然 yaml 里会同时列两套凭证字段误导用户。
-          if (isFieldHidden(type, env.id, f, (k) => (envCreds[k] || ''))) continue
-          const v = (envCreds[f.key] || '').trim()
-          if (v) {
-            const comment = f.secret ? '      # ⚠ secret,yaml 分享注意范围' : ''
-            out.push(`${baseIndent}    ${f.key}: ${yamlStr(v)}${comment}`)
-          } else {
-            // placeholder 包含 sourceID(多源时区分),单源 default 保持老命名兼容
-            const ph = sourceID === 'default'
-              ? f.envVar(env.id)
-              : `${f.envVar(env.id)}_${sourceID.toUpperCase().replace(/-/g, '_')}`
-            out.push(`${baseIndent}    ${f.key}: "{{${ph}}}"      # 没填,部署时交互收集`)
-          }
-        }
-      }
-    }
-    if (includeServiceMap) {
-      const svcMapLines: string[] = []
-      for (const env of environments) {
-        if (!env.id) continue
-        const perEnv: string[] = []
-        for (const svc of allServiceNames.value) {
-          // 只把"挑了走当前 source"的服务写进当前 source 的 service_map
-          if (getServiceSource(svc) !== type) continue
-          if (isKuboard) {
-            const loc = kuboardSvcMap[svcKey(env.id, svc)]
-            if (!loc) continue
-            const cluster = (loc.cluster || '').trim()
-            const ns = (loc.namespace || '').trim()
-            const cm = (loc.configmap || '').trim()
-            // 至少要有 cluster + namespace + configmap 才落 yaml,否则跳过(不完整不可用)
-            if (!cluster || !ns || !cm) continue
-            perEnv.push(`${baseIndent}      ${yamlStr(svc)}:`)
-            perEnv.push(`${baseIndent}        cluster: ${yamlStr(cluster)}`)
-            perEnv.push(`${baseIndent}        namespace: ${yamlStr(ns)}`)
-            perEnv.push(`${baseIndent}        configmap: ${yamlStr(cm)}`)
-          } else {
-            const dataId = (serviceConfigSel[svcKey(env.id, svc)] || '').trim()
-            if (!dataId) continue
-            const ns = (envNamespaces[env.id] || '').trim()
-            const group = (serviceConfigGroup[svcKey(env.id, svc)] || '').trim()
-            perEnv.push(`${baseIndent}      ${yamlStr(svc)}:`)
-            if (ns) perEnv.push(`${baseIndent}        namespace: ${yamlStr(ns)}`)
-            if (group) perEnv.push(`${baseIndent}        group: ${yamlStr(group)}`)
-            perEnv.push(`${baseIndent}        data_id: ${yamlStr(dataId)}`)
-          }
-        }
-        if (perEnv.length > 0) {
-          svcMapLines.push(`${baseIndent}    ${env.id}:`)
-          svcMapLines.push(...perEnv)
-        }
-      }
-      if (svcMapLines.length > 0) {
-        const fieldList = isKuboard ? 'cluster / namespace / configmap' : 'namespace / group / data_id'
-        out.push(`${baseIndent}service_map:   # 每个环境每个服务对应哪条配置(${fieldList})`)
-        out.push(...svcMapLines)
-      }
-    }
-    // rawExtra(yaml 高级字段透传)
-    // 防御:旧版本 saved 里可能残留 service_map(老 ingest 没排除 nacos/apollo/consul 的),
-    // emit 时过滤一份再 dump,避免跟 emitSourceBody 自己生成的 service_map 冲突。
-    if (data.rawExtra) {
-      const safeExtra: Record<string, unknown> = {}
-      for (const [k, v] of Object.entries(data.rawExtra)) {
-        if (k === 'service_map') continue
-        safeExtra[k] = v
-      }
-      if (Object.keys(safeExtra).length > 0) {
-        const dump = yaml.dump(safeExtra, { indent: 2, lineWidth: -1 })
-        for (const line of dump.split('\n')) {
-          if (line.trim() === '') continue
-          out.push(`${baseIndent}${line}`)
-        }
-      }
-    }
-  }
-
-  const active = activeSourceTypes.value
-  if (active.length === 0) {
-    // 没勾任何源:写 type=none 占位
-    lines.push('  config_center:        # 没勾配置源,写 none 占位')
-    lines.push('    type: none')
-  } else if (active.length === 1) {
-    // 单源:走老 schema config_center: { ... }(yaml 干净 + 跟现存项目兼容)
-    const t = active[0]
-    lines.push('  config_center:        # 配置中心:nacos/apollo/consul/kubernetes/env-vars/none')
-    lines.push(`    type: ${t}`)
-    emitSourceBody(lines, '    ', t, 'default', true)
-  } else {
-    // 多源:写 config_centers: [...] 数组,每个源 id 取 type
-    lines.push('  config_centers:        # 多源配置:每个源独立 type/凭证;repos[].config_source 引用 id')
-    for (const t of active) {
-      lines.push(`    - id: ${t}        # 源 id 跟 type 同名(简单模式;同 type 多源需手编辑)`)
-      lines.push(`      type: ${t}`)
-      emitSourceBody(lines, '      ', t, t, true)
-    }
-  }
-
-  // observability:对每个勾选的工具写 endpoints(按 env 列连接字段,跟 Step 5 同样的策略)。
-  // 用户填过的值直接进 yaml;空字段不输出。保留 loki/prometheus via_grafana 标志
-  // (这俩常见"通过 Grafana 代理访问"的用法,在选 Grafana 时自动标 true 给 routing skill 参考)。
-  // 即使没勾任何工具,只要 Loki 标签映射有数据也要输出 observability.loki.label_mapping_by_env
-  // (用户可能只用 grafana,loki 走代理但 mapping 仍要进 yaml)
-  const anyObs = Object.values(enabledObservability).some(Boolean) || hasAnyLokiMapping()
-  if (anyObs) {
-    lines.push('')
-    lines.push('  observability:        # ⚠ 含明文凭证,仅团队私密范围分享')
-    for (const spec of OBS_TOOL_SPECS) {
-      if (!enabledObservability[spec.key]) continue
-      lines.push(`    ${spec.key}:`)
-      lines.push('      enabled: true')
-      if (spec.key === 'elk') {
-        lines.push(`      default_index: "${system.id || 'my-system'}-logs-*"`)
-      }
-      // 每个 env 的 via_grafana 模式状态:per-env 不同的混合模式也支持
-      // (但常见就是全 env 统一)。loki 总是带 via_grafana(老代码兼容);其他类型按需。
-      const isViaGrafanaEligible = (VIA_GRAFANA_ELIGIBLE as readonly string[]).includes(spec.key)
-      const anyViaGrafana = isViaGrafanaEligible && environments.some(env =>
-        env.id && getObsAccessMode(spec.key, env.id) === 'via_grafana')
-      if (spec.key === 'loki' || spec.key === 'prometheus' || spec.key === 'jaeger' || spec.key === 'tempo' || spec.key === 'elk') {
-        lines.push(`      via_grafana: ${anyViaGrafana}`)
-      }
-      // Loki 标签映射(per-env)在 loki 块下输出。indent="      " 表 6 空格(loki: 字段缩进)
-      if (spec.key === 'loki') {
-        emitLokiLabelMapping(lines, '      ')
-      }
-      // 按 env 列填过的字段(via_grafana 模式下 endpoints 字段不进 yaml,改走 datasource_uid_by_env)
-      const envRows: string[] = []
-      for (const env of environments) {
-        if (!env.id) continue
-        // via_grafana 模式 → 端点信息走 Grafana ds,不写本工具自己的 url/auth
-        if (isViaGrafanaEligible && getObsAccessMode(spec.key, env.id) === 'via_grafana') continue
-        const fieldLines: string[] = []
-        for (const f of spec.fields) {
-          if (f.uiOnly) continue
-          if (isObsFieldHidden(spec.key, env.id, f)) continue
-          const k = toolKeyFor('obs', spec.key, env.id, f.key)
-          const v = (toolInputs[k] || '').trim()
-          if (v) {
-            const note = f.secret ? '      # ⚠ secret' : ''
-            fieldLines.push(`          ${f.key}: ${yamlStr(v)}${note}`)
-          }
-        }
-        if (fieldLines.length > 0) {
-          envRows.push(`        - env: ${env.id}`)
-          envRows.push(...fieldLines)
-        }
-      }
-      if (envRows.length > 0) {
-        lines.push('      endpoints:')
-        lines.push(...envRows)
-      }
-      // Loki 之外的 via-grafana 工具(prometheus/jaeger/tempo/elk):via_grafana 模式选了 ds → emit。
-      // Loki 自己的 ds_uid 在 emitLokiLabelMapping 里输出(老 schema 维持兼容)。
-      if (['prometheus', 'jaeger', 'tempo', 'elk'].includes(spec.key)) {
-        const uidRows: string[] = []
-        for (const env of environments) {
-          if (!env.id) continue
-          if (getObsAccessMode(spec.key, env.id) !== 'via_grafana') continue
-          const uid = (grafanaDsUidByObsEnv[obsGrafanaDsKey(spec.key, env.id)] || '').trim()
-          if (uid) uidRows.push(`        ${env.id}: ${yamlStr(uid)}`)
-        }
-        if (uidRows.length > 0) {
-          lines.push('      datasource_uid_by_env:        # 走 Grafana 代理时用的 datasource UID')
-          lines.push(...uidRows)
-        }
-      }
-      // k8s_runtime 专属:cluster/namespace 从 env 级 k8sRuntimeEnvLoc 拿(一个 env 一组),
-      // workload + selector 从服务级 k8sRuntimeSvcMap 拿。每行 env+service 把这两层拼成
-      // 一条完整的 service_map 记录,routing skill 直接喂给 KuboardListPods。
-      if (spec.key === 'k8s_runtime') {
-        const svcRows: string[] = []
-        for (const env of environments) {
-          if (!env.id) continue
-          const eloc = k8sRuntimeEnvLoc[env.id]
-          if (!eloc?.cluster || !eloc?.namespace) continue
-          for (const svc of allServiceNames.value) {
-            const sloc = k8sRuntimeSvcMap[svcKey(env.id, svc)]
-            // 没挑 workload 也照样落一行 cluster+ns,routing skill 至少能定位到 ns 级,
-            // 落到具体 pod 时再 fallback 到 svc 名做 label 模糊匹配。
-            svcRows.push(`        - env: ${env.id}`)
-            svcRows.push(`          service: ${yamlStr(svc)}`)
-            svcRows.push(`          cluster: ${yamlStr(eloc.cluster)}`)
-            svcRows.push(`          namespace: ${yamlStr(eloc.namespace)}`)
-            if (sloc?.workload) svcRows.push(`          workload: ${yamlStr(sloc.workload)}`)
-            if (sloc?.label_selector) svcRows.push(`          label_selector: ${yamlStr(sloc.label_selector)}`)
-          }
-        }
-        if (svcRows.length > 0) {
-          lines.push('      service_map:        # routing skill 解析 env+服务名时用')
-          lines.push(...svcRows)
-        }
-      }
-    }
-    // 兜底:用户只勾了 grafana(没勾 loki)但配过 Loki 标签映射。
-    // 写一个只含 enabled:false + via_grafana:true + label_mapping_by_env 的 loki 节点,
-    // 让 routing skill 仍能拿到映射。
-    if (!enabledObservability.loki && hasAnyLokiMapping()) {
-      lines.push('    loki:')
-      lines.push('      enabled: false      # 仅承载标签映射,实际通过 Grafana 代理查询')
-      lines.push('      via_grafana: true')
-      emitLokiLabelMapping(lines, '      ')
-    }
-  }
-
-  // data_stores:从 scannedDS(env → service → dsKey → fields)推导。
-  // schema 为每个数据层 type 一条,endpoints 按 env × service 展开,
-  // 让 generator 知道"dev 环境 user-service 用的 redis 是 X,order-service 用的 redis 是 Y"。
-  const dsTypesUsed = new Set<string>()
-  for (const envID of Object.keys(scannedDS)) {
-    for (const svc of Object.keys(scannedDS[envID])) {
-      for (const dsKey of Object.keys(scannedDS[envID][svc])) {
-        dsTypesUsed.add(dsKey)
-      }
-    }
-  }
-  if (dsTypesUsed.size > 0) {
-    lines.push('')
-    lines.push('  data_stores:          # 从各服务配置自动识别的数据层;⚠ 含明文凭证,分享注意范围')
-    for (const dsType of Array.from(dsTypesUsed).sort()) {
-      const spec = toolSpecByKey('ds', dsType)
-      lines.push(`    - type: ${dsType}`)
-      lines.push('      enabled: true')
-      lines.push('      readonly_enforced: true    # 强制只读;generator 拒绝写操作')
-      const epRows: string[] = []
-      for (const env of environments) {
-        if (!env.id) continue
-        const svcs = scannedDS[env.id]
-        if (!svcs) continue
-        for (const svc of Object.keys(svcs).sort()) {
-          const fields = svcs[svc]?.[dsType]
-          if (!fields) continue
-          const fieldLines: string[] = []
-          for (const [fKey, val] of Object.entries(fields)) {
-            if (!val) continue
-            const note = spec?.fields.find(f => f.key === fKey)?.secret ? '          # ⚠ secret' : ''
-            fieldLines.push(`          ${fKey}: ${yamlStr(val)}${note}`)
-          }
-          if (fieldLines.length > 0) {
-            epRows.push(`        - env: ${env.id}`)
-            epRows.push(`          service: ${yamlStr(svc)}`)
-            epRows.push(...fieldLines)
-          }
-        }
-      }
-      if (epRows.length > 0) {
-        lines.push('      endpoints:')
-        lines.push(...epRows)
-      }
-    }
-  }
-
-  // generation
-  const skills = deriveSkillsWhitelist()
-  lines.push('')
-  lines.push('generation:')
-  // output_dir 故意不写:CLI `tshoot gen` 才会读它,桌面 ImportAndDeploy 走 ~/.tshoot/...,
-  // wizard 用户不需要;CLI 用户可以手动加这一行覆盖默认 ./dist。
-  const selectedTargets = targetOptions.filter(t => enabledTargets[t])
-  const targetList = selectedTargets.length ? selectedTargets : ['openclaw']
-  lines.push('  targets:                             # 每个 target 产出一份机器人产物（同一份 system.yaml）')
-  for (const t of targetList) {
-    lines.push(`    - ${t}`)
-  }
-  lines.push('  skills_whitelist:                    # 只列出的 skill 会进工作区(留空 = 全开)')
-  for (const s of skills) {
-    lines.push(`    - ${s}`)
-  }
-  // preserve_on_regenerate 只对 openclaw target 生效:列表里的文件只存在于
-  // ~/.openclaw/workspace/<id>/(由 SOUL.md / USER.md / CHECKLIST.md 模板产出),
-  // claude-code / cursor 的产物不走这条 snapshot-restore 路径,emit 出来纯属噪音。
-  if (enabledTargets['openclaw']) {
-    lines.push('  preserve_on_regenerate:              # 二次 gen 时整体保留这些文件,让用户手改不丢(仅 openclaw)')
-    lines.push('    - SOUL.md')
-    lines.push('    - USER.md')
-    lines.push('    - CHECKLIST.md')
-  }
-
-  // meta
-  lines.push('')
-  lines.push('meta:')
-  lines.push('  schema_version: "0.1"')
-  lines.push('  tshoot_template_ref:')
-  lines.push('    repo: troubleshooter-studio')
-  lines.push('    ref: main')
-
-  return lines.join('\n') + '\n'
+  return libGenerateYAML(ctx)
 }
 
 // ── Validation ──
@@ -6077,60 +5249,9 @@ function generateYAML(): string {
 //   Step 5:所选 type 的 non-optional 字段 per env 必填(optional 的可以留空让 install.sh 问)
 //   Step 6/7:无硬校验
 
-// errorLabels 把 error key 翻成人话,给按钮旁的"还差 N 项"提示用。
-const errorLabels: Record<string, string> = {
-  'system.id': '系统 ID',
-  'system.name': '系统显示名',
-  'agent.name': '机器人名称',
-  'agent.workspace_name': 'OpenClaw 工作区名',
-  'targets.none': '至少勾一个部署平台',
-  'model.openclaw': 'OpenClaw 模型',
-}
+// labelForErrorKey 实现在 lib/yamlValidator.ts;此处 thin shim 注入 repos 引用。
 function labelForErrorKey(k: string): string {
-  if (errorLabels[k]) return errorLabels[k]
-  if (k.startsWith('env.')) {
-    const [, i, field] = k.split('.')
-    return `环境 #${Number(i) + 1} ${field === 'id' ? 'ID' : 'API 域名'}`
-  }
-  if (k.startsWith('repo.')) {
-    const parts = k.split('.')
-    const i = Number(parts[1]) + 1
-    const f = parts[2]
-    if (f === 'localPath') return `仓库 #${i} 本地目录`
-    if (f === 'url') return `仓库 #${i} URL`
-    if (f === 'cloneTarget') return `仓库 #${i} clone 落盘父目录(必填,远程仓库部署时 clone 到 <父目录>/${repos[i - 1]?.name || '<repo.name>'})`
-    return `仓库 #${i} ${f}`
-  }
-  if (k.startsWith('cc.')) {
-    // 多源未分配:cc.unassigned.<service>
-    if (k.startsWith('cc.unassigned.')) {
-      const svcName = k.substring('cc.unassigned.'.length)
-      return `服务 "${svcName}" 未分配源 —— 在某个源面板的"本环境包含的服务"里勾上`
-    }
-    // 细分:cc.<source>.<env>.scan / cc.<source>.<env>.namespace
-    //      cc.<source>.<env>.svc.<service> / cc.<source>.<env>.<field>
-    const parts = k.split('.')
-    const source = parts[1]
-    const envID = parts[2]
-    const kind = parts[3]
-    if (kind === 'scan') return `${envID} 环境(${source} 源)未预加载成功`
-    if (kind === 'namespace') return `${envID} 环境(${source} 源)未选 namespace`
-    if (kind === 'svc') {
-      const svcName = parts[4]
-      if (source === 'kuboard') return `${envID} 环境 "${svcName}" 服务未挑齐 集群/namespace/ConfigMap`
-      return `${envID} 环境 "${svcName}" 服务未映射 dataId`
-    }
-    return `${source}.${envID}.${kind}`
-  }
-  if (k.startsWith('ds.')) {
-    const parts = k.split('.')
-    const last = parts[parts.length - 1]
-    // ds.<env>.<svc>.notfetched / ds.<env>.<svc>.<dsKey>.probefail / .notested
-    if (last === 'probefail') return `${parts[1]} 环境 "${parts[2]}" 服务的 ${parts[3]} 连通性失败`
-    if (last === 'notested')  return `${parts[1]} 环境 "${parts[2]}" 服务的 ${parts[3]} 未测连通性`
-    return `${parts[1]} 环境 "${parts[2]}" 服务配置未拉取 / 解析成功`
-  }
-  return k
+  return libLabelForErrorKey(k, repos)
 }
 
 // 当前步骤的错误集合:computed,字段改了立即重算
@@ -6144,137 +5265,27 @@ const currentStepErrors = computed<Set<string>>(() => {
     return new Set<string>()
   }
 })
+// computeStepErrors 主体在 lib/yamlValidator.ts;此处 thin shim 注入 reactive deps。
 function computeStepErrors(): Set<string> {
-  const errs = new Set<string>()
-  const step = currentStep.value
-  if (step === 1) {
-    // Step 1 = 欢迎页(导入 yaml / 从零开始),无强制校验。任意一条路径走完都让 nextStep。
-  } else if (step === 2) {
-    if (!system.id.trim()) errs.add('system.id')
-    else if (!/^[a-z0-9][a-z0-9-]*$/.test(system.id)) errs.add('system.id')
-    if (!system.name.trim()) errs.add('system.name')
-  } else if (step === 3) {
-    if (!agent.name.trim()) errs.add('agent.name')
-    if (!anyTargetSelected.value) errs.add('targets.none')
-    if (enabledTargets['openclaw']) {
-      // workspace 目录名跟 agent.id 共用,system.id 非空就有自动派生值;不再单独校验
-      if (!(targetModels['openclaw'] || '').trim()) errs.add('model.openclaw')
-    }
-  } else if (step === 4) {
-    environments.forEach((e, i) => {
-      if (!e.id.trim()) errs.add(`env.${i}.id`)
-      if (!e.api_domain.trim()) errs.add(`env.${i}.api_domain`)
-    })
-  } else if (step === 5) {
-    // 仓库本地路径硬性必填(无论 local / remote 模式),理由:
-    //   - 本地路径是产物里 repo-path-map.yaml / 排障 skill 跑代码扫描的 必读字段
-    //   - 部署后 BotsPage 诊断 / 代码扫描 都靠 ~/.tshoot/config.json 里这份路径
-    //   - 用 remote 模式时,_cloneTarget 是 "<父目录>/<repo.name>" 落盘位置,
-    //     必须显式声明,不允许"反正默认 clone 到 ~/.tshoot/repos"这种隐式行为
-    repos.forEach((r, i) => {
-      if (!r.name.trim()) errs.add(`repo.${i}.name`)
-      if (r._source === 'local') {
-        if (!(r._localPath || '').trim()) errs.add(`repo.${i}.localPath`)
-      } else {
-        // remote 模式:url 必填(用来 clone) + _cloneTarget 也必填(显式落盘位置)
-        if (!r.url.trim()) errs.add(`repo.${i}.url`)
-        if (!(r._cloneTarget || '').trim()) errs.add(`repo.${i}.cloneTarget`)
-      }
-    })
-  } else if (step === 6) {
-    // Step 5 校验 = 每个激活的源,只校验"有服务路由到本源"的 (env, svc) 组合。
-    // 没服务挂上去的源/env 不强制填凭证(用户可以在 Step 4 把所有服务都挪到别的源)。
-    // 多源场景下,任何服务都必须明确归属某个源(否则 Step 6 自动扫无从定位)。
-    if (isMultiSource.value && allServiceNames.value.length > 0) {
-      for (const svc of allServiceNames.value) {
-        if (!getServiceSource(svc)) {
-          errs.add(`cc.unassigned.${svc}`)
-        }
-      }
-    }
-    const primary = activeSourceTypes.value[0] || ''
-    for (const t of activeSourceTypes.value) {
-      const fields = CC_FIELDS_BY_TYPE.value[t] || []
-      if (fields.length === 0) continue
-      // 取该源的字段值:主源走 ccCredInputs,副源走 sourceCreds[t].creds
-      const getField = (envID: string, fieldKey: string): string => {
-        if (t === primary) return (ccCredInputs[ccKeyFor(t, envID, fieldKey)] || '').trim()
-        return ((sourceCreds[t]?.creds?.[envID]?.[fieldKey]) || '').trim()
-      }
-      // 是否 kuboard:locator 走 per-service map,不校验 env 级 cluster/namespace/configmap 字段
-      const isKuboard = t === 'kuboard'
-      environments.forEach((e) => {
-        if (!e.id.trim()) return
-        // 本 env 是否有服务挂在本源 → 没有就跳过(不强制填没用的源)
-        const svcsOnThisSource = allServiceNames.value.filter(svc => getServiceSource(svc) === t)
-        if (svcsOnThisSource.length === 0) return
-        // 1) 凭证字段必填(optional / kuboard 的 cluster/ns/cm 跳过)。
-        //    showWhen 命中(如 kuboard 的 access_key / username+password 二选一)→ 隐藏的字段不算缺。
-        for (const f of fields) {
-          if (f.optional) continue
-          if (f.uiOnly) continue
-          if (isKuboard && (f.key === 'cluster' || f.key === 'namespace' || f.key === 'configmap')) continue
-          if (isFieldHidden(t, e.id, f, (k) => getField(e.id, k))) continue
-          if (!getField(e.id, f.key)) {
-            errs.add(`cc.${t}.${e.id}.${f.key}`)
-          }
-        }
-        if (isKuboard) {
-          // kuboard:必须先 📥 拉取一次,然后每个服务都填齐 cluster/namespace/configmap
-          const kbSt = kuboardStateByEnv[e.id]
-          if (!kbSt || kbSt.status !== 'ok') {
-            errs.add(`cc.${t}.${e.id}.scan`)
-            return
-          }
-          for (const svc of svcsOnThisSource) {
-            const loc = kuboardSvcMap[svcKey(e.id, svc)]
-            if (!loc || !loc.cluster || !loc.namespace || !loc.configmap) {
-              errs.add(`cc.${t}.${e.id}.svc.${svc}`)
-            }
-          }
-        } else {
-          // nacos / apollo / consul:走 ccHub 预加载 + namespace + per-svc dataId
-          const st = ccHubStateByEnv[e.id]
-          if (!st || st.status !== 'ok') {
-            errs.add(`cc.${t}.${e.id}.scan`)
-            return
-          }
-          if (!(e.id in envNamespaces)) {
-            errs.add(`cc.${t}.${e.id}.namespace`)
-            return
-          }
-          for (const svc of svcsOnThisSource) {
-            if (!(serviceConfigSel[svcKey(e.id, svc)] || '').trim()) {
-              errs.add(`cc.${t}.${e.id}.svc.${svc}`)
-            }
-          }
-        }
-      })
-    }
-  } else if (step === 7) {
-    // 数据层校验(简化逻辑):**只校验页面上展示的组件连通性**。
-    //
-    // 不再要求"必须 fetched / 必须扫描过"—— 三个理由:
-    //   1. yaml 可能本来就没数据层(纯网关 / 纯调度系统),scannedDS 全空合法
-    //   2. 用户可能主动删掉某些识别出的组件(点 ✕),删后不该再卡他
-    //   3. 用户也可以完全手填,连 fetch 都没跑过
-    //
-    // 校验只剩一条:**dsProbeResults 里 scannedDS 里展示的每个组件都得 status='ok'**。
-    //   未测 → notested;失败 → probefail;通过 → 放行
-    //   组件不在 scannedDS 里(被删 / 没识别)→ 自动不在校验范围
-    // 跟 probeAllAcrossEnvs 共用同一个枚举,确保"测了 N 条 / 校验门看到 M 条"绝对一致
-    for (const t of enumerateDataStoreProbeTargets()) {
-      const probeSt = dsProbeResults[probeKey(t.envID, t.svc, t.dsKey)]
-      if (!probeSt || probeSt.status !== 'ok') {
-        if (probeSt?.status === 'fail') {
-          errs.add(`ds.${t.envID}.${t.svc}.${t.dsKey}.probefail`)
-        } else {
-          errs.add(`ds.${t.envID}.${t.svc}.${t.dsKey}.notested`)
-        }
-      }
-    }
+  const ctx: ValidatorContext = {
+    step: currentStep.value,
+    system, agent,
+    enabledTargets, targetModels,
+    anyTargetSelected: anyTargetSelected.value,
+    environments: environments.map(e => ({ id: e.id, api_domain: e.api_domain, is_prod: e.is_prod })),
+    repos: repos.map(r => ({
+      name: r.name, url: r.url,
+      _source: r._source, _localPath: r._localPath, _cloneTarget: r._cloneTarget,
+    })),
+    isMultiSource: isMultiSource.value,
+    allServiceNames: allServiceNames.value,
+    activeSourceTypes: activeSourceTypes.value,
+    CC_FIELDS_BY_TYPE: CC_FIELDS_BY_TYPE.value,
+    ccCredInputs, sourceCreds, envNamespaces, serviceConfigSel,
+    kuboardStateByEnv, kuboardSvcMap, ccHubStateByEnv, dsProbeResults,
+    isFieldHidden, getServiceSource, enumerateDataStoreProbeTargets,
   }
-  return errs
+  return libComputeStepErrors(ctx)
 }
 
 // 能不能点"下一步":当前步无 error + 不是最后一步
@@ -6394,21 +5405,9 @@ async function validateYAML() {
 }
 
 async function copyYAML() {
-  try {
-    await navigator.clipboard.writeText(yamlOutput.value)
-    copySuccess.value = true
-    setTimeout(() => (copySuccess.value = false), 2000)
-  } catch {
-    // fallback
-    const ta = document.createElement('textarea')
-    ta.value = yamlOutput.value
-    document.body.appendChild(ta)
-    ta.select()
-    document.execCommand('copy')
-    document.body.removeChild(ta)
-    copySuccess.value = true
-    setTimeout(() => (copySuccess.value = false), 2000)
-  }
+  await copyToClipboard(yamlOutput.value)
+  copySuccess.value = true
+  setTimeout(() => (copySuccess.value = false), 2000)
 }
 
 async function downloadYAML() {
@@ -6575,7 +5574,7 @@ function buildOpenclawCreds(): Record<string, string> {
   }
 
   // ── Agent 模型 ──
-  const model = (targetModels['openclaw'] || agent.model || '').trim()
+  const model = (targetModels[Target.Openclaw] || agent.model || '').trim()
   if (model) creds['MODEL'] = model
 
   // ── messaging:lark / feishu_project ──
@@ -6982,48 +5981,7 @@ const configTypeDescriptions: Record<string, string> = {
                 :title="!targetCanBeEnabled(t) ? '本机未检测到该 AI 平台,先安装或点下方「我已自行安装」再勾选' : ''"
               />
               <span class="target-title">{{ targetLabels[t] }}</span>
-              <span
-                v-if="t === 'claude-code' && aitoolsResult"
-                class="target-install-badge"
-                :class="aitoolsResult.claude_code.installed ? 'ok' : 'miss'"
-                :title="aitoolsResult.claude_code.note || aitoolsResult.claude_code.path || ''"
-              >
-                {{ aitoolsResult.claude_code.installed
-                  ? `✓ v${aitoolsResult.claude_code.version || '?'}`
-                  : '⚠ 未检测到' }}
-              </span>
-              <span
-                v-else-if="t === 'cursor' && aitoolsResult"
-                class="target-install-badge"
-                :class="aitoolsResult.cursor.installed ? 'ok' : 'miss'"
-                :title="aitoolsResult.cursor.note || aitoolsResult.cursor.path || ''"
-              >
-                {{ aitoolsResult.cursor.installed
-                  ? `✓ v${aitoolsResult.cursor.version || '?'}`
-                  : '⚠ 未检测到' }}
-              </span>
-              <span
-                v-else-if="t === 'codex' && aitoolsResult"
-                class="target-install-badge"
-                :class="aitoolsResult.codex.installed ? 'ok' : 'miss'"
-                :title="aitoolsResult.codex.note || aitoolsResult.codex.path || ''"
-              >
-                {{ aitoolsResult.codex.installed
-                  ? `✓ v${aitoolsResult.codex.version || '?'}`
-                  : '⚠ 未检测到' }}
-              </span>
-              <span
-                v-else-if="t === 'openclaw' && openclawDetectStatus !== 'idle'"
-                class="target-install-badge"
-                :class="openclawDetectStatus === 'ok' ? 'ok' : 'miss'"
-                :title="openclawDetectError || ''"
-              >
-                <template v-if="openclawDetectStatus === 'ok'">
-                  {{ openclawVersion ? `✓ v${openclawVersion}` : '✓ 已装' }}
-                </template>
-                <template v-else-if="openclawDetectStatus === 'loading'">扫描中…</template>
-                <template v-else>⚠ 未检测到</template>
-              </span>
+              <TargetInstallBadge v-bind="targetBadgeProps(t)" />
             </label>
             <div class="target-hint">{{ targetDescriptions[t] }}</div>
             <!-- 未检测到 + 没强制启用 → 露出"我已自行安装/选目录/重新扫描"操作条;
@@ -7105,7 +6063,7 @@ const configTypeDescriptions: Record<string, string> = {
                     <button type="button" class="btn-link" @click="runOpenClawDetect(openclawInstallDir)">🔄 重读</button>
                   </label>
                   <select
-                    :value="targetModels['openclaw']"
+                    :value="targetModels[Target.Openclaw]"
                     @change="onModelChange('openclaw', $event)"
                   >
                     <!-- model.id 本身已经是完整 "<provider>/<model>" 格式(openclaw 约定),
@@ -7155,83 +6113,19 @@ const configTypeDescriptions: Record<string, string> = {
       <p class="help-text">
         填业务系统的运行环境(如 dev / test / prod),每个环境填后端 API 域名,可选填前端 Web 域名。建议带上 http/https 前缀。
       </p>
-      <div v-for="(env, i) in environments" :key="i" class="dynamic-row">
-        <div class="row-fields">
-          <div class="form-group compact" style="flex: 0 0 100px">
-            <label>环境 ID
-              <span class="help-icon" title="环境短标识(dev/test/staging/prod)。每个 env 会注册一套独立的 MCP 实例:nacos-mcp-server-<ID>、grafana-mcp-server-<ID> 等。">?</span>
-            </label>
-            <input
-              v-model="env.id"
-              type="text"
-              placeholder="dev"
-              :class="{ error: hasError(`env.${i}.id`) }"
-            />
-          </div>
-          <div class="form-group compact">
-            <label>API 域名
-              <span class="help-icon" title="后端接口域名,机器人做接口实测 / 日志查询时拼 URL 用。建议带 http/https 前缀明确协议(内部 dev 常 http,公网 prod 多 https);不带也行,下游按 https 兜底。">?</span>
-              <span
-                v-if="urlProbeResults[urlProbeKey(i, 'api')]?.status === 'loading'"
-                class="url-probe-badge loading"
-              >测试中…</span>
-              <span
-                v-else-if="urlProbeResults[urlProbeKey(i, 'api')]?.status === 'ok'"
-                class="url-probe-badge ok"
-                :title="urlProbeResults[urlProbeKey(i, 'api')]?.detail"
-              >✓ {{ urlProbeResults[urlProbeKey(i, 'api')]?.latency }}</span>
-              <span
-                v-else-if="urlProbeResults[urlProbeKey(i, 'api')]?.status === 'fail'"
-                class="url-probe-badge fail"
-                :title="urlProbeResults[urlProbeKey(i, 'api')]?.error"
-              >✗ {{ urlProbeResults[urlProbeKey(i, 'api')]?.error }}</span>
-            </label>
-            <input
-              v-model="env.api_domain"
-              type="text"
-              placeholder="https://api-dev.example.com"
-              :class="{ error: hasError(`env.${i}.api_domain`) }"
-              @input="scheduleURLProbe(i, 'api', env.api_domain)"
-            />
-          </div>
-          <div class="form-group compact">
-            <label>Web 域名
-              <span class="auto-tag">选填</span>
-              <span class="help-icon" title="前端入口域名(管理后台 / 用户站)。机器人排障时知道 '用户在哪个 URL 看到 bug' vs '后端哪个接口报错'。单域名系统留空即可。建议带 http/https 前缀。">?</span>
-              <span
-                v-if="urlProbeResults[urlProbeKey(i, 'web')]?.status === 'loading'"
-                class="url-probe-badge loading"
-              >测试中…</span>
-              <span
-                v-else-if="urlProbeResults[urlProbeKey(i, 'web')]?.status === 'ok'"
-                class="url-probe-badge ok"
-                :title="urlProbeResults[urlProbeKey(i, 'web')]?.detail"
-              >✓ {{ urlProbeResults[urlProbeKey(i, 'web')]?.latency }}</span>
-              <span
-                v-else-if="urlProbeResults[urlProbeKey(i, 'web')]?.status === 'fail'"
-                class="url-probe-badge fail"
-                :title="urlProbeResults[urlProbeKey(i, 'web')]?.error"
-              >✗ {{ urlProbeResults[urlProbeKey(i, 'web')]?.error }}</span>
-            </label>
-            <input
-              v-model="env.web_domain"
-              type="text"
-              placeholder="https://www-dev.example.com"
-              @input="scheduleURLProbe(i, 'web', env.web_domain)"
-            />
-          </div>
-          <div class="form-group compact checkbox-group">
-            <label :title="'is_prod=true 时机器人更保守:执行写入/重启类动作前会二次确认;OpenClaw 客户端 UI 也会标红。'">
-              <input type="checkbox" v-model="env.is_prod" />
-              生产环境
-              <span class="help-icon">?</span>
-            </label>
-          </div>
-          <button class="btn-icon remove" @click="removeEnv(i)" :disabled="environments.length <= 1" title="删除">
-            &times;
-          </button>
-        </div>
-      </div>
+      <EnvListItem
+        v-for="(env, i) in environments"
+        :key="i"
+        :env="env"
+        :index="i"
+        :api-probe="urlProbeResults[urlProbeKey(i, 'api')]"
+        :web-probe="urlProbeResults[urlProbeKey(i, 'web')]"
+        :has-id-error="hasError(`env.${i}.id`)"
+        :has-api-error="hasError(`env.${i}.api_domain`)"
+        :disable-remove="environments.length <= 1"
+        @probe="(kind, url) => scheduleURLProbe(i, kind, url)"
+        @remove="removeEnv(i)"
+      />
       <button class="btn" @click="addEnv">+ 添加环境</button>
     </div>
 
@@ -7275,485 +6169,45 @@ const configTypeDescriptions: Record<string, string> = {
         </div>
       </div>
 
-      <div v-for="(repo, i) in repos" :key="i" class="repo-block">
-        <div class="repo-header">
-          <span class="repo-badge">仓库 {{ i + 1 }}</span>
-          <span v-if="repo.sub_path && repo.sub_path.trim()" class="submodule-tag" :title="`子目录: ${repo.sub_path}`">
-            📂 {{ repo.sub_path.trim() }}
-          </span>
-          <button class="btn-icon remove" @click="removeRepo(i)" :disabled="repos.length <= 1">&times;</button>
-        </div>
-
-        <!-- 来源切换:本地已有目录 vs 远程 URL。切换清对侧字段避免残留。 -->
-        <div class="form-group">
-          <label>仓库来源</label>
-          <div class="source-toggle">
-            <label class="source-option" :class="{ selected: repo._source === 'remote' }">
-              <input
-                type="radio"
-                :checked="repo._source === 'remote'"
-                @change="setRepoSource(repo, 'remote')"
-              />
-              <span class="source-title">🌐 远程 URL</span>
-              <span class="source-hint">填 git URL,扫描时 clone 到本地</span>
-            </label>
-            <label class="source-option" :class="{ selected: repo._source === 'local' }">
-              <input
-                type="radio"
-                :checked="repo._source === 'local'"
-                @change="setRepoSource(repo, 'local')"
-              />
-              <span class="source-title">📁 本地已有</span>
-              <span class="source-hint">选一个已 clone 好的仓库目录</span>
-            </label>
-          </div>
-        </div>
-
-        <!-- 远程模式 -->
-        <template v-if="repo._source === 'remote'">
-          <div class="form-group">
-            <label>仓库地址 <span class="required">*</span>
-              <span class="field-hint">— 仓库名从 URL 自动推;扫描前需要 clone 到本地</span>
-            </label>
-            <input
-              v-model="repo.url"
-              type="text"
-              placeholder="git@github.com:org/order-service.git"
-              :class="{ error: hasError(`repo.${i}.url`) }"
-              @input="onRepoUrlInput(repo)"
-            />
-          </div>
-          <div class="form-group">
-            <label>
-              Clone 父目录 <span class="required">*</span>
-              <span class="field-hint">
-                — 必填:选父目录,git clone 自动建 <code>/{{ repo.name || '&lt;repo.name&gt;' }}</code> 子目录。
-                **本地路径不允许走全局默认隐式回落**(产物里 repo-path-map.yaml 必须有显式路径才能跑代码扫描 / 排障)。
-              </span>
-            </label>
-            <!-- 跟本地仓库目录一致:readonly,只能通过按钮选。
-                 input 显示"父目录 → 实际仓库路径"两段,让用户清楚 git 不会污染所选父目录本身。
-                 "🗑 清空"按钮把自定义还原为"用全局默认 reposRoot"。 -->
-            <div class="path-input-row">
-              <input
-                :value="repo._cloneTarget ? displayPath(resolveCloneDest(repo)) : ''"
-                type="text"
-                :placeholder="`点选父目录(如 ${displayPath(reposRootInput.trim() || resolvedReposRoot)}),会自动建 /${repo.name || '<repo.name>'}`"
-                readonly
-                class="path-readonly"
-                :title="repo._cloneTarget ? `父目录: ${repo._cloneTarget}\n实际仓库: ${resolveCloneDest(repo)}` : ''"
-              />
-              <button type="button" class="btn" @click="pickCloneTarget(repo)">
-                {{ repo._cloneTarget ? '重新选…' : '选目录…' }}
-              </button>
-              <button
-                v-if="repo._cloneTarget"
-                type="button"
-                class="btn-link cc-delete"
-                :title="'清空自定义目标,回到默认目录'"
-                @click="repo._cloneTarget = ''"
-              >🗑</button>
-            </div>
-          </div>
-          <!-- 远程模式必须用户点这个按钮才 clone+扫(不搞 URL 输入完自动 clone,避免失误 URL 拉垃圾) -->
-          <div class="form-group repo-sync-row">
-            <button
-              type="button"
-              class="btn primary"
-              :disabled="!repo.url.trim() || repo._scanning"
-              @click="scanSingleRepo(repo)"
-            >
-              <span v-if="repo._scanning" class="scan-spinner" aria-hidden="true"></span>
-              {{ repo._scanning ? 'Clone + 扫描中…' : (repo._scanned ? '🔄 重新同步扫描' : '🔄 同步到本地并扫描') }}
-            </button>
-            <span v-if="repo._scanning" class="analyze-progress-inline">
-              <span class="scan-spinner-mini"></span>
-              <span>正在 git clone + DetectStack/Framework + 读取分支列表…</span>
-            </span>
-            <span v-else-if="repo._scanError" class="repo-scan-error">✗ {{ repo._scanError }}</span>
-            <span v-else-if="repo._scanned" class="repo-scan-ok">✓ 已扫描,结果见下方</span>
-          </div>
-        </template>
-
-        <!-- 本地模式:只显示目录;URL 静默从 git remote 反填(用户不用操心),
-             读不到 remote 时用占位值兜底,保证 yaml 合法。 -->
-        <template v-else>
-          <div class="form-group">
-            <label>本地仓库目录 <span class="required">*</span>
-              <span class="field-hint">— 点"选目录"挑一个已 clone 的目录,自动反填 URL + 推仓库名 + 扫描</span>
-            </label>
-            <!-- 强制用"选目录"按钮,不让用户手敲路径(手写路径要么空格漏了、要么打错、
-                 要么存在性没核对,比让 openDir 返回一个保证存在的绝对路径麻烦多了)。
-                 input 只做 readonly 展示;想改就点按钮重选。 -->
-            <div class="path-input-row">
-              <input
-                :value="repo._localPath"
-                type="text"
-                placeholder="尚未选择目录"
-                readonly
-                class="path-readonly"
-                :title="repo._localPath || ''"
-              />
-              <button type="button" class="btn" @click="pickLocalRepoDir(repo)">
-                {{ repo._localPath ? '重新选目录…' : '选目录…' }}
-              </button>
-            </div>
-            <div v-if="repo._localPath && repo.url" class="local-url-probe ok">
-              ✓ 已识别 origin: <code>{{ repo.url }}</code>
-            </div>
-            <div v-else-if="repo._localPath && !repo.url" class="local-url-probe warn">
-              ⚠ 没读到 <code>git remote origin</code>;yaml 里会用占位 URL(仓库已在本地,不影响扫描)
-            </div>
-          </div>
-          <!-- 本地模式:选完目录会自动扫,但允许手动"重新扫描"(用户改了代码 / 切了分支后刷新) -->
-          <div v-if="repo._localPath" class="form-group repo-sync-row">
-            <button
-              type="button"
-              class="btn"
-              :disabled="repo._scanning"
-              @click="scanSingleRepo(repo)"
-            >
-              <span v-if="repo._scanning" class="scan-spinner-mini" aria-hidden="true"></span>
-              {{ repo._scanning ? '扫描中…' : '🔄 重新扫描' }}
-            </button>
-            <span v-if="repo._scanning" class="analyze-progress-inline">
-              <span>DetectStack / Framework + 读取分支…</span>
-            </span>
-            <span v-else-if="repo._scanError" class="repo-scan-error">✗ {{ repo._scanError }}</span>
-            <span v-else-if="repo._scanned" class="repo-scan-ok">✓ 已扫描</span>
-          </div>
-        </template>
-
-        <!-- 仓库名 + 自动识别 块:只在用户已经填了来源(URL / 本地目录)后才显示,
-             免得空白状态就一堆输入框 —— 用户还没给线索,仓库名从哪来? -->
-        <div v-if="hasRepoSource(repo)" class="form-group">
-          <label>
-            仓库名
-            <span v-if="!repo._nameManual" class="auto-tag">
-              {{ repo._source === 'local' ? '自动从目录名推' : '自动从 URL 推' }}
-            </span>
-            <span v-else class="field-hint">(已手改;清空可回到自动推)</span>
-          </label>
-          <input
-            v-model="repo.name"
-            type="text"
-            :placeholder="repo._source === 'local' ? '自动从目录名推出' : '自动从仓库地址推出'"
-            :class="{ error: hasError(`repo.${i}.name`) }"
-            @input="onRepoNameInput(repo)"
-          />
-        </div>
-
-        <!-- 自动识别结果:只展 技术栈(仅 readonly)。framework 启发式误报率高,
-             不自动填,用户在 yaml 里手改。 -->
-        <div v-if="hasRepoSource(repo)" class="form-group">
-          <label>
-            技术栈
-            <span class="field-hint">(扫描后自动填,只读)</span>
-          </label>
-          <div v-if="repo._source === 'remote' && repo.url.trim() && !repo._scanned && !repo._scanning" class="auto-scan-hint">
-            ⚠ 还没扫描 —
-            <strong>点上方"🔄 同步到本地并扫描"按钮</strong>触发
-          </div>
-          <div class="stack-display" :class="{ empty: !repo.stack }">
-            <span v-if="repo._scanning" class="auto-scanning">
-              <span class="scan-spinner-mini"></span>扫描中…
-            </span>
-            <span v-else>{{ repo.stack || '—' }}</span>
-          </div>
-        </div>
-
-        <!-- monorepo 自动检测结果:始终展示(让用户清楚"有没有检测到 + 检测到啥")。
-             0 个子模块  → 绿色"单服务仓库"
-             1 个       → 灰色提示(边缘情况)
-             N>1        → 紫色 banner 列出每个子模块完整路径 + 一键拆分按钮 -->
-        <div
-          v-if="hasRepoSource(repo) && repo._submoduleHints !== undefined && !repo._submoduleHintsDismissed"
-          class="monorepo-banner"
-          :class="{
-            'monorepo-banner-mono': repo._submoduleHints.length > 1,
-            'monorepo-banner-single': repo._submoduleHints.length <= 1,
-          }"
-        >
-          <div v-if="repo._submoduleHints.length === 0" class="monorepo-banner-head ok">
-            ✓ 检测结果:单服务仓库(整仓当一个服务处理,无需拆分)
-          </div>
-          <div v-else-if="repo._submoduleHints.length === 1" class="monorepo-banner-head warn">
-            ⚠ 仅检测到 1 个入口,看着不像 monorepo(整仓当一个服务也行)
-          </div>
-          <template v-else-if="isGitSubmodulesHints(repo._submoduleHints)">
-            <!-- 分支 A:.gitmodules 路径 —— 每个 hint 都有自己的 git URL,真"独立 git repo + 子目录共置"
-                 这种才拆成独立条目;每行有自己的 url + 本地路径,后续配置中心 / 数据层映射独立。 -->
-            <div class="monorepo-banner-head">
-              🔍 检测到 .gitmodules 声明的 {{ repo._submoduleHints.length }} 个独立子模块(每个都是独立 git repo,默认全选):
-            </div>
-            <div class="monorepo-banner-hint">
-              💡 <strong>不点"拆分"按钮就不影响</strong> —— 如果当成单仓处理,直接在下方"服务名"里手填即可。
-            </div>
-            <ul class="monorepo-banner-list">
-              <li v-for="h in repo._submoduleHints" :key="h.sub_path">
-                <label class="monorepo-row-check">
-                  <input
-                    type="checkbox"
-                    :checked="repo._submoduleSelection?.[h.sub_path] !== false"
-                    @change="toggleSubmodulePick(repo, h.sub_path, ($event.target as HTMLInputElement).checked)"
-                  />
-                  <div class="monorepo-row-content">
-                    <div class="monorepo-row-top">
-                      <strong>{{ h.name }}</strong>
-                      <span class="monorepo-stack">{{ h.stack }}</span>
-                      <span class="monorepo-role">{{ h.role }}</span>
-                    </div>
-                    <div class="monorepo-row-path">
-                      📂 <code>{{ submodulePathFor(repo, h.sub_path) }}</code>
-                    </div>
-                    <div class="monorepo-row-url" :title="h.url">
-                      🔗 <code>{{ h.url }}</code>
-                      <span class="field-hint">(独立 git repo)</span>
-                    </div>
-                    <div class="monorepo-row-reason">
-                      <span class="field-hint">{{ h.reason }}</span>
-                    </div>
-                  </div>
-                </label>
-              </li>
-            </ul>
-            <button
-              type="button"
-              class="btn primary monorepo-split-btn"
-              :disabled="pickedSubmoduleCount(repo) === 0"
-              @click="splitMonorepo(i)"
-            >
-              ✂ 拆成 {{ pickedSubmoduleCount(repo) }} 个独立仓库条目(各自 url / 本地路径 / role)
-            </button>
-          </template>
-          <template v-else>
-            <!-- 分支 B:同仓多入口(cmd/<x>/main.go / services/<x>/ / workspaces / pom-modules)
-                 这些**不是**独立 git repo,只是同一仓库下的多个服务入口 —— 不该拆成多条 repos[],
-                 而是合并到本仓的 service_names + 各自记录入口路径。 -->
-            <div class="monorepo-banner-head">
-              🔍 在本仓检测到 {{ repo._submoduleHints.length }} 个服务入口(同一 git 仓库,多服务模式):
-            </div>
-            <div class="monorepo-banner-hint">
-              💡 这些是<strong>同仓多服务</strong>(不是独立 git repo),建议合并到本仓的服务名列表 —— 每个服务自动加 <code>{{ repo.name || '&lt;repo&gt;' }}-</code> 前缀消歧义(避免跨仓重名,如 4 个仓都有 cmd/grpc-server 时撞成一团)。
-            </div>
-            <ul class="monorepo-banner-list">
-              <li v-for="h in repo._submoduleHints" :key="h.sub_path">
-                <label class="monorepo-row-check">
-                  <input
-                    type="checkbox"
-                    :checked="repo._submoduleSelection?.[h.sub_path] !== false"
-                    @change="toggleSubmodulePick(repo, h.sub_path, ($event.target as HTMLInputElement).checked)"
-                  />
-                  <div class="monorepo-row-content">
-                    <div class="monorepo-row-top">
-                      <strong>{{ qualifyServiceName(repo.name, h.name) }}</strong>
-                      <span v-if="qualifyServiceName(repo.name, h.name) !== h.name" class="field-hint">
-                        (原入口名:{{ h.name }})
-                      </span>
-                      <span class="monorepo-stack">{{ h.stack }}</span>
-                      <span class="monorepo-role">{{ h.role }}</span>
-                    </div>
-                    <div class="monorepo-row-path">
-                      📂 入口 <code>{{ submodulePathFor(repo, h.sub_path) }}</code>
-                    </div>
-                    <div class="monorepo-row-reason">
-                      <span class="field-hint">{{ h.reason }}</span>
-                    </div>
-                  </div>
-                </label>
-              </li>
-            </ul>
-            <button
-              type="button"
-              class="btn primary monorepo-split-btn"
-              :disabled="pickedSubmoduleCount(repo) === 0"
-              @click="mergeMonorepoIntoServices(i)"
-            >
-              ➕ 合并为本仓 {{ pickedSubmoduleCount(repo) }} 个服务名(自动加 <code>{{ repo.name || '&lt;repo&gt;' }}-</code> 前缀)
-            </button>
-          </template>
-        </div>
-
-        <!-- 已合并的"同仓多服务"展示 —— 用户合并完后这里露出 service → entry 映射作为提醒。
-             想重选时点"重新扫描"按钮就回到 banner 状态。 -->
-        <div
-          v-if="repo._serviceEntries && Object.keys(repo._serviceEntries).length > 0"
-          class="service-entries-display"
-        >
-          <div class="service-entries-head">
-            ✓ 本仓 {{ Object.keys(repo._serviceEntries).length }} 个服务的入口路径:
-            <button type="button" class="btn-link" @click="repo._submoduleHintsDismissed = false">改</button>
-          </div>
-          <ul class="service-entries-list">
-            <li v-for="(entry, name) in repo._serviceEntries" :key="name">
-              <strong>{{ name }}</strong> → <code>{{ entry }}</code>
-            </li>
-          </ul>
-        </div>
-
-        <!-- 已 split 的子模块行:把"父仓本地路径 + sub_path"拼出来明确显示给用户看 -->
-        <div
-          v-if="hasRepoSource(repo) && repo.sub_path && repo.sub_path.trim() && repo._localPath"
-          class="submodule-path-display"
-        >
-          <span class="field-hint">本服务源码实际位置:</span>
-          <code>{{ submodulePathFor(repo, repo.sub_path) }}</code>
-        </div>
-
-        <!-- 子目录(monorepo):入口在仓库 header 的 +子模块 按钮 + 上方的"一键拆分"banner,
-             两条途径设进来后,sub_path 已有值,只在这里以"已设 + 可改"的方式展示;
-             否则整个表单隐藏(默认整仓单服务,99% 用户用不到本字段)。 -->
-        <div v-if="hasRepoSource(repo) && repo.sub_path && repo.sub_path.trim()" class="form-group form-group-subpath">
-          <label>
-            子目录
-            <span class="field-hint">(monorepo 子模块路径,跟 url 一起决定本服务源码位置)</span>
-          </label>
-          <input
-            v-model="repo.sub_path"
-            type="text"
-            class="subpath-input"
-            placeholder="services/commerce"
-            @input="onRepoSubPathInput(repo)"
-          />
-        </div>
-
-        <!-- 角色:决定 incident-investigator 看本 repo 的视角。stack 不能一刀切
-             (node 既能写前端也能写 BFF/服务),所以独立一个下拉给用户挑。
-             默认值在 makeEmptyRepo 兜底 backend;node/php 用户常需要改成 frontend / admin。 -->
-        <div v-if="hasRepoSource(repo)" class="form-group">
-          <label>
-            角色
-            <span class="field-hint">(影响 AI 排障时的依赖图分析方向)</span>
-          </label>
-          <select v-model="repo.role" class="role-select" @change="syncServiceNamesWithRole(repo)">
-            <option value="backend">后端服务 (backend) — 业务微服务,双向依赖图</option>
-            <option value="frontend">前端 (frontend) — web app,只调下游不被调</option>
-            <option value="gateway">网关 / BFF (gateway) — API 聚合层</option>
-            <option value="middleware">中间层 (middleware) — worker / 调度器 / 接入层</option>
-            <option value="mobile">移动端 (mobile) — iOS / Android</option>
-            <option value="admin">管理后台 (admin) — 内部运营系统</option>
-            <option value="common-lib">公共库 (common-lib) — 不入服务图,仅作版本对比</option>
-            <option value="infra">基础设施 (infra) — k8s manifest / terraform</option>
-            <option value="docs">文档 (docs) — 仅作背景资料</option>
-          </select>
-          <!-- role 推荐 chip:RecommendRoleForRepo 基于"仓库名 + 顶层目录 + stack 专属依赖文件"算出来。
-               跟当前选的 role 一致 → 显示绿色 ✓;不一致 → 显示橙色 + 一个"采用"按钮。
-               用户能看到推荐理由(如"package.json 含 react,无后端框架"),不是黑盒推断。 -->
-          <div v-if="repo._roleHintLoading" class="role-hint-loading">📍 推荐分析中…</div>
-          <div
-            v-else-if="repo._roleHint"
-            class="role-hint"
-            :class="{ matched: repo._roleHint.role === repo.role }"
-          >
-            <span v-if="repo._roleHint.role === repo.role" class="role-hint-icon">✓</span>
-            <span v-else class="role-hint-icon">📍</span>
-            <span class="role-hint-text">
-              <template v-if="repo._roleHint.role === repo.role">推荐:{{ repo._roleHint.role }}</template>
-              <template v-else>建议:<strong>{{ repo._roleHint.role }}</strong></template>
-              <span class="role-hint-reason">— {{ repo._roleHint.reason }}</span>
-            </span>
-            <button
-              v-if="repo._roleHint.role !== repo.role"
-              type="button"
-              class="role-hint-apply"
-              @click="applyRoleHint(repo)"
-            >采用</button>
-          </div>
-        </div>
-
-        <!-- 服务名:自动识别出 chip 列表,每个右上角 ✕ 可删。monorepo 常见多服务,
-             也支持用户"+" 手动补未识别到的。
-             仅"业务服务"角色(backend / gateway / middleware / admin)显示这个块 ——
-             frontend / common-lib / mobile / infra / docs 不是服务,不需要服务名。 -->
-        <div v-if="hasRepoSource(repo) && isServiceRole(repo.role)" class="form-group">
-          <label>
-            服务名
-            <span class="help-icon" title="config-map 以此为 key。扫描会自动识别(monorepo 列所有子模块);识别不全时点 + 手动补,不想要的点 ✕ 删。">?</span>
-            <span v-if="repoServiceNamesList(repo).length" class="field-hint">
-              — {{ repoServiceNamesList(repo).length }} 个(✕ 删 / + 补)
-            </span>
-            <span v-else class="field-hint">(扫一下自动填,或点下方 + 手动补)</span>
-          </label>
-          <div v-if="repo._scanning" class="service-chips-row">
-            <span class="auto-scanning"><span class="scan-spinner-mini"></span>扫描中…</span>
-          </div>
-          <div v-else class="service-chips-row">
-            <span
-              v-for="svc in repoServiceNamesList(repo)"
-              :key="svc"
-              class="service-chip"
-            >
-              <span class="service-chip-name">{{ svc }}</span>
-              <button
-                type="button"
-                class="service-chip-x"
-                :title="`删除 ${svc}`"
-                @click="removeServiceName(repo, svc)"
-              >✕</button>
-            </span>
-            <!-- inline "+" 输入行:永远显示,方便随时补漏。Enter 提交,逗号/空白能一次粘多个。 -->
-            <span class="service-chip-add">
-              <input
-                v-model="svcAddInputs[i]"
-                type="text"
-                :placeholder="repoServiceNamesList(repo).length ? '+ 补一个服务名' : '+ 手填服务名'"
-                @keydown.enter.prevent="addServiceName(repo, i)"
-              />
-              <button
-                type="button"
-                class="service-chip-add-btn"
-                :disabled="!(svcAddInputs[i] || '').trim()"
-                :title="'添加(Enter 也行;逗号/空格分隔可一次加多个)'"
-                @click="addServiceName(repo, i)"
-              >+</button>
-            </span>
-          </div>
-        </div>
-
-        <!-- 注:配置源(config_source)的服务级映射现在在 Step 5/6 内按服务挑(更直观);
-             Step 4 的仓库表只关心代码层面(URL / 服务名 / 分支),不再叠 config_source。 -->
-
-        <!-- env_branches:扫到真实分支列表后用 <select> 下拉;没扫到回落 text input。
-             当前值不在列表里时(用户改过 yaml)会被插到最前,保证可选回。 -->
-        <div v-if="hasRepoSource(repo)" class="form-group">
-          <label>
-            环境 → 分支映射
-            <span class="help-icon" title="routing skill 根据此映射切到正确代码分支做代码定位。扫描仓库时按 env.id/is_prod 跟真实分支名做启发式匹配(dev→develop, prod→main/master,..),点下拉可改。">?</span>
-            <span v-if="repoBranchesMap[repo.name]?.length" class="field-hint">
-              — ✓ 从 {{ repoBranchesMap[repo.name]!.length }} 个真实分支里挑(可改)
-            </span>
-            <span v-else-if="branchHasOptions(repo)" class="field-hint">
-              — yaml 里声明的分支(本地未 clone,无法列全量真实分支;clone 完会刷新)
-            </span>
-            <span v-else class="field-hint">(扫一下自动映射)</span>
-          </label>
-          <div class="branch-select-grid">
-            <div v-for="env in environments" :key="env.id" class="branch-select-item">
-              <span class="branch-env">{{ env.id || '?' }}</span>
-              <span class="branch-arrow">→</span>
-              <select
-                v-if="branchHasOptions(repo)"
-                v-model="repo.env_branches[env.id]"
-                class="branch-select"
-              >
-                <option value="">—</option>
-                <option
-                  v-for="b in branchOptionsFor(repo, repo.env_branches[env.id])"
-                  :key="b"
-                  :value="b"
-                >{{ b }}</option>
-              </select>
-              <input
-                v-else
-                v-model="repo.env_branches[env.id]"
-                type="text"
-                class="branch-input"
-                placeholder="扫一下自动填,也可手填"
-              />
-            </div>
-          </div>
-        </div>
-      </div>
+      <RepoListItem
+        v-for="(repo, i) in repos"
+        :key="i"
+        :repo="repo"
+        :index="i"
+        :environments="environments"
+        :can-remove="repos.length > 1"
+        :svc-add-inputs="svcAddInputs"
+        :repo-branches-map="repoBranchesMap"
+        :repos-root-input="reposRootInput"
+        :resolved-repos-root="resolvedReposRoot"
+        :has-error="hasError"
+        :has-repo-source="hasRepoSource"
+        :display-path="displayPath"
+        :resolve-clone-dest="resolveCloneDest"
+        :submodule-path-for="submodulePathFor"
+        :is-git-submodules-hints="isGitSubmodulesHints"
+        :is-service-role="isServiceRole"
+        :qualify-service-name="qualifyServiceName"
+        :repo-service-names-list="repoServiceNamesList"
+        :branch-has-options="branchHasOptions"
+        :branch-options-for="branchOptionsFor"
+        :picked-submodule-count="pickedSubmoduleCount"
+        @remove="removeRepo"
+        @set-source="(r, source) => setRepoSource(r, source)"
+        @url-input="(r) => onRepoUrlInput(r)"
+        @name-input="(r) => onRepoNameInput(r)"
+        @sub-path-input="(r) => onRepoSubPathInput(r)"
+        @pick-clone-target="(r) => pickCloneTarget(r)"
+        @pick-local-repo-dir="(r) => pickLocalRepoDir(r)"
+        @scan-single-repo="(r) => scanSingleRepo(r)"
+        @toggle-submodule-pick="(r, sub, checked) => toggleSubmodulePick(r, sub, checked)"
+        @split-monorepo="(idx) => splitMonorepo(idx)"
+        @merge-monorepo-into-services="(idx) => mergeMonorepoIntoServices(idx)"
+        @sync-service-names-with-role="(r) => syncServiceNamesWithRole(r)"
+        @apply-role-hint="(r) => applyRoleHint(r)"
+        @remove-service-name="(r, svc) => removeServiceName(r, svc)"
+        @add-service-name="(r, idx) => addServiceName(r, idx)"
+      />
       <button class="btn" @click="addRepo">+ 添加仓库</button>
     </div>
 
@@ -7802,130 +6256,44 @@ const configTypeDescriptions: Record<string, string> = {
           <span v-if="isMultiSource" class="auto-tag" style="background:#dbeafe;color:#1e40af;">主源 · 完整 preload</span>
           <span class="field-hint">— 按环境维度填写,保存后写入 system.yaml(标 <code># ⚠ secret</code> 注释),部署时注入到目标平台的 MCP Server env</span>
         </label>
-        <div class="cc-share-warn">
-          <div class="cc-share-warn-title">⚠ 凭证与共享提醒</div>
-          <ul class="cc-share-warn-list">
-            <li>这里填的账号密码会以明文写入 <code>system.yaml</code>(每条带 <code># ⚠ secret</code> 注释),并部署时注入到机器人 MCP Server 的 env 块 + <code>~/.tshoot/&lt;agent-id&gt;-creds.json</code>。</li>
-            <li>分享 yaml 请限**团队内部 / 私有仓库**,<strong>不要提交到公开代码仓库</strong>。</li>
-          </ul>
-        </div>
+        <CredsShareWarning title="⚠ 凭证与共享提醒">
+          <li>这里填的账号密码会以明文写入 <code>system.yaml</code>(每条带 <code># ⚠ secret</code> 注释),并部署时注入到机器人 MCP Server 的 env 块 + <code>~/.tshoot/&lt;agent-id&gt;-creds.json</code>。</li>
+          <li>分享 yaml 请限**团队内部 / 私有仓库**,<strong>不要提交到公开代码仓库</strong>。</li>
+        </CredsShareWarning>
         <div v-for="env in environments" :key="env.id" class="cc-env-block">
           <div class="cc-env-head">
             <span class="cc-env-label">{{ env.id || '(未命名 env)' }}</span>
             <span v-if="env.is_prod" class="cc-env-prod-tag">prod</span>
           </div>
           <div class="cc-env-fields">
-            <template v-for="f in CC_FIELDS_BY_TYPE[configCenterType]" :key="f.key">
-              <!-- kuboard 的 cluster/namespace/configmap 不在 env 级凭证里出现,改成下面的 per-service 映射块 -->
-              <div
-                v-if="!isFieldHidden(configCenterType, env.id, f, (k) => ccCredInputs[ccKeyFor(configCenterType, env.id, k)] || '') && !(configCenterType === 'kuboard' && (f.key === 'cluster' || f.key === 'namespace' || f.key === 'configmap'))"
-                class="cc-field"
-              >
-                <label class="cc-field-label">
-                  {{ f.label }}
-                  <span v-if="f.optional" class="auto-tag">选填</span>
-                  <span v-if="f.secret" class="cc-scope-tag secret" title="Secret:会写入 yaml,分享时注意范围">🔒 Secret</span>
-                </label>
-                <div class="cc-field-row">
-                  <!-- options 非空 → <select> 下拉(枚举字段,如 auth_mode) -->
-                  <select
-                    v-if="f.options"
-                    :value="ccCredInputs[ccKeyFor(configCenterType, env.id, f.key)] || (f.options[0]?.value || '')"
-                    class="cc-input"
-                    @change="ccCredInputs[ccKeyFor(configCenterType, env.id, f.key)] = ($event.target as HTMLSelectElement).value"
-                  >
-                    <option v-for="opt in f.options" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
-                  </select>
-                  <!-- kuboard: cluster/namespace/configmap 永远 <select>,未拉取时禁用 -->
-                  <select
-                    v-else-if="configCenterType === 'kuboard' && f.key === 'cluster'"
-                    v-model="ccCredInputs[ccKeyFor(configCenterType, env.id, f.key)]"
-                    :disabled="kuboardStateByEnv[env.id]?.status !== 'ok'"
-                    class="cc-input"
-                  >
-                    <option v-if="kuboardStateByEnv[env.id]?.status !== 'ok'" value="">— 先填 URL+鉴权,点上方"📥 拉取" —</option>
-                    <option v-else value="">— 选集群 —</option>
-                    <option v-for="c in ((kuboardStateByEnv[env.id] as any)?.clusters || [])" :key="c.name" :value="c.name">{{ c.name }}</option>
-                  </select>
-                  <select
-                    v-else-if="configCenterType === 'kuboard' && f.key === 'namespace'"
-                    v-model="ccCredInputs[ccKeyFor(configCenterType, env.id, f.key)]"
-                    :disabled="kuboardStateByEnv[env.id]?.status !== 'ok' || !ccCredInputs[ccKeyFor(configCenterType, env.id, 'cluster')]"
-                    class="cc-input"
-                  >
-                    <option v-if="kuboardStateByEnv[env.id]?.status !== 'ok'" value="">— 先拉取资源 —</option>
-                    <option v-else-if="!ccCredInputs[ccKeyFor(configCenterType, env.id, 'cluster')]" value="">— 先选集群 —</option>
-                    <option v-else value="">— 选 namespace —</option>
-                    <option v-for="n in kuboardNamespacesFor(env.id, ccCredInputs[ccKeyFor(configCenterType, env.id, 'cluster')] || '')" :key="n" :value="n">{{ n }}</option>
-                  </select>
-                  <select
-                    v-else-if="configCenterType === 'kuboard' && f.key === 'configmap'"
-                    v-model="ccCredInputs[ccKeyFor(configCenterType, env.id, f.key)]"
-                    :disabled="kuboardStateByEnv[env.id]?.status !== 'ok' || !ccCredInputs[ccKeyFor(configCenterType, env.id, 'namespace')]"
-                    class="cc-input"
-                  >
-                    <option v-if="kuboardStateByEnv[env.id]?.status !== 'ok'" value="">— 先拉取资源 —</option>
-                    <option v-else-if="!ccCredInputs[ccKeyFor(configCenterType, env.id, 'namespace')]" value="">— 先选 namespace —</option>
-                    <option v-else value="">— 选 ConfigMap —</option>
-                    <option v-for="cm in kuboardConfigMapsFor(env.id, ccCredInputs[ccKeyFor(configCenterType, env.id, 'cluster')] || '', ccCredInputs[ccKeyFor(configCenterType, env.id, 'namespace')] || '')" :key="cm" :value="cm">{{ cm }}</option>
-                  </select>
-                  <input
-                    v-else
-                    v-model="ccCredInputs[ccKeyFor(configCenterType, env.id, f.key)]"
-                    :type="f.secret && !isRevealed(ccKeyFor(configCenterType, env.id, f.key)) ? 'password' : 'text'"
-                    :placeholder="f.placeholder || ''"
-                    autocomplete="off"
-                    spellcheck="false"
-                    class="cc-input"
-                  />
-                  <button
-                    v-if="f.secret && !f.options"
-                    type="button"
-                    class="btn-link cc-reveal"
-                    @click="toggleReveal(ccKeyFor(configCenterType, env.id, f.key))"
-                    :title="isRevealed(ccKeyFor(configCenterType, env.id, f.key)) ? '隐藏明文' : '显示明文'"
-                  >{{ isRevealed(ccKeyFor(configCenterType, env.id, f.key)) ? '🙈' : '👁' }}</button>
-                  <button
-                    v-if="!f.options && ccCredInputs[ccKeyFor(configCenterType, env.id, f.key)]"
-                    type="button"
-                    class="btn-link cc-delete"
-                    @click="clearCCFieldInput(ccKeyFor(configCenterType, env.id, f.key))"
-                    title="清空本字段"
-                  >🗑</button>
-                </div>
-                <div v-if="!f.uiOnly" class="cc-env-hint">
-                  对应环境变量:<code>{{ f.envVar(env.id || 'ENV') }}</code>
-                </div>
-              </div>
-            </template>
+            <CredentialField
+              v-for="f in (configCenterType === 'kuboard'
+                ? CC_FIELDS_BY_TYPE[configCenterType].filter(f2 => f2.key !== 'cluster' && f2.key !== 'namespace' && f2.key !== 'configmap')
+                : CC_FIELDS_BY_TYPE[configCenterType])"
+              :key="f.key"
+              v-show="!isFieldHidden(configCenterType, env.id, f, (k) => ccCredInputs[ccKeyFor(configCenterType, env.id, k)] || '')"
+              :field="f"
+              :env-i-d="env.id"
+              :model-value="ccCredInputs[ccKeyFor(configCenterType, env.id, f.key)] || ''"
+              :is-revealed="isRevealed(ccKeyFor(configCenterType, env.id, f.key))"
+              :is-kuboard="configCenterType === 'kuboard'"
+              :kuboard-state="kuboardStateByEnv[env.id]"
+              :sibling-cluster-value="ccCredInputs[ccKeyFor(configCenterType, env.id, 'cluster')] || ''"
+              :sibling-namespace-value="ccCredInputs[ccKeyFor(configCenterType, env.id, 'namespace')] || ''"
+              @update:model-value="(v: string) => (ccCredInputs[ccKeyFor(configCenterType, env.id, f.key)] = v)"
+              @toggle-reveal="toggleReveal(ccKeyFor(configCenterType, env.id, f.key))"
+              @clear="clearCCFieldInput(ccKeyFor(configCenterType, env.id, f.key))"
+            />
           </div>
 
           <!-- kuboard 专属:点这个按钮拉资源,把后面 cluster/namespace/cm 三个字段从手填变下拉 -->
           <div v-if="configCenterType === 'kuboard'" class="cc-preload-row">
-            <button
-              v-if="kuboardStateByEnv[env.id]?.status === 'loading'"
-              :key="`kb-load-${env.id}-loading`"
-              type="button"
-              class="btn cc-preload-btn"
-              disabled
-            >
-              <span class="cc-preload-spinner" aria-hidden="true"></span>
-              拉取中…
-            </button>
-            <button
-              v-else-if="kuboardStateByEnv[env.id]?.status === 'ok'"
-              :key="`kb-load-${env.id}-ok`"
-              type="button"
-              class="btn cc-preload-btn"
+            <PreloadButton
+              :status="kuboardStateByEnv[env.id]?.status"
+              idle-text="📥 从 Kuboard 读取可选项"
+              ok-text="🔄 重新读取"
               @click="runKuboardPreload(env.id)"
-            >🔄 重新读取</button>
-            <button
-              v-else
-              :key="`kb-load-${env.id}-idle`"
-              type="button"
-              class="btn cc-preload-btn"
-              @click="runKuboardPreload(env.id)"
-            >📥 从 Kuboard 读取可选项</button>
+            />
             <span v-if="kuboardStateByEnv[env.id]?.status === 'ok'" class="cc-preload-summary">
               ✓ {{ (kuboardStateByEnv[env.id] as any).clusters.length }} 个集群
             </span>
@@ -7938,55 +6306,24 @@ const configTypeDescriptions: Record<string, string> = {
           <!-- 服务勾选清单:勾哪些服务走当前源(主源)。多源场景下,某服务在主源勾选 = 它的
                config_source 设为主源 type;副源场景下用户去对应副源面板勾选。
                单源场景默认所有服务都走唯一源,checkbox 全勾。 -->
-          <div v-if="allServiceNames.length > 0" class="cc-svc-checklist">
-            <div class="cc-svc-checklist-head">
-              <span class="cc-svc-checklist-title">本环境包含的服务</span>
-              <span class="cc-svc-checklist-hint">勾选要走 <code>{{ configCenterType }}</code> 源的服务;点下面"拉取配置"会列出这些服务对应的配置项</span>
-            </div>
-            <div class="cc-svc-checklist-grid">
-              <label
-                v-for="svc in allServiceNames"
-                :key="svc"
-                class="cc-svc-checklist-item"
-                :class="{ checked: getServiceSource(svc) === configCenterType }"
-              >
-                <input
-                  type="checkbox"
-                  :checked="getServiceSource(svc) === configCenterType"
-                  @change="(e) => setServiceSource(svc, (e.target as HTMLInputElement).checked ? configCenterType : '')"
-                />
-                <span class="cc-svc-checklist-name">{{ svc }}</span>
-              </label>
-            </div>
-          </div>
+          <ServiceChecklist
+            v-if="allServiceNames.length > 0"
+            :services="allServiceNames"
+            :source-i-d="configCenterType"
+            :hint-html="`勾选要走 <code>${configCenterType}</code> 源的服务;点下面&quot;拉取配置&quot;会列出这些服务对应的配置项`"
+            :get-service-source="getServiceSource"
+            @toggle="(svc, checked) => setServiceSource(svc, checked ? configCenterType : '')"
+          />
 
           <!-- 真实预加载:用户填完凭证 + 勾选服务后,点一下连目标配置中心拉可用条目清单。
                按钮挨着每个 env 块,各 env 独立 loading / 错误态。 -->
           <div class="cc-preload-row">
-            <button
-              v-if="ccHubStateByEnv[env.id]?.status === 'loading'"
-              :key="`cc-preload-${env.id}-loading`"
-              type="button"
-              class="btn cc-preload-btn"
-              disabled
-            >
-              <span class="cc-preload-spinner" aria-hidden="true"></span>
-              拉取中…
-            </button>
-            <button
-              v-else-if="ccHubStateByEnv[env.id]?.status === 'ok'"
-              :key="`cc-preload-${env.id}-ok`"
-              type="button"
-              class="btn cc-preload-btn"
+            <PreloadButton
+              :status="ccHubStateByEnv[env.id]?.status"
+              idle-text="📥 拉取勾选服务的配置"
+              ok-text="🔄 重新拉取勾选服务的配置"
               @click="runCCHubPreload(env.id)"
-            >🔄 重新拉取勾选服务的配置</button>
-            <button
-              v-else
-              :key="`cc-preload-${env.id}-idle`"
-              type="button"
-              class="btn cc-preload-btn"
-              @click="runCCHubPreload(env.id)"
-            >📥 拉取勾选服务的配置</button>
+            />
             <span v-if="ccHubStateByEnv[env.id]?.status === 'ok'" class="cc-preload-summary">
               ✓ {{ ccHubStateByEnv[env.id]!.entries?.length || 0 }} 条
             </span>
@@ -7998,150 +6335,51 @@ const configTypeDescriptions: Record<string, string> = {
 
           <!-- 映射块:只有**本 env** 自己预加载成功时才显示。不借其他 env 的扫描结果 ——
                每个 env 必须用自己的凭证各扫一次,才能呈现自己的 namespace / dataId 选项。 -->
-          <!-- namespace + dataId 映射块只在"勾了服务 + 拉取过"时才出现。
-               没勾任何服务时,即便 ccHubStateByEnv 里有上次扫的缓存,也不渲染 ——
-               避免老 namespace / dataId 把"还没决定要走这个源"的视觉混淆掉。 -->
-          <div
+          <!-- namespace + dataId 映射块只在"勾了服务 + 拉取过"时才出现。 -->
+          <NamespaceServiceMap
             v-if="envScanned(env.id) && allServiceNames.filter(s => getServiceSource(s) === configCenterType).length > 0"
-            class="cc-map-block"
+            :env-i-d="env.id"
+            :config-center-type="configCenterType"
+            :services="allServiceNames.filter(s => getServiceSource(s) === configCenterType)"
+            :env-namespaces="envNamespaces"
+            :service-config-sel="serviceConfigSel"
+            :service-config-group="serviceConfigGroup"
+            :namespaces="namespacesFor(env.id)"
+            :entries="entriesForNamespace(env.id, envNamespaces[env.id] || '')"
+            :svc-key="svcKey"
+            :has-error="hasError"
+            @namespace-changed="(_e, v) => onNamespaceChanged(env.id, v)"
+            @data-id-changed="(_e, svc) => onDataIdChanged(env.id, svc)"
+          />
+          <!-- 没服务可勾的占位提示(原模板里 v-else-if 分支移到外层 v-if 之后) -->
+          <div
+            v-else-if="envScanned(env.id) && allServiceNames.length === 0"
+            class="cc-map-block cc-map-hint"
           >
-            <div class="cc-map-head">
-              <span class="cc-map-title">
-                {{ env.id }} → 挑 namespace + 每个服务对应哪个 dataId
-              </span>
-            </div>
-
-            <!-- namespace 下拉:布局完全仿 Step 4 "环境 → 分支" —— env.id 左、箭头、右 select -->
-            <div class="cc-map-ns-grid">
-              <div class="cc-map-ns-item">
-                <span class="cc-map-ns-env">{{ env.id || '?' }}</span>
-                <span class="cc-map-ns-arrow">→</span>
-                <select
-                  :value="envNamespaces[env.id] || ''"
-                  class="cc-map-select"
-                  :class="{ error: hasError(`cc.${configCenterType}.${env.id}.namespace`) }"
-                  @change="(e: any) => onNamespaceChanged(env.id, e.target.value)"
-                >
-                  <option value="">— 选 namespace —</option>
-                  <option
-                    v-for="ns in namespacesFor(env.id)"
-                    :key="ns.id || 'public'"
-                    :value="ns.id"
-                  >{{ ns.show_name || ns.id || 'public' }}</option>
-                </select>
-                <span class="cc-map-ns-count">
-                  {{ entriesForNamespace(env.id, envNamespaces[env.id] || '').length }} 条
-                </span>
-              </div>
-            </div>
-
-            <!-- 配置项映射:只列勾选了走当前源的服务。每行 service → dataId 下拉。
-                 走其它源的服务,在那个源的面板里勾选 + 配置(本面板不显示)。 -->
-            <div
-              v-if="allServiceNames.filter(s => getServiceSource(s) === configCenterType).length > 0"
-              class="cc-map-svc-list"
-            >
-              <div
-                v-for="svc in allServiceNames.filter(s => getServiceSource(s) === configCenterType)"
-                :key="svc"
-                class="cc-map-svc-row"
-              >
-                <span class="cc-map-svc-name">{{ svc }}</span>
-                <select
-                  v-model="serviceConfigSel[svcKey(env.id, svc)]"
-                  class="cc-map-select cc-map-select-svc"
-                  :class="{ error: hasError(`cc.${configCenterType}.${env.id}.svc.${svc}`) }"
-                  @change="onDataIdChanged(env.id, svc)"
-                >
-                  <option value="">(不映射)</option>
-                  <option
-                    v-for="entry in entriesForNamespace(env.id, envNamespaces[env.id] || '')"
-                    :key="entry.locator + '@' + (entry.group || '')"
-                    :value="entry.locator"
-                  >
-                    {{ entry.locator }}<template v-if="entry.group && entry.group !== 'DEFAULT_GROUP'">  @{{ entry.group }}</template>
-                  </option>
-                </select>
-                <span
-                  v-if="serviceConfigGroup[svcKey(env.id, svc)]"
-                  class="cc-map-group-tag"
-                  :title="'group = ' + serviceConfigGroup[svcKey(env.id, svc)]"
-                >
-                  {{ serviceConfigGroup[svcKey(env.id, svc)] }}
-                </span>
-              </div>
-            </div>
-            <div v-else-if="allServiceNames.length === 0" class="cc-map-hint">
-              先在 Step 4 填好 repos 的 <code>service_names</code>,这里才有服务列表可映射。
-            </div>
-            <div v-else class="cc-map-hint">
-              没有服务被勾选走 <code>{{ configCenterType }}</code> 源 —— 在上面的"本环境包含的服务"清单里勾要走当前源的服务。
-            </div>
+            先在 Step 4 填好 repos 的 <code>service_names</code>,这里才有服务列表可映射。
+          </div>
+          <div
+            v-else-if="envScanned(env.id)"
+            class="cc-map-block cc-map-hint"
+          >
+            没有服务被勾选走 <code>{{ configCenterType }}</code> 源 —— 在上面的"本环境包含的服务"清单里勾要走当前源的服务。
           </div>
 
           <!-- kuboard 主源:per-service cluster/namespace/configmap 三联映射。
                nacos 走上面的 cc-map-block(envNamespaces + serviceConfigSel),kuboard 走这里。 -->
-          <div
+          <KuboardServiceMap
             v-if="configCenterType === 'kuboard'
                   && kuboardStateByEnv[env.id]?.status === 'ok'
                   && allServiceNames.filter(s => getServiceSource(s) === configCenterType).length > 0"
-            class="cc-map-block"
-          >
-            <div class="cc-map-head">
-              <span class="cc-map-title">
-                {{ env.id }} → 每个服务对应的 集群 / namespace / ConfigMap
-              </span>
-            </div>
-            <div class="cc-map-svc-list">
-              <div
-                v-for="svc in allServiceNames.filter(s => getServiceSource(s) === configCenterType)"
-                :key="svc"
-                class="cc-map-svc-row cc-map-svc-row-kuboard"
-              >
-                <span class="cc-map-svc-name">{{ svc }}</span>
-                <select
-                  :value="(kuboardSvcMap[svcKey(env.id, svc)] || {}).cluster || ''"
-                  class="cc-map-select cc-map-select-kuboard"
-                  @change="(e: any) => setKuboardLoc(env.id, svc, 'cluster', e.target.value)"
-                >
-                  <option value="">— 选集群 —</option>
-                  <option
-                    v-for="c in ((kuboardStateByEnv[env.id] as any)?.clusters || [])"
-                    :key="c.name"
-                    :value="c.name"
-                  >{{ c.name }}</option>
-                </select>
-                <select
-                  :value="(kuboardSvcMap[svcKey(env.id, svc)] || {}).namespace || ''"
-                  :disabled="!((kuboardSvcMap[svcKey(env.id, svc)] || {}).cluster)"
-                  class="cc-map-select cc-map-select-kuboard"
-                  @change="(e: any) => setKuboardLoc(env.id, svc, 'namespace', e.target.value)"
-                >
-                  <option v-if="!((kuboardSvcMap[svcKey(env.id, svc)] || {}).cluster)" value="">— 先选集群 —</option>
-                  <option v-else value="">— 选 namespace —</option>
-                  <option
-                    v-for="n in kuboardNamespacesFor(env.id, (kuboardSvcMap[svcKey(env.id, svc)] || {}).cluster || '')"
-                    :key="n"
-                    :value="n"
-                  >{{ n }}</option>
-                </select>
-                <select
-                  :value="(kuboardSvcMap[svcKey(env.id, svc)] || {}).configmap || ''"
-                  :disabled="!((kuboardSvcMap[svcKey(env.id, svc)] || {}).namespace)"
-                  class="cc-map-select cc-map-select-kuboard"
-                  @change="(e: any) => setKuboardLoc(env.id, svc, 'configmap', e.target.value)"
-                >
-                  <option v-if="!((kuboardSvcMap[svcKey(env.id, svc)] || {}).namespace)" value="">— 先选 namespace —</option>
-                  <option v-else value="">— 选 ConfigMap —</option>
-                  <option
-                    v-for="cm in kuboardConfigMapsFor(env.id, (kuboardSvcMap[svcKey(env.id, svc)] || {}).cluster || '', (kuboardSvcMap[svcKey(env.id, svc)] || {}).namespace || '')"
-                    :key="cm"
-                    :value="cm"
-                  >{{ cm }}</option>
-                </select>
-              </div>
-            </div>
-          </div>
+            :env-i-d="env.id"
+            :services="allServiceNames.filter(s => getServiceSource(s) === configCenterType)"
+            :kuboard-svc-map="kuboardSvcMap"
+            :clusters="((kuboardStateByEnv[env.id] as any)?.clusters || [])"
+            :svc-key="svcKey"
+            :namespaces-for="kuboardNamespacesFor"
+            :configmaps-for="kuboardConfigMapsFor"
+            @set-loc="(envID, svc, field, value) => setKuboardLoc(envID, svc, field, value)"
+          />
 
           <!-- 预加载失败时,不在页面渲染长错误文本;summary 行已显示 "✗ 拉取失败,详见日志",
                用户按 toast 提示进左侧「日志」页看完整栈。
@@ -8151,227 +6389,26 @@ const configTypeDescriptions: Record<string, string> = {
         </div>
       </div>
 
-      <!-- 副源连接表单:每个非主源 type 一份,只收 endpoints 凭证;预读 / namespace 下拉
-           暂不支持(留给后续迭代或 yaml 手填)。 -->
-      <div
+      <!-- 副源连接表单:每个非主源 type 一份;主源在上面已渲染。 -->
+      <SecondarySourcePanel
         v-for="t in activeSourceTypes.slice(1).filter(t2 => CC_FIELDS_BY_TYPE[t2])"
         :key="`secsrc-${t}`"
-        class="form-group secondary-source-form"
-      >
-        <label>
-          <code>{{ t }}</code> 连接配置
-          <span class="auto-tag" style="background:#fef3c7;color:#92400e;">副源</span>
-          <span class="field-hint">
-            — 每个 env 一份连接凭证;下方"本环境包含的服务"勾选要走本副源的服务,然后给每个服务挑对应的配置定位
-          </span>
-        </label>
-        <div v-for="env in environments" :key="env.id" class="cc-env-block">
-          <div class="cc-env-head">
-            <span class="cc-env-label">{{ env.id || '(未命名 env)' }}</span>
-            <span v-if="env.is_prod" class="cc-env-prod-tag">prod</span>
-          </div>
-          <div class="cc-env-fields">
-            <template v-for="f in CC_FIELDS_BY_TYPE[t]" :key="f.key">
-              <!-- kuboard 的 cluster/namespace/configmap 不在 env 级凭证里出现,改成下面的 per-service 映射块 -->
-              <div
-                v-if="!isFieldHidden(t, env.id, f, (k) => (sourceCreds[t]?.creds?.[env.id] || {})[k] || '') && !(t === 'kuboard' && (f.key === 'cluster' || f.key === 'namespace' || f.key === 'configmap'))"
-                class="cc-field"
-              >
-                <label class="cc-field-label">
-                  {{ f.label }}
-                  <span v-if="f.optional" class="auto-tag">选填</span>
-                  <span v-if="f.secret" class="cc-scope-tag secret">🔒 Secret</span>
-                </label>
-                <div class="cc-field-row">
-                  <select
-                    v-if="f.options"
-                    :value="((sourceCreds[t]?.creds?.[env.id] || {})[f.key]) || (f.options[0]?.value || '')"
-                    class="cc-input"
-                    @change="(e) => { if (!sourceCreds[t]?.creds?.[env.id]) sourceCreds[t].creds[env.id] = {}; sourceCreds[t].creds[env.id][f.key] = (e.target as HTMLSelectElement).value }"
-                  >
-                    <option v-for="opt in f.options" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
-                  </select>
-                  <select
-                    v-else-if="t === 'kuboard' && f.key === 'cluster'"
-                    :value="(sourceCreds[t]?.creds?.[env.id] || {})[f.key] || ''"
-                    :disabled="kuboardStateByEnv[env.id]?.status !== 'ok'"
-                    class="cc-input"
-                    @change="(e) => { if (!sourceCreds[t]?.creds?.[env.id]) sourceCreds[t].creds[env.id] = {}; sourceCreds[t].creds[env.id][f.key] = (e.target as HTMLSelectElement).value }"
-                  >
-                    <option v-if="kuboardStateByEnv[env.id]?.status !== 'ok'" value="">— 先填 URL+鉴权,点上方"📥 拉取" —</option>
-                    <option v-else value="">— 选集群 —</option>
-                    <option v-for="c in ((kuboardStateByEnv[env.id] as any)?.clusters || [])" :key="c.name" :value="c.name">{{ c.name }}</option>
-                  </select>
-                  <select
-                    v-else-if="t === 'kuboard' && f.key === 'namespace'"
-                    :value="(sourceCreds[t]?.creds?.[env.id] || {})[f.key] || ''"
-                    :disabled="kuboardStateByEnv[env.id]?.status !== 'ok' || !((sourceCreds[t]?.creds?.[env.id] || {}).cluster)"
-                    class="cc-input"
-                    @change="(e) => { if (!sourceCreds[t]?.creds?.[env.id]) sourceCreds[t].creds[env.id] = {}; sourceCreds[t].creds[env.id][f.key] = (e.target as HTMLSelectElement).value }"
-                  >
-                    <option v-if="kuboardStateByEnv[env.id]?.status !== 'ok'" value="">— 先拉取资源 —</option>
-                    <option v-else-if="!((sourceCreds[t]?.creds?.[env.id] || {}).cluster)" value="">— 先选集群 —</option>
-                    <option v-else value="">— 选 namespace —</option>
-                    <option v-for="n in kuboardNamespacesFor(env.id, (sourceCreds[t]?.creds?.[env.id] || {}).cluster || '')" :key="n" :value="n">{{ n }}</option>
-                  </select>
-                  <select
-                    v-else-if="t === 'kuboard' && f.key === 'configmap'"
-                    :value="(sourceCreds[t]?.creds?.[env.id] || {})[f.key] || ''"
-                    :disabled="kuboardStateByEnv[env.id]?.status !== 'ok' || !((sourceCreds[t]?.creds?.[env.id] || {}).namespace)"
-                    class="cc-input"
-                    @change="(e) => { if (!sourceCreds[t]?.creds?.[env.id]) sourceCreds[t].creds[env.id] = {}; sourceCreds[t].creds[env.id][f.key] = (e.target as HTMLSelectElement).value }"
-                  >
-                    <option v-if="kuboardStateByEnv[env.id]?.status !== 'ok'" value="">— 先拉取资源 —</option>
-                    <option v-else-if="!((sourceCreds[t]?.creds?.[env.id] || {}).namespace)" value="">— 先选 namespace —</option>
-                    <option v-else value="">— 选 ConfigMap —</option>
-                    <option v-for="cm in kuboardConfigMapsFor(env.id, (sourceCreds[t]?.creds?.[env.id] || {}).cluster || '', (sourceCreds[t]?.creds?.[env.id] || {}).namespace || '')" :key="cm" :value="cm">{{ cm }}</option>
-                  </select>
-                  <input
-                    v-else
-                    :type="f.secret ? 'password' : 'text'"
-                    :value="(sourceCreds[t]?.creds?.[env.id] || {})[f.key] || ''"
-                    :placeholder="f.placeholder || ''"
-                    class="cc-input"
-                    autocomplete="off"
-                    spellcheck="false"
-                    @input="(e) => { if (!sourceCreds[t]?.creds?.[env.id]) sourceCreds[t].creds[env.id] = {}; sourceCreds[t].creds[env.id][f.key] = (e.target as HTMLInputElement).value }"
-                  />
-                </div>
-                <div v-if="!f.uiOnly" class="cc-env-hint">
-                  对应环境变量:<code>{{ f.envVar(env.id || 'ENV') }}_{{ t.toUpperCase().replace(/-/g, '_') }}</code>
-                </div>
-              </div>
-            </template>
-          </div>
-
-          <!-- kuboard 副源:同主源,加"📥 拉取资源"按钮,根据 sourceCreds[t].creds[env].url/username/password 读 -->
-          <div v-if="t === 'kuboard'" class="cc-preload-row">
-            <button
-              v-if="kuboardStateByEnv[env.id]?.status === 'loading'"
-              :key="`kb-sec-${env.id}-loading`"
-              type="button"
-              class="btn cc-preload-btn"
-              disabled
-            >
-              <span class="cc-preload-spinner" aria-hidden="true"></span>
-              拉取中…
-            </button>
-            <button
-              v-else-if="kuboardStateByEnv[env.id]?.status === 'ok'"
-              :key="`kb-sec-${env.id}-ok`"
-              type="button"
-              class="btn cc-preload-btn"
-              @click="runKuboardPreloadFromSource(t, env.id)"
-            >🔄 重新读取</button>
-            <button
-              v-else
-              :key="`kb-sec-${env.id}-idle`"
-              type="button"
-              class="btn cc-preload-btn"
-              @click="runKuboardPreloadFromSource(t, env.id)"
-            >📥 从 Kuboard 读取可选项</button>
-            <span v-if="kuboardStateByEnv[env.id]?.status === 'ok'" class="cc-preload-summary">
-              ✓ {{ (kuboardStateByEnv[env.id] as any).clusters.length }} 个集群
-            </span>
-            <span v-else-if="kuboardStateByEnv[env.id]?.status === 'error'" class="cc-preload-error">
-              ✗ {{ (kuboardStateByEnv[env.id] as any).error.slice(0, 60) }}
-              <router-link to="/logs" class="cc-preload-log-link">查看日志</router-link>
-            </span>
-          </div>
-
-          <!-- 副源服务勾选清单:只列"主源没勾走的"剩余服务 + 已经勾给本副源的服务。
-               主源已经勾走的服务在这里不出现,避免一个服务同时被两个源认领。
-               允许 0 勾(意味着这个副源虽然连接好了,但暂时没服务挂上去,合法但不实用)。 -->
-          <div v-if="allServiceNames.filter(s => !getServiceSource(s) || getServiceSource(s) === t).length > 0" class="cc-svc-checklist">
-            <div class="cc-svc-checklist-head">
-              <span class="cc-svc-checklist-title">本环境包含的服务</span>
-              <span class="cc-svc-checklist-hint">主源已认领的服务在此不显示;勾选要走 <code>{{ t }}</code> 副源的服务</span>
-            </div>
-            <div class="cc-svc-checklist-grid">
-              <label
-                v-for="svc in allServiceNames.filter(s => !getServiceSource(s) || getServiceSource(s) === t)"
-                :key="svc"
-                class="cc-svc-checklist-item"
-                :class="{ checked: getServiceSource(svc) === t }"
-              >
-                <input
-                  type="checkbox"
-                  :checked="getServiceSource(svc) === t"
-                  @change="(e) => setServiceSource(svc, (e.target as HTMLInputElement).checked ? t : '')"
-                />
-                <span class="cc-svc-checklist-name">{{ svc }}</span>
-              </label>
-            </div>
-          </div>
-          <div v-else-if="allServiceNames.length > 0" class="cc-svc-checklist-empty">
-            所有服务都已被其他源认领;若想让某个服务改走 <code>{{ t }}</code> 源,先在对应源把它取消勾选。
-          </div>
-
-          <!-- kuboard per-service 映射:每个勾给本副源的服务 → cluster/namespace/configmap 三联级联下拉。
-               不同服务可能落在不同 ns、不同 cm,所以三个字段都按服务挑,而不是 env 级共享。 -->
-          <div
-            v-if="t === 'kuboard'
-                  && kuboardStateByEnv[env.id]?.status === 'ok'
-                  && allServiceNames.filter(s => getServiceSource(s) === t).length > 0"
-            class="cc-map-block"
-          >
-            <div class="cc-map-head">
-              <span class="cc-map-title">
-                {{ env.id }} → 每个服务对应的 集群 / namespace / ConfigMap
-              </span>
-            </div>
-            <div class="cc-map-svc-list">
-              <div
-                v-for="svc in allServiceNames.filter(s => getServiceSource(s) === t)"
-                :key="svc"
-                class="cc-map-svc-row cc-map-svc-row-kuboard"
-              >
-                <span class="cc-map-svc-name">{{ svc }}</span>
-                <select
-                  :value="(kuboardSvcMap[svcKey(env.id, svc)] || {}).cluster || ''"
-                  class="cc-map-select cc-map-select-kuboard"
-                  @change="(e: any) => setKuboardLoc(env.id, svc, 'cluster', e.target.value)"
-                >
-                  <option value="">— 选集群 —</option>
-                  <option
-                    v-for="c in ((kuboardStateByEnv[env.id] as any)?.clusters || [])"
-                    :key="c.name"
-                    :value="c.name"
-                  >{{ c.name }}</option>
-                </select>
-                <select
-                  :value="(kuboardSvcMap[svcKey(env.id, svc)] || {}).namespace || ''"
-                  :disabled="!((kuboardSvcMap[svcKey(env.id, svc)] || {}).cluster)"
-                  class="cc-map-select cc-map-select-kuboard"
-                  @change="(e: any) => setKuboardLoc(env.id, svc, 'namespace', e.target.value)"
-                >
-                  <option v-if="!((kuboardSvcMap[svcKey(env.id, svc)] || {}).cluster)" value="">— 先选集群 —</option>
-                  <option v-else value="">— 选 namespace —</option>
-                  <option
-                    v-for="n in kuboardNamespacesFor(env.id, (kuboardSvcMap[svcKey(env.id, svc)] || {}).cluster || '')"
-                    :key="n"
-                    :value="n"
-                  >{{ n }}</option>
-                </select>
-                <select
-                  :value="(kuboardSvcMap[svcKey(env.id, svc)] || {}).configmap || ''"
-                  :disabled="!((kuboardSvcMap[svcKey(env.id, svc)] || {}).namespace)"
-                  class="cc-map-select cc-map-select-kuboard"
-                  @change="(e: any) => setKuboardLoc(env.id, svc, 'configmap', e.target.value)"
-                >
-                  <option v-if="!((kuboardSvcMap[svcKey(env.id, svc)] || {}).namespace)" value="">— 先选 namespace —</option>
-                  <option v-else value="">— 选 ConfigMap —</option>
-                  <option
-                    v-for="cm in kuboardConfigMapsFor(env.id, (kuboardSvcMap[svcKey(env.id, svc)] || {}).cluster || '', (kuboardSvcMap[svcKey(env.id, svc)] || {}).namespace || '')"
-                    :key="cm"
-                    :value="cm"
-                  >{{ cm }}</option>
-                </select>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
+        :source-type="t"
+        :fields="CC_FIELDS_BY_TYPE[t]"
+        :environments="environments"
+        :all-service-names="allServiceNames"
+        :source-creds="sourceCreds"
+        :kuboard-state-by-env="kuboardStateByEnv"
+        :kuboard-svc-map="kuboardSvcMap"
+        :is-field-hidden="isFieldHidden"
+        :get-service-source="getServiceSource"
+        :svc-key="svcKey"
+        :kuboard-namespaces-for="kuboardNamespacesFor"
+        :kuboard-config-maps-for="kuboardConfigMapsFor"
+        @preload-kuboard="(srcType, envID) => runKuboardPreloadFromSource(srcType, envID)"
+        @toggle-service-source="(svc, checked, srcType) => setServiceSource(svc, checked ? srcType : '')"
+        @set-kuboard-loc="(envID, svc, field, value) => setKuboardLoc(envID, svc, field, value)"
+      />
 
       <!-- env-vars 源(无远程连接,但每个 env 各数据层的静态连接串在 Step 6 数据层里按 data_store 维度填) -->
       <div v-if="enabledSourceTypes['env-vars']" class="form-group">
@@ -8422,14 +6459,11 @@ const configTypeDescriptions: Record<string, string> = {
       </p>
 
       <!-- 共享警告:同 Step 5 ,提醒密码会进 yaml -->
-      <div class="cc-share-warn" style="margin-bottom:18px">
-        <div class="cc-share-warn-title">⚠ 数据流与共享范围</div>
-        <ul class="cc-share-warn-list">
-          <li>本页填写字段(含密码、token 等凭证)将保存至 <code>system.yaml</code>。</li>
-          <li>部署时,生成器把对应值注入目标 AI 平台的 MCP Server 环境变量。</li>
-          <li><strong>system.yaml 含明文凭证</strong>,请仅在可信范围内分享。</li>
-        </ul>
-      </div>
+      <CredsShareWarning :margin-bottom="18">
+        <li>本页填写字段(含密码、token 等凭证)将保存至 <code>system.yaml</code>。</li>
+        <li>部署时,生成器把对应值注入目标 AI 平台的 MCP Server 环境变量。</li>
+        <li><strong>system.yaml 含明文凭证</strong>,请仅在可信范围内分享。</li>
+      </CredsShareWarning>
 
       <!-- 启用的可观测性组件:横排 chip 选择(默认全展开,跟数据层 Step 6 一致 —— 数据层是自动识别勾选,这里手动) -->
       <h3 style="margin-top:4px">启用的可观测性组件</h3>
@@ -8464,217 +6498,45 @@ const configTypeDescriptions: Record<string, string> = {
           >⧗ 还没启用任何可观测性组件 — 在上方勾选要用的</div>
 
           <div v-else class="ds-svc-container">
-            <!-- 每个启用的工具一块,展示字段 + 连通性徽章 -->
-            <div
+            <!-- 每个启用的工具一块:外壳 + head + 直连模式字段集 由 <ObservabilityToolBlock> 包,
+                 工具特定的尾部内容(k8s_runtime / via_grafana / loki labels)走 default slot。 -->
+            <ObservabilityToolBlock
               v-for="spec in OBS_TOOL_SPECS.filter(s => enabledObservability[s.key])"
               :key="spec.key"
-              class="ds-svc-block"
-              :class="['status-' + (obsProbeResults[obsProbeKey(spec.key, env.id)]?.status || 'pending')]"
+              :env-i-d="env.id"
+              :spec="spec"
+              :access-mode="getObsAccessMode(spec.key, env.id)"
+              :access-toggleable="['loki','prometheus','jaeger','tempo','elk'].includes(spec.key) && enabledObservability['grafana']"
+              :probe-state="obsProbeResults[obsProbeKey(spec.key, env.id)]"
+              :tool-inputs="toolInputs"
+              :is-revealed="isRevealed"
+              :is-obs-field-hidden="isObsFieldHidden"
+              :tool-key-for="toolKeyFor"
+              @update:access-mode="(mode) => setObsAccessMode(spec.key, env.id, mode)"
+              @update:tool-input="(k, v) => {
+                toolInputs[k] = v
+                scheduleObsProbe(spec.key, env.id)
+                if (spec.key === 'grafana') scheduleGrafanaDsAutoload(env.id)
+              }"
+              @toggle-reveal="toggleReveal"
+              @clear-input="clearToolFieldInput"
             >
-              <div class="ds-svc-head">
-                <span class="ds-svc-name">🗄 {{ spec.label }}</span>
-                <!-- 访问方式选择:仅对 loki/prometheus/jaeger/tempo/elk 且 Grafana 已启用时可切换。
-                     默认走 Grafana 代理(只需选 datasource);用户也可强制直连(填本工具自己的 URL+鉴权)。 -->
-                <span
-                  v-if="['loki','prometheus','jaeger','tempo','elk'].includes(spec.key) && enabledObservability['grafana']"
-                  class="cc-field-row"
-                  style="gap: 6px; align-items: center; margin-left: auto;"
-                >
-                  <span style="font-size: 12px; color: #6b7280;">访问方式</span>
-                  <select
-                    :value="getObsAccessMode(spec.key, env.id)"
-                    class="cc-input"
-                    style="height: 28px; padding: 0 6px; font-size: 13px; min-width: 160px;"
-                    @change="(e: any) => setObsAccessMode(spec.key, env.id, e.target.value)"
-                  >
-                    <option value="via_grafana">🔗 通过 Grafana 代理</option>
-                    <option value="direct">🔌 直连(自己填 URL)</option>
-                  </select>
-                </span>
-                <span
-                  v-if="obsProbeResults[obsProbeKey(spec.key, env.id)]?.status === 'loading'"
-                  class="url-probe-badge loading"
-                >测试中…</span>
-                <span
-                  v-else-if="obsProbeResults[obsProbeKey(spec.key, env.id)]?.status === 'ok'"
-                  class="url-probe-badge ok"
-                  :title="obsProbeResults[obsProbeKey(spec.key, env.id)]?.detail"
-                >✓ {{ obsProbeResults[obsProbeKey(spec.key, env.id)]?.latency }}</span>
-                <span
-                  v-else-if="obsProbeResults[obsProbeKey(spec.key, env.id)]?.status === 'fail'"
-                  class="url-probe-badge fail"
-                  :title="obsProbeResults[obsProbeKey(spec.key, env.id)]?.error"
-                >✗ {{ obsProbeResults[obsProbeKey(spec.key, env.id)]?.error }}</span>
-              </div>
-              <!-- 字段块仅在以下情况显示:
-                   - grafana 卡(始终显示自己的 URL+鉴权)
-                   - SkyWalking / Loki 标签映射等不归 Grafana 代理管的
-                   - 用户为本工具明确选了"直连"模式 -->
-              <div
-                v-if="!['loki','prometheus','jaeger','tempo','elk'].includes(spec.key) || getObsAccessMode(spec.key, env.id) === 'direct'"
-                class="ds-item-fields"
-              >
-                <template v-for="f in spec.fields" :key="f.key">
-                  <div
-                    v-if="!isObsFieldHidden(spec.key, env.id, f)"
-                    class="cc-field"
-                  >
-                    <label class="cc-field-label">
-                      {{ f.label }}
-                      <span v-if="f.optional" class="auto-tag">选填</span>
-                      <span v-if="f.secret" class="cc-scope-tag secret" title="Secret:会写入 yaml,分享时注意范围">🔒 Secret</span>
-                    </label>
-                    <div class="cc-field-row">
-                      <select
-                        v-if="f.options"
-                        v-model="toolInputs[toolKeyFor('obs', spec.key, env.id, f.key)]"
-                        class="cc-input"
-                        @change="spec.key === 'grafana' && scheduleGrafanaDsAutoload(env.id)"
-                      >
-                        <option v-for="opt in f.options" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
-                      </select>
-                      <template v-else>
-                        <input
-                          v-model="toolInputs[toolKeyFor('obs', spec.key, env.id, f.key)]"
-                          :type="f.secret && !isRevealed(toolKeyFor('obs', spec.key, env.id, f.key)) ? 'password' : 'text'"
-                          :placeholder="f.placeholder || ''"
-                          autocomplete="off"
-                          spellcheck="false"
-                          class="cc-input"
-                          @input="scheduleObsProbe(spec.key, env.id); spec.key === 'grafana' && scheduleGrafanaDsAutoload(env.id)"
-                        />
-                        <button
-                          v-if="f.secret"
-                          type="button"
-                          class="btn-link cc-reveal"
-                          @click="toggleReveal(toolKeyFor('obs', spec.key, env.id, f.key))"
-                          :title="isRevealed(toolKeyFor('obs', spec.key, env.id, f.key)) ? '隐藏明文' : '显示明文'"
-                        >{{ isRevealed(toolKeyFor('obs', spec.key, env.id, f.key)) ? '🙈' : '👁' }}</button>
-                        <button
-                          v-if="toolInputs[toolKeyFor('obs', spec.key, env.id, f.key)]"
-                          type="button"
-                          class="btn-link cc-delete"
-                          @click="clearToolFieldInput(toolKeyFor('obs', spec.key, env.id, f.key))"
-                          title="清空本字段"
-                        >🗑</button>
-                      </template>
-                    </div>
-                  </div>
-                </template>
-              </div>
-
-              <!-- k8s 运行时:env 级先挑一次 集群 + namespace,服务级只挑各自的 Deployment。
-                   类比 Grafana datasource:env 级一次性定位,然后所有标签/服务都基于这个上下文。
-                   集群+ns 树复用 kuboardStateByEnv(同一个 Kuboard 不重拉)。 -->
-              <div v-if="spec.key === 'k8s_runtime'" class="loki-env-mapping">
-                <div class="loki-env-mapping-head">
-                  ☸️ K8s 服务定位 ({{ env.id }}) —— 先挑集群 + namespace,再给每个服务挑 Deployment
-                </div>
-                <!-- Step 1: 加载集群资源 -->
-                <div class="cc-preload-row" style="margin: 6px 0 10px 0;">
-                  <button
-                    v-if="kuboardStateByEnv[env.id]?.status === 'loading'"
-                    type="button" class="btn cc-preload-btn" disabled
-                  >
-                    <span class="cc-preload-spinner" aria-hidden="true"></span>
-                    拉取中…
-                  </button>
-                  <button
-                    v-else-if="kuboardStateByEnv[env.id]?.status === 'ok'"
-                    type="button" class="btn cc-preload-btn"
-                    @click="runK8sRtPreload(env.id)"
-                  >🔄 重新加载集群</button>
-                  <button
-                    v-else
-                    type="button" class="btn cc-preload-btn"
-                    @click="runK8sRtPreload(env.id)"
-                  >📥 加载集群资源</button>
-                  <span v-if="kuboardStateByEnv[env.id]?.status === 'ok'" class="cc-preload-summary">
-                    ✓ {{ (kuboardStateByEnv[env.id] as any).clusters.length }} 个集群
-                  </span>
-                  <span v-else-if="kuboardStateByEnv[env.id]?.status === 'error'" class="cc-preload-error">
-                    ✗ {{ (kuboardStateByEnv[env.id] as any).error.slice(0, 60) }}
-                  </span>
-                </div>
-
-                <!-- Step 2: env 级挑集群 + namespace(只挑一次) -->
-                <div
-                  v-if="kuboardStateByEnv[env.id]?.status === 'ok'"
-                  class="cc-field-row"
-                  style="gap: 12px; margin-bottom: 10px; flex-wrap: wrap;"
-                >
-                  <div class="cc-field" style="flex: 1; min-width: 180px;">
-                    <label class="cc-field-label">集群</label>
-                    <select
-                      :value="(k8sRuntimeEnvLoc[env.id] || {}).cluster || ''"
-                      class="cc-input"
-                      @change="(e: any) => setK8sRtEnvLoc(env.id, 'cluster', e.target.value)"
-                    >
-                      <option value="">— 选集群 —</option>
-                      <option
-                        v-for="c in ((kuboardStateByEnv[env.id] as any)?.clusters || [])"
-                        :key="c.name" :value="c.name"
-                      >{{ c.name }}</option>
-                    </select>
-                  </div>
-                  <div class="cc-field" style="flex: 1; min-width: 180px;">
-                    <label class="cc-field-label">Namespace</label>
-                    <select
-                      :value="(k8sRuntimeEnvLoc[env.id] || {}).namespace || ''"
-                      :disabled="!((k8sRuntimeEnvLoc[env.id] || {}).cluster)"
-                      class="cc-input"
-                      @change="(e: any) => setK8sRtEnvLoc(env.id, 'namespace', e.target.value)"
-                    >
-                      <option v-if="!((k8sRuntimeEnvLoc[env.id] || {}).cluster)" value="">— 先选集群 —</option>
-                      <option v-else value="">— 选 namespace —</option>
-                      <option
-                        v-for="n in kuboardNamespacesFor(env.id, (k8sRuntimeEnvLoc[env.id] || {}).cluster || '')"
-                        :key="n" :value="n"
-                      >{{ n }}</option>
-                    </select>
-                  </div>
-                </div>
-
-                <!-- Step 3: 每服务一行 Deployment 下拉(选完了 ns 才显示) -->
-                <div
-                  v-if="(k8sRuntimeEnvLoc[env.id] || {}).cluster && (k8sRuntimeEnvLoc[env.id] || {}).namespace && allServiceNames.length > 0"
-                  class="cc-map-block"
-                >
-                  <div class="cc-map-head">
-                    <span class="cc-map-title">
-                      服务 → Deployment 映射 <span class="field-hint">— 留空表示该服务未在本环境部署到 K8s,排障时跳过 pod / log / metric 查询</span>
-                    </span>
-                  </div>
-                  <div class="cc-map-svc-list">
-                    <div
-                      v-for="svc in allServiceNames"
-                      :key="`k8srt-${env.id}-${svc}`"
-                      class="cc-map-svc-row"
-                    >
-                      <span class="cc-map-svc-name">{{ svc }}</span>
-                      <select
-                        :value="(k8sRuntimeSvcMap[svcKey(env.id, svc)] || {}).workload || ''"
-                        :disabled="k8sRtWorkloadCache[k8sRtWorkloadKey(env.id, (k8sRuntimeEnvLoc[env.id] || {}).cluster || '', (k8sRuntimeEnvLoc[env.id] || {}).namespace || '')]?.status === 'loading'"
-                        class="cc-map-select"
-                        style="min-width: 240px;"
-                        @change="(e: any) => setK8sRtSvcWorkload(env.id, svc, e.target.value)"
-                      >
-                        <option v-if="k8sRtWorkloadCache[k8sRtWorkloadKey(env.id, (k8sRuntimeEnvLoc[env.id] || {}).cluster || '', (k8sRuntimeEnvLoc[env.id] || {}).namespace || '')]?.status === 'loading'" value="">— 正在拉取 Deployment 列表… —</option>
-                        <option v-else-if="k8sRtWorkloadCache[k8sRtWorkloadKey(env.id, (k8sRuntimeEnvLoc[env.id] || {}).cluster || '', (k8sRuntimeEnvLoc[env.id] || {}).namespace || '')]?.status === 'error'" value="">— 拉取失败,详见日志面板 —</option>
-                        <option v-else-if="k8sRtWorkloadsFor(env.id, (k8sRuntimeEnvLoc[env.id] || {}).cluster || '', (k8sRuntimeEnvLoc[env.id] || {}).namespace || '').length === 0" value="">— 当前 namespace 下无可用 Deployment —</option>
-                        <option v-else value="">— 未部署 / 不在 K8s 内 —</option>
-                        <option
-                          v-for="d in k8sRtWorkloadsFor(env.id, (k8sRuntimeEnvLoc[env.id] || {}).cluster || '', (k8sRuntimeEnvLoc[env.id] || {}).namespace || '')"
-                          :key="d.name" :value="d.name"
-                          :title="d.selector ? 'selector: ' + d.selector : ''"
-                        >{{ d.name }}</option>
-                      </select>
-                      <!-- selector 自动从 spec.selector.matchLabels 取后写进 yaml,
-                           大多数 Deployment 是 app=<name> 跟下拉值重复;真要看用 hover option 的 tooltip。 -->
-                    </div>
-                  </div>
-                </div>
-              </div>
+              <K8sRuntimeBlock
+                v-if="spec.key === 'k8s_runtime'"
+                :env-i-d="env.id"
+                :services="allServiceNames"
+                :kuboard-state="kuboardStateByEnv[env.id]"
+                :env-loc="k8sRuntimeEnvLoc[env.id]"
+                :svc-map="k8sRuntimeSvcMap"
+                :workload-cache="k8sRtWorkloadCache"
+                :svc-key="svcKey"
+                :workload-key="k8sRtWorkloadKey"
+                :workloads-for="k8sRtWorkloadsFor"
+                :namespaces-for="kuboardNamespacesFor"
+                @preload="runK8sRtPreload"
+                @set-env-loc="(envID, field, value) => setK8sRtEnvLoc(envID, field, value)"
+                @set-svc-workload="(envID, svc, workload) => setK8sRtSvcWorkload(envID, svc, workload)"
+              />
 
               <!-- via_grafana 模式(loki/prometheus/jaeger/tempo/elk 共用):
                    显示 datasource 选择 + 加载/刷新按钮。dsList 由 Grafana 卡填好 URL+鉴权后自动拉,
@@ -8743,132 +6605,17 @@ const configTypeDescriptions: Record<string, string> = {
                 </div>
               </div>
 
-              <!-- Loki 标签映射(per-env):只在 Loki 卡显示。datasource 已在上面"访问方式"卡片块里选过,
-                   这里只走"加载标签 → 选 env/service label key → 选 env/service label value"流程。 -->
-              <div
+              <LokiMappingStep
                 v-if="spec.key === 'loki'"
-                class="loki-env-mapping"
-              >
-                <div class="loki-env-mapping-head">
-                  🏷 Loki 标签映射 ({{ env.id }}) —— 拉实时标签后选出"区分 env"和"区分服务"的两个 label key
-                </div>
-
-                <!-- Step 1: labels -->
-                <div class="loki-mapping-step">
-                  <div class="loki-mapping-step-head">
-                    <span class="loki-step-num">1</span> 加载 Loki 标签
-                  </div>
-                  <div class="cc-field-row">
-                    <button
-                      v-if="getLokiMapping(env.id).labelStatus === 'loading'"
-                      :key="`loki-label-${env.id}-loading`"
-                      type="button" class="btn cc-preload-btn" disabled
-                    >
-                      <span class="cc-preload-spinner" aria-hidden="true"></span>
-                      加载中…
-                    </button>
-                    <button
-                      v-else
-                      :key="`loki-label-${env.id}-idle`"
-                      type="button" class="btn cc-preload-btn"
-                      @click="loadLokiLabels(env.id)"
-                    >🏷 加载标签</button>
-                    <span
-                      v-if="getLokiMapping(env.id).labelStatus === 'ok'"
-                      class="cc-preload-summary"
-                    >✓ {{ getLokiMapping(env.id).labels.length }} 个 label</span>
-                    <span
-                      v-else-if="getLokiMapping(env.id).labelStatus === 'fail'"
-                      class="url-probe-badge fail"
-                      :title="getLokiMapping(env.id).labelError"
-                    >✗ {{ getLokiMapping(env.id).labelError }}</span>
-                  </div>
-                </div>
-
-                <!-- Step 3: 选 label keys -->
-                <div v-if="getLokiMapping(env.id).labels.length > 0" class="loki-mapping-step">
-                  <div class="loki-mapping-step-head">
-                    <span class="loki-step-num">2</span> 选环境 / 服务维度的 label key
-                  </div>
-                  <div class="loki-axes">
-                    <label class="loki-axis-label">
-                      环境维度:
-                      <select
-                        :value="getLokiMapping(env.id).envLabelKey"
-                        class="cc-map-select"
-                        @change="(e: any) => onEnvLabelKeyChanged(env.id, e.target.value)"
-                      >
-                        <option value="">— 选 label key —</option>
-                        <option v-for="l in getLokiMapping(env.id).labels" :key="l" :value="l">{{ l }}</option>
-                      </select>
-                    </label>
-                    <label class="loki-axis-label">
-                      服务维度:
-                      <select
-                        :value="getLokiMapping(env.id).serviceLabelKey"
-                        class="cc-map-select"
-                        @change="(e: any) => onServiceLabelKeyChanged(env.id, e.target.value)"
-                      >
-                        <option value="">— 选 label key —</option>
-                        <option v-for="l in getLokiMapping(env.id).labels" :key="l" :value="l">{{ l }}</option>
-                      </select>
-                    </label>
-                  </div>
-                </div>
-
-                <!-- Step 4: env value + per-service value -->
-                <div
-                  v-if="getLokiMapping(env.id).envLabelKey && getLokiMapping(env.id).serviceLabelKey"
-                  class="loki-mapping-step"
-                >
-                  <div class="loki-mapping-step-head">
-                    <span class="loki-step-num">3</span> 选 env / service 具体 label 值
-                  </div>
-                  <div class="loki-mapping-env-head">
-                    <span class="loki-mapping-axis-name">{{ getLokiMapping(env.id).envLabelKey }}:</span>
-                    <select
-                      v-model="getLokiMapping(env.id).envValue"
-                      class="cc-map-select"
-                      @change="onEnvValueChanged(env.id)"
-                    >
-                      <option value="">— 选 —</option>
-                      <option
-                        v-for="v in getLokiMapping(env.id).envLabelValues"
-                        :key="v" :value="v"
-                      >{{ v }}</option>
-                    </select>
-                  </div>
-                  <div
-                    v-for="svc in allServiceNames"
-                    :key="svc"
-                    class="loki-mapping-svc-row"
-                  >
-                    <span class="loki-mapping-svc-name">{{ svc }}</span>
-                    <span class="loki-mapping-axis-name">{{ getLokiMapping(env.id).serviceLabelKey }}:</span>
-                    <select
-                      v-model="getLokiMapping(env.id).serviceValues[svc]"
-                      class="cc-map-select"
-                      :class="{ 'cc-map-select-none': !getLokiMapping(env.id).serviceValues[svc] }"
-                      :title="!getLokiMapping(env.id).serviceValues[svc] && getLokiMapping(env.id).serviceMatchTried?.[svc] && getLokiMapping(env.id).serviceLabelValues.length > 0
-                        ? `自动匹配未找到候选(${getLokiMapping(env.id).serviceLabelValues.length} 个 label 都不含 ${svc} 任一前缀:${svc.split('-').filter(Boolean).join(' / ')})。本环境可能没部署该服务,留空即可。`
-                        : ''"
-                    >
-                      <option value="">{{
-                        !getLokiMapping(env.id).serviceValues[svc]
-                          && getLokiMapping(env.id).serviceMatchTried?.[svc]
-                          && getLokiMapping(env.id).serviceLabelValues.length > 0
-                          ? '— 无 / 不进 loki(未自动匹配到) —'
-                          : '— 无 / 不进 loki —'
-                      }}</option>
-                      <option
-                        v-for="v in getLokiMapping(env.id).serviceLabelValues"
-                        :key="v" :value="v"
-                      >{{ v }}</option>
-                    </select>
-                  </div>
-                </div>
-              </div>
-            </div>
+                :env-i-d="env.id"
+                :mapping="getLokiMapping(env.id)"
+                :services="allServiceNames"
+                @load-labels="loadLokiLabels"
+                @env-label-key-changed="(envID, key) => onEnvLabelKeyChanged(envID, key)"
+                @service-label-key-changed="(envID, key) => onServiceLabelKeyChanged(envID, key)"
+                @env-value-changed="onEnvValueChanged"
+              />
+            </ObservabilityToolBlock>
           </div>
         </div>
       </div>
@@ -8885,14 +6632,11 @@ const configTypeDescriptions: Record<string, string> = {
         从配置中心读取各服务配置,自动识别用到的数据层(Redis / MySQL / MongoDB 等),按 <strong>环境 → 服务 → 组件</strong> 展示。字段可直接编辑,改的是本地副本,不会回写配置中心。
       </p>
 
-      <div class="cc-share-warn" style="margin-bottom:18px">
-        <div class="cc-share-warn-title">⚠ 数据流与共享范围</div>
-        <ul class="cc-share-warn-list">
-          <li>本页字段(含密码、token 等凭证)将保存至 <code>system.yaml</code>。</li>
-          <li>部署时,生成器把对应值注入目标 AI 平台的 MCP Server 环境变量。</li>
-          <li><strong>system.yaml 含明文凭证</strong>,请仅在可信范围内分享。</li>
-        </ul>
-      </div>
+      <CredsShareWarning :margin-bottom="18">
+        <li>本页字段(含密码、token 等凭证)将保存至 <code>system.yaml</code>。</li>
+        <li>部署时,生成器把对应值注入目标 AI 平台的 MCP Server 环境变量。</li>
+        <li><strong>system.yaml 含明文凭证</strong>,请仅在可信范围内分享。</li>
+      </CredsShareWarning>
 
       <div class="ds-autoimport-row">
         <!-- loading / idle 分别用独立 <button> + :key,避免 WebKit GPU layer 残影(同 Step 5 按钮) -->
@@ -8971,122 +6715,24 @@ const configTypeDescriptions: Record<string, string> = {
           </div>
 
           <div v-else class="ds-svc-container">
-            <div
+            <DataStoreServiceBlock
               v-for="svc in allServiceNames"
               :key="svc"
-              class="ds-svc-block"
-              :class="['status-' + (scanStateOf(env.id, svc)?.status || 'pending')]"
-            >
-              <div class="ds-svc-head">
-                <span class="ds-svc-name">📁 {{ svc }}</span>
-                <span
-                  v-if="serviceConfigSel[svcKey(env.id, svc)]"
-                  class="ds-svc-dataid"
-                  :title="'来源 dataId: ' + serviceConfigSel[svcKey(env.id, svc)]"
-                >← {{ serviceConfigSel[svcKey(env.id, svc)] }}</span>
-                <span
-                  v-if="scanStateOf(env.id, svc)"
-                  class="ds-svc-status"
-                  :class="'status-' + scanStateOf(env.id, svc)!.status"
-                >
-                  <template v-if="scanStateOf(env.id, svc)!.status === 'ok'">✓ 已识别</template>
-                  <template v-else-if="scanStateOf(env.id, svc)!.status === 'empty'">✓ 已读取 · 无数据层</template>
-                  <template v-else-if="scanStateOf(env.id, svc)!.status === 'skipped'">⊘ 跳过</template>
-                  <template v-else-if="scanStateOf(env.id, svc)!.status === 'error'">✗ 拉取失败</template>
-                </span>
-              </div>
-
-              <!-- 状态详情 -->
-              <div v-if="scanStateOf(env.id, svc)?.reason" class="ds-status-reason">
-                {{ scanStateOf(env.id, svc)!.reason }}
-              </div>
-
-              <!-- 识别结果列表 -->
-              <div
-                v-if="Object.keys(scannedDS[env.id]?.[svc] || {}).length > 0"
-                class="ds-item-list"
-              >
-                <div
-                  v-for="dsKey in Object.keys(scannedDS[env.id][svc]).sort()"
-                  :key="dsKey"
-                  class="ds-item"
-                >
-                  <div class="ds-item-head">
-                    <span class="ds-item-badge">🗄 {{ dsLabel(dsKey) }}</span>
-                    <!-- 连通性测试按钮 + 状态徽章 -->
-                    <button
-                      v-if="dsProbeResults[probeKey(env.id, svc, dsKey)]?.status === 'loading'"
-                      :key="`probe-${env.id}-${svc}-${dsKey}-loading`"
-                      type="button"
-                      class="ds-item-probe loading"
-                      disabled
-                    >测试中…</button>
-                    <button
-                      v-else
-                      :key="`probe-${env.id}-${svc}-${dsKey}-${dsProbeResults[probeKey(env.id, svc, dsKey)]?.status || 'idle'}`"
-                      type="button"
-                      class="ds-item-probe"
-                      :class="dsProbeResults[probeKey(env.id, svc, dsKey)]?.status || 'idle'"
-                      :title="dsProbeResults[probeKey(env.id, svc, dsKey)]?.detail || dsProbeResults[probeKey(env.id, svc, dsKey)]?.error || '点击测试连通性 (TCP dial + 协议握手,不读不写数据)'"
-                      @click="probeOneDS(env.id, svc, dsKey)"
-                    >
-                      <template v-if="dsProbeResults[probeKey(env.id, svc, dsKey)]?.status === 'ok'">
-                        ✓ 已连通 · {{ dsProbeResults[probeKey(env.id, svc, dsKey)]?.latency }}
-                      </template>
-                      <template v-else-if="dsProbeResults[probeKey(env.id, svc, dsKey)]?.status === 'fail'">
-                        ✗ 连接异常,点击重试
-                      </template>
-                      <template v-else>🔌 连通性测试</template>
-                    </button>
-                    <button
-                      type="button"
-                      class="ds-item-delete"
-                      :title="`删除本服务识别到的 ${dsLabel(dsKey)} —— 不影响下一步校验(扫描状态保留)`"
-                      @click="removeScannedDS(env.id, svc, dsKey)"
-                    >✕</button>
-                  </div>
-                  <!-- 失败时把详细 error 展开显示在 head 下方 -->
-                  <div
-                    v-if="dsProbeResults[probeKey(env.id, svc, dsKey)]?.status === 'fail'"
-                    class="ds-probe-error"
-                  >
-                    {{ dsProbeResults[probeKey(env.id, svc, dsKey)]?.error }}
-                  </div>
-                  <div class="ds-item-fields">
-                    <div
-                      v-for="fKey in Object.keys(scannedDS[env.id][svc][dsKey])"
-                      :key="fKey"
-                      class="cc-field"
-                    >
-                      <label class="cc-field-label">
-                        {{ dsFieldLabel(dsKey, fKey) }}
-                        <span
-                          v-if="dsFieldIsSecret(dsKey, fKey)"
-                          class="cc-scope-tag secret"
-                          title="Secret:会写入 yaml,分享时注意范围"
-                        >🔒 Secret</span>
-                      </label>
-                      <div class="cc-field-row">
-                        <input
-                          v-model="scannedDS[env.id][svc][dsKey][fKey]"
-                          :type="dsFieldIsSecret(dsKey, fKey) && !isRevealed(`ds:${env.id}:${svc}:${dsKey}:${fKey}`) ? 'password' : 'text'"
-                          autocomplete="off"
-                          spellcheck="false"
-                          class="cc-input"
-                        />
-                        <button
-                          v-if="dsFieldIsSecret(dsKey, fKey)"
-                          type="button"
-                          class="btn-link cc-reveal"
-                          @click="toggleReveal(`ds:${env.id}:${svc}:${dsKey}:${fKey}`)"
-                          :title="isRevealed(`ds:${env.id}:${svc}:${dsKey}:${fKey}`) ? '隐藏明文' : '显示明文'"
-                        >{{ isRevealed(`ds:${env.id}:${svc}:${dsKey}:${fKey}`) ? '🙈' : '👁' }}</button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
+              :env-i-d="env.id"
+              :svc="svc"
+              :scan-state="scanStateOf(env.id, svc)"
+              :data-id-hint="serviceConfigSel[svcKey(env.id, svc)]"
+              :scanned-types="scannedDS[env.id]?.[svc] || {}"
+              :ds-probe-results="dsProbeResults"
+              :is-revealed="isRevealed"
+              :ds-label="dsLabel"
+              :ds-field-label="dsFieldLabel"
+              :ds-field-is-secret="dsFieldIsSecret"
+              :probe-key="probeKey"
+              @toggle-reveal="toggleReveal"
+              @remove-d-s="(dsKey) => removeScannedDS(env.id, svc, dsKey)"
+              @probe-d-s="(dsKey) => probeOneDS(env.id, svc, dsKey)"
+            />
           </div>
         </div>
       </div>
@@ -9150,7 +6796,7 @@ const configTypeDescriptions: Record<string, string> = {
             :disabled="deployLoading || deploySummary.length === 0"
             @click="runOneClickDeploy"
           >
-            {{ deployLoading ? '部署中…' : `🚀 一键部署到 ${deploySummary.length} 个目标` }}
+            {{ deployLoading ? '部署中…' : `🚀 部署到 ${deploySummary.length} 个目标` }}
           </button>
         </div>
         <div v-if="deployError" class="alert error">{{ deployError }}</div>
@@ -9175,7 +6821,12 @@ const configTypeDescriptions: Record<string, string> = {
   </div>
 </template>
 
-<style scoped>
+<style>
+/* 注:本页 CSS 不加 scoped —— InitPage 抽出 18 个子组件后,子组件 template 引用的
+   .dynamic-row / .cc-field / .ds-svc-block / .repo-block 等 ~140 个类全在这里定义,
+   scoped 会让样式无法穿透到子组件 DOM。这些类名都是 InitPage 域专属(.repo-block /
+   .cc-env-block / .monorepo-banner 等),不会跟其他页冲突。.btn 等通用类各页 scoped
+   内自有定义,不受本块影响。 */
 .render-error-banner {
   margin-bottom: 16px; padding: 14px 18px;
   background: #fef2f2; border: 1px solid #fca5a5; border-radius: 8px;
@@ -10187,7 +7838,12 @@ input.path-readonly {
   background: #eff6ff; border: 1px solid #bfdbfe; border-left: 3px solid #3b82f6;
   border-radius: 6px;
 }
-.ds-autoimport-row .btn { display: inline-flex; align-items: center; gap: 6px; }
+/* Step 7 数据层入口两枚 CTA(读取配置中心 / 全环境连通性):本步起手与收尾动作,
+   字号/内边距比普通 .btn 加大,跟旁边数据流位置对齐易点 */
+.ds-autoimport-row .btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 10px 22px; font-size: 14px; font-weight: 600;
+}
 .ds-autoimport-hint { font-size: 11px; color: #64748b; }
 
 /* Step 7 env → service → ds 层级展示 */
@@ -10863,11 +8519,13 @@ input.path-readonly {
 }
 
 /* ── Action bar ── */
+/* Step 9 预览+生成:验证 / 复制 / 导出 都是流程末段动作,放大跟旁边 yaml 预览体量对齐 */
 .action-bar {
   display: flex;
   gap: 10px;
   margin-bottom: 16px;
 }
+.action-bar .btn { padding: 10px 22px; font-size: 14px; font-weight: 600; }
 
 .validate-result {
   padding: 10px 16px;
@@ -10897,11 +8555,12 @@ input.path-readonly {
 }
 .deploy-inline-actions { display: flex; justify-content: flex-end; }
 
-/* Step 9 一键部署主要 CTA:比内联版更醒目(独立 step,这是流程最终动作) */
+/* Step 10 部署 CTA:整个向导最终动作,放大到醒目尺寸,色彩仍走 .btn.primary 主调 */
 .deploy-final-block { padding: 6px 0; }
 .deploy-final-btn {
-  font-size: 15px; padding: 12px 28px;
-  font-weight: 600;
+  padding: 16px 36px; font-size: 17px; font-weight: 700;
+  letter-spacing: 0.3px; min-width: 320px;
+  justify-content: center;  /* 文本+emoji 在 min-width 撑出来的多余空间里居中,不靠左 */
 }
 
 /* Step 1 欢迎页:两个大按钮选择"从零开始"或"导入 yaml" */
@@ -10982,6 +8641,8 @@ input.path-readonly {
   align-items: flex-end;
   margin-top: 8px;
 }
+/* 上一步 / 下一步:每步底部固定动作,放大避免误点和频繁找位 */
+.nav-buttons .btn { padding: 11px 28px; font-size: 14px; font-weight: 600; min-width: 100px; justify-content: center; }
 .nav-buttons .next-wrap {
   display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
 }

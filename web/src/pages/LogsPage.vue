@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onMounted, ref, watch } from 'vue'
 import { clearLogs, useLogStore, type LogLevel, type LogSource } from '../lib/logStore'
+import ChipFilterBar from '../components/ChipFilterBar.vue'
+import { copyToClipboard } from '../lib/clipboard'
 
 // 全工作台日志聚合:CCHub 预加载 / install.sh / analyze 都会往 logStore 推,
 // 这里只做展示 + 过滤 + 复制 + 清空。不落 localStorage —— 会话内的过程信息,关窗就算结束。
@@ -64,11 +66,7 @@ async function copyAll() {
   const text = filtered.value
     .map(e => `[${fmtTs(e.ts)}] [${e.source}/${e.level}] ${e.message}`)
     .join('\n')
-  try {
-    await navigator.clipboard.writeText(text)
-  } catch {
-    // 某些环境 clipboard 没权限;忽略
-  }
+  await copyToClipboard(text)
 }
 
 const SOURCE_LABELS: Record<LogSource, string> = {
@@ -89,32 +87,20 @@ const SOURCE_LABELS: Record<LogSource, string> = {
     </header>
 
     <div class="logs-toolbar">
-      <div class="toolbar-group">
-        <span class="toolbar-label">来源</span>
-        <label
-          v-for="(_, src) in sourceFilter"
-          :key="src"
-          class="toolbar-chip"
-          :class="{ active: sourceFilter[src as LogSource] }"
-        >
-          <input type="checkbox" v-model="sourceFilter[src as LogSource]" />
-          {{ SOURCE_LABELS[src as LogSource] }}
-          <span class="toolbar-count">{{ sourceCounts[src as LogSource] }}</span>
-        </label>
-      </div>
-      <div class="toolbar-group">
-        <span class="toolbar-label">级别</span>
-        <label
-          v-for="(_, lvl) in levelFilter"
-          :key="lvl"
-          class="toolbar-chip"
-          :class="['lvl-' + lvl, { active: levelFilter[lvl as LogLevel] }]"
-        >
-          <input type="checkbox" v-model="levelFilter[lvl as LogLevel]" />
-          {{ lvl }}
-          <span class="toolbar-count">{{ levelCounts[lvl as LogLevel] }}</span>
-        </label>
-      </div>
+      <ChipFilterBar
+        label="来源"
+        :keys="(Object.keys(sourceFilter) as LogSource[])"
+        v-model="sourceFilter"
+        :labels="SOURCE_LABELS"
+        :counts="sourceCounts"
+      />
+      <ChipFilterBar
+        label="级别"
+        :keys="(Object.keys(levelFilter) as LogLevel[])"
+        v-model="levelFilter"
+        :counts="levelCounts"
+        :item-class="(k) => 'lvl-' + k"
+      />
       <div class="toolbar-group">
         <input
           v-model="keyword"
@@ -152,7 +138,9 @@ const SOURCE_LABELS: Record<LogSource, string> = {
   </div>
 </template>
 
-<style scoped>
+<style>
+/* 不加 scoped:ChipFilterBar 子组件复用本页 .toolbar-group / .toolbar-chip / .toolbar-count
+   类名,scoped 会让样式不穿透。这些类名 LogsPage 域专属,无跨页冲突风险。 */
 .logs-page { max-width: 1200px; display: flex; flex-direction: column; gap: 14px; height: 100%; }
 .logs-header h1 { font-size: 24px; color: #1e293b; margin-bottom: 4px; }
 .logs-sub { font-size: 12px; color: #64748b; }
@@ -187,13 +175,15 @@ const SOURCE_LABELS: Record<LogSource, string> = {
 }
 .toolbar-input:focus { outline: none; border-color: #3b82f6; }
 
-.btn {
+/* 注意:.btn / .btn-danger 是全局类,这里把日志页工具栏的紧凑变体限定在 .logs-page 子树内,
+   不再泄漏到其他页(如 InitPage 部署按钮),避免切到日志再切回去就被覆盖成小尺寸 */
+.logs-page .btn {
   padding: 4px 12px; font-size: 12px; border: 1px solid #cbd5e1;
   background: #fff; color: #1e293b; border-radius: 4px; cursor: pointer;
 }
-.btn:hover { background: #f1f5f9; }
-.btn-danger { border-color: #fca5a5; color: #b91c1c; }
-.btn-danger:hover { background: #fee2e2; }
+.logs-page .btn:hover { background: #f1f5f9; }
+.logs-page .btn-danger { border-color: #fca5a5; color: #b91c1c; }
+.logs-page .btn-danger:hover { background: #fee2e2; }
 
 .logs-empty {
   padding: 40px 20px; text-align: center; color: #94a3b8;

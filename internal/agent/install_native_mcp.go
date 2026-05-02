@@ -1,21 +1,13 @@
-// install_native_mcp.go —— Claude Code / Cursor / Codex CLI 的 MCP server 自动注入。
+// install_native_mcp.go —— Claude Code / Cursor / Codex 的 MCP server 自动注入。
 //
-// 之前 InstallNative 只做文件拷贝(agent .md / skills/ / scripts/);MCP 服务器配置
-// 完全没动 IDE 的 settings.json,用户装完 agent 调任何 MCP 工具都失败。
-//
-// 这里补齐:从 cfg 推 mcpServers 配置,merge 进对应 IDE 的配置文件。
-//
-// **不同 IDE 配置位置/格式不一样**(踩过坑,2026-05 修):
+// 三家配置位置/格式不一样(对应代码踩过的坑):
 //   - claude-code → ~/.claude/settings.json,顶层 "mcpServers" JSON 字段
 //   - cursor      → ~/.cursor/mcp.json,顶层 "mcpServers" JSON 字段
-//   - codex       → ~/.codex/config.toml,`[mcp_servers.<name>]` TOML 段;
-//                   **不读 mcp.json**(早期实现以为跟 cursor 一样写 mcp.json,装完
-//                   `codex mcp list` 0 条 truss-* 服务,排障 skill 全失效)。
-//                   走 `codex mcp add/remove` CLI 子命令注册,让 codex 自己管理 TOML
-//                   格式,避免我们手 marshal TOML 破坏 [projects.*] 等其它段。
+//   - codex       → ~/.codex/config.toml `[mcp_servers.<name>]`;通过 `codex mcp add/remove`
+//                   CLI 注册,**不能**手 marshal TOML(会破坏 [projects.*] 等其它段)。
 //
-// merge 策略:对 cfg 派生的 server key,先 remove 同名再 add(替换式),避免改 yaml 后
-// 旧条目残留;用户手加的别名(其它前缀)保留不动。
+// merge 策略:cfg 派生的 server key 先 remove 同名再 add(替换式),用户手加的别名
+// (其它前缀)保留不动。
 package agent
 
 import (
@@ -42,50 +34,35 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 }
 
 // MergeMCPIntoIDESettingsAt 跟 MergeMCPIntoIDESettings 同,只是允许指定 IDE 安装根目录。
-// customRoot 非空时 settings 落到 <customRoot>/settings.json (claude-code) 或
-// <customRoot>/mcp.json (cursor/codex);空字符串时回退默认 ~/.<target>。
+// customRoot 非空时 settings 落到 <customRoot>/<settingsFile>;空时回退默认 ~/.<target>。
 func MergeMCPIntoIDESettingsAt(target string, cfg *config.SystemConfig, creds map[string]string, customRoot string) error {
-	// creds=nil → 当前是 BotsPage 重新生成 / CLI install 无凭证场景,**直接跳过** MCP
-	// merge:不传 creds 走下去会拿空值覆盖掉初次 wizard 部署时已写入的真凭证(整个连接断掉)。
-	// 真正需要变更 MCP 的路径是 wizard 重跑(那里会带上凭证),不是 regen。
+	// creds=nil → BotsPage 重生成 / CLI install 无凭证场景,直接跳过。
+	// 走下去会拿空值覆盖初次 wizard 部署时写入的真凭证,把整个连接断掉。
 	if creds == nil {
 		return nil
 	}
+	t, err := ParseIDETarget(target)
+	if err != nil {
+		return err
+	}
 	get := func(k string) string { return creds[k] }
-	// 用 system.id 当 MCP key 前缀(短),不是 ResolveID()(常见 = system.id+"-troubleshooter",
-	// 长 13 字)—— 避免 server_key + tool_name 拼起来超过 IDE 60 字符的 tool 名限制。
+	// MCP key 前缀用 system.id(短)而不是 ResolveID()(常见 = "<id>-troubleshooter"),
+	// 避免 server_key + tool_name 拼起来超过 IDE 60 字符的 tool 名限制。
 	servers := buildMCPServersForCfg(cfg, cfg.MCPKeyPrefix(), get)
 
-	// codex 走 CLI 单独分支:写 ~/.codex/config.toml 的 [mcp_servers.*] 段
-	if target == "codex" {
+	if t == TargetCodex {
 		return mergeMCPIntoCodexCLI(servers)
 	}
 
-	// claude-code / cursor 走 JSON 文件 merge
 	root := customRoot
 	if root == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return fmt.Errorf("read $HOME: %w", err)
 		}
-		switch target {
-		case "claude-code":
-			root = filepath.Join(home, ".claude")
-		case "cursor":
-			root = filepath.Join(home, ".cursor")
-		default:
-			return fmt.Errorf("MergeMCPIntoIDESettings: 不支持的 target %q(只接 claude-code / cursor / codex)", target)
-		}
+		root = filepath.Join(home, t.DirName())
 	}
-	var settingsPath string
-	switch target {
-	case "claude-code":
-		settingsPath = filepath.Join(root, "settings.json")
-	case "cursor":
-		settingsPath = filepath.Join(root, "mcp.json")
-	default:
-		return fmt.Errorf("MergeMCPIntoIDESettings: 不支持的 target %q(只接 claude-code / cursor / codex)", target)
-	}
+	settingsPath := filepath.Join(root, t.SettingsFilename())
 
 	settings, err := readJSONOrEmpty(settingsPath)
 	if err != nil {

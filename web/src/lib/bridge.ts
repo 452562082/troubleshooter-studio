@@ -1,9 +1,7 @@
 // bridge 把 "桌面 Wails binding" 和 "tshoot serve HTTP" 两种通路封到同一组函数。
-// 桌面 app 里 window.go 存在 → 直接调 Go 方法（由 wails generate module 自动产出
-// wailsjs/go/main/App.ts 绑定）；浏览器里 → 回退到原来的 fetch('/api/*')。
-//
-// 新页面写代码只调 bridge.*，不要直接 import wailsjs 或摸 window.go，省得未来改
-// 通路到处改。类型从 wailsjs/go/models 来，Go 端改了 struct 跑 make wails-gen 同步。
+// 桌面 app 里 window.go 存在 → 直接调 Go 方法(wailsjs/go/main/App.ts 自动产出);
+// 浏览器里 → fallback fetch('/api/*')。新页面只调 bridge.*,改通路一处搞定。
+// 类型从 wailsjs/go/models 来,Go 端改 struct 跑 make wails-gen 同步。
 
 import * as App from '../../wailsjs/go/main/App'
 import { agent, analyzerpipe, deploy, discover, generator, main } from '../../wailsjs/go/models'

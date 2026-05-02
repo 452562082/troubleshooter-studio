@@ -1,17 +1,9 @@
-// install_native.go —— claude-code / cursor 的"用户级安装"原生 Go 实现。
+// install_native.go —— claude-code / cursor / codex 三家 IDE 的"用户级安装":
+// 把 staging 下的 agent .md / skills/ / scripts/ / tshoot.json 锚点拷到
+// ~/.<target>/ 真实部署位置(以及 BotsPage 的 discover 锚点)。
 //
-// 历史:之前由生成的 install.sh 完成"staging → ~/.claude|cursor/agents/<name>.md"
-// 这一步,导致 Studio 必须 shell-out 一个 bash 进程才能让 AI 平台真正读到 agent。
-// 现在直接在 Go 里做(纯文件拷贝+备份),Studio 一键部署=即装即用。
-//
-// 适用 target:claude-code、cursor。openclaw 仍走 scripts/install.sh —— 它有 brew/apt
-// 依赖装载、配置中心 MCP 注册、交互凭证收集,porting 工程量大,先不动。
-//
-// "已装机器人"判断标准对齐(2026-04-30):
-// 部署完顺手把 staging 的 tshoot.json 拷到 ~/.claude/skills/<name>/tshoot.json
-// 和 ~/.cursor/skills/<name>/tshoot.json,让 BotsPage 跟 OpenClaw 用同一个标准
-// (扫真实部署位置的 tshoot.json),不再扫 staging 中间包。staging 包能删 / 重置 /
-// 用户搬目录都不影响"已装"识别 —— 只要 ~/.claude / ~/.cursor 下还有,机器人就还在。
+// 凭证 / MCP server 写入由 install_native_mcp.go + install_native_creds.go 负责,
+// 这里只管纯文件分发。openclaw 走 install_native_openclaw.go,模型不同不通用。
 package agent
 
 import (
@@ -26,17 +18,8 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 )
 
-// InstallNative 把 stagingDir 里的产物分发到用户级目录。target 决定 root:
-//   - claude-code → $HOME/.claude/{agents,skills,scripts}/
-//   - cursor      → $HOME/.cursor/{agents,skills,scripts}/
-//   - codex       → $HOME/.codex/{agents,skills,scripts}/
-//
-// 行为对齐原 install.sh.tmpl:
-//   - agents/<NAME>.md → <root>/agents/<NAME>.md(已存在则备份 .bak.YYYYMMDD-HHMMSS)
-//   - skills/*         → <root>/skills/<NAME>/(整目录覆盖,先 RemoveAll)
-//   - scripts/*        → <root>/scripts/<NAME>/(整目录覆盖,先 RemoveAll)
-//
-// NAME 取自 stagingDir/agents/*.md 第一个文件名(.md 去除)。
+// InstallNative 把 stagingDir 里的产物分发到 ~/.<target>/{agents,skills,scripts}/。
+// target 必须是三家 IDETarget 之一(openclaw 走专门入口)。
 func InstallNative(stagingDir, target string) error {
 	return InstallNativeAt(stagingDir, target, "")
 }
@@ -45,27 +28,18 @@ func InstallNative(stagingDir, target string) error {
 // <customRoot>/{agents,skills,scripts}/<NAME>/ 而不是 ~/.<target>/。给 wizard
 // "我已自行安装" 流程的"选安装目录"用 —— 用户把客户端装在非默认位置时仍能部署。
 func InstallNativeAt(stagingDir, target, customRoot string) error {
-	var rootName string
-	switch target {
-	case "claude-code":
-		rootName = ".claude"
-	case "cursor":
-		rootName = ".cursor"
-	case "codex":
-		rootName = ".codex"
-	default:
-		return fmt.Errorf("install_native: unsupported target %q (only claude-code / cursor / codex)", target)
+	t, err := ParseIDETarget(target)
+	if err != nil {
+		return err
 	}
 
-	var root string
-	if customRoot != "" {
-		root = customRoot
-	} else {
+	root := customRoot
+	if root == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return fmt.Errorf("read $HOME: %w", err)
 		}
-		root = filepath.Join(home, rootName)
+		root = filepath.Join(home, t.DirName())
 	}
 
 	// 1) 找 agents/<NAME>.md(只取第一个;generator 只生成一个)
@@ -109,10 +83,8 @@ func InstallNativeAt(stagingDir, target, customRoot string) error {
 		return fmt.Errorf("install scripts: %w", err)
 	}
 
-	// 6) tshoot.json 锚点 → ~/<root>/skills/<NAME>/tshoot.json
-	// staging 那份通过 ImportAndApply / Apply 已经写好,这里只是 cp 一份到真实位置,
-	// 让 BotsPage 的 discover 能扫到"装在 ~/.claude / ~/.cursor 里的机器人"。
-	// 没有 staging tshoot.json(老路径 / 异常)就跳过,不阻塞主流程。
+	// 6) tshoot.json 锚点 → ~/<root>/skills/<NAME>/tshoot.json,让 BotsPage 的 discover
+	// 能扫到。staging 那份没写出来就跳过,不阻塞主流程。
 	stagingMeta := filepath.Join(stagingDir, discover.MetaFilename)
 	if _, err := os.Stat(stagingMeta); err == nil {
 		dstMeta := filepath.Join(root, "skills", name, discover.MetaFilename)
@@ -125,7 +97,6 @@ func InstallNativeAt(stagingDir, target, customRoot string) error {
 }
 
 // findAgentMD 取目录下第一个 .md(忽略 .bak),返回完整路径 + name(去后缀)。
-// 没找到 → error,因为没 agent .md 后续 install 全是空动作。
 func findAgentMD(dir string) (file, name string, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -178,7 +149,32 @@ func replaceDir(src, dst string) error {
 	})
 }
 
-// copyFileSimple:把 src 拷贝到 dst,保留 mode。dst 父目录已存在(调用方负责)。
+// moveOutOrRemove 优先把 src 重命名(搬走)到 trashPath(自动建父目录),失败则 RemoveAll(src) 兜底。
+// 跨盘 rename 失败时常见,直接 RemoveAll 不阻塞主流程。
+//
+//	movedTo = trashPath, existed = true  → 搬到 Trash 成功,可恢复
+//	movedTo = "",        existed = true  → rename 失败已 RemoveAll(无回收点)
+//	movedTo = "",        existed = false → src 不存在,no-op
+//	err 非 nil                            → 必须中断
+func moveOutOrRemove(src, trashPath string) (movedTo string, existed bool, err error) {
+	if _, statErr := os.Stat(src); statErr != nil {
+		if os.IsNotExist(statErr) {
+			return "", false, nil
+		}
+		return "", false, statErr
+	}
+	if mkErr := os.MkdirAll(filepath.Dir(trashPath), 0o755); mkErr == nil {
+		if rnErr := os.Rename(src, trashPath); rnErr == nil {
+			return trashPath, true, nil
+		}
+	}
+	if rmErr := os.RemoveAll(src); rmErr != nil {
+		return "", true, fmt.Errorf("rename to trash + RemoveAll both failed: %w", rmErr)
+	}
+	return "", true, nil
+}
+
+// copyFileSimple 把 src 拷贝到 dst,保留 mode + 自动建父目录。
 func copyFileSimple(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {

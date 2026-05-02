@@ -117,3 +117,9 @@ if (typeof document !== 'undefined' && !document.getElementById('tshoot-confirm-
   `
   document.head.appendChild(style)
 }
+
+/** 危险操作快捷方式:红按钮 + 默认焦点在"取消",防止 Enter 误删。
+ * 调用方:`if (await confirmDelete('删 X 不可恢复,继续?')) { ... }` */
+export function confirmDelete(message: string, title?: string): Promise<boolean> {
+  return confirmDialog({ message, title, danger: true, defaultAction: 'cancel' })
+}

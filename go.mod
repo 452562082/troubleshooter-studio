@@ -6,7 +6,6 @@ require (
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/lib/pq v1.12.3
 	github.com/redis/go-redis/v9 v9.18.0
-	github.com/sashabaranov/go-openai v1.41.2
 	github.com/wailsapp/wails/v2 v2.12.0
 	github.com/zalando/go-keyring v0.2.8
 	go.mongodb.org/mongo-driver v1.17.9

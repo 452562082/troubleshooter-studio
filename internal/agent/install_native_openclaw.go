@@ -1,18 +1,11 @@
-// install_native_openclaw.go —— openclaw 部署的原生 Go 实现,替代之前 ~500 行的
-// scripts/install.sh + 嵌入式 Python 块。
+// install_native_openclaw.go —— openclaw 部署的原生 Go 实现。干 5 件事:
+//   (1) 探测 brew/apt 依赖(GUI 不便 sudo,只警告,装由用户自己来)
+//   (2) creds map 经入参传进来,落 <staging>/scripts/.env 持久化(删 .env 即重置)
+//   (3) 安装 workspace 到 ~/.openclaw/workspace/<name>/
+//   (4) 改写 ~/.openclaw/openclaw.json 注入 agent + MCP servers
+//   (5) 重启 gateway
 //
-// 历史:install.sh 干 5 件事 —— (1) 装 brew/apt 依赖 (2) 交互收集凭证
-// (3) 安装 workspace 到 ~/.openclaw/workspace/<name>/ (4) Python 改写
-// ~/.openclaw/openclaw.json 注入 agent + MCP servers (5) 重启 gateway。
-//
-// 现在 (1) 改成"探测+警告"(GUI 不便 sudo,让用户自己装更稳),(2) 由 Studio
-// UI 表单收集 → 走 creds map 传进来,(3)(4)(5) 全部原生 Go。这样:
-//   - 桌面端"一键部署 openclaw"完全不需要 bash subshell
-//   - CLI 用户(`tshoot agent install`)也走同一份代码,不再两套实现漂移
-//   - 取消 / 流式日志通过 ctx + onLog callback 走,跟原 RunInstallStreaming 行为一致
-//
-// 不动的:WriteEnvFile / ReadEnvFile 仍写 <staging>/scripts/.env(凭证持久化),
-// 删 .env 等同"重置凭证";只是 install.sh 没了,改由本函数 source 同一份 .env。
+// 取消 / 流式日志走 ctx + onLog callback。CLI 与桌面端共享同一份。
 package agent
 
 import (
@@ -117,17 +110,13 @@ func InstallNativeOpenclaw(ctx context.Context, stagingDir string, opts InstallO
 		return err
 	}
 	// 已存在 → 移到 Trash(对齐 install.sh 行为,留个回收点)。
-	if _, err := os.Stat(wsDir); err == nil {
-		ts := time.Now().Format("20060102-150405")
-		bk := filepath.Join(home, ".Trash", meta.SystemID+"-troubleshooter-workspace-"+ts)
-		if err := os.MkdirAll(filepath.Dir(bk), 0o755); err == nil {
-			if err := os.Rename(wsDir, bk); err == nil {
-				log(fmt.Sprintf("[backup] 旧 workspace 移到 %s", bk))
-			} else {
-				// 跨盘 rename 失败 → 直接 RemoveAll 兜底,workspace 重生成无损失
-				_ = os.RemoveAll(wsDir)
-				log(fmt.Sprintf("[backup] rename to Trash 失败(%v),已直接清掉旧 workspace", err))
-			}
+	ts := time.Now().Format("20060102-150405")
+	wsTrash := filepath.Join(home, ".Trash", meta.SystemID+"-troubleshooter-workspace-"+ts)
+	if movedTo, existed, _ := moveOutOrRemove(wsDir, wsTrash); existed {
+		if movedTo != "" {
+			log(fmt.Sprintf("[backup] 旧 workspace 移到 %s", movedTo))
+		} else {
+			log("[backup] rename to Trash 失败,已直接清掉旧 workspace")
 		}
 	}
 	if err := copyDirAll(tplSrc, wsDir); err != nil {
@@ -149,7 +138,7 @@ func InstallNativeOpenclaw(ctx context.Context, stagingDir string, opts InstallO
 	if err := injectAgent(ocData, agentID, cfg.Agent.Name, model, wsDir); err != nil {
 		return err
 	}
-	if err := injectMCPServers(ocData, cfg, get, log); err != nil {
+	if err := injectMCPServers(ocData, cfg, get); err != nil {
 		return err
 	}
 	if err := writeJSONFile(cfgPath, ocData, 0o644); err != nil {
@@ -237,35 +226,6 @@ func loadCfgFromTshoot(dir string) (*config.SystemConfig, discover.Meta, error) 
 	return cfg, meta, nil
 }
 
-func readJSONOrEmpty(path string) (map[string]any, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return map[string]any{}, nil
-		}
-		return nil, err
-	}
-	if len(data) == 0 {
-		return map[string]any{}, nil
-	}
-	out := map[string]any{}
-	if err := json.Unmarshal(data, &out); err != nil {
-		return nil, fmt.Errorf("invalid JSON at %s: %w", path, err)
-	}
-	return out, nil
-}
-
-func writeJSONFile(path string, data any, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	enc, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, enc, mode)
-}
-
 // injectAgent 把 agent 注入 openclaw.json 的 agents.list,已存在(按 id 匹配)就不重复加。
 func injectAgent(root map[string]any, id, name, model, workspace string) error {
 	agents, _ := root["agents"].(map[string]any)
@@ -302,7 +262,6 @@ func injectMCPServers(
 	root map[string]any,
 	cfg *config.SystemConfig,
 	get func(string) string,
-	log func(string),
 ) error {
 	// MCP server key 用短 prefix(system.id),跟 IDE 平台对齐 + 避免 tool 名超 60 字限制。
 	agentID := cfg.MCPKeyPrefix()
@@ -452,7 +411,6 @@ func injectMCPServers(
 			break
 		}
 	}
-	_ = log
 	return nil
 }
 

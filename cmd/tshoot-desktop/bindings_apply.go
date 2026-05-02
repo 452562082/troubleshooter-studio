@@ -1,14 +1,12 @@
-// bindings_apply.go —— 改装已装机器人 workspace 的 binding：ApplyBot / ImportAndDeploy /
-// DefaultDestPath。
-//
-// 跟 bindings_core.go 的区别是这些方法会真写盘到机器人活 workspace（rsync 产物 /
-// 更新 tshoot.json），所以单独归一档方便 reviewer 检查对权限与副作用的处理。
+// bindings_apply.go —— 改装已装机器人 workspace 的 binding:ApplyBot / ImportAndDeploy /
+// DefaultDestPath。这些方法会真写盘到机器人活 workspace,跟纯查询型 binding 分开放。
 package main
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/agent"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
@@ -16,18 +14,15 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/userconfig"
 )
 
-// ApplyBot 把新的 system.yaml 应用到已装机器人的活 workspace：
+// ApplyBot 把新的 system.yaml 应用到已装机器人的活 workspace:
 // 重新渲染产物 → rsync 到 agentPath → 更新 tshoot.json。
 // preserve_on_regenerate 列表里的文件保留用户手改不覆盖。
 //
 // 仓库本地路径:不在 yaml 里(yaml 必须可分享),从 ~/.tshoot/config.json 按
-// system.id 自动查出来,生成 repo-path-map.yaml 用。没存过就空 map(产物里
-// repo-path-map.yaml 是占位,提示用户回 wizard 重跑)。
+// system.id 自动查出来,生成 repo-path-map.yaml 用。
 //
-// 前置：agentPath 下必须有可读的 tshoot.json（由 discover 识别到的路径）。
-// dryRun=true 时只预演，不真写盘，用于 UI 先给用户看"会变什么"。
+// dryRun=true 时只预演,不真写盘,用于 UI 先给用户看"会变什么"。
 func (a *App) ApplyBot(agentPath, newYamlText string, dryRun bool) (*agent.Result, error) {
-	// 从活 workspace 回读 DiscoveredAgent（避免 UI 传整个结构体过来，省序列化）
 	found, err := discover.Scan([]string{agentPath})
 	if err != nil {
 		return nil, fmt.Errorf("read agent at %s: %w", agentPath, err)
@@ -35,13 +30,10 @@ func (a *App) ApplyBot(agentPath, newYamlText string, dryRun bool) (*agent.Resul
 	if len(found) == 0 {
 		return nil, fmt.Errorf("no tshoot.json found under %s", agentPath)
 	}
-	// 同一目录下可能有多个 target 的 tshoot.json；选路径最短（最贴近 agentPath 根）那个
-	ag := found[0]
-	for _, cand := range found[1:] {
-		if len(cand.Path) < len(ag.Path) {
-			ag = cand
-		}
-	}
+	// 同一目录下可能有多个 target 的 tshoot.json;选路径最短(最贴近 agentPath 根)那个
+	ag := slices.MinFunc(found, func(a, b discover.DiscoveredAgent) int {
+		return len(a.Path) - len(b.Path)
+	})
 	// 按 system.id 查仓库本地路径表(失败 → 空 map,不阻塞)
 	var repoPaths map[string]string
 	if cfg, perr := config.LoadFromBytes([]byte(newYamlText)); perr == nil && cfg.System.ID != "" {

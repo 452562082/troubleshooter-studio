@@ -48,3 +48,15 @@ export const toast = {
   success: (msg: string, ttl?: number) => showToast(msg, { kind: 'success', ttl }),
   error: (msg: string, ttl?: number) => showToast(msg, { kind: 'error', ttl: ttl ?? 8000 }),
 }
+
+/** catch 块的"操作失败"通用 toast。把 catch(e) {...} 收口成一行:
+ *
+ *     try { ... } catch (e) { toastError('部署', e) }
+ *
+ * 自动从 e 里提取 message,跟散落 18 处的 `toast.error(label + ': ' + String(e?.message || e))`
+ * 模板对齐。
+ */
+export function toastError(label: string, e: unknown, ttl?: number) {
+  const msg = e instanceof Error ? e.message : String((e as any)?.message ?? e)
+  return toast.error(`${label}失败:${msg}`, ttl)
+}

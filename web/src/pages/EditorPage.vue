@@ -12,8 +12,10 @@
 // 不友好。现在解析错误文本:yaml 语法错按"第 N 行"高亮,schema 错按"字段 xxx"高亮,
 // 并且把当前行源码截一段展示,让用户更快定位到问题。
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { genPreview, isDesktop, openYAML, plan as bridgePlan, validate as bridgeValidate } from '../lib/bridge'
+import { genPreview, isDesktop, plan as bridgePlan, validate as bridgeValidate } from '../lib/bridge'
 import type { GenPreviewFile, GenPreviewResult } from '../lib/bridge'
+import { useYamlFileLoader } from '../lib/useYamlFileLoader'
+import { useAsyncStatus } from '../lib/useAsyncStatus'
 
 // 跟"代码扫描"页对接的 localStorage key:AnalyzePage 用户点"应用到 YAML 沙盒"时
 // 把改写过的 yaml 内容塞进这个 key 然后跳到本页;本页 onMounted 读出来 → 自动填进
@@ -90,9 +92,8 @@ onMounted(() => {
     }
   } catch { /* localStorage 异常不阻塞页面 */ }
 })
-const loading = ref('')
-const errorMsg = ref('')
-const successMsg = ref('')
+// loading / errorMsg / successMsg + 异步样板由 useAsyncStatus composable 提供
+const { loading, errorMsg, successMsg, run: runAsync, reset: resetAsync } = useAsyncStatus()
 const resultTitle = ref('')
 const resultData = ref<any>(null)
 
@@ -153,52 +154,29 @@ function loadExample() {
   validateIssues.value = []
 }
 
-// 桌面 app 走 Wails 原生 osascript 对话框(reliable on macOS WKWebView);
-// 浏览器模式回退到 <input type="file"> + FileReader。
-// 之前用 <label><input type="file"></label> 在 Wails 里点了会让窗口失焦
-// "弹出去",原生对话框不会触发这个 bug。
-async function loadFileNative() {
-  if (!isDesktop()) return
-  try {
-    const r = await openYAML()
-    if (!r || !r.path) return // 用户取消
-    yamlContent.value = r.content || ''
-    errorMsg.value = ''
-    successMsg.value = ''
-    resultData.value = null
-    validateIssues.value = []
-  } catch (e: any) {
-    errorMsg.value = `加载文件失败: ${String(e?.message || e)}`
-  }
-}
-function loadFileBrowser(event: Event) {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
-  if (!file) return
-  const reader = new FileReader()
-  reader.onload = () => {
-    yamlContent.value = reader.result as string
-    errorMsg.value = ''
-    successMsg.value = ''
-    resultData.value = null
-    validateIssues.value = []
-  }
-  reader.readAsText(file)
-  input.value = ''
-}
+// 桌面走 osascript 原生弹窗;浏览器走 <input type=file> + FileReader。
+const { loadFileNative, loadFileBrowser } = useYamlFileLoader({
+  onLoaded: (content) => {
+    yamlContent.value = content
+    resetAsync(() => {
+      resultData.value = null
+      validateIssues.value = []
+    })
+  },
+  onError: (msg) => { errorMsg.value = msg },
+})
 
-async function apiCall(endpoint: 'validate' | 'plan', label: string) {
-  errorMsg.value = ''
-  successMsg.value = ''
+// EditorPage 异步操作清旧本地态(resultData / preview) + 走 useAsyncStatus 的 run。
+function clearLocal() {
   resultData.value = null
   resultTitle.value = ''
   validateIssues.value = []
-  // 清掉产物预览,免得一份过期的内容跟新的 plan 结果同时显示
   previewResult.value = null
   previewActivePath.value = ''
-  loading.value = label
+}
 
-  try {
+async function apiCall(endpoint: 'validate' | 'plan', label: string) {
+  await runAsync(label, async () => {
     if (endpoint === 'validate') {
       const r = await bridgeValidate(yamlContent.value)
       const errs = (r.issues || []).filter((i: HealthIssue) => i.severity === 'error').length
@@ -218,42 +196,22 @@ async function apiCall(endpoint: 'validate' | 'plan', label: string) {
       resultTitle.value = label
       resultData.value = await bridgePlan(yamlContent.value)
     }
-  } catch (e: any) {
-    // 控制台打全栈,方便用户截图给我看;errorMsg 给 UI 展示
-    console.error('[EditorPage]', endpoint, '调用失败:', e)
-    errorMsg.value = e?.message || String(e) || `${endpoint} 调用失败,请看控制台`
-  } finally {
-    loading.value = ''
-  }
+  }, clearLocal)
 }
 
-// 产物预览:真跑一次 generator 到 tmp,把所有产物文件读回来。比 plan 重,
-// 但用户能看到每个 skill 的实际 SKILL.md / config-map 行 / 其它产物内容,
-// 而不是只看到文件计数。点开左侧文件名 → 右侧加载内容。
+// 产物预览:真跑一次 generator 到 tmp,把所有产物文件读回来。
 async function runPreview() {
-  errorMsg.value = ''
-  successMsg.value = ''
-  resultData.value = null
-  resultTitle.value = ''
-  previewResult.value = null
-  previewActivePath.value = ''
-  loading.value = '预览产物'
-  try {
+  await runAsync('预览产物', async () => {
     const r = await genPreview(yamlContent.value)
     previewResult.value = r
-    // 默认选中第一份"看着像入口的"文件:tshoot.json / SOUL.md / 第一份 SKILL.md
+    // 默认选中第一份"看着像入口的"文件
     const firstHit =
       r.files.find(f => f.path.endsWith('SOUL.md')) ||
       r.files.find(f => f.path.endsWith('tshoot.json')) ||
       r.files.find(f => /\bSKILL\.md$/.test(f.path)) ||
       r.files[0]
     previewActivePath.value = firstHit?.path || ''
-  } catch (e: any) {
-    console.error('[EditorPage] genPreview 失败:', e)
-    errorMsg.value = e?.message || String(e) || '预览产物失败'
-  } finally {
-    loading.value = ''
-  }
+  }, clearLocal)
 }
 
 // 选中文件的引用,模板用

@@ -49,33 +49,29 @@ func runInstall(args []string) error {
 		return fmt.Errorf("staging dir 不存在:%s", abs)
 	}
 
-	switch *target {
-	case "claude-code", "cursor", "codex":
-		// 纯文件分发(agent.md / skills / scripts / tshoot.json 锚点)+ 顺带把 cfg 派生的
-		// MCP 服务器注入到对应 IDE 的配置文件 + 凭证镜像写 ~/.tshoot/<id>-creds.json 给
-		// kuboard / apollo / consul / 静态环境变量等非 MCP 后端用。
+	if t, err := agent.ParseIDETarget(*target); err == nil {
 		if err := agent.InstallNative(abs, *target); err != nil {
 			return err
 		}
-		// 注入 MCP + 写通用 creds.json 走跟桌面 app 一致的路径(IDECreds=nil 时全部跳过,
-		// 不会拿空值覆盖已有凭证 —— 跟 BotsPage regen 同款防御)。
+		// 注入 MCP + 写通用 creds.json,走跟桌面 app 一致的路径。IDECreds=nil 时全跳过,
+		// 不会拿空值覆盖已有凭证(跟 BotsPage regen 同款防御)。
 		if creds, _ := loadIDECredsBestEffort(abs, *envFile); creds != nil {
 			if err := installIDESideEffects(*target, abs, creds); err != nil {
 				return err
 			}
 		}
-		dirName := iderootName(*target)
-		fmt.Printf("[ok] %s 已装到用户级目录(~/.%s/agents/<name>.md + skills/scripts/<name>/)\n",
-			*target, dirName)
-		if *target == "codex" {
+		fmt.Printf("[ok] %s 已装到用户级目录(~/%s/agents/<name>.md + skills/scripts/<name>/)\n",
+			*target, t.DirName())
+		if t == agent.TargetCodex {
 			fmt.Println("    · MCP 服务器走 `codex mcp add` 注册到 ~/.codex/config.toml")
-		} else if *target == "claude-code" {
-			fmt.Println("    · MCP 服务器写到 ~/.claude/settings.json (--env-file 提供凭证才注入)")
 		} else {
-			fmt.Println("    · MCP 服务器写到 ~/.cursor/mcp.json (--env-file 提供凭证才注入)")
+			fmt.Printf("    · MCP 服务器写到 ~/%s/%s (--env-file 提供凭证才注入)\n",
+				t.DirName(), t.SettingsFilename())
 		}
 		return nil
+	}
 
+	switch *target {
 	case "openclaw":
 		creds, err := loadInstallCreds(abs, *envFile)
 		if err != nil {
@@ -242,16 +238,4 @@ func loadInstallCreds(stagingDir, envFile string) (map[string]string, error) {
 		return map[string]string{}, nil
 	}
 	return m, nil
-}
-
-// iderootName 把 IDE target 映射到 ~/.<name>/ 的目录名,仅用于 install 命令打印路径提示。
-func iderootName(target string) string {
-	switch target {
-	case "cursor":
-		return "cursor"
-	case "codex":
-		return "codex"
-	default:
-		return "claude"
-	}
 }

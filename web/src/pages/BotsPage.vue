@@ -1,29 +1,16 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, onActivated, onMounted, onUnmounted, reactive, watch } from 'vue'
-// Wails 运行时事件 API:Go 端 EventsEmit 推过来,这里 EventsOn 订阅。
-// 注意 runtime.js 是 Wails 打进 app 的全局脚本,浏览器里 import 的效果是
-// 引用 window.runtime.*;`tshoot serve` 模式下这些函数不会真实推事件(无源)。
-import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
+import { onActivated, onMounted, onUnmounted, reactive, ref } from 'vue'
 import {
   applyBot,
-  cancelInstall,
   discoverBots,
   doctor as bridgeDoctor,
   exportYAML,
-  getRepoPathsForSystem,
-  importAndDeploy,
   isDesktop as bridgeIsDesktop,
-  openDir,
-  readEnv,
-  revealInFinder,
-  runInstall,
-  scanInstallPrompts,
   uninstallBot,
 } from '../lib/bridge'
-import yaml from 'js-yaml'
-import { useDeployPath } from '../lib/useDeployPath'
-import type { ApplyResult, DiscoveredBot, InstallPrompt } from '../lib/bridge'
-import { toast } from '../lib/toast'
+import { Target } from '../lib/constants'
+import type { ApplyResult, DiscoveredBot } from '../lib/bridge'
+import { toast, toastError } from '../lib/toast'
 import { confirmDialog } from '../lib/confirm'
 import WorkspaceBrowser from '../components/WorkspaceBrowser.vue'
 
@@ -196,8 +183,8 @@ async function regen(b: DiscoveredBot) {
     const preserved = (res?.files_preserved || []).length
     const removed = (res?.files_removed || []).length
     toast.success(`${b.meta.system_id} 已刷新到 ${b.path}: 写 ${written} / 保留 ${preserved} / 清理 ${removed}`)
-  } catch (e: any) {
-    toast.error(`${b.meta.system_id} 重新生成失败: ${String(e?.message || e)}`)
+  } catch (e) {
+    toastError(`${b.meta.system_id} 重新生成`, e)
   } finally {
     regenState[k] = { loading: false }
   }
@@ -209,7 +196,7 @@ async function regen(b: DiscoveredBot) {
 async function uninstall(b: DiscoveredBot) {
   const k = regenKey(b)
   const target = b.meta.target
-  const message = target === 'openclaw'
+  const message = target === Target.Openclaw
     ? `workspace 移到 ~/.Trash;摘掉 ~/.openclaw/openclaw.json 里的 agents.list 条目;清 creds.json。MCP servers(可能被多 agent 共享)保留。`
     : `已部署目录 ${b.path} 移到 ~/.Trash;同时清掉同根下的 agents/<name>.md 与 scripts/<name>/(自定义安装目录也会一并清);staging 中间包 ~/.tshoot/${target}/<id>/ 一并删除。`
   const ok = await confirmDialog({
@@ -227,8 +214,8 @@ async function uninstall(b: DiscoveredBot) {
     // 从 bots 列表把这条摘掉(避免点完还残留 → 用户以为卸载没生效)
     bots.value = bots.value.filter(x => regenKey(x) !== k)
     toast.success(`${b.meta.system_id} (${target}) 已卸载;${(r.log || []).length} 项操作详见日志`)
-  } catch (e: any) {
-    toast.error(`卸载失败: ${String(e?.message || e)}`)
+  } catch (e) {
+    toastError('卸载', e)
   } finally {
     uninstallState[k] = { loading: false }
   }
@@ -260,8 +247,8 @@ async function doExport(b: DiscoveredBot) {
     const savedTo = await exportYAML(filename, payload)
     if (!savedTo) return // 用户取消,不弹 toast
     toast.success(`已导出 ${b.meta.system_id} 到 ${savedTo}`)
-  } catch (e: any) {
-    toast.error(`导出 ${b.meta.system_id} 失败: ${String(e?.message || e)}`)
+  } catch (e) {
+    toastError(`导出 ${b.meta.system_id}`, e)
   }
 }
 
@@ -281,9 +268,6 @@ async function runApply(b: DiscoveredBot, dryRun: boolean) {
   }
 }
 
-// addRoot / pickExtraRoot / removeRoot / newRootInput 已下线 —— 扫描路径 UI panel 整个删了。
-// 真要加自定义路径走 CLI(extraRoots 参数)。
-
 function targetLabel(t: string): string {
   const map: Record<string, string> = {
     openclaw: 'OpenClaw',
@@ -294,290 +278,11 @@ function targetLabel(t: string): string {
   return map[t] ?? t
 }
 
-// ── 导入 yaml → 部署 流程状态机 ──────────────────────────────────
-// idle → picked → deploying → deployed → installing → done
-type ImportStage = 'idle' | 'picked' | 'deploying' | 'deployed' | 'installing' | 'done'
-const importStage = ref<ImportStage>('idle')
-const importYAMLText = ref('')
-const importYAMLPath = ref('')
-const importTarget = ref<'openclaw' | 'claude-code' | 'cursor' | 'codex'>('openclaw')
-const importDestPath = ref('')
-const importError = ref<string | null>(null)
-
-// 跟 InitPage / EditorPage 一致,拿 yaml 里的 system.id 当默认路径基准。
-// importYAMLText 每次选文件都会变,computed 实时跟着算。
-const importSystemId = computed<string>(() => {
-  try {
-    const parsed: any = yaml.load(importYAMLText.value)
-    return parsed?.system?.id || ''
-  } catch { return '' }
-})
-
-// 从 import yaml 里抽仓库列表,给下面"本地路径配置"UI 用。
-// system.yaml 里只有 name/url,没有本地路径 —— 用户必须在这里手动补上才能部署,
-// 因为 bot 运行时要靠本地路径做代码分析。
-interface ImportRepoLite { name: string; url: string }
-const importRepoList = computed<ImportRepoLite[]>(() => {
-  try {
-    const parsed: any = yaml.load(importYAMLText.value)
-    if (!Array.isArray(parsed?.repos)) return []
-    return parsed.repos
-      .filter((r: any) => typeof r?.name === 'string' && r.name.trim())
-      .map((r: any) => ({ name: String(r.name).trim(), url: String(r.url || '').trim() }))
-  } catch { return [] }
-})
-// 每个仓库的本机绝对路径;部署时传进 importAndDeploy,后端烤进 repo-path-map.yaml +
-// 触发 auto-analyze(扫码生成 service-dependency-map / data-schema-map)。
-// key = repo.name。用户不填就不让部署。
-const importRepoPaths = reactive<Record<string, string>>({})
-// yaml 变动时:重置 → 用 system.id 反查上次部署存的路径,prefill 表单。
-// 这样"BotsPage 改完 yaml 重新部署"不必再选一遍目录,跟"wizard 一次,后续静默"对齐。
-watch(() => importYAMLText.value, async () => {
-  for (const k of Object.keys(importRepoPaths)) delete importRepoPaths[k]
-  try {
-    const sysID = importSystemId.value
-    if (!sysID) return
-    const saved = await getRepoPathsForSystem(sysID)
-    for (const [name, p] of Object.entries(saved || {})) {
-      if (p) importRepoPaths[name] = p
-    }
-  } catch { /* 反查失败也无所谓,用户手填 */ }
-})
-async function pickRepoPath(name: string) {
-  try {
-    const p = await openDir(`选择 ${name} 的本地目录`)
-    if (p) importRepoPaths[name] = p
-  } catch (e: any) {
-    importError.value = String(e?.message || e)
-  }
-}
-// 所有仓库路径都填了才能部署;没仓库(repos: [])时也允许(纯基础设施 yaml)
-const importRepoPathsReady = computed(() => {
-  if (importRepoList.value.length === 0) return true
-  return importRepoList.value.every(r => (importRepoPaths[r.name] || '').trim() !== '')
-})
-const importMissingRepoCount = computed(() => {
-  return importRepoList.value.filter(r => !(importRepoPaths[r.name] || '').trim()).length
-})
-const {
-  isManagedTarget: importIsManagedTarget,
-  customPathExpanded: importCustomPathExpanded,
-  autoDefaultPath: importAutoDefaultPath,
-  resetCustomPath: importResetCustomPath,
-} = useDeployPath(importTarget, importSystemId, importDestPath)
-const importedOutputDir = ref('') // agent.Result.agent_path 返回的实际落盘位置
-const installPrompts = ref<InstallPrompt[]>([])
-const installCreds = ref<Record<string, string>>({})
-const installLog = ref('')
-const installOK = ref<boolean | null>(null)
-const liveLogRef = ref<HTMLPreElement | null>(null)
-
-// 新行推进来时把 <pre> 滚到底,模拟 tail -f 体验
-watch(installLog, () => {
-  nextTick(() => {
-    if (liveLogRef.value) {
-      liveLogRef.value.scrollTop = liveLogRef.value.scrollHeight
-    }
-  })
-})
-
-// 按变量名前缀分组,让 25 字段不至于一次铺平眼花。每组顺序固定,
-// 未命中的"其他"垫底。分组 key 直接作为折叠面板标题。
-const GROUP_ORDER = [
-  '配置中心',
-  'Grafana',
-  'Jaeger',
-  'Prometheus',
-  'Loki',
-  'ELK',
-  '消息平台',
-  'MCP',
-  '其他',
-] as const
-
-function classifyPrompt(name: string): string {
-  if (name.startsWith('CC_') || name.startsWith('CONFIG_CENTER_')) return '配置中心'
-  if (name.startsWith('GRAFANA_')) return 'Grafana'
-  if (name.startsWith('JAEGER_')) return 'Jaeger'
-  if (name.startsWith('PROMETHEUS_')) return 'Prometheus'
-  if (name.startsWith('LOKI_')) return 'Loki'
-  if (name.startsWith('KIBANA_') || name.startsWith('ELK_') || name.startsWith('ES_')) return 'ELK'
-  if (name.startsWith('MESSAGING_')) return '消息平台'
-  if (name.startsWith('MCP_')) return 'MCP'
-  return '其他'
-}
-
-const groupedPrompts = computed<{ group: string; prompts: InstallPrompt[] }[]>(() => {
-  const buckets: Record<string, InstallPrompt[]> = {}
-  for (const p of installPrompts.value) {
-    const g = classifyPrompt(p.name)
-    ;(buckets[g] ||= []).push(p)
-  }
-  return GROUP_ORDER.filter((g) => buckets[g]?.length).map((g) => ({
-    group: g,
-    prompts: buckets[g]!,
-  }))
-})
-
-function filledCount(prompts: InstallPrompt[]): number {
-  return prompts.filter((p) => (installCreds.value[p.name] ?? '').trim() !== '').length
-}
-
-// pickYAML / 导入 yaml 一键部署面板已下线 —— 走「创建向导」Step 1 的"导入已有 system.yaml"路径,
-// 那条路完整覆盖校验 / 健康检查 / 仓库路径补全。本页 BotsPage 只做"扫已装 + 管理"职责。
-// 整个 importStage / importYAMLText / importTarget / pickDestDir / runDeployFromYAML 等
-// 一连串状态量保留(template 还有 v-if 的死分支引用),不影响 BotsPage 主路径。
-
-async function pickDestDir() {
-  try {
-    const p = await openDir('选择部署目标路径')
-    if (p) importDestPath.value = p
-  } catch (e: any) {
-    importError.value = String(e?.message || e)
-  }
-}
-
-async function runImportDeploy() {
-  if (!importDestPath.value.trim()) {
-    importError.value = '需要 destPath'
-    return
-  }
-  if (!importRepoPathsReady.value) {
-    importError.value = `还有 ${importMissingRepoCount.value} 个仓库没指定本地路径;不填本地路径 bot 运行时无法分析代码`
-    return
-  }
-  importError.value = null
-  importStage.value = 'deploying'
-  try {
-    // 每个 repo 的本机绝对路径,作为 repo-path-map.yaml 的原料
-    const paths: Record<string, string> = {}
-    for (const r of importRepoList.value) {
-      const p = (importRepoPaths[r.name] || '').trim()
-      if (p) paths[r.name] = p
-    }
-    const res = await importAndDeploy(importYAMLText.value, importTarget.value, importDestPath.value, paths)
-    importedOutputDir.value = res.agent_path
-    // 各 target 是否需要 install.sh 步骤:
-    //   openclaw:有交互凭证(scripts/install.sh),必须跑,UI 展示字段表单
-    //   claude-code / cursor:ImportAndApply 内部已 native install 到 ~/.claude|cursor/,
-    //                        无 install.sh 也无凭证收集
-    const needsInstall = importTarget.value === 'openclaw'
-    if (needsInstall) {
-      const [prompts, existing] = await Promise.all([
-        scanInstallPrompts(res.agent_path),
-        readEnv(res.agent_path),
-      ])
-      installPrompts.value = prompts
-      installCreds.value = { ...existing } // 预填已有
-      for (const p of prompts) {
-        if (!(p.name in installCreds.value)) installCreds.value[p.name] = ''
-      }
-      importStage.value = 'deployed'
-    } else {
-      // claude-code / cursor:ImportAndApply 已 rsync 产物到目标 project,完事
-      installOK.value = true
-      importStage.value = 'done'
-      await scan()
-    }
-  } catch (e: any) {
-    importError.value = String(e?.message || e)
-    importStage.value = 'picked' // 让用户改了重来
-  }
-}
-
-// installStartTime / installElapsed:把"已运行 X 秒 · Y 行日志"摆到按钮旁,
-// 非程序员看到计时在动就知道"app 没卡,只是 install.sh 在跑"。
-// setInterval 每秒更新;installing 结束清掉。
-const installStartTime = ref<number | null>(null)
-const installElapsed = ref(0)
-let installTimer: number | null = null
-// installCanceling:用户点了取消但 SIGKILL 还没 Go 端返回的短暂窗口,
-// 禁用按钮避免重复点击。
-const installCanceling = ref(false)
-
-async function runDeployInstall() {
-  importError.value = null
-  importStage.value = 'installing'
-  installLog.value = ''
-  installCanceling.value = false
-  // 开始计时(秒表)
-  installStartTime.value = Date.now()
-  installElapsed.value = 0
-  if (installTimer) clearInterval(installTimer)
-  installTimer = window.setInterval(() => {
-    if (installStartTime.value) {
-      installElapsed.value = Math.floor((Date.now() - installStartTime.value) / 1000)
-    }
-  }, 1000)
-  try {
-    // installLog 从 install:log 事件流已经累积;这里 r.log 是 Go 端兜底的完整文本,
-    // 如果事件丢行(理论上不会)或用户刷新页面后 Go 已跑完才回来,用 r.log 补齐
-    const r = await runInstall(importedOutputDir.value, installCreds.value)
-    if (installLog.value === '' && r.log) installLog.value = r.log
-    // exit_code === -2:Go 端约定"用户取消",UI 显示"已取消"而不是"失败"
-    if (r.exit_code === -2) {
-      installOK.value = false
-      installLog.value += '\n[已取消] 由用户触发,install.sh 进程组已被 SIGKILL。\n'
-    } else {
-      installOK.value = r.ok
-    }
-    importStage.value = 'done'
-    await scan()
-  } catch (e: any) {
-    importError.value = String(e?.message || e)
-    importStage.value = 'deployed'
-  } finally {
-    // 停秒表
-    if (installTimer) { clearInterval(installTimer); installTimer = null }
-    installStartTime.value = null
-    installCanceling.value = false
-  }
-}
-
-// abortInstall:用户点"取消安装"触发。后端 SIGKILL 进程组后,runInstall promise
-// 会 resolve 一个 exit_code=-2 的结果,由 runDeployInstall 的 try 块正常处理收尾。
-async function abortInstall() {
-  if (installCanceling.value) return // 防重复
-  installCanceling.value = true
-  try {
-    await cancelInstall()
-  } catch (e: any) {
-    toast.error(`取消失败: ${String(e?.message || e)}`)
-    installCanceling.value = false
-  }
-}
-
-function resetImport() {
-  importStage.value = 'idle'
-  importYAMLText.value = ''
-  importYAMLPath.value = ''
-  importDestPath.value = ''
-  importedOutputDir.value = ''
-  installPrompts.value = []
-  installCreds.value = {}
-  installLog.value = ''
-  installOK.value = null
-  importError.value = null
-}
-
-// install:log 事件流:Go 端 RunInstallStreaming 每行推一次,这里追加到 installLog。
-// 仅在"installing"阶段有意义,但订阅从 mount 持续到 unmount,Go 端静默时不会推。
-// 多次安装之间 installLog 在 runDeployInstall 开头清空,所以跨会话不会脏。
-onMounted(() => {
-  scan()
-  EventsOn('install:log', (line: string) => {
-    installLog.value += line + '\n'
-  })
-})
+onMounted(() => { scan() })
 // keep-alive 缓存了 BotsPage,InitPage 末步部署 → 切回 BotsPage 时组件不会重 mount,
 // onMounted 里的 scan() 不跑,卸载/重装的状态变更看不到。onActivated 是 keep-alive
 // 专属钩子,每次组件被激活(切回页面)都会触发 → 自动 rescan,卡片永远跟磁盘真态一致。
-onActivated(() => {
-  scan()
-})
-onUnmounted(() => {
-  EventsOff('install:log')
-})
+onActivated(() => { scan() })
 </script>
 
 <template>
@@ -597,193 +302,6 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <!-- ── 导入 yaml → 部署 向导面板 ───────────────────────────── -->
-    <section v-if="importStage !== 'idle'" class="deploy-panel">
-      <div class="deploy-head">
-        <strong>导入并部署</strong>
-        <span class="deploy-path">{{ importYAMLPath }}</span>
-        <button class="btn btn-regen" @click="resetImport">关闭</button>
-      </div>
-
-      <!-- Step 1: 选 target + destPath。openclaw 自动路径,其它要选 -->
-      <div v-if="importStage === 'picked' || importStage === 'deploying'" class="deploy-step">
-        <div class="deploy-field">
-          <label>目标平台</label>
-          <select v-model="importTarget" :disabled="importStage === 'deploying'">
-            <option value="openclaw">OpenClaw(Studio 托管,需填凭证)</option>
-            <option value="claude-code">Claude Code(CLI 用 @&lt;name&gt; 调)</option>
-            <option value="cursor">Cursor(AI 侧栏选 Custom Agent)</option>
-            <option value="codex">Codex CLI(用 @&lt;name&gt; 调)</option>
-          </select>
-        </div>
-        <!-- openclaw 自动管理路径,折叠;用户点"自定义"才露 input -->
-        <div v-if="importIsManagedTarget && !importCustomPathExpanded" class="deploy-field">
-          <label>部署位置 <span class="auto-tag">自动管理</span></label>
-          <div class="auto-path-display">
-            <code>{{ importAutoDefaultPath || '…' }}</code>
-            <button type="button" class="btn-link" @click="importCustomPathExpanded = true">自定义 →</button>
-          </div>
-        </div>
-        <div v-else class="deploy-field">
-          <label>
-            部署目标路径
-            <button v-if="importIsManagedTarget" type="button" class="btn-link" @click="importResetCustomPath">
-              恢复默认
-            </button>
-          </label>
-          <!-- readonly input,只能通过按钮选 —— 跟 wizard 里所有路径字段统一约束 -->
-          <div class="path-row">
-            <input
-              :value="importDestPath"
-              :placeholder="importIsManagedTarget ? importAutoDefaultPath : '点右侧按钮选择项目根路径'"
-              :disabled="importStage === 'deploying'"
-              readonly
-              class="path-readonly"
-              :title="importDestPath"
-            />
-            <button class="btn" :disabled="importStage === 'deploying'" @click="pickDestDir">
-              {{ importDestPath ? '重新选…' : '选目录…' }}
-            </button>
-          </div>
-        </div>
-        <!-- 仓库本地路径配置:system.yaml 里没有这个信息(故意的 —— 跨机器可分享),
-             部署到这台机器上的 bot 要靠每个仓库的本机绝对路径做代码分析,所以必须
-             用户在这里手动补全。跑过 init 向导的流程那边路径是 wizard 自动攒的,
-             这里 import yaml 没经过向导,用户显式指路径 —— 不然 bot 跑起来啥代码
-             也找不到。 -->
-        <div v-if="importRepoList.length > 0" class="deploy-field import-repo-paths">
-          <label>
-            仓库本地路径 <span class="required">*</span>
-            <span class="field-hint">
-              — system.yaml 不含本地路径,请为每个仓库指定本机绝对路径(bot 要读代码)
-              <span v-if="importMissingRepoCount > 0" class="path-pending">
-                · 还差 {{ importMissingRepoCount }} 个
-              </span>
-              <span v-else class="path-ready">· ✓ 全部配好</span>
-            </span>
-          </label>
-          <div
-            v-for="repo in importRepoList"
-            :key="repo.name"
-            class="import-repo-row"
-          >
-            <span class="import-repo-name">{{ repo.name }}</span>
-            <input
-              :value="importRepoPaths[repo.name]"
-              type="text"
-              :placeholder="repo.url ? `${repo.url} 对应的本机目录(点右侧选)` : '点右侧按钮选目录'"
-              :disabled="importStage === 'deploying'"
-              readonly
-              class="path-readonly"
-              :title="importRepoPaths[repo.name] || ''"
-            />
-            <button
-              type="button"
-              class="btn"
-              :disabled="importStage === 'deploying'"
-              @click="pickRepoPath(repo.name)"
-            >{{ importRepoPaths[repo.name] ? '重新选…' : '选目录…' }}</button>
-          </div>
-        </div>
-        <div class="deploy-actions">
-          <button
-            class="btn primary"
-            :disabled="importStage === 'deploying' || !importDestPath.trim() || !importRepoPathsReady"
-            @click="runImportDeploy"
-          >
-            {{ importStage === 'deploying' ? '部署中…' : '部署' }}
-          </button>
-          <span v-if="!importRepoPathsReady" class="deploy-block-hint">
-            先把 {{ importMissingRepoCount }} 个仓库的本地路径补齐才能部署
-          </span>
-        </div>
-      </div>
-
-      <!-- Step 2: install.sh 阶段 -->
-      <div v-if="importStage === 'deployed' || importStage === 'installing'" class="deploy-step">
-        <p v-if="installPrompts.length > 0" class="deploy-tip">
-          产物已写到 <code>{{ importedOutputDir }}</code>。
-          install.sh 需要下面 {{ installPrompts.length }} 个凭证字段;已存在的
-          <code>.env</code> 值自动预填。<strong>带 * 的是密码型字段</strong>。
-        </p>
-        <p v-else class="deploy-tip">
-          产物已写到 <code>{{ importedOutputDir }}</code>。
-          install.sh 不需要凭证(纯文件安装),点下面按钮直接安装。
-        </p>
-        <div v-if="installPrompts.length > 0" class="cred-groups">
-          <details
-            v-for="grp in groupedPrompts"
-            :key="grp.group"
-            class="cred-group"
-            open
-          >
-            <summary>
-              <span class="cred-group-name">{{ grp.group }}</span>
-              <span
-                class="cred-group-count"
-                :class="{ complete: filledCount(grp.prompts) === grp.prompts.length }"
-              >{{ filledCount(grp.prompts) }} / {{ grp.prompts.length }} 已填</span>
-            </summary>
-            <div class="creds-grid">
-              <div v-for="p in grp.prompts" :key="p.name" class="cred-field">
-                <label :for="'cred-' + p.name">
-                  {{ p.name }}
-                  <span v-if="p.secret" class="secret-mark">*</span>
-                </label>
-                <input
-                  :id="'cred-' + p.name"
-                  v-model="installCreds[p.name]"
-                  :type="p.secret ? 'password' : 'text'"
-                  :placeholder="p.prompt"
-                  :disabled="importStage === 'installing'"
-                />
-              </div>
-            </div>
-          </details>
-        </div>
-        <div class="deploy-actions">
-          <button class="btn" @click="revealInFinder(importedOutputDir)">在 Finder 中显示</button>
-          <button
-            class="btn primary"
-            :disabled="importStage === 'installing'"
-            @click="runDeployInstall"
-          >
-            {{ importStage === 'installing' ? '运行 install.sh 中…' : (installPrompts.length > 0 ? '写 .env 并运行 install.sh' : '运行 install.sh') }}
-          </button>
-          <!-- 取消按钮只在 installing 时出现。SIGKILL 给 bash 进程组,brew/npm 子进程也连带杀 -->
-          <button
-            v-if="importStage === 'installing'"
-            class="btn btn-cancel"
-            :disabled="installCanceling"
-            @click="abortInstall"
-          >
-            {{ installCanceling ? '取消中…' : '取消安装' }}
-          </button>
-        </div>
-        <!-- 运行时秒表 + 日志行数:让用户知道 app 没卡,install.sh 还在跑 -->
-        <div v-if="importStage === 'installing'" class="install-progress">
-          <span class="install-spinner" aria-hidden="true"></span>
-          <span class="install-elapsed">已运行 {{ installElapsed }}s</span>
-          <span class="install-loglines">· {{ installLog.split('\n').length - 1 }} 行日志</span>
-        </div>
-        <!-- installing 阶段实时滚出 install.sh 的 stdout+stderr,避免用户盯静默黑屏 -->
-        <pre v-if="importStage === 'installing' && installLog" ref="liveLogRef" class="deploy-log live">{{ installLog }}</pre>
-      </div>
-
-      <!-- Step 3: 日志 / 完成 -->
-      <div v-if="importStage === 'done'" class="deploy-step">
-        <div class="deploy-result" :class="installOK ? 'ok' : 'err'">
-          {{ installOK ? '✓ 部署完成' : '⚠ install.sh 非零退出' }}
-        </div>
-        <pre v-if="installLog" class="deploy-log">{{ installLog }}</pre>
-        <div class="deploy-actions">
-          <button class="btn" @click="revealInFinder(importedOutputDir)">在 Finder 中显示</button>
-          <button class="btn primary" @click="resetImport">完成</button>
-        </div>
-      </div>
-
-      <div v-if="importError" class="alert error">⚠ {{ importError }}</div>
-    </section>
 
     <!-- 扫描路径已下线 —— 默认 3 条路径(`~/.openclaw/workspace` / `~/.claude/skills` /
          `~/.cursor/skills`)覆盖 99% 用户级部署。极少数"装项目根"场景走 CLI 传 extraRoots
@@ -1129,145 +647,4 @@ onUnmounted(() => {
 
 .page-actions { display: flex; gap: 8px; }
 
-.deploy-panel {
-  margin-bottom: 20px; padding: 16px 18px; background: #fff;
-  border: 2px solid #0f172a; border-radius: 10px;
-}
-.deploy-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-.deploy-head strong { font-size: 14px; color: #0f172a; }
-.deploy-path { flex: 1; font-family: monospace; font-size: 11px; color: #64748b; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-.deploy-step { display: flex; flex-direction: column; gap: 12px; }
-.deploy-field { display: flex; flex-direction: column; gap: 6px; }
-.deploy-field label { font-size: 12px; font-weight: 600; color: #334155; }
-.deploy-field select, .deploy-field input {
-  padding: 7px 10px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 13px;
-}
-.path-row { display: flex; gap: 8px; }
-.path-row input { flex: 1; }
-/* 统一的只读路径样式:跟 InitPage 保持一致 */
-.path-readonly {
-  background: #f8fafc; color: #475569; cursor: default;
-  text-overflow: ellipsis;
-}
-.import-repo-row input.path-readonly {
-  background: #f8fafc; color: #475569; cursor: default;
-}
-/* embedded/openclaw 的自动路径展示 */
-.deploy-field label { display: flex; align-items: center; gap: 6px; }
-.auto-tag {
-  font-size: 10px; font-weight: 500; color: #065f46;
-  background: #d1fae5; padding: 1px 6px; border-radius: 8px; letter-spacing: 0.2px;
-}
-.auto-path-display {
-  display: flex; align-items: center; gap: 10px;
-  padding: 7px 10px; background: #f1f5f9; border-radius: 4px;
-  border: 1px dashed #cbd5e1;
-}
-.auto-path-display code {
-  flex: 1; font-size: 12px; color: #1e40af; background: transparent; padding: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.btn-link {
-  padding: 0; border: none; background: transparent; color: #1e40af;
-  font-size: 11px; font-weight: 500; cursor: pointer; font-family: inherit;
-  text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px;
-}
-.btn-link:hover { color: #1e3a8a; }
-
-.deploy-tip { font-size: 12px; color: #64748b; line-height: 1.6; }
-.deploy-tip code { background: #f1f5f9; padding: 1px 4px; border-radius: 3px; }
-.deploy-tip strong { color: #c2410c; }
-
-.cred-groups { display: flex; flex-direction: column; gap: 8px; }
-.cred-group {
-  border: 1px solid #e2e8f0; border-radius: 6px; background: #f8fafc;
-}
-.cred-group summary {
-  cursor: pointer; padding: 8px 12px; display: flex; justify-content: space-between;
-  align-items: center; font-size: 12px; font-weight: 600; color: #334155;
-  user-select: none;
-}
-.cred-group summary:hover { background: #f1f5f9; }
-.cred-group[open] summary { border-bottom: 1px solid #e2e8f0; background: #fff; }
-.cred-group-name { display: flex; align-items: center; gap: 6px; }
-.cred-group-count {
-  font-size: 11px; font-weight: 500; color: #94a3b8;
-  padding: 1px 6px; background: #f1f5f9; border-radius: 3px;
-}
-.cred-group-count.complete { background: #d1fae5; color: #065f46; }
-
-.creds-grid {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 10px; padding: 10px 12px;
-}
-.cred-field { display: flex; flex-direction: column; gap: 4px; }
-.cred-field label { font-size: 11px; font-family: monospace; color: #334155; font-weight: 600; }
-.secret-mark { color: #c2410c; }
-.cred-field input { padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 12px; font-family: monospace; }
-
-.deploy-actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
-.deploy-block-hint {
-  font-size: 11px; color: #b45309; margin-right: auto;
-}
-
-/* 导入 yaml 时让用户为每个仓库指定本机路径 */
-.import-repo-paths .path-pending { color: #b45309; font-weight: 500; }
-.import-repo-paths .path-ready { color: #047857; font-weight: 500; }
-.import-repo-row {
-  display: grid;
-  grid-template-columns: 120px 1fr auto;
-  gap: 8px; align-items: center;
-  padding: 4px 0;
-}
-.import-repo-row .import-repo-name {
-  font-family: monospace; font-size: 12px; color: #1e293b;
-  font-weight: 500;
-}
-.import-repo-row input {
-  padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 4px;
-  font-size: 12px; font-family: monospace;
-}
-.import-repo-row input:focus { outline: none; border-color: #3b82f6; }
-.import-repo-row .required { color: #dc2626; }
-/* Cancel 按钮用危险色(红)区分于 primary(黑),提示"这是破坏性操作" */
-.btn-cancel {
-  background: #fef2f2; border-color: #fecaca; color: #991b1b;
-}
-.btn-cancel:hover:not(:disabled) { background: #fee2e2; border-color: #fca5a5; }
-.btn-cancel:disabled { opacity: 0.6; }
-
-/* 运行中进度指示:spinner + 秒表 + 日志行数,告诉用户 app 没卡 */
-.install-progress {
-  display: flex; align-items: center; gap: 8px;
-  padding: 8px 12px; background: #eff6ff; border: 1px solid #bfdbfe;
-  border-radius: 6px; font-size: 12px; color: #1e40af;
-  font-variant-numeric: tabular-nums; /* 秒数跳变时数字不抖 */
-}
-.install-spinner {
-  width: 12px; height: 12px; border-radius: 50%;
-  border: 2px solid #bfdbfe; border-top-color: #2563eb;
-  animation: spin 0.8s linear infinite;
-}
-@keyframes spin { to { transform: rotate(360deg); } }
-.install-elapsed { font-weight: 600; }
-.install-loglines { color: #64748b; }
-
-.deploy-result {
-  padding: 10px 12px; border-radius: 4px; font-size: 13px; font-weight: 600;
-}
-.deploy-result.ok { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
-.deploy-result.err { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
-.deploy-log {
-  background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 6px;
-  font-family: 'SFMono-Regular', Menlo, monospace; font-size: 11px;
-  max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-all;
-  margin-top: 10px;
-}
-/* 流式中的日志框加个脉动左边框,视觉提示'还在动' */
-.deploy-log.live { border-left: 3px solid #22c55e; animation: pulse 1.4s ease-in-out infinite; }
-@keyframes pulse {
-  0%, 100% { border-left-color: #22c55e; }
-  50%      { border-left-color: #4ade80; }
-}
 </style>

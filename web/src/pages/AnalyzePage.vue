@@ -2,8 +2,11 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import yaml from 'js-yaml'
-import { analyzeV2 as bridgeAnalyzeV2, isDesktop, openDir, openYAML, getRepoPathsForSystem, saveRepoPathsForSystem, getUserConfig, type AnalyzeResult } from '../lib/bridge'
-import { toast } from '../lib/toast'
+import { analyzeV2 as bridgeAnalyzeV2, isDesktop, openDir, getRepoPathsForSystem, saveRepoPathsForSystem, getUserConfig, type AnalyzeResult } from '../lib/bridge'
+import { toast, toastError } from '../lib/toast'
+import { useYamlFileLoader } from '../lib/useYamlFileLoader'
+import { computeYamlCodeDiff, type YamlVsCodeDiff } from '../lib/yamlCodeDiff'
+import { copyToClipboard } from '../lib/clipboard'
 import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
 
 const router = useRouter()
@@ -215,8 +218,8 @@ async function saveDraftsToUserConfig() {
     await saveRepoPathsForSystem(id, filtered)
     savedRepoPaths.value = filtered
     toast.success(`✓ 已保存 ${Object.keys(filtered).length} 个仓库路径到 ~/.tshoot/config.json`)
-  } catch (e: any) {
-    toast.error(`保存失败: ${String(e?.message || e)}`)
+  } catch (e) {
+    toastError('保存', e)
   }
 }
 
@@ -230,28 +233,13 @@ function clearScanResult() {
 
 // 桌面 app 走 Wails 原生 osascript 对话框(reliable on macOS WKWebView);
 // 浏览器模式回退 <input type="file"> + FileReader。
-async function loadFileNative() {
-  if (!isDesktop()) return
-  try {
-    const r = await openYAML()
-    if (r && r.path) {
-      yamlContent.value = r.content || ''
-      clearScanResult()
-    }
-  } catch (e: any) {
-    error.value = `加载文件失败: ${String(e?.message || e)}`
-  }
-}
-function loadFileBrowser(e: Event) {
-  const file = (e.target as HTMLInputElement).files?.[0]
-  if (!file) return
-  const reader = new FileReader()
-  reader.onload = () => {
-    yamlContent.value = reader.result as string
+const { loadFileNative, loadFileBrowser } = useYamlFileLoader({
+  onLoaded: (content) => {
+    yamlContent.value = content
     clearScanResult()
-  }
-  reader.readAsText(file)
-}
+  },
+  onError: (msg) => { error.value = msg },
+})
 
 // ── yaml vs 代码实态 diff ──
 // 跑完 analyze 用户最想知道的是"跟我 yaml 里写的比,差了啥":
@@ -259,92 +247,12 @@ function loadFileBrowser(e: Event) {
 //   - missing:yaml 声明了但 analyzer 没扫到(可能写错仓库名 / service 不存在了 / 代码没 clone)
 //   - config-center 冲突:yaml 说 nacos,代码扫出 apollo
 // 纯前端算:yaml 用 js-yaml parse,result.report.repos 按 name 匹配,集合运算。
-interface YamlVsCodeDiffItem {
-  name: string
-  yamlServices: string[]
-  codeServices: string[]
-  newInCode: string[]       // 代码有 yaml 无
-  missingInCode: string[]   // yaml 有代码无
-  // role 决定是否需要 service_names 对账。infra / common-lib / docs / frontend / mobile
-  // 不是业务服务,本来就不该有 service_names —— diff 跳过 missing/new 检查,只展示一行说明。
-  isServiceRole: boolean
-  effectiveRole: string
-}
-interface YamlVsCodeDiff {
-  repos: YamlVsCodeDiffItem[]
-  configCenterYaml: string
-  configCenterCode: string
-  configCenterMismatch: boolean
-  totalNew: number          // 所有仓库加起来 new 数
-  totalMissing: number
-}
-
+// diff 计算实现见 lib/yamlCodeDiff.ts(纯函数 + 12 个单测覆盖);此处仅 parse yaml 后委托。
 const diff = computed<YamlVsCodeDiff | null>(() => {
   if (!result.value) return null
   let yamlCfg: any = {}
   try { yamlCfg = yaml.load(yamlContent.value) || {} } catch { return null }
-  const yamlRepos = Array.isArray(yamlCfg.repos) ? yamlCfg.repos : []
-  const codeRepos = result.value.report?.repos || []
-  const out: YamlVsCodeDiffItem[] = []
-  let totalNew = 0
-  let totalMissing = 0
-  // 业务服务角色判定 —— 跟前端 InitPage / 后端 RequiresServiceNames 一致。
-  // 仅这 4 类需要对账 service_names,其它角色(frontend / mobile / common-lib / infra / docs)
-  // 跳过 missing/new 计算 —— 它们本就不该有 service_names。
-  const SERVICE_ROLES = new Set(['backend', 'gateway', 'middleware', 'admin'])
-  for (const yRepo of yamlRepos) {
-    const yName = yRepo.name as string
-    // yaml 里 service_names 可能是 "a, b" 字符串或 ["a", "b"] 数组,归一
-    const yServicesRaw = yRepo.service_names
-    const yServices: string[] = Array.isArray(yServicesRaw)
-      ? yServicesRaw.map((s: any) => String(s).trim()).filter(Boolean)
-      : typeof yServicesRaw === 'string'
-      ? yServicesRaw.split(',').map((s: string) => s.trim()).filter(Boolean)
-      : []
-    // role:yaml 显式给的优先,否则用 analyzer 推断的 role_hint(都没就当 backend 兜底)
-    const codeEntry = codeRepos.find((r: any) => r.name === yName)
-    const yamlRole = (typeof yRepo.role === 'string' && yRepo.role.trim()) ? yRepo.role.trim() : ''
-    const hintedRole = (codeEntry?.role_hint?.role as string) || ''
-    const effectiveRole = yamlRole || hintedRole || 'backend'
-    const isServiceRole = SERVICE_ROLES.has(effectiveRole)
-    // yaml 里没写 service_names 时,业务服务用 repo.name 兜底,非业务服务保持空(它们本来就不需要)
-    const effectiveYaml = yServices.length > 0
-      ? yServices
-      : (isServiceRole ? [yName] : [])
-    const cServices: string[] = codeEntry?.service_names || []
-    let newIn: string[] = []
-    let miss: string[] = []
-    if (isServiceRole) {
-      // 只对业务服务跑 missing/new 对账
-      const ySet = new Set(effectiveYaml)
-      const cSet = new Set(cServices)
-      newIn = cServices.filter((s) => !ySet.has(s))
-      miss = effectiveYaml.filter((s) => !cSet.has(s))
-    }
-    totalNew += newIn.length
-    totalMissing += miss.length
-    out.push({
-      name: yName,
-      yamlServices: effectiveYaml,
-      codeServices: cServices,
-      newInCode: newIn,
-      missingInCode: miss,
-      isServiceRole,
-      effectiveRole,
-    })
-  }
-  const configCenterYaml = String(yamlCfg.infrastructure?.config_center?.type || '')
-  const configCenterCode = String(result.value.report?.config_center || '')
-  return {
-    repos: out,
-    configCenterYaml,
-    configCenterCode,
-    configCenterMismatch:
-      configCenterYaml !== '' && configCenterCode !== '' &&
-      configCenterCode !== 'unknown' && configCenterYaml !== configCenterCode,
-    totalNew,
-    totalMissing,
-  }
+  return computeYamlCodeDiff(yamlCfg, result.value.report || {})
 })
 
 // 非业务服务角色的解释文案 —— 不同 role 排障路径不同,提示也按 role 定制
@@ -368,9 +276,10 @@ function copySuggestedYamlSnippet() {
     lines.push(`  - name: ${r.name}`)
     lines.push(`    service_names: [${r.codeServices.map((s) => `"${s}"`).join(', ')}]`)
   }
-  navigator.clipboard.writeText(lines.join('\n'))
-    .then(() => toast.success('片段已复制到剪贴板,粘到你的 yaml 对应 repo 下'))
-    .catch(() => toast.error('复制失败'))
+  copyToClipboard(lines.join('\n'))
+    .then((ok) => ok
+      ? toast.success('片段已复制到剪贴板,粘到你的 yaml 对应 repo 下')
+      : toast.error('复制失败'))
 }
 
 // applyDiffToYAMLAndOpen 把代码扫描发现的差异打进 yaml,然后跳到 YAML 沙盒。
@@ -386,8 +295,8 @@ function applyDiffToYAMLAndOpen() {
   let cfg: any
   try {
     cfg = yaml.load(yamlContent.value) || {}
-  } catch (e: any) {
-    toast.error(`yaml 解析失败:${e?.message || e}`)
+  } catch (e) {
+    toastError('yaml 解析', e)
     return
   }
   if (!Array.isArray(cfg.repos)) cfg.repos = []
@@ -422,8 +331,8 @@ function applyDiffToYAMLAndOpen() {
   const patchedYAML = header + yaml.dump(cfg, { lineWidth: 200, noRefs: true })
   try {
     localStorage.setItem(PENDING_FROM_ANALYZE_KEY, patchedYAML)
-  } catch (e: any) {
-    toast.error(`保存到 localStorage 失败:${e?.message || e}`)
+  } catch (e) {
+    toastError('保存到 localStorage', e)
     return
   }
   if (touchedRepos === 0 && !diff.value.configCenterMismatch) {
@@ -479,9 +388,9 @@ async function runAnalyze() {
     )) as AnalyzeResult
     result.value = r
     toast.success(`analyze 完成: ${r.per_repo?.length ?? 0} 个仓库,共 ${r.report?.repos?.length ?? 0} 条 report`)
-  } catch (e: any) {
-    error.value = e.message || String(e)
-    toast.error(`analyze 失败: ${e.message || e}`)
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+    toastError('analyze', e)
   } finally {
     loading.value = false
     if (analyzeTimer) { clearInterval(analyzeTimer); analyzeTimer = null }
@@ -1128,7 +1037,8 @@ textarea.err { border-color: #ef4444; }
   border: 1px solid var(--c-border, #e2e8f0);
 }
 
-/* primary 按钮在 footer 里 */
+/* primary 按钮在 footer 里。注:这条全局覆盖跟设计系统的 .btn.primary 颜色一致,只是
+   为了在浏览器一进 /analyze 就有正确蓝调(避免依赖 design.css 的加载顺序),保留全局 */
 .btn.primary {
   background: #2563eb; color: #fff; border: 1px solid #2563eb;
 }

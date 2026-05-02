@@ -4065,6 +4065,45 @@ function extractPort(addr: string): string {
   return m ? m[1] : ''
 }
 
+// applyMatchersToParsedConfig:把 parseConfigContent 出来的 root object 喂给 DS_MATCHERS,
+// 命中就写 scannedDS / enabledDataStores / dsAutoFilled / matchedSet,并落 dsScanState
+// 状态(ok/empty)。autoImportDataStores 的 nacos 和 kuboard 两 pass 都跑一样的 matcher 流程,
+// 抽出来去重。emptyReasonPrefix 控制 empty 状态的提示前缀("yaml" vs "cm")。
+function applyMatchersToParsedConfig(
+  env: string, svc: string, root: any,
+  matchedSet: Set<string>,
+  emptyReasonPrefix: string,  // 'yaml 里没匹到数据层' / 'cm 里没匹到数据层'
+  matchLogPrefix: string,     // '识别数据层' / 'kuboard 识别数据层'
+): number {
+  const stateKey = scanStateKey(env, svc)
+  const hits: string[] = []
+  if (!scannedDS[env]) scannedDS[env] = {}
+  scannedDS[env][svc] = {}
+  for (const m of DS_MATCHERS) {
+    const hit = m.matchYAML(root)
+    if (!hit) continue
+    hits.push(m.dsKey)
+    // 命中数据层 → 同步把 enabledDataStores[dsKey] = true。否则 deriveSkillsWhitelist
+    // 看到 enabledDataStores.redis 仍 false,就不会把 redis-runtime-query push 进白名单。
+    enabledDataStores[m.dsKey] = true
+    dsAutoFilled[m.dsKey] = true
+    matchedSet.add(`${env}:${m.dsKey}`)
+    scannedDS[env][svc][m.dsKey] = { ...hit }
+    pushLog('cchub', 'info',
+      `[${env}/${svc}] ${matchLogPrefix} ${m.dsKey}: ${Object.keys(hit).join(',')}`,
+      { envID: env, svc, dsKey: m.dsKey })
+  }
+  if (hits.length === 0) {
+    const topKeys = (root && typeof root === 'object') ? Object.keys(root).slice(0, 15).join(',') : '(非对象)'
+    dsScanState[stateKey] = { status: 'empty', reason: `${emptyReasonPrefix}(顶级 key: ${topKeys})` }
+    pushLog('cchub', 'warn', `[${env}/${svc}] 未识别到任何数据层(顶级 key:${topKeys})`,
+      { envID: env, svc })
+  } else {
+    dsScanState[stateKey] = { status: 'ok' }
+  }
+  return hits.length
+}
+
 async function autoImportDataStores() {
   if (!canAutoImportDS.value) {
     toast.error('先在 Step 5 完成配置源扫描 + 服务 dataId 映射')
@@ -4229,32 +4268,8 @@ async function autoImportDataStores() {
             { envID: info.env, svc: info.svc })
           continue
         }
-        const hits: string[] = []
-        if (!scannedDS[info.env]) scannedDS[info.env] = {}
-        scannedDS[info.env][info.svc] = {}
-        for (const m of DS_MATCHERS) {
-          const hit = m.matchYAML(root)
-          if (!hit) continue
-          hits.push(m.dsKey)
-          // 命中数据层 → 同步把 enabledDataStores[dsKey] = true。否则 deriveSkillsWhitelist
-          // 看到 enabledDataStores.redis 仍 false,就不会把 redis-runtime-query push 进白名单,
-          // 工作区里就生成不出这个 skill —— 用户看到的"redis/mongodb/kafka 被跳过"就是这个 bug。
-          enabledDataStores[m.dsKey] = true
-          dsAutoFilled[m.dsKey] = true
-          matchedSet.add(`${info.env}:${m.dsKey}`)
-          scannedDS[info.env][info.svc][m.dsKey] = { ...hit }
-          pushLog('cchub', 'info',
-            `[${info.env}/${info.svc}] 识别数据层 ${m.dsKey}: ${Object.keys(hit).join(',')}`,
-            { envID: info.env, svc: info.svc, dsKey: m.dsKey })
-        }
-        if (hits.length === 0) {
-          const topKeys = (root && typeof root === 'object') ? Object.keys(root).slice(0, 15).join(',') : '(非对象)'
-          dsScanState[stateKey] = { status: 'empty', reason: `yaml 里没匹到数据层(顶级 key: ${topKeys})` }
-          pushLog('cchub', 'warn', `[${info.env}/${info.svc}] 未识别到任何数据层(顶级 key:${topKeys})`,
-            { envID: info.env, svc: info.svc })
-        } else {
-          dsScanState[stateKey] = { status: 'ok' }
-        }
+        applyMatchersToParsedConfig(info.env, info.svc, root, matchedSet,
+          'yaml 里没匹到数据层', '识别数据层')
       }
     }
     // ── Kuboard 源:per-env 批拉 cm.data,跟 nacos 同样跑 DS_MATCHERS ──
@@ -4343,29 +4358,8 @@ async function autoImportDataStores() {
             dsScanState[stateKey] = { status: 'error', reason: `解析 configmap 失败(format=${r.format || '?'})` }
             continue
           }
-          const hits: string[] = []
-          if (!scannedDS[info.env]) scannedDS[info.env] = {}
-          scannedDS[info.env][info.svc] = {}
-          for (const m of DS_MATCHERS) {
-            const hit = m.matchYAML(root)
-            if (!hit) continue
-            hits.push(m.dsKey)
-            // 跟 nacos pass 一样:命中数据层同步打开 enabledDataStores 标记,
-            // 让 deriveSkillsWhitelist 能把 <type>-runtime-query push 进白名单。
-            enabledDataStores[m.dsKey] = true
-            dsAutoFilled[m.dsKey] = true
-            matchedSet.add(`${info.env}:${m.dsKey}`)
-            scannedDS[info.env][info.svc][m.dsKey] = { ...hit }
-            pushLog('cchub', 'info',
-              `[${info.env}/${info.svc}] kuboard 识别数据层 ${m.dsKey}: ${Object.keys(hit).join(',')}`,
-              { envID: info.env, svc: info.svc, dsKey: m.dsKey })
-          }
-          if (hits.length === 0) {
-            const topKeys = (root && typeof root === 'object') ? Object.keys(root).slice(0, 15).join(',') : '(非对象)'
-            dsScanState[stateKey] = { status: 'empty', reason: `cm 里没匹到数据层(顶级 key:${topKeys})` }
-          } else {
-            dsScanState[stateKey] = { status: 'ok' }
-          }
+          applyMatchersToParsedConfig(info.env, info.svc, root, matchedSet,
+            'cm 里没匹到数据层', 'kuboard 识别数据层')
         }
       }
     }

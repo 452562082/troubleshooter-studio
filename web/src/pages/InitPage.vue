@@ -48,11 +48,11 @@ import { Target, IDE_TARGETS, type TargetId } from '../lib/constants'
 import type { URLProbeState } from '../lib/probeTypes'
 import type { CredField, KuboardResourceState } from '../lib/credFields'
 import EnvListItem from '../components/EnvListItem.vue'
-import TargetInstallBadge from '../components/TargetInstallBadge.vue'
 import RepoListItem from '../components/RepoListItem.vue'
 import ConfigSourceStep from '../components/ConfigSourceStep.vue'
 import ObservabilityStep from '../components/ObservabilityStep.vue'
 import DataStoreStep from '../components/DataStoreStep.vue'
+import BotIdentityStep from '../components/BotIdentityStep.vue'
 import { generateYAML as libGenerateYAML, type YAMLGenContext } from '../lib/yamlGenerator'
 import { computeStepErrors as libComputeStepErrors, labelForErrorKey as libLabelForErrorKey, type ValidatorContext } from '../lib/yamlValidator'
 import { applyParsedYAMLToWizardState, type ApplyImportContext } from '../lib/yamlImporter'
@@ -5904,187 +5904,39 @@ const configTypeDescriptions: Record<string, string> = {
     </div>
 
     <!-- Step 2 -->
-    <div v-if="currentStep === 3" class="card lg">
-      <h2>机器人身份</h2>
-      <p class="help-text" style="margin-bottom:14px">
-        给机器人起个名字,选要部署到哪些 AI 平台。
-      </p>
-      <div class="form-group">
-        <label>机器人名称 <span class="required">*</span></label>
-        <input
-          v-model="agent.name"
-          type="text"
-          :placeholder="agentNameDefault"
-          :class="{ error: hasError('agent.name') }"
-        />
-      </div>
-
-      <!-- agent.id:AI 平台里的稳定标识(OpenClaw agents.list[*].id / Claude Code / Cursor subagent 名),
-           同时也作为 OpenClaw workspace 目录名(~/.openclaw/workspace/<id>/)。
-           跟随 system.id 自动派生,只读;想改请回 Step 1 改 system.id。 -->
-      <div class="form-group">
-        <label>
-          AI 平台标识
-          <span class="help-icon" title="OpenClaw agents.list[*].id + workspace 目录名;Claude Code / Cursor 的 subagent 名。从 system.id 派生(<system.id>-troubleshooter)。">?</span>
-          <span class="auto-tag">自动派生</span>
-        </label>
-        <input
-          :value="agent.id || agentIdDefault"
-          type="text"
-          readonly
-          class="readonly-input"
-          title="只读;跟随 system.id 自动派生"
-        />
-      </div>
-
-      <!-- 部署平台卡片:每家一张,勾选的卡片内联露出该 target 相关配置(模型 / 工作区名)。
-           claude-code / cursor 不消费模型,只展示"模型由用户客户端自己选"。
-           openclaw 是唯一需要工作区名的,勾选时多一行输入框。 -->
-      <div class="form-group">
-        <label>
-          部署到哪些 AI 平台 <span class="required">*</span>
-          <span class="field-hint">— 可多选;勾了哪些,相关配置(模型 / 工作区)就展开填</span>
-        </label>
-        <div class="target-grid">
-          <div
-            v-for="t in targetOptions"
-            :key="t"
-            class="target-card"
-            :class="{ selected: enabledTargets[t], 'target-disabled': targetDetectedInstalled(t) === false && !forceEnableMissingTarget[t] }"
-          >
-            <label class="target-card-head">
-              <input
-                type="checkbox"
-                v-model="enabledTargets[t]"
-                :disabled="!targetCanBeEnabled(t)"
-                :title="!targetCanBeEnabled(t) ? '本机未检测到该 AI 平台,先安装或点下方「我已自行安装」再勾选' : ''"
-              />
-              <span class="target-title">{{ targetLabels[t] }}</span>
-              <TargetInstallBadge v-bind="targetBadgeProps(t)" />
-            </label>
-            <div class="target-hint">{{ targetDescriptions[t] }}</div>
-            <!-- 未检测到 + 没强制启用 → 露出"我已自行安装/选目录/重新扫描"操作条;
-                 强制启用后 checkbox 解锁,部署位置改用 customInstallRoots[t] 拼接(若选了自定义)。 -->
-            <div
-              v-if="t !== 'openclaw' && targetDetectedInstalled(t) === false && !forceEnableMissingTarget[t]"
-              class="target-missing-actions"
-            >
-              <span>本机未找到 {{ targetLabels[t] }} —— 先安装,或</span>
-              <button type="button" class="btn-link" @click="forceEnableMissingTarget[t] = true">
-                我已自行安装,继续
-              </button>
-              <button type="button" class="btn-link" @click="pickCustomInstallRoot(t)">📁 选安装目录…</button>
-              <button type="button" class="btn-link" @click="refreshAITools">🔄 重新扫描</button>
-            </div>
-            <div
-              v-else-if="t !== 'openclaw' && targetDetectedInstalled(t) === false && forceEnableMissingTarget[t]"
-              class="target-missing-actions overridden"
-            >
-              <span v-if="customInstallRoots[t]">📁 自定义安装目录:</span>
-              <span v-else>⚠ 未检测到本机安装,已强制启用(默认部署 ~/.{{ t }})</span>
-              <code v-if="customInstallRoots[t]" :title="customInstallRoots[t]">{{ customInstallRoots[t] }}</code>
-              <button type="button" class="btn-link" @click="pickCustomInstallRoot(t)">
-                {{ customInstallRoots[t] ? '改目录…' : '📁 选安装目录…' }}
-              </button>
-              <button v-if="customInstallRoots[t]" type="button" class="btn-link" @click="clearCustomInstallRoot(t)">清除</button>
-              <button
-                type="button"
-                class="btn-link"
-                @click="() => { forceEnableMissingTarget[t] = false; enabledTargets[t] = false; clearCustomInstallRoot(t) }"
-              >撤销</button>
-              <button type="button" class="btn-link" @click="refreshAITools">🔄 重新扫描</button>
-            </div>
-            <!-- 勾选后展示 install.sh 跑完后的最终落地位置 —— AI 平台从这里读 agent。
-                 路径长时省略号截断,鼠标悬停看完整;Step 8 一键部署也不再问路径。 -->
-            <div v-if="enabledTargets[t]" class="target-deploy-path">
-              <span class="target-deploy-path-label">部署位置</span>
-              <span class="auto-tag" :title="targetDeployPathHints[t]">自动</span>
-              <code :title="targetDeployPaths[t]">{{ targetDeployPaths[t] || '…' }}</code>
-            </div>
-
-            <!-- 勾选后才展开下面配置区。claude-code / cursor 没有要配的字段,
-                 直接不渲染 target-body,免得露出空白容器很难看 -->
-            <div v-if="enabledTargets[t] && t === 'openclaw'" class="target-body">
-              <!-- OpenClaw 模型:只从本地 openclaw 配置读,不给手填回路。
-                   原因:openclaw gateway 只认自己 config.yaml 里声明过的 model id,
-                   Studio 让用户填一个 openclaw 不认的 id 部署完 gateway 就跑不动 ——
-                   不如如实告知"请先装 openclaw 配置模型再来"。
-                   API key 也不在这里收:openclaw 的凭证走自家 install.sh 交互流程,
-                   跟 Studio 的 keychain 不是一回事。 -->
-              <template v-if="t === 'openclaw'">
-                <div v-if="openclawDetectStatus === 'loading'" class="target-field target-note">
-                  <span class="scan-spinner-mini"></span>正在读 OpenClaw 配置…
-                </div>
-                <div v-else-if="openclawDetectStatus === 'not-installed'" class="target-field openclaw-warn">
-                  <div>⚠ 本机未检测到 OpenClaw 安装(默认找 <code>~/.openclaw</code>)</div>
-                  <div style="margin-top:4px">
-                    请先安装 OpenClaw 并配置好 <code>config.yaml</code> 里的
-                    <code>models:</code> 字段,然后回来点"重新扫描";
-                    或者手动选择 OpenClaw 安装目录。
-                  </div>
-                  <div class="openclaw-warn-actions">
-                    <button type="button" class="btn" @click="runOpenClawDetect('')">🔄 重新扫描</button>
-                    <button type="button" class="btn" @click="pickOpenClawInstallDir">选择安装目录…</button>
-                  </div>
-                </div>
-                <div v-else-if="openclawDetectStatus === 'error'" class="target-field openclaw-warn">
-                  <div>✗ 读 OpenClaw 配置失败: {{ openclawDetectError }}</div>
-                  <div class="openclaw-warn-actions">
-                    <button type="button" class="btn" @click="pickOpenClawInstallDir">改选目录…</button>
-                    <button type="button" class="btn" @click="runOpenClawDetect(openclawInstallDir)">重试</button>
-                  </div>
-                </div>
-                <div v-else-if="openclawDetectStatus === 'ok' && openclawDetectedModels.length > 0" class="target-field">
-                  <label class="target-field-label">
-                    使用的模型
-                    <span class="auto-tag">读自 {{ openclawResolvedDir }}{{ openclawVersion ? ` · v${openclawVersion}` : '' }}</span>
-                    <button type="button" class="btn-link" @click="pickOpenClawInstallDir">改目录</button>
-                    <button type="button" class="btn-link" @click="runOpenClawDetect(openclawInstallDir)">🔄 重读</button>
-                  </label>
-                  <select
-                    :value="targetModels[Target.Openclaw]"
-                    @change="onModelChange('openclaw', $event)"
-                  >
-                    <!-- model.id 本身已经是完整 "<provider>/<model>" 格式(openclaw 约定),
-                         直接用 id 作 option value;不再给它拼额外前缀(避免 double-prefix)。 -->
-                    <option
-                      v-for="m in openclawDetectedModels"
-                      :key="m.id"
-                      :value="m.id"
-                    >{{ m.label || m.id }}</option>
-                  </select>
-                  <div v-if="openclawAuthProviders.length" class="target-hint" style="padding-left:0;margin-top:4px">
-                    已配置凭证 provider: {{ openclawAuthProviders.join(', ') }}
-                  </div>
-                </div>
-                <!-- 目录找到 + openclaw.json 能解析,但三个模型源全空:
-                     typical case 是用户刚装 openclaw 还没 configure 过 / 没装过任何 agent。 -->
-                <div v-else-if="openclawDetectStatus === 'ok'" class="target-field openclaw-warn">
-                  <div>
-                    ⚠ 找到 OpenClaw 安装(<code>{{ openclawResolvedDir }}</code>),
-                    但<strong>配置里还没声明任何模型</strong>
-                  </div>
-                  <div style="margin-top:4px">
-                    openclaw.json 里的 <code>agents.defaults.model.primary</code> /
-                    <code>agents.defaults.models</code> / <code>agents.list[].model</code> 三处都空。
-                    先跑一次 <code>openclaw configure</code> 选默认模型,
-                    或装一个 agent 让它产生 model 记录,再回来"重新扫描"。
-                  </div>
-                  <div class="openclaw-warn-actions">
-                    <button type="button" class="btn" @click="runOpenClawDetect(openclawInstallDir)">🔄 重新扫描</button>
-                    <button type="button" class="btn" @click="pickOpenClawInstallDir">改选目录…</button>
-                  </div>
-                </div>
-              </template>
-
-            </div>
-          </div>
-        </div>
-        <div v-if="!anyTargetSelected" class="error-text" style="margin-top:6px">
-          至少勾选一个部署目标
-        </div>
-      </div>
-    </div>
+    <BotIdentityStep
+      v-if="currentStep === 3"
+      :agent="agent"
+      :agent-name-default="agentNameDefault"
+      :agent-id-default="agentIdDefault"
+      :has-error="hasError"
+      :target-options="targetOptions"
+      :target-labels="targetLabels"
+      :target-descriptions="targetDescriptions"
+      :enabled-targets="enabledTargets"
+      :target-can-be-enabled="targetCanBeEnabled"
+      :target-detected-installed="targetDetectedInstalled"
+      :target-badge-props="targetBadgeProps"
+      :force-enable-missing-target="forceEnableMissingTarget"
+      :custom-install-roots="customInstallRoots"
+      :target-deploy-paths="targetDeployPaths"
+      :target-deploy-path-hints="targetDeployPathHints"
+      :any-target-selected="anyTargetSelected"
+      :target-models="targetModels"
+      :openclaw-detect-status="openclawDetectStatus"
+      :openclaw-detect-error="openclawDetectError"
+      :openclaw-detected-models="openclawDetectedModels"
+      :openclaw-resolved-dir="openclawResolvedDir"
+      :openclaw-version="openclawVersion"
+      :openclaw-auth-providers="openclawAuthProviders"
+      :openclaw-install-dir="openclawInstallDir"
+      @pick-custom-install-root="pickCustomInstallRoot"
+      @clear-custom-install-root="clearCustomInstallRoot"
+      @refresh-a-i-tools="refreshAITools"
+      @pick-open-claw-install-dir="pickOpenClawInstallDir"
+      @run-open-claw-detect="runOpenClawDetect"
+      @model-change="onModelChange"
+    />
 
     <!-- Step 3 -->
     <div v-if="currentStep === 4" class="card lg">

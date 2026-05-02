@@ -1999,40 +1999,53 @@ function isObsFieldHidden(toolKey: string, envID: string, f: CredField): boolean
 // sourceCreds 里更新过的字段(yaml 导入 / 副源迁移)合并进来。两边都不 destructively clear
 // —— 那会把"只写到 ccCredInputs 没回写 sourceCreds"的主源凭证整体抹掉。
 const ccCredInputs = reactive<Record<string, string>>(saved?.ccCredInputs ?? {})
+// 双向 sync 防互相 retrigger:forward / reverse watch 任一边主动写时把 syncing 置 true,
+// 对端 watch 起来看到 flag 直接 return,不再多跑一轮 O(types × envs × fields) 迭代。
+// diff check 仍保留作 saftey net,防 Vue scheduler 异步合并丢 flag 的边角。
+let syncing = false
 function syncCcCredInputsFromSource() {
-  for (const t of activeSourceTypes.value) {
-    const data = sourceCreds[t]
-    if (!data) continue
-    for (const env of Object.keys(data.creds)) {
-      for (const f of Object.keys(data.creds[env])) {
-        const k = `cc:${t}:${env}:${f}`
-        const v = data.creds[env][f]
-        if (ccCredInputs[k] !== v) ccCredInputs[k] = v
+  if (syncing) return
+  syncing = true
+  try {
+    for (const t of activeSourceTypes.value) {
+      const data = sourceCreds[t]
+      if (!data) continue
+      for (const env of Object.keys(data.creds)) {
+        for (const f of Object.keys(data.creds[env])) {
+          const k = `cc:${t}:${env}:${f}`
+          const v = data.creds[env][f]
+          if (ccCredInputs[k] !== v) ccCredInputs[k] = v
+        }
       }
     }
+  } finally {
+    syncing = false
   }
 }
 syncCcCredInputsFromSource()
-// 用 deep:true 走 Vue 的细粒度 reactivity 而不是每次 JSON.stringify 整树:
-// 用户每改一个字段不用 O(n) 序列化,Vue 内部 proxy 钩子 O(变更字段数)。
 watch(
   [sourceCreds, enabledSourceTypes],
   () => syncCcCredInputsFromSource(),
   { deep: true },
 )
 // 反向 sync:主源表单 v-model 写 ccCredInputs → 同步回 sourceCreds(yaml emit 真源)。
-// diff check 防回环;forward sync 也同样 diff check,所以两边互改不会无限触发。
 watch(
   ccCredInputs,
   () => {
-    for (const k of Object.keys(ccCredInputs)) {
-      const m = k.match(/^cc:([^:]+):([^:]+):(.+)$/)
-      if (!m) continue
-      const [, t, env, field] = m
-      if (!sourceCreds[t]) sourceCreds[t] = { creds: {} }
-      if (!sourceCreds[t].creds[env]) sourceCreds[t].creds[env] = {}
-      const v = ccCredInputs[k] ?? ''
-      if (sourceCreds[t].creds[env][field] !== v) sourceCreds[t].creds[env][field] = v
+    if (syncing) return
+    syncing = true
+    try {
+      for (const k of Object.keys(ccCredInputs)) {
+        const m = k.match(/^cc:([^:]+):([^:]+):(.+)$/)
+        if (!m) continue
+        const [, t, env, field] = m
+        if (!sourceCreds[t]) sourceCreds[t] = { creds: {} }
+        if (!sourceCreds[t].creds[env]) sourceCreds[t].creds[env] = {}
+        const v = ccCredInputs[k] ?? ''
+        if (sourceCreds[t].creds[env][field] !== v) sourceCreds[t].creds[env][field] = v
+      }
+    } finally {
+      syncing = false
     }
   },
   { deep: true },
@@ -4735,6 +4748,58 @@ watch(configCenterType, (newType, oldType) => {
 // 重建,有 saved 草稿时 badge 应直接显示"✓ 自动保存"——挂载时占位 Date.now,
 // 用户改字段后由 auto-save watch 覆盖成真实时间。
 const lastSavedAt = ref<number | null>(saved ? Date.now() : null)
+// autosave debounce:用户连续输入时,reactive 每个字符都触发本 watch,deep: true 会
+// 把整个 30+ key 的 reactive 树 stringify 一遍 + 写 localStorage(已撞过 quota
+// 走 slim 兜底)。300ms 防抖把"输入字符串"期间的写次数压到 1 次,onUnmounted
+// flush 保证页面切走时 pending payload 落地不丢。
+let persistTimer: ReturnType<typeof setTimeout> | null = null
+let lastPersistVal: any = null
+function flushPersist() {
+  if (persistTimer != null) {
+    clearTimeout(persistTimer)
+    persistTimer = null
+  }
+  if (lastPersistVal == null) return
+  const val = lastPersistVal
+  lastPersistVal = null
+  const stringify = (v: any) => JSON.stringify(v)
+  let payload = stringify(val)
+  try {
+    localStorage.setItem(STORAGE_KEY, payload)
+    lastSavedAt.value = Date.now()
+    return
+  } catch (e: any) {
+    pushLog('cchub', 'warn',
+      `localStorage 写入失败(可能超 quota,size=${payload.length}B): ${String(e?.message || e)};尝试瘦身后重写`,
+      {})
+  }
+  try {
+    const slim = { ...val } as any
+    // 把 Loki 的 labels / values / dsList 这类列表型大数据剥掉,只留 dsUID + 选好的 mapping。
+    // 重进 Step 7 时会自动重新拉一次,体验上没差,但 quota 大幅下降。
+    if (slim.lokiMappingByEnv && typeof slim.lokiMappingByEnv === 'object') {
+      const trimmed: Record<string, any> = {}
+      for (const [env, m] of Object.entries(slim.lokiMappingByEnv as Record<string, any>)) {
+        trimmed[env] = {
+          dsUID: m?.dsUID ?? '',
+          envLabelKey: m?.envLabelKey ?? '',
+          serviceLabelKey: m?.serviceLabelKey ?? '',
+          envValue: m?.envValue ?? '',
+          serviceValues: m?.serviceValues ?? {},
+        }
+      }
+      slim.lokiMappingByEnv = trimmed
+    }
+    payload = stringify(slim)
+    localStorage.setItem(STORAGE_KEY, payload)
+    lastSavedAt.value = Date.now()
+  } catch (e2: any) {
+    pushLog('cchub', 'error',
+      `瘦身后写入仍失败: ${String(e2?.message || e2)};你刚改的字段没存到本地`,
+      {})
+  }
+}
+
 watch(
   () => ({
     wizardSchema: 2, // 见 currentStep 上方注释:标记本 draft 已是新 step 编号(欢迎页+9 配置步)
@@ -4794,48 +4859,13 @@ watch(
     openclawInstallDir: openclawInstallDir.value,
   }),
   (val) => {
-    // 配额吃不下时,先剔除最大头(lokiMappingByEnv 的 dsList / values)再写,
-    // 避免你刚选的 k8sRuntimeSvcMap / kuboardSvcMap 等小字段一起被静默丢弃。
-    const stringify = (v: any) => JSON.stringify(v)
-    let payload = stringify(val)
-    try {
-      localStorage.setItem(STORAGE_KEY, payload)
-      lastSavedAt.value = Date.now()
-      return
-    } catch (e: any) {
-      pushLog('cchub', 'warn',
-        `localStorage 写入失败(可能超 quota,size=${payload.length}B): ${String(e?.message || e)};尝试瘦身后重写`,
-        {})
-    }
-    try {
-      const slim = { ...val } as any
-      // 把 Loki 的 labels / values / dsList 这类列表型大数据剥掉,只保留 dsUID + 选好的 mapping key/value。
-      // 重进 Step 7 时会自动重新拉一次,体验上没差,但 quota 大幅下降。
-      if (slim.lokiMappingByEnv && typeof slim.lokiMappingByEnv === 'object') {
-        const trimmed: Record<string, any> = {}
-        for (const [env, m] of Object.entries(slim.lokiMappingByEnv as Record<string, any>)) {
-          trimmed[env] = {
-            dsUID: m?.dsUID ?? '',
-            envLabelKey: m?.envLabelKey ?? '',
-            serviceLabelKey: m?.serviceLabelKey ?? '',
-            envValue: m?.envValue ?? '',
-            serviceValues: m?.serviceValues ?? {},
-            // 其它 dsList / labels / *LabelValues 都舍弃
-          }
-        }
-        slim.lokiMappingByEnv = trimmed
-      }
-      payload = stringify(slim)
-      localStorage.setItem(STORAGE_KEY, payload)
-      lastSavedAt.value = Date.now()
-    } catch (e2: any) {
-      pushLog('cchub', 'error',
-        `瘦身后写入仍失败: ${String(e2?.message || e2)};你刚改的字段没存到本地`,
-        {})
-    }
+    lastPersistVal = val
+    if (persistTimer != null) clearTimeout(persistTimer)
+    persistTimer = setTimeout(flushPersist, 300)
   },
   { deep: true }
 )
+onUnmounted(flushPersist)
 
 // "X 秒前"计时 —— 让徽章文案能随时间流动,用户看得到 Auto-save 真的在跑。
 const nowTick = ref(Date.now())
@@ -7016,23 +7046,17 @@ const configTypeDescriptions: Record<string, string> = {
 }
 
 /* ── Card ── */
-.card {
-  background: #fff;
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  padding: 28px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
-  margin-bottom: 20px;
-}
-/* 每步卡片标题 + 说明 + 表单之间留出呼吸空间,避免标题贴下面 help-text */
-.card h2 {
+/* InitPage 卡片 = .card.lg(尺寸/阴影来自 design.css)。本页加大步骤间距 + 标题样式,
+   并限定在 .init-page 子树,避免泄漏到 .card 同名的其它页(BotsPage / EditorPage 等)。 */
+.init-page .card.lg { margin-bottom: 20px; }
+.init-page .card.lg h2 {
   font-size: 20px;
   font-weight: 600;
   color: #1e293b;
   margin: 0 0 14px 0;
   line-height: 1.3;
 }
-.card .help-text {
+.init-page .card.lg .help-text {
   margin-bottom: 18px;
 }
 
@@ -7145,31 +7169,7 @@ textarea.error {
   margin-bottom: 0;
 }
 
-.btn-icon.remove {
-  flex-shrink: 0;
-  width: 30px;
-  height: 30px;
-  border: none;
-  background: #fee2e2;
-  color: #ef4444;
-  border-radius: 6px;
-  font-size: 18px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-bottom: 2px;
-  transition: background 0.15s;
-}
-
-.btn-icon.remove:hover:not(:disabled) {
-  background: #fecaca;
-}
-
-.btn-icon.remove:disabled {
-  opacity: 0.3;
-  cursor: not-allowed;
-}
+/* .btn-icon.remove 已上提到 design.css */
 
 /* ── Repo block ── */
 /* Analyze 集成块:折叠在 Step 4 顶部,不打扰不关心它的用户 */
@@ -8576,14 +8576,7 @@ input.path-readonly {
   font-size: 11px; font-weight: 400; color: var(--c-muted);
   margin-left: 6px;
 }
-.btn-link {
-  padding: 0; border: none; background: transparent; color: #1e40af;
-  font-size: 11px; font-weight: 500; cursor: pointer; font-family: inherit;
-  text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px;
-}
-.btn-link:hover { color: #1e3a8a; }
-
-/* .btn / .btn.primary / .info-box 来自全局 design.css */
+/* .btn / .btn.primary / .btn-link / .btn-icon / .info-box 来自全局 design.css */
 
 .nav-buttons {
   display: flex;

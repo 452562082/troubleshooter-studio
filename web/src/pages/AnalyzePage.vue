@@ -501,7 +501,7 @@ onUnmounted(() => {
           <button class="btn small" @click="loadExample">加载示例</button>
         </div>
       </div>
-      <textarea v-model="yamlContent" placeholder="把 system.yaml 内容粘到这里,或点上面「加载文件」选本机文件…" spellcheck="false" :class="{ err: error }" />
+      <textarea v-model="yamlContent" class="yaml-input" placeholder="把 system.yaml 内容粘到这里,或点上面「加载文件」选本机文件…" spellcheck="false" :class="{ err: error }" />
     </div>
 
     <!-- 仓库路径状态 banner -->
@@ -861,13 +861,13 @@ onUnmounted(() => {
 /* 文件 input 用 <label class="btn small"> 当触发器,需要 overflow/display 让嵌套 input hidden 不影响布局 */
 label.btn { cursor: pointer; }
 
-textarea {
+/* yaml 输入区 = 等宽多行,跟基础 textarea(普通文本输入)区别开,避免泄漏到其它 textarea */
+.yaml-input {
   width: 100%; min-height: 180px; padding: 10px var(--sp-3); border: 1px solid var(--c-line); border-radius: var(--r-md);
   font-family: 'SF Mono', 'Fira Code', monospace; font-size: var(--fs-base); line-height: 1.5;
   background: var(--c-surf-2); resize: vertical; box-sizing: border-box;
 }
-textarea:focus { outline: none; border-color: var(--c-accent); }
-textarea.err { border-color: #ef4444; }
+.yaml-input:focus { outline: none; border-color: var(--c-accent); }
 
 .form-row { display: flex; gap: var(--sp-4); margin-bottom: var(--sp-4); align-items: flex-end; }
 .field { flex: 1; }

@@ -1707,9 +1707,12 @@ async function runK8sRtPreload(envID: string) {
 }
 
 // 模板用的窄化 helper:跳过 status union narrowing 的 (state as any) 强转,统一一个出口
-function kuboardClusterCountOf(envID: string): number {
+function kuboardClustersOf(envID: string) {
   const st = kuboardStateByEnv[envID]
-  return (st && st.status === 'ok') ? st.clusters.length : 0
+  return (st && st.status === 'ok') ? st.clusters : []
+}
+function kuboardClusterCountOf(envID: string): number {
+  return kuboardClustersOf(envID).length
 }
 function kuboardErrorOf(envID: string): string {
   const st = kuboardStateByEnv[envID]
@@ -1750,7 +1753,7 @@ const k8sRtWorkloadCache = reactive<Record<string, K8sRtWorkloadState>>(
     const out: Record<string, K8sRtWorkloadState> = {}
     const src = (saved?.k8sRtWorkloadCache as Record<string, K8sRtWorkloadState>) ?? {}
     for (const [k, v] of Object.entries(src)) {
-      if (v && (v as any).status === 'ok' && Array.isArray((v as any).deployments)) {
+      if (v && v.status === 'ok' && Array.isArray(v.deployments)) {
         out[k] = v
       }
     }
@@ -6351,7 +6354,7 @@ const configTypeDescriptions: Record<string, string> = {
             :env-i-d="env.id"
             :services="allServiceNames.filter(s => getServiceSource(s) === configCenterType)"
             :kuboard-svc-map="kuboardSvcMap"
-            :clusters="((kuboardStateByEnv[env.id] as any)?.clusters || [])"
+            :clusters="kuboardClustersOf(env.id)"
             :svc-key="svcKey"
             :namespaces-for="kuboardNamespacesFor"
             :configmaps-for="kuboardConfigMapsFor"
@@ -7095,32 +7098,7 @@ const configTypeDescriptions: Record<string, string> = {
   color: #fff;
 }
 
-input[type="text"],
-textarea,
-select {
-  width: 100%;
-  padding: 8px 12px;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  font-size: 14px;
-  color: #1e293b;
-  background: #fff;
-  transition: border-color 0.15s;
-  font-family: inherit;
-}
-
-input[type="text"]:focus,
-textarea:focus,
-select:focus {
-  outline: none;
-  border-color: #3b82f6;
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
-}
-
-input.error,
-textarea.error {
-  border-color: #ef4444;
-}
+/* input / textarea / select 基础样式 + .error 已上提到 design.css 全局共享 */
 
 .error-text {
   color: #ef4444;

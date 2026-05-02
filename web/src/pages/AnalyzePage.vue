@@ -512,6 +512,15 @@ function isSkippedNonService(rs: { status: string; role?: string }): boolean {
   if (!role) return false
   return !SERVICE_ROLES_SET.has(role)
 }
+// 是否非服务角色(不管 status):common-lib / frontend / mobile / infra / docs。
+// 用来抑制顶部 per-repo 卡上的"服务 N 个"标签 —— 后端扫描器对 common-lib 仓库
+// 也会派生出 1 个跟仓库同名的 service_name(默认行为),前端再显示"服务 1 个"
+// 会让用户以为它是真实业务服务,跟下方"不参与服务对账"自相矛盾。
+function isNonServiceRole(role?: string): boolean {
+  const r = (role || '').trim()
+  if (!r) return false
+  return !SERVICE_ROLES_SET.has(r)
+}
 function statusZhFor(rs: { status: string; role?: string }): string {
   if (isSkippedNonService(rs)) {
     // 把"跳过(本机没有)"的红色警告改成"无需扫描"的中性提示
@@ -536,40 +545,40 @@ onUnmounted(() => {
     <h1>代码扫描</h1>
 
     <div class="info-box">
-      <div class="info-box-title">代码扫描 — 从源码反推 yaml 应该怎么写,顺带把依赖图 / 数据 schema 补齐</div>
+      <div class="info-box-title">代码扫描 — 从源码反推 yaml 应该怎么写,顺带补依赖图 / 数据 schema</div>
       <div class="info-box-body">
-        <p class="info-box-lead">把已 clone 到本机的代码当真源,扫出"实际跑的样子",跟 yaml 声明对账;扫到的有用线索一并合并进 yaml + 排障映射表,跳沙盒做最终验证。</p>
+        <p class="info-box-lead">把已 clone 到本机的代码当真源,扫"实际跑的样子"跟 yaml 对账;扫到的有用线索合并进 yaml + 排障映射表,跳沙盒做最终验证。</p>
         <ul class="info-box-actions">
           <li>
             <strong>🔍 服务名 + 配置中心线索</strong>
-            <span>—— 每个仓库提供的 service_names(go.mod / pom / package.json + monorepo cmd 入口加 <code>&lt;repo&gt;-</code> 前缀消歧义)+ Nacos / Apollo / Consul / Kuboard 用到的 dataId / namespace / configmap 等</span>
+            <span>—— 每仓库的 service_names(go.mod / pom / package.json + monorepo cmd 入口加 <code>&lt;repo&gt;-</code> 前缀消歧)+ Nacos / Apollo / Consul / Kuboard 的 dataId / namespace / configmap</span>
           </li>
           <li>
             <strong>🔗 服务依赖图 (downstream)</strong>
-            <span>—— Go 识别字面量 <code>http.Get</code> / <code>grpc.Dial(addr)</code> + 服务发现风格的 <code>client.NewXxxClient(naming, XxxServiceName, ns)</code> 工厂调用 + ServiceName 常量交叉解析;Java 识别 <code>@FeignClient</code> / RestTemplate;Python 识别 requests/httpx;扫到的下游写进 service-dependency-map 给排障"沿依赖图追"用</span>
+            <span>—— Go 识别 <code>http.Get</code> / <code>grpc.Dial</code> / <code>NewXxxClient(naming, ServiceName)</code>;Java 识 <code>@FeignClient</code>;Python 识 requests/httpx。下游写进 service-dependency-map 给排障"沿依赖图追"用</span>
           </li>
           <li>
             <strong>🗄️ 数据层 + 业务表 schema</strong>
-            <span>—— 识别 redis / mongodb / mysql / kafka / es / rocketmq / clickhouse 等客户端构造;主流 ORM(GORM / JPA / SQLAlchemy / TypeORM / Mongoose 等)抽出每服务用的表 / collection / cache prefix,写进 data-schema-map 给"按 entity ID 反查表"用</span>
+            <span>—— redis / mongodb / mysql / kafka / es / clickhouse 等客户端构造 + 主流 ORM(GORM / JPA / SQLAlchemy / TypeORM 等)抽出表 / collection / cache prefix,写进 data-schema-map</span>
           </li>
           <li>
             <strong>📊 差异对比</strong>
-            <span>—— 跟 yaml 声明逐项对照:<code>missing</code>(yaml 漏写)/ <code>extra</code>(yaml 多写)/ <code>verified</code>(已对齐)</span>
+            <span>—— 跟 yaml 声明逐项对照:<code>missing</code>(漏写)/ <code>extra</code>(多写)/ <code>verified</code>(对齐)</span>
           </li>
           <li>
             <strong>↩️ 一键回填</strong>
-            <span>—— 把扫到的差异合并回 yaml,自动跳到 <router-link to="/editor">YAML 沙盒</router-link> 做验证 + 健康检查</span>
+            <span>—— 把差异合并回 yaml,自动跳 <router-link to="/editor">YAML 沙盒</router-link> 做验证 + 健康检查</span>
           </li>
         </ul>
         <div class="info-box-inputs">
           <div class="info-box-inputs-title">📝 需要的输入:</div>
           <ul>
             <li><strong>system.yaml</strong> — 粘贴或从文件加载</li>
-            <li><strong>仓库本地路径</strong> — yaml 加载后会出现表格,挨个选目录或一键📁批量从父目录填(已部署过的系统会自动复用 <code>~/.tshoot/config.json</code> 里上次记下的路径)</li>
+            <li><strong>仓库本地路径</strong> — yaml 加载后表格挨个选,或📁批量从父目录填(已部署过的系统自动复用 <code>~/.tshoot/config.json</code> 上次记录的路径)</li>
           </ul>
         </div>
         <p class="info-box-redirect">
-          ⚠️ 本机没下载的仓库默认跳过;勾「自动 clone 缺失仓库」会按 yaml <code>repos[].url</code> 浅克隆到默认 clone 目录再扫(需要 git + 凭证)。识别精度:Go 70-80% / Java 60-70% / Python 60% / Node 50%,用了非主流框架(go-zero / kratos v2 / kitex)的部分需要在沙盒里手补。
+          ⚠️ 本机没 clone 的仓库默认跳过;勾「自动 clone 缺失仓库」会按 yaml <code>repos[].url</code> 浅克隆到默认目录(需 git + 凭证)。识别精度:Go 70-80% / Java 60-70% / Python 60% / Node 50%,小众框架的部分需在沙盒手补。
         </p>
       </div>
     </div>
@@ -717,7 +726,8 @@ onUnmounted(() => {
         >
           <span class="name">{{ rs.name }}</span>
           <span class="status-tag" :title="rs.status">{{ statusZhFor(rs) }}</span>
-          <span v-if="rs.service_name_count" class="muted">服务 {{ rs.service_name_count }} 个</span>
+          <span v-if="rs.service_name_count && !isNonServiceRole(rs.role)" class="muted">服务 {{ rs.service_name_count }} 个</span>
+          <span v-if="isNonServiceRole(rs.role)" class="muted">{{ rs.role }} · 不参与对账</span>
           <span v-if="rs.finding_count" class="muted">线索 {{ rs.finding_count }} 条</span>
           <span v-if="rs.error && !isSkippedNonService(rs)" class="err">{{ rs.error }}</span>
         </div>

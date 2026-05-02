@@ -97,14 +97,14 @@ async function onPrimaryCardClick(card: { path: string; label: string }) {
 // 纯落盘产物需求走 CLI:`tshoot gen -i system.yaml -o ./dist/<id>`
 const primaryCards = [
   { path: '/init', icon: '🧙', label: '创建向导', desc: '一步步带你创建一个新的排障机器人', tag: '推荐新用户' },
-  { path: '/bots', icon: '🤖', label: '已装机器人', desc: '管理已部署的机器人,新建、更新或重新部署' },
+  { path: '/bots', icon: '🤖', label: '已装机器人', desc: '管理已部署的机器人,新建 / 重部 / 卸载' },
 ]
 // 诊断工具:YAML 沙盒 + 代码扫描。两者职责对齐(2026-04-30):
 //   YAML 沙盒  → 操作 yaml 文件(验证/生成预览/产物预览)
 //   代码扫描  → 操作代码仓库(扫码反推 yaml,可应用差异回 yaml 形成闭环)
 // Doctor 已合进 BotsPage 卡片,独立页已删。
 const advancedCards = [
-  { path: '/editor',  icon: '📝', label: 'YAML 沙盒', desc: '验证 yaml + 干跑生成 + 产物预览' },
+  { path: '/editor',  icon: '📝', label: 'YAML 沙盒', desc: '验证 yaml + 干跑生成 + 预览产物' },
   { path: '/analyze', icon: '🔍', label: '代码扫描', desc: '扫仓库反推服务 / 配置,可应用回 yaml' },
 ]
 
@@ -127,20 +127,31 @@ const draftStepNormalized = computed<number | null>(() => {
 // 推荐下一步逻辑
 const nextStep = computed(() => {
   if (!wizardDraft.value && !lastYamlSignature.value) {
-    return { text: '从「创建向导」开始,几分钟生成你第一份 system.yaml + 可用的排障机器人', path: '/init', cta: '开始向导 →' }
+    return { text: '从「创建向导」开始,几分钟生成第一份 system.yaml + 可用机器人', path: '/init', cta: '开始向导 →' }
+  }
+  if (wizardDraft.value && wizardDraft.value.lastDeployAt) {
+    const targets: string[] = Array.isArray(wizardDraft.value.lastDeployedTargets)
+      ? wizardDraft.value.lastDeployedTargets
+      : []
+    const tip = targets.length > 0 ? `(${targets.join(' / ')})` : ''
+    return {
+      text: `${draftSystemName.value || '机器人'} 已部署 ${tip},去「已装机器人」查看 / 管理`,
+      path: '/bots',
+      cta: '查看已装机器人 →',
+    }
   }
   const step = draftStepNormalized.value
   if (wizardDraft.value && step != null && step < WIZARD_PREVIEW_STEP) {
     return { text: `向导进行到第 ${step} / ${WIZARD_TOTAL_STEPS} 步(${draftSystemName.value || '未命名'}),回去继续?`, path: '/init', cta: '继续向导 →' }
   }
   if (wizardDraft.value && step === WIZARD_PREVIEW_STEP) {
-    return { text: '向导已到预览步骤,确认 yaml 后下一步即可一键部署', path: '/init', cta: '查看向导预览 →' }
+    return { text: '向导已到预览步,确认 yaml 后即可一键部署', path: '/init', cta: '查看预览 →' }
   }
   if (wizardDraft.value && step === WIZARD_DEPLOY_STEP) {
-    return { text: '向导已到一键部署步,直接装机即可', path: '/init', cta: '继续部署 →' }
+    return { text: '向导已到一键部署步,可直接装机', path: '/init', cta: '继续部署 →' }
   }
   if (lastYamlSignature.value?.ok) {
-    return { text: `你最近编辑过 ${lastYamlSignature.value.name}(targets: ${lastYamlSignature.value.targets.join(', ')}),可以直接去 YAML 沙盒验证 / 部署`, path: '/editor', cta: '继续编辑 →' }
+    return { text: `最近编辑过 ${lastYamlSignature.value.name}(targets: ${lastYamlSignature.value.targets.join(', ')}),可去 YAML 沙盒验证 / 部署`, path: '/editor', cta: '继续编辑 →' }
   }
   return { text: '从「创建向导」开始', path: '/init', cta: '开始向导 →' }
 })

@@ -825,14 +825,14 @@ onUnmounted(() => {
             <button
               class="btn btn-regen"
               :disabled="doctorState[regenKey(b)]?.loading"
-              :title="'用部署时记下的本地仓库路径自动深度扫描:对比 yaml 声明 vs 代码实态,挑 8 类漂移给修复建议'"
+              :title="'按本地仓库路径深扫,对比 yaml 声明 vs 代码实态,挑漂移给修复建议'"
               @click="runDoctor(b)"
             >
               {{ doctorState[regenKey(b)]?.loading ? '诊断中…' : '🩺 诊断' }}
             </button>
             <button
               class="btn btn-regen"
-              :title="'打开机器人工作目录,树形浏览 + 文件编辑(改 SKILL.md / 脚本 / 变量做调试,不动 system.yaml)'"
+              :title="'打开机器人工作目录,树形浏览 + 改 SKILL.md / 脚本做调试(不动 system.yaml)'"
               @click="openBrowser(b)"
             >
               📂 浏览工作目录
@@ -844,7 +844,7 @@ onUnmounted(() => {
                 <button
                   class="menu-item"
                   :disabled="regenState[regenKey(b)]?.loading"
-                  :title="b.meta.system_yaml ? '用 tshoot.json 里保存的 yaml 重渲产物并直接刷到本机器人的活 workspace(preserve_on_regenerate 文件保留)' : 'tshoot.json 里没保存 system_yaml,无法重新生成'"
+                  :title="b.meta.system_yaml ? '用 tshoot.json 嵌入的 yaml 重渲产物,直接刷到活 workspace(preserve_on_regenerate 文件保留)' : 'tshoot.json 里没保存 system_yaml,无法重新生成'"
                   @click="closeMenu(); regen(b)"
                 >
                   {{ regenState[regenKey(b)]?.loading ? '刷新中…' : '♻ 重新生成并刷新' }}
@@ -859,7 +859,7 @@ onUnmounted(() => {
                 <button
                   class="menu-item menu-item-danger"
                   :disabled="uninstallState[regenKey(b)]?.loading"
-                  :title="'卸载已部署的机器人:claude-code/cursor/codex 清 ~/.<target>/{agents,skills,scripts}/<name> 移到 ~/.Trash;openclaw 摘 openclaw.json agents.list + 清 creds.json'"
+                  :title="'卸载已部署的机器人:claude-code/cursor/codex 把 ~/.<target>/{agents,skills,scripts}/<name> 移到 ~/.Trash;openclaw 摘 agents.list + 清 creds.json'"
                   @click="closeMenu(); uninstall(b)"
                 >
                   {{ uninstallState[regenKey(b)]?.loading ? '卸载中…' : '🗑 卸载机器人' }}
@@ -915,7 +915,7 @@ onUnmounted(() => {
         </section>
 
         <section v-if="editingKey === regenKey(b)" class="editor">
-          <label class="editor-label">system.yaml(改完先「预演」看改动列表,再「应用到活 workspace」写盘 —— 仅刷新这一张卡所属平台)</label>
+          <label class="editor-label">system.yaml(改完先「预演」看 diff,再「应用到活 workspace」写盘 —— 仅刷新本卡所属平台)</label>
           <textarea v-model="editorDraft" class="editor-textarea" spellcheck="false" />
           <div class="editor-actions">
             <button
@@ -929,7 +929,7 @@ onUnmounted(() => {
             <button
               class="btn primary"
               :disabled="applyState[regenKey(b)]?.loading"
-              :title="'真写盘到本机器人部署目录;preserve_on_regenerate 列表里的文件保留用户手改不覆盖'"
+              :title="'真写盘到本机器人部署目录;preserve_on_regenerate 列表的文件保留手改不覆盖'"
               @click="runApply(b, false)"
             >
               {{ applyState[regenKey(b)]?.loading && applyState[regenKey(b)]?.mode === 'real' ? '应用中…' : '应用到活 workspace' }}

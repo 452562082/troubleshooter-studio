@@ -119,12 +119,29 @@ func SelfTestOpenclaw(ctx context.Context, dir string) (*SelfTestResult, error) 
 		}
 	}
 
-	// 配置源 HTTP 探活:apollo / consul / kuboard 都是 HTTP API。URL 取自
-	// cc.Endpoints[].Addr —— Addr 可能裸 host:port 或带 scheme,统一兜底成 https://
+	// 配置源 HTTP 探活:apollo / consul / kuboard 都是 HTTP API。URL 字段按 type 不同:
+	//   - kuboard: ep.URL          (GUI wizard 写的 url 字段)
+	//   - apollo:  ep.MetaURL      (apollo meta_url)
+	//   - consul:  ep.Host         (consul host)
+	//   - nacos / 其它:    ep.Addr (兜底,裸 host:port)
+	// 之前一律读 ep.Addr,kuboard 部署后 self-test 永远显示 "URL 缺失,跳过探活"
+	// (用户实测撞过)—— 因为 GUI 把 kuboard URL 写到了 .URL 字段,Addr 是空。
 	for _, cc := range cfg.Infrastructure.ConfigCenters {
 		urls := map[string]string{}
 		for _, ep := range cc.Endpoints {
-			a := strings.TrimSpace(ep.Addr)
+			// 按 type 取该 type 真正的 URL 字段;空时回落 Addr(老 schema 兼容)
+			var a string
+			switch cc.Type {
+			case "kuboard":
+				a = strings.TrimSpace(ep.URL)
+			case "apollo":
+				a = strings.TrimSpace(ep.MetaURL)
+			case "consul":
+				a = strings.TrimSpace(ep.Host)
+			}
+			if a == "" {
+				a = strings.TrimSpace(ep.Addr)
+			}
 			if a == "" {
 				continue
 			}
@@ -149,10 +166,10 @@ func SelfTestOpenclaw(ctx context.Context, dir string) (*SelfTestResult, error) 
 	// 可观测性 HTTP 探活(/api/health 200/401/403 都视作"reachable",
 	// 401/403 = 站点活着但鉴权对不上;FAIL 仅给真不通的)
 	if cfg.Infrastructure.Observability.Grafana.Enabled {
-		probeGrafanaLike(ctx, servers, cfg.Environments, "grafana", agentID, add)
+		probeGrafanaLike(ctx, servers, cfg.Environments, "grafana", mcpPrefix, add)
 	}
 	if cfg.Infrastructure.Observability.Loki.Enabled {
-		probeGrafanaLike(ctx, servers, cfg.Environments, "loki", agentID, add)
+		probeGrafanaLike(ctx, servers, cfg.Environments, "loki", mcpPrefix, add)
 	}
 	if cfg.Infrastructure.Observability.Jaeger.Enabled {
 		probeURLByEnv(ctx, cfg.Environments,
@@ -354,19 +371,25 @@ func tcpProbe(ctx context.Context, addr string, timeout time.Duration) error {
 	return nil
 }
 
+// probeGrafanaLike 探活 grafana / loki 的 HTTP /api/health。
+// 注意:第 5 个参数原叫 agentID,实际语义是"MCP key 前缀",必须用 cfg.MCPKeyPrefix()
+// (=system.id 短前缀,如 "truss")拼 key,而不是 cfg.ResolveID()(完整 agent 标识,
+// 如 "truss-troubleshooter")—— install 路径 mcpKeyForAgent 第一参也是用 mcpPrefix,
+// 两边必须一致,否则 self-test 永远查不到 mcp.servers.<key>.env.GRAFANA_URL,
+// 误报 "GRAFANA_URL 缺失"(用户实测撞过)。这里把参数名改回 mcpPrefix 防再次踩坑。
 func probeGrafanaLike(
 	ctx context.Context,
 	servers map[string]any,
 	envs []config.Environment,
 	prefix string,
-	agentID string,
+	mcpPrefix string,
 	add func(name, status, detail string),
 ) {
 	client := &http.Client{Timeout: 6 * time.Second}
 	for _, e := range envs {
 		key := prefix + "-" + e.ID
-		if agentID != "" {
-			key = agentID + "-" + key
+		if mcpPrefix != "" {
+			key = mcpPrefix + "-" + key
 		}
 		url := strings.TrimRight(mcpEnv(servers, key, "GRAFANA_URL"), "/")
 		if !strings.HasPrefix(url, "http") {

@@ -23,7 +23,20 @@ import (
 	"time"
 )
 
-const probeTimeout = 5 * time.Second
+// probeTimeout HTTP 单次请求超时。原本 5s 是按 Loki 默认窗口(1~6h)给的,
+// 现在窗口拉到 30 天,Loki 索引扫描慢时容易撞超时。15s 经验值,覆盖大多数中型 Loki 部署。
+const probeTimeout = 15 * time.Second
+
+// labelLookbackWindow 拉 Loki labels / label values 时显式传 start=now-N / end=now,
+// 覆盖默认时间窗口(不同 Loki 版本 1h~6h 不等),避免"低频服务最近没日志 → 它的 app
+// 标签不在结果里 → 前端反推时漏服务"。
+//
+// 30 天是经验折衷:
+//   - 太短(1h / 1d)漏 cron / scheduler / 低频服务
+//   - 太长(>30d)Loki index 查慢,超时风险高,有些 Loki 部署的 retention 也就 30 天
+//
+// 用户感觉某服务漏了 → 该 wizard step 留个"刷新"按钮让用户手点二次拉,目前不暴露窗口可调。
+const labelLookbackWindow = 30 * 24 * time.Hour
 
 // Datasource Grafana 一条 datasource 的简化形态(只挑 UI 关心的字段)。
 type Datasource struct {
@@ -85,10 +98,19 @@ func ListGrafanaDatasources(grafanaURL, apiKey, user, pass string) ([]Datasource
 	return out, nil
 }
 
+// lookbackParams 拼 Loki labels / values API 的时间窗口参数。
+// start / end 用纳秒 epoch(Loki 各版本通用接受);窗口 = [now - labelLookbackWindow, now]。
+// 跟下游 query string 拼接器复用,加 ? 还是 & 由调用方决定。
+func lookbackParams() string {
+	now := time.Now()
+	start := now.Add(-labelLookbackWindow)
+	return fmt.Sprintf("start=%d&end=%d", start.UnixNano(), now.UnixNano())
+}
+
 // ListLokiLabelsViaGrafana 通过 grafana proxy 拉 loki labels。
 func ListLokiLabelsViaGrafana(grafanaURL, dsUID, apiKey, user, pass string) (*LabelsResult, error) {
-	u := fmt.Sprintf("%s/api/datasources/proxy/uid/%s/loki/api/v1/labels",
-		strings.TrimRight(normalize(grafanaURL), "/"), url.PathEscape(dsUID))
+	u := fmt.Sprintf("%s/api/datasources/proxy/uid/%s/loki/api/v1/labels?%s",
+		strings.TrimRight(normalize(grafanaURL), "/"), url.PathEscape(dsUID), lookbackParams())
 	body, status, err := httpGet(u, apiKey, user, pass)
 	return decodeLabelsResp(body, status, err)
 }
@@ -96,12 +118,15 @@ func ListLokiLabelsViaGrafana(grafanaURL, dsUID, apiKey, user, pass string) (*La
 // ListLokiLabelValuesViaGrafana 通过 grafana proxy 拉某 label 的 values。
 // query 是可选的 LogQL 选择器(如 `{namespace="go-truss-dev"}`),用于只列匹配它的 values
 // —— 例:选完 namespace 之后再拉 app 时,只返回该 namespace 下确实出现过的 app。
+//
+// 注意:start/end 必带 —— Loki 默认时间窗口短(1~6h),低频服务在窗口内没日志就不会
+// 出现在 values 里,UI 反推时漏服务。强制拉到 30 天回扫。
 func ListLokiLabelValuesViaGrafana(grafanaURL, dsUID, labelKey, query, apiKey, user, pass string) (*ValuesResult, error) {
-	u := fmt.Sprintf("%s/api/datasources/proxy/uid/%s/loki/api/v1/label/%s/values",
+	u := fmt.Sprintf("%s/api/datasources/proxy/uid/%s/loki/api/v1/label/%s/values?%s",
 		strings.TrimRight(normalize(grafanaURL), "/"),
-		url.PathEscape(dsUID), url.PathEscape(labelKey))
+		url.PathEscape(dsUID), url.PathEscape(labelKey), lookbackParams())
 	if query != "" {
-		u += "?query=" + url.QueryEscape(query)
+		u += "&query=" + url.QueryEscape(query)
 	}
 	body, status, err := httpGet(u, apiKey, user, pass)
 	return decodeValuesResp(labelKey, body, status, err)
@@ -110,16 +135,16 @@ func ListLokiLabelValuesViaGrafana(grafanaURL, dsUID, labelKey, query, apiKey, u
 // ── 直连 Loki ─────────────────────────────────────────────────────────
 
 func ListLokiLabelsDirect(lokiURL, user, pass string) (*LabelsResult, error) {
-	u := strings.TrimRight(normalize(lokiURL), "/") + "/loki/api/v1/labels"
+	u := strings.TrimRight(normalize(lokiURL), "/") + "/loki/api/v1/labels?" + lookbackParams()
 	body, status, err := httpGet(u, "", user, pass)
 	return decodeLabelsResp(body, status, err)
 }
 
 func ListLokiLabelValuesDirect(lokiURL, labelKey, query, user, pass string) (*ValuesResult, error) {
-	u := fmt.Sprintf("%s/loki/api/v1/label/%s/values",
-		strings.TrimRight(normalize(lokiURL), "/"), url.PathEscape(labelKey))
+	u := fmt.Sprintf("%s/loki/api/v1/label/%s/values?%s",
+		strings.TrimRight(normalize(lokiURL), "/"), url.PathEscape(labelKey), lookbackParams())
 	if query != "" {
-		u += "?query=" + url.QueryEscape(query)
+		u += "&query=" + url.QueryEscape(query)
 	}
 	body, status, err := httpGet(u, "", user, pass)
 	return decodeValuesResp(labelKey, body, status, err)

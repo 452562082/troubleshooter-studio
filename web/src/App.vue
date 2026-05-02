@@ -2,7 +2,7 @@
 import { computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import ToastContainer from './components/ToastContainer.vue'
-import { setupGlobalLogBridges, useLogStore } from './lib/logStore'
+import { setupGlobalLogBridges, useLogStore, pushLog } from './lib/logStore'
 // Vite URL import:assets/app-icon.svg 会被打进 bundle,<img src> 直接用。
 // 用 app-icon(方形,1024×1024 viewBox) 而不是 logo.svg(宽 780×220)当侧边栏品牌
 // 标记——侧边栏宽 220px,方形 icon 挤一下更合适。
@@ -14,6 +14,12 @@ const currentPath = computed(() => route.path)
 // 全局日志收集:install:log / analyze:log 等事件桥接进 logStore,所有页面都能往里塞,
 // LogsPage 统一展示。App 启动挂一次。
 onMounted(() => setupGlobalLogBridges())
+// 给 main.ts 里的 errorHandler / window.error / unhandledrejection 留个钩子,
+// 它们触发时除了红 banner 还把错误塞进 logStore —— 即便某页面白屏,侧栏「日志」永远
+// 可点(侧栏不进 keep-alive 子树),用户切过去就能看到完整堆栈 + 时间 + 当前路由。
+;(window as any).__tshootPushLog = (level: 'error' | 'warn' | 'info', msg: string) => {
+  try { pushLog('system', level, msg, { route: window.location.hash }) } catch { /* logStore 自己出错就别再循环 */ }
+}
 
 // 日志条数 —— 侧栏"日志"项右侧小徽章显示,让用户看到有新内容产生
 const { count: logCount } = useLogStore()
@@ -28,12 +34,12 @@ const { count: logCount } = useLogStore()
 //                让两个工具形成闭环 — 扫码 → 应用 → 沙盒验证 → 部署
 const navItems = [
   { path: '/', icon: '🏠', label: '首页', desc: '概览 + 下一步推荐' },
-  { path: '/bots', icon: '🤖', label: '已装机器人', desc: '管理已部署的机器人' },
+  { path: '/bots', icon: '🤖', label: '已装机器人', desc: '管理已部署机器人,可重部 / 卸载' },
   { path: '/init', icon: '🧙', label: '创建向导', desc: '一步步创建一个新机器人' },
   // ── 诊断工具(下面几项) ──
-  { path: '/editor', icon: '📝', label: 'YAML 沙盒', desc: '验证 yaml + 干跑生成 + 产物预览' },
-  { path: '/analyze', icon: '🔍', label: '代码扫描', desc: '扫仓库反推服务 / 配置,可应用回 yaml' },
-  { path: '/logs', icon: '📜', label: '日志', desc: '全工作台过程日志 / 安装流' },
+  { path: '/editor', icon: '📝', label: 'YAML 沙盒', desc: '验证 yaml + 干跑生成 + 预览产物' },
+  { path: '/analyze', icon: '🔍', label: '代码扫描', desc: '扫仓库反推服务 / 配置,回填 yaml' },
+  { path: '/logs', icon: '📜', label: '日志', desc: '全工作台过程日志' },
 ]
 </script>
 

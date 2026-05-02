@@ -562,31 +562,31 @@ function translateSchemaError(msg: string): string {
 
     <div v-if="fromAnalyzeBanner" class="alert success" style="margin-bottom: 12px;">
       ✓ 已把代码扫描的发现合并到下方 yaml(service_names / config-center 字段已更新)。
-      请点击"<strong>✓ 验证</strong>"确认无误后,回「创建向导」末步部署,或在本页直接导出。
+      点"<strong>✓ 验证</strong>"确认后,回「创建向导」末步部署,或在本页直接导出。
       <button type="button" class="btn-link" @click="fromAnalyzeBanner = false" style="float:right">知道了</button>
     </div>
 
     <div class="info-box">
       <div class="info-box-title">YAML 沙盒 — 只读校验 yaml,不动代码、不装机器人</div>
       <div class="info-box-body">
-        <p class="info-box-lead">把 system.yaml 粘进来,快速判断「语法是否正确 / 部署后会是什么样」。</p>
+        <p class="info-box-lead">粘贴 system.yaml,快速判断「语法是否正确 / 部署后会是什么样」。</p>
         <ul class="info-box-actions">
           <li>
             <strong>✓ 验证</strong>
-            <span>—— 语法 / 必填字段 / 格式校验,叠加配置健康检查(可观测性 wiring 完整性、仓库是否覆盖所有 env、多源 config_source 是否显式指定、被静默跳过的 skill 等)</span>
+            <span>—— 语法 / 必填字段 / 格式校验,叠加配置健康检查(可观测性 wiring、仓库覆盖 env、多源 config_source、被静默跳过的 skill 等)</span>
           </li>
           <li>
             <strong>📋 生成计划</strong>
-            <span>—— 干跑一遍生成器,产出"会启用哪些 skill、多少个文件、配置中心映射几条"的摘要,不写盘</span>
+            <span>—— 干跑生成器,产出"启用哪些 skill、多少文件、配置映射几条"摘要,不写盘</span>
           </li>
           <li>
             <strong>📂 预览产物</strong>
-            <span>—— 真跑一次生成器到临时目录,逐文件展开 skill / SKILL.md / scripts 的实际内容</span>
+            <span>—— 真跑生成器到临时目录,逐文件展开 SKILL.md / scripts 实际内容</span>
           </li>
         </ul>
         <p class="info-box-redirect">
-          想<strong>扫代码反推 yaml</strong>?去 <router-link to="/analyze">代码扫描</router-link>;
-          想<strong>真装到机器人</strong>?去 <router-link to="/bots">已装机器人</router-link> 导入,或在 <router-link to="/init">创建向导</router-link> 末步一键部署。
+          想<strong>扫代码反推 yaml</strong> → <router-link to="/analyze">代码扫描</router-link>;
+          想<strong>真装到机器人</strong> → <router-link to="/bots">已装机器人</router-link> 或 <router-link to="/init">创建向导</router-link> 末步一键部署。
         </p>
       </div>
     </div>

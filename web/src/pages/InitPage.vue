@@ -1491,6 +1491,21 @@ const sourceCreds = reactive<Record<string, SourceData>>(
 for (const t of ALL_SOURCE_TYPES) {
   if (!sourceCreds[t]) sourceCreds[t] = { creds: {} }
 }
+// 兜底:enabledSourceOrder / enabledSourceTypes 里可能含 ALL_SOURCE_TYPES 之外的 type
+// (yaml 里写了未来 type / 老 schema 残留如 'kubernetes' / 'none' / 自定义),Step 6 模板
+// 副源块迭代 activeSourceTypes 时会访问 `sourceCreds[t].creds.<env>`,t 没初始化就抛
+// "Cannot read properties of undefined (reading 'creds')" → 整个 InitPage 渲染崩 → 白屏。
+// 这里把 saved 里出现过的所有 type 都补出空骨架,模板永远拿到非 undefined。
+if (saved?.enabledSourceOrder && Array.isArray(saved.enabledSourceOrder)) {
+  for (const t of saved.enabledSourceOrder) {
+    if (typeof t === 'string' && t && !sourceCreds[t]) sourceCreds[t] = { creds: {} }
+  }
+}
+if (saved?.enabledSourceTypes && typeof saved.enabledSourceTypes === 'object') {
+  for (const t of Object.keys(saved.enabledSourceTypes)) {
+    if (t && !sourceCreds[t]) sourceCreds[t] = { creds: {} }
+  }
+}
 
 // 兼容:把老 ccCredInputs 里的值搬进 sourceCreds(只在迁移时跑一次)
 if (saved?.ccCredInputs && (!saved?.sourceCreds || Object.keys(saved.sourceCreds).length === 0)) {
@@ -1692,7 +1707,22 @@ type K8sRtWorkloadState =
   | { status: 'loading' }
   | { status: 'ok', deployments: Array<{ name: string; selector: string }> }
   | { status: 'error', error: string }
-const k8sRtWorkloadCache = reactive<Record<string, K8sRtWorkloadState>>({})
+// 持久化:跨会话保留 status='ok' 的 deployments 列表(switching tabs 切回时立刻有下拉,
+// 不必等 onMounted → triggerStep7Init 异步重拉)。loading / error 是瞬态不存。
+// 数据量:Deployment 列表本身是 (name, selector) 字符串对,每集群 namespace 通常几十条,
+// 整个 cache 几 KB 可控,不会撑爆 localStorage 配额。
+const k8sRtWorkloadCache = reactive<Record<string, K8sRtWorkloadState>>(
+  (() => {
+    const out: Record<string, K8sRtWorkloadState> = {}
+    const src = (saved?.k8sRtWorkloadCache as Record<string, K8sRtWorkloadState>) ?? {}
+    for (const [k, v] of Object.entries(src)) {
+      if (v && (v as any).status === 'ok' && Array.isArray((v as any).deployments)) {
+        out[k] = v
+      }
+    }
+    return out
+  })(),
+)
 function k8sRtWorkloadKey(envID: string, cluster: string, ns: string): string {
   return `${envID}::${cluster}::${ns}`
 }
@@ -2037,6 +2067,10 @@ interface CCHubEnvState {
   notes?: string[]
   error?: string
   loadedAt?: number // 记录时间戳给 UI 显示"N 秒前拉的"
+  // synthesized=true 标识本条不是从真实 HTTP preload 拉的,而是 applyImport 时
+  // 用 yaml service_map 合成的"虚假 ok"。auto-preload 用它判断是否仍需调真实 nacos
+  // 做交叉校验(防止 yaml 写的 namespace/dataId 在真实 nacos 不存在却看起来"已选中")。
+  synthesized?: boolean
 }
 // 持久化:跨会话保留已成功扫过的 env 的 entries + namespaces + notes(恢复 UI 下拉 / 服务映射);
 // loading / error 等瞬态不存 —— 重进应该从 idle 开始,loading 是"还在拉"的状态
@@ -2537,6 +2571,229 @@ async function loadConfigsForEnv(
   }
 }
 
+// 导入 yaml 反填后的"真实配置中心交叉校验"——nacos / apollo / consul 通用:
+//
+// applyImport 用 yaml service_map 给 ccHubStateByEnv 合成了"虚假 ok"(synthesized=true),
+// 但 yaml 里写的 namespace / dataId(对 nacos)/ apollo env+namespace / consul kv 前缀
+// 可能跟真实配置中心不一致(被删了 / 换了实例 / yaml 旧)。
+// 本函数(三种 type 共用一份逻辑,因为 preloadConfigCenter 后端按 payload.type 分发,
+// 返回结构都是 { entries, namespaces } —— locator 字段语义按 type 不同:
+//   - nacos:dataId
+//   - apollo:namespace name(per-cluster)
+//   - consul:完整 kv key
+// envNamespaces[envID] 在三种 type 下的语义:
+//   - nacos:namespace UUID(public 为空串)
+//   - apollo:apollo env 名(DEV/UAT/...)
+//   - consul:kv 顶层前缀):
+//   1. 用 yaml 里的 namespace 直接调真实配置中心拉 entries(同时返回 namespaces 列表)
+//   2. 比对:yaml namespace 在不在真实 namespaces / yaml dataId 在不在真实 entries
+//   3. 用真实数据替换 ccHubStateByEnv(下拉选项变成全量真实列表)
+//   4. 缺失的 yaml 值在 notes 里登记 + pushLog warn + toast 提醒
+//
+// 不破坏选中值:envNamespaces / serviceConfigSel 仍保留 yaml 反填的值。如果该值在真实
+// 配置中心不存在,UI 下拉会因为 v-model 找不到 option 而显示"空"——这时用户能立刻看到
+// 不一致(看起来选了某条但下拉空白)+ toast 警告 + 日志列出具体哪些缺失。
+async function crossCheckImportedConfigSource(envID: string): Promise<void> {
+  const payload = buildPreloadPayload(envID)
+  // payload.type 决定下游术语。preloadConfigCenter 三种 type 共享 entries/namespaces shape。
+  const ctype = payload.type
+  // 用户友好的术语,UI / log 文案按 type 切换
+  const termLocator = ctype === 'nacos' ? 'dataId' : ctype === 'apollo' ? 'namespace name' : ctype === 'consul' ? 'kv key' : 'locator'
+  const termNs = ctype === 'apollo' ? 'apollo env' : ctype === 'consul' ? 'kv 前缀' : 'namespace'
+  if (!payload.valid) {
+    pushLog('cchub', 'info',
+      `[applyImport] ${envID} 跳过真实 ${ctype} 校验(凭证不全): ${payload.missing.join(', ')}`,
+      { envID })
+    return
+  }
+  const yamlNs = (envNamespaces[envID] || '').trim()
+  if (!yamlNs) {
+    // yaml 没给这个 env 写 namespace —— 直接走标准 runCCHubPreload(autoMatch + load)
+    return runCCHubPreload(envID)
+  }
+  // 收集 yaml 写过的 (svc, locator) 做交叉校验
+  const yamlLocators = new Map<string, string>() // svc → locator(dataId / ns name / kv key)
+  for (const k of Object.keys(serviceConfigSel)) {
+    if (!k.startsWith(envID + '::')) continue
+    const svc = k.slice(envID.length + 2)
+    const loc = (serviceConfigSel[k] || '').trim()
+    if (svc && loc) yamlLocators.set(svc, loc)
+  }
+  // 失败时复原用,先快照合成态
+  const prevSynth = ccHubStateByEnv[envID]
+  ccHubStateByEnv[envID] = { status: 'loading' }
+  try {
+    // 一次性拉那个 namespace 下的 entries(后端会同时返回 namespaces 列表)
+    const r = await preloadConfigCenter({
+      type: ctype as 'nacos' | 'apollo' | 'consul',
+      addr: payload.addr,
+      username: payload.username,
+      password: payload.password,
+      token: payload.token,
+      namespace: yamlNs,
+      app_id: payload.app_id,
+    })
+    const realLocators = new Set((r.entries || []).map(e => e.locator))
+    const realNsIDs = new Set((r.namespaces || []).map(n => n.id))
+    const missingLocators: Array<[string, string]> = []
+    for (const [svc, loc] of yamlLocators) {
+      if (!realLocators.has(loc)) missingLocators.push([svc, loc])
+    }
+    const nsMissing = realNsIDs.size > 0 && !realNsIDs.has(yamlNs)
+    const notes = [...(r.notes || [])]
+    if (nsMissing) {
+      notes.push(`⚠ yaml 中 ${termNs}=${yamlNs} 在真实 ${ctype} 不存在(共 ${realNsIDs.size} 个 ${termNs})`)
+    }
+    if (missingLocators.length > 0) {
+      notes.push(`⚠ yaml 中以下 ${termLocator} 在 ${termNs}=${yamlNs} 不存在: ${missingLocators.map(([s, d]) => `${s}→${d}`).join(', ')}`)
+    }
+    ccHubStateByEnv[envID] = {
+      status: 'ok',
+      entries: r.entries || [],
+      namespaces: r.namespaces || [],
+      notes,
+      loadedAt: Date.now(),
+      synthesized: false,
+    }
+    pushLog('cchub', 'info',
+      `[applyImport] ${envID} 真实 ${ctype} preload ok: ${termNs}=${yamlNs} 拉到 ${r.entries?.length || 0} 条`,
+      { envID })
+    if (nsMissing) {
+      pushLog('cchub', 'warn',
+        `[applyImport] ${envID} yaml 里的 ${termNs}=${yamlNs} 在真实 ${ctype} 不存在`, { envID })
+      toast.error(`${envID}: yaml 里的 ${termNs}=${yamlNs} 在真实 ${ctype} 找不到,部署后路由会失败`)
+    }
+    if (missingLocators.length > 0) {
+      const desc = missingLocators.map(([s, d]) => `${s}→${d}`).join(', ')
+      pushLog('cchub', 'warn',
+        `[applyImport] ${envID} yaml 里以下 ${termLocator} 在真实 ${ctype} 不存在: ${desc}`, { envID })
+      toast.error(`${envID}: ${missingLocators.length} 个服务的 ${termLocator} 在真实 ${ctype} 找不到 —— ${desc.length > 80 ? desc.slice(0, 80) + '…' : desc}`)
+    }
+    if (!nsMissing && missingLocators.length === 0) {
+      pushLog('cchub', 'info',
+        `[applyImport] ${envID} 交叉校验通过:yaml 里所有 ${termNs} + ${termLocator} 都在真实 ${ctype} 存在`,
+        { envID })
+    }
+  } catch (e: any) {
+    const msg = String(e?.message || e)
+    // 失败保留合成态,UI 仍可用 yaml 反填的有限选项;只记日志不切 error 状态 ——
+    // 否则 UI 直接红字"拉取失败"可能误导用户以为整个 import 失败了。
+    pushLog('cchub', 'error',
+      `[applyImport] ${envID} 真实 ${ctype} 校验失败,保留 yaml 合成态: ${msg}`, { envID })
+    toast.error(`${envID}: 连不上真实 ${ctype} 做校验,先用 yaml 里的值,部署前请手动验证`)
+    if (prevSynth && prevSynth.status === 'ok') {
+      ccHubStateByEnv[envID] = prevSynth
+    } else {
+      ccHubStateByEnv[envID] = { status: 'error', error: '校验失败,详见日志' }
+    }
+  }
+}
+
+// kuboard 版交叉校验:applyImport 时把 yaml 的 service_map(cluster/namespace/configmap 三元组)
+// 反填到 kuboardSvcMap[envID::svc],但 yaml 里的值可能跟真实 kuboard 集群对不上(集群删了 /
+// 重命名 / namespace 删了 / configmap 删了 / 切实例)。本函数:
+//   1. 调真实 kuboard listResources 拿全 cluster→namespace→configmap 树
+//   2. 对每个 (env, svc) 的 (cluster, namespace, configmap),逐级在树里查
+//   3. 缺失登记到 log + toast,kuboardStateByEnv 用真实树替换合成态
+// 走的是配置中心场景的 sourceCreds['kuboard']:URL/access_key/username/password。
+async function crossCheckImportedKuboard(envID: string, sourceType: string = 'kuboard'): Promise<void> {
+  if (!isDesktop()) return
+  const data = sourceCreds[sourceType]
+  if (!data) return
+  const envCreds = data.creds[envID] || {}
+  const url = (envCreds.url || '').trim()
+  const accessKey = (envCreds.access_key || '').trim()
+  const username = (envCreds.username || '').trim()
+  const password = (envCreds.password || '').trim()
+  if (!url || (!accessKey && (!username || !password))) {
+    pushLog('cchub', 'info',
+      `[applyImport] ${envID} 跳过真实 kuboard 校验(凭证不全):url=${!!url} accessKey=${!!accessKey} basic=${!!username && !!password}`,
+      { envID })
+    return
+  }
+  // 收集 yaml 反填进 kuboardSvcMap 的所有 (svc, cluster, ns, cm)
+  const yamlEntries: Array<{ svc: string; cluster: string; namespace: string; configmap: string }> = []
+  for (const k of Object.keys(kuboardSvcMap)) {
+    if (!k.startsWith(envID + '::')) continue
+    const svc = k.slice(envID.length + 2)
+    const loc = kuboardSvcMap[k]
+    if (loc.cluster || loc.namespace || loc.configmap) {
+      yamlEntries.push({ svc, cluster: loc.cluster, namespace: loc.namespace, configmap: loc.configmap })
+    }
+  }
+  if (yamlEntries.length === 0) {
+    // 没反填任何 kuboard svcmap → 走标准 preload(给 UI 列出可选项)
+    return runKuboardPreloadFromSource(sourceType, envID)
+  }
+  kuboardStateByEnv[envID] = { status: 'loading' }
+  try {
+    const res = await kuboardListResources(url, username, password, accessKey)
+    const clusters = (res.clusters || []).map(c => ({
+      name: c.name,
+      namespaces: (c.namespaces || []).map(n => ({
+        name: n.name,
+        configmaps: n.configmaps || [],
+      })),
+    }))
+    kuboardStateByEnv[envID] = { status: 'ok', clusters, notes: res.notes }
+    persistKuboardState()
+
+    // 交叉校验:逐级查
+    const missingCluster: string[] = []
+    const missingNS: Array<[string, string, string]> = []  // [svc, cluster, ns]
+    const missingCM: Array<[string, string, string, string]> = []  // [svc, cluster, ns, cm]
+    for (const e of yamlEntries) {
+      if (!e.cluster) continue
+      const cl = clusters.find(c => c.name === e.cluster)
+      if (!cl) {
+        missingCluster.push(`${e.svc}→${e.cluster}`)
+        continue
+      }
+      if (!e.namespace) continue
+      const ns = cl.namespaces.find(n => n.name === e.namespace)
+      if (!ns) {
+        missingNS.push([e.svc, e.cluster, e.namespace])
+        continue
+      }
+      if (!e.configmap) continue
+      if (!ns.configmaps.includes(e.configmap)) {
+        missingCM.push([e.svc, e.cluster, e.namespace, e.configmap])
+      }
+    }
+
+    pushLog('cchub', 'info',
+      `[applyImport] ${envID} 真实 kuboard preload ok: 拉到 ${clusters.length} 个集群`, { envID })
+    if (missingCluster.length > 0) {
+      pushLog('cchub', 'warn',
+        `[applyImport] ${envID} yaml 里以下集群在真实 kuboard 不存在: ${missingCluster.join(', ')}`, { envID })
+      toast.error(`${envID}: ${missingCluster.length} 个 cluster 在真实 kuboard 找不到`)
+    }
+    if (missingNS.length > 0) {
+      const desc = missingNS.map(([s, c, n]) => `${s}→${c}/${n}`).join(', ')
+      pushLog('cchub', 'warn',
+        `[applyImport] ${envID} yaml 里以下 namespace 在真实 kuboard 不存在: ${desc}`, { envID })
+      toast.error(`${envID}: ${missingNS.length} 个 namespace 在 kuboard 找不到`)
+    }
+    if (missingCM.length > 0) {
+      const desc = missingCM.map(([s, c, n, cm]) => `${s}→${c}/${n}/${cm}`).join(', ')
+      pushLog('cchub', 'warn',
+        `[applyImport] ${envID} yaml 里以下 configmap 在真实 kuboard 不存在: ${desc}`, { envID })
+      toast.error(`${envID}: ${missingCM.length} 个 configmap 在 kuboard 找不到 —— ${desc.length > 80 ? desc.slice(0, 80) + '…' : desc}`)
+    }
+    if (missingCluster.length === 0 && missingNS.length === 0 && missingCM.length === 0) {
+      pushLog('cchub', 'info',
+        `[applyImport] ${envID} kuboard 交叉校验通过:yaml 里所有 cluster/namespace/configmap 都在真实 kuboard 存在`,
+        { envID })
+    }
+  } catch (e: any) {
+    const msg = String(e?.message || e)
+    kuboardStateByEnv[envID] = { status: 'error', error: msg }
+    pushLog('cchub', 'error',
+      `[applyImport] ${envID} 真实 kuboard 校验失败: ${msg}`, { envID })
+    toast.error(`${envID}: 连不上真实 kuboard 做校验,先用 yaml 里的值,部署前请手动验证`)
+  }
+}
+
 // 用户在下拉手动切 namespace → 用新 namespace 重拉 configs。没凭证 / 没扫过的 env 忽略。
 async function reloadEnvNamespace(envID: string, nsID: string) {
   if (!isDesktop()) return
@@ -2807,6 +3064,20 @@ const triggerStep7Init = (s: number) => {
       scheduleGrafanaDsAutoload(env.id)
     }
   }
+  // loki labels 自动重拉:dsUID 已选(yaml 反填或之前已挑过)+ labels 空(quota fallback
+  // 把 labels / *LabelValues 都剔了,或第一次拉过但浏览器重启清缓存)→ 拉一次 listLokiLabels,
+  // 它内部会级联拉 envLabelValues / serviceLabelValues,UI 立刻有内容,不必用户手点"加载标签"。
+  if (enabledObservability['loki']) {
+    for (const env of environments) {
+      if (!env.id) continue
+      const lm = getLokiMapping(env.id)
+      if (!lm.dsUID) continue
+      if (lm.labelStatus === 'ok' || lm.labelStatus === 'loading') continue
+      if (Array.isArray(lm.labels) && lm.labels.length > 0) continue
+      // fire-and-forget;失败会自己写 lm.labelStatus='fail' + 日志
+      loadLokiLabels(env.id).catch(() => { /* 静默 */ })
+    }
+  }
 }
 watch(() => currentStep.value, triggerStep7Init)
 onMounted(() => triggerStep7Init(currentStep.value))
@@ -2844,8 +3115,19 @@ function makeEmptyLokiMappingPerEnv(): LokiMappingPerEnv {
     serviceMatchTried: {},
   }
 }
+// saved 里可能存的是切走时的瞬态 'loading'(watcher 在 await 中途触发的快照),
+// 重 mount 后状态卡死成 'loading' 永远转圈。这里在恢复时把所有瞬态 status 一律
+// 重置成 'idle',让 onMounted/triggerStep7Init 重新拉一次。
 const lokiMappingByEnv = reactive<Record<string, LokiMappingPerEnv>>(
-  (saved?.lokiMappingByEnv as Record<string, LokiMappingPerEnv>) ?? {},
+  (() => {
+    const src = (saved?.lokiMappingByEnv as Record<string, LokiMappingPerEnv>) ?? {}
+    for (const m of Object.values(src)) {
+      if (!m) continue
+      if (m.dsListStatus === 'loading') m.dsListStatus = 'idle'
+      if (m.labelStatus === 'loading') m.labelStatus = 'idle'
+    }
+    return src
+  })(),
 )
 function getLokiMapping(envID: string): LokiMappingPerEnv {
   if (!lokiMappingByEnv[envID]) {
@@ -2959,6 +3241,122 @@ async function loadLokiDatasources(envID: string) {
 // Grafana URL+鉴权填好后自动拉一次 datasources(800ms 防抖)。
 // 用户改 URL/Key/账号 → 等输入稳定 → 自动重新加载,不必手动点"加载"。
 const grafanaDsAutoTimers: Record<string, ReturnType<typeof setTimeout>> = {}
+// 导入 yaml 反填后的"可观测性交叉校验":针对每个启用的 obs 工具的每个 env,
+// 主动调一次真实 HTTP probe(URL+鉴权)看通不通,grafana 还额外比对 datasource UID
+// 是否真在 grafana 里(yaml 写的 UID 可能已被删/改名)。
+//
+// 每个工具:
+//   - URL probe 失败  → toast.error + 日志;UI 上 obs probe 徽章自然呈红色
+//   - URL probe 通过  → 静默,UI 上呈绿色
+// grafana 额外:
+//   - listGrafanaDatasources 拿真实 UID 列表,对比 grafanaDsUidByObsEnv 反填的每条 UID
+//   - UID 找不到的 (tool, env) 组合写日志 + toast 提醒
+//
+// 失败容错:网络 / 凭证错时 toast 提醒,不阻塞 import,UI 仍可看 yaml 反填的值。
+async function crossCheckImportedObservability(): Promise<void> {
+  if (!isDesktop()) return
+  const checks: Promise<void>[] = []
+  for (const spec of OBS_TOOL_SPECS) {
+    if (!enabledObservability[spec.key]) continue
+    for (const env of environments) {
+      if (!env.id) continue
+      // 直接用现成的 scheduleObsProbe 走防抖触发,800ms 后真实调 probeURLAuth
+      // (它会写 obsProbeResults,UI 上 ✗ 徽章 + 错误 hover 都能看见)
+      scheduleObsProbe(spec.key, env.id)
+    }
+  }
+
+  // grafana datasource UID 校验:用反填的 grafana 凭证列真实 datasources,对比 yaml 写的 UID
+  if (enabledObservability['grafana']) {
+    for (const env of environments) {
+      if (!env.id) continue
+      checks.push((async () => {
+        const auth = lokiAuthFor(env.id)
+        if (!auth.grafana_url) return
+        if (!auth.api_key && (!auth.user || !auth.pass)) return
+        try {
+          const dsList = await listGrafanaDatasources(auth)
+          const realUids = new Set(dsList.map(d => d.uid))
+          // 检查反填的 datasource_uid_by_env 里每条
+          const missing: Array<{ tool: string; uid: string }> = []
+          for (const tool of ['prometheus', 'jaeger', 'tempo', 'elk']) {
+            const uid = (grafanaDsUidByObsEnv[obsGrafanaDsKey(tool, env.id)] || '').trim()
+            if (uid && !realUids.has(uid)) {
+              missing.push({ tool, uid })
+            }
+          }
+          // loki datasource UID(在 lokiMappingByEnv 里)
+          const lm = getLokiMapping(env.id)
+          if (lm.dsUID && !realUids.has(lm.dsUID)) {
+            missing.push({ tool: 'loki', uid: lm.dsUID })
+          }
+          if (missing.length === 0) {
+            pushLog('cchub', 'info',
+              `[applyImport] ${env.id} grafana 交叉校验通过(真实 ${dsList.length} 个 datasource)`,
+              { envID: env.id })
+            return
+          }
+          const desc = missing.map(m => `${m.tool}→${m.uid.slice(0, 12)}…`).join(', ')
+          pushLog('cchub', 'warn',
+            `[applyImport] ${env.id} yaml 里以下 grafana datasource UID 在真实 grafana 不存在: ${desc}`,
+            { envID: env.id })
+          toast.error(`${env.id}: ${missing.length} 个 grafana datasource UID 找不到 —— ${desc}`)
+        } catch (e: any) {
+          const msg = String(e?.message || e)
+          pushLog('cchub', 'warn',
+            `[applyImport] ${env.id} grafana 校验失败(连不上 / 鉴权错):${msg}`,
+            { envID: env.id })
+        }
+      })())
+    }
+  }
+
+  // k8s_runtime:若反填了 envLoc,用 kuboard listResources 验 cluster/namespace 是否还在
+  if (enabledObservability['k8s_runtime']) {
+    for (const [envID, loc] of Object.entries(k8sRuntimeEnvLoc)) {
+      if (!loc?.cluster && !loc?.namespace) continue
+      checks.push((async () => {
+        const obsURL = (toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'url')] || '').trim()
+          || (sourceCreds['kuboard']?.creds?.[envID]?.url || '').trim()
+        const obsKey = (toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'access_key')] || '').trim()
+          || (sourceCreds['kuboard']?.creds?.[envID]?.access_key || '').trim()
+        const obsUser = (toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'username')] || '').trim()
+          || (sourceCreds['kuboard']?.creds?.[envID]?.username || '').trim()
+        const obsPass = (toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'password')] || '').trim()
+          || (sourceCreds['kuboard']?.creds?.[envID]?.password || '').trim()
+        if (!obsURL || (!obsKey && (!obsUser || !obsPass))) return
+        try {
+          const res = await kuboardListResources(obsURL, obsUser, obsPass, obsKey)
+          const cl = (res.clusters || []).find(c => c.name === loc.cluster)
+          if (!cl) {
+            pushLog('cchub', 'warn',
+              `[applyImport] ${envID} k8s_runtime cluster=${loc.cluster} 在真实 kuboard 不存在`,
+              { envID })
+            toast.error(`${envID}: k8s_runtime cluster ${loc.cluster} 找不到`)
+            return
+          }
+          if (loc.namespace && !cl.namespaces.find(n => n.name === loc.namespace)) {
+            pushLog('cchub', 'warn',
+              `[applyImport] ${envID} k8s_runtime ${loc.cluster}/${loc.namespace} namespace 不存在`,
+              { envID })
+            toast.error(`${envID}: k8s_runtime namespace ${loc.namespace} 找不到`)
+            return
+          }
+          pushLog('cchub', 'info',
+            `[applyImport] ${envID} k8s_runtime 交叉校验通过(${loc.cluster}/${loc.namespace})`,
+            { envID })
+        } catch (e: any) {
+          pushLog('cchub', 'warn',
+            `[applyImport] ${envID} k8s_runtime 校验失败:${String(e?.message || e)}`,
+            { envID })
+        }
+      })())
+    }
+  }
+
+  await Promise.all(checks)
+}
+
 function scheduleGrafanaDsAutoload(envID: string) {
   if (!isDesktop()) return
   if (!enabledObservability['grafana']) return
@@ -3255,28 +3653,112 @@ async function probeOneDS(envID: string, svc: string, dsKey: string) {
     pushLog('cchub', 'error', `[${envID}/${svc}] ${dsKey} 测试异常: ${msg}`, { envID, svc, dsKey })
   }
 }
-// 一键测当前 env 下所有识别到的数据层(串行,80ms 间隔避免限流)。
-// per-env 开关防重入 —— 用户狂点按钮不会跑出 N 倍并发请求。
+// per-env 开关:probeAllAcrossEnvs 内部用它防止跟未来其它 per-env 测试重入。
+// 单 env 一键测试已废弃 —— 全局按钮覆盖,每条 ✓/✗ 徽章 + 失败 env 列表能定位到具体哪条。
 const probingByEnv = reactive<Record<string, boolean>>({})
-async function probeAllForEnv(envID: string) {
-  if (probingByEnv[envID]) return
-  const svcs = scannedDS[envID]
-  if (!svcs) return
-  // 清掉本 env 范围内的旧连通性结果(其他 env 不动),不然 ✓/✗ 跟当前测试混在一起难分辨
-  const prefix = `${envID}::`
-  for (const k of Object.keys(dsProbeResults)) {
-    if (k.startsWith(prefix)) delete dsProbeResults[k]
-  }
-  probingByEnv[envID] = true
-  try {
+
+// "什么算一条数据层组件"的唯一权威枚举。probeAllAcrossEnvs 跟 Step 7 校验门必须用
+// 同一个枚举,否则会出现"测了 108 条但校验门看到 103 条 / 反过来"的撕裂(用户实测撞过)。
+// 撕裂典型成因:probeAll 拿首次快照后 scannedDS 被异步动了 —— 用户删组件 / 重 import /
+// recomputeEnabledDataStoresFromScanned 副作用,等等。统一函数返回的是即时读 reactive
+// 的扁平列表,调用方各自决定"用这个列表瞬时跑"还是"实时再读一遍"。
+//
+// 过滤孤儿服务:scannedDS 里可能残留 allServiceNames 不包含的服务名(早期 yaml 反填用
+// 短名 'user',后来 Step 4 改成 'user-grpc-server',旧条目没清)。这些孤儿在 UI 上不
+// 渲染(allServiceNames 决定页面展示),用户看不到也测不了,但校验若枚举到永远卡住。
+// 解决:枚举只考虑 allServiceNames 里的服务,孤儿跳过(并记一行 debug 日志可定位)。
+function enumerateDataStoreProbeTargets(): Array<{ envID: string; svc: string; dsKey: string }> {
+  const out: Array<{ envID: string; svc: string; dsKey: string }> = []
+  const validSvcs = new Set(allServiceNames.value)
+  for (const env of environments) {
+    if (!env.id || !env.id.trim()) continue
+    const svcs = scannedDS[env.id]
+    if (!svcs) continue
     for (const svc of Object.keys(svcs).sort()) {
-      for (const dsKey of Object.keys(svcs[svc] || {}).sort()) {
-        await probeOneDS(envID, svc, dsKey)
-        await new Promise(r => setTimeout(r, 80))
+      if (!validSvcs.has(svc)) continue // 孤儿服务跳过
+      const byKey = svcs[svc] || {}
+      for (const dsKey of Object.keys(byKey).sort()) {
+        out.push({ envID: env.id, svc, dsKey })
       }
     }
+  }
+  return out
+}
+
+// 全部环境一键连通性测试 —— 跨 env 并发(每 env 内串行),配上汇总进度。
+// 设计取舍:
+//   - 跨 env 并发:多环境是不同后端集群,并行不会互相打,体感快很多
+//   - env 内串行:同一集群 100 条同时打容易被限流 / 触发熔断,80ms 间隔保持温和
+//   - 汇总:成功 / 失败 / 总数,失败的 env 在 toast 里点出来,详情让用户去看每条 ✗ 徽章 + 日志
+const probingAll = ref(false)
+const probingAllStats = reactive<{ total: number; done: number; ok: number; fail: number }>({
+  total: 0, done: 0, ok: 0, fail: 0,
+})
+async function probeAllAcrossEnvs() {
+  if (probingAll.value) return
+  if (!isDesktop()) {
+    toast.error('连通性测试只在桌面 app 可用')
+    return
+  }
+  // 用唯一枚举函数取一份快照 —— 跟 Step 7 校验门绝对对齐,避免"测了 N 条但校验门看到 M 条"。
+  // 拿快照后整个测试期间用这份固定列表(若期间用户删组件,新列表少了几条不影响已跑完的统计;
+  // 校验门下一帧自然会按新 scannedDS 重新算,小偏差由用户感知"我刚删了几条"自洽)。
+  const targets = enumerateDataStoreProbeTargets()
+  const total = targets.length
+  if (total === 0) {
+    toast.info('没有可测试的数据层组件 —— 先点"📥 从配置中心读取"识别')
+    return
+  }
+  // 清空所有旧结果,避免 ✓/✗ 跟新测试混在一起
+  for (const k of Object.keys(dsProbeResults)) delete dsProbeResults[k]
+  probingAllStats.total = total
+  probingAllStats.done = 0
+  probingAllStats.ok = 0
+  probingAllStats.fail = 0
+  probingAll.value = true
+  pushLog('cchub', 'info',
+    `[probeAll] 启动全环境连通性测试,共 ${total} 条(${environments.filter(e => e.id).length} 个环境跨 env 并行 / env 内串行)`)
+  try {
+    // 按 envID 分组,跨 env 并发、env 内串行 —— 用快照,不再读 reactive
+    const byEnv: Record<string, Array<{ svc: string; dsKey: string }>> = {}
+    for (const t of targets) {
+      if (!byEnv[t.envID]) byEnv[t.envID] = []
+      byEnv[t.envID].push({ svc: t.svc, dsKey: t.dsKey })
+    }
+    const tasks = Object.entries(byEnv).map(async ([envID, items]) => {
+      probingByEnv[envID] = true
+      try {
+        for (const { svc, dsKey } of items) {
+          await probeOneDS(envID, svc, dsKey)
+          const k = probeKey(envID, svc, dsKey)
+          const st = dsProbeResults[k]?.status
+          probingAllStats.done++
+          if (st === 'ok') probingAllStats.ok++
+          else if (st === 'fail') probingAllStats.fail++
+          await new Promise(r => setTimeout(r, 80))
+        }
+      } finally {
+        probingByEnv[envID] = false
+      }
+    })
+    await Promise.all(tasks)
+    const failedEnvs: string[] = []
+    for (const env of environments) {
+      if (!env.id) continue
+      const prefix = `${env.id}::`
+      const hasFail = Object.keys(dsProbeResults).some(k =>
+        k.startsWith(prefix) && dsProbeResults[k].status === 'fail')
+      if (hasFail) failedEnvs.push(env.id)
+    }
+    pushLog('cchub', 'info',
+      `[probeAll] 完成: ${probingAllStats.ok} 通 / ${probingAllStats.fail} 失败 / 共 ${probingAllStats.total};失败环境: ${failedEnvs.join(', ') || '无'}`)
+    if (probingAllStats.fail === 0) {
+      toast.success(`全部连通性测试通过 (${probingAllStats.ok}/${probingAllStats.total})`)
+    } else {
+      toast.error(`${probingAllStats.fail} / ${probingAllStats.total} 条失败 —— 失败环境: ${failedEnvs.join(', ')};详见每条 ✗ 徽章 + 左侧日志`)
+    }
   } finally {
-    probingByEnv[envID] = false
+    probingAll.value = false
   }
 }
 
@@ -3847,13 +4329,9 @@ async function autoImportDataStores() {
     pushLog('cchub', 'error', `自动识别异常: ${String(e?.message || e)}`)
     return
   }
-  // 自动对识别出的所有数据层组件跑一遍连通性测试 —— 用户不用再手点
+  // 自动对识别出的所有数据层组件跑一遍连通性测试 —— 跨 env 并行,比逐 env 串行快几倍
   pushLog('cchub', 'info', '识别完成,开始自动跑连通性测试...')
-  for (const env of environments) {
-    if (!env.id) continue
-    if (!scannedDS[env.id]) continue
-    await probeAllForEnv(env.id)
-  }
+  await probeAllAcrossEnvs()
   pushLog('cchub', 'info', '连通性测试完成')
 }
 
@@ -4155,11 +4633,25 @@ watch(() => environments.map(e => e.id).join('|'), () => {
 })
 
 // 切换配置源类型(nacos ↔ apollo ↔ consul ↔ env-vars ↔ kubernetes ↔ none)时,
+// applyImport 期间禁用本 watcher 的破坏性清空 —— 否则:
+//   1. applyImport sync 段 ingest 多源时,configCenterType 在 "" → "nacos" 之间瞬变
+//   2. 同步段结束后 watcher 异步触发,把刚反填的 envNamespaces / serviceConfigSel /
+//      ccHubStateByEnv 全删了
+//   3. 用户看到"导入失败、什么都没反填"的假象
+// 用 importInProgress flag 包住整个 applyImport 调用,期间不清。
+const importInProgress = ref(false)
+
 // 把 Step 5 / Step 7 里跟"上一种源"绑定的扫描状态全部清掉 —— 那些下拉选项 / 服务映射 /
 // 识别出的数据层都基于旧源的 API 拉的,切源后完全无意义。
 // 凭证输入(ccCredInputs)按 type 前缀分 key,保留不清,切回旧 type 还能复用。
 watch(configCenterType, (newType, oldType) => {
   if (newType === oldType) return
+  if (importInProgress.value) {
+    // import 还在反填阶段,configCenterType 短暂变化是正常的(reset → ingest 多源),
+    // 不要清空我们刚反填进去的 state。importInProgress 在 applyImport 开头置 true、
+    // nextTick 里完成自动预加载触发后置 false。
+    return
+  }
   // 统计要清的项数,给用户一个"确实发生了清理"的提示
   const cleaned = {
     namespaces: Object.keys(envNamespaces).length,
@@ -4219,6 +4711,9 @@ watch(
     // 可观测性 k8s_runtime:env→cluster/namespace + (env,svc)→workload/label_selector 两层映射
     k8sRuntimeEnvLoc,
     k8sRuntimeSvcMap,
+    // k8s_runtime per-(env, cluster, namespace) deployments 列表缓存 —— 跨会话保留 ok 项,
+    // 切回 Step 7 时下拉直接有内容,不用等 onMounted 异步重拉。loading/error 不存。
+    k8sRtWorkloadCache,
     // 可观测性各 via-grafana 工具(prometheus/jaeger/tempo/elk)在每 env 选中的 Grafana datasource UID
     grafanaDsUidByObsEnv,
     // 每个 (obs, env) 显式选择的访问方式 via_grafana / direct(默认按 grafana 是否启用兜底)
@@ -4436,6 +4931,9 @@ async function applyImport() {
     importError.value = '内容为空或不是合法的 system.yaml'
     return
   }
+  // 期间禁用 configCenterType watcher 的破坏性清空(它会在 ingest 多源 type 期间
+  // 触发,把我们刚反填的 envNamespaces / serviceConfigSel / ccHubStateByEnv 全删)。
+  importInProgress.value = true
 
   // system
   if (parsed.system && typeof parsed.system === 'object') {
@@ -4549,6 +5047,9 @@ async function applyImport() {
     const t = s.type
     enabledSourceTypes[t] = true
     if (!enabledSourceOrder.includes(t)) enabledSourceOrder.push(t)
+    // 必须先确保 sourceCreds[t] 有空骨架 —— 模板里 sourceCreds[t].creds.<env> 直接访问没 ?. 防御,
+    // t 没初始化(yaml 里出现了 ALL_SOURCE_TYPES 之外的 type)→ Step 6 副源块渲染抛 TypeError → 白屏。
+    if (!sourceCreds[t]) sourceCreds[t] = { creds: {} }
     const fields = CC_FIELDS_BY_TYPE.value[t] || []
     if (Array.isArray(s.endpoints)) {
       for (const ep of s.endpoints) {
@@ -4559,6 +5060,24 @@ async function applyImport() {
           if (typeof v === 'string' && !(v.startsWith('{{') && v.endsWith('}}'))) {
             envCreds[f.key] = v
           }
+        }
+        // auth_mode 反推(同主源路径,UI-only 不进 yaml)
+        const authModeField = fields.find(f => f.key === 'auth_mode')
+        if (authModeField && authModeField.options && authModeField.options.length > 0) {
+          const has = (k: string) => {
+            const v = ep[k]
+            return typeof v === 'string' && v && !(v.startsWith('{{') && v.endsWith('}}'))
+          }
+          let mode = ''
+          if (authModeField.options.some(o => o.value === 'access_key') && has('access_key')) {
+            mode = 'access_key'
+          } else if (authModeField.options.some(o => o.value === 'api_key') && has('api_key')) {
+            mode = 'api_key'
+          } else if (authModeField.options.some(o => o.value === 'username_password')
+                     && (has('username') && has('password') || has('user') && has('pass'))) {
+            mode = 'username_password'
+          }
+          if (mode) envCreds['auth_mode'] = mode
         }
         if (Object.keys(envCreds).length > 0) sourceCreds[t].creds[ep.env] = envCreds
       }
@@ -4578,15 +5097,18 @@ async function applyImport() {
         }
       }
     }
-    // 其它高级字段(service_map[非kuboard] / auth / dataid_patterns)整块进 rawExtra round-trip 保留。
-    // kuboard 的 service_map 排除在外:已经吃进 kuboardSvcMap,emitSourceBody 会重新输出,
-    // 留在 rawExtra 会双写(dump 段会再 emit 一次同样的 service_map 块)。
+    // 其它高级字段(auth / dataid_patterns 等)整块进 rawExtra round-trip 保留。
+    // service_map 一律排除:无论 nacos/apollo/consul 还是 kuboard,都已经被 applyImport
+    // 反填到结构化 reactive(envNamespaces+serviceConfigSel / kuboardSvcMap),emit 时
+    // emitSourceBody 自己会生成完整 service_map 块。如果 rawExtra 里再带一份,emit 会
+    // 在同一 source 对象下写两个 service_map: 键 → yaml 解析报
+    // "mapping key 'service_map' already defined" 直接挂掉(用户实测撞过)。
     const rawExtra: Record<string, unknown> = {}
     for (const [k, v] of Object.entries(s)) {
       if (k === 'id' || k === 'type' || k === 'endpoints') continue
       // 兼容老 yaml:per_env_credentials 字段已废弃,丢掉不回写
       if (k === 'per_env_credentials') continue
-      if (t === 'kuboard' && k === 'service_map') continue
+      if (k === 'service_map') continue
       rawExtra[k] = v
     }
     if (Object.keys(rawExtra).length > 0) sourceCreds[t].rawExtra = rawExtra
@@ -4641,6 +5163,26 @@ async function applyImport() {
         if (v.startsWith('{{') && v.endsWith('}}')) continue // 占位符不回填
         ccCredInputs[ccKeyFor(cc, envID, f.key)] = v
       }
+      // auth_mode 反推(同 obs 路径,UI-only 不进 yaml,得按 yaml 实际填了哪个凭证字段反推)
+      const authModeField = fields.find(f => f.key === 'auth_mode')
+      if (authModeField && authModeField.options && authModeField.options.length > 0) {
+        const has = (k: string) => {
+          const v = ep?.[k]
+          return typeof v === 'string' && v && !(v.startsWith('{{') && v.endsWith('}}'))
+        }
+        let mode = ''
+        if (authModeField.options.some(o => o.value === 'access_key') && has('access_key')) {
+          mode = 'access_key'
+        } else if (authModeField.options.some(o => o.value === 'api_key') && has('api_key')) {
+          mode = 'api_key'
+        } else if (authModeField.options.some(o => o.value === 'username_password')
+                   && (has('username') && has('password') || has('user') && has('pass'))) {
+          mode = 'username_password'
+        }
+        if (mode) {
+          ccCredInputs[ccKeyFor(cc, envID, 'auth_mode')] = mode
+        }
+      }
     }
   }
 
@@ -4650,6 +5192,12 @@ async function applyImport() {
   // kuboard 的 service_map 已在 ingestSource 里吃进 kuboardSvcMap,这里只处理 nacos/apollo/consul shape。
   const svcMap = (cc !== 'kuboard') ? primarySource?.service_map : null
   if (svcMap && typeof svcMap === 'object') {
+    // 同时合成 ccHubStateByEnv 的 namespaces / entries —— UI 的"per-env namespace + per-service dataId"
+    // 下拉块只在 ccHubStateByEnv[envID]?.status === 'ok' 时渲染(envScanned 守卫),否则用户得手动
+    // 点"拉取勾选服务的配置"才能看到映射 UI。但 yaml 已经带了完整 service_map,我们直接拿 yaml 里
+    // 的 namespace / data_id / group 凑出一个合成 preload 结果灌进 ccHubStateByEnv,使下拉选项立刻出现且
+    // 默认就选中 yaml 里写的值。用户如果想换条目可以再点"重新拉取"走真正的网络扫描。
+    const synthByEnv: Record<string, { ns: Map<string, string>; entries: Map<string, { locator: string; group?: string; tenant?: string }> }> = {}
     for (const [envID, svcs] of Object.entries(svcMap)) {
       if (!svcs || typeof svcs !== 'object') continue
       for (const [svc, rec] of Object.entries(svcs as Record<string, unknown>)) {
@@ -4664,6 +5212,34 @@ async function applyImport() {
         if (typeof r.group === 'string' && r.group) {
           serviceConfigGroup[svcKey(envID, svc)] = r.group
         }
+        // 累积合成 preload 用的 namespaces / entries
+        if (!synthByEnv[envID]) synthByEnv[envID] = { ns: new Map(), entries: new Map() }
+        const bucket = synthByEnv[envID]
+        if (typeof r.namespace === 'string' && r.namespace) {
+          // namespace id == show_name —— yaml 里只有一个值,无法区分 UUID vs friendly name
+          bucket.ns.set(r.namespace, r.namespace)
+        }
+        if (typeof r.data_id === 'string' && r.data_id) {
+          // entries 用 locator+group 做去重 key,避免同 dataId 重复加;namespace 写进 tenant
+          const grp = (typeof r.group === 'string' && r.group) ? r.group : ''
+          const key = r.data_id + '@' + grp
+          bucket.entries.set(key, {
+            locator: r.data_id,
+            group: grp || undefined,
+            tenant: (typeof r.namespace === 'string' && r.namespace) ? r.namespace : undefined,
+          })
+        }
+      }
+    }
+    for (const [envID, bucket] of Object.entries(synthByEnv)) {
+      if (bucket.ns.size === 0 && bucket.entries.size === 0) continue
+      ccHubStateByEnv[envID] = {
+        status: 'ok',
+        namespaces: Array.from(bucket.ns.entries()).map(([id, show]) => ({ id, show_name: show })),
+        entries: Array.from(bucket.entries.values()),
+        notes: ['(基于导入的 system.yaml service_map 合成,后续会跑一次真实 preload 校验)'],
+        loadedAt: Date.now(),
+        synthesized: true,
       }
     }
   }
@@ -4686,6 +5262,31 @@ async function applyImport() {
             if (v.startsWith('{{') && v.endsWith('}}')) continue
             toolInputs[toolKeyFor('obs', key, envID, f.key)] = v
           }
+          // auth_mode 是 UI-only(uiOnly:true),不进 yaml,所以反填时要按 yaml 实际有哪类
+          // 凭证字段反推:有 access_key → 'access_key';有 api_key → 'api_key';
+          // 有 username+password / user+pass → 'username_password'。否则保留默认。
+          // 关系到 showWhen 隐藏字段判定,不反推就会显示成"鉴权方式"下拉空白(用户体感
+          // 'yaml 反填没识别出鉴权方式')。
+          const authModeField = spec.fields.find(f => f.key === 'auth_mode')
+          if (authModeField && authModeField.options && authModeField.options.length > 0) {
+            const has = (k: string) => {
+              const v = ep?.[k]
+              return typeof v === 'string' && v && !(v.startsWith('{{') && v.endsWith('}}'))
+            }
+            let mode = ''
+            // 优先级:access_key > api_key > username/password 组合(常见三套)
+            if (authModeField.options.some(o => o.value === 'access_key') && has('access_key')) {
+              mode = 'access_key'
+            } else if (authModeField.options.some(o => o.value === 'api_key') && has('api_key')) {
+              mode = 'api_key'
+            } else if (authModeField.options.some(o => o.value === 'username_password')
+                       && (has('username') && has('password') || has('user') && has('pass'))) {
+              mode = 'username_password'
+            }
+            if (mode) {
+              toolInputs[toolKeyFor('obs', key, envID, 'auth_mode')] = mode
+            }
+          }
         }
       }
       // datasource_uid_by_env(prometheus/jaeger/tempo/elk 走 Grafana 代理时记录的 UID)
@@ -4707,6 +5308,42 @@ async function applyImport() {
         }
       }
     }
+    // loki.label_mapping_by_env 回填:emit 时是 yaml 的 obs.loki.label_mapping_by_env.<env> = {
+    //   env_label, service_label, grafana_ds_uid, <env_label_key>: <env_value>, service_map: {svc: <svc_label_value>}
+    // }。反填到 lokiMappingByEnv[env] —— 否则切走切回(InitPage 不进 keep-alive)的瞬间,
+    // mount 时虽然 toolInputs 里 grafana URL/api_key 已恢复但 dsUID/envLabelKey 等空,
+    // triggerStep7Init 重拉 datasources 后只有 dsList,labels / values / mapping 仍空,
+    // 用户感知"反填的可观测配置全没了"。
+    const lokiBlock = obs?.['loki']
+    const lokiLM = lokiBlock?.label_mapping_by_env
+    if (lokiLM && typeof lokiLM === 'object') {
+      for (const [envID, m] of Object.entries(lokiLM as Record<string, any>)) {
+        if (!envID || !m || typeof m !== 'object') continue
+        const lm = getLokiMapping(envID)
+        if (typeof m.env_label === 'string' && m.env_label) lm.envLabelKey = m.env_label
+        if (typeof m.service_label === 'string' && m.service_label) lm.serviceLabelKey = m.service_label
+        if (typeof m.grafana_ds_uid === 'string' && m.grafana_ds_uid) lm.dsUID = m.grafana_ds_uid
+        // env_label 对应的 value 用动态 key,从 m 里挑(排除已知 schema 字段)
+        if (lm.envLabelKey && typeof m[lm.envLabelKey] === 'string') {
+          lm.envValue = m[lm.envLabelKey]
+        }
+        // service_map: {svc: {<service_label>: <value>}} 或 {svc: <value>} 两种形态
+        const sm = m.service_map
+        if (sm && typeof sm === 'object') {
+          for (const [svc, val] of Object.entries(sm as Record<string, any>)) {
+            if (!svc) continue
+            let v = ''
+            if (typeof val === 'string') v = val
+            else if (val && typeof val === 'object' && lm.serviceLabelKey
+                     && typeof val[lm.serviceLabelKey] === 'string') {
+              v = val[lm.serviceLabelKey]
+            }
+            if (v) lm.serviceValues[svc] = v
+          }
+        }
+      }
+    }
+
     // k8s_runtime.service_map 回填:cluster/ns 提到 env 级(envLoc),workload/selector 进服务级(svcMap)。
     // 同 env 多行 cluster/ns 不一致时取第一条(向导本来也只允许 env 级单选)。
     const k8sSvcMap = obs?.['k8s_runtime']?.service_map
@@ -4764,12 +5401,106 @@ async function applyImport() {
         }
       }
     }
+    // 反填 dsScanState:Step 7 校验"下一步"门用 scanStateOf(env, svc) 判断该 (env, svc) 是否
+    // 已 fetched + 解析。yaml import 路径下 autoImportDataStores 没跑过,如果不合成 state,
+    // 用户即便所有连通性都通过、数据层字段都齐全,Step 7 校验仍报"服务配置未拉取/解析成功"卡死。
+    // 规则:有数据层条目 → 'ok';没数据层但服务存在(yaml 没识别到任何 redis/mysql 等)→ 'empty'。
+    for (const env of environments) {
+      if (!env.id) continue
+      for (const svc of allServiceNames.value) {
+        const k = scanStateKey(env.id, svc)
+        const hasItems = scannedDS[env.id]?.[svc] && Object.keys(scannedDS[env.id][svc]).length > 0
+        dsScanState[k] = hasItems
+          ? { status: 'ok' }
+          : { status: 'empty', reason: 'yaml 未识别到该服务的数据层(可能是无 redis/mysql 等)' }
+      }
+    }
   }
 
   // 导入完直接跳到 Step 2(系统基本信息)— 反填的字段从这里展开,用户能逐步检查 / 改。
   // 留在欢迎页(Step 1)没意义,反填的内容在那看不见。
   currentStep.value = 2
   showImportDialog.value = false
+
+  // 凭证齐全的 env 自动触发一次预加载,把 Step 6 的"per-env namespace + per-service dataId"
+  // 下拉块填出来。否则 yaml 没带 service_map(常见场景:历史 yaml 在用户点拉取前就生成),
+  // applyImport 上面那段合成逻辑没东西可合成,UI 看起来"什么都没反填"。
+  //
+  // 用 nextTick 包一层:等 enabledSourceTypes / enabledSourceOrder / ccCredInputs 这些
+  // reactive state 在 Vue 里完成一次 flush,再读 configCenterType.value & buildPreloadPayload —
+  // 不然 computed 可能还没追踪到刚刚 push 的新源,configCenterType.value 取到老值。
+  //
+  // 失败 / 凭证不全 / 非桌面 app 都静默跳过 —— 用户后续仍可手动点"📥 拉取勾选服务的配置"。
+  // 不阻塞 applyImport 同步返回:每个 env 起一个 fire-and-forget。
+  // 用 setTimeout(0) 推到下一个宏任务,确保:
+  //   1. configCenterType watcher(pre flush)早就跑完了(被 flag 拦下)
+  //   2. enabledSourceOrder / activeSourceTypes 等 reactive 都已经 settle
+  //   3. 即便 user 同时还在拖动表单 / 切 step,也不会跟同步反填竞争
+  // 比 nextTick 更彻底 —— nextTick 是微任务,setTimeout(0) 是宏任务。
+  setTimeout(() => {
+    importInProgress.value = false  // 现在放开,反填阶段已结束
+    pushLog('cchub', 'info',
+      `[applyImport] 自动预加载触发: cc=${cc} cct=${configCenterType.value} isDesktop=${isDesktop()} envs=${environments.map(e => e.id).filter(Boolean).join(',')}`,
+      { cc, cct: configCenterType.value })
+    if (!cc || !isDesktop()) return
+
+    // 主源 + 所有副源(activeSourceTypes)都跑一遍交叉校验,每种 type 走自己的逻辑:
+    //   - nacos / apollo / consul → crossCheckImportedConfigSource(用 ccHubStateByEnv + envNamespaces + serviceConfigSel)
+    //   - kuboard                  → crossCheckImportedKuboard(用 kuboardStateByEnv + kuboardSvcMap)
+    //   - env-vars / kubernetes / none → 不需要校验(没远端可比对)
+    const checkOneSource = async (sourceType: string, envID: string) => {
+      if (sourceType === 'kuboard') {
+        return crossCheckImportedKuboard(envID, sourceType)
+      }
+      if (sourceType !== 'nacos' && sourceType !== 'apollo' && sourceType !== 'consul') {
+        return // env-vars / kubernetes / none / 未知
+      }
+      const payload = buildPreloadPayload(envID)
+      if (!payload.valid) {
+        pushLog('cchub', 'info',
+          `[applyImport] ${envID}@${sourceType} 跳过自动预加载,缺字段: ${payload.missing.join(', ')}`,
+          { envID, sourceType })
+        return
+      }
+      const cur = ccHubStateByEnv[envID]
+      if (cur?.status === 'ok' && cur.synthesized) {
+        pushLog('cchub', 'info',
+          `[applyImport] ${envID}@${sourceType} 启动真实交叉校验(yaml namespace=${envNamespaces[envID] || '(空)'})`,
+          { envID, sourceType })
+        return crossCheckImportedConfigSource(envID)
+      }
+      if (cur?.status === 'ok') {
+        pushLog('cchub', 'info',
+          `[applyImport] ${envID}@${sourceType} 已是真实 ok 状态(${cur.entries?.length || 0} 条),跳过`,
+          { envID, sourceType })
+        return
+      }
+      pushLog('cchub', 'info',
+        `[applyImport] ${envID}@${sourceType} 触发自动预加载 addr=${payload.addr}`,
+        { envID, sourceType })
+      return runCCHubPreload(envID)
+    }
+    for (const env of environments) {
+      if (!env.id) continue
+      // 主源(configCenterType.value)+ 副源都跑校验。不同 source 各跑各的(envID 是公共
+      // 维度,但 ccHubStateByEnv / kuboardStateByEnv 各自管自己 type 的数据)。
+      // 当前 ccHubStateByEnv 是全局单源 keyed by envID(老设计),所以 nacos/apollo/consul
+      // 同一时刻只有一个能跑;副源是 kuboard 时单独走 kuboardStateByEnv 不冲突。
+      for (const t of activeSourceTypes.value) {
+        checkOneSource(t, env.id).catch((e) => {
+          pushLog('cchub', 'error',
+            `[applyImport] ${env.id}@${t} 交叉校验抛错: ${String(e)}`, { envID: env.id, sourceType: t })
+        })
+      }
+    }
+    // 可观测性交叉校验:启用的每个 obs 工具(grafana / loki / prometheus / jaeger / elk /
+    // skywalking / tempo / k8s_runtime),逐 env 调真实 HTTP probe + grafana datasource
+    // UID 比对 + k8s_runtime cluster/namespace 验存在。fire-and-forget,不阻塞。
+    crossCheckImportedObservability().catch((e) => {
+      pushLog('cchub', 'error',
+        `[applyImport] 可观测性交叉校验抛错: ${String(e)}`)
+    })
+  }, 0)
 }
 
 // ── Step 7: Preview / generate ──
@@ -5103,11 +5834,20 @@ function generateYAML(): string {
       }
     }
     // rawExtra(yaml 高级字段透传)
+    // 防御:旧版本 saved 里可能残留 service_map(老 ingest 没排除 nacos/apollo/consul 的),
+    // emit 时过滤一份再 dump,避免跟 emitSourceBody 自己生成的 service_map 冲突。
     if (data.rawExtra) {
-      const dump = yaml.dump(data.rawExtra, { indent: 2, lineWidth: -1 })
-      for (const line of dump.split('\n')) {
-        if (line.trim() === '') continue
-        out.push(`${baseIndent}${line}`)
+      const safeExtra: Record<string, unknown> = {}
+      for (const [k, v] of Object.entries(data.rawExtra)) {
+        if (k === 'service_map') continue
+        safeExtra[k] = v
+      }
+      if (Object.keys(safeExtra).length > 0) {
+        const dump = yaml.dump(safeExtra, { indent: 2, lineWidth: -1 })
+        for (const line of dump.split('\n')) {
+          if (line.trim() === '') continue
+          out.push(`${baseIndent}${line}`)
+        }
       }
     }
   }
@@ -5512,38 +6252,24 @@ function computeStepErrors(): Set<string> {
       })
     }
   } else if (step === 7) {
-    // 数据层校验:
-    //   1) 配置拉取必须 ok / empty(skipped/error 拦);kuboard 也走自动扫(KuboardFetchConfigMaps),
-    //      所以跟 nacos/apollo/consul 一样要求 ok|empty;env-vars/none 没自动扫,跳过此项校验。
-    //   2) 每个识别出的组件都必须做过连通性测试且通过
-    //      没测过 → 拦(notested);测过失败 → 拦(probefail);测过通过 → 放行
-    //      用户嫌某组件用不上 → 点 ✕ 删掉,删后就不在校验范围里了
-    const autoFetchSources = new Set(['nacos', 'apollo', 'consul', 'kuboard'])
-    for (const e of environments) {
-      if (!e.id.trim()) continue
-      for (const svc of allServiceNames.value) {
-        const svcSource = getServiceSource(svc)
-        if (!svcSource) continue // 没分配源 — Step 5 校验已拦,这里不重复报
-        if (!autoFetchSources.has(svcSource)) continue // 不自动扫的源 → 不强制 fetched
-        const st = scanStateOf(e.id, svc)
-        if (!st || (st.status !== 'ok' && st.status !== 'empty')) {
-          errs.add(`ds.${e.id}.${svc}.notfetched`)
-        }
-      }
-      const svcs = scannedDS[e.id]
-      if (svcs) {
-        for (const svc of Object.keys(svcs)) {
-          const byKey = svcs[svc] || {}
-          for (const dsKey of Object.keys(byKey)) {
-            const probeSt = dsProbeResults[probeKey(e.id, svc, dsKey)]
-            if (!probeSt || probeSt.status !== 'ok') {
-              if (probeSt?.status === 'fail') {
-                errs.add(`ds.${e.id}.${svc}.${dsKey}.probefail`)
-              } else {
-                errs.add(`ds.${e.id}.${svc}.${dsKey}.notested`)
-              }
-            }
-          }
+    // 数据层校验(简化逻辑):**只校验页面上展示的组件连通性**。
+    //
+    // 不再要求"必须 fetched / 必须扫描过"—— 三个理由:
+    //   1. yaml 可能本来就没数据层(纯网关 / 纯调度系统),scannedDS 全空合法
+    //   2. 用户可能主动删掉某些识别出的组件(点 ✕),删后不该再卡他
+    //   3. 用户也可以完全手填,连 fetch 都没跑过
+    //
+    // 校验只剩一条:**dsProbeResults 里 scannedDS 里展示的每个组件都得 status='ok'**。
+    //   未测 → notested;失败 → probefail;通过 → 放行
+    //   组件不在 scannedDS 里(被删 / 没识别)→ 自动不在校验范围
+    // 跟 probeAllAcrossEnvs 共用同一个枚举,确保"测了 N 条 / 校验门看到 M 条"绝对一致
+    for (const t of enumerateDataStoreProbeTargets()) {
+      const probeSt = dsProbeResults[probeKey(t.envID, t.svc, t.dsKey)]
+      if (!probeSt || probeSt.status !== 'ok') {
+        if (probeSt?.status === 'fail') {
+          errs.add(`ds.${t.envID}.${t.svc}.${t.dsKey}.probefail`)
+        } else {
+          errs.add(`ds.${t.envID}.${t.svc}.${t.dsKey}.notested`)
         }
       }
     }
@@ -5970,6 +6696,18 @@ async function runOneClickDeploy() {
       const tail = selfTestSummary ? `\n${selfTestSummary}` : ''
       toast.success(`部署完成,共 ${installedTargets.length} 个目标已生效:${installedTargets.join(' / ')}${tail}`)
     }
+    // 部署成功 → 给 saved 草稿打 lastDeployAt 时间戳。HomePage 的"下一步推荐"读到它就
+    // 切成"已部署"语义,不再引导"继续部署"(用户实测撞过:已经部署完了首页还显示"继续部署")。
+    // 改 currentStep 不安全(用户可能想留在 Step 10 重部),只加个时间戳。
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY)
+      if (raw) {
+        const parsed = JSON.parse(raw)
+        parsed.lastDeployAt = Date.now()
+        parsed.lastDeployedTargets = installedTargets
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed))
+      }
+    } catch { /* localStorage 读写失败不影响部署主流程 */ }
     router.push('/bots')
   } catch (e: any) {
     deployError.value = String(e?.message || e)
@@ -6642,7 +7380,7 @@ const configTypeDescriptions: Record<string, string> = {
         <template v-else>
           <div class="form-group">
             <label>本地仓库目录 <span class="required">*</span>
-              <span class="field-hint">— 点"选目录"选一个已 clone 好的目录,自动反填 URL + 推仓库名 + 扫描</span>
+              <span class="field-hint">— 点"选目录"挑一个已 clone 的目录,自动反填 URL + 推仓库名 + 扫描</span>
             </label>
             <!-- 强制用"选目录"按钮,不让用户手敲路径(手写路径要么空格漏了、要么打错、
                  要么存在性没核对,比让 openDir 返回一个保证存在的绝对路径麻烦多了)。
@@ -7062,7 +7800,7 @@ const configTypeDescriptions: Record<string, string> = {
         <label>
           <code>{{ configCenterType }}</code> 连接配置
           <span v-if="isMultiSource" class="auto-tag" style="background:#dbeafe;color:#1e40af;">主源 · 完整 preload</span>
-          <span class="field-hint">— 按环境维度填写,保存后写入 system.yaml(标 <code># ⚠ secret</code> 注释),部署时注入到目标平台的 MCP Server env 块</span>
+          <span class="field-hint">— 按环境维度填写,保存后写入 system.yaml(标 <code># ⚠ secret</code> 注释),部署时注入到目标平台的 MCP Server env</span>
         </label>
         <div class="cc-share-warn">
           <div class="cc-share-warn-title">⚠ 凭证与共享提醒</div>
@@ -7436,7 +8174,7 @@ const configTypeDescriptions: Record<string, string> = {
             <template v-for="f in CC_FIELDS_BY_TYPE[t]" :key="f.key">
               <!-- kuboard 的 cluster/namespace/configmap 不在 env 级凭证里出现,改成下面的 per-service 映射块 -->
               <div
-                v-if="!isFieldHidden(t, env.id, f, (k) => (sourceCreds[t].creds[env.id] || {})[k] || '') && !(t === 'kuboard' && (f.key === 'cluster' || f.key === 'namespace' || f.key === 'configmap'))"
+                v-if="!isFieldHidden(t, env.id, f, (k) => (sourceCreds[t]?.creds?.[env.id] || {})[k] || '') && !(t === 'kuboard' && (f.key === 'cluster' || f.key === 'namespace' || f.key === 'configmap'))"
                 class="cc-field"
               >
                 <label class="cc-field-label">
@@ -7447,18 +8185,18 @@ const configTypeDescriptions: Record<string, string> = {
                 <div class="cc-field-row">
                   <select
                     v-if="f.options"
-                    :value="((sourceCreds[t].creds[env.id] || {})[f.key]) || (f.options[0]?.value || '')"
+                    :value="((sourceCreds[t]?.creds?.[env.id] || {})[f.key]) || (f.options[0]?.value || '')"
                     class="cc-input"
-                    @change="(e) => { if (!sourceCreds[t].creds[env.id]) sourceCreds[t].creds[env.id] = {}; sourceCreds[t].creds[env.id][f.key] = (e.target as HTMLSelectElement).value }"
+                    @change="(e) => { if (!sourceCreds[t]?.creds?.[env.id]) sourceCreds[t].creds[env.id] = {}; sourceCreds[t].creds[env.id][f.key] = (e.target as HTMLSelectElement).value }"
                   >
                     <option v-for="opt in f.options" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
                   </select>
                   <select
                     v-else-if="t === 'kuboard' && f.key === 'cluster'"
-                    :value="(sourceCreds[t].creds[env.id] || {})[f.key] || ''"
+                    :value="(sourceCreds[t]?.creds?.[env.id] || {})[f.key] || ''"
                     :disabled="kuboardStateByEnv[env.id]?.status !== 'ok'"
                     class="cc-input"
-                    @change="(e) => { if (!sourceCreds[t].creds[env.id]) sourceCreds[t].creds[env.id] = {}; sourceCreds[t].creds[env.id][f.key] = (e.target as HTMLSelectElement).value }"
+                    @change="(e) => { if (!sourceCreds[t]?.creds?.[env.id]) sourceCreds[t].creds[env.id] = {}; sourceCreds[t].creds[env.id][f.key] = (e.target as HTMLSelectElement).value }"
                   >
                     <option v-if="kuboardStateByEnv[env.id]?.status !== 'ok'" value="">— 先填 URL+鉴权,点上方"📥 拉取" —</option>
                     <option v-else value="">— 选集群 —</option>
@@ -7466,37 +8204,37 @@ const configTypeDescriptions: Record<string, string> = {
                   </select>
                   <select
                     v-else-if="t === 'kuboard' && f.key === 'namespace'"
-                    :value="(sourceCreds[t].creds[env.id] || {})[f.key] || ''"
-                    :disabled="kuboardStateByEnv[env.id]?.status !== 'ok' || !((sourceCreds[t].creds[env.id] || {}).cluster)"
+                    :value="(sourceCreds[t]?.creds?.[env.id] || {})[f.key] || ''"
+                    :disabled="kuboardStateByEnv[env.id]?.status !== 'ok' || !((sourceCreds[t]?.creds?.[env.id] || {}).cluster)"
                     class="cc-input"
-                    @change="(e) => { if (!sourceCreds[t].creds[env.id]) sourceCreds[t].creds[env.id] = {}; sourceCreds[t].creds[env.id][f.key] = (e.target as HTMLSelectElement).value }"
+                    @change="(e) => { if (!sourceCreds[t]?.creds?.[env.id]) sourceCreds[t].creds[env.id] = {}; sourceCreds[t].creds[env.id][f.key] = (e.target as HTMLSelectElement).value }"
                   >
                     <option v-if="kuboardStateByEnv[env.id]?.status !== 'ok'" value="">— 先拉取资源 —</option>
-                    <option v-else-if="!((sourceCreds[t].creds[env.id] || {}).cluster)" value="">— 先选集群 —</option>
+                    <option v-else-if="!((sourceCreds[t]?.creds?.[env.id] || {}).cluster)" value="">— 先选集群 —</option>
                     <option v-else value="">— 选 namespace —</option>
-                    <option v-for="n in kuboardNamespacesFor(env.id, (sourceCreds[t].creds[env.id] || {}).cluster || '')" :key="n" :value="n">{{ n }}</option>
+                    <option v-for="n in kuboardNamespacesFor(env.id, (sourceCreds[t]?.creds?.[env.id] || {}).cluster || '')" :key="n" :value="n">{{ n }}</option>
                   </select>
                   <select
                     v-else-if="t === 'kuboard' && f.key === 'configmap'"
-                    :value="(sourceCreds[t].creds[env.id] || {})[f.key] || ''"
-                    :disabled="kuboardStateByEnv[env.id]?.status !== 'ok' || !((sourceCreds[t].creds[env.id] || {}).namespace)"
+                    :value="(sourceCreds[t]?.creds?.[env.id] || {})[f.key] || ''"
+                    :disabled="kuboardStateByEnv[env.id]?.status !== 'ok' || !((sourceCreds[t]?.creds?.[env.id] || {}).namespace)"
                     class="cc-input"
-                    @change="(e) => { if (!sourceCreds[t].creds[env.id]) sourceCreds[t].creds[env.id] = {}; sourceCreds[t].creds[env.id][f.key] = (e.target as HTMLSelectElement).value }"
+                    @change="(e) => { if (!sourceCreds[t]?.creds?.[env.id]) sourceCreds[t].creds[env.id] = {}; sourceCreds[t].creds[env.id][f.key] = (e.target as HTMLSelectElement).value }"
                   >
                     <option v-if="kuboardStateByEnv[env.id]?.status !== 'ok'" value="">— 先拉取资源 —</option>
-                    <option v-else-if="!((sourceCreds[t].creds[env.id] || {}).namespace)" value="">— 先选 namespace —</option>
+                    <option v-else-if="!((sourceCreds[t]?.creds?.[env.id] || {}).namespace)" value="">— 先选 namespace —</option>
                     <option v-else value="">— 选 ConfigMap —</option>
-                    <option v-for="cm in kuboardConfigMapsFor(env.id, (sourceCreds[t].creds[env.id] || {}).cluster || '', (sourceCreds[t].creds[env.id] || {}).namespace || '')" :key="cm" :value="cm">{{ cm }}</option>
+                    <option v-for="cm in kuboardConfigMapsFor(env.id, (sourceCreds[t]?.creds?.[env.id] || {}).cluster || '', (sourceCreds[t]?.creds?.[env.id] || {}).namespace || '')" :key="cm" :value="cm">{{ cm }}</option>
                   </select>
                   <input
                     v-else
                     :type="f.secret ? 'password' : 'text'"
-                    :value="(sourceCreds[t].creds[env.id] || {})[f.key] || ''"
+                    :value="(sourceCreds[t]?.creds?.[env.id] || {})[f.key] || ''"
                     :placeholder="f.placeholder || ''"
                     class="cc-input"
                     autocomplete="off"
                     spellcheck="false"
-                    @input="(e) => { if (!sourceCreds[t].creds[env.id]) sourceCreds[t].creds[env.id] = {}; sourceCreds[t].creds[env.id][f.key] = (e.target as HTMLInputElement).value }"
+                    @input="(e) => { if (!sourceCreds[t]?.creds?.[env.id]) sourceCreds[t].creds[env.id] = {}; sourceCreds[t].creds[env.id][f.key] = (e.target as HTMLInputElement).value }"
                   />
                 </div>
                 <div v-if="!f.uiOnly" class="cc-env-hint">
@@ -8180,6 +8918,28 @@ const configTypeDescriptions: Record<string, string> = {
         <span v-else-if="dsImportStatus === 'ok'" class="cc-preload-summary">
           ✓ 成功拉 {{ dsImportStats.scanned }} / 应拉 {{ environments.length * allServiceNames.length }} 条配置(env × service),识别 {{ dsImportStats.matched }} 个数据层
         </span>
+
+        <!-- 全部环境一键连通性测试:跟"从配置中心读取"放一行,识别完后用户最常做的下一步 -->
+        <button
+          v-if="probingAll"
+          :key="'probe-all-envs-loading'"
+          class="btn cc-preload-btn ds-probe-all-btn"
+          disabled
+          style="margin-left:auto;"
+        >
+          <span class="cc-preload-spinner" aria-hidden="true"></span>
+          测试中… {{ probingAllStats.done }} / {{ probingAllStats.total }}
+          <span v-if="probingAllStats.fail > 0" style="color:#dc2626;">(✗ {{ probingAllStats.fail }})</span>
+        </button>
+        <button
+          v-else
+          :key="'probe-all-envs-idle'"
+          class="btn cc-preload-btn ds-probe-all-btn"
+          :disabled="!Object.values(scannedDS).some(svcs => Object.values(svcs).some(s => Object.keys(s).length > 0))"
+          title="对所有环境的所有数据层组件批量执行连通性测试(跨 env 并行,env 内串行)"
+          style="margin-left:auto;"
+          @click="probeAllAcrossEnvs"
+        >🔌 全部环境一键连通性测试</button>
       </div>
 
       <!-- 按 env → 全部 service(allServiceNames) → ds 层级完整展示;
@@ -8194,24 +8954,16 @@ const configTypeDescriptions: Record<string, string> = {
               {{ allServiceNames.length }} 个服务 ·
               已识别 {{ Object.values(scannedDS[env.id] || {}).filter(s => Object.keys(s).length > 0).length }}
             </span>
-            <button
+            <!-- 单 env 一键连通性测试已删除 —— 顶部"🔌 全部环境一键连通性测试"覆盖
+                 整体场景,单 env 视觉冗余且使用频率最低。要重测某条用每条组件上的
+                 单点按钮即可。-->
+            <span
               v-if="probingByEnv[env.id]"
-              :key="`probe-all-${env.id}-loading`"
-              type="button"
               class="ds-env-probe-all loading"
-              disabled
             >
               <span class="cc-preload-spinner" aria-hidden="true"></span>
               测试中…
-            </button>
-            <button
-              v-else-if="Object.values(scannedDS[env.id] || {}).some(s => Object.keys(s).length > 0)"
-              :key="`probe-all-${env.id}-idle`"
-              type="button"
-              class="ds-env-probe-all"
-              title="对本环境所有数据层组件批量执行连通性测试(串行,逐条 5s 超时)"
-              @click="probeAllForEnv(env.id)"
-            >🔌 一键连通性测试</button>
+            </span>
           </div>
 
           <div v-if="allServiceNames.length === 0" class="ds-empty">

@@ -84,8 +84,7 @@ const SOURCE_LABELS: Record<LogSource, string> = {
     <header class="logs-header">
       <h1>日志</h1>
       <p class="logs-sub">
-        全工作台过程日志:配置中心预加载、原生安装(install)、代码扫描(analyze)、其它系统事件。
-        共 {{ entries.length }} 条(当前过滤后 {{ filtered.length }} 条)。
+        全工作台过程日志:配置中心预加载、原生安装、代码扫描、系统事件。共 {{ entries.length }} 条(过滤后 {{ filtered.length }} 条)。
       </p>
     </header>
 
@@ -134,10 +133,7 @@ const SOURCE_LABELS: Record<LogSource, string> = {
     </div>
 
     <div v-if="filtered.length === 0" class="logs-empty">
-      {{ entries.length === 0
-        ? '本会话暂无日志。'
-        : '当前过滤条件没有匹配的日志行。'
-      }}
+      {{ entries.length === 0 ? '本会话暂无日志' : '当前过滤条件没有匹配的日志' }}
     </div>
 
     <div v-else ref="listRef" class="logs-list">

@@ -1,6 +1,4 @@
-// jsonfile.go —— 包内通用 JSON 文件读写。被 install_native_*.go / uninstall_native_*.go
-// 多处共用(openclaw 的 openclaw.json / IDE 的 settings.json / mcp.json / creds.json),
-// 之前散在 install_native_openclaw.go 里造成"openclaw 文件被 IDE 平台代码反向 import"。
+// jsonfile.go —— 包内通用 JSON 文件读写。
 package agent
 
 import (
@@ -31,6 +29,8 @@ func readJSONOrEmpty(path string) (map[string]any, error) {
 }
 
 // writeJSONFile 把 data marshal 成 indent JSON 写到 path,自动建父目录。
+// Why: tmp + rename 原子写;若 tshoot 跟 IDE 同时改 settings.json,read-modify-write
+// 中段 crash 不会留下截断/空文件,失败时原文件保持完整。
 func writeJSONFile(path string, data any, mode os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -39,5 +39,13 @@ func writeJSONFile(path string, data any, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, enc, mode)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, enc, mode); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }

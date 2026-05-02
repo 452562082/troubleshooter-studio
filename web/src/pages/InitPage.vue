@@ -228,32 +228,7 @@ const modelGroups: ModelGroup[] = [
   },
 ]
 const allPresetModels = modelGroups.flatMap(g => g.items.map(i => i.value))
-// 老的单 model 选择器 computed —— 保留让未来单 model 模式复用,目前通过 target 版本替代。
-// 不暴露到模板,用 void 抑制 unused 警告(跟 _stackOptions 等同套路)。
-const _modelSelectValue = computed({
-  get: () => allPresetModels.includes(agent.model) ? agent.model : MODEL_CUSTOM,
-  set: (v: string) => {
-    if (v === MODEL_CUSTOM) {
-      if (allPresetModels.includes(agent.model)) agent.model = ''
-    } else {
-      agent.model = v
-    }
-  },
-})
-const _modelIsCustom = computed(() => !allPresetModels.includes(agent.model))
-void _modelSelectValue; void _modelIsCustom
 
-// target 版本:按 target 取/写 model,支持 preset select + 自定义输入
-// (embedded target 下线后这俩在模板里没再用,但 BotsPage / 部署侧可能仍引用,留着)
-function modelSelectValueFor(t: string): string {
-  const m = targetModels[t] || agent.model
-  return allPresetModels.includes(m) ? m : MODEL_CUSTOM
-}
-void modelSelectValueFor
-function modelIsCustomFor(t: string): boolean {
-  return !allPresetModels.includes(targetModels[t] || agent.model)
-}
-void modelIsCustomFor
 function onModelChange(t: string, e: Event) {
   const v = (e.target as HTMLSelectElement).value
   if (v === MODEL_CUSTOM) {
@@ -266,11 +241,6 @@ function onModelChange(t: string, e: Event) {
   // openclaw 是唯一消费模型的 target;它的值覆盖 agent.model,保 yaml 里 agent.model 永远非空。
   if (targetModels[Target.Openclaw]) agent.model = targetModels[Target.Openclaw]
 }
-
-function currentModelFor(t: string): string {
-  return targetModels[t] || agent.model
-}
-void currentModelFor
 
 // ── OpenClaw 模型探测(只给 openclaw target 卡用) ──
 // 勾上 openclaw → detect(默认 ~/.openclaw 或用户选目录)→ 成功填模型下拉 / 失败给"选目录"按钮 / 兜底回落 hardcoded modelGroups
@@ -1200,9 +1170,8 @@ function resolveCloneDest(r: RepoItem): string {
 }
 
 // hasRepoSource: 用户是否已经给这个仓库提供了来源线索(URL 或本地目录)。
-// 给模板决定要不要展示"仓库名 / 自动识别 / 分支映射"三个下游块 —— 用户没填源
-// 之前这些块没有意义(仓库名都没法自动推),一起显示会让"空输入框里怎么有值"
-// 显得违和。同时也防 localStorage 里老 draft 的残留数据露出来。
+// Why: 用户没填源时,"仓库名 / 自动识别 / 分支映射"三个下游块都推不出有意义的内容,
+//      且能防 localStorage 老 draft 的残留露出来。
 function hasRepoSource(r: RepoItem): boolean {
   if (r._source === 'local') return !!r._localPath?.trim()
   return !!r.url?.trim()
@@ -1925,14 +1894,6 @@ function setServiceSource(svc: string, t: string) {
     }
   }
 }
-
-// ── 兼容 stub:旧代码 / 老 draft 还引用 hasMultiSource / extraConfigSources 等,
-// 这里做 noop 兜底,等老 UI 全清完(本 commit 已动 Step 4/5)再删。 ──
-const hasMultiSource = computed(() => isMultiSource.value)
-const extraConfigSources = reactive<any[]>([]) // 不再使用;新代码看 enabledSourceTypes
-const allConfigSourceIDs = computed(() => activeSourceTypes.value.length > 0 ? activeSourceTypes.value : ['default'])
-function addExtraConfigSource() { /* no-op,已被顶部 checkbox 多选取代 */ }
-void hasMultiSource; void extraConfigSources; void allConfigSourceIDs; void addExtraConfigSource
 
 // 兼容 legacy 模板/代码用:configCenterType 仍然存在,反映"主源"(第一个激活的)。
 // 老 ccCredInputs 也保留(yaml 老 emit 用),由 watch 从 sourceCreds[primary] 同步过来。
@@ -4658,19 +4619,9 @@ function targetBadgeProps(t: string): { detected: boolean | null | undefined; ve
     title: r.note || r.path || '',
   }
 }
-// openclaw 是唯一需要"工作区目录"概念的 target,其它 3 个都装到用户自选位置
-// (claude-code / cursor = 项目根,embedded = Studio 内嵌)。用 computed 单独暴露,
-// 模板里读这个 flag 判断要不要露 workspace_name 输入框。
-// workspace_name 现在直接在 Step 1 卡片里按 openclaw 勾选状态展开,这里留着
-// 给未来潜在消费点(BotsPage 显示 / 校验错误提示等);以 _ 前缀避免 unused 告警。
-const _needsWorkspaceName = computed(() => enabledTargets[Target.Openclaw])
-void _needsWorkspaceName
-
 // 勾上 openclaw 时触发一次 openclaw 配置探测(还没跑过 / 上次失败都重试)。
-// 注意:这段 watch / onMounted 必须放在 enabledTargets 声明之后 —— 早期放前面
-// 会因 TDZ(Temporal Dead Zone)在 setup() 初始化时立即触发 getter,读还没声明的
-// enabledTargets 报 "Cannot access ... before initialization"。
-// openclawDetectStatus 等 ref 在文件上方已声明,跨位置 closure 引用无问题。
+// Why: 这段 watch / onMounted 必须放在 enabledTargets 声明之后 ——  放前面会 TDZ
+//      触发 getter,读未初始化的 enabledTargets 报错。
 watch(() => enabledTargets[Target.Openclaw], (on) => {
   if (on && openclawDetectStatus.value === 'idle') {
     runOpenClawDetect()
@@ -4697,14 +4648,16 @@ watch([aitoolsResult, openclawDetectStatus], () => {
 }, { flush: 'post' })
 
 // 环境列表变化 → 清掉不属于当前任何 env.id 的孤儿状态,防 draft 越攒越脏。
-// 用户改 env.id(重命名) / removeEnv 都会触发。
-// 依赖 environments.map().join() 作为 dependency trigger(deep watch 开销大)。
+// Why: 用户改 env.id(重命名)/ removeEnv 时旧 envID 残留在各 map 里,
+//      kuboardStateByEnv 等可能撑出 MB 级体积,挤爆 localStorage 配额。
 watch(() => environments.map(e => e.id).join('|'), () => {
   const valid = new Set(environments.map(e => e.id).filter(Boolean))
   // 所有 per-env map:key = env.id
   for (const k of Object.keys(envNamespaces))        if (!valid.has(k)) delete envNamespaces[k]
   for (const k of Object.keys(ccHubStateByEnv))      if (!valid.has(k)) delete ccHubStateByEnv[k]
   for (const k of Object.keys(scannedDS))            if (!valid.has(k)) delete scannedDS[k]
+  for (const k of Object.keys(kuboardStateByEnv))    if (!valid.has(k)) delete kuboardStateByEnv[k]
+  for (const k of Object.keys(k8sRuntimeEnvLoc))     if (!valid.has(k)) delete k8sRuntimeEnvLoc[k]
   // 所有 per-(env,svc) 复合 key:前缀是 "<envID>::"(svcKey 与 scanStateKey 一致)
   for (const k of Object.keys(serviceConfigSel)) {
     const env = k.split('::')[0]; if (!valid.has(env)) delete serviceConfigSel[k]
@@ -4714,6 +4667,16 @@ watch(() => environments.map(e => e.id).join('|'), () => {
   }
   for (const k of Object.keys(dsScanState)) {
     const env = k.split('::')[0]; if (!valid.has(env)) delete dsScanState[k]
+  }
+  for (const k of Object.keys(k8sRuntimeSvcMap)) {
+    const env = k.split('::')[0]; if (!valid.has(env)) delete k8sRuntimeSvcMap[k]
+  }
+  for (const k of Object.keys(kuboardSvcMap)) {
+    const env = k.split('::')[0]; if (!valid.has(env)) delete kuboardSvcMap[k]
+  }
+  // k8sRtWorkloadCache key 形如 "<envID>::<cluster>::<ns>"
+  for (const k of Object.keys(k8sRtWorkloadCache)) {
+    const env = k.split('::')[0]; if (!valid.has(env)) delete k8sRtWorkloadCache[k]
   }
   // ccCredInputs 以 "cc:<type>:<env>:<field>" 为 key
   for (const k of Object.keys(ccCredInputs)) {
@@ -4768,13 +4731,9 @@ watch(configCenterType, (newType, oldType) => {
   }
 })
 
-// Auto-save all form state so navigating away doesn't lose the draft
-// lastSavedAt:页面右上角"自动保存"徽章用。null = "草稿空 / 尚未保存过"。
-// 之前一直 null 兜底,在 keep-alive 模式下没问题(切回保留 ref 值)。但 InitPage 现在
-// 不进 keep-alive(App.vue::exclude InitPage),每次进 /init 都重新 mount,如果本地
-// 已经有 saved 草稿(loadSavedDraft 命中),badge 应该立刻显示"✓ 自动保存"而不是"草稿空"。
-// 所以挂载时根据 saved 是否存在初始化:有 saved → Date.now() 占位(用户改任一字段后由
-// auto-save watch 覆盖成真实保存时间);无 saved → null。
+// 自动保存草稿用的"上次保存时间"。Why: InitPage 不进 keep-alive,每次 mount
+// 重建,有 saved 草稿时 badge 应直接显示"✓ 自动保存"——挂载时占位 Date.now,
+// 用户改字段后由 auto-save watch 覆盖成真实时间。
 const lastSavedAt = ref<number | null>(saved ? Date.now() : null)
 watch(
   () => ({
@@ -5236,11 +5195,9 @@ function generateYAML(): string {
   return libGenerateYAML(ctx)
 }
 
-// ── Validation ──
 // ── 校验 ─────────────────────────────────────────────────────────────
-// 以前是 nextStep 时单次 validate;现在改成 computed,每次字段变动立刻重算
-// errors,模板里按 key 显示红框,按钮按 size 决定 disabled。
-// 另外 validate 规则跟着向导结构升级:
+// computed:每次字段变动立刻重算 errors,模板按 key 显示红框,按钮按 size 决定 disabled。
+// validate 规则:
 //   Step 1:system.id / name(workspace_name / model 移到 Step 2)
 //   Step 2:agent.name、≥1 个 target、勾 openclaw 要 workspace_name、
 //          勾 openclaw/embedded 要对应 model
@@ -5429,10 +5386,8 @@ async function downloadYAML() {
 }
 
 // ── 一键部署 ──
-// 之前走完向导只能下 yaml → 跳 BotsPage → 导入 → 选 target → 填路径,4 步。
-// 现在 Step 8 直接遍历 Step 2 已勾选的所有 target 一键部署:每个 target 走
-// importAndDeploy(复用 BotsPage 那条闭环)装到自动路径 ~/.tshoot/<target>/<id>/,
-// 全部成功后跳 /bots 看刚装好的卡。
+// 遍历 Step 2 已勾的 target,各自走 importAndDeploy(复用 BotsPage 那条闭环)
+// 装到 ~/.tshoot/<target>/<id>/,全部成功后跳 /bots 看刚装好的卡。
 const deployLoading = ref(false)
 const deployError = ref<string | null>(null)
 
@@ -5715,10 +5670,6 @@ async function runOneClickDeploy() {
   }
 }
 
-// stack 的枚举集合:原本给 Step 4 的下拉 select 用,现在改成自动识别 readonly badge,
-// 但 generateYAML 写注释时还提示合法值,留着当"文档"引用。
-const _stackOptions = ['go', 'java', 'node', 'php', 'python']
-void _stackOptions
 const configTypeOptions = ['nacos', 'apollo', 'consul', 'env-vars', 'kuboard', 'none']
 
 const configTypeDescriptions: Record<string, string> = {
@@ -6117,7 +6068,6 @@ const configTypeDescriptions: Record<string, string> = {
         v-for="(env, i) in environments"
         :key="i"
         :env="env"
-        :index="i"
         :api-probe="urlProbeResults[urlProbeKey(i, 'api')]"
         :web-probe="urlProbeResults[urlProbeKey(i, 'web')]"
         :has-id-error="hasError(`env.${i}.id`)"

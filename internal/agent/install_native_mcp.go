@@ -11,8 +11,8 @@
 package agent
 
 import (
-	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,19 +78,10 @@ func MergeMCPIntoIDESettingsAt(target string, cfg *config.SystemConfig, creds ma
 	for k := range servers {
 		delete(existing, k)
 	}
-	for k, v := range servers {
-		existing[k] = v
-	}
+	maps.Copy(existing, servers)
 	settings["mcpServers"] = existing
 
-	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", filepath.Dir(settingsPath), err)
-	}
-	data, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal: %w", err)
-	}
-	if err := os.WriteFile(settingsPath, data, 0o644); err != nil {
+	if err := writeJSONFile(settingsPath, settings, 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", settingsPath, err)
 	}
 	return nil

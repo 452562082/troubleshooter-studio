@@ -1,17 +1,7 @@
-// yamlGenerator.ts —— 把 InitPage::generateYAML 整体搬到 lib。
-// 设计:用一个 YAMLGenContext 接口打包 InitPage setup() 里那 25+ 个 closure
-// reactive / computed / 静态 const / helper 函数,InitPage 那边 call site
-// 缩成一个 generateYAML(ctx)。
-//
-// 为什么要搬:
-//   1. InitPage 11000+ 行的最大单函数(440 行纯 emit 逻辑),搬走立即去除噪音
-//   2. lib 文件可被 vitest 直接 import,跑 yaml 生成测试不必 mount Vue 组件
-//   3. 后续校验 yaml 格式 / schema 变更 / 多源 emit 行为只在一处改
-//
-// 设计取舍:
-//   - 用单一 ctx object 而不是 N 个 args,call site 噪音可控
-//   - 类型对齐 InitPage 现有用法,允许部分字段 readonly Map / 部分函数指针
-//   - 保留 yaml.dump 引用(rawExtra 透传那段),避免重写
+// yamlGenerator.ts —— wizard 表单 → system.yaml 文本。
+// 设计:YAMLGenContext 打包 InitPage 里需要的所有 reactive / computed / helper,
+//       InitPage call site 缩成 generateYAML(ctx)。lib 文件可被 vitest 直接 import,
+//       不必 mount Vue 组件。
 
 import yaml from 'js-yaml'
 import { Target } from './constants'

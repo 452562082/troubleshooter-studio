@@ -48,10 +48,9 @@ type UninstallNativeResult struct {
 }
 
 // UninstallNative 卸载 claude-code / cursor / codex 装的机器人。
-// installedDir = ag.Path(BotsPage 扫到的真实部署目录,2026-04-30 起 = <root>/skills/<name>/,
-//                跟 OpenClaw 一样指向真实位置)。<root> 通常是 ~/.claude / ~/.cursor / ~/.codex,
-//                但如果用户在 wizard 里选了自定义安装目录,<root> 就是那个 custom dir。
-// target 必须是 "claude-code" / "cursor" / "codex"。
+// installedDir = ag.Path,即 <root>/skills/<name>/(BotsPage 扫到的真实部署目录)。
+// <root> 通常是 ~/.claude / ~/.cursor / ~/.codex,但 wizard 里选过自定义目录时 <root>
+// 就是那个 custom dir。target 必须是 "claude-code" / "cursor" / "codex"。
 //
 // 流程:
 //  1. 真实部署目录(skills/<name>/)→ ~/.Trash(失败回退 RemoveAll)
@@ -215,13 +214,8 @@ func cleanIDEMCPServers(t IDETarget, root, systemID string, logf func(format str
 	}
 
 	cfgFile := filepath.Join(root, t.SettingsFilename())
-	data, err := os.ReadFile(cfgFile)
+	settings, err := readJSONOrEmpty(cfgFile)
 	if err != nil {
-		// 没文件 = 没 MCP 注册过,不算错
-		return nil
-	}
-	var settings map[string]any
-	if err := json.Unmarshal(data, &settings); err != nil {
 		logf("[warn] %s 解析失败:%v(skip 清理)", cfgFile, err)
 		return nil
 	}
@@ -241,12 +235,7 @@ func cleanIDEMCPServers(t IDETarget, root, systemID string, logf func(format str
 	}
 	sort.Strings(removed)
 	settings["mcpServers"] = servers
-	out, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		logf("[warn] %s marshal 失败:%v", cfgFile, err)
-		return nil
-	}
-	if err := os.WriteFile(cfgFile, out, 0o644); err != nil {
+	if err := writeJSONFile(cfgFile, settings, 0o644); err != nil {
 		logf("[warn] 写 %s 失败:%v", cfgFile, err)
 		return nil
 	}

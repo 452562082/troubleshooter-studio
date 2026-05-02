@@ -175,8 +175,8 @@ const SOURCE_LABELS: Record<LogSource, string> = {
 }
 .toolbar-input:focus { outline: none; border-color: #3b82f6; }
 
-/* 注意:.btn / .btn-danger 是全局类,这里把日志页工具栏的紧凑变体限定在 .logs-page 子树内,
-   不再泄漏到其他页(如 InitPage 部署按钮),避免切到日志再切回去就被覆盖成小尺寸 */
+/* .btn / .btn-danger 是全局类,这里日志页工具栏的紧凑变体限定在 .logs-page 子树内,
+   避免泄漏到其它页(.btn 同优先级会被源序后的本规则覆盖) */
 .logs-page .btn {
   padding: 4px 12px; font-size: 12px; border: 1px solid #cbd5e1;
   background: #fff; color: #1e293b; border-radius: 4px; cursor: pointer;

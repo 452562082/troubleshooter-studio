@@ -19,8 +19,6 @@ import URLProbeBadge from './URLProbeBadge.vue'
 defineProps<{
   /** 本行的环境对象;reactive 直引,改字段不必 emit */
   env: { id: string; api_domain: string; web_domain: string; is_prod: boolean }
-  /** 本行 index,只用于显示/disable;真正"删本行"靠 emit('remove') 让父端按 index 处理 */
-  index: number
   /** API 域名探测态;undefined / status='idle' 时不显示 badge */
   apiProbe: URLProbeState | undefined
   /** Web 域名探测态 */

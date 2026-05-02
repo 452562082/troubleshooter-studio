@@ -48,7 +48,7 @@
 
   <!-- Title -->
   <text x="480" y="24" text-anchor="middle" class="title">支持的系统架构（灵活组合，非固定分层）</text>
-  <text x="480" y="42" text-anchor="middle" class="subtitle">repos[].role 自由搭配：frontend / gateway / backend / infra / shared — 以下为 6 种常见模式</text>
+  <text x="480" y="42" text-anchor="middle" class="subtitle">repos[].role 自由搭配：frontend / gateway / backend / middleware / admin / common-lib / infra / mobile / docs — 以下为 6 种常见模式</text>
 
   <!-- ==================== 6 种架构模式 ==================== -->
 
@@ -166,8 +166,8 @@
     <rect width="45" height="14" rx="3" fill="#FEE2E2"/><text x="22" y="11" text-anchor="middle" fill="#DC2626">nacos</text>
     <rect x="50" width="45" height="14" rx="3" fill="#EDE9FE"/><text x="72" y="11" text-anchor="middle" fill="#7C3AED">apollo</text>
     <rect x="100" width="45" height="14" rx="3" fill="#D1FAE5"/><text x="122" y="11" text-anchor="middle" fill="#059669">consul</text>
-    <rect x="150" width="72" height="14" rx="3" fill="#CFFAFE"/><text x="186" y="11" text-anchor="middle" fill="#0891B2">kubernetes</text>
-    <rect x="228" width="55" height="14" rx="3" fill="#F0FDF4"/><text x="255" y="11" text-anchor="middle" fill="#16A34A">env-vars</text>
+    <rect x="150" width="55" height="14" rx="3" fill="#CFFAFE"/><text x="177" y="11" text-anchor="middle" fill="#0891B2">kuboard</text>
+    <rect x="210" width="55" height="14" rx="3" fill="#F0FDF4"/><text x="237" y="11" text-anchor="middle" fill="#16A34A">env-vars</text>
   </g>
 
   <!-- ==================== 三种配置源排障链路 ==================== -->
@@ -195,19 +195,19 @@
   <rect x="340" y="405" width="290" height="200" rx="10" fill="white" stroke="#06B6D4" stroke-width="2"/>
   <rect x="340" y="405" width="290" height="30" rx="10" fill="url(#cyan)"/>
   <rect x="340" y="425" width="290" height="10" fill="url(#cyan)"/>
-  <text x="485" y="425" text-anchor="middle" class="box-label" font-size="12">Kubernetes（ConfigMap / Secret）</text>
+  <text x="485" y="425" text-anchor="middle" class="box-label" font-size="12">Kuboard（K8s ConfigMap HTTP）</text>
   <rect x="365" y="445" width="240" height="24" rx="5" fill="#ECFEFF" stroke="#A5F3FC"/>
   <text x="485" y="461" text-anchor="middle" font-size="10" fill="#0E7490">① routing → env</text>
   <line x1="485" y1="469" x2="485" y2="478" stroke="#06B6D4" stroke-width="1.5" marker-end="url(#arr-c)"/>
   <rect x="365" y="480" width="240" height="24" rx="5" fill="#ECFEFF" stroke="#A5F3FC"/>
-  <text x="485" y="496" text-anchor="middle" font-size="10" fill="#0E7490">② kubectl get configmap / secret</text>
+  <text x="485" y="496" text-anchor="middle" font-size="10" fill="#0E7490">② Kuboard HTTP 读 ConfigMap</text>
   <line x1="485" y1="504" x2="485" y2="513" stroke="#06B6D4" stroke-width="1.5" marker-end="url(#arr-c)"/>
   <rect x="365" y="515" width="240" height="24" rx="5" fill="#ECFEFF" stroke="#A5F3FC"/>
-  <text x="485" y="531" text-anchor="middle" font-size="10" fill="#0E7490">③ resolve_runtime_k8s → 连接串</text>
+  <text x="485" y="531" text-anchor="middle" font-size="10" fill="#0E7490">③ resolve_runtime_kuboard → 连接串</text>
   <line x1="485" y1="539" x2="485" y2="548" stroke="#06B6D4" stroke-width="1.5" marker-end="url(#arr-c)"/>
   <rect x="365" y="550" width="240" height="24" rx="5" fill="#ECFEFF" stroke="#A5F3FC"/>
   <text x="485" y="566" text-anchor="middle" font-size="10" fill="#0E7490">④ runtime-query 查数据层</text>
-  <text x="485" y="593" text-anchor="middle" class="note">需要 kubectl + RBAC 权限</text>
+  <text x="485" y="593" text-anchor="middle" class="note">无需 kubectl,Kuboard HTTP API 直查</text>
 
   <!-- 模式 C：env-vars -->
   <rect x="650" y="405" width="280" height="200" rx="10" fill="white" stroke="#10B981" stroke-width="2"/>
@@ -229,7 +229,7 @@
 
   <!-- ==================== 底部能力 ==================== -->
   <rect x="30" y="620" width="900" height="220" rx="8" fill="#F8FAFC" stroke="#E2E8F0"/>
-  <text x="40" y="640" class="note" font-weight="700" font-size="12" fill="#1E293B">共享排障基础能力（19 个可选 skill + 10 个 CLI 子命令）</text>
+  <text x="40" y="640" class="note" font-weight="700" font-size="12" fill="#1E293B">共享排障基础能力（按 yaml 动态裁剪的 skill 集 + CLI 子命令）</text>
 
   <g transform="translate(50, 654)" font-size="10" fill="#475569">
     <rect width="170" height="20" rx="4" fill="#DBEAFE"/><text x="85" y="14" text-anchor="middle" fill="#1E40AF" font-weight="600">routing skill（6 张映射表）</text>

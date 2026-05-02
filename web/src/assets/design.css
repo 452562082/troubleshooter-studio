@@ -222,6 +222,84 @@ textarea.err {
   border-color: #ef4444;
 }
 
+/* ── 表单段落:label + control 一组,跨多 component(EnvListItem / RepoListItem /
+   SecondarySourcePanel / 各 cred 表单)共享。.compact 用于 row-fields 里横排不留底距。 */
+.form-group {
+  margin-bottom: 16px;
+}
+.form-group label {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: #475569;
+  margin-bottom: 5px;
+}
+.form-group.compact {
+  flex: 1;
+  margin-bottom: 0;
+}
+
+/* 必填星号 + 鼠标悬停帮助说明的 ? 圆 */
+.required {
+  color: #ef4444;
+}
+.help-icon {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  line-height: 14px;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 700;
+  color: #64748b;
+  background: #e2e8f0;
+  border-radius: 50%;
+  margin-left: 4px;
+  cursor: help;
+  vertical-align: middle;
+  transition: all 0.15s;
+}
+.help-icon:hover {
+  background: #3b82f6;
+  color: #fff;
+}
+
+/* 字段下方的红色错误文案 */
+.error-text {
+  color: #ef4444;
+  font-size: 12px;
+  margin-top: 3px;
+  display: block;
+}
+
+/* 列表行(env / repo 等动态行):分隔线 + 横排字段 + 末尾删除按钮 */
+.dynamic-row {
+  padding: 12px 0;
+  border-bottom: 1px solid #f1f5f9;
+}
+.dynamic-row:last-of-type {
+  border-bottom: none;
+}
+.row-fields {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+}
+.checkbox-group {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  padding-bottom: 2px;
+}
+.checkbox-group label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  white-space: nowrap;
+  margin-bottom: 0;
+}
+
 /* ── 通用 tag / badge ────────────────────────────────── */
 .tag {
   display: inline-block;

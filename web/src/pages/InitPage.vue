@@ -7060,91 +7060,9 @@ const configTypeDescriptions: Record<string, string> = {
   margin-bottom: 18px;
 }
 
-/* ── Form elements ── */
-.form-group {
-  margin-bottom: 16px;
-}
-
-.form-group label {
-  display: block;
-  font-size: 13px;
-  font-weight: 500;
-  color: #475569;
-  margin-bottom: 5px;
-}
-
-.required {
-  color: #ef4444;
-}
-
-.help-icon {
-  display: inline-block;
-  width: 14px;
-  height: 14px;
-  line-height: 14px;
-  text-align: center;
-  font-size: 10px;
-  font-weight: 700;
-  color: #64748b;
-  background: #e2e8f0;
-  border-radius: 50%;
-  margin-left: 4px;
-  cursor: help;
-  vertical-align: middle;
-  transition: all 0.15s;
-}
-.help-icon:hover {
-  background: #3b82f6;
-  color: #fff;
-}
-
-/* input / textarea / select 基础样式 + .error 已上提到 design.css 全局共享 */
-
-.error-text {
-  color: #ef4444;
-  font-size: 12px;
-  margin-top: 3px;
-  display: block;
-}
-
-/* ── Dynamic rows ── */
-.dynamic-row {
-  padding: 12px 0;
-  border-bottom: 1px solid #f1f5f9;
-}
-
-.dynamic-row:last-of-type {
-  border-bottom: none;
-}
-
-.row-fields {
-  display: flex;
-  gap: 12px;
-  align-items: flex-end;
-}
-
-.form-group.compact {
-  flex: 1;
-  margin-bottom: 0;
-}
-
-.checkbox-group {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  padding-bottom: 2px;
-}
-
-.checkbox-group label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  white-space: nowrap;
-  margin-bottom: 0;
-}
-
-/* .btn-icon.remove 已上提到 design.css */
+/* .form-group / .help-icon / .error-text / .dynamic-row / .row-fields /
+   .checkbox-group / .required / .btn-icon.remove / input/textarea/select 基础样式
+   全部已上提到 design.css —— 多组件共享避免依赖 InitPage CSS 加载顺序 */
 
 /* ── Repo block ── */
 /* Analyze 集成块:折叠在 Step 4 顶部,不打扰不关心它的用户 */

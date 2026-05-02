@@ -51,9 +51,12 @@ const emit = defineEmits<{
 }>()
 
 // 模板里反复 (state as any).clusters/.error,改成窄化 helper 一次性收
-function kuboardClusterCountOf(envID: string): number {
+function kuboardClustersOf(envID: string) {
   const st = props.kuboardStateByEnv[envID]
-  return (st && st.status === 'ok') ? st.clusters.length : 0
+  return (st && st.status === 'ok') ? st.clusters : []
+}
+function kuboardClusterCountOf(envID: string): number {
+  return kuboardClustersOf(envID).length
 }
 function kuboardErrorOf(envID: string): string {
   const st = props.kuboardStateByEnv[envID]
@@ -127,7 +130,7 @@ function kuboardErrorOf(envID: string): string {
         :env-i-d="env.id"
         :services="allServiceNames.filter(s => getServiceSource(s) === sourceType)"
         :kuboard-svc-map="kuboardSvcMap"
-        :clusters="((kuboardStateByEnv[env.id] as any)?.clusters || [])"
+        :clusters="kuboardClustersOf(env.id)"
         :svc-key="svcKey"
         :namespaces-for="kuboardNamespacesFor"
         :configmaps-for="kuboardConfigMapsFor"

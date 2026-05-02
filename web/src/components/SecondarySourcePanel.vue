@@ -11,7 +11,7 @@ import { computed } from 'vue'
 import type { CredField, KuboardResourceState } from '../lib/credFields'
 import type { KuboardSvcLocator } from '../lib/yamlGenerator'
 import CredentialField from './CredentialField.vue'
-import PreloadButton from './PreloadButton.vue'
+import PreloadStatusRow from './PreloadStatusRow.vue'
 import ServiceChecklist from './ServiceChecklist.vue'
 import KuboardServiceMap from './KuboardServiceMap.vue'
 
@@ -49,6 +49,16 @@ const emit = defineEmits<{
   toggleServiceSource: [svc: string, checked: boolean, sourceType: string]
   setKuboardLoc: [envID: string, svc: string, field: 'cluster' | 'namespace' | 'configmap', value: string]
 }>()
+
+// 模板里反复 (state as any).clusters/.error,改成窄化 helper 一次性收
+function kuboardClusterCountOf(envID: string): number {
+  const st = props.kuboardStateByEnv[envID]
+  return (st && st.status === 'ok') ? st.clusters.length : 0
+}
+function kuboardErrorOf(envID: string): string {
+  const st = props.kuboardStateByEnv[envID]
+  return (st && st.status === 'error') ? st.error.slice(0, 60) : ''
+}
 </script>
 
 <template>
@@ -84,21 +94,16 @@ const emit = defineEmits<{
       </div>
 
       <!-- kuboard 副源:加"📥 拉取资源"按钮,根据 sourceCreds[t].creds[env] 读 -->
-      <div v-if="sourceType === 'kuboard'" class="cc-preload-row">
-        <PreloadButton
-          :status="kuboardStateByEnv[env.id]?.status"
-          idle-text="📥 从 Kuboard 读取可选项"
-          ok-text="🔄 重新读取"
-          @click="emit('preloadKuboard', sourceType, env.id)"
-        />
-        <span v-if="kuboardStateByEnv[env.id]?.status === 'ok'" class="cc-preload-summary">
-          ✓ {{ (kuboardStateByEnv[env.id] as any).clusters.length }} 个集群
-        </span>
-        <span v-else-if="kuboardStateByEnv[env.id]?.status === 'error'" class="cc-preload-error">
-          ✗ {{ (kuboardStateByEnv[env.id] as any).error.slice(0, 60) }}
-          <router-link to="/logs" class="cc-preload-log-link">查看日志</router-link>
-        </span>
-      </div>
+      <PreloadStatusRow
+        v-if="sourceType === 'kuboard'"
+        :status="kuboardStateByEnv[env.id]?.status"
+        idle-text="📥 从 Kuboard 读取可选项"
+        ok-text="🔄 重新读取"
+        :error-message="kuboardErrorOf(env.id)"
+        @click="emit('preloadKuboard', sourceType, env.id)"
+      >
+        <template #ok>✓ {{ kuboardClusterCountOf(env.id) }} 个集群</template>
+      </PreloadStatusRow>
 
       <!-- 服务勾选清单:只列"主源没勾走的"剩余服务 + 已经勾给本副源的服务。
            主源已勾走的服务不出现,避免一个服务同时被两个源认领。 -->

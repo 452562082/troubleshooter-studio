@@ -44,13 +44,13 @@ import type { AIToolResult, CCHubEntry, CCHubNamespace, GrafanaDatasource, OpenC
 import { confirmDialog } from '../lib/confirm'
 import { pushLog } from '../lib/logStore'
 import { toast } from '../lib/toast'
-import { Target, type TargetId } from '../lib/constants'
+import { Target, IDE_TARGETS, type TargetId } from '../lib/constants'
 import type { URLProbeState } from '../lib/probeTypes'
 import type { CredField, KuboardResourceState } from '../lib/credFields'
 import EnvListItem from '../components/EnvListItem.vue'
 import CredentialField from '../components/CredentialField.vue'
 import TargetInstallBadge from '../components/TargetInstallBadge.vue'
-import PreloadButton from '../components/PreloadButton.vue'
+import PreloadStatusRow from '../components/PreloadStatusRow.vue'
 import DataStoreServiceBlock from '../components/DataStoreServiceBlock.vue'
 import ObservabilityToolBlock from '../components/ObservabilityToolBlock.vue'
 import NamespaceServiceMap from '../components/NamespaceServiceMap.vue'
@@ -1704,6 +1704,16 @@ async function runK8sRtPreload(envID: string) {
     pushLog('cchub', 'error', `[${envID}] k8s_runtime 加载集群失败: ${msg}`, { envID })
     toast.error(`${envID} 加载失败: ${msg.slice(0, 80)}`)
   }
+}
+
+// 模板用的窄化 helper:跳过 status union narrowing 的 (state as any) 强转,统一一个出口
+function kuboardClusterCountOf(envID: string): number {
+  const st = kuboardStateByEnv[envID]
+  return (st && st.status === 'ok') ? st.clusters.length : 0
+}
+function kuboardErrorOf(envID: string): string {
+  const st = kuboardStateByEnv[envID]
+  return (st && st.status === 'error') ? st.error.slice(0, 60) : ''
 }
 
 // 取当前 env 下,某 cluster 的 namespace 列表(级联下拉用)。
@@ -5625,11 +5635,10 @@ async function runOneClickDeploy() {
       // 同一份 creds 顺带传给 claude-code/cursor:installNative 走完文件拷贝后会用它
       // 注入 ~/.claude/settings.json / ~/.cursor/mcp.json 的 mcpServers,装完即可用 MCP 工具。
       // openclaw 的自定义目录走 openclawInstallDir 那条独立 UI;这里只对 ide 三家生效
-      const cir = (t === 'claude-code' || t === 'cursor' || t === 'codex')
-        ? (customInstallRoots[t] || '').trim()
-        : ''
+      const isIDE = (IDE_TARGETS as string[]).includes(t)
+      const cir = isIDE ? (customInstallRoots[t] || '').trim() : ''
       await importAndDeploy(yamlOutput.value, t, dest, repoPaths, openclawCreds, cir)
-      if (t === 'claude-code' || t === 'cursor' || t === 'codex') {
+      if (isIDE) {
         installedTargets.push(t)
         continue
       }
@@ -6267,21 +6276,16 @@ const configTypeDescriptions: Record<string, string> = {
           </div>
 
           <!-- kuboard 专属:点这个按钮拉资源,把后面 cluster/namespace/cm 三个字段从手填变下拉 -->
-          <div v-if="configCenterType === 'kuboard'" class="cc-preload-row">
-            <PreloadButton
-              :status="kuboardStateByEnv[env.id]?.status"
-              idle-text="📥 从 Kuboard 读取可选项"
-              ok-text="🔄 重新读取"
-              @click="runKuboardPreload(env.id)"
-            />
-            <span v-if="kuboardStateByEnv[env.id]?.status === 'ok'" class="cc-preload-summary">
-              ✓ {{ (kuboardStateByEnv[env.id] as any).clusters.length }} 个集群
-            </span>
-            <span v-else-if="kuboardStateByEnv[env.id]?.status === 'error'" class="cc-preload-error">
-              ✗ {{ (kuboardStateByEnv[env.id] as any).error.slice(0, 60) }}
-              <router-link to="/logs" class="cc-preload-log-link">查看日志</router-link>
-            </span>
-          </div>
+          <PreloadStatusRow
+            v-if="configCenterType === 'kuboard'"
+            :status="kuboardStateByEnv[env.id]?.status"
+            idle-text="📥 从 Kuboard 读取可选项"
+            ok-text="🔄 重新读取"
+            :error-message="kuboardErrorOf(env.id)"
+            @click="runKuboardPreload(env.id)"
+          >
+            <template #ok>✓ {{ kuboardClusterCountOf(env.id) }} 个集群</template>
+          </PreloadStatusRow>
 
           <!-- 服务勾选清单:勾哪些服务走当前源(主源)。多源场景下,某服务在主源勾选 = 它的
                config_source 设为主源 type;副源场景下用户去对应副源面板勾选。
@@ -6297,21 +6301,14 @@ const configTypeDescriptions: Record<string, string> = {
 
           <!-- 真实预加载:用户填完凭证 + 勾选服务后,点一下连目标配置中心拉可用条目清单。
                按钮挨着每个 env 块,各 env 独立 loading / 错误态。 -->
-          <div class="cc-preload-row">
-            <PreloadButton
-              :status="ccHubStateByEnv[env.id]?.status"
-              idle-text="📥 拉取勾选服务的配置"
-              ok-text="🔄 重新拉取勾选服务的配置"
-              @click="runCCHubPreload(env.id)"
-            />
-            <span v-if="ccHubStateByEnv[env.id]?.status === 'ok'" class="cc-preload-summary">
-              ✓ {{ ccHubStateByEnv[env.id]!.entries?.length || 0 }} 条
-            </span>
-            <span v-else-if="ccHubStateByEnv[env.id]?.status === 'error'" class="cc-preload-error">
-              ✗ 拉取失败
-              <router-link to="/logs" class="cc-preload-log-link">查看日志</router-link>
-            </span>
-          </div>
+          <PreloadStatusRow
+            :status="ccHubStateByEnv[env.id]?.status"
+            idle-text="📥 拉取勾选服务的配置"
+            ok-text="🔄 重新拉取勾选服务的配置"
+            @click="runCCHubPreload(env.id)"
+          >
+            <template #ok>✓ {{ ccHubStateByEnv[env.id]!.entries?.length || 0 }} 条</template>
+          </PreloadStatusRow>
 
           <!-- 映射块:只有**本 env** 自己预加载成功时才显示。不借其他 env 的扫描结果 ——
                每个 env 必须用自己的凭证各扫一次,才能呈现自己的 namespace / dataId 选项。 -->

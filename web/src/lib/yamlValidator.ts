@@ -37,7 +37,8 @@ export interface KuboardSvcLocator {
   configmap?: string
 }
 
-export type ProbeStatus = 'idle' | 'loading' | 'ok' | 'fail' | 'error'
+export type { ProbeStatus } from './probeTypes'
+import type { ProbeStatus } from './probeTypes'
 
 export interface CCHubEnvState {
   status: 'idle' | 'loading' | 'ok' | 'error'

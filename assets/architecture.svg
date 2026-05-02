@@ -232,8 +232,8 @@
   <text x="40" y="640" class="note" font-weight="700" font-size="12" fill="#1E293B">共享排障基础能力（按 yaml 动态裁剪的 skill 集 + CLI 子命令）</text>
 
   <g transform="translate(50, 654)" font-size="10" fill="#475569">
-    <rect width="170" height="20" rx="4" fill="#DBEAFE"/><text x="85" y="14" text-anchor="middle" fill="#1E40AF" font-weight="600">routing skill（6 张映射表）</text>
-    <text x="180" y="14" fill="#64748B">env → branch / domain / config-map / log-app / observability / repo-stack</text>
+    <rect width="170" height="20" rx="4" fill="#DBEAFE"/><text x="85" y="14" text-anchor="middle" fill="#1E40AF" font-weight="600">routing skill（11 张映射表）</text>
+    <text x="180" y="14" fill="#64748B">env-domain / branch / config / log-app / observability / repo-stack / repo-path / svc-dependency / data-schema / known-errors / propagation-delay</text>
   </g>
   <g transform="translate(50, 678)" font-size="10" fill="#475569">
     <rect width="170" height="20" rx="4" fill="#FEF3C7"/><text x="85" y="14" text-anchor="middle" fill="#92400E" font-weight="600">可观测性（7 项 skill）</text>
@@ -244,19 +244,19 @@
     <text x="180" y="14" fill="#64748B">Redis / MongoDB / ES / MySQL / PG / Kafka / RocketMQ / RabbitMQ / ClickHouse（全只读）</text>
   </g>
   <g transform="translate(50, 726)" font-size="10" fill="#475569">
-    <rect width="170" height="20" rx="4" fill="#EDE9FE"/><text x="85" y="14" text-anchor="middle" fill="#5B21B6" font-weight="600">代码分析（5 栈 × 5 配置源）</text>
-    <text x="180" y="14" fill="#64748B">Go / Java / PHP / Python / Node(React/Vue) — service name + 配置字段 + 前端 API URL</text>
+    <rect width="170" height="20" rx="4" fill="#EDE9FE"/><text x="85" y="14" text-anchor="middle" fill="#5B21B6" font-weight="600">代码分析(5 栈 × 5 配置源)</text>
+    <text x="180" y="14" fill="#64748B">Go / Java / PHP / Python / Node(React/Vue/Next.js/Nuxt) — 服务名 / 配置字段 / 调用图 / 数据 schema</text>
   </g>
   <g transform="translate(50, 750)" font-size="10" fill="#475569">
     <rect width="170" height="20" rx="4" fill="#FEE2E2"/><text x="85" y="14" text-anchor="middle" fill="#991B1B" font-weight="600">config-executor（5 种后端）</text>
-    <text x="180" y="14" fill="#64748B">Nacos MCP / Apollo HTTP / Consul HTTP / K8s kubectl / env-vars static</text>
+    <text x="180" y="14" fill="#64748B">Nacos MCP / Apollo HTTP / Consul HTTP / Kuboard HTTP / env-vars static</text>
   </g>
   <g transform="translate(50, 774)" font-size="10" fill="#475569">
-    <rect width="170" height="20" rx="4" fill="#F1F5F9"/><text x="85" y="14" text-anchor="middle" fill="#334155" font-weight="600">生命周期（10 个子命令）</text>
-    <text x="180" y="14" fill="#64748B">init / validate / analyze / doctor / plan / watch / gen / diff / upgrade / skill new</text>
+    <rect width="170" height="20" rx="4" fill="#F1F5F9"/><text x="85" y="14" text-anchor="middle" fill="#334155" font-weight="600">CLI 子命令(完整生命周期)</text>
+    <text x="180" y="14" fill="#64748B">init / validate / analyze / doctor / plan / diff / gen / install / discover / apply / upgrade / self-test / uninstall / serve</text>
   </g>
 
   <!-- 底部重点说明 -->
   <rect x="50" y="802" width="870" height="28" rx="5" fill="#DBEAFE" stroke="#93C5FD"/>
-  <text x="480" y="820" text-anchor="middle" font-size="11" fill="#1E40AF" font-weight="600">架构不固定：repos[].role 自由搭配（frontend / gateway / backend / infra / shared），可选 skill 按需启用，未用的不生成</text>
+  <text x="480" y="820" text-anchor="middle" font-size="11" fill="#1E40AF" font-weight="600">架构不固定:repos[].role 自由搭配(frontend / gateway / backend / middleware / admin / common-lib / infra / mobile / docs),可选 skill 按需启用,未用的不生成</text>
 </svg>

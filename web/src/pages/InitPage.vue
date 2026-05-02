@@ -48,19 +48,13 @@ import { Target, IDE_TARGETS, type TargetId } from '../lib/constants'
 import type { URLProbeState } from '../lib/probeTypes'
 import type { CredField, KuboardResourceState } from '../lib/credFields'
 import EnvListItem from '../components/EnvListItem.vue'
-import CredentialField from '../components/CredentialField.vue'
 import TargetInstallBadge from '../components/TargetInstallBadge.vue'
-import PreloadStatusRow from '../components/PreloadStatusRow.vue'
 import DataStoreServiceBlock from '../components/DataStoreServiceBlock.vue'
 import ObservabilityToolBlock from '../components/ObservabilityToolBlock.vue'
-import NamespaceServiceMap from '../components/NamespaceServiceMap.vue'
-import KuboardServiceMap from '../components/KuboardServiceMap.vue'
 import LokiMappingStep from '../components/LokiMappingStep.vue'
 import K8sRuntimeBlock from '../components/K8sRuntimeBlock.vue'
 import RepoListItem from '../components/RepoListItem.vue'
-import CredsShareWarning from '../components/CredsShareWarning.vue'
-import ServiceChecklist from '../components/ServiceChecklist.vue'
-import SecondarySourcePanel from '../components/SecondarySourcePanel.vue'
+import ConfigSourceStep from '../components/ConfigSourceStep.vue'
 import { generateYAML as libGenerateYAML, type YAMLGenContext } from '../lib/yamlGenerator'
 import { computeStepErrors as libComputeStepErrors, labelForErrorKey as libLabelForErrorKey, type ValidatorContext } from '../lib/yamlValidator'
 import { applyParsedYAMLToWizardState, type ApplyImportContext } from '../lib/yamlImporter'
@@ -6204,232 +6198,51 @@ const configTypeDescriptions: Record<string, string> = {
     </div>
 
     <!-- Step 5 -->
-    <div v-if="currentStep === 6" class="card lg">
-      <h2>配置源</h2>
-
-      <!-- 多源:顶部多选,勾哪些 type 就声明哪些源 -->
-      <div class="form-group">
-        <label>
-          系统用到的配置源(可多选)
-          <span class="field-hint">
-            — 一种源勾一次(nacos / apollo / kuboard 等);多选会让你为每个服务挑走哪个源,单选则全员默认走它
-          </span>
-        </label>
-        <div class="source-types-checkboxes">
-          <label
-            v-for="t in configTypeOptions"
-            :key="t"
-            class="source-type-pill"
-            :class="{ active: enabledSourceTypes[t] }"
-          >
-            <input
-              type="checkbox"
-              :checked="!!enabledSourceTypes[t]"
-              @change="(e) => toggleSourceType(t, (e.target as HTMLInputElement).checked)"
-            />
-            <span class="source-type-pill-name">{{ t }}</span>
-            <span class="source-type-pill-desc">{{ configTypeDescriptions[t] }}</span>
-          </label>
-        </div>
-        <div v-if="activeSourceTypes.length === 0" class="alert warn" style="margin-top:8px;">
-          至少勾选一个配置源(若系统真不用配置中心,后面 Step 6/7 也基本啥都填不了)
-        </div>
-        <div v-else-if="isMultiSource" class="multi-source-mgr-hint">
-          🔀 多源模式:每个源独立填写下面的连接信息;Step 6/7 数据层和可观测会按服务的源路由
-        </div>
-      </div>
-
-      <!-- 凭证表单:主源(activeSourceTypes[0])完整功能(连接 + 预读 + namespace + 服务 dataId 选择)。
-           nacos/apollo/consul 才展;env-vars/kubernetes/none 不需要。
-           副源在主源块下方独立渲染只填连接信息(预读 + namespace 下拉留给主源,副源走 yaml 手填或 CLI)。 -->
-      <div v-if="CC_FIELDS_BY_TYPE[configCenterType]" class="form-group">
-        <label>
-          <code>{{ configCenterType }}</code> 连接配置
-          <span v-if="isMultiSource" class="auto-tag" style="background:#dbeafe;color:#1e40af;">主源 · 完整 preload</span>
-          <span class="field-hint">— 按环境维度填写,保存后写入 system.yaml(标 <code># ⚠ secret</code> 注释),部署时注入到目标平台的 MCP Server env</span>
-        </label>
-        <CredsShareWarning title="⚠ 凭证与共享提醒">
-          <li>这里填的账号密码会以明文写入 <code>system.yaml</code>(每条带 <code># ⚠ secret</code> 注释),并部署时注入到机器人 MCP Server 的 env 块 + <code>~/.tshoot/&lt;agent-id&gt;-creds.json</code>。</li>
-          <li>分享 yaml 请限**团队内部 / 私有仓库**,<strong>不要提交到公开代码仓库</strong>。</li>
-        </CredsShareWarning>
-        <div v-for="env in environments" :key="env.id" class="cc-env-block">
-          <div class="cc-env-head">
-            <span class="cc-env-label">{{ env.id || '(未命名 env)' }}</span>
-            <span v-if="env.is_prod" class="cc-env-prod-tag">prod</span>
-          </div>
-          <div class="cc-env-fields">
-            <CredentialField
-              v-for="f in (configCenterType === 'kuboard'
-                ? CC_FIELDS_BY_TYPE[configCenterType].filter(f2 => f2.key !== 'cluster' && f2.key !== 'namespace' && f2.key !== 'configmap')
-                : CC_FIELDS_BY_TYPE[configCenterType])"
-              :key="f.key"
-              v-show="!isFieldHidden(configCenterType, env.id, f, (k) => ccCredInputs[ccKeyFor(configCenterType, env.id, k)] || '')"
-              :field="f"
-              :env-i-d="env.id"
-              :model-value="ccCredInputs[ccKeyFor(configCenterType, env.id, f.key)] || ''"
-              :is-revealed="isRevealed(ccKeyFor(configCenterType, env.id, f.key))"
-              :is-kuboard="configCenterType === 'kuboard'"
-              :kuboard-state="kuboardStateByEnv[env.id]"
-              :sibling-cluster-value="ccCredInputs[ccKeyFor(configCenterType, env.id, 'cluster')] || ''"
-              :sibling-namespace-value="ccCredInputs[ccKeyFor(configCenterType, env.id, 'namespace')] || ''"
-              @update:model-value="(v: string) => (ccCredInputs[ccKeyFor(configCenterType, env.id, f.key)] = v)"
-              @toggle-reveal="toggleReveal(ccKeyFor(configCenterType, env.id, f.key))"
-              @clear="clearCCFieldInput(ccKeyFor(configCenterType, env.id, f.key))"
-            />
-          </div>
-
-          <!-- kuboard 专属:点这个按钮拉资源,把后面 cluster/namespace/cm 三个字段从手填变下拉 -->
-          <PreloadStatusRow
-            v-if="configCenterType === 'kuboard'"
-            :status="kuboardStateByEnv[env.id]?.status"
-            idle-text="📥 从 Kuboard 读取可选项"
-            ok-text="🔄 重新读取"
-            :error-message="kuboardErrorOf(env.id)"
-            @click="runKuboardPreload(env.id)"
-          >
-            <template #ok>✓ {{ kuboardClusterCountOf(env.id) }} 个集群</template>
-          </PreloadStatusRow>
-
-          <!-- 服务勾选清单:勾哪些服务走当前源(主源)。多源场景下,某服务在主源勾选 = 它的
-               config_source 设为主源 type;副源场景下用户去对应副源面板勾选。
-               单源场景默认所有服务都走唯一源,checkbox 全勾。 -->
-          <ServiceChecklist
-            v-if="allServiceNames.length > 0"
-            :services="allServiceNames"
-            :source-i-d="configCenterType"
-            :hint-html="`勾选要走 <code>${configCenterType}</code> 源的服务;点下面&quot;拉取配置&quot;会列出这些服务对应的配置项`"
-            :get-service-source="getServiceSource"
-            @toggle="(svc, checked) => setServiceSource(svc, checked ? configCenterType : '')"
-          />
-
-          <!-- 真实预加载:用户填完凭证 + 勾选服务后,点一下连目标配置中心拉可用条目清单。
-               按钮挨着每个 env 块,各 env 独立 loading / 错误态。 -->
-          <PreloadStatusRow
-            :status="ccHubStateByEnv[env.id]?.status"
-            idle-text="📥 拉取勾选服务的配置"
-            ok-text="🔄 重新拉取勾选服务的配置"
-            @click="runCCHubPreload(env.id)"
-          >
-            <template #ok>✓ {{ ccHubStateByEnv[env.id]!.entries?.length || 0 }} 条</template>
-          </PreloadStatusRow>
-
-          <!-- 映射块:只有**本 env** 自己预加载成功时才显示。不借其他 env 的扫描结果 ——
-               每个 env 必须用自己的凭证各扫一次,才能呈现自己的 namespace / dataId 选项。 -->
-          <!-- namespace + dataId 映射块只在"勾了服务 + 拉取过"时才出现。 -->
-          <NamespaceServiceMap
-            v-if="envScanned(env.id) && allServiceNames.filter(s => getServiceSource(s) === configCenterType).length > 0"
-            :env-i-d="env.id"
-            :config-center-type="configCenterType"
-            :services="allServiceNames.filter(s => getServiceSource(s) === configCenterType)"
-            :env-namespaces="envNamespaces"
-            :service-config-sel="serviceConfigSel"
-            :service-config-group="serviceConfigGroup"
-            :namespaces="namespacesFor(env.id)"
-            :entries="entriesForNamespace(env.id, envNamespaces[env.id] || '')"
-            :svc-key="svcKey"
-            :has-error="hasError"
-            @namespace-changed="(_e, v) => onNamespaceChanged(env.id, v)"
-            @data-id-changed="(_e, svc) => onDataIdChanged(env.id, svc)"
-          />
-          <!-- 没服务可勾的占位提示(原模板里 v-else-if 分支移到外层 v-if 之后) -->
-          <div
-            v-else-if="envScanned(env.id) && allServiceNames.length === 0"
-            class="cc-map-block cc-map-hint"
-          >
-            先在 Step 4 填好 repos 的 <code>service_names</code>,这里才有服务列表可映射。
-          </div>
-          <div
-            v-else-if="envScanned(env.id)"
-            class="cc-map-block cc-map-hint"
-          >
-            没有服务被勾选走 <code>{{ configCenterType }}</code> 源 —— 在上面的"本环境包含的服务"清单里勾要走当前源的服务。
-          </div>
-
-          <!-- kuboard 主源:per-service cluster/namespace/configmap 三联映射。
-               nacos 走上面的 cc-map-block(envNamespaces + serviceConfigSel),kuboard 走这里。 -->
-          <KuboardServiceMap
-            v-if="configCenterType === 'kuboard'
-                  && kuboardStateByEnv[env.id]?.status === 'ok'
-                  && allServiceNames.filter(s => getServiceSource(s) === configCenterType).length > 0"
-            :env-i-d="env.id"
-            :services="allServiceNames.filter(s => getServiceSource(s) === configCenterType)"
-            :kuboard-svc-map="kuboardSvcMap"
-            :clusters="kuboardClustersOf(env.id)"
-            :svc-key="svcKey"
-            :namespaces-for="kuboardNamespacesFor"
-            :configmaps-for="kuboardConfigMapsFor"
-            @set-loc="(envID, svc, field, value) => setKuboardLoc(envID, svc, field, value)"
-          />
-
-          <!-- 预加载失败时,不在页面渲染长错误文本;summary 行已显示 "✗ 拉取失败,详见日志",
-               用户按 toast 提示进左侧「日志」页看完整栈。
-               "下一步" 按钮旁的"还差 N 项"汇总提示已经包含该 env 未预加载的信息,
-               env 块内不再重复展示,避免视觉冗余。 -->
-
-        </div>
-      </div>
-
-      <!-- 副源连接表单:每个非主源 type 一份;主源在上面已渲染。 -->
-      <SecondarySourcePanel
-        v-for="t in activeSourceTypes.slice(1).filter(t2 => CC_FIELDS_BY_TYPE[t2])"
-        :key="`secsrc-${t}`"
-        :source-type="t"
-        :fields="CC_FIELDS_BY_TYPE[t]"
-        :environments="environments"
-        :all-service-names="allServiceNames"
-        :source-creds="sourceCreds"
-        :kuboard-state-by-env="kuboardStateByEnv"
-        :kuboard-svc-map="kuboardSvcMap"
-        :is-field-hidden="isFieldHidden"
-        :get-service-source="getServiceSource"
-        :svc-key="svcKey"
-        :kuboard-namespaces-for="kuboardNamespacesFor"
-        :kuboard-config-maps-for="kuboardConfigMapsFor"
-        @preload-kuboard="(srcType, envID) => runKuboardPreloadFromSource(srcType, envID)"
-        @toggle-service-source="(svc, checked, srcType) => setServiceSource(svc, checked ? srcType : '')"
-        @set-kuboard-loc="(envID, svc, field, value) => setKuboardLoc(envID, svc, field, value)"
-      />
-
-      <!-- env-vars 源(无远程连接,但每个 env 各数据层的静态连接串在 Step 6 数据层里按 data_store 维度填) -->
-      <div v-if="enabledSourceTypes['env-vars']" class="form-group">
-        <p class="help-text">
-          <strong>env-vars</strong> 源:机器人直接读取仓库内 <code>.env</code> 文件 + Step 6 数据层里填的静态连接串。
-          这里没有连接信息要填,具体数据层(redis / mysql / ...)的 endpoint 走 Step 6 的"数据层"页。
-        </p>
-      </div>
-
-      <!-- none 源:整个系统不接配置中心,本步无需任何输入,继续往下走即可 -->
-      <div v-if="enabledSourceTypes['none']" class="form-group">
-        <p class="help-text" style="background:#fffbeb;border-left-color:#f59e0b;color:#92400e;line-height:1.7;">
-          <strong>不使用任何配置源</strong><br/>
-          系统的连接串 / 业务配置不来自 nacos/apollo/consul/kuboard,也不走 <code>.env</code>。本步骤无需填写,直接"下一步"即可。
-          <br/>
-          下游影响:
-          <br/>
-          ① <code>config-executor</code> skill 不会装到工作区(机器人不会主动去读配置中心);
-          <br/>
-          ② Step 6 数据层连接串需要在仓库代码里硬编码 / 部署时手动注入,机器人不再帮忙读;
-          <br/>
-          ③ 生成的 <code>system.yaml</code> 仅占位 <code>config_center.type: none</code>。
-        </p>
-      </div>
-
-      <!-- kuboard 源说明:简短引导用户填 URL + 鉴权,点拉取按钮自动加载 K8s 资源 -->
-      <div v-if="enabledSourceTypes['kuboard']" class="form-group">
-        <p class="help-text" style="background:#eff6ff;border-left-color:#3b82f6;color:#1e3a8a;line-height:1.7;">
-          <strong>Kuboard 源使用说明</strong><br/>
-          通过 Kuboard v4 API 读 K8s ConfigMap,本机无需 <code>~/.kube/config</code>,适合<strong>能登 Kuboard、拿不到 kubeconfig</strong> 的场景。
-          <br/>
-          <strong>鉴权方式(二选一)</strong>:
-          <br/>
-          ① <strong>API 访问凭证</strong>(推荐):Kuboard <strong>个人中心 → API 访问凭证 → 创建</strong>,粘到下方"API 访问凭证"字段。不暴露密码、可独立吊销、长期有效。
-          <br/>
-          ② <strong>用户名 + 密码</strong>:走 Kuboard <code>/login</code> 换临时 token,适合临时验证。
-          <br/>
-          填好 URL + 任一鉴权 → 点 <strong>📥 从 Kuboard 读取可选项</strong>,集群 / namespace / ConfigMap 自动下拉,再为每个服务挑对应位置即可。
-        </p>
-      </div>
-    </div>
+    <ConfigSourceStep
+      v-if="currentStep === 6"
+      :config-type-options="configTypeOptions"
+      :config-type-descriptions="configTypeDescriptions"
+      :enabled-source-types="enabledSourceTypes"
+      :active-source-types="activeSourceTypes"
+      :is-multi-source="isMultiSource"
+      :config-center-type="configCenterType"
+      :cc-fields-by-type="CC_FIELDS_BY_TYPE"
+      :environments="environments"
+      :all-service-names="allServiceNames"
+      :cc-cred-inputs="ccCredInputs"
+      :source-creds="sourceCreds"
+      :kuboard-state-by-env="kuboardStateByEnv"
+      :cc-hub-state-by-env="ccHubStateByEnv"
+      :env-namespaces="envNamespaces"
+      :service-config-sel="serviceConfigSel"
+      :service-config-group="serviceConfigGroup"
+      :kuboard-svc-map="kuboardSvcMap"
+      :cc-key-for="ccKeyFor"
+      :is-field-hidden="isFieldHidden"
+      :is-revealed="isRevealed"
+      :kuboard-error-of="kuboardErrorOf"
+      :kuboard-cluster-count-of="kuboardClusterCountOf"
+      :kuboard-clusters-of="kuboardClustersOf"
+      :env-scanned="envScanned"
+      :namespaces-for="namespacesFor"
+      :entries-for-namespace="entriesForNamespace"
+      :svc-key="svcKey"
+      :has-error="hasError"
+      :get-service-source="getServiceSource"
+      :kuboard-namespaces-for="kuboardNamespacesFor"
+      :kuboard-config-maps-for="kuboardConfigMapsFor"
+      @toggle-source-type="toggleSourceType"
+      @update-cred="(k, v) => (ccCredInputs[k] = v)"
+      @toggle-reveal="toggleReveal"
+      @clear-cred="clearCCFieldInput"
+      @run-kuboard-preload="runKuboardPreload"
+      @run-c-c-hub-preload="runCCHubPreload"
+      @set-service-source="(svc, src) => setServiceSource(svc, src)"
+      @namespace-changed="onNamespaceChanged"
+      @data-id-changed="onDataIdChanged"
+      @set-kuboard-loc="setKuboardLoc"
+      @preload-kuboard-from-source="runKuboardPreloadFromSource"
+    />
 
     <!-- Step 7:可观测性 -->
     <div v-if="currentStep === 8" class="card lg">

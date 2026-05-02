@@ -50,11 +50,9 @@ import type { CredField, KuboardResourceState } from '../lib/credFields'
 import EnvListItem from '../components/EnvListItem.vue'
 import TargetInstallBadge from '../components/TargetInstallBadge.vue'
 import DataStoreServiceBlock from '../components/DataStoreServiceBlock.vue'
-import ObservabilityToolBlock from '../components/ObservabilityToolBlock.vue'
-import LokiMappingStep from '../components/LokiMappingStep.vue'
-import K8sRuntimeBlock from '../components/K8sRuntimeBlock.vue'
 import RepoListItem from '../components/RepoListItem.vue'
 import ConfigSourceStep from '../components/ConfigSourceStep.vue'
+import ObservabilityStep from '../components/ObservabilityStep.vue'
 import { generateYAML as libGenerateYAML, type YAMLGenContext } from '../lib/yamlGenerator'
 import { computeStepErrors as libComputeStepErrors, labelForErrorKey as libLabelForErrorKey, type ValidatorContext } from '../lib/yamlValidator'
 import { applyParsedYAMLToWizardState, type ApplyImportContext } from '../lib/yamlImporter'
@@ -6239,178 +6237,49 @@ const configTypeDescriptions: Record<string, string> = {
     />
 
     <!-- Step 7:可观测性 -->
-    <div v-if="currentStep === 8" class="card lg">
-      <h2>可观测性</h2>
-      <p class="help-text">
-        勾选系统用到的可观测性组件(Grafana / Loki / Prometheus / Jaeger 等),按环境填上连接地址,机器人查日志 / 指标时会用。
-      </p>
-
-      <!-- 共享警告:同 Step 5 ,提醒密码会进 yaml -->
-      <CredsShareWarning :margin-bottom="18">
-        <li>本页填写字段(含密码、token 等凭证)将保存至 <code>system.yaml</code>。</li>
-        <li>部署时,生成器把对应值注入目标 AI 平台的 MCP Server 环境变量。</li>
-        <li><strong>system.yaml 含明文凭证</strong>,请仅在可信范围内分享。</li>
-      </CredsShareWarning>
-
-      <!-- 启用的可观测性组件:横排 chip 选择(默认全展开,跟数据层 Step 6 一致 —— 数据层是自动识别勾选,这里手动) -->
-      <h3 style="margin-top:4px">启用的可观测性组件</h3>
-      <div class="obs-tool-chips">
-        <label
-          v-for="spec in OBS_TOOL_SPECS"
-          :key="spec.key"
-          class="obs-tool-chip"
-          :class="{ active: enabledObservability[spec.key] }"
-          :title="spec.description"
-        >
-          <input type="checkbox" v-model="enabledObservability[spec.key]" />
-          {{ spec.label }}
-        </label>
-      </div>
-
-      <!-- 主内容:按 env → 启用的工具 → 字段 层级,跟 Step 6 数据层布局一致。
-           Loki 标签映射拆到每 env 独立加载(dev/prod 可能用不同 grafana 实例)。 -->
-      <div class="ds-hierarchy" style="margin-top:14px">
-        <div v-for="env in environments" :key="env.id" class="ds-env-section">
-          <div class="ds-env-title">
-            <span class="cc-env-label">{{ env.id || '(未命名 env)' }}</span>
-            <span v-if="env.is_prod" class="cc-env-prod-tag">prod</span>
-            <span class="ds-env-count">
-              {{ OBS_TOOL_SPECS.filter(s => enabledObservability[s.key]).length }} 个组件已启用
-            </span>
-          </div>
-
-          <div
-            v-if="OBS_TOOL_SPECS.filter(s => enabledObservability[s.key]).length === 0"
-            class="ds-empty"
-          >⧗ 还没启用任何可观测性组件 — 在上方勾选要用的</div>
-
-          <div v-else class="ds-svc-container">
-            <!-- 每个启用的工具一块:外壳 + head + 直连模式字段集 由 <ObservabilityToolBlock> 包,
-                 工具特定的尾部内容(k8s_runtime / via_grafana / loki labels)走 default slot。 -->
-            <ObservabilityToolBlock
-              v-for="spec in OBS_TOOL_SPECS.filter(s => enabledObservability[s.key])"
-              :key="spec.key"
-              :env-i-d="env.id"
-              :spec="spec"
-              :access-mode="getObsAccessMode(spec.key, env.id)"
-              :access-toggleable="['loki','prometheus','jaeger','tempo','elk'].includes(spec.key) && enabledObservability['grafana']"
-              :probe-state="obsProbeResults[obsProbeKey(spec.key, env.id)]"
-              :tool-inputs="toolInputs"
-              :is-revealed="isRevealed"
-              :is-obs-field-hidden="isObsFieldHidden"
-              :tool-key-for="toolKeyFor"
-              @update:access-mode="(mode) => setObsAccessMode(spec.key, env.id, mode)"
-              @update:tool-input="(k, v) => {
-                toolInputs[k] = v
-                scheduleObsProbe(spec.key, env.id)
-                if (spec.key === 'grafana') scheduleGrafanaDsAutoload(env.id)
-              }"
-              @toggle-reveal="toggleReveal"
-              @clear-input="clearToolFieldInput"
-            >
-              <K8sRuntimeBlock
-                v-if="spec.key === 'k8s_runtime'"
-                :env-i-d="env.id"
-                :services="allServiceNames"
-                :kuboard-state="kuboardStateByEnv[env.id]"
-                :env-loc="k8sRuntimeEnvLoc[env.id]"
-                :svc-map="k8sRuntimeSvcMap"
-                :workload-cache="k8sRtWorkloadCache"
-                :svc-key="svcKey"
-                :workload-key="k8sRtWorkloadKey"
-                :workloads-for="k8sRtWorkloadsFor"
-                :namespaces-for="kuboardNamespacesFor"
-                @preload="runK8sRtPreload"
-                @set-env-loc="(envID, field, value) => setK8sRtEnvLoc(envID, field, value)"
-                @set-svc-workload="(envID, svc, workload) => setK8sRtSvcWorkload(envID, svc, workload)"
-              />
-
-              <!-- via_grafana 模式(loki/prometheus/jaeger/tempo/elk 共用):
-                   显示 datasource 选择 + 加载/刷新按钮。dsList 由 Grafana 卡填好 URL+鉴权后自动拉,
-                   各工具卡也能就地点"刷新 datasources"。Loki 用 lokiMappingByEnv[env].dsUID 走自己的标签流程,
-                   其他用 grafanaDsUidByObsEnv[obs:env]。 -->
-              <div
-                v-if="['loki','prometheus','jaeger','tempo','elk'].includes(spec.key) && getObsAccessMode(spec.key, env.id) === 'via_grafana'"
-                class="loki-env-mapping"
-              >
-                <div class="loki-env-mapping-head">
-                  🔗 选中 {{ spec.label }} 在 Grafana 里的 datasource
-                </div>
-                <div class="cc-field-row" style="gap: 12px; align-items: center; flex-wrap: wrap;">
-                  <select
-                    v-if="spec.key === 'loki'"
-                    :value="getLokiMapping(env.id).dsUID || ''"
-                    class="cc-input"
-                    style="max-width: 420px;"
-                    @change="(e: any) => getLokiMapping(env.id).dsUID = e.target.value"
-                  >
-                    <option value="">— 选 Loki datasource —</option>
-                    <option
-                      v-for="ds in obsGrafanaDsCandidates(env.id, 'loki')"
-                      :key="ds.uid" :value="ds.uid"
-                    >{{ ds.name }}({{ ds.type }}{{ ds.default ? ', default' : '' }})</option>
-                  </select>
-                  <select
-                    v-else
-                    :value="grafanaDsUidByObsEnv[obsGrafanaDsKey(spec.key, env.id)] || ''"
-                    class="cc-input"
-                    style="max-width: 420px;"
-                    @change="(e: any) => grafanaDsUidByObsEnv[obsGrafanaDsKey(spec.key, env.id)] = e.target.value"
-                  >
-                    <option value="">— 不通过 Grafana / 留空 —</option>
-                    <option
-                      v-for="ds in obsGrafanaDsCandidates(env.id, spec.key)"
-                      :key="ds.uid" :value="ds.uid"
-                    >{{ ds.name }}({{ ds.type }}{{ ds.default ? ', default' : '' }})</option>
-                  </select>
-                  <button
-                    v-if="getLokiMapping(env.id).dsListStatus === 'loading'"
-                    type="button" class="btn cc-preload-btn" disabled
-                  >
-                    <span class="cc-preload-spinner" aria-hidden="true"></span>
-                    加载中…
-                  </button>
-                  <button
-                    v-else
-                    type="button" class="btn cc-preload-btn"
-                    @click="loadLokiDatasources(env.id)"
-                  >🔄 {{ (getLokiMapping(env.id).dsList || []).length > 0 ? '刷新' : '加载' }} datasources</button>
-                  <span
-                    v-if="getLokiMapping(env.id).dsListStatus === 'fail'"
-                    class="cc-preload-error"
-                    :title="getLokiMapping(env.id).dsListError"
-                  >✗ {{ getLokiMapping(env.id).dsListError?.slice(0, 50) }}</span>
-                  <span
-                    v-else-if="(getLokiMapping(env.id).dsList || []).length > 0 && obsGrafanaDsCandidates(env.id, spec.key).length === 0"
-                    class="cc-preload-summary"
-                    style="background: #fee2e2; color: #991b1b;"
-                  >该 Grafana 里没找到 type={{ OBS_GRAFANA_DS_TYPES[spec.key]?.join('/') }} 的 datasource</span>
-                  <span
-                    v-else-if="(getLokiMapping(env.id).dsList || []).length > 0"
-                    class="cc-preload-summary"
-                  >✓ {{ obsGrafanaDsCandidates(env.id, spec.key).length }} 个 {{ OBS_GRAFANA_DS_TYPES[spec.key]?.join('/') }} 候选</span>
-                </div>
-              </div>
-
-              <LokiMappingStep
-                v-if="spec.key === 'loki'"
-                :env-i-d="env.id"
-                :mapping="getLokiMapping(env.id)"
-                :services="allServiceNames"
-                @load-labels="loadLokiLabels"
-                @env-label-key-changed="(envID, key) => onEnvLabelKeyChanged(envID, key)"
-                @service-label-key-changed="(envID, key) => onServiceLabelKeyChanged(envID, key)"
-                @env-value-changed="onEnvValueChanged"
-              />
-            </ObservabilityToolBlock>
-          </div>
-        </div>
-      </div>
-
-      <!-- 副源卡片块已废弃 —— 多源现在由顶部 checkbox 多选驱动,每个勾选的 type 在
-           上方主表单里独立渲染(通过 activeSourceTypes v-for 包装)。
-           Step 4 已删除 config_source 下拉,服务到源的映射改在 Step 6/7 里按服务配。 -->
-    </div>
+    <ObservabilityStep
+      v-if="currentStep === 8"
+      :obs-tool-specs="OBS_TOOL_SPECS"
+      :enabled-observability="enabledObservability"
+      :environments="environments"
+      :all-service-names="allServiceNames"
+      :obs-probe-results="obsProbeResults"
+      :tool-inputs="toolInputs"
+      :is-revealed="isRevealed"
+      :is-obs-field-hidden="isObsFieldHidden"
+      :tool-key-for="toolKeyFor"
+      :obs-probe-key="obsProbeKey"
+      :get-obs-access-mode="getObsAccessMode"
+      :kuboard-state-by-env="kuboardStateByEnv"
+      :k8s-runtime-env-loc="k8sRuntimeEnvLoc"
+      :k8s-runtime-svc-map="k8sRuntimeSvcMap"
+      :k8s-rt-workload-cache="k8sRtWorkloadCache"
+      :svc-key="svcKey"
+      :k8s-rt-workload-key="k8sRtWorkloadKey"
+      :k8s-rt-workloads-for="k8sRtWorkloadsFor"
+      :kuboard-namespaces-for="kuboardNamespacesFor"
+      :get-loki-mapping="getLokiMapping"
+      :obs-grafana-ds-candidates="obsGrafanaDsCandidates"
+      :grafana-ds-uid-by-obs-env="grafanaDsUidByObsEnv"
+      :obs-grafana-ds-key="obsGrafanaDsKey"
+      :obs-grafana-ds-types="OBS_GRAFANA_DS_TYPES"
+      @set-obs-access-mode="setObsAccessMode"
+      @update-tool-input="(k, v, toolKey, envID) => {
+        toolInputs[k] = v
+        scheduleObsProbe(toolKey, envID)
+        if (toolKey === 'grafana') scheduleGrafanaDsAutoload(envID)
+      }"
+      @toggle-reveal="toggleReveal"
+      @clear-tool-input="clearToolFieldInput"
+      @run-k8s-rt-preload="runK8sRtPreload"
+      @set-k8s-rt-env-loc="(envID, field, value) => setK8sRtEnvLoc(envID, field, value)"
+      @set-k8s-rt-svc-workload="(envID, svc, workload) => setK8sRtSvcWorkload(envID, svc, workload)"
+      @load-loki-datasources="loadLokiDatasources"
+      @load-loki-labels="loadLokiLabels"
+      @env-label-key-changed="onEnvLabelKeyChanged"
+      @service-label-key-changed="onServiceLabelKeyChanged"
+      @env-value-changed="onEnvValueChanged"
+    />
 
     <!-- Step 6:数据层 —— 从配置源拉取各服务配置,按"环境 → 服务 → 数据层组件"展示识别结果 -->
     <div v-if="currentStep === 7" class="card lg">

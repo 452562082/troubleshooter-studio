@@ -49,10 +49,10 @@ import type { URLProbeState } from '../lib/probeTypes'
 import type { CredField, KuboardResourceState } from '../lib/credFields'
 import EnvListItem from '../components/EnvListItem.vue'
 import TargetInstallBadge from '../components/TargetInstallBadge.vue'
-import DataStoreServiceBlock from '../components/DataStoreServiceBlock.vue'
 import RepoListItem from '../components/RepoListItem.vue'
 import ConfigSourceStep from '../components/ConfigSourceStep.vue'
 import ObservabilityStep from '../components/ObservabilityStep.vue'
+import DataStoreStep from '../components/DataStoreStep.vue'
 import { generateYAML as libGenerateYAML, type YAMLGenContext } from '../lib/yamlGenerator'
 import { computeStepErrors as libComputeStepErrors, labelForErrorKey as libLabelForErrorKey, type ValidatorContext } from '../lib/yamlValidator'
 import { applyParsedYAMLToWizardState, type ApplyImportContext } from '../lib/yamlImporter'
@@ -6281,118 +6281,32 @@ const configTypeDescriptions: Record<string, string> = {
       @env-value-changed="onEnvValueChanged"
     />
 
-    <!-- Step 6:数据层 —— 从配置源拉取各服务配置,按"环境 → 服务 → 数据层组件"展示识别结果 -->
-    <div v-if="currentStep === 7" class="card lg">
-      <h2>数据层</h2>
-      <p class="help-text">
-        从配置中心读取各服务配置,自动识别用到的数据层(Redis / MySQL / MongoDB 等),按 <strong>环境 → 服务 → 组件</strong> 展示。字段可直接编辑,改的是本地副本,不会回写配置中心。
-      </p>
-
-      <CredsShareWarning :margin-bottom="18">
-        <li>本页字段(含密码、token 等凭证)将保存至 <code>system.yaml</code>。</li>
-        <li>部署时,生成器把对应值注入目标 AI 平台的 MCP Server 环境变量。</li>
-        <li><strong>system.yaml 含明文凭证</strong>,请仅在可信范围内分享。</li>
-      </CredsShareWarning>
-
-      <div class="ds-autoimport-row">
-        <!-- loading / idle 分别用独立 <button> + :key,避免 WebKit GPU layer 残影(同 Step 5 按钮) -->
-        <button
-          v-if="dsImportStatus === 'loading'"
-          :key="'ds-import-loading'"
-          class="btn primary cc-preload-btn"
-          disabled
-        >
-          <span class="cc-preload-spinner" aria-hidden="true"></span>
-          读取中…
-        </button>
-        <button
-          v-else
-          :key="'ds-import-idle'"
-          class="btn primary cc-preload-btn"
-          :disabled="!canAutoImportDS"
-          @click="autoImportDataStores"
-        >📥 从配置中心读取</button>
-        <span v-if="!canAutoImportDS" class="ds-autoimport-hint">
-          需先在 Step 5 完成配置源扫描 + 映射服务 dataId
-        </span>
-        <span v-else-if="dsImportStatus === 'ok'" class="cc-preload-summary">
-          ✓ 成功拉 {{ dsImportStats.scanned }} / 应拉 {{ environments.length * allServiceNames.length }} 条配置(env × service),识别 {{ dsImportStats.matched }} 个数据层
-        </span>
-
-        <!-- 全部环境一键连通性测试:跟"从配置中心读取"放一行,识别完后用户最常做的下一步 -->
-        <button
-          v-if="probingAll"
-          :key="'probe-all-envs-loading'"
-          class="btn cc-preload-btn ds-probe-all-btn"
-          disabled
-          style="margin-left:auto;"
-        >
-          <span class="cc-preload-spinner" aria-hidden="true"></span>
-          测试中… {{ probingAllStats.done }} / {{ probingAllStats.total }}
-          <span v-if="probingAllStats.fail > 0" style="color:#dc2626;">(✗ {{ probingAllStats.fail }})</span>
-        </button>
-        <button
-          v-else
-          :key="'probe-all-envs-idle'"
-          class="btn cc-preload-btn ds-probe-all-btn"
-          :disabled="!Object.values(scannedDS).some(svcs => Object.values(svcs).some(s => Object.keys(s).length > 0))"
-          title="对所有环境的所有数据层组件批量执行连通性测试(跨 env 并行,env 内串行)"
-          style="margin-left:auto;"
-          @click="probeAllAcrossEnvs"
-        >🔌 全部环境一键连通性测试</button>
-      </div>
-
-      <!-- 按 env → 全部 service(allServiceNames) → ds 层级完整展示;
-           缺失项(没映射 / 拉失败 / 未识别)也会出现一条,明确标原因。
-           这样 5 服务 × 2 环境 = 10 条永远能看全,不会"只扫出 8 条"。 -->
-      <div class="ds-hierarchy">
-        <div v-for="env in environments" :key="env.id" class="ds-env-section">
-          <div class="ds-env-title">
-            <span class="cc-env-label">{{ env.id || '(未命名 env)' }}</span>
-            <span v-if="env.is_prod" class="cc-env-prod-tag">prod</span>
-            <span class="ds-env-count">
-              {{ allServiceNames.length }} 个服务 ·
-              已识别 {{ Object.values(scannedDS[env.id] || {}).filter(s => Object.keys(s).length > 0).length }}
-            </span>
-            <!-- 单 env 一键连通性测试已删除 —— 顶部"🔌 全部环境一键连通性测试"覆盖
-                 整体场景,单 env 视觉冗余且使用频率最低。要重测某条用每条组件上的
-                 单点按钮即可。-->
-            <span
-              v-if="probingByEnv[env.id]"
-              class="ds-env-probe-all loading"
-            >
-              <span class="cc-preload-spinner" aria-hidden="true"></span>
-              测试中…
-            </span>
-          </div>
-
-          <div v-if="allServiceNames.length === 0" class="ds-empty">
-            Step 4 还没填 <code>service_names</code>,这里没服务可扫
-          </div>
-
-          <div v-else class="ds-svc-container">
-            <DataStoreServiceBlock
-              v-for="svc in allServiceNames"
-              :key="svc"
-              :env-i-d="env.id"
-              :svc="svc"
-              :scan-state="scanStateOf(env.id, svc)"
-              :data-id-hint="serviceConfigSel[svcKey(env.id, svc)]"
-              :scanned-types="scannedDS[env.id]?.[svc] || {}"
-              :ds-probe-results="dsProbeResults"
-              :is-revealed="isRevealed"
-              :ds-label="dsLabel"
-              :ds-field-label="dsFieldLabel"
-              :ds-field-is-secret="dsFieldIsSecret"
-              :probe-key="probeKey"
-              @toggle-reveal="toggleReveal"
-              @remove-d-s="(dsKey) => removeScannedDS(env.id, svc, dsKey)"
-              @probe-d-s="(dsKey) => probeOneDS(env.id, svc, dsKey)"
-            />
-          </div>
-        </div>
-      </div>
-    </div>
+    <DataStoreStep
+      v-if="currentStep === 7"
+      :ds-import-status="dsImportStatus"
+      :ds-import-stats="dsImportStats"
+      :can-auto-import-d-s="canAutoImportDS"
+      :probing-all="probingAll"
+      :probing-all-stats="probingAllStats"
+      :probing-by-env="probingByEnv"
+      :environments="environments"
+      :all-service-names="allServiceNames"
+      :scanned-d-s="scannedDS"
+      :service-config-sel="serviceConfigSel"
+      :ds-probe-results="dsProbeResults"
+      :scan-state-of="scanStateOf"
+      :svc-key="svcKey"
+      :is-revealed="isRevealed"
+      :ds-label="dsLabel"
+      :ds-field-label="dsFieldLabel"
+      :ds-field-is-secret="dsFieldIsSecret"
+      :probe-key="probeKey"
+      @auto-import-data-stores="autoImportDataStores"
+      @probe-all-across-envs="probeAllAcrossEnvs"
+      @toggle-reveal="toggleReveal"
+      @remove-d-s="(envID, svc, dsKey) => removeScannedDS(envID, svc, dsKey)"
+      @probe-d-s="(envID, svc, dsKey) => probeOneDS(envID, svc, dsKey)"
+    />
 
     <!-- Step 9: 预览 + 生成 -->
     <div v-if="currentStep === 9" class="card lg">

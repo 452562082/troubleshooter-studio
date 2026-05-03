@@ -129,8 +129,15 @@ function onTextareaScroll() {
   }
 }
 
+// errorLineNumber 由 YamlErrorCard 通过 @parsed 事件回传。声明必须在下方 watch 之前 ——
+// 之前放在文件末尾,但 watch(() => errorLineNumber.value, ...) 注册时 Vue 立刻调一次 getter
+// 收集依赖,那时 const 还在 TDZ → ReferenceError → setup 失败,YAML 沙盒页面整个白屏。
+const errorLineNumber = ref<number | null>(null)
+function onErrorParsed(p: { lineNumber?: number } | null) {
+  errorLineNumber.value = p?.lineNumber ?? null
+}
+
 // 当验证失败时,自动滚 textarea 到出错行,让用户不用手动找。
-// errorLineNumber 由 YamlErrorCard 通过 @parsed 事件回传。
 watch(
   () => errorLineNumber.value,
   async (line) => {
@@ -211,11 +218,7 @@ async function runPreview() {
 //   <YamlErrorCard :error-msg="errorMsg" :yaml-content="yamlContent" />
 // 子组件内部各自管 collapse 状态 + 排序 + 翻译,EditorPage 只透 raw 数据。
 
-// 给 textarea gutter 高亮用的"yaml 语法错行号"
-const errorLineNumber = ref<number | null>(null)
-function onErrorParsed(p: { lineNumber?: number } | null) {
-  errorLineNumber.value = p?.lineNumber ?? null
-}
+// errorLineNumber + watch 已上提到 onTextareaScroll 之后 —— 见上方 watch 注释。
 </script>
 
 <template>

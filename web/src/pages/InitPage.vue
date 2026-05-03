@@ -48,7 +48,6 @@ import { toast } from '../lib/toast'
 import { Target, IDE_TARGETS, type TargetId } from '../lib/constants'
 import type { URLProbeState } from '../lib/probeTypes'
 import type { CredField, KuboardResourceState } from '../lib/credFields'
-import EnvListItem from '../components/EnvListItem.vue'
 import RepoListItem from '../components/RepoListItem.vue'
 import ConfigSourceStep from '../components/ConfigSourceStep.vue'
 import ObservabilityStep from '../components/ObservabilityStep.vue'
@@ -58,6 +57,8 @@ import WelcomeStep from '../components/WelcomeStep.vue'
 import SystemBasicInfoStep from '../components/SystemBasicInfoStep.vue'
 import YamlPreviewStep from '../components/YamlPreviewStep.vue'
 import OneClickDeployStep from '../components/OneClickDeployStep.vue'
+import EnvListStep from '../components/EnvListStep.vue'
+import GlobalReposRootBlock from '../components/GlobalReposRootBlock.vue'
 import { generateYAML as libGenerateYAML, type YAMLGenContext } from '../lib/yamlGenerator'
 import { computeStepErrors as libComputeStepErrors, labelForErrorKey as libLabelForErrorKey, type ValidatorContext } from '../lib/yamlValidator'
 import { applyParsedYAMLToWizardState, type ApplyImportContext } from '../lib/yamlImporter'
@@ -5827,26 +5828,16 @@ provide(WizardStoreKey, {
       @model-change="onModelChange"
     />
 
-    <!-- Step 3 -->
-    <div v-if="currentStep === 4" class="card lg">
-      <h2>环境列表</h2>
-      <p class="help-text">
-        填业务系统的运行环境(如 dev / test / prod),每个环境填后端 API 域名,可选填前端 Web 域名。建议带上 http/https 前缀。
-      </p>
-      <EnvListItem
-        v-for="(env, i) in environments"
-        :key="i"
-        :env="env"
-        :api-probe="urlProbeResults[urlProbeKey(i, 'api')]"
-        :web-probe="urlProbeResults[urlProbeKey(i, 'web')]"
-        :has-id-error="hasError(`env.${i}.id`)"
-        :has-api-error="hasError(`env.${i}.api_domain`)"
-        :disable-remove="environments.length <= 1"
-        @probe="(kind, url) => scheduleURLProbe(i, kind, url)"
-        @remove="removeEnv(i)"
-      />
-      <button class="btn" @click="addEnv">+ 添加环境</button>
-    </div>
+    <EnvListStep
+      v-if="currentStep === 4"
+      :environments="environments"
+      :url-probe-results="urlProbeResults"
+      :url-probe-key="urlProbeKey"
+      :has-error="hasError"
+      @probe="(envIdx, kind, url) => scheduleURLProbe(envIdx, kind, url)"
+      @remove="removeEnv"
+      @add="addEnv"
+    />
 
     <!-- Step 4 -->
     <div v-if="currentStep === 5" class="card lg">
@@ -5855,38 +5846,14 @@ provide(WizardStoreKey, {
         填业务的代码仓库:可以选本地已 clone 的目录,也可以填远程 URL 让 Studio 帮你拉下来。扫描后会自动识别技术栈、服务名和分支。
       </p>
 
-      <!-- 全局默认 clone 目录:一次性设置,跨向导持久 -->
-      <div class="global-default-block">
-        <label class="global-default-label">
-          🌐 默认 clone 父目录(全局)
-          <span class="field-hint">
-            — 远程仓库默认 clone 到 <code>&lt;这里&gt;/&lt;repo.name&gt;/</code>
-            <span v-if="globalDefaultReposRoot" class="saved-indicator">✓ 已保存</span>
-            <span v-else>(未设置 · 将使用 <code>{{ displayPath(resolvedReposRoot) }}</code>)</span>
-          </span>
-        </label>
-        <!-- 输入框 readonly,只能通过"选目录"选 —— 跟 Step 4 本地仓库目录一致的约束。 -->
-        <div class="global-default-row">
-          <input
-            :value="displayPath(reposRootInput) || displayPath(resolvedReposRoot)"
-            type="text"
-            :placeholder="displayPath(resolvedReposRoot)"
-            readonly
-            class="path-readonly"
-            :title="reposRootInput || resolvedReposRoot"
-          />
-          <button type="button" class="btn" @click="pickReposRoot">
-            {{ reposRootInput ? '重新选…' : '选目录…' }}
-          </button>
-          <button
-            type="button"
-            class="btn"
-            :disabled="!reposRootInput.trim() || reposRootInput.trim() === globalDefaultReposRoot"
-            @click="saveAsGlobalDefault"
-            title="把当前路径写入 ~/.tshoot/config.json;下次打开 Studio 自动用"
-          >💾 设为全局默认</button>
-        </div>
-      </div>
+      <GlobalReposRootBlock
+        :repos-root-input="reposRootInput"
+        :resolved-repos-root="resolvedReposRoot"
+        :global-default-repos-root="globalDefaultReposRoot"
+        :display-path="displayPath"
+        @pick="pickReposRoot"
+        @save="saveAsGlobalDefault"
+      />
 
       <RepoListItem
         v-for="(repo, i) in repos"

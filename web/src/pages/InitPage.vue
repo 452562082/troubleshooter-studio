@@ -19,7 +19,6 @@ import {
   getRepoPathsForSystem,
   importAndDeploy,
   kuboardListResources,
-  kuboardListDeployments,
   kuboardFetchConfigMaps,
   runInstall,
   selfTestAgent,
@@ -66,6 +65,7 @@ import {
   loadInitKuboardState,
 } from '../lib/useWizardDraft'
 import { useKuboardState } from '../lib/useKuboardState'
+import { useK8sRtWorkloads } from '../lib/useK8sRtWorkloads'
 
 const router = useRouter()
 
@@ -1471,75 +1471,14 @@ async function runK8sRtPreload(envID: string) {
 }
 
 // ── k8s 运行时(可观测性)Deployments 缓存 ───────────────────────────
-// 跟 kuboardStateByEnv(集群+ns+cm 树)平行,单独存"(env, cluster, ns) → deployments[]"。
-// 走 bridge.kuboardListDeployments,返回 name + selector。
-type K8sRtWorkloadState =
-  | { status: 'loading' }
-  | { status: 'ok', deployments: Array<{ name: string; selector: string }> }
-  | { status: 'error', error: string }
-// 持久化:跨会话保留 status='ok' 的 deployments 列表(switching tabs 切回时立刻有下拉,
-// 不必等 onMounted → triggerStep7Init 异步重拉)。loading / error 是瞬态不存。
-// 数据量:Deployment 列表本身是 (name, selector) 字符串对,每集群 namespace 通常几十条,
-// 整个 cache 几 KB 可控,不会撑爆 localStorage 配额。
-const k8sRtWorkloadCache = reactive<Record<string, K8sRtWorkloadState>>(
-  (() => {
-    const out: Record<string, K8sRtWorkloadState> = {}
-    const src = (saved?.k8sRtWorkloadCache as Record<string, K8sRtWorkloadState>) ?? {}
-    for (const [k, v] of Object.entries(src)) {
-      if (v && v.status === 'ok' && Array.isArray(v.deployments)) {
-        out[k] = v
-      }
-    }
-    return out
-  })(),
-)
-function k8sRtWorkloadKey(envID: string, cluster: string, ns: string): string {
-  return `${envID}::${cluster}::${ns}`
-}
-function k8sRtWorkloadsFor(envID: string, cluster: string, ns: string): Array<{ name: string; selector: string }> {
-  const st = k8sRtWorkloadCache[k8sRtWorkloadKey(envID, cluster, ns)]
-  return (st && st.status === 'ok') ? st.deployments : []
-}
-async function loadK8sRtWorkloads(envID: string, cluster: string, ns: string) {
-  if (!cluster || !ns) return
-  const key = k8sRtWorkloadKey(envID, cluster, ns)
-  if (k8sRtWorkloadCache[key]?.status === 'loading') return
-  // 凭证优先吃 obs k8s_runtime 自己填的,fallback 用 kuboard 配置源的(同集群常见复用)
-  const url = (toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'url')] || '').trim() ||
-              (sourceCreds['kuboard']?.creds?.[envID]?.url || '').trim()
-  const accessKey = (toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'access_key')] || '').trim() ||
-                    (sourceCreds['kuboard']?.creds?.[envID]?.access_key || '').trim()
-  const username = (toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'username')] || '').trim() ||
-                   (sourceCreds['kuboard']?.creds?.[envID]?.username || '').trim()
-  const password = (toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'password')] || '').trim() ||
-                   (sourceCreds['kuboard']?.creds?.[envID]?.password || '').trim()
-  if (!url || (!accessKey && (!username || !password))) {
-    k8sRtWorkloadCache[key] = { status: 'error', error: '缺 URL 或鉴权信息' }
-    return
-  }
-  k8sRtWorkloadCache[key] = { status: 'loading' }
-  pushLog('cchub', 'info', `[${envID}] k8s_runtime 拉 deployments: cluster=${cluster}, ns=${ns}`, { envID })
-  try {
-    const list = await kuboardListDeployments({
-      url, access_key: accessKey, username, password, cluster, namespace: ns,
-    })
-    const deployments = list.map(d => ({ name: d.name, selector: d.selector || '' }))
-    k8sRtWorkloadCache[key] = { status: 'ok', deployments }
-    if (list.length === 0) {
-      pushLog('cchub', 'warn',
-        `[${envID}] k8s_runtime: ns=${ns} 下 Deployment 数为 0(选错 ns?账号 RBAC 权限够 list deployments?)`,
-        { envID })
-    } else {
-      pushLog('cchub', 'info', `[${envID}] k8s_runtime: 拉到 ${list.length} 个 Deployment`, { envID })
-      // 自动给每个服务挑最匹配的 deployment(只在用户没手动选过时填,不覆盖已有选择)
-      autoPickK8sRtWorkloads(envID, deployments)
-    }
-  } catch (e: any) {
-    const msg = String(e?.message || e)
-    k8sRtWorkloadCache[key] = { status: 'error', error: msg }
-    pushLog('cchub', 'error', `[${envID}] k8s_runtime 列 deployments 失败: ${msg}`, { envID })
-  }
-}
+// 跟 useKuboardState(集群+ns+cm 树)平行,(env, cluster, ns) → deployments[]
+// 状态 + load 收口在 lib/useK8sRtWorkloads.ts。本变量声明实际挪到 toolInputs
+// 之后(useK8sRtWorkloads 入参依赖它),见下方 "── 可观测性 toolInputs ──" 段。
+// 这里只保留前向引用占位,函数体内引用 k8sRtWorkloadCache / k8sRtWorkloadKey /
+// loadK8sRtWorkloads 都靠 lexical scope,等到调用时(user action / onMounted)才解析。
+// autoPickK8sRtWorkloads 留在下方:它要读 allServiceNames / serviceMatchKeys /
+// startsAtBoundary / ensureK8sRtSvcLoc 多块状态;loadK8sRtWorkloads 拉到结果后
+// 通过 onLoaded 回调反过来触发 autoPickK8sRtWorkloads。
 
 // 给本 env 下所有服务自动挑最匹配的 Deployment(不覆盖用户已经手动选过的)。
 // 匹配策略(由强到弱):
@@ -2741,6 +2680,18 @@ function toolKeyFor(cat: 'obs' | 'ds', tool: string, envID: string, field: strin
 
 // 所有工具字段的输入值(含 secret);跟 ccCredInputs 同策略:进 localStorage draft + 写进 yaml
 const toolInputs = reactive<Record<string, string>>(saved?.toolInputs ?? {})
+
+// useK8sRtWorkloads 必须在 toolInputs 声明之后实例化(它会闭包持有这个 reactive)。
+// 上方"k8s 运行时 Deployments 缓存"段对 k8sRtWorkloadCache / Key / loadK8sRtWorkloads
+// 的引用都是函数体里的 lexical 查找,JS hoisting 保证 user action 触发时
+// (一定晚于本行 init)能拿到值,不会撞 TDZ。
+const { k8sRtWorkloadCache, k8sRtWorkloadKey, k8sRtWorkloadsFor, loadK8sRtWorkloads } = useK8sRtWorkloads({
+  initialCache: saved?.k8sRtWorkloadCache,
+  toolInputs,
+  toolKeyFor,
+  getKuboardCredsFor: (envID) => sourceCreds['kuboard']?.creds?.[envID],
+  onLoaded: (envID, deployments) => autoPickK8sRtWorkloads(envID, deployments),
+})
 
 function clearToolFieldInput(k: string) {
   toolInputs[k] = ''

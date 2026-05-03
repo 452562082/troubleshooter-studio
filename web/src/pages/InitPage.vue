@@ -9,7 +9,6 @@ import { useRouter } from 'vue-router'
 import {
   analyzeV2 as bridgeAnalyzeV2,
   defaultDestPath,
-  detectAITools,
   fetchConfigContentBatch,
   listGrafanaDatasources,
   listLokiLabelValues,
@@ -17,7 +16,6 @@ import {
   probeDataStore,
   probeURLAuth,
   getRemoteURL,
-  getUserConfig,
   exportYAML,
   getRepoPathsForSystem,
   importAndDeploy,
@@ -33,12 +31,9 @@ import {
   listBranchesForRepo,
   preloadConfigCenter,
   recommendRoleForRepo,
-  setDefaultReposRoot,
   validate as bridgeValidate,
-  getCustomInstallRoots,
-  setCustomInstallRoot,
 } from '../lib/bridge'
-import type { AIToolResult, CCHubEntry, CCHubNamespace, GrafanaDatasource, KuboardFetchBatchResult } from '../lib/bridge'
+import type { CCHubEntry, CCHubNamespace, GrafanaDatasource, KuboardFetchBatchResult } from '../lib/bridge'
 import { confirmDialog } from '../lib/confirm'
 import { WizardStoreKey } from '../lib/wizardStore'
 import { pushLog } from '../lib/logStore'
@@ -62,6 +57,8 @@ import { applyParsedYAMLToWizardState, type ApplyImportContext } from '../lib/ya
 import { copyToClipboard } from '../lib/clipboard'
 import { useOpenClawDetect } from '../lib/useOpenClawDetect'
 import { useURLProbe } from '../lib/useURLProbe'
+import { useReposRoot } from '../lib/useReposRoot'
+import { useAITools } from '../lib/useAITools'
 
 const router = useRouter()
 
@@ -254,68 +251,20 @@ const {
   pickOpenClawInstallDir,
 } = useOpenClawDetect(saved?.openclawInstallDir ?? '')
 
-// Claude Code / Cursor / Codex 安装状态 —— 决定卡片能否被勾选:
-//   - 检测到 → 默认可勾,部署落到检测出的位置(~/.<target>/agents)
-//   - 未检测到 → checkbox 默认禁用,展示"未检测到"提示;用户可点"我已自行安装"
-//     强制启用(手填路径或确认默认 ~/.<target> 已存在),也可点"重新扫描"。
-const aitoolsResult = ref<{ claude_code: AIToolResult; cursor: AIToolResult; codex: AIToolResult } | null>(null)
-// 用户对未检测到的 target 强制启用("我自己装了" / "我会装") —— per-target bool。
-// 一旦置 true,checkbox 解锁,enabledTargets 才能勾上。持久化到 draft 跟其它字段一样。
-const forceEnableMissingTarget = reactive<Record<string, boolean>>({
-  ...(saved?.forceEnableMissingTarget ?? {}),
+// Claude Code / Cursor / Codex 检测 + customInstallRoots 全在 lib/useAITools.ts。
+// onMounted 里会先 ~/.tshoot/config.json 反填 customInstallRoots(覆盖 saved.draft,
+// 文件版优先),然后 refreshAITools。
+const {
+  aitoolsResult,
+  forceEnableMissingTarget,
+  customInstallRoots,
+  refreshAITools,
+  pickCustomInstallRoot,
+  clearCustomInstallRoot,
+} = useAITools({
+  forceEnableMissingTarget: saved?.forceEnableMissingTarget,
+  customInstallRoots: saved?.customInstallRoots,
 })
-
-// customInstallRoots[t] —— 用户对未检测到的 target 手选的安装根目录(如 /opt/myclaude/);
-// 非空时部署位置从默认 `~/.<target>` 改成 `<customRoot>` 拼 agents/workspace 后缀。
-// openclaw 的自定义安装目录另有专用 UI(openclawInstallDir),不走这里。
-const customInstallRoots = reactive<Record<string, string>>({
-  ...(saved?.customInstallRoots ?? {}),
-})
-async function pickCustomInstallRoot(t: string) {
-  try {
-    const dir = await openDir(`选 ${t} 安装根目录(目录下应有 agents/ 子目录)`)
-    if (dir) {
-      customInstallRoots[t] = dir
-      forceEnableMissingTarget[t] = true
-      // 持久化到 ~/.tshoot/config.json,跨 wizard 会话和 BotsPage 扫描共用同一份
-      await setCustomInstallRoot(t, dir).catch((e: any) => {
-        pushLog('install', 'warn', `setCustomInstallRoot(${t}) 持久化失败: ${String(e?.message || e)}`)
-      })
-    }
-  } catch (e: any) {
-    pushLog('install', 'warn', `pickCustomInstallRoot(${t}) 失败: ${String(e?.message || e)}`)
-  }
-}
-async function clearCustomInstallRoot(t: string) {
-  delete customInstallRoots[t]
-  // 同步清掉本地文件里的覆盖,否则下次启动又被反填回来
-  await setCustomInstallRoot(t, '').catch((e: any) => {
-    pushLog('install', 'warn', `setCustomInstallRoot(${t}, '') 清除失败: ${String(e?.message || e)}`)
-  })
-}
-// 启动时从 ~/.tshoot/config.json 反填一次 customInstallRoots —— 优先于 saved draft,
-// 因为本地文件是"跨向导会话的权威";draft 里的值只是这次会话的快照,持久化口径以文件为准。
-onMounted(async () => {
-  try {
-    const m = await getCustomInstallRoots()
-    for (const [t, dir] of Object.entries(m || {})) {
-      if (dir) {
-        customInstallRoots[t] = dir
-        forceEnableMissingTarget[t] = true
-      }
-    }
-  } catch {
-    // 静默兜底:浏览器模式 / binding 还没跑 generate 都返空,不影响 UI
-  }
-})
-async function refreshAITools() {
-  try {
-    aitoolsResult.value = await detectAITools()
-  } catch {
-    // 探测失败静默处理,UI 回落到"不显示徽标"
-  }
-}
-onMounted(() => { refreshAITools() })
 
 // watch / onMounted 已挪到 enabledTargets 声明之后(见该 const 下方),
 // 这里留空避免重复声明。
@@ -901,53 +850,17 @@ watch(
 // localStorage auto-save draft(见下方 watch(...) 的 tracked 字段列表)。
 // 唯一合法的持久化路径:"💾 设为全局默认" 按钮 → setDefaultReposRoot → Go binding
 // → userconfig.Save → ~/.tshoot/config.json。导入 yaml / 清空草稿都不动它。
-//
-const reposRootInput = ref('')
-// 全局默认 clone 目录:从 ~/.tshoot/config.json 读,用户一次性设置,跨 wizard 持久
-// resolvedReposRoot 永远非空(内置 fallback ~/.tshoot/repos),用作 placeholder +
-// 每个仓库 _cloneTarget 空时的实际 clone 目标。
-const globalDefaultReposRoot = ref('') // 用户设过的,可能空
-const resolvedReposRoot = ref('~/.tshoot/repos') // 永远非空;load 后会覆盖
-// homeDir: 后端报的 $HOME,用来把绝对路径前缀折成 ~/... 给用户看。
-// 拿不到(浏览器模式 / 后端报错)就留空,displayPath 回落到"原样展示"。
-const homeDir = ref('')
-onMounted(async () => {
-  try {
-    const r = await getUserConfig()
-    globalDefaultReposRoot.value = r.default_repos_root
-    homeDir.value = r.home_dir || ''
-    if (r.resolved_repos_root) resolvedReposRoot.value = r.resolved_repos_root
-    // 本会话没人改过 reposRootInput(还是空)的话,拿它填一下方便扫描
-    if (!reposRootInput.value && r.resolved_repos_root) {
-      reposRootInput.value = r.resolved_repos_root
-    }
-  } catch { /* 读不到 config.json 不打扰用户 */ }
-})
-
-// displayPath: 把绝对路径前缀 $HOME 折成 ~,仅用于 UI 展示 placeholder / hint。
-// 实际存盘 / 传给后端的路径保持绝对路径不变(git clone / Go os.Stat 不识别 ~)。
-// homeDir 拿不到时直接原样返回,不影响可用性。
-function displayPath(abs: string): string {
-  if (!abs) return ''
-  const h = homeDir.value
-  if (h && abs === h) return '~'
-  if (h && abs.startsWith(h + '/')) return '~' + abs.slice(h.length)
-  return abs
-}
-async function saveAsGlobalDefault() {
-  if (!reposRootInput.value.trim()) {
-    toast.error('先填路径再设默认')
-    return
-  }
-  try {
-    await setDefaultReposRoot(reposRootInput.value.trim())
-    globalDefaultReposRoot.value = reposRootInput.value.trim()
-    resolvedReposRoot.value = reposRootInput.value.trim()
-    toast.success(`已设为全局默认 clone 目录,下次打开 Studio 自动用这里`)
-  } catch (e: any) {
-    toast.error(`保存失败: ${String(e?.message || e)}`)
-  }
-}
+// 完整逻辑(reposRootInput / global/resolved/homeDir + onMounted 反填 + displayPath
+// + saveAsGlobalDefault + pickReposRoot)在 lib/useReposRoot.ts。
+const {
+  reposRootInput,
+  globalDefaultReposRoot,
+  resolvedReposRoot,
+  homeDir,
+  displayPath,
+  saveAsGlobalDefault,
+  pickReposRoot,
+} = useReposRoot()
 
 // repoName -> 真实 git 分支列表;扫描完填充,env_branches 下拉的 options 用它。
 // 用 ref<Record> 而不是 per-repo 属性,避免跟 saved yaml 结构污染(env_branches
@@ -959,19 +872,6 @@ const repoBranchesMap = ref<Record<string, string[]>>(
   (saved?.repoBranchesMap as Record<string, string[]>) ?? {},
 )
 
-
-async function pickReposRoot() {
-  if (!isDesktop()) {
-    toast.error('选目录需要桌面 app 环境;浏览器模式请手动输入路径')
-    return
-  }
-  try {
-    const p = await openDir('选择仓库根目录(含各个 repo.name 子目录)')
-    if (p) reposRootInput.value = p
-  } catch (e: any) {
-    toast.error(String(e?.message || e))
-  }
-}
 
 // 本地模式:用户点"选目录"挑一个已 clone 好的仓库目录。
 // 选了新目录 = 换了仓库,彻底重置身份(URL / 名字 / 手改标记 / 已扫过)再从新目录反填,

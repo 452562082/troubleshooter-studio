@@ -14,7 +14,6 @@ import {
   kuboardListResources,
   kuboardFetchConfigMaps,
   isDesktop,
-  openYAML,
   listBranchesForRepo,
   validate as bridgeValidate,
 } from '../lib/bridge'
@@ -38,7 +37,7 @@ import EnvListStep from '../components/EnvListStep.vue'
 import GlobalReposRootBlock from '../components/GlobalReposRootBlock.vue'
 import { generateYAML as libGenerateYAML, type YAMLGenContext } from '../lib/yamlGenerator'
 import { computeStepErrors as libComputeStepErrors, labelForErrorKey as libLabelForErrorKey, type ValidatorContext } from '../lib/yamlValidator'
-import { applyParsedYAMLToWizardState, type ApplyImportContext } from '../lib/yamlImporter'
+import type { ApplyImportContext } from '../lib/yamlImporter'
 import { copyToClipboard } from '../lib/clipboard'
 import { useOpenClawDetect } from '../lib/useOpenClawDetect'
 import { useURLProbe } from '../lib/useURLProbe'
@@ -65,6 +64,7 @@ import { useKuboardPreload } from '../lib/useKuboardPreload'
 import { useDataStoreState, type DSByService, type DSScanState } from '../lib/useDataStoreState'
 import { useImportCrossCheck } from '../lib/useImportCrossCheck'
 import { useDeployFlow } from '../lib/useDeployFlow'
+import { useImportFlow } from '../lib/useImportFlow'
 
 const router = useRouter()
 
@@ -3322,67 +3322,20 @@ async function clearDraft() {
 }
 
 // ── Import existing system.yaml into the wizard ──
-const showImportDialog = ref(false)
-const importText = ref('')
-const importError = ref('')
-
-function openImportDialog() {
-  importText.value = ''
-  importError.value = ''
-  showImportDialog.value = true
-}
-
-function closeImportDialog() {
-  showImportDialog.value = false
-}
-
-// 浏览器模式 fallback:HTML5 file input 走 webview 原生 panel
-function handleImportFile(e: Event) {
-  const input = e.target as HTMLInputElement
-  const file = input.files?.[0]
-  if (!file) return
-  const reader = new FileReader()
-  reader.onload = () => {
-    importText.value = String(reader.result || '')
-  }
-  reader.readAsText(file)
-}
-
-// 桌面 app 模式:用 openYAML() 走 osascript 弹原生选择器,**不能**用 <input type="file">,
-// 因为 macOS 26 上 Wails v2.12 的 WebKit2 NSOpenPanel 出现即崩(整个 app 闪退)。
-// 跟 EditorPage / AnalyzePage 的 loadFileNative 一致,统一走 osascript 绕过这个 bug。
-async function pickImportYAMLNative() {
-  if (!isDesktop()) return
-  try {
-    const r = await openYAML()
-    if (r && r.path) {
-      importText.value = r.content || ''
-    }
-  } catch (err: any) {
-    importError.value = `加载文件失败:${String(err?.message || err)}`
-  }
-}
-
-async function applyImport() {
-  importError.value = ''
-  let parsed: any
-  try {
-    parsed = yaml.load(importText.value)
-  } catch (err: any) {
-    importError.value = `YAML 解析失败：${err.message}`
-    return
-  }
-  if (!parsed || typeof parsed !== 'object') {
-    importError.value = '内容为空或不是合法的 system.yaml'
-    return
-  }
-  // 期间禁用 configCenterType watcher 的破坏性清空(它会在 ingest 多源 type 期间
-  // 触发,把我们刚反填的 envNamespaces / serviceConfigSel / ccHubStateByEnv 全删)。
-  importInProgress.value = true
-  // 同步反填主体在 lib/yamlImporter.ts;此处把 InitPage 闭包里的 reactive 引用 + helper +
-  // bridge 函数打包成一个 ctx 传进去。Vue 3 reactive proxy 跨组件边界仍然工作,lib 内
-  // 直接 obj[k]=v 等价于 InitPage 写 reactive。
-  const ctx: ApplyImportContext = {
+// 整条入口闭环(对话框状态 + open/close/file-pick + applyImport)收口在 lib/useImportFlow.ts。
+// 反填主体仍在 lib/yamlImporter.ts(applyParsedYAMLToWizardState),通过 buildContext callback
+// 把 InitPage 闭包里的 30+ reactive / helper / bridge 函数打包成一个 ApplyImportContext 传进去。
+// Vue 3 reactive proxy 跨组件边界仍然工作,lib 内直接 obj[k]=v 等价于 InitPage 写 reactive。
+const {
+  showImportDialog, importText, importError,
+  openImportDialog, closeImportDialog,
+  handleImportFile, pickImportYAMLNative,
+  applyImport,
+} = useImportFlow({
+  importInProgress,
+  currentStep,
+  runImportCrossChecks,
+  buildContext: (): ApplyImportContext => ({
     system, agent, targetModels,
     environments, repos,
     enabledSourceTypes, enabledSourceOrder, sourceCreds,
@@ -3400,19 +3353,8 @@ async function applyImport() {
     pickBranchForEnv,
     getRepoPathsForSystem, listBranchesForRepo,
     setRepoBranches: (name, branches) => { repoBranchesMap.value[name] = branches },
-  }
-  const { primaryConfigCenter } = await applyParsedYAMLToWizardState(parsed, ctx)
-  const cc = primaryConfigCenter
-
-  // 导入完直接跳到 Step 2(系统基本信息)— 反填的字段从这里展开,用户能逐步检查 / 改。
-  // 留在欢迎页(Step 1)没意义,反填的内容在那看不见。
-  currentStep.value = 2
-  showImportDialog.value = false
-
-  // 反填完成后异步触发交叉校验。setTimeout(0) 推到宏任务,确保 configCenterType
-  // watcher 跑完 + reactive flush settle,避免跟同步反填竞争。
-  setTimeout(() => runImportCrossChecks(cc), 0)
-}
+  }),
+})
 
 
 // ── Step 7: Preview / generate ──

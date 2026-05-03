@@ -66,6 +66,8 @@ import {
 } from '../lib/useWizardDraft'
 import { useKuboardState } from '../lib/useKuboardState'
 import { useK8sRtWorkloads } from '../lib/useK8sRtWorkloads'
+import { useObsAccessMode, VIA_GRAFANA_ELIGIBLE, obsAccessKey } from '../lib/useObsAccessMode'
+import { useCCHubState, type CCHubEnvState } from '../lib/useCCHubState'
 
 const router = useRouter()
 
@@ -1758,26 +1760,8 @@ function isRevealed(k: string): boolean {
 // 按 env 触发一次;用 Step 5 刚填的凭证连目标 nacos/apollo/consul HTTP API,
 // 拉出实际 dataId / appId / kv key 列表。UI 列出来给用户挑哪个 locator 对哪个服务。
 //
-// 状态按 env 分开:正在扫 loading / 扫完 entries / 扫失败 error —— 同时扫多 env 互不干扰。
-interface CCHubEnvState {
-  status: 'idle' | 'loading' | 'ok' | 'error'
-  entries?: CCHubEntry[]
-  namespaces?: CCHubNamespace[]   // nacos / apollo 返回的 namespace 列表,用户用它下拉挑
-  notes?: string[]
-  error?: string
-  loadedAt?: number // 记录时间戳给 UI 显示"N 秒前拉的"
-  // synthesized=true 标识本条不是从真实 HTTP preload 拉的,而是 applyImport 时
-  // 用 yaml service_map 合成的"虚假 ok"。auto-preload 用它判断是否仍需调真实 nacos
-  // 做交叉校验(防止 yaml 写的 namespace/dataId 在真实 nacos 不存在却看起来"已选中")。
-  synthesized?: boolean
-}
-// 持久化:跨会话保留已成功扫过的 env 的 entries + namespaces + notes(恢复 UI 下拉 / 服务映射);
-// loading / error 等瞬态不存 —— 重进应该从 idle 开始,loading 是"还在拉"的状态
-const initialCCHubState: Record<string, CCHubEnvState> = {}
-for (const [envID, raw] of Object.entries((saved?.ccHubStateByEnv || {}) as Record<string, CCHubEnvState>)) {
-  if (raw && raw.status === 'ok') initialCCHubState[envID] = raw
-}
-const ccHubStateByEnv = reactive<Record<string, CCHubEnvState>>(initialCCHubState)
+// 状态按 env 分开:类型 + 持久化收口在 lib/useCCHubState.ts(CCHubEnvState 也从那导出)。
+const { ccHubStateByEnv } = useCCHubState(saved?.ccHubStateByEnv as Record<string, CCHubEnvState> | undefined)
 
 // ── per-env × per-service 映射:用户挑的"环境对应 namespace" + "服务对应 dataId"──
 // 需求:dev 环境 + user 服务 → 应该定位到 nacos 里 dev namespace 下某条 user-*.yaml。
@@ -2847,24 +2831,11 @@ function obsGrafanaDsKey(obsKey: string, envID: string): string {
   return `${obsKey}:${envID}`
 }
 
-// 每个 (obs, env) 的访问方式:via_grafana = 走 Grafana 代理(只需选 ds);direct = 直连(填 URL+auth)。
-// 默认值:Grafana 启用 + 该工具属 via-grafana 候选(loki/prometheus/jaeger/tempo/elk)→ via_grafana;
-// 否则 → direct。用户可在卡顶 select 显式切换。
-type ObsAccessMode = 'via_grafana' | 'direct'
-const VIA_GRAFANA_ELIGIBLE = ['loki', 'prometheus', 'jaeger', 'tempo', 'elk'] as const
-const obsAccessModeMap = reactive<Record<string, ObsAccessMode>>(saved?.obsAccessModeMap ?? {})
-function obsAccessKey(obsKey: string, envID: string): string {
-  return `${obsKey}:${envID}`
-}
-function getObsAccessMode(obsKey: string, envID: string): ObsAccessMode {
-  if (!(VIA_GRAFANA_ELIGIBLE as readonly string[]).includes(obsKey)) return 'direct'
-  const explicit = obsAccessModeMap[obsAccessKey(obsKey, envID)]
-  if (explicit) return explicit
-  return enabledObservability['grafana'] ? 'via_grafana' : 'direct'
-}
-function setObsAccessMode(obsKey: string, envID: string, mode: ObsAccessMode) {
-  obsAccessModeMap[obsAccessKey(obsKey, envID)] = mode
-}
+// 每个 (obs, env) 的访问方式开关收口在 lib/useObsAccessMode.ts。
+const { obsAccessModeMap, getObsAccessMode, setObsAccessMode } = useObsAccessMode({
+  initialMap: saved?.obsAccessModeMap,
+  enabledObservability,
+})
 // obsKey → grafana datasource.type 的允许值(可多个,如 elk 需要 elasticsearch)
 const OBS_GRAFANA_DS_TYPES: Record<string, string[]> = {
   loki: ['loki'],

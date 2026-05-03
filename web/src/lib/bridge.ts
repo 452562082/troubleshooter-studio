@@ -2,82 +2,26 @@
 // 桌面 app 里 window.go 存在 → 直接调 Go 方法(wailsjs/go/main/App.ts 自动产出);
 // 浏览器里 → fallback fetch('/api/*')。新页面只调 bridge.*,改通路一处搞定。
 // 类型从 wailsjs/go/models 来,Go 端改 struct 跑 make wails-gen 同步。
+//
+// 按域分文件:
+//   bridge/kuboard.ts       —— Kuboard 集群资源 / cm / Deployments
+//   bridge/configCenter.ts  —— Nacos / Apollo / Consul + DSProbe / URLProbe
+//   bridge/loki.ts          —— Loki + Grafana datasources
+//   bridge/openclaw.ts      —— OpenClaw 模型探测
+//   bridge/aitools.ts       —— Claude Code / Cursor / Codex 安装探测
+// 本文件保留:isDesktop / yaml validate-plan-doctor-gen / discover-uninstall-applyBot /
+//          openYAML-openDir-genPreview / importAndDeploy + install workflow / 用户配置 /
+//          仓库扫描(monorepo / submodule / branches / role recommend) / Infra 凭证。
 
 import * as App from '../../wailsjs/go/main/App'
 import { agent, analyzerpipe, deploy, discover, generator, main } from '../../wailsjs/go/models'
 
-export type KuboardResources = main.KuboardResources
-
-/** Kuboard 资源拉取:登录 → 列 cluster/ns/cm 三层。仅桌面 app 可用。
- *  鉴权:accessKey(免账密,Kuboard 后台个人中心→API 访问凭证创建)优先;
- *  否则用 username+password 走 /login。loginPath 已废弃(v4 路径固定)。 */
-export async function kuboardListResources(
-  url: string, username: string, password: string, accessKey = '', loginPath = '',
-): Promise<KuboardResources> {
-  if (!isDesktop()) throw new Error('Kuboard 拉取只在桌面 app 里可用')
-  return App.KuboardListResources(url, username, password, accessKey, loginPath)
-}
-
-/** 批量拉 N 个 (cluster, namespace, configmap) 的 data 字段;
- *  Step 6 数据层自动识别用,挂在 kuboard 源的服务通过这个把 cm 内容拉回来,
- *  跟 nacos 一样跑 DS_MATCHERS 匹 redis/mysql/...。仅桌面 app。 */
-export type KuboardFetchBatchInput = {
-  url: string,
-  access_key?: string,
-  username?: string,
-  password?: string,
-  items: { key: string, cluster: string, namespace: string, configmap: string }[],
-}
-export type KuboardFetchBatchItemResult = {
-  key: string,
-  ok: boolean,
-  content?: string,
-  format?: string, // 固定 "yaml-multi"
-  error?: string,
-}
-export type KuboardFetchBatchResult = {
-  items: KuboardFetchBatchItemResult[],
-  notes?: string[],
-}
-export async function kuboardFetchConfigMaps(input: KuboardFetchBatchInput): Promise<KuboardFetchBatchResult> {
-  if (!isDesktop()) throw new Error('Kuboard 拉取只在桌面 app 里可用')
-  return App.KuboardFetchConfigMaps(input as any) as any
-}
-
-/** 列指定 (cluster, namespace) 下的 Deployments;返回 name + selector(matchLabels)等。
- *  向导 Step 7 给 k8s 运行时配置服务 → workload 用,选完后从 selector 自动取 label_selector。 */
-export type KuboardListDeploymentsInput = {
-  url: string,
-  username?: string,
-  password?: string,
-  access_key?: string,
-  cluster: string,
-  namespace: string,
-}
-export type KuboardDeploymentInfo = {
-  name: string,
-  namespace: string,
-  replicas?: number,
-  updated_replicas?: number,
-  ready_replicas?: number,
-  available_replicas?: number,
-  strategy?: string,
-  conditions?: string[],
-  selector?: string,
-}
-export async function kuboardListDeployments(input: KuboardListDeploymentsInput): Promise<KuboardDeploymentInfo[]> {
-  if (!isDesktop()) throw new Error('Kuboard 拉取只在桌面 app 里可用')
-  // Wails 生成的 KuboardListPodsInput 用 snake_case(json tag),不是 Go 的 PascalCase。
-  // 传错 key Go 端会拿到空 url/access_key,直接报"鉴权:填 accessKey 或 用户名+密码"。
-  return App.KuboardListDeployments({
-    url: input.url,
-    username: input.username || '',
-    password: input.password || '',
-    access_key: input.access_key || '',
-    cluster: input.cluster,
-    namespace: input.namespace,
-  } as any) as any
-}
+// 各域 binding re-export(已搬到 bridge/<domain>.ts 子文件;import path 不变)
+export * from './bridge/kuboard'
+export * from './bridge/configCenter'
+export * from './bridge/loki'
+export * from './bridge/openclaw'
+export * from './bridge/aitools'
 
 export type DiscoveredBot = discover.DiscoveredAgent
 export type ApplyResult = agent.Result
@@ -156,7 +100,7 @@ export async function analyzeV2(
     repo_paths: repoPaths,
     auto_clone: autoClone,
     repo_name: repoName ?? '',
-  } as any)
+  } as Parameters<typeof App.AnalyzeV2>[0])
 }
 
 /** 从本地已 clone 的仓库目录里反查 origin remote URL,用于"本地模式"反填 yaml.repos[].url */
@@ -314,7 +258,7 @@ export type UninstallBotResult = {
 }
 export async function uninstallBot(dir: string, target: string): Promise<UninstallBotResult> {
   if (!isDesktop()) throw new Error('UninstallBot 只在桌面 app 里可用')
-  return App.UninstallBot(dir, target) as any
+  return App.UninstallBot(dir, target) as unknown as UninstallBotResult
 }
 
 // ── 已装机器人:工作目录浏览 / 编辑 ──
@@ -383,7 +327,7 @@ export type GenPreviewResult = {
 }
 export async function genPreview(yamlText: string): Promise<GenPreviewResult> {
   if (!isDesktop()) throw new Error('GenPreview 只在桌面 app 里可用')
-  return App.GenPreview(yamlText) as any
+  return App.GenPreview(yamlText) as unknown as GenPreviewResult
 }
 
 /** 原生目录对话框：选一个目录（用于部署目标路径 destPath），返回路径；取消返回空串 */
@@ -448,7 +392,7 @@ export type SelfTestCheck = { name: string; status: string; detail?: string }
 export type SelfTestResult = { ok: boolean; checks: SelfTestCheck[] }
 export async function selfTestAgent(dir: string): Promise<SelfTestResult> {
   if (!isDesktop()) throw new Error('SelfTestAgent 只在桌面 app 里可用')
-  return App.SelfTestAgent(dir) as any
+  return App.SelfTestAgent(dir) as unknown as SelfTestResult
 }
 
 /** 取消正在跑的 install.sh(SIGKILL 给 bash 进程组)。返回 true=成功取消,
@@ -484,238 +428,8 @@ export async function saveInfraCredBatch(entries: Record<string, string>): Promi
   await App.SaveInfraCredBatch({ entries } as { entries: Record<string, string> })
 }
 
-// ── 配置中心预加载(真实 HTTP 调用,非 mock) ─────────────────────────
-// Nacos → /nacos/v1/auth/login + /nacos/v1/cs/configs
-// Apollo → /openapi/v1/apps + /envs/<env>/apps/<appId>/clusters/...
-// Consul → /v1/kv/<prefix>?recurse=true&keys=true
-export interface CCHubEntry {
-  locator: string    // dataId(nacos) / namespace name(apollo) / full kv key(consul)
-  group?: string     // nacos 独有;apollo 复用此字段表 cluster
-  tenant?: string    // namespace
-  type?: string      // yaml / properties / json / ...
-  app_id?: string    // apollo 独有
-}
-export interface CCHubNamespace {
-  id: string         // namespace UUID(public 为空串)
-  show_name: string  // 友好名,UI 下拉选项用
-}
-export interface CCHubResult {
-  type: string
-  entries: CCHubEntry[]
-  namespaces?: CCHubNamespace[]  // nacos / apollo:给 UI 下拉用
-  notes?: string[]
-}
-export interface CCHubPreloadInput {
-  type: 'nacos' | 'apollo' | 'consul'
-  addr: string
-  username?: string
-  password?: string
-  token?: string
-  namespace?: string
-  app_id?: string
-  namespaces_only?: boolean  // true = 轻量模式,只列 namespaces 不拉 configs
-}
-/** 连目标配置中心拉清单。失败 reject 带人话错误(网络 / 鉴权 / 参数等)。 */
-export async function preloadConfigCenter(input: CCHubPreloadInput): Promise<CCHubResult> {
-  if (!isDesktop()) throw new Error('PreloadConfigCenter 只在桌面 app 可用')
-  return App.PreloadConfigCenter(input as any) as Promise<CCHubResult>
-}
+// 配置中心预加载 / Loki / OpenClaw / AITools 已搬到 bridge/<domain>.ts(顶部 export *)
 
-// 拉单条配置内容(给"数据层自动识别"用:Step 7 从已挑的 dataId 拉原文,js-yaml 解析出数据层)
-export interface CCHubFetchContentInput {
-  type: 'nacos' | 'apollo' | 'consul'
-  addr: string
-  username?: string
-  password?: string
-  token?: string
-  namespace?: string
-  group?: string
-  data_id: string
-  app_id?: string
-}
-export interface CCHubFetchContentResult {
-  content: string
-  format?: string  // yaml / json / properties
-  notes?: string[]
-}
-export async function fetchConfigContent(input: CCHubFetchContentInput): Promise<CCHubFetchContentResult> {
-  if (!isDesktop()) throw new Error('FetchConfigContent 只在桌面 app 可用')
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return App.FetchConfigContent(input as any) as Promise<CCHubFetchContentResult>
-}
-
-// 批量拉取:nacos 会复用一次 probe+login,省 N-1 次登录开销。单条失败不中断整批。
-export interface CCHubFetchBatchItem {
-  key: string          // 前端自定义的映射 key(如 "dev::user-service")
-  namespace?: string
-  group?: string
-  data_id: string
-  app_id?: string
-}
-export interface CCHubFetchBatchInput {
-  type: 'nacos' | 'apollo' | 'consul'
-  addr: string
-  username?: string
-  password?: string
-  token?: string
-  items: CCHubFetchBatchItem[]
-}
-export interface CCHubFetchBatchItemResult {
-  key: string
-  ok: boolean
-  result?: CCHubFetchContentResult
-  error?: string
-}
-export interface CCHubFetchBatchResult {
-  items: CCHubFetchBatchItemResult[]
-  notes?: string[]
-}
-export async function fetchConfigContentBatch(input: CCHubFetchBatchInput): Promise<CCHubFetchBatchResult> {
-  if (!isDesktop()) throw new Error('FetchConfigContentBatch 只在桌面 app 可用')
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return App.FetchConfigContentBatch(input as any) as Promise<CCHubFetchBatchResult>
-}
-
-// 数据层连通性探测:轻量 TCP dial + 最小协议握手,5s 超时,不读不写数据
-export interface DSProbeInput {
-  type: string                          // redis / mysql / mongodb / ...
-  fields: Record<string, string>        // url / dsn / host / port / brokers / user / pass ...
-}
-export interface DSProbeResult {
-  ok: boolean
-  latency?: string                      // "120ms"
-  detail?: string                       // 成功时的服务版本 / 握手 banner
-  error?: string                        // 失败时的人话原因
-}
-export async function probeDataStore(input: DSProbeInput): Promise<DSProbeResult> {
-  if (!isDesktop()) throw new Error('ProbeDataStore 只在桌面 app 可用')
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return App.ProbeDataStore(input as any) as Promise<DSProbeResult>
-}
-
-// 给 Step 3 环境列表的 api_domain / web_domain 自动测试用。GET 一下 URL,
-// < 500 都算可达(404/401/403 也算通);DNS 失败 / 拒连 / 超时 / 5xx 算不通。
-export async function probeURL(url: string): Promise<DSProbeResult> {
-  if (!isDesktop()) throw new Error('ProbeURL 只在桌面 app 可用')
-  return App.ProbeURL(url) as Promise<DSProbeResult>
-}
-
-// 给 Step 7 可观测性工具用:可选 basic auth + 可选 Bearer / API Key。
-export async function probeURLAuth(url: string, user: string, pass: string, apiKey: string): Promise<DSProbeResult> {
-  if (!isDesktop()) throw new Error('ProbeURLAuth 只在桌面 app 可用')
-  return App.ProbeURLAuth(url, user, pass, apiKey) as Promise<DSProbeResult>
-}
-
-// ── Loki 标签映射(Step 7 可观测性下的 grafana/loki 子区) ────────────────
-export interface LokiAuthInput {
-  grafana_url?: string
-  loki_url?: string
-  ds_uid?: string
-  api_key?: string
-  user?: string
-  pass?: string
-}
-export interface GrafanaDatasource {
-  uid: string
-  name: string
-  type: string
-  url?: string
-  is_loki: boolean
-  default?: boolean
-}
-export interface LokiLabelsResult {
-  labels: string[]
-  notes?: string[]
-}
-export interface LokiLabelValuesResult {
-  key: string
-  values: string[]
-  notes?: string[]
-}
-export async function listGrafanaDatasources(input: LokiAuthInput): Promise<GrafanaDatasource[]> {
-  if (!isDesktop()) throw new Error('ListGrafanaDatasources 只在桌面 app 可用')
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const r = await App.ListGrafanaDatasources(input as any)
-  return Array.isArray(r) ? r : []
-}
-export async function listLokiLabels(input: LokiAuthInput): Promise<LokiLabelsResult> {
-  if (!isDesktop()) throw new Error('ListLokiLabels 只在桌面 app 可用')
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return App.ListLokiLabels(input as any) as Promise<LokiLabelsResult>
-}
-// query 可选(LogQL 选择器);用于"已选 namespace 后只拉该 namespace 下的 app"等场景
-export async function listLokiLabelValues(input: LokiAuthInput, labelKey: string, query = ''): Promise<LokiLabelValuesResult> {
-  if (!isDesktop()) throw new Error('ListLokiLabelValues 只在桌面 app 可用')
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return App.ListLokiLabelValues(input as any, labelKey, query) as Promise<LokiLabelValuesResult>
-}
-
-// ── OpenClaw 模型探测 ──────────────────────────────────────────────────
-// 读本机 ~/.openclaw/openclaw.json(真实 schema,从真实 install 反推),
-// 把 agents.defaults.model.primary / agents.defaults.models / agents.list[].model
-// 聚合成"可用模型"清单给向导 OpenClaw 卡用。
-// 三种状态:
-//   installed=false      → 没装(openclaw.json 缺失),让用户装完再来 / 手选目录
-//   installed_but_empty  → openclaw.json 存在但无任何 model 字段,让用户先装个 agent
-//   ok + models          → 正常展示下拉
-export interface OpenClawModelEntry {
-  id: string               // "openai-codex/gpt-5.4"
-  provider?: string        // "openai-codex"
-  label?: string           // id 或 "id (默认)"
-  source?: string          // 来自 openclaw.json 哪个字段
-  primary?: boolean        // 是否 defaults.model.primary
-}
-export interface OpenClawDetectResult {
-  ok: boolean
-  installed: boolean
-  installed_but_empty?: boolean
-  install_dir?: string
-  config_path?: string
-  version?: string
-  models?: OpenClawModelEntry[]
-  auth_providers?: string[]
-  err?: string
-}
-/** 探测 installDir 下的 OpenClaw 配置;installDir 为空 = 用 ~/.openclaw 默认路径 */
-export async function detectOpenClawModels(installDir: string): Promise<OpenClawDetectResult> {
-  if (!isDesktop()) return { ok: false, installed: false, err: '浏览器模式不支持' }
-  return App.DetectOpenClawModels(installDir)
-}
-
-// ── Claude Code / Cursor 安装探测 ─────────────────────────────────────
-// 给 wizard Step 2 的 claude-code / cursor 卡片显示"✓ 已装 vX.Y / ⚠ 未装"徽标用。
-// 跟 openclaw 不一样:这俩 target 不从本地读模型,只做"装了没 + 版本"信息展示。
-export interface AIToolResult {
-  installed: boolean
-  version?: string
-  path?: string
-  note?: string
-}
-export interface AIToolsDetectResult {
-  claude_code: AIToolResult
-  cursor: AIToolResult
-  codex: AIToolResult
-}
-export async function detectAITools(): Promise<AIToolsDetectResult> {
-  if (!isDesktop()) {
-    return {
-      claude_code: { installed: false, note: '浏览器模式不支持' },
-      cursor: { installed: false, note: '浏览器模式不支持' },
-      codex: { installed: false, note: '浏览器模式不支持' },
-    }
-  }
-  // Wails 生成的类型把 nested 字段标成 optional,但 Go 侧永远返回非 nil;
-  // 做一次防御性兜底,前端收到 undefined 时降级为 not-installed。
-  const r = await App.DetectAITools()
-  return {
-    claude_code: (r.claude_code as AIToolResult) || { installed: false },
-    cursor:      (r.cursor      as AIToolResult) || { installed: false },
-    codex:       ((r as any).codex as AIToolResult) || { installed: false },
-  }
-}
-
-// embedded target 的对话走 chatSend/chatStop(原生 chat,直连 LLM API,见上面)。
-// BotsChat.vue 用这套流式 API,前端无 iframe / 无 HTTP 中转。
 
 /** 在 Finder / Explorer 里展示(不是打开)指定路径 */
 export async function revealInFinder(path: string): Promise<void> {

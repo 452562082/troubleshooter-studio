@@ -22,6 +22,8 @@ cmd/tshoot-desktop/build/bin/
 # Web 构建与依赖
 web/dist/
 web/node_modules/
+# vitest / vite 偶尔在仓库根起 cache(本来不该,但 cwd 切换时会),跟 web/node_modules/ 一样不入库
+/node_modules/
 
 # 本机凭证草稿(init wizard / install.sh 自动生成)
 scripts/.env

@@ -10,7 +10,7 @@ import { yamlStr, hasAnyLokiMapping, emitLokiLabelMapping, type LokiEnvMapping }
 // VIA_GRAFANA_ELIGIBLE 跨 generator/useObsAccessMode/importer 共用,在 yamlShared 集中。
 // re-export 给老 import("from './yamlGenerator'")兼容。
 export { VIA_GRAFANA_ELIGIBLE } from './yamlShared'
-import { VIA_GRAFANA_ELIGIBLE } from './yamlShared'
+import { VIA_GRAFANA_ELIGIBLE, placeholderName } from './yamlShared'
 
 // ── 类型(跟 InitPage 现有 reactive 形状对齐) ────────────────────────
 
@@ -244,9 +244,7 @@ export function generateYAML(ctx: YAMLGenContext): string {
             const comment = f.secret ? '      # ⚠ secret,yaml 分享注意范围' : ''
             out.push(`${baseIndent}    ${f.key}: ${yamlStr(v)}${comment}`)
           } else {
-            const ph = sourceID === 'default'
-              ? f.envVar(env.id)
-              : `${f.envVar(env.id)}_${sourceID.toUpperCase().replace(/-/g, '_')}`
+            const ph = placeholderName(f.envVar(env.id), sourceID)
             out.push(`${baseIndent}    ${f.key}: "{{${ph}}}"      # 没填,部署时交互收集`)
           }
         }

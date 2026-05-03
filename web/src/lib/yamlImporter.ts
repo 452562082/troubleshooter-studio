@@ -109,13 +109,8 @@ export function parseRepoCore(r: unknown): ParsedRepoCore {
   }
 }
 
-/** 多源场景下,字段值缺失时给的 env 占位符名。
- *  例:envVar=`CC_ADDR_DEV`,sourceID='legacy-nacos' → "CC_ADDR_DEV_LEGACY_NACOS"。
- *  default 源不加后缀,跟 single-source 命名兼容。 */
-export function placeholderName(envVarBase: string, sourceID: string): string {
-  if (sourceID === 'default' || !sourceID) return envVarBase
-  return `${envVarBase}_${sourceID.toUpperCase().replace(/-/g, '_')}`
-}
+// placeholderName 收口在 yamlShared.ts(yamlGenerator 也用同一份);re-export 给老调用方。
+export { placeholderName } from './yamlShared'
 
 // ── applyParsedYAMLToWizardState 同步反填 ──
 

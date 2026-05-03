@@ -34,3 +34,23 @@ export function svcKey(envID: string, svc: string): string {
 export function probeKey(envID: string, svc: string, dsKey: string): string {
   return `${envID}::${svc}::${dsKey}`
 }
+
+// ── 占位符 / source 段命名 ────────────────────────────────────────
+// 注意:install 侧(internal/agent.envVar / InitPage::installEnvVarName)的顺序是
+// "<PREFIX>_<SOURCE>_<ENV>",跟下方 yaml 侧的 "<ENV_VAR>_<SOURCE>" 不一样,刻意
+// 保持两份;Go 端 envVar() 是真源,本文件只覆盖 yaml emit / yaml import 这一侧。
+
+/** sourceID 的环境变量段:'legacy-nacos' → 'LEGACY_NACOS';default 源 / 空串 → ''。 */
+export function sourceIDToEnvSegment(sourceID: string): string {
+  if (!sourceID || sourceID === 'default') return ''
+  return sourceID.toUpperCase().replace(/-/g, '_')
+}
+
+/** 多源场景下,字段值缺失时 yaml emit 给的环境变量占位符名(env 段在前)。
+ *  例:envVar=`CC_ADDR_DEV`,sourceID='legacy-nacos' → "CC_ADDR_DEV_LEGACY_NACOS"。
+ *  default 源 / 空串不加后缀,跟 single-source 命名兼容。
+ *  yamlGenerator emit + yamlImporter 反推占位符两边共用。 */
+export function placeholderName(envVarBase: string, sourceID: string): string {
+  const seg = sourceIDToEnvSegment(sourceID)
+  return seg ? `${envVarBase}_${seg}` : envVarBase
+}

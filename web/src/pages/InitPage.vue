@@ -67,6 +67,8 @@ import { useLokiMappingState, type LokiMappingPerEnv } from '../lib/useLokiMappi
 import { useGrafanaDS, OBS_GRAFANA_DS_TYPES, obsGrafanaDsKey } from '../lib/useGrafanaDS'
 import { useLokiLabels } from '../lib/useLokiLabels'
 import { useCCHubPreload } from '../lib/useCCHubPreload'
+import { useKuboardPreload } from '../lib/useKuboardPreload'
+import { useDataStoreState, type DSByService, type DSScanState } from '../lib/useDataStoreState'
 
 const router = useRouter()
 
@@ -1065,58 +1067,10 @@ const {
   draftKuboardState: saved?.kuboardStateByEnv,
 })
 
-async function runKuboardPreloadFromSource(sourceType: string, envID: string) {
-  if (!isDesktop()) {
-    toast.error('Kuboard 拉取只在桌面 app 可用')
-    return
-  }
-  const data = sourceCreds[sourceType]
-  if (!data) return
-  const envCreds = data.creds[envID] || {}
-  const url = (envCreds.url || '').trim()
-  const accessKey = (envCreds.access_key || '').trim()
-  const username = (envCreds.username || '').trim()
-  const password = (envCreds.password || '').trim()
-  if (!url) {
-    toast.error(`${envID}: 先填 Kuboard URL`)
-    return
-  }
-  if (!accessKey && (!username || !password)) {
-    toast.error(`${envID}: 鉴权填 API 访问凭证(优先),或 用户名+密码`)
-    return
-  }
-  kuboardStateByEnv[envID] = { status: 'loading' }
-  try {
-    const res = await kuboardListResources(url, username, password, accessKey)
-    const clusters = (res.clusters || []).map(c => ({
-      name: c.name,
-      namespaces: (c.namespaces || []).map(n => ({
-        name: n.name,
-        configmaps: n.configmaps || [],
-      })),
-    }))
-    kuboardStateByEnv[envID] = { status: 'ok', clusters, notes: res.notes }
-    persistKuboardState() // 立即落盘,不等大 draft watch
-    if (clusters.length === 0) {
-      toast.info(`${envID}: 没拉到集群,看看账号在 Kuboard 里的权限`)
-    } else {
-      // 顺手给本 env 下走 kuboard 源(主或副)的服务跑一次 auto-match,把 cluster/namespace/configmap
-      // 三级下拉自动填上 —— 跟 nacos autoFillSelections 行为对齐,免得用户每个服务手挑 3 次。
-      // 主源 vs 副源:这条入口走的是 sourceType,直接传它就行。
-      autoFillKuboardSelections(envID, sourceType)
-      toast.success(`${envID}: 拉到 ${clusters.length} 个集群`)
-    }
-  } catch (e: any) {
-    const msg = String(e?.message || e)
-    kuboardStateByEnv[envID] = { status: 'error', error: msg }
-    pushLog('cchub', 'error', `[${envID}] kuboard 拉取失败: ${msg}`, { envID })
-    toast.error(`${envID} kuboard 拉取失败: ${msg.slice(0, 80)}`)
-  }
-}
-// 主源版:固定从 sourceCreds['kuboard'] 读
-async function runKuboardPreload(envID: string) {
-  return runKuboardPreloadFromSource('kuboard', envID)
-}
+// runKuboardPreloadFromSource / runKuboardPreload / autoMatchKuboardLocation /
+// autoFillKuboardSelections 全收口在 lib/useKuboardPreload.ts。
+// 实例化点必须在 sourceCreds + kuboardSvcMap + allServiceNames + getServiceSource +
+// serviceMatchKeys + startsAtBoundary 之后,见下方"Step 5 Kuboard 预加载"段。
 
 // k8s 运行时(可观测性)拉集群资源:先吃 obs k8s_runtime 自己的 URL+鉴权,
 // 没填的话回落到 sourceCreds['kuboard'](同一个 Kuboard 实例时复用)。
@@ -1678,71 +1632,29 @@ const {
 void _autoMatchNamespace; void _autoMatchDataID; void _autoFillSelections
 void _loadConfigsForEnv; void _reloadEnvNamespace
 
-// autoMatchKuboardLocation 给 kuboard 源的服务找最匹配的 cluster/namespace/configmap。
-// 跟 autoMatchDataID 同一套退化策略:serviceMatchKeys 退化候选 + startsAtBoundary 段对齐 + 3-pass。
-// 返回 null 表示没找到,UI 保持空让用户手挑。
-function autoMatchKuboardLocation(envID: string, svc: string): { cluster: string, namespace: string, configmap: string } | null {
-  const state = kuboardStateByEnv[envID]
-  if (!state || state.status !== 'ok') return null
-  const candidates = serviceMatchKeys(svc)
-  const envLower = envID.toLowerCase()
-  // 把所有 cluster→namespace→configmap 三联拍平,方便扫描;按出现顺序保留(首个命中赢)。
-  const flat: Array<{ cluster: string, namespace: string, configmap: string }> = []
-  for (const c of state.clusters) {
-    for (const n of c.namespaces) {
-      for (const cm of n.configmaps) {
-        flat.push({ cluster: c.name, namespace: n.name, configmap: cm })
-      }
-    }
-  }
-  if (flat.length === 0) return null
-  // Pass 1:configmap 段对齐前缀 + (configmap 含 env 或 namespace 含 env)—— 最强信号
-  for (const cand of candidates) {
-    const hit = flat.find(x => {
-      const cmL = x.configmap.toLowerCase()
-      return startsAtBoundary(cmL, cand) && (cmL.includes(envLower) || x.namespace.toLowerCase().includes(envLower))
-    })
-    if (hit) return hit
-  }
-  // Pass 2:configmap 段对齐前缀(不要求含 env)—— 跨集群共享或 env 体现在 namespace
-  for (const cand of candidates) {
-    const hit = flat.find(x => startsAtBoundary(x.configmap.toLowerCase(), cand))
-    if (hit) return hit
-  }
-  // Pass 3:fuzzy 兜底(完整服务名 substring)
-  const svcLower = svc.toLowerCase()
-  let hit = flat.find(x => {
-    const cmL = x.configmap.toLowerCase()
-    return cmL.includes(svcLower) && (cmL.includes(envLower) || x.namespace.toLowerCase().includes(envLower))
-  })
-  if (!hit) hit = flat.find(x => x.configmap.toLowerCase().includes(svcLower))
-  return hit || null
-}
-
-// autoFillKuboardSelections 给某个 env 的所有"以 kuboard 为源的服务"自动填三联映射。
-// sourceType 决定从哪条服务源筛(主源走 configCenterType,副源走传入值,如 'kuboard')。
-// 行为跟 autoFillSelections 对齐:已有用户选择的格子不覆盖,只填空的。
-function autoFillKuboardSelections(envID: string, sourceType: string = 'kuboard') {
-  const state = kuboardStateByEnv[envID]
-  if (!state || state.status !== 'ok') return
-  for (const svc of allServiceNames.value) {
-    if (getServiceSource(svc) !== sourceType) continue
-    const k = svcKey(envID, svc)
-    const cur = kuboardSvcMap[k]
-    if (cur && cur.cluster && cur.namespace && cur.configmap) continue // 三联齐了 → 不动
-    const hit = autoMatchKuboardLocation(envID, svc)
-    if (!hit) continue
-    if (!cur) {
-      kuboardSvcMap[k] = { cluster: hit.cluster, namespace: hit.namespace, configmap: hit.configmap }
-    } else {
-      // 部分填:只补空字段,保留用户已挑的(如已选 cluster 想换 namespace)
-      if (!cur.cluster) cur.cluster = hit.cluster
-      if (!cur.namespace) cur.namespace = hit.namespace
-      if (!cur.configmap) cur.configmap = hit.configmap
-    }
-  }
-}
-
+// ── Step 5 Kuboard 预加载 ─────────────────────────────────────────
+// runKuboardPreload / runKuboardPreloadFromSource / autoMatchKuboardLocation /
+// autoFillKuboardSelections 全收口在 lib/useKuboardPreload.ts;runK8sRtPreload 跟
+// 可观测性 toolInputs / k8sRuntimeEnvLoc 多块状态交织,留在 InitPage 直接 mutate
+// 暴露的 kuboardStateByEnv + 调用 autoFillKuboardSelections。
+const {
+  autoMatchKuboardLocation: _autoMatchKuboardLocation,
+  autoFillKuboardSelections: _autoFillKuboardSelections,
+  runKuboardPreloadFromSource,
+  runKuboardPreload,
+} = useKuboardPreload({
+  kuboardStateByEnv,
+  persistKuboardState,
+  sourceCreds,
+  kuboardSvcMap,
+  allServiceNames,
+  getServiceSource,
+  serviceMatchKeys,
+  startsAtBoundary,
+})
+// autoMatchKuboardLocation/autoFillKuboardSelections 由 composable 内部 runKuboardPreload* 调用,
+// InitPage 模板直接用的是 runKuboardPreload / runKuboardPreloadFromSource 两个 runner
+void _autoMatchKuboardLocation; void _autoFillKuboardSelections
 
 // 导入 yaml 反填后的"真实配置中心交叉校验"——nacos / apollo / consul 通用:
 //
@@ -2414,89 +2326,25 @@ async function crossCheckImportedObservability(): Promise<void> {
 //     toolInputs[ds:<type>:<env>:<field>] 填上从 yaml 抽出来的 url/dsn/...
 // 没命中的保留原状(不覆盖用户已手填的字段)。
 
-const dsImportStatus = ref<'idle' | 'loading' | 'ok' | 'error'>('idle')
-const dsImportStats = reactive<{ scanned: number; matched: number }>({ scanned: 0, matched: 0 })
-const dsAutoFilled = reactive<Record<string, boolean>>({}) // dsType → 是否本次自动识别过
-
-// 新 Step 7 数据结构:env → service → dsKey → { fieldKey: value }
-// 每个服务拉回来的 yaml 单独识别、单独存,UI 也按 env → service → ds 分层展示。
-// 用户可改字段值,yaml 生成时从 scannedDS 推导 data_stores。
-type DSFieldMap = Record<string, string>
-type DSByKey = Record<string, DSFieldMap>
-type DSByService = Record<string, DSByKey>
-const scannedDS = reactive<Record<string, DSByService>>((saved?.scannedDS as Record<string, DSByService>) ?? {})
-
-// 每个 (env, service) 的扫描状态 —— 让 UI 可以完整展示矩阵,缺失项明确标原因:
-//   'ok'      拉取成功且识别到至少一个数据层(scannedDS 有内容)
-//   'empty'   拉取成功但 yaml 里没匹到任何 redis/mysql/...(服务可能不用数据层)
-//   'skipped' 没挑 dataId 或 env 未预加载 —— 需要用户回 Step 5 补全
-//   'error'   拉取 / 解析失败 —— 详情进日志
-interface DSScanState { status: 'ok' | 'empty' | 'skipped' | 'error'; reason?: string }
-// 一次性迁移:旧版本 nacos 批拉对"未分配源"和"挂在副源"的服务都笼统报"未映射 dataId",
-// 这些 stale 状态会跨会话留在 localStorage 里。新版本对未分配源 / 跨源服务给的 reason 不一样,
-// 加载时按特征字符串清掉它们,让用户进 Step 6 看到的是新逻辑跑出来的状态(或新触发后的结果)。
-const dsScanState = reactive<Record<string, DSScanState>>(
-  (() => {
-    const src = (saved?.dsScanState as Record<string, DSScanState>) ?? {}
-    const out: Record<string, DSScanState> = {}
-    const obsoleteReasons = [
-      '未映射 dataId,回 Step 5 为此服务挑一条',
-      '挂在', // "挂在 X 源,自动扫只针对 Y 源" 系列
-    ]
-    for (const [k, v] of Object.entries(src)) {
-      if (!v || typeof v !== 'object') continue
-      if (v.status === 'skipped' && obsoleteReasons.some(r => (v.reason || '').includes(r))) continue
-      out[k] = v
-    }
-    return out
-  })(),
+// scannedDS / dsScanState / dsAutoFilled / dsImportStatus / dsImportStats / dsProbeResults
+// state + scanStateKey/Of + removeScannedDS + recomputeEnabledDataStoresFromScanned 全收口在
+// lib/useDataStoreState.ts。autoImportDataStores / probeOneDS / probeAllAcrossEnvs 这三个
+// runner 还跟 sourceCreds / preloadConfigCenter / fetchConfigContentBatch / probeDataStore
+// 多块状态交织,留在下方 InitPage,直接 mutate 暴露的 reactive。
+const {
+  dsImportStatus, dsImportStats, dsAutoFilled,
+  scannedDS, dsScanState, dsProbeResults,
+  scanStateKey, scanStateOf,
+  removeScannedDS,
+  recomputeEnabledDataStoresFromScanned,
+} = useDataStoreState(
+  {
+    scannedDS: saved?.scannedDS as Record<string, DSByService> | undefined,
+    dsScanState: saved?.dsScanState as Record<string, DSScanState> | undefined,
+  },
+  dataStoreOptions,
+  enabledDataStores,
 )
-function scanStateKey(envID: string, svc: string): string { return `${envID}::${svc}` }
-function scanStateOf(envID: string, svc: string): DSScanState | undefined {
-  return dsScanState[scanStateKey(envID, svc)]
-}
-
-// 删掉某个 (env, service) 下识别出的某类数据层(用户手动:"这个我不要了")。
-// 不改 scanState —— 用户主观删不算"没读取到",下一步校验仍视该 (env, svc) 通过。
-function removeScannedDS(envID: string, svc: string, dsKey: string) {
-  if (scannedDS[envID]?.[svc]?.[dsKey]) {
-    delete scannedDS[envID][svc][dsKey]
-  }
-  delete dsProbeResults[probeKey(envID, svc, dsKey)]
-  // 同步 enabledDataStores —— 删掉的可能是该 type 的最后一条,enabledDataStores 得跟着关。
-  recomputeEnabledDataStoresFromScanned()
-}
-
-// 按当前 scannedDS 实际还有哪些数据层条目,实时派生 enabledDataStores。
-// scannedDS 是用户在 Step 6 见到的真相(添/删都直接改它),enabledDataStores 是
-// "这个 type 启用了"的派生结论。emit yaml / 删组件时调一次,保证两边永远一致,
-// 避免"已删除但 skill 还在白名单"或反过来的撕裂。
-function recomputeEnabledDataStoresFromScanned() {
-  const live = new Set<string>()
-  for (const envID of Object.keys(scannedDS)) {
-    for (const svc of Object.keys(scannedDS[envID] || {})) {
-      for (const dsKey of Object.keys(scannedDS[envID]?.[svc] || {})) {
-        if (Object.keys(scannedDS[envID]?.[svc]?.[dsKey] || {}).length > 0) {
-          live.add(dsKey)
-        }
-      }
-    }
-  }
-  for (const k of dataStoreOptions) {
-    enabledDataStores[k] = live.has(k)
-  }
-}
-
-// ── 数据层连通性测试 ───────────────────────────────────────────────────
-// per (env, svc, dsKey) 一个测试结果。idle/loading/ok/fail 四种状态。
-// 不进 localStorage —— 网络状态会变,缓存意义不大,重开重测。
-interface DSProbeState {
-  status: 'idle' | 'loading' | 'ok' | 'fail'
-  latency?: string
-  detail?: string
-  error?: string
-}
-const dsProbeResults = reactive<Record<string, DSProbeState>>({})
 async function probeOneDS(envID: string, svc: string, dsKey: string) {
   if (!isDesktop()) {
     toast.error('连通性测试只在桌面 app 可用')

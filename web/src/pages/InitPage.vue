@@ -66,8 +66,9 @@ import {
 } from '../lib/useWizardDraft'
 import { useKuboardState } from '../lib/useKuboardState'
 import { useK8sRtWorkloads } from '../lib/useK8sRtWorkloads'
-import { useObsAccessMode, VIA_GRAFANA_ELIGIBLE, obsAccessKey } from '../lib/useObsAccessMode'
+import { useObsAccessMode, obsAccessKey } from '../lib/useObsAccessMode'
 import { useCCHubState, type CCHubEnvState } from '../lib/useCCHubState'
+import { ccKeyFor, svcKey, probeKey } from '../lib/yamlShared'
 
 const router = useRouter()
 
@@ -1653,10 +1654,7 @@ const CC_FIELDS_BY_TYPE = computed<Record<string, CredField[]>>(() => {
     'env-vars': envVarsFields,
   }
 })
-// keychain 里用 "cc:<type>:<env>:<field>" 命名;UI 读写走这个 key
-function ccKeyFor(type: string, envID: string, field: string): string {
-  return `cc:${type}:${envID}:${field}`
-}
+// ccKeyFor / svcKey / probeKey 收口在 lib/yamlShared.ts。
 
 // 判断字段在当前 env 下是否要隐藏(基于 showWhen 条件)。
 // getSibling 由调用方提供,主源走 ccCredInputs,副源走 sourceCreds[t].creds[env]。
@@ -1836,10 +1834,6 @@ function setK8sRtSvcWorkload(envID: string, svc: string, workload: string) {
   const list = k8sRtWorkloadsFor(envID, eloc.cluster, eloc.namespace)
   const dep = list.find(d => d.name === workload)
   sloc.label_selector = dep?.selector || ''
-}
-
-function svcKey(envID: string, svc: string): string {
-  return `${envID}::${svc}`
 }
 
 // 从 repos[].service_names 抽出去重的服务名列表 —— 下拉的每个 env 块都要遍历这一份。
@@ -3282,9 +3276,6 @@ interface DSProbeState {
   error?: string
 }
 const dsProbeResults = reactive<Record<string, DSProbeState>>({})
-function probeKey(envID: string, svc: string, dsKey: string): string {
-  return `${envID}::${svc}::${dsKey}`
-}
 async function probeOneDS(envID: string, svc: string, dsKey: string) {
   if (!isDesktop()) {
     toast.error('连通性测试只在桌面 app 可用')
@@ -4641,7 +4632,7 @@ async function applyImport() {
     enabledObservability, toolInputs, obsAccessModeMap, grafanaDsUidByObsEnv,
     k8sRuntimeEnvLoc, k8sRuntimeSvcMap,
     scannedDS, enabledDataStores, dsAutoFilled, dsScanState,
-    ALL_SOURCE_TYPES, VIA_GRAFANA_ELIGIBLE,
+    ALL_SOURCE_TYPES,
     CC_FIELDS_BY_TYPE: CC_FIELDS_BY_TYPE.value,
     allServiceNames: allServiceNames.value,
     ensureKuboardLoc, getLokiMapping,

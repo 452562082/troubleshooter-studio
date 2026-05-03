@@ -10,10 +10,11 @@
 // 用户在 ObservabilityToolBlock 顶部 select 显式切换会写 obsAccessModeMap,后续 getObsAccessMode
 // 读到非空就用显式值。
 import { reactive } from 'vue'
+import { VIA_GRAFANA_ELIGIBLE } from './yamlShared'
 
 export type ObsAccessMode = 'via_grafana' | 'direct'
-
-export const VIA_GRAFANA_ELIGIBLE = ['loki', 'prometheus', 'jaeger', 'tempo', 'elk'] as const
+// re-export 给已经 from './useObsAccessMode' 拿这个常量的老调用方;新代码请直接走 yamlShared。
+export { VIA_GRAFANA_ELIGIBLE }
 
 export function useObsAccessMode(deps: {
   initialMap?: Record<string, ObsAccessMode>

@@ -11,6 +11,7 @@
 // 它依赖 runCCHubPreload / crossCheckImported* 等 closure 函数,跨边界不值得。
 
 import type { CredField } from './credFields'
+import { VIA_GRAFANA_ELIGIBLE } from './yamlShared'
 
 /** yaml 字段值是否为模板占位符 "{{XYZ}}";占位符不应当作真值反填。 */
 export function isPlaceholder(v: unknown): boolean {
@@ -148,7 +149,7 @@ export interface ApplyImportContext {
   dsScanState: Record<string, { status: string; reason?: string }>
   // 静态 / computed 数据
   ALL_SOURCE_TYPES: readonly string[]
-  VIA_GRAFANA_ELIGIBLE: readonly string[]
+  // VIA_GRAFANA_ELIGIBLE 不再走 ctx,直接 import 自 yamlShared(单一源)
   CC_FIELDS_BY_TYPE: Record<string, CredField[]>
   allServiceNames: string[]
   // helper 函数(InitPage closure)
@@ -405,7 +406,7 @@ export async function applyParsedYAMLToWizardState(
           }
         }
       }
-      if ((ctx.VIA_GRAFANA_ELIGIBLE as readonly string[]).includes(key)) {
+      if ((VIA_GRAFANA_ELIGIBLE as readonly string[]).includes(key)) {
         const viaGrafana = Boolean(obs?.[key]?.via_grafana)
         for (const env of ctx.environments) {
           if (!env.id) continue

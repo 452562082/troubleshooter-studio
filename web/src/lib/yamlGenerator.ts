@@ -7,9 +7,10 @@ import yaml from 'js-yaml'
 import { Target } from './constants'
 import type { CredField } from './credFields'
 import { yamlStr, hasAnyLokiMapping, emitLokiLabelMapping, type LokiEnvMapping } from './yamlEmit'
-
-// 跟 InitPage 同名 const 的镜像,放这里方便单测引用 / 跟前端实际行为对齐。
-export const VIA_GRAFANA_ELIGIBLE = ['loki', 'prometheus', 'jaeger', 'tempo', 'elk'] as const
+// VIA_GRAFANA_ELIGIBLE 跨 generator/useObsAccessMode/importer 共用,在 yamlShared 集中。
+// re-export 给老 import("from './yamlGenerator'")兼容。
+export { VIA_GRAFANA_ELIGIBLE } from './yamlShared'
+import { VIA_GRAFANA_ELIGIBLE } from './yamlShared'
 
 // ── 类型(跟 InitPage 现有 reactive 形状对齐) ────────────────────────
 
@@ -55,11 +56,9 @@ export interface YAMLGenToolSpec {
   fields: CredField[]
 }
 
-export interface KuboardSvcLocator {
-  cluster?: string
-  namespace?: string
-  configmap?: string
-}
+// KuboardSvcLocator 跟 yamlValidator/InitPage 共用,统一从 yamlShared 取。
+export type { KuboardSvcLocator } from './yamlShared'
+import type { KuboardSvcLocator } from './yamlShared'
 
 export interface K8sRuntimeEnvLocator {
   cluster?: string

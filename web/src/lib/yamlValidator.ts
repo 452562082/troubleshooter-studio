@@ -31,11 +31,9 @@ export interface ValidatorRepo {
   _cloneTarget?: string
 }
 
-export interface KuboardSvcLocator {
-  cluster?: string
-  namespace?: string
-  configmap?: string
-}
+// KuboardSvcLocator 跨 emit/generator/validator/importer 共用,统一从 yamlShared 取。
+export type { KuboardSvcLocator } from './yamlShared'
+import type { KuboardSvcLocator } from './yamlShared'
 
 export type { ProbeStatus } from './probeTypes'
 import type { ProbeStatus } from './probeTypes'
@@ -82,19 +80,10 @@ export interface ValidatorContext {
   enumerateDataStoreProbeTargets(): DSProbeTarget[]
 }
 
-// ── 共享 key 拼接(InitPage 同名实现统一从这里 import) ────────────────
-
-export function ccKeyFor(type: string, envID: string, field: string): string {
-  return `cc:${type}:${envID}:${field}`
-}
-
-export function svcKey(envID: string, svc: string): string {
-  return `${envID}::${svc}`
-}
-
-export function probeKey(envID: string, svc: string, dsKey: string): string {
-  return `${envID}::${svc}::${dsKey}`
-}
+// 共享 key 拼接收口在 yamlShared.ts;这里 re-export 让老调用方(只 import 本文件的)
+// 仍能用,InitPage / 新代码请直接 import yamlShared。
+export { ccKeyFor, svcKey, probeKey } from './yamlShared'
+import { ccKeyFor, svcKey, probeKey } from './yamlShared'
 
 // ── 主校验函数 ────────────────────────────────────────────────────
 

@@ -38,7 +38,7 @@ import { WizardStoreKey } from '../lib/wizardStore'
 import { pushLog } from '../lib/logStore'
 import { toast } from '../lib/toast'
 import { Target, IDE_TARGETS, type TargetId } from '../lib/constants'
-import type { CredField, KuboardResourceState } from '../lib/credFields'
+import type { CredField } from '../lib/credFields'
 import RepoListItem from '../components/RepoListItem.vue'
 import ConfigSourceStep from '../components/ConfigSourceStep.vue'
 import ObservabilityStep from '../components/ObservabilityStep.vue'
@@ -65,6 +65,7 @@ import {
   loadInitWizardDraft,
   loadInitKuboardState,
 } from '../lib/useWizardDraft'
+import { useKuboardState } from '../lib/useKuboardState'
 
 const router = useRouter()
 
@@ -1310,40 +1311,22 @@ const isMultiSource = computed(() => activeSourceTypes.value.length > 1)
 // ── Kuboard 资源探测(每 env 独立 state)──
 // 用户填了 URL+账密后点"📥 拉取资源"会调 bridge.kuboardListResources,把
 // 集群 / namespace / configmap 三级目录拉回来,UI 渲染成级联下拉,免手填。
-// 类型 KuboardResourceState / KuboardClusterEntry 见 lib/credFields.ts。
-// 跨会话恢复:优先吃独立的 KUBOARD_STATE_KEY,fallback 到大 draft blob 里的拷贝。
-// 只恢复 status==='ok' 的;loading/error 状态对历史无意义。
-const kuboardStateByEnv = reactive<Record<string, KuboardResourceState>>(
-  (() => {
-    const out: Record<string, KuboardResourceState> = {}
-    const src = savedKuboardState ?? saved?.kuboardStateByEnv
-    if (src && typeof src === 'object') {
-      for (const [k, v] of Object.entries(src as Record<string, any>)) {
-        if (v && v.status === 'ok' && Array.isArray(v.clusters)) {
-          out[k] = { status: 'ok', clusters: v.clusters, notes: v.notes }
-        }
-      }
-    }
-    return out
-  })(),
-)
-// 只保存 ok 状态;loading/error 不持久化。每次 status 改变时立即同步写入,
-// 不依赖大 draft watch(它可能因 quota 或排程而错过这次写入)。
-function persistKuboardState() {
-  try {
-    const out: Record<string, KuboardResourceState> = {}
-    for (const [k, v] of Object.entries(kuboardStateByEnv)) {
-      if (v && v.status === 'ok') out[k] = v
-    }
-    if (Object.keys(out).length > 0) {
-      localStorage.setItem(KUBOARD_STATE_KEY, JSON.stringify(out))
-    } else {
-      localStorage.removeItem(KUBOARD_STATE_KEY)
-    }
-  } catch {
-    // quota 失败 silent skip
-  }
-}
+// 完整 state + persistKuboardState + 5 个读 helper 收口在 lib/useKuboardState.ts;
+// 下面两个 runner(runKuboardPreloadFromSource / runK8sRtPreload)还跟 sourceCreds /
+// toolInputs / k8sRuntimeEnvLoc / autoPickK8sRtWorkloads 多块状态交织,留在 InitPage,
+// 直接 mutate 本 composable 暴露的 kuboardStateByEnv 并显式调用 persistKuboardState。
+const {
+  kuboardStateByEnv,
+  persistKuboardState,
+  kuboardClustersOf,
+  kuboardClusterCountOf,
+  kuboardErrorOf,
+  kuboardNamespacesFor,
+  kuboardConfigMapsFor,
+} = useKuboardState({
+  savedKuboardState,
+  draftKuboardState: saved?.kuboardStateByEnv,
+})
 
 async function runKuboardPreloadFromSource(sourceType: string, envID: string) {
   if (!isDesktop()) {
@@ -1485,37 +1468,6 @@ async function runK8sRtPreload(envID: string) {
     pushLog('cchub', 'error', `[${envID}] k8s_runtime 加载集群失败: ${msg}`, { envID })
     toast.error(`${envID} 加载失败: ${msg.slice(0, 80)}`)
   }
-}
-
-// 模板用的窄化 helper:跳过 status union narrowing 的 (state as any) 强转,统一一个出口
-function kuboardClustersOf(envID: string) {
-  const st = kuboardStateByEnv[envID]
-  return (st && st.status === 'ok') ? st.clusters : []
-}
-function kuboardClusterCountOf(envID: string): number {
-  return kuboardClustersOf(envID).length
-}
-function kuboardErrorOf(envID: string): string {
-  const st = kuboardStateByEnv[envID]
-  return (st && st.status === 'error') ? st.error.slice(0, 60) : ''
-}
-
-// 取当前 env 下,某 cluster 的 namespace 列表(级联下拉用)。
-// clusterName 由调用方从所在 form 的 state 读出来传入(主源走 ccCredInputs / 副源走 sourceCreds)。
-function kuboardNamespacesFor(envID: string, clusterName: string): string[] {
-  const st = kuboardStateByEnv[envID]
-  if (!st || st.status !== 'ok') return []
-  const c = st.clusters.find(c => c.name === clusterName)
-  return c ? c.namespaces.map(n => n.name) : []
-}
-// 取当前 env 下,某 (cluster, namespace) 的 configmap 列表
-function kuboardConfigMapsFor(envID: string, clusterName: string, nsName: string): string[] {
-  const st = kuboardStateByEnv[envID]
-  if (!st || st.status !== 'ok') return []
-  const cluster = st.clusters.find(cl => cl.name === clusterName)
-  if (!cluster) return []
-  const ns = cluster.namespaces.find(n => n.name === nsName)
-  return ns ? ns.configmaps : []
 }
 
 // ── k8s 运行时(可观测性)Deployments 缓存 ───────────────────────────

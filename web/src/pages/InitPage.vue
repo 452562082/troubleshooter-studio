@@ -14,7 +14,6 @@ import {
   listLokiLabelValues,
   listLokiLabels,
   probeDataStore,
-  probeURLAuth,
   getRemoteURL,
   exportYAML,
   getRepoPathsForSystem,
@@ -59,33 +58,23 @@ import { useOpenClawDetect } from '../lib/useOpenClawDetect'
 import { useURLProbe } from '../lib/useURLProbe'
 import { useReposRoot } from '../lib/useReposRoot'
 import { useAITools } from '../lib/useAITools'
+import { useObsProbe } from '../lib/useObsProbe'
+import {
+  INIT_WIZARD_KEY as STORAGE_KEY,
+  INIT_KUBOARD_STATE_KEY as KUBOARD_STATE_KEY,
+  loadInitWizardDraft,
+  loadInitKuboardState,
+} from '../lib/useWizardDraft'
 
 const router = useRouter()
 
 // ── Draft persistence (survives route switches and reloads) ──
-const STORAGE_KEY = 'tsf-init-wizard-v1'
-// Kuboard 资源树用独立 key 保存:
-//   1) 大 draft blob 经常因 quota 静默失败,这层 fallback 让 kuboard 数据不会被波及
-//   2) 即使主 draft 没存上,只要这个 key 存了,下次进来下拉 options 仍可用
-const KUBOARD_STATE_KEY = 'tsf-init-wizard-kuboard-state-v1'
-function loadSavedDraft(): any {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    return raw ? JSON.parse(raw) : null
-  } catch {
-    return null
-  }
-}
-function loadSavedKuboardState(): any {
-  try {
-    const raw = localStorage.getItem(KUBOARD_STATE_KEY)
-    return raw ? JSON.parse(raw) : null
-  } catch {
-    return null
-  }
-}
-const saved = loadSavedDraft()
-const savedKuboardState = loadSavedKuboardState()
+// 草稿 load 助手 + storage key 常量收口在 lib/useWizardDraft.ts。
+// Kuboard 资源树用独立 key 保存:大 draft blob 经常因 quota 静默失败,这层 fallback
+// 让 kuboard 数据不会被波及;即使主 draft 没存上,只要这个 key 存了下拉 options 仍可用。
+// 写侧(auto-save watch)还跟 30+ reactive 字段交织,留在原地。
+const saved = loadInitWizardDraft()
+const savedKuboardState = loadInitKuboardState()
 
 // ── Step management ──
 // wizardSchema=2 起 step 1 是欢迎页;老 saved(无 wizardSchema)的 currentStep 需 +1 迁移。
@@ -2811,59 +2800,10 @@ function toolSpecByKey(cat: 'obs' | 'ds', key: string): ToolSpec | undefined {
 }
 
 // ── Step 7 可观测性自动连通性测试 ─────────────────────────────────────
-// 每个工具的 (envID, toolKey) 对应一次结果。用户改任一字段(url / user / pass / api_key)
-// 都重新触发,800ms 防抖。不显示按钮,跟 Step 3 一致。
-interface OBSProbeState { status: 'idle' | 'loading' | 'ok' | 'fail'; latency?: string; detail?: string; error?: string }
-const obsProbeResults = reactive<Record<string, OBSProbeState>>({})
-const obsProbeTimers: Record<string, ReturnType<typeof setTimeout>> = {}
-function obsProbeKey(toolKey: string, envID: string): string { return `${toolKey}::${envID}` }
-// 每个 obs 工具的 "主 URL 字段" key —— 多数是 'url',ELK 是 'kibana_url'
-function obsPrimaryURLField(spec: ToolSpec): string {
-  if (spec.fields.find(f => f.key === 'url')) return 'url'
-  if (spec.fields.find(f => f.key === 'kibana_url')) return 'kibana_url'
-  return ''
-}
-function scheduleObsProbe(toolKey: string, envID: string) {
-  const spec = OBS_TOOL_SPECS.find(s => s.key === toolKey)
-  if (!spec) return
-  const urlField = obsPrimaryURLField(spec)
-  if (!urlField) return
-  const k = obsProbeKey(toolKey, envID)
-  if (obsProbeTimers[k]) clearTimeout(obsProbeTimers[k])
-  const url = (toolInputs[toolKeyFor('obs', toolKey, envID, urlField)] || '').trim()
-  if (!url) {
-    delete obsProbeResults[k]
-    return
-  }
-  // 仅当工具有 auth_mode 字段(grafana 类二选一鉴权)时按 mode 过滤,避免 stale draft
-  // 同时带上 api_key + user/pass 让后端 httpGet 走错鉴权路径(优先 Bearer)。其它工具
-  // (elk / clickhouse / kafka 等只有 user/pass 一种鉴权方式)按原行为透传。
-  const hasAuthMode = spec.fields.some(f => f.key === 'auth_mode')
-  let user = '', pass = '', apiKey = ''
-  if (hasAuthMode) {
-    const authMode = (toolInputs[toolKeyFor('obs', toolKey, envID, 'auth_mode')] || '').trim()
-    const useApiKey = authMode !== 'username_password'
-    apiKey = useApiKey ? (toolInputs[toolKeyFor('obs', toolKey, envID, 'api_key')] || '') : ''
-    user = useApiKey ? '' : (toolInputs[toolKeyFor('obs', toolKey, envID, 'user')] || '').trim()
-    pass = useApiKey ? '' : (toolInputs[toolKeyFor('obs', toolKey, envID, 'pass')] || '')
-  } else {
-    user = (toolInputs[toolKeyFor('obs', toolKey, envID, 'user')] || '').trim()
-    pass = toolInputs[toolKeyFor('obs', toolKey, envID, 'pass')] || ''
-    apiKey = toolInputs[toolKeyFor('obs', toolKey, envID, 'api_key')] || ''
-  }
-  obsProbeTimers[k] = setTimeout(async () => {
-    if (!isDesktop()) return
-    obsProbeResults[k] = { status: 'loading' }
-    try {
-      const r = await probeURLAuth(url, user, pass, apiKey)
-      obsProbeResults[k] = r.ok
-        ? { status: 'ok', latency: r.latency, detail: r.detail }
-        : { status: 'fail', error: r.error || '不可达' }
-    } catch (e: any) {
-      obsProbeResults[k] = { status: 'fail', error: String(e?.message || e) }
-    }
-  }, 800)
-}
+// 完整逻辑(每工具按 url 字段 + auth_mode 选鉴权方式 + 800ms 防抖)在 lib/useObsProbe.ts。
+// 切到 Step 7 时主动重试的 triggerStep7Init 逻辑还跟 grafana DS / loki labels /
+// k8s_runtime workload 三个独立子流程交织,留在下面 InitPage 里。
+const { obsProbeResults, obsProbeKey, scheduleObsProbe } = useObsProbe(OBS_TOOL_SPECS, toolInputs, toolKeyFor)
 // 切到 Step 7 时主动跑一次(草稿恢复后立刻看状态,不等用户重新输入)。
 // 注意:不能用 immediate:true,因为 callback 里会访问到声明在本 watch 之后的 const
 // (lokiMappingByEnv / OBS_GRAFANA_DS_TYPES 等),同步触发会撞 TDZ。

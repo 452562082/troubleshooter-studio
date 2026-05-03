@@ -65,6 +65,7 @@ import { useObsAccessMode, obsAccessKey } from '../lib/useObsAccessMode'
 import { useCCHubState, type CCHubEnvState } from '../lib/useCCHubState'
 import { ccKeyFor, svcKey, probeKey } from '../lib/yamlShared'
 import { useRepoScan } from '../lib/useRepoScan'
+import { useLokiMappingState, type LokiMappingPerEnv } from '../lib/useLokiMappingState'
 
 const router = useRouter()
 
@@ -2483,70 +2484,14 @@ onMounted(() => triggerStep7Init(currentStep.value))
 // 每个 env 独立维护 grafana 凭证 → datasource 列表 → labels → values → 选中映射,
 // 因为 dev / prod 可能用不同 Grafana / Loki 实例,UID 和 label values 都不一样。
 // envLabelKey / serviceLabelKey 也 per-env(虽然通常 namespace/app 会一致,但允许差异)。
-interface LokiMappingPerEnv {
-  dsList: GrafanaDatasource[]
-  dsUID: string
-  dsListStatus: 'idle' | 'loading' | 'ok' | 'fail'
-  dsListError?: string
-  labels: string[]
-  labelStatus: 'idle' | 'loading' | 'ok' | 'fail'
-  labelError?: string
-  envLabelKey: string
-  serviceLabelKey: string
-  envLabelValues: string[]
-  serviceLabelValues: string[]
-  envValue: string
-  serviceValues: Record<string, string>
-  // serviceMatchTried[svc] = true 表示 auto-match 已经跑过这个服务但没找到候选,
-  // UI 据此区分"未触发自动匹配(默认空)"vs"匹配过但没找到(应该提示用户)"。
-  // 用户手挑后 serviceValues[svc] 非空,UI 自然不再显示"未匹配"提示。
-  serviceMatchTried?: Record<string, boolean>
-}
-function makeEmptyLokiMappingPerEnv(): LokiMappingPerEnv {
-  return {
-    dsList: [], dsUID: '', dsListStatus: 'idle',
-    labels: [], labelStatus: 'idle',
-    envLabelKey: '', serviceLabelKey: '',
-    envLabelValues: [], serviceLabelValues: [],
-    envValue: '', serviceValues: {},
-    serviceMatchTried: {},
-  }
-}
-// saved 里可能存的是切走时的瞬态 'loading'(watcher 在 await 中途触发的快照),
-// 重 mount 后状态卡死成 'loading' 永远转圈。这里在恢复时把所有瞬态 status 一律
-// 重置成 'idle',让 onMounted/triggerStep7Init 重新拉一次。
-const lokiMappingByEnv = reactive<Record<string, LokiMappingPerEnv>>(
-  (() => {
-    const src = (saved?.lokiMappingByEnv as Record<string, LokiMappingPerEnv>) ?? {}
-    for (const m of Object.values(src)) {
-      if (!m) continue
-      if (m.dsListStatus === 'loading') m.dsListStatus = 'idle'
-      if (m.labelStatus === 'loading') m.labelStatus = 'idle'
-    }
-    return src
-  })(),
+// LokiMappingPerEnv 类型 + makeEmptyLokiMappingPerEnv + getLokiMapping 兜底初始化
+// 全收口在 lib/useLokiMappingState.ts(同 useCCHubState 模式)。写侧 runners
+// (loadLokiDatasources / loadLokiLabels / scheduleGrafanaDsAutoload / onEnvLabelKeyChanged
+// 等)还跟 toolInputs / sourceCreds / pushLog 多块状态交织,留在下方,直接 mutate
+// 暴露的 lokiMappingByEnv。
+const { lokiMappingByEnv, getLokiMapping } = useLokiMappingState(
+  saved?.lokiMappingByEnv as Record<string, LokiMappingPerEnv> | undefined,
 )
-function getLokiMapping(envID: string): LokiMappingPerEnv {
-  if (!lokiMappingByEnv[envID]) {
-    lokiMappingByEnv[envID] = makeEmptyLokiMappingPerEnv()
-  } else {
-    // 防御:saved 里可能是被 quota 兜底瘦身后的残缺对象(缺 dsList/labels/*LabelValues 等)。
-    // 补齐所有字段,免得模板访问 undefined.length 之类直接 throw 把整个页面拉白屏。
-    const lm = lokiMappingByEnv[envID] as Partial<LokiMappingPerEnv>
-    if (!Array.isArray(lm.dsList)) lm.dsList = []
-    if (!lm.dsListStatus) lm.dsListStatus = 'idle'
-    if (!Array.isArray(lm.labels)) lm.labels = []
-    if (!lm.labelStatus) lm.labelStatus = 'idle'
-    if (typeof lm.dsUID !== 'string') lm.dsUID = ''
-    if (typeof lm.envLabelKey !== 'string') lm.envLabelKey = ''
-    if (typeof lm.serviceLabelKey !== 'string') lm.serviceLabelKey = ''
-    if (!Array.isArray(lm.envLabelValues)) lm.envLabelValues = []
-    if (!Array.isArray(lm.serviceLabelValues)) lm.serviceLabelValues = []
-    if (typeof lm.envValue !== 'string') lm.envValue = ''
-    if (!lm.serviceValues || typeof lm.serviceValues !== 'object') lm.serviceValues = {}
-  }
-  return lokiMappingByEnv[envID]
-}
 
 // 通过 Grafana 代理访问的可观测性组件(prometheus/jaeger/tempo/elk)在每个 env 下
 // 对应的 Grafana datasource UID。Loki 走 lokiMappingByEnv[env].dsUID(因为还要拉 labels);

@@ -10,13 +10,11 @@ import {
   analyzeV2 as bridgeAnalyzeV2,
   defaultDestPath,
   detectAITools,
-  detectOpenClawModels,
   fetchConfigContentBatch,
   listGrafanaDatasources,
   listLokiLabelValues,
   listLokiLabels,
   probeDataStore,
-  probeURL,
   probeURLAuth,
   getRemoteURL,
   getUserConfig,
@@ -40,13 +38,12 @@ import {
   getCustomInstallRoots,
   setCustomInstallRoot,
 } from '../lib/bridge'
-import type { AIToolResult, CCHubEntry, CCHubNamespace, GrafanaDatasource, OpenClawModelEntry, KuboardFetchBatchResult } from '../lib/bridge'
+import type { AIToolResult, CCHubEntry, CCHubNamespace, GrafanaDatasource, KuboardFetchBatchResult } from '../lib/bridge'
 import { confirmDialog } from '../lib/confirm'
 import { WizardStoreKey } from '../lib/wizardStore'
 import { pushLog } from '../lib/logStore'
 import { toast } from '../lib/toast'
 import { Target, IDE_TARGETS, type TargetId } from '../lib/constants'
-import type { URLProbeState } from '../lib/probeTypes'
 import type { CredField, KuboardResourceState } from '../lib/credFields'
 import RepoListItem from '../components/RepoListItem.vue'
 import ConfigSourceStep from '../components/ConfigSourceStep.vue'
@@ -63,6 +60,8 @@ import { generateYAML as libGenerateYAML, type YAMLGenContext } from '../lib/yam
 import { computeStepErrors as libComputeStepErrors, labelForErrorKey as libLabelForErrorKey, type ValidatorContext } from '../lib/yamlValidator'
 import { applyParsedYAMLToWizardState, type ApplyImportContext } from '../lib/yamlImporter'
 import { copyToClipboard } from '../lib/clipboard'
+import { useOpenClawDetect } from '../lib/useOpenClawDetect'
+import { useURLProbe } from '../lib/useURLProbe'
 
 const router = useRouter()
 
@@ -242,13 +241,18 @@ function onModelChange(t: string, e: Event) {
 
 // ── OpenClaw 模型探测(只给 openclaw target 卡用) ──
 // 勾上 openclaw → detect(默认 ~/.openclaw 或用户选目录)→ 成功填模型下拉 / 失败给"选目录"按钮 / 兜底回落 hardcoded modelGroups
-const openclawInstallDir = ref<string>(saved?.openclawInstallDir ?? '') // localStorage 持久,换会话不用重试
-const openclawDetectStatus = ref<'idle' | 'loading' | 'ok' | 'not-installed' | 'error'>('idle')
-const openclawDetectedModels = ref<OpenClawModelEntry[]>([])
-const openclawDetectError = ref<string>('')
-const openclawResolvedDir = ref<string>('') // backend 返回的实际路径(展开 ~ 后)
-const openclawVersion = ref<string>('') // openclaw.json meta.lastTouchedVersion
-const openclawAuthProviders = ref<string[]>([]) // auth.profiles 里出现的 provider 名字
+// 完整逻辑在 lib/useOpenClawDetect.ts。InitPage 只负责把 saved 反填,以及把返回字段塞到模板/save。
+const {
+  openclawInstallDir,
+  openclawDetectStatus,
+  openclawDetectedModels,
+  openclawDetectError,
+  openclawResolvedDir,
+  openclawVersion,
+  openclawAuthProviders,
+  runOpenClawDetect,
+  pickOpenClawInstallDir,
+} = useOpenClawDetect(saved?.openclawInstallDir ?? '')
 
 // Claude Code / Cursor / Codex 安装状态 —— 决定卡片能否被勾选:
 //   - 检测到 → 默认可勾,部署落到检测出的位置(~/.<target>/agents)
@@ -313,43 +317,6 @@ async function refreshAITools() {
 }
 onMounted(() => { refreshAITools() })
 
-async function runOpenClawDetect(dir: string = openclawInstallDir.value) {
-  if (!isDesktop()) {
-    openclawDetectStatus.value = 'error'
-    openclawDetectError.value = '浏览器模式不支持探测 OpenClaw,请用桌面 app'
-    return
-  }
-  openclawDetectStatus.value = 'loading'
-  openclawDetectError.value = ''
-  try {
-    const r = await detectOpenClawModels(dir)
-    if (r.ok) {
-      openclawDetectStatus.value = 'ok'
-      openclawDetectedModels.value = r.models || []
-      openclawResolvedDir.value = r.install_dir || ''
-      openclawVersion.value = r.version || ''
-      openclawAuthProviders.value = r.auth_providers || []
-    } else {
-      openclawDetectStatus.value = r.installed ? 'error' : 'not-installed'
-      openclawDetectError.value = r.err || '未知错误'
-    }
-  } catch (e: any) {
-    openclawDetectStatus.value = 'error'
-    openclawDetectError.value = String(e?.message || e)
-  }
-}
-async function pickOpenClawInstallDir() {
-  if (!isDesktop()) return
-  try {
-    const p = await openDir('选择 OpenClaw 安装目录(含 config.yaml / gateway/ 等)')
-    if (!p) return
-    openclawInstallDir.value = p
-    await runOpenClawDetect(p)
-  } catch (e: any) {
-    openclawDetectError.value = String(e?.message || e)
-    openclawDetectStatus.value = 'error'
-  }
-}
 // watch / onMounted 已挪到 enabledTargets 声明之后(见该 const 下方),
 // 这里留空避免重复声明。
 
@@ -433,42 +400,8 @@ function removeEnv(idx: number) {
 }
 
 // ── Step 3 域名自动连通性测试 ─────────────────────────────────────────
-// 用户填 api_domain / web_domain 时,800ms 防抖触发 GET 探测;不显示按钮。
-// key = `${envIndex}:${kind}` (kind = api / web)。重新填 / 切 env 顺序都能正确刷新。
-const urlProbeResults = reactive<Record<string, URLProbeState>>({})
-const urlProbeTimers: Record<string, ReturnType<typeof setTimeout>> = {}
-function urlProbeKey(envIdx: number, kind: 'api' | 'web'): string {
-  return `${envIdx}:${kind}`
-}
-function scheduleURLProbe(envIdx: number, kind: 'api' | 'web', rawURL: string) {
-  const k = urlProbeKey(envIdx, kind)
-  if (urlProbeTimers[k]) clearTimeout(urlProbeTimers[k])
-  const url = (rawURL || '').trim()
-  if (!url) {
-    delete urlProbeResults[k]
-    return
-  }
-  urlProbeTimers[k] = setTimeout(async () => {
-    if (!isDesktop()) return
-    urlProbeResults[k] = { status: 'loading' }
-    try {
-      const r = await probeURL(url)
-      urlProbeResults[k] = r.ok
-        ? { status: 'ok', latency: r.latency, detail: r.detail }
-        : { status: 'fail', error: r.error || '不可达' }
-    } catch (e: any) {
-      urlProbeResults[k] = { status: 'fail', error: String(e?.message || e) }
-    }
-  }, 800)
-}
-// 切到 Step 3 / 已存在的 env 值,做一次主动探测(不等用户重新输入)
-watch(() => currentStep.value, (s) => {
-  if (s !== 3) return
-  environments.forEach((env, i) => {
-    if (env.api_domain) scheduleURLProbe(i, 'api', env.api_domain)
-    if (env.web_domain) scheduleURLProbe(i, 'web', env.web_domain)
-  })
-}, { immediate: true })
+// 完整逻辑(800ms 防抖 + 切 step 时主动重试)在 lib/useURLProbe.ts。
+const { urlProbeResults, urlProbeKey, scheduleURLProbe } = useURLProbe(currentStep, environments, 3)
 
 // 用户删掉某个 env / 改 env.id 后,对应的 Step 5 扫描缓存 / Step 7 数据层扫描结果
 // 仍然挂在各 reactive map 里(因为 key 是 env.id)。清掉孤儿,避免 draft 越攒越脏。

@@ -1,15 +1,20 @@
+// generator.go —— 类型定义 + Generate 主流程。
+//
+// 子文件分工:
+//   render_walk.go    walkAndRender / shouldSkipDir / renderFile / copyFile
+//   readme.go         writeReadme + 三个 section helpers
+//   clawhub_lock.go   writeClawhubLock + count* 摘要计数
+//   funcs.go          模板 funcMap
+//   tshoot_meta.go    writeTshootMeta(产物锚点 tshoot.json)
+//   plan.go / preserve.go / diff.go  二次生成的计划 / 保留 / diff
+//   claude_code.go / cursor.go / codex.go  各 target 产物适配
 package generator
 
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
-	"text/template"
-	"time"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/analyzer"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
@@ -35,11 +40,11 @@ type Context struct {
 	// dependency_scan.go 扫到的"本仓库的下游调用 + 数据层使用"种子值,
 	// 给 service-dependency-map.yaml.tmpl 渲染时自动填 downstream/data_stores 列表用。
 	// 键必须匹配 cfg.Repos[i].Name(跟 RepoLocalPaths 一样);没扫到的 repo 缺键即可。
-	DownstreamCallsByRepo  map[string][]analyzer.DownstreamCall
-	DataStoreUsagesByRepo  map[string][]analyzer.DataStoreUsage
+	DownstreamCallsByRepo map[string][]analyzer.DownstreamCall
+	DataStoreUsagesByRepo map[string][]analyzer.DataStoreUsage
 	// SchemaTablesByRepo 跟上面平行,给 data-schema-map.yaml 模板渲染用。
 	// agent 排障时 "order #xxx" → 直接知道查哪张表/collection/redis prefix。
-	SchemaTablesByRepo     map[string][]analyzer.SchemaTable
+	SchemaTablesByRepo map[string][]analyzer.SchemaTable
 }
 
 type Generator struct {
@@ -88,14 +93,14 @@ func New(cfg *config.SystemConfig, templateRoot, outputDir string) *Generator {
 		TemplateRoot: templateRoot,
 		OutputDir:    outputDir,
 		Ctx: &Context{
-			SystemConfig:           cfg,
-			AgentID:                cfg.ResolveID(),
-			MCPKeyPrefix:           cfg.MCPKeyPrefix(),
-			Findings:               map[string]map[string]analyzer.Finding{},
-			PriorOverrides:         map[string]map[string]analyzer.Finding{},
-			DownstreamCallsByRepo:  map[string][]analyzer.DownstreamCall{},
-			DataStoreUsagesByRepo:  map[string][]analyzer.DataStoreUsage{},
-			SchemaTablesByRepo:     map[string][]analyzer.SchemaTable{},
+			SystemConfig:          cfg,
+			AgentID:               cfg.ResolveID(),
+			MCPKeyPrefix:          cfg.MCPKeyPrefix(),
+			Findings:              map[string]map[string]analyzer.Finding{},
+			PriorOverrides:        map[string]map[string]analyzer.Finding{},
+			DownstreamCallsByRepo: map[string][]analyzer.DownstreamCall{},
+			DataStoreUsagesByRepo: map[string][]analyzer.DataStoreUsage{},
+			SchemaTablesByRepo:    map[string][]analyzer.SchemaTable{},
 		},
 	}
 }
@@ -281,364 +286,4 @@ func (g *Generator) Generate() error {
 		AnalyzerHitsCount:   countOverrides(g.Ctx.Findings),
 	}
 	return nil
-}
-
-func countSkills(outputDir string) int {
-	skillsDir := filepath.Join(outputDir, "templates", "workspace-template", "skills")
-	entries, err := os.ReadDir(skillsDir)
-	if err != nil {
-		return 0
-	}
-	n := 0
-	for _, e := range entries {
-		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
-			n++
-		}
-	}
-	return n
-}
-
-func countFiles(outputDir string) int {
-	n := 0
-	_ = filepath.WalkDir(outputDir, func(_ string, d fs.DirEntry, err error) error {
-		if err == nil && !d.IsDir() {
-			n++
-		}
-		return nil
-	})
-	return n
-}
-
-// writeClawhubLock 生成 ~/.openclaw 工作区识别用的 .clawhub/lock.json
-// 按输出目录下实际存在的 skills/*/ 目录来列举，避免与模板过滤逻辑重复判断
-func (g *Generator) writeClawhubLock() error {
-	wsRoot := filepath.Join(g.OutputDir, "templates", "workspace-template")
-	skillsDir := filepath.Join(wsRoot, "skills")
-	entries, err := os.ReadDir(skillsDir)
-	if err != nil {
-		// 没有 skills 目录也写一份空 lock，保证 OpenClaw 能识别工作区
-		entries = nil
-	}
-	now := time.Now().UnixMilli()
-	type skillEntry struct {
-		Version     string `json:"version"`
-		InstalledAt int64  `json:"installedAt"`
-	}
-	skills := map[string]skillEntry{}
-	for _, e := range entries {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
-			continue
-		}
-		skills[e.Name()] = skillEntry{Version: "0.0.0-tshoot", InstalledAt: now}
-	}
-	lock := struct {
-		Version int                   `json:"version"`
-		Skills  map[string]skillEntry `json:"skills"`
-	}{
-		Version: 1,
-		Skills:  skills,
-	}
-	data, err := json.MarshalIndent(lock, "", "  ")
-	if err != nil {
-		return err
-	}
-	dst := filepath.Join(wsRoot, ".clawhub", "lock.json")
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(dst, append(data, '\n'), 0o644)
-}
-
-func countOverrides(m map[string]map[string]analyzer.Finding) int {
-	n := 0
-	for _, byEnv := range m {
-		n += len(byEnv)
-	}
-	return n
-}
-
-func (g *Generator) walkAndRender(srcRoot, dstRoot string) error {
-	return filepath.WalkDir(srcRoot, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(srcRoot, path)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-
-		if d.IsDir() {
-			if g.shouldSkipDir(rel) {
-				return fs.SkipDir
-			}
-			return os.MkdirAll(filepath.Join(dstRoot, rel), 0o755)
-		}
-
-		outPath := filepath.Join(dstRoot, rel)
-		if strings.HasSuffix(path, ".tmpl") {
-			outPath = strings.TrimSuffix(outPath, ".tmpl")
-			return g.renderFile(path, outPath)
-		}
-		return copyFile(path, outPath)
-	})
-}
-
-func (g *Generator) shouldSkipDir(rel string) bool {
-	// skills whitelist filtering
-	const skillsPrefix = "skills" + string(filepath.Separator)
-	if !strings.HasPrefix(rel, skillsPrefix) {
-		return false
-	}
-	parts := strings.SplitN(rel, string(filepath.Separator), 3)
-	if len(parts) < 2 {
-		return false
-	}
-	skillName := parts[1]
-
-	whitelist := g.Ctx.Generation.SkillsWhitelist
-	if len(whitelist) > 0 {
-		found := false
-		for _, w := range whitelist {
-			if w == skillName {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return true
-		}
-	}
-
-	// infrastructure-driven: skip runtime-query skills for disabled data stores
-	for _, ds := range g.Ctx.Infrastructure.DataStores {
-		if !ds.Enabled && skillName == dataStoreSkillName(ds.Type) {
-			return true
-		}
-	}
-	// skip config-executor if no config center
-	if skillName == "config-executor" {
-		t := g.Ctx.Infrastructure.PrimaryConfigCenter().Type
-		if t == "" || t == "none" {
-			return true
-		}
-	}
-	return false
-}
-
-func (g *Generator) renderFile(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	tpl, err := template.New(filepath.Base(src)).Funcs(funcMap()).Parse(string(data))
-	if err != nil {
-		return fmt.Errorf("parse %s: %w", src, err)
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	f, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if err := tpl.Execute(f, g.Ctx); err != nil {
-		return fmt.Errorf("render %s: %w", src, err)
-	}
-	return nil
-}
-
-func copyFile(src, dst string) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	info, err := in.Stat()
-	if err != nil {
-		return err
-	}
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode())
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-	_, err = io.Copy(out, in)
-	return err
-}
-
-func (g *Generator) writeReadme() error {
-	ctx := g.Ctx
-	var sb strings.Builder
-
-	fmt.Fprintf(&sb, "# %s Troubleshooter Agent\n\n", ctx.System.Name)
-	fmt.Fprintf(&sb, "由 troubleshooter-studio 生成。系统：%s (`%s`)\n\n", ctx.System.Name, ctx.System.ID)
-	if ctx.System.Description != "" {
-		fmt.Fprintf(&sb, "> %s\n\n", ctx.System.Description)
-	}
-
-	// ── 能干什么 ──
-	sb.WriteString("## 这个机器人能干什么\n\n")
-	sb.WriteString(readmeSkillsSection(ctx))
-	sb.WriteString("\n")
-
-	// ── 你需要准备什么 ──
-	sb.WriteString("## 部署前你需要准备\n\n")
-	sb.WriteString(readmeCredentialsSection(ctx))
-	sb.WriteString("\n")
-
-	// ── 快速开始 ──
-	sb.WriteString("## 快速开始\n\n")
-	sb.WriteString("Studio 桌面端打开本目录:点 **部署** 即可(原生 Go,跑完会装 workspace + 注入 MCP + 重启 gateway,无 bash 依赖)。\n")
-	sb.WriteString("CLI 用户可走同一份逻辑(由 `tshoot` 桌面端的 `RunInstall` binding 调 `agent.InstallNativeOpenclaw`)。\n\n")
-	sb.WriteString("凭证持久化在 `scripts/.env`,删它即等同重置(下次部署不再预填)。\n\n")
-
-	// ── FAQ ──
-	sb.WriteString("## 常见问题\n\n")
-	sb.WriteString(readmeFAQSection(ctx))
-	sb.WriteString("\n")
-
-	// ── 升级 / 卸载 ──
-	sb.WriteString("## 升级与卸载\n\n")
-	sb.WriteString("- **升级**（tshoot 或 system.yaml 改过后）：在 tshoot 仓库里跑 `tshoot upgrade -i system.yaml`，会自动备份旧产物到 `<output_dir>.bak.<ts>/` 再重 gen，最后打印 diff。\n")
-	sb.WriteString("- **卸载**:Studio 桌面端 BotsPage 上点对应卡的卸载按钮(走 `agent.UninstallNativeOpenclaw`,移走 workspace + 从 openclaw.json 摘 agent)。\n")
-	sb.WriteString("- **回滚**：`mv <output_dir>.bak.<ts> <output_dir>` 然后再点一次部署。\n\n")
-
-	// ── 安装位置 ──
-	sb.WriteString("## 安装位置\n\n")
-	fmt.Fprintf(&sb, "- Agent 工作区：`~/.openclaw/workspace/%s`\n", ctx.Agent.WorkspaceName)
-	sb.WriteString("- OpenClaw 全局配置：`~/.openclaw/openclaw.json`\n")
-	sb.WriteString("- 本次凭证（0600）：`scripts/.env`\n")
-	if ctx.Infrastructure.PrimaryConfigCenter().Type == "apollo" || ctx.Infrastructure.PrimaryConfigCenter().Type == "consul" ||
-		ctx.Infrastructure.PrimaryConfigCenter().Type == "env-vars" || ctx.Infrastructure.PrimaryConfigCenter().Type == "kuboard" {
-		fmt.Fprintf(&sb, "- 运行时凭证（0600）：`~/.openclaw/%s-troubleshooter-creds.json`\n", ctx.System.ID)
-	}
-
-	return os.WriteFile(filepath.Join(g.OutputDir, "README.md"), []byte(sb.String()), 0o644)
-}
-
-// readmeSkillsSection 从 skills_whitelist + infra 推断出机器人的能力清单
-func readmeSkillsSection(ctx *Context) string {
-	var sb strings.Builder
-	if len(ctx.Generation.SkillsWhitelist) == 0 {
-		sb.WriteString("（未列白名单，所有 skill 默认启用）\n")
-		return sb.String()
-	}
-	skillDesc := map[string]string{
-		"routing":                  "根据 service + env 定位代码路径、域名、分支、配置标识",
-		"config-executor":          "从配置中心读取/对比配置值，支持历史版本",
-		"redis-runtime-query":      "查询 Redis key / TTL / 值（只读）",
-		"mongodb-runtime-query":    "MongoDB query / aggregate / count（只读）",
-		"es-runtime-query":         "Elasticsearch _search（只读）",
-		"mysql-runtime-query":      "MySQL 只读 SELECT（数据一致性 / 慢查询）",
-		"postgresql-runtime-query": "PostgreSQL 只读查询（pg_stat / 连接数 / 表大小）",
-		"kafka-runtime-query":      "Kafka topic / 消费积压 / 死信",
-		"rocketmq-runtime-query":   "RocketMQ topic / consumer / 积压 / DLQ",
-		"rabbitmq-runtime-query":   "RabbitMQ queue / exchange / 消息数",
-		"clickhouse-runtime-query": "ClickHouse 只读 OLAP 查询 / 分区 / 慢查询日志",
-		"diagram-generator":        "生成架构图 / 流程图 / 链路拓扑",
-		"tracing-query":            "Jaeger trace_id → span 树 / 耗时 TOP / 错误 span",
-		"tempo-query":              "Tempo trace 查询（Grafana 生态）",
-		"skywalking-query":         "SkyWalking APM：服务拓扑 + trace + 慢端点",
-		"elk-log-query":            "ELK 日志搜索（ES _search + Kibana）",
-	}
-	for _, s := range ctx.Generation.SkillsWhitelist {
-		desc, ok := skillDesc[s]
-		if !ok {
-			desc = "（自定义 skill，见 templates/workspace-template/skills/" + s + "/SKILL.md）"
-		}
-		fmt.Fprintf(&sb, "- **%s** — %s\n", s, desc)
-	}
-	return sb.String()
-}
-
-// readmeCredentialsSection 按 infrastructure 给出"必备凭证清单"
-func readmeCredentialsSection(ctx *Context) string {
-	var sb strings.Builder
-
-	cc := ctx.Infrastructure.PrimaryConfigCenter().Type
-	hasCreds := (cc != "" && cc != "none") ||
-		ctx.Infrastructure.Observability.Grafana.Enabled ||
-		ctx.Infrastructure.Observability.Jaeger.Enabled ||
-		ctx.Infrastructure.Observability.ELK.Enabled
-	for _, m := range ctx.Infrastructure.Messaging {
-		if m.Enabled {
-			hasCreds = true
-			break
-		}
-	}
-	for _, pt := range ctx.Infrastructure.ProjectTracking {
-		if pt.Enabled {
-			hasCreds = true
-			break
-		}
-	}
-	if !hasCreds {
-		sb.WriteString("本系统未启用任何需要凭证的外部组件（配置中心 / 可观测性 / 消息 / 项目管理），点部署即跑完。\n")
-		return sb.String()
-	}
-
-	sb.WriteString("Studio 部署时会问下面这些值（按 system.yaml 自动派生），准备好可以加快流程：\n\n")
-	switch cc {
-	case "nacos":
-		sb.WriteString("- **Nacos**：每个 env 的 `host:port` + 用户名 + 密码\n")
-	case "apollo":
-		sb.WriteString("- **Apollo**：每个 env 的 meta URL + Open API token（若无鉴权可留空）\n")
-	case "consul":
-		sb.WriteString("- **Consul**：每个 env 的 host + ACL token（若无 ACL 可留空）\n")
-	case "kuboard":
-		sb.WriteString("- **Kuboard**：每个 env 的 Kuboard URL / 用户名 / 密码（cluster / namespace / ConfigMap 由 service_map 决定，无需 install 时输入）\n")
-	case "env-vars":
-		sb.WriteString("- **静态连接串**：每个 env 下每个数据层组件的地址（host:port 或 URI）\n")
-	}
-
-	if ctx.Infrastructure.Observability.Grafana.Enabled {
-		sb.WriteString("- **Grafana**：每个 env 的 URL + 用户名 + 密码\n")
-	}
-	if ctx.Infrastructure.Observability.Jaeger.Enabled {
-		sb.WriteString("- **Jaeger**：每个 env 的 URL（如 `http://jaeger-xxx:16686`）\n")
-	}
-	if ctx.Infrastructure.Observability.ELK.Enabled {
-		sb.WriteString("- **ELK**：每个 env 的 Kibana URL / ES URL + 共用用户名密码（若无鉴权可留空）\n")
-	}
-	for _, m := range ctx.Infrastructure.Messaging {
-		if m.Enabled && m.Platform == "lark" {
-			sb.WriteString("- **Lark**：APP_ID + APP_SECRET\n")
-		}
-	}
-	for _, pt := range ctx.Infrastructure.ProjectTracking {
-		if pt.Enabled && pt.Platform == "feishu_project" {
-			sb.WriteString("- **Feishu Project**：MCP User Token\n")
-		}
-	}
-	sb.WriteString("\n> 凭证会被写入 `scripts/.env`（权限 0600），以及配置中心的 `~/.openclaw/<agent-id>-creds.json`（若使用 Apollo/Consul/env-vars/K8s）。**两个文件都是本机私有，不要提交到 git**。\n")
-	return sb.String()
-}
-
-// readmeFAQSection 根据启用的组件拼"常见问题"
-func readmeFAQSection(ctx *Context) string {
-	var sb strings.Builder
-	sb.WriteString("**Q: 机器人回答里说 MCP 连不上 / timeout？**\n")
-	sb.WriteString("A: 凭证过期或网络不通。改 `scripts/.env` 里对应 env 的变量,或回 BotsPage 重新填表 → 再点部署(走 InstallNativeOpenclaw,已设的不重问)。\n\n")
-
-	sb.WriteString("**Q: 装完后没看到 agent？**\n")
-	sb.WriteString("A: 检查 `~/.openclaw/openclaw.json` 里有没有 `agents.list[...]` 包含 `" + ctx.AgentID + "`；没有就回 BotsPage 重新部署。OpenClaw 客户端可能也需要重启 gateway：`openclaw gateway restart`。\n\n")
-
-	if ctx.Infrastructure.PrimaryConfigCenter().Type != "" && ctx.Infrastructure.PrimaryConfigCenter().Type != "none" {
-		sb.WriteString("**Q: 某个 env 的配置查不到？**\n")
-		sb.WriteString("A: (1) 检查 `scripts/.env` 里该 env 的地址/凭证；(2) 对比 `templates/workspace-template/skills/routing/references/config-map.yaml` 里的 namespace/dataId/group 是否对；(3) 在 tshoot 仓库跑 `tshoot doctor -i system.yaml --repos-root <dir>` 看声明与实态是否漂移。\n\n")
-	}
-
-	sb.WriteString("**Q: 改了 system.yaml，怎么更新部署？**\n")
-	sb.WriteString("A: 在 tshoot 仓库里跑 `tshoot upgrade -i system.yaml` —— 自动备份 + 重 gen + 打印 diff。然后回 BotsPage 重新部署(走 InstallNativeOpenclaw)应用到 OpenClaw。\n\n")
-
-	sb.WriteString("**Q: 想把机器人部署到别的平台（Claude Code / Cursor / Embedded 内嵌对话）？**\n")
-	sb.WriteString("A: 在 `system.yaml` 的 `generation.targets` 里加上对应名字再 `tshoot gen`，会生成 `<output_dir>-claude-code/` / `-cursor/` 兄弟目录；Studio 部署 → 自动装到 `~/.claude/agents/` 或 `~/.cursor/agents/`(走 agent.InstallNative,无 bash)。\n")
-	return sb.String()
 }

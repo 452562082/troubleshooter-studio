@@ -7,14 +7,12 @@ defineOptions({ name: 'InitPage' })
 import yaml from 'js-yaml'
 import { useRouter } from 'vue-router'
 import {
-  analyzeV2 as bridgeAnalyzeV2,
   defaultDestPath,
   fetchConfigContentBatch,
   listGrafanaDatasources,
   listLokiLabelValues,
   listLokiLabels,
   probeDataStore,
-  getRemoteURL,
   exportYAML,
   getRepoPathsForSystem,
   importAndDeploy,
@@ -23,12 +21,9 @@ import {
   runInstall,
   selfTestAgent,
   isDesktop,
-  openDir,
   openYAML,
-  detectSubmodulesForRepo,
   listBranchesForRepo,
   preloadConfigCenter,
-  recommendRoleForRepo,
   validate as bridgeValidate,
 } from '../lib/bridge'
 import type { CCHubEntry, CCHubNamespace, GrafanaDatasource, KuboardFetchBatchResult } from '../lib/bridge'
@@ -69,6 +64,7 @@ import { useK8sRtWorkloads } from '../lib/useK8sRtWorkloads'
 import { useObsAccessMode, obsAccessKey } from '../lib/useObsAccessMode'
 import { useCCHubState, type CCHubEnvState } from '../lib/useCCHubState'
 import { ccKeyFor, svcKey, probeKey } from '../lib/yamlShared'
+import { useRepoScan } from '../lib/useRepoScan'
 
 const router = useRouter()
 
@@ -551,29 +547,10 @@ function onRepoNameInput(r: RepoItem) {
   refreshRoleHint(r)
 }
 
-// refreshRoleHint 给 repo 拿一份"基于当前 name + stack + 本地路径"的 role 推荐,塞到 _roleHint。
-// UI 在下拉旁边渲染 "📍 推荐 X(理由)";命中跟当前 role 不一致时显示对比按钮"采用"。
-// 触发时机:onRepoNameInput / 仓库扫描完(stack 自动填好后)/ Step 4 进入时遍历刷一遍。
-async function refreshRoleHint(r: RepoItem) {
-  if (!r.name.trim()) {
-    r._roleHint = undefined
-    return
-  }
-  r._roleHintLoading = true
-  try {
-    let path = r._source === 'local' ? (r._localPath || '') : ''
-    // monorepo:把 sub_path 拼上,后端 RecommendRoleForRepo 会看子目录下的 package.json / pom.xml
-    if (path && r.sub_path && r.sub_path.trim()) {
-      path = path.replace(/\/+$/, '') + '/' + r.sub_path.trim().replace(/^\/+/, '')
-    }
-    const hint = await recommendRoleForRepo(r.stack || 'go', r.name, path)
-    r._roleHint = hint
-  } catch {
-    /* 推荐失败不阻塞用户填表 */
-  } finally {
-    r._roleHintLoading = false
-  }
-}
+// refreshRoleHint / refreshSubmoduleHints / pickLocalRepoDir / resolveLocalRepoPath /
+// pickCloneTarget / resolveCloneDest / scanSingleRepo 全套搬到 lib/useRepoScan.ts。
+// 实例化点必须在 generateYAML 之后(它要传 generateYAML callback);见本文件
+// "── Step 8: yaml 预览 + 生成 ──" 段附近的 useRepoScan() destructure。
 
 // applyRoleHint 把推荐 role 落到 r.role(用户点"采用"按钮调)。
 function applyRoleHint(r: RepoItem) {
@@ -624,38 +601,7 @@ function submodulePathFor(parent: RepoItem, subPath: string): string {
   return base + '/' + rel
 }
 
-// refreshSubmoduleHints 调后端扫 monorepo 信号(workspaces / pom modules / cmd 多入口 / services 子目录)
-// → 命中即把列表存到 r._submoduleHints,UI banner 显示"检测到 N 个子模块,一键拆分"。
-// 触发时机:scan 完成后(此时本地路径已就位)。0 命中 → 不弹 banner。
-async function refreshSubmoduleHints(r: RepoItem) {
-  // 本地模式直接用 _localPath;远程模式 clone 完成后落点 = resolveCloneDest(r),
-  // 也是个有效本地路径,送进 detectSubmodules 同样能扫。
-  let path = ''
-  if (r._source === 'local') {
-    path = r._localPath || ''
-  } else if (r._source === 'remote') {
-    const dest = resolveCloneDest(r)
-    if (dest) path = dest
-  }
-  if (!path) {
-    r._submoduleHints = []
-    r._submoduleSelection = {}
-    return
-  }
-  try {
-    const hints = await detectSubmodulesForRepo(path)
-    r._submoduleHints = hints
-    // 默认全选,用户能取消勾不想要的(如 tools/lint-rules)
-    const sel: Record<string, boolean> = {}
-    for (const h of hints) sel[h.sub_path] = true
-    r._submoduleSelection = sel
-    // 重新扫了一次 → 老的"合并状态"作废,banner 重新出现给用户决定
-    r._submoduleHintsDismissed = false
-  } catch {
-    r._submoduleHints = []
-    r._submoduleSelection = {}
-  }
-}
+// refreshSubmoduleHints 已搬到 lib/useRepoScan.ts
 
 // isGitSubmodulesHints 一组 hints 是不是都来自 .gitmodules ——
 // 后端 DetectSubmodules 命中 .gitmodules 路径时每条 hint 都带 url,其它路径(workspaces /
@@ -866,93 +812,9 @@ const repoBranchesMap = ref<Record<string, string[]>>(
 )
 
 
-// 本地模式:用户点"选目录"挑一个已 clone 好的仓库目录。
-// 选了新目录 = 换了仓库,彻底重置身份(URL / 名字 / 手改标记 / 已扫过)再从新目录反填,
-// 然后触发扫描。不保留上一个目录的任何身份字段 —— 新目录可能 git remote 完全不一样,
-// 继承旧 URL 会误导用户。scanSingleRepo 内部还会再清 stack / service_names / 分支映射,
-// 保证扫描结果不会混着两次的数据。
-async function pickLocalRepoDir(r: RepoItem) {
-  if (!isDesktop()) {
-    toast.error('选目录需要桌面 app 环境')
-    return
-  }
-  try {
-    const p = await openDir('选择已 clone 的仓库目录')
-    if (!p) return
-    await resolveLocalRepoPath(r, p)
-  } catch (e: any) {
-    toast.error(String(e?.message || e))
-  }
-}
+// pickLocalRepoDir / resolveLocalRepoPath 已搬到 lib/useRepoScan.ts
 
-// resolveLocalRepoPath 把一个新的本地路径应用到 repo,跑 url/name 反填 + 扫描。
-// 唯一入口是 pickLocalRepoDir(选目录按钮) —— 输入框不让手敲,路径一律由 openDir
-// 返回保证存在且是绝对路径。
-async function resolveLocalRepoPath(r: RepoItem, p: string) {
-  const newPath = (p || '').trim()
-  if (!newPath) return
-  // 换路径 = 换仓库,先清旧 name 对应的分支缓存 + 身份字段
-  if (r.name && r.name in repoBranchesMap.value) {
-    delete repoBranchesMap.value[r.name]
-  }
-  r._localPath = newPath
-  r.url = ''
-  r.name = ''
-  r._nameManual = false
-  r._scanned = false
-  r._scannedSource = ''
-  // 清空旧 submodule hints,避免上个仓库的检测结果残留
-  r._submoduleHints = undefined
-  try {
-    const remote = await getRemoteURL(newPath)
-    if (remote) {
-      r.url = remote
-      r.name = deriveRepoName(remote)
-    }
-  } catch { /* 不是 git 仓库 / 没 origin,容忍继续 */ }
-  if (!r.name) {
-    const parts = newPath.split(/[\\/]/).filter(Boolean)
-    r.name = parts[parts.length - 1] || ''
-  }
-  // 选完路径立刻跑一次 monorepo 检测(不等 scanSingleRepo 跑完,monorepo 信号是文件结构,
-  // 跟 stack/分支扫描独立)。给用户即时反馈,如果是 monorepo,banner 立刻出现。
-  refreshSubmoduleHints(r)
-  await scanSingleRepo(r)
-}
-
-// 远程模式:可选地给该仓库自定义 clone "父目录"。
-// 实际 clone 路径 = <picked>/<repo.name>(跟全局默认 reposRoot 一致)。
-// 用户选 ~/code,git clone 会创建 ~/code/<name>/,不会污染 ~/code 本身。
-//
-// 兼容老 draft:如果用户在旧版本里把 path 存成 ~/code/<name>(自己手动加了 name 一层),
-// 这里检测到末段就是 r.name 时自动剥掉一层,免得最终落到 ~/code/<name>/<name>。
-async function pickCloneTarget(r: RepoItem) {
-  if (!isDesktop()) {
-    toast.error('选目录需要桌面 app 环境')
-    return
-  }
-  try {
-    const p = await openDir(`选 ${r.name || '该仓库'} 的 clone 父目录(会自动建 /${r.name || '<name>'} 子目录)`)
-    if (p) {
-      // 末段意外撞上 repo.name 时剥一层(用户重复 pick 或拖了老 draft 进来)
-      const trimmed = p.replace(/\/$/, '')
-      const lastSeg = trimmed.split('/').pop() || ''
-      r._cloneTarget = (r.name && lastSeg === r.name) ? trimmed.slice(0, -lastSeg.length - 1) : trimmed
-    }
-  } catch (e: any) {
-    toast.error(String(e?.message || e))
-  }
-}
-
-// resolveCloneDest 把 "父目录 + repo.name" 拼出真实 clone 落地路径。
-// 调用方:scanSingleRepo 构造 repoPaths、Step 8 一键部署构造 repoPaths。
-// 返回空串表示"无路径信息(name 也空)",调用方走 effectiveRoot 兜底逻辑。
-function resolveCloneDest(r: RepoItem): string {
-  const parent = (r._cloneTarget || '').trim().replace(/\/$/, '')
-  const name = r.name.trim()
-  if (!parent || !name) return ''
-  return `${parent}/${name}`
-}
+// pickCloneTarget / resolveCloneDest 已搬到 lib/useRepoScan.ts
 
 // hasRepoSource: 用户是否已经给这个仓库提供了来源线索(URL 或本地目录)。
 // Why: 用户没填源时,"仓库名 / 自动识别 / 分支映射"三个下游块都推不出有意义的内容,
@@ -1053,136 +915,6 @@ function setRepoSource(r: RepoItem, src: 'local' | 'remote') {
   }
 }
 
-// 单仓库 inline 扫描:本地模式选完目录自动触发;远程模式点"Clone 并扫描"按钮触发。
-//
-// 本地 vs 远程的差别:
-//   - 本地:autoClone=false,直接扫 _localPath;瞬间完成(只跑 marker 探测 + git for-each-ref)
-//   - 远程:autoClone=true,先 gitclone 到 _cloneTarget(或 <默认>/name),再扫;耗时几秒到几十秒
-//
-// 错误隔离:只改当前 repo 的状态字段,其它 repo 不受影响。
-async function scanSingleRepo(r: RepoItem) {
-  if (!isDesktop()) {
-    r._scanError = '扫描仅在桌面 app 可用(浏览器模式请用 CLI:tshoot analyze)'
-    return
-  }
-  if (!r.name.trim()) {
-    r._scanError = '仓库名为空,无法扫描(通常 URL / 目录选完会自动填)'
-    return
-  }
-  // 远程模式需要 URL;本地模式需要 _localPath
-  if (r._source === 'remote' && !r.url.trim()) {
-    r._scanError = '远程模式需要先填仓库 URL'
-    return
-  }
-  if (r._source === 'local' && !r._localPath?.trim()) {
-    r._scanError = '本地模式需要先选目录'
-    return
-  }
-
-  // 构造 RepoPaths:仅这一个仓库的路径覆盖;效用上同 AnalyzeV2 的 per-repo 映射
-  const repoPaths: Record<string, string> = {}
-  if (r._source === 'local' && r._localPath?.trim()) {
-    repoPaths[r.name] = r._localPath.trim()
-  } else if (r._source === 'remote') {
-    const dest = resolveCloneDest(r)
-    if (dest) repoPaths[r.name] = dest
-  }
-  const autoClone = r._source === 'remote'
-  // 远程模式没填本仓库 clone 父目录时需要 effectiveRoot 来拼 ReposRoot/Name
-  const effectiveRoot = reposRootInput.value.trim() || resolvedReposRoot.value
-  if (autoClone && !repoPaths[r.name] && !effectiveRoot) {
-    r._scanError = '远程仓库需要 clone 落地点 —— 填本仓库的 clone 父目录或设全局默认 reposRoot'
-    return
-  }
-
-  r._scanning = true
-  r._scanError = undefined
-  // 扫描开始前,把上一次扫描留下的 stack / service_names / 分支全清零。
-  // 这样用户换了目录(比如从 truss 切到 nacos-go)后,新目录如果没识别出 service_names,
-  // UI 会老老实实显示空,而不是残留前一个仓库的 7 个服务名。分支下拉同理。
-  // 名字 / URL 不清:用户可能已经在上面的 pickLocalRepoDir / 自动反填改掉了,不动。
-  r.stack = ''
-  r.service_names = ''
-  for (const eid of Object.keys(r.env_branches)) {
-    r.env_branches[eid] = ''
-  }
-  if (r.name in repoBranchesMap.value) {
-    delete repoBranchesMap.value[r.name]
-  }
-  try {
-    const yamlText = generateYAML()
-    const res = (await bridgeAnalyzeV2(yamlText, effectiveRoot, repoPaths, autoClone, r.name)) as {
-      per_repo?: Array<{
-        name: string
-        status: string
-        error?: string
-        detected_stack?: string
-        detected_framework?: string
-        branches?: string[]
-      }>
-      report?: {
-        config_center?: string
-        repos?: Array<{ name: string; service_names?: string[] }>
-      }
-    }
-    const hit = (res.per_repo || []).find(p => p.name === r.name)
-    if (!hit) {
-      r._scanError = '后端没返回该仓库的扫描结果(name 不匹配?)'
-      return
-    }
-    if (hit.status === 'skipped' || hit.status === 'clone-failed') {
-      r._scanError = `${hit.status}: ${hit.error || '未知原因'}`
-      return
-    }
-
-    // service_names 只对"业务服务"类角色(backend / gateway / middleware / admin)
-    // 反填 —— frontend / common-lib / mobile / infra / docs 这类不是服务,反填上服务
-    // 名只会污染 routing skill 和后续的配置中心 / 数据层扫描。role 还没识别出来时(空)
-    // 也按"业务服务"处理,等 refreshRoleHint 跑完再说。
-    const rpt = (res.report?.repos || []).find(rr => rr.name === r.name)
-    if (isServiceRole(r.role)) {
-      if (rpt?.service_names?.length) {
-        r.service_names = rpt.service_names.join(', ')
-      } else if (!r.service_names.trim() && r.name) {
-        // analyzer 没扫出 service_names(配置 key 不显式 / 单服务仓 / monorepo 子目录 等场景),
-        // 默认就用 repo.name 当服务名。"一个仓 = 一个服务"是 95% 用户的预期。
-        // 用户想覆盖直接改 chip;routing skill 用这个 key 命中 config-map / k8s_runtime.service_map。
-        r.service_names = r.name
-      }
-    } else {
-      // 非业务服务角色:即便 analyzer 扫到 service_names 也清掉(可能是误判)
-      r.service_names = ''
-    }
-    if (hit.detected_stack) r.stack = hit.detected_stack
-    if (hit.branches?.length) {
-      repoBranchesMap.value[r.name] = hit.branches
-      for (const env of environments) {
-        if (!env.id) continue
-        const mapped = pickBranchForEnv(env, hit.branches)
-        if (mapped) r.env_branches[env.id] = mapped
-      }
-    }
-
-    // 配置中心提示:toast 一次,不静默改 Step 5
-    const cc = res.report?.config_center
-    if (cc && cc !== 'unknown') {
-      toast.info(`扫描完成:识别到配置中心 ${cc}(Step 5 可据此选)`)
-    }
-    r._scanned = true
-    // 记下这次扫描对应的身份(URL 或本地目录),用户以后改了就判定结果过期
-    r._scannedSource = r._source === 'local' ? (r._localPath || '') : r.url
-    // 扫完顺手刷一次 role 推荐 —— 此时 stack 已经识别出来,本地路径也已就位,
-    // 后端的 RecommendRoleForRepo 能进一步看 package.json/pom.xml/go.mod 的依赖,推得最准。
-    refreshRoleHint(r)
-    // monorepo 检测:看是不是 workspaces / multi-module pom / cmd 多入口 / services/ 多子目录。
-    // 命中 N>1 → UI 下面会弹"一键拆成 N 行"banner。
-    refreshSubmoduleHints(r)
-  } catch (e: any) {
-    r._scanError = String(e?.message || e)
-  } finally {
-    r._scanning = false
-  }
-}
 
 // ── Step 5: 配置源(多源 schema)──
 
@@ -4816,6 +4548,32 @@ function generateYAML(): string {
   }
   return libGenerateYAML(ctx)
 }
+
+// ── Step 4 仓库扫描(useRepoScan) ──────────────────────────────────
+// 必须在 generateYAML 之后实例化:scanSingleRepo 跑 bridgeAnalyzeV2 前要拿当前 yaml,
+// 通过 generateYAML callback 闭包持有 InitPage 25+ 个 reactive。上方"Step 4"段对
+// 这些函数的引用都在函数体里(scanSingleRepo / pickLocalRepoDir / refreshRoleHint /
+// refreshSubmoduleHints / pickCloneTarget / resolveCloneDest / resolveLocalRepoPath
+// 都是用户操作触发,一定晚于本行 init),lexical scope 自然解析。
+const {
+  resolveCloneDest,
+  refreshRoleHint,
+  pickCloneTarget,
+  pickLocalRepoDir,
+  scanSingleRepo,
+} = useRepoScan({
+  repoBranchesMap,
+  environments,
+  reposRootInput,
+  resolvedReposRoot,
+  // pickBranchForEnv / isServiceRole 的 env 参数类型 InitPage 用的是含 api_domain
+  // 等更多字段的 EnvItem,composable 只用到 id + is_prod 子集 —— 入参用 any 桥过去,
+  // 比把 RepoScanEnv 映射到 EnvItem 写一堆 cast 干净。
+  pickBranchForEnv: (env, branches) => pickBranchForEnv(env as EnvItem, branches),
+  isServiceRole,
+  deriveRepoName,
+  generateYAML,
+})
 
 // ── 校验 ─────────────────────────────────────────────────────────────
 // computed:每次字段变动立刻重算 errors,模板按 key 显示红框,按钮按 size 决定 disabled。

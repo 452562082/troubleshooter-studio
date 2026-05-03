@@ -13,6 +13,7 @@ import type { ApplyResult, DiscoveredBot } from '../lib/bridge'
 import { toast, toastError } from '../lib/toast'
 import { confirmDialog } from '../lib/confirm'
 import WorkspaceBrowser from '../components/WorkspaceBrowser.vue'
+import BotCard from '../components/BotCard.vue'
 
 const bots = ref<DiscoveredBot[]>([])
 const loading = ref(false)
@@ -103,17 +104,7 @@ async function runDoctor(b: DiscoveredBot) {
   }
 }
 
-function doctorSeverityIcon(s: string): string {
-  if (s === 'error') return '✖'
-  if (s === 'warning') return '⚠'
-  return 'ℹ'
-}
-
-function doctorClassForSeverity(s: string): string {
-  if (s === 'error') return 'doctor-err'
-  if (s === 'warning') return 'doctor-warn'
-  return 'doctor-info'
-}
+// doctorSeverityIcon / doctorClassForSeverity 已搬到 BotCard.vue 内部
 
 // ── 卡片"更多"菜单 ──
 // 一张卡之前外露 5 个按钮挤一行(打开对话 / 重生成 / 编辑 / 诊断 / 导出),
@@ -319,157 +310,29 @@ onActivated(() => { scan() })
     </div>
 
     <div v-else class="bot-grid">
-      <article v-for="b in bots" :key="b.path + b.meta.target" class="bot-card">
-        <header class="bot-head">
-          <span class="bot-target" :data-target="b.meta.target">{{ targetLabel(b.meta.target) }}</span>
-          <!-- "tshoot dev" 是 build 没打 git tag 时的兜底字面量,信息量为零(本地构建都长这样),
-               显示反而成噪音。只在版本号是真版本号(非 dev / 空)时才渲染徽章。 -->
-          <span
-            v-if="b.meta.tshoot_version && b.meta.tshoot_version !== 'dev'"
-            class="bot-ver"
-          >tshoot {{ b.meta.tshoot_version }}</span>
-        </header>
-        <h3 class="bot-name">{{ b.meta.system_name || b.meta.system_id }}</h3>
-        <p class="bot-id">ID: <code>{{ b.meta.system_id }}</code></p>
-        <p class="bot-path" :title="b.path">📁 {{ b.path }}</p>
-        <ul class="bot-stats">
-          <li><strong>{{ b.env_count }}</strong> 环境</li>
-          <li><strong>{{ b.repo_count }}</strong> 仓库</li>
-          <li><strong>{{ b.skill_count }}</strong> skills</li>
-        </ul>
-        <footer class="bot-foot">
-          <span class="bot-time">最近更新: {{ b.mod_time }}</span>
-          <div class="bot-actions">
-            <button
-              class="btn btn-regen"
-              :disabled="doctorState[regenKey(b)]?.loading"
-              :title="'按本地仓库路径深扫,对比 yaml 声明 vs 代码实态,挑漂移给修复建议'"
-              @click="runDoctor(b)"
-            >
-              {{ doctorState[regenKey(b)]?.loading ? '诊断中…' : '🩺 诊断' }}
-            </button>
-            <button
-              class="btn btn-regen"
-              :title="'打开机器人工作目录,树形浏览 + 改 SKILL.md / 脚本做调试(不动 system.yaml)'"
-              @click="openBrowser(b)"
-            >
-              📂 浏览工作目录
-            </button>
-            <!-- ⋯ 更多:低频/管理类操作折进下拉,省卡片版面 + 降视觉噪声 -->
-            <div class="bot-more-wrap">
-              <button class="btn btn-regen btn-more" :title="'更多操作'" @click.stop="toggleMenu(regenKey(b))">⋯</button>
-              <div v-if="menuOpenKey === regenKey(b)" class="bot-menu" role="menu">
-                <button
-                  class="menu-item"
-                  :disabled="regenState[regenKey(b)]?.loading"
-                  :title="b.meta.system_yaml ? '用 tshoot.json 嵌入的 yaml 重渲产物,直接刷到活 workspace(preserve_on_regenerate 文件保留)' : 'tshoot.json 里没保存 system_yaml,无法重新生成'"
-                  @click="closeMenu(); regen(b)"
-                >
-                  {{ regenState[regenKey(b)]?.loading ? '刷新中…' : '♻ 重新生成并刷新' }}
-                </button>
-                <button class="menu-item" @click="closeMenu(); toggleEditor(b)">
-                  {{ editingKey === regenKey(b) ? '收起编辑器' : '✎ 编辑配置' }}
-                </button>
-                <button class="menu-item" @click="closeMenu(); doExport(b)">
-                  {{ editingKey === regenKey(b) ? '⇩ 导出草稿' : '⇩ 导出 yaml' }}
-                </button>
-                <div class="menu-sep"></div>
-                <button
-                  class="menu-item menu-item-danger"
-                  :disabled="uninstallState[regenKey(b)]?.loading"
-                  :title="'卸载已部署的机器人:claude-code/cursor/codex 把 ~/.<target>/{agents,skills,scripts}/<name> 移到 ~/.Trash;openclaw 摘 agents.list + 清 creds.json'"
-                  @click="closeMenu(); uninstall(b)"
-                >
-                  {{ uninstallState[regenKey(b)]?.loading ? '卸载中…' : '🗑 卸载机器人' }}
-                </button>
-              </div>
-            </div>
-          </div>
-        </footer>
-
-        <!-- Doctor 诊断结果:已部署机器人的 saved per-repo paths 由部署流程保证存在,
-             后端自动用这份路径跑深度扫描,UI 不暴露"覆盖路径"入口(代码扫描页才需要)。 -->
-        <section v-if="doctorState[regenKey(b)]?.open" class="doctor-panel">
-          <div class="doctor-head">
-            <strong>🩺 诊断结果</strong>
-            <span
-              v-if="doctorState[regenKey(b)]?.scannedRepoPaths && Object.keys(doctorState[regenKey(b)]!.scannedRepoPaths!).length"
-              class="doctor-mode deep"
-              :title="Object.entries(doctorState[regenKey(b)]!.scannedRepoPaths!).map(([n,p]) => `${n} → ${p}`).join('\n')"
-            >
-              深度扫 · {{ Object.keys(doctorState[regenKey(b)]!.scannedRepoPaths!).length }} 个仓库
-            </span>
-            <span v-else class="doctor-mode">仅静态检查 · 没找到本地仓库路径</span>
-            <div class="doctor-head-actions">
-              <button class="btn btn-regen" @click="doctorState[regenKey(b)].open = false">收起</button>
-            </div>
-          </div>
-
-          <div v-if="doctorState[regenKey(b)]?.err" class="alert error">
-            {{ doctorState[regenKey(b)]!.err }}
-          </div>
-          <div v-else-if="doctorState[regenKey(b)]?.issues?.length === 0" class="alert success">
-            ✓ {{ doctorState[regenKey(b)]?.scannedRepoPaths && Object.keys(doctorState[regenKey(b)]!.scannedRepoPaths!).length
-                ? '深度扫描未发现漂移'
-                : '静态检查未发现问题(本系统暂无本地仓库路径记录)' }}
-          </div>
-          <ul v-else-if="doctorState[regenKey(b)]?.issues" class="doctor-list">
-            <li
-              v-for="(iss, i) in doctorState[regenKey(b)]!.issues"
-              :key="i"
-              :class="doctorClassForSeverity(iss.severity)"
-            >
-              <span class="doctor-icon">{{ doctorSeverityIcon(iss.severity) }}</span>
-              <div class="doctor-body">
-                <div class="doctor-line">
-                  <span class="doctor-cat">{{ iss.category }}</span>
-                  <span v-if="iss.target" class="doctor-target">→ {{ iss.target }}</span>
-                </div>
-                <div class="doctor-msg">{{ iss.message }}</div>
-                <div v-if="iss.suggest" class="doctor-sug">建议:{{ iss.suggest }}</div>
-              </div>
-            </li>
-          </ul>
-        </section>
-
-        <section v-if="editingKey === regenKey(b)" class="editor">
-          <label class="editor-label">system.yaml(改完先「预演」看 diff,再「应用到活 workspace」写盘 —— 仅刷新本卡所属平台)</label>
-          <textarea v-model="editorDraft" class="editor-textarea" spellcheck="false" />
-          <div class="editor-actions">
-            <button
-              class="btn"
-              :disabled="applyState[regenKey(b)]?.loading"
-              :title="'干跑:渲染产物 + 算 diff,告诉你哪些会写 / 保留 / 删除,不实际写盘'"
-              @click="runApply(b, true)"
-            >
-              {{ applyState[regenKey(b)]?.loading && applyState[regenKey(b)]?.mode === 'dry' ? '预演中…' : '预演' }}
-            </button>
-            <button
-              class="btn primary"
-              :disabled="applyState[regenKey(b)]?.loading"
-              :title="'真写盘到本机器人部署目录;preserve_on_regenerate 列表的文件保留手改不覆盖'"
-              @click="runApply(b, false)"
-            >
-              {{ applyState[regenKey(b)]?.loading && applyState[regenKey(b)]?.mode === 'real' ? '应用中…' : '应用到活 workspace' }}
-            </button>
-          </div>
-          <div v-if="applyState[regenKey(b)]?.result" class="apply-result">
-            <div class="apply-row"><strong>写入文件:</strong>{{ applyState[regenKey(b)]!.result!.files_written }}</div>
-            <div v-if="applyState[regenKey(b)]!.result!.files_preserved?.length" class="apply-row">
-              <strong>保留(用户手改):</strong>
-              <code v-for="f in applyState[regenKey(b)]!.result!.files_preserved" :key="f">{{ f }}</code>
-            </div>
-            <div v-if="applyState[regenKey(b)]!.result!.files_removed?.length" class="apply-row removed">
-              <strong>移除(陈旧产物):</strong>
-              <code v-for="f in applyState[regenKey(b)]!.result!.files_removed" :key="f">{{ f }}</code>
-            </div>
-            <div v-if="applyState[regenKey(b)]!.result!.needs_restart_hint" class="apply-hint">
-              💡 {{ applyState[regenKey(b)]!.result!.needs_restart_hint }}
-            </div>
-          </div>
-          <div v-if="applyState[regenKey(b)]?.err" class="apply-err">⚠ {{ applyState[regenKey(b)]?.err }}</div>
-        </section>
-      </article>
+      <BotCard
+        v-for="b in bots"
+        :key="b.path + b.meta.target"
+        v-model:editor-draft="editorDraft"
+        :bot="b"
+        :doctor="doctorState[regenKey(b)]"
+        :regen-loading="regenState[regenKey(b)]?.loading"
+        :uninstall-loading="uninstallState[regenKey(b)]?.loading"
+        :editing="editingKey === regenKey(b)"
+        :apply="applyState[regenKey(b)]"
+        :menu-open="menuOpenKey === regenKey(b)"
+        :target-label="targetLabel"
+        @run-doctor="runDoctor(b)"
+        @close-doctor="doctorState[regenKey(b)].open = false"
+        @open-browser="openBrowser(b)"
+        @toggle-menu="toggleMenu(regenKey(b))"
+        @close-menu="closeMenu"
+        @regen="regen(b)"
+        @toggle-editor="toggleEditor(b)"
+        @do-export="doExport(b)"
+        @uninstall="uninstall(b)"
+        @run-apply="(dryRun: boolean) => runApply(b, dryRun)"
+      />
     </div>
     <!-- 工作目录浏览器:点击卡片"📂 浏览工作目录"打开。 -->
     <WorkspaceBrowser
@@ -527,124 +390,9 @@ onActivated(() => { scan() })
 .empty { text-align: center; padding: 48px 24px; color: #94a3b8; font-size: 14px; line-height: 1.8; }
 .empty code { background: #f1f5f9; padding: 1px 4px; border-radius: 3px; }
 
+/* .bot-card / .bot-head / .bot-target / .bot-stats / .bot-foot / .bot-menu /
+   .doctor-* / .editor / .apply-* 全部 CSS 已搬到 components/BotCard.vue */
 .bot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
-.bot-card {
-  background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px 16px;
-  transition: box-shadow 0.15s, border-color 0.15s;
-}
-.bot-card:hover { border-color: #94a3b8; box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06); }
-
-.bot-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-.bot-target {
-  font-size: 11px; padding: 2px 8px; border-radius: 3px; font-weight: 600;
-  background: #e0e7ff; color: #3730a3;
-}
-.bot-target[data-target="openclaw"] { background: #fce7f3; color: #9f1239; }
-.bot-target[data-target="claude-code"] { background: #fef3c7; color: #92400e; }
-.bot-target[data-target="cursor"] { background: #dbeafe; color: #1e40af; }
-.bot-target[data-target="codex"] { background: #d1fae5; color: #065f46; }
-.bot-ver { font-size: 11px; color: #94a3b8; font-family: monospace; }
-
-.bot-name { font-size: 16px; font-weight: 600; color: #0f172a; margin-bottom: 4px; }
-.bot-id { font-size: 12px; color: #64748b; margin-bottom: 8px; }
-.bot-id code { font-family: monospace; background: #f1f5f9; padding: 1px 4px; border-radius: 3px; }
-.bot-path { font-size: 11px; color: #94a3b8; font-family: monospace; margin-bottom: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-.bot-stats { list-style: none; display: flex; gap: 14px; padding: 10px 0; border-top: 1px solid #f1f5f9; font-size: 12px; color: #64748b; }
-.bot-stats strong { color: #0f172a; font-weight: 600; margin-right: 2px; }
-
-.bot-foot {
-  border-top: 1px solid #f1f5f9; padding-top: 8px; font-size: 11px; color: #94a3b8;
-  display: flex; justify-content: space-between; align-items: center; gap: 10px;
-}
-.btn-regen {
-  font-size: 11px; padding: 4px 10px; border-radius: 4px;
-  background: #f1f5f9; border: 1px solid #cbd5e1; color: #334155;
-}
-.btn-regen:hover:not(:disabled) { background: #e2e8f0; }
-/* ⋯ 更多菜单:外露只留高频,管理类折进来让卡片不拥挤 */
-.bot-more-wrap { position: relative; }
-.btn-more {
-  font-size: 14px; line-height: 1; padding: 4px 10px;
-}
-.bot-menu {
-  position: absolute; top: calc(100% + 4px); right: 0; z-index: 10;
-  min-width: 140px; padding: 4px 0;
-  background: #fff; border: 1px solid var(--c-line-2); border-radius: 6px;
-  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.12);
-  display: flex; flex-direction: column;
-}
-.bot-menu .menu-item {
-  text-align: left; padding: 7px 14px; font-size: 12px;
-  border: none; background: transparent; color: var(--c-text); cursor: pointer;
-  font-family: inherit;
-}
-.bot-menu .menu-item:hover:not(:disabled) { background: var(--c-surf-3); }
-.bot-menu .menu-item:disabled { opacity: 0.5; cursor: not-allowed; }
-/* 危险操作(卸载)用红色文字 + 顶上加分隔线,跟普通 menu item 视觉拉开,降低误点风险 */
-.bot-menu .menu-sep { height: 1px; background: var(--c-line-2); margin: 4px 0; }
-.bot-menu .menu-item-danger { color: #dc2626; }
-.bot-menu .menu-item-danger:hover:not(:disabled) { background: #fef2f2; color: #b91c1c; }
-
-/* Doctor 诊断结果面板 */
-.doctor-panel {
-  margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--c-line-2);
-}
-.doctor-head {
-  display: flex; align-items: center; gap: 10px;
-  margin-bottom: 8px; font-size: var(--fs-sm); color: var(--c-ink);
-  flex-wrap: wrap;
-}
-.doctor-mode {
-  font-size: var(--fs-xs); color: var(--c-muted);
-  background: var(--c-surf-3); padding: 2px 8px; border-radius: 10px;
-}
-.doctor-mode.deep { background: #e0e7ff; color: #3730a3; font-family: monospace; }
-.doctor-head-actions { margin-left: auto; display: flex; gap: 6px; }
-
-.doctor-list {
-  list-style: none; padding: 0; margin: 0;
-  display: flex; flex-direction: column; gap: 6px;
-}
-.doctor-list li {
-  display: flex; gap: 10px; padding: 8px 10px;
-  border-radius: var(--r-sm); font-size: var(--fs-xs);
-}
-.doctor-err  { background: var(--c-danger-bg);  border: 1px solid var(--c-danger-border); color: var(--c-danger); }
-.doctor-warn { background: #fffbeb;            border: 1px solid #fde68a;             color: var(--c-warn); }
-.doctor-info { background: #eff6ff;            border: 1px solid #bfdbfe;             color: #1e40af; }
-.doctor-icon { font-size: 14px; flex-shrink: 0; line-height: 1.4; }
-.doctor-body { flex: 1; line-height: 1.5; }
-.doctor-line { font-weight: 600; margin-bottom: 2px; }
-.doctor-cat { font-family: monospace; }
-.doctor-target { margin-left: 4px; opacity: 0.85; }
-.doctor-msg { opacity: 0.92; }
-.doctor-sug { margin-top: 4px; opacity: 0.8; font-style: italic; }
-
-
-.bot-actions { display: flex; gap: 6px; }
-
-.editor {
-  margin-top: 12px; padding-top: 12px; border-top: 1px dashed #cbd5e1;
-}
-.editor-label { display: block; font-size: 11px; color: #64748b; margin-bottom: 6px; }
-.editor-textarea {
-  width: 100%; min-height: 240px; font-family: 'SFMono-Regular', 'Menlo', monospace;
-  font-size: 11px; padding: 8px 10px; border: 1px solid #cbd5e1; border-radius: 4px;
-  resize: vertical; line-height: 1.5; background: #f8fafc; color: #0f172a;
-}
-.editor-actions { display: flex; gap: 8px; margin-top: 8px; }
-
-.apply-result {
-  margin-top: 10px; padding: 10px 12px; background: #f0fdf4; border: 1px solid #bbf7d0;
-  border-radius: 4px; font-size: 11px; color: #166534;
-}
-.apply-result .apply-row { margin-bottom: 4px; line-height: 1.6; }
-.apply-result .apply-row.removed { color: #9a3412; }
-.apply-result code { background: rgba(15, 23, 42, 0.05); padding: 1px 4px; border-radius: 2px; margin-right: 4px; font-family: inherit; }
-.apply-hint { margin-top: 6px; padding-top: 6px; border-top: 1px dashed #bbf7d0; color: #166534; }
-.apply-err { margin-top: 10px; padding: 8px 12px; background: #fef2f2; border: 1px solid #fecaca; border-radius: 4px; font-size: 11px; color: #991b1b; }
-
 .page-actions { display: flex; gap: 8px; }
 
 </style>

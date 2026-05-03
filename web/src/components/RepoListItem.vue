@@ -1,19 +1,23 @@
 <script setup lang="ts">
-// RepoListItem —— Step 4 仓库列表的单行编辑器(也是 InitPage 单文件组件中最复杂的子组件):
+// RepoListItem —— Step 4 仓库列表的单行编辑器(InitPage 子组件中较复杂的一个):
 //   - 仓库 head(badge + sub_path 标 + 删除按钮)
 //   - 来源切换(remote URL / local 已有目录)
 //   - 远程模式:URL 输入 + clone 父目录 + 同步扫描按钮
 //   - 本地模式:目录选择 + URL probe 反馈
 //   - 仓库名 + 技术栈展示(readonly,扫描自动填)
-//   - monorepo banner(0/1/N 子模块)+ 一键拆分 / 合并按钮
+//   - <RepoMonorepoBanner>:monorepo 检测横幅(0/1/N 子模块,A 拆分 / B 合并)
 //   - 已合并 service_entries 展示
 //   - sub_path 编辑(monorepo 子目录)
-//   - 角色下拉 + RecommendRoleForRepo 推荐 chip
-//   - 服务名 chip 列表 + inline "+" 输入
-//   - env_branches 映射(<select> 当扫到分支 / <input> 兜底)
+//   - 角色下拉 + 推荐 chip
+//   - <RepoServiceChips>:服务名 chip 列表 + inline "+" 输入
+//   - <RepoEnvBranches>:环境 → 分支 映射(<select> / <input> 兜底)
 //
 // 父端持有 repos / repoBranchesMap / svcAddInputs / reposRootInput / resolvedReposRoot 等 reactive,
 // 大量 helper 通过函数 prop 传入;repo 对象 reactive 直传,v-model 写值同步回父端 repos[i]。
+
+import RepoMonorepoBanner from './RepoMonorepoBanner.vue'
+import RepoServiceChips from './RepoServiceChips.vue'
+import RepoEnvBranches from './RepoEnvBranches.vue'
 
 interface RepoItem {
   name: string
@@ -269,111 +273,18 @@ const emit = defineEmits<{
       </div>
     </div>
 
-    <!-- monorepo banner(0/1/N 子模块)+ 一键拆分 / 合并 -->
-    <div
-      v-if="hasRepoSource(repo) && repo._submoduleHints !== undefined && !repo._submoduleHintsDismissed"
-      class="monorepo-banner"
-      :class="{
-        'monorepo-banner-mono': repo._submoduleHints.length > 1,
-        'monorepo-banner-single': repo._submoduleHints.length <= 1,
-      }"
-    >
-      <div v-if="repo._submoduleHints.length === 0" class="monorepo-banner-head ok">
-        ✓ 检测结果:单服务仓库(整仓当一个服务处理,无需拆分)
-      </div>
-      <div v-else-if="repo._submoduleHints.length === 1" class="monorepo-banner-head warn">
-        ⚠ 仅检测到 1 个入口,看着不像 monorepo(整仓当一个服务也行)
-      </div>
-      <template v-else-if="isGitSubmodulesHints(repo._submoduleHints)">
-        <!-- 分支 A:.gitmodules 路径 -->
-        <div class="monorepo-banner-head">
-          🔍 检测到 .gitmodules 声明的 {{ repo._submoduleHints.length }} 个独立子模块(每个都是独立 git repo,默认全选):
-        </div>
-        <div class="monorepo-banner-hint">
-          💡 <strong>不点"拆分"按钮就不影响</strong> —— 如果当成单仓处理,直接在下方"服务名"里手填即可。
-        </div>
-        <ul class="monorepo-banner-list">
-          <li v-for="h in repo._submoduleHints" :key="h.sub_path">
-            <label class="monorepo-row-check">
-              <input
-                type="checkbox"
-                :checked="repo._submoduleSelection?.[h.sub_path] !== false"
-                @change="emit('toggleSubmodulePick', repo, h.sub_path, ($event.target as HTMLInputElement).checked)"
-              />
-              <div class="monorepo-row-content">
-                <div class="monorepo-row-top">
-                  <strong>{{ h.name }}</strong>
-                  <span class="monorepo-stack">{{ h.stack }}</span>
-                  <span class="monorepo-role">{{ h.role }}</span>
-                </div>
-                <div class="monorepo-row-path">
-                  📂 <code>{{ submodulePathFor(repo, h.sub_path) }}</code>
-                </div>
-                <div class="monorepo-row-url" :title="h.url">
-                  🔗 <code>{{ h.url }}</code>
-                  <span class="field-hint">(独立 git repo)</span>
-                </div>
-                <div class="monorepo-row-reason">
-                  <span class="field-hint">{{ h.reason }}</span>
-                </div>
-              </div>
-            </label>
-          </li>
-        </ul>
-        <button
-          type="button"
-          class="btn primary monorepo-split-btn"
-          :disabled="pickedSubmoduleCount(repo) === 0"
-          @click="emit('splitMonorepo', index)"
-        >
-          ✂ 拆成 {{ pickedSubmoduleCount(repo) }} 个独立仓库条目(各自 url / 本地路径 / role)
-        </button>
-      </template>
-      <template v-else>
-        <!-- 分支 B:同仓多入口(合并到 service_names) -->
-        <div class="monorepo-banner-head">
-          🔍 在本仓检测到 {{ repo._submoduleHints.length }} 个服务入口(同一 git 仓库,多服务模式):
-        </div>
-        <div class="monorepo-banner-hint">
-          💡 这些是<strong>同仓多服务</strong>(不是独立 git repo),建议合并到本仓的服务名列表 —— 每个服务自动加 <code>{{ repo.name || '&lt;repo&gt;' }}-</code> 前缀消歧义(避免跨仓重名,如 4 个仓都有 cmd/grpc-server 时撞成一团)。
-        </div>
-        <ul class="monorepo-banner-list">
-          <li v-for="h in repo._submoduleHints" :key="h.sub_path">
-            <label class="monorepo-row-check">
-              <input
-                type="checkbox"
-                :checked="repo._submoduleSelection?.[h.sub_path] !== false"
-                @change="emit('toggleSubmodulePick', repo, h.sub_path, ($event.target as HTMLInputElement).checked)"
-              />
-              <div class="monorepo-row-content">
-                <div class="monorepo-row-top">
-                  <strong>{{ qualifyServiceName(repo.name, h.name) }}</strong>
-                  <span v-if="qualifyServiceName(repo.name, h.name) !== h.name" class="field-hint">
-                    (原入口名:{{ h.name }})
-                  </span>
-                  <span class="monorepo-stack">{{ h.stack }}</span>
-                  <span class="monorepo-role">{{ h.role }}</span>
-                </div>
-                <div class="monorepo-row-path">
-                  📂 入口 <code>{{ submodulePathFor(repo, h.sub_path) }}</code>
-                </div>
-                <div class="monorepo-row-reason">
-                  <span class="field-hint">{{ h.reason }}</span>
-                </div>
-              </div>
-            </label>
-          </li>
-        </ul>
-        <button
-          type="button"
-          class="btn primary monorepo-split-btn"
-          :disabled="pickedSubmoduleCount(repo) === 0"
-          @click="emit('mergeMonorepoIntoServices', index)"
-        >
-          ➕ 合并为本仓 {{ pickedSubmoduleCount(repo) }} 个服务名(自动加 <code>{{ repo.name || '&lt;repo&gt;' }}-</code> 前缀)
-        </button>
-      </template>
-    </div>
+    <RepoMonorepoBanner
+      v-if="hasRepoSource(repo)"
+      :repo="repo"
+      :index="index"
+      :is-git-submodules-hints="isGitSubmodulesHints"
+      :qualify-service-name="qualifyServiceName"
+      :submodule-path-for="submodulePathFor"
+      :picked-submodule-count="pickedSubmoduleCount"
+      @toggle-submodule-pick="(r, sub, checked) => emit('toggleSubmodulePick', r, sub, checked)"
+      @split-monorepo="(idx) => emit('splitMonorepo', idx)"
+      @merge-monorepo-into-services="(idx) => emit('mergeMonorepoIntoServices', idx)"
+    />
 
     <!-- 已合并 service_entries 展示 -->
     <div
@@ -454,89 +365,23 @@ const emit = defineEmits<{
       </div>
     </div>
 
-    <!-- 服务名 chips -->
-    <div v-if="hasRepoSource(repo) && isServiceRole(repo.role)" class="form-group">
-      <label>
-        服务名
-        <span class="help-icon" title="config-map 以此为 key。扫描会自动识别(monorepo 列所有子模块);识别不全时点 + 手动补,不想要的点 ✕ 删。">?</span>
-        <span v-if="repoServiceNamesList(repo).length" class="field-hint">
-          — {{ repoServiceNamesList(repo).length }} 个(✕ 删 / + 补)
-        </span>
-        <span v-else class="field-hint">(扫一下自动填,或点下方 + 手动补)</span>
-      </label>
-      <div v-if="repo._scanning" class="service-chips-row">
-        <span class="auto-scanning"><span class="scan-spinner-mini"></span>扫描中…</span>
-      </div>
-      <div v-else class="service-chips-row">
-        <span
-          v-for="svc in repoServiceNamesList(repo)"
-          :key="svc"
-          class="service-chip"
-        >
-          <span class="service-chip-name">{{ svc }}</span>
-          <button
-            type="button"
-            class="service-chip-x"
-            :title="`删除 ${svc}`"
-            @click="emit('removeServiceName', repo, svc)"
-          >✕</button>
-        </span>
-        <span class="service-chip-add">
-          <input
-            v-model="svcAddInputs[index]"
-            type="text"
-            :placeholder="repoServiceNamesList(repo).length ? '+ 补一个服务名' : '+ 手填服务名'"
-            @keydown.enter.prevent="emit('addServiceName', repo, index)"
-          />
-          <button
-            type="button"
-            class="service-chip-add-btn"
-            :disabled="!(svcAddInputs[index] || '').trim()"
-            title="添加(Enter 也行;逗号/空格分隔可一次加多个)"
-            @click="emit('addServiceName', repo, index)"
-          >+</button>
-        </span>
-      </div>
-    </div>
+    <RepoServiceChips
+      v-if="hasRepoSource(repo) && isServiceRole(repo.role)"
+      :repo="repo"
+      :index="index"
+      :service-names="repoServiceNamesList(repo)"
+      :svc-add-inputs="svcAddInputs"
+      @remove-service-name="(r, svc) => emit('removeServiceName', r, svc)"
+      @add-service-name="(r, idx) => emit('addServiceName', r, idx)"
+    />
 
-    <!-- env_branches map -->
-    <div v-if="hasRepoSource(repo)" class="form-group">
-      <label>
-        环境 → 分支映射
-        <span class="help-icon" title="routing skill 根据此映射切到正确代码分支做代码定位。扫描仓库时按 env.id/is_prod 跟真实分支名做启发式匹配(dev→develop, prod→main/master,..),点下拉可改。">?</span>
-        <span v-if="repoBranchesMap[repo.name]?.length" class="field-hint">
-          — ✓ 从 {{ repoBranchesMap[repo.name]!.length }} 个真实分支里挑(可改)
-        </span>
-        <span v-else-if="branchHasOptions(repo)" class="field-hint">
-          — yaml 里声明的分支(本地未 clone,无法列全量真实分支;clone 完会刷新)
-        </span>
-        <span v-else class="field-hint">(扫一下自动映射)</span>
-      </label>
-      <div class="branch-select-grid">
-        <div v-for="env in environments" :key="env.id" class="branch-select-item">
-          <span class="branch-env">{{ env.id || '?' }}</span>
-          <span class="branch-arrow">→</span>
-          <select
-            v-if="branchHasOptions(repo)"
-            v-model="repo.env_branches[env.id]"
-            class="branch-select"
-          >
-            <option value="">—</option>
-            <option
-              v-for="b in branchOptionsFor(repo, repo.env_branches[env.id])"
-              :key="b"
-              :value="b"
-            >{{ b }}</option>
-          </select>
-          <input
-            v-else
-            v-model="repo.env_branches[env.id]"
-            type="text"
-            class="branch-input"
-            placeholder="扫一下自动填,也可手填"
-          />
-        </div>
-      </div>
-    </div>
+    <RepoEnvBranches
+      v-if="hasRepoSource(repo)"
+      :repo="repo"
+      :environments="environments"
+      :repo-branches-map="repoBranchesMap"
+      :branch-has-options="branchHasOptions"
+      :branch-options-for="branchOptionsFor"
+    />
   </div>
 </template>

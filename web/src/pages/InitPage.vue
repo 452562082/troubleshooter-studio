@@ -5046,85 +5046,73 @@ async function applyImport() {
   currentStep.value = 2
   showImportDialog.value = false
 
-  // 凭证齐全的 env 自动触发一次预加载,把 Step 6 的"per-env namespace + per-service dataId"
-  // 下拉块填出来。否则 yaml 没带 service_map(常见场景:历史 yaml 在用户点拉取前就生成),
-  // applyImport 上面那段合成逻辑没东西可合成,UI 看起来"什么都没反填"。
-  //
-  // 用 nextTick 包一层:等 enabledSourceTypes / enabledSourceOrder / ccCredInputs 这些
-  // reactive state 在 Vue 里完成一次 flush,再读 configCenterType.value & buildPreloadPayload —
-  // 不然 computed 可能还没追踪到刚刚 push 的新源,configCenterType.value 取到老值。
-  //
-  // 失败 / 凭证不全 / 非桌面 app 都静默跳过 —— 用户后续仍可手动点"📥 拉取勾选服务的配置"。
-  // 不阻塞 applyImport 同步返回:每个 env 起一个 fire-and-forget。
-  // 用 setTimeout(0) 推到下一个宏任务,确保:
-  //   1. configCenterType watcher(pre flush)早就跑完了(被 flag 拦下)
-  //   2. enabledSourceOrder / activeSourceTypes 等 reactive 都已经 settle
-  //   3. 即便 user 同时还在拖动表单 / 切 step,也不会跟同步反填竞争
-  // 比 nextTick 更彻底 —— nextTick 是微任务,setTimeout(0) 是宏任务。
-  setTimeout(() => {
-    importInProgress.value = false  // 现在放开,反填阶段已结束
-    pushLog('cchub', 'info',
-      `[applyImport] 自动预加载触发: cc=${cc} cct=${configCenterType.value} isDesktop=${isDesktop()} envs=${environments.map(e => e.id).filter(Boolean).join(',')}`,
-      { cc, cct: configCenterType.value })
-    if (!cc || !isDesktop()) return
+  // 反填完成后异步触发交叉校验。setTimeout(0) 推到宏任务,确保 configCenterType
+  // watcher 跑完 + reactive flush settle,避免跟同步反填竞争。
+  setTimeout(() => runImportCrossChecks(cc), 0)
+}
 
-    // 主源 + 所有副源(activeSourceTypes)都跑一遍交叉校验,每种 type 走自己的逻辑:
-    //   - nacos / apollo / consul → crossCheckImportedConfigSource(用 ccHubStateByEnv + envNamespaces + serviceConfigSel)
-    //   - kuboard                  → crossCheckImportedKuboard(用 kuboardStateByEnv + kuboardSvcMap)
-    //   - env-vars / kubernetes / none → 不需要校验(没远端可比对)
-    const checkOneSource = async (sourceType: string, envID: string) => {
-      if (sourceType === 'kuboard') {
-        return crossCheckImportedKuboard(envID, sourceType)
-      }
-      if (sourceType !== 'nacos' && sourceType !== 'apollo' && sourceType !== 'consul') {
-        return // env-vars / kubernetes / none / 未知
-      }
-      const payload = buildPreloadPayload(envID)
-      if (!payload.valid) {
-        pushLog('cchub', 'info',
-          `[applyImport] ${envID}@${sourceType} 跳过自动预加载,缺字段: ${payload.missing.join(', ')}`,
-          { envID, sourceType })
-        return
-      }
-      const cur = ccHubStateByEnv[envID]
-      if (cur?.status === 'ok' && cur.synthesized) {
-        pushLog('cchub', 'info',
-          `[applyImport] ${envID}@${sourceType} 启动真实交叉校验(yaml namespace=${envNamespaces[envID] || '(空)'})`,
-          { envID, sourceType })
-        return crossCheckImportedConfigSource(envID)
-      }
-      if (cur?.status === 'ok') {
-        pushLog('cchub', 'info',
-          `[applyImport] ${envID}@${sourceType} 已是真实 ok 状态(${cur.entries?.length || 0} 条),跳过`,
-          { envID, sourceType })
-        return
-      }
+// 反填后跑的交叉校验:对每个 env × 每个 source 调对应 backend probe,跟 yaml 里反填的
+// namespace / dataId / cm locator 做真实存在性比对,失败给徽章提示。
+// 失败 / 凭证不全 / 非桌面 app 都静默跳过 —— 用户后续仍可手动点"📥 拉取勾选服务的配置"。
+async function runImportCrossChecks(cc: string) {
+  importInProgress.value = false  // 反填阶段已结束,放开 watcher
+  pushLog('cchub', 'info',
+    `[applyImport] 自动预加载触发: cc=${cc} cct=${configCenterType.value} isDesktop=${isDesktop()} envs=${environments.map(e => e.id).filter(Boolean).join(',')}`,
+    { cc, cct: configCenterType.value })
+  if (!cc || !isDesktop()) return
+
+  // 每种 type 走自己的逻辑:
+  //   - nacos / apollo / consul → crossCheckImportedConfigSource(用 ccHubStateByEnv + envNamespaces + serviceConfigSel)
+  //   - kuboard                  → crossCheckImportedKuboard(用 kuboardStateByEnv + kuboardSvcMap)
+  //   - env-vars / kubernetes / none → 不需要校验(没远端可比对)
+  const checkOneSource = async (sourceType: string, envID: string) => {
+    if (sourceType === 'kuboard') {
+      return crossCheckImportedKuboard(envID, sourceType)
+    }
+    if (sourceType !== 'nacos' && sourceType !== 'apollo' && sourceType !== 'consul') {
+      return
+    }
+    const payload = buildPreloadPayload(envID)
+    if (!payload.valid) {
       pushLog('cchub', 'info',
-        `[applyImport] ${envID}@${sourceType} 触发自动预加载 addr=${payload.addr}`,
+        `[applyImport] ${envID}@${sourceType} 跳过自动预加载,缺字段: ${payload.missing.join(', ')}`,
         { envID, sourceType })
-      return runCCHubPreload(envID)
+      return
     }
-    for (const env of environments) {
-      if (!env.id) continue
-      // 主源(configCenterType.value)+ 副源都跑校验。不同 source 各跑各的(envID 是公共
-      // 维度,但 ccHubStateByEnv / kuboardStateByEnv 各自管自己 type 的数据)。
-      // 当前 ccHubStateByEnv 是全局单源 keyed by envID(老设计),所以 nacos/apollo/consul
-      // 同一时刻只有一个能跑;副源是 kuboard 时单独走 kuboardStateByEnv 不冲突。
-      for (const t of activeSourceTypes.value) {
-        checkOneSource(t, env.id).catch((e) => {
-          pushLog('cchub', 'error',
-            `[applyImport] ${env.id}@${t} 交叉校验抛错: ${String(e)}`, { envID: env.id, sourceType: t })
-        })
-      }
+    const cur = ccHubStateByEnv[envID]
+    if (cur?.status === 'ok' && cur.synthesized) {
+      pushLog('cchub', 'info',
+        `[applyImport] ${envID}@${sourceType} 启动真实交叉校验(yaml namespace=${envNamespaces[envID] || '(空)'})`,
+        { envID, sourceType })
+      return crossCheckImportedConfigSource(envID)
     }
-    // 可观测性交叉校验:启用的每个 obs 工具(grafana / loki / prometheus / jaeger / elk /
-    // skywalking / tempo / k8s_runtime),逐 env 调真实 HTTP probe + grafana datasource
-    // UID 比对 + k8s_runtime cluster/namespace 验存在。fire-and-forget,不阻塞。
-    crossCheckImportedObservability().catch((e) => {
-      pushLog('cchub', 'error',
-        `[applyImport] 可观测性交叉校验抛错: ${String(e)}`)
-    })
-  }, 0)
+    if (cur?.status === 'ok') {
+      pushLog('cchub', 'info',
+        `[applyImport] ${envID}@${sourceType} 已是真实 ok 状态(${cur.entries?.length || 0} 条),跳过`,
+        { envID, sourceType })
+      return
+    }
+    pushLog('cchub', 'info',
+      `[applyImport] ${envID}@${sourceType} 触发自动预加载 addr=${payload.addr}`,
+      { envID, sourceType })
+    return runCCHubPreload(envID)
+  }
+  for (const env of environments) {
+    if (!env.id) continue
+    // 主源 + 副源都跑校验。ccHubStateByEnv 是全局单源 keyed by envID(老设计),
+    // nacos/apollo/consul 同时只能一个跑;副源 kuboard 单独走 kuboardStateByEnv 不冲突。
+    for (const t of activeSourceTypes.value) {
+      checkOneSource(t, env.id).catch((e) => {
+        pushLog('cchub', 'error',
+          `[applyImport] ${env.id}@${t} 交叉校验抛错: ${String(e)}`, { envID: env.id, sourceType: t })
+      })
+    }
+  }
+  // 可观测性交叉校验:启用的每个 obs 工具逐 env 真实 HTTP probe + datasource UID 比对。
+  crossCheckImportedObservability().catch((e) => {
+    pushLog('cchub', 'error',
+      `[applyImport] 可观测性交叉校验抛错: ${String(e)}`)
+  })
 }
 
 // ── Step 7: Preview / generate ──

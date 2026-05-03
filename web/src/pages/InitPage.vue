@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted, onUnmounted, onErrorCaptured, nextTick } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted, onErrorCaptured, nextTick, provide } from 'vue'
 
 // 给 App.vue 的 keep-alive `:exclude="['InitPage']"` 用,让本页不被缓存。
 // 跟 HomePage 的"清空重开"按钮配套:用户清掉 localStorage 后,InitPage 重 mount 取干净状态。
@@ -42,6 +42,7 @@ import {
 } from '../lib/bridge'
 import type { AIToolResult, CCHubEntry, CCHubNamespace, GrafanaDatasource, OpenClawModelEntry, KuboardFetchBatchResult } from '../lib/bridge'
 import { confirmDialog } from '../lib/confirm'
+import { WizardStoreKey } from '../lib/wizardStore'
 import { pushLog } from '../lib/logStore'
 import { toast } from '../lib/toast'
 import { Target, IDE_TARGETS, type TargetId } from '../lib/constants'
@@ -5708,6 +5709,25 @@ const configTypeDescriptions: Record<string, string> = {
   kuboard: 'Kuboard — 通过 Kuboard 后台读 K8s ConfigMap,无需 kubeconfig',
   none: '不使用任何配置源',
 }
+
+// 共享上下文:把 2+ Step 子组件都用的高频 reactive 引用 + helper 一次性 provide,
+// 子组件 inject('wizard') 后直接 wizard.X,不再每个 prop 单独透传。
+provide(WizardStoreKey, {
+  environments,
+  // allServiceNames 是 ComputedRef,reactive proxy 不能直接放 — 这里取 .value,
+  // 子组件每次访问时仍然走 reactive(因为 environments + repos 是 reactive 源)。
+  get allServiceNames() { return allServiceNames.value },
+  kuboardStateByEnv,
+  hasError,
+  svcKey,
+  isRevealed,
+  toggleReveal,
+  kuboardClustersOf,
+  kuboardClusterCountOf,
+  kuboardErrorOf,
+  kuboardNamespacesFor,
+  kuboardConfigMapsFor,
+})
 </script>
 
 <template>
@@ -6051,11 +6071,8 @@ const configTypeDescriptions: Record<string, string> = {
       :is-multi-source="isMultiSource"
       :config-center-type="configCenterType"
       :cc-fields-by-type="CC_FIELDS_BY_TYPE"
-      :environments="environments"
-      :all-service-names="allServiceNames"
       :cc-cred-inputs="ccCredInputs"
       :source-creds="sourceCreds"
-      :kuboard-state-by-env="kuboardStateByEnv"
       :cc-hub-state-by-env="ccHubStateByEnv"
       :env-namespaces="envNamespaces"
       :service-config-sel="serviceConfigSel"
@@ -6063,21 +6080,12 @@ const configTypeDescriptions: Record<string, string> = {
       :kuboard-svc-map="kuboardSvcMap"
       :cc-key-for="ccKeyFor"
       :is-field-hidden="isFieldHidden"
-      :is-revealed="isRevealed"
-      :kuboard-error-of="kuboardErrorOf"
-      :kuboard-cluster-count-of="kuboardClusterCountOf"
-      :kuboard-clusters-of="kuboardClustersOf"
       :env-scanned="envScanned"
       :namespaces-for="namespacesFor"
       :entries-for-namespace="entriesForNamespace"
-      :svc-key="svcKey"
-      :has-error="hasError"
       :get-service-source="getServiceSource"
-      :kuboard-namespaces-for="kuboardNamespacesFor"
-      :kuboard-config-maps-for="kuboardConfigMapsFor"
       @toggle-source-type="toggleSourceType"
       @update-cred="(k, v) => (ccCredInputs[k] = v)"
-      @toggle-reveal="toggleReveal"
       @clear-cred="clearCCFieldInput"
       @run-kuboard-preload="runKuboardPreload"
       @run-c-c-hub-preload="runCCHubPreload"
@@ -6093,23 +6101,17 @@ const configTypeDescriptions: Record<string, string> = {
       v-if="currentStep === 8"
       :obs-tool-specs="OBS_TOOL_SPECS"
       :enabled-observability="enabledObservability"
-      :environments="environments"
-      :all-service-names="allServiceNames"
       :obs-probe-results="obsProbeResults"
       :tool-inputs="toolInputs"
-      :is-revealed="isRevealed"
       :is-obs-field-hidden="isObsFieldHidden"
       :tool-key-for="toolKeyFor"
       :obs-probe-key="obsProbeKey"
       :get-obs-access-mode="getObsAccessMode"
-      :kuboard-state-by-env="kuboardStateByEnv"
       :k8s-runtime-env-loc="k8sRuntimeEnvLoc"
       :k8s-runtime-svc-map="k8sRuntimeSvcMap"
       :k8s-rt-workload-cache="k8sRtWorkloadCache"
-      :svc-key="svcKey"
       :k8s-rt-workload-key="k8sRtWorkloadKey"
       :k8s-rt-workloads-for="k8sRtWorkloadsFor"
-      :kuboard-namespaces-for="kuboardNamespacesFor"
       :get-loki-mapping="getLokiMapping"
       :obs-grafana-ds-candidates="obsGrafanaDsCandidates"
       :grafana-ds-uid-by-obs-env="grafanaDsUidByObsEnv"
@@ -6121,7 +6123,6 @@ const configTypeDescriptions: Record<string, string> = {
         scheduleObsProbe(toolKey, envID)
         if (toolKey === 'grafana') scheduleGrafanaDsAutoload(envID)
       }"
-      @toggle-reveal="toggleReveal"
       @clear-tool-input="clearToolFieldInput"
       @run-k8s-rt-preload="runK8sRtPreload"
       @set-k8s-rt-env-loc="(envID, field, value) => setK8sRtEnvLoc(envID, field, value)"
@@ -6141,21 +6142,16 @@ const configTypeDescriptions: Record<string, string> = {
       :probing-all="probingAll"
       :probing-all-stats="probingAllStats"
       :probing-by-env="probingByEnv"
-      :environments="environments"
-      :all-service-names="allServiceNames"
       :scanned-d-s="scannedDS"
       :service-config-sel="serviceConfigSel"
       :ds-probe-results="dsProbeResults"
       :scan-state-of="scanStateOf"
-      :svc-key="svcKey"
-      :is-revealed="isRevealed"
       :ds-label="dsLabel"
       :ds-field-label="dsFieldLabel"
       :ds-field-is-secret="dsFieldIsSecret"
       :probe-key="probeKey"
       @auto-import-data-stores="autoImportDataStores"
       @probe-all-across-envs="probeAllAcrossEnvs"
-      @toggle-reveal="toggleReveal"
       @remove-d-s="(envID, svc, dsKey) => removeScannedDS(envID, svc, dsKey)"
       @probe-d-s="(envID, svc, dsKey) => probeOneDS(envID, svc, dsKey)"
     />

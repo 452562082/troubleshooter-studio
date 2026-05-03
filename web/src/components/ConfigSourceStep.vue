@@ -8,9 +8,11 @@
 // 内部继续复用更细的子组件:CredentialField / PreloadStatusRow / ServiceChecklist /
 // NamespaceServiceMap / KuboardServiceMap / SecondarySourcePanel / CredsShareWarning。
 
-import type { CredField, KuboardResourceState } from '../lib/credFields'
+import { inject } from 'vue'
+import type { CredField } from '../lib/credFields'
 import type { KuboardSvcLocator } from '../lib/yamlGenerator'
 import type { CCHubEntry, CCHubNamespace } from '../lib/bridge'
+import { WizardStoreKey } from '../lib/wizardStore'
 import CredentialField from './CredentialField.vue'
 import PreloadStatusRow from './PreloadStatusRow.vue'
 import ServiceChecklist from './ServiceChecklist.vue'
@@ -19,7 +21,6 @@ import KuboardServiceMap from './KuboardServiceMap.vue'
 import SecondarySourcePanel from './SecondarySourcePanel.vue'
 import CredsShareWarning from './CredsShareWarning.vue'
 
-interface Environment { id: string; is_prod: boolean }
 interface SourceCredsEntry { creds: Record<string, Record<string, string>>; rawExtra?: Record<string, unknown> }
 interface CCHubEnvState {
   status: 'idle' | 'loading' | 'ok' | 'error'
@@ -27,8 +28,11 @@ interface CCHubEnvState {
   namespaces?: CCHubNamespace[]
 }
 
+// 通用 reactive + helper 走 inject(避免每个 prop 单独透传)
+const wizard = inject(WizardStoreKey)!
+
 defineProps<{
-  // 顶部多选 + 模式
+  // Step 5 专属
   configTypeOptions: string[]
   configTypeDescriptions: Record<string, string>
   enabledSourceTypes: Record<string, boolean>
@@ -37,41 +41,27 @@ defineProps<{
   configCenterType: string
   ccFieldsByType: Record<string, CredField[]>
 
-  // env 列表 + 服务
-  environments: Environment[]
-  allServiceNames: string[]
-
-  // 凭证 / 状态 reactive map
+  // Step 5 专属:凭证 / 状态 reactive map
   ccCredInputs: Record<string, string>
   sourceCreds: Record<string, SourceCredsEntry>
-  kuboardStateByEnv: Record<string, KuboardResourceState | undefined>
   ccHubStateByEnv: Record<string, CCHubEnvState | undefined>
   envNamespaces: Record<string, string>
   serviceConfigSel: Record<string, string>
   serviceConfigGroup: Record<string, string>
   kuboardSvcMap: Record<string, KuboardSvcLocator>
 
-  // helper(全部 InitPage 那边定义,本组件只调用)
+  // Step 5 专属 helper
   ccKeyFor: (type: string, envID: string, field: string) => string
   isFieldHidden: (t: string, envID: string, f: CredField, getSibling: (k: string) => string) => boolean
-  isRevealed: (k: string) => boolean
-  kuboardErrorOf: (envID: string) => string
-  kuboardClusterCountOf: (envID: string) => number
-  kuboardClustersOf: (envID: string) => Array<{ name: string; namespaces: Array<{ name: string; configmaps: string[] }> }>
   envScanned: (envID: string) => boolean
   namespacesFor: (envID: string) => CCHubNamespace[]
   entriesForNamespace: (envID: string, ns: string) => CCHubEntry[]
-  svcKey: (envID: string, svc: string) => string
-  hasError: (key: string) => boolean
   getServiceSource: (svc: string) => string
-  kuboardNamespacesFor: (envID: string, clusterName: string) => string[]
-  kuboardConfigMapsFor: (envID: string, clusterName: string, nsName: string) => string[]
 }>()
 
 const emit = defineEmits<{
   toggleSourceType: [type: string, checked: boolean]
   updateCred: [key: string, value: string]
-  toggleReveal: [key: string]
   clearCred: [key: string]
   runKuboardPreload: [envID: string]
   runCCHubPreload: [envID: string]
@@ -132,7 +122,7 @@ const emit = defineEmits<{
         <li>这里填的账号密码会以明文写入 <code>system.yaml</code>(每条带 <code># ⚠ secret</code> 注释),并部署时注入到机器人 MCP Server 的 env 块 + <code>~/.tshoot/&lt;agent-id&gt;-creds.json</code>。</li>
         <li>分享 yaml 请限**团队内部 / 私有仓库**,<strong>不要提交到公开代码仓库</strong>。</li>
       </CredsShareWarning>
-      <div v-for="env in environments" :key="env.id" class="cc-env-block">
+      <div v-for="env in wizard.environments" :key="env.id" class="cc-env-block">
         <div class="cc-env-head">
           <span class="cc-env-label">{{ env.id || '(未命名 env)' }}</span>
           <span v-if="env.is_prod" class="cc-env-prod-tag">prod</span>
@@ -147,13 +137,13 @@ const emit = defineEmits<{
             :field="f"
             :env-i-d="env.id"
             :model-value="ccCredInputs[ccKeyFor(configCenterType, env.id, f.key)] || ''"
-            :is-revealed="isRevealed(ccKeyFor(configCenterType, env.id, f.key))"
+            :is-revealed="wizard.isRevealed(ccKeyFor(configCenterType, env.id, f.key))"
             :is-kuboard="configCenterType === 'kuboard'"
-            :kuboard-state="kuboardStateByEnv[env.id]"
+            :kuboard-state="wizard.kuboardStateByEnv[env.id]"
             :sibling-cluster-value="ccCredInputs[ccKeyFor(configCenterType, env.id, 'cluster')] || ''"
             :sibling-namespace-value="ccCredInputs[ccKeyFor(configCenterType, env.id, 'namespace')] || ''"
             @update:model-value="(v: string) => emit('updateCred', ccKeyFor(configCenterType, env.id, f.key), v)"
-            @toggle-reveal="emit('toggleReveal', ccKeyFor(configCenterType, env.id, f.key))"
+            @toggle-reveal="wizard.toggleReveal(ccKeyFor(configCenterType, env.id, f.key))"
             @clear="emit('clearCred', ccKeyFor(configCenterType, env.id, f.key))"
           />
         </div>
@@ -161,21 +151,21 @@ const emit = defineEmits<{
         <!-- kuboard 专属:点这个按钮拉资源,把后面 cluster/namespace/cm 三个字段从手填变下拉 -->
         <PreloadStatusRow
           v-if="configCenterType === 'kuboard'"
-          :status="kuboardStateByEnv[env.id]?.status"
+          :status="wizard.kuboardStateByEnv[env.id]?.status"
           idle-text="📥 从 Kuboard 读取可选项"
           ok-text="🔄 重新读取"
-          :error-message="kuboardErrorOf(env.id)"
+          :error-message="wizard.kuboardErrorOf(env.id)"
           @click="emit('runKuboardPreload', env.id)"
         >
-          <template #ok>✓ {{ kuboardClusterCountOf(env.id) }} 个集群</template>
+          <template #ok>✓ {{ wizard.kuboardClusterCountOf(env.id) }} 个集群</template>
         </PreloadStatusRow>
 
         <!-- 服务勾选清单:勾哪些服务走当前源(主源)。多源场景下,某服务在主源勾选 = 它的
              config_source 设为主源 type;副源场景下用户去对应副源面板勾选。
              单源场景默认所有服务都走唯一源,checkbox 全勾。 -->
         <ServiceChecklist
-          v-if="allServiceNames.length > 0"
-          :services="allServiceNames"
+          v-if="wizard.allServiceNames.length > 0"
+          :services="wizard.allServiceNames"
           :source-i-d="configCenterType"
           :hint-html="`勾选要走 <code>${configCenterType}</code> 源的服务;点下面&quot;拉取配置&quot;会列出这些服务对应的配置项`"
           :get-service-source="getServiceSource"
@@ -196,22 +186,22 @@ const emit = defineEmits<{
         <!-- 映射块:只有**本 env** 自己预加载成功时才显示。不借其他 env 的扫描结果 ——
              每个 env 必须用自己的凭证各扫一次,才能呈现自己的 namespace / dataId 选项。 -->
         <NamespaceServiceMap
-          v-if="envScanned(env.id) && allServiceNames.filter(s => getServiceSource(s) === configCenterType).length > 0"
+          v-if="envScanned(env.id) && wizard.allServiceNames.filter(s => getServiceSource(s) === configCenterType).length > 0"
           :env-i-d="env.id"
           :config-center-type="configCenterType"
-          :services="allServiceNames.filter(s => getServiceSource(s) === configCenterType)"
+          :services="wizard.allServiceNames.filter(s => getServiceSource(s) === configCenterType)"
           :env-namespaces="envNamespaces"
           :service-config-sel="serviceConfigSel"
           :service-config-group="serviceConfigGroup"
           :namespaces="namespacesFor(env.id)"
           :entries="entriesForNamespace(env.id, envNamespaces[env.id] || '')"
-          :svc-key="svcKey"
-          :has-error="hasError"
+          :svc-key="wizard.svcKey"
+          :has-error="wizard.hasError"
           @namespace-changed="(_e, v) => emit('namespaceChanged', env.id, v)"
           @data-id-changed="(_e, svc) => emit('dataIdChanged', env.id, svc)"
         />
         <div
-          v-else-if="envScanned(env.id) && allServiceNames.length === 0"
+          v-else-if="envScanned(env.id) && wizard.allServiceNames.length === 0"
           class="cc-map-block cc-map-hint"
         >
           先在 Step 4 填好 repos 的 <code>service_names</code>,这里才有服务列表可映射。
@@ -227,15 +217,15 @@ const emit = defineEmits<{
              nacos 走上面的 cc-map-block(envNamespaces + serviceConfigSel),kuboard 走这里。 -->
         <KuboardServiceMap
           v-if="configCenterType === 'kuboard'
-                && kuboardStateByEnv[env.id]?.status === 'ok'
-                && allServiceNames.filter(s => getServiceSource(s) === configCenterType).length > 0"
+                && wizard.kuboardStateByEnv[env.id]?.status === 'ok'
+                && wizard.allServiceNames.filter(s => getServiceSource(s) === configCenterType).length > 0"
           :env-i-d="env.id"
-          :services="allServiceNames.filter(s => getServiceSource(s) === configCenterType)"
+          :services="wizard.allServiceNames.filter(s => getServiceSource(s) === configCenterType)"
           :kuboard-svc-map="kuboardSvcMap"
-          :clusters="kuboardClustersOf(env.id)"
-          :svc-key="svcKey"
-          :namespaces-for="kuboardNamespacesFor"
-          :configmaps-for="kuboardConfigMapsFor"
+          :clusters="wizard.kuboardClustersOf(env.id)"
+          :svc-key="wizard.svcKey"
+          :namespaces-for="wizard.kuboardNamespacesFor"
+          :configmaps-for="wizard.kuboardConfigMapsFor"
           @set-loc="(envID, svc, field, value) => emit('setKuboardLoc', envID, svc, field, value)"
         />
 
@@ -248,16 +238,16 @@ const emit = defineEmits<{
       :key="`secsrc-${t}`"
       :source-type="t"
       :fields="ccFieldsByType[t]"
-      :environments="environments"
-      :all-service-names="allServiceNames"
+      :environments="wizard.environments"
+      :all-service-names="wizard.allServiceNames"
       :source-creds="sourceCreds"
-      :kuboard-state-by-env="kuboardStateByEnv"
+      :kuboard-state-by-env="wizard.kuboardStateByEnv"
       :kuboard-svc-map="kuboardSvcMap"
       :is-field-hidden="isFieldHidden"
       :get-service-source="getServiceSource"
-      :svc-key="svcKey"
-      :kuboard-namespaces-for="kuboardNamespacesFor"
-      :kuboard-config-maps-for="kuboardConfigMapsFor"
+      :svc-key="wizard.svcKey"
+      :kuboard-namespaces-for="wizard.kuboardNamespacesFor"
+      :kuboard-config-maps-for="wizard.kuboardConfigMapsFor"
       @preload-kuboard="(srcType, envID) => emit('preloadKuboardFromSource', srcType, envID)"
       @toggle-service-source="(svc, checked, srcType) => emit('setServiceSource', svc, checked ? srcType : '')"
       @set-kuboard-loc="(envID, svc, field, value) => emit('setKuboardLoc', envID, svc, field, value)"

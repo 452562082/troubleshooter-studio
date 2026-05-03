@@ -5,16 +5,17 @@
 // props 形态对齐 InitPage 现有 reactive object / closure helper(同 ConfigSourceStep 的迁移取舍),
 // 不重新设计签名以最小化迁移风险。
 
-import type { CredField, KuboardResourceState } from '../lib/credFields'
+import { inject } from 'vue'
+import type { CredField } from '../lib/credFields'
 import type { K8sRuntimeEnvLocator, K8sRuntimeSvcLocator } from '../lib/yamlGenerator'
 import type { URLProbeState } from '../lib/probeTypes'
 import type { GrafanaDatasource } from '../lib/bridge'
+import { WizardStoreKey } from '../lib/wizardStore'
 import CredsShareWarning from './CredsShareWarning.vue'
 import ObservabilityToolBlock from './ObservabilityToolBlock.vue'
 import K8sRuntimeBlock from './K8sRuntimeBlock.vue'
 import LokiMappingStep from './LokiMappingStep.vue'
 
-interface Environment { id: string; is_prod: boolean }
 interface ToolSpec { key: string; label: string; description: string; fields: CredField[] }
 interface WorkloadCacheEntry { status?: 'idle' | 'loading' | 'ok' | 'error' }
 interface LokiMappingPerEnv {
@@ -35,31 +36,28 @@ interface LokiMappingPerEnv {
 }
 type ObsAccessMode = 'via_grafana' | 'direct'
 
+// 通用 reactive + helper 走 inject(避免每个 prop 单独透传)
+const wizard = inject(WizardStoreKey)!
+
 const props = defineProps<{
   // 组件 chip 启用状态
   obsToolSpecs: ToolSpec[]
   enabledObservability: Record<string, boolean>
-  environments: Environment[]
-  allServiceNames: string[]
 
   // ObservabilityToolBlock 用
   obsProbeResults: Record<string, URLProbeState>
   toolInputs: Record<string, string>
-  isRevealed: (k: string) => boolean
   isObsFieldHidden: (toolKey: string, envID: string, f: CredField) => boolean
   toolKeyFor: (cat: 'obs' | 'ds', tool: string, envID: string, field: string) => string
   obsProbeKey: (toolKey: string, envID: string) => string
   getObsAccessMode: (toolKey: string, envID: string) => ObsAccessMode
 
   // K8sRuntimeBlock 用
-  kuboardStateByEnv: Record<string, KuboardResourceState | undefined>
   k8sRuntimeEnvLoc: Record<string, K8sRuntimeEnvLocator | undefined>
   k8sRuntimeSvcMap: Record<string, K8sRuntimeSvcLocator>
   k8sRtWorkloadCache: Record<string, WorkloadCacheEntry | undefined>
-  svcKey: (envID: string, svc: string) => string
   k8sRtWorkloadKey: (envID: string, cluster: string, ns: string) => string
   k8sRtWorkloadsFor: (envID: string, cluster: string, ns: string) => Array<{ name: string; selector: string }>
-  kuboardNamespacesFor: (envID: string, clusterName: string) => string[]
 
   // via_grafana datasource 选择
   getLokiMapping: (envID: string) => LokiMappingPerEnv
@@ -72,7 +70,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   setObsAccessMode: [toolKey: string, envID: string, mode: ObsAccessMode]
   updateToolInput: [key: string, value: string, toolKey: string, envID: string]
-  toggleReveal: [key: string]
   clearToolInput: [key: string]
   runK8sRtPreload: [envID: string]
   setK8sRtEnvLoc: [envID: string, field: 'cluster' | 'namespace', value: string]
@@ -124,7 +121,7 @@ function setGrafanaDsUid(obsKey: string, envID: string, value: string) {
 
     <!-- 主内容:按 env → 启用的工具 → 字段 层级 -->
     <div class="ds-hierarchy" style="margin-top:14px">
-      <div v-for="env in environments" :key="env.id" class="ds-env-section">
+      <div v-for="env in wizard.environments" :key="env.id" class="ds-env-section">
         <div class="ds-env-title">
           <span class="cc-env-label">{{ env.id || '(未命名 env)' }}</span>
           <span v-if="env.is_prod" class="cc-env-prod-tag">prod</span>
@@ -148,26 +145,26 @@ function setGrafanaDsUid(obsKey: string, envID: string, value: string) {
             :access-toggleable="['loki','prometheus','jaeger','tempo','elk'].includes(spec.key) && enabledObservability['grafana']"
             :probe-state="obsProbeResults[obsProbeKey(spec.key, env.id)]"
             :tool-inputs="toolInputs"
-            :is-revealed="isRevealed"
+            :is-revealed="wizard.isRevealed"
             :is-obs-field-hidden="isObsFieldHidden"
             :tool-key-for="toolKeyFor"
             @update:access-mode="(mode) => emit('setObsAccessMode', spec.key, env.id, mode)"
             @update:tool-input="(k, v) => emit('updateToolInput', k, v, spec.key, env.id)"
-            @toggle-reveal="(k) => emit('toggleReveal', k)"
+            @toggle-reveal="(k) => wizard.toggleReveal(k)"
             @clear-input="(k) => emit('clearToolInput', k)"
           >
             <K8sRuntimeBlock
               v-if="spec.key === 'k8s_runtime'"
               :env-i-d="env.id"
-              :services="allServiceNames"
-              :kuboard-state="kuboardStateByEnv[env.id]"
+              :services="wizard.allServiceNames"
+              :kuboard-state="wizard.kuboardStateByEnv[env.id]"
               :env-loc="k8sRuntimeEnvLoc[env.id]"
               :svc-map="k8sRuntimeSvcMap"
               :workload-cache="k8sRtWorkloadCache"
-              :svc-key="svcKey"
+              :svc-key="wizard.svcKey"
               :workload-key="k8sRtWorkloadKey"
               :workloads-for="k8sRtWorkloadsFor"
-              :namespaces-for="kuboardNamespacesFor"
+              :namespaces-for="wizard.kuboardNamespacesFor"
               @preload="(envID) => emit('runK8sRtPreload', envID)"
               @set-env-loc="(envID, field, value) => emit('setK8sRtEnvLoc', envID, field, value)"
               @set-svc-workload="(envID, svc, workload) => emit('setK8sRtSvcWorkload', envID, svc, workload)"
@@ -241,7 +238,7 @@ function setGrafanaDsUid(obsKey: string, envID: string, value: string) {
               v-if="spec.key === 'loki'"
               :env-i-d="env.id"
               :mapping="getLokiMapping(env.id)"
-              :services="allServiceNames"
+              :services="wizard.allServiceNames"
               @load-labels="(envID) => emit('loadLokiLabels', envID)"
               @env-label-key-changed="(envID, key) => emit('envLabelKeyChanged', envID, key)"
               @service-label-key-changed="(envID, key) => emit('serviceLabelKeyChanged', envID, key)"

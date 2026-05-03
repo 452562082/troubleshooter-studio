@@ -5,11 +5,14 @@
 // props 形态对齐 InitPage 现有 reactive object / closure helper(同 ConfigSourceStep / ObservabilityStep
 // 的迁移取舍),不重新设计签名以最小化迁移风险。
 
+import { inject } from 'vue'
 import type { DSScanState, DSProbeState } from '../lib/dsTypes'
+import { WizardStoreKey } from '../lib/wizardStore'
 import CredsShareWarning from './CredsShareWarning.vue'
 import DataStoreServiceBlock from './DataStoreServiceBlock.vue'
 
-interface Environment { id: string; is_prod: boolean }
+// 通用 reactive + helper 走 inject(避免每个 prop 单独透传)
+const wizard = inject(WizardStoreKey)!
 
 const props = defineProps<{
   // 顶部行
@@ -20,17 +23,13 @@ const props = defineProps<{
   probingAllStats: { done: number; total: number; fail: number }
   probingByEnv: Record<string, boolean>
 
-  // env / svc 数据
-  environments: Environment[]
-  allServiceNames: string[]
+  // env / svc 数据(scannedDS / serviceConfigSel / dsProbeResults 是 Step 7 专属 reactive)
   scannedDS: Record<string, Record<string, Record<string, Record<string, string>>>>
   serviceConfigSel: Record<string, string>
   dsProbeResults: Record<string, DSProbeState>
 
-  // helper(全部 InitPage 那边定义)
+  // helper(Step 7 专属)
   scanStateOf: (envID: string, svc: string) => DSScanState | undefined
-  svcKey: (envID: string, svc: string) => string
-  isRevealed: (k: string) => boolean
   dsLabel: (dsKey: string) => string
   dsFieldLabel: (dsKey: string, field: string) => string
   dsFieldIsSecret: (dsKey: string, field: string) => boolean
@@ -40,7 +39,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   autoImportDataStores: []
   probeAllAcrossEnvs: []
-  toggleReveal: [key: string]
   removeDS: [envID: string, svc: string, dsKey: string]
   probeDS: [envID: string, svc: string, dsKey: string]
 }>()
@@ -91,7 +89,7 @@ const probeAllDisabled = () => {
         需先在 Step 5 完成配置源扫描 + 映射服务 dataId
       </span>
       <span v-else-if="dsImportStatus === 'ok'" class="cc-preload-summary">
-        ✓ 成功拉 {{ dsImportStats.scanned }} / 应拉 {{ environments.length * allServiceNames.length }} 条配置(env × service),识别 {{ dsImportStats.matched }} 个数据层
+        ✓ 成功拉 {{ dsImportStats.scanned }} / 应拉 {{ wizard.environments.length * wizard.allServiceNames.length }} 条配置(env × service),识别 {{ dsImportStats.matched }} 个数据层
       </span>
 
       <!-- 全部环境一键连通性测试 -->
@@ -120,12 +118,12 @@ const probeAllDisabled = () => {
     <!-- 按 env → 全部 service(allServiceNames) → ds 层级完整展示;
          缺失项(没映射 / 拉失败 / 未识别)也会出现一条,明确标原因。 -->
     <div class="ds-hierarchy">
-      <div v-for="env in environments" :key="env.id" class="ds-env-section">
+      <div v-for="env in wizard.environments" :key="env.id" class="ds-env-section">
         <div class="ds-env-title">
           <span class="cc-env-label">{{ env.id || '(未命名 env)' }}</span>
           <span v-if="env.is_prod" class="cc-env-prod-tag">prod</span>
           <span class="ds-env-count">
-            {{ allServiceNames.length }} 个服务 ·
+            {{ wizard.allServiceNames.length }} 个服务 ·
             已识别 {{ Object.values(scannedDS[env.id] || {}).filter(s => Object.keys(s).length > 0).length }}
           </span>
           <span
@@ -137,26 +135,26 @@ const probeAllDisabled = () => {
           </span>
         </div>
 
-        <div v-if="allServiceNames.length === 0" class="ds-empty">
+        <div v-if="wizard.allServiceNames.length === 0" class="ds-empty">
           Step 4 还没填 <code>service_names</code>,这里没服务可扫
         </div>
 
         <div v-else class="ds-svc-container">
           <DataStoreServiceBlock
-            v-for="svc in allServiceNames"
+            v-for="svc in wizard.allServiceNames"
             :key="svc"
             :env-i-d="env.id"
             :svc="svc"
             :scan-state="scanStateOf(env.id, svc)"
-            :data-id-hint="serviceConfigSel[svcKey(env.id, svc)]"
+            :data-id-hint="serviceConfigSel[wizard.svcKey(env.id, svc)]"
             :scanned-types="scannedDS[env.id]?.[svc] || {}"
             :ds-probe-results="dsProbeResults"
-            :is-revealed="isRevealed"
+            :is-revealed="wizard.isRevealed"
             :ds-label="dsLabel"
             :ds-field-label="dsFieldLabel"
             :ds-field-is-secret="dsFieldIsSecret"
             :probe-key="probeKey"
-            @toggle-reveal="(k) => emit('toggleReveal', k)"
+            @toggle-reveal="(k) => wizard.toggleReveal(k)"
             @remove-d-s="(dsKey) => emit('removeDS', env.id, svc, dsKey)"
             @probe-d-s="(dsKey) => emit('probeDS', env.id, svc, dsKey)"
           />

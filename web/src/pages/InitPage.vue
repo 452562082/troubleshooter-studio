@@ -54,6 +54,10 @@ import ConfigSourceStep from '../components/ConfigSourceStep.vue'
 import ObservabilityStep from '../components/ObservabilityStep.vue'
 import DataStoreStep from '../components/DataStoreStep.vue'
 import BotIdentityStep from '../components/BotIdentityStep.vue'
+import WelcomeStep from '../components/WelcomeStep.vue'
+import SystemBasicInfoStep from '../components/SystemBasicInfoStep.vue'
+import YamlPreviewStep from '../components/YamlPreviewStep.vue'
+import OneClickDeployStep from '../components/OneClickDeployStep.vue'
 import { generateYAML as libGenerateYAML, type YAMLGenContext } from '../lib/yamlGenerator'
 import { computeStepErrors as libComputeStepErrors, labelForErrorKey as libLabelForErrorKey, type ValidatorContext } from '../lib/yamlValidator'
 import { applyParsedYAMLToWizardState, type ApplyImportContext } from '../lib/yamlImporter'
@@ -365,50 +369,11 @@ watch(() => system.id, (val, old) => {
   }
 })
 
-// system.id 从 system.name 自动派生:去掉非 ASCII、空格转 -、小写、裁剪到 32 字符。
-// 派生失败(name 全中文)时返回空串,UI 回落"让用户手填"(一般加一个"my-system"
-// 的占位就够)。用户自己在 id 输入框改过之后就 lock 住(idManualOverride=true),
-// 不再被 name 变动冲掉。
+// id 派生闭环(slugify / markIdManual / resetIdAuto / watch+onMounted)已收进
+// SystemBasicInfoStep.vue。InitPage 这里只剩 idManualOverride 引用 —— 它要参与
+// localStorage 草稿持久化(line ~4858 的 save()),所以走 v-model:idManualOverride
+// 跟子组件双向绑定,父端持有 ref。
 const idManualOverride = ref<boolean>(saved?.idManualOverride ?? false)
-function slugifyToId(name: string): string {
-  const s = (name || '')
-    .toLowerCase()
-    .replace(/[^\x00-\x7F]/g, '') // 去掉所有非 ASCII(中文 / emoji 等)
-    .replace(/[^a-z0-9]+/g, '-')  // 连续非法字符压成一个短横线
-    .replace(/^-+|-+$/g, '')       // 去头尾短横线
-    .slice(0, 32)
-  // system.id 的 regex 要求首字符必须 [a-z0-9]
-  if (!s || !/^[a-z0-9]/.test(s)) return ''
-  return s
-}
-// system.name 改动 → 自动改 system.id(前提:用户没手改过)
-watch(() => system.name, (val) => {
-  if (idManualOverride.value) return
-  const derived = slugifyToId(val)
-  if (derived) system.id = derived
-  // 派生为空(纯中文名)时不动 system.id,保留之前的值(可能是空,UI 会露出输入框让用户填)
-})
-// 初次挂载 / draft 恢复时,若 id 空但 name 能派生,填上
-onMounted(() => {
-  if (!system.id && !idManualOverride.value) {
-    const derived = slugifyToId(system.name)
-    if (derived) system.id = derived
-  }
-})
-function markIdManual() {
-  idManualOverride.value = true
-}
-function resetIdAuto() {
-  idManualOverride.value = false
-  const derived = slugifyToId(system.name)
-  system.id = derived
-}
-// 纯中文(或其它派生失败)的 name,UI 需要露出 id 输入框让用户手填
-const idAutoFailed = computed(() => {
-  if (!system.name.trim()) return false
-  return slugifyToId(system.name) === ''
-})
-const idCanAutoDerive = computed(() => slugifyToId(system.name) !== '')
 
 const agentNameDefault = computed(() => `${system.name}排障机器人`)
 // agent.id:AI 平台里的稳定标识。默认 <system.id>-troubleshooter,跟历史命名兼容。
@@ -5814,102 +5779,18 @@ provide(WizardStoreKey, {
     </div>
 
     <!-- Step 1: 欢迎页 - 选导入 yaml 还是从零开始 -->
-    <div v-if="currentStep === 1" class="card lg welcome-card">
-      <h2>开始创建机器人</h2>
-      <p class="help-text" style="margin-bottom: 24px;">
-        本向导帮你生成 system.yaml 配置 + 一键部署到 OpenClaw / Claude Code / Cursor / Codex CLI。
-        选下方任一方式开始 —— 草稿会自动保存,中途可关闭 app 下次继续。
-      </p>
-      <div class="welcome-choices">
-        <button
-          type="button"
-          class="welcome-choice"
-          @click="goToStep(2)"
-        >
-          <div class="welcome-choice-icon">✏️</div>
-          <div class="welcome-choice-text">
-            <strong>从零开始配置</strong>
-            <span>按表单一步步填,默认值已经按主流约定预设好</span>
-          </div>
-        </button>
-        <button
-          type="button"
-          class="welcome-choice"
-          @click="openImportDialog"
-        >
-          <div class="welcome-choice-icon">📥</div>
-          <div class="welcome-choice-text">
-            <strong>导入已有 system.yaml</strong>
-            <span>有 yaml 文件直接反填到向导,继续编辑调整</span>
-          </div>
-        </button>
-      </div>
-    </div>
+    <WelcomeStep
+      v-if="currentStep === 1"
+      @start="goToStep(2)"
+      @import="openImportDialog"
+    />
 
-    <!-- Step 2: 系统基本信息(原 Step 1) -->
-    <div v-if="currentStep === 2" class="card lg">
-      <h2>系统基本信息</h2>
-      <p class="help-text" style="margin-bottom:14px">
-        填一下机器人服务的业务系统:展示名、ID、一句话描述。
-      </p>
-
-      <div class="form-group">
-        <label>系统显示名 <span class="required">*</span>
-          <span class="field-hint">— 机器人打招呼 / 文档标题都用这个(可中文)</span>
-        </label>
-        <input
-          v-model="system.name"
-          type="text"
-          placeholder="我的系统"
-          :class="{ error: hasError('system.name') }"
-        />
-        <span v-if="hasError('system.name')" class="error-text">必填</span>
-      </div>
-
-      <!-- 系统 ID:默认自动从 system.name 派生,不让用户操心;仅在派生失败
-           (纯中文名)或用户点"自定义 ID"后才露输入框 -->
-      <div class="form-group">
-        <label>
-          系统 ID
-          <span class="help-icon" title="机器可读标识(ASCII),用作目录名、agent id 前缀、MCP 实例名。默认从「系统显示名」自动派生(Shop → shop)。纯中文名派生不出来时会露出手填输入框。">?</span>
-          <span v-if="idManualOverride" class="field-hint">(已手改,改完不再跟随系统名)</span>
-          <span v-else-if="idCanAutoDerive" class="field-hint">— 自动从系统名派生</span>
-          <span v-else-if="idAutoFailed" class="field-hint" style="color:#b45309">— 系统名全是中文,派生不出,请手填</span>
-        </label>
-
-        <!-- 自动派生成功且用户没手改:readonly 小 badge + "自定义" 链接 -->
-        <div v-if="!idManualOverride && idCanAutoDerive" class="id-autoderive">
-          <code class="id-badge">{{ system.id || '(填完系统名后自动生成)' }}</code>
-          <button type="button" class="btn-link" @click="markIdManual">自定义 ID →</button>
-        </div>
-
-        <!-- 手改模式 / 派生失败:露出输入框 -->
-        <div v-else>
-          <div class="id-input-row">
-            <input
-              v-model="system.id"
-              type="text"
-              placeholder="my-system (仅小写字母/数字/短横线,首字符 [a-z0-9])"
-              :class="{ error: hasError('system.id') }"
-              @input="markIdManual"
-            />
-            <button
-              v-if="idManualOverride && idCanAutoDerive"
-              type="button"
-              class="btn-link"
-              @click="resetIdAuto"
-              title="恢复：从系统名自动派生"
-            >↺ 跟随系统名</button>
-          </div>
-          <span v-if="hasError('system.id')" class="error-text">仅允许 [a-z0-9-],首字符必须是字母或数字</span>
-        </div>
-      </div>
-
-      <div class="form-group">
-        <label>系统描述</label>
-        <textarea v-model="system.description" placeholder="一句话描述你的系统（选填）" rows="3" />
-      </div>
-    </div>
+    <SystemBasicInfoStep
+      v-if="currentStep === 2"
+      v-model:id-manual-override="idManualOverride"
+      :system="system"
+      :has-error="hasError"
+    />
 
     <!-- Step 2 -->
     <BotIdentityStep
@@ -6144,70 +6025,28 @@ provide(WizardStoreKey, {
       @probe-d-s="(envID, svc, dsKey) => probeOneDS(envID, svc, dsKey)"
     />
 
-    <!-- Step 9: 预览 + 生成 -->
-    <div v-if="currentStep === 9" class="card lg">
-      <h2>预览 + 生成</h2>
-      <!-- target 已在 Step 2 勾选;这里只读展示一下"会产出哪些平台",不让改。
-           想改回去 Step 2(机器人身份)那一步。 -->
-      <div class="target-readonly-row">
-        <span class="target-readonly-label">本次部署目标:</span>
-        <span
-          v-for="t in targetOptions"
-          v-show="enabledTargets[t]"
-          :key="t"
-          class="target-readonly-chip"
-        >{{ targetLabels[t] }}</span>
-        <span v-if="!anyTargetSelected" class="error-text">
-          Step 2 没勾选任何部署目标,无法生成产物
-        </span>
-      </div>
-      <div class="yaml-preview">
-        <pre><code>{{ yamlOutput }}</code></pre>
-      </div>
-      <div class="action-bar">
-        <button class="btn primary" @click="validateYAML" :disabled="validateLoading">
-          {{ validateLoading ? '验证中...' : '✓ 验证' }}
-        </button>
-        <button class="btn" @click="copyYAML">
-          {{ copySuccess ? '已复制 ✓' : '📋 复制到剪贴板' }}
-        </button>
-        <button class="btn" @click="downloadYAML">⬇ 导出</button>
-      </div>
-      <div v-if="validateResult" class="validate-result" :class="{ success: validateResult.ok, fail: !validateResult.ok }">
-        {{ validateResult.message }}
-      </div>
-    </div>
+    <YamlPreviewStep
+      v-if="currentStep === 9"
+      :yaml-output="yamlOutput"
+      :validate-loading="validateLoading"
+      :validate-result="validateResult"
+      :copy-success="copySuccess"
+      :target-options="targetOptions"
+      :enabled-targets="enabledTargets"
+      :target-labels="targetLabels"
+      :any-target-selected="anyTargetSelected"
+      @validate="validateYAML"
+      @copy="copyYAML"
+      @download="downloadYAML"
+    />
 
-    <!-- Step 9: 一键部署 (流程末步) -->
-    <div v-if="currentStep === 10" class="card lg">
-      <h2>一键部署</h2>
-      <p class="help-text" style="margin-bottom:14px;">
-        按 Step 2 勾选的目标一次性部署,直接复用前面填的凭证,<strong>跑完即生效</strong>。
-        OpenClaw 若有字段前面没填,会回退到「已装机器人」页让你补齐。
-      </p>
-      <div v-if="deploySummary.length === 0" class="alert warn">
-        Step 2 没勾选任何部署目标,无法一键部署。请回 Step 2 至少勾选一个 AI 平台。
-      </div>
-      <div v-else class="deploy-final-block">
-        <div class="deploy-targets-line">
-          将部署到:
-          <span v-for="(item, i) in deploySummary" :key="item.target">
-            <span class="deploy-target-chip">{{ item.label }}</span><span v-if="i < deploySummary.length - 1">、</span>
-          </span>
-        </div>
-        <div class="deploy-inline-actions">
-          <button
-            type="button"
-            class="btn primary deploy-final-btn"
-            :disabled="deployLoading || deploySummary.length === 0"
-            @click="runOneClickDeploy"
-          >
-            {{ deployLoading ? '部署中…' : `🚀 部署到 ${deploySummary.length} 个目标` }}
-          </button>
-        </div>
-        <div v-if="deployError" class="alert error">{{ deployError }}</div>
-      </div>
-    </div>
+    <OneClickDeployStep
+      v-if="currentStep === 10"
+      :deploy-summary="deploySummary"
+      :deploy-loading="deployLoading"
+      :deploy-error="deployError"
+      @run-deploy="runOneClickDeploy"
+    />
 
     <!-- Navigation buttons - 欢迎页(Step 1)隐藏,因为它有两个大选择按钮做导航,
          底部再加"下一步"会跟那两个 CTA 视觉混淆。-->

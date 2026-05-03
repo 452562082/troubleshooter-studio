@@ -10,8 +10,6 @@ import {
   defaultDestPath,
   fetchConfigContentBatch,
   listGrafanaDatasources,
-  listLokiLabelValues,
-  listLokiLabels,
   probeDataStore,
   exportYAML,
   getRepoPathsForSystem,
@@ -26,7 +24,7 @@ import {
   preloadConfigCenter,
   validate as bridgeValidate,
 } from '../lib/bridge'
-import type { CCHubEntry, CCHubNamespace, GrafanaDatasource, KuboardFetchBatchResult } from '../lib/bridge'
+import type { CCHubEntry, CCHubNamespace, KuboardFetchBatchResult } from '../lib/bridge'
 import { confirmDialog } from '../lib/confirm'
 import { WizardStoreKey } from '../lib/wizardStore'
 import { pushLog } from '../lib/logStore'
@@ -66,6 +64,9 @@ import { useCCHubState, type CCHubEnvState } from '../lib/useCCHubState'
 import { ccKeyFor, svcKey, probeKey } from '../lib/yamlShared'
 import { useRepoScan } from '../lib/useRepoScan'
 import { useLokiMappingState, type LokiMappingPerEnv } from '../lib/useLokiMappingState'
+import { useGrafanaDS, OBS_GRAFANA_DS_TYPES, obsGrafanaDsKey } from '../lib/useGrafanaDS'
+import { useLokiLabels } from '../lib/useLokiLabels'
+import { useCCHubPreload } from '../lib/useCCHubPreload'
 
 const router = useRouter()
 
@@ -1611,22 +1612,6 @@ function entriesForNamespace(envID: string, _nsID: string): CCHubEntry[] {
   return entriesSourceFor(envID)
 }
 
-// 自动匹配 env → namespace:比如 env.id="dev" 找 show_name 含 "dev" 的 namespace。
-// 没匹配到就返回第一个非 public 的(避免默认落到空 public 误导)。
-function autoMatchNamespace(envID: string, list: CCHubNamespace[]): string {
-  if (!list || list.length === 0) return ''
-  const lower = envID.toLowerCase()
-  // 优先 id / show_name 里含 env 名的(忽略大小写)
-  const hit = list.find(n =>
-    n.id.toLowerCase().includes(lower) ||
-    n.show_name.toLowerCase().includes(lower),
-  )
-  if (hit) return hit.id
-  // 退化:第一个非 public("" 或 "public")的 namespace
-  const nonPublic = list.find(n => n.id !== '' && n.id.toLowerCase() !== 'public')
-  if (nonPublic) return nonPublic.id
-  return list[0].id
-}
 
 // 自动匹配 service → dataId:给定环境 + 服务名,在该 namespace 下的 entries 里
 // 找 locator 含服务名的;优先同时含 env 名。
@@ -1659,35 +1644,39 @@ function startsAtBoundary(loc: string, cand: string): boolean {
     loc.startsWith(cand + '_')
 }
 
-function autoMatchDataID(envID: string, svc: string, nsID: string): { dataId: string, group: string } {
-  const entries = entriesForNamespace(envID, nsID)
-  if (entries.length === 0) return { dataId: '', group: '' }
-  const candidates = serviceMatchKeys(svc)
-  const envLower = envID.toLowerCase()
-
-  // Pass 1:locator 段对齐前缀 + 含 env 关键字 —— 最强信号(典型 nacos 命名 <service>-<env>.yaml)
-  for (const cand of candidates) {
-    const hit = entries.find(e => {
-      const loc = e.locator.toLowerCase()
-      return startsAtBoundary(loc, cand) && loc.includes(envLower)
-    })
-    if (hit) return { dataId: hit.locator, group: hit.group || '' }
-  }
-  // Pass 2:locator 段对齐前缀(不要求含 env)—— 适配 <service>.yaml 共享配置
-  for (const cand of candidates) {
-    const hit = entries.find(e => startsAtBoundary(e.locator.toLowerCase(), cand))
-    if (hit) return { dataId: hit.locator, group: hit.group || '' }
-  }
-  // Pass 3:遗留 fuzzy 兜底(完整服务名 substring)—— 老行为,接非常规命名
-  const svcLower = svc.toLowerCase()
-  let hit = entries.find(e => {
-    const loc = e.locator.toLowerCase()
-    return loc.includes(svcLower) && loc.includes(envLower)
-  })
-  if (!hit) hit = entries.find(e => e.locator.toLowerCase().includes(svcLower))
-  if (hit) return { dataId: hit.locator, group: hit.group || '' }
-  return { dataId: '', group: '' }
-}
+// ── Step 5 配置中心预加载 ─────────────────────────────────────────
+// runCCHubPreload / loadConfigsForEnv / reloadEnvNamespace / buildPreloadPayload /
+// autoMatchNamespace / autoMatchDataID / autoFillSelections / onNamespaceChanged /
+// onDataIdChanged 全收口在 lib/useCCHubPreload.ts。
+// crossCheckImportedConfigSource(导入 yaml 后跨真实 cc 校验)还跟 import 流程多块状态
+// 交织,留在下方 InitPage。
+const {
+  autoMatchNamespace: _autoMatchNamespace,
+  autoMatchDataID: _autoMatchDataID,
+  autoFillSelections: _autoFillSelections,
+  buildPreloadPayload,
+  runCCHubPreload,
+  loadConfigsForEnv: _loadConfigsForEnv,
+  reloadEnvNamespace: _reloadEnvNamespace,
+  onNamespaceChanged,
+  onDataIdChanged,
+} = useCCHubPreload({
+  ccHubStateByEnv,
+  ccCredInputs,
+  getPrimaryConfigCenterType: () => configCenterType.value,
+  envNamespaces,
+  serviceConfigSel,
+  serviceConfigGroup,
+  allServiceNames,
+  getServiceSource,
+  namespacesFor,
+  entriesForNamespace,
+  serviceMatchKeys,
+  startsAtBoundary,
+})
+// 这几个 composable 里互相调用 / 由 onNamespaceChanged 内部触发,InitPage 模板没直接用
+void _autoMatchNamespace; void _autoMatchDataID; void _autoFillSelections
+void _loadConfigsForEnv; void _reloadEnvNamespace
 
 // autoMatchKuboardLocation 给 kuboard 源的服务找最匹配的 cluster/namespace/configmap。
 // 跟 autoMatchDataID 同一套退化策略:serviceMatchKeys 退化候选 + startsAtBoundary 段对齐 + 3-pass。
@@ -1754,232 +1743,6 @@ function autoFillKuboardSelections(envID: string, sourceType: string = 'kuboard'
   }
 }
 
-// 预加载成功后触发一次:帮用户把 namespace + 每个服务的 dataId 猜一遍 —— 只填还没填的,
-// 已有用户选择的格子不覆盖(用户想二次预加载刷新列表,但保留手动挑过的映射)。
-function autoFillSelections(envID: string) {
-  const nsList = namespacesFor(envID)
-  if (nsList.length === 0) return
-  // 1) namespace
-  if (!envNamespaces[envID]) {
-    envNamespaces[envID] = autoMatchNamespace(envID, nsList)
-  }
-  // 2) 只为"用户已勾选走当前 env 的源(主源)"的服务自动填 dataId。
-  //    没勾选的服务 = 用户明确不要把这个服务挂到当前源,即便预读拉到了配置项,也不要给它填值。
-  //    这样"勾才填"的语义跟 Step 5 服务清单的 UI 期望一致。
-  const nsID = envNamespaces[envID] || ''
-  const primaryType = configCenterType.value
-  for (const svc of allServiceNames.value) {
-    if (getServiceSource(svc) !== primaryType) continue // 没勾给这个源的,跳过
-    const k = svcKey(envID, svc)
-    if (serviceConfigSel[k]) continue // 已手挑 → 不覆盖
-    const { dataId, group } = autoMatchDataID(envID, svc, nsID)
-    if (dataId) {
-      serviceConfigSel[k] = dataId
-      serviceConfigGroup[k] = group
-    }
-  }
-}
-
-// 用户切 namespace → 清空这个 env 下所有 service 的 dataId 选择(因为旧 dataId 可能不在新 namespace)。
-// 然后如果该 env 有有效凭证,精确重拉新 namespace 下的 configs;没凭证就只跑 autoFill(借其他 env 扫过的 entries)。
-function onNamespaceChanged(envID: string, newNsID: string) {
-  for (const svc of allServiceNames.value) {
-    const k = svcKey(envID, svc)
-    delete serviceConfigSel[k]
-    delete serviceConfigGroup[k]
-  }
-  envNamespaces[envID] = newNsID
-  // 有凭证 → 精确重拉该 namespace 的 configs
-  const payload = buildPreloadPayload(envID)
-  if (payload.valid && isDesktop()) {
-    void reloadEnvNamespace(envID, newNsID)
-  } else {
-    // 没凭证:用已有数据(其他 env 扫过的 entries)重跑一次自动匹配
-    autoFillSelections(envID)
-  }
-}
-
-// 用户选 dataId → 同步记下对应的 group(生成 yaml 时要一起写)
-function onDataIdChanged(envID: string, svc: string) {
-  const nsID = envNamespaces[envID] || ''
-  const chosen = serviceConfigSel[svcKey(envID, svc)]
-  if (!chosen) {
-    delete serviceConfigGroup[svcKey(envID, svc)]
-    return
-  }
-  const entry = entriesForNamespace(envID, nsID).find(e => e.locator === chosen)
-  serviceConfigGroup[svcKey(envID, svc)] = entry?.group || ''
-}
-
-// 按 env 取当前输入组合(从 ccCredInputs 抽)。跟 install.sh read_var 变量名对齐的字段:
-//   nacos:  cc:nacos:<env>:addr / user / pass
-//   apollo: cc:apollo:<env>:meta / token
-//   consul: cc:consul:<env>:host / token
-// Namespace 字段配置里没专门收,用 system.id 当 nacos tenant 默认。
-function buildPreloadPayload(envID: string): {
-  type: string, addr: string, username: string, password: string,
-  token: string, namespace: string, app_id: string,
-  valid: boolean, missing: string[]
-} {
-  const type = configCenterType.value
-  const miss: string[] = []
-  const get = (field: string) => (ccCredInputs[ccKeyFor(type, envID, field)] || '').trim()
-
-  // kuboard / env-vars / none:不走远程预读(没有 namespace 列表概念,或字段固定),
-  // 直接给"missing"提示让按钮 disable
-  if (type !== 'nacos' && type !== 'apollo' && type !== 'consul') {
-    return {
-      type, addr: '', username: '', password: '', token: '', namespace: '', app_id: '',
-      valid: false, missing: [`${type} 不支持远程预读(直接在表单填字段即可,部署时按 env 写到 creds.json)`],
-    }
-  }
-
-  let addr = '', username = '', password = '', token = '', namespace = '', appID = ''
-  if (type === 'nacos') {
-    addr = get('addr')
-    username = get('user')
-    password = get('pass')
-    // namespace 空 —— 两阶段流程第 1 步用 NamespacesOnly 列全,第 2 步用选中的 UUID
-    namespace = ''
-    if (!addr) miss.push('nacos 地址')
-  } else if (type === 'apollo') {
-    addr = get('meta')
-    token = get('token')
-    appID = get('app_id')
-    // namespace = Apollo env 名 —— 两阶段:第 1 步空(用 NamespacesOnly 列 envs),
-    // 第 2 步用用户挑的 env 名("DEV"/"UAT"/...)
-    namespace = ''
-    if (!addr) miss.push('Portal URL')
-    if (!token) miss.push('token')
-    if (!appID) miss.push('App ID')
-  } else if (type === 'consul') {
-    addr = get('host')
-    token = get('token')
-    // namespace = kv 根下的 top-level prefix —— 两阶段:第 1 步空(用 NamespacesOnly 列根),
-    // 第 2 步用用户挑的 prefix
-    namespace = ''
-    if (!addr) miss.push('consul host')
-  }
-  return {
-    type, addr, username, password, token, namespace, app_id: appID,
-    valid: miss.length === 0, missing: miss,
-  }
-}
-
-// 两阶段预加载:
-//   第 1 步: NamespacesOnly=true 调用 → 后端只列 namespaces,不拉 configs(快)
-//   第 2 步: 按 env.id 启发式匹配到某个 namespace → 只拉那个 namespace 的 configs
-// 匹不到时不再拉 configs,给 UI 提示"请手选 namespace",用户从下拉挑后会触发 loadConfigs。
-//
-// 为什么不用第一次就全量扫? —— 扫了 test/uat/prod 的 configs 也白扫,用户只想要 dev 的。
-async function runCCHubPreload(envID: string) {
-  if (!isDesktop()) {
-    toast.error('预加载只在桌面 app 可用')
-    return
-  }
-  const payload = buildPreloadPayload(envID)
-  if (!payload.valid) {
-    toast.error(`先把这些字段填上再预加载:${payload.missing.join(', ')}`)
-    return
-  }
-  ccHubStateByEnv[envID] = { status: 'loading' }
-  try {
-    // ── Step 1: 轻量列 namespaces ──
-    const ns = await preloadConfigCenter({
-      type: payload.type as 'nacos' | 'apollo' | 'consul',
-      addr: payload.addr,
-      username: payload.username,
-      password: payload.password,
-      token: payload.token,
-      namespace: '',
-      app_id: payload.app_id,
-      namespaces_only: true,
-    })
-    pushLog('cchub', 'info',
-      `[${envID}] 列到 ${ns.namespaces?.length || 0} 个 namespace`,
-      { envID, type: payload.type, addr: payload.addr })
-    for (const n of ns.notes || []) pushLog('cchub', 'info', `[${envID}] ${n}`, { envID })
-
-    // ── Step 2: 按 env.id 启发式匹到对应 namespace,再精确拉那一个 ──
-    const matchedNs = autoMatchNamespace(envID, ns.namespaces || [])
-    if (!matchedNs && (ns.namespaces?.length || 0) > 0) {
-      // 有 namespace 列表但没匹到 → 让用户手选。先把 ns 列表存进 state,UI 展示下拉。
-      ccHubStateByEnv[envID] = {
-        status: 'ok',
-        entries: [],
-        namespaces: ns.namespaces || [],
-        notes: ns.notes || [],
-        loadedAt: Date.now(),
-      }
-      pushLog('cchub', 'warn',
-        `[${envID}] 无法按 env.id 启发式匹到 namespace,请在 UI 手选`, { envID })
-      toast.info(`${envID}: 列到 ${ns.namespaces?.length} 个 namespace,但没一条含 "${envID}",请在下拉手选`)
-      return
-    }
-    await loadConfigsForEnv(envID, matchedNs, ns.namespaces || [], payload)
-  } catch (e: any) {
-    const msg = String(e?.message || e)
-    ccHubStateByEnv[envID] = { status: 'error', error: '拉取失败,详见日志' }
-    pushLog('cchub', 'error', `[${envID}] 预加载失败: ${msg}`,
-      { envID, type: payload.type, addr: payload.addr })
-    toast.error(`${envID} 预加载失败,详见左侧「日志」`)
-  }
-}
-
-// 精确拉某 env 下某 namespace 的 configs(第二阶段,或用户后续切 namespace 触发的重拉)。
-// 共享 payload 以避免重取凭证;namespaces 是 Step 1 的结果,挂进 state 供下拉用。
-async function loadConfigsForEnv(
-  envID: string,
-  nsID: string,
-  allNamespaces: CCHubNamespace[],
-  payload: ReturnType<typeof buildPreloadPayload>,
-) {
-  ccHubStateByEnv[envID] = { status: 'loading' }
-  try {
-    const r = await preloadConfigCenter({
-      type: payload.type as 'nacos' | 'apollo' | 'consul',
-      addr: payload.addr,
-      username: payload.username,
-      password: payload.password,
-      token: payload.token,
-      namespace: nsID,
-      app_id: payload.app_id,
-    })
-    // 后端也会带回 namespaces 列表(跟 Step 1 一致),直接用 r.namespaces 覆盖
-    ccHubStateByEnv[envID] = {
-      status: 'ok',
-      entries: r.entries || [],
-      namespaces: r.namespaces || allNamespaces,
-      notes: r.notes || [],
-      loadedAt: Date.now(),
-    }
-    // 把匹到/选到的 namespace 写进 envNamespaces(autoFill 也需要它)
-    envNamespaces[envID] = nsID
-    pushLog('cchub', 'info',
-      `[${envID}] namespace=${nsID || 'public'} 拉到 ${r.entries?.length || 0} 条配置`,
-      { envID, namespace: nsID })
-    for (const n of r.notes || []) pushLog('cchub', 'info', `[${envID}] ${n}`, { envID })
-    // 清掉 localStorage 遗留的脏 serviceConfigSel:如果之前存的 dataId 不在新 namespace
-    // 的 entries 里,清空它;避免 UI 显示空 select(v-model 指向不存在的 option)。
-    const validLocators = new Set((r.entries || []).map(e => e.locator))
-    for (const svc of allServiceNames.value) {
-      const k = svcKey(envID, svc)
-      if (serviceConfigSel[k] && !validLocators.has(serviceConfigSel[k])) {
-        delete serviceConfigSel[k]
-        delete serviceConfigGroup[k]
-      }
-    }
-    // 只对当前 env 跑自动匹配,其他 env 要他们自己扫
-    autoFillSelections(envID)
-    toast.success(`${envID}: 拉到 ${r.entries?.length || 0} 条配置`)
-  } catch (e: any) {
-    const msg = String(e?.message || e)
-    ccHubStateByEnv[envID] = { status: 'error', error: '拉取失败,详见日志' }
-    pushLog('cchub', 'error',
-      `[${envID}] namespace=${nsID} 拉取失败: ${msg}`, { envID, namespace: nsID })
-    toast.error(`${envID} 拉取失败,详见左侧「日志」`)
-  }
-}
 
 // 导入 yaml 反填后的"真实配置中心交叉校验"——nacos / apollo / consul 通用:
 //
@@ -2204,19 +1967,6 @@ async function crossCheckImportedKuboard(envID: string, sourceType: string = 'ku
   }
 }
 
-// 用户在下拉手动切 namespace → 用新 namespace 重拉 configs。没凭证 / 没扫过的 env 忽略。
-async function reloadEnvNamespace(envID: string, nsID: string) {
-  if (!isDesktop()) return
-  const payload = buildPreloadPayload(envID)
-  if (!payload.valid) {
-    toast.error(`先把这些字段填上再切 namespace:${payload.missing.join(', ')}`)
-    return
-  }
-  const st = ccHubStateByEnv[envID]
-  const allNs = st?.namespaces || []
-  await loadConfigsForEnv(envID, nsID, allNs, payload)
-}
-
 // ── Step 7: 可观测性 + 数据层 ──
 const observabilityOptions = ['grafana', 'loki', 'prometheus', 'jaeger', 'elk', 'skywalking', 'tempo', 'k8s_runtime'] as const
 const dataStoreOptions = ['redis', 'mongodb', 'elasticsearch', 'mysql', 'postgresql', 'kafka', 'rocketmq', 'rabbitmq', 'clickhouse'] as const
@@ -2404,6 +2154,8 @@ const { k8sRtWorkloadCache, k8sRtWorkloadKey, k8sRtWorkloadsFor, loadK8sRtWorklo
   onLoaded: (envID, deployments) => autoPickK8sRtWorkloads(envID, deployments),
 })
 
+// useGrafanaDS / useLokiLabels 实例化点挪到 useLokiMappingState 之后(它们要 lokiMappingByEnv +
+// getLokiMapping)。见下方"Step 7 Loki 标签映射"段附近。
 function clearToolFieldInput(k: string) {
   toolInputs[k] = ''
 }
@@ -2493,88 +2245,49 @@ const { lokiMappingByEnv, getLokiMapping } = useLokiMappingState(
   saved?.lokiMappingByEnv as Record<string, LokiMappingPerEnv> | undefined,
 )
 
-// 通过 Grafana 代理访问的可观测性组件(prometheus/jaeger/tempo/elk)在每个 env 下
-// 对应的 Grafana datasource UID。Loki 走 lokiMappingByEnv[env].dsUID(因为还要拉 labels);
-// 其他类型只需选 UID,所以放进这个扁平 map。key="<obsType>:<env>"。
-// dsList(候选下拉项)继续复用 lokiMappingByEnv[env].dsList,各 obsType 按 .type 字段过滤。
-const grafanaDsUidByObsEnv = reactive<Record<string, string>>(saved?.grafanaDsUidByObsEnv ?? {})
-function obsGrafanaDsKey(obsKey: string, envID: string): string {
-  return `${obsKey}:${envID}`
-}
+// useGrafanaDS / useLokiLabels 必须在 useLokiMappingState 之后实例化(它们 closure 持有
+// lokiMappingByEnv + getLokiMapping)。上方"Step 7 可观测性"段对它们的引用都是函数体内
+// lexical 查找(用户操作触发,一定晚于本行 init),不会撞 TDZ。
+const {
+  grafanaDsUidByObsEnv,
+  lokiAuthFor,
+  obsGrafanaDsCandidates,
+  loadLokiDatasources,
+  scheduleGrafanaDsAutoload,
+} = useGrafanaDS({
+  toolInputs,
+  toolKeyFor,
+  enabledObservability,
+  getLokiMapping,
+  lokiMappingByEnv,
+})
+// 反填 saved.grafanaDsUidByObsEnv(composable 的 reactive 是空 init,这里把 saved 的值 merge 进去)
+Object.assign(grafanaDsUidByObsEnv, saved?.grafanaDsUidByObsEnv ?? {})
+
+const {
+  loadLokiLabels,
+  loadEnvLabelValues: _loadEnvLabelValues,
+  loadServiceLabelValues: _loadServiceLabelValues,
+  onEnvValueChanged,
+  autoMatchLokiMapping: _autoMatchLokiMapping,
+  onEnvLabelKeyChanged,
+  onServiceLabelKeyChanged,
+} = useLokiLabels({
+  getLokiMapping,
+  lokiAuthFor,
+  allServiceNames,
+  serviceMatchKeys,
+  startsAtBoundary,
+})
+// loadEnvLabelValues / loadServiceLabelValues / autoMatchLokiMapping 内部由 loadLokiLabels /
+// onEnvValueChanged 调,InitPage 模板没直接用
+void _loadEnvLabelValues; void _loadServiceLabelValues; void _autoMatchLokiMapping
 
 // 每个 (obs, env) 的访问方式开关收口在 lib/useObsAccessMode.ts。
 const { obsAccessModeMap, getObsAccessMode, setObsAccessMode } = useObsAccessMode({
   initialMap: saved?.obsAccessModeMap,
   enabledObservability,
 })
-// obsKey → grafana datasource.type 的允许值(可多个,如 elk 需要 elasticsearch)
-const OBS_GRAFANA_DS_TYPES: Record<string, string[]> = {
-  loki: ['loki'],
-  prometheus: ['prometheus'],
-  jaeger: ['jaeger'],
-  tempo: ['tempo'],
-  elk: ['elasticsearch'],
-}
-function obsGrafanaDsCandidates(envID: string, obsKey: string): GrafanaDatasource[] {
-  const lm = lokiMappingByEnv[envID]
-  if (!lm || lm.dsList.length === 0) return []
-  const types = OBS_GRAFANA_DS_TYPES[obsKey] || []
-  return lm.dsList.filter(d => types.includes(d.type))
-}
-
-function lokiAuthFor(envID: string) {
-  const lm = getLokiMapping(envID)
-  // auth_mode 是 UI-only 选择(api_key 或 username_password);按它过滤掉对侧的残留值,
-  // 避免 stale draft 把 api_key 跟 user/pass 一起发给后端,后端按 apiKey 优先走 Bearer
-  // → 用错的 token 401。空 auth_mode 兜底走 options[0] = api_key(跟 CredentialField 视觉一致)。
-  const authMode = (toolInputs[toolKeyFor('obs', 'grafana', envID, 'auth_mode')] || 'api_key').trim()
-  const useApiKey = authMode === 'api_key'
-  return {
-    grafana_url: (toolInputs[toolKeyFor('obs', 'grafana', envID, 'url')] || '').trim(),
-    api_key: useApiKey ? (toolInputs[toolKeyFor('obs', 'grafana', envID, 'api_key')] || '') : '',
-    user: useApiKey ? '' : (toolInputs[toolKeyFor('obs', 'grafana', envID, 'user')] || '').trim(),
-    pass: useApiKey ? '' : (toolInputs[toolKeyFor('obs', 'grafana', envID, 'pass')] || ''),
-    loki_url: (toolInputs[toolKeyFor('obs', 'loki', envID, 'url')] || '').trim(),
-    ds_uid: lm.dsUID,
-  }
-}
-
-async function loadLokiDatasources(envID: string) {
-  const lm = getLokiMapping(envID)
-  lm.dsListStatus = 'loading'
-  lm.dsListError = undefined
-  try {
-    const auth = lokiAuthFor(envID)
-    if (!auth.grafana_url) throw new Error('请先填本环境 Grafana URL')
-    const list = await listGrafanaDatasources(auth)
-    lm.dsList = list
-    lm.dsListStatus = 'ok'
-    if (!lm.dsUID) {
-      const loki = list.find(d => d.is_loki)
-      if (loki) lm.dsUID = loki.uid
-    }
-    // 自动给 prometheus / jaeger / tempo / elk 也填默认 datasource:每种 type 取第一个匹配的
-    for (const obsKey of ['prometheus', 'jaeger', 'tempo', 'elk']) {
-      const k = obsGrafanaDsKey(obsKey, envID)
-      if (grafanaDsUidByObsEnv[k]) continue // 用户填过则不动
-      const candidates = list.filter(d => (OBS_GRAFANA_DS_TYPES[obsKey] || []).includes(d.type))
-      const def = candidates.find(d => d.default) || candidates[0]
-      if (def) grafanaDsUidByObsEnv[k] = def.uid
-    }
-    const counts: Record<string, number> = {}
-    for (const d of list) counts[d.type] = (counts[d.type] || 0) + 1
-    const summary = Object.entries(counts).map(([t, n]) => `${t}=${n}`).join(', ')
-    pushLog('cchub', 'info', `[${envID}] Grafana 列到 ${list.length} 个 datasource(${summary})`, { envID })
-  } catch (e: any) {
-    lm.dsListStatus = 'fail'
-    lm.dsListError = String(e?.message || e)
-    pushLog('cchub', 'error', `[${envID}] 列 Grafana datasource 失败: ${lm.dsListError}`, { envID })
-  }
-}
-
-// Grafana URL+鉴权填好后自动拉一次 datasources(800ms 防抖)。
-// 用户改 URL/Key/账号 → 等输入稳定 → 自动重新加载,不必手动点"加载"。
-const grafanaDsAutoTimers: Record<string, ReturnType<typeof setTimeout>> = {}
 // 导入 yaml 反填后的"可观测性交叉校验":针对每个启用的 obs 工具的每个 env,
 // 主动调一次真实 HTTP probe(URL+鉴权)看通不通,grafana 还额外比对 datasource UID
 // 是否真在 grafana 里(yaml 写的 UID 可能已被删/改名)。
@@ -2691,175 +2404,6 @@ async function crossCheckImportedObservability(): Promise<void> {
   await Promise.all(checks)
 }
 
-function scheduleGrafanaDsAutoload(envID: string) {
-  if (!isDesktop()) return
-  if (!enabledObservability['grafana']) return
-  const auth = lokiAuthFor(envID)
-  if (!auth.grafana_url) return
-  if (!auth.api_key && (!auth.user || !auth.pass)) return
-  const k = `gads:${envID}`
-  if (grafanaDsAutoTimers[k]) clearTimeout(grafanaDsAutoTimers[k])
-  grafanaDsAutoTimers[k] = setTimeout(() => loadLokiDatasources(envID), 800)
-}
-
-async function loadLokiLabels(envID: string) {
-  const lm = getLokiMapping(envID)
-  lm.labelStatus = 'loading'
-  lm.labelError = undefined
-  try {
-    const auth = lokiAuthFor(envID)
-    if (!auth.grafana_url && !auth.loki_url) {
-      throw new Error('请先填本环境 Grafana URL 或 Loki URL')
-    }
-    if (auth.grafana_url && !auth.ds_uid) {
-      throw new Error('请先选中本环境的 Loki datasource')
-    }
-    const r = await listLokiLabels(auth)
-    lm.labels = r.labels || []
-    lm.labelStatus = 'ok'
-    pushLog('cchub', 'info', `[${envID}] Loki 拉到 ${lm.labels.length} 个 label key`, { envID })
-    if (!lm.envLabelKey) {
-      const guess = lm.labels.find(l => l === 'namespace')
-        || lm.labels.find(l => l.includes('namespace'))
-        || lm.labels.find(l => l.includes('env'))
-      if (guess) lm.envLabelKey = guess
-    }
-    if (!lm.serviceLabelKey) {
-      const guess = lm.labels.find(l => l === 'app')
-        || lm.labels.find(l => l === 'service')
-        || lm.labels.find(l => l === 'job')
-        || lm.labels.find(l => l.includes('container'))
-      if (guess) lm.serviceLabelKey = guess
-    }
-    if (lm.envLabelKey) await loadEnvLabelValues(envID)
-    autoMatchLokiMapping(envID)
-    // envValue 自动匹完之后再拉 serviceLabelValues —— 这次会带 selector 过滤,
-    // 只列该 namespace 下出现过的 app,避免列出来一堆别 namespace 的 app
-    if (lm.serviceLabelKey) await loadServiceLabelValues(envID)
-    autoMatchLokiMapping(envID)
-  } catch (e: any) {
-    lm.labelStatus = 'fail'
-    lm.labelError = String(e?.message || e)
-    pushLog('cchub', 'error', `[${envID}] 列 Loki labels 失败: ${lm.labelError}`, { envID })
-  }
-}
-
-async function loadEnvLabelValues(envID: string) {
-  const lm = getLokiMapping(envID)
-  if (!lm.envLabelKey) return
-  try {
-    const auth = lokiAuthFor(envID)
-    const r = await listLokiLabelValues(auth, lm.envLabelKey)
-    lm.envLabelValues = r.values || []
-  } catch (e: any) {
-    pushLog('cchub', 'error', `[${envID}] 列 ${lm.envLabelKey} 值失败: ${e?.message || e}`, { envID })
-  }
-}
-// loadServiceLabelValues:如果已选了 envValue,会带 LogQL selector 过滤,
-// 只拉该 namespace 下确实出现过的 app 值,避免列出来一堆别的 namespace 的 app。
-async function loadServiceLabelValues(envID: string) {
-  const lm = getLokiMapping(envID)
-  if (!lm.serviceLabelKey) return
-  let query = ''
-  if (lm.envLabelKey && lm.envValue) {
-    // 转义 envValue 里的双引号(防止破坏 LogQL 语法)
-    const safeVal = lm.envValue.replace(/"/g, '\\"')
-    query = `{${lm.envLabelKey}="${safeVal}"}`
-  }
-  try {
-    const auth = lokiAuthFor(envID)
-    const r = await listLokiLabelValues(auth, lm.serviceLabelKey, query)
-    lm.serviceLabelValues = r.values || []
-    pushLog('cchub', 'info',
-      `[${envID}] ${lm.serviceLabelKey} ${query ? '(限定 ' + query + ')' : ''} 拉到 ${lm.serviceLabelValues.length} 个值`,
-      { envID })
-  } catch (e: any) {
-    pushLog('cchub', 'error', `[${envID}] 列 ${lm.serviceLabelKey} 值失败: ${e?.message || e}`, { envID })
-  }
-}
-
-// envValue 改变 → 旧 service 选择全清(可能新 namespace 下根本没那些 app),
-// 重拉 serviceLabelValues(限定到新 namespace 内),再启发式自动匹一遍。
-async function onEnvValueChanged(envID: string) {
-  const lm = getLokiMapping(envID)
-  lm.serviceValues = {}
-  await loadServiceLabelValues(envID)
-  autoMatchLokiMapping(envID)
-}
-
-// 启发式自动匹:env.id="dev" → 在 envLabelValues 里找含 "dev" 的;
-// service 名 → serviceLabelValues 里找含服务名的。仅填空,不覆盖。
-function autoMatchLokiMapping(envID: string) {
-  const lm = getLokiMapping(envID)
-  if (!lm.envValue) {
-    const lower = envID.toLowerCase()
-    const hit = lm.envLabelValues.find(v => v.toLowerCase().includes(lower))
-    if (hit) lm.envValue = hit
-  }
-  // 服务 label 值匹配:跟 nacos / kuboard 同套退化策略 ——
-  // serviceMatchKeys 生成 [community-grpc-server, community-grpc, community] 候选,
-  // 段对齐前缀 + env 信号优先,逐级 fallback。loki app 标签常见命名:
-  //   <service>-<env>             如 community-scheduler-dev
-  //   base-<service>-<env>        如 base-admin-truss-dev
-  //   <repo>-<env>                如 community-dev(没区分 cmd entry 时)
-  // env 信号比 nacos 更强(loki 标签几乎一定带 env 后缀),所以 Pass 1 require env match。
-  const envLower = envID.toLowerCase()
-  const lmValuesLower = lm.serviceLabelValues.map(v => ({ raw: v, low: v.toLowerCase() }))
-  // boundaryWith:label 值要么以 cand 开头、要么含 -cand- / -cand 边界(允许前缀加 base- / app- 这种)。
-  // loki app 标签常有 base-/app- 前缀,纯 startsAtBoundary 太严会漏 base-admin-truss-dev → admin-truss。
-  const boundaryHas = (low: string, cand: string): boolean => {
-    if (startsAtBoundary(low, cand)) return true
-    return low.includes('-' + cand + '-') || low.endsWith('-' + cand) || low.includes('_' + cand + '_') || low.endsWith('_' + cand)
-  }
-  for (const svc of allServiceNames.value) {
-    if (lm.serviceValues[svc]) continue // 已选(真实标签值)→ 不覆盖
-    const candidates = serviceMatchKeys(svc)
-    let hit: string | undefined
-    // Pass 1:候选 boundary + 含 env
-    for (const cand of candidates) {
-      const m = lmValuesLower.find(v => boundaryHas(v.low, cand) && v.low.includes(envLower))
-      if (m) { hit = m.raw; break }
-    }
-    // Pass 2:候选 boundary(不含 env)
-    if (!hit) {
-      for (const cand of candidates) {
-        const m = lmValuesLower.find(v => boundaryHas(v.low, cand))
-        if (m) { hit = m.raw; break }
-      }
-    }
-    // Pass 3:fuzzy 完整服务名 substring
-    if (!hit) {
-      const sLower = svc.toLowerCase()
-      const m = lmValuesLower.find(v => v.low.includes(sLower) && v.low.includes(envLower))
-        || lmValuesLower.find(v => v.low.includes(sLower))
-      if (m) hit = m.raw
-    }
-    if (hit) {
-      lm.serviceValues[svc] = hit
-    } else {
-      // 跑过没找到 → 标记给 UI 显示"未匹配"提示,跟"还没跑"区分开
-      if (!lm.serviceMatchTried) lm.serviceMatchTried = {}
-      lm.serviceMatchTried[svc] = true
-    }
-  }
-}
-
-async function onEnvLabelKeyChanged(envID: string, newKey: string) {
-  const lm = getLokiMapping(envID)
-  lm.envLabelKey = newKey
-  lm.envValue = ''
-  lm.serviceMatchTried = {} // 切 envLabelKey 后重新匹配,清掉老 tried 标记
-  await loadEnvLabelValues(envID)
-  autoMatchLokiMapping(envID)
-}
-async function onServiceLabelKeyChanged(envID: string, newKey: string) {
-  const lm = getLokiMapping(envID)
-  lm.serviceLabelKey = newKey
-  lm.serviceValues = {}
-  lm.serviceMatchTried = {}
-  await loadServiceLabelValues(envID)
-  autoMatchLokiMapping(envID)
-}
 
 // ── Step 7 数据层:"从配置中心读取" 自动识别 ────────────────────────
 // 流程:

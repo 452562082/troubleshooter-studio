@@ -49,15 +49,15 @@ import {
 import { useKuboardState } from '../lib/useKuboardState'
 import { useK8sRtWorkloads } from '../lib/useK8sRtWorkloads'
 import { useObsAccessMode, obsAccessKey } from '../lib/useObsAccessMode'
-import { useCCHubState, type CCHubEnvState } from '../lib/useCCHubState'
+import { useCCHubState } from '../lib/useCCHubState'
 import { ccKeyFor, svcKey, probeKey } from '../lib/yamlShared'
 import { useRepoScan } from '../lib/useRepoScan'
-import { useLokiMappingState, type LokiMappingPerEnv } from '../lib/useLokiMappingState'
+import { useLokiMappingState } from '../lib/useLokiMappingState'
 import { useGrafanaDS, OBS_GRAFANA_DS_TYPES, obsGrafanaDsKey } from '../lib/useGrafanaDS'
 import { useLokiLabels } from '../lib/useLokiLabels'
 import { useCCHubPreload } from '../lib/useCCHubPreload'
 import { useKuboardPreload } from '../lib/useKuboardPreload'
-import { useDataStoreState, type DSByService, type DSScanState } from '../lib/useDataStoreState'
+import { useDataStoreState } from '../lib/useDataStoreState'
 import { useImportCrossCheck } from '../lib/useImportCrossCheck'
 import { useDeployFlow } from '../lib/useDeployFlow'
 import { useImportFlow } from '../lib/useImportFlow'
@@ -78,7 +78,7 @@ const savedKuboardState = loadInitKuboardState()
 
 // ── Step management ──
 // wizardSchema=2 起 step 1 是欢迎页;老 saved(无 wizardSchema)的 currentStep 需 +1 迁移。
-const _savedSchema: number = (saved?.wizardSchema ?? 1) as number
+const _savedSchema: number = saved?.wizardSchema ?? 1
 const currentStep = ref<number>(
   saved?.currentStep != null
     ? Math.min(_savedSchema >= 2 ? saved.currentStep : saved.currentStep + 1, 10)
@@ -451,7 +451,9 @@ function makeEmptyRepo(): RepoItem {
 }
 
 const repos = reactive<RepoItem[]>(
-  Array.isArray(saved?.repos) && saved.repos.length ? saved.repos : [makeEmptyRepo()]
+  // saved.repos 类型是 RepoScanItem[](role: string),InitPage RepoItem.role 是 RepoRole 窄化;
+  // saved 真的存的是窄字符串,直接 cast 一下复用 reactive。yaml import / makeEmptyRepo 仍走窄类型。
+  Array.isArray(saved?.repos) && saved.repos.length ? (saved.repos as RepoItem[]) : [makeEmptyRepo()]
 )
 
 // 从 URL 推导仓库名。支持三种常见格式:
@@ -638,7 +640,7 @@ const {
 //   v-if="repoBranchesMap[repo.name]?.length" 不成立 → <select> 退成 <input>,
 // 用户会看到分支值(repo.env_branches 已持久化)但没有下拉选项,很迷惑。
 const repoBranchesMap = ref<Record<string, string[]>>(
-  (saved?.repoBranchesMap as Record<string, string[]>) ?? {},
+  saved?.repoBranchesMap ?? {},
 )
 
 // useMonorepoHints 实例化:repoBranchesMap 已 ready;resolveCloneDest 在下方 useRepoScan
@@ -1221,7 +1223,7 @@ function isRevealed(k: string): boolean {
 // 拉出实际 dataId / appId / kv key 列表。UI 列出来给用户挑哪个 locator 对哪个服务。
 //
 // 状态按 env 分开:类型 + 持久化收口在 lib/useCCHubState.ts(CCHubEnvState 也从那导出)。
-const { ccHubStateByEnv } = useCCHubState(saved?.ccHubStateByEnv as Record<string, CCHubEnvState> | undefined)
+const { ccHubStateByEnv } = useCCHubState(saved?.ccHubStateByEnv)
 
 // ── per-env × per-service 映射:用户挑的"环境对应 namespace" + "服务对应 dataId"──
 // 需求:dev 环境 + user 服务 → 应该定位到 nacos 里 dev namespace 下某条 user-*.yaml。
@@ -1693,7 +1695,7 @@ onMounted(() => triggerStep7Init(currentStep.value))
 // 等)还跟 toolInputs / sourceCreds / pushLog 多块状态交织,留在下方,直接 mutate
 // 暴露的 lokiMappingByEnv。
 const { lokiMappingByEnv, getLokiMapping } = useLokiMappingState(
-  saved?.lokiMappingByEnv as Record<string, LokiMappingPerEnv> | undefined,
+  saved?.lokiMappingByEnv,
 )
 
 // useGrafanaDS / useLokiLabels 必须在 useLokiMappingState 之后实例化(它们 closure 持有
@@ -1788,8 +1790,8 @@ const {
   recomputeEnabledDataStoresFromScanned,
 } = useDataStoreState(
   {
-    scannedDS: saved?.scannedDS as Record<string, DSByService> | undefined,
-    dsScanState: saved?.dsScanState as Record<string, DSScanState> | undefined,
+    scannedDS: saved?.scannedDS,
+    dsScanState: saved?.dsScanState,
   },
   dataStoreOptions,
   enabledDataStores,

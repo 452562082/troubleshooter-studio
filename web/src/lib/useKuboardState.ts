@@ -15,16 +15,16 @@ import { INIT_KUBOARD_STATE_KEY } from './useWizardDraft'
 
 export function useKuboardState(initial: {
   /** 来自 INIT_KUBOARD_STATE_KEY 的独立缓存(优先) */
-  savedKuboardState?: any
+  savedKuboardState?: Record<string, KuboardResourceState> | null
   /** 大 draft blob 里的 kuboardStateByEnv 拷贝(fallback) */
-  draftKuboardState?: any
+  draftKuboardState?: Record<string, KuboardResourceState>
 }) {
   const kuboardStateByEnv = reactive<Record<string, KuboardResourceState>>(
     (() => {
       const out: Record<string, KuboardResourceState> = {}
       const src = initial.savedKuboardState ?? initial.draftKuboardState
       if (src && typeof src === 'object') {
-        for (const [k, v] of Object.entries(src as Record<string, any>)) {
+        for (const [k, v] of Object.entries(src)) {
           if (v && v.status === 'ok' && Array.isArray(v.clusters)) {
             out[k] = { status: 'ok', clusters: v.clusters, notes: v.notes }
           }

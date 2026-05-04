@@ -25,12 +25,14 @@
 
 | 平台 | 部署位置 | 进入方式 | MCP 注册位置 |
 |---|---|---|---|
-| **OpenClaw** | `~/.openclaw/workspace/<name>/` | OpenClaw 客户端选 agent | `~/.openclaw/openclaw.json` |
-| **Claude Code** | `~/.claude/skills/<name>/` + `~/.claude/agents/<name>.md` | 任意项目 `@<name>` 调用 | `~/.claude/settings.json` |
-| **Cursor** | `~/.cursor/skills/<name>/` | AI 侧栏选 Custom Agent | `~/.cursor/mcp.json` |
-| **Codex CLI** | `~/.codex/skills/<name>/` + `~/.codex/AGENTS.md` | `@<name>` 调用 | `~/.codex/config.toml`(走 `codex mcp add`) |
+| **OpenClaw** | `~/.openclaw/workspace/<name>/`(整套 workspace 文件) | OpenClaw 客户端 agent 列表选(装完**重启客户端**才出现) | `~/.openclaw/openclaw.json` 的 `mcp.servers` |
+| **Claude Code** | `~/.claude/agents/<name>.md` + `~/.claude/skills/<name>/` | 任意项目 `@<name>` 调 subagent | `~/.claude/settings.json` 的 `mcpServers` |
+| **Cursor** | `~/.cursor/agents/<name>.md` + `~/.cursor/skills/<name>/` | AI 侧栏选 Custom Agent(MCP 还要去 Settings 启用) | `~/.cursor/mcp.json` 的 `mcpServers` |
+| **Codex CLI** | `~/.codex/agents/<name>.md` + `~/.codex/skills/<name>/` | 终端 `@<name>` 调用 | `~/.codex/config.toml`(由 `codex mcp add` 写入) |
 
-凭证持久化:`~/.openclaw/<id>-creds.json`(OpenClaw)+ `~/.tshoot/<id>-creds.json`(IDE 平台通用)。
+凭证持久化:`~/.openclaw/<id>-creds.json`(OpenClaw)+ `~/.tshoot/<id>-creds.json`(IDE 平台通用 fallback,脚本两处优先 openclaw)。
+
+每个 IDE 平台的 `agents/<name>.md` 是为该平台**原生写**的提示词(不是把 OpenClaw workspace 文件机械拼贴),含平台运行环境介绍(Bash 能力 / MCP 注册位置 / skills 路径前缀)+ 通用排障逻辑(SOUL / IDENTITY / 排障入口 / 故障快报模板)+ skills 索引。
 
 ## 快速开始
 
@@ -38,11 +40,12 @@
 git clone <此仓库> && cd troubleshooter-studio
 ```
 
-> 首次构建必看:`bin/` 和 `dist/` 都在 `.gitignore` 里。`git clone` 完没有可执行文件 ——
-> 必须先跑下方任一构建命令产出 `bin/tshoot` 或 `dist/TroubleshooterStudio.app` 才能用。
-> 改 Go binding 后还要 `make wails-gen` 刷新 `web/wailsjs/go/`(已入库)。
+> 首次构建必看:`bin/` 和 `dist/` 都在 `.gitignore` 里,`git clone` 完没有可执行文件 ——
+> 必须先跑下方任一构建命令产出 `bin/tshoot`(CLI)或 `dist/TroubleshooterStudio.app`(桌面)
+> 才能用。改 Go binding(`cmd/tshoot-desktop/App` 的 method 签名变了)才需要 `make wails-gen`
+> 刷新 `web/wailsjs/go/`(已入库,普通构建不用动)。
 
-**桌面 app**(推荐):
+**桌面 app**(推荐,新用户):
 
 ```bash
 make desktop-app
@@ -51,23 +54,27 @@ open dist/TroubleshooterStudio.app
 
 10 步「创建向导」生成新机器人 → 末步一键部署。首次启动 macOS Gatekeeper 会拦(没签名),右键 App → 打开 → 确认即放行。
 
-**CLI**(脚本 / SSH 环境):
+**CLI**(脚本 / SSH / CI):
 
 ```bash
-go build -o bin/tshoot ./cmd/tshoot
-./bin/tshoot demo                                          # 用内置 examples 走一遍
-./bin/tshoot install --path dist/<id> --target openclaw    # 装到本机
+make                                                       # 等价 go build -o bin/tshoot ./cmd/tshoot
+./bin/tshoot demo                                          # 零配置:用内置 examples 走完整流程
+./bin/tshoot init -o system.yaml                           # 交互向导生成 yaml
+./bin/tshoot gen -i system.yaml -o ./out                   # 出 staging 产物
+./bin/tshoot install --path ./out --target openclaw        # 装到本机
 ```
 
-模板和示例已 `go:embed` 进二进制,二进制拷到任何位置都能跑。
+模板和示例已 `go:embed` 进二进制,二进制拷到任何位置都能跑。`tshoot --help` 列全部 16 个子命令。
 
-**HTTP API**(CI / 浏览器 / 自家平台):
+**HTTP API**(CI 集成 / 浏览器模式):
 
 ```bash
 ./bin/tshoot serve --port 8080
-# Web UI: http://localhost:8080
-# API:    http://localhost:8080/api/{validate,plan,gen,doctor,prefill-creds,schema}
+# Web UI:  http://localhost:8080
+# API 端点: /api/{validate,plan,gen,doctor,prefill-creds,schema}
 ```
+
+`/api/gen` 走临时目录 + Summary 即返回(不在 server 端持久化产物);需要拿 staging 文件请走 CLI 或桌面 app。
 
 ## 适配的系统架构
 
@@ -128,12 +135,14 @@ go build -o bin/tshoot ./cmd/tshoot
 
 | 端点 | 用法 |
 |---|---|
-| `POST /api/validate` | body=system.yaml,返回是否合规 + 错误位置 |
-| `POST /api/plan` | body=system.yaml,返回干跑 gen 摘要 |
-| `POST /api/gen` | body=system.yaml,真生成 staging 到默认 `./dist/<id>/` |
+| `POST /api/validate` | body=system.yaml,返回是否合规 + 错误位置 + health-check 提示 |
+| `POST /api/plan` | body=system.yaml,返回干跑 gen 摘要(临时目录,自动清) |
+| `POST /api/gen` | body=system.yaml,真跑生成器返回 Summary(stats + 文件清单);**产物写在临时目录用完即删**,不在 server 端持久化 —— 需要拿 staging 走 CLI / 桌面 app |
 | `POST /api/doctor` | body=system.yaml + `?repos_root=<path>`,返回 8 类漂移 |
 | `POST /api/prefill-creds` | body=system.yaml,返回 install 时需要哪些 env var key |
 | `GET /api/schema` | 返回 `system.schema.yaml`(给前端做字段提示) |
+
+body size 限制 1 MB(超限 400);所有 handler 无鉴权,自部署到内网。
 
 CI 示例:
 
@@ -160,8 +169,8 @@ skill 集合**按 yaml 动态裁剪**,产物的真源在 [`templates/workspace/s
   - `k8s-runtime-query` —— Kuboard v4 HTTP 查 pod / service / deployment / events / logs(只读)
   - `tracing-query` —— Jaeger 按 trace_id / service / 时间窗查 spans
 
-- **🗄 数据层运行时查询**(按 `data_stores[type=X].enabled` 启用)
-  - `redis-runtime-query` / `mongodb-runtime-query` / `es-runtime-query` / `kafka-runtime-query` —— 运行时按 entity ID 反查;连接串从配置中心动态解析
+- **🗄 数据层运行时查询**(按 `data_stores[type=X].enabled` 启用,9 种全支持)
+  - `redis-runtime-query` / `mongodb-runtime-query` / `es-runtime-query` / `mysql-runtime-query` / `postgres-runtime-query` / `kafka-runtime-query` / `rocketmq-runtime-query` / `rabbitmq-runtime-query` / `clickhouse-runtime-query` —— 运行时按 entity ID 反查;连接串从配置中心动态解析(用户**不**需要重复填一遍)
 
 裁剪规则:yaml 里没启用的能力 → 对应 skill 不生成。`generation.skills_whitelist` 是二次过滤(已启用基础上再剔除)。新增 skill 走 `tshoot skill new <name>`。
 
@@ -172,11 +181,16 @@ skill 集合**按 yaml 动态裁剪**,产物的真源在 [`templates/workspace/s
 ## 构建
 
 ```bash
-make              # CLI:bin/tshoot
-make web          # 前端 dist 进 internal/webui/(go:embed)
-make desktop-app  # 桌面 app .app:dist/TroubleshooterStudio.app
-make release      # 多平台交叉编译 darwin/linux × amd64/arm64
-make test lint    # go test -race + go vet + gofmt + vue-tsc
+make              # CLI:bin/tshoot(等价 go build ./cmd/tshoot)
+make web          # 前端 dist → internal/webui/dist/(go:embed 进二进制)
+make desktop      # 桌面裸二进制:bin/tshoot-desktop
+make desktop-app  # 桌面 .app bundle:dist/TroubleshooterStudio.app(Mac 双击就跑)
+make release      # 多平台交叉编译 darwin/linux × amd64/arm64 → dist/bin/
+make test         # go test -race -cover ./...
+make lint         # go vet + gofmt + vue-tsc
+make wails-gen    # 改 Go binding 后刷新 web/wailsjs/go/(平时不用动)
+make icon         # assets/app-icon.svg → cmd/tshoot-desktop/build/appicon.png
+make clean        # 清 bin/ + dist/bin/ + 前端 dist 中间产物
 ```
 
 `templates/` 和 `examples/` 通过仓库根 `embed.go` 用 `//go:embed` 打进二进制,运行时优先磁盘版本,没有则解压到 `~/.tshoot/templates/`。版本号:`git describe` + `git rev-parse --short HEAD`。
@@ -184,21 +198,31 @@ make test lint    # go test -race + go vet + gofmt + vue-tsc
 ## 目录结构
 
 ```
-cmd/tshoot/             CLI 入口
-cmd/tshoot-desktop/     Wails v2 桌面 app
+cmd/tshoot/             CLI 入口(16 个子命令)
+cmd/tshoot-desktop/     Wails v2 桌面 app(Wails binding 走 cmd/tshoot-desktop/App)
 api/                    HTTP handler(tshoot serve)
 web/                    Vue 3 + Vite 前端
 internal/
   config/               system.yaml schema + 加载校验
   analyzer/             5 栈 × 6 配置源仓库扫描
   analyzerpipe/         pipeline 编排 + auto-clone
-  generator/            模板渲染 + preserve + diff + plan
+  generator/            模板渲染 + preserve + diff + plan + IDE 三家 agent 原生 prompt
   discover/             扫 tshoot.json 锚点识别已装机器人
-  agent/                读-改-部署 + 原生 install/self-test/uninstall + IDE 凭证管理
+  agent/                读-改-部署 + 原生 install/self-test/uninstall + IDE / openclaw 共用 MCP / creds 派生
   doctor/               漂移检测 + --fix
   upgrade/              备份 + 重 gen + diff
   webui/                前端 dist 的 //go:embed 入口
+  cchub/                配置中心客户端 hub(nacos / apollo / consul + 连接池缓存)
+  dsprobe/              数据层连通性测试(redis / mongo / es / mysql / pg / kafka / mq / clickhouse)
   labelprobe/           Loki labels / values 拉取(给 wizard 标签映射用)
+  openclaw/             OpenClaw 客户端 / CLI 探测
+  aitools/              Claude Code / Cursor / Codex IDE 探测
+  gitclone/             仓库浅克隆(给 analyze --auto-clone)
+  initwizard/           CLI 交互向导
+  mcpcfg/               MCP 配置生成
+  skillscaffold/        `tshoot skill new` 模板脚手架
+  userconfig/           ~/.tshoot/config.json 用户偏好(全局 reposRoot 等)
+  watcher/              文件系统轮询监听(给 tshoot watch)
 templates/              workspace/(机器人模板)
 examples/               system.yaml 示例 × 多种架构 + fake-repos
 schema/system.schema.yaml

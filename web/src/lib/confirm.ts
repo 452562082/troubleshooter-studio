@@ -66,8 +66,16 @@ export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
   })
 }
 
+// 转义五个 HTML 元字符。当前调用点都在文本节点(.tshoot-confirm-msg / button text),
+// 漏掉 " ' 不会立刻撞 XSS,但万一未来把 escapeHTML 用到 attribute(如 title="${...}")
+// 就裸了 —— 现在收紧到位,把表面缩到 0,避免误用。
 function escapeHTML(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
 }
 
 // 样式按需注入到 <head>;只注一次

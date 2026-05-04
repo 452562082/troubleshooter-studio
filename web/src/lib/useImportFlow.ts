@@ -36,6 +36,12 @@ export function useImportFlow(deps: UseImportFlowDeps) {
   const importText = ref('')
   const importError = ref('')
 
+  // 单调递增的 import 序号,防 setTimeout(0) 排程的 cross-check 跟下一次 applyImport 撞:
+  // 用户快速点两次"导入"或在 cross-check 跑完前手动重 retry,旧那次 cross-check 起飞后会
+  // 写到刚被新 import 反填的 ccHubStateByEnv / kuboardStateByEnv 上,把新值覆盖掉。
+  // 每次 applyImport bump 一次 token;cross-check 起飞前对比,token 不一致就直接 return。
+  let importToken = 0
+
   function openImportDialog() {
     importText.value = ''
     importError.value = ''
@@ -86,6 +92,10 @@ export function useImportFlow(deps: UseImportFlowDeps) {
       importError.value = '内容为空或不是合法的 system.yaml'
       return
     }
+    // bump import token —— 上一次 applyImport 排程但还没起飞的 setTimeout cross-check 会因
+    // myToken !== importToken 直接 return,不会动新反填的 state。
+    importToken++
+    const myToken = importToken
     // 期间禁用 configCenterType watcher 的破坏性清空(它会在 ingest 多源 type 期间触发,把刚
     // 反填的 envNamespaces / serviceConfigSel / ccHubStateByEnv 全删)。
     deps.importInProgress.value = true
@@ -100,7 +110,12 @@ export function useImportFlow(deps: UseImportFlowDeps) {
 
     // 反填完成后异步触发交叉校验。setTimeout(0) 推到宏任务,确保 configCenterType
     // watcher 跑完 + reactive flush settle,避免跟同步反填竞争。
-    setTimeout(() => deps.runImportCrossChecks(cc), 0)
+    // myToken 闭包捕获本次 import 的序号;若期间用户又点了一次"导入" → importToken 已 bump,
+    // 这次的 cross-check 直接放弃,让新 import 自己触发它的那次 cross-check。
+    setTimeout(() => {
+      if (myToken !== importToken) return
+      deps.runImportCrossChecks(cc)
+    }, 0)
   }
 
   return {

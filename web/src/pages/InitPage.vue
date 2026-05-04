@@ -64,6 +64,7 @@ import { useImportFlow } from '../lib/useImportFlow'
 import { useDataStoreScan } from '../lib/useDataStoreScan'
 import { serviceMatchKeys, startsAtBoundary } from '../lib/serviceMatchHelpers'
 import { useMonorepoHints } from '../lib/useMonorepoHints'
+import { useSourceTypeReset } from '../lib/useSourceTypeReset'
 
 const router = useRouter()
 
@@ -2035,41 +2036,13 @@ watch(() => environments.map(e => e.id).join('|'), () => {
   }
 })
 
-// 切换配置源类型(nacos ↔ apollo ↔ consul ↔ env-vars ↔ kubernetes ↔ none)时,
-// 把 Step 5 / Step 7 里跟"上一种源"绑定的扫描状态全部清掉 —— 那些下拉选项 / 服务映射 /
-// 识别出的数据层都基于旧源的 API 拉的,切源后完全无意义。
+// 切配置源类型时清空 Step 5/7 状态:逻辑收口在 lib/useSourceTypeReset.ts。
 // 凭证输入(ccCredInputs)按 type 前缀分 key,保留不清,切回旧 type 还能复用。
-// importInProgress flag 已上提到 useImportCrossCheck 之前声明,避免 watcher 在 applyImport
-// sync 段的 type 瞬变把刚反填的 state 给清了。
-watch(configCenterType, (newType, oldType) => {
-  if (newType === oldType) return
-  if (importInProgress.value) {
-    // import 还在反填阶段,configCenterType 短暂变化是正常的(reset → ingest 多源),
-    // 不要清空我们刚反填进去的 state。importInProgress 在 applyImport 开头置 true、
-    // nextTick 里完成自动预加载触发后置 false。
-    return
-  }
-  // 统计要清的项数,给用户一个"确实发生了清理"的提示
-  const cleaned = {
-    namespaces: Object.keys(envNamespaces).length,
-    services: Object.keys(serviceConfigSel).length,
-    scans: Object.keys(ccHubStateByEnv).length,
-    dsEntries: Object.keys(scannedDS).length,
-  }
-  for (const k of Object.keys(envNamespaces))        delete envNamespaces[k]
-  for (const k of Object.keys(serviceConfigSel))     delete serviceConfigSel[k]
-  for (const k of Object.keys(serviceConfigGroup))   delete serviceConfigGroup[k]
-  for (const k of Object.keys(ccHubStateByEnv))      delete ccHubStateByEnv[k]
-  for (const k of Object.keys(scannedDS))            delete scannedDS[k]
-  for (const k of Object.keys(dsScanState))          delete dsScanState[k]
-  for (const k of Object.keys(dsAutoFilled))         delete dsAutoFilled[k]
-  dsImportStatus.value = 'idle'
-  dsImportStats.scanned = 0
-  dsImportStats.matched = 0
-  const any = cleaned.namespaces || cleaned.services || cleaned.scans || cleaned.dsEntries
-  if (any) {
-    toast.info(`已切至 ${newType},清空上一源(${oldType})的 Step 5/7 扫描与数据层识别结果`)
-  }
+// importInProgress 期间禁清(避免 applyImport reset → ingest 多源时把刚反填的 state 抹掉)。
+useSourceTypeReset({
+  configCenterType, importInProgress,
+  envNamespaces, serviceConfigSel, serviceConfigGroup, ccHubStateByEnv,
+  scannedDS, dsScanState, dsAutoFilled, dsImportStatus, dsImportStats,
 })
 
 // 自动保存草稿用的"上次保存时间"。Why: InitPage 不进 keep-alive,每次 mount

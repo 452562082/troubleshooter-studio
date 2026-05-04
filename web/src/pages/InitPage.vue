@@ -223,6 +223,8 @@ function onModelChange(t: string, e: Event) {
   // 顺手更新 agent.model 作为"默认"(给 schema 的必填兜底):
   // openclaw 是唯一消费模型的 target;它的值覆盖 agent.model,保 yaml 里 agent.model 永远非空。
   if (targetModels[Target.Openclaw]) agent.model = targetModels[Target.Openclaw]
+  // openclaw 用户手挑过一次后,不再被探测出的 detected 列表自动覆盖(见 watch 注释)
+  if (t === Target.Openclaw) onOpenclawModelChanged()
 }
 
 // ── OpenClaw 模型探测(只给 openclaw target 卡用) ──
@@ -1922,6 +1924,35 @@ onMounted(() => {
     runOpenClawDetect()
   }
 })
+
+// 探测出 openclaw 可用模型后,把"当前默认值不在该实例可用列表里"的情况自动改成 primary。
+// 触发条件:status 变 ok + detected 非空 + 当前 targetModels.openclaw 不在 detected.id 集合内。
+// 典型场景:
+//   - 老 saved draft 留的 anthropic/claude-sonnet-4-6,但本机 openclaw 只配了 openai-codex/gpt-5.4
+//     → 用户进 Step 2 看到默认是个不存在的模型,部署后 OpenClaw 报错"unknown model"
+//   - 新用户首次进 + 本机刚装的 openclaw 没 anthropic 凭证 → 同上
+// 用户已手挑过且仍在 detected 列表里 → 不覆盖;手挑了一个不在的 → 也不覆盖(尊重用户显式选择,
+// 由部署期 OpenClaw 自己报错)。判定"用户手挑过":sourcedraft 里 target_models.openclaw
+// 字段已存在(saved.agent.target_models.openclaw 非 undefined)→ 视为已挑过。
+const openclawModelManuallyPicked = ref<boolean>(saved?.agent?.target_models?.openclaw !== undefined)
+function onOpenclawModelChanged() {
+  openclawModelManuallyPicked.value = true
+}
+watch([openclawDetectStatus, openclawDetectedModels], () => {
+  if (openclawDetectStatus.value !== 'ok') return
+  const detected = openclawDetectedModels.value
+  if (!detected || detected.length === 0) return
+  const ids = new Set(detected.map(m => m.id))
+  if (ids.has(targetModels[Target.Openclaw])) return // 当前选择在 detected 里,不动
+  if (openclawModelManuallyPicked.value && targetModels[Target.Openclaw]) {
+    // 用户显式挑过一个不在 detected 的 model(企业网关 / 自部署 / 临时未注册),不强制覆盖
+    return
+  }
+  // 默认到 primary;没标 primary 就用第一项
+  const pick = detected.find(m => m.primary) ?? detected[0]
+  targetModels[Target.Openclaw] = pick.id
+  agent.model = pick.id // 同步 agent.model(yaml schema 必填兜底)
+}, { flush: 'post' })
 
 // 探测结果回填后,把"未装且没强制启用"的 target 自动取消勾选 ——
 // 默认 enabledTargets 全 true 是"探测前先假设都装着",真探测出来未装就回退。

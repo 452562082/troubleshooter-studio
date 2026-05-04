@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 )
 
 // UninstallOpenclawResult 给 UI 展示"动了哪些资源"。
@@ -48,8 +47,8 @@ func UninstallNativeOpenclaw(installedDir string) (*UninstallOpenclawResult, err
 	agentID := cfg.ResolveID()
 	wsDir := filepath.Join(home, ".openclaw", "workspace", wsName)
 	if _, err := os.Stat(wsDir); err == nil {
-		ts := time.Now().Format("20060102-150405")
-		bk := filepath.Join(home, ".Trash", agentID+"-workspace-uninstall-"+ts)
+		// nanoTimestamp 防 1 秒内连点两次卸载撞 bk(秒精度时第二次 Rename 失败可能丢 workspace)。
+		bk := filepath.Join(home, ".Trash", agentID+"-workspace-uninstall-"+nanoTimestamp())
 		if err := os.MkdirAll(filepath.Dir(bk), 0o755); err != nil {
 			return res, err
 		}

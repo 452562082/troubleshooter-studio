@@ -17,7 +17,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 )
@@ -85,8 +84,8 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 	systemID := readSystemIDFromMeta(filepath.Join(installedDir, discover.MetaFilename))
 
 	// 1) 真实部署目录 → ~/.Trash(出错回退 RemoveAll)。从 Trash 走避免误删后无法恢复。
-	ts := time.Now().Format("20060102-150405")
-	bk := filepath.Join(home, ".Trash", agentName+"-"+target+"-uninstall-"+ts)
+	// nanoTimestamp 防 1 秒内连点两次卸载撞 bk(秒精度时第二次 Rename 失败会 fallthrough 删数据)。
+	bk := filepath.Join(home, ".Trash", agentName+"-"+target+"-uninstall-"+nanoTimestamp())
 	movedTo, existed, mvErr := moveOutOrRemove(installedDir, bk)
 	if mvErr != nil {
 		return res, fmt.Errorf("uninstall installedDir: %w", mvErr)

@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 )
@@ -196,34 +198,64 @@ func (a *App) WriteBotWorkspaceFile(rootPath, relPath, content string) error {
 }
 
 // safeResolveInsideRoot 把 relPath 拼到 rootPath 下并展开成绝对路径,
-// 校验结果仍在 rootPath 内部(防 ".." 穿越)。relPath 接受空字符串(=指 root 本身)。
+// 校验结果仍在 rootPath 内部(防 ".." 穿越 + symlink 越界)。relPath 接受空字符串(=指 root 本身)。
+//
+// 关键防御:
+//  1. filepath.Clean + Rel 校验避免 ".." 文本路径穿越(老逻辑已防)
+//  2. filepath.EvalSymlinks 跟踪 symlink 真实目标,再二次校验仍在 rootPath 真实路径下 ——
+//     否则若 workspace 下有 `link → ~/.ssh/id_rsa`,旧逻辑(只 filepath.Abs)
+//     校验 link 名仍在 root 下就放行,os.ReadFile 跟链接读到根外敏感文件。
+//
+// rootPath 自己可能本身就是 symlink(用户用 `~/.openclaw/workspace/<bot>` 装的 bot 通过
+// /private 链接拿到),所以先 EvalSymlinks(root)拿到真实根,再比对 EvalSymlinks(abs)。
+// 文件还没创建时(WriteBotWorkspaceFile 写新文件)EvalSymlinks 会报 not-exist —— 那就退化到
+// EvalSymlinks(filepath.Dir(abs)) + Base 拼出"父目录解析后 + 文件名"做校验,父目录里有 symlink
+// 也会被解掉。
 func safeResolveInsideRoot(rootPath, relPath string) (string, error) {
 	rootAbs, err := filepath.Abs(rootPath)
 	if err != nil {
 		return "", err
 	}
+	rootReal, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		// rootPath 不存在等异常 —— 让上层统一报错(BotsPage 已 assertBotWorkspacePath 兜过一道)
+		return "", fmt.Errorf("eval symlinks (root): %w", err)
+	}
 	rel := filepath.Clean(filepath.FromSlash(relPath))
 	if rel == "." {
 		rel = ""
 	}
-	abs := filepath.Join(rootAbs, rel)
-	// 再 Abs 一次以解析任何符号链接 / 残留 ..
-	abs, err = filepath.Abs(abs)
-	if err != nil {
-		return "", err
+	abs := filepath.Join(rootReal, rel)
+	// EvalSymlinks 对不存在的 path 报错 —— 写新文件场景退化:解父目录 + 拼 base
+	resolved, evalErr := filepath.EvalSymlinks(abs)
+	if evalErr != nil {
+		if !os.IsNotExist(evalErr) {
+			return "", fmt.Errorf("eval symlinks: %w", evalErr)
+		}
+		parent, base := filepath.Split(abs)
+		parentReal, perr := filepath.EvalSymlinks(parent)
+		if perr != nil {
+			// 父目录都不存在 —— 不允许深度自动创建,让 caller 失败
+			return "", fmt.Errorf("eval symlinks (parent): %w", perr)
+		}
+		resolved = filepath.Join(parentReal, base)
 	}
-	rel2, err := filepath.Rel(rootAbs, abs)
+	rel2, err := filepath.Rel(rootReal, resolved)
 	if err != nil {
 		return "", err
 	}
 	if rel2 == ".." || strings.HasPrefix(rel2, ".."+string(filepath.Separator)) {
-		return "", errors.New("path escapes workspace root")
+		return "", errors.New("path escapes workspace root (symlink or ..)")
 	}
-	return abs, nil
+	return resolved, nil
 }
 
 // assertBotWorkspacePath 校验 rootPath 是 discover.Scan 出来的某个机器人部署根。
 // 不直接信任前端传值 —— 防止 binding 被当成"读任意目录"的通用 file API 用。
+//
+// discover.Scan 的结果走 5 分钟 TTL cache —— BotsPage 浏览文件树时用户每点一个文件都会
+// 触发 Read/List/Write binding,每次都跑一遍全盘 4-root 扫描会有明显 IO 卡顿。bot 在 5 分钟
+// 内被装 / 卸的概率极低,缓存窗口安全;cache miss 或 TTL 过期才重 Scan。
 func assertBotWorkspacePath(rootPath string) error {
 	rootPath = strings.TrimSpace(rootPath)
 	if rootPath == "" {
@@ -233,8 +265,38 @@ func assertBotWorkspacePath(rootPath string) error {
 	if err != nil {
 		return err
 	}
-	// discover 走默认根 + 已知 custom roots,跟 BotsPage::DiscoverBots 同一套逻辑;
-	// 这里不传 extraRoots(浏览功能不需要让用户输入额外路径)。
+	paths, err := cachedDiscoverBotPaths()
+	if err != nil {
+		return err
+	}
+	for _, p := range paths {
+		if p == abs {
+			return nil
+		}
+	}
+	return fmt.Errorf("rootPath %q 不是已识别的机器人部署目录,只能浏览 BotsPage 上展示的机器人", rootPath)
+}
+
+// botPathsCache 给 assertBotWorkspacePath 的 5 分钟 TTL 缓存。Wails 单进程,sync.Mutex 够。
+type botPathsCacheT struct {
+	mu       sync.Mutex
+	paths    []string
+	loadedAt time.Time
+}
+
+var botPathsCache botPathsCacheT
+
+const botPathsCacheTTL = 5 * time.Minute
+
+// cachedDiscoverBotPaths 拿当前 4 个根下所有 bot 的绝对路径列表。
+// TTL 内复用上次结果;TTL 过期 / 首次调用时跑 discover.Scan 重新扫。
+// 失败时(权限 / 磁盘异常)直接 propagate err,不更新 cache。
+func cachedDiscoverBotPaths() ([]string, error) {
+	botPathsCache.mu.Lock()
+	defer botPathsCache.mu.Unlock()
+	if time.Since(botPathsCache.loadedAt) < botPathsCacheTTL && botPathsCache.paths != nil {
+		return botPathsCache.paths, nil
+	}
 	roots := []string{
 		"~/.openclaw/workspace",
 		"~/.claude/skills",
@@ -243,15 +305,25 @@ func assertBotWorkspacePath(rootPath string) error {
 	}
 	found, err := discover.Scan(roots)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	out := make([]string, 0, len(found))
 	for _, ag := range found {
 		agAbs, _ := filepath.Abs(ag.Path)
-		if agAbs == abs {
-			return nil
-		}
+		out = append(out, agAbs)
 	}
-	return fmt.Errorf("rootPath %q 不是已识别的机器人部署目录,只能浏览 BotsPage 上展示的机器人", rootPath)
+	botPathsCache.paths = out
+	botPathsCache.loadedAt = time.Now()
+	return out, nil
+}
+
+// invalidateBotPathsCache 强制下次 assertBotWorkspacePath 重 Scan。
+// 部署 / 卸载完后调一次,用户立即看到新机器人(否则要等 TTL 过期才显)。
+func invalidateBotPathsCache() {
+	botPathsCache.mu.Lock()
+	botPathsCache.paths = nil
+	botPathsCache.loadedAt = time.Time{}
+	botPathsCache.mu.Unlock()
 }
 
 // isBinary 简单判定:头 8KB 含 \0 视为二进制。够用,不追求精确。

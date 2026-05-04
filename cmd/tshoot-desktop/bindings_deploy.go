@@ -156,6 +156,9 @@ func (a *App) RunInstall(outputDir string, creds map[string]string) (*RunInstall
 		Creds: creds,
 		OnLog: onLog,
 	})
+	// 装完一个 bot,assertBotWorkspacePath 的 5 分钟 TTL cache 立即失效,
+	// 用户切到 BotsPage 浏览新装的 workspace 不必等 cache 过期。
+	invalidateBotPathsCache()
 	res := &RunInstallResult{Log: logBuf.String(), OK: err == nil}
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -229,6 +232,7 @@ func (a *App) UninstallBot(dir, target string) (*UninstallBotResult, error) {
 		if err != nil {
 			return nil, err
 		}
+		invalidateBotPathsCache() // bot 已卸,失效 5 分钟 cache
 		return &UninstallBotResult{
 			Target:            target,
 			WorkspaceMovedTo:  r.WorkspaceMovedTo,
@@ -241,6 +245,7 @@ func (a *App) UninstallBot(dir, target string) (*UninstallBotResult, error) {
 		if err != nil {
 			return nil, err
 		}
+		invalidateBotPathsCache() // bot 已卸,失效 5 分钟 cache
 		return &UninstallBotResult{
 			Target:         target,
 			StagingMovedTo: r.StagingMovedTo,

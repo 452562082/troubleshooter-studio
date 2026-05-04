@@ -15,7 +15,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 // InstallOpenclawOptions 给 InstallNativeOpenclaw 的选项。零值合理。
@@ -105,8 +104,8 @@ func InstallNativeOpenclaw(ctx context.Context, stagingDir string, opts InstallO
 		return err
 	}
 	// 已存在 → 移到 Trash(对齐 install.sh 行为,留个回收点)。
-	ts := time.Now().Format("20060102-150405")
-	wsTrash := filepath.Join(home, ".Trash", meta.SystemID+"-troubleshooter-workspace-"+ts)
+	// nanoTimestamp 防 1 秒内连点两次部署撞 wsTrash 导致第二次的 workspace 被 RemoveAll 兜底删了。
+	wsTrash := filepath.Join(home, ".Trash", meta.SystemID+"-troubleshooter-workspace-"+nanoTimestamp())
 	if movedTo, existed, _ := moveOutOrRemove(wsDir, wsTrash); existed {
 		if movedTo != "" {
 			log(fmt.Sprintf("[backup] 旧 workspace 移到 %s", movedTo))

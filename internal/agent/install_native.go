@@ -58,7 +58,7 @@ func InstallNativeAt(stagingDir, target, customRoot string) error {
 	// 3) 装 agent .md(已存在 → 备份)
 	dstAgent := filepath.Join(root, "agents", name+".md")
 	if _, err := os.Stat(dstAgent); err == nil {
-		ts := time.Now().Format("20060102-150405")
+		ts := nanoTimestamp()
 		if err := copyFileSimple(dstAgent, dstAgent+".bak."+ts); err != nil {
 			return fmt.Errorf("backup existing agent: %w", err)
 		}
@@ -172,6 +172,17 @@ func moveOutOrRemove(src, trashPath string) (movedTo string, existed bool, err e
 		return "", true, fmt.Errorf("rename to trash + RemoveAll both failed: %w", rmErr)
 	}
 	return "", true, nil
+}
+
+// nanoTimestamp 给 backup / Trash 路径用的"几乎不撞"时间戳:
+//   "20060102-150405.NNNNNNNNN"(秒级 + 纳秒后 9 位)
+//
+// 老版本只到秒精度,1 秒内连点两次部署会撞 trashPath:
+// 第一次 Rename 成功 → 第二次目标已存在 Rename 失败 → moveOutOrRemove fallthrough 到
+// RemoveAll(src) 把第二次正写到一半的产物也删了。加纳秒后 9 位让两次 backup 几乎不可能撞。
+func nanoTimestamp() string {
+	now := time.Now()
+	return now.Format("20060102-150405") + fmt.Sprintf(".%09d", now.Nanosecond())
 }
 
 // copyFileSimple 把 src 拷贝到 dst,保留 mode + 自动建父目录。

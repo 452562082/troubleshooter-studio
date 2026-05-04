@@ -168,17 +168,23 @@ func InstallNativeOpenclaw(ctx context.Context, stagingDir string, opts InstallO
 	}
 
 	// 8) 尝试 reload gateway(测试可关掉)
+	//
+	// OpenClaw 客户端启动时只读一次 openclaw.json,新装的 agent 不会自动出现在 agent 列表 ——
+	// 必须 reload 才能刷出。两条路径:
+	//   a) CLI(`openclaw gateway restart`)在 PATH 里 → 自动跑(用户不用动手)
+	//   b) Mac 桌面 app 用户大概率没装 openclaw CLI,fallback 文案要明说"退出再开 OpenClaw 客户端"
+	//      (而不是只让用户跑 CLI 命令 —— 客户端用户压根不知道 CLI 是啥)
 	if opts.SkipGatewayRestart {
 		log("[skip] gateway restart 被显式跳过(测试模式)")
 	} else if _, err := exec.LookPath("openclaw"); err == nil {
 		c := exec.CommandContext(ctx, "openclaw", "gateway", "restart")
 		if err := c.Run(); err != nil {
-			log(fmt.Sprintf("[warn] openclaw gateway restart 失败:%v;手动跑一遍", err))
+			log(fmt.Sprintf("[warn] openclaw gateway restart 失败:%v;请手动 `openclaw gateway restart`,或退出再开 OpenClaw 客户端", err))
 		} else {
-			log("[ok] openclaw gateway 已重启")
+			log("[ok] openclaw gateway 已重启,新 agent 立即可用")
 		}
 	} else {
-		log("[warn] 未检测到 openclaw CLI,跳过 gateway 重启;请手动 `openclaw gateway restart`")
+		log("[info] 未检测到 openclaw CLI(桌面 app 用户的常见状态)—— **请手动退出再打开 OpenClaw 客户端** 才能在 agent 列表里看到新装的 bot;或装 openclaw CLI 后跑 `openclaw gateway restart`")
 	}
 	return nil
 }

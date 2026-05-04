@@ -49,6 +49,10 @@ export interface RepoScanItem {
   _submoduleHints?: { name: string; sub_path: string; stack: string; role: string; reason: string; url?: string }[]
   _submoduleSelection?: Record<string, boolean>
   _roleHint?: { role: string; reason: string }
+  /** 用户是否显式挑过 role(via 角色下拉 @change / "采用"按钮)。
+   * 影响 refreshRoleHint:false → hint 跟当前 role 不一致时自动采用;true → 不再覆盖。
+   * 老 saved draft 没此字段视为 false,首次 scan 后按 hint 自动 align(用户若不满意手挑一次即锁定)。 */
+  _roleManuallyPicked?: boolean
   _roleHintLoading?: boolean
 }
 
@@ -88,6 +92,12 @@ export function useRepoScan(deps: RepoScanDeps) {
 
   // refreshRoleHint 给 repo 拿一份"基于当前 name + stack + 本地路径"的 role 推荐。
   // 触发时机:onRepoNameInput / 仓库扫描完(stack 自动填好后)/ Step 4 进入时遍历刷一遍。
+  //
+  // 自动采用规则:hint 拿到后,如果用户**没显式手挑过 role**(_roleManuallyPicked=false 或
+  // 字段不存在,常见情况是 makeEmptyRepo 兜底的 'backend' 跟实际 React 前端项目对不上),
+  // 直接把 r.role 改成 hint.role —— 用户首次进 Step 4 看到的 role 就已是推荐值,不必手点
+  // "采用"按钮再让它生效。用户若不满意推荐,手挑一次即锁定 _roleManuallyPicked=true,
+  // 后续扫描不再被覆盖。
   async function refreshRoleHint(r: RepoScanItem) {
     if (!r.name.trim()) {
       r._roleHint = undefined
@@ -102,6 +112,10 @@ export function useRepoScan(deps: RepoScanDeps) {
       }
       const hint = await recommendRoleForRepo(r.stack || 'go', r.name, path)
       r._roleHint = hint
+      // 自动采用:用户没手挑过 + hint 有效 + 跟当前 role 不一致
+      if (hint?.role && hint.role !== r.role && !r._roleManuallyPicked) {
+        r.role = hint.role
+      }
     } catch {
       /* 推荐失败不阻塞用户填表 */
     } finally {

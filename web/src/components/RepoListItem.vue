@@ -41,6 +41,7 @@ interface RepoItem {
   _submoduleSelection?: Record<string, boolean>
   _roleHint?: { role: string; reason: string }
   _roleHintLoading?: boolean
+  _roleManuallyPicked?: boolean
 }
 
 interface Environment { id: string }
@@ -332,7 +333,11 @@ const emit = defineEmits<{
         角色
         <span class="field-hint">(影响 AI 排障时的依赖图分析方向)</span>
       </label>
-      <select v-model="repo.role" class="role-select" @change="emit('syncServiceNamesWithRole', repo)">
+      <select
+        v-model="repo.role"
+        class="role-select"
+        @change="(repo._roleManuallyPicked = true, emit('syncServiceNamesWithRole', repo))"
+      >
         <option value="backend">后端服务 (backend) — 业务微服务,双向依赖图</option>
         <option value="frontend">前端 (frontend) — web app,只调下游不被调</option>
         <option value="gateway">网关 / BFF (gateway) — API 聚合层</option>

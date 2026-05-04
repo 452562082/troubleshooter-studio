@@ -415,6 +415,9 @@ interface RepoItem {
   // 让用户看到"扫描推荐什么 role + 理由",方便决定是否改默认值。不进 yaml。
   _roleHint?: { role: string, reason: string }
   _roleHintLoading?: boolean
+  // 用户是否显式手挑过 role(via 角色下拉 @change / "采用"按钮)。
+  // 影响 useRepoScan.refreshRoleHint:false → hint 跟当前 role 不一致时自动采用;true → 不再覆盖。
+  _roleManuallyPicked?: boolean
   // _serviceEntries:服务名 → 仓库内入口子目录(相对仓库根)。
   // 给同仓多服务场景(cmd/<x>/main.go / services/<x>/ / workspaces / pom-modules)用 ——
   // 这些不是 git submodule,不该拆成独立 repo,只把名字塞进 service_names + 入口路径
@@ -557,9 +560,12 @@ function onRepoNameInput(r: RepoItem) {
 // "── Step 8: yaml 预览 + 生成 ──" 段附近的 useRepoScan() destructure。
 
 // applyRoleHint 把推荐 role 落到 r.role(用户点"采用"按钮调)。
+// 标 _roleManuallyPicked = true:即使后续 refreshRoleHint 又跑出别的推荐,也不再覆盖
+// (用户已经表态过)。
 function applyRoleHint(r: RepoItem) {
   if (r._roleHint?.role) {
     r.role = r._roleHint.role as RepoRole
+    r._roleManuallyPicked = true
     syncServiceNamesWithRole(r)
   }
 }

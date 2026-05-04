@@ -66,6 +66,9 @@ func (g *Generator) GenerateCodex() error {
 
 // buildCodexAgentMD —— 跟 buildClaudeAgentMD / buildCursorAgentMD 同套思路。
 // model frontmatter 仅在 target_models.codex 显式给出时写,否则用户走 Codex CLI 自己的默认。
+//
+// 主体走 writeIDEPromptBody + writeSkillsIndex 共用 helper(SOUL / IDENTITY / 跨平台通用段 +
+// skills 索引),不再吞 AGENTS / CHECKLIST / TOOLS 全文(那是 OpenClaw workspace 视角的)。
 func buildCodexAgentMD(wsRoot string, ctx *Context, agentName string) (string, error) {
 	var sb strings.Builder
 	sb.WriteString("---\n")
@@ -79,37 +82,8 @@ func buildCodexAgentMD(wsRoot string, ctx *Context, agentName string) (string, e
 	fmt.Fprintf(&sb, "# %s 排障机器人\n\n", ctx.System.Name)
 	sb.WriteString("# 由 troubleshooter-studio 生成,目标平台:OpenAI Codex CLI\n\n")
 
-	// 读取各 MD 文件合并
-	for _, name := range []string{"SOUL.md", "IDENTITY.md", "AGENTS.md", "CHECKLIST.md", "TOOLS.md"} {
-		if data, err := os.ReadFile(filepath.Join(wsRoot, name)); err == nil {
-			sb.WriteString("---\n\n")
-			sb.Write(data)
-			sb.WriteString("\n\n")
-		}
-	}
-
-	// Skills 索引(跟 Cursor 同款,Codex 也是用户在终端内手动调 skill)
-	sb.WriteString("---\n\n## 可用 Skills\n\n")
-	sb.WriteString("详细规则见 `~/.codex/skills/<agent-name>/<skill>/SKILL.md`。\n\n")
-
-	skillsDir := filepath.Join(wsRoot, "skills")
-	entries, _ := os.ReadDir(skillsDir)
-	for _, e := range entries {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
-			continue
-		}
-		skillMD := filepath.Join(skillsDir, e.Name(), "SKILL.md")
-		desc := ""
-		if data, err := os.ReadFile(skillMD); err == nil {
-			for line := range strings.SplitSeq(string(data), "\n") {
-				if rest, ok := strings.CutPrefix(line, "description:"); ok {
-					desc = strings.TrimSpace(rest)
-					break
-				}
-			}
-		}
-		fmt.Fprintf(&sb, "- **%s** — %s\n", e.Name(), desc)
-	}
-
+	writeIDEPromptBody(&sb, wsRoot, ctx, "")
+	writeSkillsIndex(&sb, wsRoot, "## 可用 Skills",
+		"详细规则见 `~/.codex/skills/<agent-name>/<skill>/SKILL.md`。")
 	return sb.String(), nil
 }

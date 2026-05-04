@@ -68,6 +68,10 @@ func (g *Generator) GenerateCursor() error {
 
 // buildCursorAgentMD —— 跟 buildClaudeAgentMD 同套思路,只是 frontmatter 形态略不同
 // (Cursor agent 不强制要 model 字段,留空让用户在 Cursor 里挑)。
+//
+// 主体内容(SOUL / IDENTITY / 跨平台通用段 + skills 索引)走 writeIDEPromptBody +
+// writeSkillsIndex 共用 helper,跟 claude-code / codex 三家保持一致。Cursor 专属的
+// "⚠ Cursor 模式限制"段作为 pre 传入,放在主体之前。
 func buildCursorAgentMD(wsRoot string, ctx *Context, agentName string) (string, error) {
 	var sb strings.Builder
 	sb.WriteString("---\n")
@@ -83,48 +87,18 @@ func buildCursorAgentMD(wsRoot string, ctx *Context, agentName string) (string, 
 	// 所以无法执行本工作区的 Python 脚本(k8s_query.py / resolve_runtime_*.py 等);
 	// MCP 也要去 Cursor Settings 手填,不会自动加载 .cursor/skills 目录。
 	// 这段告诉 Cursor 用户清晰预期:"问题分析助手"模式,不是"自动化排障执行器"。
-	sb.WriteString("---\n\n## ⚠ Cursor 模式限制\n\n")
-	sb.WriteString("Cursor Custom Agent 默认 chat 工具集**没 Bash**(除非启用 background agent),**不会自动加载** `.cursor/skills/` 目录,本工作区里的 Python 脚本(`k8s_query.py` / `resolve_runtime_*.py` 等)**无法直接执行**。\n\n")
-	sb.WriteString("**Cursor 模式下你能做的**:\n")
-	sb.WriteString("- 按 SKILL.md 里的执行流程**指导用户手动跑命令**(给完整命令模板,等用户粘贴回执)\n")
-	sb.WriteString("- 解读用户贴过来的日志 / trace / pod 状态片段,按故障快报模板输出归因\n")
-	sb.WriteString("- 查 routing 映射(读 `~/.cursor/skills/<agent-name>/routing/references/*.yaml`)给出 哪个 env / 哪个服务 / 哪个 mcp_server\n\n")
-	sb.WriteString("**Cursor 模式下你做不了**:\n")
-	sb.WriteString("- 直接调 MCP 工具(Cursor 的 MCP 集成靠 `~/.cursor/mcp.json`,需用户手动启用每个 server)\n")
-	sb.WriteString("- 跑 Bash 脚本拉日志 / pod 状态(必须改用 OpenClaw 或 Claude Code 部署)\n\n")
-	sb.WriteString("> 想要全自动排障,请用 OpenClaw 或 Claude Code 部署的同名 agent。Cursor 主要用于 IDE 内随手问。\n\n")
-
-	// 读取各 MD 文件合并
-	for _, name := range []string{"SOUL.md", "IDENTITY.md", "AGENTS.md", "CHECKLIST.md", "TOOLS.md"} {
-		if data, err := os.ReadFile(filepath.Join(wsRoot, name)); err == nil {
-			sb.WriteString("---\n\n")
-			sb.Write(data)
-			sb.WriteString("\n\n")
-		}
-	}
-
-	// Skills 索引
-	sb.WriteString("---\n\n## 可用 Skills\n\n")
-	sb.WriteString("详细规则见 `.cursor/rules/` 目录下的 .mdc 文件，映射表和脚本见 `skills/` 目录。\n\n")
-
-	skillsDir := filepath.Join(wsRoot, "skills")
-	entries, _ := os.ReadDir(skillsDir)
-	for _, e := range entries {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
-			continue
-		}
-		skillMD := filepath.Join(skillsDir, e.Name(), "SKILL.md")
-		desc := ""
-		if data, err := os.ReadFile(skillMD); err == nil {
-			for line := range strings.SplitSeq(string(data), "\n") {
-				if rest, ok := strings.CutPrefix(line, "description:"); ok {
-					desc = strings.TrimSpace(rest)
-					break
-				}
-			}
-		}
-		fmt.Fprintf(&sb, "- **%s** — %s\n", e.Name(), desc)
-	}
-
+	pre := "---\n\n## ⚠ Cursor 模式限制\n\n" +
+		"Cursor Custom Agent 默认 chat 工具集**没 Bash**(除非启用 background agent),**不会自动加载** `.cursor/skills/` 目录,本工作区里的 Python 脚本(`k8s_query.py` / `resolve_runtime_*.py` 等)**无法直接执行**。\n\n" +
+		"**Cursor 模式下你能做的**:\n" +
+		"- 按 SKILL.md 里的执行流程**指导用户手动跑命令**(给完整命令模板,等用户粘贴回执)\n" +
+		"- 解读用户贴过来的日志 / trace / pod 状态片段,按故障快报模板输出归因\n" +
+		"- 查 routing 映射(读 `~/.cursor/skills/<agent-name>/routing/references/*.yaml`)给出 哪个 env / 哪个服务 / 哪个 mcp_server\n\n" +
+		"**Cursor 模式下你做不了**:\n" +
+		"- 直接调 MCP 工具(Cursor 的 MCP 集成靠 `~/.cursor/mcp.json`,需用户手动启用每个 server)\n" +
+		"- 跑 Bash 脚本拉日志 / pod 状态(必须改用 OpenClaw 或 Claude Code 部署)\n\n" +
+		"> 想要全自动排障,请用 OpenClaw 或 Claude Code 部署的同名 agent。Cursor 主要用于 IDE 内随手问。\n"
+	writeIDEPromptBody(&sb, wsRoot, ctx, pre)
+	writeSkillsIndex(&sb, wsRoot, "## 可用 Skills",
+		"详细规则见 `.cursor/rules/` 目录下的 .mdc 文件，映射表和脚本见 `skills/` 目录。")
 	return sb.String(), nil
 }

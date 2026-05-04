@@ -100,7 +100,12 @@ func agentSlug(ctx *Context) string {
 // 那个值会把"你以为它会用的 Claude 模型"替换成奇怪字符串(或者忽略 / 报错),用户
 // 体感是"OpenClaw 选什么 Claude Code 也跟着"。修法:Claude Code 只认 target_models.claude-code,
 // 没显式配就不写 model frontmatter。
-// body 是 SOUL+IDENTITY+AGENTS+CHECKLIST+TOOLS+skills 索引的合并 prompt。
+//
+// 主体走 writeIDEPromptBody + writeSkillsIndex 共用 helper(SOUL / IDENTITY / 跨平台通用段 +
+// skills 索引),不再吞 AGENTS / CHECKLIST / TOOLS 全文。AGENTS.md 里"工作区路径"段列三平台
+// 路径 + "行为硬规则"提 TodoWrite + "出错应对"提 self-test 命令,都是 OpenClaw workspace
+// 视角的;CHECKLIST.md 是 OpenClaw 自动执行步骤;TOOLS.md 是 OpenClaw 权限边界 —— 跨平台
+// 通用的"首次打招呼"+ "故障快报模板" + "排障入口" + "输出形态"四段由 helper 抽出来拼。
 func buildClaudeAgentMD(wsRoot string, ctx *Context, agentName string) (string, error) {
 	var sb strings.Builder
 	// frontmatter
@@ -115,63 +120,10 @@ func buildClaudeAgentMD(wsRoot string, ctx *Context, agentName string) (string, 
 	fmt.Fprintf(&sb, "# %s 排障机器人\n\n", ctx.System.Name)
 	sb.WriteString("> 由 troubleshooter-studio 生成,目标平台:Claude Code subagent\n\n")
 
-	// SOUL
-	if data, err := os.ReadFile(filepath.Join(wsRoot, "SOUL.md")); err == nil {
-		sb.WriteString("---\n\n")
-		sb.Write(data)
-		sb.WriteString("\n\n")
-	}
-
-	// IDENTITY
-	if data, err := os.ReadFile(filepath.Join(wsRoot, "IDENTITY.md")); err == nil {
-		sb.Write(data)
-		sb.WriteString("\n\n")
-	}
-
-	// AGENTS（工作原则 + 故障快报模板）
-	if data, err := os.ReadFile(filepath.Join(wsRoot, "AGENTS.md")); err == nil {
-		sb.Write(data)
-		sb.WriteString("\n\n")
-	}
-
-	// CHECKLIST
-	if data, err := os.ReadFile(filepath.Join(wsRoot, "CHECKLIST.md")); err == nil {
-		sb.Write(data)
-		sb.WriteString("\n\n")
-	}
-
-	// TOOLS
-	if data, err := os.ReadFile(filepath.Join(wsRoot, "TOOLS.md")); err == nil {
-		sb.Write(data)
-		sb.WriteString("\n\n")
-	}
-
-	// Skills 索引
-	sb.WriteString("---\n\n## Skills 索引\n\n")
-	sb.WriteString("以下 skills 目录包含排障所需的映射表、脚本和执行流程文档。\n")
-	sb.WriteString("排障时请按 SKILL.md 中的执行流程操作，不要跳过步骤。\n\n")
-
-	skillsDir := filepath.Join(wsRoot, "skills")
-	entries, _ := os.ReadDir(skillsDir)
-	for _, e := range entries {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
-			continue
-		}
-		skillMD := filepath.Join(skillsDir, e.Name(), "SKILL.md")
-		desc := ""
-		if data, err := os.ReadFile(skillMD); err == nil {
-			// 从 front matter 提取 description
-			for line := range strings.SplitSeq(string(data), "\n") {
-				if rest, ok := strings.CutPrefix(line, "description:"); ok {
-					desc = strings.TrimSpace(rest)
-					break
-				}
-			}
-		}
-		fmt.Fprintf(&sb, "- **%s** — %s\n", e.Name(), desc)
-	}
-	sb.WriteString("\n详细用法见各 skill 目录下的 `SKILL.md`。\n")
-
+	writeIDEPromptBody(&sb, wsRoot, ctx, "")
+	writeSkillsIndex(&sb, wsRoot, "## Skills 索引",
+		"以下 skills 目录包含排障所需的映射表、脚本和执行流程文档。\n排障时请按 SKILL.md 中的执行流程操作，不要跳过步骤。")
+	sb.WriteString("详细用法见各 skill 目录下的 `SKILL.md`。\n")
 	return sb.String(), nil
 }
 

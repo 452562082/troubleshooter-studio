@@ -2990,14 +2990,16 @@ provide(WizardStoreKey, {
   margin-bottom: 4px;
 }
 
-.subtitle {
+/* .subtitle / .page-header 跟 design.css(全局共享)+ BotsPage(scoped)同名;本块不 scoped,
+   所以 prefix .init-page 父选择器把作用域锁在 InitPage 树内,避免污染全局 */
+.init-page .subtitle {
   color: #64748b;
   font-size: 14px;
   margin-bottom: 0;
   line-height: 1.6;
 }
 
-.page-header {
+.init-page .page-header {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
@@ -3018,7 +3020,7 @@ provide(WizardStoreKey, {
   padding-top: 4px;
 }
 
-.page-header .subtitle {
+.init-page .page-header .subtitle {
   margin-bottom: 0;
 }
 
@@ -4640,10 +4642,11 @@ input.path-readonly {
   opacity: 0.5; cursor: not-allowed;
 }
 
-/* info-box 里的 <p> 组合 InitPage 独有,保留 */
-.info-box p { margin: 0; }
-.info-box p + p { margin-top: 4px; }
-.info-box strong { font-size: var(--fs-md); }
+/* info-box 里的 <p> 组合 InitPage 独有,prefix .init-page 锁作用域 —— design.css 的
+   全局 .info-box base 不动,只调 InitPage 内部的 p / strong 排版 */
+.init-page .info-box p { margin: 0; }
+.init-page .info-box p + p { margin-top: 4px; }
+.init-page .info-box strong { font-size: var(--fs-md); }
 
 /* ── Help text ── */
 .help-text {

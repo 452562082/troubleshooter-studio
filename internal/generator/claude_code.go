@@ -101,14 +101,16 @@ func agentSlug(ctx *Context) string {
 // 体感是"OpenClaw 选什么 Claude Code 也跟着"。修法:Claude Code 只认 target_models.claude-code,
 // 没显式配就不写 model frontmatter。
 //
-// 主体走 writeIDEPromptBody + writeSkillsIndex 共用 helper(SOUL / IDENTITY / 跨平台通用段 +
-// skills 索引),不再吞 AGENTS / CHECKLIST / TOOLS 全文。AGENTS.md 里"工作区路径"段列三平台
-// 路径 + "行为硬规则"提 TodoWrite + "出错应对"提 self-test 命令,都是 OpenClaw workspace
-// 视角的;CHECKLIST.md 是 OpenClaw 自动执行步骤;TOOLS.md 是 OpenClaw 权限边界 —— 跨平台
-// 通用的"首次打招呼"+ "故障快报模板" + "排障入口" + "输出形态"四段由 helper 抽出来拼。
+// 给 Claude Code subagent 写的原生 prompt。subagent 通过 @<name> 在主 chat 里调用,可以
+// 直接用 Bash / Read / Glob / Grep / WebFetch / TodoWrite 等工具;MCP 已在 ~/.claude/settings.json
+// 自动注册,排障时 agent 直接调对应 mcp_server 即可,Python 脚本通过绝对路径跑。
+//
+// 历史 bug:之前直接写 ctx.Agent.Model,但 Agent.Model 是 OpenClaw gateway 专属的 LLM 路由
+// id(可能是 openai-codex/gpt-5.4 之类的非 Claude 模型)。Claude Code 拿到那个值会让"你以为
+// 它会用的 Claude 模型"被替换或忽略。现在只认 target_models["claude-code"],没显式配就不写
+// model frontmatter,让 Claude Code 用 IDE 当前选的模型。
 func buildClaudeAgentMD(wsRoot string, ctx *Context, agentName string) (string, error) {
 	var sb strings.Builder
-	// frontmatter
 	sb.WriteString("---\n")
 	fmt.Fprintf(&sb, "name: %s\n", agentName)
 	fmt.Fprintf(&sb, "description: %s\n", ctx.System.Name)
@@ -118,12 +120,19 @@ func buildClaudeAgentMD(wsRoot string, ctx *Context, agentName string) (string, 
 	sb.WriteString("---\n\n")
 
 	fmt.Fprintf(&sb, "# %s 排障机器人\n\n", ctx.System.Name)
-	sb.WriteString("> 由 troubleshooter-studio 生成,目标平台:Claude Code subagent\n\n")
 
-	writeIDEPromptBody(&sb, wsRoot, ctx, "")
-	writeSkillsIndex(&sb, wsRoot, "## Skills 索引",
-		"以下 skills 目录包含排障所需的映射表、脚本和执行流程文档。\n排障时请按 SKILL.md 中的执行流程操作，不要跳过步骤。")
-	sb.WriteString("详细用法见各 skill 目录下的 `SKILL.md`。\n")
+	intro := "本 agent 在 Claude Code 通过 `@" + agentName + "` 调用 subagent,做 **只读** 排障(日志 / 指标 / trace / 配置 / 代码),**不**直接落地修改。\n\n" +
+		"运行环境:\n" +
+		"- 可直接使用 Bash / Read / Glob / Grep / WebFetch / TodoWrite 工具\n" +
+		"- MCP 已在 `~/.claude/settings.json` 自动注册(由 troubleshooter-studio 装机时写入),排障时直接调对应 mcp_server 即可\n" +
+		"- skills 脚本用 **绝对路径**调用:`python3 ~/.claude/skills/" + agentName + "/<skill>/scripts/<file>.py ...` —— Claude Code 当前 cwd 不一定是本 agent 的 skills 目录\n" +
+		"- 3 步以上排障流程用 `TodoWrite` 列步骤;支持并发的工具调用尽量同消息发出,不用串行等"
+
+	writeIDEAgentBody(&sb, wsRoot, ctx, IDEPlatform{
+		Intro:                  intro,
+		SkillsScriptPathPrefix: "~/.claude/skills/" + agentName,
+		SkillsHeader:           "## Skills 索引",
+	})
 	return sb.String(), nil
 }
 

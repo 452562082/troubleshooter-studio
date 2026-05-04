@@ -64,11 +64,11 @@ func (g *Generator) GenerateCodex() error {
 	return nil
 }
 
-// buildCodexAgentMD —— 跟 buildClaudeAgentMD / buildCursorAgentMD 同套思路。
-// model frontmatter 仅在 target_models.codex 显式给出时写,否则用户走 Codex CLI 自己的默认。
+// 给 OpenAI Codex CLI 写的原生 prompt。在终端通过 `@<name>` 调用本 agent;CLI 提供 Bash
+// 能直接跑 Python 脚本,MCP 集成走 ~/.codex/config.toml(由 troubleshooter-studio 装机时通过
+// `codex mcp add` 自动注册)。
 //
-// 主体走 writeIDEPromptBody + writeSkillsIndex 共用 helper(SOUL / IDENTITY / 跨平台通用段 +
-// skills 索引),不再吞 AGENTS / CHECKLIST / TOOLS 全文(那是 OpenClaw workspace 视角的)。
+// model frontmatter 仅在 target_models["codex"] 显式给出时写,否则用 Codex CLI 自身默认。
 func buildCodexAgentMD(wsRoot string, ctx *Context, agentName string) (string, error) {
 	var sb strings.Builder
 	sb.WriteString("---\n")
@@ -80,10 +80,18 @@ func buildCodexAgentMD(wsRoot string, ctx *Context, agentName string) (string, e
 	sb.WriteString("---\n\n")
 
 	fmt.Fprintf(&sb, "# %s 排障机器人\n\n", ctx.System.Name)
-	sb.WriteString("# 由 troubleshooter-studio 生成,目标平台:OpenAI Codex CLI\n\n")
 
-	writeIDEPromptBody(&sb, wsRoot, ctx, "")
-	writeSkillsIndex(&sb, wsRoot, "## 可用 Skills",
-		"详细规则见 `~/.codex/skills/<agent-name>/<skill>/SKILL.md`。")
+	intro := "本 agent 在 OpenAI Codex CLI 终端内通过 `@" + agentName + "` 调用,做 **只读** 排障(日志 / 指标 / trace / 配置 / 代码),**不**直接落地修改。\n\n" +
+		"运行环境:\n" +
+		"- 可使用 Bash 跑 Python 脚本与 shell 命令\n" +
+		"- MCP 已通过 `codex mcp add` 自动注册到 `~/.codex/config.toml`(由 troubleshooter-studio 装机时写入),排障时直接调对应 mcp_server\n" +
+		"- skills 脚本用 **绝对路径**调用:`python3 ~/.codex/skills/" + agentName + "/<skill>/scripts/<file>.py ...`\n" +
+		"- 多步排障流程在回复开头打 `[已完成: routing ✓ / 当前: 拉指标]` 进度条让用户跟得上"
+
+	writeIDEAgentBody(&sb, wsRoot, ctx, IDEPlatform{
+		Intro:                  intro,
+		SkillsScriptPathPrefix: "~/.codex/skills/" + agentName,
+		SkillsHeader:           "## 可用 Skills",
+	})
 	return sb.String(), nil
 }

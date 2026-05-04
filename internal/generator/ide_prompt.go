@@ -1,35 +1,70 @@
-// ide_prompt.go —— claude-code / cursor / codex 三家 IDE agent .md 共用的"prompt 拼装"逻辑。
+// ide_prompt.go —— claude-code / cursor / codex 三家 IDE agent .md 的"原生 prompt 拼装"。
 //
-// 历史问题:三家 generator 早期都把 workspace 里 5 个 .md 文件(SOUL / IDENTITY / AGENTS /
-// CHECKLIST / TOOLS)整段塞进 IDE agent 文件。但这 5 个文件是 OpenClaw workspace 视角写的,
-// 大量内容跟 IDE 不匹配:
+// 原则:每个平台的 agent .md 是为该平台原生写的提示词,**不**机械拼贴 OpenClaw workspace
+// 的 5 个 .md 文件。具体:
 //
-//   - AGENTS.md 里"工作区路径"段列三平台路径 + 提"调脚本用绝对路径 python3 ~/.claude/..."
-//     ——IDE 默认不会跑 Python(Cursor 没 Bash、Claude Code/Codex 也不直接执行)
-//   - AGENTS.md "行为硬规则" 引用 `TodoWrite` 工具 + 假设并发工具调用 —— IDE 各家工具集不同
-//   - AGENTS.md "出错应对" 提 `tshoot agent self-test ...` 命令 —— IDE 用户没法跑
-//   - CHECKLIST.md 全文是 OpenClaw 自动执行步骤(git fetch / config-executor / k8s-runtime-query 等)
-//     ——IDE 用户根本没法执行
-//   - TOOLS.md 是 OpenClaw 权限边界声明 —— IDE 没这个抽象层
+//  1) workspace 里 SOUL.md / IDENTITY.md / AGENTS.md 第一行是 `# SOUL.md - X` /
+//     `# IDENTITY.md` / `# AGENTS.md - X 工作区` 这种"文件名标识 heading",对 OpenClaw
+//     workspace 内部寻址有意义,但写到 IDE agent .md 里就变成了奇怪的"# IDENTITY.md"
+//     段标题。统一脱掉,内容直接接进 agent 主标题下。
 //
-// IDE agent .md 应该只带跨平台通用内容:SOUL.md(行为风格 + 最高原则)+ IDENTITY.md(身份 +
-// 典型示例)+ AGENTS.md 里的"首次打招呼"段(开场介绍)+ "故障快报模板"段(输出格式约束)+
-// skills 索引。其余 OpenClaw 专属段一律不拼。
+//  2) AGENTS.md 里有 OpenClaw 专属段(`## 工作区路径` 列三平台路径 + 提 python3 ~/.claude/...
+//     调脚本;`## 行为硬规则` 引用 TodoWrite + 假设并发工具调用;`## 出错应对` 提
+//     `tshoot agent self-test` 命令;`## 角色` 跟 IDENTITY 重复)。这些段不进 IDE agent .md。
+//
+//  3) "Cursor 模式限制" / "Codex 模式限制" 这种 warning section 不再出现。每个平台的
+//     运行环境(有/没 Bash、MCP 怎么注册、脚本路径前缀)以**自然介绍**的形式由调用方传入
+//     intro 字符串,作为 agent 自我介绍的一部分。
+//
+//  4) CHECKLIST.md(全是 OpenClaw 自动执行步骤)+ TOOLS.md(OpenClaw 权限边界)整体不拼。
+//
+// OpenClaw 自己的 workspace 仍按原样保留 5 个 .md 文件,本文件只影响 IDE 三家产物。
 package generator
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
-// readWorkspaceMD 读 workspace 根下某 .md 文件,失败返空串(让调用方决定要不要写空白)。
-func readWorkspaceMD(wsRoot, name string) string {
+// IDEPlatform 描述一个 IDE 平台的原生属性,生成器据此拼出"为该平台原生写的"agent .md。
+type IDEPlatform struct {
+	// Intro:本平台 agent 是如何被调用 + 有哪些可用能力的"自然介绍"。
+	// 由调用方传入,会作为 agent 头部的引导段,代替老版本的"# 平台 模式限制"warning section。
+	// 例:"在 Claude Code 通过 @<name> 调用本 subagent。可直接使用 Bash / Read / WebFetch /
+	//      TodoWrite 等工具,MCP 已在 ~/.claude/settings.json 自动注册..."
+	Intro string
+
+	// SkillsScriptPathPrefix:本平台 skills 目录在用户机器上的绝对路径前缀(不带 trailing /)。
+	// 用于 agent 内部告知"调脚本 / Read 引用文件用 <prefix>/<skill>/..." 路径。
+	// 例:"~/.claude/skills/<agent-name>" / "~/.cursor/skills/<agent-name>" / "~/.codex/skills/<agent-name>"
+	SkillsScriptPathPrefix string
+
+	// SkillsHeader:Skills 索引段的标题(如 "## Skills 索引" / "## 可用 Skills")。各家 IDE 文档
+	// 风格不同 —— Claude Code 偏正式 "Skills 索引",Cursor / Codex 用 "可用 Skills"。
+	SkillsHeader string
+}
+
+// readMDStripHeading 读 workspace 根下某 .md 文件,去掉第一行的 `# *.md*` 标识 heading。
+// 这样 SOUL.md 头上的 "# SOUL.md - X排障机器人" 不会变成 IDE agent .md 里的怪段标题。
+// 文件不存在 / 无 # heading → 全文返回(让调用方决定是否拼)。
+func readMDStripHeading(wsRoot, name string) string {
 	data, err := os.ReadFile(filepath.Join(wsRoot, name))
 	if err != nil {
 		return ""
 	}
-	return string(data)
+	body := string(data)
+	// 找第一行;若以 `# ` 开头 + 含 ".md" 字样,认作"文件名标识 heading",剥掉。
+	nl := strings.IndexByte(body, '\n')
+	if nl < 0 {
+		return body
+	}
+	first := strings.TrimSpace(body[:nl])
+	if strings.HasPrefix(first, "# ") && strings.Contains(first, ".md") {
+		body = body[nl+1:]
+	}
+	return strings.TrimLeft(body, "\n")
 }
 
 // extractMDSection 从 markdown 字符串里抽指定 H2 标题(`## <title>`)开始、到下一个 H2 或文件
@@ -63,93 +98,68 @@ func extractMDSection(md, titlePrefix string) string {
 	return strings.TrimRight(strings.Join(lines[startIdx:endIdx], "\n"), "\n")
 }
 
-// writeIDEPromptBody 把跨平台通用内容(SOUL / IDENTITY / AGENTS 抽段 + skills 索引)写到 sb。
-// 三家 IDE generator 复用本函数,确保未来加新模板时三家同步,不会再飘开。
+// writeIDEAgentBody 把"原生写给该 IDE 平台"的 agent prompt 主体写到 sb。
+// 调用方传入 wsRoot(OpenClaw workspace 临时目录,内有 SOUL/IDENTITY/AGENTS 等)+ ctx +
+// 平台属性 profile。本函数负责:
 //
-// 入参 wsRoot 是 OpenClaw workspace 根(generator 临时解出的);ctx 用来取 system.id 当备用。
-// pre 由调用方传入,用于在主体之前插入 IDE 专属说明(如 Cursor 的"⚠ Cursor 模式限制"段);
-// 想要只走默认主体的传 ""。
-func writeIDEPromptBody(sb *strings.Builder, wsRoot string, ctx *Context, pre string) {
-	if pre != "" {
-		sb.WriteString(pre)
-		if !strings.HasSuffix(pre, "\n") {
-			sb.WriteString("\n")
-		}
-		sb.WriteString("\n")
-	}
-
-	// SOUL —— 行为风格 + 最高原则,跨平台通用
-	if data := readWorkspaceMD(wsRoot, "SOUL.md"); data != "" {
-		sb.WriteString("---\n\n")
-		sb.WriteString(data)
-		if !strings.HasSuffix(data, "\n") {
-			sb.WriteString("\n")
-		}
-		sb.WriteString("\n")
-	}
-
-	// IDENTITY —— 身份 + 典型示例,跨平台通用
-	if data := readWorkspaceMD(wsRoot, "IDENTITY.md"); data != "" {
-		sb.WriteString("---\n\n")
-		sb.WriteString(data)
-		if !strings.HasSuffix(data, "\n") {
-			sb.WriteString("\n")
-		}
-		sb.WriteString("\n")
-	}
-
-	// 从 AGENTS.md 抽两段跨平台通用内容(其余段是 OpenClaw 专属,不拼):
-	//   - "首次打招呼" —— 开场介绍 + 能力清单,IDE 用户也需要看到
-	//   - "故障快报模板" —— 排障类回复的输出格式约束,跨平台通用
-	if agents := readWorkspaceMD(wsRoot, "AGENTS.md"); agents != "" {
-		// 排障入口段也保留:它告诉 agent "看到排障关键词先 Read incident-investigator/SKILL.md"。
-		// IDE 平台用户问问题时这条流程一样适用。
-		if section := extractMDSection(agents, "排障入口"); section != "" {
-			sb.WriteString("---\n\n")
-			sb.WriteString(section)
-			sb.WriteString("\n\n")
-		}
-		if section := extractMDSection(agents, "输出形态"); section != "" {
-			sb.WriteString("---\n\n")
-			sb.WriteString(section)
-			sb.WriteString("\n\n")
-		}
-		if section := extractMDSection(agents, "首次打招呼"); section != "" {
-			sb.WriteString("---\n\n")
-			sb.WriteString(section)
-			sb.WriteString("\n\n")
-		}
-		if section := extractMDSection(agents, "故障快报模板"); section != "" {
-			sb.WriteString("---\n\n")
-			sb.WriteString(section)
-			sb.WriteString("\n\n")
-		}
-	}
-
-	// 不拼 CHECKLIST.md(全是 OpenClaw 自动执行步骤,IDE 用户没法跑)
-	// 不拼 TOOLS.md(OpenClaw 权限边界声明)
-	// 不拼 AGENTS.md 的"工作区路径"/"行为硬规则"/"出错应对"段(OpenClaw 专属)
-	_ = ctx // 保留参数:未来可能按 ctx.System / ctx.Agent 字段裁剪
-}
-
-// writeSkillsIndex 拼跨平台通用的 skills 索引段(列每个 skill 的名字 + description)。
-// 三家 IDE 都需要这段,让 agent 知道哪些 skill 可用。
+//	1. 写平台 intro(自然介绍,不是 warning section)
+//	2. 写 SOUL 主体(去掉文件名 heading)
+//	3. 写 IDENTITY 主体(去掉文件名 heading)
+//	4. 抽 AGENTS 跨平台通用四段(排障入口 / 输出形态 / 首次打招呼 / 故障快报模板)
+//	5. 写 Skills 索引(用 profile.SkillsScriptPathPrefix 提示路径前缀)
 //
-// header 由调用方传(如"## Skills 索引" / "## 可用 Skills"),提示性的描述行也由调用方写,
-// 因为各家提示用户怎么访问 skill 文件的路径不同(~/.claude/ vs ~/.cursor/ vs ~/.codex/)。
-func writeSkillsIndex(sb *strings.Builder, wsRoot, header, hint string) {
-	sb.WriteString("---\n\n")
+// 不拼 CHECKLIST.md / TOOLS.md / AGENTS.md 的 OpenClaw 专属段。
+func writeIDEAgentBody(sb *strings.Builder, wsRoot string, ctx *Context, profile IDEPlatform) {
+	_ = ctx // 保留:未来按 ctx.Agent / ctx.System 字段动态裁剪 intro 时用
+
+	// 1) 平台 intro —— 自然介绍,不是 warning,直接接在主标题下
+	if intro := strings.TrimSpace(profile.Intro); intro != "" {
+		sb.WriteString(intro)
+		sb.WriteString("\n\n")
+	}
+
+	// 2) SOUL 主体(去掉 "# SOUL.md - X" 第一行 heading)
+	if soul := readMDStripHeading(wsRoot, "SOUL.md"); soul != "" {
+		sb.WriteString(soul)
+		if !strings.HasSuffix(soul, "\n") {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	// 3) IDENTITY 主体(去掉 "# IDENTITY.md" 第一行 heading);整段以 "## 身份" 重命名,
+	// 避免裸的姓名 + 典型示例段没有自己的标题在 SOUL 之后突兀贴着
+	if id := readMDStripHeading(wsRoot, "IDENTITY.md"); id != "" {
+		sb.WriteString("## 身份\n\n")
+		sb.WriteString(id)
+		if !strings.HasSuffix(id, "\n") {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	// 4) AGENTS 跨平台通用四段:排障入口 / 输出形态 / 首次打招呼 / 故障快报模板。
+	// "工作区路径" / "行为硬规则" / "出错应对" / "角色" 段是 OpenClaw 视角,IDE 不要。
+	if agents, _ := os.ReadFile(filepath.Join(wsRoot, "AGENTS.md")); len(agents) > 0 {
+		md := string(agents)
+		for _, title := range []string{"排障入口", "输出形态", "首次打招呼", "故障快报模板"} {
+			if section := extractMDSection(md, title); section != "" {
+				sb.WriteString(section)
+				sb.WriteString("\n\n")
+			}
+		}
+	}
+
+	// 5) Skills 索引 —— 标题 + 路径提示(平台特定)+ 列表
+	header := strings.TrimSpace(profile.SkillsHeader)
+	if header == "" {
+		header = "## Skills 索引"
+	}
 	sb.WriteString(header)
-	if !strings.HasSuffix(header, "\n") {
-		sb.WriteString("\n")
-	}
-	sb.WriteString("\n")
-	if hint != "" {
-		sb.WriteString(hint)
-		if !strings.HasSuffix(hint, "\n") {
-			sb.WriteString("\n")
-		}
-		sb.WriteString("\n")
+	sb.WriteString("\n\n")
+	if profile.SkillsScriptPathPrefix != "" {
+		fmt.Fprintf(sb, "skill 文件路径前缀:`%s`,排障时按各 SKILL.md 流程操作,不要跳步骤。\n\n",
+			profile.SkillsScriptPathPrefix)
 	}
 
 	skillsDir := filepath.Join(wsRoot, "skills")
@@ -168,11 +178,7 @@ func writeSkillsIndex(sb *strings.Builder, wsRoot, header, hint string) {
 				}
 			}
 		}
-		sb.WriteString("- **")
-		sb.WriteString(e.Name())
-		sb.WriteString("** — ")
-		sb.WriteString(desc)
-		sb.WriteString("\n")
+		fmt.Fprintf(sb, "- **%s** — %s\n", e.Name(), desc)
 	}
 	sb.WriteString("\n")
 }

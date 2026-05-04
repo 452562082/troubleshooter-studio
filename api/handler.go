@@ -71,16 +71,23 @@ func (s *Server) HandlePlan(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleGen POST /api/gen — body 为 system.yaml 内容，返回 GenSummary
+//
+// outDir 走 MkdirTemp + defer RemoveAll —— 跟 HandlePlan 行为对齐。
+// 旧版固定写到 "./dist" 在多用户 / 并发请求场景下会互相覆盖产物 + Summary 失真,
+// 单用户也累积残留撑大磁盘。HandleGen 只返 Summary(stats),产物本身用户自己用
+// /api/gen 之前应已 fork 拷贝出去,server 侧 Generate 完即可清干净。
 func (s *Server) HandleGen(w http.ResponseWriter, r *http.Request) {
 	cfg, err := loadConfigFromBody(r)
 	if err != nil {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	outDir := "./dist"
-	if !filepath.IsAbs(outDir) {
-		outDir, _ = filepath.Abs(outDir)
+	outDir, err := os.MkdirTemp("", "tshoot-gen-*")
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
+	defer os.RemoveAll(outDir)
 
 	g := generator.New(cfg, s.TemplateRoot, outDir)
 	if err := g.Generate(); err != nil {

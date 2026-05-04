@@ -62,6 +62,7 @@ import { useImportCrossCheck } from '../lib/useImportCrossCheck'
 import { useDeployFlow } from '../lib/useDeployFlow'
 import { useImportFlow } from '../lib/useImportFlow'
 import { useDataStoreScan } from '../lib/useDataStoreScan'
+import { serviceMatchKeys, startsAtBoundary } from '../lib/serviceMatchHelpers'
 
 const router = useRouter()
 
@@ -1560,36 +1561,9 @@ function entriesForNamespace(envID: string, _nsID: string): CCHubEntry[] {
 }
 
 
-// 自动匹配 service → dataId:给定环境 + 服务名,在该 namespace 下的 entries 里
-// 找 locator 含服务名的;优先同时含 env 名。
-// serviceMatchKeys 给一个服务名生成"由具体到泛化"的候选键序列,用于 dataId 匹配。
-// 例:
-//   community-grpc-server → [community-grpc-server, community-grpc, community]
-//   api-truss             → [api-truss, api]
-//   order                 → [order]
-//
-// 背景:wizard 给同仓多入口加了 `<repo>-` 前缀做命名消歧(避免跨仓 cmd/grpc-server 撞名),
-// 但 nacos / apollo 的 dataId 经常只用 `<repo>` 这一级(`community-test.yaml`),
-// 不会带 cmd entry。如果死按完整服务名找,带前缀的 4 个 *-grpc-server 全部匹不到。
-// 退化策略:从最右段开始逐段砍,试更短的前缀,直到命中或剩 1 段。
-function serviceMatchKeys(svc: string): string[] {
-  const parts = svc.toLowerCase().split('-').filter(Boolean)
-  const out: string[] = []
-  for (let i = parts.length; i >= 1; i--) {
-    out.push(parts.slice(0, i).join('-'))
-  }
-  return out
-}
-
-// startsAtBoundary 段对齐"开头"判定:locator 等于 cand,或 locator 以 cand + 分隔符开头(- / _ / .)。
-// 这样 "community" 不会误命中 "communityfeed-test.yaml",但能命中 "community-test.yaml"。
-// 抽出来供 nacos / kuboard / 其它源的 auto-match 共享。
-function startsAtBoundary(loc: string, cand: string): boolean {
-  return loc === cand ||
-    loc.startsWith(cand + '-') ||
-    loc.startsWith(cand + '.') ||
-    loc.startsWith(cand + '_')
-}
+// serviceMatchKeys / startsAtBoundary 收口在 lib/serviceMatchHelpers.ts,
+// 三家自动匹(useCCHubPreload / useKuboardPreload / useLokiLabels)+ InitPage 的
+// autoPickK8sRtWorkloads 共用,避免飘开。
 
 // applyImport 期间禁用 configCenterType watcher 的破坏性清空 —— 否则:
 //   1. applyImport sync 段 ingest 多源时,configCenterType 在 "" → "nacos" 之间瞬变
@@ -1628,8 +1602,6 @@ const {
   getServiceSource,
   namespacesFor,
   entriesForNamespace,
-  serviceMatchKeys,
-  startsAtBoundary,
 })
 // 这几个 composable 里互相调用 / 由 onNamespaceChanged 内部触发,InitPage 模板没直接用
 void _autoMatchNamespace; void _autoMatchDataID; void _autoFillSelections
@@ -1652,8 +1624,6 @@ const {
   kuboardSvcMap,
   allServiceNames,
   getServiceSource,
-  serviceMatchKeys,
-  startsAtBoundary,
 })
 // autoMatchKuboardLocation/autoFillKuboardSelections 由 composable 内部 runKuboardPreload* 调用,
 // InitPage 模板直接用的是 runKuboardPreload / runKuboardPreloadFromSource 两个 runner
@@ -1969,8 +1939,6 @@ const {
   getLokiMapping,
   lokiAuthFor,
   allServiceNames,
-  serviceMatchKeys,
-  startsAtBoundary,
 })
 // loadEnvLabelValues / loadServiceLabelValues / autoMatchLokiMapping 内部由 loadLokiLabels /
 // onEnvValueChanged 调,InitPage 模板没直接用

@@ -11,6 +11,7 @@
 //   - onEnvValueChanged      改 envValue → 清 serviceValues + 重拉 serviceLabelValues(限定到新 namespace)+ 重匹
 import { listLokiLabels, listLokiLabelValues } from './bridge'
 import { pushLog } from './logStore'
+import { boundaryHasAnywhere, serviceMatchKeys } from './serviceMatchHelpers'
 import type { LokiMappingPerEnv } from './useLokiMappingState'
 
 export interface UseLokiLabelsDeps {
@@ -27,10 +28,6 @@ export interface UseLokiLabelsDeps {
   }
   /** 用于 autoMatch service 启发匹配 */
   allServiceNames: { value: readonly string[] }
-  /** "由具体到泛化"的服务名候选(给 dataId / loki app 等多源共用) */
-  serviceMatchKeys: (svc: string) => string[]
-  /** 段对齐前缀判定:loc 等 cand,或以 cand+分隔符开头 */
-  startsAtBoundary: (loc: string, cand: string) => boolean
 }
 
 export function useLokiLabels(deps: UseLokiLabelsDeps) {
@@ -138,25 +135,20 @@ export function useLokiLabels(deps: UseLokiLabelsDeps) {
     // env 信号比 nacos 更强(loki 标签几乎一定带 env 后缀),所以 Pass 1 require env match。
     const envLower = envID.toLowerCase()
     const lmValuesLower = lm.serviceLabelValues.map(v => ({ raw: v, low: v.toLowerCase() }))
-    // boundaryWith:label 值要么以 cand 开头、要么含 -cand- / -cand 边界(允许前缀加 base- / app- 这种)。
-    // loki app 标签常有 base-/app- 前缀,纯 startsAtBoundary 太严会漏 base-admin-truss-dev → admin-truss。
-    const boundaryHas = (low: string, cand: string): boolean => {
-      if (deps.startsAtBoundary(low, cand)) return true
-      return low.includes('-' + cand + '-') || low.endsWith('-' + cand) || low.includes('_' + cand + '_') || low.endsWith('_' + cand)
-    }
+    // boundaryHasAnywhere(共享 helper)允许前缀(base-/app-),适配 base-admin-truss-dev → admin-truss
     for (const svc of deps.allServiceNames.value) {
       if (lm.serviceValues[svc]) continue // 已选(真实标签值)→ 不覆盖
-      const candidates = deps.serviceMatchKeys(svc)
+      const candidates = serviceMatchKeys(svc)
       let hit: string | undefined
       // Pass 1:候选 boundary + 含 env
       for (const cand of candidates) {
-        const m = lmValuesLower.find(v => boundaryHas(v.low, cand) && v.low.includes(envLower))
+        const m = lmValuesLower.find(v => boundaryHasAnywhere(v.low, cand) && v.low.includes(envLower))
         if (m) { hit = m.raw; break }
       }
       // Pass 2:候选 boundary(不含 env)
       if (!hit) {
         for (const cand of candidates) {
-          const m = lmValuesLower.find(v => boundaryHas(v.low, cand))
+          const m = lmValuesLower.find(v => boundaryHasAnywhere(v.low, cand))
           if (m) { hit = m.raw; break }
         }
       }

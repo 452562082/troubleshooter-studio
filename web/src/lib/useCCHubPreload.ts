@@ -18,6 +18,7 @@ import { isDesktop } from './bridge/shared'
 import { pushLog } from './logStore'
 import { toast } from './toast'
 import { ccKeyFor, svcKey } from './yamlShared'
+import { serviceMatchKeys, startsAtBoundary } from './serviceMatchHelpers'
 import type { CCHubEnvState } from './useCCHubState'
 
 export interface UseCCHubPreloadDeps {
@@ -40,10 +41,6 @@ export interface UseCCHubPreloadDeps {
   namespacesFor: (envID: string) => CCHubNamespace[]
   /** 给 env+namespace 取可选 entries(autoMatchDataID 用) */
   entriesForNamespace: (envID: string, nsID: string) => CCHubEntry[]
-  /** "由具体到泛化"的服务名候选(loki / dataId / kuboard 多源共用) */
-  serviceMatchKeys: (svc: string) => string[]
-  /** 段对齐前缀判定:loc 等 cand,或以 cand+分隔符开头 */
-  startsAtBoundary: (loc: string, cand: string) => boolean
 }
 
 interface PreloadPayload {
@@ -82,20 +79,20 @@ export function useCCHubPreload(deps: UseCCHubPreloadDeps) {
   function autoMatchDataID(envID: string, svc: string, nsID: string): { dataId: string, group: string } {
     const entries = deps.entriesForNamespace(envID, nsID)
     if (entries.length === 0) return { dataId: '', group: '' }
-    const candidates = deps.serviceMatchKeys(svc)
+    const candidates = serviceMatchKeys(svc)
     const envLower = envID.toLowerCase()
 
     // Pass 1:locator 段对齐前缀 + 含 env 关键字 —— 最强信号
     for (const cand of candidates) {
       const hit = entries.find(e => {
         const loc = e.locator.toLowerCase()
-        return deps.startsAtBoundary(loc, cand) && loc.includes(envLower)
+        return startsAtBoundary(loc, cand) && loc.includes(envLower)
       })
       if (hit) return { dataId: hit.locator, group: hit.group || '' }
     }
     // Pass 2:locator 段对齐前缀(不要求含 env)—— 适配 <service>.yaml 共享配置
     for (const cand of candidates) {
-      const hit = entries.find(e => deps.startsAtBoundary(e.locator.toLowerCase(), cand))
+      const hit = entries.find(e => startsAtBoundary(e.locator.toLowerCase(), cand))
       if (hit) return { dataId: hit.locator, group: hit.group || '' }
     }
     // Pass 3:遗留 fuzzy 兜底(完整服务名 substring)—— 老行为,接非常规命名

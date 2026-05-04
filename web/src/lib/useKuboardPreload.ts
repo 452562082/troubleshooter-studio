@@ -14,6 +14,7 @@ import { isDesktop } from './bridge/shared'
 import { pushLog } from './logStore'
 import { toast } from './toast'
 import { svcKey } from './yamlShared'
+import { serviceMatchKeys, startsAtBoundary } from './serviceMatchHelpers'
 import type { KuboardResourceState } from './credFields'
 
 interface KuboardSvcLocator {
@@ -35,10 +36,6 @@ export interface UseKuboardPreloadDeps {
   allServiceNames: { value: readonly string[] }
   /** 取服务对应的源 type;multi-source 下区分主源/副源 */
   getServiceSource: (svc: string) => string
-  /** "由具体到泛化"的服务名候选 */
-  serviceMatchKeys: (svc: string) => string[]
-  /** 段对齐前缀判定 */
-  startsAtBoundary: (loc: string, cand: string) => boolean
 }
 
 export function useKuboardPreload(deps: UseKuboardPreloadDeps) {
@@ -48,7 +45,7 @@ export function useKuboardPreload(deps: UseKuboardPreloadDeps) {
   function autoMatchKuboardLocation(envID: string, svc: string): { cluster: string, namespace: string, configmap: string } | null {
     const state = deps.kuboardStateByEnv[envID]
     if (!state || state.status !== 'ok') return null
-    const candidates = deps.serviceMatchKeys(svc)
+    const candidates = serviceMatchKeys(svc)
     const envLower = envID.toLowerCase()
     // 把所有 cluster→namespace→configmap 三联拍平,方便扫描;按出现顺序保留(首个命中赢)。
     const flat: Array<{ cluster: string, namespace: string, configmap: string }> = []
@@ -64,13 +61,13 @@ export function useKuboardPreload(deps: UseKuboardPreloadDeps) {
     for (const cand of candidates) {
       const hit = flat.find(x => {
         const cmL = x.configmap.toLowerCase()
-        return deps.startsAtBoundary(cmL, cand) && (cmL.includes(envLower) || x.namespace.toLowerCase().includes(envLower))
+        return startsAtBoundary(cmL, cand) && (cmL.includes(envLower) || x.namespace.toLowerCase().includes(envLower))
       })
       if (hit) return hit
     }
     // Pass 2:configmap 段对齐前缀(不要求含 env)—— 跨集群共享或 env 体现在 namespace
     for (const cand of candidates) {
-      const hit = flat.find(x => deps.startsAtBoundary(x.configmap.toLowerCase(), cand))
+      const hit = flat.find(x => startsAtBoundary(x.configmap.toLowerCase(), cand))
       if (hit) return hit
     }
     // Pass 3:fuzzy 兜底(完整服务名 substring)

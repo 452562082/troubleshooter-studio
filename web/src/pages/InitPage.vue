@@ -62,9 +62,9 @@ import { useImportCrossCheck } from '../lib/useImportCrossCheck'
 import { useDeployFlow } from '../lib/useDeployFlow'
 import { useImportFlow } from '../lib/useImportFlow'
 import { useDataStoreScan } from '../lib/useDataStoreScan'
-import { serviceMatchKeys, startsAtBoundary } from '../lib/serviceMatchHelpers'
 import { useMonorepoHints } from '../lib/useMonorepoHints'
 import { useSourceTypeReset } from '../lib/useSourceTypeReset'
+import { useK8sRtAutoPick } from '../lib/useK8sRtAutoPick'
 
 const router = useRouter()
 
@@ -1011,79 +1011,9 @@ async function runK8sRtPreload(envID: string) {
 // 之后(useK8sRtWorkloads 入参依赖它),见下方 "── 可观测性 toolInputs ──" 段。
 // 这里只保留前向引用占位,函数体内引用 k8sRtWorkloadCache / k8sRtWorkloadKey /
 // loadK8sRtWorkloads 都靠 lexical scope,等到调用时(user action / onMounted)才解析。
-// autoPickK8sRtWorkloads 留在下方:它要读 allServiceNames / serviceMatchKeys /
-// startsAtBoundary / ensureK8sRtSvcLoc 多块状态;loadK8sRtWorkloads 拉到结果后
-// 通过 onLoaded 回调反过来触发 autoPickK8sRtWorkloads。
-
-// 给本 env 下所有服务自动挑最匹配的 Deployment(不覆盖用户已经手动选过的)。
-// 匹配策略(由强到弱):
-//   1) deployment 名 == 服务名 / selector app=<服务名> 精确命中
-//   2) 候选退化(serviceMatchKeys)+ 段对齐前缀 + env 信号双约束 —— 适配 base-svc-dev / svc-dev 这类
-//   3) 候选退化 + 段对齐前缀(不含 env)
-//   4) 退化 + 边界中段命中(允许 base- / app- 前缀)
-//   5) 模糊兜底(归一化后双向 substring,老行为)
-function autoPickK8sRtWorkloads(envID: string, deployments: Array<{ name: string; selector: string }>) {
-  if (deployments.length === 0) return
-  const norm = (s: string) => s.toLowerCase().replace(/[-_]/g, '')
-  const envLower = envID.toLowerCase()
-  // boundaryHas 跟 loki / kuboard 一致:候选要么以 boundary 开头,要么以 -cand- / -cand 边界出现。
-  // 这样 deployment "base-admin-truss-dev" 能被候选 "admin-truss" 命中,但 "communityfeed-dev"
-  // 不会被候选 "community" 命中(community 没在 token 边界)。
-  const boundaryHas = (low: string, cand: string) =>
-    startsAtBoundary(low, cand) ||
-    low.includes('-' + cand + '-') || low.endsWith('-' + cand) ||
-    low.includes('_' + cand + '_') || low.endsWith('_' + cand)
-  for (const svc of allServiceNames.value) {
-    const sloc = ensureK8sRtSvcLoc(envID, svc)
-    if (sloc.workload) continue // 用户已经手动选过,不动
-    const svcLower = svc.toLowerCase()
-    const svcNorm = norm(svc)
-    const candidates = serviceMatchKeys(svc)
-    let pick: { name: string; selector: string } | undefined
-    // 1a) 精确同名
-    pick = deployments.find(d => d.name === svc)
-    // 1b) selector 标签命中(app= / app.kubernetes.io/name=)
-    if (!pick) {
-      pick = deployments.find(d => {
-        const sel = d.selector
-        if (!sel) return false
-        const kvs = sel.split(',')
-        for (const kv of kvs) {
-          const [k, v] = kv.split('=')
-          if (!k || !v) continue
-          if ((k === 'app' || k === 'app.kubernetes.io/name') && v.toLowerCase() === svcLower) return true
-        }
-        return false
-      })
-    }
-    // 2) 候选退化 + 边界对齐 + 含 env —— 同 nacos / loki 套路。覆盖 community-grpc-server →
-    //    `community-dev` / `base-community-dev`(env 信号兜底,避免误中跨 env 同名 deployment)。
-    if (!pick) {
-      for (const cand of candidates) {
-        const m = deployments.find(d => {
-          const dl = d.name.toLowerCase()
-          return boundaryHas(dl, cand) && dl.includes(envLower)
-        })
-        if (m) { pick = m; break }
-      }
-    }
-    // 3) 候选退化 + 边界对齐(不含 env)—— 命名空间已经按 env 分时(base-dev / base-prod),
-    //    deployment 名常省略 env 后缀,此 pass 兜底。
-    if (!pick) {
-      for (const cand of candidates) {
-        const m = deployments.find(d => boundaryHas(d.name.toLowerCase(), cand))
-        if (m) { pick = m; break }
-      }
-    }
-    // 4) 模糊兜底:归一化后双向 substring(老行为,接非典型命名)
-    if (!pick) pick = deployments.find(d => norm(d.name).includes(svcNorm))
-    if (!pick) pick = deployments.find(d => svcNorm.includes(norm(d.name)))
-    if (pick) {
-      sloc.workload = pick.name
-      sloc.label_selector = pick.selector || ''
-    }
-  }
-}
+// autoPickK8sRtWorkloads 收口在 lib/useK8sRtAutoPick.ts;实例化点见下方 allServiceNames /
+// ensureK8sRtSvcLoc 之后(由 loadK8sRtWorkloads 的 onLoaded 回调触发,本变量声明前的 lexical
+// 引用都在函数体里,user action 触发时已 ready)。
 
 // 服务 → 源 type 取值。语义:
 //   - 显式设过(包括 '' 空值)→ 用 map 里的(允许"显式取消"是有效状态)
@@ -1377,6 +1307,14 @@ const allServiceNames = computed<string[]>(() => {
     }
   }
   return Array.from(set)
+})
+
+// useK8sRtAutoPick 实例化:allServiceNames + ensureK8sRtSvcLoc 都已 ready;
+// loadK8sRtWorkloads(还在下方)的 onLoaded 回调把 deployment 列表传过来,
+// composable 内部 lexical scope 解析时 callback 已注入。
+const { autoPickK8sRtWorkloads } = useK8sRtAutoPick({
+  allServiceNames,
+  ensureK8sRtSvcLoc: (envID, svc) => ensureK8sRtSvcLoc(envID, svc),
 })
 
 // 每个 env 独立扫描独立展示。没扫过的 env 不显示映射块,不借用其他 env 的结果。

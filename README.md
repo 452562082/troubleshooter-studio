@@ -38,6 +38,10 @@
 git clone <此仓库> && cd troubleshooter-studio
 ```
 
+> 首次构建必看:`bin/` 和 `dist/` 都在 `.gitignore` 里。`git clone` 完没有可执行文件 ——
+> 必须先跑下方任一构建命令产出 `bin/tshoot` 或 `dist/TroubleshooterStudio.app` 才能用。
+> 改 Go binding 后还要 `make wails-gen` 刷新 `web/wailsjs/go/`(已入库)。
+
 **桌面 app**(推荐):
 
 ```bash

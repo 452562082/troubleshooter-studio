@@ -141,21 +141,22 @@ func InstallNativeOpenclaw(ctx context.Context, stagingDir string, opts InstallO
 	}
 	log(fmt.Sprintf("[ok] %s 已更新(agents.list + mcp.servers)", cfgPath))
 
-	// 6) creds.json:多源场景下任一源属于 apollo/consul/env-vars/k8s 就要写
-	needsCredsFile := false
+	// 6) creds.json:多源场景下任一源属于 apollo/consul/env-vars/kuboard 就要写。
+	// 跟 IDE 平台共用 WriteCredsFileToHome —— 唯一区别是 homeSubdir(.openclaw vs .tshoot)。
+	if err := WriteCredsFileToHome(".openclaw", cfg, get); err != nil {
+		return err
+	}
+	// 跟旧行为对齐的 log:有真东西要写才报。WriteCredsFileToHome 全 nacos 时会 silent skip,
+	// 这里 needsCreds 二次判一下决定是否打 log,避免对全 nacos 系统刷"creds 写到 ..."误导。
+	hasNonNacos := false
 	for _, cc := range cfg.Infrastructure.ConfigCenters {
 		if needsCreds(cc.Type) {
-			needsCredsFile = true
+			hasNonNacos = true
 			break
 		}
 	}
-	if needsCredsFile {
+	if hasNonNacos {
 		credsPath := filepath.Join(ocHome, agentID+"-creds.json")
-		credsData, _ := readJSONOrEmpty(credsPath) // 旧的合并而非覆盖,允许多 agent 共存
-		writeCredsByType(credsData, cfg, get)
-		if err := writeJSONFile(credsPath, credsData, 0o600); err != nil {
-			return fmt.Errorf("write %s: %w", credsPath, err)
-		}
 		log(fmt.Sprintf("[ok] creds 写到 %s (mode 0600)", credsPath))
 	}
 

@@ -22,16 +22,25 @@ import (
 )
 
 // WriteIDECredsFile 把 creds 按类型分 section 写到 ~/.tshoot/<agent_id>-creds.json
-// (mode 0600)。creds=nil 时直接 return(不动盘,避免空覆盖)。
+// (mode 0600)。creds=nil / 全 nacos 时直接 return(不动盘,避免空覆盖)。
 //
 // 跟 OpenClaw 自家 ~/.openclaw/<id>-creds.json 同 schema,脚本走"openclaw 优先 +
-// tshoot 兜底"的回退就能两端通吃。
+// tshoot 兜底"的回退就能两端通吃。实质转发到 WriteCredsFileToHome("./tshoot", ...)。
 func WriteIDECredsFile(cfg *config.SystemConfig, creds map[string]string) error {
 	if creds == nil {
 		return nil
 	}
-	// 任一源是 apollo/consul/env-vars/kuboard 才真有"非 MCP 读 creds.json"的需求;
-	// 全 nacos 的系统这文件没意义,跳过减少噪音文件。
+	get := func(k string) string { return creds[k] }
+	return WriteCredsFileToHome(".tshoot", cfg, get)
+}
+
+// WriteCredsFileToHome 是 IDE / openclaw 共用的"写 <agent_id>-creds.json"实现。
+// homeSubdir 是 $HOME 下的子目录("./openclaw" / ".tshoot" 二选一);路径由这层算,
+// 调用方不关心。已存在的 creds.json 会 merge 而非覆盖(允许多次部署 / 多 agent 共存)。
+//
+// 全 nacos 的 cfg 不写(脚本不需要),避免噪音文件。
+func WriteCredsFileToHome(homeSubdir string, cfg *config.SystemConfig, get func(string) string) error {
+	// 任一源是 apollo/consul/env-vars/kuboard 才真有"非 MCP 读 creds.json"的需求。
 	needs := false
 	for _, cc := range cfg.Infrastructure.ConfigCenters {
 		if needsCreds(cc.Type) {
@@ -42,20 +51,17 @@ func WriteIDECredsFile(cfg *config.SystemConfig, creds map[string]string) error 
 	if !needs {
 		return nil
 	}
-
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("read $HOME: %w", err)
 	}
-	dir := filepath.Join(home, ".tshoot")
+	dir := filepath.Join(home, homeSubdir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 	credsPath := filepath.Join(dir, cfg.ResolveID()+"-creds.json")
-
 	// 已有就 merge(允许多次部署 / 不同 target 同 agent_id 共存)
 	credsData, _ := readJSONOrEmpty(credsPath)
-	get := func(k string) string { return creds[k] }
 	writeCredsByType(credsData, cfg, get)
 	if err := writeJSONFile(credsPath, credsData, 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", credsPath, err)

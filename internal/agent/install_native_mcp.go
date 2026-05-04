@@ -17,7 +17,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 )
@@ -48,7 +47,11 @@ func MergeMCPIntoIDESettingsAt(target string, cfg *config.SystemConfig, creds ma
 	get := func(k string) string { return creds[k] }
 	// MCP key 前缀用 system.id(短)而不是 ResolveID()(常见 = "<id>-troubleshooter"),
 	// 避免 server_key + tool_name 拼起来超过 IDE 60 字符的 tool 名限制。
-	servers := buildMCPServersForCfg(cfg, cfg.MCPKeyPrefix(), get)
+	// IDE 走 PruneEmpty=true 模式 —— 避免把 "" 当真值喂给后端进程触发无效连接。
+	servers := BuildMCPServers(cfg, MCPBuildOptions{
+		AgentID:    cfg.MCPKeyPrefix(),
+		PruneEmpty: true,
+	}, get)
 
 	if t == TargetCodex {
 		return mergeMCPIntoCodexCLI(servers)
@@ -150,126 +153,6 @@ func mergeMCPIntoCodexCLI(servers map[string]any) error {
 	return nil
 }
 
-// buildMCPServersForCfg 从 cfg 派生 mcpServers map,跟 injectMCPServers 行为对齐
-// (实质是同一份 schema,只是这里返回扁平 map 而不是写到 root["mcp"]["servers"])。
-// get(envVarName) 返回 cred 值;**返回空串的字段会从 env block 里 omit**(不写 key),
-// 避免 IDE 启 MCP 时把 "{{XXX}}" 占位字符串当真传给后端进程造成无效连接。
-// 用户事后可以在 IDE settings.json 手填该字段。
-//
-// agentID 加到所有 key 前缀(如 "truss-bot-nacos-mcp-server-prod"),保证 Claude Code/Cursor
-// 用户级共享 settings.json 池里多 system 共存不撞名。空字符串则不加前缀(单 agent 场景)。
-func buildMCPServersForCfg(cfg *config.SystemConfig, agentID string, get func(string) string) map[string]any {
-	servers := map[string]any{}
-	envs := cfg.Environments
-	keyFor := func(prefix, sourceID, envID string) string {
-		return mcpKeyForAgent(agentID, prefix, sourceID, envID)
-	}
-	keyFixed := func(name string) string {
-		if agentID == "" {
-			return name
-		}
-		return agentID + "-" + name
-	}
-
-	// 把 envMap 里 value=="" 的 entry 删掉,空字段不进 settings.json
-	pruneEmpty := func(m map[string]any) map[string]any {
-		for k, v := range m {
-			if s, ok := v.(string); ok && s == "" {
-				delete(m, k)
-			}
-		}
-		return m
-	}
-
-	// nacos per (source × env):多源 + 每 env 一个独立 MCP 实例
-	for _, cc := range cfg.Infrastructure.ConfigCenters {
-		if cc.Type != "nacos" {
-			continue
-		}
-		for _, e := range envs {
-			env := pruneEmpty(map[string]any{
-				"NACOS_ADDR":     get(envVar("CC_ADDR", cc.ID, e.ID)),
-				"NACOS_USERNAME": get(envVar("CC_USER", cc.ID, e.ID)),
-				"NACOS_PASSWORD": get(envVar("CC_PASS", cc.ID, e.ID)),
-			})
-			servers[keyFor("nacos", cc.ID, e.ID)] = map[string]any{
-				"command": "uvx",
-				"args":    []any{"nacos-mcp-router@latest"},
-				"env":     env,
-			}
-		}
-	}
-
-	if cfg.Infrastructure.Observability.Grafana.Enabled {
-		for _, e := range envs {
-			up := strings.ToUpper(e.ID)
-			env := pruneEmpty(map[string]any{
-				"GRAFANA_URL":      get("GRAFANA_URL_" + up),
-				"GRAFANA_USERNAME": get("GRAFANA_USER_" + up),
-				"GRAFANA_PASSWORD": get("GRAFANA_PASS_" + up),
-			})
-			servers[keyFor("grafana", "", e.ID)] = map[string]any{
-				"command": "npx",
-				"args": []any{
-					"-y", "@leval/mcp-grafana",
-					"--disable-incident", "--disable-alerting", "--disable-oncall",
-					"--disable-admin", "--disable-sift", "--disable-pyroscope",
-				},
-				"env": env,
-			}
-		}
-	}
-
-	if cfg.Infrastructure.Observability.Loki.Enabled {
-		for _, e := range envs {
-			up := strings.ToUpper(e.ID)
-			env := pruneEmpty(map[string]any{
-				"GRAFANA_URL":      get("GRAFANA_URL_" + up),
-				"GRAFANA_USERNAME": get("GRAFANA_USER_" + up),
-				"GRAFANA_PASSWORD": get("GRAFANA_PASS_" + up),
-			})
-			servers[keyFor("loki", "", e.ID)] = map[string]any{
-				"command": "npx",
-				"args": []any{
-					"-y", "@leval/mcp-grafana",
-					"--disable-search", "--disable-dashboard", "--disable-datasource",
-					"--disable-incident", "--disable-alerting", "--disable-oncall",
-					"--disable-admin", "--disable-sift", "--disable-pyroscope",
-				},
-				"env": env,
-			}
-		}
-	}
-
-	// messaging:lark
-	for _, m := range cfg.Infrastructure.Messaging {
-		if m.Enabled && m.Platform == "lark" {
-			servers[keyFixed("lark-openapi")] = map[string]any{
-				"command": "npx",
-				"args":    []any{"-y", "@larksuite/lark-openapi-mcp"},
-				"env": pruneEmpty(map[string]any{
-					"APP_ID":     get("LARK_APP_ID"),
-					"APP_SECRET": get("LARK_APP_SECRET"),
-				}),
-			}
-			break
-		}
-	}
-
-	// project tracking:feishu_project
-	for _, p := range cfg.Infrastructure.ProjectTracking {
-		if p.Enabled && p.Platform == "feishu_project" {
-			servers[keyFixed("FeishuProjectMcp")] = map[string]any{
-				"command": "npx",
-				"args":    []any{"-y", "@lark-project/mcp", "--domain", "https://project.feishu.cn"},
-				"env": pruneEmpty(map[string]any{
-					"MCP_USER_TOKEN": get("MCP_USER_TOKEN"),
-				}),
-			}
-			break
-		}
-	}
-
-	return servers
-}
+// buildMCPServersForCfg 已搬到 install_native_mcp_common.go::BuildMCPServers,IDE / openclaw
+// 共用一份。本文件只剩 IDE 专用的 settings.json / codex CLI 注入逻辑。
 

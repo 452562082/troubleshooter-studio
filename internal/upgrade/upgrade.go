@@ -66,8 +66,12 @@ func Run(opts Options) (*Result, error) {
 		res.SchemaMigrated = true // 标记为需要人工 review
 	}
 
-	// 备份
-	ts := time.Now().Format("20060102-150405")
+	// 备份。秒精度时,1 秒内连跑两次 upgrade 第二次 Rename 会撞已存在的 backup
+	// (Linux POSIX rename 要求目标 dir 为空,撞 EEXIST 中断;macOS APFS 边界行为不可靠)。
+	// 加纳秒后 9 位让两次 backup 几乎不可能撞。跟 internal/agent/install_native.go 的
+	// nanoTimestamp 同款思路,各自 inline 不跨包耦合。
+	now := time.Now()
+	ts := now.Format("20060102-150405") + fmt.Sprintf(".%09d", now.Nanosecond())
 	backup := opts.OutputDir + ".bak." + ts
 	if err := os.Rename(opts.OutputDir, backup); err != nil {
 		return nil, fmt.Errorf("backup rename: %w", err)

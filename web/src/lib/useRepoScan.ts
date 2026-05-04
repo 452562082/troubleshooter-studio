@@ -320,10 +320,20 @@ export function useRepoScan(deps: RepoScanDeps) {
       // 反填 —— frontend / common-lib / mobile / infra / docs 这类不是服务,反填上服务
       // 名只会污染 routing skill 和后续的配置中心 / 数据层扫描。role 还没识别出来时(空)
       // 也按"业务服务"处理,等 refreshRoleHint 跑完再说。
+      //
+      // 多服务场景(rpt.service_names.length > 1):**不**自动把全部子服务名塞进 service_names —
+      // 这跟 refreshSubmoduleHints 弹的"合并为本仓 N 个服务名"banner 冲突(banner 等用户显式决定,
+      // analyzer 抢先填 = banner 形同虚设,Step 5 立刻看到一堆未确认的服务名)。多服务时按"单一
+      // 仓 = 单一服务"兜底,用户决定 → banner 的"合并"或"拆分"按钮接管。
       const rpt = (res.report?.repos || []).find(rr => rr.name === r.name)
       if (deps.isServiceRole(r.role)) {
-        if (rpt?.service_names?.length) {
-          r.service_names = rpt.service_names.join(', ')
+        if (rpt?.service_names?.length === 1) {
+          // 单服务场景:直接填,不弹 banner
+          r.service_names = rpt.service_names[0]
+        } else if (rpt?.service_names && rpt.service_names.length > 1) {
+          // 多服务场景:留给 refreshSubmoduleHints 的 banner;此处按 r.name 兜底,
+          // 用户点"合并为本仓 N 个服务名"按钮才把 N 个服务名填进 r.service_names。
+          if (!r.service_names.trim() && r.name) r.service_names = r.name
         } else if (!r.service_names.trim() && r.name) {
           // analyzer 没扫出 service_names(配置 key 不显式 / 单服务仓 / monorepo 子目录 等场景),
           // 默认就用 repo.name 当服务名。"一个仓 = 一个服务"是 95% 用户的预期。

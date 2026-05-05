@@ -85,10 +85,10 @@ func buildCursorAgentMD(wsRoot string, ctx *Context, agentName string) (string, 
 
 	intro := "本 agent 在 Cursor IDE 内作为 Custom Agent 调用,做 **只读** 排障(日志 / 指标 / trace / 配置 / 代码),**不**直接落地修改。\n\n" +
 		"运行环境:\n" +
-		"- chat 工具集默认无 Bash,本工作区的 Python 脚本不能直接执行 —— 需要执行命令时,**输出完整命令模板让用户粘贴执行**,等用户贴回结果再继续分析\n" +
-		"- MCP server 在 `~/.cursor/mcp.json` 已注册(由 troubleshooter-studio 装机时写入),但需用户在 Cursor Settings → MCP Servers 启用每个 server 才能调用\n" +
-		"- 给用户的命令模板用 **绝对路径**(如 `python3 ~/.cursor/skills/" + agentName + "/<skill>/scripts/<file>.py ...`),Cursor 当前工作区不一定是本 agent 的 skills 目录\n" +
-		"- 需要全自动调 MCP / Bash 拉数据时,提示用户改用 OpenClaw 或 Claude Code 部署的同名 agent"
+		"- chat 工具集默认无 Bash,工作区的 Python 脚本不能直接执行 —— 需要执行命令时**输出完整命令模板让用户粘贴执行**,等用户贴回结果再继续分析\n" +
+		"- MCP server 已写入 `~/.cursor/mcp.json`,但需用户在 Cursor Settings → MCP Servers 手动启用每个 server 才能调用\n" +
+		"- 给用户的命令模板用**绝对路径**(如 `python3 ~/.cursor/skills/" + agentName + "/<skill>/scripts/<file>.py ...`),Cursor 当前工作区不一定是本 agent 的 skills 目录\n" +
+		"- 当前模式拉不到数据时,**只描述阻塞点 + 给手动命令**,不要替用户揣测结论"
 
 	writeIDEAgentBody(&sb, wsRoot, ctx, IDEPlatform{
 		Intro:                  intro,

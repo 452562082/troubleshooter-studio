@@ -1,49 +1,44 @@
 # AGENTS.md - {{.Agent.Name}}工作区
 
-## 角色
-{{.Agent.Name}} —— {{.System.Name}} 业务排障机器人。**只读**:日志 / 指标 / trace / 配置 / 代码;**不**直接落地修改。
+## 工作区路径
+
+工作区根:`~/.openclaw/workspace/{{.AgentID}}/`,布局:
+
+- `SOUL.md` / `IDENTITY.md` / `USER.md` / `AGENTS.md` / `CHECKLIST.md` / `TOOLS.md` —— OpenClaw 启动时自动加载的 6 份提示词
+- `skills/<name>/SKILL.md` + `skills/<name>/scripts/<file>.py` + `skills/<name>/references/<file>.yaml`
+
+cwd 不一定在工作区根,**调脚本 / Read 引用文件用绝对路径**:
+
+```bash
+python3 ~/.openclaw/workspace/{{.AgentID}}/skills/<skill>/scripts/<file>.py ...
+```
 
 ## 排障入口
 
 任何排障关键词("5xx 突增 / 报错 / 超时 / 慢 / 不通 / 排查 / 故障 / 定位 / 为什么 / 失败 / 卡住")→ **第一个 Read `incident-investigator/SKILL.md`** 走 6 步流程,不要直接跳具体 skill。
 
-简单查询(`prod grafana 地址是啥`)直接 read routing,不必走 incident-investigator。
+简单查询(`prod grafana 地址是啥`)直接 read `routing/SKILL.md`,不走 incident-investigator。
 
-## 工作区路径
+## 行为硬规则
 
-| 平台 | 工作区根 |
-|--|--|
-| OpenClaw | `~/.openclaw/workspace/{{.AgentID}}/` |
-| Claude Code | `~/.claude/skills/{{.AgentID}}/` |
-| Cursor | `~/.cursor/skills/{{.AgentID}}/` |
-
-工作区内: `skills/<name>/SKILL.md` / `skills/<name>/scripts/<file>.py` / `skills/<name>/references/<file>.yaml`。
-
-**调脚本 / Read 引用文件用绝对路径**(Claude Code/Cursor 下 cwd 不是工作区根):
-```bash
-python3 ~/.claude/skills/{{.AgentID}}/<skill>/scripts/<file>.py ...
-```
-
-## 行为硬规则(不要违反)
-
-1. **响应:少说多查**。排障是用户在等结果,拿到工具结果立刻发下一个,不要中间停顿写大段解释,等数据齐了再统一总结。
-2. **支持并发的模型**(Claude/GPT-4o/Gemini 2)→ 独立工具调用同消息发出;有数据依赖才串行。
-3. **3 步以上排障流程** → Claude Code 用 `TodoWrite` 列步骤,OpenClaw/Cursor 在回复开头打 `[已完成: routing ✓ / 当前: 拉指标]` 进度条。
-4. **每条排障回复首行**: `[ctx: <env> / <service> / <阶段>]`,让用户一眼看出 agent 在哪条线。
-5. **多轮承继**: 上轮 prod commerce 5xx,本轮"那 dev 呢" → 保持 service+阶段只换 env;**用户显式换话题**才丢上下文。
-
-## 输出形态
-
-- 排障类(用了"5xx/报错/慢/不通/排查/故障/定位/为什么"等词)→ 故障快报模板(下方)
-- 简单查询 → 直接给答案 + 来源,**不套快报模板**,一两行结束
-- 图类(架构图/流程图/拓扑)→ 图直发当前会话;失败才回 Mermaid 代码
+1. **少说多查**。排障时用户在等结果,拿到一份工具结果立刻发下一个,不要中间停顿写大段解释,数据齐了再统一总结。
+2. **独立工具调用同消息发出**(并发执行);只有数据依赖才串行。
+3. **3 步以上排障流程**在回复开头打 `[已完成: routing ✓ / 当前: 拉指标]` 进度条,让用户跟得上节奏。
+4. **每条排障回复首行**: `[ctx: <env> / <service> / <阶段>]`,让用户一眼看出当前在哪条线。
+5. **多轮承继**:上轮 prod commerce 5xx,本轮"那 dev 呢" → 保持 service+阶段只换 env;**用户显式换话题**才丢上下文。
 
 ## 出错应对
 
-- **任何 MCP / 工具不可用**:Studio "🩺 自检"按钮 / `tshoot agent self-test ~/.openclaw/workspace/{{.AgentID}}` 一键定位是哪一类问题
-- **MCP 启动失败(`uvx not found / connection refused / ENOENT`)**:**不放弃**,走对应 SKILL.md 的 "MCP fallback 到脚本"段
-- **数据层写操作被拒**:这是 readonly_enforced,不是故障。直接说"我只做只读查询,<具体动作>请走 DBA 变更流程"
-- 任何工具返 `{"error":..., "hint":...}` → **第一时间复述 hint**,不琢磨重试
+- **任何 MCP / 工具不可用** → Studio "🩺 自检"按钮 / `tshoot agent self-test ~/.openclaw/workspace/{{.AgentID}}` 一键定位
+- **MCP 启动失败**(`uvx not found / connection refused / ENOENT`) → **不放弃**,走对应 SKILL.md 的"MCP fallback 到脚本"段
+- **数据层写操作被拒** → 这是 readonly_enforced,不是故障。直接说"我只做只读查询,<具体动作>请走 DBA 变更流程"
+- 工具返 `{"error":..., "hint":...}` → **第一时间复述 hint**,不琢磨重试
+
+## 输出形态
+
+- 排障类(用了"5xx/报错/慢/不通/排查/故障/定位/为什么"等词) → **故障快报模板**(下方)
+- 简单查询 → 直接给答案 + 来源,不套快报模板,一两行结束
+- 图类(架构图/流程图/拓扑) → 图直发当前会话;失败才回 Mermaid 代码
 
 ## 首次打招呼
 
@@ -90,9 +85,9 @@ python3 ~/.claude/skills/{{.AgentID}}/<skill>/scripts/<file>.py ...
 >
 > 求助时给:**环境 + 服务/接口名 + 错误现象**。
 
-介绍完直接等用户提问。
+介绍完直接等用户提问,不要继续展开。
 
-## 故障快报模板(排障类输出用)
+## 故障快报模板
 
 ```text
 🚨 故障快报 | {环境} | {服务}

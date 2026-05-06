@@ -39,15 +39,40 @@
 
 **Codex grafana/loki MCP 走 go 二进制**(不走 npx):`tshoot install --target codex` 自动从 `github.com/grafana/mcp-grafana` releases 下载预编译版到 `~/.codex/bin/mcp-grafana`。换 go 版的原因:`@leval/mcp-grafana` 这个 npm 包启动时往 stdout 打 banner 污染 JSON-RPC 流,导致 codex 握手"connection closed: initialize response";同时 codex subagent thread 默认 network=Restricted 让 npx 拉包也可能失败。go 版严格 stdio + 装好就跑,绕开两条死亡路径。下载失败会 fallback 到 npx 但会打 warning。
 
+## 依赖
+
+`bin/` 和 `dist/` 在 `.gitignore` 里,`git clone` 完没有可执行文件,必须本地构建。**先按场景把依赖装齐**(否则 make 会以 `go: command not found` / `npm: not found` 之类报错):
+
+| 你要跑 | 必装 |
+|---|---|
+| `make`(只要 CLI 二进制) | **Go 1.25+** |
+| `make desktop` / `make desktop-app`(桌面 app) | Go 1.25+ · **Node.js 20+(含 npm)** · **Xcode Command Line Tools**(macOS CGO 需要;Linux 用 `build-essential` + `webkit2gtk` dev 包) |
+| `make wails-gen`(只在改 Go binding 后用) | 上述 + **Wails CLI v2**:`go install github.com/wailsapp/wails/v2/cmd/wails@latest` |
+| `make icon`(只在重渲图标时用) | 上述 + **librsvg**:`brew install librsvg` |
+| `make release`(多平台交叉编译) | Go 1.25+(纯 Go,不要 CGO) |
+
+**macOS 一键装齐(桌面 app 用)**:
+
+```bash
+xcode-select --install          # CGO 工具链
+brew install go node            # Go + Node
+```
+
+**Ubuntu / Debian(桌面 app 用)**:
+
+```bash
+sudo apt install -y golang-1.25 nodejs npm build-essential libgtk-3-dev libwebkit2gtk-4.0-dev
+```
+
+只跑 CLI 不需要 Node / CGO,装个 Go 就够。
+
 ## 快速开始
 
 ```bash
 git clone <此仓库> && cd troubleshooter-studio
 ```
 
-> 首次构建必看:`bin/` 和 `dist/` 都在 `.gitignore` 里,`git clone` 完没有可执行文件 ——
-> 必须先跑下方任一构建命令产出 `bin/tshoot`(CLI)或 `dist/TroubleshooterStudio.app`(桌面)
-> 才能用。改 Go binding(`cmd/tshoot-desktop/App` 的 method 签名变了)才需要 `make wails-gen`
+> 改 Go binding(`cmd/tshoot-desktop/App` 的 method 签名变了)才需要 `make wails-gen`
 > 刷新 `web/wailsjs/go/`(已入库,普通构建不用动)。
 
 **桌面 app**(推荐,新用户):

@@ -34,6 +34,10 @@ export interface RepoScanItem {
   framework: string
   role?: string
   sub_path?: string
+  /** umbrella 子模块:本仓是从哪个 umbrella(主仓)切出去的,引用 repos[].name */
+  parent_repo?: string
+  /** umbrella 内的挂载相对路径(默认 = name) */
+  parent_path?: string
   service_names: string
   env_branches: Record<string, string>
   _nameManual?: boolean

@@ -243,22 +243,52 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
     }
     deployLoading.value = true
     try {
-      // 构造 repoPaths(三个 target 共用同一份本机仓库路径表)
+      // 构造 repoPaths(三个 target 共用同一份本机仓库路径表)。
+      // 解析优先级跟 analyzerpipe.Run / useRepoScan refresh helpers 完全一致:
+      //   1. _localPath 显式给(本地模式 / splitMonorepo 给 umbrella 子模块预填的位置)
+      //   2. parent_repo 在场 → 等 parent 已解析,然后 <parent 路径>/<parent_path 或 name>
+      //      (umbrella 继承编排;之前漏了这条,umbrella 子模块本地路径错落到 ReposRoot/<name>
+      //      上,bot 的 repo-path-map.yaml 写成 ~/go/src/api 而不是 ~/go/src/truss/api)
+      //   3. 远程模式 _cloneTarget + name(用户挑过)
+      //   4. 兜底 effectiveRoot + name(全局默认 reposRoot)
       const repoPaths: Record<string, string> = {}
-      const effectiveRoot = deps.reposRootInput.value.trim() || deps.resolvedReposRoot.value
+      const effectiveRoot = (deps.reposRootInput.value.trim() || deps.resolvedReposRoot.value).replace(/\/$/, '')
+      // 拓扑两轮:第 1 轮处理无 parent_repo 的(算作"根"),第 2 轮处理 parent_repo 在场的
+      // (此时根已 resolved 进 repoPaths)。链式 umbrella(child of child)罕见,health check
+      // 也禁了环;两轮不够的极端场景退回 effectiveRoot/name 兜底,不会死循环。
+      const resolveRoot = (r: typeof deps.repos[number]): string => {
+        const explicit = (r._localPath || '').trim()
+        if (explicit) return explicit
+        const dest = deps.resolveCloneDest(r)
+        if (dest) return dest
+        return effectiveRoot ? `${effectiveRoot}/${r.name}` : ''
+      }
       for (const r of deps.repos) {
         if (!r.name.trim()) continue
-        let path = ''
-        if (r._source === 'local') {
-          path = (r._localPath || '').trim()
-        } else {
-          // _cloneTarget 是父目录,实际仓库路径要拼上 repo.name
-          path = deps.resolveCloneDest(r)
-          if (!path && effectiveRoot) {
-            path = `${effectiveRoot.replace(/\/$/, '')}/${r.name}`
-          }
+        if (r.parent_repo && r.parent_repo.trim()) continue // 第 2 轮处理
+        const p = resolveRoot(r)
+        if (p) repoPaths[r.name] = p
+      }
+      for (const r of deps.repos) {
+        if (!r.name.trim()) continue
+        const parentName = (r.parent_repo || '').trim()
+        if (!parentName) continue
+        // _localPath 优先(splitMonorepo 已预填,免重新算);没有就根据 parent 拼
+        const explicit = (r._localPath || '').trim()
+        if (explicit) {
+          repoPaths[r.name] = explicit
+          continue
         }
-        if (path) repoPaths[r.name] = path
+        const parentPath = repoPaths[parentName]
+        if (parentPath) {
+          const mount = (r.parent_path || '').trim() || r.name
+          repoPaths[r.name] = `${parentPath.replace(/\/$/, '')}/${mount}`
+        } else {
+          // parent 没解析出来(name 引用不到 / health check 已 error 但用户硬部署)→ 兜底
+          const dest = deps.resolveCloneDest(r)
+          if (dest) repoPaths[r.name] = dest
+          else if (effectiveRoot) repoPaths[r.name] = `${effectiveRoot}/${r.name}`
+        }
       }
 
       // 每个勾选的 target:

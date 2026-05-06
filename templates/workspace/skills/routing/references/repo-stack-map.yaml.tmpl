@@ -15,6 +15,12 @@ repos:
     {{- if .SubPath}}
     sub_path: {{.SubPath | printf "%q"}}     # monorepo 子目录:<clone-root>/<sub_path> 才是本服务源码根
     {{- end}}
+    {{- if .ParentRepo}}
+    parent_repo: {{.ParentRepo | printf "%q"}}     # 从该 umbrella(主仓)切出去的子模块,排障时跨仓查依赖 / 公共配置 / 历史变更先看 umbrella
+    {{- if .ParentPath}}
+    parent_path: {{.ParentPath | printf "%q"}}     # 在 umbrella clone 内的挂载位置(默认=name)
+    {{- end}}
+    {{- end}}
     {{- if .Framework}}
     framework: {{.Framework | printf "%q"}}
     {{- end}}

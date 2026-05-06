@@ -27,5 +27,14 @@ repos:
     # monorepo:实际源码目录 = local_path + "/" + sub_path
     sub_path: {{.SubPath | printf "%q"}}
     {{- end}}
+    {{- if .ParentRepo}}
+    # umbrella 子模块:本仓代码躺在 umbrella(parent_repo) clone 内的 parent_path 位置。
+    # 排障时:跨仓配置 / 公共依赖 / .gitmodules 关系先去 umbrella 那看;本仓的代码扫描
+    # 直接用 local_path(已是 <umbrella-clone>/<parent_path 或 name> 的绝对路径)。
+    parent_repo: {{.ParentRepo | printf "%q"}}
+    {{- if .ParentPath}}
+    parent_path: {{.ParentPath | printf "%q"}}
+    {{- end}}
+    {{- end}}
     url: {{.URL | printf "%q"}}
 {{- end}}

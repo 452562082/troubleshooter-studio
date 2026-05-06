@@ -108,14 +108,13 @@ const emit = defineEmits<{
       </span>
       <span
         v-if="repo.parent_repo && repo.parent_repo.trim()"
-        class="submodule-tag umbrella-tag has-hint"
-        :data-hint="`从 umbrella ${repo.parent_repo} 切出去的子模块,部署时 clone 到 &lt;${repo.parent_repo} clone 路径&gt;/${repo.parent_path || repo.name}`"
+        class="submodule-tag umbrella-tag"
       >
         🌂 属于 {{ repo.parent_repo.trim() }} @ {{ repo.parent_path || repo.name || '<name>' }}
         <button
           type="button"
           class="btn-link cc-delete has-hint"
-          data-hint="解除 umbrella 关联,本仓变成独立 repo"
+          data-hint="解除关联"
           @click="repo.parent_repo = ''; repo.parent_path = ''"
         >🗑</button>
       </span>
@@ -424,8 +423,7 @@ const emit = defineEmits<{
   color: #f3f5f9;
   font-size: 12px;
   line-height: 1.4;
-  white-space: pre;
-  max-width: 360px;
+  white-space: nowrap;
   border-radius: 4px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
   opacity: 0;

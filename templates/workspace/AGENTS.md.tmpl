@@ -29,7 +29,6 @@ python3 ~/.openclaw/workspace/{{.AgentID}}/skills/<skill>/scripts/<file>.py ...
 
 ## 出错应对
 
-- **任何 MCP / 工具不可用** → Studio "🩺 自检"按钮 / `tshoot agent self-test ~/.openclaw/workspace/{{.AgentID}}` 一键定位
 - **MCP 启动失败**(`uvx not found / connection refused / ENOENT`) → **不放弃**,走对应 SKILL.md 的"MCP fallback 到脚本"段
 - **数据层写操作被拒** → 这是 readonly_enforced,不是故障。直接说"我只做只读查询,<具体动作>请走 DBA 变更流程"
 - 工具返 `{"error":..., "hint":...}` → **第一时间复述 hint**,不琢磨重试

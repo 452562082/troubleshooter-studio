@@ -90,11 +90,11 @@ func TestRun_BackupAndPreserve(t *testing.T) {
 		t.Errorf("backup path format wrong: %s", res.BackupPath)
 	}
 
-	// SOUL 应仍保留
-	if got, _ := os.ReadFile(soulPath); string(got) != "custom-soul-marker\n" {
-		t.Errorf("SOUL.md not preserved after upgrade, got: %s", got)
+	// SOUL 应被模板覆盖(整文件 preserve 已删) —— upgrade 用最新模板重渲产物
+	if got, _ := os.ReadFile(soulPath); string(got) == "custom-soul-marker\n" {
+		t.Error("SOUL.md should be overwritten by template after upgrade, but kept user edit")
 	}
-	// config-map 的 order-worker/dev 应 verified
+	// config-map 的 order-worker/dev 应 verified(config-map verified 行的 prior override 仍保留)
 	newCM, _ := os.ReadFile(cmPath)
 	if !strings.Contains(string(newCM), "dataId: \"worker.yaml\"") {
 		t.Error("order-worker/dev manual override not preserved")
@@ -102,9 +102,6 @@ func TestRun_BackupAndPreserve(t *testing.T) {
 
 	if res.GenSummary == nil {
 		t.Fatal("GenSummary missing")
-	}
-	if res.GenSummary.PreservedCount < 1 {
-		t.Errorf("expected PreservedCount >= 1, got %d", res.GenSummary.PreservedCount)
 	}
 	if res.GenSummary.PriorOverridesCount != 1 {
 		t.Errorf("expected 1 prior override, got %d", res.GenSummary.PriorOverridesCount)

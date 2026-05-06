@@ -67,7 +67,6 @@ infrastructure:
 generation:
   targets: [openclaw]
   skills_whitelist: [routing, config-executor, redis-runtime-query, diagram-generator]
-  preserve_on_regenerate: [SOUL.md]
 
 meta:
   schema_version: "0.1"

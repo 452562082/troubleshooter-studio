@@ -49,8 +49,8 @@ func TestPreserve_ConfigMapManualOverride(t *testing.T) {
 	}
 }
 
-// 场景 2：手改 SOUL.md → 重 gen → 保留（因为在 preserve_on_regenerate 列表里）
-func TestPreserve_FileInPreserveList(t *testing.T) {
+// 场景 2：手改 SOUL.md → 重 gen → 被模板覆盖(整文件 preserve 已删,模板更新优先)
+func TestPreserve_TemplateDerivedFileOverwritten(t *testing.T) {
 	cfg := loadCfg(t, "examples/shop-system.yaml")
 	out := t.TempDir()
 	tr := filepath.Join(projectRoot(t), "templates")
@@ -65,8 +65,8 @@ func TestPreserve_FileInPreserveList(t *testing.T) {
 	if err := New(cfg, tr, out).Generate(); err != nil {
 		t.Fatal(err)
 	}
-	if got := readFile(t, soulPath); got != "custom soul\n" {
-		t.Errorf("SOUL.md should be preserved, got:\n%s", got)
+	if got := readFile(t, soulPath); got == "custom soul\n" {
+		t.Error("SOUL.md should be overwritten by template, but kept user edit")
 	}
 }
 

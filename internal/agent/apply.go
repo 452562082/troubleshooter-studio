@@ -1,6 +1,6 @@
 // Package agent 实现阶段 2 的"读-改-部署闭环"：
 // 从 discover 识别到的机器人 (tshoot.json) 出发，用新的 system.yaml 重新渲染产物，
-// rsync 回活的 workspace 路径，保留 preserve_on_regenerate 列表中的用户手改。
+// rsync 回活的 workspace 路径,模板派生文件按最新模板覆盖。
 //
 // 这个包刻意**不**调 install.sh —— install.sh 的职责是"首次 bootstrap + 收凭证"，
 // agent apply 的职责是"系统架构 / 映射表更新"，两者互补：
@@ -50,7 +50,6 @@ type Result struct {
 	AgentPath        string   `json:"agent_path"`
 	Target           string   `json:"target"`
 	FilesWritten     int      `json:"files_written"`
-	FilesPreserved   []string `json:"files_preserved,omitempty"`
 	FilesRemoved     []string `json:"files_removed,omitempty"`
 	TSFJSONUpdated   bool     `json:"tsf_json_updated"`
 	NeedsRestartHint string   `json:"needs_restart_hint,omitempty"`
@@ -123,13 +122,7 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 		return nil, fmt.Errorf("staging %s missing: %w", src, statErr)
 	}
 
-	// preserve 列表（仅新 yaml 声明的；其他 target 通常为空，无副作用）
-	preserveSet := map[string]bool{}
-	for _, p := range cfg.Generation.PreserveOnRegenerate {
-		preserveSet[p] = true
-	}
-
-	var preserved, removed []string
+	var removed []string
 	written := 0
 
 	srcFiles, err := listRel(src)
@@ -148,12 +141,6 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 		if rel == discover.MetaFilename {
 			continue
 		}
-		if preserveSet[rel] {
-			if _, err := os.Stat(filepath.Join(workDir, rel)); err == nil {
-				preserved = append(preserved, rel)
-				continue
-			}
-		}
 		if opts.DryRun {
 			written++
 			continue
@@ -166,7 +153,7 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 
 	// dst 里但 src 没有的文件 → 判定是不是 tshoot 管辖的产物，是的话移除
 	for _, rel := range dstFiles {
-		if rel == discover.MetaFilename || preserveSet[rel] {
+		if rel == discover.MetaFilename {
 			continue
 		}
 		if !inList(srcFiles, rel) {
@@ -219,7 +206,6 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 		AgentPath:        ag.Path,
 		Target:           ag.Meta.Target,
 		FilesWritten:     written,
-		FilesPreserved:   preserved,
 		FilesRemoved:     removed,
 		TSFJSONUpdated:   tsfUpdated,
 		NeedsRestartHint: restartHint,

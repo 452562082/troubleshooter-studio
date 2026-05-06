@@ -202,10 +202,6 @@ func (a *Answers) WriteYAML(out io.Writer) error {
 		}
 	}
 	p("    - diagram-generator\n")
-	p("  preserve_on_regenerate:              # 这些文件在下次 gen 时整体保留（让用户的手改不丢）\n")
-	p("    - SOUL.md\n")
-	p("    - USER.md\n")
-	p("    - CHECKLIST.md\n")
 
 	p("\nmeta:\n")
 	p("  schema_version: \"0.1\"\n")

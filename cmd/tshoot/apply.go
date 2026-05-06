@@ -75,9 +75,6 @@ func runApply(args []string) error {
 	}
 	fmt.Printf("%s完成：%s (%s)\n", verb, res.AgentPath, res.Target)
 	fmt.Printf("  写入文件：%d\n", res.FilesWritten)
-	if len(res.FilesPreserved) > 0 {
-		fmt.Printf("  保留（用户手改）：%s\n", strings.Join(res.FilesPreserved, ", "))
-	}
 	if len(res.FilesRemoved) > 0 {
 		fmt.Printf("  移除（陈旧产物）：%s\n", strings.Join(res.FilesRemoved, ", "))
 	}

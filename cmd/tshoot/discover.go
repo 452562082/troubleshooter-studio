@@ -62,4 +62,4 @@ func runDiscover(args []string) error {
 // tshoot apply -i <new.yaml> --path <agent-path> [--dry-run] [--format text|json]
 // 流程：读 new yaml → 根据 agent.Path 的 tshoot.json 识别 target → 重 render → rsync 回 path
 //
-//	preserve_on_regenerate 里的用户手改自动保留。
+//	模板派生文件按最新模板覆盖;config-map 中 status=verified 且无 source 的人工行保留。

@@ -20,7 +20,6 @@ type Plan struct {
 	FilesCreate    []string            `json:"files_create"`
 	FilesModify    []string            `json:"files_modify"`
 	FilesRemove    []string            `json:"files_remove"`
-	Preserved      []string            `json:"preserved"`
 	PriorOverrides []OverrideRef       `json:"prior_overrides"`
 	AnalyzerHits   []AnalyzerHitRef    `json:"analyzer_hits"`
 	ConfigMap      ConfigMapProjection `json:"config_map_projection"`
@@ -83,17 +82,6 @@ func (g *Generator) BuildPlan(existingDir string) (*Plan, error) {
 
 	// files 三态
 	plan.FilesCreate, plan.FilesModify, plan.FilesRemove = diffFileSets(existingDir, tmp)
-
-	// preserved：从 snapshot 逻辑走一遍现存产物（只做读取，不改状态）
-	if existingDir != "" {
-		snap, err := SnapshotExisting(existingDir, g.Ctx.Generation.PreserveOnRegenerate)
-		if err == nil {
-			for k := range snap.PreservedFiles {
-				plan.Preserved = append(plan.Preserved, k)
-			}
-			sort.Strings(plan.Preserved)
-		}
-	}
 
 	// prior overrides（已在 g.Ctx.PriorOverrides 中）
 	for svc, byEnv := range g.Ctx.PriorOverrides {

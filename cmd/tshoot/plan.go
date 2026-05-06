@@ -103,13 +103,6 @@ func printPlanText(p *generator.Plan) {
 	printSample("modify", "~", p.FilesModify)
 	printSample("remove", "-", p.FilesRemove)
 
-	if len(p.Preserved) > 0 {
-		fmt.Printf("\nPreserved from existing (%d):\n", len(p.Preserved))
-		for _, f := range p.Preserved {
-			fmt.Printf("  · %s\n", f)
-		}
-	}
-
 	if len(p.PriorOverrides) > 0 {
 		fmt.Printf("\nPrior manual overrides (%d):\n", len(p.PriorOverrides))
 		for _, o := range p.PriorOverrides {

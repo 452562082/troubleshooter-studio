@@ -83,7 +83,6 @@ type GenSummary struct {
 	OutputDir           string `json:"output_dir"`
 	SkillsIncludedCount int    `json:"skills_included_count"`
 	FilesWritten        int    `json:"files_written"`
-	PreservedCount      int    `json:"preserved_count"`
 	PriorOverridesCount int    `json:"prior_overrides_count"`
 	AnalyzerHitsCount   int    `json:"analyzer_hits_count"`
 }
@@ -189,8 +188,8 @@ func (g *Generator) Generate() error {
 	// 保持 Generator 字段为"外部可配",Context 为"模板可见"的分层)
 	g.Ctx.RepoLocalPaths = g.RepoLocalPaths
 
-	// 1) 从现有产物提取 preserved 文件内容 + config-map 人工行
-	snap, err := SnapshotExisting(g.OutputDir, g.Ctx.Generation.PreserveOnRegenerate)
+	// 1) 从现有产物提取 config-map 人工行(verified 状态且无 source 字段的)
+	snap, err := SnapshotExisting(g.OutputDir)
 	if err != nil {
 		return fmt.Errorf("snapshot: %w", err)
 	}
@@ -260,11 +259,6 @@ func (g *Generator) Generate() error {
 		return fmt.Errorf("clawhub lock: %w", err)
 	}
 
-	// 还原 preserved 文件（覆盖刚渲染的默认版本）
-	if err := snap.Restore(g.OutputDir); err != nil {
-		return fmt.Errorf("restore preserved: %w", err)
-	}
-
 	// 写 tshoot.json 到真正的 workspace 根（agent.InstallNativeOpenclaw cp 它到
 	// ~/.openclaw/workspace/<name>/,被 discover.Scan 反向识别）
 	// 注意:刻意不在 staging 根再写一份 —— 否则 discover 会扫到两份,UI 出重复
@@ -281,7 +275,6 @@ func (g *Generator) Generate() error {
 		OutputDir:           g.OutputDir,
 		SkillsIncludedCount: countSkills(g.OutputDir),
 		FilesWritten:        countFiles(g.OutputDir),
-		PreservedCount:      len(snap.PreservedFiles),
 		PriorOverridesCount: countOverrides(g.Ctx.PriorOverrides),
 		AnalyzerHitsCount:   countOverrides(g.Ctx.Findings),
 	}

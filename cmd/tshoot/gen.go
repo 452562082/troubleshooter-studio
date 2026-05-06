@@ -128,9 +128,6 @@ func runGen(args []string) error {
 	if *analysisFile != "" {
 		fmt.Printf("[ok] analysis loaded from %s\n", *analysisFile)
 	}
-	if g.Summary.PreservedCount > 0 {
-		fmt.Printf("[ok] restored %d preserved file(s)\n", g.Summary.PreservedCount)
-	}
 	if g.Summary.PriorOverridesCount > 0 {
 		fmt.Printf("[ok] applied %d prior manual override(s)\n", g.Summary.PriorOverridesCount)
 	}

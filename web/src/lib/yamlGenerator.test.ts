@@ -63,7 +63,8 @@ describe('generateYAML', () => {
     expect(parsed.repos[0].name).toBe('order-service')
     expect(parsed.infrastructure.config_center.type).toBe('nacos')
     expect(parsed.generation.targets).toEqual(['openclaw'])
-    expect(parsed.generation.preserve_on_regenerate).toContain('SOUL.md')
+    // preserve_on_regenerate 已删除;SOUL/USER/CHECKLIST 是模板派生、必须跟模板走
+    expect(parsed.generation.preserve_on_regenerate).toBeUndefined()
   })
 
   it('emits config_centers (plural) for multi-source', () => {
@@ -86,7 +87,9 @@ describe('generateYAML', () => {
     expect(ids).toEqual(['nacos', 'apollo'])
   })
 
-  it('omits preserve_on_regenerate for IDE-only targets', () => {
+  it('never emits preserve_on_regenerate (field deleted; template-derived files always follow template)', () => {
+    // preserve_on_regenerate 已彻底删除。SOUL/USER/CHECKLIST 是模板渲染产物,
+    // 整文件 preserve 反而让模板更新被静默吞掉,改成始终按模板覆盖。
     const out = generateYAML(makeCtx({
       enabledTargets: { openclaw: false, 'claude-code': true, cursor: false, codex: false },
     }))

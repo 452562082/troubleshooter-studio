@@ -154,14 +154,15 @@ function regenKey(b: DiscoveredBot) {
 }
 
 // 重新生成:用 tshoot.json 里现存的 system_yaml 重新渲染产物 + 刷到这张卡的真实部署目录,
-// 等同"用当前 yaml 跑一次 Apply"。preserve_on_regenerate 列表里的文件保留用户手改不覆盖。
+// 等同"用当前 yaml 跑一次 Apply"。模板派生文件按模板覆盖,config-map 中 status=verified
+// 且无 source 字段的人工行保留(那是用户填的领域数据,不会随模板版本变)。
 //
 // 跟"应用到活 workspace"的区别:那个走编辑器草稿(用户改完先 dry-run 确认再 apply),
 // 这个用存盘的 system_yaml 一键刷新,不需要进编辑器 —— 适合"模板更新了 / 想用最新版
 // generator 重出一遍产物"的场景。
 async function regen(b: DiscoveredBot) {
   const k = regenKey(b)
-  // 不弹 confirm:操作非破坏性(preserve_on_regenerate 文件保留),Wails WebView 里
+  // 不弹 confirm:操作幂等(模板派生文件按模板覆盖,config-map 人工行保留),Wails WebView 里
   // 弹 native confirm 偶发被遮挡 / 不响应。loading 态足够防抖,失败走 toast.error。
   regenState[k] = { loading: true }
   toast.info(`${b.meta.system_id}: 开始刷新 ${b.path}…`)
@@ -171,9 +172,8 @@ async function regen(b: DiscoveredBot) {
     // dryRun=false → 真写盘到 b.path(claude-code/cursor/codex 走 Apply,openclaw 同样)
     const res = await applyBot(b.path, yamlText, false) as any
     const written = res?.files_written ?? 0
-    const preserved = (res?.files_preserved || []).length
     const removed = (res?.files_removed || []).length
-    toast.success(`${b.meta.system_id} 已刷新到 ${b.path}: 写 ${written} / 保留 ${preserved} / 清理 ${removed}`)
+    toast.success(`${b.meta.system_id} 已刷新到 ${b.path}: 写 ${written} / 清理 ${removed}`)
   } catch (e) {
     toastError(`${b.meta.system_id} 重新生成`, e)
   } finally {
@@ -250,7 +250,7 @@ async function runApply(b: DiscoveredBot, dryRun: boolean) {
     const res = await applyBot(b.path, editorDraft.value, dryRun)
     applyState[k] = { loading: false, result: res, mode: dryRun ? 'dry' : 'real' }
     if (!dryRun) {
-      // 真应用后刷新列表：时间戳 / preserved 等可能变
+      // 真应用后刷新列表：时间戳 / 文件计数等可能变
       await scan()
       editingKey.value = null
     }

@@ -4,7 +4,6 @@ export namespace agent {
 	    agent_path: string;
 	    target: string;
 	    files_written: number;
-	    files_preserved?: string[];
 	    files_removed?: string[];
 	    tsf_json_updated: boolean;
 	    needs_restart_hint?: string;
@@ -18,7 +17,6 @@ export namespace agent {
 	        this.agent_path = source["agent_path"];
 	        this.target = source["target"];
 	        this.files_written = source["files_written"];
-	        this.files_preserved = source["files_preserved"];
 	        this.files_removed = source["files_removed"];
 	        this.tsf_json_updated = source["tsf_json_updated"];
 	        this.needs_restart_hint = source["needs_restart_hint"];
@@ -829,7 +827,6 @@ export namespace generator {
 	    output_dir: string;
 	    skills_included_count: number;
 	    files_written: number;
-	    preserved_count: number;
 	    prior_overrides_count: number;
 	    analyzer_hits_count: number;
 	
@@ -844,7 +841,6 @@ export namespace generator {
 	        this.output_dir = source["output_dir"];
 	        this.skills_included_count = source["skills_included_count"];
 	        this.files_written = source["files_written"];
-	        this.preserved_count = source["preserved_count"];
 	        this.prior_overrides_count = source["prior_overrides_count"];
 	        this.analyzer_hits_count = source["analyzer_hits_count"];
 	    }
@@ -885,7 +881,6 @@ export namespace generator {
 	    files_create: string[];
 	    files_modify: string[];
 	    files_remove: string[];
-	    preserved: string[];
 	    prior_overrides: OverrideRef[];
 	    analyzer_hits: AnalyzerHitRef[];
 	    config_map_projection: ConfigMapProjection;
@@ -903,7 +898,6 @@ export namespace generator {
 	        this.files_create = source["files_create"];
 	        this.files_modify = source["files_modify"];
 	        this.files_remove = source["files_remove"];
-	        this.preserved = source["preserved"];
 	        this.prior_overrides = this.convertValues(source["prior_overrides"], OverrideRef);
 	        this.analyzer_hits = this.convertValues(source["analyzer_hits"], AnalyzerHitRef);
 	        this.config_map_projection = this.convertValues(source["config_map_projection"], ConfigMapProjection);

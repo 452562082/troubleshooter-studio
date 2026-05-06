@@ -16,7 +16,8 @@ import (
 
 // ApplyBot 把新的 system.yaml 应用到已装机器人的活 workspace:
 // 重新渲染产物 → rsync 到 agentPath → 更新 tshoot.json。
-// preserve_on_regenerate 列表里的文件保留用户手改不覆盖。
+// 模板派生文件(SOUL/AGENTS/CHECKLIST/skills/...)按最新模板覆盖,
+// config-map.yaml 中 status=verified 且无 source 字段的人工行保留。
 //
 // 仓库本地路径:不在 yaml 里(yaml 必须可分享),从 ~/.tshoot/config.json 按
 // system.id 自动查出来,生成 repo-path-map.yaml 用。

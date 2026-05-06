@@ -483,13 +483,9 @@ export function generateYAML(ctx: YAMLGenContext): string {
   for (const s of skills) {
     lines.push(`    - ${s}`)
   }
-  // preserve_on_regenerate 只对 openclaw target 生效;claude-code/cursor 产物没有 snapshot-restore 路径
-  if (ctx.enabledTargets[Target.Openclaw]) {
-    lines.push('  preserve_on_regenerate:              # 二次 gen 时整体保留这些文件,让用户手改不丢(仅 openclaw)')
-    lines.push('    - SOUL.md')
-    lines.push('    - USER.md')
-    lines.push('    - CHECKLIST.md')
-  }
+  // 整文件 preserve 已彻底删除。SOUL/USER/CHECKLIST 都是模板派生、用户不改的内容,
+  // 锁住反而把模板更新静默吞掉。真正的人工沉淀(config-map.yaml verified 行)由
+  // generator.SnapshotExisting 单独抽取保留,不需要 yaml 字段。
 
   // meta
   lines.push('')

@@ -184,19 +184,19 @@ func usage() {
 
 子命令:
   init       交互式问答生成一份最小可用 system.yaml
-  gen        基于 system.yaml 生成机器人产物（保留 preserve_on_regenerate 文件与人工 verified 行）
-  plan       干跑一次 gen，展示将生成/保留/应用的内容与 config-map 分布（不写盘）
+  gen        基于 system.yaml 生成机器人产物（人工 verified 行保留,模板派生文件按模板覆盖）
+  plan       干跑一次 gen，展示将生成/应用的内容与 config-map 分布（不写盘）
   watch      文件变化时自动重跑 plan（system.yaml / templates/ / analysis.json）
   analyze    扫描已 clone 的仓库，抽取 service_names 与配置中心线索
   doctor     对比 system.yaml 声明与 analyzer 实测，报告漂移
   diff       预览本次生成相对现有产物的变化（不写盘）
-  upgrade    备份现有产物到 <out>.bak.<ts>，重跑 gen（保留人工行），输出 diff
+  upgrade    备份现有产物到 <out>.bak.<ts>，重跑 gen（保留 config-map 人工行），输出 diff
   serve      启动 Web UI（HTTP API + 前端界面）
   skill      skill 脚手架（skill new <name> 在模板库里生成新 skill 骨架）
   demo       零配置试跑：用内置 examples/shop-system.yaml + examples/fake-repos 跑完整 pipeline
   validate   仅校验 system.yaml
   discover   扫本机 tshoot.json 锚点，列出已装机器人
-  apply      拿新 yaml 重 render + rsync 回已装 workspace（preserve_on_regenerate 文件保留）
+  apply      拿新 yaml 重 render + rsync 回已装 workspace（模板派生文件按模板覆盖）
   install    把 staging 装到本机最终位置(原生 Go,无 bash 依赖):
              - openclaw:   ~/.openclaw/workspace/<name>/ + 注入 openclaw.json
              - claude-code: ~/.claude/agents/<name>.md  + skills/scripts namespace 子目录

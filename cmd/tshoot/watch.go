@@ -83,18 +83,17 @@ func runWatch(args []string) error {
 				"files_create":    len(plan.FilesCreate),
 				"files_modify":    len(plan.FilesModify),
 				"files_remove":    len(plan.FilesRemove),
-				"preserved":       len(plan.Preserved),
 				"prior_overrides": len(plan.PriorOverrides),
 				"analyzer_hits":   len(plan.AnalyzerHits),
 				"config_map":      cm,
 			})
 			fmt.Println(string(data))
 		} else {
-			fmt.Printf("[%s] skills=%d files=%dC/%dM/%dR preserved=%d prior=%d hits=%d config-map=%dV+%dP+%dI\n",
+			fmt.Printf("[%s] skills=%d files=%dC/%dM/%dR prior=%d hits=%d config-map=%dV+%dP+%dI\n",
 				now,
 				len(plan.SkillsIncluded),
 				len(plan.FilesCreate), len(plan.FilesModify), len(plan.FilesRemove),
-				len(plan.Preserved), len(plan.PriorOverrides), len(plan.AnalyzerHits),
+				len(plan.PriorOverrides), len(plan.AnalyzerHits),
 				cm.VerifiedFromAnalyzer, cm.VerifiedFromPrior, cm.Inferred)
 		}
 	}

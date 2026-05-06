@@ -10,35 +10,29 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/analyzer"
 )
 
-// Snapshot 从现有 output 目录提取的人工沉淀：
-//   - PreservedFiles：列在 generation.preserve_on_regenerate 中的文件内容（按 workspace 相对路径）
-//   - ConfigOverrides：config-map.yaml 中 status=verified 且无 source 字段的行（视为人工填写）
+// Snapshot 从现有 output 目录提取的人工沉淀:仅 config-map.yaml 中 status=verified
+// 且无 source 字段的行(视为人工填写),后续 render 时回填到新 config-map。
+//
+// 历史:曾经按 generation.preserve_on_regenerate 列表整文件保留(SOUL/USER/CHECKLIST 等),
+// 实际造成"模板更新被静默吞掉"——snapshot 老内容→render→restore 老内容覆盖,
+// 用户看不到模板的任何后续修订。整文件 preserve 已删,只留 config-map verified 行
+// (那才是真正用户手填的领域数据,不会随模板版本变)。
 type Snapshot struct {
-	PreservedFiles  map[string][]byte
 	ConfigOverrides map[string]map[string]analyzer.Finding
 	OriginalCenter  string // 上次生成时的 config_center 类型，用于冲突检测
 }
 
 // SnapshotExisting 若 outputDir 不存在则返回空 snapshot
-func SnapshotExisting(outputDir string, preserveList []string) (*Snapshot, error) {
+func SnapshotExisting(outputDir string) (*Snapshot, error) {
 	snap := &Snapshot{
-		PreservedFiles:  map[string][]byte{},
 		ConfigOverrides: map[string]map[string]analyzer.Finding{},
 	}
 	info, err := os.Stat(outputDir)
 	if err != nil || !info.IsDir() {
-		return snap, nil //nolint:nilerr // 读不到 preserve 文件算作无
+		return snap, nil //nolint:nilerr // 读不到 config-map 算作无 prior
 	}
 
 	wsRoot := filepath.Join(outputDir, "templates", "workspace-template")
-
-	for _, rel := range preserveList {
-		full := filepath.Join(wsRoot, rel)
-		if data, err := os.ReadFile(full); err == nil {
-			snap.PreservedFiles[rel] = data
-		}
-	}
-
 	cmPath := filepath.Join(wsRoot, "skills", "routing", "references", "config-map.yaml")
 	if data, err := os.ReadFile(cmPath); err == nil {
 		if err := parseConfigMapOverrides(data, snap); err != nil {
@@ -130,17 +124,3 @@ func applyFieldToFinding(f *analyzer.Finding, key, val string) {
 	}
 }
 
-// Restore 把 preserved 文件内容回写到 outputDir
-func (s *Snapshot) Restore(outputDir string) error {
-	wsRoot := filepath.Join(outputDir, "templates", "workspace-template")
-	for rel, content := range s.PreservedFiles {
-		full := filepath.Join(wsRoot, rel)
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(full, content, 0o644); err != nil {
-			return err
-		}
-	}
-	return nil
-}

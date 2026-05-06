@@ -43,18 +43,6 @@ func checkGeneration(c *SystemConfig) []HealthIssue {
 	dsCheck("postgresql-runtime-query", "postgresql")
 	dsCheck("clickhouse-runtime-query", "clickhouse")
 
-	// preserve_on_regenerate 含越狱路径
-	for _, p := range c.Generation.PreserveOnRegenerate {
-		if strings.Contains(p, "..") || strings.HasPrefix(p, "/") {
-			out = append(out, HealthIssue{
-				Severity: "error",
-				Category: "generation",
-				Field:    "generation.preserve_on_regenerate",
-				Message:  fmt.Sprintf("preserve_on_regenerate 项 %q 含绝对路径或 .. 跳出 workspace,不安全", p),
-			})
-		}
-	}
-
 	// targets 不含 openclaw 但配了 agent.model:模型字段对 claude-code/cursor 不消费
 	hasOpenclaw := false
 	hasOther := false

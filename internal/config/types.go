@@ -104,10 +104,9 @@ type Environment struct {
 type Generation struct {
 	// TargetHost 是 v0.x 的单目标遗留字段,新 yaml 用 Targets 数组替代。
 	// 仅保留读路径(ResolvedTargets() 兜底);新生成的 yaml 不再写出这个字段。
-	TargetHost           string   `yaml:"target_host,omitempty"`
-	Targets              []string `yaml:"targets"` // 多目标：openclaw / claude-code / ...
-	SkillsWhitelist      []string `yaml:"skills_whitelist"`
-	PreserveOnRegenerate []string `yaml:"preserve_on_regenerate"`
+	TargetHost      string   `yaml:"target_host,omitempty"`
+	Targets         []string `yaml:"targets"` // 多目标：openclaw / claude-code / ...
+	SkillsWhitelist []string `yaml:"skills_whitelist"`
 }
 
 // ResolvedTargets 返回最终目标列表（兼容 target_host 单值和 targets 数组）

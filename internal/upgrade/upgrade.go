@@ -39,7 +39,7 @@ type Options struct {
 //  1. 要求 existing 存在；不存在则返回错误（建议改用 gen）
 //  2. schema 版本比对（目前只有 0.1，仅做兜底）
 //  3. 把 existing 重命名为 <out>.bak.<ts>
-//  4. 将 backup 复制回 out 让 gen 的 preserve 机制生效
+//  4. 将 backup 复制回 out 让 gen 的 SnapshotExisting 抽取 config-map 人工行
 //  5. 跑 gen（带可选 analysis）
 //  6. diff(backup, new-out)，组装 Result
 func Run(opts Options) (*Result, error) {
@@ -78,9 +78,9 @@ func Run(opts Options) (*Result, error) {
 	}
 	res.BackupPath = backup
 
-	// 复制 backup → OutputDir，让 gen 的 SnapshotExisting 基于此运作
+	// 复制 backup → OutputDir,让 gen 的 SnapshotExisting 抽取 config-map verified 人工行
 	if err := copyTree(backup, opts.OutputDir); err != nil {
-		return nil, fmt.Errorf("restore from backup for preserve: %w", err)
+		return nil, fmt.Errorf("restore from backup for snapshot: %w", err)
 	}
 
 	// gen

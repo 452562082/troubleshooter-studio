@@ -122,7 +122,7 @@ function classForSeverity(s: string): string {
             <button
               class="menu-item"
               :disabled="regenLoading"
-              :title="bot.meta.system_yaml ? '用 tshoot.json 嵌入的 yaml 重渲产物,直接刷到活 workspace(preserve_on_regenerate 文件保留)' : 'tshoot.json 里没保存 system_yaml,无法重新生成'"
+              :title="bot.meta.system_yaml ? '用 tshoot.json 嵌入的 yaml 重渲产物,直接刷到活 workspace(模板派生文件按模板覆盖,config-map 人工 verified 行保留)' : 'tshoot.json 里没保存 system_yaml,无法重新生成'"
               @click="emit('closeMenu'); emit('regen')"
             >
               {{ regenLoading ? '刷新中…' : '♻ 重新生成并刷新' }}
@@ -207,7 +207,7 @@ function classForSeverity(s: string): string {
         <button
           class="btn primary"
           :disabled="apply?.loading"
-          :title="'真写盘到本机器人部署目录;preserve_on_regenerate 列表的文件保留手改不覆盖'"
+          :title="'真写盘到本机器人部署目录;模板派生文件按模板覆盖,config-map 人工 verified 行保留'"
           @click="emit('runApply', false)"
         >
           {{ apply?.loading && apply?.mode === 'real' ? '应用中…' : '应用到活 workspace' }}
@@ -215,10 +215,6 @@ function classForSeverity(s: string): string {
       </div>
       <div v-if="apply?.result" class="apply-result">
         <div class="apply-row"><strong>写入文件:</strong>{{ apply.result.files_written }}</div>
-        <div v-if="apply.result.files_preserved?.length" class="apply-row">
-          <strong>保留(用户手改):</strong>
-          <code v-for="f in apply.result.files_preserved" :key="f">{{ f }}</code>
-        </div>
         <div v-if="apply.result.files_removed?.length" class="apply-row removed">
           <strong>移除(陈旧产物):</strong>
           <code v-for="f in apply.result.files_removed" :key="f">{{ f }}</code>

@@ -43,10 +43,11 @@ func genExisting(t *testing.T, dir string) (string, []byte) {
 	return filepath.Join(dir, "templates", "workspace-template"), yamlBytes
 }
 
-func TestApplyDryRun_PreservesUserEdits(t *testing.T) {
-	// 场景:agent 已装,用户改了 SOUL.md(在 preserve_on_regenerate 里),
-	// 用原 yaml 跑 Apply --dry-run,应报告 SOUL.md 在 preserved 列表里,
-	// 真文件内容不变(dry-run 不写盘)。
+func TestApplyDryRun_NoDiskWrites(t *testing.T) {
+	// 场景:agent 已装,用户改了 SOUL.md,用原 yaml 跑 Apply --dry-run,
+	// 不应写盘(用户手改先保留),也不更新 tshoot.json。
+	// 注:整文件 preserve 机制已删 —— 真 apply 会按模板覆盖 SOUL.md,
+	// 这里只验证 dry-run 的"不动盘"语义。
 	stage := t.TempDir()
 	agentPath, yamlBytes := genExisting(t, stage)
 
@@ -72,9 +73,6 @@ func TestApplyDryRun_PreservesUserEdits(t *testing.T) {
 	if res.Target != "openclaw" {
 		t.Errorf("target wrong: %s", res.Target)
 	}
-	if !containsString(res.FilesPreserved, "SOUL.md") {
-		t.Errorf("preserve_on_regenerate 里的 SOUL.md 没被标记 preserved: %+v", res.FilesPreserved)
-	}
 	// dry-run 不写盘,用户手改必须还在
 	got, _ := os.ReadFile(soulPath)
 	if string(got) != userEdit {
@@ -86,9 +84,9 @@ func TestApplyDryRun_PreservesUserEdits(t *testing.T) {
 	}
 }
 
-func TestApplyRealWritesAndPreserves(t *testing.T) {
-	// 场景:真 apply(非 dry-run),preserve 文件保留用户手改,
-	// tshoot.json 被更新。
+func TestApplyRealOverwritesAndUpdatesMeta(t *testing.T) {
+	// 场景:真 apply(非 dry-run),所有模板派生文件按模板覆盖,tshoot.json 被更新。
+	// 整文件 preserve 已删 —— 模板更新不再被 SOUL/USER/CHECKLIST 阻塞。
 	stage := t.TempDir()
 	agentPath, yamlBytes := genExisting(t, stage)
 
@@ -115,10 +113,10 @@ func TestApplyRealWritesAndPreserves(t *testing.T) {
 	if res.FilesWritten == 0 {
 		t.Error("files_written 不该为 0")
 	}
-	// 用户手改保留
+	// 模板派生文件被覆盖回模板渲染版本(用户手改不再受保护)
 	got, _ := os.ReadFile(soulPath)
-	if string(got) != userEdit {
-		t.Errorf("preserve 失败:用户手改被覆盖\nwant %q\ngot  %q", userEdit, string(got))
+	if string(got) == userEdit {
+		t.Error("SOUL.md 应该被模板覆盖,实际还是用户手改版")
 	}
 	// tshoot.json 里 version 更新到 applied-version
 	metaData, err := os.ReadFile(filepath.Join(agentPath, "tshoot.json"))
@@ -226,13 +224,4 @@ func TestImportAndApply_DryRunNoWrite(t *testing.T) {
 	if res.NeedsRestartHint == "" {
 		t.Error("DryRun 应该给出后续步骤的提示")
 	}
-}
-
-func containsString(xs []string, x string) bool {
-	for _, v := range xs {
-		if v == x {
-			return true
-		}
-	}
-	return false
 }

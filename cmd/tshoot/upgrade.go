@@ -68,8 +68,8 @@ func runUpgrade(args []string) error {
 		fmt.Printf("⚠ %s\n", w)
 	}
 	if s := res.GenSummary; s != nil {
-		fmt.Printf("gen: %d skills / %d files / %d preserved / %d prior-overrides\n",
-			s.SkillsIncludedCount, s.FilesWritten, s.PreservedCount, s.PriorOverridesCount)
+		fmt.Printf("gen: %d skills / %d files / %d prior-overrides\n",
+			s.SkillsIncludedCount, s.FilesWritten, s.PriorOverridesCount)
 	}
 	fmt.Printf("diff: %d file change(s) / %d config-map row change(s)\n",
 		res.FilesChanged, res.ConfigMapChanges)

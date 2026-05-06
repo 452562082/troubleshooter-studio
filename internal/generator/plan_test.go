@@ -29,9 +29,6 @@ func TestBuildPlan_FirstTime(t *testing.T) {
 		t.Errorf("first-time plan should have 0 modify/remove; got %d / %d",
 			len(plan.FilesModify), len(plan.FilesRemove))
 	}
-	if len(plan.Preserved) != 0 {
-		t.Errorf("no existing dir → no preserved files; got %d", len(plan.Preserved))
-	}
 	if len(plan.PriorOverrides) != 0 {
 		t.Errorf("no existing dir → no prior overrides; got %d", len(plan.PriorOverrides))
 	}
@@ -91,13 +88,13 @@ func TestBuildPlan_WithPriorOverridesAndPreserved(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 手改 SOUL.md（在 preserve_on_regenerate 里）
+	// 手改 SOUL.md(整文件 preserve 已删,模板渲染会覆盖回去 → plan 应该报告 SOUL.md 是 modify)
 	soulPath := filepath.Join(existing, "templates/workspace-template/SOUL.md")
 	if err := os.WriteFile(soulPath, []byte("custom\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	// plan 应识别出 1 prior override + 3 preserved
+	// plan 应识别出 1 prior override + SOUL.md 在 modify 列表里(不再 preserve)
 	g := New(cfg, tr, existing)
 	plan, err := g.BuildPlan(existing)
 	if err != nil {
@@ -109,14 +106,16 @@ func TestBuildPlan_WithPriorOverridesAndPreserved(t *testing.T) {
 	if plan.PriorOverrides[0].Service != "order-worker" || plan.PriorOverrides[0].Env != "dev" {
 		t.Errorf("prior override identity wrong: %+v", plan.PriorOverrides[0])
 	}
-	// preserve_on_regenerate 有 SOUL.md/USER.md/CHECKLIST.md 三项
-	if len(plan.Preserved) != 3 {
-		t.Errorf("expected 3 preserved files, got %d: %v", len(plan.Preserved), plan.Preserved)
+	// SOUL.md 应该在 modify 列表 —— 模板渲染产物 ≠ 用户手改的 "custom\n"
+	soulInModify := false
+	for _, f := range plan.FilesModify {
+		if filepath.Base(f) == "SOUL.md" {
+			soulInModify = true
+			break
+		}
 	}
-	// 有 prior override 被应用后，files 应为 0 变动（plan 等价 gen + preserve）
-	if len(plan.FilesCreate) != 0 || len(plan.FilesModify) != 0 || len(plan.FilesRemove) != 0 {
-		t.Errorf("with preserve, plan should be no-op; got C%d M%d R%d",
-			len(plan.FilesCreate), len(plan.FilesModify), len(plan.FilesRemove))
+	if !soulInModify {
+		t.Errorf("SOUL.md should be in FilesModify (preserve removed); got modify=%v", plan.FilesModify)
 	}
 	// projection 应含 1 verified(prior)
 	if plan.ConfigMap.VerifiedFromPrior != 1 {

@@ -26,7 +26,7 @@
 | 平台 | 部署位置 | 进入方式 | MCP 注册位置 |
 |---|---|---|---|
 | **OpenClaw** | `~/.openclaw/workspace/<name>/`(整套 workspace 文件) | OpenClaw 客户端 agent 列表选(装完**重启客户端**才出现) | `~/.openclaw/openclaw.json` 的 `mcp.servers` |
-| **Claude Code** | `~/.claude/agents/<name>.md` + `~/.claude/skills/<name>/` | 任意项目 `@<name>` 调 subagent | `~/.claude/settings.json` 的 `mcpServers` |
+| **Claude Code** | `~/.claude/agents/<name>.md` + `~/.claude/skills/<name>/` | 任意项目 `@<name>` 调 subagent | `~/.claude.json`(user-scope dotfile,Claude Code CLI 启动强绑死从这里读;`~/.claude/settings.json` 是 hooks/permissions/env 用的、不读 mcpServers) |
 | **Cursor** | `~/.cursor/agents/<name>.md` + `~/.cursor/skills/<name>/` | AI 侧栏选 Custom Agent(MCP 还要去 Settings 启用) | `~/.cursor/mcp.json` 的 `mcpServers` |
 | **Codex CLI** | `~/.codex/agents/<name>.toml`(TOML subagent) + `~/.codex/skills/<name>/` + `~/.codex/bin/mcp-grafana`(go 二进制,grafana/loki 共用) | 终端 `codex` 内主 chat 说 "spawn the `<name>` agent ..."(自然语言派生 subagent thread,完成后回主 chat;[官方文档](https://developers.openai.com/codex/subagents)) | 嵌入 agent toml 内联 `[mcp_servers.*]` 段(每个 subagent 自带,不污染主 chat) |
 
@@ -114,7 +114,7 @@ make                                                       # 等价 go build -o 
 | `gen` | 生成 staging 产物 |
 | `install` / `self-test` / `uninstall` | 装到本机 / openclaw 自检 / 卸载(支持 4 个平台) |
 | `discover` | 扫本机已装机器人 |
-| `apply` | 用新 yaml 原地更新已装机器人(preserve 保留手改) |
+| `apply` | 用新 yaml 原地更新已装机器人(模板派生文件按模板覆盖,config-map verified 人工行保留) |
 | `upgrade` | 备份 + 重 gen + diff 一步到位 |
 | `doctor` | 对比声明 vs 代码实态,8 类漂移(支持 `--fix` 行级精确替换) |
 | `serve` | 启 HTTP API + Web UI |
@@ -172,7 +172,7 @@ skill 集合**按 yaml 动态裁剪**,产物的真源在 [`templates/workspace/s
   - `tracing-query` —— Jaeger 按 trace_id / service / 时间窗查 spans
 
 - **🗄 数据层运行时查询**(按 `data_stores[type=X].enabled` 启用,9 种全支持)
-  - `redis-runtime-query` / `mongodb-runtime-query` / `es-runtime-query` / `mysql-runtime-query` / `postgres-runtime-query` / `kafka-runtime-query` / `rocketmq-runtime-query` / `rabbitmq-runtime-query` / `clickhouse-runtime-query` —— 运行时按 entity ID 反查;连接串从配置中心动态解析(用户**不**需要重复填一遍)
+  - `redis-runtime-query` / `mongodb-runtime-query` / `es-runtime-query` / `mysql-runtime-query` / `postgresql-runtime-query` / `kafka-runtime-query` / `rocketmq-runtime-query` / `rabbitmq-runtime-query` / `clickhouse-runtime-query` —— 运行时按 entity ID 反查;连接串从配置中心动态解析(用户**不**需要重复填一遍)
 
 裁剪规则:yaml 里没启用的能力 → 对应 skill 不生成。`generation.skills_whitelist` 是二次过滤(已启用基础上再剔除)。新增 skill 走 `tshoot skill new <name>`。
 
@@ -208,7 +208,7 @@ internal/
   config/               system.yaml schema + 加载校验
   analyzer/             5 栈 × 6 配置源仓库扫描
   analyzerpipe/         pipeline 编排 + auto-clone
-  generator/            模板渲染 + preserve + diff + plan + IDE 三家 agent 原生 prompt
+  generator/            模板渲染 + config-map snapshot + diff + plan + IDE 三家 agent 原生 prompt
   discover/             扫 tshoot.json 锚点识别已装机器人
   agent/                读-改-部署 + 原生 install/self-test/uninstall + IDE / openclaw 共用 MCP / creds 派生
   doctor/               漂移检测 + --fix

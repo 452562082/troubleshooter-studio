@@ -41,32 +41,18 @@
 
 ## 依赖
 
-`bin/` 和 `dist/` 在 `.gitignore` 里,`git clone` 完没有可执行文件,必须本地构建。**先按场景把依赖装齐**(否则 make 会以 `go: command not found` / `npm: not found` 之类报错):
+`bin/` 和 `dist/` 都在 `.gitignore`,`git clone` 完得本地构建。
 
-| 你要跑 | 平台 | 必装 |
+| 跑什么 | 平台 | 装什么 |
 |---|---|---|
-| `make`(CLI 二进制) | macOS / Linux / Windows | **Go 1.25+** |
-| `make release`(多平台 CLI 交叉编译,纯 Go 无 CGO) | macOS / Linux / Windows | Go 1.25+ |
-| `make desktop` / `make desktop-app`(桌面 app) | **仅 macOS** | Go 1.25+ · **Node.js 20+(含 npm)** · **Xcode Command Line Tools**(`xcode-select --install`) |
-| `make wails-gen`(改 Go binding 才用) | macOS | 上述 + **Wails CLI v2**:`go install github.com/wailsapp/wails/v2/cmd/wails@latest` |
-| `make icon`(重渲图标才用) | macOS | 上述 + **librsvg**:`brew install librsvg` |
+| `make`(CLI) | macOS / Linux / Windows | Go 1.25+ |
+| `make desktop-app`(桌面 app) | **仅 macOS** | Go 1.25+ · Node.js 20+ · Xcode CLT |
+| `make wails-gen`(改 Go binding 才用) | macOS | + Wails CLI v2 (`go install github.com/wailsapp/wails/v2/cmd/wails@latest`) |
+| `make icon`(重渲图标才用) | macOS | + librsvg (`brew install librsvg`) |
 
-**macOS 一键装齐(桌面 app 用)**:
+macOS 桌面 app 一键装齐:`xcode-select --install && brew install go node`
 
-```bash
-xcode-select --install          # CGO 工具链
-brew install go node            # Go + Node
-```
-
-**Linux / Windows**:目前**只支持 CLI**(`make` 出 `bin/tshoot`)。
-桌面 app 的 Makefile 把 CGO_LDFLAGS 硬编码成了 `-framework UniformTypeIdentifiers -mmacosx-version-min=10.13`(Apple 专属),packaging 也走 `scripts/package-macos.sh` 出 `.app` bundle。
-Wails v2 本身能跑 Linux(GTK + WebKit2GTK),要支持需改 Makefile 加 GOOS=linux 分支 + 替换 packaging 脚本(AppImage / `.deb`),当前没做。
-
-```bash
-# Linux:只装 CLI(无 Node / CGO 需求)
-sudo apt install -y golang-1.25     # 或 yum install golang
-make                                  # 出 bin/tshoot
-```
+Linux / Windows 当前只能跑 CLI(桌面 app Makefile 没适配 GTK + AppImage)。
 
 ## 快速开始
 

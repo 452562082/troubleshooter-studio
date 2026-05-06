@@ -108,14 +108,14 @@ const emit = defineEmits<{
       </span>
       <span
         v-if="repo.parent_repo && repo.parent_repo.trim()"
-        class="submodule-tag umbrella-tag"
-        :title="`从 umbrella ${repo.parent_repo} 切出去的子模块。\n部署时 clone 到 <${repo.parent_repo} clone 路径>/${repo.parent_path || repo.name}`"
+        class="submodule-tag umbrella-tag has-hint"
+        :data-hint="`从 umbrella ${repo.parent_repo} 切出去的子模块,部署时 clone 到 &lt;${repo.parent_repo} clone 路径&gt;/${repo.parent_path || repo.name}`"
       >
         🌂 属于 {{ repo.parent_repo.trim() }} @ {{ repo.parent_path || repo.name || '<name>' }}
         <button
           type="button"
-          class="btn-link cc-delete"
-          title="解除关联,本仓将作为独立 repo 走自己的 clone 父目录"
+          class="btn-link cc-delete has-hint"
+          data-hint="解除 umbrella 关联,本仓变成独立 repo"
           @click="repo.parent_repo = ''; repo.parent_path = ''"
         >🗑</button>
       </span>
@@ -405,3 +405,35 @@ const emit = defineEmits<{
     />
   </div>
 </template>
+
+<style scoped>
+/* 自画 tooltip(替代 native title 在 Wails WebKit 下 macOS 系统级深色样式看不清的问题)。
+ * 任意元素加 class="has-hint" + data-hint="..." 即可,hover 后在元素下方显示明色 tooltip。
+ * 跟 RepoListItem 内部组件 scoped,不污染全局。 */
+.has-hint {
+  position: relative;
+}
+.has-hint::after {
+  content: attr(data-hint);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 6px);
+  transform: translateX(-50%);
+  padding: 6px 10px;
+  background: #2b3344;
+  color: #f3f5f9;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre;
+  max-width: 360px;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease-out 0.25s;
+  z-index: 1000;
+}
+.has-hint:hover::after {
+  opacity: 1;
+}
+</style>

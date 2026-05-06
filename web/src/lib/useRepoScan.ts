@@ -142,14 +142,19 @@ export function useRepoScan(deps: RepoScanDeps) {
   // → 命中即把列表存到 r._submoduleHints,UI banner 显示"检测到 N 个子模块,一键拆分"。
   // 触发时机:scan 完成后(此时本地路径已就位)。0 命中 → 不弹 banner。
   async function refreshSubmoduleHints(r: RepoScanItem) {
-    // 本地模式直接用 _localPath;远程模式 clone 完成后落点 = resolveCloneDest(r),
-    // 也是个有效本地路径,送进 detectSubmodules 同样能扫。
+    // 本地模式直接用 _localPath;远程模式 clone 完成后落点 = (clone 父目录 / 全局默认)+ repo.name。
+    // 之前只走 resolveCloneDest(_cloneTarget+name),用户没填 _cloneTarget 靠全局默认时
+    // 直接返空 → 跳过扫描 → 子模块 hint 永远空 —— 跟 refreshRoleHint 同款 bug。
     let path = ''
     if (r._source === 'local') {
       path = r._localPath || ''
     } else if (r._source === 'remote') {
-      const dest = resolveCloneDest(r)
-      if (dest) path = dest
+      const parent = ((r._cloneTarget || '').trim() ||
+        (deps.reposRootInput.value || '').trim() ||
+        deps.resolvedReposRoot.value).replace(/\/+$/, '')
+      if (parent && r.name.trim()) {
+        path = parent + '/' + r.name.trim()
+      }
     }
     if (!path) {
       r._submoduleHints = []

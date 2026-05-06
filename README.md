@@ -175,6 +175,9 @@ skill 集合**按 yaml 动态裁剪**,产物的真源在 [`templates/workspace/s
 - **📊 可观测性**(按 `observability.<x>.enabled` 启用)
   - `k8s-runtime-query` —— Kuboard v4 HTTP 查 pod / service / deployment / events / logs(只读)
   - `tracing-query` —— Jaeger 按 trace_id / service / 时间窗查 spans
+  - `tempo-query` —— Tempo(Grafana Labs 追踪后端)按 trace_id / service 查 spans
+  - `skywalking-query` —— SkyWalking 按 trace_id / service / 时间窗查 spans
+  - `elk-log-query` —— ELK(Elasticsearch + Kibana)按 service / 时间 / 关键词 / trace_id 搜日志(Loki 替代 / 共存)
 
 - **🗄 数据层运行时查询**(按 `data_stores[type=X].enabled` 启用,9 种全支持)
   - `redis-runtime-query` / `mongodb-runtime-query` / `es-runtime-query` / `mysql-runtime-query` / `postgresql-runtime-query` / `kafka-runtime-query` / `rocketmq-runtime-query` / `rabbitmq-runtime-query` / `clickhouse-runtime-query` —— 运行时按 entity ID 反查;连接串从配置中心动态解析(用户**不**需要重复填一遍)

@@ -41,18 +41,14 @@
 
 ## 依赖
 
-`bin/` 和 `dist/` 都在 `.gitignore`,`git clone` 完得本地构建。
+`bin/` 和 `dist/` 都在 `.gitignore`,`git clone` 完得本地构建。**只要装下面两条之一**:
 
-| 跑什么 | 平台 | 装什么 |
-|---|---|---|
-| `make`(CLI) | macOS / Linux / Windows | Go 1.25+ |
-| `make desktop-app`(桌面 app) | **仅 macOS** | Go 1.25+ · Node.js 20+ · Xcode CLT |
-| `make wails-gen`(改 Go binding 才用) | macOS | + Wails CLI v2 (`go install github.com/wailsapp/wails/v2/cmd/wails@latest`) |
-| `make icon`(重渲图标才用) | macOS | + librsvg (`brew install librsvg`) |
+- **桌面 app(仅 macOS)** —— 一行装齐:`xcode-select --install && brew install go node`
+- **只要 CLI(macOS / Linux / Windows)** —— 装 Go 1.25+ 就行
 
-macOS 桌面 app 一键装齐:`xcode-select --install && brew install go node`
-
-Linux / Windows 当前只能跑 CLI(桌面 app Makefile 没适配 GTK + AppImage)。
+> 仓库里 `make wails-gen`(改 Go binding 时刷 wails 绑定)和 `make icon`(重渲图标)是**贡献者才需要**的开发任务,跟首次跑通无关,装它们的依赖(Wails CLI / librsvg)平时不用碰。
+>
+> Linux / Windows 当前只能跑 CLI(桌面 app Makefile 没适配 GTK + AppImage)。
 
 ## 快速开始
 

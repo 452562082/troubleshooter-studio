@@ -28,11 +28,13 @@
 | **OpenClaw** | `~/.openclaw/workspace/<name>/`(整套 workspace 文件) | OpenClaw 客户端 agent 列表选(装完**重启客户端**才出现) | `~/.openclaw/openclaw.json` 的 `mcp.servers` |
 | **Claude Code** | `~/.claude/agents/<name>.md` + `~/.claude/skills/<name>/` | 任意项目 `@<name>` 调 subagent | `~/.claude/settings.json` 的 `mcpServers` |
 | **Cursor** | `~/.cursor/agents/<name>.md` + `~/.cursor/skills/<name>/` | AI 侧栏选 Custom Agent(MCP 还要去 Settings 启用) | `~/.cursor/mcp.json` 的 `mcpServers` |
-| **Codex CLI** | `~/.codex/agents/<name>.md` + `~/.codex/skills/<name>/` | 终端 `@<name>` 调用 | `~/.codex/config.toml`(由 `codex mcp add` 写入) |
+| **Codex CLI** | `~/.codex/agents/<name>.toml`(TOML subagent) + `~/.codex/skills/<name>/` + `~/.codex/bin/mcp-grafana`(go 二进制,grafana/loki 共用) | 终端 `codex` 内主 chat 说 "spawn the `<name>` agent ..."(自然语言派生 subagent thread,完成后回主 chat;[官方文档](https://developers.openai.com/codex/subagents)) | 嵌入 agent toml 内联 `[mcp_servers.*]` 段(每个 subagent 自带,不污染主 chat) |
 
 凭证持久化:`~/.openclaw/<id>-creds.json`(OpenClaw)+ `~/.tshoot/<id>-creds.json`(IDE 平台通用 fallback,脚本两处优先 openclaw)。
 
-每个 IDE 平台的 `agents/<name>.md` 是为该平台**原生写**的提示词(不是把 OpenClaw workspace 文件机械拼贴),含平台运行环境介绍(Bash 能力 / MCP 注册位置 / skills 路径前缀)+ 通用排障逻辑(SOUL / IDENTITY / 排障入口 / 故障快报模板)+ skills 索引。
+每个 IDE 平台的 agent 定义(Claude Code/Cursor 的 `agents/<name>.md`、Codex CLI 的 `agents/<name>.toml`)是为该平台**原生写**的(不是把 OpenClaw workspace 文件机械拼贴),含平台运行环境介绍(Bash 能力 / MCP 注册位置 / skills 路径前缀)+ 通用排障逻辑(SOUL / IDENTITY / 排障入口 / 故障快报模板)+ skills 索引。
+
+**Codex grafana/loki MCP 走 go 二进制**(不走 npx):`tshoot install --target codex` 自动从 `github.com/grafana/mcp-grafana` releases 下载预编译版到 `~/.codex/bin/mcp-grafana`。换 go 版的原因:`@leval/mcp-grafana` 这个 npm 包启动时往 stdout 打 banner 污染 JSON-RPC 流,导致 codex 握手"connection closed: initialize response";同时 codex subagent thread 默认 network=Restricted 让 npx 拉包也可能失败。go 版严格 stdio + 装好就跑,绕开两条死亡路径。下载失败会 fallback 到 npx 但会打 warning。
 
 ## 快速开始
 

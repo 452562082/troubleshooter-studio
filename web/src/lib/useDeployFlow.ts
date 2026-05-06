@@ -11,7 +11,7 @@
 //   - openclaw     ~/.openclaw/workspace/<workspace_name>/(用 customInstallRoots[t] 覆盖根目录)
 //   - claude-code  ~/.claude/agents/<name>.md(<name>=workspace_name 兜底 system.id-bot)
 //   - cursor       ~/.cursor/agents/<name>.md
-//   - codex        ~/.codex/agents/<name>.md
+//   - codex        ~/.codex/agents/<name>.toml(TOML subagent;主 chat 自然语言 spawn)
 //
 // 失败容错:任一 target 倒了 → 整体停下保留已成功的,error 里显示是哪个 target 倒了;
 // openclaw RunInstall 失败 → 保留中间包,toast 提示用户去 BotsPage 补凭证。
@@ -93,7 +93,7 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
       'openclaw': `${rootFor('openclaw', `${home}/.openclaw`)}/workspace/${wsName}/`,
       'claude-code': `${rootFor('claude-code', `${home}/.claude`)}/agents/${wsName}.md`,
       'cursor': `${rootFor('cursor', `${home}/.cursor`)}/agents/${wsName}.md`,
-      'codex': `${rootFor('codex', `${home}/.codex`)}/agents/${wsName}.md`,
+      'codex': `${rootFor('codex', `${home}/.codex`)}/agents/${wsName}.toml`,
     }
   })
 
@@ -103,7 +103,7 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
     'openclaw': 'OpenClaw 启动时扫 ~/.openclaw/workspace/* 列出可用 agent,选一个进入。',
     'claude-code': 'Claude Code 启动时读 ~/.claude/agents/*.md(用户级 subagent),所有项目都能 @<name> 调用。',
     'cursor': 'Cursor 启动时读 ~/.cursor/agents/*.md(用户级 Custom Agent),侧栏选用。',
-    'codex': 'OpenAI Codex CLI 启动时读 ~/.codex/agents/*.md,CLI 内 @<name> 调用。',
+    'codex': 'OpenAI Codex CLI 扫 ~/.codex/agents/*.toml 注册 subagent;在主 chat 里说 "spawn the <name> agent ..." 派生独立 thread(MCP 嵌入 toml 内联段,只在 spawn 时启动)。文档:https://developers.openai.com/codex/subagents',
   }
 
   // Step 8 一键部署摘要:Step 2 勾了哪些 target → 渲染对应路径
@@ -273,7 +273,7 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
       for (const t of enabled) {
         const dest = await defaultDestPath(t, deps.system.id || '')
         // 同一份 creds 顺带传给 claude-code/cursor:installNative 走完文件拷贝后会用它
-        // 注入 ~/.claude/settings.json / ~/.cursor/mcp.json 的 mcpServers,装完即可用 MCP 工具。
+        // 注入 ~/.claude.json (user-scope dotfile) / ~/.cursor/mcp.json 的 mcpServers,装完即可用 MCP 工具。
         // openclaw 的自定义目录走 openclawInstallDir 那条独立 UI;这里只对 ide 三家生效
         const isIDE = (IDE_TARGETS as string[]).includes(t)
         const cir = isIDE ? (deps.customInstallRoots[t] || '').trim() : ''

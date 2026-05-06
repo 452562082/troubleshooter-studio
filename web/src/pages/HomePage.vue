@@ -238,15 +238,15 @@ const nextStep = computed(() => {
           </li>
           <li>
             <code>codex</code> —
-            agent.md <code>~/.codex/agents/&lt;name&gt;.md</code> +
+            subagent <code>~/.codex/agents/&lt;name&gt;.toml</code>(TOML 格式) +
             skills/scripts <code>~/.codex/{skills,scripts}/&lt;name&gt;/</code>,
-            <strong>OpenAI Codex CLI</strong> 用 <code>@&lt;name&gt;</code> 调用
+            <strong>OpenAI Codex CLI</strong> 主 chat 里说 "spawn the &lt;name&gt; agent ..." 派生独立 subagent thread
           </li>
         </ul>
         <div class="info-foot">
-          MCP 服务器:claude-code 写 <code>~/.claude/settings.json</code>;cursor 写
-          <code>~/.cursor/mcp.json</code>;codex 通过
-          <code>codex mcp add</code> 写 <code>~/.codex/config.toml</code>;openclaw 走
+          MCP 服务器:claude-code 写 <code>~/.claude.json</code>(user-scope dotfile,Claude Code CLI 强绑死从这里读);
+          cursor 写 <code>~/.cursor/mcp.json</code>;codex 嵌入 agent toml 内联
+          <code>[mcp_servers.*]</code> 段(每个 subagent 自带,不污染主 chat);openclaw 走
           <code>openclaw.json</code> 自家注册流程。
         </div>
       </div>

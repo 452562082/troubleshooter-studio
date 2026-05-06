@@ -1855,7 +1855,7 @@ const targetDescriptions: Record<TargetId, string> = {
   [Target.Openclaw]: 'OpenClaw agent(~/.openclaw/workspace/<workspace_name>/,OpenClaw 内选 agent 切换)',
   [Target.ClaudeCode]: 'Claude Code 用户级 subagent(~/.claude/agents/<name>.md,@<name> 调用)',
   [Target.Cursor]: 'Cursor 用户级 Custom Agent(~/.cursor/agents/<name>.md,AI 侧栏选用)',
-  [Target.Codex]: 'OpenAI Codex CLI 用户级 agent(~/.codex/agents/<name>.md,CLI 内 @<name> 调用)',
+  [Target.Codex]: 'OpenAI Codex CLI subagent(~/.codex/agents/<name>.toml,主 chat 里说 "spawn the <name> agent" 派生)',
 }
 const targetLabels: Record<TargetId, string> = {
   [Target.Openclaw]: 'OpenClaw',

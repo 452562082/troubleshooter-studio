@@ -35,6 +35,7 @@ interface RepoItem {
   _scanning?: boolean
   _scanError?: string
   _scanned?: boolean
+  _scannedSource?: string
   _serviceEntries?: Record<string, string>
   _submoduleHintsDismissed?: boolean
   _submoduleHints?: { name: string; sub_path: string; stack: string; role: string; reason: string; url?: string }[]
@@ -86,6 +87,7 @@ const emit = defineEmits<{
   subPathInput: [r: any]
   pickCloneTarget: [r: any]
   pickLocalRepoDir: [r: any]
+  pickRemoteLocalReuse: [r: any]
   scanSingleRepo: [r: any]
   toggleSubmodulePick: [r: any, subPath: string, checked: boolean]
   splitMonorepo: [idx: number]
@@ -148,10 +150,10 @@ const emit = defineEmits<{
       </div>
       <div class="form-group">
         <label>
-          Clone 父目录 <span class="required">*</span>
+          Clone 父目录 <span v-if="!(repo._localPath || '').trim()" class="required">*</span>
           <span class="field-hint">
-            — 必填:选父目录,git clone 自动建 <code>/{{ repo.name || '&lt;repo.name&gt;' }}</code> 子目录。
-            **本地路径不允许走全局默认隐式回落**(产物里 repo-path-map.yaml 必须有显式路径才能跑代码扫描 / 排障)。
+            — 选父目录,git clone 自动建 <code>/{{ repo.name || '&lt;repo.name&gt;' }}</code> 子目录。
+            <strong>跟下方"复用现有本地目录"二选一</strong>。
           </span>
         </label>
         <div class="path-input-row">
@@ -161,9 +163,15 @@ const emit = defineEmits<{
             :placeholder="`点选父目录(如 ${displayPath(reposRootInput.trim() || resolvedReposRoot)}),会自动建 /${repo.name || '<repo.name>'}`"
             readonly
             class="path-readonly"
+            :disabled="!!(repo._localPath || '').trim()"
             :title="repo._cloneTarget ? `父目录: ${repo._cloneTarget}\n实际仓库: ${resolveCloneDest(repo)}` : ''"
           />
-          <button type="button" class="btn" @click="emit('pickCloneTarget', repo)">
+          <button
+            type="button"
+            class="btn"
+            :disabled="!!(repo._localPath || '').trim()"
+            @click="emit('pickCloneTarget', repo)"
+          >
             {{ repo._cloneTarget ? '重新选…' : '选目录…' }}
           </button>
           <button
@@ -172,6 +180,34 @@ const emit = defineEmits<{
             class="btn-link cc-delete"
             title="清空自定义目标,回到默认目录"
             @click="repo._cloneTarget = ''"
+          >🗑</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>
+          复用现有本地目录 <span class="field-hint">(选填)</span>
+          <span class="field-hint">
+            — 如果本仓库的代码已经躺在本地某个目录(典型:从 umbrella monorepo 切出去的独立仓,本地复用 umbrella 的子目录),填这里 → 跳过 clone 直接扫这个目录。
+          </span>
+        </label>
+        <div class="path-input-row">
+          <input
+            :value="repo._localPath || ''"
+            type="text"
+            placeholder="未选 = 走上面的 clone 父目录"
+            readonly
+            class="path-readonly"
+            :title="repo._localPath || ''"
+          />
+          <button type="button" class="btn" @click="emit('pickRemoteLocalReuse', repo)">
+            {{ repo._localPath ? '重新选…' : '选目录…' }}
+          </button>
+          <button
+            v-if="repo._localPath"
+            type="button"
+            class="btn-link cc-delete"
+            title="清空,改走 Clone 父目录"
+            @click="repo._localPath = ''; repo._scanned = false; repo._scannedSource = ''"
           >🗑</button>
         </div>
       </div>

@@ -122,15 +122,22 @@ export function computeStepErrors(ctx: ValidatorContext): Set<string> {
 
   if (step === 5) {
     // 仓库本地路径硬性必填(local / remote 都要),理由:产物 repo-path-map.yaml + BotsPage 诊断
-    // + 代码扫描都靠 ~/.tshoot/config.json 里这份。remote 模式下 _cloneTarget 是落盘父目录,
-    // 必须显式声明,不允许 "反正默认 clone 到 ~/.tshoot/repos" 这种隐式行为。
+    // + 代码扫描都靠 ~/.tshoot/config.json 里这份,不允许 "反正默认 clone 到 ~/.tshoot/repos"
+    // 这种隐式行为。
+    //
+    // remote 模式两种合法形态(二选一):
+    //   - Clone 父目录(_cloneTarget):正常 clone 落盘
+    //   - 复用现有本地目录(_localPath):跳过 clone,直接用现成目录(典型场景:
+    //     truss umbrella 已 clone,commerce 是从中切出去的独立仓,本地复用 truss/commerce)
     ctx.repos.forEach((r, i) => {
       if (!r.name.trim()) errs.add(`repo.${i}.name`)
       if (r._source === 'local') {
         if (!(r._localPath || '').trim()) errs.add(`repo.${i}.localPath`)
       } else {
         if (!r.url.trim()) errs.add(`repo.${i}.url`)
-        if (!(r._cloneTarget || '').trim()) errs.add(`repo.${i}.cloneTarget`)
+        const hasCloneTarget = (r._cloneTarget || '').trim() !== ''
+        const hasLocalReuse = (r._localPath || '').trim() !== ''
+        if (!hasCloneTarget && !hasLocalReuse) errs.add(`repo.${i}.cloneTarget`)
       }
     })
     return errs
@@ -245,7 +252,7 @@ export function labelForErrorKey(k: string, repos: ValidatorRepo[]): string {
     const f = parts[2]
     if (f === 'localPath') return `仓库 #${i} 本地目录`
     if (f === 'url') return `仓库 #${i} URL`
-    if (f === 'cloneTarget') return `仓库 #${i} clone 落盘父目录(必填,远程仓库部署时 clone 到 <父目录>/${repos[i - 1]?.name || '<repo.name>'})`
+    if (f === 'cloneTarget') return `仓库 #${i} 必填 clone 父目录(部署时 clone 到 <父目录>/${repos[i - 1]?.name || '<repo.name>'})或"复用现有本地目录"(免 clone),二选一`
     return `仓库 #${i} ${f}`
   }
   if (k.startsWith('cc.')) {

@@ -105,15 +105,17 @@ export function useRepoScan(deps: RepoScanDeps) {
     }
     r._roleHintLoading = true
     try {
-      // 推 path:本地模式直接用用户选的路径;远程模式必须算"实际落地的 clone 路径",
-      // 否则后端 RecommendRole 拿到空 path 会跳过文件级判别(读 package.json /
-      // pom.xml / go.mod 那条线)直接兜底 backend —— 远程仓 React/Vue 项目会被错判
-      // 成后端服务。落地路径 = clone 父目录(用户挑的 _cloneTarget / 全局默认
-      // reposRootInput / 始终兜底 resolvedReposRoot)+ repo.name。
+      // 推 path 优先级:
+      //   1. _localPath 显式给(本地模式 / 远程模式的 umbrella 子模块复用)→ 直接用,免 clone
+      //   2. 远程模式无显式覆盖 → 拼"clone 父目录(_cloneTarget / reposRootInput /
+      //      resolvedReposRoot 三层兜底)+ repo.name"算落地路径
+      // path 空 → 后端 RecommendRole 跳过文件级判别(读 package.json/pom.xml/go.mod)
+      // 直接兜底 backend,远程仓 React/Vue 项目会被错判成后端。
       let path = ''
-      if (r._source === 'local') {
-        path = r._localPath || ''
-      } else {
+      const explicit = (r._localPath || '').trim()
+      if (explicit) {
+        path = explicit
+      } else if (r._source === 'remote') {
         const parent = ((r._cloneTarget || '').trim() ||
           (deps.reposRootInput.value || '').trim() ||
           deps.resolvedReposRoot.value).replace(/\/+$/, '')
@@ -142,12 +144,13 @@ export function useRepoScan(deps: RepoScanDeps) {
   // → 命中即把列表存到 r._submoduleHints,UI banner 显示"检测到 N 个子模块,一键拆分"。
   // 触发时机:scan 完成后(此时本地路径已就位)。0 命中 → 不弹 banner。
   async function refreshSubmoduleHints(r: RepoScanItem) {
-    // 本地模式直接用 _localPath;远程模式 clone 完成后落点 = (clone 父目录 / 全局默认)+ repo.name。
-    // 之前只走 resolveCloneDest(_cloneTarget+name),用户没填 _cloneTarget 靠全局默认时
-    // 直接返空 → 跳过扫描 → 子模块 hint 永远空 —— 跟 refreshRoleHint 同款 bug。
+    // path 优先级跟 refreshRoleHint 一致:
+    //   1. _localPath 显式给 → 直接用(本地模式 / 远程 umbrella 子模块复用)
+    //   2. 远程模式无显式覆盖 → 拼 clone 父目录(三层兜底)+ repo.name
     let path = ''
-    if (r._source === 'local') {
-      path = r._localPath || ''
+    const explicit = (r._localPath || '').trim()
+    if (explicit) {
+      path = explicit
     } else if (r._source === 'remote') {
       const parent = ((r._cloneTarget || '').trim() ||
         (deps.reposRootInput.value || '').trim() ||
@@ -219,6 +222,28 @@ export function useRepoScan(deps: RepoScanDeps) {
     }
   }
 
+  // pickRemoteLocalReuse:远程 URL 模式下"复用现有本地目录"picker。
+  // 跟 pickLocalRepoDir 不同 —— 不动 URL / 名字 / 已扫描标记,只把 _localPath 设上
+  // 标记成"已有本地了,不用 clone"。典型场景:commerce 是从 truss umbrella 切出去的
+  // 独立仓,URL 想保留 service/commerce.git(权威标识)但本地复用 ~/go/src/truss/commerce。
+  // 设上后用户手动点同步扫描,scanSingleRepo 会优先用 _localPath、跳过 clone。
+  async function pickRemoteLocalReuse(r: RepoScanItem) {
+    if (!isDesktop()) {
+      toast.error('选目录需要桌面 app 环境')
+      return
+    }
+    try {
+      const p = await openDir('选择本地已有的代码目录(免 clone)')
+      if (!p) return
+      r._localPath = p.trim()
+      // 路径变了 = 上次扫描过期,清扫描态让 UI 提示"重新扫描"
+      r._scanned = false
+      r._scannedSource = ''
+    } catch (e: any) {
+      toast.error(String(e?.message || e))
+    }
+  }
+
   // resolveLocalRepoPath 把一个新的本地路径应用到 repo,跑 url/name 反填 + 扫描。
   // 唯一入口是 pickLocalRepoDir(选目录按钮) —— 输入框不让手敲,路径一律由 openDir
   // 返回保证存在且是绝对路径。
@@ -280,15 +305,17 @@ export function useRepoScan(deps: RepoScanDeps) {
       return
     }
 
-    // 构造 RepoPaths:仅这一个仓库的路径覆盖;效用上同 AnalyzeV2 的 per-repo 映射
+    // 构造 RepoPaths:仅这一个仓库的路径覆盖;效用上同 AnalyzeV2 的 per-repo 映射。
+    // _localPath 显式给(本地模式 或 远程模式 umbrella 子模块复用)→ 跳过 clone 直接扫
     const repoPaths: Record<string, string> = {}
-    if (r._source === 'local' && r._localPath?.trim()) {
+    if (r._localPath?.trim()) {
       repoPaths[r.name] = r._localPath.trim()
     } else if (r._source === 'remote') {
       const dest = resolveCloneDest(r)
       if (dest) repoPaths[r.name] = dest
     }
-    const autoClone = r._source === 'remote'
+    // 远程模式 + 没填 _localPath 才需要 autoClone;有显式 _localPath 直接用,免 clone
+    const autoClone = r._source === 'remote' && !r._localPath?.trim()
     // 远程模式没填本仓库 clone 父目录时需要 effectiveRoot 来拼 ReposRoot/Name
     const effectiveRoot = deps.reposRootInput.value.trim() || deps.resolvedReposRoot.value
     if (autoClone && !repoPaths[r.name] && !effectiveRoot) {
@@ -401,6 +428,7 @@ export function useRepoScan(deps: RepoScanDeps) {
     refreshSubmoduleHints,
     pickCloneTarget,
     pickLocalRepoDir,
+    pickRemoteLocalReuse,
     resolveLocalRepoPath,
     scanSingleRepo,
   }

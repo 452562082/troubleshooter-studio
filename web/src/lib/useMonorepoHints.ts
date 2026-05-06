@@ -138,8 +138,15 @@ export function useMonorepoHints(deps: UseMonorepoHintsDeps) {
     if (!parent || !parent._submoduleHints || parent._submoduleHints.length === 0) return
     const branches = { ...parent.env_branches } // 共用父仓库的 env_branches(同一个 git 仓库分支策略一致)
     const sel = parent._submoduleSelection || {}
-    // 只展开勾选了的子模块;空选状态(理论上不可能)兜底全选
-    const picked = parent._submoduleHints.filter(h => sel[h.sub_path] !== false)
+    // 1. 只展开勾选了的子模块;空选状态(理论上不可能)兜底全选
+    // 2. **防御性去重**:跟 repos[] 里已有的 name 撞 → 跳过(用户即便手动勾了已拆过的,
+    //    也不重复展开。banner 默认应该已经反勾这些,这条是最后一道闸)
+    const existingNames = new Set(
+      deps.repos.map(rr => rr.name.trim()).filter(n => n && n !== parent.name.trim()),
+    )
+    const picked = parent._submoduleHints
+      .filter(h => sel[h.sub_path] !== false)
+      .filter(h => !existingNames.has(h.name))
     if (picked.length === 0) return
     // 父仓的真实磁盘路径:
     //   - local 模式 → parent._localPath

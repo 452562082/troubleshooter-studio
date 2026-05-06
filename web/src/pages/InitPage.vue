@@ -2480,6 +2480,7 @@ const {
 } = useRepoScan({
   repoBranchesMap,
   environments,
+  repos,
   reposRootInput,
   resolvedReposRoot,
   // pickBranchForEnv / isServiceRole 的 env 参数类型 InitPage 用的是含 api_domain

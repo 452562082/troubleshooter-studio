@@ -70,6 +70,8 @@ export interface RepoScanDeps {
   repoBranchesMap: Ref<Record<string, string[]>>
   /** 已配置 envs;扫到 branches 后给每个 env 自动选默认分支用 */
   environments: Reactive<RepoScanEnv[]>
+  /** 当前所有仓库行(refreshSubmoduleHints 用来判定哪些子模块已经拆过、默认 uncheck) */
+  repos: Reactive<RepoScanItem[]>
   /** 全局默认 clone 父目录(用户可空,resolvedReposRoot 永远非空兜底) */
   reposRootInput: Ref<string>
   resolvedReposRoot: Ref<string>
@@ -171,9 +173,15 @@ export function useRepoScan(deps: RepoScanDeps) {
     try {
       const hints = await detectSubmodulesForRepo(path)
       r._submoduleHints = hints
-      // 默认全选,用户能取消勾不想要的(如 tools/lint-rules)
+      // 默认勾选规则:
+      //   - 跟 repos[] 里已有 entry name 撞 → 默认 uncheck(已经拆过了,再勾就是重复)
+      //   - 否则 check(常规第一次拆 / 新增子模块)
+      // 用户仍可手动反勾;这里只决定"banner 出现时哪些预选"。
+      const existingNames = new Set(deps.repos.map(rr => rr.name.trim()).filter(Boolean))
       const sel: Record<string, boolean> = {}
-      for (const h of hints) sel[h.sub_path] = true
+      for (const h of hints) {
+        sel[h.sub_path] = !existingNames.has(h.name)
+      }
       r._submoduleSelection = sel
       // 重新扫了一次 → 老的"合并状态"作废,banner 重新出现给用户决定
       r._submoduleHintsDismissed = false

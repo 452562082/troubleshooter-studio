@@ -400,11 +400,19 @@ interface RepoItem {
   // wizard 里有自动推荐(基于 stack):php/go/java/python → backend;node 由用户手挑
   // (前端 vs 后端 vs gateway/BFF 都是 node 常见用法,不能 stack 一刀切)。
   role?: RepoRole
-  // sub_path:monorepo 子目录。多个服务在同一个 git 仓库不同子目录时,在 repos[] 添加
-  // 多个条目共用相同 url + 不同 sub_path,name 各取服务名。
-  // 例:truss 仓库下 services/commerce 是 Go 服务,web/admin 是 Node 后台 → 两个条目同 url 不同 sub_path。
-  // 空 = 整 repo 当一个服务对待(默认行为,大部分单服务仓库)。
+  // sub_path:本仓 URL clone 后的仓内子目录(同 URL 多服务 monorepo 场景)。
+  // 例:truss 仓库下 services/commerce 是 Go 服务,web/admin 是 Node 后台 → 两个条目同 url
+  // 不同 sub_path,clone 同一份 truss 后各自扫子目录。空 = 整 repo 当一个服务对待。
+  // 跟 parent_path 正交:parent_path 是"在 umbrella 内的挂载位置",sub_path 是"本 URL clone 内的子目录"。
   sub_path?: string
+  // parent_repo:引用 repos[].name,标明本仓是某 umbrella 切出去的独立 git 仓。
+  // 默认部署:umbrella 先 clone,本仓 URL clone 到 <umbrella-clone>/<parent_path 或 name>(继承模式)。
+  // 用户也可以填 _cloneTarget 走独立 clone 模式(跟普通仓库一样)。
+  parent_repo?: string
+  // parent_path:在 umbrella clone 内的挂载相对路径(只在 parent_repo 在场时生效),
+  // 默认 = repo.name。.gitmodules 里 path != name 时(如 path=services/commerce, name=commerce)
+  // 用 parent_path 显式给。
+  parent_path?: string
   service_names: string
   env_branches: Record<string, string>
   // _nameManual: 用户手动编辑过 name,URL 变化不会再覆盖 name。
@@ -2414,6 +2422,8 @@ function generateYAML(): string {
     repos: repos.map(r => ({
       name: r.name, url: r.url, stack: r.stack, framework: r.framework,
       role: r.role, sub_path: r.sub_path,
+      parent_repo: r.parent_repo,
+      parent_path: r.parent_path,
       service_names: r.service_names,
       env_branches: r.env_branches,
       _serviceEntries: r._serviceEntries,

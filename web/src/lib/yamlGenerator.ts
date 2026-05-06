@@ -41,6 +41,8 @@ export interface YAMLGenRepo {
   framework: string
   role?: string
   sub_path?: string
+  parent_repo?: string
+  parent_path?: string
   service_names: string
   env_branches: Record<string, string>
   _serviceEntries?: Record<string, string>
@@ -182,7 +184,13 @@ export function generateYAML(ctx: YAMLGenContext): string {
       lines.push(`    role: ${repo.role}             # 仓库角色:决定排障时是否进服务依赖图`)
     }
     if (repo.sub_path && repo.sub_path.trim()) {
-      lines.push(`    sub_path: ${repo.sub_path.trim()}             # monorepo 子目录(本服务在仓库内的相对路径)`)
+      lines.push(`    sub_path: ${repo.sub_path.trim()}             # 本仓 URL clone 后的仓内子目录(同 URL 多服务 monorepo 用)`)
+    }
+    if (repo.parent_repo && repo.parent_repo.trim()) {
+      lines.push(`    parent_repo: ${repo.parent_repo.trim()}             # 从该 umbrella 切出去的子模块,部署时 clone 到 <umbrella>/<parent_path|name>`)
+    }
+    if (repo.parent_path && repo.parent_path.trim()) {
+      lines.push(`    parent_path: ${repo.parent_path.trim()}             # 在 umbrella clone 内的挂载相对路径(默认=name)`)
     }
     if (repo.framework) lines.push(`    framework: ${repo.framework}`)
     if (repo.service_names.trim()) {

@@ -79,6 +79,10 @@ export interface ParsedRepoCore {
   /** service_names 在 yaml 里可能是数组或字符串,统一成 csv 串(InitPage RepoItem 形状) */
   service_names: string
   config_source: string
+  /** 引用 repos[].name,标明本仓是某 umbrella 切出去的子模块 */
+  parent_repo: string
+  /** 在 umbrella clone 内的挂载相对路径(默认=name) */
+  parent_path: string
   service_entries?: Record<string, string>
 }
 
@@ -105,6 +109,8 @@ export function parseRepoCore(r: unknown): ParsedRepoCore {
     sub_path: typeof o.sub_path === 'string' ? (o.sub_path as string).trim() : '',
     service_names: svcNames,
     config_source: typeof o.config_source === 'string' ? o.config_source : '',
+    parent_repo: typeof o.parent_repo === 'string' ? (o.parent_repo as string).trim() : '',
+    parent_path: typeof o.parent_path === 'string' ? (o.parent_path as string).trim() : '',
     service_entries: serviceEntries,
   }
 }

@@ -26,6 +26,8 @@ interface RepoItem {
   framework: string
   role?: string
   sub_path?: string
+  parent_repo?: string
+  parent_path?: string
   service_names: string
   env_branches: Record<string, string>
   _nameManual?: boolean
@@ -103,6 +105,19 @@ const emit = defineEmits<{
       <span class="repo-badge">仓库 {{ index + 1 }}</span>
       <span v-if="repo.sub_path && repo.sub_path.trim()" class="submodule-tag" :title="`子目录: ${repo.sub_path}`">
         📂 {{ repo.sub_path.trim() }}
+      </span>
+      <span
+        v-if="repo.parent_repo && repo.parent_repo.trim()"
+        class="submodule-tag umbrella-tag"
+        :title="`从 umbrella ${repo.parent_repo} 切出去的子模块。\n部署时 clone 到 <${repo.parent_repo} clone 路径>/${repo.parent_path || repo.name}`"
+      >
+        🌂 属于 {{ repo.parent_repo.trim() }} @ {{ repo.parent_path || repo.name || '<name>' }}
+        <button
+          type="button"
+          class="btn-link cc-delete"
+          title="解除关联,本仓将作为独立 repo 走自己的 clone 父目录"
+          @click="repo.parent_repo = ''; repo.parent_path = ''"
+        >🗑</button>
       </span>
       <button class="btn-icon remove" :disabled="!canRemove" @click="emit('remove', index)">&times;</button>
     </div>

@@ -62,6 +62,21 @@ type Repo struct {
 	// 多源场景必填(运行时 routing skill 据此选 MCP);空时 LoadFromBytes 自动绑到
 	// config_centers[0],兼容只有一个源的老 yaml。
 	ConfigSource string `yaml:"config_source,omitempty"`
+	// ParentRepo 引用 repos[].name,声明本仓库是从某 umbrella(主仓)切出去的独立 git 仓。
+	// 典型场景:truss umbrella + commerce/admin/payment 三个被切出去的独立仓。
+	// 部署时编排:
+	//   1. umbrella(parent_repo 为空、被别人引用的)先 clone 到 <reposRoot>/<name>
+	//   2. 子模块默认 clone 到 <umbrella-clone>/<parent_path 或 name>(继承模式)
+	//   3. 用户也可以**单独配 clone 父目录**(wizard 里给 _cloneTarget,运行时通过
+	//      RepoPaths 覆盖),走独立模式 clone 到自己的位置,跟普通仓库完全一样
+	// 跟 SubPath 的区别:SubPath 是"本 URL 的 clone 根 → 服务代码"导航(同 URL 多服务
+	// monorepo 用);ParentPath 是"umbrella clone 根 → 本子模块挂载点"导航。两者正交,
+	// 同时设也合法(几乎不用,但语义清晰)。
+	ParentRepo string `yaml:"parent_repo,omitempty"`
+	// ParentPath 在 umbrella clone 内的相对路径,只在 ParentRepo 非空时生效。
+	// 空 = 用 repo.name 兜底(典型:.gitmodules 里 path=name 的常规约定)。
+	// 非空场景:.gitmodules 里 path=services/commerce 但 name=commerce(路径跟仓名不一致)。
+	ParentPath string `yaml:"parent_path,omitempty"`
 }
 
 // EffectiveRole 返回 repo 实际的 role:Role 显式给了就用,否则 fallback "backend"。

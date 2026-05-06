@@ -103,17 +103,35 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 	// 拆分成多 service 时常见)只 clone 一次,后续 repo 直接复用同一 clone root,
 	// 各自 sub_path 决定 scan 子目录。key=URL,val=clone 落点(绝对路径)。
 	urlClonedTo := map[string]string{}
+	// resolvedPaths 跟踪每个 repo 名最终确定的本地路径,parent_repo 在的子模块需要
+	// 用 parent 已解析路径 + sub_path 拼。配合下面的 topoSortReposByParent 保证 parent
+	// 一定先处理。RepoName filter 过滤掉的 repo 不会进这张表 —— 但被过滤的 child 不会
+	// 走到这里,过滤掉的 parent 在 child 处理时也用不到(那种场景只单扫子模块,parent 路径
+	// 走 RepoPaths 显式 / autoClone 兜底)。
+	resolvedPaths := map[string]string{}
 
-	for _, repo := range cfg.Repos {
+	for _, repo := range topoSortReposByParent(cfg.Repos) {
 		// RepoName filter:桌面 app 单仓库扫描用,其它仓库直接跳(不进 PerRepo)。
 		if opts.RepoName != "" && repo.Name != opts.RepoName {
 			continue
 		}
-		// 优先用 RepoPaths 显式指定的绝对路径(本地已有的仓库),回落到 ReposRoot/Name,
-		// 再回落到"同 URL 之前已 clone 到的根"(monorepo 多 service 共用 clone)。
+		// 路径解析优先级:
+		//  1. RepoPaths[name] 显式覆盖(本地已有 / 用户挑过 _cloneTarget 的独立 clone) → 最权威
+		//  2. ParentRepo 在场 → 继承 umbrella 路径:<resolvedPaths[parent]>/<sub_path 或 name>
+		//     (典型:commerce 从 truss 切出,本地放 ~/.../truss/commerce/)
+		//  3. urlClonedTo[url] → 同 URL 多 repo 条目复用同一 clone(monorepo 多 service)
+		//  4. ReposRoot/Name → 兜底
 		var repoPath string
 		if p, ok := opts.RepoPaths[repo.Name]; ok && p != "" {
 			repoPath = p
+		} else if repo.ParentRepo != "" {
+			if parentPath, ok := resolvedPaths[repo.ParentRepo]; ok && parentPath != "" {
+				mount := repo.ParentPath
+				if mount == "" {
+					mount = repo.Name
+				}
+				repoPath = filepath.Join(parentPath, mount)
+			}
 		} else if cloned, ok := urlClonedTo[repo.URL]; ok && cloned != "" {
 			repoPath = cloned
 		} else if opts.ReposRoot != "" {
@@ -175,6 +193,9 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 		}
 		// 记下"这个 URL 的 clone root",同 url 后续 repo 条目复用(monorepo 多 service)
 		urlClonedTo[repo.URL] = repoPath
+		// 记下"这个 repo 名最终解析到的本地路径",后续子模块(parent_repo 指向本仓的)
+		// 直接拼 <这个路径>/<sub_path 或 child.name> 当落地点
+		resolvedPaths[repo.Name] = repoPath
 
 		// monorepo:repoPath 当前是 clone root;sub_path 非空时把 scan 路径定到子目录。
 		// 这样 stack 探测 / role-hint / dep-scan / schema-scan / Analyze 看到的都是
@@ -412,4 +433,66 @@ func orDefault(s, def string) string {
 		return def
 	}
 	return s
+}
+
+// topoSortReposByParent 把 repos 按 parent_repo 拓扑排序:parent 一定排在子模块前面。
+// 同层(parent_repo 相同 / 都没 parent)按原顺序保持稳定。
+//
+// 用 Kahn 算法。环 / 引用不到的 parent 都被 health check 提前拦下,这里安全降级:
+// 残留没排进去的元素直接追加到末尾,保证返回长度跟入参一致(后续逻辑按 name 找
+// resolvedPaths,排不进去的子模块拿不到 parent 路径会落到默认 ReposRoot+Name 兜底)。
+func topoSortReposByParent(repos []config.Repo) []config.Repo {
+	if len(repos) <= 1 {
+		return repos
+	}
+	// 按 name 索引,parent_repo 引用按 name 找 idx
+	idxByName := make(map[string]int, len(repos))
+	for i, r := range repos {
+		idxByName[r.Name] = i
+	}
+	// indegree[i] = repos[i] 依赖几个 parent(0 或 1,因为单 parent_repo 字段)
+	indegree := make([]int, len(repos))
+	for i, r := range repos {
+		if r.ParentRepo == "" {
+			continue
+		}
+		if _, ok := idxByName[r.ParentRepo]; !ok {
+			continue // 引用不存在的 parent,health check 会报 error,这里不算依赖
+		}
+		indegree[i] = 1
+	}
+	// 收集所有 indegree=0 的 repo,按原顺序加进 queue
+	queue := make([]int, 0, len(repos))
+	for i := range repos {
+		if indegree[i] == 0 {
+			queue = append(queue, i)
+		}
+	}
+	out := make([]config.Repo, 0, len(repos))
+	visited := make(map[int]bool, len(repos))
+	for len(queue) > 0 {
+		i := queue[0]
+		queue = queue[1:]
+		if visited[i] {
+			continue
+		}
+		visited[i] = true
+		out = append(out, repos[i])
+		// 找所有把 repos[i] 当 parent 的 child,indegree -- 后入队
+		for j, r := range repos {
+			if r.ParentRepo == repos[i].Name && !visited[j] {
+				indegree[j]--
+				if indegree[j] == 0 {
+					queue = append(queue, j)
+				}
+			}
+		}
+	}
+	// 残留(成环 / 漏排)按原顺序追加,保证返回长度一致
+	for i, r := range repos {
+		if !visited[i] {
+			out = append(out, r)
+		}
+	}
+	return out
 }

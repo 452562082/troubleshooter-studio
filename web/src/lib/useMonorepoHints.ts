@@ -169,7 +169,21 @@ export function useMonorepoHints(deps: UseMonorepoHintsDeps) {
         url: isIndependentRepo ? (h.url as string) : parent.url,
         stack: h.stack || parent.stack || 'go',
         role: h.role || 'backend',
+        // sub_path 单义"本 URL clone 内的子目录":
+        //   - 独立仓(commerce.git):仓根就是 service 代码,sub_path=""
+        //   - 同仓子目录:跟父仓共用 URL,各行用 h.sub_path 区分
         sub_path: isIndependentRepo ? '' : h.sub_path,
+        // 独立子模块:声明 parent_repo + parent_path,另一台机器拿 yaml 能恢复 umbrella →
+        // 子模块关系,走 analyzerpipe 的 umbrella 继承编排
+        // (parent 先 clone,本仓 URL clone 到 <parent>/<parent_path 或 name>)。
+        // parent_path = h.sub_path(.gitmodules 里 commerce 子模块的挂载位置);
+        // 跟 name 一致时省略 parent_path 字段(yaml 自动用 name 兜底)。
+        ...(isIndependentRepo
+          ? {
+            parent_repo: parent.name,
+            ...(h.sub_path && h.sub_path !== h.name ? { parent_path: h.sub_path } : {}),
+          }
+          : {}),
         // service_names 默认 = 子模块名,但只对"业务服务"角色赋值;frontend / common-lib /
         // mobile / infra / docs 这类不算服务,留空更准确(否则会被后续配置中心 / 数据层
         // 扫描当成 service ID 误用)。

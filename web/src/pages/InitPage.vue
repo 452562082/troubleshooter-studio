@@ -370,6 +370,27 @@ function isServiceRole(role?: string): boolean {
   return role === 'backend' || role === 'gateway' || role === 'middleware' || role === 'admin'
 }
 
+// SourceSnapshot:_source 切换时打包暂存的"源相关字段集合"。
+// url / _localPath / _cloneTarget 三者按当前 _source 二选一在用,但都纳入 snapshot
+// (切到对面源再切回来,它们要原样恢复);name / stack / framework / service_names /
+// env_branches / 扫描状态都跟"具体哪个源(那个 URL / 那个本地路径)" 强绑定,也一起。
+interface SourceSnapshot {
+  url: string
+  name: string
+  _nameManual: boolean
+  stack: string
+  framework: string
+  service_names: string
+  env_branches: Record<string, string>
+  _localPath?: string
+  _cloneTarget?: string
+  _scanning: boolean
+  _scanError?: string
+  _scanned: boolean
+  _scannedSource?: string
+  _serviceEntries?: Record<string, string>
+}
+
 interface RepoItem {
   name: string
   url: string
@@ -424,6 +445,11 @@ interface RepoItem {
   // 单独记录;routing skill 据此把 service → 源码入口对应起来。
   // gitmodules 拆出的独立 repo 不用本字段(它们各自占一行,有自己的 sub_path / 本地路径)。
   _serviceEntries?: Record<string, string>
+  // _sourceCache:切 _source(local ↔ remote)时缓存离开侧的全部源相关字段,
+  // 切回来能原样恢复。最终 yaml emit 只看当前 _source 的活动字段。
+  // 不缓存 role / sub_path / _roleHint / _roleManuallyPicked —— 这些跟"哪个源"无关,
+  // 是用户对仓库的固有判断,跨源持久。
+  _sourceCache?: { remote?: SourceSnapshot, local?: SourceSnapshot }
   // 用户已经合并过 monorepo hints 到 service_names,banner 应隐藏不再追问。
   _submoduleHintsDismissed?: boolean
   // _submoduleHints:扫描后探测到的"这是 monorepo,有 N 个子模块"列表。
@@ -742,34 +768,71 @@ function branchHasOptions(r: RepoItem): boolean {
 
 function setRepoSource(r: RepoItem, src: 'local' | 'remote') {
   if (r._source === src) return // 切到当前源不动,避免误清
-  // 切源 = 换了一个仓库,之前扫出来的元信息全作废:URL / 仓库名 / stack /
-  // framework / service_names / env_branches / branches 缓存 / 扫描状态。
-  // 用户如果真的是"同一个仓库,只是从远程切到本地"或反之,下一步选目录/填 URL
-  // 后会立即触发扫描,数据会自动回来,不用保留旧值。
-  // 先把分支缓存按旧 name 删(后面 r.name 会清成空,删不了旧 key)
-  const oldName = r.name
-  if (oldName && oldName in repoBranchesMap.value) {
-    delete repoBranchesMap.value[oldName]
+  // 切源:把当前侧的所有源相关字段打包进 _sourceCache,切回来时原样恢复。
+  // 之前的实现是无脑清空,用户来回切就丢数据 —— 实际场景常是"切过去看一眼对比就回来"。
+  const oldSrc: 'local' | 'remote' = r._source === 'local' ? 'local' : 'remote'
+  if (!r._sourceCache) r._sourceCache = {}
+  r._sourceCache[oldSrc] = {
+    url: r.url,
+    name: r.name,
+    _nameManual: !!r._nameManual,
+    stack: r.stack,
+    framework: r.framework,
+    service_names: r.service_names,
+    env_branches: { ...r.env_branches },
+    _localPath: r._localPath,
+    _cloneTarget: r._cloneTarget,
+    _scanning: !!r._scanning,
+    _scanError: r._scanError,
+    _scanned: !!r._scanned,
+    _scannedSource: r._scannedSource,
+    _serviceEntries: r._serviceEntries ? { ...r._serviceEntries } : undefined,
   }
   r._source = src
-  r.url = ''
-  r.name = ''
-  r._nameManual = false
-  r.stack = ''
-  r.framework = ''
-  r.service_names = ''
-  for (const eid of Object.keys(r.env_branches)) {
-    r.env_branches[eid] = ''
-  }
-  r._scanning = false
-  r._scanError = undefined
-  r._scanned = false
-  r._scannedSource = ''
-  // 切到 local:清掉 remote 侧独有的 _cloneTarget;切到 remote:清 _localPath
-  if (src === 'local') {
-    r._cloneTarget = ''
+
+  // 目标侧之前缓存过 → 原样恢复;没缓存过(首次切到这一侧) → 按"全新仓库"清空
+  const restored = r._sourceCache[src]
+  if (restored) {
+    r.url = restored.url
+    r.name = restored.name
+    r._nameManual = restored._nameManual
+    r.stack = restored.stack
+    r.framework = restored.framework
+    r.service_names = restored.service_names
+    for (const eid of Object.keys(r.env_branches)) {
+      r.env_branches[eid] = restored.env_branches[eid] || ''
+    }
+    r._localPath = restored._localPath
+    r._cloneTarget = restored._cloneTarget
+    r._scanning = restored._scanning
+    r._scanError = restored._scanError
+    r._scanned = restored._scanned
+    r._scannedSource = restored._scannedSource
+    r._serviceEntries = restored._serviceEntries
   } else {
-    r._localPath = ''
+    // 首次切到这一侧:跟旧版同款清空逻辑(以前所有切源都走这条)
+    const oldName = r.name
+    if (oldName && oldName in repoBranchesMap.value) {
+      delete repoBranchesMap.value[oldName]
+    }
+    r.url = ''
+    r.name = ''
+    r._nameManual = false
+    r.stack = ''
+    r.framework = ''
+    r.service_names = ''
+    for (const eid of Object.keys(r.env_branches)) {
+      r.env_branches[eid] = ''
+    }
+    r._scanning = false
+    r._scanError = undefined
+    r._scanned = false
+    r._scannedSource = ''
+    if (src === 'local') {
+      r._cloneTarget = ''
+    } else {
+      r._localPath = ''
+    }
   }
 }
 

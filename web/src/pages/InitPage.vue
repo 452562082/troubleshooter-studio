@@ -2444,7 +2444,6 @@ const {
   refreshRoleHint,
   pickCloneTarget,
   pickLocalRepoDir,
-  pickRemoteLocalReuse,
   scanSingleRepo,
 } = useRepoScan({
   repoBranchesMap,
@@ -2904,7 +2903,6 @@ provide(WizardStoreKey, {
         @sub-path-input="(r) => onRepoSubPathInput(r)"
         @pick-clone-target="(r) => pickCloneTarget(r)"
         @pick-local-repo-dir="(r) => pickLocalRepoDir(r)"
-        @pick-remote-local-reuse="(r) => pickRemoteLocalReuse(r)"
         @scan-single-repo="(r) => scanSingleRepo(r)"
         @toggle-submodule-pick="(r, sub, checked) => toggleSubmodulePick(r, sub, checked)"
         @split-monorepo="(idx) => splitMonorepo(idx)"

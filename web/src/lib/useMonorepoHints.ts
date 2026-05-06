@@ -231,9 +231,12 @@ export function useMonorepoHints(deps: UseMonorepoHintsDeps) {
       // 还是 backend 由用户决定,不替他做主。
       parent.service_names = ''
       parent._serviceEntries = undefined
+      // 拆完关 banner —— 否则面板还在,用户能再点一次按钮重复拆出 N 行(用户截图反馈)。
+      // 用户想重新看 banner → 重新扫一次 umbrella(refreshSubmoduleHints 会重置 dismissed)。
+      parent._submoduleHintsDismissed = true
       deps.repos.splice(parentIdx + 1, 0, ...newRows)
     } else {
-      // 老行为:全替换
+      // 老行为:全替换。父行没了 banner 自然不再显示(没载体)。
       deps.repos.splice(parentIdx, 1, ...newRows)
     }
     // 各新行的"环境 → 分支映射"下拉数据:并行调 listBranchesForRepo 拉每个子模块的真实分支,

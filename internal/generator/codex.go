@@ -119,10 +119,18 @@ func buildCodexAgentTOML(wsRoot string, ctx *Context, agentName string) (string,
 
 	TomlWriteString(&sb, "name", agentName)
 
+	// 子 skill 列表先读,后面 description 计数和 [[skills.config]] 枚举都复用。
+	// 读不到必须立刻报错 —— 之前这里吞掉错误 + 下面再做"if nil 重试一次"假兜底,
+	// IO 失败时静默生成 description="路由到 0 个子 skill" + 空 skills.config 段,
+	// codex 还能 spawn agent 但起来啥也调不了。
+	subSkills, err := listCodexSubSkills(wsRoot)
+	if err != nil {
+		return "", fmt.Errorf("list sub skills: %w", err)
+	}
+
 	// description:codex 用它判断"用户意图是否要 spawn 这个 agent",写**短而精准**(关键词触发)。
-	// 子 skill 实际数量 + 配置中心类型从 ctx 派生,避免硬编码漂移。
-	subSkillsForDesc, _ := listCodexSubSkills(wsRoot)
-	desc := buildCodexAgentDescription(ctx, len(subSkillsForDesc))
+	// 子 skill 数量 + 配置中心类型从 ctx 派生,避免硬编码漂移。
+	desc := buildCodexAgentDescription(ctx, len(subSkills))
 	TomlWriteString(&sb, "description", desc)
 
 	// nickname_candidates:codex 给 spawn 出的 thread instance 起的可读 display name。
@@ -154,13 +162,6 @@ func buildCodexAgentTOML(wsRoot string, ctx *Context, agentName string) (string,
 	// 自动当主入口列出,不需要 [[skills.config]] 显式注册(冗余会占 description budget)。
 	// path 用 CodexPlaceholderSkillsRoot 占位,install 时替换为绝对路径。
 	sb.WriteString("\n# ── Skills(子能力;path 由 install 时替换为绝对路径)──\n")
-	subSkills := subSkillsForDesc
-	if subSkills == nil {
-		var err error
-		if subSkills, err = listCodexSubSkills(wsRoot); err != nil {
-			return "", err
-		}
-	}
 	for _, s := range subSkills {
 		writeSkillEntry(&sb, CodexPlaceholderSkillsRoot+"/"+s+"/SKILL.md")
 	}

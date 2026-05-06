@@ -130,11 +130,13 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 		}
 		// Fallback:reposRoot 下找不到 → 往下扒一层 <reposRoot>/<X>/<repo.name>。
 		// 典型场景:用户 git clone --recurse-submodules <umbrella>,各子模块代码落在
-		// <umbrella>/<sub>/,而不是直接落在 reposRoot。为防误中:被找到的目录必须看
-		// 着像真代码(.git 或常见 manifest 文件),且**唯一**命中(多个 ambiguous 时退回 skip,
-		// 让用户显式提供路径)。
+		// <umbrella>/<sub>/,而不是直接落在 reposRoot。
+		// 防误中:被找到的目录的 git origin 必须跟 repo.URL 归一化后匹配,**否则拒绝**
+		// (修了之前"reposRoot 下任何同名目录被借用"的产品 bug —— 比如 truss/commerce
+		// 子目录撞上独立 service/commerce.git 的扫描请求)。repo.URL 为空(纯本地仓库
+		// 用例)时跳过 URL 校验,只看名字命中。
 		if pathMissing && opts.ReposRoot != "" {
-			if guess := findInSiblingDirs(opts.ReposRoot, repo.Name); guess != "" {
+			if guess := findInSiblingDirs(opts.ReposRoot, repo.Name, repo.URL); guess != "" {
 				progress(fmt.Sprintf("[fallback] repo %s 在 %s 找不到,降级到 %s(可能是 git submodule)", repo.Name, repoPath, guess))
 				repoPath = guess
 				pathMissing = false
@@ -332,12 +334,16 @@ func filterStackManifestWarnings(warns, notes []string) (newWarns, newNotes []st
 // 命中条件(防误中):
 //   - 路径必须存在且是目录
 //   - 目录非空(有任意可见文件 / 子目录)—— 避免捡到 .gitmodules 声明但还没初始化的空目录;
-//     不再要求"代码信号"(.git / manifest),因为 infra 类配置仓(mongodb-configs / k8s-yaml /
-//     terraform 等)里只有 yaml/json/conf 文件,严要求会误漏。
+//     不要求"代码信号"(.git / manifest),因为 infra 类配置仓(mongodb-configs / k8s-yaml /
+//     terraform 等)里只有 yaml/json/conf 文件,严要求会误漏
+//   - **wantURL 非空时**:候选目录的 git origin 必须跟 wantURL 归一化后匹配
+//     (修之前"任何同名目录被借用"的 bug —— truss/commerce 子目录会被借给
+//     独立的 service/commerce.git 扫描请求)。wantURL 空时(纯本地仓库,yaml 没填 url)
+//     跳过 URL 校验,只看名字
 //   - 整个 reposRoot 范围内**唯一**命中(多个 ambiguous 时返空让上层 skip,避免误用)
 //
 // reposRoot 子目录里的 `.` 隐藏目录、node_modules、vendor 等通用排除项跳过。
-func findInSiblingDirs(reposRoot, name string) string {
+func findInSiblingDirs(reposRoot, name, wantURL string) string {
 	entries, err := os.ReadDir(reposRoot)
 	if err != nil {
 		return ""
@@ -360,6 +366,19 @@ func findInSiblingDirs(reposRoot, name string) string {
 		}
 		return false
 	}
+	wantCanonical := gitclone.CanonicalURL(wantURL)
+	urlMatches := func(dir string) bool {
+		// wantURL 空 → 跳过校验(纯本地仓库,跟 URL 无关,旧行为)
+		if wantCanonical == "" {
+			return true
+		}
+		origin, err := gitclone.ReadOrigin(dir)
+		if err != nil {
+			// 候选不是 git 仓库 / 无 origin → 跟我们 URL 一定不是同一个,拒绝
+			return false
+		}
+		return gitclone.CanonicalURL(origin) == wantCanonical
+	}
 	var matches []string
 	for _, e := range entries {
 		if !e.IsDir() {
@@ -375,6 +394,9 @@ func findInSiblingDirs(reposRoot, name string) string {
 			continue
 		}
 		if !dirNonEmpty(candidate) {
+			continue
+		}
+		if !urlMatches(candidate) {
 			continue
 		}
 		matches = append(matches, candidate)

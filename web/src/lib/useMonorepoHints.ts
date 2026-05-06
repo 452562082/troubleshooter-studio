@@ -31,6 +31,10 @@ export interface UseMonorepoHintsDeps {
   repoBranchesMap: Ref<Record<string, string[]>>
   /** 远程模式仓库的 clone 落点(从 useRepoScan 透出) */
   resolveCloneDest: (r: MonorepoRepoItem) => string
+  /** 全局默认 clone 父目录(用户输入,可空)+ 兜底解析值,跟 useRepoScan 的 deps 同名同义。
+   * 远程模式 parent._cloneTarget 空时算实际 clone 落点要走这套兜底。 */
+  reposRootInput: Ref<string>
+  resolvedReposRoot: Ref<string>
   /** 启发式 env→branch 映射(同 scanSingleRepo) */
   pickBranchForEnv: (env: { id: string }, branches: string[]) => string
   /** 业务服务角色判定;只有 backend / gateway / middleware / admin 当 service */
@@ -140,10 +144,21 @@ export function useMonorepoHints(deps: UseMonorepoHintsDeps) {
     // 父仓的真实磁盘路径:
     //   - local 模式 → parent._localPath
     //   - remote 模式 → scan 完只设 _scanned/_scannedSource,_localPath 为空,
-    //     用 resolveCloneDest 算 clone 落点(就是 git clone 完后子模块所在的根)
-    const parentLocalBase = ((parent._source === 'remote'
-      ? (deps.resolveCloneDest(parent) || '')
-      : (parent._localPath || '')) || '').replace(/\/+$/, '')
+    //     算 clone 落点 = (parent._cloneTarget / 全局默认 reposRootInput / 兜底
+    //     resolvedReposRoot)+ parent.name。**之前只走 resolveCloneDest 看 _cloneTarget,
+    //     用户没填 _cloneTarget 靠全局默认时返空 → children 拿到空 _localPath**(图里
+    //     "尚未选择目录"的根因),跟 refreshRoleHint / refreshSubmoduleHints 同款 bug。
+    let parentLocalBase = ''
+    if (parent._source === 'remote') {
+      const remoteParent = ((parent._cloneTarget || '').trim() ||
+        (deps.reposRootInput.value || '').trim() ||
+        deps.resolvedReposRoot.value).replace(/\/+$/, '')
+      if (remoteParent && parent.name.trim()) {
+        parentLocalBase = remoteParent + '/' + parent.name.trim()
+      }
+    } else {
+      parentLocalBase = (parent._localPath || '').replace(/\/+$/, '')
+    }
     const newRows: MonorepoRepoItem[] = picked.map(h => {
       // .gitmodules 路径下,h.url 非空 = 真"独立 git repo + 子目录共置";其它 monorepo 路径
       // h.url 为空 = "同一仓库子目录"。两者展开后形态不同:
@@ -155,14 +170,17 @@ export function useMonorepoHints(deps: UseMonorepoHintsDeps) {
       const ownLocalPath = isIndependentRepo && parentLocalBase
         ? parentLocalBase + '/' + h.sub_path.replace(/^\/+/, '')
         : (parent._localPath || parentLocalBase)
-      // 子模块的 source 模式:
-      //   - .gitmodules 真子模块(isIndependentRepo + parentLocalBase 非空):
-      //     父仓 clone 完后已通过 git submodule update --init 拉到 parentLocalBase/<sub>/
-      //     子模块的代码已经在磁盘上了,该行视为 'local' 模式(_localPath 已自动算好,
-      //     不需要再选 _cloneTarget,Step 5 校验门也按 local 路径走)。
+      // 子模块的 source 模式:跟父仓保持一致(remote 父 → child 也 remote)。
+      //   - 独立子模块 + parent 是 remote:子模块 url 是各自的(.gitmodules 里的 h.url),
+      //     parent_repo 在 yaml 里声明 umbrella → 子模块关系,部署时走 analyzerpipe 的
+      //     umbrella 继承编排(parent 先 clone,子模块 URL clone 到 <parent>/<parent_path>);
+      //     wizard scan 本机优化:_localPath 预填 parentLocalBase/<sub_path>,refreshRoleHint
+      //     拿到立刻能用,免重复 clone。
+      //   - 独立子模块 + parent 是 local:同上 source 跟 parent 走 'local',
+      //     _localPath 同样指向 parentLocalBase/<sub_path>(代码已在磁盘上)。
       //   - 同仓子目录(isIndependentRepo=false):跟父仓共用 _source / _localPath / url,
       //     由 sub_path 区分,父仓什么模式继续什么模式。
-      const ownSource: 'local' | 'remote' = isIndependentRepo ? 'local' : (parent._source || 'remote')
+      const ownSource: 'local' | 'remote' = parent._source || 'remote'
       return {
         ...deps.makeEmptyRepo(),
         name: h.name,

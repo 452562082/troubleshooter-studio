@@ -699,6 +699,8 @@ const {
 } = useMonorepoHints({
   repos, environments, repoBranchesMap,
   resolveCloneDest: (r) => resolveCloneDest(r as RepoItem),
+  reposRootInput,
+  resolvedReposRoot,
   pickBranchForEnv: (env, branches) => pickBranchForEnv(env as EnvItem, branches),
   isServiceRole,
   makeEmptyRepo,

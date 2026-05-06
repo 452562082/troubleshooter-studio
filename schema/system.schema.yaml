@@ -225,10 +225,6 @@ generation:
     - mongodb-runtime-query
     - es-runtime-query
     - diagram-generator              # 对标 mermaid-image-generator，改名以避免绑定实现
-  preserve_on_regenerate:            # 二次生成时保留不覆盖（保留用户手工修改）
-    - SOUL.md
-    - USER.md
-    - CHECKLIST.md
 
 # ---------------------------------------------------------------------------
 # 7. 元数据 —— 生成器自身的版本管理

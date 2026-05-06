@@ -81,9 +81,5 @@ generation:
     - redis-runtime-query
     - mongodb-runtime-query
     - diagram-generator
-  preserve_on_regenerate:
-    - SOUL.md
-    - USER.md
-
 meta:
   schema_version: "0.1"

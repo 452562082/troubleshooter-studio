@@ -176,11 +176,6 @@ generation:
     - tracing-query
     - elk-log-query
     - diagram-generator
-  preserve_on_regenerate:
-    - SOUL.md
-    - USER.md
-    - CHECKLIST.md
-
 meta:
   schema_version: "0.1"
   tshoot_template_ref:

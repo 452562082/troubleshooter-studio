@@ -216,8 +216,20 @@ export function useMonorepoHints(deps: UseMonorepoHintsDeps) {
         _roleHint: { role: h.role, reason: h.reason },
       }
     })
-    // 用 N 行替换原来的 1 行;splice 第三参数起是要插入的元素
-    deps.repos.splice(parentIdx, 1, ...newRows)
+    // 拆分行为按"独立子模块" vs "同仓子目录"分两路:
+    //   - 独立子模块(isIndependentRepo=true,.gitmodules 真子模块):**保留 umbrella 行**,
+    //     在它后面插入 N 个 child(每个带 parent_repo=parent.name)。yaml 里要有 umbrella
+    //     entry 才能让其他机器恢复"先 clone umbrella → child clone 进去"的部署编排。
+    //   - 同仓子目录(isIndependentRepo=false,workspaces / cmd-multi 等共用 URL):**删 umbrella 行**,
+    //     N 个 child 共享同 URL,各自 sub_path 区分,umbrella 行变成冗余。
+    const allIndependent = picked.every(h => !!h.url)
+    if (allIndependent) {
+      // umbrella 留下,N 行紧跟其后
+      deps.repos.splice(parentIdx + 1, 0, ...newRows)
+    } else {
+      // 老行为:全替换
+      deps.repos.splice(parentIdx, 1, ...newRows)
+    }
     // 各新行的"环境 → 分支映射"下拉数据:并行调 listBranchesForRepo 拉每个子模块的真实分支,
     // 落到 repoBranchesMap[hint.name] → UI 下拉立即可用。同时按已有 env_branches 做启发式
     // 重映射(如 dev → develop / main 之类)。失败的子模块保持空(text input 兜底,跟原行为一致)。

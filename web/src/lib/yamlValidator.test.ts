@@ -81,13 +81,15 @@ describe('computeStepErrors', () => {
     expect(errs.has('env.1.id')).toBe(false)
   })
 
-  it('step 5 remote repo requires url + cloneTarget', () => {
+  it('step 5 remote repo requires url(_cloneTarget 改可选,走全局默认 reposRoot)', () => {
     const errs = computeStepErrors(makeCtx({
       step: 5,
       repos: [{ name: 'x', url: '', _source: 'remote' }],
     }))
     expect(errs.has('repo.0.url')).toBe(true)
-    expect(errs.has('repo.0.cloneTarget')).toBe(true)
+    // _cloneTarget 不再硬性必填:空时走上方"全局默认 clone 父目录",
+    // useRepoScan 三层兜底已统一处理
+    expect(errs.has('repo.0.cloneTarget')).toBe(false)
   })
 
   it('step 5 local repo requires _localPath', () => {

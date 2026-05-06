@@ -162,10 +162,9 @@ const emit = defineEmits<{
       </div>
       <div class="form-group">
         <label>
-          Clone 父目录 <span class="required">*</span>
+          Clone 父目录
           <span class="field-hint">
-            — 必填:选父目录,git clone 自动建 <code>/{{ repo.name || '&lt;repo.name&gt;' }}</code> 子目录。
-            **本地路径不允许走全局默认隐式回落**(产物里 repo-path-map.yaml 必须有显式路径才能跑代码扫描 / 排障)。
+            — 选填:不填走上方"全局默认 clone 父目录"。给本仓单独挑一个父目录(比如 commerce 放 <code>~/code/</code> 不放 <code>~/go/src/</code>)时填这里;git clone 会自动建 <code>/{{ repo.name || '&lt;repo.name&gt;' }}</code> 子目录。
           </span>
         </label>
         <div class="path-input-row">

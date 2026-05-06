@@ -121,16 +121,21 @@ export function computeStepErrors(ctx: ValidatorContext): Set<string> {
   }
 
   if (step === 5) {
-    // 仓库本地路径硬性必填(local / remote 都要),理由:产物 repo-path-map.yaml + BotsPage 诊断
-    // + 代码扫描都靠 ~/.tshoot/config.json 里这份。remote 模式下 _cloneTarget 是落盘父目录,
-    // 必须显式声明,不允许 "反正默认 clone 到 ~/.tshoot/repos" 这种隐式行为。
+    // 仓库本地路径策略:
+    //   - local 模式:_localPath 必填(用户已 clone 好,必须告诉我们在哪)
+    //   - remote 模式:url 必填,_cloneTarget **可选** —— 不填走上方"全局默认 clone 父目录",
+    //     useRepoScan 的 refreshRoleHint / refreshSubmoduleHints / scanSingleRepo 都已统一
+    //     "_cloneTarget / reposRootInput / resolvedReposRoot"三层兜底。强制每个 repo 都填
+    //     一遍同样的 ~/go/src/ 是冗余 UX,撤掉。用户想给单个 repo 配特殊目录(比如
+    //     commerce 放 ~/code/ 不放 ~/go/src/)再填 _cloneTarget 即可。
+    //   - umbrella 子模块(parent_repo 在场):部署时 clone 到 <umbrella>/<parent_path>,
+    //     _cloneTarget 也无需填,让 analyzerpipe 走 umbrella 继承编排。
     ctx.repos.forEach((r, i) => {
       if (!r.name.trim()) errs.add(`repo.${i}.name`)
       if (r._source === 'local') {
         if (!(r._localPath || '').trim()) errs.add(`repo.${i}.localPath`)
       } else {
         if (!r.url.trim()) errs.add(`repo.${i}.url`)
-        if (!(r._cloneTarget || '').trim()) errs.add(`repo.${i}.cloneTarget`)
       }
     })
     return errs

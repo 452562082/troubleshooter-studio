@@ -105,7 +105,22 @@ export function useRepoScan(deps: RepoScanDeps) {
     }
     r._roleHintLoading = true
     try {
-      let path = r._source === 'local' ? (r._localPath || '') : ''
+      // 推 path:本地模式直接用用户选的路径;远程模式必须算"实际落地的 clone 路径",
+      // 否则后端 RecommendRole 拿到空 path 会跳过文件级判别(读 package.json /
+      // pom.xml / go.mod 那条线)直接兜底 backend —— 远程仓 React/Vue 项目会被错判
+      // 成后端服务。落地路径 = clone 父目录(用户挑的 _cloneTarget / 全局默认
+      // reposRootInput / 始终兜底 resolvedReposRoot)+ repo.name。
+      let path = ''
+      if (r._source === 'local') {
+        path = r._localPath || ''
+      } else {
+        const parent = ((r._cloneTarget || '').trim() ||
+          (deps.reposRootInput.value || '').trim() ||
+          deps.resolvedReposRoot.value).replace(/\/+$/, '')
+        if (parent) {
+          path = parent + '/' + r.name.trim()
+        }
+      }
       // monorepo:把 sub_path 拼上,后端 RecommendRoleForRepo 会看子目录下的 package.json / pom.xml
       if (path && r.sub_path && r.sub_path.trim()) {
         path = path.replace(/\/+$/, '') + '/' + r.sub_path.trim().replace(/^\/+/, '')

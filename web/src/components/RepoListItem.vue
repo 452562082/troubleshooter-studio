@@ -163,9 +163,7 @@ const emit = defineEmits<{
       <div class="form-group">
         <label>
           Clone 父目录
-          <span class="field-hint">
-            — 选填:不填走上方"全局默认 clone 父目录"。给本仓单独挑一个父目录(比如 commerce 放 <code>~/code/</code> 不放 <code>~/go/src/</code>)时填这里;git clone 会自动建 <code>/{{ repo.name || '&lt;repo.name&gt;' }}</code> 子目录。
-          </span>
+          <span class="field-hint">— 选填,不填用全局默认。git clone 会建 <code>/{{ repo.name || '&lt;repo.name&gt;' }}</code> 子目录</span>
         </label>
         <div class="path-input-row">
           <input

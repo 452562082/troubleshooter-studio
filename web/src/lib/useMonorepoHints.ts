@@ -224,7 +224,13 @@ export function useMonorepoHints(deps: UseMonorepoHintsDeps) {
     //     N 个 child 共享同 URL,各自 sub_path 区分,umbrella 行变成冗余。
     const allIndependent = picked.every(h => !!h.url)
     if (allIndependent) {
-      // umbrella 留下,N 行紧跟其后
+      // umbrella 留下,N 行紧跟其后。
+      // umbrella 拆完变成"纯容器",服务都归子模块了,清自己的 service_names +
+      // service_entries(否则 Step 6 / k8s 服务下拉等会把 umbrella 当独立服务列出来,
+      // 让用户疑惑"我都拆了为什么还在")。role 不动 —— umbrella 是不是 infra/common-lib
+      // 还是 backend 由用户决定,不替他做主。
+      parent.service_names = ''
+      parent._serviceEntries = undefined
       deps.repos.splice(parentIdx + 1, 0, ...newRows)
     } else {
       // 老行为:全替换

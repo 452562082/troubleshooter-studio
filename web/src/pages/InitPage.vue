@@ -802,6 +802,11 @@ function setRepoSource(r: RepoItem, src: 'local' | 'remote') {
 
   // 目标侧之前缓存过 → 原样恢复;没缓存过(首次切到这一侧) → 按"全新仓库"清空
   const restored = r._sourceCache[src]
+  // umbrella 子模块(parent_repo 在场)的"身份"由 parent_repo + parent_path 锁定,
+  // 切源只是"换个访问方式"(URL clone / 本地已有目录),name / stack / role / 服务名 /
+  // 分支映射这些都不该丢。普通独立仓库(parent_repo 空)切源仍可能是"换仓库"语义,
+  // 保留旧行为(全清,等用户重扫填回)。
+  const isUmbrellaChild = !!(r.parent_repo && r.parent_repo.trim())
   if (restored) {
     r.url = restored.url
     r.name = restored.name
@@ -819,8 +824,23 @@ function setRepoSource(r: RepoItem, src: 'local' | 'remote') {
     r._scanned = restored._scanned
     r._scannedSource = restored._scannedSource
     r._serviceEntries = restored._serviceEntries
+  } else if (isUmbrellaChild) {
+    // umbrella 子模块首次切源:身份字段全保留,只清"源访问方式"相关 + 扫描态。
+    // _localPath 已经被 splitMonorepo 预填到 <umbrella>/<parent_path>;切到 local 模式
+    // 直接生效,切到 remote 也照常走 url + 父仓 clone 落点拼,所以这里都不动它。
+    if (src === 'local') {
+      // local 模式不需要 _cloneTarget(本地已有,不 clone)
+      r._cloneTarget = ''
+    } else {
+      // remote 模式 _cloneTarget 留空表示"走父仓的 clone 父目录或全局默认 reposRoot"
+      // _localPath 留着,作为"已有本地副本可用"的优化(refresh helpers / scanSingleRepo 优先)
+    }
+    // 切源后扫描态过期(scan 看的是 path,源换了重新扫一次更稳),但不清 url / name 等身份
+    r._scanned = false
+    r._scannedSource = ''
+    r._scanError = undefined
   } else {
-    // 首次切到这一侧:跟旧版同款清空逻辑(以前所有切源都走这条)
+    // 普通独立仓库首次切源:跟旧版同款清空逻辑(以前所有切源都走这条)
     const oldName = r.name
     if (oldName && oldName in repoBranchesMap.value) {
       delete repoBranchesMap.value[oldName]

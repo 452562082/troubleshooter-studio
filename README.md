@@ -17,7 +17,7 @@
 |---|---|---|
 | **桌面 app** (Wails) | 完整(建模 / 扫描 / 部署 / 已装管理 / 工作目录浏览) | 个人用,推荐新用户 |
 | **CLI** (`tshoot`) | 完整 yaml 计算 + 装机能力(4 平台齐全) | 脚本 / SSH / CI |
-| **HTTP API** (`tshoot serve`) | 仅 yaml 计算子集(validate / plan / gen / doctor / schema)| CI 集成 / 浏览器模式 / 接到自家平台。**不含装机** —— 改活 workspace 必须在该机器本地 |
+| **HTTP API** (`tshoot serve`) | 仅 yaml 计算子集(validate / plan / gen / doctor / prefill-creds / schema)| CI 集成 / 浏览器模式 / 接到自家平台。**不含装机** —— 改活 workspace 必须在该机器本地 |
 
 ## 部署到 4 个 AI 平台
 
@@ -69,7 +69,7 @@ make                                                       # 等价 go build -o 
 ./bin/tshoot install --path ./out --target openclaw        # 装到本机
 ```
 
-模板和示例已 `go:embed` 进二进制,二进制拷到任何位置都能跑。`tshoot --help` 列全部 16 个子命令。
+模板和示例已 `go:embed` 进二进制,二进制拷到任何位置都能跑。`tshoot --help` 列全部 17 个子命令。
 
 **HTTP API**(CI 集成 / 浏览器模式):
 
@@ -205,7 +205,7 @@ make clean        # 清 bin/ + dist/bin/ + 前端 dist 中间产物
 ## 目录结构
 
 ```
-cmd/tshoot/             CLI 入口(16 个子命令)
+cmd/tshoot/             CLI 入口(17 个子命令)
 cmd/tshoot-desktop/     Wails v2 桌面 app(Wails binding 走 cmd/tshoot-desktop/App)
 api/                    HTTP handler(tshoot serve)
 web/                    Vue 3 + Vite 前端
@@ -216,6 +216,7 @@ internal/
   generator/            模板渲染 + config-map snapshot + diff + plan + IDE 三家 agent 原生 prompt
   discover/             扫 tshoot.json 锚点识别已装机器人
   agent/                读-改-部署 + 原生 install/self-test/uninstall + IDE / openclaw 共用 MCP / creds 派生
+  deploy/               凭证持久化:WriteEnvFile / ReadEnvFile 把 UI 表单填的凭证写到 <staging>/scripts/.env(0600),下次 import 预填
   doctor/               漂移检测 + --fix
   upgrade/              备份 + 重 gen + diff
   webui/                前端 dist 的 //go:embed 入口

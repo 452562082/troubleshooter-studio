@@ -17,7 +17,6 @@ package agent_test
 import (
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -85,67 +84,15 @@ func buildStaging(t *testing.T, cfg *config.SystemConfig, yamlSrc []byte, target
 		t.Fatalf("generate %s: %v", target, err)
 	}
 	staging := base + "-" + target
+	// 三家 staging 都是 agents/<NAME>.<ext>(claude/cursor=.md;codex=.toml)。
 	if _, err := os.Stat(filepath.Join(staging, "agents")); err != nil {
 		t.Fatalf("staging missing agents/: %v", err)
 	}
 	return staging
 }
 
-// installCodexStub 在测试 PATH 前置一个假 `codex` 二进制。它支持本工程会调用的三个子命令:
-//
-//	codex mcp add <name> [--env K=V ...] [--url <url> | -- <command> <args...>]
-//	codex mcp remove <name>
-//	codex mcp list
-//
-// 通过环境变量 STUB_STATE 指向"当前已注册"的 server 名列表文件(每行一个 name)。
-// add 追加、remove 删行、list 按 codex 真实输出格式打印("Name URL/Command" 表头 + 每行)。
-//
-// 返回 stub 所在目录(调用方负责把它前置到 PATH)。
-func installCodexStub(t *testing.T) string {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("codex stub uses bash; skip on windows")
-	}
-	binDir := t.TempDir()
-	stubPath := filepath.Join(binDir, "codex")
-	stub := `#!/usr/bin/env bash
-set -e
-state="${STUB_STATE:-/tmp/codex-stub-state}"
-log="${STUB_LOG:-/tmp/codex-stub-log}"
-echo "$@" >> "$log"
-case "$1 $2" in
-  "mcp add")
-    name="$3"
-    [ -f "$state" ] && grep -v "^${name}$" "$state" > "${state}.tmp" 2>/dev/null && mv "${state}.tmp" "$state" || true
-    echo "$name" >> "$state"
-    exit 0
-    ;;
-  "mcp remove")
-    name="$3"
-    if [ -f "$state" ]; then
-      grep -v "^${name}$" "$state" > "${state}.tmp" 2>/dev/null || true
-      mv "${state}.tmp" "$state" 2>/dev/null || rm -f "$state"
-    fi
-    exit 0
-    ;;
-  "mcp list")
-    echo "Name URL/Command"
-    [ -f "$state" ] && cat "$state"
-    exit 0
-    ;;
-esac
-exit 0
-`
-	if err := os.WriteFile(stubPath, []byte(stub), 0o755); err != nil {
-		t.Fatalf("write codex stub: %v", err)
-	}
-	// state / log 文件路径 per-test,避免并行冲突
-	stateFile := filepath.Join(binDir, "state")
-	logFile := filepath.Join(binDir, "log")
-	t.Setenv("STUB_STATE", stateFile)
-	t.Setenv("STUB_LOG", logFile)
-	return binDir
-}
+// (旧版 codex CLI stub 已删除:codex MCP 现在嵌入 ~/.codex/agents/<name>.toml 内联段,
+//  不再走 `codex mcp add/remove/list`。e2e 直接读 agent toml 文件断言。)
 
 // readJSON 读 JSON 文件到 map。文件不存在或解析失败都报 fatal。
 func readJSON(t *testing.T, path string) map[string]any {
@@ -221,13 +168,43 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 			fakeHome := t.TempDir()
 			t.Setenv("HOME", fakeHome)
 
-			// codex 走 CLI 注册,装个 stub 接管
+			// claude-code 迁移路径覆盖:模拟"装过老版本"——预先在
+			// ~/.claude/settings.json 里塞一个跟即将派生的 key 同名的 mcpServer
+			// (老 bug 把 MCP 写到这里,Claude Code 看不到)。装完新版后这个残留
+			// 应被清掉(避免新位置 .claude.json 跟老位置 settings.json 并存,导致
+			// 卸载时漏清)。
+			if target == "claude-code" {
+				oldDir := filepath.Join(fakeHome, ".claude")
+				if err := os.MkdirAll(oldDir, 0o755); err != nil {
+					t.Fatalf("mkdir legacy claude dir: %v", err)
+				}
+				legacy := map[string]any{
+					"hooks": map[string]any{"keep": "this"}, // 非 MCP 字段必须保留
+					"mcpServers": map[string]any{
+						"shop-grafana-dev": map[string]any{"command": "stale-bin"},
+						"user-custom-mcp":  map[string]any{"command": "user-keeps-this"},
+					},
+				}
+				data, _ := json.MarshalIndent(legacy, "", "  ")
+				if err := os.WriteFile(filepath.Join(oldDir, "settings.json"), data, 0o644); err != nil {
+					t.Fatalf("seed legacy settings.json: %v", err)
+				}
+			}
+
+			// codex 不再走 CLI 注入(MCP 嵌入 agent toml 内联段),无需 stub。
+			//
+			// codex grafana/loki 走 ~/.codex/bin/mcp-grafana go 二进制,InstallNative 会调
+			// EnsureMCPGrafanaBinary 自动下载。测试不能依赖网络,提前在 fakeHome 放一个
+			// fake binary(>1MB,触发 size 检测短路)让 ensure 命中"已存在"分支跳过下载。
 			if target == "codex" {
-				stubDir := installCodexStub(t)
-				t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-				// sanity: which codex 应该指向 stub
-				if path, err := exec.LookPath("codex"); err != nil || !strings.HasPrefix(path, stubDir) {
-					t.Fatalf("codex stub not on PATH: path=%s err=%v", path, err)
+				binDir := filepath.Join(fakeHome, ".codex", "bin")
+				if err := os.MkdirAll(binDir, 0o755); err != nil {
+					t.Fatalf("mkdir fake bin: %v", err)
+				}
+				fakeBin := filepath.Join(binDir, "mcp-grafana")
+				// 1.5 MiB padding,通过 size>1MiB 短路检测,避免 e2e 真去 GitHub 下载
+				if err := os.WriteFile(fakeBin, make([]byte, 1<<20+512<<10), 0o755); err != nil {
+					t.Fatalf("write fake binary: %v", err)
 				}
 			}
 
@@ -240,8 +217,10 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 			}
 			rootDir := filepath.Join(fakeHome, "."+rootName(target))
 			agentName := cfg.ResolveID() // shop-system.yaml workspace_name=shop-bot
-			// agent .md / skills / scripts / tshoot.json 锚点
-			mustExist(t, filepath.Join(rootDir, "agents", agentName+".md"))
+			// agent 人格文件 / skills / scripts / tshoot.json 锚点。
+			// claude-code / cursor → agents/<name>.md;codex → AGENTS.md(全机一份)
+			agentMDPath := agentMDLocationFor(rootDir, target, agentName)
+			mustExist(t, agentMDPath)
 			mustExist(t, filepath.Join(rootDir, "skills", agentName))
 			mustExist(t, filepath.Join(rootDir, "skills", agentName, discover.MetaFilename))
 
@@ -254,13 +233,30 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 			// 验证三家各自的写入位置
 			switch target {
 			case "claude-code":
-				assertJSONHasMCPKeys(t, filepath.Join(rootDir, "settings.json"), expectedKeys)
+				// 注意:claude-code 的 MCP 写到 $HOME/.claude.json(dotfile),不是
+				// rootDir/settings.json —— Claude Code CLI 启动时只读这个 dotfile,
+				// settings.json 给 hooks/permissions/env 用,不读 mcpServers 字段。
+				assertJSONHasMCPKeys(t, filepath.Join(fakeHome, ".claude.json"), expectedKeys)
+
+				// 迁移路径断言:旧位置 settings.json 里跟新派生 key 同名的残留应被清掉,
+				// 但用户自加的 user-custom-mcp 和 hooks 字段必须保留。
+				legacyPath := filepath.Join(rootDir, "settings.json")
+				legacy := readJSON(t, legacyPath)
+				if hooks, _ := legacy["hooks"].(map[string]any); hooks == nil || hooks["keep"] != "this" {
+					t.Errorf("迁移不应碰 hooks 字段;实际 legacy=%v", legacy)
+				}
+				legacyServers, _ := legacy["mcpServers"].(map[string]any)
+				if _, stillThere := legacyServers["shop-grafana-dev"]; stillThere {
+					t.Errorf("迁移没清掉 settings.json 里残留的 shop-grafana-dev")
+				}
+				if _, kept := legacyServers["user-custom-mcp"]; !kept {
+					t.Errorf("迁移误删了用户自加的 user-custom-mcp")
+				}
 			case "cursor":
 				assertJSONHasMCPKeys(t, filepath.Join(rootDir, "mcp.json"), expectedKeys)
 			case "codex":
-				// stub 把 add 调用记到 STUB_STATE 文件;一行一个 server 名
-				stateFile := os.Getenv("STUB_STATE")
-				assertCodexStateHasKeys(t, stateFile, expectedKeys)
+				// codex MCP 嵌入 agent toml 内联 [mcp_servers.<key>] 段,不再走全局 config.toml。
+				assertCodexAgentTOMLHasMCPKeys(t, agentMDPath, expectedKeys)
 			}
 
 			// ── 4) discover.Scan:BotsPage 同款扫描应该能找到这个机器人 ─────────
@@ -277,13 +273,33 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 			}
 			installedDir := agents[0].Path
 
-			// ── 5) reinstall:再装一次,旧 agent .md 应被备份成 .bak.<ts> ────────
+			// ── 5) reinstall:再装一次,旧 agent 人格文件应被备份成 .bak.<ts> ──────
 			if err := agent.InstallNative(staging, target); err != nil {
 				t.Fatalf("reinstall: %v", err)
 			}
-			bakMatches, _ := filepath.Glob(filepath.Join(rootDir, "agents", agentName+".md.bak.*"))
+			bakMatches, _ := filepath.Glob(agentMDPath + ".bak.*")
 			if len(bakMatches) == 0 {
 				t.Errorf("reinstall 应生成 .bak.<ts> 备份,实际为空")
+			}
+
+			// claude-code 双清覆盖:模拟"用户手上还有更早期版本的 settings.json 残留没经
+			// 过 install 路径迁移"——直接把一条 truss-* 塞回 settings.json,看 uninstall
+			// 能不能两边(.claude.json 新位置 + settings.json 老位置)都清干净。
+			// 这条断言唯一能覆盖 cleanIDEMCPServers 里 "if t == TargetClaudeCode 再清一次老位置"
+			// 那条分支(install 路径里 prune 已把 settings.json 清空,uninstall 时本来无残留可清)。
+			if target == "claude-code" {
+				legacyPath := filepath.Join(rootDir, "settings.json")
+				legacy := readJSON(t, legacyPath)
+				servers, _ := legacy["mcpServers"].(map[string]any)
+				if servers == nil {
+					servers = map[string]any{}
+				}
+				servers["shop-grafana-dev"] = map[string]any{"command": "stale-bin"}
+				legacy["mcpServers"] = servers
+				data, _ := json.MarshalIndent(legacy, "", "  ")
+				if err := os.WriteFile(legacyPath, data, 0o644); err != nil {
+					t.Fatalf("re-seed legacy mcp残留: %v", err)
+				}
 			}
 
 			// ── 6) UninstallNative:文件清掉 + IDE MCP 配置摘掉 ────────────────
@@ -291,12 +307,12 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 			if err != nil {
 				t.Fatalf("UninstallNative: %v", err)
 			}
-			// agent .md 应该被删
-			if _, err := os.Stat(filepath.Join(rootDir, "agents", agentName+".md")); !os.IsNotExist(err) {
-				t.Errorf("uninstall 后 agent .md 还在")
+			// agent 人格文件应该被删
+			if _, err := os.Stat(agentMDPath); !os.IsNotExist(err) {
+				t.Errorf("uninstall 后 agent 人格文件 %s 还在", agentMDPath)
 			}
 			// .bak 也应清干净
-			leftover, _ := filepath.Glob(filepath.Join(rootDir, "agents", agentName+".md.bak.*"))
+			leftover, _ := filepath.Glob(agentMDPath + ".bak.*")
 			if len(leftover) != 0 {
 				t.Errorf("uninstall 应清掉 .bak 备份,残留 %v", leftover)
 			}
@@ -304,20 +320,22 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 			if _, err := os.Stat(installedDir); !os.IsNotExist(err) {
 				t.Errorf("uninstall 后 skills/%s/ 还在", agentName)
 			}
-			// MCP 摘除清单非空
-			if len(res.MCPRemoved) == 0 {
+			// MCP 摘除清单:claude/cursor 才检查 res.MCPRemoved(它们走 settings.json 显式删 keys);
+			// codex 不再单独清 MCP —— 因为 MCP 内联在 agent toml 里,toml 文件被删 = MCP 跟着没。
+			if target != "codex" && len(res.MCPRemoved) == 0 {
 				t.Errorf("uninstall MCPRemoved 应非空(系统派生了 %d 个 server)", len(expectedKeys))
 			}
 
-			// 三家各自二次断言:settings.json / mcp.json / codex stub state 里 prefix 全清
+			// 三家各自二次断言:settings.json / mcp.json prefix 全清,或 agent toml 整文件已删
 			switch target {
 			case "claude-code":
+				assertJSONNoMCPPrefix(t, filepath.Join(fakeHome, ".claude.json"), cfg.System.ID+"-")
+				// 双清:刚才手塞回 settings.json 的 shop-grafana-dev 也要被 uninstall 清掉
 				assertJSONNoMCPPrefix(t, filepath.Join(rootDir, "settings.json"), cfg.System.ID+"-")
 			case "cursor":
 				assertJSONNoMCPPrefix(t, filepath.Join(rootDir, "mcp.json"), cfg.System.ID+"-")
 			case "codex":
-				stateFile := os.Getenv("STUB_STATE")
-				assertCodexStateNoPrefix(t, stateFile, cfg.System.ID+"-")
+				assertCodexAgentTOMLAbsent(t, agentMDPath)
 			}
 
 			// ── 7) 再 scan:应零结果 ───────────────────────────────────────────
@@ -330,6 +348,17 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 			}
 		})
 	}
+}
+
+// agentMDLocationFor 返回 agent 文件在 <rootDir> 下的实际路径:
+//   - claude-code / cursor → <rootDir>/agents/<name>.md
+//   - codex            → <rootDir>/agents/<name>.toml(TOML subagent)
+func agentMDLocationFor(rootDir, target, name string) string {
+	ext := ".md"
+	if target == "codex" {
+		ext = ".toml"
+	}
+	return filepath.Join(rootDir, "agents", name+ext)
 }
 
 // rootName 把 IDE target 映射到 ~/.<这里>/ 的目录名。
@@ -396,38 +425,31 @@ func assertJSONNoMCPPrefix(t *testing.T, path, prefix string) {
 	}
 }
 
-// assertCodexStateHasKeys 验证 codex stub 的 state 文件包含全部期望 server 名。
-func assertCodexStateHasKeys(t *testing.T, stateFile string, want []string) {
+// assertCodexAgentTOMLHasMCPKeys 验证 ~/.codex/agents/<name>.toml 内 [mcp_servers.<key>] 段
+// 全部期望 server 名都注入了 + GRAFANA_URL/PASSWORD/USERNAME 之类的 env 占位非空。
+//
+// 不引 toml 库:做字符串包含检查就够。codex 注册产物结构稳定,字符串匹配不会误判。
+func assertCodexAgentTOMLHasMCPKeys(t *testing.T, tomlPath string, want []string) {
 	t.Helper()
-	data, err := os.ReadFile(stateFile)
+	data, err := os.ReadFile(tomlPath)
 	if err != nil {
-		t.Fatalf("read codex stub state %s: %v", stateFile, err)
+		t.Fatalf("read codex agent toml %s: %v", tomlPath, err)
 	}
-	got := map[string]bool{}
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		if line == "" {
-			continue
-		}
-		got[line] = true
-	}
+	content := string(data)
 	for _, k := range want {
-		if !got[k] {
-			t.Errorf("codex 没 add 注册 %q;实际:%v", k, got)
+		header := "[mcp_servers." + k + "]"
+		if !strings.Contains(content, header) {
+			t.Errorf("codex agent toml 没注入 %q (找不到 %s)", k, header)
 		}
 	}
 }
 
-// assertCodexStateNoPrefix 验证 stub state 里没有 prefix 开头的残留(uninstall 后)。
-func assertCodexStateNoPrefix(t *testing.T, stateFile, prefix string) {
+// assertCodexAgentTOMLAbsent 验证 agent toml 文件已被 uninstall 删除。MCP server keys
+// 跟着 toml 文件一起没,因为它们是嵌入在 agent toml 内联段而非全局 config。
+func assertCodexAgentTOMLAbsent(t *testing.T, tomlPath string) {
 	t.Helper()
-	data, err := os.ReadFile(stateFile)
-	if err != nil {
-		return // 没文件 = 已清空
-	}
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		if strings.HasPrefix(line, prefix) {
-			t.Errorf("codex 残留未清掉的 server: %s", line)
-		}
+	if _, err := os.Stat(tomlPath); !os.IsNotExist(err) {
+		t.Errorf("uninstall 后 codex agent toml 应不存在: %s", tomlPath)
 	}
 }
 

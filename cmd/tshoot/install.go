@@ -20,12 +20,14 @@ import (
 //   - openclaw     → ~/.openclaw/workspace/<name>/ + ~/.openclaw/openclaw.json 注入
 //   - claude-code  → ~/.claude/agents/<name>.md + ~/.claude/{skills,scripts}/<name>/...
 //   - cursor       → ~/.cursor/agents/<name>.md  + ~/.cursor/{skills,scripts}/<name>/...
-//   - codex        → ~/.codex/agents/<name>.md   + ~/.codex/{skills,scripts}/<name>/...
+//   - codex        → ~/.codex/agents/<name>.toml(TOML subagent 定义,
+//                    https://developers.openai.com/codex/subagents) + ~/.codex/skills/<name>/
+//                    + ~/.codex/scripts/<name>/。MCP 嵌入 agent toml 内联段(每个 subagent 自带)。
 //
 // 凭证收集策略:
 //   - openclaw   :走 InstallNativeOpenclaw,凭证写到 ~/.openclaw/<id>-creds.json + 注入 MCP env
 //   - IDE 三家   :--env-file 非空时,凭证一并注入到对应 IDE 的 mcpServers env(claude-code 写
-//                 settings.json;cursor 写 mcp.json;codex 走 `codex mcp add` 写 config.toml),
+//                 settings.json;cursor 写 mcp.json;codex 写到 agent toml 的 [mcp_servers.*.env]),
 //                 同时镜像写 ~/.tshoot/<id>-creds.json 给 kuboard / apollo / consul / 静态环境变量
 //                 等"非 MCP 走脚本"的后端用。空凭证不阻塞 install,事后手填 .env 重跑即可。
 func runInstall(args []string) error {
@@ -60,13 +62,19 @@ func runInstall(args []string) error {
 				return err
 			}
 		}
-		fmt.Printf("[ok] %s 已装到用户级目录(~/%s/agents/<name>.md + skills/scripts/<name>/)\n",
-			*target, t.DirName())
 		if t == agent.TargetCodex {
-			fmt.Println("    · MCP 服务器走 `codex mcp add` 注册到 ~/.codex/config.toml")
+			fmt.Printf("[ok] %s 已装到用户级目录(~/%s/agents/<name>.toml + skills/scripts/<name>/);"+
+				"codex 启动后在主 chat 里说 \"spawn the <name> agent ...\" 调用(TOML subagent,见 https://developers.openai.com/codex/subagents)\n",
+				*target, t.DirName())
 		} else {
-			fmt.Printf("    · MCP 服务器写到 ~/%s/%s (--env-file 提供凭证才注入)\n",
-				t.DirName(), t.SettingsFilename())
+			fmt.Printf("[ok] %s 已装到用户级目录(~/%s/agents/<name>.md + skills/scripts/<name>/)\n",
+				*target, t.DirName())
+		}
+		if t == agent.TargetCodex {
+			fmt.Println("    · MCP 服务器嵌入 agent toml 内联 [mcp_servers.*] 段(只在 spawn 该 subagent 时启动,不污染主 chat)")
+		} else {
+			fmt.Printf("    · MCP 服务器写到 %s (--env-file 提供凭证才注入)\n",
+				t.MCPConfigDisplay())
 		}
 		return nil
 	}

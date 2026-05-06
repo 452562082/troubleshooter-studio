@@ -8,9 +8,10 @@
 //     workspace 内部寻址有意义,但写到 IDE agent .md 里就变成了奇怪的"# IDENTITY.md"
 //     段标题。统一脱掉,内容直接接进 agent 主标题下。
 //
-//  2) AGENTS.md 里有 OpenClaw 专属段(`## 工作区路径` 列三平台路径 + 提 python3 ~/.claude/...
-//     调脚本;`## 行为硬规则` 引用 TodoWrite + 假设并发工具调用;`## 出错应对` 提
-//     `tshoot agent self-test` 命令;`## 角色` 跟 IDENTITY 重复)。这些段不进 IDE agent .md。
+//  2) AGENTS.md 里有 OpenClaw 专属段(`## 工作区路径` 给 ~/.openclaw/workspace/<id>/ 路径
+//     和 6 份 .md 布局;`## 行为硬规则` 假设 OpenClaw 的进度条 / ctx 首行约定;
+//     `## 出错应对` 提 `tshoot agent self-test` 命令)。这些段不进 IDE agent .md,
+//     IDE 的对应内容在各自 generator 的 intro 里以平台原生措辞写。
 //
 //  3) "Cursor 模式限制" / "Codex 模式限制" 这种 warning section 不再出现。每个平台的
 //     运行环境(有/没 Bash、MCP 怎么注册、脚本路径前缀)以**自然介绍**的形式由调用方传入
@@ -33,7 +34,7 @@ type IDEPlatform struct {
 	// Intro:本平台 agent 是如何被调用 + 有哪些可用能力的"自然介绍"。
 	// 由调用方传入,会作为 agent 头部的引导段,代替老版本的"# 平台 模式限制"warning section。
 	// 例:"在 Claude Code 通过 @<name> 调用本 subagent。可直接使用 Bash / Read / WebFetch /
-	//      TodoWrite 等工具,MCP 已在 ~/.claude/settings.json 自动注册..."
+	//      TodoWrite 等工具,MCP 已在 ~/.claude.json 自动注册..."
 	Intro string
 
 	// SkillsScriptPathPrefix:本平台 skills 目录在用户机器上的绝对路径前缀(不带 trailing /)。

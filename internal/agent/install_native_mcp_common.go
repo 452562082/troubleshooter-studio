@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
+	"github.com/xiaolong/troubleshooter-studio/internal/generator"
 )
 
 // MCPBuildOptions 控制 BuildMCPServers 的行为差异。
@@ -90,13 +91,16 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 		}
 	}
 
+	// grafana / loki 共用同一个 mcp-grafana 二进制(loki 走 grafana datasource API)。
+	// command 写占位 sentinel,IDE install 时替换成 <root>/bin/mcp-grafana 绝对路径;
+	// 详见 ensure_mcp_grafana.go 顶部的"为什么不用 npx"说明。
+	grafanaBin := generator.CodexPlaceholderGrafanaBin
 	if cfg.Infrastructure.Observability.Grafana.Enabled {
 		for _, e := range envs {
 			up := strings.ToUpper(e.ID)
 			servers[keyFor("grafana", "", e.ID)] = map[string]any{
-				"command": "npx",
+				"command": grafanaBin,
 				"args": []any{
-					"-y", "@leval/mcp-grafana",
 					"--disable-incident", "--disable-alerting", "--disable-oncall",
 					"--disable-admin", "--disable-sift", "--disable-pyroscope",
 				},
@@ -113,9 +117,8 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 		for _, e := range envs {
 			up := strings.ToUpper(e.ID)
 			servers[keyFor("loki", "", e.ID)] = map[string]any{
-				"command": "npx",
+				"command": grafanaBin,
 				"args": []any{
-					"-y", "@leval/mcp-grafana",
 					"--disable-search", "--disable-dashboard", "--disable-datasource",
 					"--disable-incident", "--disable-alerting", "--disable-oncall",
 					"--disable-admin", "--disable-sift", "--disable-pyroscope",

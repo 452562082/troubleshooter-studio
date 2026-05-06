@@ -39,7 +39,7 @@ func readSystemIDFromMeta(metaPath string) string {
 // UninstallNativeResult 通用卸载结果(claude-code / cursor / codex 共用一个)。
 type UninstallNativeResult struct {
 	StagingMovedTo  string   // ~/.tshoot/<target>/<id>/ 移到 ~/.Trash/<...> 的路径;空 = 不存在或未动
-	UserAgentMD     string   // 删掉的 ~/.<target>/agents/<name>.md(或空)
+	UserAgentMD     string   // 删掉的 agent 人格文件(claude/cursor:~/.<target>/agents/<name>.md;codex:~/.codex/AGENTS.md)
 	UserSkillsDir   string   // 删掉的 ~/.<target>/skills/<name>/
 	UserScriptsDir  string   // 删掉的 ~/.<target>/scripts/<name>/
 	MCPRemoved      []string // 从 IDE 配置(settings.json/mcp.json/config.toml)清掉的 MCP server keys
@@ -112,19 +112,47 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 		}
 	}
 
-	// 2) ~/.claude|cursor/agents/<name>.md(及备份)
-	agentMD := filepath.Join(root, "agents", agentName+".md")
-	if err := os.Remove(agentMD); err == nil {
-		res.UserAgentMD = agentMD
-		logf("[ok] %s 已删除", agentMD)
+	// 2) agent 文件(及备份):
+	//    claude / cursor: ~/.<root>/agents/<name>.md
+	//    codex        : ~/.codex/agents/<name>.toml
+	agentFile := filepath.Join(root, "agents", agentName+t.UserAgentExt())
+	if err := os.Remove(agentFile); err == nil {
+		res.UserAgentMD = agentFile
+		logf("[ok] %s 已删除", agentFile)
 	} else if !os.IsNotExist(err) {
-		logf("[warn] 删 %s 失败:%v", agentMD, err)
+		logf("[warn] 删 %s 失败:%v", agentFile, err)
 	}
 	// 顺手清备份(install_native 生成的 .bak.YYYYMMDD-HHMMSS)
-	bakMatches, _ := filepath.Glob(agentMD + ".bak.*")
+	bakMatches, _ := filepath.Glob(agentFile + ".bak.*")
 	for _, bak := range bakMatches {
 		if err := os.Remove(bak); err == nil {
 			logf("[ok] %s 已删除", bak)
+		}
+	}
+
+	// 2b) codex 老版本残留清理:troubleshooter-studio 早期版本会另外往 ~/.codex/mcp.json
+	// 写一份 Claude Code 风格的 mcpServers JSON(孤儿,codex 实际不读但还是会启动崩溃)。
+	// 卸载时顺手清掉本机器人前缀的 server keys,避免下次装机叠加旧条目。
+	if t == TargetCodex && systemID != "" {
+		legacyMCPJSON := filepath.Join(root, "mcp.json")
+		if data, rerr := os.ReadFile(legacyMCPJSON); rerr == nil {
+			var obj map[string]any
+			if json.Unmarshal(data, &obj) == nil {
+				if servers, ok := obj["mcpServers"].(map[string]any); ok {
+					removed := 0
+					for k := range servers {
+						if k == systemID || strings.HasPrefix(k, systemID+"-") {
+							delete(servers, k)
+							removed++
+						}
+					}
+					if removed > 0 {
+						obj["mcpServers"] = servers
+						_ = writeJSONFile(legacyMCPJSON, obj, 0o644)
+						logf("[ok] 清掉老版本 %s 里 %d 项遗留 MCP", legacyMCPJSON, removed)
+					}
+				}
+			}
 		}
 	}
 
@@ -147,8 +175,26 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 	// 4) IDE 配置里的 MCP server keys —— 清自家前缀("<system.id>-...")。
 	// 老产物 ResolveID()+"-mcp-server-..." 形态以 systemID 开头也能命中,迁移期顺手清。
 	if systemID != "" {
-		removed := cleanIDEMCPServers(t, root, systemID, logf)
+		removed := cleanIDEMCPServers(t, home, root, systemID, logf)
 		res.MCPRemoved = removed
+	}
+
+	// 5) codex 专用:清掉 install 时下载的 mcp-grafana 二进制(grafana/loki 共用)。
+	// 注意:其它 codex agent 可能也用同一个二进制(共享 ~/.codex/bin/),所以**只在没有
+	// 其它 agent 占用时**清。简化判断:其它 agents/*.toml 没有就清。
+	if t == TargetCodex {
+		grafanaBin := filepath.Join(root, "bin", "mcp-grafana")
+		if _, err := os.Stat(grafanaBin); err == nil {
+			otherAgents, _ := filepath.Glob(filepath.Join(root, "agents", "*.toml"))
+			if len(otherAgents) == 0 {
+				if rmErr := os.Remove(grafanaBin); rmErr == nil {
+					logf("[ok] %s 已删除(无其它 codex agent 共用)", grafanaBin)
+				}
+				_ = os.Remove(filepath.Join(root, "bin")) // 空目录顺带清
+			} else {
+				logf("[skip] %s 保留(还有 %d 个 codex agent 在用)", grafanaBin, len(otherAgents))
+			}
+		}
 	}
 
 	logf("[done] uninstall(%s) 完成", target)
@@ -174,12 +220,13 @@ func deriveInstallRoot(installedDir string, t IDETarget, home string) string {
 }
 
 // cleanIDEMCPServers 从对应 IDE 配置里删本 system 名下的 MCP server keys。
-//   - claude-code/cursor:JSON 文件按 prefix 删
+//   - claude-code:~/.claude.json(dotfile)按 prefix 删 + 迁移期顺手清 ~/.claude/settings.json 残留
+//   - cursor:<root>/mcp.json 按 prefix 删
 //   - codex:codex mcp list → 匹配前缀逐个 codex mcp remove(不能手 marshal TOML 破坏其它段)
 //
 // 匹配 "<systemID>" 和 "<systemID>-..."(老产物 ResolveID 派生的 "<systemID>-troubleshooter-..."
 // 也命中,迁移期顺手清)。返回真删了哪些 keys 给 UI 展示。
-func cleanIDEMCPServers(t IDETarget, root, systemID string, logf func(format string, a ...any)) []string {
+func cleanIDEMCPServers(t IDETarget, home, root, systemID string, logf func(format string, a ...any)) []string {
 	prefix := systemID + "-"
 	if t == TargetCodex {
 		codexBin, err := exec.LookPath("codex")
@@ -212,7 +259,37 @@ func cleanIDEMCPServers(t IDETarget, root, systemID string, logf func(format str
 		return removed
 	}
 
-	cfgFile := filepath.Join(root, t.SettingsFilename())
+	// customRoot 对 cleanIDEMCPServers 的语义跟 install 时不同 —— uninstall 这里 root 已经
+	// 是反推出来的(deriveInstallRoot),不是用户传的 customRoot。但对 claude-code,MCPConfigPath
+	// 始终落 $HOME/.claude.json 不受 root 影响,所以传空 customRoot 就行;对 cursor,如果
+	// root 不是 ~/.cursor(用户装在自定义位置),需要走 customRoot 形态 → 检测一下传过去。
+	customRoot := ""
+	if t == TargetCursor && root != filepath.Join(home, t.DirName()) {
+		customRoot = root
+	}
+	cfgFile := t.MCPConfigPath(home, customRoot)
+	removed := pruneMCPKeysFromJSON(cfgFile, systemID, prefix, logf)
+
+	// claude-code 迁移期:老版本写到 ~/.claude/settings.json 的残留也清掉。
+	if t == TargetClaudeCode {
+		legacyPath := filepath.Join(root, "settings.json")
+		legacyRemoved := pruneMCPKeysFromJSON(legacyPath, systemID, prefix, logf)
+		// 老残留摘出来的 key 不一定跟新位置一样,合并去重
+		removed = mergeUnique(removed, legacyRemoved)
+	}
+
+	return removed
+}
+
+// pruneMCPKeysFromJSON 从 cfgFile 里 mcpServers map 删掉 key == systemID 或前缀 prefix 的项,
+// 写回原文件(其它顶层字段保留)。文件不存在 / 无 mcpServers / 没命中 → 返回 nil。
+func pruneMCPKeysFromJSON(cfgFile, systemID, prefix string, logf func(format string, a ...any)) []string {
+	if cfgFile == "" {
+		return nil
+	}
+	if _, err := os.Stat(cfgFile); err != nil {
+		return nil
+	}
 	settings, err := readJSONOrEmpty(cfgFile)
 	if err != nil {
 		logf("[warn] %s 解析失败:%v(skip 清理)", cfgFile, err)
@@ -233,11 +310,29 @@ func cleanIDEMCPServers(t IDETarget, root, systemID string, logf func(format str
 		return nil
 	}
 	sort.Strings(removed)
-	settings["mcpServers"] = servers
+	if len(servers) == 0 {
+		delete(settings, "mcpServers")
+	} else {
+		settings["mcpServers"] = servers
+	}
 	if err := writeJSONFile(cfgFile, settings, 0o644); err != nil {
 		logf("[warn] 写 %s 失败:%v", cfgFile, err)
 		return nil
 	}
 	logf("[ok] %s 摘掉 %d 项 MCP: %s", cfgFile, len(removed), strings.Join(removed, ", "))
 	return removed
+}
+
+func mergeUnique(a, b []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(a)+len(b))
+	for _, s := range append(append([]string{}, a...), b...) {
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
 }

@@ -33,7 +33,7 @@ func resolveApplySource(baseOut, target string) (src, hint string) {
 		hint = "Cursor 下次打开 AI 侧栏时会重新扫 ~/.cursor/agents/<name>.md;新建对话即可选到更新后的 Custom Agent。"
 	case "codex":
 		src = baseOut + "-codex"
-		hint = "Codex CLI 下次启动会读 ~/.codex/agents/<name>.md;正在开的 session 需要 `/clear` 或重启才能吃到新版 agent。"
+		hint = "Codex CLI 下次启动会读 ~/.codex/AGENTS.md(用户级 system prompt;每台机器只能装一个排障机器人);正在开的 session 需要 `/clear` 或重启才能吃到新版 agent。"
 	}
 	return
 }
@@ -70,8 +70,11 @@ func looksLikeFactoryArtifact(rel, target string) bool {
 	case "openclaw":
 		prefixes = append(prefixes, "SOUL.md", "IDENTITY.md", "AGENTS.md", "USER.md",
 			"CHECKLIST.md", "TOOLS.md", ".clawhub/")
-	case "claude-code", "cursor", "codex":
+	case "claude-code", "cursor":
 		prefixes = append(prefixes, "agents/")
+	case "codex":
+		// codex staging 顶层是平铺的 AGENTS.md(不再有 agents/<name>.md)
+		prefixes = append(prefixes, "AGENTS.md")
 	default:
 		return false
 	}

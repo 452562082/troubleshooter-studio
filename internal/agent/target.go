@@ -8,6 +8,7 @@ package agent
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -21,19 +22,31 @@ const (
 	TargetCodex      IDETarget = "codex"
 )
 
+
 // allIDETargets 跟下面 spec 一一对齐;改一处必改另一处。
 var allIDETargets = []IDETarget{TargetClaudeCode, TargetCursor, TargetCodex}
 
 // ideSpec 单 target 的所有"路径/文件名/特性"参数,集中在一处声明。
 type ideSpec struct {
-	dirName      string // ~/.<dirName>/  e.g. ".claude"
-	settingsFile string // 顶层 mcpServers JSON 文件名;codex 走 CLI 故为空
+	dirName string // ~/.<dirName>/  e.g. ".claude"
+	// mcpHomeRel:相对 $HOME 的 MCP 配置 JSON 文件路径(顶层 "mcpServers" 字段)。
+	//   - claude-code → ".claude.json"  (dotfile,**不**在 ~/.claude/ 下;
+	//                                    Claude Code CLI 启动时强绑死从 $HOME 读这个文件,
+	//                                    ~/.claude/settings.json 是 hooks/permissions/env 用的,
+	//                                    不读 mcpServers 字段)
+	//   - cursor      → ".cursor/mcp.json"
+	//   - codex       → ""              (MCP 嵌入 agent toml 内联段,无独立 JSON 配置)
+	mcpHomeRel string
+	// agentExt 是 <root>/agents/<name>.<这里> 的扩展名(含点)。
+	//   - claude-code / cursor → ".md"  (markdown subagent profile, frontmatter name+description+...)
+	//   - codex            → ".toml" (TOML subagent definition; 见 https://developers.openai.com/codex/subagents)
+	agentExt string
 }
 
 var ideSpecs = map[IDETarget]ideSpec{
-	TargetClaudeCode: {dirName: ".claude", settingsFile: "settings.json"},
-	TargetCursor:     {dirName: ".cursor", settingsFile: "mcp.json"},
-	TargetCodex:      {dirName: ".codex", settingsFile: ""}, // 走 codex mcp add CLI,不读 JSON
+	TargetClaudeCode: {dirName: ".claude", mcpHomeRel: ".claude.json", agentExt: ".md"},
+	TargetCursor:     {dirName: ".cursor", mcpHomeRel: ".cursor/mcp.json", agentExt: ".md"},
+	TargetCodex:      {dirName: ".codex", mcpHomeRel: "", agentExt: ".toml"},
 }
 
 // ParseIDETarget 校验并归一化 target 字符串。不在三家枚举内 → error。
@@ -50,9 +63,46 @@ func ParseIDETarget(s string) (IDETarget, error) {
 // DirName 返回 ~/.<这里>/ 的目录名。如 TargetClaudeCode → ".claude"。
 func (t IDETarget) DirName() string { return ideSpecs[t].dirName }
 
-// SettingsFilename 返回 IDE 写 mcpServers 的 JSON 文件名(顶层)。
-// codex 走 CLI 注册不读 JSON,返回空串 —— 调用方对 codex 走专门分支,不该走 JSON 路径。
-func (t IDETarget) SettingsFilename() string { return ideSpecs[t].settingsFile }
+// MCPConfigPath 返回 IDE 用户级 MCP 配置 JSON 文件的绝对路径(顶层 "mcpServers" 字段)。
+//
+//   - claude-code → 始终 $HOME/.claude.json,**不**受 customRoot 影响。Claude Code CLI
+//     启动时固定从 $HOME 读这个 dotfile;ide 安装在哪不影响配置位置。早期实现写到
+//     ~/.claude/settings.json 是 bug —— 那个文件用于 hooks/permissions/env,Claude Code
+//     不在那里读 mcpServers,装好的 MCP 在 `claude mcp list` 永远看不到。
+//   - cursor      → customRoot 非空时 <customRoot>/mcp.json(用户把 cursor 装在非默认位置时的兼容路径);
+//     否则 $HOME/.cursor/mcp.json。
+//   - codex       → 空串。codex MCP 嵌入 agent toml 内联段,没有独立 JSON 配置。
+//     调用方对 codex 走专门分支,不该走 JSON 路径。
+func (t IDETarget) MCPConfigPath(home, customRoot string) string {
+	rel := ideSpecs[t].mcpHomeRel
+	if rel == "" {
+		return ""
+	}
+	// claude-code 的 ~/.claude.json 是 Claude Code CLI 强绑死的位置,不跟 customRoot 走。
+	if t == TargetClaudeCode {
+		return filepath.Join(home, rel)
+	}
+	if customRoot != "" {
+		// cursor: customRoot 表示"用户把 cursor 装在了非默认位置";rel 形如 ".cursor/mcp.json",
+		// customRoot 已经包含 ".cursor" 那一级,只取 basename 拼上去。
+		return filepath.Join(customRoot, filepath.Base(rel))
+	}
+	return filepath.Join(home, rel)
+}
+
+// MCPConfigDisplay 返回展示用的"~/路径"形式,给 install 末尾提示文案用。
+// 不存在配置文件时(codex)返回空串。
+func (t IDETarget) MCPConfigDisplay() string {
+	rel := ideSpecs[t].mcpHomeRel
+	if rel == "" {
+		return ""
+	}
+	return "~/" + rel
+}
+
+// UserAgentExt 返回 <root>/agents/<name>.<这里> 的扩展名(含点)。
+// 例:claude-code / cursor → ".md";codex → ".toml"。
+func (t IDETarget) UserAgentExt() string { return ideSpecs[t].agentExt }
 
 // listIDETargets 给错误信息用。
 func listIDETargets() string {

@@ -102,8 +102,8 @@ func agentSlug(ctx *Context) string {
 // 没显式配就不写 model frontmatter。
 //
 // 给 Claude Code subagent 写的原生 prompt。subagent 通过 @<name> 在主 chat 里调用,可以
-// 直接用 Bash / Read / Glob / Grep / WebFetch / TodoWrite 等工具;MCP 已在 ~/.claude/settings.json
-// 自动注册,排障时 agent 直接调对应 mcp_server 即可,Python 脚本通过绝对路径跑。
+// 直接用 Bash / Read / Glob / Grep / WebFetch / TodoWrite 等工具;MCP 已在 ~/.claude.json
+// (user-scope dotfile)自动注册,排障时 agent 直接调对应 mcp_server 即可,Python 脚本通过绝对路径跑。
 //
 // 历史 bug:之前直接写 ctx.Agent.Model,但 Agent.Model 是 OpenClaw gateway 专属的 LLM 路由
 // id(可能是 openai-codex/gpt-5.4 之类的非 Claude 模型)。Claude Code 拿到那个值会让"你以为
@@ -123,10 +123,10 @@ func buildClaudeAgentMD(wsRoot string, ctx *Context, agentName string) (string, 
 
 	intro := "本 agent 在 Claude Code 通过 `@" + agentName + "` 调用 subagent,做 **只读** 排障(日志 / 指标 / trace / 配置 / 代码),**不**直接落地修改。\n\n" +
 		"运行环境:\n" +
-		"- 可直接使用 Bash / Read / Glob / Grep / WebFetch / TodoWrite 工具\n" +
-		"- MCP 已在 `~/.claude/settings.json` 自动注册(由 troubleshooter-studio 装机时写入),排障时直接调对应 mcp_server 即可\n" +
-		"- skills 脚本用 **绝对路径**调用:`python3 ~/.claude/skills/" + agentName + "/<skill>/scripts/<file>.py ...` —— Claude Code 当前 cwd 不一定是本 agent 的 skills 目录\n" +
-		"- 3 步以上排障流程用 `TodoWrite` 列步骤;支持并发的工具调用尽量同消息发出,不用串行等"
+		"- 可直接用 Bash / Read / Glob / Grep / WebFetch / TodoWrite 工具\n" +
+		"- MCP server 已写入 `~/.claude.json` user-scope dotfile,Claude Code 启动自动加载,排障时直接调对应 mcp_server\n" +
+		"- skills 脚本用**绝对路径**调用:`python3 ~/.claude/skills/" + agentName + "/<skill>/scripts/<file>.py ...` —— 当前 cwd 不一定在本 agent 的 skills 目录\n" +
+		"- 3 步以上排障流程用 `TodoWrite` 列步骤;独立工具调用同消息发出并发执行,只有数据依赖才串行"
 
 	writeIDEAgentBody(&sb, wsRoot, ctx, IDEPlatform{
 		Intro:                  intro,

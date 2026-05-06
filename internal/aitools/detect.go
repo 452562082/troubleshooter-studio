@@ -43,12 +43,15 @@ func DetectClaudeCode() *Result {
 	res := &Result{}
 	p, err := exec.LookPath("claude")
 	if err != nil {
-		// fallback:~/.claude/settings.json 存在也算装了(用户可能用别名/手动装脚本)
+		// fallback:~/.claude.json 存在也算装了(用户可能用别名/手动装脚本)。
+		// 注:不能用 ~/.claude/settings.json —— 那个文件只在用户手配 hooks/permissions/env
+		// 时才生成,纯装个 Claude Code CLI 不会创建;~/.claude.json 是 CLI 启动时强制创建
+		// 的 dotfile,装过就一定有。
 		home, herr := os.UserHomeDir()
 		if herr == nil {
-			if _, serr := os.Stat(filepath.Join(home, ".claude", "settings.json")); serr == nil {
+			if _, serr := os.Stat(filepath.Join(home, ".claude.json")); serr == nil {
 				res.Installed = true
-				res.Note = "PATH 里没找到 claude 二进制,但 ~/.claude/settings.json 在,按已装处理"
+				res.Note = "PATH 里没找到 claude 二进制,但 ~/.claude.json 在,按已装处理"
 				return res
 			}
 		}

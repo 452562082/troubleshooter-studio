@@ -33,8 +33,9 @@ type ApplyOptions struct {
 	// system.yaml 不含此信息(可分享性),由 wizard / CLI 调用方额外传入。
 	// 空 map 时产物里的 repo-path-map.yaml 是占位样子(提示用户跑向导)。
 	RepoLocalPaths map[string]string
-	// IDECreds 给 claude-code / cursor 安装时,把 mcp.servers 配置注入 ~/.claude/settings.json
-	// 或 ~/.cursor/mcp.json 用。key = env-var name(如 NACOS_ADDR_DEV),value = 实际值。
+	// IDECreds 给 claude-code / cursor 安装时,把 mcp.servers 配置注入 ~/.claude.json
+	// (user-scope dotfile,Claude Code CLI 强绑死位置)或 ~/.cursor/mcp.json 用。
+	// key = env-var name(如 NACOS_ADDR_DEV),value = 实际值。
 	// 桌面端 wizard 通过 buildOpenclawCreds() 拼出来传过来;CLI 没收集这个就传 nil,
 	// 注入的 env 字段值会变成 {{NACOS_ADDR_DEV}} 占位符让用户手填。
 	IDECreds map[string]string
@@ -196,7 +197,8 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 		if err := InstallNativeAt(workDir, ag.Meta.Target, opts.CustomInstallRoot); err != nil {
 			return nil, fmt.Errorf("native install (%s): %w", ag.Meta.Target, err)
 		}
-		// 顺带把 cfg 派生的 mcpServers 注入 IDE settings.json / mcp.json,让装完的 agent
+		// 顺带把 cfg 派生的 mcpServers 注入 IDE 配置(claude-code → ~/.claude.json,
+		// cursor → ~/.cursor/mcp.json,codex → agent toml 内联段),让装完的 agent
 		// 能直接调到 nacos / grafana / loki 等 MCP。creds 走 opts.IDECreds(桌面端 wizard 传),
 		// 没有(CLI 装时)就用 {{ENV_VAR}} 占位符,用户事后自己填。
 		if err := MergeMCPIntoIDESettingsAt(ag.Meta.Target, cfg, opts.IDECreds, opts.CustomInstallRoot); err != nil {

@@ -84,6 +84,26 @@ else
     "$DMG_OUT" >/dev/null
 fi
 
+# 给 .dmg 文件本身设 Finder custom icon —— 用户在 Downloads 看到 dmg 文件就是工作台图标,
+# 不是 macOS 默认的"白色文档+下载箭头"通用 disk image 图标。
+# 用 macOS 自带的 swift 调 NSWorkspace.setIcon(),不引入 brew 依赖(swift 在 Xcode CLT 里)。
+if [[ $have_icon -eq 1 ]] && command -v swift >/dev/null 2>&1; then
+  swift_script=$(mktemp -t tshoot-seticon).swift
+  cat >"$swift_script" <<'SWIFT'
+import Cocoa
+let args = CommandLine.arguments
+guard args.count == 3, let icon = NSImage(contentsOfFile: args[1]) else { exit(1) }
+let ok = NSWorkspace.shared.setIcon(icon, forFile: args[2], options: [])
+exit(ok ? 0 : 2)
+SWIFT
+  if swift "$swift_script" "$icns_src" "$DMG_OUT" 2>/dev/null; then
+    echo "  ✓ 设上 dmg 文件 Finder 图标"
+  else
+    echo "  [warn] setIcon 失败,dmg 文件在 Finder 仍是默认 disk image 图标(挂载后 volume 仍有图标)" >&2
+  fi
+  rm -f "$swift_script"
+fi
+
 size=$(du -h "$DMG_OUT" | cut -f1)
 echo "✓ $DMG_OUT($size)"
 echo "  分发: 双击 .dmg → 拖 .app 到 Applications → Launchpad / Spotlight 搜启动"

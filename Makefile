@@ -115,10 +115,18 @@ BUNDLE_DIR   := dist/$(BUNDLE_NAME).app
 BUNDLE_ID    := studio.troubleshooter.desktop
 .PHONY: desktop-app
 desktop-app: desktop
-	@BIN=$(DESKTOP_BIN) BUNDLE_DIR=$(BUNDLE_DIR) BUNDLE_NAME=$(BUNDLE_NAME) \
+	@icon_src="cmd/tshoot-desktop/build/appicon.png"; \
+	 [ -f "cmd/tshoot-desktop/build/appicon.macos.png" ] && icon_src="cmd/tshoot-desktop/build/appicon.macos.png"; \
+	 BIN=$(DESKTOP_BIN) BUNDLE_DIR=$(BUNDLE_DIR) BUNDLE_NAME=$(BUNDLE_NAME) \
 	 BUNDLE_ID=$(BUNDLE_ID) VERSION=$(VERSION) \
-	 ICON_SRC=cmd/tshoot-desktop/build/appicon.png \
+	 ICON_SRC="$$icon_src" \
 	 bash scripts/package-macos.sh
+
+# ── 把原 appicon.png 后处理成 macOS 规范图标(squircle + 边距 + 透明背景)─────
+# 输出到 appicon.macos.png(原图保留),desktop-app 优先用 .macos.png。
+.PHONY: icon-macos
+icon-macos:
+	@bash scripts/normalize-icon.sh
 
 # ── .dmg 安装包(macOS 标准分发格式,系统自带 hdiutil 不依赖 brew)──────
 # 双击 .dmg 挂载 → 拖 .app 到 Applications 软链 → 装机完成,Launchpad/Spotlight 直接搜

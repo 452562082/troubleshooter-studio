@@ -76,19 +76,52 @@ def detect_workspace_root() -> Path:
 def find_repo_path(workspace_root: Path, service: str) -> str:
     """从 routing/references/repo-path-map.yaml 找仓库本地路径。
     简单文本解析,避免引 PyYAML 强依赖(stdlib 仍可装但用户机器装载不一定)。"""
+    info = _find_repo_entry(workspace_root, service)
+    return info.get('local_path', '') if info else ''
+
+
+def find_umbrella_path(workspace_root: Path, service: str) -> str:
+    """umbrella 子模块场景:本服务 yaml 里有 parent_repo X,返回 X 的本地路径。
+    没 parent_repo → 返空。给 collect_git_log 做'扫子模块时同时扫 umbrella'用。
+    umbrella commit 改 .gitmodules pin / 共享 lib / 公共配置都会影响子模块,
+    单独看子模块 git log 漏这部分,排障第一原则'先看最近改了什么'就漏了。"""
+    info = _find_repo_entry(workspace_root, service)
+    if not info:
+        return ''
+    parent = info.get('parent_repo', '').strip()
+    if not parent:
+        return ''
+    parent_info = _find_repo_entry(workspace_root, parent)
+    return parent_info.get('local_path', '') if parent_info else ''
+
+
+def _find_repo_entry(workspace_root: Path, service: str) -> dict:
+    """简单解析 repo-path-map.yaml 找 <service> 块的所有 K:V(local_path / parent_repo / ...)。"""
     p = workspace_root / 'skills' / 'routing' / 'references' / 'repo-path-map.yaml'
     if not p.exists():
-        return ''
+        return {}
     text = p.read_text(encoding='utf-8', errors='ignore')
-    # 简单解析: "  <service>: \"<path>\""
+    in_block = False
+    out: dict = {}
     for line in text.splitlines():
+        # 4 空格缩进 = 块内 K:V;2 空格缩进 + 冒号结尾 = 服务名声明
+        if not line.startswith(' '):
+            in_block = False
+            continue
         s = line.strip()
         if s.startswith('#') or not s:
             continue
-        m = re.match(r'([\w\-\._]+):\s*["\']?([^"\']+)["\']?\s*$', s)
-        if m and m.group(1) == service:
-            return m.group(2).strip()
-    return ''
+        # 服务名声明行: "  <name>:"
+        m = re.match(r'^  ([\w\-\._]+):\s*$', line)
+        if m:
+            in_block = (m.group(1) == service)
+            continue
+        # 块内 K:V: "    key: \"value\""
+        if in_block:
+            m = re.match(r'    ([\w\-\._]+):\s*["\']?([^"\']*)["\']?\s*$', line)
+            if m:
+                out[m.group(1)] = m.group(2).strip()
+    return out
 
 
 def collect_git_log(repo_path: str, since: timedelta, branch: str = 'main') -> tuple[list[dict[str, Any]], str]:
@@ -627,6 +660,18 @@ def main() -> None:
     if git_err:
         notes.append(f'[git] {git_err}')
     all_events += git_events
+
+    # umbrella 子模块场景:本服务从某 umbrella 切出去 → 同时扫 umbrella 自己的 git log。
+    # umbrella commit 可能改 .gitmodules pin / 公共 lib / 共享 config,直接影响本子模块行为,
+    # 漏看会让"故障 ±5 分钟内最近变更"的关键信号缺失。每条 umbrella commit 加 [umbrella] 前缀。
+    umbrella_path = find_umbrella_path(ws_root, args.service)
+    if umbrella_path:
+        u_events, u_err = collect_git_log(umbrella_path, since_td, args.branch)
+        if u_err:
+            notes.append(f'[git-umbrella] {u_err}')
+        for ev in u_events:
+            ev['summary'] = f'[umbrella] {ev.get("summary", "")}'
+        all_events += u_events
 
     k8s_events, k8s_err = collect_k8s_rollouts(args.env, args.service, args.cluster, args.namespace, since_td, ws_root)
     if k8s_err:

@@ -176,16 +176,22 @@ export function useRepoScan(deps: RepoScanDeps) {
       r._submoduleHints = hints
       // 默认勾选规则:
       //   - 跟 repos[] 里已有 entry name 撞 → 默认 uncheck(已经拆过了,再勾就是重复)
+      //   - 跟 _serviceEntries 已合并的入口 sub_path 撞 → 默认 uncheck
       //   - 否则 check(常规第一次拆 / 新增子模块)
       // 用户仍可手动反勾;这里只决定"banner 出现时哪些预选"。
       const existingNames = new Set(deps.repos.map(rr => rr.name.trim()).filter(Boolean))
+      const mergedSubPaths = new Set(Object.values(r._serviceEntries || {}))
       const sel: Record<string, boolean> = {}
       for (const h of hints) {
-        sel[h.sub_path] = !existingNames.has(h.name)
+        sel[h.sub_path] = !existingNames.has(h.name) && !mergedSubPaths.has(h.sub_path)
       }
       r._submoduleSelection = sel
-      // 重新扫了一次 → 老的"合并状态"作废,banner 重新出现给用户决定
-      r._submoduleHintsDismissed = false
+      // banner 是否重新弹:用户上次已经处理(全部 hints 都已拆 / 已合并)→ 不弹,避免
+      // 'yaml 导入 / 重扫' 反复看到一样的 banner。有任何 new(没拆 / 没合并)→ 弹。
+      const allHandled = hints.every(h =>
+        existingNames.has(h.name) || mergedSubPaths.has(h.sub_path),
+      )
+      r._submoduleHintsDismissed = allHandled
     } catch {
       r._submoduleHints = []
       r._submoduleSelection = {}

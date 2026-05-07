@@ -63,6 +63,16 @@ func ParseIDETarget(s string) (IDETarget, error) {
 // DirName 返回 ~/.<这里>/ 的目录名。如 TargetClaudeCode → ".claude"。
 func (t IDETarget) DirName() string { return ideSpecs[t].dirName }
 
+// RootDir 返回 IDE 用户级安装根目录的绝对路径(始终 $HOME/<DirName>)。
+// home 由调用方传(通常是 os.UserHomeDir() 的结果),便于测试时注入 fakeHome。
+//
+// 收口的小 helper:install / uninstall / merge MCP 三家都要"home + DirName" 的拼,
+// 之前各自 filepath.Join 现在统一走这里,改路径形态(比如未来加 XDG_CONFIG_HOME 兜底)
+// 一处即生效。
+func (t IDETarget) RootDir(home string) string {
+	return filepath.Join(home, t.DirName())
+}
+
 // MCPConfigPath 返回 IDE 用户级 MCP 配置 JSON 文件的绝对路径(顶层 "mcpServers" 字段)。
 //
 //   - claude-code → $HOME/.claude.json。Claude Code CLI 启动时固定从 $HOME 读这个 dotfile。

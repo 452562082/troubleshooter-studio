@@ -41,7 +41,7 @@ func InstallNative(stagingDir, target string) error {
 	if err != nil {
 		return fmt.Errorf("read $HOME: %w", err)
 	}
-	root := filepath.Join(home, t.DirName())
+	root := t.RootDir(home)
 
 	// 1) 找 staging 里的 agent 文件 + 推 agent name(从文件名)。
 	//   - claude-code / cursor: staging/agents/<NAME>.md

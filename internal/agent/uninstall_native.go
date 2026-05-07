@@ -204,7 +204,7 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 // deriveInstallRoot 从 installedDir(= "<root>/skills/<name>/")反推 <root> 祖父目录。
 // 路径异常(空 / 没 skills 段 / 非绝对路径)→ 回退默认 ~/.<target>/。
 func deriveInstallRoot(installedDir string, t IDETarget, home string) string {
-	defaultRoot := filepath.Join(home, t.DirName())
+	defaultRoot := t.RootDir(home)
 	if strings.TrimSpace(installedDir) == "" {
 		return defaultRoot
 	}
@@ -240,7 +240,7 @@ func cleanIDEMCPServers(t IDETarget, home, root, systemID string, logf func(form
 			return nil
 		}
 		var removed []string
-		for _, line := range strings.Split(string(out), "\n") {
+		for line := range strings.SplitSeq(string(out), "\n") {
 			fields := strings.Fields(line)
 			if len(fields) == 0 || fields[0] == "Name" {
 				continue

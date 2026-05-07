@@ -65,7 +65,7 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 	if err != nil {
 		return fmt.Errorf("read $HOME: %w", err)
 	}
-	root := filepath.Join(home, t.DirName())
+	root := t.RootDir(home)
 
 	// grafana/loki 共用 mcp-grafana go 二进制:确保 <root>/bin/mcp-grafana 就位 + 把 servers
 	// 里的占位替换成绝对路径。三家 IDE 都要做(BuildMCPServers 输出的 command 是占位 sentinel,

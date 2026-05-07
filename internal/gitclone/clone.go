@@ -175,6 +175,10 @@ func ReadOrigin(path string) (string, error) {
 
 // CanonicalURL 把 ssh/https/git 协议的同一仓库 URL 归一化为 "host/owner/repo"（小写、无 .git 尾缀）
 // 便于跨协议比对。识别失败时原样返回 trim 过的字符串。
+//
+// 关键 case(常踩坑):ssh URL 带 port `ssh://git@host:2222/owner/repo.git`,
+// `:` 后面是数字 port 而不是 path,**必须丢掉 port**才能跟同仓 https 形式
+// (`https://host/owner/repo.git`)归一化后相等。
 func CanonicalURL(raw string) string {
 	s := strings.TrimSpace(raw)
 	if s == "" {
@@ -185,16 +189,41 @@ func CanonicalURL(raw string) string {
 	s = strings.TrimPrefix(s, "git+ssh://")
 	s = strings.TrimPrefix(s, "https://")
 	s = strings.TrimPrefix(s, "http://")
-	// scp-style: user@host:path → host/path
+	s = strings.TrimPrefix(s, "git://")
+	// scp-style: user@host:path → host:path
 	if idx := strings.Index(s, "@"); idx >= 0 && !strings.Contains(s[:idx], "/") {
 		s = s[idx+1:]
 	}
-	// 把第一个 ':' 换成 '/'（scp 形式）
-	if colon := strings.Index(s, ":"); colon >= 0 && !strings.Contains(s[:colon], "/") {
-		s = s[:colon] + "/" + s[colon+1:]
+	// 处理第一个 ':'(出现在第一个 '/' 之前才算):
+	//   - 后接数字 + '/' → ssh port,丢掉(port 不参与归一化)
+	//   - 否则 → scp 风格 path 分隔,':' 换 '/'
+	colon := strings.Index(s, ":")
+	slash := strings.Index(s, "/")
+	if colon >= 0 && (slash == -1 || colon < slash) {
+		after := s[colon+1:]
+		slashAfter := strings.Index(after, "/")
+		if slashAfter >= 0 && isAllDigits(after[:slashAfter]) {
+			// host:PORT/path → host/path
+			s = s[:colon] + after[slashAfter:]
+		} else {
+			// host:owner/repo(scp) → host/owner/repo
+			s = s[:colon] + "/" + after
+		}
 	}
 	s = strings.ToLower(s)
 	s = strings.TrimSuffix(s, "/")
 	s = strings.TrimSuffix(s, ".git")
 	return s
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }

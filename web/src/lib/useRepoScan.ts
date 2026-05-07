@@ -26,6 +26,7 @@ import {
   recommendRoleForRepo,
 } from './bridge'
 import { toast } from './toast'
+import { canonicalizeGitURL } from './canonicalGitURL'
 
 // 跟 InitPage 的 RepoItem / RepoRole / EnvItem 形状对齐(放宽到 string 避免严格 union 跨边界匹配难)。
 export interface RepoScanItem {
@@ -84,27 +85,6 @@ export interface RepoScanDeps {
   deriveRepoName: (url: string) => string
   /** 跑 bridgeAnalyzeV2 前要把当前 InitPage state 序列化成 yaml,closure 持有 25+ 个 InitPage reactive */
   generateYAML: () => string
-}
-
-// canonicalizeGitURL 把 git URL 归一化(ssh:// / https:// / scp 形式) → "host/owner/repo"
-// 小写、无 .git 后缀。给"用户选的本地目录的 origin 跟 yaml 锁定 URL 比对"用,跨协议
-// 不必改写 yaml 也能匹配。跟 internal/gitclone/clone.go 的 CanonicalURL 一致语义。
-function canonicalizeGitURL(raw: string): string {
-  let s = (raw || '').trim()
-  if (!s) return ''
-  s = s.replace(/^ssh:\/\//, '').replace(/^git\+ssh:\/\//, '')
-  s = s.replace(/^https?:\/\//, '')
-  // user@host:path(scp 风格)→ host:path
-  const at = s.indexOf('@')
-  if (at >= 0 && !s.slice(0, at).includes('/')) {
-    s = s.slice(at + 1)
-  }
-  // 第一个 ':' 替换成 '/'
-  const colon = s.indexOf(':')
-  if (colon >= 0 && !s.slice(0, colon).includes('/')) {
-    s = s.slice(0, colon) + '/' + s.slice(colon + 1)
-  }
-  return s.toLowerCase().replace(/\/+$/, '').replace(/\.git$/, '')
 }
 
 export function useRepoScan(deps: RepoScanDeps) {

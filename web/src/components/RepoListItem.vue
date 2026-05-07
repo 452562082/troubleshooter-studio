@@ -132,12 +132,10 @@ const emit = defineEmits<{
     <!-- 来源切换:
          - umbrella 子模块(parent_repo 在场)→ 锁死 '本地已有'(代码已被 umbrella 的
            git submodule 拉到本地,不能独立 clone)
-         - umbrella 父行(有 N 个子模块引用本仓 parent_repo)→ 不锁,但显眼警告
-           '改身份必须仍指向同一份代码,否则 child path 错位'(留 flexibility 让用户
-           切'本地已有'指自己已 clone 的副本) -->
-    <div v-if="umbrellaChildrenCount > 0" class="umbrella-warn">
-      ⚠ 本仓是 {{ umbrellaChildrenCount }} 个子模块的 umbrella。改 URL / 切 source / 重选路径**必须仍指向同一份代码**(同一个 git repo),否则 child path 会错位 —— 子模块代码定位会跑到错误的 umbrella 副本里。
-    </div>
+         - umbrella 父行(被 N 个子模块 parent_repo 引用)→ source 切换可选,但:
+           - URL 锁死(yaml 声明的 URL 是 child 引用的真源,不能改)
+           - 本地已有模式选目录时,后台 git remote origin 必须跟锁定 URL 匹配,
+             不匹配拒绝(防止误指别的项目把 child path 全错位) -->
     <div class="form-group">
       <label>仓库来源</label>
       <div class="source-toggle">
@@ -171,13 +169,17 @@ const emit = defineEmits<{
     <template v-if="repo._source === 'remote'">
       <div class="form-group">
         <label>仓库地址 <span class="required">*</span>
-          <span class="field-hint">— 仓库名从 URL 自动推;扫描前需要 clone 到本地</span>
+          <span class="field-hint">
+            <template v-if="umbrellaChildrenCount > 0">— 锁定:本仓被 {{ umbrellaChildrenCount }} 个子模块的 parent_repo 引用,URL 是 child 路径解析的真源,不允许改。要改先删干净 child</template>
+            <template v-else>— 仓库名从 URL 自动推;扫描前需要 clone 到本地</template>
+          </span>
         </label>
         <input
           v-model="repo.url"
           type="text"
           placeholder="git@github.com:org/order-service.git"
           :class="{ error: hasError(`repo.${index}.url`) }"
+          :readonly="umbrellaChildrenCount > 0"
           @input="emit('urlInput', repo)"
         />
       </div>
@@ -473,15 +475,4 @@ const emit = defineEmits<{
   cursor: not-allowed;
 }
 
-/* umbrella 父行警告 banner:有 child 引用时,提醒'改身份必须仍指向同一份代码',不锁住 */
-.umbrella-warn {
-  margin: 8px 0;
-  padding: 8px 12px;
-  background: #3a2f1a;
-  border-left: 3px solid #d97706;
-  color: #f3e7d2;
-  font-size: 13px;
-  line-height: 1.5;
-  border-radius: 3px;
-}
 </style>

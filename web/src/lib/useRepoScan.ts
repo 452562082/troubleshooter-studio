@@ -86,6 +86,27 @@ export interface RepoScanDeps {
   generateYAML: () => string
 }
 
+// canonicalizeGitURL 把 git URL 归一化(ssh:// / https:// / scp 形式) → "host/owner/repo"
+// 小写、无 .git 后缀。给"用户选的本地目录的 origin 跟 yaml 锁定 URL 比对"用,跨协议
+// 不必改写 yaml 也能匹配。跟 internal/gitclone/clone.go 的 CanonicalURL 一致语义。
+function canonicalizeGitURL(raw: string): string {
+  let s = (raw || '').trim()
+  if (!s) return ''
+  s = s.replace(/^ssh:\/\//, '').replace(/^git\+ssh:\/\//, '')
+  s = s.replace(/^https?:\/\//, '')
+  // user@host:path(scp 风格)→ host:path
+  const at = s.indexOf('@')
+  if (at >= 0 && !s.slice(0, at).includes('/')) {
+    s = s.slice(at + 1)
+  }
+  // 第一个 ':' 替换成 '/'
+  const colon = s.indexOf(':')
+  if (colon >= 0 && !s.slice(0, colon).includes('/')) {
+    s = s.slice(0, colon) + '/' + s.slice(colon + 1)
+  }
+  return s.toLowerCase().replace(/\/+$/, '').replace(/\.git$/, '')
+}
+
 export function useRepoScan(deps: RepoScanDeps) {
   // resolveCloneDest 把"父目录 + repo.name"拼出真实 clone 落地路径。
   // 调用方:scanSingleRepo 构造 repoPaths、Step 8 一键部署构造 repoPaths。
@@ -247,25 +268,47 @@ export function useRepoScan(deps: RepoScanDeps) {
   async function resolveLocalRepoPath(r: RepoScanItem, p: string) {
     const newPath = (p || '').trim()
     if (!newPath) return
+    // umbrella 父行(被 child parent_repo 引用)硬约束:本地目录的 git origin 必须
+    // 跟 yaml 锁定的 r.url 匹配。否则用户可能选了别的项目目录,所有 child path
+    // cascade 全错位。校验失败 → 拒绝设 _localPath,toast.error 报清原因。
+    const childCount = deps.repos.filter(rr => (rr.parent_repo || '').trim() === r.name.trim()).length
+    if (childCount > 0 && r.url.trim()) {
+      let actualOrigin = ''
+      try { actualOrigin = await getRemoteURL(newPath) } catch { /* 非 git 仓库,fallthrough */ }
+      if (!actualOrigin) {
+        toast.error(`目录 ${newPath} 不是 git 仓库或没读到 origin。umbrella 必须指向跟锁定 URL 同源的本地副本`)
+        return
+      }
+      if (canonicalizeGitURL(actualOrigin) !== canonicalizeGitURL(r.url)) {
+        toast.error(`目录 origin (${actualOrigin}) 跟 umbrella 锁定 URL (${r.url}) 不匹配。本仓被 ${childCount} 个子模块引用,选别的项目会让 child path 全错位`)
+        return
+      }
+    }
     // 换路径 = 换仓库,先清旧 name 对应的分支缓存 + 身份字段
+    // (umbrella 父行场景下 name 锁住了,这步实际不变 r.name;普通仓库照常清重填)
     if (r.name && r.name in deps.repoBranchesMap.value) {
       delete deps.repoBranchesMap.value[r.name]
     }
     r._localPath = newPath
-    r.url = ''
-    r.name = ''
-    r._nameManual = false
+    if (childCount === 0) {
+      // 普通仓 / umbrella 子模块切目录 = 换仓库,清身份等会儿从新路径反填
+      r.url = ''
+      r.name = ''
+      r._nameManual = false
+    }
     r._scanned = false
     r._scannedSource = ''
     // 清空旧 submodule hints,避免上个仓库的检测结果残留
     r._submoduleHints = undefined
-    try {
-      const remote = await getRemoteURL(newPath)
-      if (remote) {
-        r.url = remote
-        r.name = deps.deriveRepoName(remote)
-      }
-    } catch { /* 不是 git 仓库 / 没 origin,容忍继续 */ }
+    if (childCount === 0) {
+      try {
+        const remote = await getRemoteURL(newPath)
+        if (remote) {
+          r.url = remote
+          r.name = deps.deriveRepoName(remote)
+        }
+      } catch { /* 不是 git 仓库 / 没 origin,容忍继续 */ }
+    }
     if (!r.name) {
       const parts = newPath.split(/[\\/]/).filter(Boolean)
       r.name = parts[parts.length - 1] || ''

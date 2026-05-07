@@ -50,11 +50,26 @@ export function useMonorepoHints(deps: UseMonorepoHintsDeps) {
     r._submoduleSelection[subPath] = picked
   }
 
-  // pickedSubmoduleCount banner 拆分按钮上显示数量 + disable 用
+  // pickedSubmoduleCount banner 拆分按钮上显示数量 + disable 用。
+  // 排除"已经拆过"的(name 撞 repos[] 已有 entry)—— 跟 splitMonorepo 防御性去重逻辑
+  // 一致,按钮文案 / disabled 状态准确反映"真正会新增几行"。
   function pickedSubmoduleCount(r: MonorepoRepoItem): number {
     if (!r._submoduleHints) return 0
     const sel = r._submoduleSelection || {}
-    return r._submoduleHints.filter(h => sel[h.sub_path] !== false).length
+    const existingNames = new Set(
+      deps.repos.map(rr => rr.name.trim()).filter(n => n && n !== r.name.trim()),
+    )
+    return r._submoduleHints
+      .filter(h => sel[h.sub_path] !== false)
+      .filter(h => !existingNames.has(h.name))
+      .length
+  }
+
+  // isSubmoduleAlreadySplit:某个 hint 对应的 child 已经在 repos[] 里(之前已拆过)。
+  // banner 用这个给行加"已拆"标识 + 禁勾选,避免用户误以为"刚扫到的新东西"反复拆出来。
+  function isSubmoduleAlreadySplit(r: MonorepoRepoItem, hintName: string): boolean {
+    if (!hintName) return false
+    return deps.repos.some(rr => rr.name.trim() === hintName && rr.name.trim() !== r.name.trim())
   }
 
   // submodulePathFor 拼"父仓本地路径 + sub_path"得到子模块实际代码位置。
@@ -274,6 +289,7 @@ export function useMonorepoHints(deps: UseMonorepoHintsDeps) {
   return {
     toggleSubmodulePick,
     pickedSubmoduleCount,
+    isSubmoduleAlreadySplit,
     submodulePathFor,
     isGitSubmodulesHints,
     qualifyServiceName,

@@ -32,8 +32,10 @@ defineProps<{
   qualifyServiceName: (repoName: string, hintName: string) => string
   /** 子模块在仓库内的完整路径(含 sub_path) */
   submodulePathFor: (r: any, sub: string) => string
-  /** 当前勾选的子模块数(决定按钮文案 + 是否 disabled) */
+  /** 当前勾选的子模块数(决定按钮文案 + 是否 disabled);已计入"已拆排除" */
   pickedSubmoduleCount: (r: any) => number
+  /** 该 hint 对应的 child 是否已经在 repos[] 里(之前已拆过) */
+  isSubmoduleAlreadySplit: (r: any, hintName: string) => boolean
 }>()
 
 const emit = defineEmits<{
@@ -61,17 +63,18 @@ const emit = defineEmits<{
     <template v-else-if="isGitSubmodulesHints(repo._submoduleHints)">
       <!-- 分支 A:.gitmodules 路径 -->
       <div class="monorepo-banner-head">
-        🔍 检测到 .gitmodules 声明的 {{ repo._submoduleHints.length }} 个独立子模块(每个都是独立 git repo,默认全选):
+        🔍 检测到 .gitmodules 声明的 {{ repo._submoduleHints.length }} 个独立子模块(每个都是独立 git repo):
       </div>
       <div class="monorepo-banner-hint">
         💡 <strong>不点"拆分"按钮就不影响</strong> —— 如果当成单仓处理,直接在下方"服务名"里手填即可。
       </div>
       <ul class="monorepo-banner-list">
-        <li v-for="h in repo._submoduleHints" :key="h.sub_path">
+        <li v-for="h in repo._submoduleHints" :key="h.sub_path" :class="{ 'monorepo-row-already-split': isSubmoduleAlreadySplit(repo, h.name) }">
           <label class="monorepo-row-check">
             <input
               type="checkbox"
-              :checked="repo._submoduleSelection?.[h.sub_path] !== false"
+              :disabled="isSubmoduleAlreadySplit(repo, h.name)"
+              :checked="!isSubmoduleAlreadySplit(repo, h.name) && repo._submoduleSelection?.[h.sub_path] !== false"
               @change="emit('toggleSubmodulePick', repo, h.sub_path, ($event.target as HTMLInputElement).checked)"
             />
             <div class="monorepo-row-content">
@@ -79,6 +82,7 @@ const emit = defineEmits<{
                 <strong>{{ h.name }}</strong>
                 <span class="monorepo-stack">{{ h.stack }}</span>
                 <span class="monorepo-role">{{ h.role }}</span>
+                <span v-if="isSubmoduleAlreadySplit(repo, h.name)" class="monorepo-already-tag">已拆</span>
               </div>
               <div class="monorepo-row-path">
                 📂 <code>{{ submodulePathFor(repo, h.sub_path) }}</code>
@@ -94,13 +98,17 @@ const emit = defineEmits<{
           </label>
         </li>
       </ul>
+      <div v-if="repo._submoduleHints.every(h => isSubmoduleAlreadySplit(repo, h.name))" class="monorepo-banner-hint" style="margin-top: 8px;">
+        ✓ 全部子模块已拆出。要重新拆某个子模块,请先在下方对应仓库行点 <code>×</code> 删除,再回来重新扫描。
+      </div>
       <button
+        v-else
         type="button"
         class="btn primary monorepo-split-btn"
         :disabled="pickedSubmoduleCount(repo) === 0"
         @click="emit('splitMonorepo', index)"
       >
-        ✂ 拆成 {{ pickedSubmoduleCount(repo) }} 个独立仓库条目(各自 url / 本地路径 / role)
+        ✂ 拆成 {{ pickedSubmoduleCount(repo) }} 个新增子模块条目(各自 url / 本地路径 / role)
       </button>
     </template>
     <template v-else>
@@ -149,3 +157,19 @@ const emit = defineEmits<{
     </template>
   </div>
 </template>
+
+<style scoped>
+.monorepo-row-already-split {
+  opacity: 0.5;
+}
+.monorepo-already-tag {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 6px;
+  font-size: 11px;
+  background: #4a5060;
+  color: #f3f5f9;
+  border-radius: 3px;
+  vertical-align: middle;
+}
+</style>

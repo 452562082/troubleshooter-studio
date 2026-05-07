@@ -76,6 +76,7 @@ defineProps<{
   branchHasOptions: (r: any) => boolean
   branchOptionsFor: (r: any, current: string) => string[]
   pickedSubmoduleCount: (r: any) => number
+  isSubmoduleAlreadySplit: (r: any, hintName: string) => boolean
 }>()
 
 // emit 签名也用 any 接 r —— 父端 RepoItem 的 role 是 RepoRole 窄 union,跟本组件
@@ -293,6 +294,7 @@ const emit = defineEmits<{
       :qualify-service-name="qualifyServiceName"
       :submodule-path-for="submodulePathFor"
       :picked-submodule-count="pickedSubmoduleCount"
+      :is-submodule-already-split="isSubmoduleAlreadySplit"
       @toggle-submodule-pick="(r, sub, checked) => emit('toggleSubmodulePick', r, sub, checked)"
       @split-monorepo="(idx) => emit('splitMonorepo', idx)"
       @merge-monorepo-into-services="(idx) => emit('mergeMonorepoIntoServices', idx)"

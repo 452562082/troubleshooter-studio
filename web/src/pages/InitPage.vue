@@ -691,6 +691,7 @@ const repoBranchesMap = ref<Record<string, string[]>>(
 const {
   toggleSubmodulePick,
   pickedSubmoduleCount,
+  isSubmoduleAlreadySplit,
   submodulePathFor,
   isGitSubmodulesHints,
   qualifyServiceName,
@@ -2929,6 +2930,7 @@ provide(WizardStoreKey, {
         :branch-has-options="branchHasOptions"
         :branch-options-for="branchOptionsFor"
         :picked-submodule-count="pickedSubmoduleCount"
+        :is-submodule-already-split="isSubmoduleAlreadySplit"
         @remove="removeRepo"
         @set-source="(r, source) => setRepoSource(r, source)"
         @url-input="(r) => onRepoUrlInput(r)"

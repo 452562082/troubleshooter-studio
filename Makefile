@@ -136,6 +136,18 @@ desktop-dmg: desktop-app
 	@APP_BUNDLE=$(BUNDLE_DIR) VOLUME_NAME=$(BUNDLE_NAME) DMG_OUT=$(DMG_OUT) \
 	 bash scripts/package-dmg.sh
 
+# ── 一键发版本到 GitLab Release ─────────────────────────────────────
+# 流程:dmg + 跨平台 CLI binary 全 build → curl 调 GitLab API 上传 + 创 Release
+# 前置:
+#   1) git tag $(VERSION) 已 push 到远端
+#   2) 环境变量 GITLAB_TOKEN(GitLab Settings → Access Tokens,scope=api)
+# 用法:
+#   make release-publish                          # VERSION 来自 git describe
+#   make release-publish VERSION=v0.1.1           # 显式指定
+.PHONY: release-publish
+release-publish: desktop-dmg release
+	@VERSION=$(VERSION) bash scripts/publish-gitlab-release.sh
+
 # ── 快速试跑:build 后立即 demo ──────────────────────────────────
 .PHONY: demo
 demo: build

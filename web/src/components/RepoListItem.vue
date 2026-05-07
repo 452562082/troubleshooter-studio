@@ -122,14 +122,20 @@ const emit = defineEmits<{
       <button class="btn-icon remove" :disabled="!canRemove" @click="emit('remove', index)">&times;</button>
     </div>
 
-    <!-- 来源切换 -->
+    <!-- 来源切换:umbrella 子模块锁死 '本地已有'(代码已被 umbrella 的 git submodule 拉到本地,
+         不能独立 clone),普通独立仓库二选一 -->
     <div class="form-group">
       <label>仓库来源</label>
       <div class="source-toggle">
-        <label class="source-option" :class="{ selected: repo._source === 'remote' }">
+        <label
+          class="source-option"
+          :class="{ selected: repo._source === 'remote', disabled: !!repo.parent_repo }"
+          :title="repo.parent_repo ? `umbrella ${repo.parent_repo} 的子模块代码已通过 git submodule 拉到本地,不能独立配 URL clone。如需独立 clone,先点 header 上 🌂 旁的 🗑 解除关联` : ''"
+        >
           <input
             type="radio"
             :checked="repo._source === 'remote'"
+            :disabled="!!repo.parent_repo"
             @change="emit('setSource', repo, 'remote')"
           />
           <span class="source-title">🌐 远程 URL</span>
@@ -142,7 +148,7 @@ const emit = defineEmits<{
             @change="emit('setSource', repo, 'local')"
           />
           <span class="source-title">📁 本地已有</span>
-          <span class="source-hint">选一个已 clone 好的仓库目录</span>
+          <span class="source-hint">{{ repo.parent_repo ? `umbrella 的 git submodule 已拉到 <${repo.parent_repo}>/${repo.parent_path || repo.name}` : '选一个已 clone 好的仓库目录' }}</span>
         </label>
       </div>
     </div>
@@ -432,5 +438,14 @@ const emit = defineEmits<{
 }
 .has-hint:hover::after {
   opacity: 1;
+}
+
+/* umbrella 子模块 source-toggle 远程 URL 选项被锁死时的视觉(input 已 disabled,这里给容器加灰) */
+.source-option.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.source-option.disabled input[type="radio"] {
+  cursor: not-allowed;
 }
 </style>

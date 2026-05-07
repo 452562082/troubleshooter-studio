@@ -192,17 +192,15 @@ export function useMonorepoHints(deps: UseMonorepoHintsDeps) {
       const ownLocalPath = isIndependentRepo && parentLocalBase
         ? parentLocalBase + '/' + h.sub_path.replace(/^\/+/, '')
         : (parent._localPath || parentLocalBase)
-      // 子模块的 source 模式:跟父仓保持一致(remote 父 → child 也 remote)。
-      //   - 独立子模块 + parent 是 remote:子模块 url 是各自的(.gitmodules 里的 h.url),
-      //     parent_repo 在 yaml 里声明 umbrella → 子模块关系,部署时走 analyzerpipe 的
-      //     umbrella 继承编排(parent 先 clone,子模块 URL clone 到 <parent>/<parent_path>);
-      //     wizard scan 本机优化:_localPath 预填 parentLocalBase/<sub_path>,refreshRoleHint
-      //     拿到立刻能用,免重复 clone。
-      //   - 独立子模块 + parent 是 local:同上 source 跟 parent 走 'local',
-      //     _localPath 同样指向 parentLocalBase/<sub_path>(代码已在磁盘上)。
+      // 子模块的 source 模式:
+      //   - 独立子模块(isIndependentRepo=true,.gitmodules 真子模块):**锁死 'local'** ——
+      //     parent 在 umbrella 同步扫描时已 git submodule update --init --recursive 把所有
+      //     子模块代码拉到 <parent>/<sub_path> 了,子模块没有"独立 clone"的概念,只有
+      //     "在本地复用 umbrella 拉下来的副本"。yaml 里 url 仍是子模块 .git URL(parent_repo
+      //     +parent_path 让其他机器也能恢复 umbrella 继承编排),但 wizard 内部 _source 锁本地。
       //   - 同仓子目录(isIndependentRepo=false):跟父仓共用 _source / _localPath / url,
       //     由 sub_path 区分,父仓什么模式继续什么模式。
-      const ownSource: 'local' | 'remote' = parent._source || 'remote'
+      const ownSource: 'local' | 'remote' = isIndependentRepo ? 'local' : (parent._source || 'remote')
       return {
         ...deps.makeEmptyRepo(),
         name: h.name,

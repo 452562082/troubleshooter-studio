@@ -779,6 +779,11 @@ function branchHasOptions(r: RepoItem): boolean {
 
 function setRepoSource(r: RepoItem, src: 'local' | 'remote') {
   if (r._source === src) return // 切到当前源不动,避免误清
+  // umbrella 子模块代码已被 git submodule 拉到本地 <umbrella>/<parent_path>,
+  // 不能独立 clone(没有自己的落点),source 锁死 'local'。要切到远程必须先解除
+  // umbrella 关联(点 header 上 🌂 旁的 🗑)。这里防御性拦一下,即便 UI 那边
+  // disabled 失效也不会切坏。
+  if (src === 'remote' && r.parent_repo && r.parent_repo.trim()) return
   // 切源:把当前侧的所有源相关字段打包进 _sourceCache,切回来时原样恢复。
   // 之前的实现是无脑清空,用户来回切就丢数据 —— 实际场景常是"切过去看一眼对比就回来"。
   const oldSrc: 'local' | 'remote' = r._source === 'local' ? 'local' : 'remote'

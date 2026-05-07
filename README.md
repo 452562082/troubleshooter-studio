@@ -57,25 +57,24 @@
 git clone <此仓库> && cd troubleshooter-studio
 ```
 
-> 改 Go binding(`cmd/tshoot-desktop/App` 的 method 签名变了)才需要 `make wails-gen`
-> 刷新 `web/wailsjs/go/`(已入库,普通构建不用动)。
-
 **桌面 app**(推荐,新用户):
 
 ```bash
 make desktop-app
 open dist/TroubleshooterStudio.app
+# 或者拷到 /Applications,后续 Launchpad / Spotlight 直接搜
+cp -R dist/TroubleshooterStudio.app /Applications/
 ```
 
-10 步「创建向导」生成新机器人 → 末步一键部署。首次启动 macOS Gatekeeper 会拦(没签名),右键 App → 打开 → 确认即放行。
+10 步「创建向导」→ 末步一键部署。首次启动 Gatekeeper 拦截见末尾「已知限制」。
 
 **CLI**(脚本 / SSH / CI):
 
 ```bash
 make                                                       # 等价 go build -o bin/tshoot ./cmd/tshoot
 ./bin/tshoot demo                                          # 零配置:用内置 examples 走完整流程
-./bin/tshoot init -o troubleshooter.yaml                           # 交互向导生成 yaml
-./bin/tshoot gen -i troubleshooter.yaml -o ./out                   # 出 staging 产物
+./bin/tshoot init -o troubleshooter.yaml                   # 交互向导生成 yaml
+./bin/tshoot gen -i troubleshooter.yaml -o ./out           # 出 staging 产物
 ./bin/tshoot install --path ./out --target openclaw        # 装到本机
 ```
 
@@ -97,28 +96,27 @@ make                                                       # 等价 go build -o 
 
 ## Monorepo / Umbrella 仓库
 
-把多个独立服务作为**子模块**挂在一个 umbrella 仓库下(典型:`truss/.gitmodules` 引入 `commerce/api/user/...`),又同时作为**独立仓库**存在(`service/commerce.git` 等)。用 `parent_repo` + `parent_path` 描述这种关系:
+把多个独立服务以 **git submodule** 挂在一个 umbrella 仓库下,同时各自又是**独立仓库**(常见模式:平台仓的 `.gitmodules` 引入 N 个服务子模块,各服务在 git 服务器上仍以独立 repo 存在)。用 `parent_repo` + `parent_path` 描述这种关系:
 
 ```yaml
 repos:
-  - name: truss          # umbrella 父仓
-    url:  ssh://git@gitlab.example.com:2222/service/truss.git
+  - name: platform               # umbrella 父仓
+    url:  https://git.example.com/org/platform.git
     role: backend
-  - name: commerce       # umbrella 子模块,独立仓也能拉
-    url:  ssh://git@gitlab.example.com:2222/service/commerce.git
-    parent_repo: truss   # 声明本仓在 truss umbrella 内
-    parent_path: commerce  # 在 truss/ 内的相对路径(不填时复用 name)
+  - name: payments               # 子模块;在 git 服务器上也是独立仓
+    url:  https://git.example.com/org/payments.git
+    parent_repo: platform        # 声明本仓挂在 platform umbrella 下
+    parent_path: services/payments  # 在 platform/ 内的相对路径(不填时复用 name)
     role: backend
 ```
 
 工作台对此自动适配:
 
 - **wizard 仓库扫描**:扫到 monorepo 信号(`.gitmodules` / workspaces / pom modules)→ 弹"一键拆分"banner,把每个子模块出成独立 repo 条目并设好 `parent_repo`
-- **路径解析(部署期 / analyze 期)**:topological sort 保证 umbrella 先解析,子模块路径自动拼成 `<umbrella 路径>/<parent_path>`,不用每个子模块都重选目录
-- **远程 / 本地两种来源**:导入 `troubleshooter.yaml` 在新机器部署时,umbrella 子模块强制走 local 模式(代码必须由 umbrella `git submodule update --init` 提供,不能独立 clone),URL 锁死防误改身份
-- **健康检查**:`parent_repo` 自指 / 引用不存在 / 成环 三种坏配置在 health check 阶段就拦下,有清晰中文提示
-
-跨协议的 git URL 比对内部统一走 `canonicalizeGitURL`,`ssh://git@host:2222/owner/repo.git` 跟 `https://host/owner/repo.git` 视作同仓(`:2222` port 正确剥离)。
+- **路径解析(部署期 / analyze 期)**:拓扑排序保证 umbrella 先解析,子模块路径自动拼成 `<umbrella 路径>/<parent_path>`,不用每个子模块都重选目录
+- **远程 / 本地两种来源**:在新机器导入 yaml 部署时,umbrella 子模块强制走 local 模式(代码必须由 umbrella `git submodule update --init` 提供,不能独立 clone),URL 锁死防误改身份
+- **健康检查**:`parent_repo` 自指 / 引用不存在 / 成环 三种坏配置在 health check 阶段就拦下,清晰中文提示
+- **跨协议 URL 比对**:ssh-with-port / scp-form / https 视作同仓(`ssh://git@host:2222/owner/repo.git` ≡ `https://host/owner/repo.git`)
 
 ## 桌面 app 页面
 
@@ -196,12 +194,12 @@ skill 集合**按 yaml 动态裁剪**,产物的真源在 [`templates/workspace/s
 ```bash
 make              # CLI:bin/tshoot(等价 go build ./cmd/tshoot)
 make web          # 前端 dist → internal/webui/dist/(go:embed 进二进制)
-make desktop      # 桌面裸二进制:bin/tshoot-desktop
-make desktop-app  # 桌面 .app bundle:dist/TroubleshooterStudio.app(Mac 双击就跑)
+make desktop-app  # 桌面 .app bundle:dist/TroubleshooterStudio.app(默认推荐,Finder 双击 / open 启动无终端)
+make desktop      # 桌面裸二进制:bin/tshoot-desktop(开发者用,直接跑会关联 Terminal)
 make release      # 多平台交叉编译 darwin/linux × amd64/arm64 → dist/bin/
 make test         # go test -race -cover ./...
 make lint         # go vet + gofmt + vue-tsc
-make wails-gen    # 改 Go binding 后刷新 web/wailsjs/go/(平时不用动)
+make wails-gen    # 仅在改了 cmd/tshoot-desktop/App 的 method 签名时跑,刷新 web/wailsjs/go/(已入库)
 make icon         # assets/app-icon.svg → cmd/tshoot-desktop/build/appicon.png
 make clean        # 清 bin/ + dist/bin/ + 前端 dist 中间产物
 ```
@@ -244,7 +242,7 @@ schema/system.schema.yaml
 
 ## 已知限制
 
-- 桌面 app 没代码签名 / 公证,macOS Gatekeeper 首次会拦,右键 → 打开放行
+- 桌面 app 没代码签名 / 公证,macOS Gatekeeper 首次会拦。右键 .app → 打开 → 确认即放行;或一行命令解锁:`xattr -d com.apple.quarantine dist/TroubleshooterStudio.app`
 - 代码扫描精度依赖通用模式识别;**配置驱动 / 注解驱动 / 自定义包装层重的项目**命中率会下降,缺漏部分在桌面 app 编辑器手补即可
   - 服务调用图(downstream):识别 HTTP / gRPC / 服务发现工厂调用 + Java `@FeignClient` + Python `requests/httpx`;**配置文件驱动**的 RPC 注册需要手补
   - 数据 schema:识别主流 ORM(GORM / JPA / SQLAlchemy / TypeORM / Mongoose 等);裸 SQL / 冷门 ORM / 自定义命名约定 漏的部分需手补

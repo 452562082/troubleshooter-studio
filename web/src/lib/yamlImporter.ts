@@ -240,6 +240,18 @@ export async function applyParsedYAMLToWizardState(
         _submoduleHintsDismissed: !!(core.service_entries && Object.keys(core.service_entries).length > 0),
       }
     }))
+    // umbrella 行(被其他 repo 的 parent_repo 引用的)纯容器化:清 service_names +
+    // _serviceEntries(否则 yaml 残留的 service_names 会在 Step 6 服务列表里冒出来,
+    // 跟 splitMonorepo 后清 service_names 行为对齐)。
+    const umbrellaNames = new Set(
+      ctx.repos.map((r: any) => (r.parent_repo || '').trim()).filter((n: string) => n),
+    )
+    for (const r of ctx.repos as any[]) {
+      if (umbrellaNames.has(r.name.trim())) {
+        r.service_names = ''
+        r._serviceEntries = undefined
+      }
+    }
     // 后台拉真实分支:不阻塞 applyImport 同步返回
     for (const { name, path } of localPathsToFetch) {
       ctx.listBranchesForRepo(path).then((bs) => {

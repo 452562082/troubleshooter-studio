@@ -692,9 +692,6 @@ function isRepoDeletable(r: RepoItem): boolean {
 function countUmbrellaChildren(r: RepoItem): number {
   return repos.filter(rr => (rr.parent_repo || '').trim() === r.name.trim()).length
 }
-function isUmbrellaWithChildren(r: RepoItem): boolean {
-  return countUmbrellaChildren(r) > 0
-}
 
 // Sync env_branches keys when environments change
 watch(

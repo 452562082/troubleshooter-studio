@@ -40,38 +40,35 @@
 
 下载链路兜底:HTTP 5 min 超时(慢网 / GitHub 出站不通自动降级到 npx 装,带 warning),桌面 app 部署进度区**实时显示当前阶段**(下载中 / 已安装 / 已复用本机已有)避免误以为卡死。
 
-## 依赖
-
-`bin/` 和 `dist/` 都在 `.gitignore`,`git clone` 完得本地构建。**只要装下面两条之一**:
-
-- **桌面 app(仅 macOS)** —— 一行装齐:`xcode-select --install && brew install go node`
-- **只要 CLI(macOS / Linux / Windows)** —— 装 Go 1.25+ 就行
-
-> 仓库里 `make wails-gen`(改 Go binding 时刷 wails 绑定)和 `make icon`(重渲图标)是**贡献者才需要**的开发任务,跟首次跑通无关,装它们的依赖(Wails CLI / librsvg)平时不用碰。
->
-> Linux / Windows 当前只能跑 CLI(桌面 app Makefile 没适配 GTK + AppImage)。
-
 ## 快速开始
+
+`bin/` 和 `dist/` 都在 `.gitignore`,`git clone` 完得本地构建。
 
 ```bash
 git clone <此仓库> && cd troubleshooter-studio
 ```
 
-**桌面 app**(推荐,新用户):
+### 桌面 app(macOS,推荐新用户)
 
 ```bash
+# 装依赖(一行齐):xcode + go + node
+xcode-select --install && brew install go node
+
+# 打 .app bundle 启动,无终端
 make desktop-app
 open dist/TroubleshooterStudio.app
-# 或者拷到 /Applications,后续 Launchpad / Spotlight 直接搜
+# 或装到系统级,Launchpad / Spotlight 直接搜
 cp -R dist/TroubleshooterStudio.app /Applications/
 ```
 
 10 步「创建向导」→ 末步一键部署。首次启动 Gatekeeper 拦截见末尾「已知限制」。
 
-**CLI**(脚本 / SSH / CI):
+### CLI(macOS / Linux / Windows)
 
 ```bash
-make                                                       # 等价 go build -o bin/tshoot ./cmd/tshoot
+# 装依赖:Go 1.25+(macOS 上 brew install go 即可;Linux / Windows 用各自包管理器或 https://go.dev/dl/)
+
+make                                                       # CLI:bin/tshoot
 ./bin/tshoot demo                                          # 零配置:用内置 examples 走完整流程
 ./bin/tshoot init -o troubleshooter.yaml                   # 交互向导生成 yaml
 ./bin/tshoot gen -i troubleshooter.yaml -o ./out           # 出 staging 产物
@@ -79,6 +76,9 @@ make                                                       # 等价 go build -o 
 ```
 
 模板和示例已 `go:embed` 进二进制,二进制拷到任何位置都能跑。`tshoot --help` 列全部子命令。
+
+> Linux / Windows 当前**没有桌面 app**(Makefile 没适配 GTK + AppImage),只跑 CLI。
+> `make wails-gen` / `make icon` 是**贡献者才需要**的开发任务,跟首次跑通无关,依赖(Wails CLI / librsvg)平时不用装。
 
 ## 适配的系统架构
 

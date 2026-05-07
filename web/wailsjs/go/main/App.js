@@ -178,6 +178,10 @@ export function OpenYAML() {
   return window['go']['main']['App']['OpenYAML']();
 }
 
+export function PathExists(arg1) {
+  return window['go']['main']['App']['PathExists'](arg1);
+}
+
 export function Plan(arg1) {
   return window['go']['main']['App']['Plan'](arg1);
 }

@@ -100,6 +100,8 @@ export function OpenDir(arg1:string):Promise<string>;
 
 export function OpenYAML():Promise<main.OpenYAMLResult>;
 
+export function PathExists(arg1:string):Promise<boolean>;
+
 export function Plan(arg1:string):Promise<generator.Plan>;
 
 export function PrefillCreds(arg1:string):Promise<Record<string, string>>;

@@ -11,6 +11,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -84,6 +85,18 @@ func (a *App) GetMissingRepoPaths(yamlText string) (*MissingRepoPathsResult, err
 		Missing:  agent.CheckMissingRepoPaths(cfg, saved),
 		Suggest:  userconfig.DefaultReposRootOrFallback(),
 	}, nil
+}
+
+// PathExists 给 wizard 做"扫描前预检"用 —— 子模块代码可能被用户手动 rm 了,
+// 前端先 check 一下,提示明确的"先去 umbrella 行点同步扫描拉子模块"指引,
+// 比让 scanSingleRepo 真跑下去拿到 backend 的"path missing skipped"模糊错误友好。
+// 空路径返 false。
+func (a *App) PathExists(p string) bool {
+	if p == "" {
+		return false
+	}
+	_, err := os.Stat(userconfig.ExpandHome(p))
+	return err == nil
 }
 
 // ListBranchesForRepo 给 wizard Step 4 用 —— 仅列分支,比 AnalyzeV2 / scanSingleRepo

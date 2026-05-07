@@ -22,6 +22,7 @@ import {
   getRemoteURL,
   isDesktop,
   openDir,
+  pathExists,
   recommendRoleForRepo,
 } from './bridge'
 import { toast } from './toast'
@@ -293,6 +294,22 @@ export function useRepoScan(deps: RepoScanDeps) {
     if (r._source === 'local' && !r._localPath?.trim()) {
       r._scanError = '本地模式需要先选目录'
       return
+    }
+
+    // 扫描前预检本地路径存在性(主要兜 umbrella 子模块代码被 rm 的场景):
+    // umbrella 子模块的 _localPath 是 splitMonorepo 预填的 <umbrella>/<sub>,如果用户
+    // 把 <umbrella>/<sub> 目录删了,这里 path 不存在 → backend 会返"path missing skipped"
+    // 模糊错误。前端先 check 一下,umbrella 子模块给明确指引、普通仓给重选目录提示。
+    if (r._localPath?.trim()) {
+      const exists = await pathExists(r._localPath.trim())
+      if (!exists) {
+        if (r.parent_repo && r.parent_repo.trim()) {
+          r._scanError = `代码缺失(${r._localPath} 不存在)。请先去 umbrella 行 "${r.parent_repo}" 点 "重新同步扫描",会自动 git submodule update 拉回本子模块代码`
+        } else {
+          r._scanError = `本地路径已不存在(${r._localPath}),请重选目录`
+        }
+        return
+      }
     }
 
     // 构造 RepoPaths:仅这一个仓库的路径覆盖;效用上同 AnalyzeV2 的 per-repo 映射。

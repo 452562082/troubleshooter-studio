@@ -49,3 +49,11 @@ export async function getRemoteURL(repoPath: string): Promise<string> {
   if (!isDesktop()) return ''
   return App.GetRemoteURL(repoPath)
 }
+
+/** 检查路径是否存在(给 wizard 扫描前预检用 —— umbrella 子模块代码可能被用户 rm 掉,
+ *  扫描前 check 一下能给出明确指引,比让 backend 跑下去拿模糊的 path-missing 错误好。
+ *  浏览器模式 / 路径空 → false。 */
+export async function pathExists(p: string): Promise<boolean> {
+  if (!isDesktop() || !p) return false
+  return App.PathExists(p)
+}

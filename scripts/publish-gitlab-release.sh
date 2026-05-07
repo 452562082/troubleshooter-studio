@@ -32,7 +32,23 @@ set -euo pipefail
 
 GITLAB_HOST="${GITLAB_HOST:-https://gitlab.quguazhan.com}"
 PROJECT_PATH="${PROJECT_PATH:-xiaolong/troubleshooter-studio}"
-RELEASE_NOTES="${RELEASE_NOTES:-$VERSION 自动发布(make release-publish)}"
+RELEASE_NOTES="${RELEASE_NOTES:-$(cat <<NOTES
+$VERSION 自动发布(make release-publish)。
+
+## 下载与安装
+
+**macOS 桌面 app**:
+- 下载 \`TroubleshooterStudio-$VERSION.dmg.zip\`
+- 双击解压(macOS Archive Utility 会自动恢复 dmg 文件图标)
+- 双击解出来的 .dmg → Finder 弹安装窗口 → 拖 .app 到 Applications
+- 首次启动 Gatekeeper 拦截:右键 .app → 打开 → 确认放行;或一行命令解锁:\`xattr -d com.apple.quarantine /Applications/TroubleshooterStudio.app\`
+
+**CLI(macOS / Linux / Windows)**:
+- 按平台选 \`tshoot-$VERSION-<os>-<arch>\` 下载
+- macOS / Linux:\`chmod +x tshoot-...\` + 拷到 \`/usr/local/bin/tshoot\`
+- 跑 \`tshoot --help\` 看子命令
+NOTES
+)}"
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "✗ 缺 jq:brew install jq" >&2
@@ -62,11 +78,23 @@ fi
 echo "  ✓ tag 存在"
 
 # 2) 收 dist/ 下产物清单
-echo "[2/5] 扫描 dist/ 产物..."
+echo "[2/5] 扫描 dist/ 产物 + 准备 zip 包装..."
 ASSETS=()
 dmg="dist/TroubleshooterStudio-$VERSION.dmg"
 if [[ -f "$dmg" ]]; then
-  ASSETS+=("$dmg")
+  # dmg 直接走 HTTP 上传 / 下载会丢 macOS xattr(com.apple.ResourceFork +
+  # FinderInfo),导致 dmg 文件本身的 Finder icon 在用户 Downloads 里变成默认
+  # disk image 图标。用 ditto -c -k --keepParent --rsrc 打成 zip,xattr 嵌进 zip;
+  # 用户用 macOS Archive Utility(双击 zip)解压时自动恢复 xattr → dmg 文件
+  # 带回 robot 图标。
+  # 行业标准做法:VS Code / Bitwarden 等很多 mac app 都用 zip 包 dmg 分发。
+  dmg_zip="$dmg.zip"
+  echo "  ▶ 用 ditto 把 $dmg 打成 $dmg_zip(保留 xattr,解压后图标恢复)"
+  rm -f "$dmg_zip"
+  # cd 进 dmg 同级 + 只传 basename,zip 内部就只剩 dmg 文件本身,无 dist/ 子目录
+  # (--keepParent 会保留输入路径的父目录段,不是我们想要的)
+  ( cd "$(dirname "$dmg")" && ditto -c -k --rsrc "$(basename "$dmg")" "$(basename "$dmg_zip")" )
+  ASSETS+=("$dmg_zip")
 else
   echo "  [warn] 找不到 $dmg(没跑 make desktop-dmg?)" >&2
 fi

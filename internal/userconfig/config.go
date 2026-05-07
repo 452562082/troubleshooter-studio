@@ -119,6 +119,14 @@ func Load() (*Config, error) {
 
 // Save 序列化写回 ~/.tshoot/config.json(目录不存在自动建)。
 // 整份 Config 覆盖写,调用方读 → 改 → 写,不用处理 merge。
+//
+// 写入策略:
+//  1. tmp + rename 原子写。直接 os.WriteFile 写到一半 crash → 文件被截断,
+//     用户下次启动 Load 解析失败,整份 RepoPathsBySystem / DeployedBots 全丢。
+//     tmp + rename 让失败时原文件保持完整(rename 是 inode 级原子操作)。
+//  2. 0o600 而不是 0o644。content 含 RepoPathsBySystem(本机仓库绝对路径)+
+//     DeployedBots(部署元数据 + system_id),world-readable 等于让其他用户能
+//     推断 home 结构 + 哪些项目在用工作台,跟 IDE settings 同种隐私性质。
 func Save(cfg *Config) error {
 	p, err := configPath()
 	if err != nil {
@@ -131,7 +139,15 @@ func Save(cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, data, 0o644)
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, p); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // GetRepoPathsForSystem 返回某个 system.id 下"仓库名 → 本机绝对路径"映射。

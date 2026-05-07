@@ -240,18 +240,14 @@ export async function applyParsedYAMLToWizardState(
         _submoduleHintsDismissed: !!(core.service_entries && Object.keys(core.service_entries).length > 0),
       }
     }))
-    // umbrella 行(被其他 repo 的 parent_repo 引用的)纯容器化:清 service_names +
-    // _serviceEntries(否则 yaml 残留的 service_names 会在 Step 6 服务列表里冒出来,
-    // 跟 splitMonorepo 后清 service_names 行为对齐)。
-    const umbrellaNames = new Set(
-      ctx.repos.map((r: any) => (r.parent_repo || '').trim()).filter((n: string) => n),
-    )
-    for (const r of ctx.repos as any[]) {
-      if (umbrellaNames.has(r.name.trim())) {
-        r.service_names = ''
-        r._serviceEntries = undefined
-      }
-    }
+    // umbrella 行的 service_names / _serviceEntries 不在 yaml import 阶段强制清:
+    // 1. 大多数 umbrella 是纯容器 — splitMonorepo 已在创建时把它的 service_names
+    //    清掉,导出的 yaml 自然就是空的,re-import 仍是空,符合预期
+    // 2. 少数 umbrella 自身有运行的 service(典型:truss 既是 gateway 服务又是
+    //    commerce/api/... 的 umbrella),用户在 yaml 里显式写 service_names: [truss]
+    //    → 必须尊重,不能 import 时就被清掉
+    // 用户 stale yaml(老版本 splitMonorepo 没清 umbrella service_names)看到 truss
+    // 出现在 Step 6 服务列表里 → 在 Step 4 truss 行的服务名 chip 里点 × 删一下即可
     // 后台拉真实分支:不阻塞 applyImport 同步返回
     for (const { name, path } of localPathsToFetch) {
       ctx.listBranchesForRepo(path).then((bs) => {

@@ -230,13 +230,26 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 				t.Fatalf("MergeMCPIntoIDESettings: %v", err)
 			}
 
-			// 验证三家各自的写入位置
+			// 验证三家各自的写入位置 + 文件 mode 必须 0o600
+			// (mcpServers env 段嵌入 plaintext creds,world-readable 0o644 是真 leak)
+			assertFileMode := func(t *testing.T, path string, want os.FileMode) {
+				t.Helper()
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatalf("stat %s: %v", path, err)
+				}
+				if got := info.Mode().Perm(); got != want {
+					t.Errorf("%s mode want %#o, got %#o(plaintext creds 文件不能 world-readable)", path, want, got)
+				}
+			}
 			switch target {
 			case "claude-code":
 				// 注意:claude-code 的 MCP 写到 $HOME/.claude.json(dotfile),不是
 				// rootDir/settings.json —— Claude Code CLI 启动时只读这个 dotfile,
 				// settings.json 给 hooks/permissions/env 用,不读 mcpServers 字段。
-				assertJSONHasMCPKeys(t, filepath.Join(fakeHome, ".claude.json"), expectedKeys)
+				dotPath := filepath.Join(fakeHome, ".claude.json")
+				assertJSONHasMCPKeys(t, dotPath, expectedKeys)
+				assertFileMode(t, dotPath, 0o600)
 
 				// 迁移路径断言:旧位置 settings.json 里跟新派生 key 同名的残留应被清掉,
 				// 但用户自加的 user-custom-mcp 和 hooks 字段必须保留。
@@ -253,10 +266,13 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 					t.Errorf("迁移误删了用户自加的 user-custom-mcp")
 				}
 			case "cursor":
-				assertJSONHasMCPKeys(t, filepath.Join(rootDir, "mcp.json"), expectedKeys)
+				cursorPath := filepath.Join(rootDir, "mcp.json")
+				assertJSONHasMCPKeys(t, cursorPath, expectedKeys)
+				assertFileMode(t, cursorPath, 0o600)
 			case "codex":
 				// codex MCP 嵌入 agent toml 内联 [mcp_servers.<key>] 段,不再走全局 config.toml。
 				assertCodexAgentTOMLHasMCPKeys(t, agentMDPath, expectedKeys)
+				assertFileMode(t, agentMDPath, 0o600)
 			}
 
 			// ── 4) discover.Scan:BotsPage 同款扫描应该能找到这个机器人 ─────────

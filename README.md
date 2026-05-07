@@ -37,7 +37,9 @@
 - **Claude Code / Cursor** 的 `agents/<name>.md`:平台运行环境介绍(Bash 能力 / MCP 位置 / skills 路径)+ 通用排障逻辑(SOUL / IDENTITY / 排障入口 / 故障快报模板)+ skills 索引,全塞在一份 .md 里。
 - **Codex CLI** 的 `agents/<name>.toml`:`developer_instructions` 故意瘦身成"身份一句话 + 第一步 Read `~/.codex/skills/<name>/SKILL.md`",详细路由表 / 行为规则 / 故障快报模板搬到那份 root SKILL.md(picker 按需 read)—— spawn 时不烧 system prompt token,真正排障的 thread 才付内容成本。
 
-**Codex grafana/loki MCP 走 go 二进制**(不走 npx):`tshoot install --target codex` 自动从 `github.com/grafana/mcp-grafana` releases 下载预编译版到 `~/.codex/bin/mcp-grafana`。换 go 版的原因:`@leval/mcp-grafana` 这个 npm 包启动时往 stdout 打 banner 污染 JSON-RPC 流,导致 codex 握手"connection closed: initialize response";同时 codex subagent thread 默认 network=Restricted 让 npx 拉包也可能失败。go 版严格 stdio + 装好就跑,绕开两条死亡路径。下载失败会 fallback 到 npx 但会打 warning。
+**Codex grafana/loki MCP 走 go 二进制**(不走 npx):`tshoot install --target codex` 自动从 `github.com/grafana/mcp-grafana` releases 下载预编译版到 `~/.codex/bin/mcp-grafana`。换 go 版的原因:`@leval/mcp-grafana` 这个 npm 包启动时往 stdout 打 banner 污染 JSON-RPC 流,导致 codex 握手"connection closed: initialize response";同时 codex subagent thread 默认 network=Restricted 让 npx 拉包也可能失败。go 版严格 stdio + 装好就跑,绕开两条死亡路径。
+
+下载链路兜底:HTTP 5 min 超时(慢网 / GitHub 出站不通自动降级到 npx 装,带 warning),桌面 app 部署进度区**实时显示当前阶段**(下载中 / 已安装 / 已复用本机已有)避免误以为卡死。
 
 ## 依赖
 
@@ -103,6 +105,31 @@ make                                                       # 等价 go build -o 
 - **技术栈**:Go / Java / PHP / Python / Node(React/Vue/Next.js/Nuxt)
 
 不适用:Serverless / FaaS、单体应用。
+
+## Monorepo / Umbrella 仓库
+
+把多个独立服务作为**子模块**挂在一个 umbrella 仓库下(典型:`truss/.gitmodules` 引入 `commerce/api/user/...`),又同时作为**独立仓库**存在(`service/commerce.git` 等)。用 `parent_repo` + `parent_path` 描述这种关系:
+
+```yaml
+repos:
+  - name: truss          # umbrella 父仓
+    url:  ssh://git@gitlab.example.com:2222/service/truss.git
+    role: backend
+  - name: commerce       # umbrella 子模块,独立仓也能拉
+    url:  ssh://git@gitlab.example.com:2222/service/commerce.git
+    parent_repo: truss   # 声明本仓在 truss umbrella 内
+    parent_path: commerce  # 在 truss/ 内的相对路径(不填时复用 name)
+    role: backend
+```
+
+工作台对此自动适配:
+
+- **wizard 仓库扫描**:扫到 monorepo 信号(`.gitmodules` / workspaces / pom modules)→ 弹"一键拆分"banner,把每个子模块出成独立 repo 条目并设好 `parent_repo`
+- **路径解析(部署期 / analyze 期)**:topological sort 保证 umbrella 先解析,子模块路径自动拼成 `<umbrella 路径>/<parent_path>`,不用每个子模块都重选目录
+- **远程 / 本地两种来源**:导入 `system.yaml` 在新机器部署时,umbrella 子模块强制走 local 模式(代码必须由 umbrella `git submodule update --init` 提供,不能独立 clone),URL 锁死防误改身份
+- **健康检查**:`parent_repo` 自指 / 引用不存在 / 成环 三种坏配置在 health check 阶段就拦下,有清晰中文提示
+
+跨协议的 git URL 比对内部统一走 `canonicalizeGitURL`,`ssh://git@host:2222/owner/repo.git` 跟 `https://host/owner/repo.git` 视作同仓(`:2222` port 正确剥离)。
 
 ## 桌面 app 页面
 

@@ -154,7 +154,10 @@ func writeMCPServersWithVerify(path string, servers map[string]any, maxRetries i
 		}
 		maps.Copy(existing, servers)
 		settings["mcpServers"] = existing
-		return writeJSONFile(path, settings, 0o644)
+		// 0o600:mcpServers env 段含 wizard 注入的 plaintext creds(NACOS_PASS / API token /
+		// kubeconfig 等),world-readable 0o644 是真 leak —— 多用户 macOS / Linux 主机
+		// 上其它账号能直接 cat 出来。settings.json 自身没机密,但跟凭证混存只能按下限走。
+		return writeJSONFile(path, settings, 0o600)
 	}
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -215,7 +218,8 @@ func pruneLegacyClaudeSettingsMCP(legacyPath string, servers map[string]any) err
 	} else {
 		settings["mcpServers"] = existing
 	}
-	return writeJSONFile(legacyPath, settings, 0o644)
+	// 0o600:同 writeMCPServersWithVerify 注释,mcpServers env 段含 plaintext creds。
+	return writeJSONFile(legacyPath, settings, 0o600)
 }
 
 // injectMCPIntoCodexAgentTOML 把 servers 拼成 TOML [mcp_servers.<x>] 段,写到
@@ -243,8 +247,15 @@ func injectMCPIntoCodexAgentTOML(root string, cfg *config.SystemConfig, servers 
 		return fmt.Errorf("patch codex agent toml %s: %w", tomlPath, err)
 	}
 
-	if err := os.WriteFile(tomlPath, []byte(patched), 0o644); err != nil {
+	// 0o600:codex agent toml 的 [mcp_servers.*.env] 段含 plaintext creds(同 ~/.claude.json
+	// / ~/.cursor/mcp.json),不能 world-readable。
+	// 注意:os.WriteFile 在文件**已存在**时不改 mode,而本函数总是 patch 已经存在的 toml,
+	// 所以必须 chmod 显式收 mode 否则继承先前 install_native.go 第一次写时的 0o644。
+	if err := os.WriteFile(tomlPath, []byte(patched), 0o600); err != nil {
 		return fmt.Errorf("write codex agent toml %s: %w", tomlPath, err)
+	}
+	if err := os.Chmod(tomlPath, 0o600); err != nil {
+		return fmt.Errorf("chmod codex agent toml %s: %w", tomlPath, err)
 	}
 	return nil
 }
@@ -370,7 +381,11 @@ func hasGrafanaPlaceholder(servers map[string]any) bool {
 
 // npxGrafanaFallbackArgs 是 ensure binary 失败时退回 npx 走 @leval/mcp-grafana 包的前置参数。
 // 已知该包有 stdout 污染问题,只在用户机器没法装本地二进制时兜底;成功路径不走这里。
-var npxGrafanaFallbackArgs = []any{"-y", "@leval/mcp-grafana"}
+//
+// 末尾的 `--` 把后续 args 全锁给 mcp-grafana,防 npx 把 `--disable-*` 当自家 flag 解析。
+// 当前 mcp-grafana 的 args 没用 npx 自身保留的名字(`--package` `--shell` `-y` 等),
+// 加 `--` 是 future-proof 防御:upstream 加新 flag 不必再回头审 npx 兼容性。
+var npxGrafanaFallbackArgs = []any{"-y", "@leval/mcp-grafana", "--"}
 
 // replaceGrafanaWithBinary 把 command 占位换成本地 mcp-grafana 二进制绝对路径,args 不动
 // (BuildMCPServers 输出的 args 已经是 go 版二进制兼容的形态)。

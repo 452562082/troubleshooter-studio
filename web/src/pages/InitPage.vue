@@ -60,6 +60,7 @@ import { useKuboardPreload } from '../lib/useKuboardPreload'
 import { useDataStoreState } from '../lib/useDataStoreState'
 import { useImportCrossCheck } from '../lib/useImportCrossCheck'
 import { useDeployFlow } from '../lib/useDeployFlow'
+import { migrateSavedStep } from '../lib/wizardStep'
 import { useImportFlow } from '../lib/useImportFlow'
 import { useDataStoreScan } from '../lib/useDataStoreScan'
 import { useMonorepoHints } from '../lib/useMonorepoHints'
@@ -77,14 +78,11 @@ const saved = loadInitWizardDraft()
 const savedKuboardState = loadInitKuboardState()
 
 // ── Step management ──
-// wizardSchema=2 起 step 1 是欢迎页;老 saved(无 wizardSchema)的 currentStep 需 +1 迁移。
-const _savedSchema: number = saved?.wizardSchema ?? 1
-const currentStep = ref<number>(
-  saved?.currentStep != null
-    ? Math.min(_savedSchema >= 2 ? saved.currentStep : saved.currentStep + 1, 10)
-    : 1,
-)
+// migrateSavedStep 抽到 lib/wizardStep.ts(纯函数 + 7 条单测覆盖 schema=1/2 偏移、
+// null / 越界 / 0 / 负数等)。行为跟原 inline 表达式严格等价 —— 不引入额外下限
+// clamp(那是 InitPage 自己的 clampCurrentStep 兜底职责),避免任何运行时行为漂移。
 const totalSteps = 10
+const currentStep = ref<number>(migrateSavedStep(saved?.currentStep, saved?.wizardSchema, totalSteps))
 const stepTitles = [
   '开始',          // Step 1:欢迎页(导入 yaml / 从零开始)
   '系统基本信息',

@@ -1465,9 +1465,15 @@ function setK8sRtSvcWorkload(envID: string, svc: string, workload: string) {
 }
 
 // 从 repos[].service_names 抽出去重的服务名列表 —— 下拉的每个 env 块都要遍历这一份。
+// **角色非业务服务**(common-lib / docs / infra / frontend / mobile)的 repo 直接跳:
+// 即便它的 service_names 残留了字符串(老 wizard 没清 / yaml 手编辑漏 / state 不一致),
+// 这里 runtime 兜底,Step 6 服务清单不会出现 'docs 仓的名字当成服务' 的噪音。
+// 跟 wizard syncServiceNamesWithRole + yamlImporter 的 role-based 清理三层联动,
+// 任何一层漏了 runtime 这层都能兜住。
 const allServiceNames = computed<string[]>(() => {
   const set = new Set<string>()
   for (const r of repos) {
+    if (!isServiceRole(r.role)) continue
     for (const s of r.service_names.split(',').map(s => s.trim()).filter(Boolean)) {
       set.add(s)
     }

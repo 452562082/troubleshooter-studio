@@ -216,12 +216,25 @@ export async function applyParsedYAMLToWizardState(
       for (const env of ctx.environments) {
         if (env.id) branches[env.id] = r?.env_branches?.[env.id] ?? ''
       }
-      const localPath = core.name ? (savedRepoPaths[core.name] || '') : ''
+      let localPath = core.name ? (savedRepoPaths[core.name] || '') : ''
+      // umbrella 子模块(parent_repo 在场):代码必须由 umbrella 的 git submodule 提供,
+      // 不能独立 clone。即便 savedRepoPaths 没记本子模块路径(新机器导入常态),也强制 local
+      // 模式 —— 不强制的话默认 _source='remote',跟 UI 锁死 local 矛盾,用户看到混合状态。
+      // _localPath 优先 savedPath;没有就用 umbrella 的 saved path + parent_path 拼算
+      // (umbrella 也可能还没扫,这里返空即可,后续 umbrella 扫完会有 cascade 回填这里)。
+      if (core.parent_repo && !localPath) {
+        const umbrellaPath = savedRepoPaths[core.parent_repo] || ''
+        if (umbrellaPath) {
+          const sub = (core.parent_path || core.name).replace(/^\/+/, '')
+          localPath = umbrellaPath.replace(/\/+$/, '') + '/' + sub
+        }
+      }
+      const isUmbrellaChild = !!core.parent_repo
       if (core.name && localPath) localPathsToFetch.push({ name: core.name, path: localPath })
       return {
         ...core,
         env_branches: branches,
-        _source: localPath ? 'local' : 'remote',
+        _source: (isUmbrellaChild || localPath) ? 'local' : 'remote',
         _localPath: localPath,
         _serviceEntries: core.service_entries,
         _submoduleHintsDismissed: !!(core.service_entries && Object.keys(core.service_entries).length > 0),

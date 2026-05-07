@@ -422,6 +422,23 @@ export function useRepoScan(deps: RepoScanDeps) {
       // monorepo 检测:看是不是 workspaces / multi-module pom / cmd 多入口 / services/ 多子目录。
       // 命中 N>1 → UI 下面会弹"一键拆成 N 行"banner。
       refreshSubmoduleHints(r)
+      // umbrella 扫成功 → 级联回填所有 child 的 _localPath:
+      // <umbrella resolved>/<child.parent_path 或 child.name>。
+      // 场景:新机器导入 yaml,umbrella 没本地路径 → 子模块 _localPath 也空。用户点 umbrella
+      // 同步扫描 → 后端 git clone + git submodule update --recursive 把子模块代码拉下来 →
+      // 这里把子模块行的 _localPath 自动指向真实位置,不需要用户再对每个子模块手动操作。
+      const umbrellaPath = (r._localPath || '').trim() ||
+        (r._source === 'remote' ? resolveCloneDest(r) : '') ||
+        ((deps.reposRootInput.value || '').trim() ||
+          deps.resolvedReposRoot.value).replace(/\/+$/, '') + '/' + r.name.trim()
+      if (umbrellaPath) {
+        for (const child of deps.repos) {
+          if ((child.parent_repo || '').trim() === r.name.trim()) {
+            const sub = ((child.parent_path || '').trim() || child.name.trim()).replace(/^\/+/, '')
+            child._localPath = umbrellaPath.replace(/\/+$/, '') + '/' + sub
+          }
+        }
+      }
     } catch (e: any) {
       r._scanError = String(e?.message || e)
     } finally {

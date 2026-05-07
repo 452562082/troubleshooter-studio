@@ -232,7 +232,9 @@ const emit = defineEmits<{
           <input
             :value="repo._localPath"
             type="text"
-            placeholder="尚未选择目录"
+            :placeholder="repo.parent_repo
+              ? `等待 umbrella ${repo.parent_repo} 行点 '同步到本地并扫描',会自动填到 <umbrella 路径>/${repo.parent_path || repo.name}`
+              : '尚未选择目录'"
             readonly
             class="path-readonly"
             :title="repo._localPath || ''"

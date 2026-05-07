@@ -6,7 +6,7 @@ interface Environment { id: string }
 
 defineProps<{
   /** 父端 repo reactive 直传(env_branches 子字段双向绑定) */
-  repo: { name: string; env_branches: Record<string, string> }
+  repo: { name: string; env_branches: Record<string, string>; parent_repo?: string }
   environments: Environment[]
   /** repoBranchesMap[repoName] —— 真实分支列表(没扫到时空数组,走 input 兜底) */
   repoBranchesMap: Record<string, string[]>
@@ -20,7 +20,10 @@ defineProps<{
     <label>
       环境 → 分支映射
       <span class="help-icon" title="routing skill 根据此映射切到正确代码分支做代码定位。扫描仓库时按 env.id/is_prod 跟真实分支名做启发式匹配(dev→develop, prod→main/master,..),点下拉可改。">?</span>
-      <span v-if="repoBranchesMap[repo.name]?.length" class="field-hint">
+      <span v-if="repo.parent_repo" class="field-hint">
+        — 由 umbrella <code>{{ repo.parent_repo }}</code> 的 git submodule pin 决定,跨 env 共用同一 commit,不可改
+      </span>
+      <span v-else-if="repoBranchesMap[repo.name]?.length" class="field-hint">
         — ✓ 从 {{ repoBranchesMap[repo.name]!.length }} 个真实分支里挑(可改)
       </span>
       <span v-else-if="branchHasOptions(repo)" class="field-hint">
@@ -36,6 +39,7 @@ defineProps<{
           v-if="branchHasOptions(repo)"
           v-model="repo.env_branches[env.id]"
           class="branch-select"
+          :disabled="!!repo.parent_repo"
         >
           <option value="">—</option>
           <option
@@ -50,6 +54,7 @@ defineProps<{
           type="text"
           class="branch-input"
           placeholder="扫一下自动填,也可手填"
+          :readonly="!!repo.parent_repo"
         />
       </div>
     </div>

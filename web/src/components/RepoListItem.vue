@@ -215,8 +215,13 @@ const emit = defineEmits<{
     <!-- 本地模式 -->
     <template v-else>
       <div class="form-group">
-        <label>本地仓库目录 <span class="required">*</span>
-          <span class="field-hint">— 点"选目录"挑一个已 clone 的目录,自动反填 URL + 推仓库名 + 扫描</span>
+        <label>
+          本地仓库目录
+          <span v-if="!repo.parent_repo" class="required">*</span>
+          <span class="field-hint">
+            <template v-if="repo.parent_repo">— 由 umbrella <code>{{ repo.parent_repo }}</code> 的 git submodule 决定,不可改</template>
+            <template v-else>— 点"选目录"挑一个已 clone 的目录,自动反填 URL + 推仓库名 + 扫描</template>
+          </span>
         </label>
         <div class="path-input-row">
           <input
@@ -227,14 +232,14 @@ const emit = defineEmits<{
             class="path-readonly"
             :title="repo._localPath || ''"
           />
-          <button type="button" class="btn" @click="emit('pickLocalRepoDir', repo)">
+          <button v-if="!repo.parent_repo" type="button" class="btn" @click="emit('pickLocalRepoDir', repo)">
             {{ repo._localPath ? '重新选目录…' : '选目录…' }}
           </button>
         </div>
-        <div v-if="repo._localPath && repo.url" class="local-url-probe ok">
+        <div v-if="!repo.parent_repo && repo._localPath && repo.url" class="local-url-probe ok">
           ✓ 已识别 origin: <code>{{ repo.url }}</code>
         </div>
-        <div v-else-if="repo._localPath && !repo.url" class="local-url-probe warn">
+        <div v-else-if="!repo.parent_repo && repo._localPath && !repo.url" class="local-url-probe warn">
           ⚠ 没读到 <code>git remote origin</code>;yaml 里会用占位 URL(仓库已在本地,不影响扫描)
         </div>
       </div>
@@ -256,11 +261,13 @@ const emit = defineEmits<{
       </div>
     </template>
 
-    <!-- 仓库名 + 自动识别 -->
+    <!-- 仓库名 + 自动识别。umbrella 子模块名是身份(parent_repo 引用 + parent_path 默认 = name),
+         绝不能改 → readonly + 提示 -->
     <div v-if="hasRepoSource(repo)" class="form-group">
       <label>
         仓库名
-        <span v-if="!repo._nameManual" class="auto-tag">
+        <span v-if="repo.parent_repo" class="field-hint">(umbrella 子模块身份,不可改)</span>
+        <span v-else-if="!repo._nameManual" class="auto-tag">
           {{ repo._source === 'local' ? '自动从目录名推' : '自动从 URL 推' }}
         </span>
         <span v-else class="field-hint">(已手改;清空可回到自动推)</span>
@@ -270,6 +277,7 @@ const emit = defineEmits<{
         type="text"
         :placeholder="repo._source === 'local' ? '自动从目录名推出' : '自动从仓库地址推出'"
         :class="{ error: hasError(`repo.${index}.name`) }"
+        :readonly="!!repo.parent_repo"
         @input="emit('nameInput', repo)"
       />
     </div>

@@ -46,7 +46,7 @@ $VERSION 自动发布(make release-publish)。
 2. **双击解压**(必须用 macOS 自带 Archive Utility,第三方解压可能丢图标)
 3. 双击解出来的 \`.dmg\` → Finder 弹安装窗口
 4. 拖 \`.app\` 到右边 \`Applications\`
-5. 第一次打开如果报"已损坏":**双击 dmg 里的 "一键解锁.command"** → Terminal 自动跑 \`xattr\` 解锁 → 然后 Launchpad / Spotlight 打开 .app
+5. 第一次打开如果报"已损坏":**双击 dmg 里的 "Fix - 一键解锁.command"** → Terminal 自动跑 \`xattr\` 解锁 → 然后 Launchpad / Spotlight 打开 .app
 
 **CLI(macOS / Linux / Windows)**:
 - 按平台选 \`tshoot-$VERSION-<os>-<arch>\` 下载

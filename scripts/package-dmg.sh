@@ -50,7 +50,7 @@ ln -s /Applications "$staging/Applications"
 #  2. 一键解锁.command —— 双击在 Terminal 跑 xattr -dr com.apple.quarantine,
 #     无需用户敲命令;dmg 卷内文件不带 quarantine(只有从 dmg 复制出去才会被打),
 #     所以这个 .command 在 dmg 卷里直接双击能跑,Terminal 不会被 Gatekeeper 拦
-cat >"$staging/首次打开必读.txt" <<'TXT'
+cat >"$staging/README - 首次打开必读.txt" <<'TXT'
 ══════════════════════════════════════════════════════════════
   TroubleshooterStudio 首次打开必读
 ══════════════════════════════════════════════════════════════
@@ -65,7 +65,7 @@ cat >"$staging/首次打开必读.txt" <<'TXT'
 
    解决方案三选一:
 
-   ✓ 最省心:双击本 dmg 里的"一键解锁.command",自动放行
+   ✓ 最省心:双击本 dmg 里的 "Fix - 一键解锁.command",自动放行
    ✓ 也行:右键 .app → 打开 → 弹窗确认放行
    ✓ 终端命令:
      xattr -dr com.apple.quarantine /Applications/TroubleshooterStudio.app
@@ -75,7 +75,7 @@ cat >"$staging/首次打开必读.txt" <<'TXT'
 TXT
 
 # 一键解锁脚本(双击在 Terminal 弹窗跑)
-cat >"$staging/一键解锁.command" <<'CMD'
+cat >"$staging/Fix - 一键解锁.command" <<'CMD'
 #!/bin/bash
 # 给 /Applications/TroubleshooterStudio.app 解锁 macOS Gatekeeper quarantine。
 # 双击此文件在 Terminal 自动跑;dmg 卷内的 .command 不带 quarantine,无需放行。
@@ -116,7 +116,7 @@ echo ""
 echo "  按回车键关闭..."
 read -r _
 CMD
-chmod +x "$staging/一键解锁.command"
+chmod +x "$staging/Fix - 一键解锁.command"
 
 # 防卡:之前失败 build 可能留下 /Volumes/<VOLUME_NAME> 的 stale 挂载(典型 readonly,
 # 因为是 dmg attach 失败的残骸)。新挂同名卷时,macOS 优先选第一份 → 后续 AppleScript
@@ -186,8 +186,8 @@ tell application "Finder"
     set icon size of viewOptions to 96
     set position of item "$APP_NAME_IN_DMG" of container window to {180, 160}
     set position of item "Applications" of container window to {520, 160}
-    set position of item "首次打开必读.txt" of container window to {180, 340}
-    set position of item "一键解锁.command" of container window to {520, 340}
+    set position of item "README - 首次打开必读.txt" of container window to {180, 340}
+    set position of item "Fix - 一键解锁.command" of container window to {520, 340}
     update without registering applications
     delay 1
     close

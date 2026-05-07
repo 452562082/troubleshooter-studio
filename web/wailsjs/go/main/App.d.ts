@@ -52,6 +52,8 @@ export function FetchConfigContent(arg1:main.CCHubFetchContentInput):Promise<cch
 
 export function FetchConfigContentBatch(arg1:main.CCHubFetchBatchInput):Promise<cchub.FetchBatchResult>;
 
+export function ForgetGhostBot(arg1:string,arg2:string):Promise<void>;
+
 export function Gen(arg1:string,arg2:string):Promise<generator.GenSummary>;
 
 export function GenPreview(arg1:string):Promise<main.GenPreviewResult>;

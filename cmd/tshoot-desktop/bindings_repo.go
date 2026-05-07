@@ -17,6 +17,7 @@ import (
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/agent"
+	"github.com/xiaolong/troubleshooter-studio/internal/aitools"
 	"github.com/xiaolong/troubleshooter-studio/internal/analyzer"
 	"github.com/xiaolong/troubleshooter-studio/internal/analyzerpipe"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
@@ -30,6 +31,14 @@ import (
 //   - ~/.claude/skills/, ~/.cursor/skills/, ~/.codex/skills/ — IDE 平台 skills
 //
 // 桌面 app 不扫 CWD(CLI 才有意义)。extraRoots 是 UI 侧让用户追加的项目根。
+//
+// 返回结果做两步 enrichment(scan 完跑):
+//  1. IDEAvailable —— 探测对应 IDE 二进制还在不在(用户卸载 IDE 但 ~/.<target>/
+//     还在的常见场景),BotsPage 卡片标 "⚠ IDE 已卸载,机器人不可用"
+//  2. Ghost —— ~/.tshoot/config.json deployed_bots 里有但 disk 上 tshoot.json
+//     不在的(用户外部 rm -rf 清掉),append 一条 ghost=true 的占位让 UI 能引导
+//     "重新部署 / 忘掉它"。Ghost 条目 Meta 字段从 deployed_bots 元数据回填,
+//     但 SystemYAML 缺(disk 没了),前端要把"诊断/重 gen/编辑"按钮 disable。
 func (a *App) DiscoverBots(extraRoots []string) ([]discover.DiscoveredAgent, error) {
 	// 一次性迁移:老用户的 Claude Code/Cursor 机器人锚点只在 staging 里(2026-04-30 之前
 	// 部署的),新版 discover 扫不到。MigrateLegacyAnchors 把 staging 的 tshoot.json
@@ -42,7 +51,46 @@ func (a *App) DiscoverBots(extraRoots []string) ([]discover.DiscoveredAgent, err
 		"~/.codex/skills",
 	}
 	roots = append(roots, extraRoots...)
-	return discover.Scan(roots)
+	bots, err := discover.Scan(roots)
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 1: enrich IDEAvailable —— 一次性探测三家 IDE,for 每个 bot 按 target 查表。
+	// openclaw 直接 true(产品自带,不靠探测三方 IDE)。cache 在本次调用内,避免 N×detect。
+	ideInstalled := map[string]bool{
+		"openclaw":    true,
+		"claude-code": aitools.DetectClaudeCode().Installed,
+		"cursor":      aitools.DetectCursor().Installed,
+		"codex":       aitools.DetectCodex().Installed,
+	}
+	for i := range bots {
+		bots[i].IDEAvailable = ideInstalled[bots[i].Meta.Target]
+	}
+
+	// Step 2: ghost bot 合并 —— deployed_bots 里有但 scan 没找到的,append 一条
+	// ghost=true 占位。key="<system_id>|<target>" 跟 disk 上的 bot 比对去重。
+	seen := map[string]bool{}
+	for _, b := range bots {
+		seen[userconfig.DeployedBotKey(b.Meta.SystemID, b.Meta.Target)] = true
+	}
+	for key, entry := range userconfig.ListDeployedBots() {
+		if seen[key] {
+			continue
+		}
+		ghost := discover.DiscoveredAgent{
+			Meta: discover.Meta{
+				SystemID:   entry.SystemID,
+				SystemName: entry.SystemName,
+				Target:     entry.Target,
+			},
+			Path:         entry.Path,
+			IDEAvailable: ideInstalled[entry.Target],
+			Ghost:        true,
+		}
+		bots = append(bots, ghost)
+	}
+	return bots, nil
 }
 
 // MissingRepoPathsResult 给 UI 决定"要不要弹仓库路径补全对话框"。

@@ -38,6 +38,14 @@ export async function uninstallBot(dir: string, target: string): Promise<Uninsta
   return App.UninstallBot(dir, target) as unknown as UninstallBotResult
 }
 
+/** ForgetGhostBot:disk 已不在的 ghost 卡片"忘掉它"按钮 → 只清 ~/.tshoot/config.json
+ *  里的部署记录,不动 disk(disk 上本来就没东西)。disk 还在的 bot 应走 uninstallBot,
+ *  不要走这条绕过(否则 disk 残留没清)。仅桌面 app 可用。 */
+export async function forgetGhostBot(systemID: string, target: string): Promise<void> {
+  if (!isDesktop()) throw new Error('ForgetGhostBot 只在桌面 app 里可用')
+  await (App as any).ForgetGhostBot(systemID, target)
+}
+
 // ── 已装机器人:工作目录浏览 / 编辑 ──
 // BotsPage 卡片"📂 浏览工作目录"用。后端三件套(列树 / 读文件 / 写文件),
 // rootPath 必须是 BotsPage 卡片里的 path(discover.Scan 出来的真实部署位置),

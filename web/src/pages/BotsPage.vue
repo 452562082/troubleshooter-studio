@@ -7,6 +7,7 @@ import {
   exportYAML,
   isDesktop as bridgeIsDesktop,
   uninstallBot,
+  forgetGhostBot,
 } from '../lib/bridge'
 import { Target } from '../lib/constants'
 import type { ApplyResult, DiscoveredBot } from '../lib/bridge'
@@ -212,6 +213,28 @@ async function uninstall(b: DiscoveredBot) {
   }
 }
 
+// Ghost bot 的"忘掉它":disk 已不在,只清 ~/.tshoot/config.json 部署记录,不调
+// uninstallBot(那条会去找不存在的 dir 失败)。confirmDialog 比 uninstall 弱,因为
+// 实际上"已经不在了",清记录是元数据操作,无需吓用户。
+async function forgetGhost(b: DiscoveredBot) {
+  const k = regenKey(b)
+  const ok = await confirmDialog({
+    title: `忘掉 "${b.meta.system_id}" (${b.meta.target})?`,
+    message: `此机器人对应目录 ${b.path || '(未知)'} 已经不在 disk(可能被外部清理工具删了)。"忘掉"会清掉 ~/.tshoot/config.json 里的部署记录,这张卡片就不再显示。要恢复机器人请重新走部署向导。`,
+    confirmText: '忘掉它',
+    cancelText: '保留',
+    defaultAction: 'cancel',
+  })
+  if (!ok) return
+  try {
+    await forgetGhostBot(b.meta.system_id, b.meta.target)
+    bots.value = bots.value.filter(x => regenKey(x) !== k)
+    toast.success(`已忘掉 ${b.meta.system_id} (${b.meta.target}) 的部署记录`)
+  } catch (e) {
+    toastError('忘掉', e)
+  }
+}
+
 function toggleEditor(b: DiscoveredBot) {
   const k = regenKey(b)
   if (editingKey.value === k) {
@@ -331,6 +354,7 @@ onActivated(() => { scan() })
         @toggle-editor="toggleEditor(b)"
         @do-export="doExport(b)"
         @uninstall="uninstall(b)"
+        @forget-ghost="forgetGhost(b)"
         @run-apply="(dryRun: boolean) => runApply(b, dryRun)"
       />
     </div>

@@ -53,10 +53,38 @@ type Config struct {
 	//   - 团队成员拿到同一 yaml 但本机路径不一样:他们自己跑 wizard 后这份就有了。
 	RepoPathsBySystem map[string]map[string]string `json:"repo_paths_by_system,omitempty"`
 
+	// DeployedBots 是"曾经成功部署过的机器人"清单,key="<system_id>|<target>"。
+	//
+	// 用途(ghost bot):用户外部 `rm -rf ~/.<target>/skills/<name>/` 清掉机器人后,
+	// discover.Scan 找不到 tshoot.json 锚点 → BotsPage 卡片直接消失,用户视角是
+	// "刚才还在的机器人没了"。BotsPage 把这里有但实际 disk 没有的标 ghost 显示出来,
+	// 并提供"重新部署"入口,让用户能恢复或主动清理。
+	//
+	// 维护:
+	//   - ImportAndDeploy 成功后 upsert(覆盖 LastDeployedAt)
+	//   - 用户在 BotsPage 主动卸载 → RemoveDeployedBot 清掉
+	//   - 用户在 BotsPage 对 ghost 点"忘掉它" → 同上
+	//
 	// 历史:曾有 CustomInstallRoots 字段(IDE 自定义安装根目录),后来发现 IDE 扩展
 	// 目录都是 hardcoded ~/.<target>(Claude Code / Cursor / Codex 都不读别处),功能
 	// 没意义已砍。老 config.json 里如果有 custom_install_roots 字段,Unmarshal 时会
-	// 被忽略(目标 struct 没这个字段),写回时就自动消失,无需 migrate。
+	// 被忽略,写回时就自动消失,无需 migrate。
+	DeployedBots map[string]DeployedBotEntry `json:"deployed_bots,omitempty"`
+}
+
+// DeployedBotEntry 单条"曾部署"记录。字段最小化:够 BotsPage ghost 卡片渲染 +
+// 重新部署入口能拿到 system_id 即可,详细 yaml 仍以 disk 上 tshoot.json 为准。
+type DeployedBotEntry struct {
+	SystemID       string `json:"system_id"`
+	SystemName     string `json:"system_name"`
+	Target         string `json:"target"`
+	Path           string `json:"path"`             // 当时部署落地路径(disk 缺失时给"应该在哪"的线索)
+	LastDeployedAt int64  `json:"last_deployed_at"` // unix seconds
+}
+
+// DeployedBotKey 拼出 DeployedBots map 的 key。集中一处,upsert / lookup / remove 一致。
+func DeployedBotKey(systemID, target string) string {
+	return systemID + "|" + target
 }
 
 // configPath 返回 ~/.tshoot/config.json 的绝对路径。
@@ -148,6 +176,51 @@ func SetRepoPathsForSystem(systemID string, paths map[string]string) error {
 	} else {
 		cfg.RepoPathsBySystem[systemID] = filtered
 	}
+	return Save(cfg)
+}
+
+// UpsertDeployedBot 把一条"部署成功"记录写进 ~/.tshoot/config.json。
+// LastDeployedAt 调用方填(time.Now().Unix());Path 是落地路径(同卡片显示路径)。
+// 同 key 已存在 → 覆盖(LastDeployedAt 更新),不报错。
+func UpsertDeployedBot(entry DeployedBotEntry) error {
+	if entry.SystemID == "" || entry.Target == "" {
+		return nil
+	}
+	cfg, err := Load()
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		cfg = &Config{}
+	}
+	if cfg.DeployedBots == nil {
+		cfg.DeployedBots = map[string]DeployedBotEntry{}
+	}
+	cfg.DeployedBots[DeployedBotKey(entry.SystemID, entry.Target)] = entry
+	return Save(cfg)
+}
+
+// ListDeployedBots 返回 ~/.tshoot/config.json 里所有部署记录。
+// 文件不存在 / 没存过返回空 map(非 nil,方便 range)。
+func ListDeployedBots() map[string]DeployedBotEntry {
+	cfg, err := Load()
+	if err != nil || cfg == nil || cfg.DeployedBots == nil {
+		return map[string]DeployedBotEntry{}
+	}
+	return cfg.DeployedBots
+}
+
+// RemoveDeployedBot 删一条记录。BotsPage 卸载机器人 / "忘掉 ghost" 都调这个。
+// key 不存在 → no-op,不报错。
+func RemoveDeployedBot(systemID, target string) error {
+	if systemID == "" || target == "" {
+		return nil
+	}
+	cfg, err := Load()
+	if err != nil || cfg == nil || cfg.DeployedBots == nil {
+		return nil
+	}
+	delete(cfg.DeployedBots, DeployedBotKey(systemID, target))
 	return Save(cfg)
 }
 

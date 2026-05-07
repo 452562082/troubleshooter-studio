@@ -62,6 +62,8 @@ const emit = defineEmits<{
   toggleEditor: []
   doExport: []
   uninstall: []
+  /** ghost bot(disk 已删但 ~/.tshoot 还有记录)的"忘掉它"操作 */
+  forgetGhost: []
   /** dryRun=true 预演 / false 真应用 */
   runApply: [dryRun: boolean]
 }>()
@@ -79,9 +81,20 @@ function classForSeverity(s: string): string {
 </script>
 
 <template>
-  <article class="bot-card">
+  <article class="bot-card" :class="{ 'bot-card-ghost': bot.ghost, 'bot-card-broken': !bot.ide_available && !bot.ghost }">
     <header class="bot-head">
       <span class="bot-target" :data-target="bot.meta.target">{{ targetLabel(bot.meta.target) }}</span>
+      <!-- ghost > broken > version 三档 status badge,互斥(ghost 自然意味着 broken,只显严重的那条) -->
+      <span
+        v-if="bot.ghost"
+        class="bot-status bot-status-ghost"
+        title="部署目录已不在 disk(可能被外部 rm 或清理工具删了),仅从 ~/.tshoot/config.json 记录幽灵显示。点&quot;忘掉&quot;清记录,或重新部署恢复。"
+      >👻 已删除</span>
+      <span
+        v-else-if="!bot.ide_available"
+        class="bot-status bot-status-broken"
+        :title="`本机未探测到 ${targetLabel(bot.meta.target)} 二进制。机器人文件还在,但 ${targetLabel(bot.meta.target)} 启动时不会加载它。装回 IDE 即可恢复。`"
+      >⚠ IDE 已卸载</span>
       <!-- "tshoot dev" 是 build 没打 git tag 时的兜底字面量,信息量为零(本地构建都长这样),
            显示反而成噪音。只在版本号是真版本号(非 dev / 空)时才渲染徽章。 -->
       <span
@@ -100,50 +113,59 @@ function classForSeverity(s: string): string {
     <footer class="bot-foot">
       <span class="bot-time">最近更新: {{ bot.mod_time }}</span>
       <div class="bot-actions">
+        <!-- Ghost bot:disk 已不在,所有依赖文件的操作都没意义,只露"忘掉"清 ~/.tshoot 记录 -->
         <button
-          class="btn btn-regen"
-          :disabled="doctor?.loading"
-          :title="'按本地仓库路径深扫,对比 yaml 声明 vs 代码实态,挑漂移给修复建议'"
-          @click="emit('runDoctor')"
-        >
-          {{ doctor?.loading ? '诊断中…' : '🩺 诊断' }}
-        </button>
-        <button
-          class="btn btn-regen"
-          :title="'打开机器人工作目录,树形浏览 + 改 SKILL.md / 脚本做调试(不动 troubleshooter.yaml)'"
-          @click="emit('openBrowser')"
-        >
-          📂 浏览工作目录
-        </button>
-        <!-- ⋯ 更多:低频/管理类操作折进下拉,省卡片版面 + 降视觉噪声 -->
-        <div class="bot-more-wrap">
-          <button class="btn btn-regen btn-more" :title="'更多操作'" @click.stop="emit('toggleMenu')">⋯</button>
-          <div v-if="menuOpen" class="bot-menu" role="menu">
-            <button
-              class="menu-item"
-              :disabled="regenLoading"
-              :title="bot.meta.system_yaml ? '用 tshoot.json 嵌入的 yaml 重渲产物,直接刷到活 workspace(模板派生文件按模板覆盖,config-map 人工 verified 行保留)' : 'tshoot.json 里没保存 system_yaml,无法重新生成'"
-              @click="emit('closeMenu'); emit('regen')"
-            >
-              {{ regenLoading ? '刷新中…' : '♻ 重新生成并刷新' }}
-            </button>
-            <button class="menu-item" @click="emit('closeMenu'); emit('toggleEditor')">
-              {{ editing ? '收起编辑器' : '✎ 编辑配置' }}
-            </button>
-            <button class="menu-item" @click="emit('closeMenu'); emit('doExport')">
-              {{ editing ? '⇩ 导出草稿' : '⇩ 导出 yaml' }}
-            </button>
-            <div class="menu-sep"></div>
-            <button
-              class="menu-item menu-item-danger"
-              :disabled="uninstallLoading"
-              :title="'卸载已部署的机器人:claude-code/cursor/codex 把 ~/.<target>/{agents,skills,scripts}/<name> 移到 ~/.Trash;openclaw 摘 agents.list + 清 creds.json'"
-              @click="emit('closeMenu'); emit('uninstall')"
-            >
-              {{ uninstallLoading ? '卸载中…' : '🗑 卸载机器人' }}
-            </button>
+          v-if="bot.ghost"
+          class="btn btn-regen menu-item-danger"
+          :title="'清掉 ~/.tshoot/config.json 里的部署记录(disk 上已经没东西可删了)。要恢复机器人请重新部署。'"
+          @click="emit('forgetGhost')"
+        >🗑 忘掉它</button>
+        <template v-else>
+          <button
+            class="btn btn-regen"
+            :disabled="doctor?.loading"
+            :title="'按本地仓库路径深扫,对比 yaml 声明 vs 代码实态,挑漂移给修复建议'"
+            @click="emit('runDoctor')"
+          >
+            {{ doctor?.loading ? '诊断中…' : '🩺 诊断' }}
+          </button>
+          <button
+            class="btn btn-regen"
+            :title="'打开机器人工作目录,树形浏览 + 改 SKILL.md / 脚本做调试(不动 troubleshooter.yaml)'"
+            @click="emit('openBrowser')"
+          >
+            📂 浏览工作目录
+          </button>
+          <!-- ⋯ 更多:低频/管理类操作折进下拉,省卡片版面 + 降视觉噪声 -->
+          <div class="bot-more-wrap">
+            <button class="btn btn-regen btn-more" :title="'更多操作'" @click.stop="emit('toggleMenu')">⋯</button>
+            <div v-if="menuOpen" class="bot-menu" role="menu">
+              <button
+                class="menu-item"
+                :disabled="regenLoading"
+                :title="bot.meta.system_yaml ? '用 tshoot.json 嵌入的 yaml 重渲产物,直接刷到活 workspace(模板派生文件按模板覆盖,config-map 人工 verified 行保留)' : 'tshoot.json 里没保存 system_yaml,无法重新生成'"
+                @click="emit('closeMenu'); emit('regen')"
+              >
+                {{ regenLoading ? '刷新中…' : '♻ 重新生成并刷新' }}
+              </button>
+              <button class="menu-item" @click="emit('closeMenu'); emit('toggleEditor')">
+                {{ editing ? '收起编辑器' : '✎ 编辑配置' }}
+              </button>
+              <button class="menu-item" @click="emit('closeMenu'); emit('doExport')">
+                {{ editing ? '⇩ 导出草稿' : '⇩ 导出 yaml' }}
+              </button>
+              <div class="menu-sep"></div>
+              <button
+                class="menu-item menu-item-danger"
+                :disabled="uninstallLoading"
+                :title="'卸载已部署的机器人:claude-code/cursor/codex 把 ~/.<target>/{agents,skills,scripts}/<name> 移到 ~/.Trash;openclaw 摘 agents.list + 清 creds.json'"
+                @click="emit('closeMenu'); emit('uninstall')"
+              >
+                {{ uninstallLoading ? '卸载中…' : '🗑 卸载机器人' }}
+              </button>
+            </div>
           </div>
-        </div>
+        </template>
       </div>
     </footer>
 
@@ -234,6 +256,16 @@ function classForSeverity(s: string): string {
   transition: box-shadow 0.15s, border-color 0.15s;
 }
 .bot-card:hover { border-color: #94a3b8; box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06); }
+/* ghost(disk 已删) / broken(IDE 已卸载) 用整卡淡背景 + 边框颜色提醒,而不仅仅靠 status badge —
+   用户在卡片列表里一眼能看出"这张卡有问题",不用挨个读 badge。 */
+.bot-card-ghost   { background: #fef2f2; border-color: #fecaca; }
+.bot-card-broken  { background: #fffbeb; border-color: #fde68a; }
+.bot-status {
+  font-size: 11px; padding: 2px 8px; border-radius: 3px; font-weight: 600;
+  margin-left: 6px;
+}
+.bot-status-ghost  { background: #fee2e2; color: #991b1b; }
+.bot-status-broken { background: #fef3c7; color: #92400e; }
 
 .bot-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .bot-target {

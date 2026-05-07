@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"time"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/agent"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
@@ -71,7 +72,7 @@ func (a *App) ImportAndDeploy(yamlText, target, destPath string, repoPaths map[s
 	if cfg, perr := config.LoadFromBytes([]byte(yamlText)); perr == nil && cfg.System.ID != "" && len(expanded) > 0 {
 		_ = userconfig.SetRepoPathsForSystem(cfg.System.ID, expanded)
 	}
-	return agent.ImportAndApply([]byte(yamlText), target, destPath, agent.ApplyOptions{
+	res, err := agent.ImportAndApply([]byte(yamlText), target, destPath, agent.ApplyOptions{
 		TemplateRoot:   a.templateRoot,
 		TshootVersion:  version,
 		RepoLocalPaths: expanded,
@@ -84,6 +85,22 @@ func (a *App) ImportAndDeploy(yamlText, target, destPath string, repoPaths map[s
 				fmt.Sprintf("[target=%s] %s", target, line))
 		},
 	})
+	if err != nil {
+		return res, err
+	}
+	// 记一笔"曾部署":~/.<target>/skills/<name>/ 被外部 rm 后,discover.Scan 找不到锚点,
+	// BotsPage 卡片消失;有这条记录就能"幽灵显示"+ 提供"重新部署"入口,见
+	// userconfig.DeployedBotEntry 注释。失败不阻塞主流程,部署本身已成功。
+	if cfg, perr := config.LoadFromBytes([]byte(yamlText)); perr == nil && cfg.System.ID != "" {
+		_ = userconfig.UpsertDeployedBot(userconfig.DeployedBotEntry{
+			SystemID:       cfg.System.ID,
+			SystemName:     cfg.System.Name,
+			Target:         target,
+			Path:           res.AgentPath,
+			LastDeployedAt: time.Now().Unix(),
+		})
+	}
+	return res, nil
 }
 
 // DefaultDestPath 给不同 target 推荐默认部署路径,UI 据此决定要不要让用户手填。

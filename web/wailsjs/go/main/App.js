@@ -82,6 +82,10 @@ export function FetchConfigContentBatch(arg1) {
   return window['go']['main']['App']['FetchConfigContentBatch'](arg1);
 }
 
+export function ForgetGhostBot(arg1, arg2) {
+  return window['go']['main']['App']['ForgetGhostBot'](arg1, arg2);
+}
+
 export function Gen(arg1, arg2) {
   return window['go']['main']['App']['Gen'](arg1, arg2);
 }

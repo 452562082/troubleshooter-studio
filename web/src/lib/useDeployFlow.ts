@@ -19,10 +19,11 @@ import { computed, ref, type ComputedRef, type Ref } from 'vue'
 import type { Router } from 'vue-router'
 import { EventsOn } from '../../wailsjs/runtime/runtime'
 import {
-  defaultDestPath, importAndDeploy, runInstall, selfTestAgent,
+  defaultDestPath, detectAITools, importAndDeploy, runInstall, selfTestAgent,
   validate as bridgeValidate, isDesktop,
 } from './bridge'
 import { Target, IDE_TARGETS, type TargetId } from './constants'
+import { confirmDialog } from './confirm'
 import { pushLog } from './logStore'
 import { toast } from './toast'
 import type { CredField } from './credFields'
@@ -243,6 +244,40 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
       deployError.value = `yaml 校验失败:${String(e?.message || e)};请先点"✓ 验证"修复`
       return
     }
+
+    // 部署前 re-detect IDE —— Step 2 勾选时 detect 过一次,但用户可能在向导
+    // 跑完 / 离开 wizard 这段时间卸载 IDE。装下去会成孤儿(IDE 看不到 agent),
+    // 应主动拦一下让用户决定要不要继续。openclaw 例外,它跟产品自带,不靠探测。
+    try {
+      const cur = await detectAITools()
+      const ideStatus: Record<string, boolean> = {
+        'claude-code': !!cur.claude_code?.installed,
+        'cursor':      !!cur.cursor?.installed,
+        'codex':       !!cur.codex?.installed,
+      }
+      const missing = enabled.filter(t => t !== 'openclaw' && !ideStatus[t])
+      if (missing.length > 0) {
+        const labels = missing.map(t => deps.targetLabels[t] || t).join(' / ')
+        const ok = await confirmDialog({
+          title: `${labels} 已不在本机,继续部署?`,
+          message: `选目标时检测到 ${labels} 已安装,现在重新探测发现已不在(可能你刚才卸载了 IDE)。
+继续部署会把 agent 文件装到 ~/.${missing[0]}/agents/<name>.md,但 IDE 没装就调不到 ——
+机器人会出现在「已装机器人」页面但标 "⚠ IDE 已卸载,机器人不可用"。
+要么取消去重装 IDE,要么继续装(等装回 IDE 自动恢复)。`,
+          confirmText: '继续装',
+          cancelText: '取消',
+          defaultAction: 'cancel',
+        })
+        if (!ok) {
+          deployError.value = `已取消:${labels} 缺失`
+          return
+        }
+      }
+    } catch {
+      // 探测失败(浏览器模式 / detect 接口异常)→ 不阻塞部署,后端会按默认路径装,
+      // BotsPage 那边的 ide_available 会标 broken,跟 wizard 探测失败的兜底语义一致。
+    }
+
     deployLoading.value = true
     deployProgressLine.value = '正在准备部署…'
     // 订阅本次部署期间的 install:log。EventsOn 返回 unlisten,finally 里调一次防泄漏。

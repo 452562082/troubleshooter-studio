@@ -57,4 +57,17 @@ type DiscoveredAgent struct {
 	RepoCount  int      `json:"repo_count"`
 	SkillCount int      `json:"skill_count"`
 	Targets    []string `json:"targets,omitempty"` // troubleshooter.yaml 里声明的全部 targets（可能这个机器人只是其中之一）
+
+	// IDEAvailable 标"对应 IDE 二进制本机仍可探测到"。zero value=false,
+	// 由调用方(bindings_repo.go DiscoverBots)在 Scan 后 enrichment 填。Scan 自身
+	// 不依赖 aitools 包,这字段对纯 discover 调用方(CLI tshoot discover)是 false +
+	// 无意义(不影响展示),BotsPage 用它标 "⚠ IDE 已卸载,机器人不可用"。
+	// openclaw target 始终视为 available(openclaw 是产品自带,不靠探测三方 IDE)。
+	IDEAvailable bool `json:"ide_available"`
+
+	// Ghost 标"~/.tshoot/config.json deployed_bots 里有但 disk 上 tshoot.json 不在"。
+	// 用户外部 rm -rf ~/.<target>/skills/<name>/ 清掉机器人后,UI 仍能从这条记录
+	// "幽灵显示"卡片,提供"重新部署"或"忘掉它"入口。Ghost=true 时 Meta.SystemYAML
+	// 通常为空(yaml 在 disk 上没了),操作按钮要相应 disable。
+	Ghost bool `json:"ghost"`
 }

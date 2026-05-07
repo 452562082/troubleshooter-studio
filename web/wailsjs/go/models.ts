@@ -664,6 +664,8 @@ export namespace discover {
 	    repo_count: number;
 	    skill_count: number;
 	    targets?: string[];
+	    ide_available: boolean;
+	    ghost: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new DiscoveredAgent(source);
@@ -678,6 +680,8 @@ export namespace discover {
 	        this.repo_count = source["repo_count"];
 	        this.skill_count = source["skill_count"];
 	        this.targets = source["targets"];
+	        this.ide_available = source["ide_available"];
+	        this.ghost = source["ghost"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

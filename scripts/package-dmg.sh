@@ -23,6 +23,9 @@ if [[ ! -d "$APP_BUNDLE" ]]; then
   exit 1
 fi
 
+# 推 .app 在挂载窗口里的文件名(AppleScript 用)。基本就是 APP_BUNDLE 的 basename。
+APP_NAME_IN_DMG=$(basename "$APP_BUNDLE")
+
 # 临时 staging:.app + Applications 软链(让用户在 dmg 窗口里直接拖到右边的快捷方式)
 staging=$(mktemp -d)
 tmp_rw=$(mktemp -t tshoot-dmg-rw).dmg
@@ -40,6 +43,15 @@ trap cleanup EXIT
 cp -R "$APP_BUNDLE" "$staging/"
 ln -s /Applications "$staging/Applications"
 
+# 防卡:之前失败 build 可能留下 /Volumes/<VOLUME_NAME> 的 stale 挂载(典型 readonly,
+# 因为是 dmg attach 失败的残骸)。新挂同名卷时,macOS 优先选第一份 → 后续 AppleScript
+# tell disk "<VOLUME_NAME>" 拿到的是 stale readonly 卷,导致布局写错地方 + .VolumeIcon
+# 之类的文件丢。开 build 前一律 force-detach 所有同名挂载(含 macOS 自动加的 " 1" / " 2"
+# 后缀变体)。
+mount | sed -nE "s|^[^ ]+ on (/Volumes/$VOLUME_NAME( [0-9]+)?) .*|\\1|p" | while IFS= read -r vol_path; do
+  hdiutil detach "$vol_path" -force -quiet 2>/dev/null || true
+done
+
 # 老 dmg 删了再生成(hdiutil create 不会覆盖)
 rm -f "$DMG_OUT"
 mkdir -p "$(dirname "$DMG_OUT")"
@@ -48,6 +60,12 @@ icns_src="$APP_BUNDLE/Contents/Resources/icon.icns"
 have_icon=0
 if [[ -f "$icns_src" ]] && command -v SetFile >/dev/null 2>&1; then
   have_icon=1
+  # **不**在这里把 .VolumeIcon.icns 放 staging —— AppleScript 配窗口时 Finder 会重新
+  # enumerate 卷把 dotfile 当垃圾清掉(实测!.VolumeIcon.icns 永远在 update without
+  # registering applications 之后消失)。改成两次 attach 流程:
+  #   1) RW attach → AppleScript 配 .DS_Store 窗口布局 → detach
+  #   2) 重新 RW attach → cp .VolumeIcon.icns + SetFile -a C → detach
+  # 第二次 attach 不开 Finder,纯 fs 操作,Finder 不来"清理"。
 fi
 
 if [[ $have_icon -eq 1 ]]; then
@@ -66,10 +84,56 @@ if [[ $have_icon -eq 1 ]]; then
     exit 1
   fi
 
+  # 第一次 attach 的活只有一件:用 AppleScript 写 .DS_Store 配窗口布局。
+  # **不要**在这次 attach 期间放 .VolumeIcon.icns —— Finder enumerate 会清掉它。
+  #
+  # 用 AppleScript 跟 Finder 通信配置挂载窗口的视觉布局:
+  #   - 窗口 600×400 居中
+  #   - icon view + icon size 128
+  #   - 隐藏 toolbar / statusbar(让窗口干净像安装界面,不像普通文件浏览)
+  #   - .app 摆左边(150,170)、Applications 摆右边(450,170),中间留拖拽距离
+  # Finder 把这套配置写到 /Volumes/<vol>/.DS_Store,convert 时被打进 dmg。
+  # 后续用户每次挂载 dmg,Finder 都用 .DS_Store 里的布局开窗口 — 标准市面安装体验。
+  #
+  # 失败容错:AppleScript 在某些 sandbox / 自动化禁用环境下会拒,失败不阻塞 build,
+  # 用户拿到的 dmg 仍可用(只是布局退化到 Finder 默认网格)。
+  osascript >/dev/null 2>&1 <<APPLESCRIPT || echo "  [warn] AppleScript 配置 Finder 窗口失败,dmg 布局退化到默认(应用仍可装,只是窗口不漂亮)" >&2
+tell application "Finder"
+  tell disk "$VOLUME_NAME"
+    open
+    set current view of container window to icon view
+    set toolbar visible of container window to false
+    set statusbar visible of container window to false
+    set the bounds of container window to {200, 200, 800, 600}
+    set viewOptions to the icon view options of container window
+    set arrangement of viewOptions to not arranged
+    set icon size of viewOptions to 128
+    set position of item "$APP_NAME_IN_DMG" of container window to {150, 170}
+    set position of item "Applications" of container window to {450, 170}
+    update without registering applications
+    delay 1
+    close
+  end tell
+end tell
+APPLESCRIPT
+
+  # 给 Finder 写 .DS_Store 留点 buffer(它是异步)
+  sync
+  sleep 1
+
+  # detach 第一次 attach,Finder 失去对这个卷的"所有权"
+  hdiutil detach "$attach_dev" -quiet
+  attach_dev=""
+
+  # 第二次 attach:这次纯 fs 操作放 .VolumeIcon.icns + SetFile,不开 Finder
+  attach_dev=$(hdiutil attach -readwrite -noverify -nobrowse "$tmp_rw" | awk '/^\/dev\// {print $1; exit}')
+  if [[ -z "$attach_dev" ]]; then
+    echo "✗ 第二次挂载 RW dmg(放 volume icon 用)失败" >&2
+    exit 1
+  fi
   cp "$icns_src" "/Volumes/$VOLUME_NAME/.VolumeIcon.icns"
   SetFile -a C "/Volumes/$VOLUME_NAME"
-
-  # 显式 detach,然后清空 attach_dev 避免 trap 再 detach 一次
+  sync
   hdiutil detach "$attach_dev" -quiet
   attach_dev=""
 

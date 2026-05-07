@@ -122,7 +122,7 @@ const emit = defineEmits<{
       <button
         class="btn-icon remove has-hint"
         :disabled="!canRemove"
-        :data-hint="!canRemove ? '禁删:本仓是 umbrella,先删掉所有引用本仓的子模块行(parent_repo=本仓 name)再来' : '删掉本仓'"
+        :data-hint="!canRemove ? '先删所有子模块再删 umbrella' : '删掉本仓'"
         @click="emit('remove', index)"
       >&times;</button>
     </div>

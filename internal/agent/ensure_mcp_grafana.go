@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // MCPGrafanaPinnedVersion 锁的版本。upstream 升级 schema/CLI 时要在这里手动 bump 后重测。
@@ -65,6 +66,11 @@ func EnsureMCPGrafanaBinary(root string) (string, error) {
 		return "", fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
 	}
 
+	// 下载前 emit 一行可见提示(stderr):desktop app 用户至少能从启动终端看到"在拉",
+	// CLI install 也能看到。失败也走 stderr 走 npx 兜底,不阻塞。
+	fmt.Fprintf(os.Stderr,
+		"[install] 下载 mcp-grafana %s 二进制(~30 MiB,首次部署可能耗时 1-3 分钟):%s\n",
+		MCPGrafanaPinnedVersion, url)
 	if err := downloadAndExtractMCPGrafana(url, dst); err != nil {
 		return "", fmt.Errorf("download mcp-grafana from %s: %w", url, err)
 	}
@@ -110,12 +116,25 @@ func mcpGrafanaPlatformAsset() (platform, arch string, err error) {
 // 把磁盘写满)。当前 v0.13.1 的 mcp-grafana 二进制 ~30 MiB,留 5 倍裕度到 200 MiB。
 const mcpGrafanaMaxBinarySize = 200 << 20
 
+// mcpGrafanaDownloadTimeout 整次下载(connect + TLS + body 读完)的硬上限。
+// 30 MiB tarball 在 100 KiB/s 慢网下约 5 min;打不完直接 timeout 走 npx 兜底,
+// 比无超时无声死锁好得多(原 bug:首次部署 + GitHub 出站不通 → install 永远挂)。
+const mcpGrafanaDownloadTimeout = 5 * time.Minute
+
+// mcpGrafanaHTTPClient 用 var(不是 const)是为了让测试能替换成走 fakeServer 的 client。
+var mcpGrafanaHTTPClient = &http.Client{Timeout: mcpGrafanaDownloadTimeout}
+
 // downloadAndExtractMCPGrafana 拉 tarball + 解压找出 "mcp-grafana" 二进制写到 dst。
 // 不写到磁盘 tmp 文件:tarball 才十几 MB,直接 stream 处理省一次磁盘往返。
+//
+// 用带 Timeout 的 client(不是 http.Get 的零超时默认),失败明确返错让 caller
+// 走 npx fallback。原版 net/http 默认 client Timeout=0(无限等)在 GitHub 出站
+// 不通的网络环境下会让 install 永远挂死,UI 看到"部署中"转圈不停。
 func downloadAndExtractMCPGrafana(url, dst string) error {
-	resp, err := http.Get(url) //nolint:gosec // URL 在调用方已经按 hardcoded version + arch 拼好,无注入风险
+	resp, err := mcpGrafanaHTTPClient.Get(url) //nolint:gosec // URL 在调用方已经按 hardcoded version + arch 拼好,无注入风险
 	if err != nil {
-		return err
+		// 把网络超时跟 release 不存在区分开,让用户读 stderr 知道是网卡而非配置错。
+		return fmt.Errorf("拉 mcp-grafana 失败(可能 GitHub 出站不通,可走代理或手装):%w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

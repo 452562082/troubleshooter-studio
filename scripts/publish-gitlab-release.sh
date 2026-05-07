@@ -35,13 +35,18 @@ PROJECT_PATH="${PROJECT_PATH:-xiaolong/troubleshooter-studio}"
 RELEASE_NOTES="${RELEASE_NOTES:-$(cat <<NOTES
 $VERSION 自动发布(make release-publish)。
 
+## ⚠️ macOS 显示"已损坏"怎么办
+
+**这不是真损坏**,是因为本应用未做苹果数字签名(没花 \$99/年办 Apple Developer Account),macOS 14+ 把"未签名 + 来自互联网"统一报"已损坏"。**dmg 里自带"一键解锁.command",双击即可放行**(详见下方"安装"步骤)。
+
 ## 下载与安装
 
 **macOS 桌面 app**:
-- 下载 \`TroubleshooterStudio-$VERSION.dmg.zip\`
-- 双击解压(macOS Archive Utility 会自动恢复 dmg 文件图标)
-- 双击解出来的 .dmg → Finder 弹安装窗口 → 拖 .app 到 Applications
-- 首次启动 Gatekeeper 拦截:右键 .app → 打开 → 确认放行;或一行命令解锁:\`xattr -d com.apple.quarantine /Applications/TroubleshooterStudio.app\`
+1. 下载 \`TroubleshooterStudio-$VERSION.dmg.zip\`
+2. **双击解压**(必须用 macOS 自带 Archive Utility,第三方解压可能丢图标)
+3. 双击解出来的 \`.dmg\` → Finder 弹安装窗口
+4. 拖 \`.app\` 到右边 \`Applications\`
+5. 第一次打开如果报"已损坏":**双击 dmg 里的 "一键解锁.command"** → Terminal 自动跑 \`xattr\` 解锁 → 然后 Launchpad / Spotlight 打开 .app
 
 **CLI(macOS / Linux / Windows)**:
 - 按平台选 \`tshoot-$VERSION-<os>-<arch>\` 下载

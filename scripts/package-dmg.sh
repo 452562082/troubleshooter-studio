@@ -43,6 +43,81 @@ trap cleanup EXIT
 cp -R "$APP_BUNDLE" "$staging/"
 ln -s /Applications "$staging/Applications"
 
+# 用户体验:dmg 没花 $99/年苹果开发者账号签 + 公证,Gatekeeper 把"未签名 + 来自互联网"
+# 统一报"已损坏",把用户吓退。dmg 里塞两个文件帮用户自救:
+#
+#  1. 首次打开必读.txt —— 用户挂载 dmg 就看到,文字提示
+#  2. 一键解锁.command —— 双击在 Terminal 跑 xattr -dr com.apple.quarantine,
+#     无需用户敲命令;dmg 卷内文件不带 quarantine(只有从 dmg 复制出去才会被打),
+#     所以这个 .command 在 dmg 卷里直接双击能跑,Terminal 不会被 Gatekeeper 拦
+cat >"$staging/首次打开必读.txt" <<'TXT'
+══════════════════════════════════════════════════════════════
+  TroubleshooterStudio 首次打开必读
+══════════════════════════════════════════════════════════════
+
+【安装】拖左边的图标到右边的 Applications 文件夹
+
+【首次启动】macOS 可能弹"已损坏,扔到废纸篓"
+
+   这不是真损坏!是因为本应用未做苹果数字签名(没花 $99/年办
+   Apple Developer Account),macOS 14+ 把"未签名 + 来自互联网"
+   统一报"已损坏",代码本身没问题。
+
+   解决方案三选一:
+
+   ✓ 最省心:双击本 dmg 里的"一键解锁.command",自动放行
+   ✓ 也行:右键 .app → 打开 → 弹窗确认放行
+   ✓ 终端命令:
+     xattr -dr com.apple.quarantine /Applications/TroubleshooterStudio.app
+
+【官方文档 / 反馈】
+   https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio
+TXT
+
+# 一键解锁脚本(双击在 Terminal 弹窗跑)
+cat >"$staging/一键解锁.command" <<'CMD'
+#!/bin/bash
+# 给 /Applications/TroubleshooterStudio.app 解锁 macOS Gatekeeper quarantine。
+# 双击此文件在 Terminal 自动跑;dmg 卷内的 .command 不带 quarantine,无需放行。
+set -u
+APP_PATH="/Applications/TroubleshooterStudio.app"
+
+cat <<EOF
+═══════════════════════════════════════════════════════════════
+  TroubleshooterStudio - macOS Gatekeeper 一键解锁
+═══════════════════════════════════════════════════════════════
+
+EOF
+
+if [[ ! -d "$APP_PATH" ]]; then
+    echo "✗ 找不到 $APP_PATH"
+    echo ""
+    echo "  请先把 .app 拖到 Applications 文件夹,然后双击本文件再来。"
+    echo ""
+    echo "  按回车键关闭..."
+    read -r _
+    exit 1
+fi
+
+echo "▶ 给 $APP_PATH 解锁 quarantine xattr ..."
+if xattr -dr com.apple.quarantine "$APP_PATH" 2>&1; then
+    echo ""
+    echo "✓ 解锁完成!"
+    echo ""
+    echo "  现在可以从 Launchpad / Spotlight 搜 TroubleshooterStudio 启动。"
+    echo "  这个解锁一次永久生效,以后双击 .app 直接开。"
+else
+    echo ""
+    echo "✗ 解锁失败。可能权限不够,试试加 sudo:"
+    echo "    sudo xattr -dr com.apple.quarantine $APP_PATH"
+fi
+
+echo ""
+echo "  按回车键关闭..."
+read -r _
+CMD
+chmod +x "$staging/一键解锁.command"
+
 # 防卡:之前失败 build 可能留下 /Volumes/<VOLUME_NAME> 的 stale 挂载(典型 readonly,
 # 因为是 dmg attach 失败的残骸)。新挂同名卷时,macOS 优先选第一份 → 后续 AppleScript
 # tell disk "<VOLUME_NAME>" 拿到的是 stale readonly 卷,导致布局写错地方 + .VolumeIcon
@@ -97,6 +172,7 @@ if [[ $have_icon -eq 1 ]]; then
   #
   # 失败容错:AppleScript 在某些 sandbox / 自动化禁用环境下会拒,失败不阻塞 build,
   # 用户拿到的 dmg 仍可用(只是布局退化到 Finder 默认网格)。
+  # 窗口 700×460 放 4 个 item:上排 .app + Applications,下排 README + 一键解锁
   osascript >/dev/null 2>&1 <<APPLESCRIPT || echo "  [warn] AppleScript 配置 Finder 窗口失败,dmg 布局退化到默认(应用仍可装,只是窗口不漂亮)" >&2
 tell application "Finder"
   tell disk "$VOLUME_NAME"
@@ -104,12 +180,14 @@ tell application "Finder"
     set current view of container window to icon view
     set toolbar visible of container window to false
     set statusbar visible of container window to false
-    set the bounds of container window to {200, 200, 800, 600}
+    set the bounds of container window to {200, 200, 900, 660}
     set viewOptions to the icon view options of container window
     set arrangement of viewOptions to not arranged
-    set icon size of viewOptions to 128
-    set position of item "$APP_NAME_IN_DMG" of container window to {150, 170}
-    set position of item "Applications" of container window to {450, 170}
+    set icon size of viewOptions to 96
+    set position of item "$APP_NAME_IN_DMG" of container window to {180, 160}
+    set position of item "Applications" of container window to {520, 160}
+    set position of item "首次打开必读.txt" of container window to {180, 340}
+    set position of item "一键解锁.command" of container window to {520, 340}
     update without registering applications
     delay 1
     close

@@ -154,11 +154,42 @@ for f in "${ASSETS[@]}"; do
   case "$http_code" in
     200|201) echo "✓" ;;
     409)
-      echo "✗ 同名 package 已存在(409)" >&2
-      echo "   去 GitLab → 项目 Settings → Packages and registries → Generic packages" >&2
-      echo "   把 'Allow duplicates' 打开,然后重跑;或手动到 Packages 页删掉旧版本" >&2
-      echo "   $GITLAB_HOST/$PROJECT_PATH/-/packages" >&2
-      exit 1
+      # 撞同名 package file。GitLab 默认 generic_packages.duplicates_allowed=false,
+      # 同 (package_name, version, file_name) 不允许重传。release 重发场景必撞,
+      # 自动找到旧 file 删了再 PUT,免去用户手动到 Settings 开 Allow duplicates。
+      echo -n "(同名已存在,删旧 file 重传) "
+      pkg_id=$(curl -sS -L \
+          -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+          --data-urlencode "package_name=$PKG_NAME" \
+          --data-urlencode "package_version=$PKG_VER" \
+          -G "$API/packages" \
+          | jq -r '.[0].id // empty')
+      if [[ -z "$pkg_id" ]]; then
+        echo "✗ 找不到旧 package id 自动删除失败" >&2
+        exit 1
+      fi
+      file_id=$(curl -sS -L \
+          -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+          "$API/packages/$pkg_id/package_files" \
+          | jq -r --arg n "$fname" '.[] | select(.file_name==$n) | .id' \
+          | head -1)
+      if [[ -n "$file_id" ]]; then
+        curl -sS -L -X DELETE \
+            -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+            "$API/packages/$pkg_id/package_files/$file_id" >/dev/null
+      fi
+      # 重 PUT
+      http_code=$(curl -sS -L -X PUT \
+          -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+          --upload-file "$f" \
+          -o /dev/null -w '%{http_code}' \
+          "$upload_url")
+      if [[ "$http_code" == "200" || "$http_code" == "201" ]]; then
+        echo "✓"
+      else
+        echo "✗ 删旧 file 后重传仍失败 HTTP $http_code" >&2
+        exit 1
+      fi
       ;;
     *)
       echo "✗ 上传失败 HTTP $http_code" >&2

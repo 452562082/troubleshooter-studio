@@ -515,7 +515,11 @@ function deriveRepoName(url: string): string {
 // 分支等扫描结果清掉 —— 用户删了本地 clone 重新输入 URL、或者换了另一个仓库 URL,
 // 下方老数据留着会误导。清 + 把 _scanned 翻成 false,按钮文案会变回"同步到本地并扫描"。
 function onRepoUrlInput(r: RepoItem) {
-  if (!r._nameManual) r.name = deriveRepoName(r.url)
+  if (!r._nameManual) {
+    r.name = deriveRepoName(r.url)
+    // 自动派生的名字也要同步快照,后续用户手改 name 时 cascade 才有正确 oldName
+    snapshotRepoName(r)
+  }
   if (r._scanned && r.url !== r._scannedSource) {
     resetRepoScanResults(r)
   }
@@ -574,13 +578,39 @@ function pickBranchForEnv(env: EnvItem, branches: string[]): string {
   return ''
 }
 
+// 仓库名 → 上一次确认的快照,用来检测改名时级联更新所有引用本仓的 parent_repo。
+// WeakMap 跟 RepoItem 对象绑定,行被 splice 删了自动 GC,不需要手动清理。
+const previousRepoNames = new WeakMap<RepoItem, string>()
+function snapshotRepoName(r: RepoItem) {
+  previousRepoNames.set(r, (r.name || '').trim())
+}
+
 // 用户在 name 输入框里动手就算"手改过",记录下来避免被 URL 再覆盖。
 // 但如果用户把 name 清空,视作"回到自动推",清除标记。
 function onRepoNameInput(r: RepoItem) {
+  // 检测重命名 → 级联同步所有 child 的 parent_repo 引用
+  // (umbrella 子模块的 name 是 readonly,这条只在普通仓库 / umbrella 父行触发)
+  const newName = (r.name || '').trim()
+  const oldName = previousRepoNames.get(r) || ''
+  if (oldName && newName && oldName !== newName) {
+    let cascadeCount = 0
+    for (const child of repos) {
+      if ((child.parent_repo || '').trim() === oldName) {
+        child.parent_repo = newName
+        cascadeCount++
+      }
+    }
+    if (cascadeCount > 0) {
+      toast.info(`${oldName} → ${newName}:已同步更新 ${cascadeCount} 个子模块的 parent_repo 引用`)
+    }
+  }
+  previousRepoNames.set(r, newName)
+
   if (!r.name.trim()) {
     r._nameManual = false
     // 立即用当前 URL 重填
     r.name = deriveRepoName(r.url)
+    previousRepoNames.set(r, (r.name || '').trim())
     return
   }
   r._nameManual = true
@@ -626,7 +656,9 @@ function onRepoSubPathInput(r: RepoItem) {
 // 下方 repoBranchesMap 声明之后(splitMonorepo 异步落 repoBranchesMap[name],
 // 必须先有 ref;TDZ 防御)。
 function addRepo() {
-  repos.push(makeEmptyRepo())
+  const r = makeEmptyRepo()
+  repos.push(r)
+  snapshotRepoName(r) // 新行 name 现在是 '',先种快照,用户填名后 cascade 才能算 oldName
 }
 
 // (旧 addSubmodule 按钮已下线 —— 自动检测 monorepo + 一键拆分能覆盖所有真实场景。
@@ -714,7 +746,7 @@ const {
   isGitSubmodulesHints,
   qualifyServiceName,
   mergeMonorepoIntoServices,
-  splitMonorepo,
+  splitMonorepo: splitMonorepoRaw,
 } = useMonorepoHints({
   repos, environments, repoBranchesMap,
   resolveCloneDest: (r) => resolveCloneDest(r as RepoItem),
@@ -724,6 +756,13 @@ const {
   isServiceRole,
   makeEmptyRepo,
 })
+// 包一层:splitMonorepo 跑完会把 umbrella + N 个新 child 落进 repos[],
+// 立刻给所有 repos 行(包括 umbrella 和 children)种 name 快照,
+// 后续用户改 umbrella 名字时 cascade 才能跑得起来。
+function splitMonorepo(idx: number) {
+  splitMonorepoRaw(idx)
+  for (const r of repos) snapshotRepoName(r)
+}
 
 // pickLocalRepoDir / resolveLocalRepoPath 已搬到 lib/useRepoScan.ts
 
@@ -2430,6 +2469,12 @@ watch(currentStep, (s) => {
   nextTick(() => runYAMLGen(s))
 })
 onMounted(() => runYAMLGen(currentStep.value))
+
+// 启动时给所有已存在的 repos 行打 name 快照,后续 onRepoNameInput 改名时
+// 才能算出 oldName → 级联更新 child.parent_repo
+onMounted(() => {
+  for (const r of repos) snapshotRepoName(r)
+})
 
 // ── Skills whitelist derivation ──
 // 数据层 enabledDataStores 的 key 跟 skill 目录名不是 1:1 对应:特例 elasticsearch → es-runtime-query。

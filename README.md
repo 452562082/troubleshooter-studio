@@ -11,13 +11,12 @@
 - **上层(此仓库)**:研制环境,做 `troubleshooter.yaml` 建模、仓库扫描、校验、生成、部署、管理
 - **下层(产出物)**:完整可运行的排障机器人 —— skill 集合按 yaml 动态裁剪,固定核心 + 按配置 / 数据层 / 可观测性勾选的 runtime-query + 多环境 MCP + 标准故障话术,脱离 studio 独立运行
 
-## 三个入口
+## 两个入口
 
 | 入口 | 能力 | 适用 |
 |---|---|---|
 | **桌面 app** (Wails) | 完整(建模 / 扫描 / 部署 / 已装管理 / 工作目录浏览) | 个人用,推荐新用户 |
 | **CLI** (`tshoot`) | 完整 yaml 计算 + 装机能力(4 平台齐全) | 脚本 / SSH / CI |
-| **HTTP API** (`tshoot serve`) | 仅 yaml 计算子集(validate / plan / gen / doctor / prefill-creds / schema)| CI 集成 / 浏览器模式 / 接到自家平台。**不含装机** —— 改活 workspace 必须在该机器本地 |
 
 ## 部署到 4 个 AI 平台
 
@@ -80,17 +79,7 @@ make                                                       # 等价 go build -o 
 ./bin/tshoot install --path ./out --target openclaw        # 装到本机
 ```
 
-模板和示例已 `go:embed` 进二进制,二进制拷到任何位置都能跑。`tshoot --help` 列全部 17 个子命令。
-
-**HTTP API**(CI 集成 / 浏览器模式):
-
-```bash
-./bin/tshoot serve --port 8080
-# Web UI:  http://localhost:8080
-# API 端点: /api/{validate,plan,gen,doctor,prefill-creds,schema}
-```
-
-`/api/gen` 走临时目录 + Summary 即返回(不在 server 端持久化产物);需要拿 staging 文件请走 CLI 或桌面 app。
+模板和示例已 `go:embed` 进二进制,二进制拷到任何位置都能跑。`tshoot --help` 列全部子命令。
 
 ## 适配的系统架构
 
@@ -156,7 +145,6 @@ repos:
 | `apply` | 用新 yaml 原地更新已装机器人(模板派生文件按模板覆盖,config-map verified 人工行保留) |
 | `upgrade` | 备份 + 重 gen + diff 一步到位 |
 | `doctor` | 对比声明 vs 代码实态,8 类漂移(支持 `--fix` 行级精确替换) |
-| `serve` | 启 HTTP API + Web UI |
 | `demo` | 零配置试跑 |
 | `skill new` | 在模板库脚手架新 skill |
 
@@ -171,27 +159,6 @@ repos:
 ```
 
 `--format=json` 给 CI 消费;`tshoot --help` 列全部子命令。
-
-## HTTP API 端点
-
-| 端点 | 用法 |
-|---|---|
-| `POST /api/validate` | body=troubleshooter.yaml,返回是否合规 + 错误位置 + health-check 提示 |
-| `POST /api/plan` | body=troubleshooter.yaml,返回干跑 gen 摘要(临时目录,自动清) |
-| `POST /api/gen` | body=troubleshooter.yaml,真跑生成器返回 Summary(stats + 文件清单);**产物写在临时目录用完即删**,不在 server 端持久化 —— 需要拿 staging 走 CLI / 桌面 app |
-| `POST /api/doctor` | body=troubleshooter.yaml + `?repos_root=<path>`,返回 8 类漂移 |
-| `POST /api/prefill-creds` | body=troubleshooter.yaml,返回 install 时需要哪些 env var key |
-| `GET /api/schema` | 返回 `system.schema.yaml`(给前端做字段提示) |
-
-body size 限制 1 MB(超限 400);所有 handler 无鉴权,自部署到内网。
-
-CI 示例:
-
-```bash
-curl -fsS -X POST -H "Content-Type: text/yaml" \
-  --data-binary @troubleshooter.yaml \
-  "http://localhost:8080/api/doctor?repos_root=/path/to/code"
-```
 
 ## 排障机器人具备什么能力
 
@@ -244,9 +211,9 @@ make clean        # 清 bin/ + dist/bin/ + 前端 dist 中间产物
 ## 目录结构
 
 ```
-cmd/tshoot/             CLI 入口(17 个子命令)
+cmd/tshoot/             CLI 入口
 cmd/tshoot-desktop/     Wails v2 桌面 app(Wails binding 走 cmd/tshoot-desktop/App)
-api/                    HTTP handler(tshoot serve)
+api/                    桌面 app 内部 HTTP handler(前端走 /api/* 跟后端通信,不对外暴露)
 web/                    Vue 3 + Vite 前端
 internal/
   config/               troubleshooter.yaml schema + 加载校验

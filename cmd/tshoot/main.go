@@ -72,11 +72,6 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
-	case "serve":
-		if err := runServe(os.Args[2:]); err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			os.Exit(1)
-		}
 	case "upgrade":
 		if err := runUpgrade(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
@@ -152,9 +147,6 @@ func printWelcome() {
   tshoot discover                                # 扫本机已装机器人
   tshoot apply -i new.yaml --path <p>            # 原地更新已装机器人
 
-tshoot serve --port 8080 起 Web UI 也行(桌面 app 的 legacy HTTP 版本,
-功能等价但需要浏览器打开 http://localhost:8080)。
-
 完整命令列表:tshoot --help
 版本信息:    tshoot --version
 `, version)
@@ -173,7 +165,6 @@ func usage() {
   tshoot diff -i <troubleshooter.yaml> [--analysis <analysis.json>] [--against <dir>]
   tshoot upgrade -i <troubleshooter.yaml> [--analysis <analysis.json>] [--format=text|json]
   tshoot skill new <name> [-t <template_dir>] [--description "..."] [--with-scripts] [--with-references]
-  tshoot serve [--port 8080] [-t <template_dir>]              # 启动 Web UI
   tshoot demo [--keep]                                         # 零配置试跑（用内置 examples 走完整流程）
   tshoot validate -i <troubleshooter.yaml>
   tshoot discover [--roots <p1>,<p2>] [--format text|json]    # 扫本机已装机器人
@@ -191,7 +182,6 @@ func usage() {
   doctor     对比 troubleshooter.yaml 声明与 analyzer 实测，报告漂移
   diff       预览本次生成相对现有产物的变化（不写盘）
   upgrade    备份现有产物到 <out>.bak.<ts>，重跑 gen（保留 config-map 人工行），输出 diff
-  serve      启动 Web UI（HTTP API + 前端界面）
   skill      skill 脚手架（skill new <name> 在模板库里生成新 skill 骨架）
   demo       零配置试跑：用内置 examples/shop-troubleshooter.yaml + examples/fake-repos 跑完整 pipeline
   validate   仅校验 troubleshooter.yaml

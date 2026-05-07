@@ -148,6 +148,52 @@ desktop-dmg: desktop-app
 release-publish: desktop-dmg release
 	@VERSION=$(VERSION) bash scripts/publish-gitlab-release.sh
 
+# ── 一键打 tag + 推 + 发布:防止漏跑步骤 ──────────────────────
+# 自动检查 git 干净 + 没重 tag,失败立刻退,不会留半截状态。
+# 用法:
+#   make tag-and-release v=v0.1.1            # 显式版本号
+#   make bump-patch                          # 自动 patch+1(v0.1.0 → v0.1.1)
+#   make bump-minor                          # 自动 minor+1(v0.1.0 → v0.2.0)
+.PHONY: tag-and-release
+tag-and-release:
+ifndef v
+	$(error 用法:make tag-and-release v=v0.1.1)
+endif
+	@if ! git diff --quiet || ! git diff --cached --quiet; then \
+	  echo "✗ 工作树有未 commit 改动,先 git commit 再来" >&2; exit 1; \
+	fi
+	@if git rev-parse "$(v)" >/dev/null 2>&1; then \
+	  echo "✗ tag $(v) 已存在(本地或远程),换个版本号或先 git tag -d $(v) + 删远程 tag" >&2; exit 1; \
+	fi
+	@remote=$$(git config --get branch.$$(git symbolic-ref --short HEAD).remote); \
+	 [ -n "$$remote" ] || remote=origin; \
+	 echo "▶ remote: $$remote"; \
+	 echo "▶ tag $(v) 指向当前 HEAD"; \
+	 git tag -a "$(v)" -m "release $(v)"; \
+	 echo "▶ push commits + tag"; \
+	 git push "$$remote" || { echo "✗ push commits 失败" >&2; git tag -d "$(v)"; exit 1; }; \
+	 git push "$$remote" "$(v)" || { echo "✗ push tag 失败" >&2; git tag -d "$(v)"; exit 1; }
+	@echo "▶ 编 + 上传 release artifacts"
+	@$(MAKE) --no-print-directory release-publish VERSION=$(v)
+	@echo ""
+	@echo "✓ 完成 — release $(v) 已发布"
+
+# bump-patch / bump-minor:自动算下一个 semver,然后调 tag-and-release
+# 现 tag = vMAJOR.MINOR.PATCH;无现 tag 默认 v0.0.0 → bump 到 v0.0.1 / v0.1.0
+.PHONY: bump-patch
+bump-patch:
+	@cur=$$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo 0.0.0); \
+	 next=$$(echo "$$cur" | awk -F. '{$$NF=$$NF+1; print}' OFS=.); \
+	 echo "▶ 自动 bump:v$$cur → v$$next"; \
+	 $(MAKE) --no-print-directory tag-and-release v="v$$next"
+
+.PHONY: bump-minor
+bump-minor:
+	@cur=$$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo 0.0.0); \
+	 next=$$(echo "$$cur" | awk -F. '{print $$1"."$$2+1".0"}'); \
+	 echo "▶ 自动 bump:v$$cur → v$$next"; \
+	 $(MAKE) --no-print-directory tag-and-release v="v$$next"
+
 # ── 快速试跑:build 后立即 demo ──────────────────────────────────
 .PHONY: demo
 demo: build

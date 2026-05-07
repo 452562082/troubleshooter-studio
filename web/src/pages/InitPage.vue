@@ -633,7 +633,25 @@ function addRepo() {
 // 真有非典型布局漏检,用户可走"+ 添加仓库"再粘 url,行为等价。)
 
 function removeRepo(idx: number) {
-  if (repos.length > 1) repos.splice(idx, 1)
+  if (repos.length <= 1) return
+  // umbrella 不能在还有子模块引用它的时候被删 —— 否则 children 的 parent_repo
+  // 引用就坏(health check 会报 error,新机器导入也无法 umbrella 继承编排)。
+  // 用户必须先把所有 parent_repo == 本 umbrella name 的子模块删掉,才能删 umbrella。
+  const target = repos[idx]
+  if (!target) return
+  const childCount = repos.filter(r => (r.parent_repo || '').trim() === target.name.trim()).length
+  if (childCount > 0) {
+    toast.error(`先删除 ${target.name} 的 ${childCount} 个子模块行,才能删 umbrella`)
+    return
+  }
+  repos.splice(idx, 1)
+}
+
+// 给 RepoListItem 的 × 按钮判定 disabled:本仓是 umbrella + 还有 child 引用时禁删
+function isRepoDeletable(r: RepoItem): boolean {
+  if (repos.length <= 1) return false
+  const childCount = repos.filter(rr => (rr.parent_repo || '').trim() === r.name.trim()).length
+  return childCount === 0
 }
 
 // Sync env_branches keys when environments change
@@ -2918,7 +2936,7 @@ provide(WizardStoreKey, {
         :repo="repo"
         :index="i"
         :environments="environments"
-        :can-remove="repos.length > 1"
+        :can-remove="isRepoDeletable(repo)"
         :svc-add-inputs="svcAddInputs"
         :repo-branches-map="repoBranchesMap"
         :repos-root-input="reposRootInput"

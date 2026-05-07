@@ -119,7 +119,12 @@ const emit = defineEmits<{
           @click="repo.parent_repo = ''; repo.parent_path = ''"
         >🗑</button>
       </span>
-      <button class="btn-icon remove" :disabled="!canRemove" @click="emit('remove', index)">&times;</button>
+      <button
+        class="btn-icon remove has-hint"
+        :disabled="!canRemove"
+        :data-hint="!canRemove ? '禁删:本仓是 umbrella,先删掉所有引用本仓的子模块行(parent_repo=本仓 name)再来' : '删掉本仓'"
+        @click="emit('remove', index)"
+      >&times;</button>
     </div>
 
     <!-- 来源切换:umbrella 子模块锁死 '本地已有'(代码已被 umbrella 的 git submodule 拉到本地,

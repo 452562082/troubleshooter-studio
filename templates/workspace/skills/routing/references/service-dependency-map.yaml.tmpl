@@ -79,7 +79,7 @@ services:
       - {{. | printf "%q"}}
     {{- end}}
     {{- else if $yamlDS}}
-    # ↓ 从 system.yaml 的 data_stores[].endpoints 反推(用户在 wizard 已确认过本服务用哪些数据层);
+    # ↓ 从 troubleshooter.yaml 的 data_stores[].endpoints 反推(用户在 wizard 已确认过本服务用哪些数据层);
     # 逻辑名默认 = type,需要更精细分类(如 "mysql:order_db" / "mysql:user_db")时手改。
     data_stores:
     {{- range $yamlDS}}

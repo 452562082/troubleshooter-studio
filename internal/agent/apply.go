@@ -1,5 +1,5 @@
 // Package agent 实现阶段 2 的"读-改-部署闭环"：
-// 从 discover 识别到的机器人 (tshoot.json) 出发，用新的 system.yaml 重新渲染产物，
+// 从 discover 识别到的机器人 (tshoot.json) 出发，用新的 troubleshooter.yaml 重新渲染产物，
 // rsync 回活的 workspace 路径,模板派生文件按最新模板覆盖。
 //
 // 这个包刻意**不**调 install.sh —— install.sh 的职责是"首次 bootstrap + 收凭证"，
@@ -21,7 +21,7 @@ import (
 
 // ApplyOptions 控制 apply 的行为。
 type ApplyOptions struct {
-	// NewYAML 是要应用的新 system.yaml 字节（含注释）。必须能过 config.LoadFromBytes。
+	// NewYAML 是要应用的新 troubleshooter.yaml 字节（含注释）。必须能过 config.LoadFromBytes。
 	NewYAML []byte
 	// TemplateRoot 是 tshoot 模板根（tshoot discover 所在的同一个 tshoot）。
 	TemplateRoot string
@@ -30,7 +30,7 @@ type ApplyOptions struct {
 	// DryRun 为 true 时只渲染 + 打印会变的文件列表，不真写 workspace。
 	DryRun bool
 	// RepoLocalPaths 仓库名 → 本机绝对路径,生成 repo-path-map.yaml 用。
-	// system.yaml 不含此信息(可分享性),由 wizard / CLI 调用方额外传入。
+	// troubleshooter.yaml 不含此信息(可分享性),由 wizard / CLI 调用方额外传入。
 	// 空 map 时产物里的 repo-path-map.yaml 是占位样子(提示用户跑向导)。
 	RepoLocalPaths map[string]string
 	// IDECreds 给 claude-code / cursor 安装时,把 mcp.servers 配置注入 ~/.claude.json

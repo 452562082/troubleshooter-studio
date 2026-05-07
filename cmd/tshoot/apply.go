@@ -14,7 +14,7 @@ import (
 
 func runApply(args []string) error {
 	fs := flag.NewFlagSet("apply", flag.ExitOnError)
-	input := fs.String("i", "", "新 system.yaml 路径（必填）")
+	input := fs.String("i", "", "新 troubleshooter.yaml 路径（必填）")
 	path := fs.String("path", "", "目标已装机器人的 workspace 路径（必填，含 tshoot.json 的那一层）")
 	tmplDir := fs.String("t", "", "模板根（默认：可执行文件旁的 templates/ 或 embed 解压）")
 	dryRun := fs.Bool("dry-run", false, "只预演不写盘")

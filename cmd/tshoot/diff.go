@@ -14,7 +14,7 @@ import (
 
 func runDiff(args []string) error {
 	fs := flag.NewFlagSet("diff", flag.ExitOnError)
-	input := fs.String("i", "", "system.yaml 路径 (必填)")
+	input := fs.String("i", "", "troubleshooter.yaml 路径 (必填)")
 	against := fs.String("against", "", "既有产物目录 (默认 ./dist)")
 	analysisFile := fs.String("analysis", "", "可选 analysis.json")
 	tmplDir := fs.String("t", "", "模板根目录 (默认: 可执行文件旁的 templates/)")
@@ -82,7 +82,7 @@ func runDiff(args []string) error {
 	if len(rep.Files) == 0 && len(rep.ConfigMapChanges) == 0 {
 		fmt.Println("\n下一步：产物已是最新，无需 gen")
 	} else {
-		fmt.Printf("\n下一步：满意就 tshoot gen -i %s 应用；不满意继续改 system.yaml\n", *input)
+		fmt.Printf("\n下一步：满意就 tshoot gen -i %s 应用；不满意继续改 troubleshooter.yaml\n", *input)
 	}
 	return nil
 }

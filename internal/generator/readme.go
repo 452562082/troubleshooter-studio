@@ -1,5 +1,5 @@
 // readme.go —— 产物根 README.md 生成。
-// Generate() 跑完模板后调一次 writeReadme(),按 system.yaml 推断出
+// Generate() 跑完模板后调一次 writeReadme(),按 troubleshooter.yaml 推断出
 //   - 启用了哪些 skill(skillsSection)
 //   - 部署前要准备哪些凭证(credentialsSection)
 //   - 常见 FAQ(按启用组件浮现条目)
@@ -41,7 +41,7 @@ func (g *Generator) writeReadme() error {
 	sb.WriteString("\n")
 
 	sb.WriteString("## 升级与卸载\n\n")
-	sb.WriteString("- **升级**（tshoot 或 system.yaml 改过后）：在 tshoot 仓库里跑 `tshoot upgrade -i system.yaml`，会自动备份旧产物到 `<output_dir>.bak.<ts>/` 再重 gen，最后打印 diff。\n")
+	sb.WriteString("- **升级**（tshoot 或 troubleshooter.yaml 改过后）：在 tshoot 仓库里跑 `tshoot upgrade -i troubleshooter.yaml`，会自动备份旧产物到 `<output_dir>.bak.<ts>/` 再重 gen，最后打印 diff。\n")
 	sb.WriteString("- **卸载**:Studio 桌面端 BotsPage 上点对应卡的卸载按钮(走 `agent.UninstallNativeOpenclaw`,移走 workspace + 从 openclaw.json 摘 agent)。\n")
 	sb.WriteString("- **回滚**：`mv <output_dir>.bak.<ts> <output_dir>` 然后再点一次部署。\n\n")
 
@@ -118,7 +118,7 @@ func readmeCredentialsSection(ctx *Context) string {
 		return sb.String()
 	}
 
-	sb.WriteString("Studio 部署时会问下面这些值（按 system.yaml 自动派生），准备好可以加快流程：\n\n")
+	sb.WriteString("Studio 部署时会问下面这些值（按 troubleshooter.yaml 自动派生），准备好可以加快流程：\n\n")
 	switch cc {
 	case "nacos":
 		sb.WriteString("- **Nacos**：每个 env 的 `host:port` + 用户名 + 密码\n")
@@ -166,13 +166,13 @@ func readmeFAQSection(ctx *Context) string {
 
 	if ctx.Infrastructure.PrimaryConfigCenter().Type != "" && ctx.Infrastructure.PrimaryConfigCenter().Type != "none" {
 		sb.WriteString("**Q: 某个 env 的配置查不到？**\n")
-		sb.WriteString("A: (1) 检查 `scripts/.env` 里该 env 的地址/凭证；(2) 对比 `templates/workspace-template/skills/routing/references/config-map.yaml` 里的 namespace/dataId/group 是否对；(3) 在 tshoot 仓库跑 `tshoot doctor -i system.yaml --repos-root <dir>` 看声明与实态是否漂移。\n\n")
+		sb.WriteString("A: (1) 检查 `scripts/.env` 里该 env 的地址/凭证；(2) 对比 `templates/workspace-template/skills/routing/references/config-map.yaml` 里的 namespace/dataId/group 是否对；(3) 在 tshoot 仓库跑 `tshoot doctor -i troubleshooter.yaml --repos-root <dir>` 看声明与实态是否漂移。\n\n")
 	}
 
-	sb.WriteString("**Q: 改了 system.yaml，怎么更新部署？**\n")
-	sb.WriteString("A: 在 tshoot 仓库里跑 `tshoot upgrade -i system.yaml` —— 自动备份 + 重 gen + 打印 diff。然后回 BotsPage 重新部署(走 InstallNativeOpenclaw)应用到 OpenClaw。\n\n")
+	sb.WriteString("**Q: 改了 troubleshooter.yaml，怎么更新部署？**\n")
+	sb.WriteString("A: 在 tshoot 仓库里跑 `tshoot upgrade -i troubleshooter.yaml` —— 自动备份 + 重 gen + 打印 diff。然后回 BotsPage 重新部署(走 InstallNativeOpenclaw)应用到 OpenClaw。\n\n")
 
 	sb.WriteString("**Q: 想把机器人部署到别的平台（Claude Code / Cursor / Embedded 内嵌对话）？**\n")
-	sb.WriteString("A: 在 `system.yaml` 的 `generation.targets` 里加上对应名字再 `tshoot gen`，会生成 `<output_dir>-claude-code/` / `-cursor/` 兄弟目录；Studio 部署 → 自动装到 `~/.claude/agents/` 或 `~/.cursor/agents/`(走 agent.InstallNative,无 bash)。\n")
+	sb.WriteString("A: 在 `troubleshooter.yaml` 的 `generation.targets` 里加上对应名字再 `tshoot gen`，会生成 `<output_dir>-claude-code/` / `-cursor/` 兄弟目录；Studio 部署 → 自动装到 `~/.claude/agents/` 或 `~/.cursor/agents/`(走 agent.InstallNative,无 bash)。\n")
 	return sb.String()
 }

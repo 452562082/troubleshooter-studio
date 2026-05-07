@@ -8,7 +8,7 @@ import (
 )
 
 func TestDiff_NoChange(t *testing.T) {
-	cfg := loadCfg(t, "examples/shop-system.yaml")
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
 	out := t.TempDir()
 	tr := filepath.Join(projectRoot(t), "templates")
 	if err := New(cfg, tr, out).Generate(); err != nil {
@@ -27,7 +27,7 @@ func TestDiff_NoChange(t *testing.T) {
 }
 
 func TestDiff_DetectsFileAndRowChanges(t *testing.T) {
-	cfg := loadCfg(t, "examples/shop-system.yaml")
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
 	tr := filepath.Join(projectRoot(t), "templates")
 
 	oldDir := t.TempDir()
@@ -81,7 +81,7 @@ func TestDiff_DetectsFileAndRowChanges(t *testing.T) {
 }
 
 func TestDiff_RowRemoved(t *testing.T) {
-	cfg := loadCfg(t, "examples/shop-system.yaml")
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
 	tr := filepath.Join(projectRoot(t), "templates")
 	oldDir := t.TempDir()
 	newDir := t.TempDir()

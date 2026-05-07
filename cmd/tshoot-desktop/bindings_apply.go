@@ -15,7 +15,7 @@ import (
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-// ApplyBot 把新的 system.yaml 应用到已装机器人的活 workspace:
+// ApplyBot 把新的 troubleshooter.yaml 应用到已装机器人的活 workspace:
 // 重新渲染产物 → rsync 到 agentPath → 更新 tshoot.json。
 // 模板派生文件(SOUL/AGENTS/CHECKLIST/skills/...)按最新模板覆盖,
 // config-map.yaml 中 status=verified 且无 source 字段的人工行保留。
@@ -54,7 +54,7 @@ func (a *App) ApplyBot(agentPath, newYamlText string, dryRun bool) (*agent.Resul
 // target: openclaw / claude-code / cursor / embedded
 // destPath: 部署目标路径。openclaw 下是产物目录（含 install.sh）；其它 target 下是目标项目根。
 // repoPaths: 仓库名 → 本机绝对路径,烤进产物 skills/routing/references/repo-path-map.yaml。
-// 前端从 wizard 里抽出每个 repo 的 _localPath / _cloneTarget 传过来;system.yaml
+// 前端从 wizard 里抽出每个 repo 的 _localPath / _cloneTarget 传过来;troubleshooter.yaml
 // 里不含路径(故意的,保持可分享),这里是唯一的路径传入口。
 //
 // 副作用:把 repoPaths 按 system.id 持久化到 ~/.tshoot/config.json,后续 BotsPage

@@ -37,7 +37,7 @@ func runSkillNew(args []string) error {
 	fmt.Printf("[ok] scaffolded skill → %s\n", dst)
 	fmt.Println("下一步:")
 	fmt.Println("  1) 编辑 SKILL.md.tmpl 补全描述与执行流程")
-	fmt.Printf("  2) 在 system.yaml 的 generation.skills_whitelist 中加入 \"%s\"\n", name)
-	fmt.Println("  3) tshoot plan -i system.yaml 预览")
+	fmt.Printf("  2) 在 troubleshooter.yaml 的 generation.skills_whitelist 中加入 \"%s\"\n", name)
+	fmt.Println("  3) tshoot plan -i troubleshooter.yaml 预览")
 	return nil
 }

@@ -11,7 +11,7 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/generator"
 )
 
-// CurrentSchemaVersion 当前 tshoot 支持的 system.yaml schema 版本
+// CurrentSchemaVersion 当前 tshoot 支持的 troubleshooter.yaml schema 版本
 const CurrentSchemaVersion = "0.1"
 
 // Result upgrade 操作的结果，供 CLI 展示
@@ -55,7 +55,7 @@ func Run(opts Options) (*Result, error) {
 		SchemaTo:   CurrentSchemaVersion,
 	}
 	if res.SchemaFrom == "" {
-		res.Warnings = append(res.Warnings, "system.yaml meta.schema_version 为空，按当前版本处理")
+		res.Warnings = append(res.Warnings, "troubleshooter.yaml meta.schema_version 为空，按当前版本处理")
 		res.SchemaFrom = CurrentSchemaVersion
 	}
 	if res.SchemaFrom != CurrentSchemaVersion {

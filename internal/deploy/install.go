@@ -17,7 +17,7 @@ import (
 )
 
 // Prompt 描述一次凭证收集所需的 UI 表单字段。
-// agent.DerivePrompts 按 system.yaml 派生,UI 据此渲染输入框。
+// agent.DerivePrompts 按 troubleshooter.yaml 派生,UI 据此渲染输入框。
 type Prompt struct {
 	Name   string `json:"name"`   // env 变量名（写 .env 时用），如 CC_ADDR_DEV
 	Prompt string `json:"prompt"` // 给用户看的提示文案

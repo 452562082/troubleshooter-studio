@@ -94,7 +94,7 @@ async function onPrimaryCardClick(card: { path: string; label: string }) {
 // 已装机器人放 #2 是因为"我已有 yaml 想直接部署"和"查看/改已装"都在那页。
 // 注:不再列"生成产物"独立页。桌面端的完整流已经是:
 //   创建向导(产 yaml) → 已装机器人(导入 yaml 一键部署 + 原地管理)
-// 纯落盘产物需求走 CLI:`tshoot gen -i system.yaml -o ./dist/<id>`
+// 纯落盘产物需求走 CLI:`tshoot gen -i troubleshooter.yaml -o ./dist/<id>`
 const primaryCards = [
   { path: '/init', icon: '🧙', label: '创建向导', desc: '一步步带你创建一个新的排障机器人', tag: '推荐新用户' },
   { path: '/bots', icon: '🤖', label: '已装机器人', desc: '管理已部署的机器人,新建 / 重部 / 卸载' },
@@ -127,7 +127,7 @@ const draftStepNormalized = computed<number | null>(() => {
 // 推荐下一步逻辑
 const nextStep = computed(() => {
   if (!wizardDraft.value && !lastYamlSignature.value) {
-    return { text: '从「创建向导」开始,几分钟生成第一份 system.yaml + 可用机器人', path: '/init', cta: '开始向导 →' }
+    return { text: '从「创建向导」开始,几分钟生成第一份 troubleshooter.yaml + 可用机器人', path: '/init', cta: '开始向导 →' }
   }
   if (wizardDraft.value && wizardDraft.value.lastDeployAt) {
     const targets: string[] = Array.isArray(wizardDraft.value.lastDeployedTargets)
@@ -254,7 +254,7 @@ const nextStep = computed(() => {
         <div class="info-head">CLI 命令速查</div>
         <ul>
           <li><code>tshoot demo</code> — 零配置试跑(秒级看产物)</li>
-          <li><code>tshoot init -o system.yaml</code> — 命令行向导</li>
+          <li><code>tshoot init -o troubleshooter.yaml</code> — 命令行向导</li>
           <li><code>tshoot gen -i ...</code> — 生成 staging 产物</li>
           <li><code>tshoot install --path ... --target ...</code> — 装到本机(原生 Go,无 bash)</li>
           <li><code>tshoot discover</code> — 扫本机已装机器人</li>

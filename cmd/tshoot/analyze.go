@@ -13,7 +13,7 @@ import (
 
 func runAnalyze(args []string) error {
 	fs := flag.NewFlagSet("analyze", flag.ExitOnError)
-	input := fs.String("i", "", "system.yaml 路径 (必填)")
+	input := fs.String("i", "", "troubleshooter.yaml 路径 (必填)")
 	reposRoot := fs.String("repos-root", "", "仓库 checkout 根目录 (必填)；每个仓库在其下以 repos[].name 命名")
 	output := fs.String("o", "analysis.json", "输出文件路径")
 	autoClone := fs.Bool("auto-clone", false, "缺仓库时自动 shallow clone (需要 git + 凭证)")

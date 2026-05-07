@@ -31,6 +31,6 @@ func runServe(args []string) error {
 	return http.ListenAndServe(addr, router)
 }
 
-// runDemo 是"零配置试跑":用内置 examples/shop-system.yaml + examples/fake-repos 跑完整
+// runDemo 是"零配置试跑":用内置 examples/shop-troubleshooter.yaml + examples/fake-repos 跑完整
 // pipeline（validate → analyze → plan → gen），产出一个临时目录，打印产物树 + 关键下一步。
 // 目的是让新用户 30 秒内看到 tshoot 能干什么，无需准备任何输入。

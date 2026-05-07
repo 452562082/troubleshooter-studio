@@ -295,7 +295,7 @@ let analyzeTimer: number | null = null
 
 
 async function runAnalyze() {
-  if (!yamlContent.value.trim()) { error.value = '请先填写或加载 system.yaml'; return }
+  if (!yamlContent.value.trim()) { error.value = '请先填写或加载 troubleshooter.yaml'; return }
   // 路径来源:effectiveRepoPaths(drafts > saved)。要么全部 repo 有路径,要么开 autoClone
   // 让后端把缺的浅克隆到 cloneFallbackRoot;两者都不满足直接报错,提示用户用上方表格填或开 clone。
   if (!allReposCovered.value && !autoClone.value) {
@@ -424,7 +424,7 @@ onUnmounted(() => {
         <div class="info-box-inputs">
           <div class="info-box-inputs-title">📝 需要的输入:</div>
           <ul>
-            <li><strong>system.yaml</strong> — 粘贴或从文件加载</li>
+            <li><strong>troubleshooter.yaml</strong> — 粘贴或从文件加载</li>
             <li><strong>仓库本地路径</strong> — yaml 加载后表格挨个选,或📁批量从父目录填(已部署过的系统自动复用 <code>~/.tshoot/config.json</code> 上次记录的路径)</li>
           </ul>
         </div>
@@ -436,14 +436,14 @@ onUnmounted(() => {
 
     <div class="form-section">
       <div class="label-row">
-        <label>system.yaml</label>
+        <label>troubleshooter.yaml</label>
         <div class="label-row-actions">
           <button v-if="isDesktop()" class="btn small" @click="loadFileNative">加载文件</button>
           <label v-else class="btn small">加载文件 <input type="file" accept=".yaml,.yml" @change="loadFileBrowser" hidden /></label>
           <button class="btn small" @click="loadExample">加载示例</button>
         </div>
       </div>
-      <textarea v-model="yamlContent" class="yaml-input" placeholder="把 system.yaml 内容粘到这里,或点上面「加载文件」选本机文件…" spellcheck="false" :class="{ err: error }" />
+      <textarea v-model="yamlContent" class="yaml-input" placeholder="把 troubleshooter.yaml 内容粘到这里,或点上面「加载文件」选本机文件…" spellcheck="false" :class="{ err: error }" />
     </div>
 
     <AnalyzeRepoPathsPanel
@@ -607,7 +607,7 @@ onUnmounted(() => {
 /* 必须用 `>`(直接子)而非后代选择器:
  * 结构是
  *   .label-row
- *     <label>system.yaml</label>           ← 表单 label,要 600 粗 + 14px
+ *     <label>troubleshooter.yaml</label>           ← 表单 label,要 600 粗 + 14px
  *     .label-row-actions
  *       <label class="btn small">加载文件  ← 这也是 label,但走按钮样式
  *       <button class="btn small">加载示例

@@ -99,9 +99,9 @@ function setGrafanaDsUid(obsKey: string, envID: string, value: string) {
     </p>
 
     <CredsShareWarning :margin-bottom="18">
-      <li>本页填写字段(含密码、token 等凭证)将保存至 <code>system.yaml</code>。</li>
+      <li>本页填写字段(含密码、token 等凭证)将保存至 <code>troubleshooter.yaml</code>。</li>
       <li>部署时,生成器把对应值注入目标 AI 平台的 MCP Server 环境变量。</li>
-      <li><strong>system.yaml 含明文凭证</strong>,请仅在可信范围内分享。</li>
+      <li><strong>troubleshooter.yaml 含明文凭证</strong>,请仅在可信范围内分享。</li>
     </CredsShareWarning>
 
     <!-- 启用的可观测性组件:横排 chip 选择 -->

@@ -9,7 +9,7 @@ import (
 
 // 场景 1：手改 config-map 的 inferred 行 → 重 gen → 保留
 func TestPreserve_ConfigMapManualOverride(t *testing.T) {
-	cfg := loadCfg(t, "examples/shop-system.yaml")
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
 	out := t.TempDir()
 	tr := filepath.Join(projectRoot(t), "templates")
 
@@ -51,7 +51,7 @@ func TestPreserve_ConfigMapManualOverride(t *testing.T) {
 
 // 场景 2：手改 SOUL.md → 重 gen → 被模板覆盖(整文件 preserve 已删,模板更新优先)
 func TestPreserve_TemplateDerivedFileOverwritten(t *testing.T) {
-	cfg := loadCfg(t, "examples/shop-system.yaml")
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
 	out := t.TempDir()
 	tr := filepath.Join(projectRoot(t), "templates")
 
@@ -72,7 +72,7 @@ func TestPreserve_TemplateDerivedFileOverwritten(t *testing.T) {
 
 // 场景 3：analyzer finding 与人工 override 冲突 → analyzer 胜
 func TestPreserve_AnalyzerWinsOverPriorOverride(t *testing.T) {
-	cfg := loadCfg(t, "examples/shop-system.yaml")
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
 	out := t.TempDir()
 	tr := filepath.Join(projectRoot(t), "templates")
 
@@ -137,7 +137,7 @@ func TestPreserve_AnalyzerWinsOverPriorOverride(t *testing.T) {
 
 // 场景 4：config_center 切换（nacos→apollo）→ 不继承 prior overrides
 func TestPreserve_ConfigCenterSwitch_DropsOverrides(t *testing.T) {
-	nacosCfg := loadCfg(t, "examples/shop-system.yaml")
+	nacosCfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
 	out := t.TempDir()
 	tr := filepath.Join(projectRoot(t), "templates")
 
@@ -154,8 +154,8 @@ func TestPreserve_ConfigCenterSwitch_DropsOverrides(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 切换到 apollo（用同 output 目录，模拟人为切换 system.yaml）
-	apolloCfg := loadCfg(t, "examples/apollo-system.yaml")
+	// 切换到 apollo（用同 output 目录，模拟人为切换 troubleshooter.yaml）
+	apolloCfg := loadCfg(t, "examples/apollo-troubleshooter.yaml")
 	g := New(apolloCfg, tr, out)
 	if err := g.Generate(); err != nil {
 		t.Fatal(err)

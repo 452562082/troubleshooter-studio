@@ -13,7 +13,7 @@ import (
 
 func runUpgrade(args []string) error {
 	fs := flag.NewFlagSet("upgrade", flag.ExitOnError)
-	input := fs.String("i", "", "system.yaml 路径 (必填)")
+	input := fs.String("i", "", "troubleshooter.yaml 路径 (必填)")
 	output := fs.String("o", "", "现有产物目录 (默认 ./dist)")
 	tmplDir := fs.String("t", "", "模板根目录 (默认: 可执行文件旁的 templates/)")
 	analysisFile := fs.String("analysis", "", "可选 analysis.json")

@@ -9,7 +9,7 @@ import (
 
 func runValidate(args []string) error {
 	fs := flag.NewFlagSet("validate", flag.ExitOnError)
-	input := fs.String("i", "", "system.yaml 路径 (必填)")
+	input := fs.String("i", "", "troubleshooter.yaml 路径 (必填)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -20,7 +20,7 @@ func runValidate(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("[ok] system.yaml is valid")
+	fmt.Println("[ok] troubleshooter.yaml is valid")
 
 	// 健康检查:语义层缺口(可观测性 wiring 不全 / 仓库分支缺 env / 多源没指定 source 等),
 	// 不阻断,但提示用户。CLI 输出按 severity 分组,error 用 ✗ / warn 用 ! / info 用 ·

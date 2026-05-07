@@ -192,7 +192,7 @@ func (a *App) WriteBotWorkspaceFile(rootPath, relPath, content string) error {
 	base := filepath.Base(abs)
 	rel := filepath.ToSlash(relPath)
 	if base == "tshoot.json" || rel == ".clawhub/lock.json" {
-		return fmt.Errorf("file %q 由 generator 管理,UI 编辑会在下次部署时被覆盖,请通过修改 system.yaml + 重新部署来更新", base)
+		return fmt.Errorf("file %q 由 generator 管理,UI 编辑会在下次部署时被覆盖,请通过修改 troubleshooter.yaml + 重新部署来更新", base)
 	}
 	return os.WriteFile(abs, []byte(content), info.Mode().Perm())
 }

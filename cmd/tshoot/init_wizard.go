@@ -17,8 +17,8 @@ import (
 
 func runInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
-	output := fs.String("o", "system.yaml", "输出 system.yaml 路径")
-	input := fs.String("i", "", "可选：已有 system.yaml，用作字段预填（改动哪里就回答哪里，其余回车接受）")
+	output := fs.String("o", "troubleshooter.yaml", "输出 troubleshooter.yaml 路径")
+	input := fs.String("i", "", "可选：已有 troubleshooter.yaml，用作字段预填（改动哪里就回答哪里，其余回车接受）")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

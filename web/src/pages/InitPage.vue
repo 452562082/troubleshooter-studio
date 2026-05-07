@@ -716,7 +716,7 @@ watch(
 // 不自动改 Step 5 选项(avoid silent 覆盖用户选择)。
 //
 // 重要:reposRootInput / globalDefaultReposRoot / resolvedReposRoot 三个都是
-// "研制环境偏好",不属于具体系统的配置 —— 绝对不能写进 system.yaml,也不能进
+// "研制环境偏好",不属于具体系统的配置 —— 绝对不能写进 troubleshooter.yaml,也不能进
 // localStorage auto-save draft(见下方 watch(...) 的 tracked 字段列表)。
 // 唯一合法的持久化路径:"💾 设为全局默认" 按钮 → setDefaultReposRoot → Go binding
 // → userconfig.Save → ~/.tshoot/config.json。导入 yaml / 清空草稿都不动它。
@@ -1309,7 +1309,7 @@ function isObsFieldHidden(toolKey: string, envID: string, f: CredField): boolean
   return isFieldHidden('obs', envID, f, (k) => toolInputs[toolKeyFor('obs', toolKey, envID, k)] || '')
 }
 // ccCredInputs:所有配置中心字段的当前输入值(key = ccKeyFor)。
-// 流向:输入 → localStorage draft(持久) → system.yaml → 部署时注入各 AI 平台的 MCP
+// 流向:输入 → localStorage draft(持久) → troubleshooter.yaml → 部署时注入各 AI 平台的 MCP
 // server config(openclaw.json / ~/.claude/config.json / .cursor/mcp.json / embedded)。
 // **不再走 Studio 自己的钥匙串** —— 对 MCP 用途来说钥匙串是多余中间层,
 // 凭证最终要成为 AI 平台 MCP server 的 env 字段,yaml 是直接源。
@@ -2408,7 +2408,7 @@ async function clearDraft() {
   }
 }
 
-// ── Import existing system.yaml into the wizard ──
+// ── Import existing troubleshooter.yaml into the wizard ──
 // 整条入口闭环(对话框状态 + open/close/file-pick + applyImport)收口在 lib/useImportFlow.ts。
 // 反填主体仍在 lib/yamlImporter.ts(applyParsedYAMLToWizardState),通过 buildContext callback
 // 把 InitPage 闭包里的 30+ reactive / helper / bridge 函数打包成一个 ApplyImportContext 传进去。
@@ -2750,7 +2750,7 @@ async function copyYAML() {
 }
 
 async function downloadYAML() {
-  const filename = 'system.yaml'
+  const filename = 'troubleshooter.yaml'
   try {
     const path = await exportYAML(filename, yamlOutput.value)
     if (!path) {
@@ -2843,7 +2843,7 @@ provide(WizardStoreKey, {
       <div class="page-header">
         <div>
           <h1>初始化向导</h1>
-          <p class="subtitle">通过可视化表单生成 system.yaml 配置文件(草稿会自动保存到本地)</p>
+          <p class="subtitle">通过可视化表单生成 troubleshooter.yaml 配置文件(草稿会自动保存到本地)</p>
         </div>
         <div class="header-actions">
           <!-- 自动保存徽章:让用户感知到"改动一直在存"(类似 Notion/Google Docs 的风格) -->
@@ -2859,12 +2859,12 @@ provide(WizardStoreKey, {
     <div v-if="showImportDialog" class="modal-mask" @click.self="closeImportDialog">
       <div class="modal">
         <div class="modal-header">
-          <span>导入已有 system.yaml</span>
+          <span>导入已有 troubleshooter.yaml</span>
           <button class="btn-icon close" @click="closeImportDialog">&times;</button>
         </div>
         <div class="modal-body">
           <p class="help-text" style="margin-bottom: 10px;">
-            上传或粘贴现有 system.yaml 内容,字段会自动反填到各步骤。
+            上传或粘贴现有 troubleshooter.yaml 内容,字段会自动反填到各步骤。
           </p>
           <!-- 桌面 app 走 osascript 弹文件选择器(避开 macOS 26 上 WKWebView 原生 panel 闪退);
                浏览器模式回退到 HTML5 input(type=file)。 -->
@@ -2878,7 +2878,7 @@ provide(WizardStoreKey, {
           <textarea
             v-model="importText"
             rows="14"
-            placeholder="或直接粘贴 system.yaml 的 YAML 内容…"
+            placeholder="或直接粘贴 troubleshooter.yaml 的 YAML 内容…"
             class="import-textarea"
             spellcheck="false"
           />
@@ -2893,8 +2893,8 @@ provide(WizardStoreKey, {
 
       <!-- Guidance info box(嵌在 header 卡里,info-box 的浅蓝边框 + 卡片白底叠出层级) -->
       <div class="info-box init-header-info">
-        <p><strong>本向导帮助你快速生成 system.yaml 配置文件</strong></p>
-        <p>system.yaml 描述你的系统架构(仓库、环境、配置中心、基础组件),tshoot 据此生成并部署定制化的 AI 排障机器人</p>
+        <p><strong>本向导帮助你快速生成 troubleshooter.yaml 配置文件</strong></p>
+        <p>troubleshooter.yaml 描述你的系统架构(仓库、环境、配置中心、基础组件),tshoot 据此生成并部署定制化的 AI 排障机器人</p>
         <p>完成后可「验证」确保格式正确,然后「下载」到本地</p>
       </div>
 

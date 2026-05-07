@@ -110,7 +110,7 @@ function classForSeverity(s: string): string {
         </button>
         <button
           class="btn btn-regen"
-          :title="'打开机器人工作目录,树形浏览 + 改 SKILL.md / 脚本做调试(不动 system.yaml)'"
+          :title="'打开机器人工作目录,树形浏览 + 改 SKILL.md / 脚本做调试(不动 troubleshooter.yaml)'"
           @click="emit('openBrowser')"
         >
           📂 浏览工作目录
@@ -193,7 +193,7 @@ function classForSeverity(s: string): string {
     </section>
 
     <section v-if="editing" class="editor">
-      <label class="editor-label">system.yaml(改完先「预演」看 diff,再「应用到活 workspace」写盘 —— 仅刷新本卡所属平台)</label>
+      <label class="editor-label">troubleshooter.yaml(改完先「预演」看 diff,再「应用到活 workspace」写盘 —— 仅刷新本卡所属平台)</label>
       <textarea v-model="editorDraft" class="editor-textarea" spellcheck="false" />
       <div class="editor-actions">
         <button

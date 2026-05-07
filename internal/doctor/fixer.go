@@ -9,7 +9,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Patch 描述一条将要对 system.yaml 施加的改动（用户 review 用）。
+// Patch 描述一条将要对 troubleshooter.yaml 施加的改动（用户 review 用）。
 type Patch struct {
 	Kind      string `json:"kind"`       // stack-change / config-center-type / ...
 	Path      string `json:"path"`       // 可读的 yaml path，展示给用户

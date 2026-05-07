@@ -19,7 +19,7 @@ func projectRoot(t *testing.T) string {
 
 func loadShop(t *testing.T) *config.SystemConfig {
 	t.Helper()
-	cfg, err := config.Load(filepath.Join(projectRoot(t), "examples", "shop-system.yaml"))
+	cfg, err := config.Load(filepath.Join(projectRoot(t), "examples", "shop-troubleshooter.yaml"))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestCheck_ConfigCenterNone_WithFindings(t *testing.T) {
 }
 
 func TestCheck_CleanApolloExample(t *testing.T) {
-	cfg, err := config.Load(filepath.Join(projectRoot(t), "examples", "apollo-system.yaml"))
+	cfg, err := config.Load(filepath.Join(projectRoot(t), "examples", "apollo-troubleshooter.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +276,7 @@ func TestCheck_OriginCrossProtocolMatch(t *testing.T) {
 	if !gitclone.Available() {
 		t.Skip("git not available")
 	}
-	// origin 用 https 写，system.yaml 用 ssh 写 —— 应视为同一
+	// origin 用 https 写，troubleshooter.yaml 用 ssh 写 —— 应视为同一
 	origin := "https://github.com/x/y.git"
 	declared := "git@github.com:x/y.git"
 	repoDir := makeRepoWithOrigin(t, origin)

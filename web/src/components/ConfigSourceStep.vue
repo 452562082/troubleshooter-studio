@@ -116,10 +116,10 @@ const emit = defineEmits<{
       <label>
         <code>{{ configCenterType }}</code> 连接配置
         <span v-if="isMultiSource" class="auto-tag" style="background:#dbeafe;color:#1e40af;">主源 · 完整 preload</span>
-        <span class="field-hint">— 按环境维度填写,保存后写入 system.yaml(标 <code># ⚠ secret</code> 注释),部署时注入到目标平台的 MCP Server env</span>
+        <span class="field-hint">— 按环境维度填写,保存后写入 troubleshooter.yaml(标 <code># ⚠ secret</code> 注释),部署时注入到目标平台的 MCP Server env</span>
       </label>
       <CredsShareWarning title="⚠ 凭证与共享提醒">
-        <li>这里填的账号密码会以明文写入 <code>system.yaml</code>(每条带 <code># ⚠ secret</code> 注释),并部署时注入到机器人 MCP Server 的 env 块 + <code>~/.tshoot/&lt;agent-id&gt;-creds.json</code>。</li>
+        <li>这里填的账号密码会以明文写入 <code>troubleshooter.yaml</code>(每条带 <code># ⚠ secret</code> 注释),并部署时注入到机器人 MCP Server 的 env 块 + <code>~/.tshoot/&lt;agent-id&gt;-creds.json</code>。</li>
         <li>分享 yaml 请限**团队内部 / 私有仓库**,<strong>不要提交到公开代码仓库</strong>。</li>
       </CredsShareWarning>
       <div v-for="env in wizard.environments" :key="env.id" class="cc-env-block">
@@ -273,7 +273,7 @@ const emit = defineEmits<{
         <br/>
         ② Step 6 数据层连接串需要在仓库代码里硬编码 / 部署时手动注入,机器人不再帮忙读;
         <br/>
-        ③ 生成的 <code>system.yaml</code> 仅占位 <code>config_center.type: none</code>。
+        ③ 生成的 <code>troubleshooter.yaml</code> 仅占位 <code>config_center.type: none</code>。
       </p>
     </div>
 

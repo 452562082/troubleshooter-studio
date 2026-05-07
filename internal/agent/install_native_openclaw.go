@@ -35,7 +35,7 @@ type InstallOpenclawOptions struct {
 // stagingDir 是 generator 的产物目录(含 templates/workspace-template/ 和 tshoot.json)。
 //
 // 步骤:
-//  1. 从 stagingDir/tshoot.json 反读 system.yaml → cfg
+//  1. 从 stagingDir/tshoot.json 反读 troubleshooter.yaml → cfg
 //  2. 探测依赖(node/npx/python3/uvx),缺的告警但不中断
 //  3. 把 .env 旧凭证 merge 进 creds(用户可以局部覆盖)
 //  4. 备份并安装 workspace 到 ~/.openclaw/workspace/<workspace_name>/
@@ -49,7 +49,7 @@ func InstallNativeOpenclaw(ctx context.Context, stagingDir string, opts InstallO
 		log = func(string) {}
 	}
 
-	// 1) 读 tshoot.json 拿 system.yaml
+	// 1) 读 tshoot.json 拿 troubleshooter.yaml
 	cfg, meta, err := loadCfgFromTshoot(stagingDir)
 	if err != nil {
 		return err

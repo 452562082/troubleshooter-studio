@@ -21,7 +21,7 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/userconfig"
 )
 
-// Gen 按 system.yaml 实际落盘生成机器人产物(写到 outputDir;后续要部署还得走
+// Gen 按 troubleshooter.yaml 实际落盘生成机器人产物(写到 outputDir;后续要部署还得走
 // ImportAndDeploy 或 RunInstall 把产物装到 AI 平台)。
 // outputDir 为空时默认 ./dist;相对路径解析成绝对路径,让 UI 能稳定展示"产物在 /abs/path/xxx"。
 //

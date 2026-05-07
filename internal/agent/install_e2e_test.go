@@ -5,7 +5,7 @@
 //   - install_native_openclaw_*    OpenClaw 单 target 装得很细
 //   - 三 IDE target 各自的 MCP merge / creds.json / 卸载链 没有任何端到端覆盖
 //
-// 此 E2E 真跑 generator(从 examples/shop-system.yaml 起步),走完整链:
+// 此 E2E 真跑 generator(从 examples/shop-troubleshooter.yaml 起步),走完整链:
 //
 //	gen → InstallNative → MergeMCPIntoIDESettings → discover.Scan
 //	    → reinstall(.bak) → UninstallNative → 再 Scan 应为空
@@ -38,13 +38,13 @@ func projectRoot(t *testing.T) string {
 	return filepath.Clean(filepath.Join(wd, "..", ".."))
 }
 
-// loadShopCfg 从 examples/shop-system.yaml 读 cfg。yaml 里 generation.targets 写的是
+// loadShopCfg 从 examples/shop-troubleshooter.yaml 读 cfg。yaml 里 generation.targets 写的是
 // openclaw,但 GenerateClaudeCode/Cursor/Codex 不读这个字段,我们直接调它们三个产出
 // 三家 staging。yaml 选这份是因为:① workspace_name=shop-bot 是 ASCII,生成的 agent
 // 文件名干净;② nacos+grafana+loki 都开了,MCP merge 会真触发(不止派生一两条 server)。
 func loadShopCfg(t *testing.T) (*config.SystemConfig, []byte) {
 	t.Helper()
-	yamlPath := filepath.Join(projectRoot(t), "examples", "shop-system.yaml")
+	yamlPath := filepath.Join(projectRoot(t), "examples", "shop-troubleshooter.yaml")
 	src, err := os.ReadFile(yamlPath)
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
@@ -108,7 +108,7 @@ func readJSON(t *testing.T, path string) map[string]any {
 	return m
 }
 
-// fakeCreds 拼一份覆盖 shop-system.yaml 里所有派生 env 变量的凭证 map。
+// fakeCreds 拼一份覆盖 shop-troubleshooter.yaml 里所有派生 env 变量的凭证 map。
 // 不全填会触发 buildMCPServersForCfg 的 pruneEmpty,把 env 字段全删空 ——
 // 那样我们也无从断言 env 是不是注入了。
 func fakeCreds() map[string]string {
@@ -137,14 +137,14 @@ func fakeCreds() map[string]string {
 	}
 }
 
-// expectedMCPKeys 列出 shop-system.yaml 应该派生出来的所有 MCP server key。
+// expectedMCPKeys 列出 shop-troubleshooter.yaml 应该派生出来的所有 MCP server key。
 // 命名规则见 install_naming.go::mcpKeyForAgent + buildMCPServersForCfg:
 //
 //	prefix = MCPKeyPrefix() = "shop"
 //	nacos  per env(默认源 id=default → 不带 source 中缀):shop-nacos-<env>
 //	grafana / loki per env:                           shop-grafana-<env> / shop-loki-<env>
 //
-// shop-system.yaml 有 dev / staging / prod 三个环境。
+// shop-troubleshooter.yaml 有 dev / staging / prod 三个环境。
 func expectedMCPKeys() []string {
 	envs := []string{"dev", "staging", "prod"}
 	out := []string{}
@@ -216,7 +216,7 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 				t.Fatalf("InstallNative: %v", err)
 			}
 			rootDir := filepath.Join(fakeHome, "."+rootName(target))
-			agentName := cfg.ResolveID() // shop-system.yaml workspace_name=shop-bot
+			agentName := cfg.ResolveID() // shop-troubleshooter.yaml workspace_name=shop-bot
 			// agent 人格文件 / skills / scripts / tshoot.json 锚点。
 			// claude-code / cursor → agents/<name>.md;codex → AGENTS.md(全机一份)
 			agentMDPath := agentMDLocationFor(rootDir, target, agentName)
@@ -484,7 +484,7 @@ func TestE2E_ApolloCredsFile(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses unix paths")
 	}
-	yamlPath := filepath.Join(projectRoot(t), "examples", "apollo-system.yaml")
+	yamlPath := filepath.Join(projectRoot(t), "examples", "apollo-troubleshooter.yaml")
 	src, err := os.ReadFile(yamlPath)
 	if err != nil {
 		t.Fatalf("read apollo fixture: %v", err)
@@ -513,7 +513,7 @@ func TestE2E_ApolloCredsFile(t *testing.T) {
 		t.Fatalf("WriteIDECredsFile: %v", err)
 	}
 
-	// apollo-system.yaml: system.id=bank, 无 agent.id / workspace_name → ResolveID = bank-troubleshooter
+	// apollo-troubleshooter.yaml: system.id=bank, 无 agent.id / workspace_name → ResolveID = bank-troubleshooter
 	credsPath := filepath.Join(fakeHome, ".tshoot", cfg.ResolveID()+"-creds.json")
 	data, err := os.ReadFile(credsPath)
 	if err != nil {

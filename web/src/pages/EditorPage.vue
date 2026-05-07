@@ -233,7 +233,7 @@ async function runPreview() {
     <div class="info-box">
       <div class="info-box-title">YAML 沙盒 — 只读校验 yaml,不动代码、不装机器人</div>
       <div class="info-box-body">
-        <p class="info-box-lead">粘贴 system.yaml,快速判断「语法是否正确 / 部署后会是什么样」。</p>
+        <p class="info-box-lead">粘贴 troubleshooter.yaml,快速判断「语法是否正确 / 部署后会是什么样」。</p>
         <ul class="info-box-actions">
           <li>
             <strong>✓ 验证</strong>
@@ -286,7 +286,7 @@ async function runPreview() {
         ref="textareaRef"
         v-model="yamlContent"
         class="yaml-editor"
-        placeholder="# 在此粘贴或加载 system.yaml 内容..."
+        placeholder="# 在此粘贴或加载 troubleshooter.yaml 内容..."
         spellcheck="false"
         @scroll="onTextareaScroll"
       />

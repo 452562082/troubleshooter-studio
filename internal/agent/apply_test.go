@@ -26,7 +26,7 @@ func projectRoot(t *testing.T) string {
 func genExisting(t *testing.T, dir string) (string, []byte) {
 	t.Helper()
 	tr := filepath.Join(projectRoot(t), "templates")
-	yamlBytes, err := os.ReadFile(filepath.Join(projectRoot(t), "examples", "shop-system.yaml"))
+	yamlBytes, err := os.ReadFile(filepath.Join(projectRoot(t), "examples", "shop-troubleshooter.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestImportAndApply_OpenclawProducesStaging(t *testing.T) {
 	// 模板 + tshoot.json + self-test/uninstall 辅助脚本)。
 	// 注:install.sh 已迁到 InstallNativeOpenclaw,不在产物里。
 	dest := t.TempDir()
-	yamlBytes, err := os.ReadFile(filepath.Join(projectRoot(t), "examples", "shop-system.yaml"))
+	yamlBytes, err := os.ReadFile(filepath.Join(projectRoot(t), "examples", "shop-troubleshooter.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestImportAndApply_OpenclawProducesStaging(t *testing.T) {
 
 func TestImportAndApply_DryRunNoWrite(t *testing.T) {
 	dest := t.TempDir()
-	yamlBytes, _ := os.ReadFile(filepath.Join(projectRoot(t), "examples", "shop-system.yaml"))
+	yamlBytes, _ := os.ReadFile(filepath.Join(projectRoot(t), "examples", "shop-troubleshooter.yaml"))
 	res, err := ImportAndApply(yamlBytes, "openclaw", dest, ApplyOptions{
 		TemplateRoot: filepath.Join(projectRoot(t), "templates"),
 		DryRun:       true,

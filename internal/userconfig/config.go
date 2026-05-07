@@ -45,7 +45,7 @@ type Config struct {
 
 	// RepoPathsBySystem 是"仓库本地路径"映射:<system.id> → <repo.name> → 本机绝对路径。
 	//
-	// 设计:system.yaml 必须保持可分享(团队私库 / 私密频道),不含任何本机路径;
+	// 设计:troubleshooter.yaml 必须保持可分享(团队私库 / 私密频道),不含任何本机路径;
 	// 部署时 generator 需要把仓库本地路径烤进 repo-path-map.yaml,这份映射就走这里。
 	// 流程:
 	//   - wizard 一键部署:每次 ImportAndDeploy 把 repoPaths upsert 进来。

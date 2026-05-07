@@ -1,4 +1,4 @@
-// prefill_creds.go —— 从 system.yaml 抽 install 阶段需要的凭证 / URL 默认值。
+// prefill_creds.go —— 从 troubleshooter.yaml 抽 install 阶段需要的凭证 / URL 默认值。
 //
 // 背景:GUI wizard 把用户在 Step 7 填的 URL / 账密 / token 直接写进 yaml 的 endpoints[]。
 // 但 install 阶段(InstallNativeOpenclaw / RunInstall)只认 .env 里的环境变量(KUBOARD_URL_DEV

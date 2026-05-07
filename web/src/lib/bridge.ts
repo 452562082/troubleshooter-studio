@@ -45,7 +45,7 @@ export type AnalyzeResult = analyzerpipe.Result
 export type RepoSummary = analyzerpipe.RepoSummary
 export type DoctorReport = Record<string, unknown> // doctor.Report 字段较多且业务后续会扩,先 loose
 
-/** Validate system.yaml；失败抛 Error（message 已带解析原因） */
+/** Validate troubleshooter.yaml；失败抛 Error（message 已带解析原因） */
 export async function validate(yamlText: string): Promise<ValidateResult> {
   if (isDesktop()) return App.Validate(yamlText)
   const resp = await fetch('/api/validate', {

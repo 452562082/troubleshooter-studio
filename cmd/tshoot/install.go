@@ -165,7 +165,7 @@ func loadStagingSystemConfig(stagingDir string) (*config.SystemConfig, error) {
 	}
 	cfg, err := config.LoadFromBytes([]byte(meta.SystemYAML))
 	if err != nil {
-		return nil, fmt.Errorf("system.yaml in tshoot.json invalid: %w", err)
+		return nil, fmt.Errorf("troubleshooter.yaml in tshoot.json invalid: %w", err)
 	}
 	return cfg, nil
 }

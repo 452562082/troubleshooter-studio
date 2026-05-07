@@ -1,5 +1,5 @@
 // bridge/userConfig.ts —— 用户级配置 ~/.tshoot/config.json 的读写。
-// 跨 wizard 会话持久,不进 system.yaml(那份要分享,本机偏好不能塞进去)。
+// 跨 wizard 会话持久,不进 troubleshooter.yaml(那份要分享,本机偏好不能塞进去)。
 //
 // 字段:default_repos_root / repo_paths_by_system / custom_install_roots
 import * as App from '../../../wailsjs/go/main/App'

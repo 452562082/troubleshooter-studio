@@ -9,7 +9,7 @@
 //	              (或用户级 ~/.claude.json)
 //	cursor        <project>/.cursor/mcp.json          键名 "mcpServers.<name>"
 //	              (或全局 ~/.cursor/mcp.json)
-//	embedded      Studio 直读 system.yaml,无独立 MCP 文件
+//	embedded      Studio 直读 troubleshooter.yaml,无独立 MCP 文件
 //
 // 每条 MCP server 的 value 结构在 4 个平台都一致:
 //

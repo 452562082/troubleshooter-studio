@@ -9,7 +9,7 @@ import (
 
 // 首次 plan：existingDir 不存在 → 全部文件都应为 create
 func TestBuildPlan_FirstTime(t *testing.T) {
-	cfg := loadCfg(t, "examples/shop-system.yaml")
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
 	tr := filepath.Join(projectRoot(t), "templates")
 	g := New(cfg, tr, "")
 	plan, err := g.BuildPlan("/tmp/nonexistent-dir-for-plan-test")
@@ -42,7 +42,7 @@ func TestBuildPlan_FirstTime(t *testing.T) {
 }
 
 func TestBuildPlan_SkippedSkills(t *testing.T) {
-	cfg := loadCfg(t, "examples/shop-system.yaml")
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
 	// 把 whitelist 改小，让一些被 skip
 	cfg.Generation.SkillsWhitelist = []string{"routing", "diagram-generator"}
 	tr := filepath.Join(projectRoot(t), "templates")
@@ -65,7 +65,7 @@ func TestBuildPlan_SkippedSkills(t *testing.T) {
 }
 
 func TestBuildPlan_WithPriorOverridesAndPreserved(t *testing.T) {
-	cfg := loadCfg(t, "examples/shop-system.yaml")
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
 	tr := filepath.Join(projectRoot(t), "templates")
 
 	// 先生成一份 baseline 作为 existing
@@ -124,7 +124,7 @@ func TestBuildPlan_WithPriorOverridesAndPreserved(t *testing.T) {
 }
 
 func TestBuildPlan_Apollo(t *testing.T) {
-	cfg := loadCfg(t, "examples/apollo-system.yaml")
+	cfg := loadCfg(t, "examples/apollo-troubleshooter.yaml")
 	tr := filepath.Join(projectRoot(t), "templates")
 	g := New(cfg, tr, "")
 	plan, err := g.BuildPlan("")

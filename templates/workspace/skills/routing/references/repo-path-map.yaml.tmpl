@@ -3,7 +3,7 @@
 #
 # ⚠ MACHINE-LOCAL:此文件跟当前这台机器绑定,不要 commit / push / 跟同事分享。
 #    同事装这个机器人时应当自己跑一次 init 向导生成自己机器的版本。
-#    配套的 system.yaml 是可分享的(不含本地路径),通过 tshoot.json.system_yaml 可
+#    配套的 troubleshooter.yaml 是可分享的(不含本地路径),通过 tshoot.json.system_yaml 可
 #    随时回放出来。
 #
 # bot 运行时(routing skill / code-locator)读这里找"truss 这个 repo 在哪"做代码
@@ -11,7 +11,7 @@
 # 在代码里静默跳过。
 {{- if not .RepoLocalPaths}}
 #
-# 当前无任何仓库路径 —— 导入 system.yaml 的新用户默认没路径,需要在向导里
+# 当前无任何仓库路径 —— 导入 troubleshooter.yaml 的新用户默认没路径,需要在向导里
 # 选"本地已有目录"或远程 clone 后才能生成本文件的有效内容。
 {{- end}}
 repos:

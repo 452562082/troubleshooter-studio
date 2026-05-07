@@ -155,7 +155,7 @@ func TestWriteYAML_ProducesValidSystemYaml(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	p := filepath.Join(dir, "system.yaml")
+	p := filepath.Join(dir, "troubleshooter.yaml")
 	f, err := os.Create(p)
 	if err != nil {
 		t.Fatal(err)

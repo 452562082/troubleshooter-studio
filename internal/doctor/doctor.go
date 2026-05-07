@@ -12,7 +12,7 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/gitclone"
 )
 
-// Check 按 system.yaml 与 reposRoot 做漂移检测
+// Check 按 troubleshooter.yaml 与 reposRoot 做漂移检测
 // 如果 reposRoot 为 ""，只做仓库无关的静态检查（config_center 声明一致性等）
 //
 // 用法分两种:
@@ -86,7 +86,7 @@ func CheckWithPaths(cfg *config.SystemConfig, repoPaths map[string]string) (*Rep
 					Category: CatStackMismatch,
 					Target:   "repos[" + repo.Name + "].stack",
 					Message:  fmt.Sprintf("声明 stack=%q，但检测到 %q（根据标记文件）", repo.Stack, detected),
-					Suggest:  fmt.Sprintf("将 system.yaml 中该仓库的 stack 改为 %q", detected),
+					Suggest:  fmt.Sprintf("将 troubleshooter.yaml 中该仓库的 stack 改为 %q", detected),
 					FixKey:   "repo." + repo.Name + ".stack",
 					FixValue: detected,
 				})
@@ -155,7 +155,7 @@ func checkOriginMismatch(r *Report, repo config.Repo, repoPath string) {
 			Category: CatOriginMismatch,
 			Target:   "repos[" + repo.Name + "]",
 			Message:  fmt.Sprintf("声明 url=%q，但该目录实际 origin=%q", repo.URL, actual),
-			Suggest:  "确认 system.yaml 的 url 是否正确，或重新 clone 到正确路径",
+			Suggest:  "确认 troubleshooter.yaml 的 url 是否正确，或重新 clone 到正确路径",
 		})
 	}
 }
@@ -178,7 +178,7 @@ func checkServiceDrift(r *Report, repo config.Repo, ra *analyzer.RepoAnalysis) {
 				Category: CatServiceDrift,
 				Target:   "repos[" + repo.Name + "].service_names",
 				Message:  fmt.Sprintf("声明 service_name=%q 但分析器未在代码中找到（go.mod / pom.xml / package.json）", s),
-				Suggest:  "确认服务名拼写，或删除 system.yaml 中多余的 service_name",
+				Suggest:  "确认服务名拼写，或删除 troubleshooter.yaml 中多余的 service_name",
 			})
 		}
 	}
@@ -193,8 +193,8 @@ func checkServiceDrift(r *Report, repo config.Repo, ra *analyzer.RepoAnalysis) {
 				Severity: SeverityInfo,
 				Category: CatServiceDrift,
 				Target:   "repos[" + repo.Name + "].service_names",
-				Message:  fmt.Sprintf("代码中检测到 service %q 但 system.yaml 未声明", s),
-				Suggest:  "将该 service 加入 system.yaml 的 service_names",
+				Message:  fmt.Sprintf("代码中检测到 service %q 但 troubleshooter.yaml 未声明", s),
+				Suggest:  "将该 service 加入 troubleshooter.yaml 的 service_names",
 			})
 		}
 	}
@@ -209,7 +209,7 @@ func checkConfigCenterDrift(r *Report, repo config.Repo, ra *analyzer.RepoAnalys
 				Category: CatConfigCenterDrift,
 				Target:   "repos[" + repo.Name + "]",
 				Message:  fmt.Sprintf("声明 config_center=none，但代码中发现 %s 配置", strings.Join(types, "/")),
-				Suggest:  "更新 system.yaml 的 config_center.type，或清理配置",
+				Suggest:  "更新 troubleshooter.yaml 的 config_center.type，或清理配置",
 			})
 		}
 		return
@@ -221,7 +221,7 @@ func checkConfigCenterDrift(r *Report, repo config.Repo, ra *analyzer.RepoAnalys
 				Severity: SeverityWarning,
 				Category: CatConfigCenterDrift,
 				Target:   fmt.Sprintf("repos[%s] %s", repo.Name, f.SourceFile),
-				Message:  fmt.Sprintf("该文件看起来包含 %s 配置，但 system.yaml 声明 %s", f.ConfigCenter, declared),
+				Message:  fmt.Sprintf("该文件看起来包含 %s 配置，但 troubleshooter.yaml 声明 %s", f.ConfigCenter, declared),
 				Suggest: fmt.Sprintf("确认实际配置类型：若应为 %s，将 infrastructure.config_center.type 改为 %s 后跑 tshoot upgrade；否则清理该文件或在 repos[*].analysis.include_paths 中排除",
 					f.ConfigCenter, f.ConfigCenter),
 			})
@@ -240,7 +240,7 @@ func checkRepoProfileMatch(r *Report, repo config.Repo, ra *analyzer.RepoAnalysi
 				Category: CatUndeclaredProfile,
 				Target:   fmt.Sprintf("repos[%s] %s", repo.Name, f.SourceFile),
 				Message:  fmt.Sprintf("配置文件 profile=%q 未在 environments 中声明", f.EnvProfile),
-				Suggest:  fmt.Sprintf("在 system.yaml environments 中添加 id=%q，或重命名文件", f.EnvProfile),
+				Suggest:  fmt.Sprintf("在 troubleshooter.yaml environments 中添加 id=%q，或重命名文件", f.EnvProfile),
 			})
 		}
 	}

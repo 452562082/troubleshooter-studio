@@ -13,7 +13,7 @@ type Wizard struct {
 	in  *bufio.Reader
 	out io.Writer
 
-	// Defaults 可选：启动时从已有 system.yaml 预填；每个 ask 优先用其中对应字段作为默认值
+	// Defaults 可选：启动时从已有 troubleshooter.yaml 预填；每个 ask 优先用其中对应字段作为默认值
 	Defaults *Answers
 
 	// current 实时追踪已回答到哪一步的 Answers 快照，供外部(signal handler)读取保存草稿

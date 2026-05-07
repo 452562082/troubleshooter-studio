@@ -16,7 +16,7 @@ func (w *Wizard) Run() (*Answers, error) {
 	w.setCurrent(a)
 
 	w.printf("欢迎使用 troubleshooter-studio init 向导\n")
-	w.printf("将引导生成一份可用的 system.yaml，大多数问题有默认值（回车接受）\n")
+	w.printf("将引导生成一份可用的 troubleshooter.yaml，大多数问题有默认值（回车接受）\n")
 
 	d := w.Defaults // 可能为 nil；下面用 defaultOr() 统一兼容
 

@@ -12,7 +12,7 @@ export type RunInstallResult = main.RunInstallResult
 /** 把 yaml 直接部署成一个新机器人(agent.ImportAndApply 的 UI 封装)
  *
  *  repoPaths: 仓库名 → 本机绝对路径,产物里会写进 repo-path-map.yaml。
- *  system.yaml 本身不含这些路径(故意的,跨机器可分享),只有通过这里把路径送进
+ *  troubleshooter.yaml 本身不含这些路径(故意的,跨机器可分享),只有通过这里把路径送进
  *  产物。想按"仓库"部署但不关心路径的场景(比如 CLI 跑 smoke test)传空 map 即可 ——
  *  产物里的 repo-path-map.yaml 就是"未配置"占位,bot 运行时会提示用户补齐。
  */

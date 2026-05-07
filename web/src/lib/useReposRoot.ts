@@ -2,7 +2,7 @@
 //
 // 三个 ref:
 //   - reposRootInput        本会话用户在输入框看到的值;不写 yaml 也不进 draft,
-//                           "研制环境偏好"性质 —— 写进 system.yaml 会污染跨机器分享
+//                           "研制环境偏好"性质 —— 写进 troubleshooter.yaml 会污染跨机器分享
 //   - globalDefaultReposRoot ~/.tshoot/config.json 里持久的默认值,空表示用户没设过
 //   - resolvedReposRoot     永远非空(回落 ~/.tshoot/repos),给 placeholder + 实际 clone 目标用
 //   - homeDir               $HOME,用于 displayPath 折叠成 ~/...;拿不到原样展示

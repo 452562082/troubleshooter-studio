@@ -22,7 +22,7 @@ type Meta struct {
 	// TshootVersion 是生成本产物时的 tshoot 版本（main.version 注入）
 	TshootVersion string `json:"tshoot_version"`
 
-	// SystemID / SystemName 来自 system.yaml 的 system 块，供 UI 展示
+	// SystemID / SystemName 来自 troubleshooter.yaml 的 system 块，供 UI 展示
 	SystemID   string `json:"system_id"`
 	SystemName string `json:"system_name"`
 
@@ -32,7 +32,7 @@ type Meta struct {
 	// GeneratedAt RFC3339 时间戳
 	GeneratedAt string `json:"generated_at"`
 
-	// SystemYAML 是生成本产物时的完整 system.yaml 原文（含注释）。
+	// SystemYAML 是生成本产物时的完整 troubleshooter.yaml 原文（含注释）。
 	// 这是产物的"真源"：后续要修改，Web UI / tshoot agent 直接从这里读、改完 re-gen 覆盖。
 	SystemYAML string `json:"system_yaml"`
 
@@ -56,5 +56,5 @@ type DiscoveredAgent struct {
 	EnvCount   int      `json:"env_count"`
 	RepoCount  int      `json:"repo_count"`
 	SkillCount int      `json:"skill_count"`
-	Targets    []string `json:"targets,omitempty"` // system.yaml 里声明的全部 targets（可能这个机器人只是其中之一）
+	Targets    []string `json:"targets,omitempty"` // troubleshooter.yaml 里声明的全部 targets（可能这个机器人只是其中之一）
 }

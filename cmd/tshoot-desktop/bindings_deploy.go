@@ -5,11 +5,11 @@
 // Python。现在改成原生 Go(internal/agent.InstallNativeOpenclaw),好处:
 //   - 桌面端不再依赖 bash / Python 进程,跨平台行为一致
 //   - 取消逻辑统一走 ctx.cancel,不用 Setpgid + SIGKILL 进程组那套
-//   - 凭证 prompts 直接照 system.yaml 派生,跟模板的 read_var 1:1 对齐(由
+//   - 凭证 prompts 直接照 troubleshooter.yaml 派生,跟模板的 read_var 1:1 对齐(由
 //     agent.DerivePrompts 生成,不再扫脚本)
 //
 // 接口形态保留:UI 还是先 ScanInstallPrompts → 渲染表单 → ReadEnv 预填 →
-// RunInstall 收集后跑;ScanInstallPrompts 改读 tshoot.json 里的 system.yaml。
+// RunInstall 收集后跑;ScanInstallPrompts 改读 tshoot.json 里的 troubleshooter.yaml。
 package main
 
 import (
@@ -84,7 +84,7 @@ func loadStagingConfig(outputDir string) (*config.SystemConfig, string, error) {
 	}
 	cfg, err := config.LoadFromBytes([]byte(meta.SystemYAML))
 	if err != nil {
-		return nil, meta.Target, fmt.Errorf("system.yaml in tshoot.json invalid: %w", err)
+		return nil, meta.Target, fmt.Errorf("troubleshooter.yaml in tshoot.json invalid: %w", err)
 	}
 	return cfg, meta.Target, nil
 }

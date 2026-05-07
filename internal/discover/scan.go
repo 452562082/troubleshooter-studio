@@ -168,7 +168,7 @@ func readAgent(metaPath string) (DiscoveredAgent, error) {
 	if info != nil {
 		a.ModTime = info.ModTime().UTC().Format("2006-01-02 15:04:05Z")
 	}
-	// 从 embedded system.yaml 快速派生统计
+	// 从 embedded troubleshooter.yaml 快速派生统计
 	if meta.SystemYAML != "" {
 		derive(&a, meta.SystemYAML)
 	}

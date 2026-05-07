@@ -286,7 +286,7 @@ onActivated(() => { scan() })
       <div class="page-actions">
         <!-- 导入 yaml 一键部署的入口已下线 —— 这条路径跟「创建向导」的"导入 yaml → 反填 → 一键部署"
              功能重叠且后者更完整(走过校验 / 健康检查 / 仓库路径补全)。本页只做"扫已装 + 管理"。
-             需要导入新 yaml 部署?去 <创建向导> Step 1 选"导入已有 system.yaml"。 -->
+             需要导入新 yaml 部署?去 <创建向导> Step 1 选"导入已有 troubleshooter.yaml"。 -->
         <button class="btn primary" :disabled="loading" @click="scan">
           {{ loading ? '扫描中…' : '刷新' }}
         </button>
@@ -306,7 +306,7 @@ onActivated(() => { scan() })
     <div v-else-if="loading" class="empty">扫描中…</div>
     <div v-else-if="bots.length === 0" class="empty">
       还没部署过机器人。去「<strong><router-link to="/init">创建向导</router-link></strong>」从头建一份;
-      已有 yaml 文件,在向导第 1 步选"导入已有 system.yaml"反填后一键部署。
+      已有 yaml 文件,在向导第 1 步选"导入已有 troubleshooter.yaml"反填后一键部署。
     </div>
 
     <div v-else class="bot-grid">

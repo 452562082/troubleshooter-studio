@@ -36,7 +36,7 @@ type Agent struct {
 //   - 再空回落到 "<system.id>-troubleshooter"(全新 wizard 默认命名)
 //
 // 这条链让"删了 workspace_name 字段、改用 agent.id"的迁移对老 yaml 透明:
-// shop-system.yaml(workspace_name=shop-bot, 无 agent.id)→ ID 仍 = shop-bot,
+// shop-troubleshooter.yaml(workspace_name=shop-bot, 无 agent.id)→ ID 仍 = shop-bot,
 // 不会突然变成 shop-troubleshooter 让旧的 ~/.claude/agents/shop-bot.md 成孤儿。
 func (s *SystemConfig) ResolveID() string {
 	if id := s.Agent.ID; id != "" {

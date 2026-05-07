@@ -1,4 +1,4 @@
-// install_prompts.go —— 从 system.yaml 推导 openclaw 部署需要哪些凭证字段。
+// install_prompts.go —— 从 troubleshooter.yaml 推导 openclaw 部署需要哪些凭证字段。
 //
 // 多源 schema:遍历 cfg.Infrastructure.ConfigCenters,每个源独立产 prompt 集合,
 // 命名空间通过 envVar(prefix, source.id, env) 区隔。详见 install_naming.go。
@@ -15,7 +15,7 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/deploy"
 )
 
-// DerivePrompts 按 system.yaml 派生需要交互收集的凭证。
+// DerivePrompts 按 troubleshooter.yaml 派生需要交互收集的凭证。
 // 顺序:每个 config_centers 源依次走自己的字段块 → grafana / jaeger / elk / model / lark / feishu。
 func DerivePrompts(cfg *config.SystemConfig) []deploy.Prompt {
 	var out []deploy.Prompt

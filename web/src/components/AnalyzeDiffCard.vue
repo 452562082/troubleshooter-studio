@@ -20,7 +20,7 @@ defineEmits<{
 <template>
   <div class="card diff-card">
     <div class="card-header">
-      <span class="name">⚖️ 对照 system.yaml</span>
+      <span class="name">⚖️ 对照 troubleshooter.yaml</span>
       <span v-if="diff.totalNew > 0" class="tag green">代码有但 yaml 没写 {{ diff.totalNew }} 项</span>
       <span v-if="diff.totalMissing > 0" class="tag orange">yaml 写了但代码没扫到 {{ diff.totalMissing }} 项</span>
       <span v-if="diff.configCenterMismatch" class="tag red">配置中心对不上</span>
@@ -29,7 +29,7 @@ defineEmits<{
         <button
           v-if="diff.totalNew > 0"
           class="btn small"
-          title="把建议的 yaml 片段复制到剪贴板,贴回 system.yaml 的 repos 下就能补全 service_names"
+          title="把建议的 yaml 片段复制到剪贴板,贴回 troubleshooter.yaml 的 repos 下就能补全 service_names"
           @click="$emit('copySnippet')"
         >
           📋 复制补丁片段

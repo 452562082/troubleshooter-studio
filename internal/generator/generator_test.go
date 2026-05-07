@@ -36,7 +36,7 @@ func loadCfg(t *testing.T, rel string) *config.SystemConfig {
 // 每个服务的 mcp_server 字段按它所属 repo 的 config_source 选对应源的 MCP key,
 // 且副源服务多带一行 config_source 字段标记。
 func TestGenerate_MultiSource_ConfigMapRoutesPerService(t *testing.T) {
-	cfg := loadCfg(t, "examples/shop-system.yaml")
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
 	// 在 shop-system 基础上注入第二源 + 把 product-service 重路由到副源
 	cfg.Infrastructure.ConfigCenters = append(cfg.Infrastructure.ConfigCenters, config.ConfigCenter{
 		ID:   "legacy-nacos",
@@ -112,7 +112,7 @@ func loadConfigMap(t *testing.T, path string) map[string]map[string]map[string]a
 }
 
 func TestGenerate_Nacos_Shop(t *testing.T) {
-	cfg := loadCfg(t, "examples/shop-system.yaml")
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
 	out := t.TempDir()
 	tr := filepath.Join(projectRoot(t), "templates")
 
@@ -184,7 +184,7 @@ func TestGenerate_Nacos_Shop(t *testing.T) {
 // 见 internal/agent/install_prompts_test.go(每 env 独立凭证)。
 
 func TestGenerate_Apollo(t *testing.T) {
-	cfg := loadCfg(t, "examples/apollo-system.yaml")
+	cfg := loadCfg(t, "examples/apollo-troubleshooter.yaml")
 	out := t.TempDir()
 	tr := filepath.Join(projectRoot(t), "templates")
 	if err := New(cfg, tr, out).Generate(); err != nil {
@@ -212,7 +212,7 @@ func TestGenerate_Apollo(t *testing.T) {
 }
 
 func TestGenerate_Consul(t *testing.T) {
-	cfg := loadCfg(t, "examples/consul-system.yaml")
+	cfg := loadCfg(t, "examples/consul-troubleshooter.yaml")
 	out := t.TempDir()
 	tr := filepath.Join(projectRoot(t), "templates")
 	if err := New(cfg, tr, out).Generate(); err != nil {
@@ -239,7 +239,7 @@ func TestGenerate_Consul(t *testing.T) {
 }
 
 func TestGenerate_ClawhubLock(t *testing.T) {
-	cfg := loadCfg(t, "examples/shop-system.yaml")
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
 	out := t.TempDir()
 	tr := filepath.Join(projectRoot(t), "templates")
 	if err := New(cfg, tr, out).Generate(); err != nil {
@@ -264,7 +264,7 @@ func TestGenerate_ClawhubLock(t *testing.T) {
 	if lock.Version != 1 {
 		t.Errorf("lock.version expected 1, got %d", lock.Version)
 	}
-	// shop-system.yaml 的 skills_whitelist 列了 8 个 skills
+	// shop-troubleshooter.yaml 的 skills_whitelist 列了 8 个 skills
 	wantSkills := []string{"routing", "config-executor", "redis-runtime-query", "mongodb-runtime-query", "es-runtime-query", "mysql-runtime-query", "kafka-runtime-query", "diagram-generator"}
 	for _, s := range wantSkills {
 		entry, ok := lock.Skills[s]
@@ -288,7 +288,7 @@ func TestGenerate_ClawhubLock(t *testing.T) {
 }
 
 func TestGenerate_ClawhubLock_EmptySkills(t *testing.T) {
-	cfg := loadCfg(t, "examples/shop-system.yaml")
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
 	// 清空白名单 + 禁用所有 data stores，还要清掉 config center，
 	// 确保没有 skills 目录会被生成
 	cfg.Generation.SkillsWhitelist = []string{"__none__"}
@@ -331,7 +331,7 @@ func assertExists(t *testing.T, base string, rels []string) {
 // openclaw 跑完后，其产物目录被复用为 SharedStaging，后续 target 不再重复渲染 workspace。
 // 对每个 target 目录断言关键产物存在。
 func TestGenerate_MultiTargets_All(t *testing.T) {
-	cfg := loadCfg(t, "examples/shop-system.yaml")
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
 	out := filepath.Join(t.TempDir(), "sys")
 	tr := filepath.Join(projectRoot(t), "templates")
 
@@ -355,7 +355,7 @@ func TestGenerate_MultiTargets_All(t *testing.T) {
 		"templates/workspace-template/SOUL.md",
 		"templates/workspace-template/tshoot.json",
 	})
-	// examples/shop-system.yaml 的 agent.workspace_name = "shop-bot",直接做 slug
+	// examples/shop-troubleshooter.yaml 的 agent.workspace_name = "shop-bot",直接做 slug
 	// install.sh 已删除 —— 装到 ~/.claude|cursor/ 现在由 agent.InstallNative 完成
 	assertExists(t, out+"-claude-code", []string{
 		"agents/shop-bot.md",
@@ -371,7 +371,7 @@ func TestGenerate_MultiTargets_All(t *testing.T) {
 // 调用方先把 workspace 渲染到一个临时 staging，再跑各 target。
 // openclaw 产物目录不会被创建。
 func TestGenerate_MultiTargets_NoOpenclaw(t *testing.T) {
-	cfg := loadCfg(t, "examples/shop-system.yaml")
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
 	out := filepath.Join(t.TempDir(), "sys")
 	tr := filepath.Join(projectRoot(t), "templates")
 
@@ -401,7 +401,7 @@ func TestGenerate_MultiTargets_NoOpenclaw(t *testing.T) {
 }
 
 func TestGenerate_WithAnalysis_UpgradesInferredToVerified(t *testing.T) {
-	cfg := loadCfg(t, "examples/shop-system.yaml")
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
 	out := t.TempDir()
 	tr := filepath.Join(projectRoot(t), "templates")
 

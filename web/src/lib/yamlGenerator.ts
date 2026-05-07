@@ -1,4 +1,4 @@
-// yamlGenerator.ts —— wizard 表单 → system.yaml 文本。
+// yamlGenerator.ts —— wizard 表单 → troubleshooter.yaml 文本。
 // 设计:YAMLGenContext 打包 InitPage 里需要的所有 reactive / computed / helper,
 //       InitPage call site 缩成 generateYAML(ctx)。lib 文件可被 vitest 直接 import,
 //       不必 mount Vue 组件。
@@ -483,7 +483,7 @@ export function generateYAML(ctx: YAMLGenContext): string {
   // wizard 用户不需要;CLI 用户可以手动加这一行覆盖默认 ./dist。
   const selectedTargets = ctx.targetOptions.filter(t => ctx.enabledTargets[t])
   const targetList = selectedTargets.length ? selectedTargets : ['openclaw']
-  lines.push('  targets:                             # 每个 target 产出一份机器人产物（同一份 system.yaml）')
+  lines.push('  targets:                             # 每个 target 产出一份机器人产物（同一份 troubleshooter.yaml）')
   for (const t of targetList) {
     lines.push(`    - ${t}`)
   }

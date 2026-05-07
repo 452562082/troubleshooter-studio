@@ -47,7 +47,7 @@ type Answers struct {
 }
 
 // WriteYAML 手写 YAML，避免引入 yaml.Encoder 的字段顺序与 omitempty 复杂度
-// 输出结构与 examples/*-system.yaml 保持一致
+// 输出结构与 examples/*-troubleshooter.yaml 保持一致
 func (a *Answers) WriteYAML(out io.Writer) error {
 	buf := &strings.Builder{}
 	p := func(format string, args ...any) { fmt.Fprintf(buf, format, args...) }
@@ -183,7 +183,7 @@ func (a *Answers) WriteYAML(out io.Writer) error {
 	if len(targets) == 0 {
 		targets = []string{"openclaw"}
 	}
-	p("  targets:                             # 每个 target 产出一份机器人产物（同一份 system.yaml）\n")
+	p("  targets:                             # 每个 target 产出一份机器人产物（同一份 troubleshooter.yaml）\n")
 	for _, t := range targets {
 		p("    - %s\n", t)
 	}

@@ -1,4 +1,4 @@
-// useImportFlow —— "导入已有 system.yaml" 入口闭环。
+// useImportFlow —— "导入已有 troubleshooter.yaml" 入口闭环。
 //
 // 暴露:
 //   - 状态        showImportDialog / importText / importError
@@ -89,7 +89,7 @@ export function useImportFlow(deps: UseImportFlowDeps) {
       return
     }
     if (!parsed || typeof parsed !== 'object') {
-      importError.value = '内容为空或不是合法的 system.yaml'
+      importError.value = '内容为空或不是合法的 troubleshooter.yaml'
       return
     }
     // bump import token —— 上一次 applyImport 排程但还没起飞的 setTimeout cross-check 会因

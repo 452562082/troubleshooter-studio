@@ -13,7 +13,7 @@ import (
 
 func runPlan(args []string) error {
 	fs := flag.NewFlagSet("plan", flag.ExitOnError)
-	input := fs.String("i", "", "system.yaml 路径 (必填)")
+	input := fs.String("i", "", "troubleshooter.yaml 路径 (必填)")
 	analysisFile := fs.String("analysis", "", "可选 analysis.json")
 	against := fs.String("against", "", "现有产物目录 (默认 ./dist)")
 	tmplDir := fs.String("t", "", "模板根目录 (默认: 可执行文件旁的 templates/)")

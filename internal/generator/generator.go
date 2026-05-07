@@ -62,16 +62,16 @@ type Generator struct {
 	// （由 cmd/tshoot / cmd/tshoot-desktop 的 main.version 注入）。留空即空字符串。
 	TshootVersion string
 
-	// SystemYAMLSource 是原始 system.yaml 内容（含注释），塞进 tshoot.json.system_yaml。
+	// SystemYAMLSource 是原始 troubleshooter.yaml 内容（含注释），塞进 tshoot.json.system_yaml。
 	// 这是 discover / agent apply 的"真源"：二次修改时从这里读。
 	// 调用方应在 Generate 前设好；为空时 tshoot.json 里该字段为空串。
 	SystemYAMLSource []byte
 
 	// RepoLocalPaths 仓库名 → 本机绝对路径,部署时由调用方(桌面端向导 / CLI --repo-path
-	// 参数)填进来。system.yaml 故意不含此信息(路径跟机器绑定,不可分享),但部署后
+	// 参数)填进来。troubleshooter.yaml 故意不含此信息(路径跟机器绑定,不可分享),但部署后
 	// 的机器人需要知道"仓库在我这台机器上 checkout 到哪了"才能做代码分析 ——
 	// 所以把这份数据烤进 routing skill 的 references/repo-path-map.yaml(只存在于产物里,
-	// 不进 system.yaml)。键必须匹配 cfg.Repos[i].Name;未匹配的仓库不写 local_path 行。
+	// 不进 troubleshooter.yaml)。键必须匹配 cfg.Repos[i].Name;未匹配的仓库不写 local_path 行。
 	// 为空 map 时模板会生成 "# 无本地路径"的占位 yaml 提示用户补齐。
 	RepoLocalPaths map[string]string
 }

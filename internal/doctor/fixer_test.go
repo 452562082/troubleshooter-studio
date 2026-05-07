@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// writeYAML 写一个带注释、空行、多仓库的 system.yaml 片段，用来验证 fixer
+// writeYAML 写一个带注释、空行、多仓库的 troubleshooter.yaml 片段，用来验证 fixer
 // 做行级替换时不破坏原格式。
 func writeYAML(t *testing.T) string {
 	t.Helper()

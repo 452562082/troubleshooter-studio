@@ -18,7 +18,7 @@ func projectRoot(t *testing.T) string {
 
 func loadShop(t *testing.T) *config.SystemConfig {
 	t.Helper()
-	cfg, err := config.Load(filepath.Join(projectRoot(t), "examples", "shop-system.yaml"))
+	cfg, err := config.Load(filepath.Join(projectRoot(t), "examples", "shop-troubleshooter.yaml"))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}

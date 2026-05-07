@@ -55,7 +55,7 @@ func (a *App) PrefillCreds(yamlText string) (map[string]string, error) {
 	return agent.PrefillCredsFromYAML(cfg), nil
 }
 
-// Validate 校验 system.yaml 内容,解析失败返回 error;成功后再跑健康检查,
+// Validate 校验 troubleshooter.yaml 内容,解析失败返回 error;成功后再跑健康检查,
 // 把语义层缺口(severity warn/info/error)一并放进 Issues。
 func (a *App) Validate(yamlText string) (*ValidateResult, error) {
 	cfg, err := config.LoadFromBytes([]byte(yamlText))

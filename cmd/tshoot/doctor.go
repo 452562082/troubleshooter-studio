@@ -13,7 +13,7 @@ import (
 
 func runDoctor(args []string) (int, error) {
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
-	input := fs.String("i", "", "system.yaml 路径 (必填)")
+	input := fs.String("i", "", "troubleshooter.yaml 路径 (必填)")
 	reposRoot := fs.String("repos-root", "", "仓库 checkout 根目录 (可选，留空则只做静态检查)")
 	format := fs.String("format", "text", "text / json")
 	fix := fs.Bool("fix", false, "对机器可修复的 issue 生成 yaml patch，显示 diff 并询问是否写回（自动备份为 .bak.<ts>）")
@@ -56,7 +56,7 @@ func runDoctor(args []string) (int, error) {
 	return 0, nil
 }
 
-// applyDoctorFixes 读 system.yaml、对所有有 FixKey 的 issue 生成 patch，
+// applyDoctorFixes 读 troubleshooter.yaml、对所有有 FixKey 的 issue 生成 patch，
 // 让用户 review 一遍，确认后走行级精确替换写回，并备份原文件。
 func applyDoctorFixes(yamlPath string, issues []doctor.Issue, skipConfirm bool) error {
 	patches, err := doctor.PlanFixes(yamlPath, issues)
@@ -93,7 +93,7 @@ func applyDoctorFixes(yamlPath string, issues []doctor.Issue, skipConfirm bool) 
 func printDoctorText(rep *doctor.Report) {
 	errs, warns, infos := rep.Counts()
 	if len(rep.Issues) == 0 {
-		fmt.Println("[ok] 无漂移 — system.yaml 与代码一致")
+		fmt.Println("[ok] 无漂移 — troubleshooter.yaml 与代码一致")
 		fmt.Println("下一步：放心 tshoot gen 生成机器人产物")
 		return
 	}
@@ -116,7 +116,7 @@ func printDoctorText(rep *doctor.Report) {
 	fmt.Printf("\n合计：%d error / %d warning / %d info\n", errs, warns, infos)
 	switch {
 	case errs > 0:
-		fmt.Println("下一步：按每条 ↳ 建议修正 system.yaml，然后 tshoot upgrade 重跑 + 对比 diff")
+		fmt.Println("下一步：按每条 ↳ 建议修正 troubleshooter.yaml，然后 tshoot upgrade 重跑 + 对比 diff")
 	case warns > 0:
 		fmt.Println("下一步：可选修正上述 warning（或暂时忽略），tshoot gen 仍可照常进行")
 	default:

@@ -25,7 +25,7 @@ type OpenYAMLResult struct {
 
 // OpenYAML 弹原生打开对话框让用户选一个 yaml 文件，返回 {path, content}。
 func (a *App) OpenYAML() (*OpenYAMLResult, error) {
-	path, err := pickFileNative("选择 system.yaml")
+	path, err := pickFileNative("选择 troubleshooter.yaml")
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +50,7 @@ func (a *App) OpenDir(title string) (string, error) {
 //   - ok 时返回真实保存路径（含用户改过名字的情况）
 //   - 用户取消时返回空字符串 + nil error
 func (a *App) SaveYAML(defaultFilename, yamlText string) (string, error) {
-	path, err := saveFileNative("导出 system.yaml", defaultFilename, a.ctx)
+	path, err := saveFileNative("导出 troubleshooter.yaml", defaultFilename, a.ctx)
 	if err != nil {
 		return "", err
 	}

@@ -3,7 +3,7 @@
 //
 // BotsPage 点"📂 浏览工作目录"打开,左侧文件树 / 右侧编辑器(纯 textarea,Monaco 太重).
 // 用户改 SKILL.md / scripts / 配置等任意文本文件直接写盘 —— 适合"调试一个 skill 改个变量
-// 但不想动 system.yaml / 重新部署"的快速迭代场景.
+// 但不想动 troubleshooter.yaml / 重新部署"的快速迭代场景.
 //
 // 范围限制:rootPath 必须是 discover.Scan 出来的真实部署根(后端 binding 强制校验);
 // generator 管理的 tshoot.json / .clawhub/lock.json 后端拒写,UI 直接显示只读.

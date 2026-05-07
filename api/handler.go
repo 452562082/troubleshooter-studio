@@ -19,7 +19,7 @@ type Server struct {
 	TemplateRoot string
 }
 
-// HandleValidate POST /api/validate — body 为 system.yaml 内容
+// HandleValidate POST /api/validate — body 为 troubleshooter.yaml 内容
 func (s *Server) HandleValidate(w http.ResponseWriter, r *http.Request) {
 	cfg, err := loadConfigFromBody(r)
 	if err != nil {
@@ -36,7 +36,7 @@ func (s *Server) HandleValidate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// HandlePrefillCreds POST /api/prefill-creds — body 为 system.yaml 内容,返回 env var key → value
+// HandlePrefillCreds POST /api/prefill-creds — body 为 troubleshooter.yaml 内容,返回 env var key → value
 // (KUBOARD_URL_DEV 这种 install 阶段环境变量名)。空值字段不返。
 func (s *Server) HandlePrefillCreds(w http.ResponseWriter, r *http.Request) {
 	cfg, err := loadConfigFromBody(r)
@@ -47,7 +47,7 @@ func (s *Server) HandlePrefillCreds(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, agent.PrefillCredsFromYAML(cfg))
 }
 
-// HandlePlan POST /api/plan — body 为 system.yaml 内容
+// HandlePlan POST /api/plan — body 为 troubleshooter.yaml 内容
 func (s *Server) HandlePlan(w http.ResponseWriter, r *http.Request) {
 	cfg, err := loadConfigFromBody(r)
 	if err != nil {
@@ -70,7 +70,7 @@ func (s *Server) HandlePlan(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, plan)
 }
 
-// HandleGen POST /api/gen — body 为 system.yaml 内容，返回 GenSummary
+// HandleGen POST /api/gen — body 为 troubleshooter.yaml 内容，返回 GenSummary
 //
 // outDir 走 MkdirTemp + defer RemoveAll —— 跟 HandlePlan 行为对齐。
 // 旧版固定写到 "./dist" 在多用户 / 并发请求场景下会互相覆盖产物 + Summary 失真,
@@ -97,7 +97,7 @@ func (s *Server) HandleGen(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, g.Summary)
 }
 
-// HandleDoctor POST /api/doctor — body 为 system.yaml 内容 + query ?repos_root=
+// HandleDoctor POST /api/doctor — body 为 troubleshooter.yaml 内容 + query ?repos_root=
 func (s *Server) HandleDoctor(w http.ResponseWriter, r *http.Request) {
 	cfg, err := loadConfigFromBody(r)
 	if err != nil {

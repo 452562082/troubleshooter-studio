@@ -14,7 +14,7 @@ import (
 func runDemo(args []string) error {
 	fs := flag.NewFlagSet("demo", flag.ExitOnError)
 	keep := fs.Bool("keep", false, "保留 demo 目录，不自动清理")
-	sysFlag := fs.String("i", "", "可选：自定义 system.yaml（默认 examples/shop-system.yaml）")
+	sysFlag := fs.String("i", "", "可选：自定义 troubleshooter.yaml（默认 examples/shop-troubleshooter.yaml）")
 	reposFlag := fs.String("repos-root", "", "可选：自定义 repos 根目录（默认 examples/fake-repos）")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -25,14 +25,14 @@ func runDemo(args []string) error {
 
 	sysPath := *sysFlag
 	if sysPath == "" {
-		sysPath = filepath.Join(examplesDir, "shop-system.yaml")
+		sysPath = filepath.Join(examplesDir, "shop-troubleshooter.yaml")
 	}
 	reposRoot := *reposFlag
 	if reposRoot == "" {
 		reposRoot = filepath.Join(examplesDir, "fake-repos")
 	}
 	if _, err := os.Stat(sysPath); err != nil {
-		return fmt.Errorf("demo system.yaml 未找到: %s (%w)\n提示：templates / examples 都优先从可执行文件旁 / CWD 取；都不在会从二进制内嵌的 embed.FS extract 出来。", sysPath, err)
+		return fmt.Errorf("demo troubleshooter.yaml 未找到: %s (%w)\n提示：templates / examples 都优先从可执行文件旁 / CWD 取；都不在会从二进制内嵌的 embed.FS extract 出来。", sysPath, err)
 	}
 	if _, err := os.Stat(reposRoot); err != nil {
 		return fmt.Errorf("demo repos-root 未找到: %s (%w)", reposRoot, err)
@@ -50,7 +50,7 @@ func runDemo(args []string) error {
 	}
 
 	fmt.Println("=== tshoot demo ===")
-	fmt.Printf("  system.yaml: %s\n", sysPath)
+	fmt.Printf("  troubleshooter.yaml: %s\n", sysPath)
 	fmt.Printf("  repos-root:  %s\n", reposRoot)
 	fmt.Printf("  demo out:    %s\n", demoDir)
 
@@ -59,7 +59,7 @@ func runDemo(args []string) error {
 	if err != nil {
 		return fmt.Errorf("[1/3] validate 失败: %w", err)
 	}
-	fmt.Println("\n[1/3] validate ✓ system.yaml 结构合法")
+	fmt.Println("\n[1/3] validate ✓ troubleshooter.yaml 结构合法")
 
 	// demo 目录里固定一份产物输出位置
 	outDir := filepath.Join(demoDir, "out")
@@ -100,7 +100,7 @@ func runDemo(args []string) error {
 	fmt.Printf("    %s analyze -i %s --repos-root %s\n", os.Args[0], sysPath, reposRoot)
 	fmt.Println()
 	fmt.Println("  想看 multi-target（claude-code / cursor）各长啥样：")
-	fmt.Println("    在自己的 system.yaml 的 generation.targets 里加上它们，再跑 tshoot gen")
+	fmt.Println("    在自己的 troubleshooter.yaml 的 generation.targets 里加上它们，再跑 tshoot gen")
 	fmt.Println()
 	fmt.Println("  真装到本机(原生 Go,无 bash):")
 	fmt.Printf("    %s install --path %s --target openclaw\n", os.Args[0], outDir)

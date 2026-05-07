@@ -12,7 +12,7 @@ defineEmits<{
   <div class="card lg welcome-card">
     <h2>开始创建机器人</h2>
     <p class="help-text" style="margin-bottom: 24px;">
-      本向导帮你生成 system.yaml 配置 + 一键部署到 OpenClaw / Claude Code / Cursor / Codex CLI。
+      本向导帮你生成 troubleshooter.yaml 配置 + 一键部署到 OpenClaw / Claude Code / Cursor / Codex CLI。
       选下方任一方式开始 —— 草稿会自动保存,中途可关闭 app 下次继续。
     </p>
     <div class="welcome-choices">
@@ -34,7 +34,7 @@ defineEmits<{
       >
         <div class="welcome-choice-icon">📥</div>
         <div class="welcome-choice-text">
-          <strong>导入已有 system.yaml</strong>
+          <strong>导入已有 troubleshooter.yaml</strong>
           <span>有 yaml 文件直接反填到向导,继续编辑调整</span>
         </div>
       </button>

@@ -403,7 +403,7 @@ export async function applyParsedYAMLToWizardState(
         status: 'ok',
         namespaces: Array.from(bucket.ns.entries()).map(([id, show]) => ({ id, show_name: show })),
         entries: Array.from(bucket.entries.values()),
-        notes: ['(基于导入的 system.yaml service_map 合成,后续会跑一次真实 preload 校验)'],
+        notes: ['(基于导入的 troubleshooter.yaml service_map 合成,后续会跑一次真实 preload 校验)'],
         loadedAt: Date.now(),
         synthesized: true,
       }

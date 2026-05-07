@@ -8,7 +8,7 @@
 
 两层项目:
 
-- **上层(此仓库)**:研制环境,做 `system.yaml` 建模、仓库扫描、校验、生成、部署、管理
+- **上层(此仓库)**:研制环境,做 `troubleshooter.yaml` 建模、仓库扫描、校验、生成、部署、管理
 - **下层(产出物)**:完整可运行的排障机器人 —— skill 集合按 yaml 动态裁剪,固定核心 + 按配置 / 数据层 / 可观测性勾选的 runtime-query + 多环境 MCP + 标准故障话术,脱离 studio 独立运行
 
 ## 三个入口
@@ -75,8 +75,8 @@ open dist/TroubleshooterStudio.app
 ```bash
 make                                                       # 等价 go build -o bin/tshoot ./cmd/tshoot
 ./bin/tshoot demo                                          # 零配置:用内置 examples 走完整流程
-./bin/tshoot init -o system.yaml                           # 交互向导生成 yaml
-./bin/tshoot gen -i system.yaml -o ./out                   # 出 staging 产物
+./bin/tshoot init -o troubleshooter.yaml                           # 交互向导生成 yaml
+./bin/tshoot gen -i troubleshooter.yaml -o ./out                   # 出 staging 产物
 ./bin/tshoot install --path ./out --target openclaw        # 装到本机
 ```
 
@@ -126,7 +126,7 @@ repos:
 
 - **wizard 仓库扫描**:扫到 monorepo 信号(`.gitmodules` / workspaces / pom modules)→ 弹"一键拆分"banner,把每个子模块出成独立 repo 条目并设好 `parent_repo`
 - **路径解析(部署期 / analyze 期)**:topological sort 保证 umbrella 先解析,子模块路径自动拼成 `<umbrella 路径>/<parent_path>`,不用每个子模块都重选目录
-- **远程 / 本地两种来源**:导入 `system.yaml` 在新机器部署时,umbrella 子模块强制走 local 模式(代码必须由 umbrella `git submodule update --init` 提供,不能独立 clone),URL 锁死防误改身份
+- **远程 / 本地两种来源**:导入 `troubleshooter.yaml` 在新机器部署时,umbrella 子模块强制走 local 模式(代码必须由 umbrella `git submodule update --init` 提供,不能独立 clone),URL 锁死防误改身份
 - **健康检查**:`parent_repo` 自指 / 引用不存在 / 成环 三种坏配置在 health check 阶段就拦下,有清晰中文提示
 
 跨协议的 git URL 比对内部统一走 `canonicalizeGitURL`,`ssh://git@host:2222/owner/repo.git` 跟 `https://host/owner/repo.git` 视作同仓(`:2222` port 正确剥离)。
@@ -137,7 +137,7 @@ repos:
 |---|---|
 | 🏠 首页 | 概览 + 下一步推荐 |
 | 🤖 已装机器人 | 扫本机部署的机器人,诊断 / 编辑 yaml + 预演 + 应用 / 浏览工作目录 / 重新生成 / 卸载 |
-| 🧙 创建向导 | 10 步表单 → `system.yaml` → 末步一键部署(草稿存 localStorage) |
+| 🧙 创建向导 | 10 步表单 → `troubleshooter.yaml` → 末步一键部署(草稿存 localStorage) |
 | 📝 YAML 沙盒 | yaml 验证 + 健康检查 + 生成计划干跑 + 产物预览 |
 | 🔍 代码扫描 | 扫代码反推服务名 + 配置中心 + 依赖图 + 数据 schema,差异一键回填 yaml |
 | 📜 日志 | 全工作台过程日志(install / analyze / 系统事件) |
@@ -146,7 +146,7 @@ repos:
 
 | 命令 | 功能 |
 |---|---|
-| `init` | 交互式向导生成 `system.yaml` |
+| `init` | 交互式向导生成 `troubleshooter.yaml` |
 | `validate` | 校验语法与字段完整性 |
 | `analyze` | 扫代码:抽 service_names + 配置中心 + 依赖图 + 数据 schema |
 | `plan` / `diff` / `watch` | 干跑预览 / 精确 diff / 文件变化重跑 |
@@ -163,10 +163,10 @@ repos:
 典型流:
 
 ```bash
-./bin/tshoot init -o system.yaml                                # 交互向导
-./bin/tshoot validate -i system.yaml                            # 校验
-./bin/tshoot analyze -i system.yaml --repos-root ./repos -o analysis.json
-./bin/tshoot gen -i system.yaml --analysis analysis.json        # 生成 staging
+./bin/tshoot init -o troubleshooter.yaml                                # 交互向导
+./bin/tshoot validate -i troubleshooter.yaml                            # 校验
+./bin/tshoot analyze -i troubleshooter.yaml --repos-root ./repos -o analysis.json
+./bin/tshoot gen -i troubleshooter.yaml --analysis analysis.json        # 生成 staging
 ./bin/tshoot install --path dist/<id> --target openclaw         # 装机
 ```
 
@@ -176,11 +176,11 @@ repos:
 
 | 端点 | 用法 |
 |---|---|
-| `POST /api/validate` | body=system.yaml,返回是否合规 + 错误位置 + health-check 提示 |
-| `POST /api/plan` | body=system.yaml,返回干跑 gen 摘要(临时目录,自动清) |
-| `POST /api/gen` | body=system.yaml,真跑生成器返回 Summary(stats + 文件清单);**产物写在临时目录用完即删**,不在 server 端持久化 —— 需要拿 staging 走 CLI / 桌面 app |
-| `POST /api/doctor` | body=system.yaml + `?repos_root=<path>`,返回 8 类漂移 |
-| `POST /api/prefill-creds` | body=system.yaml,返回 install 时需要哪些 env var key |
+| `POST /api/validate` | body=troubleshooter.yaml,返回是否合规 + 错误位置 + health-check 提示 |
+| `POST /api/plan` | body=troubleshooter.yaml,返回干跑 gen 摘要(临时目录,自动清) |
+| `POST /api/gen` | body=troubleshooter.yaml,真跑生成器返回 Summary(stats + 文件清单);**产物写在临时目录用完即删**,不在 server 端持久化 —— 需要拿 staging 走 CLI / 桌面 app |
+| `POST /api/doctor` | body=troubleshooter.yaml + `?repos_root=<path>`,返回 8 类漂移 |
+| `POST /api/prefill-creds` | body=troubleshooter.yaml,返回 install 时需要哪些 env var key |
 | `GET /api/schema` | 返回 `system.schema.yaml`(给前端做字段提示) |
 
 body size 限制 1 MB(超限 400);所有 handler 无鉴权,自部署到内网。
@@ -189,7 +189,7 @@ CI 示例:
 
 ```bash
 curl -fsS -X POST -H "Content-Type: text/yaml" \
-  --data-binary @system.yaml \
+  --data-binary @troubleshooter.yaml \
   "http://localhost:8080/api/doctor?repos_root=/path/to/code"
 ```
 
@@ -222,7 +222,7 @@ skill 集合**按 yaml 动态裁剪**,产物的真源在 [`templates/workspace/s
 
 ## Doctor 漂移检测
 
-8 种规则:`missing-repo` / `origin-mismatch` / `stack-mismatch` / `service-drift` / `config-center-drift` / `config-center-unused` / `data-store-unused` / `undeclared-env-profile`。每条 issue 带可执行修复建议;机器可处理的走 `--fix` 行级精确替换(其他行 bit-perfect 保留,自动备份到 `system.yaml.bak.<ts>`)。
+8 种规则:`missing-repo` / `origin-mismatch` / `stack-mismatch` / `service-drift` / `config-center-drift` / `config-center-unused` / `data-store-unused` / `undeclared-env-profile`。每条 issue 带可执行修复建议;机器可处理的走 `--fix` 行级精确替换(其他行 bit-perfect 保留,自动备份到 `troubleshooter.yaml.bak.<ts>`)。
 
 ## 构建
 
@@ -249,7 +249,7 @@ cmd/tshoot-desktop/     Wails v2 桌面 app(Wails binding 走 cmd/tshoot-desktop
 api/                    HTTP handler(tshoot serve)
 web/                    Vue 3 + Vite 前端
 internal/
-  config/               system.yaml schema + 加载校验
+  config/               troubleshooter.yaml schema + 加载校验
   analyzer/             5 栈 × 6 配置源仓库扫描
   analyzerpipe/         pipeline 编排 + auto-clone
   generator/            模板渲染 + config-map snapshot + diff + plan + IDE 三家 agent 原生 prompt
@@ -271,7 +271,7 @@ internal/
   userconfig/           ~/.tshoot/config.json 用户偏好(全局 reposRoot 等)
   watcher/              文件系统轮询监听(给 tshoot watch)
 templates/              workspace/(机器人模板)
-examples/               system.yaml 示例 × 多种架构 + fake-repos
+examples/               troubleshooter.yaml 示例 × 多种架构 + fake-repos
 schema/system.schema.yaml
 ```
 

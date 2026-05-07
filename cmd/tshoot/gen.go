@@ -14,7 +14,7 @@ import (
 
 func runGen(args []string) error {
 	fs := flag.NewFlagSet("gen", flag.ExitOnError)
-	input := fs.String("i", "", "system.yaml 路径 (必填)")
+	input := fs.String("i", "", "troubleshooter.yaml 路径 (必填)")
 	output := fs.String("o", "", "输出目录 (默认 ./dist)")
 	tmplDir := fs.String("t", "", "模板根目录 (默认: 可执行文件旁的 templates/)")
 	analysisFile := fs.String("analysis", "", "可选：analyzer 产出的 analysis.json，用于升级 config-map 的 inferred 行为 verified")
@@ -134,7 +134,7 @@ func runGen(args []string) error {
 	if hasOpenclaw {
 		fmt.Printf("[ok] generated to %s\n", outDir)
 		fmt.Printf("下一步：tshoot install --path '%s' --target openclaw [--env-file <.env>]\n", outDir)
-		fmt.Printf("     或：先看变化 tshoot diff -i <system.yaml>\n")
+		fmt.Printf("     或：先看变化 tshoot diff -i <troubleshooter.yaml>\n")
 	} else {
 		// openclaw 未在 targets 中：outDir 本身不会被创建，只有 <outDir>-<target>/ 兄弟目录
 		fmt.Printf("[ok] generation complete (openclaw target not requested)\n")

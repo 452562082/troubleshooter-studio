@@ -682,8 +682,18 @@ function removeRepo(idx: number) {
 // 给 RepoListItem 的 × 按钮判定 disabled:本仓是 umbrella + 还有 child 引用时禁删
 function isRepoDeletable(r: RepoItem): boolean {
   if (repos.length <= 1) return false
-  const childCount = repos.filter(rr => (rr.parent_repo || '').trim() === r.name.trim()).length
-  return childCount === 0
+  return countUmbrellaChildren(r) === 0
+}
+
+// 给 RepoListItem 的 URL / source toggle / 路径 picker 判定:本仓是 umbrella +
+// 有 child 引用时,身份字段(URL / 本地路径 / clone 父目录 / source 切换)必须锁住,
+// 否则用户改 URL / 切到别的本地目录 → umbrella 指向另一个项目 → children 路径定位
+// 全部错位(parent_repo 引用本仓 name 不会跟着变)。要改身份必须先删干净 children。
+function countUmbrellaChildren(r: RepoItem): number {
+  return repos.filter(rr => (rr.parent_repo || '').trim() === r.name.trim()).length
+}
+function isUmbrellaWithChildren(r: RepoItem): boolean {
+  return countUmbrellaChildren(r) > 0
 }
 
 // Sync env_branches keys when environments change
@@ -2988,6 +2998,7 @@ provide(WizardStoreKey, {
         :index="i"
         :environments="environments"
         :can-remove="isRepoDeletable(repo)"
+        :umbrella-children-count="countUmbrellaChildren(repo)"
         :svc-add-inputs="svcAddInputs"
         :repo-branches-map="repoBranchesMap"
         :repos-root-input="reposRootInput"

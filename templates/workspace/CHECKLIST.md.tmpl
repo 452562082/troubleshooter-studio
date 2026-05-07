@@ -11,6 +11,15 @@
 - [ ] 已通过 `routing` 确认目标分支
 - [ ] 已切到目标分支并 `git pull --ff-only`
 - [ ] 已记录分析基线 commit hash
+{{- $hasUmbrella := false -}}
+{{- range .Repos -}}{{- if .ParentRepo -}}{{- $hasUmbrella = true -}}{{- end -}}{{- end }}
+{{- if $hasUmbrella }}
+
+> **本系统有 umbrella + 子模块关系**(看 `repo-stack-map.yaml` 里的 `parent_repo` 字段)。子模块代码躺在 `<umbrella-clone>/<parent_path>`,production 跑的是 umbrella git submodule pin 的 commit,**不是子模块自己 main 分支的 HEAD**。代码基线要按下面这样取:
+> - **要排障的是 umbrella 子模块** → 在 **umbrella 仓**目录跑 `git fetch --all && git pull --ff-only && git submodule update --init --recursive`,子模块自动 checkout 到 umbrella 当前 pin 的 commit。**不要单独 cd 进子模块跑 git pull**(会拉到子模块自己的最新 HEAD,跟 production 实际部署的 commit 不一致,代码定位错位)
+> - **要看子模块自己 main 分支的最新代码**(比如对照 PR 是不是已 merge)→ 才单独 cd 子模块 `git fetch && git log origin/main`,但分析时仍以 umbrella pin 的 commit 为准
+> - 记 baseline 时同时记 umbrella commit + 子模块 commit 两个 hash
+{{- end }}
 
 ## 3) 取证链路确认
 {{- if or (eq .Infrastructure.PrimaryConfigCenter.Type "nacos") (eq .Infrastructure.PrimaryConfigCenter.Type "apollo") (eq .Infrastructure.PrimaryConfigCenter.Type "consul")}}

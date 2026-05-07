@@ -874,9 +874,13 @@ function setRepoSource(r: RepoItem, src: 'local' | 'remote') {
   const restored = r._sourceCache[src]
   // umbrella 子模块(parent_repo 在场)的"身份"由 parent_repo + parent_path 锁定,
   // 切源只是"换个访问方式"(URL clone / 本地已有目录),name / stack / role / 服务名 /
-  // 分支映射这些都不该丢。普通独立仓库(parent_repo 空)切源仍可能是"换仓库"语义,
-  // 保留旧行为(全清,等用户重扫填回)。
+  // 分支映射这些都不该丢。
+  // umbrella 父行(被 child 引用)同理 —— URL 是 child path 解析的真源,绝不能被 source
+  // 切换搞丢(否则 resolveLocalRepoPath 校验 r.url.trim() 失效,用户选啥目录都过)。
+  // 普通独立仓库(parent_repo 空 + 没人引用本仓)切源仍可能是"换仓库"语义,保留旧行为
+  // (全清,等用户重扫填回)。
   const isUmbrellaChild = !!(r.parent_repo && r.parent_repo.trim())
+  const isUmbrellaParent = repos.some(rr => (rr.parent_repo || '').trim() === r.name.trim())
   if (restored) {
     r.url = restored.url
     r.name = restored.name
@@ -894,18 +898,17 @@ function setRepoSource(r: RepoItem, src: 'local' | 'remote') {
     r._scanned = restored._scanned
     r._scannedSource = restored._scannedSource
     r._serviceEntries = restored._serviceEntries
-  } else if (isUmbrellaChild) {
-    // umbrella 子模块首次切源:身份字段全保留,只清"源访问方式"相关 + 扫描态。
-    // _localPath 已经被 splitMonorepo 预填到 <umbrella>/<parent_path>;切到 local 模式
-    // 直接生效,切到 remote 也照常走 url + 父仓 clone 落点拼,所以这里都不动它。
+  } else if (isUmbrellaChild || isUmbrellaParent) {
+    // umbrella 子模块 / 父行首次切源:身份字段全保留(URL / name / role / 服务名 /
+    // 分支映射),只清"源访问方式"相关 + 扫描态。
+    //   - 子模块:身份由 parent_repo + parent_path 锁定
+    //   - 父行:URL 是 child path 解析的真源,被 readonly 锁;切源时也不能丢
+    // 切到 local 模式时 _cloneTarget 清掉(local 不 clone);切到 remote 模式 _localPath
+    // 留着(子模块场景的预填值仍然有用;父行场景下父行的 _localPath 是用户自己挑的副本,
+    // 切回 remote 也保留作为已有副本的提示)。
     if (src === 'local') {
-      // local 模式不需要 _cloneTarget(本地已有,不 clone)
       r._cloneTarget = ''
-    } else {
-      // remote 模式 _cloneTarget 留空表示"走父仓的 clone 父目录或全局默认 reposRoot"
-      // _localPath 留着,作为"已有本地副本可用"的优化(refresh helpers / scanSingleRepo 优先)
     }
-    // 切源后扫描态过期(scan 看的是 path,源换了重新扫一次更稳),但不清 url / name 等身份
     r._scanned = false
     r._scannedSource = ''
     r._scanError = undefined

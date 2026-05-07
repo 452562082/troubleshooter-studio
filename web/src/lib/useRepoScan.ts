@@ -441,7 +441,14 @@ export function useRepoScan(deps: RepoScanDeps) {
         for (const child of deps.repos) {
           if ((child.parent_repo || '').trim() === r.name.trim()) {
             const sub = ((child.parent_path || '').trim() || child.name.trim()).replace(/^\/+/, '')
-            child._localPath = umbrellaPath.replace(/\/+$/, '') + '/' + sub
+            const newPath = umbrellaPath.replace(/\/+$/, '') + '/' + sub
+            if (child._localPath !== newPath) {
+              // path 变了 → 旧扫描结果(stack/分支/服务名)可能 stale,清扫描态让 UI
+              // 提示用户重扫。同 path 反复 scan 不影响(no-op,_scanned 保留)
+              child._localPath = newPath
+              child._scanned = false
+              child._scannedSource = ''
+            }
           }
         }
       }

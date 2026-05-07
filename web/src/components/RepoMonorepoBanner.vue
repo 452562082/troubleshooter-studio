@@ -172,4 +172,14 @@ const emit = defineEmits<{
   border-radius: 3px;
   vertical-align: middle;
 }
+
+/* macOS WebKit 下 native checkbox 在暗色主题 + DOM :checked vs 用户交互 state 之间
+ * 渲染不一致(同样都是 checked,有的显示蓝底白勾、有的只显示灰勾无底)。强制 accent-color
+ * + 固定大小,所有勾选按钮视觉一致。 */
+.monorepo-banner-list input[type="checkbox"] {
+  accent-color: #3b82f6;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
 </style>

@@ -12,6 +12,7 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 	"github.com/xiaolong/troubleshooter-studio/internal/userconfig"
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // ApplyBot 把新的 system.yaml 应用到已装机器人的活 workspace:
@@ -84,6 +85,13 @@ func (a *App) ImportAndDeploy(yamlText, target, destPath string, repoPaths map[s
 		RepoLocalPaths:    expanded,
 		IDECreds:          ideCreds, // claude-code/cursor 装完直接注入 mcpServers 用
 		CustomInstallRoot: cir,
+		// 部署进度透传到前端:复用已有 install:log channel(logStore 全局订阅),
+		// 不必新增 event 类型。当前主要给 mcp-grafana 二进制下载用,首次部署 30 MiB
+		// 不让 UI 看起来死锁。前缀 [target=xxx] 让用户多 target 并发部署能区分来源。
+		OnLog: func(line string) {
+			wailsruntime.EventsEmit(a.ctx, "install:log",
+				fmt.Sprintf("[target=%s] %s", target, line))
+		},
 	})
 }
 

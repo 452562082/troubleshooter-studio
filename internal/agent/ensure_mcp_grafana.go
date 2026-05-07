@@ -43,13 +43,23 @@ func mcpGrafanaBinPath(root string) string {
 // 拼 GitHub release URL 下载 tarball + 解压。失败返回 error,调用方决定是 fallback 到
 // npx 还是中断装机。
 //
+// onProgress(可空)在关键节点回调一行说明,desktop binding 把它接到 wails event
+// "install:log" → UI 部署进度区显示;CLI 可以接 stderr。nil 时无 effect,纯 stderr
+// 兜底打印保留。
+//
 // 不做 SHA256 校验:GitHub release 走 HTTPS,中间人风险已经被 TLS 卡住;再加校验值得不偿失
 // (要么 hardcode 跟版本绑死,要么再发起一次请求拉 checksums.txt,工程量翻倍收益微小)。
-func EnsureMCPGrafanaBinary(root string) (string, error) {
+func EnsureMCPGrafanaBinary(root string, onProgress func(string)) (string, error) {
+	emit := func(line string) {
+		if onProgress != nil {
+			onProgress(line)
+		}
+	}
 	dst := mcpGrafanaBinPath(root)
 	// 简单校验:是 Mach-O / ELF 而不是空文件 / 0 字节。size > 1 MiB 就够说明是真二进制。
 	// 不到阈值的残文件后面 OpenFile(O_TRUNC) 会自动覆盖,无需先 Remove。
 	if info, err := os.Stat(dst); err == nil && !info.IsDir() && info.Size() > 1<<20 {
+		emit(fmt.Sprintf("[mcp-grafana] 复用本机已有二进制 %s", dst))
 		return dst, nil
 	}
 
@@ -66,17 +76,22 @@ func EnsureMCPGrafanaBinary(root string) (string, error) {
 		return "", fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
 	}
 
-	// 下载前 emit 一行可见提示(stderr):desktop app 用户至少能从启动终端看到"在拉",
-	// CLI install 也能看到。失败也走 stderr 走 npx 兜底,不阻塞。
-	fmt.Fprintf(os.Stderr,
-		"[install] 下载 mcp-grafana %s 二进制(~30 MiB,首次部署可能耗时 1-3 分钟):%s\n",
-		MCPGrafanaPinnedVersion, url)
+	// 下载前 emit 一行可见提示(同时发到 progress callback + stderr):
+	// - progress callback → desktop UI 部署进度区
+	// - stderr            → CLI / desktop app 启动终端
+	// 两条路双保险,不依赖具体 caller。
+	hint := fmt.Sprintf(
+		"[mcp-grafana] 下载 %s 二进制(~30 MiB,首次部署可能耗时 1-3 分钟,慢网最长等 5 min 后自动降级到 npx)",
+		MCPGrafanaPinnedVersion)
+	emit(hint)
+	fmt.Fprintf(os.Stderr, "[install] %s:%s\n", hint, url)
 	if err := downloadAndExtractMCPGrafana(url, dst); err != nil {
 		return "", fmt.Errorf("download mcp-grafana from %s: %w", url, err)
 	}
 	if err := os.Chmod(dst, 0o755); err != nil {
 		return "", fmt.Errorf("chmod %s: %w", dst, err)
 	}
+	emit(fmt.Sprintf("[mcp-grafana] 已安装 %s", dst))
 	return dst, nil
 }
 

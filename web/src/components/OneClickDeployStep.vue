@@ -14,6 +14,9 @@ defineProps<{
   deploySummary: DeploySummaryItem[]
   deployLoading: boolean
   deployError: string | null
+  // deployProgressLine 后端透过来的最近一行进度(主要是 mcp-grafana 下载状态)。
+  // 部署中(deployLoading=true)时显示在按钮下方,告诉用户"在干嘛"避免误判卡死。
+  deployProgressLine?: string
 }>()
 
 defineEmits<{
@@ -48,7 +51,42 @@ defineEmits<{
           {{ deployLoading ? '部署中…' : `🚀 部署到 ${deploySummary.length} 个目标` }}
         </button>
       </div>
+      <div v-if="deployLoading && deployProgressLine" class="deploy-progress-line">
+        <span class="deploy-progress-dot" />
+        <span class="deploy-progress-text">{{ deployProgressLine }}</span>
+      </div>
       <div v-if="deployError" class="alert error">{{ deployError }}</div>
     </div>
   </div>
 </template>
+
+<style scoped>
+.deploy-progress-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 12px;
+  background: #f5f7fa;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #555;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.deploy-progress-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #4a90e2;
+  flex-shrink: 0;
+  animation: deploy-pulse 1.2s ease-in-out infinite;
+}
+.deploy-progress-text {
+  flex: 1;
+  word-break: break-all;
+}
+@keyframes deploy-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+</style>

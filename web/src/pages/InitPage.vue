@@ -2776,6 +2776,7 @@ const {
   deployLoading,
   deployError,
   deploySummary,
+  deployProgressLine,
   targetDeployPaths,
   targetDeployPathHints,
   runOneClickDeploy,
@@ -3149,6 +3150,7 @@ provide(WizardStoreKey, {
       v-if="currentStep === 10"
       :deploy-summary="deploySummary"
       :deploy-loading="deployLoading"
+      :deploy-progress-line="deployProgressLine"
       :deploy-error="deployError"
       @run-deploy="runOneClickDeploy"
     />

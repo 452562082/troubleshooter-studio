@@ -40,12 +40,15 @@ import (
 // 桌面端 wizard 通过 buildOpenclawCreds() 拼出来传过来;CLI 没 creds 时传 nil,
 // 注入的 env 字段值会变成 {{ENV_VAR}} 占位符让用户手填。
 func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[string]string) error {
-	return MergeMCPIntoIDESettingsAt(target, cfg, creds, "")
+	return MergeMCPIntoIDESettingsAt(target, cfg, creds, "", nil)
 }
 
 // MergeMCPIntoIDESettingsAt 跟 MergeMCPIntoIDESettings 同,只是允许指定 IDE 安装根目录。
 // customRoot 非空时 settings 落到 <customRoot>/<settingsFile>;空时回退默认 ~/.<target>。
-func MergeMCPIntoIDESettingsAt(target string, cfg *config.SystemConfig, creds map[string]string, customRoot string) error {
+//
+// onProgress(可空)透传给 EnsureMCPGrafanaBinary,首次部署下载 mcp-grafana 二进制
+// 时会回调进度;一键部署 desktop binding 把它接到 wails event "install:log"。
+func MergeMCPIntoIDESettingsAt(target string, cfg *config.SystemConfig, creds map[string]string, customRoot string, onProgress func(string)) error {
 	// creds=nil → BotsPage 重生成 / CLI install 无凭证场景,直接跳过。
 	// 走下去会拿空值覆盖初次 wizard 部署时写入的真凭证,把整个连接断掉。
 	if creds == nil {
@@ -78,7 +81,7 @@ func MergeMCPIntoIDESettingsAt(target string, cfg *config.SystemConfig, creds ma
 	// 不替换的话 settings.json/agent toml 里就直接写 "__GRAFANA_MCP_BIN__",MCP 启动必失败)。
 	// 下载失败 → 退化到 npx 兜底(打印警告,不阻塞 install)。
 	if hasGrafanaPlaceholder(servers) {
-		if binPath, err := EnsureMCPGrafanaBinary(root); err == nil {
+		if binPath, err := EnsureMCPGrafanaBinary(root, onProgress); err == nil {
 			replaceGrafanaWithBinary(servers, binPath)
 		} else {
 			fmt.Fprintf(os.Stderr,

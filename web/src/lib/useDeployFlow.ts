@@ -17,6 +17,7 @@
 // openclaw RunInstall 失败 → 保留中间包,toast 提示用户去 BotsPage 补凭证。
 import { computed, ref, type ComputedRef, type Ref } from 'vue'
 import type { Router } from 'vue-router'
+import { EventsOn } from '../../wailsjs/runtime/runtime'
 import {
   defaultDestPath, importAndDeploy, runInstall, selfTestAgent,
   validate as bridgeValidate, isDesktop,
@@ -73,6 +74,10 @@ export interface UseDeployFlowDeps {
 export function useDeployFlow(deps: UseDeployFlowDeps) {
   const deployLoading = ref(false)
   const deployError = ref<string | null>(null)
+  // deployProgressLine 部署进度的最近一行(后端 OnLog 透 wails event "install:log" 推上来)。
+  // 主要给 mcp-grafana 二进制下载用,首次部署 ~30 MiB,UI 不显示就让人误以为卡死。
+  // logStore 也存了一份(全局日志面板),这里只是给 InitPage loading 状态做"实时一行"提示。
+  const deployProgressLine = ref<string>('')
 
   // 部署路径展示:Step 2 卡片要让用户看到"AI 平台最终从哪儿读 agent",
   // 因此这里展示的是 install.sh 跑完后的最终落地路径,不是中间包路径。
@@ -242,6 +247,15 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
       return
     }
     deployLoading.value = true
+    deployProgressLine.value = '正在准备部署…'
+    // 订阅本次部署期间的 install:log。EventsOn 返回 unlisten,finally 里调一次防泄漏。
+    // logStore 的全局桥接也在收同一个 event,不冲突(用途不同:logStore 累积全部、这里只
+    // 反映"最新一行"做实时提示)。
+    const unlisten = EventsOn('install:log', (line: string) => {
+      if (typeof line === 'string' && line.trim()) {
+        deployProgressLine.value = line
+      }
+    })
     try {
       // 构造 repoPaths(三个 target 共用同一份本机仓库路径表)。
       // 解析优先级跟 analyzerpipe.Run / useRepoScan refresh helpers 完全一致:
@@ -376,6 +390,7 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
       deployError.value = String(e?.message || e)
     } finally {
       deployLoading.value = false
+      try { unlisten?.() } catch { /* unlisten 失败无害 */ }
     }
   }
 
@@ -383,6 +398,7 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
     deployLoading,
     deployError,
     deploySummary,
+    deployProgressLine,
     targetDeployPaths,
     targetDeployPathHints,
     runOneClickDeploy,

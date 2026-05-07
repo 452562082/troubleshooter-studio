@@ -120,6 +120,14 @@ desktop-app: desktop
 	 ICON_SRC=cmd/tshoot-desktop/build/appicon.png \
 	 bash scripts/package-macos.sh
 
+# ── .dmg 安装包(macOS 标准分发格式,系统自带 hdiutil 不依赖 brew)──────
+# 双击 .dmg 挂载 → 拖 .app 到 Applications 软链 → 装机完成,Launchpad/Spotlight 直接搜
+DMG_OUT := dist/$(BUNDLE_NAME)-$(VERSION).dmg
+.PHONY: desktop-dmg
+desktop-dmg: desktop-app
+	@APP_BUNDLE=$(BUNDLE_DIR) VOLUME_NAME=$(BUNDLE_NAME) DMG_OUT=$(DMG_OUT) \
+	 bash scripts/package-dmg.sh
+
 # ── 快速试跑:build 后立即 demo ──────────────────────────────────
 .PHONY: demo
 demo: build

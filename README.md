@@ -188,6 +188,7 @@ skill 集合**按 yaml 动态裁剪**,产物的真源在 [`templates/workspace/s
 make              # CLI:bin/tshoot(等价 go build ./cmd/tshoot)
 make web          # 前端 dist → internal/webui/dist/(go:embed 进二进制)
 make desktop-app  # 桌面 .app bundle:dist/TroubleshooterStudio.app(默认推荐,Finder 双击 / open 启动无终端)
+make desktop-dmg  # 把 .app 打成 .dmg 安装包:dist/TroubleshooterStudio-<ver>.dmg(分发用,用户双击挂载 → 拖到 Applications)
 make desktop      # 桌面裸二进制:bin/tshoot-desktop(开发者用,直接跑会关联 Terminal)
 make release      # 多平台交叉编译 darwin/linux × amd64/arm64 → dist/bin/
 make test         # go test -race -cover ./...

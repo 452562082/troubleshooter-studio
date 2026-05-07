@@ -246,8 +246,18 @@ export async function applyParsedYAMLToWizardState(
     // 2. 少数 umbrella 自身有运行的 service(典型:truss 既是 gateway 服务又是
     //    commerce/api/... 的 umbrella),用户在 yaml 里显式写 service_names: [truss]
     //    → 必须尊重,不能 import 时就被清掉
-    // 用户 stale yaml(老版本 splitMonorepo 没清 umbrella service_names)看到 truss
-    // 出现在 Step 6 服务列表里 → 在 Step 4 truss 行的服务名 chip 里点 × 删一下即可
+    //
+    // **但**:role 跟 service_names 必须一致(syncServiceNamesWithRole 的 yaml-side
+    // 镜像)。非业务服务角色(common-lib / docs / infra / frontend / mobile)即便
+    // yaml 里有 service_names 也清掉 —— allServiceNames 就不会出 "frontend 仓的
+    // 名字当成服务" 这种噪音。常见场景:用户改 role=docs 后导出 yaml,但 service_names
+    // 残留(比如老版本 wizard 没自动清,或手编辑 yaml 漏)。
+    const NON_SERVICE_ROLES = new Set(['common-lib', 'docs', 'infra', 'frontend', 'mobile'])
+    for (const r of ctx.repos as any[]) {
+      if (NON_SERVICE_ROLES.has((r.role || '').trim())) {
+        r.service_names = ''
+      }
+    }
     // 后台拉真实分支:不阻塞 applyImport 同步返回
     for (const { name, path } of localPathsToFetch) {
       ctx.listBranchesForRepo(path).then((bs) => {

@@ -60,6 +60,7 @@ import { useKuboardPreload } from '../lib/useKuboardPreload'
 import { useDataStoreState } from '../lib/useDataStoreState'
 import { useImportCrossCheck } from '../lib/useImportCrossCheck'
 import { useDeployFlow } from '../lib/useDeployFlow'
+import { migrateSavedStep, useStepNavigation } from '../lib/useStepNavigation'
 import { useImportFlow } from '../lib/useImportFlow'
 import { useDataStoreScan } from '../lib/useDataStoreScan'
 import { useMonorepoHints } from '../lib/useMonorepoHints'
@@ -77,14 +78,12 @@ const saved = loadInitWizardDraft()
 const savedKuboardState = loadInitKuboardState()
 
 // ── Step management ──
-// wizardSchema=2 起 step 1 是欢迎页;老 saved(无 wizardSchema)的 currentStep 需 +1 迁移。
-const _savedSchema: number = saved?.wizardSchema ?? 1
-const currentStep = ref<number>(
-  saved?.currentStep != null
-    ? Math.min(_savedSchema >= 2 ? saved.currentStep : saved.currentStep + 1, 10)
-    : 1,
-)
+// 跳转 / 钳制 / schema 迁移在 lib/useStepNavigation.ts(纯逻辑 + 单测覆盖);
+// canGoNext / nextBlockedHint / currentStepErrors 因为依赖 30+ reactive,**留 InitPage**
+// 自己 computed,通过 props 喂给 navigation composable。InitPage 想直接读写 currentStep
+// 也行(ref 透出来了)。
 const totalSteps = 10
+const currentStep = ref<number>(migrateSavedStep(saved?.currentStep, saved?.wizardSchema, totalSteps))
 const stepTitles = [
   '开始',          // Step 1:欢迎页(导入 yaml / 从零开始)
   '系统基本信息',
@@ -2639,59 +2638,17 @@ function hasError(field: string): boolean {
   return validationErrors.value.has(field)
 }
 
+// nextStep / prevStep / goToStep / clampCurrentStep 在 lib/useStepNavigation.ts(纯逻辑 +
+// 单测覆盖)。这里把 currentStep + canGoNext 喂进去,onError 注入 pushLog,拿 helpers 出来用。
+//
 // nextStep / goToStep 不再内联调 generateYAML —— 已被 watch(currentStep) 接管(见上面),
 // 那个 watch 带 try/catch 兜底,不会让一次抛错把整个 InitPage 渲染挂掉(老路径会白屏)。
-//
-// 越界保护:无论怎么进入,都把 currentStep 钳在 [1, totalSteps] —— 防止异常状态(比如 saved
-// draft 损坏)让 v-if 全部 false 导致内容区白屏。
-function clampCurrentStep() {
-  if (typeof currentStep.value !== 'number' || isNaN(currentStep.value)) {
-    currentStep.value = 1
-    return
-  }
-  if (currentStep.value < 1) currentStep.value = 1
-  else if (currentStep.value > totalSteps) currentStep.value = totalSteps
-}
-
-function nextStep() {
-  try {
-    if (!canGoNext.value) return
-    if (currentStep.value < totalSteps) {
-      currentStep.value++
-    }
-    clampCurrentStep()
-  } catch (e) {
-    pushLog('cchub', 'error', `nextStep 失败: ${String((e as any)?.message || e)}`)
-    clampCurrentStep()
-  }
-}
-
-function prevStep() {
-  try {
-    // 回退不校验,自由退
-    if (currentStep.value > 1) currentStep.value--
-    clampCurrentStep()
-  } catch (e) {
-    pushLog('cchub', 'error', `prevStep 失败: ${String((e as any)?.message || e)}`)
-    clampCurrentStep()
-  }
-}
-
-function goToStep(step: number) {
-  try {
-    // 倒退随意;前进必须当前步无 error
-    if (step < currentStep.value) {
-      currentStep.value = step
-    } else if (step > currentStep.value && canGoNext.value) {
-      // 允许跳多步,但中间每步都得满足(这里只检查当前步;严谨版可以逐步 validate,先简单化)
-      currentStep.value = step
-    }
-    clampCurrentStep()
-  } catch (e) {
-    pushLog('cchub', 'error', `goToStep(${step}) 失败: ${String((e as any)?.message || e)}`)
-    clampCurrentStep()
-  }
-}
+const { clampCurrentStep, nextStep, prevStep, goToStep } = useStepNavigation({
+  currentStep,
+  totalSteps,
+  canAdvance: canGoNext,
+  onError: (msg) => pushLog('cchub', 'error', msg),
+})
 
 // 防白屏兜底:子组件 / step 模板渲染抛错时,Vue 默认把整个 InitPage 子树清空,
 // 用户只看见侧栏 + 一片白。捕获后展示明确错误 + 提供"回到 Step 1"按钮自救,

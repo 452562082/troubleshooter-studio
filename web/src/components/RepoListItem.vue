@@ -132,35 +132,33 @@ const emit = defineEmits<{
     <!-- 来源切换:
          - umbrella 子模块(parent_repo 在场)→ 锁死 '本地已有'(代码已被 umbrella 的
            git submodule 拉到本地,不能独立 clone)
-         - umbrella 父行(有 N 个子模块引用本仓 parent_repo)→ 锁两边(改了 umbrella 的
-           身份会让 child path 全部错位,先删 child 再来) -->
+         - umbrella 父行(有 N 个子模块引用本仓 parent_repo)→ 不锁,但显眼警告
+           '改身份必须仍指向同一份代码,否则 child path 错位'(留 flexibility 让用户
+           切'本地已有'指自己已 clone 的副本) -->
+    <div v-if="umbrellaChildrenCount > 0" class="umbrella-warn">
+      ⚠ 本仓是 {{ umbrellaChildrenCount }} 个子模块的 umbrella。改 URL / 切 source / 重选路径**必须仍指向同一份代码**(同一个 git repo),否则 child path 会错位 —— 子模块代码定位会跑到错误的 umbrella 副本里。
+    </div>
     <div class="form-group">
       <label>仓库来源</label>
       <div class="source-toggle">
         <label
           class="source-option"
-          :class="{ selected: repo._source === 'remote', disabled: !!repo.parent_repo || umbrellaChildrenCount > 0 }"
-          :title="repo.parent_repo
-            ? `umbrella ${repo.parent_repo} 的子模块代码已通过 git submodule 拉到本地,不能独立配 URL clone。如需独立 clone,先点 header 上 🌂 旁的 🗑 解除关联`
-            : (umbrellaChildrenCount > 0 ? `本仓是 ${umbrellaChildrenCount} 个子模块的 umbrella,改 source / URL / 路径会让 child path 全部错位。先删 child 再改身份` : '')"
+          :class="{ selected: repo._source === 'remote', disabled: !!repo.parent_repo }"
+          :title="repo.parent_repo ? `umbrella ${repo.parent_repo} 的子模块代码已通过 git submodule 拉到本地,不能独立配 URL clone。如需独立 clone,先点 header 上 🌂 旁的 🗑 解除关联` : ''"
         >
           <input
             type="radio"
             :checked="repo._source === 'remote'"
-            :disabled="!!repo.parent_repo || umbrellaChildrenCount > 0"
+            :disabled="!!repo.parent_repo"
             @change="emit('setSource', repo, 'remote')"
           />
           <span class="source-title">🌐 远程 URL</span>
           <span class="source-hint">填 git URL,扫描时 clone 到本地</span>
         </label>
-        <label
-          class="source-option"
-          :class="{ selected: repo._source === 'local', disabled: umbrellaChildrenCount > 0 }"
-        >
+        <label class="source-option" :class="{ selected: repo._source === 'local' }">
           <input
             type="radio"
             :checked="repo._source === 'local'"
-            :disabled="umbrellaChildrenCount > 0"
             @change="emit('setSource', repo, 'local')"
           />
           <span class="source-title">📁 本地已有</span>
@@ -173,27 +171,20 @@ const emit = defineEmits<{
     <template v-if="repo._source === 'remote'">
       <div class="form-group">
         <label>仓库地址 <span class="required">*</span>
-          <span class="field-hint">
-            <template v-if="umbrellaChildrenCount > 0">— 本仓是 {{ umbrellaChildrenCount }} 个子模块的 umbrella,改 URL 会让 child path 全部错位。先删 child 再改</template>
-            <template v-else>— 仓库名从 URL 自动推;扫描前需要 clone 到本地</template>
-          </span>
+          <span class="field-hint">— 仓库名从 URL 自动推;扫描前需要 clone 到本地</span>
         </label>
         <input
           v-model="repo.url"
           type="text"
           placeholder="git@github.com:org/order-service.git"
           :class="{ error: hasError(`repo.${index}.url`) }"
-          :readonly="umbrellaChildrenCount > 0"
           @input="emit('urlInput', repo)"
         />
       </div>
       <div class="form-group">
         <label>
           Clone 父目录
-          <span class="field-hint">
-            <template v-if="umbrellaChildrenCount > 0">— 本仓是 umbrella,改 clone 父目录会影响 {{ umbrellaChildrenCount }} 个子模块的部署位置。先删 child 再改</template>
-            <template v-else>— 选填,不填用全局默认。git clone 会建 <code>/{{ repo.name || '&lt;repo.name&gt;' }}</code> 子目录</template>
-          </span>
+          <span class="field-hint">— 选填,不填用全局默认。git clone 会建 <code>/{{ repo.name || '&lt;repo.name&gt;' }}</code> 子目录</span>
         </label>
         <div class="path-input-row">
           <input
@@ -204,11 +195,11 @@ const emit = defineEmits<{
             class="path-readonly"
             :title="repo._cloneTarget ? `父目录: ${repo._cloneTarget}\n实际仓库: ${resolveCloneDest(repo)}` : ''"
           />
-          <button v-if="umbrellaChildrenCount === 0" type="button" class="btn" @click="emit('pickCloneTarget', repo)">
+          <button type="button" class="btn" @click="emit('pickCloneTarget', repo)">
             {{ repo._cloneTarget ? '重新选…' : '选目录…' }}
           </button>
           <button
-            v-if="repo._cloneTarget && umbrellaChildrenCount === 0"
+            v-if="repo._cloneTarget"
             type="button"
             class="btn-link cc-delete"
             title="清空自定义目标,回到默认目录"
@@ -257,12 +248,7 @@ const emit = defineEmits<{
             class="path-readonly"
             :title="repo._localPath || ''"
           />
-          <button
-            v-if="!repo.parent_repo && umbrellaChildrenCount === 0"
-            type="button"
-            class="btn"
-            @click="emit('pickLocalRepoDir', repo)"
-          >
+          <button v-if="!repo.parent_repo" type="button" class="btn" @click="emit('pickLocalRepoDir', repo)">
             {{ repo._localPath ? '重新选目录…' : '选目录…' }}
           </button>
         </div>
@@ -485,5 +471,17 @@ const emit = defineEmits<{
 }
 .source-option.disabled input[type="radio"] {
   cursor: not-allowed;
+}
+
+/* umbrella 父行警告 banner:有 child 引用时,提醒'改身份必须仍指向同一份代码',不锁住 */
+.umbrella-warn {
+  margin: 8px 0;
+  padding: 8px 12px;
+  background: #3a2f1a;
+  border-left: 3px solid #d97706;
+  color: #f3e7d2;
+  font-size: 13px;
+  line-height: 1.5;
+  border-radius: 3px;
 }
 </style>

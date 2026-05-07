@@ -161,7 +161,8 @@ const emit = defineEmits<{
           @input="emit('urlInput', repo)"
         />
       </div>
-      <div class="form-group">
+      <!-- 普通独立仓库:用户可挑 clone 父目录 -->
+      <div v-if="!repo.parent_repo" class="form-group">
         <label>
           Clone 父目录
           <span class="field-hint">— 选填,不填用全局默认。git clone 会建 <code>/{{ repo.name || '&lt;repo.name&gt;' }}</code> 子目录</span>
@@ -187,6 +188,20 @@ const emit = defineEmits<{
           >🗑</button>
         </div>
       </div>
+      <!-- umbrella 子模块:位置由 umbrella 决定,read-only 展示,要单独配先点 header 上的 🌂 解除 -->
+      <div v-else class="form-group">
+        <label>
+          代码位置 <span class="field-hint">(由 umbrella <code>{{ repo.parent_repo }}</code> 决定,部署时 git submodule update 自动落到这)</span>
+        </label>
+        <input
+          :value="displayPath(repo._localPath || '')"
+          type="text"
+          placeholder="<umbrella clone 路径>/<parent_path 或 name>"
+          readonly
+          class="path-readonly"
+          :title="repo._localPath || ''"
+        />
+      </div>
       <div class="form-group repo-sync-row">
         <button
           type="button"
@@ -208,7 +223,8 @@ const emit = defineEmits<{
 
     <!-- 本地模式 -->
     <template v-else>
-      <div class="form-group">
+      <!-- 普通独立仓库:用户可选目录 -->
+      <div v-if="!repo.parent_repo" class="form-group">
         <label>本地仓库目录 <span class="required">*</span>
           <span class="field-hint">— 点"选目录"挑一个已 clone 的目录,自动反填 URL + 推仓库名 + 扫描</span>
         </label>
@@ -231,6 +247,20 @@ const emit = defineEmits<{
         <div v-else-if="repo._localPath && !repo.url" class="local-url-probe warn">
           ⚠ 没读到 <code>git remote origin</code>;yaml 里会用占位 URL(仓库已在本地,不影响扫描)
         </div>
+      </div>
+      <!-- umbrella 子模块:位置由 umbrella 决定,read-only 展示 -->
+      <div v-else class="form-group">
+        <label>
+          代码位置 <span class="field-hint">(由 umbrella <code>{{ repo.parent_repo }}</code> 决定,git submodule 已落到这)</span>
+        </label>
+        <input
+          :value="displayPath(repo._localPath || '')"
+          type="text"
+          placeholder="<umbrella 路径>/<parent_path 或 name>"
+          readonly
+          class="path-readonly"
+          :title="repo._localPath || ''"
+        />
       </div>
       <div v-if="repo._localPath" class="form-group repo-sync-row">
         <button

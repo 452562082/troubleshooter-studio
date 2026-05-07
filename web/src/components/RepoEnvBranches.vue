@@ -21,7 +21,7 @@ defineProps<{
       环境 → 分支映射
       <span class="help-icon" title="routing skill 根据此映射切到正确代码分支做代码定位。扫描仓库时按 env.id/is_prod 跟真实分支名做启发式匹配(dev→develop, prod→main/master,..),点下拉可改。">?</span>
       <span v-if="repo.parent_repo" class="field-hint">
-        — 由 umbrella <code>{{ repo.parent_repo }}</code> 的 git submodule pin 决定,跨 env 共用同一 commit,不可改
+        — 默认继承 umbrella <code>{{ repo.parent_repo }}</code> 的分支映射,可手动改
       </span>
       <span v-else-if="repoBranchesMap[repo.name]?.length" class="field-hint">
         — ✓ 从 {{ repoBranchesMap[repo.name]!.length }} 个真实分支里挑(可改)
@@ -39,7 +39,6 @@ defineProps<{
           v-if="branchHasOptions(repo)"
           v-model="repo.env_branches[env.id]"
           class="branch-select"
-          :disabled="!!repo.parent_repo"
         >
           <option value="">—</option>
           <option
@@ -54,7 +53,6 @@ defineProps<{
           type="text"
           class="branch-input"
           placeholder="扫一下自动填,也可手填"
-          :readonly="!!repo.parent_repo"
         />
       </div>
     </div>

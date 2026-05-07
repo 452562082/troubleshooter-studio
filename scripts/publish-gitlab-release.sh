@@ -100,21 +100,40 @@ elif [[ "$http_code" != "404" ]]; then
   exit 1
 fi
 
-# 4) 每个 asset POST 到 /uploads,拿回 relative URL
-echo "[4/5] 上传 ${#ASSETS[@]} 个产物到 /uploads ..."
+# 4) 每个 asset PUT 到 Generic Packages API。
+#    /projects/:id/uploads 是 markdown 附件,私有项目下载要 session 鉴权 → 容易 404;
+#    Generic Packages 是 GitLab 为 release asset 设计的标准端点,URL 永久可读,
+#    release 页"Download asset"按钮直接 work。
+#    package_name 用项目 short name,package_version 用 tag(去掉前缀 v)。
+PKG_NAME="${PROJECT_PATH##*/}"      # xiaolong/troubleshooter-studio → troubleshooter-studio
+PKG_VER="${VERSION#v}"               # v0.1.0 → 0.1.0(generic packages 不接受 v 前缀)
+echo "[4/5] 上传 ${#ASSETS[@]} 个产物到 Generic Packages($PKG_NAME / $PKG_VER)..."
 LINKS=()
 for f in "${ASSETS[@]}"; do
   fname=$(basename "$f")
   printf '  ↑ %s ... ' "$fname"
-  resp=$("${CURL[@]}" -F "file=@$f" "$API/uploads")
-  rel_url=$(printf %s "$resp" | jq -r '.url')
-  if [[ -z "$rel_url" || "$rel_url" == "null" ]]; then
-    echo "✗ 上传失败,响应:$resp" >&2
-    exit 1
-  fi
-  full_url="$GITLAB_HOST/$PROJECT_PATH$rel_url"
+  upload_url="$API/packages/generic/$PKG_NAME/$PKG_VER/$fname"
+  http_code=$(curl -sS -L -X PUT \
+      -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+      --upload-file "$f" \
+      -o /dev/null -w '%{http_code}' \
+      "$upload_url")
+  case "$http_code" in
+    200|201) echo "✓" ;;
+    409)
+      echo "✗ 同名 package 已存在(409)" >&2
+      echo "   去 GitLab → 项目 Settings → Packages and registries → Generic packages" >&2
+      echo "   把 'Allow duplicates' 打开,然后重跑;或手动到 Packages 页删掉旧版本" >&2
+      echo "   $GITLAB_HOST/$PROJECT_PATH/-/packages" >&2
+      exit 1
+      ;;
+    *)
+      echo "✗ 上传失败 HTTP $http_code" >&2
+      exit 1
+      ;;
+  esac
   echo "✓"
-  LINKS+=("{\"name\":\"$fname\",\"url\":\"$full_url\",\"link_type\":\"package\"}")
+  LINKS+=("{\"name\":\"$fname\",\"url\":\"$upload_url\",\"link_type\":\"package\"}")
 done
 
 # 5) 创建 Release(挂 asset.links)

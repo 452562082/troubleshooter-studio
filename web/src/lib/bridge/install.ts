@@ -22,11 +22,11 @@ export async function importAndDeploy(
   destPath: string,
   repoPaths: Record<string, string> = {},
   ideCreds: Record<string, string> = {},
-  customInstallRoot: string = '',
 ): Promise<ApplyResult> {
   if (!isDesktop()) throw new Error('ImportAndDeploy 只在桌面 app 里可用')
-  // Wails generate 跑慢一步时,新加的参数 backend 不认 —— 用 any 绕过 TS 严格签名校验
-  return (App.ImportAndDeploy as any)(yamlText, target, destPath, repoPaths, ideCreds, customInstallRoot)
+  // 用 any:wails generate 还没跑完时类型签名可能滞后(本次砍 customInstallRoot 参数,
+  // 旧 wailsjs/go/main/App.d.ts 还有第 6 个参数,等 generate 后类型自动 refresh)。
+  return (App.ImportAndDeploy as any)(yamlText, target, destPath, repoPaths, ideCreds)
 }
 
 /** 给 target 推荐默认部署路径。embedded/openclaw 返回 ~/.tshoot/<target>/<id>/

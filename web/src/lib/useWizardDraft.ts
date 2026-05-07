@@ -156,8 +156,6 @@ export interface WizardDraft {
   enabledTargets?: Record<string, boolean>
   /** Step 2 强制保留(即使探测未装也勾上) */
   forceEnableMissingTarget?: Record<string, boolean>
-  /** Step 2 自定义安装根目录(per target;空 = 默认 ~/.<target>) */
-  customInstallRoots?: Record<string, string>
   /** Step 2 OpenClaw 自定义安装目录(覆盖 ~/.openclaw 探测路径) */
   openclawInstallDir?: string
 

@@ -90,10 +90,6 @@ export function GenPreview(arg1) {
   return window['go']['main']['App']['GenPreview'](arg1);
 }
 
-export function GetCustomInstallRoots() {
-  return window['go']['main']['App']['GetCustomInstallRoots']();
-}
-
 export function GetMissingRepoPaths(arg1) {
   return window['go']['main']['App']['GetMissingRepoPaths'](arg1);
 }
@@ -110,8 +106,8 @@ export function GetUserConfig() {
   return window['go']['main']['App']['GetUserConfig']();
 }
 
-export function ImportAndDeploy(arg1, arg2, arg3, arg4, arg5, arg6) {
-  return window['go']['main']['App']['ImportAndDeploy'](arg1, arg2, arg3, arg4, arg5, arg6);
+export function ImportAndDeploy(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['ImportAndDeploy'](arg1, arg2, arg3, arg4, arg5);
 }
 
 export function KuboardFetchConfigMaps(arg1) {
@@ -248,10 +244,6 @@ export function ScanInstallPrompts(arg1) {
 
 export function SelfTestAgent(arg1) {
   return window['go']['main']['App']['SelfTestAgent'](arg1);
-}
-
-export function SetCustomInstallRoot(arg1, arg2) {
-  return window['go']['main']['App']['SetCustomInstallRoot'](arg1, arg2);
 }
 
 export function SetDefaultReposRoot(arg1) {

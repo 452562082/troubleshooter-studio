@@ -56,8 +56,6 @@ export function Gen(arg1:string,arg2:string):Promise<generator.GenSummary>;
 
 export function GenPreview(arg1:string):Promise<main.GenPreviewResult>;
 
-export function GetCustomInstallRoots():Promise<Record<string, string>>;
-
 export function GetMissingRepoPaths(arg1:string):Promise<main.MissingRepoPathsResult>;
 
 export function GetRemoteURL(arg1:string):Promise<string>;
@@ -66,7 +64,7 @@ export function GetRepoPathsForSystem(arg1:string):Promise<Record<string, string
 
 export function GetUserConfig():Promise<main.UserConfigResult>;
 
-export function ImportAndDeploy(arg1:string,arg2:string,arg3:string,arg4:Record<string, string>,arg5:Record<string, string>,arg6:string):Promise<agent.Result>;
+export function ImportAndDeploy(arg1:string,arg2:string,arg3:string,arg4:Record<string, string>,arg5:Record<string, string>):Promise<agent.Result>;
 
 export function KuboardFetchConfigMaps(arg1:main.KuboardFetchBatchInput):Promise<main.KuboardFetchBatchResult>;
 
@@ -135,8 +133,6 @@ export function SaveYAML(arg1:string,arg2:string):Promise<string>;
 export function ScanInstallPrompts(arg1:string):Promise<Array<deploy.Prompt>>;
 
 export function SelfTestAgent(arg1:string):Promise<agent.SelfTestResult>;
-
-export function SetCustomInstallRoot(arg1:string,arg2:string):Promise<void>;
 
 export function SetDefaultReposRoot(arg1:string):Promise<void>;
 

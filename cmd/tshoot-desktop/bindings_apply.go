@@ -59,7 +59,7 @@ func (a *App) ApplyBot(agentPath, newYamlText string, dryRun bool) (*agent.Resul
 //
 // 副作用:把 repoPaths 按 system.id 持久化到 ~/.tshoot/config.json,后续 BotsPage
 // 重新部署同一 system 时,ApplyBot 自动读这份,不必再跑一次 wizard。
-func (a *App) ImportAndDeploy(yamlText, target, destPath string, repoPaths map[string]string, ideCreds map[string]string, customInstallRoot string) (*agent.Result, error) {
+func (a *App) ImportAndDeploy(yamlText, target, destPath string, repoPaths map[string]string, ideCreds map[string]string) (*agent.Result, error) {
 	// 用户可能传 ~/foo,统一展开成绝对路径
 	expanded := make(map[string]string, len(repoPaths))
 	for k, v := range repoPaths {
@@ -71,20 +71,11 @@ func (a *App) ImportAndDeploy(yamlText, target, destPath string, repoPaths map[s
 	if cfg, perr := config.LoadFromBytes([]byte(yamlText)); perr == nil && cfg.System.ID != "" && len(expanded) > 0 {
 		_ = userconfig.SetRepoPathsForSystem(cfg.System.ID, expanded)
 	}
-	// customInstallRoot 用户在 wizard"我已自行安装→选目录"里指定的非默认安装位置;
-	// 空字符串 → 走默认 ~/.<target>。展开 ~ 一致化处理 + 持久化到 ~/.tshoot/config.json,
-	// 让 BotsPage 的 DiscoverBots 也能扫到这里、下次进 wizard 也能反填默认值。
-	cir := ""
-	if customInstallRoot != "" {
-		cir = userconfig.ExpandHome(customInstallRoot)
-		_ = userconfig.SetCustomInstallRoot(target, cir)
-	}
 	return agent.ImportAndApply([]byte(yamlText), target, destPath, agent.ApplyOptions{
-		TemplateRoot:      a.templateRoot,
-		TshootVersion:     version,
-		RepoLocalPaths:    expanded,
-		IDECreds:          ideCreds, // claude-code/cursor 装完直接注入 mcpServers 用
-		CustomInstallRoot: cir,
+		TemplateRoot:   a.templateRoot,
+		TshootVersion:  version,
+		RepoLocalPaths: expanded,
+		IDECreds:       ideCreds, // claude-code/cursor 装完直接注入 mcpServers 用
 		// 部署进度透传到前端:复用已有 install:log channel(logStore 全局订阅),
 		// 不必新增 event 类型。当前主要给 mcp-grafana 二进制下载用,首次部署 30 MiB
 		// 不让 UI 看起来死锁。前缀 [target=xxx] 让用户多 target 并发部署能区分来源。

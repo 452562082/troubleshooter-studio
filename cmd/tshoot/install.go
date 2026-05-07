@@ -127,7 +127,7 @@ func installIDESideEffects(target, stagingDir string, creds map[string]string) e
 	if err != nil {
 		return fmt.Errorf("read staging tshoot.json: %w", err)
 	}
-	if err := agent.MergeMCPIntoIDESettings(target, cfg, creds); err != nil {
+	if err := agent.MergeMCPIntoIDESettings(target, cfg, creds, nil); err != nil {
 		return fmt.Errorf("merge mcp settings: %w", err)
 	}
 	if err := agent.WriteIDECredsFile(cfg, creds); err != nil {

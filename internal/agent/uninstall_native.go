@@ -259,15 +259,9 @@ func cleanIDEMCPServers(t IDETarget, home, root, systemID string, logf func(form
 		return removed
 	}
 
-	// customRoot 对 cleanIDEMCPServers 的语义跟 install 时不同 —— uninstall 这里 root 已经
-	// 是反推出来的(deriveInstallRoot),不是用户传的 customRoot。但对 claude-code,MCPConfigPath
-	// 始终落 $HOME/.claude.json 不受 root 影响,所以传空 customRoot 就行;对 cursor,如果
-	// root 不是 ~/.cursor(用户装在自定义位置),需要走 customRoot 形态 → 检测一下传过去。
-	customRoot := ""
-	if t == TargetCursor && root != filepath.Join(home, t.DirName()) {
-		customRoot = root
-	}
-	cfgFile := t.MCPConfigPath(home, customRoot)
+	// MCPConfigPath 始终在 $HOME 下(claude-code → ~/.claude.json,cursor → ~/.cursor/mcp.json,
+	// codex → 嵌入 agent toml)。IDE 的扩展目录都是 hardcoded,不存在"自定义位置"概念。
+	cfgFile := t.MCPConfigPath(home)
 	removed := pruneMCPKeysFromJSON(cfgFile, systemID, prefix, logf)
 
 	// claude-code 迁移期:老版本写到 ~/.claude/settings.json 的残留也清掉。

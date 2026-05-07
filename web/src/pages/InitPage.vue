@@ -242,19 +242,13 @@ const {
   pickOpenClawInstallDir,
 } = useOpenClawDetect(saved?.openclawInstallDir ?? '')
 
-// Claude Code / Cursor / Codex 检测 + customInstallRoots 全在 lib/useAITools.ts。
-// onMounted 里会先 ~/.tshoot/config.json 反填 customInstallRoots(覆盖 saved.draft,
-// 文件版优先),然后 refreshAITools。
+// Claude Code / Cursor / Codex 检测在 lib/useAITools.ts。onMounted 自动 refreshAITools。
 const {
   aitoolsResult,
   forceEnableMissingTarget,
-  customInstallRoots,
   refreshAITools,
-  pickCustomInstallRoot,
-  clearCustomInstallRoot,
 } = useAITools({
   forceEnableMissingTarget: saved?.forceEnableMissingTarget,
-  customInstallRoots: saved?.customInstallRoots,
 })
 
 // watch / onMounted 已挪到 enabledTargets 声明之后(见该 const 下方),
@@ -2304,7 +2298,6 @@ watch(
     enabledDataStores,
     enabledTargets,
     forceEnableMissingTarget,
-    customInstallRoots,
     idManualOverride: idManualOverride.value,
     openclawInstallDir: openclawInstallDir.value,
   }),
@@ -2782,7 +2775,7 @@ const {
   runOneClickDeploy,
 } = useDeployFlow({
   agent, system, targetModels,
-  enabledTargets, targetOptions, targetLabels, customInstallRoots, homeDir,
+  enabledTargets, targetOptions, targetLabels, homeDir,
   activeSourceTypes, sourceCreds, environments, enabledDataStores,
   enabledObservability, toolInputs, OBS_TOOL_SPECS,
   toolKeyFor, isObsFieldHidden,
@@ -2945,7 +2938,6 @@ provide(WizardStoreKey, {
       :target-detected-installed="targetDetectedInstalled"
       :target-badge-props="targetBadgeProps"
       :force-enable-missing-target="forceEnableMissingTarget"
-      :custom-install-roots="customInstallRoots"
       :target-deploy-paths="targetDeployPaths"
       :target-deploy-path-hints="targetDeployPathHints"
       :any-target-selected="anyTargetSelected"
@@ -2957,8 +2949,6 @@ provide(WizardStoreKey, {
       :openclaw-version="openclawVersion"
       :openclaw-auth-providers="openclawAuthProviders"
       :openclaw-install-dir="openclawInstallDir"
-      @pick-custom-install-root="pickCustomInstallRoot"
-      @clear-custom-install-root="clearCustomInstallRoot"
       @refresh-a-i-tools="refreshAITools"
       @pick-open-claw-install-dir="pickOpenClawInstallDir"
       @run-open-claw-detect="runOpenClawDetect"

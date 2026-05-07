@@ -8,7 +8,7 @@
 // 跟 BotsPage 那条手动闭环对齐:wizard 已填的所有凭证(配置中心 + 可观测性 + ELK 共用 + 模型 +
 // messaging)按 install_naming.go 的 envVar() 命名拼成 creds map,直接喂给 RunInstall —— 不再
 // 让用户去 BotsPage 二次输入。openclaw / claude-code / cursor / codex 路径全自动:
-//   - openclaw     ~/.openclaw/workspace/<workspace_name>/(用 customInstallRoots[t] 覆盖根目录)
+//   - openclaw     ~/.openclaw/workspace/<workspace_name>/
 //   - claude-code  ~/.claude/agents/<name>.md(<name>=workspace_name 兜底 system.id-bot)
 //   - cursor       ~/.cursor/agents/<name>.md
 //   - codex        ~/.codex/agents/<name>.toml(TOML subagent;主 chat 自然语言 spawn)
@@ -43,7 +43,6 @@ export interface UseDeployFlowDeps {
   enabledTargets: Record<string, boolean>
   targetOptions: readonly TargetId[]
   targetLabels: Record<string, string>
-  customInstallRoots: Record<string, string>
   homeDir: Ref<string>
 
   // 配置源 / 服务 / 环境
@@ -92,13 +91,11 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
   const targetDeployPaths = computed<Record<string, string>>(() => {
     const home = deps.homeDir.value || '~'
     const wsName = agentNameForPath.value
-    // 用户手选的自定义根目录优先,没有就用默认 ~/.<target>
-    const rootFor = (t: string, def: string) => (deps.customInstallRoots[t] || '').trim() || def
     return {
-      'openclaw': `${rootFor('openclaw', `${home}/.openclaw`)}/workspace/${wsName}/`,
-      'claude-code': `${rootFor('claude-code', `${home}/.claude`)}/agents/${wsName}.md`,
-      'cursor': `${rootFor('cursor', `${home}/.cursor`)}/agents/${wsName}.md`,
-      'codex': `${rootFor('codex', `${home}/.codex`)}/agents/${wsName}.toml`,
+      'openclaw': `${home}/.openclaw/workspace/${wsName}/`,
+      'claude-code': `${home}/.claude/agents/${wsName}.md`,
+      'cursor': `${home}/.cursor/agents/${wsName}.md`,
+      'codex': `${home}/.codex/agents/${wsName}.toml`,
     }
   })
 
@@ -318,10 +315,8 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
         const dest = await defaultDestPath(t, deps.system.id || '')
         // 同一份 creds 顺带传给 claude-code/cursor:installNative 走完文件拷贝后会用它
         // 注入 ~/.claude.json (user-scope dotfile) / ~/.cursor/mcp.json 的 mcpServers,装完即可用 MCP 工具。
-        // openclaw 的自定义目录走 openclawInstallDir 那条独立 UI;这里只对 ide 三家生效
         const isIDE = (IDE_TARGETS as string[]).includes(t)
-        const cir = isIDE ? (deps.customInstallRoots[t] || '').trim() : ''
-        await importAndDeploy(deps.yamlOutput.value, t, dest, repoPaths, openclawCreds, cir)
+        await importAndDeploy(deps.yamlOutput.value, t, dest, repoPaths, openclawCreds)
         if (isIDE) {
           installedTargets.push(t)
           continue

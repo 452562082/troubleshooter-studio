@@ -27,27 +27,21 @@ import (
 
 // InstallNative 把 stagingDir 里的产物分发到 ~/.<target>/{agents,skills,scripts}/。
 // target 必须是三家 IDETarget 之一(openclaw 走专门入口)。
+//
+// 落地位置:固定 $HOME/.<target>/。三家 IDE(claude-code/cursor/codex)各自的扩展目录
+// 都是 hardcoded —— Claude Code CLI 启动只读 ~/.claude/agents/,Cursor 只读 ~/.cursor/,
+// Codex 只读 ~/.codex/agents/。装到别处 IDE 看不到,就没意义。
 func InstallNative(stagingDir, target string) error {
-	return InstallNativeAt(stagingDir, target, "")
-}
-
-// InstallNativeAt 是 InstallNative 的"自定义根目录"变体:customRoot 非空时整体落到
-// <customRoot>/{agents,skills,scripts}/<NAME>/ 而不是 ~/.<target>/。给 wizard
-// "我已自行安装" 流程的"选安装目录"用 —— 用户把客户端装在非默认位置时仍能部署。
-func InstallNativeAt(stagingDir, target, customRoot string) error {
 	t, err := ParseIDETarget(target)
 	if err != nil {
 		return err
 	}
 
-	root := customRoot
-	if root == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("read $HOME: %w", err)
-		}
-		root = filepath.Join(home, t.DirName())
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("read $HOME: %w", err)
 	}
+	root := filepath.Join(home, t.DirName())
 
 	// 1) 找 staging 里的 agent 文件 + 推 agent name(从文件名)。
 	//   - claude-code / cursor: staging/agents/<NAME>.md

@@ -39,10 +39,6 @@ type ApplyOptions struct {
 	// 桌面端 wizard 通过 buildOpenclawCreds() 拼出来传过来;CLI 没收集这个就传 nil,
 	// 注入的 env 字段值会变成 {{NACOS_ADDR_DEV}} 占位符让用户手填。
 	IDECreds map[string]string
-	// CustomInstallRoot 用户手选的 AI 平台安装根目录(claude-code/cursor/codex 三家专用,
-	// openclaw 走另一条 InstallNativeOpenclaw 路径)。空字符串 → 默认 ~/.<target>。
-	// 用于 wizard"我已自行安装"流程让用户指定非默认安装位置。
-	CustomInstallRoot string
 	// OnLog(可空)apply 链路里需要"用户感知"的进度回调,目前主要用在 mcp-grafana
 	// 二进制下载(首次部署 ~30 MiB,易让用户误以为卡死)。desktop binding 把它接到
 	// wails event "install:log" → UI 部署进度区;CLI 没传就 nil-safe 跳过。
@@ -185,14 +181,14 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 	// 注意:本路径同时覆盖"重新 apply"(改了 yaml 后回写)的场景,避免活配置和用户级
 	// 目录脱节。
 	if !opts.DryRun && (ag.Meta.Target == "claude-code" || ag.Meta.Target == "cursor" || ag.Meta.Target == "codex") {
-		if err := InstallNativeAt(workDir, ag.Meta.Target, opts.CustomInstallRoot); err != nil {
+		if err := InstallNative(workDir, ag.Meta.Target); err != nil {
 			return nil, fmt.Errorf("native install (%s): %w", ag.Meta.Target, err)
 		}
 		// 顺带把 cfg 派生的 mcpServers 注入 IDE 配置(claude-code → ~/.claude.json,
 		// cursor → ~/.cursor/mcp.json,codex → agent toml 内联段),让装完的 agent
 		// 能直接调到 nacos / grafana / loki 等 MCP。creds 走 opts.IDECreds(桌面端 wizard 传),
 		// 没有(CLI 装时)就用 {{ENV_VAR}} 占位符,用户事后自己填。
-		if err := MergeMCPIntoIDESettingsAt(ag.Meta.Target, cfg, opts.IDECreds, opts.CustomInstallRoot, opts.OnLog); err != nil {
+		if err := MergeMCPIntoIDESettings(ag.Meta.Target, cfg, opts.IDECreds, opts.OnLog); err != nil {
 			return nil, fmt.Errorf("merge mcp settings (%s): %w", ag.Meta.Target, err)
 		}
 		// kuboard / apollo / consul / env-vars 类型走脚本读 creds.json,**不通过 MCP**。

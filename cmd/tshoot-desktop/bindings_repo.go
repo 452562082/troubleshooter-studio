@@ -12,7 +12,6 @@ package main
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -41,19 +40,6 @@ func (a *App) DiscoverBots(extraRoots []string) ([]discover.DiscoveredAgent, err
 		"~/.claude/skills",
 		"~/.cursor/skills",
 		"~/.codex/skills",
-	}
-	// 把用户在 wizard 里选过的"自定义安装根目录"也加进扫描列表 —— 否则装到非默认
-	// 位置的机器人在 BotsPage 是隐形的。
-	for target, dir := range userconfig.GetCustomInstallRoots() {
-		if dir = strings.TrimSpace(dir); dir == "" {
-			continue
-		}
-		switch target {
-		case "openclaw":
-			roots = append(roots, filepath.Join(dir, "workspace"))
-		case "claude-code", "cursor", "codex":
-			roots = append(roots, filepath.Join(dir, "skills"))
-		}
 	}
 	roots = append(roots, extraRoots...)
 	return discover.Scan(roots)

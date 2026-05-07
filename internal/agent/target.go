@@ -65,27 +65,16 @@ func (t IDETarget) DirName() string { return ideSpecs[t].dirName }
 
 // MCPConfigPath 返回 IDE 用户级 MCP 配置 JSON 文件的绝对路径(顶层 "mcpServers" 字段)。
 //
-//   - claude-code → 始终 $HOME/.claude.json,**不**受 customRoot 影响。Claude Code CLI
-//     启动时固定从 $HOME 读这个 dotfile;ide 安装在哪不影响配置位置。早期实现写到
-//     ~/.claude/settings.json 是 bug —— 那个文件用于 hooks/permissions/env,Claude Code
-//     不在那里读 mcpServers,装好的 MCP 在 `claude mcp list` 永远看不到。
-//   - cursor      → customRoot 非空时 <customRoot>/mcp.json(用户把 cursor 装在非默认位置时的兼容路径);
-//     否则 $HOME/.cursor/mcp.json。
+//   - claude-code → $HOME/.claude.json。Claude Code CLI 启动时固定从 $HOME 读这个 dotfile。
+//     早期实现写到 ~/.claude/settings.json 是 bug —— 那个文件用于 hooks/permissions/env,
+//     Claude Code 不在那里读 mcpServers,装好的 MCP 在 `claude mcp list` 永远看不到。
+//   - cursor      → $HOME/.cursor/mcp.json。
 //   - codex       → 空串。codex MCP 嵌入 agent toml 内联段,没有独立 JSON 配置。
 //     调用方对 codex 走专门分支,不该走 JSON 路径。
-func (t IDETarget) MCPConfigPath(home, customRoot string) string {
+func (t IDETarget) MCPConfigPath(home string) string {
 	rel := ideSpecs[t].mcpHomeRel
 	if rel == "" {
 		return ""
-	}
-	// claude-code 的 ~/.claude.json 是 Claude Code CLI 强绑死的位置,不跟 customRoot 走。
-	if t == TargetClaudeCode {
-		return filepath.Join(home, rel)
-	}
-	if customRoot != "" {
-		// cursor: customRoot 表示"用户把 cursor 装在了非默认位置";rel 形如 ".cursor/mcp.json",
-		// customRoot 已经包含 ".cursor" 那一级,只取 basename 拼上去。
-		return filepath.Join(customRoot, filepath.Base(rel))
 	}
 	return filepath.Join(home, rel)
 }

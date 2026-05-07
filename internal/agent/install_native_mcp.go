@@ -39,16 +39,10 @@ import (
 // creds 是 env-var-name → value 的 map(跟 InstallNativeOpenclaw 一样的 schema)。
 // 桌面端 wizard 通过 buildOpenclawCreds() 拼出来传过来;CLI 没 creds 时传 nil,
 // 注入的 env 字段值会变成 {{ENV_VAR}} 占位符让用户手填。
-func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[string]string) error {
-	return MergeMCPIntoIDESettingsAt(target, cfg, creds, "", nil)
-}
-
-// MergeMCPIntoIDESettingsAt 跟 MergeMCPIntoIDESettings 同,只是允许指定 IDE 安装根目录。
-// customRoot 非空时 settings 落到 <customRoot>/<settingsFile>;空时回退默认 ~/.<target>。
 //
 // onProgress(可空)透传给 EnsureMCPGrafanaBinary,首次部署下载 mcp-grafana 二进制
 // 时会回调进度;一键部署 desktop binding 把它接到 wails event "install:log"。
-func MergeMCPIntoIDESettingsAt(target string, cfg *config.SystemConfig, creds map[string]string, customRoot string, onProgress func(string)) error {
+func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[string]string, onProgress func(string)) error {
 	// creds=nil → BotsPage 重生成 / CLI install 无凭证场景,直接跳过。
 	// 走下去会拿空值覆盖初次 wizard 部署时写入的真凭证,把整个连接断掉。
 	if creds == nil {
@@ -71,10 +65,7 @@ func MergeMCPIntoIDESettingsAt(target string, cfg *config.SystemConfig, creds ma
 	if err != nil {
 		return fmt.Errorf("read $HOME: %w", err)
 	}
-	root := customRoot
-	if root == "" {
-		root = filepath.Join(home, t.DirName())
-	}
+	root := filepath.Join(home, t.DirName())
 
 	// grafana/loki 共用 mcp-grafana go 二进制:确保 <root>/bin/mcp-grafana 就位 + 把 servers
 	// 里的占位替换成绝对路径。三家 IDE 都要做(BuildMCPServers 输出的 command 是占位 sentinel,
@@ -98,7 +89,7 @@ func MergeMCPIntoIDESettingsAt(target string, cfg *config.SystemConfig, creds ma
 		return injectMCPIntoCodexAgentTOML(root, cfg, servers)
 	}
 
-	settingsPath := t.MCPConfigPath(home, customRoot)
+	settingsPath := t.MCPConfigPath(home)
 	if settingsPath == "" {
 		return fmt.Errorf("target %s 没有 MCP 配置文件", target)
 	}

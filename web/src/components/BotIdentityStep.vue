@@ -28,7 +28,6 @@ const props = defineProps<{
   targetDetectedInstalled: (t: string) => boolean | null
   targetBadgeProps: (t: string) => { detected: boolean | null | undefined; versionText?: string; title?: string }
   forceEnableMissingTarget: Record<string, boolean>
-  customInstallRoots: Record<string, string>
   targetDeployPaths: Record<string, string>
   targetDeployPathHints: Record<string, string>
   anyTargetSelected: boolean
@@ -46,8 +45,6 @@ const props = defineProps<{
 void props  // 给 IDE 提示;运行时 Vue 自己用 props 不需要显式引用
 
 const emit = defineEmits<{
-  pickCustomInstallRoot: [t: string]
-  clearCustomInstallRoot: [t: string]
   refreshAITools: []
   pickOpenClawInstallDir: []
   runOpenClawDetect: [installDir: string]
@@ -115,7 +112,8 @@ const emit = defineEmits<{
             <TargetInstallBadge v-bind="targetBadgeProps(t)" />
           </label>
           <div class="target-hint">{{ targetDescriptions[t] }}</div>
-          <!-- 未检测到 + 没强制启用 → 露出"我已自行安装/选目录/重新扫描"操作条 -->
+          <!-- 未检测到 + 没强制启用 → 露出"我已自行安装/重新扫描"操作条
+               (没有"选安装目录"选项 —— IDE 扩展目录都是 hardcoded ~/.<target>,装别处 IDE 也看不到) -->
           <div
             v-if="t !== 'openclaw' && targetDetectedInstalled(t) === false && !forceEnableMissingTarget[t]"
             class="target-missing-actions"
@@ -124,24 +122,17 @@ const emit = defineEmits<{
             <button type="button" class="btn-link" @click="forceEnableMissingTarget[t] = true">
               我已自行安装,继续
             </button>
-            <button type="button" class="btn-link" @click="emit('pickCustomInstallRoot', t)">📁 选安装目录…</button>
             <button type="button" class="btn-link" @click="emit('refreshAITools')">🔄 重新扫描</button>
           </div>
           <div
             v-else-if="t !== 'openclaw' && targetDetectedInstalled(t) === false && forceEnableMissingTarget[t]"
             class="target-missing-actions overridden"
           >
-            <span v-if="customInstallRoots[t]">📁 自定义安装目录:</span>
-            <span v-else>⚠ 未检测到本机安装,已强制启用(默认部署 ~/.{{ t }})</span>
-            <code v-if="customInstallRoots[t]" :title="customInstallRoots[t]">{{ customInstallRoots[t] }}</code>
-            <button type="button" class="btn-link" @click="emit('pickCustomInstallRoot', t)">
-              {{ customInstallRoots[t] ? '改目录…' : '📁 选安装目录…' }}
-            </button>
-            <button v-if="customInstallRoots[t]" type="button" class="btn-link" @click="emit('clearCustomInstallRoot', t)">清除</button>
+            <span>⚠ 未检测到本机安装,已强制启用(默认部署 ~/.{{ t }})</span>
             <button
               type="button"
               class="btn-link"
-              @click="() => { forceEnableMissingTarget[t] = false; enabledTargets[t] = false; emit('clearCustomInstallRoot', t) }"
+              @click="() => { forceEnableMissingTarget[t] = false; enabledTargets[t] = false }"
             >撤销</button>
             <button type="button" class="btn-link" @click="emit('refreshAITools')">🔄 重新扫描</button>
           </div>

@@ -68,16 +68,3 @@ func (a *App) SaveRepoPathsForSystem(systemID string, paths map[string]string) e
 	return userconfig.SetRepoPathsForSystem(systemID, expanded)
 }
 
-// GetCustomInstallRoots 返回 target → 自定义安装根目录映射。InitPage 启动时读这个
-// 反填 customInstallRoots reactive,避免每次重开向导都让用户重选。BotsPage 的
-// DiscoverBots 内部也读这个把额外路径加进扫描列表。
-func (a *App) GetCustomInstallRoots() (map[string]string, error) {
-	return userconfig.GetCustomInstallRoots(), nil
-}
-
-// SetCustomInstallRoot upsert 单个 target 的自定义安装根目录到 ~/.tshoot/config.json。
-// dir 为空 → 删除该 target 的覆盖(回落默认 ~/.<target>)。
-// InitPage 在用户点"选目录"/"清除"/"撤销"时各调一次,保持本地文件跟 UI 一致。
-func (a *App) SetCustomInstallRoot(target, dir string) error {
-	return userconfig.SetCustomInstallRoot(target, dir)
-}

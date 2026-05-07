@@ -226,7 +226,7 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 
 			// ── 3) MergeMCPIntoIDESettings:写 settings/mcp.json/codex toml ────
 			creds := fakeCreds()
-			if err := agent.MergeMCPIntoIDESettings(target, cfg, creds); err != nil {
+			if err := agent.MergeMCPIntoIDESettings(target, cfg, creds, nil); err != nil {
 				t.Fatalf("MergeMCPIntoIDESettings: %v", err)
 			}
 

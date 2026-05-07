@@ -1,7 +1,7 @@
 // bridge/userConfig.ts —— 用户级配置 ~/.tshoot/config.json 的读写。
 // 跨 wizard 会话持久,不进 troubleshooter.yaml(那份要分享,本机偏好不能塞进去)。
 //
-// 字段:default_repos_root / repo_paths_by_system / custom_install_roots
+// 字段:default_repos_root / repo_paths_by_system
 import * as App from '../../../wailsjs/go/main/App'
 import { isDesktop } from './shared'
 
@@ -39,17 +39,3 @@ export async function saveRepoPathsForSystem(systemID: string, paths: Record<str
   await App.SaveRepoPathsForSystem(systemID, paths)
 }
 
-/** AI 平台自定义安装根目录(target → 绝对路径)。空 target 不返。
- *  配套 ~/.tshoot/config.json 里的 custom_install_roots 字段。
- *  InitPage 启动时调一次反填,DiscoverBots 内部也读这份合并扫描列表。 */
-export async function getCustomInstallRoots(): Promise<Record<string, string>> {
-  if (!isDesktop()) return {}
-  const m = await (App as any).GetCustomInstallRoots()
-  return (m as Record<string, string>) || {}
-}
-
-/** upsert 单个 target 的自定义安装根目录;dir='' → 删除该 target 覆盖。 */
-export async function setCustomInstallRoot(target: string, dir: string): Promise<void> {
-  if (!isDesktop() || !target) return
-  await (App as any).SetCustomInstallRoot(target, dir)
-}

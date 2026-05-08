@@ -222,9 +222,16 @@ func runUninstall(args []string) error {
 	return nil
 }
 
-// loadInstallCreds 优先 --env-file → 否则 <staging>/scripts/.env → 否则空 map。
-// openclaw 没拿到 creds 也不阻塞 install,产物结构正确,只是 MCP env 字段是空,
-// 用户后面手填 .env 重跑即可。
+// loadInstallCreds 凭证读取的 fallback 链:
+//  1. --env-file <path>(显式)
+//  2. <staging>/scripts/.env(deploy.ReadEnvFile 标准位置)
+//  3. ~/.tshoot/openclaw/<system_id>/scripts/.env(IDE staging 不写 .env,跨 target 共享
+//     openclaw 那份,wizard 已经在 openclaw 流程收过一次的 creds 不重收)
+//  4. 空 map(不阻塞 install,产物结构正确,MCP env 字段空)
+//
+// IDE staging(claude-code/cursor/codex)默认不写 scripts/.env,只有 openclaw staging 写。
+// 没这条 fallback 时,跑 `tshoot install -target claude-code` 不传 -env-file → creds 空 →
+// grafana/loki/nacos/elasticsearch 等 mcp env 段全空 → mcp 启动失败。
 func loadInstallCreds(stagingDir, envFile string) (map[string]string, error) {
 	if envFile != "" {
 		// 把外部 .env 拷到 staging/scripts/.env,再用 deploy.ReadEnvFile 标准化解析,
@@ -245,8 +252,45 @@ func loadInstallCreds(stagingDir, envFile string) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if m == nil {
-		return map[string]string{}, nil
+	if len(m) > 0 {
+		return m, nil
 	}
-	return m, nil
+	// fallback:从 staging 的 tshoot.json 读 system_id,试 ~/.tshoot/openclaw/<id>/scripts/.env
+	if creds := tryLoadOpenclawCreds(stagingDir); creds != nil {
+		fmt.Printf("    · creds fallback 自 ~/.tshoot/openclaw/%s/scripts/.env(%d 个变量)\n",
+			openclawSystemIDOf(stagingDir), len(creds))
+		return creds, nil
+	}
+	return map[string]string{}, nil
+}
+
+// tryLoadOpenclawCreds 从 staging 的 tshoot.json 读 system_id,然后读 ~/.tshoot/openclaw/<id>/scripts/.env。
+// 任何一步失败 / 找不到 / 文件不存在 → 返回 nil(让上层走"空 creds"路径,不报错)。
+func tryLoadOpenclawCreds(stagingDir string) map[string]string {
+	id := openclawSystemIDOf(stagingDir)
+	if id == "" {
+		return nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	openclawStaging := filepath.Join(home, ".tshoot", "openclaw", id)
+	if _, err := os.Stat(filepath.Join(openclawStaging, "scripts", ".env")); err != nil {
+		return nil
+	}
+	m, err := deploy.ReadEnvFile(openclawStaging)
+	if err != nil || len(m) == 0 {
+		return nil
+	}
+	return m
+}
+
+// openclawSystemIDOf 解 staging/tshoot.json 取 system.id;失败返 ""。
+func openclawSystemIDOf(stagingDir string) string {
+	cfg, err := loadStagingSystemConfig(stagingDir)
+	if err != nil || cfg == nil {
+		return ""
+	}
+	return cfg.System.ID
 }

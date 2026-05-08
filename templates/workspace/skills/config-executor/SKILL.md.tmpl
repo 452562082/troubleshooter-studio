@@ -17,7 +17,7 @@ description: 通用配置中心执行技能（后端：{{.Infrastructure.Primary
 
 本系统每个环境有**独立的后端实例**：
 {{- range .Environments}}
-- `{{.ID}}` → `{{$.Infrastructure.PrimaryConfigCenter.Type}}-mcp-server-{{.ID}}`（nacos）或 `scripts/*_config.py --env {{.ID}}`（apollo/consul）
+- `{{.ID}}` → `{{$.MCPKeyPrefix}}-nacos-{{.ID}}`（nacos）或 `scripts/*_config.py --env {{.ID}}`（apollo/consul）
 {{- end}}
 
 **规则**：
@@ -31,13 +31,13 @@ description: 通用配置中心执行技能（后端：{{.Infrastructure.Primary
 
 ### 当前后端：Nacos（走 MCP；MCP 失败时 fallback 到脚本）
 
-部署时已为每个 env 注册 `{{.AgentID}}-nacos-<env>` MCP：
+部署时已为每个 env 注册 `{{.MCPKeyPrefix}}-nacos-<env>` MCP：
 {{- range .Environments}}
-- `{{$.AgentID}}-nacos-{{.ID}}`
+- `{{$.MCPKeyPrefix}}-nacos-{{.ID}}`
 {{- end}}
 
 执行步骤：
-1. `routing` 返回 `mcp_server={{.AgentID}}-nacos-<env>` + `namespaceId/group/dataId`
+1. `routing` 返回 `mcp_server={{.MCPKeyPrefix}}-nacos-<env>` + `namespaceId/group/dataId`
 2. 调用该 MCP 的 `get_config` / `list_config_history` 等工具
 3. 需要跨 env 对比时：本地保存两份 text → `python3 scripts/nacos_diff.py --left-text ... --right-text ...`
 

@@ -103,6 +103,18 @@ fi
 
 echo "▶ 给 $APP_PATH 解锁 quarantine xattr ..."
 if xattr -dr com.apple.quarantine "$APP_PATH" 2>&1; then
+    echo "  ✓ quarantine 已清"
+
+    # 关键:强制 LaunchServices 重新注册 .app —— 否则系统缓存的"已损坏"判断
+    # 不会立即失效,第一次 open 仍被 Gatekeeper 拦,要双击 .command 第二次才开。
+    # `lsregister -f` 让 LaunchServices 重新读 .app 元数据 + 清 Gatekeeper 自家
+    # 对这个 .app 的判断缓存 → 接着 open 立即生效。
+    LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister
+    if [[ -x "$LSREGISTER" ]]; then
+        echo "  ▶ 刷新 LaunchServices 缓存 ..."
+        "$LSREGISTER" -f "$APP_PATH" 2>/dev/null || true
+    fi
+
     echo ""
     echo "✓ 解锁完成!正在帮你打开 TroubleshooterStudio ..."
     echo "  (以后直接双击 .app 就开,这个解锁一次永久生效)"

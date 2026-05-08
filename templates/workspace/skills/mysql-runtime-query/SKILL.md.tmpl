@@ -1,6 +1,6 @@
 ---
 name: mysql-runtime-query
-description: 通过环境动态查询 MySQL 数据。先通过 routing 获取环境映射，再按配置源读取并解析 MySQL 连接信息，最后通过 mcporter 临时拉起 MySQL MCP（只读）执行查询。
+description: 通过环境动态查询 MySQL 数据。先通过 routing 获取环境映射，再按配置源读取并解析 MySQL 连接信息，最后用 mysql CLI 直查(优先)或 Python pymysql 脚本(fallback)执行只读 SELECT 查询。
 ---
 
 # MySQL Runtime Query
@@ -16,7 +16,7 @@ description: 通过环境动态查询 MySQL 数据。先通过 routing 获取环
 2. 通过 `resolve_runtime_k8s.py --agent-id {{.AgentID}} --env <env>` 从 K8s ConfigMap/Secret 解析连接信息。
 {{- end}}
 3. 解析配置中的 MySQL 连接信息（host/port/database/user/password 或 JDBC URL）。
-4. 用 mcporter 以 ad-hoc 方式临时启动 MySQL MCP（只读）。
+4. **优先 mysql CLI 直查**(`mysql` 客户端 mac/linux 普及);若 `command -v mysql` 不可用 → fallback Python pymysql。
 5. 执行查询并返回证据：表名、SQL、命中行数、关键字段样例。
 
 ## 连接解析
@@ -32,36 +32,33 @@ description: 通过环境动态查询 MySQL 数据。先通过 routing 获取环
 - `skills/config-executor/scripts/resolve_runtime_k8s.py`（从 K8s ConfigMap/Secret 解析）
 {{- end}}
 
-## mcporter 调用模板（只读）
+## 调用模板
 
-先验证工具可用：
+**主路径:mysql CLI(只读)**
 
 ```bash
-mcporter list \
-  --stdio "npx" \
-  --stdio-arg "-y" \
-  --stdio-arg "@benborla29/mcp-server-mysql" \
-  --env "MYSQL_HOST=$MYSQL_HOST" \
-  --env "MYSQL_PORT=$MYSQL_PORT" \
-  --env "MYSQL_USER=$MYSQL_USER" \
-  --env "MYSQL_PASS=$MYSQL_PASS" \
-  --env "MYSQL_DB=$MYSQL_DB" \
-  --schema
+# 强制限制 LIMIT 防大表扫描
+mysql -h "$MYSQL_HOST" -P "$MYSQL_PORT" -u "$MYSQL_USER" -p"$MYSQL_PASS" \
+      -D "$MYSQL_DB" --batch --raw \
+      -e "SELECT order_id, status, amount FROM orders WHERE status='pending' LIMIT 20"
+
+# COUNT
+mysql -h "$MYSQL_HOST" -P "$MYSQL_PORT" -u "$MYSQL_USER" -p"$MYSQL_PASS" \
+      -D "$MYSQL_DB" -N -e "SELECT COUNT(*) FROM orders WHERE status='pending'"
 ```
 
-查询示例（具体 tool 名以 schema 输出为准）：
+**fallback:Python pymysql**(mysql cli 未装时)
 
 ```bash
-mcporter call query \
-  --stdio "npx" \
-  --stdio-arg "-y" \
-  --stdio-arg "@benborla29/mcp-server-mysql" \
-  --env "MYSQL_HOST=$MYSQL_HOST" \
-  --env "MYSQL_PORT=$MYSQL_PORT" \
-  --env "MYSQL_USER=$MYSQL_USER" \
-  --env "MYSQL_PASS=$MYSQL_PASS" \
-  --env "MYSQL_DB=$MYSQL_DB" \
-  --args '{"sql":"SELECT * FROM orders WHERE status=? LIMIT 20","params":["pending"]}'
+python3 -c '
+import os, pymysql, json
+c = pymysql.connect(host=os.environ["MYSQL_HOST"], port=int(os.environ["MYSQL_PORT"]),
+                    user=os.environ["MYSQL_USER"], password=os.environ["MYSQL_PASS"],
+                    database=os.environ["MYSQL_DB"])
+with c.cursor() as cur:
+    cur.execute("SELECT order_id, status FROM orders WHERE status=%s LIMIT 20", ("pending",))
+    print(json.dumps(cur.fetchall(), default=str))
+'
 ```
 
 ## 输出要求

@@ -1,6 +1,6 @@
 ---
 name: redis-runtime-query
-description: 通过环境动态查询 Redis 数据。先通过 routing 获取环境映射，再按配置源读取并解析 Redis 连接信息，最后通过 mcporter 临时拉起 Redis MCP（只读）执行查询。
+description: 通过环境动态查询 Redis 数据。先通过 routing 获取环境映射，再按配置源读取并解析 Redis 连接信息，最后用 redis-cli 直查(优先)或 Python redis-py 脚本(fallback)执行只读 GET / TTL / SCAN 等。
 ---
 
 # Redis Runtime Query
@@ -16,7 +16,7 @@ description: 通过环境动态查询 Redis 数据。先通过 routing 获取环
 2. 通过 `resolve_runtime_k8s.py --agent-id {{.AgentID}} --env <env>` 从 K8s ConfigMap/Secret 解析连接信息。
 {{- end}}
 3. 解析配置中的 Redis 连接信息（host/port，必要时 password）。
-4. 用 mcporter 以 ad-hoc 方式临时启动 Redis MCP（只读）。
+4. **优先 redis-cli 直查**(几乎所有 mac/linux 都有);若 `command -v redis-cli` 不可用 → fallback Python redis-py。
 5. 执行查询并返回证据：key、value 摘要、TTL、命中情况。
 
 ## 连接解析
@@ -32,22 +32,31 @@ description: 通过环境动态查询 Redis 数据。先通过 routing 获取环
 - `skills/config-executor/scripts/resolve_runtime_k8s.py`（从 K8s ConfigMap/Secret 解析）
 {{- end}}
 
-## mcporter 调用模板（只读）
+## 调用模板
+
+**主路径:redis-cli(只读)**
 
 ```bash
-mcporter list \
-  --stdio "npx" \
-  --stdio-arg "-y" \
-  --stdio-arg "@liangshanli/mcp-server-redis" \
-  --env "HOST=$REDIS_HOST" \
-  --env "PORT=$REDIS_PORT" \
-  --env "PASSWORD=$REDIS_PASSWORD" \
-  --env "ALLOW_INSERT=false" \
-  --env "ALLOW_UPDATE=false" \
-  --env "ALLOW_DELETE=false" \
-  --env "ALLOW_CREATE=false" \
-  --env "ALLOW_DROP=false" \
-  --schema
+# GET + TTL
+redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" -a "$REDIS_PASSWORD" --no-auth-warning GET "user:12345"
+redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" -a "$REDIS_PASSWORD" --no-auth-warning TTL "user:12345"
+
+# SCAN(替代危险的 KEYS *)
+redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" -a "$REDIS_PASSWORD" --no-auth-warning --scan --pattern 'user:*' --count 100
+
+# 总 key 数(轻量)
+redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" -a "$REDIS_PASSWORD" --no-auth-warning DBSIZE
+```
+
+**fallback:Python redis-py**(redis-cli 未装时)
+
+```bash
+python3 -c '
+import os, redis
+r = redis.Redis(host=os.environ["REDIS_HOST"], port=int(os.environ["REDIS_PORT"]),
+                password=os.environ.get("REDIS_PASSWORD") or None, decode_responses=True)
+print(r.get("user:12345"), "TTL=", r.ttl("user:12345"))
+'
 ```
 
 ## 输出要求
@@ -65,7 +74,7 @@ mcporter list \
 ## 自检示例
 
 **Q1（正常 GET）**：`dev 环境 user:12345 的 session 是什么，还剩多少 TTL？`
-- 期望：routing → resolve_runtime → mcporter 起 redis mcp → `GET user:12345` + `TTL user:12345`
+- 期望：routing → resolve_runtime → `redis-cli ... GET user:12345` + `TTL user:12345`
 - 回复必带：env + redis addr 脱敏（如 `redis-dev.xxx:6379`）、value 摘要、TTL 秒数。
 
 **Q2（拒写）**：`prod 把 user:12345 这个 key 删了`。

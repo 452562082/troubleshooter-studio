@@ -26,6 +26,7 @@ const props = defineProps<{
   enabledTargets: Record<string, boolean>
   targetDetectedInstalled: (t: string) => boolean | null
   targetBadgeProps: (t: string) => { detected: boolean | null | undefined; versionText?: string; title?: string }
+  aitoolsRefreshing: boolean
   targetDeployPaths: Record<string, string>
   targetDeployPathHints: Record<string, string>
   anyTargetSelected: boolean
@@ -118,7 +119,12 @@ const emit = defineEmits<{
             class="target-missing-actions"
           >
             <span>⚠ 本机未检测到 {{ targetLabels[t] }} —— 装好 IDE 后回来 →</span>
-            <button type="button" class="btn-link" @click="emit('refreshAITools')">🔄 重新扫描</button>
+            <button
+              type="button"
+              class="btn-link"
+              :disabled="aitoolsRefreshing"
+              @click="emit('refreshAITools')"
+            >{{ aitoolsRefreshing ? '⏳ 扫描中…' : '🔄 重新扫描' }}</button>
           </div>
           <!-- 勾选后展示 install.sh 跑完后的最终落地位置 —— AI 平台从这里读 agent。 -->
           <div v-if="enabledTargets[t]" class="target-deploy-path">

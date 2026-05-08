@@ -243,7 +243,10 @@ const {
 // Claude Code / Cursor / Codex 检测在 lib/useAITools.ts。onMounted 自动 refreshAITools。
 // detector 只做"提示"角色:扫到给绿勾,没扫到 badge 警告但 checkbox 仍可勾(信任用户)。
 // BotsPage broken/ghost 状态兜底装坏的场景。
-const { aitoolsResult, refreshAITools } = useAITools()
+const { aitoolsResult, aitoolsRefreshing, refreshAITools } = useAITools()
+// wrap:用户点"重新扫描"按钮时传 manual=true,触发 toast 反馈;
+// onMounted 那次内部已经走 manual=false,toast 不弹。
+function manualRefreshAITools() { refreshAITools(true) }
 
 // watch / onMounted 已挪到 enabledTargets 声明之后(见该 const 下方),
 // 这里留空避免重复声明。
@@ -2954,7 +2957,8 @@ provide(WizardStoreKey, {
       :openclaw-version="openclawVersion"
       :openclaw-auth-providers="openclawAuthProviders"
       :openclaw-install-dir="openclawInstallDir"
-      @refresh-a-i-tools="refreshAITools"
+      :aitools-refreshing="aitoolsRefreshing"
+      @refresh-a-i-tools="manualRefreshAITools"
       @pick-open-claw-install-dir="pickOpenClawInstallDir"
       @run-open-claw-detect="runOpenClawDetect"
       @model-change="onModelChange"

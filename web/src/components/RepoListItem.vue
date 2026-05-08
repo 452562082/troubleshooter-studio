@@ -40,6 +40,7 @@ interface RepoItem {
   _serviceEntries?: Record<string, string>
   _submoduleHintsDismissed?: boolean
   _fromYAML?: boolean
+  _yamlOriginalURL?: string
   _submoduleHints?: { name: string; sub_path: string; stack: string; role: string; reason: string; url?: string }[]
   _submoduleSelection?: Record<string, boolean>
   _roleHint?: { role: string; reason: string }
@@ -172,7 +173,7 @@ const emit = defineEmits<{
         <label>仓库地址 <span class="required">*</span>
           <span class="field-hint">
             <template v-if="umbrellaChildrenCount > 0">— 锁定:本仓被 {{ umbrellaChildrenCount }} 个子模块的 parent_repo 引用,URL 是 child 路径解析的真源,不允许改。要改先删干净 child</template>
-            <template v-else-if="repo._fromYAML">— 锁定:从 yaml 导入,URL 是身份锚(已部署机器人靠它对应)。改 URL = 等于换项目,改完会跟原配置不一致</template>
+            <template v-else-if="repo._fromYAML">— 来自 yaml(身份锚定:<code>{{ repo._yamlOriginalURL }}</code>)。可改 URL,但只允许"同仓换协议"(ssh ↔ https),换成别的项目会标红阻塞下一步</template>
             <template v-else>— 仓库名从 URL 自动推;扫描前需要 clone 到本地</template>
           </span>
         </label>
@@ -180,8 +181,8 @@ const emit = defineEmits<{
           v-model="repo.url"
           type="text"
           placeholder="git@github.com:org/order-service.git"
-          :class="{ error: hasError(`repo.${index}.url`) }"
-          :readonly="umbrellaChildrenCount > 0 || !!repo._fromYAML"
+          :class="{ error: hasError(`repo.${index}.url`) || hasError(`repo.${index}.url.identity`) }"
+          :readonly="umbrellaChildrenCount > 0"
           @input="emit('urlInput', repo)"
         />
       </div>

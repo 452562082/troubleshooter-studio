@@ -15,6 +15,7 @@
 //   Step 7:dsProbeResults 里展示的每个组件 status='ok'
 
 import { Target } from './constants'
+import { canonicalizeGitURL } from './canonicalGitURL'
 import type { CredField, KuboardResourceState } from './credFields'
 
 export interface ValidatorEnvironment {
@@ -29,6 +30,10 @@ export interface ValidatorRepo {
   _source?: 'local' | 'remote'
   _localPath?: string
   _cloneTarget?: string
+  // _fromYAML / _yamlOriginalURL: yaml import 的 repo 身份锚定校验用
+  // (URL 改成不同仓 = 标红阻塞下一步)
+  _fromYAML?: boolean
+  _yamlOriginalURL?: string
 }
 
 // KuboardSvcLocator 跨 emit/generator/validator/importer 共用,统一从 yamlShared 取。
@@ -136,6 +141,14 @@ export function computeStepErrors(ctx: ValidatorContext): Set<string> {
         if (!(r._localPath || '').trim()) errs.add(`repo.${i}.localPath`)
       } else {
         if (!r.url.trim()) errs.add(`repo.${i}.url`)
+      }
+      // _fromYAML 身份锚定:URL canonicalize 后必须跟 yaml 原 URL 一致,允许 ssh ↔
+      // https 等同仓换协议,拒绝换项目。url 空 / _yamlOriginalURL 空都跳过(由上面
+      // url 必填规则兜底)。
+      if (r._fromYAML && r.url.trim() && r._yamlOriginalURL && r._yamlOriginalURL.trim()) {
+        if (canonicalizeGitURL(r.url) !== canonicalizeGitURL(r._yamlOriginalURL)) {
+          errs.add(`repo.${i}.url.identity`)
+        }
       }
     })
     return errs
@@ -249,7 +262,14 @@ export function labelForErrorKey(k: string, repos: ValidatorRepo[]): string {
     const i = Number(parts[1]) + 1
     const f = parts[2]
     if (f === 'localPath') return `仓库 #${i} 本地目录`
-    if (f === 'url') return `仓库 #${i} URL`
+    if (f === 'url') {
+      // 第 4 段是 'identity' = 身份锚定校验失败(URL 改成了不同仓库)
+      if (parts[3] === 'identity') {
+        const orig = repos[i - 1]?._yamlOriginalURL || '<yaml 原 URL>'
+        return `仓库 #${i} URL 跟 yaml 锚定 URL 不是同一个仓库(yaml: ${orig});允许 ssh ↔ https 等同仓换协议,不允许换项目`
+      }
+      return `仓库 #${i} URL`
+    }
     if (f === 'cloneTarget') return `仓库 #${i} clone 落盘父目录(必填,远程仓库部署时 clone 到 <父目录>/${repos[i - 1]?.name || '<repo.name>'})`
     return `仓库 #${i} ${f}`
   }

@@ -238,10 +238,11 @@ export async function applyParsedYAMLToWizardState(
         _localPath: localPath,
         _serviceEntries: core.service_entries,
         _submoduleHintsDismissed: !!(core.service_entries && Object.keys(core.service_entries).length > 0),
-        // _fromYAML: 从 yaml import 来的 repo,标记身份锚定。RepoListItem 看到这个就锁
-        // URL input readonly + 本地目录选时校验 origin 跟 yaml URL 匹配。新加 /
-        // splitMonorepo 拆出来的不带这个标记。详见 InitPage RepoItem 字段注释。
+        // _fromYAML: 从 yaml import 来的 repo,身份锚定标记。URL input 可编辑,但
+        // 提交时校验 canonicalize(r.url) === canonicalize(_yamlOriginalURL)(允许 ssh ↔
+        // https 等换协议,拒绝换项目)。新加 / splitMonorepo 拆出来的不带这个标记。
         _fromYAML: true,
+        _yamlOriginalURL: core.url,
       }
     }))
     // umbrella 行的 service_names / _serviceEntries 不在 yaml import 阶段强制清:

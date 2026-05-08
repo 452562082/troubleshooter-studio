@@ -446,13 +446,17 @@ interface RepoItem {
   // 不缓存 role / sub_path / _roleHint / _roleManuallyPicked —— 这些跟"哪个源"无关,
   // 是用户对仓库的固有判断,跨源持久。
   _sourceCache?: { remote?: SourceSnapshot, local?: SourceSnapshot }
-  // _fromYAML:本仓是从 yaml import 进来的(不是 wizard 新加 / splitMonorepo 拆出)。
-  // yaml 是身份源(system.id 绑定已部署机器人,URL 是 repo 身份锚),用户在 wizard 改
-  // URL / 选错本地目录 = 等于换项目,跟原 yaml 不一致 + 跟已部署机器人对应的 repo 错位。
-  // 所以对 _fromYAML repo:URL input readonly + 本地目录选时校验 origin 跟 yaml URL 匹配,
-  // 不匹配拒绝(toast 报错)。新加 / splitMonorepo 拆出的不继承这个标记,可自由改。
-  // 跟 umbrella 父行的 childCount>0 锁是并列 OR 关系,任一命中都锁。
+  // _fromYAML:本仓从 yaml import 而来(不是 wizard 新加 / splitMonorepo 拆出)。
+  // yaml 是身份源(system.id 绑定已部署机器人,URL 是 repo 身份锚),用户改 URL / 选错
+  // 本地目录 = 等于换项目,跟已部署机器人对应的 repo 错位。
+  // 体验:URL input **可编辑**(允许 ssh ↔ https 等同仓换协议),但提交时校验 canonicalize
+  // 跟 _yamlOriginalURL 比对,不一致(换了项目)→ 标红阻塞下一步;选本地目录时校验
+  // 目录 origin 跟 r.url 匹配,不匹配 toast 拒绝。
+  // 新加 / splitMonorepo 拆出的不继承这个标记,可完全自由改。
   _fromYAML?: boolean
+  // _yamlOriginalURL:yaml import 时冻结的原 URL,_fromYAML repo 校验"换协议 vs 换项目"
+  // 的真源。canonicalizeGitURL 比对(ssh://...:2222/foo/bar.git ≡ https://.../foo/bar)。
+  _yamlOriginalURL?: string
   // 用户已经合并过 monorepo hints 到 service_names,banner 应隐藏不再追问。
   _submoduleHintsDismissed?: boolean
   // _submoduleHints:扫描后探测到的"这是 monorepo,有 N 个子模块"列表。
@@ -2605,6 +2609,7 @@ function computeStepErrors(): Set<string> {
     repos: repos.map(r => ({
       name: r.name, url: r.url,
       _source: r._source, _localPath: r._localPath, _cloneTarget: r._cloneTarget,
+      _fromYAML: r._fromYAML, _yamlOriginalURL: r._yamlOriginalURL,
     })),
     isMultiSource: isMultiSource.value,
     allServiceNames: allServiceNames.value,

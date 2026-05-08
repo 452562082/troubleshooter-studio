@@ -50,32 +50,34 @@ ln -s /Applications "$staging/Applications"
 #  2. 一键解锁.command —— 双击在 Terminal 跑 xattr -dr com.apple.quarantine,
 #     无需用户敲命令;dmg 卷内文件不带 quarantine(只有从 dmg 复制出去才会被打),
 #     所以这个 .command 在 dmg 卷里直接双击能跑,Terminal 不会被 Gatekeeper 拦
-cat >"$staging/README - 首次打开必读.txt" <<'TXT'
+cat >"$staging/1️⃣ 先看我.txt" <<'TXT'
 ══════════════════════════════════════════════════════════════
   TroubleshooterStudio 首次打开必读
 ══════════════════════════════════════════════════════════════
 
-【安装】拖左边的图标到右边的 Applications 文件夹
+【两步装好】
 
-【首次启动】macOS 可能弹"已损坏,扔到废纸篓"
+   ① 把左上角 .app 拖到右上角 Applications 文件夹
+   ② 双击右下角 "2️⃣ 一键解锁运行.command"
+      → Terminal 自动跑解锁 + 启动应用,完事
 
-   这不是真损坏!是因为本应用未做苹果数字签名(没花 $99/年办
-   Apple Developer Account),macOS 14+ 把"未签名 + 来自互联网"
-   统一报"已损坏",代码本身没问题。
+【为什么要解锁】
 
-   解决方案三选一:
+   本应用未做苹果数字签名($99/年的 Developer 账号),macOS 把
+   "未签名 + 来自互联网"统一报"已损坏" —— 不是真坏,跑解锁脚本
+   就好了。一次解锁永久生效,以后双击 .app 直接开。
 
-   ✓ 最省心:双击本 dmg 里的 "Fix - 一键解锁.command",自动放行
-   ✓ 也行:右键 .app → 打开 → 弹窗确认放行
-   ✓ 终端命令:
-     xattr -dr com.apple.quarantine /Applications/TroubleshooterStudio.app
+【其他方案】
 
-【官方文档 / 反馈】
+   - 不想跑脚本:右键 .app → 打开 → 弹窗确认放行(也 OK)
+   - 终端用户:xattr -dr com.apple.quarantine /Applications/TroubleshooterStudio.app
+
+【反馈 / 文档】
    https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio
 TXT
 
 # 一键解锁脚本(双击在 Terminal 弹窗跑)
-cat >"$staging/Fix - 一键解锁.command" <<'CMD'
+cat >"$staging/2️⃣ 一键解锁运行.command" <<'CMD'
 #!/bin/bash
 # 给 /Applications/TroubleshooterStudio.app 解锁 macOS Gatekeeper quarantine。
 # 双击此文件在 Terminal 自动跑;dmg 卷内的 .command 不带 quarantine,无需放行。
@@ -102,21 +104,23 @@ fi
 echo "▶ 给 $APP_PATH 解锁 quarantine xattr ..."
 if xattr -dr com.apple.quarantine "$APP_PATH" 2>&1; then
     echo ""
-    echo "✓ 解锁完成!"
+    echo "✓ 解锁完成!正在帮你打开 TroubleshooterStudio ..."
+    echo "  (以后直接双击 .app 就开,这个解锁一次永久生效)"
     echo ""
-    echo "  现在可以从 Launchpad / Spotlight 搜 TroubleshooterStudio 启动。"
-    echo "  这个解锁一次永久生效,以后双击 .app 直接开。"
+    sleep 1
+    open "$APP_PATH"
+    echo "  按回车键关闭本窗口..."
+    read -r _
 else
     echo ""
     echo "✗ 解锁失败。可能权限不够,试试加 sudo:"
     echo "    sudo xattr -dr com.apple.quarantine $APP_PATH"
+    echo ""
+    echo "  按回车键关闭..."
+    read -r _
 fi
-
-echo ""
-echo "  按回车键关闭..."
-read -r _
 CMD
-chmod +x "$staging/Fix - 一键解锁.command"
+chmod +x "$staging/2️⃣ 一键解锁运行.command"
 
 # 防卡:之前失败 build 可能留下 /Volumes/<VOLUME_NAME> 的 stale 挂载(典型 readonly,
 # 因为是 dmg attach 失败的残骸)。新挂同名卷时,macOS 优先选第一份 → 后续 AppleScript
@@ -186,8 +190,8 @@ tell application "Finder"
     set icon size of viewOptions to 96
     set position of item "$APP_NAME_IN_DMG" of container window to {180, 160}
     set position of item "Applications" of container window to {520, 160}
-    set position of item "README - 首次打开必读.txt" of container window to {180, 340}
-    set position of item "Fix - 一键解锁.command" of container window to {520, 340}
+    set position of item "1️⃣ 先看我.txt" of container window to {180, 340}
+    set position of item "2️⃣ 一键解锁运行.command" of container window to {520, 340}
     update without registering applications
     delay 1
     close

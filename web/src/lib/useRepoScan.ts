@@ -248,29 +248,37 @@ export function useRepoScan(deps: RepoScanDeps) {
   async function resolveLocalRepoPath(r: RepoScanItem, p: string) {
     const newPath = (p || '').trim()
     if (!newPath) return
-    // umbrella 父行(被 child parent_repo 引用)硬约束:本地目录的 git origin 必须
-    // 跟 yaml 锁定的 r.url 匹配。否则用户可能选了别的项目目录,所有 child path
-    // cascade 全错位。校验失败 → 拒绝设 _localPath,toast.error 报清原因。
+    // 身份硬约束:本地目录的 git origin 必须跟 yaml 锁定的 r.url 匹配,否则拒绝。
+    // 触发条件 OR 关系:
+    //   (1) umbrella 父行 —— 被 child parent_repo 引用,改 URL 让 child path cascade 错位
+    //   (2) yaml import 来的 repo (_fromYAML) —— yaml 是身份源,改 URL 等于换项目,
+    //       跟 system.id 绑定的已部署机器人对应的 repo 不一致
     const childCount = deps.repos.filter(rr => (rr.parent_repo || '').trim() === r.name.trim()).length
-    if (childCount > 0 && r.url.trim()) {
+    const isUmbrellaParent = childCount > 0
+    const isFromYAML = !!(r as any)._fromYAML
+    const isLocked = isUmbrellaParent || isFromYAML
+    if (isLocked && r.url.trim()) {
       let actualOrigin = ''
       try { actualOrigin = await getRemoteURL(newPath) } catch { /* 非 git 仓库,fallthrough */ }
+      const lockReason = isUmbrellaParent
+        ? `本仓是 umbrella(被 ${childCount} 个子模块引用),选别的项目会让 child path 全错位`
+        : `本仓来自 yaml(身份锚定到 system.id 部署),选别的项目会跟原配置不一致`
       if (!actualOrigin) {
-        toast.error(`目录 ${newPath} 不是 git 仓库或没读到 origin。umbrella 必须指向跟锁定 URL 同源的本地副本`)
+        toast.error(`目录 ${newPath} 不是 git 仓库或没读到 origin。${lockReason}`)
         return
       }
       if (canonicalizeGitURL(actualOrigin) !== canonicalizeGitURL(r.url)) {
-        toast.error(`目录 origin (${actualOrigin}) 跟 umbrella 锁定 URL (${r.url}) 不匹配。本仓被 ${childCount} 个子模块引用,选别的项目会让 child path 全错位`)
+        toast.error(`目录 origin (${actualOrigin}) 跟锁定 URL (${r.url}) 不匹配。${lockReason}`)
         return
       }
     }
     // 换路径 = 换仓库,先清旧 name 对应的分支缓存 + 身份字段
-    // (umbrella 父行场景下 name 锁住了,这步实际不变 r.name;普通仓库照常清重填)
+    // (锁定的 repo:name 也固定不动;普通仓库照常清重填)
     if (r.name && r.name in deps.repoBranchesMap.value) {
       delete deps.repoBranchesMap.value[r.name]
     }
     r._localPath = newPath
-    if (childCount === 0) {
+    if (!isLocked) {
       // 普通仓 / umbrella 子模块切目录 = 换仓库,清身份等会儿从新路径反填
       r.url = ''
       r.name = ''
@@ -280,7 +288,7 @@ export function useRepoScan(deps: RepoScanDeps) {
     r._scannedSource = ''
     // 清空旧 submodule hints,避免上个仓库的检测结果残留
     r._submoduleHints = undefined
-    if (childCount === 0) {
+    if (!isLocked) {
       try {
         const remote = await getRemoteURL(newPath)
         if (remote) {

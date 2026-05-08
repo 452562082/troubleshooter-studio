@@ -450,6 +450,13 @@ interface RepoItem {
   // 不缓存 role / sub_path / _roleHint / _roleManuallyPicked —— 这些跟"哪个源"无关,
   // 是用户对仓库的固有判断,跨源持久。
   _sourceCache?: { remote?: SourceSnapshot, local?: SourceSnapshot }
+  // _fromYAML:本仓是从 yaml import 进来的(不是 wizard 新加 / splitMonorepo 拆出)。
+  // yaml 是身份源(system.id 绑定已部署机器人,URL 是 repo 身份锚),用户在 wizard 改
+  // URL / 选错本地目录 = 等于换项目,跟原 yaml 不一致 + 跟已部署机器人对应的 repo 错位。
+  // 所以对 _fromYAML repo:URL input readonly + 本地目录选时校验 origin 跟 yaml URL 匹配,
+  // 不匹配拒绝(toast 报错)。新加 / splitMonorepo 拆出的不继承这个标记,可自由改。
+  // 跟 umbrella 父行的 childCount>0 锁是并列 OR 关系,任一命中都锁。
+  _fromYAML?: boolean
   // 用户已经合并过 monorepo hints 到 service_names,banner 应隐藏不再追问。
   _submoduleHintsDismissed?: boolean
   // _submoduleHints:扫描后探测到的"这是 monorepo,有 N 个子模块"列表。

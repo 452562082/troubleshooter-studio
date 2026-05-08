@@ -35,9 +35,17 @@ TARGET_DIR="${TARGET_DIR:-/Applications}"
 PROJECT_ENC=$(printf %s "$PROJECT_PATH" | sed 's|/|%2F|g')
 API="$GITLAB_HOST/api/v4/projects/$PROJECT_ENC"
 
-# curl 鉴权头(私有项目 / 未公开 release 必填 GITLAB_TOKEN)
-auth=()
-[[ -n "${GITLAB_TOKEN:-}" ]] && auth=(-H "PRIVATE-TOKEN: $GITLAB_TOKEN")
+# fetch 函数封装 curl + 可选鉴权头。封装是因为:
+#  - macOS 自带 bash 3.2(Apple 没升级);set -u 下 ${empty_array[@]} 报 unbound
+#  - 用函数避免到处判断 token + 数组展开兼容性问题
+#  - 公开项目零 token 直接调,私有项目 export GITLAB_TOKEN 后透明加 -H
+fetch() {
+    if [[ -n "${GITLAB_TOKEN:-}" ]]; then
+        curl -fsSL -H "PRIVATE-TOKEN: $GITLAB_TOKEN" "$@"
+    else
+        curl -fsSL "$@"
+    fi
+}
 
 echo ""
 echo "═══════════════════════════════════════════════════════════════"
@@ -54,7 +62,7 @@ fi
 # ── 1. 找最新 release tag(VERSION 没指定时)──────────────────
 if [[ -z "$VERSION" ]]; then
     echo "▶ 查询最新 release ..."
-    resp=$(curl -fsSL "${auth[@]}" "$API/releases?per_page=1" 2>/dev/null || true)
+    resp=$(fetch "$API/releases?per_page=1" 2>/dev/null || true)
     if [[ -z "$resp" || "$resp" == "[]" ]]; then
         echo "✗ 拿不到 release 列表(项目可能私有,设 GITLAB_TOKEN env 后重跑)" >&2
         echo "  GitLab → Preferences → Access Tokens → 创建 scope=read_api 的 token" >&2
@@ -88,7 +96,7 @@ trap '
 zip_path="$tmp/$ZIP_NAME"
 echo ""
 echo "▶ 下载 $ZIP_NAME ..."
-if ! curl -fSL --progress-bar "${auth[@]}" -o "$zip_path" "$ZIP_URL"; then
+if ! fetch --progress-bar -o "$zip_path" "$ZIP_URL"; then
     echo "✗ 下载失败 — 检查网络 / 项目权限 / token" >&2
     exit 1
 fi

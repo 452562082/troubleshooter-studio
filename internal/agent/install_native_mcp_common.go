@@ -54,10 +54,65 @@ func normalizeMongoURI(uri string) string {
 		return uri // 只有 user 没 pass,跳过
 	}
 	encoded := encodeMongoPass(pass)
-	if encoded == pass {
-		return uri // 没需要编码的字符,原样返回
+	out := uri
+	if encoded != pass {
+		out = prefix + user + ":" + encoded + afterAt
 	}
-	return prefix + user + ":" + encoded + afterAt
+	return ensureAuthSource(out)
+}
+
+// ensureAuthSource 给 mongodb URI 自动补 ?authSource=admin(如果没有)。
+//
+// 最常见 mongodb 部署:root / admin 用户建在 admin db,业务用这个 root 跨 db 访问业务库
+// (`mongodb://root:pass@host/business_db`)。MongoDB driver 默认把 path 段当 authSource —
+// 在 business_db 找 root 找不到 → "Authentication failed"。其他工具(mongosh / Compass)
+// 多数会自动 fallback 试 admin,driver 不会 → mcp 启动失败。
+//
+// 规则:
+//   - path 已经是 /admin 或为空(/) → 不加(用户显式连 admin / 没指定默认 db)
+//   - query 里已经有 authSource= → 不加(用户显式指定了)
+//   - 否则 → 自动追加 ?authSource=admin
+//
+// 如果用户的 mongodb 不是这个模式(authSource 在 myauth 等其他 db),他在 wizard URI 末尾
+// 显式加 ?authSource=myauth 即可,本函数检测到 query 里有 authSource= 会跳过不动。
+func ensureAuthSource(uri string) string {
+	idx := strings.Index(uri, "://")
+	if idx < 0 {
+		return uri
+	}
+	rest := uri[idx+3:]
+	at := strings.LastIndex(rest, "@")
+	if at < 0 {
+		return uri // 没 userinfo → 没认证场景,不动
+	}
+	hostAndAfter := rest[at+1:] // host[:port][/path][?query]
+	slashIdx := strings.Index(hostAndAfter, "/")
+	if slashIdx < 0 {
+		return uri // 没 path 段(mongodb://user:pass@host) → 没指定 db,默认走 admin,不用加
+	}
+	pathAndQuery := hostAndAfter[slashIdx+1:]
+	path, query, hasQuery := strings.Cut(pathAndQuery, "?")
+	if path == "" || path == "admin" {
+		return uri // 用户已经连 admin / 没指定默认 db
+	}
+	if hasQuery && containsParam(query, "authSource") {
+		return uri // 已显式指定 authSource(无论值是什么,尊重用户)
+	}
+	if hasQuery {
+		return uri + "&authSource=admin"
+	}
+	return uri + "?authSource=admin"
+}
+
+// containsParam 检查 query string 里是否含名为 name 的参数(`name=...` 或 `name&` 形式)。
+func containsParam(query, name string) bool {
+	for _, pair := range strings.Split(query, "&") {
+		k, _, _ := strings.Cut(pair, "=")
+		if k == name {
+			return true
+		}
+	}
+	return false
 }
 
 func encodeMongoPass(s string) string {

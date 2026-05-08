@@ -122,8 +122,8 @@ func TestBuildMCPServers_DataStores(t *testing.T) {
 		}
 	}
 
-	// ── mongodb:位置参数接 URI + --read-only ──
-	if got := argString(servers["bot-mongodb-dev"]); got != "[-y mcp-mongo-server mongodb://u:p@m.local:27017/app --read-only]" {
+	// ── mongodb:位置参数接 URI + --read-only(URI 自动 normalize 补 authSource=admin) ──
+	if got := argString(servers["bot-mongodb-dev"]); got != "[-y mcp-mongo-server mongodb://u:p@m.local:27017/app?authSource=admin --read-only]" {
 		t.Errorf("mongodb args mismatch: %s", got)
 	}
 
@@ -346,17 +346,17 @@ func TestNormalizeMongoURI(t *testing.T) {
 		{
 			name: "用户实际场景:密码含 < ] ^ . — mcp-mongo-server 严格解析必失败",
 			in:   "mongodb://root:Xx9<9]Nu^Z]5zq3UD3j.@43.206.141.191:27017/gin_microservice",
-			want: "mongodb://root:Xx9%3C9%5DNu%5EZ%5D5zq3UD3j.@43.206.141.191:27017/gin_microservice",
+			want: "mongodb://root:Xx9%3C9%5DNu%5EZ%5D5zq3UD3j.@43.206.141.191:27017/gin_microservice?authSource=admin",
 		},
 		{
-			name: "已经编码过的不重复编码",
+			name: "已经编码过的不重复编码(自动补 authSource)",
 			in:   "mongodb://u:p%3Cw@host:27017/db",
-			want: "mongodb://u:p%3Cw@host:27017/db",
+			want: "mongodb://u:p%3Cw@host:27017/db?authSource=admin",
 		},
 		{
-			name: "密码无特殊字符 → 原样返回",
+			name: "密码无特殊字符 → 仅补 authSource",
 			in:   "mongodb://user:simple123@host:27017/db",
-			want: "mongodb://user:simple123@host:27017/db",
+			want: "mongodb://user:simple123@host:27017/db?authSource=admin",
 		},
 		{
 			name: "无 userinfo → 不动",
@@ -371,17 +371,48 @@ func TestNormalizeMongoURI(t *testing.T) {
 		{
 			name: "mongodb+srv 同样适用",
 			in:   "mongodb+srv://u:p#a@cluster.mongodb.net/db",
-			want: "mongodb+srv://u:p%23a@cluster.mongodb.net/db",
+			want: "mongodb+srv://u:p%23a@cluster.mongodb.net/db?authSource=admin",
 		},
 		{
 			name: "密码含 @ — 用 LastIndex 兜底找正确的 host 起点",
 			in:   "mongodb://user:p@ss@host:27017/db",
-			want: "mongodb://user:p%40ss@host:27017/db",
+			want: "mongodb://user:p%40ss@host:27017/db?authSource=admin",
 		},
 		{
 			name: "空串 → 原样",
 			in:   "",
 			want: "",
+		},
+		// ── ensureAuthSource:root@admin 跨 db 访问场景自动补 authSource=admin ──
+		{
+			name: "用户实际场景:root 跨 db,自动补 authSource=admin",
+			in:   "mongodb://root:simple@host:27017/business_db",
+			want: "mongodb://root:simple@host:27017/business_db?authSource=admin",
+		},
+		{
+			name: "已显式 authSource → 尊重用户不动",
+			in:   "mongodb://u:p@host:27017/db?authSource=myauth",
+			want: "mongodb://u:p@host:27017/db?authSource=myauth",
+		},
+		{
+			name: "已 admin db → 不补",
+			in:   "mongodb://u:p@host:27017/admin",
+			want: "mongodb://u:p@host:27017/admin",
+		},
+		{
+			name: "无 path(默认 admin)→ 不补",
+			in:   "mongodb://u:p@host:27017",
+			want: "mongodb://u:p@host:27017",
+		},
+		{
+			name: "已有 query 但无 authSource → & 追加",
+			in:   "mongodb://u:p@host:27017/db?retryWrites=true",
+			want: "mongodb://u:p@host:27017/db?retryWrites=true&authSource=admin",
+		},
+		{
+			name: "密码编码 + 补 authSource 一并触发",
+			in:   "mongodb://root:p<w@host:27017/biz",
+			want: "mongodb://root:p%3Cw@host:27017/biz?authSource=admin",
 		},
 	}
 	for _, c := range cases {

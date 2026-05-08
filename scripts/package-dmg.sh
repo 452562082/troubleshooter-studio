@@ -115,22 +115,48 @@ echo "▶ 给 $APP_PATH 解锁 quarantine xattr ..."
 if xattr -dr com.apple.quarantine "$APP_PATH" 2>&1; then
     echo "  ✓ quarantine 已清"
 
-    # 关键:强制 LaunchServices 重新注册 .app —— 否则系统缓存的"已损坏"判断
-    # 不会立即失效,第一次 open 仍被 Gatekeeper 拦,要双击 .command 第二次才开。
-    # `lsregister -f` 让 LaunchServices 重新读 .app 元数据 + 清 Gatekeeper 自家
-    # 对这个 .app 的判断缓存 → 接着 open 立即生效。
+    # 强制 LaunchServices 重新注册 .app —— 但 lsregister -f 不一定能刷 Gatekeeper
+    # syspolicyd 的判断缓存(实测:有时 .app 第一次 open 仍被拦)。所以接下来用
+    # "open + 检查 + 失败 retry"兜底。
     LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister
     if [[ -x "$LSREGISTER" ]]; then
         echo "  ▶ 刷新 LaunchServices 缓存 ..."
         "$LSREGISTER" -f "$APP_PATH" 2>/dev/null || true
     fi
+    sync
+
+    # .app 进程的 binary 名(用 pgrep 检测启动是否成功)
+    APP_BIN_NAME=$(/usr/libexec/PlistBuddy -c "Print CFBundleExecutable" "$APP_PATH/Contents/Info.plist" 2>/dev/null || basename "$APP_PATH" .app)
 
     echo ""
-    echo "✓ 解锁完成!正在帮你打开 TroubleshooterStudio ..."
-    echo "  (以后直接双击 .app 就开,这个解锁一次永久生效)"
+    echo "▶ 启动 TroubleshooterStudio ..."
+    open "$APP_PATH" 2>/dev/null
+    sleep 2
+
+    # 检查 .app 是否真的起来。没起来 = Gatekeeper 第一次拦了(syspolicyd 缓存
+    # 过期需要几秒),sleep + retry,这次会放行。
+    retry=0
+    while ! pgrep -i "$APP_BIN_NAME" >/dev/null 2>&1; do
+        retry=$((retry + 1))
+        if [[ $retry -gt 3 ]]; then
+            echo ""
+            echo "✗ 自动启动失败 — 请到 Launchpad / Spotlight 搜 TroubleshooterStudio 手动开"
+            echo "  (解锁是成功的,这只是首次 launch 的 macOS 评估延迟)"
+            break
+        fi
+        echo "  系统首次评估中,等 ${retry}×3s 后重试 ..."
+        sleep 3
+        open "$APP_PATH" 2>/dev/null
+        sleep 2
+    done
+
+    if pgrep -i "$APP_BIN_NAME" >/dev/null 2>&1; then
+        echo ""
+        echo "✓ 完成!TroubleshooterStudio 已启动。"
+        echo "  以后直接双击 .app 就开,这个解锁一次永久生效。"
+    fi
+
     echo ""
-    sleep 1
-    open "$APP_PATH"
     echo "  按回车键关闭本窗口..."
     read -r _
 else

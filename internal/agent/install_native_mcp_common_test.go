@@ -337,6 +337,63 @@ func keysOf(m map[string]any) []string {
 	return ks
 }
 
+func TestNormalizeMongoURI(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "用户实际场景:密码含 < ] ^ . — mcp-mongo-server 严格解析必失败",
+			in:   "mongodb://root:Xx9<9]Nu^Z]5zq3UD3j.@43.206.141.191:27017/gin_microservice",
+			want: "mongodb://root:Xx9%3C9%5DNu%5EZ%5D5zq3UD3j.@43.206.141.191:27017/gin_microservice",
+		},
+		{
+			name: "已经编码过的不重复编码",
+			in:   "mongodb://u:p%3Cw@host:27017/db",
+			want: "mongodb://u:p%3Cw@host:27017/db",
+		},
+		{
+			name: "密码无特殊字符 → 原样返回",
+			in:   "mongodb://user:simple123@host:27017/db",
+			want: "mongodb://user:simple123@host:27017/db",
+		},
+		{
+			name: "无 userinfo → 不动",
+			in:   "mongodb://host:27017/db",
+			want: "mongodb://host:27017/db",
+		},
+		{
+			name: "只 user 没 pass → 不动",
+			in:   "mongodb://user@host:27017/db",
+			want: "mongodb://user@host:27017/db",
+		},
+		{
+			name: "mongodb+srv 同样适用",
+			in:   "mongodb+srv://u:p#a@cluster.mongodb.net/db",
+			want: "mongodb+srv://u:p%23a@cluster.mongodb.net/db",
+		},
+		{
+			name: "密码含 @ — 用 LastIndex 兜底找正确的 host 起点",
+			in:   "mongodb://user:p@ss@host:27017/db",
+			want: "mongodb://user:p%40ss@host:27017/db",
+		},
+		{
+			name: "空串 → 原样",
+			in:   "",
+			want: "",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := normalizeMongoURI(c.in)
+			if got != c.want {
+				t.Errorf("\n  in:   %q\n  got:  %q\n  want: %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
 func TestParseConnURL(t *testing.T) {
 	cases := []struct {
 		name                            string

@@ -25,6 +25,98 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/generator"
 )
 
+// normalizeMongoURI 修复 mongodb URI 密码段含保留字符但未 URL-encode 的常见情况。
+//
+// MongoDB 官方文档明确要求 username/password 里的 `@ / ? # [ ] %` 必须 URL-encode,
+// 但 driver 实际是按 RFC3986 严格解析,其他保留字 / unsafe char(如 `< > ^ " \ { | }`)
+// 也会触发 parse error。用户在 wizard 直接粘贴明文密码极常见(mongosh / Compass 容忍
+// 未编码 → 用户以为不需要),代码侧主动修一遍,免得 mcp 启动报"invalid connection string"。
+//
+// 算法:scheme:// 之后找最后一个 @ 作 host 起点,该 @ 之前的第一个 : 作 user/pass 分割,
+//      pass 段每字符过一遍:已编码的 %xx 整体跳,其他保留字 / 非 ASCII / 控制字符 → %XX 编码。
+// 已编码的 %xx 检测:`%` + 2 个 hex digit。用户密码含字面 `%` 而忘记编码 = 极罕见 corner,
+// 不在本函数兜底范围(MongoDB 官方文档已明确说 % 必须编码,这部分用户责任)。
+func normalizeMongoURI(uri string) string {
+	idx := strings.Index(uri, "://")
+	if idx < 0 {
+		return uri
+	}
+	prefix := uri[:idx+3] // 含 "://"
+	rest := uri[idx+3:]
+	at := strings.LastIndex(rest, "@")
+	if at < 0 {
+		return uri // 无 userinfo
+	}
+	userinfo := rest[:at]
+	afterAt := rest[at:] // 含 "@"
+	user, pass, ok := strings.Cut(userinfo, ":")
+	if !ok {
+		return uri // 只有 user 没 pass,跳过
+	}
+	encoded := encodeMongoPass(pass)
+	if encoded == pass {
+		return uri // 没需要编码的字符,原样返回
+	}
+	return prefix + user + ":" + encoded + afterAt
+}
+
+func encodeMongoPass(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	n := len(s)
+	for i := 0; i < n; i++ {
+		c := s[i]
+		// 已编码 %xx 整体跳过
+		if c == '%' && i+2 < n && isHexDigit(s[i+1]) && isHexDigit(s[i+2]) {
+			b.WriteByte('%')
+			b.WriteByte(s[i+1])
+			b.WriteByte(s[i+2])
+			i += 2
+			continue
+		}
+		if needsEscape(c) {
+			b.WriteByte('%')
+			b.WriteByte(hexUpper(c >> 4))
+			b.WriteByte(hexUpper(c & 0x0f))
+		} else {
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+func isHexDigit(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+func hexUpper(n byte) byte {
+	if n < 10 {
+		return '0' + n
+	}
+	return 'A' + n - 10
+}
+
+// needsEscape 字符是否要在 mongodb URI userinfo:password 里 URL-encode。
+// 包含:RFC3986 gen-delims + sub-delims + 常见 unsafe 字符 + 非 ASCII / 控制字符。
+// 排除字符:unreserved (alphanum + `- _ . ~`)。
+func needsEscape(c byte) bool {
+	// unreserved:不需编码
+	if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+		return false
+	}
+	switch c {
+	case '-', '_', '.', '~':
+		return false
+	}
+	// 非 ASCII / 控制字符 / 空格 → 编
+	if c < 0x21 || c > 0x7e {
+		return true
+	}
+	// 其余 ASCII 可见字符全编(覆盖 gen-delims `: / ? # [ ] @`、sub-delims `! $ & ' ( ) * + , ; =`、
+	// 和 unsafe `< > " \ ^ ` { | } %`)。我们已经在上层处理了 % + 2 hex 的免疫,这里 % 也编。
+	return true
+}
+
 // parseConnURL 把 redis:// / clickhouse:// / http:// / postgres:// 等 URL 拆成
 // host/port/user/pass/path 字段,供"npm mcp 包要拆字段不接整 URL"的场景用。
 // 解析失败 / 没填整段为空,所有返回值置空 — 调用方按需自取,空字段交 envBlock 决定保留还是 prune。
@@ -302,6 +394,9 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 				if uri == "" && opts.PruneEmpty {
 					continue // 没填连接串 → 跳过(避免注册一条永远启动失败的 mcp)
 				}
+				// 修密码段未 URL-encode 的保留字符 — mcp-mongo-server 严格按 RFC3986
+				// 解析,密码含 < ] ^ % @ : / ? # [ ] 等字面字符 → connection string parse error。
+				uri = normalizeMongoURI(uri)
 				servers[keyFor("mongodb", "", e.ID)] = map[string]any{
 					"command": "npx",
 					"args":    []any{"-y", "mcp-mongo-server", uri, "--read-only"},

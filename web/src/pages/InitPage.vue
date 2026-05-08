@@ -880,6 +880,10 @@ function setRepoSource(r: RepoItem, src: 'local' | 'remote') {
   // (全清,等用户重扫填回)。
   const isUmbrellaChild = !!(r.parent_repo && r.parent_repo.trim())
   const isUmbrellaParent = repos.some(rr => (rr.parent_repo || '').trim() === r.name.trim())
+  // _fromYAML repo 跟 umbrella 一起走"身份保留"分支:URL 是 yaml 锚定的身份,切源
+  // 不该清。否则用户切到 local 再切回 remote,URL 框就空了 → 用户以为系统忘了,得
+  // 重填一遍 + 还得过 canonicalize 校验,体验差。
+  const isFromYAML = !!r._fromYAML
   if (restored) {
     r.url = restored.url
     r.name = restored.name
@@ -897,14 +901,15 @@ function setRepoSource(r: RepoItem, src: 'local' | 'remote') {
     r._scanned = restored._scanned
     r._scannedSource = restored._scannedSource
     r._serviceEntries = restored._serviceEntries
-  } else if (isUmbrellaChild || isUmbrellaParent) {
-    // umbrella 子模块 / 父行首次切源:身份字段全保留(URL / name / role / 服务名 /
-    // 分支映射),只清"源访问方式"相关 + 扫描态。
-    //   - 子模块:身份由 parent_repo + parent_path 锁定
-    //   - 父行:URL 是 child path 解析的真源,被 readonly 锁;切源时也不能丢
+  } else if (isUmbrellaChild || isUmbrellaParent || isFromYAML) {
+    // 身份保留分支(三种 case 都走):身份字段全留(URL / name / role / 服务名 / 分支
+    // 映射),只清"源访问方式"相关 + 扫描态。
+    //   - umbrella 子模块:身份由 parent_repo + parent_path 锁定
+    //   - umbrella 父行:URL 是 child path 解析的真源,被 readonly 锁;切源时也不能丢
+    //   - _fromYAML repo:URL 是 yaml 身份锚,切源不该清(用户切回 remote 应看到原 URL)
     // 切到 local 模式时 _cloneTarget 清掉(local 不 clone);切到 remote 模式 _localPath
-    // 留着(子模块场景的预填值仍然有用;父行场景下父行的 _localPath 是用户自己挑的副本,
-    // 切回 remote 也保留作为已有副本的提示)。
+    // 留着(子模块场景的预填值仍然有用;父行 / yaml repo 场景下用户挑过的副本仍是合法
+    // 提示)。
     if (src === 'local') {
       r._cloneTarget = ''
     }

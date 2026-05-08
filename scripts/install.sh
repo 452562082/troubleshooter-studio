@@ -39,11 +39,15 @@ API="$GITLAB_HOST/api/v4/projects/$PROJECT_ENC"
 #  - macOS 自带 bash 3.2(Apple 没升级);set -u 下 ${empty_array[@]} 报 unbound
 #  - 用函数避免到处判断 token + 数组展开兼容性问题
 #  - 公开项目零 token 直接调,私有项目 export GITLAB_TOKEN 后透明加 -H
+#
+# 故意**不加** -s(silent):silent 跟 --progress-bar 冲突,会让大文件下载看着卡住。
+# 调用方按需自己加 -s(查 release 等小请求)或 --progress-bar(下 zip 大请求)。
+# --max-time 600 = 10 分钟硬上限,防 GitLab 连不上 / 服务挂时无限等。
 fetch() {
     if [[ -n "${GITLAB_TOKEN:-}" ]]; then
-        curl -fsSL -H "PRIVATE-TOKEN: $GITLAB_TOKEN" "$@"
+        curl -fL --max-time 600 -H "PRIVATE-TOKEN: $GITLAB_TOKEN" "$@"
     else
-        curl -fsSL "$@"
+        curl -fL --max-time 600 "$@"
     fi
 }
 
@@ -62,7 +66,7 @@ fi
 # ── 1. 找最新 release tag(VERSION 没指定时)──────────────────
 if [[ -z "$VERSION" ]]; then
     echo "▶ 查询最新 release ..."
-    resp=$(fetch "$API/releases?per_page=1" 2>/dev/null || true)
+    resp=$(fetch -sS "$API/releases?per_page=1" 2>/dev/null || true)
     if [[ -z "$resp" || "$resp" == "[]" ]]; then
         echo "✗ 拿不到 release 列表(项目可能私有,设 GITLAB_TOKEN env 后重跑)" >&2
         echo "  GitLab → Preferences → Access Tokens → 创建 scope=read_api 的 token" >&2

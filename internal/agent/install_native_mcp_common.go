@@ -489,6 +489,11 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 						"ES_URL":      esURL,
 						"ES_USERNAME": firstNonEmpty(get("ES_USER_"+up), epUser),
 						"ES_PASSWORD": firstNonEmpty(get("ES_PASS_"+up), epPass),
+						// 禁用 elastic-otel-node 自动监控 — 否则它启动时往 stdout 打 banner JSON
+						// (`{"name":"elastic-otel-node",...}`),污染 mcp stdio JSON-RPC 协议 →
+						// "handshaking with MCP server failed: connection closed: initialize response"。
+						// 实测设这个 env 后 stdout 干净,mcp client 能正常收 initialize response。
+						"OTEL_SDK_DISABLED": "true",
 					}),
 				}
 			case "redis":

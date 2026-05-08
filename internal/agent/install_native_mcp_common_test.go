@@ -137,10 +137,13 @@ func TestBuildMCPServers_DataStores(t *testing.T) {
 		t.Errorf("redis args mismatch: %s", got)
 	}
 
-	// ── elasticsearch:env 段 ES_URL/USERNAME/PASSWORD ──
+	// ── elasticsearch:env 段 ES_URL/USERNAME/PASSWORD + 必须禁 OTel(否则 stdout 污染) ──
 	esEnv := envOf(servers["bot-elasticsearch-dev"])
 	if esEnv["ES_URL"] != "https://es.local:9200" || esEnv["ES_USERNAME"] != "elastic" || esEnv["ES_PASSWORD"] != "espw" {
 		t.Errorf("elasticsearch env mismatch: %v", esEnv)
+	}
+	if esEnv["OTEL_SDK_DISABLED"] != "true" {
+		t.Errorf("elasticsearch 必须禁 OTel 防 stdout 污染 mcp 协议 (got OTEL_SDK_DISABLED=%q)", esEnv["OTEL_SDK_DISABLED"])
 	}
 
 	// ── mysql:DSN 拆 MYSQL_HOST/PORT/USER/PASS/DB ──

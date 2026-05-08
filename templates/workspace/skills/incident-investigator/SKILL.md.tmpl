@@ -10,9 +10,30 @@ Step 1  收齐前提 + 症状先验证 + 历史 incident 复查
 Step 2  timeline → ±5 分钟内变更(deploy / 配置 / git)
 Step 3  ns-snapshot → 孤立 vs 广播
 Step 4  cascade_check → 沿依赖图追下游
-Step 5  triangulate → trace + log + metric 客观对齐
+Step 5  多向交叉 → trace + log + metric + 代码 + 数据(按问题类型选维度,详见下方)
 Step 6  根因标注 + 决策树 + 故障快报
 ```
+
+## 证据维度全景(Step 5 选维度的依据)
+
+排障证据有 **5 大维度**,LLM 天然偏向查容易的(日志、指标),**漏代码 + 漏数据是最常见的偏科**。Step 5 之前先按问题类型对标必查维度:
+
+| 症状关键词 | 必查维度 | 可选维度 |
+|---|---|---|
+| **数据/状态类**:数据不一致 / 余额不对 / 订单状态异常 / 显示错乱 / 漏发货 / 重复扣款 / 漏发消息 | **数据库当前值** + **代码业务逻辑** + 日志事务时序 | 链路 |
+| **逻辑/计算类**:金额算错 / 优惠没生效 / 规则没触发 / 限流没生效 | **代码计算路径** + **数据库输入数据** + 日志中间结果 | 指标 |
+| **性能类**:慢 / 超时 / 卡 / P95 升高 / 响应延长 | 指标 + 链路慢 span + **数据库慢查询** + **代码热点路径** | 日志 |
+| **可用性类**:5xx 突增 / down / 不通 / 报错暴涨 | 日志 error pattern + 指标错误率 + **代码近期变更**(`git log`) | 链路 + 数据库(若 query 异常) |
+| **环境/网络类**:某 env 不通 / 跨服务断连 / DNS 失败 | 指标 + 日志 + ns-snapshot + cluster events | 代码(若超时配置变了)|
+
+**判断逻辑**:命中 ≥1 个关键词 → 该维度从"可选"升"必查";没命中关键词 → 默认按可用性类。
+
+**取证 skill 索引**:
+- 代码:routing 拿到仓库路径后用 `grep` / `glob` / `read`(IDE 自带工具),找类/函数/最近 git diff
+- 数据库:用对应 `<type>-runtime-query` skill(mongodb / mysql / postgresql / redis / es / clickhouse / kafka 等)
+- 链路:`tracing-query`(jaeger 或 tempo 或 skywalking)
+- 日志:`elk-log-query` 或 grafana-loki mcp
+- 指标:grafana-prometheus mcp
 
 ## Step 1:收齐前提 + 验证 + 历史 grep
 
@@ -64,7 +85,20 @@ python3 scripts/cascade_check.py --env <env> --service <主角> \
 - `all_healthy` → 真因在主角自身,Step 5
 - `no_downstream_in_map` → dependency-map 没填,提示用户去填;**置信度上限 medium**
 
-## Step 5:三向交叉(trace + log + metric)
+## Step 5:多向交叉(trace + log + metric + 代码 + 数据)
+
+按"证据维度全景"选维度。最低 3 维起步,**数据/逻辑类问题代码 + 数据库不可省**。
+
+### 5.1 trace + log + metric 三向
+
+**调 grafana mcp 工具的 datasource 排他契约**(防止多 datasource 重复查):
+
+用户在 wizard 已经为本系统选定了"排障专用 datasource UID",查 loki / prometheus / jaeger 时**必须显式传 `datasourceUid` 参数**,值从 routing 的 `references/observability-map.yaml` 取:
+- loki:`loki.datasource_uid_by_env.<env>` 或 `loki.label_mapping_by_env.<env>.grafana_ds_uid`
+- prometheus:`prometheus.datasource_uid_by_env.<env>`
+- jaeger:`jaeger.datasource_uid_by_env.<env>`
+
+**禁止先调 `list_datasources` 然后看到多个 loki/prometheus 就挨个试** — 用户已经选定唯一 UID,其他 datasource 就算 grafana 里存在也是噪音。**找不到对应 env 的 UID 直接报"该 env 没配 datasource_uid_by_env,请回 wizard 补",不要瞎选**。
 
 并发拉三处后**喂 triangulate.py 做客观对齐**(不要 LLM 心算):
 
@@ -80,17 +114,52 @@ EOF
 
 `critical_span` 选取规则:① 优先 `status=error` 的最深 span;② 没 error 找 duration 最长的非根 span;③ 跳过纯网络/sidecar/lb 代理 span。
 
+### 5.2 代码取证(数据/逻辑/可用性类必查)
+
+routing 给到仓库路径后:
+
+```bash
+# 1. 最近变更(可用性类:5xx 突增,先看变更)
+cd <repo_root> && git log --oneline --since="2 hours ago" -- <主角 service 子模块>
+git diff HEAD~5..HEAD -- <可疑路径>
+
+# 2. 业务逻辑取证(数据/逻辑类:状态/计算/规则)
+grep -rn "<关键报错串|关键业务字段名>" <repo_root>/<service>/ --include="*.go" --include="*.java" --include="*.py"
+# 看到候选文件 → Read 完整函数,理解状态机/分支条件/异常处理
+```
+
+`证据`段必须给:**文件路径:行号** + 关键代码片段 + 推断("此处 if 条件在 status=X 时漏处理 Y → 解释了日志里的 Z")。
+**只看日志报错串拼根因不算代码取证**,要落到具体代码行。
+
+### 5.3 数据取证(数据/状态/逻辑类必查)
+
+调对应 `<type>-runtime-query` skill(优先用 mcp tool,fallback CLI):
+
+```text
+# 数据/状态类:把"用户说的现象"对照"数据库实际值"
+- 订单 #X 状态:db 里是 paid 还是 unpaid?(对照用户说"付了钱没发货")
+- 余额:db 当前 + 流水表加总是否对得上?
+- 缓存 vs DB 差异:Redis 里的值 vs MySQL 里的值,是否过期/不同步?
+
+# 逻辑/计算类:把"代码的输入"和"代码的输出"都从 db 拿
+- 优惠规则配置表(代码读这里) + 用户实际下单数据(代码处理这条) → 跑一遍逻辑应得 X,实际 Y
+```
+
+`证据`段必须给:**表名 + SQL/查询条件 + 返回行数 + 关键字段值对比**。
+
 ## Step 6:根因标注 + 处置建议
 
 ### 置信度量化(必须按规则判)
 
 | 等级 | 条件 |
 |--|--|
-| 高 | Step 5 三向一致 + Step 2 时间轴撞上变更 + Step 4 依赖图能解释传导(**全满足**) |
-| 中 | 三条任一缺 |
-| 低 | 单证据 / 仅推断 / 无法重现 |
+| 高 | **≥3 个证据维度交叉一致** + Step 2 时间轴撞上变更 + Step 4 依赖图能解释传导(**全满足**)。数据/逻辑类问题中的"代码"和"数据库"维度计入必算项,**没查代码或没查 db 直接降到中** |
+| 中 | 维度数 ≥2 但 <3 / 时间轴或依赖图任一缺 |
+| 低 | 单证据 / 仅推断 / 无法重现 / **数据问题但只有日志没有 db 证据** |
 
-快报里**明示判定理由**(`置信度: 中(metric+log 一致,但 trace 数据缺失)`)。
+快报里**明示判定理由 + 维度自检**(`置信度: 中(日志 ✓ 指标 ✓ 代码 ✗ 数据库 ✗ 链路 N/A;数据类问题缺 db 证据降级)`)。
+
+**反偏科兜底**:数据/逻辑/状态类问题(关键词命中"数据/状态/计算/规则"那两类)若只查了日志+指标 → confidence 上限锁 `低`,快报里必须列"未查的维度"让用户决定要不要补。
 
 ### 回滚 vs 热修 决策树
 

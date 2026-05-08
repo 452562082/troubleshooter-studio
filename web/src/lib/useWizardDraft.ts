@@ -154,8 +154,6 @@ export interface WizardDraft {
   // ── Step 2 / 9 / 10 部署目标 + 安装根目录 ──
   /** Step 2 勾哪些部署 target */
   enabledTargets?: Record<string, boolean>
-  /** Step 2 强制保留(即使探测未装也勾上) */
-  forceEnableMissingTarget?: Record<string, boolean>
   /** Step 2 OpenClaw 自定义安装目录(覆盖 ~/.openclaw 探测路径) */
   openclawInstallDir?: string
 

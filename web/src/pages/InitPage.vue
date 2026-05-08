@@ -241,13 +241,9 @@ const {
 } = useOpenClawDetect(saved?.openclawInstallDir ?? '')
 
 // Claude Code / Cursor / Codex 检测在 lib/useAITools.ts。onMounted 自动 refreshAITools。
-const {
-  aitoolsResult,
-  forceEnableMissingTarget,
-  refreshAITools,
-} = useAITools({
-  forceEnableMissingTarget: saved?.forceEnableMissingTarget,
-})
+// detector 只做"提示"角色:扫到给绿勾,没扫到 badge 警告但 checkbox 仍可勾(信任用户)。
+// BotsPage broken/ghost 状态兜底装坏的场景。
+const { aitoolsResult, refreshAITools } = useAITools()
 
 // watch / onMounted 已挪到 enabledTargets 声明之后(见该 const 下方),
 // 这里留空避免重复声明。
@@ -2059,10 +2055,6 @@ function targetDetectedInstalled(t: string): boolean | null {
   if (t === Target.Codex) return !!aitoolsResult.value.codex?.installed
   return null
 }
-// targetCanBeEnabled(t) — checkbox 是否能被勾选:已检测到 OR 用户强制启用过。
-function targetCanBeEnabled(t: string): boolean {
-  return targetDetectedInstalled(t) === true || forceEnableMissingTarget[t] === true
-}
 // targetBadgeProps(t) — 把 4 家 target 异构的 detect 结果归一成 <TargetInstallBadge> 三个 prop。
 // undefined detected = 完全不渲染 badge(对应原来 openclaw idle 不出徽章 + aitoolsResult 还没回的 ide 三家)。
 function targetBadgeProps(t: string): { detected: boolean | null | undefined; versionText?: string; title?: string } {
@@ -2131,13 +2123,14 @@ watch([openclawDetectStatus, openclawDetectedModels], () => {
   agent.model = pick.id // 同步 agent.model(yaml schema 必填兜底)
 }, { flush: 'post' })
 
-// 探测结果回填后,把"未装且没强制启用"的 target 自动取消勾选 ——
-// 默认 enabledTargets 全 true 是"探测前先假设都装着",真探测出来未装就回退。
-// 只在探测刚返回时跑一次,后续用户手动操作不被覆盖。
+// 探测结果回填后,把"未装"的 target 自动取消勾选 ——
+// 默认 enabledTargets 全 true 是"探测前先假设都装着",真探测出来未装就回退到未勾。
+// 用户看到 badge 警告后可以再主动勾(checkbox 不 disabled);此 watch 只防"默认勾选 +
+// 实际未装 = 静默装到孤儿目录"这种坏 case。
 watch([aitoolsResult, openclawDetectStatus], () => {
   for (const t of targetOptions) {
     const det = targetDetectedInstalled(t)
-    if (det === false && !forceEnableMissingTarget[t] && enabledTargets[t]) {
+    if (det === false && enabledTargets[t]) {
       enabledTargets[t] = false
     }
   }
@@ -2302,7 +2295,6 @@ watch(
     enabledObservability,
     enabledDataStores,
     enabledTargets,
-    forceEnableMissingTarget,
     idManualOverride: idManualOverride.value,
     openclawInstallDir: openclawInstallDir.value,
   }),
@@ -2939,10 +2931,8 @@ provide(WizardStoreKey, {
       :target-labels="targetLabels"
       :target-descriptions="targetDescriptions"
       :enabled-targets="enabledTargets"
-      :target-can-be-enabled="targetCanBeEnabled"
       :target-detected-installed="targetDetectedInstalled"
       :target-badge-props="targetBadgeProps"
-      :force-enable-missing-target="forceEnableMissingTarget"
       :target-deploy-paths="targetDeployPaths"
       :target-deploy-path-hints="targetDeployPathHints"
       :any-target-selected="anyTargetSelected"

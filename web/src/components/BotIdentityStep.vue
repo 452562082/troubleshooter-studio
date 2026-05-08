@@ -24,10 +24,8 @@ const props = defineProps<{
   targetLabels: Record<string, string>
   targetDescriptions: Record<string, string>
   enabledTargets: Record<string, boolean>
-  targetCanBeEnabled: (t: string) => boolean
   targetDetectedInstalled: (t: string) => boolean | null
   targetBadgeProps: (t: string) => { detected: boolean | null | undefined; versionText?: string; title?: string }
-  forceEnableMissingTarget: Record<string, boolean>
   targetDeployPaths: Record<string, string>
   targetDeployPathHints: Record<string, string>
   anyTargetSelected: boolean
@@ -99,41 +97,25 @@ const emit = defineEmits<{
           v-for="t in targetOptions"
           :key="t"
           class="target-card"
-          :class="{ selected: enabledTargets[t], 'target-disabled': targetDetectedInstalled(t) === false && !forceEnableMissingTarget[t] }"
+          :class="{ selected: enabledTargets[t] }"
         >
           <label class="target-card-head">
             <input
               type="checkbox"
               v-model="enabledTargets[t]"
-              :disabled="!targetCanBeEnabled(t)"
-              :title="!targetCanBeEnabled(t) ? '本机未检测到该 AI 平台,先安装或点下方「我已自行安装」再勾选' : ''"
             />
             <span class="target-title">{{ targetLabels[t] }}</span>
             <TargetInstallBadge v-bind="targetBadgeProps(t)" />
           </label>
           <div class="target-hint">{{ targetDescriptions[t] }}</div>
-          <!-- 未检测到 + 没强制启用 → 露出"我已自行安装/重新扫描"操作条
-               (没有"选安装目录"选项 —— IDE 扩展目录都是 hardcoded ~/.<target>,装别处 IDE 也看不到) -->
+          <!-- detector 没扫到只显示 badge 警告 + 重扫按钮,checkbox 始终可勾(信任用户)。
+               真没装就部署 → 装到 ~/.<target>/(IDE 看不到)→ 用户去 BotsPage 看到
+               "⚠ IDE 已卸载" badge 兜底,不会装坏什么。 -->
           <div
-            v-if="t !== 'openclaw' && targetDetectedInstalled(t) === false && !forceEnableMissingTarget[t]"
+            v-if="t !== 'openclaw' && targetDetectedInstalled(t) === false"
             class="target-missing-actions"
           >
-            <span>本机未找到 {{ targetLabels[t] }} —— 先安装,或</span>
-            <button type="button" class="btn-link" @click="forceEnableMissingTarget[t] = true">
-              我已自行安装,继续
-            </button>
-            <button type="button" class="btn-link" @click="emit('refreshAITools')">🔄 重新扫描</button>
-          </div>
-          <div
-            v-else-if="t !== 'openclaw' && targetDetectedInstalled(t) === false && forceEnableMissingTarget[t]"
-            class="target-missing-actions overridden"
-          >
-            <span>⚠ 未检测到本机安装,已强制启用(默认部署 ~/.{{ t }})</span>
-            <button
-              type="button"
-              class="btn-link"
-              @click="() => { forceEnableMissingTarget[t] = false; enabledTargets[t] = false }"
-            >撤销</button>
+            <span>⚠ 本机未检测到 {{ targetLabels[t] }} —— 仍可勾选部署,装好 IDE 后自动生效;若已装但没扫到 →</span>
             <button type="button" class="btn-link" @click="emit('refreshAITools')">🔄 重新扫描</button>
           </div>
           <!-- 勾选后展示 install.sh 跑完后的最终落地位置 —— AI 平台从这里读 agent。 -->

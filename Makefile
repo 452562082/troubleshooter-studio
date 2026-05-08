@@ -164,7 +164,7 @@ check-token:
 #   make bump-patch                          # 自动 patch+1(v0.1.0 → v0.1.1)
 #   make bump-minor                          # 自动 minor+1(v0.1.0 → v0.2.0)
 .PHONY: tag-and-release
-tag-and-release:
+tag-and-release: check-token
 ifndef v
 	$(error 用法:make tag-and-release v=v0.1.1)
 endif

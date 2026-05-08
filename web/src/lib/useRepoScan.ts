@@ -60,6 +60,11 @@ export interface RepoScanItem {
    * 老 saved draft 没此字段视为 false,首次 scan 后按 hint 自动 align(用户若不满意手挑一次即锁定)。 */
   _roleManuallyPicked?: boolean
   _roleHintLoading?: boolean
+  /** _fromYAML / _yamlOriginalURL:yaml import 时打的身份锚定标记。详见
+   *  InitPage RepoItem 字段注释。useRepoScan 在 resolveLocalRepoPath /
+   *  scanSingleRepo 里用它做 canonicalize 校验拒绝换项目。 */
+  _fromYAML?: boolean
+  _yamlOriginalURL?: string
 }
 
 export interface RepoScanEnv {
@@ -255,7 +260,7 @@ export function useRepoScan(deps: RepoScanDeps) {
     //       跟 system.id 绑定的已部署机器人对应的 repo 不一致
     const childCount = deps.repos.filter(rr => (rr.parent_repo || '').trim() === r.name.trim()).length
     const isUmbrellaParent = childCount > 0
-    const isFromYAML = !!(r as any)._fromYAML
+    const isFromYAML = !!r._fromYAML
     const isLocked = isUmbrellaParent || isFromYAML
     if (isLocked && r.url.trim()) {
       let actualOrigin = ''
@@ -330,6 +335,19 @@ export function useRepoScan(deps: RepoScanDeps) {
     }
     if (r._source === 'local' && !r._localPath?.trim()) {
       r._scanError = '本地模式需要先选目录'
+      return
+    }
+    // _fromYAML repo 身份锚定校验:跟 yamlValidator 的 step 5 校验同款,
+    // canonicalize(r.url) 必须等于 canonicalize(_yamlOriginalURL)。
+    // 这里再校一道是因为 step 5 校验影响"下一步"按钮,但用户在 step 5 内点
+    // "同步扫描"按钮 → 可能拿不一致的 URL 直接 clone,扫到不一样的项目内容。
+    // toast 反馈拒绝 + 标 _scanError 让用户感知。
+    if (r._fromYAML && r._yamlOriginalURL && r.url.trim()
+        && canonicalizeGitURL(r.url) !== canonicalizeGitURL(r._yamlOriginalURL)) {
+      const yamlURL = r._yamlOriginalURL
+      const msg = `URL "${r.url}" 跟 yaml 锚定 URL "${yamlURL}" 不是同一个仓库 — 拒绝扫描(允许同仓换协议如 ssh ↔ https,不允许换项目)`
+      r._scanError = msg
+      toast.error(msg)
       return
     }
 

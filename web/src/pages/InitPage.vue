@@ -3554,9 +3554,17 @@ input.path-readonly {
   box-shadow: 0 0 0 2px rgba(59,130,246,0.15);
 }
 .target-card.target-disabled {
-  background: #f8fafc; opacity: 0.78;
+  background: #f8fafc;
 }
+/* opacity 只灰化 checkbox + 标题(暗示"未启用"),底部"重新扫描"按钮保持 100%
+   清晰可点 —— 否则整张卡片半透明,按钮跟着糊,用户以为按钮 disabled。 */
+.target-card.target-disabled .target-card-head { opacity: 0.6; }
 .target-card.target-disabled .target-card-head .target-title { color: #64748b; }
+.target-card.target-disabled .target-hint { opacity: 0.6; }
+.target-card.target-disabled .target-missing-actions { opacity: 1; }
+.target-card.target-disabled .target-missing-actions .btn-link {
+  font-weight: 600; /* 加粗强调按钮可点 */
+}
 .target-card .target-missing-actions {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   margin-top: 4px; padding: 6px 10px 6px 22px;

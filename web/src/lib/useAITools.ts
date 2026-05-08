@@ -19,24 +19,29 @@ export function useAITools() {
   const aitoolsRefreshing = ref(false)
 
   /**
-   * 跑 detector 探测三家 IDE。
+   * 跑 detector 探测三家 IDE(一次性扫所有家,不分单独 IDE)。
    * @param manual 用户主动点"重新扫描"触发(true) vs onMounted 自动跑(false)。
-   *   manual=true 时弹 toast 反馈结果,让用户感知按钮有响应(防"点了没反应"困惑)。
+   *   manual=true 时弹 toast 反馈各家结果,让用户对应自己点的那家。
    */
   async function refreshAITools(manual = false): Promise<void> {
     if (aitoolsRefreshing.value) return
     aitoolsRefreshing.value = true
     try {
-      const before = countInstalled(aitoolsResult.value)
       aitoolsResult.value = await detectAITools()
       if (manual) {
-        const after = countInstalled(aitoolsResult.value)
-        if (after > before) {
-          toast.success(`重新扫描完成 — 新检测到 ${after - before} 个 AI 平台`)
-        } else if (after === 0) {
-          toast.info('重新扫描完成 — 仍未检测到任何 AI 平台,确认 IDE 装在 PATH 里(或 ~/.<target>/)')
+        // 列各家逐项结果,而不是"共 N 家"含糊总数 —— 用户点的是某家的"重新扫描",
+        // 应该一眼看到自己关心的那家是 ✓ 还是 ✗。
+        const r = aitoolsResult.value
+        const lines = [
+          `Claude Code ${r?.claude_code?.installed ? '✓' : '✗'}`,
+          `Cursor ${r?.cursor?.installed ? '✓' : '✗'}`,
+          `Codex ${r?.codex?.installed ? '✓' : '✗'}`,
+        ]
+        const allMissing = !r?.claude_code?.installed && !r?.cursor?.installed && !r?.codex?.installed
+        if (allMissing) {
+          toast.info('重新扫描完成 — 三家 AI 平台都未检测到。确认 IDE 装在 PATH 里(或 ~/.<target>/)')
         } else {
-          toast.info(`重新扫描完成 — 检测到 ${after} 个 AI 平台,无变化`)
+          toast.info(`重新扫描完成 — ${lines.join(' / ')}(✗ 的需要先装好)`)
         }
       }
     } catch (e: any) {
@@ -58,11 +63,3 @@ export function useAITools() {
   }
 }
 
-function countInstalled(r: { claude_code?: AIToolResult; cursor?: AIToolResult; codex?: AIToolResult } | null): number {
-  if (!r) return 0
-  let n = 0
-  if (r.claude_code?.installed) n++
-  if (r.cursor?.installed) n++
-  if (r.codex?.installed) n++
-  return n
-}

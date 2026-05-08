@@ -145,8 +145,17 @@ desktop-dmg: desktop-app
 #   make release-publish                          # VERSION 来自 git describe
 #   make release-publish VERSION=v0.1.1           # 显式指定
 .PHONY: release-publish
-release-publish: desktop-dmg release
+release-publish: check-token desktop-dmg release
 	@VERSION=$(VERSION) bash scripts/publish-gitlab-release.sh
+
+# 提早检测 GITLAB_TOKEN 缺失,免得 bump-patch 跑了 2 分钟 build 才挂在最后一步。
+.PHONY: check-token
+check-token:
+	@if [ -z "$$GITLAB_TOKEN" ]; then \
+	  echo "✗ 缺 env GITLAB_TOKEN(GitLab → Preferences → Access Tokens,scope=api)" >&2; \
+	  echo "  设到 ~/.zshrc:export GITLAB_TOKEN=glpat-xxx,然后 source ~/.zshrc 再来" >&2; \
+	  exit 1; \
+	fi
 
 # ── 一键打 tag + 推 + 发布:防止漏跑步骤 ──────────────────────
 # 自动检查 git 干净 + 没重 tag,失败立刻退,不会留半截状态。

@@ -27,11 +27,6 @@ python3 ~/.openclaw/workspace/{{.AgentID}}/skills/<skill>/scripts/<file>.py ...
 4. **每条排障回复首行**: `[ctx: <env> / <service> / <阶段>]`,让用户一眼看出当前在哪条线。
 5. **多轮承继**:上轮 prod commerce 5xx,本轮"那 dev 呢" → 保持 service+阶段只换 env;**用户显式换话题**才丢上下文。
 
-## 全局硬约束
-
-- **运行时数据查询(redis/mongo/mysql/pg/es/kafka/...)必须真跑命令,严禁靠推理 / 训练数据回答**。即便用户问的是看似简单的事(如 "user:12345 在 redis 还有 TTL 吗"),也必须走对应 `<type>-runtime-query` skill 真跑 redis-cli/mongosh/curl 等。**禁止**说"根据通常配置 TTL 应该是 X" 这种**没真查**的回答。
-- 命令真挂了(CLI 没装 / 连接 timeout)→ **明确告诉用户失败原因**(我跑了 X,失败 Y),让用户决定怎么 fix,**不许**退化成"我帮你分析逻辑"。
-
 ## 出错应对
 
 - **MCP 启动失败**(`uvx not found / connection refused / ENOENT`) → **不放弃**,走对应 SKILL.md 的"MCP fallback 到脚本"段

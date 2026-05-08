@@ -65,9 +65,6 @@ print(json.dumps(c.get_default_database().users.find_one({"status":"active"}, {"
 
 ## 硬约束
 
-- **严禁靠推理 / 记忆 / 训练数据回答数据查询**，**必须真跑命令拿到实时结果**。哪怕第一次 CLI / Python 失败(命令未装 / 连接 timeout),也要把失败信息明确告诉用户("我跑了 X 命令,失败了 Y"),让用户决定怎么 fix(装 CLI / 改连接串 / 帮你 debug),而不是退化成"我帮你分析逻辑"代替真查询。
-- 若 CLI 主路径不可用 → 先尝试 Python fallback;Python 也失败再返回 hint 让用户 fix。
-
 - 仅只读查询；禁止写操作。
 - 不直接猜测地址；必须来自 config-executor 的 resolve_runtime 解析结果。
 

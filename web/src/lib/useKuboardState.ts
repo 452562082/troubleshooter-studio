@@ -36,14 +36,35 @@ export function useKuboardState(initial: {
 
   // 只保存 ok 状态;loading/error 不持久化。每次 status 改变时立即同步写入,
   // 不依赖大 draft watch(它可能因 quota 或排程而错过这次写入)。
+  //
+  // **增量 merge,不全量覆盖**:从 localStorage 读旧值,跟 reactive 合并 ——
+  //   - reactive ok 项 → 写新值
+  //   - reactive 缺失但 localStorage 有的 env → 保留旧值
+  // 否则 reactive 里某 env 因"清孤儿 watcher / runK8sRtPreload 中途 loading 态 / saved init
+  // 没反填(老 draft 里是 loading/error 被 init 跳过)"等原因不在 reactive 时,
+  // 全量覆盖会把那个 env 从 localStorage 永久抹掉,用户上次填的 cluster/ns/cm 凭空消失。
+  // (踩过这个坑:test 重新读取一次 → test2 的 ok 状态被覆盖丢失。)
   function persistKuboardState() {
     try {
-      const out: Record<string, KuboardResourceState> = {}
+      const merged: Record<string, KuboardResourceState> = {}
+      // 1. 先把 localStorage 旧的 ok 项捞回来作为底
+      try {
+        const raw = localStorage.getItem(INIT_KUBOARD_STATE_KEY)
+        if (raw) {
+          const old = JSON.parse(raw) as Record<string, KuboardResourceState>
+          if (old && typeof old === 'object') {
+            for (const [k, v] of Object.entries(old)) {
+              if (v && v.status === 'ok' && Array.isArray(v.clusters)) merged[k] = v
+            }
+          }
+        }
+      } catch { /* 旧值损坏忽略,从 reactive 重建 */ }
+      // 2. reactive ok 项覆盖底(以 reactive 为准 — 用户刚拉到的最新)
       for (const [k, v] of Object.entries(kuboardStateByEnv)) {
-        if (v && v.status === 'ok') out[k] = v
+        if (v && v.status === 'ok') merged[k] = v
       }
-      if (Object.keys(out).length > 0) {
-        localStorage.setItem(INIT_KUBOARD_STATE_KEY, JSON.stringify(out))
+      if (Object.keys(merged).length > 0) {
+        localStorage.setItem(INIT_KUBOARD_STATE_KEY, JSON.stringify(merged))
       } else {
         localStorage.removeItem(INIT_KUBOARD_STATE_KEY)
       }

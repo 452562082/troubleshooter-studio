@@ -1,6 +1,6 @@
 ---
 name: mysql-runtime-query
-description: 通过环境动态查询 MySQL 数据。先通过 routing 获取环境映射，再按配置源读取并解析 MySQL 连接信息，最后用 mysql CLI 直查(优先)或 Python pymysql 脚本(fallback)执行只读 SELECT 查询。
+description: 通过环境动态查询 MySQL 数据。先通过 routing 获取环境映射，优先用预注册的 mysql-<env> mcp tool 直查（已绑好 host/port/auth/db）；mcp 不可用时 fallback mysql CLI / Python pymysql，执行只读 SELECT 查询。
 ---
 
 # MySQL Runtime Query
@@ -16,7 +16,10 @@ description: 通过环境动态查询 MySQL 数据。先通过 routing 获取环
 2. 通过 `resolve_runtime_k8s.py --agent-id {{.AgentID}} --env <env>` 从 K8s ConfigMap/Secret 解析连接信息。
 {{- end}}
 3. 解析配置中的 MySQL 连接信息（host/port/database/user/password 或 JDBC URL）。
-4. **优先 mysql CLI 直查**(`mysql` 客户端 mac/linux 普及);若 `command -v mysql` 不可用 → fallback Python pymysql。
+4. **工具选用顺序**：
+   - **优先 mcp tool**：本系统每个 env 已预注册 `mysql-<env>`(列工具时找名字带 `mysql-<env>` 的)。直接 `tool_use` 调,免手动连接串。
+   - **mcp 不可用** → fallback **mysql CLI**(mac/linux 普及)。
+   - **CLI 也没装** → fallback **Python pymysql**。
 5. 执行查询并返回证据：表名、SQL、命中行数、关键字段样例。
 
 ## 连接解析
@@ -34,7 +37,14 @@ description: 通过环境动态查询 MySQL 数据。先通过 routing 获取环
 
 ## 调用模板
 
-**主路径:mysql CLI(只读)**
+**主路径:mcp tool**(已预注册,首选)
+
+```text
+查 mcp tools 列表 → 找名字含 `mysql-<env>` 的工具 → 直接 tool_use 调。
+连接串已 bake,只传 SQL/limit,不需手动 host/port/user/pass/db。
+```
+
+**fallback 1:mysql CLI(只读)**
 
 ```bash
 # 强制限制 LIMIT 防大表扫描
@@ -47,7 +57,7 @@ mysql -h "$MYSQL_HOST" -P "$MYSQL_PORT" -u "$MYSQL_USER" -p"$MYSQL_PASS" \
       -D "$MYSQL_DB" -N -e "SELECT COUNT(*) FROM orders WHERE status='pending'"
 ```
 
-**fallback:Python pymysql**(mysql cli 未装时)
+**fallback 2:Python pymysql**(mysql cli 也没装时)
 
 ```bash
 python3 -c '

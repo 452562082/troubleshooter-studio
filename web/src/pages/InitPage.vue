@@ -2787,7 +2787,7 @@ const {
   agent, system, targetModels,
   enabledTargets, targetOptions, targetLabels, homeDir,
   activeSourceTypes, sourceCreds, environments, enabledDataStores,
-  enabledObservability, toolInputs, OBS_TOOL_SPECS,
+  enabledObservability, toolInputs, OBS_TOOL_SPECS, DS_TOOL_SPECS,
   toolKeyFor, isObsFieldHidden,
   yamlOutput, reposRootInput, resolvedReposRoot, repos, resolveCloneDest,
   storageKey: STORAGE_KEY, router,

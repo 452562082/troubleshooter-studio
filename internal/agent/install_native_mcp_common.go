@@ -17,11 +17,85 @@
 package agent
 
 import (
+	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/generator"
 )
+
+// parseConnURL 把 redis:// / clickhouse:// / http:// / postgres:// 等 URL 拆成
+// host/port/user/pass/path 字段,供"npm mcp 包要拆字段不接整 URL"的场景用。
+// 解析失败 / 没填整段为空,所有返回值置空 — 调用方按需自取,空字段交 envBlock 决定保留还是 prune。
+//
+// 注意:不支持 mysql go-sql-driver DSN(`user:pass@tcp(host:port)/db`),那个走 parseMySQLDSN。
+func parseConnURL(s string) (host, port, user, pass, path string) {
+	if s == "" {
+		return
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return
+	}
+	host = u.Hostname()
+	port = u.Port()
+	if u.User != nil {
+		user = u.User.Username()
+		pass, _ = u.User.Password()
+	}
+	path = strings.TrimPrefix(u.Path, "/")
+	return
+}
+
+// parseMySQLDSN 解析 go-sql-driver/mysql 风格 DSN:
+//
+//	user:pass@tcp(host:port)/dbname?param=val
+//
+// 故意不引 go-sql-driver/mysql(整个工程没用 mysql client,引这一处不划算),
+// 走最小字符串切分:tcp() 段提 host/port,@ 前提 user/pass,)/ 后 ? 前提 db。
+// DSN 形如 unix(/path) / cloudsql(...) 等罕见 protocol 解析失败时全空 — 用户场景里
+// 几乎都是 tcp(),其他 case mcp 启动失败时按 hint 让用户重填即可。
+func parseMySQLDSN(dsn string) (host, port, user, pass, db string) {
+	if dsn == "" {
+		return
+	}
+	at := strings.LastIndex(dsn, "@")
+	if at < 0 {
+		return
+	}
+	cred := dsn[:at]
+	rest := dsn[at+1:]
+
+	if u, p, ok := strings.Cut(cred, ":"); ok {
+		user, pass = u, p
+	} else {
+		user = cred
+	}
+
+	// rest 形如 "tcp(host:port)/dbname?params"
+	lp, rp := strings.Index(rest, "("), strings.Index(rest, ")")
+	if lp < 0 || rp <= lp {
+		return
+	}
+	hp := rest[lp+1 : rp]
+	if i := strings.LastIndex(hp, ":"); i >= 0 {
+		host, port = hp[:i], hp[i+1:]
+	} else {
+		host = hp
+	}
+
+	// 跳过 ")/" 取 db,截 ? 之前
+	if rp+1 < len(rest) && rest[rp+1] == '/' {
+		after := rest[rp+2:]
+		if d, _, ok := strings.Cut(after, "?"); ok {
+			db = d
+		} else {
+			db = after
+		}
+	}
+	return
+}
 
 // MCPBuildOptions 控制 BuildMCPServers 的行为差异。
 type MCPBuildOptions struct {
@@ -161,6 +235,145 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 						"ES_PASSWORD": get("ELK_PASSWORD"),
 					},
 					"_note": "ELK 无独立 MCP；此条目仅记录 URL 供 agent 直查 ES API",
+				}
+			}
+		}
+	}
+
+	// 数据层 MCP per (data_store_type, env):wizard 用 DS_TOOL_SPECS 收集每家 + 每环境的
+	// 连接串 env vars(如 MONGODB_URI_DEV / POSTGRES_DSN_DEV / ES_URL_DEV ...),
+	// useDeployFlow.buildOpenclawCreds 把这些 env vars 写到 install creds map。
+	// 这里读对应 env var,注册成预启动 mcp server,让 AI 能直接 tool_use 调而不用读 SKILL.md
+	// 跑 mongosh / psql 这种"AI 不一定会主动跑"的 CLI。
+	//
+	// 阶段 1 覆盖 6 家(分两路写法):
+	//   接整 URI 直接传入位置参数 / env:
+	//     - mongodb:        npx mcp-mongo-server <URI>       (位置参数)
+	//     - postgresql:     npx server-postgres <PG_URL>     (位置参数)
+	//     - elasticsearch:  npx mcp-server-elasticsearch     (env: ES_URL/USERNAME/PASSWORD)
+	//     - redis:          npx server-redis-mcp <URL>       (位置参数)
+	//   要拆字段(npm/pip 包不接整 URL,只接 host/port/user/pass):
+	//     - mysql:          parseMySQLDSN → MYSQL_HOST/PORT/USER/PASS/DB env
+	//     - clickhouse:     parseConnURL  → CLICKHOUSE_HOST/PORT/USER/PASSWORD/DATABASE env
+	//
+	// 阶段 2 待做(无成熟 npm mcp,要自己写 binary):
+	//   - kafka / rabbitmq / rocketmq
+	//
+	// PruneEmpty=true 模式下空 env 段会被剔,如果用户没填 endpoint(env-vars 模式没填 /
+	// 走 from_config_center 模式),mcp server 启动时拿不到 URI 直接退出 — 不会污染 IDE。
+	for _, ds := range cfg.Infrastructure.DataStores {
+		if !ds.Enabled {
+			continue
+		}
+		for _, e := range envs {
+			up := strings.ToUpper(e.ID)
+			switch ds.Type {
+			case "mongodb":
+				uri := get("MONGODB_URI_" + up)
+				if uri == "" && opts.PruneEmpty {
+					continue // 没填连接串 → 跳过(避免注册一条永远启动失败的 mcp)
+				}
+				servers[keyFor("mongodb", "", e.ID)] = map[string]any{
+					"command": "npx",
+					"args":    []any{"-y", "mcp-mongo-server", uri, "--read-only"},
+				}
+			case "postgresql":
+				// FIXME: @modelcontextprotocol/server-postgres 已于 2025-07 deprecated
+				// (官方维护者明确 archive,不再修)。功能仍在(READ ONLY transaction
+				// 包裹所有查询,readonly 默认),近期能跑 — 后续要迁到社区活跃 fork,
+				// 候选:@henkey/postgres-mcp-server 或 @ahmedmustahid/postgres-mcp-server。
+				dsn := get("POSTGRES_DSN_" + up)
+				if dsn == "" && opts.PruneEmpty {
+					continue
+				}
+				servers[keyFor("postgresql", "", e.ID)] = map[string]any{
+					"command": "npx",
+					"args":    []any{"-y", "@modelcontextprotocol/server-postgres", dsn},
+				}
+			case "elasticsearch":
+				esURL := get("ES_URL_" + up)
+				if esURL == "" && opts.PruneEmpty {
+					continue
+				}
+				servers[keyFor("elasticsearch", "", e.ID)] = map[string]any{
+					"command": "npx",
+					"args":    []any{"-y", "@elastic/mcp-server-elasticsearch"},
+					"env": envBlock(map[string]any{
+						"ES_URL":      esURL,
+						"ES_USERNAME": get("ES_USER_" + up),
+						"ES_PASSWORD": get("ES_PASS_" + up),
+					}),
+				}
+			case "redis":
+				// @gongrzhe/server-redis-mcp 接 URL 位置参数,不用拆字段。
+				// 钉死 1.0.0:这个包目前只发过 1.0.0 一个版本(2024-12);如果作者将来发
+				// 不兼容版本(arg 顺序变 / 改 env-only),@latest 会无声 break,钉版本更稳。
+				redisURL := get("REDIS_URL_" + up)
+				if redisURL == "" && opts.PruneEmpty {
+					continue
+				}
+				servers[keyFor("redis", "", e.ID)] = map[string]any{
+					"command": "npx",
+					"args":    []any{"-y", "@gongrzhe/server-redis-mcp@1.0.0", redisURL},
+				}
+			case "mysql":
+				// @benborla29/mcp-server-mysql 接 env(MYSQL_HOST/PORT/USER/PASS),
+				// 用户填的是 go-sql-driver DSN(`user:pass@tcp(host:port)/db`)→ 拆字段喂 env。
+				dsn := get("MYSQL_DSN_" + up)
+				if dsn == "" && opts.PruneEmpty {
+					continue
+				}
+				host, port, user, pass, db := parseMySQLDSN(dsn)
+				if port == "" {
+					port = "3306"
+				}
+				servers[keyFor("mysql", "", e.ID)] = map[string]any{
+					"command": "npx",
+					"args":    []any{"-y", "@benborla29/mcp-server-mysql"},
+					"env": envBlock(map[string]any{
+						"MYSQL_HOST": host,
+						"MYSQL_PORT": port,
+						"MYSQL_USER": user,
+						"MYSQL_PASS": pass,
+						"MYSQL_DB":   db,
+					}),
+				}
+			case "clickhouse":
+				// uvx mcp-clickhouse(python pip 包)接 env(CLICKHOUSE_HOST/PORT/USER/PASSWORD)。
+				// URL 形如 http(s)://[user:pass@]host:port/[db] → 拆字段。https → secure=true。
+				chURL := get("CLICKHOUSE_URL_" + up)
+				if chURL == "" && opts.PruneEmpty {
+					continue
+				}
+				host, port, urlUser, urlPass, db := parseConnURL(chURL)
+				secure := strings.HasPrefix(strings.ToLower(chURL), "https://")
+				if port == "" {
+					if secure {
+						port = "8443"
+					} else {
+						port = "8123"
+					}
+				}
+				// URL 没带凭证就 fallback 到独立字段(用户大概率走 USER/PASS 表单填)
+				user := urlUser
+				if user == "" {
+					user = get("CLICKHOUSE_USER_" + up)
+				}
+				pass := urlPass
+				if pass == "" {
+					pass = get("CLICKHOUSE_PASS_" + up)
+				}
+				servers[keyFor("clickhouse", "", e.ID)] = map[string]any{
+					"command": "uvx",
+					"args":    []any{"mcp-clickhouse"},
+					"env": envBlock(map[string]any{
+						"CLICKHOUSE_HOST":     host,
+						"CLICKHOUSE_PORT":     port,
+						"CLICKHOUSE_USER":     user,
+						"CLICKHOUSE_PASSWORD": pass,
+						"CLICKHOUSE_DATABASE": db,
+						"CLICKHOUSE_SECURE":   strconv.FormatBool(secure),
+					}),
 				}
 			}
 		}

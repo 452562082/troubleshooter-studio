@@ -52,10 +52,11 @@ export interface UseDeployFlowDeps {
   environments: { id: string }[]
   enabledDataStores: Record<string, boolean>
 
-  // 可观测性
+  // 可观测性 + 数据层
   enabledObservability: Record<string, boolean>
   toolInputs: Record<string, string>
   OBS_TOOL_SPECS: readonly ToolSpecLike[]
+  DS_TOOL_SPECS: readonly ToolSpecLike[]
   toolKeyFor: (cat: 'obs' | 'ds', tool: string, envID: string, field: string) => string
   isObsFieldHidden: (toolKey: string, envID: string, f: CredField) => boolean
 
@@ -194,6 +195,23 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
           if (f.uiOnly) continue
           if (deps.isObsFieldHidden(tool.key, env.id, f)) continue
           const v = (deps.toolInputs[deps.toolKeyFor('obs', tool.key, env.id, f.key)] || '').trim()
+          if (v) creds[f.envVar(env.id)] = v
+        }
+      }
+    }
+
+    // ── 数据层:DS_TOOL_SPECS 同款循环把每家 (env, field) → env var 吐到 creds map。
+    // 用法:install_native_mcp_common.BuildMCPServers 把这些 env vars 注入到 mcp server
+    //       env 段(MONGODB_URI_<env> / POSTGRES_DSN_<env> / ES_URL_<env> / ...)。
+    // 之前漏了这块循环 → 用户在 wizard 填了 endpoint 但 install creds map 拿不到 →
+    // 注册的 mcp server env 段全空 → mcp 启动失败。
+    for (const tool of deps.DS_TOOL_SPECS) {
+      if (!deps.enabledDataStores[tool.key]) continue
+      for (const env of deps.environments) {
+        if (!env.id) continue
+        for (const f of tool.fields) {
+          if (f.uiOnly) continue
+          const v = (deps.toolInputs[deps.toolKeyFor('ds', tool.key, env.id, f.key)] || '').trim()
           if (v) creds[f.envVar(env.id)] = v
         }
       }

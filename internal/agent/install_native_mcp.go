@@ -50,7 +50,11 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 	//
 	// 但要保护"老 wizard 凭证不被空值覆盖":creds 为空时改走 mergeOnlyNew 模式,只新增 existing
 	// 里没有的派生 key,不动有 env 段的老条目(grafana/loki/nacos 等首次部署时 wizard 灌过真凭证)。
-	mergeOnlyNew := creds == nil
+	//
+	// 用 len(creds) == 0 而不是 creds == nil — 桌面 app bindings_deploy 走非 BestEffort 路径
+	// 时可能传 map[string]string{}(空 map ≠ nil),用 nil 检测会让空 map 走替换式覆盖,
+	// 把首次部署灌入的真凭证抹掉。len() 兼顾两种零状态。
+	mergeOnlyNew := len(creds) == 0
 	t, err := ParseIDETarget(target)
 	if err != nil {
 		return err

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/agent"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
@@ -256,34 +257,39 @@ func loadInstallCreds(stagingDir, envFile string) (map[string]string, error) {
 		return m, nil
 	}
 	// fallback:从 staging 的 tshoot.json 读 system_id,试 ~/.tshoot/openclaw/<id>/scripts/.env
-	if creds := tryLoadOpenclawCreds(stagingDir); creds != nil {
-		fmt.Printf("    · creds fallback 自 ~/.tshoot/openclaw/%s/scripts/.env(%d 个变量)\n",
-			openclawSystemIDOf(stagingDir), len(creds))
+	if creds, srcPath, mtime := tryLoadOpenclawCredsWithSource(stagingDir); creds != nil {
+		// 显式打印 system_id + .env mtime,让用户识别"是不是另一个同名 system 的 .env" — 避免
+		// 用户复制 yaml 没改 system.id 导致 fallback 拿错 system 的凭证、mcp 静默连错环境的事故。
+		fmt.Printf("    · creds fallback 自 %s(%d 个变量,文件 mtime=%s)\n",
+			srcPath, len(creds), mtime.Format("2006-01-02 15:04:05"))
 		return creds, nil
 	}
 	return map[string]string{}, nil
 }
 
-// tryLoadOpenclawCreds 从 staging 的 tshoot.json 读 system_id,然后读 ~/.tshoot/openclaw/<id>/scripts/.env。
-// 任何一步失败 / 找不到 / 文件不存在 → 返回 nil(让上层走"空 creds"路径,不报错)。
-func tryLoadOpenclawCreds(stagingDir string) map[string]string {
+// tryLoadOpenclawCredsWithSource 从 staging 的 tshoot.json 读 system_id,试
+// ~/.tshoot/openclaw/<id>/scripts/.env;返回 creds + 源路径 + 文件 mtime,失败返 nil/空/零值。
+// 调用方用 srcPath/mtime 打印让用户识别"是不是同名 system 的错配"。
+func tryLoadOpenclawCredsWithSource(stagingDir string) (map[string]string, string, time.Time) {
 	id := openclawSystemIDOf(stagingDir)
 	if id == "" {
-		return nil
+		return nil, "", time.Time{}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil
+		return nil, "", time.Time{}
 	}
 	openclawStaging := filepath.Join(home, ".tshoot", "openclaw", id)
-	if _, err := os.Stat(filepath.Join(openclawStaging, "scripts", ".env")); err != nil {
-		return nil
+	envPath := filepath.Join(openclawStaging, "scripts", ".env")
+	stat, err := os.Stat(envPath)
+	if err != nil {
+		return nil, "", time.Time{}
 	}
 	m, err := deploy.ReadEnvFile(openclawStaging)
 	if err != nil || len(m) == 0 {
-		return nil
+		return nil, "", time.Time{}
 	}
-	return m
+	return m, envPath, stat.ModTime()
 }
 
 // openclawSystemIDOf 解 staging/tshoot.json 取 system.id;失败返 ""。

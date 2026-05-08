@@ -97,25 +97,27 @@ const emit = defineEmits<{
           v-for="t in targetOptions"
           :key="t"
           class="target-card"
-          :class="{ selected: enabledTargets[t] }"
+          :class="{ selected: enabledTargets[t], 'target-disabled': targetDetectedInstalled(t) === false }"
         >
           <label class="target-card-head">
             <input
               type="checkbox"
               v-model="enabledTargets[t]"
+              :disabled="targetDetectedInstalled(t) === false"
+              :title="targetDetectedInstalled(t) === false ? `本机未检测到 ${targetLabels[t]},装好后再回来勾选` : ''"
             />
             <span class="target-title">{{ targetLabels[t] }}</span>
             <TargetInstallBadge v-bind="targetBadgeProps(t)" />
           </label>
           <div class="target-hint">{{ targetDescriptions[t] }}</div>
-          <!-- detector 没扫到只显示 badge 警告 + 重扫按钮,checkbox 始终可勾(信任用户)。
-               真没装就部署 → 装到 ~/.<target>/(IDE 看不到)→ 用户去 BotsPage 看到
-               "⚠ IDE 已卸载" badge 兜底,不会装坏什么。 -->
+          <!-- detector 没扫到 → checkbox disabled,提示"先装 IDE 再回来",
+               不提供 force enable 兜底(避免用户装到孤儿目录的 confusion)。
+               若 detector 漏扫(IDE 装在非标准位置),用户可点重新扫描重试。 -->
           <div
             v-if="t !== 'openclaw' && targetDetectedInstalled(t) === false"
             class="target-missing-actions"
           >
-            <span>⚠ 本机未检测到 {{ targetLabels[t] }} —— 仍可勾选部署,装好 IDE 后自动生效;若已装但没扫到 →</span>
+            <span>⚠ 本机未检测到 {{ targetLabels[t] }} —— 装好 IDE 后回来 →</span>
             <button type="button" class="btn-link" @click="emit('refreshAITools')">🔄 重新扫描</button>
           </div>
           <!-- 勾选后展示 install.sh 跑完后的最终落地位置 —— AI 平台从这里读 agent。 -->

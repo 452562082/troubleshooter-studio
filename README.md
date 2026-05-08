@@ -43,6 +43,22 @@ git clone <此仓库> && cd troubleshooter-studio
 
 ### 桌面 app(macOS,推荐新用户)
 
+**一行命令装(从 release 自动拉)**:
+
+```bash
+# 公开项目:零 token,直接装
+curl -fsSL https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
+
+# 私有项目:export GITLAB_TOKEN 后再跑
+export GITLAB_TOKEN=glpat-xxx
+curl -fsSL -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+  https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
+```
+
+curl/bash/xattr/open 都是 macOS 自带签名工具,**不会触发 Gatekeeper "已损坏" 拦截**,一气呵成装到 /Applications/ + 启动。
+
+**或者本地源码 build**:
+
 ```bash
 # 装依赖(一行齐):xcode + go + node
 xcode-select --install && brew install go node
@@ -54,7 +70,7 @@ open dist/TroubleshooterStudio.app
 cp -R dist/TroubleshooterStudio.app /Applications/
 ```
 
-10 步「创建向导」→ 末步一键部署。首次启动 Gatekeeper 拦截见末尾「已知限制」。
+10 步「创建向导」→ 末步一键部署。dmg 双击安装看末尾「已知限制」。
 
 ### CLI(macOS / Linux / Windows)
 

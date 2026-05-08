@@ -41,12 +41,24 @@ $VERSION 自动发布(make release-publish)。
 
 ## 下载与安装
 
-**macOS 桌面 app**:
+**macOS 桌面 app — 一行命令(推荐,无 Gatekeeper 拦截)**:
+
+\`\`\`bash
+# 公开项目:
+curl -fsSL https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
+
+# 私有项目:
+export GITLAB_TOKEN=glpat-xxx
+curl -fsSL -H "PRIVATE-TOKEN: \$GITLAB_TOKEN" https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
+\`\`\`
+
+自动下最新 release dmg → 装到 /Applications/ → 启动。**全程无 Gatekeeper 弹窗**(curl/bash 系统签名工具不被拦,xattr 清完 quarantine .app 直接放行)。
+
+**或者图形安装 dmg**:
 1. 下载 \`TroubleshooterStudio-$VERSION.dmg.zip\`
-2. **双击解压**(必须用 macOS 自带 Archive Utility,第三方解压可能丢图标)
-3. 双击解出来的 \`.dmg\` → Finder 弹安装窗口
-4. 拖 \`.app\` 到右边 \`Applications\`
-5. 第一次打开如果报"已损坏":**双击 dmg 里的 "2️⃣ 双击解锁(可能要点两次).command"** → Terminal 自动跑解锁 + 启动应用。**macOS 15+ 对未签名脚本会拦截一次**,如果首次双击 Terminal 显示 "killed",再双击一次就通(系统行为,无害)
+2. **双击解压**(必须用 macOS 自带 Archive Utility)
+3. 双击解出来的 \`.dmg\` → 拖 \`.app\` 到 \`Applications\`
+4. 第一次打开报"已损坏" → 双击 dmg 里的 "2️⃣ 双击解锁(可能要点两次).command" → 解锁。**macOS 15+ 对未签名脚本会拦截一次**,首次双击 Terminal 显示 "killed" 再双击一次就通(无害)
 
 **CLI(macOS / Linux / Windows)**:
 - 按平台选 \`tshoot-$VERSION-<os>-<arch>\` 下载

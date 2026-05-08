@@ -58,26 +58,33 @@ cat >"$staging/1️⃣ 先看我.txt" <<'TXT'
 【两步装好】
 
    ① 把左上角 .app 拖到右上角 Applications 文件夹
-   ② 双击右下角 "2️⃣ 一键解锁运行.command"
-      → Terminal 自动跑解锁 + 启动应用,完事
+   ② 双击右下角 "2️⃣ 双击解锁(可能要点两次).command"
+      Terminal 自动跑解锁 + 启动 .app
 
-【为什么要解锁】
+【为什么文件名说"可能要点两次"】
 
-   本应用未做苹果数字签名($99/年的 Developer 账号),macOS 把
-   "未签名 + 来自互联网"统一报"已损坏" —— 不是真坏,跑解锁脚本
-   就好了。一次解锁永久生效,以后双击 .app 直接开。
+   macOS 15+ 对未签名脚本有严格限制:**第一次双击 .command,
+   Terminal 会显示 "killed" 一闪而过(macOS 直接 SIGKILL 杀脚本)。
+   这是系统正常行为,不是真出错。再双击一次就跑通了。**
 
-【其他方案】
+   原因:本应用没花 $99/年办苹果开发者证书,macOS 拦未签名可执行体。
+   被拦一次后系统给 .command 评估了一次,第二次就放行。
 
-   - 不想跑脚本:右键 .app → 打开 → 弹窗确认放行(也 OK)
-   - 终端用户:xattr -dr com.apple.quarantine /Applications/TroubleshooterStudio.app
+【其他方案(不走 .command 也行)】
+
+   - 右键 .app → 打开 → 弹窗确认放行
+   - 终端命令:xattr -dr com.apple.quarantine /Applications/TroubleshooterStudio.app
+
+【一次解锁永久生效】
+
+   不论用哪种方式放行 .app,以后双击 .app 直接开,不用再点 .command。
 
 【反馈 / 文档】
    https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio
 TXT
 
 # 一键解锁脚本(双击在 Terminal 弹窗跑)
-cat >"$staging/2️⃣ 一键解锁运行.command" <<'CMD'
+cat >"$staging/2️⃣ 双击解锁(可能要点两次).command" <<'CMD'
 #!/bin/bash
 # 给 /Applications/TroubleshooterStudio.app 解锁 macOS Gatekeeper quarantine。
 # 双击此文件在 Terminal 自动跑;dmg 卷内的 .command 不带 quarantine,无需放行。
@@ -88,6 +95,9 @@ cat <<EOF
 ═══════════════════════════════════════════════════════════════
   TroubleshooterStudio - macOS Gatekeeper 一键解锁
 ═══════════════════════════════════════════════════════════════
+
+(看到这行说明已成功放行;首次双击若 Terminal 闪一下显示 "killed",
+ 是 macOS 拦未签名脚本的常态,再双击我一次就通,无害)
 
 EOF
 
@@ -132,7 +142,7 @@ else
     read -r _
 fi
 CMD
-chmod +x "$staging/2️⃣ 一键解锁运行.command"
+chmod +x "$staging/2️⃣ 双击解锁(可能要点两次).command"
 
 # 防卡:之前失败 build 可能留下 /Volumes/<VOLUME_NAME> 的 stale 挂载(典型 readonly,
 # 因为是 dmg attach 失败的残骸)。新挂同名卷时,macOS 优先选第一份 → 后续 AppleScript
@@ -203,7 +213,7 @@ tell application "Finder"
     set position of item "$APP_NAME_IN_DMG" of container window to {180, 160}
     set position of item "Applications" of container window to {520, 160}
     set position of item "1️⃣ 先看我.txt" of container window to {180, 340}
-    set position of item "2️⃣ 一键解锁运行.command" of container window to {520, 340}
+    set position of item "2️⃣ 双击解锁(可能要点两次).command" of container window to {520, 340}
     update without registering applications
     delay 1
     close

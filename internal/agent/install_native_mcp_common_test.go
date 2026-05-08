@@ -10,6 +10,7 @@
 package agent
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
@@ -183,6 +184,107 @@ func TestBuildMCPServers_DataStores_PruneEmpty(t *testing.T) {
 		if _, ok := servers[k]; ok {
 			t.Errorf("expected %q to be pruned (no creds), got registered", k)
 		}
+	}
+}
+
+// TestBuildMCPServers_DataStores_EndpointsFallback 验证 yaml endpoints[] fallback:
+// 用户通过"代码扫描自动填 endpoints[]"路径(没单独跑 wizard 输 env vars)生成的 yaml,
+// install creds 里没有 ES_URL_<env> 等 env vars 时,BuildMCPServers 应能从 endpoints
+// 派生出连接串注册 mcp。这条路径决定**老 yaml 能不能直接重新部署用上数据层 mcp**。
+func TestBuildMCPServers_DataStores_EndpointsFallback(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "dev"}},
+		Infrastructure: config.Infrastructure{
+			DataStores: []config.DataStore{
+				{
+					Type: "elasticsearch", Enabled: true,
+					Endpoints: []config.DataStoreEndpoint{
+						{Env: "dev", Service: "community", URL: "http://10.0.0.1:9200", User: "elastic", Pass: "elastic123"},
+						{Env: "dev", Service: "user", URL: "http://10.0.0.1:9200", User: "elastic", Pass: "elastic123"},
+					},
+				},
+				{
+					Type: "mongodb", Enabled: true,
+					Endpoints: []config.DataStoreEndpoint{
+						{Env: "dev", Service: "user", URI: "mongodb://m:p@10.0.0.2:27017/users"},
+					},
+				},
+				{
+					Type: "redis", Enabled: true,
+					Endpoints: []config.DataStoreEndpoint{
+						{Env: "dev", URL: "redis://:rpw@10.0.0.3:6379/0"},
+					},
+				},
+				{
+					Type: "mysql", Enabled: true,
+					Endpoints: []config.DataStoreEndpoint{
+						{Env: "dev", DSN: "u:p@tcp(10.0.0.4:3306)/orders"},
+					},
+				},
+				{
+					Type: "postgresql", Enabled: true,
+					Endpoints: []config.DataStoreEndpoint{
+						{Env: "dev", DSN: "postgres://u:p@10.0.0.5:5432/app"},
+					},
+				},
+				{
+					Type: "clickhouse", Enabled: true,
+					Endpoints: []config.DataStoreEndpoint{
+						{Env: "dev", URL: "https://chu:chpw@10.0.0.6:8443/analytics"},
+					},
+				},
+			},
+		},
+	}
+	// install creds 完全空 — 模拟用户跑老 yaml(走 endpoints[] 路径,wizard 没收 env vars)
+	emptyGet := func(_ string) string { return "" }
+
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, emptyGet)
+
+	// 6 家全部应该从 endpoints 派生连接串成功注册
+	for _, k := range []string{"elasticsearch-dev", "mongodb-dev", "redis-dev", "mysql-dev", "postgresql-dev", "clickhouse-dev"} {
+		if _, ok := servers[k]; !ok {
+			t.Errorf("expected %q registered from endpoints fallback (creds empty), got keys: %v", k, keysOf(servers))
+		}
+	}
+
+	// 关键字段值确认 fallback 正确取自 endpoints
+	if envOf(servers["elasticsearch-dev"])["ES_URL"] != "http://10.0.0.1:9200" ||
+		envOf(servers["elasticsearch-dev"])["ES_USERNAME"] != "elastic" {
+		t.Errorf("es endpoints fallback wrong: %v", envOf(servers["elasticsearch-dev"]))
+	}
+	if envOf(servers["mysql-dev"])["MYSQL_HOST"] != "10.0.0.4" {
+		t.Errorf("mysql endpoints fallback wrong: %v", envOf(servers["mysql-dev"]))
+	}
+	if envOf(servers["clickhouse-dev"])["CLICKHOUSE_HOST"] != "10.0.0.6" ||
+		envOf(servers["clickhouse-dev"])["CLICKHOUSE_SECURE"] != "true" {
+		t.Errorf("clickhouse endpoints fallback wrong: %v", envOf(servers["clickhouse-dev"]))
+	}
+}
+
+// TestBuildMCPServers_DataStores_CredsOverridesEndpoints 验证 install creds 优先于 endpoints:
+// 用户在 wizard 显式覆盖了某 env 的连接串(env-vars 模式),应以 wizard 输入为准,
+// 不要被老 yaml endpoints 的值覆盖。
+func TestBuildMCPServers_DataStores_CredsOverridesEndpoints(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "dev"}},
+		Infrastructure: config.Infrastructure{
+			DataStores: []config.DataStore{
+				{
+					Type: "mongodb", Enabled: true,
+					Endpoints: []config.DataStoreEndpoint{
+						{Env: "dev", URI: "mongodb://OLD@host/db"},
+					},
+				},
+			},
+		},
+	}
+	creds := map[string]string{"MONGODB_URI_DEV": "mongodb://NEW@host/db"}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true},
+		func(k string) string { return creds[k] })
+	got := argString(servers["mongodb-dev"])
+	if !strings.Contains(got, "mongodb://NEW@host/db") || strings.Contains(got, "OLD") {
+		t.Errorf("expected creds override endpoints, got args: %s", got)
 	}
 }
 

@@ -261,15 +261,44 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 	//
 	// PruneEmpty=true 模式下空 env 段会被剔,如果用户没填 endpoint(env-vars 模式没填 /
 	// 走 from_config_center 模式),mcp server 启动时拿不到 URI 直接退出 — 不会污染 IDE。
+	// dsEndpointFor 在 install creds 拿不到该 env var 时,fallback 到 yaml endpoints[]
+	// 派生该 (ds, env) 的代表连接串。同一 env 下若有多个 service 共用同一数据层,取第一条
+	// 非空的 — 大多数项目里多个 service 走同一 ES/Mongo 集群,代表 endpoint 即可。
+	// 用户走"代码扫描自动填 endpoints[]"路径而没单独在 wizard 输 env vars 时,这条 fallback
+	// 让老 yaml 直接能用,不用重跑 wizard。
+	dsEndpointFor := func(ds config.DataStore, envID string) *config.DataStoreEndpoint {
+		for i := range ds.Endpoints {
+			ep := &ds.Endpoints[i]
+			if ep.Env == envID && (ep.URL != "" || ep.URI != "" || ep.DSN != "" || ep.Brokers != "") {
+				return ep
+			}
+		}
+		return nil
+	}
+	// firstNonEmpty 串联多源取第一个非空。install creds 优先(env-vars 模式),fallback yaml。
+	firstNonEmpty := func(vals ...string) string {
+		for _, v := range vals {
+			if v != "" {
+				return v
+			}
+		}
+		return ""
+	}
+
 	for _, ds := range cfg.Infrastructure.DataStores {
 		if !ds.Enabled {
 			continue
 		}
 		for _, e := range envs {
 			up := strings.ToUpper(e.ID)
+			ep := dsEndpointFor(ds, e.ID) // 可能 nil(env-vars 模式 / 用户没扫到 endpoints)
 			switch ds.Type {
 			case "mongodb":
-				uri := get("MONGODB_URI_" + up)
+				var epURI string
+				if ep != nil {
+					epURI = ep.URI
+				}
+				uri := firstNonEmpty(get("MONGODB_URI_"+up), epURI)
 				if uri == "" && opts.PruneEmpty {
 					continue // 没填连接串 → 跳过(避免注册一条永远启动失败的 mcp)
 				}
@@ -282,7 +311,11 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 				// (官方维护者明确 archive,不再修)。功能仍在(READ ONLY transaction
 				// 包裹所有查询,readonly 默认),近期能跑 — 后续要迁到社区活跃 fork,
 				// 候选:@henkey/postgres-mcp-server 或 @ahmedmustahid/postgres-mcp-server。
-				dsn := get("POSTGRES_DSN_" + up)
+				var epDSN string
+				if ep != nil {
+					epDSN = ep.DSN
+				}
+				dsn := firstNonEmpty(get("POSTGRES_DSN_"+up), epDSN)
 				if dsn == "" && opts.PruneEmpty {
 					continue
 				}
@@ -291,7 +324,11 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 					"args":    []any{"-y", "@modelcontextprotocol/server-postgres", dsn},
 				}
 			case "elasticsearch":
-				esURL := get("ES_URL_" + up)
+				var epURL, epUser, epPass string
+				if ep != nil {
+					epURL, epUser, epPass = ep.URL, ep.User, ep.Pass
+				}
+				esURL := firstNonEmpty(get("ES_URL_"+up), epURL)
 				if esURL == "" && opts.PruneEmpty {
 					continue
 				}
@@ -300,15 +337,19 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 					"args":    []any{"-y", "@elastic/mcp-server-elasticsearch"},
 					"env": envBlock(map[string]any{
 						"ES_URL":      esURL,
-						"ES_USERNAME": get("ES_USER_" + up),
-						"ES_PASSWORD": get("ES_PASS_" + up),
+						"ES_USERNAME": firstNonEmpty(get("ES_USER_"+up), epUser),
+						"ES_PASSWORD": firstNonEmpty(get("ES_PASS_"+up), epPass),
 					}),
 				}
 			case "redis":
 				// @gongrzhe/server-redis-mcp 接 URL 位置参数,不用拆字段。
 				// 钉死 1.0.0:这个包目前只发过 1.0.0 一个版本(2024-12);如果作者将来发
 				// 不兼容版本(arg 顺序变 / 改 env-only),@latest 会无声 break,钉版本更稳。
-				redisURL := get("REDIS_URL_" + up)
+				var epURL string
+				if ep != nil {
+					epURL = ep.URL
+				}
+				redisURL := firstNonEmpty(get("REDIS_URL_"+up), epURL)
 				if redisURL == "" && opts.PruneEmpty {
 					continue
 				}
@@ -319,7 +360,11 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 			case "mysql":
 				// @benborla29/mcp-server-mysql 接 env(MYSQL_HOST/PORT/USER/PASS),
 				// 用户填的是 go-sql-driver DSN(`user:pass@tcp(host:port)/db`)→ 拆字段喂 env。
-				dsn := get("MYSQL_DSN_" + up)
+				var epDSN string
+				if ep != nil {
+					epDSN = ep.DSN
+				}
+				dsn := firstNonEmpty(get("MYSQL_DSN_"+up), epDSN)
 				if dsn == "" && opts.PruneEmpty {
 					continue
 				}
@@ -341,7 +386,11 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 			case "clickhouse":
 				// uvx mcp-clickhouse(python pip 包)接 env(CLICKHOUSE_HOST/PORT/USER/PASSWORD)。
 				// URL 形如 http(s)://[user:pass@]host:port/[db] → 拆字段。https → secure=true。
-				chURL := get("CLICKHOUSE_URL_" + up)
+				var epURL, epUser, epPass string
+				if ep != nil {
+					epURL, epUser, epPass = ep.URL, ep.User, ep.Pass
+				}
+				chURL := firstNonEmpty(get("CLICKHOUSE_URL_"+up), epURL)
 				if chURL == "" && opts.PruneEmpty {
 					continue
 				}
@@ -354,14 +403,15 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 						port = "8123"
 					}
 				}
-				// URL 没带凭证就 fallback 到独立字段(用户大概率走 USER/PASS 表单填)
+				// URL 没带凭证就 fallback 到独立字段(用户大概率走 USER/PASS 表单填)。
+				// 优先级:URL 内嵌 > install creds CLICKHOUSE_USER_<env> > yaml endpoint user 字段。
 				user := urlUser
 				if user == "" {
-					user = get("CLICKHOUSE_USER_" + up)
+					user = firstNonEmpty(get("CLICKHOUSE_USER_"+up), epUser)
 				}
 				pass := urlPass
 				if pass == "" {
-					pass = get("CLICKHOUSE_PASS_" + up)
+					pass = firstNonEmpty(get("CLICKHOUSE_PASS_"+up), epPass)
 				}
 				servers[keyFor("clickhouse", "", e.ID)] = map[string]any{
 					"command": "uvx",

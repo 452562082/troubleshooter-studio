@@ -42,12 +42,13 @@ API="$GITLAB_HOST/api/v4/projects/$PROJECT_ENC"
 #
 # 故意**不加** -s(silent):silent 跟 --progress-bar 冲突,会让大文件下载看着卡住。
 # 调用方按需自己加 -s(查 release 等小请求)或 --progress-bar(下 zip 大请求)。
-# --max-time 600 = 10 分钟硬上限,防 GitLab 连不上 / 服务挂时无限等。
+# --max-time 180 = 3 分钟硬上限,dmg 才 ~10MB,国内 30s 内完;3 分钟兼顾慢网
+# (跨国 / 弱网)同时不让 GitLab 服务挂时用户干等 10 分钟。
 fetch() {
     if [[ -n "${GITLAB_TOKEN:-}" ]]; then
-        curl -fL --max-time 600 -H "PRIVATE-TOKEN: $GITLAB_TOKEN" "$@"
+        curl -fL --max-time 180 -H "PRIVATE-TOKEN: $GITLAB_TOKEN" "$@"
     else
-        curl -fL --max-time 600 "$@"
+        curl -fL --max-time 180 "$@"
     fi
 }
 

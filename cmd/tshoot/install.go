@@ -55,12 +55,15 @@ func runInstall(args []string) error {
 		if err := agent.InstallNative(abs, *target); err != nil {
 			return err
 		}
-		// 注入 MCP + 写通用 creds.json,走跟桌面 app 一致的路径。IDECreds=nil 时全跳过,
-		// 不会拿空值覆盖已有凭证(跟 BotsPage regen 同款防御)。
-		if creds, _ := loadIDECredsBestEffort(abs, *envFile); creds != nil {
-			if err := installIDESideEffects(*target, abs, creds); err != nil {
-				return err
-			}
+		// 注入 MCP + 写通用 creds.json,走跟桌面 app 一致的路径。
+		// **MCP 注入即便 creds 为空也跑** — BuildMCPServers 数据层 case 有 yaml endpoints[]
+		// fallback,creds 没填的字段会从 cfg.Infrastructure.DataStores[].Endpoints[] 派生。
+		// 之前这里 creds==nil 整个跳过,导致 staging 没 .env 时数据层 mcp 永远注册不了
+		// (踩过这个坑:claude-code staging 不带 scripts/.env,跑 install 数据层 mcp 全空)。
+		// MergeMCPIntoIDESettings 是替换式合并(只删派生 keys 再覆盖),空 creds 只让 env 段空,不乱删用户别名。
+		creds, _ := loadIDECredsBestEffort(abs, *envFile)
+		if err := installIDESideEffects(*target, abs, creds); err != nil {
+			return err
 		}
 		if t == agent.TargetCodex {
 			fmt.Printf("[ok] %s 已装到用户级目录(~/%s/agents/<name>.toml + skills/scripts/<name>/);"+

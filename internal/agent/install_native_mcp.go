@@ -43,16 +43,24 @@ import (
 // onProgress(可空)透传给 EnsureMCPGrafanaBinary,首次部署下载 mcp-grafana 二进制
 // 时会回调进度;一键部署 desktop binding 把它接到 wails event "install:log"。
 func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[string]string, onProgress func(string)) error {
-	// creds=nil → BotsPage 重生成 / CLI install 无凭证场景,直接跳过。
-	// 走下去会拿空值覆盖初次 wizard 部署时写入的真凭证,把整个连接断掉。
-	if creds == nil {
-		return nil
-	}
+	// creds==nil 不再整体跳过 — 数据层 mcp(elasticsearch/mongodb/redis/...)走 yaml endpoints[]
+	// fallback,即便 install creds 没有 ES_URL_<env> 等也能从 cfg.Infrastructure.DataStores[].Endpoints[]
+	// 派生连接串。挡住会让首次注册的数据层 mcp 永远写不进去(踩过这个坑:CLI install 不传 -env-file
+	// + claude-code staging 不带 .env → creds==nil → 跳过 → ~/.claude.json 全是 0 个数据层 mcp)。
+	//
+	// 但要保护"老 wizard 凭证不被空值覆盖":creds 为空时改走 mergeOnlyNew 模式,只新增 existing
+	// 里没有的派生 key,不动有 env 段的老条目(grafana/loki/nacos 等首次部署时 wizard 灌过真凭证)。
+	mergeOnlyNew := creds == nil
 	t, err := ParseIDETarget(target)
 	if err != nil {
 		return err
 	}
-	get := func(k string) string { return creds[k] }
+	get := func(k string) string {
+		if creds == nil {
+			return ""
+		}
+		return creds[k]
+	}
 	// MCP key 前缀用 system.id(短)而不是 ResolveID()(常见 = "<id>-troubleshooter"),
 	// 避免 server_key + tool_name 拼起来超过 IDE 60 字符的 tool 名限制。
 	// IDE 走 PruneEmpty=true 模式 —— 避免把 "" 当真值喂给后端进程触发无效连接。
@@ -94,7 +102,7 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 		return fmt.Errorf("target %s 没有 MCP 配置文件", target)
 	}
 
-	if err := writeMCPServersWithVerify(settingsPath, servers, mcpWriteMaxRetries); err != nil {
+	if err := writeMCPServersWithVerify(settingsPath, servers, mcpWriteMaxRetries, mergeOnlyNew); err != nil {
 		return fmt.Errorf("write %s: %w", settingsPath, err)
 	}
 
@@ -125,12 +133,16 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 // 自己的运行时缓存,CLI 重启会重建,影响小。
 const mcpWriteMaxRetries = 3
 
-// writeMCPServersWithVerify 把 servers 替换式合进 path 顶层 mcpServers,写后 read-back
+// writeMCPServersWithVerify 把 servers 合进 path 顶层 mcpServers,写后 read-back
 // 校验派生 keys 是否齐全,丢了就重试合并+写。详见 mcpWriteMaxRetries 注释。
 //
-// 替换式语义:cfg 派生的同名 key 先删后写,用户手加的别名(其它前缀)保留。环境删了
-// /切了配置中心后不再生成的旧 key 会留下,需用户手清(可接受 —— 比误删重要 server 强)。
-func writeMCPServersWithVerify(path string, servers map[string]any, maxRetries int) error {
+// 两种合并模式:
+//   - mergeOnlyNew=false(默认,有 creds 重灌):cfg 派生的同名 key **先删后写**,
+//     env 段全用新 creds。用户手加的别名(其它前缀)保留。环境删了/切了配置中心后
+//     不再生成的旧 key 会留下,需用户手清(可接受 —— 比误删重要 server 强)。
+//   - mergeOnlyNew=true(无 creds 兜底):existing 已有的派生 key **不动**(env 段保持
+//     首次部署灌入的真凭证),只 add existing 没有的(数据层 mcp 首次注册场景)。
+func writeMCPServersWithVerify(path string, servers map[string]any, maxRetries int, mergeOnlyNew bool) error {
 	apply := func() error {
 		settings, err := readJSONOrEmpty(path)
 		if err != nil {
@@ -140,10 +152,19 @@ func writeMCPServersWithVerify(path string, servers map[string]any, maxRetries i
 		if existing == nil {
 			existing = map[string]any{}
 		}
-		for k := range servers {
-			delete(existing, k)
+		if mergeOnlyNew {
+			// 只 add existing 没有的派生 key,不删/不覆盖 — 保护老条目的 env 段真凭证
+			for k, v := range servers {
+				if _, hit := existing[k]; !hit {
+					existing[k] = v
+				}
+			}
+		} else {
+			for k := range servers {
+				delete(existing, k)
+			}
+			maps.Copy(existing, servers)
 		}
-		maps.Copy(existing, servers)
 		settings["mcpServers"] = existing
 		// 0o600:mcpServers env 段含 wizard 注入的 plaintext creds(NACOS_PASS / API token /
 		// kubeconfig 等),world-readable 0o644 是真 leak —— 多用户 macOS / Linux 主机

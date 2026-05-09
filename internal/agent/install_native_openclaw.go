@@ -132,7 +132,7 @@ func InstallNativeOpenclaw(ctx context.Context, stagingDir string, opts InstallO
 	if err := injectAgent(ocData, agentID, cfg.Agent.Name, model, wsDir); err != nil {
 		return err
 	}
-	if err := injectMCPServers(ocData, cfg, get); err != nil {
+	if err := injectMCPServers(ocData, cfg, get, ocHome); err != nil {
 		return err
 	}
 	if err := writeJSONFile(cfgPath, ocData, 0o644); err != nil {

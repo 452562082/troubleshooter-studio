@@ -42,7 +42,15 @@ fi
 commits=$(git log "$range" --no-merges --pretty=format:"- %s (%h)")
 
 if [ -z "$commits" ]; then
-    echo "❌ 范围内($range_label)无 commits,无 changelog 内容" >&2
+    echo "❌ 范围内($range_label)无 commits,空 release 没意义,refuse 打 tag" >&2
+    echo "" >&2
+    echo "可能原因:刚打过 ${last_tag} 还没新提交就再 bump,新 tag 会指向跟上一 tag 同一个 commit" >&2
+    echo "解法:" >&2
+    echo "  1) 先做几个改动 commit,再 bump(99% 场景)" >&2
+    echo "  2) 撤上一 tag 重打:" >&2
+    echo "       git tag -d ${last_tag}" >&2
+    echo "       git push troubleshooter-studio --delete ${last_tag}" >&2
+    echo "       (改代码后)make bump-minor" >&2
     exit 1
 fi
 

@@ -10,6 +10,11 @@
 #   make lint         # go vet + gofmt -l
 #   make demo         # make build 后立即 ./bin/tshoot demo
 #   make clean        # 清临时产物
+#
+# 发布:
+#   make release-notes              # dry-run,只打印自上次 tag 以来的 changelog
+#   make release-tag VERSION=v0.7.0 # 创建 annotated tag,annotation = changelog
+#                                   # push 后 GitLab/GitHub Tags 页面自带版本说明
 
 SHELL := /bin/bash
 
@@ -227,3 +232,42 @@ lint:
 clean:
 	rm -rf bin/ dist/bin/ $(WEB_DIST)/assets $(WEB_DIST)/index.html
 	@echo "✓ cleaned bin/, dist/bin/, embedded web dist (placeholder 保留)"
+
+# ── 发布:从 commits 自动生成 changelog 塞进 annotated tag ──────
+#
+# 设计:annotated tag 的 message 自动填上"上次 tag 到现在的 commits",
+# push 后 GitLab/GitHub 的 Tags 页面就能看到这版改了啥,不用单独维护 CHANGELOG.md。
+#
+# 用法:
+#   make release-notes              # dry-run,只打印将来要写的 annotation,不改 git
+#   make release-tag VERSION=v0.7.0 # 真创建 annotated tag(本地;之后 git push --tags)
+
+# scripts/changelog.sh:抽取上一个 tag 到 HEAD 的 commit subjects + 简要分类。
+# 不写在 Makefile 内 shell heredoc 里(Makefile 多行 + $$ 转义易错且难调试)。
+.PHONY: release-notes
+release-notes:
+	@scripts/changelog.sh
+
+.PHONY: release-tag
+release-tag:
+	@if [ -z "$(VERSION)" ]; then \
+		echo "Usage: make release-tag VERSION=v0.7.0"; exit 1; \
+	fi
+	@if ! echo "$(VERSION)" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$$'; then \
+		echo "❌ VERSION 必须 vX.Y.Z 格式,实际:$(VERSION)"; exit 1; \
+	fi
+	@if git rev-parse --verify --quiet "$(VERSION)" >/dev/null; then \
+		echo "❌ tag $(VERSION) 已存在,refusing 覆盖"; exit 1; \
+	fi
+	@if [ -n "$$(git status --porcelain)" ]; then \
+		echo "❌ 工作区有未提交改动,refuse 打 tag(防把脏改动当 release):"; \
+		git status --short; exit 1; \
+	fi
+	@msg=$$(scripts/changelog.sh "$(VERSION)") || exit 1; \
+	echo "─── 即将写入 $(VERSION) tag annotation ───"; \
+	echo "$$msg"; \
+	echo "──────────────────────────────────────────"; \
+	echo "$$msg" | git tag -a "$(VERSION)" -F -
+	@echo "✓ tag $(VERSION) 已创建"
+	@echo "  推送到远端:git push troubleshooter-studio $(VERSION)"
+	@echo "  撤销:git tag -d $(VERSION)"

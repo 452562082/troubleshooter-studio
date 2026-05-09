@@ -12,7 +12,9 @@ package agent
 
 import (
 	"fmt"
+	"maps"
 	"os"
+	"strings"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 )
@@ -30,6 +32,9 @@ func injectMCPServers(
 	ocHome string,
 ) error {
 	// MCP server key 用短 prefix(system.id),跟 IDE 平台对齐 + 避免 tool 名超 60 字限制。
+	// 清老版本下载到 <ocHome>/bin/ 的 mcp-grafana 孤儿二进制(改 npx 后留着没用)
+	removeLegacyGrafanaBin(ocHome)
+
 	servers := BuildMCPServers(cfg, MCPBuildOptions{
 		AgentID:    cfg.MCPKeyPrefix(),
 		PruneEmpty: false, // 留全 schema,agent 自决
@@ -52,10 +57,19 @@ func injectMCPServers(
 		existing = map[string]any{}
 		mcp["servers"] = existing
 	}
-	// 全量重写匹配前缀的条目:env 删了 / 切了 config-center 类型留下的死引用由用户手清
-	// (跟 IDE 行为一致 —— 比误删重要 server 强)。
-	for k, v := range servers {
-		existing[k] = v
+	// 重灌:同名覆盖 + 按 agentID 前缀清死引用(env 缩容 / 切配置中心类型 / system.id 改名等
+	// 场景),跟 IDE 路径同款。用户手加同前缀别名会被一起清,打 [info] 让用户感知。
+	agentPrefix := cfg.MCPKeyPrefix() + "-"
+	for k := range existing {
+		if !strings.HasPrefix(k, agentPrefix) {
+			continue
+		}
+		if _, want := servers[k]; want {
+			continue
+		}
+		delete(existing, k)
+		fmt.Fprintf(os.Stderr, "[info] openclaw:清掉死引用 mcp.servers.%s(本次 cfg 不再生成)\n", k)
 	}
+	maps.Copy(existing, servers)
 	return nil
 }

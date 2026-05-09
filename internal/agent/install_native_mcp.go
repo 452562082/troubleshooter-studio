@@ -80,6 +80,10 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 	}
 	root := t.RootDir(home)
 
+	// 清老版本下载到 <root>/bin/ 的 mcp-grafana 孤儿二进制(本会话改 npx mcp-grafana-npx 后
+	// 不再用)。re-install 顺手清,不用等 uninstall — 几十 MiB 留在那纯占盘。
+	removeLegacyGrafanaBin(root)
+
 	// nacos / jaeger / clickhouse 三家走 uvx 启动,缺 uv 整批挂 — 装机前探一下,缺失打提示。
 	// 不阻塞:其它 MCP 还能用,完全 abort 装机损失更大。
 	if CfgUsesUvx(cfg) {
@@ -104,7 +108,7 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 		return fmt.Errorf("target %s 没有 MCP 配置文件", target)
 	}
 
-	if err := writeMCPServersWithVerify(settingsPath, servers, mcpWriteMaxRetries, mergeOnlyNew); err != nil {
+	if err := writeMCPServersWithVerify(settingsPath, servers, mcpWriteMaxRetries, mergeOnlyNew, cfg.MCPKeyPrefix()+"-"); err != nil {
 		return fmt.Errorf("write %s: %w", settingsPath, err)
 	}
 
@@ -139,12 +143,16 @@ const mcpWriteMaxRetries = 3
 // 校验派生 keys 是否齐全,丢了就重试合并+写。详见 mcpWriteMaxRetries 注释。
 //
 // 两种合并模式:
-//   - mergeOnlyNew=false(默认,有 creds 重灌):cfg 派生的同名 key **先删后写**,
-//     env 段全用新 creds。用户手加的别名(其它前缀)保留。环境删了/切了配置中心后
-//     不再生成的旧 key 会留下,需用户手清(可接受 —— 比误删重要 server 强)。
+//   - mergeOnlyNew=false(默认,有 creds 重灌):cfg 派生的同名 key 覆盖,且按 agentPrefix
+//     清掉"前缀属于本系统但本次不再生成"的死 key(env 缩容 / 数据层删了 / multi-source nacos
+//     删 source / system.id 改名 等场景留下的死引用)。每条删的会打 [info] 让用户感知。
+//     用户手加同前缀的别名会被一起清 — 不常见,且 [info] log 兜底,比死 key 永远留更干净。
 //   - mergeOnlyNew=true(无 creds 兜底):existing 已有的派生 key **不动**(env 段保持
-//     首次部署灌入的真凭证),只 add existing 没有的(数据层 mcp 首次注册场景)。
-func writeMCPServersWithVerify(path string, servers map[string]any, maxRetries int, mergeOnlyNew bool) error {
+//     首次部署灌入的真凭证),只 add existing 没有的(数据层 mcp 首次注册场景)。这条路径下
+//     **不做 prefix 清理** — 因为没 creds 时拿不到完整意图,清了可能误删用户在线生效的 mcp。
+//
+// agentPrefix 通常是 `<system.id>-`(BuildMCPServers 的 AgentID + "-"),空串关闭 prefix 清理。
+func writeMCPServersWithVerify(path string, servers map[string]any, maxRetries int, mergeOnlyNew bool, agentPrefix string) error {
 	apply := func() error {
 		settings, err := readJSONOrEmpty(path)
 		if err != nil {
@@ -162,8 +170,21 @@ func writeMCPServersWithVerify(path string, servers map[string]any, maxRetries i
 				}
 			}
 		} else {
+			// 重灌模式:同名覆盖 + agentPrefix 死 key 清理
 			for k := range servers {
 				delete(existing, k)
+			}
+			if agentPrefix != "" {
+				for k := range existing {
+					if !strings.HasPrefix(k, agentPrefix) {
+						continue
+					}
+					if _, want := servers[k]; want {
+						continue // 还在生成的 key 不动,即使前缀匹配
+					}
+					delete(existing, k)
+					fmt.Fprintf(os.Stderr, "[info] 清掉死引用 mcpServers.%s(本次 cfg 不再生成此 mcp)\n", k)
+				}
 			}
 			maps.Copy(existing, servers)
 		}
@@ -200,6 +221,22 @@ func writeMCPServersWithVerify(path string, servers map[string]any, maxRetries i
 	}
 	return fmt.Errorf("装完 verify %s 仍发现派生 mcpServers 被并发写丢(已重试 %d 次,建议装机器人时不要在主 chat 跑 Claude Code)",
 		path, maxRetries)
+}
+
+// removeLegacyGrafanaBin 清掉早期版本下载到 <root>/bin/mcp-grafana[.exe] 的孤儿二进制。
+// 改走 npx mcp-grafana-npx 后,这文件留着也没人用(每个 IDE root ~30 MiB)。
+// install / uninstall 都该跑一次确保收尸,文件不存在 / 没权限删 / 任何错误都吞掉(只是清理优化,不该阻断主流程)。
+func removeLegacyGrafanaBin(root string) {
+	for _, name := range []string{"mcp-grafana", "mcp-grafana.exe"} {
+		legacy := filepath.Join(root, "bin", name)
+		if _, err := os.Stat(legacy); err == nil {
+			if rmErr := os.Remove(legacy); rmErr == nil {
+				fmt.Fprintf(os.Stderr, "[info] 清掉老 %s 孤儿二进制(已改走 npx mcp-grafana-npx)\n", legacy)
+			}
+		}
+	}
+	// 空目录顺带清(已有 grafana 二进制时 bin/ 里只这一个文件)
+	_ = os.Remove(filepath.Join(root, "bin"))
 }
 
 // pruneLegacyClaudeSettingsMCP 把 ~/.claude/settings.json 里 servers map 同名的 keys 删掉。

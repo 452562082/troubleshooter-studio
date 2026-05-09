@@ -142,7 +142,7 @@ function setGrafanaDsUid(obsKey: string, envID: string, value: string) {
             :env-i-d="env.id"
             :spec="spec"
             :access-mode="getObsAccessMode(spec.key, env.id)"
-            :access-toggleable="['loki','prometheus','jaeger','tempo','elk'].includes(spec.key) && enabledObservability['grafana']"
+            :access-toggleable="false"
             :probe-state="obsProbeResults[obsProbeKey(spec.key, env.id)]"
             :tool-inputs="toolInputs"
             :is-revealed="wizard.isRevealed"

@@ -5,9 +5,21 @@
 //   - VIA_GRAFANA_ELIGIBLE 散在 yamlGenerator + useObsAccessMode 两份,加新候选要改两处
 //   - KuboardSvcLocator 同样形状跨 yamlGenerator + yamlValidator 各写一遍
 
-/** 通过 Grafana 代理访问的 obs 工具候选(loki/prometheus/jaeger/tempo/elk)。
- *  yamlGenerator / useObsAccessMode / yamlImporter 三处共用,加新候选只改这里。 */
-export const VIA_GRAFANA_ELIGIBLE = ['loki', 'prometheus', 'jaeger', 'tempo', 'elk'] as const
+/** 强制走 Grafana 代理的 obs 工具(loki/prometheus/tempo)— 这三家在本系统**只**通过
+ *  mcp-grafana-npx 内置工具(query_loki_logs / query_prometheus / 等)访问,无独立 MCP 包。
+ *  wizard 不出"直连"选项,锁死 via_grafana。yaml 里 via_grafana 字段对它们事实上无效,
+ *  填啥都跑 grafana 代理路径。 */
+export const VIA_GRAFANA_ONLY = ['loki', 'prometheus', 'tempo'] as const
+
+/** 强制直连的 obs 工具(jaeger/elk)— 它们在本系统**只**通过独立 MCP 包访问:
+ *  jaeger → uvx opentelemetry-mcp 直连 :16686;elk → npx @elastic/mcp-server-elasticsearch
+ *  直连 ES_URL。grafana datasource proxy 不是我们采用的路径(mcp-grafana 没有 jaeger 专用工具,
+ *  ES 走 grafana proxy 也不如直连体验好)。wizard 不出"代理"选项,锁死 direct。 */
+export const DIRECT_ONLY = ['jaeger', 'elk'] as const
+
+/** 老符号 — yamlGenerator / yamlImporter 还有 import,等同于"两类候选合集"。
+ *  新代码请按需选 VIA_GRAFANA_ONLY 或 DIRECT_ONLY,语义更清。 */
+export const VIA_GRAFANA_ELIGIBLE = [...VIA_GRAFANA_ONLY, ...DIRECT_ONLY] as const
 
 /** Kuboard 三级定位:cluster / namespace / configmap;config-map.yaml 的服务行用。 */
 export interface KuboardSvcLocator {

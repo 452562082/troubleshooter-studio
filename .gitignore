@@ -39,3 +39,9 @@ scripts/.env
 # Python bytecode caches(timeline.py 等运行后产物,不该 track)
 __pycache__/
 *.pyc
+
+# Editor swap files (vim/emacs)
+*.swp
+*.swo
+.*.swp
+.*.swo

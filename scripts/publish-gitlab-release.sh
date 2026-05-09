@@ -32,38 +32,18 @@ set -euo pipefail
 
 GITLAB_HOST="${GITLAB_HOST:-https://gitlab.quguazhan.com}"
 PROJECT_PATH="${PROJECT_PATH:-xiaolong/troubleshooter-studio}"
+# RELEASE_NOTES 默认 = 本版 changelog(scripts/changelog.sh,跟 tag annotation 同源)。
+# 老版本曾把整段"安装说明 + macOS 已损坏 troubleshooting"塞进每个 release 描述,
+# 每发一版都重复一遍模板文字,本版真正改了什么反而被淹没。安装说明搬到 README,
+# release 描述只列改动 + 一行"详见 README"链接。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CHANGELOG_BODY="$("$SCRIPT_DIR/changelog.sh" "$VERSION" 2>/dev/null || echo "$VERSION 发布")"
 RELEASE_NOTES="${RELEASE_NOTES:-$(cat <<NOTES
-$VERSION 自动发布(make release-publish)。
+$CHANGELOG_BODY
 
-## ⚠️ macOS 显示"已损坏"怎么办
+---
 
-**这不是真损坏**,是因为本应用未做苹果数字签名(没花 \$99/年办 Apple Developer Account),macOS 14+ 把"未签名 + 来自互联网"统一报"已损坏"。**dmg 里自带"一键解锁.command",双击即可放行**(详见下方"安装"步骤)。
-
-## 下载与安装
-
-**macOS 桌面 app — 一行命令(推荐,无 Gatekeeper 拦截)**:
-
-\`\`\`bash
-# 公开项目:
-curl -fsSL https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
-
-# 私有项目:
-export GITLAB_TOKEN=glpat-xxx
-curl -fsSL -H "PRIVATE-TOKEN: \$GITLAB_TOKEN" https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
-\`\`\`
-
-自动下最新 release dmg → 装到 /Applications/ → 启动。**全程无 Gatekeeper 弹窗**(curl/bash 系统签名工具不被拦,xattr 清完 quarantine .app 直接放行)。
-
-**或者图形安装 dmg**:
-1. 下载 \`TroubleshooterStudio-$VERSION.dmg.zip\`
-2. **双击解压**(必须用 macOS 自带 Archive Utility)
-3. 双击解出来的 \`.dmg\` → 拖 \`.app\` 到 \`Applications\`
-4. 第一次打开报"已损坏" → 双击 dmg 里的 "2️⃣ 双击解锁(可能要点两次).command" → 解锁。**macOS 15+ 对未签名脚本会拦截一次**,首次双击 Terminal 显示 "killed" 再双击一次就通(无害)
-
-**CLI(macOS / Linux / Windows)**:
-- 按平台选 \`tshoot-$VERSION-<os>-<arch>\` 下载
-- macOS / Linux:\`chmod +x tshoot-...\` + 拷到 \`/usr/local/bin/tshoot\`
-- 跑 \`tshoot --help\` 看子命令
+📦 **下载安装**(macOS dmg / 跨平台 CLI)+ macOS \"已损坏\" 解决 → 见 [README](${GITLAB_HOST}/${PROJECT_PATH}/-/blob/main/README.md#下载与安装)
 NOTES
 )}"
 

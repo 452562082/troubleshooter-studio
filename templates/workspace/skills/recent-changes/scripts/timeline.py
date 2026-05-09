@@ -150,6 +150,10 @@ def collect_git_log(repo_path: str, since: timedelta, branch: str = 'main') -> t
             'source': 'git',
             'kind': 'commit',
             'summary': f'{author}: {subject} ({sha[:8]})',
+            # _sha 是 underscore prefix 表示"内部字段",JSON 输出会带,但下游 LLM 一般不用直接看,
+            # 主要给 _fetch_git_diff 用 — 不存这个就得从 summary 反爬 short SHA + git rev-parse,绕。
+            '_sha': sha,
+            '_repo_path': repo_path,
         })
     return events, ''
 
@@ -426,6 +430,78 @@ _DIFF_RISK_PATTERNS: list[dict[str, Any]] = [
         ],
         'hint': 'HPA 配置改;扩缩容策略变化会影响容量响应',
     },
+
+    # ─────────────────────────────────────────────────────────────────
+    # 以下是**代码 diff 专用**模式(2026-05 加,补 git commit 维度)。配置 yaml 不会触这些。
+    # 配 nacos 那 12 类几乎都对应"运维/SRE 改配置"型故障;下面这 5 类对应"开发改代码"型故障,
+    # 实战占故障的另一半,只扫配置不扫代码是明显瘸腿。
+    # 设计原则:只覆盖**误报率低的强 signal** —— 用户复审时如果一半 diff_risks 是噪音,标记功能反而没人信,得不偿失。
+    # ─────────────────────────────────────────────────────────────────
+
+    # ── 删了 retry 装饰器 / 注解 ──
+    # Java @Retryable / Spring Retry / @CircuitBreaker / Hystrix / Sentinel,Python @retry / tenacity,Go middleware.Retry
+    {
+        'risk': 'retry_decorator_removed',
+        'severity': 'high',
+        'patterns': [
+            r'^-\s*@Retryable\b',                              # Spring Retry
+            r'^-\s*@retry\b',                                  # Python tenacity 等
+            r'^-\s*\.retry\(',                                 # Go/JS 链式调用(rare)
+            r'^-\s*Retry\.\s*[Ww]hen\b',                       # tenacity / RxJS
+        ],
+        'hint': '删了 retry 装饰器/调用,瞬时网络抖动 / 下游短暂不可用直接外抛 5xx;先回滚此 commit 或单独补回 retry',
+    },
+
+    # ── 删了熔断 / 限流 / 降级 装饰器 ──
+    {
+        'risk': 'circuit_breaker_removed',
+        'severity': 'high',
+        'patterns': [
+            r'^-\s*@CircuitBreaker\b',                         # Resilience4j
+            r'^-\s*@HystrixCommand\b',                         # Netflix Hystrix
+            r'^-\s*@SentinelResource\b',                       # Alibaba Sentinel
+            r'^-\s*@RateLimiter\b',                            # Resilience4j RateLimiter
+        ],
+        'hint': '删了熔断/限流/降级装饰器,下游异常不再被隔离 → 单点故障会传导成全链路雪崩',
+    },
+
+    # ── 删了缓存注解 / 缓存层 ──
+    # 删 @Cacheable 后所有命中原本由 cache 兜的请求会全部打 DB,DB 负载瞬间翻几倍
+    {
+        'risk': 'cache_annotation_removed',
+        'severity': 'high',
+        'patterns': [
+            r'^-\s*@Cacheable\b',                              # Spring Cache
+            r'^-\s*@CachePut\b',
+        ],
+        'hint': '删了 @Cacheable,原本由缓存兜底的请求会直接打 DB,DB QPS / 连接数瞬间放大几倍',
+    },
+
+    # ── SQL 前缀通配 LIKE '%xxx' / '%xxx%' ──
+    # 加这种 LIKE 几乎必定全表扫,业务一上量就慢查询炸 DB。
+    # pattern 设计宽松:LIKE 后第一个引号紧跟 % 即触发(覆盖纯 SQL + Java/Go 字符串拼接两种)。
+    {
+        'risk': 'sql_prefix_wildcard_added',
+        'severity': 'high',
+        'patterns': [
+            r'^\+.*\bLIKE\s+["\']\s*%',                        # +.. LIKE '%...   或  Java "...LIKE '%" + var
+            r"^\+.*\bLIKE\s+CONCAT\(\s*['\"]\s*%",              # +.. LIKE CONCAT('%', ...
+        ],
+        'hint': "新增 LIKE '%xxx' 前缀通配 → 索引失效全表扫,业务量起来后 DB 必慢查询;改 LIKE 'xxx%' 或上 ES/搜索引擎",
+    },
+
+    # ── async 改 sync(去掉 await / async 关键字)──
+    # 异步函数被改回同步,在事件循环里阻塞,QPS 直接掉一个数量级
+    {
+        'risk': 'async_to_sync',
+        'severity': 'medium',
+        'patterns': [
+            r'^-\s*async\s+def\s+\w+',                         # Python async def 被删
+            r'^-\s*async\s+function\s+\w+',                    # JS async function 被删
+            r'^-\s*await\s+\w+',                               # await xxx 被删(很多对应 # 改回同步)
+        ],
+        'hint': 'async 改 sync,事件循环里同步阻塞会掉吞吐;先看是否真要同步(可能误改),否则单独补回 async/await',
+    },
 ]
 
 
@@ -561,6 +637,33 @@ def _collect_apollo_consul_history(env: str, service: str, ws_root: Path,
     return events, ''
 
 
+def _fetch_git_diff(repo_path: str, sha: str, max_lines: int = 400) -> str | None:
+    """correlated git commit → 拉本 commit 的完整 diff(--no-color, no merge),给 _classify_diff_risks 用。
+
+    返回值:
+      - 字符串:diff 文本(已截到 max_lines 行,大 commit 防卡 LLM context)
+      - None:仓库路径不存在 / git show 失败 / sha 不可用
+      - "":空 diff(merge commit / revert 后还原 等罕见情况)
+    """
+    if not repo_path or not Path(repo_path).exists() or not sha:
+        return None
+    try:
+        # --no-color:CI 默认开 color 会污染 grep;-U2:每段 diff 给 2 行上下文(够 pattern 匹配,够小);
+        # --no-merges 在这里没意义(单 commit show),不加。
+        out = subprocess.check_output(
+            ['git', '-C', repo_path, 'show', '--no-color', '-U2', '--format=', sha],
+            stderr=subprocess.STDOUT, timeout=10,
+        ).decode('utf-8', errors='ignore')
+    except Exception:
+        return None
+    if not out.strip():
+        return ''
+    lines = out.splitlines()
+    if len(lines) > max_lines:
+        lines = lines[:max_lines] + [f'... (truncated, total {len(out.splitlines())} lines)']
+    return '\n'.join(lines)
+
+
 def _fetch_nacos_diff(env: str, event: dict[str, Any], ws_root: Path) -> str | None:
     """correlated nacos history event → 拉前后两版 content 算 unified diff,塞进 event.diff。
 
@@ -647,6 +750,7 @@ def main() -> None:
     p.add_argument('--branch', default='main', help='git branch')
     p.add_argument('--incident-time', default='', help='故障开始时间 ISO,用来标 ±5 分钟相关变更')
     p.add_argument('--skip-nacos-diff', action='store_true', help='跳过 correlated nacos 事件的前后版本 diff 抓取(默认会抓)')
+    p.add_argument('--skip-git-diff', action='store_true', help='跳过 correlated git 事件的 commit diff 抓取(默认会抓 + 扫代码危险模式)')
     args = p.parse_args()
 
     since_td = parse_since(args.since)
@@ -720,6 +824,33 @@ def main() -> None:
                     e['diff_risks'] = risks
             elif diff is None:
                 notes.append(f'[nacos-diff] 无法对比 {e.get("summary", "")} 前后版本(脚本不可用 / API 不返历史 content)')
+
+    # correlated 的 git commits 自动拉 commit 完整 diff + 走危险模式扫描。
+    # 跟 nacos 一路对齐 — 但 git diff 生命周期更长,patterns 也不一样:
+    # 配置 yaml 模式只命中 nacos 等 yaml diff;@Retryable / @Cacheable 删除 / LIKE '%xxx' 等
+    # 代码模式只在 git diff 命中。一份 _classify_diff_risks 同时跑两边没冲突(patterns 是 OR)。
+    if incident_dt and not args.skip_git_diff:
+        for e in all_events:
+            if not e.get('correlated') or e.get('source') != 'git':
+                continue
+            sha = e.pop('_sha', '')  # pop 掉,不输出 underscore 字段到下游
+            rp = e.pop('_repo_path', '')
+            if not sha or not rp:
+                continue
+            diff = _fetch_git_diff(rp, sha)
+            if diff:
+                e['diff'] = diff
+                risks = _classify_diff_risks(diff)
+                if risks:
+                    e['diff_risks'] = risks
+            elif diff is None:
+                notes.append(f'[git-diff] 无法拉 {sha[:8]} 的 diff(repo path 不存在 / git show 失败)')
+
+    # 没设 incident_time 时 _sha / _repo_path 仍残留在 events 里(JSON 输出会带 underscore 字段),
+    # 删掉保持输出干净 — 它们仅 internal 用。
+    for e in all_events:
+        e.pop('_sha', None)
+        e.pop('_repo_path', None)
 
     print(json.dumps({
         'env': args.env,

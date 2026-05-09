@@ -35,3 +35,7 @@ scripts/.env
 .claude/settings.local.json
 .opencode/node_modules/
 .opencode/bun.lock
+
+# Python bytecode caches(timeline.py 等运行后产物,不该 track)
+__pycache__/
+*.pyc

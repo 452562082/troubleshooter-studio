@@ -190,6 +190,53 @@ func TestBuildMCPServers_DataStores_PruneEmpty(t *testing.T) {
 	}
 }
 
+// TestBuildMCPServers_Jaeger 验证 jaeger 走 uvx opentelemetry-mcp(2026-05 升级)而不是
+// 老的 curl 占位。所有 target 都该注册(以前只 openclaw 走 curl 占位,IDE 完全没)。
+func TestBuildMCPServers_Jaeger(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "dev"}, {ID: "prod"}},
+		Infrastructure: config.Infrastructure{
+			Observability: config.Observability{
+				Jaeger: config.Jaeger{Enabled: true},
+			},
+		},
+	}
+	creds := map[string]string{
+		"JAEGER_URL_DEV":  "http://jaeger-dev:16686",
+		"JAEGER_URL_PROD": "http://jaeger-prod:16686",
+	}
+	get := func(k string) string { return creds[k] }
+	// IDE 模式(PruneEmpty=true)— 以前 jaeger 完全不注册,现在该 2 个 env 各一份
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, get)
+	for _, k := range []string{"jaeger-dev", "jaeger-prod"} {
+		v, ok := servers[k]
+		if !ok {
+			t.Fatalf("expected %q registered, got keys: %v", k, keysOf(servers))
+		}
+		spec := v.(map[string]any)
+		if spec["command"] != "uvx" {
+			t.Errorf("%s expected command=uvx (opentelemetry-mcp), got %v", k, spec["command"])
+		}
+		args := spec["args"].([]any)
+		if len(args) != 1 || args[0] != "opentelemetry-mcp" {
+			t.Errorf("%s expected args=[opentelemetry-mcp], got %v", k, args)
+		}
+		env := envOf(v)
+		if env["BACKEND_TYPE"] != "jaeger" {
+			t.Errorf("%s missing BACKEND_TYPE=jaeger, got %v", k, env)
+		}
+	}
+	if envOf(servers["jaeger-dev"])["BACKEND_URL"] != "http://jaeger-dev:16686" {
+		t.Errorf("jaeger-dev BACKEND_URL not propagated correctly")
+	}
+
+	// PruneEmpty=true 没填 URL → 不注册(避免启动一条永远连不通的 mcp)
+	servers2 := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(k string) string { return "" })
+	if _, ok := servers2["jaeger-dev"]; ok {
+		t.Errorf("expected jaeger-dev pruned when JAEGER_URL_DEV missing under PruneEmpty=true")
+	}
+}
+
 // TestBuildMCPServers_DataStores_EndpointsFallback 验证 yaml endpoints[] fallback:
 // 用户通过"代码扫描自动填 endpoints[]"路径(没单独跑 wizard 输 env vars)生成的 yaml,
 // install creds 里没有 ES_URL_<env> 等 env vars 时,BuildMCPServers 应能从 endpoints

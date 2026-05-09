@@ -254,9 +254,10 @@ type MCPBuildOptions struct {
 	// 真值传给后端进程造成无效连接);openclaw 留着等 agent 自决,所以 false。
 	PruneEmpty bool
 
-	// IncludeRawObsCurl:写入 jaeger / elk 的 "curl 占位" 条目(无独立 MCP,只记 URL 让
-	// agent 通过 curl/HTTP 直查)。openclaw 走这条;IDE 没"代理 curl 调 API"的运行时,
-	// 所以不写。
+	// IncludeRawObsCurl:写入 elk 的 "curl 占位" 条目(elk 无独立 MCP,只记 URL 让 agent 通过
+	// curl/HTTP 直查 Kibana/ES)。openclaw 走这条;IDE 没"代理 curl 调 API"的运行时,所以不写。
+	// 注:jaeger 已在 2026-05 升级到 traceloop/opentelemetry-mcp(uvx),不再走 curl 占位,
+	// 4 家 target 都注册;本开关只剩 elk 还在用。
 	IncludeRawObsCurl bool
 }
 
@@ -353,22 +354,31 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 		}
 	}
 
-	// jaeger / elk 是 openclaw 专用的"curl 占位"条目:agent 走 curl/HTTP 直查,无独立 MCP。
-	// IDE 没"代理 curl 调 API"的运行时,所以不写;由 IncludeRawObsCurl 开关控制。
-	if opts.IncludeRawObsCurl {
-		if cfg.Infrastructure.Observability.Jaeger.Enabled {
-			for _, e := range envs {
-				up := strings.ToUpper(e.ID)
-				servers[keyFor("jaeger", "", e.ID)] = map[string]any{
-					"command": "curl",
-					"args":    []any{},
-					"env": map[string]any{
-						"JAEGER_URL": get("JAEGER_URL_" + up),
-					},
-					"_note": "Jaeger 无独立 MCP；此条目仅记录 URL 供 agent 通过 curl/HTTP 直查",
-				}
+	// jaeger:用 traceloop/opentelemetry-mcp(uvx)真 mcp,4 家平台都注册(跟数据层 mcp 同款思路 —
+	// 让 AI 直接 tool_use 调,不用让 AI 自己拼 jaeger /api/traces HTTP curl)。
+	// 老路径(opts.IncludeRawObsCurl 控制 jaeger 走 curl 占位)被替换。
+	// stdio 干净,BACKEND_TYPE=jaeger / BACKEND_URL=<JAEGER_URL_<env>> 指向 jaeger query 端口(默认 16686)。
+	// PruneEmpty 模式下:JAEGER_URL_<env> 没填则 BACKEND_URL 空 → 整个 env block 被剔 → mcp 启动失败被 IDE 自动跳。
+	if cfg.Infrastructure.Observability.Jaeger.Enabled {
+		for _, e := range envs {
+			up := strings.ToUpper(e.ID)
+			jurl := get("JAEGER_URL_" + up)
+			if jurl == "" && opts.PruneEmpty {
+				continue
+			}
+			servers[keyFor("jaeger", "", e.ID)] = map[string]any{
+				"command": "uvx",
+				"args":    []any{"opentelemetry-mcp"},
+				"env": envBlock(map[string]any{
+					"BACKEND_TYPE": "jaeger",
+					"BACKEND_URL":  jurl,
+				}),
 			}
 		}
+	}
+
+	// elk 仍走 curl 占位(无成熟独立 mcp,Elastic 官方 mcp-server-elasticsearch 走 ES API 不接 Kibana)
+	if opts.IncludeRawObsCurl {
 		if cfg.Infrastructure.Observability.ELK.Enabled {
 			for _, e := range envs {
 				up := strings.ToUpper(e.ID)

@@ -1,6 +1,6 @@
 ---
 name: tracing-query
-description: 通过 Jaeger 查询分布式链路追踪。按 trace ID、service name、时间范围查询 span，定位跨服务延迟与错误传播路径。排障时的核心取证手段。
+description: 通过 Jaeger 查询分布式链路追踪。优先用预注册的 jaeger-<env> mcp tool(opentelemetry-mcp,免手填 URL),mcp 不可用时 fallback curl + Jaeger HTTP API。按 trace ID、service name、时间范围查询 span,定位跨服务延迟与错误传播路径。排障时的核心取证手段。
 ---
 
 # Tracing Query（Jaeger）
@@ -13,17 +13,23 @@ description: 通过 Jaeger 查询分布式链路追踪。按 trace ID、service 
 
 ## 执行流程
 
-1. 确认 env（通过 `routing`）。
-2. 获取 Jaeger UI URL：
-{{- range .Environments}}
-   - `{{.ID}}` → config 中声明的 Jaeger URL
-{{- end}}
-3. 按场景选择查询方式：
-   - **有 trace ID**：直接查 → `/api/traces/{traceID}`
-   - **无 trace ID**：按 service + operation + 时间范围搜索 → `/api/traces?service=X&operation=Y&start=...&end=...`
-4. 分析 span 树：找到耗时最长的 span、错误 span、跨服务调用链。
+1. 确认 env(通过 `routing`)。
+2. **工具选用顺序**:
+   - **优先 mcp tool**:本系统每个 env 已预注册 `jaeger-<env>`(opentelemetry-mcp,uvx 启动;列工具时找名字带 `jaeger-<env>` 的)。直接 `tool_use` 调,免手填 JAEGER_URL/拼 HTTP API。
+   - **mcp 不可用** → fallback **curl + Jaeger HTTP API**(JAEGER_URL 从 routing `observability.jaeger.url_by_env.<env>` 取)。
+3. 按场景选择查询方式:
+   - **有 trace ID**:直接查
+   - **无 trace ID**:按 service + operation + 时间范围搜索
+4. 分析 span 树:找到耗时最长的 span、错误 span、跨服务调用链。
 
-## Jaeger HTTP API
+## 主路径:mcp tool(已预注册,首选)
+
+```text
+查 mcp tools 列表 → 找名字含 `jaeger-<env>` 的工具 → 直接 tool_use 调。
+URL 已 bake 进 server,只传 trace_id / service / operation / time-range,不需手动 JAEGER_URL。
+```
+
+## fallback:Jaeger HTTP API
 
 ### 按 trace ID 查询
 

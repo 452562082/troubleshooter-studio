@@ -179,23 +179,18 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 		res.MCPRemoved = removed
 	}
 
-	// 5) codex 专用:清掉 install 时下载的 mcp-grafana 二进制(grafana/loki 共用)。
-	// 注意:其它 codex agent 可能也用同一个二进制(共享 ~/.codex/bin/),所以**只在没有
-	// 其它 agent 占用时**清。简化判断:其它 agents/*.toml 没有就清。
-	if t == TargetCodex {
-		grafanaBin := mcpGrafanaBinPath(root)
-		if _, err := os.Stat(grafanaBin); err == nil {
-			otherAgents, _ := filepath.Glob(filepath.Join(root, "agents", "*.toml"))
-			if len(otherAgents) == 0 {
-				if rmErr := os.Remove(grafanaBin); rmErr == nil {
-					logf("[ok] %s 已删除(无其它 codex agent 共用)", grafanaBin)
-				}
-				_ = os.Remove(filepath.Join(root, "bin")) // 空目录顺带清
-			} else {
-				logf("[skip] %s 保留(还有 %d 个 codex agent 在用)", grafanaBin, len(otherAgents))
+	// 老产物清理:之前版本会下 mcp-grafana go 二进制到 <root>/bin/mcp-grafana
+	// (Windows 加 .exe)。现已改走 npx mcp-grafana-npx,旧二进制留着没人用,遇到就清掉。
+	// 老 codex agent 共用 + 其它 IDE 各一份的判断已不再适用 — 反正只是个 30MiB 的孤儿。
+	for _, name := range []string{"mcp-grafana", "mcp-grafana.exe"} {
+		legacy := filepath.Join(root, "bin", name)
+		if _, err := os.Stat(legacy); err == nil {
+			if rmErr := os.Remove(legacy); rmErr == nil {
+				logf("[ok] 老 %s 二进制已删(改走 npx mcp-grafana-npx)", legacy)
 			}
 		}
 	}
+	_ = os.Remove(filepath.Join(root, "bin")) // 空目录顺带清
 
 	logf("[done] uninstall(%s) 完成", target)
 	return res, nil

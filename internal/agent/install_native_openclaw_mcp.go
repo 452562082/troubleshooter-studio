@@ -35,22 +35,6 @@ func injectMCPServers(
 		PruneEmpty: false, // 留全 schema,agent 自决
 	}, get)
 
-	// 跟 MergeMCPIntoIDESettings 同款:grafana/loki 用 mcp-grafana 二进制,BuildMCPServers
-	// 输出的 command 是占位 sentinel(__GRAFANA_MCP_BIN__),install 时必须替换成 <ocHome>/bin/mcp-grafana
-	// 绝对路径。漏替换 → openclaw 启动时报 spawn __GRAFANA_MCP_BIN__ ENOENT。
-	if hasGrafanaPlaceholder(servers) {
-		if binPath, err := EnsureMCPGrafanaBinary(ocHome, nil); err == nil {
-			replaceGrafanaWithBinary(servers, binPath)
-		} else {
-			fmt.Fprintf(os.Stderr,
-				"[warn] openclaw:自动装 mcp-grafana 二进制失败: %v\n%s"+
-					"装好后重跑 openclaw 部署可一并修复 grafana/loki MCP。\n"+
-					"暂时回退到 npx -y @leval/mcp-grafana(已知 stdout 污染风险)。\n",
-				err, MCPGrafanaInstallHint(ocHome))
-			replaceGrafanaWithNpxFallback(servers)
-		}
-	}
-
 	// uvx 探测,跟 IDE 路径同款 — 缺 uv 时 nacos/jaeger/clickhouse 都启不来。
 	if CfgUsesUvx(cfg) {
 		if err := CheckUvxAvailable(); err != nil {

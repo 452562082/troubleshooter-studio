@@ -31,7 +31,7 @@
 
 - **凭证**:`~/.openclaw/<id>-creds.json`(OpenClaw) + `~/.tshoot/<id>-creds.json`(IDE 平台,脚本读两处优先 openclaw)
 - **agent 定义**:按平台原生写。Claude Code / Cursor 全塞一份 `.md`(运行环境 + 排障逻辑 + skills 索引);Codex `.toml` 瘦身配套独立 `SKILL.md`,spawn 时不烧 system prompt token
-- **Codex grafana/loki MCP**:走 `~/.codex/bin/mcp-grafana` go 二进制(install 时从 GitHub release 自动下载,5 min 超时;失败降级 npx;桌面 app 进度区实时反馈)。换 go 版是为了绕开 `@leval/mcp-grafana` npm 包 stdout banner 污染 JSON-RPC + codex subagent network=Restricted 两条死亡路径
+- **grafana/loki MCP**:走 `npx -y mcp-grafana-npx`(社区 wrapper,首次跑时拉 grafana/mcp-grafana 官方 Go 二进制到 npm 缓存,跨 IDE 共享 `~/.npm/_npx/`;stdout 干净不污染 stdio,跟其他 npx MCP 同款代码路径)
 
 ## 快速开始
 

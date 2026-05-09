@@ -40,8 +40,9 @@ import (
 // 桌面端 wizard 通过 buildOpenclawCreds() 拼出来传过来;CLI 没 creds 时传 nil,
 // 注入的 env 字段值会变成 {{ENV_VAR}} 占位符让用户手填。
 //
-// onProgress(可空)透传给 EnsureMCPGrafanaBinary,首次部署下载 mcp-grafana 二进制
-// 时会回调进度;一键部署 desktop binding 把它接到 wails event "install:log"。
+// onProgress(可空)用于 install 链路里"用户感知"的进度回调。当前 install 步骤本身
+// 都已是常数时间,onProgress 主要给 wails event "install:log"——保留参数避免破坏调用方
+// (apply/desktop binding 链路),但不再有耗时操作要回调。
 func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[string]string, onProgress func(string)) error {
 	// creds==nil 不再整体跳过 — 数据层 mcp(elasticsearch/mongodb/redis/...)走 yaml endpoints[]
 	// fallback,即便 install creds 没有 ES_URL_<env> 等也能从 cfg.Infrastructure.DataStores[].Endpoints[]
@@ -78,24 +79,6 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 		return fmt.Errorf("read $HOME: %w", err)
 	}
 	root := t.RootDir(home)
-
-	// grafana/loki 共用 mcp-grafana go 二进制:确保 <root>/bin/mcp-grafana 就位 + 把 servers
-	// 里的占位替换成绝对路径。三家 IDE 都要做(BuildMCPServers 输出的 command 是占位 sentinel,
-	// 不替换的话 settings.json/agent toml 里就直接写 "__GRAFANA_MCP_BIN__",MCP 启动必失败)。
-	// 下载失败 → 退化到 npx 兜底(打印警告,不阻塞 install)。
-	if hasGrafanaPlaceholder(servers) {
-		if binPath, err := EnsureMCPGrafanaBinary(root, onProgress); err == nil {
-			replaceGrafanaWithBinary(servers, binPath)
-		} else {
-			fmt.Fprintf(os.Stderr,
-				"[warn] 自动装 mcp-grafana 二进制失败: %v\n"+
-					"%s"+
-					"装好后重跑 `tshoot install --target %s` 可一并修复 grafana/loki MCP。\n"+
-					"暂时回退到 npx -y @leval/mcp-grafana(已知 stdout 污染风险)。\n",
-				err, MCPGrafanaInstallHint(root), target)
-			replaceGrafanaWithNpxFallback(servers)
-		}
-	}
 
 	// nacos / jaeger / clickhouse 三家走 uvx 启动,缺 uv 整批挂 — 装机前探一下,缺失打提示。
 	// 不阻塞:其它 MCP 还能用,完全 abort 装机损失更大。
@@ -394,60 +377,5 @@ func renderCodexMCPSection(servers map[string]any) string {
 		sb.WriteString("\n")
 	}
 	return strings.TrimRight(sb.String(), "\n")
-}
-
-// hasGrafanaPlaceholder 判断 servers map 里有没有任何条目用了 grafana 二进制占位
-// (用于决定要不要 ensure 二进制下载;cfg 没启用 grafana/loki 时跳过)。
-func hasGrafanaPlaceholder(servers map[string]any) bool {
-	for _, v := range servers {
-		spec, _ := v.(map[string]any)
-		if spec != nil {
-			if cmd, _ := spec["command"].(string); cmd == generator.CodexPlaceholderGrafanaBin {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// npxGrafanaFallbackArgs 是 ensure binary 失败时退回 npx 走 @leval/mcp-grafana 包的前置参数。
-// 已知该包有 stdout 污染问题,只在用户机器没法装本地二进制时兜底;成功路径不走这里。
-//
-// 末尾的 `--` 把后续 args 全锁给 mcp-grafana,防 npx 把 `--disable-*` 当自家 flag 解析。
-// 当前 mcp-grafana 的 args 没用 npx 自身保留的名字(`--package` `--shell` `-y` 等),
-// 加 `--` 是 future-proof 防御:upstream 加新 flag 不必再回头审 npx 兼容性。
-var npxGrafanaFallbackArgs = []any{"-y", "@leval/mcp-grafana", "--"}
-
-// replaceGrafanaWithBinary 把 command 占位换成本地 mcp-grafana 二进制绝对路径,args 不动
-// (BuildMCPServers 输出的 args 已经是 go 版二进制兼容的形态)。
-func replaceGrafanaWithBinary(servers map[string]any, binPath string) {
-	for _, spec := range eachGrafanaPlaceholder(servers) {
-		spec["command"] = binPath
-	}
-}
-
-// replaceGrafanaWithNpxFallback 把 command 占位换成 npx,并把 "-y @leval/mcp-grafana"
-// 拼到原 args 之前,让原 --disable-* 参数被传给那个 npm 包。
-func replaceGrafanaWithNpxFallback(servers map[string]any) {
-	for _, spec := range eachGrafanaPlaceholder(servers) {
-		spec["command"] = "npx"
-		origArgs, _ := spec["args"].([]any)
-		spec["args"] = append(append([]any{}, npxGrafanaFallbackArgs...), origArgs...)
-	}
-}
-
-// eachGrafanaPlaceholder 遍历返回所有 command=grafana 占位的 spec map(原 map 引用,可就地改)。
-func eachGrafanaPlaceholder(servers map[string]any) []map[string]any {
-	var out []map[string]any
-	for _, v := range servers {
-		spec, _ := v.(map[string]any)
-		if spec == nil {
-			continue
-		}
-		if cmd, _ := spec["command"].(string); cmd == generator.CodexPlaceholderGrafanaBin {
-			out = append(out, spec)
-		}
-	}
-	return out
 }
 

@@ -17,9 +17,6 @@ const (
 	// 重装;若 marker 都被删,install 会报错而不是默默拼到末尾(避免无限堆叠)。
 	CodexMCPRegionBegin = "# >>> tshoot mcp begin (managed; do not edit between markers)"
 	CodexMCPRegionEnd   = "# <<< tshoot mcp end"
-	// CodexPlaceholderGrafanaBin 是 BuildMCPServers 给 grafana/loki 段写的 command 占位;
-	// install 探测/下载二进制后替换为 <root>/bin/mcp-grafana 绝对路径。
-	CodexPlaceholderGrafanaBin = "__GRAFANA_MCP_BIN__"
 )
 
 // codex_toml.go —— 给 codex agent toml 写值用的最小 TOML helper。

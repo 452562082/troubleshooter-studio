@@ -25,7 +25,6 @@ import (
 	"strings"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
-	"github.com/xiaolong/troubleshooter-studio/internal/generator"
 )
 
 // normalizeMongoURI 修复 mongodb URI 密码段含保留字符但未 URL-encode 的常见情况。
@@ -320,10 +319,17 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 		}
 	}
 
-	// grafana / loki 共用同一个 mcp-grafana 二进制(loki 走 grafana datasource API)。
-	// command 写占位 sentinel,IDE install 时替换成 <root>/bin/mcp-grafana 绝对路径;
-	// 详见 ensure_mcp_grafana.go 顶部的"为什么不用 npx"说明。
-	grafanaBin := generator.CodexPlaceholderGrafanaBin
+	// grafana / loki 走 mcp-grafana-npx(社区 wrapper,首次跑时自动下 grafana/mcp-grafana
+	// 官方 Go 二进制到 npm 缓存,exec 同款进程;stdout 干净不污染 stdio)。loki 跟 grafana
+	// 共用同一个底层二进制,只是多 `--disable-search/dashboard/datasource` 把它收成"只剩
+	// Loki/Prom 查询"。
+	//
+	// 历史:之前我们自己下 grafana 官方 Go 二进制到 <root>/bin/mcp-grafana(占位 sentinel
+	// 替换路径),200 行 ensure_mcp_grafana.go + 4 平台各 30MiB 冗余。换 npx wrapper 后:
+	// - 跟其他 7 家 npx MCP 同款代码路径,统一
+	// - npm 缓存跨 4 IDE 共享(~/.npm/_npx/<hash>/),消除冗余
+	// - 删 200 行 ensure 逻辑 + 占位 / placeholder 替换 / npx fallback / uninstall codex bin 清理
+	// 代价:依赖第三方 6.7KB wrapper(animalnots,Apache-2.0),只是"下载+exec"几十行,风险小。
 	// grafanaAuthEnv 二选一:有 API key(service account token)优先,空则回落 basic auth。
 	// mcp-grafana 文档:GRAFANA_API_KEY 一旦设置,GRAFANA_USERNAME/PASSWORD 被忽略 — 但
 	// 我们这边主动只发其一,IDE/openclaw 配置文件更干净,debug 时不会看到两套凭据并排
@@ -347,8 +353,8 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 		for _, e := range envs {
 			up := strings.ToUpper(e.ID)
 			servers[keyFor("grafana", "", e.ID)] = map[string]any{
-				"command": grafanaBin,
-				"args": []any{
+				"command": "npx",
+				"args": []any{"-y", "mcp-grafana-npx",
 					"--disable-incident", "--disable-alerting", "--disable-oncall",
 					"--disable-admin", "--disable-sift", "--disable-pyroscope",
 				},
@@ -369,8 +375,8 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 			for _, e := range envs {
 				up := strings.ToUpper(e.ID)
 				servers[keyFor("loki", "", e.ID)] = map[string]any{
-					"command": grafanaBin,
-					"args": []any{
+					"command": "npx",
+					"args": []any{"-y", "mcp-grafana-npx",
 						"--disable-search", "--disable-dashboard", "--disable-datasource",
 						"--disable-incident", "--disable-alerting", "--disable-oncall",
 						"--disable-admin", "--disable-sift", "--disable-pyroscope",

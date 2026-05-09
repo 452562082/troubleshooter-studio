@@ -192,21 +192,7 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 			}
 
 			// codex 不再走 CLI 注入(MCP 嵌入 agent toml 内联段),无需 stub。
-			//
-			// codex grafana/loki 走 ~/.codex/bin/mcp-grafana go 二进制,InstallNative 会调
-			// EnsureMCPGrafanaBinary 自动下载。测试不能依赖网络,提前在 fakeHome 放一个
-			// fake binary(>1MB,触发 size 检测短路)让 ensure 命中"已存在"分支跳过下载。
-			if target == "codex" {
-				binDir := filepath.Join(fakeHome, ".codex", "bin")
-				if err := os.MkdirAll(binDir, 0o755); err != nil {
-					t.Fatalf("mkdir fake bin: %v", err)
-				}
-				fakeBin := filepath.Join(binDir, "mcp-grafana")
-				// 1.5 MiB padding,通过 size>1MiB 短路检测,避免 e2e 真去 GitHub 下载
-				if err := os.WriteFile(fakeBin, make([]byte, 1<<20+512<<10), 0o755); err != nil {
-					t.Fatalf("write fake binary: %v", err)
-				}
-			}
+			// grafana/loki MCP 现在走 npx mcp-grafana-npx,IDE 启动时按需拉,不在 install 时下二进制 — 测试不再需要 fake binary。
 
 			// ── 1) generator 出 staging ───────────────────────────────────────
 			staging := buildStaging(t, cfg, yamlSrc, target)

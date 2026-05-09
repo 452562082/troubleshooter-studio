@@ -77,17 +77,37 @@ def _has_pattern(yaml_text: str, pattern: str) -> bool:
 
 def _yaml_str(s: str) -> str:
     """把 string 编码成 yaml 安全的字面量。
-    简单策略:含特殊字符( : - # > | ` ' " { } [ ] , 反斜杠 \r \n)用双引号 + escape;否则裸出。
+    简单策略:含特殊字符( : - # > | ` ' " { } [ ] , 反斜杠 / control chars)用双引号 + 完整 escape;否则裸出。
+
+    完整 escape 包括 \\\\ \\" \\n \\r \\t \\0 + 其它 < 0x20 控制字符 → \\x.. 形式。
+    早期版本只 escape \\\\ 和 \\" — LLM 给 multi-line typical_cause 时(用 \\n 分多句)
+    实际写出真换行,破坏 yaml 缩进对齐,踩过坑。
     """
     if not s:
         return '""'
-    # 含 yaml 特殊字符 / 数字开头 → 加双引号
+    # 含 yaml 特殊字符 / 数字开头 / yaml 保留 bool 字面 → 加双引号
     needs_quote = any(c in s for c in ':#-?&*!|>%@`{}[],\n\r\t"\\') or s[0] in '0123456789' or s.lower() in ('null', 'true', 'false', 'yes', 'no', '~', 'on', 'off')
-    if needs_quote:
-        # 双引号转义:\\ 和 \"
-        escaped = s.replace('\\', '\\\\').replace('"', '\\"')
-        return f'"{escaped}"'
-    return s
+    if not needs_quote:
+        return s
+    # 完整 escape:先转义反斜杠(必须最先,否则会重复转义后续 escape 引入的反斜杠),
+    # 然后引号、常见控制字符、其它 < 0x20 全用 \xHH。
+    out = []
+    for ch in s:
+        if ch == '\\':
+            out.append('\\\\')
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == '\n':
+            out.append('\\n')
+        elif ch == '\r':
+            out.append('\\r')
+        elif ch == '\t':
+            out.append('\\t')
+        elif ord(ch) < 0x20:
+            out.append(f'\\x{ord(ch):02x}')
+        else:
+            out.append(ch)
+    return '"' + ''.join(out) + '"'
 
 
 def _format_entry(entry: dict, env: str, service: str) -> str:

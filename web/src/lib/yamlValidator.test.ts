@@ -33,6 +33,7 @@ function makeCtx(overrides: Partial<ValidatorContext> = {}): ValidatorContext {
     isFieldHidden: () => false,
     getServiceSource: () => 'nacos',
     enumerateDataStoreProbeTargets: () => [],
+    enabledObservability: {},
     ...overrides,
   }
 }
@@ -151,6 +152,32 @@ describe('computeStepErrors', () => {
       step: 7,
       enumerateDataStoreProbeTargets: () => [{ envID: 'dev', svc: 'order', dsKey: 'redis' }],
       dsProbeResults: { 'dev::order::redis': { status: 'ok' } },
+    })).size).toBe(0)
+  })
+
+  // ── step 8:可观测性 ────────────────────────────────────────────────
+  // Loki/Prometheus/Tempo 启用必须 Grafana 启用(本系统通过 mcp-grafana-npx 内置工具查,无独立 MCP 包)。
+  it('step 8 flags loki/prom/tempo enabled but grafana off', () => {
+    const errs = computeStepErrors(makeCtx({
+      step: 8,
+      enabledObservability: { loki: true, prometheus: true, tempo: true, grafana: false },
+    }))
+    expect(errs.has('obs.loki.needs_grafana')).toBe(true)
+    expect(errs.has('obs.prometheus.needs_grafana')).toBe(true)
+    expect(errs.has('obs.tempo.needs_grafana')).toBe(true)
+  })
+
+  it('step 8 grafana on => loki/prom/tempo OK', () => {
+    expect(computeStepErrors(makeCtx({
+      step: 8,
+      enabledObservability: { loki: true, prometheus: true, tempo: true, grafana: true },
+    })).size).toBe(0)
+  })
+
+  it('step 8 jaeger/elk standalone (no grafana) does not require grafana', () => {
+    expect(computeStepErrors(makeCtx({
+      step: 8,
+      enabledObservability: { jaeger: true, elk: true, grafana: false },
     })).size).toBe(0)
   })
 })

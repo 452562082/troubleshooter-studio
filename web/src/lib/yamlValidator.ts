@@ -83,6 +83,8 @@ export interface ValidatorContext {
   getServiceSource(svc: string): string
   /** 列出 Step 7 校验对象;InitPage 那边的 enumerateDataStoreProbeTargets() */
   enumerateDataStoreProbeTargets(): DSProbeTarget[]
+  /** Step 8 用:可观测组件勾选 map(grafana/loki/prometheus/jaeger/elk/...) */
+  enabledObservability: Record<string, boolean>
 }
 
 // 共享 key 拼接收口在 yamlShared.ts;这里 re-export 让老调用方(只 import 本文件的)
@@ -237,6 +239,18 @@ export function computeStepErrors(ctx: ValidatorContext): Set<string> {
     return errs
   }
 
+  if (step === 8) {
+    // 可观测性:Loki/Prometheus/Tempo 启用必须 Grafana 启用(它们在本系统通过
+    // mcp-grafana-npx 内置工具查询,无独立 MCP 包)— 跟 health_observability.go 同款规则。
+    const grafanaOn = !!ctx.enabledObservability['grafana']
+    for (const k of ['loki', 'prometheus', 'tempo']) {
+      if (ctx.enabledObservability[k] && !grafanaOn) {
+        errs.add(`obs.${k}.needs_grafana`)
+      }
+    }
+    return errs
+  }
+
   return errs
 }
 
@@ -297,6 +311,13 @@ export function labelForErrorKey(k: string, repos: ValidatorRepo[]): string {
     if (last === 'probefail') return `${parts[1]} 环境 "${parts[2]}" 服务的 ${parts[3]} 连通性失败`
     if (last === 'notested')  return `${parts[1]} 环境 "${parts[2]}" 服务的 ${parts[3]} 未测连通性`
     return `${parts[1]} 环境 "${parts[2]}" 服务配置未拉取 / 解析成功`
+  }
+  if (k.startsWith('obs.')) {
+    const parts = k.split('.')
+    if (parts[2] === 'needs_grafana') {
+      const tool = { loki: 'Loki', prometheus: 'Prometheus', tempo: 'Tempo' }[parts[1]] || parts[1]
+      return `${tool} 启用但 Grafana 未启用(${tool} 通过 grafana MCP 内置工具查询,需先勾 Grafana)`
+    }
   }
   return k
 }

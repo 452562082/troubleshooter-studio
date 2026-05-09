@@ -2626,6 +2626,7 @@ function computeStepErrors(): Set<string> {
     ccCredInputs, sourceCreds, envNamespaces, serviceConfigSel,
     kuboardStateByEnv, kuboardSvcMap, ccHubStateByEnv, dsProbeResults,
     isFieldHidden, getServiceSource, enumerateDataStoreProbeTargets,
+    enabledObservability,
   }
   return libComputeStepErrors(ctx)
 }

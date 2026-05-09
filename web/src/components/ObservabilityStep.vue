@@ -159,8 +159,12 @@ function setGrafanaDsUid(obsKey: string, envID: string, value: string) {
         >⧗ 还没启用任何可观测性组件 — 在上方勾选要用的</div>
 
         <div v-else class="ds-svc-container">
+          <!-- Loki/Prometheus/Tempo 启用但 Grafana 未启用 → 整块不渲染(数据源选择器 / 加载标签按钮
+               都依赖 grafana,渲染出来只会给用户看到能加载 stale 缓存的假象)。banner + chip 黄色
+               已是用户感知信号,这里再硬过滤一遍防止旧 dsList 被刷出来 / 用户误点加载按钮。 -->
           <ObservabilityToolBlock
-            v-for="spec in obsToolSpecs.filter(s => enabledObservability[s.key])"
+            v-for="spec in obsToolSpecs.filter(s => enabledObservability[s.key]
+              && !(['loki','prometheus','tempo'].includes(s.key) && !enabledObservability['grafana']))"
             :key="spec.key"
             :env-i-d="env.id"
             :spec="spec"

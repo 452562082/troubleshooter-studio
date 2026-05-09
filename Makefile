@@ -13,8 +13,12 @@
 #
 # 发布:
 #   make release-notes              # dry-run,只打印自上次 tag 以来的 changelog
-#   make release-tag VERSION=v0.7.0 # 创建 annotated tag,annotation = changelog
-#                                   # push 后 GitLab/GitHub Tags 页面自带版本说明
+#   make release-tag VERSION=v0.7.0 # 仅打 annotated tag(annotation=changelog,不 push、不 publish binary)
+#   make tag-and-release v=v0.7.0   # 一站式:打 tag + push + 编 + 上传 GitLab Release(需 GITLAB_TOKEN)
+#   make bump-patch                 # 自动 vX.Y.Z → vX.Y.(Z+1) → tag-and-release(bug 修复)
+#   make bump-minor                 # 自动 vX.Y.Z → vX.(Y+1).0 → tag-and-release(功能升级)
+#   make bump-major                 # 自动 vX.Y.Z → v(X+1).0.0 → tag-and-release(breaking change)
+#   ↑ tag annotation 自动用 changelog.sh 填上一 tag 到 HEAD 的 commits,push 后 GitLab Tags 页带版本说明
 
 SHELL := /bin/bash
 
@@ -153,7 +157,8 @@ desktop-dmg: desktop-app
 release-publish: check-token desktop-dmg release
 	@VERSION=$(VERSION) bash scripts/publish-gitlab-release.sh
 
-# 提早检测 GITLAB_TOKEN 缺失,免得 bump-patch 跑了 2 分钟 build 才挂在最后一步。
+# 提早检测 GITLAB_TOKEN 缺失,免得 bump-patch / bump-minor / bump-major 跑了 2 分钟 build
+# 才挂在最后一步。
 .PHONY: check-token
 check-token:
 	@if [ -z "$$GITLAB_TOKEN" ]; then \
@@ -183,7 +188,9 @@ endif
 	 [ -n "$$remote" ] || remote=origin; \
 	 echo "▶ remote: $$remote"; \
 	 echo "▶ tag $(v) 指向当前 HEAD"; \
-	 git tag -a "$(v)" -m "release $(v)"; \
+	 msg=$$(scripts/changelog.sh "$(v)") || { echo "✗ 生成 changelog 失败" >&2; exit 1; }; \
+	 echo "$$msg" | git tag -a "$(v)" -F -; \
+	 echo "▶ tag annotation 已自动填上 changelog,GitLab Tags 页面会显示版本说明"; \
 	 echo "▶ push commits + tag"; \
 	 git push "$$remote" || { echo "✗ push commits 失败" >&2; git tag -d "$(v)"; exit 1; }; \
 	 git push "$$remote" "$(v)" || { echo "✗ push tag 失败" >&2; git tag -d "$(v)"; exit 1; }
@@ -205,6 +212,13 @@ bump-patch:
 bump-minor:
 	@cur=$$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo 0.0.0); \
 	 next=$$(echo "$$cur" | awk -F. '{print $$1"."$$2+1".0"}'); \
+	 echo "▶ 自动 bump:v$$cur → v$$next"; \
+	 $(MAKE) --no-print-directory tag-and-release v="v$$next"
+
+.PHONY: bump-major
+bump-major:
+	@cur=$$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo 0.0.0); \
+	 next=$$(echo "$$cur" | awk -F. '{print $$1+1".0.0"}'); \
 	 echo "▶ 自动 bump:v$$cur → v$$next"; \
 	 $(MAKE) --no-print-directory tag-and-release v="v$$next"
 
@@ -271,3 +285,4 @@ release-tag:
 	@echo "✓ tag $(VERSION) 已创建"
 	@echo "  推送到远端:git push troubleshooter-studio $(VERSION)"
 	@echo "  撤销:git tag -d $(VERSION)"
+

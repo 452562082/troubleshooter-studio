@@ -142,14 +142,17 @@ func fakeCreds() map[string]string {
 //
 //	prefix = MCPKeyPrefix() = "shop"
 //	nacos  per env(默认源 id=default → 不带 source 中缀):shop-nacos-<env>
-//	grafana / loki per env:                           shop-grafana-<env> / shop-loki-<env>
+//	grafana per env:                                 shop-grafana-<env>
+//
+// 注:loki MCP 已合并进 grafana MCP(2026-05),query_loki_* 工具由 grafana mcp-grafana-npx
+// 提供;不再单独注册 shop-loki-<env>。
 //
 // shop-troubleshooter.yaml 有 dev / staging / prod 三个环境。
 func expectedMCPKeys() []string {
 	envs := []string{"dev", "staging", "prod"}
 	out := []string{}
 	for _, e := range envs {
-		out = append(out, "shop-nacos-"+e, "shop-grafana-"+e, "shop-loki-"+e)
+		out = append(out, "shop-nacos-"+e, "shop-grafana-"+e)
 	}
 	return out
 }

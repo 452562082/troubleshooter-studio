@@ -18,9 +18,7 @@
 package agent
 
 import (
-	"fmt"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 
@@ -364,29 +362,13 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 		}
 	}
 
-	// Loki MCP 用同款 mcp-grafana 二进制 + 加几个 --disable-* 把它收成"只剩 Loki/Prom 查询"。
-	// 走 Grafana datasource proxy,不直连 Loki,所以前置:Grafana 必须也启用且填了 URL。
-	// 用户只启 Loki 不启 Grafana 时跳过 + 提示 — 否则会发一条"GRAFANA_URL=空"的死 mcp 进 IDE。
-	if cfg.Infrastructure.Observability.Loki.Enabled {
-		if !cfg.Infrastructure.Observability.Grafana.Enabled {
-			fmt.Fprintln(os.Stderr,
-				"[warn] Loki MCP 走 Grafana datasource proxy 实现,需要 observability.grafana.enabled=true 且填 URL/凭据;"+
-					"当前 grafana 未启用,跳过 loki MCP 注入(skill/CLI 提示仍可用 LOKI_URL_<env>)")
-		} else {
-			for _, e := range envs {
-				up := strings.ToUpper(e.ID)
-				servers[keyFor("loki", "", e.ID)] = map[string]any{
-					"command": "npx",
-					"args": []any{"-y", "mcp-grafana-npx",
-						"--disable-search", "--disable-dashboard", "--disable-datasource",
-						"--disable-incident", "--disable-alerting", "--disable-oncall",
-						"--disable-admin", "--disable-sift", "--disable-pyroscope",
-					},
-					"env": envBlock(grafanaAuthEnv(up)),
-				}
-			}
-		}
-	}
+	// 注:历史上这里有过单独的 loki MCP(同款 mcp-grafana 二进制只是多 --disable-search/dashboard/
+	// datasource 把工具集瘦身)。但本质是 grafana MCP 的严格子集 — query_loki_logs/patterns/stats 等
+	// 工具 grafana MCP 都已暴露,起两份相同进程纯属浪费 spawn + zod schema 注册时间。
+	// 已删,保持 loki/prom 永远走 grafana MCP 单一路径。yaml 里 observability.loki.enabled
+	// 仅决定 routing skill 模板里的 LOKI_URL_<env> CLI fallback 提示(当 mcp 不可用时)。
+	// 同款理由:prometheus 一直没独立 MCP(社区无成熟 prom-only mcp 包),也走 grafana MCP。
+	// validate 阶段强制 Loki/Prom 启用 ⇒ Grafana 必启用,见 validate_observability_grafana_required.go。
 
 	// jaeger:用 traceloop/opentelemetry-mcp(uvx)真 mcp,4 家平台都注册(跟数据层 mcp 同款思路 —
 	// 让 AI 直接 tool_use 调,不用让 AI 自己拼 jaeger /api/traces HTTP curl)。

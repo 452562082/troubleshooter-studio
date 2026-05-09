@@ -32,30 +32,56 @@ func checkObservability(c *SystemConfig) []HealthIssue {
 	}
 
 	// 矛盾:via_grafana=true 但 grafana.enabled=false
-	if obs.Loki.Enabled && obs.Loki.ViaGrafana && !obs.Grafana.Enabled {
+	// Loki / Prometheus / Tempo 当前**只**支持 via Grafana 代理 — mcp-grafana-npx 内置
+	// query_loki_logs / query_prometheus / 等工具,社区没有成熟的"独立 Loki/Prom MCP"
+	// npm 包,自己写不划算。yaml 里 via_grafana 字段保留(向后兼容),但只接受 true。
+	// 启 Loki/Prom/Tempo 但 Grafana 未启 ⇒ 强制报错(老逻辑只在 via_grafana=true 时报,
+	// 但用户改 via_grafana=false 也是错配 — 我们根本不支持直连)。
+	if obs.Loki.Enabled && !obs.Grafana.Enabled {
 		out = append(out, HealthIssue{
 			Severity: "error",
 			Category: "observability",
-			Field:    "infrastructure.observability.loki.via_grafana",
-			Message:  "Loki via_grafana=true 但 Grafana 未启用,矛盾",
-			Hint:     "改 loki.via_grafana=false 直连 Loki,或启用 Grafana",
+			Field:    "infrastructure.observability.loki",
+			Message:  "Loki 启用但 Grafana 未启用 — 本系统的 Loki 查询通过 grafana MCP 的 query_loki_* 工具实现(没有独立 Loki MCP)",
+			Hint:     "启用 grafana 并填 URL/凭据,或关 loki.enabled",
 		})
 	}
-	if obs.Prometheus.Enabled && obs.Prometheus.ViaGrafana && !obs.Grafana.Enabled {
+	if obs.Prometheus.Enabled && !obs.Grafana.Enabled {
 		out = append(out, HealthIssue{
 			Severity: "error",
 			Category: "observability",
-			Field:    "infrastructure.observability.prometheus.via_grafana",
-			Message:  "Prometheus via_grafana=true 但 Grafana 未启用,矛盾",
+			Field:    "infrastructure.observability.prometheus",
+			Message:  "Prometheus 启用但 Grafana 未启用 — 本系统的 Prometheus 查询通过 grafana MCP 的 query_prometheus 工具实现(没有独立 Prom MCP)",
+			Hint:     "启用 grafana 并填 URL/凭据,或关 prometheus.enabled",
 		})
 	}
-	if obs.Tempo.Enabled && obs.Tempo.ViaGrafana && !obs.Grafana.Enabled {
+	if obs.Tempo.Enabled && !obs.Grafana.Enabled {
 		out = append(out, HealthIssue{
 			Severity: "error",
 			Category: "observability",
-			Field:    "infrastructure.observability.tempo.via_grafana",
-			Message:  "Tempo via_grafana=true 但 Grafana 未启用,矛盾",
+			Field:    "infrastructure.observability.tempo",
+			Message:  "Tempo 启用但 Grafana 未启用 — 本系统的 Tempo 查询通过 grafana MCP 实现(没有独立 Tempo MCP)",
+			Hint:     "启用 grafana 并填 URL/凭据,或关 tempo.enabled",
 		})
+	}
+	// 反向:via_grafana=false 也提示一下 — 当前不支持直连模式
+	for _, c := range []struct {
+		enabled, via bool
+		field, name  string
+	}{
+		{obs.Loki.Enabled, obs.Loki.ViaGrafana, "infrastructure.observability.loki.via_grafana", "Loki"},
+		{obs.Prometheus.Enabled, obs.Prometheus.ViaGrafana, "infrastructure.observability.prometheus.via_grafana", "Prometheus"},
+		{obs.Tempo.Enabled, obs.Tempo.ViaGrafana, "infrastructure.observability.tempo.via_grafana", "Tempo"},
+	} {
+		if c.enabled && !c.via {
+			out = append(out, HealthIssue{
+				Severity: "warn",
+				Category: "observability",
+				Field:    c.field,
+				Message:  c.name + " via_grafana=false,但本系统目前只通过 grafana MCP 查 " + c.name + "(无独立 MCP),via_grafana 字段实际不影响生成结果",
+				Hint:     "建议改 via_grafana=true(语义对齐实际行为)",
+			})
+		}
 	}
 
 	// Loki / Prometheus 走 Grafana 代理但 datasource_uid_by_env 完全空

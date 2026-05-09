@@ -83,13 +83,9 @@ func requiredMCPKeys(cfg *config.SystemConfig, agentID string) []string {
 			out = append(out, withAgent("grafana-"+e.ID))
 		}
 	}
-	// Loki MCP 走 Grafana datasource proxy 实现,只启 Loki 不启 Grafana 时
-	// BuildMCPServers 不会注入 loki-<env>(避免发死 mcp);self-test 同步逻辑。
-	if cfg.Infrastructure.Observability.Loki.Enabled && cfg.Infrastructure.Observability.Grafana.Enabled {
-		for _, e := range cfg.Environments {
-			out = append(out, withAgent("loki-"+e.ID))
-		}
-	}
+	// loki MCP 已合并进 grafana MCP(同款 mcp-grafana-npx 二进制本就含 query_loki_*),
+	// 不再单独注册 loki-<env>。validate 阶段强制 Loki.Enabled ⇒ Grafana.Enabled,
+	// 这里也就没"独立 loki" 期望了。
 	// jaeger / elk:2026-05 都从 curl 占位升级到真 MCP(uvx opentelemetry-mcp /
 	// npx @elastic/mcp-server-elasticsearch),openclaw injectMCPServers 必注册。
 	if cfg.Infrastructure.Observability.Jaeger.Enabled {

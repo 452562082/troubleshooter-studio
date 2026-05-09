@@ -312,39 +312,40 @@ func TestBuildMCPServers_GrafanaAuth(t *testing.T) {
 	}
 }
 
-// TestBuildMCPServers_LokiNeedsGrafana 验证 Loki MCP 走 Grafana datasource proxy 实现,
-// 只启 Loki 不启 Grafana 时不注入 loki MCP(避免发死 mcp 进 IDE)。
-func TestBuildMCPServers_LokiNeedsGrafana(t *testing.T) {
-	// 只启 Loki:跳过(不写 loki-<env>)
-	cfgLokiOnly := &config.SystemConfig{
-		Environments: []config.Environment{{ID: "dev"}},
-		Infrastructure: config.Infrastructure{
-			Observability: config.Observability{
-				Loki: config.Loki{Enabled: true},
-			},
-		},
-	}
-	servers := BuildMCPServers(cfgLokiOnly, MCPBuildOptions{PruneEmpty: true},
-		func(_ string) string { return "" })
-	if _, ok := servers["loki-dev"]; ok {
-		t.Errorf("Loki 启用但 Grafana 未启用时不该注入 loki MCP(走 Grafana proxy,前置依赖),got keys=%v", keysOf(servers))
-	}
-
-	// Loki + Grafana 双启:正常注入
-	cfgBoth := &config.SystemConfig{
-		Environments: []config.Environment{{ID: "dev"}},
-		Infrastructure: config.Infrastructure{
-			Observability: config.Observability{
-				Grafana: config.Grafana{Enabled: true},
-				Loki:    config.Loki{Enabled: true},
-			},
-		},
-	}
-	creds := map[string]string{"GRAFANA_URL_DEV": "http://g:3000", "GRAFANA_USER_DEV": "u", "GRAFANA_PASS_DEV": "p"}
-	servers2 := BuildMCPServers(cfgBoth, MCPBuildOptions{PruneEmpty: true},
-		func(k string) string { return creds[k] })
-	if _, ok := servers2["loki-dev"]; !ok {
-		t.Errorf("Loki + Grafana 双启时应注入 loki-dev MCP, got keys=%v", keysOf(servers2))
+// TestBuildMCPServers_LokiNeverRegisters 验证 loki MCP 已被合并进 grafana MCP,
+// 任何 cfg(只启 Loki / Loki+Grafana 双启)都不再单独注册 loki-<env>。
+// query_loki_logs / query_loki_patterns / query_loki_stats 等工具由 grafana MCP 提供。
+func TestBuildMCPServers_LokiNeverRegisters(t *testing.T) {
+	for _, c := range []struct {
+		name           string
+		grafanaEnabled bool
+	}{
+		{"only loki enabled", false},
+		{"loki + grafana both enabled", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := &config.SystemConfig{
+				Environments: []config.Environment{{ID: "dev"}, {ID: "prod"}},
+				Infrastructure: config.Infrastructure{
+					Observability: config.Observability{
+						Loki:    config.Loki{Enabled: true},
+						Grafana: config.Grafana{Enabled: c.grafanaEnabled},
+					},
+				},
+			}
+			creds := map[string]string{
+				"GRAFANA_URL_DEV": "http://g:3000", "GRAFANA_USER_DEV": "u", "GRAFANA_PASS_DEV": "p",
+				"GRAFANA_URL_PROD": "http://gp:3000", "GRAFANA_USER_PROD": "u", "GRAFANA_PASS_PROD": "p",
+			}
+			servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true},
+				func(k string) string { return creds[k] })
+			for _, k := range []string{"loki-dev", "loki-prod"} {
+				if _, ok := servers[k]; ok {
+					t.Errorf("%s: 不该再注册 %q(loki 工具已并入 grafana MCP), got keys=%v",
+						c.name, k, keysOf(servers))
+				}
+			}
+		})
 	}
 }
 

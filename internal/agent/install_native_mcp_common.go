@@ -330,17 +330,18 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 	// - npm 缓存跨 4 IDE 共享(~/.npm/_npx/<hash>/),消除冗余
 	// - 删 200 行 ensure 逻辑 + 占位 / placeholder 替换 / npx fallback / uninstall codex bin 清理
 	// 代价:依赖第三方 6.7KB wrapper(animalnots,Apache-2.0),只是"下载+exec"几十行,风险小。
-	// grafanaAuthEnv 二选一:有 API key(service account token)优先,空则回落 basic auth。
-	// mcp-grafana 文档:GRAFANA_API_KEY 一旦设置,GRAFANA_USERNAME/PASSWORD 被忽略 — 但
-	// 我们这边主动只发其一,IDE/openclaw 配置文件更干净,debug 时不会看到两套凭据并排
-	// (尤其 PruneEmpty=false 的 openclaw 里两套都空时会留两组空字段制造误导)。
-	// Grafana 9.1+ 标记 API key legacy,10+ 推 service account token,wizard 给的两个
-	// auth_mode 都走这同一个 GRAFANA_API_KEY env(token 在 Grafana 端是统一鉴权头)。
+	// grafanaAuthEnv 二选一:有 API key/SAT 时走 GRAFANA_SERVICE_ACCOUNT_TOKEN,空则回落
+	// basic auth。
+	//
+	// 上游 mcp-grafana README:GRAFANA_API_KEY **已标 deprecated**,推 GRAFANA_SERVICE_ACCOUNT_TOKEN
+	// (Grafana 9.1+ 用 service account token 替代 API key,值跟 token 字符串完全兼容,
+	// 改名是为强调"用新 token API 创建,不用老 admin API key")。我们 wizard 字段叫
+	// GRAFANA_API_KEY_<env>(用户语境上更直白),发到 mcp 时换成现行规范名 SERVICE_ACCOUNT_TOKEN。
 	grafanaAuthEnv := func(up string) map[string]any {
 		if k := get("GRAFANA_API_KEY_" + up); k != "" {
 			return map[string]any{
-				"GRAFANA_URL":     get("GRAFANA_URL_" + up),
-				"GRAFANA_API_KEY": k,
+				"GRAFANA_URL":                   get("GRAFANA_URL_" + up),
+				"GRAFANA_SERVICE_ACCOUNT_TOKEN": k,
 			}
 		}
 		return map[string]any{
@@ -655,12 +656,15 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 		}
 	}
 
-	// messaging:lark
+	// messaging:lark — 上游正式包名是 @larksuiteoapi/lark-mcp(注意 oapi 不是 suite),
+	// 且 binary 是 commander 多子命令,启动 mcp server 必须显式 `mcp` 子命令(没有就只是
+	// CLI 工具 exit)。env: process.env.APP_ID / APP_SECRET(在 dist/utils/constants.js
+	// 里写死,不接 LARK_APP_* 前缀)。
 	for _, m := range cfg.Infrastructure.Messaging {
 		if m.Enabled && m.Platform == "lark" {
 			servers[keyFixed("lark-openapi")] = map[string]any{
 				"command": "npx",
-				"args":    []any{"-y", "@larksuite/lark-openapi-mcp"},
+				"args":    []any{"-y", "@larksuiteoapi/lark-mcp", "mcp"},
 				"env": envBlock(map[string]any{
 					"APP_ID":     get("LARK_APP_ID"),
 					"APP_SECRET": get("LARK_APP_SECRET"),

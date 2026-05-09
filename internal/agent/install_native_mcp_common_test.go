@@ -293,16 +293,19 @@ func TestBuildMCPServers_GrafanaAuth(t *testing.T) {
 		func(k string) string { return creds[k] })
 
 	devEnv := envOf(servers["grafana-dev"])
-	if devEnv["GRAFANA_API_KEY"] != "glsa_xxx" {
-		t.Errorf("dev 应只发 API key,got env=%v", devEnv)
+	if devEnv["GRAFANA_SERVICE_ACCOUNT_TOKEN"] != "glsa_xxx" {
+		t.Errorf("dev 应发 SERVICE_ACCOUNT_TOKEN(GRAFANA_API_KEY 上游已 deprecated),got env=%v", devEnv)
 	}
 	if _, has := devEnv["GRAFANA_USERNAME"]; has {
-		t.Errorf("dev 有 API key 时不该再发 GRAFANA_USERNAME(避免双套凭据并排), got env=%v", devEnv)
+		t.Errorf("dev 有 token 时不该再发 GRAFANA_USERNAME(避免双套凭据并排), got env=%v", devEnv)
+	}
+	if _, has := devEnv["GRAFANA_API_KEY"]; has {
+		t.Errorf("dev 不该再发 deprecated GRAFANA_API_KEY,got env=%v", devEnv)
 	}
 
 	prodEnv := envOf(servers["grafana-prod"])
-	if _, has := prodEnv["GRAFANA_API_KEY"]; has {
-		t.Errorf("prod 没填 API key 时不该出现 GRAFANA_API_KEY(空值会被 prune,但回落路径不该写 key), got env=%v", prodEnv)
+	if _, has := prodEnv["GRAFANA_SERVICE_ACCOUNT_TOKEN"]; has {
+		t.Errorf("prod 没填 token 时不该出现 GRAFANA_SERVICE_ACCOUNT_TOKEN(回落路径不该写 token), got env=%v", prodEnv)
 	}
 	if prodEnv["GRAFANA_USERNAME"] != "admin" || prodEnv["GRAFANA_PASSWORD"] != "p" {
 		t.Errorf("prod 应回落 basic auth,got env=%v", prodEnv)

@@ -11,14 +11,15 @@
 #   make demo         # make build 后立即 ./bin/tshoot demo
 #   make clean        # 清临时产物
 #
-# 发布:
-#   make release-notes              # dry-run,只打印自上次 tag 以来的 changelog
-#   make release-tag VERSION=v0.7.0 # 仅打 annotated tag(annotation=changelog,不 push、不 publish binary)
-#   make tag-and-release v=v0.7.0   # 一站式:打 tag + push + 编 + 上传 GitLab Release(需 GITLAB_TOKEN)
-#   make bump-patch                 # 自动 vX.Y.Z → vX.Y.(Z+1) → tag-and-release(bug 修复)
-#   make bump-minor                 # 自动 vX.Y.Z → vX.(Y+1).0 → tag-and-release(功能升级)
-#   make bump-major                 # 自动 vX.Y.Z → v(X+1).0.0 → tag-and-release(breaking change)
-#   ↑ tag annotation 自动用 changelog.sh 填上一 tag 到 HEAD 的 commits,push 后 GitLab Tags 页带版本说明
+# 发布(本地仅 dry-run,真发布走 GitLab CI manual button — 详见 docs/CI-RELEASE.md):
+#   make release-notes              # 看下次发版会是什么 changelog(只 print,不动 git)
+#   scripts/release.sh patch --print-only    # 看版本号会算成几(本地预览)
+#   make release-tag VERSION=v0.7.0 # ⚠ 仅在迁移/特殊场景用:本地打个 tag 不 push 不 publish
+#                                   # 真要发版本应该:提 MR 合到 main → 在 Pipeline 点 release:* 按钮
+#   make release-publish VERSION=v0.7.0 # 对已有 tag 重传 binary(需 GITLAB_TOKEN,运维场景)
+#
+# 已删:make bump-{patch,minor,major} / make tag-and-release —— 强制所有 release 走 CI,
+# 版本号决策有 audit trail,git history 干净统一(都是 CI 用同一身份打 tag)。
 
 SHELL := /bin/bash
 
@@ -167,60 +168,9 @@ check-token:
 	  exit 1; \
 	fi
 
-# ── 一键打 tag + 推 + 发布:防止漏跑步骤 ──────────────────────
-# 自动检查 git 干净 + 没重 tag,失败立刻退,不会留半截状态。
-# 用法:
-#   make tag-and-release v=v0.1.1            # 显式版本号
-#   make bump-patch                          # 自动 patch+1(v0.1.0 → v0.1.1)
-#   make bump-minor                          # 自动 minor+1(v0.1.0 → v0.2.0)
-.PHONY: tag-and-release
-tag-and-release: check-token
-ifndef v
-	$(error 用法:make tag-and-release v=v0.1.1)
-endif
-	@if ! git diff --quiet || ! git diff --cached --quiet; then \
-	  echo "✗ 工作树有未 commit 改动,先 git commit 再来" >&2; exit 1; \
-	fi
-	@if git rev-parse "$(v)" >/dev/null 2>&1; then \
-	  echo "✗ tag $(v) 已存在(本地或远程),换个版本号或先 git tag -d $(v) + 删远程 tag" >&2; exit 1; \
-	fi
-	@remote=$$(git config --get branch.$$(git symbolic-ref --short HEAD).remote); \
-	 [ -n "$$remote" ] || remote=origin; \
-	 echo "▶ remote: $$remote"; \
-	 echo "▶ tag $(v) 指向当前 HEAD"; \
-	 msg=$$(scripts/changelog.sh "$(v)") || { echo "✗ 生成 changelog 失败" >&2; exit 1; }; \
-	 echo "$$msg" | git tag -a "$(v)" -F -; \
-	 echo "▶ tag annotation 已自动填上 changelog,GitLab Tags 页面会显示版本说明"; \
-	 echo "▶ push commits + tag"; \
-	 git push "$$remote" || { echo "✗ push commits 失败" >&2; git tag -d "$(v)"; exit 1; }; \
-	 git push "$$remote" "$(v)" || { echo "✗ push tag 失败" >&2; git tag -d "$(v)"; exit 1; }
-	@echo "▶ 编 + 上传 release artifacts"
-	@$(MAKE) --no-print-directory release-publish VERSION=$(v)
-	@echo ""
-	@echo "✓ 完成 — release $(v) 已发布"
-
-# bump-patch / bump-minor:自动算下一个 semver,然后调 tag-and-release
-# 现 tag = vMAJOR.MINOR.PATCH;无现 tag 默认 v0.0.0 → bump 到 v0.0.1 / v0.1.0
-.PHONY: bump-patch
-bump-patch:
-	@cur=$$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo 0.0.0); \
-	 next=$$(echo "$$cur" | awk -F. '{$$NF=$$NF+1; print}' OFS=.); \
-	 echo "▶ 自动 bump:v$$cur → v$$next"; \
-	 $(MAKE) --no-print-directory tag-and-release v="v$$next"
-
-.PHONY: bump-minor
-bump-minor:
-	@cur=$$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo 0.0.0); \
-	 next=$$(echo "$$cur" | awk -F. '{print $$1"."$$2+1".0"}'); \
-	 echo "▶ 自动 bump:v$$cur → v$$next"; \
-	 $(MAKE) --no-print-directory tag-and-release v="v$$next"
-
-.PHONY: bump-major
-bump-major:
-	@cur=$$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo 0.0.0); \
-	 next=$$(echo "$$cur" | awk -F. '{print $$1+1".0.0"}'); \
-	 echo "▶ 自动 bump:v$$cur → v$$next"; \
-	 $(MAKE) --no-print-directory tag-and-release v="v$$next"
+# 注:本地一键发布(make tag-and-release / bump-{patch,minor,major})已删 — 强制
+# release 走 GitLab CI manual button,真正的 release 流程见 docs/CI-RELEASE.md。
+# 想本地 dry-run:make release-notes 看 changelog,scripts/release.sh patch --print-only 看版本号。
 
 # ── 快速试跑:build 后立即 demo ──────────────────────────────────
 .PHONY: demo

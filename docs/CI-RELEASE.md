@@ -1,8 +1,9 @@
 # CI/CD 自动 Release 配置
 
 `.gitlab-ci.yml` 里的 `release:patch` / `release:minor` / `release:major` 三个 manual job
-跟本地 `make bump-{patch,minor,major}` 完全等价 —— 区别是跑在 CI(macos runner),
-触发方式从命令行换成 GitLab Pipeline 页面的按钮点击。
+是**唯一**发版本入口 —— 本地 `make bump-*` / `tag-and-release` 已删(强制 release 走 CI,
+版本号决策有 audit trail)。底层调 `scripts/release.sh patch|minor|major`,
+带 `$CI` 环境变量校验防本地误调。
 
 **典型流程**(用户视角):
 1. 在 feature 分支干活
@@ -61,7 +62,8 @@ xcode-select --install            # Xcode CLI Tools(cgo 链 UniformTypeIdentifie
 brew install go node jq           # Go 1.25+ / Node 20+ / jq(GitLab API JSON 解析)
 ```
 
-GitLab shared runner 默认没 macOS 节点,公司内部不要的话只能本地 `make bump-*`。
+GitLab shared runner 默认没 macOS 节点,公司内部不准备的话**完全发不了版本**(本地一键发布已禁)。
+紧急 hotfix 场景退路:`make release-tag VERSION=v0.x.x` + 手动 `git push --tags`,binary 漏装就漏装。
 
 ---
 
@@ -78,8 +80,9 @@ GitLab Pipeline 自动跑:
    ↓
 打开 Pipeline → 点对应按钮
    ↓
-runner 跑 make bump-X:
-   - 算版本号(从 git describe)
+runner 跑 scripts/release.sh X:
+   - $CI 环境校验(本地误调拒)
+   - 算版本号(从 git describe + LEVEL 递增)
    - 工作树/tag 重名校验
    - scripts/changelog.sh 生成 release notes
    - git tag -a 写 annotation
@@ -105,14 +108,21 @@ Release 页面看到新版本,描述 = 干净 changelog,assets 齐全
 
 ---
 
-## 跟本地 `make bump-*` 的关系
+## 本地不允许发布(已禁)
 
-CI release jobs **不取代**本地 `make bump-*`,只是另一种触发方式:
+历史上有 `make bump-{patch,minor,major}` 本地一键发布,**已删** —— 强制所有 release 走 CI 有几个真好处:
 
-| 场景 | 推荐路径 |
+- **单一来源**:版本号决策有 audit trail(谁点的 / 什么时间 / 哪个 commit),git history 干净
+- **统一身份**:所有 tag 都是 CI 用同一身份打,Tagger 字段一致
+- **强制 review**:发版前必跑全套 CI(go test / lint / vue-tsc / vite build / desktop check 等)
+- **多人协作**:不会两个人同时本地 bump 撞 tag
+
+本地仅保留**预览**入口(不动 git):
+| 命令 | 作用 |
 |---|---|
-| 开发机有完整环境 + 想自己看 changelog 再发 | 本地 `make bump-minor` |
-| 远程开发 / 想团队 review pipeline / 多人协作 | CI manual 按钮 |
-| Hotfix 着急发 | 都行,看哪个手边方便 |
+| `make release-notes` | 看下次发版会产生什么 changelog(scripts/changelog.sh 干跑) |
+| `scripts/release.sh patch --print-only` | 看版本号会算成几(`v0.9.0` → `v0.9.1`) |
+| `make release-tag VERSION=v0.x.x` | 紧急/迁移场景:本地打个 tag 不 push 不 publish。**正常发版别用** |
+| `make release-publish VERSION=v0.x.x` | 对已有 tag 重传 binary(运维场景:之前 release 漏传 / 重新构建) |
 
-两边底层都是 `tag-and-release` → `release-publish`,产物字节级一致(只要 git commit 一致)。
+`scripts/release.sh patch/minor/major`(不带 `--print-only`)在本地直接调会被拒,看到 `❌ 仅供 GitLab CI 调用`。

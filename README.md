@@ -230,13 +230,9 @@ make desktop-dmg  # 把 .app 打成 .dmg 安装包:dist/TroubleshooterStudio-<ve
 make desktop      # 桌面裸二进制:bin/tshoot-desktop(开发者用,直接跑会关联 Terminal)
 make release      # 多平台交叉编译 darwin/linux × amd64/arm64 → dist/bin/
 make release-notes       # dry-run,只打印自上次 tag 以来的 changelog(给眼睛 review,不改 git)
-make release-tag VERSION=v0.1.x  # 仅打 annotated tag(annotation 自动 = changelog,不 push、不上传 binary)
-make release-publish     # 编 + 上传到现有 tag 的 GitLab Release(需 GITLAB_TOKEN env)
-make tag-and-release v=v0.1.x  # 一站式:打 tag → push → 编 → 上传 Release(防忘步骤;tag annotation 自动含 changelog)
-make bump-patch          # 自动 patch+1 触发 tag-and-release(v0.1.0 → v0.1.1)
-make bump-minor          # 自动 minor+1 触发 tag-and-release(v0.1.0 → v0.2.0)
-make bump-major          # 自动 major+1 触发 tag-and-release(v0.1.0 → v1.0.0)
-# ↑ 三个 bump-* 也可以走 GitLab CI/CD 触发(main 上 manual 按钮),配置见 docs/CI-RELEASE.md
+make release-publish     # 对已有 tag 重传 binary(需 GITLAB_TOKEN env;运维场景才用)
+# ↑ 真正的发版本走 GitLab CI manual button(main pipeline 点 release:patch/minor/major),
+#   本地一键发布(make bump-* / tag-and-release)已删,强制 release 都过 CI。详见 docs/CI-RELEASE.md
 make test         # go test -race -cover ./...
 make lint         # go vet + gofmt + vue-tsc
 make wails-gen    # 仅在改了 cmd/tshoot-desktop/App 的 method 签名时跑,刷新 web/wailsjs/go/(已入库)

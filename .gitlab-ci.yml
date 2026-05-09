@@ -171,14 +171,14 @@ desktop:
 release:patch:
   extends: .release-base
   script:
-    - make bump-patch
+    - scripts/release.sh patch
 
 release:minor:
   extends: .release-base
   script:
-    - make bump-minor
+    - scripts/release.sh minor
 
 release:major:
   extends: .release-base
   script:
-    - make bump-major
+    - scripts/release.sh major

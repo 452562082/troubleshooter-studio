@@ -147,7 +147,17 @@ func buildCodexAgentTOML(wsRoot string, ctx *Context, agentName string) (string,
 		TomlWriteString(&sb, "model", m)
 	}
 	TomlWriteString(&sb, "model_reasoning_effort", "high")
-	TomlWriteString(&sb, "sandbox_mode", "read-only")
+	// sandbox_mode = workspace-write 是必要选择 —— codex 的 read-only 模式**同时禁止网络访问**
+	// (含 MCP server 子进程),而本项目所有 MCP(grafana/nacos/jaeger/mongo/...)都需要外网到
+	// 业务侧。用 read-only 会导致 codex 平台所有 MCP 静默 ENOTFOUND,排障机器人完全跑不起来。
+	//
+	// 数据安全靠 MCP 层自己保:mongo/postgres/redis/mysql 都已传 --read-only 或等价 RO env,
+	// grafana/loki 走 --disable-* 屏蔽 admin/alerting/incident 等写操作,ES MCP 包默认 RO。
+	// workspace-write 只多给 agent 写工作区 fs 的能力(日志 dump / 临时文件常用),不能动系统。
+	//
+	// 仍需用户在 ~/.codex/config.toml 全局加 `[sandbox_workspace_write]\nnetwork_access = true`
+	// (codex 默认即使 workspace-write 也禁网)— install 时会打提示。
+	TomlWriteString(&sb, "sandbox_mode", "workspace-write")
 
 	// developer_instructions:三引号 multi-line,人格 + 路由 + 故障快报模板全装进去
 	instr := buildCodexDeveloperInstructions(wsRoot, ctx, agentName)
@@ -259,7 +269,7 @@ func buildCodexRootSkillMD(wsRoot string, ctx *Context, agentName string) (strin
 	fmt.Fprintf(&sb, "# %s 排障机器人(codex 调度入口)\n\n", ctx.System.Name)
 
 	sb.WriteString("## 运行环境\n\n")
-	sb.WriteString("- Bash 可用,跑 Python 脚本与 shell 命令(sandbox_mode=read-only,只能查不能改)\n")
+	sb.WriteString("- Bash 可用,跑 Python 脚本与 shell 命令(sandbox_mode=workspace-write,只动 cwd,不碰系统)\n")
 	sb.WriteString("- MCP server 已嵌入本 agent toml `[mcp_servers.*]` 段,spawn 时自动拉起,直接调对应 mcp_server\n")
 	fmt.Fprintf(&sb, "- skills 脚本用**绝对路径**:`python3 ~/.codex/skills/%s/<skill>/scripts/<file>.py ...`\n\n", agentName)
 

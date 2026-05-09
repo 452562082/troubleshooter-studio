@@ -125,7 +125,7 @@ export function generateYAML(ctx: YAMLGenContext): string {
   const lines: string[] = []
 
   // 顶部导言注释(解析时被忽略,只给用户看)
-  lines.push('# 由初始化向导生成，可手工调整。字段说明：schema/system.schema.yaml')
+  lines.push('# 由初始化向导生成，可手工调整。字段说明：schema/troubleshooter.schema.yaml')
   lines.push('# 以下行尾 # 注释仅为提示，YAML 解析时会被忽略。')
 
   // system

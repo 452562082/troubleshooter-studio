@@ -83,9 +83,23 @@ func requiredMCPKeys(cfg *config.SystemConfig, agentID string) []string {
 			out = append(out, withAgent("grafana-"+e.ID))
 		}
 	}
-	if cfg.Infrastructure.Observability.Loki.Enabled {
+	// Loki MCP 走 Grafana datasource proxy 实现,只启 Loki 不启 Grafana 时
+	// BuildMCPServers 不会注入 loki-<env>(避免发死 mcp);self-test 同步逻辑。
+	if cfg.Infrastructure.Observability.Loki.Enabled && cfg.Infrastructure.Observability.Grafana.Enabled {
 		for _, e := range cfg.Environments {
 			out = append(out, withAgent("loki-"+e.ID))
+		}
+	}
+	// jaeger / elk:2026-05 都从 curl 占位升级到真 MCP(uvx opentelemetry-mcp /
+	// npx @elastic/mcp-server-elasticsearch),openclaw injectMCPServers 必注册。
+	if cfg.Infrastructure.Observability.Jaeger.Enabled {
+		for _, e := range cfg.Environments {
+			out = append(out, withAgent("jaeger-"+e.ID))
+		}
+	}
+	if cfg.Infrastructure.Observability.ELK.Enabled {
+		for _, e := range cfg.Environments {
+			out = append(out, withAgent("elk-"+e.ID))
 		}
 	}
 	for _, m := range cfg.Infrastructure.Messaging {

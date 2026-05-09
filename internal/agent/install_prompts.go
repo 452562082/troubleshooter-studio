@@ -75,12 +75,15 @@ func DerivePrompts(cfg *config.SystemConfig) []deploy.Prompt {
 	}
 
 	// ── Grafana ──(系统级,不分 source;每个 env 独立凭证)
+	// 鉴权两路:API key(service account token,Grafana 9.1+ 推荐)/ basic auth。
+	// 都收 — BuildMCPServers 优先 API key,空则回 user/pass。用户填一种即可。
 	if cfg.Infrastructure.Observability.Grafana.Enabled {
 		for _, e := range envs {
 			up := strings.ToUpper(e.ID)
 			add("GRAFANA_URL_"+up, "Grafana URL ("+e.ID+") []: ", false)
-			add("GRAFANA_USER_"+up, "Grafana 用户名 ("+e.ID+") []: ", false)
-			add("GRAFANA_PASS_"+up, "Grafana 密码 ("+e.ID+") []: ", true)
+			add("GRAFANA_API_KEY_"+up, "Grafana API Key / Service Account Token ("+e.ID+") [留空=改用用户名密码]: ", true)
+			add("GRAFANA_USER_"+up, "Grafana 用户名 ("+e.ID+",API key 已填则可留空) []: ", false)
+			add("GRAFANA_PASS_"+up, "Grafana 密码 ("+e.ID+",API key 已填则可留空) []: ", true)
 		}
 	}
 

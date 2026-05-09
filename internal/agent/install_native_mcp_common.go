@@ -9,15 +9,18 @@
 // 区别用 MCPBuildOptions 控制:
 //   - PruneEmpty:IDE 要(避免 settings.json 里把 "" 喂给后端,触发"无效连接"重试风暴);
 //                openclaw 不要(保留全 schema 让 agent 自决)。
-//   - IncludeRawObsCurl:openclaw 额外写 jaeger / elk 的 curl 占位条目(无独立 MCP,只记 URL
-//                       让 agent 直查 ES API);IDE 不写(IDE 没"代理 curl 调 API"的运行时)。
+// 老的 IncludeRawObsCurl(原本控制 jaeger/elk 走 curl 占位)在两家分别迁到真 MCP 后
+// 就没人用了 — 2026-05 jaeger 走 uvx opentelemetry-mcp,2026-05 elk 走
+// @elastic/mcp-server-elasticsearch,两家 IDE / openclaw 都注册,选项已删。
 //
 // 命名:统一走 mcpKeyForAgent(agentID, prefix, sourceID, envID),单源走 "<prefix>-<env>",
 // 多源走 "<prefix>-<sourceID>-<env>",IDE 共享 settings 池下加 agentID 前缀防撞名。
 package agent
 
 import (
+	"fmt"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 
@@ -253,12 +256,6 @@ type MCPBuildOptions struct {
 	// PruneEmpty:env block 里 value=="" 的 entry 丢掉(IDE 走这条,避免 IDE 把字面 "" 当
 	// 真值传给后端进程造成无效连接);openclaw 留着等 agent 自决,所以 false。
 	PruneEmpty bool
-
-	// IncludeRawObsCurl:写入 elk 的 "curl 占位" 条目(elk 无独立 MCP,只记 URL 让 agent 通过
-	// curl/HTTP 直查 Kibana/ES)。openclaw 走这条;IDE 没"代理 curl 调 API"的运行时,所以不写。
-	// 注:jaeger 已在 2026-05 升级到 traceloop/opentelemetry-mcp(uvx),不再走 curl 占位,
-	// 4 家 target 都注册;本开关只剩 elk 还在用。
-	IncludeRawObsCurl bool
 }
 
 // BuildMCPServers 按 cfg.Infrastructure 派生 {server_key: spec} 扁平 map。
@@ -282,8 +279,18 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 		return opts.AgentID + "-" + name
 	}
 
-	// envBlock 处理 PruneEmpty:opts.PruneEmpty=true 时把 value=="" 的 entry 删掉。
+	// envBlock 处理两件事:
+	//  1. 默认注入 OTEL_SDK_DISABLED=true(防 elastic-otel-node / @sentry/node / Python OTel
+	//     等被 npm/pip 包透传依赖自动启用,启动时往 stdout 打 banner JSON 污染 stdio JSON-RPC
+	//     协议 → IDE 报"connection closed: initialize response"。已知 ES MCP 必踩,其它包
+	//     难穷举,默认全开防御 — 跨语言通用 OTel 规范变量,单纯关掉自动 telemetry,不影响
+	//     业务功能)。callsite 显式设了别的值会覆盖这个默认。
+	//  2. PruneEmpty=true 时把 value=="" 的 entry 删掉(IDE 走这条,避免字面 "" 喂给后端
+	//     进程触发"无效连接"重试风暴);openclaw 留全等 agent 自决。
 	envBlock := func(m map[string]any) map[string]any {
+		if _, has := m["OTEL_SDK_DISABLED"]; !has {
+			m["OTEL_SDK_DISABLED"] = "true"
+		}
 		if !opts.PruneEmpty {
 			return m
 		}
@@ -317,6 +324,25 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 	// command 写占位 sentinel,IDE install 时替换成 <root>/bin/mcp-grafana 绝对路径;
 	// 详见 ensure_mcp_grafana.go 顶部的"为什么不用 npx"说明。
 	grafanaBin := generator.CodexPlaceholderGrafanaBin
+	// grafanaAuthEnv 二选一:有 API key(service account token)优先,空则回落 basic auth。
+	// mcp-grafana 文档:GRAFANA_API_KEY 一旦设置,GRAFANA_USERNAME/PASSWORD 被忽略 — 但
+	// 我们这边主动只发其一,IDE/openclaw 配置文件更干净,debug 时不会看到两套凭据并排
+	// (尤其 PruneEmpty=false 的 openclaw 里两套都空时会留两组空字段制造误导)。
+	// Grafana 9.1+ 标记 API key legacy,10+ 推 service account token,wizard 给的两个
+	// auth_mode 都走这同一个 GRAFANA_API_KEY env(token 在 Grafana 端是统一鉴权头)。
+	grafanaAuthEnv := func(up string) map[string]any {
+		if k := get("GRAFANA_API_KEY_" + up); k != "" {
+			return map[string]any{
+				"GRAFANA_URL":     get("GRAFANA_URL_" + up),
+				"GRAFANA_API_KEY": k,
+			}
+		}
+		return map[string]any{
+			"GRAFANA_URL":      get("GRAFANA_URL_" + up),
+			"GRAFANA_USERNAME": get("GRAFANA_USER_" + up),
+			"GRAFANA_PASSWORD": get("GRAFANA_PASS_" + up),
+		}
+	}
 	if cfg.Infrastructure.Observability.Grafana.Enabled {
 		for _, e := range envs {
 			up := strings.ToUpper(e.ID)
@@ -326,30 +352,31 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 					"--disable-incident", "--disable-alerting", "--disable-oncall",
 					"--disable-admin", "--disable-sift", "--disable-pyroscope",
 				},
-				"env": envBlock(map[string]any{
-					"GRAFANA_URL":      get("GRAFANA_URL_" + up),
-					"GRAFANA_USERNAME": get("GRAFANA_USER_" + up),
-					"GRAFANA_PASSWORD": get("GRAFANA_PASS_" + up),
-				}),
+				"env": envBlock(grafanaAuthEnv(up)),
 			}
 		}
 	}
 
+	// Loki MCP 用同款 mcp-grafana 二进制 + 加几个 --disable-* 把它收成"只剩 Loki/Prom 查询"。
+	// 走 Grafana datasource proxy,不直连 Loki,所以前置:Grafana 必须也启用且填了 URL。
+	// 用户只启 Loki 不启 Grafana 时跳过 + 提示 — 否则会发一条"GRAFANA_URL=空"的死 mcp 进 IDE。
 	if cfg.Infrastructure.Observability.Loki.Enabled {
-		for _, e := range envs {
-			up := strings.ToUpper(e.ID)
-			servers[keyFor("loki", "", e.ID)] = map[string]any{
-				"command": grafanaBin,
-				"args": []any{
-					"--disable-search", "--disable-dashboard", "--disable-datasource",
-					"--disable-incident", "--disable-alerting", "--disable-oncall",
-					"--disable-admin", "--disable-sift", "--disable-pyroscope",
-				},
-				"env": envBlock(map[string]any{
-					"GRAFANA_URL":      get("GRAFANA_URL_" + up),
-					"GRAFANA_USERNAME": get("GRAFANA_USER_" + up),
-					"GRAFANA_PASSWORD": get("GRAFANA_PASS_" + up),
-				}),
+		if !cfg.Infrastructure.Observability.Grafana.Enabled {
+			fmt.Fprintln(os.Stderr,
+				"[warn] Loki MCP 走 Grafana datasource proxy 实现,需要 observability.grafana.enabled=true 且填 URL/凭据;"+
+					"当前 grafana 未启用,跳过 loki MCP 注入(skill/CLI 提示仍可用 LOKI_URL_<env>)")
+		} else {
+			for _, e := range envs {
+				up := strings.ToUpper(e.ID)
+				servers[keyFor("loki", "", e.ID)] = map[string]any{
+					"command": grafanaBin,
+					"args": []any{
+						"--disable-search", "--disable-dashboard", "--disable-datasource",
+						"--disable-incident", "--disable-alerting", "--disable-oncall",
+						"--disable-admin", "--disable-sift", "--disable-pyroscope",
+					},
+					"env": envBlock(grafanaAuthEnv(up)),
+				}
 			}
 		}
 	}
@@ -377,22 +404,27 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 		}
 	}
 
-	// elk 仍走 curl 占位(无成熟独立 mcp,Elastic 官方 mcp-server-elasticsearch 走 ES API 不接 Kibana)
-	if opts.IncludeRawObsCurl {
-		if cfg.Infrastructure.Observability.ELK.Enabled {
-			for _, e := range envs {
-				up := strings.ToUpper(e.ID)
-				servers[keyFor("elk", "", e.ID)] = map[string]any{
-					"command": "curl",
-					"args":    []any{},
-					"env": map[string]any{
-						"KIBANA_URL":  get("KIBANA_URL_" + up),
-						"ES_URL":      get("ELK_ES_URL_" + up),
-						"ES_USERNAME": get("ELK_USERNAME"),
-						"ES_PASSWORD": get("ELK_PASSWORD"),
-					},
-					"_note": "ELK 无独立 MCP；此条目仅记录 URL 供 agent 直查 ES API",
-				}
+	// elk 走 Elastic 官方 @elastic/mcp-server-elasticsearch(跟数据层 elasticsearch 同款,
+	// 区别只在 env vars 命名空间:ELK_* 防跟数据层 ES 字段串)。Kibana UI 由 agent 通过
+	// SKILL.md 拼 deeplink,不进 MCP env(本 MCP 只接 ES API)。
+	// OTEL_SDK_DISABLED=true 防 elastic-otel-node 自动注入往 stdout 打 banner JSON 污染
+	// stdio JSON-RPC(同数据层 ES 那条注释)。
+	if cfg.Infrastructure.Observability.ELK.Enabled {
+		for _, e := range envs {
+			up := strings.ToUpper(e.ID)
+			esURL := get("ELK_ES_URL_" + up)
+			if esURL == "" && opts.PruneEmpty {
+				continue // 没填 ES URL → 跳过(避免注册一条永远启动失败的 mcp)
+			}
+			servers[keyFor("elk", "", e.ID)] = map[string]any{
+				"command": "npx",
+				"args":    []any{"-y", "@elastic/mcp-server-elasticsearch"},
+				"env": envBlock(map[string]any{
+					"ES_URL":            esURL,
+					"ES_USERNAME":       get("ELK_USERNAME"),
+					"ES_PASSWORD":       get("ELK_PASSWORD"),
+					"OTEL_SDK_DISABLED": "true",
+				}),
 			}
 		}
 	}
@@ -403,12 +435,16 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 	// 这里读对应 env var,注册成预启动 mcp server,让 AI 能直接 tool_use 调而不用读 SKILL.md
 	// 跑 mongosh / psql 这种"AI 不一定会主动跑"的 CLI。
 	//
-	// 阶段 1 覆盖 6 家(分两路写法):
-	//   接整 URI 直接传入位置参数 / env:
-	//     - mongodb:        npx mcp-mongo-server <URI>       (位置参数)
-	//     - postgresql:     npx server-postgres <PG_URL>     (位置参数)
-	//     - elasticsearch:  npx mcp-server-elasticsearch     (env: ES_URL/USERNAME/PASSWORD)
-	//     - redis:          npx server-redis-mcp <URL>       (位置参数)
+	// 阶段 1 覆盖 6 家,全部凭据走 env(IDE settings.json / openclaw.json 可分享时
+	// args 不残留连接串):
+	//   接整 URI 的三家(mongodb/postgresql/redis)上游 npm 包只认位置参数 → 走
+	//   `tshoot mcp-launch <type>`,launcher 从 env 读凭据后 exec npx,跨平台一份逻辑
+	//   (sh -c 仅 unix,windows 走不通;tshoot 子命令同时覆盖):
+	//     - mongodb:        tshoot mcp-launch mongodb     (env: MONGODB_URI)
+	//     - postgresql:     tshoot mcp-launch postgresql  (env: POSTGRES_DSN)
+	//     - redis:          tshoot mcp-launch redis       (env: REDIS_URL)
+	//   原生 env 接收的:
+	//     - elasticsearch:  npx mcp-server-elasticsearch  (env: ES_URL/USERNAME/PASSWORD)
 	//   要拆字段(npm/pip 包不接整 URL,只接 host/port/user/pass):
 	//     - mysql:          parseMySQLDSN → MYSQL_HOST/PORT/USER/PASS/DB env
 	//     - clickhouse:     parseConnURL  → CLICKHOUSE_HOST/PORT/USER/PASSWORD/DATABASE env
@@ -463,14 +499,24 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 				// 解析,密码含 < ] ^ % @ : / ? # [ ] 等字面字符 → connection string parse error。
 				uri = normalizeMongoURI(uri)
 				servers[keyFor("mongodb", "", e.ID)] = map[string]any{
-					"command": "npx",
-					"args":    []any{"-y", "mcp-mongo-server", uri, "--read-only"},
+					"command": generator.PlaceholderTshootBin,
+					"args":    []any{"mcp-launch", "mongodb"},
+					"env": envBlock(map[string]any{
+						"MONGODB_URI": uri,
+					}),
 				}
 			case "postgresql":
 				// FIXME: @modelcontextprotocol/server-postgres 已于 2025-07 deprecated
 				// (官方维护者明确 archive,不再修)。功能仍在(READ ONLY transaction
-				// 包裹所有查询,readonly 默认),近期能跑 — 后续要迁到社区活跃 fork,
-				// 候选:@henkey/postgres-mcp-server 或 @ahmedmustahid/postgres-mcp-server。
+				// 包裹所有查询,readonly 默认),近期能跑。
+				//
+				// 迁移调研(2026-05):
+				//   - @henkey/postgres-mcp-server v1.0.5(env: POSTGRES_CONNECTION_STRING):**没有 read-only 模式**,
+				//     直接换会丢失原 RO transaction 包裹 → AI 可能误执行 DELETE/UPDATE。
+				//   - @ahmedmustahid/postgres-mcp-server:接 args 不接 env(走 launcher 还要 sh 转义),不优。
+				// 建议路径:用 henkey 包但在 PG 端建 readonly role,DSN 里只给该 role 的凭据 —
+				// 安全责任从 mcp 侧移到 PG 侧。yaml schema 要相应改"必填 readonly user"才能换。
+				// 暂保持现包(archived 但能跑)。
 				var epDSN string
 				if ep != nil {
 					epDSN = ep.DSN
@@ -480,8 +526,11 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 					continue
 				}
 				servers[keyFor("postgresql", "", e.ID)] = map[string]any{
-					"command": "npx",
-					"args":    []any{"-y", "@modelcontextprotocol/server-postgres", dsn},
+					"command": generator.PlaceholderTshootBin,
+					"args":    []any{"mcp-launch", "postgresql"},
+					"env": envBlock(map[string]any{
+						"POSTGRES_DSN": dsn,
+					}),
 				}
 			case "elasticsearch":
 				var epURL, epUser, epPass string
@@ -519,8 +568,11 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 					continue
 				}
 				servers[keyFor("redis", "", e.ID)] = map[string]any{
-					"command": "npx",
-					"args":    []any{"-y", "@gongrzhe/server-redis-mcp@1.0.0", redisURL},
+					"command": generator.PlaceholderTshootBin,
+					"args":    []any{"mcp-launch", "redis"},
+					"env": envBlock(map[string]any{
+						"REDIS_URL": redisURL,
+					}),
 				}
 			case "mysql":
 				// @benborla29/mcp-server-mysql 接 env(MYSQL_HOST/PORT/USER/PASS),

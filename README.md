@@ -251,7 +251,7 @@ internal/
   watcher/              文件系统轮询监听(给 tshoot watch)
 templates/              workspace/(机器人模板)
 examples/               troubleshooter.yaml 示例 × 多种架构 + fake-repos
-schema/system.schema.yaml
+schema/troubleshooter.schema.yaml
 ```
 
 ## 已知限制

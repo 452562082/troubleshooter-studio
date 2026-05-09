@@ -5,13 +5,17 @@
 //      污染 JSON-RPC 流,codex 握手解析第一帧不是合法 JSON 直接关 pipe → 表象是
 //      "MCP startup failed: handshaking with MCP server failed: connection closed: initialize response",
 //      次生 unhandled EPIPE 把整个 node 进程崩。
-//   2. codex subagent thread 默认 network=Restricted,sandbox 内 npx 拉包可能 ENOTFOUND/EPERM。
+//   2. codex subagent thread 默认 network=Restricted,sandbox 内 npx 启动时去 npm
+//      registry 拉包可能 ENOTFOUND/EPERM(注意:仅指 npm 拉包出网,不是后续访问 Grafana
+//      API 出网;后者 go/npm 一样受 sandbox 约束,需要在 codex agent toml 里给
+//      allowed_hosts 解开)。
 //   3. node + @modelcontextprotocol/sdk 老版 stdio.js 不 catch socket write 错误,任何 stdout 关闭都崩。
 //
-// Go 版官方 mcp-grafana(github.com/grafana/mcp-grafana)三个问题全绕开:
-//   - banner 写 stderr;stdout 严格 JSON-RPC
-//   - 无运行时拉包,装好就能跑(不依赖网络出站)
-//   - 单进程二进制无 SDK 链路 EPIPE 风险
+// Go 版官方 mcp-grafana(github.com/grafana/mcp-grafana)前两条都解决:
+//   - banner 写 stderr;stdout 严格 JSON-RPC(根治问题 1)
+//   - install 时一次性下好,启动时无 npm 出网(规避问题 2 的 npm 部分;Grafana API
+//     出网仍需 sandbox 放行)
+//   - 单进程二进制无 SDK 链路 EPIPE 风险(根治问题 3)
 //
 // 装载位置:<install_root>/bin/mcp-grafana(默认 ~/.codex/bin/mcp-grafana,跟 customRoot 联动)。
 package agent
@@ -34,8 +38,15 @@ import (
 const MCPGrafanaPinnedVersion = "v0.13.1"
 
 // mcpGrafanaBinPath 返回 <root>/bin/mcp-grafana 的绝对路径(install / uninstall 都用同一函数)。
+// Windows 上 release tarball 里二进制叫 mcp-grafana.exe,不带 .exe 落盘后 CreateProcess
+// 跑不起来 — 必须按 GOOS 拼对扩展名,且 IDE config 里 command 字段也得跟随(本函数返回值
+// 直接被 replaceGrafanaWithBinary 写到 mcpServers.command,扩展名一处生效全平台对齐)。
 func mcpGrafanaBinPath(root string) string {
-	return filepath.Join(root, "bin", "mcp-grafana")
+	name := "mcp-grafana"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	return filepath.Join(root, "bin", name)
 }
 
 // EnsureMCPGrafanaBinary 保证 <root>/bin/mcp-grafana 存在且可执行。
@@ -205,10 +216,16 @@ func MCPGrafanaInstallHint(root string) string {
 		MCPGrafanaPinnedVersion, platform, arch,
 	)
 	dst := mcpGrafanaBinPath(root)
+	tarMember := "mcp-grafana"
+	if runtime.GOOS == "windows" {
+		tarMember = "mcp-grafana.exe"
+	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "请手动装 mcp-grafana 二进制到 %s:\n", dst)
 	fmt.Fprintf(&sb, "  mkdir -p %s\n", filepath.Dir(dst))
-	fmt.Fprintf(&sb, "  curl -fsSL %s | tar -xz -C %s mcp-grafana\n", url, filepath.Dir(dst))
-	fmt.Fprintf(&sb, "  chmod +x %s\n", dst)
+	fmt.Fprintf(&sb, "  curl -fsSL %s | tar -xz -C %s %s\n", url, filepath.Dir(dst), tarMember)
+	if runtime.GOOS != "windows" {
+		fmt.Fprintf(&sb, "  chmod +x %s\n", dst)
+	}
 	return sb.String()
 }

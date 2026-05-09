@@ -113,9 +113,9 @@ func (s *Server) HandleDoctor(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, rep)
 }
 
-// HandleSchema GET /api/schema — 返回 system.schema.yaml 内容
+// HandleSchema GET /api/schema — 返回 troubleshooter.schema.yaml 内容
 func (s *Server) HandleSchema(w http.ResponseWriter, r *http.Request) {
-	schemaPath := filepath.Join(filepath.Dir(s.TemplateRoot), "schema", "system.schema.yaml")
+	schemaPath := filepath.Join(filepath.Dir(s.TemplateRoot), "schema", "troubleshooter.schema.yaml")
 	data, err := os.ReadFile(schemaPath)
 	if err != nil {
 		jsonError(w, http.StatusNotFound, "schema file not found: "+err.Error())

@@ -52,7 +52,7 @@ func (a *Answers) WriteYAML(out io.Writer) error {
 	buf := &strings.Builder{}
 	p := func(format string, args ...any) { fmt.Fprintf(buf, format, args...) }
 
-	p("# 由 tshoot init 生成，可手工调整。字段说明：schema/system.schema.yaml\n")
+	p("# 由 tshoot init 生成，可手工调整。字段说明：schema/troubleshooter.schema.yaml\n")
 	p("# 以下行尾 # 注释仅为提示，YAML 解析时会被忽略。\n")
 	p("system:\n")
 	p("  id: %s                    # 机器可读标识，仅 [a-z0-9-]；用作 output_dir / agent id 前缀\n", a.SystemID)

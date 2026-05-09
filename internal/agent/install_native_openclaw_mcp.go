@@ -1,12 +1,12 @@
 // install_native_openclaw_mcp.go —— openclaw 部署:把各类 MCP server 注入
 // ~/.openclaw/openclaw.json 的 mcp.servers map。
 //
-// 派生逻辑(nacos × env / grafana / loki / lark / feishu / jaeger / elk)收口在
+// 派生逻辑(nacos × env / grafana / loki / lark / feishu / jaeger / elk / 数据层)收口在
 // install_native_mcp_common.go::BuildMCPServers,跟 IDE 三家共用同一份。本文件只剩
 // "把 servers 写到 root["mcp"]["servers"]" 这层 openclaw.json 专属容器逻辑。
 //
-// 区别:openclaw 走 PruneEmpty=false(留全 schema 让 agent 自决) + IncludeRawObsCurl=true
-// (jaeger/elk 用 curl 占位条目,无独立 MCP);IDE 反过来。
+// 区别:openclaw 走 PruneEmpty=false(留全 schema 让 agent 自决);IDE 反过来。
+// 老的 IncludeRawObsCurl 在 jaeger / elk 都迁到真 MCP 后已删。
 
 package agent
 
@@ -31,9 +31,8 @@ func injectMCPServers(
 ) error {
 	// MCP server key 用短 prefix(system.id),跟 IDE 平台对齐 + 避免 tool 名超 60 字限制。
 	servers := BuildMCPServers(cfg, MCPBuildOptions{
-		AgentID:           cfg.MCPKeyPrefix(),
-		PruneEmpty:        false, // 留全 schema,agent 自决
-		IncludeRawObsCurl: true,  // jaeger / elk URL 占位条目
+		AgentID:    cfg.MCPKeyPrefix(),
+		PruneEmpty: false, // 留全 schema,agent 自决
 	}, get)
 
 	// 跟 MergeMCPIntoIDESettings 同款:grafana/loki 用 mcp-grafana 二进制,BuildMCPServers
@@ -49,6 +48,17 @@ func injectMCPServers(
 					"暂时回退到 npx -y @leval/mcp-grafana(已知 stdout 污染风险)。\n",
 				err, MCPGrafanaInstallHint(ocHome))
 			replaceGrafanaWithNpxFallback(servers)
+		}
+	}
+
+	// 跟 IDE 路径一致:mongodb/postgresql/redis 三家用 `tshoot mcp-launch <type>` 启动器,
+	// 这里把 __TSHOOT_BIN__ 占位替换为本进程绝对路径(避免 openclaw 启动 spawn 时依赖 PATH)。
+	replaceTshootPlaceholder(servers, resolveTshootBin())
+
+	// uvx 探测,跟 IDE 路径同款 — 缺 uv 时 nacos/jaeger/clickhouse 都启不来。
+	if CfgUsesUvx(cfg) {
+		if err := CheckUvxAvailable(); err != nil {
+			fmt.Fprintf(os.Stderr, "[warn] openclaw install:\n%v\n", err)
 		}
 	}
 

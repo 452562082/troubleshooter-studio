@@ -183,7 +183,7 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 	// 注意:其它 codex agent 可能也用同一个二进制(共享 ~/.codex/bin/),所以**只在没有
 	// 其它 agent 占用时**清。简化判断:其它 agents/*.toml 没有就清。
 	if t == TargetCodex {
-		grafanaBin := filepath.Join(root, "bin", "mcp-grafana")
+		grafanaBin := mcpGrafanaBinPath(root)
 		if _, err := os.Stat(grafanaBin); err == nil {
 			otherAgents, _ := filepath.Glob(filepath.Join(root, "agents", "*.toml"))
 			if len(otherAgents) == 0 {

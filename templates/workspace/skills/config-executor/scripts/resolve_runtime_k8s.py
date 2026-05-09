@@ -211,7 +211,7 @@ def main() -> int:
     except Exception as e:
         return error_out(
             f"{type(e).__name__}: {e}",
-            "脚本内部异常。请把命令行和完整错误反馈给 system.yaml 的维护者。",
+            "脚本内部异常。请把命令行和完整错误反馈给 troubleshooter.yaml 的维护者。",
         )
 
 

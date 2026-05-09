@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
+	"github.com/xiaolong/troubleshooter-studio/internal/generator"
 )
 
 func TestParseMySQLDSN(t *testing.T) {
@@ -122,19 +123,26 @@ func TestBuildMCPServers_DataStores(t *testing.T) {
 		}
 	}
 
-	// ── mongodb:位置参数接 URI + --read-only(URI 自动 normalize 补 authSource=admin) ──
-	if got := argString(servers["bot-mongodb-dev"]); got != "[-y mcp-mongo-server mongodb://u:p@m.local:27017/app?authSource=admin --read-only]" {
-		t.Errorf("mongodb args mismatch: %s", got)
-	}
-
-	// ── postgres:位置参数接 connection string(server-postgres 默认 readonly transaction)──
-	if got := argString(servers["bot-postgresql-dev"]); got != "[-y @modelcontextprotocol/server-postgres postgres://u:p@pg.local:5432/app]" {
-		t.Errorf("postgres args mismatch: %s", got)
-	}
-
-	// ── redis:钉死 1.0.0 + URL 位置参数(防 @latest 漂移)──
-	if got := argString(servers["bot-redis-dev"]); got != "[-y @gongrzhe/server-redis-mcp@1.0.0 redis://default:rpw@r.local:6379/0]" {
-		t.Errorf("redis args mismatch: %s", got)
+	// ── mongodb / postgresql / redis 三家走 tshoot mcp-launch 启动器 ──
+	// command 是 __TSHOOT_BIN__ 占位(install 时换成 os.Executable() 绝对路径);args 仅
+	// ["mcp-launch", "<type>"];凭据在 env 块,IDE 配置文件不残留连接串。
+	for _, c := range []struct {
+		key, kind, envKey, want string
+	}{
+		{"bot-mongodb-dev", "mongodb", "MONGODB_URI", "mongodb://u:p@m.local:27017/app?authSource=admin"},
+		{"bot-postgresql-dev", "postgresql", "POSTGRES_DSN", "postgres://u:p@pg.local:5432/app"},
+		{"bot-redis-dev", "redis", "REDIS_URL", "redis://default:rpw@r.local:6379/0"},
+	} {
+		spec := servers[c.key].(map[string]any)
+		if spec["command"] != generator.PlaceholderTshootBin {
+			t.Errorf("%s command 应为 __TSHOOT_BIN__ 占位,实际 %v", c.key, spec["command"])
+		}
+		if got := argString(spec); got != "[mcp-launch "+c.kind+"]" {
+			t.Errorf("%s args mismatch: %s", c.key, got)
+		}
+		if envOf(spec)[c.envKey] != c.want {
+			t.Errorf("%s env[%s] mismatch: got %q want %q", c.key, c.envKey, envOf(spec)[c.envKey], c.want)
+		}
 	}
 
 	// ── elasticsearch:env 段 ES_URL/USERNAME/PASSWORD + 必须禁 OTel(否则 stdout 污染) ──
@@ -187,6 +195,202 @@ func TestBuildMCPServers_DataStores_PruneEmpty(t *testing.T) {
 		if _, ok := servers[k]; ok {
 			t.Errorf("expected %q to be pruned (no creds), got registered", k)
 		}
+	}
+}
+
+// TestBuildMCPServers_OTelDisabledUniversal 验证所有有 env 段的 mcp server 都带
+// OTEL_SDK_DISABLED=true(防 npm/pip 包间接依赖 elastic-otel-node / @sentry/node /
+// Python OTel 自动注入往 stdout 打 banner 污染 JSON-RPC 协议)。这个回归是 envBlock
+// 默认注入实现的 —— 加 case 时漏写 envBlock 包裹会立刻露馅。
+func TestBuildMCPServers_OTelDisabledUniversal(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "dev"}},
+		Infrastructure: config.Infrastructure{
+			ConfigCenters: []config.ConfigCenter{{Type: "nacos", ID: "primary"}},
+			Observability: config.Observability{
+				Grafana: config.Grafana{Enabled: true},
+				Loki:    config.Loki{Enabled: true},
+				Jaeger:  config.Jaeger{Enabled: true},
+				ELK:     config.ELK{Enabled: true},
+			},
+			DataStores: []config.DataStore{
+				{Type: "mongodb", Enabled: true},
+				{Type: "postgresql", Enabled: true},
+				{Type: "redis", Enabled: true},
+				{Type: "elasticsearch", Enabled: true},
+				{Type: "mysql", Enabled: true},
+				{Type: "clickhouse", Enabled: true},
+			},
+			Messaging:       []config.Messaging{{Platform: "lark", Enabled: true}},
+			ProjectTracking: []config.ProjectTracking{{Platform: "feishu_project", Enabled: true}},
+		},
+	}
+	// 给所有家最少一个连接串,免得 PruneEmpty 把空字段连同 OTEL 一起剔(envBlock 先注入
+	// 再 prune,但整段空 map 在 PruneEmpty 下还是会留 OTEL 一项 — 那种边界对生产没意义,
+	// 测真实有连接串场景就够)。
+	creds := map[string]string{
+		"NACOS_ADDR_PRIMARY_DEV": "nacos:8848", "NACOS_USER_PRIMARY_DEV": "u", "NACOS_PASS_PRIMARY_DEV": "p",
+		"GRAFANA_URL_DEV": "http://g:3000", "GRAFANA_USER_DEV": "u", "GRAFANA_PASS_DEV": "p",
+		"JAEGER_URL_DEV":   "http://j:16686",
+		"ELK_ES_URL_DEV":   "http://es:9200",
+		"MONGODB_URI_DEV":  "mongodb://m/d",
+		"POSTGRES_DSN_DEV": "postgres://u:p@p/d",
+		"REDIS_URL_DEV":    "redis://r/0",
+		"ES_URL_DEV":       "http://e:9200",
+		"MYSQL_DSN_DEV":    "u:p@tcp(m:3306)/d",
+		"CLICKHOUSE_URL_DEV": "https://c:8443/d",
+		"LARK_APP_ID":      "app", "LARK_APP_SECRET": "sec",
+		"MCP_USER_TOKEN":   "tok",
+	}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true},
+		func(k string) string { return creds[k] })
+	if len(servers) == 0 {
+		t.Fatalf("expected servers,got empty")
+	}
+	for k, v := range servers {
+		spec := v.(map[string]any)
+		env, _ := spec["env"].(map[string]any)
+		if env == nil {
+			// 没 env 段的 spec 不需要 OTEL 防御 — 当前所有 case 都有 env,这条是未来 case
+			// 漏写 envBlock 时的兜底跳过(避免误报)。
+			continue
+		}
+		if env["OTEL_SDK_DISABLED"] != "true" {
+			t.Errorf("%s 缺 OTEL_SDK_DISABLED=true 防御(env=%v)", k, env)
+		}
+	}
+}
+
+// TestBuildMCPServers_GrafanaAuth 验证两套鉴权:
+//   - 填了 GRAFANA_API_KEY_<env> → 只发 GRAFANA_API_KEY,USER/PASS 不进 env(避免双套凭据并排误导)
+//   - 没填 API key → 回落 USER/PASS basic auth
+//
+// 这里曾是个静默 bug:wizard 给 auth_mode=api_key 选项收 GRAFANA_API_KEY_<env>,
+// 但 BuildMCPServers 只读 USER/PASS,导致 API key 模式部署后 mcp 401。
+func TestBuildMCPServers_GrafanaAuth(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "dev"}, {ID: "prod"}},
+		Infrastructure: config.Infrastructure{
+			Observability: config.Observability{
+				Grafana: config.Grafana{Enabled: true},
+			},
+		},
+	}
+	creds := map[string]string{
+		"GRAFANA_URL_DEV":     "http://g-dev:3000",
+		"GRAFANA_API_KEY_DEV": "glsa_xxx",
+		// dev 给 token + user/pass(看 token 是否吃掉 user/pass)
+		"GRAFANA_USER_DEV": "ignored",
+		"GRAFANA_PASS_DEV": "ignored",
+		// prod 只给 user/pass(回落 basic auth)
+		"GRAFANA_URL_PROD":  "http://g-prod:3000",
+		"GRAFANA_USER_PROD": "admin",
+		"GRAFANA_PASS_PROD": "p",
+	}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true},
+		func(k string) string { return creds[k] })
+
+	devEnv := envOf(servers["grafana-dev"])
+	if devEnv["GRAFANA_API_KEY"] != "glsa_xxx" {
+		t.Errorf("dev 应只发 API key,got env=%v", devEnv)
+	}
+	if _, has := devEnv["GRAFANA_USERNAME"]; has {
+		t.Errorf("dev 有 API key 时不该再发 GRAFANA_USERNAME(避免双套凭据并排), got env=%v", devEnv)
+	}
+
+	prodEnv := envOf(servers["grafana-prod"])
+	if _, has := prodEnv["GRAFANA_API_KEY"]; has {
+		t.Errorf("prod 没填 API key 时不该出现 GRAFANA_API_KEY(空值会被 prune,但回落路径不该写 key), got env=%v", prodEnv)
+	}
+	if prodEnv["GRAFANA_USERNAME"] != "admin" || prodEnv["GRAFANA_PASSWORD"] != "p" {
+		t.Errorf("prod 应回落 basic auth,got env=%v", prodEnv)
+	}
+}
+
+// TestBuildMCPServers_LokiNeedsGrafana 验证 Loki MCP 走 Grafana datasource proxy 实现,
+// 只启 Loki 不启 Grafana 时不注入 loki MCP(避免发死 mcp 进 IDE)。
+func TestBuildMCPServers_LokiNeedsGrafana(t *testing.T) {
+	// 只启 Loki:跳过(不写 loki-<env>)
+	cfgLokiOnly := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "dev"}},
+		Infrastructure: config.Infrastructure{
+			Observability: config.Observability{
+				Loki: config.Loki{Enabled: true},
+			},
+		},
+	}
+	servers := BuildMCPServers(cfgLokiOnly, MCPBuildOptions{PruneEmpty: true},
+		func(_ string) string { return "" })
+	if _, ok := servers["loki-dev"]; ok {
+		t.Errorf("Loki 启用但 Grafana 未启用时不该注入 loki MCP(走 Grafana proxy,前置依赖),got keys=%v", keysOf(servers))
+	}
+
+	// Loki + Grafana 双启:正常注入
+	cfgBoth := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "dev"}},
+		Infrastructure: config.Infrastructure{
+			Observability: config.Observability{
+				Grafana: config.Grafana{Enabled: true},
+				Loki:    config.Loki{Enabled: true},
+			},
+		},
+	}
+	creds := map[string]string{"GRAFANA_URL_DEV": "http://g:3000", "GRAFANA_USER_DEV": "u", "GRAFANA_PASS_DEV": "p"}
+	servers2 := BuildMCPServers(cfgBoth, MCPBuildOptions{PruneEmpty: true},
+		func(k string) string { return creds[k] })
+	if _, ok := servers2["loki-dev"]; !ok {
+		t.Errorf("Loki + Grafana 双启时应注入 loki-dev MCP, got keys=%v", keysOf(servers2))
+	}
+}
+
+// TestBuildMCPServers_ELK 验证 elk 走 npx @elastic/mcp-server-elasticsearch(2026-05 升级)
+// 而不是老的 curl 占位。所有 target 都该注册(以前只 openclaw 走 curl 占位,IDE 完全没)。
+// 共享凭据 ELK_USERNAME / ELK_PASSWORD(不带 env 后缀,所有 env 共用)。
+func TestBuildMCPServers_ELK(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "dev"}, {ID: "prod"}},
+		Infrastructure: config.Infrastructure{
+			Observability: config.Observability{
+				ELK: config.ELK{Enabled: true},
+			},
+		},
+	}
+	creds := map[string]string{
+		"ELK_ES_URL_DEV":  "http://es-dev:9200",
+		"ELK_ES_URL_PROD": "https://es-prod:9200",
+		"ELK_USERNAME":    "elastic",
+		"ELK_PASSWORD":    "espw",
+	}
+	get := func(k string) string { return creds[k] }
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, get)
+	for _, k := range []string{"elk-dev", "elk-prod"} {
+		spec, ok := servers[k].(map[string]any)
+		if !ok {
+			t.Fatalf("expected %q registered, got keys: %v", k, keysOf(servers))
+		}
+		if spec["command"] != "npx" {
+			t.Errorf("%s expected command=npx, got %v", k, spec["command"])
+		}
+		args := spec["args"].([]any)
+		if len(args) != 2 || args[0] != "-y" || args[1] != "@elastic/mcp-server-elasticsearch" {
+			t.Errorf("%s expected args=[-y @elastic/mcp-server-elasticsearch], got %v", k, args)
+		}
+		env := envOf(spec)
+		if env["ES_USERNAME"] != "elastic" || env["ES_PASSWORD"] != "espw" {
+			t.Errorf("%s elk shared creds 未透传: %v", k, env)
+		}
+		if env["OTEL_SDK_DISABLED"] != "true" {
+			t.Errorf("%s 必须禁 OTel 防 stdout 污染 mcp 协议", k)
+		}
+	}
+	if envOf(servers["elk-dev"])["ES_URL"] != "http://es-dev:9200" {
+		t.Errorf("elk-dev ES_URL 未透传")
+	}
+
+	// PruneEmpty=true 没填 ES URL → 不注册(避免启动一条永远连不通的 mcp)
+	servers2 := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(k string) string { return "" })
+	if _, ok := servers2["elk-dev"]; ok {
+		t.Errorf("expected elk-dev pruned when ELK_ES_URL_DEV missing under PruneEmpty=true")
 	}
 }
 
@@ -332,9 +536,9 @@ func TestBuildMCPServers_DataStores_CredsOverridesEndpoints(t *testing.T) {
 	creds := map[string]string{"MONGODB_URI_DEV": "mongodb://NEW@host/db"}
 	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true},
 		func(k string) string { return creds[k] })
-	got := argString(servers["mongodb-dev"])
+	got := envOf(servers["mongodb-dev"])["MONGODB_URI"]
 	if !strings.Contains(got, "mongodb://NEW@host/db") || strings.Contains(got, "OLD") {
-		t.Errorf("expected creds override endpoints, got args: %s", got)
+		t.Errorf("expected creds override endpoints, got MONGODB_URI: %s", got)
 	}
 }
 

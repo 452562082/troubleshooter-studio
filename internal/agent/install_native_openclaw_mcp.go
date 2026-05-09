@@ -51,10 +51,6 @@ func injectMCPServers(
 		}
 	}
 
-	// 跟 IDE 路径一致:mongodb/postgresql/redis 三家用 `tshoot mcp-launch <type>` 启动器,
-	// 这里把 __TSHOOT_BIN__ 占位替换为本进程绝对路径(避免 openclaw 启动 spawn 时依赖 PATH)。
-	replaceTshootPlaceholder(servers, resolveTshootBin())
-
 	// uvx 探测,跟 IDE 路径同款 — 缺 uv 时 nacos/jaeger/clickhouse 都启不来。
 	if CfgUsesUvx(cfg) {
 		if err := CheckUvxAvailable(); err != nil {

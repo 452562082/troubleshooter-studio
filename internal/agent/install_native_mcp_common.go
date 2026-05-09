@@ -435,19 +435,21 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 	// 这里读对应 env var,注册成预启动 mcp server,让 AI 能直接 tool_use 调而不用读 SKILL.md
 	// 跑 mongosh / psql 这种"AI 不一定会主动跑"的 CLI。
 	//
-	// 阶段 1 覆盖 6 家,全部凭据走 env(IDE settings.json / openclaw.json 可分享时
-	// args 不残留连接串):
-	//   接整 URI 的三家(mongodb/postgresql/redis)上游 npm 包只认位置参数 → 走
-	//   `tshoot mcp-launch <type>`,launcher 从 env 读凭据后 exec npx,跨平台一份逻辑
-	//   (sh -c 仅 unix,windows 走不通;tshoot 子命令同时覆盖):
-	//     - mongodb:        tshoot mcp-launch mongodb     (env: MONGODB_URI)
-	//     - postgresql:     tshoot mcp-launch postgresql  (env: POSTGRES_DSN)
-	//     - redis:          tshoot mcp-launch redis       (env: REDIS_URL)
-	//   原生 env 接收的:
-	//     - elasticsearch:  npx mcp-server-elasticsearch  (env: ES_URL/USERNAME/PASSWORD)
+	// 阶段 1 覆盖 6 家:
+	//   接整 URI:
+	//     - mongodb:        npx mcp-mongo-server --read-only           (env: MCP_MONGODB_URI)
+	//     - postgresql:     npx server-postgres <DSN>                  (位置参数,包不接 env)
+	//     - redis:          npx server-redis-mcp <URL>                 (位置参数,包不接 env)
+	//     - elasticsearch:  npx mcp-server-elasticsearch               (env: ES_URL/USERNAME/PASSWORD)
 	//   要拆字段(npm/pip 包不接整 URL,只接 host/port/user/pass):
 	//     - mysql:          parseMySQLDSN → MYSQL_HOST/PORT/USER/PASS/DB env
 	//     - clickhouse:     parseConnURL  → CLICKHOUSE_HOST/PORT/USER/PASSWORD/DATABASE env
+	//
+	// 历史:本会话曾尝试给 pg/redis(只接位置参数)套一层 `tshoot mcp-launch` launcher
+	// 把凭据藏 env 里,但 desktop 二进制被 install 选作 launcher 路径时会让 Claude 启动
+	// MCP 时打开一堆 wails 窗口("启动一堆工作台"),且 launcher 多一层 fork 没解决根本问题
+	// (上游包不接 env)。改回直接传位置参数 — pg/redis 凭据落 IDE config args 字段是已知
+	// trade-off,直到上游包支持 env 或换包(@henkey/postgres-mcp-server 等)再迁。
 	//
 	// 阶段 2 待做(无成熟 npm mcp,要自己写 binary):
 	//   - kafka / rabbitmq / rocketmq
@@ -498,11 +500,13 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 				// 修密码段未 URL-encode 的保留字符 — mcp-mongo-server 严格按 RFC3986
 				// 解析,密码含 < ] ^ % @ : / ? # [ ] 等字面字符 → connection string parse error。
 				uri = normalizeMongoURI(uri)
+				// mcp-mongo-server v2+ 支持 MCP_MONGODB_URI env(2.x 起);凭据走 env IDE
+				// config args 字段不残留。
 				servers[keyFor("mongodb", "", e.ID)] = map[string]any{
-					"command": generator.PlaceholderTshootBin,
-					"args":    []any{"mcp-launch", "mongodb"},
+					"command": "npx",
+					"args":    []any{"-y", "mcp-mongo-server", "--read-only"},
 					"env": envBlock(map[string]any{
-						"MONGODB_URI": uri,
+						"MCP_MONGODB_URI": uri,
 					}),
 				}
 			case "postgresql":
@@ -525,12 +529,12 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 				if dsn == "" && opts.PruneEmpty {
 					continue
 				}
+				// 上游包只接位置参数,凭据落 args(可在 ~/.claude.json 里看到)— 已知 trade-off。
+				// envBlock(空 map) 仍然会被注入 OTEL_SDK_DISABLED=true 防 stdout 污染。
 				servers[keyFor("postgresql", "", e.ID)] = map[string]any{
-					"command": generator.PlaceholderTshootBin,
-					"args":    []any{"mcp-launch", "postgresql"},
-					"env": envBlock(map[string]any{
-						"POSTGRES_DSN": dsn,
-					}),
+					"command": "npx",
+					"args":    []any{"-y", "@modelcontextprotocol/server-postgres", dsn},
+					"env":     envBlock(map[string]any{}),
 				}
 			case "elasticsearch":
 				var epURL, epUser, epPass string
@@ -567,12 +571,11 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 				if redisURL == "" && opts.PruneEmpty {
 					continue
 				}
+				// 同 pg:上游 v1.0.0 只接位置参数,凭据落 args。
 				servers[keyFor("redis", "", e.ID)] = map[string]any{
-					"command": generator.PlaceholderTshootBin,
-					"args":    []any{"mcp-launch", "redis"},
-					"env": envBlock(map[string]any{
-						"REDIS_URL": redisURL,
-					}),
+					"command": "npx",
+					"args":    []any{"-y", "@gongrzhe/server-redis-mcp@1.0.0", redisURL},
+					"env":     envBlock(map[string]any{}),
 				}
 			case "mysql":
 				// @benborla29/mcp-server-mysql 接 env(MYSQL_HOST/PORT/USER/PASS),

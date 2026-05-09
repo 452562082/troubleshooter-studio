@@ -20,11 +20,6 @@ const (
 	// CodexPlaceholderGrafanaBin 是 BuildMCPServers 给 grafana/loki 段写的 command 占位;
 	// install 探测/下载二进制后替换为 <root>/bin/mcp-grafana 绝对路径。
 	CodexPlaceholderGrafanaBin = "__GRAFANA_MCP_BIN__"
-	// PlaceholderTshootBin 是 BuildMCPServers 给 mongodb/postgresql/redis 段写的 command 占位,
-	// 这三家上游 npm 包只接位置参数,凭据落 args 里污染 IDE 配置文件 — 改走
-	// `tshoot mcp-launch <type>`(env 注入凭据)。install 替换成 os.Executable() 绝对路径,
-	// 避免依赖 $PATH(用户多版本 / GOPATH/bin 不在 PATH 时也稳)。
-	PlaceholderTshootBin = "__TSHOOT_BIN__"
 )
 
 // codex_toml.go —— 给 codex agent toml 写值用的最小 TOML helper。

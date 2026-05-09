@@ -97,10 +97,6 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 		}
 	}
 
-	// mongodb/postgresql/redis 三家走 `tshoot mcp-launch <type>`(从 env 读凭据,跨平台
-	// 一份)— 这里把 __TSHOOT_BIN__ 占位换成本进程绝对路径,避免依赖 IDE 的 PATH。
-	replaceTshootPlaceholder(servers, resolveTshootBin())
-
 	// nacos / jaeger / clickhouse 三家走 uvx 启动,缺 uv 整批挂 — 装机前探一下,缺失打提示。
 	// 不阻塞:其它 MCP 还能用,完全 abort 装机损失更大。
 	if CfgUsesUvx(cfg) {
@@ -455,38 +451,3 @@ func eachGrafanaPlaceholder(servers map[string]any) []map[string]any {
 	return out
 }
 
-// replaceTshootPlaceholder 把 BuildMCPServers 给 mongodb/postgresql/redis 写的
-// __TSHOOT_BIN__ 占位换成 tshootBin 绝对路径(install 时 os.Executable() 拿到本进程路径)。
-// 漏替换 → IDE 启动 mcp 时 spawn __TSHOOT_BIN__ ENOENT。
-//
-// 没传 tshootBin(取 os.Executable 失败)时会写明文 "tshoot" 让 IDE 走 PATH 查找 —
-// 用户 `go install` 装的 tshoot 一般在 GOPATH/bin 里,通常 PATH 里有,作为 fallback
-// 比 ENOENT 失败强(IDE 报错信息里能看到"command not found: tshoot",指向明确)。
-func replaceTshootPlaceholder(servers map[string]any, tshootBin string) {
-	if tshootBin == "" {
-		tshootBin = "tshoot"
-	}
-	for _, v := range servers {
-		spec, _ := v.(map[string]any)
-		if spec == nil {
-			continue
-		}
-		if cmd, _ := spec["command"].(string); cmd == generator.PlaceholderTshootBin {
-			spec["command"] = tshootBin
-		}
-	}
-}
-
-// resolveTshootBin 拿当前 tshoot 进程的绝对路径(给 replaceTshootPlaceholder 用)。
-// os.Executable 可能返回 symlink — 走 EvalSymlinks 拿真实路径,避免 brew / asdf
-// 切版本时 IDE settings 还指向旧 symlink。失败返回 "" 让 fallback 走 PATH 查找。
-func resolveTshootBin() string {
-	exe, err := os.Executable()
-	if err != nil {
-		return ""
-	}
-	if real, err := filepath.EvalSymlinks(exe); err == nil {
-		return real
-	}
-	return exe
-}

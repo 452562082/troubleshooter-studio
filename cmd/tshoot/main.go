@@ -107,13 +107,6 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
-	case "mcp-launch":
-		// 内部子命令:IDE / openclaw 的 mcpServers 条目里走它启动 mongodb/postgresql/redis
-		// MCP server,从 env 读凭据后 exec npx。usage 不展示给最终用户。
-		if err := runMCPLaunch(os.Args[2:]); err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			os.Exit(1)
-		}
 	case "-h", "--help", "help":
 		usage()
 	default:

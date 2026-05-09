@@ -14,7 +14,6 @@ import (
 	"testing"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
-	"github.com/xiaolong/troubleshooter-studio/internal/generator"
 )
 
 func TestParseMySQLDSN(t *testing.T) {
@@ -123,26 +122,29 @@ func TestBuildMCPServers_DataStores(t *testing.T) {
 		}
 	}
 
-	// ── mongodb / postgresql / redis 三家走 tshoot mcp-launch 启动器 ──
-	// command 是 __TSHOOT_BIN__ 占位(install 时换成 os.Executable() 绝对路径);args 仅
-	// ["mcp-launch", "<type>"];凭据在 env 块,IDE 配置文件不残留连接串。
-	for _, c := range []struct {
-		key, kind, envKey, want string
-	}{
-		{"bot-mongodb-dev", "mongodb", "MONGODB_URI", "mongodb://u:p@m.local:27017/app?authSource=admin"},
-		{"bot-postgresql-dev", "postgresql", "POSTGRES_DSN", "postgres://u:p@pg.local:5432/app"},
-		{"bot-redis-dev", "redis", "REDIS_URL", "redis://default:rpw@r.local:6379/0"},
-	} {
-		spec := servers[c.key].(map[string]any)
-		if spec["command"] != generator.PlaceholderTshootBin {
-			t.Errorf("%s command 应为 __TSHOOT_BIN__ 占位,实际 %v", c.key, spec["command"])
-		}
-		if got := argString(spec); got != "[mcp-launch "+c.kind+"]" {
-			t.Errorf("%s args mismatch: %s", c.key, got)
-		}
-		if envOf(spec)[c.envKey] != c.want {
-			t.Errorf("%s env[%s] mismatch: got %q want %q", c.key, c.envKey, envOf(spec)[c.envKey], c.want)
-		}
+	// ── mongodb:走 npx mcp-mongo-server,凭据用 MCP_MONGODB_URI env(v2+ 支持) ──
+	// 自动 normalize URI 补 authSource=admin。
+	mongoSpec := servers["bot-mongodb-dev"].(map[string]any)
+	if mongoSpec["command"] != "npx" {
+		t.Errorf("mongodb command 应为 npx,实际 %v", mongoSpec["command"])
+	}
+	if got := argString(mongoSpec); got != "[-y mcp-mongo-server --read-only]" {
+		t.Errorf("mongodb args mismatch: %s", got)
+	}
+	if envOf(mongoSpec)["MCP_MONGODB_URI"] != "mongodb://u:p@m.local:27017/app?authSource=admin" {
+		t.Errorf("mongodb MCP_MONGODB_URI env mismatch: %v", envOf(mongoSpec))
+	}
+
+	// ── postgres:位置参数接 connection string(server-postgres 默认 readonly transaction)──
+	// 上游包不接 env,凭据落 args(已知 trade-off,见 BuildMCPServers 注释)。
+	if got := argString(servers["bot-postgresql-dev"]); got != "[-y @modelcontextprotocol/server-postgres postgres://u:p@pg.local:5432/app]" {
+		t.Errorf("postgres args mismatch: %s", got)
+	}
+
+	// ── redis:钉死 1.0.0 + URL 位置参数(防 @latest 漂移)──
+	// 上游包不接 env,凭据落 args。
+	if got := argString(servers["bot-redis-dev"]); got != "[-y @gongrzhe/server-redis-mcp@1.0.0 redis://default:rpw@r.local:6379/0]" {
+		t.Errorf("redis args mismatch: %s", got)
 	}
 
 	// ── elasticsearch:env 段 ES_URL/USERNAME/PASSWORD + 必须禁 OTel(否则 stdout 污染) ──
@@ -536,9 +538,9 @@ func TestBuildMCPServers_DataStores_CredsOverridesEndpoints(t *testing.T) {
 	creds := map[string]string{"MONGODB_URI_DEV": "mongodb://NEW@host/db"}
 	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true},
 		func(k string) string { return creds[k] })
-	got := envOf(servers["mongodb-dev"])["MONGODB_URI"]
+	got := envOf(servers["mongodb-dev"])["MCP_MONGODB_URI"]
 	if !strings.Contains(got, "mongodb://NEW@host/db") || strings.Contains(got, "OLD") {
-		t.Errorf("expected creds override endpoints, got MONGODB_URI: %s", got)
+		t.Errorf("expected creds override endpoints, got MCP_MONGODB_URI: %s", got)
 	}
 }
 

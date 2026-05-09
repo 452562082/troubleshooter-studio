@@ -33,7 +33,6 @@ import (
 
 	tshoot "github.com/xiaolong/troubleshooter-studio"
 	"github.com/xiaolong/troubleshooter-studio/api"
-	"github.com/xiaolong/troubleshooter-studio/internal/mcplaunch"
 	"github.com/xiaolong/troubleshooter-studio/internal/webui"
 )
 
@@ -69,19 +68,6 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func main() {
-	// 早识别 mcp-launch argv:install 时如果 resolveTshootBin() 拿到 desktop 二进制路径
-	// 写进 ~/.claude.json,Claude Code 启动 MCP 会用本 binary 当 launcher 拉起来 — 没这层
-	// 早返回会进 wails.Run 开窗口,每个 mongodb/postgresql/redis MCP 实例都开一个工作台,
-	// 一堆 wails 窗口蹦出来。识别到就调 mcplaunch.Run 直接 exec npx,wails 永远不启动。
-	// 共享逻辑在 internal/mcplaunch,跟 cmd/tshoot 同款。
-	if mcplaunch.IsLaunchCommand(os.Args) {
-		if err := mcplaunch.Run(os.Args[2:]); err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			os.Exit(1)
-		}
-		return
-	}
-
 	tr := resolveTemplateDir()
 	srv := &api.Server{TemplateRoot: tr}
 	router := api.NewRouter(srv, webui.Distribution())

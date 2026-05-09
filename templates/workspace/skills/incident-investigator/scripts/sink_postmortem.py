@@ -39,17 +39,33 @@ from pathlib import Path
 
 
 def _detect_known_errors_path(workspace_root: Path) -> Path:
-    """workspace_root/skills/routing/references/known-errors.yaml"""
-    p = workspace_root / 'skills' / 'routing' / 'references' / 'known-errors.yaml'
-    if not p.exists():
-        # fallback:从脚本自身位置反推 workspace 根
-        # 脚本在 skills/incident-investigator/scripts/sink_postmortem.py
-        # ../../../routing/references/known-errors.yaml
-        guess = Path(__file__).resolve().parent.parent.parent / 'routing' / 'references' / 'known-errors.yaml'
-        if guess.exists():
-            return guess
-        raise FileNotFoundError(f'known-errors.yaml not found at {p} or {guess}')
-    return p
+    """workspace_root/skills/routing/references/known-errors.local.yaml(沉淀目标)。
+
+    沉淀**不**写到 known-errors.yaml(模板内置,跟着 tshoot apply/upgrade 重新生成会被覆盖
+    清空所有沉淀)。改写到同目录的 .local.yaml — apply_helpers.looksLikeFactoryArtifact
+    用 ".local.yaml" 后缀作为"用户私有,不是模板派生"的信号,apply 时不会被当孤儿删掉。
+
+    文件不存在时:首次 sink 自动创建,带头部说明。"""
+    refs_dir = workspace_root / 'skills' / 'routing' / 'references'
+    if not refs_dir.exists():
+        # fallback:从脚本自身位置反推 workspace 根(脚本在
+        # skills/incident-investigator/scripts/sink_postmortem.py)
+        refs_dir = Path(__file__).resolve().parent.parent.parent / 'routing' / 'references'
+    if not refs_dir.exists():
+        raise FileNotFoundError(f'routing/references 目录找不到: {refs_dir}')
+    return refs_dir / 'known-errors.local.yaml'
+
+
+_LOCAL_YAML_HEADER = """# known-errors.local.yaml —— 用户私有沉淀,排障完后 sink_postmortem.py 自动追加。
+#
+# 跟模板内置的 known-errors.yaml 平级:Step 1.3 grep 两份,sink 仅写本文件。
+# 文件名 *.local.yaml 后缀让 tshoot apply/upgrade 识别为"用户写入,不删"。
+# 手工编辑也行,记得保持 errors: 列表结构 + 跟 known-errors.yaml 同款字段。
+#
+# 删条目:直接删对应 - pattern: 段(下次 sink 同 pattern 会重新追加)。
+
+errors:
+"""
 
 
 def _has_pattern(yaml_text: str, pattern: str) -> bool:
@@ -182,7 +198,13 @@ def main() -> None:
         print(f'[error] {e}', file=sys.stderr)
         sys.exit(3)
 
-    yaml_text = ke_path.read_text(encoding='utf-8')
+    # 文件不存在时(首次 sink)创建带 header 的空 yaml
+    if not ke_path.exists():
+        if not args.dry_run:
+            ke_path.write_text(_LOCAL_YAML_HEADER, encoding='utf-8')
+        yaml_text = _LOCAL_YAML_HEADER
+    else:
+        yaml_text = ke_path.read_text(encoding='utf-8')
 
     # 去重
     if _has_pattern(yaml_text, entry['pattern']):

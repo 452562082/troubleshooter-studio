@@ -63,7 +63,15 @@ func inList(xs []string, x string) bool {
 
 // looksLikeFactoryArtifact 判断 workspace 下某个文件是 tshoot 一开始生成的(可以 remove)
 // 还是用户手工放的(不要乱动)。按 target 区分管辖面:不同 target 产物结构不一样。
+//
+// 例外约定 — `*.local.yaml` 后缀:用户/机器人自己写入的私有沉淀,不是模板派生。
+// 当前唯一用例是 sink_postmortem.py 写 known-errors.local.yaml(排障经验沉淀),
+// 但约定通用 — 未来加新"用户私有"产物只要遵守 .local.yaml 命名就自动免删。
+// 这层例外**先于** common skills/ 前缀检查,因为沉淀文件就在 skills/routing/references/ 下。
 func looksLikeFactoryArtifact(rel, target string) bool {
+	if strings.HasSuffix(rel, ".local.yaml") {
+		return false
+	}
 	common := []string{"skills/", "scripts/"}
 	var prefixes []string
 	switch target {

@@ -62,3 +62,8 @@
 ## 6) 结论质量确认
 - [ ] 结论可复现、可验证
 - [ ] 已区分"现象 / 根因 / 建议动作"
+
+## 7) 沉淀(`confidence=high` 必跑,见 `incident-investigator/SKILL.md` Step 7)
+- [ ] 故障快报最后段已含沉淀草稿 JSON(`pattern` + `typical_cause` + `next_actions`)
+- [ ] 已**实际执行** `python3 scripts/sink_postmortem.py --input ...`(不是只描述要做)
+- [ ] sink 脚本退出码 0(stderr 显示 `[ok]` 或 `[skip] 已存在`,任一都算完成)

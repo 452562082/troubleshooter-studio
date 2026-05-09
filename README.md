@@ -236,6 +236,7 @@ make tag-and-release v=v0.1.x  # 一站式:打 tag → push → 编 → 上传 R
 make bump-patch          # 自动 patch+1 触发 tag-and-release(v0.1.0 → v0.1.1)
 make bump-minor          # 自动 minor+1 触发 tag-and-release(v0.1.0 → v0.2.0)
 make bump-major          # 自动 major+1 触发 tag-and-release(v0.1.0 → v1.0.0)
+# ↑ 三个 bump-* 也可以走 GitLab CI/CD 触发(main 上 manual 按钮),配置见 docs/CI-RELEASE.md
 make test         # go test -race -cover ./...
 make lint         # go vet + gofmt + vue-tsc
 make wails-gen    # 仅在改了 cmd/tshoot-desktop/App 的 method 签名时跑,刷新 web/wailsjs/go/(已入库)

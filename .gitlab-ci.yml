@@ -1,16 +1,24 @@
 # GitLab CI 等价于 .github/workflows/ci.yml,主要 gitlab 实例跑这份。
-# 三个 job:
-#   go      — go vet / fmt / mod tidy / test -race -cover         (Docker)
-#   web     — npm ci + vue-tsc --noEmit + vite build               (Docker)
-#   desktop — make desktop-app 校验 Wails + .app 打包链            (需要 macos runner)
+# 四类 job:
+#   go                  — go vet / fmt / mod tidy / test -race -cover     (Docker)
+#   web                 — npm ci + vue-tsc --noEmit + vite build          (Docker)
+#   desktop             — make desktop-app 校验 Wails + .app 打包链        (需要 macos runner)
+#   release:{p,m,M}     — main 上 manual,等价 make bump-{patch,minor,major}:
+#                         算版本 → push tag → 多平台编 → 上传 GitLab Release
 #
 # desktop job 需要一台带 `macos` tag 的 gitlab-runner;公司内部如果没有,
 # 当前是 allow_failure: true + when: manual,手动触发且失败不阻塞主 pipeline,
 # 有 runner 后可以改成自动跑 + strict。
+#
+# release:* 一次性管理员配置(见 docs/CI-RELEASE.md):
+#   1. CI/CD Variables:GITLAB_TOKEN(Project Access Token,scope=api+write_repository,masked+protected)
+#   2. macos tag runner(打 dmg + 跨平台 binary)
+#   3. Settings → Repository → Protected tags:加 v* pattern,允许 maintainer
 
 stages:
   - test
   - build
+  - release
 
 variables:
   # 缓存到 project 下让 gitlab 的 cache: 抓得到
@@ -120,3 +128,57 @@ desktop:
     paths:
       - dist/TroubleshooterStudio.app
     expire_in: 1 week
+
+# ── Release:main 上 manual 触发,等价 make bump-{patch,minor,major} ──────
+#
+# 设计:不全自动(防 main 上每个 commit 都打版本)。在 GitLab Pipeline 页面看到 3 个按钮:
+#   release:patch   - bug 修复版,vX.Y.Z → vX.Y.(Z+1)
+#   release:minor   - 功能升级,vX.Y.Z → vX.(Y+1).0
+#   release:major   - breaking change,vX.Y.Z → v(X+1).0.0
+# 点哪个就跑哪个,跟本地 `make bump-{patch,minor,major}` 完全等价。
+#
+# 必须满足:
+#  - GITLAB_TOKEN 已配 CI/CD Variables(masked + protected),token 拥有
+#    api + write_repository scope 且账号是 maintainer 以上(才能 push tag 过
+#    protected v* tag pattern + 调 GitLab Release API)
+#  - 至少一台 macos 标签 runner 在线(make release-publish 需要 macOS Xcode 链 + dmg 打包)
+
+.release-base:
+  stage: release
+  tags:
+    - macos
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+      allow_failure: true   # 允许失败不阻塞主 pipeline(可能 macos runner 暂时下线)
+  variables:
+    # 拉全 history,changelog.sh / git describe --tags --abbrev=0 都依赖
+    GIT_DEPTH: 0
+  before_script:
+    # 必备工具:jq 给 publish-gitlab-release.sh 解析 GitLab API JSON
+    - command -v jq >/dev/null 2>&1 || brew install jq
+    # GITLAB_TOKEN 是 release-publish + git push 共用的鉴权
+    - test -n "$GITLAB_TOKEN" || { echo "✗ CI/CD Variables 缺 GITLAB_TOKEN(scope=api+write_repository)" >&2; exit 1; }
+    # CI checkout 默认 detached HEAD;tag-and-release 跑 git push 需要在 branch 上
+    - git checkout -B main "$CI_COMMIT_SHA"
+    # tag-and-release 拿 git config user.* 写 tag annotation 的 Tagger 字段
+    - git config user.name "${GITLAB_USER_NAME:-CI}"
+    - git config user.email "${GITLAB_USER_EMAIL:-ci@${CI_SERVER_HOST}}"
+    # remote URL 改成 oauth2 + GITLAB_TOKEN,git push 才有权限(默认 read-only)
+    - git remote set-url origin "https://oauth2:${GITLAB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
+    - git fetch --tags --quiet
+
+release:patch:
+  extends: .release-base
+  script:
+    - make bump-patch
+
+release:minor:
+  extends: .release-base
+  script:
+    - make bump-minor
+
+release:major:
+  extends: .release-base
+  script:
+    - make bump-major

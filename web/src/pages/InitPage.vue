@@ -3940,7 +3940,24 @@ input.path-readonly {
 .obs-tool-chip.active {
   background: #dbeafe; border-color: #3b82f6; color: #1e40af; font-weight: 500;
 }
+.obs-tool-chip.needs-grafana {
+  background: #fef3c7; border-color: #f59e0b; color: #92400e;
+}
+.obs-tool-chip.needs-grafana::after { content: " ⚠ 需 Grafana"; font-size: 10px; }
 .obs-tool-chip input[type=checkbox] { width: 12px; height: 12px; margin: 0; cursor: pointer; }
+
+/* Loki/Prometheus/Tempo 启用但 Grafana 未启用时的强警示 */
+.obs-grafana-required-banner {
+  margin: 12px 0 18px;
+  padding: 12px 14px;
+  background: #fef3c7; border: 1px solid #f59e0b; border-radius: 6px;
+  font-size: 13px; color: #78350f;
+}
+.obs-grafana-required-banner strong { color: #92400e; }
+.obs-grafana-required-banner p { margin: 6px 0 0; line-height: 1.55; }
+.obs-grafana-required-banner code {
+  background: #fde68a; padding: 1px 4px; border-radius: 3px; font-size: 12px;
+}
 
 /* Step 7 grafana/loki 块下的 per-env 标签映射子区(浅黄,跟全局 loki-mapping 区分但配色协调) */
 .loki-env-mapping {

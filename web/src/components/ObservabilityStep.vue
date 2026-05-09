@@ -111,12 +111,35 @@ function setGrafanaDsUid(obsKey: string, envID: string, value: string) {
         v-for="spec in obsToolSpecs"
         :key="spec.key"
         class="obs-tool-chip"
-        :class="{ active: enabledObservability[spec.key] }"
-        :title="spec.description"
+        :class="{
+          active: enabledObservability[spec.key],
+          'needs-grafana': ['loki','prometheus','tempo'].includes(spec.key)
+            && enabledObservability[spec.key] && !enabledObservability['grafana']
+        }"
+        :title="['loki','prometheus','tempo'].includes(spec.key)
+          ? spec.description + ' — 本系统通过 grafana MCP 的内置工具查询(无独立 MCP 包),启用后必须同时启用 grafana'
+          : spec.description"
       >
         <input type="checkbox" v-model="enabledObservability[spec.key]" />
         {{ spec.label }}
       </label>
+    </div>
+
+    <!-- Loki/Prometheus/Tempo 启用但 Grafana 未启用:必报错(后端 health_observability 也会挡) -->
+    <div
+      v-if="['loki','prometheus','tempo'].some(k => enabledObservability[k]) && !enabledObservability['grafana']"
+      class="obs-grafana-required-banner"
+      role="alert"
+    >
+      <strong>⚠ Loki / Prometheus / Tempo 必须搭配 Grafana</strong>
+      <p>
+        这三家在本系统通过 <code>mcp-grafana-npx</code> 内置的 <code>query_loki_logs</code> /
+        <code>query_prometheus</code> 等工具查询(没有独立 MCP 包,社区也没成熟实现)。
+        <strong>启用它们就必须同时启用 Grafana 并填 URL/凭据</strong>,否则 yaml validate / 部署阶段都会报错。
+      </p>
+      <p style="margin-top:6px">
+        请在上方勾选 <strong>Grafana</strong>,或取消勾选这三家。
+      </p>
     </div>
 
     <!-- 主内容:按 env → 启用的工具 → 字段 层级 -->

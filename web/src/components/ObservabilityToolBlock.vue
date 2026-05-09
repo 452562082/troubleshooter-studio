@@ -72,9 +72,12 @@ const emit = defineEmits<{
       </span>
       <URLProbeBadge :state="probeState" />
     </div>
-    <!-- 字段集:仅在不能走 grafana 代理(非 via_grafana 资格)或用户选了 direct 模式时渲染 -->
+    <!-- 字段集:只在 direct 模式下渲染(via_grafana 走的是 datasource UID 选择器,在下方 slot)。
+         注:之前误用 `!accessToggleable || accessMode === 'direct'` — accessToggleable 锁成 false
+         后 `!accessToggleable=true` 永远成立,via_grafana 的 loki/prometheus/tempo 也会让用户白填
+         URL 字段。改成只看 accessMode 一个条件,跟 useObsAccessMode 的锁死规则对齐。 -->
     <div
-      v-if="!accessToggleable || accessMode === 'direct'"
+      v-if="accessMode === 'direct'"
       class="ds-item-fields"
     >
       <CredentialField

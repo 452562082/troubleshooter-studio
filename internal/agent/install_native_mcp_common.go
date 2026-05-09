@@ -660,14 +660,24 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 	// 且 binary 是 commander 多子命令,启动 mcp server 必须显式 `mcp` 子命令(没有就只是
 	// CLI 工具 exit)。env: process.env.APP_ID / APP_SECRET(在 dist/utils/constants.js
 	// 里写死,不接 LARK_APP_* 前缀)。
+	//
+	// `-t preset.im.default` 把工具集从默认 19 个(preset.default = IM + Bitable + Doc +
+	// Contact 全套)缩到 5 个(IM 群消息相关)。排障机器人对飞书的真实需求是"发故障快报
+	// 到群" + 偶尔查群信息,IM 子集足够。19 → 5 工具:启动快、Claude /mcp 面板列表清爽、
+	// LLM tools[] context 也轻不少(每个工具一份 zod-to-json-schema 描述都不便宜)。
+	//
+	// LARK_DOMAIN env(可选):海外用户填 https://open.larksuite.com,留空 → lark-mcp
+	// 走默认 https://open.feishu.cn(国内飞书 endpoint)。lark-mcp 源码
+	// `package/dist/utils/constants.js:29` 读 process.env.LARK_DOMAIN,我们透传即可。
 	for _, m := range cfg.Infrastructure.Messaging {
 		if m.Enabled && m.Platform == "lark" {
 			servers[keyFixed("lark-openapi")] = map[string]any{
 				"command": "npx",
-				"args":    []any{"-y", "@larksuiteoapi/lark-mcp", "mcp"},
+				"args":    []any{"-y", "@larksuiteoapi/lark-mcp", "mcp", "-t", "preset.im.default"},
 				"env": envBlock(map[string]any{
-					"APP_ID":     get("LARK_APP_ID"),
-					"APP_SECRET": get("LARK_APP_SECRET"),
+					"APP_ID":      get("LARK_APP_ID"),
+					"APP_SECRET":  get("LARK_APP_SECRET"),
+					"LARK_DOMAIN": get("LARK_DOMAIN"),
 				}),
 			}
 			break

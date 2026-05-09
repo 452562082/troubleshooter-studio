@@ -57,6 +57,7 @@ func TestDumpMCPSpec_AllFamilies(t *testing.T) {
 		"CLICKHOUSE_URL_DEV":        "https://chu:chpw@ch:8443/an",
 		"LARK_APP_ID":               "appid",
 		"LARK_APP_SECRET":           "appsec",
+		"LARK_DOMAIN":               "https://open.larksuite.com",
 		"MCP_USER_TOKEN":            "feishu-tok",
 	}
 	servers := BuildMCPServers(cfg, MCPBuildOptions{AgentID: "bot", PruneEmpty: true},

@@ -114,10 +114,14 @@ func DerivePrompts(cfg *config.SystemConfig) []deploy.Prompt {
 	add("MODEL", "Agent 模型 ["+defaultModel+"]: ", false)
 
 	// ── messaging:lark ──
+	// LARK_DOMAIN(可选):留空 → lark-mcp 默认 https://open.feishu.cn(国内飞书);
+	// 海外 Lark 租户填 https://open.larksuite.com。源码 dist/utils/constants.js:29
+	// 读 process.env.LARK_DOMAIN。
 	for _, m := range cfg.Infrastructure.Messaging {
 		if m.Enabled && m.Platform == "lark" {
 			add("LARK_APP_ID", "Lark APP_ID []: ", false)
 			add("LARK_APP_SECRET", "Lark APP_SECRET []: ", true)
+			add("LARK_DOMAIN", "Lark Domain (海外 Lark 用户填 https://open.larksuite.com,留空=国内飞书) []: ", false)
 			break
 		}
 	}

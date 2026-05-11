@@ -62,94 +62,76 @@
 
 2. 核心功能与运作逻辑(附两张流程图):
 
-   ── 流程图 1:两层架构 + 4 平台部署 ─────────────────────────────────────
+下面两张流程图用 **Mermaid** 格式描述,GitLab markdown 自带渲染,飞书文档 / Notion / Typora / Confluence 也都原生支持。如果你的查看环境不渲染 Mermaid,可以把代码块整段复制到 <https://mermaid.live> 在线导出 PNG / SVG。
 
-   【上层:troubleshooter-studio(研制工作台,部门管理员一次性配置)】
+### 流程图 1:两层架构 + 4 平台部署矩阵
 
-      ① wizard(10 步问答)      → 产出 troubleshooter.yaml(系统建模)
-      ② analyzer(5 栈代码扫描)  → 产出 service / 依赖 / schema 反推
-      ③ gen(模板渲染)           → 产出 staging(templates/workspace-template/)
-      ④ install --target X       → 装到 4 个 AI 平台之一或多个
+```mermaid
+flowchart TB
+    classDef studio fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
+    classDef target fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef share fill:#f3e5f5,stroke:#7b1fa2,stroke-width:1.5px
 
-                                   ↓ install --target
+    subgraph L1["上层:troubleshooter-studio 研制工作台(部门管理员一次性配置)"]
+        direction LR
+        W["wizard<br/>10 步问答<br/>→ troubleshooter.yaml"]:::studio
+        A["analyzer<br/>5 栈代码扫描<br/>→ service+依赖+schema"]:::studio
+        G["gen<br/>模板渲染<br/>→ staging 产物"]:::studio
+        I["install --target X<br/>装到目标 AI 平台"]:::studio
+        W --> A --> G --> I
+    end
 
-   【下层:排障机器人(部署到 AI 平台,脱离 studio 独立运行)】
+    subgraph L2["下层:排障机器人(脱离 studio 独立运行)"]
+        direction TB
+        subgraph Plats["4 个 AI 平台部署位置(任选 1+)"]
+            direction LR
+            OC["OpenClaw<br/>~/.openclaw/workspace/<br/>+ openclaw.json<br/>(mcp.servers)"]:::target
+            CC["Claude Code<br/>~/.claude/agents/&lt;n&gt;.md<br/>+ ~/.claude.json<br/>(mcpServers)"]:::target
+            CU["Cursor<br/>~/.cursor/agents/&lt;n&gt;.md<br/>+ ~/.cursor/mcp.json<br/>(mcpServers)"]:::target
+            CX["Codex CLI<br/>~/.codex/agents/&lt;n&gt;.toml<br/>(TOML 内嵌<br/>[mcp_servers.*])"]:::target
+        end
+        Skills["共享 skill 集合(按 yaml 动态裁剪,19 候选)<br/>routing / incident-investigator / recent-changes<br/>+ config-executor + 9 数据层 + 5 obs + diagram"]:::share
+        MCPs["13 种 MCP × N env<br/>grafana(+loki+prom+tempo)/ jaeger / es / elk<br/>mongo / pg / redis / mysql / clickhouse<br/>nacos / lark / feishu_project"]:::share
 
-   4 个 AI 平台部署位置对照:
+        OC --> Skills
+        CC --> Skills
+        CU --> Skills
+        CX --> Skills
+        Skills --> MCPs
+    end
 
-   | 平台         | 主目录                              | MCP 配置位置                        |
-   | ------------ | ----------------------------------- | ----------------------------------- |
-   | OpenClaw     | ~/.openclaw/workspace/<name>/       | ~/.openclaw/openclaw.json 的 mcp.servers |
-   | Claude Code  | ~/.claude/agents/<name>.md          | ~/.claude.json 的 mcpServers        |
-   | Cursor       | ~/.cursor/agents/<name>.md          | ~/.cursor/mcp.json 的 mcpServers    |
-   | Codex CLI    | ~/.codex/agents/<name>.toml         | TOML 内嵌 [mcp_servers.*] 段        |
+    I -.装到.-> OC
+    I -.装到.-> CC
+    I -.装到.-> CU
+    I -.装到.-> CX
+```
 
-   4 个平台共享同一份 skill + MCP 配置内容,只是写入各家原生格式。
+### 流程图 2:排障 7 步主流程 + 经验沉淀闭环
 
-   下层组件:
+```mermaid
+flowchart TB
+    classDef step fill:#e8f5e9,stroke:#388e3c,stroke-width:1.5px
+    classDef fast fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef start fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
+    classDef loop fill:#fce4ec,stroke:#c2185b,stroke-width:2px,stroke-dasharray:5
 
-   - **skill 集合**(按 yaml 动态裁剪,19 个候选)
-     - routing —— 12 张映射表:env → 分支/域名/配置/log/MCP/依赖等
-     - incident-investigator —— 7 步主流程,含 Step 7 沉淀闭环
-     - recent-changes —— 三路合并(git + k8s + 配置)+ 17 类危险模式自动分类
-     - config-executor —— nacos / apollo / consul / k8s ConfigMap
-     - 9 个数据层 runtime-query —— mongo / pg / redis / mysql / es / kafka / mq / clickhouse
-     - 5 个 obs query —— jaeger / elk / tempo / skywalking / k8s
-     - diagram-generator —— Mermaid → PNG/SVG
+    Start(["工程师描述症状<br/>env + service + 时间窗 + 关键词"]):::start
+    S1{"Step 1.3 grep<br/>known-errors.yaml(模板)<br/>+ known-errors.local.yaml(沉淀)<br/>是否命中 pattern?"}:::step
+    Fast["✨ 快路径<br/>直走 next_actions<br/>跳过 Step 2-6<br/>⏱ 30s-2min 出处置建议"]:::fast
+    S2["Step 2 timeline 三路合并<br/>git log + K8s rollout + nacos history<br/>→ 自动标 ±5min 内 17 类 risk<br/>(配置 12 类 + 代码 5 类)"]:::step
+    S3["Step 3 横向<br/>同 env 别 service<br/>孤立 vs 广播?"]:::step
+    S4["Step 4 纵向<br/>cascade_check 沿依赖图追下游<br/>定位真凶"]:::step
+    S5["Step 5 多向交叉<br/>trace + log + metric +<br/>代码 + 数据 5 维度按问题类型选"]:::step
+    S6["Step 6 故障快报 + confidence 评级<br/>P0 命令(PRE / EXEC / POST 三段)<br/>工程师确认后执行"]:::step
+    S7["Step 7 沉淀(confidence=high 强制)<br/>sink_postmortem.py 自动 append<br/>→ known-errors.local.yaml"]:::loop
 
-   - **13 种 MCP × N 个 env**(自动注册到对应平台配置文件)
-     - 可观测:grafana / loki / prometheus / tempo(统一 mcp-grafana-npx)、jaeger、elasticsearch、elk
-     - 数据库:mongodb / postgresql / redis / mysql / clickhouse
-     - 其他:nacos / lark / feishu_project
+    Start --> S1
+    S1 -->|命中| Fast
+    S1 -->|不命中| S2 --> S3 --> S4 --> S5 --> S6 --> S7
+    S7 -.闭环:下次同症状.-> S1
+```
 
-   ── 流程图 2:排障 7 步主流程 + 经验沉淀闭环 ────────────────────────
-
-   入口:工程师描述症状(env + service + 时间窗 + 关键词)
-
-      ↓
-
-   **Step 1.3** —— grep 历史 known-errors
-   - 模板内置:known-errors.yaml
-   - 本团队沉淀(跨升级保留):known-errors.local.yaml
-   - 是否有 pattern 命中?
-
-   - 分支 A —— **命中** → 【快路径】直走 next_actions,跳过 Step 2-6,⏱ 30s-2min 出处置建议(本流程结束)
-   - 分支 B —— **不命中** → 进入完整 6 步流程,继续往下 ↓
-
-   **Step 2** —— timeline 三路合并
-   - git log 最近 commits
-   - K8s rollout history
-   - nacos / 配置中心 history
-   - 自动标 ±5min 内 17 类 risk(配置 12 类 + 代码 5 类)
-
-      ↓
-
-   **Step 3** —— 横向(同 env 别 service:孤立故障 vs 广播故障?)
-
-      ↓
-
-   **Step 4** —— 纵向(cascade_check 沿依赖图追下游,定位真凶)
-
-      ↓
-
-   **Step 5** —— 多向交叉(trace + log + metric + 代码 + 数据 5 维度按问题类型选)
-
-      ↓
-
-   **Step 6** —— 故障快报 + confidence 评级
-   - P0 命令带 PRE / EXEC / POST 三段
-   - 工程师确认后执行
-
-      ↓
-
-   **Step 7** —— 沉淀(confidence=high 强制)
-   - sink_postmortem.py 自动 append 到 known-errors.local.yaml
-   - 内容:pattern + typical_cause + next_actions + mitigation
-
-      ↓
-
-   **闭环**:下次同症状 → 回到 Step 1.3 grep → 直接命中 → 走快路径
-   (机器人越用越懂,本团队特有故障模式逐月沉淀)
+**说明**:这两张图既可作 markdown 流程图用,也可在 GitLab merge request / 飞书文档 / Confluence wiki 里直接嵌入。导出图片时建议白底,字体大些(`mermaid.live` 的 "Actions → PNG/SVG → ⚙ Background color: white" 即可)。
 
 3. 主要使用的技术/工具/平台:
 

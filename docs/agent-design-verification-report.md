@@ -12,9 +12,63 @@ Agent名称: AI 排障机器人工作台(troubleshooter-studio)
 
    完整架构图见仓库 assets/architecture.svg(GitLab 上直接打开源码可查看)。
 
-   核心工作流分**研制期 → 部署期 → 排障期**三段,完整版的两层架构图 + 排障 7 步决策树
-   流程图见 docs/agent-application.md 第二部分 "2. 核心功能与运作逻辑"。本节用 actor + 命令 +
-   产物三栏表清单呈现:
+   核心工作流分**研制期 → 部署期 → 排障期**三段,两层架构图 + 排障 7 步决策树流程图详见
+   docs/agent-application.md 第二部分。本节用三阶段时序图(Mermaid)+ actor 命令产物三栏表
+   补充展示。
+
+### 三阶段时序图(Mermaid)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Mgr as 部门管理员
+    participant SRE as 管理员/SRE
+    participant Studio as troubleshooter-studio
+    participant AI as AI 平台(Claude/Cursor/Codex/OpenClaw)
+    participant Eng as 一线工程师
+    participant Bot as 排障机器人(skill+MCP)
+    participant KB as known-errors.local.yaml
+
+    rect rgb(227,242,253)
+    Note over Mgr,Studio: 研制期(一次性配置)
+    Mgr->>Studio: tshoot init / analyze / gen
+    Studio-->>Mgr: troubleshooter.yaml + staging 产物
+    end
+
+    rect rgb(255,243,224)
+    Note over SRE,AI: 部署期(任何环境变更时)
+    SRE->>Studio: tshoot install --target X
+    Studio->>AI: 写入 agents/.md/.toml + mcpServers
+    AI-->>SRE: 部署完成
+    end
+
+    rect rgb(232,245,233)
+    Note over Eng,KB: 排障期(每次故障)
+    Eng->>AI: 描述症状(env+service+时间窗)
+    AI->>Bot: 转给排障机器人
+    Bot->>KB: Step 1.3 grep 历史 pattern
+
+    alt 命中(快路径)
+        KB-->>Bot: pattern + next_actions
+        Bot-->>Eng: ⏱ 30s-2min 出处置建议
+    else 不命中(完整 6 步路径)
+        Bot->>Bot: Step 2 timeline 三路合并<br/>+ 17 类 risk 自动标记
+        Bot->>Bot: Step 3 横向 / Step 4 纵向 cascade
+        Bot->>Bot: Step 5 多向交叉 / Step 6 故障快报
+        Bot-->>Eng: 故障快报 + P0 命令 + confidence
+        Eng-->>Bot: 确认 P0 命令执行
+        alt confidence = high
+            Bot->>KB: Step 7 sink_postmortem.py append
+            KB-->>Bot: ✓ 沉淀
+            Note over KB: 闭环:下次同症状回到 Step 1.3 命中
+        end
+    end
+    end
+```
+
+如果你的查看环境不渲染 Mermaid,把代码块整段复制到 <https://mermaid.live> 在线导出 PNG / SVG 即可。
+
+### 三阶段表格(actor + 命令 + 产物视图)
 
    ── 研制期(部门管理员一次性配置)─────────────────────────────────────
 

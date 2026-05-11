@@ -43,6 +43,10 @@ scripts/.env
 __pycache__/
 *.pyc
 
+# CI 用的 Go 模块/构建缓存目录($GOMODCACHE / $GOCACHE 在 .gitlab-ci.yml 里指向这里),
+# 本地也可能有人 export 同样的路径调试 —— 一律不入库
+/.cache/
+
 # Editor swap files (vim/emacs)
 *.swp
 *.swo

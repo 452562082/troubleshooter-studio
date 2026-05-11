@@ -193,11 +193,17 @@ desktop:
 
 # ── Release:main 上 manual 触发,等价 scripts/release.sh patch|minor|major ──
 #
-# 设计:不全自动(防 main 上每个 commit 都打版本)。在 GitLab Pipeline 页面看到 3 个按钮:
-#   release:patch   - bug 修复版,vX.Y.Z → vX.Y.(Z+1)
-#   release:minor   - 功能升级,vX.Y.Z → vX.(Y+1).0
-#   release:major   - breaking change,vX.Y.Z → v(X+1).0.0
-# 点哪个就跑哪个。
+# 设计:
+#   release:patch   - bug 修复版,vX.Y.Z → vX.Y.(Z+1) —— **main 上自动触发**(默认每次 main 合入打补丁版本)
+#   release:minor   - 功能升级,vX.Y.Z → vX.(Y+1).0 —— commit msg 含 [release:minor] 时自动;否则 manual 按钮
+#   release:major   - breaking change,vX.Y.Z → v(X+1).0.0 —— commit msg 含 [release:major] 时自动;否则 manual 按钮
+#
+# 工作流:test 分支开发 → MR test→main → 合并到 main 时:
+#   - 默认 → auto patch(vX.Y.Z → vX.Y.(Z+1))
+#   - merge commit 或 squash msg 含 [release:minor] → auto minor(patch 跳过,只跑 minor)
+#   - merge commit 或 squash msg 含 [release:major] → auto major(patch 跳过,只跑 major)
+#
+# 一次合并永远只产出 1 个 release。manual 按钮保留兜底(应急/runner 故障重发)。
 #
 # 必须满足:
 #  - GITLAB_TOKEN 已配 CI/CD Variables(masked + protected),token 拥有
@@ -209,6 +215,7 @@ desktop:
   stage: release
   tags:
     - macos
+  # 默认 manual(minor/major 用) —— release:patch 在自己 job 里覆盖成 auto
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
       when: manual
@@ -236,15 +243,36 @@ desktop:
 
 release:patch:
   extends: .release-base
+  rules:
+    # commit msg 含 [release:minor] 或 [release:major] 时跳过 patch,让对应 job 接管
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_COMMIT_MESSAGE =~ /\[release:(minor|major)\]/'
+      when: never
+    # 默认 main 合入 → 自动 patch(每次 PR 合并 → vX.Y.(Z+1))
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      allow_failure: true   # macos runner 暂时下线时不挡 pipeline 状态
   script:
     - scripts/release.sh patch
 
 release:minor:
   extends: .release-base
+  rules:
+    # commit msg 含 [release:minor] → 自动跑(取代默认 patch)
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_COMMIT_MESSAGE =~ /\[release:minor\]/'
+      allow_failure: true
+    # 否则保持 manual 按钮兜底
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+      allow_failure: true
   script:
     - scripts/release.sh minor
 
 release:major:
   extends: .release-base
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_COMMIT_MESSAGE =~ /\[release:major\]/'
+      allow_failure: true
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+      allow_failure: true
   script:
     - scripts/release.sh major

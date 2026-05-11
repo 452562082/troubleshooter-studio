@@ -151,25 +151,31 @@ flowchart TB
 
 3. 主要使用的技术/工具/平台:
 
-   后端 / CLI:Go 1.25(单二进制,跨 macOS/Linux/Windows × amd64/arm64)、
-              Wails v2(macOS 桌面 app)、go:embed(模板嵌入二进制)
+   分 **A. 自己构建用的技术栈** 和 **B. 接入的外部系统**(评审快速对照)。
 
-   前端:Vue 3 + Vite + vue-tsc(类型检查)+ vitest(单测 12 文件 133 用例)+ Pinia
+   ### A. 自己构建用的技术栈
 
-   AI 协议 / 平台:MCP(Model Context Protocol,Anthropic)、Claude Code / Cursor / Codex CLI / OpenClaw
+   | 类别 | 用了什么 | 用在哪 |
+   | --- | --- | --- |
+   | 编程语言 | **Go 1.25** | 后端 + CLI + 桌面 app 主体,单二进制跨平台(macOS / Linux / Windows × amd64 / arm64) |
+   | 桌面 app | **Wails v2** | macOS WKWebView 原生桌面客户端(`make desktop-app` 出 `.app` / `.dmg`) |
+   | 前端 | **Vue 3 + Vite + Pinia + vue-tsc** | 桌面 app 内嵌的 Web UI(创建向导 / 已装机器人管理 / 代码扫描) |
+   | AI 协议 | **MCP(Model Context Protocol)** | Anthropic 开源协议,工具调用统一接口 |
+   | 工程化 | GitLab CI/CD、golangci-lint v2.0.2、vitest、go test -race -cover | 自动 changelog + release notes、代码检查、Go 全包覆盖率、前端 12 文件 133 用例 |
 
-   13 种 MCP 接入:@elastic/mcp-server-elasticsearch、mcp-mongo-server、
-                @modelcontextprotocol/server-postgres、mcp-grafana-npx(grafana+loki+prom+tempo)、
-                uvx nacos-mcp-router、uvx opentelemetry-mcp、uvx mcp-clickhouse、
-                @gongrzhe/server-redis-mcp、@benborla29/mcp-server-mysql、
-                @larksuiteoapi/lark-mcp、@lark-project/mcp
+   ### B. 接入的外部系统(机器人能"开箱即用"地查这些)
 
-   监控 / 配置中心 / 数据层:
-     可观测性 — Grafana / Prometheus / Loki / Jaeger / Tempo / ELK / SkyWalking / Kuboard
-     配置源   — Nacos / Apollo / Consul / Kubernetes ConfigMap / 纯环境变量
-     数据层   — Redis / MongoDB / Elasticsearch / MySQL / PostgreSQL / Kafka / RocketMQ / RabbitMQ / ClickHouse
+   | 接入维度 | 支持的系统 |
+   | --- | --- |
+   | **AI 平台**(机器人装到哪) | OpenClaw(公司客户端)、Claude Code、Cursor、Codex CLI(任选 1+ 个) |
+   | **可观测系统**(查指标 / 日志 / 链路) | Grafana(含 Prometheus 指标、Loki 日志、Tempo 链路)、Jaeger、ELK、SkyWalking |
+   | **K8s 运行时** | Kuboard v4 API(查 pod / service / deployment / events / logs) |
+   | **配置中心** | Nacos、Apollo、Consul、Kubernetes ConfigMap、纯环境变量 |
+   | **数据库**(只读查询) | MongoDB、PostgreSQL、Redis、MySQL、Elasticsearch、ClickHouse(6 种) |
+   | **消息队列**(只读诊断) | Kafka、RocketMQ、RabbitMQ(3 种) |
+   | **协作工具** | 飞书 IM(发故障快报到群)、飞书项目(关联 Bug / 需求单) |
 
-   工程化:GitLab CI/CD(自动 changelog + release notes)、golangci-lint v2.0.2、Go race + coverage
+   合计 **13 种 MCP × N 个环境** 自动注册到目标 AI 平台。具体 MCP 包名 / 版本钉死策略 / 代码 diff 危险模式规则,见附件一《设计与验证报告》。
 
 4. 预期适用范围(请具体到小组、部门或公司场景):
 

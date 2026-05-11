@@ -111,8 +111,12 @@ echo "$msg" | git tag -a "$NEXT" -F -
 
 # ── 4. push commits + tag(失败回滚 local tag)────────────────────
 remote=$(git config --get "branch.$(git symbolic-ref --short HEAD).remote" 2>/dev/null || echo origin)
-echo "▶ push to $remote"
-git push "$remote" || {
+# 显式给 HEAD:branch refspec —— 本地开发(有 upstream)和 CI(detached HEAD checkout
+# 后我们手动 git checkout -B main,没设 upstream tracking)都能过。少了显式 ref
+# git push 在 CI 上会 fatal: The current branch main has no upstream branch.
+branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo main)
+echo "▶ push to $remote ($branch)"
+git push "$remote" "HEAD:$branch" || {
     echo "❌ push commits 失败" >&2
     git tag -d "$NEXT"
     exit 1

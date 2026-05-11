@@ -80,16 +80,29 @@ flowchart TB
 
     subgraph L2["② 下层:排障机器人(部署后独立工作)"]
         direction TB
-        Plats["**可装到 4 个 AI 平台(任选 1+ 个)**<br/>OpenClaw 公司客户端 · Claude Code 命令行 IDE<br/>Cursor 图形 IDE · Codex CLI 终端 AI 工具"]:::target
+        subgraph Plats["可装到 4 个 AI 平台(任选 1+ 个)"]
+            direction LR
+            OC["OpenClaw<br/>公司客户端"]:::target
+            CC["Claude Code<br/>命令行 IDE"]:::target
+            CU["Cursor<br/>图形 IDE"]:::target
+            CX["Codex CLI<br/>终端 AI 工具"]:::target
+        end
 
         Skills["**机器人能力库(按配置动态裁剪)**<br/>路由查询(环境/服务/配置/依赖映射) · 排障流程编排<br/>变更追溯(代码+部署+配置 三路合并)<br/>数据查询(9 种数据库只读) · 可观测查询(日志/指标/链路)"]:::share
 
         MCPs["**对外接口集(13 种 MCP × 每个环境)**<br/>监控类:Grafana · Jaeger · ELK<br/>数据库类:MongoDB · PostgreSQL · Redis · MySQL · ClickHouse<br/>其它:Nacos 配置中心 · 飞书 · 飞书项目"]:::share
 
-        Plats --> Skills --> MCPs
+        OC --> Skills
+        CC --> Skills
+        CU --> Skills
+        CX --> Skills
+        Skills --> MCPs
     end
 
-    I -.部署.-> Plats
+    I -.部署.-> OC
+    I -.部署.-> CC
+    I -.部署.-> CU
+    I -.部署.-> CX
 ```
 
 **读这张图**:上层做的事是"把你公司的微服务系统建模 + 派生出对应的机器人配置",下层做的事是"机器人装到 AI 平台后,独立完成排障"。4 个 AI 平台是用户日常用的,公司各人可以装到自己习惯的那个,机器人能力**完全一样**。

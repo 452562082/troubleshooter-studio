@@ -76,10 +76,11 @@ go:lint:
     - go vet ./...
     - golangci-lint run --timeout=3m
     - |
-      # gofmt 是文件系统级扫描,直接 `gofmt -l .` 会把 $GOMODCACHE=.cache/go-mod 里的
-      # 第三方源码也扫进来(那些代码不归我们格式化)。用 `go list -f '{{.Dir}}'` 列出
-      # 本 module 所有包的目录,只扫这些 —— 跟 go vet / golangci-lint 的 ./... 同口径
-      out=$(gofmt -l $(go list -f '{{.Dir}}' ./...))
+      # gofmt 接到目录参数会**递归扫子目录**;`gofmt -l .` 或 `gofmt -l $(go list ...)`
+      # 都会进 $GOMODCACHE=.cache/go-mod 把第三方源码扫上(那不归我们格式化)。
+      # 用 `git ls-files '*.go'` 只列**入库**的 .go 文件,.cache 是 gitignored 自动跳过,
+      # 且 CI 本来就只该校验提交代码的格式。
+      out=$(git ls-files '*.go' | xargs gofmt -l)
       if [ -n "$out" ]; then
         echo "unformatted files detected:"
         echo "$out"

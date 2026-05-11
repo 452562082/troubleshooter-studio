@@ -62,123 +62,94 @@
 
 2. 核心功能与运作逻辑(附两张流程图):
 
-   ────────────────────────────────────────────────────────────────────────
-   流程图 1:两层架构 + 4 平台部署矩阵
-   ────────────────────────────────────────────────────────────────────────
+   ── 流程图 1:两层架构 + 4 平台部署 ─────────────────────────────────────
 
-   ┌──────────────────────────────────────────────────────────────────────┐
-   │           上层:troubleshooter-studio(研制工作台,一次性配置)        │
-   │                                                                      │
-   │  ┌─────────┐    ┌──────────┐    ┌──────────┐    ┌──────────────┐  │
-   │  │ wizard  │──▶│ analyzer │──▶│   gen    │──▶│   install     │  │
-   │  │ 10 步   │    │ 5 栈扫描 │    │ 模板渲染 │    │ 装到目标平台   │  │
-   │  └────┬────┘    └─────┬────┘    └─────┬────┘    └───────┬──────┘  │
-   │       ▼               ▼                ▼                  │           │
-   │   yaml 建模     service+依赖+      staging 产物          │           │
-   │   (env/repos/  schema 反推       (templates/             │           │
-   │   service/                       workspace-template/)    │           │
-   │   config-center/                                          │           │
-   │   data-store/                                             │           │
-   │   observability)                                          │           │
-   └──────────────────────────────────────────────────────────┼──────────┘
-                                                              │
-                                          install --target X  │
-                              ┌──────────────┬────────────────┼────────────┐
-                              ▼              ▼                ▼            ▼
-   ┌─────────────────────────────────────────────────────────────────────────┐
-   │      下层:排障机器人(部署到 4 个 AI 平台之一/多个,脱离 studio 运行) │
-   │                                                                         │
-   │  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐      │
-   │  │  OpenClaw  │  │Claude Code │  │   Cursor   │  │ Codex CLI  │      │
-   │  ├────────────┤  ├────────────┤  ├────────────┤  ├────────────┤      │
-   │  │~/.openclaw │  │~/.claude/  │  │~/.cursor/  │  │~/.codex/   │      │
-   │  │/workspace/ │  │ agents/.md │  │ agents/.md │  │ agents/.toml      │
-   │  │ + openclaw │  │ + skills/  │  │ + skills/  │  │ +skills/   │      │
-   │  │  .json     │  │ + .claude  │  │ + mcp.json │  │ TOML 内嵌  │      │
-   │  │ mcp.servers│  │  .json     │  │ mcpServers │  │[mcp_servers.*]    │
-   │  │            │  │ mcpServers │  │            │  │            │      │
-   │  └─────┬──────┘  └─────┬──────┘  └─────┬──────┘  └─────┬──────┘      │
-   │        │                │                │                │              │
-   │        └────────────────┴────────────────┴────────────────┘              │
-   │                                  │                                       │
-   │              4 平台共享同一份 skill + MCP 配置内容,只是写到各家原生格式 │
-   │                                                                         │
-   │   ┌────────────────────────────────────────────────────────────────┐  │
-   │   │ skill 集合(按 yaml 动态裁剪,19 个候选)                        │  │
-   │   │  • routing(12 张映射表:env→分支/域名/配置/log/MCP/依赖等)   │  │
-   │   │  • incident-investigator(7 步主流程,含 Step 7 沉淀闭环)     │  │
-   │   │  • recent-changes(三路合并 + 17 类危险模式自动分类)         │  │
-   │   │  • config-executor(nacos/apollo/consul/k8s ConfigMap)        │  │
-   │   │  • 9 个数据层 runtime-query(mongo/pg/redis/mysql/es/...)    │  │
-   │   │  • 5 个 obs query(jaeger/elk/tempo/skywalking/k8s)          │  │
-   │   │  • diagram-generator(Mermaid → PNG/SVG)                      │  │
-   │   ├────────────────────────────────────────────────────────────────┤  │
-   │   │ 13 种 MCP × N 个 env(自动注册到对应平台配置文件)             │  │
-   │   │  grafana / loki / prometheus / tempo (统一 mcp-grafana-npx)   │  │
-   │   │  jaeger / elasticsearch / elk(独立 MCP)                     │  │
-   │   │  mongodb / postgresql / redis / mysql / clickhouse           │  │
-   │   │  nacos / lark / feishu_project                               │  │
-   │   └────────────────────────────────────────────────────────────────┘  │
-   └─────────────────────────────────────────────────────────────────────────┘
+   【上层:troubleshooter-studio(研制工作台,部门管理员一次性配置)】
 
-   ────────────────────────────────────────────────────────────────────────
-   流程图 2:排障 7 步主流程 + 经验沉淀闭环
-   ────────────────────────────────────────────────────────────────────────
+      ① wizard(10 步问答)      → 产出 troubleshooter.yaml(系统建模)
+      ② analyzer(5 栈代码扫描)  → 产出 service / 依赖 / schema 反推
+      ③ gen(模板渲染)           → 产出 staging(templates/workspace-template/)
+      ④ install --target X       → 装到 4 个 AI 平台之一或多个
 
-                工程师描述症状(env + service + 时间窗 + 关键词)
-                                    │
-                                    ▼
-            ┌──────────────────────────────────────────────────────┐
-            │  Step 1.3  grep 历史 known-errors                    │◄─────┐
-            │  - known-errors.yaml(模板内置基础库)               │      │
-            │  - known-errors.local.yaml(本团队历次沉淀,跨升级保留)     │
-            │  是否有 pattern 命中?                                │      │
-            └────────────────────┬─────────────────────────────────┘      │
-                       ┌─────────┴──────────┐                              │
-                  命中 │                    │ 不命中                       │
-                       ▼                    ▼                              │
-              ┌───────────────┐  ┌──────────────────────────────────┐    │
-              │ 直走          │  │ Step 2 timeline 三路合并         │    │
-              │ next_actions  │  │  • git log 最近 commits           │    │
-              │ 跳过 2-7 步   │  │  • K8s rollout history            │    │
-              │               │  │  • nacos/配置中心 history         │    │
-              │ ⏱ 30s-2min   │  │  → ±5min 内 17 类 risk 自动标记  │    │
-              │ 直接给处置    │  │   (配置 12 类 + 代码 5 类)        │    │
-              └───────────────┘  └──────────────┬───────────────────┘    │
-                                                ▼                          │
-                                ┌──────────────────────────────────┐      │
-                                │ Step 3 横向 — 同 env 别 service  │      │
-                                │   孤立故障 vs 广播故障?         │      │
-                                └──────────────┬───────────────────┘      │
-                                                ▼                          │
-                                ┌──────────────────────────────────┐      │
-                                │ Step 4 纵向 — cascade_check      │      │
-                                │   沿依赖图追下游,定位真凶        │      │
-                                └──────────────┬───────────────────┘      │
-                                                ▼                          │
-                                ┌──────────────────────────────────┐      │
-                                │ Step 5 多向交叉                  │      │
-                                │   trace + log + metric + 代码 +  │      │
-                                │   数据 5 维度按问题类型选        │      │
-                                └──────────────┬───────────────────┘      │
-                                                ▼                          │
-                                ┌──────────────────────────────────┐      │
-                                │ Step 6 故障快报 + confidence     │      │
-                                │   P0 命令(PRE / EXEC / POST 三段) │   │
-                                │   工程师确认后执行                │      │
-                                └──────────────┬───────────────────┘      │
-                                                ▼                          │
-                                ┌──────────────────────────────────┐      │
-                                │ Step 7 沉淀(confidence=high 强制) │     │
-                                │   sink_postmortem.py 自动 append  │     │
-                                │   到 known-errors.local.yaml     │      │
-                                │   ↳ pattern + typical_cause +    │      │
-                                │     next_actions + mitigation     │      │
-                                └──────────────┬───────────────────┘      │
-                                                │                          │
-                                                └──────────────────────────┘
-                                                (下次同症状 Step 1.3 直接命中,
-                                                 跳过 2-7 步 ⏱ 30s 出快报)
+                                   ↓ install --target
+
+   【下层:排障机器人(部署到 AI 平台,脱离 studio 独立运行)】
+
+   4 个 AI 平台部署位置对照:
+
+   | 平台         | 主目录                              | MCP 配置位置                        |
+   | ------------ | ----------------------------------- | ----------------------------------- |
+   | OpenClaw     | ~/.openclaw/workspace/<name>/       | ~/.openclaw/openclaw.json 的 mcp.servers |
+   | Claude Code  | ~/.claude/agents/<name>.md          | ~/.claude.json 的 mcpServers        |
+   | Cursor       | ~/.cursor/agents/<name>.md          | ~/.cursor/mcp.json 的 mcpServers    |
+   | Codex CLI    | ~/.codex/agents/<name>.toml         | TOML 内嵌 [mcp_servers.*] 段        |
+
+   4 个平台共享同一份 skill + MCP 配置内容,只是写入各家原生格式。
+
+   下层组件:
+
+   - **skill 集合**(按 yaml 动态裁剪,19 个候选)
+     - routing —— 12 张映射表:env → 分支/域名/配置/log/MCP/依赖等
+     - incident-investigator —— 7 步主流程,含 Step 7 沉淀闭环
+     - recent-changes —— 三路合并(git + k8s + 配置)+ 17 类危险模式自动分类
+     - config-executor —— nacos / apollo / consul / k8s ConfigMap
+     - 9 个数据层 runtime-query —— mongo / pg / redis / mysql / es / kafka / mq / clickhouse
+     - 5 个 obs query —— jaeger / elk / tempo / skywalking / k8s
+     - diagram-generator —— Mermaid → PNG/SVG
+
+   - **13 种 MCP × N 个 env**(自动注册到对应平台配置文件)
+     - 可观测:grafana / loki / prometheus / tempo(统一 mcp-grafana-npx)、jaeger、elasticsearch、elk
+     - 数据库:mongodb / postgresql / redis / mysql / clickhouse
+     - 其他:nacos / lark / feishu_project
+
+   ── 流程图 2:排障 7 步主流程 + 经验沉淀闭环 ────────────────────────
+
+   入口:工程师描述症状(env + service + 时间窗 + 关键词)
+
+      ↓
+
+   **Step 1.3** —— grep 历史 known-errors
+   - 模板内置:known-errors.yaml
+   - 本团队沉淀(跨升级保留):known-errors.local.yaml
+   - 是否有 pattern 命中?
+
+   - 分支 A —— **命中** → 【快路径】直走 next_actions,跳过 Step 2-6,⏱ 30s-2min 出处置建议(本流程结束)
+   - 分支 B —— **不命中** → 进入完整 6 步流程,继续往下 ↓
+
+   **Step 2** —— timeline 三路合并
+   - git log 最近 commits
+   - K8s rollout history
+   - nacos / 配置中心 history
+   - 自动标 ±5min 内 17 类 risk(配置 12 类 + 代码 5 类)
+
+      ↓
+
+   **Step 3** —— 横向(同 env 别 service:孤立故障 vs 广播故障?)
+
+      ↓
+
+   **Step 4** —— 纵向(cascade_check 沿依赖图追下游,定位真凶)
+
+      ↓
+
+   **Step 5** —— 多向交叉(trace + log + metric + 代码 + 数据 5 维度按问题类型选)
+
+      ↓
+
+   **Step 6** —— 故障快报 + confidence 评级
+   - P0 命令带 PRE / EXEC / POST 三段
+   - 工程师确认后执行
+
+      ↓
+
+   **Step 7** —— 沉淀(confidence=high 强制)
+   - sink_postmortem.py 自动 append 到 known-errors.local.yaml
+   - 内容:pattern + typical_cause + next_actions + mitigation
+
+      ↓
+
+   **闭环**:下次同症状 → 回到 Step 1.3 grep → 直接命中 → 走快路径
+   (机器人越用越懂,本团队特有故障模式逐月沉淀)
 
 3. 主要使用的技术/工具/平台:
 

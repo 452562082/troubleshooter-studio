@@ -12,75 +12,39 @@ Agent名称: AI 排障机器人工作台(troubleshooter-studio)
 
    完整架构图见仓库 assets/architecture.svg(GitLab 上直接打开源码可查看)。
 
-   核心工作流分研制期 + 排障期两段,完整文字版流程图见 docs/agent-application.md 附图。
+   核心工作流分**研制期 → 部署期 → 排障期**三段,完整版的两层架构图 + 排障 7 步决策树
+   流程图见 docs/agent-application.md 第二部分 "2. 核心功能与运作逻辑"。本节用 actor + 命令 +
+   产物三栏表清单呈现:
 
-   ────────────────────────────────────────────────────────────────────────
-   研制期 → 部署期 → 排障期 三阶段视图(actor + 产物 + 触发条件)
-   ────────────────────────────────────────────────────────────────────────
+   ── 研制期(部门管理员一次性配置)─────────────────────────────────────
 
-       【actor】              【动作】                  【产物 / 输出】
-   ───────────────────────────────────────────────────────────────────────
-                                                                          
-     部门管理员      ─┐                                                   
-                      ├──▶ tshoot init --o <yaml>     ─▶  troubleshooter.yaml
-                      │     (10 步 wizard)                 (系统建模配置)
-                      │                                                    
-                      ├──▶ tshoot analyze --repos-root  ─▶  analysis.json    
-                      │     (5 栈代码扫描,反推         (services + deps + 
-                      │      service/依赖/schema)         schema)            
-                      │                                                    
-                      ├──▶ tshoot validate / plan    ─▶  health check report
-                      │     (8 类 health 校验,plan       diff 预览          
-                      │      预演 gen 产物)                                  
-                      │                                                    
-                      └──▶ tshoot gen -i <yaml>      ─▶  dist/<id>/         
-                            (模板渲染 + skill 裁剪)      (staging 产物)     
-                                          │
-                                          ▼
-   ─── 研制期完 ── 切到部署期 ──────────────────────────────────────────
-                                          │
-     部门管理员                            │
-     或 SRE                                ▼
-                  tshoot install --target {openclaw|claude-code|cursor|codex}
-                                          │
-                  ┌──────────┬─────────────┼─────────────┬──────────┐
-                  ▼          ▼             ▼             ▼          ▼
-            ~/.openclaw  ~/.claude    ~/.claude.json ~/.cursor  ~/.codex
-            workspace/   agents/<>.md mcpServers     agents/<>.md  agents/<>.toml
-            +openclaw.   +skills/                    +skills/      (TOML 内嵌
-             json                                    +mcp.json     [mcp_servers.*])
-             mcp.servers                             mcpServers   +skills/
-                                          │
-                                          ▼
-   ─── 部署期完 ── 切到排障期 ──────────────────────────────────────────
-                                          │
-     一线工程师                            ▼
-     (任何技术等级)             描述症状给 AI 平台(Claude Code / Cursor /
-                                Codex / OpenClaw 的对话框)
-                                          │
-                                          ▼
-                                 机器人按 7 步流程编排:
-                                 Step 1 grep known-errors 历史
-                                  ├ 命中  → 跳到 next_actions(快路径)
-                                  └ 不命中 → Step 2-7 完整路径
-                                          │
-                                          ▼
-                                 故障快报 + P0 命令建议
-                                          │
-                                  confidence = high?
-                                  ├ 是 → Step 7 sink_postmortem.py
-                                  │      → known-errors.local.yaml(沉淀)
-                                  │      └─┐
-                                  │        │ 下次同症状回到 Step 1 命中
-                                  │        ▼
-                                  │      (闭环:机器人越用越懂)
-                                  │
-                                  └ 否 → 故障快报仍输出,但不沉淀
+   | actor      | 命令                                  | 产物 / 输出                          |
+   | ---------- | ------------------------------------- | ------------------------------------ |
+   | 部门管理员 | tshoot init -o troubleshooter.yaml    | troubleshooter.yaml(系统建模配置)   |
+   | 部门管理员 | tshoot analyze --repos-root <dir>     | analysis.json(services + 依赖 + schema) |
+   | 部门管理员 | tshoot validate / plan                | health check 报告 + diff 预览        |
+   | 部门管理员 | tshoot gen -i troubleshooter.yaml     | dist/<id>/(staging 产物)            |
 
-   ────────────────────────────────────────────────────────────────────────
-   详细版的两层架构图 + 排障 7 步决策树流程图见 docs/agent-application.md
-   第二部分 "2. 核心功能与运作逻辑" 的两张流程图。
-   ────────────────────────────────────────────────────────────────────────
+   ── 部署期(管理员或 SRE)──────────────────────────────────────────────
+
+   | actor       | 命令                                              | 产物 / 输出                                                       |
+   | ----------- | ------------------------------------------------- | ----------------------------------------------------------------- |
+   | 管理员/SRE  | tshoot install --target openclaw --path <staging> | ~/.openclaw/workspace/<name>/ + openclaw.json mcp.servers          |
+   | 管理员/SRE  | tshoot install --target claude-code --path <staging> | ~/.claude/agents/<>.md + skills/ + ~/.claude.json mcpServers     |
+   | 管理员/SRE  | tshoot install --target cursor --path <staging>   | ~/.cursor/agents/<>.md + skills/ + ~/.cursor/mcp.json mcpServers  |
+   | 管理员/SRE  | tshoot install --target codex --path <staging>    | ~/.codex/agents/<>.toml(TOML 内嵌 [mcp_servers.*])+ skills/      |
+
+   ── 排障期(一线工程师,任何技术等级)─────────────────────────────────
+
+   | actor         | 触发                                              | 输出                                                         |
+   | ------------- | ------------------------------------------------- | ------------------------------------------------------------ |
+   | 一线工程师    | AI 平台对话框描述症状                            | 机器人按 7 步流程编排取证 + 推断                            |
+   | 机器人        | Step 1.3 grep known-errors(本团队沉淀优先)      | 命中 → 直走 next_actions(快路径)/ 不命中 → Step 2-6 完整路径 |
+   | 机器人        | Step 2-6 完整路径(timeline + 横纵向 + 多向交叉) | 故障快报 + P0 命令(PRE / EXEC / POST 三段)+ confidence    |
+   | 一线工程师    | 确认 P0 命令                                     | 执行回滚 / 限流 / 重启                                       |
+   | 机器人        | Step 7(confidence=high 强制)                    | sink_postmortem.py 自动 append 到 known-errors.local.yaml    |
+
+   ── 闭环:下次同症状 → Step 1.3 命中 → 跳 2-6 步 → 30s 出处置建议 ───
 
 2. 核心模块 / 功能说明:
 

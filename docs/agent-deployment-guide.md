@@ -77,28 +77,28 @@ Agent名称: AI 排障机器人工作台(troubleshooter-studio)
 
 1. 如何启动 / 调用 Agent:
 
-   排障场景(主路径)— 跟机器人对话,描述症状即可:
+   排障场景(主路径)— 跟机器人对话,描述症状即可。示例对话:
 
-   ┌──────────────────────────────────────────────────────────────────┐
-   │ 工程师:prod commerce 5xx 突增,14:23 开始                       │
-   │                                                                  │
-   │ 机器人:                                                          │
-   │ [ctx: prod / commerce / Step 1 收前提]                          │
-   │ 我先确认 ±5 分钟内的变更...                                      │
-   │                                                                  │
-   │ [Step 2 timeline] 14:18 nacos U:                                │
-   │    - downstream.user.timeout: 30s → 3s                          │
-   │    - risk: timeout_decreased severity: high                     │
-   │                                                                  │
-   │ [Step 6 故障快报] confidence: high                              │
-   │    根因:user 服务调用超时从 30s 改 3s,                          │
-   │         下游 p99 > 新阈值 → 全 timeout 雪崩                     │
-   │    P0 处置:nacos 回滚配置到上一版本                            │
-   │    预计恢复:1-2 分钟                                            │
-   │                                                                  │
-   │ [Step 7 沉淀] 已 sink 到 known-errors.local.yaml,              │
-   │              下次同类故障会自动命中                              │
-   └──────────────────────────────────────────────────────────────────┘
+   ```
+   工程师:prod commerce 5xx 突增,14:23 开始
+
+   机器人:
+   [ctx: prod / commerce / Step 1 收前提]
+   我先确认 ±5 分钟内的变更...
+
+   [Step 2 timeline] 14:18 nacos U:
+      - downstream.user.timeout: 30s → 3s
+      - risk: timeout_decreased severity: high
+
+   [Step 6 故障快报] confidence: high
+      根因:user 服务调用超时从 30s 改 3s,
+            下游 p99 > 新阈值 → 全 timeout 雪崩
+      P0 处置:nacos 回滚配置到上一版本
+      预计恢复:1-2 分钟
+
+   [Step 7 沉淀] 已 sink 到 known-errors.local.yaml,
+                 下次同类故障会自动命中
+   ```
 
    输入 / 输出说明:
 
@@ -136,38 +136,18 @@ Agent名称: AI 排障机器人工作台(troubleshooter-studio)
 
 1. 常见问题与解决方案:
 
-   现象                                         | 原因                                | 解决
-   ─────────────────────────────────────────────┼─────────────────────────────────────┼──────────────────────────────────────────
-   macOS 双击 .app 报"已损坏"                  | 应用未做苹果数字签名,Gatekeeper 拦 | 双击 dmg 里的"双击解锁.command";或命令:
-                                                |                                     | xattr -d com.apple.quarantine /Applications/TroubleshooterStudio.app
-   ─────────────────────────────────────────────┼─────────────────────────────────────┼──────────────────────────────────────────
-   Claude Code 看不到刚装的 agent              | Claude Code 没读到 ~/.claude.json   | 重启 Claude Code(命令行 claude 重启,GUI 退出再开)
-   ─────────────────────────────────────────────┼─────────────────────────────────────┼──────────────────────────────────────────
-   OpenClaw 找不到机器人                        | OpenClaw 启动时一次性加载 agent 列表| 重启 OpenClaw 客户端(本地 daemon + GUI)
-   ─────────────────────────────────────────────┼─────────────────────────────────────┼──────────────────────────────────────────
-   Codex 启动后 MCP 全部 ENOTFOUND              | Codex 沙箱默认禁网                  | ~/.codex/config.toml 加:
-                                                |                                     |   [sandbox_workspace_write]
-                                                |                                     |   network_access = true
-                                                |                                     | install 时探测+提示,按提示改即可
-   ─────────────────────────────────────────────┼─────────────────────────────────────┼──────────────────────────────────────────
-   nacos/jaeger/clickhouse MCP 报              | 没装 uv(uvx 不在 PATH)             | brew install uv(macOS)
-   spawn uvx ENOENT                             |                                     | 或 curl -LsSf https://astral.sh/uv/install.sh | sh(Linux/Windows)
-                                                |                                     | tshoot install 时已探测+提示
-   ─────────────────────────────────────────────┼─────────────────────────────────────┼──────────────────────────────────────────
-   桌面 app 部署时 mongo / redis 凭据          | 网络不可达(VPC / 防火墙 / VPN)    | nc -vz <host> <port> 验证 TCP 通不通
-   30s timeout                                  |                                     | 跟 MCP 配置无关,网络层面排查
-   ─────────────────────────────────────────────┼─────────────────────────────────────┼──────────────────────────────────────────
-   Grafana MCP 报 401 Unauthorized              | 用户名/密码错 或 token 失效         | 桌面 app 编辑机器人 → 重填凭据 → 测试连通性按钮
-                                                |                                     | (Grafana 9.1+ 推荐用 Service Account Token,
-                                                |                                     |  不要再用老 admin API key)
-   ─────────────────────────────────────────────┼─────────────────────────────────────┼──────────────────────────────────────────
-   Loki/Prometheus 配置时不能选"直连"          | 设计如此(本系统通过 grafana MCP    | 这三家必须搭 Grafana,wizard 警告 banner 已提示
-                                                | 的 query_loki_logs/query_prometheus | 加 Grafana(右上勾 Grafana checkbox + 填 URL/凭据)
-                                                | 内置工具查,无独立 MCP 包)         |
-   ─────────────────────────────────────────────┼─────────────────────────────────────┼──────────────────────────────────────────
-   tshoot upgrade 后 known-errors.yaml         | 沉淀应该写到 known-errors.local.yaml| 检查 sink_postmortem.py 命令是否带 --workspace-root
-   沉淀的 pattern 不见了                        | (.yaml 是模板派生,会被覆盖)        | 参数指向部署后的 workspace,而不是 staging 目录
-   ─────────────────────────────────────────────┴─────────────────────────────────────┴──────────────────────────────────────────
+   | 现象 | 原因 | 解决 |
+   | --- | --- | --- |
+   | macOS 双击 .app 报"已损坏" | 应用未做苹果数字签名,Gatekeeper 拦 | 双击 dmg 里的"双击解锁.command";或命令行 `xattr -d com.apple.quarantine /Applications/TroubleshooterStudio.app` |
+   | Claude Code 看不到刚装的 agent | Claude Code 没读到 ~/.claude.json | 重启 Claude Code(命令行 `claude` 重启,GUI 退出再开) |
+   | OpenClaw 找不到机器人 | OpenClaw 启动时一次性加载 agent 列表 | 重启 OpenClaw 客户端(本地 daemon + GUI) |
+   | Codex 启动后 MCP 全部 ENOTFOUND | Codex 沙箱默认禁网 | `~/.codex/config.toml` 加 `[sandbox_workspace_write]` + `network_access = true`(install 时探测+提示) |
+   | nacos/jaeger/clickhouse MCP 报 `spawn uvx ENOENT` | 没装 uv(uvx 不在 PATH) | macOS `brew install uv`;Linux/Windows `curl -LsSf https://astral.sh/uv/install.sh \| sh`(install 时已探测+提示) |
+   | 桌面 app 部署时 mongo / redis 凭据 30s timeout | 网络不可达(VPC / 防火墙 / VPN) | `nc -vz <host> <port>` 验证 TCP 通不通;跟 MCP 配置无关,网络层面排查 |
+   | Grafana MCP 报 401 Unauthorized | 用户名/密码错 或 token 失效 | 桌面 app 编辑机器人 → 重填凭据 → 测试连通性按钮(Grafana 9.1+ 推荐 Service Account Token,不再用老 admin API key) |
+   | Loki/Prometheus/Tempo 配置时不能选"直连" | 设计如此:本系统这 3 家通过 grafana MCP 内置工具(query_loki_logs / query_prometheus)查,无独立 MCP 包 | 必须搭 Grafana,wizard banner 已提示;勾 Grafana checkbox + 填 URL/凭据 |
+   | tshoot upgrade 后沉淀的 pattern 不见了 | 沉淀应写 known-errors.local.yaml(.yaml 是模板派生会被覆盖) | 检查 sink_postmortem.py 命令是否带 `--workspace-root` 参数指向部署后的 workspace,而不是 staging 目录 |
+   | GitLab pipeline 显示 "no runners online"(但 runner 列表里在线) | runner tag 跟 .gitlab-ci.yml 对不上 / runner 没勾 "Run untagged jobs" | Settings → CI/CD → Runners → ✏ 编辑 runner:Tags 加 `macos` + 勾 ☑ Run untagged jobs(详 docs/CI-RELEASE.md 步骤 4) |
 
 2. 联系人与支持:
 

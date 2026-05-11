@@ -19,7 +19,7 @@ Agent名称: AI 排障机器人工作台(troubleshooter-studio)
 ### 三阶段时序图(Mermaid)
 
 ```mermaid
-%%{init: {'sequence': {'actorMargin': 80, 'noteMargin': 15, 'messageMargin': 45, 'boxMargin': 12}, 'themeVariables': {'fontSize': '15px'}}}%%
+%%{init: {'sequence': {'actorMargin': 50, 'noteMargin': 10, 'messageMargin': 30, 'boxMargin': 8}, 'themeVariables': {'fontSize': '13px'}}}%%
 sequenceDiagram
     autonumber
     participant Mgr as 部门管理员
@@ -72,7 +72,7 @@ sequenceDiagram
 下面是一次真实排障的内部交互全过程,展示机器人是怎么把路由查询 / 变更追溯 / 多维取证 / 经验归档串成完整链路的:
 
 ```mermaid
-%%{init: {'sequence': {'actorMargin': 90, 'noteMargin': 18, 'messageMargin': 50, 'boxMargin': 15, 'mirrorActors': false}, 'themeVariables': {'fontSize': '14px'}}}%%
+%%{init: {'sequence': {'actorMargin': 55, 'noteMargin': 10, 'messageMargin': 32, 'boxMargin': 8, 'mirrorActors': false}, 'themeVariables': {'fontSize': '13px'}}}%%
 sequenceDiagram
     autonumber
     participant Eng as 工程师

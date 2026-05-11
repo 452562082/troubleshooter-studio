@@ -67,65 +67,29 @@
 ### 流程图 1:整体架构 —— 工作台怎么把机器人装到 AI 平台
 
 ```mermaid
-%%{init: {'flowchart': {'nodeSpacing': 60, 'rankSpacing': 80, 'padding': 20}, 'themeVariables': {'fontSize': '15px'}}}%%
+%%{init: {'flowchart': {'nodeSpacing': 30, 'rankSpacing': 45}, 'themeVariables': {'fontSize': '14px'}}}%%
 flowchart TB
     classDef studio fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
     classDef target fill:#fff3e0,stroke:#f57c00,stroke-width:2px
     classDef share fill:#f3e5f5,stroke:#7b1fa2,stroke-width:1.5px
-    classDef cat fill:#fff,stroke:#7b1fa2,stroke-width:1px
 
     subgraph L1["① 上层:研制工作台(管理员一次性配置)"]
         direction LR
-        W["创建向导<br/>10 步问答"]:::studio
-        A["代码扫描<br/>反推依赖"]:::studio
-        G["内容生成<br/>派生配置"]:::studio
-        I["一键部署<br/>装到 AI 平台"]:::studio
-        W --> A --> G --> I
+        W["创建向导<br/>10 步问答"]:::studio --> A["代码扫描<br/>反推依赖"]:::studio --> G["内容生成<br/>派生配置"]:::studio --> I["一键部署<br/>装到 AI 平台"]:::studio
     end
 
     subgraph L2["② 下层:排障机器人(部署后独立工作)"]
         direction TB
-        subgraph Plats["可装到 4 个 AI 平台(任选 1+ 个)"]
-            direction LR
-            OC["OpenClaw<br/>(公司客户端)"]:::target
-            CC["Claude Code<br/>(命令行 IDE)"]:::target
-            CU["Cursor<br/>(图形 IDE)"]:::target
-            CX["Codex CLI<br/>(终端 AI 工具)"]:::target
-        end
+        Plats["**可装到 4 个 AI 平台(任选 1+ 个)**<br/>OpenClaw 公司客户端 · Claude Code 命令行 IDE<br/>Cursor 图形 IDE · Codex CLI 终端 AI 工具"]:::target
 
-        Skills["机器人能力库(按配置动态裁剪)"]:::share
+        Skills["**机器人能力库(按配置动态裁剪)**<br/>路由查询(环境/服务/配置/依赖映射) · 排障流程编排<br/>变更追溯(代码+部署+配置 三路合并)<br/>数据查询(9 种数据库只读) · 可观测查询(日志/指标/链路)"]:::share
 
-        subgraph SkillCat["五大能力"]
-            direction LR
-            SK1["路由查询<br/>环境/服务/<br/>配置/依赖<br/>映射表"]:::cat
-            SK2["排障流程<br/>编排"]:::cat
-            SK3["变更追溯<br/>代码+部署<br/>+配置"]:::cat
-            SK4["数据查询<br/>9 种数据库<br/>只读"]:::cat
-            SK5["可观测查询<br/>日志/指标<br/>/链路"]:::cat
-        end
+        MCPs["**对外接口集(13 种 MCP × 每个环境)**<br/>监控类:Grafana · Jaeger · ELK<br/>数据库类:MongoDB · PostgreSQL · Redis · MySQL · ClickHouse<br/>其它:Nacos 配置中心 · 飞书 · 飞书项目"]:::share
 
-        MCPs["对外接口集(13 种 MCP × 每个环境)"]:::share
-
-        subgraph MCPCat["三大接口类别"]
-            direction LR
-            M1["监控类<br/>Grafana / Jaeger / ELK"]:::cat
-            M2["数据库类<br/>MongoDB / PostgreSQL<br/>/ Redis / MySQL / ClickHouse"]:::cat
-            M3["其它<br/>Nacos 配置中心 /<br/>飞书 / 飞书项目"]:::cat
-        end
-
-        OC --> Skills
-        CC --> Skills
-        CU --> Skills
-        CX --> Skills
-        Skills --> SkillCat
-        Skills --> MCPs
-        MCPs --> MCPCat
+        Plats --> Skills --> MCPs
     end
 
-    I -.部署.-> OC
-    I -.部署.-> CC
-    I -.部署.-> CU
-    I -.部署.-> CX
+    I -.部署.-> Plats
 ```
 
 **读这张图**:上层做的事是"把你公司的微服务系统建模 + 派生出对应的机器人配置",下层做的事是"机器人装到 AI 平台后,独立完成排障"。4 个 AI 平台是用户日常用的,公司各人可以装到自己习惯的那个,机器人能力**完全一样**。
@@ -135,7 +99,7 @@ flowchart TB
 ### 流程图 2:排障 7 步流程 + 经验沉淀闭环
 
 ```mermaid
-%%{init: {'flowchart': {'nodeSpacing': 55, 'rankSpacing': 70, 'padding': 18}, 'themeVariables': {'fontSize': '15px'}}}%%
+%%{init: {'flowchart': {'nodeSpacing': 25, 'rankSpacing': 40}, 'themeVariables': {'fontSize': '14px'}}}%%
 flowchart TB
     classDef step fill:#e8f5e9,stroke:#388e3c,stroke-width:1.5px
     classDef fast fill:#fff3e0,stroke:#f57c00,stroke-width:2px

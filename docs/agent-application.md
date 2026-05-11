@@ -25,7 +25,7 @@
    - 全公司 MTTR(平均故障恢复时间)预计缩短 55%(从 38 分钟降到 17 分钟,2 周观察期实测)
    - 降低跨部门协同沟通成本(减少故障复盘中 73% 的重复性数据搜集工作,从 1.5 人小时降到 0.4 人小时)
    - 赋能非技术/初级运维人员,使其具备处理 80% 常见系统故障的能力(新人独立完成排障比例从 0% 提到 60%)
-   - 复发故障识别率从 30%(靠人脑记忆)升到 92%(known-errors.local.yaml 自动沉淀 + 下次 grep 命中)
+   - 复发故障识别率从 30%(靠人脑记忆)升到 92%(团队故障库自动沉淀 + 下次自动命中)
 
 7. 预期Skill等级(L1-L4): L3
    能完整自主完成"症状 → 时间轴 → 横向 → 纵向 → 三向交叉 → 根因 → 处置建议 → 经验沉淀"端到端排障任务,
@@ -64,7 +64,7 @@
 
 下面两张流程图用 **Mermaid** 格式描述,GitLab markdown 自带渲染,飞书文档 / Notion / Typora / Confluence 也都原生支持。如果你的查看环境不渲染 Mermaid,可以把代码块整段复制到 <https://mermaid.live> 在线导出 PNG / SVG。
 
-### 流程图 1:两层架构 + 4 平台部署矩阵
+### 流程图 1:整体架构 —— 工作台怎么把机器人装到 AI 平台
 
 ```mermaid
 flowchart TB
@@ -72,26 +72,26 @@ flowchart TB
     classDef target fill:#fff3e0,stroke:#f57c00,stroke-width:2px
     classDef share fill:#f3e5f5,stroke:#7b1fa2,stroke-width:1.5px
 
-    subgraph L1["上层:troubleshooter-studio 研制工作台(部门管理员一次性配置)"]
+    subgraph L1["① 上层:研制工作台(部门管理员一次性配置)"]
         direction LR
-        W["wizard<br/>10 步问答<br/>→ troubleshooter.yaml"]:::studio
-        A["analyzer<br/>5 栈代码扫描<br/>→ service+依赖+schema"]:::studio
-        G["gen<br/>模板渲染<br/>→ staging 产物"]:::studio
-        I["install --target X<br/>装到目标 AI 平台"]:::studio
+        W["创建向导<br/>10 步问答<br/>收集系统信息"]:::studio
+        A["代码扫描<br/>自动反推<br/>服务/依赖关系"]:::studio
+        G["内容生成<br/>派生机器人<br/>所需配置"]:::studio
+        I["一键部署<br/>装到目标<br/>AI 平台"]:::studio
         W --> A --> G --> I
     end
 
-    subgraph L2["下层:排障机器人(脱离 studio 独立运行)"]
+    subgraph L2["② 下层:排障机器人(部署完后独立工作)"]
         direction TB
-        subgraph Plats["4 个 AI 平台部署位置(任选 1+)"]
+        subgraph Plats["可装到的 4 个 AI 平台(任选 1 个或多个)"]
             direction LR
-            OC["OpenClaw<br/>~/.openclaw/workspace/<br/>+ openclaw.json<br/>(mcp.servers)"]:::target
-            CC["Claude Code<br/>~/.claude/agents/&lt;n&gt;.md<br/>+ ~/.claude.json<br/>(mcpServers)"]:::target
-            CU["Cursor<br/>~/.cursor/agents/&lt;n&gt;.md<br/>+ ~/.cursor/mcp.json<br/>(mcpServers)"]:::target
-            CX["Codex CLI<br/>~/.codex/agents/&lt;n&gt;.toml<br/>(TOML 内嵌<br/>[mcp_servers.*])"]:::target
+            OC["OpenClaw<br/>(公司客户端)"]:::target
+            CC["Claude Code<br/>(命令行 IDE)"]:::target
+            CU["Cursor<br/>(图形 IDE)"]:::target
+            CX["Codex CLI<br/>(终端 AI 工具)"]:::target
         end
-        Skills["共享 skill 集合(按 yaml 动态裁剪,19 候选)<br/>routing / incident-investigator / recent-changes<br/>+ config-executor + 9 数据层 + 5 obs + diagram"]:::share
-        MCPs["13 种 MCP × N env<br/>grafana(+loki+prom+tempo)/ jaeger / es / elk<br/>mongo / pg / redis / mysql / clickhouse<br/>nacos / lark / feishu_project"]:::share
+        Skills["机器人能力库(按配置动态裁剪)<br/>• 路由查询(环境/服务/配置/依赖映射,毫秒返回)<br/>• 排障流程编排(把数据查询串成完整链路)<br/>• 变更追溯(代码+部署+配置 三路合并)<br/>• 数据查询(9 种数据库只读访问)<br/>• 可观测查询(5 种监控系统:日志/指标/链路)"]:::share
+        MCPs["对外接口集(13 种 MCP × 每个环境)<br/>监控:Grafana(含日志/指标/链路)、Jaeger、ELK<br/>数据库:MongoDB / PostgreSQL / Redis / MySQL / ClickHouse<br/>配置中心:Nacos / 沟通:飞书 / 项目管理:飞书项目"]:::share
 
         OC --> Skills
         CC --> Skills
@@ -100,13 +100,17 @@ flowchart TB
         Skills --> MCPs
     end
 
-    I -.装到.-> OC
-    I -.装到.-> CC
-    I -.装到.-> CU
-    I -.装到.-> CX
+    I -.部署.-> OC
+    I -.部署.-> CC
+    I -.部署.-> CU
+    I -.部署.-> CX
 ```
 
-### 流程图 2:排障 7 步主流程 + 经验沉淀闭环
+**读这张图**:上层做的事是"把你公司的微服务系统建模 + 派生出对应的机器人配置",下层做的事是"机器人装到 AI 平台后,独立完成排障"。4 个 AI 平台是用户日常用的,公司各人可以装到自己习惯的那个,机器人能力**完全一样**。
+
+---
+
+### 流程图 2:排障 7 步流程 + 经验沉淀闭环
 
 ```mermaid
 flowchart TB
@@ -115,93 +119,98 @@ flowchart TB
     classDef start fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
     classDef loop fill:#fce4ec,stroke:#c2185b,stroke-width:2px,stroke-dasharray:5
 
-    Start(["工程师描述症状<br/>env + service + 时间窗 + 关键词"]):::start
-    S1{"Step 1.3 grep<br/>known-errors.yaml(模板)<br/>+ known-errors.local.yaml(沉淀)<br/>是否命中 pattern?"}:::step
-    Fast["✨ 快路径<br/>直走 next_actions<br/>跳过 Step 2-6<br/>⏱ 30s-2min 出处置建议"]:::fast
-    S2["Step 2 timeline 三路合并<br/>git log + K8s rollout + nacos history<br/>→ 自动标 ±5min 内 17 类 risk<br/>(配置 12 类 + 代码 5 类)"]:::step
-    S3["Step 3 横向<br/>同 env 别 service<br/>孤立 vs 广播?"]:::step
-    S4["Step 4 纵向<br/>cascade_check 沿依赖图追下游<br/>定位真凶"]:::step
-    S5["Step 5 多向交叉<br/>trace + log + metric +<br/>代码 + 数据 5 维度按问题类型选"]:::step
-    S6["Step 6 故障快报 + confidence 评级<br/>P0 命令(PRE / EXEC / POST 三段)<br/>工程师确认后执行"]:::step
-    S7["Step 7 沉淀(confidence=high 强制)<br/>sink_postmortem.py 自动 append<br/>→ known-errors.local.yaml"]:::loop
+    Start(["工程师叙述症状<br/>(哪个环境 / 哪个服务 / 什么时候开始)"]):::start
+    S1{"Step 1 查团队故障库<br/>有没有类似的历史 pattern?"}:::step
+    Fast["✨ 快路径<br/>直接给出处置建议<br/>(30 秒~2 分钟)"]:::fast
+    S2["Step 2 时间轴对齐<br/>故障前 5 分钟的代码 / 部署 / 配置 变更<br/>自动标记 17 类已知危险变更模式"]:::step
+    S3["Step 3 横向对比<br/>同环境的其它服务是不是也有问题?<br/>(单点故障 vs 全面雪崩)"]:::step
+    S4["Step 4 纵向追下游<br/>沿调用链向下游追<br/>定位真正的源头"]:::step
+    S5["Step 5 多维取证<br/>调用链 + 日志 + 指标<br/>+ 代码 + 数据库当前值"]:::step
+    S6["Step 6 输出故障快报<br/>根因 + 处置建议 + 把握度评级<br/>关键命令带验证步骤"]:::step
+    S7["Step 7 经验归档(把握度高时强制做)<br/>把本次 pattern 加入团队故障库"]:::loop
 
     Start --> S1
     S1 -->|命中| Fast
-    S1 -->|不命中| S2 --> S3 --> S4 --> S5 --> S6 --> S7
-    S7 -.闭环:下次同症状.-> S1
+    S1 -->|没命中| S2 --> S3 --> S4 --> S5 --> S6 --> S7
+    S7 -.下次同类故障<br/>直接走快路径.-> S1
 ```
 
-### 流程图 3:实战时序图(以"prod commerce 5xx 突增"为例,展示机器人内部工作过程)
+**读这张图**:每次排障都先查"团队故障库"(本团队历次故障归档的 pattern)。命中 → 直接给处置建议;没命中 → 走完整 6 步严谨流程。完成后把握度高的话 **强制把本次经验归档**,下次同类故障被快速识别。**沉淀逐月累积,机器人越用越懂本团队的故障模式**。
+
+---
+
+### 流程图 3:实战工作过程 —— 一次真实排障的内部时序
+
+下面用一个真实场景("生产环境 commerce 服务 5xx 报错激增")展示机器人内部具体做了什么:
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant Eng as 工程师
     participant Bot as 排障机器人
-    participant Route as routing skill<br/>(12 张映射表)
-    participant RC as recent-changes<br/>(timeline.py)
-    participant II as incident-investigator
-    participant K as known-errors.local.yaml
-    participant MCPg as grafana MCP
-    participant MCPj as jaeger MCP
-    participant MCPm as mongo MCP
-    participant K8s as k8s MCP
+    participant Route as 路由查询模块<br/>(服务/环境/依赖映射)
+    participant Time as 变更追溯模块
+    participant Cascade as 下游联动检查
+    participant KB as 团队故障库
+    participant Graf as 监控指标(Grafana)
+    participant Log as 日志系统
+    participant Jaeg as 调用链(Jaeger)
+    participant K8s as K8s 运行时
 
-    Eng->>Bot: prod commerce 5xx 突增,14:23 开始
+    Eng->>Bot: 生产环境 commerce 服务 5xx 报错激增,14:23 开始
 
-    Note over Bot,Route: ── Step 1 收前提 + 历史 grep ──
-    Bot->>Route: Read routing/references/env-domain-map.yaml<br/>+ service-dependency-map.yaml
-    Route-->>Bot: prod commerce 域名 / 上下游服务 / log app 名
-    Bot->>K: grep "5xx.*timeout|context deadline"<br/>known-errors.{yaml,local.yaml}
-    K-->>Bot: 无命中 → 走完整流程
+    Note over Bot,Route: Step 1 收集前提 + 查团队故障库
+    Bot->>Route: 查 commerce 在生产环境的域名 / 上下游依赖
+    Route-->>Bot: 上游是 web,下游有 user 服务 + MySQL 数据库
+    Bot->>KB: 历史上有没有"超时变小导致 5xx 雪崩"这种 pattern?
+    KB-->>Bot: 库里暂无,走完整流程
 
-    Note over Bot,RC: ── Step 2 timeline 三路合并 ──
-    Bot->>RC: python3 timeline.py --env prod --service commerce<br/>--since 1h --incident-time "14:23"
-    RC->>RC: 并发拉:<br/>git log + k8s rollout + nacos history
-    RC-->>Bot: events[] 含 1 条 correlated nacos U<br/>+ diff_risks: timeout_decreased severity:high
+    Note over Bot,Time: Step 2 时间轴对齐(故障前 5 分钟的变更)
+    Bot->>Time: 拉 commerce 在故障窗内的代码提交 / K8s 滚动 / 配置变更
+    Time-->>Bot: 14:18 配置中心改了一条:<br/>"调用 user 服务超时:30 秒 → 3 秒"<br/>系统自动归类:**超时变小(高危)**
 
-    Note over Bot,MCPg: ── Step 3 横向 验证孤立/广播 ──
-    Bot->>MCPg: query_prometheus 同 namespace 其它 service 5xx
-    MCPg-->>Bot: 仅 commerce 错误率高 → 孤立故障
+    Note over Bot,Graf: Step 3 横向对比(同环境别的服务受影响吗?)
+    Bot->>Graf: 同 namespace 其它服务最近错误率
+    Graf-->>Bot: 只有 commerce 错误率突增 → 单点故障
 
-    Note over Bot,II: ── Step 4 纵向 cascade_check 下游 ──
-    Bot->>II: python3 cascade_check.py commerce
-    II->>Route: 读 service-dependency-map: commerce → user
-    II->>MCPg: query_loki_logs user 服务最近 5min
-    MCPg-->>II: user 服务 timeout 暴涨,跟 commerce 同步
-    II-->>Bot: 凶手在 commerce → user 调用环节
+    Note over Bot,Cascade: Step 4 纵向追下游
+    Bot->>Cascade: 沿依赖链查 commerce → user 健康状态
+    Cascade->>Log: user 服务最近 5 分钟日志
+    Log-->>Cascade: 大量"调用 user 超时"错误
+    Cascade-->>Bot: 凶手锁定在 commerce 调 user 这条边
 
-    Note over Bot,K8s: ── Step 5 多向交叉(取证关键证据)──
-    Bot->>K8s: get_pod_logs commerce 最近 10min
-    K8s-->>Bot: 错误栈:"context deadline exceeded calling user"
-    Bot->>MCPj: search_traces service=commerce error=true
-    MCPj-->>Bot: trace 显示 user 调用 3.2s timeout
+    Note over Bot,Jaeg: Step 5 多维取证(找出具体证据)
+    Bot->>K8s: 拉 commerce 容器最近错误栈
+    K8s-->>Bot: 错误栈指向 user 这次 RPC 调用
+    Bot->>Jaeg: 找一条出错的调用链看 span 时长
+    Jaeg-->>Bot: user 调用 3.2 秒就超时,比平时 p99 大
 
-    Note over Bot,Eng: ── Step 6 故障快报 ──
-    Bot-->>Eng: 故障快报:confidence=high<br/>根因: nacos downstream.user.timeout 从 30s 改 3s<br/>P0: nacos 后台回滚到上一版本<br/>预计恢复: 1-2 分钟
-    Eng->>Eng: nacos UI 点回滚
+    Note over Bot,Eng: Step 6 给出故障快报
+    Bot-->>Eng: **把握度: 高**<br/>**根因**: 配置中心把 commerce 调 user 超时从 30 秒改 3 秒<br/>**处置**: 配置中心后台回滚到上一版本<br/>**预计恢复**: 1-2 分钟
+    Eng->>Eng: 配置中心 UI 点回滚
     Eng->>Bot: 已回滚,等待验证
 
-    Note over Bot,K: ── Step 7 沉淀(confidence=high 强制)──
-    Bot->>Bot: 抽象成 pattern:<br/>"downstream\\.\\w+\\.timeout.*[1-3]s"
-    Bot->>K: python3 sink_postmortem.py --input pattern.json
-    K-->>Bot: ✓ append 完成,下次同症状直接 grep 命中
+    Note over Bot,KB: Step 7 归档经验(把握度高时强制做)
+    Bot->>Bot: 抽象成可复用的 pattern:<br/>"调用超时改小到 1-3 秒,常引发上游 5xx 雪崩"
+    Bot->>KB: 追加到团队故障库
+    KB-->>Bot: ✓ 已归档,下次同类故障直接命中
 ```
 
-**这张图想说的事**:机器人不是"把所有 MCP 工具丢给 LLM 自由发挥",而是有**结构化的取证顺序**:
-1. 先查映射表(routing,毫秒级答出"这是谁的服务、log app 是什么、依赖谁")
-2. 再扫历史(timeline.py 三路合并 + 17 类 risk 自动分类,给定性结论)
-3. 然后横向验证(指标 / 日志)→ 纵向追下游
-4. 取证(trace + 完整错误栈)
-5. 最后才输出快报 + 沉淀
+**读这张图**:机器人**不是"把所有数据丢给大模型自由发挥"**,而是有结构化的取证顺序:
 
-每一步都是**确定性的脚本/MCP 调用**驱动 LLM 决策,而不是反过来。这是它能 L3 自主完成排障 + 跨工程师水平稳定输出的核心。
+1. **先查路由表**(毫秒级答出"这是谁的服务、依赖谁",不用大模型猜)
+2. **再扫历史变更**(三路合并 + 17 类危险模式自动归类,定量给出"超时变小高危"结论)
+3. **横向验证**单点 vs 全面 → **纵向追下游**定位真凶
+4. **多维取证**(调用链 + 日志 + 错误栈)
+5. **输出快报** + **归档经验**
+
+每一步都是**确定性的内部模块或数据接口调用**在驱动大模型做局部决策,而不是反过来 ── 这是 L3 等级(完整自主完成单项任务)+ 跨工程师水平稳定输出的核心保证。
 
 ---
 
 **附:Mermaid 图使用说明**
 
-三张图既可作 markdown 流程图用,也可在 GitLab merge request / 飞书文档 / Confluence wiki 里直接嵌入。导出图片时建议白底,字体大些(`mermaid.live` 的 "Actions → PNG/SVG → ⚙ Background color: white" 即可)。
+三张图既能在 markdown 源码里 diff(便于和代码一起 review 演进),也能在 GitLab 网页 / 飞书文档 / Confluence wiki 里直接嵌入(都自带 Mermaid 渲染)。需要静态图片(贴 PPT / Word):把 ` ```mermaid ` 代码块整段复制到 <https://mermaid.live> → Actions → 导出 PNG / SVG。
 
 3. 主要使用的技术/工具/平台:
 

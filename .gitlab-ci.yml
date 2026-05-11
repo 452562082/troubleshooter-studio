@@ -1,19 +1,36 @@
 # GitLab CI 等价于 .github/workflows/ci.yml,主要 gitlab 实例跑这份。
-# 四类 job:
-#   go                  — go vet / fmt / mod tidy / test -race -cover     (Docker)
-#   web                 — npm ci + vue-tsc --noEmit + vite build          (Docker)
-#   desktop             — make desktop-app 校验 Wails + .app 打包链        (需要 macos runner)
-#   release:{p,m,M}     — main 上 manual,等价 make bump-{patch,minor,major}:
-#                         算版本 → push tag → 多平台编 → 上传 GitLab Release
+# Job 拓扑(并行 / 串行 / manual):
 #
-# desktop job 需要一台带 `macos` tag 的 gitlab-runner;公司内部如果没有,
-# 当前是 allow_failure: true + when: manual,手动触发且失败不阻塞主 pipeline,
-# 有 runner 后可以改成自动跑 + strict。
+#   stage: test                stage: build              stage: release
+#   ┌──────────┐               ┌────────────┐            ┌─────────────────┐
+#   │ go:lint  │──┐            │  desktop   │            │ release:patch   │
+#   │ go:test  │  ├─ 全过 ────►│  needs web │ (manual)   │ release:minor   │ (3 选 1 manual)
+#   │ web      │──┘            │            │            │ release:major   │
+#   └──────────┘               └────────────┘            └─────────────────┘
+#
+# 触发(workflow rules):
+#   - main push          → 跑全套
+#   - merge_request      → 跑 go:lint / go:test / web(desktop 改成 manual 按钮可选)
+#   - tag push(v*)      → 不跑(release job 已经在打 tag 那次 pipeline 里产出,
+#                         tag 二次触发 pipeline 是浪费,且 release job 不会再选自己)
+#   - 其它 branch push   → 不跑(只测试本仓 main 流;feature 分支测试在 MR 创建后)
 #
 # release:* 一次性管理员配置(见 docs/CI-RELEASE.md):
 #   1. CI/CD Variables:GITLAB_TOKEN(Project Access Token,scope=api+write_repository,masked+protected)
 #   2. macos tag runner(打 dmg + 跨平台 binary)
 #   3. Settings → Repository → Protected tags:加 v* pattern,允许 maintainer
+
+# 全局触发规则:控制 pipeline 什么时候启动
+workflow:
+  rules:
+    # tag push(尤其本仓 release job 自己创建的 v* tag) → 跳,不让 tag 又触发一次完整 pipeline
+    - if: '$CI_COMMIT_TAG'
+      when: never
+    # main 分支 push → 跑
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    # MR pipeline → 跑(开 MR 时所有 commit 上 push 都触发)
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    # 其它情况不跑(feature 分支 push 不开 MR 时不消耗 CI)
 
 stages:
   - test
@@ -28,10 +45,14 @@ variables:
   CI: "true"
   FORCE_COLOR: "0"
 
-# ── Go:vet / fmt / mod tidy / build / test + 覆盖率 ─────────────────────
-go:
+# ── Go lint:vet + golangci-lint + gofmt + mod tidy ──────────────────────
+# 拆 lint 跟 test 独立 job(原来串一坨,fmt 没过 → test 跑不到,反馈不全)。
+# 两个 job 用同 image + 同 cache key,Go module 缓存共享,代价低。
+go:lint:
   stage: test
-  image: golang:1.25
+  # 用 golangci-lint 官方 image 自带 go + 二进制,**省下每次 wget GitHub release 解压**(老逻辑 ~10s + 依赖 GitHub 可达)
+  image: golangci/golangci-lint:v2.0.2
+  interruptible: true
   cache:
     key:
       files:
@@ -41,17 +62,12 @@ go:
       - .cache/go-mod
   script:
     - go vet ./...
-    # golangci-lint(走 .golangci.yml 配置):抓 errcheck/ineffassign/unused/misspell 等
-    - |
-      GOLANGCI_VERSION=v2.0.2
-      wget -qO- "https://github.com/golangci/golangci-lint/releases/download/${GOLANGCI_VERSION}/golangci-lint-${GOLANGCI_VERSION#v}-linux-amd64.tar.gz" | tar xz
-      ./golangci-lint-${GOLANGCI_VERSION#v}-linux-amd64/golangci-lint run --timeout=3m
+    - golangci-lint run --timeout=3m
     - |
       out=$(gofmt -l .)
       if [ -n "$out" ]; then
         echo "unformatted files detected:"
         echo "$out"
-        echo ""
         echo "请在本地运行: gofmt -w ."
         exit 1
       fi
@@ -61,6 +77,20 @@ go:
         echo "go.mod/go.sum 与源码不一致,请在本地运行: go mod tidy"
         exit 1
       fi
+
+# ── Go test:build + test -race -cover ──────────────────────────────────
+go:test:
+  stage: test
+  image: golang:1.25
+  interruptible: true
+  cache:
+    key:
+      files:
+        - go.sum
+    paths:
+      - .cache/go-build
+      - .cache/go-mod
+  script:
     - go build ./...
     - go test -race -cover -coverprofile=coverage.out ./...
     - go tool cover -func=coverage.out | tail -1
@@ -73,9 +103,11 @@ go:
     expire_in: 1 week
 
 # ── Web:vue-tsc 类型检查 + vite 产物构建 ─────────────────────────────────
+# artifact 给 desktop job 复用,desktop 不再重跑 web build。
 web:
   stage: test
   image: node:20
+  interruptible: true
   cache:
     key:
       files:
@@ -90,10 +122,15 @@ web:
     # npm run build 实际跑 vue-tsc --noEmit && vite build
     # 类型检查 + 产物构建一把,能抓类型漂移 + rollup 打包失败
     - npm run build
+    # vite 产物 (web/dist) 拷到 embed 目标,让下游 desktop job 用同一份不重复构建
+    - rm -rf ../internal/webui/dist
+    - mkdir -p ../internal/webui/dist
+    - cp -R dist/. ../internal/webui/dist/
   artifacts:
     when: on_success
     paths:
       - web/dist
+      - internal/webui/dist   # 关键:desktop job 拿这份直接 cgo 编 .app,跳过 npm 重 build
     expire_in: 1 week
 
 # ── Desktop:macOS .app 打包 ──────────────────────────────────────────────
@@ -103,20 +140,26 @@ desktop:
   stage: build
   tags:
     - macos
+  # 复用 web 已 build 的 internal/webui/dist,跳过 npm install + vite build(原来重复跑 ~2-3 min)
+  needs:
+    - job: web
+      artifacts: true
   rules:
-    # merge request 上手动触发一次,main push 自动触发
+    # merge request 上手动触发一次,main push 也手动触发(macos runner 排队贵,不全自动)
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       when: manual
       allow_failure: true
     - if: '$CI_COMMIT_BRANCH == "main"'
-      when: manual # 没 runner 时改 on_success 时需要手动触发,有 runner 可以去掉这行
+      when: manual
       allow_failure: true
   # macos runner 要预装 Xcode Command Line Tools + Go + Node。
   # Wails cgo 链接需要 UniformTypeIdentifiers.framework,Makefile 里已经硬编码 CGO_LDFLAGS。
+  # WEB_PRE_BUILT=1 让 Makefile 跳过 web 子任务(已经从 artifact 拿到 internal/webui/dist)
   script:
     - go version
-    - node --version
-    - make desktop-app
+    - test -d internal/webui/dist && test -f internal/webui/dist/index.html \
+        || { echo "✗ 没拿到 web artifact(internal/webui/dist),需要先跑 web job" >&2; exit 1; }
+    - SKIP_WEB_BUILD=1 make desktop-app
     # 校验 .app bundle 三件套(可执行二进制 / Info.plist / icon.icns)
     - test -f dist/TroubleshooterStudio.app/Contents/MacOS/TroubleshooterStudio
     - test -f dist/TroubleshooterStudio.app/Contents/Info.plist
@@ -129,13 +172,13 @@ desktop:
       - dist/TroubleshooterStudio.app
     expire_in: 1 week
 
-# ── Release:main 上 manual 触发,等价 make bump-{patch,minor,major} ──────
+# ── Release:main 上 manual 触发,等价 scripts/release.sh patch|minor|major ──
 #
 # 设计:不全自动(防 main 上每个 commit 都打版本)。在 GitLab Pipeline 页面看到 3 个按钮:
 #   release:patch   - bug 修复版,vX.Y.Z → vX.Y.(Z+1)
 #   release:minor   - 功能升级,vX.Y.Z → vX.(Y+1).0
 #   release:major   - breaking change,vX.Y.Z → v(X+1).0.0
-# 点哪个就跑哪个,跟本地 `make bump-{patch,minor,major}` 完全等价。
+# 点哪个就跑哪个。
 #
 # 必须满足:
 #  - GITLAB_TOKEN 已配 CI/CD Variables(masked + protected),token 拥有
@@ -154,14 +197,18 @@ desktop:
   variables:
     # 拉全 history,changelog.sh / git describe --tags --abbrev=0 都依赖
     GIT_DEPTH: 0
+  # release 流程长(编 + 上传),设 30 min 防 runner 卡死无限挂
+  timeout: 30 minutes
+  # release 不能 interruptible,跑一半被打断会留半截脏 tag/release 状态
+  interruptible: false
   before_script:
     # 必备工具:jq 给 publish-gitlab-release.sh 解析 GitLab API JSON
     - command -v jq >/dev/null 2>&1 || brew install jq
     # GITLAB_TOKEN 是 release-publish + git push 共用的鉴权
     - test -n "$GITLAB_TOKEN" || { echo "✗ CI/CD Variables 缺 GITLAB_TOKEN(scope=api+write_repository)" >&2; exit 1; }
-    # CI checkout 默认 detached HEAD;tag-and-release 跑 git push 需要在 branch 上
+    # CI checkout 默认 detached HEAD;scripts/release.sh 跑 git push 需要在 branch 上
     - git checkout -B main "$CI_COMMIT_SHA"
-    # tag-and-release 拿 git config user.* 写 tag annotation 的 Tagger 字段
+    # tag 的 Tagger 字段
     - git config user.name "${GITLAB_USER_NAME:-CI}"
     - git config user.email "${GITLAB_USER_EMAIL:-ci@${CI_SERVER_HOST}}"
     # remote URL 改成 oauth2 + GITLAB_TOKEN,git push 才有权限(默认 read-only)

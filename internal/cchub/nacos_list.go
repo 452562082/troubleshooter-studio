@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 )
 
@@ -42,7 +43,7 @@ func (c *nacosClient) listNamespaces() ([]nsInfo, error) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("list namespaces status %d: %s", resp.StatusCode, snippet(body))
 	}
 	// 两个版本 data 结构基本一致,都是 [{namespace, namespaceShowName, ...}]
@@ -127,7 +128,7 @@ func (c *nacosClient) fetchConfigsPage(namespace string, page, pageSize int) ([]
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		return nil, 0, 0, fmt.Errorf("list configs status %d: %s", resp.StatusCode, snippet(body))
 	}
 

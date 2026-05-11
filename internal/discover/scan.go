@@ -4,11 +4,8 @@ import (
 	"encoding/json"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -207,43 +204,6 @@ func depthOf(rel string) int {
 		}
 	}
 	return n
-}
-
-// systemLocateAgents 用 OS 自带的索引工具（macOS: mdfind / Linux: locate）
-// 找所有名为 tshoot.json 的文件，返回它们所在目录（作为 Scan 的额外 roots）。
-// 失败 / 工具不存在 / 非支持平台都返回空切片，不抛错——它本来就是最大努力优化。
-//
-// macOS 默认索引用户 home + /Applications 等常见目录；被 Spotlight 排除的位置（比如
-// Time Machine 备份、某些加密卷）会扫不到，这些都不是排障机器人常驻的地方，可接受。
-func systemLocateAgents() []string {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("mdfind", "-name", "tshoot.json")
-	case "linux":
-		// locate 依赖 updatedb；可能没装，没装的话 Output() 就报错，我们返回空
-		if _, err := exec.LookPath("locate"); err != nil {
-			return nil
-		}
-		cmd = exec.Command("locate", "--basename", "tshoot.json")
-	default:
-		return nil // Windows 没通用索引工具；靠 roots 参数 + 用户手动加路径
-	}
-	out, err := cmd.Output()
-	if err != nil {
-		return nil
-	}
-	var dirs []string
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		// mdfind 可能命中 backup/旧产物，Scan 每个 root 都会 os.Stat + DFS，
-		// 不存在的自然跳过；基本正确的就进去。
-		dirs = append(dirs, filepath.Dir(line))
-	}
-	return dirs
 }
 
 func expandHome(p string) string {

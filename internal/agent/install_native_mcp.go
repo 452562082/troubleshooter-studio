@@ -244,7 +244,7 @@ func removeLegacyGrafanaBin(root string) {
 // 文件不存在 / 没 mcpServers 字段 / 没命中任何 key → no-op。
 func pruneLegacyClaudeSettingsMCP(legacyPath string, servers map[string]any) error {
 	if _, err := os.Stat(legacyPath); err != nil {
-		return nil
+		return nil //nolint:nilerr // 文件不存在就 no-op
 	}
 	settings, err := readJSONOrEmpty(legacyPath)
 	if err != nil {

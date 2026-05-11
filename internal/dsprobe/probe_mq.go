@@ -27,7 +27,7 @@ func probeKafka(f map[string]string) (bool, string, error) {
 			continue
 		}
 		if conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), probeTimeout); err == nil {
-			conn.Close()
+			_ = conn.Close()
 			return true, fmt.Sprintf("TCP 通 %s(SASL 鉴权未验证)", host+":"+port), nil
 		} else {
 			lastErr = err
@@ -54,7 +54,7 @@ func probeRocketMQ(f map[string]string) (bool, string, error) {
 			continue
 		}
 		if conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), probeTimeout); err == nil {
-			conn.Close()
+			_ = conn.Close()
 			return true, fmt.Sprintf("TCP 通 %s", host+":"+port), nil
 		} else {
 			lastErr = err
@@ -93,7 +93,7 @@ func probeRabbitMQ(f map[string]string) (bool, string, error) {
 	if err != nil {
 		return false, "", fmt.Errorf("TCP dial 失败: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := conn.Write([]byte("AMQP\x00\x00\x09\x01")); err != nil {
 		return false, "", err
 	}

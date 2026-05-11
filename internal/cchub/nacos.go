@@ -78,7 +78,7 @@ func PreloadNacos(req Request) (*Result, error) {
 		}
 		nsList := make([]Namespace, 0, len(namespaces))
 		for _, n := range namespaces {
-			nsList = append(nsList, Namespace{ID: n.ID, ShowName: n.ShowName})
+			nsList = append(nsList, Namespace(n))
 		}
 		notes = append(notes, fmt.Sprintf("只列了 namespace(共 %d 个),未拉 configs", len(nsList)))
 		return &Result{Type: "nacos", Entries: nil, Namespaces: nsList, Notes: notes}, nil
@@ -136,7 +136,7 @@ func PreloadNacos(req Request) (*Result, error) {
 	nsList := []Namespace{}
 	if namespaces, err := cli.listNamespaces(); err == nil {
 		for _, n := range namespaces {
-			nsList = append(nsList, Namespace{ID: n.ID, ShowName: n.ShowName})
+			nsList = append(nsList, Namespace(n))
 		}
 	}
 

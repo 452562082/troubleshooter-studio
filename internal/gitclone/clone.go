@@ -88,15 +88,15 @@ func EnsureAllBranches(repoPath string) error {
 	if _, err := exec.LookPath("git"); err != nil {
 		return ErrGitNotFound
 	}
-	if err := exec.Command("git", "-C", repoPath, "rev-parse", "--show-toplevel").Run(); err != nil {
-		return nil
+	if exec.Command("git", "-C", repoPath, "rev-parse", "--show-toplevel").Run() != nil {
+		return nil //nolint:nilerr // 不是 git 仓库或目录不存在,不强求
 	}
 	// 读当前 origin fetch refspec
 	cmd := exec.Command("git", "-C", repoPath, "config", "--get", "remote.origin.fetch")
 	var out bytes.Buffer
 	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
-		return nil // 没 origin,算了
+	if cmd.Run() != nil {
+		return nil //nolint:nilerr // 没 origin,算了
 	}
 	current := strings.TrimSpace(out.String())
 	wildcard := "+refs/heads/*:refs/remotes/origin/*"
@@ -137,17 +137,15 @@ func EnsureSubmodules(repoPath string) error {
 		return ErrGitNotFound
 	}
 	// 没 .gitmodules 的仓库不用跑(大多数仓库都这种)
-	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "--show-toplevel")
-	if err := cmd.Run(); err != nil {
-		return nil // 不是 git 仓库或目录不存在,不强求
+	if exec.Command("git", "-C", repoPath, "rev-parse", "--show-toplevel").Run() != nil {
+		return nil //nolint:nilerr // 不是 git 仓库或目录不存在,不强求
 	}
 	// 检查 .gitmodules 存在(跑 git config 更稳,避免对 submodule 的 "." .gitmodules 等奇怪状态误判)
-	cmd = exec.Command("git", "-C", repoPath, "config", "--file", ".gitmodules", "--get-regexp", "path")
-	if err := cmd.Run(); err != nil {
-		return nil // 没 .gitmodules 或读不到,不是 submodule umbrella,skip
+	if exec.Command("git", "-C", repoPath, "config", "--file", ".gitmodules", "--get-regexp", "path").Run() != nil {
+		return nil //nolint:nilerr // 没 .gitmodules 或读不到,不是 submodule umbrella,skip
 	}
 	// 拉 submodule。recursive 处理嵌套;init 创建未 init 的;update 同步到记录的 commit。
-	cmd = exec.Command("git", "-C", repoPath, "submodule", "update", "--init", "--recursive")
+	cmd := exec.Command("git", "-C", repoPath, "submodule", "update", "--init", "--recursive")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

@@ -107,9 +107,8 @@ func walkWorkspaceDir(abs, relSoFar string, parent *FileNode) error {
 		if !e.IsDir() {
 			node.Size = info.Size()
 		} else {
-			if err := walkWorkspaceDir(nodeAbs, nodeRel, &node); err != nil {
-				// 递归失败不中断整体(权限问题 / 软链断裂),只记空目录
-			}
+			// 递归失败不中断整体(权限问题 / 软链断裂),只记空目录
+			_ = walkWorkspaceDir(nodeAbs, nodeRel, &node)
 		}
 		parent.Children = append(parent.Children, node)
 	}

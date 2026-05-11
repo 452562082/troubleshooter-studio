@@ -73,10 +73,10 @@ func ListGrafanaDatasources(grafanaURL, apiKey, user, pass string) ([]Datasource
 	if err != nil {
 		return nil, err
 	}
-	if status == 401 || status == 403 {
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
 		return nil, fmt.Errorf("grafana 鉴权失败 (HTTP %d):检查 api key / 账密", status)
 	}
-	if status != 200 {
+	if status != http.StatusOK {
 		return nil, fmt.Errorf("grafana /api/datasources HTTP %d: %s", status, snippet(body))
 	}
 	var raw []struct {
@@ -169,7 +169,7 @@ func httpGet(rawURL, apiKey, user, pass string) ([]byte, int, error) {
 		Timeout:   probeTimeout,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
 	}
-	req, err := http.NewRequest("GET", rawURL, nil)
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, 0, fmt.Errorf("URL 格式错: %w", err)
 	}
@@ -208,18 +208,18 @@ func decodeLabelsResp(body []byte, status int, err error) (*LabelsResult, error)
 	if err != nil {
 		return nil, err
 	}
-	if status == 401 || status == 403 {
-		return nil, fmt.Errorf("Loki 鉴权失败 (HTTP %d):检查凭证 / Loki tenant 是否需要 X-Scope-OrgID", status)
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return nil, fmt.Errorf("loki 鉴权失败 (HTTP %d):检查凭证 / Loki tenant 是否需要 X-Scope-OrgID", status)
 	}
-	if status != 200 {
-		return nil, fmt.Errorf("Loki /labels HTTP %d: %s", status, snippet(body))
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("loki /labels HTTP %d: %s", status, snippet(body))
 	}
 	var doc struct {
 		Status string   `json:"status"`
 		Data   []string `json:"data"`
 	}
 	if err := json.Unmarshal(body, &doc); err != nil {
-		return nil, fmt.Errorf("Loki labels 响应解析失败: %w(body: %s)", err, snippet(body))
+		return nil, fmt.Errorf("loki labels 响应解析失败: %w(body: %s)", err, snippet(body))
 	}
 	notes := []string{fmt.Sprintf("拉到 %d 个 label key", len(doc.Data))}
 	return &LabelsResult{Labels: doc.Data, Notes: notes}, nil
@@ -229,18 +229,18 @@ func decodeValuesResp(key string, body []byte, status int, err error) (*ValuesRe
 	if err != nil {
 		return nil, err
 	}
-	if status == 401 || status == 403 {
-		return nil, fmt.Errorf("Loki 鉴权失败 (HTTP %d)", status)
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return nil, fmt.Errorf("loki 鉴权失败 (HTTP %d)", status)
 	}
-	if status != 200 {
-		return nil, fmt.Errorf("Loki /label/%s/values HTTP %d: %s", key, status, snippet(body))
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("loki /label/%s/values HTTP %d: %s", key, status, snippet(body))
 	}
 	var doc struct {
 		Status string   `json:"status"`
 		Data   []string `json:"data"`
 	}
 	if err := json.Unmarshal(body, &doc); err != nil {
-		return nil, fmt.Errorf("Loki label values 响应解析失败: %w(body: %s)", err, snippet(body))
+		return nil, fmt.Errorf("loki label values 响应解析失败: %w(body: %s)", err, snippet(body))
 	}
 	notes := []string{fmt.Sprintf("label=%s 共 %d 个 value", key, len(doc.Data))}
 	return &ValuesResult{Key: key, Values: doc.Data, Notes: notes}, nil

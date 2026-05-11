@@ -20,7 +20,7 @@ func probeClickHouse(f map[string]string) (bool, string, error) {
 	rawURL = strings.TrimRight(rawURL, "/")
 	cli := &http.Client{Timeout: probeTimeout}
 	q := rawURL + "/?query=SELECT+1"
-	req, _ := http.NewRequest("GET", q, nil)
+	req, _ := http.NewRequest(http.MethodGet, q, nil)
 	if user := f["user"]; user != "" {
 		req.SetBasicAuth(user, f["pass"])
 	}
@@ -30,10 +30,10 @@ func probeClickHouse(f map[string]string) (bool, string, error) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return false, "", fmt.Errorf("ClickHouse 认证失败 (%d): %s", resp.StatusCode, snippet(body))
 	}
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		return false, "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, snippet(body))
 	}
 	if !strings.Contains(string(body), "1") {

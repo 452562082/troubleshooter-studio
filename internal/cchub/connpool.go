@@ -66,9 +66,3 @@ func getOrConnectNacos(addr, user, pass string) (*nacosClient, error) {
 	})
 	return cli, nil
 }
-
-// invalidateNacosConn 手动清某组凭证的缓存。目前没有直接入口(token 过期靠 TTL 自动重建),
-// 保留这个以备将来加 "用户改密码 / 强制重连" 的 UI。
-func invalidateNacosConn(addr, user, pass string) {
-	nacosConnCache.Delete(nacosCacheKey(addr, user, pass))
-}

@@ -20,7 +20,7 @@ func probePostgres(f map[string]string) (bool, string, error) {
 	if err != nil {
 		return false, "", fmt.Errorf("dsn 格式错: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {

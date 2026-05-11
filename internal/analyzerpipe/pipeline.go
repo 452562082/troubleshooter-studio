@@ -162,7 +162,7 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 		}
 		if pathMissing {
 			if !opts.AutoClone {
-				perRepo = append(perRepo, RepoSummary{Name: repo.Name, Status: "skipped", Error: "not-found", Role: string(repo.EffectiveRole())})
+				perRepo = append(perRepo, RepoSummary{Name: repo.Name, Status: "skipped", Error: "not-found", Role: repo.EffectiveRole()})
 				progress(fmt.Sprintf("[skip] repo %s not found at %s", repo.Name, repoPath))
 				continue
 			}
@@ -171,7 +171,7 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 			if repoPath == "" {
 				if opts.ReposRoot == "" {
 					perRepo = append(perRepo, RepoSummary{Name: repo.Name, Status: "skipped",
-						Error: "no path hint and no repos_root to auto-clone into", Role: string(repo.EffectiveRole())})
+						Error: "no path hint and no repos_root to auto-clone into", Role: repo.EffectiveRole()})
 					continue
 				}
 				repoPath = filepath.Join(opts.ReposRoot, repo.Name)
@@ -185,7 +185,7 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 				Branch: branch,
 				Depth:  repo.Analysis.ShallowDepth,
 			}); err != nil {
-				perRepo = append(perRepo, RepoSummary{Name: repo.Name, Status: "clone-failed", Error: err.Error(), Role: string(repo.EffectiveRole())})
+				perRepo = append(perRepo, RepoSummary{Name: repo.Name, Status: "clone-failed", Error: err.Error(), Role: repo.EffectiveRole()})
 				progress(fmt.Sprintf("[skip] clone %s failed: %v", repo.Name, err))
 				continue
 			}
@@ -257,7 +257,7 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 				DetectedStack:     detectedStack,
 				DetectedFramework: detectedFramework,
 				Branches:          branches,
-				Role:              string(repo.EffectiveRole()),
+				Role:              repo.EffectiveRole(),
 			})
 			progress(fmt.Sprintf("[skip] %s: %v", repo.Name, err))
 			continue
@@ -297,7 +297,7 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 			DetectedStack:     detectedStack,
 			DetectedFramework: detectedFramework,
 			Branches:          branches,
-			Role:              string(repo.EffectiveRole()),
+			Role:              repo.EffectiveRole(),
 		})
 		progress(fmt.Sprintf("[ok] analyzed %s (stack=%s): %d service_names, %d findings",
 			repo.Name, effectiveStack, len(ra.ServiceNames), len(ra.Findings)))

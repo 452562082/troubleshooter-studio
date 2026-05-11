@@ -249,11 +249,11 @@ func (a *App) GenPreview(yamlText string) (*GenPreviewResult, error) {
 		}
 		_ = filepath.Walk(r.root, func(p string, info os.FileInfo, walkErr error) error {
 			if walkErr != nil || info == nil || info.IsDir() {
-				return nil
+				return nil //nolint:nilerr // 单个 entry 失败/目录都 skip,walk 继续
 			}
 			rel, err := filepath.Rel(r.root, p)
 			if err != nil {
-				return nil
+				return nil //nolint:nilerr // path 算不出相对就 skip,walk 继续
 			}
 			// openclaw:剥 templates/workspace-template/ 前缀;不在那个子树下的(比如根级
 			// scripts/install.sh)就照原样保留,加 target 前缀以区分。
@@ -266,7 +266,7 @@ func (a *App) GenPreview(yamlText string) (*GenPreviewResult, error) {
 			data, readErr := os.ReadFile(p)
 			if readErr != nil {
 				res.Files = append(res.Files, f)
-				return nil
+				return nil //nolint:nilerr // 读不到就只挂 metadata,walk 继续
 			}
 			for _, b := range data {
 				if b == 0 {

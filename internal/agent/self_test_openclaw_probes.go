@@ -208,7 +208,7 @@ func probeGrafanaLike(
 		}
 		_ = resp.Body.Close()
 		switch resp.StatusCode {
-		case 200, 401, 403:
+		case http.StatusOK, http.StatusUnauthorized, http.StatusForbidden:
 			add(prefix+" "+e.ID, "PASS", fmt.Sprintf("HTTP %d", resp.StatusCode))
 		default:
 			add(prefix+" "+e.ID, "FAIL", fmt.Sprintf("HTTP %d", resp.StatusCode))

@@ -76,7 +76,7 @@ func TestPreloadApollo_Unauthorized(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		w.WriteHeader(401)
+		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"message":"unauthorized"}`))
 	}))
 	defer srv.Close()

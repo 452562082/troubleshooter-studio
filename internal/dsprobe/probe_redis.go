@@ -42,7 +42,7 @@ func probeRedis(f map[string]string) (bool, string, error) {
 	opts.ReadTimeout = probeTimeout
 	opts.WriteTimeout = probeTimeout
 	cli := redis.NewClient(opts)
-	defer cli.Close()
+	defer func() { _ = cli.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
 	if err := cli.Ping(ctx).Err(); err != nil {

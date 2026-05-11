@@ -178,7 +178,7 @@ func (a *App) KuboardListDeployments(in KuboardListPodsInput) ([]KuboardDeployme
 	}
 	if len(listItems) == 0 {
 		// 五种命名都空 —— 把 Kuboard 实际响应的前 600 字节灌进 error,让用户能看到字段名
-		return nil, fmt.Errorf("Kuboard 返回里没识别出 list 字段(试过 list/items/records/content/rows);URL=%s;响应前 600 字节=%s",
+		return nil, fmt.Errorf("kuboard 返回里没识别出 list 字段(试过 list/items/records/content/rows);URL=%s;响应前 600 字节=%s",
 			hitURL, snippetN(raw, 600))
 	}
 	out := make([]KuboardDeploymentInfo, 0, len(listItems))

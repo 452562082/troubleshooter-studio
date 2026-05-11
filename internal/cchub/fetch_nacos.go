@@ -117,7 +117,7 @@ func (cli *nacosClient) fetchOneConfigInternal(namespace, group, dataID string) 
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if resp.StatusCode == 200 {
+		if resp.StatusCode == http.StatusOK {
 			// v3 响应可能包一层 {code, data:{content, ...}};v1 直接是原文
 			content := string(body)
 			format := guessFormat(req.DataID, content)

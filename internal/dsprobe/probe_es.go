@@ -24,7 +24,7 @@ func probeElasticsearch(f map[string]string) (bool, string, error) {
 		Timeout:   probeTimeout,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
 	}
-	req, _ := http.NewRequest("GET", rawURL+"/", nil)
+	req, _ := http.NewRequest(http.MethodGet, rawURL+"/", nil)
 	if user := f["user"]; user != "" {
 		req.SetBasicAuth(user, f["pass"])
 	}
@@ -34,13 +34,13 @@ func probeElasticsearch(f map[string]string) (bool, string, error) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	if resp.StatusCode == 401 {
+	if resp.StatusCode == http.StatusUnauthorized {
 		return false, "", fmt.Errorf("ES 认证失败 (401):账号密码错")
 	}
-	if resp.StatusCode == 403 {
+	if resp.StatusCode == http.StatusForbidden {
 		return false, "", fmt.Errorf("ES 权限不足 (403)")
 	}
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		return false, "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, snippet(body))
 	}
 	bs := string(body)

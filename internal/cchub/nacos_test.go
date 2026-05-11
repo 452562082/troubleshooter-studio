@@ -24,7 +24,7 @@ func TestPreloadNacos_LoginThenList(t *testing.T) {
 				t.Fatal(err)
 			}
 			if r.FormValue("username") != "nacos" || r.FormValue("password") != "nacos" {
-				http.Error(w, "invalid creds", 403)
+				http.Error(w, "invalid creds", http.StatusForbidden)
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -85,7 +85,7 @@ func TestPreloadNacos_NoAuth(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"version": "x"})
 		case "/nacos/v1/auth/login":
 			loginHit = true
-			http.Error(w, "should not login", 500)
+			http.Error(w, "should not login", http.StatusInternalServerError)
 		case "/nacos/v1/cs/configs":
 			listHit = true
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -124,7 +124,7 @@ func TestPreloadNacos_LoginFailed(t *testing.T) {
 		case "/nacos/v1/console/server/state":
 			_ = json.NewEncoder(w).Encode(map[string]any{"version": "x"})
 		default:
-			http.Error(w, `{"message":"invalid"}`, 403)
+			http.Error(w, `{"message":"invalid"}`, http.StatusForbidden)
 		}
 	}))
 	defer srv.Close()
@@ -205,7 +205,7 @@ func TestPreloadNacos_RootContextPath(t *testing.T) {
 // 两个 context path 都 502 → 完整诊断信息
 func TestPreloadNacos_Both502(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "bad gateway", 502)
+		http.Error(w, "bad gateway", http.StatusBadGateway)
 	}))
 	defer srv.Close()
 	_, err := PreloadNacos(Request{Type: "nacos", Addr: srv.URL})
@@ -239,7 +239,7 @@ func TestPreloadNacos_V3RootPath(t *testing.T) {
 			})
 		case "/v3/console/cs/config/list":
 			if r.URL.Query().Get("accessToken") != "tok-xyz" {
-				http.Error(w, "missing token", 403)
+				http.Error(w, "missing token", http.StatusForbidden)
 				return
 			}
 			listHit = true

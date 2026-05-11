@@ -141,7 +141,7 @@ func buildCodexAgentTOML(wsRoot string, ctx *Context, agentName string) (string,
 	if !codexNicknameSafe.MatchString(nick) {
 		return "", fmt.Errorf("derived nickname %q failed ASCII check (agent name %q)", nick, agentName)
 	}
-	sb.WriteString(fmt.Sprintf("nickname_candidates = [%s]\n", TomlString(nick)))
+	fmt.Fprintf(&sb, "nickname_candidates = [%s]\n", TomlString(nick))
 
 	// model 仅在用户显式给 codex 配 target_models.codex 时写出
 	if m := strings.TrimSpace(ctx.Agent.TargetModels["codex"]); m != "" {
@@ -341,6 +341,6 @@ func listCodexSubSkills(wsRoot string) ([]string, error) {
 // writeSkillEntry 写一条 [[skills.config]] inline-table 段。
 func writeSkillEntry(sb *strings.Builder, path string) {
 	sb.WriteString("[[skills.config]]\n")
-	sb.WriteString(fmt.Sprintf("path = %s\n", TomlString(path)))
+	fmt.Fprintf(sb, "path = %s\n", TomlString(path))
 	sb.WriteString("enabled = true\n\n")
 }

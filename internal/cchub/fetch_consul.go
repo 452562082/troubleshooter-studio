@@ -23,7 +23,7 @@ func fetchConsul(req FetchContentRequest) (*FetchContentResult, error) {
 	addr = strings.TrimRight(addr, "/")
 
 	u := fmt.Sprintf("%s/v1/kv/%s?raw", addr, req.DataID)
-	r, _ := http.NewRequest("GET", u, nil)
+	r, _ := http.NewRequest(http.MethodGet, u, nil)
 	if req.Token != "" {
 		r.Header.Set("X-Consul-Token", req.Token)
 	}
@@ -34,10 +34,10 @@ func fetchConsul(req FetchContentRequest) (*FetchContentResult, error) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode == 404 {
+	if resp.StatusCode == http.StatusNotFound {
 		return nil, fmt.Errorf("consul 找不到 key=%s(404)", req.DataID)
 	}
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("consul get kv status=%d: %s", resp.StatusCode, snippet(body))
 	}
 	content := string(body)

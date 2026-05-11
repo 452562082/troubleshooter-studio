@@ -48,7 +48,7 @@ func scanPythonDeps(repoPath string, include []string) ([]DownstreamCall, []Data
 			usages = append(usages, DataStoreUsage{Type: "redis", Driver: "redis-py", Callsite: rel})
 		}
 		if rePySQL.MatchString(text) {
-			driver := "sql"
+			var driver string
 			t := "mysql"
 			switch {
 			case strings.Contains(text, "psycopg"):

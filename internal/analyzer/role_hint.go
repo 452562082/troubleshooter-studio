@@ -159,7 +159,7 @@ func roleFromContentScan(repoPath string) RoleHint {
 	totalCode, totalConfig, totalDoc, totalOther := 0, 0, 0, 0
 	walk := filepath.Walk(repoPath, func(p string, info os.FileInfo, err error) error {
 		if err != nil || info == nil {
-			return nil
+			return nil //nolint:nilerr // 单条 entry 失败 skip,walk 继续
 		}
 		// 跳常见噪音目录
 		if info.IsDir() {

@@ -38,7 +38,7 @@ func fetchApollo(req FetchContentRequest) (*FetchContentResult, error) {
 	// GET /openapi/v1/envs/<env>/apps/<appId>/clusters/<cluster>/namespaces/<ns>/releases/latest
 	u := fmt.Sprintf("%s/openapi/v1/envs/%s/apps/%s/clusters/%s/namespaces/%s/releases/latest",
 		addr, env, req.AppID, cluster, req.DataID)
-	r, _ := http.NewRequest("GET", u, nil)
+	r, _ := http.NewRequest(http.MethodGet, u, nil)
 	r.Header.Set("Authorization", req.Token)
 	httpCli := &http.Client{Timeout: 10 * time.Second}
 	resp, err := httpCli.Do(r)
@@ -47,10 +47,10 @@ func fetchApollo(req FetchContentRequest) (*FetchContentResult, error) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return nil, fmt.Errorf("apollo token 无权限(status=%d): %s", resp.StatusCode, snippet(body))
 	}
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("apollo get release status=%d: %s", resp.StatusCode, snippet(body))
 	}
 	// release 里 configurations 是 map[string]string —— 同名 key/value。重新序列为 yaml 风格 (key: value)

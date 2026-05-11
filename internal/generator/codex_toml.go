@@ -52,7 +52,7 @@ func TomlString(s string) string {
 			sb.WriteString(`\t`)
 		default:
 			if r < 0x20 || r == 0x7f {
-				sb.WriteString(fmt.Sprintf(`\u%04X`, r))
+				fmt.Fprintf(&sb, `\u%04X`, r)
 			} else {
 				sb.WriteRune(r)
 			}

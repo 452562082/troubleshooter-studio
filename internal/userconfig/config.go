@@ -234,7 +234,7 @@ func RemoveDeployedBot(systemID, target string) error {
 	}
 	cfg, err := Load()
 	if err != nil || cfg == nil || cfg.DeployedBots == nil {
-		return nil
+		return nil //nolint:nilerr // 读不到 config / 无 deployed bots,移除请求当作 no-op
 	}
 	delete(cfg.DeployedBots, DeployedBotKey(systemID, target))
 	return Save(cfg)

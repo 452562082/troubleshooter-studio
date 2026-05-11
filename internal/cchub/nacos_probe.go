@@ -36,13 +36,13 @@ func (c *nacosClient) probeFlavor() (apiFlavor, string, error) {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		switch resp.StatusCode {
-		case 200:
+		case http.StatusOK:
 			note := fmt.Sprintf("检测到 Nacos:API=%s", f.Version)
 			if f.ContextPath == "" {
 				note += ",根路径部署(无 /nacos 前缀)"
 			}
 			return f, note, nil
-		case 401, 403:
+		case http.StatusUnauthorized, http.StatusForbidden:
 			// 路径对但要 auth → 仍当命中,登录流程会继续 POST 账号密码。
 			// Nacos 3.x 某些部署 /v3/console/server/state 直接要登录,才能避免走到 v1 踩 410。
 			note := fmt.Sprintf("检测到 Nacos:API=%s(需登录才能访问 console/state)", f.Version)
@@ -50,7 +50,7 @@ func (c *nacosClient) probeFlavor() (apiFlavor, string, error) {
 				note += ",根路径部署"
 			}
 			return f, note, nil
-		case 410:
+		case http.StatusGone:
 			// v1 console API 已被 3.x 禁用;响应体会提示 "please use ${contextPath:nacos}/v3/..."
 			// 直接按 v3 + /nacos 走,跳过剩余 candidate 不再白试
 			bodyStr := string(body)
@@ -87,7 +87,7 @@ func probeDashboard(cli *http.Client, base string) string {
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if resp.StatusCode == 200 && strings.Contains(strings.ToLower(string(body)), "nacos") {
+		if resp.StatusCode == http.StatusOK && strings.Contains(strings.ToLower(string(body)), "nacos") {
 			return fmt.Sprintf("探测 %s%s 返回含 \"nacos\" 的 HTML → 地址是 Nacos dashboard 但 API 路径未识别,可能被 ingress 改写过", base, p)
 		}
 	}
@@ -112,7 +112,7 @@ func (c *nacosClient) login() error {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("status %d: %s", resp.StatusCode, snippet(body))
 	}
 	var doc struct {

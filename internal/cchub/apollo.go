@@ -39,7 +39,7 @@ func PreloadApollo(req Request) (*Result, error) {
 
 	httpCli := &http.Client{Timeout: 10 * time.Second}
 	do := func(u string) ([]byte, int, error) {
-		r, err := http.NewRequest("GET", u, nil)
+		r, err := http.NewRequest(http.MethodGet, u, nil)
 		if err != nil {
 			return nil, 0, err
 		}

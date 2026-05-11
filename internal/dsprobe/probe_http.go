@@ -35,7 +35,7 @@ func ProbeHTTPURLAuth(rawURL, user, pass, apiKey string) Result {
 			return nil
 		},
 	}
-	req, err := http.NewRequest("GET", rawURL, nil)
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
 		return Result{OK: false, Error: fmt.Sprintf("URL 格式错: %v", err)}
 	}
@@ -64,13 +64,13 @@ func ProbeHTTPURLAuth(rawURL, user, pass, apiKey string) Result {
 	}
 	defer resp.Body.Close()
 	latency := time.Since(start).Round(time.Millisecond).String()
-	if resp.StatusCode == 401 {
+	if resp.StatusCode == http.StatusUnauthorized {
 		if user == "" && apiKey == "" {
 			return Result{OK: false, Latency: latency, Error: "HTTP 401:需要鉴权(user/pass 或 api_key)"}
 		}
 		return Result{OK: false, Latency: latency, Error: "HTTP 401:鉴权失败(账密错或 api_key 无效)"}
 	}
-	if resp.StatusCode == 403 {
+	if resp.StatusCode == http.StatusForbidden {
 		return Result{OK: false, Latency: latency, Error: "HTTP 403:权限不足"}
 	}
 	if resp.StatusCode >= 500 {

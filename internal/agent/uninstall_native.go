@@ -38,12 +38,12 @@ func readSystemIDFromMeta(metaPath string) string {
 
 // UninstallNativeResult 通用卸载结果(claude-code / cursor / codex 共用一个)。
 type UninstallNativeResult struct {
-	StagingMovedTo  string   // ~/.tshoot/<target>/<id>/ 移到 ~/.Trash/<...> 的路径;空 = 不存在或未动
-	UserAgentMD     string   // 删掉的 agent 人格文件(claude/cursor:~/.<target>/agents/<name>.md;codex:~/.codex/AGENTS.md)
-	UserSkillsDir   string   // 删掉的 ~/.<target>/skills/<name>/
-	UserScriptsDir  string   // 删掉的 ~/.<target>/scripts/<name>/
-	MCPRemoved      []string // 从 IDE 配置(settings.json/mcp.json/config.toml)清掉的 MCP server keys
-	Log             []string
+	StagingMovedTo string   // ~/.tshoot/<target>/<id>/ 移到 ~/.Trash/<...> 的路径;空 = 不存在或未动
+	UserAgentMD    string   // 删掉的 agent 人格文件(claude/cursor:~/.<target>/agents/<name>.md;codex:~/.codex/AGENTS.md)
+	UserSkillsDir  string   // 删掉的 ~/.<target>/skills/<name>/
+	UserScriptsDir string   // 删掉的 ~/.<target>/scripts/<name>/
+	MCPRemoved     []string // 从 IDE 配置(settings.json/mcp.json/config.toml)清掉的 MCP server keys
+	Log            []string
 }
 
 // UninstallNative 卸载 claude-code / cursor / codex 装的机器人。

@@ -1,13 +1,14 @@
 // generator.go —— 类型定义 + Generate 主流程。
 //
 // 子文件分工:
-//   render_walk.go    walkAndRender / shouldSkipDir / renderFile / copyFile
-//   readme.go         writeReadme + 三个 section helpers
-//   clawhub_lock.go   writeClawhubLock + count* 摘要计数
-//   funcs.go          模板 funcMap
-//   tshoot_meta.go    writeTshootMeta(产物锚点 tshoot.json)
-//   plan.go / preserve.go / diff.go  二次生成的计划 / 保留 / diff
-//   claude_code.go / cursor.go / codex.go  各 target 产物适配
+//
+//	render_walk.go    walkAndRender / shouldSkipDir / renderFile / copyFile
+//	readme.go         writeReadme + 三个 section helpers
+//	clawhub_lock.go   writeClawhubLock + count* 摘要计数
+//	funcs.go          模板 funcMap
+//	tshoot_meta.go    writeTshootMeta(产物锚点 tshoot.json)
+//	plan.go / preserve.go / diff.go  二次生成的计划 / 保留 / diff
+//	claude_code.go / cursor.go / codex.go  各 target 产物适配
 package generator
 
 import (

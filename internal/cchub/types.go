@@ -8,12 +8,13 @@
 //   - 三家 API 差别大,各自一个 client 更直观
 //
 // 三家 API 参考:
-//   Nacos:  GET /nacos/v1/cs/configs?tenant=<ns>&pageNo=1&pageSize=500
-//           (需先 POST /nacos/v1/auth/login 换 accessToken;开放模式可跳过)
-//   Apollo: GET /openapi/v1/envs/<env>/apps/<appId>/clusters/<cl>/namespaces
-//           (Authorization: <token>;要用户知道 appId,这里做 appId 列表查询)
-//   Consul: GET /v1/kv/<prefix>?recurse=true&keys=true
-//           (X-Consul-Token: <token>;token 可选)
+//
+//	Nacos:  GET /nacos/v1/cs/configs?tenant=<ns>&pageNo=1&pageSize=500
+//	        (需先 POST /nacos/v1/auth/login 换 accessToken;开放模式可跳过)
+//	Apollo: GET /openapi/v1/envs/<env>/apps/<appId>/clusters/<cl>/namespaces
+//	        (Authorization: <token>;要用户知道 appId,这里做 appId 列表查询)
+//	Consul: GET /v1/kv/<prefix>?recurse=true&keys=true
+//	        (X-Consul-Token: <token>;token 可选)
 package cchub
 
 // Entry 一条来自配置中心的配置记录(三家共用字段,不相关的留空)。

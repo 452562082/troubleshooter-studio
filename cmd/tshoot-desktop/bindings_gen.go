@@ -110,9 +110,11 @@ func (a *App) Diff(yamlText, existingDir string) (*generator.Plan, error) {
 // Truncated=true 时 Content 是截断版本(头 200KB),前端展示头部即可。
 //
 // Path 加 target 前缀,跟用户最终看到的目录结构对齐:
-//   openclaw     openclaw/agents/<name>.md(实际落到 ~/.openclaw/workspace/<id>/agents/<name>.md)
-//   claude-code  claude-code/agents/<name>.md(实际落到 ~/.claude/agents/<name>.md)
-//   cursor       cursor/agents/<name>.md(实际落到 ~/.cursor/agents/<name>.md)
+//
+//	openclaw     openclaw/agents/<name>.md(实际落到 ~/.openclaw/workspace/<id>/agents/<name>.md)
+//	claude-code  claude-code/agents/<name>.md(实际落到 ~/.claude/agents/<name>.md)
+//	cursor       cursor/agents/<name>.md(实际落到 ~/.cursor/agents/<name>.md)
+//
 // staging 中的 templates/workspace-template/ 前缀已被剥掉,跟用户最终看到的目录结构对齐。
 type GenPreviewFile struct {
 	Path      string `json:"path"`

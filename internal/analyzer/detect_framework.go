@@ -37,11 +37,11 @@ func DetectFramework(repoPath, stack string) string {
 
 // Go 框架识别分三档匹配,精度优先于召回:
 //
-//   第 1 档 "完整框架"(自带路由 + 中间件 + 配置):kratos / go-zero / kitex / hertz /
-//     goframe / iris / beego / micro。命中直接返,不再看其它。
-//   第 2 档 "HTTP router":gin / echo / fiber / chi。
-//   第 3 档 "RPC only":grpc。只在前两档都没命中时才用,避免"同时依赖 grpc + gin"
-//     的常规 HTTP 服务被误判成 grpc。
+//	第 1 档 "完整框架"(自带路由 + 中间件 + 配置):kratos / go-zero / kitex / hertz /
+//	  goframe / iris / beego / micro。命中直接返,不再看其它。
+//	第 2 档 "HTTP router":gin / echo / fiber / chi。
+//	第 3 档 "RPC only":grpc。只在前两档都没命中时才用,避免"同时依赖 grpc + gin"
+//	  的常规 HTTP 服务被误判成 grpc。
 //
 // go.mod 里 require (...) 块的 indirect 依赖(// indirect)不算 —— 那是传递依赖,
 // 不代表本项目直接用这个框架。解析出一组直接 require 的 module path,再按完整匹配

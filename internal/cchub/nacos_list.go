@@ -136,7 +136,7 @@ func (c *nacosClient) fetchConfigsPage(namespace string, page, pageSize int) ([]
 	type pageItem struct {
 		DataID      string `json:"dataId"`
 		Group       string `json:"group"`
-		GroupName   string `json:"groupName"`   // v3 字段名
+		GroupName   string `json:"groupName"` // v3 字段名
 		Tenant      string `json:"tenant"`
 		NamespaceID string `json:"namespaceId"` // v3 字段名
 		Type        string `json:"type"`

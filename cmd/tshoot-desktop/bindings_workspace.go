@@ -30,8 +30,8 @@ import (
 
 // FileNode 文件树节点,递归结构。前端 v-for 展开成多级缩进。
 type FileNode struct {
-	Name     string     `json:"name"`     // 文件 / 目录名(不含路径)
-	Path     string     `json:"path"`     // 相对 rootPath 的路径,前端读 / 写时回传给后端
+	Name     string     `json:"name"` // 文件 / 目录名(不含路径)
+	Path     string     `json:"path"` // 相对 rootPath 的路径,前端读 / 写时回传给后端
 	IsDir    bool       `json:"is_dir"`
 	Size     int64      `json:"size,omitempty"` // 文件字节数(目录不写)
 	Children []FileNode `json:"children,omitempty"`

@@ -18,9 +18,9 @@ import (
 
 func TestParseMySQLDSN(t *testing.T) {
 	cases := []struct {
-		name                            string
-		dsn                             string
-		host, port, user, pass, db      string
+		name                       string
+		dsn                        string
+		host, port, user, pass, db string
 	}{
 		{
 			name: "标准 user:pass@tcp(host:port)/db",
@@ -91,13 +91,13 @@ func TestBuildMCPServers_DataStores(t *testing.T) {
 		},
 	}
 	creds := map[string]string{
-		"MONGODB_URI_DEV":  "mongodb://u:p@m.local:27017/app",
-		"POSTGRES_DSN_DEV": "postgres://u:p@pg.local:5432/app",
-		"ES_URL_DEV":       "https://es.local:9200",
-		"ES_USER_DEV":      "elastic",
-		"ES_PASS_DEV":      "espw",
-		"REDIS_URL_DEV":    "redis://default:rpw@r.local:6379/0",
-		"MYSQL_DSN_DEV":    "myu:mypw@tcp(my.local:3307)/orders",
+		"MONGODB_URI_DEV":    "mongodb://u:p@m.local:27017/app",
+		"POSTGRES_DSN_DEV":   "postgres://u:p@pg.local:5432/app",
+		"ES_URL_DEV":         "https://es.local:9200",
+		"ES_USER_DEV":        "elastic",
+		"ES_PASS_DEV":        "espw",
+		"REDIS_URL_DEV":      "redis://default:rpw@r.local:6379/0",
+		"MYSQL_DSN_DEV":      "myu:mypw@tcp(my.local:3307)/orders",
 		"CLICKHOUSE_URL_DEV": "https://chu:chpw@ch.local:8443/analytics",
 	}
 	get := func(k string) string { return creds[k] }
@@ -233,16 +233,16 @@ func TestBuildMCPServers_OTelDisabledUniversal(t *testing.T) {
 	creds := map[string]string{
 		"NACOS_ADDR_PRIMARY_DEV": "nacos:8848", "NACOS_USER_PRIMARY_DEV": "u", "NACOS_PASS_PRIMARY_DEV": "p",
 		"GRAFANA_URL_DEV": "http://g:3000", "GRAFANA_USER_DEV": "u", "GRAFANA_PASS_DEV": "p",
-		"JAEGER_URL_DEV":   "http://j:16686",
-		"ELK_ES_URL_DEV":   "http://es:9200",
-		"MONGODB_URI_DEV":  "mongodb://m/d",
-		"POSTGRES_DSN_DEV": "postgres://u:p@p/d",
-		"REDIS_URL_DEV":    "redis://r/0",
-		"ES_URL_DEV":       "http://e:9200",
-		"MYSQL_DSN_DEV":    "u:p@tcp(m:3306)/d",
+		"JAEGER_URL_DEV":     "http://j:16686",
+		"ELK_ES_URL_DEV":     "http://es:9200",
+		"MONGODB_URI_DEV":    "mongodb://m/d",
+		"POSTGRES_DSN_DEV":   "postgres://u:p@p/d",
+		"REDIS_URL_DEV":      "redis://r/0",
+		"ES_URL_DEV":         "http://e:9200",
+		"MYSQL_DSN_DEV":      "u:p@tcp(m:3306)/d",
 		"CLICKHOUSE_URL_DEV": "https://c:8443/d",
-		"LARK_APP_ID":      "app", "LARK_APP_SECRET": "sec",
-		"MCP_USER_TOKEN":   "tok",
+		"LARK_APP_ID":        "app", "LARK_APP_SECRET": "sec",
+		"MCP_USER_TOKEN": "tok",
 	}
 	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true},
 		func(k string) string { return creds[k] })
@@ -687,9 +687,9 @@ func TestNormalizeMongoURI(t *testing.T) {
 
 func TestParseConnURL(t *testing.T) {
 	cases := []struct {
-		name                            string
-		s                               string
-		host, port, user, pass, path    string
+		name                         string
+		s                            string
+		host, port, user, pass, path string
 	}{
 		{
 			name: "redis 带凭证 + db",

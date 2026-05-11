@@ -18,11 +18,12 @@ import (
 // `Entry.Group` = cluster,`Entry.AppID` = appID。
 //
 // 两阶段模式:
-//   a) NamespacesOnly=true:列 Apollo envs(通过 meta-servers 接口 + fallback 常用 envs),
-//      返回 Namespaces(不拉 clusters / namespaces),UI 挑"这个 env.id 用哪个 Apollo env"。
-//   b) 正常:req.Namespace = 选中的 Apollo env(如 "DEV"),req.AppID = 指定 app →
-//      列该 app 在该 env 下所有 cluster × namespace 作 Entries。
-//      req.AppID 留空 → 退化为列所有 app(老行为,当发现模式)。
+//
+//	a) NamespacesOnly=true:列 Apollo envs(通过 meta-servers 接口 + fallback 常用 envs),
+//	   返回 Namespaces(不拉 clusters / namespaces),UI 挑"这个 env.id 用哪个 Apollo env"。
+//	b) 正常:req.Namespace = 选中的 Apollo env(如 "DEV"),req.AppID = 指定 app →
+//	   列该 app 在该 env 下所有 cluster × namespace 作 Entries。
+//	   req.AppID 留空 → 退化为列所有 app(老行为,当发现模式)。
 func PreloadApollo(req Request) (*Result, error) {
 	addr := strings.TrimSpace(req.Addr)
 	if addr == "" {
@@ -159,9 +160,9 @@ func PreloadApollo(req Request) (*Result, error) {
 
 // listApolloEnvs 列出 Portal 可用的 env 名。Apollo Open API 没直接的"列 envs"端点,
 // 我们:
-//  1) 先尝试 /openapi/v1/envs(部分新版 Portal 有,返 string 数组)
-//  2) 回退 /openapi/v1/envclusters(同样部分版本有)
-//  3) 都不支持 → 回退硬编码常用列表 DEV / FAT / UAT / PRO,外加 note 提示用户手改
+//  1. 先尝试 /openapi/v1/envs(部分新版 Portal 有,返 string 数组)
+//  2. 回退 /openapi/v1/envclusters(同样部分版本有)
+//  3. 都不支持 → 回退硬编码常用列表 DEV / FAT / UAT / PRO,外加 note 提示用户手改
 //
 // 返 (namespaces, notes);notes 里会说明数据来源,方便排查。
 func listApolloEnvs(

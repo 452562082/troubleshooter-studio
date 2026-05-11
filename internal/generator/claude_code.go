@@ -89,11 +89,12 @@ func agentSlug(ctx *Context) string {
 }
 
 // buildClaudeAgentMD 拼一份 Claude Code subagent 定义。带 YAML frontmatter:
-//   name: <slug>
-//   description: <中文显示名>
-//   tools: 不限制(默认全工具)
-//   model: 仅当用户显式给 claude-code 配了 target_models.claude-code 才写 ——
-//          否则 Claude Code 用 IDE 当前选的模型(用户偏好)。
+//
+//	name: <slug>
+//	description: <中文显示名>
+//	tools: 不限制(默认全工具)
+//	model: 仅当用户显式给 claude-code 配了 target_models.claude-code 才写 ——
+//	       否则 Claude Code 用 IDE 当前选的模型(用户偏好)。
 //
 // 历史 bug:之前直接写 ctx.Agent.Model,但 Agent.Model 是 OpenClaw gateway 专属的
 // LLM 路由 id(可能是 openai-codex/gpt-5.4 之类的非 Claude 模型)。Claude Code 拿到

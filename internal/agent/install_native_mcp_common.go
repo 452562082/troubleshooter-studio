@@ -8,7 +8,8 @@
 //
 // 区别用 MCPBuildOptions 控制:
 //   - PruneEmpty:IDE 要(避免 settings.json 里把 "" 喂给后端,触发"无效连接"重试风暴);
-//                openclaw 不要(保留全 schema 让 agent 自决)。
+//     openclaw 不要(保留全 schema 让 agent 自决)。
+//
 // 老的 IncludeRawObsCurl(原本控制 jaeger/elk 走 curl 占位)在两家分别迁到真 MCP 后
 // 就没人用了 — 2026-05 jaeger 走 uvx opentelemetry-mcp,2026-05 elk 走
 // @elastic/mcp-server-elasticsearch,两家 IDE / openclaw 都注册,选项已删。
@@ -33,7 +34,9 @@ import (
 // 未编码 → 用户以为不需要),代码侧主动修一遍,免得 mcp 启动报"invalid connection string"。
 //
 // 算法:scheme:// 之后找最后一个 @ 作 host 起点,该 @ 之前的第一个 : 作 user/pass 分割,
-//      pass 段每字符过一遍:已编码的 %xx 整体跳,其他保留字 / 非 ASCII / 控制字符 → %XX 编码。
+//
+//	pass 段每字符过一遍:已编码的 %xx 整体跳,其他保留字 / 非 ASCII / 控制字符 → %XX 编码。
+//
 // 已编码的 %xx 检测:`%` + 2 个 hex digit。用户密码含字面 `%` 而忘记编码 = 极罕见 corner,
 // 不在本函数兜底范围(MongoDB 官方文档已明确说 % 必须编码,这部分用户责任)。
 func normalizeMongoURI(uri string) string {

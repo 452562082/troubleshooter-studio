@@ -5,8 +5,8 @@
 // 三家 staging 形态:
 //   - claude-code / cursor:`agents/<name>.md` + skills/ + scripts/(每个 agent 一个 .md)
 //   - codex            :`agents/<name>.toml` + skills/<name>/SKILL.md(顶层调度入口) +
-//                          skills/<name>/<sub>/SKILL.md + scripts/(TOML 格式 subagent)
-//                          官方文档 https://developers.openai.com/codex/subagents
+//     skills/<name>/<sub>/SKILL.md + scripts/(TOML 格式 subagent)
+//     官方文档 https://developers.openai.com/codex/subagents
 //
 // 凭证 / MCP server 写入由 install_native_mcp.go + install_native_creds.go 负责,
 // 这里只管纯文件分发。openclaw 走 install_native_openclaw.go,模型不同不通用。

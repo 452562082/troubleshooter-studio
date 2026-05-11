@@ -5,11 +5,11 @@
 // 对反代层压力大、也慢。实际上凭证没变,可以一次 probe+login,后续复用同一个 client。
 //
 // 策略:
-//  - 按 (type, addr, username, password) 做 cache key(token 模式的 apollo/consul 也能放)
-//  - 命中 → 直接复用;未命中 → connect 一次 → 缓存
-//  - 缓存有效期:Nacos 默认 tokenTtl=18000s(5h),我们保守用 30 分钟就过期重建
-//  - 凭证改动 → cache key 变 → 自然不命中 → 重建。无需手动 invalidate
-//  - 进程级,不跨进程共享;Studio 自身是桌面单机应用,不需要分布式
+//   - 按 (type, addr, username, password) 做 cache key(token 模式的 apollo/consul 也能放)
+//   - 命中 → 直接复用;未命中 → connect 一次 → 缓存
+//   - 缓存有效期:Nacos 默认 tokenTtl=18000s(5h),我们保守用 30 分钟就过期重建
+//   - 凭证改动 → cache key 变 → 自然不命中 → 重建。无需手动 invalidate
+//   - 进程级,不跨进程共享;Studio 自身是桌面单机应用,不需要分布式
 //
 // 线程安全:sync.Map 读写(多窗口同时点可能并发)+ 建立连接用 sync.Mutex 避免同 key 同时
 // connect 两次(第二次进等待,第一次完成后直接复用)。

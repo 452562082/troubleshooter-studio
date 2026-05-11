@@ -24,7 +24,7 @@ func TestPreloadApollo_NamespacesOnly(t *testing.T) {
 	}))
 	defer srv.Close()
 	r, err := PreloadApollo(Request{
-		Type:  "apollo", Addr: srv.URL, Token: "t",
+		Type: "apollo", Addr: srv.URL, Token: "t",
 		NamespacesOnly: true, AppID: "foo",
 	})
 	if err != nil {

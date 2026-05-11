@@ -3,6 +3,7 @@
 //   - 启用了哪些 skill(skillsSection)
 //   - 部署前要准备哪些凭证(credentialsSection)
 //   - 常见 FAQ(按启用组件浮现条目)
+//
 // 这份 README 是装完之后用户/团队成员第一眼看到的"机器人介绍",决定能不能快速上手。
 package generator
 

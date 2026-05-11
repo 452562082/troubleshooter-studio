@@ -1,6 +1,7 @@
 // role_hint_go.go —— Go 仓库角色推断:看 main 包入口。
-//   有 cmd/<x>/main.go 或顶层 main.go → backend(典型可执行服务)
-//   有 go.mod 但无任何 main → common-lib
+//
+//	有 cmd/<x>/main.go 或顶层 main.go → backend(典型可执行服务)
+//	有 go.mod 但无任何 main → common-lib
 package analyzer
 
 import (

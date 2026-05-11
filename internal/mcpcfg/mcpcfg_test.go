@@ -191,4 +191,3 @@ func TestMergeWrite_OverridesSameKey(t *testing.T) {
 		t.Errorf("old value should be gone, got:\n%s", string(raw))
 	}
 }
-

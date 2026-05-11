@@ -59,11 +59,12 @@ type Result struct {
 // agent 来自 discover.Scan() 的结果。
 //
 // 注意"显示路径" vs "工作目录":
-//   ag.Path = 真实部署位置(UI 卡片显示用,~/.claude/skills/<name>/ 之类)
-//   workDir = discover.WorkDirFor(ag) = 实际写产物的位置:
-//     OpenClaw → 跟 ag.Path 同(单段式)
-//     Claude Code/Cursor → ~/.tshoot/<target>/<system_id>/ staging 中间包
-//                          (Apply 写 staging,然后 InstallNative 同步到 ~/.claude / ~/.cursor)
+//
+//	ag.Path = 真实部署位置(UI 卡片显示用,~/.claude/skills/<name>/ 之类)
+//	workDir = discover.WorkDirFor(ag) = 实际写产物的位置:
+//	  OpenClaw → 跟 ag.Path 同(单段式)
+//	  Claude Code/Cursor → ~/.tshoot/<target>/<system_id>/ staging 中间包
+//	                       (Apply 写 staging,然后 InstallNative 同步到 ~/.claude / ~/.cursor)
 //
 // 支持 4 种 target：openclaw / claude-code / cursor / embedded。
 // 每种 target 走各自的 generator 方法，然后把相应的产物子树 rsync 到 agent.Path。
@@ -295,4 +296,3 @@ func countFilesUnder(root string) int {
 	})
 	return n
 }
-

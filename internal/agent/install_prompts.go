@@ -145,4 +145,3 @@ func configCenterLabel(cc config.ConfigCenter) string {
 	}
 	return cc.ID + "/"
 }
-

@@ -4,6 +4,7 @@
 // 路径 yaml 没带 findings,产物里:
 //   - service-dependency-map.upstream / downstream 全是空
 //   - data-schema-map.tables / collections / cache_prefixes 全是空
+//
 // 这两条原本要让用户手填,体验差。
 //
 // 解决方案:部署阶段拿"用户在 wizard / 之前部署时存过的本地仓库路径"

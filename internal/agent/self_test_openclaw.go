@@ -233,4 +233,3 @@ func checkToolchain(cfg *config.SystemConfig, add func(name, status, detail stri
 		}
 	}
 }
-

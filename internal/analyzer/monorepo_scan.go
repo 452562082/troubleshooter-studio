@@ -4,12 +4,13 @@
 // 命中即返回每个子模块的 {Name, SubPath, Stack, RoleHint};Wizard UI 据此给"一键拆成 N 行"按钮。
 //
 // 各探测路径已按域拆到子文件:
-//   monorepo_scan_git.go      detectGitSubmodules     .gitmodules(独立 git repo,可信度最高)
-//   monorepo_scan_node.go     detectNodeWorkspaces    pnpm/lerna/yarn/npm workspaces
-//   monorepo_scan_java.go     detectJavaModules       parent pom.xml <modules>
-//   monorepo_scan_go.go       detectGoCmdDirs         cmd/<x>/main.go(≥ 2 才认)
-//   monorepo_scan_generic.go  detectGenericServiceDir + stackFromManifest helper
-//   monorepo_scan_toplevel.go detectTopLevelServices  顶层平铺(必须 manifest+可部署信号双命中)
+//
+//	monorepo_scan_git.go      detectGitSubmodules     .gitmodules(独立 git repo,可信度最高)
+//	monorepo_scan_node.go     detectNodeWorkspaces    pnpm/lerna/yarn/npm workspaces
+//	monorepo_scan_java.go     detectJavaModules       parent pom.xml <modules>
+//	monorepo_scan_go.go       detectGoCmdDirs         cmd/<x>/main.go(≥ 2 才认)
+//	monorepo_scan_generic.go  detectGenericServiceDir + stackFromManifest helper
+//	monorepo_scan_toplevel.go detectTopLevelServices  顶层平铺(必须 manifest+可部署信号双命中)
 package analyzer
 
 import (

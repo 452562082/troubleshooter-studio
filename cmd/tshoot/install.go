@@ -22,15 +22,15 @@ import (
 //   - claude-code  → ~/.claude/agents/<name>.md + ~/.claude/{skills,scripts}/<name>/...
 //   - cursor       → ~/.cursor/agents/<name>.md  + ~/.cursor/{skills,scripts}/<name>/...
 //   - codex        → ~/.codex/agents/<name>.toml(TOML subagent 定义,
-//                    https://developers.openai.com/codex/subagents) + ~/.codex/skills/<name>/
-//                    + ~/.codex/scripts/<name>/。MCP 嵌入 agent toml 内联段(每个 subagent 自带)。
+//     https://developers.openai.com/codex/subagents) + ~/.codex/skills/<name>/
+//   - ~/.codex/scripts/<name>/。MCP 嵌入 agent toml 内联段(每个 subagent 自带)。
 //
 // 凭证收集策略:
 //   - openclaw   :走 InstallNativeOpenclaw,凭证写到 ~/.openclaw/<id>-creds.json + 注入 MCP env
 //   - IDE 三家   :--env-file 非空时,凭证一并注入到对应 IDE 的 mcpServers env(claude-code 写
-//                 settings.json;cursor 写 mcp.json;codex 写到 agent toml 的 [mcp_servers.*.env]),
-//                 同时镜像写 ~/.tshoot/<id>-creds.json 给 kuboard / apollo / consul / 静态环境变量
-//                 等"非 MCP 走脚本"的后端用。空凭证不阻塞 install,事后手填 .env 重跑即可。
+//     settings.json;cursor 写 mcp.json;codex 写到 agent toml 的 [mcp_servers.*.env]),
+//     同时镜像写 ~/.tshoot/<id>-creds.json 给 kuboard / apollo / consul / 静态环境变量
+//     等"非 MCP 走脚本"的后端用。空凭证不阻塞 install,事后手填 .env 重跑即可。
 func runInstall(args []string) error {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 	stagingDir := fs.String("path", "", "staging 产物目录(必填,tshoot gen 的 -o 输出)")

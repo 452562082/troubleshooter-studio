@@ -1,9 +1,10 @@
 // install_native_openclaw.go —— openclaw 部署的原生 Go 实现。干 5 件事:
-//   (1) 探测 brew/apt 依赖(GUI 不便 sudo,只警告,装由用户自己来)
-//   (2) creds map 经入参传进来,落 <staging>/scripts/.env 持久化(删 .env 即重置)
-//   (3) 安装 workspace 到 ~/.openclaw/workspace/<name>/
-//   (4) 改写 ~/.openclaw/openclaw.json 注入 agent + MCP servers
-//   (5) 重启 gateway
+//
+//	(1) 探测 brew/apt 依赖(GUI 不便 sudo,只警告,装由用户自己来)
+//	(2) creds map 经入参传进来,落 <staging>/scripts/.env 持久化(删 .env 即重置)
+//	(3) 安装 workspace 到 ~/.openclaw/workspace/<name>/
+//	(4) 改写 ~/.openclaw/openclaw.json 注入 agent + MCP servers
+//	(5) 重启 gateway
 //
 // 取消 / 流式日志走 ctx + onLog callback。CLI 与桌面端共享同一份。
 package agent
@@ -188,4 +189,3 @@ func InstallNativeOpenclaw(ctx context.Context, stagingDir string, opts InstallO
 	}
 	return nil
 }
-

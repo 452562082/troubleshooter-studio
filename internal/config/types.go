@@ -96,11 +96,6 @@ type Environment struct {
 	IsProd    bool     `yaml:"is_prod"`
 }
 
-
-
-
-
-
 type Generation struct {
 	// TargetHost 是 v0.x 的单目标遗留字段,新 yaml 用 Targets 数组替代。
 	// 仅保留读路径(ResolvedTargets() 兜底);新生成的 yaml 不再写出这个字段。

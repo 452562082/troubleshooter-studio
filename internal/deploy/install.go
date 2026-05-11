@@ -25,7 +25,7 @@ type Prompt struct {
 }
 
 // WriteEnvFile 把 kv 写成 KEY='value' 格式到 <dir>/scripts/.env，mode 0600。
-// value 里的单引号会被 bash 兼容地转义('\'')。空 value 的键依然写出来,UI
+// value 里的单引号会被 bash 兼容地转义('\”)。空 value 的键依然写出来,UI
 // 看到完整列表后能决定哪些需要补。kv 为空时直接 no-op(避免建空 scripts/)。
 func WriteEnvFile(dir string, kv map[string]string) error {
 	if len(kv) == 0 {

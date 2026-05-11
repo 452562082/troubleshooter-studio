@@ -9,11 +9,11 @@ import (
 	"slices"
 	"time"
 
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"github.com/xiaolong/troubleshooter-studio/internal/agent"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 	"github.com/xiaolong/troubleshooter-studio/internal/userconfig"
-	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // ApplyBot 把新的 troubleshooter.yaml 应用到已装机器人的活 workspace:

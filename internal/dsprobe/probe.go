@@ -5,14 +5,15 @@
 // 这里测不通的部署后也通不了。
 //
 // 实现按数据源分到子文件:
-//   redis         → probe_redis.go      go-redis Client.Ping(ctx)              (含 AUTH)
-//   mysql         → probe_mysql.go      database/sql + go-sql-driver/mysql .Ping()
-//   postgresql    → probe_postgres.go   database/sql + lib/pq .Ping()
-//   mongodb       → probe_mongo.go      mongo-driver Connect + Ping()         (含 SCRAM auth)
-//   elasticsearch → probe_es.go         HTTP GET / + basic auth
-//   clickhouse    → probe_clickhouse.go HTTP GET /?query=SELECT+1 (验账密)
-//   kafka/rocketmq/rabbitmq → probe_mq.go  TCP/AMQP 握手(SDK 重,先做基础)
-//   通用 HTTP probe (env / Grafana 等) → probe_http.go
+//
+//	redis         → probe_redis.go      go-redis Client.Ping(ctx)              (含 AUTH)
+//	mysql         → probe_mysql.go      database/sql + go-sql-driver/mysql .Ping()
+//	postgresql    → probe_postgres.go   database/sql + lib/pq .Ping()
+//	mongodb       → probe_mongo.go      mongo-driver Connect + Ping()         (含 SCRAM auth)
+//	elasticsearch → probe_es.go         HTTP GET / + basic auth
+//	clickhouse    → probe_clickhouse.go HTTP GET /?query=SELECT+1 (验账密)
+//	kafka/rocketmq/rabbitmq → probe_mq.go  TCP/AMQP 握手(SDK 重,先做基础)
+//	通用 HTTP probe (env / Grafana 等) → probe_http.go
 //
 // 全部 5 秒超时。失败返回人话错误(给 UI 展示)。
 package dsprobe

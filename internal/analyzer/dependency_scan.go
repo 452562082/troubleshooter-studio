@@ -44,9 +44,10 @@ func ScanDependencies(stack, repoPath string, includePaths []string) (calls []Do
 
 // targetFromURL 从 URL 提目标服务名:host 部分按 - / . 切片去 env 后缀,留主体。
 // 例:
-//   "http://user-service-dev.svc:8080/api/v1/users" → "user-service"
-//   "https://payment.example.com/notify"           → "payment"
-//   "user-prod:50051" → "user"
+//
+//	"http://user-service-dev.svc:8080/api/v1/users" → "user-service"
+//	"https://payment.example.com/notify"           → "payment"
+//	"user-prod:50051" → "user"
 func targetFromURL(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -139,4 +140,3 @@ func camelToKebab(s string) string {
 	}
 	return string(b)
 }
-

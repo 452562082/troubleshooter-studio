@@ -67,4 +67,3 @@ func (a *App) SaveRepoPathsForSystem(systemID string, paths map[string]string) e
 	}
 	return userconfig.SetRepoPathsForSystem(systemID, expanded)
 }
-

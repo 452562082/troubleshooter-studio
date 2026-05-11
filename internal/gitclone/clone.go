@@ -25,10 +25,11 @@ type Options struct {
 // Clone 调用 git clone；返回命令错误（含 stderr 前 1KB 方便排查）
 //
 // 默认带 --recurse-submodules --shallow-submodules:
-//   truss 这种 umbrella 仓库通过 .gitmodules 引入 7 个子仓库(api/commerce/user/...),
-//   不 recurse 克隆出来所有服务子目录都是空的,analyzer 扫不到 go.mod / service_names,
-//   UI 上"服务名 / 技术栈 / 分支"全空。recurse 一次性把 submodule 内容拉下来,
-//   shallow 避免对每个 submodule 都做全量历史(大仓库能节省数百 MB)。
+//
+//	truss 这种 umbrella 仓库通过 .gitmodules 引入 7 个子仓库(api/commerce/user/...),
+//	不 recurse 克隆出来所有服务子目录都是空的,analyzer 扫不到 go.mod / service_names,
+//	UI 上"服务名 / 技术栈 / 分支"全空。recurse 一次性把 submodule 内容拉下来,
+//	shallow 避免对每个 submodule 都做全量历史(大仓库能节省数百 MB)。
 //
 // 如果仓库没有 submodule,这两个 flag 是 no-op,不会出问题。
 func Clone(opts Options) error {

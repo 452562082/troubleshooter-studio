@@ -69,4 +69,3 @@ func TomlWriteString(sb *strings.Builder, key, value string) {
 	sb.WriteString(TomlString(value))
 	sb.WriteString("\n")
 }
-

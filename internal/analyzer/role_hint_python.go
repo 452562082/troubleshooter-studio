@@ -1,7 +1,8 @@
 // role_hint_python.go —— Python 仓库角色推断:requirements.txt / pyproject.toml / Pipfile / setup.py。
-//   含 fastapi / flask / django / sanic / aiohttp → backend
-//   只有 setup.py + 无 web 框架 → common-lib
-//   含 scrapy(爬虫)/ celery(异步任务)→ middleware
+//
+//	含 fastapi / flask / django / sanic / aiohttp → backend
+//	只有 setup.py + 无 web 框架 → common-lib
+//	含 scrapy(爬虫)/ celery(异步任务)→ middleware
 package analyzer
 
 import (

@@ -1,8 +1,9 @@
 // role_hint_node.go —— Node 仓库角色推断:读 package.json deps。
-//   含前端框架(react/vue/next/vite/angular/svelte)且不含后端框架 → frontend
-//   含后端框架(express/koa/nestjs/fastify/hapi/midway/egg)→ backend
-//   仅 lib/util 风格(无 main + 仅 export)→ common-lib
-//   含 react-native / expo / capacitor / nativescript → mobile
+//
+//	含前端框架(react/vue/next/vite/angular/svelte)且不含后端框架 → frontend
+//	含后端框架(express/koa/nestjs/fastify/hapi/midway/egg)→ backend
+//	仅 lib/util 风格(无 main + 仅 export)→ common-lib
+//	含 react-native / expo / capacitor / nativescript → mobile
 package analyzer
 
 import (

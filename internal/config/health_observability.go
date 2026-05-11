@@ -10,9 +10,9 @@ import (
 // 设计取舍:很多团队"一套 Grafana 服所有 env"(env 区分由 LogQL/PromQL 标签决定),
 // 这种场景下 url_by_env / datasource_uid_by_env 只填一条就够。所以**不做"逐 env 缺哪个就报哪个"
 // 的检查**(伪报太多)。只在以下情况报:
-//   1. 整张 map 完全空 → warn / info(看是不是必填)
-//   2. 字段语义矛盾 → error (e.g. via_grafana=true 但 grafana 没启用)
-//   3. service_map 引用了不存在的 env → warn
+//  1. 整张 map 完全空 → warn / info(看是不是必填)
+//  2. 字段语义矛盾 → error (e.g. via_grafana=true 但 grafana 没启用)
+//  3. service_map 引用了不存在的 env → warn
 func checkObservability(c *SystemConfig) []HealthIssue {
 	var out []HealthIssue
 	obs := c.Infrastructure.Observability

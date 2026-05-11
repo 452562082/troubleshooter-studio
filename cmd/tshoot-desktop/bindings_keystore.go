@@ -128,9 +128,11 @@ func (a *App) ChatDeleteProviderKey(providerID string) error {
 // ── 基础设施凭证(配置中心 / 可观测性 / 消息平台...) ──────────────────
 // 存 system keychain,service="tshoot-studio-infra",user=<flat key>。
 // key 命名规则建议:"<type>:<env>:<field>",例:
-//   "nacos:dev:addr"  "nacos:dev:user"  "nacos:dev:pass"
-//   "apollo:prod:meta"  "apollo:prod:token"
-//   "consul:dev:host"   "consul:dev:token"
+//
+//	"nacos:dev:addr"  "nacos:dev:user"  "nacos:dev:pass"
+//	"apollo:prod:meta"  "apollo:prod:token"
+//	"consul:dev:host"   "consul:dev:token"
+//
 // 跟 install.sh read_var 变量名(CC_ADDR_DEV / APOLLO_META_DEV ...)对应,
 // 部署前把 keychain 的值 export 成对应 env var,install.sh 就跳过交互直接用。
 //

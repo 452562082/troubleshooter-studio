@@ -1,7 +1,8 @@
 // role_hint_php.go —— PHP 仓库角色推断:composer.json + 框架特征文件。
-//   含 laravel / symfony / yii / thinkphp / phalcon → backend
-//   含 nova / horizon / filament(后台框架)→ admin
-//   只有 composer.json 无入口 / 无框架 → common-lib
+//
+//	含 laravel / symfony / yii / thinkphp / phalcon → backend
+//	含 nova / horizon / filament(后台框架)→ admin
+//	只有 composer.json 无入口 / 无框架 → common-lib
 package analyzer
 
 import (

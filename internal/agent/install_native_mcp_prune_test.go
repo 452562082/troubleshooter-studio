@@ -54,11 +54,11 @@ func TestWriteMCPServers_PrunesDeadKeysByPrefix(t *testing.T) {
 	//  - oldsystem-grafana-dev(更老的 system.id 改名前留下,前缀不匹配,保留 — 用户手清)
 	writeJSON(t, path, map[string]any{
 		"mcpServers": map[string]any{
-			"bot-grafana-dev":    map[string]any{"command": "npx"},
-			"bot-grafana-prod":   map[string]any{"command": "npx"},
-			"bot-mongodb-dev":    map[string]any{"command": "npx"},
-			"bot-nacos-old-dev":  map[string]any{"command": "uvx"},
-			"other-mcp":          map[string]any{"command": "user-defined"},
+			"bot-grafana-dev":       map[string]any{"command": "npx"},
+			"bot-grafana-prod":      map[string]any{"command": "npx"},
+			"bot-mongodb-dev":       map[string]any{"command": "npx"},
+			"bot-nacos-old-dev":     map[string]any{"command": "uvx"},
+			"other-mcp":             map[string]any{"command": "user-defined"},
 			"oldsystem-grafana-dev": map[string]any{"command": "npx"},
 		},
 	})
@@ -95,8 +95,8 @@ func TestWriteMCPServers_MergeOnlyNew_PreservesEverything(t *testing.T) {
 	path := filepath.Join(dir, "settings.json")
 	writeJSON(t, path, map[string]any{
 		"mcpServers": map[string]any{
-			"bot-grafana-dev":  map[string]any{"command": "npx"},
-			"bot-mongodb-dev":  map[string]any{"command": "npx"}, // 该保留 — 没 creds 无法判断意图
+			"bot-grafana-dev": map[string]any{"command": "npx"},
+			"bot-mongodb-dev": map[string]any{"command": "npx"}, // 该保留 — 没 creds 无法判断意图
 		},
 	})
 	servers := map[string]any{

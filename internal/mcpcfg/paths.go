@@ -45,8 +45,9 @@ const (
 
 // Resolved 表示"该 target + 该 projectRoot 组合下"MCP 配置要写到哪个文件。
 // Schema:
-//   NestedUnderMCP=true  → 顶层 {"mcp": {"servers": {<name>: ...}}}(openclaw)
-//   NestedUnderMCP=false → 顶层 {"mcpServers": {<name>: ...}}(claude-code/cursor/claude-desktop)
+//
+//	NestedUnderMCP=true  → 顶层 {"mcp": {"servers": {<name>: ...}}}(openclaw)
+//	NestedUnderMCP=false → 顶层 {"mcpServers": {<name>: ...}}(claude-code/cursor/claude-desktop)
 type Resolved struct {
 	Target         Target
 	Scope          Scope

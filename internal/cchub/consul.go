@@ -16,10 +16,11 @@ import (
 // key 作为 dataId 供服务映射 —— 跟 nacos 的 (namespace × dataId) 语义对齐。
 //
 // 两阶段模式:
-//   a) NamespacesOnly=true:GET /v1/kv/?keys=true&separator=/ 只列根下 top-level prefix,
-//      返回 Namespaces(不列具体 key),给 UI 下拉挑"这个 env 用哪个 prefix"。
-//   b) 正常:req.Namespace = 选中的 prefix → GET /v1/kv/<prefix>?recurse=true&keys=true
-//      列该 prefix 下所有 key 作 Entries。
+//
+//	a) NamespacesOnly=true:GET /v1/kv/?keys=true&separator=/ 只列根下 top-level prefix,
+//	   返回 Namespaces(不列具体 key),给 UI 下拉挑"这个 env 用哪个 prefix"。
+//	b) 正常:req.Namespace = 选中的 prefix → GET /v1/kv/<prefix>?recurse=true&keys=true
+//	   列该 prefix 下所有 key 作 Entries。
 func PreloadConsul(req Request) (*Result, error) {
 	addr := strings.TrimSpace(req.Addr)
 	if addr == "" {

@@ -11,7 +11,7 @@
 //     所以优先看 CLI,Desktop 只在 CLI 不在时做 fallback 信息。
 //   - Cursor IDE:macOS /Applications/Cursor.app 的 Info.plist
 //     (Linux / Windows 路径约定不同,当前只处理 macOS —— 其它平台返回 installed=false
-//     + 一句 note 说"本检测只覆盖 macOS")。
+//   - 一句 note 说"本检测只覆盖 macOS")。
 package aitools
 
 import (

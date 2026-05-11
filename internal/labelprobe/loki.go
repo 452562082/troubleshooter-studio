@@ -1,13 +1,14 @@
 // Package labelprobe 拉 Loki 标签 / 值,给 wizard 可观测性 step 的"环境×服务 → Loki 标签映射"用。
 //
 // 两条路径:
-//   a) 通过 Grafana datasource proxy(推荐):统一鉴权(grafana url + api key)
-//      GET /api/datasources                              列 datasources(挑 loki UID)
-//      GET /api/datasources/proxy/uid/<uid>/loki/api/v1/labels
-//      GET /api/datasources/proxy/uid/<uid>/loki/api/v1/label/<key>/values
-//   b) 直连 Loki:
-//      GET /loki/api/v1/labels
-//      GET /loki/api/v1/label/<key>/values
+//
+//	a) 通过 Grafana datasource proxy(推荐):统一鉴权(grafana url + api key)
+//	   GET /api/datasources                              列 datasources(挑 loki UID)
+//	   GET /api/datasources/proxy/uid/<uid>/loki/api/v1/labels
+//	   GET /api/datasources/proxy/uid/<uid>/loki/api/v1/label/<key>/values
+//	b) 直连 Loki:
+//	   GET /loki/api/v1/labels
+//	   GET /loki/api/v1/label/<key>/values
 //
 // 5 秒超时,401/403/404 各自人话提示。结果原样返前端,前端做 env / service 启发式匹值。
 package labelprobe
@@ -44,7 +45,7 @@ type Datasource struct {
 	Name    string `json:"name"`
 	Type    string `json:"type"` // "loki" / "prometheus" / ...
 	URL     string `json:"url,omitempty"`
-	IsLoki  bool   `json:"is_loki"`  // type=="loki" 简化标志,UI 用
+	IsLoki  bool   `json:"is_loki"` // type=="loki" 简化标志,UI 用
 	Default bool   `json:"default,omitempty"`
 }
 

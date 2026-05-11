@@ -12,13 +12,13 @@ import (
 // CCHubPreloadInput 前端传来的预加载请求。
 // 跟 cchub.Request 结构同步;独立一层让 Wails 生成的 TS 类型清爽一些。
 type CCHubPreloadInput struct {
-	Type           string `json:"type"`      // "nacos" / "apollo" / "consul"
-	Addr           string `json:"addr"`      // host:port 或 full URL
+	Type           string `json:"type"` // "nacos" / "apollo" / "consul"
+	Addr           string `json:"addr"` // host:port 或 full URL
 	Username       string `json:"username,omitempty"`
 	Password       string `json:"password,omitempty"`
 	Token          string `json:"token,omitempty"`
-	Namespace      string `json:"namespace,omitempty"`     // nacos tenant / consul prefix / apollo env
-	AppID          string `json:"app_id,omitempty"`        // apollo only
+	Namespace      string `json:"namespace,omitempty"`       // nacos tenant / consul prefix / apollo env
+	AppID          string `json:"app_id,omitempty"`          // apollo only
 	NamespacesOnly bool   `json:"namespaces_only,omitempty"` // true = 只列 namespaces 不拉 configs
 }
 
@@ -72,12 +72,12 @@ func (a *App) FetchConfigContent(in CCHubFetchContentInput) (*cchub.FetchContent
 
 // CCHubFetchBatchInput 批量拉取入参。共享凭证 + N 条 (namespace, group, data_id) 精确定位。
 type CCHubFetchBatchInput struct {
-	Type     string                  `json:"type"`
-	Addr     string                  `json:"addr"`
-	Username string                  `json:"username,omitempty"`
-	Password string                  `json:"password,omitempty"`
-	Token    string                  `json:"token,omitempty"`
-	Items    []cchub.FetchBatchItem  `json:"items"`
+	Type     string                 `json:"type"`
+	Addr     string                 `json:"addr"`
+	Username string                 `json:"username,omitempty"`
+	Password string                 `json:"password,omitempty"`
+	Token    string                 `json:"token,omitempty"`
+	Items    []cchub.FetchBatchItem `json:"items"`
 }
 
 // FetchConfigContentBatch 批量拉配置内容。对 nacos 会复用一次 probe + login,

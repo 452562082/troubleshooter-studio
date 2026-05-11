@@ -2,16 +2,16 @@
 //
 // 三家配置位置/格式不一样(对应代码踩过的坑):
 //   - claude-code → ~/.claude.json(dotfile,顶层 "mcpServers" JSON 字段)。
-//                   注意:**不是** ~/.claude/settings.json —— 那个文件给 hooks/permissions/env 用,
-//                   Claude Code CLI 不在那里读 mcpServers。早期实现写到 settings.json 看似无报错,
-//                   但 `claude mcp list` 永远看不到装入的 server,只能用 ~/.claude.json。
-//                   迁移期顺手清掉旧 settings.json 里残留的同名 keys(避免新旧并存)。
+//     注意:**不是** ~/.claude/settings.json —— 那个文件给 hooks/permissions/env 用,
+//     Claude Code CLI 不在那里读 mcpServers。早期实现写到 settings.json 看似无报错,
+//     但 `claude mcp list` 永远看不到装入的 server,只能用 ~/.claude.json。
+//     迁移期顺手清掉旧 settings.json 里残留的同名 keys(避免新旧并存)。
 //   - cursor      → ~/.cursor/mcp.json,顶层 "mcpServers" JSON 字段
 //   - codex       → ~/.codex/agents/<name>.toml 内联 [mcp_servers.<x>] 段(每个 subagent 自带 MCP)。
-//                   **不要**走 `codex mcp add` 写到 ~/.codex/config.toml —— 那会让主 chat 启动时
-//                   也拉一遍这些 MCP,而排障 MCP 只对 truss-troubleshooter agent 有意义,主 chat
-//                   不该被拖累(node 25 + npx 包并发 EPIPE 崩溃风险)。官方文档明确每个 agent 自带:
-//                   https://developers.openai.com/codex/subagents
+//     **不要**走 `codex mcp add` 写到 ~/.codex/config.toml —— 那会让主 chat 启动时
+//     也拉一遍这些 MCP,而排障 MCP 只对 truss-troubleshooter agent 有意义,主 chat
+//     不该被拖累(node 25 + npx 包并发 EPIPE 崩溃风险)。官方文档明确每个 agent 自带:
+//     https://developers.openai.com/codex/subagents
 //
 // merge 策略:cfg 派生的 server key 先 remove 同名再 add(替换式),用户手加的别名
 // (其它前缀)保留不动。codex 走"替换 agent toml 里的 {{MCP_SERVERS}} 占位"路径,
@@ -415,4 +415,3 @@ func renderCodexMCPSection(servers map[string]any) string {
 	}
 	return strings.TrimRight(sb.String(), "\n")
 }
-

@@ -3,21 +3,21 @@
 // 原则:每个平台的 agent .md 是为该平台原生写的提示词,**不**机械拼贴 OpenClaw workspace
 // 的 5 个 .md 文件。具体:
 //
-//  1) workspace 里 SOUL.md / IDENTITY.md / AGENTS.md 第一行是 `# SOUL.md - X` /
+//  1. workspace 里 SOUL.md / IDENTITY.md / AGENTS.md 第一行是 `# SOUL.md - X` /
 //     `# IDENTITY.md` / `# AGENTS.md - X 工作区` 这种"文件名标识 heading",对 OpenClaw
 //     workspace 内部寻址有意义,但写到 IDE agent .md 里就变成了奇怪的"# IDENTITY.md"
 //     段标题。统一脱掉,内容直接接进 agent 主标题下。
 //
-//  2) AGENTS.md 里有 OpenClaw 专属段(`## 工作区路径` 给 ~/.openclaw/workspace/<id>/ 路径
+//  2. AGENTS.md 里有 OpenClaw 专属段(`## 工作区路径` 给 ~/.openclaw/workspace/<id>/ 路径
 //     和 6 份 .md 布局;`## 行为硬规则` 假设 OpenClaw 的进度条 / ctx 首行约定;
 //     `## 出错应对` 提 `tshoot agent self-test` 命令)。这些段不进 IDE agent .md,
 //     IDE 的对应内容在各自 generator 的 intro 里以平台原生措辞写。
 //
-//  3) "Cursor 模式限制" / "Codex 模式限制" 这种 warning section 不再出现。每个平台的
+//  3. "Cursor 模式限制" / "Codex 模式限制" 这种 warning section 不再出现。每个平台的
 //     运行环境(有/没 Bash、MCP 怎么注册、脚本路径前缀)以**自然介绍**的形式由调用方传入
 //     intro 字符串,作为 agent 自我介绍的一部分。
 //
-//  4) CHECKLIST.md(全是 OpenClaw 自动执行步骤)+ TOOLS.md(OpenClaw 权限边界)整体不拼。
+//  4. CHECKLIST.md(全是 OpenClaw 自动执行步骤)+ TOOLS.md(OpenClaw 权限边界)整体不拼。
 //
 // OpenClaw 自己的 workspace 仍按原样保留 5 个 .md 文件,本文件只影响 IDE 三家产物。
 package generator
@@ -103,11 +103,11 @@ func extractMDSection(md, titlePrefix string) string {
 // 调用方传入 wsRoot(OpenClaw workspace 临时目录,内有 SOUL/IDENTITY/AGENTS 等)+ ctx +
 // 平台属性 profile。本函数负责:
 //
-//	1. 写平台 intro(自然介绍,不是 warning section)
-//	2. 写 SOUL 主体(去掉文件名 heading)
-//	3. 写 IDENTITY 主体(去掉文件名 heading)
-//	4. 抽 AGENTS 跨平台通用四段(排障入口 / 输出形态 / 首次打招呼 / 故障快报模板)
-//	5. 写 Skills 索引(用 profile.SkillsScriptPathPrefix 提示路径前缀)
+//  1. 写平台 intro(自然介绍,不是 warning section)
+//  2. 写 SOUL 主体(去掉文件名 heading)
+//  3. 写 IDENTITY 主体(去掉文件名 heading)
+//  4. 抽 AGENTS 跨平台通用四段(排障入口 / 输出形态 / 首次打招呼 / 故障快报模板)
+//  5. 写 Skills 索引(用 profile.SkillsScriptPathPrefix 提示路径前缀)
 //
 // 不拼 CHECKLIST.md / TOOLS.md / AGENTS.md 的 OpenClaw 专属段。
 func writeIDEAgentBody(sb *strings.Builder, wsRoot string, ctx *Context, profile IDEPlatform) {

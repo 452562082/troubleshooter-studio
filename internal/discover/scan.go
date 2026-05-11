@@ -83,7 +83,7 @@ func WorkDirFor(ag DiscoveredAgent) string {
 // DefaultRoots 返回 discover 默认扫描的位置 —— 全是"真实部署位置":
 //   - ~/.openclaw/workspace/    OpenClaw 真实部署根
 //   - ~/.claude/skills/         Claude Code 真实部署根(每个 agent 一个 skills/<name> 子目录,
-//                               里面有 InstallNative 写进去的 tshoot.json 锚点)
+//     里面有 InstallNative 写进去的 tshoot.json 锚点)
 //   - ~/.cursor/skills/         Cursor 真实部署根,同上
 //   - ~/.codex/skills/          OpenAI Codex CLI 真实部署根,同上
 //

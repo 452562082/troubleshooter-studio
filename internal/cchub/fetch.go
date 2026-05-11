@@ -3,9 +3,10 @@
 // 这里把那些 dataId 的内容拉回来,前端 js-yaml 解析识别 redis / mysql / mongodb 等数据层配置。
 //
 // 跟 Preload 不一样:Preload 是"列表",Fetch 是"拿单条内容"。各平台拉取实现已按域拆:
-//   fetch_nacos.go    Nacos(含 connect/retry/batch,batch 复用同一 token)
-//   fetch_apollo.go   Apollo(token header,batch 仅复用 http.Client)
-//   fetch_consul.go   Consul(KV ?raw,无状态)
+//
+//	fetch_nacos.go    Nacos(含 connect/retry/batch,batch 复用同一 token)
+//	fetch_apollo.go   Apollo(token header,batch 仅复用 http.Client)
+//	fetch_consul.go   Consul(KV ?raw,无状态)
 package cchub
 
 import (

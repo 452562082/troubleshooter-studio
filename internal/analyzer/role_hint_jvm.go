@@ -1,7 +1,8 @@
 // role_hint_jvm.go —— Java/Kotlin 仓库角色推断:简单字符串匹配 pom.xml / build.gradle(无 XML 解析)。
-//   <packaging>jar</packaging> 且无 spring-web / spring-boot-starter-web → common-lib
-//   有 spring-cloud-gateway / spring-cloud-zuul → gateway
-//   有 spring-boot-starter-web / spring-webflux → backend
+//
+//	<packaging>jar</packaging> 且无 spring-web / spring-boot-starter-web → common-lib
+//	有 spring-cloud-gateway / spring-cloud-zuul → gateway
+//	有 spring-boot-starter-web / spring-webflux → backend
 package analyzer
 
 import (

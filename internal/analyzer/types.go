@@ -42,9 +42,9 @@ type DownstreamCall struct {
 
 // DataStoreUsage 单次数据层使用线索 —— "本仓库初始化了哪个数据层连接"。
 type DataStoreUsage struct {
-	Type     string `json:"type"`               // mysql / postgresql / redis / mongodb / elasticsearch / kafka / rocketmq / rabbitmq / clickhouse
-	Logical  string `json:"logical,omitempty"`  // 逻辑名(从配置 key / package 名推),如 "order_db" "session-cache"
-	Driver   string `json:"driver"`             // 库/驱动(go-redis / pymongo / @Autowired RedisTemplate)
+	Type     string `json:"type"`              // mysql / postgresql / redis / mongodb / elasticsearch / kafka / rocketmq / rabbitmq / clickhouse
+	Logical  string `json:"logical,omitempty"` // 逻辑名(从配置 key / package 名推),如 "order_db" "session-cache"
+	Driver   string `json:"driver"`            // 库/驱动(go-redis / pymongo / @Autowired RedisTemplate)
 	Callsite string `json:"callsite,omitempty"`
 }
 
@@ -88,8 +88,8 @@ type RepoAnalysis struct {
 	// api_url[apps/...]=https://... 这种"顺手扫到的资料"。区别于 Warnings:
 	//   Warnings  → "go.mod not found" / "scan failed" 这类需要用户注意的异常
 	//   Notes     → 扫到的事实陈述,UI 用中性色展示,不让用户误以为出错
-	Notes []string `json:"notes,omitempty"`
-	Verified        bool             `json:"verified"`
+	Notes    []string `json:"notes,omitempty"`
+	Verified bool     `json:"verified"`
 }
 
 // Report analyze 命令的聚合产物

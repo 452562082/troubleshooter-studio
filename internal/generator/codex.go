@@ -10,15 +10,16 @@ import (
 
 // GenerateCodex 输出 OpenAI Codex CLI subagent 装机 staging:
 //   - agents/<name>.toml   (codex subagent 定义,TOML 格式;放到 ~/.codex/agents/<name>.toml 后
-//                            主 chat 通过自然语言"spawn the <name> agent ..."调用)
+//     主 chat 通过自然语言"spawn the <name> agent ..."调用)
 //   - skills/<name>/SKILL.md     (顶层调度入口 SKILL.md,让 codex 的 /skills picker 显单条)
 //   - skills/<name>/<sub>/SKILL.md (11 个子能力 SKILL.md,主 agent toml 显式 [[skills.config]] 引用)
 //   - scripts/                    (辅助 python 脚本)
 //
 // 装载位置:
-//   `~/.codex/agents/<name>.toml`(subagent 注册;codex 启动时扫此目录)
-//   `~/.codex/skills/<name>/...`(skill 集合;agent toml 里 path 字段用绝对路径引用)
-//   `~/.codex/scripts/<name>/...`(辅助脚本)
+//
+//	`~/.codex/agents/<name>.toml`(subagent 注册;codex 启动时扫此目录)
+//	`~/.codex/skills/<name>/...`(skill 集合;agent toml 里 path 字段用绝对路径引用)
+//	`~/.codex/scripts/<name>/...`(辅助脚本)
 //
 // 这是"中间包"产物,装到 ~/.codex/ 由 InstallNative() 完成 —— install 时:
 //  1. 把 staging agents/<name>.toml 里 SKILLS_ROOT 占位替换成实际安装根的绝对路径

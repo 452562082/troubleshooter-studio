@@ -7,17 +7,18 @@ type RepoAnalysis struct {
 }
 
 // RepoRole 仓库在系统里担的角色,给 incident-investigator 决定"沿依赖追"的方向 + 范围。
-//   backend     — 后端业务服务(典型 microservice),双向依赖图都有
-//   frontend    — 前端 / web app,只有 downstream(调 gateway / api),无 upstream
-//   gateway     — API 网关 / BFF,downstream 是后端,upstream 是 frontend / 移动端
-//   middleware  — 接入层 / 公共中间件(消息队列 worker / cron 调度器),双向依赖
-//   common-lib  — 公共库/SDK,自身不在依赖图节点上 —— 它被各个服务 import,
-//                 但不接受运行时调用(没有 service endpoint)。排障时不当主角看,
-//                 而是作为"哪些服务依赖了某 lib 的某版本"做横向比对。
-//   mobile      — 移动端 app(iOS/Android),只调 gateway,没 upstream
-//   admin       — 管理后台,典型只有 downstream(调 backend admin 接口)
-//   infra       — 基础设施配置仓库(k8s manifest / terraform),不在运行依赖图
-//   docs        — 文档仓库,仅作背景资料
+//
+//	backend     — 后端业务服务(典型 microservice),双向依赖图都有
+//	frontend    — 前端 / web app,只有 downstream(调 gateway / api),无 upstream
+//	gateway     — API 网关 / BFF,downstream 是后端,upstream 是 frontend / 移动端
+//	middleware  — 接入层 / 公共中间件(消息队列 worker / cron 调度器),双向依赖
+//	common-lib  — 公共库/SDK,自身不在依赖图节点上 —— 它被各个服务 import,
+//	              但不接受运行时调用(没有 service endpoint)。排障时不当主角看,
+//	              而是作为"哪些服务依赖了某 lib 的某版本"做横向比对。
+//	mobile      — 移动端 app(iOS/Android),只调 gateway,没 upstream
+//	admin       — 管理后台,典型只有 downstream(调 backend admin 接口)
+//	infra       — 基础设施配置仓库(k8s manifest / terraform),不在运行依赖图
+//	docs        — 文档仓库,仅作背景资料
 //
 // 留空时模板按 "backend" 兜底。GUI wizard 给一个下拉,默认按 stack 推荐:
 // go/java/python → backend, node 含 server → backend, node 纯前端 → frontend, php → backend...

@@ -5,17 +5,17 @@
 //
 // 扫描策略(按命中精度排):
 //
-//   1. ORM annotation/api(最准):
-//      - Java   @Entity / @Table(name="...") / @TableName("...") / mybatis <mapper namespace=...>
-//      - Go     `gorm:"column:..."` tag / `db:"..."` / `bun:"table:..."` / `db.Table("...")` / `Model(&User{})`
-//      - Python SQLAlchemy `__tablename__ = "..."` / Django `class Meta: db_table = "..."` / peewee
-//      - Node   TypeORM `@Entity({name:"..."})` / Sequelize `define("name",...)` / Prisma `@@map("...")` / Mongoose `model("...",...)`
+//  1. ORM annotation/api(最准):
+//     - Java   @Entity / @Table(name="...") / @TableName("...") / mybatis <mapper namespace=...>
+//     - Go     `gorm:"column:..."` tag / `db:"..."` / `bun:"table:..."` / `db.Table("...")` / `Model(&User{})`
+//     - Python SQLAlchemy `__tablename__ = "..."` / Django `class Meta: db_table = "..."` / peewee
+//     - Node   TypeORM `@Entity({name:"..."})` / Sequelize `define("name",...)` / Prisma `@@map("...")` / Mongoose `model("...",...)`
 //
-//   2. SQL 字符串扫描(兜底,各语言通用):
-//      `CREATE TABLE \w+` / `INSERT INTO \w+` / `FROM \w+\s+WHERE` / `UPDATE \w+ SET`
+//  2. SQL 字符串扫描(兜底,各语言通用):
+//     `CREATE TABLE \w+` / `INSERT INTO \w+` / `FROM \w+\s+WHERE` / `UPDATE \w+ SET`
 //
-//   3. 文件名 / 目录提示(最弱):
-//      *Entity*.{go,java,kt} / entities/*.{go,java} / models/*.py / *.prisma
+//  3. 文件名 / 目录提示(最弱):
+//     *Entity*.{go,java,kt} / entities/*.{go,java} / models/*.py / *.prisma
 //
 // 同一 (table, type) 多策略命中保留高优先级 strategy。
 //
@@ -139,4 +139,3 @@ func isSQLKeyword(s string) bool {
 	}
 	return false
 }
-

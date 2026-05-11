@@ -123,4 +123,3 @@ func applyFieldToFinding(f *analyzer.Finding, key, val string) {
 		f.ServerAddr = val
 	}
 }
-

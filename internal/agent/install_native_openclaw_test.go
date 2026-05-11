@@ -80,19 +80,19 @@ func TestInstallNativeOpenclaw_FreshInstall(t *testing.T) {
 	staging, fakeHome := setupOpenclawStaging(t, cfg)
 
 	creds := map[string]string{
-		"CC_ADDR_DEV":      "nacos-dev.example.com:8848",
-		"CC_ADDR_PROD":     "nacos-prod.example.com:8848",
-		"CC_USER_DEV":      "nacos",
-		"CC_PASS_DEV":      "nacos-pwd",
-		"CC_USER_PROD":     "nacos",
-		"CC_PASS_PROD":     "nacos-pwd",
-		"GRAFANA_URL_DEV":  "http://grafana-dev.example.com",
-		"GRAFANA_URL_PROD": "http://grafana-prod.example.com",
-		"GRAFANA_USER_DEV": "admin",
-		"GRAFANA_PASS_DEV": "admin-pwd",
+		"CC_ADDR_DEV":       "nacos-dev.example.com:8848",
+		"CC_ADDR_PROD":      "nacos-prod.example.com:8848",
+		"CC_USER_DEV":       "nacos",
+		"CC_PASS_DEV":       "nacos-pwd",
+		"CC_USER_PROD":      "nacos",
+		"CC_PASS_PROD":      "nacos-pwd",
+		"GRAFANA_URL_DEV":   "http://grafana-dev.example.com",
+		"GRAFANA_URL_PROD":  "http://grafana-prod.example.com",
+		"GRAFANA_USER_DEV":  "admin",
+		"GRAFANA_PASS_DEV":  "admin-pwd",
 		"GRAFANA_USER_PROD": "admin",
 		"GRAFANA_PASS_PROD": "admin-pwd",
-		"MODEL":            "openai/gpt-5",
+		"MODEL":             "openai/gpt-5",
 	}
 	err := InstallNativeOpenclaw(context.Background(), staging, InstallOpenclawOptions{Creds: creds, SkipGatewayRestart: true})
 	if err != nil {
@@ -300,15 +300,15 @@ func TestInstallNativeOpenclaw_MultiSourceMix(t *testing.T) {
 	staging, fakeHome := setupOpenclawStaging(t, cfg)
 
 	creds := map[string]string{
-		"CC_ADDR_MAIN_NACOS_DEV":          "nacos-dev:8848",
-		"CC_ADDR_MAIN_NACOS_PROD":         "nacos-prod:8848",
-		"CC_USER_MAIN_NACOS_DEV":          "u",
-		"CC_PASS_MAIN_NACOS_DEV":          "p",
-		"CC_USER_MAIN_NACOS_PROD":         "u",
-		"CC_PASS_MAIN_NACOS_PROD":         "p",
-		"KUBOARD_URL_LEGACY_KUBOARD_DEV":  "https://kuboard-dev.example.com",
-		"KUBOARD_USER_LEGACY_KUBOARD_DEV": "admin",
-		"KUBOARD_PASS_LEGACY_KUBOARD_DEV": "secret",
+		"CC_ADDR_MAIN_NACOS_DEV":           "nacos-dev:8848",
+		"CC_ADDR_MAIN_NACOS_PROD":          "nacos-prod:8848",
+		"CC_USER_MAIN_NACOS_DEV":           "u",
+		"CC_PASS_MAIN_NACOS_DEV":           "p",
+		"CC_USER_MAIN_NACOS_PROD":          "u",
+		"CC_PASS_MAIN_NACOS_PROD":          "p",
+		"KUBOARD_URL_LEGACY_KUBOARD_DEV":   "https://kuboard-dev.example.com",
+		"KUBOARD_USER_LEGACY_KUBOARD_DEV":  "admin",
+		"KUBOARD_PASS_LEGACY_KUBOARD_DEV":  "secret",
 		"KUBOARD_URL_LEGACY_KUBOARD_PROD":  "https://kuboard-prod.example.com",
 		"KUBOARD_USER_LEGACY_KUBOARD_PROD": "admin",
 		"KUBOARD_PASS_LEGACY_KUBOARD_PROD": "secret",

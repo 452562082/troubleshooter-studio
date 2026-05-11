@@ -22,7 +22,6 @@ const (
 	TargetCodex      IDETarget = "codex"
 )
 
-
 // allIDETargets 跟下面 spec 一一对齐;改一处必改另一处。
 var allIDETargets = []IDETarget{TargetClaudeCode, TargetCursor, TargetCodex}
 

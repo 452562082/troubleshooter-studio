@@ -5,13 +5,14 @@
 // 这种)。如果用户:
 //   - 走 BotsPage 的"导入 yaml 一键部署"  → 没经过 wizard Step 7 表单,creds 是空的
 //   - 走 Editor 的"修改 yaml 后部署"      → 同上
+//
 // 这时如果不从 yaml 抽默认值,用户会被反复要求"再填一遍"已经在 yaml 里写过的内容。
 //
 // PrefillCredsFromYAML 解决这个:
 //   - 输入: cfg(已经 LoadFromBytes 过,migrate 已跑)
 //   - 输出: env var key(KUBOARD_URL_DEV 等) → value
 //   - 用法: caller 把这份 map 跟用户表单填的 creds 合并,**用户填的优先**
-//          (用户在 UI 改了的值不要被 yaml 覆盖)
+//     (用户在 UI 改了的值不要被 yaml 覆盖)
 package agent
 
 import (
@@ -140,9 +141,10 @@ func PrefillCredsFromYAML(cfg *config.SystemConfig) map[string]string {
 //   - prefill 只填 user 没提交的 key
 //
 // caller 用法:
-//   userCreds := <来自 UI 表单>
-//   final := agent.MergeCredsWithPrefill(userCreds, agent.PrefillCredsFromYAML(cfg))
-//   pass final to RunInstall / InstallNativeOpenclaw
+//
+//	userCreds := <来自 UI 表单>
+//	final := agent.MergeCredsWithPrefill(userCreds, agent.PrefillCredsFromYAML(cfg))
+//	pass final to RunInstall / InstallNativeOpenclaw
 func MergeCredsWithPrefill(user, prefill map[string]string) map[string]string {
 	out := make(map[string]string, len(user)+len(prefill))
 	maps.Copy(out, prefill)

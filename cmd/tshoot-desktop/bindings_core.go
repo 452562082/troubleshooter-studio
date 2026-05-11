@@ -1,11 +1,12 @@
 // bindings_core.go —— 元数据 + 验证类 binding:Version / Validate / PrefillCreds / Doctor。
 //
 // 按域分文件:
-//   bindings_core.go  Version / Validate / PrefillCreds / Doctor
-//   bindings_repo.go  DiscoverBots / Analyze / 仓库辅助(branches / submodules / role)
-//   bindings_gen.go   Gen / Plan / Diff / GenPreview
-//   bindings_apply.go 改已装机器人的活 workspace
-//   bindings_deploy.go 走 install.sh / 写 .env
+//
+//	bindings_core.go  Version / Validate / PrefillCreds / Doctor
+//	bindings_repo.go  DiscoverBots / Analyze / 仓库辅助(branches / submodules / role)
+//	bindings_gen.go   Gen / Plan / Diff / GenPreview
+//	bindings_apply.go 改已装机器人的活 workspace
+//	bindings_deploy.go 走 install.sh / 写 .env
 package main
 
 import (
@@ -27,18 +28,17 @@ func (a *App) Version() string {
 	return version
 }
 
-
 // ValidateResult 与 /api/validate 返回形状对齐，前端已有依赖。
 // Issues 是健康检查的额外发现:Validate 通过(yaml 能跑)后再跑 HealthCheck,
 // 把"语义层"的缺口(可观测性 wiring 不全 / 仓库分支缺 env / 多源没指定 source 等)
 // 一并返给前端。Issues 仅供展示提醒,不阻断生成。
 type ValidateResult struct {
-	Valid  bool                  `json:"valid"`
-	System string                `json:"system"`
-	Name   string                `json:"name"`
-	Envs   int                   `json:"envs"`
-	Repos  int                   `json:"repos"`
-	Issues []config.HealthIssue  `json:"issues,omitempty"`
+	Valid  bool                 `json:"valid"`
+	System string               `json:"system"`
+	Name   string               `json:"name"`
+	Envs   int                  `json:"envs"`
+	Repos  int                  `json:"repos"`
+	Issues []config.HealthIssue `json:"issues,omitempty"`
 }
 
 // PrefillCreds 从 yaml 抽 install 阶段需要的环境变量默认值(KUBOARD_URL_DEV / GRAFANA_URL_DEV

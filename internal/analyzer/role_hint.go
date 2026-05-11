@@ -1,10 +1,10 @@
 // role_hint.go —— 自动推断仓库角色(role)
 //
 // 规则按可信度排序,**第一条命中即返回**(注释每条都说明命中证据,UI 显示给用户看):
-//   1. 仓库名子串匹配(高可信:命名约定通常严格)
-//   2. 顶层目录结构(只有 docs / 只有 terraform → docs / infra)
-//   3. 技术栈专属信号(stack=node 看 package.json deps;stack=java 看 pom packaging;stack=go 看 main 包)
-//   4. 都不命中 → backend(默认,大部分微服务都是这个)
+//  1. 仓库名子串匹配(高可信:命名约定通常严格)
+//  2. 顶层目录结构(只有 docs / 只有 terraform → docs / infra)
+//  3. 技术栈专属信号(stack=node 看 package.json deps;stack=java 看 pom packaging;stack=go 看 main 包)
+//  4. 都不命中 → backend(默认,大部分微服务都是这个)
 //
 // 设计:本函数**只读 repo 根目录的少量文件**(package.json / pom.xml / go.mod 等),
 // 不做深度扫描 —— 速度优先。命中即返回,避免重复 IO。
@@ -284,4 +284,3 @@ func roleFromStackFiles(stack, repoPath string) RoleHint {
 	}
 	return RoleHint{}
 }
-

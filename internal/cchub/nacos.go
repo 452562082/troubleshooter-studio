@@ -2,28 +2,30 @@
 //
 // Nacos 两个大版本 API 完全不同,我们探测后自动适配:
 //
-//   v1 (Nacos 1.x / 2.x,兼容层在 3.x 仍保留但不推荐)
-//     probe:  GET  <ctx>/v1/console/server/state
-//     login:  POST <ctx>/v1/auth/login       → {accessToken}
-//     list:   GET  <ctx>/v1/cs/configs       → {totalCount, pageItems:[{dataId,group,tenant,type}]}
+//	v1 (Nacos 1.x / 2.x,兼容层在 3.x 仍保留但不推荐)
+//	  probe:  GET  <ctx>/v1/console/server/state
+//	  login:  POST <ctx>/v1/auth/login       → {accessToken}
+//	  list:   GET  <ctx>/v1/cs/configs       → {totalCount, pageItems:[{dataId,group,tenant,type}]}
 //
-//   v3 (Nacos 3.x,2025-11 之后常见的新部署)
-//     probe:  GET  <ctx>/v3/console/server/state
-//     login:  POST <ctx>/v3/auth/user/login  → {accessToken}(跟 v1 结构基本一致)
-//     list:   GET  <ctx>/v3/console/cs/config/list
-//              → {code,message,data:{totalCount,pageItems:[{dataId,groupName,namespaceId,type}]}}
+//	v3 (Nacos 3.x,2025-11 之后常见的新部署)
+//	  probe:  GET  <ctx>/v3/console/server/state
+//	  login:  POST <ctx>/v3/auth/user/login  → {accessToken}(跟 v1 结构基本一致)
+//	  list:   GET  <ctx>/v3/console/cs/config/list
+//	           → {code,message,data:{totalCount,pageItems:[{dataId,groupName,namespaceId,type}]}}
 //
 // contextPath:
-//   "/nacos" - 官方 docker / war 默认
-//   ""       - K8s Ingress 剥前缀 / 阿里云 MSE / 某些裸 jar 部署
+//
+//	"/nacos" - 官方 docker / war 默认
+//	""       - K8s Ingress 剥前缀 / 阿里云 MSE / 某些裸 jar 部署
 //
 // 组合起来 4 种可能:{/nacos v3} / {/nacos v1} / {"" v3} / {"" v1},探测时逐个 GET
 // server/state,哪个 200 用哪个。
 //
 // 子文件:
-//   nacos_probe.go   probeFlavor / probeDashboard / login(接入握手三件套)
-//   nacos_list.go    nsInfo + listNamespaces + listConfigs + fetchConfigsPage
-//   fetch_nacos.go   connect/fetchOne(给 FetchContent 用,Preload 链路无关)
+//
+//	nacos_probe.go   probeFlavor / probeDashboard / login(接入握手三件套)
+//	nacos_list.go    nsInfo + listNamespaces + listConfigs + fetchConfigsPage
+//	fetch_nacos.go   connect/fetchOne(给 FetchContent 用,Preload 链路无关)
 package cchub
 
 import (

@@ -18,14 +18,14 @@ import (
 type KuboardPodInfo struct {
 	Name         string                 `json:"name"`
 	Namespace    string                 `json:"namespace"`
-	Status       string                 `json:"status"`        // Running / Pending / CrashLoopBackOff / Succeeded / Failed / Unknown
-	Phase        string                 `json:"phase"`         // 原始 spec 的 phase
-	NodeName     string                 `json:"node_name"`     // 调度到哪个 node
+	Status       string                 `json:"status"`    // Running / Pending / CrashLoopBackOff / Succeeded / Failed / Unknown
+	Phase        string                 `json:"phase"`     // 原始 spec 的 phase
+	NodeName     string                 `json:"node_name"` // 调度到哪个 node
 	PodIP        string                 `json:"pod_ip"`
 	StartTime    string                 `json:"start_time"`    // RFC3339
 	RestartCount int                    `json:"restart_count"` // 主容器累计 restart
 	Containers   []KuboardContainerStat `json:"containers"`
-	Reason       string                 `json:"reason,omitempty"`  // OOMKilled / Error / Completed 等
+	Reason       string                 `json:"reason,omitempty"` // OOMKilled / Error / Completed 等
 	Message      string                 `json:"message,omitempty"`
 }
 
@@ -35,9 +35,9 @@ type KuboardContainerStat struct {
 	Image        string `json:"image"`
 	Ready        bool   `json:"ready"`
 	RestartCount int    `json:"restart_count"`
-	State        string `json:"state"` // running / waiting / terminated
-	WaitReason   string `json:"wait_reason,omitempty"`   // ImagePullBackOff / CrashLoopBackOff / ContainerCreating
-	TermReason   string `json:"term_reason,omitempty"`   // OOMKilled / Error / Completed
+	State        string `json:"state"`                 // running / waiting / terminated
+	WaitReason   string `json:"wait_reason,omitempty"` // ImagePullBackOff / CrashLoopBackOff / ContainerCreating
+	TermReason   string `json:"term_reason,omitempty"` // OOMKilled / Error / Completed
 	TermExitCode int    `json:"term_exit_code,omitempty"`
 }
 
@@ -230,8 +230,8 @@ func (a *App) KuboardGetPodLogs(in KuboardGetPodLogsInput) (string, error) {
 
 // KuboardEvent 事件简化表示
 type KuboardEvent struct {
-	Type           string `json:"type"`            // Normal / Warning
-	Reason         string `json:"reason"`          // FailedScheduling / OOMKilled / BackOff ...
+	Type           string `json:"type"`   // Normal / Warning
+	Reason         string `json:"reason"` // FailedScheduling / OOMKilled / BackOff ...
 	Message        string `json:"message"`
 	InvolvedObject string `json:"involved_object"` // <Kind>/<name>
 	Count          int    `json:"count"`

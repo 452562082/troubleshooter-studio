@@ -29,8 +29,8 @@ type KuboardFetchBatchInput struct {
 }
 
 type KuboardFetchBatchItem struct {
-	Key       string `json:"key"`       // 前端用来回填,如 "dev::user"
-	Cluster   string `json:"cluster"`   // cluster 名(UI 选的;后端用 tree 解析成 ID)
+	Key       string `json:"key"`     // 前端用来回填,如 "dev::user"
+	Cluster   string `json:"cluster"` // cluster 名(UI 选的;后端用 tree 解析成 ID)
 	Namespace string `json:"namespace"`
 	ConfigMap string `json:"configmap"`
 }

@@ -5,11 +5,11 @@
 // UI 渲染成级联下拉(免去手填集群名 / namespace / cm 名)。
 //
 // API 路径(对照 https://kb.guadd.fun/swagger-ui/index.html):
-//   1. POST /api/login.kuboard.cn/v4/login         body {username,password}  → {data:{accessToken}}
-//   2. GET  /api/cluster.kuboard.cn/v4/cluster-cache/cluster-namespace-tree?apiGroupName=&resource=configmaps&namespaced=true
-//          → {data:{treeItems:[{id,name,children:[{name (ns)}]}]}}     一次拿全部 cluster→ns 树
-//   3. GET  /api/cluster.kuboard.cn/v4/cluster-cache?apiGroup=&resource=configmaps&namespaced=true&clusterId=<uid>&pageSize=5000
-//          → {data:{list:[{data:{metadata:{namespace,name}}}]}}        per cluster 拉全部 cm,客户端按 ns 分组
+//  1. POST /api/login.kuboard.cn/v4/login         body {username,password}  → {data:{accessToken}}
+//  2. GET  /api/cluster.kuboard.cn/v4/cluster-cache/cluster-namespace-tree?apiGroupName=&resource=configmaps&namespaced=true
+//     → {data:{treeItems:[{id,name,children:[{name (ns)}]}]}}     一次拿全部 cluster→ns 树
+//  3. GET  /api/cluster.kuboard.cn/v4/cluster-cache?apiGroup=&resource=configmaps&namespaced=true&clusterId=<uid>&pageSize=5000
+//     → {data:{list:[{data:{metadata:{namespace,name}}}]}}        per cluster 拉全部 cm,客户端按 ns 分组
 //
 // 鉴权 header 是 Kb-Access-Key(不是标准 Authorization Bearer),value 可以是:
 //   - 登录返回的 accessToken
@@ -383,4 +383,3 @@ func kuboardDirectGET(s *kuboardSetupResult, query string) ([]byte, error) {
 }
 
 // ── Pod 查询 ─────────────────────────────────────────────────────────
-

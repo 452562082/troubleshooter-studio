@@ -131,7 +131,77 @@ flowchart TB
     S7 -.闭环:下次同症状.-> S1
 ```
 
-**说明**:这两张图既可作 markdown 流程图用,也可在 GitLab merge request / 飞书文档 / Confluence wiki 里直接嵌入。导出图片时建议白底,字体大些(`mermaid.live` 的 "Actions → PNG/SVG → ⚙ Background color: white" 即可)。
+### 流程图 3:实战时序图(以"prod commerce 5xx 突增"为例,展示机器人内部工作过程)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Eng as 工程师
+    participant Bot as 排障机器人
+    participant Route as routing skill<br/>(12 张映射表)
+    participant RC as recent-changes<br/>(timeline.py)
+    participant II as incident-investigator
+    participant K as known-errors.local.yaml
+    participant MCPg as grafana MCP
+    participant MCPj as jaeger MCP
+    participant MCPm as mongo MCP
+    participant K8s as k8s MCP
+
+    Eng->>Bot: prod commerce 5xx 突增,14:23 开始
+
+    Note over Bot,Route: ── Step 1 收前提 + 历史 grep ──
+    Bot->>Route: Read routing/references/env-domain-map.yaml<br/>+ service-dependency-map.yaml
+    Route-->>Bot: prod commerce 域名 / 上下游服务 / log app 名
+    Bot->>K: grep "5xx.*timeout|context deadline"<br/>known-errors.{yaml,local.yaml}
+    K-->>Bot: 无命中 → 走完整流程
+
+    Note over Bot,RC: ── Step 2 timeline 三路合并 ──
+    Bot->>RC: python3 timeline.py --env prod --service commerce<br/>--since 1h --incident-time "14:23"
+    RC->>RC: 并发拉:<br/>git log + k8s rollout + nacos history
+    RC-->>Bot: events[] 含 1 条 correlated nacos U<br/>+ diff_risks: timeout_decreased severity:high
+
+    Note over Bot,MCPg: ── Step 3 横向 验证孤立/广播 ──
+    Bot->>MCPg: query_prometheus 同 namespace 其它 service 5xx
+    MCPg-->>Bot: 仅 commerce 错误率高 → 孤立故障
+
+    Note over Bot,II: ── Step 4 纵向 cascade_check 下游 ──
+    Bot->>II: python3 cascade_check.py commerce
+    II->>Route: 读 service-dependency-map: commerce → user
+    II->>MCPg: query_loki_logs user 服务最近 5min
+    MCPg-->>II: user 服务 timeout 暴涨,跟 commerce 同步
+    II-->>Bot: 凶手在 commerce → user 调用环节
+
+    Note over Bot,K8s: ── Step 5 多向交叉(取证关键证据)──
+    Bot->>K8s: get_pod_logs commerce 最近 10min
+    K8s-->>Bot: 错误栈:"context deadline exceeded calling user"
+    Bot->>MCPj: search_traces service=commerce error=true
+    MCPj-->>Bot: trace 显示 user 调用 3.2s timeout
+
+    Note over Bot,Eng: ── Step 6 故障快报 ──
+    Bot-->>Eng: 故障快报:confidence=high<br/>根因: nacos downstream.user.timeout 从 30s 改 3s<br/>P0: nacos 后台回滚到上一版本<br/>预计恢复: 1-2 分钟
+    Eng->>Eng: nacos UI 点回滚
+    Eng->>Bot: 已回滚,等待验证
+
+    Note over Bot,K: ── Step 7 沉淀(confidence=high 强制)──
+    Bot->>Bot: 抽象成 pattern:<br/>"downstream\\.\\w+\\.timeout.*[1-3]s"
+    Bot->>K: python3 sink_postmortem.py --input pattern.json
+    K-->>Bot: ✓ append 完成,下次同症状直接 grep 命中
+```
+
+**这张图想说的事**:机器人不是"把所有 MCP 工具丢给 LLM 自由发挥",而是有**结构化的取证顺序**:
+1. 先查映射表(routing,毫秒级答出"这是谁的服务、log app 是什么、依赖谁")
+2. 再扫历史(timeline.py 三路合并 + 17 类 risk 自动分类,给定性结论)
+3. 然后横向验证(指标 / 日志)→ 纵向追下游
+4. 取证(trace + 完整错误栈)
+5. 最后才输出快报 + 沉淀
+
+每一步都是**确定性的脚本/MCP 调用**驱动 LLM 决策,而不是反过来。这是它能 L3 自主完成排障 + 跨工程师水平稳定输出的核心。
+
+---
+
+**附:Mermaid 图使用说明**
+
+三张图既可作 markdown 流程图用,也可在 GitLab merge request / 飞书文档 / Confluence wiki 里直接嵌入。导出图片时建议白底,字体大些(`mermaid.live` 的 "Actions → PNG/SVG → ⚙ Background color: white" 即可)。
 
 3. 主要使用的技术/工具/平台:
 

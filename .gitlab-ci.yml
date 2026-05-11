@@ -41,6 +41,11 @@ variables:
   # 缓存到 project 下让 gitlab 的 cache: 抓得到
   GOCACHE: "$CI_PROJECT_DIR/.cache/go-build"
   GOMODCACHE: "$CI_PROJECT_DIR/.cache/go-mod"
+  # proxy.golang.org(google 域)国内不可达,统一走 goproxy.cn / goproxy.io,
+  # 命中失败回落 direct(走目标仓库 git/HTTPS)。
+  # GOSUMDB 用 google 官方在国内备的镜像(sum.golang.google.cn)。
+  GOPROXY: "https://goproxy.cn,https://goproxy.io,direct"
+  GOSUMDB: "sum.golang.google.cn"
   # Vite 在 CI 环境不要尝试打开浏览器 / 色彩输出
   CI: "true"
   FORCE_COLOR: "0"

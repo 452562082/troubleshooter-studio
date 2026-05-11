@@ -73,6 +73,16 @@ xcode-select --install            # Xcode CLI Tools(cgo 链 UniformTypeIdentifie
 brew install go node jq           # Go 1.25+ / Node 20+ / jq(GitLab API JSON 解析)
 ```
 
+**runner shell 也建议永久配国内 Go 镜像**(`.gitlab-ci.yml` 已全局注入 `GOPROXY` / `GOSUMDB`,但 runner 上跑 `make` / 调试 / pre-build 时仍会用 shell 环境):
+
+```bash
+# 写进 ~/.zshrc 或 /etc/environment(runner 用户)
+go env -w GOPROXY=https://goproxy.cn,https://goproxy.io,direct
+go env -w GOSUMDB=sum.golang.google.cn
+```
+
+> **踩过的坑**:Mac mini runner 第一次跑 `go:test` 全部 i/o timeout —— `proxy.golang.org` 是 Google 域,国内 IDC 不可达。`.gitlab-ci.yml` `variables:` 块加了 `GOPROXY` / `GOSUMDB` 后修复。如果以后增加新 Go job 或 runner 上手动跑 `go mod download`,记得这两个环境变量必须有。
+
 GitLab shared runner 默认没 macOS 节点,公司内部不准备的话**完全发不了版本**(本地一键发布已禁)。
 紧急 hotfix 场景退路:`make release-tag VERSION=v0.x.x` + 手动 `git push --tags`,binary 漏装就漏装。
 
@@ -114,6 +124,7 @@ Release 页面看到新版本,描述 = 干净 changelog,assets 齐全
 | `✗ CI/CD Variables 缺 GITLAB_TOKEN` | 步骤 2 没做 | 加 var |
 | `git push: 401 Unauthorized` | token role 不是 maintainer / protected tags 没配 maintainer | 改步骤 1 + 3 |
 | `command not found: brew` | runner 不是 macOS / Xcode CLI 没装 | 看步骤 4 |
+| `go: ... dial tcp ... i/o timeout`(proxy.golang.org / sum.golang.org) | `proxy.golang.org` / `sum.golang.org` 是 Google 域,国内 runner 不可达 | `.gitlab-ci.yml` 已注入 `GOPROXY=https://goproxy.cn,https://goproxy.io,direct` + `GOSUMDB=sum.golang.google.cn`;runner shell 也 `go env -w` 配一份 |
 | `dist/bin/tshoot-darwin-arm64: file not found` | runner 没 cross-compile env | 检查 Makefile release target,看 `GOOS=... GOARCH=... go build` 是否需要额外配置 |
 | pipeline 上没看到 release:* 按钮 | 不在 main 分支 | 这 3 job 只 main 上出现(`rules: $CI_COMMIT_BRANCH == "main"`) |
 | **job 一直 pending,GitLab 显示 "no runners online"**(但 runner 列表里明明 Online) | runner tag 跟 .gitlab-ci.yml `tags:` 对不上 / runner 没勾 "Run untagged jobs" | Settings → CI/CD → Runners → ✏ 编辑 runner:Tags 加 `macos` + 勾 ☑ Run untagged jobs。详细见步骤 4。|

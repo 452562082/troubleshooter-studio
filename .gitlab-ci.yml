@@ -65,6 +65,9 @@ go:lint:
     paths:
       - .cache/go-build
       - .cache/go-mod
+  # Go module 缓存默认只读(防 tamper),runner 收工 cleanup 时 rm 不掉 —— 加回写权限静音 warning
+  after_script:
+    - chmod -R u+w "$GOCACHE" "$GOMODCACHE" 2>/dev/null || true
   script:
     - go vet ./...
     - golangci-lint run --timeout=3m
@@ -95,6 +98,9 @@ go:test:
     paths:
       - .cache/go-build
       - .cache/go-mod
+  # 同 go:lint —— cleanup warning 静音
+  after_script:
+    - chmod -R u+w "$GOCACHE" "$GOMODCACHE" 2>/dev/null || true
   script:
     - go build ./...
     - go test -race -cover -coverprofile=coverage.out ./...

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -159,11 +160,46 @@ func EnsureSubmodules(repoPath string) error {
 // ErrNotGitRepo 目标目录不是 git 仓库或没有 origin
 var ErrNotGitRepo = errors.New("not a git repository or no origin")
 
-// ReadOrigin 读取仓库的 origin URL；非 git 仓库/无 origin 返回 ErrNotGitRepo
+// ReadOrigin 读取仓库的 origin URL；非 git 仓库/无 origin 返回 ErrNotGitRepo。
+//
+// 关键 case(踩过的坑):`git -C <path> ...` 会**自动向上递归找 .git/**,
+// 如果 path 本身不是 git repo(比如 examples/fake-repos/order-service 这种纯目录),
+// git 会走到父目录的 git repo 把它的 origin 当成 path 的返回。
+// 解决:先 `rev-parse --show-toplevel` 校验 path 就是 git repo 的 root,
+// 不是子目录才往下走 remote get-url。
+//
+// 本地能漏掉这个 bug 是因为开发者本地 remote 通常叫别的名字(如本仓库叫
+// `troubleshooter-studio`),`git remote get-url origin` 直接报 No such remote
+// 顺手当 ErrNotGitRepo 处理掉;CI 上 GitLab Runner 用默认 git clone 建 `origin`
+// remote,就把父项目 origin 当成子目录的返回了。
 func ReadOrigin(path string) (string, error) {
 	if _, err := exec.LookPath("git"); err != nil {
 		return "", ErrGitNotFound
 	}
+	// 校验 path 本身就是 git repo root,不是子目录
+	topCmd := exec.Command("git", "-C", path, "rev-parse", "--show-toplevel")
+	var topOut bytes.Buffer
+	topCmd.Stdout = &topOut
+	if err := topCmd.Run(); err != nil {
+		return "", ErrNotGitRepo
+	}
+	top := strings.TrimSpace(topOut.String())
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", ErrNotGitRepo
+	}
+	// EvalSymlinks 处理 macOS /tmp 实际是 /private/tmp 之类的 symlink 场景
+	if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
+		absPath = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(top); err == nil {
+		top = resolved
+	}
+	if absPath != top {
+		// path 是 git repo 的子目录,不应该当成"这个 path 是 git repo"处理
+		return "", ErrNotGitRepo
+	}
+
 	cmd := exec.Command("git", "-C", path, "remote", "get-url", "origin")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

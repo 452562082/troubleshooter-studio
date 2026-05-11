@@ -41,6 +41,10 @@ variables:
   # 缓存到 project 下让 gitlab 的 cache: 抓得到
   GOCACHE: "$CI_PROJECT_DIR/.cache/go-build"
   GOMODCACHE: "$CI_PROJECT_DIR/.cache/go-mod"
+  # Go 默认把 module 缓存设只读防 tamper,GitLab cache:archive 阶段试图清理时一堆
+  # "failed to remove ...: Permission denied" warning;-modcacherw 让新下载的目录
+  # 直接可写,根本不需要事后 chmod。
+  GOFLAGS: "-modcacherw"
   # proxy.golang.org(google 域)国内不可达,统一走 goproxy.cn / goproxy.io,
   # 命中失败回落 direct(走目标仓库 git/HTTPS)。
   # GOSUMDB 用 google 官方在国内备的镜像(sum.golang.google.cn)。
@@ -59,15 +63,15 @@ go:lint:
   image: golangci/golangci-lint:v2.0.2
   interruptible: true
   cache:
+    # prefix v2-rw:配合 GOFLAGS=-modcacherw 重建 cache,旧的 read-only 缓存换掉,
+    # 不再触发 "failed to remove ...: Permission denied" warning
     key:
+      prefix: "v2-rw"
       files:
         - go.sum
     paths:
       - .cache/go-build
       - .cache/go-mod
-  # Go module 缓存默认只读(防 tamper),runner 收工 cleanup 时 rm 不掉 —— 加回写权限静音 warning
-  after_script:
-    - chmod -R u+w "$GOCACHE" "$GOMODCACHE" 2>/dev/null || true
   script:
     - go vet ./...
     - golangci-lint run --timeout=3m
@@ -92,15 +96,15 @@ go:test:
   image: golang:1.25
   interruptible: true
   cache:
+    # prefix v2-rw:配合 GOFLAGS=-modcacherw 重建 cache,旧的 read-only 缓存换掉,
+    # 不再触发 "failed to remove ...: Permission denied" warning
     key:
+      prefix: "v2-rw"
       files:
         - go.sum
     paths:
       - .cache/go-build
       - .cache/go-mod
-  # 同 go:lint —— cleanup warning 静音
-  after_script:
-    - chmod -R u+w "$GOCACHE" "$GOMODCACHE" 2>/dev/null || true
   script:
     - go build ./...
     - go test -race -cover -coverprofile=coverage.out ./...

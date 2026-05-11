@@ -55,7 +55,18 @@
 
 ### 4. macOS runner 上线
 
-至少一台 gitlab-runner 注册时打 `macos` tag,且预装:
+至少一台 gitlab-runner 注册到 Mac mini / MacBook 等 macOS 物理机或 VM,**两个配置必须同时满足**:
+
+1. **Tags 字段填 `macos`**(再加什么 tag 都行,逗号分隔)
+   - `.gitlab-ci.yml` 里 desktop / release:* 都用 `tags: [macos]`,匹配不上就 job 一直 pending
+   - 注册时如果只填 `runner`、`mac-mini` 之类,得在 GitLab UI 后台 **Settings → CI/CD → Runners → ✏ 编辑** 加上 `macos`
+2. **"Run untagged jobs" 必须勾上**
+   - `go:lint` / `go:test` / `web` 这三个 test stage 的 job **没有 tags**,GitLab Runner 默认只接 tag 匹配的 job
+   - 不勾这条,就算 runner 在线也只能接 desktop/release(tag 匹配的),test stage 永远 pending
+
+> **踩过的坑**:第一次部署 Mac mini runner,只填了 `runner` tag,没勾 untagged。结果 pipeline 三个 test job 永远 pending,GitLab UI 显示 "job is stuck because the project doesn't have any runners online assigned to it"(其实 runner 在线,只是 tag 不匹配 + 不接 untagged)。
+
+预装依赖:
 
 ```bash
 xcode-select --install            # Xcode CLI Tools(cgo 链 UniformTypeIdentifiers.framework)
@@ -105,6 +116,7 @@ Release 页面看到新版本,描述 = 干净 changelog,assets 齐全
 | `command not found: brew` | runner 不是 macOS / Xcode CLI 没装 | 看步骤 4 |
 | `dist/bin/tshoot-darwin-arm64: file not found` | runner 没 cross-compile env | 检查 Makefile release target,看 `GOOS=... GOARCH=... go build` 是否需要额外配置 |
 | pipeline 上没看到 release:* 按钮 | 不在 main 分支 | 这 3 job 只 main 上出现(`rules: $CI_COMMIT_BRANCH == "main"`) |
+| **job 一直 pending,GitLab 显示 "no runners online"**(但 runner 列表里明明 Online) | runner tag 跟 .gitlab-ci.yml `tags:` 对不上 / runner 没勾 "Run untagged jobs" | Settings → CI/CD → Runners → ✏ 编辑 runner:Tags 加 `macos` + 勾 ☑ Run untagged jobs。详细见步骤 4。|
 
 ---
 

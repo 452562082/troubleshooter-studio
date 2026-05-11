@@ -67,37 +67,59 @@
 ### 流程图 1:整体架构 —— 工作台怎么把机器人装到 AI 平台
 
 ```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 60, 'rankSpacing': 80, 'padding': 20}, 'themeVariables': {'fontSize': '15px'}}}%%
 flowchart TB
     classDef studio fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
     classDef target fill:#fff3e0,stroke:#f57c00,stroke-width:2px
     classDef share fill:#f3e5f5,stroke:#7b1fa2,stroke-width:1.5px
+    classDef cat fill:#fff,stroke:#7b1fa2,stroke-width:1px
 
-    subgraph L1["① 上层:研制工作台(部门管理员一次性配置)"]
+    subgraph L1["① 上层:研制工作台(管理员一次性配置)"]
         direction LR
-        W["创建向导<br/>10 步问答<br/>收集系统信息"]:::studio
-        A["代码扫描<br/>自动反推<br/>服务/依赖关系"]:::studio
-        G["内容生成<br/>派生机器人<br/>所需配置"]:::studio
-        I["一键部署<br/>装到目标<br/>AI 平台"]:::studio
+        W["创建向导<br/>10 步问答"]:::studio
+        A["代码扫描<br/>反推依赖"]:::studio
+        G["内容生成<br/>派生配置"]:::studio
+        I["一键部署<br/>装到 AI 平台"]:::studio
         W --> A --> G --> I
     end
 
-    subgraph L2["② 下层:排障机器人(部署完后独立工作)"]
+    subgraph L2["② 下层:排障机器人(部署后独立工作)"]
         direction TB
-        subgraph Plats["可装到的 4 个 AI 平台(任选 1 个或多个)"]
+        subgraph Plats["可装到 4 个 AI 平台(任选 1+ 个)"]
             direction LR
             OC["OpenClaw<br/>(公司客户端)"]:::target
             CC["Claude Code<br/>(命令行 IDE)"]:::target
             CU["Cursor<br/>(图形 IDE)"]:::target
             CX["Codex CLI<br/>(终端 AI 工具)"]:::target
         end
-        Skills["机器人能力库(按配置动态裁剪)<br/>• 路由查询(环境/服务/配置/依赖映射,毫秒返回)<br/>• 排障流程编排(把数据查询串成完整链路)<br/>• 变更追溯(代码+部署+配置 三路合并)<br/>• 数据查询(9 种数据库只读访问)<br/>• 可观测查询(5 种监控系统:日志/指标/链路)"]:::share
-        MCPs["对外接口集(13 种 MCP × 每个环境)<br/>监控:Grafana(含日志/指标/链路)、Jaeger、ELK<br/>数据库:MongoDB / PostgreSQL / Redis / MySQL / ClickHouse<br/>配置中心:Nacos / 沟通:飞书 / 项目管理:飞书项目"]:::share
+
+        Skills["机器人能力库(按配置动态裁剪)"]:::share
+
+        subgraph SkillCat["五大能力"]
+            direction LR
+            SK1["路由查询<br/>环境/服务/<br/>配置/依赖<br/>映射表"]:::cat
+            SK2["排障流程<br/>编排"]:::cat
+            SK3["变更追溯<br/>代码+部署<br/>+配置"]:::cat
+            SK4["数据查询<br/>9 种数据库<br/>只读"]:::cat
+            SK5["可观测查询<br/>日志/指标<br/>/链路"]:::cat
+        end
+
+        MCPs["对外接口集(13 种 MCP × 每个环境)"]:::share
+
+        subgraph MCPCat["三大接口类别"]
+            direction LR
+            M1["监控类<br/>Grafana / Jaeger / ELK"]:::cat
+            M2["数据库类<br/>MongoDB / PostgreSQL<br/>/ Redis / MySQL / ClickHouse"]:::cat
+            M3["其它<br/>Nacos 配置中心 /<br/>飞书 / 飞书项目"]:::cat
+        end
 
         OC --> Skills
         CC --> Skills
         CU --> Skills
         CX --> Skills
+        Skills --> SkillCat
         Skills --> MCPs
+        MCPs --> MCPCat
     end
 
     I -.部署.-> OC
@@ -113,26 +135,27 @@ flowchart TB
 ### 流程图 2:排障 7 步流程 + 经验沉淀闭环
 
 ```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 55, 'rankSpacing': 70, 'padding': 18}, 'themeVariables': {'fontSize': '15px'}}}%%
 flowchart TB
     classDef step fill:#e8f5e9,stroke:#388e3c,stroke-width:1.5px
     classDef fast fill:#fff3e0,stroke:#f57c00,stroke-width:2px
     classDef start fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
     classDef loop fill:#fce4ec,stroke:#c2185b,stroke-width:2px,stroke-dasharray:5
 
-    Start(["工程师叙述症状<br/>(哪个环境 / 哪个服务 / 什么时候开始)"]):::start
-    S1{"Step 1 查团队故障库<br/>有没有类似的历史 pattern?"}:::step
-    Fast["✨ 快路径<br/>直接给出处置建议<br/>(30 秒~2 分钟)"]:::fast
-    S2["Step 2 时间轴对齐<br/>故障前 5 分钟的代码 / 部署 / 配置 变更<br/>自动标记 17 类已知危险变更模式"]:::step
-    S3["Step 3 横向对比<br/>同环境的其它服务是不是也有问题?<br/>(单点故障 vs 全面雪崩)"]:::step
-    S4["Step 4 纵向追下游<br/>沿调用链向下游追<br/>定位真正的源头"]:::step
+    Start(["工程师叙述症状<br/>哪个环境 / 哪个服务 / 何时开始"]):::start
+    S1{"Step 1<br/>查团队故障库<br/>有相似 pattern?"}:::step
+    Fast["✨ 快路径<br/>直接给处置建议<br/>30 秒 ~ 2 分钟"]:::fast
+    S2["Step 2 时间轴对齐<br/>故障前 5 分钟内<br/>代码 / 部署 / 配置 变更<br/>+ 自动标 17 类危险模式"]:::step
+    S3["Step 3 横向对比<br/>同环境其它服务<br/>是否也出问题?<br/>单点 vs 全面"]:::step
+    S4["Step 4 纵向追下游<br/>沿调用链向下游追<br/>定位真正源头"]:::step
     S5["Step 5 多维取证<br/>调用链 + 日志 + 指标<br/>+ 代码 + 数据库当前值"]:::step
-    S6["Step 6 输出故障快报<br/>根因 + 处置建议 + 把握度评级<br/>关键命令带验证步骤"]:::step
-    S7["Step 7 经验归档(把握度高时强制做)<br/>把本次 pattern 加入团队故障库"]:::loop
+    S6["Step 6 输出故障快报<br/>根因 + 处置建议<br/>+ 把握度评级"]:::step
+    S7["Step 7 经验归档<br/>把握度高时强制做<br/>本次 pattern 入团队故障库"]:::loop
 
     Start --> S1
     S1 -->|命中| Fast
     S1 -->|没命中| S2 --> S3 --> S4 --> S5 --> S6 --> S7
-    S7 -.下次同类故障<br/>直接走快路径.-> S1
+    S7 -.下次同类直接走快路径.-> S1
 ```
 
 **读这张图**:每次排障都先查"团队故障库"(本团队历次故障归档的 pattern)。命中 → 直接给处置建议;没命中 → 走完整 6 步严谨流程。完成后把握度高的话 **强制把本次经验归档**,下次同类故障被快速识别。**沉淀逐月累积,机器人越用越懂本团队的故障模式**。

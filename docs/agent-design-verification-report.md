@@ -19,48 +19,49 @@ Agent名称: AI 排障机器人工作台(troubleshooter-studio)
 ### 三阶段时序图(Mermaid)
 
 ```mermaid
+%%{init: {'sequence': {'actorMargin': 80, 'noteMargin': 15, 'messageMargin': 45, 'boxMargin': 12}, 'themeVariables': {'fontSize': '15px'}}}%%
 sequenceDiagram
     autonumber
     participant Mgr as 部门管理员
     participant SRE as 管理员/SRE
-    participant Studio as troubleshooter-studio
-    participant AI as AI 平台(Claude/Cursor/Codex/OpenClaw)
+    participant Studio as 工作台<br/>(troubleshooter-studio)
+    participant AI as AI 平台
     participant Eng as 一线工程师
-    participant Bot as 排障机器人(skill+MCP)
-    participant KB as known-errors.local.yaml
+    participant Bot as 排障机器人
+    participant KB as 团队故障库
 
     rect rgb(227,242,253)
     Note over Mgr,Studio: 研制期(一次性配置)
-    Mgr->>Studio: tshoot init / analyze / gen
-    Studio-->>Mgr: troubleshooter.yaml + staging 产物
+    Mgr->>Studio: 创建向导 / 代码扫描 / 内容生成
+    Studio-->>Mgr: 系统建模 yaml + staging 产物
     end
 
     rect rgb(255,243,224)
     Note over SRE,AI: 部署期(任何环境变更时)
-    SRE->>Studio: tshoot install --target X
-    Studio->>AI: 写入 agents/.md/.toml + mcpServers
+    SRE->>Studio: 一键部署到目标 AI 平台
+    Studio->>AI: 写入 agent 定义 + MCP 接口配置
     AI-->>SRE: 部署完成
     end
 
     rect rgb(232,245,233)
     Note over Eng,KB: 排障期(每次故障)
-    Eng->>AI: 描述症状(env+service+时间窗)
+    Eng->>AI: 描述症状<br/>(环境 + 服务 + 时间窗)
     AI->>Bot: 转给排障机器人
-    Bot->>KB: Step 1.3 grep 历史 pattern
+    Bot->>KB: Step 1 查团队故障库
 
     alt 命中(快路径)
-        KB-->>Bot: pattern + next_actions
-        Bot-->>Eng: ⏱ 30s-2min 出处置建议
-    else 不命中(完整 6 步路径)
-        Bot->>Bot: Step 2 timeline 三路合并<br/>+ 17 类 risk 自动标记
-        Bot->>Bot: Step 3 横向 / Step 4 纵向 cascade
-        Bot->>Bot: Step 5 多向交叉 / Step 6 故障快报
-        Bot-->>Eng: 故障快报 + P0 命令 + confidence
-        Eng-->>Bot: 确认 P0 命令执行
-        alt confidence = high
-            Bot->>KB: Step 7 sink_postmortem.py append
-            KB-->>Bot: ✓ 沉淀
-            Note over KB: 闭环:下次同症状回到 Step 1.3 命中
+        KB-->>Bot: 历史 pattern + 处置步骤
+        Bot-->>Eng: ⏱ 30 秒~2 分钟出处置建议
+    else 没命中(走完整 6 步路径)
+        Bot->>Bot: Step 2 时间轴对齐<br/>+ 17 类危险模式自动标记
+        Bot->>Bot: Step 3 横向 / Step 4 纵向追下游
+        Bot->>Bot: Step 5 多维取证 / Step 6 输出快报
+        Bot-->>Eng: 故障快报 + 处置建议 + 把握度
+        Eng-->>Bot: 确认 / 执行
+        alt 把握度 = 高
+            Bot->>KB: Step 7 归档本次经验
+            KB-->>Bot: ✓ 归档完成
+            Note over KB: 闭环:下次同症状回到<br/>Step 1 直接命中
         end
     end
     end
@@ -71,56 +72,57 @@ sequenceDiagram
 下面是一次真实排障的内部交互全过程,展示机器人是怎么把路由查询 / 变更追溯 / 多维取证 / 经验归档串成完整链路的:
 
 ```mermaid
+%%{init: {'sequence': {'actorMargin': 90, 'noteMargin': 18, 'messageMargin': 50, 'boxMargin': 15, 'mirrorActors': false}, 'themeVariables': {'fontSize': '14px'}}}%%
 sequenceDiagram
     autonumber
     participant Eng as 工程师
     participant Bot as 排障机器人
-    participant Route as 路由查询模块<br/>(服务/环境/依赖映射)
+    participant Route as 路由查询模块
     participant Time as 变更追溯模块
     participant Cascade as 下游联动检查
     participant KB as 团队故障库
-    participant Graf as 监控指标(Grafana)
+    participant Graf as 监控指标
     participant Log as 日志系统
-    participant Jaeg as 调用链(Jaeger)
+    participant Jaeg as 调用链
     participant K8s as K8s 运行时
 
-    Eng->>Bot: 生产环境 commerce 服务 5xx 报错激增,14:23 开始
+    Eng->>Bot: 生产环境 commerce 服务<br/>5xx 报错激增,14:23 开始
 
-    Note over Bot,Route: Step 1 收集前提 + 查团队故障库
-    Bot->>Route: 查 commerce 在生产环境的域名 / 上下游依赖
-    Route-->>Bot: 上游是 web,下游有 user 服务 + MySQL 数据库
-    Bot->>KB: 历史上有没有"超时变小导致 5xx 雪崩"这种 pattern?
+    Note over Bot,Route: ── Step 1 收前提 + 查故障库 ──
+    Bot->>Route: 查 commerce 域名 + 上下游依赖
+    Route-->>Bot: 上游 web<br/>下游 user 服务 + MySQL
+    Bot->>KB: 有"超时变小→5xx 雪崩"<br/>这种 pattern 吗?
     KB-->>Bot: 库里暂无,走完整流程
 
-    Note over Bot,Time: Step 2 时间轴对齐(故障前 5 分钟的变更)
-    Bot->>Time: 拉 commerce 在故障窗内的代码提交 / K8s 滚动 / 配置变更
-    Time-->>Bot: 14:18 配置中心改了一条:<br/>"调用 user 服务超时:30 秒 → 3 秒"<br/>系统自动归类:**超时变小(高危)**
+    Note over Bot,Time: ── Step 2 时间轴对齐 ──
+    Bot->>Time: 拉故障前 5 分钟变更<br/>(代码 / 部署 / 配置)
+    Time-->>Bot: 14:18 配置改了一条:<br/>user 超时 30 秒 → 3 秒<br/>自动归类:超时变小(高危)
 
-    Note over Bot,Graf: Step 3 横向对比(同环境别的服务受影响吗?)
-    Bot->>Graf: 同 namespace 其它服务最近错误率
-    Graf-->>Bot: 只有 commerce 错误率突增 → 单点故障
+    Note over Bot,Graf: ── Step 3 横向对比 ──
+    Bot->>Graf: 同 namespace 其它服务错误率
+    Graf-->>Bot: 仅 commerce 突增<br/>→ 单点故障
 
-    Note over Bot,Cascade: Step 4 纵向追下游
-    Bot->>Cascade: 沿依赖链查 commerce → user 健康状态
+    Note over Bot,Cascade: ── Step 4 纵向追下游 ──
+    Bot->>Cascade: 沿依赖链查 commerce→user
     Cascade->>Log: user 服务最近 5 分钟日志
     Log-->>Cascade: 大量"调用 user 超时"错误
-    Cascade-->>Bot: 凶手锁定在 commerce 调 user 这条边
+    Cascade-->>Bot: 凶手锁定 commerce→user 这条边
 
-    Note over Bot,Jaeg: Step 5 多维取证(找出具体证据)
+    Note over Bot,Jaeg: ── Step 5 多维取证 ──
     Bot->>K8s: 拉 commerce 容器最近错误栈
-    K8s-->>Bot: 错误栈指向 user 这次 RPC 调用
-    Bot->>Jaeg: 找一条出错的调用链看 span 时长
-    Jaeg-->>Bot: user 调用 3.2 秒就超时,比平时 p99 大
+    K8s-->>Bot: 错误栈指向 user 这次 RPC
+    Bot->>Jaeg: 找一条出错调用链<br/>看 span 时长
+    Jaeg-->>Bot: user 调用 3.2 秒就超时<br/>比平时 p99 大
 
-    Note over Bot,Eng: Step 6 给出故障快报
-    Bot-->>Eng: **把握度: 高**<br/>**根因**: 配置中心把 commerce 调 user 超时从 30 秒改 3 秒<br/>**处置**: 配置中心后台回滚到上一版本<br/>**预计恢复**: 1-2 分钟
+    Note over Bot,Eng: ── Step 6 输出故障快报 ──
+    Bot-->>Eng: 把握度:高<br/>根因:超时从 30s 改 3s<br/>处置:回滚配置<br/>预计 1-2 分钟恢复
     Eng->>Eng: 配置中心 UI 点回滚
     Eng->>Bot: 已回滚,等待验证
 
-    Note over Bot,KB: Step 7 归档经验(把握度高时强制做)
-    Bot->>Bot: 抽象成可复用的 pattern:<br/>"调用超时改小到 1-3 秒,常引发上游 5xx 雪崩"
+    Note over Bot,KB: ── Step 7 归档经验 ──
+    Bot->>Bot: 抽象成 pattern:<br/>"调用超时改小到 1-3 秒,<br/>常引发上游 5xx 雪崩"
     Bot->>KB: 追加到团队故障库
-    KB-->>Bot: ✓ 已归档,下次同类故障直接命中
+    KB-->>Bot: ✓ 已归档<br/>下次同类直接命中
 ```
 
 **读这张图**:机器人**不是"把所有数据丢给大模型自由发挥"**,而是有结构化的取证顺序:

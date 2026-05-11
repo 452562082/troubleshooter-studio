@@ -139,78 +139,15 @@ flowchart TB
 
 ---
 
-### 流程图 3:实战工作过程 —— 一次真实排障的内部时序
-
-下面用一个真实场景("生产环境 commerce 服务 5xx 报错激增")展示机器人内部具体做了什么:
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Eng as 工程师
-    participant Bot as 排障机器人
-    participant Route as 路由查询模块<br/>(服务/环境/依赖映射)
-    participant Time as 变更追溯模块
-    participant Cascade as 下游联动检查
-    participant KB as 团队故障库
-    participant Graf as 监控指标(Grafana)
-    participant Log as 日志系统
-    participant Jaeg as 调用链(Jaeger)
-    participant K8s as K8s 运行时
-
-    Eng->>Bot: 生产环境 commerce 服务 5xx 报错激增,14:23 开始
-
-    Note over Bot,Route: Step 1 收集前提 + 查团队故障库
-    Bot->>Route: 查 commerce 在生产环境的域名 / 上下游依赖
-    Route-->>Bot: 上游是 web,下游有 user 服务 + MySQL 数据库
-    Bot->>KB: 历史上有没有"超时变小导致 5xx 雪崩"这种 pattern?
-    KB-->>Bot: 库里暂无,走完整流程
-
-    Note over Bot,Time: Step 2 时间轴对齐(故障前 5 分钟的变更)
-    Bot->>Time: 拉 commerce 在故障窗内的代码提交 / K8s 滚动 / 配置变更
-    Time-->>Bot: 14:18 配置中心改了一条:<br/>"调用 user 服务超时:30 秒 → 3 秒"<br/>系统自动归类:**超时变小(高危)**
-
-    Note over Bot,Graf: Step 3 横向对比(同环境别的服务受影响吗?)
-    Bot->>Graf: 同 namespace 其它服务最近错误率
-    Graf-->>Bot: 只有 commerce 错误率突增 → 单点故障
-
-    Note over Bot,Cascade: Step 4 纵向追下游
-    Bot->>Cascade: 沿依赖链查 commerce → user 健康状态
-    Cascade->>Log: user 服务最近 5 分钟日志
-    Log-->>Cascade: 大量"调用 user 超时"错误
-    Cascade-->>Bot: 凶手锁定在 commerce 调 user 这条边
-
-    Note over Bot,Jaeg: Step 5 多维取证(找出具体证据)
-    Bot->>K8s: 拉 commerce 容器最近错误栈
-    K8s-->>Bot: 错误栈指向 user 这次 RPC 调用
-    Bot->>Jaeg: 找一条出错的调用链看 span 时长
-    Jaeg-->>Bot: user 调用 3.2 秒就超时,比平时 p99 大
-
-    Note over Bot,Eng: Step 6 给出故障快报
-    Bot-->>Eng: **把握度: 高**<br/>**根因**: 配置中心把 commerce 调 user 超时从 30 秒改 3 秒<br/>**处置**: 配置中心后台回滚到上一版本<br/>**预计恢复**: 1-2 分钟
-    Eng->>Eng: 配置中心 UI 点回滚
-    Eng->>Bot: 已回滚,等待验证
-
-    Note over Bot,KB: Step 7 归档经验(把握度高时强制做)
-    Bot->>Bot: 抽象成可复用的 pattern:<br/>"调用超时改小到 1-3 秒,常引发上游 5xx 雪崩"
-    Bot->>KB: 追加到团队故障库
-    KB-->>Bot: ✓ 已归档,下次同类故障直接命中
-```
-
-**读这张图**:机器人**不是"把所有数据丢给大模型自由发挥"**,而是有结构化的取证顺序:
-
-1. **先查路由表**(毫秒级答出"这是谁的服务、依赖谁",不用大模型猜)
-2. **再扫历史变更**(三路合并 + 17 类危险模式自动归类,定量给出"超时变小高危"结论)
-3. **横向验证**单点 vs 全面 → **纵向追下游**定位真凶
-4. **多维取证**(调用链 + 日志 + 错误栈)
-5. **输出快报** + **归档经验**
-
-每一步都是**确定性的内部模块或数据接口调用**在驱动大模型做局部决策,而不是反过来 ── 这是 L3 等级(完整自主完成单项任务)+ 跨工程师水平稳定输出的核心保证。
+> 详细的实战工作过程时序图(机器人内部怎么调路由查询 / 变更追溯 / 多维取证 / 经验归档)
+> 见附件一《Agent 设计与验证报告》—— 那里有一次真实排障的 23 步内部交互全过程,
+> 用于评审深入了解机器人工作机理。
 
 ---
 
 **附:Mermaid 图使用说明**
 
-三张图既能在 markdown 源码里 diff(便于和代码一起 review 演进),也能在 GitLab 网页 / 飞书文档 / Confluence wiki 里直接嵌入(都自带 Mermaid 渲染)。需要静态图片(贴 PPT / Word):把 ` ```mermaid ` 代码块整段复制到 <https://mermaid.live> → Actions → 导出 PNG / SVG。
+两张图既能在 markdown 源码里 diff(便于和代码一起 review 演进),也能在 GitLab 网页 / 飞书文档 / Confluence wiki 里直接嵌入(都自带 Mermaid 渲染)。需要静态图片(贴 PPT / Word):把 ` ```mermaid ` 代码块整段复制到 <https://mermaid.live> → Actions → 导出 PNG / SVG。
 
 3. 主要使用的技术/工具/平台:
 

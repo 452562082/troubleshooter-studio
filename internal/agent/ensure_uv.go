@@ -34,7 +34,7 @@ func CfgUsesUvx(cfg *config.SystemConfig) bool {
 		return true
 	}
 	for _, ds := range cfg.Infrastructure.DataStores {
-		if ds.Enabled && ds.Type == "clickhouse" {
+		if ds.Enabled && (ds.Type == "clickhouse" || ds.Type == "rabbitmq") {
 			return true
 		}
 	}
@@ -56,7 +56,7 @@ func CheckUvxAvailable() error {
 // macOS 走 brew 最稳;Linux/Win 走官方一键脚本。
 func uvInstallHint() string {
 	var sb strings.Builder
-	sb.WriteString("nacos / jaeger / clickhouse 三家 MCP 走 `uvx <pkg>` 启动,缺 uv 这三家会启动失败。\n")
+	sb.WriteString("nacos / jaeger / clickhouse / rabbitmq 几家 MCP 走 `uvx <pkg>` 启动,缺 uv 这几家会启动失败。\n")
 	sb.WriteString("装法(任选其一):\n")
 	switch runtime.GOOS {
 	case "darwin":

@@ -10,6 +10,7 @@
 package agent
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -677,6 +678,71 @@ func TestBuildMCPServers_DataStores_Kafka_MultiCluster(t *testing.T) {
 	}
 	if _, ok := servers["kafka-test"]; ok {
 		t.Errorf("multi-cluster kafka should NOT have 'kafka-test' (no source) fallback")
+	}
+}
+
+// TestBuildMCPServers_DataStores_RabbitMQ:rabbitmq MCP(AWS amq-mcp-server-rabbitmq)注册验证。
+// 用 uvx 启动(零安装),默认只读(不传 --allow-mutative-tools),凭据落 args(已知 trade-off,同 redis/pg)。
+func TestBuildMCPServers_DataStores_RabbitMQ(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "test"}},
+		Infrastructure: config.Infrastructure{
+			DataStores: []config.DataStore{{
+				Type: "rabbitmq", Enabled: true,
+				Endpoints: []config.DataStoreEndpoint{
+					{Env: "test", URL: "amqp://rmq:rpw@rmq.test.example.com:5672/"},
+				},
+			}},
+		},
+	}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(_ string) string { return "" })
+
+	mcp, ok := servers["rabbitmq-test"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected 'rabbitmq-test' registered, got: %v", keysOf(servers))
+	}
+	if mcp["command"] != "uvx" {
+		t.Errorf("rabbitmq command should be 'uvx', got: %v", mcp["command"])
+	}
+	args := mcp["args"].([]any)
+	if len(args) == 0 || args[0] != "amq-mcp-server-rabbitmq@latest" {
+		t.Errorf("rabbitmq first arg should be 'amq-mcp-server-rabbitmq@latest', got: %v", args)
+	}
+	// 必须不含 --allow-mutative-tools(默认只读才是项目契约)
+	for _, a := range args {
+		if a == "--allow-mutative-tools" {
+			t.Errorf("rabbitmq MCP must default to read-only,禁止传 --allow-mutative-tools")
+		}
+	}
+	// 凭据 / host / port 都该在 args 里
+	joined := fmt.Sprint(args...)
+	for _, want := range []string{"rmq.test.example.com", "5672", "rmq", "rpw"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("rabbitmq args should contain %q, got: %v", want, args)
+		}
+	}
+}
+
+// TestBuildMCPServers_DataStores_RabbitMQ_MultiCluster:rabbitmq 多 cluster dedup-by-URL。
+func TestBuildMCPServers_DataStores_RabbitMQ_MultiCluster(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "test"}},
+		Infrastructure: config.Infrastructure{
+			DataStores: []config.DataStore{{
+				Type: "rabbitmq", Enabled: true,
+				Endpoints: []config.DataStoreEndpoint{
+					{Env: "test", URL: "amqp://u:p@rmq-commerce.test:5672/"},
+					{Env: "test", URL: "amqp://u:p@rmq-user.test:5672/"},
+				},
+			}},
+		},
+	}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(_ string) string { return "" })
+
+	for _, k := range []string{"rabbitmq-rmq-commerce-test", "rabbitmq-rmq-user-test"} {
+		if _, ok := servers[k]; !ok {
+			t.Errorf("expected multi-cluster rabbitmq %q, got: %v", k, keysOf(servers))
+		}
 	}
 }
 

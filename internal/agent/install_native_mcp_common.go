@@ -517,6 +517,8 @@ func (b *mcpBuilder) buildDataStores(servers map[string]any) {
 					b.buildClickHouse(servers, ep.endpoint, sourceID, e.ID)
 				case "kafka":
 					b.buildKafka(servers, ep.endpoint, sourceID, e.ID)
+				case "rabbitmq":
+					b.buildRabbitMQ(servers, ep.endpoint, sourceID, e.ID)
 				}
 			}
 			// env-vars 模式 / 用户没扫到 endpoints → unique 空,但还得跑一遍(让 buildXxx
@@ -533,6 +535,8 @@ func (b *mcpBuilder) buildDataStores(servers map[string]any) {
 					b.buildRedis(servers, nil, "", e.ID)
 				case "kafka":
 					b.buildKafka(servers, nil, "", e.ID)
+				case "rabbitmq":
+					b.buildRabbitMQ(servers, nil, "", e.ID)
 				case "mysql":
 					b.buildMySQL(servers, nil, "", e.ID)
 				case "clickhouse":
@@ -924,6 +928,69 @@ func (b *mcpBuilder) buildKafka(servers map[string]any, ep *config.DataStoreEndp
 		"env": b.envBlock(map[string]any{
 			"KAFKA_MCP_BOOTSTRAP_SERVERS": brokers,
 		}),
+	}
+}
+
+// buildRabbitMQ 用 amazon-mq/mcp-server-rabbitmq(AWS Labs,uvx 零安装,默认只读)。
+//
+// 关键设计选择(对比备选 `kenliao94/mcp-server-rabbitmq` 和 `rabbitmq-mcp-server` PyPI):
+//   - AWS 版默认 read-only,不加 `--allow-mutative-tools` 就只读 → 符合项目"全只读"安全契约
+//   - guercheLE PyPI 版凭据走 env(AMQP_HOST 等),更安全但**没明确默认只读**,放弃
+//   - kenliao94 版同样 args + 没只读默认,放弃
+//
+// 配置(参考上游 README):
+//
+//	command: "uvx"
+//	args:    ["amq-mcp-server-rabbitmq@latest", "--rabbitmq-host", host,
+//	          "--port", port, "--username", user, "--password", pass]
+//	          # 不传 --allow-mutative-tools → 默认只读
+//
+// trade-off:凭据落 args(可在 ~/.claude.json 看到)— 跟 redis/pg 同款已知妥协。
+// 想要凭据完全藏 env 的话得换 guercheLE 版,但放弃只读默认。
+//
+// endpoint 字段:
+//   - URL: amqp://[user:pass@]host:port[/vhost](标准 AMQP URI) — host/port 从这 parse
+//   - User / Pass:也支持独立字段(URL 没带凭据时 fallback)
+//
+// dedup 按 ep.URL 做 key(同 host/port 同一 cluster 共享 MCP)。
+func (b *mcpBuilder) buildRabbitMQ(servers map[string]any, ep *config.DataStoreEndpoint, sourceID, envID string) {
+	var epURL, epUser, epPass string
+	if ep != nil {
+		epURL, epUser, epPass = ep.URL, ep.User, ep.Pass
+	}
+	rawURL := firstNonEmpty(b.get(envVar("RABBITMQ_URL", sourceID, envID)), epURL)
+	if rawURL == "" && b.opts.PruneEmpty {
+		return // 没填 URL → 跳过(避免注册一条永远启动失败的 mcp)
+	}
+	// parse host:port:user:pass。AMQP URI 形态跟其它 RFC3986 兼容,直接用 parseConnURL。
+	host, port, urlUser, urlPass, _ := parseConnURL(rawURL)
+	if port == "" {
+		port = "5672" // 标准 AMQP 默认端口
+	}
+	// URL 没带凭证就 fallback 到独立字段(用户大概率走 USER/PASS 表单填)。
+	// 优先级:URL 内嵌 > install creds RABBITMQ_USER_<sourceID>_<env> > yaml endpoint user 字段。
+	user := urlUser
+	if user == "" {
+		user = firstNonEmpty(b.get(envVar("RABBITMQ_USER", sourceID, envID)), epUser)
+	}
+	pass := urlPass
+	if pass == "" {
+		pass = firstNonEmpty(b.get(envVar("RABBITMQ_PASS", sourceID, envID)), epPass)
+	}
+	args := []any{"amq-mcp-server-rabbitmq@latest",
+		"--rabbitmq-host", host,
+		"--port", port,
+	}
+	if user != "" {
+		args = append(args, "--username", user)
+	}
+	if pass != "" {
+		args = append(args, "--password", pass)
+	}
+	servers[b.keyFor("rabbitmq", sourceID, envID)] = map[string]any{
+		"command": "uvx",
+		"args":    args,
+		"env":     b.envBlock(map[string]any{}),
 	}
 }
 

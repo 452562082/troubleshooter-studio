@@ -124,7 +124,8 @@ func TestBuildMCPServers_DataStores(t *testing.T) {
 	}
 
 	// ── mongodb:走 npx mcp-mongo-server,凭据用 MCP_MONGODB_URI env(v2+ 支持) ──
-	// 自动 normalize URI 补 authSource=admin。
+	// 自动 normalize URI 补 authSource=admin + directConnection=true(单节点绕
+	// Node driver wire 27 SDAM 兼容 bug,详见 ensureDirectConnection 注释)。
 	mongoSpec := servers["bot-mongodb-dev"].(map[string]any)
 	if mongoSpec["command"] != "npx" {
 		t.Errorf("mongodb command 应为 npx,实际 %v", mongoSpec["command"])
@@ -132,7 +133,7 @@ func TestBuildMCPServers_DataStores(t *testing.T) {
 	if got := argString(mongoSpec); got != "[-y mcp-mongo-server --read-only]" {
 		t.Errorf("mongodb args mismatch: %s", got)
 	}
-	if envOf(mongoSpec)["MCP_MONGODB_URI"] != "mongodb://u:p@m.local:27017/app?authSource=admin" {
+	if envOf(mongoSpec)["MCP_MONGODB_URI"] != "mongodb://u:p@m.local:27017/app?authSource=admin&directConnection=true" {
 		t.Errorf("mongodb MCP_MONGODB_URI env mismatch: %v", envOf(mongoSpec))
 	}
 
@@ -948,6 +949,68 @@ func TestNormalizeMongoURI(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			got := normalizeMongoURI(c.in)
+			if got != c.want {
+				t.Errorf("\n  in:   %q\n  got:  %q\n  want: %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+func TestEnsureDirectConnection(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "用户实际场景:单节点 mongod 8.x → 补 directConnection 绕 SDAM wire 27 bug",
+			in:   "mongodb://root:pass@host:27017/db?authSource=admin",
+			want: "mongodb://root:pass@host:27017/db?authSource=admin&directConnection=true",
+		},
+		{
+			name: "无 query → ? 起头加",
+			in:   "mongodb://u:p@host:27017",
+			want: "mongodb://u:p@host:27017?directConnection=true",
+		},
+		{
+			name: "无 userinfo 但单 host → 仍补(driver bug 与认证无关)",
+			in:   "mongodb://host:27017/db",
+			want: "mongodb://host:27017/db?directConnection=true",
+		},
+		{
+			name: "mongodb+srv:// → 不动(SRV DNS 发现多端点)",
+			in:   "mongodb+srv://u:p@cluster.example.com/db?authSource=admin",
+			want: "mongodb+srv://u:p@cluster.example.com/db?authSource=admin",
+		},
+		{
+			name: "多 host(逗号分隔)→ 不动(directConnection 会让 driver 忽略其他 member)",
+			in:   "mongodb://u:p@h1:27017,h2:27017,h3:27017/db?authSource=admin",
+			want: "mongodb://u:p@h1:27017,h2:27017,h3:27017/db?authSource=admin",
+		},
+		{
+			name: "用户显式 replicaSet= → 不动(尊重 SDAM 意图)",
+			in:   "mongodb://u:p@host:27017/db?replicaSet=rs0&authSource=admin",
+			want: "mongodb://u:p@host:27017/db?replicaSet=rs0&authSource=admin",
+		},
+		{
+			name: "已有 directConnection= → 不动(无论值)",
+			in:   "mongodb://u:p@host:27017/db?directConnection=false",
+			want: "mongodb://u:p@host:27017/db?directConnection=false",
+		},
+		{
+			name: "空串 → 原样",
+			in:   "",
+			want: "",
+		},
+		{
+			name: "密码含 @ + 多 host → 不动(LastIndex @ 找到真 host 起点也不补)",
+			in:   "mongodb://user:p@ss@h1:27017,h2:27017/db",
+			want: "mongodb://user:p@ss@h1:27017,h2:27017/db",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := ensureDirectConnection(c.in)
 			if got != c.want {
 				t.Errorf("\n  in:   %q\n  got:  %q\n  want: %q", c.in, got, c.want)
 			}

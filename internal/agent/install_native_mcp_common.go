@@ -109,6 +109,60 @@ func ensureAuthSource(uri string) string {
 	return uri + "?authSource=admin"
 }
 
+// ensureDirectConnection 给单节点 mongodb URI 自动补 directConnection=true,
+// 绕过 Node mongodb driver 在 MongoDB 8.x(wire version 27)下的 SDAM 兼容 bug。
+//
+// 现象:mongod 报 maxWireVersion=27,Node driver(npm `mongodb@6.x` 和 `@7.x` 都验过)
+// 心跳成功识别 RSPrimary、compatible:true,但拓扑级 commonWireVersion 卡在 0,
+// selectServer 全部候选拒掉 → MongoClient.connect() 干等 serverSelectionTimeoutMS
+// (默认 30s)超时,MCP stdio 握手永远不成立。mongosh 走另一套 driver 实现,同 URI 秒回。
+//
+// 单节点副本集(本地 dev、单实例 prod、单 endpoint AWS DocumentDB)是这个坑的密集区。
+// `directConnection=true` 让 driver 跳过副本集 SDAM 分支,按 single server 路径走 ——
+// 实战验证可绕(2026-05-12 用户实例)。
+//
+// 安全条件:directConnection=true 只在单 host 时合法,多 host 副本集 / SRV / 用户显式
+// replicaSet= 时强行套会让 driver 忽略其他 member。规则:
+//   - mongodb+srv:// → 不动(SRV 是 DNS 多端点发现)
+//   - host 段含 `,`(多 host)→ 不动
+//   - query 已有 directConnection= → 不动(尊重用户)
+//   - query 已有 replicaSet= → 不动(用户显式跑 SDAM,不要破坏)
+//   - 其余(单 host)→ 自动补 directConnection=true
+//
+// 长期方案:等 npm `mongodb` driver 修 wire 27 兼容 / 上游 mcp-mongo-server pin
+// 兼容版本,本 helper 可下线;短期此修复值得保留(下个用户撞坑代价 4 小时)。
+func ensureDirectConnection(uri string) string {
+	if strings.HasPrefix(uri, "mongodb+srv://") {
+		return uri
+	}
+	idx := strings.Index(uri, "://")
+	if idx < 0 {
+		return uri
+	}
+	rest := uri[idx+3:]
+	hostAndAfter := rest
+	if at := strings.LastIndex(rest, "@"); at >= 0 {
+		hostAndAfter = rest[at+1:]
+	}
+	// 切出 host 段:在 `/` 或 `?` 之前
+	hostPart := hostAndAfter
+	if cut := strings.IndexAny(hostAndAfter, "/?"); cut >= 0 {
+		hostPart = hostAndAfter[:cut]
+	}
+	if strings.Contains(hostPart, ",") {
+		return uri // 多 host → 不动
+	}
+	qIdx := strings.Index(hostAndAfter, "?")
+	if qIdx >= 0 {
+		query := hostAndAfter[qIdx+1:]
+		if containsParam(query, "directConnection") || containsParam(query, "replicaSet") {
+			return uri
+		}
+		return uri + "&directConnection=true"
+	}
+	return uri + "?directConnection=true"
+}
+
 // containsParam 检查 query string 里是否含名为 name 的参数(`name=...` 或 `name&` 形式)。
 func containsParam(query, name string) bool {
 	for _, pair := range strings.Split(query, "&") {
@@ -736,6 +790,10 @@ func (b *mcpBuilder) buildMongoDB(servers map[string]any, ep *config.DataStoreEn
 	// 修密码段未 URL-encode 的保留字符 — mcp-mongo-server 严格按 RFC3986
 	// 解析,密码含 < ] ^ % @ : / ? # [ ] 等字面字符 → connection string parse error。
 	uri = normalizeMongoURI(uri)
+	// 单节点 mongod 8.x(wire 27)+ Node driver 6.x/7.x → SDAM commonWireVersion
+	// 协商 bug,MongoClient.connect() 卡 30s,MCP stdio 握手永远超时。补
+	// directConnection=true 绕开副本集分支(详见 ensureDirectConnection 文档)。
+	uri = ensureDirectConnection(uri)
 	// mcp-mongo-server v2+ 支持 MCP_MONGODB_URI env(2.x 起);凭据走 env IDE
 	// config args 字段不残留。
 	servers[b.keyFor("mongodb", sourceID, envID)] = map[string]any{

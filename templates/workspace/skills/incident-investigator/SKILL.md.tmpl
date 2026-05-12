@@ -1,9 +1,9 @@
 ---
 name: incident-investigator
-description: 排障主线 skill。固化"症状→时间轴→横向→纵向→三向交叉→根因"6 步流程,任何"X 报错/慢/不通/突增/失败"问题先用本 skill 编排其它 skill,不要直接跳具体 skill。
+description: 排障主线 skill。固化"症状→时间轴→横向→纵向→三向交叉→根因→沉淀"7 步流程,任何"X 报错/慢/不通/突增/失败"问题先用本 skill 编排其它 skill,不要直接跳具体 skill。
 ---
 
-# Incident Investigator(6 步排障图谱)
+# Incident Investigator(7 步排障图谱)
 
 ```
 Step 1  收齐前提 + 症状先验证 + 历史 incident 复查
@@ -47,12 +47,19 @@ Step 7  沉淀(必做,confidence=high 必跑):pattern 追加到 known-errors.loc
 - selector 全 0 命中 → 服务名/env 拼写问题,反问
 - 拉不到指标 → 不阻塞,但记下来回头查
 
-**1.3 历史 grep**:
+**1.3 历史 grep**(沿用 routing skill 的 known-errors 速查表,不重复实现):
+
+把症状里的关键报错串 / 异常文本提取出来作为 `<error pattern>`,然后 grep 两份故障库:
+
 ```bash
-grep -E '"env":"prod".*"service":"commerce"' \
-  <工作区根>/incident-log.jsonl | tail -10
+# 两份都扫:known-errors.yaml(模板内置常见模式)+ known-errors.local.yaml(历次 sink 的本团队特有)。
+# .local.yaml 可能不存在(从未 sink 过),grep 退码非 0 不阻塞。
+grep -E "<error pattern>" \
+  routing/references/known-errors.yaml \
+  routing/references/known-errors.local.yaml 2>/dev/null
 ```
-命中 → 提示"上次同症状根因是 X,先验证";**置信度上限调高一档**(有历史支撑)。
+
+命中 → 提示"匹配历史 pattern X,典型根因 / next_actions 见命中条目";**置信度上限调高一档**(有历史支撑);带 `causation_chain.check_downstream_for` 的 pattern 主动跑 `cascade_check.py` 看下游(详见 routing skill "关键用法 1")。
 
 ## Step 2:时间轴对齐(最高 ROI 一步)
 
@@ -199,7 +206,7 @@ kubectl rollout status deployment/commerce -n base-prod
 
 要让本次故障变成机器人的肌肉记忆,得抽象成 pattern 追加到
 `routing/references/known-errors.local.yaml` —— routing skill Step 1.3 grep 必看的速查表
-(按 `pattern` regex 匹配错误日志/异常文本),命中即跳过 6 步流程直走 next_actions。
+(按 `pattern` regex 匹配错误日志/异常文本),命中即跳过 Step 2-6 主流程直走 next_actions(Step 1 收前提仍需做)。
 
 写到 **`.local.yaml`** 而**不是** `known-errors.yaml`:后者是模板内置 / `tshoot apply/upgrade` 重灌时
 被覆盖,沉淀清零;`.local.yaml` 是用户私有(`apply_helpers` 后缀识别免删),沉淀永久保留。

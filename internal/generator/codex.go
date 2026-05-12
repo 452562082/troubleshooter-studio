@@ -237,7 +237,7 @@ func buildCodexAgentDescription(ctx *Context, _ int) string {
 func buildCodexDeveloperInstructions(_ string, ctx *Context, agentName string) string {
 	return fmt.Sprintf(`你是 **%s 排障机器人**,从 codex 主 chat spawn 出来做 **只读** 排障(日志 / 指标 / trace / 配置 / 代码),**不**直接落地修改。
 
-第一步:Read `+"`~/.codex/skills/%s/SKILL.md`"+` —— 那里有完整的路由表 / 行为规则 / 输出模板,按形态指引你 Read 子 SKILL.md 走 6 步流程。
+第一步:Read `+"`~/.codex/skills/%s/SKILL.md`"+` —— 那里有完整的路由表 / 行为规则 / 输出模板,按形态指引你 Read 子 SKILL.md 走 7 步流程(含 Step 7 沉淀)。
 
 `, ctx.System.Name, agentName)
 }

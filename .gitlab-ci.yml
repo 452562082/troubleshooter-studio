@@ -225,6 +225,11 @@ desktop:
   variables:
     # 拉全 history,changelog.sh / git describe --tags --abbrev=0 都依赖
     GIT_DEPTH: 0
+    # 强制每次新鲜 clone,跳过浅→全量 `--unshallow` 升级路径。
+    # 2026-05-12 撞过坑:其它 job 默认 GIT_DEPTH=20 留下的 build dir 被 release job 复用,
+    # `--unshallow` 在 sideband 协议协商卡 19 分钟到 SIGTERM(14 MiB 小仓库都拖死)。
+    # 单次 clone 走的 protocol 路径更短,不依赖本地浅克隆 boundary 状态。代价是每次多几秒。
+    GIT_STRATEGY: clone
   # release 流程长(编 + 上传),设 30 min 防 runner 卡死无限挂
   timeout: 30 minutes
   # release 不能 interruptible,跑一半被打断会留半截脏 tag/release 状态

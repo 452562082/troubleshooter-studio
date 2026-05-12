@@ -169,7 +169,7 @@ func usage() {
   tshoot validate -i <troubleshooter.yaml>
   tshoot discover [--roots <p1>,<p2>] [--format text|json]    # 扫本机已装机器人
   tshoot apply -i <new.yaml> --path <agent-path> [--dry-run]  # 用新 yaml 原地更新已装机器人
-  tshoot install --path <staging> --target <openclaw|claude-code|cursor> [--env-file <.env>] [--skip-gateway-restart]
+  tshoot install --path <staging> --target <openclaw|claude-code|cursor|codex> [--env-file <.env>] [--skip-gateway-restart]
   tshoot self-test --path <staging>                           # openclaw 部署后自检
   tshoot uninstall --path <staging>                           # 卸载 openclaw agent
 
@@ -191,6 +191,7 @@ func usage() {
              - openclaw:   ~/.openclaw/workspace/<name>/ + 注入 openclaw.json
              - claude-code: ~/.claude/agents/<name>.md  + skills/scripts namespace 子目录
              - cursor:     ~/.cursor/agents/<name>.md   + skills/scripts namespace 子目录
+             - codex:      ~/.codex/agents/<name>.toml(内嵌 [mcp_servers.*]) + ~/.codex/skills/<name>/
   self-test  openclaw 部署后自检(workspace / openclaw.json / mcp.servers / TCP+HTTP 探活)
   uninstall  卸载 openclaw agent(workspace 移到 ~/.Trash + 摘 openclaw.json + 清 creds.json)`)
 }

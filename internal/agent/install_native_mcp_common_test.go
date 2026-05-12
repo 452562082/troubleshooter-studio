@@ -620,9 +620,9 @@ func TestBuildMCPServers_DataStores_MultiURI_CollisionHashFallback(t *testing.T)
 	}
 }
 
-// TestBuildMCPServers_DataStores_Kafka:kafka MCP(CefBoud/kafka-mcp-server)注册验证。
-// 跟其它 6 家不同:command 是 binary `kafka-mcp-server`,不是 npx/uvx;
-// args 含 `stdio` 子命令 + `--read-only` flag;env 用 `KAFKA_MCP_BOOTSTRAP_SERVERS`。
+// TestBuildMCPServers_DataStores_Kafka:kafka MCP(@confluentinc/mcp-confluent)注册验证。
+// 用 npx 零安装,跟其它 7 家一致;Confluent MCP 没内置 read-only flag,靠 --block-tools 黑名单
+// 禁所有 mutative 工具(kafkaMutativeTools 列表)守护"全只读"安全契约。
 func TestBuildMCPServers_DataStores_Kafka(t *testing.T) {
 	cfg := &config.SystemConfig{
 		Environments: []config.Environment{{ID: "test"}},
@@ -641,16 +641,34 @@ func TestBuildMCPServers_DataStores_Kafka(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected 'kafka-test' registered, got: %v", keysOf(servers))
 	}
-	if mcp["command"] != "kafka-mcp-server" {
-		t.Errorf("kafka command should be 'kafka-mcp-server' (CefBoud go binary), got: %v", mcp["command"])
+	if mcp["command"] != "npx" {
+		t.Errorf("kafka command should be 'npx', got: %v", mcp["command"])
 	}
 	args := mcp["args"].([]any)
-	if len(args) != 2 || args[0] != "stdio" || args[1] != "--read-only" {
-		t.Errorf("kafka args should be [stdio, --read-only], got: %v", args)
+	if len(args) < 4 || args[0] != "-y" || args[1] != "@confluentinc/mcp-confluent" {
+		t.Errorf("kafka args should start with [-y, @confluentinc/mcp-confluent, ...], got: %v", args)
 	}
+	// 验证 --block-tools 把所有 mutative tools 都禁了(读 kafkaMutativeTools 全部 18 个都该在 list 里)
+	blockToolsIdx := -1
+	for i, a := range args {
+		if s, ok := a.(string); ok && s == "--block-tools" {
+			blockToolsIdx = i
+			break
+		}
+	}
+	if blockToolsIdx < 0 || blockToolsIdx+1 >= len(args) {
+		t.Fatalf("kafka args should contain '--block-tools <csv>', got: %v", args)
+	}
+	blockCSV, _ := args[blockToolsIdx+1].(string)
+	for _, mut := range kafkaMutativeTools {
+		if !strings.Contains(blockCSV, mut) {
+			t.Errorf("kafka --block-tools must contain mutative tool %q to enforce read-only,got: %s", mut, blockCSV)
+		}
+	}
+	// env:用 BOOTSTRAP_SERVERS(Confluent MCP 标准 client property 名),不带 KAFKA_MCP_ 前缀
 	env := envOf(servers["kafka-test"])
-	if env["KAFKA_MCP_BOOTSTRAP_SERVERS"] != "broker1.test:9092,broker2.test:9092" {
-		t.Errorf("kafka brokers env wrong: %v", env)
+	if env["BOOTSTRAP_SERVERS"] != "broker1.test:9092,broker2.test:9092" {
+		t.Errorf("kafka BOOTSTRAP_SERVERS env wrong: %v", env)
 	}
 }
 

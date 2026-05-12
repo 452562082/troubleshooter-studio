@@ -895,24 +895,46 @@ func (b *mcpBuilder) buildClickHouse(servers map[string]any, ep *config.DataStor
 	}
 }
 
-// buildKafka 用 CefBoud/kafka-mcp-server(Go 二进制,带 --read-only flag,跟项目"全只读"原则一致)。
+// kafkaMutativeTools 列出 @confluentinc/mcp-confluent 所有写操作(topic / connector / schema /
+// tag / flink / tableflow 等),用于 --block-tools 参数把这些 mutative 工具禁掉,达成项目
+// "全只读"安全契约。
 //
-// 跟其它 6 个数据层 MCP **不同**:这个不是 npx/uvx 零安装,需要用户**预装** binary:
+// **同步责任**:Confluent MCP 上游出新工具时需要审视是否 mutative,要的话补入本 list。
+// 来源:confluentinc/mcp-confluent README 工具列表(checked 2026-05)。
+var kafkaMutativeTools = []string{
+	// topic
+	"create-topics", "delete-topics", "alter-topic-config",
+	// producer
+	"produce-message",
+	// connector
+	"create-connector", "delete-connector",
+	// schema registry
+	"delete-schema",
+	// topic tag
+	"create-topic-tags", "delete-tag", "remove-tag-from-entity", "add-tags-to-topic",
+	// flink
+	"create-flink-statement", "delete-flink-statements",
+	// tableflow
+	"create-tableflow-topic", "update-tableflow-topic", "delete-tableflow-topic",
+	"create-tableflow-catalog-integration", "update-tableflow-catalog-integration", "delete-tableflow-catalog-integration",
+}
+
+// buildKafka 用 @confluentinc/mcp-confluent(Confluent 官方维护,MIT,npx 零安装)。
 //
-//	go install github.com/CefBoud/kafka-mcp-server/cmd/kafka-mcp-server@latest
-//	# 或 brew(若上游放了 tap)/ 源码 go build
+// 跟其它 7 家数据层 MCP **一致**:npx -y 零安装(首次跑自动下),跨 4 个 IDE 共享 ~/.npm/_npx 缓存。
 //
-// 装完二进制要在 PATH(典型 $GOPATH/bin 或 brew prefix)。tshoot install 不会替用户装,
-// 检测到 yaml 启用 kafka data_store 时如果 PATH 里没 `kafka-mcp-server`,会在 install 日志里
-// 打 WARN 提示用户手动装(参考 codex 沙箱 network_access 探测同款机制)。
+// 安全契约:Confluent MCP 没内置 --read-only flag,但支持 --block-tools 黑名单。
+// kafkaMutativeTools 列了 18 个写操作工具用 --block-tools 一次性禁掉,**剩下的读工具默认允许**。
+// 上游加新工具时如果是 mutative,要同步进 kafkaMutativeTools(test 里有 sanity 断言)。
 //
 // 配置形态(参考上游 README):
 //
-//	command: "kafka-mcp-server"
-//	args:    ["stdio", "--read-only"]            # stdio 子命令 + 只读
-//	env:     KAFKA_MCP_BOOTSTRAP_SERVERS=<csv>   # brokers 列表
+//	command: "npx"
+//	args:    ["-y", "@confluentinc/mcp-confluent", "--block-tools", "<csv mutative tools>"]
+//	env:     BOOTSTRAP_SERVERS=<csv brokers>   # 标准 Kafka client property 名
 //
-// dedup 跟其它 6 家同款:同 brokers 字符串视为同 cluster 共享 1 个 MCP。
+// 自托管 Apache Kafka 用户不需要 API key/secret(那是 Confluent Cloud 才需要)。
+// dedup 跟其它 7 家同款:brokers 字符串作 key,同 brokers 视为同 cluster 共享 1 个 MCP。
 func (b *mcpBuilder) buildKafka(servers map[string]any, ep *config.DataStoreEndpoint, sourceID, envID string) {
 	var epBrokers string
 	if ep != nil {
@@ -923,10 +945,13 @@ func (b *mcpBuilder) buildKafka(servers map[string]any, ep *config.DataStoreEndp
 		return // 没填 brokers → 跳过(避免注册一条永远启动失败的 mcp)
 	}
 	servers[b.keyFor("kafka", sourceID, envID)] = map[string]any{
-		"command": "kafka-mcp-server",
-		"args":    []any{"stdio", "--read-only"},
+		"command": "npx",
+		"args": []any{
+			"-y", "@confluentinc/mcp-confluent",
+			"--block-tools", strings.Join(kafkaMutativeTools, ","),
+		},
 		"env": b.envBlock(map[string]any{
-			"KAFKA_MCP_BOOTSTRAP_SERVERS": brokers,
+			"BOOTSTRAP_SERVERS": brokers,
 		}),
 	}
 }

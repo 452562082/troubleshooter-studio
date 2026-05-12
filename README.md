@@ -231,7 +231,8 @@ make desktop      # 桌面裸二进制:bin/tshoot-desktop(开发者用,直接跑
 make release      # 多平台交叉编译 darwin/linux × amd64/arm64 → dist/bin/
 make release-notes       # dry-run,只打印自上次 tag 以来的 changelog(给眼睛 review,不改 git)
 make release-publish     # 对已有 tag 重传 binary(需 GITLAB_TOKEN env;运维场景才用)
-# ↑ 真正的发版本走 GitLab CI manual button(main pipeline 点 release:patch/minor/major),
+# ↑ 真正的发版本走 GitLab CI(main 合入即自动 release:patch;commit msg 含
+#   [release:minor] / [release:major] 时自动跑对应 job,patch 让位;manual 按钮保留兜底)。
 #   本地一键发布(make bump-* / tag-and-release)已删,强制 release 都过 CI。详见 docs/CI-RELEASE.md
 make test         # go test -race -cover ./...
 make lint         # go vet + gofmt + vue-tsc

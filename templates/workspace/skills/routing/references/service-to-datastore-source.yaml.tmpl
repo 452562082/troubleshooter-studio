@@ -1,0 +1,41 @@
+# service-to-datastore-source.yaml —— 多 cluster 场景下 service → MCP source 映射。
+#
+# 何时需要本表:
+#   troubleshooter.yaml 同一个 (data_store_type, env) 下 endpoints[] 写了**多条不同 URI**
+#   (典型场景:test 环境里 commerce 服务用 mongo-A.test,user 服务用 mongo-B.test —— 物理上
+#   两套独立的 mongodb cluster)。工作台会按 URI dedup,每个 unique URI 注册一个 MCP:
+#     mongodb-mongo-a-test  ← commerce / order / payment service 应走这个
+#     mongodb-mongo-b-test  ← user / inventory service 应走这个
+#   机器人查"commerce 的订单"时如果不知道该走哪个 MCP,会瞎选导致拿不到数据 / 拿错数据。
+#   本表把"service 名 → 应走哪个 source"的关系明确写下来。
+#
+# 何时不需要(单 cluster 用户,95%+):
+#   每种数据层在每个 env 内只有 1 个 unique URI(典型:test 环境一台 mongo,所有 service 共用)。
+#   routing skill 查到本表时只有 1 个候选 source,直接走那个,本表保持空(`{}`)即可。
+#
+# 命名约定:
+#   - `mongodb / mysql / postgresql / redis / elasticsearch / clickhouse` 顶级 key 对应数据层 type。
+#   - 二级 key 是 service 名(跟 service-dependency-map.yaml 用同样的 service 名)。
+#   - 值是 MCP key 中间的 source 段(去掉 `<type>-` 前缀和 `-<env>` 后缀)。
+#     例如 MCP key `mongodb-mongo-commerce-test` → source 是 `mongo-commerce`。
+#
+# source 名怎么知道:
+#   - 命令行跑 `cat ~/.openclaw/openclaw.json | jq '.mcp.servers | keys'`(或对应 IDE config),
+#     看注册了哪些 `<type>-<source>-<env>` 形态的 key,从中挑出 source 段填入本表。
+#   - 也可以从 troubleshooter.yaml 的 endpoints[] URI 反推:URI 形如
+#     `mongodb://mongo-commerce.test.example.com:27017/...`,source 就是 host 第一段
+#     (sanitize 后) → `mongo-commerce`。
+#
+# 没填本表会怎样:
+#   - 单 cluster:routing skill 直接给唯一 MCP,不卡。
+#   - 多 cluster + 本表查不到映射:routing skill **置信度上限锁 low,拒绝瞎选**,
+#     提示用户来本文件补映射。跟 grafana datasource_uid 排他契约同款机制。
+
+service_routing:
+  data_stores:
+    mongodb: {}        # 例:commerce: mongo-commerce / user: mongo-user
+    mysql: {}
+    postgresql: {}
+    redis: {}
+    elasticsearch: {}
+    clickhouse: {}

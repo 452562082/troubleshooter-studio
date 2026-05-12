@@ -19,6 +19,8 @@
 package agent
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/url"
 	"strconv"
 	"strings"
@@ -489,38 +491,216 @@ func (b *mcpBuilder) buildDataStores(servers map[string]any) {
 			continue
 		}
 		for _, e := range b.cfg.Environments {
-			ep := dsEndpointFor(ds, e.ID) // 可能 nil(env-vars 模式 / 用户没扫到 endpoints)
-			switch ds.Type {
-			case "mongodb":
-				b.buildMongoDB(servers, ep, e.ID)
-			case "postgresql":
-				b.buildPostgreSQL(servers, ep, e.ID)
-			case "elasticsearch":
-				b.buildDataES(servers, ep, e.ID)
-			case "redis":
-				b.buildRedis(servers, ep, e.ID)
-			case "mysql":
-				b.buildMySQL(servers, ep, e.ID)
-			case "clickhouse":
-				b.buildClickHouse(servers, ep, e.ID)
+			// 按连接串 dedupe:同一 (env, type) 下,同 URI 视为同 cluster,共享一个 MCP;
+			// 不同 URI 注册成多个 MCP(支持"一个 env 里多个 mongodb cluster"场景)。
+			// dedupe 后只有 1 个 unique → sourceID 留空,MCP key 退化成无 source 段(跟老用户行为一致)。
+			unique := dsEndpointsUnique(ds, e.ID)
+			single := len(unique) <= 1
+			for _, ep := range unique {
+				sourceID := ""
+				if !single {
+					sourceID = ep.sourceID
+				}
+				switch ds.Type {
+				case "mongodb":
+					b.buildMongoDB(servers, ep.endpoint, sourceID, e.ID)
+				case "postgresql":
+					b.buildPostgreSQL(servers, ep.endpoint, sourceID, e.ID)
+				case "elasticsearch":
+					b.buildDataES(servers, ep.endpoint, sourceID, e.ID)
+				case "redis":
+					b.buildRedis(servers, ep.endpoint, sourceID, e.ID)
+				case "mysql":
+					b.buildMySQL(servers, ep.endpoint, sourceID, e.ID)
+				case "clickhouse":
+					b.buildClickHouse(servers, ep.endpoint, sourceID, e.ID)
+				}
+			}
+			// env-vars 模式 / 用户没扫到 endpoints → unique 空,但还得跑一遍(让 buildXxx
+			// 从 install creds env 拿连接串;PruneEmpty 模式下空 env 段会被剔)
+			if len(unique) == 0 {
+				switch ds.Type {
+				case "mongodb":
+					b.buildMongoDB(servers, nil, "", e.ID)
+				case "postgresql":
+					b.buildPostgreSQL(servers, nil, "", e.ID)
+				case "elasticsearch":
+					b.buildDataES(servers, nil, "", e.ID)
+				case "redis":
+					b.buildRedis(servers, nil, "", e.ID)
+				case "mysql":
+					b.buildMySQL(servers, nil, "", e.ID)
+				case "clickhouse":
+					b.buildClickHouse(servers, nil, "", e.ID)
+				}
 			}
 		}
 	}
 }
 
-// dsEndpointFor:install creds 拿不到该 env var 时,fallback 到 yaml endpoints[] 派生
-// 该 (ds, env) 的代表连接串。同一 env 下若有多个 service 共用同一数据层,取第一条
-// 非空的 — 大多数项目里多个 service 走同一 ES/Mongo 集群,代表 endpoint 即可。
-// 用户走"代码扫描自动填 endpoints[]"路径而没单独在 wizard 输 env vars 时,这条 fallback
-// 让老 yaml 直接能用,不用重跑 wizard。
-func dsEndpointFor(ds config.DataStore, envID string) *config.DataStoreEndpoint {
+// dsEndpointUnique 是 dedupe 后的一条 endpoint + 派生 sourceID。
+// sourceID 在调用方只在 unique > 1 时才用,= 1 时调用方会传空字符串退化命名。
+type dsEndpointUnique struct {
+	endpoint *config.DataStoreEndpoint
+	sourceID string // host 抽取 + 撞名兜底 + 异常 fallback 后的稳定 ID
+}
+
+// dsEndpointsUnique:拉同 (ds, env) 下所有非空 endpoint,按连接串 dedupe,派生 sourceID。
+//
+// dedupe 规则:同 URI / URL / DSN / Brokers 字符串完全一致视为同 cluster,只保留首次出现那条。
+// 不做 normalize(replica set hosts 排序、query params 排序等),实战中用户从 ops 文档复制
+// URI 通常前后一致;真撞 normalize 问题再升 (TODO 标记不做)。
+//
+// sourceID 派生规则(3 层 fallback,详见 deriveSourceID):
+//  1. host 第一段(主路径,~95% URI 命中) — `mongo-commerce.test:27017` → `mongo-commerce`
+//  2. 撞名时加 URI hash 短前缀 — 同 host 不同 port 场景兜底
+//  3. host 抽取完全失败 → URI hash8 完全兜底
+//
+// 调用方在 unique 数 ≤ 1 时传空 sourceID(MCP key 退化成 `<type>-<env>`,跟老用户行为一致);
+// > 1 时用本函数派生的 sourceID(MCP key = `<type>-<source>-<env>`)。
+func dsEndpointsUnique(ds config.DataStore, envID string) []dsEndpointUnique {
+	type rawEntry struct {
+		ep  *config.DataStoreEndpoint
+		key string // dedupe key(取首个非空字段)
+	}
+	var raws []rawEntry
+	seen := map[string]bool{}
 	for i := range ds.Endpoints {
 		ep := &ds.Endpoints[i]
-		if ep.Env == envID && (ep.URL != "" || ep.URI != "" || ep.DSN != "" || ep.Brokers != "") {
-			return ep
+		if ep.Env != envID {
+			continue
+		}
+		key := firstNonEmpty(ep.URI, ep.URL, ep.DSN, ep.Brokers)
+		if key == "" {
+			continue
+		}
+		if seen[key] {
+			continue // 同连接串已收过,跳
+		}
+		seen[key] = true
+		raws = append(raws, rawEntry{ep: ep, key: key})
+	}
+	// 派生 sourceID 之后再 dedupe sourceID(撞名加 hash 兜底)
+	out := make([]dsEndpointUnique, 0, len(raws))
+	usedSource := map[string]bool{}
+	for _, r := range raws {
+		sid := deriveSourceID(r.key)
+		if usedSource[sid] {
+			sid = sid + "-" + uriHash(r.key, 6)
+		}
+		usedSource[sid] = true
+		out = append(out, dsEndpointUnique{endpoint: r.ep, sourceID: sid})
+	}
+	return out
+}
+
+// deriveSourceID 从连接串提取稳定可读的 sourceID。
+//
+//	mongodb://user:pass@mongo-commerce.test.example.com:27017/?... → mongo-commerce
+//	mongodb://10.0.0.1:27017/?...                                 → 10-0-0-1
+//	mongodb://a.dc1,b.dc1/?replicaSet=rs                          → a-dc1
+//	postgres://u:p@pg-master.test/db                              → pg-master
+//	tcp://broker1.test:9092,broker2.test:9092                     → broker1
+//	格式异常 / host 抽不到 → h-<URI sha256 前 8 字符>
+//
+// 抽出 host 第一段后:小写化 + `.` 换 `-` + 非 `[a-z0-9-]` 字符换 `-` + 头尾 trim `-`。
+func deriveSourceID(connStr string) string {
+	s := strings.TrimSpace(connStr)
+	if s == "" {
+		return "h-" + uriHash(connStr, 8)
+	}
+	// 1. 去掉 scheme://(或 tcp:// / amqp:// 等)
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	// 2. 去掉凭据段(@ 之前 + 第一个 / 之前的 @ 才算凭据 @)
+	if at := strings.LastIndex(s, "@"); at >= 0 {
+		// 确认 @ 在 host 段(不在 path 段);path 起点是第一个 '/'
+		firstSlash := strings.Index(s, "/")
+		if firstSlash == -1 || at < firstSlash {
+			s = s[at+1:]
 		}
 	}
-	return nil
+	// 3. 砍掉 path / query / fragment(`/` `?` `#` 之后全丢)
+	for _, sep := range []string{"/", "?", "#"} {
+		if i := strings.Index(s, sep); i >= 0 {
+			s = s[:i]
+		}
+	}
+	// 4. 多 host(replica set / kafka brokers):取第一个 `,` 之前
+	if i := strings.Index(s, ","); i >= 0 {
+		s = s[:i]
+	}
+	// 5. 去掉 port(host:port 形式;同时兼容 ipv6 [::1]:port)
+	if strings.HasPrefix(s, "[") {
+		if end := strings.Index(s, "]"); end >= 0 {
+			s = s[1:end] // 取 ipv6 地址本身
+		}
+	} else if i := strings.LastIndex(s, ":"); i >= 0 {
+		s = s[:i]
+	}
+	// 6. 取 host 第一段(只对域名抽取;ipv4 / ipv6 整体保留)
+	if !looksLikeIP(s) {
+		if i := strings.Index(s, "."); i >= 0 {
+			s = s[:i]
+		}
+	}
+	// 7. sanitize:小写 + 非 [a-z0-9-] 换 -
+	s = sanitizeSourceID(s)
+	if s == "" {
+		return "h-" + uriHash(connStr, 8)
+	}
+	return s
+}
+
+// sanitizeSourceID 把任意字符串转成只含 [a-z0-9-] 的 ID,头尾去 `-`,空串返空。
+func sanitizeSourceID(s string) string {
+	var sb strings.Builder
+	prevDash := true // 前置 true 用于 trim 头部 -
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			sb.WriteRune(r)
+			prevDash = false
+		default:
+			if !prevDash {
+				sb.WriteByte('-')
+				prevDash = true
+			}
+		}
+	}
+	out := sb.String()
+	return strings.TrimRight(out, "-")
+}
+
+// looksLikeIP 粗判:全是数字 / `.` / `:` / a-f / `[` `]` 字符 → 是 IP(v4 或 v6)。
+// 用来决定要不要取 host 第一段(域名取第一段,IP 全保留 sanitize)。
+func looksLikeIP(s string) bool {
+	if s == "" {
+		return false
+	}
+	hasDigit := false
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		case r == '.' || r == ':' || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F'):
+			// allowed in IP forms
+		default:
+			return false
+		}
+	}
+	return hasDigit
+}
+
+// uriHash 算连接串的 sha256 短前缀(小写 hex)。用于撞名兜底 / 异常 fallback。
+func uriHash(s string, n int) string {
+	sum := sha256.Sum256([]byte(s))
+	h := hex.EncodeToString(sum[:])
+	if n > len(h) {
+		n = len(h)
+	}
+	return h[:n]
 }
 
 // firstNonEmpty 串联多源取第一个非空。install creds 优先(env-vars 模式),fallback yaml。
@@ -533,13 +713,14 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-func (b *mcpBuilder) buildMongoDB(servers map[string]any, ep *config.DataStoreEndpoint, envID string) {
-	up := strings.ToUpper(envID)
+// sourceID 在多 cluster 场景由 dsEndpointsUnique 派生(host 第一段);单 cluster 下传空,MCP key 退化无 source 段。
+// envVar 命名同步带 source 段(envVar 函数内部 sourceID == "default" / "" 时跳过)。
+func (b *mcpBuilder) buildMongoDB(servers map[string]any, ep *config.DataStoreEndpoint, sourceID, envID string) {
 	var epURI string
 	if ep != nil {
 		epURI = ep.URI
 	}
-	uri := firstNonEmpty(b.get("MONGODB_URI_"+up), epURI)
+	uri := firstNonEmpty(b.get(envVar("MONGODB_URI", sourceID, envID)), epURI)
 	if uri == "" && b.opts.PruneEmpty {
 		return // 没填连接串 → 跳过(避免注册一条永远启动失败的 mcp)
 	}
@@ -548,7 +729,7 @@ func (b *mcpBuilder) buildMongoDB(servers map[string]any, ep *config.DataStoreEn
 	uri = normalizeMongoURI(uri)
 	// mcp-mongo-server v2+ 支持 MCP_MONGODB_URI env(2.x 起);凭据走 env IDE
 	// config args 字段不残留。
-	servers[b.keyFor("mongodb", "", envID)] = map[string]any{
+	servers[b.keyFor("mongodb", sourceID, envID)] = map[string]any{
 		"command": "npx",
 		"args":    []any{"-y", "mcp-mongo-server", "--read-only"},
 		"env": b.envBlock(map[string]any{
@@ -569,19 +750,18 @@ func (b *mcpBuilder) buildMongoDB(servers map[string]any, ep *config.DataStoreEn
 // 建议路径:用 henkey 包但在 PG 端建 readonly role,DSN 里只给该 role 的凭据 —
 // 安全责任从 mcp 侧移到 PG 侧。yaml schema 要相应改"必填 readonly user"才能换。
 // 暂保持现包(archived 但能跑)。
-func (b *mcpBuilder) buildPostgreSQL(servers map[string]any, ep *config.DataStoreEndpoint, envID string) {
-	up := strings.ToUpper(envID)
+func (b *mcpBuilder) buildPostgreSQL(servers map[string]any, ep *config.DataStoreEndpoint, sourceID, envID string) {
 	var epDSN string
 	if ep != nil {
 		epDSN = ep.DSN
 	}
-	dsn := firstNonEmpty(b.get("POSTGRES_DSN_"+up), epDSN)
+	dsn := firstNonEmpty(b.get(envVar("POSTGRES_DSN", sourceID, envID)), epDSN)
 	if dsn == "" && b.opts.PruneEmpty {
 		return
 	}
 	// 上游包只接位置参数,凭据落 args(可在 ~/.claude.json 里看到)— 已知 trade-off。
 	// envBlock(空 map) 仍然会被注入 OTEL_SDK_DISABLED=true 防 stdout 污染。
-	servers[b.keyFor("postgresql", "", envID)] = map[string]any{
+	servers[b.keyFor("postgresql", sourceID, envID)] = map[string]any{
 		"command": "npx",
 		"args":    []any{"-y", "@modelcontextprotocol/server-postgres", dsn},
 		"env":     b.envBlock(map[string]any{}),
@@ -589,23 +769,22 @@ func (b *mcpBuilder) buildPostgreSQL(servers map[string]any, ep *config.DataStor
 }
 
 // buildDataES 数据层 elasticsearch(跟 ELK obs 子段同款包,但不同 env 命名空间)。
-func (b *mcpBuilder) buildDataES(servers map[string]any, ep *config.DataStoreEndpoint, envID string) {
-	up := strings.ToUpper(envID)
+func (b *mcpBuilder) buildDataES(servers map[string]any, ep *config.DataStoreEndpoint, sourceID, envID string) {
 	var epURL, epUser, epPass string
 	if ep != nil {
 		epURL, epUser, epPass = ep.URL, ep.User, ep.Pass
 	}
-	esURL := firstNonEmpty(b.get("ES_URL_"+up), epURL)
+	esURL := firstNonEmpty(b.get(envVar("ES_URL", sourceID, envID)), epURL)
 	if esURL == "" && b.opts.PruneEmpty {
 		return
 	}
-	servers[b.keyFor("elasticsearch", "", envID)] = map[string]any{
+	servers[b.keyFor("elasticsearch", sourceID, envID)] = map[string]any{
 		"command": "npx",
 		"args":    []any{"-y", "@elastic/mcp-server-elasticsearch"},
 		"env": b.envBlock(map[string]any{
 			"ES_URL":      esURL,
-			"ES_USERNAME": firstNonEmpty(b.get("ES_USER_"+up), epUser),
-			"ES_PASSWORD": firstNonEmpty(b.get("ES_PASS_"+up), epPass),
+			"ES_USERNAME": firstNonEmpty(b.get(envVar("ES_USER", sourceID, envID)), epUser),
+			"ES_PASSWORD": firstNonEmpty(b.get(envVar("ES_PASS", sourceID, envID)), epPass),
 			// 禁用 elastic-otel-node 自动监控 — 否则它启动时往 stdout 打 banner JSON
 			// (`{"name":"elastic-otel-node",...}`),污染 mcp stdio JSON-RPC 协议 →
 			// "handshaking with MCP server failed: connection closed: initialize response"。
@@ -618,18 +797,17 @@ func (b *mcpBuilder) buildDataES(servers map[string]any, ep *config.DataStoreEnd
 // buildRedis:@gongrzhe/server-redis-mcp 接 URL 位置参数,不用拆字段。
 // 钉死 1.0.0:这个包目前只发过 1.0.0 一个版本(2024-12);如果作者将来发
 // 不兼容版本(arg 顺序变 / 改 env-only),@latest 会无声 break,钉版本更稳。
-func (b *mcpBuilder) buildRedis(servers map[string]any, ep *config.DataStoreEndpoint, envID string) {
-	up := strings.ToUpper(envID)
+func (b *mcpBuilder) buildRedis(servers map[string]any, ep *config.DataStoreEndpoint, sourceID, envID string) {
 	var epURL string
 	if ep != nil {
 		epURL = ep.URL
 	}
-	redisURL := firstNonEmpty(b.get("REDIS_URL_"+up), epURL)
+	redisURL := firstNonEmpty(b.get(envVar("REDIS_URL", sourceID, envID)), epURL)
 	if redisURL == "" && b.opts.PruneEmpty {
 		return
 	}
 	// 同 pg:上游 v1.0.0 只接位置参数,凭据落 args。
-	servers[b.keyFor("redis", "", envID)] = map[string]any{
+	servers[b.keyFor("redis", sourceID, envID)] = map[string]any{
 		"command": "npx",
 		"args":    []any{"-y", "@gongrzhe/server-redis-mcp@1.0.0", redisURL},
 		"env":     b.envBlock(map[string]any{}),
@@ -638,13 +816,12 @@ func (b *mcpBuilder) buildRedis(servers map[string]any, ep *config.DataStoreEndp
 
 // buildMySQL:@benborla29/mcp-server-mysql 接 env(MYSQL_HOST/PORT/USER/PASS),
 // 用户填的是 go-sql-driver DSN(`user:pass@tcp(host:port)/db`)→ 拆字段喂 env。
-func (b *mcpBuilder) buildMySQL(servers map[string]any, ep *config.DataStoreEndpoint, envID string) {
-	up := strings.ToUpper(envID)
+func (b *mcpBuilder) buildMySQL(servers map[string]any, ep *config.DataStoreEndpoint, sourceID, envID string) {
 	var epDSN string
 	if ep != nil {
 		epDSN = ep.DSN
 	}
-	dsn := firstNonEmpty(b.get("MYSQL_DSN_"+up), epDSN)
+	dsn := firstNonEmpty(b.get(envVar("MYSQL_DSN", sourceID, envID)), epDSN)
 	if dsn == "" && b.opts.PruneEmpty {
 		return
 	}
@@ -652,7 +829,7 @@ func (b *mcpBuilder) buildMySQL(servers map[string]any, ep *config.DataStoreEndp
 	if port == "" {
 		port = "3306"
 	}
-	servers[b.keyFor("mysql", "", envID)] = map[string]any{
+	servers[b.keyFor("mysql", sourceID, envID)] = map[string]any{
 		"command": "npx",
 		"args":    []any{"-y", "@benborla29/mcp-server-mysql"},
 		"env": b.envBlock(map[string]any{
@@ -667,13 +844,12 @@ func (b *mcpBuilder) buildMySQL(servers map[string]any, ep *config.DataStoreEndp
 
 // buildClickHouse:uvx mcp-clickhouse(python pip 包)接 env(CLICKHOUSE_HOST/PORT/USER/PASSWORD)。
 // URL 形如 http(s)://[user:pass@]host:port/[db] → 拆字段。https → secure=true。
-func (b *mcpBuilder) buildClickHouse(servers map[string]any, ep *config.DataStoreEndpoint, envID string) {
-	up := strings.ToUpper(envID)
+func (b *mcpBuilder) buildClickHouse(servers map[string]any, ep *config.DataStoreEndpoint, sourceID, envID string) {
 	var epURL, epUser, epPass string
 	if ep != nil {
 		epURL, epUser, epPass = ep.URL, ep.User, ep.Pass
 	}
-	chURL := firstNonEmpty(b.get("CLICKHOUSE_URL_"+up), epURL)
+	chURL := firstNonEmpty(b.get(envVar("CLICKHOUSE_URL", sourceID, envID)), epURL)
 	if chURL == "" && b.opts.PruneEmpty {
 		return
 	}
@@ -687,16 +863,16 @@ func (b *mcpBuilder) buildClickHouse(servers map[string]any, ep *config.DataStor
 		}
 	}
 	// URL 没带凭证就 fallback 到独立字段(用户大概率走 USER/PASS 表单填)。
-	// 优先级:URL 内嵌 > install creds CLICKHOUSE_USER_<env> > yaml endpoint user 字段。
+	// 优先级:URL 内嵌 > install creds CLICKHOUSE_USER_<sourceID>_<env> > yaml endpoint user 字段。
 	user := urlUser
 	if user == "" {
-		user = firstNonEmpty(b.get("CLICKHOUSE_USER_"+up), epUser)
+		user = firstNonEmpty(b.get(envVar("CLICKHOUSE_USER", sourceID, envID)), epUser)
 	}
 	pass := urlPass
 	if pass == "" {
-		pass = firstNonEmpty(b.get("CLICKHOUSE_PASS_"+up), epPass)
+		pass = firstNonEmpty(b.get(envVar("CLICKHOUSE_PASS", sourceID, envID)), epPass)
 	}
-	servers[b.keyFor("clickhouse", "", envID)] = map[string]any{
+	servers[b.keyFor("clickhouse", sourceID, envID)] = map[string]any{
 		"command": "uvx",
 		"args":    []any{"mcp-clickhouse"},
 		"env": b.envBlock(map[string]any{

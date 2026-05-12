@@ -522,6 +522,131 @@ func TestBuildMCPServers_DataStores_EndpointsFallback(t *testing.T) {
 	}
 }
 
+// TestBuildMCPServers_DataStores_SingleURI_NoSourceSuffix:
+// 老用户兼容路径 — yaml endpoints[] 同 env 多条但 URI 完全一致(或只 1 条),
+// dedup 后 unique URI = 1,MCP key 应保持无 source 段(`mongodb-test`,跟改造前一致),
+// 老 IDE config 里的 key 不变成孤儿。
+func TestBuildMCPServers_DataStores_SingleURI_NoSourceSuffix(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "test"}},
+		Infrastructure: config.Infrastructure{
+			DataStores: []config.DataStore{{
+				Type: "mongodb", Enabled: true,
+				Endpoints: []config.DataStoreEndpoint{
+					// 5 个 service 全连同 1 个 URI — dedup 后只剩 1 个
+					{Env: "test", Service: "commerce", URI: "mongodb://test-mongo.example.com:27017/?authSource=admin"},
+					{Env: "test", Service: "user", URI: "mongodb://test-mongo.example.com:27017/?authSource=admin"},
+					{Env: "test", Service: "order", URI: "mongodb://test-mongo.example.com:27017/?authSource=admin"},
+				},
+			}},
+		},
+	}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(_ string) string { return "" })
+
+	// 退化命名:不带 source 段
+	if _, ok := servers["mongodb-test"]; !ok {
+		t.Errorf("expected single-URI dedup → 'mongodb-test' (no source segment), got: %v", keysOf(servers))
+	}
+	// 不应有任何带 source 段的 key
+	for k := range servers {
+		if strings.HasPrefix(k, "mongodb-") && k != "mongodb-test" {
+			t.Errorf("single-URI dedup should NOT produce sourced key %q", k)
+		}
+	}
+}
+
+// TestBuildMCPServers_DataStores_MultiURI_HostSourceID:
+// 多 cluster 场景 — 同 env 多条 endpoint 不同 URI,
+// 派生 sourceID = host 第一段,注册多个 MCP。
+func TestBuildMCPServers_DataStores_MultiURI_HostSourceID(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "test"}},
+		Infrastructure: config.Infrastructure{
+			DataStores: []config.DataStore{{
+				Type: "mongodb", Enabled: true,
+				Endpoints: []config.DataStoreEndpoint{
+					{Env: "test", Service: "commerce", URI: "mongodb://mongo-commerce.test.example.com:27017/?..."},
+					{Env: "test", Service: "user", URI: "mongodb://mongo-user.test.example.com:27017/?..."},
+				},
+			}},
+		},
+	}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(_ string) string { return "" })
+
+	want := []string{"mongodb-mongo-commerce-test", "mongodb-mongo-user-test"}
+	for _, k := range want {
+		if _, ok := servers[k]; !ok {
+			t.Errorf("expected multi-URI dedup → %q, got: %v", k, keysOf(servers))
+		}
+	}
+	// 不应再有无 source 段的 mongodb-test(因为 unique > 1)
+	if _, ok := servers["mongodb-test"]; ok {
+		t.Errorf("multi-URI should NOT register fallback 'mongodb-test' (no source) key")
+	}
+}
+
+// TestBuildMCPServers_DataStores_MultiURI_CollisionHashFallback:
+// 边缘 case — 同 host 不同 port,host 抽取的 sourceID 撞名,
+// 加 URI hash 短前缀兜底。
+func TestBuildMCPServers_DataStores_MultiURI_CollisionHashFallback(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "test"}},
+		Infrastructure: config.Infrastructure{
+			DataStores: []config.DataStore{{
+				Type: "mongodb", Enabled: true,
+				Endpoints: []config.DataStoreEndpoint{
+					{Env: "test", URI: "mongodb://10.0.0.1:27017/?..."},
+					{Env: "test", URI: "mongodb://10.0.0.1:27018/?..."},
+				},
+			}},
+		},
+	}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(_ string) string { return "" })
+
+	// 第一条 sourceID = 10-0-0-1
+	if _, ok := servers["mongodb-10-0-0-1-test"]; !ok {
+		t.Errorf("expected first source 'mongodb-10-0-0-1-test', got: %v", keysOf(servers))
+	}
+	// 第二条同 host 撞名,sourceID = 10-0-0-1-<hash6>
+	found := false
+	for k := range servers {
+		if strings.HasPrefix(k, "mongodb-10-0-0-1-") && strings.HasSuffix(k, "-test") && k != "mongodb-10-0-0-1-test" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected second collision-fallback key 'mongodb-10-0-0-1-<hash6>-test', got: %v", keysOf(servers))
+	}
+}
+
+// TestBuildMCPServers_DataStores_DerivedSourceID 直接单测 deriveSourceID
+// 几个典型 URI 形态(域名 / IP / 凭据 / replica set / 异常)。
+func TestBuildMCPServers_DataStores_DerivedSourceID(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"mongodb://mongo-commerce.test.example.com:27017/?...", "mongo-commerce"},
+		{"mongodb://user:pass@mongo-user.test:27017/?...", "mongo-user"},
+		{"mongodb://10.0.0.1:27017/?...", "10-0-0-1"},
+		{"mongodb://a.dc1,b.dc1,c.dc1/?replicaSet=rs", "a-dc1"},
+		{"postgres://u:p@pg-master.test/db", "pg-master"},
+		{"redis://:rpw@10.0.0.3:6379/0", "10-0-0-3"},
+		{"https://chu:chpw@10.0.0.6:8443/analytics", "10-0-0-6"},
+	}
+	for _, c := range cases {
+		got := deriveSourceID(c.in)
+		if got != c.want {
+			t.Errorf("deriveSourceID(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// 异常 URI(完全无法抽 host)应 fallback 到 h- + hash
+	bad := deriveSourceID("@!#$%")
+	if !strings.HasPrefix(bad, "h-") {
+		t.Errorf("deriveSourceID for invalid URI should fallback to h-<hash>, got %q", bad)
+	}
+}
+
 // TestBuildMCPServers_DataStores_CredsOverridesEndpoints 验证 install creds 优先于 endpoints:
 // 用户在 wizard 显式覆盖了某 env 的连接串(env-vars 模式),应以 wizard 输入为准,
 // 不要被老 yaml endpoints 的值覆盖。

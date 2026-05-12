@@ -515,6 +515,8 @@ func (b *mcpBuilder) buildDataStores(servers map[string]any) {
 					b.buildMySQL(servers, ep.endpoint, sourceID, e.ID)
 				case "clickhouse":
 					b.buildClickHouse(servers, ep.endpoint, sourceID, e.ID)
+				case "kafka":
+					b.buildKafka(servers, ep.endpoint, sourceID, e.ID)
 				}
 			}
 			// env-vars 模式 / 用户没扫到 endpoints → unique 空,但还得跑一遍(让 buildXxx
@@ -529,6 +531,8 @@ func (b *mcpBuilder) buildDataStores(servers map[string]any) {
 					b.buildDataES(servers, nil, "", e.ID)
 				case "redis":
 					b.buildRedis(servers, nil, "", e.ID)
+				case "kafka":
+					b.buildKafka(servers, nil, "", e.ID)
 				case "mysql":
 					b.buildMySQL(servers, nil, "", e.ID)
 				case "clickhouse":
@@ -883,6 +887,42 @@ func (b *mcpBuilder) buildClickHouse(servers map[string]any, ep *config.DataStor
 			"CLICKHOUSE_PASSWORD": pass,
 			"CLICKHOUSE_DATABASE": db,
 			"CLICKHOUSE_SECURE":   strconv.FormatBool(secure),
+		}),
+	}
+}
+
+// buildKafka 用 CefBoud/kafka-mcp-server(Go 二进制,带 --read-only flag,跟项目"全只读"原则一致)。
+//
+// 跟其它 6 个数据层 MCP **不同**:这个不是 npx/uvx 零安装,需要用户**预装** binary:
+//
+//	go install github.com/CefBoud/kafka-mcp-server/cmd/kafka-mcp-server@latest
+//	# 或 brew(若上游放了 tap)/ 源码 go build
+//
+// 装完二进制要在 PATH(典型 $GOPATH/bin 或 brew prefix)。tshoot install 不会替用户装,
+// 检测到 yaml 启用 kafka data_store 时如果 PATH 里没 `kafka-mcp-server`,会在 install 日志里
+// 打 WARN 提示用户手动装(参考 codex 沙箱 network_access 探测同款机制)。
+//
+// 配置形态(参考上游 README):
+//
+//	command: "kafka-mcp-server"
+//	args:    ["stdio", "--read-only"]            # stdio 子命令 + 只读
+//	env:     KAFKA_MCP_BOOTSTRAP_SERVERS=<csv>   # brokers 列表
+//
+// dedup 跟其它 6 家同款:同 brokers 字符串视为同 cluster 共享 1 个 MCP。
+func (b *mcpBuilder) buildKafka(servers map[string]any, ep *config.DataStoreEndpoint, sourceID, envID string) {
+	var epBrokers string
+	if ep != nil {
+		epBrokers = ep.Brokers
+	}
+	brokers := firstNonEmpty(b.get(envVar("KAFKA_BROKERS", sourceID, envID)), epBrokers)
+	if brokers == "" && b.opts.PruneEmpty {
+		return // 没填 brokers → 跳过(避免注册一条永远启动失败的 mcp)
+	}
+	servers[b.keyFor("kafka", sourceID, envID)] = map[string]any{
+		"command": "kafka-mcp-server",
+		"args":    []any{"stdio", "--read-only"},
+		"env": b.envBlock(map[string]any{
+			"KAFKA_MCP_BOOTSTRAP_SERVERS": brokers,
 		}),
 	}
 }

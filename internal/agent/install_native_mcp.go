@@ -94,6 +94,17 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 		}
 	}
 
+	// kafka 数据层 MCP 走 `kafka-mcp-server`(CefBoud Go binary),不是 npx/uvx 零安装,
+	// 用户得自己 go install。yaml 启用 kafka data_store 时探测一下,没装就打提示。
+	// 同上不阻塞:fallback 到 kafka CLI 还能用,完全 abort 损失更大。
+	if cfgUsesKafkaMCP(cfg) {
+		if err := CheckKafkaMCPServerAvailable(); err != nil {
+			fmt.Fprintf(os.Stderr,
+				"[warn] %s --target %s:\n%v\n",
+				"install", target, err)
+		}
+	}
+
 	if t == TargetCodex {
 		// codex 全局 sandbox 默认禁网,workspace-write 也要显式 network_access=true 才放行 —
 		// 没配的话装好后所有 MCP 启动 ENOTFOUND。这里探测 + 给修复指引,不主动改用户 config。

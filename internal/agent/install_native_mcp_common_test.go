@@ -619,6 +619,67 @@ func TestBuildMCPServers_DataStores_MultiURI_CollisionHashFallback(t *testing.T)
 	}
 }
 
+// TestBuildMCPServers_DataStores_Kafka:kafka MCP(CefBoud/kafka-mcp-server)注册验证。
+// 跟其它 6 家不同:command 是 binary `kafka-mcp-server`,不是 npx/uvx;
+// args 含 `stdio` 子命令 + `--read-only` flag;env 用 `KAFKA_MCP_BOOTSTRAP_SERVERS`。
+func TestBuildMCPServers_DataStores_Kafka(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "test"}},
+		Infrastructure: config.Infrastructure{
+			DataStores: []config.DataStore{{
+				Type: "kafka", Enabled: true,
+				Endpoints: []config.DataStoreEndpoint{
+					{Env: "test", Brokers: "broker1.test:9092,broker2.test:9092"},
+				},
+			}},
+		},
+	}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(_ string) string { return "" })
+
+	mcp, ok := servers["kafka-test"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected 'kafka-test' registered, got: %v", keysOf(servers))
+	}
+	if mcp["command"] != "kafka-mcp-server" {
+		t.Errorf("kafka command should be 'kafka-mcp-server' (CefBoud go binary), got: %v", mcp["command"])
+	}
+	args := mcp["args"].([]any)
+	if len(args) != 2 || args[0] != "stdio" || args[1] != "--read-only" {
+		t.Errorf("kafka args should be [stdio, --read-only], got: %v", args)
+	}
+	env := envOf(servers["kafka-test"])
+	if env["KAFKA_MCP_BOOTSTRAP_SERVERS"] != "broker1.test:9092,broker2.test:9092" {
+		t.Errorf("kafka brokers env wrong: %v", env)
+	}
+}
+
+// TestBuildMCPServers_DataStores_Kafka_MultiCluster:kafka 多 cluster 也走 dedup-by-URI
+// (用 brokers 字段做 dedup key),不同 broker 列表注册成多个 MCP。
+func TestBuildMCPServers_DataStores_Kafka_MultiCluster(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "test"}},
+		Infrastructure: config.Infrastructure{
+			DataStores: []config.DataStore{{
+				Type: "kafka", Enabled: true,
+				Endpoints: []config.DataStoreEndpoint{
+					{Env: "test", Brokers: "kafka-commerce.test:9092"},
+					{Env: "test", Brokers: "kafka-user.test:9092"},
+				},
+			}},
+		},
+	}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(_ string) string { return "" })
+
+	for _, k := range []string{"kafka-kafka-commerce-test", "kafka-kafka-user-test"} {
+		if _, ok := servers[k]; !ok {
+			t.Errorf("expected multi-cluster kafka %q, got: %v", k, keysOf(servers))
+		}
+	}
+	if _, ok := servers["kafka-test"]; ok {
+		t.Errorf("multi-cluster kafka should NOT have 'kafka-test' (no source) fallback")
+	}
+}
+
 // TestBuildMCPServers_DataStores_DerivedSourceID 直接单测 deriveSourceID
 // 几个典型 URI 形态(域名 / IP / 凭据 / replica set / 异常)。
 func TestBuildMCPServers_DataStores_DerivedSourceID(t *testing.T) {

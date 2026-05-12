@@ -259,7 +259,7 @@ def main() -> None:
         },
         'notes': notes,
         'next_steps_for_agent': [
-            'verdict_root_likely 字段指向的服务大概率是真因 → 把它当主角递归一遍 6 步流程',
+            'verdict_root_likely 字段指向的服务大概率是真因 → 把它当主角递归一遍 7 步流程(含 Step 7 沉淀)',
             '所有 data_store_hints 列出的数据层 → agent 还要主动调对应 skill 验证,不能只看 K8s 层',
             'verdict=all_healthy 但 metric/log 仍异常 → 真因可能在当前服务自身 / 中间网络 / 共享 DB 锁',
         ],

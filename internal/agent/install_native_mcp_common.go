@@ -144,23 +144,22 @@ func ensureDirectConnection(uri string) string {
 	if at := strings.LastIndex(rest, "@"); at >= 0 {
 		hostAndAfter = rest[at+1:]
 	}
-	// 切出 host 段:在 `/` 或 `?` 之前
 	hostPart := hostAndAfter
 	if cut := strings.IndexAny(hostAndAfter, "/?"); cut >= 0 {
 		hostPart = hostAndAfter[:cut]
 	}
 	if strings.Contains(hostPart, ",") {
-		return uri // 多 host → 不动
+		return uri
 	}
 	qIdx := strings.Index(hostAndAfter, "?")
-	if qIdx >= 0 {
-		query := hostAndAfter[qIdx+1:]
-		if containsParam(query, "directConnection") || containsParam(query, "replicaSet") {
-			return uri
-		}
-		return uri + "&directConnection=true"
+	if qIdx < 0 {
+		return uri + "?directConnection=true"
 	}
-	return uri + "?directConnection=true"
+	query := hostAndAfter[qIdx+1:]
+	if containsParam(query, "directConnection") || containsParam(query, "replicaSet") {
+		return uri
+	}
+	return uri + "&directConnection=true"
 }
 
 // containsParam 检查 query string 里是否含名为 name 的参数(`name=...` 或 `name&` 形式)。
@@ -790,9 +789,6 @@ func (b *mcpBuilder) buildMongoDB(servers map[string]any, ep *config.DataStoreEn
 	// 修密码段未 URL-encode 的保留字符 — mcp-mongo-server 严格按 RFC3986
 	// 解析,密码含 < ] ^ % @ : / ? # [ ] 等字面字符 → connection string parse error。
 	uri = normalizeMongoURI(uri)
-	// 单节点 mongod 8.x(wire 27)+ Node driver 6.x/7.x → SDAM commonWireVersion
-	// 协商 bug,MongoClient.connect() 卡 30s,MCP stdio 握手永远超时。补
-	// directConnection=true 绕开副本集分支(详见 ensureDirectConnection 文档)。
 	uri = ensureDirectConnection(uri)
 	// mcp-mongo-server v2+ 支持 MCP_MONGODB_URI env(2.x 起);凭据走 env IDE
 	// config args 字段不残留。

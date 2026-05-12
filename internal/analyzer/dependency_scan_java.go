@@ -19,8 +19,6 @@ var (
 	reJavaSpringKafka = regexp.MustCompile(`@Autowired\s+(?:private\s+)?KafkaTemplate`)
 	reJavaJpa         = regexp.MustCompile(`(?:JpaRepository|CrudRepository|MybatisPlus|@Mapper)`)
 	reJavaES          = regexp.MustCompile(`(?:ElasticsearchClient|RestHighLevelClient|ElasticsearchOperations)`)
-	// RocketMQ:DefaultMQProducer / RocketMQTemplate(spring-rocketmq)
-	reJavaRocketMQ = regexp.MustCompile(`(?:DefaultMQ(?:Producer|PushConsumer|PullConsumer)|RocketMQTemplate|@RocketMQMessageListener)`)
 	// RabbitMQ:RabbitTemplate(spring) / Connection/Channel(amqp-client)
 	reJavaRabbitMQ = regexp.MustCompile(`(?:RabbitTemplate|com\.rabbitmq\.client\.Connection|@RabbitListener)`)
 	// ClickHouse:JDBC + clickhouse-jdbc
@@ -68,9 +66,6 @@ func scanJavaDeps(repoPath string, include []string) ([]DownstreamCall, []DataSt
 		}
 		if reJavaES.MatchString(text) {
 			usages = append(usages, DataStoreUsage{Type: "elasticsearch", Driver: "spring-data-es", Callsite: rel})
-		}
-		if reJavaRocketMQ.MatchString(text) {
-			usages = append(usages, DataStoreUsage{Type: "rocketmq", Driver: "spring-rocketmq", Callsite: rel})
 		}
 		if reJavaRabbitMQ.MatchString(text) {
 			usages = append(usages, DataStoreUsage{Type: "rabbitmq", Driver: "spring-amqp", Callsite: rel})

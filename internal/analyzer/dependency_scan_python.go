@@ -16,7 +16,6 @@ var (
 	rePySQL        = regexp.MustCompile(`(?:sqlalchemy|peewee|tortoise|databases\.Database|psycopg|pymysql)`)
 	rePyKafka      = regexp.MustCompile(`(?:kafka-python|confluent_kafka|aiokafka)`)
 	rePyES         = regexp.MustCompile(`(?:elasticsearch|opensearchpy)\.`)
-	rePyRocketMQ   = regexp.MustCompile(`(?:rocketmq[-_]client[-_]python|rocketmq\.client\.)`)
 	rePyRabbitMQ   = regexp.MustCompile(`(?:pika\.|aio_pika|kombu\.)`)
 	rePyClickHouse = regexp.MustCompile(`(?:clickhouse[-_]driver|clickhouse[-_]connect)`)
 )
@@ -66,9 +65,6 @@ func scanPythonDeps(repoPath string, include []string) ([]DownstreamCall, []Data
 		}
 		if rePyES.MatchString(text) {
 			usages = append(usages, DataStoreUsage{Type: "elasticsearch", Driver: "elasticsearch-py", Callsite: rel})
-		}
-		if rePyRocketMQ.MatchString(text) {
-			usages = append(usages, DataStoreUsage{Type: "rocketmq", Driver: "rocketmq-client-python", Callsite: rel})
 		}
 		if rePyRabbitMQ.MatchString(text) {
 			usages = append(usages, DataStoreUsage{Type: "rabbitmq", Driver: "pika/aio_pika/kombu", Callsite: rel})

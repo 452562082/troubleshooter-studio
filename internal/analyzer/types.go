@@ -42,7 +42,7 @@ type DownstreamCall struct {
 
 // DataStoreUsage 单次数据层使用线索 —— "本仓库初始化了哪个数据层连接"。
 type DataStoreUsage struct {
-	Type     string `json:"type"`              // mysql / postgresql / redis / mongodb / elasticsearch / kafka / rocketmq / rabbitmq / clickhouse
+	Type     string `json:"type"`              // mysql / postgresql / redis / mongodb / elasticsearch / kafka / rabbitmq / clickhouse
 	Logical  string `json:"logical,omitempty"` // 逻辑名(从配置 key / package 名推),如 "order_db" "session-cache"
 	Driver   string `json:"driver"`            // 库/驱动(go-redis / pymongo / @Autowired RedisTemplate)
 	Callsite string `json:"callsite,omitempty"`

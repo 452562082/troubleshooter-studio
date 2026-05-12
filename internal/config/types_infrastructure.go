@@ -10,7 +10,7 @@ type DataStoreEndpoint struct {
 	URL     string `yaml:"url,omitempty"`     // redis / elasticsearch / clickhouse
 	URI     string `yaml:"uri,omitempty"`     // mongodb
 	DSN     string `yaml:"dsn,omitempty"`     // mysql / postgresql
-	Brokers string `yaml:"brokers,omitempty"` // kafka / rocketmq
+	Brokers string `yaml:"brokers,omitempty"` // kafka
 	User    string `yaml:"user,omitempty"`
 	Pass    string `yaml:"pass,omitempty"`
 }

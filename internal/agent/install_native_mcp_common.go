@@ -480,8 +480,9 @@ func (b *mcpBuilder) buildELK(servers map[string]any) {
 // (上游包不接 env)。改回直接传位置参数 — pg/redis 凭据落 IDE config args 字段是已知
 // trade-off,直到上游包支持 env 或换包(@henkey/postgres-mcp-server 等)再迁。
 //
-// 阶段 2 待做(无成熟 npm mcp,要自己写 binary):
-//   - kafka / rabbitmq / rocketmq
+// 阶段 2 待做:
+//   - kafka(社区没 npx/uvx 分发,候选 brew 装 CefBoud/kafka-mcp-server,带 --read-only flag)
+//   - rabbitmq(可走 uvx amazon-mq/mcp-server-rabbitmq,默认只读)
 //
 // PruneEmpty=true 模式下空 env 段会被剔,如果用户没填 endpoint(env-vars 模式没填 /
 // 走 from_config_center 模式),mcp server 启动时拿不到 URI 直接退出 — 不会污染 IDE。

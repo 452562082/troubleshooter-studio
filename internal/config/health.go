@@ -42,7 +42,6 @@ var knownSkills = map[string]bool{
 	"postgresql-runtime-query": true,
 	"clickhouse-runtime-query": true,
 	"kafka-runtime-query":      true,
-	"rocketmq-runtime-query":   true,
 	"rabbitmq-runtime-query":   true,
 	"elk-log-query":            true,
 	"tracing-query":            true,

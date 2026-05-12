@@ -74,7 +74,6 @@ func readmeSkillsSection(ctx *Context) string {
 		"mysql-runtime-query":      "MySQL 只读 SELECT（数据一致性 / 慢查询）",
 		"postgresql-runtime-query": "PostgreSQL 只读查询（pg_stat / 连接数 / 表大小）",
 		"kafka-runtime-query":      "Kafka topic / 消费积压 / 死信",
-		"rocketmq-runtime-query":   "RocketMQ topic / consumer / 积压 / DLQ",
 		"rabbitmq-runtime-query":   "RabbitMQ queue / exchange / 消息数",
 		"clickhouse-runtime-query": "ClickHouse 只读 OLAP 查询 / 分区 / 慢查询日志",
 		"diagram-generator":        "生成架构图 / 流程图 / 链路拓扑",

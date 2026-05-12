@@ -16,7 +16,6 @@ var (
 	reJsSQL        = regexp.MustCompile(`(?:typeorm|prisma|sequelize|mysql2|pg\.Pool)`)
 	reJsKafka      = regexp.MustCompile(`(?:kafkajs|node-rdkafka)`)
 	reJsES         = regexp.MustCompile(`(?:@elastic/elasticsearch|@opensearch-project)`)
-	reJsRocketMQ   = regexp.MustCompile(`(?:rocketmq-client-nodejs|@apache/rocketmq)`)
 	reJsRabbitMQ   = regexp.MustCompile(`(?:amqplib|amqp-connection-manager)`)
 	reJsClickHouse = regexp.MustCompile(`(?:@clickhouse/client|clickhouse)`)
 )
@@ -61,9 +60,6 @@ func scanNodeDeps(repoPath string, include []string) ([]DownstreamCall, []DataSt
 		}
 		if reJsES.MatchString(text) {
 			usages = append(usages, DataStoreUsage{Type: "elasticsearch", Driver: "@elastic/elasticsearch", Callsite: rel})
-		}
-		if reJsRocketMQ.MatchString(text) {
-			usages = append(usages, DataStoreUsage{Type: "rocketmq", Driver: "rocketmq-client-nodejs", Callsite: rel})
 		}
 		if reJsRabbitMQ.MatchString(text) {
 			usages = append(usages, DataStoreUsage{Type: "rabbitmq", Driver: "amqplib", Callsite: rel})

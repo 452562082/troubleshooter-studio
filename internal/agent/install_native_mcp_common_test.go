@@ -10,6 +10,7 @@
 package agent
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -123,7 +124,8 @@ func TestBuildMCPServers_DataStores(t *testing.T) {
 	}
 
 	// ── mongodb:走 npx mcp-mongo-server,凭据用 MCP_MONGODB_URI env(v2+ 支持) ──
-	// 自动 normalize URI 补 authSource=admin。
+	// 自动 normalize URI 补 authSource=admin + directConnection=true(单节点绕
+	// Node driver wire 27 SDAM 兼容 bug,详见 ensureDirectConnection 注释)。
 	mongoSpec := servers["bot-mongodb-dev"].(map[string]any)
 	if mongoSpec["command"] != "npx" {
 		t.Errorf("mongodb command 应为 npx,实际 %v", mongoSpec["command"])
@@ -131,7 +133,7 @@ func TestBuildMCPServers_DataStores(t *testing.T) {
 	if got := argString(mongoSpec); got != "[-y mcp-mongo-server --read-only]" {
 		t.Errorf("mongodb args mismatch: %s", got)
 	}
-	if envOf(mongoSpec)["MCP_MONGODB_URI"] != "mongodb://u:p@m.local:27017/app?authSource=admin" {
+	if envOf(mongoSpec)["MCP_MONGODB_URI"] != "mongodb://u:p@m.local:27017/app?authSource=admin&directConnection=true" {
 		t.Errorf("mongodb MCP_MONGODB_URI env mismatch: %v", envOf(mongoSpec))
 	}
 
@@ -522,6 +524,275 @@ func TestBuildMCPServers_DataStores_EndpointsFallback(t *testing.T) {
 	}
 }
 
+// TestBuildMCPServers_DataStores_SingleURI_NoSourceSuffix:
+// 老用户兼容路径 — yaml endpoints[] 同 env 多条但 URI 完全一致(或只 1 条),
+// dedup 后 unique URI = 1,MCP key 应保持无 source 段(`mongodb-test`,跟改造前一致),
+// 老 IDE config 里的 key 不变成孤儿。
+func TestBuildMCPServers_DataStores_SingleURI_NoSourceSuffix(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "test"}},
+		Infrastructure: config.Infrastructure{
+			DataStores: []config.DataStore{{
+				Type: "mongodb", Enabled: true,
+				Endpoints: []config.DataStoreEndpoint{
+					// 5 个 service 全连同 1 个 URI — dedup 后只剩 1 个
+					{Env: "test", Service: "commerce", URI: "mongodb://test-mongo.example.com:27017/?authSource=admin"},
+					{Env: "test", Service: "user", URI: "mongodb://test-mongo.example.com:27017/?authSource=admin"},
+					{Env: "test", Service: "order", URI: "mongodb://test-mongo.example.com:27017/?authSource=admin"},
+				},
+			}},
+		},
+	}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(_ string) string { return "" })
+
+	// 退化命名:不带 source 段
+	if _, ok := servers["mongodb-test"]; !ok {
+		t.Errorf("expected single-URI dedup → 'mongodb-test' (no source segment), got: %v", keysOf(servers))
+	}
+	// 不应有任何带 source 段的 key
+	for k := range servers {
+		if strings.HasPrefix(k, "mongodb-") && k != "mongodb-test" {
+			t.Errorf("single-URI dedup should NOT produce sourced key %q", k)
+		}
+	}
+}
+
+// TestBuildMCPServers_DataStores_MultiURI_HostSourceID:
+// 多 cluster 场景 — 同 env 多条 endpoint 不同 URI,
+// 派生 sourceID = host 第一段,注册多个 MCP。
+func TestBuildMCPServers_DataStores_MultiURI_HostSourceID(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "test"}},
+		Infrastructure: config.Infrastructure{
+			DataStores: []config.DataStore{{
+				Type: "mongodb", Enabled: true,
+				Endpoints: []config.DataStoreEndpoint{
+					{Env: "test", Service: "commerce", URI: "mongodb://mongo-commerce.test.example.com:27017/?..."},
+					{Env: "test", Service: "user", URI: "mongodb://mongo-user.test.example.com:27017/?..."},
+				},
+			}},
+		},
+	}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(_ string) string { return "" })
+
+	want := []string{"mongodb-mongo-commerce-test", "mongodb-mongo-user-test"}
+	for _, k := range want {
+		if _, ok := servers[k]; !ok {
+			t.Errorf("expected multi-URI dedup → %q, got: %v", k, keysOf(servers))
+		}
+	}
+	// 不应再有无 source 段的 mongodb-test(因为 unique > 1)
+	if _, ok := servers["mongodb-test"]; ok {
+		t.Errorf("multi-URI should NOT register fallback 'mongodb-test' (no source) key")
+	}
+}
+
+// TestBuildMCPServers_DataStores_MultiURI_CollisionHashFallback:
+// 边缘 case — 同 host 不同 port,host 抽取的 sourceID 撞名,
+// 加 URI hash 短前缀兜底。
+func TestBuildMCPServers_DataStores_MultiURI_CollisionHashFallback(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "test"}},
+		Infrastructure: config.Infrastructure{
+			DataStores: []config.DataStore{{
+				Type: "mongodb", Enabled: true,
+				Endpoints: []config.DataStoreEndpoint{
+					{Env: "test", URI: "mongodb://10.0.0.1:27017/?..."},
+					{Env: "test", URI: "mongodb://10.0.0.1:27018/?..."},
+				},
+			}},
+		},
+	}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(_ string) string { return "" })
+
+	// 第一条 sourceID = 10-0-0-1
+	if _, ok := servers["mongodb-10-0-0-1-test"]; !ok {
+		t.Errorf("expected first source 'mongodb-10-0-0-1-test', got: %v", keysOf(servers))
+	}
+	// 第二条同 host 撞名,sourceID = 10-0-0-1-<hash6>
+	found := false
+	for k := range servers {
+		if strings.HasPrefix(k, "mongodb-10-0-0-1-") && strings.HasSuffix(k, "-test") && k != "mongodb-10-0-0-1-test" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected second collision-fallback key 'mongodb-10-0-0-1-<hash6>-test', got: %v", keysOf(servers))
+	}
+}
+
+// TestBuildMCPServers_DataStores_Kafka:kafka MCP(@confluentinc/mcp-confluent)注册验证。
+// 用 npx 零安装,跟其它 7 家一致;Confluent MCP 没内置 read-only flag,靠 --block-tools 黑名单
+// 禁所有 mutative 工具(kafkaMutativeTools 列表)守护"全只读"安全契约。
+func TestBuildMCPServers_DataStores_Kafka(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "test"}},
+		Infrastructure: config.Infrastructure{
+			DataStores: []config.DataStore{{
+				Type: "kafka", Enabled: true,
+				Endpoints: []config.DataStoreEndpoint{
+					{Env: "test", Brokers: "broker1.test:9092,broker2.test:9092"},
+				},
+			}},
+		},
+	}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(_ string) string { return "" })
+
+	mcp, ok := servers["kafka-test"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected 'kafka-test' registered, got: %v", keysOf(servers))
+	}
+	if mcp["command"] != "npx" {
+		t.Errorf("kafka command should be 'npx', got: %v", mcp["command"])
+	}
+	args := mcp["args"].([]any)
+	if len(args) < 4 || args[0] != "-y" || args[1] != "@confluentinc/mcp-confluent" {
+		t.Errorf("kafka args should start with [-y, @confluentinc/mcp-confluent, ...], got: %v", args)
+	}
+	// 验证 --block-tools 把所有 mutative tools 都禁了(读 kafkaMutativeTools 全部 18 个都该在 list 里)
+	blockToolsIdx := -1
+	for i, a := range args {
+		if s, ok := a.(string); ok && s == "--block-tools" {
+			blockToolsIdx = i
+			break
+		}
+	}
+	if blockToolsIdx < 0 || blockToolsIdx+1 >= len(args) {
+		t.Fatalf("kafka args should contain '--block-tools <csv>', got: %v", args)
+	}
+	blockCSV, _ := args[blockToolsIdx+1].(string)
+	for _, mut := range kafkaMutativeTools {
+		if !strings.Contains(blockCSV, mut) {
+			t.Errorf("kafka --block-tools must contain mutative tool %q to enforce read-only,got: %s", mut, blockCSV)
+		}
+	}
+	// env:用 BOOTSTRAP_SERVERS(Confluent MCP 标准 client property 名),不带 KAFKA_MCP_ 前缀
+	env := envOf(servers["kafka-test"])
+	if env["BOOTSTRAP_SERVERS"] != "broker1.test:9092,broker2.test:9092" {
+		t.Errorf("kafka BOOTSTRAP_SERVERS env wrong: %v", env)
+	}
+}
+
+// TestBuildMCPServers_DataStores_Kafka_MultiCluster:kafka 多 cluster 也走 dedup-by-URI
+// (用 brokers 字段做 dedup key),不同 broker 列表注册成多个 MCP。
+func TestBuildMCPServers_DataStores_Kafka_MultiCluster(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "test"}},
+		Infrastructure: config.Infrastructure{
+			DataStores: []config.DataStore{{
+				Type: "kafka", Enabled: true,
+				Endpoints: []config.DataStoreEndpoint{
+					{Env: "test", Brokers: "kafka-commerce.test:9092"},
+					{Env: "test", Brokers: "kafka-user.test:9092"},
+				},
+			}},
+		},
+	}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(_ string) string { return "" })
+
+	for _, k := range []string{"kafka-kafka-commerce-test", "kafka-kafka-user-test"} {
+		if _, ok := servers[k]; !ok {
+			t.Errorf("expected multi-cluster kafka %q, got: %v", k, keysOf(servers))
+		}
+	}
+	if _, ok := servers["kafka-test"]; ok {
+		t.Errorf("multi-cluster kafka should NOT have 'kafka-test' (no source) fallback")
+	}
+}
+
+// TestBuildMCPServers_DataStores_RabbitMQ:rabbitmq MCP(AWS amq-mcp-server-rabbitmq)注册验证。
+// 用 uvx 启动(零安装),默认只读(不传 --allow-mutative-tools),凭据落 args(已知 trade-off,同 redis/pg)。
+func TestBuildMCPServers_DataStores_RabbitMQ(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "test"}},
+		Infrastructure: config.Infrastructure{
+			DataStores: []config.DataStore{{
+				Type: "rabbitmq", Enabled: true,
+				Endpoints: []config.DataStoreEndpoint{
+					{Env: "test", URL: "amqp://rmq:rpw@rmq.test.example.com:5672/"},
+				},
+			}},
+		},
+	}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(_ string) string { return "" })
+
+	mcp, ok := servers["rabbitmq-test"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected 'rabbitmq-test' registered, got: %v", keysOf(servers))
+	}
+	if mcp["command"] != "uvx" {
+		t.Errorf("rabbitmq command should be 'uvx', got: %v", mcp["command"])
+	}
+	args := mcp["args"].([]any)
+	if len(args) == 0 || args[0] != "amq-mcp-server-rabbitmq@latest" {
+		t.Errorf("rabbitmq first arg should be 'amq-mcp-server-rabbitmq@latest', got: %v", args)
+	}
+	// 必须不含 --allow-mutative-tools(默认只读才是项目契约)
+	for _, a := range args {
+		if a == "--allow-mutative-tools" {
+			t.Errorf("rabbitmq MCP must default to read-only,禁止传 --allow-mutative-tools")
+		}
+	}
+	// 凭据 / host / port 都该在 args 里
+	joined := fmt.Sprint(args...)
+	for _, want := range []string{"rmq.test.example.com", "5672", "rmq", "rpw"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("rabbitmq args should contain %q, got: %v", want, args)
+		}
+	}
+}
+
+// TestBuildMCPServers_DataStores_RabbitMQ_MultiCluster:rabbitmq 多 cluster dedup-by-URL。
+func TestBuildMCPServers_DataStores_RabbitMQ_MultiCluster(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "test"}},
+		Infrastructure: config.Infrastructure{
+			DataStores: []config.DataStore{{
+				Type: "rabbitmq", Enabled: true,
+				Endpoints: []config.DataStoreEndpoint{
+					{Env: "test", URL: "amqp://u:p@rmq-commerce.test:5672/"},
+					{Env: "test", URL: "amqp://u:p@rmq-user.test:5672/"},
+				},
+			}},
+		},
+	}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(_ string) string { return "" })
+
+	for _, k := range []string{"rabbitmq-rmq-commerce-test", "rabbitmq-rmq-user-test"} {
+		if _, ok := servers[k]; !ok {
+			t.Errorf("expected multi-cluster rabbitmq %q, got: %v", k, keysOf(servers))
+		}
+	}
+}
+
+// TestBuildMCPServers_DataStores_DerivedSourceID 直接单测 deriveSourceID
+// 几个典型 URI 形态(域名 / IP / 凭据 / replica set / 异常)。
+func TestBuildMCPServers_DataStores_DerivedSourceID(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"mongodb://mongo-commerce.test.example.com:27017/?...", "mongo-commerce"},
+		{"mongodb://user:pass@mongo-user.test:27017/?...", "mongo-user"},
+		{"mongodb://10.0.0.1:27017/?...", "10-0-0-1"},
+		{"mongodb://a.dc1,b.dc1,c.dc1/?replicaSet=rs", "a-dc1"},
+		{"postgres://u:p@pg-master.test/db", "pg-master"},
+		{"redis://:rpw@10.0.0.3:6379/0", "10-0-0-3"},
+		{"https://chu:chpw@10.0.0.6:8443/analytics", "10-0-0-6"},
+	}
+	for _, c := range cases {
+		got := deriveSourceID(c.in)
+		if got != c.want {
+			t.Errorf("deriveSourceID(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// 异常 URI(完全无法抽 host)应 fallback 到 h- + hash
+	bad := deriveSourceID("@!#$%")
+	if !strings.HasPrefix(bad, "h-") {
+		t.Errorf("deriveSourceID for invalid URI should fallback to h-<hash>, got %q", bad)
+	}
+}
+
 // TestBuildMCPServers_DataStores_CredsOverridesEndpoints 验证 install creds 优先于 endpoints:
 // 用户在 wizard 显式覆盖了某 env 的连接串(env-vars 模式),应以 wizard 输入为准,
 // 不要被老 yaml endpoints 的值覆盖。
@@ -678,6 +949,68 @@ func TestNormalizeMongoURI(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			got := normalizeMongoURI(c.in)
+			if got != c.want {
+				t.Errorf("\n  in:   %q\n  got:  %q\n  want: %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+func TestEnsureDirectConnection(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "用户实际场景:单节点 mongod 8.x → 补 directConnection 绕 SDAM wire 27 bug",
+			in:   "mongodb://root:pass@host:27017/db?authSource=admin",
+			want: "mongodb://root:pass@host:27017/db?authSource=admin&directConnection=true",
+		},
+		{
+			name: "无 query → ? 起头加",
+			in:   "mongodb://u:p@host:27017",
+			want: "mongodb://u:p@host:27017?directConnection=true",
+		},
+		{
+			name: "无 userinfo 但单 host → 仍补(driver bug 与认证无关)",
+			in:   "mongodb://host:27017/db",
+			want: "mongodb://host:27017/db?directConnection=true",
+		},
+		{
+			name: "mongodb+srv:// → 不动(SRV DNS 发现多端点)",
+			in:   "mongodb+srv://u:p@cluster.example.com/db?authSource=admin",
+			want: "mongodb+srv://u:p@cluster.example.com/db?authSource=admin",
+		},
+		{
+			name: "多 host(逗号分隔)→ 不动(directConnection 会让 driver 忽略其他 member)",
+			in:   "mongodb://u:p@h1:27017,h2:27017,h3:27017/db?authSource=admin",
+			want: "mongodb://u:p@h1:27017,h2:27017,h3:27017/db?authSource=admin",
+		},
+		{
+			name: "用户显式 replicaSet= → 不动(尊重 SDAM 意图)",
+			in:   "mongodb://u:p@host:27017/db?replicaSet=rs0&authSource=admin",
+			want: "mongodb://u:p@host:27017/db?replicaSet=rs0&authSource=admin",
+		},
+		{
+			name: "已有 directConnection= → 不动(无论值)",
+			in:   "mongodb://u:p@host:27017/db?directConnection=false",
+			want: "mongodb://u:p@host:27017/db?directConnection=false",
+		},
+		{
+			name: "空串 → 原样",
+			in:   "",
+			want: "",
+		},
+		{
+			name: "密码含 @ + 多 host → 不动(LastIndex @ 找到真 host 起点也不补)",
+			in:   "mongodb://user:p@ss@h1:27017,h2:27017/db",
+			want: "mongodb://user:p@ss@h1:27017,h2:27017/db",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := ensureDirectConnection(c.in)
 			if got != c.want {
 				t.Errorf("\n  in:   %q\n  got:  %q\n  want: %q", c.in, got, c.want)
 			}

@@ -17,7 +17,9 @@ description: 通过环境动态查询 Redis 数据。先通过 routing 获取环
 {{- end}}
 3. 解析配置中的 Redis 连接信息（host/port，必要时 password）。
 4. **工具选用顺序**：
-   - **优先 mcp tool**：本系统每个 env 已预注册 `redis-<env>`(列工具时找名字带 `redis-<env>` 的)。直接 `tool_use` 调,免手动连接串/凭证。
+   - **优先 mcp tool**:本系统按 URI dedup 在每个 env 注册 redis MCP。**列工具看注册了几个 source**:
+     - 只 1 个 `redis-<env>`(单 cluster,典型)→ 直接 `tool_use` 调那个。
+     - 多个 `redis-<source>-<env>`(多 cluster)→ **必须查 routing 的 `references/service-to-datastore-source.yaml`** 拿 `service_routing.data_stores.redis.<service>` 对应 source,只调 `redis-<对应 source>-<env>`,**禁止瞎选**。
    - **mcp 不可用** → fallback **redis-cli**(mac/linux 普及)。
    - **redis-cli 也没装** → fallback **Python redis-py**。
 5. 执行查询并返回证据：key、value 摘要、TTL、命中情况。

@@ -282,7 +282,7 @@ func buildCodexRootSkillMD(wsRoot string, ctx *Context, agentName string) (strin
 	sb.WriteString("5. **多轮承继**:上轮 prod 服务 5xx,本轮\"那 dev 呢\" → 保持 service+阶段只换 env;**用户显式换话题**才丢上下文。\n\n")
 
 	sb.WriteString("## 排障入口\n\n")
-	sb.WriteString("排障关键词(`5xx / 报错 / 慢 / 不通 / 突增 / 失败 / 卡住 / 排查 / 故障 / 定位 / 为什么`) → 第一个 Read `incident-investigator/SKILL.md`(6 步主线,会再编排其它 skill)。\n\n")
+	sb.WriteString("排障关键词(`5xx / 报错 / 慢 / 不通 / 突增 / 失败 / 卡住 / 排查 / 故障 / 定位 / 为什么`) → 第一个 Read `incident-investigator/SKILL.md`(7 步主线含 Step 7 沉淀,会再编排其它 skill)。\n\n")
 	sb.WriteString("简单查询(`prod grafana 地址 / dev nacos / 服务在哪个分支`) → 第一个 Read `routing/SKILL.md` 直接给映射答案。\n\n")
 
 	sb.WriteString("## 输出形态\n\n")

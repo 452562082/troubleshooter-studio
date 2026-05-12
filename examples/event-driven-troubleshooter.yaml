@@ -10,7 +10,7 @@
 #   - trace 链路断在 MQ 边界(得按 message_id 串)
 #   - 失败重试/死信队列是核心诊断维度
 #   - 机器人需要会查 MQ topic 的积压量 / 消费组滞后
-# tshoot 的 kafka-runtime-query / rocketmq-runtime-query skill 就是为此设计。
+# tshoot 的 kafka-runtime-query / rabbitmq-runtime-query skill 就是为此设计。
 
 system:
   id: async-commerce

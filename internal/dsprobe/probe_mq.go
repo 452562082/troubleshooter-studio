@@ -1,6 +1,6 @@
 package dsprobe
 
-// 消息队列(Kafka / RocketMQ / RabbitMQ)目前只 TCP / 协议握手验证可达性 ——
+// 消息队列(Kafka / RabbitMQ)目前只 TCP / 协议握手验证可达性 ——
 // SDK 重(kafka-go / rabbitmq-amqp091)、SASL/PLAIN 鉴权细节多;先做基础探活,
 // 用户后续真要验证账密再补完整 metadata 请求。
 
@@ -37,33 +37,6 @@ func probeKafka(f map[string]string) (bool, string, error) {
 		return false, "", lastErr
 	}
 	return false, "", errors.New("所有 broker 都不通")
-}
-
-func probeRocketMQ(f map[string]string) (bool, string, error) {
-	srv := strings.TrimSpace(f["namesrv"])
-	if srv == "" {
-		return false, "", errors.New("缺 namesrv")
-	}
-	srv = strings.NewReplacer(";", ",", " ", "").Replace(srv)
-	parts := splitCSV(srv)
-	var lastErr error
-	for _, p := range parts {
-		host, port, err := splitHostPort(p, "9876")
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), probeTimeout); err == nil {
-			_ = conn.Close()
-			return true, fmt.Sprintf("TCP 通 %s", host+":"+port), nil
-		} else {
-			lastErr = err
-		}
-	}
-	if lastErr != nil {
-		return false, "", lastErr
-	}
-	return false, "", errors.New("所有 namesrv 都不通")
 }
 
 // probeRabbitMQ 不止 TCP dial:发完 AMQP 协议头("AMQP\x00\x00\x09\x01")再读响应,

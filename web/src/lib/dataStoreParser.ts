@@ -1,7 +1,7 @@
 // dataStoreParser —— 纯函数:从配置中心 / kuboard ConfigMap 拉到的原文里启发式识别数据层组件配置块。
 //
 // 暴露:
-//   - DSMatcher / DS_MATCHERS         redis/mongodb/mysql/pg/es/kafka/rocketmq/rabbitmq/ck 启发式
+//   - DSMatcher / DS_MATCHERS         redis/mongodb/mysql/pg/es/kafka/rabbitmq/ck 启发式
 //   - parseConfigContent(text, fmt)   yaml / json / properties / k8s-env-flat / yaml-multi 五种格式分发
 //   - findKey / pickConnection / str / extractPort   matcher 内部用的小工具
 //
@@ -177,18 +177,6 @@ export const DS_MATCHERS: DSMatcher[] = [
         user: str(c.username) || str(c.sasl_username) || '',
         pass: str(c.password) || str(c.sasl_password) || '',
       }
-    },
-  },
-  {
-    dsKey: 'rocketmq',
-    matchYAML: (r) => {
-      const block = findKey(r, ['rocketmq', 'rocket_mq', 'rocketMQ'])
-      const c = pickConnection(block, ['namesrv', 'name_srv', 'nameserver', 'nameServer', 'servers', 'host'])
-      if (!c) return null
-      const namesrv = str(c.namesrv) || str(c.name_srv) || str(c.nameserver) || str(c.nameServer) || str(c.servers) ||
-                      (str(c.host) ? `${c.host}${c.port ? ':' + c.port : ''}` : '')
-      if (!namesrv) return null
-      return { namesrv }
     },
   },
   {

@@ -17,7 +17,9 @@ description: 通过环境动态查询 MySQL 数据。先通过 routing 获取环
 {{- end}}
 3. 解析配置中的 MySQL 连接信息（host/port/database/user/password 或 JDBC URL）。
 4. **工具选用顺序**：
-   - **优先 mcp tool**：本系统每个 env 已预注册 `mysql-<env>`(列工具时找名字带 `mysql-<env>` 的)。直接 `tool_use` 调,免手动连接串。
+   - **优先 mcp tool**:本系统按 URI dedup 在每个 env 注册 mysql MCP。**列工具看注册了几个 source**:
+     - 只 1 个 `mysql-<env>`(单 cluster,典型)→ 直接 `tool_use` 调那个。
+     - 多个 `mysql-<source>-<env>`(多 cluster)→ **必须查 routing 的 `references/service-to-datastore-source.yaml`** 拿 `service_routing.data_stores.mysql.<service>` 对应 source,只调 `mysql-<对应 source>-<env>`,**禁止瞎选**。
    - **mcp 不可用** → fallback **mysql CLI**(mac/linux 普及)。
    - **CLI 也没装** → fallback **Python pymysql**。
 5. 执行查询并返回证据：表名、SQL、命中行数、关键字段样例。

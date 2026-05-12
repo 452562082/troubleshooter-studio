@@ -97,7 +97,9 @@ go:lint:
 # ── Go test:build + test -race -cover ──────────────────────────────────
 go:test:
   stage: test
-  image: golang:1.25
+  # 锁定 patch 版本(避免 cache 锁住老 patch + 跟 go.mod `go 1.25.10` 一致)。
+  # 1.25.10 修了 7 个 stdlib CVE(GO-2026-4870/4918/4946/4947/4971 等),govulncheck 干净。
+  image: golang:1.25.10
   interruptible: true
   cache:
     # prefix v2-rw:配合 GOFLAGS=-modcacherw 重建 cache,旧的 read-only 缓存换掉,

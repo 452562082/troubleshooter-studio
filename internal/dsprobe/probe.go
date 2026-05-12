@@ -12,7 +12,7 @@
 //	mongodb       → probe_mongo.go      mongo-driver Connect + Ping()         (含 SCRAM auth)
 //	elasticsearch → probe_es.go         HTTP GET / + basic auth
 //	clickhouse    → probe_clickhouse.go HTTP GET /?query=SELECT+1 (验账密)
-//	kafka/rocketmq/rabbitmq → probe_mq.go  TCP/AMQP 握手(SDK 重,先做基础)
+//	kafka/rabbitmq → probe_mq.go  TCP/AMQP 握手(SDK 重,先做基础)
 //	通用 HTTP probe (env / Grafana 等) → probe_http.go
 //
 // 全部 5 秒超时。失败返回人话错误(给 UI 展示)。
@@ -66,8 +66,6 @@ func probe(req Request) (bool, string, error) {
 		return probeElasticsearch(req.Fields)
 	case "kafka":
 		return probeKafka(req.Fields)
-	case "rocketmq":
-		return probeRocketMQ(req.Fields)
 	case "rabbitmq":
 		return probeRabbitMQ(req.Fields)
 	case "clickhouse":

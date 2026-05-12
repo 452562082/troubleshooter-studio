@@ -1609,7 +1609,7 @@ void _autoMatchKuboardLocation; void _autoFillKuboardSelections
 
 // ── Step 7: 可观测性 + 数据层 ──
 const observabilityOptions = ['grafana', 'loki', 'prometheus', 'jaeger', 'elk', 'skywalking', 'tempo', 'k8s_runtime'] as const
-const dataStoreOptions = ['redis', 'mongodb', 'elasticsearch', 'mysql', 'postgresql', 'kafka', 'rocketmq', 'rabbitmq', 'clickhouse'] as const
+const dataStoreOptions = ['redis', 'mongodb', 'elasticsearch', 'mysql', 'postgresql', 'kafka', 'rabbitmq', 'clickhouse'] as const
 
 const enabledObservability = reactive<Record<string, boolean>>({
   ...Object.fromEntries(observabilityOptions.map(k => [k, false])),
@@ -1750,12 +1750,6 @@ const DS_TOOL_SPECS: ToolSpec[] = [
       { key: 'brokers', label: 'Brokers', secret: false, envVar: (e) => `KAFKA_BROKERS_${e.toUpperCase()}`, placeholder: 'host1:9092,host2:9092' },
       { key: 'user', label: 'SASL 用户名', secret: false, envVar: (e) => `KAFKA_USER_${e.toUpperCase()}`, optional: true },
       { key: 'pass', label: 'SASL 密码', secret: true, envVar: (e) => `KAFKA_PASS_${e.toUpperCase()}`, optional: true },
-    ],
-  },
-  {
-    key: 'rocketmq', label: 'RocketMQ', description: '阿里系消息中间件',
-    fields: [
-      { key: 'namesrv', label: 'Name Server', secret: false, envVar: (e) => `ROCKETMQ_NAMESRV_${e.toUpperCase()}`, placeholder: 'host1:9876;host2:9876' },
     ],
   },
   {
@@ -2496,7 +2490,7 @@ onMounted(() => {
 
 // ── Skills whitelist derivation ──
 // 数据层 enabledDataStores 的 key 跟 skill 目录名不是 1:1 对应:特例 elasticsearch → es-runtime-query。
-// 其他类型(redis/mongodb/mysql/postgresql/kafka/rocketmq/rabbitmq/clickhouse)就是 <key>-runtime-query。
+// 其他类型(redis/mongodb/mysql/postgresql/kafka/rabbitmq/clickhouse)就是 <key>-runtime-query。
 const DS_SKILL_NAME: Record<string, string> = {
   elasticsearch: 'es-runtime-query',
 }

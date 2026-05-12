@@ -36,7 +36,6 @@ var (
 	reGoSQL          = regexp.MustCompile(`(?:gorm\.Open|sql\.Open)\(\s*(?:mysql\.|postgres\.|"mysql"|"postgres")`)
 	reGoKafka        = regexp.MustCompile(`(?:kafka\.New|sarama\.New)`)
 	reGoES           = regexp.MustCompile(`(?:elasticsearch\.NewClient|elastic\.NewClient|opensearch)`)
-	reGoRocketMQ     = regexp.MustCompile(`(?:rocketmq\.New|primitive\.NewMessage)|"github\.com/apache/rocketmq-client-go`)
 	reGoRabbitMQ     = regexp.MustCompile(`(?:amqp\.Dial|streadway/amqp)`)
 	reGoClickHouse   = regexp.MustCompile(`(?:clickhouse\.Open|ClickHouse\{|"github\.com/ClickHouse/clickhouse-go)`)
 )
@@ -116,9 +115,6 @@ func scanGoDeps(repoPath string, include []string) ([]DownstreamCall, []DataStor
 		}
 		if reGoES.MatchString(text) {
 			usages = append(usages, DataStoreUsage{Type: "elasticsearch", Driver: "go-es", Callsite: rel})
-		}
-		if reGoRocketMQ.MatchString(text) {
-			usages = append(usages, DataStoreUsage{Type: "rocketmq", Driver: "rocketmq-client-go", Callsite: rel})
 		}
 		if reGoRabbitMQ.MatchString(text) {
 			usages = append(usages, DataStoreUsage{Type: "rabbitmq", Driver: "amqp091/streadway", Callsite: rel})

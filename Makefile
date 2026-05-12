@@ -32,8 +32,8 @@ BIN     ?= bin/tshoot
 WEB_SRC := web
 WEB_DIST := internal/webui/dist
 
-# 多平台矩阵(可按需扩)
-PLATFORMS := darwin/amd64 darwin/arm64 linux/amd64 linux/arm64
+# 多平台矩阵(可按需扩)。windows 编译时 release recipe 自动加 .exe 后缀。
+PLATFORMS := darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64
 
 .PHONY: default
 default: build
@@ -70,7 +70,9 @@ release: web
 	@mkdir -p dist/bin
 	@for p in $(PLATFORMS); do \
 	  os=$${p%/*}; arch=$${p#*/}; \
-	  out="dist/bin/tshoot-$(VERSION)-$$os-$$arch"; \
+	  ext=""; \
+	  if [ "$$os" = "windows" ]; then ext=".exe"; fi; \
+	  out="dist/bin/tshoot-$(VERSION)-$$os-$$arch$$ext"; \
 	  echo "  → $$out"; \
 	  GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 \
 	    go build -ldflags "$(LDFLAGS)" -o "$$out" ./cmd/tshoot || exit 1; \

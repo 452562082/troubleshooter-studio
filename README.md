@@ -63,12 +63,19 @@ curl -fsSL -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
 
 ### CLI(macOS / Linux / Windows)
 
-从 GitLab Release 按平台下 `tshoot-vX.Y.Z-<os>-<arch>`,然后:
+从 GitLab Release 按平台下 `tshoot-vX.Y.Z-<os>-<arch>`(Windows 自带 `.exe` 后缀),然后:
 
 ```bash
+# macOS / Linux
 chmod +x tshoot-vX.Y.Z-darwin-arm64
 sudo mv tshoot-vX.Y.Z-darwin-arm64 /usr/local/bin/tshoot
 tshoot --help                       # 看子命令
+```
+
+```powershell
+# Windows(PowerShell):放到 PATH 里的目录,改名 tshoot.exe
+Move-Item tshoot-vX.Y.Z-windows-amd64.exe C:\Users\<you>\bin\tshoot.exe
+tshoot --help
 ```
 
 ### 从源码构建

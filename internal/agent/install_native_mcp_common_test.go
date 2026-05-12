@@ -1003,9 +1003,9 @@ func TestEnsureDirectConnection(t *testing.T) {
 			want: "",
 		},
 		{
-			name: "密码含 @ + 多 host → 不动(LastIndex @ 找到真 host 起点也不补)",
-			in:   "mongodb://user:p@ss@h1:27017,h2:27017/db",
-			want: "mongodb://user:p@ss@h1:27017,h2:27017/db",
+			name: "密码含 @ + 单 host → LastIndex @ 找到真 host 起点,正常补",
+			in:   "mongodb://user:p@ss@host:27017/db",
+			want: "mongodb://user:p@ss@host:27017/db?directConnection=true",
 		},
 	}
 	for _, c := range cases {

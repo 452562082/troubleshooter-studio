@@ -79,6 +79,13 @@ Step 4 沿依赖图追下游
    │           no_downstream_in_map   → 依赖图没填,confidence 锁中
    ▼
 Step 5 多向交叉(按 "5 维证据表" 选维度,最低 3 维起步)
+   │      ├─ ★ 通用输出契约:每个子段输出 evidence_seen + missing_critical_evidence
+   │      │   - critical 判定:缺了它差分诊断里至少 1 候选 explains_all_obs 会翻 no
+   │      │   - 非空 → Step 6 入口强制 ASK_USER 三分支:
+   │      │     (a) 帮取到 → 加入 evidence_seen   |
+   │      │     (b) unavailable → confidence 上限锁中 + 快报明示风险
+   │      │     (c) 用户主动跳 → confidence 上限锁低 + 快报明示"未取证据"
+   │      │   - 跟 Step 6 差分诊断闭环(全候选 explains_all_obs=no → 反推补 missing)
    │      ├─ 5.1 trace + log + metric 三向
    │      │     └─ scripts/triangulate.py(客观对齐,不让 LLM 心算 correlation)
    │      │        输出 confidence: high/medium/low + consensus_service(直接照搬,不主观推)
@@ -98,9 +105,10 @@ Step 6 根因 + 处置建议
    │      ├─ ★ 候选假设差分诊断(前置必跑,所有问题类型通用)
    │      │   - 列 ≥2 个候选根因(推荐 3),至少 1 个与初始直觉方向相反(防确认偏差)
    │      │   - 每个候选给 supports / refutes / explains_all_obs(yes/no) / verdict
-   │      │   - 全部 explains_all_obs=no → confidence 锁低 + 列 missing_evidence
+   │      │   - 全部 explains_all_obs=no → 反推到 Step 5 对应子段补 missing_critical_evidence
+   │      │     走 Step 5 通用契约的 ASK_USER 三分支(a/b/c),不允许直接锁低收尾
    │      │   - 仅 1 个 confirmed + explains_all_obs=yes → 取该候选作为根因
-   │      │   - 多个 confirmed 决断不了 → confidence 锁中 + 列"区分最小补证"
+   │      │   - 多个 confirmed 决断不了 → confidence 锁中 + 列"区分最小补证"(同 missing_critical_evidence 格式)
    │      │   - 跳过条件:Step 1.3 known-errors 命中且证据完全吻合 typical_cause 不矛盾
    │      ├─ 置信度量化(高/中/低,按维度数 + 时间轴 + 依赖图打分)
    │      ├─ 反偏科兜底:数据/逻辑类只查日志+指标 → confidence 锁低
@@ -290,6 +298,7 @@ known-errors.local.yaml
 | **取证执行** | baseline 24h offset 必比 | 防把正常波动当突变 |
 | **取证执行** | trace 拉不到先看采样率 | 防把 "采样率低" 误判成 "trace 不存在" |
 | **取证执行** | umbrella git pull 规则 | 防代码定位看到 main HEAD 不是部署 commit |
+| **取证执行** | **★ 子查询必输出 `missing_critical_evidence` + Step 6 入口 ASK_USER** | 防 LLM 用"看到的"凑故事忽略"应看未看"的证据;跟差分诊断对偶闭环 |
 | **结论** | **★ 差分诊断 ≥2 候选 + 反证 + explains_all_obs** | **防"找证据凑单一假设",至少 1 候选必须与初始直觉相反防确认偏差** |
 | **结论** | 反偏科兜底 | 数据/逻辑类只查日志+指标 → confidence 锁低 |
 | **结论** | 推 stub 必须 3 选 1 实锤 | 防 "duration 短 + 0 db span" 误判 stub |

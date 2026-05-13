@@ -191,6 +191,79 @@ grep "<request_id|entity_id|trace_id>" <gateway_log> \
 
 ## Step 6:根因标注 + 处置建议
 
+### 候选假设差分诊断(出根因前必跑,所有问题类型通用)
+
+LLM 排障最大盲区是 **"找证据支持单一假设"** —— 拿到 3-4 个证据就拼自洽故事,
+不去想"还有什么别的解释能套上这些证据"。强制差分诊断 = 医学式
+**列候选 → 找反证 → 排除剩下**,本节是 Step 6 一切其它判断(置信度/反偏科/处置建议)的**前置必跑**。
+
+**跳过条件**(满足才跳过):
+Step 1.3 known-errors 命中,且 Step 5 维度证据跟 pattern 的 `typical_cause` 完全吻合不矛盾 → 信任速查表。
+
+**强制约束**:
+
+- 列 **≥2 个候选根因**(推荐 3 个),每个必须是**合理推断,不允许稻草人凑数**
+- **至少 1 个候选必须与初始直觉方向相反**(防确认偏差):
+  - 推 "下游 timeout" → 对偶候选必含 "本服务自身慢"
+  - 推 "代码 bug" → 对偶候选必含 "数据/配置异常导致代码进错分支"
+  - 推 "服务是 stub" → 对偶候选必含 "业务校验/鉴权早返回"
+- 每个候选给 4 个字段:
+  - `supports`: 哪些观察支持它
+  - `refutes`: 哪些观察否定它(空写 `none`)
+  - `explains_all_obs`: 能解释**所有**已观察现象 `yes/no`
+  - `verdict`: `confirmed` / `rejected` / `undecided`
+
+**结论规则**(直接绑死 confidence):
+
+- 所有候选 `explains_all_obs: no` → **confidence 锁低** + 列 "无法解释的现象" 作为 `missing_evidence`,
+  让用户决定要不要继续取证;**禁止给改 prod 命令**
+- 仅 1 个 `confirmed` 且 `explains_all_obs: yes` → 该候选作为根因,confidence 按下方量化规则评
+- 多个 `confirmed` 二选一无法决断 → **confidence 锁中** + 列出 "区分两者所需的最小补证"
+
+**例**(importPgcVideos case):
+
+```yaml
+observations:
+  - duration=0.286ms
+  - 0 mongo span
+  - trace.app.biz.code=0
+  - 网关 response.results[0].error="parent.title 超过 200 字"
+
+hypotheses:
+  - name: "服务是 stub / 空实现"
+    supports: [duration<1ms, 0 mongo span]
+    refutes:
+      - prod env + 镜像 tag v2.3.1 非 stub-mock(查 deployment manifest)
+      - response 有具体 results[] 业务错误,不是 stub 的 mock 返回形状
+    explains_all_obs: no   # 不能解释 results 数组里的业务错误
+    verdict: rejected
+
+  - name: "业务参数校验早返回"   # ← 与初始 "stub" 直觉相反的对偶候选
+    supports:
+      - duration 极短(参数校验前就 return,没进业务逻辑)
+      - 0 mongo span(没写 db)
+      - results[0].error 明确指出校验失败原因
+    refutes: none
+    explains_all_obs: yes
+    verdict: confirmed
+
+  - name: "鉴权/限流挡住"
+    supports: [duration<1ms]
+    refutes:
+      - HTTP 200(鉴权挡是 401/403,限流挡是 429)
+      - response 有完整业务结构,不是鉴权/限流的简单 body
+    explains_all_obs: no
+    verdict: rejected
+
+conclusion: 业务参数校验早返回(parent.title 超 200 字)
+            → 走 next_actions 拉每条 request 的 title 长度对账,
+              查规则是否最近改过(200 字限制是不是新加)
+```
+
+**为什么放在置信度量化之前**:置信度的"维度数"打分只回答"看了多少",
+差分诊断回答"看到的能不能排除其它解释" —— 后者是准确性的真护栏,前者是覆盖率的代理指标。
+没经过差分就给 confidence=high 是把"自洽故事"当"已验证结论"。
+
 ### 置信度量化(必须按规则判)
 
 | 等级 | 条件 |

@@ -31,6 +31,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,13 +55,21 @@ func CfgUsesKafkaMCP(cfg *config.SystemConfig) bool {
 	return false
 }
 
-// EnsureKafkaMCPInstalled 保证 kafka-mcp-server binary 在本机可执行。
+// EnsureKafkaMCPInstalled 保证 kafka-mcp-server binary 在本机可执行,返回**绝对路径**给
+// buildKafka 写进 ~/.claude.json 的 command 字段。
+//
+// 关键:返回**绝对路径**(不是 "kafka-mcp-server" 字面),因为 Claude Code MCP 子进程的 PATH
+// 跟 install 时跑的 shell PATH 不一样 —— mac 桌面 app 启动子进程的 PATH 来自 launchd GUI 默认,
+// 只有 /usr/bin:/bin:/usr/sbin:/sbin,brew prefix(/opt/homebrew/bin)被 strip。install 看到
+// PATH 有 binary 写字面 "kafka-mcp-server",Claude Code 启动时同名找不到 ENOENT 静默挂掉。
+// 这跟 findOpenclawCLI(install_native_openclaw.go,commit e44c74d)修过的是同一个坑。
 //
 // 返回 (binPath, err):
-//   - PATH 命中 → ("kafka-mcp-server", nil)。buildKafka 写 PATH 形式 command。
-//   - cache 命中 → (绝对路径, nil)。buildKafka 写绝对路径。
-//   - 下载成功 → (绝对路径, nil)。同上。
-//   - 下载失败 → ("", err)。调用方打 warn,buildKafka 仍写 PATH 形式(用户后续手动装好后无需重跑 install)。
+//   - PATH 命中 → (LookPath 的绝对路径, nil)
+//   - cache 命中 → (~/.tshoot/bin/kafka-mcp-server-<ver>, nil)
+//   - 下载成功 → 同上
+//   - 失败 → ("", err)。调用方打 warn 给手动指引,buildKafka 回落字面 "kafka-mcp-server"(用户
+//     事后手动装到 PATH 也能直接生效不需要重跑 install)
 //
 // onLog(line):流式日志回调(nil 跳过),给 desktop / CLI 进度展示用。
 func EnsureKafkaMCPInstalled(onLog func(string)) (string, error) {
@@ -68,17 +77,24 @@ func EnsureKafkaMCPInstalled(onLog func(string)) (string, error) {
 	if log == nil {
 		log = func(string) {}
 	}
-	// 1) PATH 探测
+	// 1) PATH 探测 — 返回 LookPath 的绝对路径(p),不是 "kafka-mcp-server" 字面,见函数注释。
 	if p, err := exec.LookPath("kafka-mcp-server"); err == nil {
 		log(fmt.Sprintf("[ok] kafka-mcp-server 已在 PATH:%s", p))
-		return "kafka-mcp-server", nil
+		return p, nil
 	}
-	// 2) 本机 cache 命中
+	// Windows 没实现 zip 自动解压,直接走手动安装路径 — 避免误导用户"自动下载中"然后失败。
+	if runtime.GOOS == "windows" {
+		return "", fmt.Errorf("Windows 不支持自动下载 kafka-mcp-server,请手动安装:\n%s", kafkaMCPInstallHint())
+	}
+	// 2) 本机 cache 命中。文件名带版本号 — bump kafkaMCPVersion 后旧文件不被命中触发重下,
+	// 老 binary 留 ~/.tshoot/bin/ 等定期清(避免 mcp-grafana 早期那种"换策略后孤儿 binary"坑)。
 	cachePath, err := kafkaMCPCachePath()
 	if err != nil {
 		return "", err
 	}
-	if fi, err := os.Stat(cachePath); err == nil && !fi.IsDir() && fi.Mode().Perm()&0o100 != 0 {
+	// 任意 execute bit(0o111)— umask 异常时也能识别已装好的 binary,不为了 owner-only 的吹毛求疵
+	// 强制重下。
+	if fi, err := os.Stat(cachePath); err == nil && !fi.IsDir() && fi.Mode().Perm()&0o111 != 0 {
 		log(fmt.Sprintf("[ok] kafka-mcp-server 已在 cache:%s", cachePath))
 		return cachePath, nil
 	}
@@ -91,45 +107,45 @@ func EnsureKafkaMCPInstalled(onLog func(string)) (string, error) {
 	return cachePath, nil
 }
 
-// kafkaMCPCachePath 返回固定 cache 路径 ~/.tshoot/bin/kafka-mcp-server[.exe]。
+// kafkaMCPCachePath 返回固定 cache 路径 ~/.tshoot/bin/kafka-mcp-server-<ver>[.exe]。
 // 跟 ~/.openclaw 平级,跨 IDE 共享一份 binary,卸载 IDE 不会误删。
+// 文件名带版本号:升级 kafkaMCPVersion 后旧文件 cache miss 自动重下,避免静默用旧版。
 func kafkaMCPCachePath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	name := "kafka-mcp-server"
+	name := "kafka-mcp-server-" + kafkaMCPVersion
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 	}
 	return filepath.Join(home, ".tshoot", "bin", name), nil
 }
 
-// downloadKafkaMCPBinary 从 GitHub Release 拉 tarball/zip 解到 dest。
+// maxKafkaMCPDownloadBytes 限制下载体积上限,防恶意 mirror 重定向到 /dev/urandom 灌爆磁盘。
+// tuannvm v2.0.2 实际 tarball ~5 MiB,200 MiB 留十倍空间应对上游加码 binary 也够用。
+const maxKafkaMCPDownloadBytes = 200 << 20
+
+// downloadKafkaMCPBinary 从 GitHub Release 拉 tarball 解到 dest。
 //
 // URL 模板(参考 release HTML 实际命名,小写 OS):
-//   kafka-mcp-server_<ver-no-v>_<os>_<arch>.tar.gz  (darwin/linux)
-//   kafka-mcp-server_<ver-no-v>_<os>_<arch>.zip      (windows)
 //
-// 内部 tarball 结构:CHANGELOG.md + README.md + kafka-mcp-server[.exe]。
-// 只挑 kafka-mcp-server[.exe] 这一个文件写出去,其它忽略。
+//	kafka-mcp-server_<ver-no-v>_<os>_<arch>.tar.gz  (darwin/linux,Windows zip 走 EnsureKafkaMCPInstalled 上层提前 return)
+//
+// 内部 tarball 结构:CHANGELOG.md + README.md + kafka-mcp-server。
+// 只挑 binary 这一个文件写出去,其它忽略。提取后做 Content-Length 校验防中途截断
+// 写出短 binary 导致下次 cache 命中误用。
+//
+// dest 的 basename 是 "kafka-mcp-server-<version>",但 tarball 内 binary 名是 "kafka-mcp-server"
+// 不带版本,所以匹配走固定常量,不用 filepath.Base(dest)。
 func downloadKafkaMCPBinary(dest string, log func(string)) error {
-	osName := runtime.GOOS // darwin / linux / windows
+	osName := runtime.GOOS // darwin / linux
 	arch := runtime.GOARCH // amd64 / arm64
 	verNoV := strings.TrimPrefix(kafkaMCPVersion, "v")
-	ext := "tar.gz"
-	if osName == "windows" {
-		ext = "zip" // tuannvm 上游 windows 走 zip
-	}
 	url := fmt.Sprintf(
-		"https://github.com/tuannvm/kafka-mcp-server/releases/download/%s/kafka-mcp-server_%s_%s_%s.%s",
-		kafkaMCPVersion, verNoV, osName, arch, ext,
+		"https://github.com/tuannvm/kafka-mcp-server/releases/download/%s/kafka-mcp-server_%s_%s_%s.tar.gz",
+		kafkaMCPVersion, verNoV, osName, arch,
 	)
-	if ext == "zip" {
-		// Windows zip 解压需要 archive/zip,本会话 mac/linux 优先,Windows 用户走文档手动安装路径。
-		// 真有需求再补;手动装 README 链接走 GitHub Release。
-		return fmt.Errorf("Windows zip 自动解压未实现,请走手动安装:%s", url)
-	}
 
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return fmt.Errorf("mkdir cache dir:%w", err)
@@ -145,14 +161,16 @@ func downloadKafkaMCPBinary(dest string, log func(string)) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download status=%d url=%s", resp.StatusCode, url)
 	}
+	// Body 包 LimitReader 防恶意 mirror 无限流量灌爆;tarball 才几 MiB,200 MiB 够 10× 余量。
+	body := io.LimitReader(resp.Body, maxKafkaMCPDownloadBytes)
 
-	gz, err := gzip.NewReader(resp.Body)
+	gz, err := gzip.NewReader(body)
 	if err != nil {
 		return fmt.Errorf("gzip reader:%w", err)
 	}
 	defer gz.Close()
 	tr := tar.NewReader(gz)
-	binName := filepath.Base(dest)
+	const binNameInTar = "kafka-mcp-server" // tarball 内名,不带版本号
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -161,16 +179,17 @@ func downloadKafkaMCPBinary(dest string, log func(string)) error {
 		if err != nil {
 			return fmt.Errorf("tar next:%w", err)
 		}
-		if hdr.Typeflag != tar.TypeReg || filepath.Base(hdr.Name) != binName {
+		if hdr.Typeflag != tar.TypeReg || filepath.Base(hdr.Name) != binNameInTar {
 			continue
 		}
-		// 落盘走 tmp 再 rename,避免半写状态下次探测命中残文件。
-		tmp := dest + ".tmp"
+		// tmp 名加 pid 防并发 install:两个 IDE 同时跑 install 时不会用同一个 tmp 名互相覆盖。
+		tmp := dest + ".tmp." + strconv.Itoa(os.Getpid())
 		f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 		if err != nil {
 			return fmt.Errorf("create %s:%w", tmp, err)
 		}
-		if _, err := io.Copy(f, tr); err != nil {
+		n, err := io.Copy(f, tr)
+		if err != nil {
 			f.Close()
 			os.Remove(tmp)
 			return fmt.Errorf("copy:%w", err)
@@ -179,13 +198,20 @@ func downloadKafkaMCPBinary(dest string, log func(string)) error {
 			os.Remove(tmp)
 			return fmt.Errorf("close %s:%w", tmp, err)
 		}
+		// 校验 tar header 声明的 Size — 防 HTTP 中途截断后 io.Copy 静默返回 nil
+		// (gzip 流被掐断会被 gzip.Reader 报错,但 tar 体被掐成短 binary 不一定能 caught;
+		// 比 header.Size 短 = 截断,删 tmp 报错而不是 rename 上去当好的)。
+		if hdr.Size > 0 && n != hdr.Size {
+			os.Remove(tmp)
+			return fmt.Errorf("truncated download:wrote %d bytes, tar header expects %d", n, hdr.Size)
+		}
 		if err := os.Rename(tmp, dest); err != nil {
 			os.Remove(tmp)
 			return fmt.Errorf("rename:%w", err)
 		}
 		return nil
 	}
-	return fmt.Errorf("tarball 内没找到 %s 文件", binName)
+	return fmt.Errorf("tarball 内没找到 %s 文件", binNameInTar)
 }
 
 // kafkaMCPInstallHint 给用户的手动装机指引(自动下载失败时的 fallback 文案)。

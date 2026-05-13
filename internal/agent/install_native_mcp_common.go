@@ -978,7 +978,8 @@ func (b *mcpBuilder) buildClickHouse(servers map[string]any, ep *config.DataStor
 // 自托管 Apache Kafka 用户只填 brokers,不需要 SASL/TLS 凭据(没填 KAFKA_SASL_* 即关闭)。
 // dedup 跟其它 7 家同款:brokers 字符串作 key,同 brokers 视为同 cluster 共享 1 个 MCP。
 //
-// install 时探测路径:见 CheckKafkaMCPServerAvailable(缺 binary 打 warn 给 brew 指引,不阻塞)。
+// install 时安装路径:见 EnsureKafkaMCPInstalled(PATH 命中用绝对路径 / cache 命中复用 /
+// 缺失自动从 GitHub Release 拉 tarball 到 ~/.tshoot/bin/,失败 warn 不阻塞)。
 func (b *mcpBuilder) buildKafka(servers map[string]any, ep *config.DataStoreEndpoint, sourceID, envID string) {
 	var epBrokers string
 	if ep != nil {

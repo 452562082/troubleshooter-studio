@@ -312,10 +312,16 @@ type MCPBuildOptions struct {
 	// 真值传给后端进程造成无效连接);openclaw 留着等 agent 自决,所以 false。
 	PruneEmpty bool
 
-	// KafkaMCPBinaryPath:kafka-mcp-server binary 路径。install 流程先调
-	// EnsureKafkaMCPInstalled 拿绝对路径(PATH 命中时返回 "kafka-mcp-server" 字面 PATH 形式),
-	// 再传进来 buildKafka 写 command 字段。
-	// 空字符串 = 回落 PATH 形式 "kafka-mcp-server"(用户后续手动装好后无需重跑 install)。
+	// KafkaMCPBinaryPath:kafka-mcp-server binary 绝对路径。
+	//
+	// **隐式契约**:production 调用方(install_native_mcp.go / install_native_openclaw_mcp.go)
+	// 必须先调 EnsureKafkaMCPInstalled 拿绝对路径再传进来。绝对路径关键 — mac launchd GUI
+	// 启动子进程 PATH 不含 brew prefix,字面 "kafka-mcp-server" 找不到 ENOENT 静默挂(同
+	// findOpenclawCLI 修过的坑,commit e44c74d)。
+	//
+	// 空字符串 = 回落 PATH 形式字面 "kafka-mcp-server"。仅两种场景用空:
+	//  (a) ensure 失败 fallback(用户装好后重跑 install 会拿到绝对路径)
+	//  (b) 单元测试只验证 builder 逻辑不验证启动可达性
 	KafkaMCPBinaryPath string
 }
 

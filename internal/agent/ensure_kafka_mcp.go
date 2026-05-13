@@ -14,11 +14,14 @@
 // 策略:跟 mcp-grafana 早期"自动下载"模式同源 —— kafka-mcp-server 是单一用途 binary
 // (不是 uv 那种系统级工具),装哪儿不污染用户系统,适合 install 时**自动拉**。流程:
 //
-//  1. PATH 有 `kafka-mcp-server` → 直接用,什么都不做
-//  2. 我们 cache 目录 `~/.tshoot/bin/kafka-mcp-server` 已存在 → 直接用(下次部署免下载)
-//  3. 否则下载 GitHub Release tarball 解到 `~/.tshoot/bin/` → 用绝对路径
+//  1. PATH 有 `kafka-mcp-server` → 返回 LookPath 绝对路径
+//  2. cache `~/.tshoot/bin/kafka-mcp-server-<ver>` 已存在且可执行 → 复用(下次部署免下载)
+//  3. 否则下载 GitHub Release tarball 解到 `~/.tshoot/bin/kafka-mcp-server-<ver>` → 用绝对路径
 //  4. 下载失败 → warn 给手动安装指引,本次 install 不阻塞(kafka MCP 会启动失败,
 //     但其它 MCP 不受影响)
+//
+// 文件名带 `<ver>` 后缀:bump kafkaMCPVersion 后旧文件自动 cache miss 触发重下,避免静默用旧版。
+// 老版本 binary 留在 ~/.tshoot/bin/ 等定期手动清(参考早期 mcp-grafana 孤儿 binary 教训)。
 package agent
 
 import (

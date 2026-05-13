@@ -1,6 +1,6 @@
 ---
 name: kafka-runtime-query
-description: 通过环境动态查询 Kafka 集群状态。先通过 routing 获取环境映射,优先用预注册的 kafka-<env> mcp tool 直查(CefBoud/kafka-mcp-server,--read-only 强制只读;装机器人前用户需手动 `go install github.com/CefBoud/kafka-mcp-server/cmd/kafka-mcp-server@latest`,不是 npx/uvx 零安装);mcp 不可用时 fallback kafka CLI(kafka-topics.sh / kafka-consumer-groups.sh)。
+description: 通过环境动态查询 Kafka 集群状态。先通过 routing 获取环境映射,优先用预注册的 kafka-<env> mcp tool 直查(tuannvm/kafka-mcp-server,franz-go 纯 Go 无 native deps;装机器人前用户需手动 `brew install tuannvm/mcp/kafka-mcp-server` 或从 GitHub Release 下 binary,不是 npx/uvx 零安装);mcp 不可用时 fallback kafka CLI(kafka-topics.sh / kafka-consumer-groups.sh)。
 ---
 
 # Kafka Runtime Query
@@ -17,21 +17,26 @@ description: 通过环境动态查询 Kafka 集群状态。先通过 routing 获
 {{- end}}
 3. 解析配置中的 Kafka 连接信息(broker 地址列表)。
 4. **工具选用顺序**:
-   - **优先 mcp tool**:本系统按 brokers dedup 在每个 env 注册 kafka MCP(`npx @confluentinc/mcp-confluent`,Confluent 官方 MIT,通过 `--block-tools` 黑名单禁所有 mutative 操作 = 强制只读)。**列工具看注册了几个 source**:
+   - **优先 mcp tool**:本系统按 brokers dedup 在每个 env 注册 kafka MCP(`kafka-mcp-server` binary,tuannvm/kafka-mcp-server,MIT,franz-go 纯 Go)。**列工具看注册了几个 source**:
      - 只 1 个 `kafka-<env>`(单 cluster,典型)→ 直接 `tool_use` 调那个。
      - 多个 `kafka-<source>-<env>`(多 cluster)→ **必须查 routing 的 `references/service-to-datastore-source.yaml`** 拿 `service_routing.data_stores.kafka.<service>` 对应 source,只调 `kafka-<对应 source>-<env>`,**禁止瞎选**。
-   - **mcp 不可用**(npm/node 没装 / 拉包失败) → fallback **kafka CLI**(`kafka-topics.sh` / `kafka-consumer-groups.sh`,Kafka 标准发行版自带)。
+   - **mcp 不可用**(binary 没装 / 没在 PATH) → fallback **kafka CLI**(`kafka-topics.sh` / `kafka-consumer-groups.sh`,Kafka 标准发行版自带)。
    - **CLI 也没装** → fallback Python `kafka-python` 包脚本。
 5. 返回证据:topic 列表、partition 分配、consumer-group 消费位点、积压量。
 
-## MCP 安全契约(强制只读)
+## MCP 安全契约(只读使用)
 
-Confluent 官方 MCP 没内置 `--read-only` flag,本系统通过显式 `--block-tools` 把所有 mutative
-工具(`create-topics` / `delete-topics` / `produce-message` / `delete-schema` /
-`create-connector` / `delete-connector` / `*-flink-statement` / `*-tableflow-*` 共 18 个写操作)
-全禁掉。**AI 即使想写也调不到对应工具,只剩 list-topics / describe-topic / consume-messages
-等读工具可用**(具体见 `internal/agent/install_native_mcp_common.go` 的 `kafkaMutativeTools` 常量,
-Confluent 上游加新 mutative 工具时要同步进这个 list,test 有 sanity 断言守护)。
+tuannvm/kafka-mcp-server 提供 9 个工具,其中 8 个是读操作(`list_topics` / `describe_topic` /
+`list_consumer_groups` / `describe_consumer_group` / `consume_messages` / `list_brokers` /
+`get_topic_config` / `get_broker_config`),**只 1 个 mutative `produce_message`**。
+
+binary 本身没有 `--read-only` 或 `--block-tools` flag 可用,本 skill 通过文档契约约束:**严禁
+调用 `produce_message`**。排障场景下没有正当理由发送消息到 kafka,真需要时由用户在 CLI
+手动操作(`kafka-console-producer.sh`)。AI 若调用 produce_message,视为越权,应立刻 abort 并
+告知用户。
+
+(选 tuannvm 而不是 `@confluentinc/mcp-confluent`:后者依赖 native librdkafka 绑定,
+Node ABI 矩阵滞后导致跨平台脆弱;2026-05 实战踩坑后回切纯 Go binary。)
 
 ## 连接解析
 

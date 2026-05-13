@@ -311,6 +311,18 @@ type MCPBuildOptions struct {
 	// PruneEmpty:env block 里 value=="" 的 entry 丢掉(IDE 走这条,避免 IDE 把字面 "" 当
 	// 真值传给后端进程造成无效连接);openclaw 留着等 agent 自决,所以 false。
 	PruneEmpty bool
+
+	// KafkaMCPBinaryPath:kafka-mcp-server binary 绝对路径。
+	//
+	// **隐式契约**:production 调用方(install_native_mcp.go / install_native_openclaw_mcp.go)
+	// 必须先调 EnsureKafkaMCPInstalled 拿绝对路径再传进来。绝对路径关键 — mac launchd GUI
+	// 启动子进程 PATH 不含 brew prefix,字面 "kafka-mcp-server" 找不到 ENOENT 静默挂(同
+	// findOpenclawCLI 修过的坑,commit e44c74d)。
+	//
+	// 空字符串 = 回落 PATH 形式字面 "kafka-mcp-server"。仅两种场景用空:
+	//  (a) ensure 失败 fallback(用户装好后重跑 install 会拿到绝对路径)
+	//  (b) 单元测试只验证 builder 逻辑不验证启动可达性
+	KafkaMCPBinaryPath string
 }
 
 // BuildMCPServers 按 cfg.Infrastructure 派生 {server_key: spec} 扁平 map。
@@ -533,9 +545,10 @@ func (b *mcpBuilder) buildELK(servers map[string]any) {
 // (上游包不接 env)。改回直接传位置参数 — pg/redis 凭据落 IDE config args 字段是已知
 // trade-off,直到上游包支持 env 或换包(@henkey/postgres-mcp-server 等)再迁。
 //
-// 阶段 2 待做:
-//   - kafka(社区没 npx/uvx 分发,候选 brew 装 CefBoud/kafka-mcp-server,带 --read-only flag)
-//   - rabbitmq(可走 uvx amazon-mq/mcp-server-rabbitmq,默认只读)
+// 阶段 2 进展:
+//   - kafka:走 binary 安装 tuannvm/kafka-mcp-server(franz-go 纯 Go,GoReleaser 跨平台,
+//     install 时探测 PATH 缺 binary 打 brew 安装指引;详见 ensure_kafka_mcp.go)
+//   - rabbitmq:走 uvx amazon-mq/mcp-server-rabbitmq(默认只读)
 //
 // PruneEmpty=true 模式下空 env 段会被剔,如果用户没填 endpoint(env-vars 模式没填 /
 // 走 from_config_center 模式),mcp server 启动时拿不到 URI 直接退出 — 不会污染 IDE。
@@ -949,46 +962,30 @@ func (b *mcpBuilder) buildClickHouse(servers map[string]any, ep *config.DataStor
 	}
 }
 
-// kafkaMutativeTools 列出 @confluentinc/mcp-confluent 所有写操作(topic / connector / schema /
-// tag / flink / tableflow 等),用于 --block-tools 参数把这些 mutative 工具禁掉,达成项目
-// "全只读"安全契约。
+// buildKafka 用 tuannvm/kafka-mcp-server(MIT,franz-go 纯 Go,GoReleaser 5 个 triple 全)。
 //
-// **同步责任**:Confluent MCP 上游出新工具时需要审视是否 mutative,要的话补入本 list。
-// 来源:confluentinc/mcp-confluent README 工具列表(checked 2026-05)。
-var kafkaMutativeTools = []string{
-	// topic
-	"create-topics", "delete-topics", "alter-topic-config",
-	// producer
-	"produce-message",
-	// connector
-	"create-connector", "delete-connector",
-	// schema registry
-	"delete-schema",
-	// topic tag
-	"create-topic-tags", "delete-tag", "remove-tag-from-entity", "add-tags-to-topic",
-	// flink
-	"create-flink-statement", "delete-flink-statements",
-	// tableflow
-	"create-tableflow-topic", "update-tableflow-topic", "delete-tableflow-topic",
-	"create-tableflow-catalog-integration", "update-tableflow-catalog-integration", "delete-tableflow-catalog-integration",
-}
-
-// buildKafka 用 @confluentinc/mcp-confluent(Confluent 官方维护,MIT,npx 零安装)。
+// **跟其它 7 家不一致**:走 binary 安装(brew tap / GitHub Release),不是 npx/uvx 零安装。
+// 原因:kafka 这家业界没有靠谱的 npx/uvx 实现 —— 详见 ensure_kafka_mcp.go 头部注释。
+// 简言之,Confluent 官方 npm 包(`@confluentinc/mcp-confluent`)依赖 native librdkafka 绑定,
+// Node ABI 矩阵滞后 + install scripts 静默失败,跨平台脆弱(2026-05 实战踩坑后回切 binary)。
+// franz-go 纯 Go 实现避开了 librdkafka 整条 native binding 路径。
 //
-// 跟其它 7 家数据层 MCP **一致**:npx -y 零安装(首次跑自动下),跨 4 个 IDE 共享 ~/.npm/_npx 缓存。
-//
-// 安全契约:Confluent MCP 没内置 --read-only flag,但支持 --block-tools 黑名单。
-// kafkaMutativeTools 列了 18 个写操作工具用 --block-tools 一次性禁掉,**剩下的读工具默认允许**。
-// 上游加新工具时如果是 mutative,要同步进 kafkaMutativeTools(test 里有 sanity 断言)。
+// 安全契约:tuannvm 没原生 --read-only flag,但 9 个工具里只 1 个 mutative(`produce_message`),
+// 默认靠 LLM prompt 不主动调(produce_message 是显式动作,LLM 排障时不会"恰好"调它发消息)。
+// 进一步加固在 bot 的 SKILL.md / system instruction 里写明"kafka MCP 工具只读使用"。
 //
 // 配置形态(参考上游 README):
 //
-//	command: "npx"
-//	args:    ["-y", "@confluentinc/mcp-confluent", "--block-tools", "<csv mutative tools>"]
-//	env:     BOOTSTRAP_SERVERS=<csv brokers>   # 标准 Kafka client property 名
+//	command: "kafka-mcp-server"  # 从 PATH 找 binary
+//	args:    []
+//	env:     KAFKA_BROKERS=<csv brokers>   # tuannvm 用的 env 名,不是 BOOTSTRAP_SERVERS
+//	         MCP_TRANSPORT=stdio
 //
-// 自托管 Apache Kafka 用户不需要 API key/secret(那是 Confluent Cloud 才需要)。
+// 自托管 Apache Kafka 用户只填 brokers,不需要 SASL/TLS 凭据(没填 KAFKA_SASL_* 即关闭)。
 // dedup 跟其它 7 家同款:brokers 字符串作 key,同 brokers 视为同 cluster 共享 1 个 MCP。
+//
+// install 时安装路径:见 EnsureKafkaMCPInstalled(PATH 命中用绝对路径 / cache 命中复用 /
+// 缺失自动从 GitHub Release 拉 tarball 到 ~/.tshoot/bin/,失败 warn 不阻塞)。
 func (b *mcpBuilder) buildKafka(servers map[string]any, ep *config.DataStoreEndpoint, sourceID, envID string) {
 	var epBrokers string
 	if ep != nil {
@@ -998,14 +995,16 @@ func (b *mcpBuilder) buildKafka(servers map[string]any, ep *config.DataStoreEndp
 	if brokers == "" && b.opts.PruneEmpty {
 		return // 没填 brokers → 跳过(避免注册一条永远启动失败的 mcp)
 	}
+	cmd := b.opts.KafkaMCPBinaryPath
+	if cmd == "" {
+		cmd = "kafka-mcp-server" // PATH 回落,跟手动装路径兼容
+	}
 	servers[b.keyFor("kafka", sourceID, envID)] = map[string]any{
-		"command": "npx",
-		"args": []any{
-			"-y", "@confluentinc/mcp-confluent",
-			"--block-tools", strings.Join(kafkaMutativeTools, ","),
-		},
+		"command": cmd,
+		"args":    []any{},
 		"env": b.envBlock(map[string]any{
-			"BOOTSTRAP_SERVERS": brokers,
+			"KAFKA_BROKERS": brokers,
+			"MCP_TRANSPORT": "stdio",
 		}),
 	}
 }

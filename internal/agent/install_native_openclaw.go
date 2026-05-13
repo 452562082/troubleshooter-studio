@@ -177,8 +177,8 @@ func InstallNativeOpenclaw(ctx context.Context, stagingDir string, opts InstallO
 	//      (而不是只让用户跑 CLI 命令 —— 客户端用户压根不知道 CLI 是啥)
 	if opts.SkipGatewayRestart {
 		log("[skip] gateway restart 被显式跳过(测试模式)")
-	} else if _, err := exec.LookPath("openclaw"); err == nil {
-		c := exec.CommandContext(ctx, "openclaw", "gateway", "restart")
+	} else if cli := findOpenclawCLI(); cli != "" {
+		c := exec.CommandContext(ctx, cli, "gateway", "restart")
 		if err := c.Run(); err != nil {
 			log(fmt.Sprintf("[warn] openclaw gateway restart 失败:%v;请手动 `openclaw gateway restart`,或退出再开 OpenClaw 客户端", err))
 		} else {
@@ -188,4 +188,35 @@ func InstallNativeOpenclaw(ctx context.Context, stagingDir string, opts InstallO
 		log("[info] 未检测到 openclaw CLI(桌面 app 用户的常见状态)—— **请手动退出再打开 OpenClaw 客户端** 才能在 agent 列表里看到新装的 bot;或装 openclaw CLI 后跑 `openclaw gateway restart`")
 	}
 	return nil
+}
+
+// findOpenclawCLI 在当前进程 PATH 找 openclaw CLI 二进制,找不到再 fallback 试几个
+// 装机常见绝对路径。
+//
+// 背景:OpenClaw mac 桌面 app 启动子进程时继承的 PATH 来自 launchd 的 GUI 默认,
+// 只有 /usr/bin:/bin:/usr/sbin:/sbin —— 用户 shell 里 brew prefix(/opt/homebrew/bin
+// 或 /usr/local/bin)装的 CLI 在这种环境下 exec.LookPath 找不到。用户实际装了 CLI
+// (`npm i -g openclaw` 落到 brew prefix 下),只是 GUI 进程的 PATH 不知道。
+//
+// 候选路径覆盖 Apple Silicon brew / Intel mac brew / npm-global / ~/.local 四类,
+// 命中即返回绝对路径供 exec.CommandContext 直调;全部 miss 才走 fallback 文案。
+//
+// 返回找到的可执行文件绝对路径,找不到返回空串。
+func findOpenclawCLI() string {
+	if p, err := exec.LookPath("openclaw"); err == nil {
+		return p
+	}
+	home, _ := os.UserHomeDir()
+	candidates := []string{
+		"/opt/homebrew/bin/openclaw", // Apple Silicon brew prefix
+		"/usr/local/bin/openclaw",    // Intel mac brew / Linux brew
+		filepath.Join(home, ".npm-global", "bin", "openclaw"),
+		filepath.Join(home, ".local", "bin", "openclaw"),
+	}
+	for _, p := range candidates {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			return p
+		}
+	}
+	return ""
 }

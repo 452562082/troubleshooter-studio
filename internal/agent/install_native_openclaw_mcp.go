@@ -35,17 +35,31 @@ func injectMCPServers(
 	// 清老版本下载到 <ocHome>/bin/ 的 mcp-grafana 孤儿二进制(改 npx 后留着没用)
 	removeLegacyGrafanaBin(ocHome)
 
-	servers := BuildMCPServers(cfg, MCPBuildOptions{
-		AgentID:    cfg.MCPKeyPrefix(),
-		PruneEmpty: false, // 留全 schema,agent 自决
-	}, get)
-
 	// uvx 探测,跟 IDE 路径同款 — 缺 uv 时 nacos/jaeger/clickhouse 都启不来。
 	if CfgUsesUvx(cfg) {
 		if err := CheckUvxAvailable(); err != nil {
 			fmt.Fprintf(os.Stderr, "[warn] openclaw install:\n%v\n", err)
 		}
 	}
+
+	// kafka 走 binary 启动(tuannvm/kafka-mcp-server)。同 IDE 路径:PATH 没就自动下载到
+	// ~/.tshoot/bin/,失败不阻塞 warn 给手动指引。详见 EnsureKafkaMCPInstalled 注释。
+	kafkaBinPath := ""
+	if CfgUsesKafkaMCP(cfg) {
+		var err error
+		kafkaBinPath, err = EnsureKafkaMCPInstalled(func(line string) {
+			fmt.Fprintln(os.Stderr, line)
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[warn] openclaw install:\n%v\n", err)
+		}
+	}
+
+	servers := BuildMCPServers(cfg, MCPBuildOptions{
+		AgentID:            cfg.MCPKeyPrefix(),
+		PruneEmpty:         false, // 留全 schema,agent 自决
+		KafkaMCPBinaryPath: kafkaBinPath,
+	}, get)
 
 	mcp, _ := root["mcp"].(map[string]any)
 	if mcp == nil {

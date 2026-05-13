@@ -301,8 +301,8 @@ known-errors.local.yaml
 | **取证执行** | baseline 24h offset 必比 | 防把正常波动当突变 |
 | **取证执行** | trace 拉不到先看采样率 | 防把 "采样率低" 误判成 "trace 不存在" |
 | **取证执行** | umbrella git pull 规则 | 防代码定位看到 main HEAD 不是部署 commit |
-| **取证执行** | **★ 子查询必输出 `missing_critical_evidence` + Step 6 入口 ASK_USER** | 防 LLM 用"看到的"凑故事忽略"应看未看"的证据;跟差分诊断对偶闭环 |
-| **结论** | **★ 差分诊断 ≥2 候选 + 反证 + explains_all_obs** | **防"找证据凑单一假设",至少 1 候选必须与初始直觉相反防确认偏差** |
+| **取证执行** | **★ 子查询自评证据不足时列 `missing_critical_evidence` + Step 6 入口 ASK_USER** | 防 LLM 用"看到的"凑故事忽略"应看未看"的证据;跟差分诊断对偶闭环;**空着比凑数好** |
+| **结论** | **★ 差分诊断:有合理对偶必列(防确认偏差),无对偶时单候选 + 完整反证 + `explains_all_obs`** | 防"找证据凑单一假设";**禁止凑稻草人对偶**;known-errors 命中或变更撞高危类型时跳过 |
 | **结论** | 反偏科兜底 | 数据/逻辑类只查日志+指标 → confidence 锁低 |
 | **结论** | 推 stub 必须 3 选 1 实锤 | 防 "duration 短 + 0 db span" 误判 stub |
 | **结论** | trace tag framework code ≠ 业务码 | 防 grpc `app.biz.code=0` 被当业务成功 |
@@ -336,6 +336,7 @@ known-errors.local.yaml
 - routing skill 加新映射表 / 改契约 → 同步"横切机制"段
 - 加新取证 skill(比如新增 `kafka-runtime-query`)→ 同步"skills 一览" + "取证拓扑"段
 - 加新反幻觉护栏(典型场景:新一次故障复盘发现新陷阱)→ 同步"护栏全景"表
+- 软化 / 收紧某条护栏的约束硬度 → 同步对应表格条目措辞
 
 **版本对齐自检**(每次 review 本文档时跑):
 
@@ -351,3 +352,39 @@ ls templates/workspace/skills/incident-investigator/scripts  # 期望:cascade_ch
 ls templates/workspace/skills/recent-changes/scripts          # 期望:timeline.py 在内
 ls templates/workspace/skills/k8s-runtime-query/scripts       # 期望:k8s_query.py 在内
 ```
+
+---
+
+## 8. 设计哲学(克制原则)
+
+排障链路演进的根本 tradeoff:**规则越多 ≠ 准确率越高**。
+
+prompt 越长 → LLM 注意力越分散 → 每条规则的执行率反而可能下降。
+不是"加机制"就能提升准确性 —— 一个机制只有在**真实漂移信号**驱动下加才有价值。
+
+**什么时候*不该*改本文档对应的 SKILL.md**:
+
+- 凭直觉觉得 "应该多一层防御" / "再加一条 case 就完美了" → **拒绝**。没看到真实 case 出错就是赌博
+- 通用推理机制(差分诊断 / 主动找缺失证据这类)已经覆盖四大盲区 → 再加同类机制是冗余
+- 简单 case 流程已经被卷长 / `confidence=high` 拿不到 / Step 7 沉淀跑不起来 → 这些是**漂移信号**,
+  应该走"软化 / 删条款 / 加跳过条件" 三选一,**不是加新规则**
+
+**什么时候*该*改**:
+
+- 真实 case 复盘发现新陷阱(像 importPgcVideos 那次发现 partial-success 接口盲区)→ 加针对性反偏科条款
+- 某条规则**执行率长期为 0**(LLM 总忽略)→ 删,死代码不留
+- 某类问题准确率明显偏低 → 加针对那类的条款(注意作用域要绑死,防漂移到其它问题类型)
+
+**演进里程碑**:
+
+| 阶段 | 主要变化 | 关键 commit |
+|---|---|---|
+| 1 | 7 步主线建立 | (pre-2026-05) |
+| 2 | importPgcVideos case 4 处针对性反偏科(1.1b / 5.4 / 结论自检) | `556b795` |
+| 3 | 加 A 差分诊断(通用推理机制) | `b0b5211` |
+| 4 | 加 C `missing_critical_evidence`(跟 A 对偶) | `4e80198` |
+| 5 | 软化 A+C 防过度防御(措辞从"必"→"建议") | `fee5bc1` |
+
+**下一步**:不主动 build,而是 observe —— 等真实排障数据回流,有信号再针对性微调。
+中期可考虑搭最小回归测试集(3-5 个真实 case + replay harness),
+让规则改动有数据支撑而不是盲猜。

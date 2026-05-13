@@ -47,6 +47,13 @@ func injectMCPServers(
 		}
 	}
 
+	// kafka-mcp-server binary 探测,缺 binary 这家 MCP 启动失败。同款不阻塞。
+	if CfgUsesKafkaMCP(cfg) {
+		if err := CheckKafkaMCPServerAvailable(); err != nil {
+			fmt.Fprintf(os.Stderr, "[warn] openclaw install:\n%v\n", err)
+		}
+	}
+
 	mcp, _ := root["mcp"].(map[string]any)
 	if mcp == nil {
 		mcp = map[string]any{}

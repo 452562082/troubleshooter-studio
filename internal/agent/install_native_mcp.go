@@ -94,6 +94,16 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 		}
 	}
 
+	// kafka 走 binary 启动(tuannvm/kafka-mcp-server),缺 binary 这家 MCP 启动失败。
+	// 同 uvx 路径:不阻塞,只 warn 给 brew 安装指引。
+	if CfgUsesKafkaMCP(cfg) {
+		if err := CheckKafkaMCPServerAvailable(); err != nil {
+			fmt.Fprintf(os.Stderr,
+				"[warn] %s --target %s:\n%v\n",
+				"install", target, err)
+		}
+	}
+
 	if t == TargetCodex {
 		// codex 全局 sandbox 默认禁网,workspace-write 也要显式 network_access=true 才放行 —
 		// 没配的话装好后所有 MCP 启动 ENOTFOUND。这里探测 + 给修复指引,不主动改用户 config。

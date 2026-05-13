@@ -44,6 +44,7 @@ import (
 // kafkaMCPVersion 固定上游 release tag。不查 latest:
 //   - 少一次网络调用(GitHub API 偶尔限流)
 //   - 上游出大坑时不会自动跟着崩(明确升级走 PR + test)
+//
 // 升级 cadence:观察上游 ~1 季度同步一次。
 const kafkaMCPVersion = "v2.0.2"
 
@@ -87,7 +88,7 @@ func EnsureKafkaMCPInstalled(onLog func(string)) (string, error) {
 	}
 	// Windows 没实现 zip 自动解压,直接走手动安装路径 — 避免误导用户"自动下载中"然后失败。
 	if runtime.GOOS == "windows" {
-		return "", fmt.Errorf("Windows 不支持自动下载 kafka-mcp-server,请手动安装:\n%s", kafkaMCPInstallHint())
+		return "", fmt.Errorf("windows 不支持自动下载 kafka-mcp-server,请手动安装:\n%s", kafkaMCPInstallHint())
 	}
 	// 2) 本机 cache 命中。文件名带版本号 — bump kafkaMCPVersion 后旧文件不被命中触发重下,
 	// 老 binary 留 ~/.tshoot/bin/ 等定期清(避免 mcp-grafana 早期那种"换策略后孤儿 binary"坑)。
@@ -171,7 +172,7 @@ func downloadKafkaMCPBinary(dest string, log func(string)) error {
 	if err != nil {
 		return fmt.Errorf("gzip reader:%w", err)
 	}
-	defer gz.Close()
+	defer func() { _ = gz.Close() }() // 只读流 Close 失败无可行 recovery,显式忽略
 	tr := tar.NewReader(gz)
 	const binNameInTar = "kafka-mcp-server" // tarball 内名,不带版本号
 	for {

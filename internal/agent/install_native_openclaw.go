@@ -208,8 +208,8 @@ func findOpenclawCLI() string {
 	}
 	home, _ := os.UserHomeDir()
 	candidates := []string{
-		"/opt/homebrew/bin/openclaw",                       // Apple Silicon brew prefix
-		"/usr/local/bin/openclaw",                          // Intel mac brew / Linux brew
+		"/opt/homebrew/bin/openclaw", // Apple Silicon brew prefix
+		"/usr/local/bin/openclaw",    // Intel mac brew / Linux brew
 		filepath.Join(home, ".npm-global", "bin", "openclaw"),
 		filepath.Join(home, ".local", "bin", "openclaw"),
 	}

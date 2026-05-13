@@ -21,8 +21,8 @@ Step 7  沉淀(必做,confidence=high 必跑):pattern 追加到 known-errors.loc
 
 | 症状关键词 | 必查维度 | 可选维度 |
 |---|---|---|
-| **数据/状态类**:数据不一致 / 余额不对 / 订单状态异常 / 显示错乱 / 漏发货 / 重复扣款 / 漏发消息 | **数据库当前值** + **代码业务逻辑** + 日志事务时序 | 链路 |
-| **逻辑/计算类**:金额算错 / 优惠没生效 / 规则没触发 / 限流没生效 | **代码计算路径** + **数据库输入数据** + 日志中间结果 | 指标 |
+| **数据/状态类**:数据不一致 / 余额不对 / 订单状态异常 / 显示错乱 / 漏发货 / 重复扣款 / 漏发消息 | **数据库当前值** + **代码业务逻辑** + **网关 response_body** + 日志事务时序 | 链路 |
+| **逻辑/计算类**:金额算错 / 优惠没生效 / 规则没触发 / 限流没生效 | **代码计算路径** + **数据库输入数据** + **网关 response_body**(批量接口) + 日志中间结果 | 指标 |
 | **性能类**:慢 / 超时 / 卡 / P95 升高 / 响应延长 | 指标 + 链路慢 span + **数据库慢查询** + **代码热点路径** | 日志 |
 | **可用性类**:5xx 突增 / down / 不通 / 报错暴涨 | 日志 error pattern + 指标错误率 + **代码近期变更**(`git log`) | 链路 + 数据库(若 query 异常) |
 | **环境/网络类**:某 env 不通 / 跨服务断连 / DNS 失败 | 指标 + 日志 + ns-snapshot + cluster events | 代码(若超时配置变了)|
@@ -39,6 +39,10 @@ Step 7  沉淀(必做,confidence=high 必跑):pattern 追加到 known-errors.loc
 ## Step 1:收齐前提 + 验证 + 历史 grep
 
 **1.1 前提**:`entity ID` + `时间窗` + `env` + `service`。任一缺失只反问**这一个**澄清。
+若接口名匹配 `import/sync/batch/bulk + 复数 s`(如 `importPgcVideos` / `syncOrders`)
+且用户描述含 "N 个共 M 条" / "导入 N 部,M 集" 这种 **N×M 数量词**,
+额外只问一句:"是 **1 次请求 batch M 条**,还是 **N 次请求各 ~M/N 条**?"
+**只在双重命中(接口名 + N×M 数量词)时触发**;性能类描述"batch 查询慢"不触发。
 
 **1.2 症状先验证**(30 秒,防无效排障):
 跑 `baseline_query_templates.error_rate_now` 看症状仍在?
@@ -155,6 +159,36 @@ grep -rn "<关键报错串|关键业务字段名>" <repo_root>/<service>/ --incl
 
 `证据`段必须给:**表名 + SQL/查询条件 + 返回行数 + 关键字段值对比**。
 
+### 5.4 调用方/响应方实际 payload(数据/逻辑类必查)
+
+**触发**:5 维表第 1/2 行命中(数据/状态类 或 逻辑/计算类)。
+性能/可用性/环境类此节直接跳过,不绕路。
+
+**取证内容**:
+
+```bash
+# 1. 网关访问日志 / 接入层入口日志 / API gateway access log,任一可达即可
+#    取每次请求的 request_body 长度 + response_body 完整内容
+#    数据源优先级:专用网关日志 > 业务侧 access log fallback
+grep "<request_id|entity_id|trace_id>" <gateway_log> \
+  | jq '{rid: .request_id, rbody_len: (.request_body|length), resp: .response_body}'
+```
+
+**partial-success 接口识别**(response_body 含 `results[]` / `items[]` / `errors[]` /
+`failed[]` 或任何"数组 + 数组元素带 code/error 子字段"的形状):
+
+- 按 `results[i].code` / `results[i].error` 分组统计:**成功条数 / 失败条数 / 失败原因 top 3**
+- 调用方说的"总数" vs `response.results.length` vs db 实际行数 → **三层数量对比**
+- 差异落在 "调用方≠response" → 客户端/网关裁剪;落在 "response≠db" → 业务校验/事务
+
+**证据**段必须给:**网关日志查询条件 + response_body 关键片段(可截断,
+但 results 分组统计必须完整) + 三层数量对比表**。
+
+**网关日志拿不到的 fallback**:
+- 退到入口业务日志找请求-响应配对(`elk-log-query` + `trace_id` 关联)
+- 仍拿不到 → 本维度标 N/A,confidence 上限锁中,
+  快报里提示用户补 `routing/references/observability-map.yaml` 的 `gateway_log` 字段
+
 ## Step 6:根因标注 + 处置建议
 
 ### 置信度量化(必须按规则判)
@@ -168,6 +202,22 @@ grep -rn "<关键报错串|关键业务字段名>" <repo_root>/<service>/ --incl
 快报里**明示判定理由 + 维度自检**(`置信度: 中(日志 ✓ 指标 ✓ 代码 ✗ 数据库 ✗ 链路 N/A;数据类问题缺 db 证据降级)`)。
 
 **反偏科兜底**:数据/逻辑/状态类问题(关键词命中"数据/状态/计算/规则"那两类)若只查了日志+指标 → confidence 上限锁 `低`,快报里必须列"未查的维度"让用户决定要不要补。
+
+**结论自检**(出根因前必跑,**只对命中的推断生效**,没命中静默不干预):
+
+1. 推断里含 "**服务是 stub / 空实现 / 镜像跑的不是预期版本**"
+   → 必须有 镜像源码 OR k8s deployment manifest OR 启动日志 **三选一实锤**;
+   缺实锤 → confidence 锁 `低`,结论改写为
+   "**疑似** stub,待补 X/Y/Z 验证"。
+   反模式:仅凭 trace duration 极短 + 0 db span 推 stub —— 这俩特征更可能是
+   **参数校验 early return / 鉴权限流 / 缓存命中 / 业务前置校验失败**,
+   线上 prod 跑 stub 概率极低,不要默认走 stub 解释。
+
+2. 推断引用了 **trace tag 上的 code 字段**(`app.biz.code` / `rpc.grpc.status_code` /
+   `dubbo.status` / `thrift.status` 等)→ 这些是**框架/传输层**码,
+   `=0` 只代表 RPC 链路本身没崩,**不等于业务成功**;
+   必须从 `response_body` 业务字段(`Response.Code` / `result.code` / `data.errno` 等)
+   二次确认,否则该结论降级一档。
 
 ### 回滚 vs 热修 决策树
 

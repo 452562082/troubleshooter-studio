@@ -311,6 +311,12 @@ type MCPBuildOptions struct {
 	// PruneEmpty:env block 里 value=="" 的 entry 丢掉(IDE 走这条,避免 IDE 把字面 "" 当
 	// 真值传给后端进程造成无效连接);openclaw 留着等 agent 自决,所以 false。
 	PruneEmpty bool
+
+	// KafkaMCPBinaryPath:kafka-mcp-server binary 路径。install 流程先调
+	// EnsureKafkaMCPInstalled 拿绝对路径(PATH 命中时返回 "kafka-mcp-server" 字面 PATH 形式),
+	// 再传进来 buildKafka 写 command 字段。
+	// 空字符串 = 回落 PATH 形式 "kafka-mcp-server"(用户后续手动装好后无需重跑 install)。
+	KafkaMCPBinaryPath string
 }
 
 // BuildMCPServers 按 cfg.Infrastructure 派生 {server_key: spec} 扁平 map。
@@ -982,8 +988,12 @@ func (b *mcpBuilder) buildKafka(servers map[string]any, ep *config.DataStoreEndp
 	if brokers == "" && b.opts.PruneEmpty {
 		return // 没填 brokers → 跳过(避免注册一条永远启动失败的 mcp)
 	}
+	cmd := b.opts.KafkaMCPBinaryPath
+	if cmd == "" {
+		cmd = "kafka-mcp-server" // PATH 回落,跟手动装路径兼容
+	}
 	servers[b.keyFor("kafka", sourceID, envID)] = map[string]any{
-		"command": "kafka-mcp-server",
+		"command": cmd,
 		"args":    []any{},
 		"env": b.envBlock(map[string]any{
 			"KAFKA_BROKERS": brokers,

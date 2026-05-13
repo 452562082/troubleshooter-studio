@@ -659,6 +659,33 @@ func TestBuildMCPServers_DataStores_Kafka(t *testing.T) {
 	}
 }
 
+// TestBuildMCPServers_DataStores_Kafka_AbsBinaryPath:install 流程把 EnsureKafkaMCPInstalled
+// 拿到的绝对路径(如 ~/.tshoot/bin/kafka-mcp-server)通过 KafkaMCPBinaryPath 传进来时,
+// buildKafka 应该写绝对路径到 command — 解决 PATH 没有 kafka-mcp-server 但 cache 装好的场景。
+func TestBuildMCPServers_DataStores_Kafka_AbsBinaryPath(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "test"}},
+		Infrastructure: config.Infrastructure{
+			DataStores: []config.DataStore{{
+				Type: "kafka", Enabled: true,
+				Endpoints: []config.DataStoreEndpoint{
+					{Env: "test", Brokers: "broker1.test:9092"},
+				},
+			}},
+		},
+	}
+	const absPath = "/Users/x/.tshoot/bin/kafka-mcp-server"
+	servers := BuildMCPServers(cfg, MCPBuildOptions{
+		PruneEmpty:         true,
+		KafkaMCPBinaryPath: absPath,
+	}, func(_ string) string { return "" })
+
+	mcp := servers["kafka-test"].(map[string]any)
+	if mcp["command"] != absPath {
+		t.Errorf("kafka command should be abs path %q, got: %v", absPath, mcp["command"])
+	}
+}
+
 // TestBuildMCPServers_DataStores_Kafka_MultiCluster:kafka 多 cluster 也走 dedup-by-URI
 // (用 brokers 字段做 dedup key),不同 broker 列表注册成多个 MCP。
 func TestBuildMCPServers_DataStores_Kafka_MultiCluster(t *testing.T) {

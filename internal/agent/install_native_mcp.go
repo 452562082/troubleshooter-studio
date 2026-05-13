@@ -67,13 +67,6 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 		return creds[k]
 	}
 	// MCP key 前缀用 system.id(短)而不是 ResolveID()(常见 = "<id>-troubleshooter"),
-	// 避免 server_key + tool_name 拼起来超过 IDE 60 字符的 tool 名限制。
-	// IDE 走 PruneEmpty=true 模式 —— 避免把 "" 当真值喂给后端进程触发无效连接。
-	servers := BuildMCPServers(cfg, MCPBuildOptions{
-		AgentID:    cfg.MCPKeyPrefix(),
-		PruneEmpty: true,
-	}, get)
-
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("read $HOME: %w", err)
@@ -94,15 +87,29 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 		}
 	}
 
-	// kafka 走 binary 启动(tuannvm/kafka-mcp-server),缺 binary 这家 MCP 启动失败。
-	// 同 uvx 路径:不阻塞,只 warn 给 brew 安装指引。
+	// kafka 走 binary 启动(tuannvm/kafka-mcp-server)。PATH 没有就自动从 GitHub Release 拉
+	// tarball 解到 ~/.tshoot/bin/。下载失败不阻塞,warn 给手动指引;buildKafka 仍写 PATH 形式,
+	// 用户事后手动装到 PATH 也能直接生效不需要重跑 install。
+	kafkaBinPath := ""
 	if CfgUsesKafkaMCP(cfg) {
-		if err := CheckKafkaMCPServerAvailable(); err != nil {
+		var err error
+		kafkaBinPath, err = EnsureKafkaMCPInstalled(func(line string) {
+			fmt.Fprintln(os.Stderr, line)
+		})
+		if err != nil {
 			fmt.Fprintf(os.Stderr,
 				"[warn] %s --target %s:\n%v\n",
 				"install", target, err)
 		}
 	}
+
+	// 避免 server_key + tool_name 拼起来超过 IDE 60 字符的 tool 名限制。
+	// IDE 走 PruneEmpty=true 模式 —— 避免把 "" 当真值喂给后端进程触发无效连接。
+	servers := BuildMCPServers(cfg, MCPBuildOptions{
+		AgentID:            cfg.MCPKeyPrefix(),
+		PruneEmpty:         true,
+		KafkaMCPBinaryPath: kafkaBinPath,
+	}, get)
 
 	if t == TargetCodex {
 		// codex 全局 sandbox 默认禁网,workspace-write 也要显式 network_access=true 才放行 —

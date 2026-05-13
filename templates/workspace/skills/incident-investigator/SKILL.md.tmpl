@@ -101,6 +101,39 @@ python3 scripts/cascade_check.py --env <env> --service <主角> \
 
 按"证据维度全景"选维度。最低 3 维起步,**数据/逻辑类问题代码 + 数据库不可省**。
 
+### Step 5 子查询通用输出契约(5.1 / 5.2 / 5.3 / 5.4 每个都遵守)
+
+每个子查询输出 `evidence_seen` 必填;**`missing_critical_evidence` 仅当 LLM 自评 "证据不足以做出可靠推断" 时列**
+(不是每次都必出 —— 信息已充分时空着即可,避免过度防御让 confidence=high 拿不到 / Step 7 沉淀跑不起来):
+
+```yaml
+evidence_seen:                    # 实际看到的数据(必填)
+  - "..."
+missing_critical_evidence:        # 仅自评不够时列(可空,空着不写本字段)
+  - what: "..."                   # 缺什么(具体到字段/行/记录,不写"更多日志"泛指)
+    why_critical: "..."           # 为什么关键(缺它哪个候选 explains_all_obs 会翻 no)
+    where_to_get: "..."           # 从哪取
+    or_acceptable_proxy: "..."    # 次优替代(没替代写 `none`)
+```
+
+**列出来的必须是真 critical**:缺了这条,Step 6 差分诊断里至少 1 个候选的 `explains_all_obs` 会从 yes 翻 no。
+nice-to-have / 已有充分代理证据 / 取证 ROI 极低 —— 这些不写,**空着比凑数好**。
+
+**Step 6 入口拦截**(差分诊断段会再次引用):
+
+任一子段 `missing_critical_evidence` 非空 → 进入 Step 6 前**强制走 ASK_USER**:逐条列给用户,问"能补吗"。
+用户响应三分支:
+
+- **(a) 帮取到** → 加入 `evidence_seen`,该 missing 出表;若还有其它 missing 继续 ask 直到清空
+- **(b) 明确无法取得**(不在采集范围 / 已过 TTL 等)→ 标 `unavailable`,Step 6 用现有证据出结论但
+  **confidence 上限锁中** + 故障快报明示 "以下证据 unavailable,结论可能有 X/Y 风险"
+- **(c) 先看现有的**(用户主动跳)→ 标 `skipped`,Step 6 用现有证据出结论但
+  **confidence 上限锁低** + 故障快报明示 "以下证据未取,结论可能漂移:..."
+
+**跟差分诊断的闭环**:差分诊断里全部候选 `explains_all_obs: no` → 把 "无法解释的现象"
+逐条补到对应子段的 `missing_critical_evidence` 然后走上面三分支,不允许直接锁低 confidence 收尾。
+**两个机制对偶**:差分诊断帮 LLM 排除错误假设,本契约帮 LLM 主动找缺失证据。
+
 ### 5.1 trace + log + metric 三向
 
 **调 grafana mcp 工具的 datasource 排他契约**(防止多 datasource 重复查):
@@ -190,6 +223,85 @@ grep "<request_id|entity_id|trace_id>" <gateway_log> \
   快报里提示用户补 `routing/references/observability-map.yaml` 的 `gateway_log` 字段
 
 ## Step 6:根因标注 + 处置建议
+
+### 候选假设差分诊断(出根因前必跑,所有问题类型通用)
+
+LLM 排障最大盲区是 **"找证据支持单一假设"** —— 拿到 3-4 个证据就拼自洽故事,
+不去想"还有什么别的解释能套上这些证据"。强制差分诊断 = 医学式
+**列候选 → 找反证 → 排除剩下**,本节是 Step 6 一切其它判断(置信度/反偏科/处置建议)的**前置必跑**。
+
+**跳过条件**(满足任一即跳过):
+
+- Step 1.3 known-errors 命中,且 Step 5 维度证据跟 pattern 的 `typical_cause` 完全吻合不矛盾 → 信任速查表
+- Step 2 时间轴撞 ±5min 内变更,且 `event.diff_risks` 命中高危类型
+  (`timeout_decreased` / `replicas_decreased` / `rate_limit_decreased` 等)→ 变更撞窗本身就是强证据,
+  不必走差分(简单 case 走过度防御反而拉长流程)
+
+**约束**(软化:有合理对偶必列;无对偶不强求 ≥2,但仍走 `explains_all_obs` 闭环):
+
+- **有合理对偶候选必列**(防确认偏差):
+  - 推 "下游 timeout" → 对偶候选必含 "本服务自身慢"
+  - 推 "代码 bug" → 对偶候选必含 "数据/配置异常导致代码进错分支"
+  - 推 "服务是 stub" → 对偶候选必含 "业务校验/鉴权早返回"
+- **找不到合理对偶时,单候选 + 完整反证即可**(禁止凑稻草人充 ≥2,空着 比凑数 更准)
+- 每个候选给 4 个字段:
+  - `supports`: 哪些观察支持它
+  - `refutes`: 哪些观察否定它(空写 `none`)
+  - `explains_all_obs`: 能解释**所有**已观察现象 `yes/no`
+  - `verdict`: `confirmed` / `rejected` / `undecided`
+
+**结论规则**(直接绑死 confidence,跟 Step 5 通用输出契约的 `missing_critical_evidence` 闭环):
+
+- 所有候选 `explains_all_obs: no` → 把 "无法解释的现象" 逐条**补到 Step 5 对应子段的 `missing_critical_evidence`**
+  然后走 Step 5 通用契约的 ASK_USER 三分支(a/b/c),**不允许直接锁低 confidence 收尾** ——
+  让用户决定补证还是接受降级;无论走哪条分支,**禁止给改 prod 命令**
+- 仅 1 个 `confirmed` 且 `explains_all_obs: yes` → 该候选作为根因,confidence 按下方量化规则评
+- 多个 `confirmed` 二选一无法决断 → **confidence 锁中** + 列出 "区分两者所需的最小补证"
+  (同样以 `missing_critical_evidence` 格式给出,方便用户对照取)
+
+**例**(importPgcVideos case):
+
+```yaml
+observations:
+  - duration=0.286ms
+  - 0 mongo span
+  - trace.app.biz.code=0
+  - 网关 response.results[0].error="parent.title 超过 200 字"
+
+hypotheses:
+  - name: "服务是 stub / 空实现"
+    supports: [duration<1ms, 0 mongo span]
+    refutes:
+      - prod env + 镜像 tag v2.3.1 非 stub-mock(查 deployment manifest)
+      - response 有具体 results[] 业务错误,不是 stub 的 mock 返回形状
+    explains_all_obs: no   # 不能解释 results 数组里的业务错误
+    verdict: rejected
+
+  - name: "业务参数校验早返回"   # ← 与初始 "stub" 直觉相反的对偶候选
+    supports:
+      - duration 极短(参数校验前就 return,没进业务逻辑)
+      - 0 mongo span(没写 db)
+      - results[0].error 明确指出校验失败原因
+    refutes: none
+    explains_all_obs: yes
+    verdict: confirmed
+
+  - name: "鉴权/限流挡住"
+    supports: [duration<1ms]
+    refutes:
+      - HTTP 200(鉴权挡是 401/403,限流挡是 429)
+      - response 有完整业务结构,不是鉴权/限流的简单 body
+    explains_all_obs: no
+    verdict: rejected
+
+conclusion: 业务参数校验早返回(parent.title 超 200 字)
+            → 走 next_actions 拉每条 request 的 title 长度对账,
+              查规则是否最近改过(200 字限制是不是新加)
+```
+
+**为什么放在置信度量化之前**:置信度的"维度数"打分只回答"看了多少",
+差分诊断回答"看到的能不能排除其它解释" —— 后者是准确性的真护栏,前者是覆盖率的代理指标。
+没经过差分就给 confidence=high 是把"自洽故事"当"已验证结论"。
 
 ### 置信度量化(必须按规则判)
 

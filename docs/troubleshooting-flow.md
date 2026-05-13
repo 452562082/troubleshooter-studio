@@ -79,9 +79,10 @@ Step 4 沿依赖图追下游
    │           no_downstream_in_map   → 依赖图没填,confidence 锁中
    ▼
 Step 5 多向交叉(按 "5 维证据表" 选维度,最低 3 维起步)
-   │      ├─ ★ 通用输出契约:每个子段输出 evidence_seen + missing_critical_evidence
-   │      │   - critical 判定:缺了它差分诊断里至少 1 候选 explains_all_obs 会翻 no
-   │      │   - 非空 → Step 6 入口强制 ASK_USER 三分支:
+   │      ├─ ★ 通用输出契约:evidence_seen 必填;missing_critical_evidence 仅自评不够时列(可空)
+   │      │   - 列出的必须真 critical:缺了它差分诊断里至少 1 候选 explains_all_obs 会翻 no
+   │      │   - 空着比凑数好,避免过度防御让 confidence=high 拿不到
+   │      │   - 非空时 → Step 6 入口走 ASK_USER 三分支:
    │      │     (a) 帮取到 → 加入 evidence_seen   |
    │      │     (b) unavailable → confidence 上限锁中 + 快报明示风险
    │      │     (c) 用户主动跳 → confidence 上限锁低 + 快报明示"未取证据"
@@ -103,13 +104,15 @@ Step 5 多向交叉(按 "5 维证据表" 选维度,最低 3 维起步)
    ▼
 Step 6 根因 + 处置建议
    │      ├─ ★ 候选假设差分诊断(前置必跑,所有问题类型通用)
-   │      │   - 列 ≥2 个候选根因(推荐 3),至少 1 个与初始直觉方向相反(防确认偏差)
+   │      │   - 有合理对偶必列(防确认偏差);找不到合理对偶时单候选+完整反证,禁止凑稻草人
    │      │   - 每个候选给 supports / refutes / explains_all_obs(yes/no) / verdict
    │      │   - 全部 explains_all_obs=no → 反推到 Step 5 对应子段补 missing_critical_evidence
    │      │     走 Step 5 通用契约的 ASK_USER 三分支(a/b/c),不允许直接锁低收尾
    │      │   - 仅 1 个 confirmed + explains_all_obs=yes → 取该候选作为根因
    │      │   - 多个 confirmed 决断不了 → confidence 锁中 + 列"区分最小补证"(同 missing_critical_evidence 格式)
-   │      │   - 跳过条件:Step 1.3 known-errors 命中且证据完全吻合 typical_cause 不矛盾
+   │      │   - 跳过条件(任一即跳):
+   │      │     · Step 1.3 known-errors 命中且证据完全吻合 typical_cause 不矛盾
+   │      │     · Step 2 时间轴撞 ±5min 内变更且 diff_risks 命中高危类型(变更撞窗就是强证据)
    │      ├─ 置信度量化(高/中/低,按维度数 + 时间轴 + 依赖图打分)
    │      ├─ 反偏科兜底:数据/逻辑类只查日志+指标 → confidence 锁低
    │      ├─ 结论自检 2 条

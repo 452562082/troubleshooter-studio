@@ -75,6 +75,41 @@ func nacosCfg() *config.SystemConfig {
 	return cfg
 }
 
+// TestFindOpenclawCLI_PathHit:CLI 在 PATH 里时 LookPath 直接命中,不进 fallback。
+// 主流场景:用户从 shell 跑 tshoot install,zsh PATH 含 /opt/homebrew/bin。
+func TestFindOpenclawCLI_PathHit(t *testing.T) {
+	dir := t.TempDir()
+	binPath := filepath.Join(dir, "openclaw")
+	if err := os.WriteFile(binPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+
+	got := findOpenclawCLI()
+	if got != binPath {
+		t.Errorf("findOpenclawCLI() = %q, want %q", got, binPath)
+	}
+}
+
+// TestFindOpenclawCLI_AllMiss:PATH 不含 + 所有 fallback 绝对路径也不存在时
+// 返回空串(让上层走 [info] 文案分支,不 panic 不报 error)。
+// 用 t.Setenv("HOME") 指向 empty tempdir 让 ~/.npm-global 和 ~/.local 候选 miss;
+// /opt/homebrew/bin/openclaw 和 /usr/local/bin/openclaw 在 CI runner 上一般不存在。
+// 本地开发机若装了 openclaw 会让这条 assert 失败 — 用 t.Skip 兜底,不死锁本地跑。
+func TestFindOpenclawCLI_AllMiss(t *testing.T) {
+	for _, p := range []string{"/opt/homebrew/bin/openclaw", "/usr/local/bin/openclaw"} {
+		if _, err := os.Stat(p); err == nil {
+			t.Skipf("本机 %s 存在,跳过 all-miss assert(主流装机场景,不验空串路径)", p)
+		}
+	}
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	if got := findOpenclawCLI(); got != "" {
+		t.Errorf("findOpenclawCLI() = %q, want \"\"", got)
+	}
+}
+
 func TestInstallNativeOpenclaw_FreshInstall(t *testing.T) {
 	cfg := nacosCfg()
 	staging, fakeHome := setupOpenclawStaging(t, cfg)

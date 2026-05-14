@@ -231,6 +231,58 @@ grep "<request_id|entity_id|trace_id>" <gateway_log> \
 - 仍拿不到 → 本维度标 N/A,confidence 上限锁中,
   快报里提示用户补 `routing/references/observability-map.yaml` 的 `gateway_log` 字段
 
+### 5.5 主动 curl 重放(客户端 + 资源加载 / API smoke test 类必试,先于让用户贴 HAR)
+
+**触发**:5 维表第 6 行命中(客户端/用户体验类),且症状涉及**单个资源加载**或 **API smoke**:
+看不到图片 / 视频无法播放 / 字体没渲染 / CSS 加载失败 / JS bundle 404 /
+"调用方说 API 失败但前端展示 OK" 这类**机器人能直接验证一遍前后端立刻分流**的场景。
+
+curl 比让用户贴 HAR 快得多,**先试 curl 再决定要不要要 HAR**。
+
+**取证手法**(按需挑,不必全跑):
+
+```bash
+# 1. 看 status / Content-Type / Cache-Control / 大小(最常用)
+curl -I <URL>
+
+# 2. 下载验证内容跟 mime 是否一致(200 但内容损坏的常见陷阱)
+curl -L -o /tmp/probe <URL> && file /tmp/probe && ls -la /tmp/probe
+
+# 3. 防盗链测试(CDN 配置 Referer 校验)
+curl -H "Referer: https://<正确域名>" -I <URL>
+curl -H "Referer: https://<假冒域名>" -I <URL>
+
+# 4. UA 模拟(跟反幻觉自检 #4 "仅某浏览器" 配合,复刻 Safari/iOS 13 等)
+curl -A "Mozilla/5.0 ... Safari/14.0" -I <URL>
+
+# 5. Range request(视频 / 大文件断点续传探测)
+curl -H "Range: bytes=0-1024" -I <URL>
+
+# 6. CORS 跨域校验
+curl -H "Origin: https://<前端域名>" -I <URL>
+```
+
+**判定**(curl 返回 → 前端/后端定位):
+
+| curl 看到 | 大概率结论 | 下一步 |
+|---|---|---|
+| 4xx / 5xx | **后端**(资源不存在 / 鉴权 / 限流) | 拿 `X-Trace-Id` → 5.1 后端 trace |
+| 200 + `Content-Type` 跟实际不符(图片返了 HTML) | **后端处理 / CDN 回源失败** | CDN 状态 + 后端处理 |
+| 200 + 内容损坏(`Content-Length` 异常 / `file` 探测格式不对) | **后端转码 / 上传断裂** | 后端处理流程 |
+| 200 + 全正常 | **前端代码 / 浏览器策略**(`<img src` / `<video src` / CSP / lazy load) | 走 5.2 代码取证 |
+| 加 Referer 通 / 不加 403 | **CDN 防盗链配置** | CDN 配置审计 |
+| 默认 UA 通 / Safari UA 403 | **后端 UA 黑名单 / 兼容性**(自检 #4) | 后端策略 / 浏览器兼容 |
+
+**curl 看不到的**(跳出本节回到让用户贴):
+
+- **JS 执行 / 渲染逻辑**(React/Vue state bug)→ curl 只拿 HTML/JSON 跑不了浏览器 → 让用户贴 **console error 截图**
+- **用户特定 session 状态**(cookie / localStorage 不兼容)→ curl 默认无状态 → 让用户用 F12 **抓 HAR**
+- **性能 profile / 长任务阻塞** → curl 无渲染 → 提示 "需要浏览器 DevTools Performance,机器人目前看不了"
+
+**4 平台兼容性**:OpenClaw / Claude Code / Cursor / Codex CLI 都通过原生 Bash/Shell 工具跑(同 Step 2-3 scripts 调用)。
+Codex 用户需要先在 `~/.codex/config.toml` 开 `[sandbox_workspace_write] network_access=true`,
+`tshoot install --target codex` 会探测打印修复指引。
+
 ## Step 6:根因标注 + 处置建议
 
 ### 候选假设差分诊断(出根因前必跑,所有问题类型通用)

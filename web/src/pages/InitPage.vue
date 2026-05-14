@@ -18,6 +18,7 @@ import { confirmDialog } from '../lib/confirm'
 import { WizardStoreKey } from '../lib/wizardStore'
 import { pushLog } from '../lib/logStore'
 import { toast } from '../lib/toast'
+import { countUmbrellaChildren } from '../lib/repoUmbrella'
 import { Target, type TargetId } from '../lib/constants'
 import type { CredField } from '../lib/credFields'
 import RepoListItem from '../components/RepoListItem.vue'
@@ -673,7 +674,10 @@ function removeRepo(idx: number) {
   // 用户必须先把所有 parent_repo == 本 umbrella name 的子模块删掉,才能删 umbrella。
   const target = repos[idx]
   if (!target) return
-  const childCount = repos.filter(r => (r.parent_repo || '').trim() === target.name.trim()).length
+  // umbrella 父仓有 child 引用时禁删,否则 child.parent_repo 引用会坏(health check 报 error,
+  // 新机器导入也无法继承编排)。判定逻辑统一走 lib/repoUmbrella.countUmbrellaChildren,
+  // 跟 isRepoDeletable / template umbrella-children-count 三处共用同一份。
+  const childCount = countUmbrellaChildren(repos, target.name)
   if (childCount > 0) {
     toast.error(`先删除 ${target.name} 的 ${childCount} 个子模块行,才能删 umbrella`)
     return
@@ -681,22 +685,11 @@ function removeRepo(idx: number) {
   repos.splice(idx, 1)
 }
 
-// 给 RepoListItem 的 × 按钮判定 disabled:本仓是 umbrella + 还有 child 引用时禁删
+// 给 RepoListItem 的 × 按钮判定 disabled:本仓是 umbrella + 还有 child 引用时禁删。
+// countUmbrellaChildren 详见 lib/repoUmbrella.ts(语义 + "空 name 误匹配" 防御写在那)。
 function isRepoDeletable(r: RepoItem): boolean {
   if (repos.length <= 1) return false
-  return countUmbrellaChildren(r) === 0
-}
-
-// 给 RepoListItem 的 URL / source toggle / 路径 picker 判定:本仓是 umbrella +
-// 有 child 引用时,身份字段(URL / 本地路径 / clone 父目录 / source 切换)必须锁住,
-// 否则用户改 URL / 切到别的本地目录 → umbrella 指向另一个项目 → children 路径定位
-// 全部错位(parent_repo 引用本仓 name 不会跟着变)。要改身份必须先删干净 children。
-function countUmbrellaChildren(r: RepoItem): number {
-  // 没 name 时直接返回 0:防止新加的仓库 name=='' 跟同样 parent_repo=='' 的 child 行
-  // 互相 '' === '' 匹配上,误判为 umbrella → 锁 URL / 禁删除按钮 / 显示 "被 N 个子模块引用" hint
-  const myName = r.name.trim()
-  if (!myName) return 0
-  return repos.filter(rr => (rr.parent_repo || '').trim() === myName).length
+  return countUmbrellaChildren(repos, r.name) === 0
 }
 
 // Sync env_branches keys when environments change
@@ -2997,7 +2990,7 @@ provide(WizardStoreKey, {
         :index="i"
         :environments="environments"
         :can-remove="isRepoDeletable(repo)"
-        :umbrella-children-count="countUmbrellaChildren(repo)"
+        :umbrella-children-count="countUmbrellaChildren(repos, repo.name)"
         :svc-add-inputs="svcAddInputs"
         :repo-branches-map="repoBranchesMap"
         :repos-root-input="reposRootInput"

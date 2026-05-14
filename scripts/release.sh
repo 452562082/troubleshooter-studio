@@ -86,6 +86,29 @@ if [ -n "$PRINT_ONLY" ]; then
     exit 0
 fi
 
+# ── 1.5 idempotency check:上一 tag 已经在 HEAD → publish-only 重试 ─────
+# 痛点:macOS runner 跑 release-publish(跨平台编 5 个 triple binary + dmg 打包 + GitLab
+# API 多文件 upload)总耗时常 15-25 分钟,撞 .release-base 的 30min timeout 不算罕见。
+# 一旦 publish 阶段失败,tag 已经在 line 110-128 push 到远端了,GitLab Release 却没建好。
+# 此时 last tag commit == HEAD,用户重点 release:* 按钮会被 changelog.sh 的"范围无 commits"
+# 防护卡死(refuse 打 tag,因为 NEXT 跟 last 之间确实没新 commit)→ 无法 retry,只能本地
+# make release-publish 兜底,但 token 配置麻烦,体验差。
+#
+# 检测到 "tag 阶段成功 / publish 阶段未完成" 的 dirty state → 跳过 bump+tag,直接重跑
+# publish。publish-gitlab-release.sh 头注释明示 "同名 release 已存在 → 删了重建,
+# 简化幂等",所以重跑安全(产物会被新一次的覆盖,不会出现混合状态)。
+last_commit=$(git rev-parse "${last}^{commit}")
+head_commit=$(git rev-parse HEAD)
+if [ "$last_commit" = "$head_commit" ]; then
+    echo "⚠ 上一 tag '$last' 已经指向当前 HEAD —— 大概率上次 release 走到 publish 阶段失败 / 超时" >&2
+    echo "▶ 进入 publish-only 重试模式:跳过 bump+tag,直接重跑 $last 的 publish" >&2
+    echo "  (publish-gitlab-release.sh 对同名 release force overwrite,幂等安全)" >&2
+    make release-publish VERSION="$last"
+    echo ""
+    echo "✓ republish $last 完成"
+    exit 0
+fi
+
 echo "▶ 自动 bump:$last → $NEXT"
 
 # ── 2. 工作树/重名检查 ─────────────────────────────────────────────

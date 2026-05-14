@@ -26,6 +26,7 @@ Step 7  沉淀(必做,confidence=high 必跑):pattern 追加到 known-errors.loc
 | **性能类**:慢 / 超时 / 卡 / P95 升高 / 响应延长 | 指标 + 链路慢 span + **数据库慢查询** + **代码热点路径** | 日志 |
 | **可用性类**:5xx 突增 / down / 不通 / 报错暴涨 | 日志 error pattern + 指标错误率 + **代码近期变更**(`git log`) | 链路 + 数据库(若 query 异常) |
 | **环境/网络类**:某 env 不通 / 跨服务断连 / DNS 失败 | 指标 + 日志 + ns-snapshot + cluster events | 代码(若超时配置变了)|
+| **客户端/用户体验类**:页面白屏 / 按钮没反应 / 卡顿 / 上传失败 / 渲染错乱 / 某浏览器或机型独有 / console 报错 / 用户描述"页面慢"或"加载不出来" | **HAR 文件 / 浏览器 Network panel** + **RUM 错误堆栈**(Sentry / 神策 / ARMS / 自建 console 收集,**让用户主动提供链接或截图**) + **客户端实际 bundle 版本/缓存状态** | 链路 trace(看后端是否真收到请求,关联 `X-Trace-Id` header)+ 后端日志(关联 user_id / session_id)|
 
 **判断逻辑**:命中 ≥1 个关键词 → 该维度从"可选"升"必查";没命中关键词 → 默认按可用性类。
 
@@ -43,6 +44,14 @@ Step 7  沉淀(必做,confidence=high 必跑):pattern 追加到 known-errors.loc
 且用户描述含 "N 个共 M 条" / "导入 N 部,M 集" 这种 **N×M 数量词**,
 额外只问一句:"是 **1 次请求 batch M 条**,还是 **N 次请求各 ~M/N 条**?"
 **只在双重命中(接口名 + N×M 数量词)时触发**;性能类描述"batch 查询慢"不触发。
+
+**1.1c 客户端类问题强制澄清**:症状含 "白屏 / 卡顿 / 按钮没反应 / 渲染错乱 / 某浏览器/机型独有 /
+页面慢 / console 报错 / 上传失败" 等**客户端关键词**(后端类"接口慢"不触发)→
+不要直接进 5.1 trace 查询(机器人 5 维表里"客户端/用户体验类"必查的 HAR/RUM/bundle 都得用户主动给),
+额外问一组:
+"用的什么**浏览器 + 版本**?**哪个页面 + 哪个交互**触发?能给一份 **HAR 文件 / RUM 错误链接(Sentry/神策/ARMS)/ console 截图**吗?
+后端有对应的 **trace_id / request_id** 吗(HAR 里通常在 `X-Trace-Id` request header)?"
+拿到 HAR/RUM/console 之一才进 Step 2,**禁止纯凭"用户说慢" 就开始查后端 trace**(后端视角看不到客户端真相)。
 
 **1.2 症状先验证**(30 秒,防无效排障):
 跑 `baseline_query_templates.error_rate_now` 看症状仍在?
@@ -330,6 +339,27 @@ conclusion: 业务参数校验早返回(parent.title 超 200 字)
    `=0` 只代表 RPC 链路本身没崩,**不等于业务成功**;
    必须从 `response_body` 业务字段(`Response.Code` / `result.code` / `data.errno` 等)
    二次确认,否则该结论降级一档。
+
+**客户端类问题反幻觉自检**(只在 5 维表第 6 行命中时生效,后端类问题这段静默):
+
+3. HAR 显示 `status: 200` 但 `response.body.error` 非空 → 跟 partial-success 接口同款陷阱,
+   **不要因为 HTTP 200 就推"请求成功只是前端 render 出错"**;先按 `body.error` 看业务码失败原因。
+
+4. RUM 错误堆栈是 **minified**(变量名 a/b/c,行号在 bundle.js 几万行)→ 直接读 stack
+   推不出真实代码位置,**必须先 sourcemap 反推到仓库 src/ 行号** 再下结论;sourcemap 拿不到 →
+   confidence 锁 `低`,改写为 "疑似 X 模块,需要 sourcemap 或前端协助定位"。
+
+5. 用户加载的 **bundle hash / build version ≠ 仓库当前 build**(用户没强刷,CDN/浏览器缓存还在旧版)
+   → **禁止推 "代码 bug"**(代码已经修过了用户没拿到),改写为 "用户本地缓存旧版本,引导清缓存 / 硬刷";
+   核对方式:HAR 里加载的 `bundle-<hash>.js` 文件名 vs 仓库当前 build 输出的 hash。
+
+6. 错误**只在某机型 / 某浏览器**(如仅 Safari 14 / 仅 iOS 13 / 仅 Edge legacy)→
+   必须先核 UA + 兼容性表(`browser-compat-map.yaml` 若团队有维护)再下结论,
+   **禁止默认推"代码逻辑错"**;更可能是该机型 API 不支持(fetch keepalive / IntersectionObserver / CSS gap 等)。
+
+7. 用户描述 "**刚才能用现在不行**" / "**别人都能用就我不行**" →
+   必查 (a) CDN TTL + 边缘节点回源失败 (b) 用户本地缓存版本 (c) 该用户独有的 session 状态
+   (旧 cookie / localStorage 跟新代码不兼容),禁止直接推"代码 bug"或"后端崩"。
 
 ### 回滚 vs 热修 决策树
 

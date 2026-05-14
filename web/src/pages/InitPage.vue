@@ -692,7 +692,11 @@ function isRepoDeletable(r: RepoItem): boolean {
 // 否则用户改 URL / 切到别的本地目录 → umbrella 指向另一个项目 → children 路径定位
 // 全部错位(parent_repo 引用本仓 name 不会跟着变)。要改身份必须先删干净 children。
 function countUmbrellaChildren(r: RepoItem): number {
-  return repos.filter(rr => (rr.parent_repo || '').trim() === r.name.trim()).length
+  // 没 name 时直接返回 0:防止新加的仓库 name=='' 跟同样 parent_repo=='' 的 child 行
+  // 互相 '' === '' 匹配上,误判为 umbrella → 锁 URL / 禁删除按钮 / 显示 "被 N 个子模块引用" hint
+  const myName = r.name.trim()
+  if (!myName) return 0
+  return repos.filter(rr => (rr.parent_repo || '').trim() === myName).length
 }
 
 // Sync env_branches keys when environments change

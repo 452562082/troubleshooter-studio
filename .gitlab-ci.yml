@@ -63,10 +63,12 @@ go:lint:
   image: golangci/golangci-lint:v2.0.2
   interruptible: true
   cache:
-    # prefix v2-rw:配合 GOFLAGS=-modcacherw 重建 cache,旧的 read-only 缓存换掉,
-    # 不再触发 "failed to remove ...: Permission denied" warning
+    # prefix v3-rw:bump 自 v2-rw,因为 mongo-driver v1.17.9 升级带新依赖 klauspost/compress/zstd
+    # 后,旧 cache 里 klauspost/compress v1.16.7 目录"已存在但 zstd 子目录缺失",Go 看到目录
+    # 在就不重下,go vet 解析 import 报 "no required module provides package .../zstd"。
+    # bump prefix 强制 cache miss 重新下整套 module,根治残留。
     key:
-      prefix: "v2-rw"
+      prefix: "v3-rw"
       files:
         - go.sum
     paths:
@@ -102,10 +104,11 @@ go:test:
   image: golang:1.25.10
   interruptible: true
   cache:
-    # prefix v2-rw:配合 GOFLAGS=-modcacherw 重建 cache,旧的 read-only 缓存换掉,
-    # 不再触发 "failed to remove ...: Permission denied" warning
+    # prefix v3-rw:bump 自 v2-rw,go:lint job 同款原因 — mongo-driver v1.17.9 升级后
+    # 旧 cache 残留的 klauspost/compress v1.16.7 目录缺 zstd 子目录,go 工具链不重下导致 build/vet 失败。
+    # 两个 job 共享同一 cache key,必须同步 bump。
     key:
-      prefix: "v2-rw"
+      prefix: "v3-rw"
       files:
         - go.sum
     paths:

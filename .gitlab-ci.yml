@@ -233,6 +233,13 @@ desktop:
     # `--unshallow` 在 sideband 协议协商卡 19 分钟到 SIGTERM(14 MiB 小仓库都拖死)。
     # 单次 clone 走的 protocol 路径更短,不依赖本地浅克隆 boundary 状态。代价是每次多几秒。
     GIT_STRATEGY: clone
+    # partial clone:跳过 blob 内容下载,只拉 commit/tree metadata,blob 按需 lazy fetch。
+    # 2026-05-14 撞过 git fetch 跟 Gitaly sideband 协商在 "Created fresh repository." 之后卡 11+ 分钟,
+    # 复刻 2026-05-12 unshallow 同款症状 — fresh clone 在小仓库也撞,protocol 路径短不代表稳。
+    # changelog.sh 只 git log --no-merges 拿 commit subject,git describe 拿 tag,都不读 blob 内容;
+    # release-publish 实际编 binary / 打 dmg 时才会 lazy fetch 需要的 blob,且只补当前 checkout 那批,
+    # 不补全历史 blob → fetch 时间预计压到 1/5。需要 Git 2.19+ + GitLab Runner 14+(已满足)。
+    GIT_FETCH_EXTRA_FLAGS: "--filter=blob:none"
   # release 流程长(编 + 上传),设 30 min 防 runner 卡死无限挂
   timeout: 30 minutes
   # release 不能 interruptible,跑一半被打断会留半截脏 tag/release 状态

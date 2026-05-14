@@ -223,6 +223,8 @@ skill 集合**按 yaml 动态裁剪**,产物的真源在 [`templates/workspace/s
 
 裁剪规则:yaml 里没启用的能力 → 对应 skill 不生成。`generation.skills_whitelist` 是二次过滤(已启用基础上再剔除)。新增 skill 走 `tshoot skill new <name>`。
 
+🧭 想看完整排障链路(7 步主流程 + 5 维证据表 + 反幻觉护栏 + 设计哲学)→ [`docs/troubleshooting-flow.md`](docs/troubleshooting-flow.md)
+
 ## Doctor 漂移检测
 
 8 种规则:`missing-repo` / `origin-mismatch` / `stack-mismatch` / `service-drift` / `config-center-drift` / `config-center-unused` / `data-store-unused` / `undeclared-env-profile`。每条 issue 带可执行修复建议;机器可处理的走 `--fix` 行级精确替换(其他行 bit-perfect 保留,自动备份到 `troubleshooter.yaml.bak.<ts>`)。

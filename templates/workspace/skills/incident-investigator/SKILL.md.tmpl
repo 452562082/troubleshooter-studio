@@ -432,6 +432,18 @@ conclusion: 业务参数校验早返回(parent.title 超 200 字)
    **特别警惕**:广告/订单/用户/支付类业务数据被删/异常,推断"外部 IP 入侵" 时必先核 nacos 真实
    mongo / mysql / redis URI ——很多 "入侵 IP" 是机器人误把代码里的过时默认地址当真造成的。
 
+   **配置中心不可达的 fallback 规则**(关键 — 防 silent fallback 撞坑):
+   - 调 `config-executor` / `nacos-mcp-router` 失败(mcp server not found / 网络不通 / namespace 拿不到 /
+     401/403)→ **绝对不允许 silent fallback 到代码 `config.yaml` 当 runtime 真值**
+   - 失败这件事本身要**当作 `missing_critical_evidence` 列出**,走 Step 5 通用契约的 ASK_USER 三分支:
+     - **(a) 用户帮拿** nacos 当前 service-config 里的 runtime 值 → 加入 evidence_seen 继续
+     - **(b) 用户说 nacos unavailable**(开发期 / 用户没权限)→ confidence 上限锁中 + 故障快报明示
+       "未能确认 runtime 真值,结论基于代码 config.yaml 默认值,X.X.X.X 可能不是生产真实地址"
+     - **(c) 用户跳过** → confidence 上限锁低 + 故障快报明示风险
+   - **文件头注释含 "本地" / "开发" / "fallback" / "default" / "示例" / "example" 关键词**的 yaml →
+     降级为"参考值",**绝不允许当唯一证据**(本次 truss case 的代码 config.yaml 头注释就明示"本地开发环境
+     中间件配置",agent 没看注释直接当 dev 真值)
+
 ### 回滚 vs 热修 决策树
 
 ```

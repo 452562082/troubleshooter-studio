@@ -168,14 +168,19 @@ func TestDerivePrompts_Messaging(t *testing.T) {
 	cfg.Infrastructure.Messaging = []config.Messaging{
 		{Platform: "lark", Enabled: true},
 	}
+	// feishu_project 即便 enabled,2026-05-15 B 方案后也不收 MCP_USER_TOKEN
 	cfg.Infrastructure.ProjectTracking = []config.ProjectTracking{
 		{Platform: "feishu_project", Enabled: true},
 	}
 	got := promptNames(derive(t, cfg))
-	for _, want := range []string{"LARK_APP_ID", "LARK_APP_SECRET", "MCP_USER_TOKEN"} {
+	// LARK_APP_* 收(lark messaging 真接入了);MCP_USER_TOKEN 不收(feishu mcp / SKILL 都没接)
+	for _, want := range []string{"LARK_APP_ID", "LARK_APP_SECRET"} {
 		if !contains(got, want) {
 			t.Errorf("missing %s; got=%v", want, got)
 		}
+	}
+	if contains(got, "MCP_USER_TOKEN") {
+		t.Errorf("MCP_USER_TOKEN 不该被收集(B 方案 — feishu mcp 暂未接入)")
 	}
 }
 

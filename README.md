@@ -209,8 +209,7 @@ skill 集合**按 yaml 动态裁剪**,产物的真源在 [`templates/workspace/s
   - `diagram-generator` —— Mermaid → PNG/SVG(画时间线 / 调用链)
 
 - **⚙️ 配置中心查询**(按 `config_centers` 动态切后端)
-  - `config-executor` —— nacos(MCP via `nacos-mcp-server`)/ apollo / consul / kuboard / Kubernetes ConfigMap / 纯环境变量;按 namespace/group/dataId 读配置 + 历史 + diff;MCP 不可用时 fallback `scripts/nacos_config.py` HTTP API 兜底。
-    要求 Nacos ≥ 3.0(用 Nacos Admin API 3.x);install 阶段一次性 login 拿 token bake 到 mcp 启动参数,要求 nacos 端配长 token TTL 实现 "装一次永久用",详见下方 "Nacos token TTL 配置" 段
+  - `config-executor` —— nacos(Python HTTP API,每次自己 login)/ apollo / consul / kuboard / Kubernetes ConfigMap / 纯环境变量;按 namespace/group/dataId 读配置 + 历史 + diff。nacos 支持 1.x / 2.x / 3.x(走 v1 API,3.x 通过兼容层)。详见下方 "Nacos 配置访问路径" 段
 
 - **📊 可观测性**(按 `observability.<x>.enabled` 启用)
   - `k8s-runtime-query` —— Kuboard v4 HTTP 查 pod / service / deployment / events / logs(只读)
@@ -226,27 +225,40 @@ skill 集合**按 yaml 动态裁剪**,产物的真源在 [`templates/workspace/s
 
 🧭 想看完整排障链路(7 步主流程 + 5 维证据表 + 反幻觉护栏 + 设计哲学)→ [`docs/troubleshooting-flow.md`](docs/troubleshooting-flow.md)
 
-### Nacos token TTL 配置(用 nacos MCP 的前置)
+### Nacos 配置访问路径
 
-`config-executor` 的 nacos 主路径走官方 `nacos-mcp-server`,该 mcp 只接 `--access_token` 鉴权(没有 username/password 自动 refresh 模式)。本工具在 `tshoot install` 阶段**一次性**调 `/nacos/v3/auth/user/login` 拿 token bake 进 mcp 启动参数 — 这种方案要求 nacos 端把 token TTL 调长才能"装一次永久用"。
+`config-executor` 的 nacos 走 **SKILL 内 Python HTTP API**(`scripts/nacos_config.py`),
+不注册 MCP server。每次调用脚本自己 login → 用 token → 丢弃,token TTL 5h / 5y 完全无所谓,
+nacos 端零配合。
 
-**Nacos 端配置**(运维做一次):
+**填地址注意**:`config_centers.endpoints[].addr` 写 **API 端口**(默认 `:8848`),不要写 dashboard
+端口(常见 `:8080`)— dashboard 反代多数只透传 UI,login API 会撞 `No static resource`。
+2026-05-15 truss 现场实测踩过这个坑。
 
-```properties
-# Nacos application.properties(或 K8s ConfigMap)
-nacos.core.auth.plugin.nacos.token.expire.seconds=315360000   # 10 年,足够久
-```
+#### 决策演进(为什么不走 MCP)
 
-Docker / Helm 部署用 env var `NACOS_AUTH_TOKEN_EXPIRE_SECONDS=315360000`。改完重启 nacos 生效。
+| 时间 | 方案 | 真相 |
+|---|---|---|
+| 5d5a139 | nacos 走 HTTP API 脚本 | 临时绕路修 mcp-router 能力错配 |
+| 23d503a | 换 `nacos-mcp-server` 做 MCP 主路径 + HTTP fallback | 解决能力错配,但 token bake 5h 后退化 |
+| **2026-05-15(当前)** | **回 HTTP API 主路径,删 MCP 注册** | 真正的运行时 token refresh,跟「机器人长期跑」对齐 |
 
-**没配长会怎样**:
-- nacos 默认 token TTL 5h,install 后约 5 小时 mcp 调用就开始 401 "invalid token"
-- LLM 自动 fallback 到 `scripts/nacos_config.py` HTTP API 兜底(config-executor SKILL 内置 fallback),不至于排障停摆,但每次都多一跳
-- 真要修就重 `tshoot apply` 一次 install 拿新 token(几秒钟事)
+**为什么 23d503a 那条路走不通**:
+- 官方 `nacos-mcp-server` 只接 `--access_token` CLI 参数,token 在 mcp 进程生命周期内**固定**;
+  LLM 收到 401 没办法重启 mcp 进程换 token(那是 IDE 的事)
+- install 阶段 bake token 要求 nacos 端把 `nacos.core.auth.plugin.nacos.token.expire.seconds`
+  从默认 5h 调到 10 年 — 依赖运维 + 重启 nacos;truss 现场运维不配合,bake 方案沦为
+  「装一次满血几小时然后默默降级到 fallback」,跟产品定位「AI 排障机器人长期跑」错位
 
-**为什么不做自动 token refresh wrapper**:工程复杂度跟收益不对等,nacos 端配长 TTL 是简单根治。
+**HTTP API 主路径的代价**:LLM 失去 MCP 原生 tool-call 体验,每次 nacos 调用要写一行 bash 跑
+Python 脚本。但 nacos 在排障链路里调用频次低(每个 session 通常 1-3 次),不是 grafana / jaeger
+那种 50+ tool call 的高频场景,代价可接受。
 
-**安全风险**:长 TTL token 一旦泄漏,长期可用 — 但 dev nacos 默认 `nacos:nacos` 弱密码安全模型已经不严,加长 TTL 不本质改变风险等级;生产 nacos 配 TTL 时按团队安全要求评估(可考虑 1d-7d 折中)。
+#### 凭据存储
+
+install 阶段把 `CC_ADDR_<ENV>` / `CC_USER_<ENV>` / `CC_PASS_<ENV>` 写到
+`<workspace>/scripts/.env`(0600)。多源场景带 source.id 中缀:`CC_ADDR_<SOURCE>_<ENV>` 等。
+SKILL 调用脚本前 `source scripts/.env` 即可。
 
 ## Doctor 漂移检测
 

@@ -433,8 +433,8 @@ conclusion: 业务参数校验早返回(parent.title 超 200 字)
    mongo / mysql / redis URI ——很多 "入侵 IP" 是机器人误把代码里的过时默认地址当真造成的。
 
    **配置中心不可达的 fallback 规则**(关键 — 防 silent fallback 撞坑):
-   - 调 `config-executor` / `nacos-mcp-router` 失败(mcp server not found / 网络不通 / namespace 拿不到 /
-     401/403)→ **绝对不允许 silent fallback 到代码 `config.yaml` 当 runtime 真值**
+   - 调 `config-executor` 失败(nacos 脚本 login 不通 / apollo/consul mcp not found /
+     网络不通 / namespace 拿不到 / 401 / 403)→ **绝对不允许 silent fallback 到代码 `config.yaml` 当 runtime 真值**
    - 失败这件事本身要**当作 `missing_critical_evidence` 列出**,走 Step 5 通用契约的 ASK_USER 三分支:
      - **(a) 用户帮拿** nacos 当前 service-config 里的 runtime 值 → 加入 evidence_seen 继续
      - **(b) 用户说 nacos unavailable**(开发期 / 用户没权限)→ confidence 上限锁中 + 故障快报明示

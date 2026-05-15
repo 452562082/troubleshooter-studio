@@ -2,13 +2,22 @@
 # 由 troubleshooter-studio 生成。多源配置:每个服务按 repos[].config_source 路由到对应源。
 # - status: verified → 来自代码分析或上轮人工沉淀
 # - status: inferred → 骨架,需人工校对后改为 verified
-# - mcp_server:本行对应的配置中心 MCP 实例名;agent 必须按此字段选择工具(不得拼名)
+# - runtime 字段:所有配置中心都通过 HTTP 脚本访问,LLM 看到 runtime 标记直接调 config-executor SKILL
+#   下的对应脚本,不需要找 mcp_server。当前 4 个 runtime 值:
+#     nacos-http   → scripts/nacos_config.py(2026-05-15 方案 B,token 改不了,每次脚本自己 login 即用即弃)
+#     apollo-http  → scripts/apollo_config.py(生态暂无稳定 Apollo MCP)
+#     consul-http  → scripts/consul_config.py(同上)
+#     kuboard-http → scripts/resolve_runtime_k8s.py(kuboard 历来走 HTTP)
+# - 凭据来源:
+#     nacos:  <workspace>/scripts/.env(CC_ADDR_<ENV> / CC_USER_<ENV> / CC_PASS_<ENV>)
+#             LLM 调脚本前必须先 `source scripts/.env`
+#     apollo / consul / kuboard:  ~/.openclaw/<agent-id>-creds.json(脚本按 --agent-id --env 自己取)
 # 优先级:analyzer finding > prior manual override > inferred skeleton
 {{- $ctx := .}}
 {{- $primaryCC := .Infrastructure.PrimaryConfigCenter.Type}}
 config_center: {{$primaryCC}}        # 主源类型;多源场景下其它源的 type 在 sources 块下展示
 {{- if gt (len .Infrastructure.ConfigCenters) 1}}
-sources:                           # 多源声明;每个 service 按下面 mcp_server 引用对应源的 MCP
+sources:                           # 多源声明;每个 service 按下面 config_source 引用对应源
 {{- range .Infrastructure.ConfigCenters}}
   - id: {{.ID | printf "%q"}}
     type: {{.Type | printf "%q"}}
@@ -31,7 +40,6 @@ environments:
         {{- $endpoints := $src.Endpoints}}
         {{- $nsHint := ""}}
         {{- range $endpoints}}{{if eq .Env $envID}}{{$nsHint = .NamespaceHint}}{{end}}{{end}}
-        {{- $mcp := mcpKeyForAgentSource $ctx.MCPKeyPrefix $cc $sourceID $envID}}
         {{- $f := findConfig $ctx $svc $envID}}
         {{- $p := findPrior $ctx $svc $envID}}
       {{$svc}}:
@@ -43,20 +51,20 @@ environments:
         namespaceId: {{if $f.NamespaceID}}{{$f.NamespaceID | printf "%q"}}{{else}}{{$nsHint | printf "%q"}}{{end}}
         group: {{if $f.Group}}{{$f.Group | printf "%q"}}{{else}}"DEFAULT_GROUP"{{end}}
         dataId: {{$f.DataID | printf "%q"}}
-        mcp_server: {{$mcp | printf "%q"}}
+        runtime: nacos-http
         status: verified
         source: {{$f.SourceFile | printf "%q"}}
         {{- else if $p}}
         namespaceId: {{$p.NamespaceID | printf "%q"}}
         group: {{if $p.Group}}{{$p.Group | printf "%q"}}{{else}}"DEFAULT_GROUP"{{end}}
         dataId: {{$p.DataID | printf "%q"}}
-        mcp_server: {{$mcp | printf "%q"}}
+        runtime: nacos-http
         status: verified
         {{- else}}
         namespaceId: {{$nsHint | printf "%q"}}
         group: "DEFAULT_GROUP"
         dataId: {{if $patterns}}{{index $patterns 0 | printf "%q"}}{{else}}""{{end}}
-        mcp_server: {{$mcp | printf "%q"}}
+        runtime: nacos-http
         status: inferred
         {{- end}}
         {{- else if eq $cc "apollo"}}
@@ -74,7 +82,7 @@ environments:
         {{- if $f.ServerAddr}}
         meta: {{$f.ServerAddr | printf "%q"}}
         {{- end}}
-        mcp_server: {{$mcp | printf "%q"}}
+        runtime: {{printf "%s-http" $cc}}
         status: verified
         source: {{$f.SourceFile | printf "%q"}}
         {{- else if $p}}
@@ -91,14 +99,14 @@ environments:
         {{- if $p.ServerAddr}}
         meta: {{$p.ServerAddr | printf "%q"}}
         {{- end}}
-        mcp_server: {{$mcp | printf "%q"}}
+        runtime: {{printf "%s-http" $cc}}
         status: verified
         {{- else}}
         appId: {{$svc | printf "%q"}}
         cluster: "default"
         namespaces:
           - "application"
-        mcp_server: {{$mcp | printf "%q"}}
+        runtime: {{printf "%s-http" $cc}}
         status: inferred
         {{- end}}
         {{- else if eq $cc "kuboard"}}
@@ -117,7 +125,7 @@ environments:
         {{- if $f.ServerAddr}}
         host: {{$f.ServerAddr | printf "%q"}}
         {{- end}}
-        mcp_server: {{$mcp | printf "%q"}}
+        runtime: {{printf "%s-http" $cc}}
         status: verified
         source: {{$f.SourceFile | printf "%q"}}
         {{- else if $p}}
@@ -126,12 +134,12 @@ environments:
         {{- if $p.ServerAddr}}
         host: {{$p.ServerAddr | printf "%q"}}
         {{- end}}
-        mcp_server: {{$mcp | printf "%q"}}
+        runtime: {{printf "%s-http" $cc}}
         status: verified
         {{- else}}
         kv_prefix: "config"
         default_context: {{$svc | printf "%q"}}
-        mcp_server: {{$mcp | printf "%q"}}
+        runtime: {{printf "%s-http" $cc}}
         status: inferred
         {{- end}}
         {{- else}}

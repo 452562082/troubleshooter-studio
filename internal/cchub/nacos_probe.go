@@ -126,5 +126,6 @@ func (c *nacosClient) login() error {
 		return fmt.Errorf("accessToken 空(账号或密码错?body: %s)", snippet(body))
 	}
 	c.token = doc.AccessToken
+	c.tokenTTL = doc.TokenTTL
 	return nil
 }

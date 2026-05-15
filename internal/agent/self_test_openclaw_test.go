@@ -34,7 +34,7 @@ func TestSelfTestOpenclaw_AfterInstallAllPass(t *testing.T) {
 	wantPass := []string{
 		"workspace 目录",
 		"agents.list 含 shop-troubleshooter",
-		"mcp.servers 齐全(4 项)", // nacos x2 + grafana x2
+		"mcp.servers 齐全(2 项)", // 2026-05-15 方案 B 后:grafana x2;nacos 走 Python HTTP API 不进 mcp
 	}
 	for _, name := range wantPass {
 		if statusByName[name] != "PASS" {

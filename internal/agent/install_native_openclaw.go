@@ -64,9 +64,10 @@ func InstallNativeOpenclaw(ctx context.Context, stagingDir string, opts InstallO
 			log(fmt.Sprintf("[dep] %s ok", dep))
 		}
 	}
+	// uvx 之前给 nacos-mcp-server 用,2026-05-15 方案 B 后 nacos 走 Python HTTP API,
+	// uvx 在 install 阶段不再有必装组件依赖它;留 LookPath 给未来 mcp 扩展用,缺了只是 info。
 	if _, err := exec.LookPath("uvx"); err != nil {
-		// uvx 只 nacos MCP 用到,缺了不致命
-		log("[dep] uvx 没装(nacos-mcp-router 跑不动);brew install uv 或 https://astral.sh/uv/install.sh")
+		log("[dep] uvx 没装(目前没强依赖,nacos 走 python3 主路径;若以后接入需要 uvx 的 MCP 再装:brew install uv)")
 	}
 
 	// 3) merge .env 老凭证(Creds 优先)

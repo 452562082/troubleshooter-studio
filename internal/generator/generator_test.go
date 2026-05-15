@@ -60,19 +60,20 @@ func TestGenerate_MultiSource_ConfigMapRoutesPerService(t *testing.T) {
 	}
 	cm := readFile(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/config-map.yaml"))
 
-	// 主源服务(order-service)用老命名(无 source 中缀):<agent-id>-nacos-<env>
-	for _, env := range []string{"dev", "staging", "prod"} {
-		want := `mcp_server: "shop-nacos-` + env + `"`
-		if !strings.Contains(cm, want) {
-			t.Errorf("主源服务应有 %q,但 config-map 缺;\n%s", want, cm)
-		}
+	// 2026-05-15 方案 B 后:nacos 不渲染 mcp_server,所有 nacos 服务都标 runtime: nacos-http。
+	// 主源 / 副源的区分还有效(config_source 字段下面单独验证),只是不再通过 mcp_server 名字承载。
+	if !strings.Contains(cm, "runtime: nacos-http") {
+		t.Errorf("config-map should mark nacos services as runtime: nacos-http,\ngot:\n%s", cm)
 	}
-
-	// 副源服务(product-service)用新命名:nacos-mcp-server-legacy-nacos-<env>
+	// 反向护栏:不应再出现任何 nacos mcp 名(mcp 不存在,渲染了 LLM 会去找)
 	for _, env := range []string{"dev", "staging", "prod"} {
-		want := `mcp_server: "shop-nacos-legacy-nacos-` + env + `"`
-		if !strings.Contains(cm, want) {
-			t.Errorf("副源服务应有 %q,但 config-map 缺;\n%s", want, cm)
+		for _, bad := range []string{
+			`mcp_server: "shop-nacos-` + env + `"`,
+			`mcp_server: "shop-nacos-legacy-nacos-` + env + `"`,
+		} {
+			if strings.Contains(cm, bad) {
+				t.Errorf("config-map 不应再渲染 nacos mcp 名 %q(方案 B 已删 mcp 注册)", bad)
+			}
 		}
 	}
 
@@ -155,20 +156,16 @@ func TestGenerate_Nacos_Shop(t *testing.T) {
 		t.Errorf("config-map should declare nacos center:\n%s", cm)
 	}
 
-	// Q: config-map 每行必须带 mcp_server，且按 env 区分
-	for _, env := range []string{"dev", "staging", "prod"} {
-		want := "mcp_server: \"shop-nacos-" + env + "\""
-		if !strings.Contains(cm, want) {
-			t.Errorf("config-map missing per-env mcp_server %q", want)
-		}
+	// 2026-05-15 方案 B 后:nacos 不走 MCP,config-map 里 nacos 服务标 runtime: nacos-http,
+	// 不再渲染 mcp_server 字段。改成验证 runtime: nacos-http 标签出现(且 per-service 都有)。
+	if !strings.Contains(cm, "runtime: nacos-http") {
+		t.Errorf("config-map should mark nacos services as runtime: nacos-http,\ngot:\n%s", cm)
 	}
-
-	// MCP 注入逻辑搬到 agent.InstallNativeOpenclaw 内部,这里的 staging 产物里
-	// 不再有 install.sh,只能从 config-map 间接验证 per-env MCP 拼对了名字。
+	// 反向护栏:不应再出现 shop-nacos-<env> 这种 mcp 名(mcp 不存在,渲染了 LLM 会去找)
 	for _, env := range []string{"dev", "staging", "prod"} {
-		want := "shop-nacos-" + env
-		if !strings.Contains(cm, want) {
-			t.Errorf("config-map missing per-env mcp ref %q", want)
+		bad := "shop-nacos-" + env
+		if strings.Contains(cm, bad) {
+			t.Errorf("config-map 不应再渲染 nacos mcp 名 %q(方案 B 已删 mcp 注册)", bad)
 		}
 	}
 

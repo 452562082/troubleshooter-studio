@@ -291,3 +291,104 @@ func TestPreloadNacos_V3RootPath(t *testing.T) {
 		t.Errorf("note 应包含 'v3' + '根路径',got %v", r.Notes)
 	}
 }
+
+// TestLoginNacos_V1Only 模拟 nacos 2.x:只有 /v1/auth/login,/v3 全 404。
+// 用户 2026-05-15 实测部署就是这种(nacos-server:v2.3.0,API 端口 8848)。
+// 验证 LoginNacos 公开入口能 probe + login 拿到 (token, tokenTtl, note),
+// 这是 install 端 doLoginNacos 复用的同一条路径 — 直接保护 install 阶段不撞 v3 死路。
+func TestLoginNacos_V1Only(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		// v3 探测全 404 → probeFlavor 自动回退 v1
+		case "/nacos/v3/console/server/state", "/v3/console/server/state", "/v1/console/server/state":
+			http.NotFound(w, r)
+		case "/nacos/v1/console/server/state":
+			_ = json.NewEncoder(w).Encode(map[string]any{"version": "2.3.0"})
+		case "/nacos/v1/auth/login":
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			if r.FormValue("username") != "nacos" || r.FormValue("password") != "nacos" {
+				http.Error(w, "bad creds", http.StatusForbidden)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"accessToken": "tok-v1-abc",
+				"tokenTtl":    18000, // nacos 默认 5h
+				"username":    "nacos",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	token, ttl, note, err := LoginNacos(srv.URL, "nacos", "nacos")
+	if err != nil {
+		t.Fatalf("LoginNacos v1: %v", err)
+	}
+	if token != "tok-v1-abc" {
+		t.Errorf("token = %q, want tok-v1-abc", token)
+	}
+	if ttl != 18000 {
+		t.Errorf("ttl = %d, want 18000", ttl)
+	}
+	if !strings.Contains(note, "v1") {
+		t.Errorf("note 应提及 v1,got %q", note)
+	}
+}
+
+// TestLoginNacos_V3Path 模拟 nacos 3.x:/v3/auth/user/login 通,/v1 全 404。
+func TestLoginNacos_V3Path(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/nacos/v3/console/server/state":
+			_ = json.NewEncoder(w).Encode(map[string]any{"version": "3.1.0"})
+		case "/nacos/v3/auth/user/login":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"accessToken": "tok-v3-xyz",
+				"tokenTtl":    315360000, // 10y — 推荐值
+				"username":    "nacos",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	token, ttl, note, err := LoginNacos(srv.URL, "nacos", "nacos")
+	if err != nil {
+		t.Fatalf("LoginNacos v3: %v", err)
+	}
+	if token != "tok-v3-xyz" {
+		t.Errorf("token = %q, want tok-v3-xyz", token)
+	}
+	if ttl != 315360000 {
+		t.Errorf("ttl = %d, want 315360000", ttl)
+	}
+	if !strings.Contains(note, "v3") {
+		t.Errorf("note 应提及 v3,got %q", note)
+	}
+}
+
+// TestLoginNacos_BadCreds 凭据错 → 返 error,install 端会 warn skip 注册。
+func TestLoginNacos_BadCreds(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/nacos/v3/console/server/state", "/v3/console/server/state", "/v1/console/server/state":
+			http.NotFound(w, r)
+		case "/nacos/v1/console/server/state":
+			_ = json.NewEncoder(w).Encode(map[string]any{"version": "2.3.0"})
+		case "/nacos/v1/auth/login":
+			http.Error(w, `{"status":403,"message":"unknown user"}`, http.StatusForbidden)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	_, _, _, err := LoginNacos(srv.URL, "nacos", "wrong-pass")
+	if err == nil {
+		t.Fatal("bad creds 应返 error,got nil")
+	}
+}

@@ -48,6 +48,7 @@ type nacosClient struct {
 	username  string
 	password  string
 	token     string // login 后缓存,连接池内可跨请求复用
+	tokenTTL  int    // 服务端声明的 tokenTtl(秒);install 阶段 bake token 时用来判断是否短到不可用
 }
 
 func PreloadNacos(req Request) (*Result, error) {
@@ -141,6 +142,30 @@ func PreloadNacos(req Request) (*Result, error) {
 	}
 
 	return &Result{Type: "nacos", Entries: allEntries, Namespaces: nsList, Notes: notes}, nil
+}
+
+// LoginNacos 给 install 阶段「一次性 bake accessToken 到 mcp 启动参数」用。
+//
+// 内部走完整的 probe + login(复用 connectNacos),自动适配 v1/v3 + /nacos 与根路径
+// 四种组合,所以 nacos 2.x(只有 v1)/3.x(默认 v3、保留 v1 兼容)/魔改 contextPath
+// 都能跑;不像之前在 install 端写死 v3,撞 2.x 必挂。
+//
+// 不入 connpool(install 是一次性操作、非热路径,缓存价值低),独立 client 完成 probe+login 后丢弃。
+//
+// 返回:
+//   - token:   accessToken,直接当 mcp 启动参数 --access_token 用
+//   - ttlSec:  服务端声明的有效期(秒);install 端用来判断是否短到不实用,
+//              短 TTL 下方案 A「装一次永久用」不成立,需 warn 提示用户调长 nacos 端配置
+//   - note:    人话提示(用了哪个 API 版本 / 路径),写到 install 日志
+func LoginNacos(addr, username, password string) (token string, ttlSec int, note string, err error) {
+	cli, err := connectNacos(addr, username, password)
+	if err != nil {
+		return "", 0, "", err
+	}
+	if cli.token == "" {
+		return "", 0, cli.probeNote, fmt.Errorf("nacos 开放模式(没要求 login)无 accessToken — install 方案 A 需要 token bake,请在 nacos 端开启 auth 后重试")
+	}
+	return cli.token, cli.tokenTTL, cli.probeNote, nil
 }
 
 // snippet 跨文件共享 —— probe / list / fetch 的所有错误消息都用它截 body。

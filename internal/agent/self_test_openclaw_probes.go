@@ -70,14 +70,9 @@ func requiredMCPKeys(cfg *config.SystemConfig, agentID string) []string {
 		return agentID + "-" + name
 	}
 	var out []string
-	for _, cc := range cfg.Infrastructure.ConfigCenters {
-		if cc.Type != "nacos" {
-			continue
-		}
-		for _, e := range cfg.Environments {
-			out = append(out, mcpKeyForAgent(agentID, "nacos", cc.ID, e.ID))
-		}
-	}
+	// 注:nacos 不在 requiredMCPKeys —— 2026-05-15 truss case 复盘后定方案 B,nacos 走
+	// SKILL 内 Python HTTP API,install 阶段不注册 mcp。详见
+	// install_native_mcp_common.go::BuildMCPServers 内大段注释。
 	if cfg.Infrastructure.Observability.Grafana.Enabled {
 		for _, e := range cfg.Environments {
 			out = append(out, withAgent("grafana-"+e.ID))

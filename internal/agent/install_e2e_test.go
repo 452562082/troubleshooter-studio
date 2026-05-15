@@ -141,18 +141,20 @@ func fakeCreds() map[string]string {
 // 命名规则见 install_naming.go::mcpKeyForAgent + buildMCPServersForCfg:
 //
 //	prefix = MCPKeyPrefix() = "shop"
-//	nacos  per env(默认源 id=default → 不带 source 中缀):shop-nacos-<env>
-//	grafana per env:                                 shop-grafana-<env>
+//	grafana per env: shop-grafana-<env>
 //
-// 注:loki MCP 已合并进 grafana MCP(2026-05),query_loki_* 工具由 grafana mcp-grafana-npx
+// 注 1:loki MCP 已合并进 grafana MCP(2026-05),query_loki_* 工具由 grafana mcp-grafana-npx
 // 提供;不再单独注册 shop-loki-<env>。
+//
+// 注 2:nacos 故意不在列表里 — 2026-05-15 truss case 三层复盘后定方案 B,nacos 走 SKILL
+// 内 Python HTTP API,**不**注册 mcp。详见 install_native_mcp_common.go::BuildMCPServers。
 //
 // shop-troubleshooter.yaml 有 dev / staging / prod 三个环境。
 func expectedMCPKeys() []string {
 	envs := []string{"dev", "staging", "prod"}
 	out := []string{}
 	for _, e := range envs {
-		out = append(out, "shop-nacos-"+e, "shop-grafana-"+e)
+		out = append(out, "shop-grafana-"+e)
 	}
 	return out
 }

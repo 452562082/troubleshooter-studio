@@ -25,9 +25,19 @@ description: 通过 Jaeger 查询分布式链路追踪。优先用预注册的 j
 ## 主路径:mcp tool(已预注册,首选)
 
 ```text
-查 mcp tools 列表 → 找名字含 `jaeger-<env>` 的工具 → 直接 tool_use 调。
+查 mcp tools 列表 → 找名字含 `jaeger-<env>` 的工具。traceloop/opentelemetry-mcp 暴露 5 个:
+  search_traces  — 按 service / operation / 时间范围 / duration 搜索 trace
+  get_trace      — 按 trace_id 取完整 trace
+  list_services  — 列所有 service
+  find_errors    — 找出错误的 trace(排障最常用之一)
+  get_llm_usage  — LLM 调用统计(本工具偏 LLM-tracing 设计,普通微服务排障**用不上**)
+
 URL 已 bake 进 server,只传 trace_id / service / operation / time-range,不需手动 JAEGER_URL。
 ```
+
+> **说明**:traceloop/opentelemetry-mcp 是 LLM-tracing 公司做的,工具签名带不少 `gen_ai_system` /
+> `gen_ai_model` 等 LLM 专用 filter — 普通微服务排障时**全部留空即可**,不影响通用 trace 查询。
+> `get_llm_usage` 这条工具只在排查 AI 应用 token / 成本时用,常规排障忽略。
 
 ## fallback:Jaeger HTTP API
 

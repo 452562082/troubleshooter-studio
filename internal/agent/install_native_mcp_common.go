@@ -1093,8 +1093,9 @@ func (b *mcpBuilder) buildFeishuProject(servers map[string]any) {
 			fmt.Fprintf(os.Stderr, "[warn] feishu_project mcp 暂未启用注册\n")
 			fmt.Fprintf(os.Stderr, "        理由:@lark-project/mcp v0.0.1 是字节内部 prototype(repo/readme 空),\n")
 			fmt.Fprintf(os.Stderr, "             MCP_USER_TOKEN 疑似 2h 过期 user token,bake 后会失效\n")
-			fmt.Fprintf(os.Stderr, "        现状:yaml 仍合法,凭据仍收集(不丢用户输入);install 仅跳过 mcp 注册\n")
-			fmt.Fprintf(os.Stderr, "        等条件:字节发 v1.x 正式版后重启用 — 详见 install_native_mcp_common.go::buildFeishuProject 注释\n")
+			fmt.Fprintf(os.Stderr, "        现状(2026-05-15 B 方案):yaml 仍合法,但 install_prompts 暂停收 MCP_USER_TOKEN,\n")
+			fmt.Fprintf(os.Stderr, "             SKILL / Python OpenAPI 脚本都未补 — 项目跟踪能力当前不可用\n")
+			fmt.Fprintf(os.Stderr, "        等条件:字节发 v1.x 正式版 + 我们补完 SKILL 后重启用 — 详见 install_native_mcp_common.go::buildFeishuProject 注释\n")
 			_ = servers // 占位:重启用时改回 servers[b.keyFixed("FeishuProjectMcp")] = ...
 			return
 		}

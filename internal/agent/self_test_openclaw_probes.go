@@ -99,12 +99,9 @@ func requiredMCPKeys(cfg *config.SystemConfig, agentID string) []string {
 			break
 		}
 	}
-	for _, p := range cfg.Infrastructure.ProjectTracking {
-		if p.Enabled && p.Platform == "feishu_project" {
-			out = append(out, withAgent("FeishuProjectMcp"))
-			break
-		}
-	}
+	// 注:feishu_project 不在 requiredMCPKeys —— 2026-05-15 审计后暂时禁用 mcp 注册
+	// (@lark-project/mcp v0.0.1 是字节内部 prototype),buildFeishuProject 仅打 warn。
+	// yaml 仍合法,字节发正式版后翻 buildFeishuProject 即可重启用,届时这里也补回 FeishuProjectMcp。
 	return out
 }
 

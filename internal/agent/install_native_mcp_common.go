@@ -21,7 +21,9 @@ package agent
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 
@@ -1096,16 +1098,29 @@ func (b *mcpBuilder) buildLark(servers map[string]any) {
 }
 
 // buildFeishuProject project tracking:feishu_project
+//
+// 2026-05-15 审计后**暂时禁用 mcp 注册**(yaml schema / wizard / prompts 凭据收集都不动,
+// 留作字节发正式版时重启用一行翻开)。理由:
+//
+// 上游包 @lark-project/mcp v0.0.1 验真后判定为字节内部 prototype-grade:
+//   - npm 元数据 repository / homepage / readme **全空**(`@bytedance.com` 个人邮箱 maintainer)
+//   - 主版本号 0.0.x → 稳定性 / 工具集 / 协议都可能未来 break
+//   - 架构上是 stdio→HTTPS 透明代理(转发到 https://project.feishu.cn/mcp_server/v1),
+//     工具集**完全由飞书服务端控制**,我们这边无法保证;字节运维改了我们这边自动跟着变
+//   - MCP_USER_TOKEN 经 `X-Mcp-Token` header 传 — 从命名看是 user-scoped token,
+//     **飞书规范 user_access_token 默认 2h 过期**,bake 进 mcp env 就是 nacos 同款失效坑
+//
+// 等条件:字节发 v1.x 正式版(有 README + 公开 repo + 长期 token 续期机制)后,把下面 if 分支
+// 的 `_ = ...` 替换回真注册代码即可。当前 install 时打 warn 让用户知道为啥没用 mcp。
 func (b *mcpBuilder) buildFeishuProject(servers map[string]any) {
 	for _, p := range b.cfg.Infrastructure.ProjectTracking {
 		if p.Enabled && p.Platform == "feishu_project" {
-			servers[b.keyFixed("FeishuProjectMcp")] = map[string]any{
-				"command": "npx",
-				"args":    []any{"-y", "@lark-project/mcp", "--domain", "https://project.feishu.cn"},
-				"env": b.envBlock(map[string]any{
-					"MCP_USER_TOKEN": b.get("MCP_USER_TOKEN"),
-				}),
-			}
+			fmt.Fprintf(os.Stderr, "[warn] feishu_project mcp 暂未启用注册\n")
+			fmt.Fprintf(os.Stderr, "        理由:@lark-project/mcp v0.0.1 是字节内部 prototype(repo/readme 空),\n")
+			fmt.Fprintf(os.Stderr, "             MCP_USER_TOKEN 疑似 2h 过期 user token,bake 后会失效\n")
+			fmt.Fprintf(os.Stderr, "        现状:yaml 仍合法,凭据仍收集(不丢用户输入);install 仅跳过 mcp 注册\n")
+			fmt.Fprintf(os.Stderr, "        等条件:字节发 v1.x 正式版后重启用 — 详见 install_native_mcp_common.go::buildFeishuProject 注释\n")
+			_ = servers // 占位:重启用时改回 servers[b.keyFixed("FeishuProjectMcp")] = ...
 			return
 		}
 	}

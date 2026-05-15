@@ -413,6 +413,25 @@ conclusion: 业务参数校验早返回(parent.title 超 200 字)
    必查 (a) CDN TTL + 边缘节点回源失败 (b) 用户本地缓存版本 (c) 该用户独有的 session 状态
    (旧 cookie / localStorage 跟新代码不兼容),禁止直接推"代码 bug"或"后端崩"。
 
+**runtime 配置源优先级自检**(通用,涉及任何 runtime 配置 / 连接 / 服务地址类推断时生效):
+
+8. 推断里**引用了具体的 host / IP / 端口 / 数据库连接串 / 三方 API 地址 / 服务地址 / 超时值 / 限流阈值** →
+   必须先确认**数据源是配置中心**(nacos / apollo / consul / kubernetes ConfigMap)的 **runtime 值**,
+   **不允许直接信任代码仓库里的 `config.yaml` / `application.yml` / `.env` / `config.toml`** ——
+   那些是**默认值 / 早期开发值 / 历史残留**,生产 runtime 大概率被配置中心覆盖。
+
+   **反模式**:在代码仓库 grep 到 `mongo.uri = X.X.X.X:27017` 就当 "真实 mongo 地址" 推断 →
+   完全可能 X.X.X.X 是 3 年前迁移前的地址,nacos 里早改成 Y.Y.Y.Y。
+
+   **正确流程**(数据/状态类问题尤其严格):
+   - 先调 `config-executor` 拿 nacos / apollo / consul 里**当前服务**的实际配置
+   - 跟代码仓库里 config.yaml 默认值**双向对比**,**以配置中心为准**
+   - 不一致时,代码 config.yaml 的值**禁止当根因证据**,只能作为 "历史/默认值参考"
+   - 没接配置中心(`PrimaryConfigCenter.Type=env-vars` / `kubernetes` / 无)的场景才允许用代码默认值
+
+   **特别警惕**:广告/订单/用户/支付类业务数据被删/异常,推断"外部 IP 入侵" 时必先核 nacos 真实
+   mongo / mysql / redis URI ——很多 "入侵 IP" 是机器人误把代码里的过时默认地址当真造成的。
+
 ### 回滚 vs 热修 决策树
 
 ```

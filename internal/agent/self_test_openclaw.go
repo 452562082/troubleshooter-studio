@@ -92,6 +92,10 @@ func SelfTestOpenclaw(ctx context.Context, dir string) (*SelfTestResult, error) 
 		add("mcp.servers 齐全", "FAIL", "缺失:"+strings.Join(missing, ", "))
 	}
 
+	// mcp 真能起 + tools/list 返非空 — 2026-05-15 加(防 rabbitmq fastmcp 那种 install 显示
+	// success 但 mcp 进程秒挂的 silent failure)。逻辑详见 self_test_mcp_probe.go 头部注释。
+	probeMCPServersFromConfig(ctx, servers, add)
+
 	// nacos TCP 探活:多源逐个测。
 	// 2026-05-15 方案 B 后,nacos 不再注册 mcp,addr 不能从 mcp env 读了 — 改成读 cfg
 	// 的 ConfigCenter.Endpoints[].Addr(也是 wizard 写进 scripts/.env 的 CC_ADDR_* 源)。

@@ -34,6 +34,24 @@ config-map.yaml 里每条服务定位都带**两类指针之一**:
 
 **禁止行为**:先调 `list_datasources` 看到多个 loki/prometheus → 把每个 UID 都查一遍。用户在配置时已选定唯一的"排障专用 datasource",其他 datasource 即便 grafana 列出了也是噪音。本 env 没配 UID → 报"该 env 缺 `datasource_uid_by_env.<env>`,请回 wizard 补",不要瞎选。
 
+## grafana mcp 写工具软约束(2026-05-15 runtime probe 后加)
+
+实测 grafana mcp(`mcp-grafana-npx`)在我们的 6 个 disable flag 之后仍**暴露 28 个工具**,其中
+**5 个是写工具**:
+
+```
+create_annotation / create_folder / update_annotation / update_dashboard / generate_deeplink
+```
+
+`generate_deeplink` 实际是生成 URL 不改 grafana 状态,算只读。其余 4 个真写:
+
+**排障禁调清单**:
+- `create_annotation` / `update_annotation` — 排障是诊断,不该改 grafana 状态;真要标记事件用 incident-investigator 的故障快报输出
+- `create_folder` — 排障不该建文件夹
+- `update_dashboard` — 排障不该改 dashboard
+
+**为什么不在 mcp 层硬约束(`--disable-write` flag)**:跟 mysql/redis/kafka produce_message 同款软约束哲学 — 留口子给紧急人工指令(用户在 IDE 里明确说"标记一下故障时间点")可绕过,常规排障 LLM 不主动调。LLM 自主调这 4 个写工具视为越权,立刻 abort 并告知用户。
+
 ## 映射文件清单
 
 按问题类型 read 最小必要文件,**别全读**:

@@ -11,6 +11,32 @@
 - **上层(此仓库)**:研制环境,做 `troubleshooter.yaml` 建模、仓库扫描、校验、生成、部署、管理
 - **下层(产出物)**:完整可运行的排障机器人 —— skill 集合按 yaml 动态裁剪,固定核心 + 按配置 / 数据层 / 可观测性勾选的 runtime-query + 多环境 MCP + 标准故障话术,脱离 studio 独立运行
 
+## 按角色快速导览
+
+| 你是 | 从这读起 |
+|---|---|
+| **第一次接触本项目,想跑通** | [下载与安装](#下载与安装) → [两个入口](#两个入口) → [部署到 4 个 AI 平台](#部署到-4-个-ai-平台) |
+| **想知道排障机器人能干什么** | [排障机器人具备什么能力](#排障机器人具备什么能力) → [`docs/troubleshooting-flow.md`](docs/troubleshooting-flow.md) (完整 7 步流程 + 5 维证据表) |
+| **要建模一个新的微服务系统** | [适配的系统架构](#适配的系统架构) → [Monorepo / Umbrella 仓库](#monorepo--umbrella-仓库) → [`examples/shop-troubleshooter.yaml`](examples/shop-troubleshooter.yaml) |
+| **维护本项目代码 / 想看历史决策** | [`docs/decisions.md`](docs/decisions.md) (本会话的设计决策演进:nacos / postgres / rabbitmq / mcp 软约束哲学等) → [目录结构](#目录结构) |
+| **运维想集成 CI** | [`docs/CI-RELEASE.md`](docs/CI-RELEASE.md) → [构建](#构建) |
+
+## 目录
+
+- [两个入口](#两个入口)
+- [部署到 4 个 AI 平台](#部署到-4-个-ai-平台)
+- [下载与安装](#下载与安装)(桌面 app / CLI / 源码)
+- [适配的系统架构](#适配的系统架构)
+- [Monorepo / Umbrella 仓库](#monorepo--umbrella-仓库)
+- [桌面 app 页面](#桌面-app-页面)
+- [CLI 子命令](#cli-子命令)
+- [排障机器人具备什么能力](#排障机器人具备什么能力)
+  - [Nacos 配置访问路径](#nacos-配置访问路径)
+- [Doctor 漂移检测](#doctor-漂移检测)
+- [构建](#构建)
+- [目录结构](#目录结构)
+- [已知限制](#已知限制)
+
 ## 两个入口
 
 | 入口 | 能力 | 适用 |

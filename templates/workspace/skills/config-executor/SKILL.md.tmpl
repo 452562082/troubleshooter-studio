@@ -36,14 +36,16 @@ description: 通用配置中心执行技能（后端：{{.Infrastructure.Primary
 - `{{$.MCPKeyPrefix}}-nacos-{{.ID}}`
 {{- end}}
 
-执行步骤：
-1. `routing` 返回 `mcp_server={{.MCPKeyPrefix}}-nacos-<env>` + `namespaceId/group/dataId`
-2. 调用该 MCP 的 `get_config` / `list_config_history` 等工具
-3. 需要跨 env 对比时：本地保存两份 text → `python3 scripts/nacos_diff.py --left-text ... --right-text ...`
+**重要前提**(2026-05-15 truss case 复盘发现):
 
-**MCP 启动失败时 fallback**(凡是 tool error 包含 `connection / not found / unable to spawn / uvx not found / ENOENT` 的情况):
+install 注册的 `{{.MCPKeyPrefix}}-nacos-<env>` 用的是 `nacos-mcp-router@latest`,这是
+**nacos 的 MCP 市场管理工具**(搜索 / 安装 / 调用注册到 nacos 上的其他 mcp server),
+**不暴露 `get_config` 接口,不能读 nacos KV 配置**。
 
-不要放弃 —— 直接走 Python 脚本(同等能力,只是没 LLM tool 装饰):
+所以读 nacos 配置的**主路径就是直接走 Python 脚本 HTTP API**,**不要试调 nacos-mcp-router 的工具**
+(浪费一次 tool call + 失败后 LLM 容易 silent fallback 到 grep 代码当真值)。
+
+执行步骤(主路径):
 
 ```bash
 # 读单条配置
@@ -51,7 +53,16 @@ python3 scripts/nacos_config.py get --server <NACOS_ADDR> --user <CC_USER> --pas
   --namespace <namespaceId> --group <group> --data-id <dataId>
 # 看历史
 python3 scripts/nacos_config.py history --server <...> --namespace ... --group ... --data-id ...
+# 跨 env 对比
+python3 scripts/nacos_diff.py --left-text ... --right-text ...
 ```
+
+`<NACOS_ADDR>` / `<CC_USER>` / `<CC_PASS>` 从 `~/.openclaw/{{.AgentID}}-creds.json` 或对应平台的 creds.json 读;
+`<namespaceId>` / `<group>` / `<dataId>` 从 `routing/references/config-map.yaml` 按 service 反查。
+
+**如果用户未来在 nacos 上注册了"配置读取" MCP Server**(目前注册表为空),
+nacos-mcp-router 才能 `searchMcpServer` 找到它 → `callMcpServerTool` 调它的 `get_config`。
+那时候 SKILL 主路径才该切回 MCP。**当前阶段一律走 HTTP API**。
 
 `<NACOS_ADDR>` 等参数从 `~/.openclaw/{{.AgentID}}-creds.json` 或对应平台的 creds.json 读;路径见 AGENTS.md "skills/scripts/references 路径速记"。失败仍报错时按 AGENTS.md "MCP 连不上"话术给用户。
 

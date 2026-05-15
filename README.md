@@ -209,7 +209,8 @@ skill 集合**按 yaml 动态裁剪**,产物的真源在 [`templates/workspace/s
   - `diagram-generator` —— Mermaid → PNG/SVG(画时间线 / 调用链)
 
 - **⚙️ 配置中心查询**(按 `config_centers` 动态切后端)
-  - `config-executor` —— nacos(MCP)/ apollo / consul / kuboard / Kubernetes ConfigMap / 纯环境变量;按 namespace/group/dataId 读配置 + 历史 + diff
+  - `config-executor` —— nacos(HTTP API,经 `scripts/nacos_config.py`)/ apollo / consul / kuboard / Kubernetes ConfigMap / 纯环境变量;按 namespace/group/dataId 读配置 + 历史 + diff。
+    注:`nacos-mcp-router` MCP 是 nacos MCP 市场管理工具(`searchMcpServer` / `installMcpServer`),**不暴露 `get_config`**,所以 nacos 配置读取走 HTTP API 不走 MCP
 
 - **📊 可观测性**(按 `observability.<x>.enabled` 启用)
   - `k8s-runtime-query` —— Kuboard v4 HTTP 查 pod / service / deployment / events / logs(只读)

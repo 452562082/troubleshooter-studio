@@ -10,7 +10,6 @@
 package agent
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 
@@ -746,67 +745,29 @@ func TestBuildMCPServers_DataStores_Kafka_MultiCluster(t *testing.T) {
 	}
 }
 
-// TestBuildMCPServers_DataStores_RabbitMQ:rabbitmq MCP(AWS amq-mcp-server-rabbitmq)注册验证。
-// 用 uvx 启动(零安装),默认只读(不传 --allow-mutative-tools),凭据落 args(已知 trade-off,同 redis/pg)。
-func TestBuildMCPServers_DataStores_RabbitMQ(t *testing.T) {
+// TestBuildMCPServers_DataStores_RabbitMQ_Disabled 2026-05-15 起 rabbitmq mcp 不注册(同 nacos / feishu_project 方案 B)。
+// 两个 PyPI 候选 amq-mcp-server-rabbitmq / rabbitmq-mcp-server 实测都跑不起来:
+//   - amq 包源码引用 fastmcp 不存在的 BearerAuthProvider(任何版本都没有)
+//   - rabbitmq-mcp-server 依赖声明缺一堆(tabulate / tomli / requests)
+// SKILL rabbitmq-runtime-query 主路径走 HTTP Management API。这条护栏防止有人改回 mcp 注册。
+func TestBuildMCPServers_DataStores_RabbitMQ_NotRegistered(t *testing.T) {
 	cfg := &config.SystemConfig{
-		Environments: []config.Environment{{ID: "test"}},
+		Environments: []config.Environment{{ID: "test"}, {ID: "prod"}},
 		Infrastructure: config.Infrastructure{
 			DataStores: []config.DataStore{{
 				Type: "rabbitmq", Enabled: true,
 				Endpoints: []config.DataStoreEndpoint{
 					{Env: "test", URL: "amqp://rmq:rpw@rmq.test.example.com:5672/"},
+					{Env: "prod", URL: "amqp://u:p@rmq-commerce.prod:5672/"},
 				},
 			}},
 		},
 	}
 	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(_ string) string { return "" })
 
-	mcp, ok := servers["rabbitmq-test"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected 'rabbitmq-test' registered, got: %v", keysOf(servers))
-	}
-	if mcp["command"] != "uvx" {
-		t.Errorf("rabbitmq command should be 'uvx', got: %v", mcp["command"])
-	}
-	args := mcp["args"].([]any)
-	if len(args) == 0 || args[0] != "amq-mcp-server-rabbitmq@latest" {
-		t.Errorf("rabbitmq first arg should be 'amq-mcp-server-rabbitmq@latest', got: %v", args)
-	}
-	// 必须不含 --allow-mutative-tools(默认只读才是项目契约)
-	for _, a := range args {
-		if a == "--allow-mutative-tools" {
-			t.Errorf("rabbitmq MCP must default to read-only,禁止传 --allow-mutative-tools")
-		}
-	}
-	// 凭据 / host / port 都该在 args 里
-	joined := fmt.Sprint(args...)
-	for _, want := range []string{"rmq.test.example.com", "5672", "rmq", "rpw"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("rabbitmq args should contain %q, got: %v", want, args)
-		}
-	}
-}
-
-// TestBuildMCPServers_DataStores_RabbitMQ_MultiCluster:rabbitmq 多 cluster dedup-by-URL。
-func TestBuildMCPServers_DataStores_RabbitMQ_MultiCluster(t *testing.T) {
-	cfg := &config.SystemConfig{
-		Environments: []config.Environment{{ID: "test"}},
-		Infrastructure: config.Infrastructure{
-			DataStores: []config.DataStore{{
-				Type: "rabbitmq", Enabled: true,
-				Endpoints: []config.DataStoreEndpoint{
-					{Env: "test", URL: "amqp://u:p@rmq-commerce.test:5672/"},
-					{Env: "test", URL: "amqp://u:p@rmq-user.test:5672/"},
-				},
-			}},
-		},
-	}
-	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(_ string) string { return "" })
-
-	for _, k := range []string{"rabbitmq-rmq-commerce-test", "rabbitmq-rmq-user-test"} {
-		if _, ok := servers[k]; !ok {
-			t.Errorf("expected multi-cluster rabbitmq %q, got: %v", k, keysOf(servers))
+	for k := range servers {
+		if strings.Contains(k, "rabbitmq") {
+			t.Errorf("rabbitmq mcp 不应注册(方案 B,上游包 broken),got: %s", k)
 		}
 	}
 }

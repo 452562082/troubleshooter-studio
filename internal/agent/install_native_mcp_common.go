@@ -1004,66 +1004,41 @@ func (b *mcpBuilder) buildKafka(servers map[string]any, ep *config.DataStoreEndp
 	}
 }
 
-// buildRabbitMQ 用 amazon-mq/mcp-server-rabbitmq(AWS Labs,uvx 零安装,默认只读)。
+// buildRabbitMQ 2026-05-15 真实 probe 后**禁用 mcp 注册**(yaml schema / wizard / .env 凭据
+// 都不动,等社区出能用的包再翻开)。理由:
 //
-// 关键设计选择(对比备选 `kenliao94/mcp-server-rabbitmq` 和 `rabbitmq-mcp-server` PyPI):
-//   - AWS 版默认 read-only,不加 `--allow-mutative-tools` 就只读 → 符合项目"全只读"安全契约
-//   - guercheLE PyPI 版凭据走 env(AMQP_HOST 等),更安全但**没明确默认只读**,放弃
-//   - kenliao94 版同样 args + 没只读默认,放弃
+// 跑 stdio probe 实测两个 PyPI 候选都 broken,**不是版本不兼容,是源码 import 路径根本不存在**:
 //
-// 配置(参考上游 README):
+//   1. `amq-mcp-server-rabbitmq@latest`(AWS amazon-mq 维护,曾经的首选):
+//      源码 line 9 写死 `from fastmcp.server.auth import BearerAuthProvider`,但 fastmcp 任何
+//      版本(2.7 / 2.14.7 / 3.3 都验过)的 `fastmcp.server.auth` 都没有 `BearerAuthProvider`
+//      这个 export — 大概率是 fastmcp 早期改名为 `JWTVerifier` 等,amazon-mq 没跟。
+//      `uvx --with "fastmcp==2.14.7"` 硬钉 2.x 最新也撞同款 ImportError → 死局。
+//      GitHub main 分支同款代码、0 issue 反馈,上游没人修。
+//   2. `rabbitmq-mcp-server`(guercheLE 社区):
+//      依赖声明缺一堆 — 撞 tabulate、tomli、requests 全 ModuleNotFoundError,补丁堆补丁。
 //
-//	command: "uvx"
-//	args:    ["amq-mcp-server-rabbitmq@latest", "--rabbitmq-host", host,
-//	          "--port", port, "--username", user, "--password", pass]
-//	          # 不传 --allow-mutative-tools → 默认只读
+// 修法选 B(同 nacos / feishu_project):rabbitmq 主路径走 SKILL 内 HTTP Management API
+// (端口 15672 自带 REST API,极其稳定,RabbitMQ 团队官方维护)。rabbitmq 在排障里调用频次低
+// (看队列长度、consumer lag、alarm),不像 grafana 那种高频,失去 mcp 原生 tool-call 体验
+// 代价可接受。SKILL 早就把 HTTP API 当 fallback 写了,这次直接升主路径。
 //
-// trade-off:凭据落 args(可在 ~/.claude.json 看到)— 跟 redis/pg 同款已知妥协。
-// 想要凭据完全藏 env 的话得换 guercheLE 版,但放弃只读默认。
-//
-// endpoint 字段:
-//   - URL: amqp://[user:pass@]host:port[/vhost](标准 AMQP URI) — host/port 从这 parse
-//   - User / Pass:也支持独立字段(URL 没带凭据时 fallback)
-//
-// dedup 按 ep.URL 做 key(同 host/port 同一 cluster 共享 MCP)。
+// 等条件:社区出**能跑通**的 rabbitmq mcp 包,且工具集对得上排障需求,再翻开下面 if 分支。
+// 当前 install 时打 warn 告知用户 mcp 没注册,SKILL 会走 HTTP API。
 func (b *mcpBuilder) buildRabbitMQ(servers map[string]any, ep *config.DataStoreEndpoint, sourceID, envID string) {
-	var epURL, epUser, epPass string
-	if ep != nil {
-		epURL, epUser, epPass = ep.URL, ep.User, ep.Pass
-	}
-	rawURL := firstNonEmpty(b.get(envVar("RABBITMQ_URL", sourceID, envID)), epURL)
-	if rawURL == "" && b.opts.PruneEmpty {
-		return // 没填 URL → 跳过(避免注册一条永远启动失败的 mcp)
-	}
-	// parse host:port:user:pass。AMQP URI 形态跟其它 RFC3986 兼容,直接用 parseConnURL。
-	host, port, urlUser, urlPass, _ := parseConnURL(rawURL)
-	if port == "" {
-		port = "5672" // 标准 AMQP 默认端口
-	}
-	// URL 没带凭证就 fallback 到独立字段(用户大概率走 USER/PASS 表单填)。
-	// 优先级:URL 内嵌 > install creds RABBITMQ_USER_<sourceID>_<env> > yaml endpoint user 字段。
-	user := urlUser
-	if user == "" {
-		user = firstNonEmpty(b.get(envVar("RABBITMQ_USER", sourceID, envID)), epUser)
-	}
-	pass := urlPass
-	if pass == "" {
-		pass = firstNonEmpty(b.get(envVar("RABBITMQ_PASS", sourceID, envID)), epPass)
-	}
-	args := []any{"amq-mcp-server-rabbitmq@latest",
-		"--rabbitmq-host", host,
-		"--port", port,
-	}
-	if user != "" {
-		args = append(args, "--username", user)
-	}
-	if pass != "" {
-		args = append(args, "--password", pass)
-	}
-	servers[b.keyFor("rabbitmq", sourceID, envID)] = map[string]any{
-		"command": "uvx",
-		"args":    args,
-		"env":     b.envBlock(map[string]any{}),
+	for _, ds := range b.cfg.Infrastructure.DataStores {
+		if ds.Type != "rabbitmq" || !ds.Enabled {
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "[warn] rabbitmq mcp 暂未启用注册(%s)\n", envID)
+		fmt.Fprintf(os.Stderr, "        理由:amq-mcp-server-rabbitmq 源码引用 fastmcp 不存在的 BearerAuthProvider(任何版本都没有),\n")
+		fmt.Fprintf(os.Stderr, "             rabbitmq-mcp-server 缺一堆 dep — 两个 PyPI 候选都跑不起来\n")
+		fmt.Fprintf(os.Stderr, "        现状:yaml 仍合法,凭据仍收集;主路径走 SKILL HTTP Management API(端口 15672)\n")
+		fmt.Fprintf(os.Stderr, "        等条件:社区出能跑通的 mcp 包 — 详见 install_native_mcp_common.go::buildRabbitMQ 注释\n")
+		_ = servers // 占位:重启用时改回 servers[b.keyFor("rabbitmq", sourceID, envID)] = ...
+		_ = ep
+		_ = sourceID
+		return
 	}
 }
 

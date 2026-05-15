@@ -527,7 +527,7 @@ func (b *mcpBuilder) buildELK(servers map[string]any) {
 //
 //	接整 URI:
 //	  - mongodb:        npx mcp-mongo-server --read-only           (env: MCP_MONGODB_URI)
-//	  - postgresql:     npx server-postgres <DSN>                  (位置参数,包不接 env)
+//	  - postgresql:     npx @henkey/postgres-mcp-server             (env: POSTGRES_CONNECTION_STRING)
 //	  - redis:          npx server-redis-mcp <URL>                 (位置参数,包不接 env)
 //	  - elasticsearch:  npx mcp-server-elasticsearch               (env: ES_URL/USERNAME/PASSWORD)
 //	要拆字段(npm/pip 包不接整 URL,只接 host/port/user/pass):
@@ -809,18 +809,18 @@ func (b *mcpBuilder) buildMongoDB(servers map[string]any, ep *config.DataStoreEn
 	}
 }
 
-// FIXME: @modelcontextprotocol/server-postgres 已于 2025-07 deprecated
-// (官方维护者明确 archive,不再修)。功能仍在(READ ONLY transaction
-// 包裹所有查询,readonly 默认),近期能跑。
+// buildPostgreSQL 用 @henkey/postgres-mcp-server(v1.0.5+,env-based,凭据不落 args)。
 //
-// 迁移调研(2026-05):
-//   - @henkey/postgres-mcp-server v1.0.5(env: POSTGRES_CONNECTION_STRING):**没有 read-only 模式**,
-//     直接换会丢失原 RO transaction 包裹 → AI 可能误执行 DELETE/UPDATE。
-//   - @ahmedmustahid/postgres-mcp-server:接 args 不接 env(走 launcher 还要 sh 转义),不优。
+// 2026-05-15 从 @modelcontextprotocol/server-postgres 迁移过来:
+// - 老包于 2025-07 deprecated,官方明确 archive 不再修;近期能跑但长期撞墙
+// - 老包优势(RO transaction 包裹所有查询)在新包没有 — 但跟 mysql/redis/kafka 同理,
+//   只读改靠 SKILL 软约束(用户校准过的设计哲学)
+// - @henkey 工具:pg_execute_query(SELECT 主用)/ pg_monitor_database / pg_debug_database /
+//   pg_analyze_database 等 17 个;**禁用工具**:pg_execute_mutation / pg_execute_sql(可写)
+// - env 而非位置参数 → 凭据不再落 args,~/.claude.json 不再泄漏 DSN(P3.2 旧 trade-off 顺便解决)
 //
-// 建议路径:用 henkey 包但在 PG 端建 readonly role,DSN 里只给该 role 的凭据 —
-// 安全责任从 mcp 侧移到 PG 侧。yaml schema 要相应改"必填 readonly user"才能换。
-// 暂保持现包(archived 但能跑)。
+// 安全责任建议同时下沉到 PG 端:DSN 里给只读 role,即便 LLM 误调 pg_execute_mutation
+// PG 端也会拒。这是软约束的兜底,不强制要求。
 func (b *mcpBuilder) buildPostgreSQL(servers map[string]any, ep *config.DataStoreEndpoint, sourceID, envID string) {
 	var epDSN string
 	if ep != nil {
@@ -830,12 +830,12 @@ func (b *mcpBuilder) buildPostgreSQL(servers map[string]any, ep *config.DataStor
 	if dsn == "" && b.opts.PruneEmpty {
 		return
 	}
-	// 上游包只接位置参数,凭据落 args(可在 ~/.claude.json 里看到)— 已知 trade-off。
-	// envBlock(空 map) 仍然会被注入 OTEL_SDK_DISABLED=true 防 stdout 污染。
 	servers[b.keyFor("postgresql", sourceID, envID)] = map[string]any{
 		"command": "npx",
-		"args":    []any{"-y", "@modelcontextprotocol/server-postgres", dsn},
-		"env":     b.envBlock(map[string]any{}),
+		"args":    []any{"-y", "@henkey/postgres-mcp-server"},
+		"env": b.envBlock(map[string]any{
+			"POSTGRES_CONNECTION_STRING": dsn,
+		}),
 	}
 }
 

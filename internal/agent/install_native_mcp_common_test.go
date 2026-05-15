@@ -137,10 +137,14 @@ func TestBuildMCPServers_DataStores(t *testing.T) {
 		t.Errorf("mongodb MCP_MONGODB_URI env mismatch: %v", envOf(mongoSpec))
 	}
 
-	// ── postgres:位置参数接 connection string(server-postgres 默认 readonly transaction)──
-	// 上游包不接 env,凭据落 args(已知 trade-off,见 BuildMCPServers 注释)。
-	if got := argString(servers["bot-postgresql-dev"]); got != "[-y @modelcontextprotocol/server-postgres postgres://u:p@pg.local:5432/app]" {
+	// ── postgres:@henkey/postgres-mcp-server,env POSTGRES_CONNECTION_STRING(凭据不落 args)──
+	// 2026-05-15 从 @modelcontextprotocol/server-postgres(2025-07 archived)迁过来。
+	pgSpec := servers["bot-postgresql-dev"].(map[string]any)
+	if got := argString(pgSpec); got != "[-y @henkey/postgres-mcp-server]" {
 		t.Errorf("postgres args mismatch: %s", got)
+	}
+	if envOf(pgSpec)["POSTGRES_CONNECTION_STRING"] != "postgres://u:p@pg.local:5432/app" {
+		t.Errorf("postgres POSTGRES_CONNECTION_STRING env mismatch: %v", envOf(pgSpec))
 	}
 
 	// ── redis:钉死 1.0.0 + URL 位置参数(防 @latest 漂移)──

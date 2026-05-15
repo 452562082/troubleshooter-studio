@@ -171,13 +171,22 @@ func TestInstallNativeOpenclaw_FreshInstall(t *testing.T) {
 			t.Errorf("mcp.servers missing %s", key)
 		}
 	}
-	// per-env addr 注入正确
-	nacDev := servers["shop-nacos-dev"].(map[string]any)["env"].(map[string]any)
-	if nacDev["NACOS_ADDR"] != "nacos-dev.example.com:8848" {
-		t.Errorf("nacos-mcp-server-dev addr wrong: %v", nacDev["NACOS_ADDR"])
+	// per-env addr/port 注入正确(2026-05-15 改 nacos-mcp-server 后:从 env 段搬到 args
+	// --host/--port/--access_token,因为 nacos-mcp-server 只接 CLI args 不接 env)
+	nacDev := servers["shop-nacos-dev"].(map[string]any)
+	args, _ := nacDev["args"].([]any)
+	want := map[string]string{"--host": "nacos-dev.example.com", "--port": "8848", "--access_token": "fake-token-for-test"}
+	for i := 0; i < len(args)-1; i++ {
+		k, _ := args[i].(string)
+		if expected, ok := want[k]; ok {
+			if got, _ := args[i+1].(string); got != expected {
+				t.Errorf("nacos-mcp-server-dev args %s = %q, want %q", k, got, expected)
+			}
+			delete(want, k)
+		}
 	}
-	if nacDev["NACOS_USERNAME"] != "nacos" {
-		t.Errorf("nacos-mcp-server-dev username should be CC_USER_DEV(per-env), got %v", nacDev["NACOS_USERNAME"])
+	if len(want) > 0 {
+		t.Errorf("nacos-mcp-server-dev missing args: %v in %v", want, args)
 	}
 
 	// .env 持久化

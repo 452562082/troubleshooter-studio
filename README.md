@@ -209,8 +209,8 @@ skill 集合**按 yaml 动态裁剪**,产物的真源在 [`templates/workspace/s
   - `diagram-generator` —— Mermaid → PNG/SVG(画时间线 / 调用链)
 
 - **⚙️ 配置中心查询**(按 `config_centers` 动态切后端)
-  - `config-executor` —— nacos(HTTP API,经 `scripts/nacos_config.py`)/ apollo / consul / kuboard / Kubernetes ConfigMap / 纯环境变量;按 namespace/group/dataId 读配置 + 历史 + diff。
-    注:`nacos-mcp-router` MCP 是 nacos MCP 市场管理工具(`searchMcpServer` / `installMcpServer`),**不暴露 `get_config`**,所以 nacos 配置读取走 HTTP API 不走 MCP
+  - `config-executor` —— nacos(MCP via `nacos-mcp-server`)/ apollo / consul / kuboard / Kubernetes ConfigMap / 纯环境变量;按 namespace/group/dataId 读配置 + 历史 + diff;MCP 不可用时 fallback `scripts/nacos_config.py` HTTP API 兜底。
+    要求 Nacos ≥ 3.0(用 Nacos Admin API 3.x);install 阶段一次性 login 拿 token bake 到 mcp 启动参数,要求 nacos 端配长 token TTL 实现 "装一次永久用",详见下方 "Nacos token TTL 配置" 段
 
 - **📊 可观测性**(按 `observability.<x>.enabled` 启用)
   - `k8s-runtime-query` —— Kuboard v4 HTTP 查 pod / service / deployment / events / logs(只读)
@@ -225,6 +225,28 @@ skill 集合**按 yaml 动态裁剪**,产物的真源在 [`templates/workspace/s
 裁剪规则:yaml 里没启用的能力 → 对应 skill 不生成。`generation.skills_whitelist` 是二次过滤(已启用基础上再剔除)。新增 skill 走 `tshoot skill new <name>`。
 
 🧭 想看完整排障链路(7 步主流程 + 5 维证据表 + 反幻觉护栏 + 设计哲学)→ [`docs/troubleshooting-flow.md`](docs/troubleshooting-flow.md)
+
+### Nacos token TTL 配置(用 nacos MCP 的前置)
+
+`config-executor` 的 nacos 主路径走官方 `nacos-mcp-server`,该 mcp 只接 `--access_token` 鉴权(没有 username/password 自动 refresh 模式)。本工具在 `tshoot install` 阶段**一次性**调 `/nacos/v3/auth/user/login` 拿 token bake 进 mcp 启动参数 — 这种方案要求 nacos 端把 token TTL 调长才能"装一次永久用"。
+
+**Nacos 端配置**(运维做一次):
+
+```properties
+# Nacos application.properties(或 K8s ConfigMap)
+nacos.core.auth.plugin.nacos.token.expire.seconds=315360000   # 10 年,足够久
+```
+
+Docker / Helm 部署用 env var `NACOS_AUTH_TOKEN_EXPIRE_SECONDS=315360000`。改完重启 nacos 生效。
+
+**没配长会怎样**:
+- nacos 默认 token TTL 5h,install 后约 5 小时 mcp 调用就开始 401 "invalid token"
+- LLM 自动 fallback 到 `scripts/nacos_config.py` HTTP API 兜底(config-executor SKILL 内置 fallback),不至于排障停摆,但每次都多一跳
+- 真要修就重 `tshoot apply` 一次 install 拿新 token(几秒钟事)
+
+**为什么不做自动 token refresh wrapper**:工程复杂度跟收益不对等,nacos 端配长 TTL 是简单根治。
+
+**安全风险**:长 TTL token 一旦泄漏,长期可用 — 但 dev nacos 默认 `nacos:nacos` 弱密码安全模型已经不严,加长 TTL 不本质改变风险等级;生产 nacos 配 TTL 时按团队安全要求评估(可考虑 1d-7d 折中)。
 
 ## Doctor 漂移检测
 

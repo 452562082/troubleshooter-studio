@@ -36,16 +36,21 @@ description: 通用配置中心执行技能（后端：{{.Infrastructure.Primary
 - `{{$.MCPKeyPrefix}}-nacos-{{.ID}}`
 {{- end}}
 
-**重要前提**(2026-05-15 truss case 复盘发现):
+install 注册的 `{{.MCPKeyPrefix}}-nacos-<env>` 用的是官方 `nacos-mcp-server`(2026-05-15 从
+`nacos-mcp-router@latest` 换过来,详见 README "Nacos token TTL 配置"),提供 **只读** 工具:
+`get_config` / `list_configs` / `list_config_history` / `get_config_history` / `list_namespaces` /
+`list_services` 等。
 
-install 注册的 `{{.MCPKeyPrefix}}-nacos-<env>` 用的是 `nacos-mcp-router@latest`,这是
-**nacos 的 MCP 市场管理工具**(搜索 / 安装 / 调用注册到 nacos 上的其他 mcp server),
-**不暴露 `get_config` 接口,不能读 nacos KV 配置**。
+执行步骤(主路径,优先用 MCP):
 
-所以读 nacos 配置的**主路径就是直接走 Python 脚本 HTTP API**,**不要试调 nacos-mcp-router 的工具**
-(浪费一次 tool call + 失败后 LLM 容易 silent fallback 到 grep 代码当真值)。
+1. `routing` 返回 `mcp_server={{.MCPKeyPrefix}}-nacos-<env>` + `namespaceId/group/dataId`
+2. 调 mcp 的 `get_config(namespace, group, dataId)` 工具拿配置 text
+3. 看历史:`list_config_history(namespace, group, dataId)` + `get_config_history(nid, group, dataId, nid)`
+4. 跨 env 对比:本地保存两份 text → `python3 scripts/nacos_diff.py --left-text ... --right-text ...`
 
-执行步骤(主路径):
+**MCP 不可用时 fallback**(install 阶段 nacos login 失败 → mcp 没注册;或 token 过期 → mcp tool 调用 401):
+
+不要放弃 —— 走 Python 脚本 HTTP API(同等能力,只是没 LLM tool 装饰):
 
 ```bash
 # 读单条配置
@@ -53,18 +58,14 @@ python3 scripts/nacos_config.py get --server <NACOS_ADDR> --user <CC_USER> --pas
   --namespace <namespaceId> --group <group> --data-id <dataId>
 # 看历史
 python3 scripts/nacos_config.py history --server <...> --namespace ... --group ... --data-id ...
-# 跨 env 对比
-python3 scripts/nacos_diff.py --left-text ... --right-text ...
 ```
 
 `<NACOS_ADDR>` / `<CC_USER>` / `<CC_PASS>` 从 `~/.openclaw/{{.AgentID}}-creds.json` 或对应平台的 creds.json 读;
-`<namespaceId>` / `<group>` / `<dataId>` 从 `routing/references/config-map.yaml` 按 service 反查。
+路径见 AGENTS.md "skills/scripts/references 路径速记"。
 
-**如果用户未来在 nacos 上注册了"配置读取" MCP Server**(目前注册表为空),
-nacos-mcp-router 才能 `searchMcpServer` 找到它 → `callMcpServerTool` 调它的 `get_config`。
-那时候 SKILL 主路径才该切回 MCP。**当前阶段一律走 HTTP API**。
-
-`<NACOS_ADDR>` 等参数从 `~/.openclaw/{{.AgentID}}-creds.json` 或对应平台的 creds.json 读;路径见 AGENTS.md "skills/scripts/references 路径速记"。失败仍报错时按 AGENTS.md "MCP 连不上"话术给用户。
+**token 过期 (401 / "invalid token") 时**:nacos 端配置 `nacos.core.auth.plugin.nacos.token.expire.seconds`
+默认 5h 不够用 — 让用户在 nacos 端调长(推荐 315360000=10y),然后 `tshoot apply` 重 install
+拿新 token bake 到 mcp。详见 README "Nacos token TTL 配置" 段。
 
 **运行时参数解析**(按 env 切换 Redis/Mongo/ES):
 1. 先通过对应 env 的 Nacos MCP(或 fallback 脚本)读配置文本

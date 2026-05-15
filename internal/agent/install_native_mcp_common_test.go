@@ -206,7 +206,129 @@ func TestBuildMCPServers_DataStores_PruneEmpty(t *testing.T) {
 // OTEL_SDK_DISABLED=true(防 npm/pip 包间接依赖 elastic-otel-node / @sentry/node /
 // Python OTel 自动注入往 stdout 打 banner 污染 JSON-RPC 协议)。这个回归是 envBlock
 // 默认注入实现的 —— 加 case 时漏写 envBlock 包裹会立刻露馅。
+// init 给整个 agent 包测试包默认 stub loginNacosFunc — 避免任何 test 真去 :8848 try login
+// (会 hang 10s 超时,CI 没人起 nacos)。永远返回 fake token,让 buildNacos 走 happy path 注册 mcp。
+// 个别 test 要测 login 失败的 graceful degradation 用 withFakeNacosLoginErr 局部 override。
+func init() {
+	loginNacosFunc = func(addr, user, pass string) (string, error) {
+		return "fake-token-for-test", nil
+	}
+}
+
+// withFakeNacosLogin 临时把 loginNacosFunc 换成返回 fake token 的 stub,test 结束 t.Cleanup 还原。
+// 跟 init() 默认行为一致,这个 helper 主要用在新 test 里显式声明 "本 test 期望 login 成功"。
+func withFakeNacosLogin(t *testing.T) {
+	t.Helper()
+	old := loginNacosFunc
+	loginNacosFunc = func(addr, user, pass string) (string, error) {
+		if addr == "" || user == "" || pass == "" {
+			return "", fmt.Errorf("缺 addr/user/pass")
+		}
+		return "fake-token-for-test", nil
+	}
+	t.Cleanup(func() { loginNacosFunc = old })
+}
+
+// withFakeNacosLoginErr 测 login 失败时 buildNacos 走 graceful degradation(warn + skip 注册)。
+func withFakeNacosLoginErr(t *testing.T) {
+	t.Helper()
+	old := loginNacosFunc
+	loginNacosFunc = func(addr, user, pass string) (string, error) {
+		return "", fmt.Errorf("fake nacos unreachable")
+	}
+	t.Cleanup(func() { loginNacosFunc = old })
+}
+
+func TestBuildNacos_LoginSuccess(t *testing.T) {
+	withFakeNacosLogin(t)
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "dev"}},
+		Infrastructure: config.Infrastructure{
+			ConfigCenters: []config.ConfigCenter{{Type: "nacos", ID: "primary"}},
+		},
+	}
+	creds := map[string]string{
+		"CC_ADDR_PRIMARY_DEV": "13.112.112.196:8080",
+		"CC_USER_PRIMARY_DEV": "nacos",
+		"CC_PASS_PRIMARY_DEV": "nacos",
+	}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true},
+		func(k string) string { return creds[k] })
+
+	var nacosSpec map[string]any
+	for k, v := range servers {
+		if strings.HasPrefix(k, "nacos") {
+			nacosSpec = v.(map[string]any)
+		}
+	}
+	if nacosSpec == nil {
+		t.Fatalf("expected nacos mcp registered, got: %v", servers)
+	}
+	args, _ := nacosSpec["args"].([]any)
+	if len(args) < 7 || args[0] != "nacos-mcp-server" {
+		t.Fatalf("expected nacos-mcp-server in args[0], got: %v", args)
+	}
+	// 验证 --access_token fake-token 跟 --host / --port 都被 bake 进 args
+	want := map[string]string{
+		"--host":         "13.112.112.196",
+		"--port":         "8080",
+		"--access_token": "fake-token-for-test",
+	}
+	for i := 0; i < len(args)-1; i++ {
+		k, _ := args[i].(string)
+		if expected, ok := want[k]; ok {
+			if got, _ := args[i+1].(string); got != expected {
+				t.Errorf("args %s = %q, want %q", k, got, expected)
+			}
+			delete(want, k)
+		}
+	}
+	if len(want) > 0 {
+		t.Errorf("missing args: %v in %v", want, args)
+	}
+}
+
+func TestBuildNacos_LoginFail_GracefulSkip(t *testing.T) {
+	withFakeNacosLoginErr(t)
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "dev"}},
+		Infrastructure: config.Infrastructure{
+			ConfigCenters: []config.ConfigCenter{{Type: "nacos", ID: "primary"}},
+		},
+	}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true},
+		func(k string) string {
+			return map[string]string{
+				"CC_ADDR_PRIMARY_DEV": "x:8080",
+				"CC_USER_PRIMARY_DEV": "u",
+				"CC_PASS_PRIMARY_DEV": "p",
+			}[k]
+		})
+	// login 失败 → graceful skip,不应注册 nacos mcp。LLM 走 config-executor SKILL fallback HTTP API。
+	for k := range servers {
+		if strings.HasPrefix(k, "nacos") {
+			t.Errorf("expected nacos mcp skipped on login fail, got registered: %s", k)
+		}
+	}
+}
+
+func TestSplitNacosAddr(t *testing.T) {
+	cases := []struct{ in, wantHost, wantPort string }{
+		{"13.112.112.196:8080", "13.112.112.196", "8080"},
+		{"http://13.112.112.196:8080", "13.112.112.196", "8080"},
+		{"https://nacos.example.com:8848", "nacos.example.com", "8848"},
+		{"localhost", "localhost", "8848"}, // 不带 port 默认 8848
+	}
+	for _, c := range cases {
+		host, port := splitNacosAddr(c.in)
+		if host != c.wantHost || port != c.wantPort {
+			t.Errorf("splitNacosAddr(%q) = %q, %q, want %q, %q", c.in, host, port, c.wantHost, c.wantPort)
+		}
+	}
+}
+
 func TestBuildMCPServers_OTelDisabledUniversal(t *testing.T) {
+	withFakeNacosLogin(t)
 	cfg := &config.SystemConfig{
 		Environments: []config.Environment{{ID: "dev"}},
 		Infrastructure: config.Infrastructure{

@@ -21,9 +21,14 @@ package agent
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 )
@@ -391,21 +396,109 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 	return servers
 }
 
-// buildNacos:nacos per (source × env),多源 + 每 env 一个独立 MCP 实例
+// loginNacosFunc 是 install 阶段调 nacos /v3/auth/user/login 拿 accessToken 的入口,
+// 抽 package var 是为了测试可 monkey patch 不真去 nacos(单测离线跑)。生产用默认 doLoginNacos。
+var loginNacosFunc = doLoginNacos
+
+// doLoginNacos 通过 nacos 3.x login API 拿 access_token。install 阶段一次性 bake 到
+// mcp 启动参数,token TTL 看 nacos 端配置(`nacos.core.auth.plugin.nacos.token.expire.seconds`
+// 默认 5h 不够用 —— 需要用户在 nacos 端调长,推荐 315360000=10y,详见 README "Nacos token TTL"
+// 段)实现"装一次永久用"的方案 A。
+//
+// 失败(网络不通 / 凭据错 / nacos < 3.0 没 /v3 API)→ 调用方 buildNacos warn skip,SKILL
+// fallback 走 HTTP API(scripts/nacos_config.py)兜底,不挡 install 整体流程。
+func doLoginNacos(addr, user, pass string) (string, error) {
+	if addr == "" || user == "" || pass == "" {
+		return "", fmt.Errorf("nacos login 缺 addr/user/pass")
+	}
+	base := addr
+	if !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {
+		base = "http://" + base
+	}
+	body := url.Values{}
+	body.Set("username", user)
+	body.Set("password", pass)
+	req, err := http.NewRequest("POST", base+"/nacos/v3/auth/user/login", strings.NewReader(body.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("nacos login req: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("nacos login http: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("nacos login status %d", resp.StatusCode)
+	}
+	var out struct {
+		AccessToken string `json:"accessToken"`
+		TokenTtl    int    `json:"tokenTtl"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", fmt.Errorf("nacos login json: %w", err)
+	}
+	if out.AccessToken == "" {
+		return "", fmt.Errorf("nacos login 返回空 accessToken")
+	}
+	return out.AccessToken, nil
+}
+
+// splitNacosAddr 把 "host:port" / "http://host:port" 拆 host/port。
+// 不带 port → 默认 8848(nacos 标准端口);实际生产部署常用 8080。
+func splitNacosAddr(addr string) (host, port string) {
+	addr = strings.TrimPrefix(addr, "https://")
+	addr = strings.TrimPrefix(addr, "http://")
+	if i := strings.LastIndex(addr, ":"); i >= 0 {
+		return addr[:i], addr[i+1:]
+	}
+	return addr, "8848"
+}
+
+// buildNacos:nacos per (source × env),多源 + 每 env 一个独立 MCP 实例。
+//
+// 2026-05-15 truss case 复盘后从 nacos-mcp-router 换成 nacos-mcp-server(官方):
+// - 旧 router 是 nacos MCP 市场管理工具(searchMcpServer/installMcpServer/callMcpServerTool),
+//   不暴露 get_config,无法读 nacos KV → LLM 撞 silent fallback 到代码 config.yaml 当 runtime 真值
+// - 新 server(nacos-group/nacos-mcp-server,要 nacos >= 3.0)真正提供 get_config / list_configs /
+//   list_config_history / get_config_history 等只读工具,跟 yaml readonly_enforced 对齐
+//
+// token 管理走方案 A:install 一次性 login 拿 token bake 到 mcp 启动参数。token TTL 由用户
+// 在 nacos 端配长(推荐 315360000=10y),配长后真的"装一次永久用"。
+//
+// login 失败处理 graceful degradation:warn + skip 该 env 的 mcp 注册,不挡 install。
+// LLM 后续走 config-executor SKILL 的 HTTP API fallback 路径兜底。
 func (b *mcpBuilder) buildNacos(servers map[string]any) {
 	for _, cc := range b.cfg.Infrastructure.ConfigCenters {
 		if cc.Type != "nacos" {
 			continue
 		}
 		for _, e := range b.cfg.Environments {
+			addr := b.get(envVar("CC_ADDR", cc.ID, e.ID))
+			user := b.get(envVar("CC_USER", cc.ID, e.ID))
+			pass := b.get(envVar("CC_PASS", cc.ID, e.ID))
+
+			token, err := loginNacosFunc(addr, user, pass)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[warn] nacos %s/%s login 失败:%v\n", cc.ID, e.ID, err)
+				fmt.Fprintf(os.Stderr, "        跳过 mcp 注册;LLM 通过 config-executor SKILL fallback 走 HTTP API 兜底\n")
+				fmt.Fprintf(os.Stderr, "        修复方式:(a) 检查 nacos 可达性 + username/password (b) nacos 端配 token TTL 长后重 install\n")
+				continue
+			}
+			host, port := splitNacosAddr(addr)
 			servers[b.keyFor("nacos", cc.ID, e.ID)] = map[string]any{
 				"command": "uvx",
-				"args":    []any{"nacos-mcp-router@latest"},
-				"env": b.envBlock(map[string]any{
-					"NACOS_ADDR":     b.get(envVar("CC_ADDR", cc.ID, e.ID)),
-					"NACOS_USERNAME": b.get(envVar("CC_USER", cc.ID, e.ID)),
-					"NACOS_PASSWORD": b.get(envVar("CC_PASS", cc.ID, e.ID)),
-				}),
+				"args": []any{
+					"nacos-mcp-server",
+					"--host", host,
+					"--port", port,
+					"--access_token", token,
+				},
+				// 业务凭据走 args(nacos-mcp-server 只接 CLI 不接 env),env 段空 map 喂 envBlock
+				// 让 OTEL_SDK_DISABLED 仍然注入,防 npm/python 包间接依赖的 OTel 自动 instrument
+				// 往 stdout 打 banner 污染 stdio JSON-RPC。
+				"env": b.envBlock(map[string]any{}),
 			}
 		}
 	}

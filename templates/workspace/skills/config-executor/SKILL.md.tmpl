@@ -13,50 +13,74 @@ description: 通用配置中心执行技能（后端：{{.Infrastructure.Primary
 
 本技能**不**负责：项目识别 / 环境语义判断 / 服务别名解析 / 环境到 namespace/dataId 映射。这些信息应由 `routing` 提供。
 
+## 前置(每次调用前必读)
+
+1. **先 `source scripts/.env`**(workspace 根目录执行) — 让 nacos 凭据 `CC_ADDR_<ENV>` / `CC_USER_<ENV>` / `CC_PASS_<ENV>` 进入环境变量。没 source 直接跑脚本会报 "缺凭据"。apollo / consul / kuboard 凭据走 `~/.openclaw/<agent-id>-creds.json`,脚本按 `--agent-id --env` 自取,**这步**不需 source。
+2. **先调 `routing` 拿坐标** — `namespaceId / group / dataId`(nacos) / `appId / cluster / namespaces[]`(apollo) / `kv_prefix / default_context`(consul)都必须从 routing 输出取,**不许自己拼或猜**。routing 会在每条服务上标 `runtime: <type>-http`(nacos/apollo/consul/kuboard)告知走哪个脚本。
+
 ## 多环境硬约束（必读）
 
 本系统每个环境有**独立的后端实例**：
 {{- range .Environments}}
-- `{{.ID}}` → `{{$.MCPKeyPrefix}}-nacos-{{.ID}}`（nacos）或 `scripts/*_config.py --env {{.ID}}`（apollo/consul）
+- `{{.ID}}` → 对应 env 的脚本调用,凭据从对应 `<ENV>` 后缀的变量/字段读
 {{- end}}
 
 **规则**：
-1. 永远以 `routing` 返回的 `mcp_server` 字段为准，**不得自行拼名或猜测**。
-2. 如果未拿到 `mcp_server`，先回去调 `routing` 补齐；不要用默认值。
-3. 跨 env 对比场景（prod vs dev）需要**分别**调用对应 env 的后端，不能只查一个。
+1. 永远以 `routing` 返回的环境定位字段为准，**不得自行拼名或猜测**。
+2. 跨 env 对比场景（prod vs dev）需要**分别**调用对应 env 的后端，不能只查一个。
 
 ## 后端分路径（按 config_center.type）
 
 {{- if eq .Infrastructure.PrimaryConfigCenter.Type "nacos"}}
 
-### 当前后端：Nacos（走 MCP；MCP 失败时 fallback 到脚本）
+### 当前后端：Nacos（走 Python HTTP API，每次自己 login）
 
-部署时已为每个 env 注册 `{{.MCPKeyPrefix}}-nacos-<env>` MCP：
-{{- range .Environments}}
-- `{{$.MCPKeyPrefix}}-nacos-{{.ID}}`
-{{- end}}
+**决策演进**:5d5a139(HTTP 主)→ 23d503a(换 MCP 主,nacos-mcp-router → nacos-mcp-server)→
+2026-05-15(回 HTTP 主,方案 B)。
 
-执行步骤：
-1. `routing` 返回 `mcp_server={{.MCPKeyPrefix}}-nacos-<env>` + `namespaceId/group/dataId`
-2. 调用该 MCP 的 `get_config` / `list_config_history` 等工具
-3. 需要跨 env 对比时：本地保存两份 text → `python3 scripts/nacos_diff.py --left-text ... --right-text ...`
+**为什么不走 MCP**(2026-05-15 truss case 三层复盘结论):
+- 官方 `nacos-mcp-server` 只接 `--access_token` CLI 参数,token 在 mcp 进程生命周期内固定,
+  不支持运行时 refresh。LLM 拿到 401 也只能干瞪眼,IDE 不会自动重启 mcp。
+- install 阶段 bake token 要求 nacos 端把 `nacos.core.auth.plugin.nacos.token.expire.seconds`
+  调到 10 年(默认 5h),依赖运维配合 + 重启 nacos;truss 现场运维不配合 → 沦为"装一次满血几小时然后默默降级"。
+- Python 脚本每次调用自己 login(每次 < 100ms),token TTL 5h 完全无所谓,nacos 端零配合。
 
-**MCP 启动失败时 fallback**(凡是 tool error 包含 `connection / not found / unable to spawn / uvx not found / ENOENT` 的情况):
+执行步骤(主路径):
 
-不要放弃 —— 直接走 Python 脚本(同等能力,只是没 LLM tool 装饰):
+凭据来源:install 阶段把 `CC_ADDR_<ENV>` / `CC_USER_<ENV>` / `CC_PASS_<ENV>` 写到
+workspace 根目录下 `scripts/.env`(0600)。SKILL 的 cwd = workspace 根,所以脚本 / .env 都用相对路径。
+LLM 先 `source scripts/.env`,把对应 env 的变量代入 `--server / --username / --password`。
 
 ```bash
-# 读单条配置
-python3 scripts/nacos_config.py get --server <NACOS_ADDR> --user <CC_USER> --pass <CC_PASS> \
+# 准备凭据(以 <env>=dev 为例)
+source scripts/.env
+
+# 读单条配置(脚本内部自己 login,token 即用即弃)
+python3 scripts/nacos_config.py get \
+  --server "$CC_ADDR_DEV" --username "$CC_USER_DEV" --password "$CC_PASS_DEV" \
   --namespace <namespaceId> --group <group> --data-id <dataId>
-# 看历史
-python3 scripts/nacos_config.py history --server <...> --namespace ... --group ... --data-id ...
+
+# 看配置历史
+python3 scripts/nacos_config.py history \
+  --server "$CC_ADDR_DEV" --username "$CC_USER_DEV" --password "$CC_PASS_DEV" \
+  --namespace <namespaceId> --group <group> --data-id <dataId>
+
+# 跨 env 对比:本地保存两份 text → python3 scripts/nacos_diff.py --left-text ... --right-text ...
 ```
 
-`<NACOS_ADDR>` 等参数从 `~/.openclaw/{{.AgentID}}-creds.json` 或对应平台的 creds.json 读;路径见 AGENTS.md "skills/scripts/references 路径速记"。失败仍报错时按 AGENTS.md "MCP 连不上"话术给用户。
+多源场景(`config_centers` 多个 nacos),env 变量名带 source.id 中缀:
+`CC_ADDR_<SOURCE>_<ENV>` / `CC_USER_<SOURCE>_<ENV>` / `CC_PASS_<SOURCE>_<ENV>`。
+
+**API 路径**:脚本走 Nacos `/v1/auth/login` + `/v1/cs/...`。这是 Nacos 1.x/2.x 的原生路径,
+也是 Nacos 3.x 的向后兼容路径 — 绝大多数 3.x 部署仍开放 v1。如果 nacos 3.x 显式禁用 v1
+(返 410 Gone "please use /v3/..."),会触发 `accessToken 空` / `status 410` 错误,届时升级
+脚本走 v3 路径(可参考 `internal/cchub/nacos_probe.go` 的 probe 逻辑)。
+
+**地址**(`NACOS_ADDR`)必须写 API 端口默认 `:8848`,不要写 dashboard 端口(常见 `:8080`)— 后者
+反代多数只透传 UI,login API 会撞 "No static resource"。2026-05-15 truss 现场实测踩过这个坑。
 
 **运行时参数解析**(按 env 切换 Redis/Mongo/ES):
-1. 先通过对应 env 的 Nacos MCP(或 fallback 脚本)读配置文本
+1. 先通过 `scripts/nacos_config.py get ... --env <env>` 读配置文本
 2. `python3 scripts/resolve_runtime_from_nacos.py --stdin < config.txt` 提取
 3. 输出契约:
    - `runtime.redis`: `{host, port, resolved}`
@@ -85,7 +109,7 @@ python3 scripts/apollo_config.py list-namespaces \
   --app-id <appId> --cluster default
 ```
 
-`routing` 会返回 `appId / cluster / namespaces[] / mcp_server`；**以 `--env` 精确传入**，不要拼接字符串。
+`routing` 会返回 `runtime: apollo-http` + `appId / cluster / namespaces[]`(2026-05-15 复盘后清理:之前有 `mcp_server: shop-apollo-dev` 字段,但 apollo MCP 从未实际注册过,是死字段)。**以 `--env` 精确传入**，不要拼接字符串。
 `--env-label` 可覆盖 Apollo 侧大写环境标签（如 DEV/FAT/UAT），默认用 `--env` 的 upper。
 {{- end}}
 
@@ -107,7 +131,7 @@ python3 scripts/consul_config.py list \
   --agent-id {{.AgentID}} --env <env> --prefix <prefix>
 ```
 
-`routing` 会返回 `kv_prefix / default_context / host`；组装 key 时形如 `<kv_prefix>/<default_context>` 或按实际约定。
+`routing` 会返回 `runtime: consul-http` + `kv_prefix / default_context / host`；组装 key 时形如 `<kv_prefix>/<default_context>` 或按实际约定。
 {{- end}}
 
 {{- if eq .Infrastructure.PrimaryConfigCenter.Type "env-vars"}}

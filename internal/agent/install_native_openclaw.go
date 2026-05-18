@@ -15,7 +15,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
+
+	"github.com/xiaolong/troubleshooter-studio/internal/config"
 )
 
 // InstallOpenclawOptions 给 InstallNativeOpenclaw 的选项。零值合理。
@@ -64,9 +67,10 @@ func InstallNativeOpenclaw(ctx context.Context, stagingDir string, opts InstallO
 			log(fmt.Sprintf("[dep] %s ok", dep))
 		}
 	}
+	// uvx 之前给 nacos-mcp-server 用,2026-05-15 方案 B 后 nacos 走 Python HTTP API,
+	// uvx 在 install 阶段不再有必装组件依赖它;留 LookPath 给未来 mcp 扩展用,缺了只是 info。
 	if _, err := exec.LookPath("uvx"); err != nil {
-		// uvx 只 nacos MCP 用到,缺了不致命
-		log("[dep] uvx 没装(nacos-mcp-router 跑不动);brew install uv 或 https://astral.sh/uv/install.sh")
+		log("[dep] uvx 没装(目前没强依赖,nacos 走 python3 主路径;若以后接入需要 uvx 的 MCP 再装:brew install uv)")
 	}
 
 	// 3) merge .env 老凭证(Creds 优先)
@@ -141,6 +145,12 @@ func InstallNativeOpenclaw(ctx context.Context, stagingDir string, opts InstallO
 	}
 	log(fmt.Sprintf("[ok] %s 已更新(agents.list + mcp.servers)", cfgPath))
 
+	// P2.4 进度反馈:从 ocData 反读出本次注册的 mcp 列表,逐个 log 让用户看到注册了哪些。
+	// 主要解决"`tshoot apply` 完只打一行模糊 '已更新' 用户不知道装了几家"的体验问题。
+	// 同时按 command 分类打提示:npx / uvx 类首次 IDE spawn 时会 cold install(30-60s),
+	// kafka binary 类 install 阶段已经 EnsureKafkaMCPInstalled 下载过(秒级 spawn)。
+	logMCPRegistered(ocData, cfg, log)
+
 	// 6) creds.json:多源场景下任一源属于 apollo/consul/env-vars/kuboard 就要写。
 	// 跟 IDE 平台共用 WriteCredsFileToHome —— 唯一区别是 homeSubdir(.openclaw vs .tshoot)。
 	if err := WriteCredsFileToHome(".openclaw", cfg, get); err != nil {
@@ -187,7 +197,62 @@ func InstallNativeOpenclaw(ctx context.Context, stagingDir string, opts InstallO
 	} else {
 		log("[info] 未检测到 openclaw CLI(桌面 app 用户的常见状态)—— **请手动退出再打开 OpenClaw 客户端** 才能在 agent 列表里看到新装的 bot;或装 openclaw CLI 后跑 `openclaw gateway restart`")
 	}
+
+	// P2.4 结尾提示:用户首次在 IDE 里调 mcp 工具时,npx/uvx 包会冷启动下载,体感"挂了 30s"。
+	// 提前告知避免用户疑惑。kafka binary 类已经在 EnsureKafkaMCPInstalled 阶段下完。
+	log("[info] 首次在 OpenClaw 客户端里触发 mcp 工具调用时,npx / uvx 包会冷启动下载(单家 ~10-60s)")
+	log("        正常现象 — 之后 IDE 启动 mcp 是秒级。装太久或撞错请跑 `tshoot self-test` 看 mcp probe 结果")
 	return nil
+}
+
+// logMCPRegistered 从写好的 openclaw.json 反读 mcp.servers,按家逐条 log。
+// 让用户清楚看到 install 给装了哪些 mcp,而不是只看到一行 "mcp.servers 已更新"。
+//
+// 输出形式:
+//
+//	[mcp] register: shop-grafana-dev (npx mcp-grafana-npx ...)
+//	[mcp] register: shop-mongodb-dev (npx mcp-mongo-server ...)
+//	(skip) feishu_project / rabbitmq / nacos 那些 buildXxx 内 warn skip 的,不出现在 servers map,自然不打
+//
+// 不打整行 args(密码会泄漏到 log),只打 command + 第一个非 -y 的 arg(通常是包名),给用户一个概念。
+func logMCPRegistered(ocData map[string]any, cfg *config.SystemConfig, log func(string)) {
+	mcp, _ := ocData["mcp"].(map[string]any)
+	if mcp == nil {
+		return
+	}
+	servers, _ := mcp["servers"].(map[string]any)
+	if servers == nil {
+		return
+	}
+	agentPrefix := cfg.MCPKeyPrefix() + "-"
+	names := []string{}
+	for name := range servers {
+		// 只列本次 agent 注册的 — 别家 agent 用同一 ~/.openclaw/openclaw.json 时不刷别家进度
+		if !strings.HasPrefix(name, agentPrefix) && name != cfg.MCPKeyPrefix()+"lark-openapi" {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		spec, _ := servers[name].(map[string]any)
+		if spec == nil {
+			continue
+		}
+		cmd, _ := spec["command"].(string)
+		pkg := ""
+		if args, ok := spec["args"].([]any); ok {
+			for _, a := range args {
+				s, _ := a.(string)
+				if s == "" || strings.HasPrefix(s, "-") {
+					continue
+				}
+				pkg = s
+				break
+			}
+		}
+		log(fmt.Sprintf("[mcp] register: %s (%s %s)", name, cmd, pkg))
+	}
 }
 
 // findOpenclawCLI 在当前进程 PATH 找 openclaw CLI 二进制,找不到再 fallback 试几个

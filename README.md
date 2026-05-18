@@ -11,6 +11,32 @@
 - **上层(此仓库)**:研制环境,做 `troubleshooter.yaml` 建模、仓库扫描、校验、生成、部署、管理
 - **下层(产出物)**:完整可运行的排障机器人 —— skill 集合按 yaml 动态裁剪,固定核心 + 按配置 / 数据层 / 可观测性勾选的 runtime-query + 多环境 MCP + 标准故障话术,脱离 studio 独立运行
 
+## 按角色快速导览
+
+| 你是 | 从这读起 |
+|---|---|
+| **第一次接触本项目,想跑通** | [下载与安装](#下载与安装) → [两个入口](#两个入口) → [部署到 4 个 AI 平台](#部署到-4-个-ai-平台) |
+| **想知道排障机器人能干什么** | [排障机器人具备什么能力](#排障机器人具备什么能力) → [`docs/troubleshooting-flow.md`](docs/troubleshooting-flow.md) (完整 7 步流程 + 5 维证据表) |
+| **要建模一个新的微服务系统** | [适配的系统架构](#适配的系统架构) → [Monorepo / Umbrella 仓库](#monorepo--umbrella-仓库) → [`examples/shop-troubleshooter.yaml`](examples/shop-troubleshooter.yaml) |
+| **维护本项目代码 / 想看历史决策** | [`docs/decisions.md`](docs/decisions.md) (本会话的设计决策演进:nacos / postgres / rabbitmq / mcp 软约束哲学等) → [目录结构](#目录结构) |
+| **运维想集成 CI** | [`docs/CI-RELEASE.md`](docs/CI-RELEASE.md) → [构建](#构建) |
+
+## 目录
+
+- [两个入口](#两个入口)
+- [部署到 4 个 AI 平台](#部署到-4-个-ai-平台)
+- [下载与安装](#下载与安装)(桌面 app / CLI / 源码)
+- [适配的系统架构](#适配的系统架构)
+- [Monorepo / Umbrella 仓库](#monorepo--umbrella-仓库)
+- [桌面 app 页面](#桌面-app-页面)
+- [CLI 子命令](#cli-子命令)
+- [排障机器人具备什么能力](#排障机器人具备什么能力)
+  - [Nacos 配置访问路径](#nacos-配置访问路径)
+- [Doctor 漂移检测](#doctor-漂移检测)
+- [构建](#构建)
+- [目录结构](#目录结构)
+- [已知限制](#已知限制)
+
 ## 两个入口
 
 | 入口 | 能力 | 适用 |
@@ -209,7 +235,7 @@ skill 集合**按 yaml 动态裁剪**,产物的真源在 [`templates/workspace/s
   - `diagram-generator` —— Mermaid → PNG/SVG(画时间线 / 调用链)
 
 - **⚙️ 配置中心查询**(按 `config_centers` 动态切后端)
-  - `config-executor` —— nacos(MCP)/ apollo / consul / kuboard / Kubernetes ConfigMap / 纯环境变量;按 namespace/group/dataId 读配置 + 历史 + diff
+  - `config-executor` —— nacos(Python HTTP API,每次自己 login)/ apollo / consul / kuboard / Kubernetes ConfigMap / 纯环境变量;按 namespace/group/dataId 读配置 + 历史 + diff。nacos 支持 1.x / 2.x / 3.x(走 v1 API,3.x 通过兼容层)。详见下方 "Nacos 配置访问路径" 段
 
 - **📊 可观测性**(按 `observability.<x>.enabled` 启用)
   - `k8s-runtime-query` —— Kuboard v4 HTTP 查 pod / service / deployment / events / logs(只读)
@@ -224,6 +250,41 @@ skill 集合**按 yaml 动态裁剪**,产物的真源在 [`templates/workspace/s
 裁剪规则:yaml 里没启用的能力 → 对应 skill 不生成。`generation.skills_whitelist` 是二次过滤(已启用基础上再剔除)。新增 skill 走 `tshoot skill new <name>`。
 
 🧭 想看完整排障链路(7 步主流程 + 5 维证据表 + 反幻觉护栏 + 设计哲学)→ [`docs/troubleshooting-flow.md`](docs/troubleshooting-flow.md)
+
+### Nacos 配置访问路径
+
+`config-executor` 的 nacos 走 **SKILL 内 Python HTTP API**(`scripts/nacos_config.py`),
+不注册 MCP server。每次调用脚本自己 login → 用 token → 丢弃,token TTL 5h / 5y 完全无所谓,
+nacos 端零配合。
+
+**填地址注意**:`config_centers.endpoints[].addr` 写 **API 端口**(默认 `:8848`),不要写 dashboard
+端口(常见 `:8080`)— dashboard 反代多数只透传 UI,login API 会撞 `No static resource`。
+2026-05-15 truss 现场实测踩过这个坑。
+
+#### 决策演进(为什么不走 MCP)
+
+| 时间 | 方案 | 真相 |
+|---|---|---|
+| 5d5a139 | nacos 走 HTTP API 脚本 | 临时绕路修 mcp-router 能力错配 |
+| 23d503a | 换 `nacos-mcp-server` 做 MCP 主路径 + HTTP fallback | 解决能力错配,但 token bake 5h 后退化 |
+| **2026-05-15(当前)** | **回 HTTP API 主路径,删 MCP 注册** | 真正的运行时 token refresh,跟「机器人长期跑」对齐 |
+
+**为什么 23d503a 那条路走不通**:
+- 官方 `nacos-mcp-server` 只接 `--access_token` CLI 参数,token 在 mcp 进程生命周期内**固定**;
+  LLM 收到 401 没办法重启 mcp 进程换 token(那是 IDE 的事)
+- install 阶段 bake token 要求 nacos 端把 `nacos.core.auth.plugin.nacos.token.expire.seconds`
+  从默认 5h 调到 10 年 — 依赖运维 + 重启 nacos;truss 现场运维不配合,bake 方案沦为
+  「装一次满血几小时然后默默降级到 fallback」,跟产品定位「AI 排障机器人长期跑」错位
+
+**HTTP API 主路径的代价**:LLM 失去 MCP 原生 tool-call 体验,每次 nacos 调用要写一行 bash 跑
+Python 脚本。但 nacos 在排障链路里调用频次低(每个 session 通常 1-3 次),不是 grafana / jaeger
+那种 50+ tool call 的高频场景,代价可接受。
+
+#### 凭据存储
+
+install 阶段把 `CC_ADDR_<ENV>` / `CC_USER_<ENV>` / `CC_PASS_<ENV>` 写到
+`<workspace>/scripts/.env`(0600)。多源场景带 source.id 中缀:`CC_ADDR_<SOURCE>_<ENV>` 等。
+SKILL 调用脚本前 `source scripts/.env` 即可。
 
 ## Doctor 漂移检测
 

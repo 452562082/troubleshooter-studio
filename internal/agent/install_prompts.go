@@ -127,12 +127,17 @@ func DerivePrompts(cfg *config.SystemConfig) []deploy.Prompt {
 	}
 
 	// ── project tracking:feishu_project ──
-	for _, p := range cfg.Infrastructure.ProjectTracking {
-		if p.Enabled && p.Platform == "feishu_project" {
-			add("MCP_USER_TOKEN", "Feishu MCP User Token []: ", false)
-			break
-		}
-	}
+	// 2026-05-15 B 方案后**暂停凭据收集**:@lark-project/mcp v0.0.1 是字节内部 prototype,
+	// 我们既没接入 mcp(buildFeishuProject warn + skip)也没补 SKILL / Python OpenAPI 脚本,
+	// 收 MCP_USER_TOKEN 完全没人用 — 留 prompt 等于诈骗式收集。yaml schema / wizard "启用 Feishu
+	// Project" 选项仍保留(实验性,标在 askBool 文案里),等字节发 v1.x 正式版补完整再恢复:
+	//
+	//   for _, p := range cfg.Infrastructure.ProjectTracking {
+	//       if p.Enabled && p.Platform == "feishu_project" {
+	//           add("MCP_USER_TOKEN", "Feishu MCP User Token []: ", false)
+	//           break
+	//       }
+	//   }
 
 	return out
 }

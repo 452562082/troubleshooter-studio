@@ -20,9 +20,10 @@ func TestPreserve_ConfigMapManualOverride(t *testing.T) {
 	cmPath := filepath.Join(out, "templates/workspace-template/skills/routing/references/config-map.yaml")
 	// 手改：把 order-worker/dev 从 inferred 改为具体 verified 行（不带 source 字段）
 	original := readFile(t, cmPath)
+	// 2026-05-15 方案 B 后 nacos 不渲染 mcp_server,改成 runtime: nacos-http
 	mutated := strings.Replace(original,
-		"      order-worker:\n        namespaceId: \"dev\"\n        group: \"DEFAULT_GROUP\"\n        dataId: \"{service}.yaml\"\n        mcp_server: \"shop-nacos-dev\"\n        status: inferred",
-		"      order-worker:\n        namespaceId: \"shop-dev\"\n        group: \"SHOP_WORKER\"\n        dataId: \"order-worker.yaml\"\n        status: verified",
+		"      order-worker:\n        namespaceId: \"dev\"\n        group: \"DEFAULT_GROUP\"\n        dataId: \"{service}.yaml\"\n        runtime: nacos-http\n        status: inferred",
+		"      order-worker:\n        namespaceId: \"shop-dev\"\n        group: \"SHOP_WORKER\"\n        dataId: \"order-worker.yaml\"\n        runtime: nacos-http\n        status: verified",
 		1)
 	if mutated == original {
 		t.Fatalf("failed to locate inferred block to mutate:\n%s", original)
@@ -85,8 +86,8 @@ func TestPreserve_AnalyzerWinsOverPriorOverride(t *testing.T) {
 	cmPath := filepath.Join(out, "templates/workspace-template/skills/routing/references/config-map.yaml")
 	orig := readFile(t, cmPath)
 	mut := strings.Replace(orig,
-		"      order-service:\n        namespaceId: \"dev\"\n        group: \"DEFAULT_GROUP\"\n        dataId: \"{service}.yaml\"\n        mcp_server: \"shop-nacos-dev\"\n        status: inferred",
-		"      order-service:\n        namespaceId: \"MANUAL_NS\"\n        group: \"MANUAL_GROUP\"\n        dataId: \"manual.yaml\"\n        status: verified",
+		"      order-service:\n        namespaceId: \"dev\"\n        group: \"DEFAULT_GROUP\"\n        dataId: \"{service}.yaml\"\n        runtime: nacos-http\n        status: inferred",
+		"      order-service:\n        namespaceId: \"MANUAL_NS\"\n        group: \"MANUAL_GROUP\"\n        dataId: \"manual.yaml\"\n        runtime: nacos-http\n        status: verified",
 		1)
 	if mut == orig {
 		t.Fatalf("could not find inferred order-service block")

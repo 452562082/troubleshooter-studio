@@ -273,7 +273,7 @@ reposDone:
 	if d != nil {
 		fpDef = d.FeishuProjectEnabled
 	}
-	a.FeishuProjectEnabled, err = w.askBool("启用 Feishu Project", fpDef)
+	a.FeishuProjectEnabled, err = w.askBool("启用 Feishu Project(⚠ 实验性,目前 mcp 包是字节内部 prototype 且无 SKILL 接入,选 Y 也不会真接入,等正式版)", fpDef)
 	if err != nil {
 		return nil, err
 	}

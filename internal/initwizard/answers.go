@@ -167,11 +167,16 @@ func (a *Answers) WriteYAML(out io.Writer) error {
 	}
 
 	if a.FeishuProjectEnabled {
+		// 2026-05-15 B 方案:即便用户在 wizard 答 Y,也渲染 enabled: false + 注释提示。
+		// 理由:@lark-project/mcp v0.0.1 是字节内部 prototype,mcp 没接入(buildFeishuProject
+		// warn skip)且无 SKILL / Python OpenAPI 脚本,enabled: true 没意义。yaml schema
+		// 保留 platform=feishu_project 作合法值,等字节发正式版 + 我们补完 SKILL 后改回 true。
 		p("  project_tracking:\n")
+		p("    # ⚠ 实验性:feishu_project mcp 暂未启用,SKILL 也未接入。yaml 保留 platform 占位\n")
+		p("    # 等字节发 @lark-project/mcp 正式版 + 我们补完 SKILL 后改 enabled: true。详见:\n")
+		p("    # internal/agent/install_native_mcp_common.go::buildFeishuProject 大段注释。\n")
 		p("    - platform: feishu_project\n")
-		p("      enabled: true\n")
-		p("      credentials:\n")
-		p("        user_token_placeholder: \"{{MCP_USER_TOKEN}}\"\n")
+		p("      enabled: false\n")
 	} else {
 		p("  project_tracking: []\n")
 	}

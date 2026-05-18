@@ -5,8 +5,34 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
+
+// init() stub probeMCPFunc — self-test 测试会因 cfg 注册一堆 mcp,真 probe 会因 CI 没装
+// npx/uvx 全 FAIL。stub 返成功结果,让 self-test 走 happy path。个别测试可局部 override 测 FAIL。
+func init() {
+	probeMCPFunc = func(_ context.Context, _ string, _, _ []string, _ time.Duration) MCPProbeResult {
+		return MCPProbeResult{Tools: []string{"fake_tool_a", "fake_tool_b"}}
+	}
+}
+
+// withFakeMCPProbeErr 局部 stub probeMCPFunc 模拟 mcp 起不来(rabbitmq fastmcp 那种 case)。
+func withFakeMCPProbeErr(t *testing.T) {
+	t.Helper()
+	old := probeMCPFunc
+	probeMCPFunc = func(_ context.Context, _ string, _, _ []string, _ time.Duration) MCPProbeResult {
+		return MCPProbeResult{Err: errFakeProbe, StderrTail: "ImportError: cannot import name 'X'"}
+	}
+	t.Cleanup(func() { probeMCPFunc = old })
+}
+
+var errFakeProbe = &probeErr{"fake mcp 启动失败"}
+
+type probeErr struct{ msg string }
+
+func (e *probeErr) Error() string { return e.msg }
 
 // 把上一个 install 测试 setup 的"先 install 再 self-test"流程链起来,
 // 确认装完即过自检。HOST 探活用空 NACOS_ADDR / GRAFANA_URL → 都给 WARN,不算 FAIL。
@@ -34,12 +60,43 @@ func TestSelfTestOpenclaw_AfterInstallAllPass(t *testing.T) {
 	wantPass := []string{
 		"workspace 目录",
 		"agents.list 含 shop-troubleshooter",
-		"mcp.servers 齐全(4 项)", // nacos x2 + grafana x2
+		"mcp.servers 齐全(2 项)", // 2026-05-15 方案 B 后:grafana x2;nacos 走 Python HTTP API 不进 mcp
 	}
 	for _, name := range wantPass {
 		if statusByName[name] != "PASS" {
 			t.Errorf("expected %q PASS, got %q", name, statusByName[name])
 		}
+	}
+}
+
+// TestSelfTestOpenclaw_MCPProbeFAIL 模拟 rabbitmq fastmcp 那种 case:install 显示 success 但
+// mcp 进程秒挂(probe 返 ImportError)。self-test 必须 FAIL 给具体诊断。
+func TestSelfTestOpenclaw_MCPProbeFAIL(t *testing.T) {
+	withFakeMCPProbeErr(t)
+	cfg := nacosCfg()
+	staging, _ := setupOpenclawStaging(t, cfg)
+	if err := InstallNativeOpenclaw(context.Background(), staging, InstallOpenclawOptions{SkipGatewayRestart: true}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := SelfTestOpenclaw(context.Background(), staging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OK {
+		t.Errorf("mcp probe 全 FAIL,self-test 整体应当 FAIL")
+	}
+	// 至少有一条 mcp probe FAIL 项 + detail 含 stderr tail(给用户具体故障定位)
+	failedProbes := 0
+	for _, c := range res.Checks {
+		if c.Status == "FAIL" && strings.HasPrefix(c.Name, "mcp probe ") {
+			failedProbes++
+			if !strings.Contains(c.Detail, "stderr tail:") {
+				t.Errorf("mcp probe FAIL detail 应含 stderr tail,got: %q", c.Detail)
+			}
+		}
+	}
+	if failedProbes == 0 {
+		t.Errorf("应至少 1 条 mcp probe FAIL,got: %+v", res.Checks)
 	}
 }
 

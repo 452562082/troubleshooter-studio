@@ -42,8 +42,17 @@ description: 通过环境动态查询 MySQL 数据。先通过 routing 获取环
 **主路径:mcp tool**(已预注册,首选)
 
 ```text
-查 mcp tools 列表 → 找名字含 `mysql-<env>` 的工具 → 直接 tool_use 调。
-连接串已 bake,只传 SQL/limit,不需手动 host/port/user/pass/db。
+查 mcp tools 列表 → 找名字含 `mysql-<env>` 的工具。runtime probe 实测 @benborla29@2.0.8
+**只暴露 1 个工具**:
+  mysql_query  — 单一 SQL 执行入口,任何 SELECT/INSERT/UPDATE/DELETE/DDL 都从这调
+
+软约束(SKILL 强制 — 排障禁调):
+  排障场景下 mysql_query 只传 SELECT(包括 SHOW / EXPLAIN / DESCRIBE 这类 read 类元数据查询)。
+  禁传 INSERT / UPDATE / DELETE / DROP / TRUNCATE / CREATE / ALTER 等写 / DDL。
+  install 没传 ALLOW_*_OPERATION=false(用户校准过软约束哲学),靠 SKILL 文档约束。
+  LLM 误传写 SQL 视为越权,立刻 abort 并告知用户。
+
+连接串已 bake,只传 SQL,不需手动 host/port/user/pass/db。建议每条 SQL 自带 `LIMIT N` 防大表扫描。
 ```
 
 **fallback 1:mysql CLI(只读)**

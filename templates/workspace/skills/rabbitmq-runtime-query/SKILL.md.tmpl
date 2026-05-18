@@ -1,6 +1,6 @@
 ---
 name: rabbitmq-runtime-query
-description: 通过环境动态查询 RabbitMQ 状态。先通过 routing 获取环境映射,优先用预注册的 rabbitmq-<env> mcp tool 直查(AWS amq-mcp-server-rabbitmq,默认只读;uvx 启动零安装);mcp 不可用时 fallback rabbitmqadmin CLI 或 HTTP Management API 端口 15672。
+description: 通过 RabbitMQ HTTP Management API(端口 15672)查询队列状态。先通过 routing 获取环境映射,凭据从 install creds 读,curl + Basic Auth 查队列长度 / 消费者 / exchange / 节点健康等。2026-05-15 起 mcp 主路径暂禁(PyPI 包实测两个都 broken,详见 install_native_mcp_common.go::buildRabbitMQ)。
 ---
 
 # RabbitMQ Runtime Query
@@ -16,12 +16,10 @@ description: 通过环境动态查询 RabbitMQ 状态。先通过 routing 获取
 2. 通过 `resolve_runtime_k8s.py --agent-id {{.AgentID}} --env <env>` 从 K8s ConfigMap/Secret 解析连接信息。
 {{- end}}
 3. 解析配置中的 RabbitMQ Management 连接信息(URL / user / password)。
-4. **工具选用顺序**:
-   - **优先 mcp tool**:本系统按 URL dedup 在每个 env 注册 rabbitmq MCP(`uvx amq-mcp-server-rabbitmq@latest`,默认只读)。**列工具看注册了几个 source**:
-     - 只 1 个 `rabbitmq-<env>`(单 cluster,典型)→ 直接 `tool_use` 调那个。
-     - 多个 `rabbitmq-<source>-<env>`(多 cluster)→ **必须查 routing 的 `references/service-to-datastore-source.yaml`** 拿 `service_routing.data_stores.rabbitmq.<service>` 对应 source,只调 `rabbitmq-<对应 source>-<env>`,**禁止瞎选**。
-   - **mcp 不可用** → fallback **rabbitmqadmin CLI**(RabbitMQ 标准发行版自带)。
-   - **CLI 也没装** → fallback **curl + HTTP Management API**(端口 15672,自带 Basic Auth)。
+4. **工具选用顺序**(2026-05-15 起 mcp 主路径暂禁):
+   - **主路径:curl + HTTP Management API**(端口 15672,自带 Basic Auth) — RabbitMQ 团队官方维护,极稳定,所有查询场景都覆盖。凭据从 install creds 的 `RABBITMQ_USER_<ENV>` / `RABBITMQ_PASS_<ENV>` 读。
+   - **可选 fallback:`rabbitmqadmin` CLI** — RabbitMQ 标准发行版自带,本质也是 HTTP API,curl 不顺手时备用。
+   - **为什么不走 mcp**:实测 PyPI 上 `amq-mcp-server-rabbitmq`(amazon-mq) 源码引用 fastmcp 不存在的 `BearerAuthProvider`,装上必挂;`rabbitmq-mcp-server`(社区) 依赖声明缺一堆。等社区出能跑通的包,主路径会切回 mcp,详见 install_native_mcp_common.go::buildRabbitMQ 注释。
 5. 返回证据:队列状态、消息堆积量、消费者数量、exchange 绑定关系。
 
 ## 连接解析

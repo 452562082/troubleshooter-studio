@@ -92,18 +92,29 @@ func SelfTestOpenclaw(ctx context.Context, dir string) (*SelfTestResult, error) 
 		add("mcp.servers 齐全", "FAIL", "缺失:"+strings.Join(missing, ", "))
 	}
 
-	// nacos TCP 探活:多源逐个测
+	// mcp 真能起 + tools/list 返非空 — 2026-05-15 加(防 rabbitmq fastmcp 那种 install 显示
+	// success 但 mcp 进程秒挂的 silent failure)。逻辑详见 self_test_mcp_probe.go 头部注释。
+	probeMCPServersFromConfig(ctx, servers, add)
+
+	// nacos TCP 探活:多源逐个测。
+	// 2026-05-15 方案 B 后,nacos 不再注册 mcp,addr 不能从 mcp env 读了 — 改成读 cfg
+	// 的 ConfigCenter.Endpoints[].Addr(也是 wizard 写进 scripts/.env 的 CC_ADDR_* 源)。
 	for _, cc := range cfg.Infrastructure.ConfigCenters {
 		if cc.Type != "nacos" {
 			continue
 		}
+		addrByEnv := map[string]string{}
+		for _, ep := range cc.Endpoints {
+			if a := strings.TrimSpace(ep.Addr); a != "" {
+				addrByEnv[ep.Env] = a
+			}
+		}
 		for _, e := range cfg.Environments {
-			key := mcpKeyForAgent(mcpPrefix, "nacos", cc.ID, e.ID)
-			addr := mcpEnv(servers, key, "NACOS_ADDR")
 			label := "nacos TCP " + e.ID
 			if cc.ID != "" && cc.ID != "default" {
 				label = "nacos TCP " + cc.ID + "/" + e.ID
 			}
+			addr := addrByEnv[e.ID]
 			if !strings.Contains(addr, ":") {
 				add(label, "WARN", "NACOS_ADDR 缺失,跳过探活")
 				continue
@@ -187,22 +198,18 @@ func SelfTestOpenclaw(ctx context.Context, dir string) (*SelfTestResult, error) 
 			cfg.Infrastructure.Observability.K8sRuntime.URLByEnv, "kuboard-runtime", "/", add)
 	}
 
-	// 工具链探活:nacos/grafana/loki/lark MCP 都靠 uvx / npx 起子进程,本机缺这俩 PATH
-	// 时所有 MCP 调用都跑不起来。装完一眼看出来比 Day 1 调 MCP 第一次失败再排好。
+	// 工具链探活:grafana/loki/lark MCP 靠 npx 起子进程,缺了所有 MCP 调用都跑不起来。
+	// nacos 走 Python HTTP API 主路径(2026-05-15 方案 B),依赖 python3(MCP 启动检查里已查)。
+	// 装完一眼看出来比 Day 1 调 MCP 第一次失败再排好。
 	checkToolchain(cfg, add)
 
 	return res, nil
 }
 
-// checkToolchain 看 cfg 里哪些 MCP 用 uvx / npx,逐个 which 探活;缺则 FAIL + 给 brew/nvm 安装提示。
+// checkToolchain 看 cfg 里哪些 MCP 用 npx,逐个 which 探活;缺则 FAIL + 给 nvm 安装提示。
+// 2026-05-15 方案 B 后,nacos 走 Python HTTP API(python3 在 install 阶段必查),没有 uvx 强依赖
+// MCP;如果未来重新接 uvx 类 MCP,这里加 needUvx + exec.LookPath("uvx") 即可。
 func checkToolchain(cfg *config.SystemConfig, add func(name, status, detail string)) {
-	needUvx := false
-	for _, cc := range cfg.Infrastructure.ConfigCenters {
-		if cc.Type == "nacos" {
-			needUvx = true
-			break
-		}
-	}
 	needNpx := cfg.Infrastructure.Observability.Grafana.Enabled ||
 		cfg.Infrastructure.Observability.Loki.Enabled
 	for _, m := range cfg.Infrastructure.Messaging {
@@ -218,13 +225,6 @@ func checkToolchain(cfg *config.SystemConfig, add func(name, status, detail stri
 		}
 	}
 
-	if needUvx {
-		if path, err := exec.LookPath("uvx"); err == nil {
-			add("uvx 可用", "PASS", path)
-		} else {
-			add("uvx 可用", "FAIL", "PATH 里没找到 uvx;装 uv:`brew install uv` 或 `curl -LsSf https://astral.sh/uv/install.sh | sh`(nacos-mcp 跑不起来)")
-		}
-	}
 	if needNpx {
 		if path, err := exec.LookPath("npx"); err == nil {
 			add("npx 可用", "PASS", path)

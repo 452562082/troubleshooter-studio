@@ -22,7 +22,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/url"
-	"strconv"
 	"strings"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
@@ -81,21 +80,19 @@ func normalizeMongoURI(uri string) string {
 // 如果用户的 mongodb 不是这个模式(authSource 在 myauth 等其他 db),他在 wizard URI 末尾
 // 显式加 ?authSource=myauth 即可,本函数检测到 query 里有 authSource= 会跳过不动。
 func ensureAuthSource(uri string) string {
-	idx := strings.Index(uri, "://")
-	if idx < 0 {
+	_, rest, found := strings.Cut(uri, "://")
+	if !found {
 		return uri
 	}
-	rest := uri[idx+3:]
 	at := strings.LastIndex(rest, "@")
 	if at < 0 {
 		return uri // 没 userinfo → 没认证场景,不动
 	}
 	hostAndAfter := rest[at+1:] // host[:port][/path][?query]
-	slashIdx := strings.Index(hostAndAfter, "/")
-	if slashIdx < 0 {
+	_, pathAndQuery, hasSlash := strings.Cut(hostAndAfter, "/")
+	if !hasSlash {
 		return uri // 没 path 段(mongodb://user:pass@host) → 没指定 db,默认走 admin,不用加
 	}
-	pathAndQuery := hostAndAfter[slashIdx+1:]
 	path, query, hasQuery := strings.Cut(pathAndQuery, "?")
 	if path == "" || path == "admin" {
 		return uri // 用户已经连 admin / 没指定默认 db
@@ -135,11 +132,10 @@ func ensureDirectConnection(uri string) string {
 	if strings.HasPrefix(uri, "mongodb+srv://") {
 		return uri
 	}
-	idx := strings.Index(uri, "://")
-	if idx < 0 {
+	_, rest, found := strings.Cut(uri, "://")
+	if !found {
 		return uri
 	}
-	rest := uri[idx+3:]
 	hostAndAfter := rest
 	if at := strings.LastIndex(rest, "@"); at >= 0 {
 		hostAndAfter = rest[at+1:]
@@ -151,11 +147,10 @@ func ensureDirectConnection(uri string) string {
 	if strings.Contains(hostPart, ",") {
 		return uri
 	}
-	qIdx := strings.Index(hostAndAfter, "?")
-	if qIdx < 0 {
+	_, query, hasQ := strings.Cut(hostAndAfter, "?")
+	if !hasQ {
 		return uri + "?directConnection=true"
 	}
-	query := hostAndAfter[qIdx+1:]
 	if containsParam(query, "directConnection") || containsParam(query, "replicaSet") {
 		return uri
 	}
@@ -164,7 +159,7 @@ func ensureDirectConnection(uri string) string {
 
 // containsParam 检查 query string 里是否含名为 name 的参数(`name=...` 或 `name&` 形式)。
 func containsParam(query, name string) bool {
-	for _, pair := range strings.Split(query, "&") {
+	for pair := range strings.SplitSeq(query, "&") {
 		k, _, _ := strings.Cut(pair, "=")
 		if k == name {
 			return true
@@ -381,7 +376,20 @@ func (b *mcpBuilder) envBlock(m map[string]any) map[string]any {
 func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(string) string) map[string]any {
 	b := &mcpBuilder{cfg: cfg, opts: opts, get: get}
 	servers := map[string]any{}
-	b.buildNacos(servers)
+	// 注:nacos 故意不在这里 build MCP。
+	//
+	// 2026-05-15 truss case 三层复盘后定方案 B:nacos 主路径走 SKILL 内 Python HTTP API
+	// (scripts/nacos_config.py),每次调用脚本自己 login → 用 token → 丢弃。原因:
+	//   - 官方 nacos-mcp-server 只接 --access_token CLI 参数,token 在进程生命周期内固定;
+	//     mcp 进程拿不到 username/password 自己 refresh,LLM 也不能"重启 mcp"换 token
+	//   - install 阶段 bake token(方案 A)需要用户能改 nacos 端把 TTL 调到 10 年;truss 现场
+	//     nacos 2.3.0 + 运维不调 TTL → token 5h 过期,bake 方案沦为「装一次满血几小时然后默默
+	//     降级到 fallback」,跟 [[project-product-direction]]「机器人长期跑」定位错位
+	//   - 把 HTTP API fallback 升为主路径后,token 短 TTL 完全无所谓,nacos 端零配合,
+	//     代价是失去 mcp tool-call 体验(但 nacos 在排障链路里调用频次低,代价可接受)
+	//
+	// 决策历史:5d5a139(HTTP 主)→ 23d503a(MCP 主,nacos-mcp-router → nacos-mcp-server)
+	//          → 今天(回 HTTP 主,B 方案)。详见 README "Nacos 配置访问路径"。
 	b.buildGrafana(servers)
 	b.buildJaeger(servers)
 	b.buildELK(servers)
@@ -391,227 +399,10 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 	return servers
 }
 
-// buildNacos:nacos per (source × env),多源 + 每 env 一个独立 MCP 实例
-func (b *mcpBuilder) buildNacos(servers map[string]any) {
-	for _, cc := range b.cfg.Infrastructure.ConfigCenters {
-		if cc.Type != "nacos" {
-			continue
-		}
-		for _, e := range b.cfg.Environments {
-			servers[b.keyFor("nacos", cc.ID, e.ID)] = map[string]any{
-				"command": "uvx",
-				"args":    []any{"nacos-mcp-router@latest"},
-				"env": b.envBlock(map[string]any{
-					"NACOS_ADDR":     b.get(envVar("CC_ADDR", cc.ID, e.ID)),
-					"NACOS_USERNAME": b.get(envVar("CC_USER", cc.ID, e.ID)),
-					"NACOS_PASSWORD": b.get(envVar("CC_PASS", cc.ID, e.ID)),
-				}),
-			}
-		}
-	}
-}
+// 可观测性 MCP builders(grafana / jaeger / elk)拆到 install_native_mcp_obs.go。
+// 数据层 + messaging MCP builders 后续会拆到对应文件。本文件保留 common helpers + 总入口。
 
-// buildGrafana:grafana / loki / prom 都走 mcp-grafana-npx(社区 wrapper,首次跑时自动下
-// grafana/mcp-grafana 官方 Go 二进制到 npm 缓存,exec 同款进程;stdout 干净不污染 stdio)。
-// loki 跟 grafana 共用同一个底层二进制,只是多 `--disable-search/dashboard/datasource` 把它
-// 收成"只剩 Loki/Prom 查询"。
-//
-// 历史:之前我们自己下 grafana 官方 Go 二进制到 <root>/bin/mcp-grafana(占位 sentinel
-// 替换路径),200 行 ensure_mcp_grafana.go + 4 平台各 30MiB 冗余。换 npx wrapper 后:
-//   - 跟其他 7 家 npx MCP 同款代码路径,统一
-//   - npm 缓存跨 4 IDE 共享(~/.npm/_npx/<hash>/),消除冗余
-//   - 删 200 行 ensure 逻辑 + 占位 / placeholder 替换 / npx fallback / uninstall codex bin 清理
-//
-// 代价:依赖第三方 6.7KB wrapper(animalnots,Apache-2.0),只是"下载+exec"几十行,风险小。
-//
-// 上游 mcp-grafana README:GRAFANA_API_KEY **已标 deprecated**,推 GRAFANA_SERVICE_ACCOUNT_TOKEN
-// (Grafana 9.1+ 用 service account token 替代 API key,值跟 token 字符串完全兼容,
-// 改名是为强调"用新 token API 创建,不用老 admin API key")。我们 wizard 字段叫
-// GRAFANA_API_KEY_<env>(用户语境上更直白),发到 mcp 时换成现行规范名 SERVICE_ACCOUNT_TOKEN。
-func (b *mcpBuilder) buildGrafana(servers map[string]any) {
-	if !b.cfg.Infrastructure.Observability.Grafana.Enabled {
-		return
-	}
-	for _, e := range b.cfg.Environments {
-		up := strings.ToUpper(e.ID)
-		servers[b.keyFor("grafana", "", e.ID)] = map[string]any{
-			"command": "npx",
-			"args": []any{"-y", "mcp-grafana-npx",
-				"--disable-incident", "--disable-alerting", "--disable-oncall",
-				"--disable-admin", "--disable-sift", "--disable-pyroscope",
-			},
-			"env": b.envBlock(b.grafanaAuthEnv(up)),
-		}
-	}
-}
-
-// grafanaAuthEnv 二选一:有 API key/SAT 时走 GRAFANA_SERVICE_ACCOUNT_TOKEN,空则回落 basic auth。
-func (b *mcpBuilder) grafanaAuthEnv(up string) map[string]any {
-	if k := b.get("GRAFANA_API_KEY_" + up); k != "" {
-		return map[string]any{
-			"GRAFANA_URL":                   b.get("GRAFANA_URL_" + up),
-			"GRAFANA_SERVICE_ACCOUNT_TOKEN": k,
-		}
-	}
-	return map[string]any{
-		"GRAFANA_URL":      b.get("GRAFANA_URL_" + up),
-		"GRAFANA_USERNAME": b.get("GRAFANA_USER_" + up),
-		"GRAFANA_PASSWORD": b.get("GRAFANA_PASS_" + up),
-	}
-}
-
-// 历史上这里有过单独的 loki MCP(同款 mcp-grafana 二进制只是多 --disable-search/dashboard/
-// datasource 把工具集瘦身)。但本质是 grafana MCP 的严格子集 — query_loki_logs/patterns/stats 等
-// 工具 grafana MCP 都已暴露,起两份相同进程纯属浪费 spawn + zod schema 注册时间。
-// 已删,保持 loki/prom 永远走 grafana MCP 单一路径。yaml 里 observability.loki.enabled
-// 仅决定 routing skill 模板里的 LOKI_URL_<env> CLI fallback 提示(当 mcp 不可用时)。
-// 同款理由:prometheus 一直没独立 MCP(社区无成熟 prom-only mcp 包),也走 grafana MCP。
-// validate 阶段强制 Loki/Prom 启用 ⇒ Grafana 必启用,见 validate_observability_grafana_required.go。
-
-// buildJaeger:用 traceloop/opentelemetry-mcp(uvx)真 mcp,4 家平台都注册(跟数据层 mcp 同款思路 —
-// 让 AI 直接 tool_use 调,不用让 AI 自己拼 jaeger /api/traces HTTP curl)。
-// 老路径(opts.IncludeRawObsCurl 控制 jaeger 走 curl 占位)被替换。
-// stdio 干净,BACKEND_TYPE=jaeger / BACKEND_URL=<JAEGER_URL_<env>> 指向 jaeger query 端口(默认 16686)。
-// PruneEmpty 模式下:JAEGER_URL_<env> 没填则 BACKEND_URL 空 → 整个 env block 被剔 → mcp 启动失败被 IDE 自动跳。
-func (b *mcpBuilder) buildJaeger(servers map[string]any) {
-	if !b.cfg.Infrastructure.Observability.Jaeger.Enabled {
-		return
-	}
-	for _, e := range b.cfg.Environments {
-		up := strings.ToUpper(e.ID)
-		jurl := b.get("JAEGER_URL_" + up)
-		if jurl == "" && b.opts.PruneEmpty {
-			continue
-		}
-		servers[b.keyFor("jaeger", "", e.ID)] = map[string]any{
-			"command": "uvx",
-			"args":    []any{"opentelemetry-mcp"},
-			"env": b.envBlock(map[string]any{
-				"BACKEND_TYPE": "jaeger",
-				"BACKEND_URL":  jurl,
-			}),
-		}
-	}
-}
-
-// buildELK 走 Elastic 官方 @elastic/mcp-server-elasticsearch(跟数据层 elasticsearch 同款,
-// 区别只在 env vars 命名空间:ELK_* 防跟数据层 ES 字段串)。Kibana UI 由 agent 通过
-// SKILL.md 拼 deeplink,不进 MCP env(本 MCP 只接 ES API)。
-// OTEL_SDK_DISABLED=true 防 elastic-otel-node 自动注入往 stdout 打 banner JSON 污染
-// stdio JSON-RPC(同数据层 ES 那条注释)。
-func (b *mcpBuilder) buildELK(servers map[string]any) {
-	if !b.cfg.Infrastructure.Observability.ELK.Enabled {
-		return
-	}
-	for _, e := range b.cfg.Environments {
-		up := strings.ToUpper(e.ID)
-		esURL := b.get("ELK_ES_URL_" + up)
-		if esURL == "" && b.opts.PruneEmpty {
-			continue // 没填 ES URL → 跳过(避免注册一条永远启动失败的 mcp)
-		}
-		servers[b.keyFor("elk", "", e.ID)] = map[string]any{
-			"command": "npx",
-			"args":    []any{"-y", "@elastic/mcp-server-elasticsearch"},
-			"env": b.envBlock(map[string]any{
-				"ES_URL":            esURL,
-				"ES_USERNAME":       b.get("ELK_USERNAME"),
-				"ES_PASSWORD":       b.get("ELK_PASSWORD"),
-				"OTEL_SDK_DISABLED": "true",
-			}),
-		}
-	}
-}
-
-// buildDataStores 数据层 MCP per (data_store_type, env)。wizard 用 DS_TOOL_SPECS 收集每家 +
-// 每环境的连接串 env vars(如 MONGODB_URI_DEV / POSTGRES_DSN_DEV / ES_URL_DEV ...),
-// useDeployFlow.buildOpenclawCreds 把这些 env vars 写到 install creds map。
-// 这里读对应 env var,注册成预启动 mcp server,让 AI 能直接 tool_use 调而不用读 SKILL.md
-// 跑 mongosh / psql 这种"AI 不一定会主动跑"的 CLI。
-//
-// 阶段 1 覆盖 6 家:
-//
-//	接整 URI:
-//	  - mongodb:        npx mcp-mongo-server --read-only           (env: MCP_MONGODB_URI)
-//	  - postgresql:     npx server-postgres <DSN>                  (位置参数,包不接 env)
-//	  - redis:          npx server-redis-mcp <URL>                 (位置参数,包不接 env)
-//	  - elasticsearch:  npx mcp-server-elasticsearch               (env: ES_URL/USERNAME/PASSWORD)
-//	要拆字段(npm/pip 包不接整 URL,只接 host/port/user/pass):
-//	  - mysql:          parseMySQLDSN → MYSQL_HOST/PORT/USER/PASS/DB env
-//	  - clickhouse:     parseConnURL  → CLICKHOUSE_HOST/PORT/USER/PASSWORD/DATABASE env
-//
-// 历史:本会话曾尝试给 pg/redis(只接位置参数)套一层 `tshoot mcp-launch` launcher
-// 把凭据藏 env 里,但 desktop 二进制被 install 选作 launcher 路径时会让 Claude 启动
-// MCP 时打开一堆 wails 窗口("启动一堆工作台"),且 launcher 多一层 fork 没解决根本问题
-// (上游包不接 env)。改回直接传位置参数 — pg/redis 凭据落 IDE config args 字段是已知
-// trade-off,直到上游包支持 env 或换包(@henkey/postgres-mcp-server 等)再迁。
-//
-// 阶段 2 进展:
-//   - kafka:走 binary 安装 tuannvm/kafka-mcp-server(franz-go 纯 Go,GoReleaser 跨平台,
-//     install 时探测 PATH 缺 binary 打 brew 安装指引;详见 ensure_kafka_mcp.go)
-//   - rabbitmq:走 uvx amazon-mq/mcp-server-rabbitmq(默认只读)
-//
-// PruneEmpty=true 模式下空 env 段会被剔,如果用户没填 endpoint(env-vars 模式没填 /
-// 走 from_config_center 模式),mcp server 启动时拿不到 URI 直接退出 — 不会污染 IDE。
-func (b *mcpBuilder) buildDataStores(servers map[string]any) {
-	for _, ds := range b.cfg.Infrastructure.DataStores {
-		if !ds.Enabled {
-			continue
-		}
-		for _, e := range b.cfg.Environments {
-			// 按连接串 dedupe:同一 (env, type) 下,同 URI 视为同 cluster,共享一个 MCP;
-			// 不同 URI 注册成多个 MCP(支持"一个 env 里多个 mongodb cluster"场景)。
-			// dedupe 后只有 1 个 unique → sourceID 留空,MCP key 退化成无 source 段(跟老用户行为一致)。
-			unique := dsEndpointsUnique(ds, e.ID)
-			single := len(unique) <= 1
-			for _, ep := range unique {
-				sourceID := ""
-				if !single {
-					sourceID = ep.sourceID
-				}
-				switch ds.Type {
-				case "mongodb":
-					b.buildMongoDB(servers, ep.endpoint, sourceID, e.ID)
-				case "postgresql":
-					b.buildPostgreSQL(servers, ep.endpoint, sourceID, e.ID)
-				case "elasticsearch":
-					b.buildDataES(servers, ep.endpoint, sourceID, e.ID)
-				case "redis":
-					b.buildRedis(servers, ep.endpoint, sourceID, e.ID)
-				case "mysql":
-					b.buildMySQL(servers, ep.endpoint, sourceID, e.ID)
-				case "clickhouse":
-					b.buildClickHouse(servers, ep.endpoint, sourceID, e.ID)
-				case "kafka":
-					b.buildKafka(servers, ep.endpoint, sourceID, e.ID)
-				case "rabbitmq":
-					b.buildRabbitMQ(servers, ep.endpoint, sourceID, e.ID)
-				}
-			}
-			// env-vars 模式 / 用户没扫到 endpoints → unique 空,但还得跑一遍(让 buildXxx
-			// 从 install creds env 拿连接串;PruneEmpty 模式下空 env 段会被剔)
-			if len(unique) == 0 {
-				switch ds.Type {
-				case "mongodb":
-					b.buildMongoDB(servers, nil, "", e.ID)
-				case "postgresql":
-					b.buildPostgreSQL(servers, nil, "", e.ID)
-				case "elasticsearch":
-					b.buildDataES(servers, nil, "", e.ID)
-				case "redis":
-					b.buildRedis(servers, nil, "", e.ID)
-				case "kafka":
-					b.buildKafka(servers, nil, "", e.ID)
-				case "rabbitmq":
-					b.buildRabbitMQ(servers, nil, "", e.ID)
-				case "mysql":
-					b.buildMySQL(servers, nil, "", e.ID)
-				case "clickhouse":
-					b.buildClickHouse(servers, nil, "", e.ID)
-				}
-			}
-		}
-	}
-}
+// buildDataStores 分发 + 8 家 build<DS> 已拆到 install_native_mcp_data_stores.go。
 
 // dsEndpointUnique 是 dedupe 后的一条 endpoint + 派生 sourceID。
 // sourceID 在调用方只在 unique > 1 时才用,= 1 时调用方会传空字符串退化命名。
@@ -790,330 +581,8 @@ func firstNonEmpty(vals ...string) string {
 
 // sourceID 在多 cluster 场景由 dsEndpointsUnique 派生(host 第一段);单 cluster 下传空,MCP key 退化无 source 段。
 // envVar 命名同步带 source 段(envVar 函数内部 sourceID == "default" / "" 时跳过)。
-func (b *mcpBuilder) buildMongoDB(servers map[string]any, ep *config.DataStoreEndpoint, sourceID, envID string) {
-	var epURI string
-	if ep != nil {
-		epURI = ep.URI
-	}
-	uri := firstNonEmpty(b.get(envVar("MONGODB_URI", sourceID, envID)), epURI)
-	if uri == "" && b.opts.PruneEmpty {
-		return // 没填连接串 → 跳过(避免注册一条永远启动失败的 mcp)
-	}
-	// 修密码段未 URL-encode 的保留字符 — mcp-mongo-server 严格按 RFC3986
-	// 解析,密码含 < ] ^ % @ : / ? # [ ] 等字面字符 → connection string parse error。
-	uri = normalizeMongoURI(uri)
-	uri = ensureDirectConnection(uri)
-	// mcp-mongo-server v2+ 支持 MCP_MONGODB_URI env(2.x 起);凭据走 env IDE
-	// config args 字段不残留。
-	servers[b.keyFor("mongodb", sourceID, envID)] = map[string]any{
-		"command": "npx",
-		"args":    []any{"-y", "mcp-mongo-server", "--read-only"},
-		"env": b.envBlock(map[string]any{
-			"MCP_MONGODB_URI": uri,
-		}),
-	}
-}
+// buildMongoDB → install_native_mcp_data_stores.go
 
-// FIXME: @modelcontextprotocol/server-postgres 已于 2025-07 deprecated
-// (官方维护者明确 archive,不再修)。功能仍在(READ ONLY transaction
-// 包裹所有查询,readonly 默认),近期能跑。
-//
-// 迁移调研(2026-05):
-//   - @henkey/postgres-mcp-server v1.0.5(env: POSTGRES_CONNECTION_STRING):**没有 read-only 模式**,
-//     直接换会丢失原 RO transaction 包裹 → AI 可能误执行 DELETE/UPDATE。
-//   - @ahmedmustahid/postgres-mcp-server:接 args 不接 env(走 launcher 还要 sh 转义),不优。
-//
-// 建议路径:用 henkey 包但在 PG 端建 readonly role,DSN 里只给该 role 的凭据 —
-// 安全责任从 mcp 侧移到 PG 侧。yaml schema 要相应改"必填 readonly user"才能换。
-// 暂保持现包(archived 但能跑)。
-func (b *mcpBuilder) buildPostgreSQL(servers map[string]any, ep *config.DataStoreEndpoint, sourceID, envID string) {
-	var epDSN string
-	if ep != nil {
-		epDSN = ep.DSN
-	}
-	dsn := firstNonEmpty(b.get(envVar("POSTGRES_DSN", sourceID, envID)), epDSN)
-	if dsn == "" && b.opts.PruneEmpty {
-		return
-	}
-	// 上游包只接位置参数,凭据落 args(可在 ~/.claude.json 里看到)— 已知 trade-off。
-	// envBlock(空 map) 仍然会被注入 OTEL_SDK_DISABLED=true 防 stdout 污染。
-	servers[b.keyFor("postgresql", sourceID, envID)] = map[string]any{
-		"command": "npx",
-		"args":    []any{"-y", "@modelcontextprotocol/server-postgres", dsn},
-		"env":     b.envBlock(map[string]any{}),
-	}
-}
+// (上面 7 个 build<DS> 已全部拆到 install_native_mcp_data_stores.go)
 
-// buildDataES 数据层 elasticsearch(跟 ELK obs 子段同款包,但不同 env 命名空间)。
-func (b *mcpBuilder) buildDataES(servers map[string]any, ep *config.DataStoreEndpoint, sourceID, envID string) {
-	var epURL, epUser, epPass string
-	if ep != nil {
-		epURL, epUser, epPass = ep.URL, ep.User, ep.Pass
-	}
-	esURL := firstNonEmpty(b.get(envVar("ES_URL", sourceID, envID)), epURL)
-	if esURL == "" && b.opts.PruneEmpty {
-		return
-	}
-	servers[b.keyFor("elasticsearch", sourceID, envID)] = map[string]any{
-		"command": "npx",
-		"args":    []any{"-y", "@elastic/mcp-server-elasticsearch"},
-		"env": b.envBlock(map[string]any{
-			"ES_URL":      esURL,
-			"ES_USERNAME": firstNonEmpty(b.get(envVar("ES_USER", sourceID, envID)), epUser),
-			"ES_PASSWORD": firstNonEmpty(b.get(envVar("ES_PASS", sourceID, envID)), epPass),
-			// 禁用 elastic-otel-node 自动监控 — 否则它启动时往 stdout 打 banner JSON
-			// (`{"name":"elastic-otel-node",...}`),污染 mcp stdio JSON-RPC 协议 →
-			// "handshaking with MCP server failed: connection closed: initialize response"。
-			// 实测设这个 env 后 stdout 干净,mcp client 能正常收 initialize response。
-			"OTEL_SDK_DISABLED": "true",
-		}),
-	}
-}
-
-// buildRedis:@gongrzhe/server-redis-mcp 接 URL 位置参数,不用拆字段。
-// 钉死 1.0.0:这个包目前只发过 1.0.0 一个版本(2024-12);如果作者将来发
-// 不兼容版本(arg 顺序变 / 改 env-only),@latest 会无声 break,钉版本更稳。
-func (b *mcpBuilder) buildRedis(servers map[string]any, ep *config.DataStoreEndpoint, sourceID, envID string) {
-	var epURL string
-	if ep != nil {
-		epURL = ep.URL
-	}
-	redisURL := firstNonEmpty(b.get(envVar("REDIS_URL", sourceID, envID)), epURL)
-	if redisURL == "" && b.opts.PruneEmpty {
-		return
-	}
-	// 同 pg:上游 v1.0.0 只接位置参数,凭据落 args。
-	servers[b.keyFor("redis", sourceID, envID)] = map[string]any{
-		"command": "npx",
-		"args":    []any{"-y", "@gongrzhe/server-redis-mcp@1.0.0", redisURL},
-		"env":     b.envBlock(map[string]any{}),
-	}
-}
-
-// buildMySQL:@benborla29/mcp-server-mysql 接 env(MYSQL_HOST/PORT/USER/PASS),
-// 用户填的是 go-sql-driver DSN(`user:pass@tcp(host:port)/db`)→ 拆字段喂 env。
-func (b *mcpBuilder) buildMySQL(servers map[string]any, ep *config.DataStoreEndpoint, sourceID, envID string) {
-	var epDSN string
-	if ep != nil {
-		epDSN = ep.DSN
-	}
-	dsn := firstNonEmpty(b.get(envVar("MYSQL_DSN", sourceID, envID)), epDSN)
-	if dsn == "" && b.opts.PruneEmpty {
-		return
-	}
-	host, port, user, pass, db := parseMySQLDSN(dsn)
-	if port == "" {
-		port = "3306"
-	}
-	servers[b.keyFor("mysql", sourceID, envID)] = map[string]any{
-		"command": "npx",
-		"args":    []any{"-y", "@benborla29/mcp-server-mysql"},
-		"env": b.envBlock(map[string]any{
-			"MYSQL_HOST": host,
-			"MYSQL_PORT": port,
-			"MYSQL_USER": user,
-			"MYSQL_PASS": pass,
-			"MYSQL_DB":   db,
-		}),
-	}
-}
-
-// buildClickHouse:uvx mcp-clickhouse(python pip 包)接 env(CLICKHOUSE_HOST/PORT/USER/PASSWORD)。
-// URL 形如 http(s)://[user:pass@]host:port/[db] → 拆字段。https → secure=true。
-func (b *mcpBuilder) buildClickHouse(servers map[string]any, ep *config.DataStoreEndpoint, sourceID, envID string) {
-	var epURL, epUser, epPass string
-	if ep != nil {
-		epURL, epUser, epPass = ep.URL, ep.User, ep.Pass
-	}
-	chURL := firstNonEmpty(b.get(envVar("CLICKHOUSE_URL", sourceID, envID)), epURL)
-	if chURL == "" && b.opts.PruneEmpty {
-		return
-	}
-	host, port, urlUser, urlPass, db := parseConnURL(chURL)
-	secure := strings.HasPrefix(strings.ToLower(chURL), "https://")
-	if port == "" {
-		if secure {
-			port = "8443"
-		} else {
-			port = "8123"
-		}
-	}
-	// URL 没带凭证就 fallback 到独立字段(用户大概率走 USER/PASS 表单填)。
-	// 优先级:URL 内嵌 > install creds CLICKHOUSE_USER_<sourceID>_<env> > yaml endpoint user 字段。
-	user := urlUser
-	if user == "" {
-		user = firstNonEmpty(b.get(envVar("CLICKHOUSE_USER", sourceID, envID)), epUser)
-	}
-	pass := urlPass
-	if pass == "" {
-		pass = firstNonEmpty(b.get(envVar("CLICKHOUSE_PASS", sourceID, envID)), epPass)
-	}
-	servers[b.keyFor("clickhouse", sourceID, envID)] = map[string]any{
-		"command": "uvx",
-		"args":    []any{"mcp-clickhouse"},
-		"env": b.envBlock(map[string]any{
-			"CLICKHOUSE_HOST":     host,
-			"CLICKHOUSE_PORT":     port,
-			"CLICKHOUSE_USER":     user,
-			"CLICKHOUSE_PASSWORD": pass,
-			"CLICKHOUSE_DATABASE": db,
-			"CLICKHOUSE_SECURE":   strconv.FormatBool(secure),
-		}),
-	}
-}
-
-// buildKafka 用 tuannvm/kafka-mcp-server(MIT,franz-go 纯 Go,GoReleaser 5 个 triple 全)。
-//
-// **跟其它 7 家不一致**:走 binary 安装(brew tap / GitHub Release),不是 npx/uvx 零安装。
-// 原因:kafka 这家业界没有靠谱的 npx/uvx 实现 —— 详见 ensure_kafka_mcp.go 头部注释。
-// 简言之,Confluent 官方 npm 包(`@confluentinc/mcp-confluent`)依赖 native librdkafka 绑定,
-// Node ABI 矩阵滞后 + install scripts 静默失败,跨平台脆弱(2026-05 实战踩坑后回切 binary)。
-// franz-go 纯 Go 实现避开了 librdkafka 整条 native binding 路径。
-//
-// 安全契约:tuannvm 没原生 --read-only flag,但 9 个工具里只 1 个 mutative(`produce_message`),
-// 默认靠 LLM prompt 不主动调(produce_message 是显式动作,LLM 排障时不会"恰好"调它发消息)。
-// 进一步加固在 bot 的 SKILL.md / system instruction 里写明"kafka MCP 工具只读使用"。
-//
-// 配置形态(参考上游 README):
-//
-//	command: "kafka-mcp-server"  # 从 PATH 找 binary
-//	args:    []
-//	env:     KAFKA_BROKERS=<csv brokers>   # tuannvm 用的 env 名,不是 BOOTSTRAP_SERVERS
-//	         MCP_TRANSPORT=stdio
-//
-// 自托管 Apache Kafka 用户只填 brokers,不需要 SASL/TLS 凭据(没填 KAFKA_SASL_* 即关闭)。
-// dedup 跟其它 7 家同款:brokers 字符串作 key,同 brokers 视为同 cluster 共享 1 个 MCP。
-//
-// install 时安装路径:见 EnsureKafkaMCPInstalled(PATH 命中用绝对路径 / cache 命中复用 /
-// 缺失自动从 GitHub Release 拉 tarball 到 ~/.tshoot/bin/,失败 warn 不阻塞)。
-func (b *mcpBuilder) buildKafka(servers map[string]any, ep *config.DataStoreEndpoint, sourceID, envID string) {
-	var epBrokers string
-	if ep != nil {
-		epBrokers = ep.Brokers
-	}
-	brokers := firstNonEmpty(b.get(envVar("KAFKA_BROKERS", sourceID, envID)), epBrokers)
-	if brokers == "" && b.opts.PruneEmpty {
-		return // 没填 brokers → 跳过(避免注册一条永远启动失败的 mcp)
-	}
-	cmd := b.opts.KafkaMCPBinaryPath
-	if cmd == "" {
-		cmd = "kafka-mcp-server" // PATH 回落,跟手动装路径兼容
-	}
-	servers[b.keyFor("kafka", sourceID, envID)] = map[string]any{
-		"command": cmd,
-		"args":    []any{},
-		"env": b.envBlock(map[string]any{
-			"KAFKA_BROKERS": brokers,
-			"MCP_TRANSPORT": "stdio",
-		}),
-	}
-}
-
-// buildRabbitMQ 用 amazon-mq/mcp-server-rabbitmq(AWS Labs,uvx 零安装,默认只读)。
-//
-// 关键设计选择(对比备选 `kenliao94/mcp-server-rabbitmq` 和 `rabbitmq-mcp-server` PyPI):
-//   - AWS 版默认 read-only,不加 `--allow-mutative-tools` 就只读 → 符合项目"全只读"安全契约
-//   - guercheLE PyPI 版凭据走 env(AMQP_HOST 等),更安全但**没明确默认只读**,放弃
-//   - kenliao94 版同样 args + 没只读默认,放弃
-//
-// 配置(参考上游 README):
-//
-//	command: "uvx"
-//	args:    ["amq-mcp-server-rabbitmq@latest", "--rabbitmq-host", host,
-//	          "--port", port, "--username", user, "--password", pass]
-//	          # 不传 --allow-mutative-tools → 默认只读
-//
-// trade-off:凭据落 args(可在 ~/.claude.json 看到)— 跟 redis/pg 同款已知妥协。
-// 想要凭据完全藏 env 的话得换 guercheLE 版,但放弃只读默认。
-//
-// endpoint 字段:
-//   - URL: amqp://[user:pass@]host:port[/vhost](标准 AMQP URI) — host/port 从这 parse
-//   - User / Pass:也支持独立字段(URL 没带凭据时 fallback)
-//
-// dedup 按 ep.URL 做 key(同 host/port 同一 cluster 共享 MCP)。
-func (b *mcpBuilder) buildRabbitMQ(servers map[string]any, ep *config.DataStoreEndpoint, sourceID, envID string) {
-	var epURL, epUser, epPass string
-	if ep != nil {
-		epURL, epUser, epPass = ep.URL, ep.User, ep.Pass
-	}
-	rawURL := firstNonEmpty(b.get(envVar("RABBITMQ_URL", sourceID, envID)), epURL)
-	if rawURL == "" && b.opts.PruneEmpty {
-		return // 没填 URL → 跳过(避免注册一条永远启动失败的 mcp)
-	}
-	// parse host:port:user:pass。AMQP URI 形态跟其它 RFC3986 兼容,直接用 parseConnURL。
-	host, port, urlUser, urlPass, _ := parseConnURL(rawURL)
-	if port == "" {
-		port = "5672" // 标准 AMQP 默认端口
-	}
-	// URL 没带凭证就 fallback 到独立字段(用户大概率走 USER/PASS 表单填)。
-	// 优先级:URL 内嵌 > install creds RABBITMQ_USER_<sourceID>_<env> > yaml endpoint user 字段。
-	user := urlUser
-	if user == "" {
-		user = firstNonEmpty(b.get(envVar("RABBITMQ_USER", sourceID, envID)), epUser)
-	}
-	pass := urlPass
-	if pass == "" {
-		pass = firstNonEmpty(b.get(envVar("RABBITMQ_PASS", sourceID, envID)), epPass)
-	}
-	args := []any{"amq-mcp-server-rabbitmq@latest",
-		"--rabbitmq-host", host,
-		"--port", port,
-	}
-	if user != "" {
-		args = append(args, "--username", user)
-	}
-	if pass != "" {
-		args = append(args, "--password", pass)
-	}
-	servers[b.keyFor("rabbitmq", sourceID, envID)] = map[string]any{
-		"command": "uvx",
-		"args":    args,
-		"env":     b.envBlock(map[string]any{}),
-	}
-}
-
-// buildLark messaging:lark — 上游正式包名是 @larksuiteoapi/lark-mcp(注意 oapi 不是 suite),
-// 且 binary 是 commander 多子命令,启动 mcp server 必须显式 `mcp` 子命令(没有就只是
-// CLI 工具 exit)。env: process.env.APP_ID / APP_SECRET(在 dist/utils/constants.js
-// 里写死,不接 LARK_APP_* 前缀)。
-//
-// `-t preset.im.default` 把工具集从默认 19 个(preset.default = IM + Bitable + Doc +
-// Contact 全套)缩到 5 个(IM 群消息相关)。排障机器人对飞书的真实需求是"发故障快报
-// 到群" + 偶尔查群信息,IM 子集足够。19 → 5 工具:启动快、Claude /mcp 面板列表清爽、
-// LLM tools[] context 也轻不少(每个工具一份 zod-to-json-schema 描述都不便宜)。
-//
-// LARK_DOMAIN env(可选):海外用户填 https://open.larksuite.com,留空 → lark-mcp
-// 走默认 https://open.feishu.cn(国内飞书 endpoint)。lark-mcp 源码
-// `package/dist/utils/constants.js:29` 读 process.env.LARK_DOMAIN,我们透传即可。
-func (b *mcpBuilder) buildLark(servers map[string]any) {
-	for _, m := range b.cfg.Infrastructure.Messaging {
-		if m.Enabled && m.Platform == "lark" {
-			servers[b.keyFixed("lark-openapi")] = map[string]any{
-				"command": "npx",
-				"args":    []any{"-y", "@larksuiteoapi/lark-mcp", "mcp", "-t", "preset.im.default"},
-				"env": b.envBlock(map[string]any{
-					"APP_ID":      b.get("LARK_APP_ID"),
-					"APP_SECRET":  b.get("LARK_APP_SECRET"),
-					"LARK_DOMAIN": b.get("LARK_DOMAIN"),
-				}),
-			}
-			return
-		}
-	}
-}
-
-// buildFeishuProject project tracking:feishu_project
-func (b *mcpBuilder) buildFeishuProject(servers map[string]any) {
-	for _, p := range b.cfg.Infrastructure.ProjectTracking {
-		if p.Enabled && p.Platform == "feishu_project" {
-			servers[b.keyFixed("FeishuProjectMcp")] = map[string]any{
-				"command": "npx",
-				"args":    []any{"-y", "@lark-project/mcp", "--domain", "https://project.feishu.cn"},
-				"env": b.envBlock(map[string]any{
-					"MCP_USER_TOKEN": b.get("MCP_USER_TOKEN"),
-				}),
-			}
-			return
-		}
-	}
-}
+// buildLark / buildFeishuProject 已拆到 install_native_mcp_messaging.go。

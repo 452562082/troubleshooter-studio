@@ -42,8 +42,13 @@ description: 通过环境动态查询 Redis 数据。先通过 routing 获取环
 **主路径:mcp tool**(已预注册,首选)
 
 ```text
-查 mcp tools 列表 → 找名字含 `redis-<env>` 的工具(get / set 不调 / list / scan 等) → 直接 tool_use。
-连接串已 bake,不要再传 host/port/password,只传 key / pattern / count。
+查 mcp tools 列表 → 找名字含 `redis-<env>` 的工具。@gongrzhe/server-redis-mcp@1.0.0 只暴露 4 个:
+  get      — 按 key 取值
+  list     — 列匹配 pattern 的 keys(替代危险的 KEYS *,只看不读 value)
+  set      — **排障禁调**(写操作,只查时不该用)
+  delete   — **排障禁调**(写操作)
+连接串已 bake,不要再传 host/port/password,只传 key / pattern。
+注:scan / TTL 这类高级操作上游 v1.0.0 没暴露(redis-plus 分支才有但 npm 装不到),需要时 fallback redis-cli。
 ```
 
 **fallback 1:redis-cli(只读)**

@@ -70,14 +70,9 @@ func requiredMCPKeys(cfg *config.SystemConfig, agentID string) []string {
 		return agentID + "-" + name
 	}
 	var out []string
-	for _, cc := range cfg.Infrastructure.ConfigCenters {
-		if cc.Type != "nacos" {
-			continue
-		}
-		for _, e := range cfg.Environments {
-			out = append(out, mcpKeyForAgent(agentID, "nacos", cc.ID, e.ID))
-		}
-	}
+	// 注:nacos 不在 requiredMCPKeys —— 2026-05-15 truss case 复盘后定方案 B,nacos 走
+	// SKILL 内 Python HTTP API,install 阶段不注册 mcp。详见
+	// install_native_mcp_common.go::BuildMCPServers 内大段注释。
 	if cfg.Infrastructure.Observability.Grafana.Enabled {
 		for _, e := range cfg.Environments {
 			out = append(out, withAgent("grafana-"+e.ID))
@@ -104,12 +99,9 @@ func requiredMCPKeys(cfg *config.SystemConfig, agentID string) []string {
 			break
 		}
 	}
-	for _, p := range cfg.Infrastructure.ProjectTracking {
-		if p.Enabled && p.Platform == "feishu_project" {
-			out = append(out, withAgent("FeishuProjectMcp"))
-			break
-		}
-	}
+	// 注:feishu_project 不在 requiredMCPKeys —— 2026-05-15 审计后暂时禁用 mcp 注册
+	// (@lark-project/mcp v0.0.1 是字节内部 prototype),buildFeishuProject 仅打 warn。
+	// yaml 仍合法,字节发正式版后翻 buildFeishuProject 即可重启用,届时这里也补回 FeishuProjectMcp。
 	return out
 }
 

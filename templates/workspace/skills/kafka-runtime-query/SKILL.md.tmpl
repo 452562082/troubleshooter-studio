@@ -26,14 +26,22 @@ description: 通过环境动态查询 Kafka 集群状态。先通过 routing 获
 
 ## MCP 安全契约(只读使用)
 
-tuannvm/kafka-mcp-server 提供 9 个工具,其中 8 个是读操作(`list_topics` / `describe_topic` /
-`list_consumer_groups` / `describe_consumer_group` / `consume_messages` / `list_brokers` /
-`get_topic_config` / `get_broker_config`),**只 1 个 mutative `produce_message`**。
+tuannvm/kafka-mcp-server 提供 9 个工具,其中 8 个读、1 个写:
 
-binary 本身没有 `--read-only` 或 `--block-tools` flag 可用,本 skill 通过文档契约约束:**严禁
-调用 `produce_message`**。排障场景下没有正当理由发送消息到 kafka,真需要时由用户在 CLI
-手动操作(`kafka-console-producer.sh`)。AI 若调用 produce_message,视为越权,应立刻 abort 并
-告知用户。
+读操作(排障主用):
+- `cluster_overview` — 整集群 broker / topic / consumer-group 一览(快速诊断起点)
+- `list_topics`
+- `describe_topic` — 看 topic 元信息(partition / replication / config 摘要)
+- `list_consumer_groups`
+- `describe_consumer_group` — 看 consumer-group 消费位点、lag、成员
+- `consume_messages` — 拉指定 topic/partition 的消息(诊断时常用)
+- `list_brokers`
+- `describe_configs` — 看 topic/broker 配置(替代了老版本的 get_topic_config / get_broker_config 两个分开工具)
+
+**1 个 mutative**:`produce_message` — 排障场景下没有正当理由发送消息到 kafka,**严禁调用**。
+真需要时由用户在 CLI 手动操作(`kafka-console-producer.sh`)。AI 若调用 produce_message,视为越权,
+应立刻 abort 并告知用户。binary 本身没有 `--read-only` 或 `--block-tools` flag 可用,本 skill 通过
+文档契约约束。
 
 (选 tuannvm 而不是 `@confluentinc/mcp-confluent`:后者依赖 native librdkafka 绑定,
 Node ABI 矩阵滞后导致跨平台脆弱;2026-05 实战踩坑后回切纯 Go binary。)

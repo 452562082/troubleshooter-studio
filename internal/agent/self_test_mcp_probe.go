@@ -75,7 +75,19 @@ func doProbeMCPServer(ctx context.Context, command string, args, env []string, t
 	}
 	defer func() {
 		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		// cmd.Wait() 加 1s 上限:npx/uvx 进程在 cold install 网络下载阶段被 SIGKILL,
+		// 自身退出,但内部 fork 的 node/npm 孙子进程不会一起死,孙子进程持有的 stdin/stdout
+		// pipe 让父 cmd.Wait() 永远等不到 — 这是父函数 return 后 wg.Done 触发不了的根因,
+		// 进而让 wg.Wait() 卡满 SelfTestAgent 的 120s total timeout。
+		//
+		// 1s 不收尾就放弃 wait,接受 zombie 孙子进程(OS reaper 后续会清理)。代价是短期
+		// fd 泄漏,但 self-test 单次跑 17 个 mcp probe 后 .app 继续跑,GC + OS 兜底足够。
+		done := make(chan struct{})
+		go func() { _ = cmd.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(1 * time.Second):
+		}
 	}()
 
 	reader := bufio.NewReader(stdout)

@@ -139,6 +139,12 @@ web:
         - web/package-lock.json
     paths:
       - web/node_modules
+  # runner 是 shell executor,image: node:20 被忽略。host 装了 nvm + 仓库根有 .nvmrc(=20),
+  # 这里 source nvm.sh 后 `nvm use` 读 .nvmrc 切到 node 20,绕开 host 默认 node 25 的工具链
+  # 兼容问题(esbuild postinstall SIGKILL / vitest worker_threads 死锁)。
+  before_script:
+    - source "$HOME/.nvm/nvm.sh" && nvm use
+    - node --version
   script:
     - cd web
     # --ignore-scripts:跳过 esbuild 的 postinstall (node install.js)。

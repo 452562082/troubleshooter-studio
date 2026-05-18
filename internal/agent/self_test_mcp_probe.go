@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -223,17 +224,30 @@ func (b *boundedWriter) Write(p []byte) (int, error) {
 }
 
 // probeMCPServersFromConfig 对 servers map(self_test 从 openclaw.json 反读出来的)
-// 逐个跑 probe,返每个 mcp 的 PASS/FAIL/WARN 项。
+// **并发** 跑 probe,返每个 mcp 的 PASS/FAIL/WARN 项。
 //
 //   - PASS:进程起 + tools/list 返非空 → mcp 真能用
 //   - WARN:进程起 + tools/list 返空 → 协议起来了但工具集为 0(罕见,可能凭据问题让 mcp 不暴露任何工具)
 //   - FAIL:进程没起 / 协议崩 / timeout
 //
 // 跳过场景:cfg 期望 mcp 但 servers 没注册(已被 "mcp.servers 齐全" 那条检查 FAIL 覆盖)。
+//
+// 并发 + 短 timeout:之前串行 11 个 npx mcp × 60s/个 = 最坏 660s,被 SelfTestAgent 120s
+// total timeout 砍掉一半;现在并发跑,总耗时 ≈ max(单个) 而非 sum。timeout 15s 接受
+// "首次冷启动起不来就算 FAIL",cache 命中本来秒级就过 — 比"卡 660s 才知道结果"好得多。
+// add() 在多 goroutine 调要加 mutex 保护 res.Checks 切片 append。
 func probeMCPServersFromConfig(ctx context.Context, servers map[string]any, add func(name, status, detail string)) {
 	if len(servers) == 0 {
 		return // 没注册任何 mcp(配置太精简或 install 没跑过),跳过
 	}
+	const probeTimeout = 15 * time.Second
+	var mu sync.Mutex
+	safeAdd := func(name, status, detail string) {
+		mu.Lock()
+		defer mu.Unlock()
+		add(name, status, detail)
+	}
+	var wg sync.WaitGroup
 	for name, spec := range servers {
 		specMap, ok := spec.(map[string]any)
 		if !ok {
@@ -241,7 +255,7 @@ func probeMCPServersFromConfig(ctx context.Context, servers map[string]any, add 
 		}
 		command, _ := specMap["command"].(string)
 		if command == "" {
-			add("mcp probe "+name, "WARN", "spec 缺 command,跳过 probe")
+			safeAdd("mcp probe "+name, "WARN", "spec 缺 command,跳过 probe")
 			continue
 		}
 		var args []string
@@ -269,21 +283,24 @@ func probeMCPServersFromConfig(ctx context.Context, servers map[string]any, add 
 				}
 			}
 		}
-		// 60s 超时给 npx/uvx 冷启动 + handshake 留 headroom。本机已经跑过(cache 命中)秒级返。
-		r := probeMCPFunc(ctx, command, args, env, 60*time.Second)
-		switch {
-		case r.Err != nil:
-			detail := fmt.Sprintf("起不来: %v", r.Err)
-			if r.StderrTail != "" {
-				// stderr 经常多行,塞 detail 末尾,UI 用 monospace 展示。
-				detail += "\nstderr tail: " + r.StderrTail
+		wg.Add(1)
+		go func(probeName string, cmd string, ar []string, ev []string) {
+			defer wg.Done()
+			r := probeMCPFunc(ctx, cmd, ar, ev, probeTimeout)
+			switch {
+			case r.Err != nil:
+				detail := fmt.Sprintf("起不来: %v", r.Err)
+				if r.StderrTail != "" {
+					detail += "\nstderr tail: " + r.StderrTail
+				}
+				safeAdd("mcp probe "+probeName, "FAIL", detail)
+			case len(r.Tools) == 0:
+				safeAdd("mcp probe "+probeName, "WARN", "进程起了但 tools/list 返空(可能凭据被拒或上游协议变化)")
+			default:
+				safeAdd("mcp probe "+probeName, "PASS", fmt.Sprintf("%d 工具: %s",
+					len(r.Tools), strings.Join(r.Tools, ", ")))
 			}
-			add("mcp probe "+name, "FAIL", detail)
-		case len(r.Tools) == 0:
-			add("mcp probe "+name, "WARN", "进程起了但 tools/list 返空(可能凭据被拒或上游协议变化)")
-		default:
-			add("mcp probe "+name, "PASS", fmt.Sprintf("%d 工具: %s",
-				len(r.Tools), strings.Join(r.Tools, ", ")))
-		}
+		}(name, command, args, env)
 	}
+	wg.Wait()
 }

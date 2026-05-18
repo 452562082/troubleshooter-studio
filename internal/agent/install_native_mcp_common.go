@@ -80,21 +80,19 @@ func normalizeMongoURI(uri string) string {
 // 如果用户的 mongodb 不是这个模式(authSource 在 myauth 等其他 db),他在 wizard URI 末尾
 // 显式加 ?authSource=myauth 即可,本函数检测到 query 里有 authSource= 会跳过不动。
 func ensureAuthSource(uri string) string {
-	idx := strings.Index(uri, "://")
-	if idx < 0 {
+	_, rest, found := strings.Cut(uri, "://")
+	if !found {
 		return uri
 	}
-	rest := uri[idx+3:]
 	at := strings.LastIndex(rest, "@")
 	if at < 0 {
 		return uri // 没 userinfo → 没认证场景,不动
 	}
 	hostAndAfter := rest[at+1:] // host[:port][/path][?query]
-	slashIdx := strings.Index(hostAndAfter, "/")
-	if slashIdx < 0 {
+	_, pathAndQuery, hasSlash := strings.Cut(hostAndAfter, "/")
+	if !hasSlash {
 		return uri // 没 path 段(mongodb://user:pass@host) → 没指定 db,默认走 admin,不用加
 	}
-	pathAndQuery := hostAndAfter[slashIdx+1:]
 	path, query, hasQuery := strings.Cut(pathAndQuery, "?")
 	if path == "" || path == "admin" {
 		return uri // 用户已经连 admin / 没指定默认 db
@@ -134,11 +132,10 @@ func ensureDirectConnection(uri string) string {
 	if strings.HasPrefix(uri, "mongodb+srv://") {
 		return uri
 	}
-	idx := strings.Index(uri, "://")
-	if idx < 0 {
+	_, rest, found := strings.Cut(uri, "://")
+	if !found {
 		return uri
 	}
-	rest := uri[idx+3:]
 	hostAndAfter := rest
 	if at := strings.LastIndex(rest, "@"); at >= 0 {
 		hostAndAfter = rest[at+1:]
@@ -150,11 +147,10 @@ func ensureDirectConnection(uri string) string {
 	if strings.Contains(hostPart, ",") {
 		return uri
 	}
-	qIdx := strings.Index(hostAndAfter, "?")
-	if qIdx < 0 {
+	_, query, hasQ := strings.Cut(hostAndAfter, "?")
+	if !hasQ {
 		return uri + "?directConnection=true"
 	}
-	query := hostAndAfter[qIdx+1:]
 	if containsParam(query, "directConnection") || containsParam(query, "replicaSet") {
 		return uri
 	}
@@ -163,7 +159,7 @@ func ensureDirectConnection(uri string) string {
 
 // containsParam 检查 query string 里是否含名为 name 的参数(`name=...` 或 `name&` 形式)。
 func containsParam(query, name string) bool {
-	for _, pair := range strings.Split(query, "&") {
+	for pair := range strings.SplitSeq(query, "&") {
 		k, _, _ := strings.Cut(pair, "=")
 		if k == name {
 			return true

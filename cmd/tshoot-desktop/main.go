@@ -23,7 +23,9 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/wailsapp/wails/v2"
@@ -68,6 +70,7 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func main() {
+	fixGUIPath()
 	tr := resolveTemplateDir()
 	srv := &api.Server{TemplateRoot: tr}
 	router := api.NewRouter(srv, webui.Distribution())
@@ -106,6 +109,28 @@ func main() {
 		fmt.Fprintln(os.Stderr, "wails run:", err)
 		os.Exit(1)
 	}
+}
+
+// fixGUIPath 修桌面 app 由 launchd / Finder 启动时 PATH 被精简到 /usr/bin:/bin:
+// /usr/sbin:/sbin 的问题——self-test、install 子进程、findOpenclawCLI 都依赖能看见用户
+// 装的 uvx / npx / brew 工具。靠 fallback 候选路径(brew prefix / cargo bin / asdf shims
+// / nvm ...) 永远列不全，干脆 shell-out 拿用户 login shell 的完整 PATH 写回进程 env。
+//
+// 已是非 launchd 精简 PATH (开发模式 `wails dev` / 终端 `./TroubleshooterStudio` 直跑)
+// 就不动——用 ":" 切片 >4 段当判据，launchd 给的精简 PATH 恰好 4 段。
+func fixGUIPath() {
+	if len(strings.Split(os.Getenv("PATH"), ":")) > 4 {
+		return
+	}
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/zsh"
+	}
+	out, err := exec.Command(shell, "-l", "-c", "echo $PATH").Output()
+	if err != nil || len(out) == 0 {
+		return
+	}
+	os.Setenv("PATH", strings.TrimSpace(string(out)))
 }
 
 // resolveTemplateDir 按优先级找 templates/：

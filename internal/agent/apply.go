@@ -90,10 +90,12 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 	g.TroubleshooterYAMLSource = opts.NewYAML
 	g.RepoLocalPaths = opts.RepoLocalPaths
 	// auto-analyze:同 ImportAndApply,有本地路径就跑一遍把 service-dependency-map +
-	// data-schema-map 填齐。失败 / 空路径都不阻塞。
+	// data-schema-map 填齐。失败 / 空路径都不阻塞。OnLog 透传让桌面 UI 看到进度,
+	// auto-analyze 内部有 60s timeout 兜底,不会卡死部署主流程。
 	if result, aerr := RunAutoAnalyze(RunAutoAnalyzeOptions{
 		Cfg:       cfg,
 		RepoPaths: opts.RepoLocalPaths,
+		OnLog:     opts.OnLog,
 	}); aerr == nil && result != nil {
 		g.LoadAnalysisReport(result.Report)
 	}
@@ -250,10 +252,13 @@ func ImportAndApply(yamlBytes []byte, target, destPath string, opts ApplyOptions
 		g.RepoLocalPaths = opts.RepoLocalPaths
 		// auto-analyze:用 RepoLocalPaths 跑一遍 dependency_scan / schema_scan,
 		// 把 service-dependency-map.upstream/downstream + data-schema-map.tables 自动填齐;
-		// 路径全空 / 跑失败都不阻塞 gen,只是这两份产物里的字段保持空骨架。
+		// 路径全空 / 跑失败都不阻塞 gen,只是这两份产物里的字段保持空骨架。OnLog 透传桌面 UI,
+		// auto-analyze 内部 60s timeout 兜底——之前没传 OnLog + 没 timeout, 大仓扫描可让
+		// 部署 UI 永远卡"部署中..."、日志面板看着像死锁。
 		if result, aerr := RunAutoAnalyze(RunAutoAnalyzeOptions{
 			Cfg:       cfg,
 			RepoPaths: opts.RepoLocalPaths,
+			OnLog:     opts.OnLog,
 		}); aerr == nil && result != nil {
 			g.LoadAnalysisReport(result.Report)
 		}

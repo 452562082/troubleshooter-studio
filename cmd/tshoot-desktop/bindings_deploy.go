@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
@@ -130,7 +131,11 @@ func (a *App) RunInstall(outputDir string, creds map[string]string) (*RunInstall
 		return nil, err
 	}
 
-	runCtx, cancel := context.WithCancel(a.ctx)
+	// 5 分钟 total timeout 兜底:防未来某段 install 代码忘加局部 timeout,UI 永远
+	// 卡"部署中..."。正常 install ~5-10s,5 分钟留 30-60× 余量(网络极慢 kafka 下载 +
+	// gateway restart 几次重试都够),超时 cancel 让 UI 解锁,用户至少能继续操作。
+	// 配合 a.installCancel 用户主动取消按钮,双保险。
+	runCtx, cancel := context.WithTimeout(a.ctx, 5*time.Minute)
 	a.installMu.Lock()
 	if a.installCancel != nil {
 		// 上一个还没结束,先取消(UI 应该禁了按钮防并发,走到这里是 UI bug)
@@ -197,8 +202,53 @@ func (a *App) RevealInFinder(path string) error {
 
 // SelfTestAgent 跑 openclaw 自检(替代 scripts/self-test.sh)。dir 是 staging
 // 或已部署 workspace 都行;返回各项检查结果给 UI 渲染。
+//
+// 桥 install:log 让 UI 部署流程有进度反馈——SelfTestOpenclaw 本身不发 log,
+// 部署完跑 self-test 期间前端日志面板"看着像死锁"。120s total timeout 兜底:
+// 单 probe 6s × 十几家 + npx/uvx 探活总和最坏 60-90s,留 1.5× 余量。
 func (a *App) SelfTestAgent(dir string) (*agent.SelfTestResult, error) {
-	return agent.SelfTestOpenclaw(a.ctx, dir)
+	emit := func(line string) {
+		wailsruntime.EventsEmit(a.ctx, "install:log", "[self-test] "+line)
+	}
+	emit("开始自检 (TCP/HTTP 探活 + 工具链探测,最长 ~60-90s)")
+
+	ctx, cancel := context.WithTimeout(a.ctx, 120*time.Second)
+	defer cancel()
+
+	type chRes struct {
+		r   *agent.SelfTestResult
+		err error
+	}
+	ch := make(chan chRes, 1)
+	go func() {
+		r, err := agent.SelfTestOpenclaw(ctx, dir)
+		ch <- chRes{r, err}
+	}()
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			emit(fmt.Sprintf("自检异常: %v", res.err))
+			return res.r, res.err
+		}
+		if res.r != nil {
+			passes, warns, fails := 0, 0, 0
+			for _, c := range res.r.Checks {
+				switch c.Status {
+				case "PASS":
+					passes++
+				case "WARN":
+					warns++
+				case "FAIL":
+					fails++
+				}
+			}
+			emit(fmt.Sprintf("自检完成: %d PASS / %d WARN / %d FAIL", passes, warns, fails))
+		}
+		return res.r, res.err
+	case <-ctx.Done():
+		emit("自检超过 120s 未完成,放弃等待(不阻塞部署主流程,可在 BotsPage 手动重跑)")
+		return nil, fmt.Errorf("self-test 超时 120s")
+	}
 }
 
 // UninstallAgent 卸载 openclaw agent(替代 scripts/uninstall.sh)。dir 同上,

@@ -17,6 +17,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -103,6 +104,10 @@ type RunAutoAnalyzeOptions struct {
 	Cfg       *config.SystemConfig
 	RepoPaths map[string]string // repo.name → 本机绝对路径
 	OnLog     func(string)      // 流式日志(可选)
+	// Ctx 是给 analyzerpipe.Run 用的取消上下文(可选,nil 时用 background)。
+	// 注:Go 惯例 ctx 作为第一个参数而非 struct 字段,但 RunAutoAnalyzeOptions 现有 4+
+	// 调用方都用 opts struct,把 ctx 塞这里避免改全部签名 — 这是 minimal-invasive 妥协。
+	Ctx context.Context
 }
 
 // RunAutoAnalyze 跑一遍 analyzerpipe.Run。返回 Result 给调用方塞进 generator
@@ -157,8 +162,17 @@ func RunAutoAnalyze(opts RunAutoAnalyzeOptions) (*analyzerpipe.Result, error) {
 		err error
 	}
 	ch := make(chan chRes, 1)
+	// 内部 ctx:caller ctx(opts.Ctx)+ 我们自己的 60s timeout 包一层。
+	// caller 取消(用户点 stop / 桌面关 app)或本地 60s 时间到,都让 analyzerpipe.Run
+	// 从 step 之间退出,不再"goroutine 后台跑到死"。
+	parentCtx := opts.Ctx
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	runCtx, cancelRun := context.WithTimeout(parentCtx, autoAnalyzeTimeout)
+	defer cancelRun()
 	go func() {
-		r, err := analyzerpipe.Run(opts.Cfg, analyzerpipe.Options{
+		r, err := analyzerpipe.Run(runCtx, opts.Cfg, analyzerpipe.Options{
 			ReposRoot:  reposRoot,
 			RepoPaths:  expanded,
 			AutoClone:  false,

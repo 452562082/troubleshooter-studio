@@ -133,6 +133,49 @@
 
 ---
 
+## 2026-05-18 · MCP 不注册的两种情况分类校准
+
+**背景**:本会话 5 月 15 日做了一系列"砍 mcp 走 SKILL"决策(nacos / feishu_project / rabbitmq),分类时把这三家都笼统标为"已禁用",造成下游文档(AGENTS.md / CONTRIBUTING.md / decisions.md / 代码注释)反复出现"被禁的 mcp(nacos / feishu_project / rabbitmq)必须有替代访问方式"这类描述。
+
+5 月 18 日用户校准时指出:**rabbitmq 跟 feishu_project 语义完全不同** — rabbitmq 有 HTTP Management API 完整替代(能力可用),feishu_project 无替代凭据也停收(能力当前缺失)。
+
+**决策**:严格区分两种"不注册 mcp"语义:
+
+### 3a 方案 B(有替代,能力完整可用)
+
+上游 mcp 包不可用 / 不适合产品定位,但**有成熟的 HTTP API 替代**走 SKILL 主路径:
+
+| 后端 | 不注册 mcp 理由 | 替代路径 | 凭据流 |
+|---|---|---|---|
+| nacos | bake token 不能 refresh + 官方包跟"长期跑"定位冲突 | `scripts/nacos_config.py` 每次自己 login | wizard 仍收 `CC_ADDR_<ENV>` 等,写 `<workspace>/scripts/.env`,SKILL `source` 后用 |
+| apollo | 生态暂无稳定 MCP 包 | `scripts/apollo_config.py --agent-id --env` | wizard 仍收,写 `~/.openclaw/<agent-id>-creds.json` |
+| consul | 生态暂无稳定 MCP 包 | `scripts/consul_config.py --agent-id --env` | 同 apollo |
+| **rabbitmq** | 上游两个 PyPI 包都坏(amazon-mq 引用 fastmcp 不存在的 API + guercheLE 缺一堆 dep) | `curl + :15672/api/queues` HTTP Management API(RabbitMQ 官方维护) | wizard 仍收 `RABBITMQ_USER_<ENV>` 等,写 .env / creds.json |
+
+routing/config-map.yaml 标 `runtime: <type>-http` 字段告诉 LLM 走脚本。
+
+### 3b 真禁用(无替代,能力当前缺失)
+
+上游 mcp 包还是 prototype + 我们也没补 HTTP 脚本替代,能力**当前不可用**:
+
+| 后端 | 状态 | 等条件 |
+|---|---|---|
+| **feishu_project** | mcp 禁(@lark-project/mcp v0.0.1 字节内部 prototype)+ 凭据停收(诈骗式收集)+ wizard 标"实验性,选 Y 也不接入" | 字节发 v1.x 正式版 + 我们补完 SKILL |
+
+**后果**:
+- AGENTS.md / CONTRIBUTING.md / 代码注释统一加 3a / 3b 区分,避免后人混淆
+- 加新 mcp builder skip 时**先确认是哪类**:有可行的 HTTP API 替代 → 3a(凭据仍收 + SKILL 升主路径);无替代 → 3b(凭据停收 + wizard 加实验性提示)
+- self_test_openclaw 的 `requiredMCPKeys` 自动跟着 builder 实现走,不需要因为 3a/3b 区分而额外处理(builder skip 后两类都不进 requiredMCPKeys)
+
+**判别清单**(改 mcp 决策时对照):
+- 凭据是否 install_prompts 仍收?→ 仍收 = 3a,停收 = 3b
+- SKILL 是否有 HTTP 替代脚本 / 真实 fallback?→ 有 = 3a,无 = 3b
+- routing/config-map.yaml 是否标 `runtime: <type>-http`?→ 标 = 3a,不标(平台不在 config_centers 之类映射里)= 3b
+
+**演进**:如果某天 feishu_project 补了 OpenAPI Python 脚本 + SKILL,从 3b 升级到 3a(同 nacos 方案 B);如果上游 rabbitmq mcp 修好了 → 重新走 mcp 路径,从 3a 升回方案 A(install 注册 mcp)。
+
+---
+
 ## 2026-05-15 · install_native_mcp_common.go 拆分
 
 **背景**:单文件 1103 行,塞了 14 个 builder + helper + 注释。本会话改了 nacos/postgres/rabbitmq/feishu_project 4 家 mcp,每次都得 grep 巨型文件定位,review/merge conflict 风险高。

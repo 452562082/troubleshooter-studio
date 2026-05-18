@@ -81,7 +81,7 @@ docs P1.2: README TOC + 角色导览 + docs/decisions.md 决策演进记录
   - `internal/deploy/` ≥ 80%(当前 88.1%)
   - `internal/doctor/` ≥ 70%(当前 79.6%)
   - `api/` ≥ 50%(当前 59.2%,2026-05 起)
-- **新加 mcp builder** 必须有"它**不**注册"的 negative test(防同 nacos / feishu_project / rabbitmq 那种禁用决策反悔后没护栏)
+- **新加 mcp builder** 必须有"它**不**注册"的 negative test(防同 nacos / rabbitmq 方案 B 路径,或 feishu_project 真禁用路径决策反悔后没护栏 — 两种 case 见 [`AGENTS.md`](AGENTS.md) "不注册 mcp 的两种情况")
 - **CI 不跑真 mcp probe**(没 npx/uvx),probe 测试 stub `probeMCPFunc` package var,真测自己本地起 docker 跑 `self_test_mcp_probe.go::TestSelfTestOpenclaw_MCPProbeFAIL`
 
 ## License

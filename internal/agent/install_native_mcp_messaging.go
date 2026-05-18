@@ -39,8 +39,10 @@ func (b *mcpBuilder) buildLark(servers map[string]any) {
 
 // buildFeishuProject project tracking:feishu_project
 //
-// 2026-05-15 审计后**暂时禁用 mcp 注册**(yaml schema / wizard / prompts 凭据收集都不动,
-// 留作字节发正式版时重启用一行翻开)。理由:
+// 2026-05-15 审计后**真禁用**(注:跟 nacos / rabbitmq 的"方案 B 不注册 mcp"不同 —
+// 那是有 HTTP API 替代路径,能力完整可用;feishu_project 是**当前真不可用**,等正式版)。
+//
+// 详见 AGENTS.md "不注册 mcp 的两种情况" — 3b 真禁用 vs 3a 方案 B。
 //
 // 上游包 @lark-project/mcp v0.0.1 验真后判定为字节内部 prototype-grade:
 //   - npm 元数据 repository / homepage / readme **全空**(`@bytedance.com` 个人邮箱 maintainer)

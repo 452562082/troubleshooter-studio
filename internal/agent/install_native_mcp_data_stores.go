@@ -327,10 +327,16 @@ func (b *mcpBuilder) buildKafka(servers map[string]any, ep *config.DataStoreEndp
 //  2. `rabbitmq-mcp-server`(guercheLE 社区):
 //     依赖声明缺一堆 — 撞 tabulate、tomli、requests 全 ModuleNotFoundError,补丁堆补丁。
 //
-// 修法选 B(同 nacos / feishu_project):rabbitmq 主路径走 SKILL 内 HTTP Management API
-// (端口 15672 自带 REST API,极其稳定,RabbitMQ 团队官方维护)。rabbitmq 在排障里调用频次低
-// (看队列长度、consumer lag、alarm),不像 grafana 那种高频,失去 mcp 原生 tool-call 体验
-// 代价可接受。SKILL 早就把 HTTP API 当 fallback 写了,这次直接升主路径。
+// 修法走方案 B(**同 nacos / apollo / consul,不同 feishu_project**):
+// rabbitmq 主路径走 SKILL 内 HTTP Management API(端口 15672 自带 REST API,极其稳定,
+// RabbitMQ 团队官方维护)。**能力完整可用**,只是 mcp 这一层禁了。
+//
+// 跟 feishu_project 区别:feishu_project 是 3b 真禁用 — mcp 禁 + 凭据停收 + 无替代;
+// rabbitmq 是 3a 方案 B — mcp 禁 + **凭据仍收** + HTTP API 完整替代。详见 AGENTS.md
+// "不注册 mcp 的两种情况"。
+//
+// rabbitmq 在排障里调用频次低(看队列长度、consumer lag、alarm),不像 grafana 那种高频,
+// 失去 mcp 原生 tool-call 体验代价可接受。SKILL 早就把 HTTP API 当 fallback 写了,这次直接升主路径。
 //
 // 等条件:社区出**能跑通**的 rabbitmq mcp 包,且工具集对得上排障需求,再翻开下面 if 分支。
 // 当前 install 时打 warn 告知用户 mcp 没注册,SKILL 会走 HTTP API。

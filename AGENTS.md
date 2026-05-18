@@ -36,14 +36,31 @@ trustchain:
 - runtime probe("起 mcp + tools/list")命中率 ~95%
 - **永远以 runtime probe 为准**(本会话 5 处 SKILL 死引用都是 README vs 实际脱节)
 
-### 3. 禁用 mcp 时也要补 fallback(2026-05-15)
+### 3. 不注册 mcp 的两种情况(2026-05-15 + 18 校准)
 
-被禁的 mcp(nacos / feishu_project / rabbitmq)必须有**替代访问方式**:
-- nacos → SKILL `config-executor` 内 Python HTTP API(`scripts/nacos_config.py`)
-- rabbitmq → SKILL `rabbitmq-runtime-query` 内 HTTP Management API(端口 15672)
-- feishu_project → **暂无**,凭据收集也停了(B 方案,等字节 v1.x 正式版)
+`BuildMCPServers` 不注册某后端的 mcp 有**两种**,语义完全不同 — 别混:
 
-砍 mcp 时**别只 disable builder**,必须确认 SKILL 文档有替代调用方式 + 凭据流通(`scripts/.env` / `creds.json`)对齐。
+**3a. 方案 B(有替代,能力完整可用)** — nacos / apollo / consul / rabbitmq
+
+上游 mcp 包不可用 / 不适合产品定位,但**有成熟的 HTTP API 替代**走 SKILL 主路径,**能力完整不缺**:
+- nacos → `scripts/nacos_config.py`(每次脚本自己 login,token TTL 无所谓)
+- apollo → `scripts/apollo_config.py`(--agent-id --env 读 creds.json)
+- consul → `scripts/consul_config.py`(同)
+- rabbitmq → `curl + :15672/api/queues` HTTP Management API(RabbitMQ 团队官方,极稳定)
+
+routing/config-map.yaml 标 `runtime: <type>-http` 字段告诉 LLM 走脚本。**用户排障时能力完整**。
+
+**3b. 真禁用(无替代,能力当前缺失)** — feishu_project
+
+上游 mcp 包还是 prototype + 我们也没补 HTTP 脚本替代,能力**当前不可用**:
+- mcp 禁(`@lark-project/mcp v0.0.1` 字节内部 prototype)
+- install_prompts 停收凭据(诈骗式收集)
+- wizard askBool 标"实验性,目前不会真接入"
+- 等字节发 v1.x 正式版 / 我们补完 SKILL 后重启用
+
+**改判别准则**:不是"mcp builder warn skip 注册"就归类同款 — 关键看**是否有替代 + 凭据是否仍收**。
+- 3a 类:builder skip + 凭据仍收(install_prompts 收 + .env 持久化 + SKILL 用)
+- 3b 类:builder skip + 凭据停收(install_prompts 注释掉 + wizard 加实验性提示 + SKILL 不存在)
 
 ### 4. install_native_mcp_*.go 按类型拆分(2026-05-15 重构)
 
@@ -104,9 +121,10 @@ go test ./... -cover
 
 最近的决策演进(2026-05):
 - nacos 接入回归方案 B(HTTP API 主路径)+ apollo/consul 死字段清理
-- feishu_project 禁用 mcp 注册 + 停收凭据(B 方案)
-- rabbitmq mcp 禁用注册(上游两候选都坏)
+- rabbitmq mcp 禁用注册 → 走 HTTP Management API(同方案 B)
+- feishu_project 禁用 mcp 注册 + 停收凭据(**注意**这是 3b 真禁用,不是 3a 方案 B,无替代)
 - postgres mcp 包迁移(@modelcontextprotocol → @henkey)
+- MCP 不注册的两种情况分类校准(2026-05-18 — 3a 有替代 vs 3b 真缺失)
 - MCP probe 工程化进 self_test_openclaw
 - install_native_mcp_common.go 拆分(1103 行 → 4 文件)
 - MCP 软约束哲学(用户校准)

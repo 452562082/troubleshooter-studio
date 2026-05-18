@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 )
@@ -188,9 +189,19 @@ func InstallNativeOpenclaw(ctx context.Context, stagingDir string, opts InstallO
 	if opts.SkipGatewayRestart {
 		log("[skip] gateway restart 被显式跳过(测试模式)")
 	} else if cli := findOpenclawCLI(); cli != "" {
-		c := exec.CommandContext(ctx, cli, "gateway", "restart")
-		if err := c.Run(); err != nil {
-			log(fmt.Sprintf("[warn] openclaw gateway restart 失败:%v;请手动 `openclaw gateway restart`,或退出再开 OpenClaw 客户端", err))
+		// 30s timeout 兜底:`openclaw gateway restart` 偶发挂死(OpenClaw 客户端 socket
+		// 等不到、端口被占、客户端进程僵尸等),不限时会让桌面 app UI 永远卡在"部署中..."。
+		// 5.5s 是正常重启耗时,30s 留 ~5× 余量;超时 fallback 到手动提示,装机本身已落地。
+		restartCtx, restartCancel := context.WithTimeout(ctx, 30*time.Second)
+		c := exec.CommandContext(restartCtx, cli, "gateway", "restart")
+		err := c.Run()
+		restartCancel()
+		if err != nil {
+			if restartCtx.Err() == context.DeadlineExceeded {
+				log("[warn] openclaw gateway restart 超过 30s 未返回,放弃等待。装机已完成,请手动退出再打开 OpenClaw 客户端激活新 agent")
+			} else {
+				log(fmt.Sprintf("[warn] openclaw gateway restart 失败:%v;请手动 `openclaw gateway restart`,或退出再开 OpenClaw 客户端", err))
+			}
 		} else {
 			log("[ok] openclaw gateway 已重启,新 agent 立即可用")
 		}

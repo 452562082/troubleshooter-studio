@@ -67,7 +67,7 @@ func buildStaging(t *testing.T, cfg *config.SystemConfig, yamlSrc []byte, target
 	base := filepath.Join(t.TempDir(), "stage")
 	g := generator.New(cfg, tmpl, base)
 	g.TshootVersion = "e2e-test"
-	g.SystemYAMLSource = yamlSrc
+	g.TroubleshooterYAMLSource = yamlSrc
 
 	var err error
 	switch target {

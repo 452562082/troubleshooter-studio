@@ -36,7 +36,7 @@ func genExisting(t *testing.T, dir string) (string, []byte) {
 	}
 	g := generator.New(cfg, tr, dir)
 	g.TshootVersion = "test"
-	g.SystemYAMLSource = yamlBytes
+	g.TroubleshooterYAMLSource = yamlBytes
 	if err := g.Generate(); err != nil {
 		t.Fatal(err)
 	}

@@ -637,7 +637,7 @@ export namespace discover {
 	    system_name: string;
 	    target: string;
 	    generated_at: string;
-	    system_yaml: string;
+	    troubleshooter_yaml: string;
 	    user_edits?: Record<string, any>;
 	
 	    static createFrom(source: any = {}) {
@@ -652,7 +652,7 @@ export namespace discover {
 	        this.system_name = source["system_name"];
 	        this.target = source["target"];
 	        this.generated_at = source["generated_at"];
-	        this.system_yaml = source["system_yaml"];
+	        this.troubleshooter_yaml = source["troubleshooter_yaml"];
 	        this.user_edits = source["user_edits"];
 	    }
 	}

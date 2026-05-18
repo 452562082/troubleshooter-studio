@@ -129,7 +129,7 @@ func TestRun_FullWithOneRepo(t *testing.T) {
 }
 
 // WriteYAML 产物应能被 config.Load 解析并通过校验
-func TestWriteYAML_ProducesValidSystemYaml(t *testing.T) {
+func TestWriteYAML_ProducesValidTroubleshooterYaml(t *testing.T) {
 	in := script(
 		"demo", "Demo", "",
 		"", "", "",

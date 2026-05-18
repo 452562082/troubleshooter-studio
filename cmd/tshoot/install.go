@@ -140,7 +140,7 @@ func installIDESideEffects(target, stagingDir string, creds map[string]string) e
 	return nil
 }
 
-// loadStagingSystemConfig 从 staging 目录的 tshoot.json 读出 system_yaml 段,parse 成
+// loadStagingSystemConfig 从 staging 目录的 tshoot.json 读出 troubleshooter_yaml 段,parse 成
 // SystemConfig。CLI install 在 IDE 平台分支调它,把 cfg 喂给 MergeMCPIntoIDESettings 派生 MCP。
 // 两个候选位置(谁先存在用谁,跟桌面 app bindings_deploy.go::loadStagingConfig 同款逻辑):
 //   - <staging>/tshoot.json                              ← claude-code/cursor/codex staging
@@ -167,7 +167,7 @@ func loadStagingSystemConfig(stagingDir string) (*config.SystemConfig, error) {
 	if err := json.Unmarshal(data, &meta); err != nil {
 		return nil, fmt.Errorf("parse tshoot.json: %w", err)
 	}
-	cfg, err := config.LoadFromBytes([]byte(meta.SystemYAML))
+	cfg, err := config.LoadFromBytes([]byte(meta.TroubleshooterYAML))
 	if err != nil {
 		return nil, fmt.Errorf("troubleshooter.yaml in tshoot.json invalid: %w", err)
 	}

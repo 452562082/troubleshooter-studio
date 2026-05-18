@@ -63,10 +63,10 @@ type Generator struct {
 	// （由 cmd/tshoot / cmd/tshoot-desktop 的 main.version 注入）。留空即空字符串。
 	TshootVersion string
 
-	// SystemYAMLSource 是原始 troubleshooter.yaml 内容（含注释），塞进 tshoot.json.system_yaml。
+	// TroubleshooterYAMLSource 是原始 troubleshooter.yaml 内容（含注释），塞进 tshoot.json.troubleshooter_yaml。
 	// 这是 discover / agent apply 的"真源"：二次修改时从这里读。
 	// 调用方应在 Generate 前设好；为空时 tshoot.json 里该字段为空串。
-	SystemYAMLSource []byte
+	TroubleshooterYAMLSource []byte
 
 	// RepoLocalPaths 仓库名 → 本机绝对路径,部署时由调用方(桌面端向导 / CLI --repo-path
 	// 参数)填进来。troubleshooter.yaml 故意不含此信息(路径跟机器绑定,不可分享),但部署后

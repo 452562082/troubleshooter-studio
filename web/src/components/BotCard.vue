@@ -143,7 +143,7 @@ function classForSeverity(s: string): string {
               <button
                 class="menu-item"
                 :disabled="regenLoading"
-                :title="bot.meta.system_yaml ? '用 tshoot.json 嵌入的 yaml 重渲产物,直接刷到活 workspace(模板派生文件按模板覆盖,config-map 人工 verified 行保留)' : 'tshoot.json 里没保存 system_yaml,无法重新生成'"
+                :title="bot.meta.troubleshooter_yaml ? '用 tshoot.json 嵌入的 yaml 重渲产物,直接刷到活 workspace(模板派生文件按模板覆盖,config-map 人工 verified 行保留)' : 'tshoot.json 里没保存 troubleshooter_yaml,无法重新生成'"
                 @click="emit('closeMenu'); emit('regen')"
               >
                 {{ regenLoading ? '刷新中…' : '♻ 重新生成并刷新' }}

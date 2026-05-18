@@ -38,7 +38,7 @@ import (
 //  2. Ghost —— ~/.tshoot/config.json deployed_bots 里有但 disk 上 tshoot.json
 //     不在的(用户外部 rm -rf 清掉),append 一条 ghost=true 的占位让 UI 能引导
 //     "重新部署 / 忘掉它"。Ghost 条目 Meta 字段从 deployed_bots 元数据回填,
-//     但 SystemYAML 缺(disk 没了),前端要把"诊断/重 gen/编辑"按钮 disable。
+//     但 TroubleshooterYAML 缺(disk 没了),前端要把"诊断/重 gen/编辑"按钮 disable。
 func (a *App) DiscoverBots(extraRoots []string) ([]discover.DiscoveredAgent, error) {
 	// 一次性迁移:老用户的 Claude Code/Cursor 机器人锚点只在 staging 里(2026-04-30 之前
 	// 部署的),新版 discover 扫不到。MigrateLegacyAnchors 把 staging 的 tshoot.json

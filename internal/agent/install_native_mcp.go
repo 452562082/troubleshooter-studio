@@ -73,6 +73,20 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 	}
 	root := t.RootDir(home)
 
+	// emit 把 install 进度桥到调用方的 onProgress(桌面 app 走 wails event "install:log"
+	// 实时推前端日志面板)。onProgress 为空时降级到 stderr,保持 CLI 行为不变。
+	//
+	// 关键场景:EnsureKafkaMCPInstalled 首次从 GitHub Release 拉 tarball 国内 30-60s,
+	// 之前 onLog 写死 stderr,前端 UI 看着"部署中..."不动、日志面板也没新内容,体感死锁;
+	// 走 emit 之后 "[info] 拉 tarball: ..." 这类进度行能实时刷到用户眼前。
+	emit := func(line string) {
+		if onProgress != nil {
+			onProgress(line)
+			return
+		}
+		fmt.Fprintln(os.Stderr, line)
+	}
+
 	// 清老版本下载到 <root>/bin/ 的 mcp-grafana 孤儿二进制(本会话改 npx mcp-grafana-npx 后
 	// 不再用)。re-install 顺手清,不用等 uninstall — 几十 MiB 留在那纯占盘。
 	removeLegacyGrafanaBin(root)
@@ -81,9 +95,7 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 	// 不阻塞:其它 MCP 还能用,完全 abort 装机损失更大。
 	if CfgUsesUvx(cfg) {
 		if err := CheckUvxAvailable(); err != nil {
-			fmt.Fprintf(os.Stderr,
-				"[warn] %s --target %s:\n%v\n",
-				"install", target, err)
+			emit(fmt.Sprintf("[warn] install --target %s: %v", target, err))
 		}
 	}
 
@@ -93,13 +105,9 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 	kafkaBinPath := ""
 	if CfgUsesKafkaMCP(cfg) {
 		var err error
-		kafkaBinPath, err = EnsureKafkaMCPInstalled(func(line string) {
-			fmt.Fprintln(os.Stderr, line)
-		})
+		kafkaBinPath, err = EnsureKafkaMCPInstalled(emit)
 		if err != nil {
-			fmt.Fprintf(os.Stderr,
-				"[warn] %s --target %s:\n%v\n",
-				"install", target, err)
+			emit(fmt.Sprintf("[warn] install --target %s: %v", target, err))
 		}
 	}
 
@@ -115,7 +123,7 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 		// codex 全局 sandbox 默认禁网,workspace-write 也要显式 network_access=true 才放行 —
 		// 没配的话装好后所有 MCP 启动 ENOTFOUND。这里探测 + 给修复指引,不主动改用户 config。
 		if err := CheckCodexNetworkAccess(root); err != nil {
-			fmt.Fprintf(os.Stderr, "\n[warn] codex 网络访问未启用:\n%v\n\n", err)
+			emit(fmt.Sprintf("[warn] codex 网络访问未启用: %v", err))
 		}
 		return injectMCPIntoCodexAgentTOML(root, cfg, servers)
 	}
@@ -135,7 +143,7 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 	// 同名 keys 删掉(整个 mcpServers 字段空了顺手把字段也删,保持文件干净)。
 	if t == TargetClaudeCode {
 		if err := pruneLegacyClaudeSettingsMCP(filepath.Join(root, "settings.json"), servers); err != nil {
-			fmt.Fprintf(os.Stderr, "[warn] 清理 ~/.claude/settings.json 老 MCP 残留失败: %v\n", err)
+			emit(fmt.Sprintf("[warn] 清理 ~/.claude/settings.json 老 MCP 残留失败: %v", err))
 		}
 	}
 	return nil

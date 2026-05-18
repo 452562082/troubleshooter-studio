@@ -166,8 +166,8 @@ func readAgent(metaPath string) (DiscoveredAgent, error) {
 		a.ModTime = info.ModTime().UTC().Format("2006-01-02 15:04:05Z")
 	}
 	// 从 embedded troubleshooter.yaml 快速派生统计
-	if meta.SystemYAML != "" {
-		derive(&a, meta.SystemYAML)
+	if meta.TroubleshooterYAML != "" {
+		derive(&a, meta.TroubleshooterYAML)
 	}
 	return a, nil
 }

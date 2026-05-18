@@ -79,14 +79,14 @@ const doctorState = reactive<
 
 async function runDoctor(b: DiscoveredBot) {
   const k = regenKey(b)
-  if (!b.meta.system_yaml) {
-    toast.error(`${b.meta.system_id}: tshoot.json 缺 system_yaml,无法诊断`)
+  if (!b.meta.troubleshooter_yaml) {
+    toast.error(`${b.meta.system_id}: tshoot.json 缺 troubleshooter_yaml,无法诊断`)
     return
   }
   doctorState[k] = { loading: true, open: true }
   try {
     // reposRoot 永远传空 —— 后端走 saved paths,UI 不允许覆盖
-    const data = (await bridgeDoctor(b.meta.system_yaml, '')) as {
+    const data = (await bridgeDoctor(b.meta.troubleshooter_yaml, '')) as {
       issues?: DoctorIssue[]
       scanned_repo_paths?: Record<string, string>
     }
@@ -154,12 +154,12 @@ function regenKey(b: DiscoveredBot) {
   return `${b.path}|${b.meta.target}`
 }
 
-// 重新生成:用 tshoot.json 里现存的 system_yaml 重新渲染产物 + 刷到这张卡的真实部署目录,
+// 重新生成:用 tshoot.json 里现存的 troubleshooter_yaml 重新渲染产物 + 刷到这张卡的真实部署目录,
 // 等同"用当前 yaml 跑一次 Apply"。模板派生文件按模板覆盖,config-map 中 status=verified
 // 且无 source 字段的人工行保留(那是用户填的领域数据,不会随模板版本变)。
 //
 // 跟"应用到活 workspace"的区别:那个走编辑器草稿(用户改完先 dry-run 确认再 apply),
-// 这个用存盘的 system_yaml 一键刷新,不需要进编辑器 —— 适合"模板更新了 / 想用最新版
+// 这个用存盘的 troubleshooter_yaml 一键刷新,不需要进编辑器 —— 适合"模板更新了 / 想用最新版
 // generator 重出一遍产物"的场景。
 async function regen(b: DiscoveredBot) {
   const k = regenKey(b)
@@ -168,8 +168,8 @@ async function regen(b: DiscoveredBot) {
   regenState[k] = { loading: true }
   toast.info(`${b.meta.system_id}: 开始刷新 ${b.path}…`)
   try {
-    const yamlText = b.meta.system_yaml
-    if (!yamlText) throw new Error('tshoot.json 里没 system_yaml 字段,无法重新生成')
+    const yamlText = b.meta.troubleshooter_yaml
+    if (!yamlText) throw new Error('tshoot.json 里没 troubleshooter_yaml 字段,无法重新生成')
     // dryRun=false → 真写盘到 b.path(claude-code/cursor/codex 走 Apply,openclaw 同样)
     const res = await applyBot(b.path, yamlText, false) as any
     const written = res?.files_written ?? 0
@@ -241,20 +241,20 @@ function toggleEditor(b: DiscoveredBot) {
     editingKey.value = null
     return
   }
-  if (!b.meta.system_yaml) {
-    toast.error(`${b.meta.system_id}: tshoot.json 缺 system_yaml 字段,无法编辑`)
+  if (!b.meta.troubleshooter_yaml) {
+    toast.error(`${b.meta.system_id}: tshoot.json 缺 troubleshooter_yaml 字段,无法编辑`)
     return
   }
   editingKey.value = k
-  editorDraft.value = b.meta.system_yaml
+  editorDraft.value = b.meta.troubleshooter_yaml
   delete applyState[k]
 }
 
 async function doExport(b: DiscoveredBot) {
   const k = regenKey(b)
   try {
-    const yamlText = b.meta.system_yaml
-    if (!yamlText) throw new Error('tshoot.json 里没 system_yaml 字段')
+    const yamlText = b.meta.troubleshooter_yaml
+    if (!yamlText) throw new Error('tshoot.json 里没 troubleshooter_yaml 字段')
     // 用编辑器里的草稿（如果当前在编辑）优先导，否则导存盘版本
     const payload = editingKey.value === k ? editorDraft.value : yamlText
     const filename = `${b.meta.system_id || 'system'}.yaml`

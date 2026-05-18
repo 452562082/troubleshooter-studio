@@ -32,7 +32,7 @@ import (
 )
 
 // ScanInstallPrompts 推导 outputDir 这份 openclaw 产物需要的凭证字段。
-// 数据源:<outputDir>/tshoot.json 的 SystemYAML(install.sh 没了不能再扫脚本)。
+// 数据源:<outputDir>/tshoot.json 的 TroubleshooterYAML(install.sh 没了不能再扫脚本)。
 // 非 openclaw target / 没 tshoot.json → 返回 nil(无 install 步骤)。
 func (a *App) ScanInstallPrompts(outputDir string) ([]deploy.Prompt, error) {
 	cfg, target, err := loadStagingConfig(outputDir)
@@ -83,7 +83,7 @@ func loadStagingConfig(outputDir string) (*config.SystemConfig, string, error) {
 	if err := json.Unmarshal(data, &meta); err != nil {
 		return nil, "", fmt.Errorf("parse tshoot.json: %w", err)
 	}
-	cfg, err := config.LoadFromBytes([]byte(meta.SystemYAML))
+	cfg, err := config.LoadFromBytes([]byte(meta.TroubleshooterYAML))
 	if err != nil {
 		return nil, meta.Target, fmt.Errorf("troubleshooter.yaml in tshoot.json invalid: %w", err)
 	}
@@ -120,7 +120,7 @@ type RunInstallResult struct {
 // 老版"SIGKILL bash 进程组"略弱(纯 IO 步骤不可中断),但实际跑完只要几秒,
 // 用户体验差异不大。
 func (a *App) RunInstall(outputDir string, creds map[string]string) (*RunInstallResult, error) {
-	// 从 outputDir/tshoot.json 读出嵌入的 system_yaml,抽 prefill 默认值,作为 user creds 的 fallback。
+	// 从 outputDir/tshoot.json 读出嵌入的 troubleshooter_yaml,抽 prefill 默认值,作为 user creds 的 fallback。
 	// 用户在 GUI 表单填的 creds 始终优先(MergeCredsWithPrefill 内部 user wins),
 	// 这里只兜底"用户没在表单填但 yaml 里写过"的字段(常见场景:Editor / BotsPage 导入路径)。
 	if cfg, _, err := loadStagingConfig(outputDir); err == nil && cfg != nil {

@@ -52,7 +52,7 @@ func runGen(args []string) error {
 	g := generator.New(cfg, tr, outDir)
 	g.TshootVersion = version
 	if data, err := os.ReadFile(*input); err == nil {
-		g.SystemYAMLSource = data
+		g.TroubleshooterYAMLSource = data
 	}
 	if *analysisFile != "" {
 		if err := g.LoadAnalysis(*analysisFile); err != nil {

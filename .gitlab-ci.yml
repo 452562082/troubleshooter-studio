@@ -141,7 +141,13 @@ web:
       - web/node_modules
   script:
     - cd web
-    - npm ci --prefer-offline --no-audit --no-fund
+    # --ignore-scripts:跳过 esbuild 的 postinstall (node install.js)。
+    # 背景:runner 是 shell executor (image: node:20 被忽略,实际跑 host node 25.9+),
+    # node 25 上 esbuild ^0.21 的 install.js 会 SIGKILL (pipeline #652 web job 红)。
+    # 现代 esbuild 用 platform-specific 子包 (@esbuild/<os>-<arch>),npm 安装时 npm 自动
+    # 拉对应平台子包,postinstall 只是验证脚本——跳过不影响 vite build / vitest。
+    # 本机实测 npm ci --ignore-scripts + npm test (140 PASS) + npm run build (884ms 全产物) 都正常。
+    - npm ci --prefer-offline --no-audit --no-fund --ignore-scripts
     # vitest: bridge / toast lib 层单测(regression guard)
     - npm test
     # npm run build 实际跑 vue-tsc --noEmit && vite build

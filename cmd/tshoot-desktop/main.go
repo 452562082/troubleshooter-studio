@@ -23,7 +23,10 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 
 	"github.com/wailsapp/wails/v2"
@@ -68,6 +71,7 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func main() {
+	fixGUIPath()
 	tr := resolveTemplateDir()
 	srv := &api.Server{TemplateRoot: tr}
 	router := api.NewRouter(srv, webui.Distribution())
@@ -106,6 +110,53 @@ func main() {
 		fmt.Fprintln(os.Stderr, "wails run:", err)
 		os.Exit(1)
 	}
+}
+
+// fixGUIPath 修 macOS 桌面 app 由 launchd / Finder 启动时 PATH 被精简到
+// /usr/bin:/bin:/usr/sbin:/sbin 的问题——self-test、install 子进程、findOpenclawCLI
+// 都依赖能看见用户装的 uvx / npx / brew 工具。靠 fallback 候选路径(brew prefix /
+// cargo bin / asdf shims / nvm ...) 永远列不全，干脆 shell-out 拿用户 login shell
+// 的完整 PATH 写回进程 env。
+//
+// 三层防御：
+//  1. 只在 darwin 跑——Windows/Linux 桌面会话 PATH 通常来自 user session，没这个坑。
+//  2. PATH 段数 >4 视作非 launchd 精简 PATH (开发模式 `wails dev` / 终端直跑)，
+//     直接 return 不动用户已有 PATH。launchd 给的精简 PATH 恰好 4 段。
+//  3. 用 sentinel 包围 echo——很多用户的 .zprofile / .zlogin / .bash_profile 含
+//     `echo "Welcome..."`、fortune、neofetch 之类的 banner 输出，login shell 会触发，
+//     stdout 被污染。直接 TrimSpace 会把垃圾写进 PATH 反而搞坏进程环境。提取
+//     sentinel 之间的内容才是干净的 $PATH。
+func fixGUIPath() {
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	if len(strings.Split(os.Getenv("PATH"), ":")) > 4 {
+		return
+	}
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/zsh"
+	}
+	const begin = "__TSHOOT_PATH_BEGIN__"
+	const end = "__TSHOOT_PATH_END__"
+	script := "echo " + begin + `; echo "$PATH"; echo ` + end
+	out, err := exec.Command(shell, "-l", "-c", script).Output()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[warn] fixGUIPath 拿 login shell PATH 失败: %v\n", err)
+		return
+	}
+	s := string(out)
+	i := strings.Index(s, begin)
+	j := strings.Index(s, end)
+	if i < 0 || j <= i {
+		fmt.Fprintln(os.Stderr, "[warn] fixGUIPath sentinel 未匹配,跳过 PATH 修正")
+		return
+	}
+	path := strings.TrimSpace(s[i+len(begin) : j])
+	if path == "" {
+		return
+	}
+	_ = os.Setenv("PATH", path)
 }
 
 // resolveTemplateDir 按优先级找 templates/：

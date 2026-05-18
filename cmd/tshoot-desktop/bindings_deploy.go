@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
@@ -130,7 +131,11 @@ func (a *App) RunInstall(outputDir string, creds map[string]string) (*RunInstall
 		return nil, err
 	}
 
-	runCtx, cancel := context.WithCancel(a.ctx)
+	// 5 分钟 total timeout 兜底:防未来某段 install 代码忘加局部 timeout,UI 永远
+	// 卡"部署中..."。正常 install ~5-10s,5 分钟留 30-60× 余量(网络极慢 kafka 下载 +
+	// gateway restart 几次重试都够),超时 cancel 让 UI 解锁,用户至少能继续操作。
+	// 配合 a.installCancel 用户主动取消按钮,双保险。
+	runCtx, cancel := context.WithTimeout(a.ctx, 5*time.Minute)
 	a.installMu.Lock()
 	if a.installCancel != nil {
 		// 上一个还没结束,先取消(UI 应该禁了按钮防并发,走到这里是 UI bug)

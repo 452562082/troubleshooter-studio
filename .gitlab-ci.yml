@@ -54,28 +54,32 @@ variables:
   CI: "true"
   FORCE_COLOR: "0"
 
-# ── Go lint:vet + golangci-lint + gofmt + mod tidy ──────────────────────
+# ── Go lint:golangci-lint + gofmt + mod tidy ────────────────────────────
 # 拆 lint 跟 test 独立 job(原来串一坨,fmt 没过 → test 跑不到,反馈不全)。
-# 两个 job 用同 image + 同 cache key,Go module 缓存共享,代价低。
+#
+# cache 策略(2026-05-18 重构,根治 v2-rw/v3-rw 反复 bump 都治不住的 cache 残缺):
+#   - 只 cache .cache/go-mod(module download cache,按 module@version 路径寻址,
+#     跨 image / 跨 ref 安全,坏了 go 工具链按 hash 校验自动重下)
+#   - 不 cache .cache/go-build(fingerprint-indexed 的临时编译产物,Go 设计上就
+#     ephemeral,被 GitLab 跨 image 打包/解包会出现"索引在但文件不在"导致 vet/build
+#     报 no such file or directory。让每个 job 本地新建)
+#   - lint / test 用不同 cache key 前缀:两 job image 不同(golangci-lint vs
+#     golang:1.25.10),理论上 go-mod 内容兼容,但隔离避免任何"并行 job 同 key 写同一份"
+#     的潜在竞态。
+#   - go vet 那行删了 — golangci-lint 默认开 govet linter,重复且就是它在崩。
 go:lint:
   stage: test
   # 用 golangci-lint 官方 image 自带 go + 二进制,**省下每次 wget GitHub release 解压**(老逻辑 ~10s + 依赖 GitHub 可达)
   image: golangci/golangci-lint:v2.0.2
   interruptible: true
   cache:
-    # prefix v3-rw:bump 自 v2-rw,因为 mongo-driver v1.17.9 升级带新依赖 klauspost/compress/zstd
-    # 后,旧 cache 里 klauspost/compress v1.16.7 目录"已存在但 zstd 子目录缺失",Go 看到目录
-    # 在就不重下,go vet 解析 import 报 "no required module provides package .../zstd"。
-    # bump prefix 强制 cache miss 重新下整套 module,根治残留。
     key:
-      prefix: "v3-rw"
+      prefix: "lint-v1"
       files:
         - go.sum
     paths:
-      - .cache/go-build
       - .cache/go-mod
   script:
-    - go vet ./...
     - golangci-lint run --timeout=3m
     - |
       # gofmt 接到目录参数会**递归扫子目录**;`gofmt -l .` 或 `gofmt -l $(go list ...)`
@@ -104,15 +108,12 @@ go:test:
   image: golang:1.25.10
   interruptible: true
   cache:
-    # prefix v3-rw:bump 自 v2-rw,go:lint job 同款原因 — mongo-driver v1.17.9 升级后
-    # 旧 cache 残留的 klauspost/compress v1.16.7 目录缺 zstd 子目录,go 工具链不重下导致 build/vet 失败。
-    # 两个 job 共享同一 cache key,必须同步 bump。
+    # cache 策略说明见 go:lint 上方注释。test job 独立 key 前缀,避免与 lint job 并行写竞态。
     key:
-      prefix: "v3-rw"
+      prefix: "test-v1"
       files:
         - go.sum
     paths:
-      - .cache/go-build
       - .cache/go-mod
   script:
     - go build ./...

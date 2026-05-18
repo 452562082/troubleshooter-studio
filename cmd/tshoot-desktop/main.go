@@ -130,7 +130,7 @@ func fixGUIPath() {
 	if err != nil || len(out) == 0 {
 		return
 	}
-	os.Setenv("PATH", strings.TrimSpace(string(out)))
+	_ = os.Setenv("PATH", strings.TrimSpace(string(out)))
 }
 
 // resolveTemplateDir 按优先级找 templates/：

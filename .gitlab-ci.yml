@@ -154,10 +154,14 @@ web:
     - 'echo "[ci] brew --prefix nvm = $NVM_PREFIX"'
     - 'if [ ! -s "$NVM_SH" ]; then echo "[ci] ERROR: nvm.sh not found at $NVM_SH"; ls -la "$NVM_PREFIX" 2>&1 || true; echo "Trying fallback $HOME/.nvm/nvm.sh ..."; NVM_SH="$HOME/.nvm/nvm.sh"; fi'
     - 'if [ ! -s "$NVM_SH" ]; then echo "[ci] ERROR: 找不到 nvm.sh,请在 runner 机器(botmaster)装 nvm:brew install nvm 或 curl -o- ... | bash"; exit 1; fi'
-    - 'echo "[ci] sourcing $NVM_SH"'
-    - source "$NVM_SH"
-    - nvm install
-    - node --version
+    - 'echo "[ci] sourcing $NVM_SH (set +e during source, see nvm issue #2358)"'
+    # gitlab-runner shell executor 默认 set -e。nvm.sh 内有大量 `[ -n "$VAR" ] && cmd` 这种
+    # short-circuit 模式,变量未设时 `[ ... ]` 返回 1,触发 set -e silently exit 1。
+    # 必须 source 前临时关掉 errexit,source 完再开。否则 source 立即非 0 退出无任何输出。
+    - 'set +e; source "$NVM_SH"; src_rc=$?; set -e; [ $src_rc -ne 0 ] && echo "[ci] WARN: source nvm.sh rc=$src_rc (nvm 函数仍可能已定义,继续)"; true'
+    - 'command -v nvm || { echo "[ci] ERROR: source 完 nvm 命令仍未定义,nvm.sh 损坏或不兼容"; exit 1; }'
+    - 'nvm install'
+    - 'node --version'
   script:
     - cd web
     # --ignore-scripts:跳过 esbuild 的 postinstall (node install.js)。

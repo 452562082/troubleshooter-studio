@@ -28,6 +28,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -118,11 +119,15 @@ func main() {
 // cargo bin / asdf shims / nvm ...) 永远列不全，干脆 shell-out 拿用户 login shell
 // 的完整 PATH 写回进程 env。
 //
-// 三层防御：
+// 五层防御：
 //  1. 只在 darwin 跑——Windows/Linux 桌面会话 PATH 通常来自 user session，没这个坑。
 //  2. PATH 段数 >4 视作非 launchd 精简 PATH (开发模式 `wails dev` / 终端直跑)，
 //     直接 return 不动用户已有 PATH。launchd 给的精简 PATH 恰好 4 段。
-//  3. 用 sentinel 包围 echo——很多用户的 .zprofile / .zlogin / .bash_profile 含
+//  3. shell 必须是 sh-like (bash/zsh/sh/dash/ksh)——fish/nushell 的 $PATH 是 list,
+//     `echo $PATH` 输出空格分隔的字符串,直接当 PATH 用会搞坏进程环境。
+//  4. 加 5s timeout——用户 .zprofile 若含 `ssh-add`/`read -p`/网络阻塞操作,
+//     不限时桌面 app 启动会永远挂死、看不到窗口。
+//  5. 用 sentinel 包围 echo——很多用户的 .zprofile / .zlogin / .bash_profile 含
 //     `echo "Welcome..."`、fortune、neofetch 之类的 banner 输出，login shell 会触发，
 //     stdout 被污染。直接 TrimSpace 会把垃圾写进 PATH 反而搞坏进程环境。提取
 //     sentinel 之间的内容才是干净的 $PATH。
@@ -137,10 +142,18 @@ func fixGUIPath() {
 	if shell == "" {
 		shell = "/bin/zsh"
 	}
+	switch filepath.Base(shell) {
+	case "bash", "zsh", "sh", "dash", "ksh":
+	default:
+		fmt.Fprintf(os.Stderr, "[warn] fixGUIPath: 不支持的 shell %q (仅 sh-like),跳过 PATH 修正\n", shell)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	const begin = "__TSHOOT_PATH_BEGIN__"
 	const end = "__TSHOOT_PATH_END__"
 	script := "echo " + begin + `; echo "$PATH"; echo ` + end
-	out, err := exec.Command(shell, "-l", "-c", script).Output()
+	out, err := exec.CommandContext(ctx, shell, "-l", "-c", script).Output()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[warn] fixGUIPath 拿 login shell PATH 失败: %v\n", err)
 		return

@@ -182,7 +182,7 @@ func (a *App) Analyze(yamlText, reposRoot string, autoClone bool) (*analyzerpipe
 			expanded[k] = userconfig.ExpandHome(v)
 		}
 	}
-	return analyzerpipe.Run(cfg, analyzerpipe.Options{
+	return analyzerpipe.Run(a.ctx, cfg, analyzerpipe.Options{
 		ReposRoot: userconfig.ExpandHome(reposRoot),
 		RepoPaths: expanded,
 		AutoClone: autoClone,
@@ -214,7 +214,7 @@ func (a *App) AnalyzeV2(in AnalyzeInput) (*analyzerpipe.Result, error) {
 	for k, v := range in.RepoPaths {
 		expandedPaths[k] = userconfig.ExpandHome(v)
 	}
-	return analyzerpipe.Run(cfg, analyzerpipe.Options{
+	return analyzerpipe.Run(a.ctx, cfg, analyzerpipe.Options{
 		ReposRoot: userconfig.ExpandHome(in.ReposRoot),
 		RepoPaths: expandedPaths,
 		AutoClone: in.AutoClone,

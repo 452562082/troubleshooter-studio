@@ -17,8 +17,12 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/analyzerpipe"
@@ -34,6 +38,44 @@ import (
 // 50s+。再多就是用户体感"卡死"——宁可产物两份 map 留空(可后续 BotsPage 重 gen 拿到)
 // 也不让部署 UI 永远转。
 const autoAnalyzeTimeout = 60 * time.Second
+
+// autoAnalyzeCacheTTL:一次部署 wizard 里 4 个 target(openclaw/claude-code/cursor/codex)
+// 串行调 ImportAndDeploy,每个内部各跑一次 RunAutoAnalyze,实测每个 ~4-5s = 总共 ~20s
+// 重复扫同一份 repo —— 纯浪费。加 process-level cache 按 (system.id + sorted repo paths)
+// key,首次跑写 cache,后续 target 命中直接复用 result。5min TTL 覆盖一次完整部署流程(<2min)
+// 且让用户改 yaml 后重新部署时强制重扫(避免 stale findings)。
+const autoAnalyzeCacheTTL = 5 * time.Minute
+
+// autoAnalyzeCache 是 RunAutoAnalyze 的 process-level 缓存。key 见 autoAnalyzeCacheKey。
+// 短 TTL,无 LRU 上限:一次 wizard 最多 ~1-2 个 system.id,内存可忽略。重启 .app 自动清。
+var (
+	autoAnalyzeCacheMu sync.Mutex
+	autoAnalyzeCache   = make(map[string]*autoAnalyzeCacheEntry)
+)
+
+type autoAnalyzeCacheEntry struct {
+	result *analyzerpipe.Result
+	at     time.Time
+}
+
+// autoAnalyzeCacheKey 构造 cache key:system.id + 按 repo name 排序后的 path 列表。
+// 用 \x1f (US, Unit Separator) 当字段分隔符——路径里不可能出现,避免误命中。
+func autoAnalyzeCacheKey(systemID string, expanded map[string]string) string {
+	names := make([]string, 0, len(expanded))
+	for n := range expanded {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	b.WriteString(systemID)
+	for _, n := range names {
+		b.WriteByte('\x1f')
+		b.WriteString(n)
+		b.WriteByte('=')
+		b.WriteString(expanded[n])
+	}
+	return b.String()
+}
 
 // CheckMissingRepoPaths 返回 yaml 里"应该 / 可以扫"但目前 savedPaths 没覆盖的 repo 名。
 //   - savedPaths 通常来自 userconfig.GetRepoPathsForSystem(cfg.System.ID)
@@ -62,6 +104,10 @@ type RunAutoAnalyzeOptions struct {
 	Cfg       *config.SystemConfig
 	RepoPaths map[string]string // repo.name → 本机绝对路径
 	OnLog     func(string)      // 流式日志(可选)
+	// Ctx 是给 analyzerpipe.Run 用的取消上下文(可选,nil 时用 background)。
+	// 注:Go 惯例 ctx 作为第一个参数而非 struct 字段,但 RunAutoAnalyzeOptions 现有 4+
+	// 调用方都用 opts struct,把 ctx 塞这里避免改全部签名 — 这是 minimal-invasive 妥协。
+	Ctx context.Context
 }
 
 // RunAutoAnalyze 跑一遍 analyzerpipe.Run。返回 Result 给调用方塞进 generator
@@ -87,6 +133,20 @@ func RunAutoAnalyze(opts RunAutoAnalyzeOptions) (*analyzerpipe.Result, error) {
 	if len(expanded) == 0 {
 		return nil, nil
 	}
+	// cache 命中检查:同一 wizard 部署多 target 时,后 3 个 target 复用首次扫的结果
+	cacheKey := autoAnalyzeCacheKey(opts.Cfg.System.ID, expanded)
+	autoAnalyzeCacheMu.Lock()
+	if entry, ok := autoAnalyzeCache[cacheKey]; ok && time.Since(entry.at) < autoAnalyzeCacheTTL {
+		hit := entry
+		autoAnalyzeCacheMu.Unlock()
+		if opts.OnLog != nil {
+			opts.OnLog(fmt.Sprintf("[info] auto-analyze cache 命中(%ds 前的结果),复用 dependency / schema findings",
+				int(time.Since(hit.at).Seconds())))
+		}
+		return hit.result, nil
+	}
+	autoAnalyzeCacheMu.Unlock()
+
 	// 推导一个 ReposRoot(用第一条路径的父目录),让 analyzer 接受 partial 路径
 	// (其它仓库走 ReposRoot+Name 默认拼法,虽然多半不存在但 analyzer 会 skip 不中断)
 	var reposRoot string
@@ -102,8 +162,17 @@ func RunAutoAnalyze(opts RunAutoAnalyzeOptions) (*analyzerpipe.Result, error) {
 		err error
 	}
 	ch := make(chan chRes, 1)
+	// 内部 ctx:caller ctx(opts.Ctx)+ 我们自己的 60s timeout 包一层。
+	// caller 取消(用户点 stop / 桌面关 app)或本地 60s 时间到,都让 analyzerpipe.Run
+	// 从 step 之间退出,不再"goroutine 后台跑到死"。
+	parentCtx := opts.Ctx
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	runCtx, cancelRun := context.WithTimeout(parentCtx, autoAnalyzeTimeout)
+	defer cancelRun()
 	go func() {
-		r, err := analyzerpipe.Run(opts.Cfg, analyzerpipe.Options{
+		r, err := analyzerpipe.Run(runCtx, opts.Cfg, analyzerpipe.Options{
 			ReposRoot:  reposRoot,
 			RepoPaths:  expanded,
 			AutoClone:  false,
@@ -119,6 +188,12 @@ func RunAutoAnalyze(opts RunAutoAnalyzeOptions) (*analyzerpipe.Result, error) {
 			} else {
 				opts.OnLog("[ok] auto-analyze 完成")
 			}
+		}
+		// 成功才 cache(失败 / nil result 不缓存,下次 retry 有机会)
+		if res.err == nil && res.r != nil {
+			autoAnalyzeCacheMu.Lock()
+			autoAnalyzeCache[cacheKey] = &autoAnalyzeCacheEntry{result: res.r, at: time.Now()}
+			autoAnalyzeCacheMu.Unlock()
 		}
 		return res.r, res.err
 	case <-time.After(autoAnalyzeTimeout):

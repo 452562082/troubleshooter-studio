@@ -171,8 +171,20 @@ export function setupGlobalLogBridges(): void {
 }
 
 // 根据行文本简单判别等级(Go 侧日志格式不统一,UI 层尽力猜;猜不到算 info)
+//
+// 特殊处理 "N pass / M warn / K fail" 这种 summary 格式(self-test / batch report 常见):
+// K=0 表示"没失败"是好消息,但行里有 "fail" 字面会被关键字匹配误判 error。
+// 先抽数字 K,K=0 直接降级 warn(有 ⚠) / info(没 ⚠),不进 error 分支。
 function detectLevel(line: string): LogLevel {
   const s = line.toLowerCase()
+  // 抽 "K fail" 的 K(没有 fail 关键字时 failCount=null)
+  const m = s.match(/(\d+)\s*(?:fail|✗|失败)/)
+  const failCount = m ? parseInt(m[1], 10) : null
+  if (failCount === 0) {
+    // summary 格式 0 失败 → 按 warn/info 级别走,不进 error
+    if (/\b(warn|warning|警告)\b/.test(s) || s.includes('⚠')) return 'warn'
+    return 'info'
+  }
   if (/\b(error|fail|失败|错误|panic)\b/.test(s) || s.includes('✗')) return 'error'
   if (/\b(warn|warning|警告)\b/.test(s) || s.includes('⚠')) return 'warn'
   if (/\bdebug\b/.test(s)) return 'debug'

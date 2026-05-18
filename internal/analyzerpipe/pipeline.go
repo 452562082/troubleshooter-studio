@@ -8,6 +8,7 @@
 package analyzerpipe
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -73,7 +74,13 @@ type Result struct {
 // Run 执行 analyze 流水线。入参已解析过的 config,不读文件;出参 Result 可序列化。
 // 任一 repo 的 a.Analyze 实际失败(不是 skip 类)会中断并返回 error;skip / clone-failed
 // 都会变成 RepoSummary 里的 Error 字段,不中断整体。
-func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
+// Run 跑全套 analyzer。ctx 支持取消:每个 repo 处理之前 check ctx.Err(),
+// 上层 timeout / 用户主动取消能在 step 之间生效,不再"goroutine 后台跑到死"。
+// 单个 repo 的 scan 内部目前没穿透 ctx(WalkDir 不响应 ctx),后续可改。
+func Run(ctx context.Context, cfg *config.SystemConfig, opts Options) (*Result, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if opts.ReposRoot == "" && len(opts.RepoPaths) == 0 {
 		return nil, fmt.Errorf("ReposRoot or RepoPaths required")
 	}
@@ -111,6 +118,12 @@ func Run(cfg *config.SystemConfig, opts Options) (*Result, error) {
 	resolvedPaths := map[string]string{}
 
 	for _, repo := range topoSortReposByParent(cfg.Repos) {
+		// 每个 repo 处理前 check ctx —— 上层 timeout(auto-analyze 60s)/ 用户取消能在
+		// step 之间生效。不在 repo 内部穿透是因为 WalkDir 不响应 ctx,改它要重构
+		// analyzer 包,留作 follow-up。
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		// RepoName filter:桌面 app 单仓库扫描用,其它仓库直接跳(不进 PerRepo)。
 		if opts.RepoName != "" && repo.Name != opts.RepoName {
 			continue

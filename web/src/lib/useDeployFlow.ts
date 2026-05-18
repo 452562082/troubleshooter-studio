@@ -388,38 +388,42 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
           pushLog('install', 'warn', `[${t}] auto-install 异常,保留中间包: ${String(e?.message || e)}`)
         }
       }
-      // 部署完自动跑一次 self-test,把端点 ping 结果反馈给用户(只对 openclaw 跑;
-      // claude-code/cursor 的 self-test 还没适配,跳过避免误报"openclaw.json 缺失")。
-      const openclawDest = installedTargets.includes('openclaw')
-        ? await defaultDestPath('openclaw', deps.system.id || '')
-        : ''
-      let selfTestSummary = ''
-      if (openclawDest) {
-        try {
-          const st = await selfTestAgent(openclawDest)
-          const failCount = (st.checks || []).filter(c => c.status === 'FAIL').length
-          const warnCount = (st.checks || []).filter(c => c.status === 'WARN').length
-          const passCount = (st.checks || []).filter(c => c.status === 'PASS').length
-          if (failCount > 0) {
-            const fails = (st.checks || []).filter(c => c.status === 'FAIL')
-              .map(c => `${c.name}: ${c.detail?.slice(0, 60) || ''}`).join('; ')
-            selfTestSummary = `🩺 自检 ${passCount}✓ ${warnCount}⚠ ${failCount}✗ → ${fails}`
-            pushLog('install', 'error', `[self-test] ${failCount} 项失败: ${fails}`)
-          } else if (warnCount > 0) {
-            selfTestSummary = `🩺 自检 ${passCount}✓ ${warnCount}⚠ 0✗(警告项不阻塞)`
-          } else {
-            selfTestSummary = `🩺 自检 ${passCount}✓ 全绿`
-          }
-        } catch (e: any) {
-          pushLog('install', 'warn', `[self-test] 跑不起来: ${String(e?.message || e)}`)
-        }
-      }
-
+      // 部署主流程"已就绪"信号立即给用户——install 阶段都返回 OK 就 toast + 跳 /bots,
+      // 不再等 self-test。之前 await self-test 60-90s 期间 UI 持续灰"部署中..."、用户分不清
+      // "还在跑 self-test"还是"卡死了",反复要求确认"到底装没装上",体感极差。
+      //
+      // self-test 改后台 fire-and-forget:install 完即跳走,self-test 跑完后 pushLog 一条
+      // 详情 + toast 一条 summary。用户在 /bots 页就能看到机器人卡片(那是真"装好了"的证据),
+      // self-test 完只是补一条"健康检查"反馈,不阻塞主流程。
       if (stagedOnly.length > 0) {
         toast.success(`已就绪:${installedTargets.join(' / ') || '无'};需补凭证:${stagedOnly.join(' / ')}(到「已装机器人」页完成)`)
       } else {
-        const tail = selfTestSummary ? `\n${selfTestSummary}` : ''
-        toast.success(`部署完成,共 ${installedTargets.length} 个目标已生效:${installedTargets.join(' / ')}${tail}`)
+        toast.success(`部署完成,共 ${installedTargets.length} 个目标已生效:${installedTargets.join(' / ')}(self-test 后台跑中,完成后会有反馈)`)
+      }
+
+      // 后台跑 self-test(只对 openclaw)。注意:不再 await,主流程立刻往下走 router.push('/bots')。
+      // claude-code/cursor 的 self-test 还没适配,跳过避免误报"openclaw.json 缺失"。
+      if (installedTargets.includes('openclaw')) {
+        defaultDestPath('openclaw', deps.system.id || '').then(openclawDest => {
+          if (!openclawDest) return
+          return selfTestAgent(openclawDest).then(st => {
+            const failCount = (st.checks || []).filter(c => c.status === 'FAIL').length
+            const warnCount = (st.checks || []).filter(c => c.status === 'WARN').length
+            const passCount = (st.checks || []).filter(c => c.status === 'PASS').length
+            if (failCount > 0) {
+              const fails = (st.checks || []).filter(c => c.status === 'FAIL')
+                .map(c => `${c.name}: ${c.detail?.slice(0, 60) || ''}`).join('; ')
+              pushLog('install', 'error', `[self-test] ${failCount} 项失败: ${fails}`)
+              toast.error(`🩺 自检 ${passCount}✓ ${warnCount}⚠ ${failCount}✗ → ${fails}`)
+            } else if (warnCount > 0) {
+              toast.info(`🩺 自检 ${passCount}✓ ${warnCount}⚠ 0✗(警告项不阻塞,见日志详情)`)
+            } else {
+              toast.success(`🩺 自检 ${passCount}✓ 全绿`)
+            }
+          })
+        }).catch(e => {
+          pushLog('install', 'warn', `[self-test] 跑不起来: ${String(e?.message || e)}`)
+        })
       }
       // 部署成功 → 给 saved 草稿打 lastDeployAt 时间戳。HomePage 的"下一步推荐"读到它就
       // 切成"已部署"语义,不再引导"继续部署"(用户实测撞过:已经部署完了首页还显示"继续部署")。

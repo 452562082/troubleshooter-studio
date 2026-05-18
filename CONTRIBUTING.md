@@ -10,6 +10,22 @@ make lint       # go vet + gofmt -l(diagnostic 风格问题不阻塞 commit,但 
 make build      # 至少能编出 bin/tshoot
 ```
 
+### git 操作 gotcha:**不要用 `git add -A`**
+
+本仓库 `internal/webui/dist/` 是 npm build 产物目标 + 一个常驻 `.gitkeep`(让 `//go:embed all:dist` 在 fresh clone / CI 上有文件可匹配)。`.gitignore:24` 用 `/internal/webui/dist/*` + `!.gitkeep` 例外。
+
+**但**:`.gitignore` 例外只防 `git add` 加 ignored 文件,**不防 `git add -A` 把已 tracked 文件的 delete 记下来**。`make desktop-app` 期间 web build 会清盘 + 重写 dist 产物,`.gitkeep` 短暂"消失"(实际是 mtime 变);此时若用 `git add -A`,git 把 `.gitkeep` 当 delete 记进 commit,CI fresh clone 跑 `go vet ./internal/webui/...` 就挂 `pattern all:dist: no matching files found`(本会话已踩 2 次:`7b38829` / `b3a5f98`)。
+
+**改用**:`git add <具体路径>`,显式列你改的文件。如果非要全量,先 `git status` 看一遍 staged delete 列表里没 `.gitkeep`。
+
+### Node / web build 在 CI 上的兼容性
+
+- `.gitlab-ci.yml` 配 `image: node:20`,但 runner 是 shell executor(image 标签被忽略),host node 可能比 20 新很多。本仓库根 `.nvmrc=20` + web job `before_script: source nvm.sh && nvm install` 强制 node 20。
+- runner 机器要装 nvm:`brew install nvm`(Apple Silicon 路径 `/opt/homebrew/opt/nvm/nvm.sh`)。
+- `npm ci` 加 `--ignore-scripts` 跳 esbuild postinstall(node 25+ 上 `node install.js` SIGKILL bug;esbuild 子包 `@esbuild/<os>-<arch>` npm 自动按平台拉,postinstall 只是验证,跳过不影响 build)。
+- `npm test` 用 `vitest run --pool=forks`(不是 `threads`):node 25+ worker_threads + vitest 4 偶发死锁,forks 走 child_process 绕开。
+- 详见 `.gitlab-ci.yml` web job 内嵌注释。
+
 ## 项目结构速查
 
 | 目录 | 用途 | 改这里需注意 |

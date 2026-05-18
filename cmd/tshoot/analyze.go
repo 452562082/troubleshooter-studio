@@ -1,11 +1,11 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
-
-	"encoding/json"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/analyzerpipe"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
@@ -36,7 +36,7 @@ func runAnalyze(args []string) error {
 	if text {
 		onProgress = func(msg string) { fmt.Fprintln(os.Stderr, msg) }
 	}
-	result, err := analyzerpipe.Run(cfg, analyzerpipe.Options{
+	result, err := analyzerpipe.Run(context.Background(), cfg, analyzerpipe.Options{
 		ReposRoot:   *reposRoot,
 		AutoClone:   *autoClone,
 		CloneBranch: *cloneBranch,

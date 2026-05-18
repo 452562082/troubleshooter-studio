@@ -190,6 +190,97 @@ routing/config-map.yaml 标 `runtime: <type>-http` 字段告诉 LLM 走脚本。
 
 ---
 
+## 2026-05-18 · install 链全栈 timeout 兜底(防 UI"卡死"无终点)
+
+**背景**:用户反复抱怨桌面 app 部署"卡 5+ 分钟永远不结束",反复 killall 重试。日志面板按设计反馈,但用户能等到的"安装在动"信号太弱——只要某一步无 emit,UI 看着就像死锁。系统排查后定位多个**无 timeout / 无 ctx 控制点**:任一卡住整链路无法返回。
+
+**决策**:install 全链路每段配硬上限 timeout,**层层防御**,坏一层下一层兜底:
+
+| 阶段 | timeout | 内部机制 |
+|------|---------|---------|
+| `fixGUIPath` 拿 login shell PATH | 5s | `exec.CommandContext` 直接 deadline |
+| `EnsureKafkaMCPInstalled` 拉 GitHub tarball | 90s | `http.Client.Timeout` |
+| `RunAutoAnalyze` 跑 analyzer | 60s | `select + time.After` + ctx 透传 |
+| `openclaw gateway restart` | 30s | `context.WithTimeout` 包 ctx |
+| `RunInstall` 桌面 binding 总耗时 | 5min | `context.WithTimeout(a.ctx, 5min)` |
+| `SelfTestAgent` 桌面 binding 总耗时 | 120s | 同上 |
+| MCP probe 单家 | 15s(降自 60s)| 见下条 |
+
+**护栏原则**:每层超时不阻塞 install 本体——比如 `openclaw gateway restart` 超时只让"新 agent 没自动 reload",用户**重启 OpenClaw 客户端**即可,workspace + json + creds 都已落地。`auto-analyze` 超时让 `service-dependency-map / data-schema-map` 留空,可后续 BotsPage 重 gen。
+
+**为什么不一次给整链路统一 timeout**:不同步骤合理时间差异大(gateway restart 几秒 vs auto-analyze 可能 1 分钟+),统一短 timeout 误伤合理慢路径,统一长 timeout 等价没护栏。
+
+**配套**:`install:log` event 全链路 emit(`MergeMCPIntoIDESettings` 加 `emit` helper 走 `onProgress` 而不是 stderr),前端有可见进度;前端 `useDeployFlow.ts` 把 self-test 改异步—— install 完即 toast + 跳 /bots,健康检查后台跑,用户不再盯静默条。
+
+---
+
+## 2026-05-18 · self-test MCP probe 三层根因修复(并发 + 进程组 + 前缀过滤)
+
+**背景**:`[self-test] 开始自检 → 120s 超时退出` 反复出现。120s 是我加的 `SelfTestAgent` 总 timeout 兜底,真因藏在三层:
+
+**第一层 — 串行 + 单 probe 60s timeout**:
+`probeMCPServersFromConfig` for 循环跑 17 个 mcp,每个 60s(为 npx 冷启动留余量)= 最坏 1020s。
+→ 改并发(goroutine + `sync.WaitGroup`),`safeAdd` 套 `sync.Mutex` 保护 `res.Checks` append。probe timeout 60s → 15s(self-test 是健康检查不替用户跑 cold install,首次起不来直接 FAIL 让用户在 IDE 真用时再冷启动)。
+**理论 1020s → 15s**。
+
+**第二层 — `cmd.Wait()` 永远等 npx 孙子进程**:
+即使并发,17 个 goroutine **全部卡在 `defer { cmd.Process.Kill(); cmd.Wait() }`**。POSIX 进程模型 + npx 三层 fork(npx → node → npm → mcp),SIGKILL 顶层 npx 后,孙子持有 stdin/stdout pipe → 父 `cmd.Wait()` 等不到子进程退出 → `wg.Done()` 不触发 → `wg.Wait()` 卡 → SelfTestAgent 120s timeout 兜底砍。
+→ `cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}` 把 npx 放独立进程组,defer 时 `syscall.Kill(-pgid, SIGKILL)` 杀整组(负号 pid → 杀进程组),孙子一并 SIGKILL,`cmd.Wait()` 立即返回。
+**Windows 不支持 setpgid**:拆 `self_test_mcp_probe_unix.go` (`//go:build !windows`) + `_windows.go` (noop stub) 平台分。
+保留 `cmd.Wait()` 1s 上限做 belt-and-suspenders:extreme case 即使 setpgid 没杀干净(trap SIGKILL / fd 给系统服务)也不卡。
+
+**第三层 — self-test 探别家 agent 的 mcp 拖累报告**:
+`~/.openclaw/openclaw.json` 是多 agent 共享文件,user 装过 `ai-troubleshooter` + `truss-troubleshooter` → mcp.servers 混存:本系统前缀的(`truss-grafana-dev` 等)+ 无前缀的孤儿(别家 agent / 历史包名退役如 `@larksuite/lark-openapi-mcp` 已 404)。`probeMCPServersFromConfig` 之前不按 `cfg.MCPKeyPrefix()` 过滤,把孤儿一起 probe,1 个 FAIL 拖整体报告。
+→ `self_test_openclaw.go:97` 调 probe 前用 `strings.HasPrefix(k, mcpPrefix+"-")` 过滤本系统的 mcp,**self-test 跟"本系统"绑定**,孤儿不拉进来。
+
+**验证**:用户日志 `19:45:08 → 19:45:20 = 11.6s` 完成,28 PASS / 4 WARN / 1 FAIL → 第三层修后 12 PASS / 4 WARN / 0 FAIL,真实健康度可读。
+
+**演进**:如果某天 self-test 要 cross-agent 健康度报告(检查多个 agent 共用资源),回退第三层,但要明确"是 system-level 还是 cross-agent"语义。
+
+---
+
+## 2026-05-18 · auto-analyze cache + ctx 透传(install 砍 75% 重复)
+
+**背景**:用户在 wizard step 10 一键部署 4 个 target(OpenClaw / Claude Code / Cursor / Codex)。`apply.go:94`(IDE target 走 `Apply`)+ `apply.go:258`(openclaw 走 `ImportAndApply`)各调一次 `RunAutoAnalyze`,**4 个 target 重复扫同一份 13 个 repo**——实测每次 ~5s,共 ~20s 浪费。truss 这种大 monorepo 跑满 60s timeout 时,4 次就是 4 分钟。
+
+**决策两步**:
+
+**A. process-level cache**:`internal/agent/auto_analyze.go` 加 `map[cacheKey]*entry`。
+- `cacheKey = system.id + "\x1f" + sorted (repo name=path)`,US (Unit Separator `\x1f`) 当字段分隔符避免误命中
+- TTL 5min,覆盖一次部署 wizard(实测 <2min)且让用户改 yaml 后强制重扫
+- 只缓存成功结果(`err == nil && result != nil`),失败下次 retry 有机会
+- 命中时 emit `[info] auto-analyze cache 命中(Xs 前的结果),复用 dependency / schema findings`
+
+**B. ctx 透传**:`analyzerpipe.Run` 加 `ctx context.Context` 首参,for-each-repo 循环顶 `if err := ctx.Err()` 让 step 之间能取消。`RunAutoAnalyzeOptions.Ctx` 字段(妥协:Go 惯例 ctx 不放 struct,但 ApplyOptions 全链 4+ 调用方现有 opts struct 调,加字段而非改全部签名 = minimal invasive)。`RunAutoAnalyze` 内部 derive `runCtx = WithTimeout(opts.Ctx 或 background, 60s)`,真正能 cancel 底层 analyzer(之前只让上层放弃等,goroutine 后台跑死)。
+
+**未做的部分(留 follow-up)**:`analyzer/walker.go` 的 `filepath.WalkDir` 不响应 ctx,单 repo 内部 scan 无法中断——要加 ctx 需要重构 walker.go 函数签名。step 之间取消已覆盖绝大部分场景。
+
+**效果**:install 总耗时 ~25s → ~10s,4 个 target 后 3 次 cache 命中 ~0ms。
+
+---
+
+## 2026-05-18 · codex network_access 从"探测 + warn"改"自动 patch"(推翻前决策)
+
+**前决策**:`ensure_codex_network.go` 不主动改用户全局 `~/.codex/config.toml`(怕动用户文件引连带 bug),只探测 + 打 `[warn]` 给手抄指引。
+
+**演进原因**:每次装 codex agent 用户都得手抄 toml 3 行——重复操作 + 文案显眼让用户以为"装失败"。
+
+**新决策**:`EnsureCodexNetworkAccess` 自动 patch,3 种缺失场景全覆盖:
+1. 文件 / 段不存在 → 文件末尾 append 整段
+2. 段在缺 key → 段头后插一行 `network_access = true`
+3. 段在且 key=false/其它 → 替换那一行的值
+
+**保险措施**:
+- 写之前 backup 原文件到 `<path>.tshoot-bak.<YYYYMMDD-HHMMSS>`,改坏可一键 cp 恢复
+- 写之后用 `hasNetworkAccessTrue` parser 反向 verify(防 patch 边角逻辑漏洞写出 parser 不认的怪 toml)
+- patch 失败降级到原 warn + `codexNetworkHint` 手抄指引(权限问题等极端 case)
+
+**SUPERSEDED 之前决策**:"不动用户全局 config.toml"——新决策接受"用户预期 = troubleshooter agent 能用,sandbox 这层放网不放写盘是排障常态"。
+
+**测试**:`patchCodexNetworkAccess` 5 个 parser 场景 + `EnsureCodexNetworkAccess` 3 个 E2E 场景(`t.TempDir()` 真 IO,verify backup 落盘)。
+
+---
+
 ## 历史(SUPERSEDED)
 
 下面记录已被覆盖的历史决策,**不要按这些指引**,留给读 git log 追根溯源的人用。

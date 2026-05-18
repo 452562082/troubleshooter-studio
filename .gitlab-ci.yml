@@ -140,17 +140,22 @@ web:
     paths:
       - web/node_modules
   # runner 是 shell executor,image: node:20 被忽略。host 通过 brew install nvm
-  # (Apple Silicon → /opt/homebrew/opt/nvm/nvm.sh)装了 nvm。仓库根 .nvmrc 写 `20`。
-  # 这里 source brew 的 nvm.sh 后 `nvm install`(无参数会读 .nvmrc 自动 install + use)
-  # 切到 node 20,绕开 host 默认 node 25 的工具链兼容问题(esbuild postinstall SIGKILL /
-  # vitest worker_threads 死锁)。
+  # 装了 nvm。仓库根 .nvmrc 写 `20`,nvm install(无参数)读 .nvmrc 自动 install + use,
+  # 绕开 host 默认 node 25 的工具链兼容(esbuild postinstall SIGKILL / vitest worker 死锁)。
   #
-  # NVM_DIR + mkdir:brew 装的 nvm 默认 NVM_DIR=$HOME/.nvm,但不自动创建该目录;
-  # 没目录时 nvm install 报错。显式 mkdir 防御。
+  # NVM_SH 用 brew --prefix nvm 动态拿(brew 安装路径在 Apple Silicon /opt/homebrew/opt/nvm
+  # vs Intel /usr/local/opt/nvm 不一样;手装的 nvm 是 $HOME/.nvm/nvm.sh),写死容易踩坑。
+  # 找不到时显式报错 + 列 brew prefix 实际位置,方便排查。
   before_script:
     - export NVM_DIR="$HOME/.nvm"
     - mkdir -p "$NVM_DIR"
-    - source "/opt/homebrew/opt/nvm/nvm.sh"
+    - 'NVM_PREFIX="$(brew --prefix nvm 2>/dev/null || true)"'
+    - 'NVM_SH="$NVM_PREFIX/nvm.sh"'
+    - 'echo "[ci] brew --prefix nvm = $NVM_PREFIX"'
+    - 'if [ ! -s "$NVM_SH" ]; then echo "[ci] ERROR: nvm.sh not found at $NVM_SH"; ls -la "$NVM_PREFIX" 2>&1 || true; echo "Trying fallback $HOME/.nvm/nvm.sh ..."; NVM_SH="$HOME/.nvm/nvm.sh"; fi'
+    - 'if [ ! -s "$NVM_SH" ]; then echo "[ci] ERROR: 找不到 nvm.sh,请在 runner 机器(botmaster)装 nvm:brew install nvm 或 curl -o- ... | bash"; exit 1; fi'
+    - 'echo "[ci] sourcing $NVM_SH"'
+    - source "$NVM_SH"
     - nvm install
     - node --version
   script:

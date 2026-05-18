@@ -121,9 +121,12 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 
 	if t == TargetCodex {
 		// codex 全局 sandbox 默认禁网,workspace-write 也要显式 network_access=true 才放行 —
-		// 没配的话装好后所有 MCP 启动 ENOTFOUND。这里探测 + 给修复指引,不主动改用户 config。
-		if err := CheckCodexNetworkAccess(root); err != nil {
-			emit(fmt.Sprintf("[warn] codex 网络访问未启用: %v", err))
+		// 没配的话装好后所有 MCP 启动 ENOTFOUND。自动 patch ~/.codex/config.toml,
+		// backup 原文件后再写;patch 失败降级到 [warn] + 手抄指引(EnsureCodexNetworkAccess 注释)。
+		if changed, err := EnsureCodexNetworkAccess(root); err != nil {
+			emit(fmt.Sprintf("[warn] codex 自动开启 network_access 失败: %v", err))
+		} else if changed {
+			emit(fmt.Sprintf("[ok] 已自动写入 %s/config.toml: [sandbox_workspace_write] network_access = true(MCP 才能连业务侧;原文件已 backup)", root))
 		}
 		return injectMCPIntoCodexAgentTOML(root, cfg, servers)
 	}

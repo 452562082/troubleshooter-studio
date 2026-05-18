@@ -112,13 +112,13 @@ func copyFile(src, dst string) error {
 
 func writeTSFMeta(dir, target string, cfg *config.SystemConfig, yamlSrc []byte, version string) error {
 	meta := map[string]any{
-		"schema_version": 1,
-		"tshoot_version": version,
-		"system_id":      cfg.System.ID,
-		"system_name":    cfg.System.Name,
-		"target":         target,
-		"generated_at":   time.Now().UTC().Format(time.RFC3339),
-		"system_yaml":    string(yamlSrc),
+		"schema_version":      1,
+		"tshoot_version":      version,
+		"system_id":           cfg.System.ID,
+		"system_name":         cfg.System.Name,
+		"target":              target,
+		"generated_at":        time.Now().UTC().Format(time.RFC3339),
+		"troubleshooter_yaml": string(yamlSrc),
 	}
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {

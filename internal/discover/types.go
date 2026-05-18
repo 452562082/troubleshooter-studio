@@ -32,12 +32,12 @@ type Meta struct {
 	// GeneratedAt RFC3339 时间戳
 	GeneratedAt string `json:"generated_at"`
 
-	// SystemYAML 是生成本产物时的完整 troubleshooter.yaml 原文（含注释）。
+	// TroubleshooterYAML 是生成本产物时的完整 troubleshooter.yaml 原文（含注释）。
 	// 这是产物的"真源"：后续要修改，Web UI / tshoot agent 直接从这里读、改完 re-gen 覆盖。
-	SystemYAML string `json:"system_yaml"`
+	TroubleshooterYAML string `json:"troubleshooter_yaml"`
 
 	// UserEdits 是已部署后用户通过 Web UI / tshoot agent 做的增量编辑
-	// （相对 SystemYAML 的 patch）。暂时保留字段，阶段 2 才用。
+	// （相对 TroubleshooterYAML 的 patch）。暂时保留字段，阶段 2 才用。
 	UserEdits map[string]any `json:"user_edits,omitempty"`
 }
 
@@ -52,7 +52,7 @@ type DiscoveredAgent struct {
 	// ModTime 是 tshoot.json 的修改时间，近似反映"最近一次 apply/install 的时间"
 	ModTime string `json:"mod_time"`
 
-	// 快速概览字段（从 SystemYAML 解析填充），方便 UI 不用再解析一次
+	// 快速概览字段（从 TroubleshooterYAML 解析填充），方便 UI 不用再解析一次
 	EnvCount   int      `json:"env_count"`
 	RepoCount  int      `json:"repo_count"`
 	SkillCount int      `json:"skill_count"`
@@ -67,7 +67,7 @@ type DiscoveredAgent struct {
 
 	// Ghost 标"~/.tshoot/config.json deployed_bots 里有但 disk 上 tshoot.json 不在"。
 	// 用户外部 rm -rf ~/.<target>/skills/<name>/ 清掉机器人后,UI 仍能从这条记录
-	// "幽灵显示"卡片,提供"重新部署"或"忘掉它"入口。Ghost=true 时 Meta.SystemYAML
+	// "幽灵显示"卡片,提供"重新部署"或"忘掉它"入口。Ghost=true 时 Meta.TroubleshooterYAML
 	// 通常为空(yaml 在 disk 上没了),操作按钮要相应 disable。
 	Ghost bool `json:"ghost"`
 }

@@ -17,7 +17,7 @@ import (
 // setupOpenclawStaging 给 InstallNativeOpenclaw 准备最小可跑的 staging:
 //   - <staging>/templates/workspace-template/SOUL.md(workspace 占位文件,
 //     install 拷过去后能让 InstallNative 走完文件复制路径)
-//   - <staging>/templates/workspace-template/tshoot.json(承载 SystemYAML)
+//   - <staging>/templates/workspace-template/tshoot.json(承载 TroubleshooterYAML)
 //
 // 同时把 t.Setenv("HOME") 指向新 tmp,把所有 ~/.openclaw 落地到 t.TempDir(),
 // 测试结束自动清。
@@ -40,11 +40,11 @@ func setupOpenclawStaging(t *testing.T, cfg *config.SystemConfig) (stagingDir, f
 		t.Fatal(err)
 	}
 	meta := discover.Meta{
-		SchemaVersion: 1,
-		SystemID:      cfg.System.ID,
-		SystemName:    cfg.System.Name,
-		Target:        "openclaw",
-		SystemYAML:    string(yamlBytes),
+		SchemaVersion:      1,
+		SystemID:           cfg.System.ID,
+		SystemName:         cfg.System.Name,
+		Target:             "openclaw",
+		TroubleshooterYAML: string(yamlBytes),
 	}
 	mb, _ := json.MarshalIndent(meta, "", "  ")
 	if err := os.WriteFile(filepath.Join(wsTpl, discover.MetaFilename), mb, 0o644); err != nil {

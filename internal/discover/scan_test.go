@@ -50,7 +50,7 @@ func TestScanFindsAgentInRoot(t *testing.T) {
 		SystemID:      "shop",
 		SystemName:    "Shop",
 		Target:        "openclaw",
-		SystemYAML: `system:
+		TroubleshooterYAML: `system:
   id: shop
 environments:
   - id: dev

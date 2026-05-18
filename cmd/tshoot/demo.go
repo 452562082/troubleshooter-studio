@@ -69,7 +69,7 @@ func runDemo(args []string) error {
 	// 写到 staging 的 tshoot.json 里要能反读出原 yaml,后续 tshoot install
 	// 走 InstallNativeOpenclaw 时会用。demo 没 -i 显式 yaml,直接读 sysPath。
 	if data, err := os.ReadFile(sysPath); err == nil {
-		g.SystemYAMLSource = data
+		g.TroubleshooterYAMLSource = data
 	}
 	planRes, err := g.BuildPlan("")
 	if err != nil {

@@ -44,7 +44,7 @@ func (a *App) Gen(yamlText, outputDir string) (*generator.GenSummary, error) {
 	}
 	g := generator.New(cfg, a.templateRoot, outputDir)
 	g.TshootVersion = version
-	g.SystemYAMLSource = []byte(yamlText)
+	g.TroubleshooterYAMLSource = []byte(yamlText)
 
 	// auto-analyze:从 userconfig 读已存的本地仓库路径,命中即跑一遍 analyzer。
 	// 跑失败 / 路径全空 都不阻塞 gen,只是产物里两份 map 走 fallback(yaml 反推 / 留空)。
@@ -155,7 +155,7 @@ func (a *App) GenPreview(yamlText string) (*GenPreviewResult, error) {
 	outDir := filepath.Join(tmp, "openclaw")
 	g := generator.New(cfg, a.templateRoot, outDir)
 	g.TshootVersion = version
-	g.SystemYAMLSource = []byte(yamlText)
+	g.TroubleshooterYAMLSource = []byte(yamlText)
 
 	targets := cfg.Generation.ResolvedTargets()
 	hasOpenclaw, hasOther := false, false

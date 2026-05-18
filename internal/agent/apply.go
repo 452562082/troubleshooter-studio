@@ -87,7 +87,7 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 	baseOut := filepath.Join(parent, "out")
 	g := generator.New(cfg, opts.TemplateRoot, baseOut)
 	g.TshootVersion = opts.TshootVersion
-	g.SystemYAMLSource = opts.NewYAML
+	g.TroubleshooterYAMLSource = opts.NewYAML
 	g.RepoLocalPaths = opts.RepoLocalPaths
 	// auto-analyze:同 ImportAndApply,有本地路径就跑一遍把 service-dependency-map +
 	// data-schema-map 填齐。失败 / 空路径都不阻塞。
@@ -246,7 +246,7 @@ func ImportAndApply(yamlBytes []byte, target, destPath string, opts ApplyOptions
 		}
 		g := generator.New(cfg, opts.TemplateRoot, destPath)
 		g.TshootVersion = opts.TshootVersion
-		g.SystemYAMLSource = yamlBytes
+		g.TroubleshooterYAMLSource = yamlBytes
 		g.RepoLocalPaths = opts.RepoLocalPaths
 		// auto-analyze:用 RepoLocalPaths 跑一遍 dependency_scan / schema_scan,
 		// 把 service-dependency-map.upstream/downstream + data-schema-map.tables 自动填齐;

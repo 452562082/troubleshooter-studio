@@ -50,7 +50,7 @@ func loadCfgFromTshoot(dir string) (*config.SystemConfig, discover.Meta, error) 
 	if err := json.Unmarshal(data, &meta); err != nil {
 		return nil, meta, fmt.Errorf("parse tshoot.json: %w", err)
 	}
-	cfg, err := config.LoadFromBytes([]byte(meta.SystemYAML))
+	cfg, err := config.LoadFromBytes([]byte(meta.TroubleshooterYAML))
 	if err != nil {
 		return nil, meta, fmt.Errorf("troubleshooter.yaml in tshoot.json invalid: %w", err)
 	}

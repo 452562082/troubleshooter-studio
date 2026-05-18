@@ -139,11 +139,19 @@ web:
         - web/package-lock.json
     paths:
       - web/node_modules
-  # runner 是 shell executor,image: node:20 被忽略。host 装了 nvm + 仓库根有 .nvmrc(=20),
-  # 这里 source nvm.sh 后 `nvm use` 读 .nvmrc 切到 node 20,绕开 host 默认 node 25 的工具链
-  # 兼容问题(esbuild postinstall SIGKILL / vitest worker_threads 死锁)。
+  # runner 是 shell executor,image: node:20 被忽略。host 通过 brew install nvm
+  # (Apple Silicon → /opt/homebrew/opt/nvm/nvm.sh)装了 nvm。仓库根 .nvmrc 写 `20`。
+  # 这里 source brew 的 nvm.sh 后 `nvm install`(无参数会读 .nvmrc 自动 install + use)
+  # 切到 node 20,绕开 host 默认 node 25 的工具链兼容问题(esbuild postinstall SIGKILL /
+  # vitest worker_threads 死锁)。
+  #
+  # NVM_DIR + mkdir:brew 装的 nvm 默认 NVM_DIR=$HOME/.nvm,但不自动创建该目录;
+  # 没目录时 nvm install 报错。显式 mkdir 防御。
   before_script:
-    - source "$HOME/.nvm/nvm.sh" && nvm use
+    - export NVM_DIR="$HOME/.nvm"
+    - mkdir -p "$NVM_DIR"
+    - source "/opt/homebrew/opt/nvm/nvm.sh"
+    - nvm install
     - node --version
   script:
     - cd web

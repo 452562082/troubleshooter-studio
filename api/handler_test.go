@@ -212,8 +212,8 @@ func TestCORS(t *testing.T) {
 // 用 testing/fstest.MapFS 模拟 dist FS(避免依赖真前端 build 产物)。
 func TestSPAHandler_FallsBackToIndex(t *testing.T) {
 	mockFS := fstest.MapFS{
-		"index.html":         &fstest.MapFile{Data: []byte("<html>SPA index</html>")},
-		"assets/app.js":      &fstest.MapFile{Data: []byte("// js bundle")},
+		"index.html":    &fstest.MapFile{Data: []byte("<html>SPA index</html>")},
+		"assets/app.js": &fstest.MapFile{Data: []byte("// js bundle")},
 	}
 	srv := &Server{TemplateRoot: ""}
 	server := httptest.NewServer(NewRouter(srv, fs.FS(mockFS)))

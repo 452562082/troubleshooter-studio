@@ -44,9 +44,9 @@ var probeMCPFunc = doProbeMCPServer
 
 // doProbeMCPServer 起一个 mcp 子进程,跑完整的 stdio JSON-RPC 握手:
 //
-//	1. initialize 请求 → 等响应
-//	2. notifications/initialized 通知
-//	3. tools/list 请求 → 等响应,提取工具名
+//  1. initialize 请求 → 等响应
+//  2. notifications/initialized 通知
+//  3. tools/list 请求 → 等响应,提取工具名
 //
 // timeout 覆盖整个流程。npx/uvx 冷启动可能 30-60s(首次下包),后续 cache 命中后秒级 —
 // 调用方建议给 60-90s headroom。
@@ -225,9 +225,9 @@ func (b *boundedWriter) Write(p []byte) (int, error) {
 // probeMCPServersFromConfig 对 servers map(self_test 从 openclaw.json 反读出来的)
 // 逐个跑 probe,返每个 mcp 的 PASS/FAIL/WARN 项。
 //
-//	- PASS:进程起 + tools/list 返非空 → mcp 真能用
-//	- WARN:进程起 + tools/list 返空 → 协议起来了但工具集为 0(罕见,可能凭据问题让 mcp 不暴露任何工具)
-//	- FAIL:进程没起 / 协议崩 / timeout
+//   - PASS:进程起 + tools/list 返非空 → mcp 真能用
+//   - WARN:进程起 + tools/list 返空 → 协议起来了但工具集为 0(罕见,可能凭据问题让 mcp 不暴露任何工具)
+//   - FAIL:进程没起 / 协议崩 / timeout
 //
 // 跳过场景:cfg 期望 mcp 但 servers 没注册(已被 "mcp.servers 齐全" 那条检查 FAIL 覆盖)。
 func probeMCPServersFromConfig(ctx context.Context, servers map[string]any, add func(name, status, detail string)) {

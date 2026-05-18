@@ -749,6 +749,7 @@ func TestBuildMCPServers_DataStores_Kafka_MultiCluster(t *testing.T) {
 // 两个 PyPI 候选 amq-mcp-server-rabbitmq / rabbitmq-mcp-server 实测都跑不起来:
 //   - amq 包源码引用 fastmcp 不存在的 BearerAuthProvider(任何版本都没有)
 //   - rabbitmq-mcp-server 依赖声明缺一堆(tabulate / tomli / requests)
+//
 // SKILL rabbitmq-runtime-query 主路径走 HTTP Management API。这条护栏防止有人改回 mcp 注册。
 func TestBuildMCPServers_DataStores_RabbitMQ_NotRegistered(t *testing.T) {
 	cfg := &config.SystemConfig{

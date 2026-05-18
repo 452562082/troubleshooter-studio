@@ -6,14 +6,15 @@
 // normalizeMongoURI 等)留在 install_native_mcp_common.go,跨 builder 复用。
 //
 // 涉及包(2026-05-15 runtime probe 最新事实):
-//   mongodb        npx mcp-mongo-server --read-only       8 tools(--read-only 运行时拦截写)
-//   postgresql     npx @henkey/postgres-mcp-server        19 tools(2 写 + 1 任意 SQL 软约束禁)
-//   elasticsearch  npx @elastic/mcp-server-elasticsearch  4 tools(README 写的 esql 上游 v0.3.1 未注册)
-//   redis          npx @gongrzhe/server-redis-mcp@1.0.0   4 tools(无 scan/TTL,需 redis-cli fallback)
-//   mysql          npx @benborla29/mcp-server-mysql       1 tool(单 mysql_query 入口,内部 env 限制写)
-//   clickhouse     uvx mcp-clickhouse                     3 tools(run_query 主用,内置 destructive protection)
-//   kafka          binary kafka-mcp-server (tuannvm)      9 tools(8 读 + 1 produce_message 软约束禁)
-//   rabbitmq       禁用注册(两个 PyPI 候选都 broken,SKILL 走 HTTP Management API 主路径)
+//
+//	mongodb        npx mcp-mongo-server --read-only       8 tools(--read-only 运行时拦截写)
+//	postgresql     npx @henkey/postgres-mcp-server        19 tools(2 写 + 1 任意 SQL 软约束禁)
+//	elasticsearch  npx @elastic/mcp-server-elasticsearch  4 tools(README 写的 esql 上游 v0.3.1 未注册)
+//	redis          npx @gongrzhe/server-redis-mcp@1.0.0   4 tools(无 scan/TTL,需 redis-cli fallback)
+//	mysql          npx @benborla29/mcp-server-mysql       1 tool(单 mysql_query 入口,内部 env 限制写)
+//	clickhouse     uvx mcp-clickhouse                     3 tools(run_query 主用,内置 destructive protection)
+//	kafka          binary kafka-mcp-server (tuannvm)      9 tools(8 读 + 1 produce_message 软约束禁)
+//	rabbitmq       禁用注册(两个 PyPI 候选都 broken,SKILL 走 HTTP Management API 主路径)
 package agent
 
 import (
@@ -121,12 +122,12 @@ func (b *mcpBuilder) buildMongoDB(servers map[string]any, ep *config.DataStoreEn
 // buildPostgreSQL 用 @henkey/postgres-mcp-server(v1.0.5+,env-based,凭据不落 args)。
 //
 // 2026-05-15 从 @modelcontextprotocol/server-postgres 迁移过来:
-// - 老包于 2025-07 deprecated,官方明确 archive 不再修;近期能跑但长期撞墙
-// - 老包优势(RO transaction 包裹所有查询)在新包没有 — 但跟 mysql/redis/kafka 同理,
-//   只读改靠 SKILL 软约束(用户校准过的设计哲学)
-// - @henkey 工具:pg_execute_query(SELECT 主用)/ pg_monitor_database / pg_debug_database /
-//   pg_analyze_database 等 17 个;**禁用工具**:pg_execute_mutation / pg_execute_sql(可写)
-// - env 而非位置参数 → 凭据不再落 args,~/.claude.json 不再泄漏 DSN(P3.2 旧 trade-off 顺便解决)
+//   - 老包于 2025-07 deprecated,官方明确 archive 不再修;近期能跑但长期撞墙
+//   - 老包优势(RO transaction 包裹所有查询)在新包没有 — 但跟 mysql/redis/kafka 同理,
+//     只读改靠 SKILL 软约束(用户校准过的设计哲学)
+//   - @henkey 工具:pg_execute_query(SELECT 主用)/ pg_monitor_database / pg_debug_database /
+//     pg_analyze_database 等 17 个;**禁用工具**:pg_execute_mutation / pg_execute_sql(可写)
+//   - env 而非位置参数 → 凭据不再落 args,~/.claude.json 不再泄漏 DSN(P3.2 旧 trade-off 顺便解决)
 //
 // 安全责任建议同时下沉到 PG 端:DSN 里给只读 role,即便 LLM 误调 pg_execute_mutation
 // PG 端也会拒。这是软约束的兜底,不强制要求。

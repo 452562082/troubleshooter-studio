@@ -155,7 +155,7 @@ func PreloadNacos(req Request) (*Result, error) {
 // 返回:
 //   - token:   accessToken,直接当 mcp 启动参数 --access_token 用
 //   - ttlSec:  服务端声明的有效期(秒);install 端用来判断是否短到不实用,
-//              短 TTL 下方案 A「装一次永久用」不成立,需 warn 提示用户调长 nacos 端配置
+//     短 TTL 下方案 A「装一次永久用」不成立,需 warn 提示用户调长 nacos 端配置
 //   - note:    人话提示(用了哪个 API 版本 / 路径),写到 install 日志
 func LoginNacos(addr, username, password string) (token string, ttlSec int, note string, err error) {
 	cli, err := connectNacos(addr, username, password)

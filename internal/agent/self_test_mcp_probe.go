@@ -57,6 +57,9 @@ func doProbeMCPServer(ctx context.Context, command string, args, env []string, t
 
 	cmd := exec.CommandContext(pctx, command, args...)
 	cmd.Env = env
+	// 把 npx 放到独立进程组,defer 时 killProcessGroup 可一次性杀整组(unix only;
+	// windows noop)。详见 self_test_mcp_probe_unix.go / _windows.go 的 platform helper。
+	setProcessGroup(cmd)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -74,14 +77,17 @@ func doProbeMCPServer(ctx context.Context, command string, args, env []string, t
 		return MCPProbeResult{Err: fmt.Errorf("start %s: %w", command, err)}
 	}
 	defer func() {
+		// 杀整组而不只杀顶层:npx fork 出来的 node/npm 孙子进程一并 SIGKILL,
+		// 避免孙子进程持有 stdin/stdout pipe 让 cmd.Wait() 永远等不到。
+		// unix 走 syscall.Kill(-pgid, SIGKILL);windows 上 killProcessGroup 是 noop,
+		// 后面的 cmd.Process.Kill() 兜底杀顶层。
+		if cmd.Process != nil {
+			killProcessGroup(cmd.Process.Pid)
+		}
 		_ = cmd.Process.Kill()
-		// cmd.Wait() 加 1s 上限:npx/uvx 进程在 cold install 网络下载阶段被 SIGKILL,
-		// 自身退出,但内部 fork 的 node/npm 孙子进程不会一起死,孙子进程持有的 stdin/stdout
-		// pipe 让父 cmd.Wait() 永远等不到 — 这是父函数 return 后 wg.Done 触发不了的根因,
-		// 进而让 wg.Wait() 卡满 SelfTestAgent 的 120s total timeout。
-		//
-		// 1s 不收尾就放弃 wait,接受 zombie 孙子进程(OS reaper 后续会清理)。代价是短期
-		// fd 泄漏,但 self-test 单次跑 17 个 mcp probe 后 .app 继续跑,GC + OS 兜底足够。
+		// cmd.Wait() 仍保留 1s 上限作为最后防线:即使 setpgid + killpg 也理论上不能 100%
+		// 收尾(extreme case:某进程 trap SIGKILL 或 fd 被传给系统服务)。1s 内没退出
+		// 就放弃,goroutine 后台等 OS reaper(通常秒级),不阻塞 wg.Wait() 返回。
 		done := make(chan struct{})
 		go func() { _ = cmd.Wait(); close(done) }()
 		select {

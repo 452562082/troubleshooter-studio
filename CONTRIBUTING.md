@@ -20,11 +20,10 @@ make build      # 至少能编出 bin/tshoot
 
 ### Node / web build 在 CI 上的兼容性
 
-- `.gitlab-ci.yml` 配 `image: node:20`,但 runner 是 shell executor(image 标签被忽略),host node 可能比 20 新很多。本仓库根 `.nvmrc=20` + web job `before_script: source nvm.sh && nvm install` 强制 node 20。
-- runner 机器要装 nvm:`brew install nvm`(Apple Silicon 路径 `/opt/homebrew/opt/nvm/nvm.sh`)。
+- `.github/workflows/ci.yml` 用 `actions/setup-node@v4` 锁 `node-version: '20'`,绕开 host node 25+ 的兼容问题(GitHub-hosted runner 默认 node 比较新,直接用会撞 esbuild / vitest 的 bug)。
 - `npm ci` 加 `--ignore-scripts` 跳 esbuild postinstall(node 25+ 上 `node install.js` SIGKILL bug;esbuild 子包 `@esbuild/<os>-<arch>` npm 自动按平台拉,postinstall 只是验证,跳过不影响 build)。
 - `npm test` 用 `vitest run --pool=forks`(不是 `threads`):node 25+ worker_threads + vitest 4 偶发死锁,forks 走 child_process 绕开。
-- 详见 `.gitlab-ci.yml` web job 内嵌注释。
+- 详见 `.github/workflows/ci.yml` web job 内嵌注释。
 
 ## 项目结构速查
 

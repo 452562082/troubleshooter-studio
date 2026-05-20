@@ -24,11 +24,12 @@ jobs:
         run: go vet ./...
 
       # golangci-lint 抓更多问题(errcheck / ineffassign / unused / misspell / revive 等)
+      # action@v9 + lint v2.x:v1.x(@v6 latest=v1.64.8 用 Go1.24 编译)拒绝 lint Go1.25 代码。
+      # .golangci.yml 本就是 version: "2",所以必须用 v9 action(走 v2 系列 lint)。
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
-          args: --timeout=3m
+          version: v2.12.2
 
       - name: gofmt -l
         run: |

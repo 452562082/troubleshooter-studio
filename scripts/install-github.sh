@@ -51,20 +51,24 @@ if [[ "$(uname)" != "Darwin" ]]; then
 fi
 
 # ── 1. 找最新 release tag(VERSION 没指定时)──────────────────
+# 用 github.com/.../releases/latest 的 web 302 redirect 法,**不走 api.github.com**
+# (避开匿名用户 60 次/小时的 rate limit 短时间用 install 脚本测试会撞)。
+# redirect 目标长这样:https://github.com/owner/repo/releases/tag/vX.Y.Z
+# 取最后一段就是 tag。无 release 时 GitHub 返回 404 不 redirect。
 if [[ -z "$VERSION" ]]; then
     echo "▶ 查询最新 release ..."
-    resp=$(fetch -sS "$API/releases/latest" 2>/dev/null || true)
-    if [[ -z "$resp" ]] || printf %s "$resp" | grep -q '"message".*"Not Found"'; then
-        echo "✗ 拿不到 release(仓库可能私有或还没发版,设 GITHUB_TOKEN env 后重跑)" >&2
-        echo "  GitHub → Settings → Developer settings → Personal access tokens → scope=repo" >&2
+    final_url=$(curl -sLI -o /dev/null -w '%{url_effective}' \
+        --connect-timeout 30 \
+        "https://github.com/$GITHUB_REPO/releases/latest" 2>/dev/null || true)
+    # final_url 形如 .../releases/tag/v0.9.21;basename 拿 tag
+    if [[ "$final_url" == *"/releases/tag/"* ]]; then
+        VERSION="${final_url##*/}"
+        echo "  → 最新版本 $VERSION"
+    else
+        echo "✗ 拿不到 release(仓库可能还没发版,或私有仓需 GITHUB_TOKEN)" >&2
+        echo "  浏览器手动查: https://github.com/$GITHUB_REPO/releases" >&2
         exit 1
     fi
-    VERSION=$(printf %s "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin)['tag_name'])" 2>/dev/null || true)
-    if [[ -z "$VERSION" ]]; then
-        echo "✗ 解析 release 失败" >&2
-        exit 1
-    fi
-    echo "  → 最新版本 $VERSION"
 else
     echo "▶ 安装指定版本 $VERSION"
 fi

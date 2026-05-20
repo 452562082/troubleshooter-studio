@@ -168,6 +168,14 @@ desktop-dmg: desktop-app
 release-publish: check-token desktop-dmg release
 	@VERSION=$(VERSION) bash scripts/publish-gitlab-release.sh
 
+# ── 一键发版本到 GitHub Release(对偶 release-publish,跑在 GitHub Actions macos-latest)──
+# 流程与 GitLab 版相同:dmg + 跨平台 CLI binary → gh release create + upload。
+# 鉴权用 $GITHUB_TOKEN(GitHub Actions 自动注入,本地需 PAT scope=repo)。
+# 本地手动调:make release-publish-github VERSION=v0.1.0 GITHUB_TOKEN=ghp_xxx
+.PHONY: release-publish-github
+release-publish-github: check-token-github desktop-dmg release
+	@VERSION=$(VERSION) bash scripts/publish-github-release.sh
+
 # 提早检测 GITLAB_TOKEN 缺失,免得 bump-patch / bump-minor / bump-major 跑了 2 分钟 build
 # 才挂在最后一步。
 .PHONY: check-token
@@ -175,6 +183,15 @@ check-token:
 	@if [ -z "$$GITLAB_TOKEN" ]; then \
 	  echo "✗ 缺 env GITLAB_TOKEN(GitLab → Preferences → Access Tokens,scope=api)" >&2; \
 	  echo "  设到 ~/.zshrc:export GITLAB_TOKEN=glpat-xxx,然后 source ~/.zshrc 再来" >&2; \
+	  exit 1; \
+	fi
+
+# 同上,GitHub 版用 $GITHUB_TOKEN(GitHub Actions 内自动注入,本地需 gh auth token / PAT)
+.PHONY: check-token-github
+check-token-github:
+	@if [ -z "$$GITHUB_TOKEN" ]; then \
+	  echo "✗ 缺 env GITHUB_TOKEN(GitHub → Settings → Developer settings → Tokens,scope=repo)" >&2; \
+	  echo "  GitHub Actions 内已自动注入,如果是本地跑:export GITHUB_TOKEN=\$$(gh auth token)" >&2; \
 	  exit 1; \
 	fi
 

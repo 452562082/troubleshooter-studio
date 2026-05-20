@@ -65,20 +65,28 @@
 ### 桌面 app(macOS) — 一行命令(推荐,无 Gatekeeper 弹窗)
 
 ```bash
-# 公开项目:
+# GitHub Release(公网用户,推荐):
+curl -fsSL https://raw.githubusercontent.com/452562082/troubleshooter-studio/main/scripts/install-github.sh | bash
+
+# GitLab Release(公司内网用户):
 curl -fsSL https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
 
-# 私有项目:
+# 指定版本(否则装最新):
+VERSION=v0.9.18 curl -fsSL https://raw.githubusercontent.com/452562082/troubleshooter-studio/main/scripts/install-github.sh | bash
+
+# 私有 GitLab 项目需 token:
 export GITLAB_TOKEN=glpat-xxx
 curl -fsSL -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
   https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
 ```
 
-自动从最新 GitLab Release 下 dmg → 装到 `/Applications/` → 启动。`curl/bash/xattr/open` 是 macOS 自带签名工具,不被 Gatekeeper 拦,xattr 清完 quarantine 后 `.app` 直接放行。
+自动从最新 Release 下 dmg → 装到 `/Applications/` → 启动。`curl/bash/xattr/open` 是 macOS 自带签名工具,不被 Gatekeeper 拦,xattr 清完 quarantine 后 `.app` 直接放行。
 
 ### 桌面 app(macOS) — 图形装 dmg
 
-1. 从 GitLab Release 页下 `TroubleshooterStudio-vX.Y.Z.dmg.zip`
+1. 从 Release 页下 `TroubleshooterStudio-vX.Y.Z.dmg.zip`
+   - GitHub: <https://github.com/452562082/troubleshooter-studio/releases>
+   - GitLab(内网): <https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/releases>
 2. 双击解压(必须用 macOS 自带 Archive Utility)
 3. 双击 `.dmg` → 拖 `.app` 到 `Applications`
 4. 第一次打开报"**已损坏**" → 双击 dmg 里的 `2️⃣ 双击解锁(可能要点两次).command` 一键放行
@@ -89,7 +97,7 @@ curl -fsSL -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
 
 ### CLI(macOS / Linux / Windows)
 
-从 GitLab Release 按平台下 `tshoot-vX.Y.Z-<os>-<arch>`(Windows 自带 `.exe` 后缀),然后:
+从 Release 页按平台下 `tshoot-vX.Y.Z-<os>-<arch>`(Windows 自带 `.exe` 后缀):
 
 ```bash
 # macOS / Linux
@@ -300,10 +308,12 @@ make desktop-dmg  # 把 .app 打成 .dmg 安装包:dist/TroubleshooterStudio-<ve
 make desktop      # 桌面裸二进制:bin/tshoot-desktop(开发者用,直接跑会关联 Terminal)
 make release      # 多平台交叉编译 darwin/linux × amd64/arm64 → dist/bin/
 make release-notes       # dry-run,只打印自上次 tag 以来的 changelog(给眼睛 review,不改 git)
-make release-publish     # 对已有 tag 重传 binary(需 GITLAB_TOKEN env;运维场景才用)
-# ↑ 真正的发版本走 GitLab CI(main 合入即自动 release:patch;commit msg 含
-#   [release:minor] / [release:major] 时自动跑对应 job,patch 让位;manual 按钮保留兜底)。
-#   本地一键发布(make bump-* / tag-and-release)已删,强制 release 都过 CI。详见 docs/CI-RELEASE.md
+make release-publish        # 对已有 tag 重传 binary 到 GitLab(需 GITLAB_TOKEN env;运维场景才用)
+make release-publish-github # 同上但发到 GitHub(需 GITHUB_TOKEN env;GitHub Actions 已自动注入)
+# ↑ 真正的发版本走 CI(GitLab pipeline 和 GitHub Actions 都已配:main 合入即自动
+#   release:patch;commit msg 含 [release:minor] / [release:major] 时自动跑对应
+#   job,patch 让位)。本地一键发布(make bump-* / tag-and-release)已删,强制
+#   release 都过 CI 保证版本号决策有 audit trail。详见 docs/CI-RELEASE.md
 make test         # go test -race -cover ./...
 make lint         # go vet + gofmt + vue-tsc
 make wails-gen    # 仅在改了 cmd/tshoot-desktop/App 的 method 签名时跑,刷新 web/wailsjs/go/(已入库)

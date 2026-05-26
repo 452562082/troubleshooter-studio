@@ -65,18 +65,23 @@
 ### 桌面 app(macOS) — 一行命令(推荐,无 Gatekeeper 弹窗)
 
 ```bash
-# 装最新版:
-curl -fsSL https://raw.githubusercontent.com/452562082/troubleshooter-studio/main/scripts/install-github.sh | bash
+# 装最新版(公开项目):
+curl -fsSL https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
 
 # 装指定版本:
-VERSION=v0.9.18 curl -fsSL https://raw.githubusercontent.com/452562082/troubleshooter-studio/main/scripts/install-github.sh | bash
+VERSION=v0.9.18 curl -fsSL https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
+
+# 私有 GitLab 项目需 token(GitLab → Settings → Access Tokens,scope=read_api):
+export GITLAB_TOKEN=glpat-xxx
+curl -fsSL -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+  https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
 ```
 
-自动从最新 [GitHub Release](https://github.com/452562082/troubleshooter-studio/releases) 下 dmg → 装到 `/Applications/` → 启动。`curl/bash/xattr/open` 是 macOS 自带签名工具,不被 Gatekeeper 拦,xattr 清完 quarantine 后 `.app` 直接放行。
+自动从最新 [GitLab Release](https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/releases) 下 dmg → 装到 `/Applications/` → 启动。`curl/bash/xattr/open` 是 macOS 自带签名工具,不被 Gatekeeper 拦,xattr 清完 quarantine 后 `.app` 直接放行。
 
 ### 桌面 app(macOS) — 图形装 dmg
 
-1. 从 [Releases 页](https://github.com/452562082/troubleshooter-studio/releases)下 `TroubleshooterStudio-vX.Y.Z.dmg.zip`
+1. 从 [Releases 页](https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/releases)下 `TroubleshooterStudio-vX.Y.Z.dmg.zip`
 2. 双击解压(必须用 macOS 自带 Archive Utility)
 3. 双击 `.dmg` → 拖 `.app` 到 `Applications`
 4. 第一次打开报"**已损坏**" → 双击 dmg 里的 `2️⃣ 双击解锁(可能要点两次).command` 一键放行
@@ -298,8 +303,8 @@ make desktop-dmg  # 把 .app 打成 .dmg 安装包:dist/TroubleshooterStudio-<ve
 make desktop      # 桌面裸二进制:bin/tshoot-desktop(开发者用,直接跑会关联 Terminal)
 make release      # 多平台交叉编译 darwin/linux × amd64/arm64 → dist/bin/
 make release-notes       # dry-run,只打印自上次 tag 以来的 changelog(给眼睛 review,不改 git)
-make release-publish-github # 对已有 tag 重传 binary 到 GitHub Release(需 GITHUB_TOKEN env;GitHub Actions 已自动注入)
-# ↑ 真正的发版本走 GitHub Actions(main 合入即自动 release-patch;commit msg 含
+make release-publish        # 对已有 tag 重传 binary 到 GitLab Release(需 GITLAB_TOKEN env;GitLab CI 已自动注入)
+# ↑ 真正的发版本走 GitLab CI(main 合入即自动 release:patch;commit msg 含
 #   [release:minor] / [release:major] 时自动跑对应 job,patch 让位)。本地一键发布
 #   (make bump-* / tag-and-release)已删,强制 release 都过 CI 保证版本号决策有
 #   audit trail。详见 docs/CI-RELEASE.md

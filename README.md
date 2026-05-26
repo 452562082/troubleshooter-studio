@@ -18,7 +18,7 @@
 | **第一次接触本项目,想跑通** | [下载与安装](#下载与安装) → [两个入口](#两个入口) → [部署到 4 个 AI 平台](#部署到-4-个-ai-平台) |
 | **想知道排障机器人能干什么** | [排障机器人具备什么能力](#排障机器人具备什么能力) → [`docs/troubleshooting-flow.md`](docs/troubleshooting-flow.md) (完整 7 步流程 + 5 维证据表) |
 | **要建模一个新的微服务系统** | [适配的系统架构](#适配的系统架构) → [Monorepo / Umbrella 仓库](#monorepo--umbrella-仓库) → [`examples/shop-troubleshooter.yaml`](examples/shop-troubleshooter.yaml) |
-| **维护本项目代码 / 想看历史决策** | [`docs/decisions.md`](docs/decisions.md) (本会话的设计决策演进:nacos / postgres / rabbitmq / mcp 软约束哲学等) → [目录结构](#目录结构) |
+| **维护本项目代码** | [`docs/decisions.md`](docs/decisions.md)(设计决策记录) → [目录结构](#目录结构) |
 | **运维想集成 CI** | [`docs/CI-RELEASE.md`](docs/CI-RELEASE.md) → [构建](#构建) |
 
 ## 目录
@@ -55,10 +55,9 @@
 | **Cursor** | `~/.cursor/agents/<name>.md` + `~/.cursor/skills/<name>/` | AI 侧栏选 Custom Agent(MCP 还要去 Settings 启用) | `~/.cursor/mcp.json` 的 `mcpServers` |
 | **Codex CLI** | `~/.codex/agents/<name>.toml`(TOML subagent) + `~/.codex/skills/<name>/` | 终端 `codex` 内主 chat 说 "spawn the `<name>` agent ..."(自然语言派生 subagent thread,完成后回主 chat;[官方文档](https://developers.openai.com/codex/subagents)) | 嵌入 agent toml 内联 `[mcp_servers.*]` 段(每个 subagent 自带,不污染主 chat) |
 
-- **凭证**:`~/.openclaw/<id>-creds.json`(OpenClaw) + `~/.tshoot/<id>-creds.json`(IDE 平台,脚本读两处优先 openclaw)
-- **agent 定义**:按平台原生写。Claude Code / Cursor 全塞一份 `.md`(运行环境 + 排障逻辑 + skills 索引);Codex `.toml` 瘦身配套独立 `SKILL.md`,spawn 时不烧 system prompt token
-- **grafana/loki/prometheus/tempo MCP**:走 `npx -y mcp-grafana-npx`(社区 wrapper,首次跑时拉 grafana/mcp-grafana 官方 Go 二进制到 npm 缓存,跨 IDE 共享 `~/.npm/_npx/`)。这 4 家在本系统统一通过 grafana MCP 的 `query_loki_logs` / `query_prometheus` 等内置工具查询,wizard 不让独立配置(prom/loki/tempo 启用必须 grafana 启用)
-- **Codex 沙箱**:agent toml 默认 `sandbox_mode=workspace-write`,但需要在 `~/.codex/config.toml` 全局加 `[sandbox_workspace_write] network_access=true`,否则 MCP 进程没出网,`tshoot install --target codex` 会探测并打印修复指引
+- **凭证**:OpenClaw 走 `~/.openclaw/<id>-creds.json`,IDE 平台走 `~/.tshoot/<id>-creds.json`
+- **grafana / loki / prometheus / tempo**:统一通过 grafana MCP(`npx -y mcp-grafana-npx`)查询,不独立配置
+- **Codex 沙箱**:需在 `~/.codex/config.toml` 加 `[sandbox_workspace_write] network_access=true`,install 时会探测并打印修复指引
 
 ## 下载与安装
 
@@ -84,11 +83,7 @@ curl -fsSL -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
 1. 从 [Releases 页](https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/releases)下 `TroubleshooterStudio-vX.Y.Z.dmg.zip`
 2. 双击解压(必须用 macOS 自带 Archive Utility)
 3. 双击 `.dmg` → 拖 `.app` 到 `Applications`
-4. 第一次打开报"**已损坏**" → 双击 dmg 里的 `2️⃣ 双击解锁(可能要点两次).command` 一键放行
-   - macOS 15+ 对未签名脚本拦一次,Terminal 显示 `killed` 再双击一次就通(无害)
-   - 或命令行:`xattr -d com.apple.quarantine /Applications/TroubleshooterStudio.app`
-
-> **为什么报"已损坏"?** 不是真损坏,是本应用未做苹果数字签名(没花 $99/年办 Apple Developer Account),macOS 14+ 把"未签名 + 来自互联网"统一报"已损坏"。dmg 里附的 `.command` 跑 `xattr -d com.apple.quarantine` 即可。
+4. 第一次打开报"**已损坏**"(本应用未做苹果数字签名所致,非真损坏)→ 双击 dmg 里的 `2️⃣ 双击解锁.command`,或命令行 `xattr -d com.apple.quarantine /Applications/TroubleshooterStudio.app`
 
 ### CLI(macOS / Linux / Windows)
 
@@ -163,27 +158,21 @@ make                                                       # CLI:bin/tshoot
 
 ## Monorepo / Umbrella 仓库
 
-把多个独立服务以 **git submodule** 挂在一个 umbrella 仓库下,同时各自又是**独立仓库**(常见模式:平台仓的 `.gitmodules` 引入 N 个服务子模块,各服务在 git 服务器上仍以独立 repo 存在)。用 `parent_repo` + `parent_path` 描述这种关系:
+多个独立服务以 git submodule 挂在一个 umbrella 仓库下,各自又是独立仓库。用 `parent_repo` + `parent_path` 描述:
 
 ```yaml
 repos:
   - name: platform               # umbrella 父仓
     url:  https://git.example.com/org/platform.git
     role: backend
-  - name: payments               # 子模块;在 git 服务器上也是独立仓
+  - name: payments               # 子模块,服务器上也是独立仓
     url:  https://git.example.com/org/payments.git
-    parent_repo: platform        # 声明本仓挂在 platform umbrella 下
-    parent_path: services/payments  # 在 platform/ 内的相对路径(不填时复用 name)
+    parent_repo: platform
+    parent_path: services/payments
     role: backend
 ```
 
-工作台对此自动适配:
-
-- **wizard 仓库扫描**:扫到 monorepo 信号(`.gitmodules` / workspaces / pom modules)→ 弹"一键拆分"banner,把每个子模块出成独立 repo 条目并设好 `parent_repo`
-- **路径解析(部署期 / analyze 期)**:拓扑排序保证 umbrella 先解析,子模块路径自动拼成 `<umbrella 路径>/<parent_path>`,不用每个子模块都重选目录
-- **远程 / 本地两种来源**:在新机器导入 yaml 部署时,umbrella 子模块强制走 local 模式(代码必须由 umbrella `git submodule update --init` 提供,不能独立 clone),URL 锁死防误改身份
-- **健康检查**:`parent_repo` 自指 / 引用不存在 / 成环 三种坏配置在 health check 阶段就拦下,清晰中文提示
-- **跨协议 URL 比对**:ssh-with-port / scp-form / https 视作同仓(`ssh://git@host:2222/owner/repo.git` ≡ `https://host/owner/repo.git`)
+工作台自动适配:wizard 扫到 `.gitmodules` / workspaces / pom modules 弹一键拆分;部署期路径拼成 `<umbrella>/<parent_path>`;umbrella 子模块强制 local 模式防误改身份;`parent_repo` 自指 / 不存在 / 成环 在 health check 拦下;跨协议 URL(ssh / scp-form / https)视作同仓。
 
 ## 桌面 app 页面
 
@@ -256,38 +245,11 @@ skill 集合**按 yaml 动态裁剪**,产物的真源在 [`templates/workspace/s
 
 ### Nacos 配置访问路径
 
-`config-executor` 的 nacos 走 **SKILL 内 Python HTTP API**(`scripts/nacos_config.py`),
-不注册 MCP server。每次调用脚本自己 login → 用 token → 丢弃,token TTL 5h / 5y 完全无所谓,
-nacos 端零配合。
+`config-executor` 的 nacos 走 SKILL 内 Python HTTP API(`scripts/nacos_config.py`),每次脚本自己 login → 用 token → 丢弃,运行时 refresh,不注册 MCP server,nacos 端零配合。
 
-**填地址注意**:`config_centers.endpoints[].addr` 写 **API 端口**(默认 `:8848`),不要写 dashboard
-端口(常见 `:8080`)— dashboard 反代多数只透传 UI,login API 会撞 `No static resource`。
-2026-05-15 truss 现场实测踩过这个坑。
+**填地址注意**:`config_centers.endpoints[].addr` 写 **API 端口**(默认 `:8848`),不要写 dashboard 端口(常见 `:8080`)—— 反代多数只透传 UI,login API 会撞 `No static resource`。
 
-#### 决策演进(为什么不走 MCP)
-
-| 时间 | 方案 | 真相 |
-|---|---|---|
-| 5d5a139 | nacos 走 HTTP API 脚本 | 临时绕路修 mcp-router 能力错配 |
-| 23d503a | 换 `nacos-mcp-server` 做 MCP 主路径 + HTTP fallback | 解决能力错配,但 token bake 5h 后退化 |
-| **2026-05-15(当前)** | **回 HTTP API 主路径,删 MCP 注册** | 真正的运行时 token refresh,跟「机器人长期跑」对齐 |
-
-**为什么 23d503a 那条路走不通**:
-- 官方 `nacos-mcp-server` 只接 `--access_token` CLI 参数,token 在 mcp 进程生命周期内**固定**;
-  LLM 收到 401 没办法重启 mcp 进程换 token(那是 IDE 的事)
-- install 阶段 bake token 要求 nacos 端把 `nacos.core.auth.plugin.nacos.token.expire.seconds`
-  从默认 5h 调到 10 年 — 依赖运维 + 重启 nacos;truss 现场运维不配合,bake 方案沦为
-  「装一次满血几小时然后默默降级到 fallback」,跟产品定位「AI 排障机器人长期跑」错位
-
-**HTTP API 主路径的代价**:LLM 失去 MCP 原生 tool-call 体验,每次 nacos 调用要写一行 bash 跑
-Python 脚本。但 nacos 在排障链路里调用频次低(每个 session 通常 1-3 次),不是 grafana / jaeger
-那种 50+ tool call 的高频场景,代价可接受。
-
-#### 凭据存储
-
-install 阶段把 `CC_ADDR_<ENV>` / `CC_USER_<ENV>` / `CC_PASS_<ENV>` 写到
-`<workspace>/scripts/.env`(0600)。多源场景带 source.id 中缀:`CC_ADDR_<SOURCE>_<ENV>` 等。
-SKILL 调用脚本前 `source scripts/.env` 即可。
+**凭据**:install 阶段把 `CC_ADDR_<ENV>` / `CC_USER_<ENV>` / `CC_PASS_<ENV>` 写到 `<workspace>/scripts/.env`(0600),SKILL 调用前 `source` 即可。多源场景带 source.id 中缀。
 
 ## Doctor 漂移检测
 
@@ -303,11 +265,8 @@ make desktop-dmg  # 把 .app 打成 .dmg 安装包:dist/TroubleshooterStudio-<ve
 make desktop      # 桌面裸二进制:bin/tshoot-desktop(开发者用,直接跑会关联 Terminal)
 make release      # 多平台交叉编译 darwin/linux × amd64/arm64 → dist/bin/
 make release-notes       # dry-run,只打印自上次 tag 以来的 changelog(给眼睛 review,不改 git)
-make release-publish        # 对已有 tag 重传 binary 到 GitLab Release(需 GITLAB_TOKEN env;GitLab CI 已自动注入)
-# ↑ 真正的发版本走 GitLab CI(main 合入即自动 release:patch;commit msg 含
-#   [release:minor] / [release:major] 时自动跑对应 job,patch 让位)。本地一键发布
-#   (make bump-* / tag-and-release)已删,强制 release 都过 CI 保证版本号决策有
-#   audit trail。详见 docs/CI-RELEASE.md
+make release-publish     # 对已有 tag 重传 binary 到 GitLab Release(需 GITLAB_TOKEN;CI 自动注入)
+# 正常发版本走 GitLab CI:main 合入自动 release:patch;commit msg 含 [release:minor] / [release:major] 跑对应 job。详见 docs/CI-RELEASE.md
 make test         # go test -race -cover ./...
 make lint         # go vet + gofmt + vue-tsc
 make wails-gen    # 仅在改了 cmd/tshoot-desktop/App 的 method 签名时跑,刷新 web/wailsjs/go/(已入库)

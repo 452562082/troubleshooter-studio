@@ -24,11 +24,12 @@ jobs:
         run: go vet ./...
 
       # golangci-lint 抓更多问题(errcheck / ineffassign / unused / misspell / revive 等)
+      # action@v9 + lint v2.x:v1.x(@v6 latest=v1.64.8 用 Go1.24 编译)拒绝 lint Go1.25 代码。
+      # .golangci.yml 本就是 version: "2",所以必须用 v9 action(走 v2 系列 lint)。
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
-          args: --timeout=3m
+          version: v2.12.2
 
       - name: gofmt -l
         run: |
@@ -117,3 +118,120 @@ jobs:
           test -f dist/TroubleshooterStudio.app/Contents/Resources/icon.icns
           file dist/TroubleshooterStudio.app/Contents/MacOS/TroubleshooterStudio
           echo "✓ .app bundle structure OK"
+
+  # ── Release:main 上自动打 tag + 发 GitHub Release(对偶 .gitlab-ci.yml release:*)─
+  # 拓扑:
+  #   release-patch: main 上默认自动跑(commit msg 无 [release:minor/major] 时)
+  #   release-minor: commit msg 含 [release:minor] 自动跑
+  #   release-major: commit msg 含 [release:major] 自动跑
+  # if 三 job 互斥,一次 main push 只触发一个。
+  # 共用 scripts/release.sh:算下一版本 → tag annotation → push tag →
+  # make release-publish-github(desktop-dmg + 跨平台 CLI build + gh release create/upload)。
+  #
+  # 前置:
+  #   1) 仓库已有至少一个 vX.Y.Z 严格格式 tag(release.sh 从上一 tag bump,无 tag 拒跑)
+  #      初次:本地 git push troubleshooter-studio-github --tags 把历史 tag 全推上去
+  #   2) GITHUB_TOKEN 默认 readonly,本 workflow 已显式声明 permissions.contents=write
+  release-patch:
+    name: Release (patch — auto)
+    runs-on: macos-latest
+    needs: [go, web, desktop]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '[release:minor]') && !contains(github.event.head_commit.message, '[release:major]') }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # release.sh 需全 history 算 changelog + 上一 tag
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # release.sh push 需要在 branch 上(detached HEAD 不行),且需 git identity
+      - name: setup git identity & checkout main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B main "${{ github.sha }}"
+
+      - name: release patch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLISH_TARGET: release-publish-github
+          GITHUB_REPO: ${{ github.repository }}
+        run: scripts/release.sh patch
+
+  release-minor:
+    name: Release (minor — commit msg [release:minor])
+    runs-on: macos-latest
+    needs: [go, web, desktop]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release:minor]') }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: setup git identity & checkout main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B main "${{ github.sha }}"
+      - name: release minor
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLISH_TARGET: release-publish-github
+          GITHUB_REPO: ${{ github.repository }}
+        run: scripts/release.sh minor
+
+  release-major:
+    name: Release (major — commit msg [release:major])
+    runs-on: macos-latest
+    needs: [go, web, desktop]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release:major]') }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: setup git identity & checkout main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B main "${{ github.sha }}"
+      - name: release major
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLISH_TARGET: release-publish-github
+          GITHUB_REPO: ${{ github.repository }}
+        run: scripts/release.sh major

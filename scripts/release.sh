@@ -102,8 +102,8 @@ head_commit=$(git rev-parse HEAD)
 if [ "$last_commit" = "$head_commit" ]; then
     echo "⚠ 上一 tag '$last' 已经指向当前 HEAD —— 大概率上次 release 走到 publish 阶段失败 / 超时" >&2
     echo "▶ 进入 publish-only 重试模式:跳过 bump+tag,直接重跑 $last 的 publish" >&2
-    echo "  (publish-gitlab-release.sh 对同名 release force overwrite,幂等安全)" >&2
-    make release-publish VERSION="$last"
+    echo "  (publish 脚本对同名 release force overwrite,幂等安全)" >&2
+    make "${PUBLISH_TARGET:-release-publish}" VERSION="$last"
     echo ""
     echo "✓ republish $last 完成"
     exit 0
@@ -150,11 +150,13 @@ git push "$remote" "$NEXT" || {
     exit 1
 }
 
-# ── 5. 编多平台 binary + 打 dmg + 上传 GitLab Release ──────────────
-# release-publish 内部 = check-token + desktop-dmg + release + publish-gitlab-release.sh
-# GITLAB_TOKEN 必须已注入,在 CI 是 .release-base 的 before_script 校验
-echo "▶ 编 + 上传 GitLab Release"
-make release-publish VERSION="$NEXT"
+# ── 5. 编多平台 binary + 打 dmg + 上传 Release ─────────────────────
+# 默认走 release-publish(GitLab,内部 = check-token + desktop-dmg + release + publish-gitlab-release.sh)。
+# GitHub Actions 在 job env 里 export PUBLISH_TARGET=release-publish-github 走 GitHub 链路。
+# 对应 Token 必须已注入(GitLab 是 .release-base before_script 校验;GitHub 是 secrets.GITHUB_TOKEN 自动注入)。
+PUBLISH_TARGET="${PUBLISH_TARGET:-release-publish}"
+echo "▶ 编 + 上传 Release(make $PUBLISH_TARGET)"
+make "$PUBLISH_TARGET" VERSION="$NEXT"
 
 echo ""
 echo "✓ release $NEXT 完成"

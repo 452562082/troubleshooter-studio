@@ -47,8 +47,8 @@ func TestDiff_DetectsFileAndRowChanges(t *testing.T) {
 	cm := filepath.Join(newDir, "templates/workspace-template/skills/routing/references/config-map.yaml")
 	orig := readFile(t, cm)
 	mut := strings.Replace(orig,
-		"      order-worker:\n        namespaceId: \"dev\"\n        group: \"DEFAULT_GROUP\"\n        dataId: \"{service}.yaml\"\n        runtime: nacos-http\n        status: inferred",
-		"      order-worker:\n        namespaceId: \"shop-dev\"\n        group: \"FIXED\"\n        dataId: \"fixed.yaml\"\n        runtime: nacos-http\n        status: verified",
+		"      order-worker:\n        namespaceId: \"dev\"\n        group: \"DEFAULT_GROUP\"\n        dataId: \"{service}.yaml\"\n        runtime: nacos-mcp\n        status: inferred",
+		"      order-worker:\n        namespaceId: \"shop-dev\"\n        group: \"FIXED\"\n        dataId: \"fixed.yaml\"\n        runtime: nacos-mcp\n        status: verified",
 		1)
 	if err := os.WriteFile(cm, []byte(mut), 0o644); err != nil {
 		t.Fatal(err)

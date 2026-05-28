@@ -60,7 +60,10 @@ func TestSelfTestOpenclaw_AfterInstallAllPass(t *testing.T) {
 	wantPass := []string{
 		"workspace 目录",
 		"agents.list 含 shop-troubleshooter",
-		"mcp.servers 齐全(2 项)", // 2026-05-15 方案 B 后:grafana x2;nacos 走 Python HTTP API 不进 mcp
+		// 4 项 = grafana×2(dev+prod)+ nacos×2(plan D:nacos 走本地 MCP 脚本)。
+		// install 阶段会把 legacy ConfigCenter 单字段迁移到 ConfigCenters,所以 buildNacos
+		// 注册 nacos-dev / nacos-prod,requiredMCPKeys 也镜像要求这两个。
+		"mcp.servers 齐全(4 项)",
 	}
 	for _, name := range wantPass {
 		if statusByName[name] != "PASS" {

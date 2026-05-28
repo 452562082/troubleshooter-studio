@@ -11,18 +11,18 @@ config-map.yaml 里每条服务定位都带**两类指针之一**:
 
 | 字段 | 含义 | LLM 调用方式 |
 |---|---|---|
-| `mcp_server: <name>` | 该服务通过 MCP server 访问(目前只 grafana / jaeger / elk / 数据层 / lark / feishu_project 用) | **原样调用 mcp**(不要拆 agent-id 前缀 / 不要改格式 / 不要推断)。查不到先 self-test,不要自己改名试。 |
-| `runtime: <type>-http` | 该服务通过 HTTP 脚本访问(所有配置中心 + kuboard) | 走 `config-executor` SKILL 调对应脚本,不要找 mcp_server |
+| `mcp_server: <name>` | 该服务通过 MCP server 访问(grafana / jaeger / elk / 数据层 / lark / feishu_project 用) | **原样调用 mcp**(不要拆 agent-id 前缀 / 不要改格式 / 不要推断)。查不到先 self-test,不要自己改名试。 |
+| `runtime: <type>-(mcp\|http)` | 该服务配置走配置中心,统一交给 `config-executor` SKILL 处理 | 走 `config-executor` SKILL,由它按 runtime 值决定调 MCP 还是 HTTP 脚本 |
 
-**当前所有配置中心(nacos / apollo / consul / kuboard)都走 HTTP 脚本,不走 MCP** —— 因为:
-- nacos:官方 `nacos-mcp-server` 只接 CLI `--access_token`,token 进程内固定不能 runtime refresh,跟「机器人长期跑」冲突(2026-05-15 方案 B 复盘结论)
-- apollo / consul:生态暂无稳定 MCP 实现
-- kuboard:历来 HTTP API + scripts/resolve_runtime_k8s.py
+**配置中心访问方式(2026 plan D 起)**:
+- **nacos → MCP 主路径**(`runtime: nacos-mcp`):config-executor 调 `{{.System.ID}}-nacos[-source]-<env>` 这个 MCP 的 `get_config` / `list_configs` / `get_config_history` / `list_config_history` 工具。MCP 进程自己拿 username/password 跑 login + 后台 refresh,token 短 TTL 无所谓 —— 这是 plan D 相比当年 bake-token 方案的本质区别。MCP 不可用时 config-executor 回落 `scripts/nacos_config.py` HTTP 脚本。
+- apollo / consul:生态暂无稳定 MCP,走 HTTP 脚本(`apollo-http` / `consul-http`)
+- kuboard:历来 HTTP API + `scripts/resolve_runtime_k8s.py`(`kuboard-http`)
 
-四个 runtime 值跟脚本一一对应:`nacos-http` / `apollo-http` / `consul-http` / `kuboard-http`。**LLM 看到 runtime 字段就调脚本,不要因为没 `mcp_server` 而返工 self-test**。
+四个 runtime 值:`nacos-mcp` / `apollo-http` / `consul-http` / `kuboard-http`。**LLM 看到 runtime 字段就交给 config-executor SKILL,不要因为是 nacos-mcp 就跳过 config-executor 直接乱猜工具名**。
 
 凭据位置:
-- nacos:`<workspace>/scripts/.env` 里 `CC_ADDR_<ENV>` 等 — **调脚本前必须先 `source scripts/.env`**
+- nacos:install 阶段写进 MCP env(`NACOS_HOST/PORT/USERNAME/PASSWORD`),MCP 工具调用不碰凭据。HTTP fallback 才读 `<workspace>/scripts/.env`(`CC_ADDR_<ENV>` 等,需先 `source scripts/.env`)
 - apollo / consul / kuboard:`~/.openclaw/<agent-id>-creds.json` — 脚本按 `--agent-id --env` 自己读
 
 ## datasource 排他契约(grafana mcp 工具调用必看)

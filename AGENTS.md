@@ -36,19 +36,25 @@ trustchain:
 - runtime probe("起 mcp + tools/list")命中率 ~95%
 - **永远以 runtime probe 为准**(本会话 5 处 SKILL 死引用都是 README vs 实际脱节)
 
-### 3. 不注册 mcp 的两种情况(2026-05-15 + 18 校准)
+### 3. 不注册 mcp 的两种情况(2026-05-15 + 18 校准;2026-05-27 nacos 改判)
 
 `BuildMCPServers` 不注册某后端的 mcp 有**两种**,语义完全不同 — 别混:
 
-**3a. 方案 B(有替代,能力完整可用)** — nacos / apollo / consul / rabbitmq
+> **nacos 已改判(2026-05-27,plan D)**:nacos **不再是方案 B** —— 现在走**自研本地 MCP**
+> (`templates/.../scripts/nacos_mcp.py`,运行时自己 login + refresh token),`buildNacos`
+> 重新注册 mcp。详见 [`docs/decisions.md`](docs/decisions.md) plan D 条目。HTTP 脚本
+> `scripts/nacos_config.py` 降级为 MCP 不可用时的 fallback。
+
+**3a. 方案 B(有替代,能力完整可用)** — apollo / consul / rabbitmq
 
 上游 mcp 包不可用 / 不适合产品定位,但**有成熟的 HTTP API 替代**走 SKILL 主路径,**能力完整不缺**:
-- nacos → `scripts/nacos_config.py`(每次脚本自己 login,token TTL 无所谓)
 - apollo → `scripts/apollo_config.py`(--agent-id --env 读 creds.json)
 - consul → `scripts/consul_config.py`(同)
 - rabbitmq → `curl + :15672/api/queues` HTTP Management API(RabbitMQ 团队官方,极稳定)
 
 routing/config-map.yaml 标 `runtime: <type>-http` 字段告诉 LLM 走脚本。**用户排障时能力完整**。
+(对照:nacos 走自研 mcp 但 config-map 同样用 `runtime:` 字段标 `nacos-mcp`,只是 config-executor
+看到它去调 mcp 而非脚本 —— 见下方第 5 条。)
 
 **3b. 真禁用(无替代,能力当前缺失)** — feishu_project
 
@@ -75,10 +81,14 @@ routing/config-map.yaml 标 `runtime: <type>-http` 字段告诉 LLM 走脚本。
 ### 5. routing 字段两选一(2026-05-15)
 
 `templates/workspace/skills/routing/references/config-map.yaml.tmpl` 渲染时,**`mcp_server` 字段** 跟 **`runtime` 字段**互斥:
-- 有 `mcp_server: <name>` → 走 MCP(grafana / jaeger / elk / 数据层 / lark 用)
-- 有 `runtime: <type>-http` → 走 SKILL HTTP 脚本(nacos / apollo / consul / kuboard 用)
+- 有 `mcp_server: <name>` → 直接调该 MCP(grafana / jaeger / elk / 数据层 / lark 用)
+- 有 `runtime: <type>-(mcp|http)` → 交给 `config-executor` SKILL,由它按值决定:
+  - `nacos-mcp` → 调 `<system.id>-nacos-<env>` 这个 MCP 的工具(plan D;MCP 挂了回落 HTTP 脚本)
+  - `apollo-http` / `consul-http` / `kuboard-http` → 走对应 HTTP 脚本
 
 **写 routing 模板时不要两个都给**(2026-05-15 apollo/consul `mcp_server` 死字段就是这种错配)。
+注:nacos 虽走 mcp 但用 `runtime: nacos-mcp` 而非 `mcp_server` 字段 —— 因为它带 namespaceId/group/dataId
+定位信息要交给 config-executor 统一处理,且不想在 config-map 硬编码会漂移的 agent-id 前缀。
 
 ## 工程化护栏
 
@@ -120,7 +130,8 @@ go test ./... -cover
 每次大重构 / 砍能力 / 换包 → 追加 [`docs/decisions.md`](docs/decisions.md) 一条 ADR(背景 → 决策 → 后果 → 演进)。**不改老条目**,过时标 SUPERSEDED 指向新条目。
 
 最近的决策演进(2026-05):
-- nacos 接入回归方案 B(HTTP API 主路径)+ apollo/consul 死字段清理
+- **nacos 接入 plan D(2026-05-27,SUPERSEDES 方案 B)**:自研本地 MCP `nacos_mcp.py`,运行时自己 login + refresh token(把 token 生命周期从 install 一次性 bake 挪到进程运行时),重新注册 mcp;HTTP 脚本降为 fallback
+- ~~nacos 接入回归方案 B(HTTP API 主路径)~~ + apollo/consul 死字段清理(方案 B 已被 plan D 取代)
 - rabbitmq mcp 禁用注册 → 走 HTTP Management API(同方案 B)
 - feishu_project 禁用 mcp 注册 + 停收凭据(**注意**这是 3b 真禁用,不是 3a 方案 B,无替代)
 - postgres mcp 包迁移(@modelcontextprotocol → @henkey)

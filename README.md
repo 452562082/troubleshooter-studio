@@ -227,7 +227,7 @@ skill 集合**按 yaml 动态裁剪**,产物的真源在 [`templates/workspace/s
   - `diagram-generator` —— Mermaid → PNG/SVG(画时间线 / 调用链)
 
 - **⚙️ 配置中心查询**(按 `config_centers` 动态切后端)
-  - `config-executor` —— nacos(Python HTTP API,每次自己 login)/ apollo / consul / kuboard / Kubernetes ConfigMap / 纯环境变量;按 namespace/group/dataId 读配置 + 历史 + diff。nacos 支持 1.x / 2.x / 3.x(走 v1 API,3.x 通过兼容层)。详见下方 "Nacos 配置访问路径" 段
+  - `config-executor` —— nacos(自研本地 MCP,运行时自 refresh token;MCP 不可用回落 HTTP 脚本)/ apollo / consul / kuboard / Kubernetes ConfigMap / 纯环境变量;按 namespace/group/dataId 读配置 + 历史 + diff。nacos 支持 1.x / 2.x / 3.x(走 v1 API,3.x 通过兼容层)。详见下方 "Nacos 配置访问路径" 段
 
 - **📊 可观测性**(按 `observability.<x>.enabled` 启用)
   - `k8s-runtime-query` —— Kuboard v4 HTTP 查 pod / service / deployment / events / logs(只读)
@@ -245,11 +245,17 @@ skill 集合**按 yaml 动态裁剪**,产物的真源在 [`templates/workspace/s
 
 ### Nacos 配置访问路径
 
-`config-executor` 的 nacos 走 SKILL 内 Python HTTP API(`scripts/nacos_config.py`),每次脚本自己 login → 用 token → 丢弃,运行时 refresh,不注册 MCP server,nacos 端零配合。
+`config-executor` 的 nacos 走**自研本地 MCP 脚本**(`nacos_mcp.py`,install 装到 `~/.tshoot/scripts/`),每 env 注册一个 MCP 实例 `<system.id>-nacos[-source]-<env>`,暴露 `get_config` / `list_configs` / `get_config_history` / `list_config_history` 四个只读工具。MCP 进程自己拿 username/password 跑 login + 后台按 `tokenTtl*0.8` refresh + 收 401 强制 re-login —— token 短 TTL 完全无所谓,nacos 端零配合。只用 `/v1` endpoint(nacos 2.x/3.x 通用)。MCP 不可用(uv 没装等)时回落 HTTP 脚本 `scripts/nacos_config.py`。
+
+> **决策演进**:`5d5a139`(HTTP 主)→ `23d503a`(MCP 主,bake token)→ `8d05068`(回 HTTP,方案 B)→ 本次 **plan D**(自研 MCP 主 + HTTP fallback)。23d503a 坍塌的根因是上游 `nacos-mcp-server` 只接 `--access_token` 进程内固定、5h 后过期;plan D 把 token 生命周期管理从 install 阶段(一次性会过期)挪进 MCP 进程运行时(持续 refresh),才真正修掉。详见 `internal/agent/install_native_mcp_common.go::BuildMCPServers` 注释。
 
 **填地址注意**:`config_centers.endpoints[].addr` 写 **API 端口**(默认 `:8848`),不要写 dashboard 端口(常见 `:8080`)—— 反代多数只透传 UI,login API 会撞 `No static resource`。
 
-**凭据**:install 阶段把 `CC_ADDR_<ENV>` / `CC_USER_<ENV>` / `CC_PASS_<ENV>` 写到 `<workspace>/scripts/.env`(0600),SKILL 调用前 `source` 即可。多源场景带 source.id 中缀。
+**凭据**:install 阶段把 host/port/username/password 写进 MCP 的 env(`NACOS_HOST/PORT/USERNAME/PASSWORD`),MCP 工具调用不碰凭据。HTTP fallback 才读 `<workspace>/scripts/.env`(`CC_ADDR_<ENV>` / `CC_USER_<ENV>` / `CC_PASS_<ENV>`,多源带 source.id 中缀)。需要 `uv` 在 PATH(`brew install uv`)。
+
+**代理注意**:`nacos_mcp.py` 用 `httpx(trust_env=False)`,**不走** `HTTP_PROXY`/`HTTPS_PROXY` 环境变量 —— nacos 是内网服务,不该被路由到外网代理(否则 502/挂起)。若你的 nacos 确实只能经代理访问(罕见),需另行处理。
+
+**验证刷新**:默认按 `tokenTtl*0.8` 刷新(truss 5h → 4h 刷一次)。要快速验证刷新生效,给 MCP env 加 `NACOS_REFRESH_SECONDS=60`(或启动加 `--refresh-seconds 60`),刷新周期强制成 60s,不用等几小时;验完删掉即可。
 
 ## Doctor 漂移检测
 

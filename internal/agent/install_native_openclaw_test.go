@@ -163,21 +163,28 @@ func TestInstallNativeOpenclaw_FreshInstall(t *testing.T) {
 
 	// mcp.servers per env
 	//
-	// 2026-05-15 truss case 复盘后定方案 B:**nacos 不再注册 mcp**,主路径走 SKILL 内
-	// Python HTTP API(scripts/nacos_config.py),凭据从 .env 读、每次自己 login。所以这里
-	// 只断言 grafana mcp 存在 + 显式断言 nacos-* 不在 servers 里(回归护栏)。详见
-	// install_native_mcp_common.go::BuildMCPServers 内大段注释。
+	// plan D(本次):nacos 走自研本地 MCP 脚本 `uv run --script ~/.tshoot/scripts/nacos_mcp.py`,
+	// 脚本运行时自己 login + refresh。所以 grafana 和 nacos mcp 都应注册。详见
+	// install_native_mcp_common.go::BuildMCPServers 决策注释。
 	servers := getMap(data, "mcp", "servers")
 	for _, key := range []string{
 		"shop-grafana-dev", "shop-grafana-prod",
+		"shop-nacos-dev", "shop-nacos-prod",
 	} {
 		if _, ok := servers[key]; !ok {
 			t.Errorf("mcp.servers missing %s", key)
 		}
 	}
-	for key := range servers {
-		if strings.Contains(key, "nacos") {
-			t.Errorf("nacos mcp 不应注册(方案 B),got: %s", key)
+	// nacos mcp 应走 uv script,凭据在 env,绝不 bake access_token(防回到 23d503a)
+	if nacosSpec, ok := servers["shop-nacos-dev"].(map[string]any); ok {
+		if nacosSpec["command"] != "uv" {
+			t.Errorf("nacos mcp command 应为 uv,got %v", nacosSpec["command"])
+		}
+		args, _ := nacosSpec["args"].([]any)
+		for _, a := range args {
+			if s, _ := a.(string); strings.Contains(s, "access_token") {
+				t.Errorf("nacos mcp args 不应含 access_token(plan D 走 env + 运行时 refresh): %v", args)
+			}
 		}
 	}
 
@@ -355,14 +362,16 @@ func TestInstallNativeOpenclaw_MultiSourceMix(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 2026-05-15 方案 B 后:nacos 不再注册 mcp(无论单源还是多源),走 Python HTTP API。
-	// 凭据走 scripts/.env 持久化、Python 脚本运行时自己 login。
+	// plan D:nacos 走自研本地 MCP 脚本(单源 / 多源都注册,每 source×env 一个实例)。
+	// 多源场景 source ID = "main-nacos",所以 key 形如 shop-nacos-main-nacos-<env>。
 	cfgPath := filepath.Join(fakeHome, ".openclaw", "openclaw.json")
 	data := readJSON(t, cfgPath)
 	servers := getMap(data, "mcp", "servers")
-	for k := range servers {
-		if strings.Contains(k, "nacos") {
-			t.Errorf("方案 B 下 nacos 不应注册 mcp,但出现了 %s", k)
+	for _, key := range []string{
+		"shop-nacos-main-nacos-dev", "shop-nacos-main-nacos-prod",
+	} {
+		if _, ok := servers[key]; !ok {
+			t.Errorf("plan D 下多源 nacos 应注册 mcp,缺 %s(servers=%v)", key, keysOf(servers))
 		}
 	}
 	// legacy-kuboard 不应注册 MCP(kuboard 走 creds.json + python script)
@@ -446,9 +455,10 @@ func TestInstallNativeOpenclaw_PreservesExistingAgents(t *testing.T) {
 	if _, ok := servers["shop-grafana-dev"]; !ok {
 		t.Errorf("install 应注入 shop-grafana-dev")
 	}
-	// 方案 B 后:nacos 不注册 mcp,也不该污染已有的 mcp.servers
-	if _, ok := servers["shop-nacos-dev"]; ok {
-		t.Errorf("方案 B 下不应注入 nacos mcp,但 shop-nacos-dev 出现了")
+	// plan D:nacos 走本地 MCP 脚本。openclaw PruneEmpty=false 留全 schema 让 agent 自决填
+	// 凭据,所以即使本次没传 creds,nacos mcp 也应注册(空 env 占位)。
+	if _, ok := servers["shop-nacos-dev"]; !ok {
+		t.Errorf("plan D 下应注入 nacos mcp,但 shop-nacos-dev 缺失(servers=%v)", keysOf(servers))
 	}
 }
 

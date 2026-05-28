@@ -42,6 +42,8 @@
 
 ## 2026-05-15 · Nacos 接入回归方案 B(HTTP API 主路径)
 
+> **⚠️ SUPERSEDED by [2026-05-27 · Nacos plan D](#2026-05-27--nacos-plan-d自研本地-mcp运行时-refresh-token)**:方案 B 不再是 nacos 现状。本条所述"删 mcp 注册、HTTP 脚本为主路径"已被 plan D(自研本地 MCP + 运行时 refresh)取代;HTTP 脚本降为 fallback。本条保留作历史。
+
 **背景**:本项目 nacos 接入演进 3 轮,每轮都把上一轮的方案撕掉:
 
 - **5d5a139**:`config-executor` SKILL 走 HTTP API(`scripts/nacos_config.py`),临时绕路修 `nacos-mcp-router` 能力错配(router 是市场管理工具不读 KV)
@@ -147,7 +149,7 @@
 
 | 后端 | 不注册 mcp 理由 | 替代路径 | 凭据流 |
 |---|---|---|---|
-| nacos | bake token 不能 refresh + 官方包跟"长期跑"定位冲突 | `scripts/nacos_config.py` 每次自己 login | wizard 仍收 `CC_ADDR_<ENV>` 等,写 `<workspace>/scripts/.env`,SKILL `source` 后用 |
+| ~~nacos~~ → **见 plan D** | _(SUPERSEDED 2026-05-27)_ nacos 已改走自研本地 MCP,**重新注册 mcp**;HTTP 脚本降为 fallback | `nacos_mcp.py`(主)/ `scripts/nacos_config.py`(fallback) | 凭据进 MCP env(`NACOS_*`),HTTP fallback 才读 `.env` |
 | apollo | 生态暂无稳定 MCP 包 | `scripts/apollo_config.py --agent-id --env` | wizard 仍收,写 `~/.openclaw/<agent-id>-creds.json` |
 | consul | 生态暂无稳定 MCP 包 | `scripts/consul_config.py --agent-id --env` | 同 apollo |
 | **rabbitmq** | 上游两个 PyPI 包都坏(amazon-mq 引用 fastmcp 不存在的 API + guercheLE 缺一堆 dep) | `curl + :15672/api/queues` HTTP Management API(RabbitMQ 官方维护) | wizard 仍收 `RABBITMQ_USER_<ENV>` 等,写 .env / creds.json |
@@ -278,6 +280,32 @@ routing/config-map.yaml 标 `runtime: <type>-http` 字段告诉 LLM 走脚本。
 **SUPERSEDED 之前决策**:"不动用户全局 config.toml"——新决策接受"用户预期 = troubleshooter agent 能用,sandbox 这层放网不放写盘是排障常态"。
 
 **测试**:`patchCodexNetworkAccess` 5 个 parser 场景 + `EnsureCodexNetworkAccess` 3 个 E2E 场景(`t.TempDir()` 真 IO,verify backup 落盘)。
+
+---
+
+## 2026-05-27 · Nacos plan D(自研本地 MCP,运行时 refresh token)
+
+**背景**:[2026-05-15 方案 B](#2026-05-15--nacos-接入回归方案-bhttp-api-主路径) 把 nacos 退回 HTTP 脚本、删掉 mcp 注册,代价是 LLM 失去原生 tool-call 体验(每次 nacos 调用要写一行 bash)。方案 B 那条的「演进」里也留了口子:"如果将来 nacos 出官方支持 username/password 自动 refresh 的 mcp,可重新走 mcp 主路径"。本次没等官方 —— 自己写了一个。
+
+用户问"能不能不改 upstream、有没有更好的方式",评估了三条路:(A) fork 官方 `nacos-mcp-server` 加 refresh、(B) sidecar token 注入代理、(C) 自研本地小 MCP。fork 验证过可行(本地 commit 不 push),但上游 README 明写"v3 only / 要 nacos 3.0+",给它 PR 加 v1 兼容大概率被拒;与其养 fork 等 merge,不如承认这是 truss 私有逻辑留自己仓里。
+
+**为什么 plan D 能走通而 23d503a 不能**:23d503a 的死因是 token 在 **install 阶段**一次性 bake、进程内固定不刷新 → 5h 后 401。plan D 把 token 生命周期管理从 install 挪进 **MCP 进程运行时**:脚本自己拿 username/password 跑 login + 后台按 `tokenTtl*0.8` refresh + 401 强制 re-login。token 短 TTL 完全无所谓,nacos 端零配合。这是真根因修复,不是又一个 patch。
+
+**决策**(plan D):
+- 自研 `templates/workspace/skills/config-executor/scripts/nacos_mcp.py`(PEP 723 自含依赖,`uv run --script`;install 时 `EnsureNacosMCPScript` 从 embed extract 到 `~/.tshoot/scripts/`,target 无关稳定路径,仿 `EnsureKafkaMCPInstalled`)
+- 重写 `buildNacos`:`uv run --script` 启动,凭据走 MCP env(`NACOS_HOST/PORT/USERNAME/PASSWORD`,不进 args/ps),**不 bake token**
+- 仅用 `/v1` endpoint(nacos 2.x/3.x 通用),绕开上游 `/v3 admin` 要 nacos 3.0+ 的限制;只暴露排障实际用的 4 个只读工具(get_config / list_configs / get_config_history / list_config_history)
+- 工具参数用 `namespaceId`(跟 config-map / nacos 控制台同名,LLM 零改名;内部映射 v1 wire 的 `tenant`)
+- 健壮性:startup login 失败不崩照常 serve(后台 retry);`_request` 对 token-ready 限时等待快速报错不 hang;`httpx(trust_env=False)` 不被内网代理劫持;401 突发锁内 single-flight re-login
+- config-map `runtime: nacos-http` → `nacos-mcp`;config-executor / routing SKILL 切 MCP 主路径,保留 `nacos_config.py` 作 MCP 不可用时 fallback
+
+**后果**:
+- nacos 重新有原生 tool-call 体验;long-running 机器人不再受 token TTL 约束
+- 新依赖:`uv` 必须在 PATH(self-test `checkToolchain` 会查 uvx;缺了 nacos MCP 起不来回落 HTTP)
+- 翻转了一批方案 B 的 guard(install / generator / self-test 测试 + AGENTS.md / CONTRIBUTING.md / README 文档)
+- 验证:19 个 Python 行为测试 + Go 测试;本地假 nacos 端到端验证 refresh 轮换 + 401 兜底 + namespaceId 落 wire。truss 现场 e2e 待真环境(可用 `NACOS_REFRESH_SECONDS=60` 快速验证不等 5h)
+
+**演进**:若官方 `nacos-mcp-server` 将来支持 username/password 自动 refresh + v1 endpoint,可考虑切回官方包减少自维护;在那之前 plan D 是终态。fork 分支(`~/tmp/nacos-mcp-server-fork`,本地未 push)留作上游 PR 的潜在素材。
 
 ---
 

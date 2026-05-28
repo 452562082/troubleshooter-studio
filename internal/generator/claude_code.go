@@ -147,6 +147,11 @@ func copyDirRecursive(src, dst string) error {
 		if d.IsDir() {
 			return os.MkdirAll(target, 0o755)
 		}
+		// Skill scripts carry their own pytest files (e.g. test_nacos_mcp.py) for repo-side
+		// CI; those are dev artifacts and must not ship into the generated bot workspace.
+		if name := d.Name(); strings.HasPrefix(name, "test_") && strings.HasSuffix(name, ".py") {
+			return nil
+		}
 		data, err := os.ReadFile(p)
 		if err != nil {
 			return err

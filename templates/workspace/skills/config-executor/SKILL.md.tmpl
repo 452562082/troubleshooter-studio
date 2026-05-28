@@ -15,8 +15,11 @@ description: 通用配置中心执行技能（后端：{{.Infrastructure.Primary
 
 ## 前置(每次调用前必读)
 
-1. **先 `source scripts/.env`**(workspace 根目录执行) — 让 nacos 凭据 `CC_ADDR_<ENV>` / `CC_USER_<ENV>` / `CC_PASS_<ENV>` 进入环境变量。没 source 直接跑脚本会报 "缺凭据"。apollo / consul / kuboard 凭据走 `~/.openclaw/<agent-id>-creds.json`,脚本按 `--agent-id --env` 自取,**这步**不需 source。
-2. **先调 `routing` 拿坐标** — `namespaceId / group / dataId`(nacos) / `appId / cluster / namespaces[]`(apollo) / `kv_prefix / default_context`(consul)都必须从 routing 输出取,**不许自己拼或猜**。routing 会在每条服务上标 `runtime: <type>-http`(nacos/apollo/consul/kuboard)告知走哪个脚本。
+1. **先调 `routing` 拿坐标** — `namespaceId / group / dataId`(nacos) / `appId / cluster / namespaces[]`(apollo) / `kv_prefix / default_context`(consul)都必须从 routing 输出取,**不许自己拼或猜**。routing 会在每条服务上标 `runtime`:`nacos-mcp` 走 nacos MCP 工具,`apollo-http` / `consul-http` / `kuboard-http` 走对应 HTTP 脚本。
+2. **凭据**:
+   - **nacos 主路径走 MCP,凭据已在 MCP env 里,不需要 source 任何东西**,直接调 `{{.System.ID}}-nacos-<env>` 的工具。
+   - nacos **HTTP fallback** 才需 `source scripts/.env`(拿 `CC_ADDR_<ENV>` 等)。
+   - apollo / consul / kuboard 凭据走 `~/.openclaw/<agent-id>-creds.json`,脚本按 `--agent-id --env` 自取,不需 source。
 
 ## 多环境硬约束（必读）
 
@@ -33,54 +36,51 @@ description: 通用配置中心执行技能（后端：{{.Infrastructure.Primary
 
 {{- if eq .Infrastructure.PrimaryConfigCenter.Type "nacos"}}
 
-### 当前后端：Nacos（走 Python HTTP API，每次自己 login）
+### 当前后端：Nacos（MCP 主路径 + HTTP 脚本 fallback）
 
-**决策演进**:5d5a139(HTTP 主)→ 23d503a(换 MCP 主,nacos-mcp-router → nacos-mcp-server)→
-2026-05-15(回 HTTP 主,方案 B)。
+**决策演进**:5d5a139(HTTP 主)→ 23d503a(MCP 主,bake token)→ 8d05068(回 HTTP,方案 B)→
+**plan D(本次,MCP 主 + fallback)**。
 
-**为什么不走 MCP**(2026-05-15 truss case 三层复盘结论):
-- 官方 `nacos-mcp-server` 只接 `--access_token` CLI 参数,token 在 mcp 进程生命周期内固定,
-  不支持运行时 refresh。LLM 拿到 401 也只能干瞪眼,IDE 不会自动重启 mcp。
-- install 阶段 bake token 要求 nacos 端把 `nacos.core.auth.plugin.nacos.token.expire.seconds`
-  调到 10 年(默认 5h),依赖运维配合 + 重启 nacos;truss 现场运维不配合 → 沦为"装一次满血几小时然后默默降级"。
-- Python 脚本每次调用自己 login(每次 < 100ms),token TTL 5h 完全无所谓,nacos 端零配合。
+**为什么 plan D 能走通 MCP,而 23d503a 不能**:
+- 23d503a 用官方 `nacos-mcp-server`,只接 `--access_token` CLI、token 进程内固定不 refresh;
+  truss nacos 2.3.0 默认 tokenTtl 5h、运维不配合调长 → 5h 后 mcp 401 静默降级。
+- plan D 用自研本地脚本 `nacos_mcp.py`(install 装到 `~/.tshoot/scripts/`):脚本自己拿
+  username/password 跑 login + 后台 `tokenTtl*0.8` refresh + 401 强制 re-login,token 短 TTL
+  完全无所谓,nacos 端零配合。且只用 `/v1` endpoint(2.x/3.x 通用),绕开上游 `/v3 admin` 要 3.0+ 的坑。
 
-执行步骤(主路径):
+**主路径:调 nacos MCP 工具**
 
-凭据来源:install 阶段把 `CC_ADDR_<ENV>` / `CC_USER_<ENV>` / `CC_PASS_<ENV>` 写到
-workspace 根目录下 `scripts/.env`(0600)。SKILL 的 cwd = workspace 根,所以脚本 / .env 都用相对路径。
-LLM 先 `source scripts/.env`,把对应 env 的变量代入 `--server / --username / --password`。
+每个 env 一个独立 MCP 实例,server 名 = `{{.System.ID}}-nacos-<env>`(多源场景
+`{{.System.ID}}-nacos-<source>-<env>`)。`routing` 在每条 nacos 服务上标 `runtime: nacos-mcp`。
+凭据(host/port/username/password)install 阶段已写进该 MCP 的 env,**LLM 调工具不碰凭据、不 source .env**。
+
+工具(对应 env 的 MCP 各暴露这 4 个):
+- `get_config(group, dataId, namespaceId)` — 读单条配置内容(`namespaceId` 默认 `public`)
+- `list_configs(group, dataId, namespaceId, search, pageNo, pageSize)` — 搜/列配置(`search=blur` 支持 `*` 通配)
+- `list_config_history(group, dataId, namespaceId)` — 配置发布历史(返回的 `id` 用作下面的 `nid`)
+- `get_config_history(nid, group, dataId, namespaceId)` — 读某条历史版本
+
+routing 给的定位字段 `namespaceId / group / dataId` **同名直接代入**工具参数,不用改名。
+跨 env 对比:分别调两个 env 的 MCP `get_config`,拿到两份文本本地比对(或 `scripts/nacos_diff.py --left-text ... --right-text ...`)。
+
+**Fallback:MCP 不可用时走 HTTP 脚本**
+
+MCP 起不来(uv 没装 / 脚本异常 / 工具列表里找不到对应 server)时,回落到 `scripts/nacos_config.py`
+HTTP 脚本 —— 它每次调用自己 login 即用即弃,跟 MCP 走同一套 `/v1/auth/login` + `/v1/cs/...`。
+先 `source scripts/.env` 拿 `CC_ADDR_<ENV>` / `CC_USER_<ENV>` / `CC_PASS_<ENV>`(多源带 `_<SOURCE>_` 中缀):
 
 ```bash
-# 准备凭据(以 <env>=dev 为例)
 source scripts/.env
-
-# 读单条配置(脚本内部自己 login,token 即用即弃)
 python3 scripts/nacos_config.py get \
   --server "$CC_ADDR_DEV" --username "$CC_USER_DEV" --password "$CC_PASS_DEV" \
   --namespace <namespaceId> --group <group> --data-id <dataId>
-
-# 看配置历史
-python3 scripts/nacos_config.py history \
-  --server "$CC_ADDR_DEV" --username "$CC_USER_DEV" --password "$CC_PASS_DEV" \
-  --namespace <namespaceId> --group <group> --data-id <dataId>
-
-# 跨 env 对比:本地保存两份 text → python3 scripts/nacos_diff.py --left-text ... --right-text ...
 ```
 
-多源场景(`config_centers` 多个 nacos),env 变量名带 source.id 中缀:
-`CC_ADDR_<SOURCE>_<ENV>` / `CC_USER_<SOURCE>_<ENV>` / `CC_PASS_<SOURCE>_<ENV>`。
-
-**API 路径**:脚本走 Nacos `/v1/auth/login` + `/v1/cs/...`。这是 Nacos 1.x/2.x 的原生路径,
-也是 Nacos 3.x 的向后兼容路径 — 绝大多数 3.x 部署仍开放 v1。如果 nacos 3.x 显式禁用 v1
-(返 410 Gone "please use /v3/..."),会触发 `accessToken 空` / `status 410` 错误,届时升级
-脚本走 v3 路径(可参考 `internal/cchub/nacos_probe.go` 的 probe 逻辑)。
-
-**地址**(`NACOS_ADDR`)必须写 API 端口默认 `:8848`,不要写 dashboard 端口(常见 `:8080`)— 后者
-反代多数只透传 UI,login API 会撞 "No static resource"。2026-05-15 truss 现场实测踩过这个坑。
+**地址**必须写 API 端口默认 `:8848`,不要写 dashboard 端口(常见 `:8080`)— 后者反代多数只透传 UI,
+login API 会撞 "No static resource"。2026-05-15 truss 现场实测踩过这个坑。
 
 **运行时参数解析**(按 env 切换 Redis/Mongo/ES):
-1. 先通过 `scripts/nacos_config.py get ... --env <env>` 读配置文本
+1. 先用 nacos MCP `get_config`(或 fallback 脚本)读到配置文本
 2. `python3 scripts/resolve_runtime_from_nacos.py --stdin < config.txt` 提取
 3. 输出契约:
    - `runtime.redis`: `{host, port, resolved}`
@@ -191,9 +191,10 @@ kubectl get configmap <name> -n <namespace> --context <context> -o yaml
 ## 参考文件
 
 {{- if eq .Infrastructure.PrimaryConfigCenter.Type "nacos"}}
-- `scripts/resolve_runtime_from_nacos.py`（Redis/Mongo/ES 连接提取）
+- nacos MCP(主路径,server 名 `{{.System.ID}}-nacos-<env>`)— 后端是 `~/.tshoot/scripts/nacos_mcp.py`,由 MCP 框架拉起,LLM 不直接 invoke,只调它暴露的工具
+- `scripts/resolve_runtime_from_nacos.py`（Redis/Mongo/ES 连接提取，吃 MCP 或脚本读到的配置文本）
 - `scripts/nacos_diff.py`（两份配置对比）
-- `scripts/nacos_config.py`（本地命令行读写工具）
+- `scripts/nacos_config.py`（HTTP fallback：MCP 不可用时的命令行读取工具）
 - `references/nacos-api-notes.md`（协议与联调注意事项）
 {{- end}}
 {{- if eq .Infrastructure.PrimaryConfigCenter.Type "apollo"}}

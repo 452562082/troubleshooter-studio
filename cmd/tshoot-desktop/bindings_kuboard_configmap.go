@@ -71,6 +71,11 @@ func (a *App) KuboardFetchConfigMaps(in KuboardFetchBatchInput) (*KuboardFetchBa
 	ctx, cancel := context.WithTimeout(a.ctx, 120*time.Second)
 	defer cancel()
 
+	// v3 探测:access-key 试 v4 tree 404 → v3,走 k8s-api 读 cm。
+	if accessKey != "" && kuboardDetectVersion(ctx, client, base, accessKey) == "v3" {
+		return kuboardFetchConfigMapsV3(ctx, client, base, in.Username, accessKey, in.Items)
+	}
+
 	// 1) token:accessKey 直接用,否则 /login 拿临时 accessToken
 	var token string
 	if accessKey != "" {

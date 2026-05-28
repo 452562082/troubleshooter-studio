@@ -184,6 +184,7 @@ class KuboardClient:
         self.cluster_name = cluster_name
         self._token: str | None = None
         self._cluster_uid: str | None = None
+        self._version: str | None = None
         self.session = requests.Session()
         self.session.verify = False  # Kuboard 自签名 cert 常见
         # 抑制 requests 的 InsecureRequestWarning
@@ -192,6 +193,42 @@ class KuboardClient:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         except Exception:
             pass
+
+    def version(self) -> str:
+        """探测 Kuboard 大版本:access_key 试 v4 cluster-namespace-tree,404 = v3。
+        无 access_key(走 username/password 登录)按 v4 老行为。"""
+        if self._version:
+            return self._version
+        if not self.access_key:
+            self._version = 'v4'
+            return self._version
+        try:
+            r = self.session.get(
+                self.base + '/api/cluster.kuboard.cn/v4/cluster-cache/cluster-namespace-tree'
+                '?apiGroupName=&resource=configmaps&namespaced=true',
+                headers={'Kb-Access-Key': self.access_key}, timeout=10,
+            )
+            self._version = 'v3' if r.status_code == 404 else 'v4'
+        except Exception:
+            self._version = 'v4'
+        return self._version
+
+    def _cookie(self) -> str:
+        """v3 鉴权 Cookie。access_key 形态为 <密钥ID>.<密钥>。"""
+        if not self.username:
+            fail('no-username', 'Kuboard v3 需要 username(Cookie KuboardUsername);'
+                                'access_key 形态应为 <密钥ID>.<密钥>')
+        return f'KuboardUsername={self.username}; KuboardAccessKey={self.access_key}'
+
+    def _k8s_get(self, path: str, params: str = ''):
+        """v3:把 Kuboard 当 k8s apiserver 代理,GET /k8s-api/{cluster}{path}。
+        path 例:'/api/v1/namespaces/default/pods'。返回 requests.Response。"""
+        if not self.cluster_name:
+            fail('no-cluster', '必须给 --cluster')
+        u = f'{self.base}/k8s-api/{urllib.parse.quote(self.cluster_name, safe="")}{path}'
+        if params:
+            u += '?' + params
+        return self.session.get(u, headers={'Cookie': self._cookie()}, timeout=15)
 
     def token(self) -> str:
         if self._token:
@@ -242,7 +279,23 @@ class KuboardClient:
         return self._cluster_uid
 
     def direct(self, query: str) -> dict[str, Any]:
-        """走 cluster-cache/direct(core API resources:pods/services/configmaps/events)。"""
+        """走 cluster-cache/direct(core API resources:pods/services/configmaps/events)。
+        v3 走标准 k8s-api,响应包成跟 v4 同结构 {data:{list:[{data:<obj>}]}},消费方
+        的 `it.get('data') or it` 通吃两版。"""
+        if self.version() == 'v3':
+            qd = urllib.parse.parse_qs(query)
+            resource = (qd.get('resource') or [''])[0]
+            namespace = (qd.get('namespace') or [''])[0]
+            extra = []
+            for k in ('labelSelector', 'fieldSelector'):
+                if qd.get(k):
+                    extra.append(f'{k}={urllib.parse.quote(qd[k][0])}')
+            path = f'/api/v1/namespaces/{urllib.parse.quote(namespace, safe="")}/{resource}'
+            r = self._k8s_get(path, '&'.join(extra))
+            if r.status_code >= 400:
+                fail('direct-http', f'HTTP {r.status_code}: {redact(r.text)[:300]}')
+            items = r.json().get('items') or []
+            return {'data': {'list': [{'data': it} for it in items]}}
         u = (
             self.base + '/api/cluster.kuboard.cn/v4/cluster-cache/direct'
             f'?clusterId={self.cluster_uid()}&apiVersion=v1&{query}'
@@ -253,7 +306,15 @@ class KuboardClient:
         return r.json()
 
     def list_paginated(self, api_group: str, resource: str, namespace: str) -> list[dict[str, Any]]:
-        """走 cluster-cache 分页接口(deployments 等非 core 资源)。"""
+        """走 cluster-cache 分页接口(deployments 等非 core 资源)。
+        v3 走标准 k8s-api:/apis/{group}/v1/namespaces/{ns}/{resource}(core 资源 group='' → /api/v1)。"""
+        if self.version() == 'v3':
+            prefix = f'/apis/{api_group}/v1' if api_group else '/api/v1'
+            path = f'{prefix}/namespaces/{urllib.parse.quote(namespace, safe="")}/{resource}'
+            r = self._k8s_get(path)
+            if r.status_code >= 400:
+                fail('list-http', f'HTTP {r.status_code}: {redact(r.text)[:300]}')
+            return r.json().get('items') or []
         u = (
             self.base + '/api/cluster.kuboard.cn/v4/cluster-cache'
             f'?pageNum=1&pageSize=500&apiGroup={api_group}&resource={resource}&namespaced=true'
@@ -272,7 +333,19 @@ class KuboardClient:
         return []
 
     def get_pod_logs(self, namespace: str, pod: str, container: str = '', tail_lines: int = 200, previous: bool = False) -> str:
-        """专用日志端点。"""
+        """专用日志端点。v3 走标准 k8s pod logs(返 plain text)。"""
+        if self.version() == 'v3':
+            p = [f'tailLines={tail_lines}']
+            if container:
+                p.append(f'container={urllib.parse.quote(container)}')
+            if previous:
+                p.append('previous=true')
+            path = (f'/api/v1/namespaces/{urllib.parse.quote(namespace, safe="")}'
+                    f'/pods/{urllib.parse.quote(pod, safe="")}/log')
+            r = self._k8s_get(path, '&'.join(p))
+            if r.status_code >= 400:
+                return f'[error: HTTP {r.status_code} {redact(r.text)[:200]}]'
+            return redact(r.text)
         params = [f'namespace={urllib.parse.quote(namespace)}', f'name={urllib.parse.quote(pod)}',
                   f'tailLines={tail_lines}']
         if container:

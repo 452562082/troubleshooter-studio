@@ -1113,6 +1113,7 @@ async function runK8sRtPreload(envID: string) {
   const accessKey = obsAccessKey || (fallback.access_key || '').trim()
   const username = obsUser || (fallback.username || '').trim()
   const password = obsPass || fallback.password || ''
+  const clusterHint = (fallback.cluster_hint || '').trim() // Kuboard v3 必填(v4 忽略)
   if (!url) {
     toast.error(`${envID}: 先填 Kuboard URL(可观测性 K8s 运行时 字段)`)
     return
@@ -1123,7 +1124,7 @@ async function runK8sRtPreload(envID: string) {
   }
   kuboardStateByEnv[envID] = { status: 'loading' }
   try {
-    const res = await kuboardListResources(url, username, password, accessKey)
+    const res = await kuboardListResources(url, username, password, accessKey, clusterHint)
     const clusters = (res.clusters || []).map(c => ({
       name: c.name,
       namespaces: (c.namespaces || []).map(n => ({ name: n.name, configmaps: n.configmaps || [] })),
@@ -1285,9 +1286,13 @@ const CC_FIELDS_BY_TYPE = computed<Record<string, CredField[]>>(() => {
         ],
         uiOnly: true,
       },
-      { key: 'access_key', label: 'API 访问凭证', secret: true, envVar: (e) => `KUBOARD_ACCESS_KEY_${e.toUpperCase()}`, placeholder: 'Kuboard 后台 个人中心 → API 访问凭证 → 创建', showWhen: { field: 'auth_mode', equals: 'access_key' } },
-      { key: 'username', label: '用户名', secret: false, envVar: (e) => `KUBOARD_USER_${e.toUpperCase()}`, placeholder: 'admin', showWhen: { field: 'auth_mode', equals: 'username_password' } },
+      { key: 'access_key', label: 'API 访问凭证', secret: true, envVar: (e) => `KUBOARD_ACCESS_KEY_${e.toUpperCase()}`, placeholder: 'v3: 密钥ID.密钥(如 scyfw6txxw7i.x6t2…);v4: 单串 token', showWhen: { field: 'auth_mode', equals: 'access_key' } },
+      // username 两种鉴权模式都显示:v3 access-key 也要 KuboardUsername(Cookie 必带);v4 access-key 模式可留空。
+      { key: 'username', label: '用户名(Kuboard v3 access-key 也必填)', secret: false, envVar: (e) => `KUBOARD_USER_${e.toUpperCase()}`, placeholder: 'admin' },
       { key: 'password', label: '密码', secret: true, envVar: (e) => `KUBOARD_PASS_${e.toUpperCase()}`, showWhen: { field: 'auth_mode', equals: 'username_password' } },
+      // cluster_hint:Kuboard v3 无法用 access-key 枚举集群,需先填集群名再"拉资源"(uiOnly,不写 yaml;
+      // 真正落 yaml 的是下面 per-service 的 cluster 三联映射)。v4 留空(tree 自动列全部集群)。
+      { key: 'cluster_hint', label: '集群名(Kuboard v3 必填,v4 留空)', secret: false, envVar: () => '', placeholder: 'jw-was-k8s-test', uiOnly: true },
       { key: 'cluster', label: '集群名', secret: false, envVar: (e) => `KUBOARD_CLUSTER_${e.toUpperCase()}`, placeholder: 'default' },
       { key: 'namespace', label: 'Namespace', secret: false, envVar: (e) => `KUBOARD_NAMESPACE_${e.toUpperCase()}`, placeholder: 'default' },
       { key: 'configmap', label: 'ConfigMap 名称', secret: false, envVar: (e) => `KUBOARD_CONFIGMAP_${e.toUpperCase()}`, placeholder: 'app-config' },
@@ -1701,8 +1706,9 @@ const OBS_TOOL_SPECS: ToolSpec[] = [
         ],
         uiOnly: true,
       },
-      { key: 'access_key', label: 'API 访问凭证', secret: true, envVar: (e) => `KUBOARD_ACCESS_KEY_${e.toUpperCase()}`, placeholder: 'Kuboard 后台 个人中心 → API 访问凭证 → 创建', showWhen: { field: 'auth_mode', equals: 'access_key' } },
-      { key: 'username', label: '用户名', secret: false, envVar: (e) => `KUBOARD_USER_${e.toUpperCase()}`, placeholder: 'admin', showWhen: { field: 'auth_mode', equals: 'username_password' } },
+      { key: 'access_key', label: 'API 访问凭证', secret: true, envVar: (e) => `KUBOARD_ACCESS_KEY_${e.toUpperCase()}`, placeholder: 'v3: 密钥ID.密钥;v4: 单串 token', showWhen: { field: 'auth_mode', equals: 'access_key' } },
+      // v3 access-key 也要 KuboardUsername(Cookie 必带);两模式都显示。集群名复用配置源的"集群名"输入。
+      { key: 'username', label: '用户名(Kuboard v3 access-key 也必填)', secret: false, envVar: (e) => `KUBOARD_USER_${e.toUpperCase()}`, placeholder: 'admin' },
       { key: 'password', label: '密码', secret: true, envVar: (e) => `KUBOARD_PASS_${e.toUpperCase()}`, showWhen: { field: 'auth_mode', equals: 'username_password' } },
     ],
   },

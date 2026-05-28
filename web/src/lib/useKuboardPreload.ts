@@ -116,6 +116,7 @@ export function useKuboardPreload(deps: UseKuboardPreloadDeps) {
     const accessKey = (envCreds.access_key || '').trim()
     const username = (envCreds.username || '').trim()
     const password = (envCreds.password || '').trim()
+    const clusterHint = (envCreds.cluster_hint || '').trim() // Kuboard v3 必填(v4 忽略)
     if (!url) {
       toast.error(`${envID}: 先填 Kuboard URL`)
       return
@@ -126,7 +127,7 @@ export function useKuboardPreload(deps: UseKuboardPreloadDeps) {
     }
     deps.kuboardStateByEnv[envID] = { status: 'loading' }
     try {
-      const res = await kuboardListResources(url, username, password, accessKey)
+      const res = await kuboardListResources(url, username, password, accessKey, clusterHint)
       const clusters = (res.clusters || []).map(c => ({
         name: c.name,
         namespaces: (c.namespaces || []).map(n => ({

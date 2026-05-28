@@ -2,15 +2,16 @@
 # 由 troubleshooter-studio 生成。多源配置:每个服务按 repos[].config_source 路由到对应源。
 # - status: verified → 来自代码分析或上轮人工沉淀
 # - status: inferred → 骨架,需人工校对后改为 verified
-# - runtime 字段:所有配置中心都通过 HTTP 脚本访问,LLM 看到 runtime 标记直接调 config-executor SKILL
-#   下的对应脚本,不需要找 mcp_server。当前 4 个 runtime 值:
-#     nacos-http   → scripts/nacos_config.py(2026-05-15 方案 B,token 改不了,每次脚本自己 login 即用即弃)
+# - runtime 字段:告诉 LLM 这条服务的配置走哪条访问路径。看到 runtime 标记 → 调 config-executor
+#   SKILL,由它按 runtime 值决定用 MCP 还是 HTTP 脚本。当前 4 个 runtime 值:
+#     nacos-mcp    → 调 nacos MCP(<system.id>-nacos[-source]-<env>)的 get_config 等工具;
+#                    MCP 不可用时 config-executor 回落 scripts/nacos_config.py(plan D)
 #     apollo-http  → scripts/apollo_config.py(生态暂无稳定 Apollo MCP)
 #     consul-http  → scripts/consul_config.py(同上)
 #     kuboard-http → scripts/resolve_runtime_k8s.py(kuboard 历来走 HTTP)
 # - 凭据来源:
-#     nacos:  <workspace>/scripts/.env(CC_ADDR_<ENV> / CC_USER_<ENV> / CC_PASS_<ENV>)
-#             LLM 调脚本前必须先 `source scripts/.env`
+#     nacos:  install 阶段写进 MCP env(NACOS_HOST/PORT/USERNAME/PASSWORD),MCP 进程运行时
+#             自己 login + refresh,LLM 调 MCP 工具不碰凭据。HTTP fallback 仍读 <workspace>/scripts/.env。
 #     apollo / consul / kuboard:  ~/.openclaw/<agent-id>-creds.json(脚本按 --agent-id --env 自己取)
 # 优先级:analyzer finding > prior manual override > inferred skeleton
 {{- $ctx := .}}
@@ -51,20 +52,20 @@ environments:
         namespaceId: {{if $f.NamespaceID}}{{$f.NamespaceID | printf "%q"}}{{else}}{{$nsHint | printf "%q"}}{{end}}
         group: {{if $f.Group}}{{$f.Group | printf "%q"}}{{else}}"DEFAULT_GROUP"{{end}}
         dataId: {{$f.DataID | printf "%q"}}
-        runtime: nacos-http
+        runtime: nacos-mcp
         status: verified
         source: {{$f.SourceFile | printf "%q"}}
         {{- else if $p}}
         namespaceId: {{$p.NamespaceID | printf "%q"}}
         group: {{if $p.Group}}{{$p.Group | printf "%q"}}{{else}}"DEFAULT_GROUP"{{end}}
         dataId: {{$p.DataID | printf "%q"}}
-        runtime: nacos-http
+        runtime: nacos-mcp
         status: verified
         {{- else}}
         namespaceId: {{$nsHint | printf "%q"}}
         group: "DEFAULT_GROUP"
         dataId: {{if $patterns}}{{index $patterns 0 | printf "%q"}}{{else}}""{{end}}
-        runtime: nacos-http
+        runtime: nacos-mcp
         status: inferred
         {{- end}}
         {{- else if eq $cc "apollo"}}

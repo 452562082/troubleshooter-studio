@@ -205,16 +205,13 @@ func TestBuildMCPServers_DataStores_PruneEmpty(t *testing.T) {
 	}
 }
 
-// TestBuildMCPServers_NeverRegistersNacosMCP 是 2026-05-15 truss case 复盘三层结论的回归护栏:
+// TestBuildMCPServers_NacosMCPWithRefreshAuth 守 plan D 的接入契约 + 防回到 23d503a 的
+// bake-token 坑(决策演进详见 BuildMCPServers 注释):
 //
-// 决策最终走方案 B —— nacos 主路径走 SKILL 内 Python HTTP API(scripts/nacos_config.py),
-// install 阶段**故意不**注册 nacos MCP。原因详见 BuildMCPServers 内大段注释:
-// nacos-mcp-server 只接 --access_token CLI 参数 token 进程内固定,不支持运行时 refresh,
-// 跟「机器人长期跑」定位本质冲突。
-//
-// 这条测试守住决策:即使 cfg 完整填了 nacos config_centers + 凭据,servers 里也不应该出现
-// 任何 nacos 命名的 mcp。有人改回 mcp 注册路径会立刻翻车。
-func TestBuildMCPServers_NeverRegistersNacosMCP(t *testing.T) {
+//   - nacos 走自研本地脚本 `uv run --script <~/.tshoot/scripts/nacos_mcp.py>`
+//   - 凭据走 env(NACOS_HOST/PORT/USERNAME/PASSWORD),脚本运行时自己 login + refresh
+//   - **绝不**在 args 里出现 --access_token(那是 23d503a 一次性 bake、5h 后过期的死路)
+func TestBuildMCPServers_NacosMCPWithRefreshAuth(t *testing.T) {
 	cfg := &config.SystemConfig{
 		Environments: []config.Environment{{ID: "dev"}, {ID: "prod"}},
 		Infrastructure: config.Infrastructure{
@@ -224,16 +221,92 @@ func TestBuildMCPServers_NeverRegistersNacosMCP(t *testing.T) {
 	creds := map[string]string{
 		"CC_ADDR_PRIMARY_DEV":  "13.112.112.196:8848",
 		"CC_USER_PRIMARY_DEV":  "nacos",
-		"CC_PASS_PRIMARY_DEV":  "nacos",
-		"CC_ADDR_PRIMARY_PROD": "nacos-prod:8848",
+		"CC_PASS_PRIMARY_DEV":  "nacospass",
+		"CC_ADDR_PRIMARY_PROD": "http://nacos-prod:8849/nacos",
 		"CC_USER_PRIMARY_PROD": "nacos",
-		"CC_PASS_PRIMARY_PROD": "nacos",
+		"CC_PASS_PRIMARY_PROD": "nacospass",
 	}
+	const scriptPath = "/home/u/.tshoot/scripts/nacos_mcp.py"
+	servers := BuildMCPServers(cfg, MCPBuildOptions{
+		PruneEmpty:         true,
+		NacosMCPScriptPath: scriptPath,
+	}, func(k string) string { return creds[k] })
+
+	devKey := "nacos-primary-dev"
+	spec, ok := servers[devKey].(map[string]any)
+	if !ok {
+		t.Fatalf("期望注册 %s,servers=%v", devKey, keysOf(servers))
+	}
+	if spec["command"] != "uv" {
+		t.Errorf("command 应为 uv,got %v", spec["command"])
+	}
+	args := toStrSlice(spec["args"])
+	wantArgs := []string{"run", "--script", scriptPath}
+	if strings.Join(args, " ") != strings.Join(wantArgs, " ") {
+		t.Errorf("args 应为 %v,got %v", wantArgs, args)
+	}
+	// 反 bake-token 回归护栏:args 里绝不能出现 access token 相关字样
+	for _, a := range args {
+		if strings.Contains(a, "access_token") || strings.Contains(a, "access-token") {
+			t.Errorf("args 不应含 access_token(plan D 凭据走 env,token 运行时 refresh): %v", args)
+		}
+	}
+	env := envOf(servers[devKey])
+	if env["NACOS_HOST"] != "13.112.112.196" || env["NACOS_PORT"] != "8848" {
+		t.Errorf("dev host/port 拆分错误,env=%v", env)
+	}
+	if env["NACOS_USERNAME"] != "nacos" || env["NACOS_PASSWORD"] != "nacospass" {
+		t.Errorf("dev 凭据应走 env,env=%v", env)
+	}
+	// prod 带 scheme + 非标准 port + path,splitNacosAddr 应正确剥离
+	prodEnv := envOf(servers["nacos-primary-prod"])
+	if prodEnv["NACOS_HOST"] != "nacos-prod" || prodEnv["NACOS_PORT"] != "8849" {
+		t.Errorf("prod addr 解析错误(应剥 scheme/path),env=%v", prodEnv)
+	}
+}
+
+// TestBuildMCPServers_NacosMCPSkippedWhenNoScript 守降级路径:EnsureNacosMCPScript 失败
+// (NacosMCPScriptPath 空)时不注册死 mcp,nacos 回落 config-executor SKILL 的 HTTP fallback。
+func TestBuildMCPServers_NacosMCPSkippedWhenNoScript(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "dev"}},
+		Infrastructure: config.Infrastructure{
+			ConfigCenters: []config.ConfigCenter{{Type: "nacos", ID: "primary"}},
+		},
+	}
+	creds := map[string]string{
+		"CC_ADDR_PRIMARY_DEV": "nacos:8848",
+		"CC_USER_PRIMARY_DEV": "nacos",
+		"CC_PASS_PRIMARY_DEV": "nacos",
+	}
+	// NacosMCPScriptPath 留空 = ensure 失败场景
 	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true},
 		func(k string) string { return creds[k] })
 	for k := range servers {
 		if strings.Contains(k, "nacos") {
-			t.Errorf("nacos mcp 不应注册(方案 B = HTTP API 主路径),但 servers 里出现: %s", k)
+			t.Errorf("脚本路径空时不应注册 nacos mcp(应回落 HTTP fallback),但出现: %s", k)
+		}
+	}
+}
+
+// TestBuildMCPServers_NacosMCPSkippedWhenCredsMissing 守 IDE 模式(PruneEmpty)凭据不全
+// 不注册死 mcp。
+func TestBuildMCPServers_NacosMCPSkippedWhenCredsMissing(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "dev"}},
+		Infrastructure: config.Infrastructure{
+			ConfigCenters: []config.ConfigCenter{{Type: "nacos", ID: "primary"}},
+		},
+	}
+	// 只给 addr,缺 user/pass
+	creds := map[string]string{"CC_ADDR_PRIMARY_DEV": "nacos:8848"}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{
+		PruneEmpty:         true,
+		NacosMCPScriptPath: "/x/nacos_mcp.py",
+	}, func(k string) string { return creds[k] })
+	for k := range servers {
+		if strings.Contains(k, "nacos") {
+			t.Errorf("凭据不全(缺 user/pass)不应注册 nacos mcp,但出现: %s", k)
 		}
 	}
 }
@@ -874,6 +947,16 @@ func keysOf(m map[string]any) []string {
 		ks = append(ks, k)
 	}
 	return ks
+}
+
+func toStrSlice(v any) []string {
+	raw, _ := v.([]any)
+	out := make([]string, 0, len(raw))
+	for _, x := range raw {
+		s, _ := x.(string)
+		out = append(out, s)
+	}
+	return out
 }
 
 func TestNormalizeMongoURI(t *testing.T) {

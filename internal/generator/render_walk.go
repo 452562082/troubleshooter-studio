@@ -38,6 +38,12 @@ func (g *Generator) walkAndRender(srcRoot, dstRoot string) error {
 			return os.MkdirAll(filepath.Join(dstRoot, rel), 0o755)
 		}
 
+		// Skill scripts ship with pytest files (e.g. test_nacos_mcp.py) for repo-side CI.
+		// They're dev artifacts — don't render them into the bot workspace product.
+		if name := d.Name(); strings.HasPrefix(name, "test_") && strings.HasSuffix(name, ".py") {
+			return nil
+		}
+
 		outPath := filepath.Join(dstRoot, rel)
 		if strings.HasSuffix(path, ".tmpl") {
 			outPath = strings.TrimSuffix(outPath, ".tmpl")

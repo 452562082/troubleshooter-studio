@@ -146,8 +146,9 @@ func fakeCreds() map[string]string {
 // 注 1:loki MCP 已合并进 grafana MCP(2026-05),query_loki_* 工具由 grafana mcp-grafana-npx
 // 提供;不再单独注册 shop-loki-<env>。
 //
-// 注 2:nacos 故意不在列表里 — 2026-05-15 truss case 三层复盘后定方案 B,nacos 走 SKILL
-// 内 Python HTTP API,**不**注册 mcp。详见 install_native_mcp_common.go::BuildMCPServers。
+// 注 2:nacos per env(plan D):自研本地 MCP 脚本 `uv run --script nacos_mcp.py`。
+// fakeCreds 给齐三个 env 的 CC_ADDR/USER/PASS,IDE PruneEmpty 下凭据全 → 三个 env 都注册。
+// 详见 install_native_mcp_common.go::BuildMCPServers。
 //
 // shop-troubleshooter.yaml 有 dev / staging / prod 三个环境。
 func expectedMCPKeys() []string {
@@ -155,6 +156,7 @@ func expectedMCPKeys() []string {
 	out := []string{}
 	for _, e := range envs {
 		out = append(out, "shop-grafana-"+e)
+		out = append(out, "shop-nacos-"+e)
 	}
 	return out
 }

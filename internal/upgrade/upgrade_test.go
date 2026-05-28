@@ -59,8 +59,8 @@ func TestRun_BackupAndPreserve(t *testing.T) {
 	cmPath := filepath.Join(existing, "templates/workspace-template/skills/routing/references/config-map.yaml")
 	data, _ := os.ReadFile(cmPath)
 	mut := strings.Replace(string(data),
-		"      order-worker:\n        namespaceId: \"dev\"\n        group: \"DEFAULT_GROUP\"\n        dataId: \"{service}.yaml\"\n        runtime: nacos-http\n        status: inferred",
-		"      order-worker:\n        namespaceId: \"shop-dev\"\n        group: \"WORKER\"\n        dataId: \"worker.yaml\"\n        runtime: nacos-http\n        status: verified",
+		"      order-worker:\n        namespaceId: \"dev\"\n        group: \"DEFAULT_GROUP\"\n        dataId: \"{service}.yaml\"\n        runtime: nacos-mcp\n        status: inferred",
+		"      order-worker:\n        namespaceId: \"shop-dev\"\n        group: \"WORKER\"\n        dataId: \"worker.yaml\"\n        runtime: nacos-mcp\n        status: verified",
 		1)
 	if mut == string(data) {
 		t.Fatal("mutation not applied")

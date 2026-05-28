@@ -68,10 +68,12 @@ func InstallNativeOpenclaw(ctx context.Context, stagingDir string, opts InstallO
 			log(fmt.Sprintf("[dep] %s ok", dep))
 		}
 	}
-	// uvx 之前给 nacos-mcp-server 用,2026-05-15 方案 B 后 nacos 走 Python HTTP API,
-	// uvx 在 install 阶段不再有必装组件依赖它;留 LookPath 给未来 mcp 扩展用,缺了只是 info。
-	if _, err := exec.LookPath("uvx"); err != nil {
-		log("[dep] uvx 没装(目前没强依赖,nacos 走 python3 主路径;若以后接入需要 uvx 的 MCP 再装:brew install uv)")
+	// uvx(= uv):plan D 起 nacos MCP 走 `uv run --script nacos_mcp.py`,jaeger/clickhouse 也用 uvx。
+	// 缺了这些 MCP 起不来(nacos 会回落 HTTP fallback)。install 不阻塞,只 warn 给安装指引。
+	if CfgUsesUvx(cfg) {
+		if _, err := exec.LookPath("uvx"); err != nil {
+			log("[dep] uvx 没装(nacos/jaeger/clickhouse MCP 跑不起来,nacos 会回落 HTTP fallback):brew install uv 或 curl -LsSf https://astral.sh/uv/install.sh | sh")
+		}
 	}
 
 	// 3) merge .env 老凭证(Creds 优先)

@@ -318,6 +318,11 @@ type MCPBuildOptions struct {
 	//  (a) ensure 失败 fallback(用户装好后重跑 install 会拿到绝对路径)
 	//  (b) 单元测试只验证 builder 逻辑不验证启动可达性
 	KafkaMCPBinaryPath string
+
+	// NacosMCPScriptPath:~/.tshoot/scripts/nacos_mcp.py 的绝对路径(EnsureNacosMCPScript 返回)。
+	// buildNacos 用它拼 `uv run --script <path>`。空字符串 = ensure 失败,buildNacos 跳过注册,
+	// nacos 走 config-executor SKILL 的 HTTP fallback 兜底。
+	NacosMCPScriptPath string
 }
 
 // BuildMCPServers 按 cfg.Infrastructure 派生 {server_key: spec} 扁平 map。
@@ -376,20 +381,25 @@ func (b *mcpBuilder) envBlock(m map[string]any) map[string]any {
 func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(string) string) map[string]any {
 	b := &mcpBuilder{cfg: cfg, opts: opts, get: get}
 	servers := map[string]any{}
-	// 注:nacos 故意不在这里 build MCP。
+	// nacos 走自研本地 MCP 脚本(templates/.../scripts/nacos_mcp.py,装到 ~/.tshoot/scripts/)。
 	//
-	// 2026-05-15 truss case 三层复盘后定方案 B:nacos 主路径走 SKILL 内 Python HTTP API
-	// (scripts/nacos_config.py),每次调用脚本自己 login → 用 token → 丢弃。原因:
-	//   - 官方 nacos-mcp-server 只接 --access_token CLI 参数,token 在进程生命周期内固定;
-	//     mcp 进程拿不到 username/password 自己 refresh,LLM 也不能"重启 mcp"换 token
-	//   - install 阶段 bake token(方案 A)需要用户能改 nacos 端把 TTL 调到 10 年;truss 现场
-	//     nacos 2.3.0 + 运维不调 TTL → token 5h 过期,bake 方案沦为「装一次满血几小时然后默默
-	//     降级到 fallback」,跟 [[project-product-direction]]「机器人长期跑」定位错位
-	//   - 把 HTTP API fallback 升为主路径后,token 短 TTL 完全无所谓,nacos 端零配合,
-	//     代价是失去 mcp tool-call 体验(但 nacos 在排障链路里调用频次低,代价可接受)
+	// 决策演进(为什么绕了一大圈最后回到 MCP):
+	//   5d5a139  HTTP 主路径(SKILL 内 Python 脚本,临时绕路)
+	//   23d503a  MCP 主路径,bake token:install 一次性 login 拿 access_token 烧进 mcp 启动参数
+	//   8d05068  推翻 23d503a 回 HTTP(方案 B 终局)。坍塌原因:官方 nacos-mcp-server 只接
+	//            --access_token CLI 且进程内固定不 refresh;truss 现场 nacos 2.3.0 + 运维不调
+	//            tokenTtl → token 5h 过期 mcp 401,装一次满血几小时然后默默降级,跟"机器人长期跑"冲突
+	//   本次     方案 D,自研 nacos_mcp.py:脚本自己拿 username/password 跑 login + 后台 refresh
+	//            (tokenTtl*0.8 周期 + 401 强制 re-login),token 短 TTL 完全无所谓;且只用 nacos
+	//            /v1 endpoint(2.x/3.x 都支持),绕开上游 /v3 admin API 要 nacos 3.0+ 的限制。
+	//            凭据走 env(NACOS_USERNAME/PASSWORD)不进 args,不暴露在 ps。
 	//
-	// 决策历史:5d5a139(HTTP 主)→ 23d503a(MCP 主,nacos-mcp-router → nacos-mcp-server)
-	//          → 今天(回 HTTP 主,B 方案)。详见 README "Nacos 配置访问路径"。
+	// 跟 23d503a 的本质区别:token 生命周期管理从 install 阶段(一次性、会过期)挪进 MCP 进程
+	// 运行时(持续 refresh)。这是当年坍塌的真根因,方案 D 才真正修掉。
+	//
+	// ensure 失败(NacosMCPScriptPath 空)时 buildNacos 跳过注册,nacos 回落到 config-executor
+	// SKILL 的 HTTP fallback(scripts/nacos_config.py)—— fallback 始终保留,降级不致盲。
+	b.buildNacos(servers)
 	b.buildGrafana(servers)
 	b.buildJaeger(servers)
 	b.buildELK(servers)
@@ -397,6 +407,52 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 	b.buildLark(servers)
 	b.buildFeishuProject(servers)
 	return servers
+}
+
+// buildNacos:nacos per (source × env),多源 + 每 env 一个独立本地 MCP 实例。
+//
+// 命令走 `uv run --script <~/.tshoot/scripts/nacos_mcp.py>`。凭据 host/port/username/password
+// 全走 env(脚本 argparse 默认从 NACOS_* env 读),不进 args —— 不暴露在 ps、不被 shell history
+// 记录。脚本运行时自己 login + 后台 refresh,install 阶段不碰 token(跟 23d503a 的 bake 模型
+// 根本区别,详见 BuildMCPServers 决策注释)。
+//
+// 跳过条件:
+//   - NacosMCPScriptPath 空(EnsureNacosMCPScript 失败)→ 整段跳过,nacos 回落 SKILL HTTP fallback
+//   - PruneEmpty(IDE)且 addr/user/pass 任一缺 → 跳过该 env,避免注册一个起不来的死 mcp
+//     (openclaw PruneEmpty=false 时保留空 schema 让 agent 自决填)
+func (b *mcpBuilder) buildNacos(servers map[string]any) {
+	scriptPath := b.opts.NacosMCPScriptPath
+	if scriptPath == "" {
+		return // ensure 失败,回落 HTTP fallback
+	}
+	for _, cc := range b.cfg.Infrastructure.ConfigCenters {
+		if cc.Type != "nacos" {
+			continue
+		}
+		for _, e := range b.cfg.Environments {
+			addr := b.get(envVar("CC_ADDR", cc.ID, e.ID))
+			user := b.get(envVar("CC_USER", cc.ID, e.ID))
+			pass := b.get(envVar("CC_PASS", cc.ID, e.ID))
+
+			if b.opts.PruneEmpty && (addr == "" || user == "" || pass == "") {
+				continue // IDE:凭据不全不注册死 mcp
+			}
+			host, port := splitNacosAddr(addr)
+			servers[b.keyFor("nacos", cc.ID, e.ID)] = map[string]any{
+				"command": "uv",
+				"args":    []any{"run", "--script", scriptPath},
+				// 凭据走 env(脚本从 NACOS_* 读),不进 args 防 ps 泄漏。OTEL_SDK_DISABLED 由
+				// envBlock 注入,防 python 包间接依赖的 OTel 自动 instrument 往 stdout 打 banner
+				// 污染 stdio JSON-RPC。
+				"env": b.envBlock(map[string]any{
+					"NACOS_HOST":     host,
+					"NACOS_PORT":     port,
+					"NACOS_USERNAME": user,
+					"NACOS_PASSWORD": pass,
+				}),
+			}
+		}
+	}
 }
 
 // 可观测性 MCP builders(grafana / jaeger / elk)拆到 install_native_mcp_obs.go。

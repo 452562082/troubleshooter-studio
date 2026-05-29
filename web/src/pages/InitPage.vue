@@ -1288,11 +1288,11 @@ const CC_FIELDS_BY_TYPE = computed<Record<string, CredField[]>>(() => {
       },
       { key: 'access_key', label: 'API 访问凭证', secret: true, envVar: (e) => `KUBOARD_ACCESS_KEY_${e.toUpperCase()}`, placeholder: 'v3: 密钥ID.密钥(如 scyfw6txxw7i.x6t2…);v4: 单串 token', showWhen: { field: 'auth_mode', equals: 'access_key' } },
       // username 两种鉴权模式都显示:v3 access-key 也要 KuboardUsername(Cookie 必带);v4 access-key 模式可留空。
-      { key: 'username', label: '用户名(Kuboard v3 必填;v4 仅账密模式需要)', secret: false, envVar: (e) => `KUBOARD_USER_${e.toUpperCase()}`, placeholder: 'admin' },
+      { key: 'username', label: '用户名(v3 必填;v4 仅账密模式)', secret: false, envVar: (e) => `KUBOARD_USER_${e.toUpperCase()}`, placeholder: 'admin' },
       { key: 'password', label: '密码', secret: true, envVar: (e) => `KUBOARD_PASS_${e.toUpperCase()}`, showWhen: { field: 'auth_mode', equals: 'username_password' } },
       // cluster_hint:Kuboard v3 无法用 access-key 枚举集群,需先填集群名再"拉资源"(uiOnly,不写 yaml;
       // 真正落 yaml 的是下面 per-service 的 cluster 三联映射)。v4 留空(tree 自动列全部集群)。
-      { key: 'cluster_hint', label: '集群名(Kuboard v3 必填;v4 留空,自动列出)', secret: false, envVar: () => '', placeholder: '例如 my-cluster', uiOnly: true },
+      { key: 'cluster_hint', label: '集群名(仅 v3 需填)', secret: false, envVar: () => '', placeholder: '例如 my-cluster', uiOnly: true },
       { key: 'cluster', label: '集群名', secret: false, envVar: (e) => `KUBOARD_CLUSTER_${e.toUpperCase()}`, placeholder: 'default' },
       { key: 'namespace', label: 'Namespace', secret: false, envVar: (e) => `KUBOARD_NAMESPACE_${e.toUpperCase()}`, placeholder: 'default' },
       { key: 'configmap', label: 'ConfigMap 名称', secret: false, envVar: (e) => `KUBOARD_CONFIGMAP_${e.toUpperCase()}`, placeholder: 'app-config' },
@@ -1708,7 +1708,7 @@ const OBS_TOOL_SPECS: ToolSpec[] = [
       },
       { key: 'access_key', label: 'API 访问凭证', secret: true, envVar: (e) => `KUBOARD_ACCESS_KEY_${e.toUpperCase()}`, placeholder: 'v3: 密钥ID.密钥;v4: 单串 token', showWhen: { field: 'auth_mode', equals: 'access_key' } },
       // v3 access-key 也要 KuboardUsername(Cookie 必带);两模式都显示。集群名复用配置源的"集群名"输入。
-      { key: 'username', label: '用户名(Kuboard v3 必填;v4 仅账密模式需要)', secret: false, envVar: (e) => `KUBOARD_USER_${e.toUpperCase()}`, placeholder: 'admin' },
+      { key: 'username', label: '用户名(v3 必填;v4 仅账密模式)', secret: false, envVar: (e) => `KUBOARD_USER_${e.toUpperCase()}`, placeholder: 'admin' },
       { key: 'password', label: '密码', secret: true, envVar: (e) => `KUBOARD_PASS_${e.toUpperCase()}`, showWhen: { field: 'auth_mode', equals: 'username_password' } },
     ],
   },

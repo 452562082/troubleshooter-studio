@@ -29,6 +29,9 @@ import (
 	"time"
 )
 
+// kuboardUserAgent:给所有 Kuboard 出站请求统一带的 UA,避免 Cloudflare 对默认 Go UA 风控。
+const kuboardUserAgent = "Mozilla/5.0 (compatible; tshoot-desktop)"
+
 // KuboardCluster:一个集群下的命名空间树
 type KuboardCluster struct {
 	Name       string             `json:"name"`
@@ -97,6 +100,10 @@ func (a *App) KuboardListResources(kuboardURL, username, password, accessKey, cl
 	// 2) cluster-namespace-tree 一次拿 cluster→ns 树
 	tree, err := kuboardClusterNamespaceTree(ctx, client, base, token)
 	if err != nil {
+		// 回落:探测判 v4 但 tree 调不通(如被 Cloudflare 改写/实际是 v3),且具备 v3 入参时改走 v3。
+		if username != "" {
+			return kuboardListResourcesV3(ctx, client, base, username, accessKey, strings.TrimSpace(clusterHint))
+		}
 		return nil, fmt.Errorf("列集群+namespace 失败: %w", err)
 	}
 	if len(tree) == 0 {
@@ -149,6 +156,7 @@ func kuboardClusterNamespaceTree(ctx context.Context, c *http.Client, base, toke
 		return nil, err
 	}
 	req.Header.Set("Kb-Access-Key", token)
+	req.Header.Set("User-Agent", kuboardUserAgent)
 	resp, err := c.Do(req)
 	if err != nil {
 		return nil, err
@@ -204,6 +212,7 @@ func kuboardLoginV4(ctx context.Context, c *http.Client, base, user, pass string
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", kuboardUserAgent)
 	resp, err := c.Do(req)
 	if err != nil {
 		return "", err
@@ -249,6 +258,7 @@ func kuboardListConfigMapsV4(ctx context.Context, c *http.Client, base, token, c
 		return nil, err
 	}
 	req.Header.Set("Kb-Access-Key", token)
+	req.Header.Set("User-Agent", kuboardUserAgent)
 	resp, err := c.Do(req)
 	if err != nil {
 		return nil, err
@@ -373,6 +383,18 @@ func kuboardSetup(ctx context.Context, kbURL, accessKey, username, password, clu
 	}
 	tree, err := kuboardClusterNamespaceTree(rctx, client, base, token)
 	if err != nil {
+		// 回落:探测判 v4 但 tree 调不通(被 Cloudflare 改写 / 实际是 v3),且具备 v3 入参
+		// (access-key + 用户名)时改走 v3 Cookie 鉴权 —— 跟 KuboardListResources 同款自愈。
+		if accessKey != "" && username != "" {
+			cookie := kuboardV3Cookie(username, accessKey)
+			ok, v3err := kuboardV3ClusterExists(rctx, client, base, cookie, clusterName)
+			if v3err == nil && ok {
+				return &kuboardSetupResult{
+					ctx: rctx, cancel: cancel, client: client,
+					base: base, version: "v3", cookie: cookie, clusterName: clusterName,
+				}, nil
+			}
+		}
 		cancel()
 		return nil, fmt.Errorf("列集群失败: %w", err)
 	}
@@ -403,6 +425,7 @@ func kuboardDirectGET(s *kuboardSetupResult, query string) ([]byte, error) {
 		return nil, err
 	}
 	req.Header.Set("Kb-Access-Key", s.token)
+	req.Header.Set("User-Agent", kuboardUserAgent)
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return nil, err

@@ -40,29 +40,55 @@ func TestK8sListNames(t *testing.T) {
 	}
 }
 
-// TestKuboardDetectVersion:v4 tree 返 404 ⇒ v3;返 200 ⇒ v4。
+// TestKuboardDetectVersion:正向识别 v4 —— 只有 tree 返 200 且 body 含 {data:{treeItems}}
+// 才判 v4;其余(404/401/403/5xx/200 但非 v4 JSON)一律 v3。
 func TestKuboardDetectVersion(t *testing.T) {
+	const v4Body = `{"data":{"treeItems":[{"id":"u1","name":"c1","children":[]}]}}`
 	cases := []struct {
+		name       string
 		treeStatus int
+		treeBody   string
 		want       string
 	}{
-		{http.StatusNotFound, "v3"},
-		{http.StatusOK, "v4"},
-		{http.StatusUnauthorized, "v4"}, // 路由存在只是没权限 = v4
+		{"404 ⇒ v3", http.StatusNotFound, "", "v3"},
+		{"401 ⇒ v3 (旧逻辑会误判 v4)", http.StatusUnauthorized, "", "v3"},
+		{"403 ⇒ v3 (Cloudflare/鉴权)", http.StatusForbidden, "", "v3"},
+		{"500 ⇒ v3", http.StatusInternalServerError, "", "v3"},
+		{"200 但非 v4 JSON ⇒ v3", http.StatusOK, `<html>cloudflare challenge</html>`, "v3"},
+		{"200 但 JSON 不含 treeItems(键缺失)⇒ v3", http.StatusOK, `{"data":{}}`, "v3"},
+		{"200 且 v4 形态 ⇒ v4", http.StatusOK, v4Body, "v4"},
 	}
 	for _, c := range cases {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if strings.Contains(r.URL.Path, "/api/cluster.kuboard.cn/v4/cluster-cache/cluster-namespace-tree") {
-				w.WriteHeader(c.treeStatus)
-				return
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.Contains(r.URL.Path, "/api/cluster.kuboard.cn/v4/cluster-cache/cluster-namespace-tree") {
+					if c.treeStatus != http.StatusOK {
+						w.WriteHeader(c.treeStatus)
+						return
+					}
+					_, _ = w.Write([]byte(c.treeBody))
+					return
+				}
+				w.WriteHeader(http.StatusNotFound)
+			}))
+			defer srv.Close()
+			got := kuboardDetectVersion(context.Background(), srv.Client(), srv.URL, "key")
+			if got != c.want {
+				t.Errorf("detect=%q want %q", got, c.want)
 			}
-			w.WriteHeader(http.StatusNotFound)
-		}))
-		got := kuboardDetectVersion(context.Background(), srv.Client(), srv.URL, "key")
-		if got != c.want {
-			t.Errorf("treeStatus=%d: detect=%q want %q", c.treeStatus, got, c.want)
-		}
-		srv.Close()
+		})
+	}
+}
+
+// TestKuboardDetectVersion_TransportError:传输层错误(连不上/Cloudflare 首连抖动)应判 v3,
+// 而非旧逻辑的 v4。用一个立即关闭的 server 制造连接错误。
+func TestKuboardDetectVersion_TransportError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := srv.URL
+	client := srv.Client()
+	srv.Close() // 关掉后再请求 → 传输错误
+	if got := kuboardDetectVersion(context.Background(), client, url, "key"); got != "v3" {
+		t.Errorf("传输错误应判 v3, got %q", got)
 	}
 }
 

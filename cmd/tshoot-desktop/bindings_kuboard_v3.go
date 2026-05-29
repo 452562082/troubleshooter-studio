@@ -24,23 +24,35 @@ import (
 	"strings"
 )
 
-// kuboardDetectVersion 探测 Kuboard 大版本:命中 v4 的 cluster-namespace-tree(200/401/403)
-// 即 v4;404 = 该路由不存在 = v3。网络错按 v4 兜底(保持老行为,真实调用会再报错)。
+// kuboardDetectVersion 正向识别 Kuboard 大版本:只有 v4 的 cluster-namespace-tree 返 200 且
+// body 是 v4 形态({data:{treeItems}})才判 v4;其余(404/403/5xx/Cloudflare 拦截/传输错误/
+// 非 JSON)一律 v3。guadd 这类 v3 现场该路径恒 404 且套 Cloudflare,旧的"非 404 即 v4"会
+// 因首连传输抖动误判 v4。详见 memory project-kuboard-v3-vs-v4。
 func kuboardDetectVersion(ctx context.Context, c *http.Client, base, accessKey string) string {
 	u := base + "/api/cluster.kuboard.cn/v4/cluster-cache/cluster-namespace-tree?apiGroupName=&resource=configmaps&namespaced=true"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return "v4"
+		return "v3"
 	}
+	req.Header.Set("User-Agent", kuboardUserAgent)
 	if accessKey != "" {
 		req.Header.Set("Kb-Access-Key", accessKey)
 	}
 	resp, err := c.Do(req)
 	if err != nil {
-		return "v4"
+		return "v3"
 	}
-	_ = resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "v3"
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var v struct {
+		Data struct {
+			TreeItems json.RawMessage `json:"treeItems"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &v); err != nil || len(v.Data.TreeItems) == 0 {
 		return "v3"
 	}
 	return "v4"
@@ -59,6 +71,7 @@ func kuboardV3GET(ctx context.Context, c *http.Client, u, cookie string) ([]byte
 	}
 	req.Header.Set("Cookie", cookie)
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", kuboardUserAgent)
 	resp, err := c.Do(req)
 	if err != nil {
 		return nil, 0, err
@@ -312,6 +325,82 @@ func (s *kuboardSetupResult) listK8sObjects(resource, namespace, rawQuery string
 	out := make([]json.RawMessage, 0, len(v.Data.List))
 	for _, it := range v.Data.List {
 		out = append(out, it.Data)
+	}
+	return out, nil
+}
+
+// listK8sObjectsGroup 列某 apiGroup 下的命名空间资源(如 apps/v1 的 deployments)。
+// 跟 listK8sObjects 一样把 v3/v4 差异收敛掉,但支持非 core 的 apiGroup:
+//   - apiPath  形如 "apis/apps/v1",v3 直接拼进 /k8s-api/{cluster}/{apiPath}/...;
+//   - apiGroup 形如 "apps",v4 cluster-cache 用它(core 资源传空串)。
+// rawQuery 是已转义的查询串(如 "labelSelector=app%3Dorder")。返回一组标准 k8s 对象 JSON,
+// 调用方各自 unmarshal。
+func (s *kuboardSetupResult) listK8sObjectsGroup(apiPath, apiGroup, resource, namespace, rawQuery string) ([]json.RawMessage, error) {
+	if s.version == "v3" {
+		// v3:标准 k8s apiserver 代理,GET {base}/k8s-api/{cluster}/{apiPath}/namespaces/{ns}/{resource}
+		u := fmt.Sprintf("%s/k8s-api/%s/%s/namespaces/%s/%s",
+			s.base, url.PathEscape(s.clusterName), apiPath, url.PathEscape(namespace), resource)
+		if rawQuery != "" {
+			u += "?" + rawQuery
+		}
+		body, code, err := kuboardV3GET(s.ctx, s.client, u, s.cookie)
+		if err != nil {
+			return nil, fmt.Errorf("请求 Kuboard 失败: %v;URL=%s", err, u)
+		}
+		if code >= 400 {
+			return nil, fmt.Errorf("HTTP %d;URL=%s;响应=%s", code, u, snippet(body))
+		}
+		var v struct {
+			Items []json.RawMessage `json:"items"`
+		}
+		if err := json.Unmarshal(body, &v); err != nil {
+			return nil, fmt.Errorf("解析 %s 失败:%v;URL=%s;原始=%s", resource, err, u, snippet(body))
+		}
+		return v.Items, nil
+	}
+	// v4:cluster-cache 分页接口,clusterIdNamespaces={uid}/{ns} + apiGroup 参数。
+	u := fmt.Sprintf("%s/api/cluster.kuboard.cn/v4/cluster-cache"+
+		"?pageNum=1&pageSize=500&apiGroup=%s&resource=%s&namespaced=true"+
+		"&clusterIdNamespaces=%s%%2F%s&orderBy=name",
+		s.base, url.QueryEscape(apiGroup), url.QueryEscape(resource),
+		url.QueryEscape(s.clusterUID), url.QueryEscape(namespace))
+	if rawQuery != "" {
+		u += "&" + rawQuery
+	}
+	req, err := http.NewRequestWithContext(s.ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Kb-Access-Key", s.token)
+	req.Header.Set("User-Agent", kuboardUserAgent)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("请求 Kuboard 失败: %v;URL=%s", err, u)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("HTTP %d;URL=%s;响应=%s", resp.StatusCode, u, snippet(raw))
+	}
+	// cluster-cache 分页 list[i] 可能平铺,也可能包一层 {data:...};两种都取出来。
+	var v struct {
+		Data struct {
+			List []json.RawMessage `json:"list"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, fmt.Errorf("解析 %s 失败:%v;URL=%s;原始=%s", resource, err, u, snippet(raw))
+	}
+	out := make([]json.RawMessage, 0, len(v.Data.List))
+	for _, item := range v.Data.List {
+		var wrapped struct {
+			Data json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal(item, &wrapped); err == nil && len(wrapped.Data) > 0 {
+			out = append(out, wrapped.Data) // 嵌套 {data:<obj>}
+		} else {
+			out = append(out, item) // 平铺 <obj>
+		}
 	}
 	return out, nil
 }

@@ -117,12 +117,21 @@ export function useKuboardPreload(deps: UseKuboardPreloadDeps) {
     const username = (envCreds.username || '').trim()
     const password = (envCreds.password || '').trim()
     const clusterHint = (envCreds.cluster_hint || '').trim() // Kuboard v3 必填(v4 忽略)
+    // auth_mode 默认 access_key(没填过时按推荐项算,跟 isFieldHidden 同款兜底)
+    const authMode = (envCreds.auth_mode || '').trim() || 'access_key'
     if (!url) {
       toast.error(`${envID}: 先填 Kuboard URL`)
       return
     }
     if (!accessKey && (!username || !password)) {
       toast.error(`${envID}: 鉴权填 API 访问凭证(优先),或 用户名+密码`)
+      return
+    }
+    // Kuboard v3 走 access-key 时鉴权靠 Cookie KuboardUsername,必须有用户名;v4 access-key
+    // 不需要用户名。前端无法可靠区分 v3/v4,故 access-key 模式下用户名空就拦截 —— 现场默认
+    // 是 v3,漏填用户名会在运行时报 no-username。v4 用户可忽略此要求改用「用户名+密码」鉴权。
+    if (authMode === 'access_key' && !username) {
+      toast.error(`${envID}: Kuboard v3(API 访问凭证)需要填用户名;若是 v4 可改用「用户名+密码」鉴权`)
       return
     }
     deps.kuboardStateByEnv[envID] = { status: 'loading' }

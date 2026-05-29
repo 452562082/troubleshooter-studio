@@ -154,6 +154,7 @@ func kuboardFetchConfigMapDataV4(ctx context.Context, c *http.Client, base, toke
 		return nil, err
 	}
 	req.Header.Set("Kb-Access-Key", token)
+	req.Header.Set("User-Agent", kuboardUserAgent)
 	resp, err := c.Do(req)
 	if err != nil {
 		return nil, err

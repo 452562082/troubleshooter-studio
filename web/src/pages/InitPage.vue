@@ -1108,18 +1108,28 @@ async function runK8sRtPreload(envID: string) {
   const obsAccessKey = (toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'access_key')] || '').trim()
   const obsUser = (toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'username')] || '').trim()
   const obsPass = toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'password')] || ''
+  const obsAuthMode = (toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'auth_mode')] || '').trim()
   const fallback = sourceCreds['kuboard']?.creds?.[envID] || {}
   const url = obsURL || (fallback.url || '').trim()
   const accessKey = obsAccessKey || (fallback.access_key || '').trim()
   const username = obsUser || (fallback.username || '').trim()
   const password = obsPass || fallback.password || ''
   const clusterHint = (fallback.cluster_hint || '').trim() // Kuboard v3 必填(v4 忽略)
+  // auth_mode 默认 access_key(没填过时按推荐项算,跟 isFieldHidden 同款兜底)
+  const authMode = obsAuthMode || (fallback.auth_mode || '').trim() || 'access_key'
   if (!url) {
     toast.error(`${envID}: 先填 Kuboard URL(可观测性 K8s 运行时 字段)`)
     return
   }
   if (!accessKey && (!username || !password)) {
     toast.error(`${envID}: 鉴权填 API 访问凭证 或 用户名+密码`)
+    return
+  }
+  // Kuboard v3 走 access-key 时鉴权靠 Cookie KuboardUsername,必须有用户名;v4 access-key
+  // 不需要。前端无法可靠区分 v3/v4,故 access-key 模式下用户名空就拦截 —— 现场默认是 v3,
+  // 漏填用户名会在运行时报 no-username。v4 用户可忽略此要求改用「用户名+密码」鉴权。
+  if (authMode === 'access_key' && !username) {
+    toast.error(`${envID}: Kuboard v3(API 访问凭证)需要填用户名;若是 v4 可改用「用户名+密码」鉴权`)
     return
   }
   kuboardStateByEnv[envID] = { status: 'loading' }
@@ -1287,8 +1297,9 @@ const CC_FIELDS_BY_TYPE = computed<Record<string, CredField[]>>(() => {
         uiOnly: true,
       },
       { key: 'access_key', label: 'API 访问凭证', secret: true, envVar: (e) => `KUBOARD_ACCESS_KEY_${e.toUpperCase()}`, placeholder: 'v3: 密钥ID.密钥(如 scyfw6txxw7i.x6t2…);v4: 单串 token', showWhen: { field: 'auth_mode', equals: 'access_key' } },
-      // username 两种鉴权模式都显示:v3 access-key 也要 KuboardUsername(Cookie 必带);v4 access-key 模式可留空。
-      { key: 'username', label: '用户名(v3 必填;v4 仅账密模式)', secret: false, envVar: (e) => `KUBOARD_USER_${e.toUpperCase()}`, placeholder: 'admin' },
+      // username 两种鉴权模式都显示:Kuboard v3 免账密(access-key)其实走 Cookie KuboardUsername=<user>,
+      //   必须有用户名;v4 走 access-key 时可留空。故不设 showWhen,两模式都可填。
+      { key: 'username', label: '用户名(v3 必填 / Cookie KuboardUsername)', secret: false, envVar: (e) => `KUBOARD_USER_${e.toUpperCase()}`, placeholder: 'Kuboard v3 走 access-key 时也要填;v4 可留空', optional: true },
       { key: 'password', label: '密码', secret: true, envVar: (e) => `KUBOARD_PASS_${e.toUpperCase()}`, showWhen: { field: 'auth_mode', equals: 'username_password' } },
       // cluster_hint:Kuboard v3 无法用 access-key 枚举集群,需先填集群名再"拉资源"(uiOnly,不写 yaml;
       // 真正落 yaml 的是下面 per-service 的 cluster 三联映射)。v4 留空(tree 自动列全部集群)。
@@ -1707,8 +1718,9 @@ const OBS_TOOL_SPECS: ToolSpec[] = [
         uiOnly: true,
       },
       { key: 'access_key', label: 'API 访问凭证', secret: true, envVar: (e) => `KUBOARD_ACCESS_KEY_${e.toUpperCase()}`, placeholder: 'v3: 密钥ID.密钥;v4: 单串 token', showWhen: { field: 'auth_mode', equals: 'access_key' } },
-      // v3 access-key 也要 KuboardUsername(Cookie 必带);两模式都显示。集群名复用配置源的"集群名"输入。
-      { key: 'username', label: '用户名(v3 必填;v4 仅账密模式)', secret: false, envVar: (e) => `KUBOARD_USER_${e.toUpperCase()}`, placeholder: 'admin' },
+      // v3 免账密(access-key)走 Cookie KuboardUsername=<user>,必须有用户名;两模式都显示。
+      //   集群名复用配置源的"集群名"输入。
+      { key: 'username', label: '用户名(v3 必填 / Cookie KuboardUsername)', secret: false, envVar: (e) => `KUBOARD_USER_${e.toUpperCase()}`, placeholder: 'Kuboard v3 走 access-key 时也要填;v4 可留空', optional: true },
       { key: 'password', label: '密码', secret: true, envVar: (e) => `KUBOARD_PASS_${e.toUpperCase()}`, showWhen: { field: 'auth_mode', equals: 'username_password' } },
     ],
   },

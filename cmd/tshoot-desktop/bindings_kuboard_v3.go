@@ -140,7 +140,7 @@ func isSystemNamespace(ns string) bool {
 // 跟 v4 的 KuboardListResources 返回同一个 *KuboardResources,前端 cascade UI 通吃。
 func kuboardListResourcesV3(ctx context.Context, c *http.Client, base, username, accessKey, cluster string) (*KuboardResources, error) {
 	if username == "" {
-		return nil, fmt.Errorf("Kuboard v3 鉴权需要用户名(Cookie KuboardUsername);accessKey 形态应为 <密钥ID>.<密钥>")
+		return nil, fmt.Errorf("kuboard v3 鉴权需要用户名(Cookie KuboardUsername);accessKey 形态应为 <密钥ID>.<密钥>")
 	}
 	if cluster == "" {
 		return &KuboardResources{Notes: []string{
@@ -217,7 +217,7 @@ func kuboardV3ListConfigMapNames(ctx context.Context, c *http.Client, base, cook
 // (k8s-env-flat:cm.data 这个 map[string]string 直接 JSON 编码,前端按前缀重塑)。
 func kuboardFetchConfigMapsV3(ctx context.Context, c *http.Client, base, username, accessKey string, items []KuboardFetchBatchItem) (*KuboardFetchBatchResult, error) {
 	if username == "" {
-		return nil, fmt.Errorf("Kuboard v3 鉴权需要用户名(Cookie KuboardUsername);accessKey 形态应为 <密钥ID>.<密钥>")
+		return nil, fmt.Errorf("kuboard v3 鉴权需要用户名(Cookie KuboardUsername);accessKey 形态应为 <密钥ID>.<密钥>")
 	}
 	cookie := kuboardV3Cookie(username, accessKey)
 	res := &KuboardFetchBatchResult{}
@@ -333,6 +333,7 @@ func (s *kuboardSetupResult) listK8sObjects(resource, namespace, rawQuery string
 // 跟 listK8sObjects 一样把 v3/v4 差异收敛掉,但支持非 core 的 apiGroup:
 //   - apiPath  形如 "apis/apps/v1",v3 直接拼进 /k8s-api/{cluster}/{apiPath}/...;
 //   - apiGroup 形如 "apps",v4 cluster-cache 用它(core 资源传空串)。
+//
 // rawQuery 是已转义的查询串(如 "labelSelector=app%3Dorder")。返回一组标准 k8s 对象 JSON,
 // 调用方各自 unmarshal。
 func (s *kuboardSetupResult) listK8sObjectsGroup(apiPath, apiGroup, resource, namespace, rawQuery string) ([]json.RawMessage, error) {

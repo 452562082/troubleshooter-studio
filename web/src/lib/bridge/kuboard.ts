@@ -11,12 +11,14 @@ export type KuboardResources = main.KuboardResources
 
 /** Kuboard 资源拉取:登录 → 列 cluster/ns/cm 三层。
  *  鉴权:accessKey(Kuboard 后台个人中心→API 访问凭证创建,免账密)优先;
- *  否则用 username+password 走 /login。loginPath 已废弃(v4 路径固定)。 */
+ *  否则用 username+password 走 /login。
+ *  clusterHint:Kuboard **v3** 必填 —— v3 无法用 access-key 枚举集群,需指定集群名
+ *  (access-key 形态为 <密钥ID>.<密钥> + 必须配 username)。v4 忽略此参(tree 列全部)。 */
 export async function kuboardListResources(
-  url: string, username: string, password: string, accessKey = '', loginPath = '',
+  url: string, username: string, password: string, accessKey = '', clusterHint = '',
 ): Promise<KuboardResources> {
   if (!isDesktop()) throw new Error('Kuboard 拉取只在桌面 app 里可用')
-  return App.KuboardListResources(url, username, password, accessKey, loginPath)
+  return App.KuboardListResources(url, username, password, accessKey, clusterHint)
 }
 
 /** 批量拉 N 个 (cluster, namespace, configmap) 的 data 字段;

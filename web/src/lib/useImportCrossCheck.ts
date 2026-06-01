@@ -217,7 +217,9 @@ export function useImportCrossCheck(deps: UseImportCrossCheckDeps) {
     }
     deps.kuboardStateByEnv[envID] = { status: 'loading' }
     try {
-      const res = await kuboardListResources(url, username, password, accessKey)
+      // Kuboard v3 需指定集群名;import 流程从 yaml 反填的 service_map 里直接拿(已知)。
+      const clusterHint = yamlEntries.find(e => e.cluster)?.cluster || ''
+      const res = await kuboardListResources(url, username, password, accessKey, clusterHint)
       const clusters = (res.clusters || []).map(c => ({
         name: c.name,
         namespaces: (c.namespaces || []).map(n => ({
@@ -362,7 +364,8 @@ export function useImportCrossCheck(deps: UseImportCrossCheckDeps) {
             || (deps.sourceCreds['kuboard']?.creds?.[envID]?.password || '').trim()
           if (!obsURL || (!obsKey && (!obsUser || !obsPass))) return
           try {
-            const res = await kuboardListResources(obsURL, obsUser, obsPass, obsKey)
+            // v3 需集群名;k8s_runtime 的 envLoc 里已有 loc.cluster。
+            const res = await kuboardListResources(obsURL, obsUser, obsPass, obsKey, loc.cluster || '')
             const cl = (res.clusters || []).find(c => c.name === loc.cluster)
             if (!cl) {
               pushLog('cchub', 'warn',

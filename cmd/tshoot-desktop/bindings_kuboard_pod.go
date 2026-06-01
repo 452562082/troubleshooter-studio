@@ -61,32 +61,25 @@ func (a *App) KuboardListPods(in KuboardListPodsInput) ([]KuboardPodInfo, error)
 	}
 	defer s.cancel()
 
-	q := fmt.Sprintf("resource=pods&namespace=%s", url.QueryEscape(in.Namespace))
+	rawQuery := ""
 	if in.LabelSelector != "" {
-		q += "&labelSelector=" + url.QueryEscape(in.LabelSelector)
+		rawQuery = "labelSelector=" + url.QueryEscape(in.LabelSelector)
 	}
-	raw, err := kuboardDirectGET(s, q)
+	objs, err := s.listK8sObjects("pods", in.Namespace, rawQuery)
 	if err != nil {
 		return nil, err
 	}
-	// pods list 形:{data:{list:[{data:{metadata,spec,status}}]}}
-	var v struct {
-		Data struct {
-			List []struct {
-				Data k8sPod `json:"data"`
-			} `json:"list"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return nil, fmt.Errorf("解析 pod 列表失败:%v;原始:%s", err, snippet(raw))
-	}
-	out := make([]KuboardPodInfo, 0, len(v.Data.List))
-	for _, it := range v.Data.List {
-		p := summarizePod(it.Data)
-		if in.PodNameFilter != "" && !strings.Contains(p.Name, in.PodNameFilter) {
+	out := make([]KuboardPodInfo, 0, len(objs))
+	for _, raw := range objs {
+		var p k8sPod
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, fmt.Errorf("解析 pod 失败:%v;原始:%s", err, snippet(raw))
+		}
+		pi := summarizePod(p)
+		if in.PodNameFilter != "" && !strings.Contains(pi.Name, in.PodNameFilter) {
 			continue
 		}
-		out = append(out, p)
+		out = append(out, pi)
 	}
 	return out, nil
 }
@@ -194,14 +187,33 @@ func (a *App) KuboardGetPodLogs(in KuboardGetPodLogsInput) (string, error) {
 	if tail <= 0 {
 		tail = 200
 	}
-	// Kuboard v4 logs:走 cluster-cache/direct 的子路径或专用 /pod-logs;
-	// 兼容性:实测 cluster-cache/direct 不返 logs,需 /pod-logs 端点
+
+	var u string
+	if s.version == "v3" {
+		// v3:标准 k8s pod logs,返 plain text。
+		u = fmt.Sprintf("%s/k8s-api/%s/api/v1/namespaces/%s/pods/%s/log?tailLines=%d&previous=%v",
+			s.base, url.PathEscape(s.clusterName), url.PathEscape(in.Namespace),
+			url.PathEscape(in.PodName), tail, in.Previous)
+		if in.Container != "" {
+			u += "&container=" + url.QueryEscape(in.Container)
+		}
+		body, code, err := kuboardV3GET(s.ctx, s.client, u, s.cookie)
+		if err != nil {
+			return "", err
+		}
+		if code >= 400 {
+			return "", fmt.Errorf("HTTP %d:%s", code, snippet(body))
+		}
+		return string(body), nil
+	}
+
+	// v4:专用 /pod-logs(cluster-cache/direct 不返 logs)。
 	q := fmt.Sprintf("clusterId=%s&namespace=%s&podName=%s&tailLines=%d&previous=%v",
 		s.clusterUID, url.QueryEscape(in.Namespace), url.QueryEscape(in.PodName), tail, in.Previous)
 	if in.Container != "" {
 		q += "&container=" + url.QueryEscape(in.Container)
 	}
-	u := s.base + "/api/cluster.kuboard.cn/v4/pod-logs?" + q
+	u = s.base + "/api/cluster.kuboard.cn/v4/pod-logs?" + q
 	req, err := http.NewRequestWithContext(s.ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return "", err
@@ -263,44 +275,38 @@ func (a *App) KuboardListEvents(in KuboardListEventsInput) ([]KuboardEvent, erro
 	if limit <= 0 {
 		limit = 20
 	}
-	q := fmt.Sprintf("resource=events&namespace=%s", url.QueryEscape(in.Namespace))
+	rawQuery := ""
 	if in.FieldSelector != "" {
-		q += "&fieldSelector=" + url.QueryEscape(in.FieldSelector)
+		rawQuery = "fieldSelector=" + url.QueryEscape(in.FieldSelector)
 	}
-	raw, err := kuboardDirectGET(s, q)
+	objs, err := s.listK8sObjects("events", in.Namespace, rawQuery)
 	if err != nil {
 		return nil, err
 	}
-	var v struct {
-		Data struct {
-			List []struct {
-				Data struct {
-					Type           string `json:"type"`
-					Reason         string `json:"reason"`
-					Message        string `json:"message"`
-					Count          int    `json:"count"`
-					InvolvedObject struct {
-						Kind, Name string
-					} `json:"involvedObject"`
-					FirstTimestamp string `json:"firstTimestamp"`
-					LastTimestamp  string `json:"lastTimestamp"`
-				} `json:"data"`
-			} `json:"list"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return nil, fmt.Errorf("解析 events 失败:%v;原始:%s", err, snippet(raw))
-	}
-	out := make([]KuboardEvent, 0, len(v.Data.List))
-	for _, it := range v.Data.List {
-		if in.OnlyWarnings && it.Data.Type != "Warning" {
+	out := make([]KuboardEvent, 0, len(objs))
+	for _, raw := range objs {
+		var e struct {
+			Type           string `json:"type"`
+			Reason         string `json:"reason"`
+			Message        string `json:"message"`
+			Count          int    `json:"count"`
+			InvolvedObject struct {
+				Kind, Name string
+			} `json:"involvedObject"`
+			FirstTimestamp string `json:"firstTimestamp"`
+			LastTimestamp  string `json:"lastTimestamp"`
+		}
+		if err := json.Unmarshal(raw, &e); err != nil {
+			return nil, fmt.Errorf("解析 event 失败:%v;原始:%s", err, snippet(raw))
+		}
+		if in.OnlyWarnings && e.Type != "Warning" {
 			continue
 		}
 		out = append(out, KuboardEvent{
-			Type: it.Data.Type, Reason: it.Data.Reason, Message: it.Data.Message,
-			InvolvedObject: it.Data.InvolvedObject.Kind + "/" + it.Data.InvolvedObject.Name,
-			Count:          it.Data.Count,
-			FirstTimestamp: it.Data.FirstTimestamp, LastTimestamp: it.Data.LastTimestamp,
+			Type: e.Type, Reason: e.Reason, Message: e.Message,
+			InvolvedObject: e.InvolvedObject.Kind + "/" + e.InvolvedObject.Name,
+			Count:          e.Count,
+			FirstTimestamp: e.FirstTimestamp, LastTimestamp: e.LastTimestamp,
 		})
 		if len(out) >= limit {
 			break

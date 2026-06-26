@@ -1,69 +1,84 @@
-# CHECKLIST.md - {{.Agent.Name}}开工自检
+# CHECKLIST.md - {{.Agent.Name}} 开工自检
 
-每次排障开工前先过一遍。未完成项需在首条技术回复里说明阻塞。
+排障前快速过一遍。缺项需要在首条技术回复里说明。
 
-## 1) 环境确认
-- [ ] 已确认目标环境（{{range $i, $e := .Environments}}{{if $i}}/{{end}}{{$e.ID}}{{end}}）或明确为"全部环境"
-- [ ] 已确认并记录实测域名
+## 1. 环境
 
-## 2) 代码基线确认
+- [ ] 已确认目标环境：{{range $i, $e := .Environments}}{{if $i}} / {{end}}{{$e.ID}}{{end}}，或明确为全部环境
+- [ ] 已确认实测域名
+
+## 2. 代码基线
+
 - [ ] 已执行 `git fetch --all --prune`
 - [ ] 已通过 `routing` 确认目标分支
-- [ ] 已切到目标分支并 `git pull --ff-only`
-- [ ] 已记录分析基线 commit hash
+- [ ] 已切到目标分支并执行 `git pull --ff-only`
+- [ ] 已记录 baseline commit hash
 {{- $hasUmbrella := false -}}
 {{- range .Repos -}}{{- if .ParentRepo -}}{{- $hasUmbrella = true -}}{{- end -}}{{- end }}
 {{- if $hasUmbrella }}
 
-> **本系统有 umbrella + 子模块关系**(看 `repo-stack-map.yaml` 里的 `parent_repo` 字段)。子模块代码躺在 `<umbrella-clone>/<parent_path>`,production 跑的是 umbrella git submodule pin 的 commit,**不是子模块自己 main 分支的 HEAD**。代码基线要按下面这样取:
-> - **要排障的是 umbrella 子模块** → 在 **umbrella 仓**目录跑 `git fetch --all && git pull --ff-only && git submodule update --init --recursive`,子模块自动 checkout 到 umbrella 当前 pin 的 commit。**不要单独 cd 进子模块跑 git pull**(会拉到子模块自己的最新 HEAD,跟 production 实际部署的 commit 不一致,代码定位错位)
-> - **要看子模块自己 main 分支的最新代码**(比如对照 PR 是不是已 merge)→ 才单独 cd 子模块 `git fetch && git log origin/main`,但分析时仍以 umbrella pin 的 commit 为准
-> - 记 baseline 时同时记 umbrella commit + 子模块 commit 两个 hash
+本系统有 umbrella + 子模块关系。排障子模块时：
+
+- [ ] 在 umbrella 仓执行 `git fetch --all && git pull --ff-only && git submodule update --init --recursive`
+- [ ] 未单独在子模块目录 `git pull`
+- [ ] 已记录 umbrella commit 和子模块 commit
 {{- end }}
 
-## 3) 取证链路确认
+## 3. 取证链路
+
 {{- if or (eq .Infrastructure.PrimaryConfigCenter.Type "nacos") (eq .Infrastructure.PrimaryConfigCenter.Type "apollo") (eq .Infrastructure.PrimaryConfigCenter.Type "consul")}}
-- [ ] {{.Infrastructure.PrimaryConfigCenter.Type}} 场景已先用 `routing` 解析配置标识
-- [ ] 已按 `config-executor` 执行读取/历史/对比
+- [ ] 已用 `routing` 解析配置标识
+- [ ] 已按 `config-executor` 读取当前值、历史和 diff
 {{- end}}
 {{- if eq .Infrastructure.PrimaryConfigCenter.Type "env-vars"}}
-- [ ] 确认 `resolve_runtime_static.py --env <env>` 能正确输出数据层连接串
+- [ ] `resolve_runtime_static.py --env <env>` 能输出数据层连接串
 {{- end}}
 {{- if eq .Infrastructure.PrimaryConfigCenter.Type "kubernetes"}}
-- [ ] 确认 `kubectl get configmap/secret` 可达且有 RBAC 权限
-- [ ] 确认 `resolve_runtime_k8s.py --env <env>` 能正确输出数据层连接串
+- [ ] `kubectl get configmap/secret` 可达且有 RBAC 权限
+- [ ] `resolve_runtime_k8s.py --env <env>` 能输出数据层连接串
 {{- end}}
-- [ ] 已按链路执行：{{if or (eq .Infrastructure.PrimaryConfigCenter.Type "nacos") (eq .Infrastructure.PrimaryConfigCenter.Type "apollo") (eq .Infrastructure.PrimaryConfigCenter.Type "consul")}}配置中心/{{end}}可观测性走可用 MCP；数据层走对应 skill（{{$first := true}}{{range .Infrastructure.DataStores}}{{if .Enabled}}{{if not $first}}、{{end}}{{$first = false}}{{dataStoreSkill .Type}}{{end}}{{end}}）
-- [ ] 任一步骤不可用时，已明确阻塞点并给出可执行兜底链路
+- [ ] 可观测性走可用 MCP 或明确 fallback
+- [ ] 数据层走对应 skill：{{$first := true}}{{range .Infrastructure.DataStores}}{{if .Enabled}}{{if not $first}}、{{end}}{{$first = false}}{{dataStoreSkill .Type}}{{end}}{{end}}
+- [ ] 不可用步骤已记录阻塞点和替代链路
 {{- if hasSkill . "k8s-runtime-query" }}
 
-## 3.5) K8s 运行时确认
-- [ ] 已通过 `routing` 解析得到目标 cluster + namespace + 服务的 label selector
-- [ ] 已用 `k8s-runtime-query::KuboardPodSnapshot` 拿一站式快照：pod 状态 + 最近 events + 主容器日志（current/previous）
-- [ ] 若 pod `restartCount > 0`，已查看 `logs_previous` 找上次崩溃栈
-- [ ] 若需要看 Deployment 滚动状态，已用 `KuboardListDeployments` 看 `availableReplicas / readyReplicas` 是否到位
+## 4. K8s
+
+- [ ] 已通过 `routing` 得到 cluster、namespace、label selector
+- [ ] 已用 `k8s-runtime-query` 获取 pod 状态、events、current/previous logs
+- [ ] `restartCount > 0` 时已查看 previous logs
+- [ ] 需要 Deployment 状态时，已查看 `availableReplicas / readyReplicas`
 {{- end }}
 
-## 4) 配置与鉴权确认
-- [ ] 已确认关键配置项（开关、路由、下游地址）
+## 5. 配置与鉴权
+
+- [ ] 已确认关键开关、路由、下游地址
+- [ ] 涉及 host/IP/端口/连接串时，以 runtime 配置源为准，不只看代码默认值
 
 {{- if .Infrastructure.Observability.Jaeger.Enabled}}
+## 6. 链路追踪
 
-## 4.5) 链路追踪确认
-- [ ] 已尝试获取 trace ID（从日志 / 响应头 / 用户反馈中）
-- [ ] 若有 trace ID，已通过 `tracing-query` 展开 span 树
-- [ ] 若无 trace ID，已按 service + 时间范围搜索
+- [ ] 已尝试从日志、响应头或用户反馈获取 trace ID
+- [ ] 有 trace ID 时已展开 span 树
+- [ ] 无 trace ID 时已按 service + 时间范围搜索
+
 {{- end}}
+## 7. 证据链
 
-## 5) 证据链确认
-- [ ] 至少一种证据已就位：真实日志 / 实测请求返回 / 代码定位{{if .Infrastructure.Observability.Jaeger.Enabled}} / trace 链路{{end}}
-- [ ] 涉及接口返回时，已保留请求体与关键响应字段
+- [ ] 至少一种真实证据已就位：日志 / 实测请求 / 代码定位{{if .Infrastructure.Observability.Jaeger.Enabled}} / trace{{end}}
+- [ ] 涉及接口返回时，已保留请求体和关键响应字段
+- [ ] 数据/状态/计算/规则类问题已查代码和数据
 
-## 6) 结论质量确认
+## 8. 结论
+
+- [ ] 已区分现象、根因、建议动作
 - [ ] 结论可复现、可验证
-- [ ] 已区分"现象 / 根因 / 建议动作"
+- [ ] `confidence=low` 时未给改生产命令
 
-## 7) 沉淀(`confidence=high` 必跑,见 `incident-investigator/SKILL.md` Step 7)
-- [ ] 故障快报最后段已含沉淀草稿 JSON(`pattern` + `typical_cause` + `next_actions`)
-- [ ] 已**实际执行** `python3 scripts/sink_postmortem.py --input ...`(不是只描述要做)
-- [ ] sink 脚本退出码 0(stderr 显示 `[ok]` 或 `[skip] 已存在`,任一都算完成)
+## 9. 沉淀
+
+`confidence=high` 必做：
+
+- [ ] 故障快报最后含沉淀草稿 JSON：`pattern`、`typical_cause`、`next_actions`
+- [ ] 已执行 `python3 skills/incident-investigator/scripts/sink_postmortem.py --input ...`
+- [ ] 脚本退出码 0，stderr 显示 `[ok]` 或 `[skip] 已存在`

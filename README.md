@@ -76,6 +76,13 @@ curl -fsSL https://raw.githubusercontent.com/452562082/troubleshooter-studio/mai
 - [GitHub Releases](https://github.com/452562082/troubleshooter-studio/releases)
 - [GitLab Releases](https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/releases)
 
+如果公开 GitLab 源仍提示拿不到 release 列表，先检查本机是否残留无效 token：
+
+```bash
+env | grep GITLAB_TOKEN
+unset GITLAB_TOKEN    # 公开项目可直接匿名访问
+```
+
 ### 桌面 app，手动安装 dmg
 
 1. 下载 `TroubleshooterStudio-vX.Y.Z.dmg.zip`

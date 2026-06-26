@@ -97,7 +97,22 @@ if [[ -z "$VERSION" ]]; then
             exit 1
         fi
     else
-        resp=$(fetch -sS "$API/releases?per_page=1" 2>/dev/null || true)
+        release_err_file=$(mktemp "${TMPDIR:-/tmp}/tshoot-release-err.XXXXXX")
+        resp=""
+        if ! resp=$(fetch -sS "$API/releases?per_page=1" 2>"$release_err_file"); then
+            release_err=$(cat "$release_err_file" 2>/dev/null || true)
+            rm -f "$release_err_file"
+            if [[ -n "${GITLAB_TOKEN:-}" ]]; then
+                echo "✗ 查询 GitLab release 失败:GITLAB_TOKEN 无效或已过期,或缺少 read_api scope" >&2
+                [[ -n "$release_err" ]] && echo "  curl: $release_err" >&2
+            else
+                echo "✗ 查询 GitLab release 失败(项目可能私有,或网络/API 不可达)" >&2
+                [[ -n "$release_err" ]] && echo "  curl: $release_err" >&2
+                echo "  私有项目:export GITLAB_TOKEN=glpat-xxx 后重跑(scope=read_api)" >&2
+            fi
+            exit 1
+        fi
+        rm -f "$release_err_file"
         if [[ -z "$resp" || "$resp" == "[]" ]]; then
             echo "✗ 拿不到 release 列表(项目可能私有,设 GITLAB_TOKEN env 后重跑)" >&2
             echo "  GitLab → Preferences → Access Tokens → 创建 scope=read_api 的 token" >&2

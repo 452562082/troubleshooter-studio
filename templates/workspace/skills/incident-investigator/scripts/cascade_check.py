@@ -79,16 +79,29 @@ def detect_workspace_root() -> Path:
 
 def parse_dep_map(yaml_text: str) -> dict[str, dict[str, Any]]:
     """简单文本解析 service-dependency-map.yaml(避免引 PyYAML 强依赖)。
-    支持的形态:
+    两种列表写法都支持(生成器 service-dependency-map.yaml.tmpl 实际产出的是 **block 风格**):
+
         services:
-          <name>:
-            upstream: [a, b]
+          svc-inline:
+            upstream: [a, b]                  # inline 列表
             downstream: [c, d]
-            data_stores: ["mysql:foo", "redis:bar"]
+            data_stores: ["mysql:foo"]
+          svc-block:
+            upstream:                         # block 列表(生成器默认产出这种)
+              - a
+              - b
+            downstream:
+              - c
+            data_stores:
+              - "mysql:foo"
             critical: true
+
+    历史坑(2026-06):旧版只认 inline,block 风格被静默跳过 → 自动生成的依赖图
+    downstream 永远空 → incident-investigator Step 4 形同虚设。block 解析是核心,不是 nice-to-have。
     """
     result: dict[str, dict[str, Any]] = {}
     cur_svc = ''
+    cur_field = ''  # 非空表示正在收集该字段的 block 列表项(`- xxx`)
     in_services = False
     for raw in yaml_text.splitlines():
         if raw.strip().startswith('#') or not raw.strip():
@@ -98,10 +111,19 @@ def parse_dep_map(yaml_text: str) -> dict[str, dict[str, Any]]:
             continue
         if not in_services:
             continue
+        # block 列表项(比 service/field 缩进更深的 `- xxx`)—— 先于其它规则判
+        mi = re.match(r'^\s+-\s+(.*)$', raw)
+        if mi and cur_svc and cur_field in ('upstream', 'downstream', 'data_stores'):
+            item = mi.group(1).strip().strip('"\'')
+            # 去掉行尾注释(block item 一般不带,稳妥处理)
+            if item:
+                result[cur_svc][cur_field].append(item)
+            continue
         # 服务名层(2 空格缩进)
         m = re.match(r'^  ([\w\-\.]+):\s*$', raw)
         if m:
             cur_svc = m.group(1)
+            cur_field = ''
             result[cur_svc] = {'upstream': [], 'downstream': [], 'data_stores': [], 'critical': False}
             continue
         if not cur_svc:
@@ -111,16 +133,17 @@ def parse_dep_map(yaml_text: str) -> dict[str, dict[str, Any]]:
         if not ms:
             continue
         field, val = ms.group(1), ms.group(2).strip()
+        cur_field = ''  # 默认退出 block 收集;命中 block 字段时下面再开启
         if field == 'critical':
             result[cur_svc]['critical'] = val.lower() == 'true'
         elif val.startswith('['):
-            # inline 列表 ["a", "b"]
+            # inline 列表 ["a", "b"](含空 []:inner 为空 → 空列表)
             inner = val.strip('[]').strip()
             items = [i.strip().strip('"\'') for i in inner.split(',') if i.strip()]
             result[cur_svc][field] = items
         elif val == '':
-            # block 列表后续 - <item>;此处不展开,跳过(简单解析器局限,够 wizard 占位用)
-            pass
+            # block 列表:进入收集模式,后续更深缩进的 `- item` 行累加到本字段
+            cur_field = field
     return result
 
 

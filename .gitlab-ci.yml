@@ -217,8 +217,10 @@ desktop:
   # WEB_PRE_BUILT=1 让 Makefile 跳过 web 子任务(已经从 artifact 拿到 internal/webui/dist)
   script:
     - go version
-    - test -d internal/webui/dist && test -f internal/webui/dist/index.html \
-        || { echo "✗ 没拿到 web artifact(internal/webui/dist),需要先跑 web job" >&2; exit 1; }
+    # 注:整条必须**单行写**。YAML plain scalar 多行会把换行折叠成空格,行尾 `\` 续行
+    # 会变成字面量 `\ `(反斜杠+空格)塞进命令,导致 `test ... \ || ...` 里 test 把 `||`
+    # 当二元操作符报 "binary operator expected"(pipeline #1008 desktop job 实测踩坑)。
+    - test -d internal/webui/dist && test -f internal/webui/dist/index.html || { echo "✗ 没拿到 web artifact(internal/webui/dist),需要先跑 web job" >&2; exit 1; }
     - SKIP_WEB_BUILD=1 make desktop-app
     # 校验 .app bundle 三件套(可执行二进制 / Info.plist / icon.icns)
     - test -f dist/TroubleshooterStudio.app/Contents/MacOS/TroubleshooterStudio

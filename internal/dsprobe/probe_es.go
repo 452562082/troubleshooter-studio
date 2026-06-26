@@ -1,7 +1,6 @@
 package dsprobe
 
 import (
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -20,13 +19,14 @@ func probeElasticsearch(f map[string]string) (bool, string, error) {
 		rawURL = "http://" + rawURL
 	}
 	rawURL = strings.TrimRight(rawURL, "/")
+	hasCreds := f["user"] != ""
 	cli := &http.Client{
 		Timeout:   probeTimeout,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+		Transport: &http.Transport{TLSClientConfig: TLSConfigForProbe(hasCreds)},
 	}
 	req, _ := http.NewRequest(http.MethodGet, rawURL+"/", nil)
-	if user := f["user"]; user != "" {
-		req.SetBasicAuth(user, f["pass"])
+	if hasCreds {
+		req.SetBasicAuth(f["user"], f["pass"])
 	}
 	resp, err := cli.Do(req)
 	if err != nil {

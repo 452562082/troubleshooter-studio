@@ -14,7 +14,6 @@
 package labelprobe
 
 import (
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,6 +21,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/xiaolong/troubleshooter-studio/internal/dsprobe"
 )
 
 // probeTimeout HTTP 单次请求超时。原本 5s 是按 Loki 默认窗口(1~6h)给的,
@@ -165,9 +166,10 @@ func normalize(addr string) string {
 }
 
 func httpGet(rawURL, apiKey, user, pass string) ([]byte, int, error) {
+	hasCreds := apiKey != "" || user != ""
 	cli := &http.Client{
 		Timeout:   probeTimeout,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+		Transport: &http.Transport{TLSClientConfig: dsprobe.TLSConfigForProbe(hasCreds)},
 	}
 	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {

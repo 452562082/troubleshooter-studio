@@ -309,6 +309,24 @@ routing/config-map.yaml 标 `runtime: <type>-http` 字段告诉 LLM 走脚本。
 
 ---
 
+## 2026-06-26 · 探活 TLS:带凭据默认校验 + 自签 opt-in
+
+**背景**:连通性探活(`dsprobe` / `labelprobe`)一律 `InsecureSkipVerify: true`,但探活会发真凭据(Grafana/ES 的 basic auth、Bearer token)。中间人用伪造证书即可截获这些凭据 —— 跳过校验 = 凭据裸奔。但直接翻成"永远校验"又会打断大量内网自签证书部署的探活(自签在内网很普遍,这也是当初加 `InsecureSkipVerify` 的原因)。
+
+**决策**:**按"是否发凭据"分流**,逃生口走环境变量,**不动 schema/wizard/UI**。
+- 无凭据(纯连通性探测):继续跳过校验 —— 没秘密可被偷,自签误报没必要。
+- 带凭据:**默认校验证书**(`TLSConfigForProbe(hasCreds=true)` 返 `MinVersion: TLS1.2`,不 skip)。
+- 逃生口:确属内网自签 + 带鉴权,用户 `export TSHOOT_INSECURE_TLS=1` 显式放行。探活撞 x509 错时,错误信息直接提示这个开关。
+
+**后果**:
+- 统一 helper `dsprobe.TLSConfigForProbe` + 常量 `dsprobe.InsecureTLSEnv`,`probe_http.go` / `probe_es.go` / `labelprobe/loki.go` 三处复用(labelprobe 反向 import dsprobe,无环)。
+- 行为变更:之前自签 + 带鉴权能直接探通的用户,现在需 export 一次环境变量。属有意为之(安全默认优先,逃生口兜底)。
+- 验证:`internal/dsprobe/tls_test.go` 锁定三态(无凭据 skip / 带凭据校验 / opt-in 放行)。
+
+**演进**:`cmd/tshoot-desktop/bindings_{one2all,kuboard}.go` 的 runtime 数据拉取同样发 token + skip TLS,是同一模式但属另一层(运行时查询,非 install 探活),本次未覆盖,可后续按需复用同一 helper。若将来要做"自签证书指纹 pin"而非全放行,可在 helper 里扩展。
+
+---
+
 ## 历史(SUPERSEDED)
 
 下面记录已被覆盖的历史决策,**不要按这些指引**,留给读 git log 追根溯源的人用。

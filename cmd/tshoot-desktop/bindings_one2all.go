@@ -72,7 +72,7 @@ func one2allMCPCall(mcpURL, token, toolName string, args map[string]any, result 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", mcpURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, mcpURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
@@ -98,7 +98,7 @@ func one2allMCPCall(mcpURL, token, toolName string, args map[string]any, result 
 	if err != nil {
 		return fmt.Errorf("read response: %w", err)
 	}
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("MCP returned %d: %s", resp.StatusCode, string(respBody[:min(len(respBody), 500)]))
 	}
 

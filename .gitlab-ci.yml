@@ -70,7 +70,11 @@ variables:
 go:lint:
   stage: test
   # 用 golangci-lint 官方 image 自带 go + 二进制,**省下每次 wget GitHub release 解压**(老逻辑 ~10s + 依赖 GitHub 可达)
-  image: golangci/golangci-lint:v2.0.2
+  # 版本必须 ≥ go.mod 目标 Go 版本对应的 golangci-lint(linter 只能 lint ≤ 自身构建 Go 版本的项目):
+  # go.mod 是 go1.25 → v2.0.2(go1.24 构建)会 "can't load config: ... lower than targeted Go version 1.25" 直接挂。
+  # v2.4.0 起用 go1.25 构建,v2.9.0 起用 go1.26 构建(兼容 lint go1.25)。这里钉 v2.12.2 跟
+  # .github/workflows/ci.yml 的 golangci-lint-action version 对齐,两边 CI 同一 linter 版本不漂移。
+  image: golangci/golangci-lint:v2.12.2
   interruptible: true
   cache:
     key:

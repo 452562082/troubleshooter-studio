@@ -46,10 +46,10 @@ type ConfigCenter struct {
 type ServiceMapEntry struct {
 	// Namespace = nacos namespaceId / apollo envId / consul kv prefix / kuboard k8s namespace
 	Namespace string `yaml:"namespace,omitempty"`
-	Group     string `yaml:"group,omitempty"`     // nacos 独有
-	DataID    string `yaml:"data_id,omitempty"`   // nacos dataId / consul full kv key
-	AppID     string `yaml:"app_id,omitempty"`    // apollo 独有
-	Cluster   string `yaml:"cluster,omitempty"`   // kuboard 独有:k8s 集群名
+	Group     string `yaml:"group,omitempty"`      // nacos 独有
+	DataID    string `yaml:"data_id,omitempty"`    // nacos dataId / consul full kv key
+	AppID     string `yaml:"app_id,omitempty"`     // apollo 独有
+	Cluster   string `yaml:"cluster,omitempty"`    // kuboard 独有:k8s 集群名
 	ClusterID string `yaml:"cluster_id,omitempty"` // one2all 独有:k8s 集群 ID(数字)
-	ConfigMap string `yaml:"configmap,omitempty"` // kuboard/one2all:k8s ConfigMap 名
+	ConfigMap string `yaml:"configmap,omitempty"`  // kuboard/one2all:k8s ConfigMap 名
 }

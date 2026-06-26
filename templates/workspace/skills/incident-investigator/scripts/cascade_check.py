@@ -147,6 +147,48 @@ def parse_dep_map(yaml_text: str) -> dict[str, dict[str, Any]]:
     return result
 
 
+def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """把每个下游的 verdict 汇总成 Step 4 的总判定。
+
+    关键正确性约束(2026-06 修):`unknown`(查不到 —— 脚本缺失 / kuboard 不通 /
+    超时 / cluster 名错 / creds 缺)**必须单独计数**,绝不能并进 healthy。
+    旧版只数 healthy / degraded,unknown 被吞 → 全部下游查失败时 degraded_count==0
+    误判 `all_healthy` → Step 4 据此判"真因在主角自身"拐错方向(把"下游未知"当"下游健康")。
+
+    verdict 取值:
+      no_downstream_in_map  —— 没有下游(map 没填或 downstream 空)
+      all_healthy           —— 全 healthy,无 degraded 无 unknown
+      downstream_unknown    —— 有 unknown 且没有 degraded(查不到,别当健康;Step 4 不能下主角自身结论)
+      isolated_downstream   —— 恰好 1 个 degraded
+      widespread_downstream —— ≥2 个 degraded
+    (有 degraded 时即便夹杂 unknown 也按 degraded 数判 isolated/widespread,unknown 计数仍在 summary 里暴露。)
+    """
+    healthy = sum(1 for r in results if r.get('verdict') == 'healthy')
+    degraded_results = [r for r in results if r.get('verdict') == 'degraded']
+    unknown_results = [r for r in results if r.get('verdict') not in ('healthy', 'degraded')]
+    degraded_count = len(degraded_results)
+    unknown_count = len(unknown_results)
+
+    if not results:
+        verdict = 'no_downstream_in_map'
+    elif degraded_count == 0:
+        verdict = 'all_healthy' if unknown_count == 0 else 'downstream_unknown'
+    elif degraded_count == 1:
+        verdict = 'isolated_downstream'
+    else:
+        verdict = 'widespread_downstream'
+
+    return {
+        'checked': len(results),
+        'healthy': healthy,
+        'degraded': degraded_count,
+        'unknown': unknown_count,
+        'unknown_targets': [r.get('target') for r in unknown_results],
+        'verdict_root_likely': degraded_results[0]['target'] if degraded_results else '',
+        'verdict': verdict,
+    }
+
+
 def check_one_service(env: str, cluster: str, namespace: str, service: str,
                       ws_root: Path, timeout: int = 25) -> dict[str, Any]:
     """对一个下游服务跑 ns-snapshot,提取 verdict + 关键信号。"""
@@ -170,20 +212,31 @@ def check_one_service(env: str, cluster: str, namespace: str, service: str,
         return {'target': service, 'kind': 'service', 'verdict': 'unknown',
                 'error': str(e)[:200]}
 
-    verdict_raw = data.get('verdict', 'unknown')  # healthy / isolated / widespread
-    verdict = 'healthy' if verdict_raw == 'healthy' else 'degraded'
+    # ns-snapshot verdict:healthy / isolated / widespread / no_pods_matched。
+    # no_pods_matched(label 对不上 / ns 错 / 真没 pod)→ 归 unknown 而非 degraded —— 它是
+    # "查不到"不是"查到异常",summarize 才能正确区分 all_healthy vs downstream_unknown。
+    verdict_raw = data.get('verdict', 'unknown')
+    if verdict_raw == 'healthy':
+        verdict = 'healthy'
+    elif verdict_raw in ('isolated', 'widespread'):
+        verdict = 'degraded'
+    else:  # no_pods_matched / unknown / 其它未预期值
+        verdict = 'unknown'
+    detail = {
+        'total': data.get('total'),
+        'healthy_count': data.get('healthy_count'),
+        'degraded_count': data.get('degraded_count'),
+        'phase_distribution': data.get('phase_distribution'),
+        'known_error_distribution': data.get('known_error_distribution'),
+        'degraded_pods_top3': (data.get('degraded_pods') or [])[:3],
+    }
+    if verdict == 'unknown':
+        detail['reason'] = f'ns-snapshot verdict={verdict_raw}(total={data.get("total")});下游状态未确认'
     return {
         'target': service,
         'kind': 'service',
         'verdict': verdict,
-        'detail': {
-            'total': data.get('total'),
-            'healthy_count': data.get('healthy_count'),
-            'degraded_count': data.get('degraded_count'),
-            'phase_distribution': data.get('phase_distribution'),
-            'known_error_distribution': data.get('known_error_distribution'),
-            'degraded_pods_top3': (data.get('degraded_pods') or [])[:3],
-        },
+        'detail': detail,
     }
 
 
@@ -235,36 +288,37 @@ def main() -> None:
             for f in concurrent.futures.as_completed(futures):
                 results.append(f.result())
 
-    # data_stores 不直接查(每种 type 不同 skill,agent 主动调),只列 hint
+    # data_stores 不直接查(每种 type 不同 skill,agent 主动调),只列 hint。
+    # skill_present:校验该 skill 在本 workspace 真存在(不同系统按 yaml 白名单只装了部分数据层 skill);
+    # 不存在就明示 fallback,避免提示一个不存在的 skill 让 agent 空找(P3:旧版 rocketmq 等就是 dangling)。
     data_store_hints = []
+    skill_map = {
+        'mysql': 'mysql-runtime-query', 'postgresql': 'postgresql-runtime-query',
+        'redis': 'redis-runtime-query', 'mongodb': 'mongodb-runtime-query',
+        'es': 'es-runtime-query', 'elasticsearch': 'es-runtime-query',
+        'kafka': 'kafka-runtime-query',
+        'rabbitmq': 'rabbitmq-runtime-query', 'clickhouse': 'clickhouse-runtime-query',
+    }
     for ds in data_stores:
         ds_type = ds.split(':', 1)[0] if ':' in ds else ds
-        skill_map = {
-            'mysql': 'mysql-runtime-query', 'postgresql': 'postgresql-runtime-query',
-            'redis': 'redis-runtime-query', 'mongodb': 'mongodb-runtime-query',
-            'es': 'es-runtime-query', 'elasticsearch': 'es-runtime-query',
-            'kafka': 'kafka-runtime-query', 'rocketmq': 'rocketmq-runtime-query',
-            'rabbitmq': 'rabbitmq-runtime-query', 'clickhouse': 'clickhouse-runtime-query',
-        }
+        skill = skill_map.get(ds_type, f'{ds_type}-runtime-query')
+        skill_present = (ws_root / 'skills' / skill).exists()
+        if skill_present:
+            note = f'agent 应主动调 {skill} 看 {ds} 是否异常(慢查询 / 连接池 / 命中率)'
+        else:
+            note = (f'本 workspace 未装 {skill} skill —— 改用通用工具核对 {ds}'
+                    f'(对应数据层 MCP 或 CLI;没有则在快报里标该数据层未验证)')
         data_store_hints.append({
             'target': ds,
-            'skill': skill_map.get(ds_type, f'{ds_type}-runtime-query'),
-            'note': f'agent 应主动调 {skill_map.get(ds_type, ds_type)} 看 {ds} 是否异常(慢查询 / 连接池 / 命中率)',
+            'skill': skill,
+            'skill_present': skill_present,
+            'note': note,
         })
 
-    # 汇总
-    healthy = sum(1 for r in results if r.get('verdict') == 'healthy')
-    degraded_results = [r for r in results if r.get('verdict') == 'degraded']
-    degraded_count = len(degraded_results)
-    if not results:
-        verdict = 'no_downstream_in_map'
-    elif degraded_count == 0:
-        verdict = 'all_healthy'
-    elif degraded_count == 1:
-        verdict = 'isolated_downstream'
-    else:
-        verdict = 'widespread_downstream'
-    root_likely = degraded_results[0]['target'] if degraded_results else ''
+    summary = summarize(results)
+    if summary['verdict'] == 'downstream_unknown':
+        notes.append(f"下游 {summary['unknown_targets']} 查不到状态(cluster 名 / label app=<svc> / kuboard 连通 / creds 任一问题);"
+                     '不能据此判"真因在主角自身",先补齐再判,置信度上限锁中')
 
     output = {
         'service': args.service,
@@ -273,18 +327,13 @@ def main() -> None:
         'data_stores': data_stores,
         'results': results,
         'data_store_hints': data_store_hints,
-        'summary': {
-            'checked': len(results),
-            'healthy': healthy,
-            'degraded': degraded_count,
-            'verdict_root_likely': root_likely,
-            'verdict': verdict,
-        },
+        'summary': summary,
         'notes': notes,
         'next_steps_for_agent': [
             'verdict_root_likely 字段指向的服务大概率是真因 → 把它当主角递归一遍 7 步流程(含 Step 7 沉淀)',
             '所有 data_store_hints 列出的数据层 → agent 还要主动调对应 skill 验证,不能只看 K8s 层',
             'verdict=all_healthy 但 metric/log 仍异常 → 真因可能在当前服务自身 / 中间网络 / 共享 DB 锁',
+            'verdict=downstream_unknown → 下游健康状况未知(非健康!),先按 summary.unknown_targets 补 cluster/label/creds 再追,别直接进 Step 5 当主角自身问题',
         ],
     }
     print(json.dumps(output, ensure_ascii=False, indent=2), flush=True)

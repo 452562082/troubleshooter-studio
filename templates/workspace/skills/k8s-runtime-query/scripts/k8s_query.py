@@ -19,6 +19,7 @@ action 列表:
   list-events --cluster <c> --namespace <ns> [--field-selector involvedObject.name=<p>] [--only-warnings]
   list-services --cluster <c> --namespace <ns>
   pod-snapshot --cluster <c> --namespace <ns> [--label-selector k=v]   # 一站式:pods + events + 主 pod logs(curr/prev)
+  ns-snapshot --cluster <c> --namespace <ns> [--label-selector k=v]    # 整 ns pod 状态分布 + verdict(healthy/isolated/widespread/no_pods_matched);Step 3 横向扫 + cascade_check 用
 
 输出:JSON 到 stdout;失败:exit 1 + 一行人类可读 hint 到 stderr,JSON {error,hint} 到 stdout。
 """
@@ -624,6 +625,19 @@ def cmd_ns_snapshot(args: argparse.Namespace, kc: KuboardClient) -> dict[str, An
         else:
             healthy.append(name)
 
+    # 0 pod 命中 ≠ 健康(2026-06 修):label-selector(如 app=<svc>)跟实际 label 对不上 /
+    # namespace 写错 / 服务真没起任何 pod —— 三种都返 0 pod。旧版 `'healthy' if not degraded`
+    # 在 0 pod 时也判 healthy,被 cascade_check 当"下游健康"采信 → 误导 Step 4。
+    # 显式返 no_pods_matched,让上游(cascade)归到 unknown 而非 healthy。
+    if pods_res['count'] == 0:
+        verdict = 'no_pods_matched'
+    elif not degraded:
+        verdict = 'healthy'
+    elif len(degraded) <= max(3, len(pods) // 10):
+        verdict = 'isolated'
+    else:
+        verdict = 'widespread'
+
     return {
         'namespace': args.namespace,
         'total': pods_res['count'],
@@ -633,9 +647,7 @@ def cmd_ns_snapshot(args: argparse.Namespace, kc: KuboardClient) -> dict[str, An
         'known_error_distribution': error_patterns_seen,
         'degraded_pods': degraded[:30],  # 截断:大 ns 异常 pod 一长串没意义
         'healthy_pods_sample': healthy[:10],
-        'verdict': 'healthy' if not degraded else (
-            'isolated' if len(degraded) <= max(3, len(pods) // 10) else 'widespread'
-        ),
+        'verdict': verdict,
     }
 
 

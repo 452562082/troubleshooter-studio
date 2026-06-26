@@ -20,6 +20,7 @@ _spec = importlib.util.spec_from_file_location("cascade_check", SCRIPT_PATH)
 cascade_check = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(cascade_check)
 parse_dep_map = cascade_check.parse_dep_map
+summarize = cascade_check.summarize
 
 
 # 跟 service-dependency-map.yaml.tmpl 渲染出的形状逐字对齐(block 列表 + 引号包裹)。
@@ -87,3 +88,53 @@ def test_block_field_isolation():
     # user 的 downstream 不能混入 commerce 的项
     assert "user" not in r["user"]["downstream"]
     assert set(r["commerce"]["downstream"]).isdisjoint(r["user"]["downstream"])
+
+
+# ── summarize:unknown 下游不得被当成 healthy(2026-06 正确性回归) ──────────────
+# 背景:check_one_service 对查不到的下游返 verdict='unknown'(脚本缺失 / kuboard 不通 /
+# 超时 / cluster 名错 / ns-snapshot no_pods_matched)。旧版只数 healthy/degraded,unknown 被吞,
+# 全部下游查失败时误判 all_healthy → Step 4 据此判"真因在主角自身"拐错方向。
+
+def _r(target: str, verdict: str) -> dict:
+    return {"target": target, "kind": "service", "verdict": verdict}
+
+
+def test_summarize_all_unknown_is_not_all_healthy():
+    """所有下游都查不到 → downstream_unknown,绝不能是 all_healthy(核心回归)。"""
+    s = summarize([_r("user", "unknown"), _r("order", "unknown")])
+    assert s["verdict"] == "downstream_unknown"
+    assert s["verdict"] != "all_healthy"
+    assert s["unknown"] == 2
+    assert s["healthy"] == 0
+    assert set(s["unknown_targets"]) == {"user", "order"}
+
+
+def test_summarize_healthy_plus_unknown_is_downstream_unknown():
+    """有 healthy 但混着 unknown 且无 degraded → 仍判 downstream_unknown,不漂成 all_healthy。"""
+    s = summarize([_r("user", "healthy"), _r("order", "unknown")])
+    assert s["verdict"] == "downstream_unknown"
+    assert s["healthy"] == 1
+    assert s["unknown"] == 1
+
+
+def test_summarize_all_healthy():
+    """全 healthy 才是 all_healthy。"""
+    s = summarize([_r("user", "healthy"), _r("order", "healthy")])
+    assert s["verdict"] == "all_healthy"
+    assert s["unknown"] == 0
+
+
+def test_summarize_degraded_takes_precedence():
+    """有 degraded → isolated/widespread(unknown 仍单独计数暴露在 summary)。"""
+    iso = summarize([_r("user", "degraded"), _r("order", "unknown")])
+    assert iso["verdict"] == "isolated_downstream"
+    assert iso["verdict_root_likely"] == "user"
+    assert iso["unknown"] == 1  # unknown 不被 degraded 盖掉,仍暴露
+
+    wide = summarize([_r("user", "degraded"), _r("order", "degraded")])
+    assert wide["verdict"] == "widespread_downstream"
+
+
+def test_summarize_no_downstream():
+    """空 results → no_downstream_in_map。"""
+    assert summarize([])["verdict"] == "no_downstream_in_map"

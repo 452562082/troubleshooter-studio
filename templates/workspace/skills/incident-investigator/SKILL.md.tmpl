@@ -108,7 +108,10 @@ python3 skills/incident-investigator/scripts/cascade_check.py --env <env> --serv
 - `isolated_downstream` + `verdict_root_likely=user` → 把 user 当主角递归 Step 4 再追一层
 - `widespread_downstream` → 共享依赖问题,不要继续递归
 - `all_healthy` → 真因在主角自身,Step 5
+- `downstream_unknown` → **下游健康状况未知 ≠ 健康**(`summary.unknown_targets` 列出的下游因 cluster 名 / label `app=<svc>` 对不上 / kuboard 不通 / creds 缺没查到)→ **禁止据此判"真因在主角自身"**;先按 unknown_targets 补齐定位信息重跑 cascade,补不了就标 `unavailable` + **置信度上限锁中**,快报明示"以下下游未验证"
 - `no_downstream_in_map` → dependency-map 没填,提示用户去填;**置信度上限 medium**
+
+> 注:`summary` 里 `healthy` / `degraded` / `unknown` 三个计数独立。`unknown>0` 时哪怕有 degraded(走 isolated/widespread),也要在快报里带上"另有 N 个下游未验证",别让 unknown 被 degraded 盖过。
 
 ## Step 5:多向交叉(trace + log + metric + 代码 + 数据)
 

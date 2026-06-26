@@ -203,6 +203,41 @@ def collect_k8s_rollouts(env: str, service: str, cluster: str, namespace: str,
     return events, ''
 
 
+# config-map.yaml 里每个 service 的 `runtime:` 字段 → 后端类型。多源场景下 per-service
+# config_source 会覆盖顶层 config_center 主源,所以要按服务自己的 runtime 判,不能只看顶层。
+_RUNTIME_TO_CC = {
+    'nacos-mcp': 'nacos', 'apollo-http': 'apollo', 'consul-http': 'consul',
+    'kuboard-http': 'kuboard', 'one2all-mcp': 'one2all',
+}
+
+
+def _detect_service_cc_type(cm_text: str, env: str, service: str) -> str:
+    """从 config-map.yaml 找 environments.<env>.<service>.runtime,映射成后端类型。
+    找不到返 ''(调用方回落顶层 config_center 主源)。"""
+    in_env, in_svc, indent_env, indent_svc = False, False, -1, -1
+    for raw in cm_text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith('#'):
+            continue
+        ind = len(raw) - len(raw.lstrip())
+        s = raw.strip()
+        if s == f'{env}:' or s.startswith(f'{env}:'):
+            in_env, in_svc, indent_env = True, False, ind
+            continue
+        if in_env and ind <= indent_env and ':' in s and not s.startswith(env):
+            in_env = False
+        if in_env:
+            if s.startswith(f'{service}:'):
+                in_svc, indent_svc = True, ind
+                continue
+            if in_svc and ind <= indent_svc and ':' in s and not s.startswith(service):
+                in_svc = False
+            if in_svc:
+                m = re.match(r'runtime:\s*["\']?([\w\-]+)', s)
+                if m:
+                    return _RUNTIME_TO_CC.get(m.group(1).strip(), '')
+    return ''
+
+
 def collect_config_history(env: str, service: str, ws_root: Path,
                             since: timedelta) -> tuple[list[dict[str, Any]], str]:
     """根据 routing/references/config-map.yaml 找配置后端类型 + namespace/dataId,
@@ -211,18 +246,29 @@ def collect_config_history(env: str, service: str, ws_root: Path,
     nacos:nacos_config.py history(走 namespace/group/dataId)
     apollo:apollo_config.py history(走 appId/cluster/namespace)
     consul:consul_config.py history(走 kv_prefix + key)
-    其它后端(env-vars / kubernetes ConfigMap)无原生 history,返空 + note。"""
+    one2all / kuboard:无原生 config history API → 返空 + **显式 note**(别静默,提醒手动核对)。
+    其它后端(env-vars / kubernetes ConfigMap)无原生 history,返空 + note。
+
+    后端判定优先级(2026-06 修):先按 **本 service 的 runtime 字段**(多源场景 per-service
+    config_source 覆盖主源),拿不到再回落顶层 `config_center` 主源。旧版只读顶层主源 →
+    (a) 多源时副源服务被错按主源解析 → 静默返空;(b) one2all/kuboard 主源系统配置变更
+    在 Step 2 时间轴完全不采集 → 盲区。"""
     cm = ws_root / 'skills' / 'routing' / 'references' / 'config-map.yaml'
     if not cm.exists():
         return [], 'config-map.yaml 不存在,跳过配置 history'
     text = cm.read_text(encoding='utf-8', errors='ignore')
-    cc_type = ''
-    for marker in ('nacos', 'apollo', 'consul'):
-        if f'config_center: {marker}' in text:
-            cc_type = marker
-            break
-    if cc_type == '':
-        return [], '当前后端非 nacos/apollo/consul,跳过(env-vars/k8s ConfigMap 无原生 history)'
+    cc_type = _detect_service_cc_type(text, env, service)
+    if not cc_type:
+        for marker in ('nacos', 'apollo', 'consul', 'kuboard', 'one2all'):
+            if f'config_center: {marker}' in text:
+                cc_type = marker
+                break
+    if cc_type in ('one2all', 'kuboard'):
+        return [], (f'{service} 配置走 {cc_type},该后端无原生 config history 接口;'
+                    f'Step 2 时间轴此维缺失 —— 请手动核对 {cc_type} 控制台的配置变更时间,'
+                    '别当"无配置变更"漏掉')
+    if cc_type not in ('nacos', 'apollo', 'consul'):
+        return [], '当前后端非 nacos/apollo/consul(env-vars/k8s ConfigMap 无原生 history),跳过'
     if cc_type != 'nacos':
         # 走通用解析:apollo / consul history
         return _collect_apollo_consul_history(env, service, ws_root, since, cc_type, text)

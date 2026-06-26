@@ -96,6 +96,12 @@ export function ListLokiLabels(arg1:main.LokiAuthInput):Promise<labelprobe.Label
 
 export function LoadInfraCred(arg1:string):Promise<main.ChatLoadKeyResult>;
 
+export function One2AllFetchConfigMaps(arg1:string,arg2:string,arg3:Array<main.One2AllConfigMapEntry>):Promise<Array<main.One2AllConfigMapResult>>;
+
+export function One2AllListDeployments(arg1:string,arg2:string,arg3:string,arg4:string):Promise<main.One2AllDeployments>;
+
+export function One2AllListResources(arg1:string,arg2:string,arg3:boolean):Promise<main.One2AllResources>;
+
 export function OpenDir(arg1:string):Promise<string>;
 
 export function OpenYAML():Promise<main.OpenYAMLResult>;

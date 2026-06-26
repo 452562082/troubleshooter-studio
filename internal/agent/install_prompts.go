@@ -24,6 +24,17 @@ func DerivePrompts(cfg *config.SystemConfig) []deploy.Prompt {
 	}
 
 	envs := cfg.Environments
+	one2allPrompted := false
+	addOne2All := func() {
+		if one2allPrompted {
+			return
+		}
+		one2allPrompted = true
+		// one2all-remote:单一 streamable-http MCP server,不分 env。
+		// 一个完整 MCP URL(含路径 hash)+ 一个 Bearer token 即可。
+		add("ONE2ALL_MCP_URL", "one2all MCP Server URL(含完整路径) [http://host:port/.../mcp/xxx]: ", false)
+		add("ONE2ALL_TOKEN", "one2all Bearer Token []: ", true)
+	}
 
 	// ── 多源配置中心,逐个产 prompt ──
 	for _, cc := range cfg.Infrastructure.ConfigCenters {
@@ -71,7 +82,12 @@ func DerivePrompts(cfg *config.SystemConfig) []deploy.Prompt {
 				add(envVar("KUBOARD_USER", cc.ID, e.ID), "Kuboard 用户名 ("+sourcePrefix+e.ID+",已填 access_key 可留空) []: ", false)
 				add(envVar("KUBOARD_PASS", cc.ID, e.ID), "Kuboard 密码 ("+sourcePrefix+e.ID+",已填 access_key 可留空) []: ", true)
 			}
+		case "one2all":
+			addOne2All()
 		}
+	}
+	if cfg.UsesOne2All() {
+		addOne2All()
 	}
 
 	// ── Grafana ──(系统级,不分 source;每个 env 独立凭证)

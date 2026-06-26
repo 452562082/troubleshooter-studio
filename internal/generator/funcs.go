@@ -105,6 +105,37 @@ func funcMap() template.FuncMap {
 			}
 			return toConfigCenterView(ctx.Infrastructure.PrimaryConfigCenter())
 		},
+		// configServiceMapEntry 按 source/env/service 读取配置中心 service_map。
+		// 注意:这跟 observability.k8s_runtime.service_map 是两张不同的表:
+		//   - config center service_map:cluster_id/namespace/configmap,用于读配置
+		//   - k8s runtime service_map:workload/label_selector,用于查 pod/log
+		"configServiceMapEntry": func(ctx *Context, sourceID, env, service string) *serviceMapEntryView {
+			for _, cc := range ctx.Infrastructure.ConfigCenters {
+				if sourceID != "default" && cc.ID != sourceID {
+					continue
+				}
+				if sourceID == "default" && cc.ID != "" && len(ctx.Infrastructure.ConfigCenters) > 1 {
+					continue
+				}
+				if bySvc, ok := cc.ServiceMap[env]; ok {
+					if entry, ok := bySvc[service]; ok {
+						return toServiceMapEntryView(entry)
+					}
+				}
+				if sourceID != "default" || len(ctx.Infrastructure.ConfigCenters) <= 1 {
+					break
+				}
+			}
+			if sourceID == "default" {
+				cc := ctx.Infrastructure.PrimaryConfigCenter()
+				if bySvc, ok := cc.ServiceMap[env]; ok {
+					if entry, ok := bySvc[service]; ok {
+						return toServiceMapEntryView(entry)
+					}
+				}
+			}
+			return nil
+		},
 		// yamlDataStoresForService 从 cfg.Infrastructure.DataStores[].Endpoints[].Service 抽
 		// 当前服务用了哪些数据层 type,返回 ["<type>:<type>"] 列表(逻辑名缺省用 type 自身,
 		// 用户可后续自己改,如 "mysql:mysql" → "mysql:order_db")。比 dependency_scan 走代码扫描
@@ -331,6 +362,28 @@ func toConfigCenterView(cc config.ConfigCenter) ConfigCenterView {
 		})
 	}
 	return out
+}
+
+type serviceMapEntryView struct {
+	Namespace string
+	Group     string
+	DataID    string
+	AppID     string
+	Cluster   string
+	ClusterID string
+	ConfigMap string
+}
+
+func toServiceMapEntryView(entry config.ServiceMapEntry) *serviceMapEntryView {
+	return &serviceMapEntryView{
+		Namespace: entry.Namespace,
+		Group:     entry.Group,
+		DataID:    entry.DataID,
+		AppID:     entry.AppID,
+		Cluster:   entry.Cluster,
+		ClusterID: entry.ClusterID,
+		ConfigMap: entry.ConfigMap,
+	}
 }
 
 // findingView 是模板侧可访问的结构（复制自 analyzer.Finding，避免直接把 analyzer 包泄漏到模板）

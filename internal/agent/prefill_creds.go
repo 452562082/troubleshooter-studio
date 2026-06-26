@@ -55,11 +55,22 @@ func PrefillCredsFromYAML(cfg *config.SystemConfig) map[string]string {
 				put(envVar("KUBOARD_ACCESS_KEY", cc.ID, ep.Env), ep.AccessKey)
 				put(envVar("KUBOARD_USER", cc.ID, ep.Env), ep.User)
 				put(envVar("KUBOARD_PASS", cc.ID, ep.Env), ep.Pass)
+			case "one2all":
+				// one2all:单一 streamable-http MCP server,不按 env 分。
+				// ep.URL = MCP server 完整 URL(含路径 hash),ep.Token = Bearer token。
+				put("ONE2ALL_MCP_URL", ep.URL)
+				put("ONE2ALL_TOKEN", ep.Token)
 			}
 		}
 	}
 
 	obs := cfg.Infrastructure.Observability
+	if obs.K8sRuntime.Enabled && strings.EqualFold(strings.TrimSpace(obs.K8sRuntime.Provider), "one2all") {
+		for _, ep := range obs.K8sRuntime.Endpoints {
+			put("ONE2ALL_MCP_URL", ep.URL)
+			put("ONE2ALL_TOKEN", ep.APIKey)
+		}
+	}
 
 	// ── Grafana(系统级,per env)──
 	if obs.Grafana.Enabled {

@@ -60,19 +60,20 @@ func TestGenerate_MultiSource_ConfigMapRoutesPerService(t *testing.T) {
 	}
 	cm := readFile(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/config-map.yaml"))
 
-	// 2026-05-15 方案 B 后:nacos 不渲染 mcp_server,所有 nacos 服务都标 runtime: nacos-http。
-	// 主源 / 副源的区分还有效(config_source 字段下面单独验证),只是不再通过 mcp_server 名字承载。
-	if !strings.Contains(cm, "runtime: nacos-http") {
-		t.Errorf("config-map should mark nacos services as runtime: nacos-http,\ngot:\n%s", cm)
+	// plan D:nacos 走 MCP 主路径,所有 nacos 服务标 runtime: nacos-mcp。
+	// 主源 / 副源的区分通过 config_source 字段承载(下面单独验证),不在 config-map 里硬编码 mcp_server 名。
+	if !strings.Contains(cm, "runtime: nacos-mcp") {
+		t.Errorf("config-map should mark nacos services as runtime: nacos-mcp,\ngot:\n%s", cm)
 	}
-	// 反向护栏:不应再出现任何 nacos mcp 名(mcp 不存在,渲染了 LLM 会去找)
+	// 反向护栏:config-map 不出 mcp_server 字段(用户选 runtime: nacos-mcp 风格;mcp_server 名
+	// 在 SKILL 文档里讲命名规律,config-map 不硬编码,避免 agent-id 前缀漂移)。
 	for _, env := range []string{"dev", "staging", "prod"} {
 		for _, bad := range []string{
 			`mcp_server: "shop-nacos-` + env + `"`,
 			`mcp_server: "shop-nacos-legacy-nacos-` + env + `"`,
 		} {
 			if strings.Contains(cm, bad) {
-				t.Errorf("config-map 不应再渲染 nacos mcp 名 %q(方案 B 已删 mcp 注册)", bad)
+				t.Errorf("config-map 不应渲染 mcp_server 字段 %q(plan D 用 runtime: nacos-mcp 标签)", bad)
 			}
 		}
 	}
@@ -85,6 +86,66 @@ func TestGenerate_MultiSource_ConfigMapRoutesPerService(t *testing.T) {
 	// 多源块 sources: 应被声明
 	if !strings.Contains(cm, "sources:") {
 		t.Errorf("多源场景 config-map 应有 sources: 块")
+	}
+}
+
+func TestGenerate_One2AllConfigMapWithK8sRuntimeServiceMap(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
+	cfg.Infrastructure.ConfigCenters = []config.ConfigCenter{{
+		ID:   "one2all",
+		Type: "one2all",
+		Endpoints: []config.ConfigCenterEndpoint{{
+			Env:   "dev",
+			URL:   "http://one2all.example.com/mcp",
+			Token: "o2a_test",
+		}},
+		ServiceMap: map[string]map[string]config.ServiceMapEntry{
+			"dev": {
+				"order-service": {
+					ClusterID: "1",
+					Namespace: "default",
+					ConfigMap: "base-config,app-config",
+				},
+			},
+		},
+	}}
+	for i := range cfg.Repos {
+		cfg.Repos[i].ConfigSource = "one2all"
+	}
+	cfg.Infrastructure.Observability.K8sRuntime = config.K8sRuntime{
+		Enabled:  true,
+		Provider: "one2all",
+		ServiceMap: []config.K8sRuntimeServiceMapEntry{{
+			Env:           "dev",
+			Service:       "order-service",
+			ClusterID:     "1",
+			Namespace:     "default",
+			Workload:      "order-service",
+			LabelSelector: "app=order-service",
+		}},
+	}
+
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+	if err := New(cfg, tr, out).Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	cm := readFile(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/config-map.yaml"))
+	rows := loadConfigMap(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/config-map.yaml"))
+	for _, want := range []string{
+		"runtime: one2all-mcp",
+		`mcp_server: shop-one2all`,
+		`cluster_id: "1"`,
+		`namespace: "default"`,
+		`configmaps: "base-config,app-config"`,
+	} {
+		if !strings.Contains(cm, want) {
+			t.Fatalf("config-map missing %q:\n%s", want, cm)
+		}
+	}
+	row := rows["dev"]["order-service"]
+	if row["runtime"] != "one2all-mcp" || row["cluster_id"] != "1" || row["configmaps"] != "base-config,app-config" {
+		t.Fatalf("unexpected one2all config-map row: %#v", row)
 	}
 }
 
@@ -156,17 +217,13 @@ func TestGenerate_Nacos_Shop(t *testing.T) {
 		t.Errorf("config-map should declare nacos center:\n%s", cm)
 	}
 
-	// 2026-05-15 方案 B 后:nacos 不走 MCP,config-map 里 nacos 服务标 runtime: nacos-http,
-	// 不再渲染 mcp_server 字段。改成验证 runtime: nacos-http 标签出现(且 per-service 都有)。
-	if !strings.Contains(cm, "runtime: nacos-http") {
-		t.Errorf("config-map should mark nacos services as runtime: nacos-http,\ngot:\n%s", cm)
+	// plan D:nacos 走 MCP 主路径,config-map 里 nacos 服务标 runtime: nacos-mcp。
+	if !strings.Contains(cm, "runtime: nacos-mcp") {
+		t.Errorf("config-map should mark nacos services as runtime: nacos-mcp,\ngot:\n%s", cm)
 	}
-	// 反向护栏:不应再出现 shop-nacos-<env> 这种 mcp 名(mcp 不存在,渲染了 LLM 会去找)
-	for _, env := range []string{"dev", "staging", "prod"} {
-		bad := "shop-nacos-" + env
-		if strings.Contains(cm, bad) {
-			t.Errorf("config-map 不应再渲染 nacos mcp 名 %q(方案 B 已删 mcp 注册)", bad)
-		}
+	// 反向护栏:不应再残留 nacos-http(plan D 已切 MCP 主路径;nacos-http 只在 SKILL fallback 文档里提)
+	if strings.Contains(cm, "runtime: nacos-http") {
+		t.Errorf("config-map 不应再出现 runtime: nacos-http(plan D 已切 nacos-mcp)")
 	}
 
 	// mysql 和 kafka 现在已在 shop-system 中启用，验证它们存在
@@ -174,6 +231,16 @@ func TestGenerate_Nacos_Shop(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(wsRoot, "skills", s)); err != nil {
 			t.Errorf("skill %s should be generated: %v", s, err)
 		}
+	}
+
+	// nacos_mcp.py 是 config-executor 的静态脚本资产,应进产物;但它的 pytest 文件
+	// test_nacos_mcp.py 是仓库侧 CI 用的开发产物,generator 必须过滤掉不进 bot workspace。
+	ceScripts := filepath.Join(wsRoot, "skills/config-executor/scripts")
+	if _, err := os.Stat(filepath.Join(ceScripts, "nacos_mcp.py")); err != nil {
+		t.Errorf("nacos_mcp.py should be generated: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(ceScripts, "test_nacos_mcp.py")); err == nil {
+		t.Errorf("test_nacos_mcp.py 不应进 bot workspace(generator 应过滤 test_*.py)")
 	}
 }
 
@@ -362,6 +429,19 @@ func TestGenerate_MultiTargets_All(t *testing.T) {
 		"agents/shop-bot.md",
 		"skills/routing/SKILL.md",
 	})
+
+	// copyDirRecursive (claude-code / cursor 路径) 也必须过滤 test_*.py。脚本被复制两份:
+	// skills/config-executor/scripts/ 和顶层 scripts/,两处都不应出现 test 文件。
+	for _, base := range []string{out + "-claude-code", out + "-cursor"} {
+		for _, rel := range []string{
+			"skills/config-executor/scripts/test_nacos_mcp.py",
+			"scripts/test_nacos_mcp.py",
+		} {
+			if _, err := os.Stat(filepath.Join(base, rel)); err == nil {
+				t.Errorf("%s/%s 不应存在(copyDirRecursive 应过滤 test_*.py)", base, rel)
+			}
+		}
+	}
 }
 
 // TestGenerate_MultiTargets_NoOpenclaw 覆盖"非 openclaw 独占"路径：

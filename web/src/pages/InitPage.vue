@@ -21,6 +21,7 @@ import { toast } from '../lib/toast'
 import { countUmbrellaChildren } from '../lib/repoUmbrella'
 import { Target, type TargetId } from '../lib/constants'
 import type { CredField } from '../lib/credFields'
+import { isCredFieldHidden, resolveCredFieldDisplay } from '../lib/credFields'
 import RepoListItem from '../components/RepoListItem.vue'
 import ConfigSourceStep from '../components/ConfigSourceStep.vue'
 import ObservabilityStep from '../components/ObservabilityStep.vue'
@@ -67,6 +68,8 @@ import { useDataStoreScan } from '../lib/useDataStoreScan'
 import { useMonorepoHints } from '../lib/useMonorepoHints'
 import { useSourceTypeReset } from '../lib/useSourceTypeReset'
 import { useK8sRtAutoPick } from '../lib/useK8sRtAutoPick'
+import { one2allListDeployments, one2allListResources } from '../lib/bridge/one2all'
+import type { One2AllClusterEntry as O2ACluster } from '../lib/bridge/one2all'
 
 const router = useRouter()
 
@@ -968,7 +971,7 @@ type SourceData = {
   creds: Record<string, Record<string, string>>  // creds[envID][fieldKey]
   rawExtra?: Record<string, unknown>             // yaml 高级字段透传(service_map / auth)
 }
-const ALL_SOURCE_TYPES = ['nacos', 'apollo', 'consul', 'kuboard', 'env-vars'] as const
+const ALL_SOURCE_TYPES = ['nacos', 'apollo', 'consul', 'kuboard', 'one2all', 'env-vars'] as const
 
 const enabledSourceTypes = reactive<Record<string, boolean>>(
   saved?.enabledSourceTypes ?? { nacos: true },
@@ -1100,6 +1103,13 @@ const {
 // 没填的话回落到 sourceCreds['kuboard'](同一个 Kuboard 实例时复用)。
 // 拉到的资源直接写进 kuboardStateByEnv,跟配置源用同一棵 cluster→ns→cm 树。
 async function runK8sRtPreload(envID: string) {
+  // 检查 provider:one2all 不需要 kuboard 预加载,直接让用户填 cluster_id
+  const rtProvider = (toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'provider')] || '').trim() || 'kuboard'
+  if (rtProvider === 'one2all') {
+    if (!k8sRuntimeEnvLoc[envID]) k8sRuntimeEnvLoc[envID] = { cluster: '', cluster_id: '', namespace: '' }
+    await runOne2AllPreload(envID)
+    return
+  }
   if (!isDesktop()) {
     toast.error('Kuboard 拉取只在桌面 app 可用')
     return
@@ -1108,11 +1118,15 @@ async function runK8sRtPreload(envID: string) {
   const obsAccessKey = (toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'access_key')] || '').trim()
   const obsUser = (toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'username')] || '').trim()
   const obsPass = toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'password')] || ''
+  const obsAuthMode = (toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'auth_mode')] || '').trim()
   const fallback = sourceCreds['kuboard']?.creds?.[envID] || {}
   const url = obsURL || (fallback.url || '').trim()
   const accessKey = obsAccessKey || (fallback.access_key || '').trim()
   const username = obsUser || (fallback.username || '').trim()
   const password = obsPass || fallback.password || ''
+  const clusterHint = (fallback.cluster_hint || '').trim() // Kuboard v3 必填(v4 忽略)
+  // auth_mode 默认 access_key(没填过时按推荐项算,跟 isFieldHidden 同款兜底)
+  const authMode = obsAuthMode || (fallback.auth_mode || '').trim() || 'access_key'
   if (!url) {
     toast.error(`${envID}: 先填 Kuboard URL(可观测性 K8s 运行时 字段)`)
     return
@@ -1121,9 +1135,16 @@ async function runK8sRtPreload(envID: string) {
     toast.error(`${envID}: 鉴权填 API 访问凭证 或 用户名+密码`)
     return
   }
+  // Kuboard v3 走 access-key 时鉴权靠 Cookie KuboardUsername,必须有用户名;v4 access-key
+  // 不需要。前端无法可靠区分 v3/v4,故 access-key 模式下用户名空就拦截 —— 现场默认是 v3,
+  // 漏填用户名会在运行时报 no-username。v4 用户可忽略此要求改用「用户名+密码」鉴权。
+  if (authMode === 'access_key' && !username) {
+    toast.error(`${envID}: Kuboard v3(API 访问凭证)需要填用户名;若是 v4 可改用「用户名+密码」鉴权`)
+    return
+  }
   kuboardStateByEnv[envID] = { status: 'loading' }
   try {
-    const res = await kuboardListResources(url, username, password, accessKey)
+    const res = await kuboardListResources(url, username, password, accessKey, clusterHint)
     const clusters = (res.clusters || []).map(c => ({
       name: c.name,
       namespaces: (c.namespaces || []).map(n => ({ name: n.name, configmaps: n.configmaps || [] })),
@@ -1140,7 +1161,7 @@ async function runK8sRtPreload(envID: string) {
     //   2) 当前为空 + 只有 1 个集群 → 直接定型
     //   3) 多集群无 env 信号 + 当前为空 → 不自动选(让用户决定,免得选错触发下游 deployment 全空)
     // namespace 同理。另外:cluster 切换后旧 namespace 可能在新 cluster 不存在 → 清掉再选。
-    if (!k8sRuntimeEnvLoc[envID]) k8sRuntimeEnvLoc[envID] = { cluster: '', namespace: '' }
+    if (!k8sRuntimeEnvLoc[envID]) k8sRuntimeEnvLoc[envID] = { cluster: '', cluster_id: '', namespace: '' }
     const eloc = k8sRuntimeEnvLoc[envID]
     const envLower = envID.toLowerCase()
     if (clusters.length > 0) {
@@ -1221,6 +1242,7 @@ function setServiceSource(svc: string, t: string) {
       delete serviceConfigSel[k]
       delete serviceConfigGroup[k]
       delete kuboardSvcMap[k]
+      delete one2allSvcMap[k]
     }
   }
 }
@@ -1285,12 +1307,23 @@ const CC_FIELDS_BY_TYPE = computed<Record<string, CredField[]>>(() => {
         ],
         uiOnly: true,
       },
-      { key: 'access_key', label: 'API 访问凭证', secret: true, envVar: (e) => `KUBOARD_ACCESS_KEY_${e.toUpperCase()}`, placeholder: 'Kuboard 后台 个人中心 → API 访问凭证 → 创建', showWhen: { field: 'auth_mode', equals: 'access_key' } },
-      { key: 'username', label: '用户名', secret: false, envVar: (e) => `KUBOARD_USER_${e.toUpperCase()}`, placeholder: 'admin', showWhen: { field: 'auth_mode', equals: 'username_password' } },
+      { key: 'access_key', label: 'API 访问凭证', secret: true, envVar: (e) => `KUBOARD_ACCESS_KEY_${e.toUpperCase()}`, placeholder: 'v3: 密钥ID.密钥(如 scyfw6txxw7i.x6t2…);v4: 单串 token', showWhen: { field: 'auth_mode', equals: 'access_key' } },
+      // username 两种鉴权模式都显示:Kuboard v3 免账密(access-key)其实走 Cookie KuboardUsername=<user>,
+      //   必须有用户名;v4 走 access-key 时可留空。故不设 showWhen,两模式都可填。
+      { key: 'username', label: '用户名(v3 必填 / Cookie KuboardUsername)', secret: false, envVar: (e) => `KUBOARD_USER_${e.toUpperCase()}`, placeholder: 'Kuboard v3 走 access-key 时也要填;v4 可留空', optional: true },
       { key: 'password', label: '密码', secret: true, envVar: (e) => `KUBOARD_PASS_${e.toUpperCase()}`, showWhen: { field: 'auth_mode', equals: 'username_password' } },
+      // cluster_hint:Kuboard v3 无法用 access-key 枚举集群,需先填集群名再"拉资源"(uiOnly,不写 yaml;
+      // 真正落 yaml 的是下面 per-service 的 cluster 三联映射)。v4 留空(tree 自动列全部集群)。
+      { key: 'cluster_hint', label: '集群名(仅 v3 需填)', secret: false, envVar: () => '', placeholder: '例如 my-cluster', uiOnly: true },
       { key: 'cluster', label: '集群名', secret: false, envVar: (e) => `KUBOARD_CLUSTER_${e.toUpperCase()}`, placeholder: 'default' },
       { key: 'namespace', label: 'Namespace', secret: false, envVar: (e) => `KUBOARD_NAMESPACE_${e.toUpperCase()}`, placeholder: 'default' },
       { key: 'configmap', label: 'ConfigMap 名称', secret: false, envVar: (e) => `KUBOARD_CONFIGMAP_${e.toUpperCase()}`, placeholder: 'app-config' },
+    ],
+    // one2all:单一 streamable-http MCP server,不分 env;凭据由 install 阶段写入 MCP headers。
+    // cluster_id/namespace/configmap 是 per-service 在 one2allSvcMap 里,不在此 per-env 表单。
+    one2all: [
+      { key: 'mcp_url', label: 'MCP Server URL', secret: false, envVar: () => 'ONE2ALL_MCP_URL', placeholder: 'http://192.168.113.115:32633/one2all/api/v1/platform/public/mcp/xxx' },
+      { key: 'token', label: 'Bearer Token', secret: true, envVar: () => 'ONE2ALL_TOKEN', placeholder: 'MCP 鉴权 token(从 one2all 平台获取)' },
     ],
     // env-vars:动态字段,Step 6 启用了哪些 data store 这里就出哪些
     'env-vars': envVarsFields,
@@ -1301,16 +1334,16 @@ const CC_FIELDS_BY_TYPE = computed<Record<string, CredField[]>>(() => {
 // 判断字段在当前 env 下是否要隐藏(基于 showWhen 条件)。
 // getSibling 由调用方提供,主源走 ccCredInputs,副源走 sourceCreds[t].creds[env]。
 function isFieldHidden(_t: string, _envID: string, f: CredField, getSibling: (key: string) => string): boolean {
-  if (!f.showWhen) return false
-  let siblingVal = getSibling(f.showWhen.field)
-  // auth_mode 默认 access_key(没填过时按推荐项算)
-  if (f.showWhen.field === 'auth_mode' && !siblingVal) siblingVal = 'access_key'
-  return siblingVal !== f.showWhen.equals
+  return isCredFieldHidden(f, getSibling)
 }
 
 // 可观测性字段隐藏判断:同 isFieldHidden,但走 toolInputs(obs:tool:env:field)读 sibling。
 function isObsFieldHidden(toolKey: string, envID: string, f: CredField): boolean {
   return isFieldHidden('obs', envID, f, (k) => toolInputs[toolKeyFor('obs', toolKey, envID, k)] || '')
+}
+
+function displayObsField(toolKey: string, envID: string, f: CredField): CredField {
+  return resolveCredFieldDisplay(f, (k) => toolInputs[toolKeyFor('obs', toolKey, envID, k)] || '')
 }
 // ccCredInputs:所有配置中心字段的当前输入值(key = ccKeyFor)。
 // 流向:输入 → localStorage draft(持久) → troubleshooter.yaml → 部署时注入各 AI 平台的 MCP
@@ -1434,17 +1467,33 @@ function setKuboardLoc(envID: string, svc: string, field: 'cluster' | 'namespace
   if (field === 'namespace') { loc.configmap = '' }
 }
 
+// one2all 配置源 per-service 映射:cluster_id / namespace / configmap。
+// 跟 kuboardSvcMap 平行,key = svcKey(envID, svc) = "envID::svc"
+type One2AllSvcLocator = { cluster_id: string; namespace: string; configmap: string }
+const one2allSvcMap = reactive<Record<string, One2AllSvcLocator>>(saved?.one2allSvcMap ?? {})
+function ensureOne2AllLoc(envID: string, svc: string): One2AllSvcLocator {
+  const k = svcKey(envID, svc)
+  if (!one2allSvcMap[k]) one2allSvcMap[k] = { cluster_id: '', namespace: '', configmap: '' }
+  return one2allSvcMap[k]
+}
+function setOne2AllLoc(envID: string, svc: string, field: 'cluster_id' | 'namespace' | 'configmap', value: string) {
+  const loc = ensureOne2AllLoc(envID, svc)
+  loc[field] = value
+  if (field === 'cluster_id') { loc.namespace = ''; loc.configmap = '' }
+  if (field === 'namespace') { loc.configmap = '' }
+}
+
 // k8s 运行时(可观测性)专属。两层结构:
 //   - 环境级:k8sRuntimeEnvLoc[env] = { cluster, namespace } —— 一个 env 对应一组 K8s 定位,
 //     不强求每服务重选(常见情况:一个 env 一个 ns,所有服务都在里面)。
 //   - 服务级:k8sRuntimeSvcMap[svcKey] = { workload, label_selector } —— 服务名→Deployment 名 + 自动
 //     从 spec.selector.matchLabels 取的 label selector(routing skill 直接喂 KuboardListPods)。
-type K8sRuntimeEnvLocator = { cluster: string; namespace: string }
+type K8sRuntimeEnvLocator = { cluster: string; cluster_id: string; namespace: string }
 type K8sRuntimeSvcLocator = { workload: string; label_selector: string }
 const k8sRuntimeEnvLoc = reactive<Record<string, K8sRuntimeEnvLocator>>(saved?.k8sRuntimeEnvLoc ?? {})
 const k8sRuntimeSvcMap = reactive<Record<string, K8sRuntimeSvcLocator>>(saved?.k8sRuntimeSvcMap ?? {})
 function ensureK8sRtEnvLoc(envID: string): K8sRuntimeEnvLocator {
-  if (!k8sRuntimeEnvLoc[envID]) k8sRuntimeEnvLoc[envID] = { cluster: '', namespace: '' }
+  if (!k8sRuntimeEnvLoc[envID]) k8sRuntimeEnvLoc[envID] = { cluster: '', cluster_id: '', namespace: '' }
   return k8sRuntimeEnvLoc[envID]
 }
 function ensureK8sRtSvcLoc(envID: string, svc: string): K8sRuntimeSvcLocator {
@@ -1452,12 +1501,12 @@ function ensureK8sRtSvcLoc(envID: string, svc: string): K8sRuntimeSvcLocator {
   if (!k8sRuntimeSvcMap[k]) k8sRuntimeSvcMap[k] = { workload: '', label_selector: '' }
   return k8sRuntimeSvcMap[k]
 }
-function setK8sRtEnvLoc(envID: string, field: 'cluster' | 'namespace', value: string) {
+function setK8sRtEnvLoc(envID: string, field: 'cluster' | 'cluster_id' | 'namespace', value: string) {
   const loc = ensureK8sRtEnvLoc(envID)
   loc[field] = value
-  if (field === 'cluster') loc.namespace = ''
+  if (field === 'cluster' || field === 'cluster_id') loc.namespace = ''
   // 换 cluster / ns 后,本 env 所有服务的 workload + selector 失效,清掉
-  if (field === 'cluster' || field === 'namespace') {
+  if (field === 'cluster' || field === 'cluster_id' || field === 'namespace') {
     for (const k of Object.keys(k8sRuntimeSvcMap)) {
       if (k.startsWith(envID + '::')) {
         k8sRuntimeSvcMap[k] = { workload: '', label_selector: '' }
@@ -1465,7 +1514,10 @@ function setK8sRtEnvLoc(envID: string, field: 'cluster' | 'namespace', value: st
     }
   }
   // ns 选好后立即拉本 env 下所有服务可选的 deployment 列表
-  if (field === 'namespace' && value && loc.cluster) {
+  const provider = (toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'provider')] || '').trim() || 'kuboard'
+  if (field === 'namespace' && value && provider === 'one2all' && loc.cluster_id) {
+    loadOne2AllK8sRtWorkloads(envID, loc.cluster_id, value)
+  } else if (field === 'namespace' && value && loc.cluster) {
     loadK8sRtWorkloads(envID, loc.cluster, value)
   }
 }
@@ -1473,7 +1525,9 @@ function setK8sRtSvcWorkload(envID: string, svc: string, workload: string) {
   const sloc = ensureK8sRtSvcLoc(envID, svc)
   sloc.workload = workload
   const eloc = ensureK8sRtEnvLoc(envID)
-  const list = k8sRtWorkloadsFor(envID, eloc.cluster, eloc.namespace)
+  const provider = (toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'provider')] || '').trim() || 'kuboard'
+  const clusterKey = provider === 'one2all' ? eloc.cluster_id : eloc.cluster
+  const list = k8sRtWorkloadsFor(envID, clusterKey, eloc.namespace)
   const dep = list.find(d => d.name === workload)
   sloc.label_selector = dep?.selector || ''
 }
@@ -1603,6 +1657,90 @@ const {
 // InitPage 模板直接用的是 runKuboardPreload / runKuboardPreloadFromSource 两个 runner
 void _autoMatchKuboardLocation; void _autoFillKuboardSelections
 
+// ── Step 5 one2all 预加载 ─────────────────────────────────────────
+// one2all:通过 MCP JSON-RPC 调 platform_list_clusters/namespaces 拉资源树,
+// 跟 kuboard 预加载平行,结果存入 one2allStateByEnv。
+
+type One2AllJSState =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'ok'; clusters: O2ACluster[]; notes?: string[] }
+  | { status: 'error'; error: string }
+
+const one2allStateByEnv = reactive<Record<string, One2AllJSState>>({})
+
+function one2allClustersOf(envID: string): O2ACluster[] {
+  const s = one2allStateByEnv[envID]
+  return s?.status === 'ok' ? s.clusters : []
+}
+function one2allClusterCountOf(envID: string): number {
+  return one2allClustersOf(envID).length
+}
+function one2allErrorOf(envID: string): string {
+  const s = one2allStateByEnv[envID]
+  return s?.status === 'error' ? s.error.slice(0, 60) : ''
+}
+function one2allNamespacesFor(envID: string, clusterID: string): string[] {
+  const s = one2allStateByEnv[envID]
+  if (s?.status !== 'ok') return []
+  const c = s.clusters.find(c => c.cluster_id === clusterID)
+  return c ? c.namespaces.map(n => n.name) : []
+}
+function one2allConfigMapsFor(envID: string, clusterID: string, ns: string): string[] {
+  const s = one2allStateByEnv[envID]
+  if (s?.status !== 'ok') return []
+  const c = s.clusters.find(c => c.cluster_id === clusterID)
+  if (!c) return []
+  const n = c.namespaces.find(n => n.name === ns)
+  return n ? n.configmaps : []
+}
+
+function one2allCredsFor(envID: string): { mcpURL: string; token: string } {
+  // 读 MCP URL + token:先看 one2all 源自己的 _shared_ creds,再 fallback 到 obs k8s_runtime。
+  const shared = sourceCreds['one2all']?.creds?.['_shared_'] || {}
+  let mcpURL = (shared['mcp_url'] || '').trim()
+  let token = (shared['token'] || '').trim()
+  if (!mcpURL) mcpURL = (toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'url')] || '').trim()
+  if (!token) token = (toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'api_key')] || '').trim()
+  return { mcpURL, token }
+}
+
+async function runOne2AllPreload(envID: string) {
+  if (!isDesktop()) { toast.error('one2all 预加载仅桌面 app 支持'); return }
+  const { mcpURL, token } = one2allCredsFor(envID)
+  if (!mcpURL) { toast.error(`${envID}: 请先在「全局连接」填 MCP Server URL`); return }
+  if (!token) { toast.error(`${envID}: 请先填 Bearer Token`); return }
+  one2allStateByEnv[envID] = { status: 'loading' }
+  try {
+    const res = await one2allListResources(mcpURL, token, true)
+    one2allStateByEnv[envID] = { status: 'ok', clusters: res.clusters, notes: res.notes }
+    toast.success(`${envID}: 拉到 ${res.clusters.length} 个集群`)
+    // 自动选:env 名匹配的集群/namespace
+    if (!k8sRuntimeEnvLoc[envID]) k8sRuntimeEnvLoc[envID] = { cluster: '', cluster_id: '', namespace: '' }
+    const eloc = k8sRuntimeEnvLoc[envID]
+    if (res.clusters.length === 1) {
+      eloc.cluster = res.clusters[0].name
+      eloc.cluster_id = res.clusters[0].cluster_id
+      if (res.clusters[0].namespaces.length === 1) {
+        eloc.namespace = res.clusters[0].namespaces[0].name
+      }
+    }
+    // 也自动填 one2allSvcMap —— 如果只有一个集群+namespace,全服务统一用这个
+    for (const svc of allServiceNames.value) {
+      const loc = ensureOne2AllLoc(envID, svc)
+      if (!loc.cluster_id) loc.cluster_id = eloc.cluster_id
+      if (!loc.namespace) loc.namespace = eloc.namespace
+    }
+    if (eloc.cluster_id && eloc.namespace) {
+      loadOne2AllK8sRtWorkloads(envID, eloc.cluster_id, eloc.namespace)
+    }
+  } catch (e: any) {
+    const msg = String(e?.message || e)
+    one2allStateByEnv[envID] = { status: 'error', error: msg }
+    toast.error(`${envID} one2all 加载失败: ${msg.slice(0, 80)}`)
+  }
+}
+
 
 // ── Step 7: 可观测性 + 数据层 ──
 const observabilityOptions = ['grafana', 'loki', 'prometheus', 'jaeger', 'elk', 'skywalking', 'tempo', 'k8s_runtime'] as const
@@ -1690,9 +1828,42 @@ const OBS_TOOL_SPECS: ToolSpec[] = [
     ],
   },
   {
-    key: 'k8s_runtime', label: 'K8s 运行时(Kuboard)', description: '查 pod 状态 / events / 容器日志 / Deployment 滚动状态;走 Kuboard v4 API,无需本机 kubeconfig',
+    key: 'k8s_runtime', label: 'K8s 运行时', description: '查 pod 状态 / events / 容器日志 / Deployment 滚动状态;支持 Kuboard v4 API 或 one2all MCP',
     fields: [
-      { key: 'url', label: 'Kuboard URL', secret: false, envVar: (e) => `KUBOARD_URL_${e.toUpperCase()}`, placeholder: 'https://kuboard-dev.example.com(若与配置源同集群可填同样的值)' },
+      {
+        key: 'provider', label: 'Provider', secret: false, envVar: () => '',
+        options: [
+          { value: 'kuboard', label: 'Kuboard(v4 API)' },
+          { value: 'one2all', label: 'one2all-remote MCP' },
+        ],
+        uiOnly: true,
+      },
+      {
+        key: 'url', label: 'Kuboard URL', secret: false, envVar: (e) => `KUBOARD_URL_${e.toUpperCase()}`,
+        placeholder: 'http://kuboard.example.com',
+        envVarBy: {
+          field: 'provider',
+          values: {
+            one2all: () => 'ONE2ALL_MCP_URL',
+          },
+        },
+        labelBy: {
+          field: 'provider',
+          values: {
+            kuboard: 'Kuboard URL',
+            one2all: 'MCP Server URL',
+          },
+        },
+        placeholderBy: {
+          field: 'provider',
+          values: {
+            kuboard: 'http://kuboard.example.com',
+            one2all: 'http://192.168.113.115:32633/one2all/api/v1/platform/public/mcp/xxx',
+          },
+        },
+        optional: true,
+      },
+      { key: 'api_key', label: 'one2all Bearer Token', secret: true, envVar: () => 'ONE2ALL_TOKEN', placeholder: 'o2a_xxx', showWhen: { field: 'provider', equals: 'one2all' } },
       {
         key: 'auth_mode', label: '鉴权方式', secret: false, envVar: () => '',
         options: [
@@ -1700,10 +1871,29 @@ const OBS_TOOL_SPECS: ToolSpec[] = [
           { value: 'username_password', label: '用户名 + 密码' },
         ],
         uiOnly: true,
+        showWhen: { field: 'provider', equals: 'kuboard' },
       },
-      { key: 'access_key', label: 'API 访问凭证', secret: true, envVar: (e) => `KUBOARD_ACCESS_KEY_${e.toUpperCase()}`, placeholder: 'Kuboard 后台 个人中心 → API 访问凭证 → 创建', showWhen: { field: 'auth_mode', equals: 'access_key' } },
-      { key: 'username', label: '用户名', secret: false, envVar: (e) => `KUBOARD_USER_${e.toUpperCase()}`, placeholder: 'admin', showWhen: { field: 'auth_mode', equals: 'username_password' } },
-      { key: 'password', label: '密码', secret: true, envVar: (e) => `KUBOARD_PASS_${e.toUpperCase()}`, showWhen: { field: 'auth_mode', equals: 'username_password' } },
+      {
+        key: 'access_key', label: 'API 访问凭证', secret: true, envVar: (e) => `KUBOARD_ACCESS_KEY_${e.toUpperCase()}`,
+        placeholder: 'v3: 密钥ID.密钥;v4: 单串 token',
+        showWhenAll: [
+          { field: 'provider', equals: 'kuboard' },
+          { field: 'auth_mode', equals: 'access_key' },
+        ],
+      },
+      {
+        key: 'username', label: '用户名(v3 必填 / Cookie KuboardUsername)', secret: false, envVar: (e) => `KUBOARD_USER_${e.toUpperCase()}`,
+        placeholder: 'Kuboard v3 走 access-key 时也要填;v4 可留空',
+        optional: true,
+        showWhenAll: [{ field: 'provider', equals: 'kuboard' }],
+      },
+      {
+        key: 'password', label: '密码', secret: true, envVar: (e) => `KUBOARD_PASS_${e.toUpperCase()}`,
+        showWhenAll: [
+          { field: 'provider', equals: 'kuboard' },
+          { field: 'auth_mode', equals: 'username_password' },
+        ],
+      },
     ],
   },
 ]
@@ -1785,6 +1975,32 @@ const { k8sRtWorkloadCache, k8sRtWorkloadKey, k8sRtWorkloadsFor, loadK8sRtWorklo
   onLoaded: (envID, deployments) => autoPickK8sRtWorkloads(envID, deployments),
 })
 
+async function loadOne2AllK8sRtWorkloads(envID: string, clusterID: string, ns: string) {
+  if (!clusterID || !ns) return
+  const key = k8sRtWorkloadKey(envID, clusterID, ns)
+  if (k8sRtWorkloadCache[key]?.status === 'loading') return
+  const { mcpURL, token } = one2allCredsFor(envID)
+  if (!mcpURL || !token) {
+    k8sRtWorkloadCache[key] = { status: 'error', error: '缺 one2all MCP URL 或 Bearer Token' }
+    return
+  }
+  k8sRtWorkloadCache[key] = { status: 'loading' }
+  pushLog('cchub', 'info', `[${envID}] one2all k8s_runtime 拉 deployments: cluster_id=${clusterID}, ns=${ns}`, { envID })
+  try {
+    const res = await one2allListDeployments(mcpURL, token, clusterID, ns)
+    const deployments = (res.deployments || []).map(d => ({ name: d.name, selector: d.selector || '' }))
+    k8sRtWorkloadCache[key] = { status: 'ok', deployments }
+    if (deployments.length > 0) {
+      autoPickK8sRtWorkloads(envID, deployments)
+    }
+    pushLog('cchub', 'info', `[${envID}] one2all k8s_runtime: 拉到 ${deployments.length} 个 Deployment`, { envID })
+  } catch (e: any) {
+    const msg = String(e?.message || e)
+    k8sRtWorkloadCache[key] = { status: 'error', error: msg }
+    pushLog('cchub', 'error', `[${envID}] one2all k8s_runtime 列 deployments 失败: ${msg}`, { envID })
+  }
+}
+
 // useGrafanaDS / useLokiLabels 实例化点挪到 useLokiMappingState 之后(它们要 lokiMappingByEnv +
 // getLokiMapping)。见下方"Step 7 Loki 标签映射"段附近。
 function clearToolFieldInput(k: string) {
@@ -1820,8 +2036,10 @@ const triggerStep7Init = (s: number) => {
   // 仍跑一次 autoPickK8sRtWorkloads —— 避免"切回页面 deployment 列表在但服务都'未部署'"。
   if (enabledObservability['k8s_runtime']) {
     for (const [envID, loc] of Object.entries(k8sRuntimeEnvLoc)) {
-      if (!loc?.cluster || !loc?.namespace) continue
-      const cacheKey = k8sRtWorkloadKey(envID, loc.cluster, loc.namespace)
+      const provider = (toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'provider')] || '').trim() || 'kuboard'
+      const clusterKey = provider === 'one2all' ? loc?.cluster_id : loc?.cluster
+      if (!clusterKey || !loc?.namespace) continue
+      const cacheKey = k8sRtWorkloadKey(envID, clusterKey, loc.namespace)
       const cached = k8sRtWorkloadCache[cacheKey]
       if (cached?.status === 'ok') {
         const anyUnmatched = allServiceNames.value.some(svc => {
@@ -1833,7 +2051,11 @@ const triggerStep7Init = (s: number) => {
         }
         continue
       }
-      loadK8sRtWorkloads(envID, loc.cluster, loc.namespace)
+      if (provider === 'one2all') {
+        loadOne2AllK8sRtWorkloads(envID, clusterKey, loc.namespace)
+      } else {
+        loadK8sRtWorkloads(envID, clusterKey, loc.namespace)
+      }
     }
   }
   // grafana:草稿恢复后若 URL+鉴权已填,自动拉一次 datasources(同样不等用户重新输入)
@@ -1995,7 +2217,7 @@ const {
   environments, allServiceNames, getServiceSource, svcKey,
   buildPreloadPayload, envNamespaces, serviceConfigSel, serviceConfigGroup,
   enabledSourceTypes, activeSourceTypes,
-  ccCredInputs, ccKeyFor, sourceCreds, kuboardSvcMap,
+  ccCredInputs, ccKeyFor, sourceCreds, kuboardSvcMap, one2allSvcMap,
 })
 // UI helper:DS_TOOL_SPECS 查 spec
 function dsSpecByKey(key: string) {
@@ -2166,6 +2388,9 @@ watch(() => environments.map(e => e.id).join('|'), () => {
   for (const k of Object.keys(kuboardSvcMap)) {
     const env = k.split('::')[0]; if (!valid.has(env)) delete kuboardSvcMap[k]
   }
+  for (const k of Object.keys(one2allSvcMap)) {
+    const env = k.split('::')[0]; if (!valid.has(env)) delete one2allSvcMap[k]
+  }
   // k8sRtWorkloadCache key 形如 "<envID>::<cluster>::<ns>"
   for (const k of Object.keys(k8sRtWorkloadCache)) {
     const env = k.split('::')[0]; if (!valid.has(env)) delete k8sRtWorkloadCache[k]
@@ -2270,6 +2495,7 @@ watch(
     serviceConfigSel,
     serviceConfigGroup,
     kuboardSvcMap,
+    one2allSvcMap,
     // 可观测性 k8s_runtime:env→cluster/namespace + (env,svc)→workload/label_selector 两层映射
     k8sRuntimeEnvLoc,
     k8sRuntimeSvcMap,
@@ -2368,6 +2594,7 @@ async function clearDraft() {
   for (const k of Object.keys(serviceConfigSel)) delete serviceConfigSel[k]
   for (const k of Object.keys(serviceConfigGroup)) delete serviceConfigGroup[k]
   for (const k of Object.keys(kuboardSvcMap)) delete kuboardSvcMap[k]
+  for (const k of Object.keys(one2allSvcMap)) delete one2allSvcMap[k]
   for (const k of Object.keys(k8sRuntimeEnvLoc)) delete k8sRuntimeEnvLoc[k]
   for (const k of Object.keys(k8sRuntimeSvcMap)) delete k8sRuntimeSvcMap[k]
   for (const k of Object.keys(k8sRtWorkloadCache)) delete k8sRtWorkloadCache[k]
@@ -2427,7 +2654,7 @@ const {
     ALL_SOURCE_TYPES,
     CC_FIELDS_BY_TYPE: CC_FIELDS_BY_TYPE.value,
     allServiceNames: allServiceNames.value,
-    ensureKuboardLoc, getLokiMapping,
+    ensureKuboardLoc, ensureOne2AllLoc, getLokiMapping,
     ccKeyFor, svcKey, scanStateKey, toolKeyFor,
     obsAccessKey, obsGrafanaDsKey, toolSpecByKey,
     pickBranchForEnv,
@@ -2529,7 +2756,7 @@ function generateYAML(): string {
       _serviceEntries: r._serviceEntries,
     })),
     sourceCreds, serviceConfigSel, serviceConfigGroup, envNamespaces,
-    kuboardSvcMap, lokiMappingByEnv, toolInputs, grafanaDsUidByObsEnv,
+    kuboardSvcMap, one2allSvcMap, lokiMappingByEnv, toolInputs, grafanaDsUidByObsEnv,
     k8sRuntimeEnvLoc, k8sRuntimeSvcMap, scannedDS,
     activeSourceTypes: activeSourceTypes.value,
     allServiceNames: allServiceNames.value,
@@ -2615,7 +2842,7 @@ function computeStepErrors(): Set<string> {
     activeSourceTypes: activeSourceTypes.value,
     CC_FIELDS_BY_TYPE: CC_FIELDS_BY_TYPE.value,
     ccCredInputs, sourceCreds, envNamespaces, serviceConfigSel,
-    kuboardStateByEnv, kuboardSvcMap, ccHubStateByEnv, dsProbeResults,
+    kuboardStateByEnv, kuboardSvcMap, one2allStateByEnv, one2allSvcMap, ccHubStateByEnv, dsProbeResults, dsScanState,
     isFieldHidden, getServiceSource, enumerateDataStoreProbeTargets,
     enabledObservability,
   }
@@ -2780,12 +3007,12 @@ const {
   enabledTargets, targetOptions, targetLabels, homeDir,
   activeSourceTypes, sourceCreds, environments, enabledDataStores,
   enabledObservability, toolInputs, OBS_TOOL_SPECS, DS_TOOL_SPECS,
-  toolKeyFor, isObsFieldHidden,
+  toolKeyFor, isObsFieldHidden, displayObsField,
   yamlOutput, reposRootInput, resolvedReposRoot, repos, resolveCloneDest,
   storageKey: STORAGE_KEY, router,
 })
 
-const configTypeOptions = ['nacos', 'apollo', 'consul', 'env-vars', 'kuboard', 'none']
+const configTypeOptions = ['nacos', 'apollo', 'consul', 'env-vars', 'kuboard', 'one2all', 'none']
 
 const configTypeDescriptions: Record<string, string> = {
   nacos: 'Nacos — 配置与服务发现中心(阿里巴巴开源)',
@@ -2793,6 +3020,7 @@ const configTypeDescriptions: Record<string, string> = {
   consul: 'Consul KV — HashiCorp 键值存储',
   'env-vars': '环境变量 / .env 文件 — 不使用远程配置中心',
   kuboard: 'Kuboard — 通过 Kuboard 后台读 K8s ConfigMap,无需 kubeconfig',
+  one2all: 'one2all-remote — 通过 MCP 读 ConfigMap/Secret + K8s 运行时,单 token 鉴权',
   none: '不使用任何配置源',
 }
 
@@ -2813,6 +3041,12 @@ provide(WizardStoreKey, {
   kuboardErrorOf,
   kuboardNamespacesFor,
   kuboardConfigMapsFor,
+  one2allStateByEnv,
+  one2allClustersOf,
+  one2allClusterCountOf,
+  one2allErrorOf,
+  one2allNamespacesFor,
+  one2allConfigMapsFor,
 })
 </script>
 
@@ -3044,6 +3278,7 @@ provide(WizardStoreKey, {
       :service-config-sel="serviceConfigSel"
       :service-config-group="serviceConfigGroup"
       :kuboard-svc-map="kuboardSvcMap"
+      :one2all-svc-map="one2allSvcMap"
       :cc-key-for="ccKeyFor"
       :is-field-hidden="isFieldHidden"
       :env-scanned="envScanned"
@@ -3054,11 +3289,13 @@ provide(WizardStoreKey, {
       @update-cred="(k, v) => (ccCredInputs[k] = v)"
       @clear-cred="clearCCFieldInput"
       @run-kuboard-preload="runKuboardPreload"
+      @run-one2-all-preload="runOne2AllPreload"
       @run-c-c-hub-preload="runCCHubPreload"
       @set-service-source="(svc, src) => setServiceSource(svc, src)"
       @namespace-changed="onNamespaceChanged"
       @data-id-changed="onDataIdChanged"
       @set-kuboard-loc="setKuboardLoc"
+      @set-one2-all-loc="setOne2AllLoc"
       @preload-kuboard-from-source="runKuboardPreloadFromSource"
     />
 
@@ -3070,12 +3307,14 @@ provide(WizardStoreKey, {
       :obs-probe-results="obsProbeResults"
       :tool-inputs="toolInputs"
       :is-obs-field-hidden="isObsFieldHidden"
+      :display-obs-field="displayObsField"
       :tool-key-for="toolKeyFor"
       :obs-probe-key="obsProbeKey"
       :get-obs-access-mode="getObsAccessMode"
       :k8s-runtime-env-loc="k8sRuntimeEnvLoc"
       :k8s-runtime-svc-map="k8sRuntimeSvcMap"
       :k8s-rt-workload-cache="k8sRtWorkloadCache"
+      :one2all-state-by-env="one2allStateByEnv"
       :k8s-rt-workload-key="k8sRtWorkloadKey"
       :k8s-rt-workloads-for="k8sRtWorkloadsFor"
       :get-loki-mapping="getLokiMapping"

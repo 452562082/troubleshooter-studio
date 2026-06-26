@@ -108,9 +108,10 @@ func SelfTestOpenclaw(ctx context.Context, dir string) (*SelfTestResult, error) 
 	}
 	probeMCPServersFromConfig(ctx, ownServers, add)
 
-	// nacos TCP 探活:多源逐个测。
-	// 2026-05-15 方案 B 后,nacos 不再注册 mcp,addr 不能从 mcp env 读了 — 改成读 cfg
-	// 的 ConfigCenter.Endpoints[].Addr(也是 wizard 写进 scripts/.env 的 CC_ADDR_* 源)。
+	// nacos TCP 探活:多源逐个测。读 cfg 的 ConfigCenter.Endpoints[].Addr(跟 buildNacos /
+	// scripts/.env 同源)。这是 MCP 工具探针(probeMCPServersFromConfig)之外的补充 —— MCP probe
+	// 验"脚本能起 + list tools"(plan D 下 login 失败也能 list,不测可达性),这里 TCP 拨号
+	// 验 nacos 真的连得通,两者互补。
 	for _, cc := range cfg.Infrastructure.ConfigCenters {
 		if cc.Type != "nacos" {
 			continue
@@ -218,9 +219,14 @@ func SelfTestOpenclaw(ctx context.Context, dir string) (*SelfTestResult, error) 
 	return res, nil
 }
 
-// checkToolchain 看 cfg 里哪些 MCP 用 npx,逐个 which 探活;缺则 FAIL + 给 nvm 安装提示。
-// 2026-05-15 方案 B 后,nacos 走 Python HTTP API(python3 在 install 阶段必查),没有 uvx 强依赖
-// MCP;如果未来重新接 uvx 类 MCP,这里加 needUvx + exec.LookPath("uvx") 即可。
+// toolchainLookPath 默认走 exec.LookPath;抽成包级变量供测试 stub
+// (CI docker 镜像里没装 node/uv,npx/uvx 必然 FAIL,需 stub 才能跑 happy-path 自检测试)。
+var toolchainLookPath = exec.LookPath
+
+// checkToolchain 看 cfg 里哪些 MCP 需要 npx / uvx,逐个 which 探活;缺则 FAIL + 安装提示。
+//   - npx:grafana / loki / lark / feishu_project MCP
+//   - uvx(= uv):nacos(plan D,`uv run --script nacos_mcp.py`)/ jaeger / clickhouse / rabbitmq
+//     —— CfgUsesUvx 统一判定。缺 uv 时 nacos MCP 起不来,会回落到 HTTP fallback(脚本仍需 python3)。
 func checkToolchain(cfg *config.SystemConfig, add func(name, status, detail string)) {
 	needNpx := cfg.Infrastructure.Observability.Grafana.Enabled ||
 		cfg.Infrastructure.Observability.Loki.Enabled
@@ -238,10 +244,18 @@ func checkToolchain(cfg *config.SystemConfig, add func(name, status, detail stri
 	}
 
 	if needNpx {
-		if path, err := exec.LookPath("npx"); err == nil {
+		if path, err := toolchainLookPath("npx"); err == nil {
 			add("npx 可用", "PASS", path)
 		} else {
 			add("npx 可用", "FAIL", "PATH 里没找到 npx;装 Node:`brew install node` 或 `nvm install --lts`(grafana/loki/lark MCP 跑不起来)")
+		}
+	}
+
+	if CfgUsesUvx(cfg) {
+		if path, err := toolchainLookPath("uvx"); err == nil {
+			add("uvx 可用", "PASS", path)
+		} else {
+			add("uvx 可用", "FAIL", "PATH 里没找到 uvx;装 uv:`brew install uv` 或 `curl -LsSf https://astral.sh/uv/install.sh | sh`(nacos/jaeger/clickhouse MCP 跑不起来,nacos 会回落 HTTP fallback)")
 		}
 	}
 }

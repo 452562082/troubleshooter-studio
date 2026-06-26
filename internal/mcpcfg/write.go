@@ -74,8 +74,10 @@ func MergeWrite(resolved *Resolved, servers map[string]Server) error {
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
+	// 0o600:MCP server 条目的 env / headers 段会带 plaintext creds(token / password 等),
+	// 跟 install_native_mcp.go / install_native_openclaw.go 的写入口径对齐,避免 world-readable leak。
 	tmp := resolved.Path + ".tmp"
-	if err := os.WriteFile(tmp, out, 0o644); err != nil {
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
 		return fmt.Errorf("write tmp: %w", err)
 	}
 	if err := os.Rename(tmp, resolved.Path); err != nil {

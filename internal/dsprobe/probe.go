@@ -19,8 +19,10 @@
 package dsprobe
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"time"
 )
@@ -38,6 +40,31 @@ type Result struct {
 }
 
 const probeTimeout = 5 * time.Second
+
+// InsecureTLSEnv 是放行跳过 TLS 校验的环境变量名。内网自签证书 + 带鉴权的探活场景下,
+// 用户显式 export 它即可恢复旧的"跳过校验"行为(见 TLSConfigForProbe)。
+const InsecureTLSEnv = "TSHOOT_INSECURE_TLS"
+
+// TLSConfigForProbe 返回探活 HTTP client 用的 TLS 配置,在"防 MITM 偷凭据"和
+// "内网自签证书很常见"之间取平衡:
+//   - hasCreds=false(纯连通性探测,不发任何 basic auth / token):跳过校验无所谓
+//     —— 没秘密可被中间人偷,且内网自签很普遍,校验只会徒增误报。
+//   - hasCreds=true(要发凭据):默认校验证书,防中间人用伪造证书截获 basic auth / Bearer。
+//   - 逃生口:确属内网自签 + 带鉴权,用户 export TSHOOT_INSECURE_TLS=1 显式放行。
+//
+// 注意 //nolint:gosec —— InsecureSkipVerify 仅在无凭据或用户显式 opt-in 时为 true,是有意为之。
+func TLSConfigForProbe(hasCreds bool) *tls.Config {
+	if !hasCreds || insecureTLSOptIn() {
+		return &tls.Config{InsecureSkipVerify: true} //nolint:gosec // 见上:无凭据 or 用户显式放行
+	}
+	return &tls.Config{MinVersion: tls.VersionTLS12}
+}
+
+// insecureTLSOptIn 读环境变量判断用户是否显式放行跳过校验。
+func insecureTLSOptIn() bool {
+	v := strings.TrimSpace(os.Getenv(InsecureTLSEnv))
+	return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
+}
 
 func Probe(req Request) Result {
 	start := time.Now()

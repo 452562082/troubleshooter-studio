@@ -9,8 +9,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"sort"
 	"strings"
@@ -94,40 +92,9 @@ type KuboardDeploymentInfo struct {
 	Selector string `json:"selector,omitempty"`
 }
 
-func (a *App) KuboardListDeployments(in KuboardListPodsInput) ([]KuboardDeploymentInfo, error) {
-	s, err := kuboardSetup(a.ctx, in.URL, in.AccessKey, in.Username, in.Password, in.Cluster)
-	if err != nil {
-		return nil, err
-	}
-	defer s.cancel()
-	// Kuboard v4 列非 core 资源的正确端点(swagger 文档确认):
-	//   GET /api/cluster.kuboard.cn/v4/cluster-cache
-	//     ?pageNum=1&pageSize=N
-	//     &apiGroup=apps                     # core 资源不传
-	//     &resource=deployments
-	//     &namespaced=true
-	//     &clusterIdNamespaces=<uid>/<ns>    # 同时支持多个 = 跨 ns 查
-	//     &orderBy=name
-	// 注:不是 cluster-cache/direct(那是按 name 取单条) / 也不是 cluster-cache/list。
-	hitURL := fmt.Sprintf("%s/api/cluster.kuboard.cn/v4/cluster-cache"+
-		"?pageNum=1&pageSize=500&apiGroup=apps&resource=deployments&namespaced=true"+
-		"&clusterIdNamespaces=%s%%2F%s&orderBy=name",
-		s.base, url.QueryEscape(s.clusterUID), url.QueryEscape(in.Namespace))
-	req, _ := http.NewRequestWithContext(s.ctx, http.MethodGet, hitURL, nil)
-	req.Header.Set("Kb-Access-Key", s.token)
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("请求 Kuboard 失败: %v;URL=%s", err, hitURL)
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("HTTP %d;URL=%s;响应=%s", resp.StatusCode, hitURL, snippet(raw))
-	}
-	// 兼容两种 list item 形态:
-	//   1) cluster-cache 分页接口:list[i] = { metadata, spec, status, ... }(平铺)
-	//   2) cluster-cache/direct:    list[i] = { data: { metadata, spec, status } }(嵌套)
-	// 各 binding 用 json.RawMessage 二阶段解 —— 先取 data.list,再尝试 .data 包一层 / 不包一层。
+// parseK8sDeployment 把一个标准 k8s Deployment 对象(v3 的 items[i] / v4 的 list[i].data
+// 都喂它)解析成 KuboardDeploymentInfo。解不出 name 返回 ok=false,调用方跳过。
+func parseK8sDeployment(raw json.RawMessage) (KuboardDeploymentInfo, bool) {
 	type k8sDep struct {
 		Metadata struct {
 			Name, Namespace string
@@ -150,76 +117,58 @@ func (a *App) KuboardListDeployments(in KuboardListPodsInput) ([]KuboardDeployme
 			} `json:"conditions"`
 		} `json:"status"`
 	}
-	// 兼容 Kuboard v4 多种分页字段命名:list / items / records / content / rows
-	var outer struct {
-		Data struct {
-			List    []json.RawMessage `json:"list"`
-			Items   []json.RawMessage `json:"items"`
-			Records []json.RawMessage `json:"records"`
-			Content []json.RawMessage `json:"content"`
-			Rows    []json.RawMessage `json:"rows"`
-		} `json:"data"`
+	var dep k8sDep
+	if err := json.Unmarshal(raw, &dep); err != nil || dep.Metadata.Name == "" {
+		return KuboardDeploymentInfo{}, false
 	}
-	if err := json.Unmarshal(raw, &outer); err != nil {
-		return nil, fmt.Errorf("解析 deployments 失败:%v;URL=%s;原始=%s", err, hitURL, snippet(raw))
+	info := KuboardDeploymentInfo{
+		Name: dep.Metadata.Name, Namespace: dep.Metadata.Namespace,
+		Replicas: dep.Spec.Replicas, Strategy: dep.Spec.Strategy.Type,
+		UpdatedReplicas:   dep.Status.UpdatedReplicas,
+		ReadyReplicas:     dep.Status.ReadyReplicas,
+		AvailableReplicas: dep.Status.AvailableReplicas,
 	}
-	listItems := outer.Data.List
-	if len(listItems) == 0 {
-		listItems = outer.Data.Items
-	}
-	if len(listItems) == 0 {
-		listItems = outer.Data.Records
-	}
-	if len(listItems) == 0 {
-		listItems = outer.Data.Content
-	}
-	if len(listItems) == 0 {
-		listItems = outer.Data.Rows
-	}
-	if len(listItems) == 0 {
-		// 五种命名都空 —— 把 Kuboard 实际响应的前 600 字节灌进 error,让用户能看到字段名
-		return nil, fmt.Errorf("kuboard 返回里没识别出 list 字段(试过 list/items/records/content/rows);URL=%s;响应前 600 字节=%s",
-			hitURL, snippetN(raw, 600))
-	}
-	out := make([]KuboardDeploymentInfo, 0, len(listItems))
-	for _, item := range listItems {
-		var dep k8sDep
-		// 先按平铺解;若 metadata.name 是空,fallback 到嵌套 .data 形态
-		if err := json.Unmarshal(item, &dep); err != nil || dep.Metadata.Name == "" {
-			var wrapped struct {
-				Data k8sDep `json:"data"`
-			}
-			if err2 := json.Unmarshal(item, &wrapped); err2 == nil && wrapped.Data.Metadata.Name != "" {
-				dep = wrapped.Data
-			} else {
-				continue
-			}
+	for _, c := range dep.Status.Conditions {
+		tag := c.Type + "=" + c.Status
+		if c.Reason != "" {
+			tag += " (" + c.Reason + ")"
 		}
-		info := KuboardDeploymentInfo{
-			Name: dep.Metadata.Name, Namespace: dep.Metadata.Namespace,
-			Replicas: dep.Spec.Replicas, Strategy: dep.Spec.Strategy.Type,
-			UpdatedReplicas:   dep.Status.UpdatedReplicas,
-			ReadyReplicas:     dep.Status.ReadyReplicas,
-			AvailableReplicas: dep.Status.AvailableReplicas,
+		info.Conditions = append(info.Conditions, tag)
+	}
+	if len(dep.Spec.Selector.MatchLabels) > 0 {
+		parts := make([]string, 0, len(dep.Spec.Selector.MatchLabels))
+		keys := make([]string, 0, len(dep.Spec.Selector.MatchLabels))
+		for k := range dep.Spec.Selector.MatchLabels {
+			keys = append(keys, k)
 		}
-		for _, c := range dep.Status.Conditions {
-			tag := c.Type + "=" + c.Status
-			if c.Reason != "" {
-				tag += " (" + c.Reason + ")"
-			}
-			info.Conditions = append(info.Conditions, tag)
+		sort.Strings(keys)
+		for _, k := range keys {
+			parts = append(parts, k+"="+dep.Spec.Selector.MatchLabels[k])
 		}
-		if len(dep.Spec.Selector.MatchLabels) > 0 {
-			parts := make([]string, 0, len(dep.Spec.Selector.MatchLabels))
-			keys := make([]string, 0, len(dep.Spec.Selector.MatchLabels))
-			for k := range dep.Spec.Selector.MatchLabels {
-				keys = append(keys, k)
-			}
-			sort.Strings(keys)
-			for _, k := range keys {
-				parts = append(parts, k+"="+dep.Spec.Selector.MatchLabels[k])
-			}
-			info.Selector = strings.Join(parts, ",")
+		info.Selector = strings.Join(parts, ",")
+	}
+	return info, true
+}
+
+func (a *App) KuboardListDeployments(in KuboardListPodsInput) ([]KuboardDeploymentInfo, error) {
+	s, err := kuboardSetup(a.ctx, in.URL, in.AccessKey, in.Username, in.Password, in.Cluster)
+	if err != nil {
+		return nil, err
+	}
+	defer s.cancel()
+	// deployment 在 apps/v1(非 core),v3/v4 走 listK8sObjectsGroup 统一收敛:
+	//   v3: GET {base}/k8s-api/{cluster}/apis/apps/v1/namespaces/{ns}/deployments  → {items:[<Deployment>]}
+	//   v4: GET {base}/api/cluster.kuboard.cn/v4/cluster-cache?...apiGroup=apps&resource=deployments
+	//       &clusterIdNamespaces={uid}/{ns}...                                     → {data:{list:[{data:<Deployment>}]}}
+	objs, err := s.listK8sObjectsGroup("apis/apps/v1", "apps", "deployments", in.Namespace, "")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]KuboardDeploymentInfo, 0, len(objs))
+	for _, raw := range objs {
+		info, ok := parseK8sDeployment(raw)
+		if !ok {
+			continue
 		}
 		out = append(out, info)
 	}

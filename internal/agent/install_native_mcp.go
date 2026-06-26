@@ -111,12 +111,24 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 		}
 	}
 
+	// nacos 走自研本地 MCP 脚本,extract 内嵌 nacos_mcp.py 到 ~/.tshoot/scripts/ 拿绝对路径。
+	// 失败不阻塞:buildNacos 拿到空路径会跳过注册,nacos 回落 config-executor SKILL 的 HTTP fallback。
+	nacosScriptPath := ""
+	if CfgUsesNacosMCP(cfg) {
+		var err error
+		nacosScriptPath, err = EnsureNacosMCPScript(emit)
+		if err != nil {
+			emit(fmt.Sprintf("[warn] install --target %s: %v", target, err))
+		}
+	}
+
 	// 避免 server_key + tool_name 拼起来超过 IDE 60 字符的 tool 名限制。
 	// IDE 走 PruneEmpty=true 模式 —— 避免把 "" 当真值喂给后端进程触发无效连接。
 	servers := BuildMCPServers(cfg, MCPBuildOptions{
 		AgentID:            cfg.MCPKeyPrefix(),
 		PruneEmpty:         true,
 		KafkaMCPBinaryPath: kafkaBinPath,
+		NacosMCPScriptPath: nacosScriptPath,
 	}, get)
 
 	if t == TargetCodex {
@@ -421,6 +433,26 @@ func renderCodexMCPSection(servers map[string]any) string {
 			sb.WriteString("url = ")
 			sb.WriteString(generator.TomlString(url))
 			sb.WriteString("\n")
+			// HTTP MCP:type(如 "streamable-http")+ headers
+			if typ, ok := spec["type"].(string); ok && typ != "" {
+				sb.WriteString("type = ")
+				sb.WriteString(generator.TomlString(typ))
+				sb.WriteString("\n")
+			}
+			if hdrs, ok := spec["headers"].(map[string]string); ok && len(hdrs) > 0 {
+				hdrKeys := make([]string, 0, len(hdrs))
+				for k := range hdrs {
+					hdrKeys = append(hdrKeys, k)
+				}
+				sort.Strings(hdrKeys)
+				fmt.Fprintf(&sb, "[%s.headers]\n", header)
+				for _, k := range hdrKeys {
+					sb.WriteString(k)
+					sb.WriteString(" = ")
+					sb.WriteString(generator.TomlString(hdrs[k]))
+					sb.WriteString("\n")
+				}
+			}
 		}
 
 		// env table

@@ -42,6 +42,8 @@
 
 ## 2026-05-15 · Nacos 接入回归方案 B(HTTP API 主路径)
 
+> **⚠️ SUPERSEDED by [2026-05-27 · Nacos plan D](#2026-05-27--nacos-plan-d自研本地-mcp运行时-refresh-token)**:方案 B 不再是 nacos 现状。本条所述"删 mcp 注册、HTTP 脚本为主路径"已被 plan D(自研本地 MCP + 运行时 refresh)取代;HTTP 脚本降为 fallback。本条保留作历史。
+
 **背景**:本项目 nacos 接入演进 3 轮,每轮都把上一轮的方案撕掉:
 
 - **5d5a139**:`config-executor` SKILL 走 HTTP API(`scripts/nacos_config.py`),临时绕路修 `nacos-mcp-router` 能力错配(router 是市场管理工具不读 KV)
@@ -147,7 +149,7 @@
 
 | 后端 | 不注册 mcp 理由 | 替代路径 | 凭据流 |
 |---|---|---|---|
-| nacos | bake token 不能 refresh + 官方包跟"长期跑"定位冲突 | `scripts/nacos_config.py` 每次自己 login | wizard 仍收 `CC_ADDR_<ENV>` 等,写 `<workspace>/scripts/.env`,SKILL `source` 后用 |
+| ~~nacos~~ → **见 plan D** | _(SUPERSEDED 2026-05-27)_ nacos 已改走自研本地 MCP,**重新注册 mcp**;HTTP 脚本降为 fallback | `nacos_mcp.py`(主)/ `scripts/nacos_config.py`(fallback) | 凭据进 MCP env(`NACOS_*`),HTTP fallback 才读 `.env` |
 | apollo | 生态暂无稳定 MCP 包 | `scripts/apollo_config.py --agent-id --env` | wizard 仍收,写 `~/.openclaw/<agent-id>-creds.json` |
 | consul | 生态暂无稳定 MCP 包 | `scripts/consul_config.py --agent-id --env` | 同 apollo |
 | **rabbitmq** | 上游两个 PyPI 包都坏(amazon-mq 引用 fastmcp 不存在的 API + guercheLE 缺一堆 dep) | `curl + :15672/api/queues` HTTP Management API(RabbitMQ 官方维护) | wizard 仍收 `RABBITMQ_USER_<ENV>` 等,写 .env / creds.json |
@@ -278,6 +280,71 @@ routing/config-map.yaml 标 `runtime: <type>-http` 字段告诉 LLM 走脚本。
 **SUPERSEDED 之前决策**:"不动用户全局 config.toml"——新决策接受"用户预期 = troubleshooter agent 能用,sandbox 这层放网不放写盘是排障常态"。
 
 **测试**:`patchCodexNetworkAccess` 5 个 parser 场景 + `EnsureCodexNetworkAccess` 3 个 E2E 场景(`t.TempDir()` 真 IO,verify backup 落盘)。
+
+---
+
+## 2026-05-27 · Nacos plan D(自研本地 MCP,运行时 refresh token)
+
+**背景**:[2026-05-15 方案 B](#2026-05-15--nacos-接入回归方案-bhttp-api-主路径) 把 nacos 退回 HTTP 脚本、删掉 mcp 注册,代价是 LLM 失去原生 tool-call 体验(每次 nacos 调用要写一行 bash)。方案 B 那条的「演进」里也留了口子:"如果将来 nacos 出官方支持 username/password 自动 refresh 的 mcp,可重新走 mcp 主路径"。本次没等官方 —— 自己写了一个。
+
+用户问"能不能不改 upstream、有没有更好的方式",评估了三条路:(A) fork 官方 `nacos-mcp-server` 加 refresh、(B) sidecar token 注入代理、(C) 自研本地小 MCP。fork 验证过可行(本地 commit 不 push),但上游 README 明写"v3 only / 要 nacos 3.0+",给它 PR 加 v1 兼容大概率被拒;与其养 fork 等 merge,不如承认这是 truss 私有逻辑留自己仓里。
+
+**为什么 plan D 能走通而 23d503a 不能**:23d503a 的死因是 token 在 **install 阶段**一次性 bake、进程内固定不刷新 → 5h 后 401。plan D 把 token 生命周期管理从 install 挪进 **MCP 进程运行时**:脚本自己拿 username/password 跑 login + 后台按 `tokenTtl*0.8` refresh + 401 强制 re-login。token 短 TTL 完全无所谓,nacos 端零配合。这是真根因修复,不是又一个 patch。
+
+**决策**(plan D):
+- 自研 `templates/workspace/skills/config-executor/scripts/nacos_mcp.py`(PEP 723 自含依赖,`uv run --script`;install 时 `EnsureNacosMCPScript` 从 embed extract 到 `~/.tshoot/scripts/`,target 无关稳定路径,仿 `EnsureKafkaMCPInstalled`)
+- 重写 `buildNacos`:`uv run --script` 启动,凭据走 MCP env(`NACOS_HOST/PORT/USERNAME/PASSWORD`,不进 args/ps),**不 bake token**
+- 仅用 `/v1` endpoint(nacos 2.x/3.x 通用),绕开上游 `/v3 admin` 要 nacos 3.0+ 的限制;只暴露排障实际用的 4 个只读工具(get_config / list_configs / get_config_history / list_config_history)
+- 工具参数用 `namespaceId`(跟 config-map / nacos 控制台同名,LLM 零改名;内部映射 v1 wire 的 `tenant`)
+- 健壮性:startup login 失败不崩照常 serve(后台 retry);`_request` 对 token-ready 限时等待快速报错不 hang;`httpx(trust_env=False)` 不被内网代理劫持;401 突发锁内 single-flight re-login
+- config-map `runtime: nacos-http` → `nacos-mcp`;config-executor / routing SKILL 切 MCP 主路径,保留 `nacos_config.py` 作 MCP 不可用时 fallback
+
+**后果**:
+- nacos 重新有原生 tool-call 体验;long-running 机器人不再受 token TTL 约束
+- 新依赖:`uv` 必须在 PATH(self-test `checkToolchain` 会查 uvx;缺了 nacos MCP 起不来回落 HTTP)
+- 翻转了一批方案 B 的 guard(install / generator / self-test 测试 + AGENTS.md / CONTRIBUTING.md / README 文档)
+- 验证:19 个 Python 行为测试 + Go 测试;本地假 nacos 端到端验证 refresh 轮换 + 401 兜底 + namespaceId 落 wire。truss 现场 e2e 待真环境(可用 `NACOS_REFRESH_SECONDS=60` 快速验证不等 5h)
+
+**演进**:若官方 `nacos-mcp-server` 将来支持 username/password 自动 refresh + v1 endpoint,可考虑切回官方包减少自维护;在那之前 plan D 是终态。fork 分支(`~/tmp/nacos-mcp-server-fork`,本地未 push)留作上游 PR 的潜在素材。
+
+---
+
+## 2026-06-26 · 探活 TLS:带凭据默认校验 + 自签 opt-in
+
+**背景**:连通性探活(`dsprobe` / `labelprobe`)一律 `InsecureSkipVerify: true`,但探活会发真凭据(Grafana/ES 的 basic auth、Bearer token)。中间人用伪造证书即可截获这些凭据 —— 跳过校验 = 凭据裸奔。但直接翻成"永远校验"又会打断大量内网自签证书部署的探活(自签在内网很普遍,这也是当初加 `InsecureSkipVerify` 的原因)。
+
+**决策**:**按"是否发凭据"分流**,逃生口走环境变量,**不动 schema/wizard/UI**。
+- 无凭据(纯连通性探测):继续跳过校验 —— 没秘密可被偷,自签误报没必要。
+- 带凭据:**默认校验证书**(`TLSConfigForProbe(hasCreds=true)` 返 `MinVersion: TLS1.2`,不 skip)。
+- 逃生口:确属内网自签 + 带鉴权,用户 `export TSHOOT_INSECURE_TLS=1` 显式放行。探活撞 x509 错时,错误信息直接提示这个开关。
+
+**后果**:
+- 统一 helper `dsprobe.TLSConfigForProbe` + 常量 `dsprobe.InsecureTLSEnv`,`probe_http.go` / `probe_es.go` / `labelprobe/loki.go` 三处复用(labelprobe 反向 import dsprobe,无环)。
+- 行为变更:之前自签 + 带鉴权能直接探通的用户,现在需 export 一次环境变量。属有意为之(安全默认优先,逃生口兜底)。
+- 验证:`internal/dsprobe/tls_test.go` 锁定三态(无凭据 skip / 带凭据校验 / opt-in 放行)。
+
+**演进**:`cmd/tshoot-desktop/bindings_{one2all,kuboard,kuboard_configmap}.go` 的 runtime 数据拉取(发 one2all Bearer / kuboard accessKey)同样复用 `dsprobe.TLSConfigForProbe(true)`,行为统一(默认校验 + 同一 opt-in 开关)。`bindings_kuboard_v3_live_test.go` 是手动 live test,保留原 skip 不动。若将来要做"自签证书指纹 pin"而非全放行,可在 helper 里扩展。
+
+---
+
+## 2026-06-26 · 排障链路两处脱节修复 + skill 脚本链护栏
+
+**背景**:审计产出物(机器人)排障链路时发现两处"文档/格式 vs 实际脱节"(项目反复踩、但 self-test 只 probe MCP 没覆盖到 skill 脚本链):
+
+1. **cascade_check 解析器吃不下生成器产出**:`service-dependency-map.yaml.tmpl` 渲染的是 **block 列表**(`downstream:` 换行 `- x`),但 `cascade_check.py` 的 `parse_dep_map` 只认 inline `[a,b]`,block 被静默跳过 → 自动生成的依赖图 downstream 永远解析为空 → incident-investigator **Step 4(沿依赖图追下游)对几乎所有部署静默空转**。runtime 实测确认。
+2. **incident-investigator 脚本路径漂移**:Step 2/3 写 `scripts/timeline.py` / `scripts/k8s_query.py`,但这俩脚本在 `recent-changes/` 和 `k8s-runtime-query/` 的 scripts 目录,不在 incident-investigator/scripts/ → 机器人按文档跑 file-not-found(脚本自身用 `detect_workspace_root` 健壮,纯文档错)。
+
+**决策**:
+- `parse_dep_map` 同时支持 block + inline 列表(block 是生成器默认产出,**核心路径不是 nice-to-have**)。
+- incident-investigator 5 处脚本调用统一成 workspace 根相对 `skills/<owning-skill>/scripts/<f>.py`(跟 recent-changes SKILL 既有约定一致);Step 2/3 依赖的 recent-changes / k8s-runtime-query 是可选 skill,加 `{{if hasSkill}}` 守卫,被 whitelist 砍掉时走手动降级 else 分支,不渲染破引用。
+- **补 CI 级护栏**(self-test 只覆盖 MCP 的空白):
+  - `internal/generator/chain_integrity_test.go::TestSkillScriptPathsExist` —— 渲染 fixture,遍历所有生成的 SKILL.md,断言引用的每个脚本路径真实存在(两场景:全 skill + 守卫场景)。
+  - 同文件 `TestDepMapParserHandlesGeneratedFormat` —— exec python3 跑真实 `parse_dep_map` 吃 block 样本,锁死"生成器格式 ↔ 解析器"契约(无 python3 自动 skip)。
+  - `test_cascade_check.py` —— parser block/inline/空列表的 idiomatic 单测。
+
+**后果**:Step 4 级联追下游对自动生成依赖图恢复有效;按文档跑脚本不再 file-not-found;脚本路径漂移 / 格式脱节今后 `go test` 直接拦下。
+
+**演进**:cascade_check 仍假设下游同 namespace(`--namespace-default`),多 ns 部署会漏跨 ns 下游(脚本注释自承局限),留作后续(需 dependency-map 扩 per-service namespace 字段)。`parse_dep_map` 是手写文本解析器(刻意不引 PyYAML),若将来 dependency-map 形态更复杂可考虑切 PyYAML。
 
 ---
 

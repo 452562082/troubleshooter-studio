@@ -11,13 +11,14 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/xiaolong/troubleshooter-studio/internal/dsprobe"
 )
 
 type KuboardFetchBatchInput struct {
@@ -64,12 +65,18 @@ func (a *App) KuboardFetchConfigMaps(in KuboardFetchBatchInput) (*KuboardFetchBa
 
 	client := &http.Client{
 		Timeout: 30 * time.Second,
+		// 带 accessKey / 账密出站 → 默认校验证书防 MITM;内网自签 TSHOOT_INSECURE_TLS=1 放行。
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+			TLSClientConfig: dsprobe.TLSConfigForProbe(true),
 		},
 	}
 	ctx, cancel := context.WithTimeout(a.ctx, 120*time.Second)
 	defer cancel()
+
+	// v3 探测:access-key 试 v4 tree 404 → v3,走 k8s-api 读 cm。
+	if accessKey != "" && kuboardDetectVersion(ctx, client, base, accessKey) == "v3" {
+		return kuboardFetchConfigMapsV3(ctx, client, base, in.Username, accessKey, in.Items)
+	}
 
 	// 1) token:accessKey 直接用,否则 /login 拿临时 accessToken
 	var token string
@@ -149,6 +156,7 @@ func kuboardFetchConfigMapDataV4(ctx context.Context, c *http.Client, base, toke
 		return nil, err
 	}
 	req.Header.Set("Kb-Access-Key", token)
+	req.Header.Set("User-Agent", kuboardUserAgent)
 	resp, err := c.Do(req)
 	if err != nil {
 		return nil, err

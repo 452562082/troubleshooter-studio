@@ -19,7 +19,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,7 +26,12 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/xiaolong/troubleshooter-studio/internal/dsprobe"
 )
+
+// kuboardUserAgent:给所有 Kuboard 出站请求统一带的 UA,避免 Cloudflare 对默认 Go UA 风控。
+const kuboardUserAgent = "Mozilla/5.0 (compatible; tshoot-desktop)"
 
 // KuboardCluster:一个集群下的命名空间树
 type KuboardCluster struct {
@@ -53,8 +57,10 @@ type KuboardResources struct {
 //     accessKey:Kuboard 后台"个人中心 → API 访问凭证"创建的 user-key-secret,免账密直连
 //     username+password:走 /login 拿临时 accessToken
 //   - loginPath:保留参数(v4 路径已固定),已忽略
-func (a *App) KuboardListResources(kuboardURL, username, password, accessKey, loginPath string) (*KuboardResources, error) {
-	_ = loginPath
+//
+// clusterHint(原 loginPath 槽位)：Kuboard v3 必填集群名(v3 无法用 access-key 枚举集群,
+// 用户填一次,access-key 校验存在 + 列其 ns/cm)。v4 忽略此参(tree 一次列全部集群)。
+func (a *App) KuboardListResources(kuboardURL, username, password, accessKey, clusterHint string) (*KuboardResources, error) {
 	base := strings.TrimRight(strings.TrimSpace(kuboardURL), "/")
 	if base == "" {
 		return nil, fmt.Errorf("kuboard URL 必填")
@@ -69,12 +75,18 @@ func (a *App) KuboardListResources(kuboardURL, username, password, accessKey, lo
 
 	client := &http.Client{
 		Timeout: 20 * time.Second,
+		// 带 accessKey / 账密出站 → 默认校验证书防 MITM;内网自签 TSHOOT_INSECURE_TLS=1 放行。
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+			TLSClientConfig: dsprobe.TLSConfigForProbe(true),
 		},
 	}
 	ctx, cancel := context.WithTimeout(a.ctx, 60*time.Second)
 	defer cancel()
+
+	// v3 探测:access-key 试 v4 tree 404 → v3。v3 走 Cookie 鉴权 + 指定集群名。
+	if accessKey != "" && kuboardDetectVersion(ctx, client, base, accessKey) == "v3" {
+		return kuboardListResourcesV3(ctx, client, base, username, accessKey, strings.TrimSpace(clusterHint))
+	}
 
 	// 1) 拿到鉴权 token:优先 accessKey 直接用,否则 /login 换一个
 	var token string
@@ -91,6 +103,10 @@ func (a *App) KuboardListResources(kuboardURL, username, password, accessKey, lo
 	// 2) cluster-namespace-tree 一次拿 cluster→ns 树
 	tree, err := kuboardClusterNamespaceTree(ctx, client, base, token)
 	if err != nil {
+		// 回落:探测判 v4 但 tree 调不通(如被 Cloudflare 改写/实际是 v3),且具备 v3 入参时改走 v3。
+		if username != "" {
+			return kuboardListResourcesV3(ctx, client, base, username, accessKey, strings.TrimSpace(clusterHint))
+		}
 		return nil, fmt.Errorf("列集群+namespace 失败: %w", err)
 	}
 	if len(tree) == 0 {
@@ -143,6 +159,7 @@ func kuboardClusterNamespaceTree(ctx context.Context, c *http.Client, base, toke
 		return nil, err
 	}
 	req.Header.Set("Kb-Access-Key", token)
+	req.Header.Set("User-Agent", kuboardUserAgent)
 	resp, err := c.Do(req)
 	if err != nil {
 		return nil, err
@@ -198,6 +215,7 @@ func kuboardLoginV4(ctx context.Context, c *http.Client, base, user, pass string
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", kuboardUserAgent)
 	resp, err := c.Do(req)
 	if err != nil {
 		return "", err
@@ -243,6 +261,7 @@ func kuboardListConfigMapsV4(ctx context.Context, c *http.Client, base, token, c
 		return nil, err
 	}
 	req.Header.Set("Kb-Access-Key", token)
+	req.Header.Set("User-Agent", kuboardUserAgent)
 	resp, err := c.Do(req)
 	if err != nil {
 		return nil, err
@@ -302,12 +321,15 @@ func snippetN(b []byte, n int) string {
 // 各专项 binding 在 bindings_kuboard_pod.go / bindings_kuboard_workload.go。
 
 type kuboardSetupResult struct {
-	ctx        context.Context
-	cancel     context.CancelFunc
-	client     *http.Client
-	base       string
-	token      string
-	clusterUID string
+	ctx         context.Context
+	cancel      context.CancelFunc
+	client      *http.Client
+	base        string
+	version     string // "v3" | "v4"
+	token       string // v4: Kb-Access-Key 值
+	cookie      string // v3: KuboardUsername + KuboardAccessKey Cookie
+	clusterUID  string // v4: tree 解析出的集群 UID
+	clusterName string // v3: 集群名直接进 k8s-api path
 }
 
 func kuboardSetup(ctx context.Context, kbURL, accessKey, username, password, clusterName string) (*kuboardSetupResult, error) {
@@ -324,9 +346,33 @@ func kuboardSetup(ctx context.Context, kbURL, accessKey, username, password, clu
 	}
 	client := &http.Client{
 		Timeout:   30 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, //nolint:gosec
+		Transport: &http.Transport{TLSClientConfig: dsprobe.TLSConfigForProbe(true)}, // 带凭据默认校验;自签 TSHOOT_INSECURE_TLS=1
 	}
 	rctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+
+	// v3 探测:用 access-key 试 v4 tree,404 = v3。
+	if accessKey != "" && kuboardDetectVersion(rctx, client, base, accessKey) == "v3" {
+		if username == "" {
+			cancel()
+			return nil, fmt.Errorf("kuboard v3 鉴权需要用户名(Cookie KuboardUsername),accessKey 形态应为 <密钥ID>.<密钥>")
+		}
+		cookie := kuboardV3Cookie(username, accessKey)
+		ok, err := kuboardV3ClusterExists(rctx, client, base, cookie, clusterName)
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("校验集群失败: %w", err)
+		}
+		if !ok {
+			cancel()
+			return nil, fmt.Errorf("集群 %q 在 Kuboard 里找不到(检查集群名 / access-key 权限)", clusterName)
+		}
+		return &kuboardSetupResult{
+			ctx: rctx, cancel: cancel, client: client,
+			base: base, version: "v3", cookie: cookie, clusterName: clusterName,
+		}, nil
+	}
+
+	// v4 路径(原逻辑)
 	var token string
 	if accessKey != "" {
 		token = accessKey
@@ -340,6 +386,18 @@ func kuboardSetup(ctx context.Context, kbURL, accessKey, username, password, clu
 	}
 	tree, err := kuboardClusterNamespaceTree(rctx, client, base, token)
 	if err != nil {
+		// 回落:探测判 v4 但 tree 调不通(被 Cloudflare 改写 / 实际是 v3),且具备 v3 入参
+		// (access-key + 用户名)时改走 v3 Cookie 鉴权 —— 跟 KuboardListResources 同款自愈。
+		if accessKey != "" && username != "" {
+			cookie := kuboardV3Cookie(username, accessKey)
+			ok, v3err := kuboardV3ClusterExists(rctx, client, base, cookie, clusterName)
+			if v3err == nil && ok {
+				return &kuboardSetupResult{
+					ctx: rctx, cancel: cancel, client: client,
+					base: base, version: "v3", cookie: cookie, clusterName: clusterName,
+				}, nil
+			}
+		}
 		cancel()
 		return nil, fmt.Errorf("列集群失败: %w", err)
 	}
@@ -356,7 +414,7 @@ func kuboardSetup(ctx context.Context, kbURL, accessKey, username, password, clu
 	}
 	return &kuboardSetupResult{
 		ctx: rctx, cancel: cancel, client: client,
-		base: base, token: token, clusterUID: clusterUID,
+		base: base, version: "v4", token: token, clusterUID: clusterUID,
 	}, nil
 }
 
@@ -370,6 +428,7 @@ func kuboardDirectGET(s *kuboardSetupResult, query string) ([]byte, error) {
 		return nil, err
 	}
 	req.Header.Set("Kb-Access-Key", s.token)
+	req.Header.Set("User-Agent", kuboardUserAgent)
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return nil, err

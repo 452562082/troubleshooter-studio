@@ -55,10 +55,24 @@ func injectMCPServers(
 		}
 	}
 
+	// nacos 自研本地 MCP 脚本:extract 内嵌 nacos_mcp.py 到 ~/.tshoot/scripts/。同 IDE 路径,
+	// 失败不阻塞,空路径时 buildNacos 跳过注册回落 SKILL HTTP fallback。
+	nacosScriptPath := ""
+	if CfgUsesNacosMCP(cfg) {
+		var err error
+		nacosScriptPath, err = EnsureNacosMCPScript(func(line string) {
+			fmt.Fprintln(os.Stderr, line)
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[warn] openclaw install:\n%v\n", err)
+		}
+	}
+
 	servers := BuildMCPServers(cfg, MCPBuildOptions{
 		AgentID:            cfg.MCPKeyPrefix(),
 		PruneEmpty:         false, // 留全 schema,agent 自决
 		KafkaMCPBinaryPath: kafkaBinPath,
+		NacosMCPScriptPath: nacosScriptPath,
 	}, get)
 
 	mcp, _ := root["mcp"].(map[string]any)

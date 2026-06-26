@@ -10,11 +10,16 @@ import (
 	"time"
 )
 
-// init() stub probeMCPFunc — self-test 测试会因 cfg 注册一堆 mcp,真 probe 会因 CI 没装
-// npx/uvx 全 FAIL。stub 返成功结果,让 self-test 走 happy path。个别测试可局部 override 测 FAIL。
+// init() stub probeMCPFunc / toolchainLookPath — self-test 测试会因 cfg 注册一堆 mcp,真 probe
+// 会因 CI 没装 npx/uvx 全 FAIL。stub 返成功结果,让 self-test 走 happy path。个别测试可局部 override 测 FAIL。
+// toolchainLookPath 同理:CI 的 golang docker 镜像没装 node/uv,真 LookPath npx/uvx 必 FAIL,
+// 拖垮 happy-path 自检断言;stub 成命中,保留生产 LookPath 行为只在测试里替换。
 func init() {
 	probeMCPFunc = func(_ context.Context, _ string, _, _ []string, _ time.Duration) MCPProbeResult {
 		return MCPProbeResult{Tools: []string{"fake_tool_a", "fake_tool_b"}}
+	}
+	toolchainLookPath = func(name string) (string, error) {
+		return "/fake/bin/" + name, nil
 	}
 }
 
@@ -60,7 +65,10 @@ func TestSelfTestOpenclaw_AfterInstallAllPass(t *testing.T) {
 	wantPass := []string{
 		"workspace 目录",
 		"agents.list 含 shop-troubleshooter",
-		"mcp.servers 齐全(2 项)", // 2026-05-15 方案 B 后:grafana x2;nacos 走 Python HTTP API 不进 mcp
+		// 4 项 = grafana×2(dev+prod)+ nacos×2(plan D:nacos 走本地 MCP 脚本)。
+		// install 阶段会把 legacy ConfigCenter 单字段迁移到 ConfigCenters,所以 buildNacos
+		// 注册 nacos-dev / nacos-prod,requiredMCPKeys 也镜像要求这两个。
+		"mcp.servers 齐全(4 项)",
 	}
 	for _, name := range wantPass {
 		if statusByName[name] != "PASS" {

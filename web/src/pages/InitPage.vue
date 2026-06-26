@@ -3314,6 +3314,7 @@ provide(WizardStoreKey, {
       :k8s-runtime-env-loc="k8sRuntimeEnvLoc"
       :k8s-runtime-svc-map="k8sRuntimeSvcMap"
       :k8s-rt-workload-cache="k8sRtWorkloadCache"
+      :one2all-state-by-env="one2allStateByEnv"
       :k8s-rt-workload-key="k8sRtWorkloadKey"
       :k8s-rt-workloads-for="k8sRtWorkloadsFor"
       :get-loki-mapping="getLokiMapping"

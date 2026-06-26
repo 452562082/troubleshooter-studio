@@ -7,6 +7,7 @@
 
 import { inject } from 'vue'
 import type { CredField } from '../lib/credFields'
+import type { One2AllResourceState } from '../lib/wizardStore'
 import type { K8sRuntimeEnvLocator, K8sRuntimeSvcLocator } from '../lib/yamlGenerator'
 import type { URLProbeState } from '../lib/probeTypes'
 import type { GrafanaDatasource } from '../lib/bridge'
@@ -57,6 +58,7 @@ const props = defineProps<{
   k8sRuntimeEnvLoc: Record<string, K8sRuntimeEnvLocator | undefined>
   k8sRuntimeSvcMap: Record<string, K8sRuntimeSvcLocator>
   k8sRtWorkloadCache: Record<string, WorkloadCacheEntry | undefined>
+  one2allStateByEnv: Record<string, One2AllResourceState | undefined>
   k8sRtWorkloadKey: (envID: string, cluster: string, ns: string) => string
   k8sRtWorkloadsFor: (envID: string, cluster: string, ns: string) => Array<{ name: string; selector: string }>
 
@@ -188,6 +190,7 @@ function setGrafanaDsUid(obsKey: string, envID: string, value: string) {
               :provider="toolInputs[toolKeyFor('obs', 'k8s_runtime', env.id, 'provider')] || 'kuboard'"
               :services="wizard.allServiceNames"
               :kuboard-state="wizard.kuboardStateByEnv[env.id]"
+              :one2all-state="one2allStateByEnv[env.id]"
               :env-loc="k8sRuntimeEnvLoc[env.id]"
               :svc-map="k8sRuntimeSvcMap"
               :workload-cache="k8sRtWorkloadCache"

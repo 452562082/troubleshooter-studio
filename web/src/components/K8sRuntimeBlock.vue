@@ -10,6 +10,7 @@
 import { computed } from 'vue'
 import PreloadStatusRow from './PreloadStatusRow.vue'
 import type { KuboardResourceState } from '../lib/credFields'
+import type { One2AllResourceState } from '../lib/wizardStore'
 import type { K8sRuntimeEnvLocator, K8sRuntimeSvcLocator } from '../lib/yamlGenerator'
 
 interface WorkloadCacheEntry { status?: 'idle' | 'loading' | 'ok' | 'error' }
@@ -21,6 +22,8 @@ const props = defineProps<{
   provider?: string
   /** kuboardStateByEnv[envID] —— 跟 KuboardSelector 共用同一棵 cluster 树 */
   kuboardState: KuboardResourceState | undefined
+  /** one2allStateByEnv[envID] —— one2all 拉到的 cluster_id → namespace 树 */
+  one2allState?: One2AllResourceState | undefined
   /** k8sRuntimeEnvLoc[envID] —— env 级 cluster/cluster_id + namespace 选择 */
   envLoc: K8sRuntimeEnvLocator | undefined
   /** svcKey → workload 选择(reactive map) */
@@ -42,19 +45,25 @@ const emit = defineEmits<{
 const isOne2All = computed(() => props.provider === 'one2all')
 const okClusters = computed(() => props.kuboardState?.status === 'ok' ? props.kuboardState.clusters : [])
 const errorMsg = computed(() => props.kuboardState?.status === 'error' ? props.kuboardState.error.slice(0, 60) : '')
+const one2allClusters = computed(() => props.one2allState?.status === 'ok' ? props.one2allState.clusters : [])
+const one2allErrorMsg = computed(() => props.one2allState?.status === 'error' ? props.one2allState.error.slice(0, 60) : '')
 const cluster = computed(() => props.envLoc?.cluster || '')
 const clusterId = computed(() => props.envLoc?.cluster_id || '')
 const namespace = computed(() => props.envLoc?.namespace || '')
 const workloadClusterKey = computed(() => isOne2All.value ? clusterId.value : cluster.value)
 const wlCacheEntry = computed(() => props.workloadCache[props.workloadKey(props.envID, workloadClusterKey.value, namespace.value)])
 const wlList = computed(() => props.workloadsFor(props.envID, workloadClusterKey.value, namespace.value))
+const one2allNamespaces = computed(() => {
+  const c = one2allClusters.value.find(c => c.cluster_id === clusterId.value)
+  return c ? c.namespaces.map(n => n.name) : []
+})
 </script>
 
 <template>
   <div class="loki-env-mapping">
     <div class="loki-env-mapping-head">
       <template v-if="isOne2All">
-        ☸️ K8s 服务定位 ({{ envID }}) — one2all MCP 模式:直接填写 cluster_id(数字) + namespace + Deployment
+        ☸️ K8s 服务定位 ({{ envID }}) — one2all MCP 模式:先加载集群资源,再挑 cluster_id + namespace + Deployment
       </template>
       <template v-else>
         ☸️ K8s 服务定位 ({{ envID }}) —— 先挑集群 + namespace,再给每个服务挑 Deployment
@@ -109,26 +118,49 @@ const wlList = computed(() => props.workloadsFor(props.envID, workloadClusterKey
       </div>
     </template>
 
-    <!-- one2all: 文本输入 cluster_id + namespace -->
+    <!-- one2all: 加载集群资源 + 下拉选择;不允许手填,避免 cluster_id/namespace 漂移 -->
     <template v-else>
-      <div class="cc-field-row" style="gap: 12px; margin: 10px 0; flex-wrap: wrap;">
+      <PreloadStatusRow
+        :status="one2allState?.status"
+        idle-text="📥 加载集群资源"
+        ok-text="🔄 重新加载集群资源"
+        :error-message="one2allErrorMsg"
+        style="margin: 6px 0 10px 0;"
+        @click="emit('preload', envID)"
+      >
+        <template #ok>✓ {{ one2allClusters.length }} 个集群</template>
+      </PreloadStatusRow>
+
+      <div
+        v-if="one2allClusters.length > 0"
+        class="cc-field-row"
+        style="gap: 12px; margin: 10px 0; flex-wrap: wrap;"
+      >
         <div class="cc-field" style="flex: 1; min-width: 140px;">
           <label class="cc-field-label">Cluster ID(数字)</label>
-          <input
+          <select
             :value="clusterId"
             class="cc-input"
-            placeholder="如 1"
-            @input="(e: any) => emit('setEnvLoc', envID, 'cluster_id', e.target.value)"
-          />
+            @change="(e: any) => emit('setEnvLoc', envID, 'cluster_id', e.target.value)"
+          >
+            <option value="">— 选集群 —</option>
+            <option v-for="c in one2allClusters" :key="c.cluster_id" :value="c.cluster_id">
+              {{ c.name }}({{ c.cluster_id }})
+            </option>
+          </select>
         </div>
         <div class="cc-field" style="flex: 1; min-width: 180px;">
           <label class="cc-field-label">Namespace</label>
-          <input
+          <select
             :value="namespace"
+            :disabled="!clusterId"
             class="cc-input"
-            placeholder="如 default"
-            @input="(e: any) => emit('setEnvLoc', envID, 'namespace', e.target.value)"
-          />
+            @change="(e: any) => emit('setEnvLoc', envID, 'namespace', e.target.value)"
+          >
+            <option v-if="!clusterId" value="">— 先选集群 —</option>
+            <option v-else value="">— 选 namespace —</option>
+            <option v-for="n in one2allNamespaces" :key="n" :value="n">{{ n }}</option>
+          </select>
         </div>
       </div>
     </template>

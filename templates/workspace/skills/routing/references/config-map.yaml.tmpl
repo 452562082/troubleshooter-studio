@@ -46,6 +46,7 @@ environments:
         {{- range $endpoints}}{{if eq .Env $envID}}{{$nsHint = .NamespaceHint}}{{end}}{{end}}
         {{- $f := findConfig $ctx $svc $envID}}
         {{- $p := findPrior $ctx $svc $envID}}
+        {{- $sm := configServiceMapEntry $ctx $sourceID $envID $svc}}
       {{$svc}}:
         {{- if ne $sourceID "default"}}
         config_source: {{$sourceID | printf "%q"}}        # 多源:本服务走副源
@@ -127,11 +128,15 @@ environments:
         # 单一 streamable-http 实例,所有 env 通过 cluster_id 参数区分。
         runtime: one2all-mcp
         mcp_server: {{$.System.ID}}-one2all
-        {{- range $.Infrastructure.Observability.K8sRuntime.ServiceMap}}
-        {{- if and (eq .Env $envID) (eq .Service $svc)}}
-        {{- if .ClusterID}}cluster_id: {{.ClusterID | printf "%q"}}{{"\n"}}{{end}}
-        {{- if .Namespace}}namespace: {{.Namespace | printf "%q"}}{{"\n"}}{{end}}
-        {{- if .ConfigMap}}configmaps: {{.ConfigMap | printf "%q"}}  # 逗号分隔，每个对应一个配置文件{{"\n"}}{{end}}
+        {{- if $sm}}
+        {{- if $sm.ClusterID}}
+        cluster_id: {{$sm.ClusterID | printf "%q"}}
+        {{- end}}
+        {{- if $sm.Namespace}}
+        namespace: {{$sm.Namespace | printf "%q"}}
+        {{- end}}
+        {{- if $sm.ConfigMap}}
+        configmaps: {{$sm.ConfigMap | printf "%q"}}  # 逗号分隔，每个对应一个配置文件
         {{- end}}
         {{- end}}
         status: inferred

@@ -204,7 +204,7 @@ reposDone:
 	if d != nil {
 		ccDef = defaultOr(d.ConfigCenterType, ccDef)
 	}
-	a.ConfigCenterType, err = w.askChoice("类型", []string{"nacos", "apollo", "consul", "env-vars", "kuboard", "none"}, ccDef)
+	a.ConfigCenterType, err = w.askChoice("类型", []string{"nacos", "apollo", "consul", "env-vars", "kuboard", "one2all", "none"}, ccDef)
 	if err != nil {
 		return nil, err
 	}

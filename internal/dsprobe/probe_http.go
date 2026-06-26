@@ -1,7 +1,6 @@
 package dsprobe
 
 import (
-	"crypto/tls"
 	"fmt"
 	"net/http"
 	"strings"
@@ -25,9 +24,10 @@ func ProbeHTTPURLAuth(rawURL, user, pass, apiKey string) Result {
 	if !strings.Contains(rawURL, "://") {
 		rawURL = "http://" + rawURL
 	}
+	hasCreds := user != "" || apiKey != ""
 	cli := &http.Client{
 		Timeout:   probeTimeout,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+		Transport: &http.Transport{TLSClientConfig: TLSConfigForProbe(hasCreds)},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 {
 				return http.ErrUseLastResponse
@@ -58,7 +58,11 @@ func ProbeHTTPURLAuth(rawURL, user, pass, apiKey string) Result {
 		case strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline"):
 			return Result{OK: false, Error: "超时(网络/防火墙?)"}
 		case strings.Contains(msg, "x509") || strings.Contains(msg, "tls"):
-			return Result{OK: false, Error: fmt.Sprintf("TLS 错: %s", msg)}
+			hint := ""
+			if hasCreds {
+				hint = fmt.Sprintf("(带鉴权时默认校验证书防 MITM;若确属内网自签,export %s=1 放行)", InsecureTLSEnv)
+			}
+			return Result{OK: false, Error: fmt.Sprintf("TLS 错: %s%s", msg, hint)}
 		}
 		return Result{OK: false, Error: msg}
 	}

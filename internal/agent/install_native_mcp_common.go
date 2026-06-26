@@ -406,6 +406,7 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 	b.buildDataStores(servers)
 	b.buildLark(servers)
 	b.buildFeishuProject(servers)
+	b.buildOne2All(servers)
 	return servers
 }
 

@@ -7,6 +7,11 @@ import (
 	"strings"
 )
 
+// maxScanFileBytes 单文件扫描上限。依赖图 / schema / service-name 识别针对的是人写的
+// 源码,正常都远小于此;超过的几乎都是 minified bundle / 生成代码 / 大数据文件,既无识别
+// 价值,整文件 ReadFile + 正则全量匹配还会在 auto-analyze 期造成内存尖峰 + CPU 卡死,直接跳过。
+const maxScanFileBytes = 4 << 20 // 4 MiB
+
 // walkFiles 遍历仓库，按 include 过滤 + 跳过 .git/node_modules/vendor/target 等
 //
 // 目录跳过规则:
@@ -50,6 +55,10 @@ func walkFiles(root string, include []string, match func(path string) bool) ([]s
 			}
 		}
 		if match(rel) {
+			// 超大文件跳过(见 maxScanFileBytes):d.Info() 拿 size,失败则保守保留。
+			if info, ierr := d.Info(); ierr == nil && info.Size() > maxScanFileBytes {
+				return nil
+			}
 			out = append(out, p)
 		}
 		return nil

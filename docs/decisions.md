@@ -309,6 +309,45 @@ routing/config-map.yaml 标 `runtime: <type>-http` 字段告诉 LLM 走脚本。
 
 ---
 
+## 2026-06-26 · 探活 TLS:带凭据默认校验 + 自签 opt-in
+
+**背景**:连通性探活(`dsprobe` / `labelprobe`)一律 `InsecureSkipVerify: true`,但探活会发真凭据(Grafana/ES 的 basic auth、Bearer token)。中间人用伪造证书即可截获这些凭据 —— 跳过校验 = 凭据裸奔。但直接翻成"永远校验"又会打断大量内网自签证书部署的探活(自签在内网很普遍,这也是当初加 `InsecureSkipVerify` 的原因)。
+
+**决策**:**按"是否发凭据"分流**,逃生口走环境变量,**不动 schema/wizard/UI**。
+- 无凭据(纯连通性探测):继续跳过校验 —— 没秘密可被偷,自签误报没必要。
+- 带凭据:**默认校验证书**(`TLSConfigForProbe(hasCreds=true)` 返 `MinVersion: TLS1.2`,不 skip)。
+- 逃生口:确属内网自签 + 带鉴权,用户 `export TSHOOT_INSECURE_TLS=1` 显式放行。探活撞 x509 错时,错误信息直接提示这个开关。
+
+**后果**:
+- 统一 helper `dsprobe.TLSConfigForProbe` + 常量 `dsprobe.InsecureTLSEnv`,`probe_http.go` / `probe_es.go` / `labelprobe/loki.go` 三处复用(labelprobe 反向 import dsprobe,无环)。
+- 行为变更:之前自签 + 带鉴权能直接探通的用户,现在需 export 一次环境变量。属有意为之(安全默认优先,逃生口兜底)。
+- 验证:`internal/dsprobe/tls_test.go` 锁定三态(无凭据 skip / 带凭据校验 / opt-in 放行)。
+
+**演进**:`cmd/tshoot-desktop/bindings_{one2all,kuboard,kuboard_configmap}.go` 的 runtime 数据拉取(发 one2all Bearer / kuboard accessKey)同样复用 `dsprobe.TLSConfigForProbe(true)`,行为统一(默认校验 + 同一 opt-in 开关)。`bindings_kuboard_v3_live_test.go` 是手动 live test,保留原 skip 不动。若将来要做"自签证书指纹 pin"而非全放行,可在 helper 里扩展。
+
+---
+
+## 2026-06-26 · 排障链路两处脱节修复 + skill 脚本链护栏
+
+**背景**:审计产出物(机器人)排障链路时发现两处"文档/格式 vs 实际脱节"(项目反复踩、但 self-test 只 probe MCP 没覆盖到 skill 脚本链):
+
+1. **cascade_check 解析器吃不下生成器产出**:`service-dependency-map.yaml.tmpl` 渲染的是 **block 列表**(`downstream:` 换行 `- x`),但 `cascade_check.py` 的 `parse_dep_map` 只认 inline `[a,b]`,block 被静默跳过 → 自动生成的依赖图 downstream 永远解析为空 → incident-investigator **Step 4(沿依赖图追下游)对几乎所有部署静默空转**。runtime 实测确认。
+2. **incident-investigator 脚本路径漂移**:Step 2/3 写 `scripts/timeline.py` / `scripts/k8s_query.py`,但这俩脚本在 `recent-changes/` 和 `k8s-runtime-query/` 的 scripts 目录,不在 incident-investigator/scripts/ → 机器人按文档跑 file-not-found(脚本自身用 `detect_workspace_root` 健壮,纯文档错)。
+
+**决策**:
+- `parse_dep_map` 同时支持 block + inline 列表(block 是生成器默认产出,**核心路径不是 nice-to-have**)。
+- incident-investigator 5 处脚本调用统一成 workspace 根相对 `skills/<owning-skill>/scripts/<f>.py`(跟 recent-changes SKILL 既有约定一致);Step 2/3 依赖的 recent-changes / k8s-runtime-query 是可选 skill,加 `{{if hasSkill}}` 守卫,被 whitelist 砍掉时走手动降级 else 分支,不渲染破引用。
+- **补 CI 级护栏**(self-test 只覆盖 MCP 的空白):
+  - `internal/generator/chain_integrity_test.go::TestSkillScriptPathsExist` —— 渲染 fixture,遍历所有生成的 SKILL.md,断言引用的每个脚本路径真实存在(两场景:全 skill + 守卫场景)。
+  - 同文件 `TestDepMapParserHandlesGeneratedFormat` —— exec python3 跑真实 `parse_dep_map` 吃 block 样本,锁死"生成器格式 ↔ 解析器"契约(无 python3 自动 skip)。
+  - `test_cascade_check.py` —— parser block/inline/空列表的 idiomatic 单测。
+
+**后果**:Step 4 级联追下游对自动生成依赖图恢复有效;按文档跑脚本不再 file-not-found;脚本路径漂移 / 格式脱节今后 `go test` 直接拦下。
+
+**演进**:cascade_check 仍假设下游同 namespace(`--namespace-default`),多 ns 部署会漏跨 ns 下游(脚本注释自承局限),留作后续(需 dependency-map 扩 per-service namespace 字段)。`parse_dep_map` 是手写文本解析器(刻意不引 PyYAML),若将来 dependency-map 形态更复杂可考虑切 PyYAML。
+
+---
+
 ## 历史(SUPERSEDED)
 
 下面记录已被覆盖的历史决策,**不要按这些指引**,留给读 git log 追根溯源的人用。

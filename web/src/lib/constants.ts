@@ -21,6 +21,7 @@ export const ConfigCenterType = {
   Consul: 'consul',
   EnvVars: 'env-vars',
   Kuboard: 'kuboard',
+  One2All: 'one2all',
   None: 'none',
 } as const
 

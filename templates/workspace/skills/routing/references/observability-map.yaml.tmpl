@@ -153,6 +153,9 @@ prometheus:
 
 k8s_runtime:
   enabled: {{.Infrastructure.Observability.K8sRuntime.Enabled}}
+  {{- if .Infrastructure.Observability.K8sRuntime.Provider}}
+  provider: {{.Infrastructure.Observability.K8sRuntime.Provider | printf "%q"}}
+  {{- end}}
   {{- if .Infrastructure.Observability.K8sRuntime.URLByEnv}}
   url_by_env:
   {{- range $env, $url := .Infrastructure.Observability.K8sRuntime.URLByEnv}}
@@ -161,14 +164,18 @@ k8s_runtime:
   {{- end}}
   {{- if .Infrastructure.Observability.K8sRuntime.ServiceMap}}
   # routing skill 把 (env, service) 解析到 K8s 上的具体定位:
-  #   cluster + namespace 必有;workload 与 label_selector 至少一个 ——
+  #   cluster + cluster_id + namespace 必有;workload 与 label_selector 至少一个 ——
   #   优先 label_selector(更准),没有时退到 workload 名前缀匹配。
+  #   cluster_id 给 one2all MCP 工具用(数字),cluster 给 kuboard 脚本用(名称)。
   # k8s-runtime-query 的 ns-snapshot / get-pod-logs / list-events 直接用这块结果。
   service_map:
   {{- range .Infrastructure.Observability.K8sRuntime.ServiceMap}}
     - env: {{.Env | printf "%q"}}
       service: {{.Service | printf "%q"}}
       cluster: {{.Cluster | printf "%q"}}
+      {{- if .ClusterID}}
+      cluster_id: {{.ClusterID | printf "%q"}}
+      {{- end}}
       namespace: {{.Namespace | printf "%q"}}
       {{- if .Workload}}
       workload: {{.Workload | printf "%q"}}

@@ -30,7 +30,18 @@ func connectNacos(addr, username, password string) (*nacosClient, error) {
 		base: addr,
 		// 20s:一次 fetch 实际会做 probe(4 candidate)+login+get 三步,总耗时可能接近 10s;
 		// 给充裕 headroom 避免正常响应被 context deadline 误杀成 transient 错误。
-		httpCli:  &http.Client{Timeout: 20 * time.Second},
+		httpCli: &http.Client{
+			Timeout: 20 * time.Second,
+			// accessToken 走 URL query(nacos API 要求),跨 host 302 时 Go 虽会剥掉
+			// Authorization header,但 query 里的 token 会跟着重定向发到新 host。拒绝
+			// 跨 host 重定向,避免 token 泄露到非预期端点。
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) > 0 && req.URL.Host != via[0].URL.Host {
+					return fmt.Errorf("拒绝跨 host 重定向到 %s(防 accessToken 经 query 外泄)", req.URL.Host)
+				}
+				return nil
+			},
+		},
 		username: username,
 		password: password,
 	}
@@ -106,13 +117,23 @@ func (cli *nacosClient) fetchOneConfigInternal(namespace, group, dataID string) 
 	}
 	candidates = append(candidates, addr+flavor.ContextPath+"/v1/cs/configs?"+q1.Encode())
 
+	// redact 把 accessToken 的明文从任何要外抛/记日志的字符串里抹掉。直接替换 token 值,
+	// 能同时覆盖 *url.Error(httpCli.Get 失败时错误串含完整含 token 的 URL)和 candidate URL
+	// 本身 —— 否则 token 会经 Notes / error 回到桌面 UI,或被中间代理 access log 记录。
+	redact := func(s string) string {
+		if cli.token != "" {
+			return strings.ReplaceAll(s, cli.token, "REDACTED")
+		}
+		return s
+	}
+
 	var lastErr string
 	var attempts []string
 	for _, u := range candidates {
 		resp, err := cli.httpCli.Get(u)
 		if err != nil {
-			lastErr = err.Error()
-			attempts = append(attempts, fmt.Sprintf("  GET %s → 网络错误: %v", u, err))
+			lastErr = redact(err.Error())
+			attempts = append(attempts, redact(fmt.Sprintf("  GET %s → 网络错误: %v", u, err)))
 			continue
 		}
 		body, _ := io.ReadAll(resp.Body)
@@ -138,11 +159,11 @@ func (cli *nacosClient) fetchOneConfigInternal(namespace, group, dataID string) 
 			}
 			return &FetchContentResult{
 				Content: content, Format: format,
-				Notes: []string{fmt.Sprintf("从 %s 取得(len=%d, format=%s)", shortPath(u), len(content), format)},
+				Notes: []string{redact(fmt.Sprintf("从 %s 取得(len=%d, format=%s)", shortPath(u), len(content), format))},
 			}, nil
 		}
-		attempts = append(attempts, fmt.Sprintf("  GET %s → %d %s", u, resp.StatusCode, snippet(body)))
-		lastErr = fmt.Sprintf("status=%d: %s", resp.StatusCode, snippet(body))
+		attempts = append(attempts, redact(fmt.Sprintf("  GET %s → %d %s", u, resp.StatusCode, snippet(body))))
+		lastErr = redact(fmt.Sprintf("status=%d: %s", resp.StatusCode, snippet(body)))
 	}
 	return nil, fmt.Errorf(
 		"nacos 拉配置 dataId=%s group=%s namespace=%s 失败(试过 %d 个路径)。\n最后:%s\n详细:\n%s",

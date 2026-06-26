@@ -15,10 +15,11 @@
 import { computed, reactive, ref, type ComputedRef } from 'vue'
 import { fetchConfigContentBatch, kuboardFetchConfigMaps, probeDataStore, type KuboardFetchBatchResult } from './bridge'
 import { isDesktop } from './bridge/shared'
+import { one2allFetchConfigMaps } from './bridge/one2all'
 import { pushLog } from './logStore'
 import { toast } from './toast'
 import { probeKey } from './yamlShared'
-import { DS_MATCHERS, parseConfigContent } from './dataStoreParser'
+import { DS_MATCHERS, parseConfigContent, parseK8sConfigMapDataContents } from './dataStoreParser'
 import type { DSByService, DSScanState, DSProbeState } from './useDataStoreState'
 
 interface PreloadPayload {
@@ -65,6 +66,7 @@ export interface UseDataStoreScanDeps {
   ccKeyFor: (sourceType: string, envID: string, field: string) => string
   sourceCreds: Record<string, { creds: Record<string, Record<string, string>>; rawExtra?: Record<string, unknown> }>
   kuboardSvcMap: Record<string, KuboardSvcLocator>
+  one2allSvcMap?: Record<string, { cluster_id: string; namespace: string; configmap: string }>
 }
 
 export function useDataStoreScan(deps: UseDataStoreScanDeps) {
@@ -93,6 +95,12 @@ export function useDataStoreScan(deps: UseDataStoreScanDeps) {
     for (const k of Object.keys(deps.kuboardSvcMap)) {
       const loc = deps.kuboardSvcMap[k]
       if (loc?.cluster && loc?.namespace && loc?.configmap) return true
+    }
+    if (deps.one2allSvcMap) {
+      for (const k of Object.keys(deps.one2allSvcMap)) {
+        const loc = deps.one2allSvcMap[k]
+        if (loc?.cluster_id && loc?.namespace && loc?.configmap) return true
+      }
     }
     return false
   })
@@ -508,6 +516,74 @@ export function useDataStoreScan(deps: UseDataStoreScanDeps) {
             }
             applyMatchersToParsedConfig(info.env, info.svc, root, matchedSet,
               'cm 里没匹到数据层', 'kuboard 识别数据层')
+          }
+        }
+      }
+
+      // one2all pass
+      if (deps.enabledSourceTypes['one2all'] && deps.one2allSvcMap) {
+        const isO2A = deps.activeSourceTypes.value[0] === 'one2all'
+        const o2aCred = (f: string): string => {
+          if (isO2A) return (deps.ccCredInputs[deps.ccKeyFor('one2all', '_shared_', f)] || '').trim()
+          return ((deps.sourceCreds['one2all']?.creds?.['_shared_']?.[f]) || '').trim()
+        }
+        const mURL = o2aCred('mcp_url'); const tok = o2aCred('token')
+        if (mURL && tok) {
+          for (const env of deps.environments) {
+            if (!env.id) continue
+            const cfs: any[] = []
+            for (const svc of deps.allServiceNames.value) {
+              if (deps.getServiceSource(svc) !== 'one2all') continue
+              const loc = deps.one2allSvcMap?.[deps.svcKey(env.id, svc)]
+              if (!loc?.cluster_id || !loc?.namespace || !loc?.configmap) continue
+              for (const cm of loc.configmap.split(',').filter(Boolean))
+                cfs.push({ cid: loc.cluster_id, ns: loc.namespace, name: cm, env: env.id, svc })
+            }
+            if (!cfs.length) continue
+            pushLog('cchub', 'info', `[${env.id}] one2all 批拉 ${cfs.length} 个 ConfigMap`)
+            try {
+              const res = await one2allFetchConfigMaps(mURL, tok, cfs.map(c => ({ cluster_id: c.cid, namespace: c.ns, name: c.name })))
+              const byService = new Map<string, { env: string; svc: string; names: string[]; contents: string[]; errors: string[] }>()
+              for (let i = 0; i < res.length; i++) {
+                const r = res[i]; const info = cfs[i]; if (!info) continue
+                const sk = deps.scanStateKey(info.env, info.svc)
+                const groupKey = `${info.env}::${info.svc}`
+                if (!byService.has(groupKey)) {
+                  byService.set(groupKey, { env: info.env, svc: info.svc, names: [], contents: [], errors: [] })
+                }
+                const g = byService.get(groupKey)!
+                g.names.push(info.name)
+                if (r.error) {
+                  g.errors.push(`${info.name}: ${r.error}`)
+                  deps.dsScanState[sk] = { status: 'error', reason: r.error }
+                  continue
+                }
+                scanned++
+                if (!r.content || r.content === '{}' || r.content === 'null') continue
+                g.contents.push(r.content)
+              }
+              for (const g of byService.values()) {
+                const sk = deps.scanStateKey(g.env, g.svc)
+                if (g.contents.length === 0) {
+                  deps.dsScanState[sk] = {
+                    status: g.errors.length ? 'error' : 'empty',
+                    reason: g.errors.length ? g.errors.join('; ') : 'cm 空',
+                  }
+                  continue
+                }
+                const root = parseK8sConfigMapDataContents(g.contents)
+                if (!root || Object.keys(root).length === 0) {
+                  deps.dsScanState[sk] = { status: 'empty', reason: '无有效 ConfigMap data 内容' }
+                  continue
+                }
+                pushLog('cchub', 'info',
+                  `[${g.env}/${g.svc}] one2all 合并 ${g.contents.length}/${g.names.length} 个 ConfigMap 后识别`,
+                  { envID: g.env, svc: g.svc })
+                applyMatchersToParsedConfig(g.env, g.svc, root, matchedSet, 'no match', 'one2all')
+              }
+            } catch (e: any) {
+              for (const c of cfs) deps.dsScanState[deps.scanStateKey(c.env, c.svc)] = { status: 'error', reason: String(e?.message || e) }
+            }
           }
         }
       }

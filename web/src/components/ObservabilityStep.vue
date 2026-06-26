@@ -7,6 +7,7 @@
 
 import { inject } from 'vue'
 import type { CredField } from '../lib/credFields'
+import type { One2AllResourceState } from '../lib/wizardStore'
 import type { K8sRuntimeEnvLocator, K8sRuntimeSvcLocator } from '../lib/yamlGenerator'
 import type { URLProbeState } from '../lib/probeTypes'
 import type { GrafanaDatasource } from '../lib/bridge'
@@ -48,6 +49,7 @@ const props = defineProps<{
   obsProbeResults: Record<string, URLProbeState>
   toolInputs: Record<string, string>
   isObsFieldHidden: (toolKey: string, envID: string, f: CredField) => boolean
+  displayObsField: (toolKey: string, envID: string, f: CredField) => CredField
   toolKeyFor: (cat: 'obs' | 'ds', tool: string, envID: string, field: string) => string
   obsProbeKey: (toolKey: string, envID: string) => string
   getObsAccessMode: (toolKey: string, envID: string) => ObsAccessMode
@@ -56,6 +58,7 @@ const props = defineProps<{
   k8sRuntimeEnvLoc: Record<string, K8sRuntimeEnvLocator | undefined>
   k8sRuntimeSvcMap: Record<string, K8sRuntimeSvcLocator>
   k8sRtWorkloadCache: Record<string, WorkloadCacheEntry | undefined>
+  one2allStateByEnv: Record<string, One2AllResourceState | undefined>
   k8sRtWorkloadKey: (envID: string, cluster: string, ns: string) => string
   k8sRtWorkloadsFor: (envID: string, cluster: string, ns: string) => Array<{ name: string; selector: string }>
 
@@ -72,7 +75,7 @@ const emit = defineEmits<{
   updateToolInput: [key: string, value: string, toolKey: string, envID: string]
   clearToolInput: [key: string]
   runK8sRtPreload: [envID: string]
-  setK8sRtEnvLoc: [envID: string, field: 'cluster' | 'namespace', value: string]
+  setK8sRtEnvLoc: [envID: string, field: 'cluster' | 'cluster_id' | 'namespace', value: string]
   setK8sRtSvcWorkload: [envID: string, svc: string, workload: string]
   loadLokiDatasources: [envID: string]
   loadLokiLabels: [envID: string]
@@ -174,6 +177,7 @@ function setGrafanaDsUid(obsKey: string, envID: string, value: string) {
             :tool-inputs="toolInputs"
             :is-revealed="wizard.isRevealed"
             :is-obs-field-hidden="isObsFieldHidden"
+            :display-obs-field="displayObsField"
             :tool-key-for="toolKeyFor"
             @update:access-mode="(mode) => emit('setObsAccessMode', spec.key, env.id, mode)"
             @update:tool-input="(k, v) => emit('updateToolInput', k, v, spec.key, env.id)"
@@ -183,8 +187,10 @@ function setGrafanaDsUid(obsKey: string, envID: string, value: string) {
             <K8sRuntimeBlock
               v-if="spec.key === 'k8s_runtime'"
               :env-i-d="env.id"
+              :provider="toolInputs[toolKeyFor('obs', 'k8s_runtime', env.id, 'provider')] || 'kuboard'"
               :services="wizard.allServiceNames"
               :kuboard-state="wizard.kuboardStateByEnv[env.id]"
+              :one2all-state="one2allStateByEnv[env.id]"
               :env-loc="k8sRuntimeEnvLoc[env.id]"
               :svc-map="k8sRuntimeSvcMap"
               :workload-cache="k8sRtWorkloadCache"

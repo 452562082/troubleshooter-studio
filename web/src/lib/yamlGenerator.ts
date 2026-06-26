@@ -62,8 +62,12 @@ export interface YAMLGenToolSpec {
 export type { KuboardSvcLocator } from './yamlShared'
 import type { KuboardSvcLocator } from './yamlShared'
 
+/** one2all 配置源 per-service 映射:cluster_id + namespace + configmap */
+export interface One2AllSvcLocator { cluster_id: string; namespace: string; configmap: string }
+
 export interface K8sRuntimeEnvLocator {
   cluster?: string
+  cluster_id?: string
   namespace?: string
 }
 
@@ -87,11 +91,14 @@ export interface YAMLGenContext {
   serviceConfigGroup: Record<string, string>
   envNamespaces: Record<string, string>
   kuboardSvcMap: Record<string, KuboardSvcLocator>
+  one2allSvcMap: Record<string, One2AllSvcLocator>
   lokiMappingByEnv: Record<string, LokiEnvMapping | undefined>
   toolInputs: Record<string, string>
   grafanaDsUidByObsEnv: Record<string, string>
   k8sRuntimeEnvLoc: Record<string, K8sRuntimeEnvLocator | undefined>
   k8sRuntimeSvcMap: Record<string, K8sRuntimeSvcLocator>
+  /** k8s_runtime 的 provider:"kuboard"(默认) 或 "one2all" */
+  k8sRuntimeProvider?: string
   scannedDS: Record<string, Record<string, Record<string, Record<string, string>>>>
   activeSourceTypes: string[]
   allServiceNames: string[]
@@ -123,6 +130,15 @@ export function generateYAML(ctx: YAMLGenContext): string {
   // 数据层组件一致。
   ctx.recomputeEnabledDataStoresFromScanned()
   const lines: string[] = []
+  const k8sRuntimeProvider = (): string => {
+    if (ctx.k8sRuntimeProvider) return ctx.k8sRuntimeProvider
+    for (const env of ctx.environments) {
+      if (!env.id) continue
+      const v = (ctx.toolInputs[ctx.toolKeyFor('obs', 'k8s_runtime', env.id, 'provider')] || '').trim()
+      if (v) return v
+    }
+    return 'kuboard'
+  }
 
   // 顶部导言注释(解析时被忽略,只给用户看)
   lines.push('# 由初始化向导生成，可手工调整。字段说明：schema/troubleshooter.schema.yaml')
@@ -234,11 +250,23 @@ export function generateYAML(ctx: YAMLGenContext): string {
     const data = ctx.sourceCreds[type] || { creds: {} }
     const fields = ctx.CC_FIELDS_BY_TYPE[type] || []
     const isKuboard = type === 'kuboard'
+    const isOne2All = type === 'one2all'
     // kuboard:cluster/namespace/configmap 走 service_map,不进 endpoints
     const endpointFields = isKuboard
       ? fields.filter(f => f.key !== 'cluster' && f.key !== 'namespace' && f.key !== 'configmap')
       : fields
-    if (endpointFields.length > 0) {
+    if (isOne2All) {
+      // one2all:单一 MCP server,不分 env;url + token 进单一 endpoint
+      const sharedCreds = data.creds['_shared_'] || {}
+      // 单一 endpoint(url + token)
+      const mcpURL = (sharedCreds['mcp_url'] || '').trim()
+      const token = (sharedCreds['token'] || '').trim()
+      if (mcpURL || token) {
+        out.push(`${baseIndent}endpoints:     # ⚠ 含明文 token,仅团队私密范围分享,别 commit 公开 git`)
+        out.push(`${baseIndent}  - url: ${mcpURL ? yamlStr(mcpURL) : '"{{ONE2ALL_MCP_URL}}"'}      # MCP server 完整 URL`)
+        if (token) out.push(`${baseIndent}    token: ${yamlStr(token)}      # ⚠ secret`)
+      }
+    } else if (endpointFields.length > 0) {
       out.push(`${baseIndent}endpoints:     # ⚠ 含明文凭证,仅团队私密范围分享,别 commit 公开 git`)
       for (const env of ctx.environments) {
         if (!env.id) continue
@@ -276,6 +304,17 @@ export function generateYAML(ctx: YAMLGenContext): string {
             perEnv.push(`${baseIndent}        cluster: ${yamlStr(cluster)}`)
             perEnv.push(`${baseIndent}        namespace: ${yamlStr(ns)}`)
             perEnv.push(`${baseIndent}        configmap: ${yamlStr(cm)}`)
+          } else if (isOne2All) {
+            const loc = ctx.one2allSvcMap[ctx.svcKey(env.id, svc)]
+            if (!loc) continue
+            const cid = (loc.cluster_id || '').trim()
+            const ns = (loc.namespace || '').trim()
+            const cm = (loc.configmap || '').trim()
+            if (!cid || !ns || !cm) continue
+            perEnv.push(`${baseIndent}      ${yamlStr(svc)}:`)
+            perEnv.push(`${baseIndent}        cluster_id: ${yamlStr(cid)}`)
+            perEnv.push(`${baseIndent}        namespace: ${yamlStr(ns)}`)
+            perEnv.push(`${baseIndent}        configmap: ${yamlStr(cm)}`)
           } else {
             const dataId = (ctx.serviceConfigSel[ctx.svcKey(env.id, svc)] || '').trim()
             if (!dataId) continue
@@ -293,7 +332,9 @@ export function generateYAML(ctx: YAMLGenContext): string {
         }
       }
       if (svcMapLines.length > 0) {
-        const fieldList = isKuboard ? 'cluster / namespace / configmap' : 'namespace / group / data_id'
+        const fieldList = isKuboard ? 'cluster / namespace / configmap'
+          : isOne2All ? 'cluster_id / namespace / configmap'
+          : 'namespace / group / data_id'
         out.push(`${baseIndent}service_map:   # 每个环境每个服务对应哪条配置(${fieldList})`)
         out.push(...svcMapLines)
       }
@@ -396,20 +437,30 @@ export function generateYAML(ctx: YAMLGenContext): string {
           lines.push(...uidRows)
         }
       }
-      // k8s_runtime:env 级 cluster+ns + 服务级 workload+selector,routing skill 拼 KuboardListPods
+      // k8s_runtime:env 级 cluster(+cluster_id)+ns + 服务级 workload+selector
       if (spec.key === 'k8s_runtime') {
+        // provider:默认 kuboard;one2all 由 k8sRuntimeProvider 传入
+        const rtProvider = k8sRuntimeProvider()
+        if (rtProvider) lines.push(`      provider: ${yamlStr(rtProvider)}`)
         const svcRows: string[] = []
         for (const env of ctx.environments) {
           if (!env.id) continue
           const eloc = ctx.k8sRuntimeEnvLoc[env.id]
-          if (!eloc?.cluster || !eloc?.namespace) continue
+          if (!eloc?.namespace) continue
+          // kuboard 需要 cluster,one2all 需要 cluster_id
+          const hasCluster = rtProvider === 'one2all' ? !!eloc?.cluster_id : !!eloc?.cluster
+          if (!hasCluster) continue
           for (const svc of ctx.allServiceNames) {
             const sloc = ctx.k8sRuntimeSvcMap[ctx.svcKey(env.id, svc)]
             // 没挑 workload 也照样落一行 cluster+ns,routing skill 至少能定位到 ns 级,
             // 落到具体 pod 时再 fallback 到 svc 名做 label 模糊匹配。
             svcRows.push(`        - env: ${env.id}`)
             svcRows.push(`          service: ${yamlStr(svc)}`)
-            svcRows.push(`          cluster: ${yamlStr(eloc.cluster)}`)
+            if (rtProvider === 'one2all' && eloc.cluster_id) {
+              svcRows.push(`          cluster_id: ${yamlStr(eloc.cluster_id)}`)
+            } else if (eloc.cluster) {
+              svcRows.push(`          cluster: ${yamlStr(eloc.cluster)}`)
+            }
             svcRows.push(`          namespace: ${yamlStr(eloc.namespace)}`)
             if (sloc?.workload) svcRows.push(`          workload: ${yamlStr(sloc.workload)}`)
             if (sloc?.label_selector) svcRows.push(`          label_selector: ${yamlStr(sloc.label_selector)}`)

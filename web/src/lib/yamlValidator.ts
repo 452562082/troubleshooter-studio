@@ -76,8 +76,12 @@ export interface ValidatorContext {
   serviceConfigSel: Record<string, string>
   kuboardStateByEnv: Record<string, KuboardResourceState | undefined>
   kuboardSvcMap: Record<string, KuboardSvcLocator>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  one2allStateByEnv?: Record<string, any>
+  one2allSvcMap?: Record<string, { cluster_id: string; namespace: string; configmap: string }>
   ccHubStateByEnv: Record<string, CCHubEnvState | undefined>
   dsProbeResults: Record<string, DSProbeState | undefined>
+  dsScanState?: Record<string, { status: string; reason?: string } | undefined>
   /** 跟 InitPage 同款 helper,内部 isFieldHidden 复用 */
   isFieldHidden(t: string, envID: string, f: CredField, getSibling: (k: string) => string): boolean
   getServiceSource(svc: string): string
@@ -157,8 +161,8 @@ export function computeStepErrors(ctx: ValidatorContext): Set<string> {
   }
 
   if (step === 6) {
-    // 多源:每个服务必须明确归属某源(单源默认所有服务都走唯一源,不强制)
-    if (ctx.isMultiSource && ctx.allServiceNames.length > 0) {
+    // 每个服务必须明确归属某源(多源强制;单源检查是否有显式取消)
+    if (ctx.allServiceNames.length > 0) {
       for (const svc of ctx.allServiceNames) {
         if (!ctx.getServiceSource(svc)) {
           errs.add(`cc.unassigned.${svc}`)
@@ -175,18 +179,30 @@ export function computeStepErrors(ctx: ValidatorContext): Set<string> {
         return ((ctx.sourceCreds[t]?.creds?.[envID]?.[fieldKey]) || '').trim()
       }
       const isKuboard = t === 'kuboard'
+      const isOne2All = t === 'one2all'
       ctx.environments.forEach((e) => {
         if (!e.id.trim()) return
         const svcsOnThisSource = ctx.allServiceNames.filter(svc => ctx.getServiceSource(svc) === t)
         if (svcsOnThisSource.length === 0) return
-        // 凭证字段必填(optional / kuboard 的 cluster/ns/cm 跳过 / showWhen 隐藏跳过)
-        for (const f of fields) {
-          if (f.optional) continue
-          if (f.uiOnly) continue
-          if (isKuboard && (f.key === 'cluster' || f.key === 'namespace' || f.key === 'configmap')) continue
-          if (ctx.isFieldHidden(t, e.id, f, (k) => getField(e.id, k))) continue
-          if (!getField(e.id, f.key)) {
-            errs.add(`cc.${t}.${e.id}.${f.key}`)
+        // 凭证字段必填:one2all 只查 _shared_ 一次,kuboard 跳过 cluster/ns/cm,其它 per-env
+        if (isOne2All) {
+          // one2all:全局凭证,只检查一次
+          for (const f of fields) {
+            if (f.optional) continue
+            if (f.uiOnly) continue
+            if (!(ctx.ccCredInputs[ccKeyFor(t, '_shared_', f.key)] || '').trim()) {
+              errs.add(`cc.${t}._shared_.${f.key}`)
+            }
+          }
+        } else {
+          for (const f of fields) {
+            if (f.optional) continue
+            if (f.uiOnly) continue
+            if (isKuboard && (f.key === 'cluster' || f.key === 'namespace' || f.key === 'configmap')) continue
+            if (ctx.isFieldHidden(t, e.id, f, (k) => getField(e.id, k))) continue
+            if (!getField(e.id, f.key)) {
+              errs.add(`cc.${t}.${e.id}.${f.key}`)
+            }
           }
         }
         if (isKuboard) {
@@ -198,6 +214,19 @@ export function computeStepErrors(ctx: ValidatorContext): Set<string> {
           for (const svc of svcsOnThisSource) {
             const loc = ctx.kuboardSvcMap[svcKey(e.id, svc)]
             if (!loc || !loc.cluster || !loc.namespace || !loc.configmap) {
+              errs.add(`cc.${t}.${e.id}.svc.${svc}`)
+            }
+          }
+        } else if (isOne2All) {
+          // one2all:预加载状态 + per-service cluster_id/namespace/configmap
+          const o2aSt = ctx.one2allStateByEnv?.[e.id]
+          if (!o2aSt || o2aSt.status !== 'ok') {
+            errs.add(`cc.${t}.${e.id}.scan`)
+            return
+          }
+          for (const svc of svcsOnThisSource) {
+            const loc = ctx.one2allSvcMap?.[svcKey(e.id, svc)]
+            if (!loc || !loc.cluster_id || !loc.namespace || !loc.configmap) {
               errs.add(`cc.${t}.${e.id}.svc.${svc}`)
             }
           }
@@ -224,16 +253,17 @@ export function computeStepErrors(ctx: ValidatorContext): Set<string> {
   }
 
   if (step === 7) {
-    // 数据层:只校验页面上展示的组件连通性。yaml 可能本来就没数据层(纯网关 / 纯调度)scannedDS 全空
-    // 是合法的;用户可以删掉某些识别出的组件;手填也允许。校验只看 dsProbeResults 里 status==='ok'。
+    // 扫描本身失败(网络/鉴权) → 阻止下一步;空/跳过 → 不阻止
+    if (ctx.dsScanState) {
+      for (const [k, v] of Object.entries(ctx.dsScanState)) {
+        if (v?.status === 'error') errs.add(`ds.scanerror.${k}`)
+      }
+    }
+    // 连通性:测试失败 → 阻止;未测试 → 不阻止
     for (const t of ctx.enumerateDataStoreProbeTargets()) {
       const probeSt = ctx.dsProbeResults[probeKey(t.envID, t.svc, t.dsKey)]
-      if (!probeSt || probeSt.status !== 'ok') {
-        if (probeSt?.status === 'fail') {
-          errs.add(`ds.${t.envID}.${t.svc}.${t.dsKey}.probefail`)
-        } else {
-          errs.add(`ds.${t.envID}.${t.svc}.${t.dsKey}.notested`)
-        }
+      if (probeSt?.status === 'fail') {
+        errs.add(`ds.${t.envID}.${t.svc}.${t.dsKey}.probefail`)
       }
     }
     return errs
@@ -294,8 +324,14 @@ export function labelForErrorKey(k: string, repos: ValidatorRepo[]): string {
     }
     const parts = k.split('.')
     const source = parts[1]
-    const envID = parts[2]
+    let envID = parts[2]
     const kind = parts[3]
+    // one2all 全局凭证用 _shared_ 作 key,不是真正 env
+    if (envID === '_shared_') {
+      const field = kind
+      const labels: Record<string, string> = { mcp_url: 'MCP Server URL', token: 'Bearer Token' }
+      return `one2all 全局连接缺少 ${labels[field] || field}`
+    }
     if (kind === 'scan') return `${envID} 环境(${source} 源)未预加载成功`
     if (kind === 'namespace') return `${envID} 环境(${source} 源)未选 namespace`
     if (kind === 'svc') {
@@ -304,6 +340,11 @@ export function labelForErrorKey(k: string, repos: ValidatorRepo[]): string {
       return `${envID} 环境 "${svcName}" 服务未映射 dataId`
     }
     return `${source}.${envID}.${kind}`
+  }
+  if (k.startsWith('ds.scanerror.')) {
+    const key = k.substring('ds.scanerror.'.length)
+    const parts = key.split('::')
+    return `${parts[0] || '?'} / ${parts[1] || '?'} 配置扫描失败,请检查凭证或网络`
   }
   if (k.startsWith('ds.')) {
     const parts = k.split('.')

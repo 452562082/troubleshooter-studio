@@ -11,11 +11,24 @@ import type { KuboardResourceState } from './credFields'
 
 interface Environment { id: string; is_prod: boolean }
 
+export interface One2AllClusterEntry {
+  name: string
+  cluster_id: string
+  namespaces: { name: string; configmaps: string[] }[]
+}
+
+export type One2AllResourceState =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'ok'; clusters: One2AllClusterEntry[]; notes?: string[] }
+  | { status: 'error'; error: string }
+
 export interface WizardStore {
   // 高频 reactive 数据(2+ Step 共用)
   environments: Environment[]
   allServiceNames: string[]
   kuboardStateByEnv: Record<string, KuboardResourceState | undefined>
+  one2allStateByEnv: Record<string, One2AllResourceState | undefined>
 
   // 通用 helper
   hasError: (key: string) => boolean
@@ -29,6 +42,13 @@ export interface WizardStore {
   kuboardErrorOf: (envID: string) => string
   kuboardNamespacesFor: (envID: string, clusterName: string) => string[]
   kuboardConfigMapsFor: (envID: string, clusterName: string, nsName: string) => string[]
+
+  // one2all 状态窄化
+  one2allClustersOf: (envID: string) => One2AllClusterEntry[]
+  one2allClusterCountOf: (envID: string) => number
+  one2allErrorOf: (envID: string) => string
+  one2allNamespacesFor: (envID: string, clusterID: string) => string[]
+  one2allConfigMapsFor: (envID: string, clusterID: string, ns: string) => string[]
 }
 
 export const WizardStoreKey: InjectionKey<WizardStore> = Symbol('WizardStore')

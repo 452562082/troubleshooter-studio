@@ -97,12 +97,15 @@ type Tempo struct {
 	Endpoints          []ObsEndpoint     `yaml:"endpoints,omitempty"`
 }
 
-// K8sRuntime 走 Kuboard v4 API 查 pod / events / 日志 / deployment 状态。
-// 跟配置源 kuboard 的连接信息可以重合(同一个 Kuboard 实例),但开关独立 ——
-// 用户也可能从 nacos 读配置、同时只用 Kuboard 查运行时。
+// K8sRuntime 查 pod / events / 日志 / deployment 运行时状态。
+// Provider 决定后端:"kuboard"(默认,走 Kuboard v4 HTTP API + k8s_query.py 脚本)或
+// "one2all"(走 one2all-remote MCP server 工具)。不填按 kuboard 处理。
+// 跟配置源 kuboard/one2all 的连接信息可以重合(同一个实例),但开关独立 ——
+// 用户也可能从 nacos 读配置、同时只用 Kuboard/one2all 查运行时。
 type K8sRuntime struct {
 	Enabled    bool                        `yaml:"enabled"`
-	URLByEnv   map[string]string           `yaml:"url_by_env,omitempty"` // env → Kuboard URL
+	Provider   string                      `yaml:"provider,omitempty"`   // "kuboard"(默认)或 "one2all"
+	URLByEnv   map[string]string           `yaml:"url_by_env,omitempty"` // env → Kuboard URL(kuboard provider 用)
 	Auth       CredentialAuth              `yaml:"auth"`
 	Endpoints  []ObsEndpoint               `yaml:"endpoints,omitempty"`
 	ServiceMap []K8sRuntimeServiceMapEntry `yaml:"service_map,omitempty"` // (env, service) → cluster/ns/workload/selector
@@ -114,6 +117,7 @@ type K8sRuntimeServiceMapEntry struct {
 	Env           string `yaml:"env"`
 	Service       string `yaml:"service"`
 	Cluster       string `yaml:"cluster"`
+	ClusterID     string `yaml:"cluster_id,omitempty"` // one2all 用 cluster_id 数字
 	Namespace     string `yaml:"namespace"`
 	Workload      string `yaml:"workload,omitempty"`
 	LabelSelector string `yaml:"label_selector,omitempty"`

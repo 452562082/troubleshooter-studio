@@ -371,6 +371,35 @@ func TestLoginNacos_V3Path(t *testing.T) {
 	}
 }
 
+// TestFetchNacos_RedactsToken 验证拉配置失败时,错误信息里的明文 accessToken 被脱敏。
+// 防回归:token 经 URL query 传给 nacos,失败路径会把 candidate URL(含 *url.Error)写进
+// error/Notes 回到桌面 UI / 代理日志 —— 必须替换成 REDACTED。
+func TestFetchNacos_RedactsToken(t *testing.T) {
+	const secret = "super-secret-accesstoken-xyz"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 任何 config 请求都 403 → 触发错误路径(把含 token 的 candidate URL 写进 attempts/error)
+		http.Error(w, `{"message":"forbidden"}`, http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	cli := &nacosClient{
+		base:    strings.TrimRight(srv.URL, "/"),
+		httpCli: srv.Client(),
+		flavor:  apiFlavor{ContextPath: "", Version: "v1"},
+		token:   secret,
+	}
+	_, err := cli.fetchOneConfigInternal("public", "DEFAULT_GROUP", "app.yaml")
+	if err == nil {
+		t.Fatal("expected error on 403")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("error 泄露了明文 accessToken: %v", err)
+	}
+	if !strings.Contains(err.Error(), "REDACTED") {
+		t.Errorf("token 应被替换成 REDACTED: %v", err)
+	}
+}
+
 // TestLoginNacos_BadCreds 凭据错 → 返 error,install 端会 warn skip 注册。
 func TestLoginNacos_BadCreds(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

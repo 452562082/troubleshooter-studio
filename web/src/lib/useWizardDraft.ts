@@ -54,8 +54,11 @@ export interface DraftAgent {
 /** Step 5 kuboard 副源:每 (env, svc) 选的 cluster/namespace/configmap 三联 */
 export type DraftKuboardSvcLocator = { cluster: string; namespace: string; configmap: string }
 
-/** Step 7 k8s_runtime per-env cluster/namespace */
-export type DraftK8sRuntimeEnvLocator = { cluster: string; namespace: string }
+/** one2all 配置源 per-service 映射:cluster_id + namespace + configmap */
+export type DraftOne2AllSvcLocator = { cluster_id: string; namespace: string; configmap: string }
+
+/** Step 7 k8s_runtime per-env cluster/cluster_id + namespace */
+export type DraftK8sRuntimeEnvLocator = { cluster: string; cluster_id: string; namespace: string }
 
 /** Step 7 k8s_runtime per-(env,svc) workload + label_selector */
 export type DraftK8sRuntimeSvcLocator = { workload: string; label_selector: string }
@@ -120,6 +123,8 @@ export interface WizardDraft {
   serviceConfigGroup?: Record<string, string>
   /** Step 5 kuboard 副源:(env, svc) → cluster/namespace/configmap 三联 */
   kuboardSvcMap?: Record<string, DraftKuboardSvcLocator>
+  /** Step 5 one2all 配置:(env, svc) → cluster_id/namespace/configmap */
+  one2allSvcMap?: Record<string, DraftOne2AllSvcLocator>
   /** Step 5 配置中心预加载结果(entries + namespaces + notes),跨会话恢复下拉 options */
   ccHubStateByEnv?: Record<string, CCHubEnvState>
   /** Step 5 kuboard 资源树缓存;独立 key 兜底,但主 draft 也保留(双写让 quota 失败时仍有兜底) */

@@ -259,6 +259,44 @@ export function parseConfigContent(content: string, format?: string): any {
   }
 }
 
+// parseK8sConfigMapDataContents:解析一个或多个 K8s ConfigMap.data JSON blob。
+//
+// one2all / Kuboard 都会把 ConfigMap.data 传成 {"key":"value"}:
+//   - key 可能本身就是 REDIS_URL / DB_HOST 这类扁平 env 名;
+//   - value 也可能是一整段 YAML / JSON / properties。
+// 多个 ConfigMap 挂到同一个服务时必须先合并再匹配,否则后一个无数据层的业务配置会覆盖
+// 前一个已经识别出的数据层状态。
+export function parseK8sConfigMapDataContents(contents: string[]): any {
+  const merged: Record<string, any> = {}
+  for (const content of contents) {
+    if (!content || content === '{}' || content === 'null') continue
+    let flat: Record<string, string> = {}
+    try {
+      const parsed = JSON.parse(content)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) flat = parsed
+    } catch {
+      continue
+    }
+
+    Object.assign(merged, envFlatToRoot(flat))
+
+    for (const v of Object.values(flat)) {
+      if (typeof v !== 'string' || !v.trim()) continue
+      let parsed: any = null
+      try { parsed = yaml.load(v) } catch { parsed = null }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        if (looksLikeProperties(v)) {
+          try { parsed = parseProperties(v) } catch { parsed = null }
+        }
+      }
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        Object.assign(merged, parsed)
+      }
+    }
+  }
+  return merged
+}
+
 // envFlatToRoot:把 K8s ConfigMap 的扁平 .env 形态(DB_HOST=... / REDIS_PORT=...)
 // 重塑成 DS_MATCHERS 能直接匹的嵌套对象 {redis:{...},mysql:{...},mongodb:{...},...}。
 // 原始 flat key 仍保留在 root 里,以备未来扩展规则。

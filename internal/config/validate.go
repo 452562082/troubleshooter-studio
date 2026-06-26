@@ -65,7 +65,7 @@ func Validate(c *SystemConfig) error {
 	validCCTypes := map[string]bool{
 		"none":  true,
 		"nacos": true, "apollo": true, "consul": true,
-		"env-vars": true, "kuboard": true,
+		"env-vars": true, "kuboard": true, "one2all": true,
 	}
 	sourceIDs := map[string]bool{}
 	for i, cc := range c.Infrastructure.ConfigCenters {
@@ -82,11 +82,11 @@ func Validate(c *SystemConfig) error {
 		if !validCCTypes[cc.Type] {
 			hint := ""
 			if cc.Type == "kubernetes" {
-				hint = " (注:kubernetes 类型已下线;走 kubectl+kubeconfig 的场景门槛太高,改用 kuboard 类型用 Kuboard URL+账密读 ConfigMap)"
+				hint = " (注:kubernetes 类型已下线;走 kubectl+kubeconfig 的场景门槛太高,改用 kuboard 类型用 Kuboard URL+账密读 ConfigMap;或 one2all 类型走 one2all-remote MCP)"
 			}
-			return fmt.Errorf("infrastructure.config_centers[%s].type=%q not supported (valid: nacos/apollo/consul/env-vars/kuboard/none)%s", cc.ID, cc.Type, hint)
+			return fmt.Errorf("infrastructure.config_centers[%s].type=%q not supported (valid: nacos/apollo/consul/env-vars/kuboard/one2all/none)%s", cc.ID, cc.Type, hint)
 		}
-		if cc.Type != "none" && cc.Type != "env-vars" && cc.Type != "kuboard" {
+		if cc.Type != "none" && cc.Type != "env-vars" && cc.Type != "kuboard" && cc.Type != "one2all" {
 			for j, ep := range cc.Endpoints {
 				if !envIDs[ep.Env] {
 					return fmt.Errorf("infrastructure.config_centers[%s].endpoints[%d].env unknown: %s", cc.ID, j, ep.Env)

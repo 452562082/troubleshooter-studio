@@ -196,9 +196,11 @@ func RunAutoAnalyze(opts RunAutoAnalyzeOptions) (*analyzerpipe.Result, error) {
 			autoAnalyzeCacheMu.Unlock()
 		}
 		return res.r, res.err
-	case <-time.After(autoAnalyzeTimeout):
+	case <-runCtx.Done():
+		// 复用 runCtx 的 deadline(= autoAnalyzeTimeout)而非另起 time.After:既不泄露定时器,
+		// 又让 caller 传进来的 parentCtx 取消(关 app / 取消部署)能真正中断这里的等待。
 		if opts.OnLog != nil {
-			opts.OnLog(fmt.Sprintf("[warn] auto-analyze 超过 %ds 未完成,放弃等待(产物里 service-dependency-map / data-schema-map 字段留空,可后续 BotsPage 重新生成拿到)", int(autoAnalyzeTimeout.Seconds())))
+			opts.OnLog(fmt.Sprintf("[warn] auto-analyze 超过 %ds 未完成或被取消,放弃等待(产物里 service-dependency-map / data-schema-map 字段留空,可后续 BotsPage 重新生成拿到)", int(autoAnalyzeTimeout.Seconds())))
 		}
 		return nil, nil
 	}

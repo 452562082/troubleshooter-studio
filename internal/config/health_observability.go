@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"slices"
+	"strings"
 )
 
 // checkObservability:可观测性 wiring 检查。
@@ -144,7 +145,7 @@ func checkObservability(c *SystemConfig) []HealthIssue {
 
 	// K8sRuntime:url_by_env 完全空必报(skill 跑不起来),非空时不再逐 env 比对(同 Grafana 共享逻辑)
 	if obs.K8sRuntime.Enabled {
-		if mapEmpty(obs.K8sRuntime.URLByEnv) {
+		if !strings.EqualFold(strings.TrimSpace(obs.K8sRuntime.Provider), "one2all") && mapEmpty(obs.K8sRuntime.URLByEnv) {
 			out = append(out, HealthIssue{
 				Severity: "error",
 				Category: "observability",

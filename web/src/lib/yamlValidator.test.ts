@@ -130,12 +130,15 @@ describe('computeStepErrors', () => {
     expect(errs.has('cc.nacos.dev.scan')).toBe(true)
   })
 
-  it('step 7 flags untested probe targets', () => {
+  it('step 7 does NOT block untested probe targets (未测试不阻止,只 fail 阻止 —— ec24e65 起的行为)', () => {
     const errs = computeStepErrors(makeCtx({
       step: 7,
       enumerateDataStoreProbeTargets: () => [{ envID: 'dev', svc: 'order', dsKey: 'redis' }],
+      // 不给 dsProbeResults → 该 target 处于"未测试"态
     }))
-    expect(errs.has('ds.dev.order.redis.notested')).toBe(true)
+    // 未测试不再产 notested(用户可跳过连通性测试),也不应误报 probefail
+    expect(errs.has('ds.dev.order.redis.notested')).toBe(false)
+    expect(errs.has('ds.dev.order.redis.probefail')).toBe(false)
   })
 
   it('step 7 flags probefail when status=fail', () => {

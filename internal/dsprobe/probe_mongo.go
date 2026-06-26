@@ -21,12 +21,37 @@ import (
 // 用户名密码用 SetAuth(Credential{...}) 单独传 —— SDK 不再对密码做编码 / 解码,
 // 原文 SCRAM。这样无论密码多怪都能通。
 func probeMongoDB(f map[string]string) (bool, string, error) {
+	opts, err := mongoClientOptionsFromFields(f)
+	if err != nil {
+		return false, "", err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	cli, err := mongo.Connect(ctx, opts)
+	if err != nil {
+		return false, "", mongoErrorMsg(err)
+	}
+	defer func() { _ = cli.Disconnect(context.Background()) }()
+	if err := cli.Ping(ctx, readpref.Primary()); err != nil {
+		return false, "", mongoErrorMsg(err)
+	}
+	var doc map[string]any
+	_ = cli.Database("admin").RunCommand(ctx, map[string]any{"buildInfo": 1}).Decode(&doc)
+	ver := "MongoDB"
+	if v, ok := doc["version"].(string); ok {
+		ver = "MongoDB " + v
+	}
+	return true, "登录 OK · " + ver, nil
+}
+
+func mongoClientOptionsFromFields(f map[string]string) (*options.ClientOptions, error) {
 	uri := strings.TrimSpace(f["uri"])
 	if uri == "" {
 		uri = strings.TrimSpace(f["url"])
 	}
 
-	var rawUser, rawPass, hostPart, dbPart, authSource string
+	var rawUser, rawPass, hostPart, dbPart, queryPart, authSource string
 
 	if uri != "" {
 		// 手工拆,不走 url.Parse(它对密码也会做解码)
@@ -53,7 +78,8 @@ func probeMongoDB(f map[string]string) (bool, string, error) {
 			rest := hostAndPath[slash+1:]
 			if q := strings.Index(rest, "?"); q >= 0 {
 				dbPart = rest[:q]
-				for _, kv := range strings.Split(rest[q+1:], "&") {
+				queryPart = rest[q+1:]
+				for _, kv := range strings.Split(queryPart, "&") {
 					if strings.HasPrefix(kv, "authSource=") {
 						authSource = strings.TrimPrefix(kv, "authSource=")
 					}
@@ -68,7 +94,7 @@ func probeMongoDB(f map[string]string) (bool, string, error) {
 		// 用 host/port/user/password/database 字段拼
 		host := strings.TrimSpace(f["host"])
 		if host == "" {
-			return false, "", errors.New("缺 uri 或 host")
+			return nil, errors.New("缺 uri 或 host")
 		}
 		port := strings.TrimSpace(f["port"])
 		if port == "" {
@@ -84,16 +110,18 @@ func probeMongoDB(f map[string]string) (bool, string, error) {
 	}
 
 	if hostPart == "" {
-		return false, "", errors.New("无法从 uri 解析出 host")
+		return nil, errors.New("无法从 uri 解析出 host")
 	}
-	// 拼"安全 URI"(只含 host + 可选 db),凭证走 SetAuth 不经过 URL 解析
+	// 拼"安全 URI"(不含凭证),凭证走 SetAuth 不经过 URL 解析。
+	// query 需要原样保留,否则 directConnection=true / replicaSet / tls 等连接行为会丢。
 	safeURI := "mongodb://" + hostPart
 	if dbPart != "" {
 		safeURI += "/" + dbPart
 	}
+	if queryPart != "" {
+		safeURI += "?" + queryPart
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
-	defer cancel()
 	opts := options.Client().ApplyURI(safeURI).
 		SetConnectTimeout(probeTimeout).
 		SetServerSelectionTimeout(probeTimeout)
@@ -106,21 +134,7 @@ func probeMongoDB(f map[string]string) (bool, string, error) {
 		}
 		opts.SetAuth(cred)
 	}
-	cli, err := mongo.Connect(ctx, opts)
-	if err != nil {
-		return false, "", mongoErrorMsg(err)
-	}
-	defer func() { _ = cli.Disconnect(context.Background()) }()
-	if err := cli.Ping(ctx, readpref.Primary()); err != nil {
-		return false, "", mongoErrorMsg(err)
-	}
-	var doc map[string]any
-	_ = cli.Database("admin").RunCommand(ctx, map[string]any{"buildInfo": 1}).Decode(&doc)
-	ver := "MongoDB"
-	if v, ok := doc["version"].(string); ok {
-		ver = "MongoDB " + v
-	}
-	return true, "登录 OK · " + ver, nil
+	return opts, nil
 }
 
 func mongoErrorMsg(err error) error {

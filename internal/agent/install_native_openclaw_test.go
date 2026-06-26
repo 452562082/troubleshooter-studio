@@ -145,6 +145,13 @@ func TestInstallNativeOpenclaw_FreshInstall(t *testing.T) {
 
 	// openclaw.json 应有 agents.list[shop-troubleshooter] + mcp.servers
 	cfgPath := filepath.Join(fakeHome, ".openclaw", "openclaw.json")
+	// H1 回归护栏:openclaw.json 的 mcp.servers env 段含 plaintext creds,必须 0o600
+	// (对齐 IDE 三家 install_e2e_test.go 的 0o600 断言)。world-readable 0o644 是真 leak。
+	if st, err := os.Stat(cfgPath); err != nil {
+		t.Fatalf("stat openclaw.json: %v", err)
+	} else if st.Mode().Perm() != 0o600 {
+		t.Errorf("openclaw.json 权限必须 0o600(含 plaintext creds),got %o", st.Mode().Perm())
+	}
 	data := readJSON(t, cfgPath)
 	agents := getList(data, "agents", "list")
 	if len(agents) != 1 {

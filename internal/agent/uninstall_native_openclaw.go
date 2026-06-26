@@ -102,7 +102,9 @@ func UninstallNativeOpenclaw(installedDir string) (*UninstallOpenclawResult, err
 			}
 		}
 		if dirty {
-			if err := writeJSONFile(cfgPath, data, 0o644); err != nil {
+			// 0o600:openclaw.json 仍可能含其它 agent 的 mcp.servers plaintext creds,
+			// 卸载重写时必须保持 0o600,否则把 install 收紧过的文件又放回 world-readable(H1)。
+			if err := writeJSONFile(cfgPath, data, 0o600); err != nil {
 				return res, fmt.Errorf("write %s: %w", cfgPath, err)
 			}
 		}

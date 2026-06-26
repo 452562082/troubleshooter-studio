@@ -293,12 +293,14 @@ export function useRepoScan(deps: RepoScanDeps) {
     r._scannedSource = ''
     // 清空旧 submodule hints,避免上个仓库的检测结果残留
     r._submoduleHints = undefined
-    if (!isLocked) {
+    if (!isLocked || !r.url.trim()) {
+      // 普通仓:直接反填 URL+name。
+      // 锁定仓(from YAML):如果 yaml 里 URL 是占位符/空的,也需要从本地 git remote 补上。
       try {
         const remote = await getRemoteURL(newPath)
         if (remote) {
           r.url = remote
-          r.name = deps.deriveRepoName(remote)
+          if (!isLocked) r.name = deps.deriveRepoName(remote)
         }
       } catch { /* 不是 git 仓库 / 没 origin,容忍继续 */ }
     }

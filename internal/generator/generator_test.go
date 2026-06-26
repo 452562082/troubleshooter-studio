@@ -89,6 +89,66 @@ func TestGenerate_MultiSource_ConfigMapRoutesPerService(t *testing.T) {
 	}
 }
 
+func TestGenerate_One2AllConfigMapWithK8sRuntimeServiceMap(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
+	cfg.Infrastructure.ConfigCenters = []config.ConfigCenter{{
+		ID:   "one2all",
+		Type: "one2all",
+		Endpoints: []config.ConfigCenterEndpoint{{
+			Env:   "dev",
+			URL:   "http://one2all.example.com/mcp",
+			Token: "o2a_test",
+		}},
+		ServiceMap: map[string]map[string]config.ServiceMapEntry{
+			"dev": {
+				"order-service": {
+					ClusterID: "1",
+					Namespace: "default",
+					ConfigMap: "base-config,app-config",
+				},
+			},
+		},
+	}}
+	for i := range cfg.Repos {
+		cfg.Repos[i].ConfigSource = "one2all"
+	}
+	cfg.Infrastructure.Observability.K8sRuntime = config.K8sRuntime{
+		Enabled:  true,
+		Provider: "one2all",
+		ServiceMap: []config.K8sRuntimeServiceMapEntry{{
+			Env:           "dev",
+			Service:       "order-service",
+			ClusterID:     "1",
+			Namespace:     "default",
+			Workload:      "order-service",
+			LabelSelector: "app=order-service",
+		}},
+	}
+
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+	if err := New(cfg, tr, out).Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	cm := readFile(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/config-map.yaml"))
+	rows := loadConfigMap(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/config-map.yaml"))
+	for _, want := range []string{
+		"runtime: one2all-mcp",
+		`mcp_server: shop-one2all`,
+		`cluster_id: "1"`,
+		`namespace: "default"`,
+		`configmaps: "base-config,app-config"`,
+	} {
+		if !strings.Contains(cm, want) {
+			t.Fatalf("config-map missing %q:\n%s", want, cm)
+		}
+	}
+	row := rows["dev"]["order-service"]
+	if row["runtime"] != "one2all-mcp" || row["cluster_id"] != "1" || row["configmaps"] != "base-config,app-config" {
+		t.Fatalf("unexpected one2all config-map row: %#v", row)
+	}
+}
+
 func readFile(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)

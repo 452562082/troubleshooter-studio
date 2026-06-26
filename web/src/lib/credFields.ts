@@ -16,8 +16,56 @@ export interface CredField {
   options?: Array<{ value: string; label: string }>
   /** showWhen 非空 → 仅当同 env 下某 sibling 字段值匹配时才显示(条件表单) */
   showWhen?: { field: string; equals: string }
+  /** 多条件版 showWhen;全部命中才显示。用于 provider + auth_mode 这类级联条件。 */
+  showWhenAll?: Array<{ field: string; equals: string }>
+  /** 按 sibling 字段值切换 label。 */
+  labelBy?: { field: string; values: Record<string, string> }
+  /** 按 sibling 字段值切换 placeholder。 */
+  placeholderBy?: { field: string; values: Record<string, string> }
+  /** 按 sibling 字段值切换部署环境变量名。 */
+  envVarBy?: { field: string; values: Record<string, (env: string) => string> }
   /** uiOnly:UI 状态字段,不参与 yaml emit / install 凭证收集(如 auth_mode) */
   uiOnly?: boolean
+}
+
+function siblingValueWithDefault(field: string, getSibling: (key: string) => string): string {
+  const value = getSibling(field)
+  if (value) return value
+  if (field === 'auth_mode') return 'access_key'
+  if (field === 'provider') return 'kuboard'
+  return ''
+}
+
+export function isCredFieldHidden(f: CredField, getSibling: (key: string) => string): boolean {
+  const conditions = f.showWhenAll || (f.showWhen ? [f.showWhen] : [])
+  if (conditions.length === 0) return false
+  return conditions.some(cond => siblingValueWithDefault(cond.field, getSibling) !== cond.equals)
+}
+
+function resolveDynamicText(
+  fallback: string | undefined,
+  rule: { field: string; values: Record<string, string> } | undefined,
+  getSibling: (key: string) => string,
+): string | undefined {
+  if (!rule) return fallback
+  const siblingVal = siblingValueWithDefault(rule.field, getSibling)
+  return rule.values[siblingVal] || fallback
+}
+
+export function resolveCredFieldDisplay(f: CredField, getSibling: (key: string) => string): CredField {
+  const envVarBy = f.envVarBy
+  const envVar = envVarBy
+    ? (env: string) => {
+        const siblingVal = siblingValueWithDefault(envVarBy.field, getSibling)
+        return (envVarBy.values[siblingVal] || f.envVar)(env)
+      }
+    : f.envVar
+  return {
+    ...f,
+    envVar,
+    label: resolveDynamicText(f.label, f.labelBy, getSibling) || f.label,
+    placeholder: resolveDynamicText(f.placeholder, f.placeholderBy, getSibling),
+  }
 }
 
 export type KuboardClusterEntry = {

@@ -142,7 +142,7 @@ export interface ApplyImportContext {
   toolInputs: Record<string, string>
   obsAccessModeMap: Record<string, 'via_grafana' | 'direct'>
   grafanaDsUidByObsEnv: Record<string, string>
-  k8sRuntimeEnvLoc: Record<string, { cluster?: string; namespace?: string }>
+  k8sRuntimeEnvLoc: Record<string, { cluster?: string; cluster_id?: string; namespace?: string }>
   k8sRuntimeSvcMap: Record<string, { workload?: string; label_selector?: string }>
   scannedDS: Record<string, Record<string, Record<string, Record<string, string>>>>
   enabledDataStores: Record<string, boolean>
@@ -155,6 +155,7 @@ export interface ApplyImportContext {
   allServiceNames: string[]
   // helper 函数(InitPage closure)
   ensureKuboardLoc: (envID: string, svc: string) => { cluster?: string; namespace?: string; configmap?: string }
+  ensureOne2AllLoc: (envID: string, svc: string) => { cluster_id?: string; namespace?: string; configmap?: string }
   getLokiMapping: (envID: string) => any
   ccKeyFor: (type: string, envID: string, field: string) => string
   svcKey: (envID: string, svc: string) => string
@@ -322,6 +323,19 @@ export async function applyParsedYAMLToWizardState(
         }
       }
     }
+    if (t === 'one2all' && s.service_map && typeof s.service_map === 'object') {
+      for (const [envID, svcs] of Object.entries(s.service_map as Record<string, unknown>)) {
+        if (!svcs || typeof svcs !== 'object') continue
+        for (const [svc, rec] of Object.entries(svcs as Record<string, unknown>)) {
+          if (!rec || typeof rec !== 'object') continue
+          const r = rec as { cluster_id?: string; namespace?: string; configmap?: string }
+          const loc = ctx.ensureOne2AllLoc(envID, svc)
+          if (typeof r.cluster_id === 'string') loc.cluster_id = r.cluster_id
+          if (typeof r.namespace === 'string') loc.namespace = r.namespace
+          if (typeof r.configmap === 'string') loc.configmap = r.configmap
+        }
+      }
+    }
     // 其它高级字段进 rawExtra round-trip(service_map 一律排除,emit 时 emitSourceBody 自己生成)
     const rawExtra: Record<string, unknown> = {}
     for (const [k, v] of Object.entries(s)) {
@@ -480,6 +494,13 @@ export async function applyParsedYAMLToWizardState(
     }
 
     // k8s_runtime.service_map 反填到 envLoc + svcMap
+    const k8sProvider = obs?.['k8s_runtime']?.provider
+    if (typeof k8sProvider === 'string' && k8sProvider) {
+      for (const env of ctx.environments) {
+        if (!env.id) continue
+        ctx.toolInputs[ctx.toolKeyFor('obs', 'k8s_runtime', env.id, 'provider')] = k8sProvider
+      }
+    }
     const k8sSvcMap = obs?.['k8s_runtime']?.service_map
     if (Array.isArray(k8sSvcMap)) {
       for (const k of Object.keys(ctx.k8sRuntimeSvcMap)) delete ctx.k8sRuntimeSvcMap[k]
@@ -490,6 +511,7 @@ export async function applyParsedYAMLToWizardState(
         if (!ctx.k8sRuntimeEnvLoc[envID]) {
           ctx.k8sRuntimeEnvLoc[envID] = {
             cluster: typeof entry?.cluster === 'string' ? entry.cluster : '',
+            cluster_id: typeof entry?.cluster_id === 'string' ? entry.cluster_id : '',
             namespace: typeof entry?.namespace === 'string' ? entry.namespace : '',
           }
         }

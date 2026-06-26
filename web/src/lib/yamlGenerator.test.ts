@@ -21,6 +21,7 @@ function makeCtx(overrides: Partial<YAMLGenContext> = {}): YAMLGenContext {
     serviceConfigGroup: {},
     envNamespaces: { dev: 'DEV_GROUP' },
     kuboardSvcMap: {},
+    one2allSvcMap: {},
     lokiMappingByEnv: {},
     toolInputs: {},
     grafanaDsUidByObsEnv: {},
@@ -118,5 +119,38 @@ describe('generateYAML', () => {
     })
     const diffYaml = yaml.load(generateYAML(ctxDiff)) as any
     expect(diffYaml.agent.target_models.openclaw).toBe('anthropic/claude-sonnet-4')
+  })
+
+  it('emits one2all k8s_runtime provider from tool inputs', () => {
+    const out = generateYAML(makeCtx({
+      enabledObservability: { k8s_runtime: true },
+      deriveSkillsWhitelist: () => ['routing', 'k8s-runtime-query'],
+      OBS_TOOL_SPECS: [{
+        key: 'k8s_runtime',
+        fields: [
+          { key: 'provider', label: 'Provider', secret: false, envVar: () => '', uiOnly: true },
+          { key: 'url', label: 'MCP URL', secret: false, envVar: () => 'ONE2ALL_MCP_URL' },
+          { key: 'api_key', label: 'Token', secret: true, envVar: () => 'ONE2ALL_TOKEN' },
+        ],
+      }],
+      toolInputs: {
+        'obs:k8s_runtime:dev:provider': 'one2all',
+        'obs:k8s_runtime:dev:url': 'http://one2all/mcp/hash',
+        'obs:k8s_runtime:dev:api_key': 'o2a_secret',
+      },
+      k8sRuntimeEnvLoc: {
+        dev: { cluster_id: '1', namespace: 'default' },
+      },
+      k8sRuntimeSvcMap: {
+        'dev::order-service': { workload: 'order-service' },
+      },
+    }))
+    const parsed = yaml.load(out) as any
+    const rt = parsed.infrastructure.observability.k8s_runtime
+    expect(rt.provider).toBe('one2all')
+    expect(rt.endpoints[0].url).toBe('http://one2all/mcp/hash')
+    expect(rt.endpoints[0].api_key).toBe('o2a_secret')
+    expect(rt.service_map[0].cluster_id).toBe('1')
+    expect(rt.service_map[0].cluster).toBeUndefined()
   })
 })

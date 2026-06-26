@@ -75,28 +75,32 @@ grep -E "<error pattern>" \
 命中 → 提示"匹配历史 pattern X,典型根因 / next_actions 见命中条目";**置信度上限调高一档**(有历史支撑);带 `causation_chain.check_downstream_for` 的 pattern 主动跑 `cascade_check.py` 看下游(详见 routing skill "关键用法 1")。
 
 ## Step 2:时间轴对齐(最高 ROI 一步)
-
+{{ if hasSkill . "recent-changes" }}
 ```bash
-python3 scripts/timeline.py --env <env> --service <svc> --since 1h \
+python3 skills/recent-changes/scripts/timeline.py --env <env> --service <svc> --since 1h \
     --incident-time "<故障开始时间>"
 ```
-
+{{- else }}
+> 本系统未启用 `recent-changes` skill —— 手动对齐:在主角 repo 跑 `git log --since=1h` + 查配置中心 history,找故障窗 ±5 分钟内的 deploy / 配置改。
+{{- end }}
 输出按时间倒序,`correlated:true` 标记 ±5 分钟内变更。**故障 ±5 分钟内有 deploy / 配置改 → 强相关,优先怀疑**。
 看 `event.diff_risks` —— `timeout_decreased / rate_limit_decreased / replicas_decreased` 等高危类型直接定型变更危险等级。
 
 ## Step 3:横向扫(孤立 vs 广播)
-
+{{ if hasSkill . "k8s-runtime-query" }}
 ```bash
-python3 scripts/k8s_query.py --env <env> --cluster <c> ns-snapshot --namespace <ns>
+python3 skills/k8s-runtime-query/scripts/k8s_query.py --env <env> --cluster <c> ns-snapshot --namespace <ns>
 ```
-
+{{- else }}
+> 本系统未启用 `k8s-runtime-query` skill —— 横向扫改用可观测性维度:看 cluster / namespace 级指标与日志是否多服务同时异常,判断孤立 vs 广播。
+{{- end }}
 - 只主角异常 → **孤立**,Step 4
 - 多服务一起异常 → **广播**(基础设施 / 网络 / 共享 DB),看 cluster events / kube-system
 
 ## Step 4:沿依赖图追下游
 
 ```bash
-python3 scripts/cascade_check.py --env <env> --service <主角> \
+python3 skills/incident-investigator/scripts/cascade_check.py --env <env> --service <主角> \
     --cluster <c> --namespace-default <ns>
 ```
 
@@ -104,7 +108,10 @@ python3 scripts/cascade_check.py --env <env> --service <主角> \
 - `isolated_downstream` + `verdict_root_likely=user` → 把 user 当主角递归 Step 4 再追一层
 - `widespread_downstream` → 共享依赖问题,不要继续递归
 - `all_healthy` → 真因在主角自身,Step 5
+- `downstream_unknown` → **下游健康状况未知 ≠ 健康**(`summary.unknown_targets` 列出的下游因 cluster 名 / label `app=<svc>` 对不上 / kuboard 不通 / creds 缺没查到)→ **禁止据此判"真因在主角自身"**;先按 unknown_targets 补齐定位信息重跑 cascade,补不了就标 `unavailable` + **置信度上限锁中**,快报明示"以下下游未验证"
 - `no_downstream_in_map` → dependency-map 没填,提示用户去填;**置信度上限 medium**
+
+> 注:`summary` 里 `healthy` / `degraded` / `unknown` 三个计数独立。`unknown>0` 时哪怕有 degraded(走 isolated/widespread),也要在快报里带上"另有 N 个下游未验证",别让 unknown 被 degraded 盖过。
 
 ## Step 5:多向交叉(trace + log + metric + 代码 + 数据)
 
@@ -157,7 +164,7 @@ nice-to-have / 已有充分代理证据 / 取证 ROI 极低 —— 这些不写,
 并发拉三处后**喂 triangulate.py 做客观对齐**(不要 LLM 心算):
 
 ```bash
-cat <<EOF | python3 scripts/triangulate.py --from-stdin
+cat <<EOF | python3 skills/incident-investigator/scripts/triangulate.py --from-stdin
 {"incident_window":"...","metric_anomalies":[...],"log_pattern_hits":[...],"trace_outliers":[...]}
 EOF
 ```
@@ -516,7 +523,7 @@ kubectl rollout status deployment/commerce -n base-prod
 cat > /tmp/postmortem.json <<'EOF'
 {"pattern":"...","typical_cause":"...","next_actions":[...],"mitigation":"..."}
 EOF
-python3 scripts/sink_postmortem.py --input /tmp/postmortem.json --env <env> --service <svc>
+python3 skills/incident-investigator/scripts/sink_postmortem.py --input /tmp/postmortem.json --env <env> --service <svc>
 ```
 
 `confidence=medium / low` 时:跳过 7.1 整段,故障快报到 Step 6 就结束。

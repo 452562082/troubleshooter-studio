@@ -219,6 +219,10 @@ func SelfTestOpenclaw(ctx context.Context, dir string) (*SelfTestResult, error) 
 	return res, nil
 }
 
+// toolchainLookPath 默认走 exec.LookPath;抽成包级变量供测试 stub
+// (CI docker 镜像里没装 node/uv,npx/uvx 必然 FAIL,需 stub 才能跑 happy-path 自检测试)。
+var toolchainLookPath = exec.LookPath
+
 // checkToolchain 看 cfg 里哪些 MCP 需要 npx / uvx,逐个 which 探活;缺则 FAIL + 安装提示。
 //   - npx:grafana / loki / lark / feishu_project MCP
 //   - uvx(= uv):nacos(plan D,`uv run --script nacos_mcp.py`)/ jaeger / clickhouse / rabbitmq
@@ -240,7 +244,7 @@ func checkToolchain(cfg *config.SystemConfig, add func(name, status, detail stri
 	}
 
 	if needNpx {
-		if path, err := exec.LookPath("npx"); err == nil {
+		if path, err := toolchainLookPath("npx"); err == nil {
 			add("npx 可用", "PASS", path)
 		} else {
 			add("npx 可用", "FAIL", "PATH 里没找到 npx;装 Node:`brew install node` 或 `nvm install --lts`(grafana/loki/lark MCP 跑不起来)")
@@ -248,7 +252,7 @@ func checkToolchain(cfg *config.SystemConfig, add func(name, status, detail stri
 	}
 
 	if CfgUsesUvx(cfg) {
-		if path, err := exec.LookPath("uvx"); err == nil {
+		if path, err := toolchainLookPath("uvx"); err == nil {
 			add("uvx 可用", "PASS", path)
 		} else {
 			add("uvx 可用", "FAIL", "PATH 里没找到 uvx;装 uv:`brew install uv` 或 `curl -LsSf https://astral.sh/uv/install.sh | sh`(nacos/jaeger/clickhouse MCP 跑不起来,nacos 会回落 HTTP fallback)")

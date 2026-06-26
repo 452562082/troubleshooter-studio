@@ -37,6 +37,7 @@ defineProps<{
   toolInputs: Record<string, string>
   isRevealed: (k: string) => boolean
   isObsFieldHidden: (toolKey: string, envID: string, f: CredField) => boolean
+  displayObsField: (toolKey: string, envID: string, f: CredField) => CredField
   toolKeyFor: (cat: 'obs' | 'ds', tool: string, envID: string, field: string) => string
 }>()
 
@@ -84,7 +85,7 @@ const emit = defineEmits<{
         v-for="f in spec.fields"
         :key="f.key"
         v-show="!isObsFieldHidden(spec.key, envID, f)"
-        :field="f"
+        :field="displayObsField(spec.key, envID, f)"
         :env-i-d="envID"
         :model-value="toolInputs[toolKeyFor('obs', spec.key, envID, f.key)] || ''"
         :is-revealed="isRevealed(toolKeyFor('obs', spec.key, envID, f.key))"

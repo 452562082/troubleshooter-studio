@@ -205,6 +205,65 @@ func TestBuildMCPServers_DataStores_PruneEmpty(t *testing.T) {
 	}
 }
 
+func TestBuildMCPServers_One2AllForK8sRuntimeProvider(t *testing.T) {
+	cfg := &config.SystemConfig{
+		System:       config.System{ID: "shop", Name: "Shop"},
+		Environments: []config.Environment{{ID: "dev"}},
+		Infrastructure: config.Infrastructure{
+			ConfigCenters: []config.ConfigCenter{{ID: "default", Type: "nacos"}},
+			Observability: config.Observability{
+				K8sRuntime: config.K8sRuntime{
+					Enabled:  true,
+					Provider: "one2all",
+				},
+			},
+		},
+	}
+	creds := map[string]string{
+		"ONE2ALL_MCP_URL": "http://one2all/mcp/hash",
+		"ONE2ALL_TOKEN":   "o2a_secret",
+	}
+
+	servers := BuildMCPServers(cfg, MCPBuildOptions{AgentID: "bot", PruneEmpty: true},
+		func(k string) string { return creds[k] })
+
+	spec, ok := servers["bot-one2all"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected bot-one2all mcp server; got keys=%v", keysOf(servers))
+	}
+	if spec["type"] != "streamable-http" || spec["url"] != "http://one2all/mcp/hash" {
+		t.Fatalf("one2all spec mismatch: %#v", spec)
+	}
+	headers, ok := spec["headers"].(map[string]string)
+	if !ok {
+		t.Fatalf("one2all headers should be map[string]string: %#v", spec["headers"])
+	}
+	if headers["Authorization"] != "Bearer o2a_secret" {
+		t.Fatalf("one2all Authorization header mismatch: %#v", headers)
+	}
+}
+
+func TestBuildMCPServers_One2AllPrunedWhenK8sRuntimeCredsMissing(t *testing.T) {
+	cfg := &config.SystemConfig{
+		System:       config.System{ID: "shop", Name: "Shop"},
+		Environments: []config.Environment{{ID: "dev"}},
+		Infrastructure: config.Infrastructure{
+			Observability: config.Observability{
+				K8sRuntime: config.K8sRuntime{
+					Enabled:  true,
+					Provider: "one2all",
+				},
+			},
+		},
+	}
+
+	servers := BuildMCPServers(cfg, MCPBuildOptions{AgentID: "bot", PruneEmpty: true},
+		func(string) string { return "" })
+	if _, ok := servers["bot-one2all"]; ok {
+		t.Fatalf("one2all should be pruned when URL/token are missing; got keys=%v", keysOf(servers))
+	}
+}
+
 // TestBuildMCPServers_NacosMCPWithRefreshAuth 守 plan D 的接入契约 + 防回到 23d503a 的
 // bake-token 坑(决策演进详见 BuildMCPServers 注释):
 //

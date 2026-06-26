@@ -10,11 +10,16 @@ import (
 	"time"
 )
 
-// init() stub probeMCPFunc — self-test 测试会因 cfg 注册一堆 mcp,真 probe 会因 CI 没装
-// npx/uvx 全 FAIL。stub 返成功结果,让 self-test 走 happy path。个别测试可局部 override 测 FAIL。
+// init() stub probeMCPFunc / toolchainLookPath — self-test 测试会因 cfg 注册一堆 mcp,真 probe
+// 会因 CI 没装 npx/uvx 全 FAIL。stub 返成功结果,让 self-test 走 happy path。个别测试可局部 override 测 FAIL。
+// toolchainLookPath 同理:CI 的 golang docker 镜像没装 node/uv,真 LookPath npx/uvx 必 FAIL,
+// 拖垮 happy-path 自检断言;stub 成命中,保留生产 LookPath 行为只在测试里替换。
 func init() {
 	probeMCPFunc = func(_ context.Context, _ string, _, _ []string, _ time.Duration) MCPProbeResult {
 		return MCPProbeResult{Tools: []string{"fake_tool_a", "fake_tool_b"}}
+	}
+	toolchainLookPath = func(name string) (string, error) {
+		return "/fake/bin/" + name, nil
 	}
 }
 

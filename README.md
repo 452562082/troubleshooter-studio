@@ -61,31 +61,30 @@
 
 ## 下载与安装
 
-本项目在 GitHub / GitLab 两个仓库镜像同步发布,**每个 Release 都同时发到两边**,任选其一下载:
-
-| 仓库 | Releases 页 |
-|---|---|
-| **GitHub** | <https://github.com/452562082/troubleshooter-studio/releases> |
-| **GitLab** | <https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/releases> |
-
-> 下方一行命令安装脚本(`install.sh`)目前只对接 GitLab;用 GitHub 的走「图形装 dmg」或「CLI」直接从 GitHub Releases 页下产物即可。
+> 项目在 GitHub / GitLab 两个仓库镜像同步发布,**每个 Release 同名产物两边都有**,下面任选一个源。
 
 ### 桌面 app(macOS) — 一行命令(推荐,无 Gatekeeper 弹窗)
 
 ```bash
-# 装最新版(公开项目):
+# ── GitLab 源(默认)──
+# 装最新版:
 curl -fsSL https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
-
-# 装指定版本:
-VERSION=v0.9.23 curl -fsSL https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
-
-# 私有 GitLab 项目需 token(GitLab → Settings → Access Tokens,scope=read_api):
+# 私有 GitLab 项目需 token(Settings → Access Tokens,scope=read_api):
 export GITLAB_TOKEN=glpat-xxx
 curl -fsSL -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
   https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
+
+# ── GitHub 源(SOURCE=github)──
+# 装最新版:
+curl -fsSL https://raw.githubusercontent.com/452562082/troubleshooter-studio/main/scripts/install.sh | SOURCE=github bash
+
+# ── 装指定版本(两源通用,加 VERSION)──
+curl -fsSL https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | VERSION=v0.9.23 bash
+curl -fsSL https://raw.githubusercontent.com/452562082/troubleshooter-studio/main/scripts/install.sh | SOURCE=github VERSION=v0.9.23 bash
 ```
 
-自动从最新 [GitLab Release](https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/releases) 下 dmg → 装到 `/Applications/` → 启动。`curl/bash/xattr/open` 是 macOS 自带签名工具,不被 Gatekeeper 拦,xattr 清完 quarantine 后 `.app` 直接放行。
+自动从对应源的最新 Release 下 dmg → 装到 `/Applications/` → 启动。`curl/bash/xattr/open` 是 macOS 自带签名工具,不被 Gatekeeper 拦,xattr 清完 quarantine 后 `.app` 直接放行。
+（Releases 页:[GitHub](https://github.com/452562082/troubleshooter-studio/releases) / [GitLab](https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/releases)）
 
 ### 桌面 app(macOS) — 图形装 dmg
 

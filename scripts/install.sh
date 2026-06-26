@@ -12,8 +12,11 @@
 #
 # 用法:
 #
-#   公开 GitLab 项目:
+#   公开 GitLab 项目(默认源):
 #     curl -fsSL https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
+#
+#   GitHub 源(SOURCE=github,从 GitHub Release 下产物):
+#     curl -fsSL https://raw.githubusercontent.com/452562082/troubleshooter-studio/main/scripts/install.sh | SOURCE=github bash
 #
 #   私有 GitLab 项目:
 #     export GITLAB_TOKEN=glpat-xxx   # GitLab Settings → Access Tokens(scope=read_api)
@@ -26,11 +29,19 @@
 set -euo pipefail
 
 # ── 配置(env 可覆盖)──────────────────────────────────────────
+# SOURCE 选下载源:gitlab(默认)| github。两仓库镜像同步发布同名产物。
+SOURCE="${SOURCE:-gitlab}"
 GITLAB_HOST="${GITLAB_HOST:-https://gitlab.quguazhan.com}"
 PROJECT_PATH="${PROJECT_PATH:-xiaolong/troubleshooter-studio}"
+GITHUB_REPO="${GITHUB_REPO:-452562082/troubleshooter-studio}"
 APP_NAME="${APP_NAME:-TroubleshooterStudio}"
 VERSION="${VERSION:-}"     # 空 = 自动查最新 release tag
 TARGET_DIR="${TARGET_DIR:-/Applications}"
+
+case "$SOURCE" in
+    gitlab|github) ;;
+    *) echo "✗ SOURCE 只能是 gitlab / github(当前:$SOURCE)" >&2; exit 1 ;;
+esac
 
 PROJECT_ENC=$(printf %s "$PROJECT_PATH" | sed 's|/|%2F|g')
 API="$GITLAB_HOST/api/v4/projects/$PROJECT_ENC"
@@ -52,8 +63,11 @@ API="$GITLAB_HOST/api/v4/projects/$PROJECT_ENC"
 # 不会误杀慢网用户。
 fetch() {
     local opts=(-fL --connect-timeout 30 --speed-time 60 --speed-limit 1024)
-    if [[ -n "${GITLAB_TOKEN:-}" ]]; then
+    if [[ "$SOURCE" == gitlab && -n "${GITLAB_TOKEN:-}" ]]; then
         curl "${opts[@]}" -H "PRIVATE-TOKEN: $GITLAB_TOKEN" "$@"
+    elif [[ "$SOURCE" == github && -n "${GITHUB_TOKEN:-}" ]]; then
+        # 公开仓库无需 token;给了就带上提高 API 限额(匿名 60 req/h)
+        curl "${opts[@]}" -H "Authorization: Bearer $GITHUB_TOKEN" "$@"
     else
         curl "${opts[@]}" "$@"
     fi
@@ -72,18 +86,28 @@ if [[ "$(uname)" != "Darwin" ]]; then
 fi
 
 # ── 1. 找最新 release tag(VERSION 没指定时)──────────────────
+echo "▶ 下载源:$SOURCE"
 if [[ -z "$VERSION" ]]; then
     echo "▶ 查询最新 release ..."
-    resp=$(fetch -sS "$API/releases?per_page=1" 2>/dev/null || true)
-    if [[ -z "$resp" || "$resp" == "[]" ]]; then
-        echo "✗ 拿不到 release 列表(项目可能私有,设 GITLAB_TOKEN env 后重跑)" >&2
-        echo "  GitLab → Preferences → Access Tokens → 创建 scope=read_api 的 token" >&2
-        exit 1
-    fi
-    VERSION=$(printf %s "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['tag_name'])" 2>/dev/null || true)
-    if [[ -z "$VERSION" ]]; then
-        echo "✗ 解析 release 失败" >&2
-        exit 1
+    if [[ "$SOURCE" == github ]]; then
+        resp=$(fetch -sS "https://api.github.com/repos/$GITHUB_REPO/releases/latest" 2>/dev/null || true)
+        VERSION=$(printf %s "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin)['tag_name'])" 2>/dev/null || true)
+        if [[ -z "$VERSION" ]]; then
+            echo "✗ 拿不到 GitHub 最新 release(网络 / API 限额?给 GITHUB_TOKEN env 重试)" >&2
+            exit 1
+        fi
+    else
+        resp=$(fetch -sS "$API/releases?per_page=1" 2>/dev/null || true)
+        if [[ -z "$resp" || "$resp" == "[]" ]]; then
+            echo "✗ 拿不到 release 列表(项目可能私有,设 GITLAB_TOKEN env 后重跑)" >&2
+            echo "  GitLab → Preferences → Access Tokens → 创建 scope=read_api 的 token" >&2
+            exit 1
+        fi
+        VERSION=$(printf %s "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0]['tag_name'])" 2>/dev/null || true)
+        if [[ -z "$VERSION" ]]; then
+            echo "✗ 解析 release 失败" >&2
+            exit 1
+        fi
     fi
     echo "  → 最新版本 $VERSION"
 else
@@ -91,10 +115,15 @@ else
 fi
 
 # ── 2. 下 dmg.zip ──────────────────────────────────────────────
-PKG_NAME="${PROJECT_PATH##*/}"
-PKG_VER="${VERSION#v}"
 ZIP_NAME="$APP_NAME-$VERSION.dmg.zip"
-ZIP_URL="$API/packages/generic/$PKG_NAME/$PKG_VER/$ZIP_NAME"
+if [[ "$SOURCE" == github ]]; then
+    # GitHub Release asset 固定 URL 规律(publish-github-release.sh 上传同名 zip)
+    ZIP_URL="https://github.com/$GITHUB_REPO/releases/download/$VERSION/$ZIP_NAME"
+else
+    PKG_NAME="${PROJECT_PATH##*/}"
+    PKG_VER="${VERSION#v}"
+    ZIP_URL="$API/packages/generic/$PKG_NAME/$PKG_VER/$ZIP_NAME"
+fi
 
 tmp=$(mktemp -d)
 trap '

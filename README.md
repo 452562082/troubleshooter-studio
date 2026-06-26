@@ -68,7 +68,7 @@
 curl -fsSL https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
 
 # 装指定版本:
-VERSION=v0.9.18 curl -fsSL https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
+VERSION=v0.9.23 curl -fsSL https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
 
 # 私有 GitLab 项目需 token(GitLab → Settings → Access Tokens,scope=read_api):
 export GITLAB_TOKEN=glpat-xxx

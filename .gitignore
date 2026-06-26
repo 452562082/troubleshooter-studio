@@ -9,6 +9,7 @@ dist/bin/
 
 # Wails / 桌面端本地产物（bin/ 已被上面兜住，这里只管 app bundle 和生成物）
 /factory-desktop
+/tshoot-desktop
 cmd/tshoot-desktop/build/bin/
 # web/wailsjs/go/ 入库(由 wails generate module 生成,跟 Go App 方法同步更新,
 # 入库省去 clone 后首次 build 还要先跑生成;改了 Go binding 后跑 make wails-gen 刷新)
@@ -36,6 +37,9 @@ scripts/.env
 
 # 本机工具链个人配置(不应入库)
 .claude/settings.local.json
+.claude/mcp.json
+# 本机 MCP server 配置(可能含 token / 私有 endpoint),仓库根那份不入库
+/.mcp.json
 .opencode/node_modules/
 .opencode/bun.lock
 

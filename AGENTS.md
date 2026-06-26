@@ -1,125 +1,96 @@
-# AGENTS.md — 给开发本项目的 AI 用
+# AGENTS.md - 给开发本项目的 AI
 
-> **这份文件给 AI(Claude Code / Codex / Cursor 等)看,不是给本项目产出的机器人看。**
-> 产出物机器人的 AGENTS.md 在 `templates/workspace/AGENTS.md.tmpl`。
+这份文件给 Claude Code / Codex / Cursor 等开发助手看。生成物机器人的说明在 `templates/workspace/AGENTS.md.tmpl`。
 
-## 项目本质(30 秒理解)
+## 项目本质
 
-**troubleshooter-studio** = AI 排障机器人工作台(两层):
+`troubleshooter-studio` 是 AI 排障机器人工作台，分两层：
 
-1. **上层(本仓库)**:研制环境 — CLI(`tshoot`)/ 桌面 app / HTTP server 三入口并列,共享 `internal/`,做 yaml 建模 / 仓库扫描 / 校验 / 生成 / 部署
-2. **下层(产出物)**:`tshoot apply` 生成一个独立可运行的排障机器人(skills + MCP + 话术),装到 OpenClaw / Claude Code / Cursor / Codex CLI
+| 层级 | 说明 |
+|---|---|
+| 本仓库 | 研制环境：CLI `tshoot`、桌面 app、HTTP server 三入口共享 `internal/`，负责 yaml 建模、仓库扫描、校验、生成、部署 |
+| 产出物 | `tshoot apply` 生成的独立排障机器人：skills、MCP、话术，安装到 OpenClaw / Claude Code / Cursor / Codex CLI |
 
-## 改东西前必读
+## 改动前必读
 
-1. **决策演进**:[`docs/decisions.md`](docs/decisions.md) — 本项目踩过的坑 + 为什么是现在这样
-2. **当前规范流程**:[`CONTRIBUTING.md`](CONTRIBUTING.md) — 加 mcp / 加 SKILL / 改 schema 怎么做
-3. **测试要求**:CONTRIBUTING.md "测试要求" 段(覆盖率门槛 + 必加 negative test)
+1. [docs/decisions.md](docs/decisions.md)：设计决策和踩坑记录
+2. [CONTRIBUTING.md](CONTRIBUTING.md)：当前开发流程
+3. `CONTRIBUTING.md` 的“测试要求”：覆盖率门槛和 MCP negative test 要求
 
-## 关键模式(踩过坑总结)
+## 核心约束
 
-### 1. MCP 软约束哲学(2026-05-15 校准)
+### MCP 软约束
 
-**不要**在 mcp 层硬约束写工具(`--read-only` / `ALLOW_*_OPERATION=false` 等)。**用 SKILL 文档软约束**:
-- LLM prompt 级"严禁调用 X 工具"
-- 留口子给紧急人工指令
-- 简化 install,减少配置错配
+不要在 MCP builder 里默认硬禁写工具，例如 `--read-only`、`ALLOW_*_OPERATION=false`。写操作靠 SKILL 文档软约束，保留紧急人工指令口子。
 
-应用在 mysql / redis / kafka / postgres / mongo / grafana / clickhouse 等。例外:`--read-only` 已经传的不主动去掉(如 mongo)。
+例外：上游已传的只读能力不主动去掉，例如 mongo。
 
-### 2. install 后 MCP 必须 runtime probe(2026-05-15 工程化)
+### install 后必须 runtime probe
 
-`internal/agent/self_test_mcp_probe.go` 自动跑 stdio probe + tools/list。**改 mcp builder / 加新 mcp 必须保证 probe 通过**。
+`internal/agent/self_test_mcp_probe.go` 会跑 stdio probe 和 `tools/list`。改 MCP builder 或新增 MCP 时，以 runtime probe 为准，不以 README 或源码猜工具名。
 
-trustchain:
-- doc-level("看 README + 源码 grep")命中率 ~60%
-- runtime probe("起 mcp + tools/list")命中率 ~95%
-- **永远以 runtime probe 为准**(本会话 5 处 SKILL 死引用都是 README vs 实际脱节)
+### builder skip 分两类
 
-### 3. 不注册 mcp 的两种情况(2026-05-15 + 18 校准;2026-05-27 nacos 改判)
+| 类型 | 含义 | 当前例子 |
+|---|---|---|
+| 方案 B | 不注册 MCP，但有成熟 HTTP/API 替代，能力完整；凭据仍收 | apollo、consul、rabbitmq |
+| 真禁用 | 不注册 MCP，且无替代能力；凭据停收 | feishu_project |
 
-`BuildMCPServers` 不注册某后端的 mcp 有**两种**,语义完全不同 — 别混:
+nacos 不属于方案 B。当前 nacos 走自研本地 MCP `templates/.../scripts/nacos_mcp.py`，运行时 login + refresh token；`scripts/nacos_config.py` 只是 fallback。
 
-> **nacos 已改判(2026-05-27,plan D)**:nacos **不再是方案 B** —— 现在走**自研本地 MCP**
-> (`templates/.../scripts/nacos_mcp.py`,运行时自己 login + refresh token),`buildNacos`
-> 重新注册 mcp。详见 [`docs/decisions.md`](docs/decisions.md) plan D 条目。HTTP 脚本
-> `scripts/nacos_config.py` 降级为 MCP 不可用时的 fallback。
+判断标准：
 
-**3a. 方案 B(有替代,能力完整可用)** — apollo / consul / rabbitmq
+- 凭据仍收 + 有替代脚本/API：方案 B
+- 凭据停收 + 无替代：真禁用
 
-上游 mcp 包不可用 / 不适合产品定位,但**有成熟的 HTTP API 替代**走 SKILL 主路径,**能力完整不缺**:
-- apollo → `scripts/apollo_config.py`(--agent-id --env 读 creds.json)
-- consul → `scripts/consul_config.py`(同)
-- rabbitmq → `curl + :15672/api/queues` HTTP Management API(RabbitMQ 团队官方,极稳定)
+### MCP builder 文件位置
 
-routing/config-map.yaml 标 `runtime: <type>-http` 字段告诉 LLM 走脚本。**用户排障时能力完整**。
-(对照:nacos 走自研 mcp 但 config-map 同样用 `runtime:` 字段标 `nacos-mcp`,只是 config-executor
-看到它去调 mcp 而非脚本 —— 见下方第 5 条。)
+| 文件 | 内容 |
+|---|---|
+| `install_native_mcp_common.go` | helper、`BuildMCPServers`、数据层共享 helper |
+| `install_native_mcp_obs.go` | grafana、jaeger、elk |
+| `install_native_mcp_data_stores.go` | 数据层 MCP |
+| `install_native_mcp_messaging.go` | lark、feishu_project |
 
-**3b. 真禁用(无替代,能力当前缺失)** — feishu_project
+### routing 字段互斥
 
-上游 mcp 包还是 prototype + 我们也没补 HTTP 脚本替代,能力**当前不可用**:
-- mcp 禁(`@lark-project/mcp v0.0.1` 字节内部 prototype)
-- install_prompts 停收凭据(诈骗式收集)
-- wizard askBool 标"实验性,目前不会真接入"
-- 等字节发 v1.x 正式版 / 我们补完 SKILL 后重启用
+`templates/workspace/skills/routing/references/config-map.yaml.tmpl` 中：
 
-**改判别准则**:不是"mcp builder warn skip 注册"就归类同款 — 关键看**是否有替代 + 凭据是否仍收**。
-- 3a 类:builder skip + 凭据仍收(install_prompts 收 + .env 持久化 + SKILL 用)
-- 3b 类:builder skip + 凭据停收(install_prompts 注释掉 + wizard 加实验性提示 + SKILL 不存在)
+- `mcp_server: <name>`：直接调 MCP
+- `runtime: <type>-(mcp|http)`：交给 `config-executor` 决定 MCP 或 HTTP fallback
 
-### 4. install_native_mcp_*.go 按类型拆分(2026-05-15 重构)
+不要两个字段同时给。nacos 用 `runtime: nacos-mcp`，不是 `mcp_server`。
 
-不要在单文件塞所有 builder。当前拆分:
-- `install_native_mcp_common.go` — helper + BuildMCPServers 总入口 + 数据层共享 helper
-- `install_native_mcp_obs.go` — grafana / jaeger / elk
-- `install_native_mcp_data_stores.go` — 8 家数据层 + 总分发
-- `install_native_mcp_messaging.go` — lark / feishu_project
-
-加新 mcp 选对应文件;不确定就 ping 一下结构。
-
-### 5. routing 字段两选一(2026-05-15)
-
-`templates/workspace/skills/routing/references/config-map.yaml.tmpl` 渲染时,**`mcp_server` 字段** 跟 **`runtime` 字段**互斥:
-- 有 `mcp_server: <name>` → 直接调该 MCP(grafana / jaeger / elk / 数据层 / lark 用)
-- 有 `runtime: <type>-(mcp|http)` → 交给 `config-executor` SKILL,由它按值决定:
-  - `nacos-mcp` → 调 `<system.id>-nacos-<env>` 这个 MCP 的工具(plan D;MCP 挂了回落 HTTP 脚本)
-  - `apollo-http` / `consul-http` / `kuboard-http` → 走对应 HTTP 脚本
-
-**写 routing 模板时不要两个都给**(2026-05-15 apollo/consul `mcp_server` 死字段就是这种错配)。
-注:nacos 虽走 mcp 但用 `runtime: nacos-mcp` 而非 `mcp_server` 字段 —— 因为它带 namespaceId/group/dataId
-定位信息要交给 config-executor 统一处理,且不想在 config-map 硬编码会漂移的 agent-id 前缀。
-
-## 工程化护栏
+## 工程护栏
 
 | 文件 | 作用 |
 |---|---|
-| `internal/agent/self_test_mcp_probe.go` | 每次 install 后自动 probe 所有 mcp,上游 break 立刻 FAIL |
-| `internal/agent/self_test_openclaw_probes.go::requiredMCPKeys` | 期望注册的 mcp 清单,改 build 函数同步改这里 |
-| `api/handler_test.go` | HTTP 入口测试(0% → 59.2%,2026-05-18) |
-| `internal/generator/preserve_test.go` | yaml prior overrides 保护测试(改 SKILL 模板时跑) |
-| `examples/*-troubleshooter.yaml` | 多种 config_center 类型 yaml fixture(改 schema 时跑) |
+| `internal/agent/self_test_mcp_probe.go` | install 后 probe MCP 是否能启动和列工具 |
+| `internal/agent/self_test_openclaw_probes.go::requiredMCPKeys` | 期望注册的 MCP 清单 |
+| `api/handler_test.go` | HTTP 入口测试 |
+| `internal/generator/preserve_test.go` | yaml prior overrides 保护测试 |
+| `examples/*-troubleshooter.yaml` | config_center 类型 fixture |
 
-## 常见反模式 — 别这么写
+## 常见反模式
 
-1. ❌ **install 显示 success 就认为 mcp 能用** — install 只保证 `mcp.servers` 写进 IDE config,不保证进程能起。**必须跑 self-test mcp probe**
-2. ❌ **看上游 README 写工具名** — README 跟实际包暴露经常脱节(本会话 5 处死引用)。**起 mcp probe 拿 tools/list**
-3. ❌ **install 收凭据但没人用** — 诈骗式收集,**install_prompts 不收 → wizard 也别问** → answers.go 也别渲染。三处对齐
-4. ❌ **改 schema 不改 example yaml** — 用户拿 example 当起点,字段不一致 → wizard 第一步就 valid 失败
-5. ❌ **大重构不写 decisions.md** — 后人看 git log 拼不出来的事,3 个月后自己都忘
-6. ❌ **加 mcp builder 不在 `requiredMCPKeys` 同步加** — `tshoot self-test` 会 FAIL "mcp.servers 不齐"
+- 看到 install success 就认为 MCP 可用。必须跑 self-test probe。
+- 按上游 README 写工具名。必须 runtime probe。
+- install 收凭据但没人用。prompt、wizard、answers 要一起停收。
+- 改 schema 不改 examples。
+- 大重构不写 `docs/decisions.md`。
+- 加 MCP builder 不同步 `requiredMCPKeys`。
 
 ## 测试速查
 
 ```bash
-# 全跑
+# 全量
 go test ./... -race
 
 # 关键模块
-go test ./internal/agent/ -run TestBuildMCPServers   # mcp 注册
-go test ./internal/agent/ -run TestSelfTestOpenclaw  # self-test
-go test ./internal/generator/ -run TestGenerate      # yaml → workspace 渲染
-go test ./api/                                        # HTTP 入口
+go test ./internal/agent/ -run TestBuildMCPServers
+go test ./internal/agent/ -run TestSelfTestOpenclaw
+go test ./internal/generator/ -run TestGenerate
+go test ./api/
 
 # 覆盖率
 go test ./... -cover
@@ -127,17 +98,13 @@ go test ./... -cover
 
 ## 决策追溯
 
-每次大重构 / 砍能力 / 换包 → 追加 [`docs/decisions.md`](docs/decisions.md) 一条 ADR(背景 → 决策 → 后果 → 演进)。**不改老条目**,过时标 SUPERSEDED 指向新条目。
+大重构、砍能力、换包时，追加 [docs/decisions.md](docs/decisions.md) ADR。不要改老条目；过时条目标 `SUPERSEDED` 指向新条目。
 
-最近的决策演进(2026-05):
-- **nacos 接入 plan D(2026-05-27,SUPERSEDES 方案 B)**:自研本地 MCP `nacos_mcp.py`,运行时自己 login + refresh token(把 token 生命周期从 install 一次性 bake 挪到进程运行时),重新注册 mcp;HTTP 脚本降为 fallback
-- ~~nacos 接入回归方案 B(HTTP API 主路径)~~ + apollo/consul 死字段清理(方案 B 已被 plan D 取代)
-- rabbitmq mcp 禁用注册 → 走 HTTP Management API(同方案 B)
-- feishu_project 禁用 mcp 注册 + 停收凭据(**注意**这是 3b 真禁用,不是 3a 方案 B,无替代)
-- postgres mcp 包迁移(@modelcontextprotocol → @henkey)
-- MCP 不注册的两种情况分类校准(2026-05-18 — 3a 有替代 vs 3b 真缺失)
-- MCP probe 工程化进 self_test_openclaw
-- install_native_mcp_common.go 拆分(1103 行 → 4 文件)
-- MCP 软约束哲学(用户校准)
+最近重点：
 
-读完后改东西心里有数。有疑问 → 翻 commit log 找近半年大改动的 commit message 都写得很详。
+- nacos plan D：自研本地 MCP，运行时 refresh token
+- rabbitmq：MCP 禁用，走 HTTP Management API
+- feishu_project：真禁用，停收凭据
+- postgres：迁移到 `@henkey/postgres-mcp-server`
+- MCP probe 进入 self-test
+- MCP 软约束哲学

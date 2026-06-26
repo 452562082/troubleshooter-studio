@@ -4,324 +4,282 @@
 
 # troubleshooter-studio
 
-**AI 排障机器人工作台** —— 用 yaml 描述微服务系统,工具链产出"装到 OpenClaw / Claude Code / Cursor / Codex CLI"开箱即用的排障机器人。
+AI 排障机器人工作台。用 `troubleshooter.yaml` 描述一个微服务系统，生成可安装到 OpenClaw、Claude Code、Cursor、Codex CLI 的排障机器人。
 
-两层项目:
+## 项目模型
 
-- **上层(此仓库)**:研制环境,做 `troubleshooter.yaml` 建模、仓库扫描、校验、生成、部署、管理
-- **下层(产出物)**:完整可运行的排障机器人 —— skill 集合按 yaml 动态裁剪,固定核心 + 按配置 / 数据层 / 可观测性勾选的 runtime-query + 多环境 MCP + 标准故障话术,脱离 studio 独立运行
-
-## 按角色快速导览
-
-| 你是 | 从这读起 |
+| 层级 | 说明 |
 |---|---|
-| **第一次接触本项目,想跑通** | [下载与安装](#下载与安装) → [两个入口](#两个入口) → [部署到 4 个 AI 平台](#部署到-4-个-ai-平台) |
-| **想知道排障机器人能干什么** | [排障机器人具备什么能力](#排障机器人具备什么能力) → [`docs/troubleshooting-flow.md`](docs/troubleshooting-flow.md) (完整 7 步流程 + 5 维证据表) |
-| **要建模一个新的微服务系统** | [适配的系统架构](#适配的系统架构) → [Monorepo / Umbrella 仓库](#monorepo--umbrella-仓库) → [`examples/shop-troubleshooter.yaml`](examples/shop-troubleshooter.yaml) |
-| **维护本项目代码** | [`docs/decisions.md`](docs/decisions.md)(设计决策记录) → [目录结构](#目录结构) |
-| **运维想集成 CI** | [`docs/CI-RELEASE.md`](docs/CI-RELEASE.md) → [构建](#构建) |
+| 本仓库 | 研制环境：CLI、桌面 app、HTTP server 三入口共享 `internal/`，负责建模、扫描、校验、生成、部署 |
+| 产出物 | 独立运行的排障机器人：skills、MCP、路由表、故障话术，安装后脱离 studio 使用 |
 
-## 目录
+## 从哪里开始
 
-- [两个入口](#两个入口)
-- [部署到 4 个 AI 平台](#部署到-4-个-ai-平台)
-- [下载与安装](#下载与安装)(桌面 app / CLI / 源码)
-- [适配的系统架构](#适配的系统架构)
-- [Monorepo / Umbrella 仓库](#monorepo--umbrella-仓库)
-- [桌面 app 页面](#桌面-app-页面)
-- [CLI 子命令](#cli-子命令)
-- [排障机器人具备什么能力](#排障机器人具备什么能力)
-  - [Nacos 配置访问路径](#nacos-配置访问路径)
-- [Doctor 漂移检测](#doctor-漂移检测)
-- [构建](#构建)
-- [目录结构](#目录结构)
-- [已知限制](#已知限制)
+| 目标 | 入口 |
+|---|---|
+| 第一次跑通 | [下载与安装](#下载与安装) → [入口](#入口) → [部署目标](#部署目标) |
+| 看机器人能力 | [机器人能力](#机器人能力) → [排障链路](docs/troubleshooting-flow.md) |
+| 建模新系统 | [适配范围](#适配范围) → [Monorepo / Umbrella](#monorepo--umbrella) → [示例](examples/shop-troubleshooter.yaml) |
+| 维护代码 | [贡献指南](CONTRIBUTING.md) → [决策记录](docs/decisions.md) |
+| 配 CI / 发版 | [CI / Release](docs/CI-RELEASE.md) |
 
-## 两个入口
+## 入口
 
-| 入口 | 能力 | 适用 |
-|---|---|---|
-| **桌面 app** (Wails) | 完整(建模 / 扫描 / 部署 / 已装管理 / 工作目录浏览) | 个人用,推荐新用户 |
-| **CLI** (`tshoot`) | 完整 yaml 计算 + 装机能力(4 平台齐全) | 脚本 / SSH / CI |
+| 入口 | 用途 |
+|---|---|
+| 桌面 app | 推荐给个人使用；覆盖建模、扫描、部署、已装管理、工作目录浏览 |
+| CLI `tshoot` | 推荐给脚本、SSH、CI；覆盖 yaml 计算和 4 平台安装 |
 
-## 部署到 4 个 AI 平台
+## 部署目标
 
-全程原生 Go,无 bash 依赖。`generation.targets` 勾哪些就出哪些,一次 gen 全产出。
+`generation.targets` 决定安装到哪些平台。
 
-| 平台 | 部署位置 | 进入方式 | MCP 注册位置 |
+| 平台 | 部署位置 | 使用方式 | MCP 配置 |
 |---|---|---|---|
-| **OpenClaw** | `~/.openclaw/workspace/<name>/`(整套 workspace 文件) | OpenClaw 客户端 agent 列表选(装完**重启客户端**才出现) | `~/.openclaw/openclaw.json` 的 `mcp.servers` |
-| **Claude Code** | `~/.claude/agents/<name>.md` + `~/.claude/skills/<name>/` | 任意项目 `@<name>` 调 subagent | `~/.claude.json`(user-scope dotfile,Claude Code CLI 启动强绑死从这里读;`~/.claude/settings.json` 是 hooks/permissions/env 用的、不读 mcpServers) |
-| **Cursor** | `~/.cursor/agents/<name>.md` + `~/.cursor/skills/<name>/` | AI 侧栏选 Custom Agent(MCP 还要去 Settings 启用) | `~/.cursor/mcp.json` 的 `mcpServers` |
-| **Codex CLI** | `~/.codex/agents/<name>.toml`(TOML subagent) + `~/.codex/skills/<name>/` | 终端 `codex` 内主 chat 说 "spawn the `<name>` agent ..."(自然语言派生 subagent thread,完成后回主 chat;[官方文档](https://developers.openai.com/codex/subagents)) | 嵌入 agent toml 内联 `[mcp_servers.*]` 段(每个 subagent 自带,不污染主 chat) |
+| OpenClaw | `~/.openclaw/workspace/<name>/` | 客户端 agent 列表选择，安装后需重启客户端 | `~/.openclaw/openclaw.json` |
+| Claude Code | `~/.claude/agents/<name>.md` + `~/.claude/skills/<name>/` | 项目内 `@<name>` 调 subagent | `~/.claude.json` |
+| Cursor | `~/.cursor/agents/<name>.md` + `~/.cursor/skills/<name>/` | AI 侧栏选 Custom Agent，MCP 需在 Settings 启用 | `~/.cursor/mcp.json` |
+| Codex CLI | `~/.codex/agents/<name>.toml` + `~/.codex/skills/<name>/` | 在 `codex` 中用自然语言派生 subagent | agent toml 内联 `[mcp_servers.*]` |
 
-- **凭证**:OpenClaw 走 `~/.openclaw/<id>-creds.json`,IDE 平台走 `~/.tshoot/<id>-creds.json`
-- **grafana / loki / prometheus / tempo**:统一通过 grafana MCP(`npx -y mcp-grafana-npx`)查询,不独立配置
-- **Codex 沙箱**:需在 `~/.codex/config.toml` 加 `[sandbox_workspace_write] network_access=true`,install 时会探测并打印修复指引
+凭据位置：
+
+- OpenClaw：`~/.openclaw/<id>-creds.json`
+- Claude Code / Cursor / Codex：`~/.tshoot/<id>-creds.json`
+
+Codex 需要网络访问时，安装流程会自动 patch `~/.codex/config.toml` 的 `[sandbox_workspace_write].network_access` 并备份原文件。
 
 ## 下载与安装
 
-> 项目在 GitHub / GitLab 两个仓库镜像同步发布,**每个 Release 同名产物两边都有**,下面任选一个源。
+Release 同步发布到 GitHub 和 GitLab，任选一个源。
 
-### 桌面 app(macOS) — 一行命令(推荐,无 Gatekeeper 弹窗)
+### 桌面 app，macOS 推荐安装
 
 ```bash
-# ── GitLab 源(默认)──
-# 装最新版:
+# GitLab 源，最新版
 curl -fsSL https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
-# 私有 GitLab 项目需 token(Settings → Access Tokens,scope=read_api):
+
+# 私有 GitLab 项目
 export GITLAB_TOKEN=glpat-xxx
 curl -fsSL -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
   https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
 
-# ── GitHub 源(SOURCE=github)──
-# 装最新版:
+# GitHub 源
 curl -fsSL https://raw.githubusercontent.com/452562082/troubleshooter-studio/main/scripts/install.sh | SOURCE=github bash
 
-# ── 装指定版本(两源通用,加 VERSION)──
+# 指定版本
 curl -fsSL https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | VERSION=v0.9.23 bash
 curl -fsSL https://raw.githubusercontent.com/452562082/troubleshooter-studio/main/scripts/install.sh | SOURCE=github VERSION=v0.9.23 bash
 ```
 
-自动从对应源的最新 Release 下 dmg → 装到 `/Applications/` → 启动。`curl/bash/xattr/open` 是 macOS 自带签名工具,不被 Gatekeeper 拦,xattr 清完 quarantine 后 `.app` 直接放行。
-（Releases 页:[GitHub](https://github.com/452562082/troubleshooter-studio/releases) / [GitLab](https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/releases)）
+脚本会下载 dmg、安装到 `/Applications/`、清理 quarantine 并启动应用。Release 页：
 
-### 桌面 app(macOS) — 图形装 dmg
+- [GitHub Releases](https://github.com/452562082/troubleshooter-studio/releases)
+- [GitLab Releases](https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/releases)
 
-1. 从 Releases 页([GitHub](https://github.com/452562082/troubleshooter-studio/releases) / [GitLab](https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/releases))下 `TroubleshooterStudio-vX.Y.Z.dmg.zip`
-2. 双击解压(必须用 macOS 自带 Archive Utility)
-3. 双击 `.dmg` → 拖 `.app` 到 `Applications`
-4. 第一次打开报"**已损坏**"(本应用未做苹果数字签名所致,非真损坏)→ 双击 dmg 里的 `2️⃣ 双击解锁.command`,或命令行 `xattr -d com.apple.quarantine /Applications/TroubleshooterStudio.app`
+### 桌面 app，手动安装 dmg
 
-### CLI(macOS / Linux / Windows)
+1. 下载 `TroubleshooterStudio-vX.Y.Z.dmg.zip`
+2. 用 macOS 自带 Archive Utility 解压
+3. 打开 `.dmg`，把 `.app` 拖到 `Applications`
+4. 首次打开若提示“已损坏”，运行 dmg 内的解锁脚本，或执行：
 
-从 Releases 页([GitHub](https://github.com/452562082/troubleshooter-studio/releases) / [GitLab](https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/releases))按平台下 `tshoot-vX.Y.Z-<os>-<arch>`(Windows 自带 `.exe` 后缀):
+```bash
+xattr -d com.apple.quarantine /Applications/TroubleshooterStudio.app
+```
+
+### CLI
+
+下载 `tshoot-vX.Y.Z-<os>-<arch>`，Windows 版本自带 `.exe`。
 
 ```bash
 # macOS / Linux
 chmod +x tshoot-vX.Y.Z-darwin-arm64
 sudo mv tshoot-vX.Y.Z-darwin-arm64 /usr/local/bin/tshoot
-tshoot --help                       # 看子命令
+tshoot --help
 ```
 
 ```powershell
-# Windows(PowerShell):放到 PATH 里的目录,改名 tshoot.exe
+# Windows PowerShell
 Move-Item tshoot-vX.Y.Z-windows-amd64.exe C:\Users\<you>\bin\tshoot.exe
 tshoot --help
 ```
 
-### 从源码构建
-
-`bin/` 和 `dist/` 都在 `.gitignore`,`git clone` 完得本地构建。
+## 从源码构建
 
 ```bash
-git clone <此仓库> && cd troubleshooter-studio
+git clone <repo> && cd troubleshooter-studio
 ```
 
-#### 桌面 app(macOS)
+桌面 app：
 
 ```bash
-# 装依赖(一行齐):xcode + go + node
-xcode-select --install && brew install go node
-
-# 打 .app bundle 启动,无终端
+xcode-select --install
+brew install go node
 make desktop-app
 open dist/TroubleshooterStudio.app
-# 或装到系统级,Launchpad / Spotlight 直接搜
-cp -R dist/TroubleshooterStudio.app /Applications/
 ```
 
-10 步「创建向导」→ 末步一键部署。
-
-#### CLI(macOS / Linux / Windows)
+CLI：
 
 ```bash
-# 装依赖:Go 1.25+(macOS 上 brew install go 即可;Linux / Windows 用各自包管理器或 https://go.dev/dl/)
-
-make                                                       # CLI:bin/tshoot
-./bin/tshoot demo                                          # 零配置:用内置 examples 走完整流程
-./bin/tshoot init -o troubleshooter.yaml                   # 交互向导生成 yaml
-./bin/tshoot gen -i troubleshooter.yaml -o ./out           # 出 staging 产物
-./bin/tshoot install --path ./out --target openclaw        # 装到本机
+make
+./bin/tshoot demo
+./bin/tshoot init -o troubleshooter.yaml
+./bin/tshoot gen -i troubleshooter.yaml -o ./out
+./bin/tshoot install --path ./out --target openclaw
 ```
 
-模板和示例已 `go:embed` 进二进制,二进制拷到任何位置都能跑。`tshoot --help` 列全部子命令。
+Linux / Windows 当前只支持 CLI。`make wails-gen`、`make icon` 是贡献者任务。
 
-> Linux / Windows 当前**没有桌面 app**(Makefile 没适配 GTK + AppImage),只跑 CLI。
-> `make wails-gen` / `make icon` 是**贡献者才需要**的开发任务,跟首次跑通无关,依赖(Wails CLI / librsvg)平时不用装。
-
-## 适配的系统架构
+## 适配范围
 
 <p align="center">
   <img src="assets/architecture.svg" alt="适配架构" width="900"/>
 </p>
 
-- **角色**:`frontend` / `gateway` / `backend` / `middleware` / `admin` / `mobile` / `common-lib` / `infra` / `docs`
-- **可观测性**:Grafana / Prometheus / Loki / Jaeger / Tempo / ELK / SkyWalking / k8s 运行时(Kuboard)
-- **数据层**(只读):Redis / MongoDB / Elasticsearch / MySQL / PostgreSQL / Kafka / RabbitMQ / ClickHouse
-- **配置源**:Nacos(MCP)/ Apollo / Consul / Kuboard / Kubernetes ConfigMap / 纯环境变量
-- **技术栈**:Go / Java / PHP / Python / Node(React/Vue/Next.js/Nuxt)
+| 类型 | 支持 |
+|---|---|
+| 服务角色 | frontend、gateway、backend、middleware、admin、mobile、common-lib、infra、docs |
+| 可观测性 | Grafana、Prometheus、Loki、Jaeger、Tempo、ELK、SkyWalking、Kuboard/K8s |
+| 数据层 | Redis、MongoDB、Elasticsearch、MySQL、PostgreSQL、Kafka、RabbitMQ、ClickHouse |
+| 配置源 | Nacos、Apollo、Consul、Kuboard、Kubernetes ConfigMap、环境变量 |
+| 技术栈 | Go、Java、PHP、Python、Node/React/Vue/Next.js/Nuxt |
 
-不适用:Serverless / FaaS、单体应用。
+不适用：Serverless / FaaS、单体应用。
 
-## Monorepo / Umbrella 仓库
+## Monorepo / Umbrella
 
-多个独立服务以 git submodule 挂在一个 umbrella 仓库下,各自又是独立仓库。用 `parent_repo` + `parent_path` 描述:
+子服务以 git submodule 挂在 umbrella 仓库下时，用 `parent_repo` + `parent_path` 建模：
 
 ```yaml
 repos:
-  - name: platform               # umbrella 父仓
-    url:  https://git.example.com/org/platform.git
+  - name: platform
+    url: https://git.example.com/org/platform.git
     role: backend
-  - name: payments               # 子模块,服务器上也是独立仓
-    url:  https://git.example.com/org/payments.git
+  - name: payments
+    url: https://git.example.com/org/payments.git
     parent_repo: platform
     parent_path: services/payments
     role: backend
 ```
 
-工作台自动适配:wizard 扫到 `.gitmodules` / workspaces / pom modules 弹一键拆分;部署期路径拼成 `<umbrella>/<parent_path>`;umbrella 子模块强制 local 模式防误改身份;`parent_repo` 自指 / 不存在 / 成环 在 health check 拦下;跨协议 URL(ssh / scp-form / https)视作同仓。
+工作台会按 umbrella pin 的 commit 分析子模块，避免把子模块 main HEAD 当成生产代码。
 
 ## 桌面 app 页面
 
-| 页面 | 做什么 |
+| 页面 | 用途 |
 |---|---|
-| 🏠 首页 | 概览 + 下一步推荐 |
-| 🤖 已装机器人 | 扫本机部署的机器人,诊断 / 编辑 yaml + 预演 + 应用 / 浏览工作目录 / 重新生成 / 卸载 |
-| 🧙 创建向导 | 10 步表单 → `troubleshooter.yaml` → 末步一键部署(草稿存 localStorage) |
-| 📝 YAML 沙盒 | yaml 验证 + 健康检查 + 生成计划干跑 + 产物预览 |
-| 🔍 代码扫描 | 扫代码反推服务名 + 配置中心 + 依赖图 + 数据 schema,差异一键回填 yaml |
-| 📜 日志 | 全工作台过程日志(install / analyze / 系统事件) |
+| 首页 | 概览和下一步建议 |
+| 已装机器人 | 诊断、编辑 yaml、预演、应用、浏览目录、重新生成、卸载 |
+| 创建向导 | 10 步表单生成 `troubleshooter.yaml` 并部署 |
+| YAML 沙盒 | 校验、健康检查、生成计划、产物预览 |
+| 代码扫描 | 反推服务名、配置中心、依赖图、数据 schema |
+| 日志 | install、analyze、系统事件日志 |
 
 ## CLI 子命令
 
 | 命令 | 功能 |
 |---|---|
-| `init` | 交互式向导生成 `troubleshooter.yaml` |
-| `validate` | 校验语法与字段完整性 |
-| `analyze` | 扫代码:抽 service_names + 配置中心 + 依赖图 + 数据 schema |
-| `plan` / `diff` / `watch` | 干跑预览 / 精确 diff / 文件变化重跑 |
+| `init` | 交互生成 `troubleshooter.yaml` |
+| `validate` | 校验 yaml |
+| `analyze` | 扫代码，抽取服务、配置中心、依赖图、schema |
+| `plan` / `diff` / `watch` | 干跑、diff、文件变化重跑 |
 | `gen` | 生成 staging 产物 |
-| `install` / `self-test` / `uninstall` | 装到本机 / openclaw 自检 / 卸载(支持 4 个平台) |
+| `install` / `self-test` / `uninstall` | 安装、自检、卸载 |
 | `discover` | 扫本机已装机器人 |
-| `apply` | 用新 yaml 原地更新已装机器人(模板派生文件按模板覆盖,config-map verified 人工行保留) |
-| `upgrade` | 备份 + 重 gen + diff 一步到位 |
-| `doctor` | 对比声明 vs 代码实态,8 类漂移(支持 `--fix` 行级精确替换) |
+| `apply` | 用新 yaml 原地更新已装机器人 |
+| `upgrade` | 备份、重生成、diff |
+| `doctor` | 声明与代码实态漂移检测，支持 `--fix` |
 | `demo` | 零配置试跑 |
-| `skill new` | 在模板库脚手架新 skill |
+| `skill new` | 新建 skill 模板 |
 
-典型流:
+典型流程：
 
 ```bash
-./bin/tshoot init -o troubleshooter.yaml                                # 交互向导
-./bin/tshoot validate -i troubleshooter.yaml                            # 校验
+./bin/tshoot init -o troubleshooter.yaml
+./bin/tshoot validate -i troubleshooter.yaml
 ./bin/tshoot analyze -i troubleshooter.yaml --repos-root ./repos -o analysis.json
-./bin/tshoot gen -i troubleshooter.yaml --analysis analysis.json        # 生成 staging
-./bin/tshoot install --path dist/<id> --target openclaw         # 装机
+./bin/tshoot gen -i troubleshooter.yaml --analysis analysis.json
+./bin/tshoot install --path dist/<id> --target openclaw
 ```
 
-`--format=json` 给 CI 消费;`tshoot --help` 列全部子命令。
+## 机器人能力
 
-## 排障机器人具备什么能力
+生成的 skill 集合按 yaml 裁剪。真源在 [templates/workspace/skills](templates/workspace/skills)，部署后以产物 `AGENTS.md` 为准。
 
-skill 集合**按 yaml 动态裁剪**,产物的真源在 [`templates/workspace/skills/`](templates/workspace/skills/),部署后看产物里 `AGENTS.md` 知道这台机器实际启用了哪些。
+| 能力 | skill |
+|---|---|
+| 路由 | `routing`：env 到域名、分支、配置、日志 app、MCP、依赖图、schema 的映射 |
+| 主流程 | `incident-investigator`：症状、时间轴、横向、纵向、多向交叉、根因、沉淀 |
+| 最近变更 | `recent-changes`：K8s rollout、配置 history、git log 聚合 |
+| 配置中心 | `config-executor`：Nacos、Apollo、Consul、Kuboard、Kubernetes ConfigMap、环境变量 |
+| 可观测性 | `k8s-runtime-query`、`tracing-query`、`tempo-query`、`skywalking-query`、`elk-log-query` |
+| 数据层 | `redis`、`mongodb`、`es`、`mysql`、`postgresql`、`kafka`、`rabbitmq`、`clickhouse` runtime query |
+| 图表 | `diagram-generator`：Mermaid 转 PNG/SVG |
 
-- **🎯 路由 + 主流程**(始终启用)
-  - `routing` —— env → 域名 / 分支 / 配置 / 日志 app / MCP 名 / 依赖图 / 表 schema 路由,静态查表毫秒返回。Step 1.3 同时 grep `known-errors.yaml`(模板内置)+ `known-errors.local.yaml`(用户排障沉淀,跨升级保留)
-  - `incident-investigator` —— "症状 → 时间轴 → 横向 → 纵向 → 三向交叉 → 根因 → **沉淀**"7 步主流程,confidence=high 时 Step 7 强制把本次 pattern sink 到 `known-errors.local.yaml`,机器人越用越懂
-  - `recent-changes` —— 故障窗口 ±5min K8s rollout / 配置 history / git log 三合一聚合,**配置 12 类 + 代码 5 类危险模式**自动分类(retry/熔断/cache 装饰器删除、SQL 通配前缀添加、async→sync、超时变小、replicas↓ 等)
-
-- **🖼 图表渲染**(勾 Grafana 时启用)
-  - `diagram-generator` —— Mermaid → PNG/SVG(画时间线 / 调用链)
-
-- **⚙️ 配置中心查询**(按 `config_centers` 动态切后端)
-  - `config-executor` —— nacos(自研本地 MCP,运行时自 refresh token;MCP 不可用回落 HTTP 脚本)/ apollo / consul / kuboard / Kubernetes ConfigMap / 纯环境变量;按 namespace/group/dataId 读配置 + 历史 + diff。nacos 支持 1.x / 2.x / 3.x(走 v1 API,3.x 通过兼容层)。详见下方 "Nacos 配置访问路径" 段
-
-- **📊 可观测性**(按 `observability.<x>.enabled` 启用)
-  - `k8s-runtime-query` —— Kuboard v4 HTTP 查 pod / service / deployment / events / logs(只读)
-  - `tracing-query` —— Jaeger 按 trace_id / service / 时间窗查 spans
-  - `tempo-query` —— Tempo(Grafana Labs 追踪后端)按 trace_id / service 查 spans
-  - `skywalking-query` —— SkyWalking 按 trace_id / service / 时间窗查 spans
-  - `elk-log-query` —— ELK(Elasticsearch + Kibana)按 service / 时间 / 关键词 / trace_id 搜日志(Loki 替代 / 共存)
-
-- **🗄 数据层运行时查询**(按 `data_stores[type=X].enabled` 启用,9 种全支持)
-  - `redis-runtime-query` / `mongodb-runtime-query` / `es-runtime-query` / `mysql-runtime-query` / `postgresql-runtime-query` / `kafka-runtime-query` / `rabbitmq-runtime-query` / `clickhouse-runtime-query` —— 运行时按 entity ID 反查;连接串从配置中心动态解析(用户**不**需要重复填一遍)
-
-裁剪规则:yaml 里没启用的能力 → 对应 skill 不生成。`generation.skills_whitelist` 是二次过滤(已启用基础上再剔除)。新增 skill 走 `tshoot skill new <name>`。
-
-🧭 想看完整排障链路(7 步主流程 + 5 维证据表 + 反幻觉护栏 + 设计哲学)→ [`docs/troubleshooting-flow.md`](docs/troubleshooting-flow.md)
-
-### Nacos 配置访问路径
-
-nacos 配置查询自动走本地 MCP 脚本(`nacos_mcp.py`,install 时装到 `~/.tshoot/scripts/`),进程自己用账号密码登录并后台刷新 token,**你不用管 token 过期**。需要 `uv` 在 PATH(`brew install uv`);MCP 起不来时自动回落 HTTP 脚本。
-
-**唯一要注意的坑**:`config_centers.endpoints[].addr` 填 nacos 的 **API 端口**(默认 `:8848`),别填 dashboard / 反代 UI 端口(常见 `:8080`)—— 否则 login API 撞 `No static resource`。
-
-> 实现细节(token 刷新机制 / 方案演进 / 代理处理)见 `internal/agent/install_native_mcp_common.go` 注释与 [`docs/decisions.md`](docs/decisions.md)。
+Nacos 当前走自研本地 MCP：`nacos_mcp.py` 在运行时登录并刷新 token，MCP 不可用时回落 HTTP 脚本。`config_centers.endpoints[].addr` 必须填 API 端口，默认 `:8848`，不要填 dashboard/UI 端口。
 
 ## Doctor 漂移检测
 
-8 种规则:`missing-repo` / `origin-mismatch` / `stack-mismatch` / `service-drift` / `config-center-drift` / `config-center-unused` / `data-store-unused` / `undeclared-env-profile`。每条 issue 带可执行修复建议;机器可处理的走 `--fix` 行级精确替换(其他行 bit-perfect 保留,自动备份到 `troubleshooter.yaml.bak.<ts>`)。
+`tshoot doctor` 检查声明与代码实态不一致：
 
-## 构建
+- `missing-repo`
+- `origin-mismatch`
+- `stack-mismatch`
+- `service-drift`
+- `config-center-drift`
+- `config-center-unused`
+- `data-store-unused`
+- `undeclared-env-profile`
+
+可自动修复的 issue 用 `--fix` 行级替换，并备份到 `troubleshooter.yaml.bak.<ts>`。
+
+## 常用构建命令
 
 ```bash
-make              # CLI:bin/tshoot(等价 go build ./cmd/tshoot)
-make web          # 前端 dist → internal/webui/dist/(go:embed 进二进制)
-make desktop-app  # 桌面 .app bundle:dist/TroubleshooterStudio.app(默认推荐,Finder 双击 / open 启动无终端)
-make desktop-dmg  # 把 .app 打成 .dmg 安装包:dist/TroubleshooterStudio-<ver>.dmg(分发用,用户双击挂载 → 拖到 Applications)
-make desktop      # 桌面裸二进制:bin/tshoot-desktop(开发者用,直接跑会关联 Terminal)
-make release      # 多平台交叉编译 darwin/linux × amd64/arm64 → dist/bin/
-make release-notes       # dry-run,只打印自上次 tag 以来的 changelog(给眼睛 review,不改 git)
-make release-publish     # 对已有 tag 重传 binary 到 GitLab Release(需 GITLAB_TOKEN;CI 自动注入)
-# 正常发版本走 GitLab CI:main 合入自动 release:patch;commit msg 含 [release:minor] / [release:major] 跑对应 job。详见 docs/CI-RELEASE.md
-make test         # go test -race -cover ./...
-make lint         # go vet + gofmt + vue-tsc
-make wails-gen    # 仅在改了 cmd/tshoot-desktop/App 的 method 签名时跑,刷新 web/wailsjs/go/(已入库)
-make icon         # assets/app-icon.svg → cmd/tshoot-desktop/build/appicon.png
-make clean        # 清 bin/ + dist/bin/ + 前端 dist 中间产物
+make                 # CLI: bin/tshoot
+make web             # 前端 dist -> internal/webui/dist/
+make desktop-app     # macOS .app
+make desktop-dmg     # 分发 dmg
+make desktop         # 桌面裸二进制
+make release         # 多平台 CLI 二进制
+make release-notes   # dry-run changelog
+make test            # go test -race -cover ./...
+make lint            # go vet + gofmt + vue-tsc
+make clean           # 清理 bin/ 和 dist/
 ```
 
-`templates/` 和 `examples/` 通过仓库根 `embed.go` 用 `//go:embed` 打进二进制,运行时优先磁盘版本,没有则解压到 `~/.tshoot/templates/`。版本号:`git describe` + `git rev-parse --short HEAD`。
+发版走 CI，见 [docs/CI-RELEASE.md](docs/CI-RELEASE.md)。
 
 ## 目录结构
 
-```
+```text
 cmd/tshoot/             CLI 入口
-cmd/tshoot-desktop/     Wails v2 桌面 app(Wails binding 走 cmd/tshoot-desktop/App)
-api/                    桌面 app 内部 HTTP handler(前端走 /api/* 跟后端通信,不对外暴露)
+cmd/tshoot-desktop/     Wails 桌面 app
+api/                    HTTP handler
 web/                    Vue 3 + Vite 前端
-internal/
-  config/               troubleshooter.yaml schema + 加载校验
-  analyzer/             5 栈 × 6 配置源仓库扫描
-  analyzerpipe/         pipeline 编排 + auto-clone
-  generator/            模板渲染 + config-map snapshot + diff + plan + IDE 三家 agent 原生 prompt
-  discover/             扫 tshoot.json 锚点识别已装机器人
-  agent/                读-改-部署 + 原生 install/self-test/uninstall + IDE / openclaw 共用 MCP / creds 派生
-  deploy/               凭证持久化:WriteEnvFile / ReadEnvFile 把 UI 表单填的凭证写到 <staging>/scripts/.env(0600),下次 import 预填
-  doctor/               漂移检测 + --fix
-  upgrade/              备份 + 重 gen + diff
-  webui/                前端 dist 的 //go:embed 入口
-  cchub/                配置中心客户端 hub(nacos / apollo / consul + 连接池缓存)
-  dsprobe/              数据层连通性测试(redis / mongo / es / mysql / pg / kafka / mq / clickhouse)
-  labelprobe/           Loki labels / values 拉取(给 wizard 标签映射用)
-  openclaw/             OpenClaw 客户端 / CLI 探测
-  aitools/              Claude Code / Cursor / Codex IDE 探测
-  gitclone/             仓库浅克隆(给 analyze --auto-clone)
-  initwizard/           CLI 交互向导
-  mcpcfg/               MCP 配置生成
-  skillscaffold/        `tshoot skill new` 模板脚手架
-  userconfig/           ~/.tshoot/config.json 用户偏好(全局 reposRoot 等)
-  watcher/              文件系统轮询监听(给 tshoot watch)
-templates/              workspace/(机器人模板)
-examples/               troubleshooter.yaml 示例 × 多种架构 + fake-repos
-schema/troubleshooter.schema.yaml
+internal/config/        yaml schema 与校验
+internal/analyzer*/     仓库扫描与分析 pipeline
+internal/generator/     模板渲染、diff、plan、IDE agent 生成
+internal/agent/         install、self-test、uninstall、MCP、creds
+internal/doctor/        漂移检测
+internal/upgrade/       备份、重生成、diff
+internal/cchub/         配置中心客户端
+internal/dsprobe/       数据层连通性探测
+internal/labelprobe/    Loki label 探测
+internal/openclaw/      OpenClaw 探测
+internal/aitools/       Claude Code / Cursor / Codex 探测
+internal/mcpcfg/        MCP 配置生成
+internal/skillscaffold/ skill 脚手架
+templates/              机器人 workspace 模板
+examples/               示例 yaml 与 fake repos
+schema/                 troubleshooter schema
 ```
 
 ## 已知限制
 
-- 桌面 app 没代码签名 / 公证,macOS Gatekeeper 首次拦截 → 见上方 [下载与安装](#下载与安装) 章节
-- 代码扫描精度依赖通用模式识别;**配置驱动 / 注解驱动 / 自定义包装层重的项目**命中率会下降,缺漏部分在桌面 app 编辑器手补即可
-  - 服务调用图(downstream):识别 HTTP / gRPC / 服务发现工厂调用 + Java `@FeignClient` + Python `requests/httpx`;**配置文件驱动**的 RPC 注册需要手补
-  - 数据 schema:识别主流 ORM(GORM / JPA / SQLAlchemy / TypeORM / Mongoose 等);裸 SQL / 冷门 ORM / 自定义命名约定 漏的部分需手补
-  - 各栈识别精度参考:Go 70-80% / Java 60-70% / Python 60% / Node 50%
+- macOS 桌面 app 未签名/公证，首次打开需清 quarantine。
+- 代码扫描依赖模式识别，配置驱动、注解驱动、自定义包装层重的项目需要手补。
+- downstream 识别覆盖 HTTP、gRPC、服务发现工厂、Java `@FeignClient`、Python `requests/httpx`；配置文件驱动 RPC 需要手补。
+- schema 识别覆盖主流 ORM；裸 SQL、冷门 ORM、自定义命名约定需要手补。
+- 识别精度参考：Go 70-80%，Java 60-70%，Python 60%，Node 50%。

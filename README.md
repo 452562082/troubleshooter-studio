@@ -61,6 +61,15 @@
 
 ## 下载与安装
 
+本项目在 GitHub / GitLab 两个仓库镜像同步发布,**每个 Release 都同时发到两边**,任选其一下载:
+
+| 仓库 | Releases 页 |
+|---|---|
+| **GitHub** | <https://github.com/452562082/troubleshooter-studio/releases> |
+| **GitLab** | <https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/releases> |
+
+> 下方一行命令安装脚本(`install.sh`)目前只对接 GitLab;用 GitHub 的走「图形装 dmg」或「CLI」直接从 GitHub Releases 页下产物即可。
+
 ### 桌面 app(macOS) — 一行命令(推荐,无 Gatekeeper 弹窗)
 
 ```bash
@@ -68,7 +77,7 @@
 curl -fsSL https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
 
 # 装指定版本:
-VERSION=v0.9.18 curl -fsSL https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
+VERSION=v0.9.23 curl -fsSL https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
 
 # 私有 GitLab 项目需 token(GitLab → Settings → Access Tokens,scope=read_api):
 export GITLAB_TOKEN=glpat-xxx
@@ -80,14 +89,14 @@ curl -fsSL -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
 
 ### 桌面 app(macOS) — 图形装 dmg
 
-1. 从 [Releases 页](https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/releases)下 `TroubleshooterStudio-vX.Y.Z.dmg.zip`
+1. 从 Releases 页([GitHub](https://github.com/452562082/troubleshooter-studio/releases) / [GitLab](https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/releases))下 `TroubleshooterStudio-vX.Y.Z.dmg.zip`
 2. 双击解压(必须用 macOS 自带 Archive Utility)
 3. 双击 `.dmg` → 拖 `.app` 到 `Applications`
 4. 第一次打开报"**已损坏**"(本应用未做苹果数字签名所致,非真损坏)→ 双击 dmg 里的 `2️⃣ 双击解锁.command`,或命令行 `xattr -d com.apple.quarantine /Applications/TroubleshooterStudio.app`
 
 ### CLI(macOS / Linux / Windows)
 
-从 Release 页按平台下 `tshoot-vX.Y.Z-<os>-<arch>`(Windows 自带 `.exe` 后缀):
+从 Releases 页([GitHub](https://github.com/452562082/troubleshooter-studio/releases) / [GitLab](https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/releases))按平台下 `tshoot-vX.Y.Z-<os>-<arch>`(Windows 自带 `.exe` 后缀):
 
 ```bash
 # macOS / Linux

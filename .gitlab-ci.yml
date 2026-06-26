@@ -217,8 +217,10 @@ desktop:
   # WEB_PRE_BUILT=1 让 Makefile 跳过 web 子任务(已经从 artifact 拿到 internal/webui/dist)
   script:
     - go version
-    - test -d internal/webui/dist && test -f internal/webui/dist/index.html \
-        || { echo "✗ 没拿到 web artifact(internal/webui/dist),需要先跑 web job" >&2; exit 1; }
+    # 注:整条必须**单行写**。YAML plain scalar 多行会把换行折叠成空格,行尾 `\` 续行
+    # 会变成字面量 `\ `(反斜杠+空格)塞进命令,导致 `test ... \ || ...` 里 test 把 `||`
+    # 当二元操作符报 "binary operator expected"(pipeline #1008 desktop job 实测踩坑)。
+    - test -d internal/webui/dist && test -f internal/webui/dist/index.html || { echo "✗ 没拿到 web artifact(internal/webui/dist),需要先跑 web job" >&2; exit 1; }
     - SKIP_WEB_BUILD=1 make desktop-app
     # 校验 .app bundle 三件套(可执行二进制 / Info.plist / icon.icns)
     - test -f dist/TroubleshooterStudio.app/Contents/MacOS/TroubleshooterStudio
@@ -292,7 +294,35 @@ desktop:
     - git config user.email "${GITLAB_USER_EMAIL:-ci@${CI_SERVER_HOST}}"
     # remote URL 改成 oauth2 + GITLAB_TOKEN,git push 才有权限(默认 read-only)
     - git remote set-url origin "https://oauth2:${GITLAB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
-    - git fetch --tags --quiet
+    # tag 可达性恢复(pipeline #1013 release:patch 实测踩坑):
+    #   release.sh 算版本号靠 `git describe --tags`(要 tag 是 HEAD 祖先可达),
+    #   changelog.sh 靠 `git log <lasttag>..HEAD`(要区间 history),两者都需要完整历史。
+    #   本意是上方 GIT_DEPTH:0 给全克隆,但实测 checkout 仍是 depth=1 浅克隆
+    #   (yaml 的 GIT_DEPTH:0 被 project 级 CI/CD 变量 / "Git shallow clone" 设置覆盖,
+    #    二者优先级都高于 .gitlab-ci.yml)→ 老 tag 指向的 commit 不在浅 history → describe 返空
+    #    → release.sh 误判"仓库还没 tag"直接退出。
+    #   用有界 `--deepen` 把分支历史补到足够深(release 频繁,上一 tag 离 HEAD 很近);
+    #   配 `--filter=blob:none` 只拉 commit/tree metadata,避开本 Gitaly 上 `--unshallow`
+    #   全量 blob 协商 11-19min 卡死的老坑(见上方 .release-base variables 注释)。
+    #   非浅克隆(若哪天 GIT_DEPTH:0 真生效)走 else 普通 fetch,不会被 deepen 误截断历史。
+    - |
+      if [ -f "$(git rev-parse --git-dir)/shallow" ]; then
+        echo "[release] 检测到浅克隆,deepen 历史恢复 tag 可达性"
+        git fetch --tags --deepen=2000 --filter=blob:none --quiet 2>/dev/null \
+          || git fetch --tags --deepen=2000 --quiet 2>/dev/null \
+          || git fetch --tags --unshallow --quiet 2>/dev/null \
+          || git fetch --tags --quiet
+      else
+        git fetch --tags --quiet
+      fi
+    # 探活:确认能 describe 出 tag,否则提前给清晰诊断(而非 release.sh 里"没 tag"误导)
+    - |
+      if ! git describe --tags --abbrev=0 >/dev/null 2>&1; then
+        echo "✗ deepen 后仍无可达 tag。请检查 Settings→CI/CD→Variables 是否有 GIT_DEPTH" >&2
+        echo "  或 Settings→CI/CD→General pipelines→Git shallow clone 把它调成 0;" >&2
+        echo "  远端确有 tag(git ls-remote --tags)时才会走到这里。" >&2
+        exit 1
+      fi
 
 release:patch:
   extends: .release-base

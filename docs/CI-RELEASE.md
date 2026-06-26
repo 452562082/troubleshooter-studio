@@ -90,7 +90,8 @@ merge 到 main 时 release 三 job 之一被触发,内部按顺序:
 
 | 现象 | 原因 | 修复 |
 |---|---|---|
-| `❌ 仓库还没 tag,自动 bump 没起点` | 仓库无 vX.Y.Z 严格格式 tag | 本地 `git tag -a v0.1.0 -m initial && git push origin v0.1.0`,再 trigger release |
+| `❌ 仓库还没 tag,自动 bump 没起点`(**远端确有 tag**) | CI 浅克隆(depth=1)致 `git describe --tags` 找不到可达 tag。yaml `GIT_DEPTH:0` 被 project 级 CI/CD 变量 `GIT_DEPTH` / Settings→CI/CD→Git shallow clone 覆盖(优先级高于 `.gitlab-ci.yml`) | `.release-base` before_script 已自动 `--deepen` 补历史兜底(pipeline #1013 修);根治:删掉 project 级 `GIT_DEPTH` 变量 / 把 Git shallow clone 设 `0` |
+| `❌ 仓库还没 tag,自动 bump 没起点`(**远端真无 tag**) | 仓库无 vX.Y.Z 严格格式 tag | 本地 `git tag -a v0.1.0 -m initial && git push origin v0.1.0`,再 trigger release |
 | `❌ 范围内无 commits,空 release 没意义` | 上一 tag 跟当前 HEAD 同一 commit | 先 commit 改动再 bump;或撤上一 tag 重打:`git tag -d <tag> && git push origin --delete <tag>` |
 | `⚠ 上一 tag 已指向当前 HEAD —— 进 publish-only 重试模式` | 上次 publish 阶段失败(通常 macOS runner 超时 / build 中途挂),tag 已 push 但 release 没建 | 自动重试 publish(`make release-publish-github VERSION=<last_tag>`),幂等安全 |
 | `gh: command not found` | 极少数情况 macos-latest 镜像没装 gh | 加一步 `brew install gh`(应该自带,如果没有提 issue 给 actions/runner-images) |

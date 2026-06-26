@@ -143,7 +143,11 @@ func InstallNativeOpenclaw(ctx context.Context, stagingDir string, opts InstallO
 	if err := injectMCPServers(ocData, cfg, get, ocHome); err != nil {
 		return err
 	}
-	if err := writeJSONFile(cfgPath, ocData, 0o644); err != nil {
+	// 0o600:mcp.servers env 段含 injectMCPServers 注入的 plaintext creds(NACOS_PASSWORD /
+	// one2all Bearer token / grafana token / kubeconfig 等),world-readable 0o644 是真 leak ——
+	// 多用户 macOS / Linux 主机上同机其他用户可读生产凭据。跟 IDE 三家(install_native_mcp.go
+	// 的 0o600 加固)对齐;此前漏收紧是 H1 漏洞。
+	if err := writeJSONFile(cfgPath, ocData, 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", cfgPath, err)
 	}
 	log(fmt.Sprintf("[ok] %s 已更新(agents.list + mcp.servers)", cfgPath))

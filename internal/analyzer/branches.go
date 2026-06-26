@@ -2,12 +2,18 @@ package analyzer
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
+
+// gitCmdTimeout 单个 git 子命令硬上限。git 在 NFS 仓库 / 触发 credential-helper 交互
+// 提示时会无限阻塞(读不到 stdin 干等),没有 deadline 会拖死整个 analyze。
+const gitCmdTimeout = 10 * time.Second
 
 // GetRemoteURL 读仓库的 origin remote URL:`git -C <path> remote get-url origin`。
 // 本地模式下 InitPage 用这个反填 repo.url(有 URL 才能写出合法 yaml)。
@@ -20,7 +26,9 @@ func GetRemoteURL(repoPath string) string {
 	if _, err := os.Stat(filepath.Join(repoPath, ".git")); err != nil {
 		return ""
 	}
-	cmd := exec.Command("git", "-C", repoPath, "remote", "get-url", "origin")
+	ctx, cancel := context.WithTimeout(context.Background(), gitCmdTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "remote", "get-url", "origin")
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	if err := cmd.Run(); err != nil {
@@ -45,10 +53,12 @@ func ListBranches(repoPath string) []string {
 	if _, err := os.Stat(filepath.Join(repoPath, ".git")); err != nil {
 		return nil
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), gitCmdTimeout)
+	defer cancel()
 	// 先列 remote 名字,用于过滤 "refs/remotes/<remote>" 本身这种奇怪 ref
 	// (某些 shallow clone + submodule 操作组合会留下裸 refs/remotes/origin)
 	remoteNames := map[string]bool{}
-	remoteCmd := exec.Command("git", "-C", repoPath, "remote")
+	remoteCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "remote")
 	var remoteBuf bytes.Buffer
 	remoteCmd.Stdout = &remoteBuf
 	if err := remoteCmd.Run(); err == nil {
@@ -59,7 +69,7 @@ func ListBranches(repoPath string) []string {
 		}
 	}
 
-	cmd := exec.Command("git", "-C", repoPath, "for-each-ref",
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "for-each-ref",
 		"--format=%(refname:short)",
 		"refs/heads", "refs/remotes")
 	var buf bytes.Buffer

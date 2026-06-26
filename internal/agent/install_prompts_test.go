@@ -163,6 +163,43 @@ func TestDerivePrompts_Observability(t *testing.T) {
 	}
 }
 
+func TestDerivePrompts_ObservabilityK8sRuntimeOne2All(t *testing.T) {
+	cfg := mkCfg("nacos", []string{"dev"})
+	cfg.Infrastructure.Observability.K8sRuntime = config.K8sRuntime{
+		Enabled:  true,
+		Provider: "one2all",
+	}
+
+	got := promptNames(derive(t, cfg))
+	for _, want := range []string{"ONE2ALL_MCP_URL", "ONE2ALL_TOKEN"} {
+		if !contains(got, want) {
+			t.Errorf("k8s_runtime provider=one2all should prompt %s; got=%v", want, got)
+		}
+	}
+}
+
+func TestPrefillCredsFromYAML_ObservabilityK8sRuntimeOne2All(t *testing.T) {
+	cfg := mkCfg("nacos", []string{"dev"})
+	cfg.Infrastructure.Observability.K8sRuntime = config.K8sRuntime{
+		Enabled:  true,
+		Provider: "one2all",
+		Endpoints: []config.ObsEndpoint{{
+			Env:      "dev",
+			URL:      "http://one2all/mcp/hash",
+			APIKey:   "o2a_secret",
+			Username: "ignored",
+		}},
+	}
+
+	got := PrefillCredsFromYAML(cfg)
+	if got["ONE2ALL_MCP_URL"] != "http://one2all/mcp/hash" {
+		t.Fatalf("ONE2ALL_MCP_URL prefill mismatch: %v", got)
+	}
+	if got["ONE2ALL_TOKEN"] != "o2a_secret" {
+		t.Fatalf("ONE2ALL_TOKEN prefill mismatch: %v", got)
+	}
+}
+
 func TestDerivePrompts_Messaging(t *testing.T) {
 	cfg := mkCfg("nacos", []string{"dev"})
 	cfg.Infrastructure.Messaging = []config.Messaging{

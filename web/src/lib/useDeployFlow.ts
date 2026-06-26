@@ -59,6 +59,7 @@ export interface UseDeployFlowDeps {
   DS_TOOL_SPECS: readonly ToolSpecLike[]
   toolKeyFor: (cat: 'obs' | 'ds', tool: string, envID: string, field: string) => string
   isObsFieldHidden: (toolKey: string, envID: string, f: CredField) => boolean
+  displayObsField?: (toolKey: string, envID: string, f: CredField) => CredField
 
   // 部署上下文
   yamlOutput: Ref<string>
@@ -190,12 +191,13 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
       for (const env of deps.environments) {
         if (!env.id) continue
         for (const f of tool.fields) {
+          const field = deps.displayObsField ? deps.displayObsField(tool.key, env.id, f) : f
           // uiOnly(如 auth_mode)不喂 install 凭证;showWhen 命中隐藏的字段也跳过(避免把
           // 用户填过又切换鉴权方式后残留的旧值灌进去)。
-          if (f.uiOnly) continue
+          if (field.uiOnly) continue
           if (deps.isObsFieldHidden(tool.key, env.id, f)) continue
-          const v = (deps.toolInputs[deps.toolKeyFor('obs', tool.key, env.id, f.key)] || '').trim()
-          if (v) creds[f.envVar(env.id)] = v
+          const v = (deps.toolInputs[deps.toolKeyFor('obs', tool.key, env.id, field.key)] || '').trim()
+          if (v) creds[field.envVar(env.id)] = v
         }
       }
     }

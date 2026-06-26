@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  applyParsedYAMLToWizardState,
   isPlaceholder, isLiveString, inferAuthMode, parseEnvironment, parseRepoCore, placeholderName,
 } from './yamlImporter'
 import type { CredField } from './credFields'
@@ -123,5 +124,79 @@ describe('placeholderName', () => {
   })
   it('appends uppercased sourceID with - → _ for non-default', () => {
     expect(placeholderName('CC_ADDR_DEV', 'legacy-nacos')).toBe('CC_ADDR_DEV_LEGACY_NACOS')
+  })
+})
+
+describe('applyParsedYAMLToWizardState observability import', () => {
+  it('restores k8s_runtime one2all cluster_id', async () => {
+    const ctx: any = {
+      system: { id: '', name: '', description: '' },
+      agent: { id: '', name: '', workspace_name: '', model: '' },
+      targetModels: {},
+      environments: [],
+      repos: [],
+      enabledSourceTypes: {},
+      enabledSourceOrder: [],
+      sourceCreds: {},
+      serviceSourceMap: {},
+      ccCredInputs: {},
+      envNamespaces: {},
+      serviceConfigSel: {},
+      serviceConfigGroup: {},
+      ccHubStateByEnv: {},
+      enabledObservability: { k8s_runtime: false },
+      toolInputs: {},
+      obsAccessModeMap: {},
+      grafanaDsUidByObsEnv: {},
+      k8sRuntimeEnvLoc: {},
+      k8sRuntimeSvcMap: {},
+      scannedDS: {},
+      enabledDataStores: {},
+      dsAutoFilled: {},
+      dsScanState: {},
+      ALL_SOURCE_TYPES: ['nacos', 'one2all'],
+      CC_FIELDS_BY_TYPE: {},
+      allServiceNames: ['order-service'],
+      ensureKuboardLoc: () => ({}),
+      ensureOne2AllLoc: () => ({}),
+      getLokiMapping: () => ({ serviceValues: {} }),
+      ccKeyFor: (type: string, envID: string, field: string) => `cc:${type}:${envID}:${field}`,
+      svcKey: (envID: string, svc: string) => `${envID}::${svc}`,
+      scanStateKey: (envID: string, svc: string) => `${envID}::${svc}`,
+      toolKeyFor: (cat: 'obs' | 'ds', tool: string, envID: string, field: string) => `${cat}:${tool}:${envID}:${field}`,
+      obsAccessKey: (obsKey: string, envID: string) => `${obsKey}:${envID}`,
+      obsGrafanaDsKey: (obsKey: string, envID: string) => `${obsKey}::${envID}`,
+      toolSpecByKey: () => undefined,
+      pickBranchForEnv: () => '',
+      getRepoPathsForSystem: async () => ({}),
+      listBranchesForRepo: async () => [],
+      setRepoBranches: () => {},
+    }
+
+    await applyParsedYAMLToWizardState({
+      environments: [{ id: 'dev' }],
+      infrastructure: {
+        config_center: { type: 'nacos' },
+        observability: {
+          k8s_runtime: {
+            enabled: true,
+            provider: 'one2all',
+            service_map: [{
+              env: 'dev',
+              service: 'order-service',
+              cluster_id: '1',
+              namespace: 'default',
+              workload: 'order-service',
+            }],
+          },
+        },
+      },
+    }, ctx)
+
+    expect(ctx.enabledObservability.k8s_runtime).toBe(true)
+    expect(ctx.toolInputs['obs:k8s_runtime:dev:provider']).toBe('one2all')
+    expect(ctx.k8sRuntimeEnvLoc.dev.cluster_id).toBe('1')
+    expect(ctx.k8sRuntimeEnvLoc.dev.namespace).toBe('default')
+    expect(ctx.k8sRuntimeSvcMap['dev::order-service'].workload).toBe('order-service')
   })
 })

@@ -33,7 +33,7 @@ func checkConfigCenter(c *SystemConfig) []HealthIssue {
 
 	// 类型需要 endpoints 但完全空 → error
 	for _, c1 := range cc {
-		if c1.Type == "none" || c1.Type == "env-vars" || c1.Type == "kuboard" {
+		if c1.Type == "none" || c1.Type == "env-vars" || c1.Type == "kuboard" || c1.Type == "one2all" {
 			continue
 		}
 		if len(c1.Endpoints) == 0 {

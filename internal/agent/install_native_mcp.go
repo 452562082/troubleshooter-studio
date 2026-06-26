@@ -433,6 +433,26 @@ func renderCodexMCPSection(servers map[string]any) string {
 			sb.WriteString("url = ")
 			sb.WriteString(generator.TomlString(url))
 			sb.WriteString("\n")
+			// HTTP MCP:type(如 "streamable-http")+ headers
+			if typ, ok := spec["type"].(string); ok && typ != "" {
+				sb.WriteString("type = ")
+				sb.WriteString(generator.TomlString(typ))
+				sb.WriteString("\n")
+			}
+			if hdrs, ok := spec["headers"].(map[string]string); ok && len(hdrs) > 0 {
+				hdrKeys := make([]string, 0, len(hdrs))
+				for k := range hdrs {
+					hdrKeys = append(hdrKeys, k)
+				}
+				sort.Strings(hdrKeys)
+				fmt.Fprintf(&sb, "[%s.headers]\n", header)
+				for _, k := range hdrKeys {
+					sb.WriteString(k)
+					sb.WriteString(" = ")
+					sb.WriteString(generator.TomlString(hdrs[k]))
+					sb.WriteString("\n")
+				}
+			}
 		}
 
 		// env table

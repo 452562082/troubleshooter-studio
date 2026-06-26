@@ -188,6 +188,37 @@ kubectl get configmap <name> -n <namespace> --context <context> -o yaml
 需要：kubectl 已安装且有对应 context 的 RBAC 访问权限。
 {{- end}}
 
+{{- if eq .Infrastructure.PrimaryConfigCenter.Type "one2all"}}
+
+### 当前后端：One2All MCP（ConfigMap / Secret）
+
+本系统通过 one2all-remote MCP server 读取 K8s ConfigMap 和 Secret。
+MCP server 名 = `{{.System.ID}}-one2all`（单一 streamable-http 实例,所有 env 共用）。
+
+读取 ConfigMap（列出命名空间内所有 ConfigMap）：
+- MCP 工具：`platform_list_configmaps(cluster_id, namespace)`
+  {{- range .Infrastructure.Observability.K8sRuntime.ServiceMap}}
+  例：`platform_list_configmaps(cluster_id={{.ClusterID}}, namespace={{.Namespace}})`
+  {{- end}}
+
+读取单个 ConfigMap 内容：
+- MCP 工具：`platform_get_configmap(cluster_id, namespace, name)`
+
+读取 Secret（列出命名空间内所有 Secret,不含值）：
+- MCP 工具：`platform_list_secrets(cluster_id, namespace)`
+
+读取单个 Secret 内容（默认脱敏,reveal_values=true 需 k8s_mutate 权限）：
+- MCP 工具：`platform_get_secret(cluster_id, namespace, name)`
+
+**排障流程**：
+1. `routing` 返回 env + cluster_id + namespace + configmap 名
+2. 调 one2all MCP 的 `platform_get_configmap` 读配置内容
+3. 解析配置文本提取数据层连接串（Redis/Mongo/ES）
+4. 按需调 runtime-query skills
+
+**不需要** Python 脚本或 kubectl。所有操作通过 MCP 工具直接完成。
+{{- end}}
+
 ## 参考文件
 
 {{- if eq .Infrastructure.PrimaryConfigCenter.Type "nacos"}}
@@ -208,6 +239,11 @@ kubectl get configmap <name> -n <namespace> --context <context> -o yaml
 {{- end}}
 {{- if eq .Infrastructure.PrimaryConfigCenter.Type "kubernetes"}}
 - `scripts/resolve_runtime_k8s.py`（kubectl get configmap/secret → 解析连接串）
+{{- end}}
+{{- if eq .Infrastructure.PrimaryConfigCenter.Type "one2all"}}
+- one2all-remote MCP server `{{.System.ID}}-one2all`（streamable-http,40 工具）
+- MCP 工具：`platform_get_configmap` / `platform_list_configmaps`（ConfigMap 读取）
+- MCP 工具：`platform_get_secret` / `platform_list_secrets`（Secret 读取）
 {{- end}}
 
 ## 默认输出

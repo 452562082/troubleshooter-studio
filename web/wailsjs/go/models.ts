@@ -1833,6 +1833,167 @@ export namespace main {
 	        this.suggest_repos_root = source["suggest_repos_root"];
 	    }
 	}
+	export class One2AllNsEntry {
+	    name: string;
+	    configmaps?: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new One2AllNsEntry(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.configmaps = source["configmaps"];
+	    }
+	}
+	export class One2AllClusterEntry {
+	    name: string;
+	    cluster_id: string;
+	    namespaces: One2AllNsEntry[];
+	
+	    static createFrom(source: any = {}) {
+	        return new One2AllClusterEntry(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.cluster_id = source["cluster_id"];
+	        this.namespaces = this.convertValues(source["namespaces"], One2AllNsEntry);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class One2AllConfigMapEntry {
+	    cluster_id: string;
+	    namespace: string;
+	    name: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new One2AllConfigMapEntry(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.cluster_id = source["cluster_id"];
+	        this.namespace = source["namespace"];
+	        this.name = source["name"];
+	    }
+	}
+	export class One2AllConfigMapResult {
+	    cluster_id: string;
+	    namespace: string;
+	    name: string;
+	    content: string;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new One2AllConfigMapResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.cluster_id = source["cluster_id"];
+	        this.namespace = source["namespace"];
+	        this.name = source["name"];
+	        this.content = source["content"];
+	        this.error = source["error"];
+	    }
+	}
+	export class One2AllDeploymentEntry {
+	    name: string;
+	    selector?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new One2AllDeploymentEntry(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.selector = source["selector"];
+	    }
+	}
+	export class One2AllDeployments {
+	    deployments: One2AllDeploymentEntry[];
+	
+	    static createFrom(source: any = {}) {
+	        return new One2AllDeployments(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.deployments = this.convertValues(source["deployments"], One2AllDeploymentEntry);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	export class One2AllResources {
+	    clusters: One2AllClusterEntry[];
+	    notes?: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new One2AllResources(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.clusters = this.convertValues(source["clusters"], One2AllClusterEntry);
+	        this.notes = source["notes"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class OpenClawDetectResult {
 	    ok: boolean;
 	    installed: boolean;

@@ -104,9 +104,14 @@ func (a *Answers) WriteYAML(out io.Writer) error {
 	}
 
 	p("\ninfrastructure:\n")
-	p("  config_center:          # 配置中心：nacos/apollo/consul/env-vars/kuboard/none\n")
+	p("  config_center:          # 配置中心：nacos/apollo/consul/env-vars/kuboard/one2all/none\n")
 	if a.ConfigCenterType == "" || a.ConfigCenterType == "none" {
 		p("    type: none            # 无配置中心；机器人不会尝试解析配置连接串\n")
+	} else if a.ConfigCenterType == "one2all" {
+		p("    type: one2all         # 走 one2all-remote MCP server(streamable-http),读 ConfigMap/Secret\n")
+		p("    # 单一 MCP 实例,不分 env;凭据由 install 阶段写入 MCP headers\n")
+		p("    endpoints:\n")
+		p("      - url: \"{{ONE2ALL_MCP_URL}}\"    # MCP server 完整 URL(含路径 hash)\n")
 	} else {
 		p("    type: %s\n", a.ConfigCenterType)
 		p("    endpoints:            # 每 env 的配置中心地址（{{...}} 会在 install.sh 交互时替换）\n")

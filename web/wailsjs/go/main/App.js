@@ -170,6 +170,18 @@ export function LoadInfraCred(arg1) {
   return window['go']['main']['App']['LoadInfraCred'](arg1);
 }
 
+export function One2AllFetchConfigMaps(arg1, arg2, arg3) {
+  return window['go']['main']['App']['One2AllFetchConfigMaps'](arg1, arg2, arg3);
+}
+
+export function One2AllListDeployments(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['One2AllListDeployments'](arg1, arg2, arg3, arg4);
+}
+
+export function One2AllListResources(arg1, arg2, arg3) {
+  return window['go']['main']['App']['One2AllListResources'](arg1, arg2, arg3);
+}
+
 export function OpenDir(arg1) {
   return window['go']['main']['App']['OpenDir'](arg1);
 }

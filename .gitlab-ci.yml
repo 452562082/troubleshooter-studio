@@ -139,37 +139,39 @@ web:
         - web/package-lock.json
     paths:
       - web/node_modules
-  # runner 是 shell executor,image: node:20 被忽略。host 通过 brew install nvm
-  # 装了 nvm。仓库根 .nvmrc 写 `20`,nvm install(无参数)读 .nvmrc 自动 install + use,
-  # 绕开 host 默认 node 25 的工具链兼容(esbuild postinstall SIGKILL / vitest worker 死锁)。
-  #
-  # NVM_SH 用 brew --prefix nvm 动态拿(brew 安装路径在 Apple Silicon /opt/homebrew/opt/nvm
-  # vs Intel /usr/local/opt/nvm 不一样;手装的 nvm 是 $HOME/.nvm/nvm.sh),写死容易踩坑。
-  # 找不到时显式报错 + 列 brew prefix 实际位置,方便排查。
+  # 双执行器兼容(2026-06:runner 从 macOS shell 切到 docker executor 后,旧的 brew/nvm
+  # 硬假设在 node:20 容器里 `exit 1` —— 容器没 brew、/root/.nvm/nvm.sh 也不存在):
+  #   - docker executor(现状,240-docker-runner):直接跑 `image: node:20`,node 已是 20
+  #     (= .nvmrc),无 brew / 无 nvm → 直接用镜像自带 node。
+  #   - macOS shell executor(历史/兜底):host 默认 node 25,需 nvm 读 .nvmrc 切到 20,
+  #     绕开 esbuild postinstall SIGKILL / vitest worker 死锁。
+  # 策略:能找到 nvm 就用它切 .nvmrc;找不到回落系统 node。两种执行器都能跑,不再硬 exit 1。
   before_script:
-    - export NVM_DIR="$HOME/.nvm"
-    - mkdir -p "$NVM_DIR"
-    - 'NVM_PREFIX="$(brew --prefix nvm 2>/dev/null || true)"'
-    - 'NVM_SH="$NVM_PREFIX/nvm.sh"'
-    - 'echo "[ci] brew --prefix nvm = $NVM_PREFIX"'
-    - 'if [ ! -s "$NVM_SH" ]; then echo "[ci] ERROR: nvm.sh not found at $NVM_SH"; ls -la "$NVM_PREFIX" 2>&1 || true; echo "Trying fallback $HOME/.nvm/nvm.sh ..."; NVM_SH="$HOME/.nvm/nvm.sh"; fi'
-    - 'if [ ! -s "$NVM_SH" ]; then echo "[ci] ERROR: 找不到 nvm.sh,请在 runner 机器(botmaster)装 nvm:brew install nvm 或 curl -o- ... | bash"; exit 1; fi'
-    - 'echo "[ci] sourcing $NVM_SH (set +e during source, see nvm issue #2358)"'
-    # gitlab-runner shell executor 默认 set -e。nvm.sh 内有大量 `[ -n "$VAR" ] && cmd` 这种
-    # short-circuit 模式,变量未设时 `[ ... ]` 返回 1,触发 set -e silently exit 1。
-    # 必须 source 前临时关掉 errexit,source 完再开。否则 source 立即非 0 退出无任何输出。
-    - 'set +e; source "$NVM_SH"; src_rc=$?; set -e; [ $src_rc -ne 0 ] && echo "[ci] WARN: source nvm.sh rc=$src_rc (nvm 函数仍可能已定义,继续)"; true'
-    - 'command -v nvm || { echo "[ci] ERROR: source 完 nvm 命令仍未定义,nvm.sh 损坏或不兼容"; exit 1; }'
-    - 'nvm install'
-    - 'node --version'
+    - |
+      set +e
+      export NVM_DIR="$HOME/.nvm"
+      NVM_SH=""
+      for cand in "$(brew --prefix nvm 2>/dev/null)/nvm.sh" "$HOME/.nvm/nvm.sh" "/usr/local/opt/nvm/nvm.sh" "/opt/homebrew/opt/nvm/nvm.sh"; do
+        if [ -n "$cand" ] && [ "$cand" != "/nvm.sh" ] && [ -s "$cand" ]; then NVM_SH="$cand"; break; fi
+      done
+      if [ -n "$NVM_SH" ]; then
+        echo "[ci] 用 nvm: $NVM_SH → 读 .nvmrc 切 node 版本"
+        # nvm.sh 内大量 `[ -n "$VAR" ] && cmd` short-circuit,未设变量会返 1,
+        # 故全程 set +e(本块末尾不再 set -e,交给后续逐行命令各自判定)。
+        . "$NVM_SH"
+        command -v nvm >/dev/null 2>&1 && { nvm install && nvm use; }
+      else
+        echo "[ci] 未找到 nvm(docker executor 场景),用 node:20 镜像自带 node"
+      fi
+      node --version || { echo "[ci] ERROR: 既无 nvm 也无系统 node,执行器环境异常"; exit 1; }
+      npm --version
   script:
     - cd web
     # --ignore-scripts:跳过 esbuild 的 postinstall (node install.js)。
-    # 背景:runner 是 shell executor (image: node:20 被忽略,实际跑 host node 25.9+),
-    # node 25 上 esbuild ^0.21 的 install.js 会 SIGKILL (pipeline #652 web job 红)。
-    # 现代 esbuild 用 platform-specific 子包 (@esbuild/<os>-<arch>),npm 安装时 npm 自动
-    # 拉对应平台子包,postinstall 只是验证脚本——跳过不影响 vite build / vitest。
-    # 本机实测 npm ci --ignore-scripts + npm test (140 PASS) + npm run build (884ms 全产物) 都正常。
+    # 现代 esbuild 用 platform-specific 子包 (@esbuild/<os>-<arch>),npm 安装时自动拉对应
+    # 平台子包(docker 是 @esbuild/linux-x64,mac 是 darwin-arm64),postinstall 只是验证
+    # 脚本——跳过不影响 vite build / vitest,且在 mac shell executor 的 node 25 上能避开
+    # 旧 esbuild install.js SIGKILL(pipeline #652)。docker node:20 上同样安全。
     - npm ci --prefer-offline --no-audit --no-fund --ignore-scripts
     # vitest: bridge / toast lib 层单测(regression guard)
     - npm test

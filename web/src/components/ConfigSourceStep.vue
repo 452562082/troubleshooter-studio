@@ -38,6 +38,8 @@ import KuboardServiceMap from './KuboardServiceMap.vue'
 import SecondarySourcePanel from './SecondarySourcePanel.vue'
 import CredsShareWarning from './CredsShareWarning.vue'
 
+const DATA_ID_CONFIG_TYPES = new Set(['nacos', 'apollo', 'consul'])
+
 interface SourceCredsEntry { creds: Record<string, Record<string, string>>; rawExtra?: Record<string, unknown> }
 interface CCHubEnvState {
   status: 'idle' | 'loading' | 'ok' | 'error'
@@ -231,7 +233,9 @@ const emit = defineEmits<{
         <!-- 映射块:只有**本 env** 自己预加载成功时才显示。不借其他 env 的扫描结果 ——
              每个 env 必须用自己的凭证各扫一次,才能呈现自己的 namespace / dataId 选项。 -->
         <NamespaceServiceMap
-          v-if="envScanned(env.id) && wizard.allServiceNames.filter(s => getServiceSource(s) === configCenterType).length > 0"
+          v-if="DATA_ID_CONFIG_TYPES.has(configCenterType)
+                && envScanned(env.id)
+                && wizard.allServiceNames.filter(s => getServiceSource(s) === configCenterType).length > 0"
           :env-i-d="env.id"
           :config-center-type="configCenterType"
           :services="wizard.allServiceNames.filter(s => getServiceSource(s) === configCenterType)"
@@ -246,13 +250,16 @@ const emit = defineEmits<{
           @data-id-changed="(_e, svc) => emit('dataIdChanged', env.id, svc)"
         />
         <div
-          v-else-if="envScanned(env.id) && wizard.allServiceNames.length === 0"
+          v-else-if="DATA_ID_CONFIG_TYPES.has(configCenterType)
+                    && envScanned(env.id)
+                    && wizard.allServiceNames.length === 0"
           class="cc-map-block cc-map-hint"
         >
           先在 Step 4 填好 repos 的 <code>service_names</code>,这里才有服务列表可映射。
         </div>
         <div
-          v-else-if="envScanned(env.id)"
+          v-else-if="DATA_ID_CONFIG_TYPES.has(configCenterType)
+                    && envScanned(env.id)"
           class="cc-map-block cc-map-hint"
         >
           没有服务被勾选走 <code>{{ configCenterType }}</code> 源 —— 在上面的"本环境包含的服务"清单里勾要走当前源的服务。

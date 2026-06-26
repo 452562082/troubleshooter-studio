@@ -13,13 +13,14 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/xiaolong/troubleshooter-studio/internal/dsprobe"
 )
 
 // ── 对外类型(Wails 绑定用) ──────────────────────────────────────────
@@ -81,8 +82,10 @@ func one2allMCPCall(mcpURL, token, toolName string, args map[string]any, result 
 
 	client := &http.Client{
 		Timeout: 30 * time.Second,
+		// 带 Bearer token 出站 → 默认校验证书防 MITM 偷 token;内网自签用
+		// TSHOOT_INSECURE_TLS=1 放行(见 dsprobe.TLSConfigForProbe)。
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			TLSClientConfig: dsprobe.TLSConfigForProbe(true),
 		},
 	}
 	resp, err := client.Do(req)

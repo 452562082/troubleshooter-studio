@@ -11,13 +11,14 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/xiaolong/troubleshooter-studio/internal/dsprobe"
 )
 
 type KuboardFetchBatchInput struct {
@@ -64,8 +65,9 @@ func (a *App) KuboardFetchConfigMaps(in KuboardFetchBatchInput) (*KuboardFetchBa
 
 	client := &http.Client{
 		Timeout: 30 * time.Second,
+		// 带 accessKey / 账密出站 → 默认校验证书防 MITM;内网自签 TSHOOT_INSECURE_TLS=1 放行。
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+			TLSClientConfig: dsprobe.TLSConfigForProbe(true),
 		},
 	}
 	ctx, cancel := context.WithTimeout(a.ctx, 120*time.Second)

@@ -323,7 +323,7 @@ routing/config-map.yaml 标 `runtime: <type>-http` 字段告诉 LLM 走脚本。
 - 行为变更:之前自签 + 带鉴权能直接探通的用户,现在需 export 一次环境变量。属有意为之(安全默认优先,逃生口兜底)。
 - 验证:`internal/dsprobe/tls_test.go` 锁定三态(无凭据 skip / 带凭据校验 / opt-in 放行)。
 
-**演进**:`cmd/tshoot-desktop/bindings_{one2all,kuboard}.go` 的 runtime 数据拉取同样发 token + skip TLS,是同一模式但属另一层(运行时查询,非 install 探活),本次未覆盖,可后续按需复用同一 helper。若将来要做"自签证书指纹 pin"而非全放行,可在 helper 里扩展。
+**演进**:`cmd/tshoot-desktop/bindings_{one2all,kuboard,kuboard_configmap}.go` 的 runtime 数据拉取(发 one2all Bearer / kuboard accessKey)同样复用 `dsprobe.TLSConfigForProbe(true)`,行为统一(默认校验 + 同一 opt-in 开关)。`bindings_kuboard_v3_live_test.go` 是手动 live test,保留原 skip 不动。若将来要做"自签证书指纹 pin"而非全放行,可在 helper 里扩展。
 
 ---
 

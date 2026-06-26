@@ -19,7 +19,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,6 +26,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/xiaolong/troubleshooter-studio/internal/dsprobe"
 )
 
 // kuboardUserAgent:给所有 Kuboard 出站请求统一带的 UA,避免 Cloudflare 对默认 Go UA 风控。
@@ -74,8 +75,9 @@ func (a *App) KuboardListResources(kuboardURL, username, password, accessKey, cl
 
 	client := &http.Client{
 		Timeout: 20 * time.Second,
+		// 带 accessKey / 账密出站 → 默认校验证书防 MITM;内网自签 TSHOOT_INSECURE_TLS=1 放行。
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+			TLSClientConfig: dsprobe.TLSConfigForProbe(true),
 		},
 	}
 	ctx, cancel := context.WithTimeout(a.ctx, 60*time.Second)
@@ -344,7 +346,7 @@ func kuboardSetup(ctx context.Context, kbURL, accessKey, username, password, clu
 	}
 	client := &http.Client{
 		Timeout:   30 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, //nolint:gosec
+		Transport: &http.Transport{TLSClientConfig: dsprobe.TLSConfigForProbe(true)}, // 带凭据默认校验;自签 TSHOOT_INSECURE_TLS=1
 	}
 	rctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 

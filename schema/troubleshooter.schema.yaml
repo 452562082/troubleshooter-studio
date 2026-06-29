@@ -75,8 +75,8 @@ infrastructure:
 
   # 5.1 配置源 —— 决定 config-executor skill 使用的后端协议
   config_center:
-    type: nacos                      # [required] nacos / apollo / consul / kuboard / env-vars / none
-    endpoints:                       # [required for nacos/apollo/consul/kuboard] 每环境一套（env-vars 不需要）
+    type: nacos                      # [required] nacos / apollo / consul / kuboard / one2all / env-vars / none
+    endpoints:                       # [required for nacos/apollo/consul/kuboard/one2all] 每环境一套（env-vars 不需要）
       - env: dev
         addr: "{{CONFIG_CENTER_DEV_ADDR}}"
         namespace_hint: "dev"        # [optional] 辅助路由推断

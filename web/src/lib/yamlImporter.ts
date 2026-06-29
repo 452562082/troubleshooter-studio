@@ -23,6 +23,18 @@ export function isLiveString(v: unknown): v is string {
   return typeof v === 'string' && v !== '' && !isPlaceholder(v)
 }
 
+function endpointEnvID(sourceType: string, ep: Record<string, unknown>): string {
+  if (sourceType === 'one2all') return '_shared_'
+  return typeof ep.env === 'string' ? ep.env : ''
+}
+
+function endpointFieldValue(sourceType: string, ep: Record<string, unknown>, fieldKey: string): unknown {
+  if (sourceType === 'one2all' && fieldKey === 'mcp_url') {
+    return ep.mcp_url ?? ep.url
+  }
+  return ep[fieldKey]
+}
+
 /**
  * auth_mode 是 UI-only 字段(不进 yaml),反填时根据 endpoint 实际填了哪类凭证字段反推:
  *   - 有 access_key            → 'access_key'
@@ -299,15 +311,17 @@ export async function applyParsedYAMLToWizardState(
     const fields = ctx.CC_FIELDS_BY_TYPE[t] || []
     if (Array.isArray(s.endpoints)) {
       for (const ep of s.endpoints) {
-        if (!ep || typeof ep.env !== 'string') continue
-        const envCreds: Record<string, string> = ctx.sourceCreds[t].creds[ep.env] || {}
+        if (!ep || typeof ep !== 'object') continue
+        const envID = endpointEnvID(t, ep as Record<string, unknown>)
+        if (!envID) continue
+        const envCreds: Record<string, string> = ctx.sourceCreds[t].creds[envID] || {}
         for (const f of fields) {
-          const v = ep[f.key]
+          const v = endpointFieldValue(t, ep as Record<string, unknown>, f.key)
           if (isLiveString(v)) envCreds[f.key] = v
         }
         const mode = inferAuthMode(fields.find(f => f.key === 'auth_mode'), ep)
         if (mode) envCreds['auth_mode'] = mode
-        if (Object.keys(envCreds).length > 0) ctx.sourceCreds[t].creds[ep.env] = envCreds
+        if (Object.keys(envCreds).length > 0) ctx.sourceCreds[t].creds[envID] = envCreds
       }
     }
     if (t === 'kuboard' && s.service_map && typeof s.service_map === 'object') {
@@ -378,10 +392,11 @@ export async function applyParsedYAMLToWizardState(
   if (Array.isArray(endpoints) && typeof cc === 'string') {
     const fields = ctx.CC_FIELDS_BY_TYPE[cc] || []
     for (const ep of endpoints) {
-      const envID = ep?.env
-      if (!envID || typeof envID !== 'string') continue
+      if (!ep || typeof ep !== 'object') continue
+      const envID = endpointEnvID(cc, ep as Record<string, unknown>)
+      if (!envID) continue
       for (const f of fields) {
-        const v = ep?.[f.key]
+        const v = endpointFieldValue(cc, ep as Record<string, unknown>, f.key)
         if (!isLiveString(v)) continue
         ctx.ccCredInputs[ctx.ccKeyFor(cc, envID, f.key)] = v
       }

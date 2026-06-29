@@ -128,7 +128,7 @@ describe('placeholderName', () => {
 })
 
 describe('applyParsedYAMLToWizardState observability import', () => {
-  it('restores k8s_runtime one2all cluster_id', async () => {
+  function makeImportCtx(overrides: Record<string, unknown> = {}) {
     const ctx: any = {
       system: { id: '', name: '', description: '' },
       agent: { id: '', name: '', workspace_name: '', model: '' },
@@ -158,7 +158,12 @@ describe('applyParsedYAMLToWizardState observability import', () => {
       CC_FIELDS_BY_TYPE: {},
       allServiceNames: ['order-service'],
       ensureKuboardLoc: () => ({}),
-      ensureOne2AllLoc: () => ({}),
+      ensureOne2AllLoc: (envID: string, svc: string) => {
+        const key = `${envID}::${svc}`
+        if (!ctx.one2allSvcMap) ctx.one2allSvcMap = {}
+        if (!ctx.one2allSvcMap[key]) ctx.one2allSvcMap[key] = {}
+        return ctx.one2allSvcMap[key]
+      },
       getLokiMapping: () => ({ serviceValues: {} }),
       ccKeyFor: (type: string, envID: string, field: string) => `cc:${type}:${envID}:${field}`,
       svcKey: (envID: string, svc: string) => `${envID}::${svc}`,
@@ -171,7 +176,54 @@ describe('applyParsedYAMLToWizardState observability import', () => {
       getRepoPathsForSystem: async () => ({}),
       listBranchesForRepo: async () => [],
       setRepoBranches: () => {},
+      ...overrides,
     }
+    return ctx
+  }
+
+  it('restores one2all global endpoint url/token into shared creds and visible inputs', async () => {
+    const ctx = makeImportCtx({
+      CC_FIELDS_BY_TYPE: {
+        one2all: [
+          { key: 'mcp_url', label: 'MCP Server URL', secret: false, envVar: () => 'ONE2ALL_MCP_URL' },
+          { key: 'token', label: 'Bearer Token', secret: true, envVar: () => 'ONE2ALL_TOKEN' },
+        ],
+      },
+    })
+
+    await applyParsedYAMLToWizardState({
+      environments: [{ id: 'dev' }],
+      repos: [{ name: 'order', service_names: ['order-service'] }],
+      infrastructure: {
+        config_center: {
+          type: 'one2all',
+          endpoints: [{ url: 'http://one2all/mcp/hash', token: 'o2a-token' }],
+          service_map: {
+            dev: {
+              'order-service': {
+                cluster_id: '1',
+                namespace: 'default',
+                configmap: 'order-config',
+              },
+            },
+          },
+        },
+      },
+    }, ctx)
+
+    expect(ctx.sourceCreds.one2all.creds._shared_.mcp_url).toBe('http://one2all/mcp/hash')
+    expect(ctx.sourceCreds.one2all.creds._shared_.token).toBe('o2a-token')
+    expect(ctx.ccCredInputs['cc:one2all:_shared_:mcp_url']).toBe('http://one2all/mcp/hash')
+    expect(ctx.ccCredInputs['cc:one2all:_shared_:token']).toBe('o2a-token')
+    expect(ctx.one2allSvcMap['dev::order-service']).toEqual({
+      cluster_id: '1',
+      namespace: 'default',
+      configmap: 'order-config',
+    })
+  })
+
+  it('restores k8s_runtime one2all cluster_id', async () => {
+    const ctx = makeImportCtx()
 
     await applyParsedYAMLToWizardState({
       environments: [{ id: 'dev' }],

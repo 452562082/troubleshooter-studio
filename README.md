@@ -224,6 +224,16 @@ repos:
 | 数据层 | `redis`、`mongodb`、`es`、`mysql`、`postgresql`、`kafka`、`rabbitmq`、`clickhouse` runtime query |
 | 图表 | `diagram-generator`：Mermaid 转 PNG/SVG |
 
+### 排障流程
+
+生成物机器人处理“报错 / 慢 / 不通 / 突增 / 失败”类问题时，会按 7 步证据链推进：
+
+<p align="center">
+  <img src="docs/troubleshooting-journey.png" alt="7步排障旅程图" width="920"/>
+</p>
+
+完整规则见 [排障链路](docs/troubleshooting-flow.md)。
+
 Nacos 当前走自研本地 MCP：`nacos_mcp.py` 在运行时登录并刷新 token，MCP 不可用时回落 HTTP 脚本。`config_centers.endpoints[].addr` 必须填 API 端口，默认 `:8848`，不要填 dashboard/UI 端口。
 
 ## Doctor 漂移检测

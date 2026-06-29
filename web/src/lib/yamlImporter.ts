@@ -286,7 +286,7 @@ export async function applyParsedYAMLToWizardState(
             for (const env of ctx.environments) {
               if (!env.id) continue
               const cur = (r.env_branches[env.id] || '').trim()
-              if (cur && bs.includes(cur)) continue
+              if (cur) continue
               const mapped = ctx.pickBranchForEnv(env, bs)
               if (mapped) r.env_branches[env.id] = mapped
             }

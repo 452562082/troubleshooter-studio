@@ -1,0 +1,188 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1120" viewBox="0 0 1800 1120" role="img" aria-labelledby="title desc">
+  <title id="title">7步排障旅程图</title>
+  <desc id="desc">从用户问题开始,经过收前提、对齐时间轴、横向判断、追下游依赖、多向取证、根因处置、沉淀复用七步,最后输出证据化结论。</desc>
+  <defs>
+    <filter id="softShadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#0f172a" flood-opacity="0.08"/>
+    </filter>
+    <style>
+      .bg { fill: #f8fafc; }
+      .header { fill: #ffffff; stroke: #e2e8f0; stroke-width: 1.2; rx: 24; filter: url(#softShadow); }
+      text { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+      .title { font-size: 48px; font-weight: 800; fill: #0f172a; }
+      .subtitle { font-size: 22px; font-weight: 400; fill: #475569; }
+      .label { font-size: 20px; font-weight: 700; fill: #0f172a; }
+      .small { font-size: 18px; font-weight: 400; fill: #334155; }
+      .tiny { font-size: 16px; font-weight: 400; fill: #64748b; }
+      .section { font-size: 17px; font-weight: 700; fill: #2563eb; letter-spacing: 0.5px; }
+      .step-no { font-size: 24px; font-weight: 800; fill: white; }
+      .step-title { font-size: 22px; font-weight: 700; fill: #0f172a; }
+      .step-body { font-size: 17px; font-weight: 400; fill: #334155; }
+      .card { fill: white; stroke: #cbd5e1; stroke-width: 1.5; rx: 18; filter: url(#softShadow); }
+      .evidence { fill: #eef6ff; stroke: #93c5fd; stroke-width: 1.2; rx: 14; filter: url(#softShadow); }
+      .guard { fill: #fff7ed; stroke: #fdba74; stroke-width: 1.2; rx: 14; filter: url(#softShadow); }
+      .done { fill: #ecfdf5; stroke: #34d399; stroke-width: 1.8; rx: 18; filter: url(#softShadow); }
+      .pill { fill: #eff6ff; stroke: #bfdbfe; stroke-width: 1; rx: 999; }
+      .pill-text { font-size: 16px; font-weight: 700; fill: #2563eb; }
+      .line { stroke: #94a3b8; stroke-width: 3; fill: none; }
+      .line-strong { stroke: #2563eb; stroke-width: 4; fill: none; }
+      .dash { stroke: #94a3b8; stroke-width: 2.2; stroke-dasharray: 8 8; fill: none; }
+      .muted-line { stroke: #cbd5e1; stroke-width: 1.5; fill: none; }
+    </style>
+    <marker id="arrow" markerWidth="14" markerHeight="14" refX="10" refY="7" orient="auto">
+      <path d="M 0 0 L 12 7 L 0 14 z" fill="#64748b"/>
+    </marker>
+    <marker id="blueArrow" markerWidth="14" markerHeight="14" refX="10" refY="7" orient="auto">
+      <path d="M 0 0 L 12 7 L 0 14 z" fill="#2563eb"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1800" height="1120"/>
+
+  <rect class="header" x="70" y="42" width="1660" height="112"/>
+  <text class="title" x="105" y="93">7步排障旅程图</text>
+  <text class="subtitle" x="105" y="129">目标: 每次排障都按同一条证据链推进,让过程可解释、结论可复盘。</text>
+
+  <rect class="pill" x="90" y="184" width="92" height="34"/>
+  <text class="pill-text" x="116" y="207">输入</text>
+  <rect class="card" x="90" y="232" width="310" height="112"/>
+  <text class="label" x="120" y="276">用户问题</text>
+  <text class="small" x="120" y="310">报错 / 慢 / 不通 / 突增 / 失败</text>
+
+  <rect class="pill" x="465" y="184" width="92" height="34"/>
+  <text class="pill-text" x="491" y="207">调度</text>
+  <rect class="guard" x="465" y="232" width="455" height="112"/>
+  <text class="label" x="495" y="276">先走 incident-investigator</text>
+  <text class="small" x="495" y="310">不直接跳日志、链路或数据库,防止漏证据。</text>
+
+  <path class="line" d="M400 288 H465" marker-end="url(#arrow)"/>
+
+  <text class="section" x="90" y="388">排障主线: 7 步从左到右推进</text>
+  <path class="line-strong" d="M150 444 H1640" marker-end="url(#blueArrow)"/>
+
+  <!-- Step cards -->
+  <g transform="translate(80,414)">
+    <g>
+      <circle cx="70" cy="30" r="30" fill="#2563eb"/>
+      <text class="step-no" x="63" y="39">1</text>
+      <rect class="card" x="0" y="80" width="220" height="170"/>
+      <text class="step-title" x="24" y="120">收前提</text>
+      <text class="step-body" x="24" y="154">拿最低上下文</text>
+      <text class="step-body" x="24" y="184">env / service</text>
+      <text class="step-body" x="24" y="214">时间窗 / 现象</text>
+    </g>
+    <g transform="translate(240,0)">
+      <circle cx="70" cy="30" r="30" fill="#2563eb"/>
+      <text class="step-no" x="63" y="39">2</text>
+      <rect class="card" x="0" y="80" width="220" height="170"/>
+      <text class="step-title" x="24" y="120">对齐时间轴</text>
+      <text class="step-body" x="24" y="154">看故障前后</text>
+      <text class="step-body" x="24" y="184">发布 / 配置</text>
+      <text class="step-body" x="24" y="214">代码 / rollout</text>
+    </g>
+    <g transform="translate(480,0)">
+      <circle cx="70" cy="30" r="30" fill="#2563eb"/>
+      <text class="step-no" x="63" y="39">3</text>
+      <rect class="card" x="0" y="80" width="220" height="170"/>
+      <text class="step-title" x="24" y="120">横向判断</text>
+      <text class="step-body" x="24" y="154">单服务?</text>
+      <text class="step-body" x="24" y="184">多服务?</text>
+      <text class="step-body" x="24" y="214">集群面?</text>
+    </g>
+    <g transform="translate(720,0)">
+      <circle cx="70" cy="30" r="30" fill="#2563eb"/>
+      <text class="step-no" x="63" y="39">4</text>
+      <rect class="card" x="0" y="80" width="220" height="170"/>
+      <text class="step-title" x="24" y="120">追下游依赖</text>
+      <text class="step-body" x="24" y="154">读依赖图</text>
+      <text class="step-body" x="24" y="184">判断传导范围</text>
+      <text class="step-body" x="24" y="214">锁定主角</text>
+    </g>
+    <g transform="translate(960,0)">
+      <circle cx="70" cy="30" r="30" fill="#2563eb"/>
+      <text class="step-no" x="63" y="39">5</text>
+      <rect class="card" x="0" y="80" width="220" height="170"/>
+      <text class="step-title" x="24" y="120">多向取证</text>
+      <text class="step-body" x="24" y="154">日志 / 指标</text>
+      <text class="step-body" x="24" y="184">Trace / DB</text>
+      <text class="step-body" x="24" y="214">代码交叉验证</text>
+    </g>
+    <g transform="translate(1200,0)">
+      <circle cx="70" cy="30" r="30" fill="#2563eb"/>
+      <text class="step-no" x="63" y="39">6</text>
+      <rect class="card" x="0" y="80" width="220" height="170"/>
+      <text class="step-title" x="24" y="120">根因与处置</text>
+      <text class="step-body" x="24" y="154">候选差分诊断</text>
+      <text class="step-body" x="24" y="184">确认 / 排除</text>
+      <text class="step-body" x="24" y="214">给最小动作</text>
+    </g>
+    <g transform="translate(1440,0)">
+      <circle cx="70" cy="30" r="30" fill="#2563eb"/>
+      <text class="step-no" x="63" y="39">7</text>
+      <rect class="card" x="0" y="80" width="220" height="170"/>
+      <text class="step-title" x="24" y="120">沉淀复用</text>
+      <text class="step-body" x="24" y="154">高置信才写入</text>
+      <text class="step-body" x="24" y="184">known-errors</text>
+      <text class="step-body" x="24" y="214">下次直接命中</text>
+    </g>
+  </g>
+
+  <!-- Evidence outputs -->
+  <text class="section" x="90" y="735">每步产出: 留下可验证的证据</text>
+  <g transform="translate(80,760)">
+    <rect class="evidence" x="0" y="0" width="220" height="104"/>
+    <text class="small" x="22" y="34">明确问题边界</text>
+    <text class="tiny" x="22" y="66">缺字段只追问一个</text>
+
+    <rect class="evidence" x="240" y="0" width="220" height="104"/>
+    <text class="small" x="262" y="34">变更时间线</text>
+    <text class="tiny" x="262" y="66">优先看 ±5 分钟</text>
+
+    <rect class="evidence" x="480" y="0" width="220" height="104"/>
+    <text class="small" x="502" y="34">影响范围</text>
+    <text class="tiny" x="502" y="66">单点 / 扩散 / 集群</text>
+
+    <rect class="evidence" x="720" y="0" width="220" height="104"/>
+    <text class="small" x="742" y="34">传导路径</text>
+    <text class="tiny" x="742" y="66">下游异常还是自身</text>
+
+    <rect class="evidence" x="960" y="0" width="220" height="104"/>
+    <text class="small" x="982" y="34">证据矩阵</text>
+    <text class="tiny" x="982" y="66">至少 3 个维度</text>
+
+    <rect class="evidence" x="1200" y="0" width="220" height="104"/>
+    <text class="small" x="1222" y="34">根因判断</text>
+    <text class="tiny" x="1222" y="66">supports / refutes</text>
+
+    <rect class="evidence" x="1440" y="0" width="220" height="104"/>
+    <text class="small" x="1462" y="34">可复用经验</text>
+    <text class="tiny" x="1462" y="66">pattern + next_actions</text>
+  </g>
+
+  <!-- vertical connectors between cards and evidence -->
+  <g transform="translate(80,665)">
+    <path class="muted-line" d="M110 0 V85" marker-end="url(#arrow)"/>
+    <path class="muted-line" d="M350 0 V85" marker-end="url(#arrow)"/>
+    <path class="muted-line" d="M590 0 V85" marker-end="url(#arrow)"/>
+    <path class="muted-line" d="M830 0 V85" marker-end="url(#arrow)"/>
+    <path class="muted-line" d="M1070 0 V85" marker-end="url(#arrow)"/>
+    <path class="muted-line" d="M1310 0 V85" marker-end="url(#arrow)"/>
+    <path class="muted-line" d="M1550 0 V85" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- Feedback loop and guardrails -->
+  <rect class="guard" x="170" y="925" width="620" height="128"/>
+  <text class="label" x="205" y="966">关键护栏</text>
+  <text class="small" x="205" y="999">证据缺失不硬凑结论; 低置信度不给生产改动命令。</text>
+  <text class="small" x="205" y="1031">根因未闭环时回到第 5 步补证。</text>
+
+  <path class="dash" d="M1280 865 C1260 910, 1140 925, 1040 880" marker-end="url(#arrow)"/>
+  <text class="tiny" x="1115" y="920">未闭环: 回补证据</text>
+
+  <rect class="done" x="930" y="925" width="670" height="128"/>
+  <text class="label" x="965" y="966">最终交付</text>
+  <text class="small" x="965" y="999">结论 = 根因 + 证据链 + 置信度 + 处置建议</text>
+  <text class="small" x="965" y="1031">可复盘、可复用、可解释。</text>
+
+  <path class="line-strong" d="M1540 864 C1570 890, 1585 912, 1582 936" marker-end="url(#blueArrow)"/>
+</svg>

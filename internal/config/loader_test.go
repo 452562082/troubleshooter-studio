@@ -226,6 +226,40 @@ repos:
 	}
 }
 
+// one2all 是合法配置源:通过 streamable-http MCP 读 ConfigMap/Secret。
+func TestMigrate_One2AllConfigCenterSupported(t *testing.T) {
+	yaml := `
+system: {id: shop, name: Shop}
+agent: {name: a, workspace_name: a, model: m}
+environments:
+  - {id: dev, api_domain: x, is_prod: false}
+generation: {target_host: openclaw}
+meta: {schema_version: "0.1"}
+infrastructure:
+  config_centers:
+    - id: default
+      type: one2all
+      endpoints:
+        - url: http://one2all.example.com/mcp/hash
+          token: "{{ONE2ALL_TOKEN}}"
+      service_map:
+        dev:
+          order-service:
+            cluster_id: "1"
+            namespace: default
+            configmap: order-config
+repos:
+  - {name: order, url: g, role: backend, stack: go, service_names: [order-service], env_branches: {dev: main}, config_source: default}
+`
+	cfg, err := LoadFromBytes([]byte(yaml))
+	if err != nil {
+		t.Fatalf("one2all config center should be valid: %v", err)
+	}
+	if got := cfg.Infrastructure.ConfigCenters[0].Type; got != "one2all" {
+		t.Fatalf("config center type = %q, want one2all", got)
+	}
+}
+
 // 新 schema 多源,但某仓库没显式 config_source 应自动绑到第一个(降级行为)
 func TestMigrate_MultiSourceMissingRefDefaultsFirst(t *testing.T) {
 	yaml := `

@@ -88,6 +88,22 @@ def resolve(endpoints: dict) -> dict:
     else:
         runtime["mysql"] = {"host": "", "port": "", "database": "", "resolved": False}
 
+    # doris
+    doris_addr = endpoints.get("doris", "")
+    if doris_addr:
+        # 支持 host:port 或 doris/mysql JDBC URL；默认 Doris FE query port 9030
+        host, port, db = doris_addr, "9030", ""
+        if "://" in doris_addr:
+            from urllib.parse import urlparse
+            u = urlparse(doris_addr.replace("jdbc:", "").replace("doris://", "mysql://"))
+            host, port, db = u.hostname or host, str(u.port or 9030), u.path.lstrip("/")
+        elif ":" in doris_addr:
+            parts = doris_addr.rsplit(":", 1)
+            host, port = parts[0], parts[1]
+        runtime["doris"] = {"host": host, "port": port, "database": db, "resolved": True}
+    else:
+        runtime["doris"] = {"host": "", "port": "", "database": "", "resolved": False}
+
     # kafka
     kafka_brokers = endpoints.get("kafka", "")
     if kafka_brokers:

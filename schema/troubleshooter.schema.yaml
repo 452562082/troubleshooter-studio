@@ -177,7 +177,7 @@ infrastructure:
   #   - static: 走下方 static_endpoints
   #   - both: 优先 config_center，兜底 static
   data_stores:
-    - type: redis                    # redis / mongodb / elasticsearch / mysql / kafka / ...
+    - type: redis                    # redis / mongodb / elasticsearch / mysql / doris / kafka / ...
       enabled: true
       discovery: from_config_center
       readonly_enforced: true        # 必须 true，生成的 skill 禁止写

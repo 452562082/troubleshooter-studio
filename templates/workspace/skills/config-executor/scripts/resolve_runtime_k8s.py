@@ -120,6 +120,23 @@ def extract_connections(data: dict) -> dict:
     else:
         runtime["mysql"] = {"host": "", "port": "", "database": "", "resolved": False}
 
+    # doris
+    doris = flat.get("DORIS_HOST", flat.get("DORIS_URL", ""))
+    if not doris and flat.get("DB_CONNECTION", "").lower() == "doris":
+        doris = flat.get("DB_HOST", "")
+    if doris:
+        host = doris
+        port = flat.get("DORIS_PORT", "9030")
+        db = flat.get("DORIS_DB", flat.get("DORIS_DATABASE", ""))
+        if not db and flat.get("DB_CONNECTION", "").lower() == "doris":
+            db = flat.get("DB_DATABASE", "")
+        if ":" in doris and "://" not in doris:
+            parts = doris.rsplit(":", 1)
+            host, port = parts[0], parts[1]
+        runtime["doris"] = {"host": host, "port": port, "database": db, "resolved": True}
+    else:
+        runtime["doris"] = {"host": "", "port": "", "database": "", "resolved": False}
+
     # kafka
     kafka = flat.get("KAFKA_BROKERS", flat.get("KAFKA_BOOTSTRAP_SERVERS", flat.get("KAFKA_HOSTS", "")))
     if kafka:

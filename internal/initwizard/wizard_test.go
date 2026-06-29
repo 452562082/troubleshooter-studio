@@ -44,6 +44,7 @@ func TestRun_MinimalAllDefaults(t *testing.T) {
 		"",          // mongodb default y
 		"",          // elasticsearch default y
 		"",          // mysql default n
+		"",          // doris default n
 		"",          // kafka default n
 		"",          // lark default y
 		"",          // lark attachment default y
@@ -99,7 +100,7 @@ func TestRun_FullWithOneRepo(t *testing.T) {
 		// config center
 		"apollo",
 		"", "", "", // grafana/loki/prom default y
-		"", "", "", "", "", // data stores defaults
+		"", "", "", "", "", "", // data stores defaults
 		"n", // lark disabled
 		"",  // feishu project default n
 		"",  // output_dir default
@@ -141,7 +142,7 @@ func TestWriteYAML_ProducesValidTroubleshooterYaml(t *testing.T) {
 		"",
 		"nacos",
 		"", "", "",
-		"", "", "", "", "",
+		"", "", "", "", "", "",
 		"",
 		"",
 		"",
@@ -194,7 +195,7 @@ func TestRun_BadIDReprompts(t *testing.T) {
 		"",         // repos end
 		"none",     // config center
 		"", "", "", // obs defaults
-		"", "", "", "", "", // data stores
+		"", "", "", "", "", "", // data stores
 		"", // lark enabled default
 		"", // lark attachment default
 		"", // feishu default

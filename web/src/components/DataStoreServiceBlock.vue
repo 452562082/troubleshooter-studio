@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // DataStoreServiceBlock —— Step 7 数据层每个 (env, service) 的卡片。
 // 显示:服务名 + 关联 dataId + 扫描状态 + 该服务下识别出的所有数据层组件
-// (redis / mysql / mongodb 等),每个组件 head 带连通性测试按钮,字段表单可编辑。
+// (redis / mysql / doris / mongodb 等),每个组件 head 带连通性测试按钮,字段表单可编辑。
 //
 // 父端(InitPage)负责 reactive 状态 + 探测/删除等副作用,本组件接 props/emits 透出 UI。
 // scannedTypes / dsProbeResults 直接传 reactive 引用 —— v-model 在子组件里写也能正确传播

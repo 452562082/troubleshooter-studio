@@ -14,6 +14,7 @@ var (
 	reJsMongo      = regexp.MustCompile(`(?:mongoose|MongoClient)\.?(?:connect|connection)`)
 	reJsRedis      = regexp.MustCompile(`(?:new\s+(?:Redis|IORedis)|require\s*\(\s*["']ioredis|redis\.createClient)`)
 	reJsSQL        = regexp.MustCompile(`(?:typeorm|prisma|sequelize|mysql2|pg\.Pool)`)
+	reJsDoris      = regexp.MustCompile(`(?i)(?:doris[_-]?fe|jdbc:doris|DORIS_)`)
 	reJsKafka      = regexp.MustCompile(`(?:kafkajs|node-rdkafka)`)
 	reJsES         = regexp.MustCompile(`(?:@elastic/elasticsearch|@opensearch-project)`)
 	reJsRabbitMQ   = regexp.MustCompile(`(?:amqplib|amqp-connection-manager)`)
@@ -54,6 +55,9 @@ func scanNodeDeps(repoPath string, include []string) ([]DownstreamCall, []DataSt
 				t = "postgresql"
 			}
 			usages = append(usages, DataStoreUsage{Type: t, Driver: "node-orm", Callsite: rel})
+		}
+		if reJsDoris.MatchString(text) {
+			usages = append(usages, DataStoreUsage{Type: "doris", Driver: "mysql-protocol", Callsite: rel})
 		}
 		if reJsKafka.MatchString(text) {
 			usages = append(usages, DataStoreUsage{Type: "kafka", Driver: "kafkajs", Callsite: rel})

@@ -18,6 +18,7 @@ var (
 	reJavaSpringMongo = regexp.MustCompile(`@Autowired\s+(?:private\s+)?MongoTemplate`)
 	reJavaSpringKafka = regexp.MustCompile(`@Autowired\s+(?:private\s+)?KafkaTemplate`)
 	reJavaJpa         = regexp.MustCompile(`(?:JpaRepository|CrudRepository|MybatisPlus|@Mapper)`)
+	reJavaDoris       = regexp.MustCompile(`(?i)(?:doris-jdbc|org\.apache\.doris|DorisDataSource|jdbc:doris|doris[_-]?fe)`)
 	reJavaES          = regexp.MustCompile(`(?:ElasticsearchClient|RestHighLevelClient|ElasticsearchOperations)`)
 	// RabbitMQ:RabbitTemplate(spring) / Connection/Channel(amqp-client)
 	reJavaRabbitMQ = regexp.MustCompile(`(?:RabbitTemplate|com\.rabbitmq\.client\.Connection|@RabbitListener)`)
@@ -63,6 +64,9 @@ func scanJavaDeps(repoPath string, include []string) ([]DownstreamCall, []DataSt
 		if reJavaJpa.MatchString(text) {
 			// 缺乏区分 mysql / postgres 的依据,标 sql 让用户自己定
 			usages = append(usages, DataStoreUsage{Type: "mysql", Driver: "jpa/mybatis", Callsite: rel})
+		}
+		if reJavaDoris.MatchString(text) {
+			usages = append(usages, DataStoreUsage{Type: "doris", Driver: "doris-jdbc/mysql-protocol", Callsite: rel})
 		}
 		if reJavaES.MatchString(text) {
 			usages = append(usages, DataStoreUsage{Type: "elasticsearch", Driver: "spring-data-es", Callsite: rel})

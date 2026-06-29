@@ -232,8 +232,8 @@ reposDone:
 
 	// 7) 数据层
 	w.section("7/9 数据层 runtime-query skills")
-	defaults := map[string]bool{"redis": true, "mongodb": true, "elasticsearch": true, "mysql": false, "kafka": false}
-	for _, typ := range []string{"redis", "mongodb", "elasticsearch", "mysql", "kafka"} {
+	defaults := map[string]bool{"redis": true, "mongodb": true, "elasticsearch": true, "mysql": false, "doris": false, "kafka": false}
+	for _, typ := range []string{"redis", "mongodb", "elasticsearch", "mysql", "doris", "kafka"} {
 		def := defaults[typ]
 		if d != nil {
 			if v, ok := d.DataStoresEnabled[typ]; ok {

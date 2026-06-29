@@ -32,7 +32,7 @@ Step 7  沉淀(必做,confidence=high 必跑):pattern 追加到 known-errors.loc
 
 **取证 skill 索引**:
 - 代码:routing 拿到仓库路径后用 `grep` / `glob` / `read`(IDE 自带工具),找类/函数/最近 git diff
-- 数据库:用对应 `<type>-runtime-query` skill(mongodb / mysql / postgresql / redis / es / clickhouse / kafka 等)
+- 数据库:用对应 `<type>-runtime-query` skill(mongodb / mysql / doris / postgresql / redis / es / clickhouse / kafka 等)
 - 链路:`tracing-query`(jaeger 或 tempo 或 skywalking)
 - 日志:`elk-log-query` 或 grafana-loki mcp
 - 指标:grafana-prometheus mcp

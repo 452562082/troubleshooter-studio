@@ -62,7 +62,7 @@ func TestRun_Prefill(t *testing.T) {
 		GrafanaEnabled:       false,
 		LokiEnabled:          false,
 		PrometheusEnabled:    false,
-		DataStoresEnabled:    map[string]bool{"redis": false, "mongodb": false, "elasticsearch": false, "mysql": true, "kafka": true},
+		DataStoresEnabled:    map[string]bool{"redis": false, "mongodb": false, "elasticsearch": false, "mysql": true, "doris": true, "kafka": true},
 		LarkEnabled:          false,
 		LarkAttachment:       false,
 		FeishuProjectEnabled: true,
@@ -76,7 +76,7 @@ func TestRun_Prefill(t *testing.T) {
 	// 4/9 repos: "原样复用？[Y/n]" (1)
 	// 5/9 config center type (1)
 	// 6/9 observability: grafana/loki/prom (3)
-	// 7/9 data stores: redis/mongodb/elasticsearch/mysql/kafka (5)
+	// 7/9 data stores: redis/mongodb/elasticsearch/mysql/doris/kafka (6)
 	// 8/9 lark (1)；不展开 attachment（因为 LarkEnabled=false）
 	// 9/9 feishu (1)
 	// output dir (1)
@@ -88,7 +88,7 @@ func TestRun_Prefill(t *testing.T) {
 		"",         // repos 复用
 		"",         // config center
 		"", "", "", // obs
-		"", "", "", "", "", // data stores
+		"", "", "", "", "", "", // data stores
 		"", // lark
 		"", // feishu
 		"", // output dir
@@ -120,7 +120,7 @@ func TestRun_Prefill(t *testing.T) {
 	if ans.GrafanaEnabled || ans.LokiEnabled || ans.PrometheusEnabled {
 		t.Errorf("observability prefill defaults off expected, got %+v", ans)
 	}
-	if !ans.DataStoresEnabled["mysql"] || ans.DataStoresEnabled["redis"] {
+	if !ans.DataStoresEnabled["mysql"] || !ans.DataStoresEnabled["doris"] || ans.DataStoresEnabled["redis"] {
 		t.Errorf("data-store prefill lost: %+v", ans.DataStoresEnabled)
 	}
 	if ans.LarkEnabled {
@@ -154,7 +154,7 @@ func TestWizard_Snapshot_AfterCompletedRun(t *testing.T) {
 		"",         // repo empty → end
 		"",         // config center
 		"", "", "", // obs
-		"", "", "", "", "", // data stores
+		"", "", "", "", "", "", // data stores
 		"", "", // lark + attachment
 		"", // feishu
 		"", // output dir

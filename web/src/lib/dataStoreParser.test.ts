@@ -21,6 +21,12 @@ mongodb:
   uri: mongodb://mongo:27017/app
 mysql:
   dsn: user:pass@tcp(mysql:3306)/app
+doris:
+  host: doris-fe
+  port: 9030
+  username: doris_user
+  password: doris_pass
+  database: warehouse
 elasticsearch:
   url: http://es:9200
 kafka:
@@ -44,6 +50,7 @@ tasks:
     expect(hits.redis.url).toBe('redis://cache:6379/0')
     expect(hits.mongodb.uri).toBe('mongodb://mongo:27017/app')
     expect(hits.mysql.dsn).toBe('user:pass@tcp(mysql:3306)/app')
+    expect(hits.doris.dsn).toBe('doris_user:doris_pass@tcp(doris-fe:9030)/warehouse')
     expect(hits.elasticsearch.url).toBe('http://es:9200')
     expect(hits.kafka.brokers).toBe('kafka:9092')
   })
@@ -64,5 +71,20 @@ tasks:
     const hits = matchAll(root)
     expect(hits.redis.url).toBe('redis://cache:6379/1')
     expect(hits.mysql.dsn).toBe('user:pass@tcp(mysql:3306)/app')
+  })
+
+  it('recognizes Doris flat env-style ConfigMap keys', () => {
+    const root = parseK8sConfigMapDataContents([
+      JSON.stringify({
+        DB_CONNECTION: 'doris',
+        DB_HOST: 'doris-fe',
+        DB_DATABASE: 'warehouse',
+        DB_USERNAME: 'doris_user',
+        DB_PASSWORD: 'doris_pass',
+      }),
+    ])
+
+    const hits = matchAll(root)
+    expect(hits.doris.dsn).toBe('doris_user:doris_pass@tcp(doris-fe:9030)/warehouse')
   })
 })

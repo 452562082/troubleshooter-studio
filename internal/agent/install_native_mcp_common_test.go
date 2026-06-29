@@ -86,6 +86,7 @@ func TestBuildMCPServers_DataStores(t *testing.T) {
 				{Type: "elasticsearch", Enabled: true},
 				{Type: "redis", Enabled: true},
 				{Type: "mysql", Enabled: true},
+				{Type: "doris", Enabled: true},
 				{Type: "clickhouse", Enabled: true},
 			},
 		},
@@ -98,6 +99,7 @@ func TestBuildMCPServers_DataStores(t *testing.T) {
 		"ES_PASS_DEV":        "espw",
 		"REDIS_URL_DEV":      "redis://default:rpw@r.local:6379/0",
 		"MYSQL_DSN_DEV":      "myu:mypw@tcp(my.local:3307)/orders",
+		"DORIS_DSN_DEV":      "du:dpw@tcp(doris.local:9030)/warehouse",
 		"CLICKHOUSE_URL_DEV": "https://chu:chpw@ch.local:8443/analytics",
 	}
 	get := func(k string) string { return creds[k] }
@@ -107,13 +109,14 @@ func TestBuildMCPServers_DataStores(t *testing.T) {
 		PruneEmpty: true,
 	}, get)
 
-	// ── Key 形态:6 家 + IDE mode 加 AgentID 前缀 ──
+	// ── Key 形态:7 家 + IDE mode 加 AgentID 前缀 ──
 	wantKeys := []string{
 		"bot-mongodb-dev",
 		"bot-postgresql-dev",
 		"bot-elasticsearch-dev",
 		"bot-redis-dev",
 		"bot-mysql-dev",
+		"bot-doris-dev",
 		"bot-clickhouse-dev",
 	}
 	for _, k := range wantKeys {
@@ -167,6 +170,14 @@ func TestBuildMCPServers_DataStores(t *testing.T) {
 		myEnv["MYSQL_USER"] != "myu" || myEnv["MYSQL_PASS"] != "mypw" ||
 		myEnv["MYSQL_DB"] != "orders" {
 		t.Errorf("mysql env mismatch: %v", myEnv)
+	}
+
+	// ── doris:复用 MySQL 协议 MCP,但 key/env var 独立 ──
+	dorisEnv := envOf(servers["bot-doris-dev"])
+	if dorisEnv["MYSQL_HOST"] != "doris.local" || dorisEnv["MYSQL_PORT"] != "9030" ||
+		dorisEnv["MYSQL_USER"] != "du" || dorisEnv["MYSQL_PASS"] != "dpw" ||
+		dorisEnv["MYSQL_DB"] != "warehouse" {
+		t.Errorf("doris env mismatch: %v", dorisEnv)
 	}
 
 	// ── clickhouse:https URL → SECURE=true + 拆字段 ──
@@ -387,6 +398,7 @@ func TestBuildMCPServers_OTelDisabledUniversal(t *testing.T) {
 				{Type: "redis", Enabled: true},
 				{Type: "elasticsearch", Enabled: true},
 				{Type: "mysql", Enabled: true},
+				{Type: "doris", Enabled: true},
 				{Type: "clickhouse", Enabled: true},
 			},
 			Messaging:       []config.Messaging{{Platform: "lark", Enabled: true}},
@@ -406,6 +418,7 @@ func TestBuildMCPServers_OTelDisabledUniversal(t *testing.T) {
 		"REDIS_URL_DEV":      "redis://r/0",
 		"ES_URL_DEV":         "http://e:9200",
 		"MYSQL_DSN_DEV":      "u:p@tcp(m:3306)/d",
+		"DORIS_DSN_DEV":      "u:p@tcp(doris:9030)/dwd",
 		"CLICKHOUSE_URL_DEV": "https://c:8443/d",
 		"LARK_APP_ID":        "app", "LARK_APP_SECRET": "sec",
 		"MCP_USER_TOKEN": "tok",
@@ -648,6 +661,12 @@ func TestBuildMCPServers_DataStores_EndpointsFallback(t *testing.T) {
 					},
 				},
 				{
+					Type: "doris", Enabled: true,
+					Endpoints: []config.DataStoreEndpoint{
+						{Env: "dev", DSN: "du:dp@tcp(10.0.0.8:9030)/warehouse"},
+					},
+				},
+				{
 					Type: "postgresql", Enabled: true,
 					Endpoints: []config.DataStoreEndpoint{
 						{Env: "dev", DSN: "postgres://u:p@10.0.0.5:5432/app"},
@@ -667,8 +686,8 @@ func TestBuildMCPServers_DataStores_EndpointsFallback(t *testing.T) {
 
 	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, emptyGet)
 
-	// 6 家全部应该从 endpoints 派生连接串成功注册
-	for _, k := range []string{"elasticsearch-dev", "mongodb-dev", "redis-dev", "mysql-dev", "postgresql-dev", "clickhouse-dev"} {
+	// 7 家全部应该从 endpoints 派生连接串成功注册
+	for _, k := range []string{"elasticsearch-dev", "mongodb-dev", "redis-dev", "mysql-dev", "doris-dev", "postgresql-dev", "clickhouse-dev"} {
 		if _, ok := servers[k]; !ok {
 			t.Errorf("expected %q registered from endpoints fallback (creds empty), got keys: %v", k, keysOf(servers))
 		}
@@ -681,6 +700,10 @@ func TestBuildMCPServers_DataStores_EndpointsFallback(t *testing.T) {
 	}
 	if envOf(servers["mysql-dev"])["MYSQL_HOST"] != "10.0.0.4" {
 		t.Errorf("mysql endpoints fallback wrong: %v", envOf(servers["mysql-dev"]))
+	}
+	if envOf(servers["doris-dev"])["MYSQL_HOST"] != "10.0.0.8" ||
+		envOf(servers["doris-dev"])["MYSQL_PORT"] != "9030" {
+		t.Errorf("doris endpoints fallback wrong: %v", envOf(servers["doris-dev"]))
 	}
 	if envOf(servers["clickhouse-dev"])["CLICKHOUSE_HOST"] != "10.0.0.6" ||
 		envOf(servers["clickhouse-dev"])["CLICKHOUSE_SECURE"] != "true" {
@@ -973,6 +996,38 @@ func TestBuildMCPServers_DataStores_MySQLPortDefault(t *testing.T) {
 		func(k string) string { return creds[k] })
 	if envOf(servers["mysql-dev"])["MYSQL_PORT"] != "3306" {
 		t.Errorf("expected MYSQL_PORT=3306 default, got %q", envOf(servers["mysql-dev"])["MYSQL_PORT"])
+	}
+}
+
+func TestBuildMCPServers_DataStores_DorisPortDefault(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "dev"}},
+		Infrastructure: config.Infrastructure{
+			DataStores: []config.DataStore{{Type: "doris", Enabled: true}},
+		},
+	}
+	creds := map[string]string{"DORIS_DSN_DEV": "u:p@tcp(doris-fe)/warehouse"}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true},
+		func(k string) string { return creds[k] })
+	if envOf(servers["doris-dev"])["MYSQL_PORT"] != "9030" {
+		t.Errorf("expected Doris MYSQL_PORT=9030 default, got %q", envOf(servers["doris-dev"])["MYSQL_PORT"])
+	}
+}
+
+func TestBuildMCPServers_DataStores_DorisURL(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "dev"}},
+		Infrastructure: config.Infrastructure{
+			DataStores: []config.DataStore{{Type: "doris", Enabled: true}},
+		},
+	}
+	creds := map[string]string{"DORIS_DSN_DEV": "doris://u:p@doris-fe:9031/warehouse"}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true},
+		func(k string) string { return creds[k] })
+	env := envOf(servers["doris-dev"])
+	if env["MYSQL_HOST"] != "doris-fe" || env["MYSQL_PORT"] != "9031" ||
+		env["MYSQL_USER"] != "u" || env["MYSQL_PASS"] != "p" || env["MYSQL_DB"] != "warehouse" {
+		t.Errorf("expected Doris URL parsed into MYSQL_* env, got %v", env)
 	}
 }
 

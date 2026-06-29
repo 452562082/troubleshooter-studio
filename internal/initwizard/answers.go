@@ -34,7 +34,7 @@ type Answers struct {
 	LokiEnabled       bool
 	PrometheusEnabled bool
 
-	DataStoresEnabled map[string]bool // redis/mongodb/elasticsearch/mysql/kafka → bool
+	DataStoresEnabled map[string]bool // redis/mongodb/elasticsearch/mysql/doris/kafka → bool
 
 	LarkEnabled    bool
 	LarkAttachment bool
@@ -146,7 +146,7 @@ func (a *Answers) WriteYAML(out io.Writer) error {
 	p("      via_grafana: %v\n", a.PrometheusEnabled && a.GrafanaEnabled)
 
 	p("  data_stores:            # 启用的数据层：每个会生成对应 runtime-query skill（只读）\n")
-	for _, typ := range []string{"redis", "mongodb", "elasticsearch", "mysql", "kafka"} {
+	for _, typ := range []string{"redis", "mongodb", "elasticsearch", "mysql", "doris", "kafka"} {
 		enabled := a.DataStoresEnabled[typ]
 		p("    - type: %s\n", typ)
 		p("      enabled: %v\n", enabled)
@@ -203,7 +203,7 @@ func (a *Answers) WriteYAML(out io.Writer) error {
 	if a.ConfigCenterType != "" && a.ConfigCenterType != "none" {
 		p("    - config-executor\n")
 	}
-	for _, typ := range []string{"redis", "mongodb", "elasticsearch"} {
+	for _, typ := range []string{"redis", "mongodb", "elasticsearch", "mysql", "doris", "kafka"} {
 		if a.DataStoresEnabled[typ] {
 			alias := typ
 			if typ == "elasticsearch" {

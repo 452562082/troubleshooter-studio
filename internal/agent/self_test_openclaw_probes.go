@@ -106,10 +106,41 @@ func requiredMCPKeys(cfg *config.SystemConfig, agentID string) []string {
 			break
 		}
 	}
+	for _, ds := range cfg.Infrastructure.DataStores {
+		if !ds.Enabled || !dataStoreRegistersMCP(ds.Type) {
+			continue
+		}
+		for _, e := range cfg.Environments {
+			unique := dsEndpointsUnique(ds, e.ID)
+			if len(unique) == 0 {
+				out = append(out, withAgent(mcpKey(ds.Type, "", e.ID)))
+				continue
+			}
+			single := len(unique) <= 1
+			for _, ep := range unique {
+				sourceID := ""
+				if !single {
+					sourceID = ep.sourceID
+				}
+				out = append(out, withAgent(mcpKey(ds.Type, sourceID, e.ID)))
+			}
+		}
+	}
 	// 注:feishu_project 不在 requiredMCPKeys —— 2026-05-15 审计后暂时禁用 mcp 注册
 	// (@lark-project/mcp v0.0.1 是字节内部 prototype),buildFeishuProject 仅打 warn。
 	// yaml 仍合法,字节发正式版后翻 buildFeishuProject 即可重启用,届时这里也补回 FeishuProjectMcp。
 	return out
+}
+
+func dataStoreRegistersMCP(typ string) bool {
+	switch typ {
+	case "mongodb", "postgresql", "elasticsearch", "redis", "mysql", "doris", "clickhouse", "kafka":
+		return true
+	case "rabbitmq":
+		return false // 方案 B:凭据仍收,但 MCP 不注册,SKILL 走 HTTP Management API
+	default:
+		return false
+	}
 }
 
 func hasAgentEntry(root map[string]any, id string) bool {

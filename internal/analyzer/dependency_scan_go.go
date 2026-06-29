@@ -34,6 +34,7 @@ var (
 	reGoMongo        = regexp.MustCompile(`mongo\.(Connect|NewClient)`)
 	reGoRedis        = regexp.MustCompile(`redis\.(NewClient|NewClusterClient|NewFailoverClient)`)
 	reGoSQL          = regexp.MustCompile(`(?:gorm\.Open|sql\.Open)\(\s*(?:mysql\.|postgres\.|"mysql"|"postgres")`)
+	reGoDoris        = regexp.MustCompile(`(?i)(?:apache/doris|doris[_-]?fe|DORIS_)`)
 	reGoKafka        = regexp.MustCompile(`(?:kafka\.New|sarama\.New)`)
 	reGoES           = regexp.MustCompile(`(?:elasticsearch\.NewClient|elastic\.NewClient|opensearch)`)
 	reGoRabbitMQ     = regexp.MustCompile(`(?:amqp\.Dial|streadway/amqp)`)
@@ -109,6 +110,9 @@ func scanGoDeps(repoPath string, include []string) ([]DownstreamCall, []DataStor
 				driver = "postgresql"
 			}
 			usages = append(usages, DataStoreUsage{Type: driver, Driver: "gorm/sql", Callsite: rel})
+		}
+		if reGoDoris.MatchString(text) {
+			usages = append(usages, DataStoreUsage{Type: "doris", Driver: "mysql-protocol", Callsite: rel})
 		}
 		if reGoKafka.MatchString(text) {
 			usages = append(usages, DataStoreUsage{Type: "kafka", Driver: "sarama/kafka-go", Callsite: rel})

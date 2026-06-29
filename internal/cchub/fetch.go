@@ -1,6 +1,6 @@
 // fetch.go —— 拉配置中心某条具体配置的**完整内容**(yaml / properties / json 等原文)。
 // 给 wizard "数据层自动识别" 步骤用:Step 5 用户挑了每个 (env, service) 对应的 dataId,
-// 这里把那些 dataId 的内容拉回来,前端 js-yaml 解析识别 redis / mysql / mongodb 等数据层配置。
+// 这里把那些 dataId 的内容拉回来,前端 js-yaml 解析识别 redis / mysql / doris / mongodb 等数据层配置。
 //
 // 跟 Preload 不一样:Preload 是"列表",Fetch 是"拿单条内容"。各平台拉取实现已按域拆:
 //

@@ -293,7 +293,8 @@ def main() -> None:
     # 不存在就明示 fallback,避免提示一个不存在的 skill 让 agent 空找(P3:旧版 rocketmq 等就是 dangling)。
     data_store_hints = []
     skill_map = {
-        'mysql': 'mysql-runtime-query', 'postgresql': 'postgresql-runtime-query',
+        'mysql': 'mysql-runtime-query', 'doris': 'doris-runtime-query',
+        'postgresql': 'postgresql-runtime-query',
         'redis': 'redis-runtime-query', 'mongodb': 'mongodb-runtime-query',
         'es': 'es-runtime-query', 'elasticsearch': 'es-runtime-query',
         'kafka': 'kafka-runtime-query',

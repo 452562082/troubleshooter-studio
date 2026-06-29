@@ -1,4 +1,4 @@
-// install_native_mcp_data_stores.go —— 数据层 8 家 MCP builder + 总分发。
+// install_native_mcp_data_stores.go —— 数据层 9 家 MCP builder + 总分发。
 // 2026-05-15 从 install_native_mcp_common.go 拆出,纯重构。
 //
 // 调用入口:BuildMCPServers → buildDataStores 分发到具体 build<DS>。
@@ -12,6 +12,7 @@
 //	elasticsearch  npx @elastic/mcp-server-elasticsearch  4 tools(README 写的 esql 上游 v0.3.1 未注册)
 //	redis          npx @gongrzhe/server-redis-mcp@1.0.0   4 tools(无 scan/TTL,需 redis-cli fallback)
 //	mysql          npx @benborla29/mcp-server-mysql       1 tool(单 mysql_query 入口,内部 env 限制写)
+//	doris          npx @benborla29/mcp-server-mysql       1 tool(走 Doris FE MySQL 协议)
 //	clickhouse     uvx mcp-clickhouse                     3 tools(run_query 主用,内置 destructive protection)
 //	kafka          binary kafka-mcp-server (tuannvm)      9 tools(8 读 + 1 produce_message 软约束禁)
 //	rabbitmq       禁用注册(两个 PyPI 候选都 broken,SKILL 走 HTTP Management API 主路径)
@@ -27,7 +28,7 @@ import (
 )
 
 // buildDataStores 数据层 MCP per (data_store_type, env)。wizard 用 DS_TOOL_SPECS 收集每家 +
-// 每环境的连接串 env vars(如 MONGODB_URI_DEV / POSTGRES_DSN_DEV / ES_URL_DEV ...),
+// 每环境的连接串 env vars(如 MONGODB_URI_DEV / POSTGRES_DSN_DEV / DORIS_DSN_DEV / ES_URL_DEV ...),
 // useDeployFlow.buildOpenclawCreds 把这些 env vars 写到 install creds map。
 // 这里读对应 env var,注册成预启动 mcp server,让 AI 能直接 tool_use 调而不用读 SKILL.md
 // 跑 mongosh / psql 这种"AI 不一定会主动跑"的 CLI。
@@ -61,6 +62,8 @@ func (b *mcpBuilder) buildDataStores(servers map[string]any) {
 					b.buildRedis(servers, ep.endpoint, sourceID, e.ID)
 				case "mysql":
 					b.buildMySQL(servers, ep.endpoint, sourceID, e.ID)
+				case "doris":
+					b.buildDoris(servers, ep.endpoint, sourceID, e.ID)
 				case "clickhouse":
 					b.buildClickHouse(servers, ep.endpoint, sourceID, e.ID)
 				case "kafka":
@@ -87,6 +90,8 @@ func (b *mcpBuilder) buildDataStores(servers map[string]any) {
 					b.buildRabbitMQ(servers, nil, "", e.ID)
 				case "mysql":
 					b.buildMySQL(servers, nil, "", e.ID)
+				case "doris":
+					b.buildDoris(servers, nil, "", e.ID)
 				case "clickhouse":
 					b.buildClickHouse(servers, nil, "", e.ID)
 				}
@@ -211,6 +216,41 @@ func (b *mcpBuilder) buildMySQL(servers map[string]any, ep *config.DataStoreEndp
 		port = "3306"
 	}
 	servers[b.keyFor("mysql", sourceID, envID)] = map[string]any{
+		"command": "npx",
+		"args":    []any{"-y", "@benborla29/mcp-server-mysql"},
+		"env": b.envBlock(map[string]any{
+			"MYSQL_HOST": host,
+			"MYSQL_PORT": port,
+			"MYSQL_USER": user,
+			"MYSQL_PASS": pass,
+			"MYSQL_DB":   db,
+		}),
+	}
+}
+
+// buildDoris:Doris FE 对外兼容 MySQL 协议,因此复用 MySQL MCP 包和 DSN 解析。
+// 用户填 go-sql-driver DSN,典型端口为 FE query port 9030:
+//
+//	user:pass@tcp(doris-fe:9030)/warehouse
+func (b *mcpBuilder) buildDoris(servers map[string]any, ep *config.DataStoreEndpoint, sourceID, envID string) {
+	var epDSN string
+	if ep != nil {
+		epDSN = ep.DSN
+	}
+	dsn := firstNonEmpty(b.get(envVar("DORIS_DSN", sourceID, envID)), epDSN)
+	if dsn == "" && b.opts.PruneEmpty {
+		return
+	}
+	var host, port, user, pass, db string
+	if strings.Contains(dsn, "://") {
+		host, port, user, pass, db = parseConnURL(strings.TrimPrefix(dsn, "jdbc:"))
+	} else {
+		host, port, user, pass, db = parseMySQLDSN(dsn)
+	}
+	if port == "" {
+		port = "9030"
+	}
+	servers[b.keyFor("doris", sourceID, envID)] = map[string]any{
 		"command": "npx",
 		"args":    []any{"-y", "@benborla29/mcp-server-mysql"},
 		"env": b.envBlock(map[string]any{

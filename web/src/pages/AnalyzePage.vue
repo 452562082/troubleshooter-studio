@@ -410,7 +410,7 @@ onUnmounted(() => {
           </li>
           <li>
             <strong>🗄️ 数据层 + 业务表 schema</strong>
-            <span>—— redis / mongodb / mysql / kafka / es / clickhouse 等客户端构造 + 主流 ORM(GORM / JPA / SQLAlchemy / TypeORM 等)抽出表 / collection / cache prefix,写进 data-schema-map</span>
+            <span>—— redis / mongodb / mysql / doris / kafka / es / clickhouse 等客户端构造 + 主流 ORM(GORM / JPA / SQLAlchemy / TypeORM 等)抽出表 / collection / cache prefix,写进 data-schema-map</span>
           </li>
           <li>
             <strong>📊 差异对比</strong>

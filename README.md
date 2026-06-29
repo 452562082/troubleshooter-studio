@@ -221,7 +221,7 @@ repos:
 | 最近变更 | `recent-changes`：K8s rollout、配置 history、git log 聚合 |
 | 配置中心 | `config-executor`：Nacos、Apollo、Consul、Kuboard、Kubernetes ConfigMap、环境变量 |
 | 可观测性 | `k8s-runtime-query`、`tracing-query`、`tempo-query`、`skywalking-query`、`elk-log-query` |
-| 数据层 | `redis`、`mongodb`、`es`、`mysql`、`postgresql`、`kafka`、`rabbitmq`、`clickhouse` runtime query |
+| 数据层 | `redis`、`mongodb`、`es`、`mysql`、`doris`、`postgresql`、`kafka`、`rabbitmq`、`clickhouse` runtime query |
 | 图表 | `diagram-generator`：Mermaid 转 PNG/SVG |
 
 ### 排障流程

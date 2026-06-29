@@ -37,6 +37,7 @@ var knownSkills = map[string]bool{
 	"k8s-runtime-query":        true,
 	"redis-runtime-query":      true,
 	"mysql-runtime-query":      true,
+	"doris-runtime-query":      true,
 	"mongodb-runtime-query":    true,
 	"es-runtime-query":         true,
 	"postgresql-runtime-query": true,

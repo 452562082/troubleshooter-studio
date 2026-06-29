@@ -99,6 +99,10 @@ infrastructure:
       enabled: true
       discovery: from_config_center
       readonly_enforced: true
+    - type: doris
+      enabled: true
+      discovery: from_config_center
+      readonly_enforced: true
     - type: redis
       enabled: true
       discovery: from_config_center
@@ -110,6 +114,7 @@ generation:
     - routing
     - config-executor
     - mysql-runtime-query
+    - doris-runtime-query
     - redis-runtime-query
     - tracing-query
     - elk-log-query

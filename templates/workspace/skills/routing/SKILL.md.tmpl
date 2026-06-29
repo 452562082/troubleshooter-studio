@@ -121,7 +121,7 @@ grep -E "<error pattern>" references/known-errors.yaml references/known-errors.l
 
 ### 6. 数据层 MCP 多 cluster:必须查 service → source 映射
 
-调数据层 MCP(mongodb / mysql / postgresql / redis / elasticsearch / clickhouse) 前先**列工具看注册了几个 source**:
+调数据层 MCP(mongodb / mysql / doris / postgresql / redis / elasticsearch / clickhouse) 前先**列工具看注册了几个 source**:
 
 - 只 1 个 `<type>-<env>` → 直接调那个,不查映射表
 - 注册了多个 `<type>-<source>-<env>` → **必须查 `service-to-datastore-source.yaml`** 找 service 对应的 source 段,然后只调 `<type>-<service-mapped-source>-<env>`

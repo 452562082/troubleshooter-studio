@@ -72,6 +72,7 @@ func readmeSkillsSection(ctx *Context) string {
 		"mongodb-runtime-query":    "MongoDB query / aggregate / count（只读）",
 		"es-runtime-query":         "Elasticsearch _search（只读）",
 		"mysql-runtime-query":      "MySQL 只读 SELECT（数据一致性 / 慢查询）",
+		"doris-runtime-query":      "Doris 数仓只读 SQL（分区 / 慢查询 / 明细核对）",
 		"postgresql-runtime-query": "PostgreSQL 只读查询（pg_stat / 连接数 / 表大小）",
 		"kafka-runtime-query":      "Kafka topic / 消费积压 / 死信",
 		"rabbitmq-runtime-query":   "RabbitMQ queue / exchange / 消息数",

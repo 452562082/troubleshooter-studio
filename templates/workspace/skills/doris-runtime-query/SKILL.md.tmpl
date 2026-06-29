@@ -1,0 +1,89 @@
+---
+name: doris-runtime-query
+description: 通过环境动态查询 Apache Doris 数仓数据。先通过 routing 获取环境映射，优先用预注册的 doris-<env> mcp tool 直查（已绑好 FE host/port/auth/db）；mcp 不可用时 fallback mysql CLI / Python pymysql，执行只读 SELECT 查询。
+---
+
+# Doris Runtime Query
+
+## 执行流程（固定）
+
+1. 先确认目标环境与服务；环境映射统一通过 `routing` 获取。
+{{- if or (eq .Infrastructure.PrimaryConfigCenter.Type "nacos") (eq .Infrastructure.PrimaryConfigCenter.Type "apollo") (eq .Infrastructure.PrimaryConfigCenter.Type "consul")}}
+2. 通过配置中心获取该环境配置文本。
+{{- else if eq .Infrastructure.PrimaryConfigCenter.Type "env-vars"}}
+2. 通过 `resolve_runtime_static.py --agent-id {{.AgentID}} --env <env>` 读取静态连接信息。
+{{- else if eq .Infrastructure.PrimaryConfigCenter.Type "kubernetes"}}
+2. 通过 `resolve_runtime_k8s.py --agent-id {{.AgentID}} --env <env>` 从 K8s ConfigMap/Secret 解析连接信息。
+{{- end}}
+3. 解析配置中的 Doris FE 连接信息（host/port/database/user/password 或 DSN）。默认端口按 FE query port `9030`。
+4. **工具选用顺序**：
+   - **优先 mcp tool**:本系统按 DSN dedup 在每个 env 注册 doris MCP（底层复用 MySQL 协议 MCP）。**列工具看注册了几个 source**:
+     - 只 1 个 `doris-<env>`(单 cluster,典型)→ 直接 `tool_use` 调那个。
+     - 多个 `doris-<source>-<env>`(多 cluster)→ **必须查 routing 的 `references/service-to-datastore-source.yaml`** 拿 `service_routing.data_stores.doris.<service>` 对应 source,只调 `doris-<对应 source>-<env>`,**禁止瞎选**。
+   - **mcp 不可用** → fallback **mysql CLI**（Doris FE 兼容 MySQL wire protocol）。
+   - **CLI 也没装** → fallback **Python pymysql**。
+5. 执行查询并返回证据：表名、SQL、命中行数、关键字段样例。
+
+## 调用模板
+
+**主路径:mcp tool**(已预注册,首选)
+
+```text
+查 mcp tools 列表 → 找名字含 `doris-<env>` 的工具。当前注册使用 @benborla29/mcp-server-mysql:
+  mysql_query  — 单一 SQL 执行入口
+
+软约束(SKILL 强制 — 排障禁调):
+  排障场景下 mysql_query 只传 SELECT / SHOW / EXPLAIN / DESCRIBE。
+  禁传 INSERT / UPDATE / DELETE / DROP / TRUNCATE / CREATE / ALTER / LOAD / CANCEL 等写 / DDL / 导入控制语句。
+  install 没传硬禁写 flag,靠 SKILL 文档约束。LLM 误传写 SQL 视为越权,立刻 abort 并告知用户。
+
+连接串已 bake,只传 SQL,不需手动 host/port/user/pass/db。建议每条明细 SQL 自带 `LIMIT N` 防大表扫描。
+```
+
+**fallback 1:mysql CLI(只读)**
+
+```bash
+mysql -h "$DORIS_HOST" -P "${DORIS_PORT:-9030}" -u "$DORIS_USER" -p"$DORIS_PASS" \
+      -D "$DORIS_DB" --batch --raw \
+      -e "SELECT order_id, status, amount FROM dwd_orders WHERE dt=CURRENT_DATE LIMIT 20"
+
+mysql -h "$DORIS_HOST" -P "${DORIS_PORT:-9030}" -u "$DORIS_USER" -p"$DORIS_PASS" \
+      -D "$DORIS_DB" -N \
+      -e "SELECT COUNT(*) FROM dwd_orders WHERE dt=CURRENT_DATE"
+```
+
+**fallback 2:Python pymysql**(mysql cli 也没装时)
+
+```bash
+python3 -c '
+import os, pymysql, json
+c = pymysql.connect(host=os.environ["DORIS_HOST"], port=int(os.environ.get("DORIS_PORT", "9030")),
+                    user=os.environ["DORIS_USER"], password=os.environ["DORIS_PASS"],
+                    database=os.environ["DORIS_DB"])
+with c.cursor() as cur:
+    cur.execute("SELECT order_id, status FROM dwd_orders WHERE dt=CURRENT_DATE LIMIT 20")
+    print(json.dumps(cur.fetchall(), default=str))
+'
+```
+
+## 输出要求
+
+- 先结论：是否命中异常（是/否）
+- 再证据：表名 + SQL + 命中行数 + 关键字段
+- 最后归因：数据同步问题 / 明细数据问题 / 分区缺失 / 查询性能问题
+
+## 硬约束
+
+- 仅只读查询；禁止写入、DDL、导入、删除、取消任务。
+- 不直接猜测地址；必须来自 routing / config-executor 的解析结果或预注册 MCP。
+- 涉及敏感数据时做脱敏处理（手机号/身份证/密码字段）。
+- 默认先查分区和时间窗口，避免无条件扫全表。
+
+## 自检示例
+
+用户问形如"`<env> 环境 Doris 里 <指标/订单/明细> 是否正常`"时，按上面的"执行流程"走一遍。
+
+**基础检查**（每次回复必带）：
+- 明确列出走了哪些步骤，不要只给最终答案
+- 每条结果附来源：env + FE 地址前缀脱敏
+- 对大表查询必须附 `LIMIT` 或明确限定分区 / 时间范围

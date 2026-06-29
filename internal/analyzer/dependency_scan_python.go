@@ -14,6 +14,7 @@ var (
 	rePyMongo      = regexp.MustCompile(`(?:pymongo|motor)\.\w+`)
 	rePyRedis      = regexp.MustCompile(`redis\.(?:Redis|StrictRedis|ConnectionPool|Sentinel|RedisCluster)`)
 	rePySQL        = regexp.MustCompile(`(?:sqlalchemy|peewee|tortoise|databases\.Database|psycopg|pymysql)`)
+	rePyDoris      = regexp.MustCompile(`(?i)(?:doris[_-]?fe|jdbc:doris|DORIS_)`)
 	rePyKafka      = regexp.MustCompile(`(?:kafka-python|confluent_kafka|aiokafka)`)
 	rePyES         = regexp.MustCompile(`(?:elasticsearch|opensearchpy)\.`)
 	rePyRabbitMQ   = regexp.MustCompile(`(?:pika\.|aio_pika|kombu\.)`)
@@ -59,6 +60,9 @@ func scanPythonDeps(repoPath string, include []string) ([]DownstreamCall, []Data
 				driver = "sqlalchemy"
 			}
 			usages = append(usages, DataStoreUsage{Type: t, Driver: driver, Callsite: rel})
+		}
+		if rePyDoris.MatchString(text) {
+			usages = append(usages, DataStoreUsage{Type: "doris", Driver: "mysql-protocol", Callsite: rel})
 		}
 		if rePyKafka.MatchString(text) {
 			usages = append(usages, DataStoreUsage{Type: "kafka", Driver: "kafka-python", Callsite: rel})

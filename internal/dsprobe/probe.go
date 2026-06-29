@@ -8,6 +8,7 @@
 //
 //	redis         → probe_redis.go      go-redis Client.Ping(ctx)              (含 AUTH)
 //	mysql         → probe_mysql.go      database/sql + go-sql-driver/mysql .Ping()
+//	doris         → probe_mysql.go      复用 MySQL 协议 Ping(),默认端口 9030
 //	postgresql    → probe_postgres.go   database/sql + lib/pq .Ping()
 //	mongodb       → probe_mongo.go      mongo-driver Connect + Ping()         (含 SCRAM auth)
 //	elasticsearch → probe_es.go         HTTP GET / + basic auth
@@ -87,6 +88,8 @@ func probe(req Request) (bool, string, error) {
 		return probeMongoDB(req.Fields)
 	case "mysql":
 		return probeMySQL(req.Fields)
+	case "doris":
+		return probeDoris(req.Fields)
 	case "postgresql":
 		return probePostgres(req.Fields)
 	case "elasticsearch":

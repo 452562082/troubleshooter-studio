@@ -70,6 +70,7 @@ import { useSourceTypeReset } from '../lib/useSourceTypeReset'
 import { useK8sRtAutoPick } from '../lib/useK8sRtAutoPick'
 import { one2allListDeployments, one2allListResources } from '../lib/bridge/one2all'
 import type { One2AllClusterEntry as O2ACluster } from '../lib/bridge/one2all'
+import { one2allPreloadOptionsForPurpose, type One2AllPreloadOptions, type One2AllPreloadPurpose } from '../lib/one2allPreload'
 
 const router = useRouter()
 
@@ -1107,7 +1108,7 @@ async function runK8sRtPreload(envID: string) {
   const rtProvider = (toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'provider')] || '').trim() || 'kuboard'
   if (rtProvider === 'one2all') {
     if (!k8sRuntimeEnvLoc[envID]) k8sRuntimeEnvLoc[envID] = { cluster: '', cluster_id: '', namespace: '' }
-    await runOne2AllPreload(envID)
+    await runOne2AllPreload(envID, 'k8s_runtime')
     return
   }
   if (!isDesktop()) {
@@ -1705,14 +1706,18 @@ function one2allCredsFor(envID: string): { mcpURL: string; token: string } {
   return { mcpURL, token }
 }
 
-async function runOne2AllPreload(envID: string) {
+async function runOne2AllPreload(
+  envID: string,
+  purpose: One2AllPreloadPurpose = 'config_source',
+  options: One2AllPreloadOptions = one2allPreloadOptionsForPurpose(purpose),
+) {
   if (!isDesktop()) { toast.error('one2all 预加载仅桌面 app 支持'); return }
   const { mcpURL, token } = one2allCredsFor(envID)
   if (!mcpURL) { toast.error(`${envID}: 请先在「全局连接」填 MCP Server URL`); return }
   if (!token) { toast.error(`${envID}: 请先填 Bearer Token`); return }
   one2allStateByEnv[envID] = { status: 'loading' }
   try {
-    const res = await one2allListResources(mcpURL, token, true)
+    const res = await one2allListResources(mcpURL, token, options.includeConfigMaps)
     one2allStateByEnv[envID] = { status: 'ok', clusters: res.clusters, notes: res.notes }
     toast.success(`${envID}: 拉到 ${res.clusters.length} 个集群`)
     // 自动选:env 名匹配的集群/namespace
@@ -1731,7 +1736,7 @@ async function runOne2AllPreload(envID: string) {
       if (!loc.cluster_id) loc.cluster_id = eloc.cluster_id
       if (!loc.namespace) loc.namespace = eloc.namespace
     }
-    if (eloc.cluster_id && eloc.namespace) {
+    if (options.loadDeployments && eloc.cluster_id && eloc.namespace) {
       loadOne2AllK8sRtWorkloads(envID, eloc.cluster_id, eloc.namespace)
     }
   } catch (e: any) {
@@ -3289,7 +3294,7 @@ provide(WizardStoreKey, {
       @update-cred="(k, v) => (ccCredInputs[k] = v)"
       @clear-cred="clearCCFieldInput"
       @run-kuboard-preload="runKuboardPreload"
-      @run-one2-all-preload="runOne2AllPreload"
+      @run-one2-all-preload="(envID, purpose) => runOne2AllPreload(envID, purpose)"
       @run-c-c-hub-preload="runCCHubPreload"
       @set-service-source="(svc, src) => setServiceSource(svc, src)"
       @namespace-changed="onNamespaceChanged"

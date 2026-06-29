@@ -84,7 +84,7 @@ const emit = defineEmits<{
   updateCred: [key: string, value: string]
   clearCred: [key: string]
   runKuboardPreload: [envID: string]
-  runOne2AllPreload: [envID: string]
+  runOne2AllPreload: [envID: string, purpose: 'config_source']
   runCCHubPreload: [envID: string]
   setServiceSource: [svc: string, source: string]
   namespaceChanged: [envID: string, namespace: string]
@@ -288,7 +288,7 @@ const emit = defineEmits<{
           idle-text="📥 从 one2all 读取可选项"
           ok-text="🔄 重新读取"
           :error-message="wizard.one2allErrorOf(env.id)"
-          @click="emit('runOne2AllPreload', env.id)"
+          @click="emit('runOne2AllPreload', env.id, 'config_source')"
         >
           <template #ok>✓ {{ wizard.one2allClusterCountOf(env.id) }} 个集群</template>
         </PreloadStatusRow>

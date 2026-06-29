@@ -1,7 +1,7 @@
 package config
 
 // DataStoreEndpoint 一条 (env, service) → 真实连接串。GUI wizard 写出来的形式。
-// 字段是各 type 的并集:redis/es 用 URL,mongodb 用 URI,mysql 用 DSN,kafka 用 Brokers。
+// 字段是各 type 的并集:redis/es 用 URL,mongodb 用 URI,mysql/doris 用 DSN,kafka 用 Brokers。
 // generator 用这份数据反推 service-dependency-map 的 data_stores 字段(谁用了哪些数据层),
 // 不再让用户手填。
 type DataStoreEndpoint struct {
@@ -9,7 +9,7 @@ type DataStoreEndpoint struct {
 	Service string `yaml:"service,omitempty"`
 	URL     string `yaml:"url,omitempty"`     // redis / elasticsearch / clickhouse
 	URI     string `yaml:"uri,omitempty"`     // mongodb
-	DSN     string `yaml:"dsn,omitempty"`     // mysql / postgresql
+	DSN     string `yaml:"dsn,omitempty"`     // mysql / doris / postgresql
 	Brokers string `yaml:"brokers,omitempty"` // kafka
 	User    string `yaml:"user,omitempty"`
 	Pass    string `yaml:"pass,omitempty"`

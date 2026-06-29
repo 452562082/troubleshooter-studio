@@ -14,7 +14,7 @@
 #   routing skill 查到本表时只有 1 个候选 source,直接走那个,本表保持空(`{}`)即可。
 #
 # 命名约定:
-#   - `mongodb / mysql / postgresql / redis / elasticsearch / clickhouse` 顶级 key 对应数据层 type。
+#   - `mongodb / mysql / doris / postgresql / redis / elasticsearch / clickhouse` 顶级 key 对应数据层 type。
 #   - 二级 key 是 service 名(跟 service-dependency-map.yaml 用同样的 service 名)。
 #   - 值是 MCP key 中间的 source 段(去掉 `<type>-` 前缀和 `-<env>` 后缀)。
 #     例如 MCP key `mongodb-mongo-commerce-test` → source 是 `mongo-commerce`。
@@ -35,6 +35,7 @@ service_routing:
   data_stores:
     mongodb: {}        # 例:commerce: mongo-commerce / user: mongo-user
     mysql: {}
+    doris: {}
     postgresql: {}
     redis: {}
     elasticsearch: {}

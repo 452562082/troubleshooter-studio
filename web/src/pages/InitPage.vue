@@ -1749,7 +1749,7 @@ async function runOne2AllPreload(
 
 // ── Step 7: 可观测性 + 数据层 ──
 const observabilityOptions = ['grafana', 'loki', 'prometheus', 'jaeger', 'elk', 'skywalking', 'tempo', 'k8s_runtime'] as const
-const dataStoreOptions = ['redis', 'mongodb', 'elasticsearch', 'mysql', 'postgresql', 'kafka', 'rabbitmq', 'clickhouse'] as const
+const dataStoreOptions = ['redis', 'mongodb', 'elasticsearch', 'mysql', 'doris', 'postgresql', 'kafka', 'rabbitmq', 'clickhouse'] as const
 
 const enabledObservability = reactive<Record<string, boolean>>({
   ...Object.fromEntries(observabilityOptions.map(k => [k, false])),
@@ -1928,6 +1928,12 @@ const DS_TOOL_SPECS: ToolSpec[] = [
     key: 'mysql', label: 'MySQL', description: '关系数据库',
     fields: [
       { key: 'dsn', label: 'DSN', secret: true, envVar: (e) => `MYSQL_DSN_${e.toUpperCase()}`, placeholder: 'user:pass@tcp(host:3306)/dbname' },
+    ],
+  },
+  {
+    key: 'doris', label: 'Doris', description: '数仓 / OLAP 分析型数据库',
+    fields: [
+      { key: 'dsn', label: 'DSN', secret: true, envVar: (e) => `DORIS_DSN_${e.toUpperCase()}`, placeholder: 'user:pass@tcp(doris-fe:9030)/warehouse' },
     ],
   },
   {
@@ -2719,7 +2725,7 @@ onMounted(() => {
 
 // ── Skills whitelist derivation ──
 // 数据层 enabledDataStores 的 key 跟 skill 目录名不是 1:1 对应:特例 elasticsearch → es-runtime-query。
-// 其他类型(redis/mongodb/mysql/postgresql/kafka/rabbitmq/clickhouse)就是 <key>-runtime-query。
+// 其他类型(redis/mongodb/mysql/doris/postgresql/kafka/rabbitmq/clickhouse)就是 <key>-runtime-query。
 const DS_SKILL_NAME: Record<string, string> = {
   elasticsearch: 'es-runtime-query',
 }

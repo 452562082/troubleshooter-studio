@@ -13,7 +13,7 @@ import (
 
 // probeMySQL 用 database/sql + go-sql-driver Ping;成功后查 SELECT VERSION() 拿版本展示。
 func probeMySQL(f map[string]string) (bool, string, error) {
-	dsn, err := buildMySQLDSN(f)
+	dsn, err := buildSQLDSN(f, "3306")
 	if err != nil {
 		return false, "", err
 	}
@@ -33,15 +33,45 @@ func probeMySQL(f map[string]string) (bool, string, error) {
 	return true, "登录 OK · MySQL " + version, nil
 }
 
+// probeDoris 复用 MySQL wire protocol;Doris FE query port 默认 9030。
+func probeDoris(f map[string]string) (bool, string, error) {
+	dsn, err := buildSQLDSN(f, "9030")
+	if err != nil {
+		return false, "", err
+	}
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return false, "", fmt.Errorf("dsn 格式错: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+	db.SetConnMaxLifetime(probeTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		return false, "", mysqlErrorMsg(err)
+	}
+	var version string
+	_ = db.QueryRowContext(ctx, "SELECT VERSION()").Scan(&version)
+	return true, "登录 OK · Doris " + version, nil
+}
+
 // buildMySQLDSN 兼容三种输入:dsn 是 URL 格式 / dsn 是 driver 原生格式 / 走单字段拼。
 func buildMySQLDSN(f map[string]string) (string, error) {
+	return buildSQLDSN(f, "3306")
+}
+
+// buildSQLDSN 兼容 MySQL 协议系输入:dsn 是 URL 格式 / driver 原生格式 / 走单字段拼。
+func buildSQLDSN(f map[string]string, defaultPort string) (string, error) {
 	dsn := strings.TrimSpace(f["dsn"])
 	if dsn != "" {
-		// "mysql://user:pass@host:port/db" 形式 → 转成 driver 认识的 "user:pass@tcp(host:port)/db"
+		// "mysql://user:pass@host:port/db" / "doris://..." 形式 → 转成 driver 认识的 "user:pass@tcp(host:port)/db"
 		if strings.Contains(dsn, "://") {
 			us := dsn
-			if !strings.HasPrefix(us, "mysql://") {
-				us = "mysql://" + strings.TrimPrefix(us, "mysql://")
+			if !strings.HasPrefix(us, "mysql://") && !strings.HasPrefix(us, "doris://") {
+				us = "mysql://" + strings.TrimPrefix(strings.TrimPrefix(us, "mysql://"), "doris://")
+			}
+			if strings.HasPrefix(us, "doris://") {
+				us = "mysql://" + strings.TrimPrefix(us, "doris://")
 			}
 			parsed, err := url.Parse(us)
 			if err != nil {
@@ -55,7 +85,7 @@ func buildMySQLDSN(f map[string]string) (string, error) {
 			}
 			port := parsed.Port()
 			if port == "" {
-				port = "3306"
+				port = defaultPort
 			}
 			db := strings.TrimPrefix(parsed.Path, "/")
 			return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?timeout=5s&readTimeout=5s",
@@ -73,7 +103,7 @@ func buildMySQLDSN(f map[string]string) (string, error) {
 	}
 	port := strings.TrimSpace(f["port"])
 	if port == "" {
-		port = "3306"
+		port = defaultPort
 	}
 	user := strings.TrimSpace(f["user"])
 	if user == "" {

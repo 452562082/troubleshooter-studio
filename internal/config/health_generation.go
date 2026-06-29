@@ -38,6 +38,7 @@ func checkGeneration(c *SystemConfig) []HealthIssue {
 	}
 	dsCheck("redis-runtime-query", "redis")
 	dsCheck("mysql-runtime-query", "mysql")
+	dsCheck("doris-runtime-query", "doris")
 	dsCheck("mongodb-runtime-query", "mongodb")
 	dsCheck("es-runtime-query", "elasticsearch")
 	dsCheck("postgresql-runtime-query", "postgresql")

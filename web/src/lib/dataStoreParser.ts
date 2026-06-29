@@ -1,7 +1,7 @@
 // dataStoreParser —— 纯函数:从配置中心 / kuboard ConfigMap 拉到的原文里启发式识别数据层组件配置块。
 //
 // 暴露:
-//   - DSMatcher / DS_MATCHERS         redis/mongodb/mysql/pg/es/kafka/rabbitmq/ck 启发式
+//   - DSMatcher / DS_MATCHERS         redis/mongodb/mysql/doris/pg/es/kafka/rabbitmq/ck 启发式
 //   - parseConfigContent(text, fmt)   yaml / json / properties / k8s-env-flat / yaml-multi 五种格式分发
 //   - findKey / pickConnection / str / extractPort   matcher 内部用的小工具
 //
@@ -118,7 +118,31 @@ export const DS_MATCHERS: DSMatcher[] = [
       if (dsn && /mysql|tcp\(.*\)/i.test(dsn)) return { dsn }
       const host = str(c.host), port = str(c.port), user = str(c.user) || str(c.username), pass = str(c.password), database = str(c.database) || str(c.name)
       if (!host) return null
-      return { dsn: `${user || ''}${pass ? ':' + pass : ''}@tcp(${host}${port ? ':' + port : '3306'})/${database || ''}` }
+      return { dsn: `${user || ''}${pass ? ':' + pass : ''}@tcp(${host}${port ? ':' + port : ':3306'})/${database || ''}` }
+    },
+  },
+  {
+    dsKey: 'doris',
+    matchYAML: (r) => {
+      let c: any = null
+      const dorisBlock = findKey(r, ['doris', 'Doris', 'apache_doris', 'apacheDoris'])
+      c = pickConnection(dorisBlock, ['host', 'dsn', 'url', 'uri'])
+      if (!c) {
+        const dbBlock = findKey(r, ['databases', 'datasource', 'database', 'db'])
+        if (dbBlock && typeof dbBlock === 'object') {
+          for (const v of Object.values(dbBlock)) {
+            if (!v || typeof v !== 'object') continue
+            const driver = str((v as any).driver || (v as any).dialect || (v as any).type).toLowerCase()
+            if (driver === 'doris' || driver.includes('doris')) { c = v; break }
+          }
+        }
+      }
+      if (!c) return null
+      const dsn = str(c.dsn) || str(c.uri) || str(c.url)
+      if (dsn) return { dsn }
+      const host = str(c.host), port = str(c.port), user = str(c.user) || str(c.username), pass = str(c.password), database = str(c.database) || str(c.name)
+      if (!host) return null
+      return { dsn: `${user || ''}${pass ? ':' + pass : ''}@tcp(${host}${port ? ':' + port : ':9030'})/${database || ''}` }
     },
   },
   {
@@ -307,8 +331,9 @@ export function parseK8sConfigMapDataContents(contents: string[]): any {
 //   ES_* / ELASTIC_* / ELASTICSEARCH_* → elasticsearch
 //   KAFKA_*                       → kafka
 //   MYSQL_*                       → mysql
+//   DORIS_*                       → doris
 //   PGSQL_* / POSTGRES_* / POSTGRESQL_* → pgsql
-//   DB_*  → 由 DB_CONNECTION 决定(mysql / pgsql / sqlite / etc)
+//   DB_*  → 由 DB_CONNECTION 决定(mysql / doris / pgsql / sqlite / etc)
 //
 // 字段名归一化(小写):
 //   HOST/HOSTS/SERVER → host  PORT → port  USERNAME/USER → username
@@ -362,6 +387,7 @@ function envFlatToRoot(flat: Record<string, string>): Record<string, any> {
   groupBy(['ES', 'ELASTIC', 'ELASTICSEARCH'], 'elasticsearch')
   groupBy(['KAFKA'], 'kafka')
   groupBy(['MYSQL'], 'mysql')
+  groupBy(['DORIS'], 'doris')
   groupBy(['PGSQL', 'POSTGRES', 'POSTGRESQL'], 'pgsql')
 
   // DB_* 归到 DB_CONNECTION 指明的 driver 下(Laravel 风格)
@@ -369,6 +395,7 @@ function envFlatToRoot(flat: Record<string, string>): Record<string, any> {
   if (dbConn) {
     const dbDriver =
       dbConn === 'mysql' ? 'mysql' :
+      dbConn === 'doris' ? 'doris' :
       (dbConn === 'pgsql' || dbConn === 'postgres' || dbConn === 'postgresql') ? 'pgsql' :
       (dbConn === 'mongodb' || dbConn === 'mongo') ? 'mongodb' :
       ''

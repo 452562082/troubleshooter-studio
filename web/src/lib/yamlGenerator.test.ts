@@ -153,4 +153,31 @@ describe('generateYAML', () => {
     expect(rt.service_map[0].cluster_id).toBe('1')
     expect(rt.service_map[0].cluster).toBeUndefined()
   })
+
+  it('emits Doris data store endpoints from scannedDS', () => {
+    const out = generateYAML(makeCtx({
+      scannedDS: {
+        dev: {
+          'order-service': {
+            doris: { dsn: 'user:pass@tcp(doris-fe:9030)/warehouse' },
+          },
+        },
+      },
+      toolSpecByKey: (_cat, key) => key === 'doris'
+        ? {
+            key: 'doris',
+            fields: [
+              { key: 'dsn', label: 'DSN', secret: true, envVar: (e) => `DORIS_DSN_${e.toUpperCase()}` },
+            ],
+          }
+        : undefined,
+      deriveSkillsWhitelist: () => ['routing', 'config-executor', 'doris-runtime-query'],
+    }))
+    const parsed = yaml.load(out) as any
+    const doris = parsed.infrastructure.data_stores.find((ds: any) => ds.type === 'doris')
+    expect(doris.enabled).toBe(true)
+    expect(doris.endpoints[0].service).toBe('order-service')
+    expect(doris.endpoints[0].dsn).toBe('user:pass@tcp(doris-fe:9030)/warehouse')
+    expect(parsed.generation.skills_whitelist).toContain('doris-runtime-query')
+  })
 })

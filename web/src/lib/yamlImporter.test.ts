@@ -251,4 +251,38 @@ describe('applyParsedYAMLToWizardState observability import', () => {
     expect(ctx.k8sRuntimeEnvLoc.dev.namespace).toBe('default')
     expect(ctx.k8sRuntimeSvcMap['dev::order-service'].workload).toBe('order-service')
   })
+
+  it('keeps imported env branch values even when local branch refresh has different suggestions', async () => {
+    const ctx = makeImportCtx({
+      getRepoPathsForSystem: async () => ({ order: '/repos/order' }),
+      listBranchesForRepo: async () => ['develop', 'main'],
+      pickBranchForEnv: (env: any) => env.id === 'prod' ? 'main' : 'develop',
+    })
+
+    await applyParsedYAMLToWizardState({
+      system: { id: 'shop' },
+      environments: [
+        { id: 'dev', is_prod: false },
+        { id: 'prod', is_prod: true },
+      ],
+      repos: [{
+        name: 'order',
+        url: 'git@example.com:shop/order.git',
+        service_names: ['order-service'],
+        env_branches: {
+          dev: 'feature/saved-dev',
+          prod: 'release/2026',
+        },
+      }],
+      infrastructure: {
+        config_center: { type: 'nacos' },
+      },
+    }, ctx)
+    await Promise.resolve()
+
+    expect(ctx.repos[0].env_branches).toEqual({
+      dev: 'feature/saved-dev',
+      prod: 'release/2026',
+    })
+  })
 })

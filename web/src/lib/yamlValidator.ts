@@ -12,7 +12,7 @@
 //   Step 5:每个 repo:name + (remote 必填 url+_cloneTarget,local 必填 _localPath)
 //   Step 6:所选源每个 (env, svc) 组合的 non-optional 字段必填(showWhen 隐藏跳过)
 //          多源必须每个服务都明确归属;kuboard 还要扫过 + 每服务挑齐 cluster/ns/cm
-//   Step 7:dsProbeResults 里展示的每个组件 status='ok'
+//   Step 7:dsProbeResults 里展示的每个组件必须 status='ok'
 
 import { Target } from './constants'
 import { canonicalizeGitURL } from './canonicalGitURL'
@@ -259,11 +259,13 @@ export function computeStepErrors(ctx: ValidatorContext): Set<string> {
         if (v?.status === 'error') errs.add(`ds.scanerror.${k}`)
       }
     }
-    // 连通性:测试失败 → 阻止;未测试 → 不阻止
+    // 连通性:每个识别出的数据层组件都必须测试通过;失败 / 未测试 / 测试中都阻止下一步
     for (const t of ctx.enumerateDataStoreProbeTargets()) {
       const probeSt = ctx.dsProbeResults[probeKey(t.envID, t.svc, t.dsKey)]
       if (probeSt?.status === 'fail') {
         errs.add(`ds.${t.envID}.${t.svc}.${t.dsKey}.probefail`)
+      } else if (probeSt?.status !== 'ok') {
+        errs.add(`ds.${t.envID}.${t.svc}.${t.dsKey}.notested`)
       }
     }
     return errs

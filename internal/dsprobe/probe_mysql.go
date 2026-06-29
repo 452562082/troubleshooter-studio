@@ -13,7 +13,7 @@ import (
 
 // probeMySQL 用 database/sql + go-sql-driver Ping;成功后查 SELECT VERSION() 拿版本展示。
 func probeMySQL(f map[string]string) (bool, string, error) {
-	dsn, err := buildSQLDSN(f, "3306")
+	dsn, err := buildMySQLDSN(f)
 	if err != nil {
 		return false, "", err
 	}

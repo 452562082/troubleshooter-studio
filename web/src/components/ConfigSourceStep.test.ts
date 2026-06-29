@@ -84,7 +84,7 @@ describe('ConfigSourceStep', () => {
         provide: { [WizardStoreKey as symbol]: wizard },
         stubs: {
           CredentialField: { template: '<div />' },
-          PreloadStatusRow: { template: '<div><slot name="ok" /></div>' },
+          PreloadStatusRow: { name: 'PreloadStatusRow', template: '<button type="button"><slot name="ok" /></button>' },
           ServiceChecklist: { template: '<div />' },
           NamespaceServiceMap: { template: '<div data-test="namespace-service-map">namespace/dataId map</div>' },
           KuboardServiceMap: { template: '<div />' },
@@ -100,5 +100,13 @@ describe('ConfigSourceStep', () => {
 
     expect(wrapper.find('[data-test="namespace-service-map"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('服务 → K8s 定位(one2all)')
+  })
+
+  it('emits config_source purpose when reloading one2all resources', async () => {
+    const wrapper = mountStep()
+
+    await wrapper.findComponent({ name: 'PreloadStatusRow' }).trigger('click')
+
+    expect(wrapper.emitted('runOne2AllPreload')?.[0]).toEqual(['dev', 'config_source'])
   })
 })

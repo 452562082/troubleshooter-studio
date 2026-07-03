@@ -49,6 +49,7 @@
 - 错误现象
 
 缺字段时一次只问一个。客户端问题先要 HAR、RUM/Sentry 链接、console 报错或后端 trace_id 关联，不能只查后端。
+客户端复现问题先走 `frontend-repro-investigator`:HAR/console/RUM 任一证据 → 提取失败请求/trace_id/静态资源问题 → 再接 backend trace/log/runtime；没有浏览器证据时不得只凭后端 trace 下结论。
 
 先 grep：
 

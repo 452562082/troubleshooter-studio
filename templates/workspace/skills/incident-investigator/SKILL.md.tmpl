@@ -45,13 +45,29 @@ Step 7  沉淀(必做,confidence=high 必跑):pattern 追加到 known-errors.loc
 额外只问一句:"是 **1 次请求 batch M 条**,还是 **N 次请求各 ~M/N 条**?"
 **只在双重命中(接口名 + N×M 数量词)时触发**;性能类描述"batch 查询慢"不触发。
 
-**1.1c 客户端类问题强制澄清**:症状含 "白屏 / 卡顿 / 按钮没反应 / 渲染错乱 / 某浏览器/机型独有 /
-页面慢 / console 报错 / 上传失败" 等**客户端关键词**(后端类"接口慢"不触发)→
-不要直接进 5.1 trace 查询(机器人 5 维表里"客户端/用户体验类"必查的 HAR/RUM/bundle 都得用户主动给),
-额外问一组:
-"用的什么**浏览器 + 版本**?**哪个页面 + 哪个交互**触发?能给一份 **HAR 文件 / RUM 错误链接(Sentry/神策/ARMS)/ console 截图**吗?
-后端有对应的 **trace_id / request_id** 吗(HAR 里通常在 `X-Trace-Id` request header)?"
-拿到 HAR/RUM/console 之一才进 Step 2,**禁止纯凭"用户说慢" 就开始查后端 trace**(后端视角看不到客户端真相)。
+**1.1c 客户端类问题强制前端取证**:症状含 "白屏 / 卡顿 / 按钮没反应 / 渲染错乱 / 某浏览器/机型独有 /
+页面慢 / console 报错 / 上传失败" 等客户端关键词时,先做前端证据归一化。
+
+最小输入缺失时只问一项:env、页面 URL/route、具体交互、发生时间、HAR/console/RUM/trace_id 之一。
+{{ if hasSkill . "frontend-repro-investigator" }}
+优先进入 `frontend-repro-investigator`。
+拿到 HAR 时先执行:
+
+```bash
+python3 skills/frontend-repro-investigator/scripts/har_analyzer.py --file <path-to.har>
+```
+
+根据输出分流:
+- `frontend_findings` 非空且无后端 endpoint → 先按前端 bundle/CDN/cache/CORS 定位,同时查发布版本。
+- `backend_handoff.trace_ids` 非空 → 调 `tracing-query` 查 trace,再查同窗口日志。
+- `backend_handoff.candidate_endpoints` 非空但无 trace → 用 endpoint + 时间窗查日志,并用 `routing/references/frontend-entry-map.yaml` 找候选服务。
+- 后端无收到请求证据 → 不得声称后端根因,候选保持在浏览器/CDN/网关/auth/CORS。
+{{- else }}
+本生成物未包含 `frontend-repro-investigator` skill 时,仍必须先人工归一化前端证据:
+- HAR:列出失败/慢请求、status、URL path、trace/request id。
+- console/RUM:列出错误消息、stack top frame、bundle/release、页面 URL、时间点。
+- 有 trace/request id 才进入 `tracing-query`;只有页面慢/白屏描述时不得直接下后端结论。
+{{- end }}
 
 **1.2 症状先验证**(30 秒,防无效排障):
 跑 `baseline_query_templates.error_rate_now` 看症状仍在?

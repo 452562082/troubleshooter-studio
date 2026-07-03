@@ -208,6 +208,14 @@ def fetch_configmap_data_v3(base: str, username: str, access_key: str, cluster: 
     raise RuntimeError(f"configmap {namespace}/{name} not found or response shape unsupported")
 
 
+def should_try_kuboard_v3_from_tree_error(err: Exception, access_key: str) -> bool:
+    if not access_key:
+        return False
+    if isinstance(err, HTTPStatusError):
+        return True
+    return str(err).startswith("bad JSON response:")
+
+
 def first_value(data: dict[str, str], *keys: str) -> str:
     upper = {str(k).upper().replace(".", "_").replace("-", "_"): str(v) for k, v in data.items()}
     for key in keys:
@@ -271,11 +279,12 @@ def cmd_get(args: argparse.Namespace) -> int:
         token = access_key or kuboard_login(base, username, password)
         try:
             cluster_uid = resolve_cluster_uid(base, token, args.cluster)
-            data = fetch_configmap_data(base, token, cluster_uid, args.namespace, args.configmap)
-        except HTTPStatusError as e:
-            if e.code != 404 or not access_key:
+        except Exception as e:
+            if not should_try_kuboard_v3_from_tree_error(e, access_key):
                 raise
             data = fetch_configmap_data_v3(base, username, access_key, args.cluster, args.namespace, args.configmap)
+        else:
+            data = fetch_configmap_data(base, token, cluster_uid, args.namespace, args.configmap)
     except Exception as e:
         return error_out(str(e), "Kuboard ConfigMap 读取失败:检查 URL/鉴权/cluster/namespace/configmap 是否正确")
 

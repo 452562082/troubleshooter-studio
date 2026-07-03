@@ -58,6 +58,7 @@ repos:
     url: git@github.com:shop/web-frontend.git
     stack: node
     framework: next.js
+    role: frontend
     env_branches:
       dev: develop
       staging: staging
@@ -171,6 +172,7 @@ generation:
   targets: [openclaw]
   skills_whitelist:
     - routing
+    - incident-investigator
     - config-executor
     - redis-runtime-query
     - mongodb-runtime-query
@@ -179,6 +181,7 @@ generation:
     - kafka-runtime-query
     - tracing-query
     - elk-log-query
+    - frontend-repro-investigator
     - diagram-generator
 meta:
   schema_version: "0.1"

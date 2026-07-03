@@ -1,0 +1,91 @@
+---
+name: frontend-repro-investigator
+description: 从前端复现证据开始排障。读取 HAR、console、RUM/Sentry 链接或用户复现步骤，提取失败请求、trace/request id、静态资源问题和后端候选接口，再交给 tracing/log/runtime skills 深挖。
+---
+
+# Frontend Repro Investigator
+
+## When To Use
+
+Use this skill before backend-only investigation when the report starts from:
+
+- page blank screen, button no response, upload failed, rendering mismatch
+- browser-specific or device-specific behavior
+- console error, Sentry/RUM/ARMS link, HAR file
+- tester says "I reproduced it in the frontend"
+
+Do not start by querying backend trace only. First establish what the browser saw.
+
+## Required Inputs
+
+Ask for the smallest missing item, one question at a time:
+
+- env
+- page URL or route
+- exact interaction
+- occurrence time and timezone
+- one artifact: HAR file, console text/screenshot, RUM/Sentry link, or trace/request id
+
+## HAR Workflow
+
+Run from workspace root:
+
+```bash
+python3 skills/frontend-repro-investigator/scripts/har_analyzer.py --file <path-to.har>
+```
+
+The script returns:
+
+- `failed_requests`: 4xx/5xx browser requests
+- `slow_requests`: API requests taking at least 1000 ms
+- `frontend_findings`: static chunk/CSS/image failures
+- `backend_handoff.trace_ids`: values from `x-trace-id`, `x-request-id`, `traceparent`, and similar headers
+- `backend_handoff.candidate_endpoints`: API paths to map into backend services
+
+## Console / RUM Workflow
+
+If the user provides console text or a RUM/Sentry link instead of HAR:
+
+1. Extract message, stack top frame, source file/chunk, release/bundle version, page URL, user/session id, and timestamp.
+2. If it is `ChunkLoadError`, `Loading CSS chunk failed`, or a static asset 404, classify as frontend deploy/cache/CDN first.
+3. If it contains an API URL, HTTP status, request id, or trace id, continue to backend handoff.
+4. If only a JS stack exists, use `routing/references/frontend-entry-map.yaml` to identify the frontend repo and inspect the referenced component/request wrapper.
+
+## Backend Handoff
+
+After HAR/console/RUM analysis:
+
+1. Read `routing/references/frontend-entry-map.yaml`.
+2. Match `candidate_endpoints` to known API base URLs and candidate downstream services.
+3. If a trace/request id exists, call `tracing-query` and log query skills with the same time window.
+4. If no trace id exists, search logs by endpoint path, user id, session id, and occurrence time.
+5. If backend did not receive the request, keep the root-cause candidates on frontend/CDN/network/CORS/auth.
+
+## Output Contract
+
+Always return this structure:
+
+```yaml
+frontend_evidence:
+  page: "<page-url-or-route>"
+  action: "<user-action>"
+  artifact_type: "har|console|rum|manual"
+  browser: "<browser-version-if-known>"
+findings:
+  - type: "api_5xx|api_4xx|slow_api|static_asset_failed|cors|js_exception|backend_not_reached"
+    evidence: "<specific request/error/stack>"
+backend_handoff:
+  env: "<env>"
+  endpoints: []
+  trace_ids: []
+  candidate_services: []
+next_skills:
+  - "tracing-query"
+  - "elk-log-query"
+```
+
+## Hard Constraints
+
+- Only read local artifacts and observability data.
+- Redact tokens, cookies, passwords, authorization headers, and personal identifiers before quoting.
+- Never claim backend root cause until browser evidence is linked to backend trace/log/runtime evidence.

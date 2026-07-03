@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -89,6 +91,28 @@ func (n nodeAnalyzer) Analyze(repoPath string, includePaths []string) (*RepoAnal
 			if err == nil && finding != nil {
 				ra.Findings = append(ra.Findings, *finding)
 			}
+		}
+	}
+
+	srcFiles, _ := walkFiles(repoPath, includePaths, func(rel string) bool {
+		if strings.Contains(rel, "node_modules") {
+			return false
+		}
+		ext := strings.ToLower(filepath.Ext(rel))
+		return ext == ".js" || ext == ".jsx" || ext == ".ts" || ext == ".tsx" || ext == ".vue"
+	})
+	for _, f := range srcFiles {
+		info, err := os.Stat(f)
+		if err != nil || info.Size() > 512*1024 {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		rel, _ := filepath.Rel(repoPath, f)
+		for _, ep := range extractAPIEndpointPaths(string(b)) {
+			ra.Notes = append(ra.Notes, "api_endpoint["+rel+"]="+ep)
 		}
 	}
 
@@ -197,4 +221,25 @@ func extractAPIURLs(kv map[string]string, framework string) []string {
 		}
 	}
 	return urls
+}
+
+func extractAPIEndpointPaths(src string) []string {
+	re := regexp.MustCompile(`(?i)(?:fetch|axios\.(?:get|post|put|patch|delete)|request)\s*\(\s*['"]([^'"]+)['"]`)
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range re.FindAllStringSubmatch(src, -1) {
+		if len(m) < 2 {
+			continue
+		}
+		path := strings.TrimSpace(m[1])
+		if !strings.HasPrefix(path, "/api/") && !strings.HasPrefix(path, "http") {
+			continue
+		}
+		if !seen[path] {
+			seen[path] = true
+			out = append(out, path)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

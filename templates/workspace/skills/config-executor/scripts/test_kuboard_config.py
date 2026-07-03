@@ -38,6 +38,17 @@ class MockKuboard(BaseHTTPRequestHandler):
             if MockKuboard.mode == "v3":
                 self._json({"error": "v4 endpoint not found"}, status=404)
                 return
+            if MockKuboard.mode == "v3-forbidden-tree":
+                self._json({"error": "v4 endpoint forbidden"}, status=403)
+                return
+            if MockKuboard.mode == "v3-html-tree":
+                self.send_response(200)
+                raw = b"<html>cloud gateway</html>"
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+                return
             self._json({
                 "data": {
                     "treeItems": [
@@ -178,6 +189,17 @@ class KuboardConfigTest(unittest.TestCase):
 
     def test_get_reads_kuboard_v3_configmap_data(self):
         MockKuboard.mode = "v3"
+        self.assert_kuboard_v3_configmap_fallback()
+
+    def test_get_falls_back_to_kuboard_v3_when_v4_tree_is_forbidden(self):
+        MockKuboard.mode = "v3-forbidden-tree"
+        self.assert_kuboard_v3_configmap_fallback()
+
+    def test_get_falls_back_to_kuboard_v3_when_v4_tree_is_not_json(self):
+        MockKuboard.mode = "v3-html-tree"
+        self.assert_kuboard_v3_configmap_fallback()
+
+    def assert_kuboard_v3_configmap_fallback(self):
         creds = {
             "kuboard": {
                 "default": {

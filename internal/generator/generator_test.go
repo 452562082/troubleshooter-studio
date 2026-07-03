@@ -149,6 +149,22 @@ func TestGenerate_One2AllConfigMapWithK8sRuntimeServiceMap(t *testing.T) {
 	}
 }
 
+func TestGenerate_FrontendEntryMap(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+	if err := New(cfg, tr, out).Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	fm := readFile(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/frontend-entry-map.yaml"))
+	if !strings.Contains(fm, "frontend_entries:") {
+		t.Fatalf("frontend-entry-map should contain frontend_entries root, got:\n%s", fm)
+	}
+	if !strings.Contains(fm, "candidate_downstream:") {
+		t.Errorf("frontend-entry-map should include candidate_downstream, got:\n%s", fm)
+	}
+}
+
 func readFile(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -242,6 +258,22 @@ func TestGenerate_Nacos_Shop(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(ceScripts, "test_nacos_mcp.py")); err == nil {
 		t.Errorf("test_nacos_mcp.py 不应进 bot workspace(generator 应过滤 test_*.py)")
 	}
+
+	frontendSkill := filepath.Join(wsRoot, "skills", "frontend-repro-investigator")
+	if _, err := os.Stat(filepath.Join(frontendSkill, "SKILL.md")); err != nil {
+		t.Errorf("frontend-repro-investigator skill should be generated: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", "har_analyzer.py")); err != nil {
+		t.Errorf("har_analyzer.py should be generated: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", "test_har_analyzer.py")); err == nil {
+		t.Errorf("test_har_analyzer.py should not be generated")
+	}
+
+	ii := readFile(t, filepath.Join(wsRoot, "skills", "incident-investigator", "SKILL.md"))
+	if !strings.Contains(ii, "frontend-repro-investigator") {
+		t.Errorf("incident-investigator should hand client symptoms to frontend-repro-investigator")
+	}
 }
 
 // 配置中心 prompt 派生由 agent.DerivePrompts 验证,
@@ -328,8 +360,21 @@ func TestGenerate_ClawhubLock(t *testing.T) {
 	if lock.Version != 1 {
 		t.Errorf("lock.version expected 1, got %d", lock.Version)
 	}
-	// shop-troubleshooter.yaml 的 skills_whitelist 列了 8 个 skills
-	wantSkills := []string{"routing", "config-executor", "redis-runtime-query", "mongodb-runtime-query", "es-runtime-query", "mysql-runtime-query", "kafka-runtime-query", "diagram-generator"}
+	// shop-troubleshooter.yaml 的 skills_whitelist 应完整写入 lock.json。
+	wantSkills := []string{
+		"routing",
+		"incident-investigator",
+		"config-executor",
+		"redis-runtime-query",
+		"mongodb-runtime-query",
+		"es-runtime-query",
+		"mysql-runtime-query",
+		"kafka-runtime-query",
+		"tracing-query",
+		"elk-log-query",
+		"frontend-repro-investigator",
+		"diagram-generator",
+	}
 	for _, s := range wantSkills {
 		entry, ok := lock.Skills[s]
 		if !ok {
@@ -381,12 +426,39 @@ func TestGenerate_ClawhubLock_EmptySkills(t *testing.T) {
 	}
 }
 
+func TestGenerate_FrontendReproArtifacts(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+	if err := New(cfg, tr, out).Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	root := filepath.Join(out, "templates/workspace-template")
+	assertExists(t, root, []string{
+		"skills/frontend-repro-investigator/SKILL.md",
+		"skills/frontend-repro-investigator/scripts/har_analyzer.py",
+		"skills/routing/references/frontend-entry-map.yaml",
+	})
+	assertNotExists(t, root, []string{
+		"skills/frontend-repro-investigator/scripts/test_har_analyzer.py",
+	})
+}
+
 // assertExists 检查一组相对路径都存在于 base 下，否则报告缺失。
 func assertExists(t *testing.T, base string, rels []string) {
 	t.Helper()
 	for _, rel := range rels {
 		if _, err := os.Stat(filepath.Join(base, rel)); err != nil {
 			t.Errorf("expected %s under %s (%v)", rel, base, err)
+		}
+	}
+}
+
+func assertNotExists(t *testing.T, base string, rels []string) {
+	t.Helper()
+	for _, rel := range rels {
+		if _, err := os.Stat(filepath.Join(base, rel)); err == nil {
+			t.Fatalf("%s should not exist", rel)
 		}
 	}
 }

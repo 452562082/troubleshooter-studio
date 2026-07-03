@@ -98,17 +98,25 @@ go test ./...
 ```bash
 go test ./... -race
 scripts/check-go-coverage.sh
+make audit
 ```
 
 覆盖率门槛：
 
 | 包 | 门槛 |
 |---|---|
+| `cmd/tshoot/` | 0.7% |
 | `internal/agent/` | 60% |
+| `internal/analyzer/` | 29% |
+| `internal/analyzerpipe/` | 17% |
 | `internal/generator/` | 60% |
 | `internal/deploy/` | 80% |
+| `internal/dsprobe/` | 9% |
 | `internal/doctor/` | 70% |
+| `internal/userconfig/` | 22% |
 | `api/` | 50% |
+
+`cmd/tshoot`、`internal/analyzer*`、`internal/dsprobe`、`internal/userconfig` 当前是非回归底线，先防止继续下降；后续补关键路径测试后再抬门槛。
 
 新加路径要有 happy path。新加 MCP builder 要有注册类 positive test；禁用/跳过类要有 negative test。
 
@@ -132,12 +140,15 @@ docs P1.2: README TOC + docs/decisions.md 决策演进记录
 
 ## CI 注意
 
-GitHub Actions 锁 Node 20。web job 用：
+GitHub Actions 锁 Node 20.19.0（满足 Vite 8 的 Node 下限）。web job 用：
 
 - `npm ci --ignore-scripts`
+- `npm audit --audit-level=moderate`
 - `vitest run --pool=forks`
 
 这是为规避新 Node 与 esbuild/vitest 的兼容问题，见 `.github/workflows/ci.yml` 注释。
+
+Go job 会安装固定版本的 `govulncheck` 并执行 `govulncheck ./...`；本地可用 `make audit` 复现同一类安全检查。
 
 ## License
 

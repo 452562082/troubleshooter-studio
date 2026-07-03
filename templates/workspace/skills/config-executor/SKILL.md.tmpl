@@ -19,7 +19,7 @@ description: 通用配置中心执行技能（后端：{{.Infrastructure.Primary
 2. **凭据**:
    - **nacos 主路径走 MCP,凭据已在 MCP env 里,不需要 source 任何东西**,直接调 `{{.System.ID}}-nacos-<env>` 的工具。
    - nacos **HTTP fallback** 才需 `source scripts/.env`(拿 `CC_ADDR_<ENV>` 等)。
-   - apollo / consul 凭据走 `~/.openclaw/<agent-id>-creds.json`,脚本按 `--agent-id --env` 自取,不需 source。
+   - apollo / consul / kuboard 凭据走 `~/.openclaw/<agent-id>-creds.json`,脚本按 `--agent-id --env` 自取,不需 source。
 
 ## 多环境硬约束（必读）
 
@@ -159,22 +159,38 @@ python3 scripts/resolve_runtime_static.py --agent-id {{.AgentID}} --env <env>
 
 {{- if eq .Infrastructure.PrimaryConfigCenter.Type "kuboard"}}
 
-### 当前后端：Kuboard（ConfigMap 坐标来自 routing）
+### 当前后端：Kuboard（HTTP 脚本读取 ConfigMap）
 
 本系统通过 Kuboard 管理 K8s ConfigMap。`routing` 会返回 `runtime: kuboard-http`
 以及向导挑出的 `cluster / namespace / configmap / configmap_key` 坐标。
 
+读取 ConfigMap：
+```bash
+python3 scripts/kuboard_config.py get \
+  --agent-id {{.AgentID}} --env <env> \
+  --cluster <cluster> --namespace <namespace> --configmap <configmap>
+```
+
+支持 Kuboard v4 access key / 用户名密码；Kuboard v3 access key 形态为 `<密钥ID>.<密钥>`,
+同时需要用户名用于 `KuboardUsername` Cookie。
+
+脚本输出：
+- `format: k8s-env-flat`
+- `data`: ConfigMap 的 `.data` 平铺 KV
+- `content`: 同一份 data 的 JSON 字符串，方便交给解析脚本/本地处理
+- `runtime`: 从常见 env-flat 键解析出的 Redis / MySQL / Mongo / Elasticsearch 摘要；
+  `resolved=false` 时不得猜测，继续查配置全文或向用户索取缺失字段
+
 **约束**：
 1. 不要尝试找 `mcp_server` 字段；kuboard 不注册 MCP。
 2. 不要调用旧 kubectl 脚本；`kubernetes` 配置中心类型已下线。
-3. 若需要配置全文，优先让用户在 Studio 桌面端重新拉取/确认 Kuboard service_map；
-   当前生成物不内置 Kuboard HTTP ConfigMap 读取脚本。
+3. cluster / namespace / configmap 必须来自 routing 返回坐标，不要凭服务名猜。
 
 **排障流程**：
 1. `routing` 确认 env + service 对应的 Kuboard 坐标
-2. 基于坐标判断服务配置来源和 ConfigMap 名
-3. 数据层连接串优先使用生成时扫描出的 `data-schema-map` / `service-to-datastore-source`；
-   缺失时明确说明“生成物未内置 Kuboard HTTP 读取脚本”,不要猜测连接串
+2. 调 `kuboard_config.py get` 读取当前 ConfigMap `.data`
+3. 优先使用脚本输出的 `runtime` 字段；缺失时再从 `data/content` 补充解析；
+   解析不到时再参考生成时扫描出的 `data-schema-map` / `service-to-datastore-source`
 {{- end}}
 
 {{- if eq .Infrastructure.PrimaryConfigCenter.Type "one2all"}}
@@ -222,6 +238,9 @@ MCP server 名 = `{{.System.ID}}-one2all`（单一 streamable-http 实例,所有
 {{- end}}
 {{- if eq .Infrastructure.PrimaryConfigCenter.Type "consul"}}
 - `scripts/consul_config.py`（KV HTTP 客户端）
+{{- end}}
+{{- if eq .Infrastructure.PrimaryConfigCenter.Type "kuboard"}}
+- `scripts/kuboard_config.py`（Kuboard v3/v4 HTTP 客户端，读取 ConfigMap `.data`）
 {{- end}}
 {{- if eq .Infrastructure.PrimaryConfigCenter.Type "env-vars"}}
 - `scripts/resolve_runtime_static.py`（从 creds.json 读静态连接串）

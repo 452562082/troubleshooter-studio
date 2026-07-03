@@ -953,7 +953,7 @@ function setRepoSource(r: RepoItem, src: 'local' | 'remote') {
 // ── 多源 schema(顶部多选 + 每源独立填表 + 每服务挑源)──
 //
 // 数据模型:
-//   enabledSourceTypes:{ 'nacos': true, 'kubernetes': true, ... } —— 顶部多选
+//   enabledSourceTypes:{ 'nacos': true, 'kuboard': true, ... } —— 顶部多选
 //     勾哪些 type,系统就声明那些源;每个 type 在 yaml 里 id == type(e.g. id=nacos)。
 //     不支持同 type 多个源(罕见场景,需要时手编辑 yaml + 自定义 id)。
 //   sourceCreds:每个源的 per-env 凭证 / 端点表单数据,key 是 source type。
@@ -1265,7 +1265,7 @@ const configCenterType = computed<string>({
 // 配置中心凭证字段定义:CredField interface 见 lib/credFields.ts。
 // 每个 type 对应一组字段;envVar 拼出来的名字部署时由 Studio 注入到各 AI 平台的 MCP env。
 // CC_FIELDS_BY_TYPE 是个 computed:
-//   - nacos / apollo / consul / kubernetes 是固定字段集
+//   - nacos / apollo / consul / kuboard / one2all 是固定字段集
 //   - env-vars 字段集动态跟着 Step 6 enabledDataStores 走(每个启用的 data store 一条 STATIC_<TYPE>_<ENV> 字段)
 //
 // 这种 cross-step 联动让用户在 Step 5 就能给 env-vars 源填具体连接串,不用跳到 Step 6 再填。

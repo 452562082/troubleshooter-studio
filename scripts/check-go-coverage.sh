@@ -11,10 +11,15 @@ go test -cover ./... 2>&1 | tee "$out_file"
 
 thresholds='
 github.com/xiaolong/troubleshooter-studio/api 50
+github.com/xiaolong/troubleshooter-studio/cmd/tshoot 0.7
 github.com/xiaolong/troubleshooter-studio/internal/agent 60
+github.com/xiaolong/troubleshooter-studio/internal/analyzer 29
+github.com/xiaolong/troubleshooter-studio/internal/analyzerpipe 17
 github.com/xiaolong/troubleshooter-studio/internal/generator 60
 github.com/xiaolong/troubleshooter-studio/internal/deploy 80
+github.com/xiaolong/troubleshooter-studio/internal/dsprobe 9
 github.com/xiaolong/troubleshooter-studio/internal/doctor 70
+github.com/xiaolong/troubleshooter-studio/internal/userconfig 22
 '
 
 failed=0

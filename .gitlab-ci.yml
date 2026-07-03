@@ -64,7 +64,7 @@ variables:
 #     ephemeral,被 GitLab 跨 image 打包/解包会出现"索引在但文件不在"导致 vet/build
 #     报 no such file or directory。让每个 job 本地新建)
 #   - lint / test 用不同 cache key 前缀:两 job image 不同(golangci-lint vs
-#     golang:1.25.10),理论上 go-mod 内容兼容,但隔离避免任何"并行 job 同 key 写同一份"
+#     golang:1.25.11),理论上 go-mod 内容兼容,但隔离避免任何"并行 job 同 key 写同一份"
 #     的潜在竞态。
 #   - go vet 那行删了 — golangci-lint 默认开 govet linter,重复且就是它在崩。
 go:lint:
@@ -107,9 +107,9 @@ go:lint:
 # ── Go test:build + test -race -cover ──────────────────────────────────
 go:test:
   stage: test
-  # 锁定 patch 版本(避免 cache 锁住老 patch + 跟 go.mod `go 1.25.10` 一致)。
-  # 1.25.10 修了 7 个 stdlib CVE(GO-2026-4870/4918/4946/4947/4971 等),govulncheck 干净。
-  image: golang:1.25.10
+  # 锁定 patch 版本(避免 cache 锁住老 patch + 跟 go.mod `go 1.25.11` 一致)。
+  # 1.25.11 修复当前 govulncheck 命中的 stdlib CVE,保持工具链审计干净。
+  image: golang:1.25.11
   interruptible: true
   cache:
     # cache 策略说明见 go:lint 上方注释。test job 独立 key 前缀,避免与 lint job 并行写竞态。
@@ -121,6 +121,8 @@ go:test:
       - .cache/go-mod
   script:
     - go build ./...
+    - go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
+    - "$(go env GOPATH)/bin/govulncheck" ./...
     - go test -race -cover -coverprofile=coverage.out ./...
     - scripts/check-go-coverage.sh
     - go tool cover -func=coverage.out | tail -1
@@ -148,7 +150,7 @@ web:
   # 硬假设在 node:20 容器里 `exit 1` —— 容器没 brew、/root/.nvm/nvm.sh 也不存在):
   #   - docker executor(现状,240-docker-runner):直接跑 `image: node:20.19.0`,
   #     满足 Vite 8 的 Node 下限,无 brew / 无 nvm → 直接用镜像自带 node。
-  #   - macOS shell executor(历史/兜底):host 默认 node 25,需 nvm 读 .nvmrc 切到 20,
+  #   - macOS shell executor(历史/兜底):host 默认 node 25,需 nvm 读 .nvmrc 切换到项目指定版本,
   #     绕开 esbuild postinstall SIGKILL / vitest worker 死锁。
   # 策略:能找到 nvm 就用它切 .nvmrc;找不到回落系统 node。两种执行器都能跑,不再硬 exit 1。
   before_script:
@@ -166,7 +168,7 @@ web:
         . "$NVM_SH"
         command -v nvm >/dev/null 2>&1 && { nvm install && nvm use; }
       else
-        echo "[ci] 未找到 nvm(docker executor 场景),用 node:20 镜像自带 node"
+        echo "[ci] 未找到 nvm(docker executor 场景),用 node:20.19.0 镜像自带 node"
       fi
       node --version || { echo "[ci] ERROR: 既无 nvm 也无系统 node,执行器环境异常"; exit 1; }
       npm --version
@@ -178,6 +180,7 @@ web:
     # 脚本——跳过不影响 vite build / vitest,且在 mac shell executor 的 node 25 上能避开
     # 旧 esbuild install.js SIGKILL(pipeline #652)。docker node:20 上同样安全。
     - npm ci --prefer-offline --no-audit --no-fund --ignore-scripts
+    - npm audit --audit-level=moderate
     # vitest: bridge / toast lib 层单测(regression guard)
     - npm test
     # npm run build 实际跑 vue-tsc --noEmit && vite build

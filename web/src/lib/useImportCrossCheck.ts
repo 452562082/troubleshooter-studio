@@ -410,7 +410,7 @@ export function useImportCrossCheck(deps: UseImportCrossCheckDeps) {
     // 每种 type 走自己的逻辑:
     //   - nacos / apollo / consul → crossCheckImportedConfigSource(用 ccHubStateByEnv + envNamespaces + serviceConfigSel)
     //   - kuboard                  → crossCheckImportedKuboard(用 kuboardStateByEnv + kuboardSvcMap)
-    //   - env-vars / kubernetes / none → 不需要校验(没远端可比对)
+    //   - env-vars / none / unknown future source → 不需要校验(没远端可比对)
     const checkOneSource = async (sourceType: string, envID: string) => {
       if (sourceType === 'kuboard') {
         return crossCheckImportedKuboard(envID, sourceType)

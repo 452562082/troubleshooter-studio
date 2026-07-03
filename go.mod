@@ -1,6 +1,6 @@
 module github.com/xiaolong/troubleshooter-studio
 
-go 1.25.10
+go 1.25.11
 
 require (
 	github.com/go-sql-driver/mysql v1.9.3

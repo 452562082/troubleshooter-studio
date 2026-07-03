@@ -8,7 +8,7 @@ description: 通过环境动态查询 Apache Doris 数仓数据。先通过 rout
 ## 执行流程（固定）
 
 1. 先确认目标环境与服务；环境映射统一通过 `routing` 获取。
-{{- if or (eq .Infrastructure.PrimaryConfigCenter.Type "nacos") (eq .Infrastructure.PrimaryConfigCenter.Type "apollo") (eq .Infrastructure.PrimaryConfigCenter.Type "consul")}}
+{{- if or (eq .Infrastructure.PrimaryConfigCenter.Type "nacos") (eq .Infrastructure.PrimaryConfigCenter.Type "apollo") (eq .Infrastructure.PrimaryConfigCenter.Type "consul") (eq .Infrastructure.PrimaryConfigCenter.Type "kuboard")}}
 2. 通过配置中心获取该环境配置文本。
 {{- else if eq .Infrastructure.PrimaryConfigCenter.Type "env-vars"}}
 2. 通过 `resolve_runtime_static.py --agent-id {{.AgentID}} --env <env>` 读取静态连接信息。

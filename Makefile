@@ -210,6 +210,15 @@ test:
 	go test -race -cover ./...
 	./scripts/check-go-coverage.sh
 
+.PHONY: audit
+audit:
+	cd $(WEB_SRC) && npm audit --audit-level=moderate
+	@if command -v govulncheck >/dev/null 2>&1; then \
+	  govulncheck ./...; \
+	else \
+	  echo "govulncheck not installed; skipping"; \
+	fi
+
 .PHONY: lint
 lint:
 	go vet ./...

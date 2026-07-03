@@ -141,6 +141,71 @@ class OrderController {
 	}
 }
 
+func TestScanAPIRoutesUsesStackSpecificPatterns(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"handler.go": `
+package main
+func main() {
+  r.GET("/api/go/:id", handler)
+}
+`,
+		"routes.ts": `
+router.get('/api/node/:id', handler)
+`,
+		"app.py": `
+@app.get("/api/python/{id}")
+def get_item(id):
+    return {}
+`,
+		"OrderController.java": `
+@RestController
+@RequestMapping("/api")
+class OrderController {
+  @PostMapping("/java")
+  public String create() { return "ok"; }
+}
+`,
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	goRoutes := ScanAPIRoutes("go", root, nil)
+	if !hasRoute(goRoutes, "GET", "/api/go/:id") {
+		t.Fatalf("go route missing: %#v", goRoutes)
+	}
+	if hasRoute(goRoutes, "GET", "/api/node/:id") || hasRoute(goRoutes, "GET", "/api/python/{id}") || hasRoute(goRoutes, "POST", "/api/java") {
+		t.Fatalf("go scan should not include other stacks: %#v", goRoutes)
+	}
+
+	nodeRoutes := ScanAPIRoutes("node", root, nil)
+	if !hasRoute(nodeRoutes, "GET", "/api/node/:id") {
+		t.Fatalf("node route missing: %#v", nodeRoutes)
+	}
+	if hasRoute(nodeRoutes, "GET", "/api/go/:id") || hasRoute(nodeRoutes, "GET", "/api/python/{id}") || hasRoute(nodeRoutes, "POST", "/api/java") {
+		t.Fatalf("node scan should not include other stacks: %#v", nodeRoutes)
+	}
+
+	pythonRoutes := ScanAPIRoutes("python", root, nil)
+	if !hasRoute(pythonRoutes, "GET", "/api/python/{id}") {
+		t.Fatalf("python route missing: %#v", pythonRoutes)
+	}
+	if hasRoute(pythonRoutes, "GET", "/api/go/:id") || hasRoute(pythonRoutes, "GET", "/api/node/:id") || hasRoute(pythonRoutes, "POST", "/api/java") {
+		t.Fatalf("python scan should not include other stacks: %#v", pythonRoutes)
+	}
+
+	javaRoutes := ScanAPIRoutes("java", root, nil)
+	if !hasRoute(javaRoutes, "POST", "/api/java") {
+		t.Fatalf("java route missing: %#v", javaRoutes)
+	}
+	if hasRoute(javaRoutes, "GET", "/api/go/:id") || hasRoute(javaRoutes, "GET", "/api/node/:id") || hasRoute(javaRoutes, "GET", "/api/python/{id}") {
+		t.Fatalf("java scan should not include other stacks: %#v", javaRoutes)
+	}
+}
+
 func TestScanAPIRoutesIgnoresDependencyDirectories(t *testing.T) {
 	root := t.TempDir()
 	for _, path := range []string{

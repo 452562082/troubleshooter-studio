@@ -6,6 +6,7 @@
 package analyzer
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -41,13 +42,16 @@ var (
 	reGoClickHouse   = regexp.MustCompile(`(?:clickhouse\.Open|ClickHouse\{|"github\.com/ClickHouse/clickhouse-go)`)
 )
 
-func scanGoDeps(repoPath string, include []string) ([]DownstreamCall, []DataStoreUsage) {
-	files, _ := walkFiles(repoPath, include, func(p string) bool {
+func scanGoDeps(ctx context.Context, repoPath string, include []string) ([]DownstreamCall, []DataStoreUsage) {
+	files, _ := walkFilesContext(ctx, repoPath, include, func(p string) bool {
 		return strings.HasSuffix(p, ".go") && !strings.HasSuffix(p, "_test.go")
 	})
 	// 第一遍:扫所有 services.go 风格的常量定义,建 ServiceName const → 实际值 的映射。
 	serviceConstMap := map[string]string{}
 	for _, fp := range files {
+		if ctx != nil && ctx.Err() != nil {
+			break
+		}
 		data, err := os.ReadFile(fp)
 		if err != nil {
 			continue
@@ -60,6 +64,9 @@ func scanGoDeps(repoPath string, include []string) ([]DownstreamCall, []DataStor
 	var calls []DownstreamCall
 	var usages []DataStoreUsage
 	for _, fp := range files {
+		if ctx != nil && ctx.Err() != nil {
+			break
+		}
 		data, err := os.ReadFile(fp)
 		if err != nil {
 			continue

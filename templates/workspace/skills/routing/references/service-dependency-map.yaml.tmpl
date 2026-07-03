@@ -26,6 +26,8 @@
 #     role        : 来自 repo.role(backend / frontend / gateway / ...)
 #     upstream    : 调用本服务的上游(谁会受我影响)
 #     downstream  : 本服务调用的下游(我挂了谁不一定挂,但我挂常因为他们)
+#     downstream_namespaces : 可选;下游服务不在 `cascade_check --namespace-default` 时填
+#                              service → namespace 映射,例如 `order: "order-prod"`
 #     data_stores : 本服务用的数据层,格式 "<type>:<logical-name>"
 #     critical    : 关键路径标记;true=核心交易服务,P0 故障要更谨慎诊断 + 严格止血策略
 #
@@ -72,6 +74,7 @@ services:
     {{- else}}
     downstream: []       # 没扫到下游(analyzer 没跑或路径未填;wizard Step 4 / BotsPage 部署时填本地路径自动跑)
     {{- end}}
+    downstream_namespaces: {}  # 跨 namespace 下游在这里手填,未填则 cascade_check 使用 --namespace-default
     {{- if $scannedDS}}
     # ↓ 从代码扫到的数据层(import / 客户端构造);":scanned" 占位需替换成真实逻辑名
     data_stores:
@@ -110,6 +113,9 @@ lib_repos:
 # commerce:
 #   upstream: [api-gateway, web-bff]
 #   downstream: [user, order, inventory]
+#   downstream_namespaces:
+#     order: "order-prod"
+#     inventory: "warehouse-prod"
 #   data_stores:
 #     - "mysql:order_db"
 #     - "redis:session"

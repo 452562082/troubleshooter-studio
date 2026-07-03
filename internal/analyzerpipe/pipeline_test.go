@@ -2,6 +2,7 @@ package analyzerpipe
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -57,5 +58,26 @@ func main() {
 	}
 	if len(result.PerRepo) != 1 || result.PerRepo[0].Status != "analyzed" {
 		t.Fatalf("per repo = %#v", result.PerRepo)
+	}
+}
+
+func TestRunReturnsContextCanceledBeforeRepoScan(t *testing.T) {
+	reposRoot := t.TempDir()
+	cfg := &config.SystemConfig{
+		Repos: []config.Repo{{
+			Name:  "order-service",
+			Stack: "go",
+			Role:  config.RoleBackend,
+		}},
+		Infrastructure: config.Infrastructure{
+			ConfigCenters: []config.ConfigCenter{{ID: "nacos", Type: "nacos"}},
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := Run(ctx, cfg, Options{ReposRoot: reposRoot})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run err = %v, want context.Canceled", err)
 	}
 }

@@ -2,6 +2,7 @@
 package analyzer
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -21,13 +22,16 @@ var (
 	rePyClickHouse = regexp.MustCompile(`(?:clickhouse[-_]driver|clickhouse[-_]connect)`)
 )
 
-func scanPythonDeps(repoPath string, include []string) ([]DownstreamCall, []DataStoreUsage) {
-	files, _ := walkFiles(repoPath, include, func(p string) bool {
+func scanPythonDeps(ctx context.Context, repoPath string, include []string) ([]DownstreamCall, []DataStoreUsage) {
+	files, _ := walkFilesContext(ctx, repoPath, include, func(p string) bool {
 		return strings.HasSuffix(p, ".py")
 	})
 	var calls []DownstreamCall
 	var usages []DataStoreUsage
 	for _, fp := range files {
+		if ctx != nil && ctx.Err() != nil {
+			break
+		}
 		data, err := os.ReadFile(fp)
 		if err != nil {
 			continue

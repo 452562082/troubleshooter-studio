@@ -550,6 +550,9 @@ func TestGenerate_Nacos_Shop(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", "sentry_fetch.py")); err != nil {
 		t.Errorf("sentry_fetch.py should be generated: %v", err)
 	}
+	if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", "evidence_merge.py")); err != nil {
+		t.Errorf("evidence_merge.py should be generated: %v", err)
+	}
 	if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", "test_har_analyzer.py")); err == nil {
 		t.Errorf("test_har_analyzer.py should not be generated")
 	}
@@ -557,6 +560,7 @@ func TestGenerate_Nacos_Shop(t *testing.T) {
 		"test_console_analyzer.py",
 		"test_browser_collect.py",
 		"test_sentry_fetch.py",
+		"test_evidence_merge.py",
 	} {
 		if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", testScript)); err == nil {
 			t.Errorf("%s should not be generated", testScript)

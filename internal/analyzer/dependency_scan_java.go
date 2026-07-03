@@ -2,6 +2,7 @@
 package analyzer
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -26,13 +27,16 @@ var (
 	reJavaClickHouse = regexp.MustCompile(`(?:clickhouse-jdbc|ClickHouseDataSource|com\.clickhouse)`)
 )
 
-func scanJavaDeps(repoPath string, include []string) ([]DownstreamCall, []DataStoreUsage) {
-	files, _ := walkFiles(repoPath, include, func(p string) bool {
+func scanJavaDeps(ctx context.Context, repoPath string, include []string) ([]DownstreamCall, []DataStoreUsage) {
+	files, _ := walkFilesContext(ctx, repoPath, include, func(p string) bool {
 		return strings.HasSuffix(p, ".java") || strings.HasSuffix(p, ".kt")
 	})
 	var calls []DownstreamCall
 	var usages []DataStoreUsage
 	for _, fp := range files {
+		if ctx != nil && ctx.Err() != nil {
+			break
+		}
 		data, err := os.ReadFile(fp)
 		if err != nil {
 			continue

@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,9 +15,19 @@ type routePattern struct {
 	pathIndex int
 }
 
-var apiRoutePatterns = []routePattern{
+var nodeRoutePatterns = []routePattern{
 	{
 		re: regexp.MustCompile(`(?i)\b(?:router|app|r)\.(get|post|put|patch|delete)\s*\(\s*["']([^"']+)["']`),
+		method: func(m []string) string {
+			return strings.ToUpper(m[1])
+		},
+		pathIndex: 2,
+	},
+}
+
+var goRoutePatterns = []routePattern{
+	{
+		re: regexp.MustCompile(`\b(?:router|app|r|e)\.(GET|POST|PUT|PATCH|DELETE)\s*\(\s*["']([^"']+)["']`),
 		method: func(m []string) string {
 			return strings.ToUpper(m[1])
 		},
@@ -31,6 +42,26 @@ var apiRoutePatterns = []routePattern{
 	},
 }
 
+var pythonRoutePatterns = []routePattern{
+	{
+		re: regexp.MustCompile(`(?i)@(?:app|router|bp)\.(get|post|put|patch|delete|route)\s*\(\s*["']([^"']+)["']`),
+		method: func(m []string) string {
+			if strings.EqualFold(m[1], "route") {
+				return "ANY"
+			}
+			return strings.ToUpper(m[1])
+		},
+		pathIndex: 2,
+	},
+	{
+		re: regexp.MustCompile(`(?i)add_url_rule\s*\(\s*["']([^"']+)["']`),
+		method: func([]string) string {
+			return "ANY"
+		},
+		pathIndex: 1,
+	},
+}
+
 var (
 	springMappingRE       = regexp.MustCompile(`@(GetMapping|PostMapping|PutMapping|PatchMapping|DeleteMapping|RequestMapping)\s*(?:\(([^)]*)\))?`)
 	springNamedPathRE     = regexp.MustCompile(`(?:^|[,{]\s*)(?:value|path)\s*=\s*["']([^"']+)["']`)
@@ -38,7 +69,11 @@ var (
 )
 
 func ScanAPIRoutes(stack, repoPath string, includePaths []string) []APIRoute {
-	files, _ := walkFiles(repoPath, includePaths, func(rel string) bool {
+	return ScanAPIRoutesContext(context.Background(), stack, repoPath, includePaths)
+}
+
+func ScanAPIRoutesContext(ctx context.Context, stack, repoPath string, includePaths []string) []APIRoute {
+	files, _ := walkFilesContext(ctx, repoPath, includePaths, func(rel string) bool {
 		if pathHasIgnoredSegment(rel) || isTestRouteSource(rel) {
 			return false
 		}
@@ -48,6 +83,9 @@ func ScanAPIRoutes(stack, repoPath string, includePaths []string) []APIRoute {
 	seen := map[string]bool{}
 	var out []APIRoute
 	for _, file := range files {
+		if ctx != nil && ctx.Err() != nil {
+			break
+		}
 		info, err := os.Stat(file)
 		if err != nil || info.Size() > 512*1024 {
 			continue
@@ -57,7 +95,7 @@ func ScanAPIRoutes(stack, repoPath string, includePaths []string) []APIRoute {
 			continue
 		}
 		rel, _ := filepath.Rel(repoPath, file)
-		for _, route := range extractRoutesFromSource(string(data), filepath.ToSlash(rel)) {
+		for _, route := range extractRoutesFromSourceForStack(stack, string(data), filepath.ToSlash(rel)) {
 			key := route.Method + " " + route.Path
 			if seen[key] {
 				continue
@@ -80,9 +118,15 @@ func ScanAPIRoutes(stack, repoPath string, includePaths []string) []APIRoute {
 }
 
 func extractRoutesFromSource(src, source string) []APIRoute {
+	return extractRoutesFromSourceForStack("", src, source)
+}
+
+func extractRoutesFromSourceForStack(stack, src, source string) []APIRoute {
 	var routes []APIRoute
-	routes = append(routes, extractSpringRoutes(src, source)...)
-	for _, pat := range apiRoutePatterns {
+	if stackSupportsSpringRoutes(stack) {
+		routes = append(routes, extractSpringRoutes(src, source)...)
+	}
+	for _, pat := range routePatternsForStack(stack) {
 		for _, loc := range pat.re.FindAllStringSubmatchIndex(src, -1) {
 			matches := pat.re.FindStringSubmatch(src[loc[0]:loc[1]])
 			if len(matches) <= pat.pathIndex {
@@ -103,6 +147,34 @@ func extractRoutesFromSource(src, source string) []APIRoute {
 		}
 	}
 	return routes
+}
+
+func stackSupportsSpringRoutes(stack string) bool {
+	switch strings.ToLower(stack) {
+	case "java", "jvm", "":
+		return true
+	default:
+		return false
+	}
+}
+
+func routePatternsForStack(stack string) []routePattern {
+	switch strings.ToLower(stack) {
+	case "go":
+		return goRoutePatterns
+	case "node", "javascript", "typescript":
+		return nodeRoutePatterns
+	case "java", "jvm":
+		return nil
+	case "python":
+		return pythonRoutePatterns
+	default:
+		out := make([]routePattern, 0, len(goRoutePatterns)+len(nodeRoutePatterns)+len(pythonRoutePatterns))
+		out = append(out, goRoutePatterns...)
+		out = append(out, nodeRoutePatterns...)
+		out = append(out, pythonRoutePatterns...)
+		return out
+	}
 }
 
 func extractSpringRoutes(src, source string) []APIRoute {

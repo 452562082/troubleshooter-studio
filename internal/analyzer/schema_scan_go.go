@@ -2,6 +2,7 @@
 package analyzer
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -21,12 +22,15 @@ var (
 	reGoDBTag = regexp.MustCompile("db:\\s*\"\\w+\"")
 )
 
-func scanGoSchema(repoPath string, include []string) []SchemaTable {
-	files, _ := walkFiles(repoPath, include, func(p string) bool {
+func scanGoSchema(ctx context.Context, repoPath string, include []string) []SchemaTable {
+	files, _ := walkFilesContext(ctx, repoPath, include, func(p string) bool {
 		return strings.HasSuffix(p, ".go") && !strings.HasSuffix(p, "_test.go")
 	})
 	out := []SchemaTable{}
 	for _, fp := range files {
+		if ctx != nil && ctx.Err() != nil {
+			break
+		}
 		data, err := os.ReadFile(fp)
 		if err != nil {
 			continue

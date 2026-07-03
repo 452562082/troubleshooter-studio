@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"context"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -20,6 +21,13 @@ const maxScanFileBytes = 4 << 20 // 4 MiB
 //     vendored module 的 go.mod 当成子服务误报成 service_names。
 //   - 明确的源码忽略目录:node_modules / vendor / target / build / dist / testdata
 func walkFiles(root string, include []string, match func(path string) bool) ([]string, error) {
+	return walkFilesContext(context.Background(), root, include, match)
+}
+
+func walkFilesContext(ctx context.Context, root string, include []string, match func(path string) bool) ([]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var out []string
 	skipDirs := map[string]bool{
 		"node_modules": true, "vendor": true,
@@ -27,6 +35,9 @@ func walkFiles(root string, include []string, match func(path string) bool) ([]s
 		"testdata": true, "third_party": true,
 	}
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if err != nil {
 			return nil //nolint:nilerr // 遍历遇权限错/符号链接失效,跳过该文件不中断
 		}

@@ -120,6 +120,16 @@ python3 skills/incident-investigator/scripts/cascade_check.py --env <env> --serv
     --cluster <c> --namespace-default <ns>
 ```
 
+如果下游服务跨 namespace,先在 `routing/references/service-dependency-map.yaml` 的主角服务下补:
+
+```yaml
+downstream_namespaces:
+  order-service: "order-prod"
+  inventory-service: "warehouse-prod"
+```
+
+未出现在 `downstream_namespaces` 的下游仍使用 `--namespace-default`。
+
 按 `summary.verdict` 走:
 - `isolated_downstream` + `verdict_root_likely=user` → 把 user 当主角递归 Step 4 再追一层
 - `widespread_downstream` → 共享依赖问题,不要继续递归

@@ -2,6 +2,7 @@
 package analyzer
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -19,12 +20,15 @@ var (
 	rePyClass = regexp.MustCompile(`class\s+(\w+)\s*\(\s*(?:Base|models\.Model|Document|BaseModel)\s*\)`)
 )
 
-func scanPythonSchema(repoPath string, include []string) []SchemaTable {
-	files, _ := walkFiles(repoPath, include, func(p string) bool {
+func scanPythonSchema(ctx context.Context, repoPath string, include []string) []SchemaTable {
+	files, _ := walkFilesContext(ctx, repoPath, include, func(p string) bool {
 		return strings.HasSuffix(p, ".py")
 	})
 	out := []SchemaTable{}
 	for _, fp := range files {
+		if ctx != nil && ctx.Err() != nil {
+			break
+		}
 		data, err := os.ReadFile(fp)
 		if err != nil {
 			continue

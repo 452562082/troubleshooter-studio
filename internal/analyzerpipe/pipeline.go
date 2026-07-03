@@ -75,8 +75,8 @@ type Result struct {
 // 任一 repo 的 a.Analyze 实际失败(不是 skip 类)会中断并返回 error;skip / clone-failed
 // 都会变成 RepoSummary 里的 Error 字段,不中断整体。
 // Run 跑全套 analyzer。ctx 支持取消:每个 repo 处理之前 check ctx.Err(),
-// 上层 timeout / 用户主动取消能在 step 之间生效,不再"goroutine 后台跑到死"。
-// 单个 repo 的 scan 内部目前没穿透 ctx(WalkDir 不响应 ctx),后续可改。
+// 上层 timeout / 用户主动取消能在 step 之间生效。补充扫描依赖图 /
+// API route / schema 时也会把 ctx 继续传给 walkFilesContext。
 func Run(ctx context.Context, cfg *config.SystemConfig, opts Options) (*Result, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -287,11 +287,11 @@ func Run(ctx context.Context, cfg *config.SystemConfig, opts Options) (*Result, 
 		// 没有 cmd 入口信号:保留 ra.ServiceNames 原值(单仓单服务场景,go.mod 的 module 名就是服务名)
 		// 顺带扫"下游调用 + 数据层使用"——给 service-dependency-map.yaml 自动填种子值,
 		// 用户拿到种子改比从空白起强 10 倍。即使扫漏 50% 也比 0% 强,保守 best-effort。
-		ra.DownstreamCalls, ra.DataStoreUsages = analyzer.ScanDependencies(effectiveStack, repoPath, repo.Analysis.IncludePaths)
-		ra.APIRoutes = analyzer.ScanAPIRoutes(effectiveStack, repoPath, repo.Analysis.IncludePaths)
+		ra.DownstreamCalls, ra.DataStoreUsages = analyzer.ScanDependenciesContext(ctx, effectiveStack, repoPath, repo.Analysis.IncludePaths)
+		ra.APIRoutes = analyzer.ScanAPIRoutesContext(ctx, effectiveStack, repoPath, repo.Analysis.IncludePaths)
 		// 扫"业务表 / collection / 缓存 prefix"——给 data-schema-map.yaml 自动填种子值,
 		// 多策略叠加(orm_annotation > orm_api_call > sql_literal > file_name)同 (name,kind) 去重保最高优先级。
-		ra.SchemaTables = analyzer.ScanSchema(effectiveStack, repoPath, repo.Analysis.IncludePaths)
+		ra.SchemaTables = analyzer.ScanSchemaContext(ctx, effectiveStack, repoPath, repo.Analysis.IncludePaths)
 		// role 推荐:基于仓库名 + 顶层目录 + stack 专属文件(package.json/pom.xml/go.mod/...)。
 		// 用户在 yaml 显式 set 了 role 时不覆盖(只是产物里仍记录 hint,UI 给"📍 推荐 vs 实际"对比)。
 		hint := analyzer.RecommendRole(effectiveStack, repo.Name, repoPath)

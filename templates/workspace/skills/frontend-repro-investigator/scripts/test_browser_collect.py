@@ -4,11 +4,40 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
 SCRIPT = Path(__file__).with_name("browser_collect.mjs")
+
+
+class SmokePage(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b"""<!doctype html>
+<html>
+  <body>
+    <script>
+      console.log("tshoot smoke console");
+      fetch("/api/smoke").catch(() => {});
+    </script>
+  </body>
+</html>
+"""
+        if self.path == "/api/smoke":
+            body = b'{"ok":true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+        else:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        return
 
 
 class BrowserCollectTest(unittest.TestCase):
@@ -207,6 +236,40 @@ module.exports = {
                     "context.close",
                     "browser.close",
                 ],
+            )
+
+    @unittest.skipUnless(
+        os.environ.get("TSHOOT_BROWSER_COLLECT_SMOKE") == "1",
+        "set TSHOOT_BROWSER_COLLECT_SMOKE=1 to run real Playwright smoke",
+    )
+    def test_real_playwright_smoke_collects_local_page(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), SmokePage)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(lambda: thread.join(timeout=5))
+        self.addCleanup(server.server_close)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "artifacts"
+            res = self.run_script(
+                "--url",
+                f"http://127.0.0.1:{server.server_port}/",
+                "--out",
+                str(out_dir),
+            )
+            if res.returncode == 3:
+                self.skipTest("Playwright is not installed")
+
+            self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+            payload = json.loads(res.stdout)
+            self.assertTrue(Path(payload["artifacts"]["har"]).exists())
+            self.assertTrue(Path(payload["artifacts"]["console"]).exists())
+            self.assertTrue(Path(payload["artifacts"]["screenshot"]).exists())
+            self.assertTrue(Path(payload["artifacts"]["trace"]).exists())
+            self.assertIn(
+                "tshoot smoke console",
+                Path(payload["artifacts"]["console"]).read_text(encoding="utf-8"),
             )
 
 

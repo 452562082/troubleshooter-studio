@@ -2,6 +2,7 @@
 package analyzer
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,12 +19,15 @@ var (
 	reMybatisRMap   = regexp.MustCompile(`<resultMap\s+[^>]*type\s*=\s*"([\w\.]+)"`)
 )
 
-func scanJavaSchema(repoPath string, include []string) []SchemaTable {
-	files, _ := walkFiles(repoPath, include, func(p string) bool {
+func scanJavaSchema(ctx context.Context, repoPath string, include []string) []SchemaTable {
+	files, _ := walkFilesContext(ctx, repoPath, include, func(p string) bool {
 		return strings.HasSuffix(p, ".java") || strings.HasSuffix(p, ".kt") || strings.HasSuffix(p, ".xml")
 	})
 	out := []SchemaTable{}
 	for _, fp := range files {
+		if ctx != nil && ctx.Err() != nil {
+			break
+		}
 		data, err := os.ReadFile(fp)
 		if err != nil {
 			continue

@@ -40,6 +40,15 @@ type DownstreamCall struct {
 	Hint     string `json:"hint,omitempty"`     // 原始字符串(URL / 调用表达式),给人核对用
 }
 
+type APIRoute struct {
+	Path     string `json:"path"`
+	Method   string `json:"method,omitempty"`
+	Source   string `json:"source,omitempty"`
+	Line     int    `json:"line,omitempty"`
+	Pattern  string `json:"pattern,omitempty"`
+	Strength string `json:"strength,omitempty"`
+}
+
 // DataStoreUsage 单次数据层使用线索 —— "本仓库初始化了哪个数据层连接"。
 type DataStoreUsage struct {
 	Type     string `json:"type"`              // mysql / doris / postgresql / redis / mongodb / elasticsearch / kafka / rabbitmq / clickhouse
@@ -80,6 +89,7 @@ type RepoAnalysis struct {
 	ServiceNames    []string         `json:"service_names,omitempty"`
 	Findings        []Finding        `json:"findings,omitempty"`
 	DownstreamCalls []DownstreamCall `json:"downstream_calls,omitempty"`
+	APIRoutes       []APIRoute       `json:"api_routes,omitempty"`
 	DataStoreUsages []DataStoreUsage `json:"data_store_usages,omitempty"`
 	SchemaTables    []SchemaTable    `json:"schema_tables,omitempty"`
 	RoleHint        *RoleHint        `json:"role_hint,omitempty"` // 自动推断的角色 + 理由(用户可改)

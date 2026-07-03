@@ -119,6 +119,25 @@ metadata Authorization: Bearer bearer-hidden-987
         self.assertNotIn("refresh-cookie-secret-987", raw)
         self.assertNotIn("bearer-hidden-987", raw)
 
+    def test_classifies_chunk_csp_mixed_content_and_source_map_console_evidence(self):
+        console_text = """
+ChunkLoadError: Loading chunk checkout failed.
+Refused to connect to 'https://api.example.com/api/profile' because it violates the following Content Security Policy directive.
+Mixed Content: The page at 'https://shop.example.com' was loaded over HTTPS, but requested an insecure resource 'http://api.example.com/api/profile'.
+DevTools failed to load source map: Could not load content for https://shop.example.com/assets/app.js.map: HTTP error: status code 404
+"""
+
+        res = self.run_script(console_text)
+
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        payload = json.loads(res.stdout)
+        types = [item["type"] for item in payload["frontend_findings"]]
+        self.assertIn("chunk_load_error", types)
+        self.assertIn("csp_violation", types)
+        self.assertIn("mixed_content_or_tls_block", types)
+        self.assertIn("source_map_reference", types)
+        self.assertIn("/api/profile", payload["backend_handoff"]["candidate_endpoints"])
+
 
 if __name__ == "__main__":
     unittest.main()

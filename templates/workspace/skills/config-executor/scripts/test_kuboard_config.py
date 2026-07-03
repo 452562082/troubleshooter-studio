@@ -9,6 +9,7 @@ Run:
 """
 
 import json
+import importlib.util
 import os
 import subprocess
 import sys
@@ -21,6 +22,13 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).with_name("kuboard_config.py")
+
+
+def load_kuboard_config_module():
+    spec = importlib.util.spec_from_file_location("kuboard_config", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class MockKuboard(BaseHTTPRequestHandler):
@@ -267,6 +275,53 @@ class KuboardConfigTest(unittest.TestCase):
         self.assertEqual(runtime["rabbitmq"]["host"], "mq.internal")
         self.assertEqual(runtime["rabbitmq"]["port"], 5673)
         self.assertEqual(runtime["rabbitmq"]["vhost"], "/orders")
+
+    def test_runtime_resolution_parses_common_dsn_and_jdbc_urls_without_passwords(self):
+        module = load_kuboard_config_module()
+
+        runtime = module.resolve_runtime({
+            "DATABASE_URL": "mysql://app_user:db-secret@mysql.internal:3307/shop?sslmode=disable",
+            "REDIS_URL": "redis://:redis-secret@redis.internal:6380/0",
+            "AMQP_URL": "amqp://mq_user:mq-secret@mq.internal:5679/orders",
+            "CLICKHOUSE_DSN": "clickhouse://ch_user:ch-secret@ch.internal:9000/metrics",
+        })
+
+        self.assertEqual(runtime["mysql"]["host"], "mysql.internal")
+        self.assertEqual(runtime["mysql"]["port"], 3307)
+        self.assertEqual(runtime["mysql"]["database"], "shop")
+        self.assertEqual(runtime["mysql"]["user"], "app_user")
+        self.assertEqual(runtime["redis"]["host"], "redis.internal")
+        self.assertEqual(runtime["redis"]["port"], 6380)
+        self.assertEqual(runtime["rabbitmq"]["host"], "mq.internal")
+        self.assertEqual(runtime["rabbitmq"]["port"], 5679)
+        self.assertEqual(runtime["rabbitmq"]["vhost"], "orders")
+        self.assertEqual(runtime["clickhouse"]["hosts"], ["clickhouse://ch.internal:9000"])
+        self.assertNotIn("secret", json.dumps(runtime))
+
+    def test_runtime_resolution_parses_jdbc_postgres_url(self):
+        module = load_kuboard_config_module()
+
+        runtime = module.resolve_runtime({
+            "SPRING_DATASOURCE_URL": "jdbc:postgresql://pg.internal:5434/orders",
+            "SPRING_DATASOURCE_USERNAME": "order_user",
+        })
+
+        self.assertEqual(runtime["postgres"]["host"], "pg.internal")
+        self.assertEqual(runtime["postgres"]["port"], 5434)
+        self.assertEqual(runtime["postgres"]["database"], "orders")
+        self.assertEqual(runtime["postgres"]["user"], "order_user")
+
+    def test_runtime_resolution_preserves_clickhouse_hosts_csv(self):
+        module = load_kuboard_config_module()
+
+        runtime = module.resolve_runtime({
+            "CLICKHOUSE_HOSTS": "http://ch-1.internal:8123,http://ch-2.internal:8123",
+        })
+
+        self.assertEqual(runtime["clickhouse"]["hosts"], [
+            "http://ch-1.internal:8123",
+            "http://ch-2.internal:8123",
+        ])
 
     def assert_kuboard_v3_configmap_fallback(self):
         creds = {

@@ -183,6 +183,8 @@ func TestGenerate_FrontendEntryMapIncludesAnalysisEndpoints(t *testing.T) {
 				Notes: []string{
 					"api_endpoint[src/api.ts]=/api/orders",
 					"api_endpoint[src/pay.ts]=/api/payments/submit",
+					"api_endpoint[src/root.ts]=/api?debug=1",
+					"api_endpoint[src/graphql.ts]=/graphql?op=Order",
 					"api_endpoint[src/ignored.ts]=/healthz",
 				},
 			},
@@ -194,6 +196,8 @@ func TestGenerate_FrontendEntryMapIncludesAnalysisEndpoints(t *testing.T) {
 	fm := readFile(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/frontend-entry-map.yaml"))
 	for _, want := range []string{
 		`endpoint_paths:`,
+		`- "/api"`,
+		`- "/graphql"`,
 		`- "/api/orders"`,
 		`- "/api/payments/submit"`,
 		`path_candidates:`,
@@ -216,6 +220,15 @@ func TestGenerate_FrontendEntryMapIncludesAnalysisEndpoints(t *testing.T) {
 	if !stringSliceContains(mallWeb.EndpointPaths, "/api/payments/submit") {
 		t.Fatalf("mall-web endpoint_paths missing /api/payments/submit: %#v", mallWeb.EndpointPaths)
 	}
+	if !stringSliceContains(mallWeb.EndpointPaths, "/api") {
+		t.Fatalf("mall-web endpoint_paths missing /api: %#v", mallWeb.EndpointPaths)
+	}
+	if !stringSliceContains(mallWeb.EndpointPaths, "/graphql") {
+		t.Fatalf("mall-web endpoint_paths missing /graphql: %#v", mallWeb.EndpointPaths)
+	}
+	if stringSliceContains(mallWeb.EndpointPaths, "/api?debug=1") {
+		t.Fatalf("mall-web endpoint_paths should normalize /api query: %#v", mallWeb.EndpointPaths)
+	}
 	if stringSliceContains(mallWeb.EndpointPaths, "/healthz") {
 		t.Fatalf("mall-web endpoint_paths should not contain /healthz: %#v", mallWeb.EndpointPaths)
 	}
@@ -225,6 +238,161 @@ func TestGenerate_FrontendEntryMapIncludesAnalysisEndpoints(t *testing.T) {
 	}
 	if _, ok := orders.CandidateServices.([]interface{}); !ok {
 		t.Fatalf("/api/orders candidate_services should be a list, got %T (%#v)", orders.CandidateServices, orders.CandidateServices)
+	}
+}
+
+func TestGenerate_FrontendEntryMapMatchesBackendRoutes(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	cfg.Repos = append(cfg.Repos,
+		config.Repo{
+			Name:         "order-service",
+			Stack:        "go",
+			Role:         config.RoleBackend,
+			ServiceNames: []string{"order-service"},
+		},
+		config.Repo{
+			Name:         "payment-service",
+			Stack:        "node",
+			Role:         config.RoleBackend,
+			ServiceNames: []string{"payment-service"},
+		},
+		config.Repo{
+			Name:         "search-service",
+			Stack:        "go",
+			Role:         config.RoleBackend,
+			ServiceNames: []string{"search-service", "search-service"},
+		},
+		config.Repo{
+			Name:         "sort-service",
+			Stack:        "go",
+			Role:         config.RoleBackend,
+			ServiceNames: []string{"sort-service"},
+		},
+		config.Repo{
+			Name:         "legacy-order-service",
+			Stack:        "go",
+			Role:         config.RoleBackend,
+			ServiceNames: []string{"legacy-order-service"},
+		},
+	)
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+	g := New(cfg, tr, out)
+	g.LoadAnalysisReport(analyzer.Report{Repos: []analyzer.RepoAnalysis{
+		{
+			Name: "mall-web",
+			Notes: []string{
+				"api_endpoint[src/api.ts]=https://api.example.com/api/orders/42?debug=1",
+				"api_endpoint[src/pay.ts]=/api/payments/submit?x=1",
+				"api_endpoint[src/search.ts]=/api/search/items?q=x",
+				"api_endpoint[src/no_route.ts]=/api/no-route",
+				"api_endpoint[src/sort.ts]=/api/sort/42",
+			},
+		},
+		{
+			Name:         "order-service",
+			ServiceNames: []string{"order-service"},
+			APIRoutes: []analyzer.APIRoute{
+				{Path: "/api/orders/:id", Method: "GET", Source: "handler.go", Strength: "scanned"},
+			},
+		},
+		{
+			Name:         "payment-service",
+			ServiceNames: []string{"payment-service"},
+			APIRoutes: []analyzer.APIRoute{
+				{Path: "/api/payments/submit", Method: "POST", Source: "routes.ts", Strength: "scanned"},
+			},
+		},
+		{
+			Name:         "search-service",
+			ServiceNames: []string{"search-service", "search-service"},
+			APIRoutes: []analyzer.APIRoute{
+				{Path: "/api/search", Method: "GET", Source: "search.go", Strength: "scanned"},
+				{Path: "/api/search", Method: "GET", Source: "search.go", Strength: "scanned"},
+			},
+		},
+		{
+			Name:         "sort-service",
+			ServiceNames: []string{"sort-service"},
+			APIRoutes: []analyzer.APIRoute{
+				{Path: "/api/sort", Method: "GET", Source: "sort.go", Strength: "scanned"},
+				{Path: "/api/sort/:id", Method: "GET", Source: "sort.go", Strength: "scanned"},
+				{Path: "/api/sort/42", Method: "GET", Source: "sort.go", Strength: "scanned"},
+			},
+		},
+		{
+			Name:         "legacy-order-service",
+			ServiceNames: []string{"legacy-order-service"},
+			APIRoutes: []analyzer.APIRoute{
+				{Path: "/api/order", Method: "GET", Source: "legacy.go", Strength: "scanned"},
+			},
+		},
+	}})
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	entries := loadFrontendEntryMap(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/frontend-entry-map.yaml"))
+	mallWeb := entries.FrontendEntries["mall-web"]
+	for _, endpoint := range []string{
+		"/api/orders/42",
+		"/api/payments/submit",
+		"/api/search/items",
+		"/api/no-route",
+		"/api/sort/42",
+	} {
+		if !stringSliceContains(mallWeb.EndpointPaths, endpoint) {
+			t.Fatalf("mall-web endpoint_paths missing normalized endpoint %s: %#v", endpoint, mallWeb.EndpointPaths)
+		}
+	}
+	for _, rawEndpoint := range []string{
+		"https://api.example.com/api/orders/42?debug=1",
+		"/api/payments/submit?x=1",
+		"/api/search/items?q=x",
+	} {
+		if stringSliceContains(mallWeb.EndpointPaths, rawEndpoint) {
+			t.Fatalf("mall-web endpoint_paths should normalize %s: %#v", rawEndpoint, mallWeb.EndpointPaths)
+		}
+	}
+	candidates := mallWeb.PathCandidates
+	orderCandidates := candidates["/api/orders/42"].RouteCandidates
+	if len(orderCandidates) != 1 {
+		t.Fatalf("order route candidates = %#v", orderCandidates)
+	}
+	orderCandidate := orderCandidates[0]
+	if orderCandidate.Service != "order-service" || orderCandidate.Match != "pattern" ||
+		orderCandidate.Route != "/api/orders/:id" || orderCandidate.Method != "GET" || orderCandidate.Source != "handler.go" {
+		t.Fatalf("order route candidate = %#v", orderCandidate)
+	}
+	paymentCandidates := candidates["/api/payments/submit"].RouteCandidates
+	if len(paymentCandidates) != 1 {
+		t.Fatalf("payment route candidates = %#v", paymentCandidates)
+	}
+	paymentCandidate := paymentCandidates[0]
+	if paymentCandidate.Service != "payment-service" || paymentCandidate.Match != "exact" ||
+		paymentCandidate.Route != "/api/payments/submit" || paymentCandidate.Method != "POST" || paymentCandidate.Source != "routes.ts" {
+		t.Fatalf("payment route candidate = %#v", paymentCandidate)
+	}
+	searchCandidates := candidates["/api/search/items"].RouteCandidates
+	if len(searchCandidates) != 1 {
+		t.Fatalf("search route candidates should be deduplicated, got %#v", searchCandidates)
+	}
+	searchCandidate := searchCandidates[0]
+	if searchCandidate.Service != "search-service" || searchCandidate.Match != "prefix" ||
+		searchCandidate.Route != "/api/search" || searchCandidate.Method != "GET" || searchCandidate.Source != "search.go" {
+		t.Fatalf("search route candidate = %#v", searchCandidate)
+	}
+	noRouteCandidates := candidates["/api/no-route"].RouteCandidates
+	if noRouteCandidates == nil || len(noRouteCandidates) != 0 {
+		t.Fatalf("no-route route_candidates should parse as empty slice, got %#v", noRouteCandidates)
+	}
+	sortCandidates := candidates["/api/sort/42"].RouteCandidates
+	if len(sortCandidates) != 3 {
+		t.Fatalf("sort route candidates = %#v", sortCandidates)
+	}
+	for i, want := range []string{"exact", "pattern", "prefix"} {
+		if sortCandidates[i].Match != want {
+			t.Fatalf("sort route candidates should be ordered exact, pattern, prefix; got %#v", sortCandidates)
+		}
 	}
 }
 
@@ -262,7 +430,16 @@ type frontendEntryFixture struct {
 }
 
 type pathCandidateFixture struct {
-	CandidateServices interface{} `yaml:"candidate_services"`
+	CandidateServices interface{}             `yaml:"candidate_services"`
+	RouteCandidates   []routeCandidateFixture `yaml:"route_candidates"`
+}
+
+type routeCandidateFixture struct {
+	Service string `yaml:"service"`
+	Match   string `yaml:"match"`
+	Route   string `yaml:"route"`
+	Method  string `yaml:"method"`
+	Source  string `yaml:"source"`
 }
 
 func loadFrontendEntryMap(t *testing.T, path string) frontendEntryMapFixture {
@@ -364,8 +541,26 @@ func TestGenerate_Nacos_Shop(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", "har_analyzer.py")); err != nil {
 		t.Errorf("har_analyzer.py should be generated: %v", err)
 	}
+	if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", "console_analyzer.py")); err != nil {
+		t.Errorf("console_analyzer.py should be generated: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", "browser_collect.mjs")); err != nil {
+		t.Errorf("browser_collect.mjs should be generated: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", "sentry_fetch.py")); err != nil {
+		t.Errorf("sentry_fetch.py should be generated: %v", err)
+	}
 	if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", "test_har_analyzer.py")); err == nil {
 		t.Errorf("test_har_analyzer.py should not be generated")
+	}
+	for _, testScript := range []string{
+		"test_console_analyzer.py",
+		"test_browser_collect.py",
+		"test_sentry_fetch.py",
+	} {
+		if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", testScript)); err == nil {
+			t.Errorf("%s should not be generated", testScript)
+		}
 	}
 
 	ii := readFile(t, filepath.Join(wsRoot, "skills", "incident-investigator", "SKILL.md"))

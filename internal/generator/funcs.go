@@ -1,7 +1,9 @@
 package generator
 
 import (
+	"net/url"
 	"slices"
+	"sort"
 	"strings"
 	"text/template"
 
@@ -40,7 +42,18 @@ func frontendEndpointsForRepo(ctx *Context, repoName string) []string {
 	if ctx == nil {
 		return nil
 	}
-	return ctx.FrontendEndpointsByRepo[repoName]
+	seen := map[string]bool{}
+	var out []string
+	for _, endpoint := range ctx.FrontendEndpointsByRepo[repoName] {
+		path := normalizeRoutePathForTemplate(endpoint)
+		if path == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		out = append(out, path)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func frontendCandidateServicesForRepo(ctx *Context, repoName string) []string {
@@ -57,14 +70,160 @@ func frontendCandidateServicesForRepo(ctx *Context, repoName string) []string {
 	return services
 }
 
+type frontendRouteCandidate struct {
+	Service string
+	Match   string
+	Route   string
+	Method  string
+	Source  string
+}
+
+func frontendRouteCandidatesForRepoEndpoint(ctx *Context, frontendRepo, endpoint string) []frontendRouteCandidate {
+	if ctx == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []frontendRouteCandidate
+	for _, repo := range ctx.Repos {
+		if repo.Name == frontendRepo || !repo.RequiresServiceNames() {
+			continue
+		}
+		names := repo.ServiceNames
+		if len(names) == 0 {
+			names = []string{repo.Name}
+		}
+		for _, route := range ctx.APIRoutesByRepo[repo.Name] {
+			routePath := normalizeRoutePathForTemplate(route.Path)
+			match := routeMatchStrengthForTemplate(routePath, endpoint)
+			if match == "" {
+				continue
+			}
+			for _, svc := range names {
+				key := svc + "|" + match + "|" + routePath + "|" + route.Method + "|" + route.Source
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				out = append(out, frontendRouteCandidate{
+					Service: svc,
+					Match:   match,
+					Route:   routePath,
+					Method:  route.Method,
+					Source:  route.Source,
+				})
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if routeMatchRank(out[i].Match) != routeMatchRank(out[j].Match) {
+			return routeMatchRank(out[i].Match) < routeMatchRank(out[j].Match)
+		}
+		if out[i].Service != out[j].Service {
+			return out[i].Service < out[j].Service
+		}
+		if out[i].Route != out[j].Route {
+			return out[i].Route < out[j].Route
+		}
+		if out[i].Method != out[j].Method {
+			return out[i].Method < out[j].Method
+		}
+		return out[i].Source < out[j].Source
+	})
+	return out
+}
+
+func routeMatchStrengthForTemplate(routePath, endpointPath string) string {
+	routePath = normalizeRoutePathForTemplate(routePath)
+	endpointPath = normalizeRoutePathForTemplate(endpointPath)
+	if routePath == "" || endpointPath == "" {
+		return ""
+	}
+	if routePath == endpointPath {
+		return "exact"
+	}
+
+	routeParts := strings.Split(strings.Trim(routePath, "/"), "/")
+	endpointParts := strings.Split(strings.Trim(endpointPath, "/"), "/")
+	if len(routeParts) == len(endpointParts) {
+		matched := true
+		hasParam := false
+		for i := range routeParts {
+			if isRouteParamForTemplate(routeParts[i]) {
+				hasParam = true
+				continue
+			}
+			if routeParts[i] != endpointParts[i] {
+				matched = false
+				break
+			}
+		}
+		if matched && hasParam {
+			return "pattern"
+		}
+	}
+
+	if strings.HasPrefix(endpointPath, strings.TrimRight(routePath, "/")+"/") {
+		return "prefix"
+	}
+	return ""
+}
+
+func normalizeRoutePathForTemplate(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if u, err := url.Parse(path); err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" {
+		path = u.Path
+	}
+	if before, _, ok := strings.Cut(path, "#"); ok {
+		path = before
+	}
+	if before, _, ok := strings.Cut(path, "?"); ok {
+		path = before
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	path = strings.TrimRight(path, "/")
+	if path == "" {
+		path = "/"
+	}
+	if path != "/graphql" && path != "/api" && !strings.HasPrefix(path, "/api/") {
+		return ""
+	}
+	return path
+}
+
+func isRouteParamForTemplate(part string) bool {
+	return part == "*" ||
+		strings.HasPrefix(part, ":") ||
+		(strings.HasPrefix(part, "{") && strings.HasSuffix(part, "}")) ||
+		(strings.HasPrefix(part, "<") && strings.HasSuffix(part, ">"))
+}
+
+func routeMatchRank(match string) int {
+	switch match {
+	case "exact":
+		return 0
+	case "pattern":
+		return 1
+	case "prefix":
+		return 2
+	default:
+		return 3
+	}
+}
+
 func funcMap() template.FuncMap {
 	return template.FuncMap{
-		"upper":                            strings.ToUpper,
-		"lower":                            strings.ToLower,
-		"dataStoreSkill":                   dataStoreSkillName,
-		"frontendEndpointsForRepo":         frontendEndpointsForRepo,
-		"frontendCandidateServicesForRepo": frontendCandidateServicesForRepo,
-		"list":                             func(items ...string) []string { return items },
+		"upper":                                  strings.ToUpper,
+		"lower":                                  strings.ToLower,
+		"dataStoreSkill":                         dataStoreSkillName,
+		"frontendEndpointsForRepo":               frontendEndpointsForRepo,
+		"frontendCandidateServicesForRepo":       frontendCandidateServicesForRepo,
+		"frontendRouteCandidatesForRepoEndpoint": frontendRouteCandidatesForRepoEndpoint,
+		"list":                                   func(items ...string) []string { return items },
 		"hasSkill": func(ctx *Context, name string) bool {
 			if len(ctx.Generation.SkillsWhitelist) == 0 {
 				return true

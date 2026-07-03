@@ -233,9 +233,52 @@ def csv_values(value: str) -> list[str]:
     return [item.strip() for item in str(value).split(",") if item.strip()]
 
 
+def parse_runtime_url(value: str) -> dict:
+    raw = str(value or "").strip()
+    if not raw:
+        return {}
+    if raw.startswith("jdbc:"):
+        raw = raw[len("jdbc:"):]
+    parsed = urllib.parse.urlparse(raw)
+    if not parsed.scheme:
+        parsed = urllib.parse.urlparse("//" + raw)
+    return {
+        "scheme": parsed.scheme.lower(),
+        "host": parsed.hostname or "",
+        "port": parsed.port,
+        "database": urllib.parse.unquote(parsed.path.lstrip("/")),
+        "user": urllib.parse.unquote(parsed.username or ""),
+        "path": urllib.parse.unquote(parsed.path.lstrip("/")),
+    }
+
+
+def runtime_host_url(parsed: dict, default_port=None) -> str:
+    host = parsed.get("host") or ""
+    if not host:
+        return ""
+    port = parsed.get("port") or default_port
+    scheme = parsed.get("scheme") or ""
+    netloc = f"{host}:{port}" if port else host
+    return f"{scheme}://{netloc}" if scheme else netloc
+
+
+def first_nonempty(*values) -> str:
+    for value in values:
+        if value:
+            return value
+    return ""
+
+
 def resolve_runtime(data: dict[str, str]) -> dict:
     redis_host = first_value(data, "REDIS_HOST", "SPRING_REDIS_HOST")
     redis_port = first_value(data, "REDIS_PORT", "SPRING_REDIS_PORT")
+    redis_url = first_value(data, "REDIS_URL", "SPRING_REDIS_URL", "SPRING_DATA_REDIS_URL")
+    redis_parsed = parse_runtime_url(redis_url)
+
+    database_url = first_value(data, "DATABASE_URL", "SPRING_DATASOURCE_URL", "JDBC_DATABASE_URL")
+    database_parsed = parse_runtime_url(database_url)
+    datasource_user = first_value(data, "SPRING_DATASOURCE_USERNAME", "SPRING_DATASOURCE_USER", "DATASOURCE_USER")
+
     mysql_host = first_value(data, "MYSQL_HOST", "DB_HOST", "DATABASE_HOST")
     mysql_port = first_value(data, "MYSQL_PORT", "DB_PORT", "DATABASE_PORT")
     mysql_db = first_value(data, "MYSQL_DATABASE", "MYSQL_DB", "DB_DATABASE", "DATABASE_NAME")
@@ -246,13 +289,36 @@ def resolve_runtime(data: dict[str, str]) -> dict:
     postgres_user = first_value(data, "POSTGRES_USER", "POSTGRESQL_USER", "PGUSER")
     mongo_uri = first_value(data, "MONGO_URI", "MONGODB_URI", "SPRING_DATA_MONGODB_URI")
     es_url = first_value(data, "ELASTICSEARCH_URL", "ES_URL", "ELASTICSEARCH_HOSTS", "ES_HOSTS")
-    clickhouse_url = first_value(data, "CLICKHOUSE_URL", "CLICKHOUSE_HOSTS", "CH_URL", "CH_HOSTS")
+    clickhouse_url = first_value(data, "CLICKHOUSE_URL", "CLICKHOUSE_HOSTS", "CH_URL", "CH_HOSTS", "CLICKHOUSE_DSN")
+    clickhouse_parsed = parse_runtime_url(clickhouse_url) if "," not in clickhouse_url else {}
     clickhouse_host = first_value(data, "CLICKHOUSE_HOST", "CH_HOST")
     clickhouse_port = first_value(data, "CLICKHOUSE_PORT", "CH_PORT")
     kafka_servers = first_value(data, "KAFKA_BOOTSTRAP_SERVERS", "KAFKA_BROKERS", "SPRING_KAFKA_BOOTSTRAP_SERVERS")
     rabbitmq_host = first_value(data, "RABBITMQ_HOST", "SPRING_RABBITMQ_HOST")
     rabbitmq_port = first_value(data, "RABBITMQ_PORT", "SPRING_RABBITMQ_PORT")
     rabbitmq_vhost = first_value(data, "RABBITMQ_VHOST", "SPRING_RABBITMQ_VIRTUAL_HOST")
+    rabbitmq_url = first_value(data, "RABBITMQ_URL", "AMQP_URL", "AMQPS_URL", "SPRING_RABBITMQ_URL")
+    rabbitmq_parsed = parse_runtime_url(rabbitmq_url)
+
+    if database_parsed.get("scheme") in ("mysql", "mariadb"):
+        mysql_host = first_nonempty(mysql_host, database_parsed.get("host"))
+        mysql_port = first_nonempty(mysql_port, str(database_parsed.get("port") or ""))
+        mysql_db = first_nonempty(mysql_db, database_parsed.get("database"))
+        mysql_user = first_nonempty(mysql_user, database_parsed.get("user"), datasource_user)
+    if database_parsed.get("scheme") in ("postgres", "postgresql"):
+        postgres_host = first_nonempty(postgres_host, database_parsed.get("host"))
+        postgres_port = first_nonempty(postgres_port, str(database_parsed.get("port") or ""))
+        postgres_db = first_nonempty(postgres_db, database_parsed.get("database"))
+        postgres_user = first_nonempty(postgres_user, database_parsed.get("user"), datasource_user)
+
+    redis_host = first_nonempty(redis_host, redis_parsed.get("host"))
+    redis_port = first_nonempty(redis_port, str(redis_parsed.get("port") or ""))
+
+    rabbitmq_host = first_nonempty(rabbitmq_host, rabbitmq_parsed.get("host"))
+    rabbitmq_port = first_nonempty(rabbitmq_port, str(rabbitmq_parsed.get("port") or ""))
+    rabbitmq_vhost = first_nonempty(rabbitmq_vhost, rabbitmq_parsed.get("path"))
+
+    clickhouse_host_url = runtime_host_url(clickhouse_parsed)
     return {
         "redis": {
             "host": redis_host,
@@ -282,7 +348,7 @@ def resolve_runtime(data: dict[str, str]) -> dict:
             "resolved": bool(es_url),
         },
         "clickhouse": {
-            "hosts": csv_values(clickhouse_url) if clickhouse_url else ([f"{clickhouse_host}:{int_or_none(clickhouse_port) or 8123}"] if clickhouse_host else []),
+            "hosts": [clickhouse_host_url] if clickhouse_host_url else (csv_values(clickhouse_url) if clickhouse_url else ([f"{clickhouse_host}:{int_or_none(clickhouse_port) or 8123}"] if clickhouse_host else [])),
             "resolved": bool(clickhouse_url or clickhouse_host),
         },
         "kafka": {

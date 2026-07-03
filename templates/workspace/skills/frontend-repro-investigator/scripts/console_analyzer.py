@@ -18,6 +18,10 @@ REQUEST_RE = re.compile(
     r"(?:\s+|\s*-\s*)(\d{3})\b"
 )
 STACK_FRAME_RE = re.compile(r"(?m)^\s*at\s+.+$")
+CHUNK_LOAD_RE = re.compile(r"(?i)\b(ChunkLoadError|Loading chunk [\w.-]+ failed|failed to fetch dynamically imported module)\b")
+CSP_RE = re.compile(r"(?i)\b(Content Security Policy|violates the following Content Security Policy directive|refused to load|refused to connect|refused to execute)\b")
+MIXED_CONTENT_RE = re.compile(r"(?i)\b(Mixed Content|blocked:mixed-content|was loaded over HTTPS, but requested an insecure|SSL|TLS|certificate)\b")
+SOURCE_MAP_RE = re.compile(r"(?i)\b(source map|sourcemap|\.map\b).*(404|not found|failed|error)|failed to parse source map\b")
 SENSITIVE_KEYS = ("token", "password", "secret", "authorization", "cookie")
 SENSITIVE_QUERY_KEY_PARTS = ("token", "password", "secret", "key", "auth", "session", "cookie")
 SENSITIVE_HEADER_KEYS = {
@@ -171,6 +175,34 @@ def parse_text(text: str) -> dict:
                 "type": "js_exception",
                 "stack_top": redact_text(stack_frames[0]),
                 "stack_frames": [redact_text(frame) for frame in stack_frames[:5]],
+            }
+        )
+    if CHUNK_LOAD_RE.search(text):
+        frontend_findings.append(
+            {
+                "type": "chunk_load_error",
+                "hint": "A JS chunk failed to load. Check stale index.html, CDN cache, deploy asset retention, and frontend version skew.",
+            }
+        )
+    if CSP_RE.search(text):
+        frontend_findings.append(
+            {
+                "type": "csp_violation",
+                "hint": "Browser console indicates Content Security Policy blocking. Compare the blocked URL with script/connect/img directives.",
+            }
+        )
+    if MIXED_CONTENT_RE.search(text):
+        frontend_findings.append(
+            {
+                "type": "mixed_content_or_tls_block",
+                "hint": "Browser security blocked a request or asset. Check HTTPS origins, TLS certificate, HSTS, and mixed-content policy.",
+            }
+        )
+    if SOURCE_MAP_RE.search(text):
+        frontend_findings.append(
+            {
+                "type": "source_map_reference",
+                "hint": "Source map evidence may help map minified stack traces, or indicate missing map files in the frontend deploy.",
             }
         )
 

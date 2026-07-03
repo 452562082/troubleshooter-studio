@@ -32,6 +32,16 @@ frontend_entries:
     path_candidates:
     {{- range frontendEndpointsForRepo $ctx $repo.Name}}
       {{. | printf "%q"}}:
+        route_candidates:
+        {{- range frontendRouteCandidatesForRepoEndpoint $ctx $repo.Name .}}
+          - service: {{.Service | printf "%q"}}
+            match: {{.Match | printf "%q"}}
+            route: {{.Route | printf "%q"}}
+            method: {{.Method | printf "%q"}}
+            source: {{.Source | printf "%q"}}
+        {{- else}}
+          []
+        {{- end}}
         candidate_services:
         {{- range frontendCandidateServicesForRepo $ctx $repo.Name}}
           - {{. | printf "%q"}}

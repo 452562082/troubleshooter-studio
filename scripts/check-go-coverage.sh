@@ -13,9 +13,9 @@ thresholds='
 github.com/xiaolong/troubleshooter-studio/api 50
 github.com/xiaolong/troubleshooter-studio/cmd/tshoot 0.7
 github.com/xiaolong/troubleshooter-studio/internal/agent 60
-github.com/xiaolong/troubleshooter-studio/internal/analyzer 29
-github.com/xiaolong/troubleshooter-studio/internal/analyzerpipe 17
-github.com/xiaolong/troubleshooter-studio/internal/generator 60
+github.com/xiaolong/troubleshooter-studio/internal/analyzer 33
+github.com/xiaolong/troubleshooter-studio/internal/analyzerpipe 40
+github.com/xiaolong/troubleshooter-studio/internal/generator 65
 github.com/xiaolong/troubleshooter-studio/internal/deploy 80
 github.com/xiaolong/troubleshooter-studio/internal/dsprobe 9
 github.com/xiaolong/troubleshooter-studio/internal/doctor 70

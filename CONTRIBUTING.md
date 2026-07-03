@@ -100,6 +100,11 @@ go test ./... -race
 scripts/check-go-coverage.sh
 python3 templates/workspace/skills/frontend-repro-investigator/scripts/test_har_analyzer.py
 python3 templates/workspace/skills/frontend-repro-investigator/scripts/test_console_analyzer.py
+python3 templates/workspace/skills/frontend-repro-investigator/scripts/test_sentry_fetch.py
+python3 templates/workspace/skills/frontend-repro-investigator/scripts/test_browser_collect.py
+python3 templates/workspace/skills/config-executor/scripts/test_kuboard_config.py
+go test ./internal/analyzer ./internal/analyzerpipe ./internal/generator
+go test ./internal/generator -run TestGenerate_Nacos_Shop
 make audit
 ```
 
@@ -109,9 +114,9 @@ make audit
 |---|---|
 | `cmd/tshoot/` | 0.7% |
 | `internal/agent/` | 60% |
-| `internal/analyzer/` | 29% |
-| `internal/analyzerpipe/` | 17% |
-| `internal/generator/` | 60% |
+| `internal/analyzer/` | 33% |
+| `internal/analyzerpipe/` | 40% |
+| `internal/generator/` | 65% |
 | `internal/deploy/` | 80% |
 | `internal/dsprobe/` | 9% |
 | `internal/doctor/` | 70% |

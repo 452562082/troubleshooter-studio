@@ -45,6 +45,7 @@ type Context struct {
 	// 键必须匹配 cfg.Repos[i].Name(跟 RepoLocalPaths 一样);没扫到的 repo 缺键即可。
 	DownstreamCallsByRepo map[string][]analyzer.DownstreamCall
 	DataStoreUsagesByRepo map[string][]analyzer.DataStoreUsage
+	APIRoutesByRepo       map[string][]analyzer.APIRoute
 	// SchemaTablesByRepo 跟上面平行,给 data-schema-map.yaml 模板渲染用。
 	// agent 排障时 "order #xxx" → 直接知道查哪张表/collection/redis prefix。
 	SchemaTablesByRepo map[string][]analyzer.SchemaTable
@@ -104,6 +105,7 @@ func New(cfg *config.SystemConfig, templateRoot, outputDir string) *Generator {
 			PriorOverrides:          map[string]map[string]analyzer.Finding{},
 			DownstreamCallsByRepo:   map[string][]analyzer.DownstreamCall{},
 			DataStoreUsagesByRepo:   map[string][]analyzer.DataStoreUsage{},
+			APIRoutesByRepo:         map[string][]analyzer.APIRoute{},
 			SchemaTablesByRepo:      map[string][]analyzer.SchemaTable{},
 			FrontendEndpointsByRepo: map[string][]string{},
 		},
@@ -118,8 +120,8 @@ func frontendEndpointNotes(notes []string) []string {
 		if !strings.HasPrefix(note, "api_endpoint[") || !strings.Contains(note, marker) {
 			continue
 		}
-		path := strings.TrimSpace(note[strings.Index(note, marker)+len(marker):])
-		if !strings.HasPrefix(path, "/api/") && !strings.HasPrefix(path, "http") {
+		path := normalizeRoutePathForTemplate(note[strings.Index(note, marker)+len(marker):])
+		if path == "" {
 			continue
 		}
 		if seen[path] {
@@ -158,6 +160,9 @@ func (g *Generator) LoadAnalysisReport(report analyzer.Report) {
 			}
 			if len(ra.DataStoreUsages) > 0 {
 				g.Ctx.DataStoreUsagesByRepo[ra.Name] = ra.DataStoreUsages
+			}
+			if len(ra.APIRoutes) > 0 {
+				g.Ctx.APIRoutesByRepo[ra.Name] = ra.APIRoutes
 			}
 			if len(ra.SchemaTables) > 0 {
 				g.Ctx.SchemaTablesByRepo[ra.Name] = ra.SchemaTables

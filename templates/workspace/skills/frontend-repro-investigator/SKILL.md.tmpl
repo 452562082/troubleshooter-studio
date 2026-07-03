@@ -26,6 +26,40 @@ Ask for the smallest missing item, one question at a time:
 - occurrence time and timezone
 - one artifact: HAR file, console text/screenshot, RUM/Sentry link, or trace/request id
 
+## Evidence Priority
+
+Prefer structured evidence that can produce backend handoff fields:
+
+1. Sentry/RUM event id with `trace_id`, request id, API URL, or JS stack.
+2. HAR or browser collector output with failed/slow requests, trace headers, static asset status, CSP headers, or mixed-content/TLS blocks.
+3. Console text/screenshot with API status, ChunkLoadError, CSP violation, mixed-content/TLS message, source-map reference, or JS stack.
+4. Manual reproduction steps only after asking for the smallest missing artifact above.
+
+Use `backend_handoff.trace_ids` first. If no trace id exists, use `backend_handoff.candidate_endpoints` with `routing/references/frontend-entry-map.yaml` route candidates to pick backend services before querying logs.
+
+## Optional Browser Collection
+
+If the user can share a reproducible URL and the generated workspace has Node.js, first show the artifact plan without launching a browser:
+
+```bash
+node skills/frontend-repro-investigator/scripts/browser_collect.mjs --url <page-url> --out /tmp/tshoot-artifacts --plan
+```
+
+If browser automation is appropriate, run:
+
+```bash
+node skills/frontend-repro-investigator/scripts/browser_collect.mjs --url <page-url> --out /tmp/tshoot-artifacts
+```
+
+The collector writes:
+
+- `network.har`
+- `console.jsonl`
+- `screenshot.png`
+- `trace.zip`
+
+Playwright is optional and is not bundled by default. If it is missing, the script returns JSON with error code `3`, an `install_hint`, and the planned artifact paths. Do not treat missing Playwright as a blocker when the user already has HAR, console, RUM/Sentry, trace id, or request id evidence.
+
 ## HAR Workflow
 
 Run from workspace root:
@@ -38,7 +72,7 @@ The script returns:
 
 - `failed_requests`: 4xx/5xx browser requests
 - `slow_requests`: API requests taking at least 1000 ms
-- `frontend_findings`: static chunk/CSS/image failures
+- `frontend_findings`: static asset/chunk failures, source-map misses, cache risk, CSP headers, CORS/auth redirects, mixed-content/TLS blocks, and GraphQL errors
 - `backend_handoff.trace_ids`: values from `x-trace-id`, `x-request-id`, `traceparent`, and similar headers
 - `backend_handoff.candidate_endpoints`: API paths to map into backend services
 
@@ -60,7 +94,7 @@ pbpaste | python3 skills/frontend-repro-investigator/scripts/console_analyzer.py
 
 The script returns:
 
-- `frontend_findings`: console API failures and JS stack evidence
+- `frontend_findings`: console API failures, JS stack evidence, ChunkLoadError, CSP violation, mixed-content/TLS block, and source-map reference
 - `backend_handoff.trace_ids`: values from `x-request-id`, `request-id`, `x-trace-id`, `trace-id`, and Sentry-like `trace_id` fields
 - `backend_handoff.candidate_endpoints`: `/api/...` and `/graphql` paths extracted from URLs
 - `redacted_input_preview`: sanitized preview with tokens, passwords, secrets, authorization, cookies, bearer tokens, and sensitive query values removed
@@ -70,6 +104,34 @@ Then:
 1. If it is `ChunkLoadError`, `Loading CSS chunk failed`, or a static asset 404, classify as frontend deploy/cache/CDN first.
 2. If analyzer output contains an API URL, HTTP status, request id, or trace id, continue to backend handoff using `backend_handoff`.
 3. If only a JS stack exists, use `routing/references/frontend-entry-map.yaml` to identify the frontend repo and inspect the referenced component/request wrapper.
+
+## Sentry Event Lookup
+
+If the user provides a Sentry event id and the workspace has Sentry access, fetch and normalize the event from workspace root:
+
+```bash
+SENTRY_AUTH_TOKEN=<token> python3 skills/frontend-repro-investigator/scripts/sentry_fetch.py \
+  --base-url <sentry-base-url> \
+  --organization <org-slug> \
+  --project <project-slug> \
+  --event-id <event-id>
+```
+
+You can also pass `--token <token>` instead of `SENTRY_AUTH_TOKEN`. The script calls:
+
+```text
+GET /api/0/projects/{org}/{project}/events/{event_id}/
+```
+
+The script returns:
+
+- `summary`: event id, message, trace/endpoint/stack counts
+- `frontend_findings`: Sentry message, endpoint evidence, and JS stack summary
+- `backend_handoff.trace_ids`: recursive `trace_id`, `traceid`, `x-request-id`, `request-id`, `x-trace-id`, and `trace-id` values
+- `backend_handoff.candidate_endpoints`: only `/api`, `/api/...`, and `/graphql` paths
+- `redacted_event_preview`: sanitized event preview with sensitive query values and bearer tokens removed
+
+Continue backend investigation with the normalized `backend_handoff`. Do not paste raw Sentry event JSON when the normalized output contains enough evidence.
 
 ## Backend Handoff
 
@@ -92,7 +154,7 @@ frontend_evidence:
   artifact_type: "har|console|rum|manual"
   browser: "<browser-version-if-known>"
 findings:
-  - type: "api_5xx|api_4xx|slow_api|static_asset_failed|cors|js_exception|backend_not_reached"
+  - type: "api_5xx|api_4xx|slow_api|static_asset_failed|chunk_load_error|csp_violation|mixed_content_or_tls_block|cors|js_exception|backend_not_reached"
     evidence: "<specific request/error/stack>"
 backend_handoff:
   env: "<env>"

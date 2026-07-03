@@ -75,8 +75,51 @@ class HARAnalyzerTest(unittest.TestCase):
 
         self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
         payload = json.loads(res.stdout)
-        self.assertEqual(payload["frontend_findings"][0]["type"], "static_asset_failed")
+        types = [item["type"] for item in payload["frontend_findings"]]
+        self.assertIn("static_asset_failed", types)
         self.assertEqual(payload["backend_handoff"]["candidate_endpoints"], [])
+
+    def test_network_abort_static_asset_stays_out_of_backend_handoff(self):
+        har = {"log": {"entries": [
+            entry("https://shop.example.com/assets/chunk-deadbeef.js", status=0),
+            entry("https://shop.example.com/api/static/app.js", status=0),
+        ]}}
+
+        res = self.run_script(har)
+
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        payload = json.loads(res.stdout)
+        types = [item["type"] for item in payload["frontend_findings"]]
+        self.assertIn("network_request_aborted", types)
+        self.assertEqual(payload["backend_handoff"]["candidate_endpoints"], [])
+
+    def test_detects_chunk_source_map_cache_csp_and_mixed_content_evidence(self):
+        har = {"log": {"entries": [
+            entry(
+                "https://shop.example.com/assets/chunk-abc12345.js",
+                status=404,
+                response_headers={"Age": "3600"},
+            ),
+            entry("https://shop.example.com/assets/app.js.map", status=404),
+            entry(
+                "https://shop.example.com/",
+                status=200,
+                response_headers={"Content-Security-Policy": "default-src 'self'; connect-src https://api.example.com"},
+            ),
+            entry("http://api.example.com/api/profile", status=0),
+        ]}}
+
+        res = self.run_script(har)
+
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        payload = json.loads(res.stdout)
+        types = [item["type"] for item in payload["frontend_findings"]]
+        self.assertIn("chunk_load_error", types)
+        self.assertIn("asset_cache_risk", types)
+        self.assertIn("source_map_missing", types)
+        self.assertIn("csp_present", types)
+        self.assertIn("mixed_content_or_tls_block", types)
+        self.assertIn("/api/profile", payload["backend_handoff"]["candidate_endpoints"])
 
     def test_reports_slow_requests_without_5xx(self):
         har = {"log": {"entries": [

@@ -1,5 +1,5 @@
-# 示例：K8s 原生配置管理（ConfigMap + Secret）
-# 典型场景：Kubernetes 微服务，配置不在 Nacos/Apollo
+# 示例：Kuboard 配置管理（K8s ConfigMap + Secret）
+# 典型场景：Kubernetes 微服务，配置不在 Nacos/Apollo，通过 Kuboard 读取 ConfigMap
 system:
   id: k8s-app
   name: "K8sApp"
@@ -36,7 +36,7 @@ repos:
 
 infrastructure:
   config_center:
-    type: kubernetes   # ← K8s ConfigMap/Secret
+    type: kuboard   # ← 通过 Kuboard 读取 K8s ConfigMap/Secret
 
   observability:
     grafana:

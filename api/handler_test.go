@@ -171,6 +171,33 @@ func TestHandleSchema_HappyPath(t *testing.T) {
 	}
 }
 
+// TestHandleSchema_EmbeddedFallback: go install / tshoot serve 场景下 templates
+// 可能从 embed 解压到临时目录,旁边没有 repo 的 schema/ 目录;此时仍应返回内嵌 schema。
+func TestHandleSchema_EmbeddedFallback(t *testing.T) {
+	tmp := t.TempDir()
+	tplRoot := filepath.Join(tmp, "templates")
+	if err := os.MkdirAll(tplRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{TemplateRoot: tplRoot}
+	server := httptest.NewServer(NewRouter(srv, nil))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/api/schema")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := readAll(resp.Body)
+		t.Fatalf("status = %d, body=%s", resp.StatusCode, data)
+	}
+	data, _ := readAll(resp.Body)
+	if !strings.Contains(string(data), "schema_version") {
+		t.Fatalf("embedded schema fallback looks wrong: %.200s", data)
+	}
+}
+
 // TestHandleDoctor_HappyPath: doctor 需要 repos_root query 参数,空给空报告
 func TestHandleDoctor_HappyPath(t *testing.T) {
 	srv := newTestServer(t)

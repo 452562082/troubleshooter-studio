@@ -29,6 +29,7 @@ AI 排障机器人工作台。用 `troubleshooter.yaml` 描述一个微服务系
 |---|---|
 | 桌面 app | 推荐给个人使用；覆盖建模、扫描、部署、已装管理、工作目录浏览 |
 | CLI `tshoot` | 推荐给脚本、SSH、CI；覆盖 yaml 计算和 4 平台安装 |
+| HTTP server `tshoot serve` | 推荐给浏览器调试和轻量 Web UI；提供 `/api/*` 与嵌入式前端 |
 
 ## 部署目标
 
@@ -188,6 +189,7 @@ repos:
 | 命令 | 功能 |
 |---|---|
 | `init` | 交互生成 `troubleshooter.yaml` |
+| `serve` | 启动本机 HTTP API + Web UI，默认监听 `127.0.0.1:8080` |
 | `validate` | 校验 yaml |
 | `analyze` | 扫代码，抽取服务、配置中心、依赖图、schema |
 | `plan` / `diff` / `watch` | 干跑、diff、文件变化重跑 |

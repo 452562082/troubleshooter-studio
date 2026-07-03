@@ -12,8 +12,6 @@ description: 通过 RabbitMQ HTTP Management API(端口 15672)查询队列状态
 2. 通过配置中心获取该环境配置文本。
 {{- else if eq .Infrastructure.PrimaryConfigCenter.Type "env-vars"}}
 2. 通过 `resolve_runtime_static.py --agent-id {{.AgentID}} --env <env>` 读取静态连接信息。
-{{- else if eq .Infrastructure.PrimaryConfigCenter.Type "kubernetes"}}
-2. 通过 `resolve_runtime_k8s.py --agent-id {{.AgentID}} --env <env>` 从 K8s ConfigMap/Secret 解析连接信息。
 {{- end}}
 3. 解析配置中的 RabbitMQ Management 连接信息(URL / user / password)。
 4. **工具选用顺序**(2026-05-15 起 mcp 主路径暂禁):
@@ -30,9 +28,6 @@ description: 通过 RabbitMQ HTTP Management API(端口 15672)查询队列状态
 {{- end}}
 {{- if eq .Infrastructure.PrimaryConfigCenter.Type "env-vars"}}
 - `skills/config-executor/scripts/resolve_runtime_static.py`（从 creds.json 读静态连接串）
-{{- end}}
-{{- if eq .Infrastructure.PrimaryConfigCenter.Type "kubernetes"}}
-- `skills/config-executor/scripts/resolve_runtime_k8s.py`（从 K8s ConfigMap/Secret 解析）
 {{- end}}
 
 ## 诊断命令模板

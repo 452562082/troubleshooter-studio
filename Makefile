@@ -41,7 +41,7 @@ default: build
 # ── 前端:npm build + 拷到 embed 目标 ────────────────────────────
 .PHONY: web
 # SKIP_WEB_BUILD=1 + 已有 $(WEB_DIST)/index.html 时跳过整段 — 给 GitLab CI 的 desktop job
-# 用:它从 web job 的 artifact 拿到 internal/webui/dist,不需要再 npm install 重 build,
+# 用:它从 web job 的 artifact 拿到 internal/webui/dist,不需要再 npm ci 重 build,
 # 省 2-3 min 单次 pipeline 时间。Makefile recipe 行间是独立 shell,跳过逻辑必须**整段**
 # 用 if/else 写一行,否则 exit 0 不影响后续 recipe 行。
 web:
@@ -49,7 +49,7 @@ web:
 		echo "▶ web build SKIPPED (SKIP_WEB_BUILD=1 + 已有 $(WEB_DIST)/index.html)"; \
 	else \
 		echo "▶ building web frontend ($(WEB_SRC) → $(WEB_DIST))"; \
-		cd $(WEB_SRC) && npm install --silent && npm run build && cd - >/dev/null; \
+		cd $(WEB_SRC) && npm ci --ignore-scripts --silent && npm run build && cd - >/dev/null; \
 		rm -rf $(WEB_DIST); \
 		mkdir -p $(WEB_DIST); \
 		cp -R $(WEB_SRC)/dist/. $(WEB_DIST)/; \
@@ -208,6 +208,7 @@ demo: build
 .PHONY: test
 test:
 	go test -race -cover ./...
+	./scripts/check-go-coverage.sh
 
 .PHONY: lint
 lint:
@@ -262,4 +263,3 @@ release-tag:
 	@echo "✓ tag $(VERSION) 已创建"
 	@echo "  推送到远端:git push troubleshooter-studio $(VERSION)"
 	@echo "  撤销:git tag -d $(VERSION)"
-

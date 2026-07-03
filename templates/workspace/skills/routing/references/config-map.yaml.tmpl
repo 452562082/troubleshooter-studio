@@ -8,7 +8,7 @@
 #                    MCP 不可用时 config-executor 回落 scripts/nacos_config.py(plan D)
 #     apollo-http  → scripts/apollo_config.py(生态暂无稳定 Apollo MCP)
 #     consul-http  → scripts/consul_config.py(同上)
-#     kuboard-http → scripts/resolve_runtime_k8s.py(kuboard 历来走 HTTP)
+#     kuboard-http → 配置坐标来自 Kuboard service_map；不要找 MCP server 或 kubectl 脚本
 #     one2all-mcp  → 调 one2all-remote MCP(<system.id>-one2all)的 platform_get_configmap 等工具;
 #                    单一 streamable-http 实例,所有 env 通过 cluster_id 区分
 # - 凭据来源:
@@ -115,11 +115,8 @@ environments:
         status: inferred
         {{- end}}
         {{- else if eq $cc "kuboard"}}
-        # kuboard:**不通过 MCP**,走 Kuboard HTTP API + scripts/resolve_runtime_k8s.py 直读。
-        # 凭证(URL/access_key/cluster/namespace/configmap)按 agent_id 索引,优先级:
-        #   1. ~/.openclaw/<agent_id>-creds.json     (OpenClaw 部署专用)
-        #   2. ~/.tshoot/<agent_id>-creds.json       (Claude Code/Cursor/Codex 通用)
-        # agent 看到 runtime: kuboard-http 就 **不要** 尝试找 mcp_server,直接用脚本调 HTTP。
+        # kuboard:**不通过 MCP**。这里仅记录向导挑出的 ConfigMap 坐标,
+        # agent 看到 runtime: kuboard-http 就 **不要** 尝试找 mcp_server 或 kubectl 脚本。
         configmap_key: {{$svc | printf "%q"}}
         runtime: kuboard-http
         status: inferred

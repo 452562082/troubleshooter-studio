@@ -304,7 +304,7 @@ async function runAnalyze() {
     return
   }
   if (!isDesktop()) {
-    error.value = 'Analyze 仅在桌面 app 可用;浏览器 tshoot serve 模式请改用 CLI:\n  tshoot analyze -i <yaml> --repos-root ... -o analysis.json'
+    error.value = '代码扫描依赖本机文件访问,浏览器 tshoot serve 模式不支持;请用桌面 app 或 CLI:\n  tshoot analyze -i <yaml> --repos-root ... -o analysis.json'
     return
   }
   loading.value = true

@@ -182,7 +182,7 @@ infrastructure:
       discovery: from_config_center
       readonly_enforced: true        # 必须 true，生成的 skill 禁止写
       static_endpoints: []           # discovery=static/both 时用（legacy flat list）
-      endpoints_by_env:              # [optional] 按 env 声明静态连接串（env-vars/kubernetes 模式常用）
+      endpoints_by_env:              # [optional] 按 env 声明静态连接串（env-vars/kuboard/one2all 模式常用）
         dev: "redis-dev:6379"
         prod: "redis-prod:6379"
     - type: mongodb

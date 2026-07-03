@@ -17,7 +17,7 @@ config-map.yaml 里每条服务定位都带**两类指针之一**:
 **配置中心访问方式(2026 plan D 起)**:
 - **nacos → MCP 主路径**(`runtime: nacos-mcp`):config-executor 调 `{{.System.ID}}-nacos[-source]-<env>` 这个 MCP 的 `get_config` / `list_configs` / `get_config_history` / `list_config_history` 工具。MCP 进程自己拿 username/password 跑 login + 后台 refresh,token 短 TTL 无所谓 —— 这是 plan D 相比当年 bake-token 方案的本质区别。MCP 不可用时 config-executor 回落 `scripts/nacos_config.py` HTTP 脚本。
 - apollo / consul:生态暂无稳定 MCP,走 HTTP 脚本(`apollo-http` / `consul-http`)
-- kuboard:历来 HTTP API + `scripts/resolve_runtime_k8s.py`(`kuboard-http`)
+- kuboard:`runtime: kuboard-http` 仅表示配置坐标来自 Kuboard service_map；不要找 MCP server 或 kubectl 脚本。
 - one2all:走 one2all-remote MCP(`platform_get_configmap / platform_get_secret`,单一 streamable-http 实例,键 `one2all-mcp`)
 
 五个 runtime 值:`nacos-mcp` / `apollo-http` / `consul-http` / `kuboard-http` / `one2all-mcp`。**LLM 看到 runtime 字段就交给 config-executor SKILL,不要因为是 nacos-mcp 或 one2all-mcp 就跳过 config-executor 直接乱猜工具名**。

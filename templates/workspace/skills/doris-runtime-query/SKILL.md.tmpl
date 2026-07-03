@@ -12,8 +12,6 @@ description: 通过环境动态查询 Apache Doris 数仓数据。先通过 rout
 2. 通过配置中心获取该环境配置文本。
 {{- else if eq .Infrastructure.PrimaryConfigCenter.Type "env-vars"}}
 2. 通过 `resolve_runtime_static.py --agent-id {{.AgentID}} --env <env>` 读取静态连接信息。
-{{- else if eq .Infrastructure.PrimaryConfigCenter.Type "kubernetes"}}
-2. 通过 `resolve_runtime_k8s.py --agent-id {{.AgentID}} --env <env>` 从 K8s ConfigMap/Secret 解析连接信息。
 {{- end}}
 3. 解析配置中的 Doris FE 连接信息（host/port/database/user/password 或 DSN）。默认端口按 FE query port `9030`。
 4. **工具选用顺序**：

@@ -30,12 +30,16 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
-	srv := &api.Server{TemplateRoot: resolveTemplateDir()}
 	httpSrv := &http.Server{
 		Addr:              opts.addr,
-		Handler:           api.NewRouter(srv, webui.Distribution()),
+		Handler:           newServeHandler(resolveTemplateDir()),
 		ReadHeaderTimeout: opts.readHeaderTimeout,
 	}
 	fmt.Printf("tshoot serve listening on http://%s\n", opts.addr)
 	return httpSrv.ListenAndServe()
+}
+
+func newServeHandler(templateRoot string) http.Handler {
+	srv := &api.Server{TemplateRoot: templateRoot}
+	return api.NewRouter(srv, webui.Distribution())
 }

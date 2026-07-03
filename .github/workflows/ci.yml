@@ -56,8 +56,8 @@ jobs:
       - name: test
         run: go test -race -cover -coverprofile=coverage.out ./...
 
-      - name: coverage summary
-        run: go tool cover -func=coverage.out | tail -1
+      - name: coverage gate
+        run: scripts/check-go-coverage.sh
 
   web:
     name: Web (vue-tsc / vite build)
@@ -70,12 +70,12 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '20.19.0'
           cache: npm
           cache-dependency-path: web/package-lock.json
 
       - name: npm ci
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       # vitest:bridge / toast 等 lib 层单测。null.length 崩页 regression guard 在这里。
       - name: vitest
@@ -101,7 +101,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '20.19.0'
           cache: npm
           cache-dependency-path: web/package-lock.json
 
@@ -152,7 +152,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '20.19.0'
           cache: npm
           cache-dependency-path: web/package-lock.json
 
@@ -188,7 +188,7 @@ jobs:
           cache: true
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '20.19.0'
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: setup git identity & checkout main
@@ -221,7 +221,7 @@ jobs:
           cache: true
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '20.19.0'
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: setup git identity & checkout main

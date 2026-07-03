@@ -122,6 +122,7 @@ go:test:
   script:
     - go build ./...
     - go test -race -cover -coverprofile=coverage.out ./...
+    - scripts/check-go-coverage.sh
     - go tool cover -func=coverage.out | tail -1
   # 覆盖率 % 抽到 GitLab UI 显示(总覆盖率那行是 "total: (statements) XX.X%")
   coverage: '/total:\s+\(statements\)\s+(\d+\.\d+)%/'
@@ -135,7 +136,7 @@ go:test:
 # artifact 给 desktop job 复用,desktop 不再重跑 web build。
 web:
   stage: test
-  image: node:20
+  image: node:20.19.0
   interruptible: true
   cache:
     key:
@@ -145,8 +146,8 @@ web:
       - web/node_modules
   # 双执行器兼容(2026-06:runner 从 macOS shell 切到 docker executor 后,旧的 brew/nvm
   # 硬假设在 node:20 容器里 `exit 1` —— 容器没 brew、/root/.nvm/nvm.sh 也不存在):
-  #   - docker executor(现状,240-docker-runner):直接跑 `image: node:20`,node 已是 20
-  #     (= .nvmrc),无 brew / 无 nvm → 直接用镜像自带 node。
+  #   - docker executor(现状,240-docker-runner):直接跑 `image: node:20.19.0`,
+  #     满足 Vite 8 的 Node 下限,无 brew / 无 nvm → 直接用镜像自带 node。
   #   - macOS shell executor(历史/兜底):host 默认 node 25,需 nvm 读 .nvmrc 切到 20,
   #     绕开 esbuild postinstall SIGKILL / vitest worker 死锁。
   # 策略:能找到 nvm 就用它切 .nvmrc;找不到回落系统 node。两种执行器都能跑,不再硬 exit 1。
@@ -200,7 +201,7 @@ desktop:
   stage: build
   tags:
     - macos
-  # 复用 web 已 build 的 internal/webui/dist,跳过 npm install + vite build(原来重复跑 ~2-3 min)
+  # 复用 web 已 build 的 internal/webui/dist,跳过 npm ci + vite build(原来重复跑 ~2-3 min)
   needs:
     - job: web
       artifacts: true

@@ -97,6 +97,7 @@ go test ./...
 
 ```bash
 go test ./... -race
+scripts/check-go-coverage.sh
 ```
 
 覆盖率门槛：

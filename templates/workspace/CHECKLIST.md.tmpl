@@ -33,10 +33,6 @@
 {{- if eq .Infrastructure.PrimaryConfigCenter.Type "env-vars"}}
 - [ ] `resolve_runtime_static.py --env <env>` 能输出数据层连接串
 {{- end}}
-{{- if eq .Infrastructure.PrimaryConfigCenter.Type "kubernetes"}}
-- [ ] `kubectl get configmap/secret` 可达且有 RBAC 权限
-- [ ] `resolve_runtime_k8s.py --env <env>` 能输出数据层连接串
-{{- end}}
 - [ ] 可观测性走可用 MCP 或明确 fallback
 - [ ] 数据层走对应 skill：{{$first := true}}{{range .Infrastructure.DataStores}}{{if .Enabled}}{{if not $first}}、{{end}}{{$first = false}}{{dataStoreSkill .Type}}{{end}}{{end}}
 - [ ] 不可用步骤已记录阻塞点和替代链路

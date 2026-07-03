@@ -29,7 +29,7 @@ AI 排障机器人工作台。用 `troubleshooter.yaml` 描述一个微服务系
 |---|---|
 | 桌面 app | 推荐给个人使用；覆盖建模、扫描、部署、已装管理、工作目录浏览 |
 | CLI `tshoot` | 推荐给脚本、SSH、CI；覆盖 yaml 计算和 4 平台安装 |
-| HTTP server `tshoot serve` | 推荐给浏览器调试和轻量 Web UI；提供 `/api/*` 与嵌入式前端 |
+| HTTP server `tshoot serve` | 推荐给浏览器调试和轻量 Web UI；提供校验、计划、生成、doctor、schema API；代码扫描/安装等本机原生能力仍用桌面 app 或 CLI |
 
 ## 部署目标
 
@@ -189,7 +189,7 @@ repos:
 | 命令 | 功能 |
 |---|---|
 | `init` | 交互生成 `troubleshooter.yaml` |
-| `serve` | 启动本机 HTTP API + Web UI，默认监听 `127.0.0.1:8080` |
+| `serve` | 启动本机轻量 HTTP API + Web UI，默认监听 `127.0.0.1:8080` |
 | `validate` | 校验 yaml |
 | `analyze` | 扫代码，抽取服务、配置中心、依赖图、schema |
 | `plan` / `diff` / `watch` | 干跑、diff、文件变化重跑 |
@@ -201,6 +201,8 @@ repos:
 | `doctor` | 声明与代码实态漂移检测，支持 `--fix` |
 | `demo` | 零配置试跑 |
 | `skill new` | 新建 skill 模板 |
+
+`tshoot serve` 当前覆盖浏览器可安全完成的轻量操作：`/api/validate`、`/api/plan`、`/api/gen`、`/api/doctor`、`/api/schema` 与静态 Web UI。涉及本机文件选择、代码扫描、安装、self-test、钥匙串、OpenClaw 探测等原生能力时，请用桌面 app 或对应 CLI 子命令。
 
 典型流程：
 

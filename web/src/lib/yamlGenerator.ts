@@ -362,7 +362,7 @@ export function generateYAML(ctx: YAMLGenContext): string {
     lines.push('    type: none')
   } else if (active.length === 1) {
     const t = active[0]
-    lines.push('  config_center:        # 配置中心:nacos/apollo/consul/kubernetes/env-vars/none')
+    lines.push('  config_center:        # 配置中心:nacos/apollo/consul/kuboard/one2all/env-vars/none')
     lines.push(`    type: ${t}`)
     emitSourceBody(lines, '    ', t, 'default', true)
   } else {

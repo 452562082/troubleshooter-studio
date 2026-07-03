@@ -139,12 +139,13 @@ When you have more than one analyzer output, merge them before backend handoff:
 
 ```bash
 python3 skills/frontend-repro-investigator/scripts/evidence_merge.py \
+  --frontend-entry-map skills/routing/references/frontend-entry-map.yaml \
   /tmp/har-analysis.json \
   /tmp/console-analysis.json \
   /tmp/sentry-analysis.json
 ```
 
-The merge output keeps one `backend_handoff` with deduplicated trace ids, ranked candidate endpoints, endpoint source metadata, and combined frontend findings. Prefer merged `trace_ids` over individual analyzer output; if there is no trace id, use the ranked `candidate_endpoints` with `routing/references/frontend-entry-map.yaml`.
+The merge output keeps one `backend_handoff` with deduplicated trace ids, ranked candidate endpoints, candidate services from `frontend-entry-map.yaml`, endpoint source metadata, and combined frontend findings. Prefer merged `trace_ids` over individual analyzer output; if there is no trace id, use `candidate_services` first, then ranked `candidate_endpoints` with `routing/references/frontend-entry-map.yaml`.
 
 ## Backend Handoff
 

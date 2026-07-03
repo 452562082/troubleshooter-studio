@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import yaml from 'js-yaml'
-import { analyzeV2 as bridgeAnalyzeV2, isDesktop, getRepoPathsForSystem, getUserConfig, type AnalyzeResult } from '../lib/bridge'
+import { analyzeV2 as bridgeAnalyzeV2, cancelAnalyze, isDesktop, getRepoPathsForSystem, getUserConfig, type AnalyzeResult } from '../lib/bridge'
 import { toast, toastError } from '../lib/toast'
 import { useYamlFileLoader } from '../lib/useYamlFileLoader'
 import { computeYamlCodeDiff, type YamlVsCodeDiff } from '../lib/yamlCodeDiff'
@@ -288,10 +288,11 @@ function applyDiffToYAMLAndOpen() {
 // analyze:log 事件流(analyzerpipe.OnProgress 每行 EventsEmit)
 const progressLog = ref('')
 // 跑 analyze 是长任务(大仓库 + auto-clone 可能跑分钟级),秒表让用户知道没卡。
-// 目前 analyzerpipe 没 ctx 支持,不给 cancel 按钮(避免假承诺),只展示进度。
+// analyzerpipe 支持 ctx;桌面模式下取消按钮会调用后端 CancelAnalyze 中断扫描。
 const analyzeStartTime = ref<number | null>(null)
 const analyzeElapsed = ref(0)
 let analyzeTimer: number | null = null
+const canceling = ref(false)
 
 
 async function runAnalyze() {
@@ -308,6 +309,7 @@ async function runAnalyze() {
     return
   }
   loading.value = true
+  canceling.value = false
   error.value = ''
   result.value = null
   progressLog.value = ''
@@ -331,12 +333,34 @@ async function runAnalyze() {
     result.value = r
     toast.success(`analyze 完成: ${r.per_repo?.length ?? 0} 个仓库,共 ${r.report?.repos?.length ?? 0} 条 report`)
   } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
-    toastError('analyze', e)
+    const msg = e instanceof Error ? e.message : String(e)
+    if (msg.includes('context canceled') || msg.includes('operation was canceled')) {
+      error.value = ''
+      toast.info('扫描已取消')
+    } else {
+      error.value = msg
+      toastError('analyze', e)
+    }
   } finally {
     loading.value = false
+    canceling.value = false
     if (analyzeTimer) { clearInterval(analyzeTimer); analyzeTimer = null }
     analyzeStartTime.value = null
+  }
+}
+
+async function cancelRunningAnalyze() {
+  if (!loading.value || canceling.value) return
+  canceling.value = true
+  try {
+    const canceled = await cancelAnalyze()
+    if (!canceled) {
+      toast.info('当前没有正在运行的扫描')
+      loading.value = false
+    }
+  } catch (e) {
+    canceling.value = false
+    toastError('取消扫描', e)
   }
 }
 
@@ -459,9 +483,14 @@ onUnmounted(() => {
       @error="(msg: string) => (error = msg)"
     />
 
-    <button class="btn accent" @click="runAnalyze" :disabled="loading">
-      {{ loading ? '正在扫…' : '🔍 开始扫描' }}
-    </button>
+    <div class="analyze-actions">
+      <button class="btn accent" @click="runAnalyze" :disabled="loading">
+        {{ loading ? '正在扫…' : '🔍 开始扫描' }}
+      </button>
+      <button v-if="loading" class="btn" @click="cancelRunningAnalyze" :disabled="canceling">
+        {{ canceling ? '取消中…' : '取消扫描' }}
+      </button>
+    </div>
 
     <div v-if="error" class="alert error">{{ error }}</div>
 
@@ -676,6 +705,13 @@ input.path-readonly {
 .tag.orange { background: #fef3c7; color: #92400e; }
 .tag.gray { background: #f1f5f9; color: #475569; }
 .name { font-weight: 700; color: #1e293b; font-size: 15px; }
+
+.analyze-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 
 /* 运行时秒表 —— 跟 BotsPage install 的进度条视觉对齐 */
 .analyze-progress {

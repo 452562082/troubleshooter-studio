@@ -93,6 +93,22 @@ jobs:
       - name: vue-tsc + vite build
         run: npm run build
 
+  skill-scripts:
+    name: Workspace Skill Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: install pytest
+        run: python3 -m pip install pytest
+
+      - name: skill script tests
+        run: scripts/test-skill-scripts.sh
+
   desktop:
     name: Desktop (macOS .app build)
     # macOS runner 慢且配额贵,只在 push main / PR 上跑是可接受的。
@@ -143,7 +159,7 @@ jobs:
   release-patch:
     name: Release (patch — auto)
     runs-on: macos-latest
-    needs: [go, web, desktop]
+    needs: [go, web, skill-scripts, desktop]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '[release:minor]') && !contains(github.event.head_commit.message, '[release:major]') }}
     permissions:
       contents: write
@@ -181,7 +197,7 @@ jobs:
   release-minor:
     name: Release (minor — commit msg [release:minor])
     runs-on: macos-latest
-    needs: [go, web, desktop]
+    needs: [go, web, skill-scripts, desktop]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release:minor]') }}
     permissions:
       contents: write
@@ -214,7 +230,7 @@ jobs:
   release-major:
     name: Release (major — commit msg [release:major])
     runs-on: macos-latest
-    needs: [go, web, desktop]
+    needs: [go, web, skill-scripts, desktop]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release:major]') }}
     permissions:
       contents: write

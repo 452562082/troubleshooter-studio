@@ -11,6 +11,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"strings"
 
@@ -24,6 +25,47 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 	"github.com/xiaolong/troubleshooter-studio/internal/userconfig"
 )
+
+func (a *App) beginAnalyzeContext() (context.Context, func()) {
+	base := a.ctx
+	if base == nil {
+		base = context.Background()
+	}
+	ctx, cancel := context.WithCancel(base)
+	a.analyzeMu.Lock()
+	if a.analyzeCancel != nil {
+		a.analyzeCancel()
+	}
+	a.analyzeID++
+	id := a.analyzeID
+	a.analyzeCancel = cancel
+	a.analyzeMu.Unlock()
+
+	done := func() {
+		a.analyzeMu.Lock()
+		if a.analyzeID == id {
+			a.analyzeCancel = nil
+		}
+		a.analyzeMu.Unlock()
+		cancel()
+	}
+	return ctx, done
+}
+
+// CancelAnalyze 取消当前代码扫描。返回 false 表示当前没有正在跑的 analyze。
+func (a *App) CancelAnalyze() bool {
+	a.analyzeMu.Lock()
+	cancel := a.analyzeCancel
+	if cancel != nil {
+		a.analyzeCancel = nil
+	}
+	a.analyzeMu.Unlock()
+	if cancel == nil {
+		return false
+	}
+	cancel()
+	return true
+}
 
 // DiscoverBots 扫描本机已安装的排障机器人(tshoot.json 锚点)。
 // 默认根:
@@ -176,13 +218,15 @@ func (a *App) Analyze(yamlText, reposRoot string, autoClone bool) (*analyzerpipe
 	if err != nil {
 		return nil, err
 	}
+	runCtx, done := a.beginAnalyzeContext()
+	defer done()
 	expanded := map[string]string{}
 	for k, v := range userconfig.GetRepoPathsForSystem(cfg.System.ID) {
 		if strings.TrimSpace(v) != "" {
 			expanded[k] = userconfig.ExpandHome(v)
 		}
 	}
-	return analyzerpipe.Run(a.ctx, cfg, analyzerpipe.Options{
+	return analyzerpipe.Run(runCtx, cfg, analyzerpipe.Options{
 		ReposRoot: userconfig.ExpandHome(reposRoot),
 		RepoPaths: expanded,
 		AutoClone: autoClone,
@@ -209,12 +253,14 @@ func (a *App) AnalyzeV2(in AnalyzeInput) (*analyzerpipe.Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	runCtx, done := a.beginAnalyzeContext()
+	defer done()
 	// 路径里可能夹带 ~(用户手输 / 从 UI displayPath 保留的写法),统一展开
 	expandedPaths := make(map[string]string, len(in.RepoPaths))
 	for k, v := range in.RepoPaths {
 		expandedPaths[k] = userconfig.ExpandHome(v)
 	}
-	return analyzerpipe.Run(a.ctx, cfg, analyzerpipe.Options{
+	return analyzerpipe.Run(runCtx, cfg, analyzerpipe.Options{
 		ReposRoot: userconfig.ExpandHome(in.ReposRoot),
 		RepoPaths: expandedPaths,
 		AutoClone: in.AutoClone,

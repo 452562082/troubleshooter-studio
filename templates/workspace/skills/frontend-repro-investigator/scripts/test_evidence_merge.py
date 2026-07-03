@@ -89,6 +89,59 @@ class EvidenceMergeTest(unittest.TestCase):
         self.assertEqual(json.loads(res.stdout)["error"]["code"], 2)
         self.assertEqual(res.stderr, "")
 
+    def test_frontend_entry_map_adds_candidate_services(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        evidence = Path(tmp.name) / "har.json"
+        evidence.write_text(json.dumps({
+            "frontend_findings": [],
+            "backend_handoff": {
+                "trace_ids": [],
+                "candidate_endpoints": ["/api/profile"],
+            },
+            "failed_requests": [],
+        }), encoding="utf-8")
+        entry_map = Path(tmp.name) / "frontend-entry-map.yaml"
+        entry_map.write_text("""
+frontend_entries:
+  mall-web:
+    path_candidates:
+      "/api/profile":
+        route_candidates:
+          - service: "user-service"
+            match: "exact"
+            route: "/api/profile"
+            method: "GET"
+            source: "routes.go:12"
+        candidate_services:
+          - "fallback-service"
+""", encoding="utf-8")
+
+        res = subprocess.run(
+            [sys.executable, str(SCRIPT), "--frontend-entry-map", str(entry_map), str(evidence)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        payload = json.loads(res.stdout)
+        services = payload["backend_handoff"]["candidate_services"]
+        self.assertEqual(services[0]["service"], "user-service")
+        self.assertEqual(services[0]["frontend_repo"], "mall-web")
+        self.assertEqual(services[0]["endpoint"], "/api/profile")
+        self.assertEqual(services[0]["match"], "exact")
+        self.assertIn({
+            "endpoint": "/api/profile",
+            "frontend_repo": "mall-web",
+            "service": "fallback-service",
+            "match": "fallback",
+            "route": "",
+            "method": "",
+            "source": "candidate_services",
+        }, services)
+
 
 if __name__ == "__main__":
     unittest.main()

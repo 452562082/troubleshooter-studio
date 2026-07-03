@@ -6,12 +6,20 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/analyzerpipe"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 )
 
 func runAnalyze(args []string) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runAnalyzeWithContext(ctx, args)
+}
+
+func runAnalyzeWithContext(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("analyze", flag.ExitOnError)
 	input := fs.String("i", "", "troubleshooter.yaml 路径 (必填)")
 	reposRoot := fs.String("repos-root", "", "仓库 checkout 根目录 (必填)；每个仓库在其下以 repos[].name 命名")
@@ -36,7 +44,7 @@ func runAnalyze(args []string) error {
 	if text {
 		onProgress = func(msg string) { fmt.Fprintln(os.Stderr, msg) }
 	}
-	result, err := analyzerpipe.Run(context.Background(), cfg, analyzerpipe.Options{
+	result, err := analyzerpipe.Run(ctx, cfg, analyzerpipe.Options{
 		ReposRoot:   *reposRoot,
 		AutoClone:   *autoClone,
 		CloneBranch: *cloneBranch,

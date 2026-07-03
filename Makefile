@@ -209,6 +209,7 @@ demo: build
 test:
 	go test -race -cover ./...
 	./scripts/check-go-coverage.sh
+	./scripts/test-skill-scripts.sh
 
 .PHONY: audit
 audit:

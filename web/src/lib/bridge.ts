@@ -108,6 +108,11 @@ export async function analyzeV2(
   } as Parameters<typeof App.AnalyzeV2>[0])
 }
 
+export async function cancelAnalyze(): Promise<boolean> {
+  if (!isDesktop()) return false
+  return App.CancelAnalyze()
+}
+
 // 注:曾经的 diff() bridge + DiffPage 已删 —— 功能被 BotsPage 的"编辑配置 → 预演"
 // 完全覆盖(而且那个给的是 target-aware 真实 diff,带 preserve/remove 列表)。
 // 后端 App.Diff binding 暂留做 CLI 调用兼容,UI 不再经过 bridge.

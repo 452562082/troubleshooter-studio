@@ -98,11 +98,7 @@ go test ./...
 ```bash
 go test ./... -race
 scripts/check-go-coverage.sh
-python3 templates/workspace/skills/frontend-repro-investigator/scripts/test_har_analyzer.py
-python3 templates/workspace/skills/frontend-repro-investigator/scripts/test_console_analyzer.py
-python3 templates/workspace/skills/frontend-repro-investigator/scripts/test_sentry_fetch.py
-python3 templates/workspace/skills/frontend-repro-investigator/scripts/test_browser_collect.py
-python3 templates/workspace/skills/config-executor/scripts/test_kuboard_config.py
+scripts/test-skill-scripts.sh
 go test ./internal/analyzer ./internal/analyzerpipe ./internal/generator
 go test ./internal/generator -run TestGenerate_Nacos_Shop
 make audit

@@ -18,6 +18,8 @@ export function AnalyzeV2(arg1:main.AnalyzeInput):Promise<analyzerpipe.Result>;
 
 export function ApplyBot(arg1:string,arg2:string,arg3:boolean):Promise<agent.Result>;
 
+export function CancelAnalyze():Promise<boolean>;
+
 export function CancelInstall():Promise<boolean>;
 
 export function ChatDeleteKey(arg1:string):Promise<void>;

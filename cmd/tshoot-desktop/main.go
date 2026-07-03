@@ -64,6 +64,12 @@ type App struct {
 	// RunInstall 赋值并 defer 清空;CancelInstall 读取并调用。同一时刻只允许一个
 	// install 跑,前端 UI 会禁用"部署"按钮避免并发。
 	installCancel context.CancelFunc
+
+	// analyzeMu/analyzeCancel 保护代码扫描长任务。Analyze 和 CancelAnalyze 来自不同
+	// Wails goroutine,必须加锁避免 race。
+	analyzeMu     sync.Mutex
+	analyzeCancel context.CancelFunc
+	analyzeID     uint64
 }
 
 // startup 由 Wails 在窗口创建完成时调用，注入 runtime ctx。私有也能被 Wails 识别。

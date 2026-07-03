@@ -116,6 +116,28 @@ export namespace aitools {
 
 export namespace analyzer {
 	
+	export class APIRoute {
+	    path: string;
+	    method?: string;
+	    source?: string;
+	    line?: number;
+	    pattern?: string;
+	    strength?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new APIRoute(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.method = source["method"];
+	        this.source = source["source"];
+	        this.line = source["line"];
+	        this.pattern = source["pattern"];
+	        this.strength = source["strength"];
+	    }
+	}
 	export class DataStoreUsage {
 	    type: string;
 	    logical?: string;
@@ -231,6 +253,7 @@ export namespace analyzer {
 	    service_names?: string[];
 	    findings?: Finding[];
 	    downstream_calls?: DownstreamCall[];
+	    api_routes?: APIRoute[];
 	    data_store_usages?: DataStoreUsage[];
 	    schema_tables?: SchemaTable[];
 	    role_hint?: RoleHint;
@@ -250,6 +273,7 @@ export namespace analyzer {
 	        this.service_names = source["service_names"];
 	        this.findings = this.convertValues(source["findings"], Finding);
 	        this.downstream_calls = this.convertValues(source["downstream_calls"], DownstreamCall);
+	        this.api_routes = this.convertValues(source["api_routes"], APIRoute);
 	        this.data_store_usages = this.convertValues(source["data_store_usages"], DataStoreUsage);
 	        this.schema_tables = this.convertValues(source["schema_tables"], SchemaTable);
 	        this.role_hint = this.convertValues(source["role_hint"], RoleHint);

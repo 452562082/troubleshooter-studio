@@ -47,13 +47,134 @@ def read_payload(path: str) -> dict:
     return payload
 
 
+def strip_yaml_scalar(value: str) -> str:
+    value = value.strip()
+    if "#" in value:
+        value = value.split("#", 1)[0].strip()
+    return value.strip("\"'")
+
+
+def parse_frontend_entry_map(path: str) -> dict[str, list[dict]]:
+    """Parse generated frontend-entry-map.yaml without requiring PyYAML."""
+    endpoint_services: dict[str, list[dict]] = {}
+    current_repo = ""
+    current_endpoint = ""
+    in_entries = False
+    in_paths = False
+    in_routes = False
+    in_services = False
+    current_route: dict | None = None
+
+    def finish_route() -> None:
+        nonlocal current_route
+        if current_endpoint and current_route and current_route.get("service"):
+            endpoint_services.setdefault(current_endpoint, []).append({
+                "endpoint": current_endpoint,
+                "frontend_repo": current_repo,
+                "service": current_route.get("service", ""),
+                "match": current_route.get("match", ""),
+                "route": current_route.get("route", ""),
+                "method": current_route.get("method", ""),
+                "source": current_route.get("source", "route_candidates"),
+            })
+        current_route = None
+
+    for raw in Path(path).read_text(encoding="utf-8").splitlines():
+        if not raw.strip() or raw.strip().startswith("#"):
+            continue
+        if raw.strip() == "frontend_entries:":
+            in_entries = True
+            continue
+        if not in_entries:
+            continue
+
+        if raw.startswith("  ") and not raw.startswith("    ") and raw.strip().endswith(":"):
+            finish_route()
+            current_repo = strip_yaml_scalar(raw.strip()[:-1])
+            current_endpoint = ""
+            in_paths = False
+            in_routes = False
+            in_services = False
+            continue
+        if raw.startswith("    path_candidates:"):
+            finish_route()
+            in_paths = True
+            in_routes = False
+            in_services = False
+            continue
+        if in_paths and raw.startswith("      ") and not raw.startswith("        ") and raw.strip().endswith(":"):
+            finish_route()
+            current_endpoint = strip_yaml_scalar(raw.strip()[:-1])
+            in_routes = False
+            in_services = False
+            continue
+        if raw.startswith("        route_candidates:"):
+            finish_route()
+            in_routes = True
+            in_services = False
+            continue
+        if raw.startswith("        candidate_services:"):
+            finish_route()
+            in_routes = False
+            in_services = True
+            continue
+
+        text = raw.strip()
+        if in_routes and text.startswith("- service:"):
+            finish_route()
+            current_route = {"service": strip_yaml_scalar(text.split(":", 1)[1])}
+            continue
+        if in_routes and current_route is not None and ":" in text:
+            key, value = text.split(":", 1)
+            if key in {"match", "route", "method", "source"}:
+                current_route[key] = strip_yaml_scalar(value)
+            continue
+        if in_services and text.startswith("- "):
+            service = strip_yaml_scalar(text[2:])
+            if current_endpoint and service:
+                endpoint_services.setdefault(current_endpoint, []).append({
+                    "endpoint": current_endpoint,
+                    "frontend_repo": current_repo,
+                    "service": service,
+                    "match": "fallback",
+                    "route": "",
+                    "method": "",
+                    "source": "candidate_services",
+                })
+    finish_route()
+    return endpoint_services
+
+
 def score_endpoint(endpoint: str, source: str, trace_count: int, hit_count: int = 1) -> tuple[int, int, int, int, str]:
     exact_api_bonus = 5 if endpoint == "/graphql" or endpoint.startswith("/api/") or endpoint == "/api" else 0
     depth = endpoint.count("/")
     return (hit_count, trace_count, SOURCE_WEIGHT.get(source, 0) + exact_api_bonus, depth, endpoint)
 
 
-def merge(items: list[tuple[str, dict]]) -> dict:
+def candidate_services_for_endpoints(endpoints: list[str], entry_map: dict[str, list[dict]] | None) -> list[dict]:
+    if not entry_map:
+        return []
+    seen = set()
+    out = []
+    for endpoint in endpoints:
+        for item in entry_map.get(endpoint, []):
+            key = (
+                item.get("endpoint"),
+                item.get("frontend_repo"),
+                item.get("service"),
+                item.get("match"),
+                item.get("route"),
+                item.get("method"),
+                item.get("source"),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(item)
+    return out
+
+
+def merge(items: list[tuple[str, dict]], entry_map: dict[str, list[dict]] | None = None) -> dict:
     trace_ids = []
     endpoint_hits = {}
     findings = []
@@ -96,18 +217,22 @@ def merge(items: list[tuple[str, dict]]) -> dict:
         })
 
     ranked_endpoints = sorted(endpoint_hits.values(), key=lambda item: item["score"], reverse=True)
+    ranked_endpoint_paths = [item["endpoint"] for item in ranked_endpoints]
+    candidate_services = candidate_services_for_endpoints(ranked_endpoint_paths, entry_map)
     return {
         "summary": {
             "source_count": len(items),
             "trace_id_count": len(unique(trace_ids)),
             "candidate_endpoint_count": len(ranked_endpoints),
+            "candidate_service_count": len(candidate_services),
             "frontend_finding_count": len(findings),
         },
         "sources": sources,
         "frontend_findings": findings[:40],
         "backend_handoff": {
             "trace_ids": unique(trace_ids),
-            "candidate_endpoints": [item["endpoint"] for item in ranked_endpoints],
+            "candidate_endpoints": ranked_endpoint_paths,
+            "candidate_services": candidate_services,
             "endpoint_sources": [
                 {"endpoint": item["endpoint"], "source": item["source"]}
                 for item in ranked_endpoints
@@ -118,12 +243,14 @@ def merge(items: list[tuple[str, dict]]) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Merge frontend evidence analyzer JSON outputs.")
+    parser.add_argument("--frontend-entry-map", help="Optional routing/references/frontend-entry-map.yaml.")
     parser.add_argument("files", nargs="+", help="Analyzer JSON files, or '-' for stdin.")
     args = parser.parse_args()
 
     try:
         payloads = [(path, read_payload(path)) for path in args.files]
-        print(json.dumps(merge(payloads), ensure_ascii=False, indent=2))
+        entry_map = parse_frontend_entry_map(args.frontend_entry_map) if args.frontend_entry_map else None
+        print(json.dumps(merge(payloads, entry_map), ensure_ascii=False, indent=2))
         return 0
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(json.dumps({"error": {"code": 2, "message": str(exc)}}, ensure_ascii=False, indent=2))

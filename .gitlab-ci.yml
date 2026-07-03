@@ -138,6 +138,16 @@ go:test:
       - coverage.out
     expire_in: 1 week
 
+# ── Workspace skill scripts:生成物机器人脚本单测 ─────────────────────────────
+skill-scripts:
+  stage: test
+  image: python:3.12-slim
+  interruptible: true
+  before_script:
+    - python3 -m pip install --no-cache-dir pytest
+  script:
+    - scripts/test-skill-scripts.sh
+
 # ── Web:vue-tsc 类型检查 + vite 产物构建 ─────────────────────────────────
 # artifact 给 desktop job 复用,desktop 不再重跑 web build。
 web:

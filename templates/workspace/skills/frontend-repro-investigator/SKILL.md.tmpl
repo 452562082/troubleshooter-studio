@@ -46,10 +46,30 @@ The script returns:
 
 If the user provides console text or a RUM/Sentry link instead of HAR:
 
-1. Extract message, stack top frame, source file/chunk, release/bundle version, page URL, user/session id, and timestamp.
-2. If it is `ChunkLoadError`, `Loading CSS chunk failed`, or a static asset 404, classify as frontend deploy/cache/CDN first.
-3. If it contains an API URL, HTTP status, request id, or trace id, continue to backend handoff.
-4. If only a JS stack exists, use `routing/references/frontend-entry-map.yaml` to identify the frontend repo and inspect the referenced component/request wrapper.
+Run from workspace root:
+
+```bash
+python3 skills/frontend-repro-investigator/scripts/console_analyzer.py --file <path-to-console-or-sentry.json>
+```
+
+If the artifact is pasted text, save it to a local scratch file first or pipe stdin:
+
+```bash
+pbpaste | python3 skills/frontend-repro-investigator/scripts/console_analyzer.py
+```
+
+The script returns:
+
+- `frontend_findings`: console API failures and JS stack evidence
+- `backend_handoff.trace_ids`: values from `x-request-id`, `request-id`, `x-trace-id`, `trace-id`, and Sentry-like `trace_id` fields
+- `backend_handoff.candidate_endpoints`: `/api/...` and `/graphql` paths extracted from URLs
+- `redacted_input_preview`: sanitized preview with tokens, passwords, secrets, authorization, cookies, bearer tokens, and sensitive query values removed
+
+Then:
+
+1. If it is `ChunkLoadError`, `Loading CSS chunk failed`, or a static asset 404, classify as frontend deploy/cache/CDN first.
+2. If analyzer output contains an API URL, HTTP status, request id, or trace id, continue to backend handoff using `backend_handoff`.
+3. If only a JS stack exists, use `routing/references/frontend-entry-map.yaml` to identify the frontend repo and inspect the referenced component/request wrapper.
 
 ## Backend Handoff
 

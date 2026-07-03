@@ -90,6 +90,71 @@ class HARAnalyzerTest(unittest.TestCase):
         self.assertEqual(payload["summary"]["slow_request_count"], 1)
         self.assertEqual(payload["slow_requests"][0]["duration_ms"], 2500)
 
+    def test_detects_cors_preflight_and_network_abort(self):
+        har = {"log": {"entries": [
+            entry("https://api.example.com/api/orders", status=403, method="OPTIONS", response_headers={}, body="cors denied"),
+            entry("https://api.example.com/api/payments", status=0, method="POST", ms=120),
+        ]}}
+
+        res = self.run_script(har)
+
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        payload = json.loads(res.stdout)
+        types = [item["type"] for item in payload["frontend_findings"]]
+        self.assertIn("cors_preflight_failed", types)
+        self.assertIn("network_request_aborted", types)
+        self.assertIn("/api/payments", payload["backend_handoff"]["candidate_endpoints"])
+
+    def test_extracts_trace_id_from_traceparent(self):
+        har = {"log": {"entries": [
+            entry(
+                "https://api.example.com/api/orders/42",
+                status=500,
+                request_headers={"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"},
+            ),
+        ]}}
+
+        res = self.run_script(har)
+
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        payload = json.loads(res.stdout)
+        self.assertIn("4bf92f3577b34da6a3ce929d0e0e4736", payload["backend_handoff"]["trace_ids"])
+
+    def test_detects_graphql_error_and_auth_redirect(self):
+        har = {"log": {"entries": [
+            entry("https://api.example.com/graphql", status=200, method="POST", body='{"errors":[{"message":"resolver failed"}]}'),
+            entry("https://api.example.com/api/profile", status=302, response_headers={"Location": "https://login.example.com/sso"}),
+        ]}}
+
+        res = self.run_script(har)
+
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        payload = json.loads(res.stdout)
+        types = [item["type"] for item in payload["frontend_findings"]]
+        self.assertIn("graphql_error_response", types)
+        self.assertIn("auth_redirect", types)
+        self.assertIn("/graphql", payload["backend_handoff"]["candidate_endpoints"])
+        self.assertIn("/api/profile", payload["backend_handoff"]["candidate_endpoints"])
+
+    def test_redacts_sensitive_output_values(self):
+        har = {"log": {"entries": [
+            entry(
+                "https://api.example.com/api/login",
+                status=500,
+                request_headers={"Authorization": "Bearer secret-token", "Cookie": "sid=abc"},
+                body='{"token":"abc","password":"pw","secret":"hidden"}',
+            ),
+        ]}}
+
+        res = self.run_script(har)
+
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        raw = res.stdout
+        self.assertNotIn("secret-token", raw)
+        self.assertNotIn("sid=abc", raw)
+        self.assertNotIn('"pw"', raw)
+        self.assertIn("<redacted>", raw)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -99,6 +99,7 @@ go test ./...
 go test ./... -race
 scripts/check-go-coverage.sh
 python3 templates/workspace/skills/frontend-repro-investigator/scripts/test_har_analyzer.py
+python3 templates/workspace/skills/frontend-repro-investigator/scripts/test_console_analyzer.py
 make audit
 ```
 

@@ -216,14 +216,16 @@ audit:
 	@if command -v govulncheck >/dev/null 2>&1; then \
 	  govulncheck ./...; \
 	else \
-	  echo "govulncheck not installed; skipping"; \
+	  echo "govulncheck not installed; install with: go install golang.org/x/vuln/cmd/govulncheck@v1.5.0"; \
+	  exit 1; \
 	fi
 
 .PHONY: lint
 lint:
 	go vet ./...
-	@if [ -n "$$(gofmt -l .)" ]; then \
-	  echo "gofmt 未通过:"; gofmt -l .; exit 1; \
+	@out="$$(git ls-files -z '*.go' | xargs -0 gofmt -l)"; \
+	if [ -n "$$out" ]; then \
+	  echo "gofmt 未通过:"; echo "$$out"; exit 1; \
 	fi
 	@echo "✓ go vet + gofmt clean"
 	cd $(WEB_SRC) && npx vue-tsc --noEmit

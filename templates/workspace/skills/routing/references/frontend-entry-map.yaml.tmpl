@@ -23,6 +23,25 @@ frontend_entries:
     {{- range $ctx.Environments}}
       {{.ID}}: {{.APIDomain | printf "%q"}}
     {{- end}}
+    endpoint_paths:
+    {{- range frontendEndpointsForRepo $ctx $repo.Name}}
+      - {{. | printf "%q"}}
+    {{- else}}
+      []
+    {{- end}}
+    path_candidates:
+    {{- range frontendEndpointsForRepo $ctx $repo.Name}}
+      {{. | printf "%q"}}:
+        candidate_services:
+        {{- range frontendCandidateServicesForRepo $ctx $repo.Name}}
+          - {{. | printf "%q"}}
+        {{- else}}
+          []
+        {{- end}}
+        hint: "Match this endpoint with gateway routes, access logs, or trace spans before selecting the backend service."
+    {{- else}}
+      {}
+    {{- end}}
     candidate_downstream:
     {{- range $ctx.Repos}}
       {{- if and (.RequiresServiceNames) (ne .Name $repo.Name)}}

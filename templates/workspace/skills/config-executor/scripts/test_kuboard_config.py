@@ -199,6 +199,75 @@ class KuboardConfigTest(unittest.TestCase):
         MockKuboard.mode = "v3-html-tree"
         self.assert_kuboard_v3_configmap_fallback()
 
+    def test_runtime_resolution_covers_data_and_messaging_stores(self):
+        creds = {
+            "kuboard": {
+                "default": {
+                    "dev": {
+                        "url": self.base_url,
+                        "access_key": "ak",
+                    },
+                },
+            },
+        }
+        (self.home / ".openclaw" / "shop-creds.json").write_text(
+            json.dumps(creds), encoding="utf-8"
+        )
+
+        original_do_get = MockKuboard.do_GET
+
+        def do_get_with_rich_config(handler):
+            parsed = urllib.parse.urlparse(handler.path)
+            if parsed.path.endswith("/cluster-cache/direct"):
+                handler._json({
+                    "data": {
+                        "list": [
+                            {
+                                "data": {
+                                    "metadata": {"name": "app-config"},
+                                    "data": {
+                                        "POSTGRES_HOST": "pg.internal",
+                                        "POSTGRES_PORT": "5433",
+                                        "POSTGRES_DB": "orders",
+                                        "POSTGRES_USER": "order_user",
+                                        "CLICKHOUSE_URL": "http://ch.internal:8123",
+                                        "KAFKA_BOOTSTRAP_SERVERS": "kafka-1:9092,kafka-2:9092",
+                                        "RABBITMQ_HOST": "mq.internal",
+                                        "RABBITMQ_PORT": "5673",
+                                        "RABBITMQ_VHOST": "/orders",
+                                    },
+                                },
+                            },
+                        ],
+                    },
+                })
+                return
+            original_do_get(handler)
+
+        MockKuboard.do_GET = do_get_with_rich_config
+        self.addCleanup(lambda: setattr(MockKuboard, "do_GET", original_do_get))
+
+        res = self.run_script(
+            "get",
+            "--agent-id", "shop",
+            "--env", "dev",
+            "--cluster", "dev-cluster",
+            "--namespace", "default",
+            "--configmap", "app-config",
+        )
+
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        runtime = json.loads(res.stdout)["runtime"]
+        self.assertEqual(runtime["postgres"]["host"], "pg.internal")
+        self.assertEqual(runtime["postgres"]["port"], 5433)
+        self.assertEqual(runtime["postgres"]["database"], "orders")
+        self.assertEqual(runtime["postgres"]["user"], "order_user")
+        self.assertEqual(runtime["clickhouse"]["hosts"], ["http://ch.internal:8123"])
+        self.assertEqual(runtime["kafka"]["bootstrap_servers"], ["kafka-1:9092", "kafka-2:9092"])
+        self.assertEqual(runtime["rabbitmq"]["host"], "mq.internal")
+        self.assertEqual(runtime["rabbitmq"]["port"], 5673)
+        self.assertEqual(runtime["rabbitmq"]["vhost"], "/orders")
+
     def assert_kuboard_v3_configmap_fallback(self):
         creds = {
             "kuboard": {

@@ -9,6 +9,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/xiaolong/troubleshooter-studio/internal/analyzer"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 )
 
@@ -165,6 +166,68 @@ func TestGenerate_FrontendEntryMap(t *testing.T) {
 	}
 }
 
+func TestGenerate_FrontendEntryMapIncludesAnalysisEndpoints(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	for i := range cfg.Repos {
+		if cfg.Repos[i].Name != "mall-web" {
+			cfg.Repos[i].ServiceNames = nil
+		}
+	}
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+	g := New(cfg, tr, out)
+	g.LoadAnalysisReport(analyzer.Report{
+		Repos: []analyzer.RepoAnalysis{
+			{
+				Name: "mall-web",
+				Notes: []string{
+					"api_endpoint[src/api.ts]=/api/orders",
+					"api_endpoint[src/pay.ts]=/api/payments/submit",
+					"api_endpoint[src/ignored.ts]=/healthz",
+				},
+			},
+		},
+	})
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	fm := readFile(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/frontend-entry-map.yaml"))
+	for _, want := range []string{
+		`endpoint_paths:`,
+		`- "/api/orders"`,
+		`- "/api/payments/submit"`,
+		`path_candidates:`,
+	} {
+		if !strings.Contains(fm, want) {
+			t.Fatalf("frontend-entry-map missing %q:\n%s", want, fm)
+		}
+	}
+	if strings.Contains(fm, "/healthz") {
+		t.Fatalf("frontend-entry-map should not include non-api endpoint:\n%s", fm)
+	}
+	entries := loadFrontendEntryMap(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/frontend-entry-map.yaml"))
+	mallWeb, ok := entries.FrontendEntries["mall-web"]
+	if !ok {
+		t.Fatalf("frontend-entry-map missing mall-web entry: %#v", entries.FrontendEntries)
+	}
+	if !stringSliceContains(mallWeb.EndpointPaths, "/api/orders") {
+		t.Fatalf("mall-web endpoint_paths missing /api/orders: %#v", mallWeb.EndpointPaths)
+	}
+	if !stringSliceContains(mallWeb.EndpointPaths, "/api/payments/submit") {
+		t.Fatalf("mall-web endpoint_paths missing /api/payments/submit: %#v", mallWeb.EndpointPaths)
+	}
+	if stringSliceContains(mallWeb.EndpointPaths, "/healthz") {
+		t.Fatalf("mall-web endpoint_paths should not contain /healthz: %#v", mallWeb.EndpointPaths)
+	}
+	orders, ok := mallWeb.PathCandidates["/api/orders"]
+	if !ok {
+		t.Fatalf("mall-web path_candidates missing /api/orders: %#v", mallWeb.PathCandidates)
+	}
+	if _, ok := orders.CandidateServices.([]interface{}); !ok {
+		t.Fatalf("/api/orders candidate_services should be a list, got %T (%#v)", orders.CandidateServices, orders.CandidateServices)
+	}
+}
+
 func readFile(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -187,6 +250,41 @@ func loadConfigMap(t *testing.T, path string) map[string]map[string]map[string]a
 		t.Fatalf("parse %s: %v", path, err)
 	}
 	return root.Environments
+}
+
+type frontendEntryMapFixture struct {
+	FrontendEntries map[string]frontendEntryFixture `yaml:"frontend_entries"`
+}
+
+type frontendEntryFixture struct {
+	EndpointPaths  []string                        `yaml:"endpoint_paths"`
+	PathCandidates map[string]pathCandidateFixture `yaml:"path_candidates"`
+}
+
+type pathCandidateFixture struct {
+	CandidateServices interface{} `yaml:"candidate_services"`
+}
+
+func loadFrontendEntryMap(t *testing.T, path string) frontendEntryMapFixture {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var root frontendEntryMapFixture
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	return root
+}
+
+func stringSliceContains(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestGenerate_Nacos_Shop(t *testing.T) {

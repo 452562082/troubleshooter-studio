@@ -229,6 +229,10 @@ def int_or_none(value: str):
     return int(value) if str(value).isdigit() else None
 
 
+def csv_values(value: str) -> list[str]:
+    return [item.strip() for item in str(value).split(",") if item.strip()]
+
+
 def resolve_runtime(data: dict[str, str]) -> dict:
     redis_host = first_value(data, "REDIS_HOST", "SPRING_REDIS_HOST")
     redis_port = first_value(data, "REDIS_PORT", "SPRING_REDIS_PORT")
@@ -236,8 +240,19 @@ def resolve_runtime(data: dict[str, str]) -> dict:
     mysql_port = first_value(data, "MYSQL_PORT", "DB_PORT", "DATABASE_PORT")
     mysql_db = first_value(data, "MYSQL_DATABASE", "MYSQL_DB", "DB_DATABASE", "DATABASE_NAME")
     mysql_user = first_value(data, "MYSQL_USER", "DB_USERNAME", "DB_USER", "DATABASE_USER")
+    postgres_host = first_value(data, "POSTGRES_HOST", "POSTGRESQL_HOST", "PG_HOST", "SPRING_DATASOURCE_HOST")
+    postgres_port = first_value(data, "POSTGRES_PORT", "POSTGRESQL_PORT", "PG_PORT")
+    postgres_db = first_value(data, "POSTGRES_DATABASE", "POSTGRES_DB", "POSTGRESQL_DATABASE", "POSTGRESQL_DB", "PGDATABASE")
+    postgres_user = first_value(data, "POSTGRES_USER", "POSTGRESQL_USER", "PGUSER")
     mongo_uri = first_value(data, "MONGO_URI", "MONGODB_URI", "SPRING_DATA_MONGODB_URI")
     es_url = first_value(data, "ELASTICSEARCH_URL", "ES_URL", "ELASTICSEARCH_HOSTS", "ES_HOSTS")
+    clickhouse_url = first_value(data, "CLICKHOUSE_URL", "CLICKHOUSE_HOSTS", "CH_URL", "CH_HOSTS")
+    clickhouse_host = first_value(data, "CLICKHOUSE_HOST", "CH_HOST")
+    clickhouse_port = first_value(data, "CLICKHOUSE_PORT", "CH_PORT")
+    kafka_servers = first_value(data, "KAFKA_BOOTSTRAP_SERVERS", "KAFKA_BROKERS", "SPRING_KAFKA_BOOTSTRAP_SERVERS")
+    rabbitmq_host = first_value(data, "RABBITMQ_HOST", "SPRING_RABBITMQ_HOST")
+    rabbitmq_port = first_value(data, "RABBITMQ_PORT", "SPRING_RABBITMQ_PORT")
+    rabbitmq_vhost = first_value(data, "RABBITMQ_VHOST", "SPRING_RABBITMQ_VIRTUAL_HOST")
     return {
         "redis": {
             "host": redis_host,
@@ -251,13 +266,34 @@ def resolve_runtime(data: dict[str, str]) -> dict:
             "user": mysql_user,
             "resolved": bool(mysql_host),
         },
+        "postgres": {
+            "host": postgres_host,
+            "port": int_or_none(postgres_port) or 5432,
+            "database": postgres_db,
+            "user": postgres_user,
+            "resolved": bool(postgres_host),
+        },
         "mongo": {
             "uri": mongo_uri,
             "resolved": bool(mongo_uri),
         },
         "elasticsearch": {
-            "hosts": [es_url] if es_url else [],
+            "hosts": csv_values(es_url) if es_url else [],
             "resolved": bool(es_url),
+        },
+        "clickhouse": {
+            "hosts": csv_values(clickhouse_url) if clickhouse_url else ([f"{clickhouse_host}:{int_or_none(clickhouse_port) or 8123}"] if clickhouse_host else []),
+            "resolved": bool(clickhouse_url or clickhouse_host),
+        },
+        "kafka": {
+            "bootstrap_servers": csv_values(kafka_servers),
+            "resolved": bool(kafka_servers),
+        },
+        "rabbitmq": {
+            "host": rabbitmq_host,
+            "port": int_or_none(rabbitmq_port) or 5672,
+            "vhost": rabbitmq_vhost,
+            "resolved": bool(rabbitmq_host),
         },
     }
 

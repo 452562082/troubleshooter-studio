@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/analyzer"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
@@ -46,6 +48,8 @@ type Context struct {
 	// SchemaTablesByRepo 跟上面平行,给 data-schema-map.yaml 模板渲染用。
 	// agent 排障时 "order #xxx" → 直接知道查哪张表/collection/redis prefix。
 	SchemaTablesByRepo map[string][]analyzer.SchemaTable
+	// FrontendEndpointsByRepo stores api_endpoint[...] notes extracted by node analyzer.
+	FrontendEndpointsByRepo map[string][]string
 }
 
 type Generator struct {
@@ -93,16 +97,39 @@ func New(cfg *config.SystemConfig, templateRoot, outputDir string) *Generator {
 		TemplateRoot: templateRoot,
 		OutputDir:    outputDir,
 		Ctx: &Context{
-			SystemConfig:          cfg,
-			AgentID:               cfg.ResolveID(),
-			MCPKeyPrefix:          cfg.MCPKeyPrefix(),
-			Findings:              map[string]map[string]analyzer.Finding{},
-			PriorOverrides:        map[string]map[string]analyzer.Finding{},
-			DownstreamCallsByRepo: map[string][]analyzer.DownstreamCall{},
-			DataStoreUsagesByRepo: map[string][]analyzer.DataStoreUsage{},
-			SchemaTablesByRepo:    map[string][]analyzer.SchemaTable{},
+			SystemConfig:            cfg,
+			AgentID:                 cfg.ResolveID(),
+			MCPKeyPrefix:            cfg.MCPKeyPrefix(),
+			Findings:                map[string]map[string]analyzer.Finding{},
+			PriorOverrides:          map[string]map[string]analyzer.Finding{},
+			DownstreamCallsByRepo:   map[string][]analyzer.DownstreamCall{},
+			DataStoreUsagesByRepo:   map[string][]analyzer.DataStoreUsage{},
+			SchemaTablesByRepo:      map[string][]analyzer.SchemaTable{},
+			FrontendEndpointsByRepo: map[string][]string{},
 		},
 	}
+}
+
+func frontendEndpointNotes(notes []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, note := range notes {
+		const marker = "]="
+		if !strings.HasPrefix(note, "api_endpoint[") || !strings.Contains(note, marker) {
+			continue
+		}
+		path := strings.TrimSpace(note[strings.Index(note, marker)+len(marker):])
+		if !strings.HasPrefix(path, "/api/") && !strings.HasPrefix(path, "http") {
+			continue
+		}
+		if seen[path] {
+			continue
+		}
+		seen[path] = true
+		out = append(out, path)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // LoadAnalysisReport 合并已经在内存里的 analyzer.Report 到 Context。
@@ -134,6 +161,12 @@ func (g *Generator) LoadAnalysisReport(report analyzer.Report) {
 			}
 			if len(ra.SchemaTables) > 0 {
 				g.Ctx.SchemaTablesByRepo[ra.Name] = ra.SchemaTables
+			}
+			if endpoints := frontendEndpointNotes(ra.Notes); len(endpoints) > 0 {
+				if g.Ctx.FrontendEndpointsByRepo == nil {
+					g.Ctx.FrontendEndpointsByRepo = map[string][]string{}
+				}
+				g.Ctx.FrontendEndpointsByRepo[ra.Name] = endpoints
 			}
 		}
 	}

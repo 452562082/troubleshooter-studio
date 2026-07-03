@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, test]
   pull_request:
 
 permissions:
@@ -33,12 +33,12 @@ jobs:
 
       - name: gofmt -l
         run: |
-          out=$(gofmt -l .)
+          out=$(git ls-files -z '*.go' | xargs -0 gofmt -l)
           if [ -n "$out" ]; then
             echo "unformatted files detected:"
             echo "$out"
             echo ""
-            echo "请在本地运行: gofmt -w ."
+            echo "请在本地运行: gofmt -w <files>"
             exit 1
           fi
 

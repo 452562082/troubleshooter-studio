@@ -36,12 +36,35 @@ func dataStoreSkillName(typ string) string {
 	return typ + "-runtime-query"
 }
 
+func frontendEndpointsForRepo(ctx *Context, repoName string) []string {
+	if ctx == nil {
+		return nil
+	}
+	return ctx.FrontendEndpointsByRepo[repoName]
+}
+
+func frontendCandidateServicesForRepo(ctx *Context, repoName string) []string {
+	if ctx == nil {
+		return nil
+	}
+	var services []string
+	for _, repo := range ctx.Repos {
+		if !repo.RequiresServiceNames() || repo.Name == repoName {
+			continue
+		}
+		services = append(services, repo.ServiceNames...)
+	}
+	return services
+}
+
 func funcMap() template.FuncMap {
 	return template.FuncMap{
-		"upper":          strings.ToUpper,
-		"lower":          strings.ToLower,
-		"dataStoreSkill": dataStoreSkillName,
-		"list":           func(items ...string) []string { return items },
+		"upper":                            strings.ToUpper,
+		"lower":                            strings.ToLower,
+		"dataStoreSkill":                   dataStoreSkillName,
+		"frontendEndpointsForRepo":         frontendEndpointsForRepo,
+		"frontendCandidateServicesForRepo": frontendCandidateServicesForRepo,
+		"list":                             func(items ...string) []string { return items },
 		"hasSkill": func(ctx *Context, name string) bool {
 			if len(ctx.Generation.SkillsWhitelist) == 0 {
 				return true

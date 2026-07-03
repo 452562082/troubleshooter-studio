@@ -10,6 +10,7 @@
 #
 # 触发(workflow rules):
 #   - main push          → 跑全套
+#   - test push          → 跑全套(当前开发分支直接 push 验证)
 #   - merge_request      → 跑 go:lint / go:test / web(desktop 改成 manual 按钮可选)
 #   - tag push(v*)      → 不跑(release job 已经在打 tag 那次 pipeline 里产出,
 #                         tag 二次触发 pipeline 是浪费,且 release job 不会再选自己)
@@ -28,6 +29,8 @@ workflow:
       when: never
     # main 分支 push → 跑
     - if: '$CI_COMMIT_BRANCH == "main"'
+    # test 分支 push → 跑,匹配当前开发分支的直接推送流程
+    - if: '$CI_COMMIT_BRANCH == "test"'
     # MR pipeline → 跑(开 MR 时所有 commit 上 push 都触发)
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     # 其它情况不跑(feature 分支 push 不开 MR 时不消耗 CI)
@@ -88,9 +91,9 @@ go:lint:
     - |
       # gofmt 接到目录参数会**递归扫子目录**;`gofmt -l .` 或 `gofmt -l $(go list ...)`
       # 都会进 $GOMODCACHE=.cache/go-mod 把第三方源码扫上(那不归我们格式化)。
-      # 用 `git ls-files '*.go'` 只列**入库**的 .go 文件,.cache 是 gitignored 自动跳过,
+      # 用 `git ls-files -z '*.go'` 只列**入库**的 .go 文件,.cache 是 gitignored 自动跳过,
       # 且 CI 本来就只该校验提交代码的格式。
-      out=$(git ls-files '*.go' | xargs gofmt -l)
+      out=$(git ls-files -z '*.go' | xargs -0 gofmt -l)
       if [ -n "$out" ]; then
         echo "unformatted files detected:"
         echo "$out"
@@ -122,7 +125,8 @@ go:test:
   script:
     - go build ./...
     - go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
-    - "$(go env GOPATH)/bin/govulncheck" ./...
+    - |
+      "$(go env GOPATH)/bin/govulncheck" ./...
     - go test -race -cover -coverprofile=coverage.out ./...
     - scripts/check-go-coverage.sh
     - go tool cover -func=coverage.out | tail -1

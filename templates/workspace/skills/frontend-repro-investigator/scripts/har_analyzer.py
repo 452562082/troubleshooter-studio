@@ -29,6 +29,36 @@ def header_values(headers: list[dict], names: set[str]) -> list[str]:
     return values
 
 
+def redact_text(text: str) -> str:
+    text = re.sub(
+        r"(?i)(token|password|secret|authorization|cookie)([\"']?\s*[:=]\s*[\"']?)[^,\"'&\s}]+",
+        r"\1\2<redacted>",
+        str(text),
+    )
+    text = re.sub(r"(?i)(bearer\s+)[a-z0-9._~+/=-]+", r"\1<redacted>", text)
+    return text
+
+
+def normalized_trace_values(values: list[str]) -> list[str]:
+    out = []
+    for value in values:
+        if value.startswith("00-") and value.count("-") >= 3:
+            parts = value.split("-")
+            if len(parts) >= 4 and len(parts[1]) == 32:
+                out.append(parts[1])
+                continue
+        out.append(value)
+    return out
+
+
+def response_header(entry: dict, name: str) -> str:
+    target = name.lower()
+    for h in ((entry.get("response") or {}).get("headers") or []):
+        if str(h.get("name", "")).lower() == target:
+            return str(h.get("value", "")).strip()
+    return ""
+
+
 def path_for(url: str) -> str:
     parsed = urlparse(url)
     return parsed.path or "/"
@@ -40,8 +70,7 @@ def is_static_asset(url: str) -> bool:
 
 def body_snippet(entry: dict) -> str:
     text = (((entry.get("response") or {}).get("content") or {}).get("text") or "")
-    text = re.sub(r"(?i)(token|password|secret)[=:][^,&\s]+", r"\1=<redacted>", str(text))
-    return text[:500]
+    return redact_text(text)[:500]
 
 
 def summarize_entry(entry: dict) -> dict:
@@ -53,11 +82,11 @@ def summarize_entry(entry: dict) -> dict:
     return {
         "started_at": entry.get("startedDateTime", ""),
         "method": req.get("method", "GET"),
-        "url": req.get("url", ""),
+        "url": redact_text(req.get("url", "")),
         "path": path_for(req.get("url", "")),
         "status": int(resp.get("status") or 0),
         "duration_ms": int(entry.get("time") or 0),
-        "trace_ids": sorted(set(headers)),
+        "trace_ids": sorted(set(normalized_trace_values(headers))),
         "response_snippet": body_snippet(entry),
     }
 
@@ -76,6 +105,41 @@ def analyze(har: dict) -> dict:
         url = item["url"]
         for trace_id in item["trace_ids"]:
             trace_ids.add(trace_id)
+        if status == 0:
+            failed.append(item)
+            frontend_findings.append({
+                "type": "network_request_aborted",
+                "url": url,
+                "status": status,
+                "hint": "Browser saw status 0. Check CORS, DNS/TLS, ad blockers, gateway reset, or client-side aborts.",
+            })
+            candidate_endpoints.append(item["path"])
+            continue
+        if item["method"].upper() == "OPTIONS" and status >= 400:
+            frontend_findings.append({
+                "type": "cors_preflight_failed",
+                "url": url,
+                "status": status,
+                "hint": "Check gateway CORS policy, allowed origin, allowed headers, and credentials mode.",
+            })
+        location = response_header(entry, "Location")
+        if 300 <= status < 400 and location and re.search(r"(?i)(login|sso|oauth|auth)", location):
+            frontend_findings.append({
+                "type": "auth_redirect",
+                "url": url,
+                "status": status,
+                "location": redact_text(location),
+                "hint": "Check frontend auth state, session expiry, gateway auth middleware, and environment domain config.",
+            })
+            candidate_endpoints.append(item["path"])
+        if item["path"].endswith("/graphql") and '"errors"' in item["response_snippet"]:
+            frontend_findings.append({
+                "type": "graphql_error_response",
+                "url": url,
+                "status": status,
+                "hint": "HTTP 200 contains GraphQL errors. Inspect resolver error, operation name, and backend trace/logs.",
+            })
+            candidate_endpoints.append(item["path"])
         if status >= 400:
             failed.append(item)
             if is_static_asset(url):

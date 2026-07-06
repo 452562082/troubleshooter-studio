@@ -56,7 +56,8 @@ type App struct {
 
 	// ctx 是 Wails 运行时 ctx，在 startup 阶段注入。所有需要原生能力（SaveFileDialog /
 	// OpenDirectoryDialog / WindowShow / EventsEmit 等）的 binding 都用这个。
-	ctx context.Context
+	ctxMu sync.RWMutex
+	ctx   context.Context
 
 	// installMu 保护 installCancel 字段；install 和 cancel 是不同 Wails goroutine
 	// 过来的,没锁会 race。
@@ -77,7 +78,19 @@ type App struct {
 
 // startup 由 Wails 在窗口创建完成时调用，注入 runtime ctx。私有也能被 Wails 识别。
 func (a *App) startup(ctx context.Context) {
+	a.setRuntimeContext(ctx)
+}
+
+func (a *App) setRuntimeContext(ctx context.Context) {
+	a.ctxMu.Lock()
+	defer a.ctxMu.Unlock()
 	a.ctx = ctx
+}
+
+func (a *App) getRuntimeContext() context.Context {
+	a.ctxMu.RLock()
+	defer a.ctxMu.RUnlock()
+	return a.ctx
 }
 
 func main() {

@@ -34,7 +34,7 @@ func (a *App) StartBugInvestigation(input BugInvestigationInput) (bughub.Investi
 	if _, err := exec.LookPath("codex"); err != nil {
 		return bughub.InvestigationRun{}, errors.New("未检测到 codex CLI")
 	}
-	ctx := a.ctx
+	ctx := a.getRuntimeContext()
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -58,8 +58,8 @@ func (a *App) codexInvestigator() *bughub.CodexInvestigator {
 	if a.bugInvestigator == nil {
 		a.bugInvestigator = bughub.NewCodexInvestigator(bugInvestigationStore(), "codex")
 		a.bugInvestigator.SetEventSink(func(run bughub.InvestigationRun, event bughub.InvestigationEvent) {
-			if a.ctx != nil {
-				wailsruntime.EventsEmit(a.ctx, "bug-investigation:event", map[string]any{
+			if ctx := a.getRuntimeContext(); ctx != nil {
+				wailsruntime.EventsEmit(ctx, "bug-investigation:event", map[string]any{
 					"run":   run,
 					"event": event,
 				})

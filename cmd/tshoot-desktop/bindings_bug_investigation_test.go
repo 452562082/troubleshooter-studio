@@ -28,7 +28,8 @@ func TestStartBugInvestigationRunsCodexBot(t *testing.T) {
 		t.Fatalf("Upsert bug: %v", err)
 	}
 
-	run, err := (&App{}).StartBugInvestigation(BugInvestigationInput{
+	app := &App{}
+	run, err := app.StartBugInvestigation(BugInvestigationInput{
 		BugID: "zentao-577",
 		Bot: bughub.BotRef{
 			Key:      repo + "|codex",
@@ -42,6 +43,13 @@ func TestStartBugInvestigationRunsCodexBot(t *testing.T) {
 	}
 	if run.Status != bughub.InvestigationRunning {
 		t.Fatalf("run = %+v", run)
+	}
+	waited, err := app.codexInvestigator().Wait(run.ID)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if waited.Status != bughub.InvestigationSucceeded || waited.FinalMessage != "done" {
+		t.Fatalf("waited = %+v", waited)
 	}
 }
 
@@ -57,6 +65,27 @@ func TestStartBugInvestigationRejectsNonCodexBot(t *testing.T) {
 		Bot:   bughub.BotRef{Key: "repo|cursor", Target: "cursor", Path: root, SystemID: "base"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "当前只支持 Codex 机器人直接排障") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestStartBugInvestigationRejectsMissingCodexCLI(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("PATH", t.TempDir())
+	repo := filepath.Join(root, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := bugStore().Upsert(bughub.Bug{ID: "zentao-577", Source: "zentao", Title: "Bug 577"}); err != nil {
+		t.Fatalf("Upsert bug: %v", err)
+	}
+
+	_, err := (&App{}).StartBugInvestigation(BugInvestigationInput{
+		BugID: "zentao-577",
+		Bot:   bughub.BotRef{Key: repo + "|codex", Target: "codex", Path: repo, SystemID: "base"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "未检测到 codex CLI") {
 		t.Fatalf("err = %v", err)
 	}
 }

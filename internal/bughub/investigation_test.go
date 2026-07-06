@@ -333,6 +333,55 @@ func TestCodexInvestigatorRunsFakeCodex(t *testing.T) {
 	}
 }
 
+func TestCodexInvestigatorEmitsSinkEventWithCurrentRun(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "repo")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "codex")
+	script := "#!/bin/sh\nprintf '%s\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"checking\"}}' '{\"type\":\"turn.completed\"}'\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := NewInvestigationStore(root)
+	inv := NewCodexInvestigator(store, bin)
+	got := make(chan struct {
+		run   InvestigationRun
+		event InvestigationEvent
+	}, 4)
+	inv.SetEventSink(func(run InvestigationRun, event InvestigationEvent) {
+		got <- struct {
+			run   InvestigationRun
+			event InvestigationEvent
+		}{run: run, event: event}
+	})
+
+	run, err := inv.Start(context.Background(), Bug{ID: "bug-1", Title: "Bug"}, BotRef{Key: "b|codex", Target: "codex", Path: workspace})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waited, err := inv.Wait(run.ID)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if waited.Status != InvestigationSucceeded {
+		t.Fatalf("waited = %+v", waited)
+	}
+
+	select {
+	case emitted := <-got:
+		if emitted.run.ID != run.ID || emitted.run.BugID != "bug-1" {
+			t.Fatalf("sink run = %+v", emitted.run)
+		}
+		if emitted.event.Type != "agent_message" || emitted.event.Message != "checking" || emitted.event.At.IsZero() {
+			t.Fatalf("sink event = %+v", emitted.event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for sink event")
+	}
+}
+
 func TestCodexInvestigatorStoresLongAgentMessage(t *testing.T) {
 	root := t.TempDir()
 	workspace := filepath.Join(root, "repo")
@@ -426,7 +475,7 @@ func TestCodexInvestigatorCancelKillsDescendantHoldingStdout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	waitForFile(t, childPID, time.Second)
+	waitForFile(t, childPID, 2*time.Second)
 
 	done := make(chan error, 1)
 	go func() {

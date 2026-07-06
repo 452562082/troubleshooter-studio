@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { EventsOn } from '../../wailsjs/runtime/runtime'
 import {
   type BotMatch,
   type BugPlatform,
@@ -10,6 +11,7 @@ import {
   deleteBugPlatform,
   fetchBugByID,
   generateBugContext,
+  type InvestigationEvent,
   type InvestigationRun,
   loginBugPlatform,
   listBugInvestigationRuns,
@@ -62,6 +64,7 @@ const platformDraft = ref({
   poll_enabled: false,
   poll_interval_minutes: 5,
 })
+let unlistenInvestigationEvents: (() => void) | undefined
 
 const selectedBug = computed(() => bugs.value.find(b => b.id === selectedID.value) || bugs.value[0])
 const selectedPlatform = computed(() => platforms.value.find(p => p.id === selectedPlatformID.value))
@@ -123,7 +126,15 @@ watch(selectedBug, async (bug) => {
 }, { immediate: false })
 
 onMounted(async () => {
+  setupInvestigationEventBridge()
   await Promise.all([loadPlatforms(), loadBugs(), loadHookBase()])
+})
+
+onUnmounted(() => {
+  if (unlistenInvestigationEvents) {
+    unlistenInvestigationEvents()
+    unlistenInvestigationEvents = undefined
+  }
 })
 
 async function loadHookBase() {
@@ -323,16 +334,19 @@ async function refreshMatches(bugID: string, preferredKey = '') {
   if (!bugID) return
   matching.value = true
   try {
-    matches.value = await matchBugBots(bugID)
+    const nextMatches = await matchBugBots(bugID)
+    if (selectedBug.value?.id !== bugID) return
+    matches.value = nextMatches
     selectedBotKey.value = preferredKey && matches.value.some(m => m.bot.key === preferredKey)
       ? preferredKey
       : matches.value[0]?.bot.key || ''
   } catch (e) {
+    if (selectedBug.value?.id !== bugID) return
     matches.value = []
     selectedBotKey.value = ''
     toastError('匹配机器人', e)
   } finally {
-    matching.value = false
+    if (selectedBug.value?.id === bugID) matching.value = false
   }
 }
 
@@ -361,8 +375,11 @@ async function loadInvestigationRuns(bugID: string) {
     return
   }
   try {
-    investigationRuns.value = await listBugInvestigationRuns(bugID)
+    const runs = await listBugInvestigationRuns(bugID)
+    if (selectedBug.value?.id !== bugID) return
+    investigationRuns.value = runs
   } catch (e) {
+    if (selectedBug.value?.id !== bugID) return
     investigationRuns.value = []
     toastError('读取排障记录', e)
   }
@@ -380,18 +397,45 @@ async function startInvestigation() {
     return
   }
   investigationStarting.value = true
+  const bugID = bug.id
   try {
-    const run = await startBugInvestigation({ bug_id: bug.id, bot })
-    investigationRuns.value = [
-      run,
-      ...investigationRuns.value.filter(item => item.id !== run.id),
-    ]
+    const run = await startBugInvestigation({ bug_id: bugID, bot })
+    if (selectedBug.value?.id === bugID && run.bug_id === bugID) mergeInvestigationRun(run)
     toast.success('排障已启动')
   } catch (e) {
     toastError('启动排障', e)
   } finally {
     investigationStarting.value = false
   }
+}
+
+function setupInvestigationEventBridge() {
+  if (unlistenInvestigationEvents || !hasWailsEventRuntime()) return
+  unlistenInvestigationEvents = EventsOn('bug-investigation:event', (payload: { run?: InvestigationRun; event?: InvestigationEvent }) => {
+    const run = payload?.run
+    if (!run || run.bug_id !== selectedBug.value?.id) return
+    mergeInvestigationRun(run, payload?.event)
+  })
+}
+
+function hasWailsEventRuntime(): boolean {
+  if (typeof window === 'undefined') return false
+  const rt = (window as any).runtime
+  return !!rt && typeof rt.EventsOnMultiple === 'function'
+}
+
+function mergeInvestigationRun(run: InvestigationRun, event?: InvestigationEvent) {
+  const idx = investigationRuns.value.findIndex(item => item.id === run.id)
+  const existing = idx >= 0 ? investigationRuns.value[idx] : undefined
+  const events = Array.isArray(run.events)
+    ? run.events
+    : event
+      ? [...(existing?.events || []), event]
+      : existing?.events || []
+  const merged = { ...(existing || {}), ...run, events }
+  investigationRuns.value = idx >= 0
+    ? investigationRuns.value.map(item => item.id === run.id ? merged : item)
+    : [merged, ...investigationRuns.value]
 }
 
 async function cancelInvestigation() {
@@ -693,10 +737,10 @@ function fmtTime(s?: string): string {
           <button class="btn" type="button" :disabled="!selectedRun || selectedRun.status !== 'running' || investigationCancelling" @click="cancelInvestigation">
             停止
           </button>
-          <button class="btn" type="button" :disabled="!investigationOutput" @click="copyInvestigationOutput">复制</button>
+          <button class="btn" type="button" :disabled="!investigationOutput.trim()" @click="copyInvestigationOutput">复制</button>
         </div>
         <p v-if="selectedBot && !selectedBotIsCodex" class="muted direct-launch-note">当前只支持 Codex 机器人直接排障。</p>
-        <textarea :value="investigationOutput" v-text="investigationOutput" class="context-preview" readonly placeholder="开始排障后在这里显示过程和结论"></textarea>
+        <textarea :value="investigationOutput" class="context-preview" readonly placeholder="开始排障后在这里显示过程和结论"></textarea>
       </aside>
     </section>
   </div>

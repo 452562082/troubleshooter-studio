@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,6 +35,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
 	tshoot "github.com/xiaolong/troubleshooter-studio"
 	"github.com/xiaolong/troubleshooter-studio/api"
@@ -72,13 +74,32 @@ type App struct {
 	analyzeMu     sync.Mutex
 	analyzeCancel context.CancelFunc
 	analyzeID     uint64
+
+	trayOnce       sync.Once
+	bugPollOnce    sync.Once
+	bugHookOnce    sync.Once
+	bugHookBaseURL string
+	bugHookErr     error
+
 	bugInvestigationMu sync.Mutex
 	bugInvestigator    *bughub.CodexInvestigator
 }
 
+var startDesktopTray = startTray
+var startDesktopBugPoller = startBugPoller
+
 // startup 由 Wails 在窗口创建完成时调用，注入 runtime ctx。私有也能被 Wails 识别。
 func (a *App) startup(ctx context.Context) {
 	a.setRuntimeContext(ctx)
+	a.trayOnce.Do(func() {
+		startDesktopTray(a)
+	})
+	a.bugPollOnce.Do(func() {
+		startDesktopBugPoller(ctx, a)
+	})
+	a.bugHookOnce.Do(func() {
+		a.bugHookBaseURL, a.bugHookErr = startBugHookReceiver(a.templateRoot)
+	})
 }
 
 func (a *App) setRuntimeContext(ctx context.Context) {
@@ -103,10 +124,20 @@ func main() {
 		templateRoot: tr,
 	}
 
-	err := wails.Run(&options.App{
+	err := wails.Run(newDesktopOptions(appState, router))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "wails run:", err)
+		os.Exit(1)
+	}
+}
+
+func newDesktopOptions(appState *App, router http.Handler) *options.App {
+	return &options.App{
 		Title:  "Troubleshooter Studio",
 		Width:  1280,
 		Height: 860,
+		// 关闭主窗口时只隐藏,让桌面端继续在系统托盘/菜单栏图标里运行。
+		HideWindowOnClose: true,
 
 		// AssetServer.Handler = 所有 HTTP 请求（静态 SPA 资源 + /api/*）走这里。
 		// 不设 Assets，让 router 一肩挑（NewRouter 里已经做了 SPA fallback + CORS）。
@@ -128,11 +159,25 @@ func main() {
 
 		Bind:      []any{appState},
 		OnStartup: appState.startup,
-	})
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "wails run:", err)
-		os.Exit(1)
 	}
+}
+
+func (a *App) ShowMainWindow() {
+	ctx := a.getRuntimeContext()
+	if ctx == nil {
+		return
+	}
+	wailsruntime.Show(ctx)
+	wailsruntime.WindowShow(ctx)
+	wailsruntime.WindowUnminimise(ctx)
+}
+
+func (a *App) QuitApp() {
+	ctx := a.getRuntimeContext()
+	if ctx == nil {
+		os.Exit(0)
+	}
+	wailsruntime.Quit(ctx)
 }
 
 // fixGUIPath 修 macOS 桌面 app 由 launchd / Finder 启动时 PATH 被精简到

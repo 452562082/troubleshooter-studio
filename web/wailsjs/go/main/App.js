@@ -14,8 +14,16 @@ export function ApplyBot(arg1, arg2, arg3) {
   return window['go']['main']['App']['ApplyBot'](arg1, arg2, arg3);
 }
 
+export function BugHookBaseURL() {
+  return window['go']['main']['App']['BugHookBaseURL']();
+}
+
 export function CancelAnalyze() {
   return window['go']['main']['App']['CancelAnalyze']();
+}
+
+export function CancelBugInvestigation(arg1) {
+  return window['go']['main']['App']['CancelBugInvestigation'](arg1);
 }
 
 export function CancelInstall() {
@@ -46,8 +54,16 @@ export function ChatSaveProviderKey(arg1, arg2) {
   return window['go']['main']['App']['ChatSaveProviderKey'](arg1, arg2);
 }
 
+export function ClearBugPlatformLogin(arg1) {
+  return window['go']['main']['App']['ClearBugPlatformLogin'](arg1);
+}
+
 export function DefaultDestPath(arg1, arg2) {
   return window['go']['main']['App']['DefaultDestPath'](arg1, arg2);
+}
+
+export function DeleteBugPlatform(arg1) {
+  return window['go']['main']['App']['DeleteBugPlatform'](arg1);
 }
 
 export function DeleteInfraCred(arg1) {
@@ -78,6 +94,10 @@ export function Doctor(arg1, arg2) {
   return window['go']['main']['App']['Doctor'](arg1, arg2);
 }
 
+export function FetchBugByID(arg1) {
+  return window['go']['main']['App']['FetchBugByID'](arg1);
+}
+
 export function FetchConfigContent(arg1) {
   return window['go']['main']['App']['FetchConfigContent'](arg1);
 }
@@ -96,6 +116,10 @@ export function Gen(arg1, arg2) {
 
 export function GenPreview(arg1) {
   return window['go']['main']['App']['GenPreview'](arg1);
+}
+
+export function GenerateBugContext(arg1) {
+  return window['go']['main']['App']['GenerateBugContext'](arg1);
 }
 
 export function GetMissingRepoPaths(arg1) {
@@ -158,6 +182,18 @@ export function ListBranchesForRepo(arg1) {
   return window['go']['main']['App']['ListBranchesForRepo'](arg1);
 }
 
+export function ListBugInvestigationRuns(arg1) {
+  return window['go']['main']['App']['ListBugInvestigationRuns'](arg1);
+}
+
+export function ListBugPlatforms() {
+  return window['go']['main']['App']['ListBugPlatforms']();
+}
+
+export function ListBugs() {
+  return window['go']['main']['App']['ListBugs']();
+}
+
 export function ListGrafanaDatasources(arg1) {
   return window['go']['main']['App']['ListGrafanaDatasources'](arg1);
 }
@@ -172,6 +208,14 @@ export function ListLokiLabels(arg1) {
 
 export function LoadInfraCred(arg1) {
   return window['go']['main']['App']['LoadInfraCred'](arg1);
+}
+
+export function LoginBugPlatform(arg1) {
+  return window['go']['main']['App']['LoginBugPlatform'](arg1);
+}
+
+export function MatchBugBots(arg1) {
+  return window['go']['main']['App']['MatchBugBots'](arg1);
 }
 
 export function One2AllFetchConfigMaps(arg1, arg2, arg3) {
@@ -222,6 +266,10 @@ export function ProbeURLAuth(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['ProbeURLAuth'](arg1, arg2, arg3, arg4);
 }
 
+export function QuitApp() {
+  return window['go']['main']['App']['QuitApp']();
+}
+
 export function ReadBotWorkspaceFile(arg1, arg2) {
   return window['go']['main']['App']['ReadBotWorkspaceFile'](arg1, arg2);
 }
@@ -240,6 +288,10 @@ export function RevealInFinder(arg1) {
 
 export function RunInstall(arg1, arg2) {
   return window['go']['main']['App']['RunInstall'](arg1, arg2);
+}
+
+export function SaveBugPlatform(arg1) {
+  return window['go']['main']['App']['SaveBugPlatform'](arg1);
 }
 
 export function SaveInfraCred(arg1, arg2) {
@@ -268,6 +320,18 @@ export function SelfTestAgent(arg1) {
 
 export function SetDefaultReposRoot(arg1) {
   return window['go']['main']['App']['SetDefaultReposRoot'](arg1);
+}
+
+export function ShowMainWindow() {
+  return window['go']['main']['App']['ShowMainWindow']();
+}
+
+export function StartBugInvestigation(arg1) {
+  return window['go']['main']['App']['StartBugInvestigation'](arg1);
+}
+
+export function SyncBugPlatform(arg1) {
+  return window['go']['main']['App']['SyncBugPlatform'](arg1);
 }
 
 export function UninstallAgent(arg1) {

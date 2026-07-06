@@ -7,6 +7,7 @@ import {analyzer} from '../models';
 import {generator} from '../models';
 import {discover} from '../models';
 import {doctor} from '../models';
+import {bughub} from '../models';
 import {cchub} from '../models';
 import {labelprobe} from '../models';
 import {dsprobe} from '../models';
@@ -18,7 +19,11 @@ export function AnalyzeV2(arg1:main.AnalyzeInput):Promise<analyzerpipe.Result>;
 
 export function ApplyBot(arg1:string,arg2:string,arg3:boolean):Promise<agent.Result>;
 
+export function BugHookBaseURL():Promise<string>;
+
 export function CancelAnalyze():Promise<boolean>;
+
+export function CancelBugInvestigation(arg1:main.BugInvestigationCancelInput):Promise<void>;
 
 export function CancelInstall():Promise<boolean>;
 
@@ -34,7 +39,11 @@ export function ChatSaveKey(arg1:string,arg2:string):Promise<void>;
 
 export function ChatSaveProviderKey(arg1:string,arg2:string):Promise<void>;
 
+export function ClearBugPlatformLogin(arg1:main.BugLoginInput):Promise<main.BugLoginResult>;
+
 export function DefaultDestPath(arg1:string,arg2:string):Promise<string>;
+
+export function DeleteBugPlatform(arg1:main.BugPlatformDeleteInput):Promise<void>;
 
 export function DeleteInfraCred(arg1:string):Promise<void>;
 
@@ -50,6 +59,8 @@ export function DiscoverBots(arg1:Array<string>):Promise<Array<discover.Discover
 
 export function Doctor(arg1:string,arg2:string):Promise<doctor.Report>;
 
+export function FetchBugByID(arg1:main.BugFetchInput):Promise<bughub.SyncResult>;
+
 export function FetchConfigContent(arg1:main.CCHubFetchContentInput):Promise<cchub.FetchContentResult>;
 
 export function FetchConfigContentBatch(arg1:main.CCHubFetchBatchInput):Promise<cchub.FetchBatchResult>;
@@ -59,6 +70,8 @@ export function ForgetGhostBot(arg1:string,arg2:string):Promise<void>;
 export function Gen(arg1:string,arg2:string):Promise<generator.GenSummary>;
 
 export function GenPreview(arg1:string):Promise<main.GenPreviewResult>;
+
+export function GenerateBugContext(arg1:main.BugContextInput):Promise<string>;
 
 export function GetMissingRepoPaths(arg1:string):Promise<main.MissingRepoPathsResult>;
 
@@ -90,6 +103,12 @@ export function ListBotWorkspaceFiles(arg1:string):Promise<main.FileNode>;
 
 export function ListBranchesForRepo(arg1:string):Promise<Array<string>>;
 
+export function ListBugInvestigationRuns(arg1:string):Promise<Array<bughub.InvestigationRun>>;
+
+export function ListBugPlatforms():Promise<Array<bughub.PlatformConfig>>;
+
+export function ListBugs():Promise<Array<bughub.Bug>>;
+
 export function ListGrafanaDatasources(arg1:main.LokiAuthInput):Promise<Array<labelprobe.Datasource>>;
 
 export function ListLokiLabelValues(arg1:main.LokiAuthInput,arg2:string,arg3:string):Promise<labelprobe.ValuesResult>;
@@ -97,6 +116,10 @@ export function ListLokiLabelValues(arg1:main.LokiAuthInput,arg2:string,arg3:str
 export function ListLokiLabels(arg1:main.LokiAuthInput):Promise<labelprobe.LabelsResult>;
 
 export function LoadInfraCred(arg1:string):Promise<main.ChatLoadKeyResult>;
+
+export function LoginBugPlatform(arg1:main.BugLoginInput):Promise<main.BugLoginResult>;
+
+export function MatchBugBots(arg1:string):Promise<Array<bughub.BotMatch>>;
 
 export function One2AllFetchConfigMaps(arg1:string,arg2:string,arg3:Array<main.One2AllConfigMapEntry>):Promise<Array<main.One2AllConfigMapResult>>;
 
@@ -122,6 +145,8 @@ export function ProbeURL(arg1:string):Promise<dsprobe.Result>;
 
 export function ProbeURLAuth(arg1:string,arg2:string,arg3:string,arg4:string):Promise<dsprobe.Result>;
 
+export function QuitApp():Promise<void>;
+
 export function ReadBotWorkspaceFile(arg1:string,arg2:string):Promise<main.ReadFileResult>;
 
 export function ReadEnv(arg1:string):Promise<Record<string, string>>;
@@ -131,6 +156,8 @@ export function RecommendRoleForRepo(arg1:string,arg2:string,arg3:string):Promis
 export function RevealInFinder(arg1:string):Promise<void>;
 
 export function RunInstall(arg1:string,arg2:Record<string, string>):Promise<main.RunInstallResult>;
+
+export function SaveBugPlatform(arg1:main.BugPlatformInput):Promise<bughub.PlatformConfig>;
 
 export function SaveInfraCred(arg1:string,arg2:string):Promise<void>;
 
@@ -145,6 +172,12 @@ export function ScanInstallPrompts(arg1:string):Promise<Array<deploy.Prompt>>;
 export function SelfTestAgent(arg1:string):Promise<agent.SelfTestResult>;
 
 export function SetDefaultReposRoot(arg1:string):Promise<void>;
+
+export function ShowMainWindow():Promise<void>;
+
+export function StartBugInvestigation(arg1:main.BugInvestigationInput):Promise<bughub.InvestigationRun>;
+
+export function SyncBugPlatform(arg1:string):Promise<bughub.SyncResult>;
 
 export function UninstallAgent(arg1:string):Promise<agent.UninstallOpenclawResult>;
 

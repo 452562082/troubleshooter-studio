@@ -211,3 +211,40 @@ func TestInvestigationStoreWriteTightensExistingFileMode(t *testing.T) {
 		t.Fatalf("mode = %o", got)
 	}
 }
+
+func TestParseCodexJSONLEvent(t *testing.T) {
+	event, final, failed := ParseCodexJSONLEvent([]byte(`{"type":"item.completed","item":{"type":"agent_message","text":"root cause found"}}`))
+	if event.Type != "agent_message" || event.Message != "root cause found" {
+		t.Fatalf("event = %+v", event)
+	}
+	if final != "root cause found" || failed != "" {
+		t.Fatalf("final=%q failed=%q", final, failed)
+	}
+
+	event, final, failed = ParseCodexJSONLEvent([]byte(`{"type":"turn.failed","error":{"message":"auth missing"}}`))
+	if event.Type != "turn_failed" || failed != "auth missing" || final != "" {
+		t.Fatalf("event=%+v final=%q failed=%q", event, final, failed)
+	}
+
+	event, final, failed = ParseCodexJSONLEvent([]byte(`not-json`))
+	if event.Type != "raw" || event.Message != "not-json" || final != "" || failed != "" {
+		t.Fatalf("malformed event=%+v final=%q failed=%q", event, final, failed)
+	}
+}
+
+func TestBuildCodexInvestigationPromptIncludesBugAndBot(t *testing.T) {
+	bug := Bug{ID: "zentao-577", Source: "zentao", SourceID: "577", Title: "搜索结果错误", Steps: "1. 搜索电影"}
+	bot := BotRef{Key: "/tmp/base.toml|codex", SystemID: "base", Target: "codex", Path: "/tmp/base.toml"}
+	prompt := BuildCodexInvestigationPrompt(bug, bot)
+	for _, want := range []string{
+		"请作为选定的 Codex 排障机器人开始排障",
+		"搜索结果错误",
+		"zentao:577",
+		"target: codex",
+		"不要修改代码",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}

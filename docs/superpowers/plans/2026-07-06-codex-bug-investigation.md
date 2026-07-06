@@ -495,9 +495,6 @@ Append to `internal/bughub/investigation_test.go`:
 ```go
 func TestBuildCodexExecCommandUsesSafeWorkspace(t *testing.T) {
 	workspace := t.TempDir()
-	if err := os.Mkdir(filepath.Join(workspace, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	cmd, err := BuildCodexExecCommand("codex", workspace, "hello")
 	if err != nil {
 		t.Fatalf("BuildCodexExecCommand: %v", err)
@@ -509,11 +506,14 @@ func TestBuildCodexExecCommandUsesSafeWorkspace(t *testing.T) {
 	if !strings.Contains(got, "--sandbox workspace-write") {
 		t.Fatalf("args missing sandbox: %q", got)
 	}
+	if !strings.Contains(got, "--skip-git-repo-check") {
+		t.Fatalf("args missing git repo skip: %q", got)
+	}
 }
 
-func TestBuildCodexExecCommandRejectsNonGitWorkspace(t *testing.T) {
-	_, err := BuildCodexExecCommand("codex", t.TempDir(), "hello")
-	if err == nil || !strings.Contains(err.Error(), "git repository") {
+func TestBuildCodexExecCommandRejectsMissingWorkspace(t *testing.T) {
+	_, err := BuildCodexExecCommand("codex", filepath.Join(t.TempDir(), "missing"), "hello")
+	if err == nil || !strings.Contains(err.Error(), "workspace") {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -552,13 +552,16 @@ func BuildCodexExecCommand(codexBin string, workspace string, prompt string) (*e
 	if workspace == "" {
 		return nil, errors.New("codex workspace is required")
 	}
-	if _, err := os.Stat(filepath.Join(workspace, ".git")); err != nil {
-		return nil, errors.New("codex workspace must be a git repository")
+	if info, err := os.Stat(workspace); err != nil {
+		return nil, fmt.Errorf("codex workspace: %w", err)
+	} else if !info.IsDir() {
+		return nil, errors.New("codex workspace must be a directory")
 	}
 	args := []string{
 		"exec",
 		"--json",
 		"--sandbox", "workspace-write",
+		"--skip-git-repo-check",
 		"--cd", workspace,
 		prompt,
 	}

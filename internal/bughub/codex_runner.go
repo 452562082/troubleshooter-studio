@@ -24,10 +24,11 @@ type CodexInvestigator struct {
 }
 
 type activeCodexRun struct {
-	cancel context.CancelFunc
-	done   chan struct{}
-	errMu  sync.Mutex
-	err    error
+	cancel  context.CancelFunc
+	done    chan struct{}
+	errMu   sync.Mutex
+	err     error
+	process *os.Process
 }
 
 func NewCodexInvestigator(store *InvestigationStore, codexBin string) *CodexInvestigator {
@@ -137,6 +138,7 @@ func (i *CodexInvestigator) Start(parent context.Context, bug Bug, bot BotRef) (
 	}
 	active := &activeCodexRun{cancel: cancel, done: make(chan struct{})}
 	i.active[run.ID] = active
+	setCodexProcessGroup(cmd)
 
 	if err := cmd.Start(); err != nil {
 		if finishErr := i.store.Finish(run.ID, InvestigationFailed, "", err.Error()); finishErr != nil {
@@ -148,6 +150,7 @@ func (i *CodexInvestigator) Start(parent context.Context, bug Bug, bot BotRef) (
 		close(active.done)
 		return run, err
 	}
+	active.process = cmd.Process
 
 	i.mu.Unlock()
 	go i.collectRun(ctx, run.ID, cmd, stdout, stderr, active)
@@ -162,6 +165,7 @@ func (i *CodexInvestigator) Cancel(runID string) error {
 		return os.ErrNotExist
 	}
 	active.cancel()
+	active.kill()
 	<-active.done
 	i.removeActive(runID)
 	return active.getError()
@@ -184,6 +188,15 @@ func (i *CodexInvestigator) Wait(runID string) (InvestigationRun, error) {
 func (i *CodexInvestigator) collectRun(ctx context.Context, runID string, cmd *exec.Cmd, stdout io.Reader, stderr io.Reader, active *activeCodexRun) {
 	defer close(active.done)
 	defer i.removeActive(runID)
+	stopKillWatcher := make(chan struct{})
+	defer close(stopKillWatcher)
+	go func() {
+		select {
+		case <-ctx.Done():
+			active.kill()
+		case <-stopKillWatcher:
+		}
+	}()
 
 	stderrDone := make(chan string, 1)
 	go func() {
@@ -248,6 +261,17 @@ func (a *activeCodexRun) getError() error {
 	a.errMu.Lock()
 	defer a.errMu.Unlock()
 	return a.err
+}
+
+func (a *activeCodexRun) kill() {
+	a.errMu.Lock()
+	process := a.process
+	a.errMu.Unlock()
+	if process == nil {
+		return
+	}
+	killCodexProcessGroup(process.Pid)
+	_ = process.Kill()
 }
 
 func (i *CodexInvestigator) removeActive(runID string) {

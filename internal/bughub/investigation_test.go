@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -396,6 +398,58 @@ func TestCodexInvestigatorCancelMarksStoredRunCancelled(t *testing.T) {
 	}
 }
 
+func TestCodexInvestigatorCancelKillsDescendantHoldingStdout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell descendant stdout inheritance regression is unix-specific")
+	}
+	root := t.TempDir()
+	workspace := filepath.Join(root, "repo")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "codex")
+	childPID := filepath.Join(root, "child.pid")
+	script := "#!/bin/sh\n(sh -c 'trap \"\" HUP TERM; while :; do sleep 1; done') &\necho $! > " + shellQuote(childPID) + "\nwait\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		data, err := os.ReadFile(childPID)
+		if err != nil {
+			return
+		}
+		_ = exec.Command("kill", "-9", strings.TrimSpace(string(data))).Run()
+	})
+	store := NewInvestigationStore(root)
+	inv := NewCodexInvestigator(store, bin)
+	run, err := inv.Start(context.Background(), Bug{ID: "bug-1", Title: "Bug"}, BotRef{Key: "b|codex", Target: "codex", Path: workspace})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitForFile(t, childPID, time.Second)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- inv.Cancel(run.ID)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Cancel: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Cancel timed out while descendant held stdout")
+	}
+
+	got, err := store.Get(run.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != InvestigationCancelled {
+		t.Fatalf("run = %+v", got)
+	}
+}
+
 func TestCodexInvestigatorStartsNewRunWhenStoredActiveRunIsOrphaned(t *testing.T) {
 	root := t.TempDir()
 	workspace := filepath.Join(root, "repo")
@@ -462,4 +516,16 @@ func TestCodexInvestigatorWaitReturnsPersistenceError(t *testing.T) {
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func waitForFile(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", path)
 }

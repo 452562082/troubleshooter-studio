@@ -37,6 +37,7 @@ import (
 
 	tshoot "github.com/xiaolong/troubleshooter-studio"
 	"github.com/xiaolong/troubleshooter-studio/api"
+	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 	"github.com/xiaolong/troubleshooter-studio/internal/webui"
 )
 
@@ -70,6 +71,8 @@ type App struct {
 	analyzeMu     sync.Mutex
 	analyzeCancel context.CancelFunc
 	analyzeID     uint64
+	bugInvestigationMu sync.Mutex
+	bugInvestigator    *bughub.CodexInvestigator
 }
 
 // startup 由 Wails 在窗口创建完成时调用，注入 runtime ctx。私有也能被 Wails 识别。

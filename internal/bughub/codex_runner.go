@@ -16,11 +16,14 @@ import (
 	"unicode/utf8"
 )
 
+type InvestigationEventSink func(run InvestigationRun, event InvestigationEvent)
+
 type CodexInvestigator struct {
-	store    *InvestigationStore
-	codexBin string
-	mu       sync.Mutex
-	active   map[string]*activeCodexRun
+	store     *InvestigationStore
+	codexBin  string
+	mu        sync.Mutex
+	active    map[string]*activeCodexRun
+	eventSink InvestigationEventSink
 }
 
 type activeCodexRun struct {
@@ -40,6 +43,15 @@ func NewCodexInvestigator(store *InvestigationStore, codexBin string) *CodexInve
 		codexBin: codexBin,
 		active:   make(map[string]*activeCodexRun),
 	}
+}
+
+func (i *CodexInvestigator) SetEventSink(sink InvestigationEventSink) {
+	if i == nil {
+		return
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.eventSink = sink
 }
 
 func BuildCodexInvestigationPrompt(b Bug, bot BotRef) string {
@@ -215,7 +227,14 @@ func (i *CodexInvestigator) collectRun(ctx context.Context, runID string, cmd *e
 		}
 		event, final, failed := ParseCodexJSONLEvent([]byte(line))
 		if strings.TrimSpace(event.Message) != "" {
-			active.setError(i.store.AppendEvent(runID, event))
+			if event.At.IsZero() {
+				event.At = time.Now().UTC()
+			}
+			err := i.store.AppendEvent(runID, event)
+			active.setError(err)
+			if err == nil {
+				i.emitEvent(runID, event)
+			}
 		}
 		if strings.TrimSpace(final) != "" {
 			finalMessage = final
@@ -244,6 +263,20 @@ func (i *CodexInvestigator) collectRun(ctx context.Context, runID string, cmd *e
 	default:
 		active.setError(i.store.Finish(runID, InvestigationSucceeded, finalMessage, ""))
 	}
+}
+
+func (i *CodexInvestigator) emitEvent(runID string, event InvestigationEvent) {
+	i.mu.Lock()
+	sink := i.eventSink
+	i.mu.Unlock()
+	if sink == nil {
+		return
+	}
+	run, err := i.store.Get(runID)
+	if err != nil {
+		return
+	}
+	sink(run, event)
 }
 
 func (a *activeCodexRun) setError(err error) {

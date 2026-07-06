@@ -10,7 +10,6 @@ import {
   clearBugPlatformLogin,
   deleteBugPlatform,
   fetchBugByID,
-  generateBugContext,
   type InvestigationEvent,
   type InvestigationRun,
   loginBugPlatform,
@@ -41,7 +40,6 @@ const loginClearing = ref(false)
 const platformDeleting = ref(false)
 const syncingBugs = ref(false)
 const fetchingBug = ref(false)
-const contextGenerating = ref(false)
 const matching = ref(false)
 const investigationRuns = ref<InvestigationRun[]>([])
 const investigationStarting = ref(false)
@@ -350,25 +348,6 @@ async function refreshMatches(bugID: string, preferredKey = '') {
   }
 }
 
-async function generateContext() {
-  const bug = selectedBug.value
-  const bot = selectedBot.value
-  if (!bug || !bot) {
-    toast.error('请先选择 Bug 和机器人')
-    return
-  }
-  contextGenerating.value = true
-  try {
-    contextText.value = await generateBugContext({ bug_id: bug.id, bot })
-    bugs.value = bugs.value.map(b => b.id === bug.id ? { ...b, selected_bot_key: bot.key, last_context: contextText.value } : b)
-    toast.success('已生成排障上下文')
-  } catch (e) {
-    toastError('生成排障上下文', e)
-  } finally {
-    contextGenerating.value = false
-  }
-}
-
 async function loadInvestigationRuns(bugID: string) {
   if (!bugID) {
     investigationRuns.value = []
@@ -460,14 +439,6 @@ async function copyHookURL() {
     return
   }
   ;(await copyToClipboard(hookURL.value)) ? toast.success('Hook URL 已复制') : toast.error('复制失败')
-}
-
-async function copyContext() {
-  if (!contextText.value.trim()) {
-    toast.error('没有可复制的上下文')
-    return
-  }
-  ;(await copyToClipboard(contextText.value)) ? toast.success('已复制') : toast.error('复制失败')
 }
 
 async function copyInvestigationOutput() {

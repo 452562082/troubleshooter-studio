@@ -380,6 +380,24 @@ func TestCodexInvestigatorEmitsSinkEventWithCurrentRun(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for sink event")
 	}
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case emitted := <-got:
+			if emitted.event.Type != "status" {
+				continue
+			}
+			if emitted.run.ID != run.ID || emitted.run.Status != InvestigationSucceeded {
+				t.Fatalf("sink finish run = %+v", emitted.run)
+			}
+			if emitted.event.Message != string(InvestigationSucceeded) || emitted.event.At.IsZero() {
+				t.Fatalf("sink finish event = %+v", emitted.event)
+			}
+			return
+		case <-deadline:
+			t.Fatal("timed out waiting for finish sink event")
+		}
+	}
 }
 
 func TestCodexInvestigatorStoresLongAgentMessage(t *testing.T) {

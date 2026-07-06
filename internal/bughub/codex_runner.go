@@ -249,20 +249,34 @@ func (i *CodexInvestigator) collectRun(ctx context.Context, runID string, cmd *e
 
 	waitErr := cmd.Wait()
 	stderrText := <-stderrDone
+	var finishStatus InvestigationStatus
+	var finishError string
 	switch {
 	case ctx.Err() != nil:
-		active.setError(i.store.Finish(runID, InvestigationCancelled, finalMessage, ctx.Err().Error()))
+		finishStatus = InvestigationCancelled
+		finishError = ctx.Err().Error()
 	case strings.TrimSpace(failure) != "":
-		active.setError(i.store.Finish(runID, InvestigationFailed, finalMessage, failure))
+		finishStatus = InvestigationFailed
+		finishError = failure
 	case waitErr != nil:
 		errorText := strings.TrimSpace(stderrText)
 		if errorText == "" {
 			errorText = waitErr.Error()
 		}
-		active.setError(i.store.Finish(runID, InvestigationFailed, finalMessage, errorText))
+		finishStatus = InvestigationFailed
+		finishError = errorText
 	default:
-		active.setError(i.store.Finish(runID, InvestigationSucceeded, finalMessage, ""))
+		finishStatus = InvestigationSucceeded
 	}
+	if err := i.store.Finish(runID, finishStatus, finalMessage, finishError); err != nil {
+		active.setError(err)
+		return
+	}
+	i.emitEvent(runID, InvestigationEvent{
+		At:      time.Now().UTC(),
+		Type:    "status",
+		Message: string(finishStatus),
+	})
 }
 
 func (i *CodexInvestigator) emitEvent(runID string, event InvestigationEvent) {

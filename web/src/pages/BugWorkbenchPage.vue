@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { marked } from 'marked'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { EventsOn } from '../../wailsjs/runtime/runtime'
 import {
   type BotMatch,
@@ -46,6 +47,7 @@ const matching = ref(false)
 const investigationRuns = ref<InvestigationRun[]>([])
 const investigationStarting = ref(false)
 const investigationCancelling = ref(false)
+const outputScrollRef = ref<HTMLElement | null>(null)
 const query = ref('')
 const manualBugID = ref('')
 const configOpen = ref(false)
@@ -77,13 +79,26 @@ const selectedBotUnsupportedReason = computed(() => {
   if (selectedBot.value.target === 'cursor') return 'Cursor 暂不支持后台直启,请复制上下文后在 Cursor Custom Agent 中发起。'
   return '该机器人暂不支持后台直启。'
 })
-const investigationOutput = computed(() => {
+const investigationEventLines = computed(() => {
   const run = selectedRun.value
-  if (!run) return contextText.value
-  if (run.final_message) return run.final_message
-  const lines = (run.events || []).map(e => e.message).filter(Boolean)
-  return lines.join('\n') || contextText.value
+  if (!run) return []
+  return (run.events || []).map(e => e.message).filter(Boolean)
 })
+const investigationFinalText = computed(() => {
+  const run = selectedRun.value
+  if (!run) return ''
+  return run.final_message || run.error || ''
+})
+const investigationOutput = computed(() => {
+  const parts = []
+  if (investigationEventLines.value.length > 0) parts.push(investigationEventLines.value.join('\n'))
+  if (investigationFinalText.value.trim()) parts.push(investigationFinalText.value.trim())
+  if (parts.length > 0) return parts.join('\n\n')
+  return contextText.value
+})
+const renderedInvestigationMarkdown = computed(() => safeMarkdown(investigationFinalText.value || contextText.value))
+const selectedBugStepsHTML = computed(() => selectedBug.value?.steps ? safeMarkdown(selectedBug.value.steps) : '-')
+const selectedBugDescriptionHTML = computed(() => selectedBug.value?.description ? safeMarkdown(selectedBug.value.description) : '')
 const filteredBugs = computed(() => {
   const kw = query.value.trim().toLowerCase()
   if (!kw) return bugs.value
@@ -129,6 +144,10 @@ watch(selectedBug, async (bug) => {
   contextText.value = bug.last_context || ''
   await Promise.all([refreshMatches(bug.id, bug.selected_bot_key), loadInvestigationRuns(bug.id)])
 }, { immediate: false })
+
+watch(investigationOutput, () => {
+  scrollOutputToBottom()
+}, { flush: 'post' })
 
 onMounted(async () => {
   setupInvestigationEventBridge()
@@ -432,15 +451,23 @@ function hasWailsEventRuntime(): boolean {
 function mergeInvestigationRun(run: InvestigationRun, event?: InvestigationEvent) {
   const idx = investigationRuns.value.findIndex(item => item.id === run.id)
   const existing = idx >= 0 ? investigationRuns.value[idx] : undefined
-  const events = Array.isArray(run.events)
-    ? run.events
-    : event
+  const incomingEvents = Array.isArray(run.events) ? run.events : undefined
+  const events = incomingEvents && incomingEvents.length > 0
+    ? incomingEvents
+    : event && event.type !== 'status'
       ? [...(existing?.events || []), event]
-      : existing?.events || []
+      : existing?.events || incomingEvents || []
   const merged = { ...(existing || {}), ...run, events }
   investigationRuns.value = idx >= 0
     ? investigationRuns.value.map(item => item.id === run.id ? merged : item)
     : [merged, ...investigationRuns.value]
+}
+
+function scrollOutputToBottom() {
+  nextTick(() => {
+    const el = outputScrollRef.value
+    if (el) el.scrollTop = el.scrollHeight
+  })
 }
 
 async function cancelInvestigation() {
@@ -510,6 +537,16 @@ function fmtTime(s?: string): string {
   const d = new Date(s)
   if (Number.isNaN(d.getTime())) return s
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+function safeMarkdown(text: string): string {
+  const html = marked.parse(text || '', { async: false }) as string
+  return html
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+    .replace(/\son\w+="[^"]*"/gi, '')
+    .replace(/\son\w+='[^']*'/gi, '')
+    .replace(/\s(href|src)="javascript:[^"]*"/gi, ' $1="#"')
+    .replace(/\s(href|src)='javascript:[^']*'/gi, " $1='#'")
 }
 </script>
 
@@ -689,11 +726,11 @@ function fmtTime(s?: string): string {
 
           <section class="text-block">
             <h3>复现步骤</h3>
-            <pre>{{ selectedBug.steps || '-' }}</pre>
+            <article class="rich-text markdown-result" v-html="selectedBugStepsHTML"></article>
           </section>
           <section v-if="selectedBug.description" class="text-block">
             <h3>描述</h3>
-            <pre>{{ selectedBug.description }}</pre>
+            <article class="rich-text markdown-result" v-html="selectedBugDescriptionHTML"></article>
           </section>
           <section class="evidence-grid">
             <div>
@@ -740,7 +777,17 @@ function fmtTime(s?: string): string {
           <button class="btn" type="button" :disabled="!investigationOutput.trim()" @click="copyInvestigationOutput">复制</button>
         </div>
         <p v-if="selectedBotUnsupportedReason" class="muted direct-launch-note">{{ selectedBotUnsupportedReason }}</p>
-        <textarea :value="investigationOutput" class="context-preview" readonly placeholder="开始排障后在这里显示过程和结论"></textarea>
+        <div ref="outputScrollRef" class="context-preview" role="log" aria-live="polite">
+          <template v-if="selectedRun">
+            <div v-if="investigationEventLines.length" class="process-log">
+              <div v-for="(line, idx) in investigationEventLines" :key="idx" class="process-line">{{ line }}</div>
+            </div>
+            <article v-if="investigationFinalText" class="markdown-result" v-html="renderedInvestigationMarkdown"></article>
+            <div v-if="!investigationEventLines.length && !investigationFinalText" class="preview-placeholder">开始排障后在这里显示过程和结论</div>
+          </template>
+          <article v-else-if="contextText" class="markdown-result" v-html="renderedInvestigationMarkdown"></article>
+          <div v-else class="preview-placeholder">开始排障后在这里显示过程和结论</div>
+        </div>
       </aside>
     </section>
   </div>
@@ -991,7 +1038,8 @@ select.form-control { padding-right: 28px; }
 .text-block { margin-top: 12px; }
 .text-block h3,
 .evidence-grid h3 { font-size: 13px; color: #0f172a; margin-bottom: 6px; }
-.text-block pre {
+.text-block pre,
+.text-block .rich-text {
   background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;
   padding: 10px; color: #334155; white-space: pre-wrap; word-break: break-word;
   font-family: inherit; font-size: 13px; line-height: 1.55;
@@ -1012,8 +1060,49 @@ select.form-control { padding-right: 28px; }
 .bot-actions { display: flex; gap: 8px; margin-top: 2px; }
 .direct-launch-note { margin: 0; }
 .context-preview {
-  flex: 1; min-height: 260px; resize: none; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px; line-height: 1.5; color: #0f172a;
+  flex: 1; min-height: 260px; overflow: auto; box-sizing: border-box;
+  border: 1px solid #cbd5e1; border-radius: 6px; background: #fff;
+  padding: 10px; color: #0f172a; font-size: 13px; line-height: 1.55;
+}
+.process-log {
+  margin-bottom: 12px; padding: 9px; border: 1px solid #e2e8f0; border-radius: 6px;
+  background: #f8fafc; color: #475569; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px; line-height: 1.5;
+}
+.process-line { white-space: pre-wrap; word-break: break-word; }
+.process-line + .process-line { margin-top: 4px; }
+.markdown-result { color: #0f172a; word-break: break-word; }
+.markdown-result :deep(h1),
+.markdown-result :deep(h2),
+.markdown-result :deep(h3) {
+  color: #0f172a; font-weight: 800; line-height: 1.3; margin: 14px 0 8px;
+}
+.markdown-result :deep(h1) { font-size: 18px; }
+.markdown-result :deep(h2) { font-size: 16px; }
+.markdown-result :deep(h3) { font-size: 14px; }
+.markdown-result :deep(p) { margin: 7px 0; }
+.markdown-result :deep(ol),
+.markdown-result :deep(ul) { margin: 8px 0 8px 20px; padding: 0; }
+.markdown-result :deep(li) { margin: 4px 0; }
+.markdown-result :deep(pre) {
+  overflow: auto; margin: 8px 0; padding: 9px; border: 1px solid #e2e8f0; border-radius: 6px;
+  background: #f8fafc; color: #334155; font-size: 12px; line-height: 1.5;
+}
+.markdown-result :deep(code) {
+  padding: 1px 4px; border-radius: 4px; background: #f1f5f9;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px;
+}
+.markdown-result :deep(pre code) { padding: 0; background: transparent; }
+.markdown-result :deep(blockquote) {
+  margin: 8px 0; padding-left: 10px; border-left: 3px solid #cbd5e1; color: #475569;
+}
+.markdown-result :deep(table) { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 12px; }
+.markdown-result :deep(th),
+.markdown-result :deep(td) { border: 1px solid #e2e8f0; padding: 6px; text-align: left; vertical-align: top; }
+.markdown-result :deep(a) { color: #2563eb; text-decoration: none; }
+.preview-placeholder {
+  min-height: 220px; display: flex; align-items: center; justify-content: center;
+  color: #94a3b8; font-size: 13px;
 }
 .empty {
   color: #94a3b8; background: #f8fafc; border: 1px dashed #cbd5e1;

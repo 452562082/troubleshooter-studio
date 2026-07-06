@@ -144,6 +144,25 @@ describe('BugWorkbenchPage', () => {
     expect(wrapper.text()).toContain('同步我的 Bug')
   })
 
+  it('renders zentao html steps as rich text', async () => {
+    vi.mocked(listBugs).mockResolvedValue([
+      {
+        id: 'zentao-577',
+        source: 'zentao',
+        source_id: '577',
+        title: '搜索页异常',
+        steps: '<p>[步骤]</p><ol><li>PC端进入搜索页</li><li>输入电影名称</li></ol>',
+      },
+    ])
+
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.find('.text-block li').text()).toBe('PC端进入搜索页')
+    expect(wrapper.find('.text-block').text()).not.toContain('<p>[步骤]</p>')
+  })
+
   it('renders bot matches when backend returns null reasons', async () => {
     vi.mocked(listBugs).mockResolvedValue([
       { id: 'zentao-1842', source: 'zentao', source_id: '1842', title: '支付页 500' },
@@ -245,7 +264,34 @@ describe('BugWorkbenchPage', () => {
     await flushPromises()
     await flushPromises()
 
-    expect((wrapper.find('textarea.context-preview').element as HTMLTextAreaElement).value).toContain('缓存配置错误')
+    expect(wrapper.find('.context-preview').text()).toContain('缓存配置错误')
+    expect(wrapper.find('.context-preview .markdown-result').html()).toContain('<p>缓存配置错误</p>')
+  })
+
+  it('renders investigation final message as markdown', async () => {
+    vi.mocked(listBugs).mockResolvedValue([
+      { id: 'zentao-577', source: 'zentao', source_id: '577', title: '搜索页异常' },
+    ])
+    vi.mocked(matchBugBots).mockResolvedValue([
+      { bot: { key: 'base|codex', system_id: 'base', target: 'codex', path: '/repo' }, score: 10, reasons: [] },
+    ])
+    vi.mocked(listBugInvestigationRuns).mockResolvedValue([
+      {
+        id: 'run-1',
+        bug_id: 'zentao-577',
+        bot_key: 'base|codex',
+        status: 'succeeded',
+        final_message: '## 现象复述\n\n1. 输入电影名称\n2. 电影卡片显示 **一集全**',
+        events: [],
+      },
+    ])
+
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.find('.context-preview .markdown-result h2').text()).toBe('现象复述')
+    expect(wrapper.find('.context-preview .markdown-result strong').text()).toBe('一集全')
   })
 
   it('disables start investigation and offers context fallback for cursor bot', async () => {
@@ -288,7 +334,7 @@ describe('BugWorkbenchPage', () => {
     })
     await wrapper.vm.$nextTick()
 
-    expect((wrapper.find('textarea.context-preview').element as HTMLTextAreaElement).value).toContain('正在检查缓存配置')
+    expect(wrapper.find('.context-preview').text()).toContain('正在检查缓存配置')
 
     runtimeMock.handlers['bug-investigation:event']({
       run: { id: 'run-1', bug_id: 'zentao-577', bot_key: 'base|codex', status: 'succeeded', final_message: '缓存配置错误', events: [] },
@@ -296,9 +342,39 @@ describe('BugWorkbenchPage', () => {
     })
     await wrapper.vm.$nextTick()
 
-    expect((wrapper.find('textarea.context-preview').element as HTMLTextAreaElement).value).toContain('缓存配置错误')
+    expect(wrapper.find('.process-log').text()).toContain('正在检查缓存配置')
+    expect(wrapper.find('.context-preview .markdown-result').text()).toContain('缓存配置错误')
     wrapper.unmount()
     expect(runtimeMock.unlisten).toHaveBeenCalled()
+  })
+
+  it('scrolls investigation output to the bottom as events arrive', async () => {
+    ;(window as any).runtime = { EventsOnMultiple: vi.fn() }
+    vi.mocked(listBugs).mockResolvedValue([
+      { id: 'zentao-577', source: 'zentao', source_id: '577', title: '搜索页异常' },
+    ])
+    vi.mocked(matchBugBots).mockResolvedValue([
+      { bot: { key: 'base|codex', system_id: 'base', target: 'codex', path: '/repo' }, score: 10, reasons: [] },
+    ])
+    vi.mocked(listBugInvestigationRuns).mockResolvedValue([
+      { id: 'run-1', bug_id: 'zentao-577', bot_key: 'base|codex', status: 'running', events: [] },
+    ])
+
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises()
+    await flushPromises()
+    const output = wrapper.find('.context-preview').element as HTMLElement
+    Object.defineProperty(output, 'scrollHeight', { configurable: true, value: 900 })
+    output.scrollTop = 0
+
+    runtimeMock.handlers['bug-investigation:event']({
+      run: { id: 'run-1', bug_id: 'zentao-577', bot_key: 'base|codex', status: 'running' },
+      event: { type: 'message', message: '第 1 步：检查最近变更' },
+    })
+    await wrapper.vm.$nextTick()
+    await wrapper.vm.$nextTick()
+
+    expect(output.scrollTop).toBe(900)
   })
 
   it('ignores investigation events for a non-selected bug', async () => {
@@ -320,6 +396,6 @@ describe('BugWorkbenchPage', () => {
     })
     await wrapper.vm.$nextTick()
 
-    expect((wrapper.find('textarea.context-preview').element as HTMLTextAreaElement).value).toBe('当前 Bug 上下文')
+    expect(wrapper.find('.context-preview').text()).toBe('当前 Bug 上下文')
   })
 })

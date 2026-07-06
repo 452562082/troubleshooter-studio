@@ -229,9 +229,9 @@ export async function listBugInvestigationRuns(bugID: string): Promise<Investiga
 
 function normalizeInvestigationRun(raw: any): InvestigationRun {
 	return {
-		id: String(raw?.id || ''),
-		bug_id: String(raw?.bug_id || ''),
-		bot_key: String(raw?.bot_key || ''),
+		id: String(raw?.id ?? ''),
+		bug_id: String(raw?.bug_id ?? ''),
+		bot_key: String(raw?.bot_key ?? ''),
 		status: raw?.status || 'queued',
 		started_at: raw?.started_at,
 		finished_at: raw?.finished_at,

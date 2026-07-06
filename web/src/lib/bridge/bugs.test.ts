@@ -149,4 +149,17 @@ describe('bug bridge', () => {
     expect(spy).toHaveBeenCalledWith('zentao-577')
     expect(result[0].events).toEqual([])
   })
+
+  it('preserves zero investigation identifiers while coercing to strings', async () => {
+    const spy = vi.fn().mockResolvedValue([
+      { id: 0, bug_id: 0, bot_key: 0, status: 'running' },
+    ])
+    ;(window as any).go = { main: { App: { ListBugInvestigationRuns: spy } } }
+
+    const result = await listBugInvestigationRuns('zentao-577')
+
+    expect(result[0].id).toBe('0')
+    expect(result[0].bug_id).toBe('0')
+    expect(result[0].bot_key).toBe('0')
+  })
 })

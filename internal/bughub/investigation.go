@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -34,12 +35,14 @@ type InvestigationRun struct {
 	BotKey        string               `json:"bot_key,omitempty"`
 	Status        InvestigationStatus  `json:"status"`
 	StartedAt     time.Time            `json:"started_at,omitempty"`
-	FinishedAt    time.Time            `json:"finished_at,omitempty"`
+	FinishedAt    *time.Time           `json:"finished_at,omitempty"`
 	PromptPreview string               `json:"prompt_preview,omitempty"`
 	Events        []InvestigationEvent `json:"events,omitempty"`
 	FinalMessage  string               `json:"final_message,omitempty"`
 	Error         string               `json:"error,omitempty"`
 }
+
+var investigationStoreMu sync.Mutex
 
 type InvestigationStore struct {
 	root string
@@ -54,6 +57,12 @@ func (s *InvestigationStore) Path() string {
 }
 
 func (s *InvestigationStore) ListByBug(bugID string) ([]InvestigationRun, error) {
+	investigationStoreMu.Lock()
+	defer investigationStoreMu.Unlock()
+	return s.listByBugLocked(bugID)
+}
+
+func (s *InvestigationStore) listByBugLocked(bugID string) ([]InvestigationRun, error) {
 	items, err := s.readAll()
 	if err != nil {
 		return nil, err
@@ -71,7 +80,9 @@ func (s *InvestigationStore) ListByBug(bugID string) ([]InvestigationRun, error)
 }
 
 func (s *InvestigationStore) ActiveRunForBug(bugID string) (InvestigationRun, bool, error) {
-	runs, err := s.ListByBug(bugID)
+	investigationStoreMu.Lock()
+	defer investigationStoreMu.Unlock()
+	runs, err := s.listByBugLocked(bugID)
 	if err != nil {
 		return InvestigationRun{}, false, err
 	}
@@ -84,6 +95,8 @@ func (s *InvestigationStore) ActiveRunForBug(bugID string) (InvestigationRun, bo
 }
 
 func (s *InvestigationStore) Upsert(run InvestigationRun) error {
+	investigationStoreMu.Lock()
+	defer investigationStoreMu.Unlock()
 	if strings.TrimSpace(run.ID) == "" {
 		return errors.New("investigation run id is required")
 	}
@@ -116,6 +129,8 @@ func (s *InvestigationStore) Upsert(run InvestigationRun) error {
 }
 
 func (s *InvestigationStore) AppendEvent(runID string, event InvestigationEvent) error {
+	investigationStoreMu.Lock()
+	defer investigationStoreMu.Unlock()
 	items, err := s.readAll()
 	if err != nil {
 		return err
@@ -133,14 +148,17 @@ func (s *InvestigationStore) AppendEvent(runID string, event InvestigationEvent)
 }
 
 func (s *InvestigationStore) Finish(runID string, status InvestigationStatus, finalMessage, errorText string) error {
+	investigationStoreMu.Lock()
+	defer investigationStoreMu.Unlock()
 	items, err := s.readAll()
 	if err != nil {
 		return err
 	}
 	for i := range items {
 		if items[i].ID == runID {
+			finishedAt := time.Now().UTC()
 			items[i].Status = status
-			items[i].FinishedAt = time.Now().UTC()
+			items[i].FinishedAt = &finishedAt
 			items[i].FinalMessage = finalMessage
 			items[i].Error = errorText
 			return s.writeAll(items)

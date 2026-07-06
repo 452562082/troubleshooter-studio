@@ -1,6 +1,7 @@
 package bughub
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -62,6 +63,23 @@ func TestInvestigationStoreActiveRunForBug(t *testing.T) {
 	}
 	if !ok || got.ID != "running" {
 		t.Fatalf("active ok=%v run=%+v", ok, got)
+	}
+}
+
+func TestInvestigationStoreGet(t *testing.T) {
+	store := NewInvestigationStore(t.TempDir())
+	if err := store.Upsert(InvestigationRun{ID: "run-1", BugID: "b1", Status: InvestigationRunning}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get("run-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.ID != "run-1" || got.BugID != "b1" {
+		t.Fatalf("run = %+v", got)
+	}
+	if _, err := store.Get("missing"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing err = %v", err)
 	}
 }
 
@@ -246,5 +264,102 @@ func TestBuildCodexInvestigationPromptIncludesBugAndBot(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
 		}
+	}
+}
+
+func TestBuildCodexExecCommandUsesSafeWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.Mkdir(filepath.Join(workspace, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd, err := BuildCodexExecCommand("codex", workspace, "hello")
+	if err != nil {
+		t.Fatalf("BuildCodexExecCommand: %v", err)
+	}
+	got := strings.Join(cmd.Args, " ")
+	for _, want := range []string{"exec", "--json", "--cd " + workspace, "--sandbox workspace-write"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("args %q missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "ask-for-approval") {
+		t.Fatalf("args include unsupported approval flag: %q", got)
+	}
+	if cmd.Dir != workspace {
+		t.Fatalf("Dir = %q", cmd.Dir)
+	}
+}
+
+func TestBuildCodexExecCommandRejectsNonGitWorkspace(t *testing.T) {
+	_, err := BuildCodexExecCommand("codex", t.TempDir(), "hello")
+	if err == nil || !strings.Contains(err.Error(), "git repository") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestCodexInvestigatorRunsFakeCodex(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "repo")
+	if err := os.MkdirAll(filepath.Join(workspace, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "codex")
+	script := "#!/bin/sh\nprintf '%s\n' '{\"type\":\"thread.started\",\"thread_id\":\"t1\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"final answer\"}}' '{\"type\":\"turn.completed\"}'\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := NewInvestigationStore(root)
+	inv := NewCodexInvestigator(store, bin)
+	run, err := inv.Start(context.Background(), Bug{ID: "bug-1", Title: "Bug"}, BotRef{Key: "b|codex", Target: "codex", Path: workspace})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if run.Status != InvestigationRunning {
+		t.Fatalf("initial run = %+v", run)
+	}
+	waited, err := inv.Wait(run.ID)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if waited.Status != InvestigationSucceeded || waited.FinalMessage != "final answer" {
+		t.Fatalf("waited = %+v", waited)
+	}
+}
+
+func TestCodexInvestigatorRejectsNonCodexBot(t *testing.T) {
+	store := NewInvestigationStore(t.TempDir())
+	inv := NewCodexInvestigator(store, "codex")
+	_, err := inv.Start(context.Background(), Bug{ID: "bug-1", Title: "Bug"}, BotRef{Key: "b|claude", Target: "claude", Path: t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), "codex") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestCodexInvestigatorCancelMarksStoredRunCancelled(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "repo")
+	if err := os.MkdirAll(filepath.Join(workspace, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "codex")
+	script := "#!/bin/sh\nwhile :; do :; done\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := NewInvestigationStore(root)
+	inv := NewCodexInvestigator(store, bin)
+	run, err := inv.Start(context.Background(), Bug{ID: "bug-1", Title: "Bug"}, BotRef{Key: "b|codex", Target: "codex", Path: workspace})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := inv.Cancel(run.ID); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	got, err := store.Get(run.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != InvestigationCancelled {
+		t.Fatalf("run = %+v", got)
 	}
 }

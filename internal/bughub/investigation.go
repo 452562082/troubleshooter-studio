@@ -94,6 +94,21 @@ func (s *InvestigationStore) ActiveRunForBug(bugID string) (InvestigationRun, bo
 	return InvestigationRun{}, false, nil
 }
 
+func (s *InvestigationStore) Get(runID string) (InvestigationRun, error) {
+	investigationStoreMu.Lock()
+	defer investigationStoreMu.Unlock()
+	items, err := s.readAll()
+	if err != nil {
+		return InvestigationRun{}, err
+	}
+	for _, item := range items {
+		if item.ID == runID {
+			return item, nil
+		}
+	}
+	return InvestigationRun{}, os.ErrNotExist
+}
+
 func (s *InvestigationStore) Upsert(run InvestigationRun) error {
 	investigationStoreMu.Lock()
 	defer investigationStoreMu.Unlock()

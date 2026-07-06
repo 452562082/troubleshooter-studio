@@ -53,7 +53,41 @@ func TestStartBugInvestigationRunsCodexBot(t *testing.T) {
 	}
 }
 
-func TestStartBugInvestigationRejectsNonCodexBot(t *testing.T) {
+func TestStartBugInvestigationRunsClaudeBot(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	agentPath := filepath.Join(root, "base-troubleshooter.md")
+	if err := os.WriteFile(agentPath, []byte("# agent"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "claude")
+	script := "#!/bin/sh\nprintf '%s\n' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"claude done\"}'\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := bugStore().Upsert(bughub.Bug{ID: "zentao-577", Source: "zentao", Title: "Bug 577"}); err != nil {
+		t.Fatalf("Upsert bug: %v", err)
+	}
+
+	app := &App{}
+	run, err := app.StartBugInvestigation(BugInvestigationInput{
+		BugID: "zentao-577",
+		Bot:   bughub.BotRef{Key: agentPath + "|claude-code", Target: "claude-code", Path: agentPath, SystemID: "base"},
+	})
+	if err != nil {
+		t.Fatalf("StartBugInvestigation: %v", err)
+	}
+	waited, err := app.codexInvestigator().Wait(run.ID)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if waited.Status != bughub.InvestigationSucceeded || waited.FinalMessage != "claude done" {
+		t.Fatalf("waited = %+v", waited)
+	}
+}
+
+func TestStartBugInvestigationRejectsCursorBot(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", root)
 	if err := bugStore().Upsert(bughub.Bug{ID: "zentao-577", Source: "zentao", Title: "Bug 577"}); err != nil {
@@ -64,7 +98,7 @@ func TestStartBugInvestigationRejectsNonCodexBot(t *testing.T) {
 		BugID: "zentao-577",
 		Bot:   bughub.BotRef{Key: "repo|cursor", Target: "cursor", Path: root, SystemID: "base"},
 	})
-	if err == nil || !strings.Contains(err.Error(), "当前只支持 Codex 机器人直接排障") {
+	if err == nil || !strings.Contains(err.Error(), "暂不支持 Cursor") {
 		t.Fatalf("err = %v", err)
 	}
 }

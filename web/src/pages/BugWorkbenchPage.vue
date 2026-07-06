@@ -10,6 +10,7 @@ import {
   clearBugPlatformLogin,
   deleteBugPlatform,
   fetchBugByID,
+  generateBugContext,
   type InvestigationEvent,
   type InvestigationRun,
   loginBugPlatform,
@@ -40,6 +41,7 @@ const loginClearing = ref(false)
 const platformDeleting = ref(false)
 const syncingBugs = ref(false)
 const fetchingBug = ref(false)
+const contextGenerating = ref(false)
 const matching = ref(false)
 const investigationRuns = ref<InvestigationRun[]>([])
 const investigationStarting = ref(false)
@@ -69,7 +71,12 @@ const selectedPlatform = computed(() => platforms.value.find(p => p.id === selec
 const selectedPlatformHasSession = computed(() => Boolean(selectedPlatform.value?.session_header))
 const selectedBot = computed(() => matches.value.find(m => m.bot.key === selectedBotKey.value)?.bot)
 const selectedRun = computed(() => investigationRuns.value[0])
-const selectedBotIsCodex = computed(() => selectedBot.value?.target === 'codex')
+const selectedBotSupportsDirectLaunch = computed(() => ['codex', 'claude-code', 'openclaw'].includes(selectedBot.value?.target || ''))
+const selectedBotUnsupportedReason = computed(() => {
+  if (!selectedBot.value || selectedBotSupportsDirectLaunch.value) return ''
+  if (selectedBot.value.target === 'cursor') return 'Cursor 暂不支持后台直启,请复制上下文后在 Cursor Custom Agent 中发起。'
+  return '该机器人暂不支持后台直启。'
+})
 const investigationOutput = computed(() => {
   const run = selectedRun.value
   if (!run) return contextText.value
@@ -371,8 +378,8 @@ async function startInvestigation() {
     toast.error('请先选择 Bug 和机器人')
     return
   }
-  if (bot.target !== 'codex') {
-    toast.error('当前只支持 Codex 机器人直接排障。')
+  if (!selectedBotSupportsDirectLaunch.value) {
+    toast.error(selectedBotUnsupportedReason.value || '该机器人暂不支持后台直启。')
     return
   }
   investigationStarting.value = true
@@ -385,6 +392,25 @@ async function startInvestigation() {
     toastError('启动排障', e)
   } finally {
     investigationStarting.value = false
+  }
+}
+
+async function generateContext() {
+  const bug = selectedBug.value
+  const bot = selectedBot.value
+  if (!bug || !bot) {
+    toast.error('请先选择 Bug 和机器人')
+    return
+  }
+  contextGenerating.value = true
+  try {
+    contextText.value = await generateBugContext({ bug_id: bug.id, bot })
+    bugs.value = bugs.value.map(b => b.id === bug.id ? { ...b, selected_bot_key: bot.key, last_context: contextText.value } : b)
+    toast.success('已生成排障上下文')
+  } catch (e) {
+    toastError('生成排障上下文', e)
+  } finally {
+    contextGenerating.value = false
   }
 }
 
@@ -702,15 +728,18 @@ function fmtTime(s?: string): string {
           </span>
         </label>
         <div class="bot-actions">
-          <button class="btn primary" type="button" :disabled="!selectedBug || !selectedBotKey || !selectedBotIsCodex || investigationStarting" @click="startInvestigation">
+          <button class="btn primary" type="button" :disabled="!selectedBug || !selectedBotKey || !selectedBotSupportsDirectLaunch || investigationStarting" @click="startInvestigation">
             {{ investigationStarting ? '启动中...' : '开始排障' }}
+          </button>
+          <button v-if="selectedBot && !selectedBotSupportsDirectLaunch" class="btn" type="button" :disabled="contextGenerating" @click="generateContext">
+            {{ contextGenerating ? '生成中...' : '生成上下文' }}
           </button>
           <button class="btn" type="button" :disabled="!selectedRun || selectedRun.status !== 'running' || investigationCancelling" @click="cancelInvestigation">
             停止
           </button>
           <button class="btn" type="button" :disabled="!investigationOutput.trim()" @click="copyInvestigationOutput">复制</button>
         </div>
-        <p v-if="selectedBot && !selectedBotIsCodex" class="muted direct-launch-note">当前只支持 Codex 机器人直接排障。</p>
+        <p v-if="selectedBotUnsupportedReason" class="muted direct-launch-note">{{ selectedBotUnsupportedReason }}</p>
         <textarea :value="investigationOutput" class="context-preview" readonly placeholder="开始排障后在这里显示过程和结论"></textarea>
       </aside>
     </section>

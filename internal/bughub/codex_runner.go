@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ type InvestigationEventSink func(run InvestigationRun, event InvestigationEvent)
 type CodexInvestigator struct {
 	store     *InvestigationStore
 	codexBin  string
+	binaries  map[string]string
 	mu        sync.Mutex
 	active    map[string]*activeCodexRun
 	eventSink InvestigationEventSink
@@ -41,7 +43,32 @@ func NewCodexInvestigator(store *InvestigationStore, codexBin string) *CodexInve
 	return &CodexInvestigator{
 		store:    store,
 		codexBin: codexBin,
-		active:   make(map[string]*activeCodexRun),
+		binaries: map[string]string{
+			"codex":       codexBin,
+			"claude-code": "claude",
+			"openclaw":    "openclaw",
+		},
+		active: make(map[string]*activeCodexRun),
+	}
+}
+
+func (i *CodexInvestigator) SetBinaryForTarget(target, bin string) {
+	if i == nil {
+		return
+	}
+	target = strings.TrimSpace(target)
+	bin = strings.TrimSpace(bin)
+	if target == "" || bin == "" {
+		return
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.binaries == nil {
+		i.binaries = make(map[string]string)
+	}
+	i.binaries[target] = bin
+	if target == "codex" {
+		i.codexBin = bin
 	}
 }
 
@@ -56,7 +83,7 @@ func (i *CodexInvestigator) SetEventSink(sink InvestigationEventSink) {
 
 func BuildCodexInvestigationPrompt(b Bug, bot BotRef) string {
 	var sb strings.Builder
-	sb.WriteString("请作为选定的 Codex 排障机器人开始排障。\n")
+	sb.WriteString("请作为选定的 AI 排障机器人开始排障。\n")
 	sb.WriteString("目标：基于下面 Bug 工单上下文，完成只读根因分析，输出可执行结论和下一步建议。\n")
 	sb.WriteString("约束：默认不要修改代码，不要执行破坏性命令；如必须写入或重启服务，先在结论中说明需要人工确认。\n\n")
 	sb.WriteString(GenerateContext(b, bot))
@@ -89,13 +116,48 @@ func BuildCodexExecCommand(codexBin, workspace, prompt string) (*exec.Cmd, error
 	return cmd, nil
 }
 
+func BuildClaudeInvestigationCommand(claudeBin, workspace, agentPath, prompt string) (*exec.Cmd, error) {
+	claudeBin = strings.TrimSpace(claudeBin)
+	if claudeBin == "" {
+		claudeBin = "claude"
+	}
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" {
+		return nil, errors.New("workspace is required")
+	}
+	info, err := os.Stat(workspace)
+	if err != nil {
+		return nil, fmt.Errorf("check workspace %q: %w", workspace, err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("workspace %q is not a directory", workspace)
+	}
+	agentName := claudeAgentName(agentPath)
+	if agentName == "" {
+		return nil, errors.New("claude agent is required")
+	}
+	cmd := exec.Command(claudeBin, "-p", "--output-format", "stream-json", "--agent", agentName, prompt)
+	cmd.Dir = workspace
+	return cmd, nil
+}
+
+func BuildOpenClawInvestigationCommand(openclawBin, agentID, prompt string) (*exec.Cmd, error) {
+	openclawBin = strings.TrimSpace(openclawBin)
+	if openclawBin == "" {
+		openclawBin = "openclaw"
+	}
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return nil, errors.New("openclaw agent is required")
+	}
+	return exec.Command(openclawBin, "agent", "--agent", agentID, "--message", prompt, "--json"), nil
+}
+
 func (i *CodexInvestigator) Start(parent context.Context, bug Bug, bot BotRef) (InvestigationRun, error) {
 	if i == nil || i.store == nil {
 		return InvestigationRun{}, errors.New("investigation store is required")
 	}
-	if strings.TrimSpace(bot.Target) != "codex" {
-		return InvestigationRun{}, fmt.Errorf("bot target %q is not codex", bot.Target)
-	}
+	target := strings.TrimSpace(bot.Target)
 
 	i.mu.Lock()
 	if active, ok, err := i.store.ActiveRunForBug(bug.ID); err != nil {
@@ -113,14 +175,15 @@ func (i *CodexInvestigator) Start(parent context.Context, bug Bug, bot BotRef) (
 	}
 
 	prompt := BuildCodexInvestigationPrompt(bug, bot)
-	cmd, err := BuildCodexExecCommand(i.codexBin, bot.Path, prompt)
+	cmd, parser, err := i.buildCommandLocked(target, bot, prompt)
 	if err != nil {
 		i.mu.Unlock()
 		return InvestigationRun{}, err
 	}
 	ctx, cancel := context.WithCancel(parent)
+	cmdDir := cmd.Dir
 	cmd = exec.CommandContext(ctx, cmd.Path, cmd.Args[1:]...)
-	cmd.Dir = strings.TrimSpace(bot.Path)
+	cmd.Dir = cmdDir
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -165,8 +228,30 @@ func (i *CodexInvestigator) Start(parent context.Context, bug Bug, bot BotRef) (
 	active.process = cmd.Process
 
 	i.mu.Unlock()
-	go i.collectRun(ctx, run.ID, cmd, stdout, stderr, active)
+	go i.collectRun(ctx, run.ID, cmd, stdout, stderr, active, parser)
 	return run, nil
+}
+
+func (i *CodexInvestigator) buildCommandLocked(target string, bot BotRef, prompt string) (*exec.Cmd, investigationEventParser, error) {
+	if i.binaries == nil {
+		i.binaries = make(map[string]string)
+	}
+	switch target {
+	case "codex":
+		cmd, err := BuildCodexExecCommand(firstNonEmpty(i.binaries["codex"], i.codexBin, "codex"), bot.Path, prompt)
+		return cmd, ParseCodexJSONLEvent, err
+	case "claude-code":
+		workspace := claudeWorkspace(bot.Path)
+		cmd, err := BuildClaudeInvestigationCommand(firstNonEmpty(i.binaries["claude-code"], "claude"), workspace, bot.Path, prompt)
+		return cmd, ParseClaudeStreamJSONEvent, err
+	case "openclaw":
+		cmd, err := BuildOpenClawInvestigationCommand(firstNonEmpty(i.binaries["openclaw"], "openclaw"), openClawAgentID(bot), prompt)
+		return cmd, ParseOpenClawJSONEvent, err
+	case "cursor":
+		return nil, nil, errors.New("暂不支持 Cursor 后台直启，请复制上下文后在 Cursor Custom Agent 中发起")
+	default:
+		return nil, nil, fmt.Errorf("暂不支持 %s 后台直启", firstNonEmpty(target, "unknown"))
+	}
 }
 
 func (i *CodexInvestigator) Cancel(runID string) error {
@@ -197,7 +282,7 @@ func (i *CodexInvestigator) Wait(runID string) (InvestigationRun, error) {
 	return i.store.Get(runID)
 }
 
-func (i *CodexInvestigator) collectRun(ctx context.Context, runID string, cmd *exec.Cmd, stdout io.Reader, stderr io.Reader, active *activeCodexRun) {
+func (i *CodexInvestigator) collectRun(ctx context.Context, runID string, cmd *exec.Cmd, stdout io.Reader, stderr io.Reader, active *activeCodexRun, parser investigationEventParser) {
 	defer close(active.done)
 	defer i.removeActive(runID)
 	stopKillWatcher := make(chan struct{})
@@ -225,7 +310,7 @@ func (i *CodexInvestigator) collectRun(ctx context.Context, runID string, cmd *e
 		if line == "" {
 			continue
 		}
-		event, final, failed := ParseCodexJSONLEvent([]byte(line))
+		event, final, failed := parser([]byte(line))
 		if strings.TrimSpace(event.Message) != "" {
 			if event.At.IsZero() {
 				event.At = time.Now().UTC()
@@ -342,4 +427,27 @@ func promptPreview(prompt string) string {
 	}
 	runes := []rune(prompt)
 	return string(runes[:240])
+}
+
+func claudeWorkspace(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "."
+	}
+	info, err := os.Stat(path)
+	if err == nil && info.IsDir() {
+		return path
+	}
+	return filepath.Dir(path)
+}
+
+func claudeAgentName(path string) string {
+	base := filepath.Base(strings.TrimSpace(path))
+	ext := filepath.Ext(base)
+	return strings.TrimSuffix(base, ext)
+}
+
+func openClawAgentID(bot BotRef) string {
+	pathBase := strings.TrimSuffix(filepath.Base(strings.TrimSpace(bot.Path)), filepath.Ext(strings.TrimSpace(bot.Path)))
+	return firstNonEmpty(pathBase, bot.SystemID, bot.Name)
 }

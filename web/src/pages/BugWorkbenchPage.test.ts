@@ -1,6 +1,6 @@
 import { mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cancelBugInvestigation, listBugs, matchBugBots, startBugInvestigation, listBugInvestigationRuns } from '../lib/bridge'
+import { cancelBugInvestigation, generateBugContext, listBugs, matchBugBots, startBugInvestigation, listBugInvestigationRuns } from '../lib/bridge'
 import BugWorkbenchPage from './BugWorkbenchPage.vue'
 
 const runtimeMock = vi.hoisted(() => {
@@ -56,6 +56,7 @@ afterEach(() => {
   runtimeMock.EventsOn.mockClear()
   runtimeMock.unlisten.mockClear()
   vi.mocked(cancelBugInvestigation).mockReset()
+  vi.mocked(generateBugContext).mockReset()
   vi.mocked(listBugInvestigationRuns).mockResolvedValue([])
   vi.mocked(listBugs).mockResolvedValue([])
   vi.mocked(matchBugBots).mockResolvedValue([])
@@ -201,6 +202,34 @@ describe('BugWorkbenchPage', () => {
     })
   })
 
+  it('starts claude code investigation from selected bot', async () => {
+    vi.mocked(listBugs).mockResolvedValue([
+      { id: 'zentao-577', source: 'zentao', source_id: '577', title: '搜索页异常' },
+    ])
+    vi.mocked(matchBugBots).mockResolvedValue([
+      { bot: { key: 'base|claude-code', system_id: 'base', target: 'claude-code', path: '/Users/me/.claude/agents/base.md' }, score: 10, reasons: [] },
+    ])
+    vi.mocked(startBugInvestigation).mockResolvedValue({
+      id: 'run-1',
+      bug_id: 'zentao-577',
+      bot_key: 'base|claude-code',
+      status: 'running',
+      events: [],
+    })
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises()
+    await flushPromises()
+
+    const button = wrapper.findAll('button').find(b => b.text() === '开始排障')
+    expect(button?.attributes('disabled')).toBeUndefined()
+    await button!.trigger('click')
+
+    expect(startBugInvestigation).toHaveBeenCalledWith({
+      bug_id: 'zentao-577',
+      bot: { key: 'base|claude-code', system_id: 'base', target: 'claude-code', path: '/Users/me/.claude/agents/base.md' },
+    })
+  })
+
   it('renders final investigation output', async () => {
     vi.mocked(listBugs).mockResolvedValue([
       { id: 'zentao-577', source: 'zentao', source_id: '577', title: '搜索页异常' },
@@ -219,7 +248,7 @@ describe('BugWorkbenchPage', () => {
     expect((wrapper.find('textarea.context-preview').element as HTMLTextAreaElement).value).toContain('缓存配置错误')
   })
 
-  it('disables start investigation and explains unsupported non-codex bot', async () => {
+  it('disables start investigation and offers context fallback for cursor bot', async () => {
     vi.mocked(listBugs).mockResolvedValue([
       { id: 'zentao-577', source: 'zentao', source_id: '577', title: '搜索页异常' },
     ])
@@ -231,9 +260,10 @@ describe('BugWorkbenchPage', () => {
     await flushPromises()
     await flushPromises()
 
-    expect(wrapper.text()).toContain('当前只支持 Codex 机器人直接排障。')
+    expect(wrapper.text()).toContain('Cursor 暂不支持后台直启')
     const button = wrapper.findAll('button').find(b => b.text() === '开始排障')
     expect(button?.attributes('disabled')).toBeDefined()
+    expect(wrapper.findAll('button').some(b => b.text() === '生成上下文')).toBe(true)
   })
 
   it('streams investigation events into the selected run output', async () => {

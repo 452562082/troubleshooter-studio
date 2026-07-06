@@ -257,7 +257,7 @@ func TestBuildCodexInvestigationPromptIncludesBugAndBot(t *testing.T) {
 	bot := BotRef{Key: "/tmp/base.toml|codex", SystemID: "base", Target: "codex", Path: "/tmp/base.toml"}
 	prompt := BuildCodexInvestigationPrompt(bug, bot)
 	for _, want := range []string{
-		"请作为选定的 Codex 排障机器人开始排障",
+		"请作为选定的 AI 排障机器人开始排障",
 		"搜索结果错误",
 		"zentao:577",
 		"target: codex",
@@ -301,6 +301,40 @@ func TestBuildCodexExecCommandRejectsMissingWorkspace(t *testing.T) {
 	_, err = BuildCodexExecCommand("codex", file, "hello")
 	if err == nil || !strings.Contains(err.Error(), "directory") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestBuildClaudeInvestigationCommand(t *testing.T) {
+	workspace := t.TempDir()
+	agentPath := filepath.Join(workspace, "base-troubleshooter.md")
+	if err := os.WriteFile(agentPath, []byte("# agent"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd, err := BuildClaudeInvestigationCommand("claude", workspace, agentPath, "hello")
+	if err != nil {
+		t.Fatalf("BuildClaudeInvestigationCommand: %v", err)
+	}
+	got := strings.Join(cmd.Args, " ")
+	for _, want := range []string{"-p", "--output-format stream-json", "--agent base-troubleshooter", "hello"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("args %q missing %q", got, want)
+		}
+	}
+	if cmd.Dir != workspace {
+		t.Fatalf("Dir = %q", cmd.Dir)
+	}
+}
+
+func TestBuildOpenClawInvestigationCommand(t *testing.T) {
+	cmd, err := BuildOpenClawInvestigationCommand("openclaw", "base", "hello")
+	if err != nil {
+		t.Fatalf("BuildOpenClawInvestigationCommand: %v", err)
+	}
+	got := strings.Join(cmd.Args, " ")
+	for _, want := range []string{"agent", "--agent base", "--message hello", "--json"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("args %q missing %q", got, want)
+		}
 	}
 }
 
@@ -427,11 +461,65 @@ func TestCodexInvestigatorStoresLongAgentMessage(t *testing.T) {
 	}
 }
 
-func TestCodexInvestigatorRejectsNonCodexBot(t *testing.T) {
+func TestCodexInvestigatorRunsFakeClaude(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "repo")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	agentPath := filepath.Join(workspace, "base-troubleshooter.md")
+	if err := os.WriteFile(agentPath, []byte("# agent"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "claude")
+	script := "#!/bin/sh\nprintf '%s\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"checking\"}]}}' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"claude final\"}'\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := NewInvestigationStore(root)
+	inv := NewCodexInvestigator(store, "codex")
+	inv.SetBinaryForTarget("claude-code", bin)
+	run, err := inv.Start(context.Background(), Bug{ID: "bug-1", Title: "Bug"}, BotRef{Key: agentPath + "|claude-code", Target: "claude-code", Path: agentPath})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waited, err := inv.Wait(run.ID)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if waited.Status != InvestigationSucceeded || waited.FinalMessage != "claude final" {
+		t.Fatalf("waited = %+v", waited)
+	}
+}
+
+func TestCodexInvestigatorRunsFakeOpenClaw(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "openclaw")
+	script := "#!/bin/sh\nprintf '%s\n' '{\"ok\":true,\"reply\":\"openclaw final\"}'\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := NewInvestigationStore(root)
+	inv := NewCodexInvestigator(store, "codex")
+	inv.SetBinaryForTarget("openclaw", bin)
+	run, err := inv.Start(context.Background(), Bug{ID: "bug-1", Title: "Bug"}, BotRef{Key: "base|openclaw", Target: "openclaw", Path: "base", SystemID: "base"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waited, err := inv.Wait(run.ID)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if waited.Status != InvestigationSucceeded || waited.FinalMessage != "openclaw final" {
+		t.Fatalf("waited = %+v", waited)
+	}
+}
+
+func TestCodexInvestigatorRejectsUnsupportedBot(t *testing.T) {
 	store := NewInvestigationStore(t.TempDir())
 	inv := NewCodexInvestigator(store, "codex")
-	_, err := inv.Start(context.Background(), Bug{ID: "bug-1", Title: "Bug"}, BotRef{Key: "b|claude", Target: "claude", Path: t.TempDir()})
-	if err == nil || !strings.Contains(err.Error(), "codex") {
+	_, err := inv.Start(context.Background(), Bug{ID: "bug-1", Title: "Bug"}, BotRef{Key: "b|cursor", Target: "cursor", Path: t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), "不支持") {
 		t.Fatalf("err = %v", err)
 	}
 }

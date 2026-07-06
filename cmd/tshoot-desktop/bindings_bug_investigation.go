@@ -28,11 +28,24 @@ func (a *App) StartBugInvestigation(input BugInvestigationInput) (bughub.Investi
 	if !ok {
 		return bughub.InvestigationRun{}, os.ErrNotExist
 	}
-	if strings.TrimSpace(input.Bot.Target) != "codex" {
-		return bughub.InvestigationRun{}, errors.New("当前只支持 Codex 机器人直接排障")
-	}
-	if _, err := exec.LookPath("codex"); err != nil {
-		return bughub.InvestigationRun{}, errors.New("未检测到 codex CLI")
+	target := strings.TrimSpace(input.Bot.Target)
+	switch target {
+	case "codex":
+		if _, err := exec.LookPath("codex"); err != nil {
+			return bughub.InvestigationRun{}, errors.New("未检测到 codex CLI")
+		}
+	case "claude-code":
+		if _, err := exec.LookPath("claude"); err != nil {
+			return bughub.InvestigationRun{}, errors.New("未检测到 claude CLI")
+		}
+	case "openclaw":
+		if _, err := exec.LookPath("openclaw"); err != nil {
+			return bughub.InvestigationRun{}, errors.New("未检测到 openclaw CLI")
+		}
+	case "cursor":
+		return bughub.InvestigationRun{}, errors.New("暂不支持 Cursor 后台直启，请复制上下文后在 Cursor Custom Agent 中发起")
+	default:
+		return bughub.InvestigationRun{}, errors.New("暂不支持该机器人后台直启")
 	}
 	ctx := a.getRuntimeContext()
 	if ctx == nil {

@@ -63,7 +63,7 @@ export interface InvestigationEvent {
   type: string
   message: string
   raw?: Record<string, unknown>
-  meta?: Record<string, string>
+  meta?: Record<string, unknown>
 }
 
 export interface InvestigationRun {

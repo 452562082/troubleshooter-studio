@@ -133,6 +133,19 @@ describe('bug bridge', () => {
     expect(spy).toHaveBeenCalledWith({ run_id: 'run-1' })
   })
 
+  it('rejects startBugInvestigation in browser mode', async () => {
+    delete (window as any).go
+    const input = { bug_id: 'zentao-577', bot: { key: 'base|codex', target: 'codex', path: '/repo', system_id: 'base' } }
+
+    await expect(startBugInvestigation(input)).rejects.toThrow(/桌面 app/)
+  })
+
+  it('rejects cancelBugInvestigation in browser mode', async () => {
+    delete (window as any).go
+
+    await expect(cancelBugInvestigation({ run_id: 'run-1' })).rejects.toThrow(/桌面 app/)
+  })
+
   it('returns [] for listBugInvestigationRuns in browser mode', async () => {
     delete (window as any).go
     await expect(listBugInvestigationRuns('zentao-577')).resolves.toEqual([])

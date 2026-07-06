@@ -196,5 +196,8 @@ func (s *InvestigationStore) writeAll(items []InvestigationRun) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.Path(), append(data, '\n'), 0o600)
+	if err := os.WriteFile(s.Path(), append(data, '\n'), 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(s.Path(), 0o600)
 }

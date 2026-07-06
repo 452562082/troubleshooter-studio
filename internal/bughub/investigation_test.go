@@ -193,3 +193,21 @@ func TestInvestigationStoreWriteNewlineAndMode(t *testing.T) {
 		t.Fatalf("mode = %o", got)
 	}
 }
+
+func TestInvestigationStoreWriteTightensExistingFileMode(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "runs.json"), []byte("[]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := NewInvestigationStore(root)
+	if err := store.Upsert(InvestigationRun{ID: "run-1", BugID: "b1"}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	info, err := os.Stat(store.Path())
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("mode = %o", got)
+	}
+}

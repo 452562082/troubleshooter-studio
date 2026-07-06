@@ -269,15 +269,12 @@ func TestBuildCodexInvestigationPromptIncludesBugAndBot(t *testing.T) {
 
 func TestBuildCodexExecCommandUsesSafeWorkspace(t *testing.T) {
 	workspace := t.TempDir()
-	if err := os.Mkdir(filepath.Join(workspace, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	cmd, err := BuildCodexExecCommand("codex", workspace, "hello")
 	if err != nil {
 		t.Fatalf("BuildCodexExecCommand: %v", err)
 	}
 	got := strings.Join(cmd.Args, " ")
-	for _, want := range []string{"exec", "--json", "--cd " + workspace, "--sandbox workspace-write"} {
+	for _, want := range []string{"exec", "--json", "--cd " + workspace, "--sandbox workspace-write", "--skip-git-repo-check"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("args %q missing %q", got, want)
 		}
@@ -290,9 +287,17 @@ func TestBuildCodexExecCommandUsesSafeWorkspace(t *testing.T) {
 	}
 }
 
-func TestBuildCodexExecCommandRejectsNonGitWorkspace(t *testing.T) {
-	_, err := BuildCodexExecCommand("codex", t.TempDir(), "hello")
-	if err == nil || !strings.Contains(err.Error(), "git repository") {
+func TestBuildCodexExecCommandRejectsMissingWorkspace(t *testing.T) {
+	_, err := BuildCodexExecCommand("codex", filepath.Join(t.TempDir(), "missing"), "hello")
+	if err == nil || !strings.Contains(err.Error(), "workspace") {
+		t.Fatalf("err = %v", err)
+	}
+	file := filepath.Join(t.TempDir(), "workspace-file")
+	if err := os.WriteFile(file, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = BuildCodexExecCommand("codex", file, "hello")
+	if err == nil || !strings.Contains(err.Error(), "directory") {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -300,7 +305,7 @@ func TestBuildCodexExecCommandRejectsNonGitWorkspace(t *testing.T) {
 func TestCodexInvestigatorRunsFakeCodex(t *testing.T) {
 	root := t.TempDir()
 	workspace := filepath.Join(root, "repo")
-	if err := os.MkdirAll(filepath.Join(workspace, ".git"), 0o755); err != nil {
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(root, "codex")
@@ -326,6 +331,33 @@ func TestCodexInvestigatorRunsFakeCodex(t *testing.T) {
 	}
 }
 
+func TestCodexInvestigatorStoresLongAgentMessage(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "repo")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	longMessage := strings.Repeat("x", 70*1024)
+	bin := filepath.Join(root, "codex")
+	script := "#!/bin/sh\nprintf '%s\\n' " + shellQuote(`{"type":"item.completed","item":{"type":"agent_message","text":"`+longMessage+`"}}`) + "\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := NewInvestigationStore(root)
+	inv := NewCodexInvestigator(store, bin)
+	run, err := inv.Start(context.Background(), Bug{ID: "bug-1", Title: "Bug"}, BotRef{Key: "b|codex", Target: "codex", Path: workspace})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waited, err := inv.Wait(run.ID)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if waited.Status != InvestigationSucceeded || waited.FinalMessage != longMessage {
+		t.Fatalf("status=%s final len=%d", waited.Status, len(waited.FinalMessage))
+	}
+}
+
 func TestCodexInvestigatorRejectsNonCodexBot(t *testing.T) {
 	store := NewInvestigationStore(t.TempDir())
 	inv := NewCodexInvestigator(store, "codex")
@@ -338,7 +370,7 @@ func TestCodexInvestigatorRejectsNonCodexBot(t *testing.T) {
 func TestCodexInvestigatorCancelMarksStoredRunCancelled(t *testing.T) {
 	root := t.TempDir()
 	workspace := filepath.Join(root, "repo")
-	if err := os.MkdirAll(filepath.Join(workspace, ".git"), 0o755); err != nil {
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(root, "codex")
@@ -362,4 +394,72 @@ func TestCodexInvestigatorCancelMarksStoredRunCancelled(t *testing.T) {
 	if got.Status != InvestigationCancelled {
 		t.Fatalf("run = %+v", got)
 	}
+}
+
+func TestCodexInvestigatorStartsNewRunWhenStoredActiveRunIsOrphaned(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "repo")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "codex")
+	script := "#!/bin/sh\nprintf '%s\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"new final\"}}'\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := NewInvestigationStore(root)
+	if err := store.Upsert(InvestigationRun{ID: "old-run", BugID: "bug-1", Status: InvestigationRunning}); err != nil {
+		t.Fatal(err)
+	}
+	inv := NewCodexInvestigator(store, bin)
+	run, err := inv.Start(context.Background(), Bug{ID: "bug-1", Title: "Bug"}, BotRef{Key: "b|codex", Target: "codex", Path: workspace})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if run.ID == "old-run" || run.Status != InvestigationRunning {
+		t.Fatalf("run = %+v", run)
+	}
+	oldRun, err := store.Get("old-run")
+	if err != nil {
+		t.Fatalf("Get old-run: %v", err)
+	}
+	if oldRun.Status != InvestigationFailed || !strings.Contains(oldRun.Error, "investigation process is not running") {
+		t.Fatalf("old run = %+v", oldRun)
+	}
+	if _, err := inv.Wait(run.ID); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+}
+
+func TestCodexInvestigatorWaitReturnsPersistenceError(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "repo")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "codex")
+	script := "#!/bin/sh\nsleep 0.2\nprintf '%s\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"final\"}}'\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := NewInvestigationStore(root)
+	inv := NewCodexInvestigator(store, bin)
+	run, err := inv.Start(context.Background(), Bug{ID: "bug-1", Title: "Bug"}, BotRef{Key: "b|codex", Target: "codex", Path: workspace})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := os.Remove(store.Path()); err != nil {
+		t.Fatalf("Remove runs.json: %v", err)
+	}
+	if err := os.Mkdir(store.Path(), 0o700); err != nil {
+		t.Fatalf("Mkdir runs.json: %v", err)
+	}
+	_, err = inv.Wait(run.ID)
+	if err == nil {
+		t.Fatal("expected persistence error")
+	}
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }

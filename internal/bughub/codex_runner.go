@@ -10,7 +10,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +26,8 @@ type CodexInvestigator struct {
 type activeCodexRun struct {
 	cancel context.CancelFunc
 	done   chan struct{}
+	errMu  sync.Mutex
+	err    error
 }
 
 func NewCodexInvestigator(store *InvestigationStore, codexBin string) *CodexInvestigator {
@@ -60,14 +61,17 @@ func BuildCodexExecCommand(codexBin, workspace, prompt string) (*exec.Cmd, error
 	if workspace == "" {
 		return nil, errors.New("workspace is required")
 	}
-	gitPath := filepath.Join(workspace, ".git")
-	if _, err := os.Stat(gitPath); err != nil {
+	info, err := os.Stat(workspace)
+	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("workspace %q is not a git repository", workspace)
+			return nil, fmt.Errorf("workspace %q does not exist", workspace)
 		}
-		return nil, fmt.Errorf("check git repository %q: %w", workspace, err)
+		return nil, fmt.Errorf("check workspace %q: %w", workspace, err)
 	}
-	cmd := exec.Command(codexBin, "exec", "--json", "--sandbox", "workspace-write", "--cd", workspace, prompt)
+	if !info.IsDir() {
+		return nil, fmt.Errorf("workspace %q is not a directory", workspace)
+	}
+	cmd := exec.Command(codexBin, "exec", "--json", "--sandbox", "workspace-write", "--cd", workspace, "--skip-git-repo-check", prompt)
 	cmd.Dir = workspace
 	return cmd, nil
 }
@@ -79,15 +83,26 @@ func (i *CodexInvestigator) Start(parent context.Context, bug Bug, bot BotRef) (
 	if strings.TrimSpace(bot.Target) != "codex" {
 		return InvestigationRun{}, fmt.Errorf("bot target %q is not codex", bot.Target)
 	}
+
+	i.mu.Lock()
 	if active, ok, err := i.store.ActiveRunForBug(bug.ID); err != nil {
+		i.mu.Unlock()
 		return InvestigationRun{}, err
 	} else if ok {
-		return active, nil
+		if _, inMemory := i.active[active.ID]; inMemory {
+			i.mu.Unlock()
+			return active, nil
+		}
+		if err := i.store.Finish(active.ID, InvestigationFailed, active.FinalMessage, "investigation process is not running"); err != nil {
+			i.mu.Unlock()
+			return InvestigationRun{}, err
+		}
 	}
 
 	prompt := BuildCodexInvestigationPrompt(bug, bot)
 	cmd, err := BuildCodexExecCommand(i.codexBin, bot.Path, prompt)
 	if err != nil {
+		i.mu.Unlock()
 		return InvestigationRun{}, err
 	}
 	ctx, cancel := context.WithCancel(parent)
@@ -96,11 +111,13 @@ func (i *CodexInvestigator) Start(parent context.Context, bug Bug, bot BotRef) (
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		i.mu.Unlock()
 		cancel()
 		return InvestigationRun{}, err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
+		i.mu.Unlock()
 		cancel()
 		return InvestigationRun{}, err
 	}
@@ -114,23 +131,26 @@ func (i *CodexInvestigator) Start(parent context.Context, bug Bug, bot BotRef) (
 		PromptPreview: promptPreview(prompt),
 	}
 	if err := i.store.Upsert(run); err != nil {
+		i.mu.Unlock()
 		cancel()
 		return InvestigationRun{}, err
 	}
 	active := &activeCodexRun{cancel: cancel, done: make(chan struct{})}
-	i.mu.Lock()
 	i.active[run.ID] = active
-	i.mu.Unlock()
 
 	if err := cmd.Start(); err != nil {
-		_ = i.store.Finish(run.ID, InvestigationFailed, "", err.Error())
-		i.removeActive(run.ID)
+		if finishErr := i.store.Finish(run.ID, InvestigationFailed, "", err.Error()); finishErr != nil {
+			active.setError(finishErr)
+		}
+		delete(i.active, run.ID)
+		i.mu.Unlock()
 		cancel()
 		close(active.done)
 		return run, err
 	}
 
-	go i.collectRun(ctx, run.ID, cmd, stdout, stderr, active.done)
+	i.mu.Unlock()
+	go i.collectRun(ctx, run.ID, cmd, stdout, stderr, active)
 	return run, nil
 }
 
@@ -144,7 +164,7 @@ func (i *CodexInvestigator) Cancel(runID string) error {
 	active.cancel()
 	<-active.done
 	i.removeActive(runID)
-	return nil
+	return active.getError()
 }
 
 func (i *CodexInvestigator) Wait(runID string) (InvestigationRun, error) {
@@ -154,12 +174,15 @@ func (i *CodexInvestigator) Wait(runID string) (InvestigationRun, error) {
 	if ok {
 		<-active.done
 		i.removeActive(runID)
+		if err := active.getError(); err != nil {
+			return InvestigationRun{}, err
+		}
 	}
 	return i.store.Get(runID)
 }
 
-func (i *CodexInvestigator) collectRun(ctx context.Context, runID string, cmd *exec.Cmd, stdout io.Reader, stderr io.Reader, done chan<- struct{}) {
-	defer close(done)
+func (i *CodexInvestigator) collectRun(ctx context.Context, runID string, cmd *exec.Cmd, stdout io.Reader, stderr io.Reader, active *activeCodexRun) {
+	defer close(active.done)
 	defer i.removeActive(runID)
 
 	stderrDone := make(chan string, 1)
@@ -171,6 +194,7 @@ func (i *CodexInvestigator) collectRun(ctx context.Context, runID string, cmd *e
 	var finalMessage string
 	var failure string
 	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -178,7 +202,7 @@ func (i *CodexInvestigator) collectRun(ctx context.Context, runID string, cmd *e
 		}
 		event, final, failed := ParseCodexJSONLEvent([]byte(line))
 		if strings.TrimSpace(event.Message) != "" {
-			_ = i.store.AppendEvent(runID, event)
+			active.setError(i.store.AppendEvent(runID, event))
 		}
 		if strings.TrimSpace(final) != "" {
 			finalMessage = final
@@ -195,18 +219,35 @@ func (i *CodexInvestigator) collectRun(ctx context.Context, runID string, cmd *e
 	stderrText := <-stderrDone
 	switch {
 	case ctx.Err() != nil:
-		_ = i.store.Finish(runID, InvestigationCancelled, finalMessage, ctx.Err().Error())
+		active.setError(i.store.Finish(runID, InvestigationCancelled, finalMessage, ctx.Err().Error()))
 	case strings.TrimSpace(failure) != "":
-		_ = i.store.Finish(runID, InvestigationFailed, finalMessage, failure)
+		active.setError(i.store.Finish(runID, InvestigationFailed, finalMessage, failure))
 	case waitErr != nil:
 		errorText := strings.TrimSpace(stderrText)
 		if errorText == "" {
 			errorText = waitErr.Error()
 		}
-		_ = i.store.Finish(runID, InvestigationFailed, finalMessage, errorText)
+		active.setError(i.store.Finish(runID, InvestigationFailed, finalMessage, errorText))
 	default:
-		_ = i.store.Finish(runID, InvestigationSucceeded, finalMessage, "")
+		active.setError(i.store.Finish(runID, InvestigationSucceeded, finalMessage, ""))
 	}
+}
+
+func (a *activeCodexRun) setError(err error) {
+	if err == nil {
+		return
+	}
+	a.errMu.Lock()
+	defer a.errMu.Unlock()
+	if a.err == nil {
+		a.err = err
+	}
+}
+
+func (a *activeCodexRun) getError() error {
+	a.errMu.Lock()
+	defer a.errMu.Unlock()
+	return a.err
 }
 
 func (i *CodexInvestigator) removeActive(runID string) {

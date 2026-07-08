@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,9 +16,12 @@ import (
 func TestStartBugInvestigationRunsCodexBot(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", root)
-	repo := filepath.Join(root, "repo")
-	if err := os.MkdirAll(repo, 0o755); err != nil {
-		t.Fatal(err)
+	repo := filepath.Join(root, "base-troubleshooter")
+	validatorRepo := filepath.Join(root, "base-validator")
+	for _, dir := range []string{repo, validatorRepo} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	bin := filepath.Join(root, "codex")
 	script := "#!/bin/sh\nprintf '%s\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}' '{\"type\":\"turn.completed\"}'\n"
@@ -36,6 +41,10 @@ func TestStartBugInvestigationRunsCodexBot(t *testing.T) {
 			Target:   "codex",
 			Path:     repo,
 			SystemID: "base",
+			InternalAgents: []bughub.BotInternalAgent{
+				{ID: "base-troubleshooter", Role: "troubleshooter"},
+				{ID: "base-validator", Role: "validator"},
+			},
 		},
 	})
 	if err != nil {
@@ -53,12 +62,111 @@ func TestStartBugInvestigationRunsCodexBot(t *testing.T) {
 	}
 }
 
+func TestStartBugInvestigationMaterializesZentaoAttachmentsForAgent(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	repo := filepath.Join(root, "base-troubleshooter")
+	validatorRepo := filepath.Join(root, "base-validator")
+	for _, dir := range []string{repo, validatorRepo} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	callsPath := filepath.Join(root, "calls.txt")
+	bin := filepath.Join(root, "codex")
+	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\nprintf '%s\\n' \"$last\" >> \"$CALLS_PATH\"\nprintf '%s\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}' '{\"type\":\"turn.completed\"}'\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CALLS_PATH", callsPath)
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Token") != "secret" {
+			t.Fatalf("Token header = %q", r.Header.Get("Token"))
+		}
+		if r.URL.Path != "/api.php/v1/files/101/download" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("\x89PNG\r\n\x1a\nagent-readable"))
+	}))
+	defer srv.Close()
+	if _, err := bugPlatformStore().Upsert(bughub.PlatformConfig{
+		ID:      "zentao-main",
+		Name:    "禅道",
+		Type:    "zentao",
+		BaseURL: srv.URL,
+		Token:   "secret",
+		Enabled: true,
+	}); err != nil {
+		t.Fatalf("Upsert platform: %v", err)
+	}
+	if err := bugStore().Upsert(bughub.Bug{
+		ID:     "zentao-718",
+		Source: "zentao",
+		Title:  "Bug 718",
+		Attachments: []bughub.Attachment{{
+			ID:        "101",
+			Name:      "screen.png",
+			Type:      "image/png",
+			RemoteURL: "/data/upload/1/202607/screen",
+		}},
+	}); err != nil {
+		t.Fatalf("Upsert bug: %v", err)
+	}
+
+	app := &App{}
+	run, err := app.StartBugInvestigation(BugInvestigationInput{
+		BugID: "zentao-718",
+		Bot: bughub.BotRef{
+			Key:      repo + "|codex",
+			Target:   "codex",
+			Path:     repo,
+			SystemID: "base",
+			InternalAgents: []bughub.BotInternalAgent{
+				{ID: "base-troubleshooter", Role: "troubleshooter"},
+				{ID: "base-validator", Role: "validator"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBugInvestigation: %v", err)
+	}
+	if _, err := app.codexInvestigator().Wait(run.ID); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	prompts, err := os.ReadFile(callsPath)
+	if err != nil {
+		t.Fatalf("ReadFile calls: %v", err)
+	}
+	if !strings.Contains(string(prompts), "id=101") {
+		t.Fatalf("prompt missing attachment id:\n%s", prompts)
+	}
+	localMarker := filepath.Join(".tshoot", "bugs", "attachments", "zentao-718", "101-screen.png")
+	if !strings.Contains(string(prompts), localMarker) {
+		t.Fatalf("prompt missing materialized attachment path %q:\n%s", localMarker, prompts)
+	}
+	materialized := filepath.Join(root, localMarker)
+	data, err := os.ReadFile(materialized)
+	if err != nil {
+		t.Fatalf("materialized attachment missing: %v", err)
+	}
+	if !strings.Contains(string(data), "agent-readable") {
+		t.Fatalf("materialized data = %q", data)
+	}
+}
+
 func TestStartBugInvestigationRunsClaudeBot(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", root)
-	agentPath := filepath.Join(root, "base-troubleshooter.md")
-	if err := os.WriteFile(agentPath, []byte("# agent"), 0o600); err != nil {
-		t.Fatal(err)
+	agentPath := filepath.Join(root, "skills", "base-troubleshooter")
+	validatorPath := filepath.Join(root, "skills", "base-validator")
+	for _, dir := range []string{agentPath, validatorPath} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	bin := filepath.Join(root, "claude")
 	script := "#!/bin/sh\nprintf '%s\n' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"claude done\"}'\n"
@@ -73,7 +181,16 @@ func TestStartBugInvestigationRunsClaudeBot(t *testing.T) {
 	app := &App{}
 	run, err := app.StartBugInvestigation(BugInvestigationInput{
 		BugID: "zentao-577",
-		Bot:   bughub.BotRef{Key: agentPath + "|claude-code", Target: "claude-code", Path: agentPath, SystemID: "base"},
+		Bot: bughub.BotRef{
+			Key:      agentPath + "|claude-code",
+			Target:   "claude-code",
+			Path:     agentPath,
+			SystemID: "base",
+			InternalAgents: []bughub.BotInternalAgent{
+				{ID: "base-troubleshooter", Role: "troubleshooter"},
+				{ID: "base-validator", Role: "validator"},
+			},
+		},
 	})
 	if err != nil {
 		t.Fatalf("StartBugInvestigation: %v", err)

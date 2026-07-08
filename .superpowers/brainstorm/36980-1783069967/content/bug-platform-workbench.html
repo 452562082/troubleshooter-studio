@@ -1,0 +1,138 @@
+<h2>Bug 平台工作台草图</h2>
+<p class="subtitle">目标:收到禅道/其它平台推送的 Bug 后,在工作台里查看内容,选择已安装排障机器人开始排查。</p>
+
+<div class="mockup">
+  <div class="mockup-header">Troubleshooter Studio - 新增「Bug 工单」入口</div>
+  <div class="mockup-body">
+    <div style="display:grid;grid-template-columns:210px 310px 1fr 300px;min-height:560px;border:1px solid #d7dee8;border-radius:8px;overflow:hidden;background:#fff">
+      <div style="background:#1e293b;color:#e2e8f0;padding:18px 12px">
+        <div style="font-weight:700;margin-bottom:18px">AI 排障机器人工作台</div>
+        <div style="display:flex;flex-direction:column;gap:6px;font-size:13px">
+          <div style="padding:9px 10px;border-radius:6px;color:#94a3b8">🏠 首页</div>
+          <div style="padding:9px 10px;border-radius:6px;color:#94a3b8">🤖 已装机器人</div>
+          <div style="padding:9px 10px;border-radius:6px;color:#94a3b8">🧙 创建向导</div>
+          <div style="padding:9px 10px;border-radius:6px;background:#3b82f6;color:white;display:flex;align-items:center;justify-content:space-between">
+            <span>🐞 Bug 工单</span><span style="background:#f97316;color:white;border-radius:10px;padding:1px 6px;font-size:10px">3</span>
+          </div>
+          <div style="height:1px;background:#334155;margin:8px 0"></div>
+          <div style="padding:9px 10px;border-radius:6px;color:#94a3b8">📝 YAML 沙盒</div>
+          <div style="padding:9px 10px;border-radius:6px;color:#94a3b8">🔍 代码扫描</div>
+          <div style="padding:9px 10px;border-radius:6px;color:#94a3b8">📜 日志</div>
+        </div>
+      </div>
+
+      <div style="border-right:1px solid #e2e8f0;background:#f8fafc;display:flex;flex-direction:column">
+        <div style="padding:16px;border-bottom:1px solid #e2e8f0">
+          <div style="font-size:18px;font-weight:700;color:#0f172a">Bug 工单</div>
+          <div style="font-size:12px;color:#64748b;margin-top:4px">来源:禅道 / Webhook / 手动导入</div>
+          <input style="margin-top:12px;width:100%;padding:8px 10px;border:1px solid #cbd5e1;border-radius:6px" placeholder="搜索标题、ID、服务名">
+        </div>
+        <div style="padding:10px;display:flex;gap:6px;font-size:12px">
+          <button style="padding:5px 8px;border:1px solid #cbd5e1;background:white;border-radius:6px">全部</button>
+          <button style="padding:5px 8px;border:1px solid #cbd5e1;background:white;border-radius:6px">未排障</button>
+          <button style="padding:5px 8px;border:1px solid #cbd5e1;background:white;border-radius:6px">处理中</button>
+        </div>
+        <div style="padding:0 10px 12px;display:flex;flex-direction:column;gap:8px;overflow:auto">
+          <div style="background:white;border:1px solid #bfdbfe;border-left:4px solid #3b82f6;border-radius:6px;padding:10px">
+            <div style="display:flex;justify-content:space-between;gap:8px"><strong style="font-size:13px">#BUG-1842 支付页提交后 500</strong><span style="font-size:11px;color:#dc2626">P1</span></div>
+            <div style="font-size:12px;color:#64748b;margin-top:5px">mall-web · prod · 10 分钟前</div>
+            <div style="font-size:11px;color:#2563eb;margin-top:6px">状态:未排障</div>
+          </div>
+          <div style="background:white;border:1px solid #e2e8f0;border-radius:6px;padding:10px">
+            <strong style="font-size:13px">#BUG-1838 订单列表偶发空白</strong>
+            <div style="font-size:12px;color:#64748b;margin-top:5px">order-admin · test · 42 分钟前</div>
+            <div style="font-size:11px;color:#64748b;margin-top:6px">状态:处理中</div>
+          </div>
+          <div style="background:white;border:1px solid #e2e8f0;border-radius:6px;padding:10px">
+            <strong style="font-size:13px">#BUG-1827 用户详情接口超时</strong>
+            <div style="font-size:12px;color:#64748b;margin-top:5px">crm-web · prod · 昨天</div>
+            <div style="font-size:11px;color:#16a34a;margin-top:6px">状态:已定位</div>
+          </div>
+        </div>
+      </div>
+
+      <div style="padding:20px 22px;border-right:1px solid #e2e8f0;overflow:auto">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px">
+          <div>
+            <div style="font-size:12px;color:#64748b">禅道 BUG-1842 · opened by qa-chen</div>
+            <h3 style="margin:4px 0 8px;color:#0f172a">支付页提交后 500,用户无法完成付款</h3>
+          </div>
+          <span style="background:#fee2e2;color:#991b1b;border-radius:6px;padding:5px 8px;font-size:12px;font-weight:700">P1 生产</span>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:16px 0">
+          <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:9px"><div style="font-size:11px;color:#64748b">环境</div><strong>prod</strong></div>
+          <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:9px"><div style="font-size:11px;color:#64748b">前端入口</div><strong>mall-web</strong></div>
+          <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:9px"><div style="font-size:11px;color:#64748b">用户</div><strong>u_23901</strong></div>
+          <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:9px"><div style="font-size:11px;color:#64748b">发生时间</div><strong>14:31</strong></div>
+        </div>
+        <div style="margin:18px 0">
+          <div style="font-size:12px;font-weight:700;color:#475569;margin-bottom:6px">复现描述</div>
+          <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:12px;font-size:13px;line-height:1.55;color:#334155">
+            1. 打开 https://mall.example.com/order/checkout<br>
+            2. 选择支付宝,点击提交订单<br>
+            3. 页面弹出“系统异常”,Network 里 /api/pay/submit 返回 500
+          </div>
+        </div>
+        <div style="margin:18px 0">
+          <div style="font-size:12px;font-weight:700;color:#475569;margin-bottom:6px">附件和线索</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;font-size:12px">
+            <span style="border:1px solid #cbd5e1;border-radius:6px;padding:6px 8px;background:white">network.har</span>
+            <span style="border:1px solid #cbd5e1;border-radius:6px;padding:6px 8px;background:white">console.log</span>
+            <span style="border:1px solid #cbd5e1;border-radius:6px;padding:6px 8px;background:white">screenshot.png</span>
+            <span style="border:1px solid #cbd5e1;border-radius:6px;padding:6px 8px;background:white">trace_id: 9fd2...</span>
+          </div>
+        </div>
+        <div style="margin:18px 0">
+          <div style="font-size:12px;font-weight:700;color:#475569;margin-bottom:6px">排障记录</div>
+          <div style="border-left:3px solid #cbd5e1;padding-left:10px;color:#64748b;font-size:12px;line-height:1.7">
+            14:35 已分配给 shop-prod-troubleshooter<br>
+            14:36 已提取 HAR:失败接口 /api/pay/submit<br>
+            14:37 等待机器人排查后端链路...
+          </div>
+        </div>
+      </div>
+
+      <div style="padding:18px;background:#fbfdff">
+        <div style="font-size:15px;font-weight:700;color:#0f172a">选择排障机器人</div>
+        <div style="font-size:12px;color:#64748b;margin:5px 0 14px">按 system.id / 环境 / 已装平台匹配推荐</div>
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <div style="border:1px solid #3b82f6;background:#eff6ff;border-radius:8px;padding:12px">
+            <div style="display:flex;justify-content:space-between"><strong>shop-prod-troubleshooter</strong><span style="font-size:11px;color:#2563eb">推荐</span></div>
+            <div style="font-size:12px;color:#64748b;margin-top:5px">OpenClaw · prod · mall/shop</div>
+          </div>
+          <div style="border:1px solid #e2e8f0;background:white;border-radius:8px;padding:12px">
+            <strong>order-troubleshooter</strong>
+            <div style="font-size:12px;color:#64748b;margin-top:5px">Claude Code · prod/test</div>
+          </div>
+          <div style="border:1px solid #e2e8f0;background:white;border-radius:8px;padding:12px;opacity:.6">
+            <strong>crm-troubleshooter</strong>
+            <div style="font-size:12px;color:#64748b;margin-top:5px">Cursor · 不匹配当前前端入口</div>
+          </div>
+        </div>
+        <button style="width:100%;margin-top:18px;padding:10px 12px;background:#2563eb;color:white;border:none;border-radius:7px;font-weight:700">开始排障</button>
+        <button style="width:100%;margin-top:8px;padding:9px 12px;background:white;color:#334155;border:1px solid #cbd5e1;border-radius:7px">生成排障 Prompt</button>
+        <div style="margin-top:14px;font-size:12px;color:#64748b;line-height:1.55">
+          首版建议不直接驱动外部 IDE,先把 Bug 上下文、附件路径、trace_id 和推荐机器人组合成可复制/可发送的排障上下文。
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>当前建议的首版范围</h3>
+  <div class="options" data-multiselect>
+    <div class="option" data-choice="inbox" onclick="toggleSelect(this)">
+      <div class="letter">1</div>
+      <div class="content"><h3>Bug 收件箱</h3><p>展示平台推送/手动导入的 Bug,支持筛选、搜索、详情。</p></div>
+    </div>
+    <div class="option" data-choice="bot-select" onclick="toggleSelect(this)">
+      <div class="letter">2</div>
+      <div class="content"><h3>选择已装机器人</h3><p>复用 DiscoverBots,按 system/env/repo 进行推荐,也允许手选。</p></div>
+    </div>
+    <div class="option" data-choice="context" onclick="toggleSelect(this)">
+      <div class="letter">3</div>
+      <div class="content"><h3>生成排障上下文</h3><p>先产出结构化 prompt/上下文包,后续再接 OpenClaw/IDE 自动发起。</p></div>
+    </div>
+  </div>
+</div>

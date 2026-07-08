@@ -326,29 +326,46 @@ func pruneLegacyClaudeSettingsMCP(legacyPath string, servers map[string]any) err
 // 用户手改 toml 时只要保留两行 marker 就能继续重装;两行都丢了 install 报错而不是默默
 // 拼到末尾(避免无限堆叠出多个 [mcp_servers.*] 段、codex 加载时冲突)。
 func injectMCPIntoCodexAgentTOML(root string, cfg *config.SystemConfig, servers map[string]any) error {
-	agentName := cfg.ResolveID()
-	tomlPath := filepath.Join(root, "agents", agentName+".toml")
-	raw, err := os.ReadFile(tomlPath)
-	if err != nil {
-		return fmt.Errorf("read codex agent toml %s: %w", tomlPath, err)
-	}
+	for _, agentName := range codexAgentNamesForConfig(cfg) {
+		tomlPath := filepath.Join(root, "agents", agentName+".toml")
+		raw, err := os.ReadFile(tomlPath)
+		if err != nil {
+			if os.IsNotExist(err) && agentName != cfg.ResolveID() {
+				continue
+			}
+			return fmt.Errorf("read codex agent toml %s: %w", tomlPath, err)
+		}
 
-	patched, err := replaceCodexMCPRegion(string(raw), renderCodexMCPSection(servers))
-	if err != nil {
-		return fmt.Errorf("patch codex agent toml %s: %w", tomlPath, err)
-	}
+		patched, err := replaceCodexMCPRegion(string(raw), renderCodexMCPSection(servers))
+		if err != nil {
+			return fmt.Errorf("patch codex agent toml %s: %w", tomlPath, err)
+		}
 
-	// 0o600:codex agent toml 的 [mcp_servers.*.env] 段含 plaintext creds(同 ~/.claude.json
-	// / ~/.cursor/mcp.json),不能 world-readable。
-	// 注意:os.WriteFile 在文件**已存在**时不改 mode,而本函数总是 patch 已经存在的 toml,
-	// 所以必须 chmod 显式收 mode 否则继承先前 install_native.go 第一次写时的 0o644。
-	if err := os.WriteFile(tomlPath, []byte(patched), 0o600); err != nil {
-		return fmt.Errorf("write codex agent toml %s: %w", tomlPath, err)
-	}
-	if err := os.Chmod(tomlPath, 0o600); err != nil {
-		return fmt.Errorf("chmod codex agent toml %s: %w", tomlPath, err)
+		// 0o600:codex agent toml 的 [mcp_servers.*.env] 段含 plaintext creds(同 ~/.claude.json
+		// / ~/.cursor/mcp.json),不能 world-readable。
+		// 注意:os.WriteFile 在文件**已存在**时不改 mode,而本函数总是 patch 已经存在的 toml,
+		// 所以必须 chmod 显式收 mode 否则继承先前 install_native.go 第一次写时的 0o644。
+		if err := os.WriteFile(tomlPath, []byte(patched), 0o600); err != nil {
+			return fmt.Errorf("write codex agent toml %s: %w", tomlPath, err)
+		}
+		if err := os.Chmod(tomlPath, 0o600); err != nil {
+			return fmt.Errorf("chmod codex agent toml %s: %w", tomlPath, err)
+		}
 	}
 	return nil
+}
+
+func codexAgentNamesForConfig(cfg *config.SystemConfig) []string {
+	troubleshooter := cfg.ResolveID()
+	base := strings.TrimSpace(cfg.System.ID)
+	if base == "" {
+		base = strings.TrimSuffix(troubleshooter, "-troubleshooter")
+	}
+	validator := base + "-validator"
+	if validator == troubleshooter {
+		return []string{troubleshooter}
+	}
+	return []string{troubleshooter, validator}
 }
 
 // replaceCodexMCPRegion 找 begin..end 两行 marker,把中间(含两行)整体换成

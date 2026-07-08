@@ -2745,6 +2745,9 @@ function deriveSkillsWhitelist(): string[] {
   if (enabledObservability.jaeger) skills.push('tracing-query')
   if (enabledObservability.skywalking) skills.push('skywalking-query')
   if (enabledObservability.tempo) skills.push('tempo-query')
+  if (enabledObservability.grafana || enabledObservability.loki || enabledObservability.prometheus) {
+    skills.push('grafana-observability-query')
+  }
   if (enabledObservability.elk) skills.push('elk-log-query')
   return skills
 }

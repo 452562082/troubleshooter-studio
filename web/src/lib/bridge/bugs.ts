@@ -4,6 +4,7 @@ import { isDesktop } from './shared'
 const desktopApp = App as Record<string, (...args: any[]) => Promise<any>>
 
 export interface BugAttachment {
+  id?: string
   name: string
   type?: string
   local_path?: string
@@ -22,11 +23,18 @@ export interface BugRecord {
   status?: string
   severity?: string
   priority?: string
+  product?: string
+  module?: string
+  bug_type?: string
+  os?: string
+  browser?: string
+  keywords?: string
   assignee?: string
   reporter?: string
   created_at?: string
   updated_at?: string
   env?: string
+  bot_env?: string
   system_id?: string
   frontend_repo?: string
   service_hints?: string[]
@@ -47,7 +55,11 @@ export interface BotRef {
   target: string
   path: string
   name?: string
+  agent_id?: string
+  role?: string
+  internal_agents?: Array<{ id: string, role: string }>
   env?: string
+  envs?: string[]
 }
 
 export interface BotMatch {
@@ -94,16 +106,24 @@ export interface BugPlatform {
   type: string
   base_url?: string
   account?: string
+  env?: string
   auth_mode?: string
   session_header?: string
   password?: string
   token?: string
   hook_secret?: string
+  bot_env?: string
+  bot_mappings?: PlatformBotMapping[]
   enabled: boolean
   poll_enabled?: boolean
   poll_interval_minutes?: number
   created_at?: string
   updated_at?: string
+}
+
+export interface PlatformBotMapping {
+  bot_key: string
+  env?: string
 }
 
 export interface BugPlatformInput {
@@ -112,11 +132,14 @@ export interface BugPlatformInput {
   type: string
   base_url?: string
   account?: string
+  env?: string
   auth_mode?: string
   session_header?: string
   password?: string
   token?: string
   hook_secret?: string
+  bot_env?: string
+  bot_mappings?: PlatformBotMapping[]
   enabled: boolean
   poll_enabled?: boolean
   poll_interval_minutes?: number
@@ -132,6 +155,18 @@ export interface BugSyncResult {
 export interface BugFetchInput {
   platform_id: string
   bug_id: string
+}
+
+export interface BugAttachmentPreviewInput {
+  platform_id: string
+  bug_id: string
+  attachment_index: number
+}
+
+export interface BugAttachmentPreviewResult {
+  name: string
+  content_type: string
+  data_url: string
 }
 
 export interface BugLoginInput {
@@ -185,6 +220,11 @@ export async function syncBugPlatform(platformID: string): Promise<BugSyncResult
 export async function fetchBugByID(input: BugFetchInput): Promise<BugSyncResult> {
   if (!isDesktop()) throw new Error('拉取 Bug 只在桌面 app 可用')
   return desktopApp.FetchBugByID(input) as Promise<BugSyncResult>
+}
+
+export async function previewBugAttachment(input: BugAttachmentPreviewInput): Promise<BugAttachmentPreviewResult> {
+  if (!isDesktop()) throw new Error('附件预览只在桌面 app 可用')
+  return desktopApp.PreviewBugAttachment(input) as Promise<BugAttachmentPreviewResult>
 }
 
 export async function loginBugPlatform(input: BugLoginInput): Promise<BugLoginResult> {

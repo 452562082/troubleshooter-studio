@@ -142,6 +142,46 @@ frontend_entries:
             "source": "candidate_services",
         }, services)
 
+    def test_frontend_entry_map_supports_inline_candidate_services(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        evidence = Path(tmp.name) / "har.json"
+        evidence.write_text(json.dumps({
+            "backend_handoff": {
+                "trace_ids": [],
+                "candidate_endpoints": ["/api/orders"],
+            },
+        }), encoding="utf-8")
+        entry_map = Path(tmp.name) / "frontend-entry-map.yaml"
+        entry_map.write_text("""
+frontend_entries:
+  mall-web:
+    path_candidates:
+      "/api/orders":
+        route_candidates: []
+        candidate_services: ["order-service"]
+""", encoding="utf-8")
+
+        res = subprocess.run(
+            [sys.executable, str(SCRIPT), "--frontend-entry-map", str(entry_map), str(evidence)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+        services = json.loads(res.stdout)["backend_handoff"]["candidate_services"]
+        self.assertIn({
+            "endpoint": "/api/orders",
+            "frontend_repo": "mall-web",
+            "service": "order-service",
+            "match": "fallback",
+            "route": "",
+            "method": "",
+            "source": "candidate_services",
+        }, services)
+
 
 if __name__ == "__main__":
     unittest.main()

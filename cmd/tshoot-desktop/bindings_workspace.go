@@ -16,6 +16,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xiaolong/troubleshooter-studio/internal/agent"
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 )
 
@@ -62,6 +64,9 @@ func (a *App) ListBotWorkspaceFiles(rootPath string) (*FileNode, error) {
 	}
 	if _, err := os.Stat(abs); err != nil {
 		return nil, fmt.Errorf("stat root: %w", err)
+	}
+	if layout, ok := loadIDEWorkspaceLayout(abs); ok {
+		return listIDEWorkspace(layout)
 	}
 	root := &FileNode{Name: filepath.Base(abs), Path: "", IsDir: true}
 	if err := walkWorkspaceDir(abs, "", root); err != nil {
@@ -109,6 +114,9 @@ func walkWorkspaceDir(abs, relSoFar string, parent *FileNode) error {
 		} else {
 			// 递归失败不中断整体(权限问题 / 软链断裂),只记空目录
 			_ = walkWorkspaceDir(nodeAbs, nodeRel, &node)
+			if len(node.Children) == 0 {
+				continue
+			}
 		}
 		parent.Children = append(parent.Children, node)
 	}
@@ -130,7 +138,7 @@ func (a *App) ReadBotWorkspaceFile(rootPath, relPath string) (*ReadFileResult, e
 	if err := assertBotWorkspacePath(rootPath); err != nil {
 		return nil, err
 	}
-	abs, err := safeResolveInsideRoot(rootPath, relPath)
+	abs, err := resolveBotWorkspaceFile(rootPath, relPath)
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +178,7 @@ func (a *App) WriteBotWorkspaceFile(rootPath, relPath, content string) error {
 	if err := assertBotWorkspacePath(rootPath); err != nil {
 		return err
 	}
-	abs, err := safeResolveInsideRoot(rootPath, relPath)
+	abs, err := resolveBotWorkspaceFile(rootPath, relPath)
 	if err != nil {
 		return err
 	}
@@ -194,6 +202,206 @@ func (a *App) WriteBotWorkspaceFile(rootPath, relPath, content string) error {
 		return fmt.Errorf("file %q 由 generator 管理,UI 编辑会在下次部署时被覆盖,请通过修改 troubleshooter.yaml + 重新部署来更新", base)
 	}
 	return os.WriteFile(abs, []byte(content), info.Mode().Perm())
+}
+
+type ideWorkspaceLayout struct {
+	RootPath     string
+	PlatformRoot string
+	SkillsRoot   string
+	Target       string
+	SystemID     string
+	AgentExt     string
+	AgentIDs     []string
+}
+
+func loadIDEWorkspaceLayout(rootPath string) (ideWorkspaceLayout, bool) {
+	meta, ok := readWorkspaceMeta(rootPath)
+	if !ok {
+		return ideWorkspaceLayout{}, false
+	}
+	target := strings.TrimSpace(meta.Target)
+	if target != string(agent.TargetClaudeCode) && target != string(agent.TargetCursor) && target != string(agent.TargetCodex) {
+		return ideWorkspaceLayout{}, false
+	}
+	rootAbs, err := filepath.Abs(rootPath)
+	if err != nil {
+		return ideWorkspaceLayout{}, false
+	}
+	skillsRoot := filepath.Dir(rootAbs)
+	if filepath.Base(skillsRoot) != "skills" {
+		return ideWorkspaceLayout{}, false
+	}
+	t, err := agent.ParseIDETarget(target)
+	if err != nil {
+		return ideWorkspaceLayout{}, false
+	}
+	ids := internalAgentIDs(meta, filepath.Base(rootAbs))
+	return ideWorkspaceLayout{
+		RootPath:     rootAbs,
+		PlatformRoot: filepath.Dir(skillsRoot),
+		SkillsRoot:   skillsRoot,
+		Target:       target,
+		SystemID:     strings.TrimSpace(meta.SystemID),
+		AgentExt:     t.UserAgentExt(),
+		AgentIDs:     ids,
+	}, true
+}
+
+func readWorkspaceMeta(rootPath string) (discover.Meta, bool) {
+	var meta discover.Meta
+	data, err := os.ReadFile(filepath.Join(rootPath, discover.MetaFilename))
+	if err != nil {
+		return meta, false
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return meta, false
+	}
+	discover.NormalizeMetaForPath(&meta, filepath.Join(rootPath, discover.MetaFilename))
+	return meta, true
+}
+
+func internalAgentIDs(meta discover.Meta, fallback string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	add(meta.AgentID)
+	for _, ag := range meta.InternalAgents {
+		add(ag.ID)
+	}
+	add(fallback)
+	sort.Strings(out)
+	return out
+}
+
+func listIDEWorkspace(layout ideWorkspaceLayout) (*FileNode, error) {
+	name := layout.SystemID
+	if name == "" {
+		name = filepath.Base(layout.RootPath)
+	}
+	root := &FileNode{Name: name, Path: "", IsDir: true}
+	if metaNode, err := fileNodeForPath(filepath.Join(layout.RootPath, discover.MetaFilename), discover.MetaFilename); err == nil {
+		root.Children = append(root.Children, metaNode)
+	}
+
+	agentsNode := FileNode{Name: "agents", Path: "agents", IsDir: true}
+	for _, id := range layout.AgentIDs {
+		abs := filepath.Join(layout.PlatformRoot, "agents", id+layout.AgentExt)
+		if node, err := fileNodeForPath(abs, filepath.ToSlash(filepath.Join("agents", id+layout.AgentExt))); err == nil {
+			agentsNode.Children = append(agentsNode.Children, node)
+		}
+	}
+	root.Children = append(root.Children, agentsNode)
+
+	skillsNode := FileNode{Name: "skills", Path: "skills", IsDir: true}
+	for _, id := range layout.AgentIDs {
+		abs := filepath.Join(layout.SkillsRoot, id)
+		if info, err := os.Stat(abs); err == nil && info.IsDir() {
+			node := FileNode{Name: id, Path: filepath.ToSlash(filepath.Join("skills", id)), IsDir: true}
+			_ = walkWorkspaceDir(abs, filepath.Join("skills", id), &node)
+			skillsNode.Children = append(skillsNode.Children, node)
+		}
+	}
+	root.Children = append(root.Children, skillsNode)
+
+	scriptsNode := FileNode{Name: "scripts", Path: "scripts", IsDir: true}
+	for _, id := range layout.AgentIDs {
+		abs := filepath.Join(layout.PlatformRoot, "scripts", id)
+		if info, err := os.Stat(abs); err == nil && info.IsDir() {
+			node := FileNode{Name: id, Path: filepath.ToSlash(filepath.Join("scripts", id)), IsDir: true}
+			_ = walkWorkspaceDir(abs, filepath.Join("scripts", id), &node)
+			scriptsNode.Children = append(scriptsNode.Children, node)
+		}
+	}
+	root.Children = append(root.Children, scriptsNode)
+	return root, nil
+}
+
+func fileNodeForPath(abs, rel string) (FileNode, error) {
+	info, err := os.Stat(abs)
+	if err != nil {
+		return FileNode{}, err
+	}
+	node := FileNode{
+		Name:  filepath.Base(abs),
+		Path:  filepath.ToSlash(rel),
+		IsDir: info.IsDir(),
+	}
+	if !info.IsDir() {
+		node.Size = info.Size()
+	}
+	return node, nil
+}
+
+func resolveBotWorkspaceFile(rootPath, relPath string) (string, error) {
+	absRoot, err := filepath.Abs(rootPath)
+	if err != nil {
+		return "", err
+	}
+	if layout, ok := loadIDEWorkspaceLayout(absRoot); ok {
+		if resolved, ok, err := resolveIDEWorkspaceFile(layout, relPath); ok || err != nil {
+			return resolved, err
+		}
+	}
+	return safeResolveInsideRoot(rootPath, relPath)
+}
+
+func resolveIDEWorkspaceFile(layout ideWorkspaceLayout, relPath string) (string, bool, error) {
+	rel := filepath.ToSlash(filepath.Clean(filepath.FromSlash(relPath)))
+	if rel == "." || rel == "" {
+		return "", true, errors.New("path is a directory, not a file")
+	}
+	if rel == discover.MetaFilename {
+		abs, err := safeResolveInsideRoot(layout.RootPath, discover.MetaFilename)
+		return abs, true, err
+	}
+	parts := strings.Split(rel, "/")
+	if len(parts) < 2 {
+		return "", false, nil
+	}
+	switch parts[0] {
+	case "agents":
+		if len(parts) != 2 {
+			return "", true, errors.New("agents 目录只允许访问当前机器人声明的 agent 文件")
+		}
+		id := strings.TrimSuffix(parts[1], layout.AgentExt)
+		if parts[1] != id+layout.AgentExt || !containsString(layout.AgentIDs, id) {
+			return "", true, fmt.Errorf("agent %q 不属于当前机器人", parts[1])
+		}
+		abs, err := safeResolveInsideRoot(filepath.Join(layout.PlatformRoot, "agents"), parts[1])
+		return abs, true, err
+	case "skills":
+		id := parts[1]
+		if !containsString(layout.AgentIDs, id) {
+			return "", true, fmt.Errorf("skills/%s 不属于当前机器人", id)
+		}
+		abs, err := safeResolveInsideRoot(filepath.Join(layout.SkillsRoot, id), strings.Join(parts[2:], "/"))
+		return abs, true, err
+	case "scripts":
+		id := parts[1]
+		if !containsString(layout.AgentIDs, id) {
+			return "", true, fmt.Errorf("scripts/%s 不属于当前机器人", id)
+		}
+		abs, err := safeResolveInsideRoot(filepath.Join(layout.PlatformRoot, "scripts", id), strings.Join(parts[2:], "/"))
+		return abs, true, err
+	default:
+		return "", false, nil
+	}
+}
+
+func containsString(items []string, target string) bool {
+	for _, item := range items {
+		if item == target {
+			return true
+		}
+	}
+	return false
 }
 
 // safeResolveInsideRoot 把 relPath 拼到 rootPath 下并展开成绝对路径,

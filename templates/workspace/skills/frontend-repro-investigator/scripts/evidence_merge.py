@@ -56,6 +56,10 @@ def strip_yaml_scalar(value: str) -> str:
 
 def parse_frontend_entry_map(path: str) -> dict[str, list[dict]]:
     """Parse generated frontend-entry-map.yaml without requiring PyYAML."""
+    parsed = parse_frontend_entry_map_with_pyyaml(path)
+    if parsed is not None:
+        return parsed
+
     endpoint_services: dict[str, list[dict]] = {}
     current_repo = ""
     current_endpoint = ""
@@ -142,6 +146,57 @@ def parse_frontend_entry_map(path: str) -> dict[str, list[dict]]:
                     "source": "candidate_services",
                 })
     finish_route()
+    return endpoint_services
+
+
+def parse_frontend_entry_map_with_pyyaml(path: str) -> dict[str, list[dict]] | None:
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return None
+    try:
+        payload = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    except Exception:
+        return None
+    entries = payload.get("frontend_entries") if isinstance(payload, dict) else None
+    if not isinstance(entries, dict):
+        return None
+
+    endpoint_services: dict[str, list[dict]] = {}
+    for frontend_repo, raw_entry in entries.items():
+        if not isinstance(raw_entry, dict):
+            continue
+        path_candidates = raw_entry.get("path_candidates") or {}
+        if not isinstance(path_candidates, dict):
+            continue
+        for endpoint, raw_candidate in path_candidates.items():
+            endpoint = str(endpoint)
+            if not isinstance(raw_candidate, dict):
+                raw_candidate = {}
+            for route in raw_candidate.get("route_candidates") or []:
+                if not isinstance(route, dict) or not route.get("service"):
+                    continue
+                endpoint_services.setdefault(endpoint, []).append({
+                    "endpoint": endpoint,
+                    "frontend_repo": str(frontend_repo),
+                    "service": str(route.get("service", "")),
+                    "match": str(route.get("match", "")),
+                    "route": str(route.get("route", "")),
+                    "method": str(route.get("method", "")),
+                    "source": str(route.get("source", "route_candidates")),
+                })
+            for service in raw_candidate.get("candidate_services") or []:
+                if not service:
+                    continue
+                endpoint_services.setdefault(endpoint, []).append({
+                    "endpoint": endpoint,
+                    "frontend_repo": str(frontend_repo),
+                    "service": str(service),
+                    "match": "fallback",
+                    "route": "",
+                    "method": "",
+                    "source": "candidate_services",
+                })
     return endpoint_services
 
 

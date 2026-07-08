@@ -3,7 +3,7 @@ name: rabbitmq-runtime-query
 description: 通过 RabbitMQ HTTP Management API(端口 15672)查询队列状态。先通过 routing 获取环境映射,凭据从 install creds 读,curl + Basic Auth 查队列长度 / 消费者 / exchange / 节点健康等。2026-05-15 起 mcp 主路径暂禁(PyPI 包实测两个都 broken,详见 install_native_mcp_common.go::buildRabbitMQ)。
 ---
 
-# RabbitMQ Runtime Query
+# RabbitMQ 运行时查询
 
 ## 执行流程（固定）
 

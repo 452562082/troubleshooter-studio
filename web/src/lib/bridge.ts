@@ -16,6 +16,7 @@
 //   bridge/loki.ts          —— Loki + Grafana datasources
 //   bridge/openclaw.ts      —— OpenClaw 模型探测
 //   bridge/aitools.ts       —— Claude Code / Cursor / Codex 安装探测
+//   bridge/bugs.ts          —— Bug 工单收件箱 / 平台同步 / 机器人匹配
 // 本文件只保留:isDesktop re-export + YAML core(validate / plan / analyze / doctor / gen)
 //          —— 这一组共用 yaml 文本入参 + JSON 出参的 fetch 模板,集中放着。
 
@@ -35,6 +36,7 @@ export * from './bridge/configCenter'
 export * from './bridge/loki'
 export * from './bridge/openclaw'
 export * from './bridge/aitools'
+export * from './bridge/bugs'
 
 import { isDesktop } from './bridge/shared'
 

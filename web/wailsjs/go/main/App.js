@@ -254,6 +254,10 @@ export function PreloadConfigCenter(arg1) {
   return window['go']['main']['App']['PreloadConfigCenter'](arg1);
 }
 
+export function PreviewBugAttachment(arg1) {
+  return window['go']['main']['App']['PreviewBugAttachment'](arg1);
+}
+
 export function ProbeDataStore(arg1) {
   return window['go']['main']['App']['ProbeDataStore'](arg1);
 }

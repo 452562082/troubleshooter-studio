@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, test]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -103,11 +104,34 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: install pytest
-        run: python3 -m pip install pytest
+      - name: install python test tools
+        run: python3 -m pip install pytest PyYAML uv
 
       - name: skill script tests
         run: scripts/test-skill-scripts.sh
+
+  browser-smoke:
+    name: Browser Collector Smoke (manual)
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.19.0'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: install playwright chromium
+        run: |
+          npm install --no-save --no-package-lock playwright
+          npx playwright install --with-deps chromium
+
+      - name: real browser collector smoke
+        run: scripts/test-browser-smoke.sh
 
   desktop:
     name: Desktop (macOS .app build)

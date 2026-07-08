@@ -3,7 +3,7 @@ name: mongodb-runtime-query
 description: 通过环境动态查询 MongoDB 数据。先通过 routing 获取环境映射，优先用预注册的 mongodb-<env> mcp tool 直查（已绑好 URI，免手动连接串）；mcp 不可用时 fallback mongosh CLI / Python pymongo，执行只读 query/aggregate/count/listCollections。
 ---
 
-# MongoDB Runtime Query
+# MongoDB 运行时查询
 
 ## 执行流程（固定）
 

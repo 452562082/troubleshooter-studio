@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 const DEFAULT_OUT = "tshoot-browser-artifacts";
 
 function parseArgs(argv) {
-  const args = { out: DEFAULT_OUT, plan: false };
+  const args = { out: DEFAULT_OUT, plan: false, chromiumArgs: [] };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--plan") {
@@ -23,6 +23,26 @@ function parseArgs(argv) {
       i += 1;
       continue;
     }
+    if (arg === "--chromium-arg") {
+      args.chromiumArgs.push(argv[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (arg === "--executable-path") {
+      args.executablePath = argv[i + 1];
+      i += 1;
+      continue;
+    }
+    if (arg === "--channel") {
+      args.channel = argv[i + 1];
+      i += 1;
+      continue;
+    }
+  }
+  if (process.env.TSHOOT_CHROMIUM_ARGS) {
+    args.chromiumArgs.push(
+      ...process.env.TSHOOT_CHROMIUM_ARGS.split(/\s+/).filter(Boolean),
+    );
   }
   return args;
 }
@@ -50,6 +70,40 @@ function errorPayload(code, message, args, extra = {}) {
     artifacts: artifactPaths(args.out),
     ...extra,
   };
+}
+
+function launchOptions(args) {
+  const options = {};
+  if (args.chromiumArgs.length) {
+    options.args = args.chromiumArgs;
+  }
+  if (args.executablePath) {
+    options.executablePath = args.executablePath;
+  }
+  if (args.channel) {
+    options.channel = args.channel;
+  }
+  return options;
+}
+
+function classifyCollectError(err) {
+  const message = err?.message || String(err);
+  if (
+    /mach_port_rendezvous_mac|MachPortRendezvousServer|bootstrap_check_in/i.test(message) &&
+    /Permission denied|KERN|1100/i.test(message)
+  ) {
+    return {
+      reason: "browser_launch_permission_denied",
+      hint: "Chromium was blocked by macOS MachPort permissions inside the current sandbox. Collect browser screenshots/HAR from the Studio host process or rerun outside the Codex sandbox.",
+    };
+  }
+  if (/Executable doesn't exist|browser executable|install chromium|playwright install/i.test(message)) {
+    return {
+      reason: "browser_binary_missing",
+      hint: "Install Playwright browser binaries with npx playwright install chromium, or pass --executable-path/--channel for an existing browser.",
+    };
+  }
+  return {};
 }
 
 async function importPlaywright() {
@@ -92,7 +146,7 @@ async function collectWithPlaywright(playwright, args, artifacts) {
   let navigationError = null;
 
   try {
-    browser = await playwright.chromium.launch();
+    browser = await playwright.chromium.launch(launchOptions(args));
     context = await browser.newContext({
       recordHar: {
         path: artifacts.har,
@@ -200,7 +254,7 @@ async function main() {
     printJSON(await collectWithPlaywright(playwright, args, artifacts));
     return 0;
   } catch (err) {
-    printJSON(errorPayload(4, err.message || String(err), args));
+    printJSON(errorPayload(4, err.message || String(err), args, classifyCollectError(err)));
     return 4;
   }
 }

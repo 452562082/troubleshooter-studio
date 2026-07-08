@@ -3,7 +3,7 @@ name: postgresql-runtime-query
 description: 通过环境动态查询 PostgreSQL 数据。先通过 routing 获取环境映射，优先用预注册的 postgresql-<env> mcp tool 直查（已绑好 connection string）；mcp 不可用时 fallback psql CLI / Python psycopg，执行只读 SELECT 查询。
 ---
 
-# PostgreSQL Runtime Query
+# PostgreSQL 运行时查询
 
 ## 执行流程（固定）
 

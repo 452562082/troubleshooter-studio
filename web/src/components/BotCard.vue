@@ -8,6 +8,7 @@
 // 父端持有 bots 列表 + 各种 per-card reactive map(regenState / doctorState 等),
 // 把单卡所需切片透下来,本组件仅渲染 + emit 触发。
 
+import { computed, ref } from 'vue'
 import type { ApplyResult, DiscoveredBot } from '../lib/bridge'
 
 interface DoctorIssue {
@@ -51,11 +52,13 @@ const props = defineProps<{
 void props // IDE 提示
 
 const editorDraft = defineModel<string>('editorDraft', { required: true })
+const agentsOpen = ref(false)
 
 const emit = defineEmits<{
   runDoctor: []
   closeDoctor: []
   openBrowser: []
+  openBrowserAt: [payload: { initialPath: string; agentId: string }]
   toggleMenu: []
   closeMenu: []
   regen: []
@@ -67,6 +70,62 @@ const emit = defineEmits<{
   /** dryRun=true 预演 / false 真应用 */
   runApply: [dryRun: boolean]
 }>()
+
+interface AgentRow {
+  id: string
+  role: string
+  roleLabel: string
+  summary: string
+  definitionRel: string
+}
+
+const agentRows = computed<AgentRow[]>(() => {
+  const fromMeta = props.bot.meta.internal_agents || []
+  const agents = fromMeta.length
+    ? fromMeta
+    : [{
+        id: props.bot.meta.agent_id || props.bot.meta.system_id || 'agent',
+        role: props.bot.meta.role || 'troubleshooter',
+      }]
+  const seen = new Set<string>()
+  return agents
+    .filter(a => {
+      const id = (a.id || '').trim()
+      if (!id || seen.has(id)) return false
+      seen.add(id)
+      return true
+    })
+    .map(a => {
+      const role = (a.role || '').trim() || roleFromAgentID(a.id)
+      return {
+        id: a.id,
+        role,
+        roleLabel: roleLabel(role),
+        summary: roleSummary(role),
+        definitionRel: `agents/${a.id}${agentDefinitionExt.value}`,
+      }
+    })
+})
+
+const agentDefinitionExt = computed(() => props.bot.meta.target === 'codex' ? '.toml' : '.md')
+
+function roleFromAgentID(id: string): string {
+  const s = id.toLowerCase()
+  if (s.includes('valid') || s.includes('verif')) return 'validator'
+  return 'troubleshooter'
+}
+
+function roleLabel(role: string): string {
+  if (role === 'validator') return '验证 Agent'
+  if (role === 'troubleshooter') return '排障 Agent'
+  return `${role} Agent`
+}
+
+function roleSummary(role: string): string {
+  if (role === 'validator') return '复现、回归、采集证据'
+  if (role === 'troubleshooter') return '定位根因、给出修复建议'
+  return '独立执行入口'
+}
 
 function severityIcon(s: string): string {
   if (s === 'error') return '✖'
@@ -108,8 +167,37 @@ function classForSeverity(s: string): string {
     <ul class="bot-stats">
       <li><strong>{{ bot.env_count }}</strong> 环境</li>
       <li><strong>{{ bot.repo_count }}</strong> 仓库</li>
-      <li><strong>{{ bot.skill_count }}</strong> skills</li>
     </ul>
+    <section v-if="!bot.ghost && agentRows.length" class="agent-section" aria-label="机器人内置 Agent">
+      <button
+        type="button"
+        class="agent-section-head"
+        :aria-expanded="agentsOpen"
+        @click="agentsOpen = !agentsOpen"
+      >
+        <strong>Agents</strong>
+        <span>{{ agentRows.length }} 个执行入口</span>
+        <span class="agent-chevron" aria-hidden="true">{{ agentsOpen ? '收起' : '展开' }}</span>
+      </button>
+      <div v-if="agentsOpen" class="agent-list">
+        <div v-for="agent in agentRows" :key="agent.id" class="agent-row">
+          <div class="agent-main">
+            <div class="agent-title">
+              <span class="agent-role" :data-role="agent.role">{{ agent.roleLabel }}</span>
+              <strong>{{ agent.id }}</strong>
+            </div>
+            <div class="agent-summary">{{ agent.summary }}</div>
+          </div>
+          <div class="agent-actions">
+            <button
+              class="btn btn-agent"
+              :title="`打开 ${agent.id} 的工作区`"
+              @click="emit('openBrowserAt', { initialPath: agent.definitionRel, agentId: agent.id })"
+            >打开</button>
+          </div>
+        </div>
+      </div>
+    </section>
     <footer class="bot-foot">
       <span class="bot-time">最近更新: {{ bot.mod_time }}</span>
       <div class="bot-actions">
@@ -267,7 +355,7 @@ function classForSeverity(s: string): string {
 .bot-status-ghost  { background: #fee2e2; color: #991b1b; }
 .bot-status-broken { background: #fef3c7; color: #92400e; }
 
-.bot-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.bot-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
 .bot-target {
   font-size: 11px; padding: 2px 8px; border-radius: 3px; font-weight: 600;
   background: #e0e7ff; color: #3730a3;
@@ -285,6 +373,45 @@ function classForSeverity(s: string): string {
 
 .bot-stats { list-style: none; display: flex; gap: 14px; padding: 10px 0; border-top: 1px solid #f1f5f9; font-size: 12px; color: #64748b; }
 .bot-stats strong { color: #0f172a; font-weight: 600; margin-right: 2px; }
+
+.agent-section {
+  padding: 8px 0;
+  border-top: 1px solid #f1f5f9;
+}
+.agent-section-head {
+  width: 100%;
+  display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px;
+  border: none; background: transparent; padding: 0;
+  font: inherit; font-size: 12px; color: #64748b;
+  cursor: pointer; text-align: left;
+}
+.agent-section-head:hover { color: #334155; }
+.agent-section-head strong { color: #0f172a; font-size: 13px; }
+.agent-chevron { justify-self: end; font-size: 11px; color: #64748b; }
+.agent-list { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.agent-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center;
+  padding: 8px 0;
+  border-top: 1px dashed #e2e8f0;
+}
+.agent-row:first-child { border-top: none; padding-top: 0; }
+.agent-main { min-width: 0; }
+.agent-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.agent-title strong {
+  font-size: 13px; color: #0f172a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.agent-role {
+  flex: 0 0 auto; font-size: 10px; padding: 2px 7px; border-radius: 999px;
+  background: #eef2ff; color: #3730a3; font-weight: 700;
+}
+.agent-role[data-role="validator"] { background: #ecfdf5; color: #047857; }
+.agent-summary { margin-top: 3px; font-size: 11px; color: #64748b; }
+.agent-actions { display: flex; gap: 6px; }
+.btn-agent {
+  font-size: 11px; padding: 4px 8px; border-radius: 4px;
+  background: #fff; border: 1px solid #cbd5e1; color: #334155;
+}
+.btn-agent:hover:not(:disabled) { background: #f1f5f9; }
 
 .bot-foot {
   border-top: 1px solid #f1f5f9; padding-top: 8px; font-size: 11px; color: #94a3b8;

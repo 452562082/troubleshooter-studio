@@ -13,11 +13,13 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -46,7 +48,7 @@ func InstallNative(stagingDir, target string) error {
 	// 1) 找 staging 里的 agent 文件 + 推 agent name(从文件名)。
 	//   - claude-code / cursor: staging/agents/<NAME>.md
 	//   - codex            : staging/agents/<NAME>.toml
-	agentFile, name, err := findStagingAgentFile(stagingDir, t)
+	agentFiles, err := findStagingAgentFiles(stagingDir, t)
 	if err != nil {
 		return err
 	}
@@ -58,8 +60,27 @@ func InstallNative(stagingDir, target string) error {
 		}
 	}
 
-	// 3) 装 agent 文件:<root>/agents/<NAME>.<ext>(已存在 → 备份)
-	dstAgent := filepath.Join(root, "agents", name+t.UserAgentExt())
+	primaryAgentName := primaryAgentNameFromStagingMeta(stagingDir)
+	if primaryAgentName == "" {
+		primaryAgentName = agentFiles[0].Name
+	}
+	for _, ag := range agentFiles {
+		if err := installOneNativeAgent(stagingDir, root, t, ag, primaryAgentName); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+type stagingAgentFile struct {
+	File string
+	Name string
+}
+
+func installOneNativeAgent(stagingDir, root string, t IDETarget, ag stagingAgentFile, primaryAgentName string) error {
+	// 装 agent 文件:<root>/agents/<NAME>.<ext>(已存在 → 备份)
+	dstAgent := filepath.Join(root, "agents", ag.Name+t.UserAgentExt())
 	if _, err := os.Stat(dstAgent); err == nil {
 		ts := nanoTimestamp()
 		if err := copyFileSimple(dstAgent, dstAgent+".bak."+ts); err != nil {
@@ -70,48 +91,97 @@ func InstallNative(stagingDir, target string) error {
 	// 装机时替换成 <root>/skills/<name>/ 的实际绝对路径(codex 不解析 ~ / $HOME)。
 	// MCP servers 段的 {{MCP_SERVERS}} 占位由 MergeMCPIntoIDESettingsAt 时填,这里保留原样。
 	if t == TargetCodex {
-		raw, rerr := os.ReadFile(agentFile)
+		raw, rerr := os.ReadFile(ag.File)
 		if rerr != nil {
 			return fmt.Errorf("read staging codex toml: %w", rerr)
 		}
-		skillsRoot := filepath.Join(root, "skills", name)
+		skillsRoot := filepath.Join(root, "skills", ag.Name)
 		patched := strings.ReplaceAll(string(raw), generator.CodexPlaceholderSkillsRoot, skillsRoot)
 		if err := os.WriteFile(dstAgent, []byte(patched), 0o644); err != nil {
 			return fmt.Errorf("install codex agent toml: %w", err)
 		}
 	} else {
-		if err := copyFileSimple(agentFile, dstAgent); err != nil {
+		if err := copyFileSimple(ag.File, dstAgent); err != nil {
 			return fmt.Errorf("install agent file: %w", err)
 		}
 	}
 
-	// 4) skills/* → ~/<root>/skills/<NAME>/(命名空间隔离,防覆盖其它 agent 的 skills)
-	if err := replaceDir(
+	role := stagingAgentRole(stagingDir, ag.Name)
+
+	// skills/* → ~/<root>/skills/<NAME>/(命名空间隔离,防覆盖其它 agent 的 skills)。
+	// 同一机器人内的不同 agent 只安装各自角色需要的 skill,避免验证 agent 带上
+	// incident-investigator / recent-changes 这类 RCA 主线能力。
+	if err := replaceSkillsDirForRole(
 		filepath.Join(stagingDir, "skills"),
-		filepath.Join(root, "skills", name),
+		filepath.Join(root, "skills", ag.Name),
+		role,
 	); err != nil {
-		return fmt.Errorf("install skills: %w", err)
+		return fmt.Errorf("install skills for %s: %w", ag.Name, err)
 	}
 
-	// 5) scripts/* → ~/<root>/scripts/<NAME>/
+	// scripts/* → ~/<root>/scripts/<NAME>/
 	if err := replaceDir(
 		filepath.Join(stagingDir, "scripts"),
-		filepath.Join(root, "scripts", name),
+		filepath.Join(root, "scripts", ag.Name),
 	); err != nil {
-		return fmt.Errorf("install scripts: %w", err)
+		return fmt.Errorf("install scripts for %s: %w", ag.Name, err)
 	}
 
-	// 6) tshoot.json 锚点 → ~/<root>/skills/<NAME>/tshoot.json,让 BotsPage 的 discover
-	// 能扫到。staging 那份没写出来就跳过,不阻塞主流程。
-	stagingMeta := filepath.Join(stagingDir, discover.MetaFilename)
-	if _, err := os.Stat(stagingMeta); err == nil {
-		dstMeta := filepath.Join(root, "skills", name, discover.MetaFilename)
-		if err := copyFileSimple(stagingMeta, dstMeta); err != nil {
-			return fmt.Errorf("install tshoot.json anchor: %w", err)
+	// tshoot.json 锚点只放主机器人目录,让 BotsPage / discover 只看到一台机器人。
+	// validator 等内部 agent 目录不能带 tshoot.json,否则旧扫描逻辑会把它当第二台机器人。
+	dstMeta := filepath.Join(root, "skills", ag.Name, discover.MetaFilename)
+	if ag.Name == primaryAgentName {
+		stagingMeta := filepath.Join(stagingDir, discover.MetaFilename)
+		if _, err := os.Stat(stagingMeta); err == nil {
+			if err := copyFileSimple(stagingMeta, dstMeta); err != nil {
+				return fmt.Errorf("install tshoot.json anchor for %s: %w", ag.Name, err)
+			}
 		}
+	} else if err := os.Remove(dstMeta); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove internal agent tshoot.json for %s: %w", ag.Name, err)
 	}
 
 	return nil
+}
+
+func stagingAgentRole(stagingDir, agentName string) generator.AgentRole {
+	metaPath := filepath.Join(stagingDir, "agents-meta", agentName, discover.MetaFilename)
+	data, err := os.ReadFile(metaPath)
+	if err == nil {
+		var meta discover.Meta
+		if json.Unmarshal(data, &meta) == nil {
+			if strings.EqualFold(strings.TrimSpace(meta.Role), discover.RoleValidator) {
+				return generator.AgentRoleValidator
+			}
+			if strings.EqualFold(strings.TrimSpace(meta.Role), discover.RoleTroubleshooter) {
+				return generator.AgentRoleTroubleshooter
+			}
+		}
+	}
+	if strings.Contains(strings.ToLower(agentName), "valid") || strings.Contains(strings.ToLower(agentName), "verif") {
+		return generator.AgentRoleValidator
+	}
+	return generator.AgentRoleTroubleshooter
+}
+
+func primaryAgentNameFromStagingMeta(stagingDir string) string {
+	data, err := os.ReadFile(filepath.Join(stagingDir, discover.MetaFilename))
+	if err != nil {
+		return ""
+	}
+	var meta discover.Meta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return ""
+	}
+	if strings.TrimSpace(meta.AgentID) != "" {
+		return strings.TrimSpace(meta.AgentID)
+	}
+	for _, ag := range meta.InternalAgents {
+		if strings.EqualFold(strings.TrimSpace(ag.Role), discover.RoleTroubleshooter) {
+			return strings.TrimSpace(ag.ID)
+		}
+	}
+	return ""
 }
 
 // findStagingAgentFile 找 staging/agents/<NAME>.<ext> —— 取第一个匹配后缀的非 .bak 文件,
@@ -120,13 +190,24 @@ func InstallNative(stagingDir, target string) error {
 //	claude-code / cursor: <NAME>.md
 //	codex            : <NAME>.toml
 func findStagingAgentFile(stagingDir string, t IDETarget) (file, name string, err error) {
+	matches, err := findStagingAgentFiles(stagingDir, t)
+	if err != nil {
+		return "", "", err
+	}
+	if len(matches) > 1 {
+		return "", "", fmt.Errorf("found %d agent files in staging %s (expected 1): %v", len(matches), filepath.Join(stagingDir, "agents"), agentFileNames(matches))
+	}
+	return matches[0].File, matches[0].Name, nil
+}
+
+func findStagingAgentFiles(stagingDir string, t IDETarget) ([]stagingAgentFile, error) {
 	dir := filepath.Join(stagingDir, "agents")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return "", "", fmt.Errorf("read staging agents dir: %w", err)
+		return nil, fmt.Errorf("read staging agents dir: %w", err)
 	}
 	ext := t.UserAgentExt()
-	var matches []string
+	var matches []stagingAgentFile
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -135,18 +216,24 @@ func findStagingAgentFile(stagingDir string, t IDETarget) (file, name string, er
 		if strings.Contains(n, ".bak.") || !strings.HasSuffix(n, ext) {
 			continue
 		}
-		matches = append(matches, n)
+		matches = append(matches, stagingAgentFile{
+			File: filepath.Join(dir, n),
+			Name: strings.TrimSuffix(n, ext),
+		})
 	}
-	switch len(matches) {
-	case 0:
-		return "", "", fmt.Errorf("no agents/*%s in staging %s", ext, dir)
-	case 1:
-		return filepath.Join(dir, matches[0]), strings.TrimSuffix(matches[0], ext), nil
-	default:
-		// generator 应保证只生成一个;多个匹配 = 上次产物没清干净 / staging 重叠,直接报错
-		// 让用户感知,而不是 ReadDir 顺序非确定性下随机选一个。
-		return "", "", fmt.Errorf("found %d agent files in staging %s (expected 1): %v", len(matches), dir, matches)
+	sort.Slice(matches, func(i, j int) bool { return matches[i].Name < matches[j].Name })
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("no agents/*%s in staging %s", ext, dir)
 	}
+	return matches, nil
+}
+
+func agentFileNames(files []stagingAgentFile) []string {
+	names := make([]string, 0, len(files))
+	for _, f := range files {
+		names = append(names, filepath.Base(f.File))
+	}
+	return names
 }
 
 // replaceDir:src 不存在 → 跳过(scripts 可能没有);存在 → 清掉 dst 后整目录拷过去。
@@ -175,11 +262,73 @@ func replaceDir(src, dst string) error {
 		if rel == "." {
 			return nil
 		}
+		if installShouldSkipGeneratedArtifact(d.Name()) {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
 		target := filepath.Join(dst, rel)
 		if d.IsDir() {
 			return os.MkdirAll(target, 0o755)
 		}
 		return copyFileSimple(p, target)
+	})
+}
+
+func replaceSkillsDirForRole(src, dst string, role generator.AgentRole) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("expected dir, got file: %s", src)
+	}
+	if err := os.RemoveAll(dst); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	return filepath.WalkDir(src, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, _ := filepath.Rel(src, p)
+		if rel == "." {
+			return nil
+		}
+		if installShouldSkipGeneratedArtifact(d.Name()) {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		parts := strings.Split(filepath.ToSlash(rel), "/")
+		if len(parts) == 0 || parts[0] == "" {
+			return nil
+		}
+		skillName := parts[0]
+		if d.IsDir() {
+			if len(parts) == 1 && !generator.SkillAllowedForAgentRole(skillName, role) {
+				return fs.SkipDir
+			}
+			return os.MkdirAll(filepath.Join(dst, rel), 0o755)
+		}
+		// Codex staging has a root skills/SKILL.md entry for the troubleshooter only.
+		if len(parts) == 1 {
+			if role == generator.AgentRoleValidator {
+				return nil
+			}
+			return copyFileSimple(p, filepath.Join(dst, rel))
+		}
+		if !generator.SkillAllowedForAgentRole(skillName, role) {
+			return nil
+		}
+		return copyFileSimple(p, filepath.Join(dst, rel))
 	})
 }
 
@@ -241,4 +390,17 @@ func copyFileSimple(src, dst string) error {
 	defer out.Close()
 	_, err = io.Copy(out, in)
 	return err
+}
+
+func installShouldSkipGeneratedArtifact(name string) bool {
+	if name == "__pycache__" {
+		return true
+	}
+	if strings.HasPrefix(name, "test_") && strings.HasSuffix(name, ".py") {
+		return true
+	}
+	if strings.HasSuffix(name, ".pyc") || strings.HasSuffix(name, ".pyo") {
+		return true
+	}
+	return false
 }

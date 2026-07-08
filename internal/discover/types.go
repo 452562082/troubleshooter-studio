@@ -14,6 +14,16 @@ package discover
 // 代价是这个文件会出现在 ls / Finder 里 —— 可接受。
 const MetaFilename = "tshoot.json"
 
+const (
+	RoleTroubleshooter = "troubleshooter"
+	RoleValidator      = "validator"
+)
+
+type InternalAgent struct {
+	ID   string `json:"id"`
+	Role string `json:"role"`
+}
+
 // Meta 是 tshoot.json 的 schema。字段尽量稳定，新增字段要向后兼容。
 type Meta struct {
 	// SchemaVersion 让未来扩字段时不破坏旧机器人的 discover
@@ -25,6 +35,12 @@ type Meta struct {
 	// SystemID / SystemName 来自 troubleshooter.yaml 的 system 块，供 UI 展示
 	SystemID   string `json:"system_id"`
 	SystemName string `json:"system_name"`
+
+	// AgentID / Role 是旧字段:早期纠偏版本曾把内部 agent 暴露成多个 bot。
+	// 新模型下 Studio 仍只发现一台机器人,InternalAgents 描述这台机器人里有哪些执行入口。
+	AgentID        string          `json:"agent_id,omitempty"`
+	Role           string          `json:"role,omitempty"`
+	InternalAgents []InternalAgent `json:"internal_agents,omitempty"`
 
 	// Target 是本产物的部署形态：openclaw / claude-code / cursor / embedded
 	Target string `json:"target"`
@@ -53,10 +69,11 @@ type DiscoveredAgent struct {
 	ModTime string `json:"mod_time"`
 
 	// 快速概览字段（从 TroubleshooterYAML 解析填充），方便 UI 不用再解析一次
-	EnvCount   int      `json:"env_count"`
-	RepoCount  int      `json:"repo_count"`
-	SkillCount int      `json:"skill_count"`
-	Targets    []string `json:"targets,omitempty"` // troubleshooter.yaml 里声明的全部 targets（可能这个机器人只是其中之一）
+	EnvCount     int      `json:"env_count"`
+	Environments []string `json:"environments,omitempty"`
+	RepoCount    int      `json:"repo_count"`
+	SkillCount   int      `json:"skill_count"`
+	Targets      []string `json:"targets,omitempty"` // troubleshooter.yaml 里声明的全部 targets（可能这个机器人只是其中之一）
 
 	// IDEAvailable 标"对应 IDE 二进制本机仍可探测到"。zero value=false,
 	// 由调用方(bindings_repo.go DiscoverBots)在 Scan 后 enrichment 填。Scan 自身

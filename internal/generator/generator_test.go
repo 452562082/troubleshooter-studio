@@ -33,6 +33,38 @@ func loadCfg(t *testing.T, rel string) *config.SystemConfig {
 	return cfg
 }
 
+func TestWriteTshootMetaIncludesAgentRole(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
+	out := filepath.Join(t.TempDir(), "sys")
+	tr := filepath.Join(projectRoot(t), "templates")
+	g := New(cfg, tr, out)
+	g.TroubleshooterYAMLSource = []byte("system:\n  id: shop\n")
+
+	dir := filepath.Join(out, "meta")
+	if err := g.writeTshootMetaForRole(dir, "codex", AgentRoleValidator); err != nil {
+		t.Fatalf("writeTshootMetaForRole: %v", err)
+	}
+	data := readFile(t, filepath.Join(dir, "tshoot.json"))
+	if !strings.Contains(data, `"agent_id": "shop-validator"`) {
+		t.Fatalf("agent_id missing from meta:\n%s", data)
+	}
+	if !strings.Contains(data, `"role": "validator"`) {
+		t.Fatalf("role missing from meta:\n%s", data)
+	}
+
+	troubleshooterDir := filepath.Join(out, "troubleshooter-meta")
+	if err := g.writeTshootMetaForRole(troubleshooterDir, "codex", AgentRoleTroubleshooter); err != nil {
+		t.Fatalf("writeTshootMetaForRole troubleshooter: %v", err)
+	}
+	troubleshooterData := readFile(t, filepath.Join(troubleshooterDir, "tshoot.json"))
+	if !strings.Contains(troubleshooterData, `"agent_id": "shop-bot"`) {
+		t.Fatalf("troubleshooter agent_id should preserve existing ResolveID/agentSlug:\n%s", troubleshooterData)
+	}
+	if !strings.Contains(troubleshooterData, `"role": "troubleshooter"`) {
+		t.Fatalf("troubleshooter role missing from meta:\n%s", troubleshooterData)
+	}
+}
+
 // TestGenerate_MultiSource_ConfigMapRoutesPerService 验证多源场景下 config-map.yaml
 // 每个服务的 mcp_server 字段按它所属 repo 的 config_source 选对应源的 MCP key,
 // 且副源服务多带一行 config_source 字段标记。
@@ -604,6 +636,33 @@ func TestGenerate_Apollo(t *testing.T) {
 	}
 }
 
+func TestGenerate_ConfigExecutorScriptsScopedToConfigCenter(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	cfg.Infrastructure.ConfigCenter.Type = "one2all"
+	cfg.Infrastructure.ConfigCenters[0].Type = "one2all"
+	cfg.Generation.SkillsWhitelist = []string{"config-executor"}
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+	if err := New(cfg, tr, out).Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	root := filepath.Join(out, "templates/workspace-template")
+	assertExists(t, root, []string{
+		"skills/config-executor/SKILL.md",
+	})
+	assertNotExists(t, root, []string{
+		"skills/config-executor/scripts/nacos_config.py",
+		"skills/config-executor/scripts/nacos_diff.py",
+		"skills/config-executor/scripts/nacos_mcp.py",
+		"skills/config-executor/scripts/resolve_runtime_from_nacos.py",
+		"skills/config-executor/scripts/apollo_config.py",
+		"skills/config-executor/scripts/consul_config.py",
+		"skills/config-executor/scripts/kuboard_config.py",
+		"skills/config-executor/scripts/resolve_runtime_static.py",
+		"skills/config-executor/references/nacos-api-notes.md",
+	})
+}
+
 func TestGenerate_Consul(t *testing.T) {
 	cfg := loadCfg(t, "examples/consul-troubleshooter.yaml")
 	out := t.TempDir()
@@ -695,8 +754,8 @@ func TestGenerate_ClawhubLock(t *testing.T) {
 
 func TestGenerate_ClawhubLock_EmptySkills(t *testing.T) {
 	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
-	// 清空白名单 + 禁用所有 data stores，还要清掉 config center，
-	// 确保没有 skills 目录会被生成
+	// 清空白名单 + 禁用所有 data stores，还要清掉 config center；
+	// 验证必备 skill 仍应生成,避免 validator agent 指向不存在的入口。
 	cfg.Generation.SkillsWhitelist = []string{"__none__"}
 	out := t.TempDir()
 	tr := filepath.Join(projectRoot(t), "templates")
@@ -718,8 +777,20 @@ func TestGenerate_ClawhubLock_EmptySkills(t *testing.T) {
 	if lock.Version != 1 {
 		t.Errorf("version expected 1, got %d", lock.Version)
 	}
-	if len(lock.Skills) != 0 {
-		t.Errorf("expected empty skills, got %v", lock.Skills)
+	want := map[string]bool{
+		"api-verifier":                 true,
+		"attachment-evidence-verifier": true,
+		"bug-verifier":                 true,
+		"frontend-repro-investigator":  true,
+		"grafana-observability-query":  true,
+	}
+	if len(lock.Skills) != len(want) {
+		t.Fatalf("expected validator baseline and observability skills, got %v", lock.Skills)
+	}
+	for skill := range want {
+		if _, ok := lock.Skills[skill]; !ok {
+			t.Errorf("lock.json missing validator baseline skill %q: %v", skill, lock.Skills)
+		}
 	}
 }
 
@@ -739,6 +810,124 @@ func TestGenerate_FrontendReproArtifacts(t *testing.T) {
 	assertNotExists(t, root, []string{
 		"skills/frontend-repro-investigator/scripts/test_har_analyzer.py",
 	})
+}
+
+func TestGenerateIncludesBugVerifierSkill(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	cfg.Generation.SkillsWhitelist = nil
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+	if err := New(cfg, tr, out).Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	root := filepath.Join(out, "templates/workspace-template")
+	assertExists(t, root, []string{
+		"skills/api-verifier/SKILL.md",
+		"skills/attachment-evidence-verifier/SKILL.md",
+		"skills/attachment-evidence-verifier/scripts/attachment_manifest.py",
+		"skills/bug-verifier/SKILL.md",
+		"skills/frontend-repro-investigator/SKILL.md",
+	})
+
+	data := readFile(t, filepath.Join(root, "skills/bug-verifier/SKILL.md"))
+	for _, want := range []string{
+		"verification_status",
+		"environment",
+		"observed_behavior",
+		"expected_behavior",
+		"evidence",
+		"screenshots",
+		"network",
+		"reproduced",
+		"not_reproduced",
+		"insufficient_info",
+		"fixed_verified",
+		"still_reproduces",
+		"gaps",
+		"entry:",
+		"frontend_url",
+		"api_url",
+		"console_errors",
+		"trace_ids",
+		"request_ids",
+		"attachments",
+		"attachment-evidence-verifier",
+		"api-verifier",
+		"frontend-repro-investigator",
+		"handoff_to_troubleshooter",
+		"不读取业务源码",
+		"建议改动",
+	} {
+		if !strings.Contains(data, want) {
+			t.Fatalf("bug-verifier skill missing %q:\n%s", want, data)
+		}
+	}
+	for _, forbidden := range []string{"最可能根因", "RCA", "inconclusive"} {
+		if strings.Contains(data, forbidden) {
+			t.Fatalf("bug-verifier skill should not contain %q:\n%s", forbidden, data)
+		}
+	}
+}
+
+func TestGenerateIncludesValidatorSkillsEvenWhenWhitelistOmitsThem(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	cfg.Generation.SkillsWhitelist = []string{"routing", "incident-investigator"}
+	cfg.Infrastructure.Observability.Grafana.Enabled = true
+	cfg.Infrastructure.Observability.Loki.Enabled = true
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+	if err := New(cfg, tr, out).Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	root := filepath.Join(out, "templates/workspace-template")
+	assertExists(t, root, []string{
+		"skills/api-verifier/SKILL.md",
+		"skills/attachment-evidence-verifier/SKILL.md",
+		"skills/bug-verifier/SKILL.md",
+		"skills/frontend-repro-investigator/SKILL.md",
+		"skills/grafana-observability-query/SKILL.md",
+	})
+}
+
+func TestSkillAllowedForAgentRoleScopesValidatorAndTroubleshooter(t *testing.T) {
+	validatorAllowed := []string{
+		"bug-verifier",
+		"api-verifier",
+		"attachment-evidence-verifier",
+		"frontend-repro-investigator",
+		"routing",
+		"postgresql-runtime-query",
+		"elk-log-query",
+		"tracing-query",
+	}
+	for _, skill := range validatorAllowed {
+		if !SkillAllowedForAgentRole(skill, AgentRoleValidator) {
+			t.Fatalf("validator should allow %s", skill)
+		}
+	}
+	validatorDenied := []string{
+		"incident-investigator",
+		"recent-changes",
+		"diagram-generator",
+		"postgres-runtime-query",
+	}
+	for _, skill := range validatorDenied {
+		if SkillAllowedForAgentRole(skill, AgentRoleValidator) {
+			t.Fatalf("validator should not allow %s", skill)
+		}
+	}
+	if SkillAllowedForAgentRole("bug-verifier", AgentRoleTroubleshooter) {
+		t.Fatalf("troubleshooter should not install validator entry skill")
+	}
+	if SkillAllowedForAgentRole("api-verifier", AgentRoleTroubleshooter) {
+		t.Fatalf("troubleshooter should not install validator API replay skill")
+	}
+	if SkillAllowedForAgentRole("attachment-evidence-verifier", AgentRoleTroubleshooter) {
+		t.Fatalf("troubleshooter should not install validator attachment evidence skill")
+	}
+	if !SkillAllowedForAgentRole("incident-investigator", AgentRoleTroubleshooter) {
+		t.Fatalf("troubleshooter should keep incident-investigator")
+	}
 }
 
 // assertExists 检查一组相对路径都存在于 base 下，否则报告缺失。
@@ -783,6 +972,9 @@ func TestGenerate_MultiTargets_All(t *testing.T) {
 	if err := g.GenerateCursor(); err != nil {
 		t.Fatalf("cursor: %v", err)
 	}
+	if err := g.GenerateCodex(); err != nil {
+		t.Fatalf("codex: %v", err)
+	}
 
 	assertExists(t, out, []string{
 		"templates/workspace-template/SOUL.md",
@@ -792,16 +984,38 @@ func TestGenerate_MultiTargets_All(t *testing.T) {
 	// install.sh 已删除 —— 装到 ~/.claude|cursor/ 现在由 agent.InstallNative 完成
 	assertExists(t, out+"-claude-code", []string{
 		"agents/shop-bot.md",
+		"agents/shop-validator.md",
+		"agents-meta/shop-bot/tshoot.json",
+		"agents-meta/shop-validator/tshoot.json",
 		"skills/routing/SKILL.md",
 	})
 	assertExists(t, out+"-cursor", []string{
 		"agents/shop-bot.md",
+		"agents/shop-validator.md",
+		"agents-meta/shop-bot/tshoot.json",
+		"agents-meta/shop-validator/tshoot.json",
 		"skills/routing/SKILL.md",
 	})
+	assertExists(t, out+"-codex", []string{
+		"agents/shop-bot.toml",
+		"agents/shop-validator.toml",
+		"agents-meta/shop-bot/tshoot.json",
+		"agents-meta/shop-validator/tshoot.json",
+		"skills/routing/SKILL.md",
+	})
+	assertAgentMetaRole(t, filepath.Join(out+"-claude-code", "agents-meta/shop-bot/tshoot.json"), "shop-bot", "troubleshooter")
+	assertAgentMetaRole(t, filepath.Join(out+"-claude-code", "agents-meta/shop-validator/tshoot.json"), "shop-validator", "validator")
+
+	assertTroubleshooterAgentDefinition(t, filepath.Join(out+"-claude-code", "agents/shop-bot.md"))
+	assertValidatorAgentDefinition(t, filepath.Join(out+"-claude-code", "agents/shop-validator.md"))
+	assertTroubleshooterAgentDefinition(t, filepath.Join(out+"-cursor", "agents/shop-bot.md"))
+	assertValidatorAgentDefinition(t, filepath.Join(out+"-cursor", "agents/shop-validator.md"))
+	assertTroubleshooterAgentDefinition(t, filepath.Join(out+"-codex", "agents/shop-bot.toml"))
+	assertValidatorAgentDefinition(t, filepath.Join(out+"-codex", "agents/shop-validator.toml"))
 
 	// copyDirRecursive (claude-code / cursor 路径) 也必须过滤 test_*.py。脚本被复制两份:
 	// skills/config-executor/scripts/ 和顶层 scripts/,两处都不应出现 test 文件。
-	for _, base := range []string{out + "-claude-code", out + "-cursor"} {
+	for _, base := range []string{out + "-claude-code", out + "-cursor", out + "-codex"} {
 		for _, rel := range []string{
 			"skills/config-executor/scripts/test_nacos_mcp.py",
 			"scripts/test_nacos_mcp.py",
@@ -836,6 +1050,9 @@ func TestGenerate_MultiTargets_NoOpenclaw(t *testing.T) {
 	if err := g.GenerateClaudeCode(); err != nil {
 		t.Fatalf("claude-code: %v", err)
 	}
+	if err := g.GenerateCodex(); err != nil {
+		t.Fatalf("codex: %v", err)
+	}
 
 	// openclaw 目录不应存在
 	if _, err := os.Stat(out); err == nil {
@@ -843,7 +1060,73 @@ func TestGenerate_MultiTargets_NoOpenclaw(t *testing.T) {
 	}
 
 	// 其它 target 产物存在(install.sh 已挪到 InstallNative,产物里只剩纯素材)
-	assertExists(t, out+"-claude-code", []string{"agents/shop-bot.md"})
+	assertExists(t, out+"-claude-code", []string{
+		"agents/shop-bot.md",
+		"agents/shop-validator.md",
+		"agents-meta/shop-bot/tshoot.json",
+		"agents-meta/shop-validator/tshoot.json",
+	})
+	assertExists(t, out+"-codex", []string{
+		"agents/shop-bot.toml",
+		"agents/shop-validator.toml",
+		"agents-meta/shop-bot/tshoot.json",
+		"agents-meta/shop-validator/tshoot.json",
+	})
+}
+
+func assertAgentMetaRole(t *testing.T, path, agentID, role string) {
+	t.Helper()
+	data := readFile(t, path)
+	for _, want := range []string{
+		`"agent_id": "` + agentID + `"`,
+		`"role": "` + role + `"`,
+	} {
+		if !strings.Contains(data, want) {
+			t.Fatalf("meta %s missing %q:\n%s", path, want, data)
+		}
+	}
+}
+
+func assertTroubleshooterAgentDefinition(t *testing.T, path string) {
+	t.Helper()
+	data := readFile(t, path)
+	for _, want := range []string{
+		"排障",
+		"只读",
+		"incident-investigator",
+	} {
+		if !strings.Contains(data, want) {
+			t.Fatalf("troubleshooter agent %s missing %q:\n%s", path, want, data)
+		}
+	}
+}
+
+func assertValidatorAgentDefinition(t *testing.T, path string) {
+	t.Helper()
+	data := readFile(t, path)
+	for _, want := range []string{
+		"bug-verifier",
+		"验证",
+		"主动复现",
+		"修复后复查",
+		"验证报告",
+		"不读取业务源码",
+		"原因判断交给排障 Agent",
+	} {
+		if !strings.Contains(data, want) {
+			t.Fatalf("validator agent %s missing %q:\n%s", path, want, data)
+		}
+	}
+	for _, forbidden := range []string{
+		"RCA",
+		"根因",
+		"incident-investigator",
+		"故障快报",
+	} {
+		if strings.Contains(data, forbidden) {
+			t.Fatalf("validator agent %s should not contain %q:\n%s", path, forbidden, data)
+		}
+	}
 }
 
 func TestGenerate_WithAnalysis_UpgradesInferredToVerified(t *testing.T) {

@@ -3,13 +3,18 @@ import { marked } from 'marked'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { EventsOn } from '../../wailsjs/runtime/runtime'
 import {
+  type BotRef,
   type BotMatch,
+  type BugAttachment,
+  type BugAttachmentPreviewResult,
   type BugPlatform,
   type BugRecord,
   cancelBugInvestigation,
   bugHookBaseURL,
   clearBugPlatformLogin,
   deleteBugPlatform,
+  type DiscoveredBot,
+  discoverBots,
   fetchBugByID,
   generateBugContext,
   type InvestigationEvent,
@@ -19,6 +24,7 @@ import {
   listBugPlatforms,
   listBugs,
   matchBugBots,
+  previewBugAttachment,
   saveBugPlatform,
   startBugInvestigation,
   syncBugPlatform,
@@ -29,6 +35,7 @@ import { toast, toastError } from '../lib/toast'
 
 const bugs = ref<BugRecord[]>([])
 const platforms = ref<BugPlatform[]>([])
+const installedBots = ref<DiscoveredBot[]>([])
 const hookBaseURL = ref('')
 const selectedID = ref('')
 const selectedPlatformID = ref('')
@@ -44,6 +51,9 @@ const syncingBugs = ref(false)
 const fetchingBug = ref(false)
 const contextGenerating = ref(false)
 const matching = ref(false)
+const attachmentPreviewing = ref(false)
+const attachmentPreview = ref<BugAttachmentPreviewResult | null>(null)
+const attachmentThumbnails = ref<Record<string, BugAttachmentPreviewResult | 'loading' | 'failed'>>({})
 const investigationRuns = ref<InvestigationRun[]>([])
 const investigationStarting = ref(false)
 const investigationCancelling = ref(false)
@@ -51,9 +61,11 @@ const outputScrollRef = ref<HTMLElement | null>(null)
 const query = ref('')
 const manualBugID = ref('')
 const configOpen = ref(false)
+const botPickerOpen = ref(false)
+const botPickerQuery = ref('')
 const platformDraft = ref({
   id: '',
-  name: '禅道',
+  name: 'Bug 平台',
   type: 'zentao',
   base_url: '',
   account: '',
@@ -62,6 +74,7 @@ const platformDraft = ref({
   password: '',
   token: '',
   hook_secret: '',
+  bot_mappings: [] as Array<{ bot_key: string; env: string }>,
   enabled: true,
   poll_enabled: false,
   poll_interval_minutes: 5,
@@ -72,7 +85,30 @@ const selectedBug = computed(() => bugs.value.find(b => b.id === selectedID.valu
 const selectedPlatform = computed(() => platforms.value.find(p => p.id === selectedPlatformID.value))
 const selectedPlatformHasSession = computed(() => Boolean(selectedPlatform.value?.session_header))
 const selectedBot = computed(() => matches.value.find(m => m.bot.key === selectedBotKey.value)?.bot)
+const allBotRefs = computed(() => installedBots.value.filter(b => !b.ghost).map(discoveredBotToRef))
+const availableBotRefs = computed(() => allBotRefs.value)
+const configuredPlatformBots = computed(() => platformDraft.value.bot_mappings.map(mapping => ({
+  mapping,
+  bot: botRefByKey(mapping.bot_key),
+})))
+const addableBotRefs = computed(() => {
+  const selected = new Set(platformDraft.value.bot_mappings.map(m => m.bot_key))
+  const kw = botPickerQuery.value.trim().toLowerCase()
+  return availableBotRefs.value
+    .filter(bot => !selected.has(bot.key))
+    .filter(bot => {
+      if (!kw) return true
+      return [botDisplayName(bot), bot.target, bot.path, bot.system_id].join(' ').toLowerCase().includes(kw)
+    })
+})
+const platformBotMappings = computed(() => selectedPlatform.value?.bot_mappings || [])
+const platformBotEmptyText = computed(() => {
+  if (!selectedPlatform.value) return '请先保存并选择 Bug 平台'
+  if (platformBotMappings.value.length === 0) return '当前平台未勾选排障机器人'
+  return '暂无已安装机器人'
+})
 const selectedRun = computed(() => investigationRuns.value[0])
+const outputTab = ref<'validation' | 'investigation'>('investigation')
 const selectedBotSupportsDirectLaunch = computed(() => ['codex', 'claude-code', 'openclaw'].includes(selectedBot.value?.target || ''))
 const selectedBotUnsupportedReason = computed(() => {
   if (!selectedBot.value || selectedBotSupportsDirectLaunch.value) return ''
@@ -82,12 +118,30 @@ const selectedBotUnsupportedReason = computed(() => {
 const investigationEventLines = computed(() => {
   const run = selectedRun.value
   if (!run) return []
-  return (run.events || []).map(e => e.message).filter(Boolean)
+  const finalText = investigationFinalText.value.trim()
+  return (run.events || [])
+    .filter(e => eventPhase(e) !== 'validation')
+    .filter(e => !isFinalInvestigationEvent(e))
+    .filter(e => !(isTerminalInvestigationRun(run) && isLikelyInvestigationReport(e.message || '')))
+    .map(e => e.message)
+    .filter(message => {
+      const text = (message || '').trim()
+      return Boolean(text) && (!finalText || (text !== finalText && !(text.length > 120 && finalText.includes(text))))
+    })
+})
+const validationEventLines = computed(() => {
+  const run = selectedRun.value
+  if (!run) return []
+  return (run.events || [])
+    .filter(e => eventPhase(e) === 'validation')
+    .filter(e => !isFinalInvestigationEvent(e))
+    .map(e => e.message)
+    .filter(message => Boolean((message || '').trim()))
 })
 const investigationFinalText = computed(() => {
   const run = selectedRun.value
   if (!run) return ''
-  return run.final_message || run.error || ''
+  return run.final_message || run.error || fallbackInvestigationFinalMessage(run)
 })
 const investigationOutput = computed(() => {
   const parts = []
@@ -96,14 +150,24 @@ const investigationOutput = computed(() => {
   if (parts.length > 0) return parts.join('\n\n')
   return contextText.value
 })
+const copyableInvestigationText = computed(() => {
+  const result = investigationFinalText.value.trim()
+  if (result) return result
+  if (!selectedRun.value) return contextText.value.trim()
+  return ''
+})
+const copyInvestigationLabel = computed(() => investigationFinalText.value.trim() ? '复制结果' : '复制上下文')
+const canCancelInvestigation = computed(() => selectedRun.value?.status === 'running')
 const renderedInvestigationMarkdown = computed(() => safeMarkdown(investigationFinalText.value || contextText.value))
+const renderedValidationMarkdown = computed(() => safeMarkdown(validationEventLines.value.join('\n\n')))
 const selectedBugStepsHTML = computed(() => selectedBug.value?.steps ? safeMarkdown(selectedBug.value.steps) : '-')
 const selectedBugDescriptionHTML = computed(() => selectedBug.value?.description ? safeMarkdown(selectedBug.value.description) : '')
+const selectedBugAttachments = computed(() => selectedBug.value?.attachments || [])
 const filteredBugs = computed(() => {
   const kw = query.value.trim().toLowerCase()
   if (!kw) return bugs.value
   return bugs.value.filter(b => [
-    b.title, b.source, b.source_id, b.env, b.system_id, b.assignee, ...(b.service_hints || []),
+    b.title, b.source, b.source_id, b.env, b.bot_env, b.system_id, b.assignee, ...(b.service_hints || []),
   ].filter(Boolean).join(' ').toLowerCase().includes(kw))
 })
 const hookURL = computed(() => {
@@ -126,9 +190,13 @@ watch(selectedPlatform, (p) => {
     password: '',
     token: '',
     hook_secret: p.hook_secret || '',
+    bot_mappings: (p.bot_mappings || []).map(m => ({ bot_key: m.bot_key, env: m.env || '' })),
     enabled: p.enabled,
     poll_enabled: Boolean(p.poll_enabled),
     poll_interval_minutes: p.poll_interval_minutes || 5,
+  }
+  if (selectedBug.value?.id) {
+    void refreshMatches(selectedBug.value.id, selectedBug.value.selected_bot_key)
   }
 }, { immediate: false })
 
@@ -145,13 +213,23 @@ watch(selectedBug, async (bug) => {
   await Promise.all([refreshMatches(bug.id, bug.selected_bot_key), loadInvestigationRuns(bug.id)])
 }, { immediate: false })
 
+watch([selectedBug, selectedPlatformID], () => {
+  void preloadAttachmentThumbnails()
+}, { flush: 'post' })
+
+watch(selectedRun, (run, previousRun) => {
+  if (!run || run.id !== previousRun?.id || run.status === 'failed') {
+    outputTab.value = 'investigation'
+  }
+})
+
 watch(investigationOutput, () => {
   scrollOutputToBottom()
 }, { flush: 'post' })
 
 onMounted(async () => {
   setupInvestigationEventBridge()
-  await Promise.all([loadPlatforms(), loadBugs(), loadHookBase()])
+  await Promise.all([loadInstalledBots(), loadPlatforms(), loadBugs(), loadHookBase()])
 })
 
 onUnmounted(() => {
@@ -184,6 +262,15 @@ async function loadPlatforms() {
   }
 }
 
+async function loadInstalledBots() {
+  try {
+    installedBots.value = await discoverBots([])
+  } catch (e) {
+    installedBots.value = []
+    toastError('读取已安装机器人', e)
+  }
+}
+
 async function savePlatform() {
   if (!platformDraft.value.name.trim()) {
     toast.error('请填写平台名称')
@@ -202,6 +289,9 @@ async function savePlatform() {
       password: platformDraft.value.password.trim(),
       token: platformDraft.value.token.trim(),
       hook_secret: platformDraft.value.hook_secret.trim(),
+      bot_mappings: platformDraft.value.bot_mappings
+        .map(m => ({ bot_key: m.bot_key.trim(), env: m.env.trim() }))
+        .filter(m => m.bot_key),
       enabled: platformDraft.value.enabled,
       poll_enabled: platformDraft.value.poll_enabled,
       poll_interval_minutes: Math.max(1, Math.floor(Number(platformDraft.value.poll_interval_minutes) || 5)),
@@ -221,7 +311,7 @@ async function savePlatform() {
 
 async function savePlatformForLogin() {
   if (!platformDraft.value.base_url.trim()) {
-    toast.error('请先填写禅道平台地址')
+    toast.error('请先填写平台地址')
     return undefined
   }
   return savePlatform()
@@ -235,11 +325,11 @@ async function loginSelectedPlatform() {
     const result = await loginBugPlatform({ platform_id: saved.id })
     await loadPlatforms()
     selectedPlatformID.value = saved.id
-    toast.success(`禅道登录态已保存,读取到 ${result.cookie_count} 个 Cookie`)
+    toast.success(`平台登录态已保存,读取到 ${result.cookie_count} 个 Cookie`)
   } catch (e) {
     await loadPlatforms()
     selectedPlatformID.value = saved.id
-    toastError('飞书授权登录禅道', e)
+    toastError('授权登录平台', e)
   } finally {
     platformLoggingIn.value = false
   }
@@ -354,13 +444,82 @@ async function fetchManualBug() {
   }
 }
 
+async function previewAttachment(index: number) {
+  const bug = selectedBug.value
+  const platform = selectedPlatform.value
+  if (!bug || !platform) {
+    toast.error('请先选择 Bug 和平台')
+    return
+  }
+  attachmentPreviewing.value = true
+  try {
+    const preview = await previewBugAttachment({
+      platform_id: platform.id,
+      bug_id: bug.id,
+      attachment_index: index,
+    })
+    attachmentPreview.value = preview
+    if (preview.content_type.startsWith('image/')) {
+      attachmentThumbnails.value[attachmentThumbnailKey(bug.id, index)] = preview
+    }
+  } catch (e) {
+    toastError('预览附件', e)
+  } finally {
+    attachmentPreviewing.value = false
+  }
+}
+
+async function preloadAttachmentThumbnails() {
+  const bug = selectedBug.value
+  const platform = selectedPlatform.value
+  if (!bug || !platform) return
+  const attachments = bug.attachments || []
+  for (const [index, att] of attachments.entries()) {
+    if (!isImageAttachment(att)) continue
+    const key = attachmentThumbnailKey(bug.id, index)
+    if (attachmentThumbnails.value[key]) continue
+    attachmentThumbnails.value[key] = 'loading'
+    try {
+      const preview = await previewBugAttachment({
+        platform_id: platform.id,
+        bug_id: bug.id,
+        attachment_index: index,
+      })
+      attachmentThumbnails.value[key] = preview.content_type.startsWith('image/') ? preview : 'failed'
+    } catch {
+      attachmentThumbnails.value[key] = 'failed'
+    }
+  }
+}
+
+function attachmentThumbnailKey(bugID: string, index: number): string {
+  return `${bugID}:${index}`
+}
+
+function attachmentThumbnailSrc(index: number): string {
+  const bug = selectedBug.value
+  if (!bug) return ''
+  const thumb = attachmentThumbnails.value[attachmentThumbnailKey(bug.id, index)]
+  return typeof thumb === 'object' ? thumb.data_url : ''
+}
+
+function isImageAttachment(att: Pick<BugAttachment, 'type' | 'name'>): boolean {
+  const type = (att.type || '').toLowerCase()
+  const name = (att.name || '').toLowerCase()
+  return type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)$/.test(name)
+}
+
+function attachmentSubtitle(att: Pick<BugAttachment, 'type' | 'local_path' | 'remote_url' | 'id'>): string {
+  return att.type || (att.id ? `平台文件 #${att.id}` : att.remote_url || att.local_path || '附件')
+}
+
 async function refreshMatches(bugID: string, preferredKey = '') {
   if (!bugID) return
   matching.value = true
   try {
     const nextMatches = await matchBugBots(bugID)
     if (selectedBug.value?.id !== bugID) return
-    matches.value = nextMatches
+    matches.value = applyPlatformBotMappings(nextMatches)
     selectedBotKey.value = preferredKey && matches.value.some(m => m.bot.key === preferredKey)
       ? preferredKey
       : matches.value[0]?.bot.key || ''
@@ -372,6 +531,22 @@ async function refreshMatches(bugID: string, preferredKey = '') {
   } finally {
     if (selectedBug.value?.id === bugID) matching.value = false
   }
+}
+
+function applyPlatformBotMappings(items: BotMatch[]): BotMatch[] {
+  const mappings = platformBotMappings.value
+  if (!selectedPlatform.value) return items
+  if (mappings.length === 0) return []
+  const byKey = new Map(mappings.map(m => [m.bot_key, m.env || '']))
+  return items
+    .filter(item => byKey.has(item.bot.key))
+    .map(item => {
+      const env = byKey.get(item.bot.key) || ''
+      return {
+        ...item,
+        bot: { ...item.bot, env },
+      }
+    })
 }
 
 async function loadInvestigationRuns(bugID: string) {
@@ -495,9 +670,9 @@ async function copyHookURL() {
 }
 
 async function copyInvestigationOutput() {
-  const text = investigationOutput.value
+  const text = copyableInvestigationText.value
   if (!text.trim()) {
-    toast.error('没有可复制的排障输出')
+    toast.error('没有可复制的内容')
     return
   }
   ;(await copyToClipboard(text)) ? toast.success('已复制') : toast.error('复制失败')
@@ -505,9 +680,11 @@ async function copyInvestigationOutput() {
 
 function newPlatform() {
   selectedPlatformID.value = ''
+  botPickerOpen.value = false
+  botPickerQuery.value = ''
   platformDraft.value = {
     id: '',
-    name: '禅道',
+    name: 'Bug 平台',
     type: 'zentao',
     base_url: '',
     account: '',
@@ -516,11 +693,64 @@ function newPlatform() {
     password: '',
     token: '',
     hook_secret: '',
+    bot_mappings: [],
     enabled: true,
     poll_enabled: false,
     poll_interval_minutes: 5,
   }
   configOpen.value = true
+}
+
+function discoveredBotToRef(bot: DiscoveredBot): BotRef {
+  return {
+    key: `${bot.path}|${bot.meta.target}`,
+    system_id: bot.meta.system_id,
+    target: bot.meta.target,
+    path: bot.path,
+    name: bot.meta.system_name,
+    agent_id: bot.meta.agent_id,
+    role: bot.meta.role || 'troubleshooter',
+    internal_agents: bot.meta.internal_agents || [],
+    envs: bot.environments || [],
+  }
+}
+
+function botRefByKey(botKey: string): BotRef {
+  return allBotRefs.value.find(bot => bot.key === botKey) || {
+    key: botKey,
+    system_id: '',
+    target: '',
+    path: botKey,
+  }
+}
+
+function botDisplayName(bot: BotRef): string {
+  return bot.name || bot.system_id || bot.path
+}
+
+function platformBotEnv(botKey: string): string {
+  return platformDraft.value.bot_mappings.find(m => m.bot_key === botKey)?.env || ''
+}
+
+function addPlatformBot(bot: BotRef) {
+  const existing = platformDraft.value.bot_mappings.find(m => m.bot_key === bot.key)
+  if (existing) return
+  platformDraft.value.bot_mappings.push({ bot_key: bot.key, env: bot.envs?.[0] || '' })
+  botPickerQuery.value = ''
+  if (addableBotRefs.value.length === 0) botPickerOpen.value = false
+}
+
+function removePlatformBot(botKey: string) {
+  platformDraft.value.bot_mappings = platformDraft.value.bot_mappings.filter(m => m.bot_key !== botKey)
+}
+
+function setPlatformBotEnv(botKey: string, env: string) {
+  const existing = platformDraft.value.bot_mappings.find(m => m.bot_key === botKey)
+  if (existing) existing.env = env
+}
+
+function eventValue(event: Event): string {
+  return (event.target as HTMLInputElement | HTMLSelectElement | null)?.value || ''
 }
 
 function selectBug(id: string) {
@@ -547,6 +777,50 @@ function safeMarkdown(text: string): string {
     .replace(/\son\w+='[^']*'/gi, '')
     .replace(/\s(href|src)="javascript:[^"]*"/gi, ' $1="#"')
     .replace(/\s(href|src)='javascript:[^']*'/gi, " $1='#'")
+}
+
+function fallbackInvestigationFinalMessage(run: InvestigationRun): string {
+  const events = [...(run.events || [])].reverse()
+  const finalEvent = events.find(isFinalInvestigationEvent)
+  if (finalEvent?.message?.trim()) return finalEvent.message
+  if (isTerminalInvestigationRun(run)) {
+    const reportEvent = events.find(e => isLikelyInvestigationReport(e.message || ''))
+    if (reportEvent?.message?.trim()) return reportEvent.message
+    return events.find(e => !isCompletionMarkerEvent(e) && e.message?.trim())?.message || ''
+  }
+  return ''
+}
+
+function isFinalInvestigationEvent(event: InvestigationEvent): boolean {
+  return ['final', 'result'].includes(event.type)
+}
+
+function eventPhase(event: InvestigationEvent): string {
+  const phase = event?.meta?.phase
+  return typeof phase === 'string' ? phase : ''
+}
+
+function isTerminalInvestigationRun(run: InvestigationRun): boolean {
+  return ['succeeded', 'failed', 'cancelled'].includes(run.status)
+}
+
+function isCompletionMarkerEvent(event: InvestigationEvent): boolean {
+  const message = (event.message || '').trim()
+  return event.type === 'status' ||
+    event.type === 'turn_completed' ||
+    message === '排障完成' ||
+    message === 'succeeded' ||
+    message === 'failed' ||
+    message === 'cancelled'
+}
+
+function isLikelyInvestigationReport(message: string): boolean {
+  const text = message.trim()
+  if (!text) return false
+  if (/^#{1,6}\s+/m.test(text) && /\n\|.+\|\n\|[-:\s|]+\|/m.test(text)) return true
+  if (/^#{1,6}\s+/.test(text) && /(故障快报|现象复述|已验证事实|根因|结论|建议)/.test(text)) return true
+  if (/\*\*(结论|根因|现象|时间)\*\*/.test(text) && text.length > 120) return true
+  return false
 }
 </script>
 
@@ -581,7 +855,7 @@ function safeMarkdown(text: string): string {
       <div class="config-grid">
         <div class="config-row basic-row">
           <div class="field">
-            <input v-model="platformDraft.name" class="form-control" placeholder="平台名称,如 禅道" />
+            <input v-model="platformDraft.name" class="form-control" placeholder="平台名称,如 测试环境 Bug 平台" />
           </div>
           <div class="field platform-type-field">
             <select v-model="platformDraft.type" class="form-control">
@@ -590,7 +864,7 @@ function safeMarkdown(text: string): string {
             </select>
           </div>
           <div class="field">
-            <input v-model="platformDraft.base_url" class="form-control" placeholder="平台地址 https://zentao.example.com" />
+            <input v-model="platformDraft.base_url" class="form-control" placeholder="平台地址 https://bug-platform.example.com" />
           </div>
         </div>
         <div class="config-row auth-row">
@@ -615,7 +889,7 @@ function safeMarkdown(text: string): string {
               </strong>
             </span>
             <button class="btn" type="button" :disabled="platformSaving || platformLoggingIn" @click="loginSelectedPlatform">
-              {{ platformLoggingIn ? '等待授权' : '登录禅道' }}
+              {{ platformLoggingIn ? '等待授权' : '登录平台' }}
             </button>
             <button class="btn" type="button" :disabled="loginClearing || platformLoggingIn || !selectedPlatformHasSession" @click="clearSelectedPlatformLogin">清除登录态</button>
           </div>
@@ -624,6 +898,75 @@ function safeMarkdown(text: string): string {
               <input v-model="platformDraft.enabled" type="checkbox" />
               启用平台
             </label>
+          </div>
+        </div>
+        <div class="bot-config-block">
+          <div class="bot-config-title">
+            <div>
+              <strong>可用于该平台的排障机器人</strong>
+              <span>只展示已添加机器人,开始排障时只能从这里选择。</span>
+            </div>
+            <button
+              class="btn small add-bot-btn"
+              type="button"
+              :disabled="availableBotRefs.length === 0"
+              @click="botPickerOpen = !botPickerOpen"
+            >
+              {{ botPickerOpen ? '收起' : '+ 添加' }}
+            </button>
+          </div>
+          <div v-if="configuredPlatformBots.length === 0" class="empty compact-empty">
+            {{ availableBotRefs.length === 0 ? '暂无已安装机器人' : '还未添加排障机器人' }}
+          </div>
+          <div v-else class="bot-config-list">
+            <div
+              v-for="item in configuredPlatformBots"
+              :key="item.mapping.bot_key"
+              class="bot-config-row"
+              :class="{ active: true }"
+            >
+              <span class="bot-config-main">
+                <strong>{{ botDisplayName(item.bot) }}</strong>
+                <small>{{ item.bot.target || '未知类型' }} · {{ item.bot.path }}</small>
+              </span>
+              <select
+                v-if="item.bot.envs?.length"
+                class="form-control bot-env-select"
+                :value="platformBotEnv(item.mapping.bot_key)"
+                @change="setPlatformBotEnv(item.mapping.bot_key, eventValue($event))"
+              >
+                <option v-for="env in item.bot.envs" :key="env" :value="env">{{ env }}</option>
+              </select>
+              <input
+                v-else
+                class="form-control bot-env-select"
+                :value="platformBotEnv(item.mapping.bot_key)"
+                placeholder="机器人环境"
+                @input="setPlatformBotEnv(item.mapping.bot_key, eventValue($event))"
+              />
+              <button class="btn icon remove-bot-btn" type="button" title="移除机器人" aria-label="移除机器人" @click="removePlatformBot(item.mapping.bot_key)">×</button>
+            </div>
+          </div>
+          <div v-if="botPickerOpen" class="bot-picker">
+            <input v-model="botPickerQuery" class="form-control bot-picker-search" placeholder="搜索机器人名称、类型、路径" />
+            <div v-if="addableBotRefs.length === 0" class="empty compact-empty">
+              {{ availableBotRefs.length === platformDraft.bot_mappings.length ? '已添加全部机器人' : '没有匹配的机器人' }}
+            </div>
+            <div v-else class="bot-picker-list">
+              <button
+                v-for="bot in addableBotRefs"
+                :key="bot.key"
+                class="bot-picker-row"
+                type="button"
+                @click="addPlatformBot(bot)"
+              >
+                <span class="bot-config-main">
+                  <strong>{{ botDisplayName(bot) }}</strong>
+                  <small>{{ bot.target }} · {{ bot.path }}</small>
+                </span>
+                <span class="add-inline">添加</span>
+              </button>
+            </div>
           </div>
         </div>
         <div class="config-row ops-row">
@@ -716,12 +1059,18 @@ function safeMarkdown(text: string): string {
           </div>
 
           <dl class="bug-fields">
-            <div><dt>系统</dt><dd>{{ selectedBug.system_id || '-' }}</dd></div>
+            <div><dt>所属产品</dt><dd>{{ selectedBug.product || '-' }}</dd></div>
+            <div><dt>所属模块</dt><dd>{{ selectedBug.module || '-' }}</dd></div>
+            <div><dt>Bug 类型</dt><dd>{{ selectedBug.bug_type || '-' }}</dd></div>
+            <div><dt>严重程度</dt><dd>{{ selectedBug.severity ? `S${selectedBug.severity}` : '-' }}</dd></div>
+            <div><dt>优先级</dt><dd>{{ selectedBug.priority ? `P${selectedBug.priority}` : '-' }}</dd></div>
             <div><dt>指派</dt><dd>{{ selectedBug.assignee || '-' }}</dd></div>
             <div><dt>提交</dt><dd>{{ selectedBug.reporter || '-' }}</dd></div>
+            <div><dt>创建时间</dt><dd>{{ fmtTime(selectedBug.created_at) }}</dd></div>
             <div><dt>更新时间</dt><dd>{{ fmtTime(selectedBug.updated_at) }}</dd></div>
-            <div><dt>前端仓库</dt><dd>{{ selectedBug.frontend_repo || '-' }}</dd></div>
-            <div><dt>前端 URL</dt><dd>{{ selectedBug.frontend_url || '-' }}</dd></div>
+            <div><dt>操作系统</dt><dd>{{ selectedBug.os || '-' }}</dd></div>
+            <div><dt>浏览器</dt><dd>{{ selectedBug.browser || '-' }}</dd></div>
+            <div><dt>关键词</dt><dd>{{ selectedBug.keywords || '-' }}</dd></div>
           </dl>
 
           <section class="text-block">
@@ -732,16 +1081,38 @@ function safeMarkdown(text: string): string {
             <h3>描述</h3>
             <article class="rich-text markdown-result" v-html="selectedBugDescriptionHTML"></article>
           </section>
-          <section class="evidence-grid">
-            <div>
-              <h3>API 路径</h3>
-              <span v-for="p in selectedBug.api_paths || []" :key="p" class="pill">{{ p }}</span>
-              <span v-if="!selectedBug.api_paths?.length" class="muted">-</span>
-            </div>
-            <div>
-              <h3>Trace / Request</h3>
-              <span v-for="p in [...(selectedBug.trace_ids || []), ...(selectedBug.request_ids || [])]" :key="p" class="pill">{{ p }}</span>
-              <span v-if="!selectedBug.trace_ids?.length && !selectedBug.request_ids?.length" class="muted">-</span>
+          <section v-if="selectedBugAttachments.length" class="attachments-block">
+            <h3>附件</h3>
+            <div class="attachment-grid">
+              <button
+                v-for="(att, idx) in selectedBugAttachments"
+                :key="`${att.name}-${idx}`"
+                class="attachment-item"
+                type="button"
+                :disabled="attachmentPreviewing"
+                @click="previewAttachment(idx)"
+              >
+                <span class="attachment-thumb" :class="{ loading: isImageAttachment(att) && !attachmentThumbnailSrc(idx) }">
+                  <img
+                    v-if="attachmentThumbnailSrc(idx)"
+                    class="attachment-thumb-img"
+                    :src="attachmentThumbnailSrc(idx)"
+                    :alt="att.name"
+                    loading="lazy"
+                  >
+                  <svg v-else-if="isImageAttachment(att)" class="attachment-thumb-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v13a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 18.5v-13Zm2.5-.8a.8.8 0 0 0-.8.8v9.67l3.18-3.18a1.5 1.5 0 0 1 2.12 0l1.58 1.58 3.08-3.58a1.5 1.5 0 0 1 2.25-.04l.39.42V5.5a.8.8 0 0 0-.8-.8h-11Zm11.8 8.18-1.47-1.58-3.08 3.58a1.5 1.5 0 0 1-2.2.09L9.94 13.4 5.7 17.65v.85c0 .44.36.8.8.8h11c.44 0 .8-.36.8-.8v-5.62ZM8.6 8.5a1.4 1.4 0 1 1 2.8 0 1.4 1.4 0 0 1-2.8 0Z" />
+                  </svg>
+                  <svg v-else class="attachment-thumb-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M6 3h8.2L19 7.8V19a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm7.3 1.8V8.7h3.9L13.3 4.8ZM6 4.7a.3.3 0 0 0-.3.3v14c0 .17.13.3.3.3h11a.3.3 0 0 0 .3-.3V10.4h-4.8a.9.9 0 0 1-.9-.9V4.7H6Zm1.7 8.1h7.6v1.6H7.7v-1.6Zm0 3h5.6v1.6H7.7v-1.6Z" />
+                  </svg>
+                </span>
+                <span class="attachment-main">
+                  <strong>{{ att.name }}</strong>
+                  <small>{{ attachmentSubtitle(att) }}</small>
+                </span>
+                <span class="attachment-action">预览</span>
+              </button>
             </div>
           </section>
         </template>
@@ -750,7 +1121,7 @@ function safeMarkdown(text: string): string {
       <aside class="bot-panel">
         <div class="panel-title">选择排障机器人</div>
         <div v-if="matching" class="empty">匹配中...</div>
-        <div v-else-if="matches.length === 0" class="empty">暂无已安装机器人</div>
+        <div v-else-if="matches.length === 0" class="empty">{{ platformBotEmptyText }}</div>
         <label
           v-for="m in matches"
           :key="m.bot.key"
@@ -760,8 +1131,8 @@ function safeMarkdown(text: string): string {
           <input v-model="selectedBotKey" type="radio" :value="m.bot.key" />
           <span>
             <strong>{{ m.bot.name || m.bot.system_id || m.bot.path }}</strong>
-            <em>{{ m.bot.target }} · score {{ m.score }}</em>
-            <small>{{ (m.reasons || []).length ? (m.reasons || []).join(', ') : '无显式匹配,可手动选择' }}</small>
+            <em>{{ m.bot.target }}</em>
+            <small v-if="m.bot.env" class="bot-env-pill">环境 {{ m.bot.env }}</small>
           </span>
         </label>
         <div class="bot-actions">
@@ -771,25 +1142,79 @@ function safeMarkdown(text: string): string {
           <button v-if="selectedBot && !selectedBotSupportsDirectLaunch" class="btn" type="button" :disabled="contextGenerating" @click="generateContext">
             {{ contextGenerating ? '生成中...' : '生成上下文' }}
           </button>
-          <button class="btn" type="button" :disabled="!selectedRun || selectedRun.status !== 'running' || investigationCancelling" @click="cancelInvestigation">
+          <button v-if="canCancelInvestigation" class="btn" type="button" :disabled="investigationCancelling" @click="cancelInvestigation">
             停止
           </button>
-          <button class="btn" type="button" :disabled="!investigationOutput.trim()" @click="copyInvestigationOutput">复制</button>
+          <button v-if="copyableInvestigationText" class="btn" type="button" @click="copyInvestigationOutput">{{ copyInvestigationLabel }}</button>
         </div>
         <p v-if="selectedBotUnsupportedReason" class="muted direct-launch-note">{{ selectedBotUnsupportedReason }}</p>
-        <div ref="outputScrollRef" class="context-preview" role="log" aria-live="polite">
-          <template v-if="selectedRun">
+      </aside>
+    </section>
+
+    <section class="bug-output-panel">
+      <div class="output-head">
+        <strong>验证 / 排障</strong>
+        <span>{{ selectedRun ? selectedRun.status : '未开始' }}</span>
+      </div>
+      <div v-if="selectedRun" class="output-tabs" role="tablist" aria-label="验证与排障输出">
+        <button
+          class="output-tab"
+          :class="{ active: outputTab === 'validation' }"
+          type="button"
+          role="tab"
+          :aria-selected="outputTab === 'validation'"
+          @click="outputTab = 'validation'"
+        >
+          验证证据
+        </button>
+        <button
+          class="output-tab"
+          :class="{ active: outputTab === 'investigation' }"
+          type="button"
+          role="tab"
+          :aria-selected="outputTab === 'investigation'"
+          @click="outputTab = 'investigation'"
+        >
+          排障分析
+        </button>
+      </div>
+      <div ref="outputScrollRef" class="context-preview" role="log" aria-live="polite">
+        <template v-if="selectedRun">
+          <template v-if="outputTab === 'validation'">
+            <article v-if="validationEventLines.length" class="markdown-result validation-result" v-html="renderedValidationMarkdown"></article>
+            <div v-else class="preview-placeholder">验证 Agent 完成后在这里显示取证过程和证据</div>
+          </template>
+          <template v-else>
             <div v-if="investigationEventLines.length" class="process-log">
               <div v-for="(line, idx) in investigationEventLines" :key="idx" class="process-line">{{ line }}</div>
             </div>
             <article v-if="investigationFinalText" class="markdown-result" v-html="renderedInvestigationMarkdown"></article>
-            <div v-if="!investigationEventLines.length && !investigationFinalText" class="preview-placeholder">开始排障后在这里显示过程和结论</div>
+            <div v-if="!investigationEventLines.length && !investigationFinalText" class="preview-placeholder">验证完成后在这里显示排障过程和结论</div>
           </template>
-          <article v-else-if="contextText" class="markdown-result" v-html="renderedInvestigationMarkdown"></article>
-          <div v-else class="preview-placeholder">开始排障后在这里显示过程和结论</div>
-        </div>
-      </aside>
+        </template>
+        <article v-else-if="contextText" class="markdown-result" v-html="renderedInvestigationMarkdown"></article>
+        <div v-else class="preview-placeholder">开始排障后在这里显示过程和结论</div>
+      </div>
     </section>
+
+    <div v-if="attachmentPreview" class="attachment-preview-backdrop" @click.self="attachmentPreview = null">
+      <div class="attachment-preview-modal">
+        <div class="attachment-preview-head">
+          <strong>{{ attachmentPreview.name }}</strong>
+          <button class="btn icon" type="button" aria-label="关闭附件预览" @click="attachmentPreview = null">×</button>
+        </div>
+        <img
+          v-if="attachmentPreview.content_type.startsWith('image/')"
+          class="attachment-preview-image"
+          :src="attachmentPreview.data_url"
+          :alt="attachmentPreview.name"
+        />
+        <div v-else class="attachment-preview-fallback">
+          <p>该附件类型暂不支持内嵌预览。</p>
+          <a class="btn" :href="attachmentPreview.data_url" :download="attachmentPreview.name">下载附件</a>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -839,7 +1264,7 @@ function safeMarkdown(text: string): string {
   min-width: 0;
 }
 .basic-row {
-  grid-template-columns: minmax(220px, 1fr) minmax(150px, 180px) minmax(360px, 2fr);
+  grid-template-columns: minmax(220px, 1fr) minmax(130px, 160px) minmax(360px, 2fr);
 }
 .auth-row {
   grid-template-columns: minmax(220px, 1fr) minmax(420px, 1.45fr) minmax(170px, 220px);
@@ -961,6 +1386,141 @@ select.form-control { padding-right: 28px; }
   min-width: 120px;
   justify-content: center;
 }
+.bot-config-block {
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #fff;
+  padding: 10px;
+  min-width: 0;
+}
+.bot-config-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.bot-config-title > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.bot-config-title strong {
+  color: #0f172a;
+  font-size: 13px;
+}
+.bot-config-title span {
+  color: #64748b;
+  font-size: 12px;
+}
+.add-bot-btn {
+  min-width: 72px;
+  height: 32px;
+  justify-content: center;
+}
+.bot-config-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 8px;
+}
+.bot-config-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(110px, 150px) 32px;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #fff;
+  padding: 8px;
+}
+.bot-config-row.active {
+  border-color: #3b82f6;
+  background: #eff6ff;
+}
+.bot-config-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.bot-config-main strong {
+  color: #0f172a;
+  font-size: 13px;
+  word-break: break-word;
+}
+.bot-config-main small {
+  color: #64748b;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bot-env-select {
+  height: 34px;
+  line-height: 34px;
+  font-size: 12px;
+  padding: 0 8px;
+}
+.remove-bot-btn {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  padding: 0;
+  justify-content: center;
+  color: #64748b;
+}
+.remove-bot-btn:hover:not(:disabled) {
+  border-color: #fca5a5;
+  color: #b91c1c;
+  background: #fef2f2;
+}
+.bot-picker {
+  margin-top: 8px;
+  border-top: 1px solid #e2e8f0;
+  padding-top: 8px;
+  display: grid;
+  gap: 8px;
+}
+.bot-picker-search {
+  height: 34px;
+  line-height: 34px;
+  font-size: 12px;
+}
+.bot-picker-list {
+  max-height: 220px;
+  overflow: auto;
+  display: grid;
+  gap: 6px;
+}
+.bot-picker-row {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  text-align: left;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #fff;
+  padding: 8px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.bot-picker-row:hover {
+  border-color: #3b82f6;
+  background: #eff6ff;
+}
+.add-inline {
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 700;
+}
+.compact-empty {
+  padding: 12px;
+}
 .btn.danger {
   border-color: #fecaca;
   background: #fff;
@@ -991,9 +1551,64 @@ select.form-control { padding-right: 28px; }
   justify-content: center;
 }
 .bug-workbench {
-  flex: 1; min-height: 0; display: grid;
+  flex: 1 1 0; min-height: 320px; display: grid;
   grid-template-columns: minmax(240px, 300px) minmax(420px, 1fr) minmax(300px, 360px);
   gap: 14px;
+}
+.bug-output-panel {
+  flex: 0 0 clamp(320px, 36vh, 500px);
+  min-height: 320px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px;
+}
+.output-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+.output-head strong {
+  color: #0f172a;
+  font-size: 13px;
+}
+.output-head span {
+  color: #64748b;
+  font-size: 12px;
+}
+.output-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+.output-tab {
+  min-height: 34px;
+  border: 1px solid #cbd5e1;
+  border-radius: 7px;
+  background: #fff;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: border-color .16s ease, background .16s ease, color .16s ease;
+}
+.output-tab:hover {
+  border-color: #93c5fd;
+  color: #1d4ed8;
+}
+.output-tab:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+.output-tab.active {
+  border-color: #2563eb;
+  background: #eff6ff;
+  color: #1d4ed8;
 }
 .bug-list,
 .bug-detail,
@@ -1044,6 +1659,97 @@ select.form-control { padding-right: 28px; }
   padding: 10px; color: #334155; white-space: pre-wrap; word-break: break-word;
   font-family: inherit; font-size: 13px; line-height: 1.55;
 }
+.attachments-block { margin-top: 12px; }
+.attachments-block h3 { font-size: 13px; color: #0f172a; margin-bottom: 6px; }
+.attachment-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+.attachment-item {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  text-align: left;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #fff;
+  padding: 8px 10px 8px 8px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+}
+.attachment-item:hover:not(:disabled) {
+  border-color: #3b82f6;
+  background: #eff6ff;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+}
+.attachment-item:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+.attachment-thumb {
+  width: 56px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  color: #475569;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.attachment-thumb.loading {
+  background:
+    linear-gradient(90deg, rgba(241, 245, 249, 0.6), rgba(226, 232, 240, 0.95), rgba(241, 245, 249, 0.6));
+  background-size: 180% 100%;
+  animation: attachment-thumb-pulse 1.2s ease-in-out infinite;
+}
+.attachment-thumb-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.attachment-thumb-icon {
+  width: 22px;
+  height: 22px;
+  fill: currentColor;
+}
+@keyframes attachment-thumb-pulse {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+.attachment-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.attachment-main strong {
+  color: #0f172a;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attachment-main small {
+  color: #64748b;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attachment-action {
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 700;
+}
 .evidence-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
 .muted { color: #94a3b8; font-size: 12px; }
 .bot-panel { padding: 12px; display: flex; flex-direction: column; gap: 8px; }
@@ -1057,10 +1763,22 @@ select.form-control { padding-right: 28px; }
 .bot-match strong { display: block; color: #0f172a; font-size: 13px; word-break: break-all; }
 .bot-match em { display: block; color: #475569; font-style: normal; font-size: 11px; margin-top: 2px; }
 .bot-match small { display: block; color: #64748b; font-size: 11px; line-height: 1.4; margin-top: 4px; }
+.bot-match .bot-env-pill {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  margin-top: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #eef2ff;
+  color: #3730a3;
+  border: 1px solid #c7d2fe;
+  font-weight: 700;
+}
 .bot-actions { display: flex; gap: 8px; margin-top: 2px; }
 .direct-launch-note { margin: 0; }
 .context-preview {
-  flex: 1; min-height: 260px; overflow: auto; box-sizing: border-box;
+  flex: 1; min-height: 0; overflow: auto; box-sizing: border-box;
   border: 1px solid #cbd5e1; border-radius: 6px; background: #fff;
   padding: 10px; color: #0f172a; font-size: 13px; line-height: 1.55;
 }
@@ -1109,6 +1827,59 @@ select.form-control { padding-right: 28px; }
   border-radius: 6px; padding: 18px 12px; text-align: center; font-size: 13px;
 }
 .detail-empty { height: 100%; display: flex; align-items: center; justify-content: center; }
+.attachment-preview-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+  background: rgba(15, 23, 42, 0.58);
+}
+.attachment-preview-modal {
+  width: min(1080px, 92vw);
+  max-height: 88vh;
+  min-height: 240px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 8px;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.28);
+  overflow: hidden;
+}
+.attachment-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #e2e8f0;
+}
+.attachment-preview-head strong {
+  color: #0f172a;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attachment-preview-image {
+  max-width: 100%;
+  max-height: calc(88vh - 54px);
+  object-fit: contain;
+  background: #0f172a;
+}
+.attachment-preview-fallback {
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: #64748b;
+  padding: 24px;
+}
 @media (max-width: 1180px) {
   .basic-row { grid-template-columns: minmax(180px, 1fr) minmax(140px, 170px); }
   .basic-row .field:last-child { grid-column: 1 / -1; }
@@ -1117,7 +1888,8 @@ select.form-control { padding-right: 28px; }
   .ops-row { grid-template-columns: 1fr; }
   .config-actions { justify-content: flex-start; }
   .bug-workbench { grid-template-columns: 280px 1fr; }
-  .bot-panel { grid-column: 1 / -1; min-height: 420px; }
+  .bot-panel { grid-column: 1 / -1; }
+  .bug-output-panel { flex-basis: 380px; min-height: 320px; }
 }
 @media (max-width: 760px) {
   .bug-header,
@@ -1130,9 +1902,15 @@ select.form-control { padding-right: 28px; }
   .basic-row .field:last-child,
   .auth-row .toggle-cell { grid-column: auto; }
   .config-actions { flex-direction: column-reverse; align-items: stretch; }
+  .bot-config-title { flex-direction: column; gap: 3px; align-items: flex-start; }
+  .bot-config-list { grid-template-columns: 1fr; }
+  .bot-config-row { grid-template-columns: minmax(0, 1fr) 32px; }
+  .bot-env-select { grid-column: 1 / -1; grid-row: 2; }
+  .remove-bot-btn { grid-column: 2; grid-row: 1; }
   .toggle-cell,
   .sync-settings { height: auto; min-height: 38px; flex-wrap: wrap; padding: 8px 11px; }
   .login-field { height: auto; min-height: 38px; flex-wrap: wrap; }
   .bot-panel { grid-column: auto; }
+  .bug-output-panel { flex-basis: 360px; min-height: 300px; }
 }
 </style>

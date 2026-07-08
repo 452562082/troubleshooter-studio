@@ -1,0 +1,83 @@
+---
+name: attachment-evidence-verifier
+description: 验证 Bug 工单附件、截图、录屏、HAR、console 导出或下载证据时使用。用于复现前取证或修复后复查，不做根因分析。
+---
+
+# 附件证据验证
+
+## 使用场景
+
+当 Bug 工单包含附件或外链证据时使用本 skill：
+
+- 来自 Bug 工单平台、聊天工具、邮件或 webhook 的截图。
+- 录屏、HAR 文件、console 日志、文本导出或下载的 API 响应。
+- 修复前后的对比截图。
+- 验证报告需要汇总附件元数据和可观察事实。
+
+本 skill 不从附件推断根因，只提取可观察事实，并判断这些证据是否足够支撑验证。
+
+## 工作流程
+
+1. 收集附件路径、预览 URL、MIME 类型和来源 Bug id。
+2. 本地文件路径可用时，运行 manifest helper：
+
+   ```bash
+   python3 scripts/attachment_manifest.py --file <path> --file <path>
+   ```
+
+   或扫描目录：
+
+   ```bash
+   python3 scripts/attachment_manifest.py --dir <attachment-dir>
+   ```
+
+3. 对图片，检查可见 UI 状态：
+   - 页面或应用区域。
+   - 可见报错、错配、空状态、错误文案、错误数据或时间戳。
+   - 截图是否匹配工单里的复现步骤。
+4. 对录屏，抽取关键帧或摘要可见状态变化。
+5. 对 HAR / console / 文本文件，把归一化后的证据交给 `frontend-repro-investigator`。
+6. 将附件证据与以下内容对比：
+   - 工单描述的实际表现。
+   - 期望表现。
+   - 新鲜复现证据。
+   - 修复后复查证据。
+7. 把事实和缺口返回给 `bug-verifier`。
+
+## 证据规则
+
+- 优先使用原始附件文件，不用被聊天工具压缩过的预览图代替。
+- 保留 filename、source platform、bug id、size、MIME、dimensions 和 checksum。
+- 必须脱敏 token、cookie、手机号、邮箱、用户标识和个人数据。
+- 历史截图不能单独证明当前行为；除非重新复现，否则只能标记为历史证据。
+- 附件打不开或无法预览时，记录为缺口，不要猜测。
+
+## 输出契约
+
+返回给 `bug-verifier` 的结构：
+
+```yaml
+attachment_evidence:
+  source_bug_id: "<bug-id-or-empty>"
+  artifacts:
+    - filename: "<name>"
+      type: "screenshot|recording|har|console|text|other"
+      mime: "<mime-or-empty>"
+      size_bytes: "<size-or-empty>"
+      dimensions: "<width>x<height-or-empty>"
+      checksum: "<sha256-or-empty>"
+      observed_facts:
+        - "<visible fact, not cause>"
+      gaps:
+        - "<unreadable/missing/ambiguous detail>"
+  verification_use:
+    - "<how this evidence helps reproduce or validate the fix>"
+```
+
+## 硬约束
+
+- 不做根因判断。
+- 不修改附件。
+- 不把附件上传到外部服务。
+- 不引用截图或日志中的密钥和个人数据。
+- 不能只凭历史附件标记修复已验证；必须有修复后的新鲜证据。

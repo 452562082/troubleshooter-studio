@@ -8,6 +8,7 @@ import {
   listBugs,
   loginBugPlatform,
   matchBugBots,
+  previewBugAttachment,
   saveBugPlatform,
   startBugInvestigation,
   syncBugPlatform,
@@ -34,6 +35,7 @@ describe('bug bridge', () => {
       account: 'xiaolong',
       auth_mode: 'session_header',
       session_header: 'Cookie: sid=1',
+      bot_mappings: [{ bot_key: '/repo/base|codex', env: 'test' }],
       enabled: true,
       poll_enabled: true,
       poll_interval_minutes: 15,
@@ -45,6 +47,7 @@ describe('bug bridge', () => {
       account: 'xiaolong',
       auth_mode: 'session_header',
       session_header: 'Cookie: sid=1',
+      bot_mappings: [{ bot_key: '/repo/base|codex', env: 'test' }],
       enabled: true,
       poll_enabled: true,
       poll_interval_minutes: 15,
@@ -70,6 +73,17 @@ describe('bug bridge', () => {
 
     expect(spy).toHaveBeenCalledWith({ platform_id: 'zentao-main', bug_id: '#1842' })
     expect(result.selected_bug_id).toBe('zentao-1842')
+  })
+
+  it('forwards previewBugAttachment to Wails in desktop mode', async () => {
+    const spy = vi.fn().mockResolvedValue({ name: 'shot.png', content_type: 'image/png', data_url: 'data:image/png;base64,AA==' })
+    ;(window as any).go = { main: { App: { PreviewBugAttachment: spy } } }
+
+    const input = { platform_id: 'zentao-main', bug_id: 'zentao-718', attachment_index: 0 }
+    const result = await previewBugAttachment(input)
+
+    expect(spy).toHaveBeenCalledWith(input)
+    expect(result.data_url).toContain('data:image/png')
   })
 
   it('forwards loginBugPlatform to Wails in desktop mode', async () => {

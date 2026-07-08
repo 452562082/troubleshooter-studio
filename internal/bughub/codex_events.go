@@ -72,15 +72,18 @@ func ParseClaudeStreamJSONEvent(line []byte) (InvestigationEvent, string, string
 	eventType := stringFromAny(payload["type"])
 	event := InvestigationEvent{
 		Type:    firstNonEmpty(eventType, "event"),
-		Message: firstNonEmpty(stringFromAny(payload["message"]), eventType),
+		Message: stringFromAny(payload["message"]),
 		Raw:     payload,
 	}
 
 	switch eventType {
+	case "system", "user":
+		event.Type = eventType
+		event.Message = ""
 	case "assistant":
 		text := claudeMessageText(payload)
 		event.Type = "agent_message"
-		event.Message = firstNonEmpty(text, "Claude Code 输出")
+		event.Message = text
 	case "result":
 		final := firstNonEmpty(stringFromAny(payload["result"]), stringFromAny(payload["message"]))
 		subtype := stringFromAny(payload["subtype"])

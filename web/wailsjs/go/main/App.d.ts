@@ -139,6 +139,8 @@ export function PrefillCreds(arg1:string):Promise<Record<string, string>>;
 
 export function PreloadConfigCenter(arg1:main.CCHubPreloadInput):Promise<cchub.Result>;
 
+export function PreviewBugAttachment(arg1:main.BugAttachmentPreviewInput):Promise<main.BugAttachmentPreviewResult>;
+
 export function ProbeDataStore(arg1:main.DSProbeInput):Promise<dsprobe.Result>;
 
 export function ProbeURL(arg1:string):Promise<dsprobe.Result>;

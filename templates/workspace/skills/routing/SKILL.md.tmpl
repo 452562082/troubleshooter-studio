@@ -87,7 +87,7 @@ create_annotation / create_folder / update_annotation / update_dashboard / gener
 grep -E "<error pattern>" references/known-errors.yaml references/known-errors.local.yaml 2>/dev/null
 ```
 
-带 `causation_chain.check_downstream_for` 的 pattern:**主动跑 cascade_check** 看下游是否出现 chain 列出的模式。命中 → 真因在下游,把那个下游当主角递归 7 步(含 Step 7 沉淀);不命中 → 走 `next_actions`。
+带 `causation_chain.check_downstream_for` 的 pattern:**主动跑 cascade_check** 看下游是否出现 chain 列出的模式。命中 → 真因在下游,把那个下游当主角递归 7 步(含 步骤 7 沉淀);不命中 → 走 `next_actions`。
 
 ### 2. selector_chain:按顺序试,命中即停
 

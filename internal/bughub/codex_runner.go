@@ -82,12 +82,43 @@ func (i *CodexInvestigator) SetEventSink(sink InvestigationEventSink) {
 }
 
 func BuildCodexInvestigationPrompt(b Bug, bot BotRef) string {
+	return BuildCodexInvestigationPromptWithValidation(b, bot, "")
+}
+
+func BuildCodexValidationPrompt(b Bug, bot BotRef) string {
+	var sb strings.Builder
+	sb.WriteString("你是 Bug 验证 Agent。\n")
+	sb.WriteString("目标：先做取证验证，不做根因判断，不给修复方案；修复后也可复用同一流程做回归复查。\n")
+	sb.WriteString("请读取 Bug 工单的复现步骤、附件、环境、前端 URL/API 线索；能实际打开页面或请求接口时优先执行，只读取证。\n")
+	sb.WriteString("边界：只复现场景和收集证据；不要读取业务源码定位函数/行号，不要输出“代码根因/最可能原因/修复建议/候选原因”。如需代码分析，交给后续排障 Agent。\n")
+	sb.WriteString("如果缺少账号、入口、测试数据或浏览器能力，请明确标记 insufficient_info；如果用于修复后复查，请明确 fixed_verified 或 still_reproduces。\n\n")
+	sb.WriteString(GenerateContext(b, bot))
+	sb.WriteString("\n请只输出结构化验证报告，格式如下：\n")
+	sb.WriteString("verification_status: reproduced | not_reproduced | insufficient_info | fixed_verified | still_reproduces\n")
+	sb.WriteString("environment: <bug env / bot env>\n")
+	sb.WriteString("entry:\n  frontend_url: <实际入口或 ->\n  api_url: <实际接口或 ->\n")
+	sb.WriteString("observed_behavior: <实际看到的现象>\n")
+	sb.WriteString("expected_behavior: <工单期望>\n")
+	sb.WriteString("evidence:\n  screenshots: []\n  network: []\n  console_errors: []\n  trace_ids: []\n  request_ids: []\n")
+	sb.WriteString("gaps: []\n")
+	return sb.String()
+}
+
+func BuildCodexInvestigationPromptWithValidation(b Bug, bot BotRef, validationReport string) string {
 	var sb strings.Builder
 	sb.WriteString("请作为选定的 AI 排障机器人开始排障。\n")
 	sb.WriteString("目标：基于下面 Bug 工单上下文，完成只读根因分析，输出可执行结论和下一步建议。\n")
 	sb.WriteString("约束：默认不要修改代码，不要执行破坏性命令；如必须写入或重启服务，先在结论中说明需要人工确认。\n\n")
 	sb.WriteString(GenerateContext(b, bot))
+	if strings.TrimSpace(validationReport) != "" {
+		sb.WriteString("\n## 验证 Agent 报告\n")
+		sb.WriteString(strings.TrimSpace(validationReport))
+		sb.WriteString("\n")
+	}
 	sb.WriteString("\n请按以下结构输出：\n")
+	sb.WriteString("0. 验证结论：引用验证 Agent 报告的 verification_status、入口、关键证据和缺口。\n")
+	sb.WriteString("如果验证 Agent 报告里误包含根因、代码行、修复建议或候选原因，只把它当作待复核线索；你必须重新用排障证据确认后再写根因。\n")
+	sb.WriteString("注意：不适用的日志/指标/链路维度不要用 ✗ 标记；请写“— / 不适用”并说明跳过原因。只有真实查询失败或应该查询但未查到时才写失败。\n")
 	sb.WriteString("1. 现象复述\n2. 已验证事实\n3. 最可能根因\n4. 建议排查命令或证据\n5. 需要用户补充的信息\n")
 	return sb.String()
 }
@@ -136,7 +167,7 @@ func BuildClaudeInvestigationCommand(claudeBin, workspace, agentPath, prompt str
 	if agentName == "" {
 		return nil, errors.New("claude agent is required")
 	}
-	cmd := exec.Command(claudeBin, "-p", "--output-format", "stream-json", "--agent", agentName, prompt)
+	cmd := exec.Command(claudeBin, "-p", "--dangerously-skip-permissions", "--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--verbose", "--agent", agentName, prompt)
 	cmd.Dir = workspace
 	return cmd, nil
 }
@@ -154,10 +185,22 @@ func BuildOpenClawInvestigationCommand(openclawBin, agentID, prompt string) (*ex
 }
 
 func (i *CodexInvestigator) Start(parent context.Context, bug Bug, bot BotRef) (InvestigationRun, error) {
+	return i.StartWithValidator(parent, bug, bot, ValidatorBotFor(bot))
+}
+
+func (i *CodexInvestigator) StartWithValidator(parent context.Context, bug Bug, bot BotRef, validator BotRef) (InvestigationRun, error) {
 	if i == nil || i.store == nil {
 		return InvestigationRun{}, errors.New("investigation store is required")
 	}
 	target := strings.TrimSpace(bot.Target)
+	validationBot := validator
+	if strings.TrimSpace(validationBot.Key) == "" {
+		validationBot = bot
+	}
+	validationTarget := strings.TrimSpace(validationBot.Target)
+	if validationTarget == "" {
+		validationTarget = target
+	}
 
 	i.mu.Lock()
 	if active, ok, err := i.store.ActiveRunForBug(bug.ID); err != nil {
@@ -174,29 +217,13 @@ func (i *CodexInvestigator) Start(parent context.Context, bug Bug, bot BotRef) (
 		}
 	}
 
-	prompt := BuildCodexInvestigationPrompt(bug, bot)
-	cmd, parser, err := i.buildCommandLocked(target, bot, prompt)
+	validationPrompt := BuildCodexValidationPrompt(bug, validationBot)
+	validationCmd, validationParser, err := i.buildCommandLocked(validationTarget, validationBot, validationPrompt)
 	if err != nil {
 		i.mu.Unlock()
 		return InvestigationRun{}, err
 	}
 	ctx, cancel := context.WithCancel(parent)
-	cmdDir := cmd.Dir
-	cmd = exec.CommandContext(ctx, cmd.Path, cmd.Args[1:]...)
-	cmd.Dir = cmdDir
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		i.mu.Unlock()
-		cancel()
-		return InvestigationRun{}, err
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		i.mu.Unlock()
-		cancel()
-		return InvestigationRun{}, err
-	}
 
 	run := InvestigationRun{
 		ID:            randomRunID(),
@@ -204,7 +231,7 @@ func (i *CodexInvestigator) Start(parent context.Context, bug Bug, bot BotRef) (
 		BotKey:        bot.Key,
 		Status:        InvestigationRunning,
 		StartedAt:     time.Now().UTC(),
-		PromptPreview: promptPreview(prompt),
+		PromptPreview: promptPreview(validationPrompt),
 	}
 	if err := i.store.Upsert(run); err != nil {
 		i.mu.Unlock()
@@ -213,22 +240,9 @@ func (i *CodexInvestigator) Start(parent context.Context, bug Bug, bot BotRef) (
 	}
 	active := &activeCodexRun{cancel: cancel, done: make(chan struct{})}
 	i.active[run.ID] = active
-	setCodexProcessGroup(cmd)
-
-	if err := cmd.Start(); err != nil {
-		if finishErr := i.store.Finish(run.ID, InvestigationFailed, "", err.Error()); finishErr != nil {
-			active.setError(finishErr)
-		}
-		delete(i.active, run.ID)
-		i.mu.Unlock()
-		cancel()
-		close(active.done)
-		return run, err
-	}
-	active.process = cmd.Process
 
 	i.mu.Unlock()
-	go i.collectRun(ctx, run.ID, cmd, stdout, stderr, active, parser)
+	go i.collectRun(ctx, run.ID, bug, bot, target, validationCmd, validationParser, active)
 	return run, nil
 }
 
@@ -282,7 +296,7 @@ func (i *CodexInvestigator) Wait(runID string) (InvestigationRun, error) {
 	return i.store.Get(runID)
 }
 
-func (i *CodexInvestigator) collectRun(ctx context.Context, runID string, cmd *exec.Cmd, stdout io.Reader, stderr io.Reader, active *activeCodexRun, parser investigationEventParser) {
+func (i *CodexInvestigator) collectRun(ctx context.Context, runID string, bug Bug, bot BotRef, target string, validationCmd *exec.Cmd, validationParser investigationEventParser, active *activeCodexRun) {
 	defer close(active.done)
 	defer i.removeActive(runID)
 	stopKillWatcher := make(chan struct{})
@@ -294,6 +308,94 @@ func (i *CodexInvestigator) collectRun(ctx context.Context, runID string, cmd *e
 		case <-stopKillWatcher:
 		}
 	}()
+
+	i.emitStageEvent(runID, "validation", "验证 Agent 开始取证验证")
+	validationReport, validationStatus, validationError := i.runCommandStage(ctx, runID, validationCmd, validationParser, active, "validation")
+	if validationError != nil && validationStatus != InvestigationCancelled {
+		active.setError(validationError)
+	}
+	if validationStatus != InvestigationSucceeded {
+		_ = i.store.Finish(runID, validationStatus, "", runErrorText(ctx, validationError))
+		i.emitEvent(runID, InvestigationEvent{
+			At:      time.Now().UTC(),
+			Type:    "status",
+			Message: string(validationStatus),
+		})
+		return
+	}
+	i.emitStageEvent(runID, "validation", "验证 Agent 完成，已将证据交给排障 Agent")
+
+	prompt := BuildCodexInvestigationPromptWithValidation(bug, bot, validationReport)
+	investigationCmd, parser, err := i.buildCommand(target, bot, prompt)
+	if err != nil {
+		active.setError(err)
+		_ = i.store.Finish(runID, InvestigationFailed, validationReport, err.Error())
+		i.emitEvent(runID, InvestigationEvent{
+			At:      time.Now().UTC(),
+			Type:    "status",
+			Message: string(InvestigationFailed),
+		})
+		return
+	}
+	finalMessage, finishStatus, runErr := i.runCommandStage(ctx, runID, investigationCmd, parser, active, "investigation")
+	if runErr != nil && finishStatus != InvestigationCancelled {
+		active.setError(runErr)
+	}
+	finishError := ""
+	if finishStatus != InvestigationSucceeded {
+		finishError = runErrorText(ctx, runErr)
+	}
+	if err := i.store.Finish(runID, finishStatus, finalMessage, finishError); err != nil {
+		active.setError(err)
+		return
+	}
+	i.emitEvent(runID, InvestigationEvent{
+		At:      time.Now().UTC(),
+		Type:    "status",
+		Message: string(finishStatus),
+	})
+}
+
+func (i *CodexInvestigator) buildCommand(target string, bot BotRef, prompt string) (*exec.Cmd, investigationEventParser, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.buildCommandLocked(target, bot, prompt)
+}
+
+func (i *CodexInvestigator) emitStageEvent(runID string, phase string, message string) {
+	event := InvestigationEvent{
+		At:      time.Now().UTC(),
+		Type:    "stage",
+		Message: message,
+		Meta:    map[string]any{"phase": phase},
+	}
+	if err := i.store.AppendEvent(runID, event); err != nil {
+		return
+	}
+	i.emitEvent(runID, event)
+}
+
+func (i *CodexInvestigator) runCommandStage(ctx context.Context, runID string, cmd *exec.Cmd, parser investigationEventParser, active *activeCodexRun, phase string) (string, InvestigationStatus, error) {
+	cmdDir := cmd.Dir
+	cmd = exec.CommandContext(ctx, cmd.Path, cmd.Args[1:]...)
+	cmd.Dir = cmdDir
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", InvestigationFailed, err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return "", InvestigationFailed, err
+	}
+	setCodexProcessGroup(cmd)
+	if err := cmd.Start(); err != nil {
+		if ctx.Err() != nil {
+			return "", InvestigationCancelled, ctx.Err()
+		}
+		return "", InvestigationFailed, err
+	}
+	active.setProcess(cmd.Process)
 
 	stderrDone := make(chan string, 1)
 	go func() {
@@ -315,6 +417,13 @@ func (i *CodexInvestigator) collectRun(ctx context.Context, runID string, cmd *e
 			if event.At.IsZero() {
 				event.At = time.Now().UTC()
 			}
+			normalizePhaseEvent(&event, phase)
+			if strings.TrimSpace(phase) != "" {
+				if event.Meta == nil {
+					event.Meta = make(map[string]any)
+				}
+				event.Meta["phase"] = phase
+			}
 			err := i.store.AppendEvent(runID, event)
 			active.setError(err)
 			if err == nil {
@@ -333,35 +442,44 @@ func (i *CodexInvestigator) collectRun(ctx context.Context, runID string, cmd *e
 	}
 
 	waitErr := cmd.Wait()
+	active.setProcess(nil)
 	stderrText := <-stderrDone
-	var finishStatus InvestigationStatus
-	var finishError string
 	switch {
 	case ctx.Err() != nil:
-		finishStatus = InvestigationCancelled
-		finishError = ctx.Err().Error()
+		return finalMessage, InvestigationCancelled, ctx.Err()
 	case strings.TrimSpace(failure) != "":
-		finishStatus = InvestigationFailed
-		finishError = failure
+		return finalMessage, InvestigationFailed, errors.New(failure)
 	case waitErr != nil:
 		errorText := strings.TrimSpace(stderrText)
 		if errorText == "" {
 			errorText = waitErr.Error()
 		}
-		finishStatus = InvestigationFailed
-		finishError = errorText
+		return finalMessage, InvestigationFailed, errors.New(errorText)
 	default:
-		finishStatus = InvestigationSucceeded
+		return finalMessage, InvestigationSucceeded, nil
 	}
-	if err := i.store.Finish(runID, finishStatus, finalMessage, finishError); err != nil {
-		active.setError(err)
+}
+
+func normalizePhaseEvent(event *InvestigationEvent, phase string) {
+	if event == nil || phase != "validation" {
 		return
 	}
-	i.emitEvent(runID, InvestigationEvent{
-		At:      time.Now().UTC(),
-		Type:    "status",
-		Message: string(finishStatus),
-	})
+	switch event.Type {
+	case "turn_started":
+		event.Message = "开始验证"
+	case "turn_completed":
+		event.Message = "验证完成"
+	}
+}
+
+func runErrorText(ctx context.Context, err error) string {
+	if ctx != nil && ctx.Err() != nil {
+		return ctx.Err().Error()
+	}
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func (i *CodexInvestigator) emitEvent(runID string, event InvestigationEvent) {
@@ -393,6 +511,12 @@ func (a *activeCodexRun) getError() error {
 	a.errMu.Lock()
 	defer a.errMu.Unlock()
 	return a.err
+}
+
+func (a *activeCodexRun) setProcess(process *os.Process) {
+	a.errMu.Lock()
+	defer a.errMu.Unlock()
+	a.process = process
 }
 
 func (a *activeCodexRun) kill() {
@@ -448,6 +572,9 @@ func claudeAgentName(path string) string {
 }
 
 func openClawAgentID(bot BotRef) string {
+	if strings.TrimSpace(bot.AgentID) != "" {
+		return strings.TrimSpace(bot.AgentID)
+	}
 	pathBase := strings.TrimSuffix(filepath.Base(strings.TrimSpace(bot.Path)), filepath.Ext(strings.TrimSpace(bot.Path)))
 	return firstNonEmpty(pathBase, bot.SystemID, bot.Name)
 }

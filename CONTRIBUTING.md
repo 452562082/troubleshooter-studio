@@ -104,6 +104,14 @@ go test ./internal/generator -run TestGenerate_Nacos_Shop
 make audit
 ```
 
+`scripts/test-skill-scripts.sh` 需要 `pytest`、`PyYAML` 和 `uv`（Nacos MCP 专项测试用 `uv` 隔离安装 `mcp/httpx/respx/pytest-asyncio`）。真实 Playwright 采集链路不进默认测试，本地手动跑：
+
+```bash
+npm install --no-save --no-package-lock playwright
+npx playwright install chromium
+scripts/test-browser-smoke.sh
+```
+
 覆盖率门槛：
 
 | 包 | 门槛 |

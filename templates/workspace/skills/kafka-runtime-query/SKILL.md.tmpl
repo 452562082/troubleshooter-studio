@@ -3,7 +3,7 @@ name: kafka-runtime-query
 description: 通过环境动态查询 Kafka 集群状态。先通过 routing 获取环境映射,优先用预注册的 kafka-<env> mcp tool 直查(tuannvm/kafka-mcp-server,franz-go 纯 Go 无 native deps;装机器人前用户需手动 `brew install tuannvm/mcp/kafka-mcp-server` 或从 GitHub Release 下 binary,不是 npx/uvx 零安装);mcp 不可用时 fallback kafka CLI(kafka-topics.sh / kafka-consumer-groups.sh)。
 ---
 
-# Kafka Runtime Query
+# Kafka 运行时查询
 
 ## 执行流程（固定）
 

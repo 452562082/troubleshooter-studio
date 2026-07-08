@@ -3,7 +3,7 @@ name: es-runtime-query
 description: 通过环境动态查询 Elasticsearch 数据。先通过 routing 获取环境映射，优先用预注册的 elasticsearch-<env> mcp tool 直查（已绑好 ES_URL/auth）；mcp 不可用时 fallback curl + ES REST API，执行只读 _search / _count / _cat 等。
 ---
 
-# ES Runtime Query
+# ES 运行时查询
 
 ## 执行流程（固定）
 

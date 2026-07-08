@@ -32,18 +32,20 @@ func (g *Generator) GenerateCursor() error {
 	}
 	defer cleanup()
 
-	// 1) 生成 agents/<workspace_name>.md (Cursor agent 定义)
-	agentName := agentSlug(g.Ctx)
-	agentMD, err := buildCursorAgentMD(wsRoot, g.Ctx, agentName)
-	if err != nil {
-		return fmt.Errorf("build agent .md: %w", err)
-	}
 	agentsDir := filepath.Join(outDir, "agents")
 	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(agentsDir, agentName+".md"), []byte(agentMD), 0o644); err != nil {
-		return err
+	// 1) 生成两个 agent 定义:排障 agent + 验证 agent。两者共享下面同一份 skills/scripts。
+	for _, role := range []AgentRole{AgentRoleTroubleshooter, AgentRoleValidator} {
+		agentName := agentIDForRole(g.Ctx, role)
+		agentMD, err := buildCursorAgentMD(wsRoot, g.Ctx, agentName, role)
+		if err != nil {
+			return fmt.Errorf("build %s agent .md: %w", role, err)
+		}
+		if err := os.WriteFile(filepath.Join(agentsDir, agentName+".md"), []byte(agentMD), 0o644); err != nil {
+			return err
+		}
 	}
 
 	// 2) 拷贝 skills/(含 references 映射表)
@@ -60,7 +62,7 @@ func (g *Generator) GenerateCursor() error {
 		}
 	}
 
-	if err := g.writeTshootMeta(outDir, "cursor"); err != nil {
+	if err := g.writeIDEAgentMetas(outDir, "cursor"); err != nil {
 		return fmt.Errorf("write tshoot meta: %w", err)
 	}
 	return nil
@@ -74,14 +76,30 @@ func (g *Generator) GenerateCursor() error {
 //
 // 这些环境约束作为 intro 自然介绍写在 agent 身份介绍里,不再单独开 "## ⚠ Cursor 模式限制"
 // warning section。frontmatter.model 字段留空,让用户在 Cursor 里自选模型。
-func buildCursorAgentMD(wsRoot string, ctx *Context, agentName string) (string, error) {
+func buildCursorAgentMD(wsRoot string, ctx *Context, agentName string, role AgentRole) (string, error) {
 	var sb strings.Builder
 	sb.WriteString("---\n")
 	fmt.Fprintf(&sb, "name: %s\n", agentName)
-	fmt.Fprintf(&sb, "description: %s\n", ctx.System.Name)
+	fmt.Fprintf(&sb, "description: %s\n", roleDisplayName(ctx, role))
 	sb.WriteString("---\n\n")
 
-	fmt.Fprintf(&sb, "# %s 排障机器人\n\n", ctx.System.Name)
+	fmt.Fprintf(&sb, "# %s\n\n", roleDisplayName(ctx, role))
+
+	if role == AgentRoleValidator {
+		intro := "本 agent 在 Cursor IDE 内作为 Custom Agent 调用,负责 **验证 / 主动复现 / 修复后复查**,只输出验证报告,不做原因定位。\n\n" +
+			"运行环境:\n" +
+			"- chat 工具集默认无 Bash,工作区的 Python 脚本不能直接执行 —— 需要执行命令时**输出完整命令模板让用户粘贴执行**,等用户贴回结果再继续验证\n" +
+			"- MCP server 已写入 `~/.cursor/mcp.json`,但需用户在 Cursor Settings → MCP Servers 手动启用每个 server 才能调用\n" +
+			"- 给用户的命令模板用**绝对路径**(如 `python3 ~/.cursor/skills/" + agentName + "/<skill>/scripts/<file>.py ...`),Cursor 当前工作区不一定是本 agent 的 skills 目录\n" +
+			"- 不读取业务源码定位函数/文件行号/补丁点;代码分析和原因判断交给排障 Agent\n" +
+			"- 第一动作是 Read `~/.cursor/skills/" + agentName + "/bug-verifier/SKILL.md`,按其中流程复现、回归并输出验证报告"
+
+		writeIDEValidatorAgentBody(&sb, IDEPlatform{
+			Intro:                  intro,
+			SkillsScriptPathPrefix: "~/.cursor/skills/" + agentName,
+		})
+		return sb.String(), nil
+	}
 
 	intro := "本 agent 在 Cursor IDE 内作为 Custom Agent 调用,做 **只读** 排障(日志 / 指标 / trace / 配置 / 代码),**不**直接落地修改。\n\n" +
 		"运行环境:\n" +

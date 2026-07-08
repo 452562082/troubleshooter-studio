@@ -12,8 +12,17 @@ python3 - <<'PY'
 import importlib.util
 import sys
 
-if importlib.util.find_spec("pytest") is None:
-    print("pytest not found; install with: python3 -m pip install pytest", file=sys.stderr)
+missing = [
+    name for name in ("pytest", "yaml")
+    if importlib.util.find_spec(name) is None
+]
+if missing:
+    print(
+        "missing Python test dependencies: "
+        + ", ".join(missing)
+        + "; install with: python3 -m pip install pytest PyYAML",
+        file=sys.stderr,
+    )
     sys.exit(1)
 PY
 
@@ -36,5 +45,8 @@ python3 -m pytest \
   templates/workspace/skills/incident-investigator/scripts/test_cascade_check.py \
   templates/workspace/skills/recent-changes/scripts/test_timeline.py \
   -q
+
+echo "▶ scripts/test-nacos-mcp.sh"
+scripts/test-nacos-mcp.sh
 
 echo "✓ workspace skill script tests passed"

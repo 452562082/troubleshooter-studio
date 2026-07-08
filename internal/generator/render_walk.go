@@ -32,15 +32,19 @@ func (g *Generator) walkAndRender(srcRoot, dstRoot string) error {
 		}
 
 		if d.IsDir() {
+			if shouldSkipGeneratedArtifact(d.Name()) {
+				return fs.SkipDir
+			}
 			if g.shouldSkipDir(rel) {
 				return fs.SkipDir
 			}
 			return os.MkdirAll(filepath.Join(dstRoot, rel), 0o755)
 		}
 
-		// Skill scripts ship with pytest files (e.g. test_nacos_mcp.py) for repo-side CI.
-		// They're dev artifacts — don't render them into the bot workspace product.
-		if name := d.Name(); strings.HasPrefix(name, "test_") && strings.HasSuffix(name, ".py") {
+		if shouldSkipGeneratedArtifact(d.Name()) {
+			return nil
+		}
+		if g.shouldSkipFile(rel) {
 			return nil
 		}
 
@@ -51,6 +55,53 @@ func (g *Generator) walkAndRender(srcRoot, dstRoot string) error {
 		}
 		return copyFile(path, outPath)
 	})
+}
+
+func shouldSkipGeneratedArtifact(name string) bool {
+	if name == "__pycache__" {
+		return true
+	}
+	if strings.HasPrefix(name, "test_") && strings.HasSuffix(name, ".py") {
+		return true
+	}
+	if strings.HasSuffix(name, ".pyc") || strings.HasSuffix(name, ".pyo") {
+		return true
+	}
+	return false
+}
+
+func (g *Generator) shouldSkipFile(rel string) bool {
+	rel = filepath.ToSlash(rel)
+	if !strings.HasPrefix(rel, "skills/config-executor/") {
+		return false
+	}
+	configType := g.Ctx.Infrastructure.PrimaryConfigCenter().Type
+	if rel == "skills/config-executor/references/nacos-api-notes.md" {
+		return configType != "nacos"
+	}
+	if !strings.HasPrefix(rel, "skills/config-executor/scripts/") {
+		return false
+	}
+	name := filepath.Base(rel)
+	switch configType {
+	case "nacos":
+		return !map[string]bool{
+			"nacos_config.py":               true,
+			"nacos_diff.py":                 true,
+			"nacos_mcp.py":                  true,
+			"resolve_runtime_from_nacos.py": true,
+		}[name]
+	case "apollo":
+		return name != "apollo_config.py"
+	case "consul":
+		return name != "consul_config.py"
+	case "kuboard":
+		return name != "kuboard_config.py"
+	case "env-vars":
+		return name != "resolve_runtime_static.py"
+	default:
+		return true
+	}
 }
 
 func (g *Generator) shouldSkipDir(rel string) bool {
@@ -65,7 +116,7 @@ func (g *Generator) shouldSkipDir(rel string) bool {
 	skillName := parts[1]
 
 	whitelist := g.Ctx.Generation.SkillsWhitelist
-	if len(whitelist) > 0 {
+	if len(whitelist) > 0 && !g.alwaysIncludeSkill(skillName) {
 		found := false
 		for _, w := range whitelist {
 			if w == skillName {
@@ -90,6 +141,18 @@ func (g *Generator) shouldSkipDir(rel string) bool {
 		}
 	}
 	return false
+}
+
+func (g *Generator) alwaysIncludeSkill(skillName string) bool {
+	switch skillName {
+	case "bug-verifier", "api-verifier", "attachment-evidence-verifier", "frontend-repro-investigator":
+		return true
+	case "grafana-observability-query":
+		obs := g.Ctx.Infrastructure.Observability
+		return obs.Grafana.Enabled || obs.Loki.Enabled || obs.Prometheus.Enabled
+	default:
+		return false
+	}
 }
 
 func (g *Generator) renderFile(src, dst string) error {

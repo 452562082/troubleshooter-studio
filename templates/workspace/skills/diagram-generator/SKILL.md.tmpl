@@ -1,23 +1,23 @@
 ---
 name: diagram-generator
-description: Generate PNG/SVG images from Mermaid diagram syntax using mermaid.ink API. Zero dependencies - uses only Node.js built-in modules and curl. Use when users need to convert Mermaid code to images, create diagrams for presentations/PPTs, visualize flowcharts/class diagrams/sequence diagrams, or generate shareable diagram images. Supports both file input and stdin.
+description: 将 Mermaid 图表语法转换成 PNG/SVG 图片时使用。零依赖，仅使用 Node.js 内置模块和 curl，支持文件输入和 stdin。
 ---
 
-# Diagram Generator
+# 图表生成
 
 Convert Mermaid diagram syntax to PNG/SVG images using the mermaid.ink online rendering API.
 
-## Quick Start
+## 快速开始
 
 ```bash
 node scripts/mermaid-to-image.js diagram.mmd output.png
 echo "flowchart LR; A --> B" | node scripts/mermaid-to-image.js - output.png
 ```
 
-## Security Notes
+## 安全说明
 
 - Diagram code is sent to mermaid.ink API
-- Do not include sensitive information in diagrams
+- 不要在图表中包含敏感信息。
 
 
 ## 自检示例

@@ -348,6 +348,26 @@ routing/config-map.yaml 标 `runtime: <type>-http` 字段告诉 LLM 走脚本。
 
 ---
 
+## 2026-07-03 · 桌面端关闭隐藏 + 菜单栏/托盘后台入口
+
+**背景**:工作台是 Wails v2 桌面壳。用户希望关闭窗口后仍能在后台运行,并可从小图标重新打开。直接引入 `github.com/getlantern/systray` 的 macOS 实现会和 Wails 同时定义 Objective-C `AppDelegate`,链接时报 `duplicate symbol _OBJC_CLASS_$_AppDelegate`。
+
+**决策**:
+- Wails 主窗口启用 `HideWindowOnClose`,点击关闭按钮只隐藏窗口,不退出进程。
+- macOS 不使用第三方 systray,改用本仓库轻量 Objective-C `NSStatusItem` 实现菜单栏入口,避免接管 AppDelegate。
+- Windows 使用 `github.com/getlantern/systray` 注册托盘菜单;Linux 先 no-op,避免 CI/用户环境必须安装 `gtk3` / appindicator 开发库。
+- 托盘/菜单栏只提供两个动作:`打开工作台` 和 `退出`,不引入开机自启、最小化到托盘设置项等额外行为。
+
+**后果**:
+- 桌面端可以关闭窗口后继续运行;后台部署、扫描、自测等长任务不会因窗口关闭而被中断。
+- macOS 菜单栏状态项显示 `TS`,菜单项负责重新显示主窗口或真正退出应用。
+- Windows 新增 systray 依赖;该依赖仅由 windows build tag 文件引用,不会让 Linux Go 测试依赖托盘系统库。
+- 新增 `newDesktopOptions` 单测锁定关闭隐藏行为,桌面编译验证覆盖 macOS 原生状态项链接。
+
+**演进**:若 Wails v2 后续暴露稳定的系统托盘配置入口,可用 Wails 官方入口替换当前 macOS `NSStatusItem` 和 Windows systray 分支,但需要先确认不会重新引入 AppDelegate 冲突。
+
+---
+
 ## 历史(SUPERSEDED)
 
 下面记录已被覆盖的历史决策,**不要按这些指引**,留给读 git log 追根溯源的人用。

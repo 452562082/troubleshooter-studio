@@ -35,6 +35,7 @@ const { count: logCount } = useLogStore()
 const navItems = [
   { path: '/', icon: '🏠', label: '首页', desc: '概览 + 下一步推荐' },
   { path: '/bots', icon: '🤖', label: '已装机器人', desc: '管理已部署机器人,可重部 / 卸载' },
+  { path: '/bugs', icon: '🐞', label: 'Bug 工单', desc: '接入工单平台,选择机器人排障' },
   { path: '/init', icon: '🧙', label: '创建向导', desc: '一步步创建一个新机器人' },
   // ── 诊断工具(下面几项) ──
   { path: '/editor', icon: '📝', label: 'YAML 沙盒', desc: '验证 yaml + 干跑生成 + 预览产物' },
@@ -53,7 +54,7 @@ const navItems = [
       </div>
       <nav>
         <router-link
-          v-for="(item, i) in navItems"
+          v-for="item in navItems"
           :key="item.path"
           :to="item.path"
           class="nav-link"
@@ -64,7 +65,7 @@ const navItems = [
             <span class="nav-label">{{ item.label }}</span>
             <span class="nav-desc">{{ item.desc }}</span>
           </span>
-          <span v-if="i === 2" class="nav-badge">推荐</span>
+          <span v-if="item.path === '/init'" class="nav-badge">推荐</span>
           <span
             v-else-if="item.path === '/logs' && logCount > 0"
             class="nav-badge nav-badge-count"

@@ -1,6 +1,7 @@
 import { mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cancelBugInvestigation, generateBugContext, listBugs, matchBugBots, startBugInvestigation, listBugInvestigationRuns } from '../lib/bridge'
+import { cancelBugInvestigation, discoverBots, generateBugContext, listBugs, listBugPlatforms, matchBugBots, previewBugAttachment, startBugInvestigation, listBugInvestigationRuns, saveBugPlatform } from '../lib/bridge'
+import { copyToClipboard } from '../lib/clipboard'
 import BugWorkbenchPage from './BugWorkbenchPage.vue'
 
 const runtimeMock = vi.hoisted(() => {
@@ -25,6 +26,7 @@ vi.mock('../lib/bridge', () => ({
   cancelBugInvestigation: vi.fn(),
   clearBugPlatformLogin: vi.fn(),
   deleteBugPlatform: vi.fn(),
+  discoverBots: vi.fn().mockResolvedValue([]),
   fetchBugByID: vi.fn(),
   generateBugContext: vi.fn(),
   loginBugPlatform: vi.fn(),
@@ -32,6 +34,7 @@ vi.mock('../lib/bridge', () => ({
   listBugPlatforms: vi.fn().mockResolvedValue([]),
   listBugs: vi.fn().mockResolvedValue([]),
   matchBugBots: vi.fn().mockResolvedValue([]),
+  previewBugAttachment: vi.fn(),
   saveBugPlatform: vi.fn(),
   startBugInvestigation: vi.fn(),
   syncBugPlatform: vi.fn(),
@@ -56,11 +59,16 @@ afterEach(() => {
   runtimeMock.EventsOn.mockClear()
   runtimeMock.unlisten.mockClear()
   vi.mocked(cancelBugInvestigation).mockReset()
+  vi.mocked(discoverBots).mockResolvedValue([])
   vi.mocked(generateBugContext).mockReset()
   vi.mocked(listBugInvestigationRuns).mockResolvedValue([])
+  vi.mocked(listBugPlatforms).mockResolvedValue([])
   vi.mocked(listBugs).mockResolvedValue([])
   vi.mocked(matchBugBots).mockResolvedValue([])
+  vi.mocked(previewBugAttachment).mockReset()
+  vi.mocked(saveBugPlatform).mockReset()
   vi.mocked(startBugInvestigation).mockReset()
+  vi.mocked(copyToClipboard).mockResolvedValue(true)
 })
 
 function flushPromises() {
@@ -81,7 +89,7 @@ describe('BugWorkbenchPage', () => {
     await wrapper.find('button.accent').trigger('click')
 
     expect(wrapper.text()).toContain('飞书授权登录')
-    expect(wrapper.text()).toContain('登录禅道')
+    expect(wrapper.text()).toContain('登录平台')
     expect(wrapper.find('input[placeholder="我的禅道账号"]').exists()).toBe(false)
     expect(wrapper.find('input[placeholder="指派人账号,仅后台同步时用于筛选"]').exists()).toBe(false)
     expect(wrapper.find('input[placeholder="Hook Secret,留空自动生成"]').exists()).toBe(false)
@@ -132,10 +140,60 @@ describe('BugWorkbenchPage', () => {
 
     await wrapper.find('button.accent').trigger('click')
 
-    const loginButton = wrapper.findAll('button').find(button => button.text() === '登录禅道')
+    const loginButton = wrapper.findAll('button').find(button => button.text() === '登录平台')
     const saveButton = wrapper.findAll('button').find(button => button.text() === '保存配置')
     expect(loginButton?.attributes('disabled')).toBeUndefined()
     expect(saveButton?.attributes('disabled')).toBeUndefined()
+  })
+
+  it('saves selected platform bots and their mapped environments', async () => {
+    vi.mocked(discoverBots).mockResolvedValue([
+      {
+        path: '/repo/base',
+        ghost: false,
+        meta: {
+          system_id: 'base',
+          system_name: 'Base',
+          target: 'codex',
+          agent_id: 'base-troubleshooter',
+          role: 'troubleshooter',
+          internal_agents: [
+            { id: 'base-troubleshooter', role: 'troubleshooter' },
+            { id: 'base-validator', role: 'validator' },
+          ],
+        },
+        environments: ['test', 'prod'],
+      } as any,
+    ])
+    vi.mocked(saveBugPlatform).mockResolvedValue({
+      id: 'zentao-main',
+      name: '禅道',
+      type: 'zentao',
+      base_url: 'https://zentao.example.com',
+      bot_mappings: [{ bot_key: '/repo/base|codex', env: 'prod' }],
+      enabled: true,
+    })
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises()
+    await wrapper.find('button.accent').trigger('click')
+
+    await wrapper.find('input[placeholder="平台名称,如 测试环境 Bug 平台"]').setValue('禅道')
+    await wrapper.find('input[placeholder="平台地址 https://bug-platform.example.com"]').setValue('https://zentao.example.com')
+    expect(wrapper.findAll('.bot-config-row')).toHaveLength(0)
+    await wrapper.find('.add-bot-btn').trigger('click')
+    expect(wrapper.findAll('.bot-picker-row')).toHaveLength(1)
+    await wrapper.find('.bot-picker-row').trigger('click')
+    expect(wrapper.findAll('.bot-config-row')).toHaveLength(1)
+    expect(wrapper.findAll('.bot-picker-row')).toHaveLength(0)
+    await wrapper.find('.bot-config-row select').setValue('prod')
+    const saveButton = wrapper.findAll('button').find(button => button.text() === '保存配置')
+    await saveButton!.trigger('click')
+
+    expect(saveBugPlatform).toHaveBeenCalledWith(expect.objectContaining({
+      name: '禅道',
+      base_url: 'https://zentao.example.com',
+      bot_mappings: [{ bot_key: '/repo/base|codex', env: 'prod' }],
+    }))
   })
 
   it('labels immediate sync as syncing my assigned bugs', async () => {
@@ -151,6 +209,20 @@ describe('BugWorkbenchPage', () => {
         source: 'zentao',
         source_id: '577',
         title: '搜索页异常',
+        product: 'S基建项目',
+        module: 'frontend',
+        bug_type: '代码错误',
+        os: 'WEB',
+        browser: 'Chrome',
+        keywords: 'PC 搜索',
+        severity: '3',
+        priority: '1',
+        created_at: '2026-07-03T10:03:21Z',
+        frontend_repo: 'pc-web',
+        frontend_url: 'https://example.com/search',
+        api_paths: ['/api/search'],
+        trace_ids: ['trace-1'],
+        request_ids: ['request-1'],
         steps: '<p>[步骤]</p><ol><li>PC端进入搜索页</li><li>输入电影名称</li></ol>',
       },
     ])
@@ -161,6 +233,59 @@ describe('BugWorkbenchPage', () => {
 
     expect(wrapper.find('.text-block li').text()).toBe('PC端进入搜索页')
     expect(wrapper.find('.text-block').text()).not.toContain('<p>[步骤]</p>')
+    expect(wrapper.find('.bug-fields').text()).toContain('S基建项目')
+    expect(wrapper.find('.bug-fields').text()).toContain('frontend')
+    expect(wrapper.find('.bug-fields').text()).toContain('代码错误')
+    expect(wrapper.find('.bug-fields').text()).toContain('WEB')
+    expect(wrapper.find('.bug-fields').text()).toContain('Chrome')
+    expect(wrapper.find('.bug-fields').text()).toContain('PC 搜索')
+    expect(wrapper.find('.bug-fields').text()).toContain('S3')
+    expect(wrapper.find('.bug-fields').text()).toContain('P1')
+    expect(wrapper.find('.bug-detail').text()).not.toContain('API 路径')
+    expect(wrapper.find('.bug-detail').text()).not.toContain('Trace / Request')
+    expect(wrapper.find('.bug-detail').text()).not.toContain('前端仓库')
+    expect(wrapper.find('.bug-detail').text()).not.toContain('前端 URL')
+    expect(wrapper.find('.bug-detail').text()).not.toContain('/api/search')
+    expect(wrapper.find('.bug-detail').text()).not.toContain('trace-1')
+  })
+
+  it('renders and previews bug attachments', async () => {
+    vi.mocked(listBugPlatforms).mockResolvedValue([
+      { id: 'zentao-main', name: '禅道', type: 'zentao', base_url: 'https://zentao.example.com', enabled: true },
+    ])
+    vi.mocked(listBugs).mockResolvedValue([
+      {
+        id: 'zentao-718',
+        source: 'zentao',
+        source_id: '718',
+        title: '搜索页异常',
+        attachments: [{ id: '101', name: 'screen.png', type: 'image/png' }],
+      },
+    ])
+    vi.mocked(previewBugAttachment).mockResolvedValue({
+      name: 'screen.png',
+      content_type: 'image/png',
+      data_url: 'data:image/png;base64,AA==',
+    })
+
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises()
+    await flushPromises()
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('附件')
+    expect(wrapper.text()).toContain('screen.png')
+    expect(wrapper.find('.attachment-thumb-img').attributes('src')).toBe('data:image/png;base64,AA==')
+    await wrapper.find('.attachment-item').trigger('click')
+    await flushPromises()
+
+    expect(previewBugAttachment).toHaveBeenCalledWith({
+      platform_id: 'zentao-main',
+      bug_id: 'zentao-718',
+      attachment_index: 0,
+    })
+    expect(wrapper.find('.attachment-preview-image').attributes('src')).toBe('data:image/png;base64,AA==')
   })
 
   it('renders bot matches when backend returns null reasons', async () => {
@@ -168,7 +293,7 @@ describe('BugWorkbenchPage', () => {
       { id: 'zentao-1842', source: 'zentao', source_id: '1842', title: '支付页 500' },
     ])
     vi.mocked(matchBugBots).mockResolvedValue([
-      { bot: { key: 'shop-prod', system_id: 'shop', target: 'prod', path: '/bots/shop' }, score: 10, reasons: null as any },
+      { bot: { key: 'shop-prod', system_id: 'shop', target: 'codex', path: '/bots/shop', envs: ['test', 'prod'] }, score: 10, reasons: null as any },
     ])
 
     const wrapper = mount(BugWorkbenchPage)
@@ -176,7 +301,55 @@ describe('BugWorkbenchPage', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('shop')
-    expect(wrapper.text()).toContain('无显式匹配,可手动选择')
+    expect(wrapper.text()).toContain('codex')
+    expect(wrapper.text()).not.toContain('score 10')
+    expect(wrapper.text()).not.toContain('支持环境')
+    expect(wrapper.text()).not.toContain('无显式匹配')
+  })
+
+  it('filters selectable bots by platform mapping and passes mapped env to start', async () => {
+    vi.mocked(listBugPlatforms).mockResolvedValue([
+      {
+        id: 'zentao-main',
+        name: '禅道',
+        type: 'zentao',
+        base_url: 'https://zentao.example.com',
+        enabled: true,
+        bot_mappings: [{ bot_key: 'base|codex', env: 'prod' }],
+      },
+    ])
+    vi.mocked(listBugs).mockResolvedValue([
+      { id: 'zentao-577', source: 'zentao', source_id: '577', title: '搜索页异常' },
+    ])
+    vi.mocked(matchBugBots).mockResolvedValue([
+      { bot: { key: 'base|codex', system_id: 'base', target: 'codex', path: '/repo', envs: ['test', 'prod'] }, score: 10, reasons: [] },
+      { bot: { key: 'base|claude-code', system_id: 'base', target: 'claude-code', path: '/repo' }, score: 9, reasons: [] },
+    ])
+    vi.mocked(startBugInvestigation).mockResolvedValue({
+      id: 'run-1',
+      bug_id: 'zentao-577',
+      bot_key: 'base|codex',
+      status: 'running',
+      events: [],
+    })
+
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises()
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('codex')
+    expect(wrapper.text()).toContain('环境 prod')
+    expect(wrapper.text()).not.toContain('score 10')
+    expect(wrapper.text()).not.toContain('claude-code')
+
+    const button = wrapper.findAll('button').find(b => b.text() === '开始排障')
+    await button!.trigger('click')
+
+    expect(startBugInvestigation).toHaveBeenCalledWith({
+      bug_id: 'zentao-577',
+      bot: { key: 'base|codex', system_id: 'base', target: 'codex', path: '/repo', env: 'prod', envs: ['test', 'prod'] },
+    })
   })
 
   it('shows start investigation for codex bot', async () => {
@@ -218,6 +391,79 @@ describe('BugWorkbenchPage', () => {
     expect(startBugInvestigation).toHaveBeenCalledWith({
       bug_id: 'zentao-577',
       bot: { key: 'base|codex', system_id: 'base', target: 'codex', path: '/repo' },
+    })
+  })
+
+  it('passes a single bot with internal agents when starting investigation', async () => {
+    vi.mocked(discoverBots).mockResolvedValue([
+      {
+        path: '/repo/base-troubleshooter',
+        ghost: false,
+        meta: {
+          system_id: 'base',
+          system_name: 'Base',
+          target: 'codex',
+          agent_id: 'base-troubleshooter',
+          role: 'troubleshooter',
+          internal_agents: [
+            { id: 'base-troubleshooter', role: 'troubleshooter' },
+            { id: 'base-validator', role: 'validator' },
+          ],
+        },
+        environments: ['test'],
+      } as any,
+    ])
+    vi.mocked(listBugs).mockResolvedValue([
+      { id: 'zentao-577', source: 'zentao', source_id: '577', title: '搜索页异常' },
+    ])
+    vi.mocked(matchBugBots).mockResolvedValue([
+      {
+        bot: {
+          key: '/repo/base-troubleshooter|codex',
+          system_id: 'base',
+          target: 'codex',
+          path: '/repo/base-troubleshooter',
+          agent_id: 'base-troubleshooter',
+          role: 'troubleshooter',
+          internal_agents: [
+            { id: 'base-troubleshooter', role: 'troubleshooter' },
+            { id: 'base-validator', role: 'validator' },
+          ],
+          env: 'test',
+        },
+        score: 10,
+        reasons: [],
+      },
+    ])
+    vi.mocked(startBugInvestigation).mockResolvedValue({
+      id: 'run-1',
+      bug_id: 'zentao-577',
+      bot_key: '/repo/base-troubleshooter|codex',
+      status: 'running',
+      events: [],
+    })
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises()
+    await flushPromises()
+
+    const button = wrapper.findAll('button').find(b => b.text() === '开始排障')
+    await button!.trigger('click')
+
+    expect(startBugInvestigation).toHaveBeenCalledWith({
+      bug_id: 'zentao-577',
+      bot: {
+        key: '/repo/base-troubleshooter|codex',
+        system_id: 'base',
+        target: 'codex',
+        path: '/repo/base-troubleshooter',
+        agent_id: 'base-troubleshooter',
+        role: 'troubleshooter',
+        internal_agents: [
+          { id: 'base-troubleshooter', role: 'troubleshooter' },
+          { id: 'base-validator', role: 'validator' },
+        ],
+        env: 'test',
+      },
     })
   })
 
@@ -312,6 +558,120 @@ describe('BugWorkbenchPage', () => {
     expect(wrapper.findAll('button').some(b => b.text() === '生成上下文')).toBe(true)
   })
 
+  it('hides output actions until they are applicable', async () => {
+    vi.mocked(listBugs).mockResolvedValue([
+      { id: 'zentao-577', source: 'zentao', source_id: '577', title: '搜索页异常' },
+    ])
+    vi.mocked(matchBugBots).mockResolvedValue([
+      { bot: { key: 'base|codex', system_id: 'base', target: 'codex', path: '/repo' }, score: 10, reasons: [] },
+    ])
+    vi.mocked(listBugInvestigationRuns).mockResolvedValue([])
+
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises()
+    await flushPromises()
+
+    const actionText = wrapper.find('.bot-actions').text()
+    expect(actionText).not.toContain('停止')
+    expect(actionText).not.toContain('复制')
+  })
+
+  it('shows copy for completed output but hides stop', async () => {
+    vi.mocked(listBugs).mockResolvedValue([
+      { id: 'zentao-577', source: 'zentao', source_id: '577', title: '搜索页异常' },
+    ])
+    vi.mocked(matchBugBots).mockResolvedValue([
+      { bot: { key: 'base|codex', system_id: 'base', target: 'codex', path: '/repo' }, score: 10, reasons: [] },
+    ])
+    vi.mocked(listBugInvestigationRuns).mockResolvedValue([
+      { id: 'run-1', bug_id: 'zentao-577', bot_key: 'base|codex', status: 'succeeded', final_message: '排障结论', events: [] },
+    ])
+
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises()
+    await flushPromises()
+
+    const actionText = wrapper.find('.bot-actions').text()
+    expect(actionText).not.toContain('停止')
+    expect(actionText).toContain('复制结果')
+  })
+
+  it('does not show copy for running process logs without final result', async () => {
+    vi.mocked(listBugs).mockResolvedValue([
+      { id: 'zentao-577', source: 'zentao', source_id: '577', title: '搜索页异常' },
+    ])
+    vi.mocked(matchBugBots).mockResolvedValue([
+      { bot: { key: 'base|codex', system_id: 'base', target: 'codex', path: '/repo' }, score: 10, reasons: [] },
+    ])
+    vi.mocked(listBugInvestigationRuns).mockResolvedValue([
+      {
+        id: 'run-1',
+        bug_id: 'zentao-577',
+        bot_key: 'base|codex',
+        status: 'running',
+        events: [{ type: 'agent_message', message: '正在读取配置' }],
+      },
+    ])
+
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.find('.context-preview').text()).toContain('正在读取配置')
+    expect(wrapper.find('.bot-actions').text()).not.toContain('复制')
+  })
+
+  it('copies final result without process logs', async () => {
+    vi.mocked(listBugs).mockResolvedValue([
+      { id: 'zentao-577', source: 'zentao', source_id: '577', title: '搜索页异常' },
+    ])
+    vi.mocked(matchBugBots).mockResolvedValue([
+      { bot: { key: 'base|codex', system_id: 'base', target: 'codex', path: '/repo' }, score: 10, reasons: [] },
+    ])
+    vi.mocked(listBugInvestigationRuns).mockResolvedValue([
+      {
+        id: 'run-1',
+        bug_id: 'zentao-577',
+        bot_key: 'base|codex',
+        status: 'succeeded',
+        final_message: '最终根因',
+        events: [{ type: 'agent_message', message: '正在读取配置' }],
+      },
+    ])
+
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises()
+    await flushPromises()
+
+    const copyButton = wrapper.findAll('.bot-actions button').find(b => b.text() === '复制结果')
+    await copyButton!.trigger('click')
+
+    expect(copyToClipboard).toHaveBeenCalledWith('最终根因')
+  })
+
+  it('shows stop for running investigation and cancels the active run', async () => {
+    vi.mocked(cancelBugInvestigation).mockResolvedValue()
+    vi.mocked(listBugs).mockResolvedValue([
+      { id: 'zentao-577', source: 'zentao', source_id: '577', title: '搜索页异常' },
+    ])
+    vi.mocked(matchBugBots).mockResolvedValue([
+      { bot: { key: 'base|codex', system_id: 'base', target: 'codex', path: '/repo' }, score: 10, reasons: [] },
+    ])
+    vi.mocked(listBugInvestigationRuns).mockResolvedValue([
+      { id: 'run-1', bug_id: 'zentao-577', bot_key: 'base|codex', status: 'running', events: [] },
+    ])
+
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises()
+    await flushPromises()
+
+    const stopButton = wrapper.findAll('.bot-actions button').find(b => b.text() === '停止')
+    expect(stopButton?.exists()).toBe(true)
+    await stopButton!.trigger('click')
+
+    expect(cancelBugInvestigation).toHaveBeenCalledWith({ run_id: 'run-1' })
+  })
+
   it('streams investigation events into the selected run output', async () => {
     ;(window as any).runtime = { EventsOnMultiple: vi.fn() }
     vi.mocked(listBugs).mockResolvedValue([
@@ -346,6 +706,146 @@ describe('BugWorkbenchPage', () => {
     expect(wrapper.find('.context-preview .markdown-result').text()).toContain('缓存配置错误')
     wrapper.unmount()
     expect(runtimeMock.unlisten).toHaveBeenCalled()
+  })
+
+  it('separates validation evidence from investigation output tabs', async () => {
+    vi.mocked(listBugs).mockResolvedValue([
+      { id: 'zentao-577', source: 'zentao', source_id: '577', title: '搜索页异常' },
+    ])
+    vi.mocked(matchBugBots).mockResolvedValue([
+      { bot: { key: 'base|codex', system_id: 'base', target: 'codex', path: '/repo' }, score: 10, reasons: [] },
+    ])
+    vi.mocked(listBugInvestigationRuns).mockResolvedValue([
+      {
+        id: 'run-1',
+        bug_id: 'zentao-577',
+        bot_key: 'base|codex',
+        status: 'succeeded',
+        final_message: '最终根因',
+        events: [
+          { type: 'stage', message: '验证 Agent 开始取证验证', meta: { phase: 'validation' } },
+          { type: 'agent_message', message: 'verification_status: reproduced', meta: { phase: 'validation' } },
+          { type: 'agent_message', message: '正在定位后端代码', meta: { phase: 'investigation' } },
+        ],
+      },
+    ])
+
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.find('.context-preview').text()).toContain('正在定位后端代码')
+    expect(wrapper.find('.context-preview').text()).toContain('最终根因')
+    expect(wrapper.find('.context-preview').text()).not.toContain('verification_status')
+
+    const validationTab = wrapper.findAll('.output-tab').find(tab => tab.text().includes('验证证据'))
+    expect(validationTab?.exists()).toBe(true)
+    await validationTab!.trigger('click')
+
+    expect(wrapper.find('.context-preview').text()).toContain('verification_status: reproduced')
+    expect(wrapper.find('.context-preview').text()).not.toContain('最终根因')
+  })
+
+  it('switches to investigation output when a run fails', async () => {
+    ;(window as any).runtime = { EventsOnMultiple: vi.fn() }
+    vi.mocked(listBugs).mockResolvedValue([
+      { id: 'zentao-577', source: 'zentao', source_id: '577', title: '搜索页异常' },
+    ])
+    vi.mocked(matchBugBots).mockResolvedValue([
+      { bot: { key: 'base|codex', system_id: 'base', target: 'codex', path: '/repo' }, score: 10, reasons: [] },
+    ])
+    vi.mocked(listBugInvestigationRuns).mockResolvedValue([
+      {
+        id: 'run-1',
+        bug_id: 'zentao-577',
+        bot_key: 'base|codex',
+        status: 'running',
+        events: [
+          { type: 'agent_message', message: 'verification_status: reproduced', meta: { phase: 'validation' } },
+        ],
+      },
+    ])
+
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises()
+    await flushPromises()
+
+    const validationTab = wrapper.findAll('.output-tab').find(tab => tab.text().includes('验证证据'))
+    await validationTab!.trigger('click')
+    expect(wrapper.find('.context-preview').text()).toContain('verification_status: reproduced')
+
+    runtimeMock.handlers['bug-investigation:event']({
+      run: { id: 'run-1', bug_id: 'zentao-577', bot_key: 'base|codex', status: 'failed', error: 'request timed out' },
+      event: { type: 'status', message: 'failed' },
+    })
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('.output-tab.active').text()).toContain('排障分析')
+    expect(wrapper.find('.context-preview').text()).toContain('request timed out')
+    expect(wrapper.find('.context-preview').text()).not.toContain('verification_status: reproduced')
+  })
+
+  it('renders streamed final investigation event as markdown', async () => {
+    ;(window as any).runtime = { EventsOnMultiple: vi.fn() }
+    vi.mocked(listBugs).mockResolvedValue([
+      { id: 'zentao-577', source: 'zentao', source_id: '577', title: '搜索页异常' },
+    ])
+    vi.mocked(matchBugBots).mockResolvedValue([
+      { bot: { key: 'base|codex', system_id: 'base', target: 'codex', path: '/repo' }, score: 10, reasons: [] },
+    ])
+    vi.mocked(listBugInvestigationRuns).mockResolvedValue([
+      { id: 'run-1', bug_id: 'zentao-577', bot_key: 'base|codex', status: 'running', events: [] },
+    ])
+
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises()
+    await flushPromises()
+
+    runtimeMock.handlers['bug-investigation:event']({
+      run: { id: 'run-1', bug_id: 'zentao-577', bot_key: 'base|codex', status: 'succeeded', events: [] },
+      event: {
+        type: 'final',
+        message: '## 故障快报\n\n### 1. 已验证事实\n\n| # | 事实 |\n|---|---|\n| 1 | 命中搜索接口 |',
+      },
+    })
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('.process-log').exists()).toBe(false)
+    expect(wrapper.find('.context-preview .markdown-result h2').text()).toBe('故障快报')
+    expect(wrapper.find('.context-preview .markdown-result table').exists()).toBe(true)
+    expect(wrapper.find('.context-preview').text()).not.toContain('|---|')
+  })
+
+  it('promotes terminal markdown agent messages above completion markers', async () => {
+    vi.mocked(listBugs).mockResolvedValue([
+      { id: 'zentao-577', source: 'zentao', source_id: '577', title: '搜索页异常' },
+    ])
+    vi.mocked(matchBugBots).mockResolvedValue([
+      { bot: { key: 'base|codex', system_id: 'base', target: 'codex', path: '/repo' }, score: 10, reasons: [] },
+    ])
+    vi.mocked(listBugInvestigationRuns).mockResolvedValue([
+      {
+        id: 'run-1',
+        bug_id: 'zentao-577',
+        bot_key: 'base|codex',
+        status: 'succeeded',
+        events: [
+          {
+            type: 'agent_message',
+            message: '### 1. 现象复述\n\n| # | 事实 |\n|---|---|\n| 1 | 搜索结果显示一集全 |',
+          },
+          { type: 'turn_completed', message: '排障完成' },
+        ],
+      },
+    ])
+
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.find('.context-preview .markdown-result h3').text()).toBe('1. 现象复述')
+    expect(wrapper.find('.context-preview .markdown-result table').exists()).toBe(true)
+    expect(wrapper.find('.process-log').text()).not.toContain('|---|')
   })
 
   it('scrolls investigation output to the bottom as events arrive', async () => {

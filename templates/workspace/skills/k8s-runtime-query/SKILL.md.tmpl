@@ -3,7 +3,7 @@ name: k8s-runtime-query
 description: 通过 Kuboard v4 API 或 one2all MCP 查 K8s pod / service / deployment 运行时状态(状态/事件/日志/资源)。排障入口必备:接口报错先看后端 pod 健不健康,容器崩溃看上次日志找根因。仅只读,不做 delete/scale/exec-write。
 ---
 
-# K8s Runtime Query(via Kuboard v4 API / one2all MCP)
+# K8s 运行时查询（Kuboard v4 API / one2all MCP）
 
 ## 何时使用
 
@@ -44,7 +44,7 @@ description: 通过 Kuboard v4 API 或 one2all MCP 查 K8s pod / service / deplo
 | `platform_list_service_catalog` | Service + Ports + Selector + 关联 Deployment | "Service 后面挂了哪些 pod" |
 | `platform_list_deployments` | Deployment 副本/滚动状态(enrich=true 含 volume/env 详情) | "Deployment 在滚动吗" |
 | `platform_list_deployment_history` | Deployment 滚动发布版本历史(ReplicaSet revision/镜像/时间) | "什么时候上的这版 / 上一个 revision 是哪个镜像" |
-| `platform_get_namespace_snapshot` | 整 ns 健康诊断(healthy/isolated/degraded + 错误分布) | incident-investigator Step 3 横向扫 |
+| `platform_get_namespace_snapshot` | 整 ns 健康诊断(healthy/isolated/degraded + 错误分布) | incident-investigator 步骤 3 横向扫 |
 
 调用示例(routing 解析 env → cluster_id + namespace + label_selector):
 
@@ -98,7 +98,7 @@ agent 看到这条 **复述给用户** 让其装一下。
 | `list-services` | Service + Ports + Selector | "Service 后面挂了哪些 pod"(对照 selector 反查 pod) |
 | `list-deployments` | Deployment 副本/滚动状态 + Conditions | "Deployment 在滚动吗 / 新 RS 起没起来" |
 | `rollout-history` | 指定 Deployment 的 ReplicaSet 历史(revision + 镜像 + 副本数 + 创建时间,倒序) | "什么时候上的这版 / 上一个 revision 是哪个镜像" |
-| `ns-snapshot` | 整 namespace 的 pod 状态分布:健康/异常计数 + verdict(healthy/isolated/widespread) + 异常 pod 列表 + known-errors 分布 | **incident-investigator Step 3(横向扫)用**;5 秒判断"孤立故障 vs 广播故障 vs 基础设施问题" |
+| `ns-snapshot` | 整 namespace 的 pod 状态分布:健康/异常计数 + verdict(healthy/isolated/widespread) + 异常 pod 列表 + known-errors 分布 | **incident-investigator 步骤 3(横向扫)用**;5 秒判断"孤立故障 vs 广播故障 vs 基础设施问题" |
 
 调用模板(三件套必给:`--env / --cluster / --namespace`,routing 解析后给):
 

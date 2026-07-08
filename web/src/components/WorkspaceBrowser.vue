@@ -24,6 +24,8 @@ import FileTreeNode from './FileTreeNode.vue'
 const props = defineProps<{
   rootPath: string
   bot: { meta?: { system_id?: string; target?: string }; path: string }
+  initialPath?: string
+  agentScope?: string
 }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
 
@@ -57,11 +59,67 @@ const isReadOnly = computed(() => {
 
 // hidden 文件折叠展示(.clawhub/.openclaw 这类元数据目录默认折叠减少视觉干扰)
 const showHidden = ref(false)
-const visibleTree = computed<FileNode | null>(() => {
+const scopedAgentID = computed(() => props.agentScope || agentIDFromInitialPath(props.initialPath || ''))
+const scopedSkillRoot = computed(() => skillRootFromInitialPath(props.initialPath || '', scopedAgentID.value))
+const scopedTree = computed<FileNode | null>(() => {
   if (!tree.value) return null
-  if (showHidden.value) return tree.value
-  return filterHidden(tree.value)
+  if (!scopedAgentID.value) return tree.value
+  return filterAgentScope(tree.value, scopedAgentID.value, scopedSkillRoot.value)
 })
+const visibleTree = computed<FileNode | null>(() => {
+  if (!scopedTree.value) return null
+  const filtered = showHidden.value ? scopedTree.value : filterHidden(scopedTree.value)
+  return pruneEmptyDirs(filtered, true)
+})
+
+function agentIDFromInitialPath(path: string): string {
+  const rel = normalizeRelPath(path)
+  const parts = rel.split('/').filter(Boolean)
+  if (parts[0] === 'agents' && parts[1]) {
+    return parts[1].replace(/\.(md|toml)$/i, '')
+  }
+  if ((parts[0] === 'skills' || parts[0] === 'scripts') && parts[1]) {
+    return parts[1]
+  }
+  return ''
+}
+
+function skillRootFromInitialPath(path: string, agentID: string): string {
+  const rel = normalizeRelPath(path)
+  const parts = rel.split('/').filter(Boolean)
+  if (parts[0] === 'skills' && parts[1]) {
+    return `skills/${parts[1]}`
+  }
+  return agentID ? `skills/${agentID}` : ''
+}
+
+function normalizeRelPath(path: string): string {
+  return path.replace(/^\/+/, '').replace(/\\/g, '/')
+}
+
+function filterAgentScope(root: FileNode, agentID: string, skillRoot: string): FileNode {
+  const children: FileNode[] = []
+  for (const child of root.children || []) {
+    if (child.path === 'agents') {
+      const filtered = (child.children || []).filter(c => agentIDFromInitialPath(c.path) === agentID)
+      if (filtered.length) children.push({ ...child, children: filtered })
+      continue
+    }
+    if (child.path === 'skills') {
+      const filtered = (child.children || []).filter(c => {
+        return c.path === `skills/${agentID}` || (!!skillRoot && c.path === skillRoot)
+      })
+      if (filtered.length) children.push({ ...child, children: filtered })
+      continue
+    }
+    if (child.path === 'scripts') {
+      const filtered = (child.children || []).filter(c => c.path === `scripts/${agentID}`)
+      if (filtered.length) children.push({ ...child, children: filtered })
+    }
+  }
+  return { ...root, children }
+}
+
 function filterHidden(node: FileNode): FileNode {
   if (!node.children) return node
   return {
@@ -72,18 +130,49 @@ function filterHidden(node: FileNode): FileNode {
   }
 }
 
+function pruneEmptyDirs(node: FileNode, keepRoot = false): FileNode | null {
+  if (!node.is_dir) return node
+  const children = (node.children || [])
+    .map(c => c.is_dir ? pruneEmptyDirs(c) : c)
+    .filter((c): c is FileNode => !!c)
+  if (!keepRoot && children.length === 0) return null
+  return { ...node, children }
+}
+
 async function loadTree() {
   loadingTree.value = true
   treeError.value = ''
   try {
     const t = await listBotWorkspaceFiles(props.rootPath)
     tree.value = t
+    await pickInitialFileIfNeeded()
   } catch (e: any) {
     treeError.value = String(e?.message || e)
     toast.error(`列文件树失败: ${treeError.value.slice(0, 80)}`)
   } finally {
     loadingTree.value = false
   }
+}
+
+async function pickInitialFileIfNeeded() {
+  if (!props.initialPath || selectedPath.value) return
+  const target = findFilePath(tree.value, props.initialPath)
+  if (!target) return
+  selectedPath.value = target
+  await loadFile()
+}
+
+function findFilePath(node: FileNode | null, wanted: string): string {
+  if (!node) return ''
+  const normalized = wanted.replace(/^\/+/, '')
+  if (!node.is_dir && node.path === normalized) return node.path
+  if (node.children) {
+    for (const child of node.children) {
+      const found = findFilePath(child, normalized)
+      if (found) return found
+    }
+  }
+  return ''
 }
 
 async function pickFile(path: string) {
@@ -163,7 +252,18 @@ onMounted(() => {
   window.addEventListener('keydown', onKey)
 })
 onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
-watch(() => props.rootPath, loadTree)
+watch(() => props.rootPath, () => {
+  selectedPath.value = ''
+  loadTree()
+})
+watch(() => props.initialPath, () => {
+  selectedPath.value = ''
+  pickInitialFileIfNeeded()
+})
+watch(() => props.agentScope, () => {
+  selectedPath.value = ''
+  pickInitialFileIfNeeded()
+})
 
 function fmtSize(n: number): string {
   if (n < 1024) return `${n} B`
@@ -179,6 +279,7 @@ function fmtSize(n: number): string {
         <div class="ws-title">
           <span class="ws-target-tag" :data-target="bot.meta?.target || ''">{{ bot.meta?.target || '?' }}</span>
           <strong>{{ bot.meta?.system_id || '机器人' }}</strong>
+          <span v-if="scopedAgentID" class="ws-agent-tag" :title="`当前只显示 ${scopedAgentID} 的定义 / skills / scripts`">{{ scopedAgentID }}</span>
           <span class="ws-path muted" :title="rootPath">{{ rootPath }}</span>
         </div>
         <div class="ws-header-actions">
@@ -284,6 +385,14 @@ function fmtSize(n: number): string {
 .ws-target-tag[data-target="claude-code"] { background: #fef3c7; color: #92400e; }
 .ws-target-tag[data-target="cursor"] { background: #dbeafe; color: #1e40af; }
 .ws-target-tag[data-target="codex"] { background: #d1fae5; color: #065f46; }
+.ws-agent-tag {
+  flex: 0 1 auto;
+  max-width: 220px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: ui-monospace, monospace;
+  font-size: 11px; padding: 2px 7px; border-radius: 999px;
+  background: #eef2ff; color: #3730a3; border: 1px solid #c7d2fe;
+}
 .ws-header-actions { display: flex; align-items: center; gap: 8px; }
 .ws-toggle { font-size: 11px; color: #475569; display: flex; align-items: center; gap: 4px; cursor: pointer; }
 .btn-icon.close {

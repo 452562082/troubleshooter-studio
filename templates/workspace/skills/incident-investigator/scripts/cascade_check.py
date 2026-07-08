@@ -101,6 +101,10 @@ def parse_dep_map(yaml_text: str) -> dict[str, dict[str, Any]]:
     历史坑(2026-06):旧版只认 inline,block 风格被静默跳过 → 自动生成的依赖图
     downstream 永远空 → incident-investigator Step 4 形同虚设。block 解析是核心,不是 nice-to-have。
     """
+    parsed = parse_dep_map_with_pyyaml(yaml_text)
+    if parsed is not None:
+        return parsed
+
     result: dict[str, dict[str, Any]] = {}
     cur_svc = ''
     cur_field = ''  # 非空表示正在收集 block 列表项或 mapping
@@ -165,6 +169,54 @@ def parse_dep_map(yaml_text: str) -> dict[str, dict[str, Any]]:
             # block 列表:进入收集模式,后续更深缩进的 `- item` 行累加到本字段
             cur_field = field
     return result
+
+
+def parse_dep_map_with_pyyaml(yaml_text: str) -> dict[str, dict[str, Any]] | None:
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return None
+    try:
+        data = yaml.safe_load(yaml_text) or {}
+    except Exception:
+        return None
+    services = data.get('services') if isinstance(data, dict) else None
+    if not isinstance(services, dict):
+        return None
+
+    result: dict[str, dict[str, Any]] = {}
+    for svc, raw_entry in services.items():
+        if not isinstance(raw_entry, dict):
+            raw_entry = {}
+        entry = raw_entry
+        result[str(svc)] = {
+            'upstream': scalar_list(entry.get('upstream')),
+            'downstream': scalar_list(entry.get('downstream')),
+            'downstream_namespaces': scalar_map(entry.get('downstream_namespaces')),
+            'data_stores': scalar_list(entry.get('data_stores')),
+            'critical': bool(entry.get('critical', False)),
+        }
+    return result
+
+
+def scalar_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if item is not None and str(item)]
+    if isinstance(value, str) and value:
+        return [value]
+    return []
+
+
+def scalar_map(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(k): str(v)
+        for k, v in value.items()
+        if k is not None and v is not None and str(k) and str(v)
+    }
 
 
 def strip_yaml_scalar(value: str) -> str:

@@ -92,7 +92,13 @@ func copyDirAll(src, dst string) error {
 		rel, _ := filepath.Rel(src, p)
 		target := filepath.Join(dst, rel)
 		if d.IsDir() {
+			if installShouldSkipGeneratedArtifact(d.Name()) {
+				return fs.SkipDir
+			}
 			return os.MkdirAll(target, 0o755)
+		}
+		if installShouldSkipGeneratedArtifact(d.Name()) {
+			return nil
 		}
 		if err := copyFileSimple(p, target); err != nil {
 			return err

@@ -3,111 +3,113 @@ name: frontend-repro-investigator
 description: 从前端复现证据开始排障。读取 HAR、console、RUM/Sentry 链接或用户复现步骤，提取失败请求、trace/request id、静态资源问题和后端候选接口，再交给 tracing/log/runtime skills 深挖。
 ---
 
-# Frontend Repro Investigator
+# 前端复现取证
 
-## When To Use
+## 使用场景
 
-Use this skill before backend-only investigation when the report starts from:
+当报告从前端现象开始时，先使用本 skill，再进入纯后端排查：
 
-- page blank screen, button no response, upload failed, rendering mismatch
-- browser-specific or device-specific behavior
-- console error, Sentry/RUM/ARMS link, HAR file
-- tester says "I reproduced it in the frontend"
+- 页面白屏、按钮无响应、上传失败、渲染不一致。
+- 浏览器或设备特定问题。
+- console error、Sentry/RUM/ARMS 链接、HAR 文件。
+- 测试人员说“我在前端复现了”。
 
-Do not start by querying backend trace only. First establish what the browser saw.
+不要一开始就查后端 trace。先确认浏览器实际看到了什么。
 
-## Required Inputs
+如果由 `bug-verifier` 调用，归一化证据和 `backend_handoff` 字段后就停止，不继续做根因分析或原因排序。
 
-Ask for the smallest missing item, one question at a time:
+## 必要输入
 
-- env
-- page URL or route
-- exact interaction
-- occurrence time and timezone
-- one artifact: HAR file, console text/screenshot, RUM/Sentry link, or trace/request id
+缺信息时一次只问一个最小阻塞项：
 
-## Evidence Priority
+- env。
+- 页面 URL 或 route。
+- 精确交互步骤。
+- 发生时间和时区。
+- 至少一个证据：HAR 文件、console 文本/截图、RUM/Sentry 链接、trace id 或 request id。
 
-Prefer structured evidence that can produce backend handoff fields:
+## 证据优先级
 
-1. Sentry/RUM event id with `trace_id`, request id, API URL, or JS stack.
-2. HAR or browser collector output with failed/slow requests, trace headers, static asset status, CSP headers, or mixed-content/TLS blocks.
-3. Console text/screenshot with API status, ChunkLoadError, CSP violation, mixed-content/TLS message, source-map reference, or JS stack.
-4. Manual reproduction steps only after asking for the smallest missing artifact above.
+优先使用能生成后端交接字段的结构化证据：
 
-Use `backend_handoff.trace_ids` first. If no trace id exists, use `backend_handoff.candidate_endpoints` with `routing/references/frontend-entry-map.yaml` route candidates to pick backend services before querying logs.
+1. Sentry / RUM event id，且包含 `trace_id`、request id、API URL 或 JS stack。
+2. HAR 或浏览器采集输出，包含失败/慢请求、trace header、静态资源状态、CSP header 或 mixed-content/TLS block。
+3. console 文本/截图，包含 API status、ChunkLoadError、CSP violation、mixed-content/TLS message、source-map reference 或 JS stack。
+4. 只有手工复现步骤时，先索要上面最小缺失证据。
 
-## Optional Browser Collection
+优先使用 `backend_handoff.trace_ids`。没有 trace id 时，用 `backend_handoff.candidate_endpoints` 结合 `routing/references/frontend-entry-map.yaml` 选择候选后端服务，再查日志。
 
-If the user can share a reproducible URL and the generated workspace has Node.js, first show the artifact plan without launching a browser:
+## 可选浏览器采集
+
+如果用户提供可复现 URL，且生成工作区有 Node.js，先展示采集计划，不立即启动浏览器：
 
 ```bash
 node skills/frontend-repro-investigator/scripts/browser_collect.mjs --url <page-url> --out /tmp/tshoot-artifacts --plan
 ```
 
-If browser automation is appropriate, run:
+确认适合做浏览器自动化后再运行：
 
 ```bash
 node skills/frontend-repro-investigator/scripts/browser_collect.mjs --url <page-url> --out /tmp/tshoot-artifacts
 ```
 
-The collector writes:
+采集器会写出：
 
 - `network.har`
 - `console.jsonl`
 - `screenshot.png`
 - `trace.zip`
 
-Playwright is optional and is not bundled by default. If it is missing, the script returns JSON with error code `3`, an `install_hint`, and the planned artifact paths. Do not treat missing Playwright as a blocker when the user already has HAR, console, RUM/Sentry, trace id, or request id evidence.
+Playwright 是可选依赖，默认不内置。缺失时脚本会返回 error code `3`、`install_hint` 和计划产物路径。用户已有 HAR、console、RUM/Sentry、trace id 或 request id 证据时，不要把缺少 Playwright 当成阻塞。
 
-## HAR Workflow
+## HAR 流程
 
-Run from workspace root:
+从 workspace root 运行：
 
 ```bash
 python3 skills/frontend-repro-investigator/scripts/har_analyzer.py --file <path-to.har>
 ```
 
-The script returns:
+脚本返回：
 
-- `failed_requests`: 4xx/5xx browser requests
-- `slow_requests`: API requests taking at least 1000 ms
-- `frontend_findings`: static asset/chunk failures, source-map misses, cache risk, CSP headers, CORS/auth redirects, mixed-content/TLS blocks, and GraphQL errors
-- `backend_handoff.trace_ids`: values from `x-trace-id`, `x-request-id`, `traceparent`, and similar headers
-- `backend_handoff.candidate_endpoints`: API paths to map into backend services
+- `failed_requests`：浏览器里的 4xx / 5xx 请求。
+- `slow_requests`：耗时至少 1000 ms 的 API 请求。
+- `frontend_findings`：静态资源/chunk 失败、source-map 缺失、缓存风险、CSP header、CORS/auth redirect、mixed-content/TLS block 和 GraphQL 错误。
+- `backend_handoff.trace_ids`：从 `x-trace-id`、`x-request-id`、`traceparent` 等 header 提取的值。
+- `backend_handoff.candidate_endpoints`：可映射到后端服务的 API path。
 
-## Console / RUM Workflow
+## Console / RUM 流程
 
-If the user provides console text or a RUM/Sentry link instead of HAR:
+如果用户提供 console 文本或 RUM/Sentry 链接，而不是 HAR：
 
-Run from workspace root:
+从 workspace root 运行：
 
 ```bash
 python3 skills/frontend-repro-investigator/scripts/console_analyzer.py --file <path-to-console-or-sentry.json>
 ```
 
-If the artifact is pasted text, save it to a local scratch file first or pipe stdin:
+如果证据是粘贴文本，先保存到本地临时文件，或通过 stdin 输入：
 
 ```bash
 pbpaste | python3 skills/frontend-repro-investigator/scripts/console_analyzer.py
 ```
 
-The script returns:
+脚本返回：
 
-- `frontend_findings`: console API failures, JS stack evidence, ChunkLoadError, CSP violation, mixed-content/TLS block, and source-map reference
-- `backend_handoff.trace_ids`: values from `x-request-id`, `request-id`, `x-trace-id`, `trace-id`, and Sentry-like `trace_id` fields
-- `backend_handoff.candidate_endpoints`: `/api/...` and `/graphql` paths extracted from URLs
-- `redacted_input_preview`: sanitized preview with tokens, passwords, secrets, authorization, cookies, bearer tokens, and sensitive query values removed
+- `frontend_findings`：console API 失败、JS stack 证据、ChunkLoadError、CSP violation、mixed-content/TLS block 和 source-map reference。
+- `backend_handoff.trace_ids`：从 `x-request-id`、`request-id`、`x-trace-id`、`trace-id` 和 Sentry-like `trace_id` 字段提取的值。
+- `backend_handoff.candidate_endpoints`：从 URL 中提取的 `/api/...` 和 `/graphql` path。
+- `redacted_input_preview`：已脱敏预览，隐藏 token、password、secret、authorization、cookie、bearer token 和敏感 query 值。
 
-Then:
+然后按下面规则处理：
 
-1. If it is `ChunkLoadError`, `Loading CSS chunk failed`, or a static asset 404, classify as frontend deploy/cache/CDN first.
-2. If analyzer output contains an API URL, HTTP status, request id, or trace id, continue to backend handoff using `backend_handoff`.
-3. If only a JS stack exists, use `routing/references/frontend-entry-map.yaml` to identify the frontend repo and inspect the referenced component/request wrapper.
+1. 如果是 `ChunkLoadError`、`Loading CSS chunk failed` 或静态资源 404，优先按前端发布/缓存/CDN 方向分类。
+2. 如果分析结果包含 API URL、HTTP status、request id 或 trace id，用 `backend_handoff` 继续交给后端取证。
+3. 如果只有 JS stack，用 `routing/references/frontend-entry-map.yaml` 识别前端仓库，再检查相关组件或 request wrapper。
 
-## Sentry Event Lookup
+## Sentry 事件查询
 
-If the user provides a Sentry event id and the workspace has Sentry access, fetch and normalize the event from workspace root:
+如果用户提供 Sentry event id，且工作区有 Sentry 权限，从 workspace root 拉取并归一化事件：
 
 ```bash
 SENTRY_AUTH_TOKEN=<token> python3 skills/frontend-repro-investigator/scripts/sentry_fetch.py \
@@ -117,25 +119,25 @@ SENTRY_AUTH_TOKEN=<token> python3 skills/frontend-repro-investigator/scripts/sen
   --event-id <event-id>
 ```
 
-You can also pass `--token <token>` instead of `SENTRY_AUTH_TOKEN`. The script calls:
+也可以用 `--token <token>` 替代 `SENTRY_AUTH_TOKEN`。脚本调用：
 
 ```text
 GET /api/0/projects/{org}/{project}/events/{event_id}/
 ```
 
-The script returns:
+脚本返回：
 
-- `summary`: event id, message, trace/endpoint/stack counts
-- `frontend_findings`: Sentry message, endpoint evidence, and JS stack summary
-- `backend_handoff.trace_ids`: recursive `trace_id`, `traceid`, `x-request-id`, `request-id`, `x-trace-id`, and `trace-id` values
-- `backend_handoff.candidate_endpoints`: only `/api`, `/api/...`, and `/graphql` paths
-- `redacted_event_preview`: sanitized event preview with sensitive query values and bearer tokens removed
+- `summary`：event id、message、trace / endpoint / stack 数量。
+- `frontend_findings`：Sentry message、endpoint 证据和 JS stack 摘要。
+- `backend_handoff.trace_ids`：递归提取的 `trace_id`、`traceid`、`x-request-id`、`request-id`、`x-trace-id` 和 `trace-id`。
+- `backend_handoff.candidate_endpoints`：仅保留 `/api`、`/api/...` 和 `/graphql` path。
+- `redacted_event_preview`：隐藏敏感 query 值和 bearer token 后的事件预览。
 
-Continue backend investigation with the normalized `backend_handoff`. Do not paste raw Sentry event JSON when the normalized output contains enough evidence.
+排障模式下才用归一化的 `backend_handoff` 继续后端排查。验证模式下，把归一化证据返回给 `bug-verifier`。归一化输出已经足够时，不要粘贴原始 Sentry event JSON。
 
-## Evidence Merge
+## 证据合并
 
-When you have more than one analyzer output, merge them before backend handoff:
+有多个分析结果时，先合并再交接后端：
 
 ```bash
 python3 skills/frontend-repro-investigator/scripts/evidence_merge.py \
@@ -145,21 +147,23 @@ python3 skills/frontend-repro-investigator/scripts/evidence_merge.py \
   /tmp/sentry-analysis.json
 ```
 
-The merge output keeps one `backend_handoff` with deduplicated trace ids, ranked candidate endpoints, candidate services from `frontend-entry-map.yaml`, endpoint source metadata, and combined frontend findings. Prefer merged `trace_ids` over individual analyzer output; if there is no trace id, use `candidate_services` first, then ranked `candidate_endpoints` with `routing/references/frontend-entry-map.yaml`.
+合并结果会保留一个 `backend_handoff`，包含去重后的 trace ids、排序后的 candidate endpoints、从 `frontend-entry-map.yaml` 得到的 candidate services、endpoint 来源元数据和合并后的 frontend findings。优先使用合并后的 `trace_ids`；没有 trace id 时，先用 `candidate_services`，再结合 `routing/references/frontend-entry-map.yaml` 使用排序后的 `candidate_endpoints`。
 
-## Backend Handoff
+## 后端交接
 
-After HAR/console/RUM analysis:
+HAR / console / RUM 分析后：
 
-1. Read `routing/references/frontend-entry-map.yaml`.
-2. Match `candidate_endpoints` to known API base URLs and candidate downstream services.
-3. If a trace/request id exists, call `tracing-query` and log query skills with the same time window.
-4. If no trace id exists, search logs by endpoint path, user id, session id, and occurrence time.
-5. If backend did not receive the request, keep the root-cause candidates on frontend/CDN/network/CORS/auth.
+1. 读取 `routing/references/frontend-entry-map.yaml`。
+2. 将 `candidate_endpoints` 匹配到已知 API base URLs 和候选下游服务。
+3. 如果有 trace/request id，用同一时间窗口调用 `tracing-query` 和日志查询 skill。
+4. 如果没有 trace id，用 endpoint path、user id、session id 和发生时间查日志。
+5. 如果后端没有收到请求，排障模式下才保留 frontend / CDN / network / CORS / auth 方向候选。
 
-## Output Contract
+验证模式下，本节只作为证据收集指南。返回 `backend_handoff` 和浏览器实际表现，不要声称后端、前端、CDN、鉴权或网络根因。
 
-Always return this structure:
+## 输出契约
+
+始终返回这个结构：
 
 ```yaml
 frontend_evidence:
@@ -180,8 +184,9 @@ next_skills:
   - "elk-log-query"
 ```
 
-## Hard Constraints
+## 硬约束
 
-- Only read local artifacts and observability data.
-- Redact tokens, cookies, passwords, authorization headers, and personal identifiers before quoting.
-- Never claim backend root cause until browser evidence is linked to backend trace/log/runtime evidence.
+- 只读取本地证据和观测数据。
+- 引用前必须脱敏 token、cookie、password、authorization header 和个人标识。
+- 浏览器证据没有关联到后端 trace / log / runtime 证据前，不能声称后端根因。
+- 验证 Agent 使用时，完全不能输出根因判断。

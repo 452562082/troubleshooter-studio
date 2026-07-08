@@ -123,6 +123,45 @@ class BrowserCollectTest(unittest.TestCase):
             self.assertEqual(payload["code"], 4)
             self.assertIn("fake import exploded", payload["error"])
 
+    def test_chromium_mach_port_permission_failure_is_classified(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            script = tmp_path / "browser_collect.mjs"
+            shutil.copy2(SCRIPT, script)
+            module_dir = tmp_path / "node_modules" / "playwright"
+            module_dir.mkdir(parents=True)
+            (module_dir / "package.json").write_text(
+                json.dumps({"name": "playwright", "main": "index.js"}),
+                encoding="utf-8",
+            )
+            (module_dir / "index.js").write_text(
+                """
+module.exports = {
+  chromium: {
+    async launch() {
+      throw new Error("browserType.launch: Target page, context or browser has been closed\\n[FATAL:base/apple/mach_port_rendezvous_mac.cc:159] bootstrap_check_in org.chromium.Chromium.MachPortRendezvousServer.123: Permission denied (1100)");
+    },
+  },
+};
+""",
+                encoding="utf-8",
+            )
+
+            res = self.run_script(
+                "--url",
+                "https://shop.example.com/orders/42",
+                "--out",
+                str(tmp_path / "artifacts"),
+                script=script,
+            )
+
+            self.assertEqual(res.returncode, 4, res.stderr + res.stdout)
+            payload = json.loads(res.stdout)
+            self.assertEqual(payload["mode"], "error")
+            self.assertEqual(payload["code"], 4)
+            self.assertEqual(payload["reason"], "browser_launch_permission_denied")
+            self.assertIn("macOS MachPort", payload["hint"])
+
     def test_collect_with_fake_playwright_writes_artifacts_and_closes(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

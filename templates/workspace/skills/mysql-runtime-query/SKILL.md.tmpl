@@ -3,7 +3,7 @@ name: mysql-runtime-query
 description: 通过环境动态查询 MySQL 数据。先通过 routing 获取环境映射，优先用预注册的 mysql-<env> mcp tool 直查（已绑好 host/port/auth/db）；mcp 不可用时 fallback mysql CLI / Python pymysql，执行只读 SELECT 查询。
 ---
 
-# MySQL Runtime Query
+# MySQL 运行时查询
 
 ## 执行流程（固定）
 

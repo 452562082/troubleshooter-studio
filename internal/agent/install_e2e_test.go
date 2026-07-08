@@ -161,6 +161,10 @@ func expectedMCPKeys() []string {
 	return out
 }
 
+func expectedAgentNames(cfg *config.SystemConfig) []string {
+	return []string{cfg.ResolveID(), cfg.System.ID + "-validator"}
+}
+
 // TestE2E_IDEInstallChain 把三家 IDE target 都跑一遍 init→gen→install→merge MCP→
 // discover→reinstall→uninstall→discover 的整链。
 func TestE2E_IDEInstallChain(t *testing.T) {
@@ -209,13 +213,19 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 				t.Fatalf("InstallNative: %v", err)
 			}
 			rootDir := filepath.Join(fakeHome, "."+rootName(target))
-			agentName := cfg.ResolveID() // shop-troubleshooter.yaml workspace_name=shop-bot
+			agentNames := expectedAgentNames(cfg)
 			// agent 人格文件 / skills / scripts / tshoot.json 锚点。
-			// claude-code / cursor → agents/<name>.md;codex → AGENTS.md(全机一份)
-			agentMDPath := agentMDLocationFor(rootDir, target, agentName)
-			mustExist(t, agentMDPath)
-			mustExist(t, filepath.Join(rootDir, "skills", agentName))
-			mustExist(t, filepath.Join(rootDir, "skills", agentName, discover.MetaFilename))
+			// claude-code / cursor → agents/<name>.md;codex → agents/<name>.toml
+			for _, name := range agentNames {
+				mustExist(t, agentMDLocationFor(rootDir, target, name))
+				mustExist(t, filepath.Join(rootDir, "skills", name))
+				metaPath := filepath.Join(rootDir, "skills", name, discover.MetaFilename)
+				if name == cfg.ResolveID() {
+					mustExist(t, metaPath)
+				} else if _, err := os.Stat(metaPath); !os.IsNotExist(err) {
+					t.Fatalf("internal validator agent should not expose discover meta: %s", metaPath)
+				}
+			}
 
 			// ── 3) MergeMCPIntoIDESettings:写 settings/mcp.json/codex toml ────
 			creds := fakeCreds()
@@ -264,8 +274,11 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 				assertFileMode(t, cursorPath, 0o600)
 			case "codex":
 				// codex MCP 嵌入 agent toml 内联 [mcp_servers.<key>] 段,不再走全局 config.toml。
-				assertCodexAgentTOMLHasMCPKeys(t, agentMDPath, expectedKeys)
-				assertFileMode(t, agentMDPath, 0o600)
+				for _, name := range agentNames {
+					path := agentMDLocationFor(rootDir, target, name)
+					assertCodexAgentTOMLHasMCPKeys(t, path, expectedKeys)
+					assertFileMode(t, path, 0o600)
+				}
 			}
 
 			// ── 4) discover.Scan:BotsPage 同款扫描应该能找到这个机器人 ─────────
@@ -275,10 +288,13 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 				t.Fatalf("discover.Scan: %v", err)
 			}
 			if len(agents) != 1 {
-				t.Fatalf("scan 应找到 1 个机器人,实际 %d", len(agents))
+				t.Fatalf("scan 应找到 1 个机器人(内部含排障+验证 agent),实际 %d", len(agents))
 			}
 			if agents[0].Meta.SystemID != cfg.System.ID || agents[0].Meta.Target != target {
 				t.Errorf("scan meta 不对:%+v", agents[0].Meta)
+			}
+			if len(agents[0].Meta.InternalAgents) != 2 {
+				t.Errorf("scan meta should include internal agents, got %+v", agents[0].Meta.InternalAgents)
 			}
 			installedDir := agents[0].Path
 
@@ -286,9 +302,12 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 			if err := agent.InstallNative(staging, target); err != nil {
 				t.Fatalf("reinstall: %v", err)
 			}
-			bakMatches, _ := filepath.Glob(agentMDPath + ".bak.*")
-			if len(bakMatches) == 0 {
-				t.Errorf("reinstall 应生成 .bak.<ts> 备份,实际为空")
+			for _, name := range agentNames {
+				path := agentMDLocationFor(rootDir, target, name)
+				bakMatches, _ := filepath.Glob(path + ".bak.*")
+				if len(bakMatches) == 0 {
+					t.Errorf("reinstall 应为 %s 生成 .bak.<ts> 备份,实际为空", path)
+				}
 			}
 
 			// claude-code 双清覆盖:模拟"用户手上还有更早期版本的 settings.json 残留没经
@@ -316,18 +335,21 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 			if err != nil {
 				t.Fatalf("UninstallNative: %v", err)
 			}
-			// agent 人格文件应该被删
-			if _, err := os.Stat(agentMDPath); !os.IsNotExist(err) {
-				t.Errorf("uninstall 后 agent 人格文件 %s 还在", agentMDPath)
-			}
-			// .bak 也应清干净
-			leftover, _ := filepath.Glob(agentMDPath + ".bak.*")
-			if len(leftover) != 0 {
-				t.Errorf("uninstall 应清掉 .bak 备份,残留 %v", leftover)
-			}
-			// skills/<name>/ 整目录被搬到 ~/.Trash(或 RemoveAll fallback);现位置应不存在
-			if _, err := os.Stat(installedDir); !os.IsNotExist(err) {
-				t.Errorf("uninstall 后 skills/%s/ 还在", agentName)
+			for _, name := range agentNames {
+				path := agentMDLocationFor(rootDir, target, name)
+				// agent 人格文件应该被删
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Errorf("uninstall 后 agent 人格文件 %s 还在", path)
+				}
+				// .bak 也应清干净
+				leftover, _ := filepath.Glob(path + ".bak.*")
+				if len(leftover) != 0 {
+					t.Errorf("uninstall 应清掉 .bak 备份,残留 %v", leftover)
+				}
+				// skills/<name>/ 整目录被搬到 ~/.Trash(或 RemoveAll fallback);现位置应不存在
+				if _, err := os.Stat(filepath.Join(rootDir, "skills", name)); !os.IsNotExist(err) {
+					t.Errorf("uninstall 后 skills/%s/ 还在", name)
+				}
 			}
 			// MCP 摘除清单:claude/cursor 才检查 res.MCPRemoved(它们走 settings.json 显式删 keys);
 			// codex 不再单独清 MCP —— 因为 MCP 内联在 agent toml 里,toml 文件被删 = MCP 跟着没。
@@ -344,7 +366,9 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 			case "cursor":
 				assertJSONNoMCPPrefix(t, filepath.Join(rootDir, "mcp.json"), cfg.System.ID+"-")
 			case "codex":
-				assertCodexAgentTOMLAbsent(t, agentMDPath)
+				for _, name := range agentNames {
+					assertCodexAgentTOMLAbsent(t, agentMDLocationFor(rootDir, target, name))
+				}
 			}
 
 			// ── 7) 再 scan:应零结果 ───────────────────────────────────────────

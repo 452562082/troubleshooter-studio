@@ -110,6 +110,21 @@ def test_namespace_for_downstream_uses_override_or_default():
     assert namespace_for_downstream(entry, "order", "base-prod") == "base-prod"
 
 
+def test_pyyaml_path_handles_comments_after_block_items():
+    """PyYAML 可用时,block item 行尾注释不能污染服务名或数据层名。"""
+    r = parse_dep_map("""services:
+  commerce:
+    upstream: []
+    downstream:
+      - "user"  # identity service
+    data_stores:
+      - "mysql:order_db"  # primary
+    critical: false
+""")
+    assert r["commerce"]["downstream"] == ["user"]
+    assert r["commerce"]["data_stores"] == ["mysql:order_db"]
+
+
 # ── summarize:unknown 下游不得被当成 healthy(2026-06 正确性回归) ──────────────
 # 背景:check_one_service 对查不到的下游返 verdict='unknown'(脚本缺失 / kuboard 不通 /
 # 超时 / cluster 名错 / ns-snapshot no_pods_matched)。旧版只数 healthy/degraded,unknown 被吞,

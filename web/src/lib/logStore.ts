@@ -160,14 +160,23 @@ export function useLogStore() {
  *  install:log / analyze:log 是 Go 侧每行 stdout 发一次的,这里复制一份进日志库;
  *  原页面的 EventsOn 继续存在(它们还要做本地 UI 滚动 / 状态切换)。 */
 export function setupGlobalLogBridges(): void {
-  if (bridgesInstalled) return
-  bridgesInstalled = true
-  EventsOn('install:log', (line: string) => {
-    pushLog('install', detectLevel(line), line)
+	if (bridgesInstalled) return
+	// Vite/browser preview 没有 Wails 注入的 window.runtime。wailsjs/runtime 里的
+	// EventsOn 会直接访问 window.runtime.EventsOnMultiple,不 guard 会导致整页白屏。
+	if (!hasWailsEventRuntime()) return
+	bridgesInstalled = true
+	EventsOn('install:log', (line: string) => {
+		pushLog('install', detectLevel(line), line)
   })
   EventsOn('analyze:log', (line: string) => {
     pushLog('analyze', detectLevel(line), line)
-  })
+	})
+}
+
+function hasWailsEventRuntime(): boolean {
+	if (typeof window === 'undefined') return false
+	const rt = (window as any).runtime
+	return !!rt && typeof rt.EventsOnMultiple === 'function'
 }
 
 // 根据行文本简单判别等级(Go 侧日志格式不统一,UI 层尽力猜;猜不到算 info)

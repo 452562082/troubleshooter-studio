@@ -3,7 +3,7 @@ name: redis-runtime-query
 description: 通过环境动态查询 Redis 数据。先通过 routing 获取环境映射，优先用预注册的 redis-<env> mcp tool 直查（已绑好 URL，免手动连接串）；mcp 不可用时 fallback redis-cli / Python redis-py，执行只读 GET / TTL / SCAN 等。
 ---
 
-# Redis Runtime Query
+# Redis 运行时查询
 
 ## 执行流程（固定）
 

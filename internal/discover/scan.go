@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -147,6 +148,7 @@ func readAgent(metaPath string) (DiscoveredAgent, error) {
 	if err := json.Unmarshal(data, &meta); err != nil {
 		return DiscoveredAgent{}, err
 	}
+	NormalizeMetaForPath(&meta, metaPath)
 	if meta.SystemID == "" || meta.Target == "" {
 		return DiscoveredAgent{}, os.ErrInvalid // 无效元数据（不是 tshoot 生成的）
 	}
@@ -172,6 +174,124 @@ func readAgent(metaPath string) (DiscoveredAgent, error) {
 	return a, nil
 }
 
+func normalizeMeta(meta *Meta) {
+	if meta == nil {
+		return
+	}
+	if strings.TrimSpace(meta.Role) == "" {
+		meta.Role = RoleTroubleshooter
+	}
+	if strings.TrimSpace(meta.AgentID) == "" && strings.TrimSpace(meta.SystemID) != "" {
+		meta.AgentID = meta.SystemID + "-" + meta.Role
+	}
+	if len(meta.InternalAgents) == 0 && strings.TrimSpace(meta.AgentID) != "" {
+		meta.InternalAgents = []InternalAgent{{ID: meta.AgentID, Role: meta.Role}}
+	}
+}
+
+// NormalizeMetaForPath applies schema defaults and, for IDE installs, backfills
+// internal_agents from sibling agents/skills directories. This keeps old
+// tshoot.json anchors usable after the single-bot/multi-agent layout change.
+func NormalizeMetaForPath(meta *Meta, metaPath string) {
+	normalizeMeta(meta)
+	inferInternalAgentsFromIDELayout(meta, metaPath)
+}
+
+func inferInternalAgentsFromIDELayout(meta *Meta, metaPath string) {
+	if meta == nil || len(meta.InternalAgents) > 1 {
+		return
+	}
+	ext := ""
+	switch meta.Target {
+	case "claude-code", "cursor":
+		ext = ".md"
+	case "codex":
+		ext = ".toml"
+	default:
+		return
+	}
+	botRoot := filepath.Dir(metaPath)
+	skillsRoot := filepath.Dir(botRoot)
+	if filepath.Base(skillsRoot) != "skills" {
+		return
+	}
+	platformRoot := filepath.Dir(skillsRoot)
+	ids := map[string]string{}
+	add := func(id, role string) {
+		id = strings.TrimSpace(id)
+		if id == "" || !belongsToMetaAgent(meta, id) {
+			return
+		}
+		if role = strings.TrimSpace(role); role == "" {
+			role = inferRoleFromAgentID(meta, id)
+		}
+		if _, ok := ids[id]; !ok {
+			ids[id] = role
+		}
+	}
+	add(meta.AgentID, meta.Role)
+	for _, ag := range meta.InternalAgents {
+		add(ag.ID, ag.Role)
+	}
+	if entries, err := os.ReadDir(filepath.Join(platformRoot, "agents")); err == nil {
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || strings.Contains(name, ".bak.") || !strings.HasSuffix(name, ext) {
+				continue
+			}
+			add(strings.TrimSuffix(name, ext), "")
+		}
+	}
+	if entries, err := os.ReadDir(skillsRoot); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				add(e.Name(), "")
+			}
+		}
+	}
+	if len(ids) <= 1 {
+		return
+	}
+	out := make([]InternalAgent, 0, len(ids))
+	addOut := func(id string) {
+		if role, ok := ids[id]; ok {
+			out = append(out, InternalAgent{ID: id, Role: role})
+			delete(ids, id)
+		}
+	}
+	addOut(meta.AgentID)
+	addOut(meta.SystemID + "-" + RoleTroubleshooter)
+	addOut(meta.SystemID + "-" + RoleValidator)
+	rest := make([]string, 0, len(ids))
+	for id := range ids {
+		rest = append(rest, id)
+	}
+	sort.Strings(rest)
+	for _, id := range rest {
+		addOut(id)
+	}
+	meta.InternalAgents = out
+}
+
+func belongsToMetaAgent(meta *Meta, id string) bool {
+	if id == strings.TrimSpace(meta.AgentID) {
+		return true
+	}
+	systemID := strings.TrimSpace(meta.SystemID)
+	return systemID != "" && strings.HasPrefix(id, systemID+"-")
+}
+
+func inferRoleFromAgentID(meta *Meta, id string) string {
+	if id == strings.TrimSpace(meta.AgentID) && strings.TrimSpace(meta.Role) != "" {
+		return meta.Role
+	}
+	lower := strings.ToLower(id)
+	if strings.Contains(lower, "valid") || strings.Contains(lower, "verif") {
+		return RoleValidator
+	}
+	return RoleTroubleshooter
+}
+
 type yamlProbe struct {
 	Environments []struct{ ID string }   `yaml:"environments"`
 	Repos        []struct{ Name string } `yaml:"repos"`
@@ -187,6 +307,12 @@ func derive(a *DiscoveredAgent, yamlSrc string) {
 		return
 	}
 	a.EnvCount = len(p.Environments)
+	a.Environments = make([]string, 0, len(p.Environments))
+	for _, env := range p.Environments {
+		if env.ID != "" {
+			a.Environments = append(a.Environments, env.ID)
+		}
+	}
 	a.RepoCount = len(p.Repos)
 	a.SkillCount = len(p.Generation.SkillsWhitelist)
 	a.Targets = p.Generation.Targets

@@ -3,7 +3,7 @@ name: doris-runtime-query
 description: 通过环境动态查询 Apache Doris 数仓数据。先通过 routing 获取环境映射，优先用预注册的 doris-<env> mcp tool 直查（已绑好 FE host/port/auth/db）；mcp 不可用时 fallback mysql CLI / Python pymysql，执行只读 SELECT 查询。
 ---
 
-# Doris Runtime Query
+# Doris 运行时查询
 
 ## 执行流程（固定）
 

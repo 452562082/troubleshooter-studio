@@ -1,0 +1,106 @@
+package bughub
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func TestStoreUpsertAndList(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	created := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	updated := created.Add(time.Hour)
+
+	first := Bug{
+		ID:        "zentao-1842",
+		Source:    "zentao",
+		SourceID:  "1842",
+		Title:     "支付页提交后 500",
+		Status:    "active",
+		Severity:  "P1",
+		Env:       "prod",
+		CreatedAt: created,
+		UpdatedAt: created,
+	}
+	if err := store.Upsert(first); err != nil {
+		t.Fatalf("upsert first: %v", err)
+	}
+
+	first.Title = "支付页提交后 500,用户无法完成付款"
+	first.CreatedAt = time.Time{}
+	first.UpdatedAt = updated
+	if err := store.Upsert(first); err != nil {
+		t.Fatalf("upsert updated: %v", err)
+	}
+
+	got, err := store.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	if got[0].Title != first.Title {
+		t.Fatalf("title = %q, want %q", got[0].Title, first.Title)
+	}
+	if got[0].UpdatedAt.IsZero() {
+		t.Fatal("updated_at was not preserved")
+	}
+	if !got[0].CreatedAt.Equal(created) {
+		t.Fatalf("created_at = %s, want %s", got[0].CreatedAt, created)
+	}
+}
+
+func TestStoreRejectsEmptyID(t *testing.T) {
+	store := NewStore(t.TempDir())
+	if err := store.Upsert(Bug{Title: "missing id"}); err == nil {
+		t.Fatal("Upsert accepted empty ID")
+	}
+}
+
+func TestStoreListNormalizesLegacyZentaoHTMLSteps(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data := `[{
+  "id": "zentao-577",
+  "source": "zentao",
+  "source_id": "577",
+  "title": "PC端搜索结果页",
+  "steps": "\u003cp\u003e[步骤]\u003c/p\u003e\u003col\u003e\u003cli\u003ePC端进入搜索页。\u003c/li\u003e\u003c/ol\u003e"
+}]`
+	if err := os.WriteFile(store.Path(), []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items = %+v", items)
+	}
+	if items[0].Steps != "[步骤]\n- PC端进入搜索页。" {
+		t.Fatalf("steps = %q", items[0].Steps)
+	}
+
+	got, ok, err := store.Get("zentao-577")
+	if err != nil || !ok {
+		t.Fatalf("Get ok=%v err=%v", ok, err)
+	}
+	if got.Steps != items[0].Steps {
+		t.Fatalf("get steps = %q", got.Steps)
+	}
+}
+
+func TestStorePathIsUnderRoot(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	if got := store.Path(); got != filepath.Join(root, "bugs.json") {
+		t.Fatalf("Path = %q", got)
+	}
+}

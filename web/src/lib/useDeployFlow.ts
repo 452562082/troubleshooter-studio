@@ -413,10 +413,15 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
             const warnCount = (st.checks || []).filter(c => c.status === 'WARN').length
             const passCount = (st.checks || []).filter(c => c.status === 'PASS').length
             if (failCount > 0) {
-              const fails = (st.checks || []).filter(c => c.status === 'FAIL')
-                .map(c => `${c.name}: ${c.detail?.slice(0, 60) || ''}`).join('; ')
-              pushLog('install', 'error', `[self-test] ${failCount} 项失败: ${fails}`)
-              toast.error(`🩺 自检 ${passCount}✓ ${warnCount}⚠ ${failCount}✗ → ${fails}`)
+              const failedChecks = (st.checks || []).filter(c => c.status === 'FAIL')
+              const failDetails = failedChecks
+                .map(c => `${c.name}: ${c.detail || ''}`).join('; ')
+              const fails = failedChecks
+                .slice(0, 3)
+                .map(c => `${c.name}: ${c.detail?.slice(0, 80) || ''}`).join('; ')
+              const more = failCount > 3 ? `; 另 ${failCount - 3} 项见部署日志` : ''
+              pushLog('install', 'error', `[self-test] ${failCount} 项失败: ${failDetails}`)
+              toast.error(`🩺 自检 ${passCount}✓ ${warnCount}⚠ ${failCount}✗ → ${fails}${more}`)
             } else if (warnCount > 0) {
               toast.info(`🩺 自检 ${passCount}✓ ${warnCount}⚠ 0✗(警告项不阻塞,见日志详情)`)
             } else {

@@ -301,6 +301,9 @@ func zentaoImageFilesFromHTML(input string) zentaoFiles {
 			if src == "" {
 				continue
 			}
+			if strings.HasPrefix(src, "{") {
+				continue
+			}
 			id, ext := zentaoFileIDAndExtFromURL(src)
 			title := firstNonEmpty(zentaoImageNameFromAlt(alt), zentaoImageNameFromURL(src), "评论图片 "+id)
 			out = append(out, zentaoFile{

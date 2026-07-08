@@ -225,7 +225,7 @@ func NormalizeZentaoBug(raw ZentaoBug) Bug {
 		Env:          env,
 		FrontendRepo: frontend,
 		ServiceHints: hints,
-		Attachments:  normalizeZentaoAttachments(raw.Files, raw.Attachments, zentaoActionCommentFiles(raw.Actions)),
+		Attachments:  normalizeZentaoAttachments(raw.Files, raw.Attachments, zentaoActionCommentFiles(raw.Actions), zentaoImageFilesFromHTML(raw.Steps.String())),
 		CreatedAt:    parseZentaoTime(raw.OpenedDate.String()),
 		UpdatedAt:    firstTime(parseZentaoTime(raw.EditedDate.String()), parseZentaoTime(raw.ResolvedDate.String()), time.Now().UTC()),
 		RawPreview:   raw.Title.String(),

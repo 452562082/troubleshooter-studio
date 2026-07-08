@@ -282,7 +282,8 @@ func TestBuildCodexInvestigationPromptIncludesBugAndBot(t *testing.T) {
 		"zentao:577",
 		"target: codex",
 		"不要修改代码",
-		"不适用的日志/指标/链路维度不要用 ✗ 标记",
+		"Read `incident-investigator/SKILL.md`",
+		"7 步排障图谱",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
@@ -447,7 +448,7 @@ func TestBuildCodexValidationPromptKeepsValidatorEvidenceOnly(t *testing.T) {
 	for _, want := range []string{
 		"只复现场景和收集证据",
 		"不要读取业务源码定位函数/行号",
-		"不要输出“代码根因/最可能原因/修复建议/候选原因”",
+		"不要输出\"代码根因/最可能原因/修复建议/候选原因\"",
 		"如需代码分析，交给后续排障 Agent",
 		"verification_status",
 	} {

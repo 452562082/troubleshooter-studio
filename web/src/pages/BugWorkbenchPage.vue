@@ -154,11 +154,15 @@ const investigationEventLines = computed(() => {
 const validationEventLines = computed(() => {
   const run = selectedRun.value
   if (!run) return []
+  const finalText = validationFinalText.value.trim()
   return (run.events || [])
     .filter(e => eventPhase(e) === 'validation')
     .filter(e => !isFinalInvestigationEvent(e))
     .map(e => e.message)
-    .filter(message => Boolean((message || '').trim()))
+    .filter(message => {
+      const text = (message || '').trim()
+      return Boolean(text) && (!finalText || (text !== finalText && !isLikelyValidationStructuredResult(text)))
+    })
 })
 const fixEventLines = computed(() => {
   const run = selectedRun.value
@@ -179,6 +183,16 @@ const investigationFinalText = computed(() => {
   if (currentRunPhase(run) === 'fix') return ''
   return run.final_message || run.error || fallbackInvestigationFinalMessage(run)
 })
+const validationFinalText = computed(() => {
+  const run = selectedRun.value
+  if (!run) return ''
+  if (currentRunPhase(run) === 'validation' && (run.final_message || run.error)) {
+    return run.final_message || run.error || ''
+  }
+  const events = [...(run.events || [])].reverse()
+  const reportEvent = events.find(e => eventPhase(e) === 'validation' && isLikelyValidationStructuredResult(e.message || ''))
+  return reportEvent?.message ? formatValidationReportForDisplay(reportEvent.message) : ''
+})
 const fixFinalText = computed(() => {
   const run = selectedRun.value
   if (!run || currentRunPhase(run) !== 'fix') return ''
@@ -197,8 +211,14 @@ const fixOutput = computed(() => {
   if (fixFinalText.value.trim()) parts.push(fixFinalText.value.trim())
   return parts.join('\n\n')
 })
+const validationOutput = computed(() => {
+  const parts = []
+  if (validationEventLines.value.length > 0) parts.push(validationEventLines.value.join('\n'))
+  if (validationFinalText.value.trim()) parts.push(validationFinalText.value.trim())
+  return parts.join('\n\n')
+})
 const activeOutputText = computed(() => outputTab.value === 'validation'
-  ? validationEventLines.value.join('\n\n')
+  ? validationOutput.value
   : outputTab.value === 'fix'
     ? fixOutput.value
     : investigationOutput.value
@@ -214,7 +234,7 @@ const copyableInvestigationText = computed(() => {
 const copyInvestigationLabel = computed(() => fixFinalText.value.trim() || investigationFinalText.value.trim() ? '复制结果' : '复制上下文')
 const canCancelInvestigation = computed(() => selectedRun.value?.status === 'running')
 const renderedInvestigationMarkdown = computed(() => safeMarkdown(investigationFinalText.value || contextText.value))
-const renderedValidationMarkdown = computed(() => safeMarkdown(validationEventLines.value.join('\n\n')))
+const renderedValidationMarkdown = computed(() => safeMarkdown(validationFinalText.value))
 const renderedFixMarkdown = computed(() => safeMarkdown(fixFinalText.value))
 const hasFixOutput = computed(() => fixEventLines.value.length > 0 || Boolean(fixFinalText.value.trim()) || currentRunPhase(selectedRun.value || ({} as InvestigationRun)) === 'fix')
 const canStartFix = computed(() => {
@@ -768,13 +788,15 @@ function followRunPhase(run: InvestigationRun, event?: InvestigationEvent) {
 }
 
 function currentRunPhase(run: InvestigationRun): 'validation' | 'investigation' | 'fix' {
+  if ((run.prompt_preview || '').includes('修复 Agent')) return 'fix'
+  if ((run.status === 'failed' || run.status === 'cancelled') && (run.error || run.final_message)) return 'investigation'
   const events = run.events || []
   for (let i = events.length - 1; i >= 0; i--) {
     const phase = eventPhase(events[i])
     if (phase === 'validation' || phase === 'investigation' || phase === 'fix') return phase
   }
-  if ((run.prompt_preview || '').includes('修复 Agent')) return 'fix'
-  if (run.status === 'running') return 'validation'
+  if ((run.prompt_preview || '').includes('验证 Agent')) return 'validation'
+  if (run.status === 'running') return 'investigation'
   return (run.final_message || run.error || fallbackInvestigationFinalMessage(run)).trim() ? 'investigation' : 'validation'
 }
 
@@ -1009,6 +1031,105 @@ function isLikelyInvestigationReport(message: string): boolean {
   if (/^#{1,6}\s+/.test(text) && /(故障快报|现象复述|已验证事实|根因|结论|建议)/.test(text)) return true
   if (/\*\*(结论|根因|现象|时间)\*\*/.test(text) && text.length > 120) return true
   return false
+}
+
+function isLikelyValidationStructuredResult(message: string): boolean {
+  const text = message.trim()
+  return Boolean(text) && (/^verification_status\s*:/mi.test(text) || /^#{1,6}\s*验证报告\s*\|/m.test(text))
+}
+
+function formatValidationReportForDisplay(message: string): string {
+  const raw = message.trim().split('\\n').join('\n')
+  if (!raw) return ''
+  if (/^#{1,6}\s*验证报告\s*\|/m.test(raw)) return raw
+  const status = yamlScalar(raw, 'verification_status')
+  const env = yamlScalar(raw, 'environment') || '-'
+  const observed = yamlScalar(raw, 'observed_behavior') || '-'
+  const expected = yamlScalar(raw, 'expected_behavior') || '-'
+  const evidence = yamlNestedScalar(raw, 'handoff_to_troubleshooter', 'evidence_summary') || '-'
+  const gaps = yamlBlockSummary(raw, 'gaps') || '[]'
+  return [
+    `### 验证报告 | ${env} | ${validationStatusLabel(status)}`,
+    '',
+    `- 结论: ${validationConclusion(status)}`,
+    `- 实际现象: ${observed}`,
+    `- 期望表现: ${expected}`,
+    `- 关键证据: ${evidence}`,
+    `- 需补信息: ${gaps}`,
+    '',
+    '#### 原始结构化结果',
+    '',
+    '```yaml',
+    raw,
+    '```',
+  ].join('\n')
+}
+
+function validationStatusLabel(status: string): string {
+  switch (status) {
+    case 'reproduced': return '已复现'
+    case 'not_reproduced': return '未复现'
+    case 'insufficient_info': return '信息不足'
+    case 'fixed_verified': return '修复已验证'
+    case 'still_reproduces': return '修复后仍复现'
+    default: return '结论不完整'
+  }
+}
+
+function validationConclusion(status: string): string {
+  switch (status) {
+    case 'reproduced': return '已复现原始 Bug，可以进入排障 Agent。'
+    case 'not_reproduced': return '未复现原始 Bug，已暂停进入排障 Agent。'
+    case 'insufficient_info': return '验证所需信息不足，用户补充后应继续验证。'
+    case 'fixed_verified': return '修复验证通过，已暂停进入排障 Agent。'
+    case 'still_reproduces': return '修复后仍可复现，需要进入排障 Agent。'
+    default: return '验证 Agent 未输出可进入排障的完整结构化结论。'
+  }
+}
+
+function yamlScalar(text: string, key: string): string {
+  const pattern = new RegExp(`^\\s*${escapeRegExp(key)}\\s*:\\s*(.*)$`, 'mi')
+  const match = text.match(pattern)
+  return stripYamlQuotes(match?.[1] || '')
+}
+
+function yamlNestedScalar(text: string, parent: string, key: string): string {
+  return yamlScalar(yamlRawBlock(text, parent), key)
+}
+
+function yamlBlockSummary(text: string, key: string): string {
+  const direct = yamlScalar(text, key)
+  if (direct) return direct
+  const block = yamlRawBlock(text, key).replace(/\s+/g, ' ').trim()
+  if (!block) return ''
+  return block.length > 420 ? `${block.slice(0, 420)}...` : block
+}
+
+function yamlRawBlock(text: string, key: string): string {
+  const lines = text.split('\\n').join('\n').split('\n')
+  const keyPattern = new RegExp(`^\\s*${escapeRegExp(key)}\\s*:\\s*(.*)$`, 'i')
+  for (let i = 0; i < lines.length; i += 1) {
+    const match = lines[i].match(keyPattern)
+    if (!match) continue
+    const direct = stripYamlQuotes(match[1] || '')
+    if (direct) return direct
+    const block: string[] = []
+    for (const next of lines.slice(i + 1)) {
+      if (!next.trim()) continue
+      if (/^[A-Za-z_][A-Za-z0-9_-]*\s*:/.test(next)) break
+      block.push(next.trim())
+    }
+    return block.join('\n')
+  }
+  return ''
+}
+
+function stripYamlQuotes(value: string): string {
+  return value.trim().replace(/^["'`]+|["'`]+$/g, '')
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 </script>
 
@@ -1383,8 +1504,11 @@ function isLikelyInvestigationReport(message: string): boolean {
       <div ref="outputScrollRef" class="context-preview" role="log" aria-live="polite">
         <template v-if="selectedRun">
           <template v-if="outputTab === 'validation'">
-            <article v-if="validationEventLines.length" class="markdown-result validation-result" v-html="renderedValidationMarkdown"></article>
-            <div v-else class="preview-placeholder">验证 Agent 完成后在这里显示取证过程和证据</div>
+            <div v-if="validationEventLines.length" class="process-log">
+              <div v-for="(line, idx) in validationEventLines" :key="idx" class="process-line">{{ line }}</div>
+            </div>
+            <article v-if="validationFinalText" class="markdown-result validation-result" v-html="renderedValidationMarkdown"></article>
+            <div v-if="!validationEventLines.length && !validationFinalText" class="preview-placeholder">验证 Agent 完成后在这里显示取证过程和证据</div>
           </template>
           <template v-else>
             <template v-if="outputTab === 'fix'">

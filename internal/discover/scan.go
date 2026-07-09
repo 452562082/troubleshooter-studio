@@ -41,6 +41,12 @@ func Scan(roots []string) ([]DiscoveredAgent, error) {
 		for _, a := range agents {
 			key := a.Meta.SystemID + "|" + a.Meta.Target
 			if seen[key] {
+				for i := range out {
+					if out[i].Meta.SystemID+"|"+out[i].Meta.Target == key && preferDiscoveredAgent(a, out[i]) {
+						out[i] = a
+						break
+					}
+				}
 				continue
 			}
 			seen[key] = true
@@ -55,6 +61,22 @@ func Scan(roots []string) ([]DiscoveredAgent, error) {
 		return out[i].Meta.Target < out[j].Meta.Target
 	})
 	return out, nil
+}
+
+func preferDiscoveredAgent(candidate, current DiscoveredAgent) bool {
+	candidateBase := filepath.Base(candidate.Path)
+	currentBase := filepath.Base(current.Path)
+	candidateMatchesAgent := candidateBase == strings.TrimSpace(candidate.Meta.AgentID)
+	currentMatchesAgent := currentBase == strings.TrimSpace(current.Meta.AgentID)
+	if candidateMatchesAgent != currentMatchesAgent {
+		return candidateMatchesAgent
+	}
+	candidatePrimary := strings.EqualFold(strings.TrimSpace(candidate.Meta.Role), RoleTroubleshooter)
+	currentPrimary := strings.EqualFold(strings.TrimSpace(current.Meta.Role), RoleTroubleshooter)
+	if candidatePrimary != currentPrimary {
+		return candidatePrimary
+	}
+	return candidate.Path < current.Path
 }
 
 // WorkDirFor 返回 Apply / 重 gen / 卸载 实际写入产物的"工作目录"。跟 ag.Path("UI 显示用的

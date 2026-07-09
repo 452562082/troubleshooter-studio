@@ -62,7 +62,7 @@ func InstallNative(stagingDir, target string) error {
 
 	primaryAgentName := primaryAgentNameFromStagingMeta(stagingDir)
 	if primaryAgentName == "" {
-		primaryAgentName = agentFiles[0].Name
+		primaryAgentName = primaryAgentNameFromFiles(stagingDir, agentFiles)
 	}
 	for _, ag := range agentFiles {
 		if err := installOneNativeAgent(stagingDir, root, t, ag, primaryAgentName); err != nil {
@@ -172,22 +172,84 @@ func stagingAgentRole(stagingDir, agentName string) generator.AgentRole {
 
 func primaryAgentNameFromStagingMeta(stagingDir string) string {
 	data, err := os.ReadFile(filepath.Join(stagingDir, discover.MetaFilename))
+	if err == nil {
+		var meta discover.Meta
+		if json.Unmarshal(data, &meta) == nil {
+			if strings.TrimSpace(meta.AgentID) != "" {
+				return strings.TrimSpace(meta.AgentID)
+			}
+			for _, ag := range meta.InternalAgents {
+				if strings.EqualFold(strings.TrimSpace(ag.Role), discover.RoleTroubleshooter) {
+					return strings.TrimSpace(ag.ID)
+				}
+			}
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(stagingDir, "agents-meta"))
 	if err != nil {
 		return ""
 	}
-	var meta discover.Meta
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return ""
-	}
-	if strings.TrimSpace(meta.AgentID) != "" {
-		return strings.TrimSpace(meta.AgentID)
-	}
-	for _, ag := range meta.InternalAgents {
-		if strings.EqualFold(strings.TrimSpace(ag.Role), discover.RoleTroubleshooter) {
-			return strings.TrimSpace(ag.ID)
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		metaPath := filepath.Join(stagingDir, "agents-meta", e.Name(), discover.MetaFilename)
+		data, err := os.ReadFile(metaPath)
+		if err != nil {
+			continue
+		}
+		var meta discover.Meta
+		if json.Unmarshal(data, &meta) != nil {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(meta.Role), discover.RoleTroubleshooter) {
+			if strings.TrimSpace(meta.AgentID) != "" {
+				return strings.TrimSpace(meta.AgentID)
+			}
+			return e.Name()
 		}
 	}
 	return ""
+}
+
+func primaryAgentNameFromFiles(stagingDir string, agentFiles []stagingAgentFile) string {
+	for _, ag := range agentFiles {
+		role, ok := explicitStagingAgentRole(stagingDir, ag.Name)
+		if ok && role == generator.AgentRoleTroubleshooter {
+			return ag.Name
+		}
+	}
+	for _, ag := range agentFiles {
+		if strings.Contains(strings.ToLower(ag.Name), "troubleshooter") {
+			return ag.Name
+		}
+	}
+	if len(agentFiles) > 0 {
+		return agentFiles[0].Name
+	}
+	return ""
+}
+
+func explicitStagingAgentRole(stagingDir, agentName string) (generator.AgentRole, bool) {
+	metaPath := filepath.Join(stagingDir, "agents-meta", agentName, discover.MetaFilename)
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		return "", false
+	}
+	var meta discover.Meta
+	if json.Unmarshal(data, &meta) != nil {
+		return "", false
+	}
+	switch {
+	case strings.EqualFold(strings.TrimSpace(meta.Role), discover.RoleFixer):
+		return generator.AgentRoleFixer, true
+	case strings.EqualFold(strings.TrimSpace(meta.Role), discover.RoleValidator):
+		return generator.AgentRoleValidator, true
+	case strings.EqualFold(strings.TrimSpace(meta.Role), discover.RoleTroubleshooter):
+		return generator.AgentRoleTroubleshooter, true
+	default:
+		return "", false
+	}
 }
 
 // findStagingAgentFile 找 staging/agents/<NAME>.<ext> —— 取第一个匹配后缀的非 .bak 文件,

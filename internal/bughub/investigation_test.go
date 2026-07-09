@@ -513,7 +513,10 @@ func TestCodexInvestigatorPausesWhenValidationNeedsUserInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Wait: %v", err)
 	}
-	if waited.Status != InvestigationSucceeded || strings.TrimSpace(waited.FinalMessage) != "" {
+	if waited.Status != InvestigationSucceeded ||
+		!strings.Contains(waited.FinalMessage, "### 验证报告") ||
+		!strings.Contains(waited.FinalMessage, "信息不足") ||
+		!strings.Contains(waited.FinalMessage, "未提供后台账号") {
 		t.Fatalf("waited = %+v", waited)
 	}
 	data, err := os.ReadFile(promptsPath)
@@ -646,6 +649,70 @@ gaps:
 				t.Fatalf("validationReportReadyForInvestigation() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestFormatValidationFinalReportSummarizesStructuredResult(t *testing.T) {
+	report := `verification_status: not_reproduced
+environment: test
+entry:
+  frontend_url: https://example.test/admin
+  api_url: /admin/items
+observed_behavior: 当前接口返回计数正确
+expected_behavior: 历史截图中计数为 0
+handoff_to_troubleshooter:
+  evidence_summary: GET /admin/items 返回 total=2
+  unchecked_scopes:
+  - 未采集实时 console
+gaps: []`
+
+	formatted := formatValidationFinalReport(report)
+	for _, want := range []string{
+		"### 验证报告 | test | 未复现",
+		"未复现原始 Bug",
+		"frontend=https://example.test/admin; api=/admin/items",
+		"GET /admin/items 返回 total=2",
+		"```yaml",
+		"verification_status: not_reproduced",
+	} {
+		if !strings.Contains(formatted, want) {
+			t.Fatalf("formatted report missing %q:\n%s", want, formatted)
+		}
+	}
+}
+
+func TestFormatFixFinalReportSummarizesStructuredResult(t *testing.T) {
+	report := `fix_status: fixed_pushed
+environment: "test"
+branches:
+  - repo: "admin"
+    base_branch: "test"
+    fix_branch: "fix/bug-909"
+    commit: "abc123"
+    pushed: true
+changes:
+  - "counter.ts: 按内容类型拆分计数"
+tests:
+  - command: "npm test"
+    result: passed
+    note: "unit passed"
+deployment_notice: "请部署 admin/fix/bug-909 到 test 后再触发验证 Agent 回归。"
+risks: []
+blocked_reason: ""`
+
+	formatted := formatFixFinalReport(report)
+	for _, want := range []string{
+		"### 修复报告 | test | 已提交推送",
+		"修复分支已生成",
+		"fix/bug-909",
+		"counter.ts",
+		"npm test",
+		"请部署 admin/fix/bug-909 到 test",
+		"```yaml",
+	} {
+		if !strings.Contains(formatted, want) {
+			t.Fatalf("formatted report missing %q:\n%s", want, formatted)
+		}
 	}
 }
 
@@ -855,7 +922,10 @@ func TestCodexInvestigatorKeepsValidationContinuationPausedWithoutEvidence(t *te
 	if err != nil {
 		t.Fatalf("Wait: %v", err)
 	}
-	if waited.Status != InvestigationSucceeded || strings.TrimSpace(waited.FinalMessage) != "" {
+	if waited.Status != InvestigationSucceeded ||
+		!strings.Contains(waited.FinalMessage, "### 验证报告") ||
+		!strings.Contains(waited.FinalMessage, "信息不足") ||
+		!strings.Contains(waited.FinalMessage, "仍缺少测试账号") {
 		t.Fatalf("waited = %+v", waited)
 	}
 	calls, err := os.ReadFile(callsPath)
@@ -897,7 +967,10 @@ func TestCodexInvestigatorPausesWhenValidationDoesNotReproduce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Wait: %v", err)
 	}
-	if waited.Status != InvestigationSucceeded || strings.TrimSpace(waited.FinalMessage) != "" {
+	if waited.Status != InvestigationSucceeded ||
+		!strings.Contains(waited.FinalMessage, "### 验证报告") ||
+		!strings.Contains(waited.FinalMessage, "未复现") ||
+		!strings.Contains(waited.FinalMessage, "未复现原始 Bug") {
 		t.Fatalf("waited = %+v", waited)
 	}
 	calls, err := os.ReadFile(callsPath)

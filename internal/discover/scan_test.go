@@ -233,6 +233,36 @@ func TestScanBackfillsInternalAgentsFromIDELayout(t *testing.T) {
 	}
 }
 
+func TestScanPrefersPrimaryAgentAnchorOverStaleInternalAnchor(t *testing.T) {
+	root := t.TempDir()
+	platformRoot := filepath.Join(root, ".claude")
+	writeMeta(t, filepath.Join(platformRoot, "skills", "base-fixer"), Meta{
+		SchemaVersion: 1,
+		SystemID:      "base",
+		SystemName:    "Base",
+		Target:        "claude-code",
+	})
+	writeMeta(t, filepath.Join(platformRoot, "skills", "base-troubleshooter"), Meta{
+		SchemaVersion: 1,
+		SystemID:      "base",
+		SystemName:    "Base",
+		AgentID:       "base-troubleshooter",
+		Role:          RoleTroubleshooter,
+		Target:        "claude-code",
+	})
+
+	agents, err := Scan([]string{filepath.Join(platformRoot, "skills")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 1 {
+		t.Fatalf("want 1 bot, got %d", len(agents))
+	}
+	if filepath.Base(agents[0].Path) != "base-troubleshooter" {
+		t.Fatalf("stale internal anchor won dedup: %+v", agents[0])
+	}
+}
+
 func TestScanMultipleTargetsOfSameSystem(t *testing.T) {
 	// 同 systemID 但不同 target 的算不同 agent,不去重。
 	root := t.TempDir()

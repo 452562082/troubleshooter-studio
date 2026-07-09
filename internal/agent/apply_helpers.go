@@ -111,11 +111,15 @@ func copyFile(src, dst string) error {
 }
 
 func writeTSFMeta(dir, target string, cfg *config.SystemConfig, yamlSrc []byte, version string) error {
+	primaryAgentID := cfg.ResolveID()
 	meta := map[string]any{
 		"schema_version":      1,
 		"tshoot_version":      version,
 		"system_id":           cfg.System.ID,
 		"system_name":         cfg.System.Name,
+		"agent_id":            primaryAgentID,
+		"role":                discover.RoleTroubleshooter,
+		"internal_agents":     internalAgentsForTSFMeta(cfg),
 		"target":              target,
 		"generated_at":        time.Now().UTC().Format(time.RFC3339),
 		"troubleshooter_yaml": string(yamlSrc),
@@ -125,4 +129,16 @@ func writeTSFMeta(dir, target string, cfg *config.SystemConfig, yamlSrc []byte, 
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, discover.MetaFilename), append(data, '\n'), 0o644)
+}
+
+func internalAgentsForTSFMeta(cfg *config.SystemConfig) []discover.InternalAgent {
+	base := strings.TrimSpace(cfg.System.ID)
+	if base == "" {
+		base = strings.TrimSuffix(cfg.ResolveID(), "-"+discover.RoleTroubleshooter)
+	}
+	return []discover.InternalAgent{
+		{ID: cfg.ResolveID(), Role: discover.RoleTroubleshooter},
+		{ID: base + "-" + discover.RoleValidator, Role: discover.RoleValidator},
+		{ID: base + "-" + discover.RoleFixer, Role: discover.RoleFixer},
+	}
 }

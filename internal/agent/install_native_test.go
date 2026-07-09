@@ -160,6 +160,42 @@ func TestInstallNative_InstallsMultipleClaudeAgents(t *testing.T) {
 	assertMissing("shop-validator/recent-changes")
 }
 
+func TestInstallNative_PrimaryAnchorUsesTroubleshooterWhenRootMetaIsLegacy(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	staging := t.TempDir()
+	must := func(err error) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(os.MkdirAll(filepath.Join(staging, "agents"), 0o755))
+	for _, name := range []string{"base-fixer", "base-troubleshooter", "base-validator"} {
+		must(os.WriteFile(filepath.Join(staging, "agents", name+".toml"), []byte("name = \""+name+"\"\n"), 0o644))
+		must(os.MkdirAll(filepath.Join(staging, "agents-meta", name), 0o755))
+	}
+	must(os.WriteFile(filepath.Join(staging, "agents-meta", "base-fixer", "tshoot.json"), []byte(`{"schema_version":1,"system_id":"base","target":"codex","agent_id":"base-fixer","role":"fixer"}`), 0o644))
+	must(os.WriteFile(filepath.Join(staging, "agents-meta", "base-troubleshooter", "tshoot.json"), []byte(`{"schema_version":1,"system_id":"base","target":"codex","agent_id":"base-troubleshooter","role":"troubleshooter"}`), 0o644))
+	must(os.WriteFile(filepath.Join(staging, "agents-meta", "base-validator", "tshoot.json"), []byte(`{"schema_version":1,"system_id":"base","target":"codex","agent_id":"base-validator","role":"validator"}`), 0o644))
+	must(os.MkdirAll(filepath.Join(staging, "skills", "incident-investigator"), 0o755))
+	must(os.WriteFile(filepath.Join(staging, "skills", "incident-investigator", "SKILL.md"), []byte("# incident\n"), 0o644))
+	must(os.MkdirAll(filepath.Join(staging, "skills", "bug-fixer"), 0o755))
+	must(os.WriteFile(filepath.Join(staging, "skills", "bug-fixer", "SKILL.md"), []byte("# fix\n"), 0o644))
+	must(os.MkdirAll(filepath.Join(staging, "scripts"), 0o755))
+	must(os.WriteFile(filepath.Join(staging, "tshoot.json"), []byte(`{"schema_version":1,"system_id":"base","system_name":"Base","target":"codex"}`), 0o644))
+
+	if err := InstallNative(staging, "codex"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(filepath.Join(fakeHome, ".codex", "skills", "base-troubleshooter", "tshoot.json")); err != nil {
+		t.Fatalf("troubleshooter meta missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(fakeHome, ".codex", "skills", "base-fixer", "tshoot.json")); !os.IsNotExist(err) {
+		t.Fatalf("fixer should not expose discover meta, err=%v", err)
+	}
+}
+
 func TestInstallNative_BackupExistingAgent(t *testing.T) {
 	fakeHome := t.TempDir()
 	t.Setenv("HOME", fakeHome)

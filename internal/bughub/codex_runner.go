@@ -636,6 +636,9 @@ func (i *CodexInvestigator) collectContinueRun(ctx context.Context, runID string
 	if finishStatus != InvestigationSucceeded {
 		finishError = runErrorText(ctx, runErr)
 	}
+	if phase == "fix" && isStructuredFixReport(finalMessage) {
+		finalMessage = formatFixFinalReport(finalMessage)
+	}
 	if err := i.store.Finish(runID, finishStatus, finalMessage, finishError); err != nil {
 		active.setError(err)
 		return
@@ -676,7 +679,7 @@ func (i *CodexInvestigator) collectValidationContinueRun(ctx context.Context, ru
 	}
 	if !validationReportReadyForInvestigation(validationReport) {
 		i.emitStageEvent(runID, "validation", validationPauseMessage(validationReport))
-		if err := i.store.Finish(runID, InvestigationSucceeded, "", ""); err != nil {
+		if err := i.store.Finish(runID, InvestigationSucceeded, formatValidationFinalReport(validationReport), ""); err != nil {
 			active.setError(err)
 			return
 		}
@@ -799,7 +802,7 @@ func (i *CodexInvestigator) collectRun(ctx context.Context, runID string, bug Bu
 	}
 	if !validationReportReadyForInvestigation(validationReport) {
 		i.emitStageEvent(runID, "validation", validationPauseMessage(validationReport))
-		if err := i.store.Finish(runID, InvestigationSucceeded, "", ""); err != nil {
+		if err := i.store.Finish(runID, InvestigationSucceeded, formatValidationFinalReport(validationReport), ""); err != nil {
 			active.setError(err)
 			return
 		}
@@ -878,6 +881,222 @@ func validationPauseMessage(report string) string {
 	default:
 		return "验证 Agent 尚未给出可进入排障的复现结论，已暂停进入排障 Agent"
 	}
+}
+
+func formatValidationFinalReport(report string) string {
+	report = strings.TrimSpace(strings.ReplaceAll(report, `\n`, "\n"))
+	if report == "" {
+		return ""
+	}
+	if strings.Contains(report, "验证报告 |") {
+		return report
+	}
+	status := validationStatus(report)
+	statusLabel := validationStatusLabel(status)
+	env := firstNonEmpty(yamlScalar(report, "environment"), "-")
+	frontendURL := firstNonEmpty(yamlNestedScalar(report, "entry", "frontend_url"), "-")
+	apiURL := firstNonEmpty(yamlNestedScalar(report, "entry", "api_url"), "-")
+	observed := firstNonEmpty(yamlScalar(report, "observed_behavior"), "-")
+	expected := firstNonEmpty(yamlScalar(report, "expected_behavior"), "-")
+	evidenceSummary := firstNonEmpty(yamlNestedScalar(report, "handoff_to_troubleshooter", "evidence_summary"), "-")
+	gaps := yamlBlockSummary(report, "gaps")
+	if gaps == "" {
+		gaps = "[]"
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "### 验证报告 | %s | %s\n\n", env, statusLabel)
+	fmt.Fprintf(&sb, "- 结论: %s\n", validationConclusion(status))
+	fmt.Fprintf(&sb, "- 入口: frontend=%s; api=%s\n", frontendURL, apiURL)
+	fmt.Fprintf(&sb, "- 实际现象: %s\n", observed)
+	fmt.Fprintf(&sb, "- 期望表现: %s\n", expected)
+	fmt.Fprintf(&sb, "- 关键证据: %s\n", evidenceSummary)
+	fmt.Fprintf(&sb, "- 需补信息: %s\n\n", gaps)
+	sb.WriteString("#### 原始结构化结果\n\n")
+	sb.WriteString("```yaml\n")
+	sb.WriteString(report)
+	sb.WriteString("\n```\n")
+	return sb.String()
+}
+
+func validationStatusLabel(status string) string {
+	switch status {
+	case "reproduced":
+		return "已复现"
+	case "not_reproduced":
+		return "未复现"
+	case "insufficient_info":
+		return "信息不足"
+	case "fixed_verified":
+		return "修复已验证"
+	case "still_reproduces":
+		return "修复后仍复现"
+	default:
+		return "结论不完整"
+	}
+}
+
+func validationConclusion(status string) string {
+	switch status {
+	case "reproduced":
+		return "已复现原始 Bug，可以进入排障 Agent。"
+	case "not_reproduced":
+		return "未复现原始 Bug，已暂停进入排障 Agent。"
+	case "insufficient_info":
+		return "验证所需信息不足，用户补充后应继续验证。"
+	case "fixed_verified":
+		return "修复验证通过，已暂停进入排障 Agent。"
+	case "still_reproduces":
+		return "修复后仍可复现，需要进入排障 Agent。"
+	default:
+		return "验证 Agent 未输出可进入排障的完整结构化结论。"
+	}
+}
+
+func formatFixFinalReport(report string) string {
+	report = strings.TrimSpace(strings.ReplaceAll(report, `\n`, "\n"))
+	if report == "" {
+		return ""
+	}
+	if strings.Contains(report, "修复报告 |") {
+		return report
+	}
+	status := yamlScalar(report, "fix_status")
+	env := firstNonEmpty(yamlScalar(report, "environment"), "-")
+	deploymentNotice := firstNonEmpty(yamlScalar(report, "deployment_notice"), "-")
+	blockedReason := yamlScalar(report, "blocked_reason")
+	branches := yamlBlockSummary(report, "branches")
+	changes := yamlBlockSummary(report, "changes")
+	tests := yamlBlockSummary(report, "tests")
+	risks := yamlBlockSummary(report, "risks")
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "### 修复报告 | %s | %s\n\n", env, fixStatusLabel(status))
+	fmt.Fprintf(&sb, "- 结论: %s\n", fixConclusion(status))
+	if branches != "" {
+		fmt.Fprintf(&sb, "- 分支/提交: %s\n", branches)
+	}
+	if changes != "" {
+		fmt.Fprintf(&sb, "- 改动: %s\n", changes)
+	}
+	if tests != "" {
+		fmt.Fprintf(&sb, "- 测试: %s\n", tests)
+	}
+	fmt.Fprintf(&sb, "- 部署提示: %s\n", deploymentNotice)
+	if risks != "" {
+		fmt.Fprintf(&sb, "- 风险: %s\n", risks)
+	}
+	if strings.TrimSpace(blockedReason) != "" {
+		fmt.Fprintf(&sb, "- 阻塞原因: %s\n", blockedReason)
+	}
+	sb.WriteString("\n#### 原始结构化结果\n\n")
+	sb.WriteString("```yaml\n")
+	sb.WriteString(report)
+	sb.WriteString("\n```\n")
+	return sb.String()
+}
+
+func isStructuredFixReport(report string) bool {
+	return strings.Contains(strings.ToLower(strings.ReplaceAll(report, `\n`, "\n")), "fix_status:")
+}
+
+func fixStatusLabel(status string) string {
+	switch strings.TrimSpace(status) {
+	case "fixed_pushed":
+		return "已提交推送"
+	case "blocked":
+		return "已阻塞"
+	case "failed":
+		return "失败"
+	default:
+		return "结论不完整"
+	}
+}
+
+func fixConclusion(status string) string {
+	switch strings.TrimSpace(status) {
+	case "fixed_pushed":
+		return "修复分支已生成、提交并推送，等待部署后回归验证。"
+	case "blocked":
+		return "修复 Agent 遇到阻塞，用户补充信息后可继续修复。"
+	case "failed":
+		return "修复执行失败，需要查看失败原因后重试或人工介入。"
+	default:
+		return "修复 Agent 未输出完整结构化结论。"
+	}
+}
+
+func yamlScalar(report, key string) string {
+	report = strings.ReplaceAll(report, `\n`, "\n")
+	prefix := strings.TrimSpace(key) + ":"
+	for _, line := range strings.Split(report, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, prefix) {
+			continue
+		}
+		value := strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))
+		return strings.Trim(value, "`\"'")
+	}
+	return ""
+}
+
+func yamlNestedScalar(report, parent, key string) string {
+	block := yamlRawBlock(report, parent)
+	if block == "" {
+		return ""
+	}
+	return yamlScalar(block, key)
+}
+
+func yamlBlockSummary(report, key string) string {
+	block := strings.TrimSpace(yamlRawBlock(report, key))
+	if block == "" {
+		value := strings.TrimSpace(yamlScalar(report, key))
+		if value == "" || value == "[]" || strings.EqualFold(value, "null") {
+			return value
+		}
+		return value
+	}
+	block = strings.ReplaceAll(block, "\n", " ")
+	block = strings.Join(strings.Fields(block), " ")
+	if block == "[]" || strings.EqualFold(block, "null") {
+		return block
+	}
+	const maxLen = 420
+	if utf8.RuneCountInString(block) > maxLen {
+		runes := []rune(block)
+		block = string(runes[:maxLen]) + "..."
+	}
+	return block
+}
+
+func yamlRawBlock(report, key string) string {
+	report = strings.ReplaceAll(report, `\n`, "\n")
+	lines := strings.Split(report, "\n")
+	prefix := strings.TrimSpace(key) + ":"
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, prefix) {
+			continue
+		}
+		_, value, _ := strings.Cut(trimmed, ":")
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return strings.Trim(value, "`\"'")
+		}
+		var block []string
+		for _, next := range lines[i+1:] {
+			if strings.TrimSpace(next) == "" {
+				continue
+			}
+			if isTopLevelYAMLKey(next) {
+				break
+			}
+			block = append(block, strings.TrimSpace(next))
+		}
+		return strings.Join(block, "\n")
+	}
+	return ""
 }
 
 func validationGapsState(report string) (bool, bool) {

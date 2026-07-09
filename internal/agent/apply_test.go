@@ -43,6 +43,34 @@ func genExisting(t *testing.T, dir string) (string, []byte) {
 	return filepath.Join(dir, "templates", "workspace-template"), yamlBytes
 }
 
+func TestWriteTSFMetaIncludesInternalAgentContract(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.SystemConfig{}
+	cfg.System.ID = "base"
+	cfg.System.Name = "Base"
+	cfg.Agent.ID = "base-troubleshooter"
+	if err := writeTSFMeta(dir, "codex", cfg, []byte("system:\n  id: base\n"), "test-version"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, discover.MetaFilename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta discover.Meta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta.AgentID != "base-troubleshooter" || meta.Role != discover.RoleTroubleshooter {
+		t.Fatalf("meta missing primary agent fields: %+v", meta)
+	}
+	if len(meta.InternalAgents) != 3 {
+		t.Fatalf("internal agents = %+v", meta.InternalAgents)
+	}
+	if meta.InternalAgents[1].ID != "base-validator" || meta.InternalAgents[2].ID != "base-fixer" {
+		t.Fatalf("internal agents wrong: %+v", meta.InternalAgents)
+	}
+}
+
 func TestApplyDryRun_NoDiskWrites(t *testing.T) {
 	// 场景:agent 已装,用户改了 SOUL.md,用原 yaml 跑 Apply --dry-run,
 	// 不应写盘(用户手改先保留),也不更新 tshoot.json。

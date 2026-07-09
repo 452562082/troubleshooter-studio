@@ -49,7 +49,7 @@ func (g *Generator) writeTshootMetaForRole(dir, target string, role AgentRole) e
 }
 
 func (g *Generator) writeIDEAgentMetas(dir, target string) error {
-	for _, role := range []AgentRole{AgentRoleTroubleshooter, AgentRoleValidator} {
+	for _, role := range internalAgentRoles() {
 		agentID := agentIDForRole(g.Ctx, role)
 		metaDir := filepath.Join(dir, "agents-meta", agentID)
 		if err := g.writeTshootMetaForRole(metaDir, target, role); err != nil {
@@ -63,5 +63,6 @@ func internalAgentsForMeta(ctx *Context) []discover.InternalAgent {
 	return []discover.InternalAgent{
 		{ID: agentIDForRole(ctx, AgentRoleTroubleshooter), Role: string(AgentRoleTroubleshooter)},
 		{ID: agentIDForRole(ctx, AgentRoleValidator), Role: string(AgentRoleValidator)},
+		{ID: agentIDForRole(ctx, AgentRoleFixer), Role: string(AgentRoleFixer)},
 	}
 }

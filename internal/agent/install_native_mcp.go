@@ -362,10 +362,15 @@ func codexAgentNamesForConfig(cfg *config.SystemConfig) []string {
 		base = strings.TrimSuffix(troubleshooter, "-troubleshooter")
 	}
 	validator := base + "-validator"
-	if validator == troubleshooter {
-		return []string{troubleshooter}
+	fixer := base + "-fixer"
+	names := []string{troubleshooter}
+	for _, candidate := range []string{validator, fixer} {
+		if strings.TrimSpace(candidate) == "" || candidate == troubleshooter {
+			continue
+		}
+		names = append(names, candidate)
 	}
-	return []string{troubleshooter, validator}
+	return names
 }
 
 // replaceCodexMCPRegion 找 begin..end 两行 marker,把中间(含两行)整体换成

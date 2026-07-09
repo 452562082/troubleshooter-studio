@@ -39,7 +39,7 @@ func (g *Generator) GenerateClaudeCode() error {
 		return err
 	}
 	// 1) 生成两个 agent 定义:排障 agent + 验证 agent。两者共享下面同一份 skills/scripts。
-	for _, role := range []AgentRole{AgentRoleTroubleshooter, AgentRoleValidator} {
+	for _, role := range internalAgentRoles() {
 		agentName := agentIDForRole(g.Ctx, role)
 		agentMD, err := buildClaudeAgentMD(wsRoot, g.Ctx, agentName, role)
 		if err != nil {
@@ -137,6 +137,21 @@ func buildClaudeAgentMD(wsRoot string, ctx *Context, agentName string, role Agen
 			Intro:                  intro,
 			SkillsScriptPathPrefix: "~/.claude/skills/" + agentName,
 		})
+		return sb.String(), nil
+	}
+	if role == AgentRoleFixer {
+		fmt.Fprintf(&sb, "本 agent 在 Claude Code 通过 `@%s` 调用 subagent,负责 **修复 Bug / 创建修复分支 / 提交并推送**,只在用户明确触发修复后执行。\n\n", agentName)
+		sb.WriteString("第一动作是 Read `~/.claude/skills/" + agentName + "/bug-fixer/SKILL.md`,按其中流程执行。\n\n")
+		sb.WriteString("## 强制流程\n\n")
+		sb.WriteString("1. 确认当前工作区已经在目标环境分支；如果不是或无法确认，停止并说明。\n")
+		sb.WriteString("2. 从当前环境分支创建独立修复分支，分支名使用 `fix/bug-<source>-<id>-<short>` 风格。\n")
+		sb.WriteString("3. 基于验证证据和排障结论做最小必要修改，不做无关重构。\n")
+		sb.WriteString("4. 运行相关测试或构建；无法运行时说明原因和残余风险。\n")
+		sb.WriteString("5. 提交并推送修复分支；完成后告知用户分支、提交、测试结果和需要部署的分支。\n\n")
+		sb.WriteString("## 边界\n\n")
+		sb.WriteString("- 如果工作区有用户未提交改动，停止并说明，不要覆盖。\n")
+		sb.WriteString("- 不自行部署，不修改生产配置，不执行破坏性命令。\n")
+		sb.WriteString("- 输出聚焦修复结果、验证方式和部署提示。\n")
 		return sb.String(), nil
 	}
 

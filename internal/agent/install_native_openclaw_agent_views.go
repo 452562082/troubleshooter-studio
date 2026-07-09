@@ -48,6 +48,7 @@ func openclawInternalAgents(cfg *config.SystemConfig) []openclawInternalAgent {
 		base = strings.TrimSuffix(troubleshooterID, "-troubleshooter")
 	}
 	validatorID := strings.TrimSpace(base + "-validator")
+	fixerID := strings.TrimSpace(base + "-fixer")
 	return []openclawInternalAgent{
 		{
 			ID:      troubleshooterID,
@@ -60,6 +61,12 @@ func openclawInternalAgents(cfg *config.SystemConfig) []openclawInternalAgent {
 			Role:    generator.AgentRoleValidator,
 			Summary: "复现、回归、采集证据",
 			Entry:   "skills/" + validatorID + "/bug-verifier/SKILL.md",
+		},
+		{
+			ID:      fixerID,
+			Role:    generator.AgentRoleFixer,
+			Summary: "创建修复分支、修改代码、提交并推送",
+			Entry:   "skills/" + fixerID + "/bug-fixer/SKILL.md",
 		},
 	}
 }
@@ -96,7 +103,7 @@ func installOpenclawAgentSkills(wsDir string, ag openclawInternalAgent) error {
 			continue
 		}
 		name := entry.Name()
-		if name == ag.ID || strings.HasSuffix(name, "-troubleshooter") || strings.HasSuffix(name, "-validator") {
+		if name == ag.ID || strings.HasSuffix(name, "-troubleshooter") || strings.HasSuffix(name, "-validator") || strings.HasSuffix(name, "-fixer") {
 			continue
 		}
 		if !generator.SkillAllowedForAgentRole(name, ag.Role) {
@@ -130,7 +137,7 @@ func installOpenclawAgentScripts(wsDir string, ag openclawInternalAgent) error {
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if name == ag.ID || strings.HasSuffix(name, "-troubleshooter") || strings.HasSuffix(name, "-validator") {
+		if name == ag.ID || strings.HasSuffix(name, "-troubleshooter") || strings.HasSuffix(name, "-validator") || strings.HasSuffix(name, "-fixer") {
 			continue
 		}
 		src := filepath.Join(srcRoot, name)

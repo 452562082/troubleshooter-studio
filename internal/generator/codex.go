@@ -83,7 +83,7 @@ func (g *Generator) GenerateCodex() error {
 	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
 		return err
 	}
-	for _, role := range []AgentRole{AgentRoleTroubleshooter, AgentRoleValidator} {
+	for _, role := range internalAgentRoles() {
 		agentName := agentIDForRole(g.Ctx, role)
 		agentTOML, err := buildCodexAgentTOML(wsRoot, g.Ctx, agentName, role)
 		if err != nil {
@@ -225,6 +225,12 @@ func buildCodexAgentDescription(ctx *Context, _ int, role AgentRole) string {
 			ctx.System.Name,
 		)
 	}
+	if role == AgentRoleFixer {
+		return fmt.Sprintf(
+			"%s 修复。触发词:修复/改代码/打补丁/fix/提交/推送/修复分支/部署。",
+			ctx.System.Name,
+		)
+	}
 	return fmt.Sprintf(
 		"%s 排障(只读)。触发词:5xx/报错/超时/慢/不通/突增/失败/卡住/排查/故障/定位/为什么/查日志/查指标/查配置/查链路。",
 		ctx.System.Name,
@@ -251,6 +257,15 @@ func buildCodexDeveloperInstructions(_ string, ctx *Context, agentName string, r
 第一步:Read `+"`~/.codex/skills/%s/bug-verifier/SKILL.md`"+` —— 那里有复现、回归、证据收集、状态枚举和验证报告结构。信息不足时列阻塞项,不要猜测。
 
 边界:不读取业务源码定位函数/文件行号/补丁点;只收集可复查证据和交接摘要,代码分析与原因判断交给排障 Agent。
+
+`, ctx.System.Name, agentName)
+	}
+	if role == AgentRoleFixer {
+		return fmt.Sprintf(`你是 **%s 修复机器人**,从 codex 主 chat spawn 出来做 Bug 修复落地。只有用户明确要求修复时才执行。
+
+第一步:Read `+"`~/.codex/skills/%s/bug-fixer/SKILL.md`"+` —— 那里有分支确认、脏工作区保护、最小改动、测试、提交、推送和部署通知契约。
+
+边界:不要扩大重构;不要改无关文件;如果工作区已有用户未提交改动、无法确认分支、无法推送,立刻停止并说明阻塞。完成后只通知用户部署修复分支,不要自行部署。
 
 `, ctx.System.Name, agentName)
 	}

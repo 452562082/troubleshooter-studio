@@ -17,6 +17,7 @@ const MetaFilename = "tshoot.json"
 const (
 	RoleTroubleshooter = "troubleshooter"
 	RoleValidator      = "validator"
+	RoleFixer          = "fixer"
 )
 
 type InternalAgent struct {

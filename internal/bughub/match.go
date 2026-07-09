@@ -1,6 +1,7 @@
 package bughub
 
 import (
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -39,25 +40,36 @@ func MatchBots(b Bug, bots []BotRef) []BotMatch {
 }
 
 func ValidatorBotFor(selected BotRef) BotRef {
-	validatorID := internalAgentIDForRole(selected, "validator")
-	if strings.TrimSpace(validatorID) == "" {
-		validatorID = strings.TrimSpace(selected.SystemID)
-		if validatorID != "" {
-			validatorID += "-validator"
+	return roleBotFor(selected, "validator", "validator")
+}
+
+func FixerBotFor(selected BotRef) BotRef {
+	return roleBotFor(selected, "fixer", "fixer")
+}
+
+func roleBotFor(selected BotRef, role string, suffix string) BotRef {
+	agentID := internalAgentIDForRole(selected, role)
+	if strings.TrimSpace(agentID) == "" {
+		agentID = strings.TrimSpace(selected.SystemID)
+		if agentID != "" {
+			agentID += "-" + suffix
 		}
 	}
 	out := selected
-	out.Role = "validator"
-	out.AgentID = validatorID
+	out.Role = role
+	out.AgentID = agentID
 	if strings.TrimSpace(out.Target) == "openclaw" {
-		out.AgentID = firstNonEmpty(strings.TrimSpace(selected.AgentID), internalAgentIDForRole(selected, "troubleshooter"), strings.TrimSpace(selected.SystemID))
+		out.AgentID = firstNonEmpty(strings.TrimSpace(agentID), internalAgentIDForRole(selected, role), strings.TrimSpace(selected.AgentID), internalAgentIDForRole(selected, "troubleshooter"), strings.TrimSpace(selected.SystemID))
 	}
 	out.Key = strings.TrimSpace(selected.Key)
 	if out.Key != "" {
-		out.Key += "#validator"
+		out.Key += "#" + role
 	}
-	if strings.TrimSpace(out.Target) != "openclaw" && strings.TrimSpace(validatorID) != "" {
-		out.Path = filepath.Join(filepath.Dir(strings.TrimSpace(selected.Path)), validatorID)
+	if strings.TrimSpace(out.Target) != "openclaw" && strings.TrimSpace(agentID) != "" {
+		candidate := filepath.Join(filepath.Dir(strings.TrimSpace(selected.Path)), agentID)
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			out.Path = candidate
+		}
 	}
 	return out
 }

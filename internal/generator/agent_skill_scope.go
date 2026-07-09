@@ -6,8 +6,13 @@ func SkillAllowedForAgentRole(skillName string, role AgentRole) bool {
 	switch role {
 	case AgentRoleValidator:
 		return validatorSkillSet[skillName]
-	case AgentRoleTroubleshooter:
+	case AgentRoleFixer:
 		return skillName != "bug-verifier" &&
+			skillName != "api-verifier" &&
+			skillName != "attachment-evidence-verifier"
+	case AgentRoleTroubleshooter:
+		return skillName != "bug-fixer" &&
+			skillName != "bug-verifier" &&
 			skillName != "api-verifier" &&
 			skillName != "attachment-evidence-verifier"
 	default:

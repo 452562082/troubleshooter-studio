@@ -145,7 +145,7 @@ func (g *Generator) shouldSkipDir(rel string) bool {
 
 func (g *Generator) alwaysIncludeSkill(skillName string) bool {
 	switch skillName {
-	case "bug-verifier", "api-verifier", "attachment-evidence-verifier", "frontend-repro-investigator":
+	case "bug-fixer", "bug-verifier", "api-verifier", "attachment-evidence-verifier", "frontend-repro-investigator":
 		return true
 	case "grafana-observability-query":
 		obs := g.Ctx.Infrastructure.Observability

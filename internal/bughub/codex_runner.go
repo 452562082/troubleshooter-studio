@@ -91,16 +91,11 @@ func BuildCodexValidationPrompt(b Bug, bot BotRef) string {
 	sb.WriteString("目标：先做取证验证，不做根因判断，不给修复方案；修复后也可复用同一流程做回归复查。\n")
 	sb.WriteString("请读取 Bug 工单的复现步骤、附件、环境、前端 URL/API 线索；能实际打开页面或请求接口时优先执行，只读取证。\n")
 	sb.WriteString("边界：只复现场景和收集证据；不要读取业务源码定位函数/行号，不要输出\"代码根因/最可能原因/修复建议/候选原因\"。如需代码分析，交给后续排障 Agent。\n")
-	sb.WriteString("如果缺少账号、入口、测试数据或浏览器能力，请明确标记 insufficient_info；如果用于修复后复查，请明确 fixed_verified 或 still_reproduces。\n\n")
+	sb.WriteString("如果缺少账号、入口、测试数据或可重放请求，请明确标记 insufficient_info；如果用于修复后复查，请明确 fixed_verified 或 still_reproduces。\n")
+	sb.WriteString(validationAgentExecutionGuidance())
+	sb.WriteString("\n")
 	sb.WriteString(GenerateContext(b, bot))
-	sb.WriteString("\n请只输出结构化验证报告，格式如下：\n")
-	sb.WriteString("verification_status: reproduced | not_reproduced | insufficient_info | fixed_verified | still_reproduces\n")
-	sb.WriteString("environment: <bug env / bot env>\n")
-	sb.WriteString("entry:\n  frontend_url: <实际入口或 ->\n  api_url: <实际接口或 ->\n")
-	sb.WriteString("observed_behavior: <实际看到的现象>\n")
-	sb.WriteString("expected_behavior: <工单期望>\n")
-	sb.WriteString("evidence:\n  screenshots: []\n  network: []\n  console_errors: []\n  trace_ids: []\n  request_ids: []\n")
-	sb.WriteString("gaps: []\n")
+	sb.WriteString(validationOutputContract())
 	return sb.String()
 }
 
@@ -196,6 +191,8 @@ func BuildCodexValidationContinuePrompt(b Bug, bot BotRef, userInput string, pre
 	var sb strings.Builder
 	sb.WriteString("你是 Bug 验证 Agent。\n")
 	sb.WriteString("目标：基于用户补充信息继续取证验证，不做根因判断，不给修复方案。\n\n")
+	sb.WriteString(validationAgentExecutionGuidance())
+	sb.WriteString("\n")
 	sb.WriteString("## 用户补充信息\n\n")
 	sb.WriteString(strings.TrimSpace(userInput))
 	sb.WriteString("\n\n")
@@ -220,14 +217,106 @@ func BuildCodexValidationContinuePrompt(b Bug, bot BotRef, userInput string, pre
 	}
 
 	sb.WriteString(GenerateContext(b, bot))
+	sb.WriteString(validationOutputContract())
+	return sb.String()
+}
+
+func BuildCodexFixPrompt(b Bug, bot BotRef, prevRun InvestigationRun, userInput string) string {
+	var sb strings.Builder
+	sb.WriteString("你是 Bug 修复 Agent。\n")
+	sb.WriteString("目标：基于 Bug 工单、验证证据和排障结论落地修复。只有用户明确触发修复后才执行。\n\n")
+	sb.WriteString("第一步：如果当前机器人 workspace 中存在 `bug-fixer/SKILL.md`，必须先 Read 它，并按其中流程执行。\n")
+	sb.WriteString("如果旧安装还没有该 skill，使用下面内置流程作为兼容兜底。\n\n")
+	sb.WriteString("## 强制流程\n\n")
+	sb.WriteString("1. 先确认当前代码仓库已经切到目标环境对应分支；不要从错误分支修复。\n")
+	sb.WriteString("2. 基于当前环境分支创建独立修复分支，分支名使用 `fix/bug-<source>-<id>-<short>` 风格。\n")
+	sb.WriteString("3. 修复 Bug，只做最小必要改动，不做无关重构，不改无关文件。\n")
+	sb.WriteString("4. 运行相关测试、构建或最小验证命令；无法运行时说明具体原因。\n")
+	sb.WriteString("5. `git status` 确认只包含本次修复文件后提交，并推送修复分支。\n")
+	sb.WriteString("6. 最终输出分支名、commit、push 结果、测试结果，并明确通知用户部署该修复分支。\n\n")
+	sb.WriteString("## 停止条件\n\n")
+	sb.WriteString("- 如果工作区已有用户未提交改动或无法确认这些改动属于本次修复，停止并说明，不要覆盖。\n")
+	sb.WriteString("- 如果无法确认环境分支、无法创建分支、无法提交或无法推送，停止并说明阻塞点。\n")
+	sb.WriteString("- 不自行部署，不修改生产配置，不执行破坏性命令。\n\n")
+	if strings.TrimSpace(userInput) != "" {
+		sb.WriteString("## 用户补充修复要求\n\n")
+		sb.WriteString(strings.TrimSpace(userInput))
+		sb.WriteString("\n\n")
+	}
+	sb.WriteString("## Bug 上下文\n\n")
+	sb.WriteString(GenerateContext(b, bot))
+	sb.WriteString("\n")
+	appendPreviousRunForFix(&sb, prevRun)
+	sb.WriteString("\n## 输出结构\n\n")
+	sb.WriteString("1. 修复分支\n")
+	sb.WriteString("2. 修改摘要\n")
+	sb.WriteString("3. 测试/验证结果\n")
+	sb.WriteString("4. 提交与推送结果\n")
+	sb.WriteString("5. 部署提示\n")
+	return sb.String()
+}
+
+func appendPreviousRunForFix(sb *strings.Builder, prevRun InvestigationRun) {
+	if sb == nil {
+		return
+	}
+	var validationParts []string
+	var investigationParts []string
+	for _, e := range prevRun.Events {
+		msg := strings.TrimSpace(e.Message)
+		if msg == "" {
+			continue
+		}
+		phase, _ := e.Meta["phase"].(string)
+		switch phase {
+		case "validation":
+			validationParts = append(validationParts, msg)
+		case "investigation":
+			investigationParts = append(investigationParts, msg)
+		}
+	}
+	if len(validationParts) > 0 {
+		sb.WriteString("## 验证 Agent 证据\n\n")
+		for _, p := range validationParts {
+			sb.WriteString(p)
+			sb.WriteString("\n\n")
+		}
+	}
+	if len(investigationParts) > 0 || strings.TrimSpace(prevRun.FinalMessage) != "" {
+		sb.WriteString("## 排障 Agent 结论\n\n")
+		for _, p := range investigationParts {
+			sb.WriteString(p)
+			sb.WriteString("\n\n")
+		}
+		if strings.TrimSpace(prevRun.FinalMessage) != "" {
+			sb.WriteString(strings.TrimSpace(prevRun.FinalMessage))
+			sb.WriteString("\n\n")
+		}
+	}
+}
+
+func validationAgentExecutionGuidance() string {
+	var sb strings.Builder
+	sb.WriteString("\n## 执行环境说明\n")
+	sb.WriteString("- 当前验证 Agent 由桌面应用后台启动，不保证拥有 in-app browser / iab / 可视化浏览器控制能力。\n")
+	sb.WriteString("- 如果浏览器工具返回 unavailable，不要把它本身写入 gaps，也不要要求用户提供浏览器能力；应改用工单附件、本地附件路径、HAR/Network 导出、curl/API 请求、trace/request id、日志或已有截图取证。\n")
+	sb.WriteString("- 只有缺少业务验证必需资料时才写入 gaps，例如后台登录态/测试账号、受影响 URL/route/API、测试数据、HAR/Network 导出、request id 或 trace id。\n")
+	sb.WriteString("- 工具能力限制但不阻塞已有证据判断时，写入 handoff_to_troubleshooter.unchecked_scopes，不要写入 gaps。\n")
+	return sb.String()
+}
+
+func validationOutputContract() string {
+	var sb strings.Builder
 	sb.WriteString("\n请只输出结构化验证报告，格式如下：\n")
 	sb.WriteString("verification_status: reproduced | not_reproduced | insufficient_info | fixed_verified | still_reproduces\n")
 	sb.WriteString("environment: <bug env / bot env>\n")
 	sb.WriteString("entry:\n  frontend_url: <实际入口或 ->\n  api_url: <实际接口或 ->\n")
 	sb.WriteString("observed_behavior: <实际看到的现象>\n")
 	sb.WriteString("expected_behavior: <工单期望>\n")
-	sb.WriteString("evidence:\n  screenshots: []\n  network: []\n  console_errors: []\n  trace_ids: []\n  request_ids: []\n")
+	sb.WriteString("evidence:\n  attachments: []\n  screenshots: []\n  network: []\n  console_errors: []\n  trace_ids: []\n  request_ids: []\n")
+	sb.WriteString("handoff_to_troubleshooter:\n  evidence_summary: <只写事实>\n  unchecked_scopes: []\n")
 	sb.WriteString("gaps: []\n")
+	sb.WriteString("\n只有当用户需要补充的阻塞资料已经清空时，gaps 才能输出 []。\n")
 	return sb.String()
 }
 
@@ -380,11 +469,15 @@ func (i *CodexInvestigator) Continue(ctx context.Context, bug Bug, bot BotRef, u
 	continueBot := bot
 	if phase == "validation" {
 		continueBot = ValidatorBotFor(bot)
+	} else if phase == "fix" {
+		continueBot = FixerBotFor(bot)
 	}
 	target := strings.TrimSpace(continueBot.Target)
 	prompt := BuildCodexContinuePrompt(bug, continueBot, userInput, prevRun)
 	if phase == "validation" {
 		prompt = BuildCodexValidationContinuePrompt(bug, continueBot, userInput, prevRun)
+	} else if phase == "fix" {
+		prompt = BuildCodexFixPrompt(bug, continueBot, prevRun, userInput)
 	}
 	continueCmd, parser, err := i.buildCommandLocked(target, continueBot, prompt)
 	if err != nil {
@@ -419,10 +512,62 @@ func (i *CodexInvestigator) Continue(ctx context.Context, bug Bug, bot BotRef, u
 	return run, nil
 }
 
+func (i *CodexInvestigator) StartFix(ctx context.Context, bug Bug, bot BotRef, previousRunID string) (InvestigationRun, error) {
+	if i == nil || i.store == nil {
+		return InvestigationRun{}, errors.New("investigation store is required")
+	}
+	i.mu.Lock()
+	if active, ok, err := i.store.ActiveRunForBug(bug.ID); err != nil {
+		i.mu.Unlock()
+		return InvestigationRun{}, err
+	} else if ok {
+		if _, inMemory := i.active[active.ID]; inMemory {
+			i.mu.Unlock()
+			return InvestigationRun{}, fmt.Errorf("bug %s has an active investigation (%s), cannot start fix", bug.ID, active.ID)
+		}
+	}
+
+	prevRun, err := i.store.Get(strings.TrimSpace(previousRunID))
+	if err != nil {
+		i.mu.Unlock()
+		return InvestigationRun{}, fmt.Errorf("previous run %s not found: %w", previousRunID, err)
+	}
+	fixBot := FixerBotFor(bot)
+	target := strings.TrimSpace(fixBot.Target)
+	prompt := BuildCodexFixPrompt(bug, fixBot, prevRun, "")
+	cmd, parser, err := i.buildCommandLocked(target, fixBot, prompt)
+	if err != nil {
+		i.mu.Unlock()
+		return InvestigationRun{}, err
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	run := InvestigationRun{
+		ID:             randomRunID(),
+		BugID:          bug.ID,
+		BotKey:         bot.Key,
+		Status:         InvestigationRunning,
+		StartedAt:      time.Now().UTC(),
+		PromptPreview:  promptPreview(prompt),
+		ContinuationOf: strings.TrimSpace(previousRunID),
+	}
+	if err := i.store.Upsert(run); err != nil {
+		i.mu.Unlock()
+		cancel()
+		return InvestigationRun{}, err
+	}
+	active := &activeCodexRun{cancel: cancel, done: make(chan struct{})}
+	i.active[run.ID] = active
+	i.mu.Unlock()
+	go i.collectContinueRun(ctx, run.ID, cmd, parser, active, "fix")
+	return run, nil
+}
+
 func normalizeContinuationPhase(phase string) string {
 	switch strings.TrimSpace(strings.ToLower(phase)) {
 	case "validation":
 		return "validation"
+	case "fix":
+		return "fix"
 	default:
 		return "investigation"
 	}
@@ -444,6 +589,8 @@ func (i *CodexInvestigator) collectContinueRun(ctx context.Context, runID string
 	stageMessage := "排障 Agent 继续执行（基于用户补充信息）"
 	if phase == "validation" {
 		stageMessage = "验证 Agent 继续取证（基于用户补充信息）"
+	} else if phase == "fix" {
+		stageMessage = "修复 Agent 开始修复（基于排障结论）"
 	}
 	i.emitStageEvent(runID, phase, stageMessage)
 	finalMessage, finishStatus, runErr := i.runCommandStage(ctx, runID, cmd, parser, active, phase)
@@ -670,27 +817,12 @@ func validationReportReadyForInvestigation(report string) bool {
 	if strings.Contains(lower, "insufficient_info") {
 		return false
 	}
-	if strings.Contains(lower, "gaps:") && !strings.Contains(lower, "gaps: []") {
+	gapsPresent, gapsEmpty := validationGapsState(text)
+	if !gapsPresent || !gapsEmpty {
 		return false
 	}
-	for _, marker := range []string{
-		"需要用户补充",
-		"需要补充信息",
-		"请提供",
-		"缺少",
-		"未提供",
-		"无法确认",
-		"无法采集",
-		"登录态",
-		"测试账号",
-	} {
-		if strings.Contains(text, marker) {
-			return false
-		}
-	}
 	// Flow control is allowlist-based: validation must emit a structured terminal
-	// status before investigation can start. The marker checks above only add
-	// conservative vetoes for contradictory reports.
+	// status and explicitly empty blocking gaps before investigation can start.
 	status := validationStatus(text)
 	switch status {
 	case "reproduced", "not_reproduced", "fixed_verified", "still_reproduces":
@@ -698,6 +830,58 @@ func validationReportReadyForInvestigation(report string) bool {
 	default:
 		return false
 	}
+}
+
+func validationGapsState(report string) (bool, bool) {
+	report = strings.ReplaceAll(report, `\n`, "\n")
+	lines := strings.Split(report, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		if !strings.HasPrefix(lower, "gaps") {
+			continue
+		}
+		_, value, ok := strings.Cut(trimmed, ":")
+		if !ok {
+			return true, false
+		}
+		value = strings.TrimSpace(value)
+		if value == "[]" || strings.EqualFold(value, "null") {
+			return true, true
+		}
+		if value != "" {
+			return true, false
+		}
+		for _, next := range lines[i+1:] {
+			nextTrimmed := strings.TrimSpace(next)
+			if nextTrimmed == "" {
+				continue
+			}
+			if isTopLevelYAMLKey(next) {
+				break
+			}
+			if nextTrimmed != "[]" {
+				return true, false
+			}
+		}
+		return true, true
+	}
+	return false, false
+}
+
+func isTopLevelYAMLKey(line string) bool {
+	if strings.TrimSpace(line) == "" {
+		return false
+	}
+	if strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") || strings.HasPrefix(strings.TrimSpace(line), "-") {
+		return false
+	}
+	key, _, ok := strings.Cut(line, ":")
+	if !ok {
+		return false
+	}
+	key = strings.TrimSpace(key)
+	return key != ""
 }
 
 func validationStatus(report string) string {

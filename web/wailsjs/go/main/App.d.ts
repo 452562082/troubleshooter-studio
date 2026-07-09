@@ -3,11 +3,11 @@
 import {analyzerpipe} from '../models';
 import {main} from '../models';
 import {agent} from '../models';
+import {bughub} from '../models';
 import {analyzer} from '../models';
 import {generator} from '../models';
 import {discover} from '../models';
 import {doctor} from '../models';
-import {bughub} from '../models';
 import {cchub} from '../models';
 import {labelprobe} from '../models';
 import {dsprobe} from '../models';
@@ -40,6 +40,8 @@ export function ChatSaveKey(arg1:string,arg2:string):Promise<void>;
 export function ChatSaveProviderKey(arg1:string,arg2:string):Promise<void>;
 
 export function ClearBugPlatformLogin(arg1:main.BugLoginInput):Promise<main.BugLoginResult>;
+
+export function ContinueBugInvestigation(arg1:main.BugInvestigationContinueInput):Promise<bughub.InvestigationRun>;
 
 export function DefaultDestPath(arg1:string,arg2:string):Promise<string>;
 
@@ -161,6 +163,8 @@ export function RunInstall(arg1:string,arg2:Record<string, string>):Promise<main
 
 export function SaveBugPlatform(arg1:main.BugPlatformInput):Promise<bughub.PlatformConfig>;
 
+export function SaveBugSelectedBot(arg1:main.BugSelectedBotInput):Promise<bughub.Bug>;
+
 export function SaveInfraCred(arg1:string,arg2:string):Promise<void>;
 
 export function SaveInfraCredBatch(arg1:main.InfraCredBatchInput):Promise<void>;
@@ -176,6 +180,8 @@ export function SelfTestAgent(arg1:string):Promise<agent.SelfTestResult>;
 export function SetDefaultReposRoot(arg1:string):Promise<void>;
 
 export function ShowMainWindow():Promise<void>;
+
+export function StartBugFix(arg1:main.BugFixInput):Promise<bughub.InvestigationRun>;
 
 export function StartBugInvestigation(arg1:main.BugInvestigationInput):Promise<bughub.InvestigationRun>;
 

@@ -262,6 +262,7 @@ func inferInternalAgentsFromIDELayout(meta *Meta, metaPath string) {
 	addOut(meta.AgentID)
 	addOut(meta.SystemID + "-" + RoleTroubleshooter)
 	addOut(meta.SystemID + "-" + RoleValidator)
+	addOut(meta.SystemID + "-" + RoleFixer)
 	rest := make([]string, 0, len(ids))
 	for id := range ids {
 		rest = append(rest, id)
@@ -286,6 +287,9 @@ func inferRoleFromAgentID(meta *Meta, id string) string {
 		return meta.Role
 	}
 	lower := strings.ToLower(id)
+	if strings.Contains(lower, "fix") || strings.Contains(lower, "repair") {
+		return RoleFixer
+	}
 	if strings.Contains(lower, "valid") || strings.Contains(lower, "verif") {
 		return RoleValidator
 	}

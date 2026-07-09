@@ -8,7 +8,7 @@
 // 父端持有 bots 列表 + 各种 per-card reactive map(regenState / doctorState 等),
 // 把单卡所需切片透下来,本组件仅渲染 + emit 触发。
 
-import { computed, ref } from 'vue'
+import { computed, ref, watchEffect } from 'vue'
 import type { ApplyResult, DiscoveredBot } from '../lib/bridge'
 
 interface DoctorIssue {
@@ -53,6 +53,11 @@ void props // IDE 提示
 
 const editorDraft = defineModel<string>('editorDraft', { required: true })
 const agentsOpen = ref(false)
+watchEffect(() => {
+  if ((props.bot.meta.internal_agents || []).length > 1) {
+    agentsOpen.value = true
+  }
+})
 
 const emit = defineEmits<{
   runDoctor: []
@@ -111,18 +116,21 @@ const agentDefinitionExt = computed(() => props.bot.meta.target === 'codex' ? '.
 
 function roleFromAgentID(id: string): string {
   const s = id.toLowerCase()
+  if (s.includes('fix') || s.includes('repair')) return 'fixer'
   if (s.includes('valid') || s.includes('verif')) return 'validator'
   return 'troubleshooter'
 }
 
 function roleLabel(role: string): string {
   if (role === 'validator') return '验证 Agent'
+  if (role === 'fixer') return '修复 Agent'
   if (role === 'troubleshooter') return '排障 Agent'
   return `${role} Agent`
 }
 
 function roleSummary(role: string): string {
   if (role === 'validator') return '复现、回归、采集证据'
+  if (role === 'fixer') return '创建修复分支、修改代码、提交并推送'
   if (role === 'troubleshooter') return '定位根因、给出修复建议'
   return '独立执行入口'
 }

@@ -1,0 +1,158 @@
+---
+name: bug-fixer
+description: Bug 修复 Agent 统一入口。用于基于已验证证据和排障结论创建修复分支、最小改动修复、测试、提交、推送，并通知用户部署。
+---
+
+# Bug 修复
+
+## 使用场景
+
+当用户在 Bug 工单里明确点击或要求“修复”时使用本 skill。
+
+本 skill 不负责首次复现，也不负责只读根因分析。它接收验证 Agent 的证据和排障 Agent 的结论，执行代码修复闭环：
+
+- 确认目标环境和代码分支。
+- 从环境当前分支创建修复分支。
+- 根据证据和根因做最小必要改动。
+- 运行相关测试或构建。
+- 提交并推送修复分支。
+- 通知用户部署该修复分支。
+
+## 必要输入
+
+开始前必须已经有：
+
+- Bug ID、标题、环境和复现/验证证据。
+- 排障 Agent 输出的根因结论、受影响服务/模块/仓库。
+- 环境分支映射，来自 `routing/references/env-branch-map.yaml` 或当前工作区状态。
+- 本地仓库路径，来自部署时保存的 repo path 或工单上下文。
+
+缺少阻塞输入时停止，不要猜。
+
+## 分支规则
+
+1. 先确认当前仓库已经切到目标环境分支。
+2. 环境分支必须来自映射或当前启动器已经切好的分支，不要自己猜 `test` / `main` / `master`。
+3. 创建修复分支前运行：
+
+```bash
+git status --short
+git branch --show-current
+```
+
+4. 如果存在未提交改动：
+   - 能明确判断是本次修复 Agent 刚产生的改动，继续。
+   - 否则停止并提示用户处理，不要覆盖或顺手提交用户改动。
+5. 修复分支命名：
+
+```text
+fix/bug-<source>-<id>-<short-slug>
+```
+
+示例：`fix/bug-zentao-909-category-count`。
+
+6. 从环境分支创建分支：
+
+```bash
+git checkout -b fix/bug-<source>-<id>-<short-slug>
+```
+
+如果分支已存在，先确认它是否是当前 Bug 的修复分支；不能确认时停止。
+
+## 修复流程
+
+1. 读取上一轮验证证据和排障结论，提取：
+   - 失败入口。
+   - 实际行为和期望行为。
+   - 相关接口、页面、服务、表或配置。
+   - 根因定位文件或模块。
+2. 用 `routing` 确认环境、仓库和分支；必要时读取 `repo-stack-map.yaml` 和 `frontend-entry-map.yaml`。
+3. 定位代码时优先用结构化搜索：
+   - Go：`rg`、`go test ./...`、包级测试。
+   - Node/TS：`rg`、`npm test`、`npm run build`、相关 lint/typecheck。
+   - Java：`mvn test`、`gradle test`、模块级测试。
+4. 做最小必要改动：
+   - 不做无关重构。
+   - 不改格式化无关大文件。
+   - 不修改生成物、lockfile 或配置，除非根因明确要求。
+   - 不删除用户已有逻辑，除非有证据证明它就是错误点。
+5. 运行最小闭环测试：
+   - 先跑直接相关测试。
+   - 风险较高或共享模块改动时跑更大范围测试。
+   - 如果测试无法运行，记录命令、失败原因和残余风险。
+6. 提交前复查：
+
+```bash
+git diff --check
+git diff --stat
+git status --short
+```
+
+7. 提交：
+
+```bash
+git add <files>
+git commit -m "fix: <short bug fix summary>"
+```
+
+8. 推送：
+
+```bash
+git push -u origin <fix-branch>
+```
+
+## 多仓库规则
+
+如果一个 Bug 需要改多个仓库：
+
+- 逐仓库确认环境分支。
+- 每个仓库各自创建同名或同前缀修复分支。
+- 每个仓库独立提交和推送。
+- 最终输出列出每个仓库的分支、commit 和测试结果。
+
+如果只确认一个仓库需要改，不要顺手改其它仓库。
+
+## 禁止行为
+
+- 不自行部署。
+- 不直接改生产配置。
+- 不执行 `git reset --hard`、`git clean -fd`、强推、删除分支等破坏性命令。
+- 不提交用户已有未提交改动。
+- 不把 token、cookie、password、authorization header 写入代码、日志或提交信息。
+- 不凭感觉扩大修复范围。
+
+## 输出契约
+
+修复完成或阻塞时输出：
+
+```yaml
+fix_status: fixed_pushed | blocked | failed
+environment: "<env>"
+branches:
+  - repo: "<repo>"
+    base_branch: "<env-branch>"
+    fix_branch: "<fix-branch>"
+    commit: "<sha-or-empty>"
+    pushed: true
+changes:
+  - "<file-or-module>: <what changed>"
+tests:
+  - command: "<command>"
+    result: passed | failed | skipped
+    note: "<short evidence>"
+deployment_notice: "请部署 <repo>/<fix_branch> 到 <env> 后再触发验证 Agent 回归。"
+risks:
+  - "<remaining-risk-or-empty>"
+blocked_reason: "<only when blocked/failed>"
+```
+
+## 完成标准
+
+只有同时满足以下条件才返回 `fixed_pushed`：
+
+- 已从环境分支创建修复分支。
+- 代码已最小改动修复。
+- 已运行相关测试或明确说明无法运行原因。
+- 已提交。
+- 已推送。
+- 已通知用户部署修复分支。

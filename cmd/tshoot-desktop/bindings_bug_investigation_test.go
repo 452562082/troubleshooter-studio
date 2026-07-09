@@ -28,7 +28,7 @@ func TestStartBugInvestigationRunsCodexBot(t *testing.T) {
 		}
 	}
 	bin := filepath.Join(root, "codex")
-	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: reproduced\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}' '{\"type\":\"turn.completed\"}' ;;\nesac\n"
+	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: reproduced\\ngaps: []\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}' '{\"type\":\"turn.completed\"}' ;;\nesac\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -66,6 +66,64 @@ func TestStartBugInvestigationRunsCodexBot(t *testing.T) {
 	}
 }
 
+func TestStartBugFixRunsCodexBot(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	repo := filepath.Join(root, "base-troubleshooter")
+	fixerRepo := filepath.Join(root, "base-fixer")
+	for _, dir := range []string{repo, fixerRepo} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bin := filepath.Join(root, "codex")
+	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\nprintf '%s\\n' \"$last\" > " + shellQuote(filepath.Join(root, "prompt.txt")) + "\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"fix pushed\"}}' '{\"type\":\"turn.completed\"}'\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := bugStore().Upsert(bughub.Bug{ID: "zentao-909", Source: "zentao", SourceID: "909", Title: "Bug 909"}); err != nil {
+		t.Fatalf("Upsert bug: %v", err)
+	}
+	prevRun := bughub.InvestigationRun{ID: "run-prev", BugID: "zentao-909", Status: bughub.InvestigationSucceeded, FinalMessage: "root cause"}
+	if err := bugInvestigationStore().Upsert(prevRun); err != nil {
+		t.Fatalf("Upsert previous run: %v", err)
+	}
+
+	app := &App{}
+	run, err := app.StartBugFix(BugFixInput{
+		BugID:         "zentao-909",
+		PreviousRunID: prevRun.ID,
+		Bot: bughub.BotRef{
+			Key:      repo + "|codex",
+			Target:   "codex",
+			Path:     repo,
+			SystemID: "base",
+			InternalAgents: []bughub.BotInternalAgent{
+				{ID: "base-troubleshooter", Role: "troubleshooter"},
+				{ID: "base-fixer", Role: "fixer"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBugFix: %v", err)
+	}
+	waited, err := app.codexInvestigator().Wait(run.ID)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if waited.Status != bughub.InvestigationSucceeded || waited.FinalMessage != "fix pushed" {
+		t.Fatalf("waited = %+v", waited)
+	}
+	prompt, err := os.ReadFile(filepath.Join(root, "prompt.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile prompt: %v", err)
+	}
+	if !strings.Contains(string(prompt), "你是 Bug 修复 Agent") || !strings.Contains(string(prompt), "推送修复分支") {
+		t.Fatalf("prompt missing fix instructions:\n%s", prompt)
+	}
+}
+
 func TestStartBugInvestigationChecksOutConfiguredEnvBranch(t *testing.T) {
 	requireGit(t)
 	root := t.TempDir()
@@ -84,7 +142,7 @@ func TestStartBugInvestigationChecksOutConfiguredEnvBranch(t *testing.T) {
 		t.Fatalf("SetRepoPathsForSystem: %v", err)
 	}
 	bin := filepath.Join(root, "codex")
-	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: reproduced\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}' '{\"type\":\"turn.completed\"}' ;;\nesac\n"
+	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: reproduced\\ngaps: []\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}' '{\"type\":\"turn.completed\"}' ;;\nesac\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +238,7 @@ func TestStartBugInvestigationMaterializesZentaoAttachmentsForAgent(t *testing.T
 	}
 	callsPath := filepath.Join(root, "calls.txt")
 	bin := filepath.Join(root, "codex")
-	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\nprintf '%s\\n' \"$last\" >> \"$CALLS_PATH\"\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: reproduced\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}' '{\"type\":\"turn.completed\"}' ;;\nesac\n"
+	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\nprintf '%s\\n' \"$last\" >> \"$CALLS_PATH\"\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: reproduced\\ngaps: []\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}' '{\"type\":\"turn.completed\"}' ;;\nesac\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +424,7 @@ func TestStartBugInvestigationRunsClaudeBot(t *testing.T) {
 		}
 	}
 	bin := filepath.Join(root, "claude")
-	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"verification_status: reproduced\"}' ;;\n  *) printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"claude done\"}' ;;\nesac\n"
+	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"verification_status: reproduced\\ngaps: []\"}' ;;\n  *) printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"claude done\"}' ;;\nesac\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -487,4 +545,8 @@ func TestCancelBugInvestigationRejectsBlankRunID(t *testing.T) {
 	if errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("blank run should be validation error, got %v", err)
 	}
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }

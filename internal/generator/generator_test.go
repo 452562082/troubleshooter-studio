@@ -780,6 +780,7 @@ func TestGenerate_ClawhubLock_EmptySkills(t *testing.T) {
 	want := map[string]bool{
 		"api-verifier":                 true,
 		"attachment-evidence-verifier": true,
+		"bug-fixer":                    true,
 		"bug-verifier":                 true,
 		"frontend-repro-investigator":  true,
 		"grafana-observability-query":  true,
@@ -825,6 +826,7 @@ func TestGenerateIncludesBugVerifierSkill(t *testing.T) {
 		"skills/api-verifier/SKILL.md",
 		"skills/attachment-evidence-verifier/SKILL.md",
 		"skills/attachment-evidence-verifier/scripts/attachment_manifest.py",
+		"skills/bug-fixer/SKILL.md",
 		"skills/bug-verifier/SKILL.md",
 		"skills/frontend-repro-investigator/SKILL.md",
 	})
@@ -883,6 +885,7 @@ func TestGenerateIncludesValidatorSkillsEvenWhenWhitelistOmitsThem(t *testing.T)
 	assertExists(t, root, []string{
 		"skills/api-verifier/SKILL.md",
 		"skills/attachment-evidence-verifier/SKILL.md",
+		"skills/bug-fixer/SKILL.md",
 		"skills/bug-verifier/SKILL.md",
 		"skills/frontend-repro-investigator/SKILL.md",
 		"skills/grafana-observability-query/SKILL.md",
@@ -919,6 +922,9 @@ func TestSkillAllowedForAgentRoleScopesValidatorAndTroubleshooter(t *testing.T) 
 	if SkillAllowedForAgentRole("bug-verifier", AgentRoleTroubleshooter) {
 		t.Fatalf("troubleshooter should not install validator entry skill")
 	}
+	if SkillAllowedForAgentRole("bug-fixer", AgentRoleTroubleshooter) {
+		t.Fatalf("troubleshooter should not install fixer entry skill")
+	}
 	if SkillAllowedForAgentRole("api-verifier", AgentRoleTroubleshooter) {
 		t.Fatalf("troubleshooter should not install validator API replay skill")
 	}
@@ -927,6 +933,12 @@ func TestSkillAllowedForAgentRoleScopesValidatorAndTroubleshooter(t *testing.T) 
 	}
 	if !SkillAllowedForAgentRole("incident-investigator", AgentRoleTroubleshooter) {
 		t.Fatalf("troubleshooter should keep incident-investigator")
+	}
+	if !SkillAllowedForAgentRole("bug-fixer", AgentRoleFixer) {
+		t.Fatalf("fixer should install bug-fixer entry skill")
+	}
+	if SkillAllowedForAgentRole("bug-verifier", AgentRoleFixer) {
+		t.Fatalf("fixer should not install validator entry skill")
 	}
 }
 
@@ -985,33 +997,43 @@ func TestGenerate_MultiTargets_All(t *testing.T) {
 	assertExists(t, out+"-claude-code", []string{
 		"agents/shop-bot.md",
 		"agents/shop-validator.md",
+		"agents/shop-fixer.md",
 		"agents-meta/shop-bot/tshoot.json",
 		"agents-meta/shop-validator/tshoot.json",
+		"agents-meta/shop-fixer/tshoot.json",
 		"skills/routing/SKILL.md",
 	})
 	assertExists(t, out+"-cursor", []string{
 		"agents/shop-bot.md",
 		"agents/shop-validator.md",
+		"agents/shop-fixer.md",
 		"agents-meta/shop-bot/tshoot.json",
 		"agents-meta/shop-validator/tshoot.json",
+		"agents-meta/shop-fixer/tshoot.json",
 		"skills/routing/SKILL.md",
 	})
 	assertExists(t, out+"-codex", []string{
 		"agents/shop-bot.toml",
 		"agents/shop-validator.toml",
+		"agents/shop-fixer.toml",
 		"agents-meta/shop-bot/tshoot.json",
 		"agents-meta/shop-validator/tshoot.json",
+		"agents-meta/shop-fixer/tshoot.json",
 		"skills/routing/SKILL.md",
 	})
 	assertAgentMetaRole(t, filepath.Join(out+"-claude-code", "agents-meta/shop-bot/tshoot.json"), "shop-bot", "troubleshooter")
 	assertAgentMetaRole(t, filepath.Join(out+"-claude-code", "agents-meta/shop-validator/tshoot.json"), "shop-validator", "validator")
+	assertAgentMetaRole(t, filepath.Join(out+"-claude-code", "agents-meta/shop-fixer/tshoot.json"), "shop-fixer", "fixer")
 
 	assertTroubleshooterAgentDefinition(t, filepath.Join(out+"-claude-code", "agents/shop-bot.md"))
 	assertValidatorAgentDefinition(t, filepath.Join(out+"-claude-code", "agents/shop-validator.md"))
+	assertFixerAgentDefinition(t, filepath.Join(out+"-claude-code", "agents/shop-fixer.md"))
 	assertTroubleshooterAgentDefinition(t, filepath.Join(out+"-cursor", "agents/shop-bot.md"))
 	assertValidatorAgentDefinition(t, filepath.Join(out+"-cursor", "agents/shop-validator.md"))
+	assertFixerAgentDefinition(t, filepath.Join(out+"-cursor", "agents/shop-fixer.md"))
 	assertTroubleshooterAgentDefinition(t, filepath.Join(out+"-codex", "agents/shop-bot.toml"))
 	assertValidatorAgentDefinition(t, filepath.Join(out+"-codex", "agents/shop-validator.toml"))
+	assertFixerAgentDefinition(t, filepath.Join(out+"-codex", "agents/shop-fixer.toml"))
 
 	// copyDirRecursive (claude-code / cursor 路径) 也必须过滤 test_*.py。脚本被复制两份:
 	// skills/config-executor/scripts/ 和顶层 scripts/,两处都不应出现 test 文件。
@@ -1063,14 +1085,18 @@ func TestGenerate_MultiTargets_NoOpenclaw(t *testing.T) {
 	assertExists(t, out+"-claude-code", []string{
 		"agents/shop-bot.md",
 		"agents/shop-validator.md",
+		"agents/shop-fixer.md",
 		"agents-meta/shop-bot/tshoot.json",
 		"agents-meta/shop-validator/tshoot.json",
+		"agents-meta/shop-fixer/tshoot.json",
 	})
 	assertExists(t, out+"-codex", []string{
 		"agents/shop-bot.toml",
 		"agents/shop-validator.toml",
+		"agents/shop-fixer.toml",
 		"agents-meta/shop-bot/tshoot.json",
 		"agents-meta/shop-validator/tshoot.json",
+		"agents-meta/shop-fixer/tshoot.json",
 	})
 }
 
@@ -1125,6 +1151,23 @@ func assertValidatorAgentDefinition(t *testing.T, path string) {
 	} {
 		if strings.Contains(data, forbidden) {
 			t.Fatalf("validator agent %s should not contain %q:\n%s", path, forbidden, data)
+		}
+	}
+}
+
+func assertFixerAgentDefinition(t *testing.T, path string) {
+	t.Helper()
+	data := readFile(t, path)
+	for _, want := range []string{
+		"bug-fixer",
+		"修复",
+		"修复分支",
+		"提交",
+		"推送",
+		"部署",
+	} {
+		if !strings.Contains(data, want) {
+			t.Fatalf("fixer agent %s missing %q:\n%s", path, want, data)
 		}
 	}
 }

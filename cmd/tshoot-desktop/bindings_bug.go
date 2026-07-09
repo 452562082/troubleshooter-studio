@@ -20,6 +20,11 @@ type BugContextInput struct {
 	Bot   bughub.BotRef `json:"bot"`
 }
 
+type BugSelectedBotInput struct {
+	BugID  string `json:"bug_id"`
+	BotKey string `json:"bot_key"`
+}
+
 type BugPlatformInput struct {
 	ID                  string                      `json:"id"`
 	Name                string                      `json:"name"`
@@ -315,6 +320,26 @@ func (a *App) MatchBugBots(bugID string) ([]bughub.BotMatch, error) {
 		return nil, err
 	}
 	return bughub.MatchBots(selected, bots), nil
+}
+
+func (a *App) SaveBugSelectedBot(input BugSelectedBotInput) (bughub.Bug, error) {
+	store := bugStore()
+	b, ok, err := store.Get(input.BugID)
+	if err != nil {
+		return bughub.Bug{}, err
+	}
+	if !ok {
+		return bughub.Bug{}, os.ErrNotExist
+	}
+	botKey := strings.TrimSpace(input.BotKey)
+	if botKey == "" {
+		return bughub.Bug{}, errors.New("bot key is required")
+	}
+	b.SelectedBotKey = botKey
+	if err := store.Upsert(b); err != nil {
+		return bughub.Bug{}, err
+	}
+	return b, nil
 }
 
 func (a *App) GenerateBugContext(input BugContextInput) (string, error) {

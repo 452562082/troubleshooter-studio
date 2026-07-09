@@ -162,7 +162,7 @@ func expectedMCPKeys() []string {
 }
 
 func expectedAgentNames(cfg *config.SystemConfig) []string {
-	return []string{cfg.ResolveID(), cfg.System.ID + "-validator"}
+	return []string{cfg.ResolveID(), cfg.System.ID + "-validator", cfg.System.ID + "-fixer"}
 }
 
 // TestE2E_IDEInstallChain 把三家 IDE target 都跑一遍 init→gen→install→merge MCP→
@@ -288,12 +288,12 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 				t.Fatalf("discover.Scan: %v", err)
 			}
 			if len(agents) != 1 {
-				t.Fatalf("scan 应找到 1 个机器人(内部含排障+验证 agent),实际 %d", len(agents))
+				t.Fatalf("scan 应找到 1 个机器人(内部含排障+验证+修复 agent),实际 %d", len(agents))
 			}
 			if agents[0].Meta.SystemID != cfg.System.ID || agents[0].Meta.Target != target {
 				t.Errorf("scan meta 不对:%+v", agents[0].Meta)
 			}
-			if len(agents[0].Meta.InternalAgents) != 2 {
+			if len(agents[0].Meta.InternalAgents) != 3 {
 				t.Errorf("scan meta should include internal agents, got %+v", agents[0].Meta.InternalAgents)
 			}
 			installedDir := agents[0].Path

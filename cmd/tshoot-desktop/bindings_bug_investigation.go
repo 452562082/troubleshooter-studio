@@ -168,6 +168,10 @@ func (a *App) StartBugInvestigation(input BugInvestigationInput) (bughub.Investi
 	if err := checkoutBugAgentEnvBranches(input.Bot, bug); err != nil {
 		return bughub.InvestigationRun{}, err
 	}
+	if strings.TrimSpace(input.Bot.Key) != "" {
+		bug.SelectedBotKey = input.Bot.Key
+		_ = bugStore().Upsert(bug)
+	}
 	ctx := a.getRuntimeContext()
 	if ctx == nil {
 		ctx = context.Background()
@@ -287,6 +291,12 @@ type BugInvestigationContinueInput struct {
 	Phase         string        `json:"phase,omitempty"`
 }
 
+type BugFixInput struct {
+	BugID         string        `json:"bug_id"`
+	Bot           bughub.BotRef `json:"bot"`
+	PreviousRunID string        `json:"previous_run_id,omitempty"`
+}
+
 func (a *App) ContinueBugInvestigation(input BugInvestigationContinueInput) (bughub.InvestigationRun, error) {
 	bug, ok, err := bugStore().Get(input.BugID)
 	if err != nil {
@@ -321,6 +331,10 @@ func (a *App) ContinueBugInvestigation(input BugInvestigationContinueInput) (bug
 	if err := checkoutBugAgentEnvBranches(input.Bot, bug); err != nil {
 		return bughub.InvestigationRun{}, err
 	}
+	if strings.TrimSpace(input.Bot.Key) != "" {
+		bug.SelectedBotKey = input.Bot.Key
+		_ = bugStore().Upsert(bug)
+	}
 	ctx := a.getRuntimeContext()
 	if ctx == nil {
 		ctx = context.Background()
@@ -333,6 +347,58 @@ func (a *App) ContinueBugInvestigation(input BugInvestigationContinueInput) (bug
 		}
 	}
 	return a.codexInvestigator().Continue(ctx, bug, input.Bot, input.UserInput, previousRunID, input.Phase)
+}
+
+func (a *App) StartBugFix(input BugFixInput) (bughub.InvestigationRun, error) {
+	bug, ok, err := bugStore().Get(input.BugID)
+	if err != nil {
+		return bughub.InvestigationRun{}, err
+	}
+	if !ok {
+		return bughub.InvestigationRun{}, os.ErrNotExist
+	}
+	bug = materializeBugAttachmentsForAgent(bug)
+	target := strings.TrimSpace(input.Bot.Target)
+	switch target {
+	case "codex":
+		if _, err := exec.LookPath("codex"); err != nil {
+			return bughub.InvestigationRun{}, errors.New("未检测到 codex CLI")
+		}
+	case "claude-code":
+		if _, err := exec.LookPath("claude"); err != nil {
+			return bughub.InvestigationRun{}, errors.New("未检测到 claude CLI")
+		}
+	case "openclaw":
+		if _, err := exec.LookPath("openclaw"); err != nil {
+			return bughub.InvestigationRun{}, errors.New("未检测到 openclaw CLI")
+		}
+	case "cursor":
+		return bughub.InvestigationRun{}, errors.New("暂不支持 Cursor 后台直启，请复制上下文后在 Cursor Custom Agent 中发起")
+	default:
+		return bughub.InvestigationRun{}, errors.New("暂不支持该机器人后台直启")
+	}
+	if err := checkoutBugAgentEnvBranches(input.Bot, bug); err != nil {
+		return bughub.InvestigationRun{}, err
+	}
+	if strings.TrimSpace(input.Bot.Key) != "" {
+		bug.SelectedBotKey = input.Bot.Key
+		_ = bugStore().Upsert(bug)
+	}
+	previousRunID := strings.TrimSpace(input.PreviousRunID)
+	if previousRunID == "" {
+		runs, err := bugInvestigationStore().ListByBug(bug.ID)
+		if err == nil && len(runs) > 0 {
+			previousRunID = runs[0].ID
+		}
+	}
+	if previousRunID == "" {
+		return bughub.InvestigationRun{}, errors.New("缺少排障结论，无法启动修复 Agent")
+	}
+	ctx := a.getRuntimeContext()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return a.codexInvestigator().StartFix(ctx, bug, input.Bot, previousRunID)
 }
 
 func (a *App) CancelBugInvestigation(input BugInvestigationCancelInput) error {

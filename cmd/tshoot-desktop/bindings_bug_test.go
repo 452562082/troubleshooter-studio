@@ -566,3 +566,29 @@ generation:
 		t.Fatalf("score = %d, reasons=%+v", matches[0].Score, matches[0].Reasons)
 	}
 }
+
+func TestSaveBugSelectedBotPersistsChoice(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	if err := bugStore().Upsert(bughub.Bug{ID: "zentao-1842", Source: "zentao", SourceID: "1842", Title: "支付页 500"}); err != nil {
+		t.Fatalf("Upsert bug: %v", err)
+	}
+
+	updated, err := (&App{}).SaveBugSelectedBot(BugSelectedBotInput{
+		BugID:  "zentao-1842",
+		BotKey: "/Users/me/.codex/agents/base.toml|codex",
+	})
+	if err != nil {
+		t.Fatalf("SaveBugSelectedBot: %v", err)
+	}
+	if updated.SelectedBotKey != "/Users/me/.codex/agents/base.toml|codex" {
+		t.Fatalf("updated = %+v", updated)
+	}
+	stored, ok, err := bugStore().Get("zentao-1842")
+	if err != nil || !ok {
+		t.Fatalf("Get stored ok=%v err=%v", ok, err)
+	}
+	if stored.SelectedBotKey != updated.SelectedBotKey {
+		t.Fatalf("stored = %+v", stored)
+	}
+}

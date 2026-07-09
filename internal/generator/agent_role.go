@@ -11,7 +11,12 @@ type AgentRole string
 const (
 	AgentRoleTroubleshooter AgentRole = discover.RoleTroubleshooter
 	AgentRoleValidator      AgentRole = discover.RoleValidator
+	AgentRoleFixer          AgentRole = discover.RoleFixer
 )
+
+func internalAgentRoles() []AgentRole {
+	return []AgentRole{AgentRoleTroubleshooter, AgentRoleValidator, AgentRoleFixer}
+}
 
 func agentIDForRole(ctx *Context, role AgentRole) string {
 	if role == AgentRoleTroubleshooter {
@@ -24,6 +29,9 @@ func agentIDForRole(ctx *Context, role AgentRole) string {
 	if role == AgentRoleValidator {
 		return base + "-validator"
 	}
+	if role == AgentRoleFixer {
+		return base + "-fixer"
+	}
 	return agentSlug(ctx)
 }
 
@@ -34,6 +42,9 @@ func roleDisplayName(ctx *Context, role AgentRole) string {
 	}
 	if role == AgentRoleValidator {
 		return name + " 验证"
+	}
+	if role == AgentRoleFixer {
+		return name + " 修复"
 	}
 	return name + " 排障"
 }

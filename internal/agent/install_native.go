@@ -150,6 +150,9 @@ func stagingAgentRole(stagingDir, agentName string) generator.AgentRole {
 	if err == nil {
 		var meta discover.Meta
 		if json.Unmarshal(data, &meta) == nil {
+			if strings.EqualFold(strings.TrimSpace(meta.Role), discover.RoleFixer) {
+				return generator.AgentRoleFixer
+			}
 			if strings.EqualFold(strings.TrimSpace(meta.Role), discover.RoleValidator) {
 				return generator.AgentRoleValidator
 			}
@@ -157,6 +160,9 @@ func stagingAgentRole(stagingDir, agentName string) generator.AgentRole {
 				return generator.AgentRoleTroubleshooter
 			}
 		}
+	}
+	if strings.Contains(strings.ToLower(agentName), "fix") || strings.Contains(strings.ToLower(agentName), "repair") {
+		return generator.AgentRoleFixer
 	}
 	if strings.Contains(strings.ToLower(agentName), "valid") || strings.Contains(strings.ToLower(agentName), "verif") {
 		return generator.AgentRoleValidator
@@ -320,7 +326,7 @@ func replaceSkillsDirForRole(src, dst string, role generator.AgentRole) error {
 		}
 		// Codex staging has a root skills/SKILL.md entry for the troubleshooter only.
 		if len(parts) == 1 {
-			if role == generator.AgentRoleValidator {
+			if role == generator.AgentRoleValidator || role == generator.AgentRoleFixer {
 				return nil
 			}
 			return copyFileSimple(p, filepath.Join(dst, rel))

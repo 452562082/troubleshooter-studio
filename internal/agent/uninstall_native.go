@@ -230,17 +230,22 @@ func uninstallAgentNames(currentName string, meta discover.Meta) []string {
 	}
 	add(currentName)
 	add(meta.AgentID)
+	for _, ag := range meta.InternalAgents {
+		add(ag.ID)
+	}
 	if strings.TrimSpace(meta.TroubleshooterYAML) != "" {
 		if cfg, err := config.LoadFromBytes([]byte(meta.TroubleshooterYAML)); err == nil {
 			add(cfg.ResolveID())
 			if base := strings.TrimSpace(cfg.System.ID); base != "" {
 				add(base + "-validator")
+				add(base + "-fixer")
 			}
 		}
 	}
 	if meta.SystemID != "" {
 		add(meta.SystemID + "-troubleshooter")
 		add(meta.SystemID + "-validator")
+		add(meta.SystemID + "-fixer")
 	}
 	return out
 }

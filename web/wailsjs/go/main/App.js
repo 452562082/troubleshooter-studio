@@ -58,6 +58,10 @@ export function ClearBugPlatformLogin(arg1) {
   return window['go']['main']['App']['ClearBugPlatformLogin'](arg1);
 }
 
+export function ContinueBugInvestigation(arg1) {
+  return window['go']['main']['App']['ContinueBugInvestigation'](arg1);
+}
+
 export function DefaultDestPath(arg1, arg2) {
   return window['go']['main']['App']['DefaultDestPath'](arg1, arg2);
 }
@@ -298,6 +302,10 @@ export function SaveBugPlatform(arg1) {
   return window['go']['main']['App']['SaveBugPlatform'](arg1);
 }
 
+export function SaveBugSelectedBot(arg1) {
+  return window['go']['main']['App']['SaveBugSelectedBot'](arg1);
+}
+
 export function SaveInfraCred(arg1, arg2) {
   return window['go']['main']['App']['SaveInfraCred'](arg1, arg2);
 }
@@ -328,6 +336,10 @@ export function SetDefaultReposRoot(arg1) {
 
 export function ShowMainWindow() {
   return window['go']['main']['App']['ShowMainWindow']();
+}
+
+export function StartBugFix(arg1) {
+  return window['go']['main']['App']['StartBugFix'](arg1);
 }
 
 export function StartBugInvestigation(arg1) {

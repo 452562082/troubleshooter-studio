@@ -101,6 +101,17 @@ export interface BugInvestigationCancelInput {
   run_id: string
 }
 
+export interface BugFixInput {
+  bug_id: string
+  bot: BotRef
+  previous_run_id?: string
+}
+
+export interface BugSelectedBotInput {
+  bug_id: string
+  bot_key: string
+}
+
 export interface BugPlatform {
   id: string
   name: string
@@ -244,6 +255,11 @@ export async function matchBugBots(bugID: string): Promise<BotMatch[]> {
 	return Array.isArray(r) ? r.map(normalizeBotMatch) : []
 }
 
+export async function saveBugSelectedBot(input: BugSelectedBotInput): Promise<BugRecord> {
+  if (!isDesktop()) throw new Error('保存 Bug 机器人选择只在桌面 app 可用')
+  return desktopApp.SaveBugSelectedBot(input) as Promise<BugRecord>
+}
+
 function normalizeBotMatch(raw: any): BotMatch {
 	return {
 		bot: raw?.bot || { key: '', system_id: '', target: '', path: '' },
@@ -255,6 +271,11 @@ function normalizeBotMatch(raw: any): BotMatch {
 export async function startBugInvestigation(input: BugInvestigationInput): Promise<InvestigationRun> {
 	if (!isDesktop()) throw new Error('启动排障只在桌面 app 可用')
 	return normalizeInvestigationRun(await desktopApp.StartBugInvestigation(input))
+}
+
+export async function startBugFix(input: BugFixInput): Promise<InvestigationRun> {
+	if (!isDesktop()) throw new Error('启动修复只在桌面 app 可用')
+	return normalizeInvestigationRun(await desktopApp.StartBugFix(input))
 }
 
 export async function cancelBugInvestigation(input: BugInvestigationCancelInput): Promise<void> {
@@ -294,7 +315,7 @@ export interface InvestigationContinueInput {
   bot: BotRef
   user_input: string
   previous_run_id?: string
-  phase?: 'validation' | 'investigation'
+  phase?: 'validation' | 'investigation' | 'fix'
 }
 
 export async function continueBugInvestigation(input: InvestigationContinueInput): Promise<InvestigationRun> {

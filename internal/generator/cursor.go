@@ -37,7 +37,7 @@ func (g *Generator) GenerateCursor() error {
 		return err
 	}
 	// 1) 生成两个 agent 定义:排障 agent + 验证 agent。两者共享下面同一份 skills/scripts。
-	for _, role := range []AgentRole{AgentRoleTroubleshooter, AgentRoleValidator} {
+	for _, role := range internalAgentRoles() {
 		agentName := agentIDForRole(g.Ctx, role)
 		agentMD, err := buildCursorAgentMD(wsRoot, g.Ctx, agentName, role)
 		if err != nil {
@@ -98,6 +98,17 @@ func buildCursorAgentMD(wsRoot string, ctx *Context, agentName string, role Agen
 			Intro:                  intro,
 			SkillsScriptPathPrefix: "~/.cursor/skills/" + agentName,
 		})
+		return sb.String(), nil
+	}
+	if role == AgentRoleFixer {
+		fmt.Fprintf(&sb, "本 agent 在 Cursor IDE 内作为 Custom Agent 调用,负责 **修复 Bug / 创建修复分支 / 提交并推送**。只在用户明确触发修复后执行。\n\n")
+		sb.WriteString("第一动作是 Read `~/.cursor/skills/" + agentName + "/bug-fixer/SKILL.md`,按其中流程执行。\n\n")
+		sb.WriteString("## 强制流程\n\n")
+		sb.WriteString("1. 确认当前工作区已经在目标环境分支；无法确认就停止。\n")
+		sb.WriteString("2. 从当前环境分支创建独立修复分支，分支名使用 `fix/bug-<source>-<id>-<short>` 风格。\n")
+		sb.WriteString("3. 最小改动修复，运行相关测试或给出无法运行原因。\n")
+		sb.WriteString("4. 提交并推送修复分支；最后通知用户部署该分支，不自行部署。\n\n")
+		sb.WriteString("如果工作区已有用户未提交改动，不要覆盖，先停止并说明。\n")
 		return sb.String(), nil
 	}
 

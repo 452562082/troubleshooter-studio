@@ -28,6 +28,8 @@ import {
   matchBugBots,
   previewBugAttachment,
   saveBugPlatform,
+  saveBugSelectedBot,
+  startBugFix,
   startBugInvestigation,
   syncBugPlatform,
 } from '../lib/bridge'
@@ -58,11 +60,12 @@ const attachmentPreview = ref<BugAttachmentPreviewResult | null>(null)
 const attachmentThumbnails = ref<Record<string, BugAttachmentPreviewResult | 'loading' | 'failed'>>({})
 const investigationRuns = ref<InvestigationRun[]>([])
 const investigationStarting = ref(false)
+const fixStarting = ref(false)
 const investigationCancelling = ref(false)
 const continuingInvestigation = ref(false)
 const supplementDialogOpen = ref(false)
 const userSupplementInput = ref('')
-const supplementPhase = ref<'validation' | 'investigation'>('investigation')
+const supplementPhase = ref<'validation' | 'investigation' | 'fix'>('investigation')
 const outputScrollRef = ref<HTMLElement | null>(null)
 const query = ref('')
 const manualBugID = ref('')
@@ -114,7 +117,7 @@ const platformBotEmptyText = computed(() => {
   return '暂无已安装机器人'
 })
 const selectedRun = computed(() => investigationRuns.value[0])
-const outputTab = ref<'validation' | 'investigation'>('investigation')
+const outputTab = ref<'validation' | 'investigation' | 'fix'>('investigation')
 const selectedBotSupportsDirectLaunch = computed(() => ['codex', 'claude-code', 'openclaw'].includes(selectedBot.value?.target || ''))
 const selectedBotUnsupportedReason = computed(() => {
   if (!selectedBot.value || selectedBotSupportsDirectLaunch.value) return ''
@@ -126,19 +129,20 @@ const latestRunNeedsUserInput = computed(() => {
 	const run = selectedRun.value
 	if (!run) return false
 	const phase = outputTab.value
-	const text = (phase === 'investigation' ? (run.final_message || '') : '') + (run.events || []).filter(e => eventPhase(e) === phase).map(e => e.message).join('\n')
+	const finalText = phase === currentRunPhase(run) ? (run.final_message || run.error || '') : ''
+	const text = finalText + (run.events || []).filter(e => eventPhase(e) === phase).map(e => e.message).join('\n')
 	return /insufficient_info|需要用户补充|需要补充信息|请提供|缺少.*信息|未提供|无法确认|无法采集|登录态|测试账号|无法.*请.*输入/i.test(text)
 })
-const outputPhaseLabel = computed(() => outputTab.value === 'validation' ? '验证 Agent' : '排障 Agent')
-const supplementPhaseLabel = computed(() => supplementPhase.value === 'validation' ? '验证 Agent' : '排障 Agent')
-const supplementActionLabel = computed(() => supplementPhase.value === 'validation' ? '继续验证' : '继续排障')
+const outputPhaseLabel = computed(() => phaseLabel(outputTab.value))
+const supplementPhaseLabel = computed(() => phaseLabel(supplementPhase.value))
+const supplementActionLabel = computed(() => supplementPhase.value === 'validation' ? '继续验证' : supplementPhase.value === 'fix' ? '继续修复' : '继续排障')
 
 const investigationEventLines = computed(() => {
   const run = selectedRun.value
   if (!run) return []
   const finalText = investigationFinalText.value.trim()
   return (run.events || [])
-    .filter(e => eventPhase(e) !== 'validation')
+    .filter(e => eventPhase(e) === 'investigation' || !eventPhase(e))
     .filter(e => !isFinalInvestigationEvent(e))
     .filter(e => !(isTerminalInvestigationRun(run) && isLikelyInvestigationReport(e.message || '')))
     .map(e => e.message)
@@ -156,9 +160,28 @@ const validationEventLines = computed(() => {
     .map(e => e.message)
     .filter(message => Boolean((message || '').trim()))
 })
+const fixEventLines = computed(() => {
+  const run = selectedRun.value
+  if (!run) return []
+  const finalText = fixFinalText.value.trim()
+  return (run.events || [])
+    .filter(e => eventPhase(e) === 'fix')
+    .filter(e => !isFinalInvestigationEvent(e))
+    .map(e => e.message)
+    .filter(message => {
+      const text = (message || '').trim()
+      return Boolean(text) && (!finalText || (text !== finalText && !(text.length > 120 && finalText.includes(text))))
+    })
+})
 const investigationFinalText = computed(() => {
   const run = selectedRun.value
   if (!run) return ''
+  if (currentRunPhase(run) === 'fix') return ''
+  return run.final_message || run.error || fallbackInvestigationFinalMessage(run)
+})
+const fixFinalText = computed(() => {
+  const run = selectedRun.value
+  if (!run || currentRunPhase(run) !== 'fix') return ''
   return run.final_message || run.error || fallbackInvestigationFinalMessage(run)
 })
 const investigationOutput = computed(() => {
@@ -168,16 +191,36 @@ const investigationOutput = computed(() => {
   if (parts.length > 0) return parts.join('\n\n')
   return contextText.value
 })
+const fixOutput = computed(() => {
+  const parts = []
+  if (fixEventLines.value.length > 0) parts.push(fixEventLines.value.join('\n'))
+  if (fixFinalText.value.trim()) parts.push(fixFinalText.value.trim())
+  return parts.join('\n\n')
+})
+const activeOutputText = computed(() => outputTab.value === 'validation'
+  ? validationEventLines.value.join('\n\n')
+  : outputTab.value === 'fix'
+    ? fixOutput.value
+    : investigationOutput.value
+)
 const copyableInvestigationText = computed(() => {
+  const fixResult = fixFinalText.value.trim()
+  if (fixResult) return fixResult
   const result = investigationFinalText.value.trim()
   if (result) return result
   if (!selectedRun.value) return contextText.value.trim()
   return ''
 })
-const copyInvestigationLabel = computed(() => investigationFinalText.value.trim() ? '复制结果' : '复制上下文')
+const copyInvestigationLabel = computed(() => fixFinalText.value.trim() || investigationFinalText.value.trim() ? '复制结果' : '复制上下文')
 const canCancelInvestigation = computed(() => selectedRun.value?.status === 'running')
 const renderedInvestigationMarkdown = computed(() => safeMarkdown(investigationFinalText.value || contextText.value))
 const renderedValidationMarkdown = computed(() => safeMarkdown(validationEventLines.value.join('\n\n')))
+const renderedFixMarkdown = computed(() => safeMarkdown(fixFinalText.value))
+const hasFixOutput = computed(() => fixEventLines.value.length > 0 || Boolean(fixFinalText.value.trim()) || currentRunPhase(selectedRun.value || ({} as InvestigationRun)) === 'fix')
+const canStartFix = computed(() => {
+  const run = selectedRun.value
+  return Boolean(run && run.status === 'succeeded' && selectedBotSupportsDirectLaunch.value && investigationFinalText.value.trim() && !hasFixOutput.value)
+})
 const selectedBugStepsHTML = computed(() => selectedBug.value?.steps ? safeMarkdown(selectedBug.value.steps) : '-')
 const selectedBugDescriptionHTML = computed(() => selectedBug.value?.description ? safeMarkdown(selectedBug.value.description) : '')
 const selectedBugAttachments = computed(() => selectedBug.value?.attachments || [])
@@ -236,12 +279,20 @@ watch([selectedBug, selectedPlatformID], () => {
 }, { flush: 'post' })
 
 watch(selectedRun, (run, previousRun) => {
-  if (!run || run.id !== previousRun?.id || run.status === 'failed') {
+  if (!run) {
     outputTab.value = 'investigation'
+    return
+  }
+  if (run.id !== previousRun?.id) {
+    followRunPhase(run)
   }
 })
 
-watch(investigationOutput, () => {
+watch(activeOutputText, () => {
+  scrollOutputToBottom()
+}, { flush: 'post' })
+
+watch(outputTab, () => {
   scrollOutputToBottom()
 }, { flush: 'post' })
 
@@ -600,6 +651,7 @@ async function startInvestigation() {
   }
   investigationStarting.value = true
   const bugID = bug.id
+  outputTab.value = 'validation'
   try {
     const run = await startBugInvestigation({ bug_id: bugID, bot })
     if (selectedBug.value?.id === bugID && run.bug_id === bugID) mergeInvestigationRun(run)
@@ -608,6 +660,44 @@ async function startInvestigation() {
     toastError('启动排障', e)
   } finally {
     investigationStarting.value = false
+  }
+}
+
+async function startFix() {
+  const bug = selectedBug.value
+  const bot = selectedBot.value
+  const run = selectedRun.value
+  if (!bug || !bot || !run) {
+    toast.error('请先完成排障并选择机器人')
+    return
+  }
+  if (!canStartFix.value) {
+    toast.error('需要排障 Agent 完成结论后才能启动修复')
+    return
+  }
+  fixStarting.value = true
+  const bugID = bug.id
+  outputTab.value = 'fix'
+  try {
+    const nextRun = await startBugFix({ bug_id: bugID, bot, previous_run_id: run.id })
+    if (selectedBug.value?.id === bugID && nextRun.bug_id === bugID) mergeInvestigationRun(nextRun)
+    toast.success('修复 Agent 已启动')
+  } catch (e) {
+    toastError('启动修复', e)
+  } finally {
+    fixStarting.value = false
+  }
+}
+
+async function rememberSelectedBot(botKey: string) {
+  selectedBotKey.value = botKey
+  const bug = selectedBug.value
+  if (!bug || !botKey) return
+  bugs.value = bugs.value.map(b => b.id === bug.id ? { ...b, selected_bot_key: botKey } : b)
+  try {
+    await saveBugSelectedBot({ bug_id: bug.id, bot_key: botKey })
+  } catch (e) {
+    toastError('保存机器人选择', e)
   }
 }
 
@@ -658,6 +748,9 @@ function mergeInvestigationRun(run: InvestigationRun, event?: InvestigationEvent
   investigationRuns.value = idx >= 0
     ? investigationRuns.value.map(item => item.id === run.id ? merged : item)
     : [merged, ...investigationRuns.value]
+  if (selectedRun.value?.id === merged.id) {
+    followRunPhase(merged, event)
+  }
 }
 
 function scrollOutputToBottom() {
@@ -665,6 +758,24 @@ function scrollOutputToBottom() {
     const el = outputScrollRef.value
     if (el) el.scrollTop = el.scrollHeight
   })
+}
+
+function followRunPhase(run: InvestigationRun, event?: InvestigationEvent) {
+  const phase = eventPhase(event || ({} as InvestigationEvent)) || currentRunPhase(run)
+  if (phase === 'validation' || phase === 'investigation' || phase === 'fix') {
+    outputTab.value = phase
+  }
+}
+
+function currentRunPhase(run: InvestigationRun): 'validation' | 'investigation' | 'fix' {
+  const events = run.events || []
+  for (let i = events.length - 1; i >= 0; i--) {
+    const phase = eventPhase(events[i])
+    if (phase === 'validation' || phase === 'investigation' || phase === 'fix') return phase
+  }
+  if ((run.prompt_preview || '').includes('修复 Agent')) return 'fix'
+  if (run.status === 'running') return 'validation'
+  return (run.final_message || run.error || fallbackInvestigationFinalMessage(run)).trim() ? 'investigation' : 'validation'
 }
 
 async function cancelInvestigation() {
@@ -712,6 +823,7 @@ async function submitSupplement() {
   continuingInvestigation.value = true
   const bugID = bug.id
   const prevRunID = selectedRun.value?.id || ''
+  outputTab.value = supplementPhase.value
   try {
     const run = await continueBugInvestigation({
       bug_id: bugID,
@@ -868,6 +980,12 @@ function isFinalInvestigationEvent(event: InvestigationEvent): boolean {
 function eventPhase(event: InvestigationEvent): string {
   const phase = event?.meta?.phase
   return typeof phase === 'string' ? phase : ''
+}
+
+function phaseLabel(phase: 'validation' | 'investigation' | 'fix'): string {
+  if (phase === 'validation') return '验证 Agent'
+  if (phase === 'fix') return '修复 Agent'
+  return '排障 Agent'
 }
 
 function isTerminalInvestigationRun(run: InvestigationRun): boolean {
@@ -1198,7 +1316,7 @@ function isLikelyInvestigationReport(message: string): boolean {
           class="bot-match"
           :class="{ active: selectedBotKey === m.bot.key }"
         >
-          <input v-model="selectedBotKey" type="radio" :value="m.bot.key" />
+          <input v-model="selectedBotKey" type="radio" :value="m.bot.key" @change="rememberSelectedBot(m.bot.key)" />
           <span>
             <strong>{{ m.bot.name || m.bot.system_id || m.bot.path }}</strong>
             <em>{{ m.bot.target }}</em>
@@ -1214,6 +1332,9 @@ function isLikelyInvestigationReport(message: string): boolean {
           </button>
           <button v-if="canCancelInvestigation" class="btn" type="button" :disabled="investigationCancelling" @click="cancelInvestigation">
             停止
+          </button>
+          <button v-if="canStartFix" class="btn accent" type="button" :disabled="fixStarting" @click="startFix">
+            {{ fixStarting ? '启动中...' : '启动修复 Agent' }}
           </button>
           <button v-if="copyableInvestigationText" class="btn" type="button" @click="copyInvestigationOutput">{{ copyInvestigationLabel }}</button>
         </div>
@@ -1247,6 +1368,17 @@ function isLikelyInvestigationReport(message: string): boolean {
         >
           排障分析
         </button>
+        <button
+          v-if="hasFixOutput"
+          class="output-tab"
+          :class="{ active: outputTab === 'fix' }"
+          type="button"
+          role="tab"
+          :aria-selected="outputTab === 'fix'"
+          @click="outputTab = 'fix'"
+        >
+          修复提交
+        </button>
       </div>
       <div ref="outputScrollRef" class="context-preview" role="log" aria-live="polite">
         <template v-if="selectedRun">
@@ -1255,11 +1387,20 @@ function isLikelyInvestigationReport(message: string): boolean {
             <div v-else class="preview-placeholder">验证 Agent 完成后在这里显示取证过程和证据</div>
           </template>
           <template v-else>
+            <template v-if="outputTab === 'fix'">
+              <div v-if="fixEventLines.length" class="process-log">
+                <div v-for="(line, idx) in fixEventLines" :key="idx" class="process-line">{{ line }}</div>
+              </div>
+              <article v-if="fixFinalText" class="markdown-result" v-html="renderedFixMarkdown"></article>
+              <div v-if="!fixEventLines.length && !fixFinalText" class="preview-placeholder">修复 Agent 启动后在这里显示修复、提交和推送过程</div>
+            </template>
+            <template v-else>
             <div v-if="investigationEventLines.length" class="process-log">
               <div v-for="(line, idx) in investigationEventLines" :key="idx" class="process-line">{{ line }}</div>
             </div>
             <article v-if="investigationFinalText" class="markdown-result" v-html="renderedInvestigationMarkdown"></article>
             <div v-if="!investigationEventLines.length && !investigationFinalText" class="preview-placeholder">验证完成后在这里显示排障过程和结论</div>
+            </template>
           </template>
         </template>
         <article v-else-if="contextText" class="markdown-result" v-html="renderedInvestigationMarkdown"></article>
@@ -1294,7 +1435,7 @@ function isLikelyInvestigationReport(message: string): boolean {
           v-model="userSupplementInput"
           class="supplement-textarea"
           rows="6"
-          :placeholder="supplementPhase === 'validation' ? '输入验证 Agent 缺失的信息，如入口 URL、测试账号、复现条件、截图说明等' : '输入排障 Agent 缺失的信息，如日志片段、trace id、服务线索、配置变更等'"
+          :placeholder="supplementPhase === 'validation' ? '输入验证 Agent 缺失的信息，如入口 URL、测试账号、复现条件、截图说明等' : supplementPhase === 'fix' ? '输入修复 Agent 需要补充的要求，如期望分支名、测试命令、修复范围或提交说明等' : '输入排障 Agent 缺失的信息，如日志片段、trace id、服务线索、配置变更等'"
           :disabled="continuingInvestigation"
         ></textarea>
         <div class="supplement-modal-actions">

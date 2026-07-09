@@ -284,10 +284,62 @@ func TestBuildCodexInvestigationPromptIncludesBugAndBot(t *testing.T) {
 		"不要修改代码",
 		"Read `incident-investigator/SKILL.md`",
 		"7 步排障图谱",
+		"最终回答必须使用下面的故障快报模板",
+		"🚨 故障快报 | <环境> | <服务/模块>",
+		"confidence=high",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
 		}
+	}
+	if strings.Contains(prompt, "1. 排障过程：") {
+		t.Fatalf("investigation prompt should not use the old generic output shape:\n%s", prompt)
+	}
+}
+
+func TestBuildCodexContinuePromptRequiresIncidentReport(t *testing.T) {
+	prompt := BuildCodexContinuePrompt(
+		Bug{ID: "zentao-909", Source: "zentao", SourceID: "909", Title: "分类数量错误"},
+		BotRef{Target: "codex", Env: "test"},
+		"补充账号：admin",
+		InvestigationRun{FinalMessage: "前一轮缺少登录态"},
+	)
+	for _, want := range []string{
+		"用户补充信息",
+		"补充账号：admin",
+		"最终回答必须使用下面的故障快报模板",
+		"🚨 故障快报 | <环境> | <服务/模块>",
+		"7) 需补信息",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("continue prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "1. 排障过程：") {
+		t.Fatalf("continue prompt should not use the old generic output shape:\n%s", prompt)
+	}
+}
+
+func TestBuildCodexFixPromptUsesStructuredOutputContract(t *testing.T) {
+	prompt := BuildCodexFixPrompt(
+		Bug{ID: "zentao-909", Source: "zentao", SourceID: "909", Title: "分类数量错误"},
+		BotRef{Target: "codex", Env: "test"},
+		InvestigationRun{FinalMessage: "根因：分类接口统计字段错误"},
+		"只修复最小问题",
+	)
+	for _, want := range []string{
+		"你是 Bug 修复 Agent",
+		"最终回答必须只输出下面的 YAML 结构",
+		"fix_status: fixed_pushed | blocked | failed",
+		"deployment_notice",
+		"blocked_reason",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("fix prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "1. 修复分支") {
+		t.Fatalf("fix prompt should not use the old generic output shape:\n%s", prompt)
 	}
 }
 
@@ -482,7 +534,7 @@ func TestCodexInvestigatorPausesWhenValidationNeedsUserInput(t *testing.T) {
 		}
 	}
 	joined := strings.Join(messages, "\n")
-	if !strings.Contains(joined, "尚未给出可进入排障的完整验证结论") || !strings.Contains(joined, "未提供后台账号") {
+	if !strings.Contains(joined, "验证 Agent 信息不足，已暂停进入排障 Agent") || !strings.Contains(joined, "未提供后台账号") {
 		t.Fatalf("validation messages = %q", joined)
 	}
 }
@@ -534,10 +586,22 @@ gaps: []`,
 			want: true,
 		},
 		{
-			name: "fixed verified",
-			report: `verification_status: fixed_verified
+			name: "still reproduces",
+			report: `verification_status: still_reproduces
 gaps: []`,
 			want: true,
+		},
+		{
+			name: "not reproduced pauses before investigation",
+			report: `verification_status: not_reproduced
+gaps: []`,
+			want: false,
+		},
+		{
+			name: "fixed verified pauses before investigation",
+			report: `verification_status: fixed_verified
+gaps: []`,
+			want: false,
 		},
 		{
 			name: "tool limitation is non blocking when gaps empty",
@@ -601,6 +665,7 @@ func TestBuildCodexValidationPromptKeepsValidatorEvidenceOnly(t *testing.T) {
 		"不要把它本身写入 gaps",
 		"后台登录态/测试账号",
 		"unchecked_scopes",
+		"最终回答不得输出该结构之外的解释性段落",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("validation prompt missing %q:\n%s", want, prompt)
@@ -799,6 +864,54 @@ func TestCodexInvestigatorKeepsValidationContinuationPausedWithoutEvidence(t *te
 	}
 	if got := strings.Count(string(calls), "---CALL---"); got != 1 {
 		t.Fatalf("want validation only, got %d calls:\n%s", got, calls)
+	}
+}
+
+func TestCodexInvestigatorPausesWhenValidationDoesNotReproduce(t *testing.T) {
+	root := t.TempDir()
+	troubleshooterWorkspace := filepath.Join(root, "troubleshooter")
+	validatorWorkspace := filepath.Join(root, "validator")
+	for _, dir := range []string{troubleshooterWorkspace, validatorWorkspace} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	callsPath := filepath.Join(root, "calls.txt")
+	bin := filepath.Join(root, "codex")
+	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\n{\n  printf '%s\\n' '---CALL---'\n  pwd\n  printf '%s\\n' \"$last\"\n} >> " + shellQuote(callsPath) + "\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: not_reproduced\\\\ngaps: []\\\\nobserved_behavior: 未复现原始问题\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"rca should not run\"}}' ;;\nesac\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := NewInvestigationStore(root)
+	inv := NewCodexInvestigator(store, bin)
+	run, err := inv.StartWithValidator(
+		context.Background(),
+		Bug{ID: "bug-1", Title: "Bug"},
+		BotRef{Key: "t|codex", Target: "codex", Path: troubleshooterWorkspace, Role: "troubleshooter"},
+		BotRef{Key: "v|codex", Target: "codex", Path: validatorWorkspace, Role: "validator"},
+	)
+	if err != nil {
+		t.Fatalf("StartWithValidator: %v", err)
+	}
+	waited, err := inv.Wait(run.ID)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if waited.Status != InvestigationSucceeded || strings.TrimSpace(waited.FinalMessage) != "" {
+		t.Fatalf("waited = %+v", waited)
+	}
+	calls, err := os.ReadFile(callsPath)
+	if err != nil {
+		t.Fatalf("ReadFile calls: %v", err)
+	}
+	if got := strings.Count(string(calls), "---CALL---"); got != 1 {
+		t.Fatalf("want validation only, got %d calls:\n%s", got, calls)
+	}
+	if !strings.Contains(string(calls), "verification_status") || strings.Contains(string(calls), "请作为选定的 AI 排障机器人开始排障") {
+		t.Fatalf("unexpected calls:\n%s", calls)
+	}
+	if phaseForMessageContaining(eventPhases(waited.Events), "未复现原始 Bug") != "validation" {
+		t.Fatalf("missing not reproduced pause event: %+v", waited.Events)
 	}
 }
 

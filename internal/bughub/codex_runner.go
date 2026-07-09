@@ -119,11 +119,7 @@ func BuildCodexInvestigationPromptWithValidation(b Bug, bot BotRef, validationRe
 		sb.WriteString(strings.TrimSpace(validationReport))
 		sb.WriteString("\n")
 	}
-	sb.WriteString("\n## 输出结构\n\n")
-	sb.WriteString("1. 排障过程：列出你实际执行的查询（trace/log/metric/code/config），附上关键证据。每一项前面标记 [已查] 或 [未查+原因]。\n")
-	sb.WriteString("2. 最可能根因：基于你自己查到的证据得出的结论，不要复述验证报告。\n")
-	sb.WriteString("3. 建议处置和验证方法\n")
-	sb.WriteString("4. 需要用户补充的信息\n")
+	sb.WriteString(investigationOutputContract())
 	return sb.String()
 }
 
@@ -179,11 +175,7 @@ func BuildCodexContinuePrompt(b Bug, bot BotRef, userInput string, prevRun Inves
 	// Bug context
 	sb.WriteString(GenerateContext(b, bot))
 
-	sb.WriteString("\n## 输出结构\n\n")
-	sb.WriteString("1. 排障过程：列出你实际执行的查询（trace/log/metric/code/config），附上关键证据。每一项前面标记 [已查] 或 [未查+原因]。\n")
-	sb.WriteString("2. 最可能根因：基于你自己查到的证据得出的结论。\n")
-	sb.WriteString("3. 建议处置和验证方法\n")
-	sb.WriteString("4. 需要用户补充的信息\n")
+	sb.WriteString(investigationOutputContract())
 	return sb.String()
 }
 
@@ -247,12 +239,7 @@ func BuildCodexFixPrompt(b Bug, bot BotRef, prevRun InvestigationRun, userInput 
 	sb.WriteString(GenerateContext(b, bot))
 	sb.WriteString("\n")
 	appendPreviousRunForFix(&sb, prevRun)
-	sb.WriteString("\n## 输出结构\n\n")
-	sb.WriteString("1. 修复分支\n")
-	sb.WriteString("2. 修改摘要\n")
-	sb.WriteString("3. 测试/验证结果\n")
-	sb.WriteString("4. 提交与推送结果\n")
-	sb.WriteString("5. 部署提示\n")
+	sb.WriteString(fixOutputContract())
 	return sb.String()
 }
 
@@ -317,6 +304,54 @@ func validationOutputContract() string {
 	sb.WriteString("handoff_to_troubleshooter:\n  evidence_summary: <只写事实>\n  unchecked_scopes: []\n")
 	sb.WriteString("gaps: []\n")
 	sb.WriteString("\n只有当用户需要补充的阻塞资料已经清空时，gaps 才能输出 []。\n")
+	sb.WriteString("最终回答不得输出该结构之外的解释性段落。\n")
+	return sb.String()
+}
+
+func investigationOutputContract() string {
+	var sb strings.Builder
+	sb.WriteString("\n## 最终输出契约（必须遵守）\n\n")
+	sb.WriteString("最终回答必须使用下面的故障快报模板，不要改成普通列表或过程总结。证据不足时也要输出故障快报，但把置信度标为中/低，并在“需补信息”里列明缺口。\n\n")
+	sb.WriteString("```text\n")
+	sb.WriteString("🚨 故障快报 | <环境> | <服务/模块>\n")
+	sb.WriteString("🕒 时间: <故障窗口，使用绝对时间和时区>\n")
+	sb.WriteString("📌 结论: <一句话根因或低置信度疑似结论>\n")
+	sb.WriteString("1) 影响范围  <用户影响 / 页面或接口 / 错误量或复现范围>\n")
+	sb.WriteString("2) 关键信号  <TOP 3 信号，包含时间、trace_id/request_id/日志关键词/指标结论>\n")
+	sb.WriteString("3) 已查证据  [已查] trace/log/metric/code/config/data 中实际查过的证据；[未查+原因] 不可用或用户未提供的关键证据\n")
+	sb.WriteString("4) 根因      <直接根因 + 深层根因 + 置信度: 高/中/低 + 维度自检>\n")
+	sb.WriteString("5) 处置      <P0 止血 / P1 修复 / P2 预防；低置信度不得给生产修改命令>\n")
+	sb.WriteString("6) 验证      <如何确认恢复或如何复查修复>\n")
+	sb.WriteString("7) 需补信息  <无则写 []；有则列最小阻塞项及获取方式>\n")
+	sb.WriteString("```\n\n")
+	sb.WriteString("如果 confidence=high，按 `incident-investigator/SKILL.md` 的步骤 7 追加 known-errors.local.yaml 沉淀草稿；confidence=medium/low 时不要追加沉淀草稿。\n")
+	return sb.String()
+}
+
+func fixOutputContract() string {
+	var sb strings.Builder
+	sb.WriteString("\n## 最终输出契约（必须遵守）\n\n")
+	sb.WriteString("修复完成、阻塞或失败时，最终回答必须只输出下面的 YAML 结构，不要改成普通列表：\n\n")
+	sb.WriteString("```yaml\n")
+	sb.WriteString("fix_status: fixed_pushed | blocked | failed\n")
+	sb.WriteString("environment: \"<env>\"\n")
+	sb.WriteString("branches:\n")
+	sb.WriteString("  - repo: \"<repo>\"\n")
+	sb.WriteString("    base_branch: \"<env-branch>\"\n")
+	sb.WriteString("    fix_branch: \"<fix-branch>\"\n")
+	sb.WriteString("    commit: \"<sha-or-empty>\"\n")
+	sb.WriteString("    pushed: true\n")
+	sb.WriteString("changes:\n")
+	sb.WriteString("  - \"<file-or-module>: <what changed>\"\n")
+	sb.WriteString("tests:\n")
+	sb.WriteString("  - command: \"<command>\"\n")
+	sb.WriteString("    result: passed | failed | skipped\n")
+	sb.WriteString("    note: \"<short evidence>\"\n")
+	sb.WriteString("deployment_notice: \"请部署 <repo>/<fix_branch> 到 <env> 后再触发验证 Agent 回归。\"\n")
+	sb.WriteString("risks:\n")
+	sb.WriteString("  - \"<remaining-risk-or-empty>\"\n")
+	sb.WriteString("blocked_reason: \"<only when blocked/failed>\"\n")
+	sb.WriteString("```\n")
 	return sb.String()
 }
 
@@ -640,7 +675,7 @@ func (i *CodexInvestigator) collectValidationContinueRun(ctx context.Context, ru
 		return
 	}
 	if !validationReportReadyForInvestigation(validationReport) {
-		i.emitStageEvent(runID, "validation", "验证 Agent 尚未给出可进入排障的完整验证结论，已暂停进入排障 Agent")
+		i.emitStageEvent(runID, "validation", validationPauseMessage(validationReport))
 		if err := i.store.Finish(runID, InvestigationSucceeded, "", ""); err != nil {
 			active.setError(err)
 			return
@@ -763,7 +798,7 @@ func (i *CodexInvestigator) collectRun(ctx context.Context, runID string, bug Bu
 		return
 	}
 	if !validationReportReadyForInvestigation(validationReport) {
-		i.emitStageEvent(runID, "validation", "验证 Agent 尚未给出可进入排障的完整验证结论，已暂停进入排障 Agent")
+		i.emitStageEvent(runID, "validation", validationPauseMessage(validationReport))
 		if err := i.store.Finish(runID, InvestigationSucceeded, "", ""); err != nil {
 			active.setError(err)
 			return
@@ -825,10 +860,23 @@ func validationReportReadyForInvestigation(report string) bool {
 	// status and explicitly empty blocking gaps before investigation can start.
 	status := validationStatus(text)
 	switch status {
-	case "reproduced", "not_reproduced", "fixed_verified", "still_reproduces":
+	case "reproduced", "still_reproduces":
 		return true
 	default:
 		return false
+	}
+}
+
+func validationPauseMessage(report string) string {
+	switch validationStatus(report) {
+	case "not_reproduced":
+		return "验证 Agent 未复现原始 Bug，已暂停进入排障 Agent"
+	case "fixed_verified":
+		return "验证 Agent 确认修复已通过，已暂停进入排障 Agent"
+	case "insufficient_info":
+		return "验证 Agent 信息不足，已暂停进入排障 Agent"
+	default:
+		return "验证 Agent 尚未给出可进入排障的复现结论，已暂停进入排障 Agent"
 	}
 }
 

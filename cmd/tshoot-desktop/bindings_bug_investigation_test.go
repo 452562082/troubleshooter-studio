@@ -78,8 +78,8 @@ func TestStartBugInvestigationChecksOutConfiguredEnvBranch(t *testing.T) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		writeBotMeta(t, dir)
 	}
+	writeBotMeta(t, agentDir)
 	if err := userconfig.SetRepoPathsForSystem("base", map[string]string{"app": repo}); err != nil {
 		t.Fatalf("SetRepoPathsForSystem: %v", err)
 	}

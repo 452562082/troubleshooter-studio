@@ -89,18 +89,7 @@ func checkoutEnvBranches(bot bughub.BotRef, bug bughub.Bug) error {
 }
 
 func checkoutBugAgentEnvBranches(bot bughub.BotRef, bug bughub.Bug) error {
-	seen := map[string]bool{}
-	for _, candidate := range []bughub.BotRef{bot, bughub.ValidatorBotFor(bot)} {
-		key := strings.TrimSpace(candidate.Path) + "|" + strings.TrimSpace(candidate.Target)
-		if key == "|" || seen[key] {
-			continue
-		}
-		seen[key] = true
-		if err := checkoutEnvBranches(candidate, bug); err != nil {
-			return err
-		}
-	}
-	return nil
+	return checkoutEnvBranches(bot, bug)
 }
 
 func ensureRepoBranch(repoPath string, branch string) error {

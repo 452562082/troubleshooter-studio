@@ -279,6 +279,62 @@ func safePathSegment(input string) string {
 	return input
 }
 
+type BugInvestigationContinueInput struct {
+	BugID         string        `json:"bug_id"`
+	Bot           bughub.BotRef `json:"bot"`
+	UserInput     string        `json:"user_input"`
+	PreviousRunID string        `json:"previous_run_id,omitempty"`
+	Phase         string        `json:"phase,omitempty"`
+}
+
+func (a *App) ContinueBugInvestigation(input BugInvestigationContinueInput) (bughub.InvestigationRun, error) {
+	bug, ok, err := bugStore().Get(input.BugID)
+	if err != nil {
+		return bughub.InvestigationRun{}, err
+	}
+	if !ok {
+		return bughub.InvestigationRun{}, os.ErrNotExist
+	}
+	bug = materializeBugAttachmentsForAgent(bug)
+	target := strings.TrimSpace(input.Bot.Target)
+	switch target {
+	case "codex":
+		if _, err := exec.LookPath("codex"); err != nil {
+			return bughub.InvestigationRun{}, errors.New("未检测到 codex CLI")
+		}
+	case "claude-code":
+		if _, err := exec.LookPath("claude"); err != nil {
+			return bughub.InvestigationRun{}, errors.New("未检测到 claude CLI")
+		}
+	case "openclaw":
+		if _, err := exec.LookPath("openclaw"); err != nil {
+			return bughub.InvestigationRun{}, errors.New("未检测到 openclaw CLI")
+		}
+	case "cursor":
+		return bughub.InvestigationRun{}, errors.New("暂不支持 Cursor 后台直启，请复制上下文后在 Cursor Custom Agent 中发起")
+	default:
+		return bughub.InvestigationRun{}, errors.New("暂不支持该机器人后台直启")
+	}
+	if strings.TrimSpace(input.UserInput) == "" {
+		return bughub.InvestigationRun{}, errors.New("补充信息不能为空")
+	}
+	if err := checkoutBugAgentEnvBranches(input.Bot, bug); err != nil {
+		return bughub.InvestigationRun{}, err
+	}
+	ctx := a.getRuntimeContext()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	previousRunID := strings.TrimSpace(input.PreviousRunID)
+	if previousRunID == "" {
+		runs, err := bugInvestigationStore().ListByBug(bug.ID)
+		if err == nil && len(runs) > 0 {
+			previousRunID = runs[0].ID
+		}
+	}
+	return a.codexInvestigator().Continue(ctx, bug, input.Bot, input.UserInput, previousRunID, input.Phase)
+}
+
 func (a *App) CancelBugInvestigation(input BugInvestigationCancelInput) error {
 	if strings.TrimSpace(input.RunID) == "" {
 		return errors.New("run id is required")

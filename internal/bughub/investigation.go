@@ -30,16 +30,17 @@ type InvestigationEvent struct {
 }
 
 type InvestigationRun struct {
-	ID            string               `json:"id"`
-	BugID         string               `json:"bug_id"`
-	BotKey        string               `json:"bot_key,omitempty"`
-	Status        InvestigationStatus  `json:"status"`
-	StartedAt     time.Time            `json:"started_at,omitempty"`
-	FinishedAt    *time.Time           `json:"finished_at,omitempty"`
-	PromptPreview string               `json:"prompt_preview,omitempty"`
-	Events        []InvestigationEvent `json:"events,omitempty"`
-	FinalMessage  string               `json:"final_message,omitempty"`
-	Error         string               `json:"error,omitempty"`
+	ID             string               `json:"id"`
+	BugID          string               `json:"bug_id"`
+	BotKey         string               `json:"bot_key,omitempty"`
+	Status         InvestigationStatus  `json:"status"`
+	StartedAt      time.Time            `json:"started_at,omitempty"`
+	FinishedAt     *time.Time           `json:"finished_at,omitempty"`
+	PromptPreview  string               `json:"prompt_preview,omitempty"`
+	Events         []InvestigationEvent `json:"events,omitempty"`
+	FinalMessage   string               `json:"final_message,omitempty"`
+	Error          string               `json:"error,omitempty"`
+	ContinuationOf string               `json:"continuation_of,omitempty"`
 }
 
 var investigationStoreMu sync.Mutex

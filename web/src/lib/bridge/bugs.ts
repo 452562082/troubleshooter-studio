@@ -89,6 +89,7 @@ export interface InvestigationRun {
   events?: InvestigationEvent[]
   final_message?: string
   error?: string
+  continuation_of?: string
 }
 
 export interface BugInvestigationInput {
@@ -279,10 +280,24 @@ function normalizeInvestigationRun(raw: any): InvestigationRun {
 		events: Array.isArray(raw?.events) ? raw.events : [],
 		final_message: raw?.final_message || '',
 		error: raw?.error || '',
+		continuation_of: raw?.continuation_of || '',
 	}
 }
 
 export async function generateBugContext(input: { bug_id: string; bot: BotRef }): Promise<string> {
 	if (!isDesktop()) throw new Error('生成排障上下文只在桌面 app 可用')
 	return desktopApp.GenerateBugContext(input)
+}
+
+export interface InvestigationContinueInput {
+  bug_id: string
+  bot: BotRef
+  user_input: string
+  previous_run_id?: string
+  phase?: 'validation' | 'investigation'
+}
+
+export async function continueBugInvestigation(input: InvestigationContinueInput): Promise<InvestigationRun> {
+  if (!isDesktop()) throw new Error('继续排障只在桌面 app 可用')
+  return normalizeInvestigationRun(await desktopApp.ContinueBugInvestigation(input))
 }

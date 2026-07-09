@@ -367,7 +367,7 @@ func TestCodexInvestigatorRunsFakeCodex(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(root, "codex")
-	script := "#!/bin/sh\nprintf '%s\n' '{\"type\":\"thread.started\",\"thread_id\":\"t1\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"final answer\"}}' '{\"type\":\"turn.completed\"}'\n"
+	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"t1\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: reproduced\"}}' '{\"type\":\"turn.completed\"}' ;;\n  *) printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"t1\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"final answer\"}}' '{\"type\":\"turn.completed\"}' ;;\nesac\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -436,6 +436,137 @@ func TestCodexInvestigatorRunsValidationAgentBeforeInvestigationAgent(t *testing
 	}
 	if !strings.Contains(prompts, "## 验证 Agent 报告") || !strings.Contains(prompts, "movie shows 一集全") {
 		t.Fatalf("investigation prompt missing validation report:\n%s", prompts)
+	}
+}
+
+func TestCodexInvestigatorPausesWhenValidationNeedsUserInput(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "repo")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promptsPath := filepath.Join(root, "prompts.txt")
+	bin := filepath.Join(root, "codex")
+	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\n{\n  printf '%s\\n' '---PROMPT---'\n  printf '%s\\n' \"$last\"\n} >> " + shellQuote(promptsPath) + "\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: insufficient_info\\\\ngaps:\\\\n- 未提供后台账号/登录态，无法确认页面业务数据。\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"rca should not run\"}}' ;;\nesac\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := NewInvestigationStore(root)
+	inv := NewCodexInvestigator(store, bin)
+	run, err := inv.Start(context.Background(), Bug{ID: "bug-1", Title: "Bug"}, BotRef{Key: "b|codex", Target: "codex", Path: workspace})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waited, err := inv.Wait(run.ID)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if waited.Status != InvestigationSucceeded || strings.TrimSpace(waited.FinalMessage) != "" {
+		t.Fatalf("waited = %+v", waited)
+	}
+	data, err := os.ReadFile(promptsPath)
+	if err != nil {
+		t.Fatalf("ReadFile prompts: %v", err)
+	}
+	prompts := string(data)
+	if got := strings.Count(prompts, "---PROMPT---"); got != 1 {
+		t.Fatalf("prompt count = %d, want validation only\n%s", got, prompts)
+	}
+	var messages []string
+	for _, event := range waited.Events {
+		if phase, _ := event.Meta["phase"].(string); phase == "validation" {
+			messages = append(messages, event.Message)
+		}
+		if phase, _ := event.Meta["phase"].(string); phase == "investigation" {
+			t.Fatalf("unexpected investigation event: %+v", event)
+		}
+	}
+	joined := strings.Join(messages, "\n")
+	if !strings.Contains(joined, "尚未给出可进入排障的完整验证结论") || !strings.Contains(joined, "未提供后台账号") {
+		t.Fatalf("validation messages = %q", joined)
+	}
+}
+
+func TestCodexInvestigatorPausesWhenValidationStatusMissing(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "repo")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promptsPath := filepath.Join(root, "prompts.txt")
+	bin := filepath.Join(root, "codex")
+	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\n{\n  printf '%s\\n' '---PROMPT---'\n  printf '%s\\n' \"$last\"\n} >> " + shellQuote(promptsPath) + "\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"验证看起来完成了，但没有结构化状态\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"rca should not run\"}}' ;;\nesac\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := NewInvestigationStore(root)
+	inv := NewCodexInvestigator(store, bin)
+	run, err := inv.Start(context.Background(), Bug{ID: "bug-1", Title: "Bug"}, BotRef{Key: "b|codex", Target: "codex", Path: workspace})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waited, err := inv.Wait(run.ID)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if waited.Status != InvestigationSucceeded {
+		t.Fatalf("waited = %+v", waited)
+	}
+	data, err := os.ReadFile(promptsPath)
+	if err != nil {
+		t.Fatalf("ReadFile prompts: %v", err)
+	}
+	if got := strings.Count(string(data), "---PROMPT---"); got != 1 {
+		t.Fatalf("prompt count = %d, want validation only\n%s", got, data)
+	}
+}
+
+func TestValidationReportReadyForInvestigationRequiresTerminalStatusAndNoGaps(t *testing.T) {
+	cases := []struct {
+		name   string
+		report string
+		want   bool
+	}{
+		{
+			name: "reproduced",
+			report: `verification_status: reproduced
+gaps: []`,
+			want: true,
+		},
+		{
+			name: "fixed verified",
+			report: `verification_status: fixed_verified
+gaps: []`,
+			want: true,
+		},
+		{
+			name: "insufficient info",
+			report: `verification_status: insufficient_info
+gaps:
+- 缺少测试账号`,
+			want: false,
+		},
+		{
+			name: "missing status",
+			report: `observed_behavior: 已打开页面
+gaps: []`,
+			want: false,
+		},
+		{
+			name: "non empty gaps",
+			report: `verification_status: reproduced
+gaps:
+- 仍缺少登录态`,
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := validationReportReadyForInvestigation(tc.report); got != tc.want {
+				t.Fatalf("validationReportReadyForInvestigation() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -511,6 +642,147 @@ func TestCodexInvestigatorUsesValidatorBotForValidationStage(t *testing.T) {
 	}
 }
 
+func TestCodexInvestigatorContinuesValidationPhaseWithValidatorBot(t *testing.T) {
+	root := t.TempDir()
+	troubleshooterWorkspace := filepath.Join(root, "troubleshooter")
+	validatorWorkspace := filepath.Join(root, "validator")
+	for _, dir := range []string{troubleshooterWorkspace, validatorWorkspace} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	callsPath := filepath.Join(root, "calls.txt")
+	bin := filepath.Join(root, "codex")
+	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\n{\n  printf '%s\\n' '---CALL---'\n  pwd\n  printf '%s\\n' \"$last\"\n} >> " + shellQuote(callsPath) + "\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: reproduced\\\\nvalidation continued\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"rca final\"}}' ;;\nesac\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := NewInvestigationStore(root)
+	prevRun := InvestigationRun{
+		ID:     "run-prev",
+		BugID:  "bug-1",
+		Status: InvestigationSucceeded,
+		Events: []InvestigationEvent{{
+			Type:    "agent_message",
+			Message: "previous validation",
+			Meta:    map[string]any{"phase": "validation"},
+		}},
+	}
+	if err := store.Upsert(prevRun); err != nil {
+		t.Fatalf("Upsert previous run: %v", err)
+	}
+	inv := NewCodexInvestigator(store, bin)
+	run, err := inv.Continue(
+		context.Background(),
+		Bug{ID: "bug-1", Title: "Bug"},
+		BotRef{
+			Key:      "t|codex",
+			Target:   "codex",
+			Path:     troubleshooterWorkspace,
+			SystemID: "base",
+			Role:     "troubleshooter",
+			InternalAgents: []BotInternalAgent{
+				{ID: "troubleshooter", Role: "troubleshooter"},
+				{ID: "validator", Role: "validator"},
+			},
+		},
+		"补充验证账号",
+		prevRun.ID,
+		"validation",
+	)
+	if err != nil {
+		t.Fatalf("Continue validation: %v", err)
+	}
+	waited, err := inv.Wait(run.ID)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if waited.Status != InvestigationSucceeded || waited.BotKey != "t|codex" || waited.FinalMessage != "rca final" {
+		t.Fatalf("waited = %+v", waited)
+	}
+	calls, err := os.ReadFile(callsPath)
+	if err != nil {
+		t.Fatalf("ReadFile calls: %v", err)
+	}
+	callParts := strings.Split(string(calls), "---CALL---")
+	if len(callParts) < 3 {
+		t.Fatalf("want validation + investigation calls, got:\n%s", calls)
+	}
+	if !strings.Contains(callParts[1], validatorWorkspace) || !strings.Contains(callParts[1], "你是 Bug 验证 Agent") {
+		t.Fatalf("validation continuation should use validator workspace and prompt:\n%s", callParts[1])
+	}
+	if !strings.Contains(callParts[2], troubleshooterWorkspace) || !strings.Contains(callParts[2], "请作为选定的 AI 排障机器人开始排障") {
+		t.Fatalf("validation continuation should enter investigation after evidence:\n%s", callParts[2])
+	}
+	phasesByMessage := map[string]string{}
+	for _, event := range waited.Events {
+		if event.Meta != nil {
+			phase, _ := event.Meta["phase"].(string)
+			phasesByMessage[event.Message] = phase
+		}
+	}
+	if phasesByMessage["验证 Agent 继续取证（基于用户补充信息）"] != "validation" || phasesByMessage["rca final"] != "investigation" || phaseForMessageContaining(phasesByMessage, "validation continued") != "validation" {
+		t.Fatalf("phasesByMessage = %+v", phasesByMessage)
+	}
+}
+
+func TestCodexInvestigatorKeepsValidationContinuationPausedWithoutEvidence(t *testing.T) {
+	root := t.TempDir()
+	troubleshooterWorkspace := filepath.Join(root, "troubleshooter")
+	validatorWorkspace := filepath.Join(root, "validator")
+	for _, dir := range []string{troubleshooterWorkspace, validatorWorkspace} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	callsPath := filepath.Join(root, "calls.txt")
+	bin := filepath.Join(root, "codex")
+	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\n{\n  printf '%s\\n' '---CALL---'\n  pwd\n  printf '%s\\n' \"$last\"\n} >> " + shellQuote(callsPath) + "\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: insufficient_info\\\\ngaps:\\\\n- 仍缺少测试账号\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"rca should not run\"}}' ;;\nesac\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := NewInvestigationStore(root)
+	prevRun := InvestigationRun{ID: "run-prev", BugID: "bug-1", Status: InvestigationSucceeded}
+	if err := store.Upsert(prevRun); err != nil {
+		t.Fatalf("Upsert previous run: %v", err)
+	}
+	inv := NewCodexInvestigator(store, bin)
+	run, err := inv.Continue(
+		context.Background(),
+		Bug{ID: "bug-1", Title: "Bug"},
+		BotRef{
+			Key:      "t|codex",
+			Target:   "codex",
+			Path:     troubleshooterWorkspace,
+			SystemID: "base",
+			InternalAgents: []BotInternalAgent{
+				{ID: "troubleshooter", Role: "troubleshooter"},
+				{ID: "validator", Role: "validator"},
+			},
+		},
+		"继续补充",
+		prevRun.ID,
+		"validation",
+	)
+	if err != nil {
+		t.Fatalf("Continue validation: %v", err)
+	}
+	waited, err := inv.Wait(run.ID)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if waited.Status != InvestigationSucceeded || strings.TrimSpace(waited.FinalMessage) != "" {
+		t.Fatalf("waited = %+v", waited)
+	}
+	calls, err := os.ReadFile(callsPath)
+	if err != nil {
+		t.Fatalf("ReadFile calls: %v", err)
+	}
+	if got := strings.Count(string(calls), "---CALL---"); got != 1 {
+		t.Fatalf("want validation only, got %d calls:\n%s", got, calls)
+	}
+}
+
 func TestCodexInvestigatorEmitsSinkEventWithCurrentRun(t *testing.T) {
 	root := t.TempDir()
 	workspace := filepath.Join(root, "repo")
@@ -518,7 +790,7 @@ func TestCodexInvestigatorEmitsSinkEventWithCurrentRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(root, "codex")
-	script := "#!/bin/sh\nprintf '%s\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"checking\"}}' '{\"type\":\"turn.completed\"}'\n"
+	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: reproduced\"}}' '{\"type\":\"turn.completed\"}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"checking\"}}' '{\"type\":\"turn.completed\"}' ;;\nesac\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -554,10 +826,13 @@ func TestCodexInvestigatorEmitsSinkEventWithCurrentRun(t *testing.T) {
 			if emitted.event.Type != "agent_message" {
 				continue
 			}
+			if emitted.event.Message != "checking" {
+				continue
+			}
 			if emitted.run.ID != run.ID || emitted.run.BugID != "bug-1" {
 				t.Fatalf("sink run = %+v", emitted.run)
 			}
-			if emitted.event.Message != "checking" || emitted.event.At.IsZero() {
+			if emitted.event.At.IsZero() {
 				t.Fatalf("sink event = %+v", emitted.event)
 			}
 			goto sawAgentMessage
@@ -593,7 +868,7 @@ func TestCodexInvestigatorEmitsValidationStageEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(root, "codex")
-	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"validation report\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"final report\"}}' ;;\nesac\n"
+	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: reproduced\\\\nvalidation report\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"final report\"}}' ;;\nesac\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -640,7 +915,7 @@ func TestCodexInvestigatorTagsValidationAndInvestigationEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(root, "codex")
-	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"validation evidence\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"investigation evidence\"}}' ;;\nesac\n"
+	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: reproduced\\\\nvalidation evidence\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"investigation evidence\"}}' ;;\nesac\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -662,7 +937,7 @@ func TestCodexInvestigatorTagsValidationAndInvestigationEvents(t *testing.T) {
 			}
 		}
 	}
-	if phasesByMessage["validation evidence"] != "validation" {
+	if phaseForMessageContaining(phasesByMessage, "validation evidence") != "validation" {
 		t.Fatalf("validation event phase map = %+v", phasesByMessage)
 	}
 	if phasesByMessage["investigation evidence"] != "investigation" {
@@ -677,7 +952,7 @@ func TestCodexInvestigatorUsesPhaseSpecificLifecycleMessages(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(root, "codex")
-	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\nprintf '%s\\n' '{\"type\":\"turn.started\"}'\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"validation evidence\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"investigation evidence\"}}' ;;\nesac\nprintf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
+	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\nprintf '%s\\n' '{\"type\":\"turn.started\"}'\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: reproduced\\\\nvalidation evidence\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"investigation evidence\"}}' ;;\nesac\nprintf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -723,7 +998,7 @@ func TestCodexInvestigatorStoresLongAgentMessage(t *testing.T) {
 	}
 	longMessage := strings.Repeat("x", 70*1024)
 	bin := filepath.Join(root, "codex")
-	script := "#!/bin/sh\nprintf '%s\\n' " + shellQuote(`{"type":"item.completed","item":{"type":"agent_message","text":"`+longMessage+`"}}`) + "\n"
+	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: reproduced\"}}' ;;\n  *) printf '%s\\n' " + shellQuote(`{"type":"item.completed","item":{"type":"agent_message","text":"`+longMessage+`"}}`) + " ;;\nesac\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -753,7 +1028,7 @@ func TestCodexInvestigatorRunsFakeClaude(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := filepath.Join(root, "claude")
-	script := "#!/bin/sh\nprintf '%s\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"checking\"}]}}' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"claude final\"}'\n"
+	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"verification_status: reproduced\"}' ;;\n  *) printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"checking\"}]}}' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"claude final\"}' ;;\nesac\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -776,7 +1051,7 @@ func TestCodexInvestigatorRunsFakeClaude(t *testing.T) {
 func TestCodexInvestigatorRunsFakeOpenClaw(t *testing.T) {
 	root := t.TempDir()
 	bin := filepath.Join(root, "openclaw")
-	script := "#!/bin/sh\nprintf '%s\n' '{\"ok\":true,\"reply\":\"openclaw final\"}'\n"
+	script := "#!/bin/sh\nall=\"$*\"\ncase \"$all\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"ok\":true,\"reply\":\"verification_status: reproduced\"}' ;;\n  *) printf '%s\\n' '{\"ok\":true,\"reply\":\"openclaw final\"}' ;;\nesac\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -948,6 +1223,15 @@ func TestCodexInvestigatorWaitReturnsPersistenceError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected persistence error")
 	}
+}
+
+func phaseForMessageContaining(phasesByMessage map[string]string, needle string) string {
+	for message, phase := range phasesByMessage {
+		if strings.Contains(message, needle) {
+			return phase
+		}
+	}
+	return ""
 }
 
 func shellQuote(s string) string {

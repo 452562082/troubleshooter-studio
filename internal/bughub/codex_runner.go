@@ -132,6 +132,105 @@ func BuildCodexInvestigationPromptWithValidation(b Bug, bot BotRef, validationRe
 	return sb.String()
 }
 
+func BuildCodexContinuePrompt(b Bug, bot BotRef, userInput string, prevRun InvestigationRun) string {
+	var sb strings.Builder
+	sb.WriteString("## 用户补充信息（请优先根据此信息调整排障方向）\n\n")
+	sb.WriteString(strings.TrimSpace(userInput))
+	sb.WriteString("\n\n")
+
+	sb.WriteString("以上是用户针对前一轮排障中缺失的信息提供的补充说明。请基于这些补充信息重新排障，重点关注新的线索。\n\n")
+
+	// Get previous validation events
+	var validationParts []string
+	var investigationParts []string
+	for _, e := range prevRun.Events {
+		msg := strings.TrimSpace(e.Message)
+		if msg == "" {
+			continue
+		}
+		phase, _ := e.Meta["phase"].(string)
+		switch phase {
+		case "validation":
+			validationParts = append(validationParts, msg)
+		case "investigation":
+			investigationParts = append(investigationParts, msg)
+		default:
+			investigationParts = append(investigationParts, msg)
+		}
+	}
+
+	// Validation report (from previous run)
+	if len(validationParts) > 0 {
+		sb.WriteString("## 前一轮验证报告（复现参考）\n\n")
+		for _, p := range validationParts {
+			sb.WriteString(p)
+			sb.WriteString("\n\n")
+		}
+	}
+
+	// Previous investigation output
+	if len(investigationParts) > 0 || strings.TrimSpace(prevRun.FinalMessage) != "" {
+		sb.WriteString("## 前一轮排障输出\n\n")
+		for _, p := range investigationParts {
+			sb.WriteString(p)
+			sb.WriteString("\n\n")
+		}
+		if strings.TrimSpace(prevRun.FinalMessage) != "" {
+			sb.WriteString(strings.TrimSpace(prevRun.FinalMessage))
+			sb.WriteString("\n\n")
+		}
+	}
+
+	// Bug context
+	sb.WriteString(GenerateContext(b, bot))
+
+	sb.WriteString("\n## 输出结构\n\n")
+	sb.WriteString("1. 排障过程：列出你实际执行的查询（trace/log/metric/code/config），附上关键证据。每一项前面标记 [已查] 或 [未查+原因]。\n")
+	sb.WriteString("2. 最可能根因：基于你自己查到的证据得出的结论。\n")
+	sb.WriteString("3. 建议处置和验证方法\n")
+	sb.WriteString("4. 需要用户补充的信息\n")
+	return sb.String()
+}
+
+func BuildCodexValidationContinuePrompt(b Bug, bot BotRef, userInput string, prevRun InvestigationRun) string {
+	var sb strings.Builder
+	sb.WriteString("你是 Bug 验证 Agent。\n")
+	sb.WriteString("目标：基于用户补充信息继续取证验证，不做根因判断，不给修复方案。\n\n")
+	sb.WriteString("## 用户补充信息\n\n")
+	sb.WriteString(strings.TrimSpace(userInput))
+	sb.WriteString("\n\n")
+
+	var previousValidation []string
+	for _, e := range prevRun.Events {
+		msg := strings.TrimSpace(e.Message)
+		if msg == "" {
+			continue
+		}
+		phase, _ := e.Meta["phase"].(string)
+		if phase == "validation" {
+			previousValidation = append(previousValidation, msg)
+		}
+	}
+	if len(previousValidation) > 0 {
+		sb.WriteString("## 前一轮验证证据\n\n")
+		for _, p := range previousValidation {
+			sb.WriteString(p)
+			sb.WriteString("\n\n")
+		}
+	}
+
+	sb.WriteString(GenerateContext(b, bot))
+	sb.WriteString("\n请只输出结构化验证报告，格式如下：\n")
+	sb.WriteString("verification_status: reproduced | not_reproduced | insufficient_info | fixed_verified | still_reproduces\n")
+	sb.WriteString("environment: <bug env / bot env>\n")
+	sb.WriteString("entry:\n  frontend_url: <实际入口或 ->\n  api_url: <实际接口或 ->\n")
+	sb.WriteString("observed_behavior: <实际看到的现象>\n")
+	sb.WriteString("expected_behavior: <工单期望>\n")
+	sb.WriteString("evidence:\n  screenshots: []\n  network: []\n  console_errors: []\n  trace_ids: []\n  request_ids: []\n")
+	sb.WriteString("gaps: []\n")
+	return sb.String()
+}
+
 func BuildCodexExecCommand(codexBin, workspace, prompt string) (*exec.Cmd, error) {
 	codexBin = strings.TrimSpace(codexBin)
 	if codexBin == "" {
@@ -255,6 +354,190 @@ func (i *CodexInvestigator) StartWithValidator(parent context.Context, bug Bug, 
 	return run, nil
 }
 
+func (i *CodexInvestigator) Continue(ctx context.Context, bug Bug, bot BotRef, userInput string, previousRunID string, phase string) (InvestigationRun, error) {
+	if i == nil || i.store == nil {
+		return InvestigationRun{}, errors.New("investigation store is required")
+	}
+	phase = normalizeContinuationPhase(phase)
+
+	i.mu.Lock()
+	if active, ok, err := i.store.ActiveRunForBug(bug.ID); err != nil {
+		i.mu.Unlock()
+		return InvestigationRun{}, err
+	} else if ok {
+		if _, inMemory := i.active[active.ID]; inMemory {
+			i.mu.Unlock()
+			return InvestigationRun{}, fmt.Errorf("bug %s has an active investigation (%s), cannot start continuation", bug.ID, active.ID)
+		}
+	}
+
+	prevRun, err := i.store.Get(previousRunID)
+	if err != nil {
+		i.mu.Unlock()
+		return InvestigationRun{}, fmt.Errorf("previous run %s not found: %w", previousRunID, err)
+	}
+
+	continueBot := bot
+	if phase == "validation" {
+		continueBot = ValidatorBotFor(bot)
+	}
+	target := strings.TrimSpace(continueBot.Target)
+	prompt := BuildCodexContinuePrompt(bug, continueBot, userInput, prevRun)
+	if phase == "validation" {
+		prompt = BuildCodexValidationContinuePrompt(bug, continueBot, userInput, prevRun)
+	}
+	continueCmd, parser, err := i.buildCommandLocked(target, continueBot, prompt)
+	if err != nil {
+		i.mu.Unlock()
+		return InvestigationRun{}, err
+	}
+	ctx, cancel := context.WithCancel(ctx)
+
+	run := InvestigationRun{
+		ID:             randomRunID(),
+		BugID:          bug.ID,
+		BotKey:         bot.Key,
+		Status:         InvestigationRunning,
+		StartedAt:      time.Now().UTC(),
+		PromptPreview:  promptPreview(prompt),
+		ContinuationOf: strings.TrimSpace(previousRunID),
+	}
+	if err := i.store.Upsert(run); err != nil {
+		i.mu.Unlock()
+		cancel()
+		return InvestigationRun{}, err
+	}
+	active := &activeCodexRun{cancel: cancel, done: make(chan struct{})}
+	i.active[run.ID] = active
+
+	i.mu.Unlock()
+	if phase == "validation" {
+		go i.collectValidationContinueRun(ctx, run.ID, bug, bot, continueCmd, parser, active)
+	} else {
+		go i.collectContinueRun(ctx, run.ID, continueCmd, parser, active, phase)
+	}
+	return run, nil
+}
+
+func normalizeContinuationPhase(phase string) string {
+	switch strings.TrimSpace(strings.ToLower(phase)) {
+	case "validation":
+		return "validation"
+	default:
+		return "investigation"
+	}
+}
+
+func (i *CodexInvestigator) collectContinueRun(ctx context.Context, runID string, cmd *exec.Cmd, parser investigationEventParser, active *activeCodexRun, phase string) {
+	defer close(active.done)
+	defer i.removeActive(runID)
+	stopKillWatcher := make(chan struct{})
+	defer close(stopKillWatcher)
+	go func() {
+		select {
+		case <-ctx.Done():
+			active.kill()
+		case <-stopKillWatcher:
+		}
+	}()
+
+	stageMessage := "排障 Agent 继续执行（基于用户补充信息）"
+	if phase == "validation" {
+		stageMessage = "验证 Agent 继续取证（基于用户补充信息）"
+	}
+	i.emitStageEvent(runID, phase, stageMessage)
+	finalMessage, finishStatus, runErr := i.runCommandStage(ctx, runID, cmd, parser, active, phase)
+	if runErr != nil && finishStatus != InvestigationCancelled {
+		active.setError(runErr)
+	}
+	finishError := ""
+	if finishStatus != InvestigationSucceeded {
+		finishError = runErrorText(ctx, runErr)
+	}
+	if err := i.store.Finish(runID, finishStatus, finalMessage, finishError); err != nil {
+		active.setError(err)
+		return
+	}
+	i.emitEvent(runID, InvestigationEvent{
+		At:      time.Now().UTC(),
+		Type:    "status",
+		Message: string(finishStatus),
+	})
+}
+
+func (i *CodexInvestigator) collectValidationContinueRun(ctx context.Context, runID string, bug Bug, bot BotRef, validationCmd *exec.Cmd, validationParser investigationEventParser, active *activeCodexRun) {
+	defer close(active.done)
+	defer i.removeActive(runID)
+	stopKillWatcher := make(chan struct{})
+	defer close(stopKillWatcher)
+	go func() {
+		select {
+		case <-ctx.Done():
+			active.kill()
+		case <-stopKillWatcher:
+		}
+	}()
+
+	i.emitStageEvent(runID, "validation", "验证 Agent 继续取证（基于用户补充信息）")
+	validationReport, validationStatus, validationError := i.runCommandStage(ctx, runID, validationCmd, validationParser, active, "validation")
+	if validationError != nil && validationStatus != InvestigationCancelled {
+		active.setError(validationError)
+	}
+	if validationStatus != InvestigationSucceeded {
+		_ = i.store.Finish(runID, validationStatus, "", runErrorText(ctx, validationError))
+		i.emitEvent(runID, InvestigationEvent{
+			At:      time.Now().UTC(),
+			Type:    "status",
+			Message: string(validationStatus),
+		})
+		return
+	}
+	if !validationReportReadyForInvestigation(validationReport) {
+		i.emitStageEvent(runID, "validation", "验证 Agent 尚未给出可进入排障的完整验证结论，已暂停进入排障 Agent")
+		if err := i.store.Finish(runID, InvestigationSucceeded, "", ""); err != nil {
+			active.setError(err)
+			return
+		}
+		i.emitEvent(runID, InvestigationEvent{
+			At:      time.Now().UTC(),
+			Type:    "status",
+			Message: string(InvestigationSucceeded),
+		})
+		return
+	}
+	i.emitStageEvent(runID, "validation", "验证 Agent 完成，已将证据交给排障 Agent")
+
+	prompt := BuildCodexInvestigationPromptWithValidation(bug, bot, validationReport)
+	investigationCmd, parser, err := i.buildCommand(strings.TrimSpace(bot.Target), bot, prompt)
+	if err != nil {
+		active.setError(err)
+		_ = i.store.Finish(runID, InvestigationFailed, validationReport, err.Error())
+		i.emitEvent(runID, InvestigationEvent{
+			At:      time.Now().UTC(),
+			Type:    "status",
+			Message: string(InvestigationFailed),
+		})
+		return
+	}
+	finalMessage, finishStatus, runErr := i.runCommandStage(ctx, runID, investigationCmd, parser, active, "investigation")
+	if runErr != nil && finishStatus != InvestigationCancelled {
+		active.setError(runErr)
+	}
+	finishError := ""
+	if finishStatus != InvestigationSucceeded {
+		finishError = runErrorText(ctx, runErr)
+	}
+	if err := i.store.Finish(runID, finishStatus, finalMessage, finishError); err != nil {
+		active.setError(err)
+		return
+	}
+	i.emitEvent(runID, InvestigationEvent{
+		At:      time.Now().UTC(),
+		Type:    "status",
+		Message: string(finishStatus),
+	})
+}
+
 func (i *CodexInvestigator) buildCommandLocked(target string, bot BotRef, prompt string) (*exec.Cmd, investigationEventParser, error) {
 	if i.binaries == nil {
 		i.binaries = make(map[string]string)
@@ -332,6 +615,19 @@ func (i *CodexInvestigator) collectRun(ctx context.Context, runID string, bug Bu
 		})
 		return
 	}
+	if !validationReportReadyForInvestigation(validationReport) {
+		i.emitStageEvent(runID, "validation", "验证 Agent 尚未给出可进入排障的完整验证结论，已暂停进入排障 Agent")
+		if err := i.store.Finish(runID, InvestigationSucceeded, "", ""); err != nil {
+			active.setError(err)
+			return
+		}
+		i.emitEvent(runID, InvestigationEvent{
+			At:      time.Now().UTC(),
+			Type:    "status",
+			Message: string(InvestigationSucceeded),
+		})
+		return
+	}
 	i.emitStageEvent(runID, "validation", "验证 Agent 完成，已将证据交给排障 Agent")
 
 	prompt := BuildCodexInvestigationPromptWithValidation(bug, bot, validationReport)
@@ -363,6 +659,65 @@ func (i *CodexInvestigator) collectRun(ctx context.Context, runID string, bug Bu
 		Type:    "status",
 		Message: string(finishStatus),
 	})
+}
+
+func validationReportReadyForInvestigation(report string) bool {
+	text := strings.TrimSpace(report)
+	if text == "" {
+		return false
+	}
+	lower := strings.ToLower(text)
+	if strings.Contains(lower, "insufficient_info") {
+		return false
+	}
+	if strings.Contains(lower, "gaps:") && !strings.Contains(lower, "gaps: []") {
+		return false
+	}
+	for _, marker := range []string{
+		"需要用户补充",
+		"需要补充信息",
+		"请提供",
+		"缺少",
+		"未提供",
+		"无法确认",
+		"无法采集",
+		"登录态",
+		"测试账号",
+	} {
+		if strings.Contains(text, marker) {
+			return false
+		}
+	}
+	// Flow control is allowlist-based: validation must emit a structured terminal
+	// status before investigation can start. The marker checks above only add
+	// conservative vetoes for contradictory reports.
+	status := validationStatus(text)
+	switch status {
+	case "reproduced", "not_reproduced", "fixed_verified", "still_reproduces":
+		return true
+	default:
+		return false
+	}
+}
+
+func validationStatus(report string) string {
+	report = strings.ReplaceAll(report, `\n`, "\n")
+	for _, line := range strings.Split(report, "\n") {
+		line = strings.TrimSpace(strings.ToLower(line))
+		if !strings.HasPrefix(line, "verification_status") {
+			continue
+		}
+		_, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if idx := strings.IndexAny(value, " \t,;|"); idx >= 0 {
+			value = value[:idx]
+		}
+		return strings.Trim(value, "`\"'")
+	}
+	return ""
 }
 
 func (i *CodexInvestigator) buildCommand(target string, bot BotRef, prompt string) (*exec.Cmd, investigationEventParser, error) {

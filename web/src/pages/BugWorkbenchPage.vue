@@ -10,6 +10,8 @@ import {
   type BugPlatform,
   type BugRecord,
   cancelBugInvestigation,
+  continueBugInvestigation,
+  type InvestigationContinueInput,
   bugHookBaseURL,
   clearBugPlatformLogin,
   deleteBugPlatform,
@@ -57,6 +59,10 @@ const attachmentThumbnails = ref<Record<string, BugAttachmentPreviewResult | 'lo
 const investigationRuns = ref<InvestigationRun[]>([])
 const investigationStarting = ref(false)
 const investigationCancelling = ref(false)
+const continuingInvestigation = ref(false)
+const supplementDialogOpen = ref(false)
+const userSupplementInput = ref('')
+const supplementPhase = ref<'validation' | 'investigation'>('investigation')
 const outputScrollRef = ref<HTMLElement | null>(null)
 const query = ref('')
 const manualBugID = ref('')
@@ -115,6 +121,18 @@ const selectedBotUnsupportedReason = computed(() => {
   if (selectedBot.value.target === 'cursor') return 'Cursor 暂不支持后台直启,请复制上下文后在 Cursor Custom Agent 中发起。'
   return '该机器人暂不支持后台直启。'
 })
+
+const latestRunNeedsUserInput = computed(() => {
+	const run = selectedRun.value
+	if (!run) return false
+	const phase = outputTab.value
+	const text = (phase === 'investigation' ? (run.final_message || '') : '') + (run.events || []).filter(e => eventPhase(e) === phase).map(e => e.message).join('\n')
+	return /insufficient_info|需要用户补充|需要补充信息|请提供|缺少.*信息|未提供|无法确认|无法采集|登录态|测试账号|无法.*请.*输入/i.test(text)
+})
+const outputPhaseLabel = computed(() => outputTab.value === 'validation' ? '验证 Agent' : '排障 Agent')
+const supplementPhaseLabel = computed(() => supplementPhase.value === 'validation' ? '验证 Agent' : '排障 Agent')
+const supplementActionLabel = computed(() => supplementPhase.value === 'validation' ? '继续验证' : '继续排障')
+
 const investigationEventLines = computed(() => {
   const run = selectedRun.value
   if (!run) return []
@@ -665,6 +683,54 @@ async function cancelInvestigation() {
   }
 }
 
+function openSupplementDialog() {
+  supplementPhase.value = outputTab.value
+  supplementDialogOpen.value = true
+}
+
+function closeSupplementDialog() {
+  if (continuingInvestigation.value) return
+  supplementDialogOpen.value = false
+}
+
+async function submitSupplement() {
+  const bug = selectedBug.value
+  const bot = selectedBot.value
+  const inputText = userSupplementInput.value.trim()
+  if (!bug || !bot) {
+    toast.error('请先选择 Bug 和机器人')
+    return
+  }
+  if (!selectedBotSupportsDirectLaunch.value) {
+    toast.error(selectedBotUnsupportedReason.value || '该机器人暂不支持后台直启。')
+    return
+  }
+  if (!inputText) {
+    toast.error('请输入补充信息')
+    return
+  }
+  continuingInvestigation.value = true
+  const bugID = bug.id
+  const prevRunID = selectedRun.value?.id || ''
+  try {
+    const run = await continueBugInvestigation({
+      bug_id: bugID,
+      bot,
+      user_input: inputText,
+      previous_run_id: prevRunID,
+      phase: supplementPhase.value,
+    } as InvestigationContinueInput)
+    if (selectedBug.value?.id === bugID && run.bug_id === bugID) mergeInvestigationRun(run)
+    userSupplementInput.value = ''
+    supplementDialogOpen.value = false
+    toast.success(`${supplementActionLabel.value}已启动（基于用户补充信息）`)
+  } catch (e) {
+    toastError('继续排障', e)
+  } finally {
+    continuingInvestigation.value = false
+  }
+}
+
 async function copyHookURL() {
   if (!hookURL.value) {
     toast.error('请先保存平台配置')
@@ -1199,7 +1265,51 @@ function isLikelyInvestigationReport(message: string): boolean {
         <article v-else-if="contextText" class="markdown-result" v-html="renderedInvestigationMarkdown"></article>
         <div v-else class="preview-placeholder">开始排障后在这里显示过程和结论</div>
       </div>
+      <button
+        v-if="selectedRun"
+        class="supplement-fab"
+        :class="{ needsInput: latestRunNeedsUserInput }"
+        type="button"
+        :title="`补充信息给${outputPhaseLabel}`"
+        :aria-label="`补充信息给${outputPhaseLabel}`"
+        :disabled="canCancelInvestigation"
+        @click="openSupplementDialog"
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="22" y1="2" x2="11" y2="13"></line>
+          <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+        </svg>
+      </button>
     </section>
+
+    <!-- 补充信息弹窗 -->
+    <div v-if="supplementDialogOpen" class="supplement-backdrop" @click.self="closeSupplementDialog">
+      <div class="supplement-modal">
+        <div class="supplement-modal-head">
+          <strong>补充信息给{{ supplementPhaseLabel }}</strong>
+          <span v-if="latestRunNeedsUserInput" class="supplement-modal-hint">{{ supplementPhaseLabel }} 需要更多信息才能继续</span>
+          <button class="btn icon" type="button" aria-label="关闭" @click="closeSupplementDialog">×</button>
+        </div>
+        <textarea
+          v-model="userSupplementInput"
+          class="supplement-textarea"
+          rows="6"
+          :placeholder="supplementPhase === 'validation' ? '输入验证 Agent 缺失的信息，如入口 URL、测试账号、复现条件、截图说明等' : '输入排障 Agent 缺失的信息，如日志片段、trace id、服务线索、配置变更等'"
+          :disabled="continuingInvestigation"
+        ></textarea>
+        <div class="supplement-modal-actions">
+          <button class="btn" type="button" @click="closeSupplementDialog">取消</button>
+          <button
+            class="btn primary"
+            type="button"
+            :disabled="!userSupplementInput.trim() || continuingInvestigation"
+            @click="submitSupplement"
+          >
+            {{ continuingInvestigation ? '启动中...' : `提交并${supplementActionLabel}` }}
+          </button>
+        </div>
+      </div>
+    </div>
 
     <div v-if="attachmentPreview" class="attachment-preview-backdrop" @click.self="attachmentPreview = null">
       <div class="attachment-preview-modal">
@@ -1560,9 +1670,10 @@ select.form-control { padding-right: 28px; }
   gap: 14px;
 }
 .bug-output-panel {
-  flex: 0 0 clamp(320px, 36vh, 500px);
+  flex: 1 1 clamp(380px, 45vh, 700px);
   min-height: 320px;
   min-width: 0;
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1826,6 +1937,134 @@ select.form-control { padding-right: 28px; }
   min-height: 220px; display: flex; align-items: center; justify-content: center;
   color: #94a3b8; font-size: 13px;
 }
+/* 补充信息 FAB 按钮 */
+.supplement-fab {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  color: #64748b;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
+  transition: all 0.18s ease;
+  z-index: 10;
+}
+.supplement-fab:hover:not(:disabled) {
+  border-color: #3b82f6;
+  background: #eff6ff;
+  color: #2563eb;
+  transform: scale(1.08);
+  box-shadow: 0 4px 14px rgba(59, 130, 246, 0.22);
+}
+.supplement-fab.needsInput {
+  border-color: #f59e0b;
+  background: #fffbeb;
+  color: #d97706;
+  animation: fab-pulse 2s ease-in-out infinite;
+}
+.supplement-fab.needsInput:hover:not(:disabled) {
+  border-color: #d97706;
+  background: #fef3c7;
+}
+.supplement-fab:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+@keyframes fab-pulse {
+  0%, 100% { box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12); }
+  50% { box-shadow: 0 2px 18px rgba(245, 158, 11, 0.45); }
+}
+
+/* 补充信息弹窗 */
+.supplement-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+  background: rgba(15, 23, 42, 0.5);
+}
+.supplement-modal {
+  width: min(560px, 92vw);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  border-radius: 10px;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.28);
+  overflow: hidden;
+}
+.supplement-modal-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid #e2e8f0;
+}
+.supplement-modal-head strong {
+  color: #0f172a;
+  font-size: 14px;
+  white-space: nowrap;
+}
+.supplement-modal-hint {
+  color: #d97706;
+  font-size: 12px;
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.supplement-textarea {
+  flex: 1;
+  min-height: 140px;
+  border: none;
+  border-radius: 0;
+  background: #fff;
+  color: #0f172a;
+  padding: 12px 14px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.55;
+  resize: vertical;
+  outline: none;
+}
+.supplement-textarea::placeholder {
+  color: #94a3b8;
+  opacity: 1;
+}
+.supplement-textarea:focus {
+  outline: none;
+  box-shadow: inset 0 0 0 2px #3b82f6;
+}
+.supplement-textarea:disabled {
+  background: #f8fafc;
+  color: #94a3b8;
+}
+.supplement-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid #e2e8f0;
+}
+.supplement-modal-actions .btn {
+  height: 38px;
+  min-width: 90px;
+  justify-content: center;
+}
+
 .empty {
   color: #94a3b8; background: #f8fafc; border: 1px dashed #cbd5e1;
   border-radius: 6px; padding: 18px 12px; text-align: center; font-size: 13px;
@@ -1893,7 +2132,7 @@ select.form-control { padding-right: 28px; }
   .config-actions { justify-content: flex-start; }
   .bug-workbench { grid-template-columns: 280px 1fr; }
   .bot-panel { grid-column: 1 / -1; }
-  .bug-output-panel { flex-basis: 380px; min-height: 320px; }
+  .bug-output-panel { flex: 1 1 clamp(340px, 40vh, 520px); min-height: 320px; }
 }
 @media (max-width: 760px) {
   .bug-header,
@@ -1915,6 +2154,6 @@ select.form-control { padding-right: 28px; }
   .sync-settings { height: auto; min-height: 38px; flex-wrap: wrap; padding: 8px 11px; }
   .login-field { height: auto; min-height: 38px; flex-wrap: wrap; }
   .bot-panel { grid-column: auto; }
-  .bug-output-panel { flex-basis: 360px; min-height: 300px; }
+  .bug-output-panel { flex: 1 1 clamp(300px, 38vh, 460px); min-height: 300px; }
 }
 </style>

@@ -56,6 +56,55 @@ func TestSyncBugPlatformStoresAssignedBugs(t *testing.T) {
 	}
 }
 
+func TestSyncBugPlatformRemovesPrunedBugAttachmentCache(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api.php/v1/bugs":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"bugs":[{"id":"1842","title":"支付页提交后 500","assignedTo":"xiaolong"}]}`))
+		case "/api.php/v1/bugs/1842":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"bug":{"id":"1842","title":"支付页提交后 500","assignedTo":"xiaolong"}}`))
+		default:
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	if _, err := bugPlatformStore().Upsert(bughub.PlatformConfig{
+		ID: "zentao-main", Name: "禅道", Type: "zentao", BaseURL: srv.URL, Account: "xiaolong", Enabled: true,
+	}); err != nil {
+		t.Fatalf("Upsert platform: %v", err)
+	}
+	if err := bugStore().Upsert(bughub.Bug{
+		ID: "zentao-old", Source: "zentao", PlatformID: "zentao-main", Title: "已关闭旧 Bug",
+	}); err != nil {
+		t.Fatalf("Upsert stale bug: %v", err)
+	}
+	cacheDir := filepath.Join(bughub.DefaultRoot(), "attachments", "zentao-old")
+	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheDir, "screen.png"), []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := (&App{}).SyncBugPlatform("zentao-main")
+	if err != nil {
+		t.Fatalf("SyncBugPlatform: %v", err)
+	}
+	if got.Pruned != 1 || len(got.PrunedIDs) != 1 || got.PrunedIDs[0] != "zentao-old" {
+		t.Fatalf("result = %+v", got)
+	}
+	if _, err := os.Stat(cacheDir); !os.IsNotExist(err) {
+		t.Fatalf("cache dir still exists or stat failed unexpectedly: %v", err)
+	}
+	if _, ok, err := bugStore().Get("zentao-old"); err != nil || ok {
+		t.Fatalf("stale bug ok=%v err=%v", ok, err)
+	}
+}
+
 func TestSyncBugPlatformStoresConfiguredPlatformAndBotEnv(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", root)
@@ -88,6 +137,114 @@ func TestSyncBugPlatformStoresConfiguredPlatformAndBotEnv(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].Env != "stage" || items[0].BotEnv != "test" {
 		t.Fatalf("items = %+v", items)
+	}
+}
+
+func TestSyncBugPlatformClearsExpiredCapturedSession(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"Unauthorized"}`, http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	_, err := bugPlatformStore().Upsert(bughub.PlatformConfig{
+		ID:            "zentao-main",
+		Name:          "禅道",
+		Type:          "zentao",
+		BaseURL:       srv.URL,
+		Account:       "xiaolong",
+		AuthMode:      "feishu_sso",
+		SessionHeader: "Cookie: zentaosid=expired",
+		Enabled:       true,
+	})
+	if err != nil {
+		t.Fatalf("Upsert platform: %v", err)
+	}
+	oldRecapture := recaptureZentaoLoginSession
+	recaptureZentaoLoginSession = func(baseURL string) (string, int, error) {
+		return "", 0, errors.New("sso expired")
+	}
+	t.Cleanup(func() { recaptureZentaoLoginSession = oldRecapture })
+
+	_, err = (&App{}).SyncBugPlatform("zentao-main")
+	if err == nil {
+		t.Fatal("SyncBugPlatform succeeded with expired session")
+	}
+	if !strings.Contains(err.Error(), "禅道登录授权已失效") {
+		t.Fatalf("error = %v", err)
+	}
+	platform, ok, err := bugPlatformStore().Get("zentao-main")
+	if err != nil || !ok {
+		t.Fatalf("Get platform ok=%v err=%v", ok, err)
+	}
+	if platform.SessionHeader != "" {
+		t.Fatalf("session header should be cleared: %q", platform.SessionHeader)
+	}
+}
+
+func TestSyncBugPlatformRecapturesExpiredSessionAndRetries(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Header.Get("Cookie") == "zentaosid=expired" {
+			http.Error(w, `{"error":"Unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		if r.Header.Get("Cookie") != "zentaosid=fresh" {
+			t.Fatalf("Cookie = %q", r.Header.Get("Cookie"))
+		}
+		switch r.URL.Path {
+		case "/api.php/v1/bugs":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"bugs":[{"id":"1842","title":"支付页提交后 500","assignedTo":"xiaolong"}]}`))
+		case "/api.php/v1/bugs/1842":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"bug":{"id":"1842","title":"支付页提交后 500","assignedTo":"xiaolong"}}`))
+		default:
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	_, err := bugPlatformStore().Upsert(bughub.PlatformConfig{
+		ID:            "zentao-main",
+		Name:          "禅道",
+		Type:          "zentao",
+		BaseURL:       srv.URL,
+		Account:       "xiaolong",
+		AuthMode:      "feishu_sso",
+		SessionHeader: "Cookie: zentaosid=expired",
+		Enabled:       true,
+	})
+	if err != nil {
+		t.Fatalf("Upsert platform: %v", err)
+	}
+	oldRecapture := recaptureZentaoLoginSession
+	recaptureZentaoLoginSession = func(baseURL string) (string, int, error) {
+		if baseURL != srv.URL {
+			t.Fatalf("baseURL = %q", baseURL)
+		}
+		return "Cookie: zentaosid=fresh", 1, nil
+	}
+	t.Cleanup(func() { recaptureZentaoLoginSession = oldRecapture })
+
+	result, err := (&App{}).SyncBugPlatform("zentao-main")
+	if err != nil {
+		t.Fatalf("SyncBugPlatform: %v", err)
+	}
+	if result.Stored != 1 || result.SelectedBugID != "zentao-1842" {
+		t.Fatalf("result = %+v", result)
+	}
+	platform, ok, err := bugPlatformStore().Get("zentao-main")
+	if err != nil || !ok {
+		t.Fatalf("Get platform ok=%v err=%v", ok, err)
+	}
+	if platform.SessionHeader != "Cookie: zentaosid=fresh" {
+		t.Fatalf("session header = %q", platform.SessionHeader)
+	}
+	if requests < 3 {
+		t.Fatalf("requests = %d, want initial list + retried list/detail", requests)
 	}
 }
 
@@ -297,6 +454,69 @@ func TestPreviewBugAttachmentReadsLocalImage(t *testing.T) {
 	}
 	if got.Name != "shot.png" || got.ContentType != "image/png" || !strings.HasPrefix(got.DataURL, "data:image/png;base64,") {
 		t.Fatalf("preview = %+v", got)
+	}
+}
+
+func TestPreviewBugAttachmentCachesRemoteImage(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	remoteAvailable := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !remoteAvailable {
+			http.Error(w, "gone", http.StatusGone)
+			return
+		}
+		if r.URL.Path != "/api.php/v1/files/101/download" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Cookie") != "zentaosid=abc" {
+			t.Fatalf("Cookie = %q", r.Header.Get("Cookie"))
+		}
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("\x89PNG\r\n\x1a\ncached"))
+	}))
+	defer srv.Close()
+	_, err := bugPlatformStore().Upsert(bughub.PlatformConfig{
+		ID: "zentao-main", Name: "禅道", Type: "zentao", BaseURL: srv.URL,
+		AuthMode: "feishu_sso", SessionHeader: "Cookie: zentaosid=abc", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("Upsert platform: %v", err)
+	}
+	if err := bugStore().Upsert(bughub.Bug{
+		ID: "zentao-718", Source: "zentao", Title: "截图",
+		Attachments: []bughub.Attachment{{ID: "101", Name: "screen.png", Type: "image/png"}},
+	}); err != nil {
+		t.Fatalf("Upsert bug: %v", err)
+	}
+
+	got, err := (&App{}).PreviewBugAttachment(BugAttachmentPreviewInput{PlatformID: "zentao-main", BugID: "zentao-718", AttachmentIndex: 0})
+	if err != nil {
+		t.Fatalf("PreviewBugAttachment: %v", err)
+	}
+	if got.ContentType != "image/png" || !strings.HasPrefix(got.DataURL, "data:image/png;base64,") {
+		t.Fatalf("preview = %+v", got)
+	}
+	stored, ok, err := bugStore().Get("zentao-718")
+	if err != nil || !ok {
+		t.Fatalf("Get bug ok=%v err=%v", ok, err)
+	}
+	localPath := stored.Attachments[0].LocalPath
+	if localPath == "" {
+		t.Fatalf("attachment was not cached: %+v", stored.Attachments[0])
+	}
+	if _, err := os.Stat(localPath); err != nil {
+		t.Fatalf("cached file missing: %v", err)
+	}
+
+	remoteAvailable = false
+	got, err = (&App{}).PreviewBugAttachment(BugAttachmentPreviewInput{PlatformID: "zentao-main", BugID: "zentao-718", AttachmentIndex: 0})
+	if err != nil {
+		t.Fatalf("PreviewBugAttachment from cache: %v", err)
+	}
+	if got.ContentType != "image/png" || !strings.HasPrefix(got.DataURL, "data:image/png;base64,") {
+		t.Fatalf("cached preview = %+v", got)
 	}
 }
 

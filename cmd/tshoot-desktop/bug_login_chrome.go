@@ -17,15 +17,18 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 )
 
 var captureZentaoLoginSession = captureZentaoLoginSessionChrome
+var recaptureZentaoLoginSession = recaptureZentaoLoginSessionChrome
 var readZentaoCookies = readChromeCookies
 var verifyCapturedZentaoSession = verifyZentaoSession
 var errChromeDebugUnavailable = errors.New("chrome debug endpoint unavailable")
 var errChromePageUnavailable = errors.New("chrome page unavailable")
 var zentaoLoginPollInterval = 2 * time.Second
 var chromeLoginStartupGrace = 15 * time.Second
+var zentaoSilentRecaptureTimeout = 25 * time.Second
 
 type chromeDebugTarget struct {
 	WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
@@ -49,6 +52,14 @@ type cdpClient struct {
 }
 
 func captureZentaoLoginSessionChrome(baseURL string) (string, int, error) {
+	return captureZentaoLoginSessionChromeWithTimeout(baseURL, 5*time.Minute)
+}
+
+func recaptureZentaoLoginSessionChrome(baseURL string) (string, int, error) {
+	return captureZentaoLoginSessionChromeWithTimeout(baseURL, zentaoSilentRecaptureTimeout)
+}
+
+func captureZentaoLoginSessionChromeWithTimeout(baseURL string, timeout time.Duration) (string, int, error) {
 	u, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil || u.Scheme == "" || u.Hostname() == "" {
 		return "", 0, fmt.Errorf("invalid zentao base url %q", baseURL)
@@ -57,13 +68,15 @@ func captureZentaoLoginSessionChrome(baseURL string) (string, int, error) {
 	if err != nil {
 		return "", 0, err
 	}
-	profileDir, err := os.MkdirTemp("", "tshoot-zentao-login-*")
+	profileDir, err := zentaoBrowserProfileDir(baseURL)
 	if err != nil {
+		return "", 0, err
+	}
+	if err := os.MkdirAll(profileDir, 0o700); err != nil {
 		return "", 0, err
 	}
 	browserCmd, err := openControlledBrowser(u.String(), port, profileDir)
 	if err != nil {
-		_ = os.RemoveAll(profileDir)
 		return "", 0, err
 	}
 	defer func() {
@@ -72,9 +85,11 @@ func captureZentaoLoginSessionChrome(baseURL string) (string, int, error) {
 			_ = browserCmd.Process.Kill()
 			_, _ = browserCmd.Process.Wait()
 		}
-		_ = os.RemoveAll(profileDir)
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	header, cookieCount, err := waitForVerifiedZentaoSession(ctx, port, u)
 	if err != nil {
@@ -456,5 +471,43 @@ func hasLikelyLoginCookie(cookies []chromeCookie) bool {
 }
 
 func controlledBrowserProfileRoot() string {
-	return filepath.Join(os.TempDir(), "tshoot-zentao-login")
+	return filepath.Join(bughub.DefaultRoot(), "browser-profiles")
+}
+
+func zentaoBrowserProfileDir(baseURL string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("invalid zentao base url %q", baseURL)
+	}
+	return filepath.Join(controlledBrowserProfileRoot(), safeProfileName(u.Host)), nil
+}
+
+func removeZentaoBrowserProfile(baseURL string) error {
+	dir, err := zentaoBrowserProfileDir(baseURL)
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(dir)
+}
+
+func safeProfileName(host string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	var b strings.Builder
+	for _, r := range host {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '.', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	name := strings.Trim(b.String(), "-.")
+	if name == "" {
+		return "default"
+	}
+	return name
 }

@@ -97,6 +97,40 @@ func TestStoreListNormalizesLegacyZentaoHTMLSteps(t *testing.T) {
 	}
 }
 
+func TestStorePruneStaleIDsReturnsRemovedBugIDs(t *testing.T) {
+	store := NewStore(t.TempDir())
+	bugs := []Bug{
+		{ID: "zentao-keep", Source: "zentao", PlatformID: "zentao-main", Title: "keep"},
+		{ID: "zentao-drop", Source: "zentao", PlatformID: "zentao-main", Title: "drop"},
+		{ID: "zentao-other-platform", Source: "zentao", PlatformID: "zentao-other", Title: "other platform"},
+		{ID: "tapd-drop", Source: "tapd", PlatformID: "zentao-main", Title: "other source"},
+	}
+	for _, bug := range bugs {
+		if err := store.Upsert(bug); err != nil {
+			t.Fatalf("Upsert %s: %v", bug.ID, err)
+		}
+	}
+
+	prunedIDs, err := store.PruneStaleIDs("zentao", "zentao-main", []string{"zentao-keep"})
+	if err != nil {
+		t.Fatalf("PruneStaleIDs: %v", err)
+	}
+	if len(prunedIDs) != 1 || prunedIDs[0] != "zentao-drop" {
+		t.Fatalf("prunedIDs = %+v", prunedIDs)
+	}
+	if pruned, err := store.PruneStale("zentao", "zentao-main", []string{"zentao-keep"}); err != nil || pruned != 0 {
+		t.Fatalf("second PruneStale pruned=%d err=%v", pruned, err)
+	}
+	for _, id := range []string{"zentao-keep", "zentao-other-platform", "tapd-drop"} {
+		if _, ok, err := store.Get(id); err != nil || !ok {
+			t.Fatalf("Get %s ok=%v err=%v", id, ok, err)
+		}
+	}
+	if _, ok, err := store.Get("zentao-drop"); err != nil || ok {
+		t.Fatalf("Get zentao-drop ok=%v err=%v", ok, err)
+	}
+}
+
 func TestStorePathIsUnderRoot(t *testing.T) {
 	root := t.TempDir()
 	store := NewStore(root)

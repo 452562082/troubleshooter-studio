@@ -202,6 +202,28 @@ type ZentaoClient struct {
 	HTTPClient    *http.Client
 }
 
+type ZentaoHTTPError struct {
+	Prefix     string
+	Status     string
+	StatusCode int
+	Body       string
+}
+
+func (e *ZentaoHTTPError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if strings.TrimSpace(e.Body) == "" {
+		return fmt.Sprintf("%s %s", e.Prefix, e.Status)
+	}
+	return fmt.Sprintf("%s %s: %s", e.Prefix, e.Status, e.Body)
+}
+
+func IsZentaoUnauthorized(err error) bool {
+	var statusErr *ZentaoHTTPError
+	return errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusUnauthorized
+}
+
 func NormalizeZentaoBug(raw ZentaoBug) Bug {
 	id := raw.ID.String()
 	env, frontend, hints := parseZentaoKeywords(raw.Keywords.String())
@@ -913,7 +935,12 @@ func (c ZentaoClient) FetchAttachment(att Attachment) ([]byte, string, error) {
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			lastErr = fmt.Errorf("zentao attachment returned %s", resp.Status)
+			lastErr = &ZentaoHTTPError{
+				Prefix:     "zentao attachment returned",
+				Status:     resp.Status,
+				StatusCode: resp.StatusCode,
+				Body:       strings.TrimSpace(string(data)),
+			}
 			continue
 		}
 		contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
@@ -1060,11 +1087,12 @@ func (c ZentaoClient) authToken(client *http.Client) (string, error) {
 
 func zentaoStatusError(resp *http.Response, prefix string) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-	detail := strings.TrimSpace(string(body))
-	if detail == "" {
-		return fmt.Errorf("%s %s", prefix, resp.Status)
+	return &ZentaoHTTPError{
+		Prefix:     prefix,
+		Status:     resp.Status,
+		StatusCode: resp.StatusCode,
+		Body:       strings.TrimSpace(string(body)),
 	}
-	return fmt.Errorf("%s %s: %s", prefix, resp.Status, detail)
 }
 
 func isZentaoProductIDRequired(err error) bool {

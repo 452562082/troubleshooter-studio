@@ -87,34 +87,43 @@ func (s *Store) Upsert(b Bug) error {
 // 用于同步后清理禅道上已修复/关闭/重新指派的 bug。
 // platformID 为空时退化为只按 source 匹配（兼容老数据没有 platform_id 的情况）。
 func (s *Store) PruneStale(source, platformID string, keepIDs []string) (int, error) {
-	items, err := s.readAll()
+	prunedIDs, err := s.PruneStaleIDs(source, platformID, keepIDs)
 	if err != nil {
 		return 0, err
+	}
+	return len(prunedIDs), nil
+}
+
+// PruneStaleIDs is PruneStale 的可观测变体，返回被清理的 bug ID。
+func (s *Store) PruneStaleIDs(source, platformID string, keepIDs []string) ([]string, error) {
+	items, err := s.readAll()
+	if err != nil {
+		return nil, err
 	}
 	keep := make(map[string]bool, len(keepIDs))
 	for _, id := range keepIDs {
 		keep[id] = true
 	}
-	pruned := 0
+	prunedIDs := []string{}
 	filtered := make([]Bug, 0, len(items))
 	for _, item := range items {
 		if item.Source == source {
 			if platformID == "" || item.PlatformID == "" || item.PlatformID == platformID {
 				if !keep[item.ID] {
-					pruned++
+					prunedIDs = append(prunedIDs, item.ID)
 					continue
 				}
 			}
 		}
 		filtered = append(filtered, item)
 	}
-	if pruned == 0 {
-		return 0, nil
+	if len(prunedIDs) == 0 {
+		return nil, nil
 	}
 	if err := s.writeAll(filtered); err != nil {
-		return 0, err
+		return nil, err
 	}
-	return pruned, nil
+	return prunedIDs, nil
 }
 
 func (s *Store) readAll() ([]Bug, error) {

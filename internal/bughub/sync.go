@@ -10,15 +10,16 @@ import (
 var bugIDPattern = regexp.MustCompile(`(?i)#\s*([0-9]+)|bug\s*#?\s*([0-9]+)|^\s*([0-9]+)\s*$`)
 
 type SyncResult struct {
-	PlatformID    string `json:"platform_id"`
-	Fetched       int    `json:"fetched"`
-	Stored        int    `json:"stored"`
-	SelectedBugID string `json:"selected_bug_id,omitempty"`
-	Account       string `json:"account,omitempty"`
-	RawFetched    int    `json:"raw_fetched,omitempty"`
-	Filtered      int    `json:"filtered,omitempty"`
-	Pruned        int    `json:"pruned,omitempty"`
-	ProductCount  int    `json:"product_count,omitempty"`
+	PlatformID    string   `json:"platform_id"`
+	Fetched       int      `json:"fetched"`
+	Stored        int      `json:"stored"`
+	SelectedBugID string   `json:"selected_bug_id,omitempty"`
+	Account       string   `json:"account,omitempty"`
+	RawFetched    int      `json:"raw_fetched,omitempty"`
+	Filtered      int      `json:"filtered,omitempty"`
+	Pruned        int      `json:"pruned,omitempty"`
+	PrunedIDs     []string `json:"-"`
+	ProductCount  int      `json:"product_count,omitempty"`
 }
 
 func SyncZentaoAssigned(platform PlatformConfig, store *Store, client *http.Client) (SyncResult, error) {
@@ -71,8 +72,9 @@ func SyncZentaoAssigned(platform PlatformConfig, store *Store, client *http.Clie
 		}
 	}
 	// 清理本地存储中不在本次同步结果里的同平台旧 bug（已修复/关闭/重新指派）
-	if pruned, err := store.PruneStale("zentao", platform.ID, keepIDs); err == nil && pruned > 0 {
-		result.Pruned = pruned
+	if prunedIDs, err := store.PruneStaleIDs("zentao", platform.ID, keepIDs); err == nil && len(prunedIDs) > 0 {
+		result.PrunedIDs = prunedIDs
+		result.Pruned = len(prunedIDs)
 	}
 	return result, nil
 }

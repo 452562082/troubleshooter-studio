@@ -1,16 +1,20 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
+	"github.com/xiaolong/troubleshooter-studio/internal/discover"
+	"github.com/xiaolong/troubleshooter-studio/internal/userconfig"
 )
 
 func TestStartBugInvestigationRunsCodexBot(t *testing.T) {
@@ -59,6 +63,108 @@ func TestStartBugInvestigationRunsCodexBot(t *testing.T) {
 	}
 	if waited.Status != bughub.InvestigationSucceeded || waited.FinalMessage != "done" {
 		t.Fatalf("waited = %+v", waited)
+	}
+}
+
+func TestStartBugInvestigationChecksOutConfiguredEnvBranch(t *testing.T) {
+	requireGit(t)
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	repo := filepath.Join(root, "app")
+	initGitRepoWithBranch(t, repo, "release/test")
+	agentDir := filepath.Join(root, "base-troubleshooter")
+	validatorDir := filepath.Join(root, "base-validator")
+	for _, dir := range []string{agentDir, validatorDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeBotMeta(t, dir)
+	}
+	if err := userconfig.SetRepoPathsForSystem("base", map[string]string{"app": repo}); err != nil {
+		t.Fatalf("SetRepoPathsForSystem: %v", err)
+	}
+	bin := filepath.Join(root, "codex")
+	script := "#!/bin/sh\nprintf '%s\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}' '{\"type\":\"turn.completed\"}'\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := bugStore().Upsert(bughub.Bug{ID: "zentao-577", Source: "zentao", Title: "Bug 577", BotEnv: "test"}); err != nil {
+		t.Fatalf("Upsert bug: %v", err)
+	}
+
+	app := &App{}
+	run, err := app.StartBugInvestigation(BugInvestigationInput{
+		BugID: "zentao-577",
+		Bot: bughub.BotRef{
+			Key:      agentDir + "|codex",
+			Target:   "codex",
+			Path:     agentDir,
+			SystemID: "base",
+			InternalAgents: []bughub.BotInternalAgent{
+				{ID: "base-troubleshooter", Role: "troubleshooter"},
+				{ID: "base-validator", Role: "validator"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBugInvestigation: %v", err)
+	}
+	if run.Status != bughub.InvestigationRunning {
+		t.Fatalf("run = %+v", run)
+	}
+	if got := gitBranch(t, repo); got != "release/test" {
+		t.Fatalf("branch = %q", got)
+	}
+	if _, err := app.codexInvestigator().Wait(run.ID); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+}
+
+func TestStartBugInvestigationRejectsMissingEnvBranch(t *testing.T) {
+	requireGit(t)
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	repo := filepath.Join(root, "app")
+	initGitRepoWithBranch(t, repo, "release/test")
+	agentDir := filepath.Join(root, "base-troubleshooter")
+	validatorDir := filepath.Join(root, "base-validator")
+	for _, dir := range []string{agentDir, validatorDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeBotMetaWithBranch(t, dir, "missing/test")
+	}
+	if err := userconfig.SetRepoPathsForSystem("base", map[string]string{"app": repo}); err != nil {
+		t.Fatalf("SetRepoPathsForSystem: %v", err)
+	}
+	bin := filepath.Join(root, "codex")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := bugStore().Upsert(bughub.Bug{ID: "zentao-577", Source: "zentao", Title: "Bug 577", BotEnv: "test"}); err != nil {
+		t.Fatalf("Upsert bug: %v", err)
+	}
+
+	_, err := (&App{}).StartBugInvestigation(BugInvestigationInput{
+		BugID: "zentao-577",
+		Bot: bughub.BotRef{
+			Key:      agentDir + "|codex",
+			Target:   "codex",
+			Path:     agentDir,
+			SystemID: "base",
+			InternalAgents: []bughub.BotInternalAgent{
+				{ID: "base-troubleshooter", Role: "troubleshooter"},
+				{ID: "base-validator", Role: "validator"},
+			},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "分支切换失败") {
+		t.Fatalf("err = %v", err)
+	}
+	if got := gitBranch(t, repo); got != "main" {
+		t.Fatalf("branch changed after failed start: %q", got)
 	}
 }
 
@@ -155,6 +261,97 @@ func TestStartBugInvestigationMaterializesZentaoAttachmentsForAgent(t *testing.T
 	}
 	if !strings.Contains(string(data), "agent-readable") {
 		t.Fatalf("materialized data = %q", data)
+	}
+}
+
+func requireGit(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+}
+
+func runGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=Test",
+		"GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=Test",
+		"GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func initGitRepoWithBranch(t *testing.T, repo string, branch string) {
+	t.Helper()
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "init", "-b", "main", repo)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v\n%s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", ".")
+	runGit(t, repo, "commit", "-m", "initial")
+	runGit(t, repo, "checkout", "-b", branch)
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte(branch+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "commit", "-am", "branch")
+	runGit(t, repo, "checkout", "main")
+}
+
+func gitBranch(t *testing.T, repo string) string {
+	t.Helper()
+	return runGit(t, repo, "rev-parse", "--abbrev-ref", "HEAD")
+}
+
+func writeBotMeta(t *testing.T, dir string) {
+	t.Helper()
+	writeBotMetaWithBranch(t, dir, "release/test")
+}
+
+func writeBotMetaWithBranch(t *testing.T, dir string, branch string) {
+	t.Helper()
+	yamlText := `system:
+  id: base
+  name: Base
+agent:
+  name: Base
+  model: openai-codex/gpt-5.3-codex
+environments:
+  - id: test
+repos:
+  - name: app
+    url: https://example.com/app.git
+    stack: go
+    env_branches:
+      test: ` + branch + `
+generation:
+  targets: [codex]
+meta:
+  schema_version: "0.1"
+`
+	data, err := json.Marshal(discover.Meta{
+		SchemaVersion:      1,
+		SystemID:           "base",
+		SystemName:         "Base",
+		Target:             "codex",
+		TroubleshooterYAML: yamlText,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, discover.MetaFilename), data, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

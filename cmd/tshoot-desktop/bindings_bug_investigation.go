@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +14,9 @@ import (
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
+	"github.com/xiaolong/troubleshooter-studio/internal/config"
+	"github.com/xiaolong/troubleshooter-studio/internal/discover"
+	"github.com/xiaolong/troubleshooter-studio/internal/userconfig"
 )
 
 type BugInvestigationInput struct {
@@ -21,6 +26,126 @@ type BugInvestigationInput struct {
 
 type BugInvestigationCancelInput struct {
 	RunID string `json:"run_id"`
+}
+
+// checkoutEnvBranches 在启动排障 Agent 前，根据 bot 的环境 → 仓库分支映射，
+// 把 workspace 涉及的各仓库切到对应分支上。bot.Env 为空时跳过。
+func checkoutEnvBranches(bot bughub.BotRef, bug bughub.Bug) error {
+	env := strings.TrimSpace(bot.Env)
+	if env == "" {
+		env = strings.TrimSpace(bug.BotEnv)
+	}
+	if env == "" {
+		return nil
+	}
+
+	botDir := strings.TrimSpace(bot.Path)
+	if info, err := os.Stat(botDir); err == nil && !info.IsDir() {
+		botDir = filepath.Dir(botDir)
+	}
+	metaPath := filepath.Join(botDir, discover.MetaFilename)
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		return fmt.Errorf("读取机器人元数据失败，无法确认环境 %s 的代码分支: %w", env, err)
+	}
+	var meta discover.Meta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return fmt.Errorf("解析机器人元数据失败，无法确认环境 %s 的代码分支: %w", env, err)
+	}
+	cfg, err := config.LoadFromBytes([]byte(meta.TroubleshooterYAML))
+	if err != nil {
+		return fmt.Errorf("读取机器人 yaml 失败，无法确认环境 %s 的代码分支: %w", env, err)
+	}
+
+	systemID := strings.TrimSpace(bot.SystemID)
+	if systemID == "" {
+		systemID = strings.TrimSpace(meta.SystemID)
+	}
+	if systemID == "" {
+		systemID = strings.TrimSpace(cfg.System.ID)
+	}
+	repoPaths := userconfig.GetRepoPathsForSystem(systemID)
+	if repoPaths == nil {
+		repoPaths = map[string]string{}
+	}
+
+	for _, repo := range cfg.Repos {
+		branch := strings.TrimSpace(repo.EnvBranches[env])
+		if branch == "" {
+			continue
+		}
+		repoPath := strings.TrimSpace(repoPaths[repo.Name])
+		if repoPath == "" {
+			return fmt.Errorf("环境 %s 需要仓库 %s 切到分支 %s，但未配置本地仓库路径", env, repo.Name, branch)
+		}
+		if repo.SubPath != "" {
+			repoPath = filepath.Join(repoPath, repo.SubPath)
+		}
+		if err := ensureRepoBranch(repoPath, branch); err != nil {
+			return fmt.Errorf("环境 %s 仓库 %s 分支切换失败: %w", env, repo.Name, err)
+		}
+	}
+	return nil
+}
+
+func checkoutBugAgentEnvBranches(bot bughub.BotRef, bug bughub.Bug) error {
+	seen := map[string]bool{}
+	for _, candidate := range []bughub.BotRef{bot, bughub.ValidatorBotFor(bot)} {
+		key := strings.TrimSpace(candidate.Path) + "|" + strings.TrimSpace(candidate.Target)
+		if key == "|" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		if err := checkoutEnvBranches(candidate, bug); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureRepoBranch(repoPath string, branch string) error {
+	repoPath = strings.TrimSpace(repoPath)
+	branch = strings.TrimSpace(branch)
+	if repoPath == "" || branch == "" {
+		return nil
+	}
+	info, err := os.Stat(repoPath)
+	if err != nil {
+		return fmt.Errorf("检查仓库路径 %s: %w", repoPath, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("仓库路径 %s 不是目录", repoPath)
+	}
+	current, err := currentGitBranch(repoPath)
+	if err != nil {
+		return err
+	}
+	if current == branch {
+		return nil
+	}
+	if out, err := exec.Command("git", "-C", repoPath, "checkout", branch).CombinedOutput(); err != nil {
+		return fmt.Errorf("git checkout %s: %w (%s)", branch, err, strings.TrimSpace(string(out)))
+	}
+	current, err = currentGitBranch(repoPath)
+	if err != nil {
+		return err
+	}
+	if current != branch {
+		return fmt.Errorf("checkout 后当前分支为 %s，期望 %s", current, branch)
+	}
+	return nil
+}
+
+func currentGitBranch(repoPath string) (string, error) {
+	out, err := exec.Command("git", "-C", repoPath, "rev-parse", "--abbrev-ref", "HEAD").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("读取当前 git 分支失败: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	branch := strings.TrimSpace(string(out))
+	if branch == "" || branch == "HEAD" {
+		return "", fmt.Errorf("当前仓库处于 detached HEAD，无法确认环境分支")
+	}
+	return branch, nil
 }
 
 func (a *App) StartBugInvestigation(input BugInvestigationInput) (bughub.InvestigationRun, error) {
@@ -50,6 +175,9 @@ func (a *App) StartBugInvestigation(input BugInvestigationInput) (bughub.Investi
 		return bughub.InvestigationRun{}, errors.New("暂不支持 Cursor 后台直启，请复制上下文后在 Cursor Custom Agent 中发起")
 	default:
 		return bughub.InvestigationRun{}, errors.New("暂不支持该机器人后台直启")
+	}
+	if err := checkoutBugAgentEnvBranches(input.Bot, bug); err != nil {
+		return bughub.InvestigationRun{}, err
 	}
 	ctx := a.getRuntimeContext()
 	if ctx == nil {

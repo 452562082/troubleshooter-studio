@@ -414,6 +414,8 @@ async function syncSelectedPlatform() {
     await loadBugs()
     toast.success(`已同步指派给我的 Bug,新增/更新 ${result.stored} 条`)
   } catch (e) {
+    await loadPlatforms()
+    selectedPlatformID.value = platform.id
     toastError('同步 Bug', e)
   } finally {
     syncingBugs.value = false
@@ -438,6 +440,8 @@ async function fetchManualBug() {
     await loadBugs()
     toast.success('Bug 已拉取')
   } catch (e) {
+    await loadPlatforms()
+    selectedPlatformID.value = platform.id
     toastError('拉取 Bug', e)
   } finally {
     fetchingBug.value = false

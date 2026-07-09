@@ -98,6 +98,9 @@ func (a *App) SaveBugPlatform(input BugPlatformInput) (bughub.PlatformConfig, er
 }
 
 func (a *App) DeleteBugPlatform(input BugPlatformDeleteInput) error {
+	if platform, err := getBugPlatform(input.PlatformID); err == nil {
+		_ = removeZentaoBrowserProfile(platform.BaseURL)
+	}
 	return bugPlatformStore().Delete(input.PlatformID)
 }
 
@@ -123,7 +126,13 @@ func (a *App) SyncBugPlatform(platformID string) (bughub.SyncResult, error) {
 	if err != nil {
 		return bughub.SyncResult{}, err
 	}
-	return bughub.SyncZentaoAssigned(platform, bugStore(), nil)
+	result, err := runZentaoSyncWithSessionRecovery(platform, func(platform bughub.PlatformConfig) (bughub.SyncResult, error) {
+		return bughub.SyncZentaoAssigned(platform, bugStore(), nil)
+	})
+	if err == nil {
+		cleanupPrunedBugAttachmentCaches(result)
+	}
+	return result, err
 }
 
 func (a *App) FetchBugByID(input BugFetchInput) (bughub.SyncResult, error) {
@@ -131,7 +140,9 @@ func (a *App) FetchBugByID(input BugFetchInput) (bughub.SyncResult, error) {
 	if err != nil {
 		return bughub.SyncResult{}, err
 	}
-	return bughub.SyncZentaoBug(platform, bugStore(), input.BugID, nil)
+	return runZentaoSyncWithSessionRecovery(platform, func(platform bughub.PlatformConfig) (bughub.SyncResult, error) {
+		return bughub.SyncZentaoBug(platform, bugStore(), input.BugID, nil)
+	})
 }
 
 func (a *App) PreviewBugAttachment(input BugAttachmentPreviewInput) (BugAttachmentPreviewResult, error) {
@@ -146,12 +157,16 @@ func (a *App) PreviewBugAttachment(input BugAttachmentPreviewInput) (BugAttachme
 		return BugAttachmentPreviewResult{}, fmt.Errorf("attachment index %d out of range", input.AttachmentIndex)
 	}
 	att := bug.Attachments[input.AttachmentIndex]
-	data, contentType, err := readBugAttachmentPreview(input.PlatformID, att)
+	data, contentType, cachedAtt, err := readBugAttachmentPreview(input.PlatformID, bug.ID, input.AttachmentIndex, att)
 	if err != nil {
 		return BugAttachmentPreviewResult{}, err
 	}
 	if contentType == "" {
 		contentType = http.DetectContentType(data)
+	}
+	if cachedAtt.LocalPath != att.LocalPath || cachedAtt.Type != att.Type {
+		bug.Attachments[input.AttachmentIndex] = cachedAtt
+		_ = bugStore().Upsert(bug)
 	}
 	return BugAttachmentPreviewResult{
 		Name:        att.Name,
@@ -160,23 +175,23 @@ func (a *App) PreviewBugAttachment(input BugAttachmentPreviewInput) (BugAttachme
 	}, nil
 }
 
-func readBugAttachmentPreview(platformID string, att bughub.Attachment) ([]byte, string, error) {
+func readBugAttachmentPreview(platformID string, bugID string, attachmentIndex int, att bughub.Attachment) ([]byte, string, bughub.Attachment, error) {
 	if strings.TrimSpace(att.LocalPath) != "" {
 		data, err := os.ReadFile(att.LocalPath)
 		if err != nil {
-			return nil, "", err
+			return nil, "", att, err
 		}
 		contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(att.LocalPath)))
 		if contentType == "" {
 			contentType = http.DetectContentType(data)
 		}
-		return data, contentType, nil
+		return data, contentType, att, nil
 	}
 	platform, err := getBugPlatform(platformID)
 	if err != nil {
-		return nil, "", err
+		return nil, "", att, err
 	}
-	return (bughub.ZentaoClient{
+	data, contentType, err := (bughub.ZentaoClient{
 		BaseURL:       platform.BaseURL,
 		Account:       platform.Account,
 		AuthMode:      platform.AuthMode,
@@ -184,6 +199,59 @@ func readBugAttachmentPreview(platformID string, att bughub.Attachment) ([]byte,
 		Password:      platform.Password,
 		Token:         platform.Token,
 	}).FetchAttachment(att)
+	if err != nil && shouldRecoverZentaoSession(platform, err) {
+		if refreshed, ok := refreshZentaoSession(platform); ok {
+			data, contentType, err = (bughub.ZentaoClient{
+				BaseURL:       refreshed.BaseURL,
+				Account:       refreshed.Account,
+				AuthMode:      refreshed.AuthMode,
+				SessionHeader: refreshed.SessionHeader,
+				Password:      refreshed.Password,
+				Token:         refreshed.Token,
+			}).FetchAttachment(att)
+		}
+	}
+	if err != nil && clearExpiredZentaoSession(platform, err) {
+		return nil, "", att, zentaoSessionExpiredError(err)
+	}
+	if err != nil {
+		return nil, "", att, err
+	}
+	cachedAtt, err := cacheBugAttachment(bugID, attachmentIndex, att, data, contentType)
+	if err != nil {
+		if att.Type == "" {
+			att.Type = contentType
+		}
+		return data, contentType, att, nil
+	}
+	return data, contentType, cachedAtt, nil
+}
+
+func cacheBugAttachment(bugID string, idx int, att bughub.Attachment, data []byte, contentType string) (bughub.Attachment, error) {
+	dir := filepath.Join(bughub.DefaultRoot(), "attachments", safePathSegment(bugID))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return att, err
+	}
+	name := materializedAttachmentName(att, contentType, idx)
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return att, err
+	}
+	att.LocalPath = path
+	if att.Type == "" {
+		att.Type = contentType
+	}
+	return att, nil
+}
+
+func cleanupPrunedBugAttachmentCaches(result bughub.SyncResult) {
+	for _, id := range result.PrunedIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(bughub.DefaultRoot(), "attachments", safePathSegment(id)))
+	}
 }
 
 func (a *App) LoginBugPlatform(input BugLoginInput) (BugLoginResult, error) {
@@ -206,6 +274,7 @@ func (a *App) LoginBugPlatform(input BugLoginInput) (BugLoginResult, error) {
 	if err != nil {
 		return BugLoginResult{}, err
 	}
+	_ = removeZentaoBrowserProfile(platform.BaseURL)
 	return BugLoginResult{
 		PlatformID:   saved.ID,
 		AuthMode:     saved.AuthMode,
@@ -326,4 +395,57 @@ func getBugPlatform(id string) (bughub.PlatformConfig, error) {
 		return bughub.PlatformConfig{}, os.ErrNotExist
 	}
 	return platform, nil
+}
+
+func runZentaoSyncWithSessionRecovery(platform bughub.PlatformConfig, run func(bughub.PlatformConfig) (bughub.SyncResult, error)) (bughub.SyncResult, error) {
+	result, err := run(platform)
+	if err != nil && shouldRecoverZentaoSession(platform, err) {
+		if refreshed, ok := refreshZentaoSession(platform); ok {
+			result, err = run(refreshed)
+		}
+	}
+	if err != nil && clearExpiredZentaoSession(platform, err) {
+		return result, zentaoSessionExpiredError(err)
+	}
+	return result, err
+}
+
+func shouldRecoverZentaoSession(platform bughub.PlatformConfig, err error) bool {
+	return bughub.IsZentaoUnauthorized(err) && bugPlatformUsesCapturedSession(platform)
+}
+
+func refreshZentaoSession(platform bughub.PlatformConfig) (bughub.PlatformConfig, bool) {
+	sessionHeader, _, err := recaptureZentaoLoginSession(platform.BaseURL)
+	if err != nil || strings.TrimSpace(sessionHeader) == "" {
+		return platform, false
+	}
+	refreshed, err := bugPlatformStore().SetSessionHeader(platform.ID, "feishu_sso", sessionHeader)
+	if err != nil {
+		return platform, false
+	}
+	return refreshed, true
+}
+
+func clearExpiredZentaoSession(platform bughub.PlatformConfig, err error) bool {
+	if !bughub.IsZentaoUnauthorized(err) || !bugPlatformUsesCapturedSession(platform) {
+		return false
+	}
+	_, _ = bugPlatformStore().ClearSessionHeader(platform.ID)
+	return true
+}
+
+func bugPlatformUsesCapturedSession(platform bughub.PlatformConfig) bool {
+	if strings.TrimSpace(platform.SessionHeader) == "" {
+		return false
+	}
+	switch strings.TrimSpace(strings.ToLower(platform.AuthMode)) {
+	case "", "feishu_sso", "session_header":
+		return true
+	default:
+		return false
+	}
+}
+
+func zentaoSessionExpiredError(err error) error {
+	return fmt.Errorf("禅道登录授权已失效，请重新点击“登录平台”授权: %w", err)
 }

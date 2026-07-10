@@ -51,6 +51,18 @@ Codex 需要网络访问时，安装流程会自动 patch `~/.codex/config.toml`
 
 ## 下载与安装
 
+### 可选代码图谱（CodeGraph）
+
+需要在故障期获得符号、调用链和影响面证据时，可显式开启：
+
+```yaml
+code_intelligence:
+  enabled: true
+  provider: codegraph
+```
+
+CodeGraph 首次安装约占 200 MB+，每个仓库在本地生成 `.codegraph/` 索引；索引不上传，遥测已关闭。安装使用固定 v1.3.1 及逐平台 SHA256 校验，并注册一个共享 MCP，通过显式 `projectPath` 查询；不会自动 checkout 或创建 worktree。分支不一致时图谱证据置信度低，机器人会回落 `rg`/`read` 路径。卸载默认保留索引，便于重新启用；需要释放空间时可手动删除 `.codegraph/`。
+
 Release 同步发布到 GitHub 和 GitLab，任选一个源。
 
 ### 桌面 app，macOS 推荐安装

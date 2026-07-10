@@ -43,6 +43,8 @@ git status --short
 2. 起 runtime probe，拿真实 `tools/list`。不要按 README 猜工具名。
 3. 更新对应 `templates/workspace/skills/<x>-runtime-query/SKILL.md.tmpl`，写清只读主路径和写工具软约束。
 4. 同步 `requiredMCPKeys` 期望清单。
+
+CodeGraph 还必须固定 release version 和逐平台 SHA256；升级前先运行 `scripts/test-codegraph-smoke.sh`。runtime probe 必须确认 `tools/list` 含 `codegraph_explore`；索引 probe 与 MCP probe 分开，源码仓库要求验证 `complete/fileCount/nodeCount`。普通单测使用 fake CLI，禁止隐式联网下载。
 5. 测试：
 
 ```bash

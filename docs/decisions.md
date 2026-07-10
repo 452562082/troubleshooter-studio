@@ -368,6 +368,16 @@ routing/config-map.yaml 标 `runtime: <type>-http` 字段告诉 LLM 走脚本。
 
 ---
 
+### 2026-07-10 · CodeGraph 作为可选故障期代码图谱，保留 analyzer 主路径
+
+**背景**：现有 regex analyzer 缺少符号、调用和影响面证据；CodeGraph 是 Tree-sitter/SQLite/MCP 能力，不是 LSP。
+
+**决策**：CodeGraph 仅显式 opt-in；使用一个共享 MCP 和 `projectPath`，固定 v1.3.1/SHA，查询前同步，self-test 将 MCP probe 与 index probe 分开，并关闭遥测。
+
+**拒绝方案**：每仓库一个 MCP、嵌入 analyzer、自动 checkout/worktree、启用隐藏工具。
+
+**后果**：增加 200 MB+ 磁盘占用和 `.codegraph` 生命周期管理；图边是启发式的，分支不一致时置信度降低；保留稳定的 `rg`/`read` fallback，并按固定版本升级流程维护。
+
 ## 历史(SUPERSEDED)
 
 下面记录已被覆盖的历史决策,**不要按这些指引**,留给读 git log 追根溯源的人用。

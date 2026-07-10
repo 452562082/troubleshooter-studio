@@ -1,9 +1,13 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
@@ -252,4 +256,247 @@ func TestImportAndApply_DryRunNoWrite(t *testing.T) {
 	if res.NeedsRestartHint == "" {
 		t.Error("DryRun 应该给出后续步骤的提示")
 	}
+}
+
+func TestApply_CodeGraphDisabledDoesNothing(t *testing.T) {
+	stage := t.TempDir()
+	agentPath, yamlBytes := genExisting(t, stage)
+	ag := discover.DiscoveredAgent{
+		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "openclaw"},
+		Path: agentPath,
+	}
+	previousEnsure := ensureCodeGraphForDeploy
+	previousPrepare := prepareCodeGraphForDeploy
+	ensureCodeGraphForDeploy = func(func(string)) (string, error) {
+		t.Fatal("disabled CodeGraph deployment called installer")
+		return "", nil
+	}
+	prepareCodeGraphForDeploy = func(context.Context, CodeGraphIndexOptions) CodeGraphIndexReport {
+		t.Fatal("disabled CodeGraph deployment called index manager")
+		return CodeGraphIndexReport{}
+	}
+	t.Cleanup(func() {
+		ensureCodeGraphForDeploy = previousEnsure
+		prepareCodeGraphForDeploy = previousPrepare
+	})
+
+	result, err := Apply(ag, ApplyOptions{
+		NewYAML:      yamlBytes,
+		TemplateRoot: filepath.Join(projectRoot(t), "templates"),
+	})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if result.CodeGraph != nil {
+		t.Fatalf("CodeGraph report = %#v, want nil", result.CodeGraph)
+	}
+}
+
+func TestApply_CodeGraphFailureWarnsAndStillDeploys(t *testing.T) {
+	stage := t.TempDir()
+	agentPath, yamlBytes := genExisting(t, stage)
+	yamlBytes = enableCodeGraphForApplyTest(t, yamlBytes)
+	ag := discover.DiscoveredAgent{
+		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "openclaw"},
+		Path: agentPath,
+	}
+	previousEnsure := ensureCodeGraphForDeploy
+	previousPrepare := prepareCodeGraphForDeploy
+	ensureCodeGraphForDeploy = func(func(string)) (string, error) {
+		return "", errors.New("checksum mismatch")
+	}
+	prepareCodeGraphForDeploy = func(context.Context, CodeGraphIndexOptions) CodeGraphIndexReport {
+		t.Fatal("index manager called after installer failure")
+		return CodeGraphIndexReport{}
+	}
+	t.Cleanup(func() {
+		ensureCodeGraphForDeploy = previousEnsure
+		prepareCodeGraphForDeploy = previousPrepare
+	})
+
+	var logs []string
+	result, err := Apply(ag, ApplyOptions{
+		NewYAML:      yamlBytes,
+		TemplateRoot: filepath.Join(projectRoot(t), "templates"),
+		OnLog:        func(line string) { logs = append(logs, line) },
+	})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if result == nil || result.CodeGraph == nil {
+		t.Fatalf("Apply() result = %#v, want successful result with CodeGraph fallback report", result)
+	}
+	if result.CodeGraph.Total != 1 {
+		t.Fatalf("CodeGraph total = %d, want 1", result.CodeGraph.Total)
+	}
+	joined := strings.Join(logs, "\n")
+	if !strings.Contains(joined, "checksum mismatch") || !strings.Contains(joined, "rg/read fallback") {
+		t.Fatalf("logs = %q, want checksum failure and rg/read fallback", joined)
+	}
+}
+
+func TestApply_CodeGraphReportReturned(t *testing.T) {
+	stage := t.TempDir()
+	agentPath, yamlBytes := genExisting(t, stage)
+	yamlBytes = enableCodeGraphForApplyTest(t, yamlBytes)
+	ag := discover.DiscoveredAgent{
+		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "openclaw"},
+		Path: agentPath,
+	}
+	previousEnsure := ensureCodeGraphForDeploy
+	previousPrepare := prepareCodeGraphForDeploy
+	ensureCodeGraphForDeploy = func(func(string)) (string, error) { return "/fake/codegraph", nil }
+	prepareCodeGraphForDeploy = func(_ context.Context, opts CodeGraphIndexOptions) CodeGraphIndexReport {
+		if opts.BinaryPath != "/fake/codegraph" || opts.SystemID != "shop" {
+			t.Fatalf("index options = %#v", opts)
+		}
+		return CodeGraphIndexReport{
+			Ready: 1,
+			Total: 1,
+			Repos: []CodeGraphRepoResult{{
+				Name: "order-service", Status: "ready", FileCount: 12, NodeCount: 34, EdgeCount: 56,
+			}},
+		}
+	}
+	t.Cleanup(func() {
+		ensureCodeGraphForDeploy = previousEnsure
+		prepareCodeGraphForDeploy = previousPrepare
+	})
+
+	result, err := Apply(ag, ApplyOptions{
+		NewYAML:      yamlBytes,
+		TemplateRoot: filepath.Join(projectRoot(t), "templates"),
+	})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	codeGraph, ok := fields["codegraph"].(map[string]any)
+	if !ok || codeGraph["ready"] != float64(1) || codeGraph["total"] != float64(1) {
+		t.Fatalf("serialized codegraph = %#v", fields["codegraph"])
+	}
+	repos, ok := codeGraph["repos"].([]any)
+	if !ok || len(repos) != 1 {
+		t.Fatalf("serialized repos = %#v", codeGraph["repos"])
+	}
+	repo := repos[0].(map[string]any)
+	if repo["file_count"] != float64(12) || repo["node_count"] != float64(34) || repo["edge_count"] != float64(56) {
+		t.Fatalf("serialized repo counts = %#v", repo)
+	}
+}
+
+func TestApply_CodeGraphDryRunDoesNothing(t *testing.T) {
+	stage := t.TempDir()
+	agentPath, yamlBytes := genExisting(t, stage)
+	yamlBytes = enableCodeGraphForApplyTest(t, yamlBytes)
+	ag := discover.DiscoveredAgent{
+		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "openclaw"},
+		Path: agentPath,
+	}
+	previousEnsure := ensureCodeGraphForDeploy
+	previousPrepare := prepareCodeGraphForDeploy
+	ensureCodeGraphForDeploy = func(func(string)) (string, error) {
+		t.Fatal("dry-run called installer")
+		return "", nil
+	}
+	prepareCodeGraphForDeploy = func(context.Context, CodeGraphIndexOptions) CodeGraphIndexReport {
+		t.Fatal("dry-run called index manager")
+		return CodeGraphIndexReport{}
+	}
+	t.Cleanup(func() {
+		ensureCodeGraphForDeploy = previousEnsure
+		prepareCodeGraphForDeploy = previousPrepare
+	})
+
+	result, err := Apply(ag, ApplyOptions{
+		NewYAML:      yamlBytes,
+		TemplateRoot: filepath.Join(projectRoot(t), "templates"),
+		DryRun:       true,
+	})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if result.CodeGraph != nil {
+		t.Fatalf("CodeGraph report = %#v, want nil", result.CodeGraph)
+	}
+}
+
+func TestImportAndApply_MultiTargetCacheAvoidsSecondIndex(t *testing.T) {
+	yamlBytes, err := os.ReadFile(filepath.Join(projectRoot(t), "examples", "shop-troubleshooter.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	yamlBytes = enableCodeGraphForApplyTest(t, yamlBytes)
+	repoRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoRoot, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitForCodeGraphTest(t, "init", "-q", repoRoot)
+	runGitForCodeGraphTest(t, "-C", repoRoot, "add", "main.go")
+	runGitForCodeGraphTest(t, "-C", repoRoot, "-c", "user.name=CodeGraph Test", "-c", "user.email=codegraph@example.invalid", "commit", "-qm", "initial")
+
+	const systemID = "shop"
+	InvalidateCodeGraphIndexCache(systemID)
+	t.Cleanup(func() { InvalidateCodeGraphIndexCache(systemID) })
+	previousEnsure := ensureCodeGraphForDeploy
+	previousPrepare := prepareCodeGraphForDeploy
+	previousRunner := runCodeGraphCommand
+	ensureCodeGraphForDeploy = func(func(string)) (string, error) { return "/fake/codegraph", nil }
+	prepareCodeGraphForDeploy = PrepareCodeGraphIndexes
+	var commands atomic.Int32
+	runCodeGraphCommand = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		call := commands.Add(1)
+		if len(args) > 0 && args[0] == "status" {
+			if call == 1 {
+				return codeGraphStatusJSON(repoRoot, false, 0, 0, 0, "missing"), nil
+			}
+			return codeGraphStatusJSON(repoRoot, true, 1, 2, 1, "complete"), nil
+		}
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		ensureCodeGraphForDeploy = previousEnsure
+		prepareCodeGraphForDeploy = previousPrepare
+		runCodeGraphCommand = previousRunner
+	})
+
+	opts := ApplyOptions{
+		TemplateRoot:   filepath.Join(projectRoot(t), "templates"),
+		RepoLocalPaths: map[string]string{"order-service": repoRoot},
+	}
+	first, err := ImportAndApply(yamlBytes, "openclaw", t.TempDir(), opts)
+	if err != nil {
+		t.Fatalf("first ImportAndApply() error = %v", err)
+	}
+	firstCommandCount := commands.Load()
+	if firstCommandCount == 0 || first.CodeGraph == nil || first.CodeGraph.Ready != 1 {
+		t.Fatalf("first result = %#v, commands = %d", first, firstCommandCount)
+	}
+	second, err := ImportAndApply(yamlBytes, "openclaw", t.TempDir(), opts)
+	if err != nil {
+		t.Fatalf("second ImportAndApply() error = %v", err)
+	}
+	if commands.Load() != firstCommandCount {
+		t.Fatalf("commands after second deployment = %d, want cache reuse at %d", commands.Load(), firstCommandCount)
+	}
+	if second.CodeGraph == nil || second.CodeGraph.Ready != first.CodeGraph.Ready || second.CodeGraph.Total != first.CodeGraph.Total {
+		t.Fatalf("second report = %#v, first = %#v", second.CodeGraph, first.CodeGraph)
+	}
+}
+
+func enableCodeGraphForApplyTest(t *testing.T, yamlBytes []byte) []byte {
+	t.Helper()
+	const disabled = "code_intelligence:\n  enabled: false"
+	const enabled = "code_intelligence:\n  enabled: true"
+	if !strings.Contains(string(yamlBytes), disabled) {
+		t.Fatal("test fixture does not contain disabled code_intelligence block")
+	}
+	return []byte(strings.Replace(string(yamlBytes), disabled, enabled, 1))
 }

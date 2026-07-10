@@ -9,15 +9,20 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 	"github.com/xiaolong/troubleshooter-studio/internal/generator"
 )
+
+var ensureCodeGraphForDeploy = EnsureCodeGraphInstalled
+var prepareCodeGraphForDeploy = PrepareCodeGraphIndexes
 
 // ApplyOptions 控制 apply 的行为。
 type ApplyOptions struct {
@@ -47,12 +52,41 @@ type ApplyOptions struct {
 
 // Result 是 apply 的摘要，给 CLI 用来打印下一步。
 type Result struct {
-	AgentPath        string   `json:"agent_path"`
-	Target           string   `json:"target"`
-	FilesWritten     int      `json:"files_written"`
-	FilesRemoved     []string `json:"files_removed,omitempty"`
-	TSFJSONUpdated   bool     `json:"tsf_json_updated"`
-	NeedsRestartHint string   `json:"needs_restart_hint,omitempty"`
+	AgentPath        string                `json:"agent_path"`
+	Target           string                `json:"target"`
+	FilesWritten     int                   `json:"files_written"`
+	FilesRemoved     []string              `json:"files_removed,omitempty"`
+	TSFJSONUpdated   bool                  `json:"tsf_json_updated"`
+	NeedsRestartHint string                `json:"needs_restart_hint,omitempty"`
+	CodeGraph        *CodeGraphIndexReport `json:"codegraph,omitempty"`
+}
+
+// PrepareCodeGraphForDeploy best-effort prepares CodeGraph indexes for an opted-in
+// system. Setup failures are reported as a visible fallback and never fail deploy.
+func PrepareCodeGraphForDeploy(ctx context.Context, cfg *config.SystemConfig, repoPaths map[string]string, onLog func(string)) *CodeGraphIndexReport {
+	if cfg == nil || !cfg.CodeIntelligence.UsesCodeGraph() {
+		return nil
+	}
+	log := onLog
+	if log == nil {
+		log = func(string) {}
+	}
+	repos := BuildCodeGraphRepoTargets(cfg, repoPaths)
+	binary, err := ensureCodeGraphForDeploy(onLog)
+	if err != nil {
+		log("[codegraph] warn: binary unavailable; rg/read fallback enabled: " + err.Error())
+		return &CodeGraphIndexReport{Total: len(repos)}
+	}
+	report := prepareCodeGraphForDeploy(ctx, CodeGraphIndexOptions{
+		BinaryPath:     binary,
+		SystemID:       cfg.System.ID,
+		Repos:          repos,
+		OnProgress:     onLog,
+		InitTimeout:    120 * time.Second,
+		SyncTimeout:    30 * time.Second,
+		MaxConcurrency: 2,
+	})
+	return &report
 }
 
 // Apply 用 NewYAML 替换 agent 的活配置，重新 render 并 rsync 到工作目录。
@@ -205,6 +239,10 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 		}
 	}
 
+	var codeGraph *CodeGraphIndexReport
+	if !opts.DryRun {
+		codeGraph = PrepareCodeGraphForDeploy(context.Background(), cfg, opts.RepoLocalPaths, opts.OnLog)
+	}
 	return &Result{
 		AgentPath:        ag.Path,
 		Target:           ag.Meta.Target,
@@ -212,6 +250,7 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 		FilesRemoved:     removed,
 		TSFJSONUpdated:   tsfUpdated,
 		NeedsRestartHint: restartHint,
+		CodeGraph:        codeGraph,
 	}, nil
 }
 
@@ -266,12 +305,14 @@ func ImportAndApply(yamlBytes []byte, target, destPath string, opts ApplyOptions
 			return nil, fmt.Errorf("openclaw gen: %w", err)
 		}
 		written := countFilesUnder(destPath)
+		codeGraph := PrepareCodeGraphForDeploy(context.Background(), cfg, opts.RepoLocalPaths, opts.OnLog)
 		return &Result{
 			AgentPath:        destPath,
 			Target:           target,
 			FilesWritten:     written,
 			TSFJSONUpdated:   true,
 			NeedsRestartHint: "已生成 openclaw staging。桌面端下一步会跑 RunInstall(原生 Go,无 bash 依赖)注入 ~/.openclaw/openclaw.json 并安装 workspace。",
+			CodeGraph:        codeGraph,
 		}, nil
 	}
 

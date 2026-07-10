@@ -53,7 +53,7 @@ const autoAnalyzeCacheTTL = 5 * time.Minute
 
 // autoAnalyzeCache 是 RunAutoAnalyze 的 process-level 缓存。key 见 autoAnalyzeCacheKey;
 // autoAnalyzeFlights 合并并发 miss,二者共用同一把短临界区 mutex,扫描期间不持锁。
-// 短 TTL,无 LRU 上限:一次 wizard 最多 ~1-2 个 system.id,内存可忽略。重启 .app 自动清。
+// 短 TTL,每次 lookup/publication 顺手清过期项;一次 wizard 最多 ~1-2 个 system.id。
 var (
 	autoAnalyzeCacheMu sync.Mutex
 	autoAnalyzeCache   = make(map[string]*autoAnalyzeCacheEntry)
@@ -66,11 +66,12 @@ type autoAnalyzeCacheEntry struct {
 }
 
 type autoAnalyzeFlight struct {
-	done    chan struct{}
-	result  *analyzerpipe.Result
-	err     error
-	cancel  context.CancelFunc
-	waiters int
+	done      chan struct{}
+	result    *analyzerpipe.Result
+	err       error
+	cancel    context.CancelFunc
+	waiters   int
+	abandoned bool
 }
 
 type autoAnalyzeCacheRepository struct {
@@ -148,6 +149,16 @@ func autoAnalyzeRepoHead(path string) string {
 	return head
 }
 
+// pruneExpiredAutoAnalyzeCacheLocked removes stale entries while the caller
+// already holds autoAnalyzeCacheMu. Entries exactly at the TTL are expired.
+func pruneExpiredAutoAnalyzeCacheLocked(now time.Time) {
+	for key, entry := range autoAnalyzeCache {
+		if entry == nil || now.Sub(entry.at) >= autoAnalyzeCacheTTL {
+			delete(autoAnalyzeCache, key)
+		}
+	}
+}
+
 // CheckMissingRepoPaths 返回 yaml 里"应该 / 可以扫"但目前 savedPaths 没覆盖的 repo 名。
 //   - savedPaths 通常来自 userconfig.GetRepoPathsForSystem(cfg.System.ID)
 //   - "应该扫"的判断:repo.Stack 非空(有 stack 才能扫;不含 docs / 配置仓库)
@@ -211,7 +222,8 @@ func RunAutoAnalyze(opts RunAutoAnalyzeOptions) (*analyzerpipe.Result, error) {
 		callerCtx = context.Background()
 	}
 	autoAnalyzeCacheMu.Lock()
-	if entry, ok := autoAnalyzeCache[cacheKey]; ok && time.Since(entry.at) < autoAnalyzeCacheTTL {
+	pruneExpiredAutoAnalyzeCacheLocked(time.Now())
+	if entry, ok := autoAnalyzeCache[cacheKey]; ok {
 		hit := entry
 		autoAnalyzeCacheMu.Unlock()
 		if opts.OnLog != nil {
@@ -241,10 +253,14 @@ func RunAutoAnalyze(opts RunAutoAnalyzeOptions) (*analyzerpipe.Result, error) {
 		autoAnalyzeCacheMu.Lock()
 		flight.result = result
 		flight.err = err
-		if err == nil && result != nil {
-			autoAnalyzeCache[cacheKey] = &autoAnalyzeCacheEntry{result: result, at: time.Now()}
+		if current, ok := autoAnalyzeFlights[cacheKey]; ok && current == flight && !flight.abandoned {
+			now := time.Now()
+			pruneExpiredAutoAnalyzeCacheLocked(now)
+			if err == nil && result != nil {
+				autoAnalyzeCache[cacheKey] = &autoAnalyzeCacheEntry{result: result, at: now}
+			}
+			delete(autoAnalyzeFlights, cacheKey)
 		}
-		delete(autoAnalyzeFlights, cacheKey)
 		close(flight.done)
 		flight.cancel()
 		autoAnalyzeCacheMu.Unlock()
@@ -262,6 +278,8 @@ func waitAutoAnalyzeFlight(ctx context.Context, cacheKey string, flight *autoAna
 		if current, ok := autoAnalyzeFlights[cacheKey]; ok && current == flight {
 			flight.waiters--
 			if flight.waiters == 0 {
+				flight.abandoned = true
+				delete(autoAnalyzeFlights, cacheKey)
 				flight.cancel()
 			}
 		}

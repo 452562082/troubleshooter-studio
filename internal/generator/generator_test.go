@@ -119,6 +119,12 @@ func TestGenerate_CodeIntelligenceRequiresRouting(t *testing.T) {
 	if got := skipReason(g, "code-intelligence-query"); got != "requires routing skill" {
 		t.Fatalf("skip reason = %q", got)
 	}
+	readme := readFile(t, filepath.Join(out, "README.md"))
+	for _, forbidden := range []string{"**code-intelligence-query**", "CodeGraph"} {
+		if strings.Contains(readme, forbidden) {
+			t.Fatalf("README advertised skipped CodeGraph capability %q:\n%s", forbidden, readme)
+		}
+	}
 
 	// incident-investigator may still be selected independently; the unavailable CodeGraph
 	// dependency must not leak into its rendered Step 5.2 branch.

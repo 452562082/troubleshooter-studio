@@ -1,5 +1,9 @@
 package topology
 
+// SchemaVersion identifies the rebuildable endpoint/edge snapshot contract.
+// Cache keys include it so a contract change cannot reuse an older analysis.
+const SchemaVersion = "1"
+
 type Direction string
 
 const (

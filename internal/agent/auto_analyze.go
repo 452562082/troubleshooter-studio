@@ -19,6 +19,8 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -27,6 +29,7 @@ import (
 
 	"github.com/xiaolong/troubleshooter-studio/internal/analyzerpipe"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
+	"github.com/xiaolong/troubleshooter-studio/internal/topology"
 	"github.com/xiaolong/troubleshooter-studio/internal/userconfig"
 )
 
@@ -58,7 +61,8 @@ type autoAnalyzeCacheEntry struct {
 	at     time.Time
 }
 
-// autoAnalyzeCacheKey 构造 cache key:system.id + 按 repo name 排序后的 path 列表。
+// autoAnalyzeCacheKey 构造 cache key:system.id + topology contract version + 按 repo
+// name 排序后的 path/HEAD 列表。这样同路径 checkout 到新 commit 后不会复用旧拓扑。
 // 用 \x1f (US, Unit Separator) 当字段分隔符——路径里不可能出现,避免误命中。
 func autoAnalyzeCacheKey(systemID string, expanded map[string]string) string {
 	names := make([]string, 0, len(expanded))
@@ -68,13 +72,32 @@ func autoAnalyzeCacheKey(systemID string, expanded map[string]string) string {
 	sort.Strings(names)
 	var b strings.Builder
 	b.WriteString(systemID)
+	b.WriteString("\x1ftopology-schema=")
+	b.WriteString(topology.SchemaVersion)
 	for _, n := range names {
 		b.WriteByte('\x1f')
 		b.WriteString(n)
 		b.WriteByte('=')
 		b.WriteString(expanded[n])
+		b.WriteString("\x1fhead=")
+		b.WriteString(autoAnalyzeRepoHead(expanded[n]))
 	}
 	return b.String()
+}
+
+func autoAnalyzeRepoHead(path string) string {
+	if _, err := os.Stat(path); err != nil {
+		return "missing"
+	}
+	output, err := exec.Command("git", "-C", path, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return "not-git"
+	}
+	head := strings.TrimSpace(string(output))
+	if head == "" {
+		return "not-git"
+	}
+	return head
 }
 
 // CheckMissingRepoPaths 返回 yaml 里"应该 / 可以扫"但目前 savedPaths 没覆盖的 repo 名。
@@ -140,7 +163,7 @@ func RunAutoAnalyze(opts RunAutoAnalyzeOptions) (*analyzerpipe.Result, error) {
 		hit := entry
 		autoAnalyzeCacheMu.Unlock()
 		if opts.OnLog != nil {
-			opts.OnLog(fmt.Sprintf("[info] auto-analyze cache 命中(%ds 前的结果),复用 dependency / schema findings",
+			opts.OnLog(fmt.Sprintf("[info] auto-analyze cache 命中(%ds 前的结果),复用 dependency / schema / topology findings",
 				int(time.Since(hit.at).Seconds())))
 		}
 		return hit.result, nil

@@ -124,6 +124,7 @@ func Run(ctx context.Context, cfg *config.SystemConfig, opts Options) (*Result, 
 	// 走到这里,过滤掉的 parent 在 child 处理时也用不到(那种场景只单扫子模块,parent 路径
 	// 走 RepoPaths 显式 / autoClone 兜底)。
 	resolvedPaths := map[string]string{}
+	explicitPathsOnly := opts.ReposRoot == "" && len(opts.RepoPaths) > 0
 
 	for _, repo := range topoSortReposByParent(cfg.Repos) {
 		// 每个 repo 处理前 check ctx —— 上层 timeout(auto-analyze 60s)/ 用户取消能在
@@ -142,21 +143,27 @@ func Run(ctx context.Context, cfg *config.SystemConfig, opts Options) (*Result, 
 		//     (典型:commerce 从 truss 切出,本地放 ~/.../truss/commerce/)
 		//  3. urlClonedTo[url] → 同 URL 多 repo 条目复用同一 clone(monorepo 多 service)
 		//  4. ReposRoot/Name → 兜底
+		// 仅传 RepoPaths 且 ReposRoot 为空时是 strict explicit 模式:未列出的 repo 不做
+		// parent/URL/root 推导,稳定标记为 missing。
 		var repoPath string
 		if p, ok := opts.RepoPaths[repo.Name]; ok && p != "" {
 			repoPath = p
-		} else if repo.ParentRepo != "" {
-			if parentPath, ok := resolvedPaths[repo.ParentRepo]; ok && parentPath != "" {
-				mount := repo.ParentPath
-				if mount == "" {
-					mount = repo.Name
+		} else if !explicitPathsOnly {
+			if repo.ParentRepo != "" {
+				if parentPath, ok := resolvedPaths[repo.ParentRepo]; ok && parentPath != "" {
+					mount := repo.ParentPath
+					if mount == "" {
+						mount = repo.Name
+					}
+					repoPath = filepath.Join(parentPath, mount)
 				}
-				repoPath = filepath.Join(parentPath, mount)
 			}
-		} else if cloned, ok := urlClonedTo[repo.URL]; ok && cloned != "" {
-			repoPath = cloned
-		} else if opts.ReposRoot != "" {
-			repoPath = filepath.Join(opts.ReposRoot, repo.Name)
+			if repoPath == "" && repo.URL != "" {
+				repoPath = urlClonedTo[repo.URL]
+			}
+			if repoPath == "" && opts.ReposRoot != "" {
+				repoPath = filepath.Join(opts.ReposRoot, repo.Name)
+			}
 		}
 		status := "analyzed"
 
@@ -217,7 +224,9 @@ func Run(ctx context.Context, cfg *config.SystemConfig, opts Options) (*Result, 
 			status = "cloned-then-analyzed"
 		}
 		// 记下"这个 URL 的 clone root",同 url 后续 repo 条目复用(monorepo 多 service)
-		urlClonedTo[repo.URL] = repoPath
+		if repo.URL != "" {
+			urlClonedTo[repo.URL] = repoPath
+		}
 		// 记下"这个 repo 名最终解析到的本地路径",后续子模块(parent_repo 指向本仓的)
 		// 直接拼 <这个路径>/<sub_path 或 child.name> 当落地点
 		resolvedPaths[repo.Name] = repoPath
@@ -306,16 +315,18 @@ func Run(ctx context.Context, cfg *config.SystemConfig, opts Options) (*Result, 
 		// 多策略叠加(orm_annotation > orm_api_call > sql_literal > file_name)同 (name,kind) 去重保最高优先级。
 		ra.SchemaTables = analyzer.ScanSchemaContext(ctx, effectiveStack, repoPath, repo.Analysis.IncludePaths)
 		if repo.IsServiceNode() {
+			runnableTopologyRepos++
 			effectiveFramework := repo.Framework
 			if effectiveFramework == "" {
 				effectiveFramework = detectedFramework
 			}
+			services := effectiveTopologyServices(repo)
 			endpoints, endpointErr := analyzer.ScanEndpointsContext(ctx, analyzer.EndpointScanOptions{
 				Repo:         repo.Name,
 				Stack:        effectiveStack,
 				Framework:    effectiveFramework,
 				RepoPath:     repoPath,
-				Services:     effectiveTopologyServices(repo),
+				Services:     services,
 				IncludePaths: repo.Analysis.IncludePaths,
 			})
 			if endpointErr != nil {
@@ -324,14 +335,12 @@ func Run(ctx context.Context, cfg *config.SystemConfig, opts Options) (*Result, 
 				})
 				progress(fmt.Sprintf("[warn] endpoint scan %s failed: %v", repo.Name, endpointErr))
 			} else {
+				endpoints = assignTopologyEndpointServices(endpoints, services)
 				ra.Endpoints = endpoints
 				topologySnapshot.Endpoints = append(topologySnapshot.Endpoints, endpoints...)
 				topologySnapshot.Repositories = append(topologySnapshot.Repositories, topology.RepositoryStatus{
 					Repo: repo.Name, State: "scanned", EndpointCount: len(endpoints),
 				})
-				if len(endpoints) > 0 {
-					runnableTopologyRepos++
-				}
 			}
 		} else {
 			topologySnapshot.Repositories = append(topologySnapshot.Repositories, topology.RepositoryStatus{
@@ -387,7 +396,7 @@ func topologyServiceDescriptors(cfg *config.SystemConfig, repoName string) []top
 				Repo:    repo.Name,
 				Service: service,
 				Role:    repo.EffectiveRole(),
-				Aliases: topologyServiceAliases(repo.Name, service),
+				Aliases: topologyServiceAliases(repo, service, cfg.Infrastructure.Observability.K8sRuntime.ServiceMap),
 				Hosts:   topologyServiceHosts(repo.EffectiveRole(), cfg.Environments),
 			})
 		}
@@ -422,15 +431,46 @@ func effectiveTopologyServices(repo config.Repo) []string {
 	return services
 }
 
-func topologyServiceAliases(repoName, service string) []string {
-	aliases := []string{
-		strings.TrimSpace(repoName),
-		strings.TrimSpace(service),
-		strings.TrimSpace(service) + ".svc",
-		strings.TrimSpace(service) + ".default.svc",
-		strings.TrimSpace(service) + ".svc.cluster.local",
+func topologyServiceAliases(repo config.Repo, service string, serviceMap []config.K8sRuntimeServiceMapEntry) []string {
+	service = strings.TrimSpace(service)
+	aliases := []string{service}
+	if len(effectiveTopologyServices(repo)) == 1 {
+		aliases = append(aliases, strings.TrimSpace(repo.Name))
+	}
+	for _, mapping := range serviceMap {
+		if strings.TrimSpace(mapping.Service) != service {
+			continue
+		}
+		namespace := strings.TrimSpace(mapping.Namespace)
+		if namespace == "" {
+			continue
+		}
+		serviceNamespace := service + "." + namespace
+		aliases = append(aliases,
+			serviceNamespace,
+			serviceNamespace+".svc",
+			serviceNamespace+".svc.cluster.local",
+		)
 	}
 	return sortedNonEmptyStrings(aliases)
+}
+
+func assignTopologyEndpointServices(endpoints []topology.Endpoint, services []string) []topology.Endpoint {
+	result := make([]topology.Endpoint, 0, len(endpoints)*max(1, len(services)))
+	for _, endpoint := range endpoints {
+		if strings.TrimSpace(endpoint.Service) != "" || len(services) == 0 {
+			endpoint.ID = endpoint.SemanticID()
+			result = append(result, endpoint)
+			continue
+		}
+		for _, service := range services {
+			assigned := endpoint
+			assigned.Service = service
+			assigned.ID = assigned.SemanticID()
+			result = append(result, assigned)
+		}
+	}
+	return result
 }
 
 func topologyServiceHosts(role string, environments []config.Environment) []string {

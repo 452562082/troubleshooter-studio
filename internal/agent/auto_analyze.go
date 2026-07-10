@@ -18,10 +18,12 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -44,16 +46,18 @@ const autoAnalyzeTimeout = 60 * time.Second
 
 // autoAnalyzeCacheTTL:一次部署 wizard 里 4 个 target(openclaw/claude-code/cursor/codex)
 // 串行调 ImportAndDeploy,每个内部各跑一次 RunAutoAnalyze,实测每个 ~4-5s = 总共 ~20s
-// 重复扫同一份 repo —— 纯浪费。加 process-level cache 按 (system.id + sorted repo paths)
-// key,首次跑写 cache,后续 target 命中直接复用 result。5min TTL 覆盖一次完整部署流程(<2min)
-// 且让用户改 yaml 后重新部署时强制重扫(避免 stale findings)。
+// 重复扫同一份 repo —— 纯浪费。加 process-level cache,按完整配置摘要 + topology schema
+// + sorted repo path/HEAD 生成 key,首次跑写 cache,后续 target 命中直接复用 result。
+// 5min TTL 覆盖一次完整部署流程(<2min),配置或 checkout 变化则立即换 key 重扫。
 const autoAnalyzeCacheTTL = 5 * time.Minute
 
-// autoAnalyzeCache 是 RunAutoAnalyze 的 process-level 缓存。key 见 autoAnalyzeCacheKey。
+// autoAnalyzeCache 是 RunAutoAnalyze 的 process-level 缓存。key 见 autoAnalyzeCacheKey;
+// autoAnalyzeFlights 合并并发 miss,二者共用同一把短临界区 mutex,扫描期间不持锁。
 // 短 TTL,无 LRU 上限:一次 wizard 最多 ~1-2 个 system.id,内存可忽略。重启 .app 自动清。
 var (
 	autoAnalyzeCacheMu sync.Mutex
 	autoAnalyzeCache   = make(map[string]*autoAnalyzeCacheEntry)
+	autoAnalyzeFlights = make(map[string]*autoAnalyzeFlight)
 )
 
 type autoAnalyzeCacheEntry struct {
@@ -61,28 +65,72 @@ type autoAnalyzeCacheEntry struct {
 	at     time.Time
 }
 
-// autoAnalyzeCacheKey 构造 cache key:system.id + topology contract version + 按 repo
-// name 排序后的 path/HEAD 列表。这样同路径 checkout 到新 commit 后不会复用旧拓扑。
-// 用 \x1f (US, Unit Separator) 当字段分隔符——路径里不可能出现,避免误命中。
-func autoAnalyzeCacheKey(systemID string, expanded map[string]string) string {
+type autoAnalyzeFlight struct {
+	done    chan struct{}
+	result  *analyzerpipe.Result
+	err     error
+	cancel  context.CancelFunc
+	waiters int
+}
+
+type autoAnalyzeCacheRepository struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+	Head string `json:"head"`
+}
+
+type autoAnalyzeCacheMaterial struct {
+	SystemID      string                       `json:"system_id"`
+	ConfigDigest  string                       `json:"config_digest"`
+	SchemaVersion string                       `json:"schema_version"`
+	Repositories  []autoAnalyzeCacheRepository `json:"repositories"`
+}
+
+// autoAnalyzeCacheKey hashes canonical JSON containing the system/config digest,
+// topology contract version, and each sorted repository path plus HEAD state.
+// Hashing both config and final material invalidates topology-relevant aliases,
+// roles, domains, and overrides without exposing configuration values or secrets.
+func autoAnalyzeCacheKey(cfg *config.SystemConfig, expanded map[string]string) string {
+	material := autoAnalyzeCacheMaterialFor(cfg, expanded)
+	encoded, err := json.Marshal(material)
+	if err != nil {
+		encoded = []byte(fmt.Sprintf("cache-material-json-error:%T:%v", material, err))
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:])
+}
+
+func autoAnalyzeCacheMaterialFor(cfg *config.SystemConfig, expanded map[string]string) autoAnalyzeCacheMaterial {
 	names := make([]string, 0, len(expanded))
 	for n := range expanded {
 		names = append(names, n)
 	}
 	sort.Strings(names)
-	var b strings.Builder
-	b.WriteString(systemID)
-	b.WriteString("\x1ftopology-schema=")
-	b.WriteString(topology.SchemaVersion)
-	for _, n := range names {
-		b.WriteByte('\x1f')
-		b.WriteString(n)
-		b.WriteByte('=')
-		b.WriteString(expanded[n])
-		b.WriteString("\x1fhead=")
-		b.WriteString(autoAnalyzeRepoHead(expanded[n]))
+	material := autoAnalyzeCacheMaterial{
+		ConfigDigest:  canonicalJSONDigest(cfg),
+		SchemaVersion: topology.SchemaVersion,
+		Repositories:  make([]autoAnalyzeCacheRepository, 0, len(names)),
 	}
-	return b.String()
+	if cfg != nil {
+		material.SystemID = cfg.System.ID
+	}
+	for _, n := range names {
+		material.Repositories = append(material.Repositories, autoAnalyzeCacheRepository{
+			Name: n,
+			Path: expanded[n],
+			Head: autoAnalyzeRepoHead(expanded[n]),
+		})
+	}
+	return material
+}
+
+func canonicalJSONDigest(value any) string {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		encoded = []byte(fmt.Sprintf("config-json-error:%T:%v", value, err))
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:])
 }
 
 func autoAnalyzeRepoHead(path string) string {
@@ -157,7 +205,11 @@ func RunAutoAnalyze(opts RunAutoAnalyzeOptions) (*analyzerpipe.Result, error) {
 		return nil, nil
 	}
 	// cache 命中检查:同一 wizard 部署多 target 时,后 3 个 target 复用首次扫的结果
-	cacheKey := autoAnalyzeCacheKey(opts.Cfg.System.ID, expanded)
+	cacheKey := autoAnalyzeCacheKey(opts.Cfg, expanded)
+	callerCtx := opts.Ctx
+	if callerCtx == nil {
+		callerCtx = context.Background()
+	}
 	autoAnalyzeCacheMu.Lock()
 	if entry, ok := autoAnalyzeCache[cacheKey]; ok && time.Since(entry.at) < autoAnalyzeCacheTTL {
 		hit := entry
@@ -168,15 +220,60 @@ func RunAutoAnalyze(opts RunAutoAnalyzeOptions) (*analyzerpipe.Result, error) {
 		}
 		return hit.result, nil
 	}
+	if flight, ok := autoAnalyzeFlights[cacheKey]; ok {
+		flight.waiters++
+		autoAnalyzeCacheMu.Unlock()
+		if opts.OnLog != nil {
+			opts.OnLog("[info] auto-analyze 同 key 扫描进行中,等待共享结果")
+		}
+		return waitAutoAnalyzeFlight(callerCtx, cacheKey, flight, opts.OnLog)
+	}
+	sharedCtx, cancelShared := context.WithTimeout(context.Background(), autoAnalyzeTimeout)
+	flight := &autoAnalyzeFlight{done: make(chan struct{}), cancel: cancelShared, waiters: 1}
+	autoAnalyzeFlights[cacheKey] = flight
 	autoAnalyzeCacheMu.Unlock()
 
-	// 推导一个 ReposRoot(用第一条路径的父目录),让 analyzer 接受 partial 路径
-	// (其它仓库走 ReposRoot+Name 默认拼法,虽然多半不存在但 analyzer 会 skip 不中断)
-	var reposRoot string
-	for _, p := range expanded {
-		reposRoot = filepath.Dir(p)
-		break
+	scanOpts := opts
+	scanOpts.Ctx = sharedCtx
+	go func() {
+		result, err := runAutoAnalyzeScan(scanOpts, expanded)
+
+		autoAnalyzeCacheMu.Lock()
+		flight.result = result
+		flight.err = err
+		if err == nil && result != nil {
+			autoAnalyzeCache[cacheKey] = &autoAnalyzeCacheEntry{result: result, at: time.Now()}
+		}
+		delete(autoAnalyzeFlights, cacheKey)
+		close(flight.done)
+		flight.cancel()
+		autoAnalyzeCacheMu.Unlock()
+	}()
+
+	return waitAutoAnalyzeFlight(callerCtx, cacheKey, flight, opts.OnLog)
+}
+
+func waitAutoAnalyzeFlight(ctx context.Context, cacheKey string, flight *autoAnalyzeFlight, onLog func(string)) (*analyzerpipe.Result, error) {
+	select {
+	case <-flight.done:
+		return flight.result, flight.err
+	case <-ctx.Done():
+		autoAnalyzeCacheMu.Lock()
+		if current, ok := autoAnalyzeFlights[cacheKey]; ok && current == flight {
+			flight.waiters--
+			if flight.waiters == 0 {
+				flight.cancel()
+			}
+		}
+		autoAnalyzeCacheMu.Unlock()
+		if onLog != nil {
+			onLog("[warn] auto-analyze 调用已取消,放弃等待共享扫描结果")
+		}
+		return nil, nil
 	}
+}
+
+func runAutoAnalyzeScan(opts RunAutoAnalyzeOptions, expanded map[string]string) (*analyzerpipe.Result, error) {
 	if opts.OnLog != nil {
 		opts.OnLog(fmt.Sprintf("[info] auto-analyze 开始扫 %d 个 repo 的依赖 + schema(上限 %ds,超时自动放弃)", len(expanded), int(autoAnalyzeTimeout.Seconds())))
 	}
@@ -185,18 +282,13 @@ func RunAutoAnalyze(opts RunAutoAnalyzeOptions) (*analyzerpipe.Result, error) {
 		err error
 	}
 	ch := make(chan chRes, 1)
-	// 内部 ctx:caller ctx(opts.Ctx)+ 我们自己的 60s timeout 包一层。
-	// caller 取消(用户点 stop / 桌面关 app)或本地 60s 时间到,都让 analyzerpipe.Run
-	// 从 step 之间退出,不再"goroutine 后台跑到死"。
-	parentCtx := opts.Ctx
-	if parentCtx == nil {
-		parentCtx = context.Background()
+	runCtx := opts.Ctx
+	if runCtx == nil {
+		runCtx = context.Background()
 	}
-	runCtx, cancelRun := context.WithTimeout(parentCtx, autoAnalyzeTimeout)
-	defer cancelRun()
 	go func() {
 		r, err := analyzerpipe.Run(runCtx, opts.Cfg, analyzerpipe.Options{
-			ReposRoot:  reposRoot,
+			ReposRoot:  "",
 			RepoPaths:  expanded,
 			AutoClone:  false,
 			OnProgress: opts.OnLog,
@@ -212,16 +304,10 @@ func RunAutoAnalyze(opts RunAutoAnalyzeOptions) (*analyzerpipe.Result, error) {
 				opts.OnLog("[ok] auto-analyze 完成")
 			}
 		}
-		// 成功才 cache(失败 / nil result 不缓存,下次 retry 有机会)
-		if res.err == nil && res.r != nil {
-			autoAnalyzeCacheMu.Lock()
-			autoAnalyzeCache[cacheKey] = &autoAnalyzeCacheEntry{result: res.r, at: time.Now()}
-			autoAnalyzeCacheMu.Unlock()
-		}
 		return res.r, res.err
 	case <-runCtx.Done():
-		// 复用 runCtx 的 deadline(= autoAnalyzeTimeout)而非另起 time.After:既不泄露定时器,
-		// 又让 caller 传进来的 parentCtx 取消(关 app / 取消部署)能真正中断这里的等待。
+		// 复用 shared runCtx 的 deadline(= autoAnalyzeTimeout)而非另起 time.After,
+		// 既不泄露定时器,又能在所有 caller 都取消时中断底层扫描。
 		if opts.OnLog != nil {
 			opts.OnLog(fmt.Sprintf("[warn] auto-analyze 超过 %ds 未完成或被取消,放弃等待(产物里 service-dependency-map / data-schema-map 字段留空,可后续 BotsPage 重新生成拿到)", int(autoAnalyzeTimeout.Seconds())))
 		}

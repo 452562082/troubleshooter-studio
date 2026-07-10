@@ -11,6 +11,7 @@
 // 它依赖 runCCHubPreload / crossCheckImported* 等 closure 函数,跨边界不值得。
 
 import type { CredField } from './credFields'
+import type { CodeIntelligenceState } from './yamlGenerator'
 import { VIA_GRAFANA_ELIGIBLE } from './yamlShared'
 
 /** yaml 字段值是否为模板占位符 "{{XYZ}}";占位符不应当作真值反填。 */
@@ -139,6 +140,7 @@ export interface ApplyImportContext {
   system: { id: string; name: string; description: string }
   agent: { id: string; name: string; workspace_name: string; model: string }
   targetModels: Record<string, string>
+  codeIntelligence: CodeIntelligenceState
   environments: Array<{ id: string; api_domain: string; web_domain: string; is_prod: boolean }>
   repos: any[]
   enabledSourceTypes: Record<string, boolean>
@@ -194,6 +196,11 @@ export async function applyParsedYAMLToWizardState(
   parsed: any,
   ctx: ApplyImportContext,
 ): Promise<{ primaryConfigCenter: string }> {
+  const codeIntelligence = parsed?.code_intelligence
+  ctx.codeIntelligence.enabled = codeIntelligence?.enabled === true
+    && (codeIntelligence.provider === undefined || codeIntelligence.provider === 'codegraph')
+  ctx.codeIntelligence.provider = 'codegraph'
+
   // system
   if (parsed.system && typeof parsed.system === 'object') {
     ctx.system.id = parsed.system.id ?? ''

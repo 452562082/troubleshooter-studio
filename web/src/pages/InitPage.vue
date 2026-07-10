@@ -33,7 +33,11 @@ import YamlPreviewStep from '../components/YamlPreviewStep.vue'
 import OneClickDeployStep from '../components/OneClickDeployStep.vue'
 import EnvListStep from '../components/EnvListStep.vue'
 import GlobalReposRootBlock from '../components/GlobalReposRootBlock.vue'
-import { generateYAML as libGenerateYAML, type YAMLGenContext } from '../lib/yamlGenerator'
+import {
+  generateYAML as libGenerateYAML,
+  type CodeIntelligenceState,
+  type YAMLGenContext,
+} from '../lib/yamlGenerator'
 import { computeStepErrors as libComputeStepErrors, labelForErrorKey as libLabelForErrorKey, type ValidatorContext } from '../lib/yamlValidator'
 import type { ApplyImportContext } from '../lib/yamlImporter'
 import { copyToClipboard } from '../lib/clipboard'
@@ -125,6 +129,10 @@ const agent = reactive({
 })
 const targetModels = reactive<Record<string, string>>({
   openclaw: saved?.agent?.target_models?.openclaw ?? (saved?.agent?.model ?? 'anthropic/claude-sonnet-4-6'),
+})
+const codeIntelligence = reactive<CodeIntelligenceState>({
+  enabled: saved?.codeIntelligence?.enabled ?? false,
+  provider: 'codegraph',
 })
 const modelConsumingTargets = [Target.Openclaw] as const
 
@@ -2488,6 +2496,7 @@ watch(
     system,
     agent,
     targetModels,
+    codeIntelligence,
     environments,
     repos,
     repoBranchesMap: repoBranchesMap.value,
@@ -2589,6 +2598,8 @@ async function clearDraft() {
   agent.name = ''
   agent.workspace_name = ''
   agent.model = 'anthropic/claude-sonnet-4-6'
+  codeIntelligence.enabled = false
+  codeIntelligence.provider = 'codegraph'
   // 环境 / 仓库回到初始 1 条
   environments.splice(0, environments.length,
     { id: 'dev', api_domain: '', web_domain: '', is_prod: false },
@@ -2654,7 +2665,7 @@ const {
   currentStep,
   runImportCrossChecks,
   buildContext: (): ApplyImportContext => ({
-    system, agent, targetModels,
+    system, agent, targetModels, codeIntelligence,
     environments, repos,
     enabledSourceTypes, enabledSourceOrder, sourceCreds,
     serviceSourceMap, ccCredInputs,
@@ -2732,7 +2743,9 @@ const DS_SKILL_NAME: Record<string, string> = {
 function deriveSkillsWhitelist(): string[] {
   // routing / incident-investigator / recent-changes 是"编排者 / 路由"三大基础 skill,
   // 跟具体后端无关,任何启用配置都需要它们;前者给数据,后两者把数据串成排障流程。
-  const skills: string[] = ['routing', 'incident-investigator', 'recent-changes']
+  const skills: string[] = ['routing', 'incident-investigator']
+  if (codeIntelligence.enabled) skills.push('code-intelligence-query')
+  skills.push('recent-changes')
   if (configCenterType.value !== 'none') skills.push('config-executor')
   for (const [key, on] of Object.entries(enabledDataStores)) {
     if (on) skills.push(DS_SKILL_NAME[key] || `${key}-runtime-query`)
@@ -2749,7 +2762,7 @@ function deriveSkillsWhitelist(): string[] {
     skills.push('grafana-observability-query')
   }
   if (enabledObservability.elk) skills.push('elk-log-query')
-  return skills
+  return [...new Set(skills)]
 }
 
 // ── YAML generation ──
@@ -2758,7 +2771,7 @@ function deriveSkillsWhitelist(): string[] {
 function generateYAML(): string {
   const ctx: YAMLGenContext = {
     system, agent, agentNameDefault: agentNameDefault.value,
-    targetModels, enabledTargets, enabledObservability,
+    targetModels, enabledTargets, codeIntelligence, enabledObservability,
     environments: environments.map(e => ({ id: e.id, api_domain: e.api_domain, web_domain: e.web_domain, is_prod: e.is_prod })),
     repos: repos.map(r => ({
       name: r.name, url: r.url, stack: r.stack, framework: r.framework,

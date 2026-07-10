@@ -133,6 +133,7 @@ describe('applyParsedYAMLToWizardState observability import', () => {
       system: { id: '', name: '', description: '' },
       agent: { id: '', name: '', workspace_name: '', model: '' },
       targetModels: {},
+      codeIntelligence: { enabled: false, provider: 'codegraph' },
       environments: [],
       repos: [],
       enabledSourceTypes: {},
@@ -180,6 +181,17 @@ describe('applyParsedYAMLToWizardState observability import', () => {
     }
     return ctx
   }
+
+  it('imports code intelligence and defaults old YAML to disabled', async () => {
+    const ctx = makeImportCtx({ codeIntelligence: { enabled: false, provider: 'codegraph' } })
+    await applyParsedYAMLToWizardState({
+      code_intelligence: { enabled: true, provider: 'codegraph' },
+    }, ctx)
+    expect(ctx.codeIntelligence).toEqual({ enabled: true, provider: 'codegraph' })
+
+    await applyParsedYAMLToWizardState({}, ctx)
+    expect(ctx.codeIntelligence).toEqual({ enabled: false, provider: 'codegraph' })
+  })
 
   it('restores one2all global endpoint url/token into shared creds and visible inputs', async () => {
     const ctx = makeImportCtx({

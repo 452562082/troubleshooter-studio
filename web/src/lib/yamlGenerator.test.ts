@@ -10,6 +10,7 @@ function makeCtx(overrides: Partial<YAMLGenContext> = {}): YAMLGenContext {
     agentNameDefault: 'Shop 排障机器人',
     targetModels: { openclaw: 'anthropic/claude-sonnet-4-6' },
     enabledTargets: { openclaw: true, 'claude-code': false, cursor: false, codex: false },
+    codeIntelligence: { enabled: false, provider: 'codegraph' },
     enabledObservability: {},
     environments: [{ id: 'dev', api_domain: 'api-dev.shop', web_domain: '', is_prod: false }],
     repos: [{
@@ -55,6 +56,16 @@ function makeCtx(overrides: Partial<YAMLGenContext> = {}): YAMLGenContext {
 }
 
 describe('generateYAML', () => {
+  it('omits code_intelligence by default', () => {
+    expect(generateYAML(makeCtx())).not.toContain('code_intelligence:')
+  })
+
+  it('emits enabled codegraph and its skill', () => {
+    const ctx = makeCtx({ codeIntelligence: { enabled: true, provider: 'codegraph' } })
+    ctx.deriveSkillsWhitelist = () => ['routing', 'incident-investigator', 'code-intelligence-query']
+    expect(generateYAML(ctx)).toContain('code_intelligence:\n  enabled: true\n  provider: codegraph')
+  })
+
   it('emits parseable yaml for minimal context', () => {
     const out = generateYAML(makeCtx())
     const parsed = yaml.load(out) as any

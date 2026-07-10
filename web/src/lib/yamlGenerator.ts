@@ -48,6 +48,11 @@ export interface YAMLGenRepo {
   _serviceEntries?: Record<string, string>
 }
 
+export interface CodeIntelligenceState {
+  enabled: boolean
+  provider: 'codegraph'
+}
+
 export interface YAMLGenSourceData {
   creds: Record<string, Record<string, string>>
   rawExtra?: Record<string, unknown>
@@ -83,6 +88,7 @@ export interface YAMLGenContext {
   agentNameDefault: string
   targetModels: Record<string, string>
   enabledTargets: Record<string, boolean>
+  codeIntelligence: CodeIntelligenceState
   enabledObservability: Record<string, boolean>
   environments: YAMLGenEnvironment[]
   repos: YAMLGenRepo[]
@@ -238,6 +244,13 @@ export function generateYAML(ctx: YAMLGenContext): string {
         lines.push(`    config_source: ${src}    # 引用 infrastructure.config_centers[].id`)
       }
     }
+  }
+
+  if (ctx.codeIntelligence.enabled) {
+    lines.push('')
+    lines.push('code_intelligence:')
+    lines.push('  enabled: true')
+    lines.push('  provider: codegraph')
   }
 
   // infrastructure

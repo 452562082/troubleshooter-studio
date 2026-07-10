@@ -27,7 +27,7 @@ export type CodeGraphIndexReport = {
   repos: CodeGraphRepoResult[]
 }
 
-export type ImportAndDeployResult = ApplyResult & {
+export type ImportAndDeployResult = Omit<ApplyResult, 'codegraph'> & {
   codegraph?: CodeGraphIndexReport
 }
 
@@ -46,9 +46,8 @@ export async function importAndDeploy(
   ideCreds: Record<string, string> = {},
 ): Promise<ImportAndDeployResult> {
   if (!isDesktop()) throw new Error('ImportAndDeploy 只在桌面 app 里可用')
-  // 用 any:wails generate 还没跑完时类型签名可能滞后(本次砍 customInstallRoot 参数,
-  // 旧 wailsjs/go/main/App.d.ts 还有第 6 个参数,等 generate 后类型自动 refresh)。
-  return (App.ImportAndDeploy as any)(yamlText, target, destPath, repoPaths, ideCreds)
+  // Wails 将 Go 的 action/status 生成为宽泛 string；桥接层按后端 JSON 契约收窄成 UI 联合类型。
+  return App.ImportAndDeploy(yamlText, target, destPath, repoPaths, ideCreds) as unknown as ImportAndDeployResult
 }
 
 /** 用户显式重试 CodeGraph 准备和索引。repoPaths 必须与部署使用同一份解析结果。 */

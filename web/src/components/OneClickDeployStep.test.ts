@@ -82,4 +82,22 @@ describe('OneClickDeployStep CodeGraph report', () => {
     expect(wrapper.get('[data-test="codegraph-retry-feedback"]').attributes('aria-live')).toBe('polite')
     expect(wrapper.get('[data-test="codegraph-retry-feedback"]').text()).toContain('正在重新索引')
   })
+
+  it('disables deploy while retry is active and does not emit an overlapping action', async () => {
+    const wrapper = mountStep({ codeGraphRetrying: true })
+    const deploy = wrapper.get('.deploy-final-btn')
+
+    expect(deploy.attributes('disabled')).toBeDefined()
+    await deploy.trigger('click')
+    expect(wrapper.emitted('run-deploy')).toBeUndefined()
+  })
+
+  it('disables retry while deploy is active and does not emit an overlapping action', async () => {
+    const wrapper = mountStep({ deployLoading: true })
+    const retry = wrapper.get('[data-test="retry-codegraph"]')
+
+    expect(retry.attributes('disabled')).toBeDefined()
+    await retry.trigger('click')
+    expect(wrapper.emitted('retry-codegraph')).toBeUndefined()
+  })
 })

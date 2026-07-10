@@ -57,7 +57,7 @@ defineEmits<{
         <button
           type="button"
           class="btn primary deploy-final-btn"
-          :disabled="deployLoading || deploySummary.length === 0"
+          :disabled="deployLoading || codeGraphRetrying || deploySummary.length === 0"
           @click="$emit('run-deploy')"
         >
           {{ deployLoading ? '部署中…' : `🚀 部署到 ${deploySummary.length} 个目标` }}
@@ -80,7 +80,7 @@ defineEmits<{
           type="button"
           class="btn codegraph-report__retry"
           data-test="retry-codegraph"
-          :disabled="codeGraphRetrying"
+          :disabled="codeGraphRetrying || deployLoading"
           @click="$emit('retry-codegraph')"
         >
           {{ codeGraphRetrying ? '重新索引中…' : '重新索引失败仓库' }}

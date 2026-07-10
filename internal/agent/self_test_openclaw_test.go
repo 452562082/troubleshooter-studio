@@ -36,10 +36,9 @@ func init() {
 func TestSelfTestOpenclaw_CodeGraphIndexWarningDoesNotFailOverall(t *testing.T) {
 	repoPath := makeCodeGraphSourceRepo(t, "main.go")
 	staging, _ := setupCodeGraphSelfTestOpenclaw(t, repoPath)
+	binaries := make(chan string, 1)
 	setCodeGraphRunnerForTest(t, func(_ context.Context, binary string, _ ...string) ([]byte, error) {
-		if binary != "/managed/codegraph" {
-			t.Fatalf("CodeGraph binary = %q, want command extracted from openclaw.json", binary)
-		}
+		binaries <- binary
 		return codeGraphStatusJSON(repoPath, false, 0, 0, 0, "missing"), nil
 	})
 
@@ -49,6 +48,9 @@ func TestSelfTestOpenclaw_CodeGraphIndexWarningDoesNotFailOverall(t *testing.T) 
 	}
 	if !res.OK {
 		t.Fatalf("optional CodeGraph index warning must not fail self-test: %#v", res.Checks)
+	}
+	if binary := <-binaries; binary != "/managed/codegraph" {
+		t.Fatalf("CodeGraph binary = %q, want command extracted from openclaw.json", binary)
 	}
 	assertCodeGraphSelfTestRows(t, res.Checks, "PASS", "WARN")
 }
@@ -73,6 +75,31 @@ func TestSelfTestOpenclaw_CodeGraphMissingExploreToolFails(t *testing.T) {
 		t.Fatalf("missing runtime-observed codegraph_explore must fail self-test: %#v", res.Checks)
 	}
 	assertCodeGraphSelfTestRows(t, res.Checks, "FAIL", "PASS")
+}
+
+func TestSelfTestOpenclaw_CodeGraphMalformedPresentSpecFails(t *testing.T) {
+	repoPath := makeCodeGraphSourceRepo(t, "main.go")
+	staging, fakeHome := setupCodeGraphSelfTestOpenclaw(t, repoPath)
+	configPath := filepath.Join(fakeHome, ".openclaw", "openclaw.json")
+	root := readJSON(t, configPath)
+	servers := getMap(root, "mcp", "servers")
+	servers["shop-codegraph"] = "not-an-object"
+	writeJSON(t, configPath, root)
+
+	res, err := SelfTestOpenclaw(context.Background(), staging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OK {
+		t.Fatalf("present but malformed CodeGraph spec must fail self-test: %#v", res.Checks)
+	}
+	statusByName := make(map[string]string, len(res.Checks))
+	for _, check := range res.Checks {
+		statusByName[check.Name] = check.Status
+	}
+	if statusByName["mcp.servers 齐全(1 项)"] != "PASS" || statusByName["mcp probe shop-codegraph"] != "FAIL" {
+		t.Fatalf("required-key check should pass while malformed runtime probe fails: %#v", res.Checks)
+	}
 }
 
 func setupCodeGraphSelfTestOpenclaw(t *testing.T, repoPath string) (staging, fakeHome string) {

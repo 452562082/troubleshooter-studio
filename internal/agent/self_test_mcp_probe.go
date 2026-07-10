@@ -272,10 +272,17 @@ func probeMCPServersFromConfig(ctx context.Context, servers map[string]any, add 
 	for name, spec := range servers {
 		specMap, ok := spec.(map[string]any)
 		if !ok {
+			if isCodeGraphMCP(name, "") {
+				safeAdd("mcp probe "+name, "FAIL", "CodeGraph MCP spec 必须是对象,无法验证 codegraph_explore")
+			}
 			continue
 		}
 		command, _ := specMap["command"].(string)
-		if command == "" {
+		if command == "" || (isCodeGraphMCP(name, command) && strings.TrimSpace(command) == "") {
+			if isCodeGraphMCP(name, command) {
+				safeAdd("mcp probe "+name, "FAIL", "CodeGraph MCP spec 缺 command,无法验证 codegraph_explore")
+				continue
+			}
 			safeAdd("mcp probe "+name, "WARN", "spec 缺 command,跳过 probe")
 			continue
 		}

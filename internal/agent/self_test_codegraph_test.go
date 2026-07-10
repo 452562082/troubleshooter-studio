@@ -19,18 +19,25 @@ func TestProbeCodeGraphIndexes_CompleteIndexPasses(t *testing.T) {
 	workspaceDir := makeCodeGraphSelfTestWorkspace(t, map[string]string{"orders": repoPath})
 	cfg := codeGraphSelfTestConfig("orders")
 
+	type commandCall struct {
+		binary string
+		args   []string
+	}
+	calls := make(chan commandCall, 1)
 	setCodeGraphRunnerForTest(t, func(_ context.Context, binary string, args ...string) ([]byte, error) {
-		if binary != "/managed/codegraph" {
-			t.Fatalf("binary = %q, want registered absolute command", binary)
-		}
-		want := []string{"status", repoPath, "--json"}
-		if fmt.Sprint(args) != fmt.Sprint(want) {
-			t.Fatalf("args = %v, want %v", args, want)
-		}
+		calls <- commandCall{binary: binary, args: append([]string(nil), args...)}
 		return codeGraphStatusJSON(repoPath, true, 12, 84, 103, "complete"), nil
 	})
 
 	checks := collectCodeGraphIndexChecks(context.Background(), cfg, workspaceDir, "/managed/codegraph")
+	call := <-calls
+	if call.binary != "/managed/codegraph" {
+		t.Fatalf("binary = %q, want registered absolute command", call.binary)
+	}
+	want := []string{"status", repoPath, "--json"}
+	if fmt.Sprint(call.args) != fmt.Sprint(want) {
+		t.Fatalf("args = %v, want %v", call.args, want)
+	}
 	assertSingleCodeGraphCheck(t, checks, "PASS", "files=12", "nodes=84", "edges=103")
 }
 
@@ -110,10 +117,16 @@ func TestProbeCodeGraphIndexes_OptionalFailuresWarn(t *testing.T) {
 			if tt.runner != nil {
 				setCodeGraphRunnerForTest(t, tt.runner)
 			} else {
+				var calls atomic.Int32
 				setCodeGraphRunnerForTest(t, func(_ context.Context, _ string, _ ...string) ([]byte, error) {
-					t.Fatal("missing-path repository must not execute CodeGraph")
-					return nil, nil
+					calls.Add(1)
+					return nil, errors.New("unexpected CodeGraph command for missing path")
 				})
+				defer func() {
+					if calls.Load() != 0 {
+						t.Errorf("missing-path repository executed %d CodeGraph commands, want 0", calls.Load())
+					}
+				}()
 			}
 			checks := collectCodeGraphIndexChecks(context.Background(), cfg, workspaceDir, "/managed/codegraph")
 			assertSingleCodeGraphCheck(t, checks, "WARN", tt.wantDetail)

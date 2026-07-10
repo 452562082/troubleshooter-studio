@@ -186,6 +186,32 @@ func TestProbeMCPServers_CodeGraphEmptyToolSurfaceFails(t *testing.T) {
 	}
 }
 
+func TestProbeMCPServers_CodeGraphMalformedSpecFails(t *testing.T) {
+	servers := map[string]any{"shop-codegraph": "not-an-object"}
+	var checks []SelfTestCheck
+	probeMCPServersFromConfig(context.Background(), servers, func(name, status, detail string) {
+		checks = append(checks, SelfTestCheck{Name: name, Status: status, Detail: detail})
+	})
+
+	if len(checks) != 1 || checks[0].Status != "FAIL" || !strings.Contains(checks[0].Detail, "spec") {
+		t.Fatalf("malformed CodeGraph spec should fail, got %#v", checks)
+	}
+}
+
+func TestProbeMCPServers_CodeGraphMissingCommandFails(t *testing.T) {
+	servers := map[string]any{
+		"shop-codegraph": map[string]any{"args": []any{"serve", "--mcp"}},
+	}
+	var checks []SelfTestCheck
+	probeMCPServersFromConfig(context.Background(), servers, func(name, status, detail string) {
+		checks = append(checks, SelfTestCheck{Name: name, Status: status, Detail: detail})
+	})
+
+	if len(checks) != 1 || checks[0].Status != "FAIL" || !strings.Contains(checks[0].Detail, "command") {
+		t.Fatalf("CodeGraph spec without command should fail, got %#v", checks)
+	}
+}
+
 func envSliceToMap(items []string) map[string]string {
 	out := map[string]string{}
 	for _, item := range items {

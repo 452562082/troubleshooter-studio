@@ -9,6 +9,7 @@ import (
 
 	"github.com/xiaolong/troubleshooter-studio/internal/analyzer"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
+	"github.com/xiaolong/troubleshooter-studio/internal/topology"
 )
 
 func toFindingView(f analyzer.Finding) *findingView {
@@ -227,6 +228,125 @@ func routeMatchRank(match string) int {
 	}
 }
 
+func topologyServiceNodes(ctx *Context) []topology.ServiceNode {
+	if ctx == nil {
+		return nil
+	}
+	names := make([]string, 0, len(ctx.ServiceGraph.Services))
+	for name := range ctx.ServiceGraph.Services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	result := make([]topology.ServiceNode, 0, len(names))
+	for _, name := range names {
+		result = append(result, ctx.ServiceGraph.Services[name])
+	}
+	return result
+}
+
+func scannedDownstreamsForService(ctx *Context, service string) []string {
+	if ctx == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var result []string
+	for _, repo := range ctx.Repos {
+		matches := repo.Name == service
+		for _, name := range repo.ServiceNames {
+			if name == service {
+				matches = true
+				break
+			}
+		}
+		if !matches {
+			continue
+		}
+		for _, call := range ctx.DownstreamCallsByRepo[repo.Name] {
+			if call.Target == "" || seen[call.Target] {
+				continue
+			}
+			seen[call.Target] = true
+			result = append(result, call.Target)
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
+func legacyUpstreamsForService(ctx *Context, service string) []string {
+	if ctx == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var result []string
+	for _, repo := range ctx.Repos {
+		matched := false
+		for _, call := range ctx.DownstreamCallsByRepo[repo.Name] {
+			if call.Target == service {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		names := repo.ServiceNames
+		if len(names) == 0 {
+			names = []string{repo.Name}
+		}
+		for _, name := range names {
+			if name == service || seen[name] {
+				continue
+			}
+			seen[name] = true
+			result = append(result, name)
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
+func topologyDownstreamsForService(ctx *Context, service string) []string {
+	if ctx == nil {
+		return nil
+	}
+	if ctx.Topology.SchemaVersion == "" {
+		return scannedDownstreamsForService(ctx, service)
+	}
+	node, ok := ctx.ServiceGraph.Services[service]
+	if !ok {
+		return nil
+	}
+	return append([]string(nil), node.Downstream...)
+}
+
+func topologyUpstreamsForService(ctx *Context, service string) []string {
+	if ctx == nil {
+		return nil
+	}
+	if ctx.Topology.SchemaVersion == "" {
+		return legacyUpstreamsForService(ctx, service)
+	}
+	node, ok := ctx.ServiceGraph.Services[service]
+	if !ok {
+		return nil
+	}
+	return append([]string(nil), node.Upstream...)
+}
+
+func topologyEvidenceID(edge topology.CandidateEdge) string {
+	if edge.FromEndpoint != "" || edge.ToEndpoint != "" {
+		return edge.FromEndpoint + ">" + edge.ToEndpoint
+	}
+	formal := edge
+	formal.Status = "automatic"
+	graph := topology.ProjectServiceGraph(topology.Snapshot{Edges: []topology.CandidateEdge{formal}})
+	if len(graph.Edges) == 1 && len(graph.Edges[0].Routes) == 1 {
+		return graph.Edges[0].Routes[0].EndpointEdge
+	}
+	return strings.Join([]string{edge.FromService, edge.ToService, edge.Protocol, edge.Method, edge.Path, edge.RPCMethod}, "|")
+}
+
 func funcMap() template.FuncMap {
 	return template.FuncMap{
 		"upper":                                  strings.ToUpper,
@@ -235,6 +355,10 @@ func funcMap() template.FuncMap {
 		"frontendEndpointsForRepo":               frontendEndpointsForRepo,
 		"frontendCandidateServicesForRepo":       frontendCandidateServicesForRepo,
 		"frontendRouteCandidatesForRepoEndpoint": frontendRouteCandidatesForRepoEndpoint,
+		"topologyServiceNodes":                   topologyServiceNodes,
+		"topologyEvidenceID":                     topologyEvidenceID,
+		"topologyDownstreamsForService":          topologyDownstreamsForService,
+		"topologyUpstreamsForService":            topologyUpstreamsForService,
 		"list":                                   func(items ...string) []string { return items },
 		"hasSkill": func(ctx *Context, name string) bool {
 			return skillEnabled(ctx, name)
@@ -351,40 +475,6 @@ func funcMap() template.FuncMap {
 			}
 			return out
 		},
-		// upstreamForService 反推图:谁的 downstream 包含 svc → 那个就是 svc 的 upstream。
-		// 只要 analyzer 在部署期跑过(dependency_scan 填了 ctx.DownstreamCallsByRepo),或者
-		// 用户手填过任一服务的 downstream,本服务的 upstream 自动出来。
-		// 跟 scannedDownstreamsForService 一样基于 repo 级 regex 扫,精度 50-70%,可手动校正。
-		"upstreamForService": func(ctx *Context, svc string) []string {
-			seen := map[string]bool{}
-			var out []string
-			for _, repo := range ctx.Repos {
-				calls := ctx.DownstreamCallsByRepo[repo.Name]
-				hits := false
-				for _, c := range calls {
-					if c.Target == svc {
-						hits = true
-						break
-					}
-				}
-				if !hits {
-					continue
-				}
-				// repo 调用了 svc → repo 内每个 service 都视为 svc 的上游
-				names := repo.ServiceNames
-				if len(names) == 0 {
-					names = []string{repo.Name}
-				}
-				for _, n := range names {
-					if n == svc || seen[n] {
-						continue
-					}
-					seen[n] = true
-					out = append(out, n)
-				}
-			}
-			return out
-		},
 		// lokiAppForService 从 loki.label_mapping_by_env[env].service_map[service].app
 		// 抽出"用户在 wizard 里手挑过的 Loki app 名"。命中即返回真实 app 名,没填回空串。
 		// log-app-map.yaml 用这个填 verifiedApp,免得每条都让用户再手填一遍 ——
@@ -408,37 +498,6 @@ func funcMap() template.FuncMap {
 				return prefix + "-" + envID
 			}
 			return prefix + "-" + sourceID + "-" + envID
-		},
-		// scannedDownstreamsForService 给 service-dependency-map.yaml.tmpl 用:从 ctx 找指定服务名
-		// 对应 repo 的 DownstreamCalls,提取去重后的目标服务名列表。同 repo 多服务时复用 repo 的
-		// 下游列表(无法精确到 service 级,因为 dependency_scan 是 repo 级 regex 扫)。
-		"scannedDownstreamsForService": func(ctx *Context, svc string) []string {
-			seen := map[string]bool{}
-			var out []string
-			for _, repo := range ctx.Repos {
-				match := false
-				if repo.Name == svc {
-					match = true
-				}
-				for _, sn := range repo.ServiceNames {
-					if sn == svc {
-						match = true
-						break
-					}
-				}
-				if !match {
-					continue
-				}
-				calls := ctx.DownstreamCallsByRepo[repo.Name]
-				for _, c := range calls {
-					if c.Target == "" || seen[c.Target] {
-						continue
-					}
-					seen[c.Target] = true
-					out = append(out, c.Target)
-				}
-			}
-			return out
 		},
 		// scannedDataStoresForService 给 service-dependency-map.yaml.tmpl 用:类似上面,提数据层使用。
 		// 输出格式 "<type>:scanned"(没 logical 名字时占位 "scanned",用户填具体逻辑名)。

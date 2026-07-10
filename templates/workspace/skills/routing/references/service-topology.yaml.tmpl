@@ -1,0 +1,36 @@
+# service-topology.yaml
+# 正式服务拓扑:仅 automatic / confirmed / manual 边可进入本文件。
+# candidate / rejected / stale 等完整证据见 endpoint-evidence.yaml。
+schema_version: {{.Topology.SchemaVersion | printf "%q"}}
+analysis_attempted: {{if .Topology.SchemaVersion}}true{{else}}false{{end}}
+{{$services := topologyServiceNodes .}}
+services:{{if $services}}
+{{range $services}}
+  {{.Service}}:
+    repo: {{.Repo | printf "%q"}}
+    role: {{.Role | printf "%q"}}
+    upstream:{{if .Upstream}}
+{{range .Upstream}}
+      - {{. | printf "%q"}}
+{{end}}{{else}} []
+{{end}}    downstream:{{if .Downstream}}
+{{range .Downstream}}
+      - {{. | printf "%q"}}
+{{end}}{{else}} []
+{{end}}{{end}}{{else}} []
+{{end}}edges:{{if .ServiceGraph.Edges}}
+{{range .ServiceGraph.Edges}}
+  - from: {{.From | printf "%q"}}
+    to: {{.To | printf "%q"}}
+    status: {{.Status | printf "%q"}}
+    confidence: {{printf "%g" .Confidence}}
+    routes:{{if .Routes}}
+{{range .Routes}}
+      - protocol: {{.Protocol | printf "%q"}}
+{{if .Method}}        method: {{.Method | printf "%q"}}
+{{end}}{{if .Path}}        path: {{.Path | printf "%q"}}
+{{end}}{{if .RPCMethod}}        rpc_method: {{.RPCMethod | printf "%q"}}
+{{end}}        endpoint_edge: {{.EndpointEdge | printf "%q"}}
+{{end}}{{else}} []
+{{end}}{{end}}{{else}} []
+{{end}}

@@ -67,7 +67,9 @@ create_annotation / create_folder / update_annotation / update_dashboard / gener
 | 监控 / 数据源 / selector_chain / baseline 模板 | `references/observability-map.yaml` |
 | 仓库技术栈 | `references/repo-stack-map.yaml` |
 | 前端复现入口 / 页面到 API 映射 | `references/frontend-entry-map.yaml` |
-| 服务依赖图(下游/数据层) | `references/service-dependency-map.yaml` |
+| 正式服务拓扑(仅 automatic/confirmed/manual 边) | `references/service-topology.yaml` |
+| 端点、代码位置、候选/拒绝/过期边证据 | `references/endpoint-evidence.yaml` |
+| 兼容依赖图(正式拓扑投影的下游/数据层) | `references/service-dependency-map.yaml` |
 | 业务表 schema | `references/data-schema-map.yaml` |
 | 经典错误模式(模板内置) | `references/known-errors.yaml` |
 | 经典错误模式(用户私有沉淀) | `references/known-errors.local.yaml`(可能不存在,排障沉淀后才生成) |
@@ -75,6 +77,11 @@ create_annotation / create_folder / update_annotation / update_dashboard / gener
 | service → 数据层 MCP source 映射(多 cluster 才需要) | `references/service-to-datastore-source.yaml` |
 
 读大文件优先用 `grep` 精确取目标行,不是 `Read` 全文。
+
+`service-topology.yaml` 是服务依赖导航的唯一正式图；`service-dependency-map.yaml` 的
+upstream/downstream 由同一正式图投影，仅用于兼容现有 cascade/runtime 检查。需要解释某条边时再按
+`endpoint_edge` 去 `endpoint-evidence.yaml` 找位置、置信度和 reasons。candidate / rejected / stale
+只能作为待复核证据，不能当成真实调用关系。
 
 ## 关键用法 4 条
 

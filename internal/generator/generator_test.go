@@ -10,7 +10,9 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/analyzer"
+	"github.com/xiaolong/troubleshooter-studio/internal/analyzerpipe"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
+	"github.com/xiaolong/troubleshooter-studio/internal/topology"
 )
 
 // projectRoot 返回 troubleshooter-studio 仓库根目录（便于测试定位 templates/ 与 examples/）
@@ -31,6 +33,199 @@ func loadCfg(t *testing.T, rel string) *config.SystemConfig {
 		t.Fatalf("load %s: %v", rel, err)
 	}
 	return cfg
+}
+
+func writeAnalysisResult(t *testing.T, result analyzerpipe.Result) string {
+	t.Helper()
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal analysis result: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "analysis.json")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write analysis result: %v", err)
+	}
+	return path
+}
+
+func TestGenerate_ServiceTopology(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	out := t.TempDir()
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+	result := analyzerpipe.Result{
+		Report: analyzer.Report{Repos: []analyzer.RepoAnalysis{{
+			Name:            "mall-web",
+			DownstreamCalls: []analyzer.DownstreamCall{{Target: "legacy-bff"}},
+		}}},
+		Topology: topology.Snapshot{
+			SchemaVersion: topology.SchemaVersion,
+			Services: []topology.ServiceDescriptor{
+				{Repo: "mall-order", Service: "mall-order", Role: "backend"},
+				{Repo: "mall-web", Service: "mall-web", Role: "frontend"},
+				{Repo: "mall-bff", Service: "mall-bff", Role: "gateway"},
+			},
+			Endpoints: []topology.Endpoint{
+				{ID: "mall-order:in", Repo: "mall-order", Service: "mall-order", Direction: topology.DirectionInbound, Protocol: "http", Method: "POST", Path: "/internal/orders", Location: "internal/order.go:42", Source: "gin-route"},
+				{ID: "mall-web:out", Repo: "mall-web", Service: "mall-web", Direction: topology.DirectionOutbound, Protocol: "http", Method: "GET", Path: "/api/orders", Location: "src/api/order.ts:18", Source: "fetch"},
+				{ID: "mall-bff:in", Repo: "mall-bff", Service: "mall-bff", Direction: topology.DirectionInbound, Protocol: "http", Method: "GET", Path: "/api/orders", Location: "routes/api.php:7", Source: "laravel-route"},
+			},
+			Edges: []topology.CandidateEdge{
+				{FromEndpoint: "mall-bff:out", ToEndpoint: "mall-order:in", FromService: "mall-bff", ToService: "mall-order", Protocol: "http", Method: "POST", Path: "/internal/orders", Confidence: .74, Status: "candidate", Reasons: []string{"path_exact", "method_exact"}},
+				{FromEndpoint: "mall-web:out", ToEndpoint: "legacy-bff:in", FromService: "mall-web", ToService: "legacy-bff", Protocol: "http", Method: "GET", Path: "/legacy", Confidence: .91, Status: "rejected", Reasons: []string{"human_override_reject"}},
+				{FromEndpoint: "mall-bff:old", ToEndpoint: "mall-order:old", FromService: "mall-bff", ToService: "mall-order", Protocol: "http", Method: "GET", Path: "/old", Confidence: 0, Status: "stale", Reasons: []string{"human_override_confirm_stale"}},
+				{FromEndpoint: "mall-web:out", ToEndpoint: "mall-bff:in", FromService: "mall-web", ToService: "mall-bff", Protocol: "http", Method: "GET", Path: "/api/orders", Confidence: .98, Status: "automatic", Reasons: []string{"target_service_exact", "method_path_exact"}},
+			},
+			Repositories: []topology.RepositoryStatus{
+				{Repo: "mall-web", State: "analyzed", EndpointCount: 1},
+				{Repo: "mall-bff", State: "failed", Error: "fixture failure"},
+			},
+		},
+	}
+	if err := g.LoadAnalysis(writeAnalysisResult(t, result)); err != nil {
+		t.Fatalf("load analysis result: %v", err)
+	}
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	refs := filepath.Join(out, "templates/workspace-template/skills/routing/references")
+	serviceTopology := readFile(t, filepath.Join(refs, "service-topology.yaml"))
+	var serviceTopologyDocument map[string]any
+	if err := yaml.Unmarshal([]byte(serviceTopology), &serviceTopologyDocument); err != nil {
+		t.Fatalf("service topology is not valid yaml: %v\n%s", err, serviceTopology)
+	}
+	for _, want := range []string{`from: "mall-web"`, `to: "mall-bff"`, `status: "automatic"`, `repo: "mall-web"`, `role: "frontend"`, `mall-web:out>mall-bff:in`} {
+		if !strings.Contains(serviceTopology, want) {
+			t.Fatalf("service topology missing %q:\n%s", want, serviceTopology)
+		}
+	}
+	for _, forbidden := range []string{`to: "legacy-bff"`, `status: "candidate"`, `status: "rejected"`, `status: "stale"`} {
+		if strings.Contains(serviceTopology, forbidden) {
+			t.Fatalf("formal topology contains %q:\n%s", forbidden, serviceTopology)
+		}
+	}
+
+	evidence := readFile(t, filepath.Join(refs, "endpoint-evidence.yaml"))
+	var evidenceDocument map[string]any
+	if err := yaml.Unmarshal([]byte(evidence), &evidenceDocument); err != nil {
+		t.Fatalf("endpoint evidence is not valid yaml: %v\n%s", err, evidence)
+	}
+	for _, want := range []string{`status: "automatic"`, `status: "candidate"`, `status: "rejected"`, `status: "stale"`, `src/api/order.ts:18`, `state: "failed"`, `fixture failure`} {
+		if !strings.Contains(evidence, want) {
+			t.Fatalf("endpoint evidence missing %q:\n%s", want, evidence)
+		}
+	}
+	if strings.Index(evidence, `- "method_path_exact"`) > strings.Index(evidence, `- "target_service_exact"`) {
+		t.Fatalf("edge reasons are not sorted:\n%s", evidence)
+	}
+	if strings.Index(evidence, `id: "mall-bff:in"`) > strings.Index(evidence, `id: "mall-web:out"`) {
+		t.Fatalf("endpoints are not sorted by id:\n%s", evidence)
+	}
+
+	deps := readFile(t, filepath.Join(refs, "service-dependency-map.yaml"))
+	if !strings.Contains(deps, `- "mall-bff"`) || strings.Contains(deps, `legacy-bff`) {
+		t.Fatalf("dependency projection drifted:\n%s", deps)
+	}
+
+	routing := readFile(t, filepath.Join(out, "templates/workspace-template/skills/routing/SKILL.md"))
+	for _, want := range []string{"references/service-topology.yaml", "references/endpoint-evidence.yaml"} {
+		if !strings.Contains(routing, want) {
+			t.Fatalf("routing skill missing %q:\n%s", want, routing)
+		}
+	}
+}
+
+func TestLoadAnalysisResult_ServiceTopologyCopiesAndProjectsOnce(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), t.TempDir())
+	result := &analyzerpipe.Result{Topology: topology.Snapshot{
+		SchemaVersion: topology.SchemaVersion,
+		Services: []topology.ServiceDescriptor{
+			{Repo: "mall-web", Service: "mall-web", Role: "frontend"},
+			{Repo: "mall-bff", Service: "mall-bff", Role: "gateway"},
+		},
+		Edges: []topology.CandidateEdge{
+			{FromService: "mall-web", ToService: "mall-order", Protocol: "http", Method: "GET", Path: "/candidate", Status: "candidate", Confidence: .74},
+			{FromService: "mall-web", ToService: "mall-bff", Protocol: "http", Method: "GET", Path: "/api/orders", Status: "automatic", Confidence: .98, Reasons: []string{"target_service_exact", "method_path_exact"}},
+		},
+	}}
+
+	g.LoadAnalysisResult(result)
+	if got := result.Topology.Edges[1].Reasons; len(got) != 2 || got[0] != "target_service_exact" {
+		t.Fatalf("LoadAnalysisResult mutated caller snapshot: %#v", got)
+	}
+	result.Topology.Edges[1].Reasons[0] = "caller_mutation"
+	if got := g.Ctx.Topology.Edges[0].Reasons; len(got) != 2 || got[0] != "method_path_exact" {
+		t.Fatalf("context did not keep sorted independent copy: %#v", got)
+	}
+	if len(g.Ctx.ServiceGraph.Edges) != 1 || g.Ctx.ServiceGraph.Edges[0].To != "mall-bff" || g.Ctx.ServiceGraph.Edges[0].Status != "automatic" {
+		t.Fatalf("formal graph includes non-formal status: %#v", g.Ctx.ServiceGraph.Edges)
+	}
+}
+
+func TestGenerate_ServiceTopologyEmptyDocuments(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	out := t.TempDir()
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+	result := analyzerpipe.Result{Topology: topology.Snapshot{SchemaVersion: topology.SchemaVersion}}
+	if err := g.LoadAnalysis(writeAnalysisResult(t, result)); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Generate(); err != nil {
+		t.Fatal(err)
+	}
+
+	refs := filepath.Join(out, "templates/workspace-template/skills/routing/references")
+	for _, name := range []string{"service-topology.yaml", "endpoint-evidence.yaml"} {
+		data := readFile(t, filepath.Join(refs, name))
+		var document map[string]any
+		if err := yaml.Unmarshal([]byte(data), &document); err != nil {
+			t.Fatalf("%s is not valid yaml: %v\n%s", name, err, data)
+		}
+		if _, ok := document["edges"]; !ok {
+			t.Fatalf("%s missing empty edges collection:\n%s", name, data)
+		}
+	}
+}
+
+func TestGenerate_ServiceDependencyTopologyAttemptedEmptyDoesNotFallback(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	out := t.TempDir()
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+	result := analyzerpipe.Result{
+		Report: analyzer.Report{Repos: []analyzer.RepoAnalysis{{
+			Name:            "mall-web",
+			DownstreamCalls: []analyzer.DownstreamCall{{Target: "legacy-bff"}},
+		}}},
+		Topology: topology.Snapshot{SchemaVersion: topology.SchemaVersion},
+	}
+	if err := g.LoadAnalysis(writeAnalysisResult(t, result)); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	deps := readFile(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/service-dependency-map.yaml"))
+	if strings.Contains(deps, "legacy-bff") {
+		t.Fatalf("attempted empty topology must not fall back to legacy scan:\n%s", deps)
+	}
+}
+
+func TestGenerate_ServiceDependencyLegacyAnalysisFallback(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	out := t.TempDir()
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+	g.LoadAnalysisReport(analyzer.Report{Repos: []analyzer.RepoAnalysis{{
+		Name:            "mall-web",
+		DownstreamCalls: []analyzer.DownstreamCall{{Target: "mall-bff"}},
+	}}})
+	if err := g.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	deps := readFile(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/service-dependency-map.yaml"))
+	if !strings.Contains(deps, `- "mall-bff"`) {
+		t.Fatalf("legacy analysis downstream fallback missing:\n%s", deps)
+	}
 }
 
 func TestGenerate_CodeIntelligenceOptIn(t *testing.T) {

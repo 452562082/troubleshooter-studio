@@ -133,7 +133,7 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 		RepoPaths: opts.RepoLocalPaths,
 		OnLog:     opts.OnLog,
 	}); aerr == nil && result != nil {
-		g.LoadAnalysisReport(result.Report)
+		g.LoadAnalysisResult(result)
 	}
 
 	// 按 target 渲染
@@ -301,7 +301,7 @@ func ImportAndApply(yamlBytes []byte, target, destPath string, opts ApplyOptions
 			RepoPaths: opts.RepoLocalPaths,
 			OnLog:     opts.OnLog,
 		}); aerr == nil && result != nil {
-			g.LoadAnalysisReport(result.Report)
+			g.LoadAnalysisResult(result)
 		}
 		if err := g.Generate(); err != nil {
 			return nil, fmt.Errorf("openclaw gen: %w", err)

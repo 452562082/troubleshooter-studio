@@ -235,6 +235,84 @@ func TestImportAndApply_OpenclawProducesStaging(t *testing.T) {
 	}
 }
 
+func TestApply_AutoAnalyzeTopologyReachesGeneratedWorkspace(t *testing.T) {
+	yamlBytes, repoPaths := applyTopologyFixture(t)
+	cfg, err := config.LoadFromBytes(yamlBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := t.TempDir()
+	g := generator.New(cfg, filepath.Join(projectRoot(t), "templates"), stage)
+	g.TroubleshooterYAMLSource = yamlBytes
+	if err := g.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	agentPath := filepath.Join(stage, "templates", "workspace-template")
+
+	_, err = Apply(discover.DiscoveredAgent{
+		Meta: discover.Meta{SchemaVersion: 1, SystemID: "mall", SystemName: "Mall", Target: "openclaw"},
+		Path: agentPath,
+	}, ApplyOptions{
+		NewYAML:        yamlBytes,
+		TemplateRoot:   filepath.Join(projectRoot(t), "templates"),
+		RepoLocalPaths: repoPaths,
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	assertGeneratedTopologyEdge(t, filepath.Join(agentPath, "skills", "routing", "references", "service-topology.yaml"))
+}
+
+func TestImportAndApply_AutoAnalyzeTopologyReachesGeneratedStaging(t *testing.T) {
+	yamlBytes, repoPaths := applyTopologyFixture(t)
+	dest := t.TempDir()
+	_, err := ImportAndApply(yamlBytes, "openclaw", dest, ApplyOptions{
+		TemplateRoot:   filepath.Join(projectRoot(t), "templates"),
+		RepoLocalPaths: repoPaths,
+	})
+	if err != nil {
+		t.Fatalf("ImportAndApply: %v", err)
+	}
+	assertGeneratedTopologyEdge(t, filepath.Join(dest, "templates", "workspace-template", "skills", "routing", "references", "service-topology.yaml"))
+}
+
+func applyTopologyFixture(t *testing.T) ([]byte, map[string]string) {
+	t.Helper()
+	yamlBytes, err := os.ReadFile(filepath.Join(projectRoot(t), "examples", "three-tier-troubleshooter.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	web := filepath.Join(root, "mall-web")
+	order := filepath.Join(root, "mall-order")
+	writeAutoAnalyzeFixtureFile(t, filepath.Join(web, "package.json"), `{"name":"mall-web","dependencies":{"axios":"1.0.0"}}`)
+	writeAutoAnalyzeFixtureFile(t, filepath.Join(web, "src", "orders.ts"), `axios.get("http://mall-order/internal/orders")`)
+	writeAutoAnalyzeFixtureFile(t, filepath.Join(order, "go.mod"), "module example.test/mall-order\n\ngo 1.22\n")
+	writeAutoAnalyzeFixtureFile(t, filepath.Join(order, "handler.go"), `
+package main
+
+func routes(r *Router) {
+	r.GET("/internal/orders", handler)
+}
+`)
+	initAutoAnalyzeGitRepo(t, web)
+	initAutoAnalyzeGitRepo(t, order)
+	return yamlBytes, map[string]string{"mall-web": web, "mall-order": order}
+}
+
+func assertGeneratedTopologyEdge(t *testing.T, path string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read generated topology: %v", err)
+	}
+	for _, want := range []string{`from: "mall-web"`, `to: "mall-order"`, `status: "automatic"`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("generated topology missing %q:\n%s", want, data)
+		}
+	}
+}
+
 func TestImportAndApply_DryRunNoWrite(t *testing.T) {
 	dest := t.TempDir()
 	yamlBytes, _ := os.ReadFile(filepath.Join(projectRoot(t), "examples", "shop-troubleshooter.yaml"))

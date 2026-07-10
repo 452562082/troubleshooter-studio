@@ -20,7 +20,9 @@ import (
 	"strings"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/analyzer"
+	"github.com/xiaolong/troubleshooter-studio/internal/analyzerpipe"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
+	"github.com/xiaolong/troubleshooter-studio/internal/topology"
 )
 
 type Context struct {
@@ -51,6 +53,11 @@ type Context struct {
 	SchemaTablesByRepo map[string][]analyzer.SchemaTable
 	// FrontendEndpointsByRepo stores api_endpoint[...] notes extracted by node analyzer.
 	FrontendEndpointsByRepo map[string][]string
+	// Topology is the complete endpoint-evidence snapshot. ServiceGraph is its
+	// formal automatic/confirmed/manual projection and is computed once when
+	// analysis is loaded so every generated topology view shares one source.
+	Topology     topology.Snapshot
+	ServiceGraph topology.ServiceGraph
 }
 
 type Generator struct {
@@ -108,6 +115,7 @@ func New(cfg *config.SystemConfig, templateRoot, outputDir string) *Generator {
 			APIRoutesByRepo:         map[string][]analyzer.APIRoute{},
 			SchemaTablesByRepo:      map[string][]analyzer.SchemaTable{},
 			FrontendEndpointsByRepo: map[string][]string{},
+			ServiceGraph:            topology.ProjectServiceGraph(topology.Snapshot{}),
 		},
 	}
 }
@@ -177,18 +185,108 @@ func (g *Generator) LoadAnalysisReport(report analyzer.Report) {
 	}
 }
 
+// LoadAnalysisResult merges the legacy analyzer report and snapshots the
+// endpoint topology. The snapshot is cloned before sorting so callers may
+// safely retain or cache their analyzerpipe.Result without generator mutation.
+func (g *Generator) LoadAnalysisResult(result *analyzerpipe.Result) {
+	if result == nil {
+		return
+	}
+	g.LoadAnalysisReport(result.Report)
+	g.Ctx.Topology = sortedTopologySnapshot(result.Topology)
+	g.Ctx.ServiceGraph = topology.ProjectServiceGraph(g.Ctx.Topology)
+}
+
 // LoadAnalysis 合并 analyzer 产出的 findings 到 Context
 func (g *Generator) LoadAnalysis(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read analysis: %w", err)
 	}
+	var shape struct {
+		Report json.RawMessage `json:"report"`
+	}
+	if err := json.Unmarshal(data, &shape); err != nil {
+		return fmt.Errorf("parse analysis: %w", err)
+	}
+	if len(shape.Report) > 0 && string(shape.Report) != "null" {
+		var result analyzerpipe.Result
+		if err := json.Unmarshal(data, &result); err != nil {
+			return fmt.Errorf("parse analysis result: %w", err)
+		}
+		g.LoadAnalysisResult(&result)
+		return nil
+	}
 	var report analyzer.Report
 	if err := json.Unmarshal(data, &report); err != nil {
-		return fmt.Errorf("parse analysis: %w", err)
+		return fmt.Errorf("parse legacy analysis: %w", err)
 	}
 	g.LoadAnalysisReport(report)
 	return nil
+}
+
+func sortedTopologySnapshot(snapshot topology.Snapshot) topology.Snapshot {
+	result := topology.Snapshot{
+		SchemaVersion: snapshot.SchemaVersion,
+		Services:      append([]topology.ServiceDescriptor(nil), snapshot.Services...),
+		Endpoints:     append([]topology.Endpoint(nil), snapshot.Endpoints...),
+		Edges:         append([]topology.CandidateEdge(nil), snapshot.Edges...),
+		Repositories:  append([]topology.RepositoryStatus(nil), snapshot.Repositories...),
+	}
+	for i := range result.Services {
+		result.Services[i].Aliases = append([]string(nil), result.Services[i].Aliases...)
+		result.Services[i].Hosts = append([]string(nil), result.Services[i].Hosts...)
+		sort.Strings(result.Services[i].Aliases)
+		sort.Strings(result.Services[i].Hosts)
+	}
+	for i := range result.Endpoints {
+		result.Endpoints[i].Transforms = append([]topology.Transform(nil), result.Endpoints[i].Transforms...)
+		sort.Slice(result.Endpoints[i].Transforms, func(a, b int) bool {
+			left, right := result.Endpoints[i].Transforms[a], result.Endpoints[i].Transforms[b]
+			return strings.Join([]string{left.Kind, left.From, left.To}, "\x00") <
+				strings.Join([]string{right.Kind, right.From, right.To}, "\x00")
+		})
+	}
+	for i := range result.Edges {
+		result.Edges[i].Reasons = append([]string(nil), result.Edges[i].Reasons...)
+		result.Edges[i].Conflicts = append([]string(nil), result.Edges[i].Conflicts...)
+		sort.Strings(result.Edges[i].Reasons)
+		sort.Strings(result.Edges[i].Conflicts)
+	}
+	sort.Slice(result.Services, func(i, j int) bool {
+		return topologyServiceSortKey(result.Services[i]) < topologyServiceSortKey(result.Services[j])
+	})
+	sort.Slice(result.Endpoints, func(i, j int) bool {
+		return topologyEndpointSortKey(result.Endpoints[i]) < topologyEndpointSortKey(result.Endpoints[j])
+	})
+	sort.Slice(result.Edges, func(i, j int) bool {
+		return topologyEdgeSortKey(result.Edges[i]) < topologyEdgeSortKey(result.Edges[j])
+	})
+	sort.Slice(result.Repositories, func(i, j int) bool {
+		left, right := result.Repositories[i], result.Repositories[j]
+		return strings.Join([]string{left.Repo, left.State, left.Error, fmt.Sprint(left.EndpointCount)}, "\x00") <
+			strings.Join([]string{right.Repo, right.State, right.Error, fmt.Sprint(right.EndpointCount)}, "\x00")
+	})
+	return result
+}
+
+func topologyServiceSortKey(service topology.ServiceDescriptor) string {
+	return strings.Join([]string{service.Service, service.Repo, service.Role, strings.Join(service.Aliases, "\x00"), strings.Join(service.Hosts, "\x00")}, "\x01")
+}
+
+func topologyEndpointSortKey(endpoint topology.Endpoint) string {
+	return strings.Join([]string{
+		endpoint.ID, endpoint.Repo, endpoint.Service, string(endpoint.Direction), endpoint.Protocol,
+		endpoint.Method, endpoint.Path, endpoint.RPCMethod, endpoint.TargetHint, endpoint.Location, endpoint.Source,
+	}, "\x00")
+}
+
+func topologyEdgeSortKey(edge topology.CandidateEdge) string {
+	return strings.Join([]string{
+		edge.FromService, edge.ToService, edge.Protocol, edge.Method, edge.Path, edge.RPCMethod,
+		edge.Status, edge.FromEndpoint, edge.ToEndpoint, fmt.Sprintf("%020.10f", edge.Confidence),
+		strings.Join(edge.Reasons, "\x00"), strings.Join(edge.Conflicts, "\x00"),
+	}, "\x01")
 }
 
 // resolveWorkspace 返回一个可读的 workspace-template 目录路径。

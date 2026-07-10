@@ -2,8 +2,8 @@
 # 服务依赖图(谁调谁 + 用什么数据层)。incident-investigator Step 4(纵向沿依赖追)的核心数据。
 #
 # 自动填来源(优先级):
-#   1. 部署期 analyzer 扫码(dependency_scan.go 抓 http/grpc/FeignClient 等)→ downstream
-#   2. downstream 图反推 → upstream(谁的 downstream 含我,谁就是我的 upstream)
+#   1. 部署期 topology 正式边(automatic/confirmed/manual)→ downstream/upstream
+#   2. 旧 analysis.json 无 topology 时才回退 dependency_scan.go 的 repo 级扫描
 #   3. yaml data_stores[].endpoints[].service → data_stores
 #   4. repo.role 决定节点形态(下方"role hint"表)
 #   只要本机有仓库 clone 路径(ImportAndDeploy 时填过 / wizard Step 4),analyzer 自动跑,
@@ -48,14 +48,14 @@ services:
   {{- if not $svcs}}{{$svcs = list .Name}}{{end}}
   {{- range $svcs}}
   {{- $svc := .}}
-  {{- $scannedDown := scannedDownstreamsForService $ctx $svc}}
-  {{- $upstream := upstreamForService $ctx $svc}}
+  {{- $scannedDown := topologyDownstreamsForService $ctx $svc}}
+  {{- $upstream := topologyUpstreamsForService $ctx $svc}}
   {{- $scannedDS := scannedDataStoresForService $ctx $svc}}
   {{- $yamlDS := yamlDataStoresForService $ctx $svc}}
   {{$svc}}:
     role: {{$role | printf "%q"}}
     {{- if $upstream}}
-    # ↓ 由 downstream 图反推(谁的 downstream 含我,谁就是我的上游);analyzer 跑过则自动得
+    # ↓ 由正式 topology 图反推(谁的 downstream 含我,谁就是我的上游)
     upstream:
     {{- range $upstream}}
       - {{. | printf "%q"}}
@@ -66,7 +66,7 @@ services:
     upstream: []         # 没人在代码里调本服务(可能 analyzer 没跑 / 路径没填,或它确实是叶子服务)
     {{- end}}
     {{- if $scannedDown}}
-    # ↓ 从代码扫到的下游调用(http/grpc URL host / @FeignClient name);精度 50-70%,可手动校正
+    # ↓ topology 正式边汇总;仅旧 analysis.json 会回退 repo 级 regex 扫描
     downstream:
     {{- range $scannedDown}}
       - {{. | printf "%q"}}

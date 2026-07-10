@@ -57,10 +57,16 @@ func ScanEndpointsContext(ctx context.Context, opts EndpointScanOptions) ([]topo
 	var endpoints []topology.Endpoint
 	var err error
 	switch strings.ToLower(strings.TrimSpace(opts.Stack)) {
+	case "go", "golang":
+		endpoints, err = scanGoEndpoints(ctx, opts)
+	case "java", "jvm", "kotlin":
+		endpoints, err = scanJavaEndpoints(ctx, opts)
 	case "node", "javascript", "typescript":
 		endpoints, err = scanNodeEndpoints(ctx, opts)
 	case "php":
 		endpoints, err = scanPHPEndpoints(ctx, opts)
+	case "python", "py":
+		endpoints, err = scanPythonEndpoints(ctx, opts)
 	}
 	if err != nil {
 		return nil, err
@@ -377,4 +383,15 @@ func findMatchingDelimiter(text string, openOffset int, open, close byte, slashC
 		}
 	}
 	return 0, false
+}
+
+func grpcEndpoint(direction topology.Direction, rpcMethod, hint, location, source string) topology.Endpoint {
+	return topology.Endpoint{
+		Direction:  direction,
+		Protocol:   "grpc",
+		RPCMethod:  strings.TrimPrefix(strings.TrimSpace(rpcMethod), "/"),
+		TargetHint: hint,
+		Location:   location,
+		Source:     source,
+	}
 }

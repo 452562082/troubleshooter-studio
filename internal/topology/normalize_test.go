@@ -8,6 +8,7 @@ func TestNormalizePath(t *testing.T) {
 		"/orders/{orderId}": "/orders/{param}",
 		"/orders/[id]":      "/orders/{param}",
 		"/files/*path":      "/files/{wildcard}",
+		"/files/{wildcard}": "/files/{wildcard}",
 		"https://api.example.com//orders/1?full=true": "/orders/1",
 		"/orders/": "/orders",
 		"/":        "/",
@@ -15,6 +16,24 @@ func TestNormalizePath(t *testing.T) {
 	for in, want := range cases {
 		if got := NormalizePath(in); got != want {
 			t.Errorf("NormalizePath(%q)=%q want %q", in, got, want)
+		}
+	}
+}
+
+func TestNormalizePathIsIdempotent(t *testing.T) {
+	paths := []string{
+		"/orders/:id",
+		"/orders/{orderId}",
+		"/orders/[id]",
+		"/files/*path",
+		"https://api.example.com//orders/1?full=true",
+		"/orders/",
+		"/",
+	}
+	for _, path := range paths {
+		once := NormalizePath(path)
+		if twice := NormalizePath(once); twice != once {
+			t.Errorf("NormalizePath is not idempotent for %q: once=%q twice=%q", path, once, twice)
 		}
 	}
 }

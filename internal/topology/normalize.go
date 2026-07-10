@@ -52,6 +52,8 @@ func normalizePathSegment(segment string) string {
 	switch {
 	case strings.HasPrefix(segment, "*"):
 		return "{wildcard}"
+	case segment == "{wildcard}":
+		return segment
 	case strings.HasPrefix(segment, ":"):
 		if strings.HasSuffix(segment, "*") {
 			return "{wildcard}"

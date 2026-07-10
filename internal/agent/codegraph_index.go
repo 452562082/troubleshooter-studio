@@ -62,6 +62,8 @@ type codeGraphCommandRunner func(ctx context.Context, binary string, args ...str
 
 var runCodeGraphCommand codeGraphCommandRunner = runCodeGraphCommandExec
 
+var errCodeGraphStatusTimeout = errors.New("CodeGraph status timeout")
+
 var (
 	codeGraphIndexCacheMu sync.Mutex
 	codeGraphIndexCache   = make(map[string]CodeGraphIndexReport)
@@ -149,7 +151,7 @@ func PrepareCodeGraphIndexes(ctx context.Context, opts CodeGraphIndexOptions) Co
 		ctx = context.Background()
 	}
 	cacheKey := codeGraphIndexCacheKey(opts.SystemID, opts.Repos)
-	if cached, ok := loadCodeGraphIndexReport(cacheKey); ok {
+	if cached, ok := loadCodeGraphIndexReport(cacheKey, opts.Repos); ok {
 		return cached
 	}
 
@@ -175,6 +177,7 @@ func PrepareCodeGraphIndexes(ctx context.Context, opts CodeGraphIndexOptions) Co
 	}
 	semaphore := make(chan struct{}, maxConcurrency)
 	var wg sync.WaitGroup
+	var progressMu sync.Mutex
 	for i, target := range opts.Repos {
 		wg.Add(1)
 		semaphore <- struct{}{}
@@ -184,6 +187,8 @@ func PrepareCodeGraphIndexes(ctx context.Context, opts CodeGraphIndexOptions) Co
 			result := prepareCodeGraphRepo(ctx, opts.BinaryPath, repo, initTimeout, syncTimeout)
 			report.Repos[index] = result
 			if opts.OnProgress != nil {
+				progressMu.Lock()
+				defer progressMu.Unlock()
 				opts.OnProgress(codeGraphProgressLine(result))
 			}
 		}(i, target)
@@ -234,7 +239,7 @@ func prepareCodeGraphRepo(ctx context.Context, binary string, target CodeGraphRe
 		result.Detail = "repository path unavailable"
 		return result
 	}
-	hasSource, err := codeGraphRepoHasSource(target.Path)
+	hasSource, err := codeGraphRepoHasSource(ctx, target.Path)
 	if err != nil {
 		return codeGraphWarningResult(result, fmt.Sprintf("source scan failed: %v, fallback enabled", err))
 	}
@@ -245,8 +250,11 @@ func prepareCodeGraphRepo(ctx context.Context, binary string, target CodeGraphRe
 		return result
 	}
 
-	status, err := queryCodeGraphStatus(ctx, binary, target.Path)
+	status, err := queryCodeGraphStatus(ctx, binary, target.Path, syncTimeout)
 	if err != nil {
+		if errors.Is(err, errCodeGraphStatusTimeout) {
+			return codeGraphWarningResult(result, "status timeout, fallback enabled")
+		}
 		return codeGraphWarningResult(result, fmt.Sprintf("status failed: %v, fallback enabled", err))
 	}
 
@@ -269,8 +277,11 @@ func prepareCodeGraphRepo(ctx context.Context, binary string, target CodeGraphRe
 		return codeGraphWarningResult(result, fmt.Sprintf("%s failed: %s, fallback enabled", command, codeGraphCommandError(commandErr, output)))
 	}
 
-	finalStatus, err := queryCodeGraphStatus(ctx, binary, target.Path)
+	finalStatus, err := queryCodeGraphStatus(ctx, binary, target.Path, syncTimeout)
 	if err != nil {
+		if errors.Is(err, errCodeGraphStatusTimeout) {
+			return codeGraphWarningResult(result, fmt.Sprintf("status after %s timeout, fallback enabled", command))
+		}
 		return codeGraphWarningResult(result, fmt.Sprintf("status after %s failed: %v, fallback enabled", command, err))
 	}
 	if !codeGraphStatusReady(finalStatus) {
@@ -297,9 +308,15 @@ func codeGraphWarningResult(result CodeGraphRepoResult, detail string) CodeGraph
 	return result
 }
 
-func queryCodeGraphStatus(ctx context.Context, binary, repoPath string) (codeGraphStatus, error) {
-	output, err := runCodeGraphCommand(ctx, binary, "status", repoPath, "--json")
+func queryCodeGraphStatus(ctx context.Context, binary, repoPath string, timeout time.Duration) (codeGraphStatus, error) {
+	statusCtx, cancel := context.WithTimeout(ctx, timeout)
+	output, err := runCodeGraphCommand(statusCtx, binary, "status", repoPath, "--json")
+	statusCtxErr := statusCtx.Err()
+	cancel()
 	if err != nil {
+		if errors.Is(statusCtxErr, context.DeadlineExceeded) {
+			return codeGraphStatus{}, errCodeGraphStatusTimeout
+		}
 		return codeGraphStatus{}, errors.New(codeGraphCommandError(err, output))
 	}
 	var status codeGraphStatus
@@ -321,9 +338,12 @@ func codeGraphCommandError(err error, output []byte) string {
 	return fmt.Sprintf("%v: %s", err, detail)
 }
 
-func codeGraphRepoHasSource(root string) (bool, error) {
+func codeGraphRepoHasSource(ctx context.Context, root string) (bool, error) {
 	found := false
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return walkErr
 		}
@@ -371,14 +391,14 @@ func codeGraphIndexCacheKey(systemID string, repos []CodeGraphRepoTarget) string
 	return systemID + "\n" + strings.Join(parts, "\n")
 }
 
-func loadCodeGraphIndexReport(key string) (CodeGraphIndexReport, bool) {
+func loadCodeGraphIndexReport(key string, repos []CodeGraphRepoTarget) (CodeGraphIndexReport, bool) {
 	codeGraphIndexCacheMu.Lock()
 	defer codeGraphIndexCacheMu.Unlock()
 	report, ok := codeGraphIndexCache[key]
 	if !ok {
 		return CodeGraphIndexReport{}, false
 	}
-	return cloneCodeGraphIndexReport(report), true
+	return reorderCodeGraphIndexReport(report, repos), true
 }
 
 func storeCodeGraphIndexReport(key string, report CodeGraphIndexReport) {
@@ -391,4 +411,36 @@ func cloneCodeGraphIndexReport(report CodeGraphIndexReport) CodeGraphIndexReport
 	cloned := report
 	cloned.Repos = append([]CodeGraphRepoResult(nil), report.Repos...)
 	return cloned
+}
+
+func reorderCodeGraphIndexReport(report CodeGraphIndexReport, repos []CodeGraphRepoTarget) CodeGraphIndexReport {
+	resultsByRepo := make(map[string][]CodeGraphRepoResult, len(report.Repos))
+	for _, result := range report.Repos {
+		identity := codeGraphRepoIdentity(result.Name, result.Path)
+		resultsByRepo[identity] = append(resultsByRepo[identity], result)
+	}
+
+	ordered := make([]CodeGraphRepoResult, len(repos))
+	for i, repo := range repos {
+		identity := codeGraphRepoIdentity(repo.Name, repo.Path)
+		matches := resultsByRepo[identity]
+		if len(matches) == 0 {
+			return cloneCodeGraphIndexReport(report)
+		}
+		ordered[i] = matches[0]
+		resultsByRepo[identity] = matches[1:]
+	}
+	reordered := report
+	reordered.Repos = ordered
+	return reordered
+}
+
+func codeGraphRepoIdentity(name, path string) string {
+	path = strings.TrimSpace(path)
+	if path != "" {
+		if absolutePath, err := filepath.Abs(path); err == nil {
+			path = filepath.Clean(absolutePath)
+		}
+	}
+	return name + "\n" + path
 }

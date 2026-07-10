@@ -299,6 +299,72 @@ func TestPrepareCodeGraphIndexes_MaxConcurrencyTwo(t *testing.T) {
 	}
 }
 
+func TestPrepareCodeGraphIndexes_SerializesProgressCallbacks(t *testing.T) {
+	systemID := "codegraph-index-progress-serialization"
+	InvalidateCodeGraphIndexCache(systemID)
+	targets := []CodeGraphRepoTarget{
+		{Name: "first", Path: makeCodeGraphSourceRepo(t, "main.go")},
+		{Name: "second", Path: makeCodeGraphSourceRepo(t, "main.go")},
+	}
+
+	var workActive atomic.Int32
+	var workMaximum atomic.Int32
+	var callbackActive atomic.Int32
+	var callbackMaximum atomic.Int32
+	var statusMu sync.Mutex
+	statusCalls := map[string]int{}
+	finalStatuses := make(chan struct{})
+	var finalStatusCount atomic.Int32
+	setCodeGraphRunnerForTest(t, func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		active := workActive.Add(1)
+		defer workActive.Add(-1)
+		recordCodeGraphMaximum(&workMaximum, active)
+
+		path := args[1]
+		switch args[0] {
+		case "status":
+			statusMu.Lock()
+			statusCalls[path]++
+			call := statusCalls[path]
+			statusMu.Unlock()
+			if call == 2 {
+				if finalStatusCount.Add(1) == int32(len(targets)) {
+					close(finalStatuses)
+				}
+				<-finalStatuses
+			}
+			return codeGraphStatusJSON(path, true, 2, 3, 4, "complete"), nil
+		case "sync":
+			return nil, nil
+		default:
+			t.Errorf("unexpected command: %v", args)
+			return nil, errors.New("unexpected command")
+		}
+	})
+
+	report := PrepareCodeGraphIndexes(context.Background(), CodeGraphIndexOptions{
+		BinaryPath: "/managed/codegraph",
+		SystemID:   systemID,
+		Repos:      targets,
+		OnProgress: func(string) {
+			active := callbackActive.Add(1)
+			recordCodeGraphMaximum(&callbackMaximum, active)
+			time.Sleep(20 * time.Millisecond)
+			callbackActive.Add(-1)
+		},
+	})
+
+	if report.Ready != len(targets) {
+		t.Fatalf("report = %#v, want both repositories ready", report)
+	}
+	if got := workMaximum.Load(); got != 2 {
+		t.Fatalf("repository work maximum concurrency = %d, want 2", got)
+	}
+	if got := callbackMaximum.Load(); got != 1 {
+		t.Fatalf("progress callback maximum concurrency = %d, want 1", got)
+	}
+}
+
 func TestPrepareCodeGraphIndexes_ProcessCacheReusesReport(t *testing.T) {
 	repoPath := makeCodeGraphSourceRepo(t, "main.go")
 	systemID := "codegraph-index-cache-warning"
@@ -346,6 +412,183 @@ func TestPrepareCodeGraphIndexes_ProcessCacheReusesReport(t *testing.T) {
 	_ = PrepareCodeGraphIndexes(context.Background(), opts)
 	if got := calls.Load(); got != 4 {
 		t.Fatalf("invalidated call count = %d, want 4", got)
+	}
+}
+
+func TestPrepareCodeGraphIndexes_ProcessCachePreservesCurrentInputOrder(t *testing.T) {
+	firstPath := makeCodeGraphSourceRepo(t, "first.go")
+	secondPath := makeCodeGraphSourceRepo(t, "second.go")
+	systemID := "codegraph-index-cache-order"
+	InvalidateCodeGraphIndexCache(systemID)
+
+	var calls atomic.Int32
+	setCodeGraphRunnerForTest(t, func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		calls.Add(1)
+		path := args[1]
+		switch args[0] {
+		case "status":
+			if path == firstPath {
+				return codeGraphStatusJSON(path, true, 11, 12, 13, "complete"), nil
+			}
+			return codeGraphStatusJSON(path, true, 21, 22, 23, "complete"), nil
+		case "sync":
+			return nil, nil
+		default:
+			t.Errorf("unexpected command: %v", args)
+			return nil, errors.New("unexpected command")
+		}
+	})
+	firstTarget := CodeGraphRepoTarget{Name: "first", Path: firstPath, Head: "head-first"}
+	secondTarget := CodeGraphRepoTarget{Name: "second", Path: secondPath, Head: "head-second"}
+
+	first := PrepareCodeGraphIndexes(context.Background(), CodeGraphIndexOptions{
+		BinaryPath: "/managed/codegraph",
+		SystemID:   systemID,
+		Repos:      []CodeGraphRepoTarget{firstTarget, secondTarget},
+	})
+	if got := []string{first.Repos[0].Name, first.Repos[1].Name}; !reflect.DeepEqual(got, []string{"first", "second"}) {
+		t.Fatalf("initial report order = %v", got)
+	}
+	if got := calls.Load(); got != 6 {
+		t.Fatalf("initial command count = %d, want 6", got)
+	}
+
+	reversed := PrepareCodeGraphIndexes(context.Background(), CodeGraphIndexOptions{
+		BinaryPath: "/managed/codegraph",
+		SystemID:   systemID,
+		Repos:      []CodeGraphRepoTarget{secondTarget, firstTarget},
+	})
+	if got := calls.Load(); got != 6 {
+		t.Fatalf("reversed cache hit executed commands; total = %d, want 6", got)
+	}
+	if got := []string{reversed.Repos[0].Name, reversed.Repos[1].Name}; !reflect.DeepEqual(got, []string{"second", "first"}) {
+		t.Fatalf("reversed cache report order = %v, want [second first]", got)
+	}
+	if reversed.Repos[0].FileCount != 21 || reversed.Repos[1].FileCount != 11 {
+		t.Fatalf("reversed cache report mismatched repositories: %#v", reversed.Repos)
+	}
+
+	reversed.Repos[0].Name = "caller mutation"
+	again := PrepareCodeGraphIndexes(context.Background(), CodeGraphIndexOptions{
+		BinaryPath: "/managed/codegraph",
+		SystemID:   systemID,
+		Repos:      []CodeGraphRepoTarget{secondTarget, firstTarget},
+	})
+	if again.Repos[0].Name != "second" || calls.Load() != 6 {
+		t.Fatalf("cached reordered report did not preserve deep-copy isolation: %#v", again)
+	}
+}
+
+func TestPrepareCodeGraphIndexes_StatusUsesSyncTimeout(t *testing.T) {
+	repoPath := makeCodeGraphSourceRepo(t, "main.go")
+	systemID := "codegraph-index-status-timeout"
+	InvalidateCodeGraphIndexCache(systemID)
+
+	setCodeGraphRunnerForTest(t, func(ctx context.Context, _ string, args ...string) ([]byte, error) {
+		if args[0] != "status" {
+			t.Errorf("unexpected command: %v", args)
+			return nil, errors.New("unexpected command")
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	parentCtx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	report := PrepareCodeGraphIndexes(parentCtx, CodeGraphIndexOptions{
+		BinaryPath:  "/managed/codegraph",
+		SystemID:    systemID,
+		Repos:       []CodeGraphRepoTarget{{Name: "bounded-status", Path: repoPath}},
+		SyncTimeout: 20 * time.Millisecond,
+	})
+
+	got := report.Repos[0]
+	if got.Status != "warn" || got.Action != "failed" || got.Detail != "status timeout, fallback enabled" {
+		t.Fatalf("status timeout result = %#v", got)
+	}
+	if got.DurationMS < 15 || got.DurationMS >= 100 {
+		t.Fatalf("status timeout duration_ms = %d, want sync-timeout bound near 20ms", got.DurationMS)
+	}
+}
+
+func TestPrepareCodeGraphIndexes_CanceledContextStopsSourceWalk(t *testing.T) {
+	repoPath := makeCodeGraphSourceRepo(t, "main.go")
+	systemID := "codegraph-index-canceled-walk"
+	InvalidateCodeGraphIndexCache(systemID)
+
+	var calls atomic.Int32
+	setCodeGraphRunnerForTest(t, func(ctx context.Context, _ string, _ ...string) ([]byte, error) {
+		calls.Add(1)
+		return nil, ctx.Err()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	report := PrepareCodeGraphIndexes(ctx, CodeGraphIndexOptions{
+		BinaryPath: "/managed/codegraph",
+		SystemID:   systemID,
+		Repos:      []CodeGraphRepoTarget{{Name: "canceled-walk", Path: repoPath}},
+	})
+
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("canceled source walk executed %d CodeGraph commands, want 0", got)
+	}
+	if got := report.Repos[0]; got.Status != "warn" || got.Detail != "source scan failed: context canceled, fallback enabled" {
+		t.Fatalf("canceled source walk result = %#v", got)
+	}
+}
+
+func TestPrepareCodeGraphIndexes_ConcurrentInvalidationAndCacheStore(t *testing.T) {
+	repoPath := makeCodeGraphSourceRepo(t, "main.go")
+	systemID := "codegraph-index-concurrent-invalidation"
+	InvalidateCodeGraphIndexCache(systemID)
+
+	var calls atomic.Int32
+	setCodeGraphRunnerForTest(t, func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		calls.Add(1)
+		switch args[0] {
+		case "status":
+			return codeGraphStatusJSON(repoPath, true, 3, 4, 5, "complete"), nil
+		case "sync":
+			time.Sleep(time.Millisecond)
+			return nil, nil
+		default:
+			t.Errorf("unexpected command: %v", args)
+			return nil, errors.New("unexpected command")
+		}
+	})
+	opts := CodeGraphIndexOptions{
+		BinaryPath: "/managed/codegraph",
+		SystemID:   systemID,
+		Repos:      []CodeGraphRepoTarget{{Name: "concurrent", Path: repoPath, Head: "head"}},
+	}
+
+	const workers = 8
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			report := PrepareCodeGraphIndexes(context.Background(), opts)
+			if report.Ready != 1 {
+				t.Errorf("concurrent report = %#v", report)
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			InvalidateCodeGraphIndexCache(systemID)
+		}
+	}()
+	wg.Wait()
+
+	InvalidateCodeGraphIndexCache(systemID)
+	before := calls.Load()
+	report := PrepareCodeGraphIndexes(context.Background(), opts)
+	if report.Ready != 1 || calls.Load() <= before {
+		t.Fatalf("final invalidation did not force fresh commands: before=%d after=%d report=%#v", before, calls.Load(), report)
 	}
 }
 
@@ -446,6 +689,15 @@ func waitForCodeGraphFakeCall(t *testing.T, entered <-chan struct{}) {
 	case <-entered:
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for fake CodeGraph command")
+	}
+}
+
+func recordCodeGraphMaximum(maximum *atomic.Int32, current int32) {
+	for {
+		seen := maximum.Load()
+		if current <= seen || maximum.CompareAndSwap(seen, current) {
+			return
+		}
 	}
 }
 

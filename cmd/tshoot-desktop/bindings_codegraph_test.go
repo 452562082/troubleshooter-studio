@@ -39,6 +39,35 @@ func TestReindexCodeGraph_DisabledRejected(t *testing.T) {
 	}
 }
 
+func TestReindexCodeGraph_NilRuntimeContextDoesNotEmitWailsEvent(t *testing.T) {
+	yamlText := desktopCodeGraphYAML(t, true)
+	previousEnsure := ensureCodeGraphForRetry
+	previousPrepare := prepareCodeGraphForRetry
+	previousInvalidate := invalidateCodeGraphForRetry
+	ensureCodeGraphForRetry = func(onLog func(string)) (string, error) {
+		onLog("installer ready")
+		return "/fake/codegraph", nil
+	}
+	prepareCodeGraphForRetry = func(_ context.Context, opts agent.CodeGraphIndexOptions) agent.CodeGraphIndexReport {
+		opts.OnProgress("repository ready")
+		return agent.CodeGraphIndexReport{}
+	}
+	invalidateCodeGraphForRetry = func(string) {}
+	t.Cleanup(func() {
+		ensureCodeGraphForRetry = previousEnsure
+		prepareCodeGraphForRetry = previousPrepare
+		invalidateCodeGraphForRetry = previousInvalidate
+	})
+
+	report, err := (&App{}).ReindexCodeGraph(yamlText, nil)
+	if err != nil {
+		t.Fatalf("ReindexCodeGraph() error = %v", err)
+	}
+	if report == nil {
+		t.Fatal("ReindexCodeGraph() report is nil")
+	}
+}
+
 func TestReindexCodeGraph_ExpandsPathsInvalidatesCacheAndSerializesReport(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

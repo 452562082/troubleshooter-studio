@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -429,6 +430,8 @@ func TestApply_CodeGraphDryRunDoesNothing(t *testing.T) {
 }
 
 func TestImportAndApply_MultiTargetCacheAvoidsSecondIndex(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	yamlBytes, err := os.ReadFile(filepath.Join(projectRoot(t), "examples", "shop-troubleshooter.yaml"))
 	if err != nil {
 		t.Fatal(err)
@@ -448,8 +451,26 @@ func TestImportAndApply_MultiTargetCacheAvoidsSecondIndex(t *testing.T) {
 	previousEnsure := ensureCodeGraphForDeploy
 	previousPrepare := prepareCodeGraphForDeploy
 	previousRunner := runCodeGraphCommand
+	previousInstallNative := installNativeForApply
+	previousMergeMCP := mergeMCPIntoIDESettingsForApply
 	ensureCodeGraphForDeploy = func(func(string)) (string, error) { return "/fake/codegraph", nil }
 	prepareCodeGraphForDeploy = PrepareCodeGraphIndexes
+	var nativeInstalls atomic.Int32
+	installNativeForApply = func(_ string, target string) error {
+		if target != "claude-code" {
+			t.Fatalf("native install target = %q, want claude-code", target)
+		}
+		nativeInstalls.Add(1)
+		return nil
+	}
+	var mcpMerges atomic.Int32
+	mergeMCPIntoIDESettingsForApply = func(target string, _ *config.SystemConfig, _ map[string]string, _ func(string)) error {
+		if target != "claude-code" {
+			t.Fatalf("MCP merge target = %q, want claude-code", target)
+		}
+		mcpMerges.Add(1)
+		return nil
+	}
 	var commands atomic.Int32
 	runCodeGraphCommand = func(_ context.Context, _ string, args ...string) ([]byte, error) {
 		call := commands.Add(1)
@@ -465,6 +486,8 @@ func TestImportAndApply_MultiTargetCacheAvoidsSecondIndex(t *testing.T) {
 		ensureCodeGraphForDeploy = previousEnsure
 		prepareCodeGraphForDeploy = previousPrepare
 		runCodeGraphCommand = previousRunner
+		installNativeForApply = previousInstallNative
+		mergeMCPIntoIDESettingsForApply = previousMergeMCP
 	})
 
 	opts := ApplyOptions{
@@ -479,14 +502,25 @@ func TestImportAndApply_MultiTargetCacheAvoidsSecondIndex(t *testing.T) {
 	if firstCommandCount == 0 || first.CodeGraph == nil || first.CodeGraph.Ready != 1 {
 		t.Fatalf("first result = %#v, commands = %d", first, firstCommandCount)
 	}
-	second, err := ImportAndApply(yamlBytes, "openclaw", t.TempDir(), opts)
+	second, err := ImportAndApply(yamlBytes, "claude-code", t.TempDir(), opts)
 	if err != nil {
 		t.Fatalf("second ImportAndApply() error = %v", err)
+	}
+	if first.Target != "openclaw" || second.Target != "claude-code" {
+		t.Fatalf("deployment targets = %q then %q", first.Target, second.Target)
+	}
+	if nativeInstalls.Load() != 1 || mcpMerges.Load() != 1 {
+		t.Fatalf("IDE seams called native=%d mcp=%d, want 1 each", nativeInstalls.Load(), mcpMerges.Load())
+	}
+	for _, userConfigPath := range []string{filepath.Join(home, ".claude"), filepath.Join(home, ".claude.json")} {
+		if _, err := os.Stat(userConfigPath); !os.IsNotExist(err) {
+			t.Fatalf("stubbed IDE deployment mutated user config %s: %v", userConfigPath, err)
+		}
 	}
 	if commands.Load() != firstCommandCount {
 		t.Fatalf("commands after second deployment = %d, want cache reuse at %d", commands.Load(), firstCommandCount)
 	}
-	if second.CodeGraph == nil || second.CodeGraph.Ready != first.CodeGraph.Ready || second.CodeGraph.Total != first.CodeGraph.Total {
+	if second.CodeGraph == nil || !reflect.DeepEqual(second.CodeGraph, first.CodeGraph) {
 		t.Fatalf("second report = %#v, first = %#v", second.CodeGraph, first.CodeGraph)
 	}
 }

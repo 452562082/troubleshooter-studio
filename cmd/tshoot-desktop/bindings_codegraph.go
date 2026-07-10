@@ -36,11 +36,13 @@ func (a *App) ReindexCodeGraph(yamlText string, repoPaths map[string]string) (*a
 	}
 
 	ctx := a.getRuntimeContext()
+	log := func(string) {}
 	if ctx == nil {
 		ctx = context.Background()
-	}
-	log := func(line string) {
-		emitCodeGraphRetryLog(ctx, "[codegraph-retry] "+line)
+	} else {
+		log = func(line string) {
+			emitCodeGraphRetryLog(ctx, "[codegraph-retry] "+line)
+		}
 	}
 
 	invalidateCodeGraphForRetry(cfg.System.ID)

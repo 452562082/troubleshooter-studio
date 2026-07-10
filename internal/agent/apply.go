@@ -23,6 +23,8 @@ import (
 
 var ensureCodeGraphForDeploy = EnsureCodeGraphInstalled
 var prepareCodeGraphForDeploy = PrepareCodeGraphIndexes
+var installNativeForApply = InstallNative
+var mergeMCPIntoIDESettingsForApply = MergeMCPIntoIDESettings
 
 // ApplyOptions 控制 apply 的行为。
 type ApplyOptions struct {
@@ -218,14 +220,14 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 	// 注意:本路径同时覆盖"重新 apply"(改了 yaml 后回写)的场景,避免活配置和用户级
 	// 目录脱节。
 	if !opts.DryRun && (ag.Meta.Target == "claude-code" || ag.Meta.Target == "cursor" || ag.Meta.Target == "codex") {
-		if err := InstallNative(workDir, ag.Meta.Target); err != nil {
+		if err := installNativeForApply(workDir, ag.Meta.Target); err != nil {
 			return nil, fmt.Errorf("native install (%s): %w", ag.Meta.Target, err)
 		}
 		// 顺带把 cfg 派生的 mcpServers 注入 IDE 配置(claude-code → ~/.claude.json,
 		// cursor → ~/.cursor/mcp.json,codex → agent toml 内联段),让装完的 agent
 		// 能直接调到 nacos / grafana / loki 等 MCP。creds 走 opts.IDECreds(桌面端 wizard 传),
 		// 没有(CLI 装时)就用 {{ENV_VAR}} 占位符,用户事后自己填。
-		if err := MergeMCPIntoIDESettings(ag.Meta.Target, cfg, opts.IDECreds, opts.OnLog); err != nil {
+		if err := mergeMCPIntoIDESettingsForApply(ag.Meta.Target, cfg, opts.IDECreds, opts.OnLog); err != nil {
 			return nil, fmt.Errorf("merge mcp settings (%s): %w", ag.Meta.Target, err)
 		}
 		// kuboard / apollo / consul / env-vars 类型走脚本读 creds.json,**不通过 MCP**。

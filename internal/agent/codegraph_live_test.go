@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,7 +15,13 @@ import (
 	"time"
 )
 
-const codeGraphLiveTimeout = 5 * time.Minute
+const (
+	codeGraphLiveTimeout          = 5 * time.Minute
+	codeGraphLiveSyncTimeout      = 30 * time.Second
+	codeGraphLiveCloseWaitTimeout = time.Second
+)
+
+var errCodeGraphLiveCommandTimeout = errors.New("CodeGraph live command timeout")
 
 func TestCodeGraphLive(t *testing.T) {
 	if os.Getenv("TSHOOT_CODEGRAPH_LIVE") != "1" {
@@ -152,7 +159,10 @@ func GoGraphFreshAfterSyncUnique() string {
 	if err := os.WriteFile(goSource, contents, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if output, err := exec.Command(binary, "sync", goRepo).CombinedOutput(); err != nil {
+	if output, err := runCodeGraphLiveCommand(codeGraphLiveSyncTimeout, binary, "sync", goRepo); err != nil {
+		if errors.Is(err, errCodeGraphLiveCommandTimeout) {
+			t.Fatalf("codegraph sync %s timed out after %s\n%s", goRepo, codeGraphLiveSyncTimeout, output)
+		}
 		t.Fatalf("codegraph sync %s: %v\n%s", goRepo, err, output)
 	}
 	freshExplore := mcp.callTool(t, "codegraph_explore", map[string]any{
@@ -201,6 +211,16 @@ func compareCodeGraphLiveBranch(repoPath, target string) (codeGraphLiveBranchCom
 	return codeGraphLiveBranchComparison{Current: current, Target: target, Freshness: freshness, Mismatch: mismatch}, nil
 }
 
+func runCodeGraphLiveCommand(timeout time.Duration, binary string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, binary, args...).CombinedOutput()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return output, fmt.Errorf("%w: %s %s timed out after %s", errCodeGraphLiveCommandTimeout, filepath.Base(binary), strings.Join(args, " "), timeout)
+	}
+	return output, err
+}
+
 func initCodeGraphLiveRepo(t *testing.T, repoPath string, files map[string]string) {
 	t.Helper()
 	if err := os.MkdirAll(repoPath, 0o755); err != nil {
@@ -247,6 +267,7 @@ func startCodeGraphLiveMCP(t *testing.T, binary string) *codeGraphLiveMCP {
 	ctx, cancel := context.WithTimeout(context.Background(), codeGraphLiveTimeout)
 	client := &codeGraphLiveMCP{ctx: ctx, cancel: cancel, nextID: 1}
 	client.cmd = exec.CommandContext(ctx, binary, "serve", "--mcp")
+	client.cmd.WaitDelay = codeGraphLiveCloseWaitTimeout
 	client.cmd.Env = append(os.Environ(), "CODEGRAPH_TELEMETRY=0", "DO_NOT_TRACK=1", "CODEGRAPH_NO_WATCH=1")
 	setProcessGroup(client.cmd)
 	stdin, err := client.cmd.StdinPipe()
@@ -354,9 +375,25 @@ func (c *codeGraphLiveMCP) close() {
 		if c.cmd != nil && c.cmd.Process != nil {
 			killProcessGroup(c.cmd.Process.Pid)
 			_ = c.cmd.Process.Kill()
-			_ = c.cmd.Wait()
+			_ = waitCodeGraphLiveProcess(c.cmd.Wait, codeGraphLiveCloseWaitTimeout)
 		}
 	})
+}
+
+func waitCodeGraphLiveProcess(wait func() error, timeout time.Duration) bool {
+	done := make(chan struct{}, 1)
+	go func() {
+		_ = wait()
+		done <- struct{}{}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 type codeGraphLiveBuffer struct {
@@ -402,4 +439,49 @@ func assertCodeGraphLiveSourceLine(t *testing.T, text, source string) {
 		}
 	}
 	t.Fatalf("CodeGraph response did not expose a numbered source line %q:\n%s", source, text)
+}
+
+func TestRunCodeGraphLiveCommandReportsTimeout(t *testing.T) {
+	t.Setenv("TSHOOT_CODEGRAPH_TEST_HELPER", "hang")
+	started := time.Now()
+	_, err := runCodeGraphLiveCommand(25*time.Millisecond, os.Args[0], "-test.run=^TestCodeGraphLifecycleHelperProcess$")
+	if !errors.Is(err, errCodeGraphLiveCommandTimeout) {
+		t.Fatalf("runCodeGraphLiveCommand error = %v, want timeout sentinel", err)
+	}
+	if !strings.Contains(err.Error(), "timed out after 25ms") {
+		t.Fatalf("runCodeGraphLiveCommand error = %q, want explicit timeout", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("timed command returned after %s, want under 1s", elapsed)
+	}
+}
+
+func TestWaitCodeGraphLiveProcessIsBounded(t *testing.T) {
+	release := make(chan struct{})
+	done := make(chan struct{})
+	wait := func() error {
+		defer close(done)
+		<-release
+		return nil
+	}
+	started := time.Now()
+	if waitCodeGraphLiveProcess(wait, 25*time.Millisecond) {
+		t.Fatal("bounded wait reported completion while wait function remained blocked")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("bounded wait returned after %s, want under 1s", elapsed)
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("released wait goroutine did not exit")
+	}
+}
+
+func TestCodeGraphLifecycleHelperProcess(t *testing.T) {
+	if os.Getenv("TSHOOT_CODEGRAPH_TEST_HELPER") != "hang" {
+		return
+	}
+	time.Sleep(10 * time.Second)
 }

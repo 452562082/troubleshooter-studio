@@ -64,6 +64,7 @@ func scanJavaEndpoints(ctx context.Context, opts EndpointScanOptions) ([]topolog
 		case ".yaml", ".yml":
 			extracted, err = extractSpringGatewayYAMLContext(ctx, source)
 		default:
+			source.text = maskCStyleComments(source.text)
 			extracted, err = extractJavaEndpointsContext(ctx, source)
 		}
 		if err != nil {
@@ -160,15 +161,17 @@ func extractFeignEndpointsContext(ctx context.Context, source endpointSource) ([
 		if !ok {
 			continue
 		}
-		span := javaSourceSpan{start: feign[0], end: closeOffset + 1}
+		headerStart := javaDeclarationHeaderStart(source.text, feign[0])
+		span := javaSourceSpan{start: headerStart, end: closeOffset + 1}
 		spans = append(spans, span)
 		target := javaFeignTarget(source.text[feign[2]:feign[3]])
 		prefix := ""
-		for _, mapping := range springMappingRE.FindAllStringSubmatchIndex(source.text[feign[1]:openOffset], -1) {
-			if source.text[feign[1]+mapping[2]:feign[1]+mapping[3]] != "RequestMapping" {
+		declarationHeader := source.text[headerStart:openOffset]
+		for _, mapping := range springMappingRE.FindAllStringSubmatchIndex(declarationHeader, -1) {
+			if declarationHeader[mapping[2]:mapping[3]] != "RequestMapping" {
 				continue
 			}
-			args := javaMappingArgs(source.text[feign[1]:openOffset], mapping)
+			args := javaMappingArgs(declarationHeader, mapping)
 			if path, found := springMappingPath(args); found {
 				prefix = path
 			}
@@ -192,6 +195,16 @@ func extractFeignEndpointsContext(ctx context.Context, source endpointSource) ([
 		}
 	}
 	return endpoints, spans, ctx.Err()
+}
+
+func javaDeclarationHeaderStart(text string, annotationStart int) int {
+	if annotationStart <= 0 {
+		return 0
+	}
+	if boundary := strings.LastIndexAny(text[:annotationStart], ";{}"); boundary >= 0 {
+		return boundary + 1
+	}
+	return 0
 }
 
 func javaFeignTarget(args string) string {

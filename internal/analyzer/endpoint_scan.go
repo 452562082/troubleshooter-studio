@@ -270,6 +270,140 @@ func endpointLocation(source endpointSource, offset int) string {
 	return fmt.Sprintf("%s:%d", source.rel, lineNumberAt(source.text, offset))
 }
 
+func maskCStyleComments(text string) string {
+	masked := []byte(text)
+	var quote byte
+	escaped := false
+	tripleDouble := false
+	for i := 0; i < len(text); {
+		if tripleDouble {
+			if i+2 < len(text) && text[i:i+3] == `"""` {
+				tripleDouble = false
+				i += 3
+				continue
+			}
+			i++
+			continue
+		}
+		if quote != 0 {
+			if quote != '`' && escaped {
+				escaped = false
+				i++
+				continue
+			}
+			if quote != '`' && text[i] == '\\' {
+				escaped = true
+				i++
+				continue
+			}
+			if text[i] == quote {
+				quote = 0
+			}
+			i++
+			continue
+		}
+		if i+2 < len(text) && text[i:i+3] == `"""` {
+			tripleDouble = true
+			i += 3
+			continue
+		}
+		if text[i] == '\'' || text[i] == '"' || text[i] == '`' {
+			quote = text[i]
+			i++
+			continue
+		}
+		if i+1 < len(text) && text[i:i+2] == "//" {
+			for i < len(text) && text[i] != '\n' {
+				if text[i] != '\r' {
+					masked[i] = ' '
+				}
+				i++
+			}
+			continue
+		}
+		if i+1 < len(text) && text[i:i+2] == "/*" {
+			masked[i], masked[i+1] = ' ', ' '
+			i += 2
+			for i < len(text) {
+				if i+1 < len(text) && text[i:i+2] == "*/" {
+					masked[i], masked[i+1] = ' ', ' '
+					i += 2
+					break
+				}
+				if text[i] != '\n' && text[i] != '\r' {
+					masked[i] = ' '
+				}
+				i++
+			}
+			continue
+		}
+		i++
+	}
+	return string(masked)
+}
+
+func maskPythonCommentsAndDocstrings(text string) string {
+	masked := []byte(text)
+	var quote byte
+	escaped := false
+	for i := 0; i < len(text); {
+		if quote != 0 {
+			if escaped {
+				escaped = false
+				i++
+				continue
+			}
+			if text[i] == '\\' {
+				escaped = true
+				i++
+				continue
+			}
+			if text[i] == quote {
+				quote = 0
+			}
+			i++
+			continue
+		}
+		if i+2 < len(text) && (text[i:i+3] == `"""` || text[i:i+3] == `'''`) {
+			delimiter := text[i : i+3]
+			for j := 0; j < 3; j++ {
+				masked[i+j] = ' '
+			}
+			i += 3
+			for i < len(text) {
+				if i+2 < len(text) && text[i:i+3] == delimiter {
+					for j := 0; j < 3; j++ {
+						masked[i+j] = ' '
+					}
+					i += 3
+					break
+				}
+				if text[i] != '\n' && text[i] != '\r' {
+					masked[i] = ' '
+				}
+				i++
+			}
+			continue
+		}
+		if text[i] == '\'' || text[i] == '"' {
+			quote = text[i]
+			i++
+			continue
+		}
+		if text[i] == '#' {
+			for i < len(text) && text[i] != '\n' {
+				if text[i] != '\r' {
+					masked[i] = ' '
+				}
+				i++
+			}
+			continue
+		}
+		i++
+	}
+	return string(masked)
+}
+
 func splitHTTPURL(raw string) (path, targetHint string) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {

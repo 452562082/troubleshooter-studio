@@ -10,15 +10,13 @@ import (
 )
 
 var (
-	pythonDecoratorRE      = regexp.MustCompile(`(?i)@([A-Za-z_][A-Za-z0-9_]*)\.(get|post|put|patch|delete|route|api_route)\s*\(\s*["']([^"']+)["']([^)]*)\)`)
-	pythonRouteMethodsRE   = regexp.MustCompile(`(?is)\bmethods\s*=\s*[\[(]([^\])]+)[\])]`)
-	pythonQuotedMethodRE   = regexp.MustCompile(`["'](GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)["']`)
-	pythonAddURLRuleRE     = regexp.MustCompile(`(?i)\badd_url_rule\s*\(\s*["']([^"']+)["']([^)]*)\)`)
-	pythonDjangoRouteRE    = regexp.MustCompile(`(?i)\b(?:path|re_path)\s*\(\s*["']([^"']+)["']`)
-	pythonDjangoParamRE    = regexp.MustCompile(`<(?:[A-Za-z_][A-Za-z0-9_]*:)?[A-Za-z_][A-Za-z0-9_]*>`)
-	pythonHTTPCallRE       = regexp.MustCompile(`\b(requests|httpx)(?:\.(?:Client|AsyncClient)\s*\([^)]*\))?\.(get|post|put|patch|delete|head|options)\s*\(\s*`)
-	pythonNamedURLExprRE   = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\s*\+\s*["']([^"']+)["']`)
-	pythonLiteralURLExprRE = regexp.MustCompile(`^["']([^"']+)["']`)
+	pythonDecoratorRE    = regexp.MustCompile(`(?i)@([A-Za-z_][A-Za-z0-9_]*)\.(get|post|put|patch|delete|route|api_route)\s*\(\s*["']([^"']+)["']([^)]*)\)`)
+	pythonRouteMethodsRE = regexp.MustCompile(`(?is)\bmethods\s*=\s*[\[(]([^\])]+)[\])]`)
+	pythonQuotedMethodRE = regexp.MustCompile(`["'](GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)["']`)
+	pythonAddURLRuleRE   = regexp.MustCompile(`(?i)\badd_url_rule\s*\(\s*["']([^"']+)["']([^)]*)\)`)
+	pythonDjangoRouteRE  = regexp.MustCompile(`(?i)\b(?:path|re_path)\s*\(\s*["']([^"']+)["']`)
+	pythonDjangoParamRE  = regexp.MustCompile(`<(?:[A-Za-z_][A-Za-z0-9_]*:)?[A-Za-z_][A-Za-z0-9_]*>`)
+	pythonHTTPCallRE     = regexp.MustCompile(`\b(requests|httpx)(?:\.(?:Client|AsyncClient)\s*\([^)]*\))?\.(get|post|put|patch|delete|head|options)\s*\(\s*`)
 )
 
 func scanPythonEndpoints(ctx context.Context, opts EndpointScanOptions) ([]topology.Endpoint, error) {
@@ -34,6 +32,7 @@ func scanPythonEndpoints(ctx context.Context, opts EndpointScanOptions) ([]topol
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		source.text = maskPythonCommentsAndDocstrings(source.text)
 		extracted, err := extractPythonEndpointsContext(ctx, opts, source)
 		if err != nil {
 			return nil, err
@@ -133,11 +132,67 @@ func normalizePythonRoutePath(path string) string {
 }
 
 func splitPythonHTTPExpression(expression string) (path, hint string) {
-	if match := pythonNamedURLExprRE.FindStringSubmatch(expression); len(match) == 3 {
-		return ensureLeadingSlash(match[2]), match[1]
+	expression = strings.TrimLeft(expression, " \t\r\n")
+	if identifier, rest, ok := pythonIdentifierPrefix(expression); ok {
+		rest = strings.TrimLeft(rest, " \t\r\n")
+		if !strings.HasPrefix(rest, "+") {
+			return "", ""
+		}
+		literal, tail, ok := pythonQuotedLiteral(strings.TrimLeft(rest[1:], " \t\r\n"))
+		if !ok || !pythonHTTPArgumentEnds(tail) {
+			return "", ""
+		}
+		return ensureLeadingSlash(literal), identifier
 	}
-	if match := pythonLiteralURLExprRE.FindStringSubmatch(expression); len(match) == 2 {
-		return splitHTTPURL(match[1])
+	literal, tail, ok := pythonQuotedLiteral(expression)
+	if !ok || !pythonHTTPArgumentEnds(tail) {
+		return "", ""
 	}
-	return "", ""
+	return splitHTTPURL(literal)
+}
+
+func pythonIdentifierPrefix(expression string) (identifier, rest string, ok bool) {
+	if expression == "" || !isPythonIdentifierStart(expression[0]) {
+		return "", expression, false
+	}
+	i := 1
+	for i < len(expression) && isPythonIdentifierPart(expression[i]) {
+		i++
+	}
+	return expression[:i], expression[i:], true
+}
+
+func isPythonIdentifierStart(ch byte) bool {
+	return ch == '_' || ch >= 'A' && ch <= 'Z' || ch >= 'a' && ch <= 'z'
+}
+
+func isPythonIdentifierPart(ch byte) bool {
+	return isPythonIdentifierStart(ch) || ch >= '0' && ch <= '9'
+}
+
+func pythonQuotedLiteral(expression string) (literal, tail string, ok bool) {
+	if len(expression) < 2 || expression[0] != '\'' && expression[0] != '"' {
+		return "", expression, false
+	}
+	quote := expression[0]
+	escaped := false
+	for i := 1; i < len(expression); i++ {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if expression[i] == '\\' {
+			escaped = true
+			continue
+		}
+		if expression[i] == quote {
+			return expression[1:i], expression[i+1:], true
+		}
+	}
+	return "", expression, false
+}
+
+func pythonHTTPArgumentEnds(tail string) bool {
+	tail = strings.TrimLeft(tail, " \t\r\n")
+	return strings.HasPrefix(tail, ",") || strings.HasPrefix(tail, ")")
 }

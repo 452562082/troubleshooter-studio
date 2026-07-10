@@ -182,6 +182,192 @@ requests.delete(build_url('/dynamic'))
 	}
 }
 
+func TestScanEndpoints_BackendCommentsAndDocstringsAreIgnored(t *testing.T) {
+	t.Run("go and proto", func(t *testing.T) {
+		root := fixtureRepo(t, map[string]string{
+			"routes.go": `package routes
+func register(r Router) {
+  // r.GET("/dead-line", dead)
+  /* r.POST("/dead-block", dead) */
+  r.GET("/live//orders", live)
+  http.Get("http://catalog-service/live//items")
+}`,
+			"service.proto": `package shop.live;
+// service DeadLine { rpc Gone (In) returns (Out); }
+/* service DeadBlock { rpc Gone (In) returns (Out); } */
+service Live { rpc Get (In) returns (Out); }`,
+		})
+		got, err := ScanEndpointsContext(context.Background(), EndpointScanOptions{Repo: "live", Stack: "go", RepoPath: root})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertEndpoint(t, got, topology.DirectionInbound, "GET", "/live/orders", "", "gin-route")
+		assertEndpoint(t, got, topology.DirectionOutbound, "GET", "/live/items", "catalog-service", "go-http")
+		assertRPC(t, got, topology.DirectionInbound, "shop.live.Live/Get")
+		assertNoEndpointPath(t, got, "/dead-line")
+		assertNoEndpointPath(t, got, "/dead-block")
+		assertNoRPCMethod(t, got, "shop.live.DeadLine/Gone")
+		assertNoRPCMethod(t, got, "shop.live.DeadBlock/Gone")
+		live := requireEndpoint(t, got, topology.DirectionInbound, "GET", "/live/orders", "", "gin-route")
+		if live.Location != "routes.go:5" {
+			t.Fatalf("Go route location = %q, want routes.go:5", live.Location)
+		}
+	})
+
+	t.Run("java", func(t *testing.T) {
+		root := fixtureRepo(t, map[string]string{"Routes.java": `// @GetMapping("/dead-line")
+/* @PostMapping("/dead-block") */
+@RequestMapping("/live//api")
+class Routes {
+  @GetMapping("/orders/*marker*/detail")
+  Object get() { return null; }
+}`})
+		got, err := ScanEndpointsContext(context.Background(), EndpointScanOptions{Repo: "live", Stack: "java", RepoPath: root})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertEndpoint(t, got, topology.DirectionInbound, "GET", "/live/api/orders/{wildcard}/detail", "", "spring-route")
+		assertNoEndpointPath(t, got, "/dead-line")
+		assertNoEndpointPath(t, got, "/dead-block")
+		live := requireEndpoint(t, got, topology.DirectionInbound, "GET", "/live/api/orders/{wildcard}/detail", "", "spring-route")
+		if live.Location != "Routes.java:5" {
+			t.Fatalf("Java route location = %q, want Routes.java:5", live.Location)
+		}
+	})
+
+	t.Run("python", func(t *testing.T) {
+		root := fixtureRepo(t, map[string]string{"app.py": `# @app.get("/dead-line")
+"""
+@app.post("/dead-docstring")
+requests.get("http://dead-service/docstring")
+"""
+@app.get("/live/orders")
+def live(): pass
+requests.get("http://profile-service/live//items")
+requests.get("http://anchor-service/live#fragment")
+`})
+		got, err := ScanEndpointsContext(context.Background(), EndpointScanOptions{Repo: "live", Stack: "python", RepoPath: root})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertEndpoint(t, got, topology.DirectionInbound, "GET", "/live/orders", "", "fastapi-route")
+		assertEndpoint(t, got, topology.DirectionOutbound, "GET", "/live/items", "profile-service", "python-requests")
+		assertEndpoint(t, got, topology.DirectionOutbound, "GET", "/live", "anchor-service", "python-requests")
+		assertNoEndpointPath(t, got, "/dead-line")
+		assertNoEndpointPath(t, got, "/dead-docstring")
+		assertNoEndpointPath(t, got, "/docstring")
+		live := requireEndpoint(t, got, topology.DirectionInbound, "GET", "/live/orders", "", "fastapi-route")
+		if live.Location != "app.py:6" {
+			t.Fatalf("Python route location = %q, want app.py:6", live.Location)
+		}
+	})
+}
+
+func TestScanEndpoints_JavaFeignClassMappingBeforeAnnotation(t *testing.T) {
+	root := fixtureRepo(t, map[string]string{"OrderClient.java": `@RequestMapping("/api")
+@FeignClient(name="orders")
+interface OrderClient {
+  @GetMapping("/x") Object get();
+}`})
+	got, err := ScanEndpointsContext(context.Background(), EndpointScanOptions{Repo: "client", Stack: "java", RepoPath: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEndpoint(t, got, topology.DirectionOutbound, "GET", "/api/x", "orders", "feign")
+	for _, endpoint := range got {
+		if endpoint.Direction == topology.DirectionInbound && (endpoint.Path == "/api" || endpoint.Path == "/x" || endpoint.Path == "/api/x") {
+			t.Fatalf("Feign mapping emitted as inbound: %#v", endpoint)
+		}
+	}
+}
+
+func TestScanEndpoints_PythonRejectsPartiallyStaticClientExpressions(t *testing.T) {
+	root := fixtureRepo(t, map[string]string{"client.py": `requests.get(BASE_URL + "/users/" + user_id)
+httpx.post("https://orders-service/orders/" + order_id)
+requests.delete(API_URL + "/static", timeout=1)
+`})
+	got, err := ScanEndpointsContext(context.Background(), EndpointScanOptions{Repo: "client", Stack: "python", RepoPath: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEndpoint(t, got, topology.DirectionOutbound, "DELETE", "/static", "API_URL", "python-requests")
+	assertNoEndpointPath(t, got, "/users")
+	assertNoEndpointPath(t, got, "/orders")
+}
+
+func TestScanEndpoints_GoRequestMethodConstants(t *testing.T) {
+	root := fixtureRepo(t, map[string]string{"client.go": `package client
+func call(ctx context.Context) {
+  http.NewRequest(http.MethodGet, "http://catalog-service/items", nil)
+  http.NewRequestWithContext(ctx, http.MethodPost, "http://order-service/orders", nil)
+  http.NewRequest(http.MethodPut, "http://order-service/orders/1", nil)
+  http.NewRequestWithContext(ctx, http.MethodPatch, "http://order-service/orders/2", nil)
+  http.NewRequest(http.MethodDelete, "http://order-service/orders/3", nil)
+  http.NewRequest(ctxMethod, "http://ignored-service/ignored", nil)
+}`})
+	got, err := ScanEndpointsContext(context.Background(), EndpointScanOptions{Repo: "client", Stack: "go", RepoPath: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEndpoint(t, got, topology.DirectionOutbound, "GET", "/items", "catalog-service", "go-http")
+	assertEndpoint(t, got, topology.DirectionOutbound, "POST", "/orders", "order-service", "go-http")
+	assertEndpoint(t, got, topology.DirectionOutbound, "PUT", "/orders/1", "order-service", "go-http")
+	assertEndpoint(t, got, topology.DirectionOutbound, "PATCH", "/orders/2", "order-service", "go-http")
+	assertEndpoint(t, got, topology.DirectionOutbound, "DELETE", "/orders/3", "order-service", "go-http")
+	assertNoEndpointPath(t, got, "/ignored")
+}
+
+func TestScanEndpoints_GoGinAndEchoGroups(t *testing.T) {
+	root := fixtureRepo(t, map[string]string{"routes.go": `package routes
+func v1(r Router) {
+  api := r.Group("/api")
+  api.GET("/orders", list)
+  r.Group("/admin").POST("/jobs", create)
+}
+func v2(r Router) {
+  api := r.Group("/v2")
+  api.GET("/orders", listV2)
+}
+func unrelated(r Router) {
+  api.GET("/health", health)
+}
+func echo(e Router) {
+  api := e.Group("/echo")
+  api.GET("/orders", listEcho)
+  e.Group("/ops").DELETE("/jobs", deleteJob)
+}`})
+	got, err := ScanEndpointsContext(context.Background(), EndpointScanOptions{Repo: "routes", Stack: "go", RepoPath: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEndpoint(t, got, topology.DirectionInbound, "GET", "/api/orders", "", "gin-route")
+	assertEndpoint(t, got, topology.DirectionInbound, "POST", "/admin/jobs", "", "gin-route")
+	assertEndpoint(t, got, topology.DirectionInbound, "GET", "/v2/orders", "", "gin-route")
+	assertEndpoint(t, got, topology.DirectionInbound, "GET", "/health", "", "gin-route")
+	assertEndpoint(t, got, topology.DirectionInbound, "GET", "/echo/orders", "", "echo-route")
+	assertEndpoint(t, got, topology.DirectionInbound, "DELETE", "/ops/jobs", "", "echo-route")
+	assertNoEndpointPath(t, got, "/api/health")
+	assertNoEndpointPath(t, got, "/v2/health")
+}
+
+func assertNoEndpointPath(t *testing.T, got []topology.Endpoint, path string) {
+	t.Helper()
+	for _, endpoint := range got {
+		if endpoint.Path == path {
+			t.Fatalf("unexpected endpoint path %q: %#v", path, endpoint)
+		}
+	}
+}
+
+func assertNoRPCMethod(t *testing.T, got []topology.Endpoint, method string) {
+	t.Helper()
+	for _, endpoint := range got {
+		if endpoint.RPCMethod == method {
+			t.Fatalf("unexpected RPC method %q: %#v", method, endpoint)
+		}
+	}
+}
+
 func requireRPCEndpoint(t *testing.T, got []topology.Endpoint, direction topology.Direction, method string) topology.Endpoint {
 	t.Helper()
 	for _, endpoint := range got {

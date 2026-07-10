@@ -7,12 +7,11 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/xiaolong/troubleshooter-studio/internal/topology"
 )
 
-var (
-	idPattern                       = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
-	serviceTopologyPathParamPattern = regexp.MustCompile(`(^|/)(:[^/?#]+|\{[^/{}]+\}|\[[^/\[\]]+\])`)
-)
+var idPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 func Validate(c *SystemConfig) error {
 	if c.System.ID == "" {
@@ -200,7 +199,7 @@ func validateServiceTopology(c *SystemConfig) error {
 
 		override.Protocol = strings.ToLower(override.Protocol)
 		override.Method = strings.ToUpper(override.Method)
-		override.Path = normalizeServiceTopologyPath(override.Path)
+		override.Path = topology.NormalizePath(override.Path)
 		switch override.Protocol {
 		case "http":
 			if override.Method == "" || override.Path == "" || override.RPCMethod != "" {
@@ -225,10 +224,6 @@ func validateServiceTopology(c *SystemConfig) error {
 		c.ServiceTopology.Overrides[i] = override
 	}
 	return nil
-}
-
-func normalizeServiceTopologyPath(path string) string {
-	return serviceTopologyPathParamPattern.ReplaceAllString(path, `${1}{param}`)
 }
 
 func sortedKeys(m map[string]bool) []string {

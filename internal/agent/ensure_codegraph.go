@@ -42,6 +42,7 @@ var codeGraphUserHomeDir = os.UserHomeDir
 var codeGraphGOOS = runtime.GOOS
 var codeGraphGOARCH = runtime.GOARCH
 var codeGraphHTTPClient = &http.Client{Timeout: 90 * time.Second}
+var codeGraphRename = os.Rename
 
 type codeGraphInstallPaths struct {
 	cacheRoot      string
@@ -128,7 +129,7 @@ func EnsureCodeGraphInstalled(onLog func(string)) (string, error) {
 	// Another install may have completed while this process downloaded. Reuse that
 	// valid cache instead of replacing it.
 	if !codeGraphCacheValid(paths, artifact) {
-		if err := promoteCodeGraphDirectory(extractRoot, paths.cacheRoot); err != nil {
+		if err := promoteCodeGraphDirectory(extractRoot, paths, artifact); err != nil {
 			return "", fmt.Errorf("promote CodeGraph cache: %w", err)
 		}
 	}
@@ -411,28 +412,71 @@ func writeCodeGraphArchiveFile(destination string, mode os.FileMode, source io.R
 	return nil
 }
 
-func promoteCodeGraphDirectory(extractRoot, cacheRoot string) error {
-	if _, err := os.Lstat(cacheRoot); os.IsNotExist(err) {
-		return os.Rename(extractRoot, cacheRoot)
-	} else if err != nil {
-		return err
-	}
-
-	backupRoot, err := unusedCodeGraphPath(filepath.Dir(cacheRoot), "."+filepath.Base(cacheRoot)+".backup-")
-	if err != nil {
-		return err
-	}
-	if err := os.Rename(cacheRoot, backupRoot); err != nil {
-		return err
-	}
-	if err := os.Rename(extractRoot, cacheRoot); err != nil {
-		if rollbackErr := os.Rename(backupRoot, cacheRoot); rollbackErr != nil {
-			return fmt.Errorf("rename new cache: %v; rollback old cache: %w", err, rollbackErr)
+func promoteCodeGraphDirectory(extractRoot string, paths codeGraphInstallPaths, artifact codeGraphArtifact) error {
+	cacheRoot := paths.cacheRoot
+	for attempt := 0; attempt < 64; attempt++ {
+		if codeGraphCacheValid(paths, artifact) {
+			return removeConcurrentCodeGraphExtraction(extractRoot)
 		}
-		return err
+
+		_, statErr := os.Lstat(cacheRoot)
+		if os.IsNotExist(statErr) {
+			if err := codeGraphRename(extractRoot, cacheRoot); err == nil {
+				return nil
+			} else if codeGraphCacheValid(paths, artifact) {
+				return removeConcurrentCodeGraphExtraction(extractRoot)
+			} else if _, retryErr := os.Lstat(cacheRoot); os.IsNotExist(retryErr) {
+				continue
+			} else {
+				return err
+			}
+		}
+		if statErr != nil {
+			return statErr
+		}
+
+		backupRoot, err := unusedCodeGraphPath(filepath.Dir(cacheRoot), "."+filepath.Base(cacheRoot)+".backup-")
+		if err != nil {
+			return err
+		}
+		if err := codeGraphRename(cacheRoot, backupRoot); err != nil {
+			if codeGraphCacheValid(paths, artifact) {
+				return removeConcurrentCodeGraphExtraction(extractRoot)
+			}
+			if _, retryErr := os.Lstat(cacheRoot); os.IsNotExist(retryErr) {
+				continue
+			}
+			return err
+		}
+
+		if err := codeGraphRename(extractRoot, cacheRoot); err == nil {
+			if removeErr := os.RemoveAll(backupRoot); removeErr != nil {
+				return fmt.Errorf("remove replaced CodeGraph cache backup: %w", removeErr)
+			}
+			return nil
+		} else if codeGraphCacheValid(paths, artifact) {
+			if removeErr := os.RemoveAll(backupRoot); removeErr != nil {
+				return fmt.Errorf("remove losing CodeGraph cache backup: %w", removeErr)
+			}
+			return removeConcurrentCodeGraphExtraction(extractRoot)
+		} else if rollbackErr := codeGraphRename(backupRoot, cacheRoot); rollbackErr != nil {
+			if codeGraphCacheValid(paths, artifact) {
+				if removeErr := os.RemoveAll(backupRoot); removeErr != nil {
+					return fmt.Errorf("remove CodeGraph backup after concurrent promotion: %w", removeErr)
+				}
+				return removeConcurrentCodeGraphExtraction(extractRoot)
+			}
+			return fmt.Errorf("rename new cache: %v; rollback old cache: %w", err, rollbackErr)
+		} else {
+			return err
+		}
 	}
-	if err := os.RemoveAll(backupRoot); err != nil {
-		return fmt.Errorf("remove replaced CodeGraph cache backup: %w", err)
+	return fmt.Errorf("promote CodeGraph cache: too many concurrent filesystem changes at %s", cacheRoot)
+}
+
+func removeConcurrentCodeGraphExtraction(extractRoot string) error {
+	if err := os.RemoveAll(extractRoot); err != nil {
+		return fmt.Errorf("remove losing CodeGraph extraction: %w", err)
 	}
 	return nil
 }

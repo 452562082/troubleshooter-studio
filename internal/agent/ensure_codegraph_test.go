@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
@@ -233,6 +235,51 @@ func TestEnsureCodeGraphInstalled_DownloadFailureLeavesNoExecutable(t *testing.T
 	assertCodeGraphNotPromoted(t, home, "linux-x64", "linux")
 }
 
+func TestEnsureCodeGraphInstalled_RejectsAdvertisedBodyOverLimit(t *testing.T) {
+	home, _ := setCodeGraphTestEnvironment(t, "linux", "amd64", nil, http.StatusOK, false)
+	codeGraphHTTPClient = &http.Client{Transport: codeGraphRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode:    http.StatusOK,
+			Status:        "200 OK",
+			Header:        make(http.Header),
+			ContentLength: maxCodeGraphDownloadBytes + 1,
+			Body:          io.NopCloser(bytes.NewReader(nil)),
+			Request:       req,
+		}, nil
+	})}
+
+	_, err := EnsureCodeGraphInstalled(nil)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "larger than") {
+		t.Fatalf("EnsureCodeGraphInstalled() error = %v, want advertised-size rejection", err)
+	}
+	assertCodeGraphNotPromoted(t, home, "linux-x64", "linux")
+}
+
+func TestEnsureCodeGraphInstalled_RejectsStreamedBodyOverLimit(t *testing.T) {
+	home, _ := setCodeGraphTestEnvironment(t, "linux", "amd64", nil, http.StatusOK, false)
+	const unreadTail = int64(4096)
+	body := &sizedZeroReadCloser{remaining: maxCodeGraphDownloadBytes + 1 + unreadTail}
+	codeGraphHTTPClient = &http.Client{Transport: codeGraphRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode:    http.StatusOK,
+			Status:        "200 OK",
+			Header:        make(http.Header),
+			ContentLength: -1,
+			Body:          body,
+			Request:       req,
+		}, nil
+	})}
+
+	_, err := EnsureCodeGraphInstalled(nil)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "exceeds") {
+		t.Fatalf("EnsureCodeGraphInstalled() error = %v, want streamed-size rejection", err)
+	}
+	if body.remaining != unreadTail {
+		t.Errorf("stream reader has %d bytes remaining, want %d after early stop at the over-limit sentinel", body.remaining, unreadTail)
+	}
+	assertCodeGraphNotPromoted(t, home, "linux-x64", "linux")
+}
+
 func TestEnsureCodeGraphInstalled_InvalidMarkerDoesNotReuseCache(t *testing.T) {
 	home, requests := setCodeGraphTestEnvironment(t, "linux", "amd64", []byte("unavailable"), http.StatusServiceUnavailable, false)
 	launcher := codeGraphTestBundleLauncher(home, "linux-x64", "linux")
@@ -286,6 +333,60 @@ func TestEnsureCodeGraphInstalled_AtomicallyReplacesInvalidCacheAfterCompleteExt
 	assertNoCodeGraphTemps(t, filepath.Dir(filepath.Dir(filepath.Dir(launcher))))
 }
 
+func TestEnsureCodeGraphInstalled_ConcurrentPromotionsAcceptValidWinner(t *testing.T) {
+	parent := t.TempDir()
+	artifact := codeGraphArtifacts["linux/amd64"]
+	cacheRoot := filepath.Join(parent, artifact.Target)
+	paths := codeGraphInstallPaths{
+		cacheRoot:      cacheRoot,
+		bundleLauncher: filepath.Join(cacheRoot, "bin", "codegraph"),
+		marker:         filepath.Join(cacheRoot, ".installed-sha256"),
+		stableCommand:  filepath.Join(parent, "bin", "codegraph"),
+	}
+	writeCodeGraphTestCache(t, cacheRoot, "invalid launcher", "invalid digest")
+	extractOne := filepath.Join(parent, ".linux-x64.extract-one")
+	extractTwo := filepath.Join(parent, ".linux-x64.extract-two")
+	writeCodeGraphTestCache(t, extractOne, "winner one", artifact.SHA256)
+	writeCodeGraphTestCache(t, extractTwo, "winner two", artifact.SHA256)
+
+	oldRename := codeGraphRename
+	var backupAttempts atomic.Int32
+	ready := make(chan struct{}, 2)
+	release := make(chan struct{})
+	codeGraphRename = func(oldPath, newPath string) error {
+		if oldPath == cacheRoot && strings.Contains(filepath.Base(newPath), ".backup-") && backupAttempts.Add(1) <= 2 {
+			ready <- struct{}{}
+			<-release
+		}
+		return os.Rename(oldPath, newPath)
+	}
+	t.Cleanup(func() { codeGraphRename = oldRename })
+
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for _, extractRoot := range []string{extractOne, extractTwo} {
+		wg.Add(1)
+		go func(root string) {
+			defer wg.Done()
+			errs <- promoteCodeGraphDirectory(root, paths, artifact)
+		}(extractRoot)
+	}
+	<-ready
+	<-ready
+	close(release)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("concurrent promotion error = %v", err)
+		}
+	}
+	if !codeGraphCacheValid(paths, artifact) {
+		t.Fatal("concurrent promotion did not leave a valid cache winner")
+	}
+	assertNoCodeGraphTemps(t, parent)
+}
+
 func TestEnsureCodeGraphInstalled_UnsupportedPlatform(t *testing.T) {
 	home, requests := setCodeGraphTestEnvironment(t, "freebsd", "amd64", nil, http.StatusOK, false)
 
@@ -306,6 +407,24 @@ type codeGraphRoundTripFunc func(*http.Request) (*http.Response, error)
 func (f codeGraphRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
+
+type sizedZeroReadCloser struct {
+	remaining int64
+}
+
+func (r *sizedZeroReadCloser) Read(p []byte) (int, error) {
+	if r.remaining == 0 {
+		return 0, io.EOF
+	}
+	n := int64(len(p))
+	if n > r.remaining {
+		n = r.remaining
+	}
+	r.remaining -= n
+	return int(n), nil
+}
+
+func (*sizedZeroReadCloser) Close() error { return nil }
 
 var codeGraphTestLastRequestURL string
 
@@ -414,6 +533,19 @@ func assertFileContents(t *testing.T, path, want string) {
 	}
 	if string(got) != want {
 		t.Errorf("%s contents = %q, want %q", path, got, want)
+	}
+}
+
+func writeCodeGraphTestCache(t *testing.T, root, launcherContents, digest string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "bin", "codegraph"), []byte(launcherContents), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".installed-sha256"), []byte(digest+"\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

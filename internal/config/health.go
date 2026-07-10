@@ -30,6 +30,7 @@ type HealthIssue struct {
 // 用 map 加速 lookup;前端展示时排序后给出
 var knownSkills = map[string]bool{
 	"routing":                      true,
+	"code-intelligence-query":      true,
 	"config-executor":              true,
 	"incident-investigator":        true,
 	"api-verifier":                 true,

@@ -58,6 +58,13 @@ func Validate(c *SystemConfig) error {
 		envIDs[env.ID] = true
 	}
 
+	if c.CodeIntelligence.Enabled && c.CodeIntelligence.Provider == "" {
+		return fmt.Errorf("code_intelligence.provider required when enabled")
+	}
+	if p := c.CodeIntelligence.Provider; p != "" && p != CodeIntelligenceProviderCodeGraph {
+		return fmt.Errorf("code_intelligence.provider=%q invalid (valid: codegraph)", p)
+	}
+
 	// ── 配置中心:多源 schema ──
 	// kuboard:走 Kuboard HTTP API 读 ConfigMap(用户没 kubeconfig、只能拿到
 	// Kuboard URL+账密的常见场景)。原 kubernetes 类型(走 kubectl + ~/.kube/config)

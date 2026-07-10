@@ -3,6 +3,7 @@ package analyzer
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -292,6 +293,130 @@ func TestExtractNodeCalls_ContextCancellationDuringSourceExtraction(t *testing.T
 	if _, err := extractNodeCallsContext(ctx, source); !errors.Is(err, context.Canceled) {
 		t.Fatalf("source extraction error = %v, want context.Canceled", err)
 	}
+}
+
+func TestScanEndpoints_SurfacesWalkErrorsBelowRepoRoot(t *testing.T) {
+	root := fixtureRepo(t, map[string]string{"src/client.ts": `fetch('/api/orders')`})
+	wantErr := fs.ErrPermission
+	original := endpointWalkDir
+	endpointWalkDir = func(root string, walkFn fs.WalkDirFunc) error {
+		return walkFn(filepath.Join(root, "private"), nil, wantErr)
+	}
+	t.Cleanup(func() { endpointWalkDir = original })
+
+	if _, err := ScanEndpointsContext(context.Background(), EndpointScanOptions{Repo: "mall-web", Stack: "node", RepoPath: root}); !errors.Is(err, wantErr) {
+		t.Fatalf("scan error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestScanEndpoints_SurfacesSourceStatErrors(t *testing.T) {
+	root := fixtureRepo(t, map[string]string{"src/client.ts": `fetch('/api/orders')`})
+	wantErr := errors.New("injected endpoint stat failure")
+	original := endpointStat
+	endpointStat = func(path string) (os.FileInfo, error) {
+		if strings.HasSuffix(filepath.ToSlash(path), "/src/client.ts") {
+			return nil, wantErr
+		}
+		return original(path)
+	}
+	t.Cleanup(func() { endpointStat = original })
+
+	if _, err := ScanEndpointsContext(context.Background(), EndpointScanOptions{Repo: "mall-web", Stack: "node", RepoPath: root}); !errors.Is(err, wantErr) {
+		t.Fatalf("scan error = %v, want injected stat failure", err)
+	}
+}
+
+func TestScanEndpoints_SurfacesSourceReadErrors(t *testing.T) {
+	root := fixtureRepo(t, map[string]string{"src/client.ts": `fetch('/api/orders')`})
+	wantErr := errors.New("injected endpoint read failure")
+	original := endpointReadFile
+	endpointReadFile = func(path string) ([]byte, error) {
+		if strings.HasSuffix(filepath.ToSlash(path), "/src/client.ts") {
+			return nil, wantErr
+		}
+		return original(path)
+	}
+	t.Cleanup(func() { endpointReadFile = original })
+
+	if _, err := ScanEndpointsContext(context.Background(), EndpointScanOptions{Repo: "mall-web", Stack: "node", RepoPath: root}); !errors.Is(err, wantErr) {
+		t.Fatalf("scan error = %v, want injected read failure", err)
+	}
+}
+
+func TestScanEndpoints_TemplateVariableHostOnlyURLsUseRootPath(t *testing.T) {
+	root := fixtureRepo(t, map[string]string{
+		"src/client.ts":  "fetch(`${API_BASE_URL}`)",
+		"next.config.js": "module.exports={async rewrites(){return [{source:'/api',destination:'${BFF_URL}'}]}}",
+	})
+
+	got, err := ScanEndpointsContext(context.Background(), EndpointScanOptions{Repo: "mall-web", Stack: "node", RepoPath: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEndpoint(t, got, topology.DirectionOutbound, "GET", "/", "${API_BASE_URL}", "fetch")
+	rewrite := requireEndpoint(t, got, topology.DirectionInbound, "ANY", "/api", "${BFF_URL}", "next-rewrite")
+	assertEndpointTransform(t, rewrite, "rewrite", "/api", "/")
+}
+
+func TestScanEndpoints_NestRootControllerWithClassDecorators(t *testing.T) {
+	root := fixtureRepo(t, map[string]string{
+		"src/controllers.ts": `
+@Controller()
+@UseGuards(AuthGuard)
+export class RootController {
+  @Get('/health')
+  health() {}
+}
+
+@Controller('/admin')
+@UseInterceptors(AuditInterceptor)
+class AdminController {
+  @Post('/jobs')
+  createJob() {}
+}
+`,
+	})
+
+	got, err := ScanEndpointsContext(context.Background(), EndpointScanOptions{Repo: "control-api", Stack: "node", RepoPath: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEndpoint(t, got, topology.DirectionInbound, "GET", "/health", "", "nest-route")
+	assertEndpoint(t, got, topology.DirectionInbound, "POST", "/admin/jobs", "", "nest-route")
+}
+
+func TestScanEndpoints_NginxParentDoesNotInheritNestedLocationDirectives(t *testing.T) {
+	root := fixtureRepo(t, map[string]string{
+		"deploy/nginx.conf": `
+location /api {
+  location /api/admin {
+    rewrite ^/api/admin/(.*)$ /admin/$1 break;
+    proxy_pass http://admin-bff;
+  }
+  if ($request_method = OPTIONS) {
+    rewrite ^/api/preflight$ /preflight break;
+  }
+  rewrite ^/api/(.*)$ /internal/$1 break;
+  proxy_pass http://mall-bff;
+}
+`,
+	})
+
+	got, err := ScanEndpointsContext(context.Background(), EndpointScanOptions{Repo: "mall-gateway", Stack: "nginx", RepoPath: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := requireEndpoint(t, got, topology.DirectionInbound, "ANY", "/api", "mall-bff", "nginx-location")
+	assertEndpointTransform(t, parent, "rewrite", "/api/{wildcard}", "/internal/{wildcard}")
+	assertEndpointTransform(t, parent, "rewrite", "/api/preflight", "/preflight")
+	for _, transform := range parent.Transforms {
+		if transform.From == "/api/admin/{wildcard}" || transform.To == "/admin/{wildcard}" {
+			t.Fatalf("parent inherited nested location transform: %#v", parent)
+		}
+	}
+
+	child := requireEndpoint(t, got, topology.DirectionInbound, "ANY", "/api/admin", "admin-bff", "nginx-location")
+	assertEndpointTransform(t, child, "rewrite", "/api/admin/{wildcard}", "/admin/{wildcard}")
 }
 
 type cancelAfterErrChecks struct {

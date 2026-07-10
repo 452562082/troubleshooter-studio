@@ -48,7 +48,7 @@ func scanNginxEndpoints(ctx context.Context, opts EndpointScanOptions) ([]topolo
 			if modifier == "~" || modifier == "~*" {
 				path = normalizeNginxRewritePath(path)
 			}
-			body := source.text[openOffset+1 : closeOffset]
+			body := nginxOwnedLocationBody(source.text[openOffset+1 : closeOffset])
 			hint := ""
 			if match := nginxProxyRE.FindStringSubmatch(body); len(match) == 2 {
 				hint = targetHintFromURL(match[1])
@@ -68,6 +68,29 @@ func scanNginxEndpoints(ctx context.Context, opts EndpointScanOptions) ([]topolo
 		}
 	}
 	return endpoints, nil
+}
+
+func nginxOwnedLocationBody(body string) string {
+	owned := []byte(body)
+	for searchOffset := 0; searchOffset < len(body); {
+		loc := nginxLocationRE.FindStringSubmatchIndex(body[searchOffset:])
+		if len(loc) == 0 {
+			break
+		}
+		locationStart := searchOffset + loc[0]
+		openOffset := searchOffset + loc[1] - 1
+		closeOffset, ok := findMatchingDelimiter(body, openOffset, '{', '}', false, true)
+		if !ok {
+			break
+		}
+		for i := locationStart; i <= closeOffset; i++ {
+			if owned[i] != '\n' {
+				owned[i] = ' '
+			}
+		}
+		searchOffset = closeOffset + 1
+	}
+	return string(owned)
 }
 
 func normalizeNginxRewritePath(path string) string {

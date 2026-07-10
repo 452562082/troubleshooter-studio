@@ -15,9 +15,8 @@ var (
 	nodeAxiosVerbRE         = regexp.MustCompile(`(?i)\baxios\.(get|post|put|patch|delete)\s*\(\s*["'\x60]([^"'\x60]+)["'\x60]`)
 	nodeAxiosConfigRE       = regexp.MustCompile(`(?is)\baxios(?:\.request)?\s*\(\s*\{([^{}]{0,1000})\}\s*\)`)
 	nodeExpressRE           = regexp.MustCompile(`(?i)\b(?:app|router)\.(get|post|put|patch|delete|all)\s*\(\s*["'\x60]([^"'\x60]+)["'\x60]`)
-	nodeControllerRE        = regexp.MustCompile(`(?is)@Controller\s*\(\s*["'\x60]([^"'\x60]*)["'\x60]\s*\)\s*(?:export\s+)?class\s+[A-Za-z_$][\w$]*[^\{]*\{`)
+	nodeControllerRE        = regexp.MustCompile(`(?is)@Controller\s*\(\s*(?:["'\x60]([^"'\x60]*)["'\x60])?\s*\)\s*(?:@[A-Za-z_$][\w$]*(?:\s*\([^\r\n]*\))?\s*)*(?:export\s+)?class\s+[A-Za-z_$][\w$]*[^\{]*\{`)
 	nodeNestRouteRE         = regexp.MustCompile(`(?i)@(Get|Post|Put|Patch|Delete|All)\s*\(\s*(?:["'\x60]([^"'\x60]*)["'\x60])?\s*\)`)
-	nodeObjectRE            = regexp.MustCompile(`(?s)\{([^{}]{0,1000})\}`)
 	nodeRewriteMethodRE     = regexp.MustCompile(`(?is)\b(?:async\s+)?rewrites\s*\([^)]*\)\s*\{`)
 	nodeRewriteArrowBlockRE = regexp.MustCompile(`(?is)\brewrites\s*:\s*(?:async\s*)?\([^)]*\)\s*=>\s*\{`)
 	nodeRewriteArrowArrayRE = regexp.MustCompile(`(?is)\brewrites\s*:\s*(?:async\s*)?\([^)]*\)\s*=>\s*\[`)
@@ -127,7 +126,10 @@ func extractNodeRoutesContext(ctx context.Context, source endpointSource) ([]top
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		prefix := source.text[controller[2]:controller[3]]
+		prefix := ""
+		if controller[2] >= 0 && controller[3] >= 0 {
+			prefix = source.text[controller[2]:controller[3]]
+		}
 		openOffset := controller[1] - 1
 		closeOffset, ok := findMatchingDelimiter(source.text, openOffset, '{', '}', true, false)
 		if !ok {
@@ -164,23 +166,41 @@ func extractNextRewritesContext(ctx context.Context, source endpointSource) ([]t
 			return nil, err
 		}
 		text := source.text[span.start:span.end]
-		for _, loc := range nodeObjectRE.FindAllStringSubmatchIndex(text, -1) {
+		for _, object := range jsObjectSpans(text) {
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
-			body := text[loc[2]:loc[3]]
+			body := text[object.start:object.end]
 			from := jsStringProperty(body, "source")
 			destination := jsStringProperty(body, "destination")
 			to, hint := splitHTTPURL(destination)
 			if from == "" || to == "" {
 				continue
 			}
-			endpoint := httpEndpoint(topology.DirectionInbound, "ANY", from, hint, endpointLocation(source, span.start+loc[0]), "next-rewrite")
+			endpoint := httpEndpoint(topology.DirectionInbound, "ANY", from, hint, endpointLocation(source, span.start+object.start-1), "next-rewrite")
 			endpoint.Transforms = []topology.Transform{{Kind: "rewrite", From: from, To: to}}
 			endpoints = append(endpoints, endpoint)
 		}
 	}
 	return endpoints, ctx.Err()
+}
+
+func jsObjectSpans(text string) []endpointSourceSpan {
+	var spans []endpointSourceSpan
+	for offset := 0; offset < len(text); {
+		relativeOpen := strings.IndexByte(text[offset:], '{')
+		if relativeOpen < 0 {
+			break
+		}
+		openOffset := offset + relativeOpen
+		closeOffset, ok := findMatchingDelimiter(text, openOffset, '{', '}', true, false)
+		if !ok {
+			break
+		}
+		spans = append(spans, endpointSourceSpan{start: openOffset + 1, end: closeOffset})
+		offset = closeOffset + 1
+	}
+	return spans
 }
 
 func nextRewriteSpans(text string) []endpointSourceSpan {

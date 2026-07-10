@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,6 +17,12 @@ import (
 )
 
 const maxEndpointScanFileBytes = 512 * 1024
+
+var (
+	endpointWalkDir  = filepath.WalkDir
+	endpointStat     = os.Stat
+	endpointReadFile = os.ReadFile
+)
 
 type EndpointScanOptions struct {
 	Repo         string
@@ -95,7 +102,7 @@ func validateEndpointRepoRoot(repoPath string) error {
 }
 
 func endpointSources(ctx context.Context, opts EndpointScanOptions, match func(string) bool) ([]endpointSource, error) {
-	files, err := walkFilesContext(ctx, opts.RepoPath, opts.IncludePaths, func(rel string) bool {
+	files, err := walkEndpointFilesContext(ctx, opts.RepoPath, opts.IncludePaths, func(rel string) bool {
 		return !pathHasIgnoredSegment(rel) && !isTestRouteSource(rel) && match(filepath.ToSlash(rel))
 	})
 	if err != nil {
@@ -107,19 +114,74 @@ func endpointSources(ctx context.Context, opts EndpointScanOptions, match func(s
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		info, err := os.Stat(path)
-		if err != nil || info.Size() > maxEndpointScanFileBytes {
+		info, err := endpointStat(path)
+		if err != nil {
+			return nil, fmt.Errorf("stat endpoint source %q: %w", path, err)
+		}
+		if info.Size() > maxEndpointScanFileBytes {
 			continue
 		}
-		data, err := os.ReadFile(path)
+		data, err := endpointReadFile(path)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("read endpoint source %q: %w", path, err)
 		}
 		rel, err := filepath.Rel(opts.RepoPath, path)
 		if err != nil {
 			rel = path
 		}
 		out = append(out, endpointSource{rel: filepath.ToSlash(rel), text: string(data)})
+	}
+	return out, nil
+}
+
+func walkEndpointFilesContext(ctx context.Context, root string, include []string, match func(string) bool) ([]string, error) {
+	var out []string
+	skipDirs := map[string]bool{
+		"node_modules": true, "vendor": true,
+		"target": true, "build": true, "dist": true,
+		"testdata": true, "third_party": true,
+	}
+	err := endpointWalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if walkErr != nil {
+			return fmt.Errorf("walk endpoint source %q: %w", path, walkErr)
+		}
+		if entry == nil {
+			return fmt.Errorf("walk endpoint source %q: missing directory entry", path)
+		}
+		if entry.IsDir() {
+			name := entry.Name()
+			if path != root && (strings.HasPrefix(name, ".") || skipDirs[name]) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return fmt.Errorf("resolve endpoint source %q relative to %q: %w", path, root, err)
+		}
+		if len(include) > 0 {
+			included := false
+			for _, prefix := range include {
+				if strings.HasPrefix(rel, strings.TrimSuffix(prefix, "/")) {
+					included = true
+					break
+				}
+			}
+			if !included {
+				return nil
+			}
+		}
+		if match(rel) {
+			out = append(out, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -211,6 +273,9 @@ func splitHTTPURL(raw string) (path, targetHint string) {
 		if end := strings.Index(raw, "}"); end >= 0 {
 			targetHint = raw[:end+1]
 			path = raw[end+1:]
+			if path == "" {
+				path = "/"
+			}
 			return ensureLeadingSlash(path), targetHint
 		}
 	}

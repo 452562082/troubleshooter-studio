@@ -44,15 +44,14 @@ services:
   {{- $repo := .}}
   {{- if $repo.IsServiceNode}}
   {{- $role := $repo.EffectiveRole}}
-  {{- $svcs := .ServiceNames}}
-  {{- if not $svcs}}{{$svcs = list .Name}}{{end}}
+  {{- $svcs := dependencyServicesForRepo $ctx $repo}}
   {{- range $svcs}}
   {{- $svc := .}}
   {{- $scannedDown := topologyDownstreamsForService $ctx $svc}}
   {{- $upstream := topologyUpstreamsForService $ctx $svc}}
   {{- $scannedDS := scannedDataStoresForService $ctx $svc}}
   {{- $yamlDS := yamlDataStoresForService $ctx $svc}}
-  {{$svc}}:
+  {{$svc | yamlQuote}}:
     role: {{$role | printf "%q"}}
     {{- if $upstream}}
     # ↓ 由正式 topology 图反推(谁的 downstream 含我,谁就是我的上游)
@@ -103,7 +102,7 @@ services:
 lib_repos:
 {{- range .Repos}}
   {{- if not .IsServiceNode}}
-  {{.Name}}:
+  {{.Name | yamlQuote}}:
     role: {{.EffectiveRole | printf "%q"}}
     stack: {{.Stack}}
   {{- end}}

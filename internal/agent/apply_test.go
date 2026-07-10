@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,10 +11,13 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/xiaolong/troubleshooter-studio/internal/analyzerpipe"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 	"github.com/xiaolong/troubleshooter-studio/internal/generator"
+	"github.com/xiaolong/troubleshooter-studio/internal/topology"
 )
 
 // projectRoot 定位 troubleshooter-studio 仓库根(tests 在 internal/agent)。
@@ -260,7 +264,10 @@ func TestApply_AutoAnalyzeTopologyReachesGeneratedWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	assertGeneratedTopologyEdge(t, filepath.Join(agentPath, "skills", "routing", "references", "service-topology.yaml"))
+	refs := filepath.Join(agentPath, "skills", "routing", "references")
+	assertGeneratedTopologyEdge(t, filepath.Join(refs, "service-topology.yaml"))
+	assertGeneratedTopologyEvidence(t, filepath.Join(refs, "endpoint-evidence.yaml"))
+	assertGeneratedTopologySource(t, filepath.Join(agentPath, discover.MetaFilename), yamlBytes)
 }
 
 func TestImportAndApply_AutoAnalyzeTopologyReachesGeneratedStaging(t *testing.T) {
@@ -273,7 +280,11 @@ func TestImportAndApply_AutoAnalyzeTopologyReachesGeneratedStaging(t *testing.T)
 	if err != nil {
 		t.Fatalf("ImportAndApply: %v", err)
 	}
-	assertGeneratedTopologyEdge(t, filepath.Join(dest, "templates", "workspace-template", "skills", "routing", "references", "service-topology.yaml"))
+	workspace := filepath.Join(dest, "templates", "workspace-template")
+	refs := filepath.Join(workspace, "skills", "routing", "references")
+	assertGeneratedTopologyEdge(t, filepath.Join(refs, "service-topology.yaml"))
+	assertGeneratedTopologyEvidence(t, filepath.Join(refs, "endpoint-evidence.yaml"))
+	assertGeneratedTopologySource(t, filepath.Join(workspace, discover.MetaFilename), yamlBytes)
 }
 
 func applyTopologyFixture(t *testing.T) ([]byte, map[string]string) {
@@ -282,22 +293,73 @@ func applyTopologyFixture(t *testing.T) ([]byte, map[string]string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	overrides := `service_topology:
+  overrides:
+    - action: confirm
+      from_service: mall-web
+      to_service: mall-bff
+      protocol: http
+      method: GET
+      path: /api/orders
+    - action: reject
+      from_service: mall-web
+      to_service: mall-order
+      protocol: http
+      method: GET
+      path: /candidate-only
+
+`
+	source := strings.Replace(string(yamlBytes), "infrastructure:\n", overrides+"infrastructure:\n", 1)
+	if source == string(yamlBytes) {
+		t.Fatal("failed to inject service_topology overrides")
+	}
 	root := t.TempDir()
 	web := filepath.Join(root, "mall-web")
+	bff := filepath.Join(root, "mall-bff")
 	order := filepath.Join(root, "mall-order")
-	writeAutoAnalyzeFixtureFile(t, filepath.Join(web, "package.json"), `{"name":"mall-web","dependencies":{"axios":"1.0.0"}}`)
-	writeAutoAnalyzeFixtureFile(t, filepath.Join(web, "src", "orders.ts"), `axios.get("http://mall-order/internal/orders")`)
-	writeAutoAnalyzeFixtureFile(t, filepath.Join(order, "go.mod"), "module example.test/mall-order\n\ngo 1.22\n")
-	writeAutoAnalyzeFixtureFile(t, filepath.Join(order, "handler.go"), `
-package main
-
-func routes(r *Router) {
-	r.GET("/internal/orders", handler)
+	for _, path := range []string{web, bff, order} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	repoPaths := map[string]string{"mall-web": web, "mall-bff": bff, "mall-order": order}
+	cfg, err := config.LoadFromBytes([]byte(source))
+	if err != nil {
+		t.Fatalf("load topology source fixture: %v", err)
+	}
+	seedApplyTopologyCache(t, cfg, repoPaths, &analyzerpipe.Result{Topology: topology.Snapshot{
+		SchemaVersion: topology.SchemaVersion,
+		Services: []topology.ServiceDescriptor{
+			{Repo: "mall-web", Service: "mall-web", Role: config.RoleFrontend},
+			{Repo: "mall-bff", Service: "mall-bff", Role: config.RoleGateway},
+			{Repo: "mall-order", Service: "mall-order", Role: config.RoleBackend},
+		},
+		Edges: []topology.CandidateEdge{
+			{FromEndpoint: "mall-web:out", ToEndpoint: "mall-bff:in", FromService: "mall-web", ToService: "mall-bff", Protocol: "http", Method: "GET", Path: "/api/orders", Status: "automatic", Confidence: .98, Reasons: []string{"method_path_exact"}},
+			{FromEndpoint: "mall-bff:out", ToEndpoint: "mall-order:in", FromService: "mall-bff", ToService: "mall-order", Protocol: "http", Method: "POST", Path: "/internal/orders", Status: "automatic", Confidence: .97, Reasons: []string{"method_path_exact"}},
+			{FromEndpoint: "mall-bff:out", ToEndpoint: "mall-order:in", FromService: "mall-bff", ToService: "mall-order", Protocol: "http", Method: "POST", Path: "/candidate-only", Status: "candidate", Confidence: .74, Reasons: []string{"candidate_cache"}},
+			{FromEndpoint: "mall-web:out", ToEndpoint: "mall-order:in", FromService: "mall-web", ToService: "mall-order", Protocol: "http", Method: "GET", Path: "/rejected-only", Status: "rejected", Confidence: .91, Reasons: []string{"candidate_cache", "human_override_reject"}},
+		},
+	}})
+	return []byte(source), repoPaths
 }
-`)
-	initAutoAnalyzeGitRepo(t, web)
-	initAutoAnalyzeGitRepo(t, order)
-	return yamlBytes, map[string]string{"mall-web": web, "mall-order": order}
+
+func seedApplyTopologyCache(t *testing.T, cfg *config.SystemConfig, repoPaths map[string]string, result *analyzerpipe.Result) {
+	t.Helper()
+	key := autoAnalyzeCacheKey(cfg, repoPaths)
+	autoAnalyzeCacheMu.Lock()
+	previous, existed := autoAnalyzeCache[key]
+	autoAnalyzeCache[key] = &autoAnalyzeCacheEntry{result: result, at: time.Now()}
+	autoAnalyzeCacheMu.Unlock()
+	t.Cleanup(func() {
+		autoAnalyzeCacheMu.Lock()
+		defer autoAnalyzeCacheMu.Unlock()
+		if existed {
+			autoAnalyzeCache[key] = previous
+		} else {
+			delete(autoAnalyzeCache, key)
+		}
+	})
 }
 
 func assertGeneratedTopologyEdge(t *testing.T, path string) {
@@ -309,6 +371,44 @@ func assertGeneratedTopologyEdge(t *testing.T, path string) {
 	for _, want := range []string{`from: "mall-web"`, `to: "mall-order"`, `status: "automatic"`} {
 		if !strings.Contains(string(data), want) {
 			t.Fatalf("generated topology missing %q:\n%s", want, data)
+		}
+	}
+}
+
+func assertGeneratedTopologyEvidence(t *testing.T, path string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read generated topology evidence: %v", err)
+	}
+	for _, want := range []string{`status: "candidate"`, `status: "rejected"`, `"candidate_cache"`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("generated topology evidence missing %q:\n%s", want, data)
+		}
+	}
+}
+
+func assertGeneratedTopologySource(t *testing.T, path string, source []byte) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read generated tshoot.json: %v", err)
+	}
+	var meta discover.Meta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("parse generated tshoot.json: %v", err)
+	}
+	if !bytes.Equal([]byte(meta.TroubleshooterYAML), source) {
+		t.Fatalf("embedded troubleshooter_yaml changed source bytes:\n--- got ---\n%s\n--- want ---\n%s", meta.TroubleshooterYAML, source)
+	}
+	for _, want := range []string{"service_topology:", "action: confirm", "action: reject"} {
+		if !bytes.Contains([]byte(meta.TroubleshooterYAML), []byte(want)) {
+			t.Fatalf("embedded troubleshooter_yaml missing source override %q:\n%s", want, meta.TroubleshooterYAML)
+		}
+	}
+	for _, forbidden := range []string{"candidate_cache", `status: "candidate"`, `status: "rejected"`, "/rejected-only"} {
+		if bytes.Contains([]byte(meta.TroubleshooterYAML), []byte(forbidden)) {
+			t.Fatalf("auto-analyze candidate evidence %q leaked into troubleshooter_yaml:\n%s", forbidden, meta.TroubleshooterYAML)
 		}
 	}
 }

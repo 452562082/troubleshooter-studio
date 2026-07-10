@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -226,6 +228,136 @@ func TestGenerate_ServiceDependencyLegacyAnalysisFallback(t *testing.T) {
 	if !strings.Contains(deps, `- "mall-bff"`) {
 		t.Fatalf("legacy analysis downstream fallback missing:\n%s", deps)
 	}
+}
+
+func TestGenerate_ServiceDependencyTopologyUsesCanonicalCatalogServices(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	cfg.Repos[0].ServiceNames = []string{" mall-web ", "mall-web", "legacy-web"}
+	cfg.Repos[1].ServiceNames = []string{" mall-bff ", "mall-bff"}
+	cfg.Repos[2].ServiceNames = []string{"mall-order", " mall-order "}
+
+	out := t.TempDir()
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+	g.LoadAnalysisResult(&analyzerpipe.Result{Topology: topology.Snapshot{
+		SchemaVersion: topology.SchemaVersion,
+		Services: []topology.ServiceDescriptor{
+			{Repo: "mall-web", Service: "mall-web", Role: config.RoleFrontend},
+			{Repo: "mall-bff", Service: "mall-bff", Role: config.RoleGateway},
+			{Repo: "mall-order", Service: "mall-order", Role: config.RoleBackend},
+		},
+		Edges: []topology.CandidateEdge{
+			{FromService: "mall-web", ToService: "mall-bff", Protocol: "http", Method: "GET", Path: "/api/orders", Status: "automatic", Confidence: .98},
+			{FromService: "mall-bff", ToService: "mall-order", Protocol: "http", Method: "POST", Path: "/internal/orders", Status: "automatic", Confidence: .97},
+		},
+	}})
+	if err := g.Generate(); err != nil {
+		t.Fatal(err)
+	}
+
+	refs := filepath.Join(out, "templates/workspace-template/skills/routing/references")
+	formal := yamlMappingKeys(t, readFile(t, filepath.Join(refs, "service-topology.yaml")), "services")
+	compatibility := yamlMappingKeys(t, readFile(t, filepath.Join(refs, "service-dependency-map.yaml")), "services")
+	if !reflect.DeepEqual(compatibility, formal) {
+		t.Fatalf("compatibility services = %q, want exact formal services %q", compatibility, formal)
+	}
+}
+
+func TestGenerate_ServiceDependencyLegacyCanonicalizesEffectiveRepoServices(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	cfg.Repos[0].ServiceNames = []string{" legacy-web ", "legacy-web", " shared ", " "}
+	cfg.Repos[1].ServiceNames = []string{" ", "\t"}
+	cfg.Repos[2].ServiceNames = []string{" mall-order ", "mall-order", "shared"}
+
+	out := t.TempDir()
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+	g.LoadAnalysisReport(analyzer.Report{Repos: []analyzer.RepoAnalysis{{
+		Name:            "mall-web",
+		DownstreamCalls: []analyzer.DownstreamCall{{Target: "mall-bff"}},
+	}}})
+	if err := g.Generate(); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(out, "templates/workspace-template/skills/routing/references/service-dependency-map.yaml")
+	services := yamlMappingKeys(t, readFile(t, path), "services")
+	want := []string{"legacy-web", "mall-bff", "mall-order", "shared"}
+	if !reflect.DeepEqual(services, want) {
+		t.Fatalf("legacy compatibility services = %q, want canonical effective services %q", services, want)
+	}
+}
+
+func TestGenerate_TopologyArtifactsQuoteDynamicYAMLKeys(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	cfg.Repos[0].ServiceNames = []string{" null ", "null"}
+	cfg.Repos[1].ServiceNames = []string{" true ", "true"}
+	cfg.Repos[2].ServiceNames = []string{"api: v1", " api: v1 "}
+	cfg.Repos = append(cfg.Repos, config.Repo{Name: "false", Stack: "markdown", Role: config.RoleCommonLib})
+
+	out := t.TempDir()
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+	g.LoadAnalysisResult(&analyzerpipe.Result{Topology: topology.Snapshot{
+		SchemaVersion: topology.SchemaVersion,
+		Services: []topology.ServiceDescriptor{
+			{Repo: "mall-web", Service: "null", Role: config.RoleFrontend},
+			{Repo: "mall-bff", Service: "true", Role: config.RoleGateway},
+			{Repo: "mall-order", Service: "api: v1", Role: config.RoleBackend},
+		},
+		Edges: []topology.CandidateEdge{
+			{FromService: "null", ToService: "true", Protocol: "http", Method: "GET", Path: "/api/orders", Status: "automatic", Confidence: .98},
+			{FromService: "true", ToService: "api: v1", Protocol: "http", Method: "POST", Path: "/internal/orders", Status: "automatic", Confidence: .97},
+		},
+	}})
+	if err := g.Generate(); err != nil {
+		t.Fatal(err)
+	}
+
+	refs := filepath.Join(out, "templates/workspace-template/skills/routing/references")
+	wantServices := []string{"api: v1", "null", "true"}
+	formal := yamlMappingKeys(t, readFile(t, filepath.Join(refs, "service-topology.yaml")), "services")
+	if !reflect.DeepEqual(formal, wantServices) {
+		t.Fatalf("formal service keys = %q, want %q", formal, wantServices)
+	}
+	compatibilityDocument := readFile(t, filepath.Join(refs, "service-dependency-map.yaml"))
+	compatibility := yamlMappingKeys(t, compatibilityDocument, "services")
+	if !reflect.DeepEqual(compatibility, wantServices) {
+		t.Fatalf("compatibility service keys = %q, want %q", compatibility, wantServices)
+	}
+	if got := yamlMappingKeys(t, compatibilityDocument, "lib_repos"); !reflect.DeepEqual(got, []string{"false"}) {
+		t.Fatalf("lib repo keys = %q, want [false]", got)
+	}
+}
+
+func yamlMappingKeys(t *testing.T, document, field string) []string {
+	t.Helper()
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(document), &root); err != nil {
+		t.Fatalf("parse generated yaml: %v\n%s", err, document)
+	}
+	if len(root.Content) != 1 || root.Content[0].Kind != yaml.MappingNode {
+		t.Fatalf("generated yaml root is not a mapping:\n%s", document)
+	}
+	fields := root.Content[0]
+	for i := 0; i < len(fields.Content); i += 2 {
+		if fields.Content[i].Value != field {
+			continue
+		}
+		mapping := fields.Content[i+1]
+		if mapping.Kind != yaml.MappingNode {
+			t.Fatalf("%s is not a mapping:\n%s", field, document)
+		}
+		keys := make([]string, 0, len(mapping.Content)/2)
+		for j := 0; j < len(mapping.Content); j += 2 {
+			key := mapping.Content[j]
+			if key.Tag != "!!str" {
+				t.Fatalf("%s key %q resolved as %s, want !!str:\n%s", field, key.Value, key.Tag, document)
+			}
+			keys = append(keys, key.Value)
+		}
+		sort.Strings(keys)
+		return keys
+	}
+	t.Fatalf("generated yaml missing %s:\n%s", field, document)
+	return nil
 }
 
 func TestGenerate_CodeIntelligenceOptIn(t *testing.T) {

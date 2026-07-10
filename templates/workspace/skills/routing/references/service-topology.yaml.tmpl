@@ -6,7 +6,7 @@ analysis_attempted: {{if .Topology.SchemaVersion}}true{{else}}false{{end}}
 {{$services := topologyServiceNodes .}}
 services:{{if $services}}
 {{range $services}}
-  {{.Service}}:
+  {{.Service | yamlQuote}}:
     repo: {{.Repo | printf "%q"}}
     role: {{.Role | printf "%q"}}
     upstream:{{if .Upstream}}

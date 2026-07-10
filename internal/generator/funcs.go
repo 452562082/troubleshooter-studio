@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -244,6 +245,69 @@ func topologyServiceNodes(ctx *Context) []topology.ServiceNode {
 	return result
 }
 
+func canonicalRepoServices(repo config.Repo) []string {
+	seen := make(map[string]bool, len(repo.ServiceNames)+1)
+	services := make([]string, 0, len(repo.ServiceNames)+1)
+	for _, raw := range repo.ServiceNames {
+		service := strings.TrimSpace(raw)
+		if service == "" || seen[service] {
+			continue
+		}
+		seen[service] = true
+		services = append(services, service)
+	}
+	if len(services) == 0 {
+		if name := strings.TrimSpace(repo.Name); name != "" {
+			services = append(services, name)
+		}
+	}
+	sort.Strings(services)
+	return services
+}
+
+// dependencyServicesForRepo returns the canonical service keys emitted by the
+// compatibility dependency map. Once topology analysis has been attempted,
+// the formal graph/catalog owns those keys; raw YAML service_names must not
+// reintroduce whitespace variants, duplicates, or services absent from the
+// analyzed catalog. Legacy reports retain the old repo-derived behavior after
+// applying the same trim/deduplicate normalization as the topology pipeline.
+func dependencyServicesForRepo(ctx *Context, repo config.Repo) []string {
+	if ctx == nil || !repo.IsServiceNode() {
+		return nil
+	}
+	if ctx.Topology.SchemaVersion == "" {
+		ownerByService := make(map[string]string)
+		for _, candidateRepo := range ctx.Repos {
+			if !candidateRepo.IsServiceNode() {
+				continue
+			}
+			owner := strings.TrimSpace(candidateRepo.Name)
+			for _, service := range canonicalRepoServices(candidateRepo) {
+				if _, exists := ownerByService[service]; !exists {
+					ownerByService[service] = owner
+				}
+			}
+		}
+		owner := strings.TrimSpace(repo.Name)
+		services := canonicalRepoServices(repo)
+		return slices.DeleteFunc(services, func(service string) bool {
+			return ownerByService[service] != owner
+		})
+	}
+
+	repoName := strings.TrimSpace(repo.Name)
+	services := make([]string, 0, len(ctx.ServiceGraph.Services))
+	for name, node := range ctx.ServiceGraph.Services {
+		service := strings.TrimSpace(name)
+		if service == "" || strings.TrimSpace(node.Repo) != repoName {
+			continue
+		}
+		services = append(services, service)
+	}
+	sort.Strings(services)
+	return services
+}
+
 func scannedDownstreamsForService(ctx *Context, service string) []string {
 	if ctx == nil {
 		return nil
@@ -251,8 +315,8 @@ func scannedDownstreamsForService(ctx *Context, service string) []string {
 	seen := map[string]bool{}
 	var result []string
 	for _, repo := range ctx.Repos {
-		matches := repo.Name == service
-		for _, name := range repo.ServiceNames {
+		matches := false
+		for _, name := range canonicalRepoServices(repo) {
 			if name == service {
 				matches = true
 				break
@@ -290,11 +354,7 @@ func legacyUpstreamsForService(ctx *Context, service string) []string {
 		if !matched {
 			continue
 		}
-		names := repo.ServiceNames
-		if len(names) == 0 {
-			names = []string{repo.Name}
-		}
-		for _, name := range names {
+		for _, name := range canonicalRepoServices(repo) {
 			if name == service || seen[name] {
 				continue
 			}
@@ -347,6 +407,10 @@ func topologyEvidenceID(edge topology.CandidateEdge) string {
 	return strings.Join([]string{edge.FromService, edge.ToService, edge.Protocol, edge.Method, edge.Path, edge.RPCMethod}, "|")
 }
 
+func yamlQuote(value string) string {
+	return strconv.Quote(value)
+}
+
 func funcMap() template.FuncMap {
 	return template.FuncMap{
 		"upper":                                  strings.ToUpper,
@@ -355,10 +419,12 @@ func funcMap() template.FuncMap {
 		"frontendEndpointsForRepo":               frontendEndpointsForRepo,
 		"frontendCandidateServicesForRepo":       frontendCandidateServicesForRepo,
 		"frontendRouteCandidatesForRepoEndpoint": frontendRouteCandidatesForRepoEndpoint,
+		"dependencyServicesForRepo":              dependencyServicesForRepo,
 		"topologyServiceNodes":                   topologyServiceNodes,
 		"topologyEvidenceID":                     topologyEvidenceID,
 		"topologyDownstreamsForService":          topologyDownstreamsForService,
 		"topologyUpstreamsForService":            topologyUpstreamsForService,
+		"yamlQuote":                              yamlQuote,
 		"list":                                   func(items ...string) []string { return items },
 		"hasSkill": func(ctx *Context, name string) bool {
 			return skillEnabled(ctx, name)

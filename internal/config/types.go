@@ -131,6 +131,7 @@ type SystemConfig struct {
 	Environments     []Environment    `yaml:"environments"`
 	Repos            []Repo           `yaml:"repos"`
 	CodeIntelligence CodeIntelligence `yaml:"code_intelligence,omitempty"`
+	ServiceTopology  ServiceTopology  `yaml:"service_topology,omitempty"`
 	Infrastructure   Infrastructure   `yaml:"infrastructure"`
 	Generation       Generation       `yaml:"generation"`
 	Meta             Meta             `yaml:"meta"`

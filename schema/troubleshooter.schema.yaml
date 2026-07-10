@@ -72,6 +72,18 @@ code_intelligence:
   enabled: false                    # 显式 opt-in；关闭时不下载、不索引、不注册 MCP
   provider: codegraph               # 首版只支持 codegraph
 
+# 人工确认/拒绝/补录的跨服务调用边；服务名来自 service-node repo 的 service_names，
+# 未声明 service_names 时回落到 repo.name。HTTP path 参数统一归一化为 {param}。
+service_topology:
+  overrides: []                     # [optional] 持久化拓扑审核结果；action: confirm / reject / add
+  # overrides 示例：
+  #   - action: confirm
+  #     from_service: mall-web
+  #     to_service: user-service
+  #     protocol: http               # http 需 method + path，grpc 需 rpc_method
+  #     method: GET
+  #     path: /api/users/:id
+
 # ---------------------------------------------------------------------------
 # 5. 基础组件 —— 决定 mcp.servers.json 和 skills/ 生成内容
 # 每类组件独立开关，按需生成对应 skill 与 MCP server

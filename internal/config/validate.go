@@ -9,7 +9,10 @@ import (
 	"strings"
 )
 
-var idPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+var (
+	idPattern                       = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+	serviceTopologyPathParamPattern = regexp.MustCompile(`(^|/)(:[^/?#]+|\{[^/{}]+\}|\[[^/\[\]]+\])`)
+)
 
 func Validate(c *SystemConfig) error {
 	if c.System.ID == "" {
@@ -147,6 +150,10 @@ func Validate(c *SystemConfig) error {
 		}
 	}
 
+	if err := validateServiceTopology(c); err != nil {
+		return err
+	}
+
 	validTargets := map[string]bool{"openclaw": true, "claude-code": true, "cursor": true, "codex": true}
 	targets := c.Generation.ResolvedTargets()
 	for _, t := range targets {
@@ -159,6 +166,69 @@ func Validate(c *SystemConfig) error {
 		return fmt.Errorf("meta.schema_version required")
 	}
 	return nil
+}
+
+func validateServiceTopology(c *SystemConfig) error {
+	serviceNames := make(map[string]bool)
+	for _, repo := range c.Repos {
+		if !repo.IsServiceNode() {
+			continue
+		}
+		if len(repo.ServiceNames) == 0 {
+			serviceNames[repo.Name] = true
+			continue
+		}
+		for _, serviceName := range repo.ServiceNames {
+			if serviceName != "" {
+				serviceNames[serviceName] = true
+			}
+		}
+	}
+
+	semanticKeys := make(map[string]bool)
+	for i, override := range c.ServiceTopology.Overrides {
+		field := fmt.Sprintf("service_topology.overrides[%d]", i)
+		if override.Action != "confirm" && override.Action != "reject" && override.Action != "add" {
+			return fmt.Errorf("%s.action=%q invalid (valid: confirm/reject/add)", field, override.Action)
+		}
+		if !serviceNames[override.FromService] {
+			return fmt.Errorf("%s.from_service=%q is not an effective service name", field, override.FromService)
+		}
+		if !serviceNames[override.ToService] {
+			return fmt.Errorf("%s.to_service=%q is not an effective service name", field, override.ToService)
+		}
+
+		override.Protocol = strings.ToLower(override.Protocol)
+		override.Method = strings.ToUpper(override.Method)
+		override.Path = normalizeServiceTopologyPath(override.Path)
+		switch override.Protocol {
+		case "http":
+			if override.Method == "" || override.Path == "" || override.RPCMethod != "" {
+				return fmt.Errorf("%s: http override requires method and path only", field)
+			}
+			if !strings.HasPrefix(override.Path, "/") {
+				return fmt.Errorf("%s.path=%q must start with '/'", field, override.Path)
+			}
+		case "grpc":
+			if override.RPCMethod == "" || override.Method != "" || override.Path != "" {
+				return fmt.Errorf("%s: grpc override requires rpc_method only", field)
+			}
+		default:
+			return fmt.Errorf("%s.protocol=%q invalid (valid: http/grpc)", field, override.Protocol)
+		}
+
+		key := override.SemanticKey()
+		if semanticKeys[key] {
+			return fmt.Errorf("%s has duplicate semantic key", field)
+		}
+		semanticKeys[key] = true
+		c.ServiceTopology.Overrides[i] = override
+	}
+	return nil
+}
+
+func normalizeServiceTopologyPath(path string) string {
+	return serviceTopologyPathParamPattern.ReplaceAllString(path, `${1}{param}`)
 }
 
 func sortedKeys(m map[string]bool) []string {

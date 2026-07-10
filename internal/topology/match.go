@@ -37,13 +37,14 @@ func Match(input MatchInput) MatchResult {
 
 		candidates := routeCandidates(outbound, inbound)
 		matchedTargets := resolvedTargetServices(outbound.TargetHint, candidates, descriptors)
+		targetAmbiguous := len(matchedTargets) > 1
 		if len(matchedTargets) > 0 {
 			candidates = candidatesForServices(candidates, matchedTargets)
 		}
 		duplicateRoute := distinctServiceCount(candidates) > 1
 
 		for _, candidate := range candidates {
-			edge := matchedRouteEdge(outbound, candidate, descriptors, duplicateRoute)
+			edge := matchedRouteEdge(outbound, candidate, descriptors, duplicateRoute, targetAmbiguous)
 			if edge.Confidence >= 0.60 {
 				result.Edges = append(result.Edges, edge)
 			} else {
@@ -123,12 +124,12 @@ func routeCandidates(outbound Endpoint, inbound []Endpoint) []routeCandidate {
 	primary := make([]routeCandidate, 0, len(inbound))
 	similar := make([]routeCandidate, 0, len(inbound))
 	for _, candidate := range inbound {
-		if outbound.Repo == candidate.Repo || !protocolsCompatible(outbound.Protocol, candidate.Protocol) {
+		if outbound.Repo == candidate.Repo || outbound.Service == candidate.Service || !protocolsCompatible(outbound.Protocol, candidate.Protocol) {
 			continue
 		}
 		switch normalizedProtocol(outbound.Protocol) {
 		case "http":
-			if !methodsCompatible(outbound.Method, candidate.Method) {
+			if !hasCompleteHTTPDiscriminators(outbound) || !hasCompleteHTTPDiscriminators(candidate) || !methodsCompatible(outbound.Method, candidate.Method) {
 				continue
 			}
 			switch {
@@ -140,7 +141,9 @@ func routeCandidates(outbound Endpoint, inbound []Endpoint) []routeCandidate {
 				similar = append(similar, routeCandidate{endpoint: candidate, kind: routeSimilar})
 			}
 		case "grpc":
-			if normalizeRPCMethod(outbound.RPCMethod) == normalizeRPCMethod(candidate.RPCMethod) {
+			outboundMethod, outboundOK := normalizedQualifiedRPCMethod(outbound.RPCMethod)
+			candidateMethod, candidateOK := normalizedQualifiedRPCMethod(candidate.RPCMethod)
+			if outboundOK && candidateOK && outboundMethod == candidateMethod {
 				primary = append(primary, routeCandidate{endpoint: candidate, kind: routeExact})
 			}
 		}
@@ -166,8 +169,25 @@ func methodsCompatible(left, right string) bool {
 	return left == right || left == "ANY" || right == "ANY"
 }
 
+func hasCompleteHTTPDiscriminators(endpoint Endpoint) bool {
+	return normalizedProtocol(endpoint.Protocol) == "http" &&
+		NormalizeHTTPMethod(endpoint.Method) != "" &&
+		strings.TrimSpace(endpoint.Path) != "" &&
+		NormalizePath(endpoint.Path) != ""
+}
+
 func normalizeRPCMethod(method string) string {
 	return strings.TrimPrefix(strings.TrimSpace(method), "/")
+}
+
+func normalizedQualifiedRPCMethod(method string) (string, bool) {
+	service, rpcMethod, found := strings.Cut(normalizeRPCMethod(method), "/")
+	service = strings.TrimSpace(service)
+	rpcMethod = strings.TrimSpace(rpcMethod)
+	if !found || service == "" || rpcMethod == "" || strings.Contains(rpcMethod, "/") {
+		return "", false
+	}
+	return service + "/" + rpcMethod, true
 }
 
 func resolvedTargetServices(hint string, candidates []routeCandidate, descriptors map[serviceKey]ServiceDescriptor) map[serviceKey]struct{} {
@@ -199,20 +219,20 @@ func distinctServiceCount(endpoints []routeCandidate) int {
 	return len(services)
 }
 
-func matchedRouteEdge(outbound Endpoint, match routeCandidate, descriptors map[serviceKey]ServiceDescriptor, duplicateRoute bool) CandidateEdge {
+func matchedRouteEdge(outbound Endpoint, match routeCandidate, descriptors map[serviceKey]ServiceDescriptor, duplicateRoute, targetAmbiguous bool) CandidateEdge {
 	inbound := match.endpoint
 	edge := candidateEdge(outbound, inbound)
 	evidence := targetEvidence(outbound.TargetHint, inbound, descriptors[serviceKey{repo: inbound.Repo, service: inbound.Service}])
 
 	if match.kind == routeTransformed {
 		edge.Reasons = append(edge.Reasons, "path_transform_proven")
-		scoreTransformedRoute(&edge, evidence, duplicateRoute)
+		scoreTransformedRoute(&edge, evidence, duplicateRoute, targetAmbiguous)
 	} else if match.kind == routeSimilar {
 		edge.Reasons = append(edge.Reasons, "http_method_compatible", "path_suffix_similar")
 		scoreSimilarRoute(&edge, evidence)
 	} else {
 		edge.Reasons = append(edge.Reasons, exactRouteReason(edge.Protocol))
-		scoreExactRoute(&edge, evidence, duplicateRoute)
+		scoreExactRoute(&edge, evidence, duplicateRoute, targetAmbiguous)
 	}
 
 	edge.Confidence = clampConfidence(edge.Confidence)
@@ -220,8 +240,10 @@ func matchedRouteEdge(outbound Endpoint, match routeCandidate, descriptors map[s
 	return edge
 }
 
-func scoreExactRoute(edge *CandidateEdge, evidence string, duplicateRoute bool) {
+func scoreExactRoute(edge *CandidateEdge, evidence string, duplicateRoute, targetAmbiguous bool) {
 	switch {
+	case targetAmbiguous:
+		scoreAmbiguousTarget(edge, evidence)
 	case evidence != "":
 		edge.Confidence = 0.98
 		edge.Reasons = append(edge.Reasons, evidence)
@@ -234,8 +256,10 @@ func scoreExactRoute(edge *CandidateEdge, evidence string, duplicateRoute bool) 
 	}
 }
 
-func scoreTransformedRoute(edge *CandidateEdge, evidence string, duplicateRoute bool) {
+func scoreTransformedRoute(edge *CandidateEdge, evidence string, duplicateRoute, targetAmbiguous bool) {
 	switch {
+	case targetAmbiguous:
+		scoreAmbiguousTarget(edge, evidence)
 	case evidence != "":
 		edge.Confidence = 0.90
 		edge.Reasons = append(edge.Reasons, evidence)
@@ -246,6 +270,12 @@ func scoreTransformedRoute(edge *CandidateEdge, evidence string, duplicateRoute 
 		edge.Confidence = 0.70
 		edge.Conflicts = append(edge.Conflicts, "target_unresolved")
 	}
+}
+
+func scoreAmbiguousTarget(edge *CandidateEdge, evidence string) {
+	edge.Confidence = 0.55
+	edge.Reasons = append(edge.Reasons, evidence)
+	edge.Conflicts = append(edge.Conflicts, "target_ambiguous_across_services", "route_duplicated_across_services")
 }
 
 func scoreSimilarRoute(edge *CandidateEdge, evidence string) {
@@ -315,12 +345,21 @@ func applyTransformChain(path string, transforms []Transform) (string, bool) {
 	for _, transform := range transforms {
 		from := NormalizePath(transform.From)
 		to := NormalizePath(transform.To)
-		if strings.TrimSpace(transform.Kind) == "" || from == "" || to == "" || current != from {
+		if !isSupportedTransformKind(transform.Kind) || from == "" || to == "" || current != from {
 			return "", false
 		}
 		current = to
 	}
 	return current, true
+}
+
+func isSupportedTransformKind(kind string) bool {
+	switch strings.TrimSpace(kind) {
+	case "rewrite", "strip_prefix":
+		return true
+	default:
+		return false
+	}
 }
 
 func pathsHaveSuffixSimilarity(left, right string) bool {

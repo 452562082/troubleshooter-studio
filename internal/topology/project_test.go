@@ -1,6 +1,7 @@
 package topology
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -103,6 +104,28 @@ func TestProjectServiceGraphUsesSnapshotServiceMetadataWithoutEndpointFacts(t *t
 	}
 	if len(got.Edges) != 1 || got.Edges[0].From != "web" || got.Edges[0].To != "order" {
 		t.Fatalf("formal edges=%#v, want only descriptor-backed manual edge", got.Edges)
+	}
+}
+
+func TestSnapshotServiceMetadataSerializationContract(t *testing.T) {
+	payload, err := json.Marshal(Snapshot{Services: []ServiceDescriptor{{
+		Repo: "web-repo", Service: "web", Role: "frontend",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serialized := string(payload)
+	if !strings.Contains(serialized, `"services":[{"repo":"web-repo","service":"web","role":"frontend"}]`) {
+		t.Fatalf("snapshot service metadata uses the wrong JSON contract: %s", serialized)
+	}
+	for _, fieldName := range []string{"Repo", "Service", "Role", "Aliases", "Hosts"} {
+		field, ok := reflect.TypeOf(ServiceDescriptor{}).FieldByName(fieldName)
+		if !ok {
+			t.Fatalf("ServiceDescriptor field %s missing", fieldName)
+		}
+		if field.Tag.Get("json") == "" || field.Tag.Get("yaml") == "" {
+			t.Fatalf("ServiceDescriptor.%s lacks JSON/YAML tags: %q", fieldName, field.Tag)
+		}
 	}
 }
 

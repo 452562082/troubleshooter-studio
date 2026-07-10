@@ -8,11 +8,11 @@ import (
 )
 
 type ServiceDescriptor struct {
-	Repo    string
-	Service string
-	Role    string
-	Aliases []string
-	Hosts   []string
+	Repo    string   `json:"repo" yaml:"repo"`
+	Service string   `json:"service" yaml:"service"`
+	Role    string   `json:"role,omitempty" yaml:"role,omitempty"`
+	Aliases []string `json:"aliases,omitempty" yaml:"aliases,omitempty"`
+	Hosts   []string `json:"hosts,omitempty" yaml:"hosts,omitempty"`
 }
 
 type MatchInput struct {

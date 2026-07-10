@@ -38,6 +38,14 @@ func dataStoreSkillName(typ string) string {
 	return typ + "-runtime-query"
 }
 
+func skillEnabled(ctx *Context, name string) bool {
+	if name == "code-intelligence-query" && !ctx.CodeIntelligence.UsesCodeGraph() {
+		return false
+	}
+	whitelist := ctx.Generation.SkillsWhitelist
+	return len(whitelist) == 0 || slices.Contains(whitelist, name)
+}
+
 func frontendEndpointsForRepo(ctx *Context, repoName string) []string {
 	if ctx == nil {
 		return nil
@@ -225,10 +233,7 @@ func funcMap() template.FuncMap {
 		"frontendRouteCandidatesForRepoEndpoint": frontendRouteCandidatesForRepoEndpoint,
 		"list":                                   func(items ...string) []string { return items },
 		"hasSkill": func(ctx *Context, name string) bool {
-			if len(ctx.Generation.SkillsWhitelist) == 0 {
-				return true
-			}
-			return slices.Contains(ctx.Generation.SkillsWhitelist, name)
+			return skillEnabled(ctx, name)
 		},
 		// findConfig 返回给定 service+env 的 analyzer finding 视图；命中优先级：精确 env > 无 env 默认 > nil
 		"findConfig": func(ctx *Context, service, env string) *findingView {

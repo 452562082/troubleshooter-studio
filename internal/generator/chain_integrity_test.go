@@ -17,6 +17,10 @@ import (
 //   - skill 目录相对:  `python3 scripts/<f>.py`(同 skill 自带脚本)
 var scriptRefRe = regexp.MustCompile(`python3 +((?:skills|scripts)/[^\s'"` + "`" + `]+\.py)`)
 
+// skillFileRefRe 抓 skill 文档里 workspace 根相对的静态文件路径。只匹配带扩展名的
+// literal，避免把 skills/<skill>/ 说明性目录或含占位符的示例误当成真实文件。
+var skillFileRefRe = regexp.MustCompile(`skills/[A-Za-z0-9._/-]+\.(?:md|yaml|py)`)
+
 // TestSkillScriptPathsExist 渲染一份完整 fixture,遍历所有生成的 SKILL.md,
 // 断言里头引用的每个 python 脚本路径在产物里真实存在。
 //
@@ -41,6 +45,39 @@ func TestSkillScriptPathsExist(t *testing.T) {
 		cfg.Generation.SkillsWhitelist = []string{"routing", "incident-investigator", "config-executor", "diagram-generator"}
 		assertSkillScriptPathsExist(t, cfg)
 	})
+
+	// 场景 3:CodeGraph opt-in skill 引用 routing 的三份静态映射；每条 literal 路径
+	// 必须能在同一份生成 workspace 中解析，避免文档路径和产物布局漂移。
+	t.Run("code-intelligence-static-paths", func(t *testing.T) {
+		cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
+		cfg.CodeIntelligence = config.CodeIntelligence{Enabled: true, Provider: "codegraph"}
+		cfg.Generation.SkillsWhitelist = []string{"routing", "code-intelligence-query"}
+		assertCodeIntelligenceFilePathsExist(t, cfg)
+	})
+}
+
+func assertCodeIntelligenceFilePathsExist(t *testing.T, cfg *config.SystemConfig) {
+	t.Helper()
+	out := t.TempDir()
+	if err := New(cfg, filepath.Join(projectRoot(t), "templates"), out).Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	wsRoot := filepath.Join(out, "templates/workspace-template")
+	skillPath := filepath.Join(wsRoot, "skills/code-intelligence-query/SKILL.md")
+	data, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("read generated CodeGraph skill: %v", err)
+	}
+
+	refs := skillFileRefRe.FindAllString(string(data), -1)
+	if len(refs) == 0 {
+		t.Fatal("CodeGraph skill has no literal skills/... file references")
+	}
+	for _, ref := range refs {
+		if _, err := os.Stat(filepath.Join(wsRoot, filepath.FromSlash(ref))); err != nil {
+			t.Errorf("CodeGraph skill references missing file %q: %v", ref, err)
+		}
+	}
 }
 
 func assertSkillScriptPathsExist(t *testing.T, cfg *config.SystemConfig) {

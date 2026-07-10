@@ -4,6 +4,7 @@
 // .tmpl 走 text/template 渲染并去掉后缀,其它文件原样 copy。
 // shouldSkipDir 在遍历过程里挑掉:
 //   - skills_whitelist 没列的 skill 目录
+//   - 需要显式配置但未启用的 skill(当前为 code-intelligence-query)
 //   - infra 里 disabled 的 data store 对应的 *-runtime-query
 //   - 没声明 config_center 时跳 config-executor
 package generator
@@ -115,18 +116,8 @@ func (g *Generator) shouldSkipDir(rel string) bool {
 	}
 	skillName := parts[1]
 
-	whitelist := g.Ctx.Generation.SkillsWhitelist
-	if len(whitelist) > 0 && !g.alwaysIncludeSkill(skillName) {
-		found := false
-		for _, w := range whitelist {
-			if w == skillName {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return true
-		}
+	if !g.alwaysIncludeSkill(skillName) && !skillEnabled(g.Ctx, skillName) {
+		return true
 	}
 
 	for _, ds := range g.Ctx.Infrastructure.DataStores {

@@ -205,6 +205,10 @@ EOF
 
 routing 给到仓库路径后:
 
+{{if hasSkill . "code-intelligence-query"}}
+先 Read `skills/code-intelligence-query/SKILL.md` 并按其分支/freshness规则取证；满足条件时先调用 CodeGraph，失败立即回退到下方 git diff + rg + Read。
+{{end}}
+
 ```bash
 # 1. 最近变更(可用性类:5xx 突增,先看变更)
 cd <repo_root> && git log --oneline --since="2 hours ago" -- <主角 service 子模块>

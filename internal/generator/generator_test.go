@@ -33,6 +33,67 @@ func loadCfg(t *testing.T, rel string) *config.SystemConfig {
 	return cfg
 }
 
+func TestGenerate_CodeIntelligenceOptIn(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
+	cfg.CodeIntelligence = config.CodeIntelligence{Enabled: true, Provider: "codegraph"}
+	cfg.Generation.SkillsWhitelist = []string{"routing", "incident-investigator", "code-intelligence-query"}
+	out := t.TempDir()
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+	if err := g.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	assertExists(t, out, []string{"templates/workspace-template/skills/code-intelligence-query/SKILL.md"})
+	if got := readFile(t, filepath.Join(out, "templates/workspace-template/skills/code-intelligence-query/SKILL.md")); !strings.Contains(got, "codegraph_explore") {
+		t.Fatal(got)
+	}
+	if got := readFile(t, filepath.Join(out, "templates/workspace-template/skills/incident-investigator/SKILL.md")); !strings.Contains(got, "code-intelligence-query") {
+		t.Fatal(got)
+	}
+	readme := readFile(t, filepath.Join(out, "README.md"))
+	for _, want := range []string{
+		"CodeGraph 函数级源码、调用关系与影响面取证；失败自动回退 rg/read",
+		".codegraph/",
+		"目标分支",
+		"不能独立证明根因",
+	} {
+		if !strings.Contains(readme, want) {
+			t.Fatalf("README missing %q:\n%s", want, readme)
+		}
+	}
+}
+
+func TestGenerate_CodeIntelligenceDisabledEvenWithOpenWhitelist(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
+	cfg.Generation.SkillsWhitelist = nil
+	out := t.TempDir()
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+	if err := g.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	assertNotExists(t, out, []string{"templates/workspace-template/skills/code-intelligence-query"})
+	if got := readFile(t, filepath.Join(out, "templates/workspace-template/skills/incident-investigator/SKILL.md")); strings.Contains(got, "调用 code-intelligence-query") {
+		t.Fatal(got)
+	}
+	if got := skipReason(g, "code-intelligence-query"); got != "code_intelligence.enabled=false" {
+		t.Fatalf("skip reason = %q", got)
+	}
+}
+
+func TestGenerate_CodeIntelligenceWhitelistCanTrimSkill(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
+	cfg.CodeIntelligence = config.CodeIntelligence{Enabled: true, Provider: "codegraph"}
+	cfg.Generation.SkillsWhitelist = []string{"routing", "incident-investigator"}
+	out := t.TempDir()
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+	if err := g.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	assertNotExists(t, out, []string{"templates/workspace-template/skills/code-intelligence-query"})
+	if got := skipReason(g, "code-intelligence-query"); got != "not in skills_whitelist" {
+		t.Fatalf("skip reason = %q", got)
+	}
+}
+
 func TestWriteTshootMetaIncludesAgentRole(t *testing.T) {
 	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
 	out := filepath.Join(t.TempDir(), "sys")

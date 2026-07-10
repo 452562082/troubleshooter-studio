@@ -323,6 +323,10 @@ type MCPBuildOptions struct {
 	// buildNacos 用它拼 `uv run --script <path>`。空字符串 = ensure 失败,buildNacos 跳过注册,
 	// nacos 走 config-executor SKILL 的 HTTP fallback 兜底。
 	NacosMCPScriptPath string
+
+	// CodeGraphBinaryPath:EnsureCodeGraphInstalled 返回的稳定绝对命令路径。
+	// 空字符串表示 ensure 失败或能力未启用,buildCodeGraph 跳过 MCP 注册。
+	CodeGraphBinaryPath string
 }
 
 // BuildMCPServers 按 cfg.Infrastructure 派生 {server_key: spec} 扁平 map。
@@ -407,6 +411,7 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 	b.buildLark(servers)
 	b.buildFeishuProject(servers)
 	b.buildOne2All(servers)
+	b.buildCodeGraph(servers)
 	return servers
 }
 

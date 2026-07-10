@@ -70,6 +70,9 @@ func requiredMCPKeys(cfg *config.SystemConfig, agentID string) []string {
 		return agentID + "-" + name
 	}
 	var out []string
+	if cfg.CodeIntelligence.UsesCodeGraph() {
+		out = append(out, withAgent("codegraph"))
+	}
 	// nacos(plan D):自研本地 MCP 脚本,每 source × env 一个实例,跟 buildNacos 镜像。
 	// openclaw injectMCPServers 走 PruneEmpty=false 全注册,所以所有 source×env 都该在。
 	for _, cc := range cfg.Infrastructure.ConfigCenters {

@@ -5,10 +5,20 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/xiaolong/troubleshooter-studio/internal/config"
 )
+
+func TestRequiredMCPKeys_CodeGraph(t *testing.T) {
+	cfg := &config.SystemConfig{CodeIntelligence: config.CodeIntelligence{Enabled: true, Provider: "codegraph"}}
+	if got := requiredMCPKeys(cfg, "shop"); !slices.Contains(got, "shop-codegraph") {
+		t.Fatalf("%v", got)
+	}
+}
 
 // init() stub probeMCPFunc / toolchainLookPath — self-test 测试会因 cfg 注册一堆 mcp,真 probe
 // 会因 CI 没装 npx/uvx 全 FAIL。stub 返成功结果,让 self-test 走 happy path。个别测试可局部 override 测 FAIL。

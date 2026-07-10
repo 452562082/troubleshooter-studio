@@ -122,13 +122,23 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 		}
 	}
 
+	codeGraphBinPath := ""
+	if CfgUsesCodeGraph(cfg) {
+		var err error
+		codeGraphBinPath, err = EnsureCodeGraphInstalled(emit)
+		if err != nil {
+			emit(fmt.Sprintf("[warn] CodeGraph 安装失败,跳过 MCP 注册并启用 rg/read fallback: %v", err))
+		}
+	}
+
 	// 避免 server_key + tool_name 拼起来超过 IDE 60 字符的 tool 名限制。
 	// IDE 走 PruneEmpty=true 模式 —— 避免把 "" 当真值喂给后端进程触发无效连接。
 	servers := BuildMCPServers(cfg, MCPBuildOptions{
-		AgentID:            cfg.MCPKeyPrefix(),
-		PruneEmpty:         true,
-		KafkaMCPBinaryPath: kafkaBinPath,
-		NacosMCPScriptPath: nacosScriptPath,
+		AgentID:             cfg.MCPKeyPrefix(),
+		PruneEmpty:          true,
+		KafkaMCPBinaryPath:  kafkaBinPath,
+		NacosMCPScriptPath:  nacosScriptPath,
+		CodeGraphBinaryPath: codeGraphBinPath,
 	}, get)
 
 	if t == TargetCodex {
@@ -187,9 +197,10 @@ const mcpWriteMaxRetries = 3
 //     清掉"前缀属于本系统但本次不再生成"的死 key(env 缩容 / 数据层删了 / multi-source nacos
 //     删 source / system.id 改名 等场景留下的死引用)。每条删的会打 [info] 让用户感知。
 //     用户手加同前缀的别名会被一起清 — 不常见,且 [info] log 兜底,比死 key 永远留更干净。
-//   - mergeOnlyNew=true(无 creds 兜底):existing 已有的派生 key **不动**(env 段保持
-//     首次部署灌入的真凭证),只 add existing 没有的(数据层 mcp 首次注册场景)。这条路径下
-//     **不做 prefix 清理** — 因为没 creds 时拿不到完整意图,清了可能误删用户在线生效的 mcp。
+//   - mergeOnlyNew=true(无 creds 兜底):existing 已有的凭证型派生 key **不动**(env 段保持
+//     首次部署灌入的真凭证),只 add existing 没有的(数据层 mcp 首次注册场景)。CodeGraph
+//     不含用户凭证,其固定 key 例外地按本次 ensure 结果覆盖或删除,避免 fallback 时残留死引用。
+//     除这个固定 key 外不做 prefix 清理 — 没 creds 时拿不到完整意图,清了可能误删在线 mcp。
 //
 // agentPrefix 通常是 `<system.id>-`(BuildMCPServers 的 AgentID + "-"),空串关闭 prefix 清理。
 func writeMCPServersWithVerify(path string, servers map[string]any, maxRetries int, mergeOnlyNew bool, agentPrefix string) error {
@@ -203,7 +214,8 @@ func writeMCPServersWithVerify(path string, servers map[string]any, maxRetries i
 			existing = map[string]any{}
 		}
 		if mergeOnlyNew {
-			// 只 add existing 没有的派生 key,不删/不覆盖 — 保护老条目的 env 段真凭证
+			reconcileCodeGraphServer(existing, servers, strings.TrimSuffix(agentPrefix, "-"))
+			// 除无凭证的 CodeGraph 固定 key 外,只 add 不删/不覆盖 — 保护老条目的 env 真凭证。
 			for k, v := range servers {
 				if _, hit := existing[k]; !hit {
 					existing[k] = v

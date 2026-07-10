@@ -10,11 +10,50 @@
 package agent
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 )
+
+func TestBuildMCPServers_CodeGraph(t *testing.T) {
+	cfg := &config.SystemConfig{
+		System:           config.System{ID: "shop"},
+		CodeIntelligence: config.CodeIntelligence{Enabled: true, Provider: "codegraph"},
+	}
+	got := BuildMCPServers(cfg, MCPBuildOptions{AgentID: "shop", CodeGraphBinaryPath: "/opt/tshoot/codegraph"}, func(string) string { return "" })
+	srv := got["shop-codegraph"].(map[string]any)
+	if srv["command"] != "/opt/tshoot/codegraph" {
+		t.Fatalf("%#v", srv)
+	}
+	if want := []any{"serve", "--mcp"}; !reflect.DeepEqual(srv["args"], want) {
+		t.Fatalf("args = %#v, want %#v", srv["args"], want)
+	}
+	env := srv["env"].(map[string]any)
+	if env["CODEGRAPH_TELEMETRY"] != "0" || env["DO_NOT_TRACK"] != "1" {
+		t.Fatalf("%#v", env)
+	}
+	if _, exists := env["CODEGRAPH_MCP_TOOLS"]; exists {
+		t.Fatal("must retain default one-tool surface")
+	}
+}
+
+func TestBuildMCPServers_CodeGraphDisabledOrMissingBinary(t *testing.T) {
+	for _, tc := range []struct {
+		enabled bool
+		binary  string
+	}{{false, "/opt/tshoot/codegraph"}, {true, ""}} {
+		cfg := &config.SystemConfig{System: config.System{ID: "shop"}}
+		if tc.enabled {
+			cfg.CodeIntelligence = config.CodeIntelligence{Enabled: true, Provider: "codegraph"}
+		}
+		got := BuildMCPServers(cfg, MCPBuildOptions{AgentID: "shop", CodeGraphBinaryPath: tc.binary}, func(string) string { return "" })
+		if _, exists := got["shop-codegraph"]; exists {
+			t.Fatalf("unexpected server: %#v", got)
+		}
+	}
+}
 
 func TestParseMySQLDSN(t *testing.T) {
 	cases := []struct {

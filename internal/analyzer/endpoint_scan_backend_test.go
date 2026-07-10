@@ -281,6 +281,41 @@ interface OrderClient {
 	}
 }
 
+func TestScanEndpoints_JavaFeignHeaderIgnoresQuotedBoundaryCharacters(t *testing.T) {
+	tests := []struct {
+		name       string
+		classPath  string
+		expected   string
+		unexpected string
+	}{
+		{name: "route parameter", classPath: "/api/{tenant}", expected: "/api/{param}/x", unexpected: "/api/{param}"},
+		{name: "property placeholder", classPath: "${api.prefix}", expected: "/${api.prefix}/x", unexpected: "/${api.prefix}"},
+		{name: "semicolon", classPath: "/api;v1", expected: "/api;v1/x", unexpected: "/api;v1"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := fixtureRepo(t, map[string]string{"OrderClient.java": `@RequestMapping("` + test.classPath + `")
+@FeignClient(name="orders")
+interface OrderClient {
+  @GetMapping("/x") Object get();
+}`})
+			got, err := ScanEndpointsContext(context.Background(), EndpointScanOptions{Repo: "client", Stack: "java", RepoPath: root})
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertEndpoint(t, got, topology.DirectionOutbound, "GET", test.expected, "orders", "feign")
+			if len(got) != 1 {
+				t.Fatalf("Feign declaration emitted endpoints besides the combined outbound route: %#v", got)
+			}
+			for _, endpoint := range got {
+				if endpoint.Direction == topology.DirectionInbound || endpoint.Path == test.unexpected {
+					t.Fatalf("Feign class mapping emitted as inbound: %#v", endpoint)
+				}
+			}
+		})
+	}
+}
+
 func TestScanEndpoints_PythonRejectsPartiallyStaticClientExpressions(t *testing.T) {
 	root := fixtureRepo(t, map[string]string{"client.py": `requests.get(BASE_URL + "/users/" + user_id)
 httpx.post("https://orders-service/orders/" + order_id)

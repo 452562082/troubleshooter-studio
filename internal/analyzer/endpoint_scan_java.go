@@ -201,7 +201,49 @@ func javaDeclarationHeaderStart(text string, annotationStart int) int {
 	if annotationStart <= 0 {
 		return 0
 	}
-	if boundary := strings.LastIndexAny(text[:annotationStart], ";{}"); boundary >= 0 {
+	if annotationStart > len(text) {
+		annotationStart = len(text)
+	}
+	boundary := -1
+	var quote byte
+	escaped := false
+	tripleDouble := false
+	for i := 0; i < annotationStart; i++ {
+		if tripleDouble {
+			if i+2 < annotationStart && text[i:i+3] == `"""` {
+				tripleDouble = false
+				i += 2
+			}
+			continue
+		}
+		if quote != 0 {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if text[i] == '\\' {
+				escaped = true
+				continue
+			}
+			if text[i] == quote {
+				quote = 0
+			}
+			continue
+		}
+		if i+2 < annotationStart && text[i:i+3] == `"""` {
+			tripleDouble = true
+			i += 2
+			continue
+		}
+		if text[i] == '\'' || text[i] == '"' {
+			quote = text[i]
+			continue
+		}
+		if text[i] == ';' || text[i] == '{' || text[i] == '}' {
+			boundary = i
+		}
+	}
+	if boundary >= 0 {
 		return boundary + 1
 	}
 	return 0

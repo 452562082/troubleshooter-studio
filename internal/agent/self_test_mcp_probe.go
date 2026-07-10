@@ -10,7 +10,8 @@
 //     "包能起 / 凭据被接受 / 协议没崩"的真错配。
 //
 // **不做**的事(避免过度规约):
-//   - 不强制工具名清单跟 SKILL.md 文档对照 —— 那是 doc 漂移检测,做 driftcheck 单独工具更合适
+//   - 不为通用 MCP 强制工具名清单跟 SKILL.md 文档对照 —— CodeGraph 是例外:它只有
+//     codegraph_explore 这一个关键工具,tools/list 缺它等价于能力不可用
 //   - 不真调任何工具(无副作用),只 tools/list
 //   - 不验证写工具是否被拦截(那是 LLM SKILL 软约束的事,跟 mcp probe 无关)
 //
@@ -315,6 +316,10 @@ func probeMCPServersFromConfig(ctx context.Context, servers map[string]any, add 
 				} else {
 					safeAdd("mcp probe "+probeName, "FAIL", detail)
 				}
+			case isCodeGraphMCP(probeName, cmd) && !containsMCPTool(r.Tools, "codegraph_explore"):
+				safeAdd("mcp probe "+probeName, "FAIL", fmt.Sprintf(
+					"MCP %s tool surface: expected codegraph_explore, got %s",
+					probeName, strings.Join(r.Tools, ", ")))
 			case len(r.Tools) == 0:
 				safeAdd("mcp probe "+probeName, "WARN", "进程起了但 tools/list 返空(可能凭据被拒或上游协议变化)")
 			default:
@@ -324,6 +329,26 @@ func probeMCPServersFromConfig(ctx context.Context, servers map[string]any, add 
 		}(name, command, args, env)
 	}
 	wg.Wait()
+}
+
+func isCodeGraphMCP(name, command string) bool {
+	if strings.HasSuffix(strings.ToLower(name), "-codegraph") {
+		return true
+	}
+	// filepath.Base follows the host OS. Normalize separators first so a Windows
+	// codegraph.cmd spec can also be inspected by tests/tools running on Unix.
+	base := filepath.Base(strings.ReplaceAll(command, "\\", "/"))
+	base = strings.ToLower(base)
+	return base == "codegraph" || base == "codegraph.cmd"
+}
+
+func containsMCPTool(tools []string, expected string) bool {
+	for _, tool := range tools {
+		if tool == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func shouldWarnMCPProbeFailure(name, command string, r MCPProbeResult) bool {

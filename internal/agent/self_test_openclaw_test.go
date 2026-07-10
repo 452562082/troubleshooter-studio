@@ -26,10 +26,104 @@ func TestRequiredMCPKeys_CodeGraph(t *testing.T) {
 // 拖垮 happy-path 自检断言;stub 成命中,保留生产 LookPath 行为只在测试里替换。
 func init() {
 	probeMCPFunc = func(_ context.Context, _ string, _, _ []string, _ time.Duration) MCPProbeResult {
-		return MCPProbeResult{Tools: []string{"fake_tool_a", "fake_tool_b"}}
+		return MCPProbeResult{Tools: []string{"fake_tool_a", "fake_tool_b", "codegraph_explore"}}
 	}
 	toolchainLookPath = func(name string) (string, error) {
 		return "/fake/bin/" + name, nil
+	}
+}
+
+func TestSelfTestOpenclaw_CodeGraphIndexWarningDoesNotFailOverall(t *testing.T) {
+	repoPath := makeCodeGraphSourceRepo(t, "main.go")
+	staging, _ := setupCodeGraphSelfTestOpenclaw(t, repoPath)
+	setCodeGraphRunnerForTest(t, func(_ context.Context, binary string, _ ...string) ([]byte, error) {
+		if binary != "/managed/codegraph" {
+			t.Fatalf("CodeGraph binary = %q, want command extracted from openclaw.json", binary)
+		}
+		return codeGraphStatusJSON(repoPath, false, 0, 0, 0, "missing"), nil
+	})
+
+	res, err := SelfTestOpenclaw(context.Background(), staging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK {
+		t.Fatalf("optional CodeGraph index warning must not fail self-test: %#v", res.Checks)
+	}
+	assertCodeGraphSelfTestRows(t, res.Checks, "PASS", "WARN")
+}
+
+func TestSelfTestOpenclaw_CodeGraphMissingExploreToolFails(t *testing.T) {
+	repoPath := makeCodeGraphSourceRepo(t, "main.go")
+	staging, _ := setupCodeGraphSelfTestOpenclaw(t, repoPath)
+	old := probeMCPFunc
+	probeMCPFunc = func(_ context.Context, _ string, _, _ []string, _ time.Duration) MCPProbeResult {
+		return MCPProbeResult{Tools: []string{"codegraph_status"}}
+	}
+	t.Cleanup(func() { probeMCPFunc = old })
+	setCodeGraphRunnerForTest(t, func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+		return codeGraphStatusJSON(repoPath, true, 12, 84, 103, "complete"), nil
+	})
+
+	res, err := SelfTestOpenclaw(context.Background(), staging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OK {
+		t.Fatalf("missing runtime-observed codegraph_explore must fail self-test: %#v", res.Checks)
+	}
+	assertCodeGraphSelfTestRows(t, res.Checks, "FAIL", "PASS")
+}
+
+func setupCodeGraphSelfTestOpenclaw(t *testing.T, repoPath string) (staging, fakeHome string) {
+	t.Helper()
+	cfg := nacosCfg()
+	cfg.Infrastructure = config.Infrastructure{}
+	cfg.CodeIntelligence = config.CodeIntelligence{Enabled: true, Provider: config.CodeIntelligenceProviderCodeGraph}
+	cfg.Repos = []config.Repo{{
+		Name: "orders", URL: "https://example.invalid/orders.git", Stack: "go",
+		Analysis: config.RepoAnalysis{Enabled: true},
+	}}
+	staging, fakeHome = setupOpenclawStaging(t, cfg)
+
+	workspaceDir := filepath.Join(fakeHome, ".openclaw", "workspace", cfg.ResolveWorkspaceName())
+	generated := makeCodeGraphSelfTestWorkspace(t, map[string]string{"orders": repoPath})
+	if err := os.MkdirAll(filepath.Dir(workspaceDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(generated, workspaceDir); err != nil {
+		t.Fatal(err)
+	}
+
+	configPath := filepath.Join(fakeHome, ".openclaw", "openclaw.json")
+	writeJSON(t, configPath, map[string]any{
+		"agents": map[string]any{"list": []any{map[string]any{"id": cfg.ResolveID()}}},
+		"mcp": map[string]any{"servers": map[string]any{
+			"shop-codegraph": map[string]any{"command": "/managed/codegraph", "args": []any{"serve", "--mcp"}},
+		}},
+	})
+	return staging, fakeHome
+}
+
+func assertCodeGraphSelfTestRows(t *testing.T, checks []SelfTestCheck, wantMCP, wantIndex string) {
+	t.Helper()
+	mcpIndex, indexIndex := -1, -1
+	for i, check := range checks {
+		switch {
+		case check.Name == "mcp probe shop-codegraph":
+			mcpIndex = i
+			if check.Status != wantMCP {
+				t.Fatalf("MCP row = %#v, want status %s", check, wantMCP)
+			}
+		case check.Name == "CodeGraph 索引 orders":
+			indexIndex = i
+			if check.Status != wantIndex {
+				t.Fatalf("index row = %#v, want status %s", check, wantIndex)
+			}
+		}
+	}
+	if mcpIndex < 0 || indexIndex < 0 || indexIndex != mcpIndex+1 {
+		t.Fatalf("CodeGraph MCP/index rows must be separate and adjacent: %#v", checks)
 	}
 }
 

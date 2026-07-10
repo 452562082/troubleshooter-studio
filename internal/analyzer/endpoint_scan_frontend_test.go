@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/topology"
 )
@@ -136,6 +137,179 @@ func TestScanEndpoints_RespectsCancellationAndWalkerGuards(t *testing.T) {
 	}
 }
 
+func TestScanEndpoints_RejectsInvalidRepoRoot(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	if _, err := ScanEndpointsContext(context.Background(), EndpointScanOptions{RepoPath: missing, Stack: "node"}); err == nil {
+		t.Fatal("missing repository root returned nil error")
+	}
+
+	file := filepath.Join(t.TempDir(), "repo.txt")
+	if err := os.WriteFile(file, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ScanEndpointsContext(context.Background(), EndpointScanOptions{RepoPath: file, Stack: "node"}); err == nil {
+		t.Fatal("file repository root returned nil error")
+	}
+}
+
+func TestScanEndpoints_LaravelEnvDefaultAndSuffix(t *testing.T) {
+	root := fixtureRepo(t, map[string]string{
+		"app/Clients/Order.php": `Http::post(env('ORDER_SERVICE_URL', 'https://fallback.example').'/internal/orders', $body);`,
+	})
+
+	got, err := ScanEndpointsContext(context.Background(), EndpointScanOptions{Repo: "mall-bff", Stack: "php", RepoPath: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEndpoint(t, got, topology.DirectionOutbound, "POST", "/internal/orders", "ORDER_SERVICE_URL", "laravel-http")
+}
+
+func TestScanEndpoints_NextRewritesIgnoreRedirectsAndArbitraryObjects(t *testing.T) {
+	root := fixtureRepo(t, map[string]string{
+		"next.config.js": `
+const unrelated = {source:'/not-a-rewrite', destination:'http://wrong/unrelated'}
+module.exports = {
+  async redirects() { return [{source:'/old', destination:'http://wrong/new', permanent:true}] },
+  async rewrites() { return [{source:'/api/:path*', destination:'http://mall-bff/internal/:path*'}] },
+}
+`,
+		"src/fixture.ts": `export const fixture = {source:'/also-not-a-rewrite', destination:'http://wrong/fixture'}`,
+	})
+
+	got, err := ScanEndpointsContext(context.Background(), EndpointScanOptions{Repo: "mall-web", Stack: "node", Framework: "next.js", RepoPath: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEndpoint(t, got, topology.DirectionInbound, "ANY", "/api/{wildcard}", "mall-bff", "next-rewrite")
+	for _, endpoint := range got {
+		if endpoint.Source == "next-rewrite" && endpoint.Path != "/api/{wildcard}" {
+			t.Fatalf("non-rewrite source/destination object was scanned: %#v", endpoint)
+		}
+	}
+}
+
+func TestScanEndpoints_NginxRegexModifierNestedBlockAssociation(t *testing.T) {
+	root := fixtureRepo(t, map[string]string{
+		"deploy/nginx.conf": `
+location ~* ^/api/(.*)$ {
+  if ($request_method = OPTIONS) {
+    add_header Access-Control-Allow-Origin *;
+  }
+  rewrite ^/api/(.*)$ /internal/$1 break;
+  proxy_pass http://mall-bff/internal;
+}
+location ~ ^/admin/(.+)$ {
+  rewrite ^/admin/(.+)$ /ops/$1 break;
+  proxy_pass http://admin-bff;
+}
+`,
+	})
+
+	got, err := ScanEndpointsContext(context.Background(), EndpointScanOptions{Repo: "mall-gateway", Stack: "nginx", RepoPath: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := requireEndpoint(t, got, topology.DirectionInbound, "ANY", "/api/{wildcard}", "mall-bff", "nginx-location")
+	assertEndpointTransform(t, api, "rewrite", "/api/{wildcard}", "/internal/{wildcard}")
+	admin := requireEndpoint(t, got, topology.DirectionInbound, "ANY", "/admin/{wildcard}", "admin-bff", "nginx-location")
+	assertEndpointTransform(t, admin, "rewrite", "/admin/{wildcard}", "/ops/{wildcard}")
+}
+
+func TestScanEndpoints_NestRoutesUseContainingController(t *testing.T) {
+	root := fixtureRepo(t, map[string]string{
+		"src/controllers.ts": `
+@Controller('/cats')
+class CatsController {
+  @Get('/:id')
+  getCat() {}
+}
+
+@Controller('/dogs')
+class DogsController {
+  @Post('/')
+  addDog() {}
+}
+`,
+	})
+
+	got, err := ScanEndpointsContext(context.Background(), EndpointScanOptions{Repo: "pets-api", Stack: "node", RepoPath: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEndpoint(t, got, topology.DirectionInbound, "GET", "/cats/{param}", "", "nest-route")
+	assertEndpoint(t, got, topology.DirectionInbound, "POST", "/dogs", "", "nest-route")
+}
+
+func TestScanEndpoints_HostOnlyHTTPURLsUseRootPath(t *testing.T) {
+	root := fixtureRepo(t, map[string]string{
+		"src/client.ts":  `fetch('https://api.example.com')`,
+		"next.config.js": `module.exports={async rewrites(){return [{source:'/api',destination:'https://mall-bff'}]}}`,
+	})
+
+	got, err := ScanEndpointsContext(context.Background(), EndpointScanOptions{Repo: "mall-web", Stack: "node", RepoPath: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEndpoint(t, got, topology.DirectionOutbound, "GET", "/", "api.example.com", "fetch")
+	rewrite := requireEndpoint(t, got, topology.DirectionInbound, "ANY", "/api", "mall-bff", "next-rewrite")
+	assertEndpointTransform(t, rewrite, "rewrite", "/api", "/")
+}
+
+func TestNormalizeEndpoints_DeduplicatesExactFacts(t *testing.T) {
+	endpoint := httpEndpoint(topology.DirectionOutbound, "GET", "/api/orders", "orders", "src/client.ts:3", "fetch")
+	got := normalizeEndpoints(EndpointScanOptions{Repo: "mall-web"}, []topology.Endpoint{endpoint, endpoint})
+	if len(got) != 1 {
+		t.Fatalf("normalized endpoint count = %d, want 1: %#v", len(got), got)
+	}
+}
+
+func TestScanEndpoints_RecordsSourceLineEvidence(t *testing.T) {
+	root := fixtureRepo(t, map[string]string{
+		"src/client.ts": "// setup\n\naxios.get('/api/orders')\n",
+	})
+
+	got, err := ScanEndpointsContext(context.Background(), EndpointScanOptions{Repo: "mall-web", Stack: "node", RepoPath: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := requireEndpoint(t, got, topology.DirectionOutbound, "GET", "/api/orders", "", "axios")
+	if endpoint.Location != "src/client.ts:3" {
+		t.Fatalf("location = %q, want src/client.ts:3", endpoint.Location)
+	}
+}
+
+func TestNormalizeEndpoints_ContextCancellationDuringNormalization(t *testing.T) {
+	ctx := &cancelAfterErrChecks{remaining: 1}
+	endpoint := httpEndpoint(topology.DirectionOutbound, "GET", "/api/orders", "orders", "src/client.ts:1", "fetch")
+	if _, err := normalizeEndpointsContext(ctx, EndpointScanOptions{Repo: "mall-web"}, []topology.Endpoint{endpoint, endpoint}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("normalization error = %v, want context.Canceled", err)
+	}
+}
+
+func TestExtractNodeCalls_ContextCancellationDuringSourceExtraction(t *testing.T) {
+	ctx := &cancelAfterErrChecks{remaining: 1}
+	source := endpointSource{rel: "src/client.ts", text: "fetch('/api/one'); fetch('/api/two')"}
+	if _, err := extractNodeCallsContext(ctx, source); !errors.Is(err, context.Canceled) {
+		t.Fatalf("source extraction error = %v, want context.Canceled", err)
+	}
+}
+
+type cancelAfterErrChecks struct {
+	context.Context
+	remaining int
+}
+
+func (c *cancelAfterErrChecks) Deadline() (deadline time.Time, ok bool) { return time.Time{}, false }
+func (c *cancelAfterErrChecks) Done() <-chan struct{}                   { return nil }
+func (c *cancelAfterErrChecks) Value(key any) any                       { return nil }
+func (c *cancelAfterErrChecks) Err() error {
+	if c.remaining == 0 {
+		return context.Canceled
+	}
+	c.remaining--
+	return nil
+}
+
 func fixtureRepo(t *testing.T, files map[string]string) string {
 	t.Helper()
 	root := t.TempDir()
@@ -159,6 +333,27 @@ func assertEndpoint(t *testing.T, got []topology.Endpoint, direction topology.Di
 		}
 	}
 	t.Fatalf("endpoint not found: direction=%s method=%s path=%s hint=%s source=%s in %#v", direction, method, path, hint, source, got)
+}
+
+func requireEndpoint(t *testing.T, got []topology.Endpoint, direction topology.Direction, method, path, hint, source string) topology.Endpoint {
+	t.Helper()
+	for _, endpoint := range got {
+		if endpoint.Direction == direction && endpoint.Method == method && endpoint.Path == path && endpoint.TargetHint == hint && endpoint.Source == source {
+			return endpoint
+		}
+	}
+	t.Fatalf("endpoint not found: direction=%s method=%s path=%s hint=%s source=%s in %#v", direction, method, path, hint, source, got)
+	return topology.Endpoint{}
+}
+
+func assertEndpointTransform(t *testing.T, endpoint topology.Endpoint, kind, from, to string) {
+	t.Helper()
+	for _, transform := range endpoint.Transforms {
+		if transform.Kind == kind && transform.From == from && transform.To == to {
+			return
+		}
+	}
+	t.Fatalf("transform %s %s -> %s not found on %#v", kind, from, to, endpoint)
 }
 
 func assertTransform(t *testing.T, got []topology.Endpoint, kind, from, to string) {

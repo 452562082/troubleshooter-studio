@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	nginxLocationRE = regexp.MustCompile(`(?is)\blocation\s+(?:\^~\s+|=\s+)?([^\s{]+)\s*\{([^{}]*)\}`)
+	nginxLocationRE = regexp.MustCompile(`(?is)\blocation\s+(?:(\^~|=|~\*|~)\s+)?([^\s{]+)\s*\{`)
 	nginxProxyRE    = regexp.MustCompile(`(?i)\bproxy_pass\s+([^;\s]+)`)
 	nginxRewriteRE  = regexp.MustCompile(`(?i)\brewrite\s+([^\s;]+)\s+([^\s;]+)`)
 	nginxCaptureRE  = regexp.MustCompile(`\((?:\.\*|\.\+)\)|\[[^]]+\]\+?`)
@@ -32,14 +32,32 @@ func scanNginxEndpoints(ctx context.Context, opts EndpointScanOptions) ([]topolo
 			return nil, err
 		}
 		for _, loc := range nginxLocationRE.FindAllStringSubmatchIndex(source.text, -1) {
-			path := source.text[loc[2]:loc[3]]
-			body := source.text[loc[4]:loc[5]]
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			openOffset := loc[1] - 1
+			closeOffset, ok := findMatchingDelimiter(source.text, openOffset, '{', '}', false, true)
+			if !ok {
+				continue
+			}
+			modifier := ""
+			if loc[2] >= 0 && loc[3] >= 0 {
+				modifier = source.text[loc[2]:loc[3]]
+			}
+			path := source.text[loc[4]:loc[5]]
+			if modifier == "~" || modifier == "~*" {
+				path = normalizeNginxRewritePath(path)
+			}
+			body := source.text[openOffset+1 : closeOffset]
 			hint := ""
 			if match := nginxProxyRE.FindStringSubmatch(body); len(match) == 2 {
 				hint = targetHintFromURL(match[1])
 			}
 			endpoint := httpEndpoint(topology.DirectionInbound, "ANY", path, hint, endpointLocation(source, loc[0]), "nginx-location")
 			for _, rewrite := range nginxRewriteRE.FindAllStringSubmatch(body, -1) {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
 				endpoint.Transforms = append(endpoint.Transforms, topology.Transform{
 					Kind: "rewrite",
 					From: normalizeNginxRewritePath(rewrite[1]),

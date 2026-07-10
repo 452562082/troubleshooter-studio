@@ -3,7 +3,9 @@ package analyzer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -29,11 +31,19 @@ type endpointSource struct {
 	text string
 }
 
+type endpointSourceSpan struct {
+	start int
+	end   int
+}
+
 func ScanEndpointsContext(ctx context.Context, opts EndpointScanOptions) ([]topology.Endpoint, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateEndpointRepoRoot(opts.RepoPath); err != nil {
 		return nil, err
 	}
 
@@ -58,7 +68,30 @@ func ScanEndpointsContext(ctx context.Context, opts EndpointScanOptions) ([]topo
 		return nil, err
 	}
 
-	return normalizeEndpoints(opts, endpoints), nil
+	return normalizeEndpointsContext(ctx, opts, endpoints)
+}
+
+func validateEndpointRepoRoot(repoPath string) error {
+	if strings.TrimSpace(repoPath) == "" {
+		return fmt.Errorf("endpoint scan repository path is empty")
+	}
+	root, err := os.Open(repoPath)
+	if err != nil {
+		return fmt.Errorf("open endpoint scan repository root %q: %w", repoPath, err)
+	}
+	defer root.Close()
+
+	info, err := root.Stat()
+	if err != nil {
+		return fmt.Errorf("stat endpoint scan repository root %q: %w", repoPath, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("endpoint scan repository root %q is not a directory", repoPath)
+	}
+	if _, err := root.Readdirnames(1); err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("read endpoint scan repository root %q: %w", repoPath, err)
+	}
+	return nil
 }
 
 func endpointSources(ctx context.Context, opts EndpointScanOptions, match func(string) bool) ([]endpointSource, error) {
@@ -92,10 +125,18 @@ func endpointSources(ctx context.Context, opts EndpointScanOptions, match func(s
 }
 
 func normalizeEndpoints(opts EndpointScanOptions, endpoints []topology.Endpoint) []topology.Endpoint {
+	normalized, _ := normalizeEndpointsContext(context.Background(), opts, endpoints)
+	return normalized
+}
+
+func normalizeEndpointsContext(ctx context.Context, opts EndpointScanOptions, endpoints []topology.Endpoint) ([]topology.Endpoint, error) {
 	service := singleEffectiveService(opts.Services)
 	seen := make(map[string]struct{}, len(endpoints))
 	normalized := make([]topology.Endpoint, 0, len(endpoints))
 	for _, endpoint := range endpoints {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if endpoint.Repo == "" {
 			endpoint.Repo = opts.Repo
 		}
@@ -125,6 +166,9 @@ func normalizeEndpoints(opts EndpointScanOptions, endpoints []topology.Endpoint)
 		seen[key] = struct{}{}
 		normalized = append(normalized, endpoint)
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	sort.Slice(normalized, func(i, j int) bool {
 		if normalized[i].ID != normalized[j].ID {
@@ -134,7 +178,7 @@ func normalizeEndpoints(opts EndpointScanOptions, endpoints []topology.Endpoint)
 		right, _ := json.Marshal(normalized[j])
 		return string(left) < string(right)
 	})
-	return normalized
+	return normalized, nil
 }
 
 func singleEffectiveService(services []string) string {
@@ -171,11 +215,19 @@ func splitHTTPURL(raw string) (path, targetHint string) {
 		}
 	}
 	if parsed, err := url.Parse(raw); err == nil && parsed.Host != "" {
-		return ensureLeadingSlash(parsed.Path), parsed.Hostname()
+		path := parsed.Path
+		if path == "" {
+			path = "/"
+		}
+		return ensureLeadingSlash(path), parsed.Hostname()
 	}
 	if strings.HasPrefix(raw, "//") {
 		if parsed, err := url.Parse("http:" + raw); err == nil {
-			return ensureLeadingSlash(parsed.Path), parsed.Hostname()
+			path := parsed.Path
+			if path == "" {
+				path = "/"
+			}
+			return ensureLeadingSlash(path), parsed.Hostname()
 		}
 	}
 	return ensureLeadingSlash(raw), ""
@@ -204,4 +256,60 @@ func ensureLeadingSlash(path string) string {
 		return "/" + path
 	}
 	return path
+}
+
+func findMatchingDelimiter(text string, openOffset int, open, close byte, slashComments, hashComments bool) (int, bool) {
+	if openOffset < 0 || openOffset >= len(text) || text[openOffset] != open {
+		return 0, false
+	}
+	depth := 0
+	var quote byte
+	escaped := false
+	lineComment := false
+	for i := openOffset; i < len(text); i++ {
+		ch := text[i]
+		if lineComment {
+			if ch == '\n' {
+				lineComment = false
+			}
+			continue
+		}
+		if quote != 0 {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+		if ch == '\'' || ch == '"' || ch == '`' {
+			quote = ch
+			continue
+		}
+		if slashComments && ch == '/' && i+1 < len(text) && text[i+1] == '/' {
+			lineComment = true
+			i++
+			continue
+		}
+		if hashComments && ch == '#' {
+			lineComment = true
+			continue
+		}
+		switch ch {
+		case open:
+			depth++
+		case close:
+			depth--
+			if depth == 0 {
+				return i, true
+			}
+		}
+	}
+	return 0, false
 }

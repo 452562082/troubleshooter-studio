@@ -10,14 +10,17 @@ import (
 )
 
 var (
-	nodeFetchRE        = regexp.MustCompile(`(?i)\bfetch\s*\(\s*["'\x60]([^"'\x60]+)["'\x60]`)
-	nodeFetchOptionsRE = regexp.MustCompile(`(?is)^\s*,\s*\{([^{}]{0,1000})\}`)
-	nodeAxiosVerbRE    = regexp.MustCompile(`(?i)\baxios\.(get|post|put|patch|delete)\s*\(\s*["'\x60]([^"'\x60]+)["'\x60]`)
-	nodeAxiosConfigRE  = regexp.MustCompile(`(?is)\baxios(?:\.request)?\s*\(\s*\{([^{}]{0,1000})\}\s*\)`)
-	nodeExpressRE      = regexp.MustCompile(`(?i)\b(?:app|router)\.(get|post|put|patch|delete|all)\s*\(\s*["'\x60]([^"'\x60]+)["'\x60]`)
-	nodeControllerRE   = regexp.MustCompile(`(?i)@Controller\s*\(\s*["'\x60]([^"'\x60]*)["'\x60]\s*\)`)
-	nodeNestRouteRE    = regexp.MustCompile(`(?i)@(Get|Post|Put|Patch|Delete|All)\s*\(\s*(?:["'\x60]([^"'\x60]*)["'\x60])?\s*\)`)
-	nodeObjectRE       = regexp.MustCompile(`(?s)\{([^{}]{0,1000})\}`)
+	nodeFetchRE             = regexp.MustCompile(`(?i)\bfetch\s*\(\s*["'\x60]([^"'\x60]+)["'\x60]`)
+	nodeFetchOptionsRE      = regexp.MustCompile(`(?is)^\s*,\s*\{([^{}]{0,1000})\}`)
+	nodeAxiosVerbRE         = regexp.MustCompile(`(?i)\baxios\.(get|post|put|patch|delete)\s*\(\s*["'\x60]([^"'\x60]+)["'\x60]`)
+	nodeAxiosConfigRE       = regexp.MustCompile(`(?is)\baxios(?:\.request)?\s*\(\s*\{([^{}]{0,1000})\}\s*\)`)
+	nodeExpressRE           = regexp.MustCompile(`(?i)\b(?:app|router)\.(get|post|put|patch|delete|all)\s*\(\s*["'\x60]([^"'\x60]+)["'\x60]`)
+	nodeControllerRE        = regexp.MustCompile(`(?is)@Controller\s*\(\s*["'\x60]([^"'\x60]*)["'\x60]\s*\)\s*(?:export\s+)?class\s+[A-Za-z_$][\w$]*[^\{]*\{`)
+	nodeNestRouteRE         = regexp.MustCompile(`(?i)@(Get|Post|Put|Patch|Delete|All)\s*\(\s*(?:["'\x60]([^"'\x60]*)["'\x60])?\s*\)`)
+	nodeObjectRE            = regexp.MustCompile(`(?s)\{([^{}]{0,1000})\}`)
+	nodeRewriteMethodRE     = regexp.MustCompile(`(?is)\b(?:async\s+)?rewrites\s*\([^)]*\)\s*\{`)
+	nodeRewriteArrowBlockRE = regexp.MustCompile(`(?is)\brewrites\s*:\s*(?:async\s*)?\([^)]*\)\s*=>\s*\{`)
+	nodeRewriteArrowArrayRE = regexp.MustCompile(`(?is)\brewrites\s*:\s*(?:async\s*)?\([^)]*\)\s*=>\s*\[`)
 )
 
 func scanNodeEndpoints(ctx context.Context, opts EndpointScanOptions) ([]topology.Endpoint, error) {
@@ -38,18 +41,33 @@ func scanNodeEndpoints(ctx context.Context, opts EndpointScanOptions) ([]topolog
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		endpoints = append(endpoints, extractNodeCalls(source)...)
-		endpoints = append(endpoints, extractNodeRoutes(source)...)
-		if strings.HasPrefix(strings.ToLower(filepath.Base(source.rel)), "next.config.") || strings.Contains(strings.ToLower(opts.Framework), "next") {
-			endpoints = append(endpoints, extractNextRewrites(source)...)
+		extracted, err := extractNodeCallsContext(ctx, source)
+		if err != nil {
+			return nil, err
+		}
+		endpoints = append(endpoints, extracted...)
+		extracted, err = extractNodeRoutesContext(ctx, source)
+		if err != nil {
+			return nil, err
+		}
+		endpoints = append(endpoints, extracted...)
+		if strings.HasPrefix(strings.ToLower(filepath.Base(source.rel)), "next.config.") {
+			extracted, err = extractNextRewritesContext(ctx, source)
+			if err != nil {
+				return nil, err
+			}
+			endpoints = append(endpoints, extracted...)
 		}
 	}
 	return endpoints, nil
 }
 
-func extractNodeCalls(source endpointSource) []topology.Endpoint {
+func extractNodeCallsContext(ctx context.Context, source endpointSource) ([]topology.Endpoint, error) {
 	var endpoints []topology.Endpoint
 	for _, loc := range nodeFetchRE.FindAllStringSubmatchIndex(source.text, -1) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		raw := source.text[loc[2]:loc[3]]
 		path, hint := splitHTTPURL(raw)
 		if path == "" {
@@ -64,6 +82,9 @@ func extractNodeCalls(source endpointSource) []topology.Endpoint {
 		endpoints = append(endpoints, httpEndpoint(topology.DirectionOutbound, method, path, hint, endpointLocation(source, loc[0]), "fetch"))
 	}
 	for _, loc := range nodeAxiosVerbRE.FindAllStringSubmatchIndex(source.text, -1) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		method := source.text[loc[2]:loc[3]]
 		raw := source.text[loc[4]:loc[5]]
 		path, hint := splitHTTPURL(raw)
@@ -73,6 +94,9 @@ func extractNodeCalls(source endpointSource) []topology.Endpoint {
 		endpoints = append(endpoints, httpEndpoint(topology.DirectionOutbound, method, path, hint, endpointLocation(source, loc[0]), "axios"))
 	}
 	for _, loc := range nodeAxiosConfigRE.FindAllStringSubmatchIndex(source.text, -1) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		body := source.text[loc[2]:loc[3]]
 		method := jsStringProperty(body, "method")
 		raw := jsStringProperty(body, "url")
@@ -82,12 +106,15 @@ func extractNodeCalls(source endpointSource) []topology.Endpoint {
 		}
 		endpoints = append(endpoints, httpEndpoint(topology.DirectionOutbound, method, path, hint, endpointLocation(source, loc[0]), "axios"))
 	}
-	return endpoints
+	return endpoints, ctx.Err()
 }
 
-func extractNodeRoutes(source endpointSource) []topology.Endpoint {
+func extractNodeRoutesContext(ctx context.Context, source endpointSource) ([]topology.Endpoint, error) {
 	var endpoints []topology.Endpoint
 	for _, loc := range nodeExpressRE.FindAllStringSubmatchIndex(source.text, -1) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		method := source.text[loc[2]:loc[3]]
 		if strings.EqualFold(method, "all") {
 			method = "ANY"
@@ -96,43 +123,87 @@ func extractNodeRoutes(source endpointSource) []topology.Endpoint {
 		endpoints = append(endpoints, httpEndpoint(topology.DirectionInbound, method, path, "", endpointLocation(source, loc[0]), "express-route"))
 	}
 
-	prefix := ""
-	if match := nodeControllerRE.FindStringSubmatch(source.text); len(match) == 2 {
-		prefix = match[1]
-	}
-	for _, loc := range nodeNestRouteRE.FindAllStringSubmatchIndex(source.text, -1) {
-		method := source.text[loc[2]:loc[3]]
-		if strings.EqualFold(method, "all") {
-			method = "ANY"
+	for _, controller := range nodeControllerRE.FindAllStringSubmatchIndex(source.text, -1) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		path := ""
-		if loc[4] >= 0 && loc[5] >= 0 {
-			path = source.text[loc[4]:loc[5]]
-		}
-		path = joinEndpointPaths(prefix, path)
-		if path == "" {
+		prefix := source.text[controller[2]:controller[3]]
+		openOffset := controller[1] - 1
+		closeOffset, ok := findMatchingDelimiter(source.text, openOffset, '{', '}', true, false)
+		if !ok {
 			continue
 		}
-		endpoints = append(endpoints, httpEndpoint(topology.DirectionInbound, method, path, "", endpointLocation(source, loc[0]), "nest-route"))
+		bodyStart := openOffset + 1
+		body := source.text[bodyStart:closeOffset]
+		for _, loc := range nodeNestRouteRE.FindAllStringSubmatchIndex(body, -1) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			method := body[loc[2]:loc[3]]
+			if strings.EqualFold(method, "all") {
+				method = "ANY"
+			}
+			path := ""
+			if loc[4] >= 0 && loc[5] >= 0 {
+				path = body[loc[4]:loc[5]]
+			}
+			path = joinEndpointPaths(prefix, path)
+			if path == "" {
+				continue
+			}
+			endpoints = append(endpoints, httpEndpoint(topology.DirectionInbound, method, path, "", endpointLocation(source, bodyStart+loc[0]), "nest-route"))
+		}
 	}
-	return endpoints
+	return endpoints, ctx.Err()
 }
 
-func extractNextRewrites(source endpointSource) []topology.Endpoint {
+func extractNextRewritesContext(ctx context.Context, source endpointSource) ([]topology.Endpoint, error) {
 	var endpoints []topology.Endpoint
-	for _, loc := range nodeObjectRE.FindAllStringSubmatchIndex(source.text, -1) {
-		body := source.text[loc[2]:loc[3]]
-		from := jsStringProperty(body, "source")
-		destination := jsStringProperty(body, "destination")
-		to, hint := splitHTTPURL(destination)
-		if from == "" || to == "" {
-			continue
+	for _, span := range nextRewriteSpans(source.text) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		endpoint := httpEndpoint(topology.DirectionInbound, "ANY", from, hint, endpointLocation(source, loc[0]), "next-rewrite")
-		endpoint.Transforms = []topology.Transform{{Kind: "rewrite", From: from, To: to}}
-		endpoints = append(endpoints, endpoint)
+		text := source.text[span.start:span.end]
+		for _, loc := range nodeObjectRE.FindAllStringSubmatchIndex(text, -1) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			body := text[loc[2]:loc[3]]
+			from := jsStringProperty(body, "source")
+			destination := jsStringProperty(body, "destination")
+			to, hint := splitHTTPURL(destination)
+			if from == "" || to == "" {
+				continue
+			}
+			endpoint := httpEndpoint(topology.DirectionInbound, "ANY", from, hint, endpointLocation(source, span.start+loc[0]), "next-rewrite")
+			endpoint.Transforms = []topology.Transform{{Kind: "rewrite", From: from, To: to}}
+			endpoints = append(endpoints, endpoint)
+		}
 	}
-	return endpoints
+	return endpoints, ctx.Err()
+}
+
+func nextRewriteSpans(text string) []endpointSourceSpan {
+	var spans []endpointSourceSpan
+	for _, pattern := range []struct {
+		re    *regexp.Regexp
+		open  byte
+		close byte
+	}{
+		{re: nodeRewriteMethodRE, open: '{', close: '}'},
+		{re: nodeRewriteArrowBlockRE, open: '{', close: '}'},
+		{re: nodeRewriteArrowArrayRE, open: '[', close: ']'},
+	} {
+		for _, loc := range pattern.re.FindAllStringIndex(text, -1) {
+			openOffset := loc[1] - 1
+			closeOffset, ok := findMatchingDelimiter(text, openOffset, pattern.open, pattern.close, true, false)
+			if !ok {
+				continue
+			}
+			spans = append(spans, endpointSourceSpan{start: openOffset + 1, end: closeOffset})
+		}
+	}
+	return spans
 }
 
 func jsStringProperty(body, property string) string {

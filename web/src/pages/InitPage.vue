@@ -23,6 +23,7 @@ import { Target, type TargetId } from '../lib/constants'
 import type { CredField } from '../lib/credFields'
 import { isCredFieldHidden, resolveCredFieldDisplay } from '../lib/credFields'
 import RepoListItem from '../components/RepoListItem.vue'
+import CodeIntelligenceToggle from '../components/CodeIntelligenceToggle.vue'
 import ConfigSourceStep from '../components/ConfigSourceStep.vue'
 import ObservabilityStep from '../components/ObservabilityStep.vue'
 import DataStoreStep from '../components/DataStoreStep.vue'
@@ -3026,9 +3027,14 @@ const {
   deployError,
   deploySummary,
   deployProgressLine,
+  codeGraphReport,
+  codeGraphRetrying,
+  codeGraphRetryFeedback,
+  codeGraphRetryState,
   targetDeployPaths,
   targetDeployPathHints,
   runOneClickDeploy,
+  retryCodeGraph,
 } = useDeployFlow({
   agent, system, targetModels,
   enabledTargets, targetOptions, targetLabels, homeDir,
@@ -3286,6 +3292,7 @@ provide(WizardStoreKey, {
         @add-service-name="(r, idx) => addServiceName(r, idx)"
       />
       <button class="btn" @click="addRepo">+ 添加仓库</button>
+      <CodeIntelligenceToggle v-model="codeIntelligence.enabled" />
     </div>
 
     <!-- Step 5 -->
@@ -3409,7 +3416,12 @@ provide(WizardStoreKey, {
       :deploy-loading="deployLoading"
       :deploy-progress-line="deployProgressLine"
       :deploy-error="deployError"
+      :code-graph-report="codeGraphReport"
+      :code-graph-retrying="codeGraphRetrying"
+      :code-graph-retry-feedback="codeGraphRetryFeedback"
+      :code-graph-retry-state="codeGraphRetryState"
       @run-deploy="runOneClickDeploy"
+      @retry-codegraph="retryCodeGraph"
     />
 
     <!-- Navigation buttons - 欢迎页(Step 1)隐藏,因为它有两个大选择按钮做导航,

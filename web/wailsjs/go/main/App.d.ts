@@ -157,6 +157,8 @@ export function ReadEnv(arg1:string):Promise<Record<string, string>>;
 
 export function RecommendRoleForRepo(arg1:string,arg2:string,arg3:string):Promise<analyzer.RoleHint>;
 
+export function ReindexCodeGraph(arg1:string,arg2:Record<string, string>):Promise<agent.CodeGraphIndexReport>;
+
 export function RevealInFinder(arg1:string):Promise<void>;
 
 export function RunInstall(arg1:string,arg2:Record<string, string>):Promise<main.RunInstallResult>;

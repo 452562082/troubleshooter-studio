@@ -19,9 +19,10 @@ import { computed, ref, type ComputedRef, type Ref } from 'vue'
 import type { Router } from 'vue-router'
 import { EventsOn } from '../../wailsjs/runtime/runtime'
 import {
-  defaultDestPath, detectAITools, importAndDeploy, runInstall, selfTestAgent,
+  defaultDestPath, detectAITools, importAndDeploy, reindexCodeGraph, runInstall, selfTestAgent,
   validate as bridgeValidate, isDesktop,
 } from './bridge'
+import type { CodeGraphIndexReport } from './bridge'
 import { Target, IDE_TARGETS, type TargetId } from './constants'
 import { confirmDialog } from './confirm'
 import { pushLog } from './logStore'
@@ -76,6 +77,10 @@ export interface UseDeployFlowDeps {
 export function useDeployFlow(deps: UseDeployFlowDeps) {
   const deployLoading = ref(false)
   const deployError = ref<string | null>(null)
+  const codeGraphReport = ref<CodeGraphIndexReport | null>(null)
+  const codeGraphRetrying = ref(false)
+  const codeGraphRetryFeedback = ref('')
+  const codeGraphRetryState = ref<'idle' | 'loading' | 'success' | 'error'>('idle')
   // deployProgressLine 部署进度的最近一行(后端 OnLog 透 wails event "install:log" 推上来)。
   // 主要给 mcp-grafana 二进制下载用,首次部署 ~30 MiB,UI 不显示就让人误以为卡死。
   // logStore 也存了一份(全局日志面板),这里只是给 InitPage loading 状态做"实时一行"提示。
@@ -243,11 +248,83 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
     return creds
   }
 
+  // 部署和显式重试必须共享这一份路径解析。尤其 umbrella 子仓库需要先解析 parent,
+  // 再用 parent_path 拼接；分叉实现很容易让首次部署与 retry 指向不同目录。
+  function buildDeployRepoPaths(): Record<string, string> {
+    const repoPaths: Record<string, string> = {}
+    const effectiveRoot = (deps.reposRootInput.value.trim() || deps.resolvedReposRoot.value).replace(/\/$/, '')
+    const resolveRoot = (r: typeof deps.repos[number]): string => {
+      const explicit = (r._localPath || '').trim()
+      if (explicit) return explicit
+      const dest = deps.resolveCloneDest(r)
+      if (dest) return dest
+      return effectiveRoot ? `${effectiveRoot}/${r.name}` : ''
+    }
+
+    for (const r of deps.repos) {
+      if (!r.name.trim()) continue
+      if (r.parent_repo && r.parent_repo.trim()) continue
+      const path = resolveRoot(r)
+      if (path) repoPaths[r.name] = path
+    }
+    for (const r of deps.repos) {
+      if (!r.name.trim()) continue
+      const parentName = (r.parent_repo || '').trim()
+      if (!parentName) continue
+      const explicit = (r._localPath || '').trim()
+      if (explicit) {
+        repoPaths[r.name] = explicit
+        continue
+      }
+      const parentPath = repoPaths[parentName]
+      if (parentPath) {
+        const mount = (r.parent_path || '').trim() || r.name
+        repoPaths[r.name] = `${parentPath.replace(/\/$/, '')}/${mount}`
+        continue
+      }
+      const dest = deps.resolveCloneDest(r)
+      if (dest) repoPaths[r.name] = dest
+      else if (effectiveRoot) repoPaths[r.name] = `${effectiveRoot}/${r.name}`
+    }
+    return repoPaths
+  }
+
+  async function retryCodeGraph() {
+    if (codeGraphRetrying.value) return
+    codeGraphRetrying.value = true
+    codeGraphRetryState.value = 'loading'
+    codeGraphRetryFeedback.value = '正在重新索引失败仓库…'
+    const unlisten = EventsOn('install:log', (line: string) => {
+      if (typeof line === 'string' && line.trim()) {
+        deployProgressLine.value = line
+        codeGraphRetryFeedback.value = line
+      }
+    })
+    try {
+      const report = await reindexCodeGraph(deps.yamlOutput.value, buildDeployRepoPaths())
+      codeGraphReport.value = report
+      codeGraphRetryState.value = report.ready === report.total ? 'success' : 'error'
+      codeGraphRetryFeedback.value = report.ready === report.total
+        ? `重新索引完成：CodeGraph ${report.ready}/${report.total} repos ready`
+        : `重新索引完成，但仍有 ${report.total - report.ready} 个仓库未就绪`
+    } catch (e: any) {
+      codeGraphRetryState.value = 'error'
+      codeGraphRetryFeedback.value = `重新索引失败：${String(e?.message || e)}`
+      pushLog('install', 'error', `[codegraph-retry] ${String(e?.message || e)}`)
+    } finally {
+      codeGraphRetrying.value = false
+      try { unlisten?.() } catch { /* unlisten 失败无害 */ }
+    }
+  }
+
   // 一键部署:遍历 Step 2 已勾选的所有 target,各自走 importAndDeploy。
   // 路径全自动,无需用户在 Step 8 再选 target / 选目录(都用 ~/.tshoot/<target>/<id>/)。
   // 任一 target 部署失败 → 整体停下保留已成功的,error 里显示是哪个 target 倒了。
   async function runOneClickDeploy() {
     deployError.value = null
+    codeGraphReport.value = null
+    codeGraphRetryState.value = 'idle'
+    codeGraphRetryFeedback.value = ''
     if (!isDesktop()) {
       deployError.value = '一键部署只在桌面 app 可用;浏览器模式请下载 yaml 去 BotsPage 或用 CLI'
       return
@@ -317,45 +394,7 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
       //      上,bot 的 repo-path-map.yaml 写成 ~/go/src/api 而不是 ~/go/src/truss/api)
       //   3. 远程模式 _cloneTarget + name(用户挑过)
       //   4. 兜底 effectiveRoot + name(全局默认 reposRoot)
-      const repoPaths: Record<string, string> = {}
-      const effectiveRoot = (deps.reposRootInput.value.trim() || deps.resolvedReposRoot.value).replace(/\/$/, '')
-      // 拓扑两轮:第 1 轮处理无 parent_repo 的(算作"根"),第 2 轮处理 parent_repo 在场的
-      // (此时根已 resolved 进 repoPaths)。链式 umbrella(child of child)罕见,health check
-      // 也禁了环;两轮不够的极端场景退回 effectiveRoot/name 兜底,不会死循环。
-      const resolveRoot = (r: typeof deps.repos[number]): string => {
-        const explicit = (r._localPath || '').trim()
-        if (explicit) return explicit
-        const dest = deps.resolveCloneDest(r)
-        if (dest) return dest
-        return effectiveRoot ? `${effectiveRoot}/${r.name}` : ''
-      }
-      for (const r of deps.repos) {
-        if (!r.name.trim()) continue
-        if (r.parent_repo && r.parent_repo.trim()) continue // 第 2 轮处理
-        const p = resolveRoot(r)
-        if (p) repoPaths[r.name] = p
-      }
-      for (const r of deps.repos) {
-        if (!r.name.trim()) continue
-        const parentName = (r.parent_repo || '').trim()
-        if (!parentName) continue
-        // _localPath 优先(splitMonorepo 已预填,免重新算);没有就根据 parent 拼
-        const explicit = (r._localPath || '').trim()
-        if (explicit) {
-          repoPaths[r.name] = explicit
-          continue
-        }
-        const parentPath = repoPaths[parentName]
-        if (parentPath) {
-          const mount = (r.parent_path || '').trim() || r.name
-          repoPaths[r.name] = `${parentPath.replace(/\/$/, '')}/${mount}`
-        } else {
-          // parent 没解析出来(name 引用不到 / health check 已 error 但用户硬部署)→ 兜底
-          const dest = deps.resolveCloneDest(r)
-          if (dest) repoPaths[r.name] = dest
-          else if (effectiveRoot) repoPaths[r.name] = `${effectiveRoot}/${r.name}`
-        }
-      }
+      const repoPaths = buildDeployRepoPaths()
 
       // 每个勾选的 target:
       //   - claude-code / cursor:importAndDeploy 内部已 native install 到 ~/.claude|cursor/,
@@ -371,7 +410,8 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
         // 同一份 creds 顺带传给 claude-code/cursor:installNative 走完文件拷贝后会用它
         // 注入 ~/.claude.json (user-scope dotfile) / ~/.cursor/mcp.json 的 mcpServers,装完即可用 MCP 工具。
         const isIDE = (IDE_TARGETS as string[]).includes(t)
-        await importAndDeploy(deps.yamlOutput.value, t, dest, repoPaths, openclawCreds)
+        const applied = await importAndDeploy(deps.yamlOutput.value, t, dest, repoPaths, openclawCreds)
+        if (!codeGraphReport.value && applied.codegraph) codeGraphReport.value = applied.codegraph
         if (isIDE) {
           installedTargets.push(t)
           continue
@@ -444,7 +484,11 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
           localStorage.setItem(deps.storageKey, JSON.stringify(parsed))
         }
       } catch { /* localStorage 读写失败不影响部署主流程 */ }
-      deps.router.push('/bots')
+      // 部分失败时留在当前步骤，让用户能看到逐仓库原因并直接重试。
+      // 全部 ready 或未启用 CodeGraph 时保留既有的部署后跳转行为。
+      if (!codeGraphReport.value || codeGraphReport.value.ready === codeGraphReport.value.total) {
+        deps.router.push('/bots')
+      }
     } catch (e: any) {
       deployError.value = String(e?.message || e)
     } finally {
@@ -458,8 +502,13 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
     deployError,
     deploySummary,
     deployProgressLine,
+    codeGraphReport,
+    codeGraphRetrying,
+    codeGraphRetryFeedback,
+    codeGraphRetryState,
     targetDeployPaths,
     targetDeployPathHints,
     runOneClickDeploy,
+    retryCodeGraph,
   }
 }

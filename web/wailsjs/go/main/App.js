@@ -290,6 +290,10 @@ export function RecommendRoleForRepo(arg1, arg2, arg3) {
   return window['go']['main']['App']['RecommendRoleForRepo'](arg1, arg2, arg3);
 }
 
+export function ReindexCodeGraph(arg1, arg2) {
+  return window['go']['main']['App']['ReindexCodeGraph'](arg1, arg2);
+}
+
 export function RevealInFinder(arg1) {
   return window['go']['main']['App']['RevealInFinder'](arg1);
 }

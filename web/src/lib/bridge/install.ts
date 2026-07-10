@@ -9,6 +9,28 @@ import type { ApplyResult } from './discoverBot'
 export type InstallPrompt = deploy.Prompt
 export type RunInstallResult = main.RunInstallResult
 
+export type CodeGraphRepoResult = {
+  name: string
+  path: string
+  action: 'initialized' | 'synced' | 'skipped' | 'failed'
+  status: 'ready' | 'skipped' | 'warn'
+  detail?: string
+  file_count?: number
+  node_count?: number
+  edge_count?: number
+  duration_ms: number
+}
+
+export type CodeGraphIndexReport = {
+  ready: number
+  total: number
+  repos: CodeGraphRepoResult[]
+}
+
+export type ImportAndDeployResult = ApplyResult & {
+  codegraph?: CodeGraphIndexReport
+}
+
 /** 把 yaml 直接部署成一个新机器人(agent.ImportAndApply 的 UI 封装)
  *
  *  repoPaths: 仓库名 → 本机绝对路径,产物里会写进 repo-path-map.yaml。
@@ -22,11 +44,20 @@ export async function importAndDeploy(
   destPath: string,
   repoPaths: Record<string, string> = {},
   ideCreds: Record<string, string> = {},
-): Promise<ApplyResult> {
+): Promise<ImportAndDeployResult> {
   if (!isDesktop()) throw new Error('ImportAndDeploy 只在桌面 app 里可用')
   // 用 any:wails generate 还没跑完时类型签名可能滞后(本次砍 customInstallRoot 参数,
   // 旧 wailsjs/go/main/App.d.ts 还有第 6 个参数,等 generate 后类型自动 refresh)。
   return (App.ImportAndDeploy as any)(yamlText, target, destPath, repoPaths, ideCreds)
+}
+
+/** 用户显式重试 CodeGraph 准备和索引。repoPaths 必须与部署使用同一份解析结果。 */
+export async function reindexCodeGraph(
+  yamlText: string,
+  repoPaths: Record<string, string>,
+): Promise<CodeGraphIndexReport> {
+  if (!isDesktop()) throw new Error('ReindexCodeGraph 只在桌面 app 里可用')
+  return App.ReindexCodeGraph(yamlText, repoPaths) as unknown as CodeGraphIndexReport
 }
 
 /** 给 target 推荐默认部署路径。embedded/openclaw 返回 ~/.tshoot/<target>/<id>/

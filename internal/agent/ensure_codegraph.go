@@ -20,6 +20,8 @@ import (
 
 const codeGraphVersion = "v1.3.1"
 
+const codeGraphDownloadTimeout = 30 * time.Minute
+
 const maxCodeGraphDownloadBytes int64 = 512 << 20
 
 type codeGraphArtifact struct {
@@ -41,7 +43,7 @@ var codeGraphArtifacts = map[string]codeGraphArtifact{
 var codeGraphUserHomeDir = os.UserHomeDir
 var codeGraphGOOS = runtime.GOOS
 var codeGraphGOARCH = runtime.GOARCH
-var codeGraphHTTPClient = &http.Client{Timeout: 90 * time.Second}
+var codeGraphHTTPClient = &http.Client{Timeout: codeGraphDownloadTimeout}
 var codeGraphRename = os.Rename
 
 type codeGraphInstallPaths struct {

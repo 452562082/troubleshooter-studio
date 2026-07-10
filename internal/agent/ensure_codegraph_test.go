@@ -16,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 )
@@ -42,6 +43,15 @@ func TestCodeGraphArtifactForPlatform_AllSupported(t *testing.T) {
 		if got != expected {
 			t.Errorf("codeGraphArtifactForPlatform(%q) = %#v, want %#v", platform, got, expected)
 		}
+	}
+}
+
+func TestCodeGraphHTTPClientTimeout(t *testing.T) {
+	if codeGraphDownloadTimeout != 30*time.Minute {
+		t.Fatalf("CodeGraph download timeout = %s, want 30m", codeGraphDownloadTimeout)
+	}
+	if codeGraphHTTPClient.Timeout != codeGraphDownloadTimeout {
+		t.Fatalf("CodeGraph HTTP client timeout = %s, want %s", codeGraphHTTPClient.Timeout, codeGraphDownloadTimeout)
 	}
 }
 

@@ -45,6 +45,9 @@ func skillEnabled(ctx *Context, name string) bool {
 	if len(whitelist) > 0 && !slices.Contains(whitelist, name) {
 		return false
 	}
+	if name == "service-topology-query" {
+		return serviceTopologySkillEnabled(ctx)
+	}
 	if name == "code-intelligence-query" {
 		return ctx.CodeIntelligence.UsesCodeGraph() &&
 			(len(whitelist) == 0 || slices.Contains(whitelist, "routing"))

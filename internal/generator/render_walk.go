@@ -134,6 +134,35 @@ func (g *Generator) shouldSkipDir(rel string) bool {
 	return false
 }
 
+// serviceTopologySkillEnabled mirrors analyzerpipe's activation boundary: a
+// cross-repository topology needs routing plus at least two runtime service
+// nodes. Local-path/analyzer failures are represented by the generated
+// references and handled by the query skill's explicit fallback contract.
+func serviceTopologySkillEnabled(ctx *Context) bool {
+	if ctx == nil || !skillEnabledForWhitelist(ctx, "routing") {
+		return false
+	}
+	runnable := 0
+	for _, repo := range ctx.Repos {
+		if repo.IsServiceNode() {
+			runnable++
+		}
+	}
+	return runnable >= 2
+}
+
+func skillEnabledForWhitelist(ctx *Context, name string) bool {
+	if ctx == nil || len(ctx.Generation.SkillsWhitelist) == 0 {
+		return ctx != nil
+	}
+	for _, allowed := range ctx.Generation.SkillsWhitelist {
+		if allowed == name {
+			return true
+		}
+	}
+	return false
+}
+
 func (g *Generator) alwaysIncludeSkill(skillName string) bool {
 	switch skillName {
 	case "bug-fixer", "bug-verifier", "api-verifier", "attachment-evidence-verifier", "frontend-repro-investigator":

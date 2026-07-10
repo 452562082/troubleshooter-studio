@@ -163,6 +163,12 @@ func skipReason(g *Generator, skill string) string {
 	if skill == "code-intelligence-query" && !skillEnabled(g.Ctx, "routing") {
 		return "requires routing skill"
 	}
+	if skill == "service-topology-query" && !skillEnabledForWhitelist(g.Ctx, "routing") {
+		return "requires routing skill"
+	}
+	if skill == "service-topology-query" && !serviceTopologySkillEnabled(g.Ctx) {
+		return "requires at least two runnable service repos"
+	}
 	for _, ds := range g.Ctx.Infrastructure.DataStores {
 		if !ds.Enabled && skill == dataStoreSkillName(ds.Type) {
 			return fmt.Sprintf("data_store.%s.enabled=false", ds.Type)

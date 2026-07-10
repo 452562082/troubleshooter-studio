@@ -154,10 +154,23 @@ python3 skills/frontend-repro-investigator/scripts/evidence_merge.py \
 HAR / console / RUM 分析后：
 
 1. 读取 `routing/references/frontend-entry-map.yaml`。
-2. 将 `candidate_endpoints` 匹配到已知 API base URLs 和候选下游服务。
-3. 如果有 trace/request id，用同一时间窗口调用 `tracing-query` 和日志查询 skill。
-4. 如果没有 trace id，用 endpoint path、user id、session id 和发生时间查日志。
-5. 如果后端没有收到请求，排障模式下才保留 frontend / CDN / network / CORS / auth 方向候选。
+2. 将 `candidate_endpoints` 匹配到已知 API base URLs 和候选下游服务，并从失败请求提取准确的 method/path。
+{{ if hasSkill . "service-topology-query" }}
+3. method/path 提取完成后，先查询有界正式拓扑；只有一个已确定的 `candidate_service` 时传 `<入口服务>`。存在多个候选或尚不能确定服务时省略 `--service`，让查询器返回全部排序候选继续取证，不任选一个：
+
+```bash
+python3 skills/service-topology-query/scripts/query.py \
+  --service <入口服务> --method <失败请求 method> --path <失败请求 path> \
+  --max-depth 3 --json
+```
+
+拓扑路径只作后端导航证据。逐跳用 trace、同窗口日志和 runtime 验证；与 trace 冲突时以 trace 为准。查询返回 `no_match/unavailable` 时回退 `frontend-entry-map.yaml`、routing 和 endpoint 日志查找。
+{{- else }}
+3. 本生成物未包含 `service-topology-query`，继续用 `frontend-entry-map.yaml`、routing 和 endpoint 日志查找候选后端。
+{{- end }}
+4. 如果有 trace/request id，用同一时间窗口调用 `tracing-query` 和日志查询 skill。
+5. 如果没有 trace id，用 endpoint path、user id、session id 和发生时间查日志。
+6. 如果后端没有收到请求，排障模式下才保留 frontend / CDN / network / CORS / auth 方向候选。
 
 验证模式下，本节只作为证据收集指南。返回 `backend_handoff` 和浏览器实际表现，不要声称后端、前端、CDN、鉴权或网络根因。
 

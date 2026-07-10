@@ -1,0 +1,56 @@
+---
+name: service-topology-query
+description: 从 routing 生成的静态服务拓扑按失败 URL、method/path 或 service 查询有界下游路径，并携带 endpoint 证据供 trace/log/runtime 逐跳验证。
+---
+
+# 服务拓扑查询
+
+本 skill 只读取：
+
+- `skills/routing/references/service-topology.yaml`：正式的 automatic / confirmed / manual 服务边。
+- `skills/routing/references/endpoint-evidence.yaml`：端点位置、匹配理由以及 candidate / stale 等证据状态。
+
+拓扑只作为导航证据，不能单独证明根因。它回答“下一步应验证哪些服务、端点和仓库”，不回答“根因已经在哪”。如果静态拓扑和当前环境的运行时 trace 冲突，以 trace 为准，并提示拓扑可能过期、需要重新分析。
+
+## 查询
+
+从 workspace 根执行。已知入口服务和失败请求时：
+
+```bash
+python3 skills/service-topology-query/scripts/query.py \
+  --service <service> --method <HTTP-method> --path <failed-URL-or-path> \
+  --max-depth 3 --json
+```
+
+只有失败 URL、尚未确定入口服务时可省略 `--service`：
+
+```bash
+python3 skills/service-topology-query/scripts/query.py \
+  --method <HTTP-method> --path <failed-URL-or-path> --json
+```
+
+`--max-depth` 默认 3，脚本强制限制在 1..5。路径会去掉 URL query/fragment，并把 `:id`、`{id}`、`[id]`、`<id>` 统一为 `{param}` 后匹配。遍历检测环，只返回无环的完整叶路径或深度边界路径。
+
+稳定 JSON 字段：
+
+- `status`：`ok`、`no_match` 或 `unavailable`。
+- `query`：归一化后的 `service/method/path/max_depth`。
+- `paths`：按人工确认关系优先、路径最低置信度、路径长度和服务名字典序稳定排序。
+- `warnings`：缺文件、环、candidate / stale 标签等导航风险。
+- `fallback`：无正式路径时为 `routing_rg_read`；成功时为 `null`。
+
+每条路径的 `edges[].evidence` 会尽可能带两端代码位置、匹配理由和冲突。证据为空表示静态引用不完整，不代表该调用已经在运行时发生。
+
+## 逐跳验证
+
+1. 先取排序靠前的正式路径，但多候选无法消歧时保留全部候选，不任选一个写成事实。
+2. 每一跳优先用当前环境 trace 验证实际调用；无 trace 时查同时间窗的网关/服务日志、request id，再查 K8s/runtime 状态。
+3. 输出时明确标注：`运行时已验证`、`静态正式拓扑`、`candidate 待确认`、`stale 可能过期`。candidate / stale 只能用于继续取证，不能冒充正式依赖。
+4. 选中具体仓库和 endpoint 后，如果生成物包含 `code-intelligence-query`，先 Read 该 skill 并按其分支/freshness 规则使用 CodeGraph；不可用或失败时回退 `rg` + Read 源码。
+5. `status=no_match|unavailable` 或 `fallback=routing_rg_read` 时，回到 routing 的 repo/service 映射、`service-dependency-map.yaml` 与 `rg`/Read，不阻塞主排障流程。
+
+## 边界
+
+- 只读，不修改拓扑、override、仓库或运行时状态；不执行外部网络探测。
+- 当前拓扑只描述已建模的 HTTP/gRPC 同步调用，不覆盖 Kafka topic、RabbitMQ queue/exchange 等异步事件拓扑，也不得声称具备异步事件覆盖。
+- 默认只向下游查三跳。只有新增运行时证据明确指向更深层时，才可在 5 跳硬上限内扩大一次查询。

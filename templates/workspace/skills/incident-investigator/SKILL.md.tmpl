@@ -115,6 +115,21 @@ python3 skills/k8s-runtime-query/scripts/k8s_query.py --env <env> --cluster <c> 
 
 ## 步骤 4:沿依赖图追下游
 
+{{ if hasSkill . "service-topology-query" }}
+先用失败请求的 method/path 和主角服务查询正式拓扑，最多三跳：
+
+```bash
+python3 skills/service-topology-query/scripts/query.py --service <主角> \
+    --method <失败请求 method> --path <失败请求 path> --max-depth 3 --json
+```
+
+拓扑只作导航证据。按排序路径逐跳用 trace、同时间窗日志和 runtime 验证实际调用；与静态路径冲突时以 trace 为准。candidate / stale 必须保留标签，不得当成已发生调用。选定仓库/endpoint 后进入代码取证。拓扑与后续 cascade 合计最多向下游递归三跳。
+
+`status=no_match|unavailable`、证据不足或需要兼容旧依赖图时，继续执行下面的 `cascade_check.py`；它读取 `routing/references/service-dependency-map.yaml`，是保留的 dependency-map fallback。
+{{- else }}
+本生成物未包含 `service-topology-query`，直接使用下面基于 `routing/references/service-dependency-map.yaml` 的 cascade fallback。
+{{- end }}
+
 ```bash
 python3 skills/incident-investigator/scripts/cascade_check.py --env <env> --service <主角> \
     --cluster <c> --namespace-default <ns>
@@ -138,6 +153,7 @@ downstream_namespaces:
 - `no_downstream_in_map` → dependency-map 没填,提示用户去填;**置信度上限 medium**
 
 > 注:`summary` 里 `healthy` / `degraded` / `unknown` 三个计数独立。`unknown>0` 时哪怕有 degraded(走 isolated/widespread),也要在快报里带上"另有 N 个下游未验证",别让 unknown 被 degraded 盖过。
+> 递归硬上限:无论拓扑查询和 cascade 如何组合，步骤 4 总计不得超过三跳。
 
 ## 步骤 5:多向交叉(trace + log + metric + 代码 + 数据)
 

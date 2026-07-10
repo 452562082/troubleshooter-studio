@@ -31,6 +31,7 @@ type HealthIssue struct {
 var knownSkills = map[string]bool{
 	"routing":                      true,
 	"code-intelligence-query":      true,
+	"service-topology-query":       true,
 	"config-executor":              true,
 	"incident-investigator":        true,
 	"api-verifier":                 true,

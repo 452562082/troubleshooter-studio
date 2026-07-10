@@ -170,3 +170,130 @@ print(json.dumps(m.parse_dep_map(block)['commerce']))
 		}
 	}
 }
+
+func TestServiceTopologyChainIntegrity(t *testing.T) {
+	t.Run("generated-with-routing-and-multiple-service-repos", func(t *testing.T) {
+		cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+		cfg.Generation.SkillsWhitelist = []string{
+			"routing", "service-topology-query", "incident-investigator", "frontend-repro-investigator",
+		}
+		out := t.TempDir()
+		if err := New(cfg, filepath.Join(projectRoot(t), "templates"), out).Generate(); err != nil {
+			t.Fatalf("generate: %v", err)
+		}
+
+		wsRoot := filepath.Join(out, "templates/workspace-template")
+		skill := readFile(t, filepath.Join(wsRoot, "skills/service-topology-query/SKILL.md"))
+		for _, want := range []string{
+			"skills/routing/references/service-topology.yaml",
+			"skills/routing/references/endpoint-evidence.yaml",
+			"拓扑只作为导航证据",
+			"trace",
+			"candidate",
+			"stale",
+			"code-intelligence-query",
+			"rg",
+			"异步事件",
+		} {
+			if !strings.Contains(skill, want) {
+				t.Errorf("service topology skill missing %q:\n%s", want, skill)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(wsRoot, "skills/service-topology-query/scripts/query.py")); err != nil {
+			t.Fatalf("generated query script missing: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(wsRoot, "skills/service-topology-query/scripts/test_query.py")); !os.IsNotExist(err) {
+			t.Fatalf("python test must not leak into generated workspace: %v", err)
+		}
+
+		frontend := readFile(t, filepath.Join(wsRoot, "skills/frontend-repro-investigator/SKILL.md"))
+		for _, want := range []string{
+			"python3 skills/service-topology-query/scripts/query.py",
+			"--method <失败请求 method>",
+			"--path <失败请求 path>",
+		} {
+			if !strings.Contains(frontend, want) {
+				t.Errorf("frontend topology handoff missing %q:\n%s", want, frontend)
+			}
+		}
+
+		incident := readFile(t, filepath.Join(wsRoot, "skills/incident-investigator/SKILL.md"))
+		topologyAt := strings.Index(incident, "python3 skills/service-topology-query/scripts/query.py")
+		cascadeAt := strings.Index(incident, "python3 skills/incident-investigator/scripts/cascade_check.py")
+		if topologyAt < 0 || cascadeAt < 0 || topologyAt > cascadeAt {
+			t.Fatalf("incident must query topology before cascade fallback: topology=%d cascade=%d\n%s", topologyAt, cascadeAt, incident)
+		}
+		for _, want := range []string{"--max-depth 3", "逐跳", "trace", "日志", "runtime", "service-dependency-map.yaml"} {
+			if !strings.Contains(incident, want) {
+				t.Errorf("incident topology workflow missing %q:\n%s", want, incident)
+			}
+		}
+	})
+
+	t.Run("gated-by-routing-service-count-and-whitelist", func(t *testing.T) {
+		cases := []struct {
+			name      string
+			configure func(*config.SystemConfig)
+		}{
+			{
+				name: "routing-absent",
+				configure: func(cfg *config.SystemConfig) {
+					cfg.Generation.SkillsWhitelist = []string{"service-topology-query"}
+				},
+			},
+			{
+				name: "only-one-runnable-service-repo",
+				configure: func(cfg *config.SystemConfig) {
+					cfg.Repos = cfg.Repos[:1]
+					cfg.Generation.SkillsWhitelist = []string{"routing", "service-topology-query"}
+				},
+			},
+			{
+				name: "trimmed-by-whitelist",
+				configure: func(cfg *config.SystemConfig) {
+					cfg.Generation.SkillsWhitelist = []string{"routing", "incident-investigator"}
+				},
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+				tc.configure(cfg)
+				out := t.TempDir()
+				if err := New(cfg, filepath.Join(projectRoot(t), "templates"), out).Generate(); err != nil {
+					t.Fatalf("generate: %v", err)
+				}
+				wsRoot := filepath.Join(out, "templates/workspace-template")
+				if _, err := os.Stat(filepath.Join(wsRoot, "skills/service-topology-query")); !os.IsNotExist(err) {
+					t.Fatalf("service topology skill should be gated: %v", err)
+				}
+				for _, rel := range []string{
+					"skills/frontend-repro-investigator/SKILL.md",
+					"skills/incident-investigator/SKILL.md",
+				} {
+					path := filepath.Join(wsRoot, rel)
+					data, err := os.ReadFile(path)
+					if os.IsNotExist(err) {
+						continue
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					if strings.Contains(string(data), "skills/service-topology-query/") {
+						t.Errorf("gated skill leaked reference into %s:\n%s", rel, data)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("known-skill", func(t *testing.T) {
+		cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+		cfg.Generation.SkillsWhitelist = []string{"service-topology-query"}
+		for _, issue := range config.HealthCheck(cfg) {
+			if issue.Field == "generation.skills_whitelist" && strings.Contains(issue.Message, "未知 skill") {
+				t.Fatalf("service-topology-query was not registered as a known skill: %+v", issue)
+			}
+		}
+	})
+}

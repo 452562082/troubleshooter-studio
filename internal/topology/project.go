@@ -52,18 +52,25 @@ type Path struct {
 // stale endpoint evidence remains in Snapshot but cannot affect this view.
 func ProjectServiceGraph(snapshot Snapshot) ServiceGraph {
 	graph := ServiceGraph{Services: make(map[string]ServiceNode)}
-	for _, endpoint := range snapshot.Endpoints {
-		service := strings.TrimSpace(endpoint.Service)
+	for _, descriptor := range snapshot.Services {
+		service := strings.TrimSpace(descriptor.Service)
 		if service == "" {
 			continue
 		}
 		node := graph.Services[service]
 		node.Service = service
-		repo := strings.TrimSpace(endpoint.Repo)
+		repo := strings.TrimSpace(descriptor.Repo)
 		if node.Repo == "" || repo != "" && repo < node.Repo {
 			node.Repo = repo
 		}
+		role := strings.TrimSpace(descriptor.Role)
+		if node.Role == "" || role != "" && role < node.Role {
+			node.Role = role
+		}
 		graph.Services[service] = node
+	}
+	if len(snapshot.Services) == 0 {
+		projectEndpointRepositories(graph.Services, snapshot.Endpoints)
 	}
 
 	pairs := make(map[string]*ServiceEdge)
@@ -120,6 +127,22 @@ func ProjectServiceGraph(snapshot Snapshot) ServiceGraph {
 		graph.Services[service] = node
 	}
 	return graph
+}
+
+func projectEndpointRepositories(services map[string]ServiceNode, endpoints []Endpoint) {
+	for _, endpoint := range endpoints {
+		service := strings.TrimSpace(endpoint.Service)
+		if service == "" {
+			continue
+		}
+		node := services[service]
+		node.Service = service
+		repo := strings.TrimSpace(endpoint.Repo)
+		if node.Repo == "" || repo != "" && repo < node.Repo {
+			node.Repo = repo
+		}
+		services[service] = node
+	}
 }
 
 func isFormalStatus(status string) bool {

@@ -51,8 +51,9 @@ type RepositoryStatus struct {
 }
 
 type Snapshot struct {
-	SchemaVersion string             `json:"schema_version" yaml:"schema_version"`
-	Endpoints     []Endpoint         `json:"endpoints" yaml:"endpoints"`
-	Edges         []CandidateEdge    `json:"edges" yaml:"edges"`
-	Repositories  []RepositoryStatus `json:"repositories" yaml:"repositories"`
+	SchemaVersion string              `json:"schema_version" yaml:"schema_version"`
+	Services      []ServiceDescriptor `json:"services" yaml:"services"`
+	Endpoints     []Endpoint          `json:"endpoints" yaml:"endpoints"`
+	Edges         []CandidateEdge     `json:"edges" yaml:"edges"`
+	Repositories  []RepositoryStatus  `json:"repositories" yaml:"repositories"`
 }

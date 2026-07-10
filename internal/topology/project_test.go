@@ -78,6 +78,34 @@ func TestProjectServiceGraphUsesDeterministicRepositoriesAndOrdering(t *testing.
 	}
 }
 
+func TestProjectServiceGraphUsesSnapshotServiceMetadataWithoutEndpointFacts(t *testing.T) {
+	snapshot := Snapshot{
+		Services: []ServiceDescriptor{
+			{Repo: "web-repo", Service: "web", Role: "frontend"},
+			{Repo: "order-repo", Service: "order", Role: "backend"},
+			{Repo: "profile-repo", Service: "profile", Role: "backend"},
+		},
+		Edges: []CandidateEdge{
+			{FromService: "web", ToService: "order", Protocol: "http", Method: "POST", Path: "/orders", Status: "manual", Confidence: 1},
+			{FromService: "web", ToService: "profile", Protocol: "http", Method: "GET", Path: "/profile", Status: "stale", Confidence: 0},
+		},
+	}
+
+	got := ProjectServiceGraph(snapshot)
+	if node := got.Services["web"]; node.Repo != "web-repo" || node.Role != "frontend" {
+		t.Fatalf("web metadata=%#v", node)
+	}
+	if node := got.Services["order"]; node.Repo != "order-repo" || node.Role != "backend" {
+		t.Fatalf("manual target metadata=%#v", node)
+	}
+	if node := got.Services["profile"]; node.Repo != "profile-repo" || node.Role != "backend" {
+		t.Fatalf("stale target metadata=%#v", node)
+	}
+	if len(got.Edges) != 1 || got.Edges[0].From != "web" || got.Edges[0].To != "order" {
+		t.Fatalf("formal edges=%#v, want only descriptor-backed manual edge", got.Edges)
+	}
+}
+
 func TestFindPathsBoundsDepthAndCycles(t *testing.T) {
 	graph := graphOf("web>bff", "bff>order", "order>user", "user>bff")
 	paths := FindPaths(graph, Query{StartService: "web", MaxDepth: 3})

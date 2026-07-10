@@ -99,7 +99,7 @@ func ProjectServiceGraph(snapshot Snapshot) ServiceGraph {
 				projected.Confidence = candidate.Confidence
 			}
 		}
-		projected.Routes = append(projected.Routes, routeReference(candidate))
+		projected.Routes = appendUniqueRouteReference(projected.Routes, routeReference(candidate))
 	}
 
 	graph.Edges = make([]ServiceEdge, 0, len(pairs))
@@ -193,6 +193,15 @@ func endpointEdgeReference(candidate CandidateEdge) string {
 		return candidate.FromEndpoint + ">" + candidate.ToEndpoint
 	}
 	return candidateSemanticKey(candidate)
+}
+
+func appendUniqueRouteReference(routes []RouteRef, reference RouteRef) []RouteRef {
+	for _, current := range routes {
+		if current == reference {
+			return routes
+		}
+	}
+	return append(routes, reference)
 }
 
 func sortRouteReferences(routes []RouteRef) {

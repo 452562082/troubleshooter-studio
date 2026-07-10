@@ -55,6 +55,45 @@ func TestProjectServiceGraphKeepsOnlyFormalStatusesAndDeduplicatesPairs(t *testi
 	}
 }
 
+func TestProjectServiceGraphCollapsesExactDuplicateRouteReferences(t *testing.T) {
+	duplicate := CandidateEdge{
+		FromEndpoint: "web:out:orders", ToEndpoint: "bff:in:orders",
+		FromService: "web", ToService: "bff", Protocol: "http",
+		Method: "GET", Path: "/orders", Status: "automatic", Confidence: .98,
+	}
+
+	got := ProjectServiceGraph(Snapshot{Edges: []CandidateEdge{duplicate, duplicate}})
+	if len(got.Edges) != 1 {
+		t.Fatalf("formal graph edges=%#v, want one service pair", got.Edges)
+	}
+	if routes := got.Edges[0].Routes; len(routes) != 1 {
+		t.Fatalf("duplicate route references were retained: %#v", routes)
+	}
+}
+
+func TestProjectServiceGraphPreservesSameRouteWithDistinctEndpointEvidence(t *testing.T) {
+	first := CandidateEdge{
+		FromEndpoint: "web:out:orders:first", ToEndpoint: "bff:in:orders:first",
+		FromService: "web", ToService: "bff", Protocol: "http",
+		Method: "GET", Path: "/orders", Status: "automatic", Confidence: .98,
+	}
+	second := first
+	second.FromEndpoint = "web:out:orders:second"
+	second.ToEndpoint = "bff:in:orders:second"
+
+	got := ProjectServiceGraph(Snapshot{Edges: []CandidateEdge{second, first}})
+	if len(got.Edges) != 1 {
+		t.Fatalf("formal graph edges=%#v, want one service pair", got.Edges)
+	}
+	want := []RouteRef{
+		{Protocol: "http", Method: "GET", Path: "/orders", EndpointEdge: "web:out:orders:first>bff:in:orders:first"},
+		{Protocol: "http", Method: "GET", Path: "/orders", EndpointEdge: "web:out:orders:second>bff:in:orders:second"},
+	}
+	if !reflect.DeepEqual(got.Edges[0].Routes, want) {
+		t.Fatalf("routes=%#v, want distinct endpoint evidence %#v", got.Edges[0].Routes, want)
+	}
+}
+
 func TestProjectServiceGraphUsesDeterministicRepositoriesAndOrdering(t *testing.T) {
 	snapshot := Snapshot{
 		Endpoints: []Endpoint{

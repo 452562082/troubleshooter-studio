@@ -62,7 +62,7 @@ func (g *Generator) writeReadme() error {
 func readmeSkillsSection(ctx *Context) string {
 	var sb strings.Builder
 	if len(ctx.Generation.SkillsWhitelist) == 0 {
-		sb.WriteString("（未列白名单，所有 skill 默认启用）\n")
+		sb.WriteString("（未列白名单，除需显式配置的能力外，所有 skill 默认启用）\n")
 		return sb.String()
 	}
 	skillDesc := map[string]string{

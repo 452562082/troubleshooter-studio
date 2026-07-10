@@ -77,6 +77,9 @@ func TestGenerate_CodeIntelligenceDisabledEvenWithOpenWhitelist(t *testing.T) {
 	if got := skipReason(g, "code-intelligence-query"); got != "code_intelligence.enabled=false" {
 		t.Fatalf("skip reason = %q", got)
 	}
+	if got := readFile(t, filepath.Join(out, "README.md")); !strings.Contains(got, "除需显式配置的能力外，所有 skill 默认启用") {
+		t.Fatalf("README should distinguish config-gated capabilities:\n%s", got)
+	}
 }
 
 func TestGenerate_CodeIntelligenceWhitelistCanTrimSkill(t *testing.T) {
@@ -89,8 +92,47 @@ func TestGenerate_CodeIntelligenceWhitelistCanTrimSkill(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertNotExists(t, out, []string{"templates/workspace-template/skills/code-intelligence-query"})
+	incident := readFile(t, filepath.Join(out, "templates/workspace-template/skills/incident-investigator/SKILL.md"))
+	for _, forbidden := range []string{"skills/code-intelligence-query/SKILL.md", "调用 CodeGraph"} {
+		if strings.Contains(incident, forbidden) {
+			t.Fatalf("trimmed CodeGraph skill leaked incident reference %q:\n%s", forbidden, incident)
+		}
+	}
 	if got := skipReason(g, "code-intelligence-query"); got != "not in skills_whitelist" {
 		t.Fatalf("skip reason = %q", got)
+	}
+}
+
+func TestGenerate_CodeIntelligenceRequiresRouting(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
+	cfg.CodeIntelligence = config.CodeIntelligence{Enabled: true, Provider: "codegraph"}
+	cfg.Generation.SkillsWhitelist = []string{"code-intelligence-query"}
+	out := t.TempDir()
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+	if err := g.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	assertNotExists(t, out, []string{
+		"templates/workspace-template/skills/code-intelligence-query",
+		"templates/workspace-template/skills/incident-investigator",
+	})
+	if got := skipReason(g, "code-intelligence-query"); got != "requires routing skill" {
+		t.Fatalf("skip reason = %q", got)
+	}
+
+	// incident-investigator may still be selected independently; the unavailable CodeGraph
+	// dependency must not leak into its rendered Step 5.2 branch.
+	cfg.Generation.SkillsWhitelist = []string{"incident-investigator", "code-intelligence-query"}
+	outWithIncident := t.TempDir()
+	if err := New(cfg, filepath.Join(projectRoot(t), "templates"), outWithIncident).Generate(); err != nil {
+		t.Fatal(err)
+	}
+	assertNotExists(t, outWithIncident, []string{"templates/workspace-template/skills/code-intelligence-query"})
+	incident := readFile(t, filepath.Join(outWithIncident, "templates/workspace-template/skills/incident-investigator/SKILL.md"))
+	for _, forbidden := range []string{"skills/code-intelligence-query/SKILL.md", "调用 CodeGraph"} {
+		if strings.Contains(incident, forbidden) {
+			t.Fatalf("missing routing dependency leaked incident reference %q:\n%s", forbidden, incident)
+		}
 	}
 }
 

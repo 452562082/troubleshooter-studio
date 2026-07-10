@@ -160,6 +160,9 @@ func skipReason(g *Generator, skill string) string {
 	if skill == "code-intelligence-query" && !g.Ctx.CodeIntelligence.UsesCodeGraph() {
 		return "code_intelligence.enabled=false"
 	}
+	if skill == "code-intelligence-query" && !skillEnabled(g.Ctx, "routing") {
+		return "requires routing skill"
+	}
 	for _, ds := range g.Ctx.Infrastructure.DataStores {
 		if !ds.Enabled && skill == dataStoreSkillName(ds.Type) {
 			return fmt.Sprintf("data_store.%s.enabled=false", ds.Type)

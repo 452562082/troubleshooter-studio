@@ -39,11 +39,15 @@ func dataStoreSkillName(typ string) string {
 }
 
 func skillEnabled(ctx *Context, name string) bool {
-	if name == "code-intelligence-query" && !ctx.CodeIntelligence.UsesCodeGraph() {
+	whitelist := ctx.Generation.SkillsWhitelist
+	if len(whitelist) > 0 && !slices.Contains(whitelist, name) {
 		return false
 	}
-	whitelist := ctx.Generation.SkillsWhitelist
-	return len(whitelist) == 0 || slices.Contains(whitelist, name)
+	if name == "code-intelligence-query" {
+		return ctx.CodeIntelligence.UsesCodeGraph() &&
+			(len(whitelist) == 0 || slices.Contains(whitelist, "routing"))
+	}
+	return true
 }
 
 func frontendEndpointsForRepo(ctx *Context, repoName string) []string {

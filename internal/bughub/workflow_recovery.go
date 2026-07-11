@@ -11,19 +11,17 @@ import (
 // goroutines behind: every external inspection or runner schedule completes
 // before this method returns.
 func (o *CaseOrchestrator) RecoverInterrupted(ctx context.Context) error {
-	o.mu.Lock()
-	defer o.mu.Unlock()
 	if o == nil || o.store == nil {
 		return errors.New("case orchestrator store is required")
 	}
-	attempts, err := o.store.ListAttempts(ctx, AttemptFilter{Statuses: []AttemptStatus{AttemptStatusRunning}})
+	attempts, err := o.store.ListAttempts(ctx, AttemptFilter{Statuses: []AttemptStatus{AttemptStatusQueued, AttemptStatusRunning}})
 	if err != nil {
 		return err
 	}
 	var recoveredErr error
 	processedCases := make(map[string]struct{})
 	for _, attempt := range attempts {
-		if _, scheduledHere := o.recoveryStarted[attempt.ID]; scheduledHere {
+		if o.wasRecoveryStarted(attempt.ID) {
 			continue
 		}
 		if err := o.recoverAttempt(ctx, attempt); err != nil {
@@ -36,6 +34,12 @@ func (o *CaseOrchestrator) RecoverInterrupted(ctx context.Context) error {
 		return errors.Join(recoveredErr, err)
 	}
 	for _, incident := range cases {
+		if incident.Status == CaseDeploymentUnverified {
+			if recoveryErr := o.recoverDeploymentVerification(ctx, incident); recoveryErr != nil {
+				recoveredErr = errors.Join(recoveredErr, recoveryErr)
+			}
+			continue
+		}
 		if incident.Status != CaseMerging {
 			continue
 		}
@@ -46,7 +50,56 @@ func (o *CaseOrchestrator) RecoverInterrupted(ctx context.Context) error {
 			recoveredErr = errors.Join(recoveredErr, fmt.Errorf("recover merging case %s: %w", incident.ID, err))
 		}
 	}
+	for _, incident := range cases {
+		if incident.CurrentAttemptID == "" {
+			continue
+		}
+		if _, done := processedCases[incident.ID]; done {
+			continue
+		}
+		attempt, getErr := o.store.GetAttempt(ctx, incident.CurrentAttemptID)
+		if getErr != nil {
+			continue
+		}
+		if attempt.Status == AttemptStatusSucceeded || attempt.Status == AttemptStatusFailed || attempt.Status == AttemptStatusCancelled || attempt.Status == AttemptStatusInterrupted {
+			if reconcileErr := o.reconcileTerminalCurrent(ctx, incident, attempt); reconcileErr != nil {
+				recoveredErr = errors.Join(recoveredErr, reconcileErr)
+			}
+		}
+	}
 	return recoveredErr
+}
+
+func (o *CaseOrchestrator) recoverDeploymentVerification(ctx context.Context, incident IncidentCase) error {
+	originalVersion := incident.Version - 1
+	if originalVersion < 1 {
+		return nil
+	}
+	resultKey := fmt.Sprintf("deployment-result:%s:v%d", incident.ID, originalVersion)
+	if found, err := o.hasEvent(ctx, incident.ID, resultKey); err != nil || found {
+		return err
+	}
+	changes, err := o.store.ListCodeChanges(ctx, incident.ID)
+	if err != nil {
+		return err
+	}
+	expected := map[string]string{}
+	for _, change := range changes {
+		if change.PushStatus == "pushed" {
+			if change.MergeCommit != "" {
+				expected[change.Repo] = change.MergeCommit
+			} else {
+				expected[change.Repo] = change.FixCommit
+			}
+		}
+	}
+	if len(expected) == 0 || o.deployment == nil {
+		return nil
+	}
+	observation, verifyErr := o.deployment.Verify(ctx, DeploymentVerificationRequest{CaseID: incident.ID, Environment: incident.Environment, ExpectedCommits: expected})
+	cmd := NotifyDeployedCommand{CaseID: incident.ID, ExpectedVersion: originalVersion, IdempotencyKey: "recovery", ActorID: "recovery", Bug: Bug{ID: incident.BugID, Source: incident.Source, SystemID: incident.SystemID, Env: incident.Environment}, Bot: BotRef{Key: incident.SelectedBotKey}}
+	_, recordErr := o.recordDeploymentResult(incident, cmd, expected, observation, verifyErr)
+	return recordErr
 }
 
 func (o *CaseOrchestrator) recoverMergeWithoutAttempt(ctx context.Context, incident IncidentCase) error {
@@ -75,18 +128,12 @@ func (o *CaseOrchestrator) recoverAttempt(ctx context.Context, attempt PhaseAtte
 		if CanTransition(incident.Status, statusForPhase(attempt.Phase)) {
 			return o.recoverPreparedAttempt(ctx, incident, attempt)
 		}
-		return o.interruptDetachedAttempt(ctx, attempt)
+		return o.interruptDetachedAttempt(ctx, incident, attempt)
 	}
 	attempt.Status = AttemptStatusInterrupted
 	attempt.OutputJSON = []byte(`{}`)
 	attempt.ErrorCode = "studio_restarted"
 	attempt.ErrorMessage = "phase process was interrupted by Studio restart"
-	if err := o.store.FinishAttempt(ctx, attempt); err != nil {
-		if errors.Is(err, ErrAttemptAlreadyFinished) {
-			return nil
-		}
-		return err
-	}
 	switch incident.Status {
 	case CaseValidating, CaseInvestigating:
 		return o.recoverReadOnly(ctx, incident, attempt, true)
@@ -97,12 +144,42 @@ func (o *CaseOrchestrator) recoverAttempt(ctx context.Context, attempt PhaseAtte
 		}
 		return o.recoverReadOnly(ctx, incident, attempt, matched)
 	case CaseFixing:
+		if err := o.reserveInterruptedSideEffect(ctx, incident, attempt); err != nil {
+			return err
+		}
+		incident, err = o.store.GetCase(ctx, incident.ID)
+		if err != nil {
+			return err
+		}
 		return o.recoverFix(ctx, incident, attempt)
 	case CaseMerging:
+		if err := o.reserveInterruptedSideEffect(ctx, incident, attempt); err != nil {
+			return err
+		}
+		incident, err = o.store.GetCase(ctx, incident.ID)
+		if err != nil {
+			return err
+		}
 		return o.recoverMerge(ctx, incident, attempt)
 	default:
 		return nil
 	}
+}
+
+func (o *CaseOrchestrator) reserveInterruptedSideEffect(ctx context.Context, incident IncidentCase, attempt PhaseAttempt) error {
+	key := "recovery:" + attempt.ID + ":inspect"
+	_, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: mustJSON(map[string]string{"attempt_id": attempt.ID}), FinishAttempts: []PhaseAttempt{attempt}, Steps: []CaseMutationStep{{To: incident.Status, AuditOnly: true, Event: TransitionEvent{ID: stableID("event", key), EventType: "side_effect_inspection_reserved", ActorType: "recovery", ActorID: "recovery", PayloadJSON: mustJSON(map[string]string{"attempt_id": attempt.ID})}}}})
+	return err
+}
+
+func (o *CaseOrchestrator) reconcileTerminalCurrent(ctx context.Context, incident IncidentCase, attempt PhaseAttempt) error {
+	to := failureStateForPhase(attempt.Phase)
+	if !CanTransition(incident.Status, to) {
+		return nil
+	}
+	key := "recovery:" + attempt.ID + ":terminal-reconcile"
+	_, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: mustJSON(map[string]any{"attempt_id": attempt.ID, "status": attempt.Status}), Steps: []CaseMutationStep{{To: to, Event: TransitionEvent{ID: stableID("event", key), EventType: "terminal_attempt_reconciled", ActorType: "recovery", ActorID: "recovery", PayloadJSON: mustJSON(map[string]string{"attempt_id": attempt.ID})}}}})
+	return err
 }
 
 func (o *CaseOrchestrator) recoverPreparedAttempt(ctx context.Context, incident IncidentCase, attempt PhaseAttempt) error {
@@ -122,19 +199,18 @@ func (o *CaseOrchestrator) recoverPreparedAttempt(ctx context.Context, incident 
 		_, scheduleErr := o.phaseScheduleFailure(ctx, updated, attempt, key, err)
 		return scheduleErr
 	}
-	o.recoveryStarted[attempt.ID] = struct{}{}
+	o.markRecoveryStarted(attempt.ID)
 	return nil
 }
 
-func (o *CaseOrchestrator) interruptDetachedAttempt(ctx context.Context, attempt PhaseAttempt) error {
+func (o *CaseOrchestrator) interruptDetachedAttempt(ctx context.Context, incident IncidentCase, attempt PhaseAttempt) error {
 	attempt.Status = AttemptStatusInterrupted
 	attempt.OutputJSON = []byte(`{}`)
 	attempt.ErrorCode = "detached_attempt"
 	attempt.ErrorMessage = "attempt was not the current Case attempt during recovery"
-	if err := o.store.FinishAttempt(ctx, attempt); err != nil && !errors.Is(err, ErrAttemptAlreadyFinished) {
-		return err
-	}
-	return nil
+	key := "recovery:" + attempt.ID + ":detached"
+	_, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: mustJSON(map[string]string{"attempt_id": attempt.ID}), FinishAttempts: []PhaseAttempt{attempt}, Steps: []CaseMutationStep{{To: incident.Status, AuditOnly: true, Event: TransitionEvent{ID: stableID("event", key), EventType: "detached_attempt_interrupted", ActorType: "recovery", ActorID: "recovery", PayloadJSON: mustJSON(map[string]string{"attempt_id": attempt.ID})}}}})
+	return err
 }
 
 func (o *CaseOrchestrator) recoverReadOnly(ctx context.Context, incident IncidentCase, attempt PhaseAttempt, retryAllowed bool) error {
@@ -148,48 +224,78 @@ func (o *CaseOrchestrator) recoverReadOnly(ctx context.Context, incident Inciden
 			count++
 		}
 	}
-	waiting, _, err := o.transition(ctx, incident, CaseWaitingEvidence, "recovery:"+attempt.ID+":interrupted", "recovery", "attempt_interrupted", map[string]string{"attempt_id": attempt.ID}, CaseSnapshotUpdate{})
+	key := "recovery:" + attempt.ID + ":interrupted"
+	steps := []CaseMutationStep{{To: CaseWaitingEvidence, Event: TransitionEvent{ID: stableID("event", key), EventType: "attempt_interrupted", ActorType: "recovery", ActorID: "recovery", PayloadJSON: mustJSON(map[string]string{"attempt_id": attempt.ID})}}}
+	creates := []PhaseAttempt{}
+	update := CaseSnapshotUpdate{}
+	empty := ""
+	update.CurrentAttemptID = &empty
+	var retry PhaseAttempt
+	if retryAllowed && count < 2 {
+		bot := BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget}
+		retry = newAttempt(incident, attempt.Phase, attempt.Mode, key+":retry", bot, attempt.InputJSON, attempt.ID)
+		creates = append(creates, retry)
+		update.CurrentAttemptID = workflowStringPtr(retry.ID)
+		steps = append(steps, CaseMutationStep{To: statusForPhase(attempt.Phase), Event: TransitionEvent{ID: stableID("event", key+":retry"), EventType: "interrupted_attempt_retried", ActorType: "recovery", ActorID: "recovery", PayloadJSON: mustJSON(map[string]string{"attempt_id": retry.ID})}})
+	}
+	mutation, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: mustJSON(map[string]any{"attempt_id": attempt.ID, "retry": retryAllowed, "count": count}), FinishAttempts: []PhaseAttempt{attempt}, CreateAttempts: creates, Snapshot: update, Steps: steps})
 	if err != nil {
 		return err
 	}
-	if !retryAllowed || count >= 2 {
+	if len(creates) == 0 || mutation.Replay {
 		return nil
 	}
-	key := "recovery:" + attempt.ID + ":retry"
-	bot := BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget}
-	retry := newAttempt(waiting, attempt.Phase, attempt.Mode, key, bot, attempt.InputJSON, attempt.ID)
-	bug := Bug{ID: waiting.BugID, Source: waiting.Source, SystemID: waiting.SystemID, Env: waiting.Environment}
-	updated, err := o.beginPhase(ctx, waiting, statusForPhase(attempt.Phase), retry, bug, bot, key, "recovery", "interrupted_attempt_retried")
-	if err == nil && updated.CurrentAttemptID == retry.ID {
-		o.recoveryStarted[retry.ID] = struct{}{}
+	bug := Bug{ID: incident.BugID, Source: incident.Source, SystemID: incident.SystemID, Env: incident.Environment}
+	bot := BotRef{Key: retry.BotKey, Target: retry.AgentTarget}
+	if o.runner == nil {
+		_, err = o.phaseScheduleFailure(ctx, mutation.Case, retry, key+":retry", errors.New("phase runner unavailable"))
+		return err
 	}
-	return err
+	if startErr := o.runner.Start(ctx, retry, bug, bot); startErr != nil {
+		_, err = o.phaseScheduleFailure(ctx, mutation.Case, retry, key+":retry", startErr)
+		return err
+	}
+	o.markRecoveryStarted(retry.ID)
+	return nil
 }
 
 func (o *CaseOrchestrator) recoverFix(ctx context.Context, incident IncidentCase, attempt PhaseAttempt) error {
-	request, err := decodeRecoveryMergeRequest(incident.ID, attempt.InputJSON)
+	changes, err := o.store.ListCodeChanges(ctx, incident.ID)
 	if err != nil {
-		_, _, transitionErr := o.transition(ctx, incident, CaseFixFailed, "recovery:"+attempt.ID+":invalid", "recovery", "fix_recovery_failed", map[string]string{"error": err.Error()}, CaseSnapshotUpdate{})
-		return transitionErr
-	}
-	if o.git == nil {
-		_, _, err := o.transition(ctx, incident, CaseFixFailed, "recovery:"+attempt.ID+":unavailable", "recovery", "fix_recovery_failed", map[string]string{"error": "git integration is unavailable"}, CaseSnapshotUpdate{})
 		return err
 	}
-	inspection, inspectErr := o.git.Inspect(ctx, request)
+	relevant := []CodeChange{}
+	for _, change := range changes {
+		if change.AttemptID == attempt.ID {
+			relevant = append(relevant, change)
+		}
+	}
+	if o.git == nil {
+		return o.finishFixRecovery(ctx, incident, attempt, relevant, false, "git integration unavailable")
+	}
+	inspection, inspectErr := o.git.InspectFix(ctx, FixInspectionRequest{CaseID: incident.ID, Attempt: attempt.Clone(), Changes: relevant})
 	if inspectErr != nil || !inspection.FixPushed {
 		message := "fix commit is not confirmed pushed"
 		if inspectErr != nil {
 			message = inspectErr.Error()
 		}
-		_, _, err := o.transition(ctx, incident, CaseFixFailed, "recovery:"+attempt.ID+":failed", "recovery", "fix_recovery_failed", map[string]string{"error": message}, CaseSnapshotUpdate{})
-		return err
+		return o.finishFixRecovery(ctx, incident, attempt, relevant, false, message)
 	}
-	pushed, _, err := o.transition(ctx, incident, CaseFixPushed, "recovery:"+attempt.ID+":pushed", "recovery", "fix_push_confirmed", inspection, CaseSnapshotUpdate{})
-	if err != nil {
-		return err
+	return o.finishFixRecovery(ctx, incident, attempt, relevant, true, "")
+}
+
+func (o *CaseOrchestrator) finishFixRecovery(ctx context.Context, incident IncidentCase, attempt PhaseAttempt, changes []CodeChange, pushed bool, message string) error {
+	key := "recovery:" + attempt.ID + ":result"
+	steps := []CaseMutationStep{}
+	if pushed {
+		for i := range changes {
+			changes[i].PushStatus = "pushed"
+		}
+		steps = append(steps, CaseMutationStep{To: CaseFixPushed, Event: TransitionEvent{ID: stableID("event", key), EventType: "fix_push_confirmed", ActorType: "recovery", ActorID: "recovery", PayloadJSON: mustJSON(map[string]string{"attempt_id": attempt.ID})}}, CaseMutationStep{To: CaseWaitingMergeApproval, Event: TransitionEvent{ID: stableID("event", key+":approval"), EventType: "merge_approval_requested", ActorType: "studio", ActorID: "orchestrator", PayloadJSON: mustJSON(map[string]string{"attempt_id": attempt.ID})}})
+	} else {
+		steps = append(steps, CaseMutationStep{To: CaseFixFailed, Event: TransitionEvent{ID: stableID("event", key), EventType: "fix_recovery_failed", ActorType: "recovery", ActorID: "recovery", PayloadJSON: mustJSON(map[string]string{"error": message})}})
 	}
-	_, _, err = o.transition(ctx, pushed, CaseWaitingMergeApproval, "recovery:"+attempt.ID+":merge-approval", "recovery", "merge_approval_requested", map[string]string{"attempt_id": attempt.ID}, CaseSnapshotUpdate{})
+	_, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: mustJSON(map[string]any{"pushed": pushed, "message": message}), CodeChanges: changes, Steps: steps})
 	return err
 }
 
@@ -203,20 +309,44 @@ func (o *CaseOrchestrator) recoverMerge(ctx context.Context, incident IncidentCa
 }
 
 func (o *CaseOrchestrator) inspectInterruptedMerge(ctx context.Context, incident IncidentCase, request MergeRequest, key string) error {
+	allChanges, loadErr := o.store.ListCodeChanges(ctx, incident.ID)
+	if loadErr != nil {
+		return loadErr
+	}
+	changes := []CodeChange{}
+	for _, change := range allChanges {
+		if _, ok := request.FixCommits[change.Repo]; ok {
+			changes = append(changes, change)
+		}
+	}
 	if o.git == nil {
-		_, _, err := o.transition(ctx, incident, CaseMergeConflict, key+":unavailable", "recovery", "merge_recovery_failed", map[string]string{"error": "git integration is unavailable"}, CaseSnapshotUpdate{})
+		_, err := o.recordMergeAmbiguous(incident, key, changes, errors.New("git integration unavailable"))
 		return err
 	}
 	inspection, inspectErr := o.git.Inspect(ctx, request)
-	if inspectErr != nil || !inspection.MergePushed {
-		message := "merge commit is not confirmed remote"
-		if inspectErr != nil {
-			message = inspectErr.Error()
-		}
-		_, _, err := o.transition(ctx, incident, CaseMergeConflict, key+":failed", "recovery", "merge_recovery_failed", map[string]string{"error": message}, CaseSnapshotUpdate{})
+	if inspectErr != nil {
+		_, err := o.recordMergeAmbiguous(incident, key, changes, inspectErr)
 		return err
 	}
-	_, _, err := o.transition(ctx, incident, CaseWaitingDeployment, key+":pushed", "recovery", "merge_push_confirmed", inspection, CaseSnapshotUpdate{})
+	if inspection.Conflict {
+		_, err := o.recordMergeConflict(incident, key, errors.New("merge conflict confirmed"))
+		return err
+	}
+	if !inspection.MergePushed {
+		_, err := o.recordMergeAmbiguous(incident, key, changes, errors.New("merge push is incomplete"))
+		return err
+	}
+	for i := range changes {
+		commit := inspection.MergeCommits[changes[i].Repo]
+		if commit == "" {
+			_, err := o.recordMergeAmbiguous(incident, key, changes, errors.New("merge commit is missing"))
+			return err
+		}
+		changes[i].MergeCommit = commit
+		changes[i].PushStatus = "pushed"
+	}
+	doneKey := key + ":pushed"
+	_, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: doneKey, RequestJSON: mustJSON(inspection), CodeChanges: changes, Steps: []CaseMutationStep{{To: CaseWaitingDeployment, Event: TransitionEvent{ID: stableID("event", doneKey), EventType: "merge_push_confirmed", ActorType: "recovery", ActorID: "recovery", PayloadJSON: mustJSON(inspection)}}}})
 	return err
 }
 

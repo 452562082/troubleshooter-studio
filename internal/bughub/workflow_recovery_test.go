@@ -75,6 +75,25 @@ func TestRecoverPreparedAttemptAfterCrashBeforeTransition(t *testing.T) {
 	}
 }
 
+func TestRecoverPreparedQueuedAttemptAfterReservationCrash(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "recover-queued", CasePendingValidation)
+	attempt := PhaseAttempt{ID: "recover-queued-attempt", CaseID: incident.ID, CycleNumber: 1, Phase: PhaseValidation, Mode: AttemptReproduce, Status: AttemptStatusQueued, AgentTarget: "codex", BotKey: "bot", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}
+	if err := store.CreateAttempt(ctx, attempt); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingPhaseRunner{}
+	o := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
+	if err := o.RecoverInterrupted(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := store.GetCase(ctx, incident.ID)
+	if got.Status != CaseValidating || got.CurrentAttemptID != attempt.ID || runner.startCount() != 1 {
+		t.Fatalf("case=%+v starts=%d", got, runner.startCount())
+	}
+}
+
 func TestRecoverInterruptedReadOnlyPhaseStopsAfterOneRetry(t *testing.T) {
 	ctx := context.Background()
 	store := newOrchestratorStore(t)
@@ -113,9 +132,7 @@ func TestRecoverInterruptedReadOnlyPhaseStopsAfterOneRetry(t *testing.T) {
 func TestRecoverInterruptedFixInspectsExternalStateAndNeverBlindlyRetries(t *testing.T) {
 	ctx := context.Background()
 	store := newOrchestratorStore(t)
-	request := MergeRequest{CaseID: "recover-fix", FixCommits: map[string]string{"repo": "fix-1"}, TargetBranches: map[string]string{"repo": "test"}}
-	input, _ := json.Marshal(request)
-	incident, _ := createRunningPhase(t, store, request.CaseID, CaseWaitingFixApproval, CaseFixing, PhaseFix, "", input)
+	incident, _ := createRunningPhase(t, store, "recover-fix", CaseWaitingFixApproval, CaseFixing, PhaseFix, "", []byte(`{"fix_branch":"fix/bug","workspace":"/repo"}`))
 	runner := &recordingPhaseRunner{}
 	git := &recordingGitIntegration{inspection: MergeInspection{FixPushed: true}}
 	o := NewCaseOrchestrator(store, runner, git, &recordingDeploymentVerifier{})
@@ -139,6 +156,14 @@ func TestRecoverInterruptedMergeInspectsRemoteBeforeAdvancing(t *testing.T) {
 	store := newOrchestratorStore(t)
 	request := MergeRequest{CaseID: "recover-merge", FixCommits: map[string]string{"repo": "fix-1"}, TargetBranches: map[string]string{"repo": "test"}}
 	incident := createWorkflowCase(t, store, request.CaseID, CaseWaitingMergeApproval)
+	now := time.Now().UTC()
+	fixAttempt := PhaseAttempt{ID: "recover-merge-fix", CaseID: incident.ID, CycleNumber: 1, Phase: PhaseFix, Status: AttemptStatusSucceeded, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`), FinishedAt: &now}
+	if err := store.CreateAttempt(ctx, fixAttempt); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordCodeChange(ctx, CodeChange{ID: "recover-merge-change", CaseID: incident.ID, AttemptID: fixAttempt.ID, Repo: "repo", BaseBranch: "main", FixBranch: "fix/bug", FixCommit: "fix-1", TestEvidence: []byte(`{}`), TargetEnvironmentBranch: "test", PushStatus: "pushed"}); err != nil {
+		t.Fatal(err)
+	}
 	scope, _ := json.Marshal(map[string]any{"fix_commits": request.FixCommits, "target_branches": request.TargetBranches})
 	approval := Approval{ID: "recover-merge-approval", CaseID: incident.ID, Kind: ApprovalMergeEnvironmentBranch, Actor: "alice", CaseVersion: incident.Version, ScopeJSON: scope, FixCommits: request.FixCommits, TargetBranches: request.TargetBranches}
 	if err := store.RecordApproval(ctx, approval, "recover-merge-approval"); err != nil {
@@ -179,5 +204,24 @@ func TestRecoverInterruptedRegressionRequiresLatestMatchedDeployment(t *testing.
 	}
 	if got.Status != CaseRegressionValidating || runner.startCount() != 1 {
 		t.Fatalf("case=%+v starts=%d", got, runner.startCount())
+	}
+}
+
+func TestRecoverInterruptedReconcilesTerminalCurrentAttempt(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident, attempt := createRunningPhase(t, store, "recover-terminal", CasePendingValidation, CaseValidating, PhaseValidation, AttemptReproduce, []byte(`{}`))
+	attempt.Status = AttemptStatusFailed
+	attempt.OutputJSON = []byte(`{"error":"crash-after-finish"}`)
+	if err := store.FinishAttempt(ctx, attempt); err != nil {
+		t.Fatal(err)
+	}
+	o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
+	if err := o.RecoverInterrupted(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := store.GetCase(ctx, incident.ID)
+	if got.Status != CaseWaitingEvidence {
+		t.Fatalf("case=%+v", got)
 	}
 }

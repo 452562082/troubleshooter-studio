@@ -867,6 +867,365 @@ type CaseSnapshotUpdate struct {
 	ClosedAt         *time.Time
 }
 
+// CaseMutation is the single typed write boundary used by the orchestrator.
+// All records, attempt changes, ordered transition/audit events, and the final
+// Case snapshot commit or roll back together under one Case-version CAS.
+type CaseMutation struct {
+	CaseID          string
+	ExpectedVersion int64
+	IdempotencyKey  string
+	RequestJSON     json.RawMessage
+	Steps           []CaseMutationStep
+	CreateAttempts  []PhaseAttempt
+	FinishAttempts  []PhaseAttempt
+	Approvals       []Approval
+	CodeChanges     []CodeChange
+	Observations    []DeploymentObservation
+	Snapshot        CaseSnapshotUpdate
+}
+
+type CaseMutationStep struct {
+	To        CaseStatus
+	AuditOnly bool
+	Event     TransitionEvent
+}
+
+type CaseMutationResult struct {
+	Case     IncidentCase
+	Attempts []PhaseAttempt
+	Replay   bool
+}
+
+func (m CaseMutation) clone() CaseMutation {
+	cloned := m
+	cloned.RequestJSON = CloneRawMessage(m.RequestJSON)
+	cloned.Steps = append([]CaseMutationStep(nil), m.Steps...)
+	for index := range cloned.Steps {
+		cloned.Steps[index].Event = cloned.Steps[index].Event.Clone()
+	}
+	cloned.CreateAttempts = make([]PhaseAttempt, len(m.CreateAttempts))
+	for i := range m.CreateAttempts {
+		cloned.CreateAttempts[i] = m.CreateAttempts[i].Clone()
+	}
+	cloned.FinishAttempts = make([]PhaseAttempt, len(m.FinishAttempts))
+	for i := range m.FinishAttempts {
+		cloned.FinishAttempts[i] = m.FinishAttempts[i].Clone()
+	}
+	cloned.Approvals = make([]Approval, len(m.Approvals))
+	for i := range m.Approvals {
+		cloned.Approvals[i] = m.Approvals[i].Clone()
+	}
+	cloned.CodeChanges = make([]CodeChange, len(m.CodeChanges))
+	for i := range m.CodeChanges {
+		cloned.CodeChanges[i] = m.CodeChanges[i].Clone()
+	}
+	cloned.Observations = make([]DeploymentObservation, len(m.Observations))
+	for i := range m.Observations {
+		cloned.Observations[i] = m.Observations[i].Clone()
+	}
+	cloned.Snapshot.CurrentAttemptID = cloneStringPtr(m.Snapshot.CurrentAttemptID)
+	cloned.Snapshot.SelectedBotKey = cloneStringPtr(m.Snapshot.SelectedBotKey)
+	cloned.Snapshot.CycleNumber = cloneIntPtr(m.Snapshot.CycleNumber)
+	cloned.Snapshot.ClosedAt = cloneTimePtr(m.Snapshot.ClosedAt)
+	return cloned
+}
+
+func (s *CaseStore) ApplyCaseMutation(ctx context.Context, mutation CaseMutation) (result CaseMutationResult, err error) {
+	mutation = mutation.clone()
+	if blank(mutation.CaseID) || mutation.ExpectedVersion < 1 || blank(mutation.IdempotencyKey) {
+		return result, errors.New("compound Case mutation requires case ID, positive expected version, and idempotency key")
+	}
+	if len(mutation.RequestJSON) == 0 || !json.Valid(mutation.RequestJSON) {
+		return result, errors.New("compound Case mutation request must be valid JSON")
+	}
+	fingerprint, err := caseMutationFingerprint(mutation)
+	if err != nil {
+		return result, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return result, fmt.Errorf("begin compound Case mutation: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	var existingFingerprint, resultJSON string
+	queryErr := tx.QueryRowContext(ctx, `SELECT request_fingerprint, result_case_json FROM transition_events WHERE idempotency_key = ?`, mutation.IdempotencyKey).Scan(&existingFingerprint, &resultJSON)
+	if queryErr == nil {
+		if existingFingerprint != fingerprint {
+			return result, fmt.Errorf("%w: compound mutation key %q", ErrIdempotencyConflict, mutation.IdempotencyKey)
+		}
+		if err = json.Unmarshal([]byte(resultJSON), &result.Case); err != nil {
+			return result, fmt.Errorf("decode compound replay: %w", err)
+		}
+		for _, attempt := range append(append([]PhaseAttempt(nil), mutation.CreateAttempts...), mutation.FinishAttempts...) {
+			stored, loadErr := getAttempt(ctx, tx, attempt.ID)
+			if loadErr != nil {
+				return result, loadErr
+			}
+			result.Attempts = append(result.Attempts, stored)
+		}
+		result.Replay = true
+		if err = tx.Commit(); err != nil {
+			return result, err
+		}
+		return cloneCaseMutationResult(result), nil
+	}
+	if !errors.Is(queryErr, sql.ErrNoRows) {
+		return result, queryErr
+	}
+	incident, err := getCase(ctx, tx, mutation.CaseID)
+	if err != nil {
+		return result, err
+	}
+	if incident.Version != mutation.ExpectedVersion {
+		return result, fmt.Errorf("%w: expected %d, current %d", ErrCaseVersionConflict, mutation.ExpectedVersion, incident.Version)
+	}
+	if len(mutation.Steps) == 0 {
+		mutation.Steps = []CaseMutationStep{{To: incident.Status, AuditOnly: true, Event: TransitionEvent{ID: "mutation-" + mutation.IdempotencyKey, EventType: "compound_mutation", ActorType: "studio", ActorID: "case-store", PayloadJSON: []byte(`{}`)}}}
+	}
+	status := incident.Status
+	for index := range mutation.Steps {
+		step := &mutation.Steps[index]
+		step.Event.CaseID = incident.ID
+		step.Event.FromStatus = status
+		if step.Event.IdempotencyKey == "" {
+			if index == 0 {
+				step.Event.IdempotencyKey = mutation.IdempotencyKey
+			} else {
+				step.Event.IdempotencyKey = fmt.Sprintf("%s:step:%d", mutation.IdempotencyKey, index)
+			}
+		}
+		if index == 0 && step.Event.IdempotencyKey != mutation.IdempotencyKey {
+			return result, errors.New("first compound event must use the mutation idempotency key")
+		}
+		if step.AuditOnly {
+			if step.To != status {
+				return result, fmt.Errorf("audit step must retain status %s", status)
+			}
+			step.Event.ToStatus = status
+			if err = validateAuditEvent(step.Event); err != nil {
+				return result, err
+			}
+		} else {
+			if !CanTransition(status, step.To) {
+				return result, &ErrInvalidTransition{From: status, To: step.To}
+			}
+			step.Event.ToStatus = step.To
+			if err = step.Event.Validate(); err != nil {
+				return result, err
+			}
+			status = step.To
+		}
+	}
+	for index := range mutation.CreateAttempts {
+		attempt := &mutation.CreateAttempts[index]
+		if attempt.CaseID != incident.ID {
+			return result, errors.New("created attempt must belong to mutated Case")
+		}
+		if attempt.StartedAt.IsZero() {
+			attempt.StartedAt = time.Now().UTC()
+		}
+		if err = attempt.Validate(); err != nil {
+			return result, err
+		}
+		if err = insertAttemptTx(ctx, tx, *attempt); err != nil {
+			return result, err
+		}
+		result.Attempts = append(result.Attempts, attempt.Clone())
+	}
+	for index := range mutation.FinishAttempts {
+		attempt := &mutation.FinishAttempts[index]
+		if attempt.CaseID != incident.ID {
+			return result, errors.New("finished attempt must belong to mutated Case")
+		}
+		switch attempt.Status {
+		case AttemptStatusSucceeded, AttemptStatusFailed, AttemptStatusCancelled, AttemptStatusInterrupted:
+		default:
+			return result, errors.New("compound attempt finish requires terminal status")
+		}
+		if attempt.FinishedAt == nil {
+			now := time.Now().UTC()
+			attempt.FinishedAt = &now
+		}
+		if err = attempt.Validate(); err != nil {
+			return result, err
+		}
+		execResult, execErr := tx.ExecContext(ctx, `UPDATE phase_attempts SET status=?, output_json=?, finished_at=?, error_code=?, error_message=?, input_tokens=?, output_tokens=?, duration_nanos=? WHERE id=? AND case_id=? AND status IN (?,?)`, attempt.Status, string(attempt.OutputJSON), formatOptionalStoreTime(attempt.FinishedAt), attempt.ErrorCode, attempt.ErrorMessage, attempt.Usage.InputTokens, attempt.Usage.OutputTokens, int64(attempt.Usage.Duration), attempt.ID, incident.ID, AttemptStatusQueued, AttemptStatusRunning)
+		if execErr != nil {
+			return result, execErr
+		}
+		rows, _ := execResult.RowsAffected()
+		if rows != 1 {
+			return result, fmt.Errorf("%w: %s", ErrAttemptAlreadyFinished, attempt.ID)
+		}
+		result.Attempts = append(result.Attempts, attempt.Clone())
+	}
+	for index := range mutation.Approvals {
+		if err = insertApprovalTx(ctx, tx, mutation.Approvals[index], mutation.IdempotencyKey+":approval:"+mutation.Approvals[index].ID); err != nil {
+			return result, err
+		}
+	}
+	for index := range mutation.CodeChanges {
+		if err = upsertCodeChangeTx(ctx, tx, mutation.CodeChanges[index]); err != nil {
+			return result, err
+		}
+	}
+	for index := range mutation.Observations {
+		if err = insertObservationTx(ctx, tx, mutation.Observations[index], mutation.IdempotencyKey+":observation:"+mutation.Observations[index].ID); err != nil {
+			return result, err
+		}
+	}
+	incident.Status = status
+	applyCaseSnapshot(&incident, mutation.Snapshot)
+	incident.Version++
+	now := time.Now().UTC()
+	incident.UpdatedAt = now
+	if err = incident.Validate(); err != nil {
+		return result, err
+	}
+	resultJSONBytes, _ := json.Marshal(incident.Clone())
+	updateResult, execErr := tx.ExecContext(ctx, `UPDATE incident_cases SET status=?,cycle_number=?,current_attempt_id=?,selected_bot_key=?,version=?,updated_at=?,closed_at=? WHERE id=? AND version=?`, incident.Status, incident.CycleNumber, incident.CurrentAttemptID, incident.SelectedBotKey, incident.Version, formatStoreTime(now), formatOptionalStoreTime(incident.ClosedAt), incident.ID, mutation.ExpectedVersion)
+	if execErr != nil {
+		return result, execErr
+	}
+	rows, _ := updateResult.RowsAffected()
+	if rows != 1 {
+		return result, ErrCaseVersionConflict
+	}
+	for index, step := range mutation.Steps {
+		created := step.Event.CreatedAt
+		if created.IsZero() {
+			created = now.Add(time.Duration(index) * time.Nanosecond)
+		}
+		_, execErr = tx.ExecContext(ctx, `INSERT INTO transition_events (id,case_id,from_status,to_status,event_type,actor_type,actor_id,idempotency_key,payload_json,created_at,request_fingerprint,result_case_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, step.Event.ID, incident.ID, step.Event.FromStatus, step.Event.ToStatus, step.Event.EventType, step.Event.ActorType, step.Event.ActorID, step.Event.IdempotencyKey, string(step.Event.PayloadJSON), formatStoreTime(created), fingerprint, string(resultJSONBytes))
+		if execErr != nil {
+			return result, execErr
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return result, err
+	}
+	result.Case = incident.Clone()
+	return cloneCaseMutationResult(result), nil
+}
+
+func insertAttemptTx(ctx context.Context, tx *sql.Tx, a PhaseAttempt) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO phase_attempts (id,case_id,cycle_number,phase,mode,status,agent_target,bot_key,input_json,output_json,parent_attempt_id,started_at,finished_at,error_code,error_message,input_tokens,output_tokens,duration_nanos) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, a.ID, a.CaseID, a.CycleNumber, a.Phase, a.Mode, a.Status, a.AgentTarget, a.BotKey, string(a.InputJSON), string(a.OutputJSON), a.ParentAttemptID, formatStoreTime(a.StartedAt), formatOptionalStoreTime(a.FinishedAt), a.ErrorCode, a.ErrorMessage, a.Usage.InputTokens, a.Usage.OutputTokens, int64(a.Usage.Duration))
+	return err
+}
+
+func insertApprovalTx(ctx context.Context, tx *sql.Tx, a Approval, key string) error {
+	if a.ApprovedAt.IsZero() {
+		a.ApprovedAt = time.Now().UTC()
+	}
+	if err := a.Validate(); err != nil {
+		return err
+	}
+	fixes, _ := marshalStringMap(a.FixCommits)
+	targets, _ := marshalStringMap(a.TargetBranches)
+	_, err := tx.ExecContext(ctx, `INSERT INTO approvals (id,case_id,kind,actor,approved_at,case_version,scope_json,fix_commits_json,target_branches_json,idempotency_key) VALUES (?,?,?,?,?,?,?,?,?,?)`, a.ID, a.CaseID, a.Kind, a.Actor, formatStoreTime(a.ApprovedAt), a.CaseVersion, string(a.ScopeJSON), fixes, targets, key)
+	return err
+}
+
+func upsertCodeChangeTx(ctx context.Context, tx *sql.Tx, c CodeChange) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	var caseID, attemptID, repo, base, branch, commit string
+	err := tx.QueryRowContext(ctx, `SELECT case_id,attempt_id,repo,base_branch,fix_branch,fix_commit FROM code_changes WHERE id=?`, c.ID).Scan(&caseID, &attemptID, &repo, &base, &branch, &commit)
+	if errors.Is(err, sql.ErrNoRows) {
+		_, err = tx.ExecContext(ctx, `INSERT INTO code_changes (id,case_id,attempt_id,repo,base_branch,fix_branch,fix_commit,test_evidence_json,target_environment_branch,merge_base_head,merge_commit,push_remote,push_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, c.ID, c.CaseID, c.AttemptID, c.Repo, c.BaseBranch, c.FixBranch, c.FixCommit, string(c.TestEvidence), c.TargetEnvironmentBranch, c.MergeBaseHead, c.MergeCommit, c.PushRemote, c.PushStatus)
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	if caseID != c.CaseID || attemptID != c.AttemptID || repo != c.Repo || base != c.BaseBranch || branch != c.FixBranch || commit != c.FixCommit {
+		return ErrIdempotencyConflict
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE code_changes SET test_evidence_json=?,target_environment_branch=?,merge_base_head=?,merge_commit=?,push_remote=?,push_status=? WHERE id=?`, string(c.TestEvidence), c.TargetEnvironmentBranch, c.MergeBaseHead, c.MergeCommit, c.PushRemote, c.PushStatus, c.ID)
+	return err
+}
+
+func insertObservationTx(ctx context.Context, tx *sql.Tx, o DeploymentObservation, key string) error {
+	if err := o.Validate(); err != nil {
+		return err
+	}
+	expected, _ := marshalStringMap(o.ExpectedCommits)
+	images, _ := marshalStringMap(o.ObservedImages)
+	commits, _ := marshalStringMap(o.ObservedCommits)
+	_, err := tx.ExecContext(ctx, `INSERT INTO deployment_observations (id,case_id,environment,expected_commits_json,user_notified_at,verification_source,observed_version,observed_images_json,observed_commits_json,verified_at,result,idempotency_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, o.ID, o.CaseID, o.Environment, expected, formatOptionalStoreTime(o.UserNotifiedAt), o.VerificationSource, o.ObservedVersion, images, commits, formatOptionalStoreTime(o.VerifiedAt), o.Result, key)
+	return err
+}
+
+func applyCaseSnapshot(c *IncidentCase, u CaseSnapshotUpdate) {
+	if u.CurrentAttemptID != nil {
+		c.CurrentAttemptID = *u.CurrentAttemptID
+	}
+	if u.SelectedBotKey != nil {
+		c.SelectedBotKey = *u.SelectedBotKey
+	}
+	if u.CycleNumber != nil {
+		c.CycleNumber = *u.CycleNumber
+	}
+	if u.ClosedAtSet {
+		c.ClosedAt = cloneTimePtr(u.ClosedAt)
+	}
+}
+
+func validateAuditEvent(e TransitionEvent) error {
+	if blank(e.ID) || blank(e.CaseID) || e.FromStatus != e.ToStatus || !e.FromStatus.valid() {
+		return errors.New("invalid audit event status")
+	}
+	if blank(e.EventType) || blank(e.ActorType) || blank(e.ActorID) || blank(e.IdempotencyKey) || len(e.PayloadJSON) == 0 || !json.Valid(e.PayloadJSON) {
+		return errors.New("invalid audit event")
+	}
+	return nil
+}
+
+func caseMutationFingerprint(m CaseMutation) (string, error) {
+	encoded, err := json.Marshal(m)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	h.Write(encoded)
+	raws := []json.RawMessage{m.RequestJSON}
+	for _, s := range m.Steps {
+		raws = append(raws, s.Event.PayloadJSON)
+	}
+	for _, a := range m.CreateAttempts {
+		raws = append(raws, a.InputJSON, a.OutputJSON)
+	}
+	for _, a := range m.FinishAttempts {
+		raws = append(raws, a.InputJSON, a.OutputJSON)
+	}
+	for _, a := range m.Approvals {
+		raws = append(raws, a.ScopeJSON)
+	}
+	for _, c := range m.CodeChanges {
+		raws = append(raws, c.TestEvidence)
+	}
+	for _, raw := range raws {
+		sum := sha256.Sum256(raw)
+		h.Write(sum[:])
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func cloneCaseMutationResult(r CaseMutationResult) CaseMutationResult {
+	r.Case = r.Case.Clone()
+	out := make([]PhaseAttempt, len(r.Attempts))
+	for i := range r.Attempts {
+		out[i] = r.Attempts[i].Clone()
+	}
+	r.Attempts = out
+	return r
+}
+
 type transitionFingerprintInput struct {
 	EventID          string     `json:"event_id"`
 	CaseID           string     `json:"case_id"`
@@ -1070,8 +1429,14 @@ func (s *CaseStore) ListEvents(ctx context.Context, caseID string) ([]Transition
 		if err != nil {
 			return nil, err
 		}
-		if err := event.Validate(); err != nil {
-			return nil, fmt.Errorf("validate stored transition event: %w", err)
+		var validationErr error
+		if event.FromStatus == event.ToStatus {
+			validationErr = validateAuditEvent(event)
+		} else {
+			validationErr = event.Validate()
+		}
+		if validationErr != nil {
+			return nil, fmt.Errorf("validate stored transition event: %w", validationErr)
 		}
 		events = append(events, event.Clone())
 	}

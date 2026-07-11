@@ -242,6 +242,46 @@ func TestImportLegacyRunsRedactsWholeInlineHeadersAndEventTypeButKeepsProse(t *t
 	}
 }
 
+func TestImportLegacyRunsRedactsPrefixedKeysAndCompleteQuotedValues(t *testing.T) {
+	store := openTestCaseStore(t)
+	run := InvestigationRun{
+		ID: "run-prefixed", BugID: "bug-prefixed", Status: InvestigationFailed,
+		PromptPreview: "DB_PASSWORD=\"DB-FIRST DB-SECOND \\\"DB-QUOTED\\\" DB-TAIL\"\nAWS_SECRET_ACCESS_KEY='AWS-FIRST AWS-TAIL'\nGITHUB_TOKEN=GH-CONFIG-VALUE;SAFE_SETTING=keep-me",
+		Events: []InvestigationEvent{{
+			Type:    "service.authorization=\"Digest TYPE-FIRST TYPE-TAIL\"",
+			Message: "prefix.cookie='COOKIE-FIRST COOKIE-TAIL'",
+			Raw:     map[string]any{"db_password": "JSON-DB-SECRET", "secretary": "office-manager", "password_hint": "use vault"},
+			Meta:    map[string]any{"aws.secret-access-key": "META-AWS-SECRET"},
+		}},
+		FinalMessage: "service-client_secret=\"CLIENT-FIRST CLIENT-TAIL\"",
+		Error:        "config.private-key='PRIVATE-FIRST PRIVATE-TAIL'",
+	}
+	path := writeLegacyRuns(t, []InvestigationRun{run})
+	if _, err := ImportLegacyRuns(context.Background(), store, path); err != nil {
+		t.Fatal(err)
+	}
+	attempts, err := store.ListAttempts(context.Background(), AttemptFilter{})
+	if err != nil || len(attempts) != 1 {
+		t.Fatalf("attempts=%+v err=%v", attempts, err)
+	}
+	combined := string(attempts[0].InputJSON) + string(attempts[0].OutputJSON) + attempts[0].ErrorMessage
+	for _, secret := range []string{
+		"DB-FIRST", "DB-SECOND", "DB-QUOTED", "DB-TAIL", "AWS-FIRST", "AWS-TAIL",
+		"GH-CONFIG-VALUE", "TYPE-FIRST", "TYPE-TAIL", "COOKIE-FIRST", "COOKIE-TAIL",
+		"JSON-DB-SECRET", "META-AWS-SECRET", "CLIENT-FIRST", "CLIENT-TAIL",
+		"PRIVATE-FIRST", "PRIVATE-TAIL",
+	} {
+		if strings.Contains(combined, secret) {
+			t.Fatalf("credential %q remained in %s", secret, combined)
+		}
+	}
+	for _, safe := range []string{"office-manager", "use vault", "SAFE_SETTING=keep-me"} {
+		if !strings.Contains(combined, safe) {
+			t.Fatalf("unrelated value %q was removed from %s", safe, combined)
+		}
+	}
+}
+
 func writeLegacyRuns(t *testing.T, runs []InvestigationRun) string {
 	t.Helper()
 	data, err := json.Marshal(runs)

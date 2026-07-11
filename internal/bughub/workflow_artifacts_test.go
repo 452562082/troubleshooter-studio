@@ -228,6 +228,52 @@ func TestRegisterArtifactSecretGateRejectsInlineCredentialHeadersAndStrongGeneri
 	}
 }
 
+func TestRegisterArtifactSecretGateNormalizesPrefixedKeysAndQuotedValues(t *testing.T) {
+	ctx := context.Background()
+	store := openTestCaseStore(t)
+	createTestCase(t, store, "case-prefixed-keys")
+	attempt := validRunningAttempt("attempt-prefixed-keys", "case-prefixed-keys")
+	if err := store.CreateAttempt(ctx, attempt); err != nil {
+		t.Fatal(err)
+	}
+	positives := []string{
+		`DB_PASSWORD="db value with spaces and \"escaped quote\" tail"`,
+		`AWS_SECRET_ACCESS_KEY='aws value with spaces tail'`,
+		`GITHUB_TOKEN=short-config-value`,
+		`service.api-key="api key value"`,
+		`service_client_secret='client secret value'`,
+		`proxy.authorization="Digest username=admin response=abcdef"`,
+		`http_cookie='session=abc; other=def'`,
+		`{"db_password":"json-secret","nested":{"aws.secret-access-key":"aws-json-secret"}}`,
+	}
+	for index, content := range positives {
+		source := filepath.Join(t.TempDir(), fmt.Sprintf("prefixed-positive-%d.txt", index))
+		if err := os.WriteFile(source, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		input := ArtifactInput{ArtifactsRoot: resolvedTempDir(t), SourcePath: source, CaseID: "case-prefixed-keys", AttemptID: attempt.ID, Kind: fmt.Sprintf("positive-%d", index), RedactionStatus: RedactionStatusNotRequired}
+		if _, err := RegisterArtifact(ctx, store, input); err == nil {
+			t.Fatalf("prefixed credential was accepted: %q", content)
+		}
+	}
+
+	negatives := []string{
+		`SECRETARY=office-manager`,
+		`PASSWORD_HINT="use the company vault"`,
+		`{"secretary":"office-manager","password_hint":"use vault"}`,
+	}
+	for index, content := range negatives {
+		source := filepath.Join(t.TempDir(), fmt.Sprintf("prefixed-negative-%d.txt", index))
+		if err := os.WriteFile(source, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		input := ArtifactInput{ArtifactsRoot: resolvedTempDir(t), SourcePath: source, CaseID: "case-prefixed-keys", AttemptID: attempt.ID, Kind: fmt.Sprintf("negative-%d", index), RedactionStatus: RedactionStatusNotRequired}
+		if _, err := RegisterArtifact(ctx, store, input); err != nil {
+			t.Fatalf("unrelated key was rejected %q: %v", content, err)
+		}
+	}
+}
+
 func TestRegisterArtifactContentAddressIgnoresExtensionAndConcurrentRoot(t *testing.T) {
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "private", "workflows.db")

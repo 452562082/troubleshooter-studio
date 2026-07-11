@@ -1,8 +1,10 @@
 package bughub
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -49,6 +51,46 @@ const (
 	AttemptRegression AttemptMode = "regression"
 )
 
+type AttemptStatus string
+
+const (
+	AttemptStatusQueued      AttemptStatus = "queued"
+	AttemptStatusRunning     AttemptStatus = "running"
+	AttemptStatusSucceeded   AttemptStatus = "succeeded"
+	AttemptStatusFailed      AttemptStatus = "failed"
+	AttemptStatusCancelled   AttemptStatus = "cancelled"
+	AttemptStatusInterrupted AttemptStatus = "interrupted"
+)
+
+func AttemptStatusFromInvestigationStatus(status InvestigationStatus) (AttemptStatus, error) {
+	attemptStatus := AttemptStatus(status)
+	if !attemptStatus.valid() || attemptStatus == AttemptStatusInterrupted {
+		return "", fmt.Errorf("unsupported investigation status %q", status)
+	}
+	return attemptStatus, nil
+}
+
+func (s AttemptStatus) InvestigationStatus() (InvestigationStatus, error) {
+	if !s.valid() || s == AttemptStatusInterrupted {
+		return "", fmt.Errorf("attempt status %q has no investigation status equivalent", s)
+	}
+	return InvestigationStatus(s), nil
+}
+
+func (s AttemptStatus) valid() bool {
+	switch s {
+	case AttemptStatusQueued,
+		AttemptStatusRunning,
+		AttemptStatusSucceeded,
+		AttemptStatusFailed,
+		AttemptStatusCancelled,
+		AttemptStatusInterrupted:
+		return true
+	default:
+		return false
+	}
+}
+
 type IncidentCase struct {
 	ID               string     `json:"id"`
 	BugID            string     `json:"bug_id"`
@@ -65,11 +107,17 @@ type IncidentCase struct {
 	ClosedAt         *time.Time `json:"closed_at"`
 }
 
+func (c IncidentCase) Clone() IncidentCase {
+	cloned := c
+	cloned.ClosedAt = cloneTimePtr(c.ClosedAt)
+	return cloned
+}
+
 func (c IncidentCase) Validate() error {
-	if c.ID == "" {
+	if blank(c.ID) {
 		return fmt.Errorf("incident case ID is required")
 	}
-	if c.BugID == "" {
+	if blank(c.BugID) {
 		return fmt.Errorf("incident case bug ID is required")
 	}
 	if c.CycleNumber < 1 {
@@ -98,50 +146,119 @@ func (u AgentUsage) Validate() error {
 }
 
 type PhaseAttempt struct {
-	ID              string              `json:"id"`
-	CaseID          string              `json:"case_id"`
-	CycleNumber     int                 `json:"cycle_number"`
-	Phase           Phase               `json:"phase"`
-	Mode            AttemptMode         `json:"mode"`
-	Status          InvestigationStatus `json:"status"`
-	AgentTarget     string              `json:"agent_target"`
-	BotKey          string              `json:"bot_key"`
-	InputJSON       json.RawMessage     `json:"input_json"`
-	OutputJSON      json.RawMessage     `json:"output_json"`
-	ParentAttemptID string              `json:"parent_attempt_id"`
-	StartedAt       time.Time           `json:"started_at"`
-	FinishedAt      *time.Time          `json:"finished_at"`
-	ErrorCode       string              `json:"error_code"`
-	ErrorMessage    string              `json:"error_message"`
-	Usage           AgentUsage          `json:"usage"`
+	ID              string          `json:"id"`
+	CaseID          string          `json:"case_id"`
+	CycleNumber     int             `json:"cycle_number"`
+	Phase           Phase           `json:"phase"`
+	Mode            AttemptMode     `json:"mode"`
+	Status          AttemptStatus   `json:"status"`
+	AgentTarget     string          `json:"agent_target"`
+	BotKey          string          `json:"bot_key"`
+	InputJSON       json.RawMessage `json:"input_json"`
+	OutputJSON      json.RawMessage `json:"output_json"`
+	ParentAttemptID string          `json:"parent_attempt_id"`
+	StartedAt       time.Time       `json:"started_at"`
+	FinishedAt      *time.Time      `json:"finished_at"`
+	ErrorCode       string          `json:"error_code"`
+	ErrorMessage    string          `json:"error_message"`
+	Usage           AgentUsage      `json:"usage"`
+}
+
+func (a PhaseAttempt) Clone() PhaseAttempt {
+	cloned := a
+	cloned.InputJSON = CloneRawMessage(a.InputJSON)
+	cloned.OutputJSON = CloneRawMessage(a.OutputJSON)
+	cloned.FinishedAt = cloneTimePtr(a.FinishedAt)
+	return cloned
 }
 
 func (a PhaseAttempt) Validate() error {
-	if a.ID == "" {
+	return a.ValidateWithOptions(AttemptValidationOptions{})
+}
+
+type AttemptValidationOptions struct {
+	AllowLegacyMigration bool
+}
+
+func (a PhaseAttempt) ValidateWithOptions(options AttemptValidationOptions) error {
+	if blank(a.ID) {
 		return fmt.Errorf("phase attempt ID is required")
 	}
-	if a.CaseID == "" {
+	if blank(a.CaseID) {
 		return fmt.Errorf("phase attempt case ID is required")
 	}
 	if a.CycleNumber < 1 {
 		return fmt.Errorf("phase attempt cycle number must be positive")
 	}
+	if !a.Status.valid() {
+		return fmt.Errorf("unsupported phase attempt status %q", a.Status)
+	}
+	switch a.Phase {
+	case PhaseValidation:
+		if a.Mode != AttemptReproduce {
+			return fmt.Errorf("validation phase requires reproduce mode")
+		}
+	case PhaseRegression:
+		if a.Mode != AttemptRegression {
+			return fmt.Errorf("regression phase requires regression mode")
+		}
+	case PhaseInvestigation, PhaseFix:
+		if a.Mode != "" {
+			return fmt.Errorf("phase %q does not accept an attempt mode", a.Phase)
+		}
+	case PhaseLegacy:
+		if !options.AllowLegacyMigration {
+			return fmt.Errorf("legacy phase attempts may only be created during migration")
+		}
+		if a.Mode != "" {
+			return fmt.Errorf("legacy phase does not accept an attempt mode")
+		}
+	default:
+		return fmt.Errorf("unsupported phase %q", a.Phase)
+	}
 	return a.Usage.Validate()
 }
 
+type RedactionStatus string
+
+const (
+	RedactionStatusPending     RedactionStatus = "pending"
+	RedactionStatusRedacted    RedactionStatus = "redacted"
+	RedactionStatusNotRequired RedactionStatus = "not_required"
+)
+
 type EvidenceArtifact struct {
-	ID              string    `json:"id"`
-	CaseID          string    `json:"case_id"`
-	AttemptID       string    `json:"attempt_id"`
-	Kind            string    `json:"kind"`
-	PathOrReference string    `json:"path_or_reference"`
-	SHA256          string    `json:"sha256"`
-	CapturedAt      time.Time `json:"captured_at"`
-	Environment     string    `json:"environment"`
-	Version         string    `json:"version"`
-	RequestID       string    `json:"request_id"`
-	TraceID         string    `json:"trace_id"`
-	RedactionStatus string    `json:"redaction_status"`
+	ID              string          `json:"id"`
+	CaseID          string          `json:"case_id"`
+	AttemptID       string          `json:"attempt_id"`
+	Kind            string          `json:"kind"`
+	PathOrReference string          `json:"path_or_reference"`
+	SHA256          string          `json:"sha256"`
+	CapturedAt      time.Time       `json:"captured_at"`
+	Environment     string          `json:"environment"`
+	Version         string          `json:"version"`
+	RequestID       string          `json:"request_id"`
+	TraceID         string          `json:"trace_id"`
+	RedactionStatus RedactionStatus `json:"redaction_status"`
+}
+
+func (a EvidenceArtifact) Validate() error {
+	if blank(a.ID) || blank(a.CaseID) || blank(a.AttemptID) {
+		return fmt.Errorf("evidence artifact ID, case ID, and attempt ID are required")
+	}
+	if blank(a.Kind) || blank(a.PathOrReference) {
+		return fmt.Errorf("evidence artifact kind and path or reference are required")
+	}
+	sha, err := hex.DecodeString(a.SHA256)
+	if err != nil || len(sha) != 32 {
+		return fmt.Errorf("evidence artifact SHA256 must be a 64-character hexadecimal digest")
+	}
+	switch a.RedactionStatus {
+	case RedactionStatusPending, RedactionStatusRedacted, RedactionStatusNotRequired:
+		return nil
+	default:
+		return fmt.Errorf("unsupported evidence redaction status %q", a.RedactionStatus)
+	}
 }
 
 type CodeChange struct {
@@ -160,10 +277,36 @@ type CodeChange struct {
 	PushStatus              string          `json:"push_status"`
 }
 
+func (c CodeChange) Clone() CodeChange {
+	cloned := c
+	cloned.TestEvidence = CloneRawMessage(c.TestEvidence)
+	return cloned
+}
+
+func (c CodeChange) Validate() error {
+	if blank(c.ID) || blank(c.CaseID) || blank(c.AttemptID) {
+		return fmt.Errorf("code change ID, case ID, and attempt ID are required")
+	}
+	if blank(c.Repo) || blank(c.BaseBranch) || blank(c.FixBranch) || blank(c.FixCommit) {
+		return fmt.Errorf("code change repository, base branch, fix branch, and fix commit are required")
+	}
+	if len(c.TestEvidence) == 0 || !json.Valid(c.TestEvidence) {
+		return fmt.Errorf("code change test evidence must be valid JSON")
+	}
+	return nil
+}
+
+type ApprovalKind string
+
+const (
+	ApprovalStartFix               ApprovalKind = "start_fix"
+	ApprovalMergeEnvironmentBranch ApprovalKind = "merge_environment_branch"
+)
+
 type Approval struct {
 	ID             string            `json:"id"`
 	CaseID         string            `json:"case_id"`
-	Kind           string            `json:"kind"`
+	Kind           ApprovalKind      `json:"kind"`
 	Actor          string            `json:"actor"`
 	ApprovedAt     time.Time         `json:"approved_at"`
 	CaseVersion    int64             `json:"case_version"`
@@ -172,11 +315,19 @@ type Approval struct {
 	TargetBranches map[string]string `json:"target_branches"`
 }
 
+func (a Approval) Clone() Approval {
+	cloned := a
+	cloned.ScopeJSON = CloneRawMessage(a.ScopeJSON)
+	cloned.FixCommits = CloneStringMap(a.FixCommits)
+	cloned.TargetBranches = CloneStringMap(a.TargetBranches)
+	return cloned
+}
+
 func (a Approval) Validate() error {
-	if a.ID == "" {
+	if blank(a.ID) {
 		return fmt.Errorf("approval ID is required")
 	}
-	if a.CaseID == "" {
+	if blank(a.CaseID) {
 		return fmt.Errorf("approval case ID is required")
 	}
 	if a.CaseVersion < 1 {
@@ -188,8 +339,75 @@ func (a Approval) Validate() error {
 	if !json.Valid(a.ScopeJSON) {
 		return fmt.Errorf("approval scope must be valid JSON")
 	}
+	if blank(a.Actor) {
+		return fmt.Errorf("approval actor is required")
+	}
+	var scopeObject map[string]json.RawMessage
+	if err := json.Unmarshal(a.ScopeJSON, &scopeObject); err != nil || len(scopeObject) == 0 {
+		return fmt.Errorf("approval scope must be a non-empty JSON object")
+	}
+	switch a.Kind {
+	case ApprovalStartFix:
+		var scope struct {
+			RootCauseAttemptID string `json:"root_cause_attempt_id"`
+		}
+		if err := json.Unmarshal(a.ScopeJSON, &scope); err != nil {
+			return fmt.Errorf("decode start-fix approval scope: %w", err)
+		}
+		if blank(scope.RootCauseAttemptID) {
+			return fmt.Errorf("start-fix approval scope requires root_cause_attempt_id")
+		}
+	case ApprovalMergeEnvironmentBranch:
+		if err := validateNonEmptyStringMap("approval fix commits", a.FixCommits); err != nil {
+			return err
+		}
+		if err := validateNonEmptyStringMap("approval target branches", a.TargetBranches); err != nil {
+			return err
+		}
+		if !sameStringMapKeys(a.FixCommits, a.TargetBranches) {
+			return fmt.Errorf("merge approval fix commits and target branches must cover the same repositories")
+		}
+	default:
+		return fmt.Errorf("unsupported approval kind %q", a.Kind)
+	}
 	return nil
 }
+
+func validateNonEmptyStringMap(name string, values map[string]string) error {
+	if len(values) == 0 {
+		return fmt.Errorf("%s are required", name)
+	}
+	return validateStringMapEntries(name, values)
+}
+
+func validateStringMapEntries(name string, values map[string]string) error {
+	for key, value := range values {
+		if blank(key) || blank(value) {
+			return fmt.Errorf("%s must not contain empty keys or values", name)
+		}
+	}
+	return nil
+}
+
+func sameStringMapKeys(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key := range left {
+		if _, ok := right[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+type DeploymentResult string
+
+const (
+	DeploymentResultMatched     DeploymentResult = "matched"
+	DeploymentResultMismatched  DeploymentResult = "mismatched"
+	DeploymentResultUnavailable DeploymentResult = "unavailable"
+)
 
 type DeploymentObservation struct {
 	ID                 string            `json:"id"`
@@ -202,7 +420,41 @@ type DeploymentObservation struct {
 	ObservedVersion    string            `json:"observed_version"`
 	ObservedImages     map[string]string `json:"observed_images"`
 	ObservedCommits    map[string]string `json:"observed_commits"`
-	Result             string            `json:"result"`
+	Result             DeploymentResult  `json:"result"`
+}
+
+func (o DeploymentObservation) Clone() DeploymentObservation {
+	cloned := o
+	cloned.ExpectedCommits = CloneStringMap(o.ExpectedCommits)
+	cloned.ObservedImages = CloneStringMap(o.ObservedImages)
+	cloned.ObservedCommits = CloneStringMap(o.ObservedCommits)
+	cloned.UserNotifiedAt = cloneTimePtr(o.UserNotifiedAt)
+	cloned.VerifiedAt = cloneTimePtr(o.VerifiedAt)
+	return cloned
+}
+
+func (o DeploymentObservation) Validate() error {
+	if blank(o.ID) || blank(o.CaseID) {
+		return fmt.Errorf("deployment observation ID and case ID are required")
+	}
+	if blank(o.Environment) || blank(o.VerificationSource) {
+		return fmt.Errorf("deployment observation environment and verification source are required")
+	}
+	if err := validateNonEmptyStringMap("deployment expected commits", o.ExpectedCommits); err != nil {
+		return err
+	}
+	if err := validateStringMapEntries("deployment observed images", o.ObservedImages); err != nil {
+		return err
+	}
+	if err := validateStringMapEntries("deployment observed commits", o.ObservedCommits); err != nil {
+		return err
+	}
+	switch o.Result {
+	case DeploymentResultMatched, DeploymentResultMismatched, DeploymentResultUnavailable:
+		return nil
+	default:
+		return fmt.Errorf("unsupported deployment observation result %q", o.Result)
+	}
 }
 
 type TransitionEvent struct {
@@ -216,4 +468,56 @@ type TransitionEvent struct {
 	IdempotencyKey string          `json:"idempotency_key"`
 	PayloadJSON    json.RawMessage `json:"payload_json"`
 	CreatedAt      time.Time       `json:"created_at"`
+}
+
+func (e TransitionEvent) Clone() TransitionEvent {
+	cloned := e
+	cloned.PayloadJSON = CloneRawMessage(e.PayloadJSON)
+	return cloned
+}
+
+func (e TransitionEvent) Validate() error {
+	if blank(e.ID) || blank(e.CaseID) {
+		return fmt.Errorf("transition event ID and case ID are required")
+	}
+	if !CanTransition(e.FromStatus, e.ToStatus) {
+		return fmt.Errorf("transition event has invalid status edge %s -> %s", e.FromStatus, e.ToStatus)
+	}
+	if blank(e.EventType) || blank(e.ActorType) || blank(e.ActorID) || blank(e.IdempotencyKey) {
+		return fmt.Errorf("transition event type, actor type, actor ID, and idempotency key are required")
+	}
+	if len(e.PayloadJSON) == 0 || !json.Valid(e.PayloadJSON) {
+		return fmt.Errorf("transition event payload must be valid JSON")
+	}
+	return nil
+}
+
+func CloneRawMessage(value json.RawMessage) json.RawMessage {
+	if value == nil {
+		return nil
+	}
+	return append(json.RawMessage(nil), value...)
+}
+
+func CloneStringMap(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func cloneTimePtr(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func blank(value string) bool {
+	return strings.TrimSpace(value) == ""
 }

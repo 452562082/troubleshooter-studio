@@ -4,18 +4,18 @@ import "fmt"
 
 var allowedCaseTransitions = map[CaseStatus]map[CaseStatus]struct{}{
 	CasePendingValidation:    {CaseValidating: {}},
-	CaseValidating:           {CaseReproduced: {}, CaseWaitingEvidence: {}},
+	CaseValidating:           {CaseReproduced: {}, CaseWaitingEvidence: {}, CaseNotReproduced: {}},
 	CaseReproduced:           {CaseInvestigating: {}},
-	CaseInvestigating:        {CaseRootCauseReady: {}},
+	CaseInvestigating:        {CaseRootCauseReady: {}, CaseWaitingEvidence: {}},
 	CaseRootCauseReady:       {CaseWaitingFixApproval: {}},
 	CaseWaitingFixApproval:   {CaseFixing: {}},
-	CaseFixing:               {CaseFixPushed: {}},
+	CaseFixing:               {CaseFixPushed: {}, CaseFixFailed: {}},
 	CaseFixPushed:            {CaseWaitingMergeApproval: {}},
 	CaseWaitingMergeApproval: {CaseMerging: {}},
-	CaseMerging:              {CaseWaitingDeployment: {}},
-	CaseWaitingDeployment:    {CaseDeploymentVerified: {}},
+	CaseMerging:              {CaseWaitingDeployment: {}, CaseMergeConflict: {}},
+	CaseWaitingDeployment:    {CaseDeploymentVerified: {}, CaseDeploymentUnverified: {}},
 	CaseDeploymentVerified:   {CaseRegressionValidating: {}},
-	CaseRegressionValidating: {CaseFixedVerified: {}, CaseStillReproduces: {}},
+	CaseRegressionValidating: {CaseFixedVerified: {}, CaseStillReproduces: {}, CaseWaitingEvidence: {}},
 	CaseStillReproduces:      {CaseInvestigating: {}},
 }
 

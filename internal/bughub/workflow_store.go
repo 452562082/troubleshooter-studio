@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -111,36 +112,18 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 	}
 	switch version {
 	case 0:
-		tables, err := workflowTableColumns(ctx, tx)
+		objectCount, err := workflowUserSchemaObjectCount(ctx, tx)
 		if err != nil {
 			return err
 		}
-		if len(tables) == 0 {
-			if _, err := tx.ExecContext(ctx, legacyWorkflowStoreSchema); err != nil {
-				return fmt.Errorf("create workflow schema: %w", err)
-			}
-		} else if err := verifyWorkflowColumns(tables, legacyWorkflowTableColumns); err != nil {
-			return err
+		if objectCount != 0 {
+			return fmt.Errorf("%w: pre-release unversioned workflow schema lacks exact idempotency metadata", ErrUnsupportedWorkflowSchema)
 		}
-		if err := verifyRequiredWorkflowIndexes(ctx, tx); err != nil {
-			return err
-		}
-		actualLegacyFingerprint, err := workflowSchemaFingerprint(ctx, tx)
-		if err != nil {
-			return err
-		}
-		expectedLegacyFingerprint, err := expectedLegacyWorkflowSchemaFingerprint(ctx)
-		if err != nil {
-			return err
-		}
-		if actualLegacyFingerprint != expectedLegacyFingerprint {
-			return fmt.Errorf("%w: unversioned workflow schema definition mismatch", ErrUnsupportedWorkflowSchema)
+		if _, err := tx.ExecContext(ctx, legacyWorkflowStoreSchema); err != nil {
+			return fmt.Errorf("create workflow schema: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, workflowStoreSchemaV1Upgrade); err != nil {
 			return fmt.Errorf("apply workflow schema v1: %w", err)
-		}
-		if err := backfillLegacyTransitionEvents(ctx, tx); err != nil {
-			return err
 		}
 		fingerprint, err := workflowSchemaFingerprint(ctx, tx)
 		if err != nil {
@@ -160,6 +143,8 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 	case workflowStoreSchemaVersion:
 		// Verified below before the transaction is committed.
 	default:
+		// Future ordered migrations add explicit cases here. Unknown versions are
+		// never modified or guessed.
 		return fmt.Errorf("%w: user_version=%d", ErrUnsupportedWorkflowSchema, version)
 	}
 	tables, err := workflowTableColumns(ctx, tx)
@@ -194,89 +179,6 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit workflow schema initialization: %w", err)
-	}
-	return nil
-}
-
-func backfillLegacyTransitionEvents(ctx context.Context, tx *sql.Tx) error {
-	rows, err := tx.QueryContext(ctx, `SELECT id, case_id, from_status, to_status, event_type,
-		actor_type, actor_id, idempotency_key, payload_json, created_at
-		FROM transition_events ORDER BY case_id ASC, created_at ASC, id ASC`)
-	if err != nil {
-		return fmt.Errorf("list legacy transition events: %w", err)
-	}
-	eventsByCase := map[string][]TransitionEvent{}
-	var caseOrder []string
-	for rows.Next() {
-		var event TransitionEvent
-		var payload, createdAt string
-		if err := rows.Scan(&event.ID, &event.CaseID, &event.FromStatus, &event.ToStatus,
-			&event.EventType, &event.ActorType, &event.ActorID, &event.IdempotencyKey,
-			&payload, &createdAt); err != nil {
-			rows.Close()
-			return fmt.Errorf("scan legacy transition event: %w", err)
-		}
-		event.PayloadJSON = CloneRawMessage([]byte(payload))
-		event.CreatedAt, err = parseStoreTime(createdAt)
-		if err != nil {
-			rows.Close()
-			return err
-		}
-		if err := event.Validate(); err != nil {
-			rows.Close()
-			return fmt.Errorf("%w: invalid legacy event %q: %v", ErrUnsupportedWorkflowSchema, event.ID, err)
-		}
-		if _, ok := eventsByCase[event.CaseID]; !ok {
-			caseOrder = append(caseOrder, event.CaseID)
-		}
-		eventsByCase[event.CaseID] = append(eventsByCase[event.CaseID], event)
-	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("close legacy transition events: %w", err)
-	}
-	for _, caseID := range caseOrder {
-		events := eventsByCase[caseID]
-		current, err := getCase(ctx, tx, caseID)
-		if err != nil {
-			return fmt.Errorf("%w: load legacy event case %q: %v", ErrUnsupportedWorkflowSchema, caseID, err)
-		}
-		expectedVersion := current.Version - int64(len(events))
-		if expectedVersion < 1 {
-			return fmt.Errorf("%w: case %q version %d cannot cover %d events", ErrUnsupportedWorkflowSchema, caseID, current.Version, len(events))
-		}
-		status := events[0].FromStatus
-		for _, event := range events {
-			if event.FromStatus != status {
-				return fmt.Errorf("%w: legacy event %q breaks status chain", ErrUnsupportedWorkflowSchema, event.ID)
-			}
-			// The unversioned store's only IncidentCase writer after CreateCase was
-			// Transition, which changed only status, version, and updated_at. The
-			// remaining snapshot fields are therefore invariant across its event
-			// history and can be copied exactly from the current snapshot.
-			result := current.Clone()
-			result.Status = event.ToStatus
-			result.Version = expectedVersion + 1
-			result.UpdatedAt = event.CreatedAt
-			fingerprint, err := transitionRequestFingerprint(caseID, expectedVersion, event.FromStatus,
-				event.ToStatus, event, "", CaseSnapshotUpdate{})
-			if err != nil {
-				return err
-			}
-			resultJSON, err := json.Marshal(result)
-			if err != nil {
-				return fmt.Errorf("encode legacy event result: %w", err)
-			}
-			if _, err := tx.ExecContext(ctx, `UPDATE transition_events
-				SET request_fingerprint = ?, result_case_json = ? WHERE id = ?`, fingerprint, string(resultJSON), event.ID); err != nil {
-				return fmt.Errorf("backfill legacy event %q: %w", event.ID, err)
-			}
-			status = event.ToStatus
-			expectedVersion++
-		}
-		last := events[len(events)-1]
-		if status != current.Status || expectedVersion != current.Version || !last.CreatedAt.Equal(current.UpdatedAt) {
-			return fmt.Errorf("%w: case %q snapshot does not match its event chain", ErrUnsupportedWorkflowSchema, caseID)
-		}
 	}
 	return nil
 }
@@ -738,26 +640,28 @@ func (s *CaseStore) RecordDeploymentObservation(ctx context.Context, observation
 
 type CaseSnapshotUpdate struct {
 	CurrentAttemptID *string
+	SelectedBotKey   *string
 	CycleNumber      *int
 	ClosedAtSet      bool
 	ClosedAt         *time.Time
 }
 
 type transitionFingerprintInput struct {
-	EventID          string          `json:"event_id"`
-	CaseID           string          `json:"case_id"`
-	ExpectedVersion  int64           `json:"expected_version"`
-	FromStatus       CaseStatus      `json:"from_status"`
-	ToStatus         CaseStatus      `json:"to_status"`
-	EventType        string          `json:"event_type"`
-	ActorType        string          `json:"actor_type"`
-	ActorID          string          `json:"actor_id"`
-	PayloadJSON      json.RawMessage `json:"payload_json"`
-	RequestedAt      string          `json:"requested_at"`
-	CurrentAttemptID *string         `json:"current_attempt_id"`
-	CycleNumber      *int            `json:"cycle_number"`
-	ClosedAtSet      bool            `json:"closed_at_set"`
-	ClosedAt         *string         `json:"closed_at"`
+	EventID          string     `json:"event_id"`
+	CaseID           string     `json:"case_id"`
+	ExpectedVersion  int64      `json:"expected_version"`
+	FromStatus       CaseStatus `json:"from_status"`
+	ToStatus         CaseStatus `json:"to_status"`
+	EventType        string     `json:"event_type"`
+	ActorType        string     `json:"actor_type"`
+	ActorID          string     `json:"actor_id"`
+	PayloadSHA256    string     `json:"payload_sha256_base64"`
+	RequestedAt      string     `json:"requested_at"`
+	CurrentAttemptID *string    `json:"current_attempt_id"`
+	SelectedBotKey   *string    `json:"selected_bot_key"`
+	CycleNumber      *int       `json:"cycle_number"`
+	ClosedAtSet      bool       `json:"closed_at_set"`
+	ClosedAt         *string    `json:"closed_at"`
 }
 
 func (s *CaseStore) Transition(ctx context.Context, caseID string, expectedVersion int64, to CaseStatus, event TransitionEvent) (IncidentCase, bool, error) {
@@ -871,6 +775,9 @@ func (s *CaseStore) TransitionWithUpdate(ctx context.Context, caseID string, exp
 	if update.CurrentAttemptID != nil {
 		updated.CurrentAttemptID = *update.CurrentAttemptID
 	}
+	if update.SelectedBotKey != nil {
+		updated.SelectedBotKey = *update.SelectedBotKey
+	}
 	if update.CycleNumber != nil {
 		updated.CycleNumber = *update.CycleNumber
 	}
@@ -891,9 +798,10 @@ func (s *CaseStore) TransitionWithUpdate(ctx context.Context, caseID string, exp
 		return IncidentCase{}, false, fmt.Errorf("encode transition result case: %w", err)
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE incident_cases
-		SET status = ?, cycle_number = ?, current_attempt_id = ?, version = ?, updated_at = ?, closed_at = ?
+		SET status = ?, cycle_number = ?, current_attempt_id = ?, selected_bot_key = ?, version = ?, updated_at = ?, closed_at = ?
 		WHERE id = ? AND version = ?`, updated.Status, updated.CycleNumber, updated.CurrentAttemptID,
-		updated.Version, formatStoreTime(updated.UpdatedAt), formatOptionalStoreTime(updated.ClosedAt), caseID, expectedVersion)
+		updated.SelectedBotKey, updated.Version, formatStoreTime(updated.UpdatedAt),
+		formatOptionalStoreTime(updated.ClosedAt), caseID, expectedVersion)
 	if err != nil {
 		return IncidentCase{}, false, fmt.Errorf("update incident case transition: %w", err)
 	}
@@ -953,6 +861,7 @@ func (s *CaseStore) ListEvents(ctx context.Context, caseID string) ([]Transition
 }
 
 func transitionRequestFingerprint(caseID string, expectedVersion int64, from, to CaseStatus, event TransitionEvent, requestedAt string, update CaseSnapshotUpdate) (string, error) {
+	payloadDigest := sha256.Sum256([]byte(event.PayloadJSON))
 	var closedAt *string
 	if update.ClosedAt != nil {
 		formatted := formatStoreTime(*update.ClosedAt)
@@ -967,9 +876,10 @@ func transitionRequestFingerprint(caseID string, expectedVersion int64, from, to
 		EventType:        event.EventType,
 		ActorType:        event.ActorType,
 		ActorID:          event.ActorID,
-		PayloadJSON:      CloneRawMessage(event.PayloadJSON),
+		PayloadSHA256:    base64.StdEncoding.EncodeToString(payloadDigest[:]),
 		RequestedAt:      requestedAt,
 		CurrentAttemptID: cloneStringPtr(update.CurrentAttemptID),
+		SelectedBotKey:   cloneStringPtr(update.SelectedBotKey),
 		CycleNumber:      cloneIntPtr(update.CycleNumber),
 		ClosedAtSet:      update.ClosedAtSet,
 		ClosedAt:         closedAt,
@@ -1171,6 +1081,15 @@ func workflowTableColumns(ctx context.Context, query rowsQuery) (map[string][]st
 	return result, nil
 }
 
+func workflowUserSchemaObjectCount(ctx context.Context, query caseQuery) (int, error) {
+	var count int
+	if err := query.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master
+		WHERE type IN ('table', 'index', 'view', 'trigger') AND name NOT LIKE 'sqlite_%'`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count workflow schema objects: %w", err)
+	}
+	return count, nil
+}
+
 func verifyWorkflowColumns(actual, expected map[string][]string) error {
 	if len(actual) != len(expected) {
 		return fmt.Errorf("%w: tables=%v", ErrUnsupportedWorkflowSchema, sortedMapKeys(actual))
@@ -1241,23 +1160,6 @@ func workflowSchemaFingerprint(ctx context.Context, query rowsQuery) (string, er
 		return "", fmt.Errorf("read workflow schema definition: %w", err)
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
-}
-
-func expectedLegacyWorkflowSchemaFingerprint(ctx context.Context) (string, error) {
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		return "", fmt.Errorf("open canonical legacy workflow schema: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	defer db.Close()
-	if _, err := db.ExecContext(ctx, legacyWorkflowStoreSchema); err != nil {
-		return "", fmt.Errorf("create canonical legacy workflow schema: %w", err)
-	}
-	fingerprint, err := workflowSchemaFingerprint(ctx, db)
-	if err != nil {
-		return "", fmt.Errorf("fingerprint canonical legacy workflow schema: %w", err)
-	}
-	return fingerprint, nil
 }
 
 func cloneWorkflowColumns(values map[string][]string) map[string][]string {

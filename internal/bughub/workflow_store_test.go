@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -518,6 +519,25 @@ func TestCaseStoreTransitionReplayBindsFullRequestAndReturnsCommittedSnapshot(t 
 	}
 }
 
+func TestCaseStoreTransitionFingerprintPreservesExactPayloadBytes(t *testing.T) {
+	store := openTestCaseStore(t)
+	ctx := context.Background()
+	createTestCase(t, store, "case-payload-bytes")
+	event := validEvent(1, "case-payload-bytes")
+	event.PayloadJSON = json.RawMessage(`{"value":1}`)
+	if _, replay, err := store.Transition(ctx, "case-payload-bytes", 1, CaseValidating, event); err != nil || replay {
+		t.Fatalf("first replay=%v err=%v", replay, err)
+	}
+	if _, replay, err := store.Transition(ctx, "case-payload-bytes", 1, CaseValidating, event); err != nil || !replay {
+		t.Fatalf("identical replay=%v err=%v", replay, err)
+	}
+	whitespaceDistinct := event.Clone()
+	whitespaceDistinct.PayloadJSON = json.RawMessage(`{ "value": 1 }`)
+	if _, _, err := store.Transition(ctx, "case-payload-bytes", 1, CaseValidating, whitespaceDistinct); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("whitespace-distinct payload error=%v", err)
+	}
+}
+
 func TestCaseStoreTransitionWithUpdateIsAtomicAndIdempotent(t *testing.T) {
 	store := openTestCaseStore(t)
 	ctx := context.Background()
@@ -553,6 +573,45 @@ func TestCaseStoreTransitionWithUpdateIsAtomicAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestCaseStoreTransitionWithUpdateSelectedBotSetClearAndNoChange(t *testing.T) {
+	store := openTestCaseStore(t)
+	ctx := context.Background()
+	for index, tc := range []struct {
+		name             string
+		initial          string
+		update           *string
+		want             string
+		conflictNoChange bool
+	}{
+		{name: "set", initial: "bot-old", update: stringPointer("bot-new"), want: "bot-new"},
+		{name: "clear", initial: "bot-old", update: stringPointer(""), want: "", conflictNoChange: true},
+		{name: "no change", initial: "bot-old", update: nil, want: "bot-old"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			caseID := "case-bot-" + strings.ReplaceAll(tc.name, " ", "-")
+			if err := store.CreateCase(ctx, IncidentCase{ID: caseID, BugID: "bug-" + caseID,
+				Status: CasePendingValidation, CycleNumber: 1, Version: 1, SelectedBotKey: tc.initial}); err != nil {
+				t.Fatal(err)
+			}
+			update := CaseSnapshotUpdate{SelectedBotKey: tc.update}
+			event := validEvent(index+20, caseID)
+			updated, replay, err := store.TransitionWithUpdate(ctx, caseID, 1, CaseValidating, update, event)
+			if err != nil || replay || updated.SelectedBotKey != tc.want {
+				t.Fatalf("updated=%+v replay=%v err=%v", updated, replay, err)
+			}
+			stored, err := store.GetCase(ctx, caseID)
+			if err != nil || stored.SelectedBotKey != tc.want {
+				t.Fatalf("stored=%+v err=%v", stored, err)
+			}
+			if tc.conflictNoChange {
+				if _, _, err := store.TransitionWithUpdate(ctx, caseID, 1, CaseValidating, CaseSnapshotUpdate{}, event); !errors.Is(err, ErrIdempotencyConflict) {
+					t.Fatalf("clear vs no-change error=%v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestCaseStoreInitializesAndMigratesVersionedSchema(t *testing.T) {
 	t.Run("new database", func(t *testing.T) {
 		store := openTestCaseStore(t)
@@ -570,58 +629,48 @@ func TestCaseStoreInitializesAndMigratesVersionedSchema(t *testing.T) {
 		assertTableColumns(t, store.db, "transition_events", "request_fingerprint", "result_case_json")
 	})
 
-	t.Run("known unversioned schema", func(t *testing.T) {
+	t.Run("pre-release unversioned schema with explicit event time is rejected without mutation", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "private", "workflows.db")
 		db := openRawWorkflowDB(t, path)
 		if _, err := db.Exec(legacyWorkflowStoreSchema); err != nil {
 			t.Fatal(err)
 		}
 		createdAt := time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC)
-		firstAt := createdAt.Add(time.Hour)
-		secondAt := firstAt.Add(time.Nanosecond)
 		if _, err := db.Exec(`INSERT INTO incident_cases (
 			id, bug_id, status, cycle_number, version, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?)`, "case-legacy-schema", "bug-legacy", CaseReproduced,
-			1, 3, formatStoreTime(createdAt), formatStoreTime(secondAt)); err != nil {
+		) VALUES (?, ?, ?, ?, ?, ?, ?)`, "case-legacy-schema", "bug-legacy", CaseValidating,
+			1, 2, formatStoreTime(createdAt.Add(-time.Hour)), formatStoreTime(createdAt)); err != nil {
 			t.Fatal(err)
 		}
-		legacyEvents := []TransitionEvent{
-			{ID: "legacy-event-1", CaseID: "case-legacy-schema", FromStatus: CasePendingValidation,
-				ToStatus: CaseValidating, EventType: "validation_started", ActorType: "user", ActorID: "user-1",
-				IdempotencyKey: "legacy-key-1", PayloadJSON: json.RawMessage(`{}`), CreatedAt: firstAt},
-			{ID: "legacy-event-2", CaseID: "case-legacy-schema", FromStatus: CaseValidating,
-				ToStatus: CaseReproduced, EventType: "validation_finished", ActorType: "agent", ActorID: "agent-1",
-				IdempotencyKey: "legacy-key-2", PayloadJSON: json.RawMessage(`{}`), CreatedAt: secondAt},
-		}
-		for _, event := range legacyEvents {
-			if _, err := db.Exec(`INSERT INTO transition_events (id, case_id, from_status, to_status,
-				event_type, actor_type, actor_id, idempotency_key, payload_json, created_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, event.ID, event.CaseID, event.FromStatus,
-				event.ToStatus, event.EventType, event.ActorType, event.ActorID, event.IdempotencyKey,
-				string(event.PayloadJSON), formatStoreTime(event.CreatedAt)); err != nil {
-				t.Fatal(err)
-			}
+		if _, err := db.Exec(`INSERT INTO transition_events (id, case_id, from_status, to_status,
+			event_type, actor_type, actor_id, idempotency_key, payload_json, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, "legacy-event-1", "case-legacy-schema",
+			CasePendingValidation, CaseValidating, "validation_started", "user", "user-1",
+			"legacy-key-1", `{ "explicit": true }`, formatStoreTime(createdAt)); err != nil {
+			t.Fatal(err)
 		}
 		if err := db.Close(); err != nil {
 			t.Fatal(err)
 		}
-		store, err := OpenCaseStore(path)
-		if err != nil {
-			t.Fatal(err)
+		if _, err := OpenCaseStore(path); !errors.Is(err, ErrUnsupportedWorkflowSchema) {
+			t.Fatalf("error=%v", err)
 		}
-		defer store.Close()
-		assertTableColumns(t, store.db, "transition_events", "request_fingerprint", "result_case_json")
+		db = openRawWorkflowDB(t, path)
+		defer db.Close()
 		var version int
-		if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != workflowStoreSchemaVersion {
+		if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 0 {
 			t.Fatalf("user_version=%d err=%v", version, err)
 		}
-		replayEvent := legacyEvents[0].Clone()
-		replayEvent.FromStatus = ""
-		replayEvent.ToStatus = ""
-		replayEvent.CreatedAt = time.Time{}
-		replayed, replay, err := store.Transition(context.Background(), "case-legacy-schema", 1, CaseValidating, replayEvent)
-		if err != nil || !replay || replayed.Status != CaseValidating || replayed.Version != 2 || !replayed.UpdatedAt.Equal(firstAt) {
-			t.Fatalf("replayed=%+v replay=%v err=%v", replayed, replay, err)
+		var createdAtStored, payloadStored string
+		if err := db.QueryRow(`SELECT created_at, payload_json FROM transition_events WHERE id = 'legacy-event-1'`).Scan(&createdAtStored, &payloadStored); err != nil {
+			t.Fatal(err)
+		}
+		if createdAtStored != formatStoreTime(createdAt) || payloadStored != `{ "explicit": true }` {
+			t.Fatalf("event mutated: created_at=%q payload=%q", createdAtStored, payloadStored)
+		}
+		columns := tableColumnNames(t, db, "transition_events")
+		if columns["request_fingerprint"] || columns["result_case_json"] {
+			t.Fatalf("legacy schema was partially mutated: %+v", columns)
 		}
 	})
 }
@@ -653,6 +702,38 @@ func TestCaseStoreRejectsPartialAndUnknownSchemas(t *testing.T) {
 				t.Fatalf("error=%v", err)
 			}
 		})
+	}
+}
+
+func TestCaseStoreRejectsViewOnlyUnversionedSchemaWithoutMutation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "private", "workflows.db")
+	db := openRawWorkflowDB(t, path)
+	const viewSQL = `CREATE VIEW stray_workflow_view AS SELECT 1 AS value`
+	if _, err := db.Exec(viewSQL); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenCaseStore(path); !errors.Is(err, ErrUnsupportedWorkflowSchema) {
+		t.Fatalf("error=%v", err)
+	}
+	db = openRawWorkflowDB(t, path)
+	defer db.Close()
+	var version int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 0 {
+		t.Fatalf("user_version=%d err=%v", version, err)
+	}
+	var objectType, storedSQL string
+	if err := db.QueryRow(`SELECT type, sql FROM sqlite_master WHERE name = 'stray_workflow_view'`).Scan(&objectType, &storedSQL); err != nil {
+		t.Fatal(err)
+	}
+	if objectType != "view" || storedSQL != viewSQL {
+		t.Fatalf("view mutated: type=%q sql=%q", objectType, storedSQL)
+	}
+	var workflowTables int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'incident_cases'`).Scan(&workflowTables); err != nil || workflowTables != 0 {
+		t.Fatalf("workflow tables=%d err=%v", workflowTables, err)
 	}
 }
 
@@ -901,6 +982,16 @@ func openRawWorkflowDB(t *testing.T, path string) *sql.DB {
 
 func assertTableColumns(t *testing.T, db *sql.DB, table string, columns ...string) {
 	t.Helper()
+	found := tableColumnNames(t, db, table)
+	for _, column := range columns {
+		if !found[column] {
+			t.Fatalf("table %s missing column %s", table, column)
+		}
+	}
+}
+
+func tableColumnNames(t *testing.T, db *sql.DB, table string) map[string]bool {
+	t.Helper()
 	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
 	if err != nil {
 		t.Fatal(err)
@@ -916,11 +1007,11 @@ func assertTableColumns(t *testing.T, db *sql.DB, table string, columns ...strin
 		}
 		found[name] = true
 	}
-	for _, column := range columns {
-		if !found[column] {
-			t.Fatalf("table %s missing column %s", table, column)
-		}
-	}
+	return found
+}
+
+func stringPointer(value string) *string {
+	return &value
 }
 
 func createTestCase(t *testing.T, store *CaseStore, id string) {

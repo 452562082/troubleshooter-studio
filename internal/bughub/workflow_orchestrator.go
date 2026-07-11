@@ -15,10 +15,15 @@ import (
 )
 
 var (
-	ErrApprovalNotReady  = errors.New("workflow approval is not ready")
-	ErrApprovalScope     = errors.New("workflow approval scope is invalid")
-	ErrAttemptNotCurrent = errors.New("phase attempt is not current")
+	ErrApprovalNotReady      = errors.New("workflow approval is not ready")
+	ErrApprovalScope         = errors.New("workflow approval scope is invalid")
+	ErrAttemptNotCurrent     = errors.New("phase attempt is not current")
+	ErrCancelWorkerSaturated = errors.New("external cancel worker capacity is saturated")
 )
+
+// cancelWorkerCapacity bounds context-ignoring PhaseRunner.Cancel calls owned
+// by one orchestrator. A slot is held until the dependency actually returns.
+const cancelWorkerCapacity = 4
 
 var workflowCommandLocks = commandLockRegistry{locks: make(map[string]*commandLock)}
 
@@ -279,10 +284,11 @@ type CaseOrchestrator struct {
 	recoveryStarted map[string]struct{}
 	scheduleTimeout time.Duration
 	cancelTimeout   time.Duration
+	cancelWorkers   chan struct{}
 }
 
 func NewCaseOrchestrator(store *CaseStore, runner PhaseRunner, git GitIntegration, deployment DeploymentVerifier) *CaseOrchestrator {
-	return &CaseOrchestrator{store: store, runner: runner, git: git, deployment: deployment, recoveryStarted: make(map[string]struct{}), scheduleTimeout: 30 * time.Second, cancelTimeout: 30 * time.Second}
+	return &CaseOrchestrator{store: store, runner: runner, git: git, deployment: deployment, recoveryStarted: make(map[string]struct{}), scheduleTimeout: 30 * time.Second, cancelTimeout: 30 * time.Second, cancelWorkers: make(chan struct{}, cancelWorkerCapacity)}
 }
 
 func (o *CaseOrchestrator) startPhase(attempt PhaseAttempt, bug Bug, bot BotRef) error {
@@ -836,6 +842,10 @@ func (o *CaseOrchestrator) CancelAttempt(ctx context.Context, cmd CancelAttemptC
 		return IncidentCase{}, err
 	}
 	attempt.Status, attempt.OutputJSON, attempt.ErrorCode = AttemptStatusCancelled, []byte(`{}`), "cancelled"
+	if attempt.FinishedAt == nil {
+		now := time.Now().UTC()
+		attempt.FinishedAt = &now
+	}
 	to := failureStateForPhase(attempt.Phase)
 	payload := mustJSON(map[string]string{"attempt_id": attempt.ID})
 	mutation, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: cmd.IdempotencyKey, RequestJSON: mustJSON(cmd), FinishAttempts: []PhaseAttempt{attempt}, Steps: []CaseMutationStep{{To: to, Event: TransitionEvent{ID: stableID("event", cmd.IdempotencyKey), EventType: "attempt_cancelled", ActorType: "user", ActorID: cmd.ActorID, PayloadJSON: payload}}}})
@@ -843,6 +853,9 @@ func (o *CaseOrchestrator) CancelAttempt(ctx context.Context, cmd CancelAttemptC
 		return IncidentCase{}, err
 	}
 	if mutation.Replay {
+		if replayed, replayErr, found := o.replayedCancelOutcome(ctx, mutation.Case, cmd.IdempotencyKey); found {
+			return replayed, replayErr
+		}
 		return mutation.Case, nil
 	}
 	if o.runner != nil {
@@ -855,6 +868,11 @@ func (o *CaseOrchestrator) CancelAttempt(ctx context.Context, cmd CancelAttemptC
 }
 
 func (o *CaseOrchestrator) cancelPhase(attemptID string) error {
+	select {
+	case o.cancelWorkers <- struct{}{}:
+	default:
+		return ErrCancelWorkerSaturated
+	}
 	timeout := o.cancelTimeout
 	if timeout <= 0 {
 		timeout = 30 * time.Second
@@ -862,7 +880,10 @@ func (o *CaseOrchestrator) cancelPhase(attemptID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	result := make(chan error, 1)
-	go func() { result <- o.runner.Cancel(ctx, attemptID) }()
+	go func() {
+		defer func() { <-o.cancelWorkers }()
+		result <- o.runner.Cancel(ctx, attemptID)
+	}()
 	select {
 	case err := <-result:
 		return err
@@ -871,10 +892,31 @@ func (o *CaseOrchestrator) cancelPhase(attemptID string) error {
 	}
 }
 
+func (o *CaseOrchestrator) replayedCancelOutcome(ctx context.Context, committed IncidentCase, key string) (IncidentCase, error, bool) {
+	event, found, err := o.store.GetEventByIdempotencyKey(ctx, key+":runner-cancel")
+	if err != nil || !found {
+		return committed, err, err != nil
+	}
+	current, loadErr := o.store.GetCase(ctx, committed.ID)
+	if loadErr != nil {
+		return IncidentCase{}, loadErr, true
+	}
+	switch event.EventType {
+	case "runner_cancel_timed_out":
+		return current, context.DeadlineExceeded, true
+	case "runner_cancel_saturated":
+		return current, ErrCancelWorkerSaturated, true
+	default:
+		return current, errors.New("external runner cancellation failed"), true
+	}
+}
+
 func (o *CaseOrchestrator) recordCancelFailure(incident IncidentCase, key string, cause error) (IncidentCase, error) {
 	eventType := "runner_cancel_failed"
 	if errors.Is(cause, context.DeadlineExceeded) {
 		eventType = "runner_cancel_timed_out"
+	} else if errors.Is(cause, ErrCancelWorkerSaturated) {
+		eventType = "runner_cancel_saturated"
 	}
 	durable, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

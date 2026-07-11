@@ -24,15 +24,41 @@ type deadlinePhaseRunner struct{ sawDeadline bool }
 type ignoringCancelPhaseRunner struct {
 	release     chan struct{}
 	sawDeadline atomic.Bool
+	calls       atomic.Int32
 }
 
 func (r *ignoringCancelPhaseRunner) Start(context.Context, PhaseAttempt, Bug, BotRef) error {
 	return nil
 }
 func (r *ignoringCancelPhaseRunner) Cancel(ctx context.Context, _ string) error {
+	r.calls.Add(1)
 	_, hasDeadline := ctx.Deadline()
 	r.sawDeadline.Store(hasDeadline)
 	<-r.release
+	return nil
+}
+
+type saturatedCancelPhaseRunner struct {
+	release chan struct{}
+	calls   atomic.Int32
+	active  atomic.Int32
+	maximum atomic.Int32
+}
+
+func (r *saturatedCancelPhaseRunner) Start(context.Context, PhaseAttempt, Bug, BotRef) error {
+	return nil
+}
+func (r *saturatedCancelPhaseRunner) Cancel(context.Context, string) error {
+	r.calls.Add(1)
+	active := r.active.Add(1)
+	for {
+		maximum := r.maximum.Load()
+		if active <= maximum || r.maximum.CompareAndSwap(maximum, active) {
+			break
+		}
+	}
+	<-r.release
+	r.active.Add(-1)
 	return nil
 }
 
@@ -74,6 +100,77 @@ func TestOrchestratorCancelReturnsByDeadlineWhenRunnerIgnoresContext(t *testing.
 	}
 	if events[len(events)-1].EventType != "runner_cancel_timed_out" || events[len(events)-1].ActorType != "studio" {
 		t.Fatalf("events=%+v", events)
+	}
+	stored, storedErr := store.GetAttempt(ctx, attempt.ID)
+	if storedErr != nil || stored.FinishedAt == nil || stored.FinishedAt.IsZero() {
+		t.Fatalf("attempt=%+v err=%v", stored, storedErr)
+	}
+	replayed, replayErr := o.CancelAttempt(ctx, CancelAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "cancel:deadline", ActorID: "alice"})
+	if !errors.Is(replayErr, context.DeadlineExceeded) || replayed.Version != got.Version || runner.calls.Load() != 1 {
+		t.Fatalf("replayed=%+v calls=%d err=%v", replayed, runner.calls.Load(), replayErr)
+	}
+}
+
+func TestOrchestratorCancelExactReplayUsesPersistedFinishedAtAndDoesNotCancelTwice(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident, attempt := createRunningPhase(t, store, "case-cancel-replay", CasePendingValidation, CaseValidating, PhaseValidation, AttemptReproduce, []byte(`{}`))
+	runner := &recordingPhaseRunner{}
+	o := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
+	cmd := CancelAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "cancel:exact-replay", ActorID: "alice"}
+	first, err := o.CancelAttempt(ctx, cmd)
+	if err != nil || first.Status != CaseWaitingEvidence {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	stored, err := store.GetAttempt(ctx, attempt.ID)
+	if err != nil || stored.FinishedAt == nil || stored.FinishedAt.IsZero() {
+		t.Fatalf("attempt=%+v err=%v", stored, err)
+	}
+	second, err := o.CancelAttempt(ctx, cmd)
+	if err != nil || second.Version != first.Version || len(runner.cancels) != 1 {
+		t.Fatalf("second=%+v cancels=%v err=%v", second, runner.cancels, err)
+	}
+}
+
+func TestOrchestratorCancelWorkerCapacityBoundsIgnoringDependencies(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	runner := &saturatedCancelPhaseRunner{release: make(chan struct{})}
+	t.Cleanup(func() { close(runner.release) })
+	o := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
+	o.cancelTimeout = 10 * time.Millisecond
+	var saturatedCommand CancelAttemptCommand
+	for i := 0; i < cancelWorkerCapacity+2; i++ {
+		incident, attempt := createRunningPhase(t, store, fmt.Sprintf("case-cancel-capacity-%d", i), CasePendingValidation, CaseValidating, PhaseValidation, AttemptReproduce, []byte(`{}`))
+		command := CancelAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: fmt.Sprintf("cancel:capacity:%d", i), ActorID: "alice"}
+		got, err := o.CancelAttempt(ctx, command)
+		if got.Status != CaseWaitingEvidence {
+			t.Fatalf("case %d=%+v err=%v", i, got, err)
+		}
+		if i < cancelWorkerCapacity && !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("case %d err=%v", i, err)
+		}
+		if i >= cancelWorkerCapacity && !errors.Is(err, ErrCancelWorkerSaturated) {
+			t.Fatalf("case %d saturation err=%v", i, err)
+		}
+		if i == cancelWorkerCapacity {
+			saturatedCommand = command
+			events, listErr := store.ListEvents(ctx, incident.ID)
+			if listErr != nil || events[len(events)-1].EventType != "runner_cancel_saturated" {
+				t.Fatalf("events=%+v err=%v", events, listErr)
+			}
+		}
+	}
+	if calls, maximum := runner.calls.Load(), runner.maximum.Load(); calls != cancelWorkerCapacity || maximum > cancelWorkerCapacity {
+		t.Fatalf("calls=%d maximum=%d capacity=%d", calls, maximum, cancelWorkerCapacity)
+	}
+	if _, err := o.CancelAttempt(ctx, saturatedCommand); !errors.Is(err, ErrCancelWorkerSaturated) || runner.calls.Load() != cancelWorkerCapacity {
+		t.Fatalf("saturated replay calls=%d err=%v", runner.calls.Load(), err)
+	}
+	unrelated := createWorkflowCase(t, store, "case-cancel-unrelated", CasePendingValidation)
+	started, err := o.StartCase(ctx, StartCaseCommand{CaseID: unrelated.ID, ExpectedVersion: unrelated.Version, IdempotencyKey: "start:unrelated", ActorID: "alice", Bug: Bug{ID: unrelated.BugID}, Bot: BotRef{Key: "validator", Target: "codex"}, InputJSON: []byte(`{}`)})
+	if err != nil || started.Status != CaseValidating {
+		t.Fatalf("unrelated=%+v err=%v", started, err)
 	}
 }
 

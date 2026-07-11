@@ -191,6 +191,22 @@ func (o *CaseOrchestrator) recoverAttempt(ctx context.Context, attempt PhaseAtte
 
 func (o *CaseOrchestrator) reserveInspectionOnly(ctx context.Context, incident IncidentCase, attempt PhaseAttempt) error {
 	key := "recovery:" + attempt.ID + ":inspect"
+	if event, found, err := o.store.GetEventByIdempotencyKey(ctx, key); err != nil {
+		return err
+	} else if found {
+		if event.CaseID != incident.ID {
+			return ErrIdempotencyConflict
+		}
+		return nil
+	}
+	if event, found, err := o.store.GetEventByIdempotencyKey(ctx, "recovery:"+attempt.ID+":result"); err != nil {
+		return err
+	} else if found {
+		if event.CaseID != incident.ID {
+			return ErrIdempotencyConflict
+		}
+		return nil
+	}
 	_, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: mustJSON(map[string]string{"attempt_id": attempt.ID}), Steps: []CaseMutationStep{{To: incident.Status, AuditOnly: true, Event: TransitionEvent{ID: stableID("event", key), EventType: "side_effect_inspection_reserved", ActorType: "recovery", ActorID: "recovery", PayloadJSON: mustJSON(map[string]string{"attempt_id": attempt.ID})}}}})
 	return err
 }

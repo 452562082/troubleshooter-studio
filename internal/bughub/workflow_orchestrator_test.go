@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -19,6 +20,21 @@ type recordingPhaseRunner struct {
 }
 
 type deadlinePhaseRunner struct{ sawDeadline bool }
+
+type ignoringCancelPhaseRunner struct {
+	release     chan struct{}
+	sawDeadline atomic.Bool
+}
+
+func (r *ignoringCancelPhaseRunner) Start(context.Context, PhaseAttempt, Bug, BotRef) error {
+	return nil
+}
+func (r *ignoringCancelPhaseRunner) Cancel(ctx context.Context, _ string) error {
+	_, hasDeadline := ctx.Deadline()
+	r.sawDeadline.Store(hasDeadline)
+	<-r.release
+	return nil
+}
 
 func (r *deadlinePhaseRunner) Start(ctx context.Context, _ PhaseAttempt, _ Bug, _ BotRef) error {
 	_, r.sawDeadline = ctx.Deadline()
@@ -36,6 +52,28 @@ func TestOrchestratorBlockedRunnerUsesBoundedDetachedContext(t *testing.T) {
 	got, err := o.StartCase(context.Background(), StartCaseCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "start:deadline", ActorID: "alice", Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "bot", Target: "codex"}, InputJSON: []byte(`{}`)})
 	if !errors.Is(err, context.DeadlineExceeded) || !runner.sawDeadline || got.Status != CaseWaitingEvidence {
 		t.Fatalf("case=%+v deadline=%v err=%v", got, runner.sawDeadline, err)
+	}
+}
+
+func TestOrchestratorCancelReturnsByDeadlineWhenRunnerIgnoresContext(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident, attempt := createRunningPhase(t, store, "case-cancel-deadline", CasePendingValidation, CaseValidating, PhaseValidation, AttemptReproduce, []byte(`{}`))
+	runner := &ignoringCancelPhaseRunner{release: make(chan struct{})}
+	t.Cleanup(func() { close(runner.release) })
+	o := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
+	o.cancelTimeout = 20 * time.Millisecond
+	started := time.Now()
+	got, err := o.CancelAttempt(ctx, CancelAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "cancel:deadline", ActorID: "alice"})
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) > time.Second || !runner.sawDeadline.Load() || got.Status != CaseWaitingEvidence {
+		t.Fatalf("case=%+v elapsed=%s deadline=%v err=%v", got, time.Since(started), runner.sawDeadline.Load(), err)
+	}
+	events, listErr := store.ListEvents(ctx, incident.ID)
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if events[len(events)-1].EventType != "runner_cancel_timed_out" || events[len(events)-1].ActorType != "studio" {
+		t.Fatalf("events=%+v", events)
 	}
 }
 
@@ -557,7 +595,8 @@ func TestNotifyDeployedMatchedReplayReturnsCommittedRegressionWithoutDuplicate(t
 	verifier := &recordingDeploymentVerifier{result: DeploymentObservation{VerificationSource: "manual", Result: DeploymentResultMatched, VerifiedAt: &now, ObservedCommits: map[string]string{"repo": "merge-1"}}}
 	runner := &recordingPhaseRunner{}
 	o := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, verifier)
-	cmd := NotifyDeployedCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "deploy-replay", ActorID: "alice", ObservedCommits: map[string]string{"repo": "merge-1"}, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "validator", Target: "codex"}}
+	regressionInput := []byte(`{ "scenario" : "original-reproduction", "evidence_id" : "e-1" }`)
+	cmd := NotifyDeployedCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "deploy-replay", ActorID: "alice", ObservedCommits: map[string]string{"repo": "merge-1"}, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "validator", Target: "codex"}, InputJSON: regressionInput}
 	first, err := o.NotifyDeployed(ctx, cmd)
 	if err != nil || first.Status != CaseRegressionValidating {
 		t.Fatalf("case=%+v err=%v", first, err)
@@ -566,6 +605,80 @@ func TestNotifyDeployedMatchedReplayReturnsCommittedRegressionWithoutDuplicate(t
 	if err != nil || second.Status != CaseRegressionValidating || runner.startCount() != 1 || len(verifier.requests) != 1 {
 		t.Fatalf("case=%+v starts=%d verifies=%d err=%v", second, runner.startCount(), len(verifier.requests), err)
 	}
+	attempt, attemptErr := store.GetAttempt(ctx, second.CurrentAttemptID)
+	if attemptErr != nil || string(attempt.InputJSON) != string(regressionInput) {
+		t.Fatalf("attempt=%+v err=%v", attempt, attemptErr)
+	}
+	changed := cmd
+	changed.InputJSON = []byte(`{"scenario":"different"}`)
+	if _, changedErr := o.NotifyDeployed(ctx, changed); !errors.Is(changedErr, ErrIdempotencyConflict) {
+		t.Fatalf("changed regression input err=%v", changedErr)
+	}
+}
+
+func TestContinueWithEvidenceReopensDeploymentAndMergeAuthorizationGates(t *testing.T) {
+	ctx := context.Background()
+	t.Run("deployment proof", func(t *testing.T) {
+		store := newOrchestratorStore(t)
+		incident := createWorkflowCase(t, store, "case-deploy-retry", CaseWaitingDeployment)
+		incident = addPushedWorkflowChange(t, store, incident)
+		verifier := &recordingDeploymentVerifier{result: DeploymentObservation{VerificationSource: "manual", Result: DeploymentResultMismatched}}
+		o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, &recordingGitIntegration{}, verifier)
+		first, err := o.NotifyDeployed(ctx, NotifyDeployedCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "deploy:first", ActorID: "alice", ObservedVersion: "old"})
+		if err != nil || first.Status != CaseDeploymentUnverified {
+			t.Fatalf("first=%+v err=%v", first, err)
+		}
+		reopened, err := o.ContinueWithEvidence(ctx, ContinueWithEvidenceCommand{CaseID: first.ID, ExpectedVersion: first.Version, IdempotencyKey: "deploy:new-proof", ActorID: "alice", InputJSON: []byte(`{"version":"new"}`)})
+		if err != nil || reopened.Status != CaseWaitingDeployment {
+			t.Fatalf("reopened=%+v err=%v", reopened, err)
+		}
+		now := time.Now().UTC()
+		verifier.mu.Lock()
+		verifier.result = DeploymentObservation{VerificationSource: "manual", Result: DeploymentResultMatched, VerifiedAt: &now, ObservedCommits: map[string]string{"repo": "merge-1"}}
+		verifier.mu.Unlock()
+		regressed, err := o.NotifyDeployed(ctx, NotifyDeployedCommand{CaseID: reopened.ID, ExpectedVersion: reopened.Version, IdempotencyKey: "deploy:second", ActorID: "alice", ObservedVersion: "new", ObservedCommits: map[string]string{"repo": "merge-1"}, InputJSON: []byte(`{"proof":"new"}`)})
+		if err != nil || regressed.Status != CaseRegressionValidating || len(verifier.requests) != 2 {
+			t.Fatalf("regressed=%+v verifies=%d err=%v", regressed, len(verifier.requests), err)
+		}
+	})
+
+	t.Run("merge inspection", func(t *testing.T) {
+		store := newOrchestratorStore(t)
+		incident := IncidentCase{ID: "case-merge-retry", BugID: "bug", Status: CaseWaitingMergeApproval, CycleNumber: 1, CurrentAttemptID: "merge-retry-fix", Version: 1}
+		if err := store.CreateCase(ctx, incident); err != nil {
+			t.Fatal(err)
+		}
+		now := time.Now().UTC()
+		attempt := PhaseAttempt{ID: incident.CurrentAttemptID, CaseID: incident.ID, CycleNumber: 1, Phase: PhaseFix, Status: AttemptStatusSucceeded, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`), FinishedAt: &now}
+		if err := store.CreateAttempt(ctx, attempt); err != nil {
+			t.Fatal(err)
+		}
+		change := CodeChange{ID: "merge-retry-change", CaseID: incident.ID, AttemptID: attempt.ID, Repo: "repo", BaseBranch: "main", FixBranch: "fix/bug", FixCommit: "fix-1", TestEvidence: []byte(`{}`), TargetEnvironmentBranch: "test", PushStatus: "pushed"}
+		if err := store.RecordCodeChange(ctx, change); err != nil {
+			t.Fatal(err)
+		}
+		git := &recordingGitIntegration{result: MergeResult{Repositories: map[string]MergeRepositoryResult{"repo": {Conflict: true}}}}
+		o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, git, &recordingDeploymentVerifier{})
+		conflicted, conflictErr := o.ApproveMerge(ctx, ApproveMergeCommand{CaseID: incident.ID, ExpectedVersion: 1, IdempotencyKey: "merge:first-approval", ActorID: "alice"})
+		if conflictErr == nil || conflicted.Status != CaseMergeConflict {
+			t.Fatalf("conflicted=%+v err=%v", conflicted, conflictErr)
+		}
+		reopened, err := o.ContinueWithEvidence(ctx, ContinueWithEvidenceCommand{CaseID: incident.ID, ExpectedVersion: conflicted.Version, IdempotencyKey: "merge:fresh-inspection", ActorID: "alice", InputJSON: []byte(`{"inspection":"resolved"}`)})
+		if err != nil || reopened.Status != CaseWaitingMergeApproval {
+			t.Fatalf("reopened=%+v err=%v", reopened, err)
+		}
+		events, _ := store.ListEvents(ctx, incident.ID)
+		if events[len(events)-1].ActorType != "user" || events[len(events)-1].EventType != "merge_reinspection_confirmed" {
+			t.Fatalf("events=%+v", events)
+		}
+		git.mu.Lock()
+		git.result = MergeResult{Repositories: map[string]MergeRepositoryResult{"repo": {MergeCommit: "merge-2", Pushed: true}}}
+		git.mu.Unlock()
+		merged, mergeErr := o.ApproveMerge(ctx, ApproveMergeCommand{CaseID: incident.ID, ExpectedVersion: reopened.Version, IdempotencyKey: "merge:second-approval", ActorID: "alice"})
+		if mergeErr != nil || merged.Status != CaseWaitingDeployment || git.mergeCalls != 2 {
+			t.Fatalf("merged=%+v calls=%d err=%v", merged, git.mergeCalls, mergeErr)
+		}
+	})
 }
 
 func TestApproveMergePersistsPartialPerRepoAndGlobalPushedCannotOverride(t *testing.T) {
@@ -605,11 +718,17 @@ func TestApproveMergePersistsPartialPerRepoAndGlobalPushedCannotOverride(t *test
 	}
 	git.mu.Lock()
 	git.inspection = MergeInspection{Repositories: map[string]MergeRepositoryResult{"a": {MergeCommit: "merge-a", Pushed: true}, "b": {MergeCommit: "merge-b", Pushed: false}}}
-	git.result = MergeResult{Repositories: map[string]MergeRepositoryResult{"a": {MergeCommit: "merge-a", Pushed: true}, "b": {MergeCommit: "merge-b", Pushed: true}}}
+	git.result = MergeResult{Repositories: map[string]MergeRepositoryResult{"b": {MergeCommit: "merge-b", Pushed: true}}}
 	git.mu.Unlock()
 	resumed, resumeErr := o.ApproveMerge(ctx, cmd)
 	if resumeErr != nil || resumed.Status != CaseWaitingDeployment || git.mergeCalls != 1 || git.resumeCalls != 1 {
 		t.Fatalf("resumed=%+v merge=%d resume=%d err=%v", resumed, git.mergeCalls, git.resumeCalls, resumeErr)
+	}
+	git.mu.Lock()
+	resumeRequest := git.merges[len(git.merges)-1].Clone()
+	git.mu.Unlock()
+	if len(resumeRequest.Changes) != 1 || resumeRequest.Changes[0].Repo != "b" || len(resumeRequest.FixCommits) != 1 || resumeRequest.FixCommits["b"] != "fix-b" {
+		t.Fatalf("resume request=%+v", resumeRequest)
 	}
 }
 

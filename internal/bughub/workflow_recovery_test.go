@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -156,6 +157,37 @@ func TestRecoverInterruptedFixInspectsExternalStateAndNeverBlindlyRetries(t *tes
 	}
 }
 
+func TestRecoverInterruptedFixReplaysPersistedInspectionReservationAfterReopen(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "workflow.db")
+	store, err := OpenCaseStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incident, attempt := createRunningPhase(t, store, "recover-fix-reopen", CaseWaitingFixApproval, CaseFixing, PhaseFix, "", []byte(`{"fix_branch":"fix/bug","workspace":"/repo"}`))
+	first := NewCaseOrchestrator(store, &recordingPhaseRunner{}, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
+	if err := first.reserveInspectionOnly(ctx, incident, attempt); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenCaseStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	git := &recordingGitIntegration{fixInspection: FixInspection{Complete: true, Changes: []CodeChange{{Repo: "repo", BaseBranch: "main", FixBranch: "fix/bug", FixCommit: "fix-1", TestEvidence: []byte(`{}`), TargetEnvironmentBranch: "test", PushRemote: "origin", PushStatus: "pushed"}}}}
+	reopened := NewCaseOrchestrator(store, &recordingPhaseRunner{}, git, &recordingDeploymentVerifier{})
+	if err := reopened.RecoverInterrupted(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetCase(ctx, incident.ID)
+	if err != nil || got.Status != CaseWaitingMergeApproval || len(git.inspections) != 1 {
+		t.Fatalf("case=%+v inspections=%d err=%v", got, len(git.inspections), err)
+	}
+}
+
 func TestRecoverInterruptedMergeInspectsRemoteBeforeAdvancing(t *testing.T) {
 	ctx := context.Background()
 	store := newOrchestratorStore(t)
@@ -241,7 +273,8 @@ func TestRecoverDeploymentUsesPersistedReservationContextAndDoesNotRerunResult(t
 	incident = addPushedWorkflowChange(t, store, incident)
 	reserveKey := fmt.Sprintf("deployment-reserve:%s:v%d", incident.ID, incident.Version)
 	request := DeploymentVerificationRequest{CaseID: incident.ID, Environment: incident.Environment, ExpectedCommits: map[string]string{"repo": "merge-1"}, ObservedVersion: "persisted-proof", ObservedCommits: map[string]string{"repo": "merge-1"}}
-	reservation := DeploymentReservation{ReservationID: "reservation", ReservationKey: reserveKey, OriginalExpectedVersion: incident.Version, CycleNumber: 1, Environment: incident.Environment, ExpectedCommits: request.ExpectedCommits, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "validator", Target: "codex"}, VerifierInput: request}
+	regressionInput := []byte(`{"scenario":"persisted-regression"}`)
+	reservation := DeploymentReservation{ReservationID: "reservation", ReservationKey: reserveKey, OriginalExpectedVersion: incident.Version, CycleNumber: 1, Environment: incident.Environment, ExpectedCommits: request.ExpectedCommits, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "validator", Target: "codex"}, VerifierInput: request, RegressionInputJSON: regressionInput}
 	payload := mustJSON(reservation)
 	reserved, err := store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: reserveKey, RequestJSON: payload, Steps: []CaseMutationStep{{To: CaseDeploymentUnverified, Event: TransitionEvent{ID: "reserve-event", EventType: "deployment_verification_reserved", ActorType: "user", ActorID: "alice", PayloadJSON: payload}}}})
 	if err != nil {
@@ -260,5 +293,9 @@ func TestRecoverDeploymentUsesPersistedReservationContextAndDoesNotRerunResult(t
 	got, _ := store.GetCase(ctx, incident.ID)
 	if got.Status != CaseRegressionValidating || len(verifier.requests) != 1 || verifier.requests[0].ObservedVersion != "persisted-proof" || runner.startCount() != 1 {
 		t.Fatalf("case=%+v requests=%+v starts=%d", got, verifier.requests, runner.startCount())
+	}
+	attempt, attemptErr := store.GetAttempt(ctx, got.CurrentAttemptID)
+	if attemptErr != nil || string(attempt.InputJSON) != string(regressionInput) {
+		t.Fatalf("attempt=%+v err=%v", attempt, attemptErr)
 	}
 }

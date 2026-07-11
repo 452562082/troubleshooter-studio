@@ -35,3 +35,10 @@ func TestGenerateContextIncludesBugAndBot(t *testing.T) {
 		}
 	}
 }
+
+func TestGenerateContextUsesBotEnvWhenBugEnvMissing(t *testing.T) {
+	ctx := GenerateContext(Bug{Title: "分类计数错误"}, BotRef{Target: "codex", Env: "test"})
+	if !strings.Contains(ctx, "- 环境: test") || !strings.Contains(ctx, "- 排障机器人环境: test") {
+		t.Fatalf("context should use bot env fallback:\n%s", ctx)
+	}
+}

@@ -746,6 +746,35 @@ describe('BugWorkbenchPage', () => {
     expect(wrapper.find('.context-preview').text()).not.toContain('最终根因')
   })
 
+  it('normalizes validation report environment labels from older runs', async () => {
+    vi.mocked(listBugs).mockResolvedValue([
+      { id: 'zentao-909', source: 'zentao', source_id: '909', title: '分类计数错误' },
+    ])
+    vi.mocked(matchBugBots).mockResolvedValue([
+      { bot: { key: 'base|codex', system_id: 'base', target: 'codex', path: '/repo', env: 'test' }, score: 10, reasons: [] },
+    ])
+    vi.mocked(listBugInvestigationRuns).mockResolvedValue([
+      {
+        id: 'run-1',
+        bug_id: 'zentao-909',
+        bot_key: 'base|codex',
+        status: 'succeeded',
+        final_message: '### 验证报告 | bug env: -, bot env: test | 未复现\n\n- 结论: 未复现原始 Bug',
+        events: [
+          { type: 'stage', message: '验证 Agent 未复现原始 Bug，已暂停进入排障 Agent', meta: { phase: 'validation' } },
+        ],
+      },
+    ])
+
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises()
+    await flushPromises()
+
+    const text = wrapper.find('.context-preview').text()
+    expect(text).toContain('验证报告 | test | 未复现')
+    expect(text).not.toContain('bug env: -')
+  })
+
   it('switches to investigation output when a run fails', async () => {
     ;(window as any).runtime = { EventsOnMultiple: vi.fn() }
     vi.mocked(listBugs).mockResolvedValue([

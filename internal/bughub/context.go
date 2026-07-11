@@ -20,11 +20,11 @@ func GenerateContext(b Bug, bot BotRef) string {
 	line("- 状态: %s", emptyDash(b.Status))
 	line("- 严重级别: %s", emptyDash(b.Severity))
 	line("- 优先级: %s", emptyDash(b.Priority))
-	line("- 环境: %s", emptyDash(b.Env))
 	botEnv := strings.TrimSpace(bot.Env)
 	if botEnv == "" {
 		botEnv = matchEnv(b)
 	}
+	line("- 环境: %s", emptyDash(effectiveBugEnv(b, bot)))
 	line("- 排障机器人环境: %s", emptyDash(botEnv))
 	line("- 系统: %s", emptyDash(b.SystemID))
 	line("- 前端仓库: %s", emptyDash(b.FrontendRepo))
@@ -81,6 +81,10 @@ func GenerateContext(b Bug, bot BotRef) string {
 	line("2. 若没有 trace id,用 API 路径和前端入口映射候选后端服务。")
 	line("3. 对照最近变更、K8s 状态、配置中心和下游依赖定位根因。")
 	return strings.TrimSpace(sb.String()) + "\n"
+}
+
+func effectiveBugEnv(b Bug, bot BotRef) string {
+	return firstNonEmpty(strings.TrimSpace(b.Env), strings.TrimSpace(b.BotEnv), strings.TrimSpace(bot.Env))
 }
 
 func writeList(sb *strings.Builder, title string, items []string) {

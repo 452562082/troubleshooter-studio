@@ -666,7 +666,7 @@ handoff_to_troubleshooter:
   - 未采集实时 console
 gaps: []`
 
-	formatted := formatValidationFinalReport(report)
+	formatted := formatValidationFinalReport(report, Bug{}, BotRef{})
 	for _, want := range []string{
 		"### 验证报告 | test | 未复现",
 		"未复现原始 Bug",
@@ -678,6 +678,21 @@ gaps: []`
 		if !strings.Contains(formatted, want) {
 			t.Fatalf("formatted report missing %q:\n%s", want, formatted)
 		}
+	}
+}
+
+func TestFormatValidationFinalReportNormalizesCompositeEnv(t *testing.T) {
+	report := `verification_status: not_reproduced
+environment: bug env: -, bot env: test
+observed_behavior: 未复现
+gaps: []`
+
+	formatted := formatValidationFinalReport(report, Bug{}, BotRef{Env: "test"})
+	if !strings.Contains(formatted, "### 验证报告 | test | 未复现") {
+		t.Fatalf("formatted report should normalize env:\n%s", formatted)
+	}
+	if strings.Contains(formatted, "验证报告 | bug env") {
+		t.Fatalf("formatted report leaked composite env:\n%s", formatted)
 	}
 }
 

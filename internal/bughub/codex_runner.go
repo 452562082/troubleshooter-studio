@@ -296,7 +296,7 @@ func validationOutputContract() string {
 	var sb strings.Builder
 	sb.WriteString("\n请只输出结构化验证报告，格式如下：\n")
 	sb.WriteString("verification_status: reproduced | not_reproduced | insufficient_info | fixed_verified | still_reproduces\n")
-	sb.WriteString("environment: <bug env / bot env>\n")
+	sb.WriteString("environment: <有效环境；优先使用上文“环境”，为空时使用“排障机器人环境”；不要输出 bug env/bot env 组合字符串>\n")
 	sb.WriteString("entry:\n  frontend_url: <实际入口或 ->\n  api_url: <实际接口或 ->\n")
 	sb.WriteString("observed_behavior: <实际看到的现象>\n")
 	sb.WriteString("expected_behavior: <工单期望>\n")
@@ -679,7 +679,7 @@ func (i *CodexInvestigator) collectValidationContinueRun(ctx context.Context, ru
 	}
 	if !validationReportReadyForInvestigation(validationReport) {
 		i.emitStageEvent(runID, "validation", validationPauseMessage(validationReport))
-		if err := i.store.Finish(runID, InvestigationSucceeded, formatValidationFinalReport(validationReport), ""); err != nil {
+		if err := i.store.Finish(runID, InvestigationSucceeded, formatValidationFinalReport(validationReport, bug, bot), ""); err != nil {
 			active.setError(err)
 			return
 		}
@@ -802,7 +802,7 @@ func (i *CodexInvestigator) collectRun(ctx context.Context, runID string, bug Bu
 	}
 	if !validationReportReadyForInvestigation(validationReport) {
 		i.emitStageEvent(runID, "validation", validationPauseMessage(validationReport))
-		if err := i.store.Finish(runID, InvestigationSucceeded, formatValidationFinalReport(validationReport), ""); err != nil {
+		if err := i.store.Finish(runID, InvestigationSucceeded, formatValidationFinalReport(validationReport, bug, bot), ""); err != nil {
 			active.setError(err)
 			return
 		}
@@ -883,7 +883,7 @@ func validationPauseMessage(report string) string {
 	}
 }
 
-func formatValidationFinalReport(report string) string {
+func formatValidationFinalReport(report string, bug Bug, bot BotRef) string {
 	report = strings.TrimSpace(strings.ReplaceAll(report, `\n`, "\n"))
 	if report == "" {
 		return ""
@@ -893,7 +893,7 @@ func formatValidationFinalReport(report string) string {
 	}
 	status := validationStatus(report)
 	statusLabel := validationStatusLabel(status)
-	env := firstNonEmpty(yamlScalar(report, "environment"), "-")
+	env := normalizeValidationReportEnv(yamlScalar(report, "environment"), bug, bot)
 	frontendURL := firstNonEmpty(yamlNestedScalar(report, "entry", "frontend_url"), "-")
 	apiURL := firstNonEmpty(yamlNestedScalar(report, "entry", "api_url"), "-")
 	observed := firstNonEmpty(yamlScalar(report, "observed_behavior"), "-")
@@ -917,6 +917,46 @@ func formatValidationFinalReport(report string) string {
 	sb.WriteString(report)
 	sb.WriteString("\n```\n")
 	return sb.String()
+}
+
+func normalizeValidationReportEnv(env string, bug Bug, bot BotRef) string {
+	env = strings.TrimSpace(strings.Trim(env, "`\"'"))
+	fallback := firstNonEmpty(effectiveBugEnv(bug, bot), "-")
+	if env == "" || env == "-" {
+		return fallback
+	}
+	lower := strings.ToLower(env)
+	if strings.Contains(lower, "bug env") || strings.Contains(lower, "bot env") {
+		bugEnv := fieldFromLooseEnvLabel(env, "bug env")
+		botEnv := fieldFromLooseEnvLabel(env, "bot env")
+		return firstNonEmpty(nonDash(bugEnv), nonDash(botEnv), fallback)
+	}
+	return env
+}
+
+func fieldFromLooseEnvLabel(text, key string) string {
+	lower := strings.ToLower(text)
+	key = strings.ToLower(key)
+	idx := strings.Index(lower, key)
+	if idx < 0 {
+		return ""
+	}
+	rest := strings.TrimSpace(text[idx+len(key):])
+	rest = strings.TrimLeft(rest, " :=：")
+	for _, sep := range []string{",", "，", "|", ";", "；"} {
+		if cut := strings.Index(rest, sep); cut >= 0 {
+			rest = rest[:cut]
+		}
+	}
+	return strings.TrimSpace(rest)
+}
+
+func nonDash(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "-" {
+		return ""
+	}
+	return value
 }
 
 func validationStatusLabel(status string) string {

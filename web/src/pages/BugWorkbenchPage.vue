@@ -187,7 +187,7 @@ const validationFinalText = computed(() => {
   const run = selectedRun.value
   if (!run) return ''
   if (currentRunPhase(run) === 'validation' && (run.final_message || run.error)) {
-    return run.final_message || run.error || ''
+    return normalizeValidationReportForDisplay(run.final_message || run.error || '')
   }
   const events = [...(run.events || [])].reverse()
   const reportEvent = events.find(e => eventPhase(e) === 'validation' && isLikelyValidationStructuredResult(e.message || ''))
@@ -1041,7 +1041,7 @@ function isLikelyValidationStructuredResult(message: string): boolean {
 function formatValidationReportForDisplay(message: string): string {
   const raw = message.trim().split('\\n').join('\n')
   if (!raw) return ''
-  if (/^#{1,6}\s*验证报告\s*\|/m.test(raw)) return raw
+  if (/^#{1,6}\s*验证报告\s*\|/m.test(raw)) return normalizeValidationReportForDisplay(raw)
   const status = yamlScalar(raw, 'verification_status')
   const env = yamlScalar(raw, 'environment') || '-'
   const observed = yamlScalar(raw, 'observed_behavior') || '-'
@@ -1063,6 +1063,36 @@ function formatValidationReportForDisplay(message: string): string {
     raw,
     '```',
   ].join('\n')
+}
+
+function normalizeValidationReportForDisplay(message: string): string {
+  const text = message.trim()
+  if (!text) return ''
+  return text.replace(/^(#{1,6}\s*验证报告\s*\|\s*)([^|\n]+?)(\s*\|\s*[^\n]+)$/m, (_match, prefix, env, suffix) => {
+    return `${prefix}${normalizeValidationEnvLabel(env)}${suffix}`
+  })
+}
+
+function normalizeValidationEnvLabel(env: string): string {
+  const text = env.trim()
+  if (!/bug env|bot env/i.test(text)) return text || '-'
+  const bugEnv = looseEnvField(text, 'bug env')
+  const botEnv = looseEnvField(text, 'bot env')
+  return firstDisplayEnv(bugEnv, botEnv, text)
+}
+
+function looseEnvField(text: string, key: string): string {
+  const pattern = new RegExp(`${escapeRegExp(key)}\\s*[:=：]?\\s*([^,，|;；]+)`, 'i')
+  const match = text.match(pattern)
+  return stripYamlQuotes(match?.[1] || '')
+}
+
+function firstDisplayEnv(...values: string[]): string {
+  for (const value of values) {
+    const trimmed = value.trim()
+    if (trimmed && trimmed !== '-') return trimmed
+  }
+  return '-'
 }
 
 function validationStatusLabel(status: string): string {

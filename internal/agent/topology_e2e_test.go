@@ -33,6 +33,9 @@ func TestServiceTopologyE2E_ScansGeneratesAndQueriesThreeLayerPath(t *testing.T)
 	if got, want := query.Paths[0].Services, []string{"mall-web", "mall-bff", "mall-order"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("query services=%v, want %v", got, want)
 	}
+	if got := len(query.Paths[0].Edges); got != 2 {
+		t.Fatalf("query edge count=%d, want 2: %#v", got, query.Paths[0].Edges)
+	}
 	for index, edge := range query.Paths[0].Edges {
 		if len(edge.Evidence) == 0 || len(edge.Evidence[0].Reasons) == 0 || edge.Evidence[0].FromLocation == "" || edge.Evidence[0].ToLocation == "" {
 			t.Fatalf("query edge %d lacks evidence: %#v", index, edge)

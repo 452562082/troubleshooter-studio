@@ -222,6 +222,35 @@ describe('applyParsedYAMLToWizardState observability import', () => {
     })
   })
 
+  it('normalizes uppercase HTTP and gRPC overrides without dropping semantic fields', async () => {
+    const ctx = makeImportCtx()
+    await applyParsedYAMLToWizardState({
+      service_topology: {
+        overrides: [
+          {
+            action: 'confirm', from_service: 'web', to_service: 'files',
+            protocol: 'HTTP', method: 'get', path: '/files/:path*',
+          },
+          {
+            action: 'reject', from_service: 'web', to_service: 'orders',
+            protocol: 'GRPC', rpc_method: 'orders.v1.OrderService/GetOrder',
+          },
+        ],
+      },
+    }, ctx)
+
+    expect(ctx.serviceTopology.overrides).toEqual([
+      {
+        action: 'confirm', fromService: 'web', toService: 'files',
+        protocol: 'http', method: 'GET', path: '/files/:path*',
+      },
+      {
+        action: 'reject', fromService: 'web', toService: 'orders',
+        protocol: 'grpc', rpcMethod: 'orders.v1.OrderService/GetOrder',
+      },
+    ])
+  })
+
   it('defaults old YAML topology overrides to an empty array', async () => {
     const ctx = makeImportCtx({ serviceTopology: { overrides: [{
       action: 'add', fromService: 'old', toService: 'old-peer', protocol: 'http', method: 'GET', path: '/old',

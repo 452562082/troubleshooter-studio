@@ -193,6 +193,30 @@ export interface ApplyImportContext {
   setRepoBranches: (name: string, branches: string[]) => void
 }
 
+/** Convert backend-valid YAML override records into wizard state.
+ * Protocol and HTTP method use the same case normalization as Go validation;
+ * paths stay byte-for-byte intact for the backend to canonicalize. */
+export function importServiceTopologyOverrides(rawOverrides: unknown): ServiceTopologyOverrideState[] {
+  if (!Array.isArray(rawOverrides)) return []
+  return rawOverrides.flatMap((raw: unknown): ServiceTopologyOverrideState[] => {
+    if (!raw || typeof raw !== 'object') return []
+    const value = raw as Record<string, unknown>
+    if (value.action !== 'confirm' && value.action !== 'reject' && value.action !== 'add') return []
+    const protocol = typeof value.protocol === 'string' ? value.protocol.trim().toLowerCase() : ''
+    if (protocol !== 'http' && protocol !== 'grpc') return []
+    if (typeof value.from_service !== 'string' || typeof value.to_service !== 'string') return []
+    return [{
+      action: value.action,
+      fromService: value.from_service,
+      toService: value.to_service,
+      protocol,
+      ...(typeof value.method === 'string' ? { method: value.method.trim().toUpperCase() } : {}),
+      ...(typeof value.path === 'string' ? { path: value.path } : {}),
+      ...(typeof value.rpc_method === 'string' ? { rpcMethod: value.rpc_method } : {}),
+    }]
+  })
+}
+
 /**
  * 把 parsed yaml 反填到 wizard 的 reactive state(同步部分,async cross-check tail 留 InitPage)。
  * 返回主源 type(InitPage 用作 setTimeout cross-check 的 envID 输入)。
@@ -206,25 +230,7 @@ export async function applyParsedYAMLToWizardState(
     && (codeIntelligence.provider === undefined || codeIntelligence.provider === 'codegraph')
   ctx.codeIntelligence.provider = 'codegraph'
 
-  const topologyOverrides = Array.isArray(parsed?.service_topology?.overrides)
-    ? parsed.service_topology.overrides
-    : []
-  ctx.serviceTopology.overrides = topologyOverrides.flatMap((raw: unknown): ServiceTopologyOverrideState[] => {
-    if (!raw || typeof raw !== 'object') return []
-    const value = raw as Record<string, unknown>
-    if (value.action !== 'confirm' && value.action !== 'reject' && value.action !== 'add') return []
-    if (value.protocol !== 'http' && value.protocol !== 'grpc') return []
-    if (typeof value.from_service !== 'string' || typeof value.to_service !== 'string') return []
-    return [{
-      action: value.action,
-      fromService: value.from_service,
-      toService: value.to_service,
-      protocol: value.protocol,
-      ...(typeof value.method === 'string' ? { method: value.method } : {}),
-      ...(typeof value.path === 'string' ? { path: value.path } : {}),
-      ...(typeof value.rpc_method === 'string' ? { rpcMethod: value.rpc_method } : {}),
-    }]
-  })
+  ctx.serviceTopology.overrides = importServiceTopologyOverrides(parsed?.service_topology?.overrides)
 
   // system
   if (parsed.system && typeof parsed.system === 'object') {

@@ -21,6 +21,133 @@ func TestMatchExactHostMethodPathIsAutomatic(t *testing.T) {
 	assertStrings(t, edge.Conflicts, nil)
 }
 
+func TestMatchOutboundTemplateDoesNotMatchFixedInboundLiteral(t *testing.T) {
+	result := Match(MatchInput{
+		Endpoints: []Endpoint{
+			endpoint("web", "web", DirectionOutbound, "GET", "/api/orders/{param}", "orders"),
+			endpoint("orders", "orders", DirectionInbound, "GET", "/api/orders/123", ""),
+		},
+		Services: []ServiceDescriptor{{Repo: "orders", Service: "orders", Aliases: []string{"orders"}}},
+	})
+	if len(result.Edges) != 0 || len(result.Hints) != 0 {
+		t.Fatalf("outbound template matched fixed inbound route: edges=%#v hints=%#v", result.Edges, result.Hints)
+	}
+}
+
+func TestMatchConcreteRequestKeepsMostSpecificRouteInSameService(t *testing.T) {
+	result := Match(MatchInput{
+		Endpoints: []Endpoint{
+			endpoint("web", "web", DirectionOutbound, "GET", "/users/me", "users"),
+			endpoint("users", "users", DirectionInbound, "GET", "/users/{param}", ""),
+			endpoint("users", "users", DirectionInbound, "GET", "/users/me", ""),
+		},
+		Services: []ServiceDescriptor{{Repo: "users", Service: "users", Aliases: []string{"users"}}},
+	})
+	edge := onlyEdge(t, result)
+	if edge.Path != "/users/me" || edge.Confidence != 0.98 || edge.Status != "automatic" {
+		t.Fatalf("edge=%#v", edge)
+	}
+	assertStrings(t, edge.Reasons, []string{"method_path_exact", "target_alias_exact"})
+}
+
+func TestMatchInboundParameterTemplateHasDeterministicReason(t *testing.T) {
+	result := Match(MatchInput{
+		Endpoints: []Endpoint{
+			endpoint("web", "web", DirectionOutbound, "GET", "/api/orders/123", "orders"),
+			endpoint("orders", "orders", DirectionInbound, "GET", "/api/orders/{param}", ""),
+		},
+		Services: []ServiceDescriptor{{Repo: "orders", Service: "orders", Aliases: []string{"orders"}}},
+	})
+	edge := onlyEdge(t, result)
+	if edge.Confidence != 0.98 || edge.Status != "automatic" {
+		t.Fatalf("edge=%#v", edge)
+	}
+	assertStrings(t, edge.Reasons, []string{"method_path_template", "target_alias_exact"})
+}
+
+func TestMatchInboundWildcardConsumesOneOrMoreConcreteSegments(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		path    string
+		matched bool
+	}{
+		{name: "one segment", path: "/files/a", matched: true},
+		{name: "multiple segments", path: "/files/a/b", matched: true},
+		{name: "zero segments", path: "/files", matched: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result := Match(MatchInput{
+				Endpoints: []Endpoint{
+					endpoint("web", "web", DirectionOutbound, "GET", test.path, "files"),
+					endpoint("files", "files", DirectionInbound, "GET", "/files/{wildcard}", ""),
+				},
+				Services: []ServiceDescriptor{{Repo: "files", Service: "files", Aliases: []string{"files"}}},
+			})
+			if !test.matched {
+				if len(result.Edges) != 0 || len(result.Hints) != 0 {
+					t.Fatalf("zero-segment wildcard matched: edges=%#v hints=%#v", result.Edges, result.Hints)
+				}
+				return
+			}
+			edge := onlyEdge(t, result)
+			if edge.Path != "/files/{wildcard}" || edge.Confidence != 0.98 {
+				t.Fatalf("edge=%#v", edge)
+			}
+			assertStrings(t, edge.Reasons, []string{"method_path_template", "target_alias_exact"})
+		})
+	}
+}
+
+func TestMatchConcreteRequestPrefersLiteralOverWildcardInSameService(t *testing.T) {
+	result := Match(MatchInput{
+		Endpoints: []Endpoint{
+			endpoint("web", "web", DirectionOutbound, "GET", "/files/public", "files"),
+			endpoint("files", "files", DirectionInbound, "GET", "/files/{wildcard}", ""),
+			endpoint("files", "files", DirectionInbound, "GET", "/files/public", ""),
+		},
+		Services: []ServiceDescriptor{{Repo: "files", Service: "files", Aliases: []string{"files"}}},
+	})
+	edge := onlyEdge(t, result)
+	if edge.Path != "/files/public" || edge.Confidence != 0.98 {
+		t.Fatalf("edge=%#v", edge)
+	}
+}
+
+func TestMatchConcreteRequestPrefersTransformedLiteralOverRawWildcardInSameService(t *testing.T) {
+	outbound := endpoint("gateway", "gateway", DirectionOutbound, "GET", "/edge/files/public", "files")
+	outbound.Transforms = []Transform{{Kind: "rewrite", From: "/edge/files/public", To: "/files/public"}}
+	result := Match(MatchInput{
+		Endpoints: []Endpoint{
+			outbound,
+			endpoint("files", "files", DirectionInbound, "GET", "/edge/files/{wildcard}", ""),
+			endpoint("files", "files", DirectionInbound, "GET", "/files/public", ""),
+		},
+		Services: []ServiceDescriptor{{Repo: "files", Service: "files", Aliases: []string{"files"}}},
+	})
+	edge := onlyEdge(t, result)
+	if edge.Path != "/files/public" || edge.Confidence != 0.90 {
+		t.Fatalf("edge=%#v", edge)
+	}
+	assertStrings(t, edge.Reasons, []string{"path_transform_proven", "target_alias_exact"})
+}
+
+func TestMatchLiteralAndWildcardAcrossServicesRemainAmbiguous(t *testing.T) {
+	result := Match(MatchInput{Endpoints: []Endpoint{
+		endpoint("web", "web", DirectionOutbound, "GET", "/files/public", "API_URL"),
+		endpoint("literal", "literal-files", DirectionInbound, "GET", "/files/public", ""),
+		endpoint("wildcard", "wildcard-files", DirectionInbound, "GET", "/files/{wildcard}", ""),
+	}})
+	if len(result.Edges) != 0 || len(result.Hints) != 2 {
+		t.Fatalf("cross-service ambiguity lost: edges=%#v hints=%#v", result.Edges, result.Hints)
+	}
+	for _, edge := range result.Hints {
+		if edge.Confidence != 0.55 || edge.Status != "candidate" {
+			t.Fatalf("ambiguous route promoted: %#v", edge)
+		}
+		assertStrings(t, edge.Conflicts, []string{"target_unresolved", "route_duplicated_across_services"})
+	}
+}
+
 func TestMatchUniquePathWithUnknownVariableIsCandidate(t *testing.T) {
 	result := Match(MatchInput{Endpoints: []Endpoint{
 		endpoint("web", "web", DirectionOutbound, "GET", "/api/orders", "API_BASE_URL"),

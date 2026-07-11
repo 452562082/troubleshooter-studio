@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import yaml from 'js-yaml'
 import { generateYAML, type ServiceTopologyState, type YAMLGenContext } from './yamlGenerator'
+import { importServiceTopologyOverrides } from './yamlImporter'
 
 // 最小可工作 ctx 工厂:测试用 stub。各测试按需 spread + 覆盖具体字段。
 function makeCtx(overrides: Partial<YAMLGenContext> = {}): YAMLGenContext {
@@ -90,6 +91,33 @@ describe('generateYAML', () => {
     })
     expect(JSON.stringify(parsed.service_topology)).not.toContain('runtime-only-endpoint')
     expect(JSON.stringify(parsed.service_topology)).not.toContain('candidate')
+  })
+
+  it('round-trips uppercase HTTP and gRPC override semantics through imported state', () => {
+    const serviceTopology: ServiceTopologyState = {
+      overrides: importServiceTopologyOverrides([
+        {
+          action: 'confirm', from_service: 'web', to_service: 'files',
+          protocol: 'HTTP', method: 'get', path: '/files/:path*',
+        },
+        {
+          action: 'reject', from_service: 'web', to_service: 'orders',
+          protocol: 'GRPC', rpc_method: 'orders.v1.OrderService/GetOrder',
+        },
+      ]),
+    }
+
+    const parsed = yaml.load(generateYAML(makeCtx({ serviceTopology }))) as Record<string, any>
+    expect(parsed.service_topology.overrides).toEqual([
+      {
+        action: 'confirm', from_service: 'web', to_service: 'files',
+        protocol: 'http', method: 'GET', path: '/files/:path*',
+      },
+      {
+        action: 'reject', from_service: 'web', to_service: 'orders',
+        protocol: 'grpc', rpc_method: 'orders.v1.OrderService/GetOrder',
+      },
+    ])
   })
 
   it('emits parseable yaml for minimal context', () => {

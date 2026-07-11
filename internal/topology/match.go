@@ -111,13 +111,15 @@ type routeMatchKind uint8
 
 const (
 	routeExact routeMatchKind = iota
+	routeTemplate
 	routeTransformed
 	routeSimilar
 )
 
 type routeCandidate struct {
-	endpoint Endpoint
-	kind     routeMatchKind
+	endpoint    Endpoint
+	kind        routeMatchKind
+	specificity int
 }
 
 func routeCandidates(outbound Endpoint, inbound []Endpoint) []routeCandidate {
@@ -134,11 +136,11 @@ func routeCandidates(outbound Endpoint, inbound []Endpoint) []routeCandidate {
 			}
 			switch {
 			case NormalizePath(outbound.Path) == NormalizePath(candidate.Path):
-				primary = append(primary, routeCandidate{endpoint: candidate, kind: routeExact})
-			case pathsMatchParameterTemplate(outbound.Path, candidate.Path):
-				primary = append(primary, routeCandidate{endpoint: candidate, kind: routeExact})
+				primary = append(primary, routeCandidate{endpoint: candidate, kind: routeExact, specificity: inboundRouteSpecificity(candidate.Path)})
+			case outboundMatchesInboundTemplate(outbound.Path, candidate.Path):
+				primary = append(primary, routeCandidate{endpoint: candidate, kind: routeTemplate, specificity: inboundRouteSpecificity(candidate.Path)})
 			case pathsMatchThroughTransforms(outbound, candidate):
-				primary = append(primary, routeCandidate{endpoint: candidate, kind: routeTransformed})
+				primary = append(primary, routeCandidate{endpoint: candidate, kind: routeTransformed, specificity: inboundRouteSpecificity(candidate.Path)})
 			case pathsHaveSuffixSimilarity(outbound.Path, candidate.Path):
 				similar = append(similar, routeCandidate{endpoint: candidate, kind: routeSimilar})
 			}
@@ -151,29 +153,96 @@ func routeCandidates(outbound Endpoint, inbound []Endpoint) []routeCandidate {
 		}
 	}
 	if len(primary) > 0 {
-		return primary
+		return mostSpecificCandidatesPerService(primary)
 	}
 	return similar
 }
 
-func pathsMatchParameterTemplate(left, right string) bool {
-	leftSegments := strings.Split(strings.TrimPrefix(NormalizePath(left), "/"), "/")
-	rightSegments := strings.Split(strings.TrimPrefix(NormalizePath(right), "/"), "/")
-	if len(leftSegments) != len(rightSegments) {
-		return false
-	}
-	usedParameter := false
-	for index := range leftSegments {
-		if leftSegments[index] == rightSegments[index] {
-			continue
+func outboundMatchesInboundTemplate(outboundPath, inboundPath string) bool {
+	outbound := normalizedPathSegments(outboundPath)
+	inbound := normalizedPathSegments(inboundPath)
+	var match func(int, int) bool
+	match = func(outboundIndex, inboundIndex int) bool {
+		if inboundIndex == len(inbound) {
+			return outboundIndex == len(outbound)
 		}
-		if leftSegments[index] == "{param}" || rightSegments[index] == "{param}" {
-			usedParameter = true
-			continue
+		segment := inbound[inboundIndex]
+		switch segment {
+		case "{param}":
+			return outboundIndex < len(outbound) && outbound[outboundIndex] != "{wildcard}" && match(outboundIndex+1, inboundIndex+1)
+		case "{wildcard}":
+			// An inbound wildcard is a route catch-all, but it must consume at
+			// least one concrete request segment. Symbolic outbound templates do
+			// not prove that contract; canonical equality is handled above.
+			for end := outboundIndex + 1; end <= len(outbound); end++ {
+				if !isConcretePathSegment(outbound[end-1]) {
+					break
+				}
+				if match(end, inboundIndex+1) {
+					return true
+				}
+			}
+			return false
+		default:
+			return outboundIndex < len(outbound) && outbound[outboundIndex] == segment && match(outboundIndex+1, inboundIndex+1)
 		}
-		return false
 	}
-	return usedParameter
+	return match(0, 0)
+}
+
+func normalizedPathSegments(path string) []string {
+	path = strings.TrimPrefix(NormalizePath(path), "/")
+	if path == "" {
+		return nil
+	}
+	return strings.Split(path, "/")
+}
+
+func isConcretePathSegment(segment string) bool {
+	return segment != "{param}" && segment != "{wildcard}"
+}
+
+func inboundRouteSpecificity(path string) int {
+	segments := normalizedPathSegments(path)
+	literals := 0
+	params := 0
+	wildcards := 0
+	for _, segment := range segments {
+		switch segment {
+		case "{param}":
+			params++
+		case "{wildcard}":
+			wildcards++
+		default:
+			literals++
+		}
+	}
+	switch {
+	case wildcards > 0:
+		return 100000 + literals*100 - wildcards
+	case params > 0:
+		return 200000 + literals*100 - params
+	default:
+		return 300000 + literals*100
+	}
+}
+
+func mostSpecificCandidatesPerService(candidates []routeCandidate) []routeCandidate {
+	best := make(map[serviceKey]int, len(candidates))
+	for _, candidate := range candidates {
+		key := serviceKey{repo: candidate.endpoint.Repo, service: candidate.endpoint.Service}
+		if candidate.specificity > best[key] {
+			best[key] = candidate.specificity
+		}
+	}
+	result := make([]routeCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		key := serviceKey{repo: candidate.endpoint.Repo, service: candidate.endpoint.Service}
+		if candidate.specificity == best[key] {
+			result = append(result, candidate)
+		}
+	}
+	return result
 }
 
 func normalizedProtocol(protocol string) string {
@@ -252,6 +321,9 @@ func matchedRouteEdge(outbound Endpoint, match routeCandidate, descriptors map[s
 	} else if match.kind == routeSimilar {
 		edge.Reasons = append(edge.Reasons, "http_method_compatible", "path_suffix_similar")
 		scoreSimilarRoute(&edge, evidence)
+	} else if match.kind == routeTemplate {
+		edge.Reasons = append(edge.Reasons, "method_path_template")
+		scoreExactRoute(&edge, evidence, duplicateRoute, targetAmbiguous)
 	} else {
 		edge.Reasons = append(edge.Reasons, exactRouteReason(edge.Protocol))
 		scoreExactRoute(&edge, evidence, duplicateRoute, targetAmbiguous)

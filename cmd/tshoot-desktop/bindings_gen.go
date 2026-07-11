@@ -51,9 +51,14 @@ func (a *App) Gen(yamlText, outputDir string) (*generator.GenSummary, error) {
 	// auto-analyze:从 userconfig 读已存的本地仓库路径,命中即跑一遍 analyzer。
 	// 跑失败 / 路径全空 都不阻塞 gen,只是产物里两份 map 走 fallback(yaml 反推 / 留空)。
 	saved := userconfig.GetRepoPathsForSystem(cfg.System.ID)
+	expanded := make(map[string]string, len(saved))
+	for name, path := range saved {
+		expanded[name] = userconfig.ExpandHome(path)
+	}
+	g.RepoLocalPaths = expanded
 	if result, aerr := runAutoAnalyzeForGen(agent.RunAutoAnalyzeOptions{
 		Cfg:       cfg,
-		RepoPaths: saved,
+		RepoPaths: expanded,
 		OnLog: func(msg string) {
 			wailsruntime.EventsEmit(a.ctx, "gen:log", msg)
 		},

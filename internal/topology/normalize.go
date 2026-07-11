@@ -28,7 +28,16 @@ func NormalizeHTTPMethod(method string) string {
 
 func (e Endpoint) SemanticID() string {
 	protocol := strings.ToLower(strings.TrimSpace(e.Protocol))
-	parts := []string{e.Repo, protocol, strings.ToLower(string(e.Direction))}
+	owner := strings.TrimSpace(e.Repo)
+	service := strings.TrimSpace(e.Service)
+	// Preserve the original single-service ID contract while qualifying facts
+	// copied across multiple services in the same repository. Consumers treat
+	// endpoint IDs as opaque keys, so the qualifier is stable and reversible
+	// without invalidating existing repo==service evidence.
+	if service != "" && service != owner {
+		owner += "/" + service
+	}
+	parts := []string{owner, protocol, strings.ToLower(string(e.Direction))}
 	if protocol == "http" {
 		parts = append(parts, NormalizeHTTPMethod(e.Method), NormalizePath(e.Path))
 	} else {

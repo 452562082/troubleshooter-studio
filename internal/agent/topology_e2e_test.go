@@ -51,6 +51,34 @@ func TestServiceTopologyE2E_ScansGeneratesAndQueriesThreeLayerPath(t *testing.T)
 	}
 }
 
+func TestServiceTopologyE2E_MultiServiceRepositoryGeneratesQueryableEvidence(t *testing.T) {
+	cfg, repoPaths := topologyE2EConfigAndRepos(t)
+	cfg.System.ID += "-multi-service"
+	for index := range cfg.Repos {
+		if cfg.Repos[index].Name == "mall-bff" {
+			cfg.Repos[index].ServiceNames = []string{"mall-bff", "mall-bff-admin"}
+		}
+	}
+
+	result, err := RunAutoAnalyze(RunAutoAnalyzeOptions{Cfg: cfg, RepoPaths: repoPaths})
+	if err != nil {
+		t.Fatalf("RunAutoAnalyze: %v", err)
+	}
+	seen := make(map[string]string, len(result.Topology.Endpoints))
+	for _, endpoint := range result.Topology.Endpoints {
+		if previous, exists := seen[endpoint.ID]; exists {
+			t.Fatalf("endpoint id %q is shared by services %q and %q", endpoint.ID, previous, endpoint.Service)
+		}
+		seen[endpoint.ID] = endpoint.Service
+	}
+
+	workspace := generateTopologyE2EWorkspace(t, cfg, repoPaths, result)
+	query := runTopologyE2EQuery(t, workspace, "GET", "/api/orders/123")
+	if query.Status != "ok" || len(query.Paths) == 0 {
+		t.Fatalf("generated multi-service evidence is not queryable: %#v", query)
+	}
+}
+
 func TestServiceTopologyE2E_MissingOrderRepositoryGeneratesPartialEvidence(t *testing.T) {
 	cfg, repoPaths := topologyE2EConfigAndRepos(t)
 	delete(repoPaths, "mall-order")

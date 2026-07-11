@@ -142,6 +142,7 @@ func routes(r *Router) {
 		t.Fatalf("multi-service endpoints=%#v, want one copy per configured service", result.Topology.Endpoints)
 	}
 	services := map[string]int{}
+	ids := map[string]string{}
 	for _, endpoint := range result.Topology.Endpoints {
 		if endpoint.Service == "" {
 			t.Fatalf("endpoint kept blank service ownership: %#v", endpoint)
@@ -150,6 +151,10 @@ func routes(r *Router) {
 			t.Fatalf("endpoint ID was not recomputed after service assignment: %#v", endpoint)
 		}
 		services[endpoint.Service]++
+		if previousService, exists := ids[endpoint.ID]; exists {
+			t.Fatalf("multi-service endpoint ID %q is shared by %q and %q", endpoint.ID, previousService, endpoint.Service)
+		}
+		ids[endpoint.ID] = endpoint.Service
 	}
 	if !reflect.DeepEqual(services, map[string]int{"orders": 1, "payments": 1}) {
 		t.Fatalf("endpoint service copies=%#v", services)

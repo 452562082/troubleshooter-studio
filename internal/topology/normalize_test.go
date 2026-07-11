@@ -49,4 +49,20 @@ func TestEndpointSemanticIDIsStable(t *testing.T) {
 	if got, want := e.SemanticID(), "mall-web:http:outbound:GET:/orders/{param}"; got != want {
 		t.Fatalf("id=%q want %q", got, want)
 	}
+	e.ID = "ignored:previous:id"
+	if got, want := e.SemanticID(), "mall-web:http:outbound:GET:/orders/{param}"; got != want {
+		t.Fatalf("recomputed id=%q want %q", got, want)
+	}
+}
+
+func TestEndpointSemanticIDQualifiesMultiServiceRepositoryOwnership(t *testing.T) {
+	orders := Endpoint{Repo: "platform", Service: "orders", Direction: DirectionInbound, Protocol: "http", Method: "GET", Path: "/health"}
+	payments := orders
+	payments.Service = "payments"
+	if orders.SemanticID() == payments.SemanticID() {
+		t.Fatalf("multi-service IDs collided: %q", orders.SemanticID())
+	}
+	if got, want := orders.SemanticID(), "platform/orders:http:inbound:GET:/health"; got != want {
+		t.Fatalf("orders id=%q want %q", got, want)
+	}
 }

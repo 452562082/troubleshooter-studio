@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -12,6 +13,41 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/topology"
 )
+
+func TestAnalyzeServiceTopology_NoResultFromTimeoutOrCancellationReturnsError(t *testing.T) {
+	yamlText, paths := desktopTopologyFixture(t)
+	previousRun := runAutoAnalyzeForTopology
+	previousInvalidate := invalidateAutoAnalyzeForTopology
+	runAutoAnalyzeForTopology = func(agent.RunAutoAnalyzeOptions) (*analyzerpipe.Result, error) {
+		return nil, nil
+	}
+	invalidateAutoAnalyzeForTopology = func(*config.SystemConfig, map[string]string) {}
+	t.Cleanup(func() {
+		runAutoAnalyzeForTopology = previousRun
+		invalidateAutoAnalyzeForTopology = previousInvalidate
+	})
+
+	for _, test := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{name: "timeout without result", ctx: context.Background()},
+		{name: "canceled runtime", ctx: func() context.Context {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx
+		}()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app := &App{}
+			app.setRuntimeContext(test.ctx)
+			snapshot, err := app.AnalyzeServiceTopology(yamlText, paths)
+			if err == nil || snapshot != nil {
+				t.Fatalf("snapshot=%#v err=%v, want nil/error so the UI retains its previous snapshot", snapshot, err)
+			}
+		})
+	}
+}
 
 func TestAnalyzeServiceTopology_NilRuntimeContextScansFixture(t *testing.T) {
 	yamlText, paths := desktopTopologyFixture(t)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"github.com/xiaolong/troubleshooter-studio/internal/agent"
@@ -49,6 +50,12 @@ func (a *App) AnalyzeServiceTopology(yamlText string, repoPaths map[string]strin
 		return nil, err
 	}
 	if result == nil {
+		if len(expanded) > 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, fmt.Errorf("service topology analysis canceled: %w", err)
+			}
+			return nil, fmt.Errorf("service topology analysis timed out or returned no result")
+		}
 		return &topology.Snapshot{SchemaVersion: topology.SchemaVersion}, nil
 	}
 	return &result.Topology, nil

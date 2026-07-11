@@ -9,11 +9,27 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/agent"
 	"github.com/xiaolong/troubleshooter-studio/internal/analyzerpipe"
 	"github.com/xiaolong/troubleshooter-studio/internal/topology"
+	"github.com/xiaolong/troubleshooter-studio/internal/userconfig"
 )
 
 func TestGen_AutoAnalyzeTopologyReachesGeneratedWorkspace(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	saved := map[string]string{}
+	for _, name := range []string{"mall-web", "mall-bff", "mall-order"} {
+		saved[name] = filepath.Join(home, name)
+		if err := os.MkdirAll(saved[name], 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := userconfig.SetRepoPathsForSystem("mall", saved); err != nil {
+		t.Fatal(err)
+	}
 	previous := runAutoAnalyzeForGen
-	runAutoAnalyzeForGen = func(agent.RunAutoAnalyzeOptions) (*analyzerpipe.Result, error) {
+	runAutoAnalyzeForGen = func(options agent.RunAutoAnalyzeOptions) (*analyzerpipe.Result, error) {
+		if len(options.RepoPaths) != len(saved) {
+			t.Fatalf("auto-analyze repo paths=%#v, want %#v", options.RepoPaths, saved)
+		}
 		return &analyzerpipe.Result{Topology: topology.Snapshot{
 			SchemaVersion: topology.SchemaVersion,
 			Services: []topology.ServiceDescriptor{
@@ -49,6 +65,10 @@ func TestGen_AutoAnalyzeTopologyReachesGeneratedWorkspace(t *testing.T) {
 		if !strings.Contains(string(data), want) {
 			t.Fatalf("generated topology missing %q:\n%s", want, data)
 		}
+	}
+	queryScript := filepath.Join(out, "templates", "workspace-template", "skills", "service-topology-query", "scripts", "query.py")
+	if _, err := os.Stat(queryScript); err != nil {
+		t.Fatalf("Gen dropped service-topology-query despite saved repository paths: %v", err)
 	}
 }
 

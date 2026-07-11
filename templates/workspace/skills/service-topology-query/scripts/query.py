@@ -295,26 +295,59 @@ def normalized_edges(document: dict, legacy_flat: bool) -> list[dict]:
     return result
 
 
-def route_matches(route: dict, method: str | None, path: str | None) -> bool:
+def normalize_rpc_method(value: object) -> str | None:
+    method = str(value or "").strip().lstrip("/")
+    return method or None
+
+
+def route_matches(
+    route: dict,
+    protocol: str | None,
+    method: str | None,
+    path: str | None,
+    rpc_method: str | None,
+) -> bool:
+    if protocol and route.get("protocol") != protocol:
+        return False
     if method and route.get("method") != method:
         return False
     if path and not path_matches(route.get("path"), path):
         return False
+    if rpc_method and normalize_rpc_method(route.get("rpc_method")) != rpc_method:
+        return False
     return True
 
 
-def entry_edge_matches(edge: dict, method: str | None, path: str | None) -> bool:
-    if not method and not path:
+def entry_edge_matches(
+    edge: dict,
+    protocol: str | None,
+    method: str | None,
+    path: str | None,
+    rpc_method: str | None,
+) -> bool:
+    if not protocol and not method and not path and not rpc_method:
         return True
-    return any(route_matches(route, method, path) for route in edge["routes"])
+    return any(
+        route_matches(route, protocol, method, path, rpc_method)
+        for route in edge["routes"]
+    )
 
 
 def scoped_entry_edge(
-    edge: dict, method: str | None, path: str | None, edge_index: dict[str, dict]
+    edge: dict,
+    protocol: str | None,
+    method: str | None,
+    path: str | None,
+    rpc_method: str | None,
+    edge_index: dict[str, dict],
 ) -> dict | None:
-    if not method and not path:
+    if not protocol and not method and not path and not rpc_method:
         return edge
-    routes = [route for route in edge["routes"] if route_matches(route, method, path)]
+    routes = [
+        route
+        for route in edge["routes"]
+        if route_matches(route, protocol, method, path, rpc_method)
+    ]
     if not routes:
         return None
     records = [edge_index[route["endpoint_edge"]] for route in routes]
@@ -403,8 +436,10 @@ def public_edge(
 def find_paths(
     edges: list[dict],
     starts: list[str],
+    protocol: str | None,
     method: str | None,
     path: str | None,
+    rpc_method: str | None,
     max_depth: int,
     edge_index: dict[str, dict],
 ) -> tuple[list[tuple[list[str], list[dict]]], bool]:
@@ -425,7 +460,9 @@ def find_paths(
         eligible = []
         for edge in adjacency.get(service, []):
             if not traversed:
-                edge = scoped_entry_edge(edge, method, path, edge_index)
+                edge = scoped_entry_edge(
+                    edge, protocol, method, path, rpc_method, edge_index
+                )
                 if edge is None:
                     continue
             if edge["to"] in services:
@@ -469,11 +506,19 @@ def query(args: argparse.Namespace) -> dict:
     max_depth = max(1, min(5, args.max_depth))
     method = str(args.method or "").strip().upper() or None
     path = normalize_path(args.path)
+    rpc_method = normalize_rpc_method(args.rpc_method)
+    protocol = str(args.protocol or "").strip().lower() or None
+    if protocol is None and (method or path):
+        protocol = "http"
+    if protocol is None and rpc_method:
+        protocol = "grpc"
     service = str(args.service or "").strip() or None
     query_contract = {
         "service": service,
+        "protocol": protocol,
         "method": method,
         "path": path,
+        "rpc_method": rpc_method,
         "max_depth": max_depth,
     }
     result = {
@@ -518,12 +563,12 @@ def query(args: argparse.Namespace) -> dict:
             {
                 edge["from"]
                 for edge in edges
-                if entry_edge_matches(edge, method, path)
+                if entry_edge_matches(edge, protocol, method, path, rpc_method)
             }
         )
     try:
         raw_paths, cycle_seen = find_paths(
-            edges, starts, method, path, max_depth, edge_index
+            edges, starts, protocol, method, path, rpc_method, max_depth, edge_index
         )
     except DocumentError as exc:
         result["warnings"].append(f"cannot match endpoint evidence: {exc}")
@@ -557,13 +602,19 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path, default=Path.cwd())
     parser.add_argument("--service")
+    parser.add_argument("--protocol", choices=("http", "grpc"))
     parser.add_argument("--method")
     parser.add_argument("--path")
+    parser.add_argument("--rpc-method")
     parser.add_argument("--max-depth", type=int, default=3)
     parser.add_argument("--json", action="store_true", help="emit stable JSON")
     args = parser.parse_args()
-    if not args.service and not args.path:
-        parser.error("at least one of --service or --path is required")
+    if not args.service and not args.path and not args.rpc_method:
+        parser.error("at least one of --service, --path or --rpc-method is required")
+    if args.protocol == "grpc" and (args.method or args.path):
+        parser.error("--protocol grpc cannot be combined with --method or --path")
+    if args.protocol == "http" and args.rpc_method:
+        parser.error("--protocol http cannot be combined with --rpc-method")
     return args
 
 

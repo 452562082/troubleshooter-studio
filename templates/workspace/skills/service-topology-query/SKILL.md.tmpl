@@ -29,12 +29,22 @@ python3 skills/service-topology-query/scripts/query.py \
   --method <HTTP-method> --path <failed-URL-or-path> --json
 ```
 
+查询完整限定名的 gRPC 方法时：
+
+```bash
+python3 skills/service-topology-query/scripts/query.py \
+  --service <service> --protocol grpc \
+  --rpc-method </package.Service/Method> --json
+```
+
+`--protocol` 会限制首跳协议；提供 method/path 时默认 HTTP，提供 `--rpc-method` 时默认 gRPC。gRPC 方法比较会统一去掉可选的前导 `/`，但仍要求完整的 `package.Service/Method` 精确匹配。
+
 `--max-depth` 默认 3，脚本强制限制在 1..5。路径会去掉 URL query/fragment；普通的 `:id`、`{id}`、`[id]` 统一为 `{param}` 且只匹配一个 segment，`*path`、`:path*`、`{*path}`、`[...path]` 统一为 `{wildcard}` 且匹配一个或多个 segment。遍历检测环，只返回无环的完整叶路径或深度边界路径。
 
 稳定 JSON 字段：
 
 - `status`：`ok`、`no_match` 或 `unavailable`。
-- `query`：归一化后的 `service/method/path/max_depth`。
+- `query`：归一化后的 `service/protocol/method/path/rpc_method/max_depth`。
 - `paths`：按人工确认关系优先、路径最低置信度、路径长度和服务名字典序稳定排序。
 - `warnings`：缺文件、格式错误、环、candidate / stale 标签等导航风险。
 - `fallback`：无正式路径时为 `routing_rg_read`；成功时为 `null`。

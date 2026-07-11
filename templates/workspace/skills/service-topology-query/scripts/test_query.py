@@ -28,6 +28,23 @@ def edge(source, target, method, path, confidence, status):
     }
 
 
+def grpc_edge(source, target, rpc_method, confidence=0.98, status="automatic"):
+    endpoint_edge = f"{source}:grpc:outbound:{rpc_method}>{target}:grpc:inbound:{rpc_method}"
+    return {
+        "from": source,
+        "to": target,
+        "confidence": confidence,
+        "status": status,
+        "routes": [
+            {
+                "protocol": "grpc",
+                "rpc_method": rpc_method,
+                "endpoint_edge": endpoint_edge,
+            }
+        ],
+    }
+
+
 def write_fixture(root, edges):
     refs = root / "skills" / "routing" / "references"
     refs.mkdir(parents=True)
@@ -128,8 +145,10 @@ def test_query_by_failed_request_returns_ranked_three_hop_path(tmp_path):
     assert result["status"] == "ok"
     assert result["query"] == {
         "service": "mall-web",
+        "protocol": "http",
         "method": "GET",
         "path": "/api/orders/123",
+        "rpc_method": None,
         "max_depth": 3,
     }
     assert result["paths"][0]["services"] == [
@@ -139,6 +158,34 @@ def test_query_by_failed_request_returns_ranked_three_hop_path(tmp_path):
     ]
     assert result["paths"][0]["edges"][0]["evidence"]
     assert result["fallback"] is None
+
+
+def test_query_cli_selects_protocol_and_fully_qualified_grpc_method(tmp_path):
+    write_fixture(
+        tmp_path,
+        edges=[
+            edge("web", "http-profile", "GET", "/profile", 0.98, "automatic"),
+            grpc_edge("web", "grpc-profile", "profile.v1.ProfileService/GetProfile"),
+            grpc_edge("web", "wrong-grpc", "profile.v1.ProfileService/ListProfiles"),
+        ],
+    )
+
+    result = run_query(
+        tmp_path,
+        "--service",
+        "web",
+        "--protocol",
+        "grpc",
+        "--rpc-method",
+        "/profile.v1.ProfileService/GetProfile",
+        "--json",
+    )
+
+    assert result["status"] == "ok"
+    assert [path["services"] for path in result["paths"]] == [["web", "grpc-profile"]]
+    assert result["paths"][0]["edges"][0]["routes"][0]["rpc_method"] == (
+        "profile.v1.ProfileService/GetProfile"
+    )
 
 
 def test_query_accepts_exact_unversioned_flat_brief_fixture(tmp_path):

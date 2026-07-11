@@ -56,6 +56,10 @@ code_intelligence:
   enabled: false                    # 显式 opt-in；关闭时不下载、不索引、不注册 MCP
   provider: codegraph               # 首版只支持 codegraph
 
+# 跨仓库拓扑由部署期扫描自动生成；工作台确认/拒绝/补录后只把人工决策写回这里。
+service_topology:
+  overrides: []
+
 infrastructure:
   config_center:
     type: nacos
@@ -109,6 +113,7 @@ generation:
     - incident-investigator
     - config-executor
     - frontend-repro-investigator
+    - service-topology-query
     - redis-runtime-query
     - diagram-generator
 meta:

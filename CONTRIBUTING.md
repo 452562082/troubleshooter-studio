@@ -133,6 +133,14 @@ scripts/test-browser-smoke.sh
 
 新加路径要有 happy path。新加 MCP builder 要有注册类 positive test；禁用/跳过类要有 negative test。
 
+跨仓库服务拓扑还有以下回归要求：
+
+- 每种新增语言或框架扫描器必须使用 `examples/fake-repos/` 下的离线 fixture，默认测试不得 clone、下载依赖或访问网络。
+- 匹配结果必须给出稳定、可排序的确定性理由；禁止用 LLM 打分，也不要引入依赖遍历顺序或 map 顺序的随机性。
+- happy path 之外必须覆盖单仓库扫描失败或缺少本地路径的 partial 结果，部署和生成仍应成功并在 endpoint evidence 中保留失败状态。
+- `service-topology.yaml` 是正式图，`endpoint-evidence.yaml` 是完整证据；兼容用的 `service-dependency-map.yaml` 必须由同一正式图投影，并用测试防止 downstream 漂移。
+- override 测试必须覆盖人工优先级、过期证据和 YAML 往返；缓存测试必须覆盖配置摘要与仓库 HEAD 变化。
+
 ## Commit Message
 
 参考现有风格：

@@ -307,9 +307,8 @@ func applyTopologyFixture(t *testing.T) ([]byte, map[string]string) {
       protocol: http
       method: GET
       path: /candidate-only
-
 `
-	source := strings.Replace(string(yamlBytes), "infrastructure:\n", overrides+"infrastructure:\n", 1)
+	source := strings.Replace(string(yamlBytes), "service_topology:\n  overrides: []\n", overrides, 1)
 	if source == string(yamlBytes) {
 		t.Fatal("failed to inject service_topology overrides")
 	}

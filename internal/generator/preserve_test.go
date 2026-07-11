@@ -25,9 +25,8 @@ func TestPreserve_ServiceTopologyOverridesRemainSourceOfTruth(t *testing.T) {
       protocol: http
       method: GET
       path: /api/orders
-
 `
-	source := strings.Replace(string(base), "infrastructure:\n", override+"infrastructure:\n", 1)
+	source := strings.Replace(string(base), "service_topology:\n  overrides: []\n", override, 1)
 	if source == string(base) {
 		t.Fatal("failed to inject service_topology fixture")
 	}

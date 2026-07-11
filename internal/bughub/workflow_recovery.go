@@ -71,34 +71,37 @@ func (o *CaseOrchestrator) RecoverInterrupted(ctx context.Context) error {
 }
 
 func (o *CaseOrchestrator) recoverDeploymentVerification(ctx context.Context, incident IncidentCase) error {
-	originalVersion := incident.Version - 1
-	if originalVersion < 1 {
-		return nil
-	}
-	resultKey := fmt.Sprintf("deployment-result:%s:v%d", incident.ID, originalVersion)
-	if found, err := o.hasEvent(ctx, incident.ID, resultKey); err != nil || found {
-		return err
-	}
-	changes, err := o.store.ListCodeChanges(ctx, incident.ID)
+	events, err := o.store.ListEvents(ctx, incident.ID)
 	if err != nil {
 		return err
 	}
-	expected := map[string]string{}
-	for _, change := range changes {
-		if change.PushStatus == "pushed" {
-			if change.MergeCommit != "" {
-				expected[change.Repo] = change.MergeCommit
-			} else {
-				expected[change.Repo] = change.FixCommit
-			}
+	var reservation DeploymentReservation
+	found := false
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].EventType != "deployment_verification_reserved" {
+			continue
 		}
+		typed, ok, getErr := o.store.GetEventByIdempotencyKey(ctx, events[i].IdempotencyKey)
+		if getErr != nil {
+			return getErr
+		}
+		if !ok || json.Unmarshal(typed.PayloadJSON, &reservation) != nil {
+			continue
+		}
+		found = true
+		break
 	}
-	if len(expected) == 0 || o.deployment == nil {
+	if !found {
 		return nil
 	}
-	observation, verifyErr := o.deployment.Verify(ctx, DeploymentVerificationRequest{CaseID: incident.ID, Environment: incident.Environment, ExpectedCommits: expected})
-	cmd := NotifyDeployedCommand{CaseID: incident.ID, ExpectedVersion: originalVersion, IdempotencyKey: "recovery", ActorID: "recovery", Bug: Bug{ID: incident.BugID, Source: incident.Source, SystemID: incident.SystemID, Env: incident.Environment}, Bot: BotRef{Key: incident.SelectedBotKey}}
-	_, recordErr := o.recordDeploymentResult(incident, cmd, expected, observation, verifyErr)
+	if _, resultFound, resultErr := o.store.GetEventByIdempotencyKey(ctx, reservation.ReservationKey+":result"); resultErr != nil || resultFound {
+		return resultErr
+	}
+	if o.deployment == nil {
+		return nil
+	}
+	observation, verifyErr := o.deployment.Verify(ctx, reservation.VerifierInput)
+	_, recordErr := o.recordDeploymentResult(incident, reservation, observation, verifyErr)
 	return recordErr
 }
 
@@ -112,7 +115,27 @@ func (o *CaseOrchestrator) recoverMergeWithoutAttempt(ctx context.Context, incid
 		if approval.Kind != ApprovalMergeEnvironmentBranch {
 			continue
 		}
-		request := MergeRequest{CaseID: incident.ID, FixCommits: CloneStringMap(approval.FixCommits), TargetBranches: CloneStringMap(approval.TargetBranches)}
+		var scope MergeApprovalScope
+		if json.Unmarshal(approval.ScopeJSON, &scope) != nil || scope.CycleNumber != incident.CycleNumber || scope.FixAttemptID != incident.CurrentAttemptID {
+			continue
+		}
+		all, loadErr := o.store.ListCodeChanges(ctx, incident.ID)
+		if loadErr != nil {
+			return loadErr
+		}
+		byID := map[string]CodeChange{}
+		for _, change := range all {
+			byID[change.ID] = change
+		}
+		selected := []CodeChange{}
+		for _, approved := range scope.CodeChanges {
+			change, ok := byID[approved.ID]
+			if !ok {
+				return ErrApprovalScope
+			}
+			selected = append(selected, change)
+		}
+		request := MergeRequest{CaseID: incident.ID, FixCommits: CloneStringMap(approval.FixCommits), TargetBranches: CloneStringMap(approval.TargetBranches), Changes: selected}
 		return o.inspectInterruptedMerge(ctx, incident, request, "recovery:"+incident.ID+":merge")
 	}
 	_, _, err = o.transition(ctx, incident, CaseMergeConflict, "recovery:"+incident.ID+":merge:no-approval", "recovery", "merge_recovery_failed", map[string]string{"error": "merge approval is missing"}, CaseSnapshotUpdate{})
@@ -144,7 +167,7 @@ func (o *CaseOrchestrator) recoverAttempt(ctx context.Context, attempt PhaseAtte
 		}
 		return o.recoverReadOnly(ctx, incident, attempt, matched)
 	case CaseFixing:
-		if err := o.reserveInterruptedSideEffect(ctx, incident, attempt); err != nil {
+		if err := o.reserveInspectionOnly(ctx, incident, attempt); err != nil {
 			return err
 		}
 		incident, err = o.store.GetCase(ctx, incident.ID)
@@ -164,6 +187,12 @@ func (o *CaseOrchestrator) recoverAttempt(ctx context.Context, attempt PhaseAtte
 	default:
 		return nil
 	}
+}
+
+func (o *CaseOrchestrator) reserveInspectionOnly(ctx context.Context, incident IncidentCase, attempt PhaseAttempt) error {
+	key := "recovery:" + attempt.ID + ":inspect"
+	_, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: mustJSON(map[string]string{"attempt_id": attempt.ID}), Steps: []CaseMutationStep{{To: incident.Status, AuditOnly: true, Event: TransitionEvent{ID: stableID("event", key), EventType: "side_effect_inspection_reserved", ActorType: "recovery", ActorID: "recovery", PayloadJSON: mustJSON(map[string]string{"attempt_id": attempt.ID})}}}})
+	return err
 }
 
 func (o *CaseOrchestrator) reserveInterruptedSideEffect(ctx context.Context, incident IncidentCase, attempt PhaseAttempt) error {
@@ -195,7 +224,7 @@ func (o *CaseOrchestrator) recoverPreparedAttempt(ctx context.Context, incident 
 	}
 	bug := Bug{ID: updated.BugID, Source: updated.Source, SystemID: updated.SystemID, Env: updated.Environment}
 	bot := BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget}
-	if err := o.runner.Start(ctx, attempt.Clone(), bug, bot); err != nil {
+	if err := o.startPhase(attempt, bug, bot); err != nil {
 		_, scheduleErr := o.phaseScheduleFailure(ctx, updated, attempt, key, err)
 		return scheduleErr
 	}
@@ -251,7 +280,7 @@ func (o *CaseOrchestrator) recoverReadOnly(ctx context.Context, incident Inciden
 		_, err = o.phaseScheduleFailure(ctx, mutation.Case, retry, key+":retry", errors.New("phase runner unavailable"))
 		return err
 	}
-	if startErr := o.runner.Start(ctx, retry, bug, bot); startErr != nil {
+	if startErr := o.startPhase(retry, bug, bot); startErr != nil {
 		_, err = o.phaseScheduleFailure(ctx, mutation.Case, retry, key+":retry", startErr)
 		return err
 	}
@@ -274,12 +303,23 @@ func (o *CaseOrchestrator) recoverFix(ctx context.Context, incident IncidentCase
 		return o.finishFixRecovery(ctx, incident, attempt, relevant, false, "git integration unavailable")
 	}
 	inspection, inspectErr := o.git.InspectFix(ctx, FixInspectionRequest{CaseID: incident.ID, Attempt: attempt.Clone(), Changes: relevant})
-	if inspectErr != nil || !inspection.FixPushed {
+	if inspectErr != nil || !inspection.Complete || len(inspection.Changes) == 0 {
 		message := "fix commit is not confirmed pushed"
 		if inspectErr != nil {
 			message = inspectErr.Error()
 		}
 		return o.finishFixRecovery(ctx, incident, attempt, relevant, false, message)
+	}
+	relevant = inspection.Changes
+	for i := range relevant {
+		if relevant[i].ID == "" {
+			relevant[i].ID = stableID("recovered-change", attempt.ID+":"+relevant[i].Repo)
+		}
+		relevant[i].CaseID = incident.ID
+		relevant[i].AttemptID = attempt.ID
+		if relevant[i].PushStatus != "pushed" || relevant[i].FixCommit == "" {
+			return o.finishFixRecovery(ctx, incident, attempt, nil, false, "fix push is not confirmed")
+		}
 	}
 	return o.finishFixRecovery(ctx, incident, attempt, relevant, true, "")
 }
@@ -287,15 +327,20 @@ func (o *CaseOrchestrator) recoverFix(ctx context.Context, incident IncidentCase
 func (o *CaseOrchestrator) finishFixRecovery(ctx context.Context, incident IncidentCase, attempt PhaseAttempt, changes []CodeChange, pushed bool, message string) error {
 	key := "recovery:" + attempt.ID + ":result"
 	steps := []CaseMutationStep{}
+	attempt.OutputJSON = []byte(`{}`)
 	if pushed {
+		attempt.Status = AttemptStatusSucceeded
 		for i := range changes {
 			changes[i].PushStatus = "pushed"
 		}
 		steps = append(steps, CaseMutationStep{To: CaseFixPushed, Event: TransitionEvent{ID: stableID("event", key), EventType: "fix_push_confirmed", ActorType: "recovery", ActorID: "recovery", PayloadJSON: mustJSON(map[string]string{"attempt_id": attempt.ID})}}, CaseMutationStep{To: CaseWaitingMergeApproval, Event: TransitionEvent{ID: stableID("event", key+":approval"), EventType: "merge_approval_requested", ActorType: "studio", ActorID: "orchestrator", PayloadJSON: mustJSON(map[string]string{"attempt_id": attempt.ID})}})
 	} else {
+		attempt.Status = AttemptStatusFailed
+		attempt.ErrorCode = "fix_recovery_failed"
+		attempt.ErrorMessage = message
 		steps = append(steps, CaseMutationStep{To: CaseFixFailed, Event: TransitionEvent{ID: stableID("event", key), EventType: "fix_recovery_failed", ActorType: "recovery", ActorID: "recovery", PayloadJSON: mustJSON(map[string]string{"error": message})}})
 	}
-	_, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: mustJSON(map[string]any{"pushed": pushed, "message": message}), CodeChanges: changes, Steps: steps})
+	_, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: mustJSON(map[string]any{"pushed": pushed, "message": message}), FinishAttempts: []PhaseAttempt{attempt}, CodeChanges: changes, Steps: steps})
 	return err
 }
 
@@ -314,9 +359,15 @@ func (o *CaseOrchestrator) inspectInterruptedMerge(ctx context.Context, incident
 		return loadErr
 	}
 	changes := []CodeChange{}
-	for _, change := range allChanges {
-		if _, ok := request.FixCommits[change.Repo]; ok {
-			changes = append(changes, change)
+	if len(request.Changes) > 0 {
+		for _, change := range request.Changes {
+			changes = append(changes, change.Clone())
+		}
+	} else {
+		for _, change := range allChanges {
+			if _, ok := request.FixCommits[change.Repo]; ok {
+				changes = append(changes, change)
+			}
 		}
 	}
 	if o.git == nil {
@@ -328,25 +379,7 @@ func (o *CaseOrchestrator) inspectInterruptedMerge(ctx context.Context, incident
 		_, err := o.recordMergeAmbiguous(incident, key, changes, inspectErr)
 		return err
 	}
-	if inspection.Conflict {
-		_, err := o.recordMergeConflict(incident, key, errors.New("merge conflict confirmed"))
-		return err
-	}
-	if !inspection.MergePushed {
-		_, err := o.recordMergeAmbiguous(incident, key, changes, errors.New("merge push is incomplete"))
-		return err
-	}
-	for i := range changes {
-		commit := inspection.MergeCommits[changes[i].Repo]
-		if commit == "" {
-			_, err := o.recordMergeAmbiguous(incident, key, changes, errors.New("merge commit is missing"))
-			return err
-		}
-		changes[i].MergeCommit = commit
-		changes[i].PushStatus = "pushed"
-	}
-	doneKey := key + ":pushed"
-	_, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: doneKey, RequestJSON: mustJSON(inspection), CodeChanges: changes, Steps: []CaseMutationStep{{To: CaseWaitingDeployment, Event: TransitionEvent{ID: stableID("event", doneKey), EventType: "merge_push_confirmed", ActorType: "recovery", ActorID: "recovery", PayloadJSON: mustJSON(inspection)}}}})
+	_, err := o.resumeInspectedMerge(ctx, incident, key, changes, request, inspection)
 	return err
 }
 

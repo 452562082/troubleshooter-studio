@@ -3,6 +3,7 @@ package bughub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -134,7 +135,7 @@ func TestRecoverInterruptedFixInspectsExternalStateAndNeverBlindlyRetries(t *tes
 	store := newOrchestratorStore(t)
 	incident, _ := createRunningPhase(t, store, "recover-fix", CaseWaitingFixApproval, CaseFixing, PhaseFix, "", []byte(`{"fix_branch":"fix/bug","workspace":"/repo"}`))
 	runner := &recordingPhaseRunner{}
-	git := &recordingGitIntegration{inspection: MergeInspection{FixPushed: true}}
+	git := &recordingGitIntegration{fixInspection: FixInspection{Complete: true, Changes: []CodeChange{{Repo: "repo", BaseBranch: "main", FixBranch: "fix/bug", FixCommit: "fix-1", TestEvidence: []byte(`{}`), TargetEnvironmentBranch: "test", PushRemote: "origin", PushStatus: "pushed"}}}, result: MergeResult{Repositories: map[string]MergeRepositoryResult{"repo": {MergeCommit: "merge-1", Pushed: true}}}}
 	o := NewCaseOrchestrator(store, runner, git, &recordingDeploymentVerifier{})
 	if err := o.RecoverInterrupted(ctx); err != nil {
 		t.Fatal(err)
@@ -148,6 +149,10 @@ func TestRecoverInterruptedFixInspectsExternalStateAndNeverBlindlyRetries(t *tes
 	}
 	if runner.startCount() != 0 || len(git.inspections) != 1 {
 		t.Fatalf("starts=%d inspections=%d", runner.startCount(), len(git.inspections))
+	}
+	merged, mergeErr := o.ApproveMerge(ctx, ApproveMergeCommand{CaseID: got.ID, ExpectedVersion: got.Version, IdempotencyKey: "recover-fix-merge", ActorID: "alice"})
+	if mergeErr != nil || merged.Status != CaseWaitingDeployment {
+		t.Fatalf("merge after recovered fix=%+v err=%v", merged, mergeErr)
 	}
 }
 
@@ -164,13 +169,13 @@ func TestRecoverInterruptedMergeInspectsRemoteBeforeAdvancing(t *testing.T) {
 	if err := store.RecordCodeChange(ctx, CodeChange{ID: "recover-merge-change", CaseID: incident.ID, AttemptID: fixAttempt.ID, Repo: "repo", BaseBranch: "main", FixBranch: "fix/bug", FixCommit: "fix-1", TestEvidence: []byte(`{}`), TargetEnvironmentBranch: "test", PushStatus: "pushed"}); err != nil {
 		t.Fatal(err)
 	}
-	scope, _ := json.Marshal(map[string]any{"fix_commits": request.FixCommits, "target_branches": request.TargetBranches})
+	scope, _ := json.Marshal(MergeApprovalScope{CycleNumber: 1, FixAttemptID: fixAttempt.ID, CodeChanges: []ApprovedCodeChange{{ID: "recover-merge-change", Repo: "repo", FixCommit: "fix-1", TargetBranch: "test"}}})
 	approval := Approval{ID: "recover-merge-approval", CaseID: incident.ID, Kind: ApprovalMergeEnvironmentBranch, Actor: "alice", CaseVersion: incident.Version, ScopeJSON: scope, FixCommits: request.FixCommits, TargetBranches: request.TargetBranches}
 	if err := store.RecordApproval(ctx, approval, "recover-merge-approval"); err != nil {
 		t.Fatal(err)
 	}
-	incident, _, _ = store.Transition(ctx, incident.ID, incident.Version, CaseMerging, TransitionEvent{ID: "recover-merge-start", IdempotencyKey: "recover-merge-start", EventType: "merge_started", ActorType: "studio", ActorID: "test", PayloadJSON: []byte(`{}`)})
-	git := &recordingGitIntegration{inspection: MergeInspection{MergePushed: true, MergeCommits: map[string]string{"repo": "merge-1"}}}
+	incident, _, _ = store.TransitionWithUpdate(ctx, incident.ID, incident.Version, CaseMerging, CaseSnapshotUpdate{CurrentAttemptID: workflowStringPointer(fixAttempt.ID)}, TransitionEvent{ID: "recover-merge-start", IdempotencyKey: "recover-merge-start", EventType: "merge_started", ActorType: "studio", ActorID: "test", PayloadJSON: []byte(`{}`)})
+	git := &recordingGitIntegration{inspection: MergeInspection{Repositories: map[string]MergeRepositoryResult{"repo": {MergeCommit: "merge-1", Pushed: false}}}, result: MergeResult{Repositories: map[string]MergeRepositoryResult{"repo": {MergeCommit: "merge-1", Pushed: true}}}}
 	o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, git, &recordingDeploymentVerifier{})
 	if err := o.RecoverInterrupted(ctx); err != nil {
 		t.Fatal(err)
@@ -181,6 +186,9 @@ func TestRecoverInterruptedMergeInspectsRemoteBeforeAdvancing(t *testing.T) {
 	}
 	if got.Status != CaseWaitingDeployment || len(git.inspections) != 1 {
 		t.Fatalf("case=%+v inspections=%d", got, len(git.inspections))
+	}
+	if git.mergeCalls != 0 || git.resumeCalls != 1 {
+		t.Fatalf("merge calls=%d resume calls=%d", git.mergeCalls, git.resumeCalls)
 	}
 }
 
@@ -223,5 +231,34 @@ func TestRecoverInterruptedReconcilesTerminalCurrentAttempt(t *testing.T) {
 	got, _ := store.GetCase(ctx, incident.ID)
 	if got.Status != CaseWaitingEvidence {
 		t.Fatalf("case=%+v", got)
+	}
+}
+
+func TestRecoverDeploymentUsesPersistedReservationContextAndDoesNotRerunResult(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "recover-deploy-reservation", CaseWaitingDeployment)
+	incident = addPushedWorkflowChange(t, store, incident)
+	reserveKey := fmt.Sprintf("deployment-reserve:%s:v%d", incident.ID, incident.Version)
+	request := DeploymentVerificationRequest{CaseID: incident.ID, Environment: incident.Environment, ExpectedCommits: map[string]string{"repo": "merge-1"}, ObservedVersion: "persisted-proof", ObservedCommits: map[string]string{"repo": "merge-1"}}
+	reservation := DeploymentReservation{ReservationID: "reservation", ReservationKey: reserveKey, OriginalExpectedVersion: incident.Version, CycleNumber: 1, Environment: incident.Environment, ExpectedCommits: request.ExpectedCommits, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "validator", Target: "codex"}, VerifierInput: request}
+	payload := mustJSON(reservation)
+	reserved, err := store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: reserveKey, RequestJSON: payload, Steps: []CaseMutationStep{{To: CaseDeploymentUnverified, Event: TransitionEvent{ID: "reserve-event", EventType: "deployment_verification_reserved", ActorType: "user", ActorID: "alice", PayloadJSON: payload}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	verifier := &recordingDeploymentVerifier{result: DeploymentObservation{VerificationSource: "manual", Result: DeploymentResultMatched, VerifiedAt: &now, ObservedCommits: map[string]string{"repo": "merge-1"}}}
+	runner := &recordingPhaseRunner{}
+	o := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, verifier)
+	if err := o.recoverDeploymentVerification(ctx, reserved.Case); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.recoverDeploymentVerification(ctx, reserved.Case); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := store.GetCase(ctx, incident.ID)
+	if got.Status != CaseRegressionValidating || len(verifier.requests) != 1 || verifier.requests[0].ObservedVersion != "persisted-proof" || runner.startCount() != 1 {
+		t.Fatalf("case=%+v requests=%+v starts=%d", got, verifier.requests, runner.startCount())
 	}
 }

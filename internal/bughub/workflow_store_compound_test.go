@@ -50,10 +50,20 @@ func TestCaseStoreCompoundMutationCommitsAttemptsMultiEdgeAndAuditAtomically(t *
 	if len(events) != 4 {
 		t.Fatalf("events=%+v", events)
 	}
+	terminalNext := next.Clone()
+	terminalNext.Status = AttemptStatusFailed
+	terminalNext.OutputJSON = []byte(`{"later":true}`)
+	if err := store.FinishAttempt(ctx, terminalNext); err != nil {
+		t.Fatal(err)
+	}
 
 	replay, err := store.ApplyCaseMutation(ctx, mutation)
 	if err != nil || !replay.Replay || replay.Case.Status != CaseInvestigating {
 		t.Fatalf("replay=%+v err=%v", replay, err)
+	}
+	afterReplay, _ := store.GetAttempt(ctx, next.ID)
+	if afterReplay.Status != AttemptStatusFailed {
+		t.Fatalf("replay rewrote historical attempt: %+v", afterReplay)
 	}
 
 	changed := CaseMutation{
@@ -137,12 +147,16 @@ func TestCaseStoreCompoundMutationRecordsApprovalCodeAndObservationOrRollsBack(t
 	if err := store.CreateAttempt(ctx, attempt); err != nil {
 		t.Fatal(err)
 	}
-	approval := Approval{ID: "records-approval", CaseID: "case-records", Kind: ApprovalStartFix, Actor: "alice", CaseVersion: 1, ScopeJSON: []byte(`{"root_cause_attempt_id":"records-attempt"}`)}
+	active, _, err := store.TransitionWithUpdate(ctx, "case-records", 1, CaseValidating, CaseSnapshotUpdate{CurrentAttemptID: workflowStringPointer(attempt.ID)}, validEvent(999, "case-records"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	approval := Approval{ID: "records-approval", CaseID: "case-records", Kind: ApprovalStartFix, Actor: "alice", CaseVersion: active.Version, ScopeJSON: []byte(`{"root_cause_attempt_id":"records-attempt"}`)}
 	change := CodeChange{ID: "records-change", CaseID: "case-records", AttemptID: attempt.ID, Repo: "repo", BaseBranch: "main", FixBranch: "fix/bug", FixCommit: "abc", TestEvidence: []byte(`{}`), TargetEnvironmentBranch: "test", PushStatus: "pushed"}
 	observation := DeploymentObservation{ID: "records-observation", CaseID: "case-records", Environment: "test", ExpectedCommits: map[string]string{"repo": "abc"}, VerificationSource: "manual", Result: DeploymentResultUnavailable}
-	mutation := CaseMutation{CaseID: "case-records", ExpectedVersion: 1, IdempotencyKey: "records-mutation", RequestJSON: []byte(`{"records":true}`), Approvals: []Approval{approval}, CodeChanges: []CodeChange{change}, Observations: []DeploymentObservation{observation}, Steps: []CaseMutationStep{{To: CaseValidating, Event: TransitionEvent{ID: "records-event", EventType: "records", ActorType: "studio", ActorID: "orchestrator", PayloadJSON: []byte(`{}`)}}}}
+	mutation := CaseMutation{CaseID: "case-records", ExpectedVersion: active.Version, IdempotencyKey: "records-mutation", RequestJSON: []byte(`{"records":true}`), Approvals: []Approval{approval}, CodeChanges: []CodeChange{change}, Observations: []DeploymentObservation{observation}, Steps: []CaseMutationStep{{To: CaseWaitingEvidence, Event: TransitionEvent{ID: "records-event", EventType: "records", ActorType: "studio", ActorID: "orchestrator", PayloadJSON: []byte(`{}`)}}}}
 	result, err := store.ApplyCaseMutation(ctx, mutation)
-	if err != nil || result.Case.Status != CaseValidating {
+	if err != nil || result.Case.Status != CaseWaitingEvidence {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 	approvals, _ := store.ListApprovals(ctx, "case-records")
@@ -155,5 +169,47 @@ func TestCaseStoreCompoundMutationRecordsApprovalCodeAndObservationOrRollsBack(t
 	again, _ := store.ListApprovals(ctx, "case-records")
 	if len(again[0].FixCommits) != 0 {
 		t.Fatal("compound result leaked mutable approval input")
+	}
+}
+
+func TestCaseStoreCompoundMutationRejectsCrossOwnershipBeforeWrite(t *testing.T) {
+	for _, kind := range []string{"approval", "observation", "code-change", "attempt"} {
+		t.Run(kind, func(t *testing.T) {
+			ctx := context.Background()
+			store := openTestCaseStore(t)
+			createTestCase(t, store, "owner-a")
+			createTestCase(t, store, "owner-b")
+			attemptA := validFixAttempt("attempt-a", "owner-a")
+			attemptB := validFixAttempt("attempt-b", "owner-b")
+			if err := store.CreateAttempt(ctx, attemptA); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.CreateAttempt(ctx, attemptB); err != nil {
+				t.Fatal(err)
+			}
+			id := attemptA.ID
+			active, _, err := store.TransitionWithUpdate(ctx, "owner-a", 1, CaseValidating, CaseSnapshotUpdate{CurrentAttemptID: &id}, validEvent(777, "owner-a"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			mutation := CaseMutation{CaseID: "owner-a", ExpectedVersion: active.Version, IdempotencyKey: "inject-" + kind, RequestJSON: []byte(`{}`), Steps: []CaseMutationStep{{To: CaseWaitingEvidence, Event: TransitionEvent{ID: "inject-event-" + kind, EventType: "inject", ActorType: "studio", ActorID: "test", PayloadJSON: []byte(`{}`)}}}}
+			switch kind {
+			case "approval":
+				mutation.Approvals = []Approval{{ID: "bad-approval", CaseID: "owner-b", Kind: ApprovalStartFix, Actor: "x", CaseVersion: active.Version, ScopeJSON: []byte(`{"root_cause_attempt_id":"attempt-a"}`)}}
+			case "observation":
+				mutation.Observations = []DeploymentObservation{{ID: "bad-observation", CaseID: "owner-b", Environment: "test", ExpectedCommits: map[string]string{"repo": "x"}, VerificationSource: "manual", Result: DeploymentResultUnavailable}}
+			case "code-change":
+				mutation.CodeChanges = []CodeChange{{ID: "bad-change", CaseID: "owner-b", AttemptID: attemptA.ID, Repo: "repo", BaseBranch: "main", FixBranch: "fix", FixCommit: "x", TestEvidence: []byte(`{}`)}}
+			case "attempt":
+				mutation.CodeChanges = []CodeChange{{ID: "bad-attempt", CaseID: "owner-a", AttemptID: attemptB.ID, Repo: "repo", BaseBranch: "main", FixBranch: "fix", FixCommit: "x", TestEvidence: []byte(`{}`)}}
+			}
+			if _, err := store.ApplyCaseMutation(ctx, mutation); err == nil {
+				t.Fatal("cross ownership accepted")
+			}
+			got, _ := store.GetCase(ctx, "owner-a")
+			if got.Version != active.Version || got.Status != CaseValidating {
+				t.Fatalf("partial write: %+v", got)
+			}
+		})
 	}
 }

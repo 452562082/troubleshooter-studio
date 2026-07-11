@@ -891,9 +891,20 @@ type CaseMutationStep struct {
 }
 
 type CaseMutationResult struct {
-	Case     IncidentCase
-	Attempts []PhaseAttempt
-	Replay   bool
+	Case   IncidentCase
+	Replay bool
+}
+
+type MergeApprovalScope struct {
+	CycleNumber  int                  `json:"cycle_number"`
+	FixAttemptID string               `json:"fix_attempt_id"`
+	CodeChanges  []ApprovedCodeChange `json:"code_changes"`
+}
+type ApprovedCodeChange struct {
+	ID           string `json:"id"`
+	Repo         string `json:"repo"`
+	FixCommit    string `json:"fix_commit"`
+	TargetBranch string `json:"target_branch"`
 }
 
 func (m CaseMutation) clone() CaseMutation {
@@ -960,13 +971,6 @@ func (s *CaseStore) ApplyCaseMutation(ctx context.Context, mutation CaseMutation
 		if err = json.Unmarshal([]byte(resultJSON), &result.Case); err != nil {
 			return result, fmt.Errorf("decode compound replay: %w", err)
 		}
-		for _, attempt := range append(append([]PhaseAttempt(nil), mutation.CreateAttempts...), mutation.FinishAttempts...) {
-			stored, loadErr := getAttempt(ctx, tx, attempt.ID)
-			if loadErr != nil {
-				return result, loadErr
-			}
-			result.Attempts = append(result.Attempts, stored)
-		}
 		result.Replay = true
 		if err = tx.Commit(); err != nil {
 			return result, err
@@ -982,6 +986,54 @@ func (s *CaseStore) ApplyCaseMutation(ctx context.Context, mutation CaseMutation
 	}
 	if incident.Version != mutation.ExpectedVersion {
 		return result, fmt.Errorf("%w: expected %d, current %d", ErrCaseVersionConflict, mutation.ExpectedVersion, incident.Version)
+	}
+	finishedIDs := map[string]struct{}{}
+	for _, attempt := range mutation.FinishAttempts {
+		finishedIDs[attempt.ID] = struct{}{}
+	}
+	for _, approval := range mutation.Approvals {
+		if approval.CaseID != incident.ID {
+			return result, errors.New("approval belongs to a different Case")
+		}
+		switch approval.Kind {
+		case ApprovalStartFix:
+			var scope struct {
+				RootCauseAttemptID string `json:"root_cause_attempt_id"`
+			}
+			if json.Unmarshal(approval.ScopeJSON, &scope) != nil || scope.RootCauseAttemptID != incident.CurrentAttemptID {
+				return result, errors.New("fix approval is not bound to current attempt")
+			}
+		case ApprovalMergeEnvironmentBranch:
+			var scope MergeApprovalScope
+			if json.Unmarshal(approval.ScopeJSON, &scope) != nil || scope.CycleNumber != incident.CycleNumber || scope.FixAttemptID != incident.CurrentAttemptID || len(scope.CodeChanges) == 0 {
+				return result, errors.New("merge approval is not bound to current cycle and fix attempt")
+			}
+			for _, approved := range scope.CodeChanges {
+				var caseID, attemptID, repo, fixCommit, target string
+				if queryErr := tx.QueryRowContext(ctx, `SELECT case_id,attempt_id,repo,fix_commit,target_environment_branch FROM code_changes WHERE id=?`, approved.ID).Scan(&caseID, &attemptID, &repo, &fixCommit, &target); queryErr != nil || caseID != incident.ID || attemptID != scope.FixAttemptID || repo != approved.Repo || fixCommit != approved.FixCommit || target != approved.TargetBranch {
+					return result, errors.New("merge approval references an unrelated code change")
+				}
+			}
+		}
+	}
+	for _, observation := range mutation.Observations {
+		if observation.CaseID != incident.ID {
+			return result, errors.New("deployment observation belongs to a different Case")
+		}
+	}
+	for _, change := range mutation.CodeChanges {
+		if change.CaseID != incident.ID {
+			return result, errors.New("code change belongs to a different Case")
+		}
+		if change.AttemptID != incident.CurrentAttemptID {
+			if _, ok := finishedIDs[change.AttemptID]; !ok {
+				return result, errors.New("code change is not bound to current or winning finished attempt")
+			}
+		}
+		storedAttempt, attemptErr := getAttempt(ctx, tx, change.AttemptID)
+		if attemptErr != nil || storedAttempt.CaseID != incident.ID {
+			return result, errors.New("code change attempt belongs to a different Case")
+		}
 	}
 	if len(mutation.Steps) == 0 {
 		mutation.Steps = []CaseMutationStep{{To: incident.Status, AuditOnly: true, Event: TransitionEvent{ID: "mutation-" + mutation.IdempotencyKey, EventType: "compound_mutation", ActorType: "studio", ActorID: "case-store", PayloadJSON: []byte(`{}`)}}}
@@ -1034,7 +1086,6 @@ func (s *CaseStore) ApplyCaseMutation(ctx context.Context, mutation CaseMutation
 		if err = insertAttemptTx(ctx, tx, *attempt); err != nil {
 			return result, err
 		}
-		result.Attempts = append(result.Attempts, attempt.Clone())
 	}
 	for index := range mutation.FinishAttempts {
 		attempt := &mutation.FinishAttempts[index]
@@ -1061,7 +1112,6 @@ func (s *CaseStore) ApplyCaseMutation(ctx context.Context, mutation CaseMutation
 		if rows != 1 {
 			return result, fmt.Errorf("%w: %s", ErrAttemptAlreadyFinished, attempt.ID)
 		}
-		result.Attempts = append(result.Attempts, attempt.Clone())
 	}
 	for index := range mutation.Approvals {
 		if err = insertApprovalTx(ctx, tx, mutation.Approvals[index], mutation.IdempotencyKey+":approval:"+mutation.Approvals[index].ID); err != nil {
@@ -1218,11 +1268,6 @@ func caseMutationFingerprint(m CaseMutation) (string, error) {
 
 func cloneCaseMutationResult(r CaseMutationResult) CaseMutationResult {
 	r.Case = r.Case.Clone()
-	out := make([]PhaseAttempt, len(r.Attempts))
-	for i := range r.Attempts {
-		out[i] = r.Attempts[i].Clone()
-	}
-	r.Attempts = out
 	return r
 }
 
@@ -1444,6 +1489,32 @@ func (s *CaseStore) ListEvents(ctx context.Context, caseID string) ([]Transition
 		return nil, fmt.Errorf("list transition events: %w", err)
 	}
 	return events, nil
+}
+
+func (s *CaseStore) GetEventByIdempotencyKey(ctx context.Context, key string) (TransitionEvent, bool, error) {
+	var event TransitionEvent
+	var payload, created string
+	err := s.db.QueryRowContext(ctx, `SELECT id,case_id,from_status,to_status,event_type,actor_type,actor_id,idempotency_key,payload_json,created_at FROM transition_events WHERE idempotency_key=?`, key).Scan(&event.ID, &event.CaseID, &event.FromStatus, &event.ToStatus, &event.EventType, &event.ActorType, &event.ActorID, &event.IdempotencyKey, &payload, &created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return TransitionEvent{}, false, nil
+	}
+	if err != nil {
+		return TransitionEvent{}, false, err
+	}
+	event.PayloadJSON = []byte(payload)
+	event.CreatedAt, err = parseStoreTime(created)
+	if err != nil {
+		return TransitionEvent{}, false, err
+	}
+	if event.FromStatus == event.ToStatus {
+		err = validateAuditEvent(event)
+	} else {
+		err = event.Validate()
+	}
+	if err != nil {
+		return TransitionEvent{}, false, err
+	}
+	return event.Clone(), true, nil
 }
 
 func transitionRequestFingerprint(caseID string, expectedVersion int64, from, to CaseStatus, event TransitionEvent, requestedAt string, update CaseSnapshotUpdate) (string, error) {

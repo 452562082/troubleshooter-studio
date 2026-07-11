@@ -49,6 +49,21 @@ type InvestigationStore struct {
 	root string
 }
 
+// ProjectAttempt records the legacy runs.json view of a durable attempt. It is
+// intentionally a read-compatibility projection: callers must never derive or
+// mutate IncidentCase state from FinalMessage or InvestigationStatus.
+func (s *InvestigationStore) ProjectAttempt(run InvestigationRun) error {
+	return s.Upsert(run)
+}
+
+func (s *InvestigationStore) ProjectEvent(runID string, event InvestigationEvent) error {
+	return s.AppendEvent(runID, event)
+}
+
+func (s *InvestigationStore) FinishProjection(runID string, status InvestigationStatus, finalMessage, errorText string) error {
+	return s.Finish(runID, status, finalMessage, errorText)
+}
+
 func NewInvestigationStore(root string) *InvestigationStore {
 	return &InvestigationStore{root: root}
 }

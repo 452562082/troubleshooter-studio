@@ -363,6 +363,32 @@ func TestBuildCodexExecCommandUsesSafeWorkspace(t *testing.T) {
 	}
 }
 
+func TestCodexInvestigatorExecutePhaseReusesTargetAdapterAndCapturesUsage(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "codex")
+	script := `#!/bin/sh
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"verification_status: reproduced\nenvironment: test\nevidence: []\ngaps: []"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":17,"output_tokens":9}}'
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	investigator := NewCodexInvestigator(NewInvestigationStore(filepath.Join(root, "legacy")), bin)
+	var events []InvestigationEvent
+	result, err := investigator.ExecutePhase(context.Background(), "attempt-execute", BotRef{Target: "codex", Path: root}, "prompt", func(event InvestigationEvent) {
+		events = append(events, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.FinalYAML, "verification_status: reproduced") || result.Usage.InputTokens != 17 || result.Usage.OutputTokens != 9 || result.Usage.Duration <= 0 {
+		t.Fatalf("result = %+v", result)
+	}
+	if len(events) == 0 {
+		t.Fatal("phase execution did not stream events")
+	}
+}
+
 func TestBuildCodexExecCommandRejectsMissingWorkspace(t *testing.T) {
 	_, err := BuildCodexExecCommand("codex", filepath.Join(t.TempDir(), "missing"), "hello")
 	if err == nil || !strings.Contains(err.Error(), "workspace") {
@@ -756,6 +782,42 @@ func TestBuildCodexValidationPromptKeepsValidatorEvidenceOnly(t *testing.T) {
 	if strings.Contains(prompt, "禅道工单") {
 		t.Fatalf("validation prompt should use generic bug platform wording:\n%s", prompt)
 	}
+}
+
+func TestValidationSkillTemplateMatchesRuntimeOutputContract(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "templates", "workspace", "skills", "bug-verifier", "SKILL.md.tmpl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateBlock := fencedYAMLBlock(string(data))
+	runtimeBlock := strings.TrimSpace(strings.SplitN(validationOutputContract(), "只有当阻塞资料", 2)[0])
+	runtimeBlock = strings.TrimSpace(strings.TrimPrefix(runtimeBlock, "请只输出下面的严格 YAML，不得增加字段或解释性段落："))
+	if templateBlock != runtimeBlock {
+		t.Fatalf("validator template/runtime contract drift\ntemplate:\n%s\nruntime:\n%s", templateBlock, runtimeBlock)
+	}
+}
+
+func TestFixerSkillTemplateMatchesRuntimeOutputContract(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "templates", "workspace", "skills", "bug-fixer", "SKILL.md.tmpl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if templateBlock, runtimeBlock := fencedYAMLBlock(string(data)), fencedYAMLBlock(fixOutputContract()); templateBlock != runtimeBlock {
+		t.Fatalf("fixer template/runtime contract drift\ntemplate:\n%s\nruntime:\n%s", templateBlock, runtimeBlock)
+	}
+}
+
+func fencedYAMLBlock(text string) string {
+	start := strings.Index(text, "```yaml\n")
+	if start < 0 {
+		return ""
+	}
+	remaining := text[start+len("```yaml\n"):]
+	end := strings.Index(remaining, "\n```")
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(remaining[:end])
 }
 
 func TestCodexInvestigatorUsesValidatorBotForValidationStage(t *testing.T) {

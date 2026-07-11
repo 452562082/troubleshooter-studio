@@ -20,6 +20,9 @@ type ArtifactInput struct {
 	RequestID       string
 	TraceID         string
 	RedactionStatus RedactionStatus
+	// RejectSHA256 prevents a newly reported source from being re-registered
+	// when its bytes are already known to belong to an earlier attempt.
+	RejectSHA256 []string
 }
 
 func RegisterArtifact(ctx context.Context, store *CaseStore, input ArtifactInput) (EvidenceArtifact, error) {
@@ -62,6 +65,11 @@ func registerArtifactWithHooks(ctx context.Context, store *CaseStore, input Arti
 	captured, err := captureArtifactSource(input.SourcePath)
 	if err != nil {
 		return EvidenceArtifact{}, err
+	}
+	for _, rejected := range input.RejectSHA256 {
+		if captured.SHA256 == rejected {
+			return EvidenceArtifact{}, ErrEvidenceArtifactReused
+		}
 	}
 	metadata := strings.Join([]string{input.CaseID, input.AttemptID, input.Kind, input.Environment, input.Version, input.RequestID, input.TraceID}, "\n")
 	if input.RedactionStatus != RedactionStatusRedacted && (containsSensitiveData(captured.Content) || containsSensitiveData([]byte(metadata))) {

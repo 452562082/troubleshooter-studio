@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -294,16 +295,15 @@ func validationAgentExecutionGuidance() string {
 
 func validationOutputContract() string {
 	var sb strings.Builder
-	sb.WriteString("\n请只输出结构化验证报告，格式如下：\n")
+	sb.WriteString("\n请只输出下面的严格 YAML，不得增加字段或解释性段落：\n")
 	sb.WriteString("verification_status: reproduced | not_reproduced | insufficient_info | fixed_verified | still_reproduces\n")
-	sb.WriteString("environment: <有效环境；优先使用上文“环境”，为空时使用“排障机器人环境”；不要输出 bug env/bot env 组合字符串>\n")
-	sb.WriteString("entry:\n  frontend_url: <实际入口或 ->\n  api_url: <实际接口或 ->\n")
-	sb.WriteString("observed_behavior: <实际看到的现象>\n")
-	sb.WriteString("expected_behavior: <工单期望>\n")
-	sb.WriteString("evidence:\n  attachments: []\n  screenshots: []\n  network: []\n  console_errors: []\n  trace_ids: []\n  request_ids: []\n")
-	sb.WriteString("handoff_to_troubleshooter:\n  evidence_summary: <只写事实>\n  unchecked_scopes: []\n")
+	sb.WriteString("environment: \"<有效目标环境>\"\n")
+	sb.WriteString("observed_behavior: \"<what-was-observed-during-verification>\"\n")
+	sb.WriteString("expected_behavior: \"<expected>\"\n")
+	sb.WriteString("scenario_hash: \"<原始场景哈希；首次验证可为空，回归必须原样返回>\"\n")
+	sb.WriteString("evidence:\n  - kind: \"<har|screenshot|network|console|api|trace|log|command>\"\n    path: \"<本机已脱敏常规文件的绝对路径>\"\n    captured_at: \"<RFC3339 时间>\"\n    environment: \"<env>\"\n    version: \"<运行版本；回归必填>\"\n    request_id: \"<可空>\"\n    trace_id: \"<可空>\"\n    redaction_status: redacted | not_required\n")
 	sb.WriteString("gaps: []\n")
-	sb.WriteString("\n只有当用户需要补充的阻塞资料已经清空时，gaps 才能输出 []。\n")
+	sb.WriteString("只有当阻塞资料已经清空时 gaps 才能输出 []。证据必须通过 path 引用常规文件；不得内联密钥、cookie 或 Authorization。\n")
 	sb.WriteString("最终回答不得输出该结构之外的解释性段落。\n")
 	return sb.String()
 }
@@ -341,16 +341,21 @@ func fixOutputContract() string {
 	sb.WriteString("    fix_branch: \"<fix-branch>\"\n")
 	sb.WriteString("    commit: \"<sha-or-empty>\"\n")
 	sb.WriteString("    pushed: true\n")
+	sb.WriteString("    target_environment_branch: \"<env-branch>\"\n")
+	sb.WriteString("    push_remote: \"<remote>\"\n")
 	sb.WriteString("changes:\n")
 	sb.WriteString("  - \"<file-or-module>: <what changed>\"\n")
 	sb.WriteString("tests:\n")
-	sb.WriteString("  - command: \"<command>\"\n")
+	sb.WriteString("  - repo: \"<repo>\"\n")
+	sb.WriteString("    commit: \"<tested-fix-commit>\"\n")
+	sb.WriteString("    command: \"<command>\"\n")
 	sb.WriteString("    result: passed | failed | skipped\n")
 	sb.WriteString("    note: \"<short evidence>\"\n")
 	sb.WriteString("deployment_notice: \"请部署 <repo>/<fix_branch> 到 <env> 后再触发验证 Agent 回归。\"\n")
 	sb.WriteString("risks:\n")
 	sb.WriteString("  - \"<remaining-risk-or-empty>\"\n")
 	sb.WriteString("blocked_reason: \"<only when blocked/failed>\"\n")
+	sb.WriteString("evidence: []\n")
 	sb.WriteString("```\n")
 	return sb.String()
 }
@@ -1215,6 +1220,176 @@ func (i *CodexInvestigator) buildCommand(target string, bot BotRef, prompt strin
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	return i.buildCommandLocked(target, bot, prompt)
+}
+
+// ExecutePhase reuses the established target-specific CLI adapters without
+// mutating CaseStore. AgentPhaseRunner owns the compatibility projection and
+// the orchestrator remains the only workflow state writer.
+func (i *CodexInvestigator) ExecutePhase(parent context.Context, attemptID string, bot BotRef, prompt string, emit func(InvestigationEvent)) (PhaseExecutionResult, error) {
+	if i == nil {
+		return PhaseExecutionResult{}, errors.New("agent executor is required")
+	}
+	cmd, parser, err := i.buildCommand(strings.TrimSpace(bot.Target), bot, prompt)
+	if err != nil {
+		return PhaseExecutionResult{}, err
+	}
+	ctx, cancel := context.WithCancel(parent)
+	active := &activeCodexRun{cancel: cancel, done: make(chan struct{})}
+	i.mu.Lock()
+	if _, exists := i.active[attemptID]; exists {
+		i.mu.Unlock()
+		cancel()
+		return PhaseExecutionResult{}, fmt.Errorf("phase attempt %s is already running", attemptID)
+	}
+	i.active[attemptID] = active
+	i.mu.Unlock()
+	defer func() {
+		close(active.done)
+		i.removeActive(attemptID)
+		cancel()
+	}()
+	result, err := executePhaseCommand(ctx, cmd, parser, active, emit)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		active.setError(err)
+	}
+	return result, err
+}
+
+func (i *CodexInvestigator) CancelPhase(ctx context.Context, attemptID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return i.Cancel(attemptID)
+}
+
+func executePhaseCommand(ctx context.Context, command *exec.Cmd, parser investigationEventParser, active *activeCodexRun, emit func(InvestigationEvent)) (PhaseExecutionResult, error) {
+	cmd := exec.CommandContext(ctx, command.Path, command.Args[1:]...)
+	cmd.Dir = command.Dir
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return PhaseExecutionResult{}, err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return PhaseExecutionResult{}, err
+	}
+	setCodexProcessGroup(cmd)
+	started := time.Now()
+	if err := cmd.Start(); err != nil {
+		if ctx.Err() != nil {
+			return PhaseExecutionResult{}, ctx.Err()
+		}
+		return PhaseExecutionResult{}, err
+	}
+	active.setProcess(cmd.Process)
+	stderrDone := make(chan string, 1)
+	go func() {
+		data, _ := io.ReadAll(stderr)
+		stderrDone <- strings.TrimSpace(string(data))
+	}()
+	var result PhaseExecutionResult
+	var failure string
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		event, final, failed := parser([]byte(line))
+		if event.At.IsZero() {
+			event.At = time.Now().UTC()
+		}
+		if strings.TrimSpace(event.Message) != "" && emit != nil {
+			emit(event)
+		}
+		mergeUsageFromRaw(&result.Usage, event.Raw)
+		if strings.TrimSpace(final) != "" {
+			result.FinalYAML = final
+		}
+		if strings.TrimSpace(failed) != "" {
+			failure = failed
+		}
+	}
+	if err := scanner.Err(); err != nil && failure == "" {
+		failure = err.Error()
+	}
+	waitErr := cmd.Wait()
+	active.setProcess(nil)
+	stderrText := <-stderrDone
+	result.Usage.Duration = time.Since(started)
+	switch {
+	case ctx.Err() != nil:
+		return result, ctx.Err()
+	case failure != "":
+		return result, errors.New(failure)
+	case waitErr != nil:
+		if stderrText == "" {
+			stderrText = waitErr.Error()
+		}
+		return result, errors.New(stderrText)
+	case strings.TrimSpace(result.FinalYAML) == "":
+		return result, errors.New("agent returned no final structured result")
+	default:
+		return result, nil
+	}
+}
+
+func mergeUsageFromRaw(usage *AgentUsage, raw any) {
+	root, ok := raw.(map[string]any)
+	if !ok || usage == nil {
+		return
+	}
+	for _, candidate := range []any{root["usage"], root["token_usage"], nestedAny(root, "result", "usage")} {
+		values, ok := candidate.(map[string]any)
+		if !ok {
+			continue
+		}
+		usage.InputTokens = maxInt64(usage.InputTokens, int64FromAny(firstAny(values["input_tokens"], values["inputTokens"], values["prompt_tokens"])))
+		usage.OutputTokens = maxInt64(usage.OutputTokens, int64FromAny(firstAny(values["output_tokens"], values["outputTokens"], values["completion_tokens"])))
+	}
+}
+
+func nestedAny(root map[string]any, keys ...string) any {
+	var value any = root
+	for _, key := range keys {
+		object, ok := value.(map[string]any)
+		if !ok {
+			return nil
+		}
+		value = object[key]
+	}
+	return value
+}
+
+func firstAny(values ...any) any {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func int64FromAny(value any) int64 {
+	switch typed := value.(type) {
+	case float64:
+		return int64(typed)
+	case int64:
+		return typed
+	case json.Number:
+		result, _ := typed.Int64()
+		return result
+	default:
+		return 0
+	}
+}
+
+func maxInt64(left, right int64) int64 {
+	if right > left {
+		return right
+	}
+	return left
 }
 
 func (i *CodexInvestigator) emitStageEvent(runID string, phase string, message string) {

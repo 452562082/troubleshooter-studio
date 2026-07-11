@@ -10,6 +10,8 @@ import (
 
 var ErrSecureArtifactStoreUnsupported = errors.New("secure artifact store is unsupported on this platform")
 
+var ErrEvidenceArtifactReused = errors.New("evidence artifact was already registered by an earlier attempt")
+
 type capturedArtifactSource struct {
 	Content    []byte
 	SHA256     string

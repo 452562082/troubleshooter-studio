@@ -193,6 +193,7 @@ describe('useServiceTopology', () => {
     ['encoded slash', '/orders%2F%7Bid%7D', '/orders/{orderId}'],
     ['absolute encoded query and trailing slash', 'https://orders.test/orders/%7Bid%7D%2F?debug=true', '/orders/{orderId}'],
     ['encoded question mark across relative and absolute URLs', '/search%3Fterm?debug=true', 'https://orders.test/search%3Fterm?trace=true'],
+    ['scheme-relative URL host', '//orders.test/orders/%7Bid%7D?debug=true', '/orders/{orderId}'],
   ])('deduplicates %s paths like Go net/url', (_name, existingPath, incomingPath) => {
     const { topologyState, overrides } = makeTopology(vi.fn(async () => makeSnapshot('orders')))
     overrides.value = [{
@@ -224,6 +225,15 @@ describe('useServiceTopology', () => {
     }]
     const edge = makeEdge('orders')
     edge.path = '/orders/%ZZ'
+
+    expect(() => topologyState.reject(edge)).not.toThrow()
+    expect(overrides.value).toHaveLength(1)
+  })
+
+  it('does not throw for a malformed scheme-relative percent encoding', () => {
+    const { topologyState, overrides } = makeTopology(vi.fn(async () => makeSnapshot('orders')))
+    const edge = makeEdge('orders')
+    edge.path = '//orders.test/orders/%ZZ?debug=true'
 
     expect(() => topologyState.reject(edge)).not.toThrow()
     expect(overrides.value).toHaveLength(1)

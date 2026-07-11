@@ -3,7 +3,7 @@ export interface ServiceTopologyRepoGateInput {
   role?: string
 }
 
-const serviceRoles = new Set(['backend', 'gateway', 'middleware', 'admin'])
+const excludedServiceNodeRoles = new Set(['common-lib', 'infra', 'docs'])
 
 export function hasServiceTopologyWorkbenchRepos(
   repos: readonly ServiceTopologyRepoGateInput[],
@@ -15,7 +15,7 @@ export function hasServiceTopologyWorkbenchRepos(
   for (const repo of repos) {
     const name = repo.name.trim()
     const role = repo.role?.trim() || 'backend'
-    if (!name || !serviceRoles.has(role) || repoNames.has(name)) continue
+    if (!name || excludedServiceNodeRoles.has(role) || repoNames.has(name)) continue
     if (!Object.prototype.hasOwnProperty.call(topologyRepoPaths, name)) continue
     const path = topologyRepoPaths[name]?.trim()
     if (!path) continue

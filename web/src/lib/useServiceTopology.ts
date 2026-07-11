@@ -27,9 +27,9 @@ function normalizedOptional(value?: string): string | undefined {
 
 function normalizedRoutePath(value?: string): string {
   let path = value?.trim() ?? ''
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(path)) {
+  if (/^(?:[a-z][a-z0-9+.-]*:)?\/\//i.test(path)) {
     try {
-      path = decodeURIComponent(new URL(path).pathname)
+      path = decodeURIComponent(new URL(path, 'http://topology.local').pathname)
     } catch {
       path = path.split(/[?#]/, 1)[0] ?? ''
     }

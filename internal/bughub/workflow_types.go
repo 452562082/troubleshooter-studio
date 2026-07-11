@@ -34,6 +34,35 @@ const (
 	CaseLegacyArchived       CaseStatus = "legacy_archived"
 )
 
+func (s CaseStatus) valid() bool {
+	switch s {
+	case CasePendingValidation,
+		CaseValidating,
+		CaseWaitingEvidence,
+		CaseReproduced,
+		CaseNotReproduced,
+		CaseInvestigating,
+		CaseRootCauseReady,
+		CaseWaitingFixApproval,
+		CaseFixing,
+		CaseFixFailed,
+		CaseFixPushed,
+		CaseWaitingMergeApproval,
+		CaseMerging,
+		CaseMergeConflict,
+		CaseWaitingDeployment,
+		CaseDeploymentUnverified,
+		CaseDeploymentVerified,
+		CaseRegressionValidating,
+		CaseFixedVerified,
+		CaseStillReproduces,
+		CaseLegacyArchived:
+		return true
+	default:
+		return false
+	}
+}
+
 type Phase string
 
 const (
@@ -122,6 +151,9 @@ func (c IncidentCase) Validate() error {
 	}
 	if c.CycleNumber < 1 {
 		return fmt.Errorf("incident case cycle number must be positive")
+	}
+	if !c.Status.valid() {
+		return fmt.Errorf("unsupported incident case status %q", c.Status)
 	}
 	return nil
 }
@@ -215,6 +247,12 @@ func (a PhaseAttempt) ValidateWithOptions(options AttemptValidationOptions) erro
 		}
 	default:
 		return fmt.Errorf("unsupported phase %q", a.Phase)
+	}
+	if err := validateJSONObject("phase attempt input", a.InputJSON, true); err != nil {
+		return err
+	}
+	if err := validateJSONObject("phase attempt output", a.OutputJSON, true); err != nil {
+		return err
 	}
 	return a.Usage.Validate()
 }
@@ -450,7 +488,17 @@ func (o DeploymentObservation) Validate() error {
 		return err
 	}
 	switch o.Result {
-	case DeploymentResultMatched, DeploymentResultMismatched, DeploymentResultUnavailable:
+	case DeploymentResultMatched:
+		if o.VerifiedAt == nil || o.VerifiedAt.IsZero() {
+			return fmt.Errorf("matched deployment observation requires verified_at")
+		}
+		for repo, expectedCommit := range o.ExpectedCommits {
+			if observedCommit, ok := o.ObservedCommits[repo]; !ok || observedCommit != expectedCommit {
+				return fmt.Errorf("matched deployment observation requires every expected repository commit")
+			}
+		}
+		return nil
+	case DeploymentResultMismatched, DeploymentResultUnavailable:
 		return nil
 	default:
 		return fmt.Errorf("unsupported deployment observation result %q", o.Result)
@@ -497,6 +545,20 @@ func CloneRawMessage(value json.RawMessage) json.RawMessage {
 		return nil
 	}
 	return append(json.RawMessage(nil), value...)
+}
+
+func validateJSONObject(name string, value json.RawMessage, allowEmpty bool) error {
+	if len(strings.TrimSpace(string(value))) == 0 {
+		return fmt.Errorf("%s must be a JSON object", name)
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(value, &object); err != nil || object == nil {
+		return fmt.Errorf("%s must be a JSON object", name)
+	}
+	if !allowEmpty && len(object) == 0 {
+		return fmt.Errorf("%s must be a non-empty JSON object", name)
+	}
+	return nil
 }
 
 func CloneStringMap(values map[string]string) map[string]string {

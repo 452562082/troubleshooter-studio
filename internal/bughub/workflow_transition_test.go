@@ -14,19 +14,26 @@ func TestCanTransition(t *testing.T) {
 		{CaseValidating, CaseReproduced},
 		{CaseValidating, CaseWaitingEvidence},
 		{CaseValidating, CaseNotReproduced},
+		{CaseWaitingEvidence, CaseValidating},
+		{CaseWaitingEvidence, CaseInvestigating},
+		{CaseWaitingEvidence, CaseRegressionValidating},
 		{CaseReproduced, CaseInvestigating},
+		{CaseNotReproduced, CaseValidating},
 		{CaseInvestigating, CaseRootCauseReady},
 		{CaseInvestigating, CaseWaitingEvidence},
 		{CaseRootCauseReady, CaseWaitingFixApproval},
 		{CaseWaitingFixApproval, CaseFixing},
 		{CaseFixing, CaseFixPushed},
 		{CaseFixing, CaseFixFailed},
+		{CaseFixFailed, CaseFixing},
 		{CaseFixPushed, CaseWaitingMergeApproval},
 		{CaseWaitingMergeApproval, CaseMerging},
 		{CaseMerging, CaseWaitingDeployment},
 		{CaseMerging, CaseMergeConflict},
+		{CaseMergeConflict, CaseWaitingMergeApproval},
 		{CaseWaitingDeployment, CaseDeploymentVerified},
 		{CaseWaitingDeployment, CaseDeploymentUnverified},
+		{CaseDeploymentUnverified, CaseWaitingDeployment},
 		{CaseDeploymentVerified, CaseRegressionValidating},
 		{CaseRegressionValidating, CaseFixedVerified},
 		{CaseRegressionValidating, CaseStillReproduces},
@@ -134,6 +141,8 @@ func TestValidateWorkflow(t *testing.T) {
 			Phase:       PhaseValidation,
 			Mode:        AttemptReproduce,
 			Status:      AttemptStatusRunning,
+			InputJSON:   json.RawMessage(`{}`),
+			OutputJSON:  json.RawMessage(`{}`),
 		}
 		if err := valid.Validate(); err != nil {
 			t.Fatalf("Validate() error = %v", err)
@@ -178,6 +187,46 @@ func TestValidateWorkflow(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestValidateWorkflowCaseStatusMembership(t *testing.T) {
+	base := IncidentCase{ID: "case-1", BugID: "zentao-909", CycleNumber: 1}
+	for _, status := range []CaseStatus{
+		CasePendingValidation,
+		CaseValidating,
+		CaseWaitingEvidence,
+		CaseReproduced,
+		CaseNotReproduced,
+		CaseInvestigating,
+		CaseRootCauseReady,
+		CaseWaitingFixApproval,
+		CaseFixing,
+		CaseFixFailed,
+		CaseFixPushed,
+		CaseWaitingMergeApproval,
+		CaseMerging,
+		CaseMergeConflict,
+		CaseWaitingDeployment,
+		CaseDeploymentUnverified,
+		CaseDeploymentVerified,
+		CaseRegressionValidating,
+		CaseFixedVerified,
+		CaseStillReproduces,
+		CaseLegacyArchived,
+	} {
+		incident := base
+		incident.Status = status
+		if err := incident.Validate(); err != nil {
+			t.Fatalf("status %q Validate() error = %v", status, err)
+		}
+	}
+	for _, status := range []CaseStatus{"", "unknown"} {
+		incident := base
+		incident.Status = status
+		if err := incident.Validate(); err == nil {
+			t.Fatalf("status %q Validate() error = nil", status)
+		}
+	}
 }
 
 func TestValidateWorkflowApprovalKindsAndScopes(t *testing.T) {
@@ -237,6 +286,8 @@ func TestValidateWorkflowAttemptContract(t *testing.T) {
 		CaseID:      "case-1",
 		CycleNumber: 1,
 		Status:      AttemptStatusInterrupted,
+		InputJSON:   json.RawMessage(`{}`),
+		OutputJSON:  json.RawMessage(`{}`),
 	}
 	valid := []PhaseAttempt{
 		func() PhaseAttempt { a := base; a.Phase = PhaseValidation; a.Mode = AttemptReproduce; return a }(),
@@ -286,6 +337,39 @@ func TestValidateWorkflowAttemptContract(t *testing.T) {
 	for _, attempt := range invalid {
 		if err := attempt.Validate(); err == nil {
 			t.Fatalf("Validate(%+v) error = nil, want contract validation error", attempt)
+		}
+	}
+
+	for _, payload := range []json.RawMessage{
+		nil,
+		json.RawMessage{},
+		json.RawMessage(`{`),
+		json.RawMessage(`null`),
+		json.RawMessage(`[]`),
+		json.RawMessage(`"text"`),
+		json.RawMessage(`1`),
+	} {
+		invalidInput := base
+		invalidInput.Phase = PhaseFix
+		invalidInput.InputJSON = payload
+		if err := invalidInput.Validate(); err == nil {
+			t.Fatalf("InputJSON %q Validate() error = nil", payload)
+		}
+		invalidOutput := base
+		invalidOutput.Phase = PhaseFix
+		invalidOutput.OutputJSON = payload
+		if err := invalidOutput.Validate(); err == nil {
+			t.Fatalf("OutputJSON %q Validate() error = nil", payload)
+		}
+		invalidLegacy := legacy
+		invalidLegacy.InputJSON = payload
+		if err := invalidLegacy.ValidateWithOptions(AttemptValidationOptions{AllowLegacyMigration: true}); err == nil {
+			t.Fatalf("legacy InputJSON %q migration validation error = nil", payload)
+		}
+		invalidLegacy = legacy
+		invalidLegacy.OutputJSON = payload
+		if err := invalidLegacy.ValidateWithOptions(AttemptValidationOptions{AllowLegacyMigration: true}); err == nil {
+			t.Fatalf("legacy OutputJSON %q migration validation error = nil", payload)
 		}
 	}
 
@@ -381,6 +465,8 @@ func TestValidateWorkflowPersistedRecords(t *testing.T) {
 		Environment:        "test",
 		ExpectedCommits:    map[string]string{"api": "abc123"},
 		VerificationSource: "manual",
+		ObservedCommits:    map[string]string{"api": "abc123"},
+		VerifiedAt:         func() *time.Time { value := time.Now().UTC(); return &value }(),
 		Result:             DeploymentResultMatched,
 	}
 	if err := observation.Validate(); err != nil {
@@ -405,14 +491,37 @@ func TestValidateWorkflowPersistedRecords(t *testing.T) {
 		}
 	}
 	for _, result := range []DeploymentResult{
-		DeploymentResultMatched,
 		DeploymentResultMismatched,
 		DeploymentResultUnavailable,
 	} {
 		valid := observation
 		valid.Result = result
+		valid.VerifiedAt = nil
+		valid.ObservedCommits = nil
+		valid.ObservedVersion = "build-20260711"
+		valid.ObservedImages = map[string]string{"api": "registry/api:build-20260711"}
 		if err := valid.Validate(); err != nil {
 			t.Fatalf("result %q Validate() error = %v", result, err)
+		}
+	}
+
+	matchedMultiRepo := observation
+	matchedMultiRepo.ExpectedCommits = map[string]string{"api": "abc123", "worker": "def456"}
+	matchedMultiRepo.ObservedCommits = map[string]string{"api": "abc123", "worker": "def456"}
+	if err := matchedMultiRepo.Validate(); err != nil {
+		t.Fatalf("matched multi-repo Validate() error = %v", err)
+	}
+	for _, mutate := range []func(*DeploymentObservation){
+		func(v *DeploymentObservation) { v.VerifiedAt = nil },
+		func(v *DeploymentObservation) { value := time.Time{}; v.VerifiedAt = &value },
+		func(v *DeploymentObservation) { v.ObservedCommits = nil },
+		func(v *DeploymentObservation) { delete(v.ObservedCommits, "worker") },
+		func(v *DeploymentObservation) { v.ObservedCommits["worker"] = "wrong-commit" },
+	} {
+		invalid := matchedMultiRepo.Clone()
+		mutate(&invalid)
+		if err := invalid.Validate(); err == nil {
+			t.Fatalf("matched observation without commit proof %+v passed validation", invalid)
 		}
 	}
 

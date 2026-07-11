@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -34,10 +35,15 @@ func ImportLegacyRuns(ctx context.Context, store *CaseStore, runsPath string) (L
 		data = []byte("[]")
 	}
 	var runs []InvestigationRun
-	if err := json.Unmarshal(data, &runs); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&runs); err != nil {
 		return LegacyImportResult{}, fmt.Errorf("decode legacy runs: %w", err)
 	}
-
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return LegacyImportResult{}, fmt.Errorf("decode legacy runs: trailing JSON value")
+	}
 	uniqueRuns := make(map[string]InvestigationRun, len(runs))
 	for index, run := range runs {
 		if strings.TrimSpace(run.ID) == "" || strings.TrimSpace(run.BugID) == "" {
@@ -51,10 +57,15 @@ func ImportLegacyRuns(ctx context.Context, store *CaseStore, runsPath string) (L
 		}
 		uniqueRuns[run.ID] = run
 	}
+	for id, run := range uniqueRuns {
+		uniqueRuns[id] = redactLegacyRun(run)
+	}
 
 	byBug := make(map[string][]InvestigationRun)
+	runBug := make(map[string]string, len(uniqueRuns))
 	for _, run := range uniqueRuns {
 		byBug[run.BugID] = append(byBug[run.BugID], run)
+		runBug[run.ID] = run.BugID
 	}
 	bugIDs := make([]string, 0, len(byBug))
 	for bugID := range byBug {
@@ -78,7 +89,11 @@ func ImportLegacyRuns(ctx context.Context, store *CaseStore, runsPath string) (L
 			CreatedAt: createdAt, UpdatedAt: updatedAt,
 		})
 		for _, run := range bugRuns {
-			attempt, err := legacyAttempt(caseID, run)
+			parentAttemptID := ""
+			if run.ContinuationOf != "" && runBug[run.ContinuationOf] == run.BugID {
+				parentAttemptID = deterministicWorkflowID("legacy-attempt:" + run.ContinuationOf)
+			}
+			attempt, err := legacyAttempt(caseID, run, parentAttemptID)
 			if err != nil {
 				return LegacyImportResult{}, err
 			}
@@ -88,7 +103,7 @@ func ImportLegacyRuns(ctx context.Context, store *CaseStore, runsPath string) (L
 	return store.importLegacyBatch(ctx, batch)
 }
 
-func legacyAttempt(caseID string, run InvestigationRun) (PhaseAttempt, error) {
+func legacyAttempt(caseID string, run InvestigationRun, parentAttemptID string) (PhaseAttempt, error) {
 	input := json.RawMessage(`{}`)
 	if run.PromptPreview != "" {
 		encoded, err := json.Marshal(struct {
@@ -100,13 +115,15 @@ func legacyAttempt(caseID string, run InvestigationRun) (PhaseAttempt, error) {
 		input = encoded
 	}
 	output := json.RawMessage(`{}`)
-	if len(run.Events) != 0 || run.FinalMessage != "" || run.Error != "" || run.Status != "" {
+	if run.ID != "" {
 		encoded, err := json.Marshal(struct {
-			Events       []InvestigationEvent `json:"events,omitempty"`
-			FinalMessage string               `json:"final_message,omitempty"`
-			Error        string               `json:"error,omitempty"`
-			LegacyStatus InvestigationStatus  `json:"legacy_status,omitempty"`
-		}{run.Events, run.FinalMessage, run.Error, run.Status})
+			OriginalRunID string               `json:"original_run_id"`
+			Continuation  string               `json:"continuation_of,omitempty"`
+			Events        []InvestigationEvent `json:"events,omitempty"`
+			FinalMessage  string               `json:"final_message,omitempty"`
+			Error         string               `json:"error,omitempty"`
+			LegacyStatus  InvestigationStatus  `json:"legacy_status,omitempty"`
+		}{run.ID, run.ContinuationOf, run.Events, run.FinalMessage, run.Error, run.Status})
 		if err != nil {
 			return PhaseAttempt{}, fmt.Errorf("encode legacy run %q output: %w", run.ID, err)
 		}
@@ -124,8 +141,23 @@ func legacyAttempt(caseID string, run InvestigationRun) (PhaseAttempt, error) {
 		ID: deterministicWorkflowID("legacy-attempt:" + run.ID), CaseID: caseID,
 		CycleNumber: 1, Phase: PhaseLegacy, Status: status, BotKey: run.BotKey,
 		InputJSON: input, OutputJSON: output, StartedAt: startedAt,
-		FinishedAt: cloneTimePtr(run.FinishedAt), ErrorMessage: run.Error,
+		FinishedAt: cloneTimePtr(run.FinishedAt), ParentAttemptID: parentAttemptID, ErrorMessage: run.Error,
 	}, nil
+}
+
+func redactLegacyRun(run InvestigationRun) InvestigationRun {
+	run.PromptPreview = redactSensitiveText(run.PromptPreview)
+	run.FinalMessage = redactSensitiveText(run.FinalMessage)
+	run.Error = redactSensitiveText(run.Error)
+	for index := range run.Events {
+		run.Events[index].Message = redactSensitiveText(run.Events[index].Message)
+		run.Events[index].Raw = redactSensitiveAny(run.Events[index].Raw)
+		if run.Events[index].Meta != nil {
+			redacted := redactSensitiveAny(map[string]any(run.Events[index].Meta))
+			run.Events[index].Meta = redacted.(map[string]any)
+		}
+	}
+	return run
 }
 
 func legacyCaseTimes(runs []InvestigationRun) (time.Time, time.Time) {

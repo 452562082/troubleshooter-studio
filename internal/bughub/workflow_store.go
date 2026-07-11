@@ -377,20 +377,34 @@ func sameImportedAttempt(left, right PhaseAttempt) bool {
 		left.ErrorMessage == right.ErrorMessage && left.Usage == right.Usage
 }
 
-func (s *CaseStore) recordEvidenceArtifact(ctx context.Context, artifact EvidenceArtifact) (EvidenceArtifact, error) {
+func (s *CaseStore) GetEvidenceArtifact(ctx context.Context, attemptID, sha256Digest, kind string) (EvidenceArtifact, bool, error) {
+	artifact, err := scanEvidenceArtifact(s.db.QueryRowContext(ctx, `SELECT id, case_id, attempt_id,
+		kind, path_or_reference, sha256, captured_at, environment, version, request_id,
+		trace_id, redaction_status FROM evidence_artifacts
+		WHERE attempt_id = ? AND sha256 = ? AND kind = ?`, attemptID, sha256Digest, kind))
+	if errors.Is(err, sql.ErrNoRows) {
+		return EvidenceArtifact{}, false, nil
+	}
+	if err != nil {
+		return EvidenceArtifact{}, false, fmt.Errorf("get evidence artifact: %w", err)
+	}
+	return artifact, true, nil
+}
+
+func (s *CaseStore) recordEvidenceArtifact(ctx context.Context, artifact EvidenceArtifact, beforeCommit func() error) (EvidenceArtifact, bool, error) {
 	if artifact.CapturedAt.IsZero() {
-		return EvidenceArtifact{}, errors.New("evidence artifact captured_at is required")
+		return EvidenceArtifact{}, false, errors.New("evidence artifact captured_at is required")
 	}
 	artifact.CapturedAt = artifact.CapturedAt.UTC()
 	if err := artifact.Validate(); err != nil {
-		return EvidenceArtifact{}, err
+		return EvidenceArtifact{}, false, err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return EvidenceArtifact{}, fmt.Errorf("begin evidence registration: %w", err)
+		return EvidenceArtifact{}, false, fmt.Errorf("begin evidence registration: %w", err)
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT INTO evidence_artifacts (
+	result, err := tx.ExecContext(ctx, `INSERT INTO evidence_artifacts (
 		id, case_id, attempt_id, kind, path_or_reference, sha256, captured_at,
 		environment, version, request_id, trace_id, redaction_status
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -399,22 +413,28 @@ func (s *CaseStore) recordEvidenceArtifact(ctx context.Context, artifact Evidenc
 		formatStoreTime(artifact.CapturedAt), artifact.Environment, artifact.Version,
 		artifact.RequestID, artifact.TraceID, artifact.RedactionStatus)
 	if err != nil {
-		return EvidenceArtifact{}, fmt.Errorf("register evidence artifact: %w", err)
+		return EvidenceArtifact{}, false, fmt.Errorf("register evidence artifact: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return EvidenceArtifact{}, false, fmt.Errorf("inspect evidence registration: %w", err)
 	}
 	stored, err := scanEvidenceArtifact(tx.QueryRowContext(ctx, `SELECT id, case_id, attempt_id,
 		kind, path_or_reference, sha256, captured_at, environment, version, request_id,
 		trace_id, redaction_status FROM evidence_artifacts
 		WHERE attempt_id = ? AND sha256 = ? AND kind = ?`, artifact.AttemptID, artifact.SHA256, artifact.Kind))
 	if err != nil {
-		return EvidenceArtifact{}, fmt.Errorf("read registered evidence artifact: %w", err)
+		return EvidenceArtifact{}, false, fmt.Errorf("read registered evidence artifact: %w", err)
 	}
-	if stored != artifact {
-		return EvidenceArtifact{}, fmt.Errorf("%w: evidence artifact %s", ErrIdempotencyConflict, artifact.ID)
+	if beforeCommit != nil {
+		if err := beforeCommit(); err != nil {
+			return EvidenceArtifact{}, false, fmt.Errorf("verify evidence publication before commit: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
-		return EvidenceArtifact{}, fmt.Errorf("commit evidence registration: %w", err)
+		return EvidenceArtifact{}, false, fmt.Errorf("commit evidence registration: %w", err)
 	}
-	return stored, nil
+	return stored, rows == 1, nil
 }
 
 func (s *CaseStore) ListEvidenceArtifacts(ctx context.Context, caseID string) ([]EvidenceArtifact, error) {

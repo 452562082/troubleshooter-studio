@@ -1,10 +1,12 @@
 package bughub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -136,6 +138,80 @@ func TestImportLegacyRunsStoreConflictRollsBackWholeFile(t *testing.T) {
 	cases := mustListCases(t, store)
 	if len(cases) != 1 || cases[0].ID != conflictingID {
 		t.Fatalf("partial import persisted: %+v", cases)
+	}
+}
+
+func TestImportLegacyRunsRedactsSecretsPreservesNumbersAndContinuation(t *testing.T) {
+	ctx := context.Background()
+	store := openTestCaseStore(t)
+	raw := `[
+		{"id":"parent","bug_id":"bug-1","status":"succeeded","prompt_preview":"Authorization: Bearer abc.def.123456789","events":[{"type":"message","message":"password=hunter2","raw":{"count":9007199254740993,"token":"raw-secret"},"meta":{"client_secret":"meta-secret","safe":"kept"}},{"type":"message","message":"{\"api_key\":\"nested-secret\"}"}],"final_message":"Cookie: session=abc","error":"access_token=error-secret"},
+		{"id":"child","bug_id":"bug-1","status":"failed","continuation_of":"parent"},
+		{"id":"other","bug_id":"bug-2","status":"failed","continuation_of":"parent"}
+	]`
+	path := filepath.Join(t.TempDir(), "runs.json")
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ImportLegacyRuns(ctx, store, path); err != nil {
+		t.Fatal(err)
+	}
+	attempts, err := store.ListAttempts(ctx, AttemptFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := make(map[string]PhaseAttempt)
+	for _, attempt := range attempts {
+		var output map[string]any
+		decoder := json.NewDecoder(bytes.NewReader(attempt.OutputJSON))
+		decoder.UseNumber()
+		if err := decoder.Decode(&output); err != nil {
+			t.Fatal(err)
+		}
+		originalID, _ := output["original_run_id"].(string)
+		byID[originalID] = attempt
+	}
+	parent := byID["parent"]
+	if parent.ID == "" {
+		t.Fatalf("original run IDs not retained: %+v", byID)
+	}
+	combined := string(parent.InputJSON) + string(parent.OutputJSON) + parent.ErrorMessage
+	for _, secret := range []string{"abc.def.123456789", "hunter2", "raw-secret", "meta-secret", "nested-secret", "session=abc", "error-secret"} {
+		if strings.Contains(combined, secret) {
+			t.Fatalf("secret %q persisted in %s", secret, combined)
+		}
+	}
+	if !strings.Contains(combined, "[REDACTED]") || !strings.Contains(combined, "9007199254740993") || !strings.Contains(combined, `"safe":"kept"`) {
+		t.Fatalf("redaction/number preservation failed: %s", combined)
+	}
+	child := byID["child"]
+	if child.ParentAttemptID != parent.ID {
+		t.Fatalf("same-bug continuation parent=%q want=%q", child.ParentAttemptID, parent.ID)
+	}
+	if other := byID["other"]; other.ParentAttemptID != "" {
+		t.Fatalf("cross-bug continuation linked to %q", other.ParentAttemptID)
+	}
+	unchanged, err := os.ReadFile(path)
+	if err != nil || string(unchanged) != raw {
+		t.Fatalf("runs.json changed err=%v", err)
+	}
+}
+
+func TestImportLegacyRunsRejectsConflictingDuplicatesBeforeRedaction(t *testing.T) {
+	store := openTestCaseStore(t)
+	path := filepath.Join(t.TempDir(), "runs.json")
+	raw := `[
+		{"id":"same","bug_id":"bug-1","status":"failed","error":"token=first-secret"},
+		{"id":"same","bug_id":"bug-1","status":"failed","error":"token=second-secret"}
+	]`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ImportLegacyRuns(context.Background(), store, path); err == nil {
+		t.Fatal("expected pre-redaction duplicate conflict")
+	}
+	if cases := mustListCases(t, store); len(cases) != 0 {
+		t.Fatalf("conflicting duplicates modified store: %+v", cases)
 	}
 }
 

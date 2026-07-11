@@ -2,6 +2,7 @@ package bughub
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -22,7 +23,7 @@ func TestRegisterArtifactCopiesHashesSecuresAndIsIdempotent(t *testing.T) {
 	if err := os.WriteFile(source, content, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	root := filepath.Join(t.TempDir(), "private-artifacts")
+	root := filepath.Join(resolvedTempDir(t), "private-artifacts")
 	input := ArtifactInput{ArtifactsRoot: root, SourcePath: source, CaseID: "case-artifact", AttemptID: attempt.ID, Kind: "har", CapturedAt: time.Date(2026, 7, 11, 1, 2, 3, 0, time.UTC), Environment: "staging", RedactionStatus: RedactionStatusNotRequired}
 
 	artifact, err := RegisterArtifact(ctx, store, input)
@@ -66,7 +67,7 @@ func TestRegisterArtifactRejectsSecretsTraversalAndSymlinkEscape(t *testing.T) {
 	if err := store.CreateAttempt(ctx, attempt); err != nil {
 		t.Fatal(err)
 	}
-	root := filepath.Join(t.TempDir(), "artifacts")
+	root := filepath.Join(resolvedTempDir(t), "artifacts")
 	secret := filepath.Join(t.TempDir(), "secret.txt")
 	if err := os.WriteFile(secret, []byte("Authorization: Bearer top.secret.token"), 0o600); err != nil {
 		t.Fatal(err)
@@ -90,7 +91,7 @@ func TestRegisterArtifactRejectsSecretsTraversalAndSymlinkEscape(t *testing.T) {
 	}
 
 	outside := t.TempDir()
-	symlinkRoot := filepath.Join(t.TempDir(), "linked-artifacts")
+	symlinkRoot := filepath.Join(resolvedTempDir(t), "linked-artifacts")
 	if err := os.Symlink(outside, symlinkRoot); err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +119,7 @@ func TestRegisterArtifactSecretGateCoversHeadersPasswordsAndBearerTokens(t *test
 			if err := os.WriteFile(source, []byte(content), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			input := ArtifactInput{ArtifactsRoot: filepath.Join(t.TempDir(), "artifacts"), SourcePath: source, CaseID: "case-secrets", AttemptID: attempt.ID, Kind: "text", RedactionStatus: RedactionStatusNotRequired}
+			input := ArtifactInput{ArtifactsRoot: filepath.Join(resolvedTempDir(t), "artifacts"), SourcePath: source, CaseID: "case-secrets", AttemptID: attempt.ID, Kind: "text", RedactionStatus: RedactionStatusNotRequired}
 			if _, err := RegisterArtifact(ctx, store, input); err == nil {
 				t.Fatalf("secret was accepted: %q", content)
 			}
@@ -129,9 +130,147 @@ func TestRegisterArtifactSecretGateCoversHeadersPasswordsAndBearerTokens(t *test
 	if err := os.WriteFile(clean, []byte("safe"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	input := ArtifactInput{ArtifactsRoot: filepath.Join(t.TempDir(), "artifacts"), SourcePath: clean, CaseID: "case-secrets", AttemptID: attempt.ID, Kind: "text", RequestID: "Authorization: secret", RedactionStatus: RedactionStatusNotRequired}
+	input := ArtifactInput{ArtifactsRoot: filepath.Join(resolvedTempDir(t), "artifacts"), SourcePath: clean, CaseID: "case-secrets", AttemptID: attempt.ID, Kind: "text", RequestID: "Authorization: secret", RedactionStatus: RedactionStatusNotRequired}
 	if _, err := RegisterArtifact(ctx, store, input); err == nil {
 		t.Fatal("metadata secret was accepted")
+	}
+}
+
+func TestRegisterArtifactSecretGateStructuredPositiveAndNegativeCases(t *testing.T) {
+	ctx := context.Background()
+	store := openTestCaseStore(t)
+	createTestCase(t, store, "case-structured-secrets")
+	attempt := validRunningAttempt("attempt-structured-secrets", "case-structured-secrets")
+	if err := store.CreateAttempt(ctx, attempt); err != nil {
+		t.Fatal(err)
+	}
+	positives := []string{
+		`{"access_token":"abc123456789"}`,
+		`{"nested":{"client_secret":"actual-value"}}`,
+		"API_KEY=key-123456789\n",
+		"passwd: hunter2\n",
+		"access-key = AKIAIOSFODNN7EXAMPLE\n",
+		"GET /callback?access_token=query-secret-123 HTTP/1.1\n",
+		"github_pat_11AA22BB33CC44DD55EE66FF77GG88HH\n",
+		"AKIAIOSFODNN7EXAMPLE\n",
+		"-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n",
+	}
+	for index, content := range positives {
+		source := filepath.Join(t.TempDir(), fmt.Sprintf("positive-%d.txt", index))
+		if err := os.WriteFile(source, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		input := ArtifactInput{ArtifactsRoot: resolvedTempDir(t), SourcePath: source, CaseID: "case-structured-secrets", AttemptID: attempt.ID, Kind: "text", RedactionStatus: RedactionStatusNotRequired}
+		if _, err := RegisterArtifact(ctx, store, input); err == nil {
+			t.Fatalf("secret was accepted: %q", content)
+		}
+	}
+
+	negatives := []string{
+		"Bearer authentication is configured by the operator.",
+		"The password field is documented here.",
+		`{"token":""}`,
+		`{"secret":false}`,
+		`{"access_key":[]}`,
+		`{"private_key":"[REDACTED]"}`,
+	}
+	for index, content := range negatives {
+		source := filepath.Join(t.TempDir(), fmt.Sprintf("negative-%d.txt", index))
+		if err := os.WriteFile(source, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		input := ArtifactInput{ArtifactsRoot: resolvedTempDir(t), SourcePath: source, CaseID: "case-structured-secrets", AttemptID: attempt.ID, Kind: fmt.Sprintf("negative-%d", index), RedactionStatus: RedactionStatusNotRequired}
+		if _, err := RegisterArtifact(ctx, store, input); err != nil {
+			t.Fatalf("benign prose rejected %q: %v", content, err)
+		}
+	}
+
+	sourceDir := t.TempDir()
+	source := filepath.Join(sourceDir, "password=filename.txt")
+	if err := os.WriteFile(source, []byte("safe evidence"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	input := ArtifactInput{ArtifactsRoot: resolvedTempDir(t), SourcePath: source, CaseID: "case-structured-secrets", AttemptID: attempt.ID, Kind: "safe-filename", RedactionStatus: RedactionStatusNotRequired}
+	if _, err := RegisterArtifact(ctx, store, input); err != nil {
+		t.Fatalf("keyword filename rejected: %v", err)
+	}
+}
+
+func TestRegisterArtifactContentAddressIgnoresExtensionAndConcurrentRoot(t *testing.T) {
+	ctx := context.Background()
+	databasePath := filepath.Join(t.TempDir(), "private", "workflows.db")
+	first, err := OpenCaseStore(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := OpenCaseStore(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	createTestCase(t, first, "case-content-address")
+	attempt := validRunningAttempt("attempt-content-address", "case-content-address")
+	if err := first.CreateAttempt(ctx, attempt); err != nil {
+		t.Fatal(err)
+	}
+	contents := []byte("same immutable evidence")
+	firstSource := filepath.Join(t.TempDir(), "evidence.log")
+	secondSource := filepath.Join(t.TempDir(), "evidence.har")
+	for _, source := range []string{firstSource, secondSource} {
+		if err := os.WriteFile(source, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	firstRoot := resolvedTempDir(t)
+	secondRoot := resolvedTempDir(t)
+	inputs := []ArtifactInput{
+		{ArtifactsRoot: firstRoot, SourcePath: firstSource, CaseID: "case-content-address", AttemptID: attempt.ID, Kind: "evidence", RedactionStatus: RedactionStatusNotRequired},
+		{ArtifactsRoot: secondRoot, SourcePath: secondSource, CaseID: "case-content-address", AttemptID: attempt.ID, Kind: "evidence", RedactionStatus: RedactionStatusNotRequired},
+	}
+	results := make(chan EvidenceArtifact, 2)
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for index, store := range []*CaseStore{first, second} {
+		wg.Add(1)
+		go func(store *CaseStore, input ArtifactInput) {
+			defer wg.Done()
+			artifact, err := RegisterArtifact(ctx, store, input)
+			results <- artifact
+			errs <- err
+		}(store, inputs[index])
+	}
+	wg.Wait()
+	close(results)
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent different-root registration: %v", err)
+		}
+	}
+	var committed EvidenceArtifact
+	for artifact := range results {
+		if committed.ID == "" {
+			committed = artifact
+		} else if artifact != committed {
+			t.Fatalf("results differ: %+v %+v", committed, artifact)
+		}
+	}
+	if filepath.Ext(committed.PathOrReference) != "" {
+		t.Fatalf("content address contains source extension: %s", committed.PathOrReference)
+	}
+	for _, root := range []string{firstRoot, secondRoot} {
+		matches, err := filepath.Glob(filepath.Join(root, "case-content-address", "*"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if committed.PathOrReference == filepath.Join(root, "case-content-address", filepath.Base(committed.PathOrReference)) {
+			if len(matches) != 1 {
+				t.Fatalf("committed root files=%v", matches)
+			}
+		} else if len(matches) != 0 {
+			t.Fatalf("losing root left orphan=%v", matches)
+		}
 	}
 }
 
@@ -147,7 +286,7 @@ func TestRegisterArtifactConcurrentDuplicateIsSingleRecord(t *testing.T) {
 	if err := os.WriteFile(source, []byte("redacted evidence"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	input := ArtifactInput{ArtifactsRoot: filepath.Join(t.TempDir(), "artifacts"), SourcePath: source, CaseID: "case-concurrent", AttemptID: attempt.ID, Kind: "log", RedactionStatus: RedactionStatusRedacted}
+	input := ArtifactInput{ArtifactsRoot: filepath.Join(resolvedTempDir(t), "artifacts"), SourcePath: source, CaseID: "case-concurrent", AttemptID: attempt.ID, Kind: "log", RedactionStatus: RedactionStatusRedacted}
 
 	const workers = 8
 	results := make(chan EvidenceArtifact, workers)
@@ -206,7 +345,7 @@ func TestRegisterArtifactConcurrentDuplicateAcrossStoreHandles(t *testing.T) {
 	if err := os.WriteFile(source, []byte("redacted evidence"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	input := ArtifactInput{ArtifactsRoot: filepath.Join(t.TempDir(), "artifacts"), SourcePath: source, CaseID: "case-handles", AttemptID: attempt.ID, Kind: "log", RedactionStatus: RedactionStatusRedacted}
+	input := ArtifactInput{ArtifactsRoot: filepath.Join(resolvedTempDir(t), "artifacts"), SourcePath: source, CaseID: "case-handles", AttemptID: attempt.ID, Kind: "log", RedactionStatus: RedactionStatusRedacted}
 
 	results := make(chan EvidenceArtifact, 2)
 	errs := make(chan error, 2)
@@ -255,7 +394,7 @@ func TestRegisterArtifactValidatesRelationshipBeforeWriting(t *testing.T) {
 	if err := os.WriteFile(source, []byte("clean"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	root := filepath.Join(t.TempDir(), "artifacts")
+	root := filepath.Join(resolvedTempDir(t), "artifacts")
 	input := ArtifactInput{ArtifactsRoot: root, SourcePath: source, CaseID: "case-other", AttemptID: attempt.ID, Kind: "log", RedactionStatus: RedactionStatusNotRequired}
 	if _, err := RegisterArtifact(ctx, store, input); err == nil {
 		t.Fatal("expected attempt/case mismatch rejection")
@@ -287,7 +426,7 @@ func TestRegisterArtifactNormalizesCapturedInstantForIdempotency(t *testing.T) {
 		t.Fatal(err)
 	}
 	input := ArtifactInput{
-		ArtifactsRoot: filepath.Join(t.TempDir(), "artifacts"), SourcePath: source,
+		ArtifactsRoot: filepath.Join(resolvedTempDir(t), "artifacts"), SourcePath: source,
 		CaseID: "case-time", AttemptID: attempt.ID, Kind: "text",
 		CapturedAt:      time.Date(2026, 7, 11, 9, 0, 0, 0, time.FixedZone("CST", 8*60*60)),
 		RedactionStatus: RedactionStatusNotRequired,
@@ -312,6 +451,15 @@ func assertMode(t *testing.T, path string, want os.FileMode) {
 	if got := info.Mode().Perm(); got != want {
 		t.Fatalf("%s mode=%#o want=%#o", path, got, want)
 	}
+}
+
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	path, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func validRunningAttempt(id, caseID string) PhaseAttempt {

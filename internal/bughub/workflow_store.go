@@ -3,27 +3,37 @@ package bughub
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
 
 var (
-	ErrCaseNotFound           = errors.New("incident case not found")
-	ErrCaseVersionConflict    = errors.New("incident case version conflict")
-	ErrIdempotencyConflict    = errors.New("idempotency key conflicts with committed request")
-	ErrAttemptAlreadyFinished = errors.New("phase attempt is already finished")
+	ErrCaseNotFound              = errors.New("incident case not found")
+	ErrCaseVersionConflict       = errors.New("incident case version conflict")
+	ErrIdempotencyConflict       = errors.New("idempotency key conflicts with committed request")
+	ErrAttemptAlreadyFinished    = errors.New("phase attempt is already finished")
+	ErrUnsupportedWorkflowSchema = errors.New("unsupported workflow store schema")
 )
 
 type CaseStore struct {
 	db *sql.DB
+}
+
+type workflowSchemaMigrationDetail struct {
+	Version     int    `json:"version"`
+	Fingerprint string `json:"fingerprint"`
 }
 
 func OpenCaseStore(path string) (*CaseStore, error) {
@@ -54,6 +64,9 @@ func OpenCaseStore(path string) (*CaseStore, error) {
 	if err := os.Chmod(path, 0o600); err != nil {
 		return nil, fmt.Errorf("secure case store permissions: %w", err)
 	}
+	if err := secureSQLiteFiles(path); err != nil {
+		return nil, err
+	}
 	values := url.Values{}
 	values.Add("_pragma", "foreign_keys(1)")
 	values.Add("_pragma", "journal_mode(WAL)")
@@ -70,6 +83,10 @@ func OpenCaseStore(path string) (*CaseStore, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := secureSQLiteFiles(path); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return store, nil
 }
 
@@ -83,8 +100,183 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 			return fmt.Errorf("initialize case store (%s): %w", pragma, err)
 		}
 	}
-	if _, err := s.db.ExecContext(ctx, workflowStoreSchema); err != nil {
-		return fmt.Errorf("initialize case store schema: %w", err)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin workflow schema initialization: %w", err)
+	}
+	defer tx.Rollback()
+	var version int
+	if err := tx.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		return fmt.Errorf("read workflow schema version: %w", err)
+	}
+	switch version {
+	case 0:
+		tables, err := workflowTableColumns(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if len(tables) == 0 {
+			if _, err := tx.ExecContext(ctx, legacyWorkflowStoreSchema); err != nil {
+				return fmt.Errorf("create workflow schema: %w", err)
+			}
+		} else if err := verifyWorkflowColumns(tables, legacyWorkflowTableColumns); err != nil {
+			return err
+		}
+		if err := verifyRequiredWorkflowIndexes(ctx, tx); err != nil {
+			return err
+		}
+		actualLegacyFingerprint, err := workflowSchemaFingerprint(ctx, tx)
+		if err != nil {
+			return err
+		}
+		expectedLegacyFingerprint, err := expectedLegacyWorkflowSchemaFingerprint(ctx)
+		if err != nil {
+			return err
+		}
+		if actualLegacyFingerprint != expectedLegacyFingerprint {
+			return fmt.Errorf("%w: unversioned workflow schema definition mismatch", ErrUnsupportedWorkflowSchema)
+		}
+		if _, err := tx.ExecContext(ctx, workflowStoreSchemaV1Upgrade); err != nil {
+			return fmt.Errorf("apply workflow schema v1: %w", err)
+		}
+		if err := backfillLegacyTransitionEvents(ctx, tx); err != nil {
+			return err
+		}
+		fingerprint, err := workflowSchemaFingerprint(ctx, tx)
+		if err != nil {
+			return err
+		}
+		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: workflowStoreSchemaVersion, Fingerprint: fingerprint})
+		if err != nil {
+			return fmt.Errorf("encode workflow schema v1 detail: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (key, applied_at, detail_json) VALUES (?, ?, ?)`,
+			workflowStoreSchemaV1Key, formatStoreTime(time.Now().UTC()), string(detail)); err != nil {
+			return fmt.Errorf("record workflow schema v1: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `PRAGMA user_version=1`); err != nil {
+			return fmt.Errorf("set workflow schema version: %w", err)
+		}
+	case workflowStoreSchemaVersion:
+		// Verified below before the transaction is committed.
+	default:
+		return fmt.Errorf("%w: user_version=%d", ErrUnsupportedWorkflowSchema, version)
+	}
+	tables, err := workflowTableColumns(ctx, tx)
+	if err != nil {
+		return err
+	}
+	v1Columns := cloneWorkflowColumns(legacyWorkflowTableColumns)
+	v1Columns["transition_events"] = append(v1Columns["transition_events"], "request_fingerprint", "result_case_json")
+	if err := verifyWorkflowColumns(tables, v1Columns); err != nil {
+		return err
+	}
+	if err := verifyRequiredWorkflowIndexes(ctx, tx); err != nil {
+		return err
+	}
+	var detailJSON string
+	if err := tx.QueryRowContext(ctx, `SELECT detail_json FROM schema_migrations WHERE key = ?`, workflowStoreSchemaV1Key).Scan(&detailJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: missing workflow schema v1 marker", ErrUnsupportedWorkflowSchema)
+		}
+		return fmt.Errorf("verify workflow schema marker: %w", err)
+	}
+	var detail workflowSchemaMigrationDetail
+	if err := json.Unmarshal([]byte(detailJSON), &detail); err != nil || detail.Version != workflowStoreSchemaVersion || detail.Fingerprint == "" {
+		return fmt.Errorf("%w: invalid workflow schema v1 marker", ErrUnsupportedWorkflowSchema)
+	}
+	fingerprint, err := workflowSchemaFingerprint(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if fingerprint != detail.Fingerprint {
+		return fmt.Errorf("%w: workflow schema fingerprint mismatch", ErrUnsupportedWorkflowSchema)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit workflow schema initialization: %w", err)
+	}
+	return nil
+}
+
+func backfillLegacyTransitionEvents(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `SELECT id, case_id, from_status, to_status, event_type,
+		actor_type, actor_id, idempotency_key, payload_json, created_at
+		FROM transition_events ORDER BY case_id ASC, created_at ASC, id ASC`)
+	if err != nil {
+		return fmt.Errorf("list legacy transition events: %w", err)
+	}
+	eventsByCase := map[string][]TransitionEvent{}
+	var caseOrder []string
+	for rows.Next() {
+		var event TransitionEvent
+		var payload, createdAt string
+		if err := rows.Scan(&event.ID, &event.CaseID, &event.FromStatus, &event.ToStatus,
+			&event.EventType, &event.ActorType, &event.ActorID, &event.IdempotencyKey,
+			&payload, &createdAt); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan legacy transition event: %w", err)
+		}
+		event.PayloadJSON = CloneRawMessage([]byte(payload))
+		event.CreatedAt, err = parseStoreTime(createdAt)
+		if err != nil {
+			rows.Close()
+			return err
+		}
+		if err := event.Validate(); err != nil {
+			rows.Close()
+			return fmt.Errorf("%w: invalid legacy event %q: %v", ErrUnsupportedWorkflowSchema, event.ID, err)
+		}
+		if _, ok := eventsByCase[event.CaseID]; !ok {
+			caseOrder = append(caseOrder, event.CaseID)
+		}
+		eventsByCase[event.CaseID] = append(eventsByCase[event.CaseID], event)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close legacy transition events: %w", err)
+	}
+	for _, caseID := range caseOrder {
+		events := eventsByCase[caseID]
+		current, err := getCase(ctx, tx, caseID)
+		if err != nil {
+			return fmt.Errorf("%w: load legacy event case %q: %v", ErrUnsupportedWorkflowSchema, caseID, err)
+		}
+		expectedVersion := current.Version - int64(len(events))
+		if expectedVersion < 1 {
+			return fmt.Errorf("%w: case %q version %d cannot cover %d events", ErrUnsupportedWorkflowSchema, caseID, current.Version, len(events))
+		}
+		status := events[0].FromStatus
+		for _, event := range events {
+			if event.FromStatus != status {
+				return fmt.Errorf("%w: legacy event %q breaks status chain", ErrUnsupportedWorkflowSchema, event.ID)
+			}
+			// The unversioned store's only IncidentCase writer after CreateCase was
+			// Transition, which changed only status, version, and updated_at. The
+			// remaining snapshot fields are therefore invariant across its event
+			// history and can be copied exactly from the current snapshot.
+			result := current.Clone()
+			result.Status = event.ToStatus
+			result.Version = expectedVersion + 1
+			result.UpdatedAt = event.CreatedAt
+			fingerprint, err := transitionRequestFingerprint(caseID, expectedVersion, event.FromStatus,
+				event.ToStatus, event, "", CaseSnapshotUpdate{})
+			if err != nil {
+				return err
+			}
+			resultJSON, err := json.Marshal(result)
+			if err != nil {
+				return fmt.Errorf("encode legacy event result: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE transition_events
+				SET request_fingerprint = ?, result_case_json = ? WHERE id = ?`, fingerprint, string(resultJSON), event.ID); err != nil {
+				return fmt.Errorf("backfill legacy event %q: %w", event.ID, err)
+			}
+			status = event.ToStatus
+			expectedVersion++
+		}
+		last := events[len(events)-1]
+		if status != current.Status || expectedVersion != current.Version || !last.CreatedAt.Equal(current.UpdatedAt) {
+			return fmt.Errorf("%w: case %q snapshot does not match its event chain", ErrUnsupportedWorkflowSchema, caseID)
+		}
 	}
 	return nil
 }
@@ -98,6 +290,9 @@ func (s *CaseStore) Close() error {
 
 func (s *CaseStore) CreateCase(ctx context.Context, incident IncidentCase) error {
 	incident = incident.Clone()
+	if incident.ClosedAt != nil && incident.ClosedAt.IsZero() {
+		return errors.New("incident case closed_at must not be zero when provided")
+	}
 	if err := incident.Validate(); err != nil {
 		return err
 	}
@@ -160,8 +355,178 @@ func (s *CaseStore) CreateAttempt(ctx context.Context, attempt PhaseAttempt) err
 	return s.createAttempt(ctx, attempt, AttemptValidationOptions{})
 }
 
+type AttemptFilter struct {
+	CaseID   string
+	Statuses []AttemptStatus
+}
+
+func (s *CaseStore) GetAttempt(ctx context.Context, id string) (PhaseAttempt, error) {
+	return getAttempt(ctx, s.db, id)
+}
+
+func (s *CaseStore) ListAttempts(ctx context.Context, filter AttemptFilter) ([]PhaseAttempt, error) {
+	allowed := make(map[AttemptStatus]struct{}, len(filter.Statuses))
+	for _, status := range filter.Statuses {
+		if !status.valid() {
+			return nil, fmt.Errorf("unsupported attempt filter status %q", status)
+		}
+		allowed[status] = struct{}{}
+	}
+	query := `SELECT id, case_id, cycle_number, phase, mode, status,
+		agent_target, bot_key, input_json, output_json, parent_attempt_id, started_at,
+		finished_at, error_code, error_message, input_tokens, output_tokens, duration_nanos
+		FROM phase_attempts`
+	var args []any
+	if filter.CaseID != "" {
+		query += ` WHERE case_id = ?`
+		args = append(args, filter.CaseID)
+	}
+	query += ` ORDER BY started_at ASC, id ASC`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list phase attempts: %w", err)
+	}
+	defer rows.Close()
+	var attempts []PhaseAttempt
+	for rows.Next() {
+		attempt, err := scanAttempt(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan phase attempt: %w", err)
+		}
+		if len(allowed) != 0 {
+			if _, ok := allowed[attempt.Status]; !ok {
+				continue
+			}
+		}
+		attempts = append(attempts, attempt.Clone())
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list phase attempts: %w", err)
+	}
+	return attempts, nil
+}
+
+func (s *CaseStore) ListApprovals(ctx context.Context, caseID string) ([]Approval, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, case_id, kind, actor, approved_at,
+		case_version, scope_json, fix_commits_json, target_branches_json
+		FROM approvals WHERE case_id = ? ORDER BY approved_at ASC, id ASC`, caseID)
+	if err != nil {
+		return nil, fmt.Errorf("list approvals: %w", err)
+	}
+	defer rows.Close()
+	var approvals []Approval
+	for rows.Next() {
+		var approval Approval
+		var approvedAt, scope, fixes, targets string
+		if err := rows.Scan(&approval.ID, &approval.CaseID, &approval.Kind, &approval.Actor,
+			&approvedAt, &approval.CaseVersion, &scope, &fixes, &targets); err != nil {
+			return nil, fmt.Errorf("scan approval: %w", err)
+		}
+		approval.ApprovedAt, err = parseStoreTime(approvedAt)
+		if err != nil {
+			return nil, err
+		}
+		approval.ScopeJSON = CloneRawMessage([]byte(scope))
+		if err := json.Unmarshal([]byte(fixes), &approval.FixCommits); err != nil {
+			return nil, fmt.Errorf("decode approval fix commits: %w", err)
+		}
+		if err := json.Unmarshal([]byte(targets), &approval.TargetBranches); err != nil {
+			return nil, fmt.Errorf("decode approval target branches: %w", err)
+		}
+		if err := approval.Validate(); err != nil {
+			return nil, fmt.Errorf("validate stored approval: %w", err)
+		}
+		approvals = append(approvals, approval.Clone())
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list approvals: %w", err)
+	}
+	return approvals, nil
+}
+
+func (s *CaseStore) ListCodeChanges(ctx context.Context, caseID string) ([]CodeChange, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, case_id, attempt_id, repo, base_branch,
+		fix_branch, fix_commit, test_evidence_json, target_environment_branch,
+		merge_base_head, merge_commit, push_remote, push_status
+		FROM code_changes WHERE case_id = ? ORDER BY id ASC`, caseID)
+	if err != nil {
+		return nil, fmt.Errorf("list code changes: %w", err)
+	}
+	defer rows.Close()
+	var changes []CodeChange
+	for rows.Next() {
+		var change CodeChange
+		var evidence string
+		if err := rows.Scan(&change.ID, &change.CaseID, &change.AttemptID, &change.Repo,
+			&change.BaseBranch, &change.FixBranch, &change.FixCommit, &evidence,
+			&change.TargetEnvironmentBranch, &change.MergeBaseHead, &change.MergeCommit,
+			&change.PushRemote, &change.PushStatus); err != nil {
+			return nil, fmt.Errorf("scan code change: %w", err)
+		}
+		change.TestEvidence = CloneRawMessage([]byte(evidence))
+		if err := change.Validate(); err != nil {
+			return nil, fmt.Errorf("validate stored code change: %w", err)
+		}
+		changes = append(changes, change.Clone())
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list code changes: %w", err)
+	}
+	return changes, nil
+}
+
+func (s *CaseStore) ListDeploymentObservations(ctx context.Context, caseID string) ([]DeploymentObservation, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, case_id, environment, expected_commits_json,
+		user_notified_at, verification_source, observed_version, observed_images_json,
+		observed_commits_json, verified_at, result
+		FROM deployment_observations WHERE case_id = ? ORDER BY COALESCE(verified_at, user_notified_at, '') ASC, id ASC`, caseID)
+	if err != nil {
+		return nil, fmt.Errorf("list deployment observations: %w", err)
+	}
+	defer rows.Close()
+	var observations []DeploymentObservation
+	for rows.Next() {
+		var observation DeploymentObservation
+		var expected, images, commits string
+		var notifiedAt, verifiedAt sql.NullString
+		if err := rows.Scan(&observation.ID, &observation.CaseID, &observation.Environment,
+			&expected, &notifiedAt, &observation.VerificationSource, &observation.ObservedVersion,
+			&images, &commits, &verifiedAt, &observation.Result); err != nil {
+			return nil, fmt.Errorf("scan deployment observation: %w", err)
+		}
+		if err := json.Unmarshal([]byte(expected), &observation.ExpectedCommits); err != nil {
+			return nil, fmt.Errorf("decode deployment expected commits: %w", err)
+		}
+		if err := json.Unmarshal([]byte(images), &observation.ObservedImages); err != nil {
+			return nil, fmt.Errorf("decode deployment observed images: %w", err)
+		}
+		if err := json.Unmarshal([]byte(commits), &observation.ObservedCommits); err != nil {
+			return nil, fmt.Errorf("decode deployment observed commits: %w", err)
+		}
+		observation.UserNotifiedAt, err = parseOptionalStoreTime(notifiedAt)
+		if err != nil {
+			return nil, err
+		}
+		observation.VerifiedAt, err = parseOptionalStoreTime(verifiedAt)
+		if err != nil {
+			return nil, err
+		}
+		if err := observation.Validate(); err != nil {
+			return nil, fmt.Errorf("validate stored deployment observation: %w", err)
+		}
+		observations = append(observations, observation.Clone())
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list deployment observations: %w", err)
+	}
+	return observations, nil
+}
+
 func (s *CaseStore) createAttempt(ctx context.Context, attempt PhaseAttempt, options AttemptValidationOptions) error {
 	attempt = attempt.Clone()
+	if attempt.FinishedAt != nil && attempt.FinishedAt.IsZero() {
+		return errors.New("phase attempt finished_at must not be zero when provided")
+	}
 	if attempt.StartedAt.IsZero() {
 		attempt.StartedAt = time.Now().UTC()
 	}
@@ -187,6 +552,9 @@ func (s *CaseStore) createAttempt(ctx context.Context, attempt PhaseAttempt, opt
 
 func (s *CaseStore) FinishAttempt(ctx context.Context, attempt PhaseAttempt) error {
 	attempt = attempt.Clone()
+	if attempt.FinishedAt != nil && attempt.FinishedAt.IsZero() {
+		return errors.New("phase attempt finished_at must not be zero when provided")
+	}
 	if err := attempt.Validate(); err != nil {
 		return err
 	}
@@ -301,6 +669,12 @@ func (s *CaseStore) RecordCodeChange(ctx context.Context, change CodeChange) err
 
 func (s *CaseStore) RecordDeploymentObservation(ctx context.Context, observation DeploymentObservation, idempotencyKey string) error {
 	observation = observation.Clone()
+	if observation.UserNotifiedAt != nil && observation.UserNotifiedAt.IsZero() {
+		return errors.New("deployment observation user_notified_at must not be zero when provided")
+	}
+	if observation.VerifiedAt != nil && observation.VerifiedAt.IsZero() {
+		return errors.New("deployment observation verified_at must not be zero when provided")
+	}
 	userNotifiedAtProvided := observation.UserNotifiedAt != nil && !observation.UserNotifiedAt.IsZero()
 	verifiedAtProvided := observation.VerifiedAt != nil && !observation.VerifiedAt.IsZero()
 	if err := observation.Validate(); err != nil {
@@ -362,9 +736,58 @@ func (s *CaseStore) RecordDeploymentObservation(ctx context.Context, observation
 	return fmt.Errorf("%w: deployment observation key %q", ErrIdempotencyConflict, idempotencyKey)
 }
 
-func (s *CaseStore) Transition(ctx context.Context, caseID string, expectedVersion int64, to CaseStatus, event TransitionEvent) (updated IncidentCase, replay bool, err error) {
+type CaseSnapshotUpdate struct {
+	CurrentAttemptID *string
+	CycleNumber      *int
+	ClosedAtSet      bool
+	ClosedAt         *time.Time
+}
+
+type transitionFingerprintInput struct {
+	EventID          string          `json:"event_id"`
+	CaseID           string          `json:"case_id"`
+	ExpectedVersion  int64           `json:"expected_version"`
+	FromStatus       CaseStatus      `json:"from_status"`
+	ToStatus         CaseStatus      `json:"to_status"`
+	EventType        string          `json:"event_type"`
+	ActorType        string          `json:"actor_type"`
+	ActorID          string          `json:"actor_id"`
+	PayloadJSON      json.RawMessage `json:"payload_json"`
+	RequestedAt      string          `json:"requested_at"`
+	CurrentAttemptID *string         `json:"current_attempt_id"`
+	CycleNumber      *int            `json:"cycle_number"`
+	ClosedAtSet      bool            `json:"closed_at_set"`
+	ClosedAt         *string         `json:"closed_at"`
+}
+
+func (s *CaseStore) Transition(ctx context.Context, caseID string, expectedVersion int64, to CaseStatus, event TransitionEvent) (IncidentCase, bool, error) {
+	return s.TransitionWithUpdate(ctx, caseID, expectedVersion, to, CaseSnapshotUpdate{}, event)
+}
+
+func (s *CaseStore) TransitionWithUpdate(ctx context.Context, caseID string, expectedVersion int64, to CaseStatus, update CaseSnapshotUpdate, event TransitionEvent) (updated IncidentCase, replay bool, err error) {
 	event = event.Clone()
-	createdAtProvided := !event.CreatedAt.IsZero()
+	if blank(caseID) {
+		return IncidentCase{}, false, errors.New("transition case ID is required")
+	}
+	if event.CaseID != "" && event.CaseID != caseID {
+		return IncidentCase{}, false, fmt.Errorf("transition event case ID %q does not match %q", event.CaseID, caseID)
+	}
+	if event.ToStatus != "" && event.ToStatus != to {
+		return IncidentCase{}, false, fmt.Errorf("transition event target %q does not match %q", event.ToStatus, to)
+	}
+	if update.CycleNumber != nil && *update.CycleNumber < 1 {
+		return IncidentCase{}, false, errors.New("transition cycle number must be positive")
+	}
+	if update.ClosedAt != nil && update.ClosedAt.IsZero() {
+		return IncidentCase{}, false, errors.New("transition closed_at must not be zero when provided")
+	}
+	if !update.ClosedAtSet && update.ClosedAt != nil {
+		return IncidentCase{}, false, errors.New("transition closed_at requires ClosedAtSet")
+	}
+	requestedAt := ""
+	if !event.CreatedAt.IsZero() {
+		requestedAt = formatStoreTime(event.CreatedAt)
+	}
 	if event.EventType == "" {
 		event.EventType = "transition"
 	}
@@ -387,22 +810,29 @@ func (s *CaseStore) Transition(ctx context.Context, caseID string, expectedVersi
 		}
 	}()
 
-	var existingID, existingCaseID, existingEventType, existingActorType, existingActorID, existingPayload, existingCreatedAt string
-	var existingTo CaseStatus
-	err = tx.QueryRowContext(ctx, `SELECT id, case_id, to_status, event_type, actor_type,
-		actor_id, payload_json, created_at FROM transition_events WHERE idempotency_key = ?`,
-		event.IdempotencyKey).Scan(&existingID, &existingCaseID, &existingTo, &existingEventType,
-		&existingActorType, &existingActorID, &existingPayload, &existingCreatedAt)
+	var existingFingerprint, resultCaseJSON string
+	var existingFrom CaseStatus
+	err = tx.QueryRowContext(ctx, `SELECT from_status, request_fingerprint, result_case_json
+		FROM transition_events WHERE idempotency_key = ?`, event.IdempotencyKey).Scan(
+		&existingFrom, &existingFingerprint, &resultCaseJSON,
+	)
 	if err == nil {
-		if existingID != event.ID || existingCaseID != caseID || existingTo != to ||
-			existingEventType != event.EventType || existingActorType != event.ActorType ||
-			existingActorID != event.ActorID || existingPayload != string(event.PayloadJSON) ||
-			(createdAtProvided && existingCreatedAt != formatStoreTime(event.CreatedAt)) {
+		requestFrom := existingFrom
+		if event.FromStatus != "" {
+			requestFrom = event.FromStatus
+		}
+		fingerprint, fingerprintErr := transitionRequestFingerprint(caseID, expectedVersion, requestFrom, to, event, requestedAt, update)
+		if fingerprintErr != nil {
+			return IncidentCase{}, false, fingerprintErr
+		}
+		if fingerprint != existingFingerprint {
 			return IncidentCase{}, false, fmt.Errorf("%w: transition key %q", ErrIdempotencyConflict, event.IdempotencyKey)
 		}
-		updated, err = getCase(ctx, tx, caseID)
-		if err != nil {
-			return IncidentCase{}, false, err
+		if err := json.Unmarshal([]byte(resultCaseJSON), &updated); err != nil {
+			return IncidentCase{}, false, fmt.Errorf("decode replayed incident case: %w", err)
+		}
+		if err := updated.Validate(); err != nil {
+			return IncidentCase{}, false, fmt.Errorf("validate replayed incident case: %w", err)
 		}
 		if err = tx.Commit(); err != nil {
 			return IncidentCase{}, false, fmt.Errorf("commit replayed case transition: %w", err)
@@ -423,6 +853,9 @@ func (s *CaseStore) Transition(ctx context.Context, caseID string, expectedVersi
 	if err = ValidateTransition(updated, to); err != nil {
 		return IncidentCase{}, false, err
 	}
+	if event.FromStatus != "" && event.FromStatus != updated.Status {
+		return IncidentCase{}, false, fmt.Errorf("transition event source %q does not match %q", event.FromStatus, updated.Status)
+	}
 
 	event.CaseID = caseID
 	event.FromStatus = updated.Status
@@ -435,11 +868,32 @@ func (s *CaseStore) Transition(ctx context.Context, caseID string, expectedVersi
 	}
 
 	updated.Status = to
+	if update.CurrentAttemptID != nil {
+		updated.CurrentAttemptID = *update.CurrentAttemptID
+	}
+	if update.CycleNumber != nil {
+		updated.CycleNumber = *update.CycleNumber
+	}
+	if update.ClosedAtSet {
+		updated.ClosedAt = cloneTimePtr(update.ClosedAt)
+	}
 	updated.Version++
 	updated.UpdatedAt = event.CreatedAt
+	if err := updated.Validate(); err != nil {
+		return IncidentCase{}, false, err
+	}
+	fingerprint, err := transitionRequestFingerprint(caseID, expectedVersion, event.FromStatus, to, event, requestedAt, update)
+	if err != nil {
+		return IncidentCase{}, false, err
+	}
+	resultCase, err := json.Marshal(updated.Clone())
+	if err != nil {
+		return IncidentCase{}, false, fmt.Errorf("encode transition result case: %w", err)
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE incident_cases
-		SET status = ?, version = ?, updated_at = ? WHERE id = ? AND version = ?`,
-		updated.Status, updated.Version, formatStoreTime(updated.UpdatedAt), caseID, expectedVersion)
+		SET status = ?, cycle_number = ?, current_attempt_id = ?, version = ?, updated_at = ?, closed_at = ?
+		WHERE id = ? AND version = ?`, updated.Status, updated.CycleNumber, updated.CurrentAttemptID,
+		updated.Version, formatStoreTime(updated.UpdatedAt), formatOptionalStoreTime(updated.ClosedAt), caseID, expectedVersion)
 	if err != nil {
 		return IncidentCase{}, false, fmt.Errorf("update incident case transition: %w", err)
 	}
@@ -452,10 +906,10 @@ func (s *CaseStore) Transition(ctx context.Context, caseID string, expectedVersi
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO transition_events (
 		id, case_id, from_status, to_status, event_type, actor_type, actor_id,
-		idempotency_key, payload_json, created_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, event.ID, event.CaseID, event.FromStatus,
+		idempotency_key, payload_json, created_at, request_fingerprint, result_case_json
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, event.ID, event.CaseID, event.FromStatus,
 		event.ToStatus, event.EventType, event.ActorType, event.ActorID, event.IdempotencyKey,
-		string(event.PayloadJSON), formatStoreTime(event.CreatedAt))
+		string(event.PayloadJSON), formatStoreTime(event.CreatedAt), fingerprint, string(resultCase))
 	if err != nil {
 		return IncidentCase{}, false, fmt.Errorf("insert transition event: %w", err)
 	}
@@ -498,8 +952,58 @@ func (s *CaseStore) ListEvents(ctx context.Context, caseID string) ([]Transition
 	return events, nil
 }
 
+func transitionRequestFingerprint(caseID string, expectedVersion int64, from, to CaseStatus, event TransitionEvent, requestedAt string, update CaseSnapshotUpdate) (string, error) {
+	var closedAt *string
+	if update.ClosedAt != nil {
+		formatted := formatStoreTime(*update.ClosedAt)
+		closedAt = &formatted
+	}
+	input := transitionFingerprintInput{
+		EventID:          event.ID,
+		CaseID:           caseID,
+		ExpectedVersion:  expectedVersion,
+		FromStatus:       from,
+		ToStatus:         to,
+		EventType:        event.EventType,
+		ActorType:        event.ActorType,
+		ActorID:          event.ActorID,
+		PayloadJSON:      CloneRawMessage(event.PayloadJSON),
+		RequestedAt:      requestedAt,
+		CurrentAttemptID: cloneStringPtr(update.CurrentAttemptID),
+		CycleNumber:      cloneIntPtr(update.CycleNumber),
+		ClosedAtSet:      update.ClosedAtSet,
+		ClosedAt:         closedAt,
+	}
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return "", fmt.Errorf("encode transition request fingerprint: %w", err)
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func cloneStringPtr(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func cloneIntPtr(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
 type caseQuery interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+type rowsQuery interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
 
 type rowScanner interface {
@@ -548,24 +1052,29 @@ func scanCase(row rowScanner) (IncidentCase, error) {
 }
 
 func getAttempt(ctx context.Context, query caseQuery, id string) (PhaseAttempt, error) {
+	attempt, err := scanAttempt(query.QueryRowContext(ctx, `SELECT id, case_id, cycle_number, phase, mode, status,
+		agent_target, bot_key, input_json, output_json, parent_attempt_id, started_at,
+		finished_at, error_code, error_message, input_tokens, output_tokens, duration_nanos
+		FROM phase_attempts WHERE id = ?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return PhaseAttempt{}, fmt.Errorf("phase attempt %q not found", id)
+	}
+	return attempt, err
+}
+
+func scanAttempt(row rowScanner) (PhaseAttempt, error) {
 	var attempt PhaseAttempt
 	var inputJSON, outputJSON, startedAt string
 	var finishedAt sql.NullString
 	var durationNanos int64
-	err := query.QueryRowContext(ctx, `SELECT id, case_id, cycle_number, phase, mode, status,
-		agent_target, bot_key, input_json, output_json, parent_attempt_id, started_at,
-		finished_at, error_code, error_message, input_tokens, output_tokens, duration_nanos
-		FROM phase_attempts WHERE id = ?`, id).Scan(
+	err := row.Scan(
 		&attempt.ID, &attempt.CaseID, &attempt.CycleNumber, &attempt.Phase, &attempt.Mode,
 		&attempt.Status, &attempt.AgentTarget, &attempt.BotKey, &inputJSON, &outputJSON,
 		&attempt.ParentAttemptID, &startedAt, &finishedAt, &attempt.ErrorCode,
 		&attempt.ErrorMessage, &attempt.Usage.InputTokens, &attempt.Usage.OutputTokens, &durationNanos,
 	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return PhaseAttempt{}, fmt.Errorf("phase attempt %q not found", id)
-	}
 	if err != nil {
-		return PhaseAttempt{}, fmt.Errorf("get phase attempt: %w", err)
+		return PhaseAttempt{}, err
 	}
 	attempt.InputJSON = CloneRawMessage([]byte(inputJSON))
 	attempt.OutputJSON = CloneRawMessage([]byte(outputJSON))
@@ -612,6 +1121,162 @@ func optionalTimeMatches(stored sql.NullString, requested *time.Time, compare bo
 	return stored.Valid && requested != nil && stored.String == formatStoreTime(*requested)
 }
 
+func secureSQLiteFiles(path string) error {
+	for _, candidate := range []string{path, path + "-wal", path + "-shm"} {
+		if err := os.Chmod(candidate, 0o600); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("secure SQLite file %q: %w", candidate, err)
+		}
+	}
+	return nil
+}
+
+func workflowTableColumns(ctx context.Context, query rowsQuery) (map[string][]string, error) {
+	rows, err := query.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("list workflow schema tables: %w", err)
+	}
+	var tables []string
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan workflow schema table: %w", err)
+		}
+		tables = append(tables, table)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close workflow schema table rows: %w", err)
+	}
+	result := make(map[string][]string, len(tables))
+	for _, table := range tables {
+		quoted := strings.ReplaceAll(table, `"`, `""`)
+		columnRows, err := query.QueryContext(ctx, `PRAGMA table_info("`+quoted+`")`)
+		if err != nil {
+			return nil, fmt.Errorf("inspect workflow table %q: %w", table, err)
+		}
+		for columnRows.Next() {
+			var cid, notNull, pk int
+			var name, columnType string
+			var defaultValue any
+			if err := columnRows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+				columnRows.Close()
+				return nil, fmt.Errorf("scan workflow table %q: %w", table, err)
+			}
+			result[table] = append(result[table], name)
+		}
+		if err := columnRows.Close(); err != nil {
+			return nil, fmt.Errorf("close workflow table %q columns: %w", table, err)
+		}
+	}
+	return result, nil
+}
+
+func verifyWorkflowColumns(actual, expected map[string][]string) error {
+	if len(actual) != len(expected) {
+		return fmt.Errorf("%w: tables=%v", ErrUnsupportedWorkflowSchema, sortedMapKeys(actual))
+	}
+	for table, expectedColumns := range expected {
+		actualColumns, ok := actual[table]
+		if !ok {
+			return fmt.Errorf("%w: missing table %q", ErrUnsupportedWorkflowSchema, table)
+		}
+		actualSorted := append([]string(nil), actualColumns...)
+		expectedSorted := append([]string(nil), expectedColumns...)
+		sort.Strings(actualSorted)
+		sort.Strings(expectedSorted)
+		if strings.Join(actualSorted, "\x00") != strings.Join(expectedSorted, "\x00") {
+			return fmt.Errorf("%w: table %q columns=%v", ErrUnsupportedWorkflowSchema, table, actualColumns)
+		}
+	}
+	return nil
+}
+
+func verifyRequiredWorkflowIndexes(ctx context.Context, query rowsQuery) error {
+	rows, err := query.QueryContext(ctx, `SELECT name, tbl_name FROM sqlite_master
+		WHERE type = 'index' AND name NOT LIKE 'sqlite_%'`)
+	if err != nil {
+		return fmt.Errorf("list workflow indexes: %w", err)
+	}
+	defer rows.Close()
+	found := map[string]string{}
+	for rows.Next() {
+		var name, table string
+		if err := rows.Scan(&name, &table); err != nil {
+			return fmt.Errorf("scan workflow index: %w", err)
+		}
+		found[name] = table
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("list workflow indexes: %w", err)
+	}
+	for name, table := range requiredWorkflowIndexes {
+		if found[name] != table {
+			return fmt.Errorf("%w: missing or invalid index %q", ErrUnsupportedWorkflowSchema, name)
+		}
+	}
+	return nil
+}
+
+func workflowSchemaFingerprint(ctx context.Context, query rowsQuery) (string, error) {
+	rows, err := query.QueryContext(ctx, `SELECT type, name, tbl_name, COALESCE(sql, '')
+		FROM sqlite_master
+		WHERE type IN ('table', 'index', 'trigger', 'view') AND name NOT LIKE 'sqlite_%'
+		ORDER BY type ASC, name ASC`)
+	if err != nil {
+		return "", fmt.Errorf("read workflow schema definition: %w", err)
+	}
+	defer rows.Close()
+	hash := sha256.New()
+	for rows.Next() {
+		var objectType, name, table, definition string
+		if err := rows.Scan(&objectType, &name, &table, &definition); err != nil {
+			return "", fmt.Errorf("scan workflow schema definition: %w", err)
+		}
+		for _, value := range []string{objectType, name, table, definition} {
+			_, _ = hash.Write([]byte(value))
+			_, _ = hash.Write([]byte{0})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("read workflow schema definition: %w", err)
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func expectedLegacyWorkflowSchemaFingerprint(ctx context.Context) (string, error) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		return "", fmt.Errorf("open canonical legacy workflow schema: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, legacyWorkflowStoreSchema); err != nil {
+		return "", fmt.Errorf("create canonical legacy workflow schema: %w", err)
+	}
+	fingerprint, err := workflowSchemaFingerprint(ctx, db)
+	if err != nil {
+		return "", fmt.Errorf("fingerprint canonical legacy workflow schema: %w", err)
+	}
+	return fingerprint, nil
+}
+
+func cloneWorkflowColumns(values map[string][]string) map[string][]string {
+	cloned := make(map[string][]string, len(values))
+	for key, columns := range values {
+		cloned[key] = append([]string(nil), columns...)
+	}
+	return cloned
+}
+
+func sortedMapKeys(values map[string][]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func formatStoreTime(value time.Time) string {
 	return value.UTC().Format("2006-01-02T15:04:05.000000000Z")
 }
@@ -629,6 +1294,17 @@ func parseStoreTime(value string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("parse case store time %q: %w", value, err)
 	}
 	return parsed, nil
+}
+
+func parseOptionalStoreTime(value sql.NullString) (*time.Time, error) {
+	if !value.Valid {
+		return nil, nil
+	}
+	parsed, err := parseStoreTime(value.String)
+	if err != nil {
+		return nil, err
+	}
+	return &parsed, nil
 }
 
 func marshalStringMap(values map[string]string) (string, error) {

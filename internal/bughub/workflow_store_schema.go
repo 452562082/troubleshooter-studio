@@ -1,6 +1,6 @@
 package bughub
 
-const workflowStoreSchema = `
+const legacyWorkflowStoreSchema = `
 CREATE TABLE IF NOT EXISTS incident_cases (
   id TEXT PRIMARY KEY,
   bug_id TEXT NOT NULL,
@@ -88,3 +88,29 @@ CREATE INDEX IF NOT EXISTS idx_cases_status_updated ON incident_cases(status, up
 CREATE INDEX IF NOT EXISTS idx_attempts_case_started ON phase_attempts(case_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_events_case_created ON transition_events(case_id, created_at);
 `
+
+const (
+	workflowStoreSchemaVersion   = 1
+	workflowStoreSchemaV1Key     = "workflow-schema-v1"
+	workflowStoreSchemaV1Upgrade = `
+ALTER TABLE transition_events ADD COLUMN request_fingerprint TEXT NOT NULL DEFAULT '';
+ALTER TABLE transition_events ADD COLUMN result_case_json TEXT NOT NULL DEFAULT '{}';
+`
+)
+
+var legacyWorkflowTableColumns = map[string][]string{
+	"incident_cases":          {"id", "bug_id", "source", "system_id", "environment", "status", "cycle_number", "current_attempt_id", "selected_bot_key", "version", "created_at", "updated_at", "closed_at"},
+	"phase_attempts":          {"id", "case_id", "cycle_number", "phase", "mode", "status", "agent_target", "bot_key", "input_json", "output_json", "parent_attempt_id", "started_at", "finished_at", "error_code", "error_message", "input_tokens", "output_tokens", "duration_nanos"},
+	"transition_events":       {"id", "case_id", "from_status", "to_status", "event_type", "actor_type", "actor_id", "idempotency_key", "payload_json", "created_at"},
+	"evidence_artifacts":      {"id", "case_id", "attempt_id", "kind", "path_or_reference", "sha256", "captured_at", "environment", "version", "request_id", "trace_id", "redaction_status"},
+	"code_changes":            {"id", "case_id", "attempt_id", "repo", "base_branch", "fix_branch", "fix_commit", "test_evidence_json", "target_environment_branch", "merge_base_head", "merge_commit", "push_remote", "push_status"},
+	"approvals":               {"id", "case_id", "kind", "actor", "approved_at", "case_version", "scope_json", "fix_commits_json", "target_branches_json", "idempotency_key"},
+	"deployment_observations": {"id", "case_id", "environment", "expected_commits_json", "user_notified_at", "verification_source", "observed_version", "observed_images_json", "observed_commits_json", "verified_at", "result", "idempotency_key"},
+	"schema_migrations":       {"key", "applied_at", "detail_json"},
+}
+
+var requiredWorkflowIndexes = map[string]string{
+	"idx_cases_status_updated":  "incident_cases",
+	"idx_attempts_case_started": "phase_attempts",
+	"idx_events_case_created":   "transition_events",
+}

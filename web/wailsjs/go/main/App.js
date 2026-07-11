@@ -18,6 +18,14 @@ export function ApplyBot(arg1, arg2, arg3) {
   return window['go']['main']['App']['ApplyBot'](arg1, arg2, arg3);
 }
 
+export function ApproveIncidentFix(arg1) {
+  return window['go']['main']['App']['ApproveIncidentFix'](arg1);
+}
+
+export function ApproveIncidentMerge(arg1) {
+  return window['go']['main']['App']['ApproveIncidentMerge'](arg1);
+}
+
 export function BugHookBaseURL() {
   return window['go']['main']['App']['BugHookBaseURL']();
 }
@@ -28,6 +36,10 @@ export function CancelAnalyze() {
 
 export function CancelBugInvestigation(arg1) {
   return window['go']['main']['App']['CancelBugInvestigation'](arg1);
+}
+
+export function CancelIncidentAttempt(arg1) {
+  return window['go']['main']['App']['CancelIncidentAttempt'](arg1);
 }
 
 export function CancelInstall() {
@@ -64,6 +76,10 @@ export function ClearBugPlatformLogin(arg1) {
 
 export function ContinueBugInvestigation(arg1) {
   return window['go']['main']['App']['ContinueBugInvestigation'](arg1);
+}
+
+export function ContinueIncidentCase(arg1) {
+  return window['go']['main']['App']['ContinueIncidentCase'](arg1);
 }
 
 export function DefaultDestPath(arg1, arg2) {
@@ -128,6 +144,10 @@ export function GenPreview(arg1) {
 
 export function GenerateBugContext(arg1) {
   return window['go']['main']['App']['GenerateBugContext'](arg1);
+}
+
+export function GetIncidentCase(arg1) {
+  return window['go']['main']['App']['GetIncidentCase'](arg1);
 }
 
 export function GetMissingRepoPaths(arg1) {
@@ -206,6 +226,10 @@ export function ListGrafanaDatasources(arg1) {
   return window['go']['main']['App']['ListGrafanaDatasources'](arg1);
 }
 
+export function ListIncidentCases() {
+  return window['go']['main']['App']['ListIncidentCases']();
+}
+
 export function ListLokiLabelValues(arg1, arg2, arg3) {
   return window['go']['main']['App']['ListLokiLabelValues'](arg1, arg2, arg3);
 }
@@ -224,6 +248,10 @@ export function LoginBugPlatform(arg1) {
 
 export function MatchBugBots(arg1) {
   return window['go']['main']['App']['MatchBugBots'](arg1);
+}
+
+export function NotifyIncidentDeployed(arg1) {
+  return window['go']['main']['App']['NotifyIncidentDeployed'](arg1);
 }
 
 export function One2AllFetchConfigMaps(arg1, arg2, arg3) {
@@ -352,6 +380,10 @@ export function StartBugFix(arg1) {
 
 export function StartBugInvestigation(arg1) {
   return window['go']['main']['App']['StartBugInvestigation'](arg1);
+}
+
+export function StartIncidentCase(arg1) {
+  return window['go']['main']['App']['StartIncidentCase'](arg1);
 }
 
 export function SyncBugPlatform(arg1) {

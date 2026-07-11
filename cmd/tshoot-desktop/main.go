@@ -83,6 +83,19 @@ type App struct {
 
 	bugInvestigationMu sync.Mutex
 	bugInvestigator    *bughub.CodexInvestigator
+
+	// workflowMu protects the single durable workflow runtime owned by this App.
+	// Bindings only adapt commands to this runtime; persistence and transitions
+	// remain inside bughub's CaseStore and CaseOrchestrator.
+	workflowMu           sync.Mutex
+	workflowRoot         string
+	workflowStore        *bughub.CaseStore
+	workflowOrchestrator *bughub.CaseOrchestrator
+	workflowRunner       *bughub.AgentPhaseRunner
+	workflowInitErr      error
+	workflowLoadBug      func(string) (bughub.Bug, error)
+	workflowLoadBot      func(string) (bughub.BotRef, error)
+	workflowEmit         func(string, any)
 }
 
 var startDesktopTray = startTray
@@ -91,6 +104,7 @@ var startDesktopBugPoller = startBugPoller
 // startup 由 Wails 在窗口创建完成时调用，注入 runtime ctx。私有也能被 Wails 识别。
 func (a *App) startup(ctx context.Context) {
 	a.setRuntimeContext(ctx)
+	_ = a.initializeIncidentWorkflow(workflowContext(ctx))
 	a.trayOnce.Do(func() {
 		startDesktopTray(a)
 	})
@@ -159,6 +173,9 @@ func newDesktopOptions(appState *App, router http.Handler) *options.App {
 
 		Bind:      []any{appState},
 		OnStartup: appState.startup,
+		OnShutdown: func(ctx context.Context) {
+			_ = appState.closeIncidentWorkflow()
+		},
 	}
 }
 

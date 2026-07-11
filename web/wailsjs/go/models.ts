@@ -517,6 +517,69 @@ export namespace analyzerpipe {
 
 export namespace bughub {
 
+	export class AgentUsage {
+	    input_tokens?: number;
+	    output_tokens?: number;
+	    duration?: number;
+
+	    static createFrom(source: any = {}) {
+	        return new AgentUsage(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.input_tokens = source["input_tokens"];
+	        this.output_tokens = source["output_tokens"];
+	        this.duration = source["duration"];
+	    }
+	}
+	export class Approval {
+	    id: string;
+	    case_id: string;
+	    kind: string;
+	    actor: string;
+	    // Go type: time
+	    approved_at: any;
+	    case_version: number;
+	    scope_json: number[];
+	    fix_commits: Record<string, string>;
+	    target_branches: Record<string, string>;
+
+	    static createFrom(source: any = {}) {
+	        return new Approval(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.case_id = source["case_id"];
+	        this.kind = source["kind"];
+	        this.actor = source["actor"];
+	        this.approved_at = this.convertValues(source["approved_at"], null);
+	        this.case_version = source["case_version"];
+	        this.scope_json = source["scope_json"];
+	        this.fix_commits = source["fix_commits"];
+	        this.target_branches = source["target_branches"];
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class Attachment {
 	    id?: string;
 	    name: string;
@@ -737,6 +800,204 @@ export namespace bughub {
 		    return a;
 		}
 	}
+	export class CodeChange {
+	    id: string;
+	    case_id: string;
+	    attempt_id: string;
+	    repo: string;
+	    base_branch: string;
+	    fix_branch: string;
+	    fix_commit: string;
+	    test_evidence: number[];
+	    target_environment_branch: string;
+	    merge_base_head: string;
+	    merge_commit: string;
+	    push_remote: string;
+	    push_status: string;
+
+	    static createFrom(source: any = {}) {
+	        return new CodeChange(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.case_id = source["case_id"];
+	        this.attempt_id = source["attempt_id"];
+	        this.repo = source["repo"];
+	        this.base_branch = source["base_branch"];
+	        this.fix_branch = source["fix_branch"];
+	        this.fix_commit = source["fix_commit"];
+	        this.test_evidence = source["test_evidence"];
+	        this.target_environment_branch = source["target_environment_branch"];
+	        this.merge_base_head = source["merge_base_head"];
+	        this.merge_commit = source["merge_commit"];
+	        this.push_remote = source["push_remote"];
+	        this.push_status = source["push_status"];
+	    }
+	}
+	export class DeploymentObservation {
+	    id: string;
+	    case_id: string;
+	    environment: string;
+	    expected_commits: Record<string, string>;
+	    // Go type: time
+	    user_notified_at?: any;
+	    // Go type: time
+	    verified_at?: any;
+	    verification_source: string;
+	    observed_version: string;
+	    observed_images: Record<string, string>;
+	    observed_commits: Record<string, string>;
+	    result: string;
+
+	    static createFrom(source: any = {}) {
+	        return new DeploymentObservation(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.case_id = source["case_id"];
+	        this.environment = source["environment"];
+	        this.expected_commits = source["expected_commits"];
+	        this.user_notified_at = this.convertValues(source["user_notified_at"], null);
+	        this.verified_at = this.convertValues(source["verified_at"], null);
+	        this.verification_source = source["verification_source"];
+	        this.observed_version = source["observed_version"];
+	        this.observed_images = source["observed_images"];
+	        this.observed_commits = source["observed_commits"];
+	        this.result = source["result"];
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class EvidenceArtifact {
+	    id: string;
+	    case_id: string;
+	    attempt_id: string;
+	    kind: string;
+	    path_or_reference: string;
+	    sha256: string;
+	    // Go type: time
+	    captured_at: any;
+	    environment: string;
+	    version: string;
+	    request_id: string;
+	    trace_id: string;
+	    redaction_status: string;
+
+	    static createFrom(source: any = {}) {
+	        return new EvidenceArtifact(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.case_id = source["case_id"];
+	        this.attempt_id = source["attempt_id"];
+	        this.kind = source["kind"];
+	        this.path_or_reference = source["path_or_reference"];
+	        this.sha256 = source["sha256"];
+	        this.captured_at = this.convertValues(source["captured_at"], null);
+	        this.environment = source["environment"];
+	        this.version = source["version"];
+	        this.request_id = source["request_id"];
+	        this.trace_id = source["trace_id"];
+	        this.redaction_status = source["redaction_status"];
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class IncidentCase {
+	    id: string;
+	    bug_id: string;
+	    source: string;
+	    system_id: string;
+	    environment: string;
+	    status: string;
+	    cycle_number: number;
+	    current_attempt_id: string;
+	    selected_bot_key: string;
+	    version: number;
+	    // Go type: time
+	    created_at: any;
+	    // Go type: time
+	    updated_at: any;
+	    // Go type: time
+	    closed_at?: any;
+
+	    static createFrom(source: any = {}) {
+	        return new IncidentCase(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.bug_id = source["bug_id"];
+	        this.source = source["source"];
+	        this.system_id = source["system_id"];
+	        this.environment = source["environment"];
+	        this.status = source["status"];
+	        this.cycle_number = source["cycle_number"];
+	        this.current_attempt_id = source["current_attempt_id"];
+	        this.selected_bot_key = source["selected_bot_key"];
+	        this.version = source["version"];
+	        this.created_at = this.convertValues(source["created_at"], null);
+	        this.updated_at = this.convertValues(source["updated_at"], null);
+	        this.closed_at = this.convertValues(source["closed_at"], null);
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class InvestigationEvent {
 	    // Go type: time
 	    at?: any;
@@ -808,6 +1069,68 @@ export namespace bughub {
 	        this.final_message = source["final_message"];
 	        this.error = source["error"];
 	        this.continuation_of = source["continuation_of"];
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class PhaseAttempt {
+	    id: string;
+	    case_id: string;
+	    cycle_number: number;
+	    phase: string;
+	    mode: string;
+	    status: string;
+	    agent_target: string;
+	    bot_key: string;
+	    input_json: number[];
+	    output_json: number[];
+	    parent_attempt_id: string;
+	    // Go type: time
+	    started_at: any;
+	    // Go type: time
+	    finished_at?: any;
+	    error_code: string;
+	    error_message: string;
+	    usage: AgentUsage;
+
+	    static createFrom(source: any = {}) {
+	        return new PhaseAttempt(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.case_id = source["case_id"];
+	        this.cycle_number = source["cycle_number"];
+	        this.phase = source["phase"];
+	        this.mode = source["mode"];
+	        this.status = source["status"];
+	        this.agent_target = source["agent_target"];
+	        this.bot_key = source["bot_key"];
+	        this.input_json = source["input_json"];
+	        this.output_json = source["output_json"];
+	        this.parent_attempt_id = source["parent_attempt_id"];
+	        this.started_at = this.convertValues(source["started_at"], null);
+	        this.finished_at = this.convertValues(source["finished_at"], null);
+	        this.error_code = source["error_code"];
+	        this.error_message = source["error_message"];
+	        this.usage = this.convertValues(source["usage"], AgentUsage);
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -935,6 +1258,55 @@ export namespace bughub {
 	        this.pruned = source["pruned"];
 	        this.product_count = source["product_count"];
 	    }
+	}
+	export class TransitionEvent {
+	    id: string;
+	    case_id: string;
+	    from_status: string;
+	    to_status: string;
+	    event_type: string;
+	    actor_type: string;
+	    actor_id: string;
+	    idempotency_key: string;
+	    payload_json: number[];
+	    // Go type: time
+	    created_at: any;
+
+	    static createFrom(source: any = {}) {
+	        return new TransitionEvent(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.case_id = source["case_id"];
+	        this.from_status = source["from_status"];
+	        this.to_status = source["to_status"];
+	        this.event_type = source["event_type"];
+	        this.actor_type = source["actor_type"];
+	        this.actor_id = source["actor_id"];
+	        this.idempotency_key = source["idempotency_key"];
+	        this.payload_json = source["payload_json"];
+	        this.created_at = this.convertValues(source["created_at"], null);
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 
 }
@@ -1619,6 +1991,50 @@ export namespace main {
 	        this.repo_name = source["repo_name"];
 	    }
 	}
+	export class ApproveIncidentFixInput {
+	    case_id: string;
+	    expected_version: number;
+	    idempotency_key: string;
+	    actor_id: string;
+	    root_cause_attempt_id: string;
+	    input_json?: Record<string, any>;
+
+	    static createFrom(source: any = {}) {
+	        return new ApproveIncidentFixInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.case_id = source["case_id"];
+	        this.expected_version = source["expected_version"];
+	        this.idempotency_key = source["idempotency_key"];
+	        this.actor_id = source["actor_id"];
+	        this.root_cause_attempt_id = source["root_cause_attempt_id"];
+	        this.input_json = source["input_json"];
+	    }
+	}
+	export class ApproveIncidentMergeInput {
+	    case_id: string;
+	    expected_version: number;
+	    idempotency_key: string;
+	    actor_id: string;
+	    fix_commits: Record<string, string>;
+	    target_branches: Record<string, string>;
+
+	    static createFrom(source: any = {}) {
+	        return new ApproveIncidentMergeInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.case_id = source["case_id"];
+	        this.expected_version = source["expected_version"];
+	        this.idempotency_key = source["idempotency_key"];
+	        this.actor_id = source["actor_id"];
+	        this.fix_commits = source["fix_commits"];
+	        this.target_branches = source["target_branches"];
+	    }
+	}
 	export class BugAttachmentPreviewInput {
 	    platform_id: string;
 	    bug_id: string;
@@ -2025,6 +2441,26 @@ export namespace main {
 	        this.namespaces_only = source["namespaces_only"];
 	    }
 	}
+	export class CancelIncidentAttemptInput {
+	    case_id: string;
+	    attempt_id: string;
+	    expected_version: number;
+	    idempotency_key: string;
+	    actor_id: string;
+
+	    static createFrom(source: any = {}) {
+	        return new CancelIncidentAttemptInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.case_id = source["case_id"];
+	        this.attempt_id = source["attempt_id"];
+	        this.expected_version = source["expected_version"];
+	        this.idempotency_key = source["idempotency_key"];
+	        this.actor_id = source["actor_id"];
+	    }
+	}
 	export class ChatLoadKeyResult {
 	    api_key: string;
 	    ok: boolean;
@@ -2039,6 +2475,28 @@ export namespace main {
 	        this.api_key = source["api_key"];
 	        this.ok = source["ok"];
 	        this.err = source["err"];
+	    }
+	}
+	export class ContinueIncidentCaseInput {
+	    case_id: string;
+	    expected_version: number;
+	    idempotency_key: string;
+	    actor_id: string;
+	    phase: string;
+	    input_json?: Record<string, any>;
+
+	    static createFrom(source: any = {}) {
+	        return new ContinueIncidentCaseInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.case_id = source["case_id"];
+	        this.expected_version = source["expected_version"];
+	        this.idempotency_key = source["idempotency_key"];
+	        this.actor_id = source["actor_id"];
+	        this.phase = source["phase"];
+	        this.input_json = source["input_json"];
 	    }
 	}
 	export class DSProbeInput {
@@ -2133,6 +2591,48 @@ export namespace main {
 	        this.skills_included = this.convertValues(source["skills_included"], generator.SkillDecision);
 	        this.skills_skipped = this.convertValues(source["skills_skipped"], generator.SkillDecision);
 	        this.files = this.convertValues(source["files"], GenPreviewFile);
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class IncidentCaseDetail {
+	    case: bughub.IncidentCase;
+	    attempts: bughub.PhaseAttempt[];
+	    artifacts: bughub.EvidenceArtifact[];
+	    approvals: bughub.Approval[];
+	    code_changes: bughub.CodeChange[];
+	    deployment_observations: bughub.DeploymentObservation[];
+	    events: bughub.TransitionEvent[];
+
+	    static createFrom(source: any = {}) {
+	        return new IncidentCaseDetail(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.case = this.convertValues(source["case"], bughub.IncidentCase);
+	        this.attempts = this.convertValues(source["attempts"], bughub.PhaseAttempt);
+	        this.artifacts = this.convertValues(source["artifacts"], bughub.EvidenceArtifact);
+	        this.approvals = this.convertValues(source["approvals"], bughub.Approval);
+	        this.code_changes = this.convertValues(source["code_changes"], bughub.CodeChange);
+	        this.deployment_observations = this.convertValues(source["deployment_observations"], bughub.DeploymentObservation);
+	        this.events = this.convertValues(source["events"], bughub.TransitionEvent);
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -2723,6 +3223,30 @@ export namespace main {
 	        this.suggest_repos_root = source["suggest_repos_root"];
 	    }
 	}
+	export class NotifyIncidentDeployedInput {
+	    case_id: string;
+	    expected_version: number;
+	    idempotency_key: string;
+	    actor_id: string;
+	    observed_version: string;
+	    observed_commits?: Record<string, string>;
+	    input_json?: Record<string, any>;
+
+	    static createFrom(source: any = {}) {
+	        return new NotifyIncidentDeployedInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.case_id = source["case_id"];
+	        this.expected_version = source["expected_version"];
+	        this.idempotency_key = source["idempotency_key"];
+	        this.actor_id = source["actor_id"];
+	        this.observed_version = source["observed_version"];
+	        this.observed_commits = source["observed_commits"];
+	        this.input_json = source["input_json"];
+	    }
+	}
 	export class One2AllNsEntry {
 	    name: string;
 	    configmaps?: string[];
@@ -2976,6 +3500,26 @@ export namespace main {
 	        this.log = source["log"];
 	        this.exit_code = source["exit_code"];
 	        this.ok = source["ok"];
+	    }
+	}
+	export class StartIncidentCaseInput {
+	    case_id: string;
+	    expected_version: number;
+	    idempotency_key: string;
+	    actor_id: string;
+	    input_json?: Record<string, any>;
+
+	    static createFrom(source: any = {}) {
+	        return new StartIncidentCaseInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.case_id = source["case_id"];
+	        this.expected_version = source["expected_version"];
+	        this.idempotency_key = source["idempotency_key"];
+	        this.actor_id = source["actor_id"];
+	        this.input_json = source["input_json"];
 	    }
 	}
 	export class UninstallBotResult {

@@ -22,11 +22,17 @@ export function AnalyzeV2(arg1:main.AnalyzeInput):Promise<analyzerpipe.Result>;
 
 export function ApplyBot(arg1:string,arg2:string,arg3:boolean):Promise<agent.Result>;
 
+export function ApproveIncidentFix(arg1:main.ApproveIncidentFixInput):Promise<bughub.IncidentCase>;
+
+export function ApproveIncidentMerge(arg1:main.ApproveIncidentMergeInput):Promise<bughub.IncidentCase>;
+
 export function BugHookBaseURL():Promise<string>;
 
 export function CancelAnalyze():Promise<boolean>;
 
 export function CancelBugInvestigation(arg1:main.BugInvestigationCancelInput):Promise<void>;
+
+export function CancelIncidentAttempt(arg1:main.CancelIncidentAttemptInput):Promise<bughub.IncidentCase>;
 
 export function CancelInstall():Promise<boolean>;
 
@@ -45,6 +51,8 @@ export function ChatSaveProviderKey(arg1:string,arg2:string):Promise<void>;
 export function ClearBugPlatformLogin(arg1:main.BugLoginInput):Promise<main.BugLoginResult>;
 
 export function ContinueBugInvestigation(arg1:main.BugInvestigationContinueInput):Promise<bughub.InvestigationRun>;
+
+export function ContinueIncidentCase(arg1:main.ContinueIncidentCaseInput):Promise<bughub.IncidentCase>;
 
 export function DefaultDestPath(arg1:string,arg2:string):Promise<string>;
 
@@ -77,6 +85,8 @@ export function Gen(arg1:string,arg2:string):Promise<generator.GenSummary>;
 export function GenPreview(arg1:string):Promise<main.GenPreviewResult>;
 
 export function GenerateBugContext(arg1:main.BugContextInput):Promise<string>;
+
+export function GetIncidentCase(arg1:string):Promise<main.IncidentCaseDetail>;
 
 export function GetMissingRepoPaths(arg1:string):Promise<main.MissingRepoPathsResult>;
 
@@ -116,6 +126,8 @@ export function ListBugs():Promise<Array<bughub.Bug>>;
 
 export function ListGrafanaDatasources(arg1:main.LokiAuthInput):Promise<Array<labelprobe.Datasource>>;
 
+export function ListIncidentCases():Promise<Array<bughub.IncidentCase>>;
+
 export function ListLokiLabelValues(arg1:main.LokiAuthInput,arg2:string,arg3:string):Promise<labelprobe.ValuesResult>;
 
 export function ListLokiLabels(arg1:main.LokiAuthInput):Promise<labelprobe.LabelsResult>;
@@ -125,6 +137,8 @@ export function LoadInfraCred(arg1:string):Promise<main.ChatLoadKeyResult>;
 export function LoginBugPlatform(arg1:main.BugLoginInput):Promise<main.BugLoginResult>;
 
 export function MatchBugBots(arg1:string):Promise<Array<bughub.BotMatch>>;
+
+export function NotifyIncidentDeployed(arg1:main.NotifyIncidentDeployedInput):Promise<bughub.IncidentCase>;
 
 export function One2AllFetchConfigMaps(arg1:string,arg2:string,arg3:Array<main.One2AllConfigMapEntry>):Promise<Array<main.One2AllConfigMapResult>>;
 
@@ -189,6 +203,8 @@ export function ShowMainWindow():Promise<void>;
 export function StartBugFix(arg1:main.BugFixInput):Promise<bughub.InvestigationRun>;
 
 export function StartBugInvestigation(arg1:main.BugInvestigationInput):Promise<bughub.InvestigationRun>;
+
+export function StartIncidentCase(arg1:main.StartIncidentCaseInput):Promise<bughub.IncidentCase>;
 
 export function SyncBugPlatform(arg1:string):Promise<bughub.SyncResult>;
 

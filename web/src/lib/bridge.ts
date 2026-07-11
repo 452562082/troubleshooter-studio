@@ -37,6 +37,7 @@ export * from './bridge/loki'
 export * from './bridge/openclaw'
 export * from './bridge/aitools'
 export * from './bridge/bugs'
+export * from './bridge/bugWorkflow'
 
 import { isDesktop } from './bridge/shared'
 

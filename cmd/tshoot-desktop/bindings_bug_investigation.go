@@ -413,19 +413,25 @@ func (a *App) ListBugInvestigationRuns(bugID string) ([]bughub.InvestigationRun,
 }
 
 func (a *App) codexInvestigator() *bughub.CodexInvestigator {
+	// Prefer the durable workflow's shared executor. initializeIncidentWorkflow
+	// is idempotent and also ensures migration/recovery has run when a legacy
+	// binding is invoked before Wails startup completes.
+	_ = a.initializeIncidentWorkflow(a.workflowCommandContext())
 	a.bugInvestigationMu.Lock()
 	defer a.bugInvestigationMu.Unlock()
 	if a.bugInvestigator == nil {
 		a.bugInvestigator = bughub.NewCodexInvestigator(bugInvestigationStore(), "codex")
-		a.bugInvestigator.SetEventSink(func(run bughub.InvestigationRun, event bughub.InvestigationEvent) {
-			if ctx := a.getRuntimeContext(); ctx != nil {
-				wailsruntime.EventsEmit(ctx, "bug-investigation:event", map[string]any{
-					"run":   run,
-					"event": event,
-				})
-			}
-		})
 	}
+	// The durable workflow reuses this executor, so configure the legacy event
+	// projection even when the investigator was created during App startup.
+	a.bugInvestigator.SetEventSink(func(run bughub.InvestigationRun, event bughub.InvestigationEvent) {
+		if ctx := a.getRuntimeContext(); ctx != nil {
+			wailsruntime.EventsEmit(ctx, "bug-investigation:event", map[string]any{
+				"run":   run,
+				"event": event,
+			})
+		}
+	})
 	return a.bugInvestigator
 }
 

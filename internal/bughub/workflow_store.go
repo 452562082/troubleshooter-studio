@@ -32,6 +32,12 @@ type CaseStore struct {
 	db *sql.DB
 }
 
+type legacyImportBatch struct {
+	MigrationKey string
+	Cases        []IncidentCase
+	Attempts     []PhaseAttempt
+}
+
 type workflowSchemaMigrationDetail struct {
 	Version     int    `json:"version"`
 	Fingerprint string `json:"fingerprint"`
@@ -255,6 +261,201 @@ func (s *CaseStore) ListCases(ctx context.Context) ([]IncidentCase, error) {
 
 func (s *CaseStore) CreateAttempt(ctx context.Context, attempt PhaseAttempt) error {
 	return s.createAttempt(ctx, attempt, AttemptValidationOptions{})
+}
+
+func (s *CaseStore) importLegacyBatch(ctx context.Context, batch legacyImportBatch) (LegacyImportResult, error) {
+	if blank(batch.MigrationKey) {
+		return LegacyImportResult{}, errors.New("legacy migration key is required")
+	}
+	for _, incident := range batch.Cases {
+		if incident.Status != CaseLegacyArchived {
+			return LegacyImportResult{}, errors.New("legacy import cases must be archived")
+		}
+		if err := incident.Validate(); err != nil {
+			return LegacyImportResult{}, err
+		}
+	}
+	for _, attempt := range batch.Attempts {
+		if attempt.Phase != PhaseLegacy {
+			return LegacyImportResult{}, errors.New("legacy import attempts require legacy phase")
+		}
+		if err := attempt.ValidateWithOptions(AttemptValidationOptions{AllowLegacyMigration: true}); err != nil {
+			return LegacyImportResult{}, err
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return LegacyImportResult{}, fmt.Errorf("begin legacy import: %w", err)
+	}
+	defer tx.Rollback()
+	var marker int
+	err = tx.QueryRowContext(ctx, `SELECT 1 FROM schema_migrations WHERE key = ?`, batch.MigrationKey).Scan(&marker)
+	if err == nil {
+		return LegacyImportResult{}, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return LegacyImportResult{}, fmt.Errorf("check legacy migration: %w", err)
+	}
+	result := LegacyImportResult{}
+	for _, incident := range batch.Cases {
+		insert, err := tx.ExecContext(ctx, `INSERT INTO incident_cases (
+			id, bug_id, source, system_id, environment, status, cycle_number,
+			current_attempt_id, selected_bot_key, version, created_at, updated_at, closed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
+			incident.ID, incident.BugID, incident.Source, incident.SystemID, incident.Environment,
+			incident.Status, incident.CycleNumber, incident.CurrentAttemptID, incident.SelectedBotKey,
+			incident.Version, formatStoreTime(incident.CreatedAt), formatStoreTime(incident.UpdatedAt),
+			formatOptionalStoreTime(incident.ClosedAt))
+		if err != nil {
+			return LegacyImportResult{}, fmt.Errorf("import legacy case: %w", err)
+		}
+		rows, err := insert.RowsAffected()
+		if err != nil {
+			return LegacyImportResult{}, fmt.Errorf("inspect legacy case import: %w", err)
+		}
+		if rows == 0 {
+			stored, err := getCase(ctx, tx, incident.ID)
+			if err != nil || !sameImportedCase(stored, incident) {
+				return LegacyImportResult{}, fmt.Errorf("%w: legacy case %s", ErrIdempotencyConflict, incident.ID)
+			}
+		} else {
+			result.Cases++
+		}
+	}
+	for _, attempt := range batch.Attempts {
+		insert, err := tx.ExecContext(ctx, `INSERT INTO phase_attempts (
+			id, case_id, cycle_number, phase, mode, status, agent_target, bot_key,
+			input_json, output_json, parent_attempt_id, started_at, finished_at,
+			error_code, error_message, input_tokens, output_tokens, duration_nanos
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
+			attempt.ID, attempt.CaseID, attempt.CycleNumber, attempt.Phase, attempt.Mode,
+			attempt.Status, attempt.AgentTarget, attempt.BotKey, string(attempt.InputJSON),
+			string(attempt.OutputJSON), attempt.ParentAttemptID, formatStoreTime(attempt.StartedAt),
+			formatOptionalStoreTime(attempt.FinishedAt), attempt.ErrorCode, attempt.ErrorMessage,
+			attempt.Usage.InputTokens, attempt.Usage.OutputTokens, int64(attempt.Usage.Duration))
+		if err != nil {
+			return LegacyImportResult{}, fmt.Errorf("import legacy attempt: %w", err)
+		}
+		rows, err := insert.RowsAffected()
+		if err != nil {
+			return LegacyImportResult{}, fmt.Errorf("inspect legacy attempt import: %w", err)
+		}
+		if rows == 0 {
+			stored, err := getAttempt(ctx, tx, attempt.ID)
+			if err != nil || !sameImportedAttempt(stored, attempt) {
+				return LegacyImportResult{}, fmt.Errorf("%w: legacy attempt %s", ErrIdempotencyConflict, attempt.ID)
+			}
+		} else {
+			result.Attempts++
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (key, applied_at, detail_json) VALUES (?, ?, ?)`,
+		batch.MigrationKey, formatStoreTime(time.Now().UTC()), `{}`); err != nil {
+		return LegacyImportResult{}, fmt.Errorf("record legacy migration: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return LegacyImportResult{}, fmt.Errorf("commit legacy import: %w", err)
+	}
+	return result, nil
+}
+
+func sameImportedCase(left, right IncidentCase) bool {
+	return left.ID == right.ID && left.BugID == right.BugID && left.Source == right.Source &&
+		left.SystemID == right.SystemID && left.Environment == right.Environment &&
+		left.Status == right.Status && left.CycleNumber == right.CycleNumber &&
+		left.CurrentAttemptID == "" && left.SelectedBotKey == "" && left.Version == right.Version &&
+		left.ClosedAt == nil && right.ClosedAt == nil
+}
+
+func sameImportedAttempt(left, right PhaseAttempt) bool {
+	return left.ID == right.ID && left.CaseID == right.CaseID && left.CycleNumber == right.CycleNumber &&
+		left.Phase == right.Phase && left.Mode == right.Mode && left.Status == right.Status &&
+		left.AgentTarget == right.AgentTarget && left.BotKey == right.BotKey &&
+		bytes.Equal(left.InputJSON, right.InputJSON) && bytes.Equal(left.OutputJSON, right.OutputJSON) &&
+		left.ParentAttemptID == right.ParentAttemptID && left.StartedAt.Equal(right.StartedAt) &&
+		timesEqual(left.FinishedAt, right.FinishedAt) && left.ErrorCode == right.ErrorCode &&
+		left.ErrorMessage == right.ErrorMessage && left.Usage == right.Usage
+}
+
+func (s *CaseStore) recordEvidenceArtifact(ctx context.Context, artifact EvidenceArtifact) (EvidenceArtifact, error) {
+	if artifact.CapturedAt.IsZero() {
+		return EvidenceArtifact{}, errors.New("evidence artifact captured_at is required")
+	}
+	artifact.CapturedAt = artifact.CapturedAt.UTC()
+	if err := artifact.Validate(); err != nil {
+		return EvidenceArtifact{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return EvidenceArtifact{}, fmt.Errorf("begin evidence registration: %w", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `INSERT INTO evidence_artifacts (
+		id, case_id, attempt_id, kind, path_or_reference, sha256, captured_at,
+		environment, version, request_id, trace_id, redaction_status
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(attempt_id, sha256, kind) DO NOTHING`, artifact.ID, artifact.CaseID,
+		artifact.AttemptID, artifact.Kind, artifact.PathOrReference, artifact.SHA256,
+		formatStoreTime(artifact.CapturedAt), artifact.Environment, artifact.Version,
+		artifact.RequestID, artifact.TraceID, artifact.RedactionStatus)
+	if err != nil {
+		return EvidenceArtifact{}, fmt.Errorf("register evidence artifact: %w", err)
+	}
+	stored, err := scanEvidenceArtifact(tx.QueryRowContext(ctx, `SELECT id, case_id, attempt_id,
+		kind, path_or_reference, sha256, captured_at, environment, version, request_id,
+		trace_id, redaction_status FROM evidence_artifacts
+		WHERE attempt_id = ? AND sha256 = ? AND kind = ?`, artifact.AttemptID, artifact.SHA256, artifact.Kind))
+	if err != nil {
+		return EvidenceArtifact{}, fmt.Errorf("read registered evidence artifact: %w", err)
+	}
+	if stored != artifact {
+		return EvidenceArtifact{}, fmt.Errorf("%w: evidence artifact %s", ErrIdempotencyConflict, artifact.ID)
+	}
+	if err := tx.Commit(); err != nil {
+		return EvidenceArtifact{}, fmt.Errorf("commit evidence registration: %w", err)
+	}
+	return stored, nil
+}
+
+func (s *CaseStore) ListEvidenceArtifacts(ctx context.Context, caseID string) ([]EvidenceArtifact, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, case_id, attempt_id, kind, path_or_reference,
+		sha256, captured_at, environment, version, request_id, trace_id, redaction_status
+		FROM evidence_artifacts WHERE case_id = ? ORDER BY captured_at ASC, id ASC`, caseID)
+	if err != nil {
+		return nil, fmt.Errorf("list evidence artifacts: %w", err)
+	}
+	defer rows.Close()
+	var artifacts []EvidenceArtifact
+	for rows.Next() {
+		artifact, err := scanEvidenceArtifact(rows)
+		if err != nil {
+			return nil, err
+		}
+		artifacts = append(artifacts, artifact)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list evidence artifacts: %w", err)
+	}
+	return artifacts, nil
+}
+
+func scanEvidenceArtifact(row rowScanner) (EvidenceArtifact, error) {
+	var artifact EvidenceArtifact
+	var capturedAt string
+	if err := row.Scan(&artifact.ID, &artifact.CaseID, &artifact.AttemptID, &artifact.Kind,
+		&artifact.PathOrReference, &artifact.SHA256, &capturedAt, &artifact.Environment,
+		&artifact.Version, &artifact.RequestID, &artifact.TraceID, &artifact.RedactionStatus); err != nil {
+		return EvidenceArtifact{}, err
+	}
+	var err error
+	artifact.CapturedAt, err = parseStoreTime(capturedAt)
+	if err != nil {
+		return EvidenceArtifact{}, err
+	}
+	if err := artifact.Validate(); err != nil {
+		return EvidenceArtifact{}, fmt.Errorf("validate stored evidence artifact: %w", err)
+	}
+	return artifact, nil
 }
 
 type AttemptFilter struct {

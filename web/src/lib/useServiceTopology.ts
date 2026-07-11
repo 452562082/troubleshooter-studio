@@ -28,9 +28,14 @@ function normalizedOptional(value?: string): string | undefined {
 function normalizedRoutePath(value?: string): string {
   let path = value?.trim() ?? ''
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(path)) {
-    try { path = new URL(path).pathname } catch { /* fall back to the raw path below */ }
+    try {
+      path = decodeURIComponent(new URL(path).pathname)
+    } catch {
+      path = path.split(/[?#]/, 1)[0] ?? ''
+    }
   } else {
     path = path.split(/[?#]/, 1)[0] ?? ''
+    try { path = decodeURIComponent(path) } catch { /* Go net/url also keeps malformed escapes on fallback */ }
   }
   path = path.replace(/\/{2,}/g, '/')
   if (path.length > 1) path = path.replace(/\/$/, '')

@@ -55,7 +55,15 @@ function makeTopologySnapshot(input: { edges: topology.CandidateEdge[] }): topol
   ])
   return topology.Snapshot.createFrom({
     schema_version: '1',
-    services: [],
+    services: [
+      'mall-bff',
+      'mall-order',
+      'mall-search',
+      'mall-web',
+      'profile',
+      '',
+      'mall-web',
+    ].map(service => topology.ServiceDescriptor.createFrom({ repo: service, service })),
     endpoints,
     edges: input.edges,
     repositories: [],
@@ -124,16 +132,28 @@ describe('ServiceTopologyPanel', () => {
     ])
   })
 
-  it('retargets by rejecting the old edge and adding the replacement', async () => {
+  it('rejects an arbitrary retarget and accepts a configured service from a labeled select', async () => {
     const wrapper = mountPanel()
 
     await wrapper.get('[data-edge="bff-order"]').trigger('click')
+    const retarget = wrapper.get('[data-retarget-service]')
+    expect(retarget.element.tagName).toBe('SELECT')
+    expect(wrapper.get('label[for="topology-retarget"]').text()).toContain('目标服务')
+
     await wrapper.get('[data-retarget-service]').setValue('mall-orders-v2')
+    await wrapper.get('[data-action="retarget"]').trigger('click')
+    expect(wrapper.emitted('update:overrides')).toBeUndefined()
+    expect(wrapper.get('[data-validation]').attributes('role')).toBe('alert')
+    expect(wrapper.get('[data-validation]').attributes('aria-live')).toBe('polite')
+    expect(wrapper.get('[data-validation]').text()).toContain('有效服务')
+    expect(wrapper.get('[data-action="retarget"]').attributes('disabled')).toBeDefined()
+
+    await wrapper.get('[data-retarget-service]').setValue('mall-search')
     await wrapper.get('[data-action="retarget"]').trigger('click')
 
     expect(wrapper.emitted('update:overrides')?.[0]?.[0]).toEqual([
       expect.objectContaining({ action: 'reject', fromService: 'mall-bff', toService: 'mall-order' }),
-      expect.objectContaining({ action: 'add', fromService: 'mall-bff', toService: 'mall-orders-v2' }),
+      expect.objectContaining({ action: 'add', fromService: 'mall-bff', toService: 'mall-search' }),
     ])
   })
 
@@ -158,12 +178,29 @@ describe('ServiceTopologyPanel', () => {
     ])
   })
 
-  it('emits a manual add and disables every mutation during refresh', async () => {
+  it('only adds distinct configured services through semantic labeled selects', async () => {
     const wrapper = mountPanel()
 
+    expect(wrapper.get('[data-add-from]').element.tagName).toBe('SELECT')
+    expect(wrapper.get('[data-add-to]').element.tagName).toBe('SELECT')
+    expect(wrapper.get('label[for="topology-add-from"]').text()).toContain('来源服务')
+    expect(wrapper.get('label[for="topology-add-to"]').text()).toContain('目标服务')
+    expect(wrapper.findAll('[data-add-from] option').map(option => option.attributes('value'))).toEqual([
+      '', 'mall-bff', 'mall-order', 'mall-search', 'mall-web', 'profile',
+    ])
+
     await wrapper.get('[data-add-from]').setValue('mall-web')
-    await wrapper.get('[data-add-to]').setValue('mall-search')
+    await wrapper.get('[data-add-to]').setValue('mall-orders-v2')
     await wrapper.get('[data-add-path]').setValue('/internal/search')
+    await wrapper.get('[data-action="add"]').trigger('click')
+    expect(wrapper.emitted('update:overrides')).toBeUndefined()
+    expect(wrapper.get('[data-validation]').text()).toContain('有效服务')
+
+    await wrapper.get('[data-add-to]').setValue('mall-web')
+    expect(wrapper.get('[data-action="add"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-validation]').text()).toContain('不能相同')
+
+    await wrapper.get('[data-add-to]').setValue('mall-search')
     await wrapper.get('[data-action="add"]').trigger('click')
     expect(wrapper.emitted('update:overrides')?.[0]?.[0]).toEqual([
       expect.objectContaining({
@@ -174,8 +211,11 @@ describe('ServiceTopologyPanel', () => {
         path: '/internal/search',
       }),
     ])
+  })
 
-    await wrapper.setProps({ loading: true })
+  it('disables every mutation during refresh', async () => {
+    const wrapper = mountPanel({ loading: true })
+
     for (const button of wrapper.findAll('[data-mutation]')) {
       expect(button.attributes('disabled')).toBeDefined()
     }
@@ -188,6 +228,9 @@ describe('ServiceTopologyPanel', () => {
 
     expect(wrapper.get('[role="alert"]').text()).toContain('timeout')
     expect(wrapper.get('[data-action="refresh"]').attributes('disabled')).toBeDefined()
+    for (const button of wrapper.findAll('[data-mutation]')) {
+      expect(button.attributes('disabled')).toBeDefined()
+    }
     await wrapper.get('[data-action="refresh"]').trigger('click')
     expect(wrapper.emitted('refresh')).toBeUndefined()
   })

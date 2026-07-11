@@ -186,4 +186,46 @@ describe('useServiceTopology', () => {
       expect.objectContaining({ action: 'reject', method: 'GET', path: '/orders/{orderId}' }),
     ])
   })
+
+  it.each([
+    ['encoded parameter', '/orders/%7Bid%7D', '/orders/{orderId}'],
+    ['encoded wildcard', '/files/%2Apath', '/files/{*rest}'],
+    ['encoded slash', '/orders%2F%7Bid%7D', '/orders/{orderId}'],
+    ['absolute encoded query and trailing slash', 'https://orders.test/orders/%7Bid%7D%2F?debug=true', '/orders/{orderId}'],
+    ['encoded question mark across relative and absolute URLs', '/search%3Fterm?debug=true', 'https://orders.test/search%3Fterm?trace=true'],
+  ])('deduplicates %s paths like Go net/url', (_name, existingPath, incomingPath) => {
+    const { topologyState, overrides } = makeTopology(vi.fn(async () => makeSnapshot('orders')))
+    overrides.value = [{
+      action: 'confirm',
+      fromService: 'web',
+      toService: 'orders',
+      protocol: 'http',
+      method: 'GET',
+      path: existingPath,
+    }]
+    const edge = makeEdge('orders')
+    edge.path = incomingPath
+
+    topologyState.reject(edge)
+
+    expect(overrides.value).toHaveLength(1)
+    expect(overrides.value[0]).toEqual(expect.objectContaining({ action: 'reject', path: incomingPath }))
+  })
+
+  it('does not throw or over-normalize malformed percent encodings', () => {
+    const { topologyState, overrides } = makeTopology(vi.fn(async () => makeSnapshot('orders')))
+    overrides.value = [{
+      action: 'confirm',
+      fromService: 'web',
+      toService: 'orders',
+      protocol: 'http',
+      method: 'GET',
+      path: '/orders/%ZZ?debug=true',
+    }]
+    const edge = makeEdge('orders')
+    edge.path = '/orders/%ZZ'
+
+    expect(() => topologyState.reject(edge)).not.toThrow()
+    expect(overrides.value).toHaveLength(1)
+  })
 })

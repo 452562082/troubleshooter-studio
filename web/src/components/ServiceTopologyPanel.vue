@@ -32,6 +32,8 @@ const addProtocol = ref<'http' | 'grpc'>('http')
 const addMethod = ref('GET')
 const addPath = ref('')
 const addRPCMethod = ref('')
+const retargetTouched = ref(false)
+const addTouched = ref(false)
 
 const locked = computed(() => props.loading || props.disabled)
 const edges = computed(() => {
@@ -41,14 +43,42 @@ const edges = computed(() => {
     return priority(left.status) - priority(right.status)
   })
 })
-const services = computed(() => new Set([
-  ...(props.snapshot?.services ?? []).map(service => service.service),
-  ...(props.snapshot?.endpoints ?? []).map(endpoint => endpoint.service),
-  ...edges.value.flatMap(edge => [edge.from_service, edge.to_service]),
-].filter(Boolean)))
+const services = computed(() => [...new Set(
+  (props.snapshot?.services ?? []).map(service => service.service.trim()).filter(Boolean),
+)].sort((left, right) => left.localeCompare(right)))
+const serviceSet = computed(() => new Set(services.value))
+function serviceValue(value: string | undefined): string {
+  return value?.trim() ?? ''
+}
+const retargetValid = computed(() => {
+  const edge = selectedEdge.value
+  const target = serviceValue(retargetService.value)
+  return !!edge && serviceSet.value.has(target) && target !== edge.to_service.trim()
+})
+const manualServicesValid = computed(() => {
+  const fromService = serviceValue(addFrom.value)
+  const toService = serviceValue(addTo.value)
+  return serviceSet.value.has(fromService)
+    && serviceSet.value.has(toService)
+    && fromService !== toService
+})
 const manualRouteValid = computed(() => addProtocol.value === 'http'
   ? !!addMethod.value.trim() && addPath.value.trim().startsWith('/')
   : !!addRPCMethod.value.trim())
+const validationMessage = computed(() => {
+  if (retargetTouched.value && !retargetValid.value) {
+    const target = serviceValue(retargetService.value)
+    if (target && target === selectedEdge.value?.to_service.trim()) return '新目标服务不能与当前目标相同。'
+    return '请选择快照中的有效服务作为新目标。'
+  }
+  if (addTouched.value && !manualServicesValid.value) {
+    const fromService = serviceValue(addFrom.value)
+    const toService = serviceValue(addTo.value)
+    if (fromService && fromService === toService) return '来源服务与目标服务不能相同。'
+    return '请选择快照中的有效服务作为来源和目标。'
+  }
+  return ''
+})
 
 function edgeKey(edge: topology.CandidateEdge): string {
   return [
@@ -80,6 +110,7 @@ watch(edges, (nextEdges) => {
 
 watch(selectedEdge, (edge) => {
   retargetService.value = edge?.to_service ?? ''
+  retargetTouched.value = false
 })
 
 const selectedEndpoints = computed(() => {
@@ -113,16 +144,18 @@ function emitDecision(action: 'confirm' | 'reject') {
 }
 
 function emitRetarget() {
+  retargetTouched.value = true
   const edge = selectedEdge.value
-  const target = retargetService.value.trim()
-  if (!edge || !target || target === edge.to_service.trim() || locked.value) return
+  const target = serviceValue(retargetService.value)
+  if (!edge || !retargetValid.value || locked.value) return
   emit('update:overrides', retargetTopologyOverride(props.overrides, edge, target))
 }
 
 function emitAdd() {
-  const fromService = addFrom.value.trim()
-  const toService = addTo.value.trim()
-  if (!fromService || !toService || locked.value) return
+  addTouched.value = true
+  const fromService = serviceValue(addFrom.value)
+  const toService = serviceValue(addTo.value)
+  if (!manualServicesValid.value || !manualRouteValid.value || locked.value) return
   const decision: ServiceTopologyOverrideState = {
     action: 'add',
     fromService,
@@ -137,6 +170,7 @@ function emitAdd() {
   addTo.value = ''
   addPath.value = ''
   addRPCMethod.value = ''
+  addTouched.value = false
 }
 
 function requestRefresh() {
@@ -167,7 +201,7 @@ function requestRefresh() {
     <p class="topology-feedback" data-feedback aria-live="polite">
       <template v-if="loading">正在分析仓库端点和跨服务调用关系，请稍候。</template>
       <template v-else-if="disabled">其他任务正在运行，拓扑操作暂时不可用。</template>
-      <template v-else-if="snapshot">已载入 {{ services.size }} 个服务、{{ edges.length }} 条证据边。</template>
+      <template v-else-if="snapshot">已载入 {{ services.length }} 个服务、{{ edges.length }} 条证据边。</template>
       <template v-else>点击“刷新拓扑”开始分析；编辑仓库字段不会自动触发扫描。</template>
     </p>
 
@@ -265,13 +299,21 @@ function requestRefresh() {
           <div class="retarget-row">
             <label for="topology-retarget">改为目标服务</label>
             <div class="inline-controls">
-              <input id="topology-retarget" v-model="retargetService" data-retarget-service type="text" list="topology-service-options">
+              <select
+                id="topology-retarget"
+                v-model="retargetService"
+                data-retarget-service
+                @change="retargetTouched = true"
+              >
+                <option value="">请选择服务</option>
+                <option v-for="service in services" :key="service" :value="service">{{ service }}</option>
+              </select>
               <button
                 class="topology-button"
                 type="button"
                 data-action="retarget"
                 data-mutation
-                :disabled="locked || !retargetService.trim() || retargetService.trim() === selectedEdge.to_service"
+                :disabled="locked || !retargetValid"
                 @click="emitRetarget"
               >重定目标</button>
             </div>
@@ -289,13 +331,19 @@ function requestRefresh() {
         </div>
       </div>
       <div class="manual-grid">
-        <label>
+        <label for="topology-add-from">
           来源服务
-          <input v-model="addFrom" data-add-from type="text" list="topology-service-options" autocomplete="off">
+          <select id="topology-add-from" v-model="addFrom" data-add-from @change="addTouched = true">
+            <option value="">请选择服务</option>
+            <option v-for="service in services" :key="service" :value="service">{{ service }}</option>
+          </select>
         </label>
-        <label>
+        <label for="topology-add-to">
           目标服务
-          <input v-model="addTo" data-add-to type="text" list="topology-service-options" autocomplete="off">
+          <select id="topology-add-to" v-model="addTo" data-add-to @change="addTouched = true">
+            <option value="">请选择服务</option>
+            <option v-for="service in services" :key="service" :value="service">{{ service }}</option>
+          </select>
         </label>
         <label>
           协议
@@ -321,13 +369,11 @@ function requestRefresh() {
           type="button"
           data-action="add"
           data-mutation
-          :disabled="locked || !addFrom.trim() || !addTo.trim() || !manualRouteValid"
+          :disabled="locked || !manualServicesValid || !manualRouteValid"
           @click="emitAdd"
         >新增关系</button>
       </div>
-      <datalist id="topology-service-options">
-        <option v-for="service in services" :key="service" :value="service" />
-      </datalist>
+      <p class="topology-validation" data-validation role="alert" aria-live="polite">{{ validationMessage }}</p>
     </form>
   </section>
 </template>
@@ -526,13 +572,14 @@ function requestRefresh() {
 .retarget-row label,
 .manual-grid label { display: grid; gap: 6px; color: #475569; font-size: 13px; font-weight: 600; }
 .inline-controls { margin-top: 6px; }
-.inline-controls input { flex: 1 1 160px; min-height: 44px; }
+.inline-controls select { flex: 1 1 160px; min-height: 44px; }
 
 .manual-edge { margin-top: 16px; }
 .manual-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)) 100px 100px; align-items: end; gap: 8px; margin-top: 12px; }
 .manual-route-field { grid-column: span 2; }
 .manual-grid input,
 .manual-grid select { min-height: 44px; }
+.topology-validation { min-height: 21px; margin: 10px 0 0; color: var(--c-danger); font-size: 13px; line-height: 1.5; }
 .empty-state { margin: 16px 0 0; color: var(--c-muted); line-height: 1.5; }
 
 @media (max-width: 767px) {

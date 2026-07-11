@@ -74,6 +74,7 @@ import { useImportFlow } from '../lib/useImportFlow'
 import { useDataStoreScan } from '../lib/useDataStoreScan'
 import { useMonorepoHints } from '../lib/useMonorepoHints'
 import { useServiceTopology } from '../lib/useServiceTopology'
+import { hasServiceTopologyWorkbenchRepos } from '../lib/serviceTopologyGate'
 import { useSourceTypeReset } from '../lib/useSourceTypeReset'
 import { useK8sRtAutoPick } from '../lib/useK8sRtAutoPick'
 import { one2allListDeployments, one2allListResources } from '../lib/bridge/one2all'
@@ -3094,14 +3095,9 @@ const topologyRepoPaths = computed<Record<string, string>>(() => {
   return paths
 })
 
-function isTopologyServiceNode(repo: RepoItem): boolean {
-  const role = repo.role || 'backend'
-  return role !== 'common-lib' && role !== 'infra' && role !== 'docs'
-}
-
-const showServiceTopology = computed(() => repos.filter(repo => (
-  isTopologyServiceNode(repo) && !!topologyRepoPaths.value[repo.name.trim()]
-)).length >= 2)
+const showServiceTopology = computed(() => (
+  hasServiceTopologyWorkbenchRepos(repos, topologyRepoPaths.value)
+))
 
 const {
   snapshot: serviceTopologySnapshot,

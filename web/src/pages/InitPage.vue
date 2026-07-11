@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted, onUnmounted, onErrorCaptured, nextTick, provide } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted, onErrorCaptured, nextTick, provide, toRef } from 'vue'
 
 // 给 App.vue 的 keep-alive `:exclude="['InitPage']"` 用,让本页不被缓存。
 // 跟 HomePage 的"清空重开"按钮配套:用户清掉 localStorage 后,InitPage 重 mount 取干净状态。
@@ -24,6 +24,7 @@ import type { CredField } from '../lib/credFields'
 import { isCredFieldHidden, resolveCredFieldDisplay } from '../lib/credFields'
 import RepoListItem from '../components/RepoListItem.vue'
 import CodeIntelligenceToggle from '../components/CodeIntelligenceToggle.vue'
+import ServiceTopologyPanel from '../components/ServiceTopologyPanel.vue'
 import ConfigSourceStep from '../components/ConfigSourceStep.vue'
 import ObservabilityStep from '../components/ObservabilityStep.vue'
 import DataStoreStep from '../components/DataStoreStep.vue'
@@ -72,6 +73,7 @@ import { migrateSavedStep } from '../lib/wizardStep'
 import { useImportFlow } from '../lib/useImportFlow'
 import { useDataStoreScan } from '../lib/useDataStoreScan'
 import { useMonorepoHints } from '../lib/useMonorepoHints'
+import { useServiceTopology } from '../lib/useServiceTopology'
 import { useSourceTypeReset } from '../lib/useSourceTypeReset'
 import { useK8sRtAutoPick } from '../lib/useK8sRtAutoPick'
 import { one2allListDeployments, one2allListResources } from '../lib/bridge/one2all'
@@ -2606,7 +2608,7 @@ async function clearDraft() {
   agent.model = 'anthropic/claude-sonnet-4-6'
   codeIntelligence.enabled = false
   codeIntelligence.provider = 'codegraph'
-  serviceTopology.overrides = []
+  clearServiceTopology()
   // 环境 / 仓库回到初始 1 条
   environments.splice(0, environments.length,
     { id: 'dev', api_domain: '', web_domain: '', is_prod: false },
@@ -3051,6 +3053,83 @@ const {
   storageKey: STORAGE_KEY, router,
 })
 
+// ── Step 5 跨仓服务拓扑确认 ──────────────────────────────────────────
+// 路径解析与部署保持相同优先级，并复用 useRepoScan 的 resolveCloneDest：
+// 显式本地路径 → umbrella parent_path → per-repo clone 目标 → 全局 reposRoot。
+// 这里只构造本机扫描上下文，不写入 YAML；YAML 仅保存人工 overrides。
+const topologyRepoPaths = computed<Record<string, string>>(() => {
+  const paths: Record<string, string> = {}
+  const effectiveRoot = (reposRootInput.value.trim() || resolvedReposRoot.value).replace(/\/$/, '')
+  const resolveRoot = (r: RepoItem): string => {
+    const explicit = (r._localPath || '').trim()
+    if (explicit) return explicit
+    const cloneDest = resolveCloneDest(r)
+    if (cloneDest) return cloneDest
+    return effectiveRoot && r.name.trim() ? `${effectiveRoot}/${r.name.trim()}` : ''
+  }
+
+  for (const repo of repos) {
+    if (!repo.name.trim() || repo.parent_repo?.trim()) continue
+    const path = resolveRoot(repo)
+    if (path) paths[repo.name.trim()] = path
+  }
+  for (const repo of repos) {
+    const name = repo.name.trim()
+    const parentName = repo.parent_repo?.trim() || ''
+    if (!name || !parentName) continue
+    const explicit = (repo._localPath || '').trim()
+    if (explicit) {
+      paths[name] = explicit
+      continue
+    }
+    const parentPath = paths[parentName]
+    if (parentPath) {
+      const mount = repo.parent_path?.trim() || name
+      paths[name] = `${parentPath.replace(/\/$/, '')}/${mount}`
+      continue
+    }
+    const fallback = resolveRoot(repo)
+    if (fallback) paths[name] = fallback
+  }
+  return paths
+})
+
+function isTopologyServiceNode(repo: RepoItem): boolean {
+  const role = repo.role || 'backend'
+  return role !== 'common-lib' && role !== 'infra' && role !== 'docs'
+}
+
+const showServiceTopology = computed(() => repos.filter(repo => (
+  isTopologyServiceNode(repo) && !!topologyRepoPaths.value[repo.name.trim()]
+)).length >= 2)
+
+const {
+  snapshot: serviceTopologySnapshot,
+  loading: serviceTopologyLoading,
+  error: serviceTopologyError,
+  refresh: refreshServiceTopology,
+  clear: clearServiceTopology,
+} = useServiceTopology({
+  overrides: toRef(serviceTopology, 'overrides'),
+  yamlText: generateYAML,
+  repoPaths: () => topologyRepoPaths.value,
+  blocked: () => deployLoading.value || codeGraphRetrying.value,
+})
+
+function updateServiceTopologyOverrides(value: ServiceTopologyState['overrides']) {
+  serviceTopology.overrides = value
+}
+
+async function runOneClickDeployExclusively() {
+  if (serviceTopologyLoading.value) return
+  await runOneClickDeploy()
+}
+
+async function retryCodeGraphExclusively() {
+  if (serviceTopologyLoading.value) return
+  await retryCodeGraph()
+}
+
 const configTypeOptions = ['nacos', 'apollo', 'consul', 'env-vars', 'kuboard', 'one2all', 'none']
 
 const configTypeDescriptions: Record<string, string> = {
@@ -3299,6 +3378,16 @@ provide(WizardStoreKey, {
       />
       <button class="btn" @click="addRepo">+ 添加仓库</button>
       <CodeIntelligenceToggle v-model="codeIntelligence.enabled" />
+      <ServiceTopologyPanel
+        v-if="showServiceTopology"
+        :snapshot="serviceTopologySnapshot"
+        :overrides="serviceTopology.overrides"
+        :loading="serviceTopologyLoading"
+        :disabled="deployLoading || codeGraphRetrying"
+        :error="serviceTopologyError"
+        @update:overrides="updateServiceTopologyOverrides"
+        @refresh="refreshServiceTopology"
+      />
     </div>
 
     <!-- Step 5 -->
@@ -3423,11 +3512,11 @@ provide(WizardStoreKey, {
       :deploy-progress-line="deployProgressLine"
       :deploy-error="deployError"
       :code-graph-report="codeGraphReport"
-      :code-graph-retrying="codeGraphRetrying"
+      :code-graph-retrying="codeGraphRetrying || serviceTopologyLoading"
       :code-graph-retry-feedback="codeGraphRetryFeedback"
       :code-graph-retry-state="codeGraphRetryState"
-      @run-deploy="runOneClickDeploy"
-      @retry-codegraph="retryCodeGraph"
+      @run-deploy="runOneClickDeployExclusively"
+      @retry-codegraph="retryCodeGraphExclusively"
     />
 
     <!-- Navigation buttons - 欢迎页(Step 1)隐藏,因为它有两个大选择按钮做导航,

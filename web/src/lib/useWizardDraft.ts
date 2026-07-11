@@ -21,6 +21,7 @@ import type { DSByService, DSScanState } from './useDataStoreState'
 import type { K8sRtWorkloadState } from './useK8sRtWorkloads'
 import type { RepoScanItem } from './useRepoScan'
 import type { ObsAccessMode } from './useObsAccessMode'
+import type { CodeIntelligenceState, ServiceTopologyState } from './yamlGenerator'
 
 export const INIT_WIZARD_KEY = 'tsf-init-wizard-v1'
 export const INIT_KUBOARD_STATE_KEY = 'tsf-init-wizard-kuboard-state-v1'
@@ -98,6 +99,10 @@ export interface WizardDraft {
   repos?: RepoScanItem[]
   /** repoName → 真实分支列表(saved 持久化让重开向导时 select 仍有 options) */
   repoBranchesMap?: Record<string, string[]>
+  /** CodeGraph 代码智能查询能力；老 draft 缺失时默认关闭 */
+  codeIntelligence?: CodeIntelligenceState
+  /** 人工确认/拒绝/新增的跨服务拓扑覆盖；扫描端点与候选边不持久化 */
+  serviceTopology?: ServiceTopologyState
 
   // ── Step 5 配置源(多源 schema)──
   /** 老 single-source 字段;新 schema 走 enabledSourceTypes,但保留兼容老 draft */

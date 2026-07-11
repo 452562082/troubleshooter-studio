@@ -238,6 +238,87 @@ func TestInstallNativeOpenclaw_FreshInstall(t *testing.T) {
 	}
 }
 
+func TestInstallNativeOpenclaw_CodeGraphEnsureFailureIsNonBlocking(t *testing.T) {
+	oldGOOS := codeGraphGOOS
+	codeGraphGOOS = "unsupported"
+	t.Cleanup(func() { codeGraphGOOS = oldGOOS })
+
+	cfg := nacosCfg()
+	cfg.Infrastructure = config.Infrastructure{}
+	cfg.CodeIntelligence = config.CodeIntelligence{Enabled: true, Provider: "codegraph"}
+	staging, fakeHome := setupOpenclawStaging(t, cfg)
+	ocConfigPath := filepath.Join(fakeHome, ".openclaw", "openclaw.json")
+	if err := os.MkdirAll(filepath.Dir(ocConfigPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, ocConfigPath, map[string]any{
+		"mcp": map[string]any{
+			"servers": map[string]any{
+				"shop-codegraph": map[string]any{"command": "/stale/codegraph"},
+			},
+		},
+	})
+
+	stderrPath := filepath.Join(t.TempDir(), "stderr.log")
+	stderr, err := os.Create(stderrPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = stderr
+	t.Cleanup(func() {
+		os.Stderr = oldStderr
+		_ = stderr.Close()
+	})
+
+	installErr := InstallNativeOpenclaw(context.Background(), staging, InstallOpenclawOptions{SkipGatewayRestart: true})
+	os.Stderr = oldStderr
+	if err := stderr.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if installErr != nil {
+		t.Fatalf("InstallNativeOpenclaw() error = %v", installErr)
+	}
+	stderrBytes, err := os.ReadFile(stderrPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(stderrBytes); !strings.Contains(got, "CodeGraph 安装失败,跳过 MCP 注册并启用 rg/read fallback") {
+		t.Fatalf("missing CodeGraph fallback warning on stderr: %q", got)
+	}
+	root := readJSON(t, ocConfigPath)
+	servers := getMap(root, "mcp", "servers")
+	if _, exists := servers["shop-codegraph"]; exists {
+		t.Fatalf("CodeGraph server registered after ensure failure: %#v", servers)
+	}
+}
+
+func TestInstallNativeOpenclaw_CodeGraphDisabledRemovesStaleServer(t *testing.T) {
+	cfg := nacosCfg()
+	cfg.Infrastructure = config.Infrastructure{}
+	staging, fakeHome := setupOpenclawStaging(t, cfg)
+	ocConfigPath := filepath.Join(fakeHome, ".openclaw", "openclaw.json")
+	if err := os.MkdirAll(filepath.Dir(ocConfigPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, ocConfigPath, map[string]any{
+		"mcp": map[string]any{
+			"servers": map[string]any{
+				"shop-codegraph": map[string]any{"command": "/stale/codegraph"},
+			},
+		},
+	})
+
+	if err := InstallNativeOpenclaw(context.Background(), staging, InstallOpenclawOptions{SkipGatewayRestart: true}); err != nil {
+		t.Fatalf("InstallNativeOpenclaw() error = %v", err)
+	}
+	root := readJSON(t, ocConfigPath)
+	servers := getMap(root, "mcp", "servers")
+	if _, exists := servers["shop-codegraph"]; exists {
+		t.Fatalf("disabled CodeGraph left stale server registered: %#v", servers)
+	}
+}
+
 func addOpenclawStagingSkills(t *testing.T, staging string, names []string) {
 	t.Helper()
 	wsTpl := filepath.Join(staging, "templates", "workspace-template")

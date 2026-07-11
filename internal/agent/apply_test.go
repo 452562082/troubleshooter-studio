@@ -1,14 +1,23 @@
 package agent
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/xiaolong/troubleshooter-studio/internal/analyzerpipe"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 	"github.com/xiaolong/troubleshooter-studio/internal/generator"
+	"github.com/xiaolong/troubleshooter-studio/internal/topology"
 )
 
 // projectRoot 定位 troubleshooter-studio 仓库根(tests 在 internal/agent)。
@@ -230,6 +239,179 @@ func TestImportAndApply_OpenclawProducesStaging(t *testing.T) {
 	}
 }
 
+func TestApply_AutoAnalyzeTopologyReachesGeneratedWorkspace(t *testing.T) {
+	yamlBytes, repoPaths := applyTopologyFixture(t)
+	cfg, err := config.LoadFromBytes(yamlBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := t.TempDir()
+	g := generator.New(cfg, filepath.Join(projectRoot(t), "templates"), stage)
+	g.TroubleshooterYAMLSource = yamlBytes
+	if err := g.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	agentPath := filepath.Join(stage, "templates", "workspace-template")
+
+	_, err = Apply(discover.DiscoveredAgent{
+		Meta: discover.Meta{SchemaVersion: 1, SystemID: "mall", SystemName: "Mall", Target: "openclaw"},
+		Path: agentPath,
+	}, ApplyOptions{
+		NewYAML:        yamlBytes,
+		TemplateRoot:   filepath.Join(projectRoot(t), "templates"),
+		RepoLocalPaths: repoPaths,
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	refs := filepath.Join(agentPath, "skills", "routing", "references")
+	assertGeneratedTopologyEdge(t, filepath.Join(refs, "service-topology.yaml"))
+	assertGeneratedTopologyEvidence(t, filepath.Join(refs, "endpoint-evidence.yaml"))
+	assertGeneratedTopologySource(t, filepath.Join(agentPath, discover.MetaFilename), yamlBytes)
+}
+
+func TestImportAndApply_AutoAnalyzeTopologyReachesGeneratedStaging(t *testing.T) {
+	yamlBytes, repoPaths := applyTopologyFixture(t)
+	dest := t.TempDir()
+	_, err := ImportAndApply(yamlBytes, "openclaw", dest, ApplyOptions{
+		TemplateRoot:   filepath.Join(projectRoot(t), "templates"),
+		RepoLocalPaths: repoPaths,
+	})
+	if err != nil {
+		t.Fatalf("ImportAndApply: %v", err)
+	}
+	workspace := filepath.Join(dest, "templates", "workspace-template")
+	refs := filepath.Join(workspace, "skills", "routing", "references")
+	assertGeneratedTopologyEdge(t, filepath.Join(refs, "service-topology.yaml"))
+	assertGeneratedTopologyEvidence(t, filepath.Join(refs, "endpoint-evidence.yaml"))
+	assertGeneratedTopologySource(t, filepath.Join(workspace, discover.MetaFilename), yamlBytes)
+}
+
+func applyTopologyFixture(t *testing.T) ([]byte, map[string]string) {
+	t.Helper()
+	yamlBytes, err := os.ReadFile(filepath.Join(projectRoot(t), "examples", "three-tier-troubleshooter.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	overrides := `service_topology:
+  overrides:
+    - action: confirm
+      from_service: mall-web
+      to_service: mall-bff
+      protocol: http
+      method: GET
+      path: /api/orders
+    - action: reject
+      from_service: mall-web
+      to_service: mall-order
+      protocol: http
+      method: GET
+      path: /candidate-only
+`
+	source := strings.Replace(string(yamlBytes), "service_topology:\n  overrides: []\n", overrides, 1)
+	if source == string(yamlBytes) {
+		t.Fatal("failed to inject service_topology overrides")
+	}
+	root := t.TempDir()
+	web := filepath.Join(root, "mall-web")
+	bff := filepath.Join(root, "mall-bff")
+	order := filepath.Join(root, "mall-order")
+	for _, path := range []string{web, bff, order} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	repoPaths := map[string]string{"mall-web": web, "mall-bff": bff, "mall-order": order}
+	cfg, err := config.LoadFromBytes([]byte(source))
+	if err != nil {
+		t.Fatalf("load topology source fixture: %v", err)
+	}
+	seedApplyTopologyCache(t, cfg, repoPaths, &analyzerpipe.Result{Topology: topology.Snapshot{
+		SchemaVersion: topology.SchemaVersion,
+		Services: []topology.ServiceDescriptor{
+			{Repo: "mall-web", Service: "mall-web", Role: config.RoleFrontend},
+			{Repo: "mall-bff", Service: "mall-bff", Role: config.RoleGateway},
+			{Repo: "mall-order", Service: "mall-order", Role: config.RoleBackend},
+		},
+		Edges: []topology.CandidateEdge{
+			{FromEndpoint: "mall-web:out", ToEndpoint: "mall-bff:in", FromService: "mall-web", ToService: "mall-bff", Protocol: "http", Method: "GET", Path: "/api/orders", Status: "automatic", Confidence: .98, Reasons: []string{"method_path_exact"}},
+			{FromEndpoint: "mall-bff:out", ToEndpoint: "mall-order:in", FromService: "mall-bff", ToService: "mall-order", Protocol: "http", Method: "POST", Path: "/internal/orders", Status: "automatic", Confidence: .97, Reasons: []string{"method_path_exact"}},
+			{FromEndpoint: "mall-bff:out", ToEndpoint: "mall-order:in", FromService: "mall-bff", ToService: "mall-order", Protocol: "http", Method: "POST", Path: "/candidate-only", Status: "candidate", Confidence: .74, Reasons: []string{"candidate_cache"}},
+			{FromEndpoint: "mall-web:out", ToEndpoint: "mall-order:in", FromService: "mall-web", ToService: "mall-order", Protocol: "http", Method: "GET", Path: "/rejected-only", Status: "rejected", Confidence: .91, Reasons: []string{"candidate_cache", "human_override_reject"}},
+		},
+	}})
+	return []byte(source), repoPaths
+}
+
+func seedApplyTopologyCache(t *testing.T, cfg *config.SystemConfig, repoPaths map[string]string, result *analyzerpipe.Result) {
+	t.Helper()
+	key := autoAnalyzeCacheKey(cfg, repoPaths)
+	autoAnalyzeCacheMu.Lock()
+	previous, existed := autoAnalyzeCache[key]
+	autoAnalyzeCache[key] = &autoAnalyzeCacheEntry{result: result, at: time.Now()}
+	autoAnalyzeCacheMu.Unlock()
+	t.Cleanup(func() {
+		autoAnalyzeCacheMu.Lock()
+		defer autoAnalyzeCacheMu.Unlock()
+		if existed {
+			autoAnalyzeCache[key] = previous
+		} else {
+			delete(autoAnalyzeCache, key)
+		}
+	})
+}
+
+func assertGeneratedTopologyEdge(t *testing.T, path string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read generated topology: %v", err)
+	}
+	for _, want := range []string{`from: "mall-web"`, `to: "mall-order"`, `status: "automatic"`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("generated topology missing %q:\n%s", want, data)
+		}
+	}
+}
+
+func assertGeneratedTopologyEvidence(t *testing.T, path string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read generated topology evidence: %v", err)
+	}
+	for _, want := range []string{`status: "candidate"`, `status: "rejected"`, `"candidate_cache"`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("generated topology evidence missing %q:\n%s", want, data)
+		}
+	}
+}
+
+func assertGeneratedTopologySource(t *testing.T, path string, source []byte) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read generated tshoot.json: %v", err)
+	}
+	var meta discover.Meta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("parse generated tshoot.json: %v", err)
+	}
+	if !bytes.Equal([]byte(meta.TroubleshooterYAML), source) {
+		t.Fatalf("embedded troubleshooter_yaml changed source bytes:\n--- got ---\n%s\n--- want ---\n%s", meta.TroubleshooterYAML, source)
+	}
+	for _, want := range []string{"service_topology:", "action: confirm", "action: reject"} {
+		if !bytes.Contains([]byte(meta.TroubleshooterYAML), []byte(want)) {
+			t.Fatalf("embedded troubleshooter_yaml missing source override %q:\n%s", want, meta.TroubleshooterYAML)
+		}
+	}
+	for _, forbidden := range []string{"candidate_cache", `status: "candidate"`, `status: "rejected"`, "/rejected-only"} {
+		if bytes.Contains([]byte(meta.TroubleshooterYAML), []byte(forbidden)) {
+			t.Fatalf("auto-analyze candidate evidence %q leaked into troubleshooter_yaml:\n%s", forbidden, meta.TroubleshooterYAML)
+		}
+	}
+}
+
 func TestImportAndApply_DryRunNoWrite(t *testing.T) {
 	dest := t.TempDir()
 	yamlBytes, _ := os.ReadFile(filepath.Join(projectRoot(t), "examples", "shop-troubleshooter.yaml"))
@@ -252,4 +434,280 @@ func TestImportAndApply_DryRunNoWrite(t *testing.T) {
 	if res.NeedsRestartHint == "" {
 		t.Error("DryRun 应该给出后续步骤的提示")
 	}
+}
+
+func TestApply_CodeGraphDisabledDoesNothing(t *testing.T) {
+	stage := t.TempDir()
+	agentPath, yamlBytes := genExisting(t, stage)
+	ag := discover.DiscoveredAgent{
+		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "openclaw"},
+		Path: agentPath,
+	}
+	previousEnsure := ensureCodeGraphForDeploy
+	previousPrepare := prepareCodeGraphForDeploy
+	ensureCodeGraphForDeploy = func(func(string)) (string, error) {
+		t.Fatal("disabled CodeGraph deployment called installer")
+		return "", nil
+	}
+	prepareCodeGraphForDeploy = func(context.Context, CodeGraphIndexOptions) CodeGraphIndexReport {
+		t.Fatal("disabled CodeGraph deployment called index manager")
+		return CodeGraphIndexReport{}
+	}
+	t.Cleanup(func() {
+		ensureCodeGraphForDeploy = previousEnsure
+		prepareCodeGraphForDeploy = previousPrepare
+	})
+
+	result, err := Apply(ag, ApplyOptions{
+		NewYAML:      yamlBytes,
+		TemplateRoot: filepath.Join(projectRoot(t), "templates"),
+	})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if result.CodeGraph != nil {
+		t.Fatalf("CodeGraph report = %#v, want nil", result.CodeGraph)
+	}
+}
+
+func TestApply_CodeGraphFailureWarnsAndStillDeploys(t *testing.T) {
+	stage := t.TempDir()
+	agentPath, yamlBytes := genExisting(t, stage)
+	yamlBytes = enableCodeGraphForApplyTest(t, yamlBytes)
+	ag := discover.DiscoveredAgent{
+		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "openclaw"},
+		Path: agentPath,
+	}
+	previousEnsure := ensureCodeGraphForDeploy
+	previousPrepare := prepareCodeGraphForDeploy
+	ensureCodeGraphForDeploy = func(func(string)) (string, error) {
+		return "", errors.New("checksum mismatch")
+	}
+	prepareCodeGraphForDeploy = func(context.Context, CodeGraphIndexOptions) CodeGraphIndexReport {
+		t.Fatal("index manager called after installer failure")
+		return CodeGraphIndexReport{}
+	}
+	t.Cleanup(func() {
+		ensureCodeGraphForDeploy = previousEnsure
+		prepareCodeGraphForDeploy = previousPrepare
+	})
+
+	var logs []string
+	result, err := Apply(ag, ApplyOptions{
+		NewYAML:      yamlBytes,
+		TemplateRoot: filepath.Join(projectRoot(t), "templates"),
+		OnLog:        func(line string) { logs = append(logs, line) },
+	})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if result == nil || result.CodeGraph == nil {
+		t.Fatalf("Apply() result = %#v, want successful result with CodeGraph fallback report", result)
+	}
+	if result.CodeGraph.Total != 1 {
+		t.Fatalf("CodeGraph total = %d, want 1", result.CodeGraph.Total)
+	}
+	joined := strings.Join(logs, "\n")
+	if !strings.Contains(joined, "checksum mismatch") || !strings.Contains(joined, "rg/read fallback") {
+		t.Fatalf("logs = %q, want checksum failure and rg/read fallback", joined)
+	}
+}
+
+func TestApply_CodeGraphReportReturned(t *testing.T) {
+	stage := t.TempDir()
+	agentPath, yamlBytes := genExisting(t, stage)
+	yamlBytes = enableCodeGraphForApplyTest(t, yamlBytes)
+	ag := discover.DiscoveredAgent{
+		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "openclaw"},
+		Path: agentPath,
+	}
+	previousEnsure := ensureCodeGraphForDeploy
+	previousPrepare := prepareCodeGraphForDeploy
+	ensureCodeGraphForDeploy = func(func(string)) (string, error) { return "/fake/codegraph", nil }
+	prepareCodeGraphForDeploy = func(_ context.Context, opts CodeGraphIndexOptions) CodeGraphIndexReport {
+		if opts.BinaryPath != "/fake/codegraph" || opts.SystemID != "shop" {
+			t.Fatalf("index options = %#v", opts)
+		}
+		return CodeGraphIndexReport{
+			Ready: 1,
+			Total: 1,
+			Repos: []CodeGraphRepoResult{{
+				Name: "order-service", Status: "ready", FileCount: 12, NodeCount: 34, EdgeCount: 56,
+			}},
+		}
+	}
+	t.Cleanup(func() {
+		ensureCodeGraphForDeploy = previousEnsure
+		prepareCodeGraphForDeploy = previousPrepare
+	})
+
+	result, err := Apply(ag, ApplyOptions{
+		NewYAML:      yamlBytes,
+		TemplateRoot: filepath.Join(projectRoot(t), "templates"),
+	})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	codeGraph, ok := fields["codegraph"].(map[string]any)
+	if !ok || codeGraph["ready"] != float64(1) || codeGraph["total"] != float64(1) {
+		t.Fatalf("serialized codegraph = %#v", fields["codegraph"])
+	}
+	repos, ok := codeGraph["repos"].([]any)
+	if !ok || len(repos) != 1 {
+		t.Fatalf("serialized repos = %#v", codeGraph["repos"])
+	}
+	repo := repos[0].(map[string]any)
+	if repo["file_count"] != float64(12) || repo["node_count"] != float64(34) || repo["edge_count"] != float64(56) {
+		t.Fatalf("serialized repo counts = %#v", repo)
+	}
+}
+
+func TestApply_CodeGraphDryRunDoesNothing(t *testing.T) {
+	stage := t.TempDir()
+	agentPath, yamlBytes := genExisting(t, stage)
+	yamlBytes = enableCodeGraphForApplyTest(t, yamlBytes)
+	ag := discover.DiscoveredAgent{
+		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "openclaw"},
+		Path: agentPath,
+	}
+	previousEnsure := ensureCodeGraphForDeploy
+	previousPrepare := prepareCodeGraphForDeploy
+	ensureCodeGraphForDeploy = func(func(string)) (string, error) {
+		t.Fatal("dry-run called installer")
+		return "", nil
+	}
+	prepareCodeGraphForDeploy = func(context.Context, CodeGraphIndexOptions) CodeGraphIndexReport {
+		t.Fatal("dry-run called index manager")
+		return CodeGraphIndexReport{}
+	}
+	t.Cleanup(func() {
+		ensureCodeGraphForDeploy = previousEnsure
+		prepareCodeGraphForDeploy = previousPrepare
+	})
+
+	result, err := Apply(ag, ApplyOptions{
+		NewYAML:      yamlBytes,
+		TemplateRoot: filepath.Join(projectRoot(t), "templates"),
+		DryRun:       true,
+	})
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if result.CodeGraph != nil {
+		t.Fatalf("CodeGraph report = %#v, want nil", result.CodeGraph)
+	}
+}
+
+func TestImportAndApply_MultiTargetCacheAvoidsSecondIndex(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	yamlBytes, err := os.ReadFile(filepath.Join(projectRoot(t), "examples", "shop-troubleshooter.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	yamlBytes = enableCodeGraphForApplyTest(t, yamlBytes)
+	repoRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoRoot, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitForCodeGraphTest(t, "init", "-q", repoRoot)
+	runGitForCodeGraphTest(t, "-C", repoRoot, "add", "main.go")
+	runGitForCodeGraphTest(t, "-C", repoRoot, "-c", "user.name=CodeGraph Test", "-c", "user.email=codegraph@example.invalid", "commit", "-qm", "initial")
+
+	const systemID = "shop"
+	InvalidateCodeGraphIndexCache(systemID)
+	t.Cleanup(func() { InvalidateCodeGraphIndexCache(systemID) })
+	previousEnsure := ensureCodeGraphForDeploy
+	previousPrepare := prepareCodeGraphForDeploy
+	previousRunner := runCodeGraphCommand
+	previousInstallNative := installNativeForApply
+	previousMergeMCP := mergeMCPIntoIDESettingsForApply
+	ensureCodeGraphForDeploy = func(func(string)) (string, error) { return "/fake/codegraph", nil }
+	prepareCodeGraphForDeploy = PrepareCodeGraphIndexes
+	var nativeInstalls atomic.Int32
+	installNativeForApply = func(_ string, target string) error {
+		if target != "claude-code" {
+			t.Fatalf("native install target = %q, want claude-code", target)
+		}
+		nativeInstalls.Add(1)
+		return nil
+	}
+	var mcpMerges atomic.Int32
+	mergeMCPIntoIDESettingsForApply = func(target string, _ *config.SystemConfig, _ map[string]string, _ func(string)) error {
+		if target != "claude-code" {
+			t.Fatalf("MCP merge target = %q, want claude-code", target)
+		}
+		mcpMerges.Add(1)
+		return nil
+	}
+	var commands atomic.Int32
+	runCodeGraphCommand = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		call := commands.Add(1)
+		if len(args) > 0 && args[0] == "status" {
+			if call == 1 {
+				return codeGraphStatusJSON(repoRoot, false, 0, 0, 0, "missing"), nil
+			}
+			return codeGraphStatusJSON(repoRoot, true, 1, 2, 1, "complete"), nil
+		}
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		ensureCodeGraphForDeploy = previousEnsure
+		prepareCodeGraphForDeploy = previousPrepare
+		runCodeGraphCommand = previousRunner
+		installNativeForApply = previousInstallNative
+		mergeMCPIntoIDESettingsForApply = previousMergeMCP
+	})
+
+	opts := ApplyOptions{
+		TemplateRoot:   filepath.Join(projectRoot(t), "templates"),
+		RepoLocalPaths: map[string]string{"order-service": repoRoot},
+	}
+	first, err := ImportAndApply(yamlBytes, "openclaw", t.TempDir(), opts)
+	if err != nil {
+		t.Fatalf("first ImportAndApply() error = %v", err)
+	}
+	firstCommandCount := commands.Load()
+	if firstCommandCount == 0 || first.CodeGraph == nil || first.CodeGraph.Ready != 1 {
+		t.Fatalf("first result = %#v, commands = %d", first, firstCommandCount)
+	}
+	second, err := ImportAndApply(yamlBytes, "claude-code", t.TempDir(), opts)
+	if err != nil {
+		t.Fatalf("second ImportAndApply() error = %v", err)
+	}
+	if first.Target != "openclaw" || second.Target != "claude-code" {
+		t.Fatalf("deployment targets = %q then %q", first.Target, second.Target)
+	}
+	if nativeInstalls.Load() != 1 || mcpMerges.Load() != 1 {
+		t.Fatalf("IDE seams called native=%d mcp=%d, want 1 each", nativeInstalls.Load(), mcpMerges.Load())
+	}
+	for _, userConfigPath := range []string{filepath.Join(home, ".claude"), filepath.Join(home, ".claude.json")} {
+		if _, err := os.Stat(userConfigPath); !os.IsNotExist(err) {
+			t.Fatalf("stubbed IDE deployment mutated user config %s: %v", userConfigPath, err)
+		}
+	}
+	if commands.Load() != firstCommandCount {
+		t.Fatalf("commands after second deployment = %d, want cache reuse at %d", commands.Load(), firstCommandCount)
+	}
+	if second.CodeGraph == nil || !reflect.DeepEqual(second.CodeGraph, first.CodeGraph) {
+		t.Fatalf("second report = %#v, first = %#v", second.CodeGraph, first.CodeGraph)
+	}
+}
+
+func enableCodeGraphForApplyTest(t *testing.T, yamlBytes []byte) []byte {
+	t.Helper()
+	const disabled = "code_intelligence:\n  enabled: false"
+	const enabled = "code_intelligence:\n  enabled: true"
+	if !strings.Contains(string(yamlBytes), disabled) {
+		t.Fatal("test fixture does not contain disabled code_intelligence block")
+	}
+	return []byte(strings.Replace(string(yamlBytes), disabled, enabled, 1))
 }

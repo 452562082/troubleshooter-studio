@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import yaml from 'js-yaml'
-import { generateYAML, type YAMLGenContext } from './yamlGenerator'
+import { generateYAML, type ServiceTopologyState, type YAMLGenContext } from './yamlGenerator'
+import { importServiceTopologyOverrides } from './yamlImporter'
 
 // 最小可工作 ctx 工厂:测试用 stub。各测试按需 spread + 覆盖具体字段。
 function makeCtx(overrides: Partial<YAMLGenContext> = {}): YAMLGenContext {
@@ -10,6 +11,8 @@ function makeCtx(overrides: Partial<YAMLGenContext> = {}): YAMLGenContext {
     agentNameDefault: 'Shop 排障机器人',
     targetModels: { openclaw: 'anthropic/claude-sonnet-4-6' },
     enabledTargets: { openclaw: true, 'claude-code': false, cursor: false, codex: false },
+    codeIntelligence: { enabled: false, provider: 'codegraph' },
+    serviceTopology: { overrides: [] },
     enabledObservability: {},
     environments: [{ id: 'dev', api_domain: 'api-dev.shop', web_domain: '', is_prod: false }],
     repos: [{
@@ -55,6 +58,68 @@ function makeCtx(overrides: Partial<YAMLGenContext> = {}): YAMLGenContext {
 }
 
 describe('generateYAML', () => {
+  it('omits code_intelligence by default', () => {
+    expect(generateYAML(makeCtx())).not.toContain('code_intelligence:')
+  })
+
+  it('emits enabled codegraph and its skill', () => {
+    const ctx = makeCtx({ codeIntelligence: { enabled: true, provider: 'codegraph' } })
+    ctx.deriveSkillsWhitelist = () => ['routing', 'incident-investigator', 'code-intelligence-query']
+    expect(generateYAML(ctx)).toContain('code_intelligence:\n  enabled: true\n  provider: codegraph')
+  })
+
+  it('emits only service topology overrides and excludes scan candidates', () => {
+    const serviceTopology: ServiceTopologyState = {
+      overrides: [
+        { action: 'confirm', fromService: 'web', toService: 'bff', protocol: 'http', method: 'GET', path: '/api/orders' },
+        { action: 'reject', fromService: 'bff', toService: 'legacy', protocol: 'grpc', rpcMethod: 'legacy.Order/Get' },
+        { action: 'add', fromService: 'bff', toService: 'order', protocol: 'http', method: 'POST', path: '/internal/orders' },
+      ],
+    }
+    Object.assign(serviceTopology, {
+      endpoints: [{ id: 'runtime-only-endpoint' }],
+      edges: [{ status: 'candidate', confidence: 0.76 }],
+    })
+
+    const parsed = yaml.load(generateYAML(makeCtx({ serviceTopology }))) as Record<string, any>
+    expect(parsed.service_topology).toEqual({
+      overrides: [
+        { action: 'confirm', from_service: 'web', to_service: 'bff', protocol: 'http', method: 'GET', path: '/api/orders' },
+        { action: 'reject', from_service: 'bff', to_service: 'legacy', protocol: 'grpc', rpc_method: 'legacy.Order/Get' },
+        { action: 'add', from_service: 'bff', to_service: 'order', protocol: 'http', method: 'POST', path: '/internal/orders' },
+      ],
+    })
+    expect(JSON.stringify(parsed.service_topology)).not.toContain('runtime-only-endpoint')
+    expect(JSON.stringify(parsed.service_topology)).not.toContain('candidate')
+  })
+
+  it('round-trips uppercase HTTP and gRPC override semantics through imported state', () => {
+    const serviceTopology: ServiceTopologyState = {
+      overrides: importServiceTopologyOverrides([
+        {
+          action: 'confirm', from_service: 'web', to_service: 'files',
+          protocol: 'HTTP', method: 'get', path: '/files/:path*',
+        },
+        {
+          action: 'reject', from_service: 'web', to_service: 'orders',
+          protocol: 'GRPC', rpc_method: 'orders.v1.OrderService/GetOrder',
+        },
+      ]),
+    }
+
+    const parsed = yaml.load(generateYAML(makeCtx({ serviceTopology }))) as Record<string, any>
+    expect(parsed.service_topology.overrides).toEqual([
+      {
+        action: 'confirm', from_service: 'web', to_service: 'files',
+        protocol: 'http', method: 'GET', path: '/files/:path*',
+      },
+      {
+        action: 'reject', from_service: 'web', to_service: 'orders',
+        protocol: 'grpc', rpc_method: 'orders.v1.OrderService/GetOrder',
+      },
+    ])
+  })
+
   it('emits parseable yaml for minimal context', () => {
     const out = generateYAML(makeCtx())
     const parsed = yaml.load(out) as any

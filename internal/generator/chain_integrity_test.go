@@ -17,6 +17,10 @@ import (
 //   - skill 目录相对:  `python3 scripts/<f>.py`(同 skill 自带脚本)
 var scriptRefRe = regexp.MustCompile(`python3 +((?:skills|scripts)/[^\s'"` + "`" + `]+\.py)`)
 
+// skillFileRefRe 抓 skill 文档里 workspace 根相对的静态文件路径。只匹配带扩展名的
+// literal，避免把 skills/<skill>/ 说明性目录或含占位符的示例误当成真实文件。
+var skillFileRefRe = regexp.MustCompile(`skills/[A-Za-z0-9._/-]+\.(?:md|yaml|py)`)
+
 // TestSkillScriptPathsExist 渲染一份完整 fixture,遍历所有生成的 SKILL.md,
 // 断言里头引用的每个 python 脚本路径在产物里真实存在。
 //
@@ -41,6 +45,39 @@ func TestSkillScriptPathsExist(t *testing.T) {
 		cfg.Generation.SkillsWhitelist = []string{"routing", "incident-investigator", "config-executor", "diagram-generator"}
 		assertSkillScriptPathsExist(t, cfg)
 	})
+
+	// 场景 3:CodeGraph opt-in skill 引用 routing 的三份静态映射；每条 literal 路径
+	// 必须能在同一份生成 workspace 中解析，避免文档路径和产物布局漂移。
+	t.Run("code-intelligence-static-paths", func(t *testing.T) {
+		cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
+		cfg.CodeIntelligence = config.CodeIntelligence{Enabled: true, Provider: "codegraph"}
+		cfg.Generation.SkillsWhitelist = []string{"routing", "code-intelligence-query"}
+		assertCodeIntelligenceFilePathsExist(t, cfg)
+	})
+}
+
+func assertCodeIntelligenceFilePathsExist(t *testing.T, cfg *config.SystemConfig) {
+	t.Helper()
+	out := t.TempDir()
+	if err := New(cfg, filepath.Join(projectRoot(t), "templates"), out).Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	wsRoot := filepath.Join(out, "templates/workspace-template")
+	skillPath := filepath.Join(wsRoot, "skills/code-intelligence-query/SKILL.md")
+	data, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("read generated CodeGraph skill: %v", err)
+	}
+
+	refs := skillFileRefRe.FindAllString(string(data), -1)
+	if len(refs) == 0 {
+		t.Fatal("CodeGraph skill has no literal skills/... file references")
+	}
+	for _, ref := range refs {
+		if _, err := os.Stat(filepath.Join(wsRoot, filepath.FromSlash(ref))); err != nil {
+			t.Errorf("CodeGraph skill references missing file %q: %v", ref, err)
+		}
+	}
 }
 
 func assertSkillScriptPathsExist(t *testing.T, cfg *config.SystemConfig) {
@@ -132,4 +169,206 @@ print(json.dumps(m.parse_dep_map(block)['commerce']))
 			t.Errorf("parse_dep_map 没从 block 风格解析出 %q(Bug1 回归):%s", want, got)
 		}
 	}
+}
+
+func TestServiceTopologyChainIntegrity(t *testing.T) {
+	t.Run("generated-with-routing-and-multiple-service-repos", func(t *testing.T) {
+		cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+		cfg.Generation.SkillsWhitelist = []string{
+			"routing", "service-topology-query", "incident-investigator", "frontend-repro-investigator",
+		}
+		out := t.TempDir()
+		g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+		g.RepoLocalPaths = existingServiceRepoPaths(t, cfg, 2)
+		if err := g.Generate(); err != nil {
+			t.Fatalf("generate: %v", err)
+		}
+
+		wsRoot := filepath.Join(out, "templates/workspace-template")
+		skill := readFile(t, filepath.Join(wsRoot, "skills/service-topology-query/SKILL.md"))
+		for _, want := range []string{
+			"skills/routing/references/service-topology.yaml",
+			"skills/routing/references/endpoint-evidence.yaml",
+			"拓扑只作为导航证据",
+			"trace",
+			"candidate",
+			"stale",
+			"code-intelligence-query",
+			"rg",
+			"异步事件",
+			"{wildcard}",
+			"首跳只返回",
+			"缺失或格式错误",
+		} {
+			if !strings.Contains(skill, want) {
+				t.Errorf("service topology skill missing %q:\n%s", want, skill)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(wsRoot, "skills/service-topology-query/scripts/query.py")); err != nil {
+			t.Fatalf("generated query script missing: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(wsRoot, "skills/service-topology-query/scripts/test_query.py")); !os.IsNotExist(err) {
+			t.Fatalf("python test must not leak into generated workspace: %v", err)
+		}
+
+		frontend := readFile(t, filepath.Join(wsRoot, "skills/frontend-repro-investigator/SKILL.md"))
+		for _, want := range []string{
+			"python3 skills/service-topology-query/scripts/query.py",
+			"--method <失败请求 method>",
+			"--path <失败请求 path>",
+		} {
+			if !strings.Contains(frontend, want) {
+				t.Errorf("frontend topology handoff missing %q:\n%s", want, frontend)
+			}
+		}
+
+		incident := readFile(t, filepath.Join(wsRoot, "skills/incident-investigator/SKILL.md"))
+		directionAt := strings.Index(incident, "先判断失败调用相对主角的方向")
+		outboundAt := strings.Index(incident, "主角发起的出站调用")
+		inboundAt := strings.Index(incident, "进入主角的入站请求")
+		topologyAt := strings.Index(incident, "python3 skills/service-topology-query/scripts/query.py")
+		cascadeAt := strings.Index(incident, "python3 skills/incident-investigator/scripts/cascade_check.py")
+		if directionAt < 0 || outboundAt < directionAt || inboundAt < outboundAt || topologyAt < outboundAt || cascadeAt < inboundAt {
+			t.Fatalf("incident must decide direction, document outbound/inbound queries, then cascade: direction=%d outbound=%d topology=%d inbound=%d cascade=%d\n%s",
+				directionAt, outboundAt, topologyAt, inboundAt, cascadeAt, incident)
+		}
+		for _, want := range []string{
+			"只有出站证据明确包含 method/path 时才传这两个参数",
+			"--service <主角> --max-depth 3 --json",
+			"--service <已知调用方> --method <失败请求 method> --path <失败请求 path>",
+		} {
+			if !strings.Contains(incident, want) {
+				t.Errorf("incident direction handoff missing %q:\n%s", want, incident)
+			}
+		}
+		for _, want := range []string{"--max-depth 3", "逐跳", "trace", "日志", "runtime", "service-dependency-map.yaml"} {
+			if !strings.Contains(incident, want) {
+				t.Errorf("incident topology workflow missing %q:\n%s", want, incident)
+			}
+		}
+	})
+
+	t.Run("gated-by-routing-existing-service-paths-and-whitelist", func(t *testing.T) {
+		cases := []struct {
+			name          string
+			configure     func(*config.SystemConfig)
+			existingPaths int
+			wantGenerated bool
+		}{
+			{
+				name: "routing-absent",
+				configure: func(cfg *config.SystemConfig) {
+					cfg.Generation.SkillsWhitelist = []string{"service-topology-query"}
+				},
+				existingPaths: 2,
+			},
+			{
+				name: "zero-existing-service-paths",
+				configure: func(cfg *config.SystemConfig) {
+					cfg.Generation.SkillsWhitelist = []string{"routing", "service-topology-query"}
+				},
+			},
+			{
+				name: "one-existing-service-path",
+				configure: func(cfg *config.SystemConfig) {
+					cfg.Generation.SkillsWhitelist = []string{"routing", "service-topology-query"}
+				},
+				existingPaths: 1,
+			},
+			{
+				name: "two-existing-service-paths",
+				configure: func(cfg *config.SystemConfig) {
+					cfg.Generation.SkillsWhitelist = []string{"routing", "service-topology-query"}
+				},
+				existingPaths: 2,
+				wantGenerated: true,
+			},
+			{
+				name: "trimmed-by-whitelist",
+				configure: func(cfg *config.SystemConfig) {
+					cfg.Generation.SkillsWhitelist = []string{"routing", "incident-investigator"}
+				},
+				existingPaths: 2,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+				tc.configure(cfg)
+				out := t.TempDir()
+				g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+				g.RepoLocalPaths = existingServiceRepoPaths(t, cfg, tc.existingPaths)
+				if err := g.Generate(); err != nil {
+					t.Fatalf("generate: %v", err)
+				}
+				wsRoot := filepath.Join(out, "templates/workspace-template")
+				_, err := os.Stat(filepath.Join(wsRoot, "skills/service-topology-query"))
+				if tc.wantGenerated && err != nil {
+					t.Fatalf("service topology skill should be generated: %v", err)
+				}
+				if !tc.wantGenerated && !os.IsNotExist(err) {
+					t.Fatalf("service topology skill should be gated: %v", err)
+				}
+				if tc.wantGenerated {
+					return
+				}
+				for _, rel := range []string{
+					"skills/frontend-repro-investigator/SKILL.md",
+					"skills/incident-investigator/SKILL.md",
+				} {
+					path := filepath.Join(wsRoot, rel)
+					data, err := os.ReadFile(path)
+					if os.IsNotExist(err) {
+						continue
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					if strings.Contains(string(data), "skills/service-topology-query/") {
+						t.Errorf("gated skill leaked reference into %s:\n%s", rel, data)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("build-plan-syncs-generator-repo-paths-before-skill-decisions", func(t *testing.T) {
+		cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+		cfg.Generation.SkillsWhitelist = []string{"routing", "service-topology-query"}
+		g := New(cfg, filepath.Join(projectRoot(t), "templates"), t.TempDir())
+		g.RepoLocalPaths = existingServiceRepoPaths(t, cfg, 2)
+
+		plan, err := g.BuildPlan("")
+		if err != nil {
+			t.Fatalf("build plan: %v", err)
+		}
+		for _, decision := range plan.SkillsIncluded {
+			if decision.Name == "service-topology-query" {
+				return
+			}
+		}
+		t.Fatalf("service topology skill missing from plan after path sync: %+v", plan)
+	})
+
+	t.Run("known-skill", func(t *testing.T) {
+		cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+		cfg.Generation.SkillsWhitelist = []string{"service-topology-query"}
+		for _, issue := range config.HealthCheck(cfg) {
+			if issue.Field == "generation.skills_whitelist" && strings.Contains(issue.Message, "未知 skill") {
+				t.Fatalf("service-topology-query was not registered as a known skill: %+v", issue)
+			}
+		}
+	})
+}
+
+func existingServiceRepoPaths(t *testing.T, cfg *config.SystemConfig, count int) map[string]string {
+	t.Helper()
+	paths := make(map[string]string)
+	for _, repo := range cfg.Repos {
+		if !repo.IsServiceNode() || len(paths) >= count {
+			continue
+		}
+		paths[repo.Name] = t.TempDir()
+	}
+	return paths
 }

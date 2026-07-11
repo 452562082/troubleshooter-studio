@@ -113,6 +113,93 @@ func TestHandleValidate_HappyPath(t *testing.T) {
 	}
 }
 
+func TestHandleValidate_CodeIntelligence(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.Close()
+
+	enabledYAML := strings.Replace(minimalYAML, "infrastructure:\n", `code_intelligence:
+  enabled: true
+  provider: codegraph
+infrastructure:
+`, 1)
+	status, body := post(t, srv, "/api/validate", enabledYAML)
+	if status != http.StatusOK {
+		t.Fatalf("enabled code intelligence status = %d, body=%s", status, body)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("unmarshal enabled response: %v\nbody=%s", err, body)
+	}
+	if out["valid"] != true {
+		t.Fatalf("enabled code intelligence should be valid, got %v", out["valid"])
+	}
+
+	invalidYAML := strings.Replace(enabledYAML, "provider: codegraph", "provider: lsp", 1)
+	status, body = post(t, srv, "/api/validate", invalidYAML)
+	if status != http.StatusBadRequest {
+		t.Fatalf("unknown provider status = %d, body=%s", status, body)
+	}
+	if !strings.Contains(string(body), "code_intelligence.provider") {
+		t.Fatalf("unknown provider error missing field name: %s", body)
+	}
+}
+
+func TestHandleValidate_ServiceTopology(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.Close()
+
+	topologyYAML := strings.Replace(minimalYAML, "infrastructure:\n", `  - name: bff
+    url: https://github.com/example/bff
+    stack: php
+    service_names: [mall-bff]
+  - name: orders
+    url: https://github.com/example/orders
+    stack: go
+    service_names: [order-service]
+service_topology:
+  overrides:
+    - action: confirm
+      from_service: example
+      to_service: mall-bff
+      protocol: http
+      method: get
+      path: /api/orders/:id
+    - action: reject
+      from_service: mall-bff
+      to_service: order-service
+      protocol: grpc
+      rpc_method: orders.v1.OrderService/GetOrder
+    - action: add
+      from_service: example
+      to_service: order-service
+      protocol: http
+      method: POST
+      path: /api/orders
+infrastructure:
+`, 1)
+
+	status, body := post(t, srv, "/api/validate", topologyYAML)
+	if status != http.StatusOK {
+		t.Fatalf("valid topology status = %d, body=%s", status, body)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("unmarshal valid topology response: %v\nbody=%s", err, body)
+	}
+	if out["valid"] != true {
+		t.Fatalf("valid topology should return valid:true, got %v", out["valid"])
+	}
+
+	invalidYAML := strings.Replace(topologyYAML, "action: confirm", "action: guess", 1)
+	status, body = post(t, srv, "/api/validate", invalidYAML)
+	if status != http.StatusBadRequest {
+		t.Fatalf("invalid topology status = %d, body=%s", status, body)
+	}
+	if !strings.Contains(string(body), "service_topology.overrides") {
+		t.Fatalf("invalid topology error missing field name: %s", body)
+	}
+}
+
 // TestHandleValidate_BadYAML: 错误 yaml → 400 + error message
 func TestHandleValidate_BadYAML(t *testing.T) {
 	srv := newTestServer(t)

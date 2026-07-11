@@ -122,6 +122,96 @@ func TestProbeMCPServersFromConfig_NonKafkaStartupTimeoutWarns(t *testing.T) {
 	}
 }
 
+func TestProbeMCPServers_CodeGraphRequiresExploreTool(t *testing.T) {
+	old := probeMCPFunc
+	probeMCPFunc = func(_ context.Context, _ string, _, _ []string, _ time.Duration) MCPProbeResult {
+		return MCPProbeResult{Tools: []string{"codegraph_status"}}
+	}
+	t.Cleanup(func() { probeMCPFunc = old })
+
+	servers := map[string]any{
+		"shop-codegraph": map[string]any{
+			"command": "/managed/codegraph",
+		},
+	}
+	var checks []SelfTestCheck
+	probeMCPServersFromConfig(context.Background(), servers, func(name, status, detail string) {
+		checks = append(checks, SelfTestCheck{Name: name, Status: status, Detail: detail})
+	})
+
+	if len(checks) != 1 || checks[0].Status != "FAIL" || !strings.Contains(checks[0].Detail, "codegraph_explore") {
+		t.Fatalf("CodeGraph without codegraph_explore should fail, got %#v", checks)
+	}
+}
+
+func TestProbeMCPServers_CodeGraphExploreToolPasses(t *testing.T) {
+	old := probeMCPFunc
+	probeMCPFunc = func(_ context.Context, _ string, _, _ []string, _ time.Duration) MCPProbeResult {
+		return MCPProbeResult{Tools: []string{"codegraph_explore"}}
+	}
+	t.Cleanup(func() { probeMCPFunc = old })
+
+	servers := map[string]any{
+		"shared-code-intelligence": map[string]any{
+			"command": "C:\\managed\\codegraph.cmd",
+		},
+	}
+	var checks []SelfTestCheck
+	probeMCPServersFromConfig(context.Background(), servers, func(name, status, detail string) {
+		checks = append(checks, SelfTestCheck{Name: name, Status: status, Detail: detail})
+	})
+
+	if len(checks) != 1 || checks[0].Status != "PASS" || !strings.Contains(checks[0].Detail, "codegraph_explore") {
+		t.Fatalf("CodeGraph with codegraph_explore should pass, got %#v", checks)
+	}
+}
+
+func TestProbeMCPServers_CodeGraphEmptyToolSurfaceFails(t *testing.T) {
+	old := probeMCPFunc
+	probeMCPFunc = func(_ context.Context, _ string, _, _ []string, _ time.Duration) MCPProbeResult {
+		return MCPProbeResult{}
+	}
+	t.Cleanup(func() { probeMCPFunc = old })
+
+	servers := map[string]any{
+		"shop-codegraph": map[string]any{"command": "/managed/codegraph"},
+	}
+	var checks []SelfTestCheck
+	probeMCPServersFromConfig(context.Background(), servers, func(name, status, detail string) {
+		checks = append(checks, SelfTestCheck{Name: name, Status: status, Detail: detail})
+	})
+
+	if len(checks) != 1 || checks[0].Status != "FAIL" || !strings.Contains(checks[0].Detail, "codegraph_explore") {
+		t.Fatalf("empty CodeGraph tool surface should fail, got %#v", checks)
+	}
+}
+
+func TestProbeMCPServers_CodeGraphMalformedSpecFails(t *testing.T) {
+	servers := map[string]any{"shop-codegraph": "not-an-object"}
+	var checks []SelfTestCheck
+	probeMCPServersFromConfig(context.Background(), servers, func(name, status, detail string) {
+		checks = append(checks, SelfTestCheck{Name: name, Status: status, Detail: detail})
+	})
+
+	if len(checks) != 1 || checks[0].Status != "FAIL" || !strings.Contains(checks[0].Detail, "spec") {
+		t.Fatalf("malformed CodeGraph spec should fail, got %#v", checks)
+	}
+}
+
+func TestProbeMCPServers_CodeGraphMissingCommandFails(t *testing.T) {
+	servers := map[string]any{
+		"shop-codegraph": map[string]any{"args": []any{"serve", "--mcp"}},
+	}
+	var checks []SelfTestCheck
+	probeMCPServersFromConfig(context.Background(), servers, func(name, status, detail string) {
+		checks = append(checks, SelfTestCheck{Name: name, Status: status, Detail: detail})
+	})
+
+	if len(checks) != 1 || checks[0].Status != "FAIL" || !strings.Contains(checks[0].Detail, "command") {
+		t.Fatalf("CodeGraph spec without command should fail, got %#v", checks)
+	}
+}
+
 func envSliceToMap(items []string) map[string]string {
 	out := map[string]string{}
 	for _, item := range items {

@@ -115,6 +115,30 @@ python3 skills/k8s-runtime-query/scripts/k8s_query.py --env <env> --cluster <c> 
 
 ## 步骤 4:沿依赖图追下游
 
+{{ if hasSkill . "service-topology-query" }}
+先判断失败调用相对主角的方向，最多向下游查三跳：
+
+- 仅当 trace / 日志 / 前端交接证据明确显示失败的是**主角发起的出站调用**时，才从主角查询该调用。只有出站证据明确包含 method/path 时才传这两个参数：
+
+```bash
+python3 skills/service-topology-query/scripts/query.py --service <主角> \
+    --method <失败请求 method> --path <失败请求 path> --max-depth 3 --json
+```
+
+- 如果失败的是**进入主角的入站请求**，该 method/path 描述的是“调用方 → 主角”，不是“主角 → 下游”。未知调用方时只按主角查询下游；已从 trace / 网关日志确认调用方时，改从已知调用方查询入口边：
+
+```bash
+python3 skills/service-topology-query/scripts/query.py --service <主角> --max-depth 3 --json
+python3 skills/service-topology-query/scripts/query.py --service <已知调用方> --method <失败请求 method> --path <失败请求 path> --max-depth 3 --json
+```
+
+拓扑只作导航证据。按排序路径逐跳用 trace、同时间窗日志和 runtime 验证实际调用；与静态路径冲突时以 trace 为准。candidate / stale 必须保留标签，不得当成已发生调用。选定仓库/endpoint 后进入代码取证。拓扑与后续 cascade 合计最多向下游递归三跳。
+
+`status=no_match|unavailable`、证据不足或需要兼容旧依赖图时，继续执行下面的 `cascade_check.py`；它读取 `routing/references/service-dependency-map.yaml`，是保留的 dependency-map fallback。
+{{- else }}
+本生成物未包含 `service-topology-query`，直接使用下面基于 `routing/references/service-dependency-map.yaml` 的 cascade fallback。
+{{- end }}
+
 ```bash
 python3 skills/incident-investigator/scripts/cascade_check.py --env <env> --service <主角> \
     --cluster <c> --namespace-default <ns>
@@ -138,6 +162,7 @@ downstream_namespaces:
 - `no_downstream_in_map` → dependency-map 没填,提示用户去填;**置信度上限 medium**
 
 > 注:`summary` 里 `healthy` / `degraded` / `unknown` 三个计数独立。`unknown>0` 时哪怕有 degraded(走 isolated/widespread),也要在快报里带上"另有 N 个下游未验证",别让 unknown 被 degraded 盖过。
+> 递归硬上限:无论拓扑查询和 cascade 如何组合，步骤 4 总计不得超过三跳。
 
 ## 步骤 5:多向交叉(trace + log + metric + 代码 + 数据)
 
@@ -204,6 +229,10 @@ EOF
 ### 5.2 代码取证(数据/逻辑/可用性类必查)
 
 routing 给到仓库路径后:
+
+{{if hasSkill . "code-intelligence-query"}}
+先 Read `skills/code-intelligence-query/SKILL.md` 并按其分支/freshness规则取证；满足条件时先调用 CodeGraph，失败立即回退到下方 git diff + rg + Read。
+{{end}}
 
 ```bash
 # 1. 最近变更(可用性类:5xx 突增,先看变更)

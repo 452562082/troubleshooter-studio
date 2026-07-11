@@ -126,11 +126,13 @@ type Meta struct {
 }
 
 type SystemConfig struct {
-	System         System         `yaml:"system"`
-	Agent          Agent          `yaml:"agent"`
-	Environments   []Environment  `yaml:"environments"`
-	Repos          []Repo         `yaml:"repos"`
-	Infrastructure Infrastructure `yaml:"infrastructure"`
-	Generation     Generation     `yaml:"generation"`
-	Meta           Meta           `yaml:"meta"`
+	System           System           `yaml:"system"`
+	Agent            Agent            `yaml:"agent"`
+	Environments     []Environment    `yaml:"environments"`
+	Repos            []Repo           `yaml:"repos"`
+	CodeIntelligence CodeIntelligence `yaml:"code_intelligence,omitempty"`
+	ServiceTopology  ServiceTopology  `yaml:"service_topology,omitempty"`
+	Infrastructure   Infrastructure   `yaml:"infrastructure"`
+	Generation       Generation       `yaml:"generation"`
+	Meta             Meta             `yaml:"meta"`
 }

@@ -21,6 +21,8 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/userconfig"
 )
 
+var runAutoAnalyzeForGen = agent.RunAutoAnalyze
+
 // Gen 按 troubleshooter.yaml 实际落盘生成机器人产物(写到 outputDir;后续要部署还得走
 // ImportAndDeploy 或 RunInstall 把产物装到 AI 平台)。
 // outputDir 为空时默认 ./dist;相对路径解析成绝对路径,让 UI 能稳定展示"产物在 /abs/path/xxx"。
@@ -49,14 +51,19 @@ func (a *App) Gen(yamlText, outputDir string) (*generator.GenSummary, error) {
 	// auto-analyze:从 userconfig 读已存的本地仓库路径,命中即跑一遍 analyzer。
 	// 跑失败 / 路径全空 都不阻塞 gen,只是产物里两份 map 走 fallback(yaml 反推 / 留空)。
 	saved := userconfig.GetRepoPathsForSystem(cfg.System.ID)
-	if result, aerr := agent.RunAutoAnalyze(agent.RunAutoAnalyzeOptions{
+	expanded := make(map[string]string, len(saved))
+	for name, path := range saved {
+		expanded[name] = userconfig.ExpandHome(path)
+	}
+	g.RepoLocalPaths = expanded
+	if result, aerr := runAutoAnalyzeForGen(agent.RunAutoAnalyzeOptions{
 		Cfg:       cfg,
-		RepoPaths: saved,
+		RepoPaths: expanded,
 		OnLog: func(msg string) {
 			wailsruntime.EventsEmit(a.ctx, "gen:log", msg)
 		},
 	}); aerr == nil && result != nil {
-		g.LoadAnalysisReport(result.Report)
+		g.LoadAnalysisResult(result)
 	} else if aerr != nil {
 		// 不中断 gen;只是日志告诉用户"分析没跑成,产物某些字段会空"
 		wailsruntime.EventsEmit(a.ctx, "gen:log", "[warn] auto-analyze failed: "+aerr.Error())

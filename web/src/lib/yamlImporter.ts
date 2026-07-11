@@ -11,6 +11,11 @@
 // 它依赖 runCCHubPreload / crossCheckImported* 等 closure 函数,跨边界不值得。
 
 import type { CredField } from './credFields'
+import type {
+  CodeIntelligenceState,
+  ServiceTopologyOverrideState,
+  ServiceTopologyState,
+} from './yamlGenerator'
 import { VIA_GRAFANA_ELIGIBLE } from './yamlShared'
 
 /** yaml 字段值是否为模板占位符 "{{XYZ}}";占位符不应当作真值反填。 */
@@ -139,6 +144,8 @@ export interface ApplyImportContext {
   system: { id: string; name: string; description: string }
   agent: { id: string; name: string; workspace_name: string; model: string }
   targetModels: Record<string, string>
+  codeIntelligence: CodeIntelligenceState
+  serviceTopology: ServiceTopologyState
   environments: Array<{ id: string; api_domain: string; web_domain: string; is_prod: boolean }>
   repos: any[]
   enabledSourceTypes: Record<string, boolean>
@@ -186,6 +193,30 @@ export interface ApplyImportContext {
   setRepoBranches: (name: string, branches: string[]) => void
 }
 
+/** Convert backend-valid YAML override records into wizard state.
+ * Protocol and HTTP method use the same case normalization as Go validation;
+ * paths stay byte-for-byte intact for the backend to canonicalize. */
+export function importServiceTopologyOverrides(rawOverrides: unknown): ServiceTopologyOverrideState[] {
+  if (!Array.isArray(rawOverrides)) return []
+  return rawOverrides.flatMap((raw: unknown): ServiceTopologyOverrideState[] => {
+    if (!raw || typeof raw !== 'object') return []
+    const value = raw as Record<string, unknown>
+    if (value.action !== 'confirm' && value.action !== 'reject' && value.action !== 'add') return []
+    const protocol = typeof value.protocol === 'string' ? value.protocol.trim().toLowerCase() : ''
+    if (protocol !== 'http' && protocol !== 'grpc') return []
+    if (typeof value.from_service !== 'string' || typeof value.to_service !== 'string') return []
+    return [{
+      action: value.action,
+      fromService: value.from_service,
+      toService: value.to_service,
+      protocol,
+      ...(typeof value.method === 'string' ? { method: value.method.trim().toUpperCase() } : {}),
+      ...(typeof value.path === 'string' ? { path: value.path } : {}),
+      ...(typeof value.rpc_method === 'string' ? { rpcMethod: value.rpc_method } : {}),
+    }]
+  })
+}
+
 /**
  * 把 parsed yaml 反填到 wizard 的 reactive state(同步部分,async cross-check tail 留 InitPage)。
  * 返回主源 type(InitPage 用作 setTimeout cross-check 的 envID 输入)。
@@ -194,6 +225,13 @@ export async function applyParsedYAMLToWizardState(
   parsed: any,
   ctx: ApplyImportContext,
 ): Promise<{ primaryConfigCenter: string }> {
+  const codeIntelligence = parsed?.code_intelligence
+  ctx.codeIntelligence.enabled = codeIntelligence?.enabled === true
+    && (codeIntelligence.provider === undefined || codeIntelligence.provider === 'codegraph')
+  ctx.codeIntelligence.provider = 'codegraph'
+
+  ctx.serviceTopology.overrides = importServiceTopologyOverrides(parsed?.service_topology?.overrides)
+
   // system
   if (parsed.system && typeof parsed.system === 'object') {
     ctx.system.id = parsed.system.id ?? ''

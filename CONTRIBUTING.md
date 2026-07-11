@@ -43,6 +43,8 @@ git status --short
 2. 起 runtime probe，拿真实 `tools/list`。不要按 README 猜工具名。
 3. 更新对应 `templates/workspace/skills/<x>-runtime-query/SKILL.md.tmpl`，写清只读主路径和写工具软约束。
 4. 同步 `requiredMCPKeys` 期望清单。
+
+CodeGraph 还必须固定 release version 和逐平台 SHA256；升级前先运行 `scripts/test-codegraph-smoke.sh`。runtime probe 必须确认 `tools/list` 含 `codegraph_explore`；索引 probe 与 MCP probe 分开，源码仓库要求验证 `complete/fileCount/nodeCount`。普通单测使用 fake CLI，禁止隐式联网下载。
 5. 测试：
 
 ```bash
@@ -130,6 +132,14 @@ scripts/test-browser-smoke.sh
 `cmd/tshoot`、`internal/analyzer*`、`internal/dsprobe`、`internal/userconfig` 当前是非回归底线，先防止继续下降；后续补关键路径测试后再抬门槛。
 
 新加路径要有 happy path。新加 MCP builder 要有注册类 positive test；禁用/跳过类要有 negative test。
+
+跨仓库服务拓扑还有以下回归要求：
+
+- 每种新增语言或框架扫描器必须使用 `examples/fake-repos/` 下的离线 fixture，默认测试不得 clone、下载依赖或访问网络。
+- 匹配结果必须给出稳定、可排序的确定性理由；禁止用 LLM 打分，也不要引入依赖遍历顺序或 map 顺序的随机性。
+- happy path 之外必须覆盖单仓库扫描失败或缺少本地路径的 partial 结果，部署和生成仍应成功并在 endpoint evidence 中保留失败状态。
+- `service-topology.yaml` 是正式图，`endpoint-evidence.yaml` 是完整证据；兼容用的 `service-dependency-map.yaml` 必须由同一正式图投影，并用测试防止 downstream 漂移。
+- override 测试必须覆盖人工优先级、过期证据和 YAML 往返；缓存测试必须覆盖配置摘要与仓库 HEAD 变化。
 
 ## Commit Message
 

@@ -1,11 +1,89 @@
 package generator
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/xiaolong/troubleshooter-studio/internal/analyzerpipe"
+	"github.com/xiaolong/troubleshooter-studio/internal/config"
+	"github.com/xiaolong/troubleshooter-studio/internal/topology"
 )
+
+func TestPreserve_ServiceTopologyOverridesRemainSourceOfTruth(t *testing.T) {
+	base, err := os.ReadFile(filepath.Join(projectRoot(t), "examples/three-tier-troubleshooter.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	override := `service_topology:
+  overrides:
+    - action: confirm
+      from_service: mall-web
+      to_service: mall-bff
+      protocol: http
+      method: GET
+      path: /api/orders
+`
+	source := strings.Replace(string(base), "service_topology:\n  overrides: []\n", override, 1)
+	if source == string(base) {
+		t.Fatal("failed to inject service_topology fixture")
+	}
+	configPath := filepath.Join(t.TempDir(), "troubleshooter.yaml")
+	if err := os.WriteFile(configPath, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load fixture: %v", err)
+	}
+
+	out := t.TempDir()
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+	g.TroubleshooterYAMLSource = []byte(source)
+	result := analyzerpipe.Result{Topology: topology.Snapshot{
+		SchemaVersion: topology.SchemaVersion,
+		Edges: []topology.CandidateEdge{{
+			FromEndpoint: "mall-web:out", ToEndpoint: "mall-order:in",
+			FromService: "mall-web", ToService: "mall-order",
+			Protocol: "http", Method: "GET", Path: "/api/orders",
+			Status: "candidate", Confidence: .74, Reasons: []string{"candidate_cache"},
+		}},
+	}}
+	if err := g.LoadAnalysis(writeAnalysisResult(t, result)); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Generate(); err != nil {
+		t.Fatal(err)
+	}
+
+	diskSource, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(diskSource) != source {
+		t.Fatalf("source YAML changed during generation:\n%s", diskSource)
+	}
+	var meta struct {
+		TroubleshooterYAML string `json:"troubleshooter_yaml"`
+	}
+	metaPath := filepath.Join(out, "templates/workspace-template/tshoot.json")
+	if err := json.Unmarshal([]byte(readFile(t, metaPath)), &meta); err != nil {
+		t.Fatalf("parse tshoot meta: %v", err)
+	}
+	if meta.TroubleshooterYAML != source {
+		t.Fatalf("embedded source YAML replaced by analysis cache:\n%s", meta.TroubleshooterYAML)
+	}
+	for _, want := range []string{"action: confirm", "to_service: mall-bff"} {
+		if !strings.Contains(meta.TroubleshooterYAML, want) {
+			t.Fatalf("embedded source missing override %q:\n%s", want, meta.TroubleshooterYAML)
+		}
+	}
+	if strings.Contains(meta.TroubleshooterYAML, "candidate_cache") || strings.Contains(meta.TroubleshooterYAML, "to_service: mall-order") {
+		t.Fatalf("candidate cache leaked into source YAML:\n%s", meta.TroubleshooterYAML)
+	}
+}
 
 // 场景 1：手改 config-map 的 inferred 行 → 重 gen → 保留
 func TestPreserve_ConfigMapManualOverride(t *testing.T) {

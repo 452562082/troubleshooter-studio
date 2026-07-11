@@ -48,6 +48,25 @@ export interface YAMLGenRepo {
   _serviceEntries?: Record<string, string>
 }
 
+export interface CodeIntelligenceState {
+  enabled: boolean
+  provider: 'codegraph'
+}
+
+export interface ServiceTopologyOverrideState {
+  action: 'confirm' | 'reject' | 'add'
+  fromService: string
+  toService: string
+  protocol: 'http' | 'grpc'
+  method?: string
+  path?: string
+  rpcMethod?: string
+}
+
+export interface ServiceTopologyState {
+  overrides: ServiceTopologyOverrideState[]
+}
+
 export interface YAMLGenSourceData {
   creds: Record<string, Record<string, string>>
   rawExtra?: Record<string, unknown>
@@ -83,6 +102,8 @@ export interface YAMLGenContext {
   agentNameDefault: string
   targetModels: Record<string, string>
   enabledTargets: Record<string, boolean>
+  codeIntelligence: CodeIntelligenceState
+  serviceTopology: ServiceTopologyState
   enabledObservability: Record<string, boolean>
   environments: YAMLGenEnvironment[]
   repos: YAMLGenRepo[]
@@ -237,6 +258,28 @@ export function generateYAML(ctx: YAMLGenContext): string {
       if (src && src !== ctx.activeSourceTypes[0]) {
         lines.push(`    config_source: ${src}    # 引用 infrastructure.config_centers[].id`)
       }
+    }
+  }
+
+  if (ctx.codeIntelligence.enabled) {
+    lines.push('')
+    lines.push('code_intelligence:')
+    lines.push('  enabled: true')
+    lines.push('  provider: codegraph')
+  }
+
+  if (ctx.serviceTopology.overrides.length > 0) {
+    lines.push('')
+    lines.push('service_topology:')
+    lines.push('  overrides:')
+    for (const override of ctx.serviceTopology.overrides) {
+      lines.push(`    - action: ${override.action}`)
+      lines.push(`      from_service: ${yamlStr(override.fromService)}`)
+      lines.push(`      to_service: ${yamlStr(override.toService)}`)
+      lines.push(`      protocol: ${override.protocol}`)
+      if (override.method) lines.push(`      method: ${yamlStr(override.method)}`)
+      if (override.path) lines.push(`      path: ${yamlStr(override.path)}`)
+      if (override.rpcMethod) lines.push(`      rpc_method: ${yamlStr(override.rpcMethod)}`)
     }
   }
 

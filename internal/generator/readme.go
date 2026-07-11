@@ -62,11 +62,12 @@ func (g *Generator) writeReadme() error {
 func readmeSkillsSection(ctx *Context) string {
 	var sb strings.Builder
 	if len(ctx.Generation.SkillsWhitelist) == 0 {
-		sb.WriteString("（未列白名单，所有 skill 默认启用）\n")
+		sb.WriteString("（未列白名单，除需显式配置的能力外，所有 skill 默认启用）\n")
 		return sb.String()
 	}
 	skillDesc := map[string]string{
 		"routing":                      "根据 service + env 定位代码路径、域名、分支、配置标识",
+		"code-intelligence-query":      "CodeGraph 函数级源码、调用关系与影响面取证；失败自动回退 rg/read",
 		"config-executor":              "从配置中心读取/对比配置值，支持历史版本",
 		"attachment-evidence-verifier": "Bug 附件 / 截图 / 录屏 / HAR 证据归一化",
 		"redis-runtime-query":          "查询 Redis key / TTL / 值（只读）",
@@ -86,6 +87,9 @@ func readmeSkillsSection(ctx *Context) string {
 		"elk-log-query":                "ELK 日志搜索（ES _search + Kibana）",
 	}
 	for _, s := range ctx.Generation.SkillsWhitelist {
+		if !skillEnabled(ctx, s) {
+			continue
+		}
 		desc, ok := skillDesc[s]
 		if !ok {
 			desc = "（自定义 skill，见 templates/workspace-template/skills/" + s + "/SKILL.md）"
@@ -170,6 +174,11 @@ func readmeFAQSection(ctx *Context) string {
 	if ctx.Infrastructure.PrimaryConfigCenter().Type != "" && ctx.Infrastructure.PrimaryConfigCenter().Type != "none" {
 		sb.WriteString("**Q: 某个 env 的配置查不到？**\n")
 		sb.WriteString("A: (1) 检查 `scripts/.env` 里该 env 的地址/凭证；(2) 对比 `templates/workspace-template/skills/routing/references/config-map.yaml` 里的 namespace/dataId/group 是否对；(3) 在 tshoot 仓库跑 `tshoot doctor -i troubleshooter.yaml --repos-root <dir>` 看声明与实态是否漂移。\n\n")
+	}
+
+	if skillEnabled(ctx, "code-intelligence-query") {
+		sb.WriteString("**Q: CodeGraph 索引不可用、过期或和目标分支不一致？**\n")
+		sb.WriteString("A: CodeGraph 索引保存在仓库根目录的 `.codegraph/`；当前 checkout 与环境目标分支不匹配时，只能把图谱结果当低置信度候选。索引缺失、同步失败或 MCP 不可用会自动回退到 git diff + rg/read。CodeGraph 的调用关系和影响面属于静态分析推断，不能独立证明根因，必须用源码行和运行时证据交叉验证。\n\n")
 	}
 
 	sb.WriteString("**Q: 改了 troubleshooter.yaml，怎么更新部署？**\n")

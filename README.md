@@ -51,6 +51,44 @@ Codex 需要网络访问时，安装流程会自动 patch `~/.codex/config.toml`
 
 ## 下载与安装
 
+### 可选代码图谱（CodeGraph）
+
+需要在故障期获得符号、调用链和影响面证据时，可显式开启：
+
+```yaml
+code_intelligence:
+  enabled: true
+  provider: codegraph
+```
+
+CodeGraph 首次安装约占 200 MB+，每个仓库在本地生成 `.codegraph/` 索引；索引不上传，遥测已关闭。安装使用固定 v1.3.1 及逐平台 SHA256 校验，并注册一个共享 MCP，通过显式 `projectPath` 查询；不会自动 checkout 或创建 worktree。分支不一致时图谱证据置信度低，机器人会回落 `rg`/`read` 路径。卸载默认保留索引，便于重新启用；需要释放空间时可手动删除 `.codegraph/`。
+
+### 跨仓库服务拓扑
+
+配置了至少两个有本地路径的可运行服务仓库后，部署或重新生成机器人时会扫描 HTTP/HTTPS、Feign 和 gRPC 端点，按“调用端点 → 接收端点”建立跨仓库候选关系。桌面工作台会展示端点位置、匹配理由和冲突，供用户确认、拒绝、改目标或手工补边；人工决定写回 `troubleshooter.yaml` 的 `service_topology.overrides`，它是需要评审和版本管理的真源，自动扫描结果则可随代码重建。
+
+状态含义：
+
+- `automatic`：证据超过确定性门槛，进入正式服务图。
+- `confirmed` / `manual`：人工确认或补录，优先于自动结果，进入正式服务图。
+- `candidate`：证据不足，只在工作台和证据文件展示，不参与自动导航。
+- `rejected` / `stale`：已拒绝，或人工决定找不到当前端点证据，需要复查，不参与正式服务图。
+
+生成物中的 `service-topology-query` 最多沿正式服务图向下游走三跳，并返回每条边的源码位置和确定性理由；运行时 trace 能确定真实链路时仍以 trace 为准。定位到具体仓库和入口端点后，如果启用了 CodeGraph，机器人再把 `projectPath` 和端点位置交给 CodeGraph 做仓库内符号、调用链和影响面分析；CodeGraph 不负责猜跨仓库边，索引不可用时继续回落 `routing`、`rg` 和文件读取。
+
+示例：
+
+```yaml
+service_topology:
+  overrides:
+    - action: confirm
+      from_service: mall-bff
+      to_service: mall-order
+      protocol: http
+      method: POST
+      path: /internal/orders
+```
+
 Release 同步发布到 GitHub 和 GitLab，任选一个源。
 
 ### 桌面 app，macOS 推荐安装
@@ -221,6 +259,7 @@ repos:
 | 能力 | skill |
 |---|---|
 | 路由 | `routing`：env 到域名、分支、配置、日志 app、MCP、依赖图、schema 的映射 |
+| 服务拓扑 | `service-topology-query`：按入口接口查询最多三跳的正式跨仓库路径和端点证据 |
 | 主流程 | `incident-investigator`：症状、时间轴、横向、纵向、多向交叉、根因、沉淀 |
 | 最近变更 | `recent-changes`：K8s rollout、配置 history、git log 聚合 |
 | 配置中心 | `config-executor`：Nacos、Apollo、Consul、Kuboard(K8s ConfigMap)、One2All、环境变量 |

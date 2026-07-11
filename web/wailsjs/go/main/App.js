@@ -6,6 +6,10 @@ export function Analyze(arg1, arg2, arg3) {
   return window['go']['main']['App']['Analyze'](arg1, arg2, arg3);
 }
 
+export function AnalyzeServiceTopology(arg1, arg2) {
+  return window['go']['main']['App']['AnalyzeServiceTopology'](arg1, arg2);
+}
+
 export function AnalyzeV2(arg1) {
   return window['go']['main']['App']['AnalyzeV2'](arg1);
 }
@@ -288,6 +292,10 @@ export function ReadEnv(arg1) {
 
 export function RecommendRoleForRepo(arg1, arg2, arg3) {
   return window['go']['main']['App']['RecommendRoleForRepo'](arg1, arg2, arg3);
+}
+
+export function ReindexCodeGraph(arg1, arg2) {
+  return window['go']['main']['App']['ReindexCodeGraph'](arg1, arg2);
 }
 
 export function RevealInFinder(arg1) {

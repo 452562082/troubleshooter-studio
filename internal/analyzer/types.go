@@ -1,5 +1,7 @@
 package analyzer
 
+import "github.com/xiaolong/troubleshooter-studio/internal/topology"
+
 // ConfigCenter 枚举
 const (
 	CenterNacos  = "nacos"
@@ -83,17 +85,18 @@ type RoleHint struct {
 
 // RepoAnalysis 单仓库分析产物
 type RepoAnalysis struct {
-	Name            string           `json:"name"`
-	Stack           string           `json:"stack"`
-	RepoPath        string           `json:"repo_path"`
-	ServiceNames    []string         `json:"service_names,omitempty"`
-	Findings        []Finding        `json:"findings,omitempty"`
-	DownstreamCalls []DownstreamCall `json:"downstream_calls,omitempty"`
-	APIRoutes       []APIRoute       `json:"api_routes,omitempty"`
-	DataStoreUsages []DataStoreUsage `json:"data_store_usages,omitempty"`
-	SchemaTables    []SchemaTable    `json:"schema_tables,omitempty"`
-	RoleHint        *RoleHint        `json:"role_hint,omitempty"` // 自动推断的角色 + 理由(用户可改)
-	Warnings        []string         `json:"warnings,omitempty"`
+	Name            string              `json:"name"`
+	Stack           string              `json:"stack"`
+	RepoPath        string              `json:"repo_path"`
+	ServiceNames    []string            `json:"service_names,omitempty"`
+	Findings        []Finding           `json:"findings,omitempty"`
+	DownstreamCalls []DownstreamCall    `json:"downstream_calls,omitempty"`
+	APIRoutes       []APIRoute          `json:"api_routes,omitempty"`
+	Endpoints       []topology.Endpoint `json:"endpoints,omitempty"`
+	DataStoreUsages []DataStoreUsage    `json:"data_store_usages,omitempty"`
+	SchemaTables    []SchemaTable       `json:"schema_tables,omitempty"`
+	RoleHint        *RoleHint           `json:"role_hint,omitempty"` // 自动推断的角色 + 理由(用户可改)
+	Warnings        []string            `json:"warnings,omitempty"`
 	// Notes 是"信息性扫描发现",非错误也非警告 —— frontend_framework=next、
 	// api_url[apps/...]=https://... 这种"顺手扫到的资料"。区别于 Warnings:
 	//   Warnings  → "go.mod not found" / "scan failed" 这类需要用户注意的异常

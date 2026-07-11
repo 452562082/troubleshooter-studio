@@ -113,6 +113,41 @@ func TestMatchConcreteRequestPrefersLiteralOverWildcardInSameService(t *testing.
 	}
 }
 
+func TestMatchSpecificityPrefersMoreLiteralEvidenceBeforeTemplateClass(t *testing.T) {
+	result := Match(MatchInput{
+		Endpoints: []Endpoint{
+			endpoint("web", "web", DirectionOutbound, "GET", "/files/public/x", "files"),
+			endpoint("files", "files", DirectionInbound, "GET", "/files/public/{wildcard}", ""),
+			endpoint("files", "files", DirectionInbound, "GET", "/files/{param}/{param}", ""),
+		},
+		Services: []ServiceDescriptor{{Repo: "files", Service: "files", Aliases: []string{"files"}}},
+	})
+	edge := onlyEdge(t, result)
+	if edge.Path != "/files/public/{wildcard}" || edge.Confidence != 0.98 {
+		t.Fatalf("edge=%#v", edge)
+	}
+	assertStrings(t, edge.Reasons, []string{"method_path_template", "target_alias_exact"})
+}
+
+func TestMatchSpecificityTiePreservesAllSameServiceCandidates(t *testing.T) {
+	result := Match(MatchInput{
+		Endpoints: []Endpoint{
+			endpoint("web", "web", DirectionOutbound, "GET", "/files/x/x", "files"),
+			endpoint("files", "files", DirectionInbound, "GET", "/files/{param}/x", ""),
+			endpoint("files", "files", DirectionInbound, "GET", "/files/x/{param}", ""),
+		},
+		Services: []ServiceDescriptor{{Repo: "files", Service: "files", Aliases: []string{"files"}}},
+	})
+	if len(result.Edges) != 2 || len(result.Hints) != 0 {
+		t.Fatalf("specificity tie was discarded: edges=%#v hints=%#v", result.Edges, result.Hints)
+	}
+	for _, edge := range result.Edges {
+		if edge.Confidence != 0.98 || edge.Status != "automatic" {
+			t.Fatalf("edge=%#v", edge)
+		}
+	}
+}
+
 func TestMatchConcreteRequestPrefersTransformedLiteralOverRawWildcardInSameService(t *testing.T) {
 	outbound := endpoint("gateway", "gateway", DirectionOutbound, "GET", "/edge/files/public", "files")
 	outbound.Transforms = []Transform{{Kind: "rewrite", From: "/edge/files/public", To: "/files/public"}}

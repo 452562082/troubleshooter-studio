@@ -119,7 +119,13 @@ const (
 type routeCandidate struct {
 	endpoint    Endpoint
 	kind        routeMatchKind
-	specificity int
+	specificity routeSpecificity
+}
+
+type routeSpecificity struct {
+	exactLiteral     bool
+	literalSegments  int
+	wildcardSegments int
 }
 
 func routeCandidates(outbound Endpoint, inbound []Endpoint) []routeCandidate {
@@ -136,11 +142,11 @@ func routeCandidates(outbound Endpoint, inbound []Endpoint) []routeCandidate {
 			}
 			switch {
 			case NormalizePath(outbound.Path) == NormalizePath(candidate.Path):
-				primary = append(primary, routeCandidate{endpoint: candidate, kind: routeExact, specificity: inboundRouteSpecificity(candidate.Path)})
+				primary = append(primary, routeCandidate{endpoint: candidate, kind: routeExact, specificity: inboundRouteSpecificity(candidate.Path, true)})
 			case outboundMatchesInboundTemplate(outbound.Path, candidate.Path):
-				primary = append(primary, routeCandidate{endpoint: candidate, kind: routeTemplate, specificity: inboundRouteSpecificity(candidate.Path)})
+				primary = append(primary, routeCandidate{endpoint: candidate, kind: routeTemplate, specificity: inboundRouteSpecificity(candidate.Path, false)})
 			case pathsMatchThroughTransforms(outbound, candidate):
-				primary = append(primary, routeCandidate{endpoint: candidate, kind: routeTransformed, specificity: inboundRouteSpecificity(candidate.Path)})
+				primary = append(primary, routeCandidate{endpoint: candidate, kind: routeTransformed, specificity: inboundRouteSpecificity(candidate.Path, false)})
 			case pathsHaveSuffixSimilarity(outbound.Path, candidate.Path):
 				similar = append(similar, routeCandidate{endpoint: candidate, kind: routeSimilar})
 			}
@@ -202,43 +208,58 @@ func isConcretePathSegment(segment string) bool {
 	return segment != "{param}" && segment != "{wildcard}"
 }
 
-func inboundRouteSpecificity(path string) int {
+func inboundRouteSpecificity(path string, exactPathEquality bool) routeSpecificity {
 	segments := normalizedPathSegments(path)
-	literals := 0
-	params := 0
-	wildcards := 0
+	specificity := routeSpecificity{}
 	for _, segment := range segments {
 		switch segment {
-		case "{param}":
-			params++
 		case "{wildcard}":
-			wildcards++
+			specificity.wildcardSegments++
+		case "{param}":
 		default:
-			literals++
+			specificity.literalSegments++
 		}
 	}
-	switch {
-	case wildcards > 0:
-		return 100000 + literals*100 - wildcards
-	case params > 0:
-		return 200000 + literals*100 - params
-	default:
-		return 300000 + literals*100
+	specificity.exactLiteral = exactPathEquality &&
+		specificity.literalSegments == len(segments)
+	return specificity
+}
+
+func compareRouteSpecificity(left, right routeSpecificity) int {
+	if left.exactLiteral != right.exactLiteral {
+		if left.exactLiteral {
+			return 1
+		}
+		return -1
 	}
+	if left.literalSegments != right.literalSegments {
+		if left.literalSegments > right.literalSegments {
+			return 1
+		}
+		return -1
+	}
+	if left.wildcardSegments != right.wildcardSegments {
+		if left.wildcardSegments < right.wildcardSegments {
+			return 1
+		}
+		return -1
+	}
+	return 0
 }
 
 func mostSpecificCandidatesPerService(candidates []routeCandidate) []routeCandidate {
-	best := make(map[serviceKey]int, len(candidates))
+	best := make(map[serviceKey]routeSpecificity, len(candidates))
 	for _, candidate := range candidates {
 		key := serviceKey{repo: candidate.endpoint.Repo, service: candidate.endpoint.Service}
-		if candidate.specificity > best[key] {
+		current, found := best[key]
+		if !found || compareRouteSpecificity(candidate.specificity, current) > 0 {
 			best[key] = candidate.specificity
 		}
 	}
 	result := make([]routeCandidate, 0, len(candidates))
 	for _, candidate := range candidates {
 		key := serviceKey{repo: candidate.endpoint.Repo, service: candidate.endpoint.Service}
-		if candidate.specificity == best[key] {
+		if compareRouteSpecificity(candidate.specificity, best[key]) == 0 {
 			result = append(result, candidate)
 		}
 	}

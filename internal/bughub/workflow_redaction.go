@@ -1,7 +1,6 @@
 package bughub
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"io"
@@ -15,11 +14,12 @@ var (
 	pemPrivateKeyPattern    = regexp.MustCompile(`(?is)-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----.*?-----END(?: [A-Z0-9]+)* PRIVATE KEY-----`)
 	commonTokenPattern      = regexp.MustCompile(`(?i)\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|(?:AKIA|ASIA|A3T[A-Z0-9])[A-Z0-9]{12,})\b`)
 	bearerPattern           = regexp.MustCompile(`(?i)\bBearer[ \t]+([A-Za-z0-9._~+/=-]{8,})\b`)
-	structuredSecretPattern = regexp.MustCompile(`(?im)(^|[?&;,\s{])(["']?(?:authorization|cookie|set[-_]cookie|password|passwd|token|access[-_]token|api[-_]key|client[-_]secret|secret|access[-_]key|private[-_]key)["']?\s*[:=]\s*)([^\s&,}]+)`)
+	inlineHeaderPattern     = regexp.MustCompile(`(?im)(^|[\s;,])(["']?(?:proxy-authorization|authorization|set-cookie|cookie)["']?\s*:)\s*([^\r\n]*)`)
+	structuredSecretPattern = regexp.MustCompile(`(?im)(^|[?&;,\s{])(["']?(password|passwd|token|access[-_]token|api[-_]key|client[-_]secret|secret|access[-_]key|private[-_]key)["']?\s*)([:=])\s*([^\s&,}]+)`)
 )
 
 var sensitiveNames = map[string]struct{}{
-	"authorization": {}, "cookie": {}, "set_cookie": {}, "password": {}, "passwd": {},
+	"authorization": {}, "proxy_authorization": {}, "cookie": {}, "set_cookie": {}, "password": {}, "passwd": {},
 	"token": {}, "access_token": {}, "api_key": {}, "client_secret": {}, "secret": {},
 	"access_key": {}, "private_key": {},
 }
@@ -28,8 +28,13 @@ func containsSensitiveData(data []byte) bool {
 	if pemPrivateKeyPattern.Match(data) || commonTokenPattern.Match(data) || containsActualBearer(data) {
 		return true
 	}
-	for _, match := range structuredSecretPattern.FindAllSubmatch(data, -1) {
+	for _, match := range inlineHeaderPattern.FindAllSubmatch(data, -1) {
 		if len(match) == 4 && isActualSecretValue(string(match[3])) {
+			return true
+		}
+	}
+	for _, match := range structuredSecretPattern.FindAllSubmatch(data, -1) {
+		if structuredMatchIsCredentialBytes(match) {
 			return true
 		}
 	}
@@ -39,12 +44,6 @@ func containsSensitiveData(data []byte) bool {
 	if err := decoder.Decode(&value); err == nil {
 		var trailing any
 		if err := decoder.Decode(&trailing); err == io.EOF && sensitiveJSONValue(value) {
-			return true
-		}
-	}
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	for scanner.Scan() {
-		if key, value, ok := splitStructuredSecret(scanner.Text()); ok && isSensitiveName(key) && isActualSecretValue(value) {
 			return true
 		}
 	}
@@ -117,32 +116,71 @@ func containsSensitiveText(value string) bool {
 	if pemPrivateKeyPattern.Match(data) || commonTokenPattern.Match(data) || containsActualBearer(data) {
 		return true
 	}
-	for _, match := range structuredSecretPattern.FindAllStringSubmatch(value, -1) {
+	for _, match := range inlineHeaderPattern.FindAllStringSubmatch(value, -1) {
 		if len(match) == 4 && isActualSecretValue(match[3]) {
 			return true
 		}
 	}
-	scanner := bufio.NewScanner(strings.NewReader(value))
-	for scanner.Scan() {
-		if key, candidate, ok := splitStructuredSecret(scanner.Text()); ok && isSensitiveName(key) && isActualSecretValue(candidate) {
+	for _, match := range structuredSecretPattern.FindAllStringSubmatch(value, -1) {
+		if structuredMatchIsCredential(match) {
 			return true
 		}
 	}
 	return false
 }
 
-func splitStructuredSecret(line string) (string, string, bool) {
-	trimmed := strings.TrimSpace(line)
-	for _, separator := range []string{":", "="} {
-		if index := strings.Index(trimmed, separator); index > 0 {
-			key := strings.Trim(strings.TrimSpace(trimmed[:index]), `"'`)
-			if strings.ContainsAny(key, " {}[],") {
-				continue
-			}
-			return key, strings.TrimSpace(trimmed[index+1:]), true
+func structuredMatchIsCredentialBytes(match [][]byte) bool {
+	if len(match) != 6 {
+		return false
+	}
+	stringsMatch := make([]string, len(match))
+	for index := range match {
+		stringsMatch[index] = string(match[index])
+	}
+	return structuredMatchIsCredential(stringsMatch)
+}
+
+func structuredMatchIsCredential(match []string) bool {
+	if len(match) != 6 || !isActualSecretValue(match[5]) {
+		return false
+	}
+	name := strings.ReplaceAll(strings.ToLower(match[3]), "-", "_")
+	if name != "token" && name != "secret" {
+		return true
+	}
+	if match[4] == "=" {
+		return true
+	}
+	return strongTokenEvidence(strings.Trim(match[5], `"'`))
+}
+
+func strongTokenEvidence(value string) bool {
+	if commonTokenPattern.MatchString(value) || strings.Count(value, ".") >= 2 && len(value) >= 16 {
+		return true
+	}
+	if len(value) < 12 {
+		return false
+	}
+	var lower, upper, digit, symbol bool
+	for _, character := range value {
+		switch {
+		case character >= 'a' && character <= 'z':
+			lower = true
+		case character >= 'A' && character <= 'Z':
+			upper = true
+		case character >= '0' && character <= '9':
+			digit = true
+		default:
+			symbol = true
 		}
 	}
-	return "", "", false
+	categories := 0
+	for _, present := range []bool{lower, upper, digit, symbol} {
+		if present {
+			categories++
+		}
+	}
+	return categories >= 3 || len(value) >= 24 && categories >= 2
 }
 
 func isSensitiveName(name string) bool {
@@ -198,6 +236,13 @@ func redactSensitiveText(value string) string {
 		}
 	}
 	value = pemPrivateKeyPattern.ReplaceAllString(value, redactedValue)
+	value = inlineHeaderPattern.ReplaceAllStringFunc(value, func(match string) string {
+		parts := inlineHeaderPattern.FindStringSubmatch(match)
+		if len(parts) == 4 && isActualSecretValue(parts[3]) {
+			return parts[1] + parts[2] + " " + redactedValue
+		}
+		return match
+	})
 	value = commonTokenPattern.ReplaceAllString(value, redactedValue)
 	value = bearerPattern.ReplaceAllStringFunc(value, func(match string) string {
 		parts := strings.Fields(match)
@@ -208,21 +253,10 @@ func redactSensitiveText(value string) string {
 	})
 	value = structuredSecretPattern.ReplaceAllStringFunc(value, func(match string) string {
 		parts := structuredSecretPattern.FindStringSubmatch(match)
-		if len(parts) == 4 && isActualSecretValue(parts[3]) {
-			return parts[1] + parts[2] + redactedValue
+		if structuredMatchIsCredential(parts) {
+			return parts[1] + parts[2] + parts[4] + redactedValue
 		}
 		return match
 	})
-	lines := strings.Split(value, "\n")
-	for index, line := range lines {
-		key, candidate, ok := splitStructuredSecret(line)
-		if !ok || !isSensitiveName(key) || !isActualSecretValue(candidate) {
-			continue
-		}
-		separatorIndex := strings.IndexAny(line, ":=")
-		if separatorIndex >= 0 {
-			lines[index] = line[:separatorIndex+1] + " " + redactedValue
-		}
-	}
-	return strings.Join(lines, "\n")
+	return value
 }

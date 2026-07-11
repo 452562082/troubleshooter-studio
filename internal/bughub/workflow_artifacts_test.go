@@ -168,6 +168,9 @@ func TestRegisterArtifactSecretGateStructuredPositiveAndNegativeCases(t *testing
 
 	negatives := []string{
 		"Bearer authentication is configured by the operator.",
+		"Use the token: bucket algorithm.",
+		"Use the token: bucket2 algorithm.",
+		"The secret: ingredient is salt.",
 		"The password field is documented here.",
 		`{"token":""}`,
 		`{"secret":false}`,
@@ -193,6 +196,35 @@ func TestRegisterArtifactSecretGateStructuredPositiveAndNegativeCases(t *testing
 	input := ArtifactInput{ArtifactsRoot: resolvedTempDir(t), SourcePath: source, CaseID: "case-structured-secrets", AttemptID: attempt.ID, Kind: "safe-filename", RedactionStatus: RedactionStatusNotRequired}
 	if _, err := RegisterArtifact(ctx, store, input); err != nil {
 		t.Fatalf("keyword filename rejected: %v", err)
+	}
+}
+
+func TestRegisterArtifactSecretGateRejectsInlineCredentialHeadersAndStrongGenericTokens(t *testing.T) {
+	ctx := context.Background()
+	store := openTestCaseStore(t)
+	createTestCase(t, store, "case-inline-headers")
+	attempt := validRunningAttempt("attempt-inline-headers", "case-inline-headers")
+	if err := store.CreateAttempt(ctx, attempt); err != nil {
+		t.Fatal(err)
+	}
+	positives := []string{
+		"request Authorization: Basic dXNlcjpwYXNz trailing-credential\nnext line",
+		"logged \"Authorization\": Digest username=admin,response=abcdef tail\n",
+		"proxy Proxy-Authorization: Negotiate TlRMTVNTUAABAAA tail\n",
+		"response Set-Cookie: session=abc; HttpOnly\n",
+		"request Cookie: session=abc; other=def\n",
+		"token: eyJhbGciOiJIUzI1NiJ9.payload.signature\n",
+		"secret: github_pat_11AA22BB33CC44DD55EE66FF77GG88HH\n",
+	}
+	for index, content := range positives {
+		source := filepath.Join(t.TempDir(), fmt.Sprintf("inline-%d.txt", index))
+		if err := os.WriteFile(source, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		input := ArtifactInput{ArtifactsRoot: resolvedTempDir(t), SourcePath: source, CaseID: "case-inline-headers", AttemptID: attempt.ID, Kind: fmt.Sprintf("inline-%d", index), RedactionStatus: RedactionStatusNotRequired}
+		if _, err := RegisterArtifact(ctx, store, input); err == nil {
+			t.Fatalf("credential was accepted: %q", content)
+		}
 	}
 }
 

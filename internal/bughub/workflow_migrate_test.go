@@ -215,6 +215,33 @@ func TestImportLegacyRunsRejectsConflictingDuplicatesBeforeRedaction(t *testing.
 	}
 }
 
+func TestImportLegacyRunsRedactsWholeInlineHeadersAndEventTypeButKeepsProse(t *testing.T) {
+	store := openTestCaseStore(t)
+	raw := `[{"id":"run-inline","bug_id":"bug-inline","status":"failed","prompt_preview":"prefix Authorization: Basic dXNlcjpwYXNz credential-tail\nUse the token: bucket algorithm","events":[{"type":"Proxy-Authorization: Negotiate TlRMTVNTUAABAAA type-tail","message":"The secret: ingredient is salt"}],"final_message":"prefix Cookie: session=abc; other=def cookie-tail\nkept next line","error":"prefix Set-Cookie: auth=xyz; Secure set-cookie-tail"}]`
+	path := filepath.Join(t.TempDir(), "runs.json")
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ImportLegacyRuns(context.Background(), store, path); err != nil {
+		t.Fatal(err)
+	}
+	attempts, err := store.ListAttempts(context.Background(), AttemptFilter{})
+	if err != nil || len(attempts) != 1 {
+		t.Fatalf("attempts=%+v err=%v", attempts, err)
+	}
+	combined := string(attempts[0].InputJSON) + string(attempts[0].OutputJSON) + attempts[0].ErrorMessage
+	for _, credentialTail := range []string{"dXNlcjpwYXNz", "credential-tail", "TlRMTVNTUAABAAA", "type-tail", "session=abc", "cookie-tail", "auth=xyz", "set-cookie-tail"} {
+		if strings.Contains(combined, credentialTail) {
+			t.Fatalf("credential tail %q remained in %s", credentialTail, combined)
+		}
+	}
+	for _, prose := range []string{"Use the token: bucket algorithm", "The secret: ingredient is salt", "kept next line"} {
+		if !strings.Contains(combined, prose) {
+			t.Fatalf("benign prose %q was removed from %s", prose, combined)
+		}
+	}
+}
+
 func writeLegacyRuns(t *testing.T, runs []InvestigationRun) string {
 	t.Helper()
 	data, err := json.Marshal(runs)

@@ -150,6 +150,7 @@ func redactLegacyRun(run InvestigationRun) InvestigationRun {
 	run.FinalMessage = redactSensitiveText(run.FinalMessage)
 	run.Error = redactSensitiveText(run.Error)
 	for index := range run.Events {
+		run.Events[index].Type = redactSensitiveText(run.Events[index].Type)
 		run.Events[index].Message = redactSensitiveText(run.Events[index].Message)
 		run.Events[index].Raw = redactSensitiveAny(run.Events[index].Raw)
 		if run.Events[index].Meta != nil {

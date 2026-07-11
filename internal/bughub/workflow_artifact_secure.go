@@ -1,11 +1,14 @@
 package bughub
 
 import (
+	"errors"
 	"hash/fnv"
 	"path/filepath"
 	"sync"
 	"time"
 )
+
+var ErrSecureArtifactStoreUnsupported = errors.New("secure artifact store is unsupported on this platform")
 
 type capturedArtifactSource struct {
 	Content    []byte

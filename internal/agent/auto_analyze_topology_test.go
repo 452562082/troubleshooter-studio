@@ -441,6 +441,34 @@ func TestRunAutoAnalyzeCacheLookupPrunesExpiredEntries(t *testing.T) {
 	}
 }
 
+func TestInvalidateAutoAnalyzeCacheRemovesOnlyRequestedAnalysis(t *testing.T) {
+	cfg := &config.SystemConfig{System: config.System{ID: "refresh-target"}}
+	repoPaths := map[string]string{"api": filepath.Join(t.TempDir(), "api")}
+	targetKey := autoAnalyzeCacheKey(cfg, repoPaths)
+	otherKey := targetKey + "-other"
+
+	autoAnalyzeCacheMu.Lock()
+	autoAnalyzeCache[targetKey] = &autoAnalyzeCacheEntry{result: &analyzerpipe.Result{}, at: time.Now()}
+	autoAnalyzeCache[otherKey] = &autoAnalyzeCacheEntry{result: &analyzerpipe.Result{}, at: time.Now()}
+	autoAnalyzeCacheMu.Unlock()
+	t.Cleanup(func() {
+		autoAnalyzeCacheMu.Lock()
+		delete(autoAnalyzeCache, targetKey)
+		delete(autoAnalyzeCache, otherKey)
+		autoAnalyzeCacheMu.Unlock()
+	})
+
+	InvalidateAutoAnalyzeCache(cfg, repoPaths)
+
+	autoAnalyzeCacheMu.Lock()
+	_, targetRetained := autoAnalyzeCache[targetKey]
+	_, otherRetained := autoAnalyzeCache[otherKey]
+	autoAnalyzeCacheMu.Unlock()
+	if targetRetained || !otherRetained {
+		t.Fatalf("cache retained: target=%v other=%v, want false/true", targetRetained, otherRetained)
+	}
+}
+
 func assertAutoAnalyzeRepoStatus(t *testing.T, result *analyzerpipe.Result, repo, status, repoErr string) {
 	t.Helper()
 	for _, summary := range result.PerRepo {

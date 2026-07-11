@@ -192,6 +192,35 @@ type RunAutoAnalyzeOptions struct {
 	Ctx context.Context
 }
 
+// InvalidateAutoAnalyzeCache removes the cached analysis for one explicit
+// configuration/path selection. It intentionally leaves unrelated systems and
+// path selections warm. An in-flight scan for the same key is abandoned and
+// canceled so the caller's following RunAutoAnalyze starts a fresh scan.
+func InvalidateAutoAnalyzeCache(cfg *config.SystemConfig, repoPaths map[string]string) {
+	if cfg == nil {
+		return
+	}
+	expanded := make(map[string]string, len(repoPaths))
+	for name, path := range repoPaths {
+		if path == "" {
+			continue
+		}
+		expanded[name] = userconfig.ExpandHome(path)
+	}
+	if len(expanded) == 0 {
+		return
+	}
+	key := autoAnalyzeCacheKey(cfg, expanded)
+	autoAnalyzeCacheMu.Lock()
+	delete(autoAnalyzeCache, key)
+	if flight, ok := autoAnalyzeFlights[key]; ok {
+		flight.abandoned = true
+		delete(autoAnalyzeFlights, key)
+		flight.cancel()
+	}
+	autoAnalyzeCacheMu.Unlock()
+}
+
 // RunAutoAnalyze 跑一遍 analyzerpipe.Run。返回 Result 给调用方塞进 generator
 // (g.LoadAnalysisResult 或写到临时 analysis.json 再 LoadAnalysis)。
 //

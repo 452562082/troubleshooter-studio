@@ -339,6 +339,7 @@ export namespace analyzer {
 	    findings?: Finding[];
 	    downstream_calls?: DownstreamCall[];
 	    api_routes?: APIRoute[];
+	    endpoints?: topology.Endpoint[];
 	    data_store_usages?: DataStoreUsage[];
 	    schema_tables?: SchemaTable[];
 	    role_hint?: RoleHint;
@@ -359,6 +360,7 @@ export namespace analyzer {
 	        this.findings = this.convertValues(source["findings"], Finding);
 	        this.downstream_calls = this.convertValues(source["downstream_calls"], DownstreamCall);
 	        this.api_routes = this.convertValues(source["api_routes"], APIRoute);
+	        this.endpoints = this.convertValues(source["endpoints"], topology.Endpoint);
 	        this.data_store_usages = this.convertValues(source["data_store_usages"], DataStoreUsage);
 	        this.schema_tables = this.convertValues(source["schema_tables"], SchemaTable);
 	        this.role_hint = this.convertValues(source["role_hint"], RoleHint);
@@ -479,6 +481,7 @@ export namespace analyzerpipe {
 	export class Result {
 	    report: analyzer.Report;
 	    per_repo: RepoSummary[];
+	    topology: topology.Snapshot;
 
 	    static createFrom(source: any = {}) {
 	        return new Result(source);
@@ -488,6 +491,7 @@ export namespace analyzerpipe {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.report = this.convertValues(source["report"], analyzer.Report);
 	        this.per_repo = this.convertValues(source["per_repo"], RepoSummary);
+	        this.topology = this.convertValues(source["topology"], topology.Snapshot);
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -3084,6 +3088,189 @@ export namespace openclaw {
 	        this.source = source["source"];
 	        this.primary = source["primary"];
 	    }
+	}
+
+}
+
+export namespace topology {
+
+	export class CandidateEdge {
+	    from_endpoint: string;
+	    to_endpoint: string;
+	    from_service: string;
+	    to_service: string;
+	    protocol: string;
+	    method?: string;
+	    path?: string;
+	    rpc_method?: string;
+	    confidence: number;
+	    status: string;
+	    reasons: string[];
+	    conflicts?: string[];
+
+	    static createFrom(source: any = {}) {
+	        return new CandidateEdge(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.from_endpoint = source["from_endpoint"];
+	        this.to_endpoint = source["to_endpoint"];
+	        this.from_service = source["from_service"];
+	        this.to_service = source["to_service"];
+	        this.protocol = source["protocol"];
+	        this.method = source["method"];
+	        this.path = source["path"];
+	        this.rpc_method = source["rpc_method"];
+	        this.confidence = source["confidence"];
+	        this.status = source["status"];
+	        this.reasons = source["reasons"];
+	        this.conflicts = source["conflicts"];
+	    }
+	}
+	export class Transform {
+	    kind: string;
+	    from: string;
+	    to: string;
+
+	    static createFrom(source: any = {}) {
+	        return new Transform(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.kind = source["kind"];
+	        this.from = source["from"];
+	        this.to = source["to"];
+	    }
+	}
+	export class Endpoint {
+	    id: string;
+	    repo: string;
+	    service: string;
+	    direction: string;
+	    protocol: string;
+	    method?: string;
+	    path?: string;
+	    rpc_method?: string;
+	    target_hint?: string;
+	    location: string;
+	    source: string;
+	    transforms?: Transform[];
+
+	    static createFrom(source: any = {}) {
+	        return new Endpoint(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.repo = source["repo"];
+	        this.service = source["service"];
+	        this.direction = source["direction"];
+	        this.protocol = source["protocol"];
+	        this.method = source["method"];
+	        this.path = source["path"];
+	        this.rpc_method = source["rpc_method"];
+	        this.target_hint = source["target_hint"];
+	        this.location = source["location"];
+	        this.source = source["source"];
+	        this.transforms = this.convertValues(source["transforms"], Transform);
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class RepositoryStatus {
+	    repo: string;
+	    state: string;
+	    error?: string;
+	    endpoint_count: number;
+
+	    static createFrom(source: any = {}) {
+	        return new RepositoryStatus(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.repo = source["repo"];
+	        this.state = source["state"];
+	        this.error = source["error"];
+	        this.endpoint_count = source["endpoint_count"];
+	    }
+	}
+	export class ServiceDescriptor {
+	    repo: string;
+	    service: string;
+	    role?: string;
+	    aliases?: string[];
+	    hosts?: string[];
+
+	    static createFrom(source: any = {}) {
+	        return new ServiceDescriptor(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.repo = source["repo"];
+	        this.service = source["service"];
+	        this.role = source["role"];
+	        this.aliases = source["aliases"];
+	        this.hosts = source["hosts"];
+	    }
+	}
+	export class Snapshot {
+	    schema_version: string;
+	    services: ServiceDescriptor[];
+	    endpoints: Endpoint[];
+	    edges: CandidateEdge[];
+	    repositories: RepositoryStatus[];
+
+	    static createFrom(source: any = {}) {
+	        return new Snapshot(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.schema_version = source["schema_version"];
+	        this.services = this.convertValues(source["services"], ServiceDescriptor);
+	        this.endpoints = this.convertValues(source["endpoints"], Endpoint);
+	        this.edges = this.convertValues(source["edges"], CandidateEdge);
+	        this.repositories = this.convertValues(source["repositories"], RepositoryStatus);
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 
 }

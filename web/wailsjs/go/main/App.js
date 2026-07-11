@@ -6,6 +6,10 @@ export function Analyze(arg1, arg2, arg3) {
   return window['go']['main']['App']['Analyze'](arg1, arg2, arg3);
 }
 
+export function AnalyzeServiceTopology(arg1, arg2) {
+  return window['go']['main']['App']['AnalyzeServiceTopology'](arg1, arg2);
+}
+
 export function AnalyzeV2(arg1) {
   return window['go']['main']['App']['AnalyzeV2'](arg1);
 }

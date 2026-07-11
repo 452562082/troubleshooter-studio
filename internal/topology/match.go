@@ -135,6 +135,8 @@ func routeCandidates(outbound Endpoint, inbound []Endpoint) []routeCandidate {
 			switch {
 			case NormalizePath(outbound.Path) == NormalizePath(candidate.Path):
 				primary = append(primary, routeCandidate{endpoint: candidate, kind: routeExact})
+			case pathsMatchParameterTemplate(outbound.Path, candidate.Path):
+				primary = append(primary, routeCandidate{endpoint: candidate, kind: routeExact})
 			case pathsMatchThroughTransforms(outbound, candidate):
 				primary = append(primary, routeCandidate{endpoint: candidate, kind: routeTransformed})
 			case pathsHaveSuffixSimilarity(outbound.Path, candidate.Path):
@@ -152,6 +154,26 @@ func routeCandidates(outbound Endpoint, inbound []Endpoint) []routeCandidate {
 		return primary
 	}
 	return similar
+}
+
+func pathsMatchParameterTemplate(left, right string) bool {
+	leftSegments := strings.Split(strings.TrimPrefix(NormalizePath(left), "/"), "/")
+	rightSegments := strings.Split(strings.TrimPrefix(NormalizePath(right), "/"), "/")
+	if len(leftSegments) != len(rightSegments) {
+		return false
+	}
+	usedParameter := false
+	for index := range leftSegments {
+		if leftSegments[index] == rightSegments[index] {
+			continue
+		}
+		if leftSegments[index] == "{param}" || rightSegments[index] == "{param}" {
+			usedParameter = true
+			continue
+		}
+		return false
+	}
+	return usedParameter
 }
 
 func normalizedProtocol(protocol string) string {

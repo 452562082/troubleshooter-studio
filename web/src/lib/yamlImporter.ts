@@ -11,7 +11,11 @@
 // 它依赖 runCCHubPreload / crossCheckImported* 等 closure 函数,跨边界不值得。
 
 import type { CredField } from './credFields'
-import type { CodeIntelligenceState } from './yamlGenerator'
+import type {
+  CodeIntelligenceState,
+  ServiceTopologyOverrideState,
+  ServiceTopologyState,
+} from './yamlGenerator'
 import { VIA_GRAFANA_ELIGIBLE } from './yamlShared'
 
 /** yaml 字段值是否为模板占位符 "{{XYZ}}";占位符不应当作真值反填。 */
@@ -141,6 +145,7 @@ export interface ApplyImportContext {
   agent: { id: string; name: string; workspace_name: string; model: string }
   targetModels: Record<string, string>
   codeIntelligence: CodeIntelligenceState
+  serviceTopology: ServiceTopologyState
   environments: Array<{ id: string; api_domain: string; web_domain: string; is_prod: boolean }>
   repos: any[]
   enabledSourceTypes: Record<string, boolean>
@@ -200,6 +205,26 @@ export async function applyParsedYAMLToWizardState(
   ctx.codeIntelligence.enabled = codeIntelligence?.enabled === true
     && (codeIntelligence.provider === undefined || codeIntelligence.provider === 'codegraph')
   ctx.codeIntelligence.provider = 'codegraph'
+
+  const topologyOverrides = Array.isArray(parsed?.service_topology?.overrides)
+    ? parsed.service_topology.overrides
+    : []
+  ctx.serviceTopology.overrides = topologyOverrides.flatMap((raw: unknown): ServiceTopologyOverrideState[] => {
+    if (!raw || typeof raw !== 'object') return []
+    const value = raw as Record<string, unknown>
+    if (value.action !== 'confirm' && value.action !== 'reject' && value.action !== 'add') return []
+    if (value.protocol !== 'http' && value.protocol !== 'grpc') return []
+    if (typeof value.from_service !== 'string' || typeof value.to_service !== 'string') return []
+    return [{
+      action: value.action,
+      fromService: value.from_service,
+      toService: value.to_service,
+      protocol: value.protocol,
+      ...(typeof value.method === 'string' ? { method: value.method } : {}),
+      ...(typeof value.path === 'string' ? { path: value.path } : {}),
+      ...(typeof value.rpc_method === 'string' ? { rpcMethod: value.rpc_method } : {}),
+    }]
+  })
 
   // system
   if (parsed.system && typeof parsed.system === 'object') {

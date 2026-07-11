@@ -37,6 +37,7 @@ import GlobalReposRootBlock from '../components/GlobalReposRootBlock.vue'
 import {
   generateYAML as libGenerateYAML,
   type CodeIntelligenceState,
+  type ServiceTopologyState,
   type YAMLGenContext,
 } from '../lib/yamlGenerator'
 import { computeStepErrors as libComputeStepErrors, labelForErrorKey as libLabelForErrorKey, type ValidatorContext } from '../lib/yamlValidator'
@@ -134,6 +135,9 @@ const targetModels = reactive<Record<string, string>>({
 const codeIntelligence = reactive<CodeIntelligenceState>({
   enabled: saved?.codeIntelligence?.enabled ?? false,
   provider: 'codegraph',
+})
+const serviceTopology = reactive<ServiceTopologyState>({
+  overrides: saved?.serviceTopology?.overrides ?? [],
 })
 const modelConsumingTargets = [Target.Openclaw] as const
 
@@ -2498,6 +2502,7 @@ watch(
     agent,
     targetModels,
     codeIntelligence,
+    serviceTopology,
     environments,
     repos,
     repoBranchesMap: repoBranchesMap.value,
@@ -2601,6 +2606,7 @@ async function clearDraft() {
   agent.model = 'anthropic/claude-sonnet-4-6'
   codeIntelligence.enabled = false
   codeIntelligence.provider = 'codegraph'
+  serviceTopology.overrides = []
   // 环境 / 仓库回到初始 1 条
   environments.splice(0, environments.length,
     { id: 'dev', api_domain: '', web_domain: '', is_prod: false },
@@ -2666,7 +2672,7 @@ const {
   currentStep,
   runImportCrossChecks,
   buildContext: (): ApplyImportContext => ({
-    system, agent, targetModels, codeIntelligence,
+    system, agent, targetModels, codeIntelligence, serviceTopology,
     environments, repos,
     enabledSourceTypes, enabledSourceOrder, sourceCreds,
     serviceSourceMap, ccCredInputs,
@@ -2772,7 +2778,7 @@ function deriveSkillsWhitelist(): string[] {
 function generateYAML(): string {
   const ctx: YAMLGenContext = {
     system, agent, agentNameDefault: agentNameDefault.value,
-    targetModels, enabledTargets, codeIntelligence, enabledObservability,
+    targetModels, enabledTargets, codeIntelligence, serviceTopology, enabledObservability,
     environments: environments.map(e => ({ id: e.id, api_domain: e.api_domain, web_domain: e.web_domain, is_prod: e.is_prod })),
     repos: repos.map(r => ({
       name: r.name, url: r.url, stack: r.stack, framework: r.framework,

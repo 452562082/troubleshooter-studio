@@ -109,16 +109,24 @@ def finite_confidence(value: object, label: str) -> float:
     return confidence
 
 
-def validate_topology(document: dict) -> None:
+def validate_topology(document: dict) -> bool:
     services = document.get("services")
     if not isinstance(services, dict):
         raise DocumentError("topology.services must be a mapping")
     if any(not isinstance(name, str) or not isinstance(item, dict) for name, item in services.items()):
         raise DocumentError("topology.services entries must be mappings keyed by service")
-    for edge_index, edge in enumerate(required_list(document, "edges", "topology")):
-        label = f"topology.edges[{edge_index}]"
+    edges = required_list(document, "edges", "topology")
+    for edge_index, edge in enumerate(edges):
         if not isinstance(edge, dict):
-            raise DocumentError(f"{label} must be a mapping")
+            raise DocumentError(f"topology.edges[{edge_index}] must be a mapping")
+    flat_edges = bool(edges) and all("routes" not in edge for edge in edges)
+    if flat_edges and str(document.get("schema_version") or "").strip():
+        raise DocumentError("schema-versioned topology edges must use routes")
+    if not flat_edges and any("routes" not in edge for edge in edges):
+        raise DocumentError("topology cannot mix flat edges and route edges")
+
+    for edge_index, edge in enumerate(edges):
+        label = f"topology.edges[{edge_index}]"
         for key in ("from", "to"):
             if not isinstance(edge.get(key), str) or not edge[key].strip():
                 raise DocumentError(f"{label}.{key} must be a non-empty string")
@@ -126,6 +134,20 @@ def validate_topology(document: dict) -> None:
         if not isinstance(status, str) or status.strip().lower() not in FORMAL_STATUSES:
             raise DocumentError(f"{label}.status must be a formal status")
         finite_confidence(edge.get("confidence"), f"{label}.confidence")
+        if flat_edges:
+            if not isinstance(edge.get("protocol"), str) or not edge["protocol"].strip():
+                raise DocumentError(f"{label}.protocol must be a non-empty string")
+            for key in ("method", "path", "rpc_method"):
+                if key in edge and not isinstance(edge[key], str):
+                    raise DocumentError(f"{label}.{key} must be a string")
+            endpoint_edges = edge.get("endpoint_edges")
+            if (
+                not isinstance(endpoint_edges, list)
+                or not endpoint_edges
+                or any(not isinstance(item, str) or not item.strip() for item in endpoint_edges)
+            ):
+                raise DocumentError(f"{label}.endpoint_edges must be a non-empty list of strings")
+            continue
         routes = edge.get("routes")
         if not isinstance(routes, list):
             raise DocumentError(f"{label}.routes must be a list")
@@ -141,15 +163,40 @@ def validate_topology(document: dict) -> None:
             for key in ("method", "path", "rpc_method"):
                 if key in route and not isinstance(route[key], str):
                     raise DocumentError(f"{route_label}.{key} must be a string")
+    return flat_edges
 
 
-def validate_evidence(document: dict) -> None:
+def validate_evidence(document: dict, legacy_flat: bool) -> None:
+    if legacy_flat:
+        if str(document.get("schema_version") or "").strip():
+            raise DocumentError("legacy flat evidence must be unversioned")
+        if "endpoints" in document and not isinstance(document["endpoints"], list):
+            raise DocumentError("evidence.endpoints must be a list")
+        for edge_index, edge in enumerate(required_list(document, "edges", "evidence")):
+            label = f"evidence.edges[{edge_index}]"
+            if not isinstance(edge, dict):
+                raise DocumentError(f"{label} must be a mapping")
+            if not isinstance(edge.get("id"), str) or not edge["id"].strip():
+                raise DocumentError(f"{label}.id must be a non-empty string")
+            if "location" in edge and not isinstance(edge["location"], str):
+                raise DocumentError(f"{label}.location must be a string")
+            for key in ("reasons", "conflicts"):
+                value = edge.get(key, [])
+                if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                    raise DocumentError(f"{label}.{key} must be a list of strings")
+        return
+
+    endpoint_ids = set()
     for endpoint_index, endpoint in enumerate(required_list(document, "endpoints", "evidence")):
         label = f"evidence.endpoints[{endpoint_index}]"
         if not isinstance(endpoint, dict):
             raise DocumentError(f"{label} must be a mapping")
         if not isinstance(endpoint.get("id"), str) or not endpoint["id"].strip():
             raise DocumentError(f"{label}.id must be a non-empty string")
+        endpoint_id = endpoint["id"].strip()
+        if endpoint_id in endpoint_ids:
+            raise DocumentError(f"duplicate evidence endpoint id: {endpoint_id}")
+        endpoint_ids.add(endpoint_id)
         if "location" in endpoint and not isinstance(endpoint["location"], str):
             raise DocumentError(f"{label}.location must be a string")
     for edge_index, edge in enumerate(required_list(document, "edges", "evidence")):
@@ -163,6 +210,9 @@ def validate_evidence(document: dict) -> None:
         for key in ("from_endpoint", "to_endpoint"):
             if key in edge and not isinstance(edge[key], str):
                 raise DocumentError(f"{label}.{key} must be a string")
+            endpoint_id = str(edge.get(key) or "").strip()
+            if endpoint_id and endpoint_id not in endpoint_ids:
+                raise DocumentError(f"{label}.{key} references missing endpoint: {endpoint_id}")
         finite_confidence(edge.get("confidence"), f"{label}.confidence")
         for key in ("reasons", "conflicts"):
             value = edge.get(key, [])
@@ -170,9 +220,19 @@ def validate_evidence(document: dict) -> None:
                 raise DocumentError(f"{label}.{key} must be a list of strings")
 
 
-def normalized_routes(raw: dict) -> list[dict]:
+def normalized_routes(raw: dict, legacy_flat: bool) -> list[dict]:
+    items = raw["routes"] if not legacy_flat else [
+        {
+            "protocol": raw.get("protocol"),
+            "method": raw.get("method"),
+            "path": raw.get("path"),
+            "rpc_method": raw.get("rpc_method"),
+            "endpoint_edge": endpoint_edge,
+        }
+        for endpoint_edge in raw["endpoint_edges"]
+    ]
     routes = []
-    for item in raw["routes"]:
+    for item in items:
         route = {
             "protocol": str(item.get("protocol") or "").lower() or None,
             "method": str(item.get("method") or "").upper() or None,
@@ -184,7 +244,7 @@ def normalized_routes(raw: dict) -> list[dict]:
     return routes
 
 
-def normalized_edges(document: dict) -> list[dict]:
+def normalized_edges(document: dict, legacy_flat: bool) -> list[dict]:
     result = []
     for raw in document["edges"]:
         source = str(raw.get("from") or "").strip()
@@ -197,7 +257,7 @@ def normalized_edges(document: dict) -> list[dict]:
                 "to": target,
                 "status": status,
                 "confidence": confidence,
-                "routes": normalized_routes(raw),
+                "routes": normalized_routes(raw, legacy_flat),
             }
         )
     result.sort(
@@ -235,19 +295,22 @@ def scoped_entry_edge(
     if not routes:
         return None
     records = [edge_index[route["endpoint_edge"]] for route in routes]
-    statuses = [str(record["status"]).strip().lower() for record in records]
+    statuses = [str(record.get("status") or edge["status"]).strip().lower() for record in records]
     if any(status not in FORMAL_STATUSES for status in statuses):
         raise DocumentError("matched route evidence must use a formal status")
     scoped = dict(edge)
     scoped["routes"] = routes
     scoped["status"] = max(statuses, key=lambda status: STATUS_PRIORITY[status])
-    scoped["confidence"] = max(float(record["confidence"]) for record in records)
+    scoped["confidence"] = max(
+        float(record.get("confidence", edge["confidence"])) for record in records
+    )
     return scoped
 
 
-def evidence_indexes(document: dict) -> tuple[dict[str, dict], dict[str, dict]]:
+def evidence_indexes(document: dict, legacy_flat: bool) -> tuple[dict[str, dict], dict[str, dict]]:
     endpoints = {}
-    for item in document["endpoints"]:
+    endpoint_items = document.get("endpoints", []) if legacy_flat else document["endpoints"]
+    for item in endpoint_items:
         endpoints[str(item["id"])] = item
     edges = {}
     for item in document["edges"]:
@@ -290,7 +353,7 @@ def edge_evidence(
         result.append(
             {
                 "id": evidence_id,
-                "status": str(raw["status"]),
+                "status": str(raw.get("status") or edge["status"]),
                 "location": str(raw.get("location") or ""),
                 "from_location": str(endpoint_index.get(from_endpoint, {}).get("location") or ""),
                 "to_location": str(endpoint_index.get(to_endpoint, {}).get("location") or ""),
@@ -407,7 +470,7 @@ def query(args: argparse.Namespace) -> dict:
 
     try:
         topology_document = safe_document(topology_path, "topology")
-        validate_topology(topology_document)
+        legacy_flat = validate_topology(topology_document)
     except (OSError, UnicodeError, yaml.YAMLError, DocumentError) as exc:
         result["warnings"].append(f"cannot read topology: {exc}")
         return result
@@ -417,9 +480,9 @@ def query(args: argparse.Namespace) -> dict:
         return result
     try:
         evidence_document = safe_document(evidence_path, "evidence")
-        validate_evidence(evidence_document)
-        endpoint_index, edge_index = evidence_indexes(evidence_document)
-        edges = normalized_edges(topology_document)
+        validate_evidence(evidence_document, legacy_flat)
+        endpoint_index, edge_index = evidence_indexes(evidence_document, legacy_flat)
+        edges = normalized_edges(topology_document, legacy_flat)
         validate_route_evidence(edges, edge_index)
     except (OSError, UnicodeError, yaml.YAMLError, DocumentError) as exc:
         result["warnings"].append(f"cannot read endpoint evidence: {exc}")

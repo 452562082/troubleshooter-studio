@@ -37,7 +37,10 @@ def write_fixture(root, edges):
         for service in (item["from"], item["to"])
     }
     (refs / "service-topology.yaml").write_text(
-        yaml.safe_dump({"services": services, "edges": edges}), encoding="utf-8"
+        yaml.safe_dump(
+            {"schema_version": "1", "services": services, "edges": edges}
+        ),
+        encoding="utf-8",
     )
     endpoint_ids = {
         endpoint_id
@@ -46,6 +49,7 @@ def write_fixture(root, edges):
         for endpoint_id in route["endpoint_edge"].split(">", 1)
     }
     evidence = {
+        "schema_version": "1",
         "endpoints": [
             {"id": endpoint_id, "location": f"{endpoint_id}.fixture:1"}
             for endpoint_id in sorted(endpoint_ids)
@@ -135,6 +139,94 @@ def test_query_by_failed_request_returns_ranked_three_hop_path(tmp_path):
     ]
     assert result["paths"][0]["edges"][0]["evidence"]
     assert result["fallback"] is None
+
+
+def test_query_accepts_exact_unversioned_flat_brief_fixture(tmp_path):
+    refs = tmp_path / "skills" / "routing" / "references"
+    refs.mkdir(parents=True)
+    edges = [
+        {
+            "from": "mall-web",
+            "to": "mall-bff",
+            "protocol": "http",
+            "method": "GET",
+            "path": "/api/orders/{param}",
+            "confidence": 0.98,
+            "status": "confirmed",
+            "endpoint_edges": [
+                "mall-web:GET:/api/orders/{param}>mall-bff"
+            ],
+        },
+        {
+            "from": "mall-bff",
+            "to": "mall-order",
+            "protocol": "http",
+            "method": "POST",
+            "path": "/internal/orders",
+            "confidence": 0.90,
+            "status": "automatic",
+            "endpoint_edges": ["mall-bff:POST:/internal/orders>mall-order"],
+        },
+    ]
+    (refs / "service-topology.yaml").write_text(
+        yaml.safe_dump({"services": {}, "edges": edges}), encoding="utf-8"
+    )
+    (refs / "endpoint-evidence.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "edges": [
+                    {
+                        "id": item["endpoint_edges"][0],
+                        "location": "fixture:1",
+                        "reasons": ["fixture"],
+                    }
+                    for item in edges
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_query(
+        tmp_path,
+        "--service",
+        "mall-web",
+        "--method",
+        "GET",
+        "--path",
+        "/api/orders/123",
+        "--json",
+    )
+
+    assert result["status"] == "ok"
+    assert result["paths"][0]["services"] == [
+        "mall-web",
+        "mall-bff",
+        "mall-order",
+    ]
+    first_edge = result["paths"][0]["edges"][0]
+    assert first_edge["status"] == "confirmed"
+    assert first_edge["confidence"] == 0.98
+    assert first_edge["routes"] == [
+        {
+            "protocol": "http",
+            "method": "GET",
+            "path": "/api/orders/{param}",
+            "rpc_method": None,
+            "endpoint_edge": "mall-web:GET:/api/orders/{param}>mall-bff",
+        }
+    ]
+    assert first_edge["evidence"] == [
+        {
+            "id": "mall-web:GET:/api/orders/{param}>mall-bff",
+            "status": "confirmed",
+            "location": "fixture:1",
+            "from_location": "",
+            "to_location": "",
+            "reasons": ["fixture"],
+            "conflicts": [],
+        }
+    ]
 
 
 def test_query_by_url_without_service_finds_matching_start(tmp_path):
@@ -487,6 +579,39 @@ def test_query_missing_evidence_is_unavailable(tmp_path):
         / "endpoint-evidence.yaml"
     )
     evidence_path.unlink()
+
+    assert_unavailable(run_query(tmp_path, "--service", "web", "--json"))
+
+
+def test_query_duplicate_generated_endpoint_ids_are_unavailable(tmp_path):
+    write_fixture(
+        tmp_path,
+        edges=[edge("web", "orders", "GET", "/orders", 0.9, "automatic")],
+    )
+    evidence_path = (
+        tmp_path / "skills" / "routing" / "references" / "endpoint-evidence.yaml"
+    )
+    evidence = yaml.safe_load(evidence_path.read_text(encoding="utf-8"))
+    evidence["endpoints"].append(dict(evidence["endpoints"][0]))
+    evidence_path.write_text(yaml.safe_dump(evidence), encoding="utf-8")
+
+    assert_unavailable(run_query(tmp_path, "--service", "web", "--json"))
+
+
+@pytest.mark.parametrize("endpoint_field", ["from_endpoint", "to_endpoint"])
+def test_query_dangling_generated_endpoint_references_are_unavailable(
+    tmp_path, endpoint_field
+):
+    write_fixture(
+        tmp_path,
+        edges=[edge("web", "orders", "GET", "/orders", 0.9, "automatic")],
+    )
+    evidence_path = (
+        tmp_path / "skills" / "routing" / "references" / "endpoint-evidence.yaml"
+    )
+    evidence = yaml.safe_load(evidence_path.read_text(encoding="utf-8"))
+    evidence["edges"][0][endpoint_field] = "missing:endpoint"
+    evidence_path.write_text(yaml.safe_dump(evidence), encoding="utf-8")
 
     assert_unavailable(run_query(tmp_path, "--service", "web", "--json"))
 

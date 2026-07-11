@@ -116,11 +116,20 @@ python3 skills/k8s-runtime-query/scripts/k8s_query.py --env <env> --cluster <c> 
 ## 步骤 4:沿依赖图追下游
 
 {{ if hasSkill . "service-topology-query" }}
-先用失败请求的 method/path 和主角服务查询正式拓扑，最多三跳：
+先判断失败调用相对主角的方向，最多向下游查三跳：
+
+- 仅当 trace / 日志 / 前端交接证据明确显示失败的是**主角发起的出站调用**时，才从主角查询该调用。只有出站证据明确包含 method/path 时才传这两个参数：
 
 ```bash
 python3 skills/service-topology-query/scripts/query.py --service <主角> \
     --method <失败请求 method> --path <失败请求 path> --max-depth 3 --json
+```
+
+- 如果失败的是**进入主角的入站请求**，该 method/path 描述的是“调用方 → 主角”，不是“主角 → 下游”。未知调用方时只按主角查询下游；已从 trace / 网关日志确认调用方时，改从已知调用方查询入口边：
+
+```bash
+python3 skills/service-topology-query/scripts/query.py --service <主角> --max-depth 3 --json
+python3 skills/service-topology-query/scripts/query.py --service <已知调用方> --method <失败请求 method> --path <失败请求 path> --max-depth 3 --json
 ```
 
 拓扑只作导航证据。按排序路径逐跳用 trace、同时间窗日志和 runtime 验证实际调用；与静态路径冲突时以 trace 为准。candidate / stale 必须保留标签，不得当成已发生调用。选定仓库/endpoint 后进入代码取证。拓扑与后续 cascade 合计最多向下游递归三跳。

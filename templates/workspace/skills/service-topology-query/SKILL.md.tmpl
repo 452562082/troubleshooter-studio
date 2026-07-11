@@ -29,17 +29,17 @@ python3 skills/service-topology-query/scripts/query.py \
   --method <HTTP-method> --path <failed-URL-or-path> --json
 ```
 
-`--max-depth` 默认 3，脚本强制限制在 1..5。路径会去掉 URL query/fragment，并把 `:id`、`{id}`、`[id]`、`<id>` 统一为 `{param}` 后匹配。遍历检测环，只返回无环的完整叶路径或深度边界路径。
+`--max-depth` 默认 3，脚本强制限制在 1..5。路径会去掉 URL query/fragment；普通的 `:id`、`{id}`、`[id]` 统一为 `{param}` 且只匹配一个 segment，`*path`、`:path*`、`{*path}`、`[...path]` 统一为 `{wildcard}` 且匹配一个或多个 segment。遍历检测环，只返回无环的完整叶路径或深度边界路径。
 
 稳定 JSON 字段：
 
 - `status`：`ok`、`no_match` 或 `unavailable`。
 - `query`：归一化后的 `service/method/path/max_depth`。
 - `paths`：按人工确认关系优先、路径最低置信度、路径长度和服务名字典序稳定排序。
-- `warnings`：缺文件、环、candidate / stale 标签等导航风险。
+- `warnings`：缺文件、格式错误、环、candidate / stale 标签等导航风险。
 - `fallback`：无正式路径时为 `routing_rg_read`；成功时为 `null`。
 
-每条路径的 `edges[].evidence` 会尽可能带两端代码位置、匹配理由和冲突。证据为空表示静态引用不完整，不代表该调用已经在运行时发生。
+带 method/path 查询时，首跳只返回实际命中的 route；首跳 `status/confidence/evidence` 也只来自这些 route 对应的 endpoint edge，不受同一服务对上其它路由影响。拓扑或 endpoint evidence 缺失或格式错误、route 引用找不到证据时返回 `status=unavailable`、空 `paths` 和 `routing_rg_read` fallback，不伪造空/null 证据。
 
 ## 逐跳验证
 

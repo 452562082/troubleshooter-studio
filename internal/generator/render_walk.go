@@ -136,17 +136,25 @@ func (g *Generator) shouldSkipDir(rel string) bool {
 
 // serviceTopologySkillEnabled mirrors analyzerpipe's activation boundary: a
 // cross-repository topology needs routing plus at least two runtime service
-// nodes. Local-path/analyzer failures are represented by the generated
-// references and handled by the query skill's explicit fallback contract.
+// nodes backed by existing local checkout directories.
 func serviceTopologySkillEnabled(ctx *Context) bool {
 	if ctx == nil || !skillEnabledForWhitelist(ctx, "routing") {
 		return false
 	}
 	runnable := 0
 	for _, repo := range ctx.Repos {
-		if repo.IsServiceNode() {
-			runnable++
+		if !repo.IsServiceNode() {
+			continue
 		}
+		path := strings.TrimSpace(ctx.RepoLocalPaths[repo.Name])
+		if path == "" {
+			continue
+		}
+		info, err := os.Stat(path)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		runnable++
 	}
 	return runnable >= 2
 }

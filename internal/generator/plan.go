@@ -167,7 +167,7 @@ func skipReason(g *Generator, skill string) string {
 		return "requires routing skill"
 	}
 	if skill == "service-topology-query" && !serviceTopologySkillEnabled(g.Ctx) {
-		return "requires at least two runnable service repos"
+		return "requires at least two service repos with existing local directories"
 	}
 	for _, ds := range g.Ctx.Infrastructure.DataStores {
 		if !ds.Enabled && skill == dataStoreSkillName(ds.Type) {

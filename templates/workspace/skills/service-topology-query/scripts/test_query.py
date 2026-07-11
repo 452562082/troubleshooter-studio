@@ -3,6 +3,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 
@@ -10,32 +11,57 @@ SCRIPT = Path(__file__).with_name("query.py")
 
 
 def edge(source, target, method, path, confidence, status):
+    endpoint_edge = f"{source}:{method}:{path}>{target}:{method}:{path}"
     return {
         "from": source,
         "to": target,
-        "protocol": "http",
-        "method": method,
-        "path": path,
         "confidence": confidence,
         "status": status,
-        "endpoint_edges": [f"{source}:{method}:{path}>{target}"],
+        "routes": [
+            {
+                "protocol": "http",
+                "method": method,
+                "path": path,
+                "endpoint_edge": endpoint_edge,
+            }
+        ],
     }
 
 
 def write_fixture(root, edges):
     refs = root / "skills" / "routing" / "references"
     refs.mkdir(parents=True)
+    services = {
+        service: {"repo": f"{service}-repo"}
+        for item in edges
+        for service in (item["from"], item["to"])
+    }
     (refs / "service-topology.yaml").write_text(
-        yaml.safe_dump({"services": {}, "edges": edges}), encoding="utf-8"
+        yaml.safe_dump({"services": services, "edges": edges}), encoding="utf-8"
     )
+    endpoint_ids = {
+        endpoint_id
+        for item in edges
+        for route in item["routes"]
+        for endpoint_id in route["endpoint_edge"].split(">", 1)
+    }
     evidence = {
+        "endpoints": [
+            {"id": endpoint_id, "location": f"{endpoint_id}.fixture:1"}
+            for endpoint_id in sorted(endpoint_ids)
+        ],
         "edges": [
             {
-                "id": item["endpoint_edges"][0],
-                "location": "fixture:1",
+                "id": route["endpoint_edge"],
+                "from_endpoint": route["endpoint_edge"].split(">", 1)[0],
+                "to_endpoint": route["endpoint_edge"].split(">", 1)[1],
+                "status": item["status"],
+                "confidence": item["confidence"],
                 "reasons": ["fixture"],
+                "conflicts": [],
             }
             for item in edges
+            for route in item["routes"]
         ]
     }
     (refs / "endpoint-evidence.yaml").write_text(
@@ -51,6 +77,14 @@ def run_query(root, *args):
         capture_output=True,
     )
     return json.loads(proc.stdout)
+
+
+def assert_unavailable(result, service="web"):
+    assert result["status"] == "unavailable"
+    assert result["paths"] == []
+    assert result["fallback"] == "routing_rg_read"
+    assert result["query"]["service"] == service
+    assert result["warnings"]
 
 
 def test_query_by_failed_request_returns_ranked_three_hop_path(tmp_path):
@@ -250,7 +284,9 @@ def test_query_reads_generated_route_and_endpoint_evidence_shape(tmp_path):
                 "from_endpoint": "web:out",
                 "to_endpoint": "bff:in",
                 "status": "automatic",
+                "confidence": 0.98,
                 "reasons": ["method_path_exact"],
+                "conflicts": [],
             }
         ],
     }
@@ -278,11 +314,244 @@ def test_query_reads_generated_route_and_endpoint_evidence_shape(tmp_path):
     assert first_edge["evidence"][0]["to_location"] == "routes/orders.go:12"
 
 
+def test_query_scopes_first_edge_status_confidence_routes_and_evidence_to_match(tmp_path):
+    refs = tmp_path / "skills" / "routing" / "references"
+    refs.mkdir(parents=True)
+    get_ref = "web:get>bff:get"
+    post_ref = "web:post>bff:post"
+    topology = {
+        "services": {"web": {"repo": "web"}, "bff": {"repo": "bff"}},
+        "edges": [
+            {
+                "from": "web",
+                "to": "bff",
+                "status": "manual",
+                "confidence": 1.0,
+                "routes": [
+                    {
+                        "protocol": "http",
+                        "method": "GET",
+                        "path": "/orders/{param}",
+                        "endpoint_edge": get_ref,
+                    },
+                    {
+                        "protocol": "http",
+                        "method": "POST",
+                        "path": "/orders/{param}",
+                        "endpoint_edge": post_ref,
+                    },
+                ],
+            }
+        ],
+    }
+    evidence = {
+        "endpoints": [
+            {"id": "web:get", "location": "src/get.ts:1"},
+            {"id": "bff:get", "location": "routes/get.go:2"},
+            {"id": "web:post", "location": "src/post.ts:3"},
+            {"id": "bff:post", "location": "routes/post.go:4"},
+        ],
+        "edges": [
+            {
+                "id": "legacy-get-id",
+                "from_endpoint": "web:get",
+                "to_endpoint": "bff:get",
+                "status": "automatic",
+                "confidence": 0.91,
+                "reasons": ["method_path_exact"],
+                "conflicts": [],
+            },
+            {
+                "id": "legacy-post-id",
+                "from_endpoint": "web:post",
+                "to_endpoint": "bff:post",
+                "status": "manual",
+                "confidence": 1.0,
+                "reasons": ["manual_override"],
+                "conflicts": [],
+            },
+        ],
+    }
+    (refs / "service-topology.yaml").write_text(
+        yaml.safe_dump(topology), encoding="utf-8"
+    )
+    (refs / "endpoint-evidence.yaml").write_text(
+        yaml.safe_dump(evidence), encoding="utf-8"
+    )
+
+    result = run_query(
+        tmp_path,
+        "--service",
+        "web",
+        "--method",
+        "GET",
+        "--path",
+        "/orders/42",
+        "--json",
+    )
+
+    first_edge = result["paths"][0]["edges"][0]
+    assert first_edge["status"] == "automatic"
+    assert first_edge["confidence"] == 0.91
+    assert [route["method"] for route in first_edge["routes"]] == ["GET"]
+    assert [item["id"] for item in first_edge["evidence"]] == [get_ref]
+    assert first_edge["evidence"][0]["reasons"] == ["method_path_exact"]
+    assert result["paths"][0]["score"] == 0.91
+
+
+@pytest.mark.parametrize(
+    ("formal", "concrete"),
+    [
+        ("/files/*path", "/files/a/b/c"),
+        ("/files/:name*", "/files/a/b/c"),
+        ("/files/{*name}", "/files/a/b/c"),
+        ("/files/[...name]", "/files/a/b/c"),
+        ("/files/{wildcard}", "/files/a/b/c"),
+    ],
+)
+def test_query_wildcard_forms_match_one_or_more_concrete_url_segments(
+    tmp_path, formal, concrete
+):
+    write_fixture(
+        tmp_path,
+        edges=[edge("web", "files", "GET", formal, 0.9, "automatic")],
+    )
+
+    result = run_query(
+        tmp_path,
+        "--service",
+        "web",
+        "--method",
+        "GET",
+        "--path",
+        f"https://api.example.test{concrete}?download=1",
+        "--json",
+    )
+
+    assert result["status"] == "ok"
+    assert result["paths"][0]["edges"][0]["routes"][0]["path"] == "/files/{wildcard}"
+
+
+@pytest.mark.parametrize("formal", ["/files/*path", "/files/{wildcard}"])
+def test_query_wildcard_requires_at_least_one_segment(tmp_path, formal):
+    write_fixture(
+        tmp_path,
+        edges=[edge("web", "files", "GET", formal, 0.9, "automatic")],
+    )
+
+    result = run_query(
+        tmp_path, "--service", "web", "--method", "GET", "--path", "/files"
+    )
+
+    assert result["status"] == "no_match"
+
+
+@pytest.mark.parametrize(
+    "formal",
+    ["/orders/:id", "/orders/{orderId}", "/orders/[id]"],
+)
+def test_query_param_forms_match_exactly_one_concrete_segment(tmp_path, formal):
+    write_fixture(
+        tmp_path,
+        edges=[edge("web", "orders", "GET", formal, 0.9, "automatic")],
+    )
+
+    one = run_query(
+        tmp_path, "--service", "web", "--method", "GET", "--path", "/orders/42"
+    )
+    two = run_query(
+        tmp_path,
+        "--service",
+        "web",
+        "--method",
+        "GET",
+        "--path",
+        "/orders/42/items",
+    )
+
+    assert one["status"] == "ok"
+    assert one["paths"][0]["edges"][0]["routes"][0]["path"] == "/orders/{param}"
+    assert two["status"] == "no_match"
+
+
+def test_query_missing_evidence_is_unavailable(tmp_path):
+    write_fixture(
+        tmp_path,
+        edges=[edge("web", "orders", "GET", "/orders", 0.9, "automatic")],
+    )
+    evidence_path = (
+        tmp_path
+        / "skills"
+        / "routing"
+        / "references"
+        / "endpoint-evidence.yaml"
+    )
+    evidence_path.unlink()
+
+    assert_unavailable(run_query(tmp_path, "--service", "web", "--json"))
+
+
+@pytest.mark.parametrize(
+    ("target", "mutate"),
+    [
+        ("topology", lambda document: "scalar-root"),
+        ("topology", lambda document: [document]),
+        ("topology", lambda document: {**document, "services": ["web"]}),
+        ("topology", lambda document: {**document, "edges": {"bad": "shape"}}),
+        (
+            "topology",
+            lambda document: {
+                **document,
+                "edges": [{**document["edges"][0], "routes": "not-a-list"}],
+            },
+        ),
+        ("evidence", lambda document: "scalar-root"),
+        ("evidence", lambda document: [document]),
+        ("evidence", lambda document: {**document, "endpoints": {"bad": "shape"}}),
+        ("evidence", lambda document: {**document, "edges": {"bad": "shape"}}),
+        (
+            "evidence",
+            lambda document: {
+                **document,
+                "edges": [{**document["edges"][0], "reasons": "not-a-list"}],
+            },
+        ),
+        (
+            "evidence",
+            lambda document: {
+                **document,
+                "edges": [
+                    {
+                        key: value
+                        for key, value in document["edges"][0].items()
+                        if key != "status"
+                    }
+                ],
+            },
+        ),
+    ],
+)
+def test_query_malformed_required_documents_return_stable_unavailable(
+    tmp_path, target, mutate
+):
+    write_fixture(
+        tmp_path,
+        edges=[edge("web", "orders", "GET", "/orders", 0.9, "automatic")],
+    )
+    refs = tmp_path / "skills" / "routing" / "references"
+    path = refs / (
+        "service-topology.yaml" if target == "topology" else "endpoint-evidence.yaml"
+    )
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    path.write_text(yaml.safe_dump(mutate(document)), encoding="utf-8")
+
+    result = run_query(tmp_path, "--service", "web", "--json")
+
+    assert_unavailable(result)
+    assert all(item is not None for item in result["warnings"])
+
+
 def test_query_marks_missing_topology_as_fallback(tmp_path):
     result = run_query(tmp_path, "--service", "mall-web", "--json")
 
-    assert result["status"] == "unavailable"
-    assert result["fallback"] == "routing_rg_read"
-    assert result["paths"] == []
-    assert result["query"]["service"] == "mall-web"
-    assert result["warnings"]
+    assert_unavailable(result, service="mall-web")

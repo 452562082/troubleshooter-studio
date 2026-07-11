@@ -178,7 +178,9 @@ func TestServiceTopologyChainIntegrity(t *testing.T) {
 			"routing", "service-topology-query", "incident-investigator", "frontend-repro-investigator",
 		}
 		out := t.TempDir()
-		if err := New(cfg, filepath.Join(projectRoot(t), "templates"), out).Generate(); err != nil {
+		g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+		g.RepoLocalPaths = existingServiceRepoPaths(t, cfg, 2)
+		if err := g.Generate(); err != nil {
 			t.Fatalf("generate: %v", err)
 		}
 
@@ -194,6 +196,9 @@ func TestServiceTopologyChainIntegrity(t *testing.T) {
 			"code-intelligence-query",
 			"rg",
 			"异步事件",
+			"{wildcard}",
+			"首跳只返回",
+			"缺失或格式错误",
 		} {
 			if !strings.Contains(skill, want) {
 				t.Errorf("service topology skill missing %q:\n%s", want, skill)
@@ -218,10 +223,23 @@ func TestServiceTopologyChainIntegrity(t *testing.T) {
 		}
 
 		incident := readFile(t, filepath.Join(wsRoot, "skills/incident-investigator/SKILL.md"))
+		directionAt := strings.Index(incident, "先判断失败调用相对主角的方向")
+		outboundAt := strings.Index(incident, "主角发起的出站调用")
+		inboundAt := strings.Index(incident, "进入主角的入站请求")
 		topologyAt := strings.Index(incident, "python3 skills/service-topology-query/scripts/query.py")
 		cascadeAt := strings.Index(incident, "python3 skills/incident-investigator/scripts/cascade_check.py")
-		if topologyAt < 0 || cascadeAt < 0 || topologyAt > cascadeAt {
-			t.Fatalf("incident must query topology before cascade fallback: topology=%d cascade=%d\n%s", topologyAt, cascadeAt, incident)
+		if directionAt < 0 || outboundAt < directionAt || inboundAt < outboundAt || topologyAt < outboundAt || cascadeAt < inboundAt {
+			t.Fatalf("incident must decide direction, document outbound/inbound queries, then cascade: direction=%d outbound=%d topology=%d inbound=%d cascade=%d\n%s",
+				directionAt, outboundAt, topologyAt, inboundAt, cascadeAt, incident)
+		}
+		for _, want := range []string{
+			"只有出站证据明确包含 method/path 时才传这两个参数",
+			"--service <主角> --max-depth 3 --json",
+			"--service <已知调用方> --method <失败请求 method> --path <失败请求 path>",
+		} {
+			if !strings.Contains(incident, want) {
+				t.Errorf("incident direction handoff missing %q:\n%s", want, incident)
+			}
 		}
 		for _, want := range []string{"--max-depth 3", "逐跳", "trace", "日志", "runtime", "service-dependency-map.yaml"} {
 			if !strings.Contains(incident, want) {
@@ -230,29 +248,47 @@ func TestServiceTopologyChainIntegrity(t *testing.T) {
 		}
 	})
 
-	t.Run("gated-by-routing-service-count-and-whitelist", func(t *testing.T) {
+	t.Run("gated-by-routing-existing-service-paths-and-whitelist", func(t *testing.T) {
 		cases := []struct {
-			name      string
-			configure func(*config.SystemConfig)
+			name          string
+			configure     func(*config.SystemConfig)
+			existingPaths int
+			wantGenerated bool
 		}{
 			{
 				name: "routing-absent",
 				configure: func(cfg *config.SystemConfig) {
 					cfg.Generation.SkillsWhitelist = []string{"service-topology-query"}
 				},
+				existingPaths: 2,
 			},
 			{
-				name: "only-one-runnable-service-repo",
+				name: "zero-existing-service-paths",
 				configure: func(cfg *config.SystemConfig) {
-					cfg.Repos = cfg.Repos[:1]
 					cfg.Generation.SkillsWhitelist = []string{"routing", "service-topology-query"}
 				},
+			},
+			{
+				name: "one-existing-service-path",
+				configure: func(cfg *config.SystemConfig) {
+					cfg.Generation.SkillsWhitelist = []string{"routing", "service-topology-query"}
+				},
+				existingPaths: 1,
+			},
+			{
+				name: "two-existing-service-paths",
+				configure: func(cfg *config.SystemConfig) {
+					cfg.Generation.SkillsWhitelist = []string{"routing", "service-topology-query"}
+				},
+				existingPaths: 2,
+				wantGenerated: true,
 			},
 			{
 				name: "trimmed-by-whitelist",
 				configure: func(cfg *config.SystemConfig) {
 					cfg.Generation.SkillsWhitelist = []string{"routing", "incident-investigator"}
 				},
+				existingPaths: 2,
 			},
 		}
 		for _, tc := range cases {
@@ -260,12 +296,21 @@ func TestServiceTopologyChainIntegrity(t *testing.T) {
 				cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
 				tc.configure(cfg)
 				out := t.TempDir()
-				if err := New(cfg, filepath.Join(projectRoot(t), "templates"), out).Generate(); err != nil {
+				g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+				g.RepoLocalPaths = existingServiceRepoPaths(t, cfg, tc.existingPaths)
+				if err := g.Generate(); err != nil {
 					t.Fatalf("generate: %v", err)
 				}
 				wsRoot := filepath.Join(out, "templates/workspace-template")
-				if _, err := os.Stat(filepath.Join(wsRoot, "skills/service-topology-query")); !os.IsNotExist(err) {
+				_, err := os.Stat(filepath.Join(wsRoot, "skills/service-topology-query"))
+				if tc.wantGenerated && err != nil {
+					t.Fatalf("service topology skill should be generated: %v", err)
+				}
+				if !tc.wantGenerated && !os.IsNotExist(err) {
 					t.Fatalf("service topology skill should be gated: %v", err)
+				}
+				if tc.wantGenerated {
+					return
 				}
 				for _, rel := range []string{
 					"skills/frontend-repro-investigator/SKILL.md",
@@ -287,6 +332,24 @@ func TestServiceTopologyChainIntegrity(t *testing.T) {
 		}
 	})
 
+	t.Run("build-plan-syncs-generator-repo-paths-before-skill-decisions", func(t *testing.T) {
+		cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+		cfg.Generation.SkillsWhitelist = []string{"routing", "service-topology-query"}
+		g := New(cfg, filepath.Join(projectRoot(t), "templates"), t.TempDir())
+		g.RepoLocalPaths = existingServiceRepoPaths(t, cfg, 2)
+
+		plan, err := g.BuildPlan("")
+		if err != nil {
+			t.Fatalf("build plan: %v", err)
+		}
+		for _, decision := range plan.SkillsIncluded {
+			if decision.Name == "service-topology-query" {
+				return
+			}
+		}
+		t.Fatalf("service topology skill missing from plan after path sync: %+v", plan)
+	})
+
 	t.Run("known-skill", func(t *testing.T) {
 		cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
 		cfg.Generation.SkillsWhitelist = []string{"service-topology-query"}
@@ -296,4 +359,16 @@ func TestServiceTopologyChainIntegrity(t *testing.T) {
 			}
 		}
 	})
+}
+
+func existingServiceRepoPaths(t *testing.T, cfg *config.SystemConfig, count int) map[string]string {
+	t.Helper()
+	paths := make(map[string]string)
+	for _, repo := range cfg.Repos {
+		if !repo.IsServiceNode() || len(paths) >= count {
+			continue
+		}
+		paths[repo.Name] = t.TempDir()
+	}
+	return paths
 }

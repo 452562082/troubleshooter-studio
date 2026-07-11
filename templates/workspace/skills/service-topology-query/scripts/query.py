@@ -170,8 +170,22 @@ def validate_evidence(document: dict, legacy_flat: bool) -> None:
     if legacy_flat:
         if str(document.get("schema_version") or "").strip():
             raise DocumentError("legacy flat evidence must be unversioned")
-        if "endpoints" in document and not isinstance(document["endpoints"], list):
-            raise DocumentError("evidence.endpoints must be a list")
+        endpoint_ids = set()
+        if "endpoints" in document:
+            if not isinstance(document["endpoints"], list):
+                raise DocumentError("evidence.endpoints must be a list")
+            for endpoint_index, endpoint in enumerate(document["endpoints"]):
+                label = f"evidence.endpoints[{endpoint_index}]"
+                if not isinstance(endpoint, dict):
+                    raise DocumentError(f"{label} must be a mapping")
+                if not isinstance(endpoint.get("id"), str) or not endpoint["id"].strip():
+                    raise DocumentError(f"{label}.id must be a non-empty string")
+                endpoint_id = endpoint["id"].strip()
+                if endpoint_id in endpoint_ids:
+                    raise DocumentError(f"duplicate evidence endpoint id: {endpoint_id}")
+                endpoint_ids.add(endpoint_id)
+                if "location" in endpoint and not isinstance(endpoint["location"], str):
+                    raise DocumentError(f"{label}.location must be a string")
         for edge_index, edge in enumerate(required_list(document, "edges", "evidence")):
             label = f"evidence.edges[{edge_index}]"
             if not isinstance(edge, dict):
@@ -180,6 +194,15 @@ def validate_evidence(document: dict, legacy_flat: bool) -> None:
                 raise DocumentError(f"{label}.id must be a non-empty string")
             if "location" in edge and not isinstance(edge["location"], str):
                 raise DocumentError(f"{label}.location must be a string")
+            if "status" in edge and (
+                not isinstance(edge["status"], str) or not edge["status"].strip()
+            ):
+                raise DocumentError(f"{label}.status must be a non-empty string")
+            if "confidence" in edge:
+                finite_confidence(edge["confidence"], f"{label}.confidence")
+            for key in ("from_endpoint", "to_endpoint"):
+                if key in edge and not isinstance(edge[key], str):
+                    raise DocumentError(f"{label}.{key} must be a string")
             for key in ("reasons", "conflicts"):
                 value = edge.get(key, [])
                 if not isinstance(value, list) or any(not isinstance(item, str) for item in value):

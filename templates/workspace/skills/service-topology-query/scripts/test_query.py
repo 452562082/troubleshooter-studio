@@ -229,6 +229,95 @@ def test_query_accepts_exact_unversioned_flat_brief_fixture(tmp_path):
     ]
 
 
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        {
+            "endpoints": [1],
+            "edges": [
+                {
+                    "id": "mall-web:GET:/api/orders/{param}>mall-bff",
+                    "location": "fixture:1",
+                    "reasons": ["fixture"],
+                }
+            ],
+        },
+        {
+            "endpoints": [{"location": "fixture:1"}],
+            "edges": [
+                {
+                    "id": "mall-web:GET:/api/orders/{param}>mall-bff",
+                    "location": "fixture:1",
+                    "reasons": ["fixture"],
+                }
+            ],
+        },
+        {
+            "edges": [
+                {
+                    "id": "mall-web:GET:/api/orders/{param}>mall-bff",
+                    "location": "fixture:1",
+                    "reasons": ["fixture"],
+                    "confidence": "bad",
+                }
+            ],
+        },
+    ],
+)
+def test_query_malformed_optional_legacy_evidence_is_stable_unavailable(
+    tmp_path, evidence
+):
+    refs = tmp_path / "skills" / "routing" / "references"
+    refs.mkdir(parents=True)
+    topology = {
+        "services": {},
+        "edges": [
+            {
+                "from": "mall-web",
+                "to": "mall-bff",
+                "protocol": "http",
+                "method": "GET",
+                "path": "/api/orders/{param}",
+                "confidence": 0.98,
+                "status": "confirmed",
+                "endpoint_edges": [
+                    "mall-web:GET:/api/orders/{param}>mall-bff"
+                ],
+            }
+        ],
+    }
+    (refs / "service-topology.yaml").write_text(
+        yaml.safe_dump(topology), encoding="utf-8"
+    )
+    (refs / "endpoint-evidence.yaml").write_text(
+        yaml.safe_dump(evidence), encoding="utf-8"
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--workspace",
+            str(tmp_path),
+            "--service",
+            "mall-web",
+            "--method",
+            "GET",
+            "--path",
+            "/api/orders/123",
+            "--json",
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert proc.returncode == 0
+    assert "Traceback" not in proc.stderr
+    result = json.loads(proc.stdout)
+    assert_unavailable(result, service="mall-web")
+
+
 def test_query_by_url_without_service_finds_matching_start(tmp_path):
     write_fixture(
         tmp_path,

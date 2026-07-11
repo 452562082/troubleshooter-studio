@@ -606,6 +606,80 @@ func TestOrchestratorCancelledRunnerStillDurablyRecordsFailure(t *testing.T) {
 	}
 }
 
+func TestOrchestratorCancelCannotErasePersistedCompletionIntent(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-cancel-completion-intent", CaseValidating)
+	attempt := PhaseAttempt{ID: "attempt-cancel-completion-intent", CaseID: incident.ID, CycleNumber: 1, Phase: PhaseValidation, Mode: AttemptReproduce, Status: AttemptStatusRunning, AgentTarget: "codex", BotKey: "bot", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}
+	if err := store.CreateAttempt(ctx, attempt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE incident_cases SET current_attempt_id=?,selected_bot_key=? WHERE id=?`, attempt.ID, attempt.BotKey, incident.ID); err != nil {
+		t.Fatal(err)
+	}
+	command := CompleteAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "agent-phase:" + attempt.ID, ActorID: "bot", Outcome: PhaseOutcomeNotReproduced, OutputJSON: []byte(`{"result":"done"}`)}
+	if err := store.SaveCompletionIntentIfRunning(ctx, command); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingPhaseRunner{}
+	o := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
+	_, err := o.CancelAttempt(ctx, CancelAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "cancel-after-intent", ActorID: "alice"})
+	if !errors.Is(err, ErrCompletionIntentPending) {
+		t.Fatalf("cancel error = %v", err)
+	}
+	divergent := command
+	divergent.Outcome = PhaseOutcomeReproduced
+	if _, err := o.CompleteAttempt(ctx, divergent); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("divergent completion error = %v", err)
+	}
+	stored, _ := store.GetAttempt(ctx, attempt.ID)
+	if _, found, parseErr := parseCompletionIntent(stored.OutputJSON); parseErr != nil || !found || stored.Status != AttemptStatusRunning || len(runner.cancels) != 0 {
+		t.Fatalf("attempt=%+v found=%v parseErr=%v cancels=%v", stored, found, parseErr, runner.cancels)
+	}
+}
+
+func TestOrchestratorPersistedIntentWinsConcurrentCancelAndCompletion(t *testing.T) {
+	for iteration := 0; iteration < 10; iteration++ {
+		ctx := context.Background()
+		store := newOrchestratorStore(t)
+		incident := createWorkflowCase(t, store, fmt.Sprintf("case-intent-race-%d", iteration), CaseValidating)
+		attempt := PhaseAttempt{ID: fmt.Sprintf("attempt-intent-race-%d", iteration), CaseID: incident.ID, CycleNumber: 1, Phase: PhaseValidation, Mode: AttemptReproduce, Status: AttemptStatusRunning, AgentTarget: "codex", BotKey: "bot", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}
+		if err := store.CreateAttempt(ctx, attempt); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = store.db.Exec(`UPDATE incident_cases SET current_attempt_id=?,selected_bot_key=? WHERE id=?`, attempt.ID, attempt.BotKey, incident.ID)
+		command := CompleteAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "agent-phase:" + attempt.ID, ActorID: "bot", Outcome: PhaseOutcomeNotReproduced, OutputJSON: []byte(`{"result":"done"}`)}
+		if err := store.SaveCompletionIntentIfRunning(ctx, command); err != nil {
+			t.Fatal(err)
+		}
+		o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
+		start := make(chan struct{})
+		var completeErr, cancelErr error
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, completeErr = o.CompleteAttempt(ctx, command)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_, cancelErr = o.CancelAttempt(ctx, CancelAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "cancel-intent-race", ActorID: "alice"})
+		}()
+		close(start)
+		wg.Wait()
+		if completeErr != nil {
+			t.Fatalf("iteration %d completion error=%v cancel=%v", iteration, completeErr, cancelErr)
+		}
+		got, _ := store.GetCase(ctx, incident.ID)
+		stored, _ := store.GetAttempt(ctx, attempt.ID)
+		if got.Status != CaseNotReproduced || stored.Status != AttemptStatusSucceeded || string(stored.OutputJSON) != string(command.OutputJSON) {
+			t.Fatalf("iteration %d case=%+v attempt=%+v cancel=%v", iteration, got, stored, cancelErr)
+		}
+	}
+}
+
 func TestOrchestratorCancelVsCompleteBindsOneAttemptOutcome(t *testing.T) {
 	ctx := context.Background()
 	store := newOrchestratorStore(t)

@@ -947,16 +947,22 @@ func (o *CaseOrchestrator) CompleteAttempt(ctx context.Context, cmd CompleteAtte
 	if len(cmd.OutputJSON) == 0 {
 		cmd.OutputJSON = []byte(`{}`)
 	}
+	expectedAttemptOutput := CloneRawMessage(attempt.OutputJSON)
+	if intent, found, parseErr := parseCompletionIntent(attempt.OutputJSON); parseErr != nil {
+		return IncidentCase{}, parseErr
+	} else if found && !equivalentCompletionCommands(intent, cmd) {
+		return IncidentCase{}, ErrIdempotencyConflict
+	}
 	attempt.OutputJSON, attempt.ErrorCode, attempt.ErrorMessage, attempt.Usage = CloneRawMessage(cmd.OutputJSON), cmd.ErrorCode, cmd.ErrorMessage, cmd.Usage
 	if cmd.Outcome == PhaseOutcomeFixFailed || cmd.Outcome == PhaseOutcomeNeedsEvidence {
 		attempt.Status = AttemptStatusFailed
 	} else {
 		attempt.Status = AttemptStatusSucceeded
 	}
-	return o.applyOutcome(ctx, incident, attempt, cmd)
+	return o.applyOutcome(ctx, incident, attempt, cmd, expectedAttemptOutput)
 }
 
-func (o *CaseOrchestrator) applyOutcome(ctx context.Context, incident IncidentCase, attempt PhaseAttempt, cmd CompleteAttemptCommand) (IncidentCase, error) {
+func (o *CaseOrchestrator) applyOutcome(ctx context.Context, incident IncidentCase, attempt PhaseAttempt, cmd CompleteAttemptCommand, expectedAttemptOutput json.RawMessage) (IncidentCase, error) {
 	if attempt.FinishedAt == nil {
 		now := time.Now().UTC()
 		attempt.FinishedAt = &now
@@ -1008,7 +1014,7 @@ func (o *CaseOrchestrator) applyOutcome(ctx context.Context, incident IncidentCa
 		creates = append(creates, *next)
 	}
 	request := mustJSON(cmd)
-	mutation, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: cmd.IdempotencyKey, RequestJSON: request, FinishAttempts: []PhaseAttempt{attempt}, CreateAttempts: creates, CodeChanges: cmd.CodeChanges, Snapshot: update, Steps: steps})
+	mutation, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: cmd.IdempotencyKey, RequestJSON: request, FinishAttempts: []PhaseAttempt{attempt}, CreateAttempts: creates, CodeChanges: cmd.CodeChanges, ExpectedAttemptOutputs: map[string]json.RawMessage{attempt.ID: expectedAttemptOutput}, Snapshot: update, Steps: steps})
 	if err != nil {
 		return IncidentCase{}, err
 	}

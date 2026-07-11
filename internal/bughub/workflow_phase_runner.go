@@ -146,8 +146,17 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 	if err := attempt.Validate(); err != nil {
 		return err
 	}
+	r.mu.Lock()
+	_, alreadyScheduled := r.scheduled[attempt.ID]
+	r.mu.Unlock()
+	if alreadyScheduled {
+		return nil
+	}
 	if strings.TrimSpace(attempt.AgentTarget) != "" && strings.TrimSpace(bot.Target) != attempt.AgentTarget {
 		return fmt.Errorf("bot target %q does not match persisted attempt target %q", bot.Target, attempt.AgentTarget)
+	}
+	if strings.TrimSpace(bot.Key) != attempt.BotKey {
+		return fmt.Errorf("bot key %q does not match persisted attempt bot %q", bot.Key, attempt.BotKey)
 	}
 	if attempt.Phase == PhaseLegacy {
 		return errors.New("legacy attempts are read-only projections")
@@ -156,21 +165,47 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 	if err != nil {
 		return err
 	}
-	if incident.CurrentAttemptID != "" && incident.CurrentAttemptID != attempt.ID {
+	if strings.TrimSpace(incident.CurrentAttemptID) == "" || incident.CurrentAttemptID != attempt.ID {
 		return ErrAttemptNotCurrent
 	}
-	prompt, err := r.promptForAttempt(attempt, bug, bot)
+	if incident.Status != statusForPhase(attempt.Phase) || incident.CycleNumber != attempt.CycleNumber || strings.TrimSpace(incident.SelectedBotKey) == "" || incident.SelectedBotKey != attempt.BotKey {
+		return errors.New("phase attempt is not bound to the current Case status, cycle, and selected bot")
+	}
+	persisted, err := r.store.GetAttempt(ctx, attempt.ID)
 	if err != nil {
 		return err
 	}
+	if persisted.Status != AttemptStatusQueued && persisted.Status != AttemptStatusRunning {
+		return fmt.Errorf("phase attempt %s is not runnable: %s", persisted.ID, persisted.Status)
+	}
+	if !sameRunnableAttempt(persisted, attempt) {
+		return errors.New("caller phase attempt does not match persisted attempt")
+	}
+	if _, found, err := parseCompletionIntent(persisted.OutputJSON); err != nil {
+		return err
+	} else if found {
+		return errors.New("phase attempt already has a persisted completion intent")
+	}
+	staging, err := openAttemptEvidenceStaging(r.artifactsRoot, attempt.ID)
+	if err != nil {
+		return fmt.Errorf("create Studio evidence staging: %w", err)
+	}
+	prompt, err := r.promptForAttempt(attempt, bug, bot)
+	if err != nil {
+		_ = staging.Close()
+		return err
+	}
+	prompt += "\n## Studio evidence staging (mandatory)\n\nSTUDIO_EVIDENCE_STAGING_DIR=" + staging.Path() + "\nWrite every evidence file beneath this exact directory. In final YAML, `path` must be a clean relative path from this directory; absolute paths and `..` are rejected. Studio derives timestamps and redaction status from securely opened file bytes.\n"
 	r.mu.Lock()
 	if _, exists := r.scheduled[attempt.ID]; exists {
 		r.mu.Unlock()
+		_ = staging.Close()
 		return nil
 	}
 	complete := r.complete
 	if complete == nil {
 		r.mu.Unlock()
+		_ = staging.Close()
 		return errors.New("agent phase completion callback is required")
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
@@ -179,8 +214,15 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 	r.mu.Unlock()
 
 	r.startLegacyProjection(attempt, bug, bot, prompt)
-	go r.run(runCtx, attempt.Clone(), bug, bot, prompt, incident.Version, complete)
+	go r.run(runCtx, attempt.Clone(), bug, bot, prompt, staging, incident.Version, complete)
 	return nil
+}
+
+func sameRunnableAttempt(persisted, caller PhaseAttempt) bool {
+	return persisted.ID == caller.ID && persisted.CaseID == caller.CaseID &&
+		persisted.CycleNumber == caller.CycleNumber && persisted.Phase == caller.Phase &&
+		persisted.Mode == caller.Mode && persisted.AgentTarget == caller.AgentTarget &&
+		persisted.BotKey == caller.BotKey && bytes.Equal(persisted.InputJSON, caller.InputJSON)
 }
 
 func (r *AgentPhaseRunner) Cancel(ctx context.Context, attemptID string) error {
@@ -203,8 +245,15 @@ func (r *AgentPhaseRunner) Cancel(ctx context.Context, attemptID string) error {
 	return err
 }
 
-func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, _ Bug, bot BotRef, prompt string, expectedVersion int64, complete PhaseCompletionFunc) {
+func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, _ Bug, bot BotRef, prompt string, staging attemptEvidenceStaging, expectedVersion int64, complete PhaseCompletionFunc) {
 	started := time.Now()
+	cleaned := false
+	defer func() {
+		if !cleaned {
+			_ = staging.Cleanup()
+		}
+		_ = staging.Close()
+	}()
 	defer func() {
 		r.mu.Lock()
 		cancel := r.active[attempt.ID]
@@ -229,7 +278,13 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, _ Bug,
 		result.Usage.OutputTokens += firstUsage.OutputTokens
 	}
 	if ctx.Err() != nil {
-		r.finishLegacy(attempt.ID, InvestigationCancelled, result.FinalYAML, ctx.Err().Error())
+		cleanupErr := staging.Cleanup()
+		cleaned = cleanupErr == nil
+		errorText := ctx.Err().Error()
+		if cleanupErr != nil {
+			errorText = "cancelled; evidence staging cleanup failed: " + cleanupErr.Error()
+		}
+		r.finishLegacy(attempt.ID, InvestigationCancelled, safeLegacyPhaseText(result.FinalYAML), safeLegacyPhaseText(errorText))
 		return
 	}
 	command := CompleteAttemptCommand{CaseID: attempt.CaseID, AttemptID: attempt.ID, IdempotencyKey: "agent-phase:" + attempt.ID, ActorID: firstNonEmpty(bot.Key, attempt.BotKey, "agent"), Usage: result.Usage}
@@ -258,7 +313,7 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, _ Bug,
 				command.OutputJSON = mustJSON(map[string]any{"error_code": "regression_evidence_invalid", "error_message": err.Error(), "evidence_limitation": true})
 				command.ErrorCode = "regression_evidence_invalid"
 				command.ErrorMessage = err.Error()
-			} else if err := r.registerArtifacts(ctx, attempt, parsed.ArtifactInputs); err != nil {
+			} else if err := r.registerArtifacts(ctx, attempt, staging, parsed.ArtifactInputs); err != nil {
 				command.Outcome = failureOutcome(attempt.Phase)
 				command.OutputJSON = mustJSON(map[string]any{"error_code": artifactErrorCode(err), "error_message": err.Error(), "evidence_limitation": true})
 				command.ErrorCode = artifactErrorCode(err)
@@ -266,16 +321,50 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, _ Bug,
 			}
 		}
 	}
+	cleanupErr := staging.Cleanup()
+	if cleanupErr != nil {
+		command.Outcome = failureOutcome(attempt.Phase)
+		command.OutputJSON = mustJSON(map[string]any{"error_code": "evidence_staging_cleanup_failed", "error_message": cleanupErr.Error(), "evidence_limitation": true})
+		command.ErrorCode = "evidence_staging_cleanup_failed"
+		command.ErrorMessage = cleanupErr.Error()
+	}
+	cleaned = cleanupErr == nil
+	if completionContainsSensitiveData(command) {
+		command.Outcome = failureOutcome(attempt.Phase)
+		command.OutputJSON = mustJSON(map[string]any{"error_code": "sensitive_phase_output", "evidence_limitation": true})
+		command.ErrorCode = "sensitive_phase_output"
+		command.ErrorMessage = "agent phase output contained sensitive data and was not persisted"
+		command.CodeChanges = nil
+	}
 	command.ExpectedVersion = expectedVersion
+	if err := r.store.SaveCompletionIntentIfRunning(ctx, command); err != nil {
+		r.finishLegacy(attempt.ID, InvestigationFailed, safeLegacyPhaseText(result.FinalYAML), safeLegacyPhaseText(err.Error()))
+		return
+	}
 	if err := complete(ctx, command); err != nil {
-		r.finishLegacy(attempt.ID, InvestigationFailed, result.FinalYAML, err.Error())
+		r.finishLegacy(attempt.ID, InvestigationFailed, safeLegacyPhaseText(result.FinalYAML), safeLegacyPhaseText(err.Error()))
 		return
 	}
 	status := InvestigationSucceeded
 	if command.ErrorCode != "" {
 		status = InvestigationFailed
 	}
-	r.finishLegacy(attempt.ID, status, result.FinalYAML, command.ErrorMessage)
+	r.finishLegacy(attempt.ID, status, safeLegacyPhaseText(result.FinalYAML), safeLegacyPhaseText(command.ErrorMessage))
+}
+
+func safeLegacyPhaseText(value string) string {
+	if containsSensitiveData([]byte(value)) {
+		return "[sensitive phase output suppressed]"
+	}
+	return value
+}
+
+func completionContainsSensitiveData(command CompleteAttemptCommand) bool {
+	if containsSensitiveData(command.OutputJSON) || containsSensitiveData([]byte(command.ErrorMessage)) {
+		return true
+	}
+	changes, err := json.Marshal(command.CodeChanges)
+	return err != nil || containsSensitiveData(changes)
 }
 
 func (r *AgentPhaseRunner) validateResultEnvironment(ctx context.Context, attempt PhaseAttempt, result PhaseResult) error {
@@ -336,6 +425,13 @@ func (r *AgentPhaseRunner) validateRegressionInputBinding(ctx context.Context, a
 			return errors.New("regression expected commits require non-empty repository and commit")
 		}
 	}
+	incident, err := r.store.GetCase(ctx, attempt.CaseID)
+	if err != nil {
+		return err
+	}
+	if input.TargetEnvironment != incident.Environment {
+		return errors.New("regression target environment does not match Case environment")
+	}
 	observations, err := r.store.ListDeploymentObservations(ctx, attempt.CaseID)
 	if err != nil {
 		return err
@@ -354,11 +450,11 @@ func buildStructuredInvestigationPrompt(bug Bug, bot BotRef) string {
 	sb.WriteString("请作为选定的 AI 排障机器人执行只读根因分析。先遵循 incident-investigator/SKILL.md 的取证流程。\n")
 	sb.WriteString(GenerateContext(bug, bot))
 	sb.WriteString("\n最终只输出严格 YAML，不得添加字段或解释性段落：\n")
-	sb.WriteString("investigation_status: root_cause_ready | insufficient_info\nenvironment: <env>\nroot_cause: <直接和深层根因；信息不足时为空>\nconfidence: high | medium | low\nevidence:\n  - kind: <trace|log|metric|code|config|data|command>\n    path: <已脱敏常规文件绝对路径>\n    captured_at: <RFC3339>\n    environment: <env>\n    version: <可空>\n    request_id: <可空>\n    trace_id: <可空>\n    redaction_status: redacted | not_required\ngaps: []\n")
+	sb.WriteString("investigation_status: root_cause_ready | insufficient_info\nenvironment: <env>\nroot_cause: <直接和深层根因；信息不足时为空>\nconfidence: high | medium | low\nevidence:\n  - kind: <trace|log|metric|code|config|data|command>\n    path: <Studio staging 目录内的相对路径>\n    captured_at: <RFC3339；仅兼容输出，Studio 以 fstat 为准>\n    environment: <env>\n    version: <可空>\n    request_id: <可空>\n    trace_id: <可空>\n    redaction_status: redacted | not_required # Studio 总会重新扫描\ngaps: []\n")
 	return sb.String()
 }
 
-func (r *AgentPhaseRunner) registerArtifacts(ctx context.Context, attempt PhaseAttempt, references []ArtifactReference) error {
+func (r *AgentPhaseRunner) registerArtifacts(ctx context.Context, attempt PhaseAttempt, staging attemptEvidenceStaging, references []ArtifactReference) error {
 	registered, err := r.store.ListEvidenceArtifacts(ctx, attempt.CaseID)
 	if err != nil {
 		return err
@@ -372,10 +468,14 @@ func (r *AgentPhaseRunner) registerArtifacts(ctx context.Context, attempt PhaseA
 		}
 	}
 	for _, reference := range references {
-		if strings.TrimSpace(reference.Path) == "" || strings.TrimSpace(reference.Kind) == "" || reference.CapturedAt.IsZero() || strings.TrimSpace(reference.Environment) == "" {
-			return errors.New("artifact path, kind, captured_at, and environment are required")
+		if strings.TrimSpace(reference.Path) == "" || strings.TrimSpace(reference.Kind) == "" || strings.TrimSpace(reference.Environment) == "" {
+			return errors.New("artifact relative path, kind, and environment are required")
 		}
-		if _, err := RegisterArtifact(ctx, r.store, ArtifactInput{ArtifactsRoot: r.artifactsRoot, SourcePath: reference.Path, CaseID: attempt.CaseID, AttemptID: attempt.ID, Kind: reference.Kind, CapturedAt: reference.CapturedAt, Environment: reference.Environment, Version: reference.Version, RequestID: reference.RequestID, TraceID: reference.TraceID, RedactionStatus: reference.RedactionStatus, RejectSHA256: priorDigests}); err != nil {
+		captured, err := staging.Capture(reference.Path)
+		if err != nil {
+			return err
+		}
+		if _, err := registerCapturedArtifact(ctx, r.store, ArtifactInput{ArtifactsRoot: r.artifactsRoot, SourcePath: filepath.Join(staging.Path(), reference.Path), CaseID: attempt.CaseID, AttemptID: attempt.ID, Kind: reference.Kind, CapturedAt: captured.CapturedAt, Environment: reference.Environment, Version: reference.Version, RequestID: reference.RequestID, TraceID: reference.TraceID, RedactionStatus: RedactionStatusNotRequired, RejectSHA256: priorDigests, RejectSensitive: true}, captured); err != nil {
 			return err
 		}
 	}
@@ -404,34 +504,11 @@ func (r *AgentPhaseRunner) validateRegressionEvidence(ctx context.Context, attem
 		return errors.New("regression result requires fresh evidence from the current attempt")
 	}
 	for _, artifact := range result.ArtifactInputs {
-		if !artifact.CapturedAt.After(attempt.StartedAt) {
-			return errors.New("regression evidence must be captured after the current attempt started")
-		}
 		if artifact.Environment != input.TargetEnvironment {
 			return errors.New("regression evidence environment does not match the target environment")
 		}
 		if artifact.Version != input.ObservedDeploymentVersion {
 			return errors.New("regression evidence version does not match the observed deployment version")
-		}
-		info, err := os.Stat(artifact.Path)
-		if err != nil {
-			return fmt.Errorf("inspect regression evidence: %w", err)
-		}
-		if !info.Mode().IsRegular() || !info.ModTime().After(attempt.StartedAt) {
-			return errors.New("regression evidence file must be freshly created during the current attempt")
-		}
-	}
-	priorArtifacts, err := r.store.ListEvidenceArtifacts(ctx, attempt.CaseID)
-	if err != nil {
-		return err
-	}
-	for _, reference := range result.ArtifactInputs {
-		candidate, _ := filepath.Abs(reference.Path)
-		for _, prior := range priorArtifacts {
-			registered, _ := filepath.Abs(prior.PathOrReference)
-			if prior.AttemptID != attempt.ID && candidate == registered {
-				return errors.New("regression evidence cannot reuse an artifact registered by an earlier attempt")
-			}
 		}
 	}
 	observations, err := r.store.ListDeploymentObservations(ctx, attempt.CaseID)
@@ -455,6 +532,13 @@ func (r *AgentPhaseRunner) startLegacyProjection(attempt PhaseAttempt, bug Bug, 
 }
 
 func (r *AgentPhaseRunner) projectEvent(attempt PhaseAttempt, event InvestigationEvent) {
+	raw, rawErr := json.Marshal(event.Raw)
+	meta, metaErr := json.Marshal(event.Meta)
+	if containsSensitiveData([]byte(event.Message)) || rawErr != nil || containsSensitiveData(raw) || metaErr != nil || containsSensitiveData(meta) {
+		event.Message = "[sensitive phase event suppressed]"
+		event.Raw = nil
+		event.Meta = nil
+	}
 	if event.Meta == nil {
 		event.Meta = make(map[string]any)
 	}

@@ -299,3 +299,72 @@ func TestRecoverDeploymentUsesPersistedReservationContextAndDoesNotRerunResult(t
 		t.Fatalf("attempt=%+v err=%v", attempt, attemptErr)
 	}
 }
+
+func TestRecoverInterruptedAppliesPersistedCompletionIntentWithoutRerunningPhase(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident, attempt := createRunningPhase(t, store, "recover-completion-intent", CasePendingValidation, CaseValidating, PhaseValidation, AttemptReproduce, []byte(`{"mode":"reproduce"}`))
+	command := CompleteAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "agent-phase:" + attempt.ID, ActorID: "validator", Outcome: PhaseOutcomeReproduced, OutputJSON: []byte(`{"verification_status":"reproduced","environment":"test"}`), Usage: AgentUsage{InputTokens: 3, OutputTokens: 2}}
+	if err := store.SaveCompletionIntentIfRunning(ctx, command); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingPhaseRunner{}
+	o := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
+	if err := o.RecoverInterrupted(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := store.GetCase(ctx, incident.ID)
+	if got.Status != CaseInvestigating || got.CurrentAttemptID == attempt.ID {
+		t.Fatalf("case = %+v", got)
+	}
+	finished, _ := store.GetAttempt(ctx, attempt.ID)
+	if finished.Status != AttemptStatusSucceeded || string(finished.OutputJSON) != string(command.OutputJSON) || finished.Usage.InputTokens != 3 {
+		t.Fatalf("finished = %+v", finished)
+	}
+	runner.mu.Lock()
+	starts := append([]PhaseAttempt(nil), runner.starts...)
+	runner.mu.Unlock()
+	if len(starts) != 1 || starts[0].Phase != PhaseInvestigation {
+		t.Fatalf("recovery reran original phase: %+v", starts)
+	}
+}
+
+func TestRecoverInterruptedMalformedCompletionIntentFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident, attempt := createRunningPhase(t, store, "recover-malformed-intent", CasePendingValidation, CaseValidating, PhaseValidation, AttemptReproduce, []byte(`{}`))
+	if _, err := store.db.Exec(`UPDATE phase_attempts SET output_json = ? WHERE id = ?`, `{"kind":"phase_completion_intent","version":1,"command":{}}`, attempt.ID); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingPhaseRunner{}
+	o := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
+	if err := o.RecoverInterrupted(ctx); err == nil {
+		t.Fatal("malformed completion intent was ignored")
+	}
+	got, _ := store.GetCase(ctx, incident.ID)
+	stored, _ := store.GetAttempt(ctx, attempt.ID)
+	if got.Status != CaseValidating || stored.Status != AttemptStatusRunning || runner.startCount() != 0 {
+		t.Fatalf("case=%+v attempt=%+v starts=%d", got, stored, runner.startCount())
+	}
+}
+
+func TestRecoverInterruptedCompletionIntentPreservesFixCodeChanges(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident, attempt := createRunningPhase(t, store, "recover-fix-intent", CaseWaitingFixApproval, CaseFixing, PhaseFix, "", []byte(`{"root_cause":"race"}`))
+	change := CodeChange{ID: "change-fix-intent", CaseID: incident.ID, AttemptID: attempt.ID, Repo: "api", BaseBranch: "test", FixBranch: "fix/race", FixCommit: "deadbeef", TestEvidence: []byte(`[{"repo":"api","commit":"deadbeef","command":"go test ./...","result":"passed"}]`), TargetEnvironmentBranch: "test", PushRemote: "origin", PushStatus: "pushed"}
+	command := CompleteAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "agent-phase:" + attempt.ID, ActorID: "fixer", Outcome: PhaseOutcomeFixPushed, OutputJSON: []byte(`{"fix_status":"fixed_pushed","environment":"test"}`), CodeChanges: []CodeChange{change}}
+	if err := store.SaveCompletionIntentIfRunning(ctx, command); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingPhaseRunner{}
+	o := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
+	if err := o.RecoverInterrupted(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := store.GetCase(ctx, incident.ID)
+	changes, _ := store.ListCodeChanges(ctx, incident.ID)
+	if got.Status != CaseWaitingMergeApproval || len(changes) != 1 || changes[0].FixCommit != "deadbeef" || runner.startCount() != 0 {
+		t.Fatalf("case=%+v changes=%+v starts=%d", got, changes, runner.startCount())
+	}
+}

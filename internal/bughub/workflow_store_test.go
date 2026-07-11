@@ -1074,3 +1074,33 @@ func readAttempt(t *testing.T, store *CaseStore, id string) PhaseAttempt {
 	attempt.Usage.Duration = time.Duration(duration)
 	return attempt.Clone()
 }
+
+func TestCaseStoreSaveCompletionIntentIfRunningIsCASAndIdempotent(t *testing.T) {
+	ctx := context.Background()
+	store := openTestCaseStore(t)
+	createTestCase(t, store, "case-completion-intent")
+	attempt := validRunningAttempt("attempt-completion-intent", "case-completion-intent")
+	if err := store.CreateAttempt(ctx, attempt); err != nil {
+		t.Fatal(err)
+	}
+	command := CompleteAttemptCommand{CaseID: attempt.CaseID, AttemptID: attempt.ID, ExpectedVersion: 1, IdempotencyKey: "agent-phase:" + attempt.ID, ActorID: "validator", Outcome: PhaseOutcomeNotReproduced, OutputJSON: []byte(`{"result":"not-reproduced"}`)}
+	if err := store.SaveCompletionIntentIfRunning(ctx, command); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveCompletionIntentIfRunning(ctx, command); err != nil {
+		t.Fatalf("idempotent save: %v", err)
+	}
+	stored, err := store.GetAttempt(ctx, attempt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := parseCompletionIntent(stored.OutputJSON)
+	if err != nil || !found || got.Outcome != command.Outcome || string(got.OutputJSON) != string(command.OutputJSON) {
+		t.Fatalf("intent=%+v found=%v err=%v raw=%s", got, found, err, stored.OutputJSON)
+	}
+	divergent := command
+	divergent.Outcome = PhaseOutcomeReproduced
+	if err := store.SaveCompletionIntentIfRunning(ctx, divergent); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("divergent save error = %v", err)
+	}
+}

@@ -51,6 +51,26 @@ type phaseExecutorStub struct {
 	cancelID string
 }
 
+type phaseExecutorFunc func(context.Context, string, BotRef, string, func(InvestigationEvent)) (PhaseExecutionResult, error)
+
+func (fn phaseExecutorFunc) ExecutePhase(ctx context.Context, id string, bot BotRef, prompt string, emit func(InvestigationEvent)) (PhaseExecutionResult, error) {
+	return fn(ctx, id, bot, prompt, emit)
+}
+func (phaseExecutorFunc) CancelPhase(context.Context, string) error { return nil }
+
+type flakyCleanupStaging struct {
+	attemptEvidenceStaging
+	calls int
+}
+
+func (s *flakyCleanupStaging) Cleanup() error {
+	s.calls++
+	if s.calls == 1 {
+		return errors.New("injected first cleanup failure")
+	}
+	return s.attemptEvidenceStaging.Cleanup()
+}
+
 func (s *phaseExecutorStub) ExecutePhase(_ context.Context, attemptID string, _ BotRef, _ string, emit func(InvestigationEvent)) (PhaseExecutionResult, error) {
 	s.mu.Lock()
 	s.calls++
@@ -82,14 +102,14 @@ func TestAgentPhaseRunnerCompletesOnceAndTagsProjectionEvents(t *testing.T) {
 	legacy := NewInvestigationStore(t.TempDir())
 	executor := &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: "verification_status: reproduced\nenvironment: test\nevidence: []\ngaps: []\n", Usage: AgentUsage{InputTokens: 12, OutputTokens: 7}}, event: InvestigationEvent{Type: "agent_message", Message: "working"}}
 	completed := make(chan CompleteAttemptCommand, 2)
-	runner := NewAgentPhaseRunner(store, executor, legacy, filepath.Join(t.TempDir(), "artifacts"), func(_ context.Context, cmd CompleteAttemptCommand) error {
+	runner := NewAgentPhaseRunner(store, executor, legacy, phaseArtifactsRoot(t), func(_ context.Context, cmd CompleteAttemptCommand) error {
 		completed <- cmd
 		return nil
 	})
-	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "validator", Target: "codex", Env: "test"}); err != nil {
+	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex", Env: "test"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "validator", Target: "codex", Env: "test"}); err != nil {
+	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex", Env: "test"}); err != nil {
 		t.Fatal(err)
 	}
 	var cmd CompleteAttemptCommand
@@ -106,7 +126,7 @@ func TestAgentPhaseRunnerCompletesOnceAndTagsProjectionEvents(t *testing.T) {
 		t.Fatalf("duplicate callback: %+v", duplicate)
 	case <-time.After(50 * time.Millisecond):
 	}
-	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "validator", Target: "codex", Env: "test"}); err != nil {
+	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex", Env: "test"}); err != nil {
 		t.Fatal(err)
 	}
 	executor.mu.Lock()
@@ -154,7 +174,7 @@ func TestAgentPhaseRunnerRetriesReadOnlyOnceButNeverFix(t *testing.T) {
 			attempt := createPhaseRunnerAttempt(t, store, incident, tc.phase, tc.mode)
 			executor := &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: tc.yaml}, errors: []error{errors.New("process exited")}}
 			done := make(chan struct{}, 1)
-			runner := NewAgentPhaseRunner(store, executor, nil, filepath.Join(t.TempDir(), "artifacts"), func(context.Context, CompleteAttemptCommand) error { done <- struct{}{}; return nil })
+			runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error { done <- struct{}{}; return nil })
 			if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex", Env: "test"}); err != nil {
 				t.Fatal(err)
 			}
@@ -190,13 +210,13 @@ func TestAgentPhaseRunnerRegressionRequiresMatchedDeploymentAndFreshSameEnvironm
 	fresh := time.Now().UTC().Add(time.Second).Format(time.RFC3339Nano)
 	yaml := "verification_status: fixed_verified\nenvironment: test\nscenario_hash: scenario\nevidence:\n  - kind: har\n    path: " + source + "\n    captured_at: " + fresh + "\n    environment: test\n    version: version-1\n    request_id: req-new\n    redaction_status: not_required\ngaps: []\n"
 	executor := &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: yaml}}
-	runner := NewAgentPhaseRunner(store, executor, nil, filepath.Join(t.TempDir(), "artifacts"), func(_ context.Context, cmd CompleteAttemptCommand) error { return nil })
-	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "validator", Target: "codex", Env: "test"}); err == nil {
+	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(_ context.Context, cmd CompleteAttemptCommand) error { return nil })
+	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex", Env: "test"}); err == nil {
 		t.Fatal("regression started without a matched deployment")
 	}
 }
 
-func TestPhaseResultRegressionFreshnessRejectsEarlierCycleAndEnvironmentMismatch(t *testing.T) {
+func TestPhaseResultRegressionFreshnessIgnoresClaimedTimeAndRejectsEnvironmentMismatch(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-regression-rules", CaseRegressionValidating)
 	input := RegressionValidationInput{OriginalScenarioHash: "scenario", ExpectedFixCommits: map[string]string{"api": "fix-1"}, ObservedDeploymentVersion: "version-1", TargetEnvironment: "test"}
@@ -207,7 +227,7 @@ func TestPhaseResultRegressionFreshnessRejectsEarlierCycleAndEnvironmentMismatch
 	if err := store.RecordDeploymentObservation(context.Background(), DeploymentObservation{ID: "deployment-regression-rules", CaseID: incident.ID, Environment: "test", ExpectedCommits: map[string]string{"api": "fix-1"}, VerificationSource: "test", ObservedVersion: "version-1", ObservedCommits: map[string]string{"api": "fix-1"}, VerifiedAt: &now, Result: DeploymentResultMatched}, "deployment-regression-rules"); err != nil {
 		t.Fatal(err)
 	}
-	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, filepath.Join(t.TempDir(), "artifacts"), nil)
+	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, phaseArtifactsRoot(t), nil)
 	evidencePath := filepath.Join(t.TempDir(), "fresh.har")
 	if err := os.WriteFile(evidencePath, []byte(`{"status":200}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -221,8 +241,8 @@ func TestPhaseResultRegressionFreshnessRejectsEarlierCycleAndEnvironmentMismatch
 		output, _ := json.Marshal(validation)
 		return PhaseResult{Outcome: PhaseOutcomeFixedVerified, OutputJSON: output, ArtifactInputs: validation.Evidence}
 	}
-	if err := runner.validateRegressionEvidence(context.Background(), attempt, makeResult(attempt.StartedAt.Add(-time.Second), "test")); err == nil {
-		t.Fatal("accepted evidence captured before the current attempt")
+	if err := runner.validateRegressionEvidence(context.Background(), attempt, makeResult(attempt.StartedAt.Add(-time.Second), "test")); err != nil {
+		t.Fatalf("trusted agent-claimed timestamp: %v", err)
 	}
 	if err := runner.validateRegressionEvidence(context.Background(), attempt, makeResult(attempt.StartedAt.Add(time.Second), "prod")); err == nil {
 		t.Fatal("accepted evidence from a different environment")
@@ -260,15 +280,276 @@ func TestAgentPhaseRunnerRejectsEarlierArtifactBytesAtNewTouchedPath(t *testing.
 	if err := store.CreateAttempt(context.Background(), second); err != nil {
 		t.Fatal(err)
 	}
-	copyPath := filepath.Join(t.TempDir(), "touched-copy.har")
+	staging, err := openAttemptEvidenceStaging(root, second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer staging.Close()
+	copyPath := filepath.Join(staging.Path(), "touched-copy.har")
 	if err := os.WriteFile(copyPath, []byte(`{"same":"bytes"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, root, nil)
-	err := runner.registerArtifacts(context.Background(), second, []ArtifactReference{{Kind: "har", Path: copyPath, CapturedAt: time.Now().UTC(), Environment: "test", RedactionStatus: RedactionStatusNotRequired}})
+	err = runner.registerArtifacts(context.Background(), second, staging, []ArtifactReference{{Kind: "har", Path: "touched-copy.har", CapturedAt: time.Now().UTC(), Environment: "test", RedactionStatus: RedactionStatusNotRequired}})
 	if !errors.Is(err, ErrEvidenceArtifactReused) {
 		t.Fatalf("reused bytes error = %v", err)
 	}
+}
+
+func TestAgentPhaseRunnerOwnsEvidenceStagingAndUsesFstatMetadata(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-owned-staging", CaseValidating)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
+	root := filepath.Join(resolvedTempDir(t), "artifacts")
+	var staging string
+	executor := phaseExecutorFunc(func(_ context.Context, _ string, _ BotRef, prompt string, _ func(InvestigationEvent)) (PhaseExecutionResult, error) {
+		staging = stagingPathFromPrompt(prompt)
+		if staging == "" {
+			return PhaseExecutionResult{}, errors.New("missing Studio staging path")
+		}
+		info, err := os.Stat(staging)
+		if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+			return PhaseExecutionResult{}, fmt.Errorf("staging=%q info=%v err=%v", staging, info, err)
+		}
+		entries, _ := os.ReadDir(staging)
+		if len(entries) != 0 {
+			return PhaseExecutionResult{}, fmt.Errorf("staging was not empty")
+		}
+		if err := os.WriteFile(filepath.Join(staging, "current.har"), []byte(`{"status":200}`), 0o600); err != nil {
+			return PhaseExecutionResult{}, err
+		}
+		old := time.Date(1999, 1, 1, 0, 0, 0, 0, time.UTC)
+		if err := os.Chtimes(filepath.Join(staging, "current.har"), old, old); err != nil {
+			return PhaseExecutionResult{}, err
+		}
+		if err := os.WriteFile(filepath.Join(staging, "concurrent-unclaimed.txt"), []byte("must not be registered"), 0o600); err != nil {
+			return PhaseExecutionResult{}, err
+		}
+		return PhaseExecutionResult{FinalYAML: "verification_status: reproduced\nenvironment: test\nevidence:\n  - kind: har\n    path: current.har\n    captured_at: 2000-01-01T00:00:00Z\n    environment: test\n    redaction_status: redacted\ngaps: []\n"}, nil
+	})
+	completed := make(chan CompleteAttemptCommand, 1)
+	runner := NewAgentPhaseRunner(store, executor, nil, root, func(_ context.Context, command CompleteAttemptCommand) error { completed <- command; return nil })
+	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	command := <-completed
+	if command.ErrorCode != "" {
+		t.Fatalf("completion error = %s: %s", command.ErrorCode, command.ErrorMessage)
+	}
+	artifacts, err := store.ListEvidenceArtifacts(context.Background(), incident.ID)
+	if err != nil || len(artifacts) != 1 {
+		t.Fatalf("artifacts=%+v err=%v", artifacts, err)
+	}
+	if !artifacts[0].CapturedAt.After(attempt.StartedAt) || artifacts[0].RedactionStatus != RedactionStatusNotRequired {
+		t.Fatalf("trusted agent metadata instead of fstat/Studio scan: %+v", artifacts[0])
+	}
+	if staging == "" || !strings.Contains(staging, attempt.ID) {
+		t.Fatalf("staging path = %q", staging)
+	}
+	if _, err := os.Stat(staging); !os.IsNotExist(err) {
+		t.Fatalf("Studio staging directory was retained after completion: %v", err)
+	}
+}
+
+func TestAgentPhaseRunnerRejectsOutsideAndFakeRedactedEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		path    string
+		content string
+	}{
+		{name: "outside absolute", path: filepath.Join(os.Getenv("HOME"), ".ssh", "id_rsa"), content: "safe"},
+		{name: "fake redaction", path: "secret.txt", content: "authorization: Bearer abcdefghijklmnopqrstuvwxyz"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newOrchestratorStore(t)
+			incident := createWorkflowCase(t, store, "case-staging-"+strings.ReplaceAll(tc.name, " ", "-"), CaseValidating)
+			attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
+			root := filepath.Join(resolvedTempDir(t), "artifacts-"+strings.ReplaceAll(tc.name, " ", "-"))
+			var staging string
+			executor := phaseExecutorFunc(func(_ context.Context, _ string, _ BotRef, prompt string, _ func(InvestigationEvent)) (PhaseExecutionResult, error) {
+				staging = stagingPathFromPrompt(prompt)
+				if staging == "" {
+					return PhaseExecutionResult{}, errors.New("missing Studio staging path")
+				}
+				if !filepath.IsAbs(tc.path) {
+					if err := os.WriteFile(filepath.Join(staging, tc.path), []byte(tc.content), 0o600); err != nil {
+						return PhaseExecutionResult{}, err
+					}
+				}
+				return PhaseExecutionResult{FinalYAML: fmt.Sprintf("verification_status: reproduced\nenvironment: test\nevidence:\n  - kind: command\n    path: %q\n    captured_at: 2099-01-01T00:00:00Z\n    environment: test\n    redaction_status: redacted\ngaps: []\n", tc.path)}, nil
+			})
+			completed := make(chan CompleteAttemptCommand, 1)
+			runner := NewAgentPhaseRunner(store, executor, nil, root, func(_ context.Context, command CompleteAttemptCommand) error { completed <- command; return nil })
+			if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"}); err != nil {
+				t.Fatal(err)
+			}
+			command := <-completed
+			if command.ErrorCode != "artifact_registration_failed" {
+				t.Fatalf("error code = %q, message=%q", command.ErrorCode, command.ErrorMessage)
+			}
+			artifacts, _ := store.ListEvidenceArtifacts(context.Background(), incident.ID)
+			if len(artifacts) != 0 {
+				t.Fatalf("registered rejected artifacts: %+v", artifacts)
+			}
+			if _, err := os.Stat(staging); !os.IsNotExist(err) {
+				t.Fatalf("rejected evidence staging was retained: %v", err)
+			}
+		})
+	}
+}
+
+func TestAgentPhaseRunnerSecretScansStructuredOutputBeforeIntent(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-output-secret", CaseValidating)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
+	executor := &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: "verification_status: reproduced\nenvironment: test\nobserved_behavior: 'authorization: Bearer abcdefghijklmnopqrstuvwxyz'\nevidence: []\ngaps: []\n"}, event: InvestigationEvent{Type: "agent_message", Message: "authorization: Bearer streamed-secret", Raw: map[string]any{"authorization": "Bearer streamed-secret"}}}
+	completed := make(chan CompleteAttemptCommand, 1)
+	legacy := NewInvestigationStore(t.TempDir())
+	runner := NewAgentPhaseRunner(store, executor, legacy, phaseArtifactsRoot(t), func(_ context.Context, command CompleteAttemptCommand) error {
+		completed <- command
+		return errors.New("stop after intent")
+	})
+	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	command := <-completed
+	if command.ErrorCode != "sensitive_phase_output" || strings.Contains(string(command.OutputJSON), "Bearer") {
+		t.Fatalf("unsafe completion command = %+v", command)
+	}
+	stored, _ := store.GetAttempt(context.Background(), attempt.ID)
+	if strings.Contains(string(stored.OutputJSON), "Bearer") {
+		t.Fatalf("secret persisted in intent: %s", stored.OutputJSON)
+	}
+	projected, err := legacy.Get(attempt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(projected.FinalMessage, "Bearer") || strings.Contains(projected.Error, "Bearer") {
+		t.Fatalf("secret persisted in legacy projection: %+v", projected)
+	}
+	encodedProjection, _ := json.Marshal(projected)
+	if strings.Contains(string(encodedProjection), "streamed-secret") {
+		t.Fatalf("secret persisted in legacy event: %s", encodedProjection)
+	}
+}
+
+func TestAgentPhaseRunnerEventSanitizationFailsClosed(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-event-fail-closed", CaseValidating)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
+	legacy := NewInvestigationStore(t.TempDir())
+	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, legacy, phaseArtifactsRoot(t), nil)
+	events := make(chan InvestigationEvent, 1)
+	runner.SetEventSink(func(_ InvestigationRun, event InvestigationEvent) { events <- event })
+	if err := legacy.ProjectAttempt(InvestigationRun{ID: attempt.ID, BugID: incident.BugID, Status: InvestigationRunning}); err != nil {
+		t.Fatal(err)
+	}
+
+	runner.projectEvent(attempt, InvestigationEvent{
+		Type:    "agent_message",
+		Message: "apparently safe",
+		Raw:     map[string]any{"secret": "authorization: Bearer raw-secret", "unmarshalable": make(chan struct{})},
+		Meta:    map[string]any{"secret": "authorization: Bearer metadata-secret"},
+	})
+
+	event := <-events
+	if event.Message != "[sensitive phase event suppressed]" || event.Raw != nil {
+		t.Fatalf("event was not suppressed: %+v", event)
+	}
+	for _, key := range []string{"case_id", "attempt_id", "cycle_number", "phase"} {
+		if _, ok := event.Meta[key]; !ok {
+			t.Fatalf("Studio metadata %q missing: %+v", key, event.Meta)
+		}
+	}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "raw-secret") || strings.Contains(string(encoded), "metadata-secret") || strings.Contains(string(encoded), "unmarshalable") {
+		t.Fatalf("agent-controlled sensitive event data survived: %s", encoded)
+	}
+	projected, err := legacy.Get(attempt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection, err := json.Marshal(projected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(projection), "raw-secret") || strings.Contains(string(projection), "metadata-secret") {
+		t.Fatalf("sensitive event data persisted: %s", projection)
+	}
+}
+
+func TestAgentPhaseRunnerCancellationCleansEvidenceStaging(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-cancel-staging", CaseValidating)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
+	stagingReady := make(chan string, 1)
+	executor := phaseExecutorFunc(func(ctx context.Context, _ string, _ BotRef, prompt string, _ func(InvestigationEvent)) (PhaseExecutionResult, error) {
+		staging := stagingPathFromPrompt(prompt)
+		if err := os.WriteFile(filepath.Join(staging, "unscanned-secret.txt"), []byte("authorization: Bearer cancelled-secret"), 0o600); err != nil {
+			return PhaseExecutionResult{}, err
+		}
+		stagingReady <- staging
+		<-ctx.Done()
+		return PhaseExecutionResult{}, ctx.Err()
+	})
+	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error {
+		t.Fatal("cancelled run invoked completion")
+		return nil
+	})
+	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	staging := <-stagingReady
+	if err := runner.Cancel(context.Background(), attempt.ID); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		_, err := os.Stat(staging)
+		if os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("cancelled staging retained: %v", err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestAgentPhaseRunnerDeferredCleanupRetriesAfterFirstFailure(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-cleanup-retry", CaseValidating)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
+	owned, err := openAttemptEvidenceStaging(phaseArtifactsRoot(t), attempt.ID+"-cleanup-retry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	staging := &flakyCleanupStaging{attemptEvidenceStaging: owned}
+	executor := &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: "verification_status: not_reproduced\nenvironment: test\nevidence: []\ngaps: []\n"}}
+	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), nil)
+	runner.run(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"}, "prompt", staging, incident.Version, func(context.Context, CompleteAttemptCommand) error { return nil })
+	if staging.calls != 2 {
+		t.Fatalf("cleanup calls = %d, want initial failure plus deferred retry", staging.calls)
+	}
+	if _, err := os.Stat(owned.Path()); !os.IsNotExist(err) {
+		t.Fatalf("staging retained after deferred retry: %v", err)
+	}
+}
+
+func stagingPathFromPrompt(prompt string) string {
+	const marker = "STUDIO_EVIDENCE_STAGING_DIR="
+	index := strings.Index(prompt, marker)
+	if index < 0 {
+		return ""
+	}
+	line := prompt[index+len(marker):]
+	if newline := strings.IndexByte(line, '\n'); newline >= 0 {
+		line = line[:newline]
+	}
+	return strings.TrimSpace(line)
 }
 
 func statusForRunningPhase(phase Phase) CaseStatus {
@@ -290,7 +571,102 @@ func createPhaseRunnerAttempt(t *testing.T, store *CaseStore, incident IncidentC
 	if err := store.CreateAttempt(context.Background(), attempt); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.db.Exec(`UPDATE incident_cases SET current_attempt_id = ?, selected_bot_key = ? WHERE id = ?`, attempt.ID, attempt.BotKey, incident.ID); err != nil {
+		t.Fatal(err)
+	}
 	return attempt
+}
+
+func phaseArtifactsRoot(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(resolvedTempDir(t), "phase-artifacts")
+}
+
+func TestAgentPhaseRunnerPreflightRequiresExactCurrentPersistedAttempt(t *testing.T) {
+	mutations := map[string]func(*PhaseAttempt){
+		"case":        func(a *PhaseAttempt) { a.CaseID = "other" },
+		"cycle":       func(a *PhaseAttempt) { a.CycleNumber++ },
+		"phase":       func(a *PhaseAttempt) { a.Phase, a.Mode = PhaseInvestigation, "" },
+		"mode":        func(a *PhaseAttempt) { a.Mode = AttemptRegression },
+		"target":      func(a *PhaseAttempt) { a.AgentTarget = "openclaw" },
+		"bot":         func(a *PhaseAttempt) { a.BotKey = "other" },
+		"input bytes": func(a *PhaseAttempt) { a.InputJSON = []byte(`{"different":true}`) },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			store := newOrchestratorStore(t)
+			incident := createWorkflowCase(t, store, "case-preflight-"+strings.ReplaceAll(name, " ", "-"), CaseValidating)
+			persisted := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
+			caller := persisted.Clone()
+			mutate(&caller)
+			executor := &phaseExecutorStub{}
+			runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error { return nil })
+			if err := runner.Start(context.Background(), caller, Bug{ID: incident.BugID}, BotRef{Key: caller.BotKey, Target: caller.AgentTarget}); err == nil {
+				t.Fatal("accepted caller attempt that differs from persisted attempt")
+			}
+			executor.mu.Lock()
+			defer executor.mu.Unlock()
+			if executor.calls != 0 {
+				t.Fatalf("executor calls = %d", executor.calls)
+			}
+		})
+	}
+}
+
+func TestAgentPhaseRunnerPreflightRejectsMissingDetachedAndTerminalAttempts(t *testing.T) {
+	for _, state := range []string{"missing-current", "detached-current", "terminal"} {
+		t.Run(state, func(t *testing.T) {
+			store := newOrchestratorStore(t)
+			incident := createWorkflowCase(t, store, "case-preflight-"+state, CaseValidating)
+			attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
+			switch state {
+			case "missing-current":
+				_, _ = store.db.Exec(`UPDATE incident_cases SET current_attempt_id = '' WHERE id = ?`, incident.ID)
+			case "detached-current":
+				_, _ = store.db.Exec(`UPDATE incident_cases SET current_attempt_id = 'other-attempt' WHERE id = ?`, incident.ID)
+			case "terminal":
+				_, _ = store.db.Exec(`UPDATE phase_attempts SET status = ? WHERE id = ?`, AttemptStatusSucceeded, attempt.ID)
+			}
+			executor := &phaseExecutorStub{}
+			runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error { return nil })
+			if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget}); err == nil {
+				t.Fatalf("accepted %s attempt", state)
+			}
+			executor.mu.Lock()
+			defer executor.mu.Unlock()
+			if executor.calls != 0 {
+				t.Fatalf("executor calls = %d", executor.calls)
+			}
+		})
+	}
+}
+
+func TestAgentPhaseRunnerPreflightBindsCaseStatusCycleAndSelectedBot(t *testing.T) {
+	for _, mismatch := range []string{"status", "cycle", "selected-bot"} {
+		t.Run(mismatch, func(t *testing.T) {
+			store := newOrchestratorStore(t)
+			incident := createWorkflowCase(t, store, "case-snapshot-"+mismatch, CaseValidating)
+			attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
+			switch mismatch {
+			case "status":
+				_, _ = store.db.Exec(`UPDATE incident_cases SET status=? WHERE id=?`, CaseWaitingEvidence, incident.ID)
+			case "cycle":
+				_, _ = store.db.Exec(`UPDATE incident_cases SET cycle_number=2 WHERE id=?`, incident.ID)
+			case "selected-bot":
+				_, _ = store.db.Exec(`UPDATE incident_cases SET selected_bot_key='other' WHERE id=?`, incident.ID)
+			}
+			executor := &phaseExecutorStub{}
+			runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error { return nil })
+			if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"}); err == nil {
+				t.Fatalf("accepted Case %s mismatch", mismatch)
+			}
+			executor.mu.Lock()
+			defer executor.mu.Unlock()
+			if executor.calls != 0 {
+				t.Fatalf("executor calls = %d", executor.calls)
+			}
+		})
+	}
 }
 
 func TestPhaseResultRejectsUnknownFieldsAndPhaseModeMismatch(t *testing.T) {
@@ -351,7 +727,7 @@ func TestAgentPhaseRunnerEventSinkWorksWithoutLegacyProjection(t *testing.T) {
 	executor := &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: "verification_status: reproduced\nenvironment: test\nevidence: []\ngaps: []\n"}, event: InvestigationEvent{Type: "agent_message", Message: "event"}}
 	done := make(chan struct{}, 1)
 	events := make(chan InvestigationEvent, 1)
-	runner := NewAgentPhaseRunner(store, executor, nil, t.TempDir(), func(context.Context, CompleteAttemptCommand) error { done <- struct{}{}; return nil })
+	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error { done <- struct{}{}; return nil })
 	runner.SetEventSink(func(_ InvestigationRun, event InvestigationEvent) { events <- event })
 	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"}); err != nil {
 		t.Fatal(err)
@@ -371,7 +747,7 @@ func TestAgentPhaseRunnerRejectsAdapterTargetMismatch(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-target-mismatch", CaseValidating)
 	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
-	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, t.TempDir(), func(context.Context, CompleteAttemptCommand) error { return nil })
+	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error { return nil })
 	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "openclaw"}); err == nil {
 		t.Fatal("accepted bot target that differs from persisted attempt")
 	}
@@ -379,7 +755,7 @@ func TestAgentPhaseRunnerRejectsAdapterTargetMismatch(t *testing.T) {
 
 func TestAgentPhaseRunnerFixPromptIncludesAuthorizedStructuredInput(t *testing.T) {
 	store := newOrchestratorStore(t)
-	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, t.TempDir(), func(context.Context, CompleteAttemptCommand) error { return nil })
+	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error { return nil })
 	attempt := PhaseAttempt{Phase: PhaseFix, InputJSON: []byte(`{"root_cause":"authorized-race-in-cache"}`)}
 	prompt, err := runner.promptForAttempt(attempt, Bug{ID: "bug"}, BotRef{})
 	if err != nil {
@@ -396,7 +772,7 @@ func TestAgentPhaseRunnerAccumulatesUsageAcrossReadOnlyRetry(t *testing.T) {
 	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
 	executor := &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: "verification_status: reproduced\nenvironment: test\nevidence: []\ngaps: []\n", Usage: AgentUsage{InputTokens: 4, OutputTokens: 3}}, errors: []error{errors.New("retry")}}
 	completed := make(chan CompleteAttemptCommand, 1)
-	runner := NewAgentPhaseRunner(store, executor, nil, t.TempDir(), func(_ context.Context, command CompleteAttemptCommand) error { completed <- command; return nil })
+	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(_ context.Context, command CompleteAttemptCommand) error { completed <- command; return nil })
 	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"}); err != nil {
 		t.Fatal(err)
 	}
@@ -413,7 +789,7 @@ func TestAgentPhaseRunnerInvokesCompletionExactlyOnceEvenWhenItFails(t *testing.
 	executor := &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: "verification_status: reproduced\nenvironment: test\nevidence: []\ngaps: []\n"}}
 	callbacks := make(chan int, 2)
 	var callbackCalls int
-	runner := NewAgentPhaseRunner(store, executor, nil, t.TempDir(), func(context.Context, CompleteAttemptCommand) error {
+	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error {
 		callbackCalls++
 		callbacks <- callbackCalls
 		return errors.New("store failure")
@@ -435,9 +811,26 @@ func TestAgentPhaseRunnerInvokesCompletionExactlyOnceEvenWhenItFails(t *testing.
 	case <-time.After(100 * time.Millisecond):
 	}
 	executor.mu.Lock()
-	defer executor.mu.Unlock()
-	if executor.calls != 1 {
-		t.Fatalf("agent reran %d times while retrying completion", executor.calls)
+	executorCalls := executor.calls
+	executor.mu.Unlock()
+	if executorCalls != 1 {
+		t.Fatalf("agent reran %d times while retrying completion", executorCalls)
+	}
+	stored, err := store.GetAttempt(context.Background(), attempt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := parseCompletionIntent(stored.OutputJSON); err != nil || !found {
+		t.Fatalf("completion intent found=%v err=%v raw=%s", found, err, stored.OutputJSON)
+	}
+	recoveryRunner := &recordingPhaseRunner{}
+	orchestrator := NewCaseOrchestrator(store, recoveryRunner, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
+	if err := orchestrator.RecoverInterrupted(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	recovered, _ := store.GetCase(context.Background(), incident.ID)
+	if recovered.Status != CaseReproduced && recovered.Status != CaseInvestigating {
+		t.Fatalf("recovered case = %+v", recovered)
 	}
 }
 
@@ -446,7 +839,7 @@ func TestAgentPhaseRunnerRejectsUnboundRegressionInputBeforeProcessStart(t *test
 	incident := createWorkflowCase(t, store, "case-unbound-regression", CaseRegressionValidating)
 	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseRegression, AttemptRegression)
 	executor := &phaseExecutorStub{}
-	runner := NewAgentPhaseRunner(store, executor, nil, t.TempDir(), func(context.Context, CompleteAttemptCommand) error { return nil })
+	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error { return nil })
 	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"}); err == nil {
 		t.Fatal("started regression without scenario/deployment/commit binding")
 	}
@@ -454,5 +847,30 @@ func TestAgentPhaseRunnerRejectsUnboundRegressionInputBeforeProcessStart(t *test
 	defer executor.mu.Unlock()
 	if executor.calls != 0 {
 		t.Fatalf("unbound regression executed %d processes", executor.calls)
+	}
+}
+
+func TestAgentPhaseRunnerRejectsRegressionEnvironmentDifferentFromCaseBeforeProcessStart(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-regression-env-mismatch", CaseRegressionValidating)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseRegression, AttemptRegression)
+	input, _ := json.Marshal(RegressionValidationInput{OriginalReproduction: "checkout", OriginalScenarioHash: "hash", ExpectedFixCommits: map[string]string{"api": "fix-1"}, ObservedDeploymentVersion: "version-1", TargetEnvironment: "prod"})
+	attempt.InputJSON = input
+	if _, err := store.db.Exec(`UPDATE phase_attempts SET input_json=? WHERE id=?`, string(input), attempt.ID); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := store.RecordDeploymentObservation(context.Background(), DeploymentObservation{ID: "obs-env-mismatch", CaseID: incident.ID, Environment: "prod", ExpectedCommits: map[string]string{"api": "fix-1"}, VerificationSource: "test", ObservedVersion: "version-1", ObservedCommits: map[string]string{"api": "fix-1"}, VerifiedAt: &now, Result: DeploymentResultMatched}, "obs-env-mismatch"); err != nil {
+		t.Fatal(err)
+	}
+	executor := &phaseExecutorStub{}
+	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error { return nil })
+	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"}); err == nil {
+		t.Fatal("started regression for an environment different from Case")
+	}
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	if executor.calls != 0 {
+		t.Fatalf("executor calls = %d", executor.calls)
 	}
 }

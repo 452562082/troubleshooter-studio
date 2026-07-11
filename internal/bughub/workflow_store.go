@@ -871,17 +871,18 @@ type CaseSnapshotUpdate struct {
 // All records, attempt changes, ordered transition/audit events, and the final
 // Case snapshot commit or roll back together under one Case-version CAS.
 type CaseMutation struct {
-	CaseID          string
-	ExpectedVersion int64
-	IdempotencyKey  string
-	RequestJSON     json.RawMessage
-	Steps           []CaseMutationStep
-	CreateAttempts  []PhaseAttempt
-	FinishAttempts  []PhaseAttempt
-	Approvals       []Approval
-	CodeChanges     []CodeChange
-	Observations    []DeploymentObservation
-	Snapshot        CaseSnapshotUpdate
+	CaseID                 string
+	ExpectedVersion        int64
+	IdempotencyKey         string
+	RequestJSON            json.RawMessage
+	Steps                  []CaseMutationStep
+	CreateAttempts         []PhaseAttempt
+	FinishAttempts         []PhaseAttempt
+	Approvals              []Approval
+	CodeChanges            []CodeChange
+	Observations           []DeploymentObservation
+	ExpectedAttemptOutputs map[string]json.RawMessage `json:"-"`
+	Snapshot               CaseSnapshotUpdate
 }
 
 type CaseMutationStep struct {
@@ -933,6 +934,12 @@ func (m CaseMutation) clone() CaseMutation {
 	cloned.Observations = make([]DeploymentObservation, len(m.Observations))
 	for i := range m.Observations {
 		cloned.Observations[i] = m.Observations[i].Clone()
+	}
+	if m.ExpectedAttemptOutputs != nil {
+		cloned.ExpectedAttemptOutputs = make(map[string]json.RawMessage, len(m.ExpectedAttemptOutputs))
+		for id, output := range m.ExpectedAttemptOutputs {
+			cloned.ExpectedAttemptOutputs[id] = CloneRawMessage(output)
+		}
 	}
 	cloned.Snapshot.CurrentAttemptID = cloneStringPtr(m.Snapshot.CurrentAttemptID)
 	cloned.Snapshot.SelectedBotKey = cloneStringPtr(m.Snapshot.SelectedBotKey)
@@ -1104,7 +1111,24 @@ func (s *CaseStore) ApplyCaseMutation(ctx context.Context, mutation CaseMutation
 		if err = attempt.Validate(); err != nil {
 			return result, err
 		}
-		execResult, execErr := tx.ExecContext(ctx, `UPDATE phase_attempts SET status=?, output_json=?, finished_at=?, error_code=?, error_message=?, input_tokens=?, output_tokens=?, duration_nanos=? WHERE id=? AND case_id=? AND status IN (?,?)`, attempt.Status, string(attempt.OutputJSON), formatOptionalStoreTime(attempt.FinishedAt), attempt.ErrorCode, attempt.ErrorMessage, attempt.Usage.InputTokens, attempt.Usage.OutputTokens, int64(attempt.Usage.Duration), attempt.ID, incident.ID, AttemptStatusQueued, AttemptStatusRunning)
+		var currentOutput string
+		if queryErr := tx.QueryRowContext(ctx, `SELECT output_json FROM phase_attempts WHERE id=? AND case_id=? AND status IN (?,?)`, attempt.ID, incident.ID, AttemptStatusQueued, AttemptStatusRunning).Scan(&currentOutput); queryErr != nil {
+			if errors.Is(queryErr, sql.ErrNoRows) {
+				return result, fmt.Errorf("%w: %s", ErrAttemptAlreadyFinished, attempt.ID)
+			}
+			return result, queryErr
+		}
+		expectedOutput, hasExpected := mutation.ExpectedAttemptOutputs[attempt.ID]
+		if hasExpected {
+			if !bytes.Equal([]byte(currentOutput), expectedOutput) {
+				return result, fmt.Errorf("%w: attempt output changed before finish", ErrIdempotencyConflict)
+			}
+		} else if _, found, parseErr := parseCompletionIntent([]byte(currentOutput)); parseErr != nil {
+			return result, parseErr
+		} else if found {
+			return result, ErrCompletionIntentPending
+		}
+		execResult, execErr := tx.ExecContext(ctx, `UPDATE phase_attempts SET status=?, output_json=?, finished_at=?, error_code=?, error_message=?, input_tokens=?, output_tokens=?, duration_nanos=? WHERE id=? AND case_id=? AND status IN (?,?) AND output_json=?`, attempt.Status, string(attempt.OutputJSON), formatOptionalStoreTime(attempt.FinishedAt), attempt.ErrorCode, attempt.ErrorMessage, attempt.Usage.InputTokens, attempt.Usage.OutputTokens, int64(attempt.Usage.Duration), attempt.ID, incident.ID, AttemptStatusQueued, AttemptStatusRunning, currentOutput)
 		if execErr != nil {
 			return result, execErr
 		}

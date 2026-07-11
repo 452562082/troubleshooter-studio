@@ -153,6 +153,18 @@ func (o *CaseOrchestrator) recoverAttempt(ctx context.Context, attempt PhaseAtte
 		}
 		return o.interruptDetachedAttempt(ctx, incident, attempt)
 	}
+	completion, found, err := parseCompletionIntent(attempt.OutputJSON)
+	if err != nil {
+		return err
+	}
+	if found {
+		if completion.CaseID != incident.ID || completion.AttemptID != attempt.ID {
+			return errors.New("persisted completion intent is not bound to current Case attempt")
+		}
+		completion.ExpectedVersion = incident.Version
+		_, err := o.CompleteAttempt(ctx, completion)
+		return err
+	}
 	attempt.Status = AttemptStatusInterrupted
 	attempt.OutputJSON = []byte(`{}`)
 	attempt.ErrorCode = "studio_restarted"
@@ -433,6 +445,8 @@ func statusForPhase(phase Phase) CaseStatus {
 		return CaseInvestigating
 	case PhaseRegression:
 		return CaseRegressionValidating
+	case PhaseFix:
+		return CaseFixing
 	default:
 		return ""
 	}

@@ -22,7 +22,14 @@ type ArtifactInput struct {
 	RedactionStatus RedactionStatus
 	// RejectSHA256 prevents a newly reported source from being re-registered
 	// when its bytes are already known to belong to an earlier attempt.
-	RejectSHA256 []string
+	RejectSHA256    []string
+	RejectSensitive bool
+	captured        *capturedArtifactSource
+}
+
+func registerCapturedArtifact(ctx context.Context, store *CaseStore, input ArtifactInput, captured capturedArtifactSource) (EvidenceArtifact, error) {
+	input.captured = &captured
+	return registerArtifactWithHooks(ctx, store, input, artifactHooks{})
 }
 
 func RegisterArtifact(ctx context.Context, store *CaseStore, input ArtifactInput) (EvidenceArtifact, error) {
@@ -62,9 +69,14 @@ func registerArtifactWithHooks(ctx context.Context, store *CaseStore, input Arti
 	if attempt.CaseID != input.CaseID {
 		return EvidenceArtifact{}, fmt.Errorf("artifact attempt does not belong to case")
 	}
-	captured, err := captureArtifactSource(input.SourcePath)
-	if err != nil {
-		return EvidenceArtifact{}, err
+	var captured capturedArtifactSource
+	if input.captured != nil {
+		captured = *input.captured
+	} else {
+		captured, err = captureArtifactSource(input.SourcePath)
+		if err != nil {
+			return EvidenceArtifact{}, err
+		}
 	}
 	for _, rejected := range input.RejectSHA256 {
 		if captured.SHA256 == rejected {
@@ -72,7 +84,7 @@ func registerArtifactWithHooks(ctx context.Context, store *CaseStore, input Arti
 		}
 	}
 	metadata := strings.Join([]string{input.CaseID, input.AttemptID, input.Kind, input.Environment, input.Version, input.RequestID, input.TraceID}, "\n")
-	if input.RedactionStatus != RedactionStatusRedacted && (containsSensitiveData(captured.Content) || containsSensitiveData([]byte(metadata))) {
+	if (input.RejectSensitive || input.RedactionStatus != RedactionStatusRedacted) && (containsSensitiveData(captured.Content) || containsSensitiveData([]byte(metadata))) {
 		return EvidenceArtifact{}, fmt.Errorf("artifact may contain credentials and must be explicitly redacted")
 	}
 	unlockPublication := lockArtifactPublication(input.ArtifactsRoot, input.CaseID, captured.SHA256)

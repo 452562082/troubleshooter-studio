@@ -81,17 +81,17 @@ expected_behavior: "<expected>"
 scenario_hash: "<原始场景哈希；首次验证可为空，回归必须原样返回>"
 evidence:
   - kind: "<har|screenshot|network|console|api|trace|log|command>"
-    path: "<本机已脱敏常规文件的绝对路径>"
-    captured_at: "<RFC3339 时间>"
+    path: "<Studio staging 目录内的相对路径>"
+    captured_at: "<RFC3339；仅兼容输出，Studio 以 fstat 为准>"
     environment: "<env>"
     version: "<运行版本；回归必填>"
     request_id: "<可空>"
     trace_id: "<可空>"
-    redaction_status: redacted | not_required
+    redaction_status: redacted | not_required # 仅兼容输出，Studio 总会重新扫描
 gaps: []
 ```
 
-证据必须通过 `path` 引用本机已脱敏的常规文件，供 Studio 安全复制、计算 SHA256 并登记元数据。不得内联 token、cookie、password 或 Authorization。Windows 若安全 artifact store 不可用，Studio 会以 `secure_artifact_store_unsupported` 证据限制结束当前 attempt，不能把它当作验证成功。
+证据必须先写入 prompt 指定的 Studio staging 目录，`path` 只写该目录内的干净相对路径。绝对路径、`..`、符号链接和其它 attempt 的 staging 路径都会被拒绝。Studio 使用安全文件描述符读取、计算 SHA256 和 fstat 时间，并始终重新扫描 token、cookie、password、Authorization；Agent 声称 `redacted` 不能绕过扫描。Windows 若安全 artifact store 不可用，Studio 会以 `secure_artifact_store_unsupported` 证据限制结束当前 attempt，不能把它当作验证成功。
 
 ## 硬约束
 

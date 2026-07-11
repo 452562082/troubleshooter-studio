@@ -108,6 +108,7 @@ type AgentPhaseRunner struct {
 	artifactsRoot string
 	complete      PhaseCompletionFunc
 	eventSink     InvestigationEventSink
+	openStaging   func(string, string) (attemptEvidenceStaging, error)
 
 	mu        sync.Mutex
 	active    map[string]context.CancelFunc
@@ -124,7 +125,7 @@ func (r *AgentPhaseRunner) SetEventSink(sink InvestigationEventSink) {
 }
 
 func NewAgentPhaseRunner(store *CaseStore, executor PhaseAgentExecutor, legacy *InvestigationStore, artifactsRoot string, complete PhaseCompletionFunc) *AgentPhaseRunner {
-	return &AgentPhaseRunner{store: store, executor: executor, legacy: legacy, artifactsRoot: artifactsRoot, complete: complete, active: make(map[string]context.CancelFunc), scheduled: make(map[string]struct{})}
+	return &AgentPhaseRunner{store: store, executor: executor, legacy: legacy, artifactsRoot: artifactsRoot, complete: complete, openStaging: openAttemptEvidenceStaging, active: make(map[string]context.CancelFunc), scheduled: make(map[string]struct{})}
 }
 
 func (r *AgentPhaseRunner) SetCompletionCallback(complete PhaseCompletionFunc) {
@@ -186,36 +187,46 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 	} else if found {
 		return errors.New("phase attempt already has a persisted completion intent")
 	}
-	staging, err := openAttemptEvidenceStaging(r.artifactsRoot, attempt.ID)
+	openStaging := r.openStaging
+	if openStaging == nil {
+		openStaging = openAttemptEvidenceStaging
+	}
+	staging, err := openStaging(r.artifactsRoot, attempt.ID)
 	if err != nil {
 		return fmt.Errorf("create Studio evidence staging: %w", err)
 	}
 	prompt, err := r.promptForAttempt(attempt, bug, bot)
 	if err != nil {
-		_ = staging.Close()
-		return err
+		return releaseUntransferredStaging(staging, err)
 	}
 	prompt += "\n## Studio evidence staging (mandatory)\n\nSTUDIO_EVIDENCE_STAGING_DIR=" + staging.Path() + "\nWrite every evidence file beneath this exact directory. In final YAML, `path` must be a clean relative path from this directory; absolute paths and `..` are rejected. Studio derives timestamps and redaction status from securely opened file bytes.\n"
 	r.mu.Lock()
 	if _, exists := r.scheduled[attempt.ID]; exists {
 		r.mu.Unlock()
-		_ = staging.Close()
-		return nil
+		return releaseUntransferredStaging(staging, nil)
 	}
 	complete := r.complete
 	if complete == nil {
 		r.mu.Unlock()
-		_ = staging.Close()
-		return errors.New("agent phase completion callback is required")
+		return releaseUntransferredStaging(staging, errors.New("agent phase completion callback is required"))
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
 	r.scheduled[attempt.ID] = struct{}{}
 	r.active[attempt.ID] = cancel
 	r.mu.Unlock()
 
-	r.startLegacyProjection(attempt, bug, bot, prompt)
+	r.startLegacyProjection(attempt, bug, bot)
 	go r.run(runCtx, attempt.Clone(), bug, bot, prompt, staging, incident.Version, complete)
 	return nil
+}
+
+func releaseUntransferredStaging(staging attemptEvidenceStaging, cause error) error {
+	if staging == nil {
+		return cause
+	}
+	cleanupErr := staging.Cleanup()
+	closeErr := staging.Close()
+	return errors.Join(cause, cleanupErr, closeErr)
 }
 
 func sameRunnableAttempt(persisted, caller PhaseAttempt) bool {
@@ -524,11 +535,12 @@ func (r *AgentPhaseRunner) validateRegressionEvidence(ctx context.Context, attem
 	return errors.New("regression requires a matched deployment observation for the expected commits, version, and environment")
 }
 
-func (r *AgentPhaseRunner) startLegacyProjection(attempt PhaseAttempt, bug Bug, bot BotRef, prompt string) {
+func (r *AgentPhaseRunner) startLegacyProjection(attempt PhaseAttempt, bug Bug, bot BotRef) {
 	if r.legacy == nil {
 		return
 	}
-	_ = r.legacy.ProjectAttempt(InvestigationRun{ID: attempt.ID, BugID: bug.ID, BotKey: bot.Key, Status: InvestigationRunning, StartedAt: attempt.StartedAt, PromptPreview: promptPreview(prompt), ContinuationOf: attempt.ParentAttemptID})
+	preview := fmt.Sprintf("durable workflow phase: phase=%s mode=%s", attempt.Phase, attempt.Mode)
+	_ = r.legacy.ProjectAttempt(InvestigationRun{ID: attempt.ID, BugID: bug.ID, BotKey: bot.Key, Status: InvestigationRunning, StartedAt: attempt.StartedAt, PromptPreview: preview, ContinuationOf: attempt.ParentAttemptID})
 }
 
 func (r *AgentPhaseRunner) projectEvent(attempt PhaseAttempt, event InvestigationEvent) {

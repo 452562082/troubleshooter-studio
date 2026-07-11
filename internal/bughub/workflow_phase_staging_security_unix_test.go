@@ -3,10 +3,42 @@
 package bughub
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestCaptureAttemptStagedArtifactRejectsOversizedDeclaredAndReadContent(t *testing.T) {
+	root := filepath.Join(resolvedTempDir(t), "staging-size-limit")
+	staging, err := openAttemptEvidenceStaging(root, "attempt-size")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer staging.Close()
+	defer staging.Cleanup()
+
+	oversized := filepath.Join(staging.Path(), "oversized.bin")
+	file, err := os.OpenFile(oversized, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(maxStagedEvidenceBytes + 1); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := staging.Capture("oversized.bin"); !errors.Is(err, ErrStagedEvidenceTooLarge) {
+		t.Fatalf("oversized declared file error = %v", err)
+	}
+
+	if _, _, err := readStagedEvidence(bytes.NewReader(make([]byte, maxStagedEvidenceBytes+1))); !errors.Is(err, ErrStagedEvidenceTooLarge) {
+		t.Fatalf("N+1 post-read error = %v", err)
+	}
+}
 
 func TestCaptureAttemptStagedArtifactRejectsTraversalSymlinkAndWrongAttempt(t *testing.T) {
 	root := filepath.Join(resolvedTempDir(t), "staging-security")

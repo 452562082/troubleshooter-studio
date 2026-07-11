@@ -3,9 +3,7 @@
 package bughub
 
 import (
-	"bytes"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -257,14 +255,16 @@ func captureArtifactDescriptor(fd int, name string) (capturedArtifactSource, err
 	if err := unix.Fstat(fd, &stat); err != nil || stat.Nlink != 1 {
 		return capturedArtifactSource{}, errors.New("staged evidence must have exactly one link")
 	}
-	hash := sha256.New()
-	var content bytes.Buffer
-	if _, err := io.Copy(io.MultiWriter(&content, hash), file); err != nil {
+	if stat.Size > maxStagedEvidenceBytes {
+		return capturedArtifactSource{}, fmt.Errorf("%w: declared size %d exceeds maximum %d bytes", ErrStagedEvidenceTooLarge, stat.Size, maxStagedEvidenceBytes)
+	}
+	content, digest, err := readStagedEvidence(file)
+	if err != nil {
 		return capturedArtifactSource{}, err
 	}
 	after, err := file.Stat()
 	if err != nil || !os.SameFile(before, after) || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
 		return capturedArtifactSource{}, errors.New("staged evidence changed while being captured")
 	}
-	return capturedArtifactSource{Content: content.Bytes(), SHA256: hex.EncodeToString(hash.Sum(nil)), CapturedAt: time.Now().UTC()}, nil
+	return capturedArtifactSource{Content: content, SHA256: digest, CapturedAt: time.Now().UTC()}, nil
 }

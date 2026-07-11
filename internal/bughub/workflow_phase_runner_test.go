@@ -63,6 +63,35 @@ type flakyCleanupStaging struct {
 	calls int
 }
 
+type lifecycleStaging struct {
+	mu       sync.Mutex
+	path     string
+	cleanups int
+	closes   int
+}
+
+func (s *lifecycleStaging) Path() string { return s.path }
+func (s *lifecycleStaging) Capture(string) (capturedArtifactSource, error) {
+	return capturedArtifactSource{}, errors.New("unexpected capture")
+}
+func (s *lifecycleStaging) Cleanup() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cleanups++
+	return nil
+}
+func (s *lifecycleStaging) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closes++
+	return nil
+}
+func (s *lifecycleStaging) lifecycle() (int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cleanups, s.closes
+}
+
 func (s *flakyCleanupStaging) Cleanup() error {
 	s.calls++
 	if s.calls == 1 {
@@ -666,6 +695,110 @@ func TestAgentPhaseRunnerPreflightBindsCaseStatusCycleAndSelectedBot(t *testing.
 				t.Fatalf("executor calls = %d", executor.calls)
 			}
 		})
+	}
+}
+
+func TestAgentPhaseRunnerCleansUntransferredStagingOnStartFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		phase      Phase
+		mode       AttemptMode
+		input      []byte
+		completion PhaseCompletionFunc
+	}{
+		{name: "prompt error", phase: PhaseRegression, mode: AttemptRegression, input: []byte(`{}`), completion: func(context.Context, CompleteAttemptCommand) error { return nil }},
+		{name: "missing callback", phase: PhaseValidation, mode: AttemptReproduce, input: []byte(`{}`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newOrchestratorStore(t)
+			incident := createWorkflowCase(t, store, "case-start-cleanup-"+strings.ReplaceAll(tc.name, " ", "-"), statusForRunningPhase(tc.phase))
+			attempt := createPhaseRunnerAttempt(t, store, incident, tc.phase, tc.mode)
+			attempt.InputJSON = tc.input
+			if _, err := store.db.Exec(`UPDATE phase_attempts SET input_json=? WHERE id=?`, string(tc.input), attempt.ID); err != nil {
+				t.Fatal(err)
+			}
+			staging := &lifecycleStaging{path: filepath.Join(t.TempDir(), "owned")}
+			runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, phaseArtifactsRoot(t), tc.completion)
+			runner.openStaging = func(string, string) (attemptEvidenceStaging, error) { return staging, nil }
+			if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"}); err == nil {
+				t.Fatal("Start succeeded")
+			}
+			if cleanups, closes := staging.lifecycle(); cleanups != 1 || closes != 1 {
+				t.Fatalf("staging lifecycle cleanup=%d close=%d", cleanups, closes)
+			}
+		})
+	}
+}
+
+func TestAgentPhaseRunnerCleansConcurrentScheduledRaceStaging(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-start-cleanup-race", CaseValidating)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
+	created := make(chan *lifecycleStaging, 2)
+	release := make(chan struct{})
+	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: "verification_status: reproduced\nenvironment: test\nevidence: []\ngaps: []\n"}}, nil, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error { return nil })
+	runner.openStaging = func(string, string) (attemptEvidenceStaging, error) {
+		staging := &lifecycleStaging{path: filepath.Join(t.TempDir(), "owned")}
+		created <- staging
+		<-release
+		return staging, nil
+	}
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			results <- runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"})
+		}()
+	}
+	first, second := <-created, <-created
+	close(release)
+	if err := <-results; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-results; err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		firstCleanups, firstCloses := first.lifecycle()
+		secondCleanups, secondCloses := second.lifecycle()
+		if firstCleanups == 1 && firstCloses == 1 && secondCleanups == 1 && secondCloses == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("staging lifecycles first=%d/%d second=%d/%d", firstCleanups, firstCloses, secondCleanups, secondCloses)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestAgentPhaseRunnerLegacyPreviewOmitsRegressionSecrets(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-regression-preview", CaseRegressionValidating)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseRegression, AttemptRegression)
+	input := RegressionValidationInput{OriginalReproduction: "Authorization: Bearer preview-secret Cookie: sid=cookie-secret token=token-secret", OriginalScenarioHash: "hash", ExpectedFixCommits: map[string]string{"api": "fix-1"}, ObservedDeploymentVersion: "version-1", TargetEnvironment: "test"}
+	attempt.InputJSON, _ = json.Marshal(input)
+	if _, err := store.db.Exec(`UPDATE phase_attempts SET input_json=? WHERE id=?`, string(attempt.InputJSON), attempt.ID); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := store.RecordDeploymentObservation(context.Background(), DeploymentObservation{ID: "obs-preview-secret", CaseID: incident.ID, Environment: "test", ExpectedCommits: input.ExpectedFixCommits, VerificationSource: "test", ObservedVersion: input.ObservedDeploymentVersion, ObservedCommits: input.ExpectedFixCommits, VerifiedAt: &now, Result: DeploymentResultMatched}, "obs-preview-secret"); err != nil {
+		t.Fatal(err)
+	}
+	legacy := NewInvestigationStore(t.TempDir())
+	done := make(chan struct{}, 1)
+	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: "verification_status: fixed_verified\nenvironment: test\nevidence: []\ngaps: []\n"}}, legacy, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error { done <- struct{}{}; return nil })
+	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	raw, err := os.ReadFile(legacy.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"preview-secret", "cookie-secret", "token-secret", "Authorization", "Cookie"} {
+		if strings.Contains(string(raw), secret) {
+			t.Fatalf("legacy runs.json contains %q: %s", secret, raw)
+		}
 	}
 }
 

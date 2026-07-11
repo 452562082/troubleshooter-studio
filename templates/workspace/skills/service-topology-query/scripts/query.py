@@ -611,6 +611,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if not args.service and not args.path and not args.rpc_method:
         parser.error("at least one of --service, --path or --rpc-method is required")
+    if args.rpc_method and (args.method or args.path):
+        parser.error("--rpc-method cannot be combined with --method or --path")
     if args.protocol == "grpc" and (args.method or args.path):
         parser.error("--protocol grpc cannot be combined with --method or --path")
     if args.protocol == "http" and args.rpc_method:

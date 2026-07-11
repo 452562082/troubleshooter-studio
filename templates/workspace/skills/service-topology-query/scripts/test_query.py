@@ -188,6 +188,36 @@ def test_query_cli_selects_protocol_and_fully_qualified_grpc_method(tmp_path):
     )
 
 
+@pytest.mark.parametrize(
+    "conflicting_args",
+    [
+        ("--method", "GET"),
+        ("--path", "/profiles/123"),
+    ],
+)
+def test_query_cli_rejects_grpc_method_with_http_selector_without_protocol(
+    tmp_path, conflicting_args
+):
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--workspace",
+            str(tmp_path),
+            "--rpc-method",
+            "/profile.v1.ProfileService/GetProfile",
+            *conflicting_args,
+            "--json",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert proc.returncode == 2
+    assert "--rpc-method cannot be combined with --method or --path" in proc.stderr
+
+
 def test_query_accepts_exact_unversioned_flat_brief_fixture(tmp_path):
     refs = tmp_path / "skills" / "routing" / "references"
     refs.mkdir(parents=True)

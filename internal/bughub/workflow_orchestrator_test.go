@@ -506,7 +506,7 @@ func TestOrchestratorRequiresSeparateScopeBoundFixAndMergeApprovals(t *testing.T
 	ctx := context.Background()
 	store := newOrchestratorStore(t)
 	root := createWorkflowCase(t, store, "case-gates", CaseRootCauseReady)
-	rootAttempt := PhaseAttempt{ID: "investigation-root", CaseID: root.ID, CycleNumber: 1, Phase: PhaseInvestigation, Status: AttemptStatusSucceeded, InputJSON: []byte(`{}`), OutputJSON: []byte(`{"root_cause":"db timeout"}`)}
+	rootAttempt := PhaseAttempt{ID: "investigation-root", CaseID: root.ID, CycleNumber: 1, Phase: PhaseInvestigation, Status: AttemptStatusSucceeded, InputJSON: []byte(`{}`), OutputJSON: []byte(`{"investigation_status":"root_cause_ready","environment":"test","root_cause":"db timeout","confidence":"high","evidence":[],"gaps":[]}`)}
 	if err := store.CreateAttempt(ctx, rootAttempt); err != nil {
 		t.Fatal(err)
 	}
@@ -521,7 +521,7 @@ func TestOrchestratorRequiresSeparateScopeBoundFixAndMergeApprovals(t *testing.T
 	if _, err := o.ApproveMerge(ctx, ApproveMergeCommand{CaseID: root.ID, ExpectedVersion: root.Version, IdempotencyKey: "merge-too-early", ActorID: "alice"}); !errors.Is(err, ErrApprovalNotReady) {
 		t.Fatalf("early merge err=%v", err)
 	}
-	fixing, err := o.ApproveFix(ctx, ApproveFixCommand{CaseID: root.ID, ExpectedVersion: root.Version, IdempotencyKey: "approve-fix", ActorID: "alice", RootCauseAttemptID: rootAttempt.ID, Bug: Bug{ID: root.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{}`)})
+	fixing, err := o.ApproveFix(ctx, ApproveFixCommand{CaseID: root.ID, ExpectedVersion: root.Version, IdempotencyKey: StartFixApprovalKey(root.ID, rootAttempt.ID, root.Version), ActorID: "alice", RootCauseAttemptID: rootAttempt.ID, Bug: Bug{ID: root.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{}`)})
 	if err != nil || fixing.Status != CaseFixing {
 		t.Fatalf("case=%+v err=%v", fixing, err)
 	}

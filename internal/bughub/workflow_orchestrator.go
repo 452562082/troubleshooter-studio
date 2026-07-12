@@ -512,6 +512,9 @@ func (o *CaseOrchestrator) ApproveFix(ctx context.Context, cmd ApproveFixCommand
 	if err := validateCommand(cmd.CaseID, cmd.ExpectedVersion, cmd.IdempotencyKey, cmd.ActorID); err != nil {
 		return IncidentCase{}, err
 	}
+	if cmd.IdempotencyKey != StartFixApprovalKey(cmd.CaseID, cmd.RootCauseAttemptID, cmd.ExpectedVersion) {
+		return IncidentCase{}, ErrApprovalScope
+	}
 	incident, err := o.loadForCommand(ctx, cmd.CaseID, cmd.ExpectedVersion, cmd.IdempotencyKey)
 	if err != nil {
 		return IncidentCase{}, err
@@ -519,8 +522,18 @@ func (o *CaseOrchestrator) ApproveFix(ctx context.Context, cmd ApproveFixCommand
 	if incident.Status != CaseWaitingFixApproval {
 		return IncidentCase{}, ErrApprovalNotReady
 	}
-	if cmd.RootCauseAttemptID == "" || cmd.RootCauseAttemptID != incident.CurrentAttemptID {
-		return IncidentCase{}, ErrApprovalScope
+	// loadForCommand projects status/version from the original transition on an
+	// idempotent replay. Restore the original approval snapshot's current
+	// investigation attempt so the store can compare the exact request again.
+	if incident.CurrentAttemptID != cmd.RootCauseAttemptID {
+		if replay, replayErr := o.hasEvent(ctx, incident.ID, cmd.IdempotencyKey); replayErr != nil {
+			return IncidentCase{}, replayErr
+		} else if replay {
+			incident.CurrentAttemptID = cmd.RootCauseAttemptID
+		}
+	}
+	if err := validateFixApprovalRootCause(ctx, o.store, incident, cmd.RootCauseAttemptID); err != nil {
+		return IncidentCase{}, err
 	}
 	scope, _ := json.Marshal(map[string]string{"root_cause_attempt_id": cmd.RootCauseAttemptID})
 	approval := Approval{ID: stableID("approval", cmd.IdempotencyKey), CaseID: incident.ID, Kind: ApprovalStartFix, Actor: cmd.ActorID, CaseVersion: incident.Version, ScopeJSON: scope}

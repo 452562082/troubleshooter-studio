@@ -731,10 +731,15 @@ branches:
     fix_branch: "fix/bug-909"
     commit: "abc123"
     pushed: true
+    target_environment_branch: "test"
+    push_remote: "origin"
 changes:
-  - "counter.ts: 按内容类型拆分计数"
+  - repo: "admin"
+    summary: "counter.ts: 按内容类型拆分计数"
 tests:
-  - command: "npm test"
+  - repo: "admin"
+    commit: "abc123"
+    command: "npm test"
     result: passed
     note: "unit passed"
 deployment_notice: "请部署 admin/fix/bug-909 到 test 后再触发验证 Agent 回归。"

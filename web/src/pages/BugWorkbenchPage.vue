@@ -738,7 +738,7 @@ function selectWorkbenchView(view: 'inbox' | 'cases') {
   workbenchViewChosen = true
 }
 
-async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind']; input?: string; observedVersion?: string }) {
+async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind']; input?: string; observedVersion?: string; rootCauseAttemptID?: string; caseVersion?: number }) {
   const detail = incidentDetail.value
   if (!detail) return
   const incident = detail.case
@@ -767,9 +767,10 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
         return continueIncidentCase({ ...base, phase: 'regression', input_json: { decision: 'update_deployment_proof', evidence: payload.input || '' } })
       }
       if (payload.kind === 'approve_fix') {
-        const rootCause = [...detail.attempts].reverse().find(attempt => attempt.phase === 'investigation' && attempt.status === 'succeeded')
-        if (!rootCause) throw new Error('未找到可授权的根因结论')
-        return approveIncidentFix({ ...base, root_cause_attempt_id: rootCause.id })
+        const rootCauseAttemptID = payload.rootCauseAttemptID || ''
+        const caseVersion = payload.caseVersion
+        if (!rootCauseAttemptID || caseVersion === undefined) throw new Error('修复授权缺少对话框中的根因或 Case 版本快照')
+        return approveIncidentFix({ ...base, expected_version: caseVersion, idempotency_key: `start-fix:${incident.id}:${rootCauseAttemptID}:${caseVersion}`, root_cause_attempt_id: rootCauseAttemptID })
       }
       if (payload.kind === 'approve_merge') {
         return approveIncidentMerge({

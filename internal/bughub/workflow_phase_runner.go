@@ -52,36 +52,6 @@ type InvestigationResult struct {
 	Gaps                []string            `yaml:"gaps" json:"gaps"`
 }
 
-type FixBranchResult struct {
-	Repo                    string `yaml:"repo" json:"repo"`
-	BaseBranch              string `yaml:"base_branch" json:"base_branch"`
-	FixBranch               string `yaml:"fix_branch" json:"fix_branch"`
-	Commit                  string `yaml:"commit" json:"commit"`
-	Pushed                  bool   `yaml:"pushed" json:"pushed"`
-	TargetEnvironmentBranch string `yaml:"target_environment_branch" json:"target_environment_branch"`
-	PushRemote              string `yaml:"push_remote,omitempty" json:"push_remote,omitempty"`
-}
-
-type FixTestResult struct {
-	Repo    string `yaml:"repo" json:"repo"`
-	Commit  string `yaml:"commit" json:"commit"`
-	Command string `yaml:"command" json:"command"`
-	Result  string `yaml:"result" json:"result"`
-	Note    string `yaml:"note,omitempty" json:"note,omitempty"`
-}
-
-type FixResult struct {
-	FixStatus        string              `yaml:"fix_status" json:"fix_status"`
-	Environment      string              `yaml:"environment" json:"environment"`
-	Branches         []FixBranchResult   `yaml:"branches" json:"branches"`
-	Changes          []string            `yaml:"changes" json:"changes"`
-	Tests            []FixTestResult     `yaml:"tests" json:"tests"`
-	DeploymentNotice string              `yaml:"deployment_notice" json:"deployment_notice"`
-	Risks            []string            `yaml:"risks" json:"risks"`
-	BlockedReason    string              `yaml:"blocked_reason,omitempty" json:"blocked_reason,omitempty"`
-	Evidence         []ArtifactReference `yaml:"evidence" json:"evidence"`
-}
-
 type PhaseResult struct {
 	Outcome        PhaseOutcome
 	OutputJSON     json.RawMessage
@@ -661,62 +631,6 @@ func ParseInvestigationResult(data []byte) (InvestigationResult, error) {
 	return result, nil
 }
 
-func ParseFixResult(data []byte) (FixResult, error) {
-	var result FixResult
-	if err := decodeStrictYAML(data, &result); err != nil {
-		return FixResult{}, fmt.Errorf("parse fix result: %w", err)
-	}
-	switch result.FixStatus {
-	case "fixed_pushed":
-		if len(result.Branches) == 0 {
-			return FixResult{}, errors.New("fixed_pushed requires branches")
-		}
-		for _, branch := range result.Branches {
-			if strings.TrimSpace(branch.Repo) == "" || strings.TrimSpace(branch.BaseBranch) == "" || strings.TrimSpace(branch.FixBranch) == "" || strings.TrimSpace(branch.Commit) == "" || !branch.Pushed || strings.TrimSpace(branch.TargetEnvironmentBranch) == "" || strings.TrimSpace(branch.PushRemote) == "" {
-				return FixResult{}, errors.New("fixed_pushed requires pushed commit and branch context for every repository")
-			}
-		}
-		if len(result.Tests) == 0 {
-			return FixResult{}, errors.New("fixed_pushed requires test evidence")
-		}
-	case "blocked", "failed":
-		if strings.TrimSpace(result.BlockedReason) == "" {
-			return FixResult{}, fmt.Errorf("%s requires blocked_reason", result.FixStatus)
-		}
-	default:
-		return FixResult{}, fmt.Errorf("unsupported fix status %q", result.FixStatus)
-	}
-	if strings.TrimSpace(result.Environment) == "" {
-		return FixResult{}, errors.New("fix environment is required")
-	}
-	for _, test := range result.Tests {
-		if test.Result != "passed" && test.Result != "failed" && test.Result != "skipped" {
-			return FixResult{}, fmt.Errorf("unsupported fix test result %q", test.Result)
-		}
-		if result.FixStatus == "fixed_pushed" && test.Result != "passed" {
-			return FixResult{}, errors.New("fixed_pushed requires every reported test to pass")
-		}
-		if result.FixStatus == "fixed_pushed" && (strings.TrimSpace(test.Repo) == "" || strings.TrimSpace(test.Commit) == "" || strings.TrimSpace(test.Command) == "") {
-			return FixResult{}, errors.New("fixed_pushed test evidence requires repository, commit, and command")
-		}
-	}
-	if result.FixStatus == "fixed_pushed" {
-		for _, branch := range result.Branches {
-			matched := false
-			for _, test := range result.Tests {
-				if test.Repo == branch.Repo && test.Commit == branch.Commit {
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				return FixResult{}, fmt.Errorf("fixed_pushed requires passing test evidence for %s@%s", branch.Repo, branch.Commit)
-			}
-		}
-	}
-	return result, nil
-}
-
 func ParsePhaseResult(attempt PhaseAttempt, data []byte) (PhaseResult, error) {
 	switch attempt.Phase {
 	case PhaseValidation, PhaseRegression:
@@ -776,7 +690,13 @@ func ParsePhaseResult(attempt PhaseAttempt, data []byte) (PhaseResult, error) {
 		if result.FixStatus == "fixed_pushed" {
 			outcome = PhaseOutcomeFixPushed
 			for index, branch := range result.Branches {
-				testEvidence, _ := json.Marshal(result.Tests)
+				repositoryTests := make([]FixTestResult, 0, len(result.Tests))
+				for _, test := range result.Tests {
+					if test.Repo == branch.Repo {
+						repositoryTests = append(repositoryTests, test)
+					}
+				}
+				testEvidence, _ := json.Marshal(repositoryTests)
 				changes = append(changes, CodeChange{ID: stableID("change", fmt.Sprintf("%s:%s:%d", attempt.ID, branch.Repo, index)), CaseID: attempt.CaseID, AttemptID: attempt.ID, Repo: branch.Repo, BaseBranch: branch.BaseBranch, FixBranch: branch.FixBranch, FixCommit: branch.Commit, TestEvidence: testEvidence, TargetEnvironmentBranch: branch.TargetEnvironmentBranch, PushRemote: branch.PushRemote, PushStatus: "pushed"})
 			}
 		}

@@ -1,6 +1,6 @@
 import { mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { approveIncidentMerge, cancelBugInvestigation, continueIncidentCase, discoverBots, generateBugContext, getIncidentCase, listBugInvestigationRuns, listBugPlatforms, listBugs, listIncidentCases, matchBugBots, notifyIncidentDeployed, previewBugAttachment, saveBugPlatform, startBugInvestigation, startIncidentCase } from '../lib/bridge'
+import { approveIncidentFix, approveIncidentMerge, cancelBugInvestigation, continueIncidentCase, discoverBots, generateBugContext, getIncidentCase, listBugInvestigationRuns, listBugPlatforms, listBugs, listIncidentCases, matchBugBots, notifyIncidentDeployed, previewBugAttachment, saveBugPlatform, startBugInvestigation, startIncidentCase } from '../lib/bridge'
 import { copyToClipboard } from '../lib/clipboard'
 import BugWorkbenchPage from './BugWorkbenchPage.vue'
 
@@ -73,6 +73,7 @@ afterEach(() => {
   vi.mocked(listIncidentCases).mockResolvedValue([])
   vi.mocked(getIncidentCase).mockReset()
   vi.mocked(continueIncidentCase).mockReset()
+  vi.mocked(approveIncidentFix).mockReset()
   vi.mocked(approveIncidentMerge).mockReset()
   vi.mocked(notifyIncidentDeployed).mockReset()
   vi.mocked(listBugPlatforms).mockResolvedValue([])
@@ -964,6 +965,25 @@ describe('BugWorkbenchPage', () => {
 
     expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
       case_id: 'legacy-1', bug_id: 'zentao-577', expected_version: 3, bot_key: 'base|codex', actor_id: 'desktop-user',
+    }))
+  })
+
+  it('submits fix approval with the dialog-captured root cause and exact Case version key', async () => {
+    const snapshot = durableDetail('waiting_fix_approval', {
+      attempts: [{ id: 'attempt-1', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { investigation_status: 'root_cause_ready', confidence: 'high', gaps: [] }, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }],
+    })
+    vi.mocked(listIncidentCases).mockResolvedValue([snapshot.case as any])
+    vi.mocked(getIncidentCase).mockResolvedValue(snapshot as any)
+    vi.mocked(approveIncidentFix).mockResolvedValue({ ...snapshot.case, status: 'fixing', version: 8 } as any)
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises(); await flushPromises()
+
+    await wrapper.find('.primary-action').trigger('click')
+    await wrapper.find('[data-confirm]').trigger('click')
+    await flushPromises()
+
+    expect(approveIncidentFix).toHaveBeenCalledWith(expect.objectContaining({
+      case_id: 'case-1', expected_version: 7, root_cause_attempt_id: 'attempt-1', idempotency_key: 'start-fix:case-1:attempt-1:7', actor_id: 'desktop-user',
     }))
   })
 

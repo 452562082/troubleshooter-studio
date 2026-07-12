@@ -195,7 +195,7 @@ func TestAgentPhaseRunnerRetriesReadOnlyOnceButNeverFix(t *testing.T) {
 	}{
 		{PhaseValidation, AttemptReproduce, "verification_status: reproduced\nenvironment: test\nevidence: []\ngaps: []\n", 2},
 		{PhaseInvestigation, "", "investigation_status: root_cause_ready\nenvironment: test\nroot_cause: race\nconfidence: high\nevidence: []\ngaps: []\n", 2},
-		{PhaseFix, "", "fix_status: failed\nenvironment: test\nbranches: []\nchanges: []\ntests: []\ndeployment_notice: ''\nrisks: []\nblocked_reason: failed\nevidence: []\n", 1},
+		{PhaseFix, "", "fix_status: failed\nenvironment: test\nbranches: []\nchanges: []\ntests: []\ndeployment_notice: no deployment; fix failed\nrisks: []\nblocked_reason: failed\nevidence: []\n", 1},
 	} {
 		t.Run(string(tc.phase), func(t *testing.T) {
 			store := newOrchestratorStore(t)
@@ -817,7 +817,7 @@ func TestPhaseResultRejectsUnknownFieldsAndPhaseModeMismatch(t *testing.T) {
 }
 
 func TestPhaseResultFixRequiresPushRemoteAndPassingTests(t *testing.T) {
-	base := "fix_status: fixed_pushed\nenvironment: test\nbranches:\n  - repo: api\n    base_branch: test\n    fix_branch: fix/bug\n    commit: deadbeef\n    pushed: true\n    target_environment_branch: test\n    push_remote: origin\nchanges: []\ntests:\n  - repo: api\n    commit: deadbeef\n    command: go test ./...\n    result: passed\ndeployment_notice: deploy\nrisks: []\nblocked_reason: ''\nevidence: []\n"
+	base := "fix_status: fixed_pushed\nenvironment: test\nbranches:\n  - repo: api\n    base_branch: test\n    fix_branch: fix/bug\n    commit: deadbeef\n    pushed: true\n    target_environment_branch: test\n    push_remote: origin\nchanges:\n  - repo: api\n    summary: safe fix\ntests:\n  - repo: api\n    commit: deadbeef\n    command: go test ./...\n    result: passed\ndeployment_notice: deploy\nrisks: []\nblocked_reason: ''\nevidence: []\n"
 	if _, err := ParseFixResult([]byte(base)); err != nil {
 		t.Fatal(err)
 	}

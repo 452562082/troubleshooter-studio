@@ -499,6 +499,10 @@ func (a *App) ApproveIncidentFix(input ApproveIncidentFixInput) (bughub.Incident
 	if strings.TrimSpace(input.RootCauseAttemptID) == "" {
 		return bughub.IncidentCase{}, errors.New("root_cause_attempt_id is required")
 	}
+	expectedKey := bughub.StartFixApprovalKey(strings.TrimSpace(input.CaseID), strings.TrimSpace(input.RootCauseAttemptID), input.ExpectedVersion)
+	if strings.TrimSpace(input.IdempotencyKey) != expectedKey {
+		return bughub.IncidentCase{}, errors.New("start-fix approval key does not match the dialog snapshot scope")
+	}
 	_, orchestrator, err := a.workflowComponents()
 	if err != nil {
 		return bughub.IncidentCase{}, err

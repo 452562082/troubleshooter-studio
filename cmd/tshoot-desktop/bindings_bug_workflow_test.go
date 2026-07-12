@@ -97,6 +97,19 @@ func TestStartIncidentCaseValidatesScalarsBeforeOpeningRuntime(t *testing.T) {
 	}
 }
 
+func TestApproveIncidentFixRejectsMismatchedDialogScopeBeforeOpeningRuntime(t *testing.T) {
+	rootFile := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(rootFile, []byte("occupied"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (&App{workflowRoot: rootFile}).ApproveIncidentFix(ApproveIncidentFixInput{
+		CaseID: "case-1", ExpectedVersion: 7, IdempotencyKey: "approve-fix", ActorID: "alice", RootCauseAttemptID: "investigation-7",
+	})
+	if err == nil || !strings.Contains(err.Error(), "dialog snapshot scope") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestStartIncidentCaseRejectsStaleVersionBeforeScheduling(t *testing.T) {
 	app, store, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
 	incident := createPendingBindingCase(t, store, "case-stale")

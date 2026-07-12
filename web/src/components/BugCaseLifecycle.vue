@@ -42,7 +42,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   select: [caseID: string]
   refresh: []
-  primary: [payload: { kind: CasePrimaryAction['kind']; input?: string; observedVersion?: string }]
+  primary: [payload: { kind: CasePrimaryAction['kind']; input?: string; observedVersion?: string; rootCauseAttemptID?: string; caseVersion?: number }]
 }>()
 
 const dialogOpen = ref(false)
@@ -50,6 +50,8 @@ const dialogInput = ref('')
 const confirmButton = ref<HTMLButtonElement | null>(null)
 const dialogElement = ref<HTMLElement | null>(null)
 const actionTrigger = ref<HTMLElement | null>(null)
+const dialogCaseVersion = ref<number>()
+const dialogRootCauseAttemptID = ref('')
 const currentCase = computed(() => props.detail?.case)
 const action = computed(() => currentCase.value ? primaryActionFor(currentCase.value) : undefined)
 const latestDeployment = computed(() => {
@@ -120,6 +122,15 @@ async function openAction(event: MouseEvent) {
     return
   }
   actionTrigger.value = event.currentTarget as HTMLElement
+  if (action.value.kind === 'approve_fix') {
+    dialogCaseVersion.value = props.detail?.case.version
+    const currentAttemptID = props.detail?.case.current_attempt_id || ''
+    const rootCause = props.detail?.attempts.find(attempt => attempt.id === currentAttemptID && attempt.phase === 'investigation' && attempt.status === 'succeeded')
+    dialogRootCauseAttemptID.value = rootCause?.id || ''
+  } else {
+    dialogCaseVersion.value = undefined
+    dialogRootCauseAttemptID.value = ''
+  }
   dialogInput.value = ''
   dialogOpen.value = true
   await nextTick()
@@ -134,7 +145,11 @@ function closeDialog() {
 
 function confirmAction() {
   if (!action.value) return
-  const payload: { kind: CasePrimaryAction['kind']; input?: string; observedVersion?: string } = { kind: action.value.kind }
+  const payload: { kind: CasePrimaryAction['kind']; input?: string; observedVersion?: string; rootCauseAttemptID?: string; caseVersion?: number } = { kind: action.value.kind }
+  if (action.value.kind === 'approve_fix') {
+    payload.rootCauseAttemptID = dialogRootCauseAttemptID.value
+    payload.caseVersion = dialogCaseVersion.value
+  }
   if (['supply_evidence', 'continue_fix', 'supply_merge_decision', 'supply_deployment_proof'].includes(action.value.kind)) payload.input = dialogInput.value.trim()
   if (action.value.kind === 'notify_deployed') payload.observedVersion = dialogInput.value.trim()
   emit('primary', payload)
@@ -236,7 +251,7 @@ function dialogTitle(): string {
     <div v-if="dialogOpen && action" class="dialog-backdrop" @click.self="closeDialog" @keydown.esc="closeDialog">
       <section ref="dialogElement" role="dialog" aria-modal="true" aria-labelledby="case-action-dialog-title" class="approval-dialog" @keydown="trapDialogFocus">
         <header><h2 id="case-action-dialog-title">{{ dialogTitle() }}</h2></header>
-        <p v-if="action.kind === 'approve_fix'">将授权修复 Agent 基于当前根因和证据创建最小修复。</p>
+        <p v-if="action.kind === 'approve_fix'">将授权修复 Agent 基于当前根因和证据创建最小修复。授权范围：Case v{{ dialogCaseVersion }} / {{ dialogRootCauseAttemptID || '未找到根因 attempt' }}。</p>
         <p v-else-if="action.kind === 'approve_merge'">将按已记录的修复 commit 和目标环境分支执行合并与 SSH 推送。</p>
         <p v-else-if="action.kind === 'supply_merge_decision'">记录冲突处理结果并返回合并授权门，不会在这一步直接重新合并。</p>
         <p v-else-if="action.kind === 'notify_deployed'">Studio 不执行部署；这里只记录人工部署通知，并核验运行版本是否包含目标 commit。</p>
@@ -252,7 +267,7 @@ function dialogTitle(): string {
         <textarea v-if="['supply_evidence', 'continue_fix', 'supply_merge_decision', 'supply_deployment_proof'].includes(action.kind)" id="case-supplement" v-model="dialogInput" rows="5" placeholder="输入新证据、处理决定、版本证明或测试信息"></textarea>
         <footer>
           <button class="btn" type="button" :disabled="pending" @click="closeDialog">取消</button>
-          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (['supply_evidence', 'continue_fix', 'supply_merge_decision', 'supply_deployment_proof'].includes(action.kind) && !dialogInput.trim())" @click="confirmAction">确认</button>
+          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (action.kind === 'approve_fix' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined)) || (['supply_evidence', 'continue_fix', 'supply_merge_decision', 'supply_deployment_proof'].includes(action.kind) && !dialogInput.trim())" @click="confirmAction">确认</button>
         </footer>
       </section>
     </div>

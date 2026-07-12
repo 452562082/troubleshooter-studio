@@ -62,6 +62,20 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.emitted('primary')?.[0]).toEqual([{ kind: 'approve_merge' }])
   })
 
+  it('emits the root-cause attempt and Case version captured when the fix dialog opens', async () => {
+    const snapshot = detail('waiting_fix_approval')
+    snapshot.case.version = 7
+    snapshot.case.current_attempt_id = 'investigation-7'
+    snapshot.attempts = [{ id: 'investigation-7', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { investigation_status: 'root_cause_ready', confidence: 'high', gaps: [] }, parent_attempt_id: '', started_at: '2026-07-11T10:00:00Z', error_code: '', error_message: '', usage: {} }]
+    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+
+    await wrapper.find('.primary-action').trigger('click')
+    await wrapper.setProps({ detail: { ...snapshot, case: { ...snapshot.case, version: 8 } } })
+    await wrapper.find('[data-confirm]').trigger('click')
+
+    expect(wrapper.emitted('primary')?.[0]).toEqual([{ kind: 'approve_fix', rootCauseAttemptID: 'investigation-7', caseVersion: 7 }])
+  })
+
   it('previews target environment, expected commits, and verifier before deployment validation', async () => {
     const snapshot = detail('waiting_deployment')
     snapshot.code_changes = [{ id: 'change-1', case_id: 'case-1', attempt_id: 'fix-1', repo: 'api', base_branch: 'main', fix_branch: 'fix/1', fix_commit: 'fix-abc', test_evidence: [], target_environment_branch: 'test', merge_base_head: 'base', merge_commit: 'merge-def', push_remote: 'origin', push_status: 'pushed' }]
@@ -76,7 +90,10 @@ describe('BugCaseLifecycle', () => {
   })
 
   it('restores focus to the primary action when an approval dialog closes', async () => {
-    const wrapper = mount(BugCaseLifecycle, { attachTo: document.body, props: { cases: [incident('waiting_fix_approval')], detail: detail('waiting_fix_approval') } })
+    const snapshot = detail('waiting_fix_approval')
+    snapshot.case.current_attempt_id = 'investigation-focus'
+    snapshot.attempts = [{ id: 'investigation-focus', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { investigation_status: 'root_cause_ready', confidence: 'high', gaps: [] }, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }]
+    const wrapper = mount(BugCaseLifecycle, { attachTo: document.body, props: { cases: [snapshot.case], detail: snapshot } })
     const trigger = wrapper.find<HTMLButtonElement>('.primary-action')
     await trigger.trigger('click')
     expect(document.activeElement).toBe(wrapper.find('[data-confirm]').element)

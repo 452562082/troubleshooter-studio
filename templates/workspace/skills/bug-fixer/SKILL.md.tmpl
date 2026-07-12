@@ -137,13 +137,15 @@ branches:
     target_environment_branch: "<env-branch>"
     push_remote: "<remote>"
 changes:
-  - "<file-or-module>: <what changed>"
+  - repo: "<repo>"
+    summary: "<file-or-module>: <what changed>"
 tests:
   - repo: "<repo>"
     commit: "<tested-fix-commit>"
     command: "<command>"
     result: passed | failed | skipped
     note: "<short evidence>"
+    skipped_reason: "<required only when result=skipped>"
 deployment_notice: "请部署 <repo>/<fix_branch> 到 <env> 后再触发验证 Agent 回归。"
 risks:
   - "<remaining-risk-or-empty>"

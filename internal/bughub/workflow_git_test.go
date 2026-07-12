@@ -581,6 +581,125 @@ func TestGitIntegrationFreshApprovalRetainsPreviouslyBlockedRepository(t *testin
 	}
 }
 
+func TestGitIntegrationUnavailableRejectsApprovalWithoutMutationAndReplay(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident := IncidentCase{ID: "case-no-git", BugID: "bug", Status: CaseWaitingMergeApproval, CycleNumber: 1, CurrentAttemptID: "fix", Version: 1}
+	if err := store.CreateCase(ctx, incident); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateAttempt(ctx, PhaseAttempt{ID: "fix", CaseID: incident.ID, CycleNumber: 1, Phase: PhaseFix, Status: AttemptStatusSucceeded, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordCodeChange(ctx, CodeChange{ID: "change", CaseID: incident.ID, AttemptID: "fix", Repo: "api", BaseBranch: "test", FixBranch: "fix", FixCommit: "abc", TestEvidence: []byte(`{}`), TargetEnvironmentBranch: "test", PushStatus: "pushed"}); err != nil {
+		t.Fatal(err)
+	}
+	o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, &recordingDeploymentVerifier{})
+	cmd := ApproveMergeCommand{CaseID: incident.ID, ExpectedVersion: 1, IdempotencyKey: "no-git", ActorID: "alice", TargetHeads: map[string]string{"api": "head"}}
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := o.ApproveMerge(ctx, cmd); err == nil {
+			t.Fatal("approval unexpectedly succeeded")
+		}
+	}
+	got, _ := store.GetCase(ctx, incident.ID)
+	approvals, _ := store.ListApprovals(ctx, incident.ID)
+	events, _ := store.ListEvents(ctx, incident.ID)
+	if got.Version != incident.Version || got.Status != CaseWaitingMergeApproval || len(approvals) != 0 || len(events) != 0 {
+		t.Fatalf("case=%+v approvals=%+v events=%+v", got, approvals, events)
+	}
+}
+
+func TestGitIntegrationCaseStoreRequiresCanonicalMergeScopeAndReplays(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident := IncidentCase{ID: "case-store-scope", BugID: "bug", Status: CaseWaitingMergeApproval, CycleNumber: 1, CurrentAttemptID: "fix", Version: 1}
+	if err := store.CreateCase(ctx, incident); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateAttempt(ctx, PhaseAttempt{ID: "fix", CaseID: incident.ID, CycleNumber: 1, Phase: PhaseFix, Status: AttemptStatusSucceeded, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	change := CodeChange{ID: "change", CaseID: incident.ID, AttemptID: "fix", Repo: "api", BaseBranch: "test", FixBranch: "fix", FixCommit: "abc", TestEvidence: []byte(`{}`), TargetEnvironmentBranch: "test", PushStatus: "pushed"}
+	if err := store.RecordCodeChange(ctx, change); err != nil {
+		t.Fatal(err)
+	}
+	mutation := func(key, head, approvalKey string) CaseMutation {
+		scope := mustJSON(MergeApprovalScope{CycleNumber: 1, FixAttemptID: "fix", CodeChanges: []ApprovedCodeChange{{ID: "change", Repo: "api", FixCommit: "abc", TargetBranch: "test", TargetHead: head, ApprovalKey: approvalKey}}})
+		return CaseMutation{CaseID: incident.ID, ExpectedVersion: 1, IdempotencyKey: key, RequestJSON: []byte(`{"approve":true}`), Approvals: []Approval{{ID: "approval-" + key, CaseID: incident.ID, Kind: ApprovalMergeEnvironmentBranch, Actor: "alice", CaseVersion: 1, ScopeJSON: scope, FixCommits: map[string]string{"api": "abc"}, TargetBranches: map[string]string{"api": "test"}}}, Steps: []CaseMutationStep{{To: CaseMerging, Event: TransitionEvent{ID: "event-" + key, EventType: "merge_approved", ActorType: "user", ActorID: "alice", PayloadJSON: []byte(`{}`)}}}}
+	}
+	for _, bad := range []CaseMutation{mutation("empty", "", ""), mutation("bad-key", "head", "wrong")} {
+		if _, err := store.ApplyCaseMutation(ctx, bad); err == nil {
+			t.Fatalf("bad mutation accepted: %+v", bad)
+		}
+	}
+	canonical := MergeApprovalKey(incident.ID, "api", "abc", "test", "head")
+	valid := mutation("valid", "head", canonical)
+	first, err := store.ApplyCaseMutation(ctx, valid)
+	if err != nil || first.Replay {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	replay, err := store.ApplyCaseMutation(ctx, valid)
+	if err != nil || !replay.Replay || replay.Case.Version != first.Case.Version {
+		t.Fatalf("replay=%+v err=%v", replay, err)
+	}
+}
+
+func TestGitIntegrationCleanupPreservesUnrelatedStaleWorktreeRegistration(t *testing.T) {
+	f := newGitFixture(t)
+	external := filepath.Join(t.TempDir(), "user-worktree")
+	runGitTest(t, f.repo, "worktree", "add", "--detach", external, "test")
+	if err := os.RemoveAll(external); err != nil {
+		t.Fatal(err)
+	}
+	commit := f.makeFix(t, "fix\n")
+	service := f.service(t)
+	req := f.request(commit)
+	inspection, err := service.Inspect(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.TargetHeads = map[string]string{"api": inspection.Repositories["api"].TargetHead}
+	if _, err := service.MergeAndPush(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	listing := runGitTest(t, f.repo, "worktree", "list", "--porcelain")
+	if !strings.Contains(listing, "user-worktree") || !strings.Contains(listing, "prunable") {
+		t.Fatalf("unrelated stale registration removed:\n%s", listing)
+	}
+}
+
+func TestGitIntegrationOwnershipMismatchFailsClosedWithoutDeletingForeignPath(t *testing.T) {
+	f := newGitFixture(t)
+	commit := f.makeFix(t, "fix\n")
+	service := f.service(t)
+	req := f.request(commit)
+	inspection, err := service.Inspect(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.TargetHeads = map[string]string{"api": inspection.Repositories["api"].TargetHead}
+	rejectAllPushes(t, f.remote)
+	if _, err := service.MergeAndPush(context.Background(), req); err == nil {
+		t.Fatal("push unexpectedly succeeded")
+	}
+	worktree := service.worktreePath(req.CaseID, "api", req.TargetHeads["api"], commit)
+	runGitTest(t, f.repo, "worktree", "remove", "--force", worktree)
+	if err := os.MkdirAll(worktree, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, worktree, "init")
+	marker := filepath.Join(worktree, "foreign.marker")
+	if err := os.WriteFile(marker, []byte("foreign"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Inspect(context.Background(), req); !errors.Is(err, ErrStudioWorktree) {
+		t.Fatalf("err=%v", err)
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "foreign" {
+		t.Fatalf("foreign path modified data=%q err=%v", data, err)
+	}
+}
+
 func rejectAllPushes(t *testing.T, bareRepo string) {
 	t.Helper()
 	hook := filepath.Join(bareRepo, "hooks", "pre-receive")

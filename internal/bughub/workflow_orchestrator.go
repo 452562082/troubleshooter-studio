@@ -597,6 +597,9 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 	if incident.Status != CaseWaitingMergeApproval {
 		return IncidentCase{}, ErrApprovalNotReady
 	}
+	if o.git == nil {
+		return IncidentCase{}, errors.New("git integration is unavailable")
+	}
 	_, hasReservation, reservationErr := o.store.GetEventByIdempotencyKey(ctx, cmd.IdempotencyKey)
 	if reservationErr != nil {
 		return IncidentCase{}, reservationErr
@@ -718,9 +721,6 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 			return current, loadErr
 		}
 		return o.recoverReservedMerge(ctx, current, cmd.IdempotencyKey, selected, request)
-	}
-	if o.git == nil {
-		return o.recordMergeAmbiguous(reserved.Case, cmd.IdempotencyKey, selected, errors.New("git integration is unavailable"))
 	}
 	result, callErr := o.git.MergeAndPush(ctx, request)
 	allPushed := len(result.Repositories) == len(selected)

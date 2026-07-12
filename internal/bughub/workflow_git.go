@@ -635,19 +635,33 @@ func (s *GitIntegrationService) cleanupStudioWorktree(ctx context.Context, sourc
 		return errors.New("refusing to clean a path outside the Studio worktree root")
 	}
 	if _, statErr := os.Lstat(pathAbs); errors.Is(statErr, os.ErrNotExist) {
-		return gitRun(ctx, source, "worktree", "prune")
+		registered, listErr := worktreePathRegistered(ctx, source, pathAbs)
+		if listErr != nil {
+			return listErr
+		}
+		if registered {
+			return errors.New("registered Studio worktree path is missing; refusing global metadata cleanup")
+		}
+		return nil
+	} else if statErr != nil {
+		return statErr
 	}
-	removeErr := gitRun(ctx, source, "worktree", "remove", "--force", pathAbs)
-	if removeErr != nil {
-		// The deterministic direct child may have been replaced or detached from
-		// Git registration. RemoveAll does not follow symlinks and the direct-child
-		// check above prevents this fallback from touching a user worktree.
-		if fallbackErr := os.RemoveAll(pathAbs); fallbackErr != nil {
-			removeErr = errors.Join(removeErr, fallbackErr)
-		} else {
-			removeErr = nil
+	registered, commonMatch, identityErr := worktreeIdentity(ctx, source, pathAbs)
+	if identityErr != nil || !registered || !commonMatch {
+		return errors.Join(errors.New("refusing to remove worktree without exact Studio ownership"), identityErr)
+	}
+	return gitRun(ctx, source, "worktree", "remove", "--force", pathAbs)
+}
+
+func worktreePathRegistered(ctx context.Context, source, want string) (bool, error) {
+	listing, err := gitOutput(ctx, source, "worktree", "list", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(listing, "\n") {
+		if strings.HasPrefix(line, "worktree ") && filepath.Clean(strings.TrimPrefix(line, "worktree ")) == filepath.Clean(want) {
+			return true, nil
 		}
 	}
-	pruneErr := gitRun(ctx, source, "worktree", "prune")
-	return errors.Join(removeErr, pruneErr)
+	return false, nil
 }

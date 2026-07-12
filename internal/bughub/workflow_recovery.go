@@ -18,6 +18,12 @@ func (o *CaseOrchestrator) RecoverInterrupted(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	contexts, err := o.preflightRecoveryContexts(ctx, attempts)
+	if err != nil {
+		return err
+	}
+	o.setRecoveryContexts(contexts)
+	defer o.setRecoveryContexts(make(map[string]resolvedRecoveryContext))
 	var recoveredErr error
 	processedCases := make(map[string]struct{})
 	for _, attempt := range attempts {
@@ -68,6 +74,81 @@ func (o *CaseOrchestrator) RecoverInterrupted(ctx context.Context) error {
 		}
 	}
 	return recoveredErr
+}
+
+func (o *CaseOrchestrator) preflightRecoveryContexts(ctx context.Context, attempts []PhaseAttempt) (map[string]resolvedRecoveryContext, error) {
+	contexts := make(map[string]resolvedRecoveryContext)
+	if o.runner == nil {
+		return contexts, nil
+	}
+	for _, attempt := range attempts {
+		if o.wasRecoveryStarted(attempt.ID) {
+			continue
+		}
+		incident, err := o.store.GetCase(ctx, attempt.CaseID)
+		if err != nil {
+			return nil, err
+		}
+		needsContext, err := o.recoveryAttemptNeedsPhaseContext(ctx, incident, attempt)
+		if err != nil {
+			return nil, err
+		}
+		if !needsContext {
+			continue
+		}
+		key := recoveryContextKey(incident, attempt)
+		if _, ok := contexts[key]; ok {
+			continue
+		}
+		o.mu.Lock()
+		resolver := o.recoveryContext
+		o.mu.Unlock()
+		bug, bot, err := resolveRecoveryContextWith(ctx, resolver, incident, attempt)
+		if err != nil {
+			return nil, fmt.Errorf("preflight attempt %s context: %w", attempt.ID, err)
+		}
+		contexts[key] = resolvedRecoveryContext{bug: bug, bot: bot}
+	}
+	return contexts, nil
+}
+
+func (o *CaseOrchestrator) recoveryAttemptNeedsPhaseContext(ctx context.Context, incident IncidentCase, attempt PhaseAttempt) (bool, error) {
+	if incident.CurrentAttemptID != attempt.ID {
+		return CanTransition(incident.Status, statusForPhase(attempt.Phase)), nil
+	}
+	completion, found, err := parseCompletionIntent(attempt.OutputJSON)
+	if err != nil {
+		return false, err
+	}
+	if found {
+		return completion.Outcome == PhaseOutcomeReproduced || completion.Outcome == PhaseOutcomeStillReproduces, nil
+	}
+	switch incident.Status {
+	case CaseValidating, CaseInvestigating:
+		return o.recoveryRetryAvailable(ctx, incident, attempt)
+	case CaseRegressionValidating:
+		matched, err := o.latestDeploymentMatched(ctx, incident.ID)
+		if err != nil || !matched {
+			return false, err
+		}
+		return o.recoveryRetryAvailable(ctx, incident, attempt)
+	default:
+		return false, nil
+	}
+}
+
+func (o *CaseOrchestrator) recoveryRetryAvailable(ctx context.Context, incident IncidentCase, attempt PhaseAttempt) (bool, error) {
+	items, err := o.store.ListAttempts(ctx, AttemptFilter{CaseID: incident.ID})
+	if err != nil {
+		return false, err
+	}
+	count := 0
+	for _, item := range items {
+		if item.CycleNumber == attempt.CycleNumber && item.Phase == attempt.Phase {
+			count++
+		}
+	}
+	return count < 2, nil
 }
 
 func (o *CaseOrchestrator) recoverDeploymentVerification(ctx context.Context, incident IncidentCase) error {

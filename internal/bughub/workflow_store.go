@@ -32,6 +32,16 @@ type CaseStore struct {
 	db *sql.DB
 }
 
+// CaseCreation atomically persists a new pending Case and the exact durable
+// command identity that created it. RequestJSON must include every execution
+// identity field (actor, input, and full Bot context) used by the orchestrator.
+type CaseCreation struct {
+	Case           IncidentCase    `json:"case"`
+	IdempotencyKey string          `json:"idempotency_key"`
+	ActorID        string          `json:"actor_id"`
+	RequestJSON    json.RawMessage `json:"request_json"`
+}
+
 type legacyImportBatch struct {
 	MigrationKey string
 	Cases        []IncidentCase
@@ -230,6 +240,116 @@ func (s *CaseStore) CreateCase(ctx context.Context, incident IncidentCase) error
 		return fmt.Errorf("create incident case: %w", err)
 	}
 	return nil
+}
+
+func (s *CaseStore) CreateCaseWithIdentity(ctx context.Context, creation CaseCreation) (created IncidentCase, replay bool, err error) {
+	creation.Case = creation.Case.Clone()
+	if creation.Case.Status != CasePendingValidation || creation.Case.CurrentAttemptID != "" || creation.Case.ClosedAt != nil {
+		return created, false, errors.New("durable Case creation requires an open pending_validation Case without an attempt")
+	}
+	if blank(creation.IdempotencyKey) || blank(creation.ActorID) || len(creation.RequestJSON) == 0 || !json.Valid(creation.RequestJSON) {
+		return created, false, errors.New("durable Case creation requires idempotency key, actor, and valid request JSON")
+	}
+	if err := creation.Case.Validate(); err != nil {
+		return created, false, err
+	}
+	fingerprint, err := caseCreationFingerprint(creation)
+	if err != nil {
+		return created, false, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return created, false, fmt.Errorf("begin durable Case creation: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	var eventType, storedFingerprint, resultJSON string
+	queryErr := tx.QueryRowContext(ctx, `SELECT event_type,request_fingerprint,result_case_json FROM transition_events WHERE idempotency_key=?`, creation.IdempotencyKey).Scan(&eventType, &storedFingerprint, &resultJSON)
+	if queryErr == nil {
+		if eventType != "case_created" || storedFingerprint != fingerprint {
+			return created, false, ErrIdempotencyConflict
+		}
+		if err = json.Unmarshal([]byte(resultJSON), &created); err != nil {
+			return created, false, fmt.Errorf("decode durable Case creation replay: %w", err)
+		}
+		if err = tx.Commit(); err != nil {
+			return IncidentCase{}, false, err
+		}
+		return created.Clone(), true, nil
+	}
+	if !errors.Is(queryErr, sql.ErrNoRows) {
+		return created, false, queryErr
+	}
+	if _, caseErr := getCase(ctx, tx, creation.Case.ID); caseErr == nil {
+		return created, false, ErrIdempotencyConflict
+	} else if !errors.Is(caseErr, ErrCaseNotFound) {
+		return created, false, caseErr
+	}
+	now := time.Now().UTC()
+	created = creation.Case.Clone()
+	if created.Version == 0 {
+		created.Version = 1
+	}
+	if created.Version != 1 {
+		return IncidentCase{}, false, errors.New("new durable Case version must be one")
+	}
+	if created.CreatedAt.IsZero() {
+		created.CreatedAt = now
+	}
+	if created.UpdatedAt.IsZero() {
+		created.UpdatedAt = created.CreatedAt
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO incident_cases (id,bug_id,source,system_id,environment,status,cycle_number,current_attempt_id,selected_bot_key,version,created_at,updated_at,closed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, created.ID, created.BugID, created.Source, created.SystemID, created.Environment, created.Status, created.CycleNumber, created.CurrentAttemptID, created.SelectedBotKey, created.Version, formatStoreTime(created.CreatedAt), formatStoreTime(created.UpdatedAt), nil); err != nil {
+		return IncidentCase{}, false, fmt.Errorf("insert durable Case: %w", err)
+	}
+	resultBytes, marshalErr := json.Marshal(created)
+	if marshalErr != nil {
+		return IncidentCase{}, false, marshalErr
+	}
+	resultJSON = string(resultBytes)
+	payload := mustJSON(map[string]any{"case_id": created.ID, "cycle_number": created.CycleNumber})
+	if _, err = tx.ExecContext(ctx, `INSERT INTO transition_events (id,case_id,from_status,to_status,event_type,actor_type,actor_id,idempotency_key,payload_json,created_at,request_fingerprint,result_case_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, stableID("event", "case-created:"+creation.IdempotencyKey), created.ID, created.Status, created.Status, "case_created", "user", creation.ActorID, creation.IdempotencyKey, string(payload), formatStoreTime(now), fingerprint, resultJSON); err != nil {
+		return IncidentCase{}, false, fmt.Errorf("insert durable Case creation identity: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return IncidentCase{}, false, err
+	}
+	return created.Clone(), false, nil
+}
+
+func caseCreationFingerprint(creation CaseCreation) (string, error) {
+	identity := struct {
+		CaseID         string          `json:"case_id"`
+		BugID          string          `json:"bug_id"`
+		Source         string          `json:"source"`
+		SystemID       string          `json:"system_id"`
+		Environment    string          `json:"environment"`
+		CycleNumber    int             `json:"cycle_number"`
+		SelectedBotKey string          `json:"selected_bot_key"`
+		IdempotencyKey string          `json:"idempotency_key"`
+		ActorID        string          `json:"actor_id"`
+		RequestJSON    json.RawMessage `json:"request_json"`
+	}{
+		CaseID:         creation.Case.ID,
+		BugID:          creation.Case.BugID,
+		Source:         creation.Case.Source,
+		SystemID:       creation.Case.SystemID,
+		Environment:    creation.Case.Environment,
+		CycleNumber:    creation.Case.CycleNumber,
+		SelectedBotKey: creation.Case.SelectedBotKey,
+		IdempotencyKey: creation.IdempotencyKey,
+		ActorID:        creation.ActorID,
+		RequestJSON:    CloneRawMessage(creation.RequestJSON),
+	}
+	encoded, err := json.Marshal(identity)
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.Sum256(encoded)
+	return hex.EncodeToString(hash[:]), nil
 }
 
 func (s *CaseStore) GetCase(ctx context.Context, id string) (IncidentCase, error) {

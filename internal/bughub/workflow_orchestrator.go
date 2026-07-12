@@ -304,20 +304,26 @@ type CompleteAttemptCommand struct {
 }
 
 type CaseOrchestrator struct {
-	store           *CaseStore
-	runner          PhaseRunner
-	git             GitIntegration
-	deployment      DeploymentVerifier
-	recoveryContext RecoveryContextResolver
-	mu              sync.Mutex
-	recoveryStarted map[string]struct{}
-	scheduleTimeout time.Duration
-	cancelTimeout   time.Duration
-	cancelWorkers   chan struct{}
+	store            *CaseStore
+	runner           PhaseRunner
+	git              GitIntegration
+	deployment       DeploymentVerifier
+	recoveryContext  RecoveryContextResolver
+	recoveryContexts map[string]resolvedRecoveryContext
+	mu               sync.Mutex
+	recoveryStarted  map[string]struct{}
+	scheduleTimeout  time.Duration
+	cancelTimeout    time.Duration
+	cancelWorkers    chan struct{}
 }
 
 func NewCaseOrchestrator(store *CaseStore, runner PhaseRunner, git GitIntegration, deployment DeploymentVerifier) *CaseOrchestrator {
-	return &CaseOrchestrator{store: store, runner: runner, git: git, deployment: deployment, recoveryStarted: make(map[string]struct{}), scheduleTimeout: 30 * time.Second, cancelTimeout: 30 * time.Second, cancelWorkers: make(chan struct{}, cancelWorkerCapacity)}
+	return &CaseOrchestrator{store: store, runner: runner, git: git, deployment: deployment, recoveryStarted: make(map[string]struct{}), recoveryContexts: make(map[string]resolvedRecoveryContext), scheduleTimeout: 30 * time.Second, cancelTimeout: 30 * time.Second, cancelWorkers: make(chan struct{}, cancelWorkerCapacity)}
+}
+
+type resolvedRecoveryContext struct {
+	bug Bug
+	bot BotRef
 }
 
 func (o *CaseOrchestrator) SetRecoveryContextResolver(resolver RecoveryContextResolver) {
@@ -331,8 +337,16 @@ func (o *CaseOrchestrator) SetRecoveryContextResolver(resolver RecoveryContextRe
 
 func (o *CaseOrchestrator) resolveRecoveryContext(ctx context.Context, incident IncidentCase, attempt PhaseAttempt) (Bug, BotRef, error) {
 	o.mu.Lock()
+	if cached, ok := o.recoveryContexts[recoveryContextKey(incident, attempt)]; ok {
+		o.mu.Unlock()
+		return cached.bug, cached.bot, nil
+	}
 	resolver := o.recoveryContext
 	o.mu.Unlock()
+	return resolveRecoveryContextWith(ctx, resolver, incident, attempt)
+}
+
+func resolveRecoveryContextWith(ctx context.Context, resolver RecoveryContextResolver, incident IncidentCase, attempt PhaseAttempt) (Bug, BotRef, error) {
 	if resolver == nil {
 		return Bug{ID: incident.BugID, Source: incident.Source, SystemID: incident.SystemID, Env: incident.Environment}, BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget}, nil
 	}
@@ -350,6 +364,16 @@ func (o *CaseOrchestrator) resolveRecoveryContext(ctx context.Context, incident 
 		return Bug{}, BotRef{}, errors.New("resolved recovery Bot workspace path is required")
 	}
 	return bug, bot, nil
+}
+
+func recoveryContextKey(incident IncidentCase, attempt PhaseAttempt) string {
+	return incident.ID + "\x1f" + attempt.BotKey + "\x1f" + attempt.AgentTarget
+}
+
+func (o *CaseOrchestrator) setRecoveryContexts(contexts map[string]resolvedRecoveryContext) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.recoveryContexts = contexts
 }
 
 func (o *CaseOrchestrator) startPhase(attempt PhaseAttempt, bug Bug, bot BotRef) error {
@@ -414,7 +438,6 @@ func (o *CaseOrchestrator) CreateAndStartCase(ctx context.Context, cmd CreateAnd
 	defer release()
 
 	targetID := cmd.CaseID
-	targetVersion := cmd.ExpectedVersion
 	cycle := 1
 	existing, getErr := o.store.GetCase(ctx, cmd.CaseID)
 	switch {
@@ -422,48 +445,29 @@ func (o *CaseOrchestrator) CreateAndStartCase(ctx context.Context, cmd CreateAnd
 		if cmd.ExpectedVersion != 0 {
 			return IncidentCase{}, fmt.Errorf("%w: expected %d for missing Case", ErrCaseVersionConflict, cmd.ExpectedVersion)
 		}
-		targetVersion = 1
 	case getErr != nil:
 		return IncidentCase{}, getErr
 	case existing.Status == CaseLegacyArchived:
 		if existing.Version != cmd.ExpectedVersion {
 			return IncidentCase{}, fmt.Errorf("%w: expected %d, current %d", ErrCaseVersionConflict, cmd.ExpectedVersion, existing.Version)
 		}
-		targetID = stableID("case-cycle", existing.ID+":"+cmd.IdempotencyKey)
-		targetVersion = 1
 		cycle = existing.CycleNumber + 1
+		targetID = stableID("case-cycle", fmt.Sprintf("%s:%d", existing.ID, cycle))
 	case cmd.ExpectedVersion == 0:
-		found, eventErr := o.hasEvent(ctx, existing.ID, cmd.IdempotencyKey)
-		if eventErr != nil {
-			return IncidentCase{}, eventErr
-		}
-		if !found && (existing.Status != CasePendingValidation || existing.BugID != cmd.Bug.ID || existing.SelectedBotKey != cmd.Bot.Key) {
-			return IncidentCase{}, fmt.Errorf("%w: Case already exists", ErrCaseVersionConflict)
-		}
-		// A matching pending Case may be the durable half of a crash between
-		// creation and first transition. Starting it is safe and closes that gap.
-		targetVersion = 1
+		cycle = existing.CycleNumber
 	default:
 		return o.StartCase(ctx, StartCaseCommand{CaseID: existing.ID, ExpectedVersion: cmd.ExpectedVersion, IdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, Bug: cmd.Bug, Bot: cmd.Bot, InputJSON: cmd.InputJSON})
 	}
-
-	target, targetErr := o.store.GetCase(ctx, targetID)
-	if errors.Is(targetErr, ErrCaseNotFound) {
-		environment := strings.TrimSpace(cmd.Bug.Env)
-		if environment == "" {
-			environment = strings.TrimSpace(cmd.Bot.Env)
-		}
-		created := IncidentCase{ID: targetID, BugID: cmd.Bug.ID, Source: cmd.Bug.Source, SystemID: cmd.Bug.SystemID, Environment: environment, Status: CasePendingValidation, CycleNumber: cycle, SelectedBotKey: cmd.Bot.Key}
-		if createErr := o.store.CreateCase(ctx, created); createErr != nil {
-			return IncidentCase{}, createErr
-		}
-		target = created
-	} else if targetErr != nil {
-		return IncidentCase{}, targetErr
-	} else if target.BugID != cmd.Bug.ID || target.CycleNumber != cycle || target.SelectedBotKey != cmd.Bot.Key {
-		return IncidentCase{}, ErrIdempotencyConflict
+	environment := strings.TrimSpace(cmd.Bug.Env)
+	if environment == "" {
+		environment = strings.TrimSpace(cmd.Bot.Env)
 	}
-	return o.StartCase(ctx, StartCaseCommand{CaseID: targetID, ExpectedVersion: targetVersion, IdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, Bug: cmd.Bug, Bot: cmd.Bot, InputJSON: cmd.InputJSON})
+	pending := IncidentCase{ID: targetID, BugID: cmd.Bug.ID, Source: cmd.Bug.Source, SystemID: cmd.Bug.SystemID, Environment: environment, Status: CasePendingValidation, CycleNumber: cycle, SelectedBotKey: cmd.Bot.Key}
+	created, _, createErr := o.store.CreateCaseWithIdentity(ctx, CaseCreation{Case: pending, IdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, RequestJSON: mustJSON(cmd)})
+	if createErr != nil {
+		return IncidentCase{}, createErr
+	}
+	return o.StartCase(ctx, StartCaseCommand{CaseID: created.ID, ExpectedVersion: created.Version, IdempotencyKey: cmd.IdempotencyKey + ":start", ActorID: cmd.ActorID, Bug: cmd.Bug, Bot: cmd.Bot, InputJSON: cmd.InputJSON})
 }
 
 func (o *CaseOrchestrator) ContinueWithEvidence(ctx context.Context, cmd ContinueWithEvidenceCommand) (IncidentCase, error) {

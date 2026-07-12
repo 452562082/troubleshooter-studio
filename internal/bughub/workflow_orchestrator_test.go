@@ -136,18 +136,107 @@ func TestCreateAndStartCaseRecoversCrashAfterCreationBeforeStart(t *testing.T) {
 	ctx := context.Background()
 	store := newOrchestratorStore(t)
 	pending := IncidentCase{ID: "case-created-only", BugID: "bug-created-only", Source: "zentao", SystemID: "base", Environment: "test", Status: CasePendingValidation, CycleNumber: 1, SelectedBotKey: "base|codex"}
-	if err := store.CreateCase(ctx, pending); err != nil {
-		t.Fatal(err)
-	}
 	runner := &recordingPhaseRunner{}
 	o := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
-	started, err := o.CreateAndStartCase(ctx, CreateAndStartCaseCommand{
+	command := CreateAndStartCaseCommand{
 		CaseID: pending.ID, ExpectedVersion: 0, IdempotencyKey: "create:resume", ActorID: "alice",
 		Bug: Bug{ID: pending.BugID, Source: pending.Source, SystemID: pending.SystemID, Env: pending.Environment},
 		Bot: BotRef{Key: pending.SelectedBotKey, Target: "codex", Path: "/workspace/base", Env: "test"}, InputJSON: []byte(`{}`),
-	})
+	}
+	if _, replay, err := store.CreateCaseWithIdentity(ctx, CaseCreation{Case: pending, IdempotencyKey: command.IdempotencyKey, ActorID: command.ActorID, RequestJSON: mustJSON(command)}); err != nil || replay {
+		t.Fatalf("creation replay=%v err=%v", replay, err)
+	}
+	started, err := o.CreateAndStartCase(ctx, command)
 	if err != nil || started.Status != CaseValidating || runner.startCount() != 1 {
 		t.Fatalf("started=%+v starts=%d err=%v", started, runner.startCount(), err)
+	}
+}
+
+func TestCreateAndStartCaseRejectsDifferentIdentityAfterCreationCrash(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	pending := IncidentCase{ID: "case-identity", BugID: "bug-identity", Source: "zentao", SystemID: "base", Environment: "test", Status: CasePendingValidation, CycleNumber: 1, SelectedBotKey: "base|codex"}
+	base := CreateAndStartCaseCommand{CaseID: pending.ID, ExpectedVersion: 0, IdempotencyKey: "create:identity", ActorID: "alice", Bug: Bug{ID: pending.BugID, Source: pending.Source, SystemID: pending.SystemID, Env: pending.Environment}, Bot: BotRef{Key: pending.SelectedBotKey, Target: "codex", Path: "/workspace/base", Env: "test"}, InputJSON: []byte(`{"mode":"reproduce"}`)}
+	if _, _, err := store.CreateCaseWithIdentity(ctx, CaseCreation{Case: pending, IdempotencyKey: base.IdempotencyKey, ActorID: base.ActorID, RequestJSON: mustJSON(base)}); err != nil {
+		t.Fatal(err)
+	}
+	o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, nil)
+	mutations := []CreateAndStartCaseCommand{base, base, base, base, base}
+	mutations[0].IdempotencyKey = "different-key"
+	mutations[1].ActorID = "bob"
+	mutations[2].InputJSON = []byte(`{"mode":"different"}`)
+	mutations[3].Bot.Target = "claude-code"
+	mutations[4].Bot.Path = "/workspace/other"
+	for index, command := range mutations {
+		if _, err := o.CreateAndStartCase(ctx, command); !errors.Is(err, ErrIdempotencyConflict) {
+			t.Fatalf("mutation %d err=%v", index, err)
+		}
+	}
+}
+
+func TestCreateAndStartLegacyRefreshCannotCreateAnotherSuccessor(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	archived := IncidentCase{ID: "legacy-refresh", BugID: "bug-refresh", Source: "legacy-runs-json", Status: CaseLegacyArchived, CycleNumber: 1}
+	if err := store.CreateCase(ctx, archived); err != nil {
+		t.Fatal(err)
+	}
+	archived, _ = store.GetCase(ctx, archived.ID)
+	o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, nil)
+	base := CreateAndStartCaseCommand{CaseID: archived.ID, ExpectedVersion: archived.Version, IdempotencyKey: "legacy:first", ActorID: "alice", Bug: Bug{ID: archived.BugID, Source: "zentao", SystemID: "base", Env: "test"}, Bot: BotRef{Key: "base|codex", Target: "codex", Path: "/workspace/base", Env: "test"}, InputJSON: []byte(`{}`)}
+	first, err := o.CreateAndStartCase(ctx, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refresh := base
+	refresh.IdempotencyKey = "legacy:refresh"
+	if _, err := o.CreateAndStartCase(ctx, refresh); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("refresh err=%v", err)
+	}
+	cases, err := store.ListCases(ctx)
+	if err != nil || len(cases) != 2 {
+		t.Fatalf("first=%s cases=%+v err=%v", first.ID, cases, err)
+	}
+}
+
+func TestCreateAndStartCaseConcurrentExactCommandRunsAgentOnce(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	runner := &recordingPhaseRunner{}
+	o := NewCaseOrchestrator(store, runner, nil, nil)
+	command := CreateAndStartCaseCommand{CaseID: "case-concurrent-create", ExpectedVersion: 0, IdempotencyKey: "create:concurrent", ActorID: "alice", Bug: Bug{ID: "bug-concurrent", Source: "zentao", SystemID: "base", Env: "test"}, Bot: BotRef{Key: "base|codex", Target: "codex", Path: "/workspace/base", Env: "test"}, InputJSON: []byte(`{}`)}
+	const workers = 8
+	results := make(chan IncidentCase, workers)
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			result, err := o.CreateAndStartCase(ctx, command)
+			results <- result
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(results)
+	close(errs)
+	var first IncidentCase
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for result := range results {
+		if first.ID == "" {
+			first = result
+		}
+		if result != first {
+			t.Fatalf("result=%+v first=%+v", result, first)
+		}
+	}
+	if runner.startCount() != 1 {
+		t.Fatalf("starts=%d", runner.startCount())
 	}
 }
 

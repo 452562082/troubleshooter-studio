@@ -179,7 +179,15 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 	a.workflowMu.Lock()
 	defer a.workflowMu.Unlock()
 	if a.workflowStore != nil && a.workflowOrchestrator != nil {
-		return a.workflowInitErr
+		if a.workflowInitErr == nil {
+			return nil
+		}
+		if recoverErr := a.workflowOrchestrator.RecoverInterrupted(workflowContext(ctx)); recoverErr != nil {
+			a.workflowInitErr = recoverErr
+			return recoverErr
+		}
+		a.workflowInitErr = nil
+		return nil
 	}
 	// Initialization errors are observable but not sticky: a later command can
 	// retry after a transient filesystem or migration issue is corrected.
@@ -194,6 +202,17 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 		return err
 	}
 	legacy := bughub.NewInvestigationStore(root)
+	if _, statErr := os.Stat(legacy.Path()); statErr == nil {
+		if _, importErr := bughub.ImportLegacyRuns(workflowContext(ctx), store, legacy.Path()); importErr != nil {
+			a.workflowInitErr = importErr
+			_ = store.Close()
+			return importErr
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		a.workflowInitErr = statErr
+		_ = store.Close()
+		return statErr
+	}
 	runtime := incidentWorkflowRuntime{}
 	if a.workflowRuntimeFactory != nil {
 		runtime = a.workflowRuntimeFactory(store, legacy)
@@ -229,25 +248,11 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 		a.bugInvestigator = runtime.investigator
 		a.bugInvestigationMu.Unlock()
 	}
-	if _, statErr := os.Stat(legacy.Path()); statErr == nil {
-		if _, importErr := bughub.ImportLegacyRuns(workflowContext(ctx), store, legacy.Path()); importErr != nil {
-			a.workflowInitErr = importErr
-			_ = store.Close()
-			a.workflowStore, a.workflowOrchestrator, a.workflowRunner = nil, nil, nil
-			return importErr
-		}
-	} else if !errors.Is(statErr, os.ErrNotExist) {
-		a.workflowInitErr = statErr
-		_ = store.Close()
-		a.workflowStore, a.workflowOrchestrator, a.workflowRunner = nil, nil, nil
-		return statErr
-	}
 	if recoverErr := runtime.orchestrator.RecoverInterrupted(workflowContext(ctx)); recoverErr != nil {
 		a.workflowInitErr = recoverErr
-		_ = store.Close()
-		a.workflowStore, a.workflowOrchestrator, a.workflowRunner = nil, nil, nil
 		return recoverErr
 	}
+	a.workflowInitErr = nil
 	return nil
 }
 

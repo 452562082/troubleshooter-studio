@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,6 +42,7 @@ func newWorkflowBindingApp(t *testing.T, dbPath string) (*App, *bughub.CaseStore
 	}
 	runner := &workflowBindingRunner{}
 	orchestrator := bughub.NewCaseOrchestrator(store, runner, nil, nil)
+	botPath := t.TempDir()
 	app := &App{
 		workflowStore:        store,
 		workflowOrchestrator: orchestrator,
@@ -48,7 +50,7 @@ func newWorkflowBindingApp(t *testing.T, dbPath string) (*App, *bughub.CaseStore
 			return bughub.Bug{ID: id, Title: "checkout fails", Env: "test", SystemID: "base"}, nil
 		},
 		workflowLoadBot: func(key string) (bughub.BotRef, error) {
-			return bughub.BotRef{Key: key, Target: "codex", Path: t.TempDir(), SystemID: "base", Env: "test"}, nil
+			return bughub.BotRef{Key: key, Target: "codex", Path: botPath, SystemID: "base", Env: "test"}, nil
 		},
 	}
 	t.Cleanup(func() { _ = app.closeIncidentWorkflow() })
@@ -365,6 +367,99 @@ func TestIncidentWorkflowStartupRecoveryLoadsWorkspaceForQueuedAndRunningAttempt
 		if bot.Path != "/installed/base-workspace" {
 			t.Fatalf("recovered bot = %+v", bot)
 		}
+	}
+}
+
+func TestIncidentWorkflowStartupRecoveryRetriesSameRuntimeAfterContextPreflightFailure(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "workflows.db")
+	store, err := bughub.OpenCaseStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for index, id := range []string{"case-recovery-first", "case-recovery-second"} {
+		incident := bughub.IncidentCase{
+			ID: id, BugID: "bug-" + id, Source: "zentao", SystemID: "base", Environment: "test",
+			Status: bughub.CasePendingValidation, CycleNumber: 1, SelectedBotKey: fmt.Sprintf("base|codex-%d", index),
+		}
+		if err := store.CreateCase(ctx, incident); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.CreateAttempt(ctx, bughub.PhaseAttempt{
+			ID: id + "-attempt", CaseID: id, CycleNumber: 1, Phase: bughub.PhaseValidation,
+			Mode: bughub.AttemptReproduce, Status: bughub.AttemptStatusQueued, AgentTarget: "codex",
+			BotKey: incident.SelectedBotKey, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &workflowBindingRunner{}
+	failSecond := true
+	factoryCalls := 0
+	app := &App{
+		workflowRoot: root,
+		workflowLoadBug: func(id string) (bughub.Bug, error) {
+			return bughub.Bug{ID: id, Title: "loaded bug", Env: "test", SystemID: "base"}, nil
+		},
+		workflowLoadBot: func(key string) (bughub.BotRef, error) {
+			if failSecond && key == "base|codex-1" {
+				return bughub.BotRef{}, errors.New("workspace mapping unavailable")
+			}
+			return bughub.BotRef{Key: key, Target: "codex", Path: "/installed/" + key, Env: "test"}, nil
+		},
+		workflowRuntimeFactory: func(store *bughub.CaseStore, _ *bughub.InvestigationStore) incidentWorkflowRuntime {
+			factoryCalls++
+			return incidentWorkflowRuntime{orchestrator: bughub.NewCaseOrchestrator(store, runner, nil, nil)}
+		},
+	}
+	if err := app.initializeIncidentWorkflow(ctx); err == nil {
+		t.Fatal("startup unexpectedly succeeded")
+	}
+	if factoryCalls != 1 || runner.count() != 0 {
+		t.Fatalf("first startup factory calls=%d runner starts=%d", factoryCalls, runner.count())
+	}
+	if app.workflowStore == nil || app.workflowOrchestrator == nil {
+		t.Fatal("failed recovery discarded the published runtime")
+	}
+	if _, err := app.workflowStore.GetCase(ctx, "case-recovery-first"); err != nil {
+		t.Fatalf("retained store is unavailable: %v", err)
+	}
+
+	failSecond = false
+	if err := app.initializeIncidentWorkflow(ctx); err != nil {
+		t.Fatalf("retry recovery: %v", err)
+	}
+	t.Cleanup(func() { _ = app.closeIncidentWorkflow() })
+	if factoryCalls != 1 || runner.count() != 2 {
+		t.Fatalf("retry factory calls=%d runner starts=%d", factoryCalls, runner.count())
+	}
+	if err := app.initializeIncidentWorkflow(ctx); err != nil {
+		t.Fatalf("idempotent retry: %v", err)
+	}
+	if factoryCalls != 1 || runner.count() != 2 {
+		t.Fatalf("duplicate retry factory calls=%d runner starts=%d", factoryCalls, runner.count())
+	}
+
+	incident, err := app.workflowStore.GetCase(ctx, "case-recovery-first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := app.workflowOrchestrator.CompleteAttempt(ctx, bughub.CompleteAttemptCommand{
+		CaseID: incident.ID, AttemptID: incident.CurrentAttemptID, ExpectedVersion: incident.Version,
+		IdempotencyKey: "complete:recovery-first", ActorID: "agent", Outcome: bughub.PhaseOutcomeNeedsEvidence,
+		OutputJSON: []byte(`{"gaps":["proof"]}`),
+	})
+	if err != nil || completed.Status != bughub.CaseWaitingEvidence {
+		t.Fatalf("completion=%+v err=%v", completed, err)
+	}
+	persisted, err := app.workflowStore.GetCase(ctx, completed.ID)
+	if err != nil || persisted.Status != bughub.CaseWaitingEvidence {
+		t.Fatalf("persisted=%+v err=%v", persisted, err)
 	}
 }
 

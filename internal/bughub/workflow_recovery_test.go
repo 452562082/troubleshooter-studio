@@ -3,6 +3,7 @@ package bughub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -118,6 +119,51 @@ func TestRecoverQueuedAttemptUsesResolvedWorkspaceContext(t *testing.T) {
 	}
 	if len(runner.bots) != 1 || runner.bots[0].Path != "/workspace/base" || len(runner.bugs) != 1 || runner.bugs[0].Title != "loaded bug" {
 		t.Fatalf("bugs=%+v bots=%+v", runner.bugs, runner.bots)
+	}
+}
+
+func TestRecoverInterruptedPreflightsAllContextsBeforeScheduling(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	createPrepared := func(id string) PhaseAttempt {
+		incident := createWorkflowCase(t, store, id, CasePendingValidation)
+		attempt := PhaseAttempt{ID: id + "-attempt", CaseID: incident.ID, CycleNumber: 1, Phase: PhaseValidation, Mode: AttemptReproduce, Status: AttemptStatusQueued, AgentTarget: "codex", BotKey: "bot", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}
+		if err := store.CreateAttempt(ctx, attempt); err != nil {
+			t.Fatal(err)
+		}
+		return attempt
+	}
+	first := createPrepared("preflight-first")
+	second := createPrepared("preflight-second")
+	runner := &recordingPhaseRunner{}
+	o := NewCaseOrchestrator(store, runner, nil, nil)
+	failSecond := true
+	o.SetRecoveryContextResolver(RecoveryContextResolverFunc(func(_ context.Context, incident IncidentCase, attempt PhaseAttempt) (Bug, BotRef, error) {
+		if failSecond && attempt.ID == second.ID {
+			return Bug{}, BotRef{}, errors.New("workspace mapping unavailable")
+		}
+		return Bug{ID: incident.BugID}, BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget, Path: "/workspace/" + incident.ID}, nil
+	}))
+	if err := o.RecoverInterrupted(ctx); err == nil || runner.startCount() != 0 {
+		t.Fatalf("first recovery starts=%d err=%v", runner.startCount(), err)
+	}
+	firstCase, _ := store.GetCase(ctx, first.CaseID)
+	secondCase, _ := store.GetCase(ctx, second.CaseID)
+	if firstCase.Status != CasePendingValidation || secondCase.Status != CasePendingValidation {
+		t.Fatalf("preflight mutated cases first=%+v second=%+v", firstCase, secondCase)
+	}
+	failSecond = false
+	if err := o.RecoverInterrupted(ctx); err != nil || runner.startCount() != 2 {
+		t.Fatalf("retry starts=%d err=%v", runner.startCount(), err)
+	}
+	firstCase, _ = store.GetCase(ctx, first.CaseID)
+	startedAttempt, err := store.GetAttempt(ctx, firstCase.CurrentAttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := o.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: firstCase.ID, AttemptID: startedAttempt.ID, ExpectedVersion: firstCase.Version, IdempotencyKey: "complete:preflight-first", ActorID: "agent", Outcome: PhaseOutcomeNeedsEvidence, OutputJSON: []byte(`{"gaps":["proof"]}`)})
+	if err != nil || completed.Status != CaseWaitingEvidence {
+		t.Fatalf("completion=%+v err=%v", completed, err)
 	}
 }
 

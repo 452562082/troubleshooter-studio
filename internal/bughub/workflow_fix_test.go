@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func prepareFixApprovalCase(t *testing.T, output string) (*CaseStore, IncidentCase, PhaseAttempt, *recordingPhaseRunner, *CaseOrchestrator) {
@@ -455,6 +458,125 @@ func TestFixCompletionRemoteMismatchFailsAttemptWithoutWaitingForRestart(t *test
 	persisted, loadErr := store.GetAttempt(context.Background(), attempt.ID)
 	if loadErr != nil || persisted.Status != AttemptStatusFailed || persisted.ErrorCode != "fix_recovery_failed" {
 		t.Fatalf("attempt=%+v err=%v", persisted, loadErr)
+	}
+}
+
+func completeFixForReplayTest(t *testing.T) (*CaseStore, CompleteAttemptCommand, IncidentCase, gitFixture) {
+	t.Helper()
+	fixture := newGitFixture(t)
+	commit := fixture.makeFix(t, "replay\n")
+	store, incident, root, _, orchestrator := prepareFixApprovalCase(t, validRootCauseOutput())
+	approved, err := orchestrator.ApproveFix(context.Background(), ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version), ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := store.GetAttempt(context.Background(), approved.CurrentAttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := fmt.Sprintf(`fix_status: fixed_pushed
+environment: test
+branches:
+  - {repo: api, base_branch: test, fix_branch: fix/bug, commit: %s, pushed: true, target_environment_branch: test, push_remote: origin}
+changes:
+  - {repo: api, summary: replay-safe fix}
+tests:
+  - {repo: api, commit: %s, command: go test ./..., result: passed}
+deployment_notice: deploy api
+risks: []
+evidence: []
+`, commit, commit)
+	parsed, err := ParsePhaseResult(attempt, []byte(document))
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := CompleteAttemptCommand{CaseID: approved.ID, AttemptID: attempt.ID, ExpectedVersion: approved.Version, IdempotencyKey: "replay-fix:" + attempt.ID, ActorID: "fixer", Outcome: parsed.Outcome, OutputJSON: parsed.OutputJSON, Usage: AgentUsage{InputTokens: 11, OutputTokens: 7, Duration: 3 * time.Second}, CodeChanges: parsed.CodeChanges}
+	orchestrator.git = fixture.service(t)
+	completed, err := orchestrator.CompleteAttempt(context.Background(), command)
+	if err != nil || completed.Status != CaseWaitingMergeApproval {
+		t.Fatalf("completed=%+v err=%v", completed, err)
+	}
+	return store, command, completed, fixture
+}
+
+func TestCompleteAttemptExactFixReplayUsesImmutableIdentityBeforeGit(t *testing.T) {
+	store, command, completed, fixture := completeFixForReplayTest(t)
+	runGitTest(t, fixture.repo, "push", "origin", "--delete", "fix/bug")
+	git := &recordingGitIntegration{err: errors.New("Git must not run during exact replay")}
+	replayed, err := NewCaseOrchestrator(store, nil, git, nil).CompleteAttempt(context.Background(), command)
+	if err != nil || !reflect.DeepEqual(replayed, completed) {
+		t.Fatalf("replayed=%+v want=%+v err=%v", replayed, completed, err)
+	}
+	git.mu.Lock()
+	calls := git.fixCalls
+	git.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("exact replay called Git %d times", calls)
+	}
+}
+
+func TestCompleteAttemptFixReplayRejectsEveryIdentityDifferenceBeforeGit(t *testing.T) {
+	store, command, _, _ := completeFixForReplayTest(t)
+	mutations := []struct {
+		name   string
+		mutate func(*CompleteAttemptCommand)
+	}{
+		{name: "actor", mutate: func(c *CompleteAttemptCommand) { c.ActorID = "other" }},
+		{name: "usage", mutate: func(c *CompleteAttemptCommand) { c.Usage.InputTokens++ }},
+		{name: "payload", mutate: func(c *CompleteAttemptCommand) {
+			c.OutputJSON = []byte(strings.Replace(string(c.OutputJSON), "deploy api", "deploy other", 1))
+		}},
+		{name: "code changes", mutate: func(c *CompleteAttemptCommand) { c.CodeChanges[0].FixCommit = strings.Repeat("b", 40) }},
+	}
+	for _, test := range mutations {
+		t.Run(test.name, func(t *testing.T) {
+			changed := command
+			changed.OutputJSON = CloneRawMessage(command.OutputJSON)
+			changed.CodeChanges = []CodeChange{command.CodeChanges[0].Clone()}
+			test.mutate(&changed)
+			git := &recordingGitIntegration{err: errors.New("Git must not run for divergent replay")}
+			if _, err := NewCaseOrchestrator(store, nil, git, nil).CompleteAttempt(context.Background(), changed); !errors.Is(err, ErrIdempotencyConflict) {
+				t.Fatalf("err=%v", err)
+			}
+			git.mu.Lock()
+			calls := git.fixCalls
+			git.mu.Unlock()
+			if calls != 0 {
+				t.Fatalf("divergent replay called Git %d times", calls)
+			}
+		})
+	}
+}
+
+func TestCompleteAttemptExactFixReplayIsConcurrentAndSurvivesLaterWorkflowMutation(t *testing.T) {
+	store, command, completed, fixture := completeFixForReplayTest(t)
+	change := command.CodeChanges[0]
+	if _, err := store.db.ExecContext(context.Background(), `UPDATE code_changes SET merge_base_head=?,merge_commit=?,push_status=? WHERE id=?`, "later-head", "later-merge", "merged", change.ID); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, fixture.repo, "push", "origin", "--delete", "fix/bug")
+	git := &recordingGitIntegration{err: errors.New("Git must not run during concurrent replay")}
+	const workers = 12
+	errs := make(chan error, workers)
+	for range workers {
+		go func() {
+			got, err := NewCaseOrchestrator(store, nil, git, nil).CompleteAttempt(context.Background(), command)
+			if err == nil && !reflect.DeepEqual(got, completed) {
+				err = fmt.Errorf("replay result changed: %+v", got)
+			}
+			errs <- err
+		}()
+	}
+	for range workers {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	git.mu.Lock()
+	calls := git.fixCalls
+	git.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("concurrent replay called Git %d times", calls)
 	}
 }
 

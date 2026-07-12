@@ -90,7 +90,7 @@ CREATE INDEX IF NOT EXISTS idx_events_case_created ON transition_events(case_id,
 `
 
 const (
-	workflowStoreSchemaVersion   = 4
+	workflowStoreSchemaVersion   = 5
 	workflowStoreSchemaV1Key     = "workflow-schema-v1"
 	workflowStoreSchemaV1Upgrade = `
 ALTER TABLE transition_events ADD COLUMN request_fingerprint TEXT NOT NULL DEFAULT '';
@@ -112,6 +112,10 @@ CREATE TABLE fix_checkpoints (
   staging_locator TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+`
+	workflowStoreSchemaV5Upgrade = `
+ALTER TABLE phase_attempts ADD COLUMN completion_identity_sha256 TEXT NOT NULL DEFAULT '';
+ALTER TABLE phase_attempts ADD COLUMN run_claim_token TEXT NOT NULL DEFAULT '';
 `
 )
 

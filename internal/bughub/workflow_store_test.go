@@ -675,6 +675,41 @@ func TestCaseStoreInitializesAndMigratesVersionedSchema(t *testing.T) {
 	})
 }
 
+func TestClaimRunnableAttemptAtomicallyBindsFixCheckpoint(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-atomic-run-claim", CaseFixing)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseFix, "")
+	checkpoint := FixCheckpoint{AttemptID: attempt.ID, CaseID: attempt.CaseID, StagingLocator: attempt.ID + "-claim-a"}
+	if err := store.ClaimRunnableAttempt(context.Background(), AttemptRunClaim{Attempt: attempt, ClaimToken: "claim-a", Checkpoint: &checkpoint}); err != nil {
+		t.Fatal(err)
+	}
+	if valid, err := store.ValidateAttemptRunClaim(context.Background(), attempt, "claim-a"); err != nil || !valid {
+		t.Fatalf("valid=%v err=%v", valid, err)
+	}
+	storedCheckpoint, found, err := store.GetFixCheckpoint(context.Background(), attempt.ID)
+	if err != nil || !found || storedCheckpoint.StagingLocator != checkpoint.StagingLocator {
+		t.Fatalf("checkpoint=%+v found=%v err=%v", storedCheckpoint, found, err)
+	}
+	second := checkpoint
+	second.StagingLocator = attempt.ID + "-claim-b"
+	if err := store.ClaimRunnableAttempt(context.Background(), AttemptRunClaim{Attempt: attempt, ClaimToken: "claim-b", Checkpoint: &second}); !errors.Is(err, ErrAttemptRunClaimConflict) {
+		t.Fatalf("second claim err=%v", err)
+	}
+	storedCheckpoint, found, err = store.GetFixCheckpoint(context.Background(), attempt.ID)
+	if err != nil || !found || storedCheckpoint.StagingLocator != checkpoint.StagingLocator {
+		t.Fatalf("checkpoint changed after losing claim: %+v found=%v err=%v", storedCheckpoint, found, err)
+	}
+	if err := store.ReleaseAttemptRunClaim(context.Background(), attempt.ID, attempt.CaseID, "claim-a"); err != nil {
+		t.Fatal(err)
+	}
+	if valid, err := store.ValidateAttemptRunClaim(context.Background(), attempt, "claim-a"); err != nil || valid {
+		t.Fatalf("released valid=%v err=%v", valid, err)
+	}
+	if _, found, err := store.GetFixCheckpoint(context.Background(), attempt.ID); err != nil || found {
+		t.Fatalf("released checkpoint found=%v err=%v", found, err)
+	}
+}
+
 func TestCaseStoreRejectsPartialAndUnknownSchemas(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

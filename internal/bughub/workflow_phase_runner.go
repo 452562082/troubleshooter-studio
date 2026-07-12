@@ -3,6 +3,8 @@ package bughub
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -119,58 +121,75 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 	if err := attempt.Validate(); err != nil {
 		return err
 	}
-	r.mu.Lock()
-	_, alreadyScheduled := r.scheduled[attempt.ID]
-	r.mu.Unlock()
-	if alreadyScheduled {
-		return nil
-	}
-	if strings.TrimSpace(attempt.AgentTarget) != "" && strings.TrimSpace(bot.Target) != attempt.AgentTarget {
-		return fmt.Errorf("bot target %q does not match persisted attempt target %q", bot.Target, attempt.AgentTarget)
-	}
-	if strings.TrimSpace(bot.Key) != attempt.BotKey {
-		return fmt.Errorf("bot key %q does not match persisted attempt bot %q", bot.Key, attempt.BotKey)
-	}
-	if attempt.Phase == PhaseLegacy {
-		return errors.New("legacy attempts are read-only projections")
-	}
-	incident, err := r.store.GetCase(ctx, attempt.CaseID)
+	claimToken, err := newAttemptRunClaimToken()
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(incident.CurrentAttemptID) == "" || incident.CurrentAttemptID != attempt.ID {
-		return ErrAttemptNotCurrent
-	}
-	if incident.Status != statusForPhase(attempt.Phase) || incident.CycleNumber != attempt.CycleNumber || strings.TrimSpace(incident.SelectedBotKey) == "" || incident.SelectedBotKey != attempt.BotKey {
-		return errors.New("phase attempt is not bound to the current Case status, cycle, and selected bot")
-	}
-	persisted, err := r.store.GetAttempt(ctx, attempt.ID)
-	if err != nil {
-		return err
-	}
-	if persisted.Status != AttemptStatusQueued && persisted.Status != AttemptStatusRunning {
-		return fmt.Errorf("phase attempt %s is not runnable: %s", persisted.ID, persisted.Status)
-	}
-	if !sameRunnableAttempt(persisted, attempt) {
-		return errors.New("caller phase attempt does not match persisted attempt")
-	}
-	if _, found, err := parseCompletionIntent(persisted.OutputJSON); err != nil {
-		return err
-	} else if found {
-		return errors.New("phase attempt already has a persisted completion intent")
-	}
+	// Start's caller context only bounds synchronous scheduling. The phase is a
+	// durable background job and must outlive the orchestrator's short scheduling
+	// timeout; explicit Cancel owns its lifetime after the reservation is visible.
+	runCtx, cancel := context.WithCancel(context.Background())
 	r.mu.Lock()
-	if _, exists := r.scheduled[attempt.ID]; exists {
+	if _, alreadyScheduled := r.scheduled[attempt.ID]; alreadyScheduled {
 		r.mu.Unlock()
+		cancel()
 		return nil
 	}
 	r.scheduled[attempt.ID] = struct{}{}
+	r.active[attempt.ID] = cancel
 	complete := r.complete
 	r.mu.Unlock()
 	releaseReservation := func() {
+		cancel()
 		r.mu.Lock()
 		delete(r.scheduled, attempt.ID)
+		delete(r.active, attempt.ID)
 		r.mu.Unlock()
+	}
+	fail := func(cause error) error {
+		releaseReservation()
+		return cause
+	}
+	if complete == nil {
+		return fail(errors.New("agent phase completion callback is required"))
+	}
+	if strings.TrimSpace(attempt.AgentTarget) != "" && strings.TrimSpace(bot.Target) != attempt.AgentTarget {
+		return fail(fmt.Errorf("bot target %q does not match persisted attempt target %q", bot.Target, attempt.AgentTarget))
+	}
+	if strings.TrimSpace(bot.Key) != attempt.BotKey {
+		return fail(fmt.Errorf("bot key %q does not match persisted attempt bot %q", bot.Key, attempt.BotKey))
+	}
+	if attempt.Phase == PhaseLegacy {
+		return fail(errors.New("legacy attempts are read-only projections"))
+	}
+	incident, err := r.store.GetCase(ctx, attempt.CaseID)
+	if err != nil {
+		return fail(err)
+	}
+	if strings.TrimSpace(incident.CurrentAttemptID) == "" || incident.CurrentAttemptID != attempt.ID {
+		return fail(ErrAttemptNotCurrent)
+	}
+	if incident.Status != statusForPhase(attempt.Phase) || incident.CycleNumber != attempt.CycleNumber || strings.TrimSpace(incident.SelectedBotKey) == "" || incident.SelectedBotKey != attempt.BotKey {
+		return fail(errors.New("phase attempt is not bound to the current Case status, cycle, and selected bot"))
+	}
+	persisted, err := r.store.GetAttempt(ctx, attempt.ID)
+	if err != nil {
+		return fail(err)
+	}
+	if persisted.Status != AttemptStatusQueued && persisted.Status != AttemptStatusRunning {
+		return fail(fmt.Errorf("phase attempt %s is not runnable: %s", persisted.ID, persisted.Status))
+	}
+	if !sameRunnableAttempt(persisted, attempt) {
+		return fail(errors.New("caller phase attempt does not match persisted attempt"))
+	}
+	if _, found, err := parseCompletionIntent(persisted.OutputJSON); err != nil {
+		return fail(err)
+	} else if found {
+		return fail(errors.New("phase attempt already has a persisted completion intent"))
+	}
+	prompt, err := r.promptForAttempt(attempt, bug, bot)
+	if err != nil {
+		return fail(err)
 	}
 	openStaging := r.openStaging
 	if openStaging == nil {
@@ -178,21 +197,36 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 	}
 	staging, err := openStaging(r.artifactsRoot, attempt.ID)
 	if err != nil {
-		releaseReservation()
-		return fmt.Errorf("create Studio evidence staging: %w", err)
+		return fail(fmt.Errorf("create Studio evidence staging: %w", err))
 	}
+	checkpoint := (*FixCheckpoint)(nil)
 	if attempt.Phase == PhaseFix {
-		checkpoint := FixCheckpoint{AttemptID: attempt.ID, CaseID: attempt.CaseID, StagingLocator: fixCheckpointLocator(staging)}
-		if err := r.store.SaveFixCheckpoint(ctx, checkpoint); err != nil {
-			releaseReservation()
-			return releaseUntransferredStaging(staging, fmt.Errorf("persist fix checkpoint locator: %w", err))
-		}
+		checkpoint = &FixCheckpoint{AttemptID: attempt.ID, CaseID: attempt.CaseID, StagingLocator: fixCheckpointLocator(staging)}
 	}
-	prompt, err := r.promptForAttempt(attempt, bug, bot)
-	if err != nil {
-		if attempt.Phase == PhaseFix {
-			_ = r.store.DeleteFixCheckpoint(ctx, attempt.ID, attempt.CaseID)
+	if err := ctx.Err(); err != nil {
+		releaseReservation()
+		return releaseUntransferredStaging(staging, err)
+	}
+	if err := r.store.ClaimRunnableAttempt(ctx, AttemptRunClaim{Attempt: attempt, ClaimToken: claimToken, Checkpoint: checkpoint}); err != nil {
+		releaseReservation()
+		return releaseUntransferredStaging(staging, err)
+	}
+	releaseClaim := func() {
+		durable, durableCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer durableCancel()
+		_ = r.store.ReleaseAttemptRunClaim(durable, attempt.ID, attempt.CaseID, claimToken)
+	}
+	if err := ctx.Err(); err != nil {
+		releaseClaim()
+		releaseReservation()
+		return releaseUntransferredStaging(staging, err)
+	}
+	valid, err := r.store.ValidateAttemptRunClaim(ctx, attempt, claimToken)
+	if err != nil || !valid {
+		if err == nil {
+			err = ErrAttemptRunClaimConflict
 		}
+		releaseClaim()
 		releaseReservation()
 		return releaseUntransferredStaging(staging, err)
 	}
@@ -200,21 +234,17 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 	if attempt.Phase == PhaseFix {
 		prompt += "\n## Durable fix checkpoint (mandatory)\n\nBefore the first repository push, atomically write `" + fixCheckpointManifestName + "` in the Studio staging directory (write a temporary sibling, fsync, then rename) with state=`prepared`; include every planned repository commit/branch/remote/test. After all pushes succeed, atomically replace it with the same manifest and state=`pushed` before reporting completion. JSON fields: kind=`" + fixCheckpointManifestKind + "`, version=1, case_id=`" + attempt.CaseID + "`, attempt_id=`" + attempt.ID + "`, state=`prepared|pushed`, result=<the exact structured FixResult also returned as final YAML>. Never include credentials. Recovery treats the SSH remote branch as truth, so a crash after push but before the state update remains recoverable while a pre-push crash cannot be misreported.\n"
 	}
-	if complete == nil {
-		if attempt.Phase == PhaseFix {
-			_ = r.store.DeleteFixCheckpoint(ctx, attempt.ID, attempt.CaseID)
-		}
-		releaseReservation()
-		return releaseUntransferredStaging(staging, errors.New("agent phase completion callback is required"))
-	}
-	runCtx, cancel := context.WithCancel(context.Background())
-	r.mu.Lock()
-	r.active[attempt.ID] = cancel
-	r.mu.Unlock()
-
 	r.startLegacyProjection(attempt, bug, bot)
-	go r.run(runCtx, attempt.Clone(), bug, bot, prompt, staging, incident.Version, complete)
+	go r.run(runCtx, attempt.Clone(), bug, bot, prompt, staging, incident.Version, claimToken, complete)
 	return nil
+}
+
+func newAttemptRunClaimToken() (string, error) {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(value[:]), nil
 }
 
 func releaseUntransferredStaging(staging attemptEvidenceStaging, cause error) error {
@@ -253,9 +283,14 @@ func (r *AgentPhaseRunner) Cancel(ctx context.Context, attemptID string) error {
 	return err
 }
 
-func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, _ Bug, bot BotRef, prompt string, staging attemptEvidenceStaging, expectedVersion int64, complete PhaseCompletionFunc) {
+func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, _ Bug, bot BotRef, prompt string, staging attemptEvidenceStaging, expectedVersion int64, claimToken string, complete PhaseCompletionFunc) {
 	started := time.Now()
 	cleaned := false
+	releaseClaim := func() {
+		durable, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = r.store.ReleaseAttemptRunClaim(durable, attempt.ID, attempt.CaseID, claimToken)
+	}
 	defer func() {
 		if !cleaned {
 			_ = staging.Cleanup()
@@ -277,6 +312,15 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, _ Bug,
 		}
 		r.projectEvent(attempt, event)
 	}
+	if err := ctx.Err(); err != nil {
+		releaseClaim()
+		return
+	}
+	claimValid, claimErr := r.store.ValidateAttemptRunClaim(ctx, attempt, claimToken)
+	if claimErr != nil || !claimValid || ctx.Err() != nil {
+		releaseClaim()
+		return
+	}
 	result, runErr := r.executor.ExecutePhase(ctx, attempt.ID, bot, prompt, emit)
 	if runErr != nil && attempt.Phase != PhaseFix && ctx.Err() == nil {
 		r.projectEvent(attempt, InvestigationEvent{Type: "retry", Message: "read-only phase process retry"})
@@ -286,6 +330,7 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, _ Bug,
 		result.Usage.OutputTokens += firstUsage.OutputTokens
 	}
 	if ctx.Err() != nil {
+		releaseClaim()
 		cleanupErr := staging.Cleanup()
 		cleaned = cleanupErr == nil
 		errorText := ctx.Err().Error()
@@ -359,6 +404,7 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, _ Bug,
 	}
 	command.ExpectedVersion = expectedVersion
 	if err := r.store.SaveCompletionIntentIfRunning(ctx, command); err != nil {
+		releaseClaim()
 		r.finishLegacy(attempt.ID, InvestigationFailed, safeLegacyPhaseText(result.FinalYAML), safeLegacyPhaseText(err.Error()))
 		return
 	}

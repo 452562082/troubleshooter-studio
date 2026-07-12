@@ -1372,23 +1372,26 @@ func (o *CaseOrchestrator) recordCancelFailure(incident IncidentCase, key string
 }
 
 func (o *CaseOrchestrator) CompleteAttempt(ctx context.Context, cmd CompleteAttemptCommand) (IncidentCase, error) {
+	if o == nil || o.store == nil {
+		return IncidentCase{}, errors.New("case orchestrator store is required")
+	}
 	if len(cmd.OutputJSON) == 0 {
 		cmd.OutputJSON = []byte(`{}`)
+	}
+	if strings.TrimSpace(cmd.IdempotencyKey) == "" {
+		return IncidentCase{}, validateCompletionCommand(cmd)
+	}
+	release := workflowCommandLocks.acquire("complete-attempt:" + cmd.IdempotencyKey)
+	defer release()
+	if replayed, found, replayErr := o.replayAttemptCompletion(ctx, cmd); found || replayErr != nil {
+		return replayed, replayErr
 	}
 	if err := validateCompletionCommand(cmd); err != nil {
 		return IncidentCase{}, err
 	}
-	release := workflowCommandLocks.acquire("complete-attempt:" + cmd.IdempotencyKey)
-	defer release()
-	if replayed, found, replayErr := o.replayRegressionCompletion(ctx, cmd); found || replayErr != nil {
-		return replayed, replayErr
-	}
 	incident, err := o.loadForCommand(ctx, cmd.CaseID, cmd.ExpectedVersion, cmd.IdempotencyKey)
 	if err != nil {
 		return IncidentCase{}, err
-	}
-	if replayed, found, replayErr := o.replayRegressionCompletion(ctx, cmd); found || replayErr != nil {
-		return replayed, replayErr
 	}
 	if incident.CurrentAttemptID != cmd.AttemptID {
 		return IncidentCase{}, ErrAttemptNotCurrent
@@ -1454,6 +1457,78 @@ func (o *CaseOrchestrator) CompleteAttempt(ctx context.Context, cmd CompleteAtte
 	return o.applyOutcome(ctx, incident, attempt, cmd, expectedAttemptOutput)
 }
 
+func (o *CaseOrchestrator) replayAttemptCompletion(ctx context.Context, cmd CompleteAttemptCommand) (IncidentCase, bool, error) {
+	replay, found, err := o.store.GetCommittedCaseMutation(ctx, cmd.IdempotencyKey)
+	if err != nil || !found {
+		return IncidentCase{}, found, err
+	}
+	if replay.Event.CaseID != cmd.CaseID {
+		return IncidentCase{}, true, ErrIdempotencyConflict
+	}
+	want, err := completionCommandIdentity(cmd)
+	if err != nil {
+		return IncidentCase{}, true, err
+	}
+	stored, identityFound, err := o.store.GetAttemptCompletionIdentity(ctx, cmd.AttemptID)
+	if err != nil {
+		return IncidentCase{}, true, err
+	}
+	if !identityFound {
+		persisted, rebuildErr := o.rebuildCommittedCompletion(ctx, replay, cmd.AttemptID)
+		if rebuildErr != nil {
+			return IncidentCase{}, true, ErrIdempotencyConflict
+		}
+		stored, err = completionCommandIdentity(persisted)
+		if err != nil {
+			return IncidentCase{}, true, err
+		}
+	}
+	if stored != want {
+		return IncidentCase{}, true, ErrIdempotencyConflict
+	}
+	return replay.ResultCase.Clone(), true, nil
+}
+
+func (o *CaseOrchestrator) rebuildCommittedCompletion(ctx context.Context, replay CommittedCaseMutation, attemptID string) (CompleteAttemptCommand, error) {
+	attempt, err := o.store.GetAttempt(ctx, attemptID)
+	if err != nil || attempt.CaseID != replay.Event.CaseID || attempt.FinishedAt == nil {
+		return CompleteAttemptCommand{}, ErrIdempotencyConflict
+	}
+	outcomes := map[string]PhaseOutcome{
+		"validation_reproduced":     PhaseOutcomeReproduced,
+		"validation_not_reproduced": PhaseOutcomeNotReproduced,
+		"evidence_required":         PhaseOutcomeNeedsEvidence,
+		"root_cause_ready":          PhaseOutcomeRootCauseReady,
+		"fix_pushed":                PhaseOutcomeFixPushed,
+		"fix_failed":                PhaseOutcomeFixFailed,
+		"regression_fixed":          PhaseOutcomeFixedVerified,
+		"regression_failed":         PhaseOutcomeStillReproduces,
+	}
+	outcome, ok := outcomes[replay.Event.EventType]
+	if !ok || !jsonValuesEqual(replay.Event.PayloadJSON, attempt.OutputJSON) {
+		return CompleteAttemptCommand{}, ErrIdempotencyConflict
+	}
+	persisted := CompleteAttemptCommand{CaseID: attempt.CaseID, AttemptID: attempt.ID, ExpectedVersion: replay.ResultCase.Version - 1, IdempotencyKey: replay.Event.IdempotencyKey, ActorID: replay.Event.ActorID, Outcome: outcome, OutputJSON: CloneRawMessage(attempt.OutputJSON), ErrorCode: attempt.ErrorCode, ErrorMessage: attempt.ErrorMessage, Usage: attempt.Usage}
+	if outcome == PhaseOutcomeFixPushed {
+		parsed, parseErr := ParsePhaseResult(attempt, attempt.OutputJSON)
+		if parseErr != nil || parsed.Outcome != outcome {
+			return CompleteAttemptCommand{}, ErrIdempotencyConflict
+		}
+		persisted.CodeChanges = parsed.CodeChanges
+	}
+	return persisted, nil
+}
+
+func jsonValuesEqual(left, right json.RawMessage) bool {
+	var leftValue, rightValue any
+	if json.Unmarshal(left, &leftValue) != nil || json.Unmarshal(right, &rightValue) != nil {
+		return false
+	}
+	leftJSON, leftErr := json.Marshal(leftValue)
+	rightJSON, rightErr := json.Marshal(rightValue)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftJSON, rightJSON)
+}
+
 const fixInspectionMaxAttempts = 3
 
 func (o *CaseOrchestrator) inspectFixWithRetry(ctx context.Context, request FixInspectionRequest) (FixInspection, error) {
@@ -1475,35 +1550,6 @@ func (o *CaseOrchestrator) inspectFixWithRetry(ctx context.Context, request FixI
 		}
 	}
 	return inspection, errors.Join(ErrFixInspectionUnavailable, err)
-}
-
-func (o *CaseOrchestrator) replayRegressionCompletion(ctx context.Context, cmd CompleteAttemptCommand) (IncidentCase, bool, error) {
-	replay, found, err := o.store.GetCommittedCaseMutation(ctx, cmd.IdempotencyKey)
-	if err != nil || !found {
-		return IncidentCase{}, found, err
-	}
-	attempt, err := o.store.GetAttempt(ctx, cmd.AttemptID)
-	if err != nil {
-		return IncidentCase{}, true, ErrIdempotencyConflict
-	}
-	terminal := attempt.Status == AttemptStatusSucceeded || attempt.Status == AttemptStatusFailed
-	validIdentity := attempt.Phase == PhaseRegression && attempt.CaseID == cmd.CaseID && terminal && attempt.FinishedAt != nil &&
-		replay.Event.CaseID == cmd.CaseID && replay.Event.FromStatus == CaseRegressionValidating &&
-		replay.ResultCase.Version >= 2 && cmd.ExpectedVersion == replay.ResultCase.Version-1 &&
-		bytes.Equal(replay.Event.PayloadJSON, attempt.OutputJSON) && bytes.Equal(cmd.OutputJSON, attempt.OutputJSON)
-	if !validIdentity {
-		return IncidentCase{}, true, ErrIdempotencyConflict
-	}
-	outcomes := map[string]PhaseOutcome{"regression_fixed": PhaseOutcomeFixedVerified, "regression_failed": PhaseOutcomeStillReproduces, "evidence_required": PhaseOutcomeNeedsEvidence}
-	outcome, ok := outcomes[replay.Event.EventType]
-	if !ok {
-		return IncidentCase{}, true, ErrIdempotencyConflict
-	}
-	persisted := CompleteAttemptCommand{CaseID: attempt.CaseID, AttemptID: attempt.ID, ExpectedVersion: replay.ResultCase.Version - 1, IdempotencyKey: replay.Event.IdempotencyKey, ActorID: replay.Event.ActorID, Outcome: outcome, OutputJSON: CloneRawMessage(attempt.OutputJSON), ErrorCode: attempt.ErrorCode, ErrorMessage: attempt.ErrorMessage, Usage: attempt.Usage}
-	if !equivalentCompletionCommands(persisted, cmd) {
-		return IncidentCase{}, true, ErrIdempotencyConflict
-	}
-	return replay.ResultCase.Clone(), true, nil
 }
 
 func (o *CaseOrchestrator) applyOutcome(ctx context.Context, incident IncidentCase, attempt PhaseAttempt, cmd CompleteAttemptCommand, expectedAttemptOutput json.RawMessage) (IncidentCase, error) {
@@ -1569,7 +1615,11 @@ func (o *CaseOrchestrator) applyOutcome(ctx context.Context, incident IncidentCa
 		creates = append(creates, *next)
 	}
 	request := mustJSON(cmd)
-	mutationRequest := CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: cmd.IdempotencyKey, RequestJSON: request, FinishAttempts: []PhaseAttempt{attempt}, CreateAttempts: creates, CodeChanges: cmd.CodeChanges, ExpectedAttemptOutputs: map[string]json.RawMessage{attempt.ID: expectedAttemptOutput}, Snapshot: update, Steps: steps}
+	completionIdentity, err := completionCommandIdentity(cmd)
+	if err != nil {
+		return IncidentCase{}, err
+	}
+	mutationRequest := CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: cmd.IdempotencyKey, RequestJSON: request, FinishAttempts: []PhaseAttempt{attempt}, CreateAttempts: creates, CodeChanges: cmd.CodeChanges, ExpectedAttemptOutputs: map[string]json.RawMessage{attempt.ID: expectedAttemptOutput}, CompletionAttemptID: attempt.ID, CompletionIdentitySHA256: completionIdentity, Snapshot: update, Steps: steps}
 	if attempt.Phase == PhaseFix {
 		mutationRequest.DeleteFixCheckpointAttemptID = attempt.ID
 	}

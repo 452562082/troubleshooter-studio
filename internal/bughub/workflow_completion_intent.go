@@ -3,7 +3,9 @@ package bughub
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -154,4 +156,13 @@ func equivalentCompletionCommands(left, right CompleteAttemptCommand) bool {
 	leftJSON, leftErr := json.Marshal(left)
 	rightJSON, rightErr := json.Marshal(right)
 	return leftErr == nil && rightErr == nil && bytes.Equal(leftJSON, rightJSON)
+}
+
+func completionCommandIdentity(command CompleteAttemptCommand) (string, error) {
+	encoded, err := json.Marshal(command)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
 }

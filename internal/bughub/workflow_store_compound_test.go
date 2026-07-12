@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 )
@@ -76,6 +77,45 @@ func TestCaseStoreCompoundMutationCommitsAttemptsMultiEdgeAndAuditAtomically(t *
 	}
 	if _, err := store.ApplyCaseMutation(ctx, changed); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestAtomicRunClaimAndCancelRaceLeavesNoRunnableFixSideEffect(t *testing.T) {
+	store := newOrchestratorStore(t)
+	for iteration := 0; iteration < 50; iteration++ {
+		caseID := fmt.Sprintf("case-claim-cancel-%d", iteration)
+		incident := createWorkflowCase(t, store, caseID, CaseFixing)
+		attempt := createPhaseRunnerAttempt(t, store, incident, PhaseFix, "")
+		checkpoint := FixCheckpoint{AttemptID: attempt.ID, CaseID: attempt.CaseID, StagingLocator: attempt.ID + "-race"}
+		orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, nil)
+		start := make(chan struct{})
+		errs := make(chan error, 2)
+		go func() {
+			<-start
+			errs <- store.ClaimRunnableAttempt(context.Background(), AttemptRunClaim{Attempt: attempt, ClaimToken: "race-claim", Checkpoint: &checkpoint})
+		}()
+		go func() {
+			<-start
+			_, err := orchestrator.CancelAttempt(context.Background(), CancelAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "cancel-claim-race-" + caseID, ActorID: "alice"})
+			errs <- err
+		}()
+		close(start)
+		for range 2 {
+			err := <-errs
+			if err != nil && !errors.Is(err, ErrAttemptAlreadyFinished) {
+				t.Fatalf("iteration %d err=%v", iteration, err)
+			}
+		}
+		persisted, err := store.GetAttempt(context.Background(), attempt.ID)
+		if err != nil || persisted.Status != AttemptStatusCancelled {
+			t.Fatalf("iteration %d attempt=%+v err=%v", iteration, persisted, err)
+		}
+		if valid, err := store.ValidateAttemptRunClaim(context.Background(), attempt, "race-claim"); err != nil || valid {
+			t.Fatalf("iteration %d valid=%v err=%v", iteration, valid, err)
+		}
+		if _, found, err := store.GetFixCheckpoint(context.Background(), attempt.ID); err != nil || found {
+			t.Fatalf("iteration %d checkpoint found=%v err=%v", iteration, found, err)
+		}
 	}
 }
 

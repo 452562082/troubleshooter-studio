@@ -1,6 +1,7 @@
 package bughub
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -168,15 +169,29 @@ func (s *GitIntegrationService) InspectFix(ctx context.Context, req FixInspectio
 			result.ErrorMessage = err.Error()
 			return result, fmt.Errorf("%w: %v", ErrFixInspectionUnavailable, err)
 		}
-		remoteHead, err := fetchFixHead(ctx, path, remote, change.FixBranch)
+		remoteHead, err := remoteExactBranchHead(ctx, path, remote, change.FixBranch)
 		if err != nil {
 			result.Complete = false
 			result.ErrorMessage = err.Error()
-			return result, fmt.Errorf("%w: %v", ErrFixInspectionUnavailable, err)
+			return result, err
 		}
 		if remoteHead != change.FixCommit {
 			result.Complete = false
 			result.ErrorMessage = "remote fix branch does not point at the checkpoint commit"
+			return result, fmt.Errorf("%w: %s", ErrFixRemoteMismatch, result.ErrorMessage)
+		}
+		fetchedHead, err := fetchFixHead(ctx, path, remote, change.FixBranch)
+		if err != nil {
+			result.Complete = false
+			result.ErrorMessage = err.Error()
+			if _, confirmErr := remoteExactBranchHead(ctx, path, remote, change.FixBranch); errors.Is(confirmErr, ErrFixRemoteMismatch) {
+				return result, confirmErr
+			}
+			return result, fmt.Errorf("%w: fetch exact fix ref: %v", ErrFixInspectionUnavailable, err)
+		}
+		if fetchedHead != remoteHead || fetchedHead != change.FixCommit {
+			result.Complete = false
+			result.ErrorMessage = "fetched fix branch changed during inspection"
 			return result, fmt.Errorf("%w: %s", ErrFixRemoteMismatch, result.ErrorMessage)
 		}
 		// Fetch is the source of truth and materializes the exact remote object in
@@ -190,6 +205,36 @@ func (s *GitIntegrationService) InspectFix(ctx context.Context, req FixInspectio
 		result.Changes[i] = change.Clone()
 	}
 	return result, nil
+}
+
+func remoteExactBranchHead(ctx context.Context, path, remote, branch string) (string, error) {
+	if err := gitRun(ctx, path, "check-ref-format", "--branch", branch); err != nil {
+		return "", fmt.Errorf("%w: invalid fix branch", ErrFixRemoteMismatch)
+	}
+	ref := "refs/heads/" + branch
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--exit-code", remote, ref)
+	cmd.Dir = path
+	cmd.Env = gitEnvironment()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 2 && len(bytes.TrimSpace(stdout.Bytes())) == 0 {
+			return "", fmt.Errorf("%w: remote fix branch is absent", ErrFixRemoteMismatch)
+		}
+		return "", fmt.Errorf("%w: git ls-remote exit failed", ErrFixInspectionUnavailable)
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 1 {
+		return "", fmt.Errorf("%w: exact remote ref response is ambiguous", ErrFixInspectionUnavailable)
+	}
+	fields := strings.Fields(lines[0])
+	if len(fields) != 2 || fields[1] != ref || !isFullGitObjectID(fields[0]) {
+		return "", fmt.Errorf("%w: exact remote ref response is invalid", ErrFixInspectionUnavailable)
+	}
+	return fields[0], nil
 }
 
 func (s *GitIntegrationService) inspectRepo(ctx context.Context, caseID string, change CodeChange) (MergeRepositoryResult, error) {

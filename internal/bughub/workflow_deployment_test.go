@@ -69,10 +69,16 @@ func TestDeploymentProofSchemaMigratesV1Store(t *testing.T) {
 			t.Fatalf("missing fix_checkpoints.%s columns=%v", required, columns["fix_checkpoints"])
 		}
 	}
+	if !containsString(columns["phase_attempts"], "completion_identity_sha256") {
+		t.Fatalf("missing phase_attempts.completion_identity_sha256 columns=%v", columns["phase_attempts"])
+	}
+	if !containsString(columns["phase_attempts"], "run_claim_token") {
+		t.Fatalf("missing phase_attempts.run_claim_token columns=%v", columns["phase_attempts"])
+	}
 }
 
-func TestDeploymentProofSchemaMigratesV2AndV3Stores(t *testing.T) {
-	for _, initialVersion := range []int{2, 3} {
+func TestDeploymentProofSchemaMigratesV2ThroughV4Stores(t *testing.T) {
+	for _, initialVersion := range []int{2, 3, 4} {
 		t.Run(fmt.Sprintf("v%d", initialVersion), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "workflow.db")
 			db, err := sql.Open("sqlite", path)
@@ -90,6 +96,16 @@ func TestDeploymentProofSchemaMigratesV2AndV3Stores(t *testing.T) {
 			}
 			if initialVersion == 3 {
 				if _, err = tx.Exec(workflowStoreSchemaV3Upgrade); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if initialVersion >= 4 {
+				if initialVersion == 4 {
+					if _, err = tx.Exec(workflowStoreSchemaV3Upgrade); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err = tx.Exec(workflowStoreSchemaV4Upgrade); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -128,6 +144,12 @@ func TestDeploymentProofSchemaMigratesV2AndV3Stores(t *testing.T) {
 				if !containsString(columns["fix_checkpoints"], required) {
 					t.Fatalf("missing fix_checkpoints.%s columns=%v", required, columns["fix_checkpoints"])
 				}
+			}
+			if !containsString(columns["phase_attempts"], "completion_identity_sha256") {
+				t.Fatalf("missing completion identity columns=%v", columns["phase_attempts"])
+			}
+			if !containsString(columns["phase_attempts"], "run_claim_token") {
+				t.Fatalf("missing run claim columns=%v", columns["phase_attempts"])
 			}
 		})
 	}

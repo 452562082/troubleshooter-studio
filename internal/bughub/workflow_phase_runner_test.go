@@ -588,7 +588,11 @@ func TestAgentPhaseRunnerDeferredCleanupRetriesAfterFirstFailure(t *testing.T) {
 	staging := &flakyCleanupStaging{attemptEvidenceStaging: owned}
 	executor := &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: "verification_status: not_reproduced\nenvironment: test\nevidence: []\ngaps: []\n"}}
 	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), nil)
-	runner.run(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"}, "prompt", staging, incident.Version, func(context.Context, CompleteAttemptCommand) error { return nil })
+	claimToken := "cleanup-retry-claim"
+	if err := store.ClaimRunnableAttempt(context.Background(), AttemptRunClaim{Attempt: attempt, ClaimToken: claimToken}); err != nil {
+		t.Fatal(err)
+	}
+	runner.run(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"}, "prompt", staging, incident.Version, claimToken, func(context.Context, CompleteAttemptCommand) error { return nil })
 	if staging.calls != 2 {
 		t.Fatalf("cleanup calls = %d, want initial failure plus deferred retry", staging.calls)
 	}
@@ -727,7 +731,7 @@ func TestAgentPhaseRunnerPreflightBindsCaseStatusCycleAndSelectedBot(t *testing.
 	}
 }
 
-func TestAgentPhaseRunnerCleansUntransferredStagingOnStartFailures(t *testing.T) {
+func TestAgentPhaseRunnerAvoidsStagingForPreflightFailures(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		phase      Phase
@@ -752,7 +756,7 @@ func TestAgentPhaseRunnerCleansUntransferredStagingOnStartFailures(t *testing.T)
 			if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"}); err == nil {
 				t.Fatal("Start succeeded")
 			}
-			if cleanups, closes := staging.lifecycle(); cleanups != 1 || closes != 1 {
+			if cleanups, closes := staging.lifecycle(); cleanups != 0 || closes != 0 {
 				t.Fatalf("staging lifecycle cleanup=%d close=%d", cleanups, closes)
 			}
 		})
@@ -801,6 +805,180 @@ func TestAgentPhaseRunnerConcurrentFixStartCreatesOneCheckpointStaging(t *testin
 	case extra := <-created:
 		t.Fatalf("duplicate Start created staging %+v", extra)
 	default:
+	}
+}
+
+func TestAgentPhaseRunnerCancelDuringStagingPreflightPreventsNonFixExecutor(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-cancel-staging-preflight", CaseValidating)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	executor := &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: validReproducedPhaseYAML}}
+	var orchestrator *CaseOrchestrator
+	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(ctx context.Context, command CompleteAttemptCommand) error {
+		_, err := orchestrator.CompleteAttempt(ctx, command)
+		return err
+	})
+	runner.openStaging = func(string, string) (attemptEvidenceStaging, error) {
+		close(entered)
+		<-release
+		return &lifecycleStaging{path: filepath.Join(t.TempDir(), "cancel-preflight")}, nil
+	}
+	orchestrator = NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
+	startErr := make(chan error, 1)
+	go func() {
+		startErr <- runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"})
+	}()
+	<-entered
+	cancelled, err := orchestrator.CancelAttempt(context.Background(), CancelAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "cancel-staging-preflight", ActorID: "alice"})
+	if err != nil || cancelled.Status != CaseWaitingEvidence {
+		t.Fatalf("cancelled=%+v err=%v", cancelled, err)
+	}
+	close(release)
+	if err := <-startErr; err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, ErrAttemptAlreadyFinished) {
+		t.Fatalf("start err=%v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	executor.mu.Lock()
+	calls := executor.calls
+	executor.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("cancelled preflight started executor %d times", calls)
+	}
+}
+
+func TestAgentPhaseRunnerCancelBeforeAtomicFixClaimCreatesNoCheckpointOrExecutor(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-cancel-fix-claim", CaseFixing)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseFix, "")
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	executor := &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: "must not execute"}}
+	var orchestrator *CaseOrchestrator
+	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(ctx context.Context, command CompleteAttemptCommand) error {
+		_, err := orchestrator.CompleteAttempt(ctx, command)
+		return err
+	})
+	runner.openStaging = func(string, string) (attemptEvidenceStaging, error) {
+		close(entered)
+		<-release
+		return &lifecycleStaging{path: filepath.Join(t.TempDir(), attempt.ID+"-cancelled")}, nil
+	}
+	orchestrator = NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
+	startErr := make(chan error, 1)
+	go func() {
+		startErr <- runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"})
+	}()
+	<-entered
+	if _, err := orchestrator.CancelAttempt(context.Background(), CancelAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "cancel-before-fix-claim", ActorID: "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-startErr; err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, ErrAttemptAlreadyFinished) {
+		t.Fatalf("start err=%v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	executor.mu.Lock()
+	calls := executor.calls
+	executor.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("cancelled fix started executor %d times", calls)
+	}
+	if _, found, err := store.GetFixCheckpoint(context.Background(), attempt.ID); err != nil || found {
+		t.Fatalf("checkpoint found=%v err=%v", found, err)
+	}
+}
+
+func TestAgentPhaseRunnerPhaseOutlivesSchedulingContext(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-scheduling-context", CaseValidating)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
+	started := make(chan struct{})
+	inspect := make(chan struct{})
+	executorContext := make(chan error, 1)
+	executor := phaseExecutorFunc(func(ctx context.Context, _ string, _ BotRef, _ string, _ func(InvestigationEvent)) (PhaseExecutionResult, error) {
+		close(started)
+		<-inspect
+		executorContext <- ctx.Err()
+		return PhaseExecutionResult{FinalYAML: validReproducedPhaseYAML}, nil
+	})
+	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error { return nil })
+	schedulingCtx, cancelScheduling := context.WithCancel(context.Background())
+	if err := runner.Start(schedulingCtx, attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	cancelScheduling()
+	close(inspect)
+	if err := <-executorContext; err != nil {
+		t.Fatalf("durable phase inherited expired scheduling context: %v", err)
+	}
+}
+
+func TestOrchestratorScheduledValidationAndFixOutliveSchedulingContext(t *testing.T) {
+	for _, phase := range []Phase{PhaseValidation, PhaseFix} {
+		t.Run(string(phase), func(t *testing.T) {
+			store := newOrchestratorStore(t)
+			status := CaseValidating
+			mode := AttemptReproduce
+			if phase == PhaseFix {
+				status = CaseFixing
+				mode = ""
+			}
+			incident := createWorkflowCase(t, store, "case-orchestrator-schedule-"+string(phase), status)
+			attempt := createPhaseRunnerAttempt(t, store, incident, phase, mode)
+			started := make(chan struct{})
+			inspect := make(chan struct{})
+			release := make(chan struct{})
+			executorContext := make(chan error, 1)
+			executor := phaseExecutorFunc(func(ctx context.Context, _ string, _ BotRef, _ string, _ func(InvestigationEvent)) (PhaseExecutionResult, error) {
+				close(started)
+				<-inspect
+				executorContext <- ctx.Err()
+				<-release
+				return PhaseExecutionResult{}, errors.New("test executor stopped")
+			})
+			runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error { return nil })
+			orchestrator := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
+			orchestrator.scheduleTimeout = time.Second
+			if err := orchestrator.startPhase(attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"}); err != nil {
+				t.Fatal(err)
+			}
+			<-started
+			close(inspect)
+			if err := <-executorContext; err != nil {
+				t.Fatalf("%s executor inherited orchestrator scheduling context: %v", phase, err)
+			}
+			if phase == PhaseFix {
+				if checkpoint, found, err := store.GetFixCheckpoint(context.Background(), attempt.ID); err != nil || !found || checkpoint.AttemptID != attempt.ID {
+					t.Fatalf("live fix checkpoint=%+v found=%v err=%v", checkpoint, found, err)
+				}
+			}
+			if err := runner.Cancel(context.Background(), attempt.ID); err != nil {
+				t.Fatal(err)
+			}
+			close(release)
+		})
+	}
+}
+
+func TestAgentPhaseRunnerCancelledSchedulingContextBeforeClaimStartsNoExecutor(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-cancelled-scheduling-context", CaseValidating)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
+	executor := &phaseExecutorStub{}
+	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error { return nil })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := runner.Start(ctx, attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start err=%v, want context.Canceled", err)
+	}
+	executor.mu.Lock()
+	calls := executor.calls
+	executor.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("cancelled scheduling context started executor %d times", calls)
 	}
 }
 

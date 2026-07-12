@@ -42,7 +42,7 @@ pending_validation -> validating -> reproduced -> investigating
 
 修复和 Git 操作有副作用，不做盲目自动重试。合并冲突不会修改环境分支；push 失败保留本地 merge commit，恢复时先检查远端状态，只重试尚未完成的 push。旧 `runs.json` 一次性导入为不可变的 `legacy_archived` Case，只有用户明确重新开始时才从下一 cycle 的 `pending_validation` 创建活动 Case。
 
-修复阶段在第一次 push 前把完整计划以 `prepared` manifest 原子写入 Studio-owned staging，全部 push 后更新为 `pushed`。正常完成与重启恢复使用同一个 SSH remote exact verifier，逐仓确认 fix branch 精确指向 manifest commit；只有 verifier 通过，Studio 才在同一 SQLite 事务中保存 CodeChange、消费 checkpoint，再清理 staging。`prepared` 只表示可恢复计划，不能代替远端证明。临时 DNS/SSH/权限不可用会进行有界 reconcile，期间保持 attempt running、completion intent 和 checkpoint，不重跑修复 Agent、更不会重复 push；远端可读且 ref 明确漂移才进入 `fix_failed` 并事务消费 checkpoint。schema v4 的 `fix_checkpoints` 表只保存 attempt、Case 和 staging opaque locator，不保存仓库凭据或绝对工作区路径。
+修复阶段在第一次 push 前把完整计划以 `prepared` manifest 原子写入 Studio-owned staging，全部 push 后更新为 `pushed`。正常完成与重启恢复使用同一个 SSH remote exact verifier，逐仓确认 fix branch 精确指向 manifest commit；只有 verifier 通过，Studio 才在同一 SQLite 事务中保存 CodeChange、消费 checkpoint，再清理 staging。`prepared` 只表示可恢复计划，不能代替远端证明。临时 DNS/SSH/权限不可用会进行有界 reconcile，期间保持 attempt running、completion intent 和 checkpoint，不重跑修复 Agent、更不会重复 push；远端可读但精确 ref 缺失、已删除或漂移才进入 `fix_failed` 并事务消费 checkpoint。schema v5 的 `fix_checkpoints` 表只保存 attempt、Case 和 staging opaque locator，不保存仓库凭据或绝对工作区路径；attempt 的完成命令摘要和运行 claim 也持久化，确保跨重启精确重放且 Start/Cancel 竞争不会越过取消边界启动副作用。同步调度 context 不作为 Agent 长任务 context；Start 成功后由 runner 持有独立 cancel context，避免调度函数返回时取消真实任务。
 
 HTTP 版本接口执行时禁用系统代理和自定义 TLS dial 旁路，并在每次 Dial 时校验实际 DNS IP。默认拒绝 loopback、RFC1918/ULA、link-local、multicast、unspecified 和 metadata；`allow_private: true` 是对应环境 URL 精确 host 的显式内网 opt-in，metadata 地址仍不可放行。
 

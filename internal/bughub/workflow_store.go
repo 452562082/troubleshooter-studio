@@ -25,6 +25,7 @@ var (
 	ErrCaseVersionConflict       = errors.New("incident case version conflict")
 	ErrIdempotencyConflict       = errors.New("idempotency key conflicts with committed request")
 	ErrAttemptAlreadyFinished    = errors.New("phase attempt is already finished")
+	ErrAttemptRunClaimConflict   = errors.New("phase attempt run claim conflicts with another starter")
 	ErrUnsupportedWorkflowSchema = errors.New("unsupported workflow store schema")
 )
 
@@ -169,6 +170,10 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		if err := verifyWorkflowSchemaMarker(ctx, tx, 3); err != nil {
 			return err
 		}
+	case 4:
+		if err := verifyWorkflowSchemaMarker(ctx, tx, 4); err != nil {
+			return err
+		}
 	case workflowStoreSchemaVersion:
 		// Verified below before the transaction is committed.
 	default:
@@ -224,7 +229,7 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: workflowStoreSchemaVersion, Fingerprint: fingerprint})
+		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: 4, Fingerprint: fingerprint})
 		if err != nil {
 			return fmt.Errorf("encode workflow schema v4 detail: %w", err)
 		}
@@ -233,6 +238,26 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		}
 		if _, err := tx.ExecContext(ctx, `PRAGMA user_version=4`); err != nil {
 			return fmt.Errorf("set workflow schema version 4: %w", err)
+		}
+		version = 4
+	}
+	if version == 4 {
+		if _, err := tx.ExecContext(ctx, workflowStoreSchemaV5Upgrade); err != nil {
+			return fmt.Errorf("apply workflow schema v5: %w", err)
+		}
+		fingerprint, err := workflowSchemaFingerprint(ctx, tx)
+		if err != nil {
+			return err
+		}
+		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: workflowStoreSchemaVersion, Fingerprint: fingerprint})
+		if err != nil {
+			return fmt.Errorf("encode workflow schema v5 detail: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE schema_migrations SET applied_at = ?, detail_json = ? WHERE key = ?`, formatStoreTime(time.Now().UTC()), string(detail), workflowStoreSchemaV1Key); err != nil {
+			return fmt.Errorf("record workflow schema v5: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `PRAGMA user_version=5`); err != nil {
+			return fmt.Errorf("set workflow schema version 5: %w", err)
 		}
 	}
 	tables, err := workflowTableColumns(ctx, tx)
@@ -244,6 +269,8 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 	v1Columns["deployment_observations"] = append(v1Columns["deployment_observations"], "verified_commit_ancestors_json")
 	v1Columns["deployment_observations"] = append(v1Columns["deployment_observations"], "observed_at", "diagnostic_code", "diagnostic_message")
 	v1Columns["fix_checkpoints"] = []string{"attempt_id", "case_id", "staging_locator", "created_at"}
+	v1Columns["phase_attempts"] = append(v1Columns["phase_attempts"], "completion_identity_sha256")
+	v1Columns["phase_attempts"] = append(v1Columns["phase_attempts"], "run_claim_token")
 	if err := verifyWorkflowColumns(tables, v1Columns); err != nil {
 		return err
 	}
@@ -918,7 +945,7 @@ func (s *CaseStore) FinishAttempt(ctx context.Context, attempt PhaseAttempt) err
 	}
 	result, err := s.db.ExecContext(ctx, `UPDATE phase_attempts SET
 		status = ?, output_json = ?, finished_at = ?, error_code = ?, error_message = ?,
-		input_tokens = ?, output_tokens = ?, duration_nanos = ?
+		input_tokens = ?, output_tokens = ?, duration_nanos = ?, run_claim_token = ''
 		WHERE id = ? AND case_id = ? AND status IN (?, ?)`, attempt.Status, string(attempt.OutputJSON),
 		formatOptionalStoreTime(attempt.FinishedAt), attempt.ErrorCode, attempt.ErrorMessage,
 		attempt.Usage.InputTokens, attempt.Usage.OutputTokens, int64(attempt.Usage.Duration),
@@ -1113,6 +1140,113 @@ type FixCheckpoint struct {
 	CreatedAt      time.Time
 }
 
+type AttemptRunClaim struct {
+	Attempt    PhaseAttempt
+	ClaimToken string
+	Checkpoint *FixCheckpoint
+}
+
+func (s *CaseStore) ClaimRunnableAttempt(ctx context.Context, claim AttemptRunClaim) (err error) {
+	if s == nil || s.db == nil || strings.TrimSpace(claim.ClaimToken) == "" {
+		return errors.New("attempt run claim requires store and token")
+	}
+	if err := claim.Attempt.Validate(); err != nil {
+		return err
+	}
+	if claim.Checkpoint != nil {
+		checkpoint := claim.Checkpoint
+		if claim.Attempt.Phase != PhaseFix || checkpoint.AttemptID != claim.Attempt.ID || checkpoint.CaseID != claim.Attempt.CaseID {
+			return errors.New("fix checkpoint must match the claimed fix attempt")
+		}
+		if err := validateArtifactComponent("fix checkpoint locator", checkpoint.StagingLocator); err != nil || !strings.HasPrefix(checkpoint.StagingLocator, checkpoint.AttemptID+"-") {
+			return errors.New("fix checkpoint locator is not bound to its attempt")
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	incident, err := getCase(ctx, tx, claim.Attempt.CaseID)
+	if err != nil {
+		return err
+	}
+	persisted, err := getAttempt(ctx, tx, claim.Attempt.ID)
+	if err != nil {
+		return err
+	}
+	if incident.CurrentAttemptID != persisted.ID || incident.Status != statusForPhase(persisted.Phase) || incident.CycleNumber != persisted.CycleNumber || incident.SelectedBotKey != persisted.BotKey || !sameRunnableAttempt(persisted, claim.Attempt) || (persisted.Status != AttemptStatusQueued && persisted.Status != AttemptStatusRunning) {
+		return ErrAttemptAlreadyFinished
+	}
+	if _, found, parseErr := parseCompletionIntent(persisted.OutputJSON); parseErr != nil {
+		return parseErr
+	} else if found {
+		return ErrCompletionIntentPending
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE phase_attempts SET status=?,run_claim_token=? WHERE id=? AND case_id=? AND status IN (?,?) AND run_claim_token=''`, AttemptStatusRunning, claim.ClaimToken, persisted.ID, persisted.CaseID, AttemptStatusQueued, AttemptStatusRunning)
+	if err != nil {
+		return err
+	}
+	rows, _ := result.RowsAffected()
+	if rows != 1 {
+		var existing string
+		if queryErr := tx.QueryRowContext(ctx, `SELECT run_claim_token FROM phase_attempts WHERE id=? AND case_id=?`, persisted.ID, persisted.CaseID).Scan(&existing); queryErr != nil {
+			return queryErr
+		}
+		if existing != claim.ClaimToken {
+			return ErrAttemptRunClaimConflict
+		}
+	}
+	if claim.Checkpoint != nil {
+		checkpoint := *claim.Checkpoint
+		if checkpoint.CreatedAt.IsZero() {
+			checkpoint.CreatedAt = time.Now().UTC()
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO fix_checkpoints (attempt_id,case_id,staging_locator,created_at) VALUES (?,?,?,?)`, checkpoint.AttemptID, checkpoint.CaseID, checkpoint.StagingLocator, formatStoreTime(checkpoint.CreatedAt)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *CaseStore) ValidateAttemptRunClaim(ctx context.Context, attempt PhaseAttempt, claimToken string) (bool, error) {
+	var status AttemptStatus
+	var storedToken, currentAttempt, selectedBot string
+	var caseStatus CaseStatus
+	var cycle int
+	err := s.db.QueryRowContext(ctx, `SELECT p.status,p.run_claim_token,c.current_attempt_id,c.status,c.cycle_number,c.selected_bot_key FROM phase_attempts p JOIN incident_cases c ON c.id=p.case_id WHERE p.id=? AND p.case_id=?`, attempt.ID, attempt.CaseID).Scan(&status, &storedToken, &currentAttempt, &caseStatus, &cycle, &selectedBot)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return status == AttemptStatusRunning && storedToken == claimToken && currentAttempt == attempt.ID && caseStatus == statusForPhase(attempt.Phase) && cycle == attempt.CycleNumber && selectedBot == attempt.BotKey, nil
+}
+
+func (s *CaseStore) ReleaseAttemptRunClaim(ctx context.Context, attemptID, caseID, claimToken string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE phase_attempts SET run_claim_token='' WHERE id=? AND case_id=? AND status IN (?,?) AND run_claim_token=?`, attemptID, caseID, AttemptStatusQueued, AttemptStatusRunning, claimToken)
+	if err != nil {
+		return err
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 1 {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM fix_checkpoints WHERE attempt_id=? AND case_id=?`, attemptID, caseID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *CaseStore) SaveFixCheckpoint(ctx context.Context, checkpoint FixCheckpoint) error {
 	if s == nil || s.db == nil || strings.TrimSpace(checkpoint.AttemptID) == "" || strings.TrimSpace(checkpoint.CaseID) == "" {
 		return errors.New("fix checkpoint store, attempt, and Case are required")
@@ -1179,6 +1313,8 @@ type CaseMutation struct {
 	CodeChanges                  []CodeChange
 	Observations                 []DeploymentObservation
 	ExpectedAttemptOutputs       map[string]json.RawMessage `json:"-"`
+	CompletionAttemptID          string
+	CompletionIdentitySHA256     string
 	DeleteFixCheckpointAttemptID string
 	Snapshot                     CaseSnapshotUpdate
 }
@@ -1255,6 +1391,25 @@ func (s *CaseStore) ApplyCaseMutation(ctx context.Context, mutation CaseMutation
 	}
 	if len(mutation.RequestJSON) == 0 || !json.Valid(mutation.RequestJSON) {
 		return result, errors.New("compound Case mutation request must be valid JSON")
+	}
+	if (mutation.CompletionAttemptID == "") != (mutation.CompletionIdentitySHA256 == "") {
+		return result, errors.New("completion attempt and identity digest must be provided together")
+	}
+	if mutation.CompletionIdentitySHA256 != "" {
+		decoded, decodeErr := hex.DecodeString(mutation.CompletionIdentitySHA256)
+		if decodeErr != nil || len(decoded) != sha256.Size {
+			return result, errors.New("completion identity digest must be SHA-256")
+		}
+		found := false
+		for _, attempt := range mutation.FinishAttempts {
+			if attempt.ID == mutation.CompletionAttemptID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return result, errors.New("completion identity must belong to a finished attempt")
+		}
 	}
 	fingerprint, err := caseMutationFingerprint(mutation)
 	if err != nil {
@@ -1431,7 +1586,11 @@ func (s *CaseStore) ApplyCaseMutation(ctx context.Context, mutation CaseMutation
 		} else if found {
 			return result, ErrCompletionIntentPending
 		}
-		execResult, execErr := tx.ExecContext(ctx, `UPDATE phase_attempts SET status=?, output_json=?, finished_at=?, error_code=?, error_message=?, input_tokens=?, output_tokens=?, duration_nanos=? WHERE id=? AND case_id=? AND status IN (?,?) AND output_json=?`, attempt.Status, string(attempt.OutputJSON), formatOptionalStoreTime(attempt.FinishedAt), attempt.ErrorCode, attempt.ErrorMessage, attempt.Usage.InputTokens, attempt.Usage.OutputTokens, int64(attempt.Usage.Duration), attempt.ID, incident.ID, AttemptStatusQueued, AttemptStatusRunning, currentOutput)
+		completionIdentity := ""
+		if mutation.CompletionAttemptID == attempt.ID {
+			completionIdentity = mutation.CompletionIdentitySHA256
+		}
+		execResult, execErr := tx.ExecContext(ctx, `UPDATE phase_attempts SET status=?, output_json=?, finished_at=?, error_code=?, error_message=?, input_tokens=?, output_tokens=?, duration_nanos=?, completion_identity_sha256=?, run_claim_token='' WHERE id=? AND case_id=? AND status IN (?,?) AND output_json=?`, attempt.Status, string(attempt.OutputJSON), formatOptionalStoreTime(attempt.FinishedAt), attempt.ErrorCode, attempt.ErrorMessage, attempt.Usage.InputTokens, attempt.Usage.OutputTokens, int64(attempt.Usage.Duration), completionIdentity, attempt.ID, incident.ID, AttemptStatusQueued, AttemptStatusRunning, currentOutput)
 		if execErr != nil {
 			return result, execErr
 		}
@@ -1907,6 +2066,25 @@ func (s *CaseStore) GetCommittedCaseMutation(ctx context.Context, key string) (C
 		return CommittedCaseMutation{}, false, err
 	}
 	return replay, true, nil
+}
+
+func (s *CaseStore) GetAttemptCompletionIdentity(ctx context.Context, attemptID string) (string, bool, error) {
+	var digest string
+	err := s.db.QueryRowContext(ctx, `SELECT completion_identity_sha256 FROM phase_attempts WHERE id=?`, attemptID).Scan(&digest)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if digest == "" {
+		return "", false, nil
+	}
+	decoded, decodeErr := hex.DecodeString(digest)
+	if decodeErr != nil || len(decoded) != sha256.Size {
+		return "", false, errors.New("persisted completion identity is invalid")
+	}
+	return digest, true, nil
 }
 
 // latestDeploymentReservationEvent reads the reservation envelope without

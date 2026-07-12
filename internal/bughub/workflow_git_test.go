@@ -87,6 +87,50 @@ func TestGitIntegrationFastForwardAndIdempotentReplay(t *testing.T) {
 	}
 }
 
+func TestInspectFixClassifiesExactRemoteRefState(t *testing.T) {
+	t.Run("reachable remote without branch is authoritative mismatch", func(t *testing.T) {
+		f := newGitFixture(t)
+		commit := strings.TrimSpace(runGitTest(t, f.repo, "rev-parse", "HEAD"))
+		_, err := f.service(t).InspectFix(context.Background(), FixInspectionRequest{CaseID: "case-missing", Changes: []CodeChange{{Repo: "api", FixBranch: "fix/missing", FixCommit: commit, PushRemote: "origin"}}})
+		if !errors.Is(err, ErrFixRemoteMismatch) || errors.Is(err, ErrFixInspectionUnavailable) {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("deleted branch is authoritative mismatch", func(t *testing.T) {
+		f := newGitFixture(t)
+		commit := f.makeFix(t, "deleted\n")
+		runGitTest(t, f.repo, "push", "origin", "--delete", "fix/bug")
+		_, err := f.service(t).InspectFix(context.Background(), FixInspectionRequest{CaseID: "case-deleted", Changes: []CodeChange{{Repo: "api", FixBranch: "fix/bug", FixCommit: commit, PushRemote: "origin"}}})
+		if !errors.Is(err, ErrFixRemoteMismatch) || errors.Is(err, ErrFixInspectionUnavailable) {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	for _, tc := range []struct {
+		name   string
+		stderr string
+	}{
+		{name: "network failure remains unavailable", stderr: "ssh: connect to host example.test port 22: Network is unreachable"},
+		{name: "authentication failure remains unavailable", stderr: "git@example.test: Permission denied (publickey)."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newGitFixture(t)
+			commit := strings.TrimSpace(runGitTest(t, f.repo, "rev-parse", "HEAD"))
+			script := filepath.Join(t.TempDir(), "ssh-fail")
+			if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' '"+tc.stderr+"' >&2\nexit 255\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GIT_SSH", script)
+			runGitTest(t, f.repo, "config", "--unset-all", "url.file://"+f.remote+".insteadOf")
+			_, err := f.service(t).InspectFix(context.Background(), FixInspectionRequest{CaseID: "case-unavailable", Changes: []CodeChange{{Repo: "api", FixBranch: "fix/bug", FixCommit: commit, PushRemote: "origin"}}})
+			if !errors.Is(err, ErrFixInspectionUnavailable) || errors.Is(err, ErrFixRemoteMismatch) {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
 func TestGitIntegrationCreatesMergeCommit(t *testing.T) {
 	f := newGitFixture(t)
 	commit := f.makeFix(t, "fix\n")

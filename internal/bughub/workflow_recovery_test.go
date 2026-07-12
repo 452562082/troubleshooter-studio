@@ -278,7 +278,7 @@ func TestRecoverFixCheckpointUsesRemoteBranchAsCrashTruth(t *testing.T) {
 			runGitTest(t, f.repo, "add", "fix.txt")
 			runGitTest(t, f.repo, "commit", "-m", "local fix")
 			return strings.TrimSpace(runGitTest(t, f.repo, "rev-parse", "HEAD"))
-		}, want: CaseFixing, wantUnavailable: true},
+		}, want: CaseFixFailed},
 		{name: "remote branch drift", state: "pushed", setup: func(t *testing.T, f gitFixture) string {
 			commit := f.makeFix(t, "first\n")
 			if err := os.WriteFile(filepath.Join(f.repo, "drift.txt"), []byte("drift\n"), 0o600); err != nil {

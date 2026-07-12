@@ -55,14 +55,19 @@ const dialogCaseVersion = ref<number>()
 const dialogRootCauseAttemptID = ref('')
 const currentCase = computed(() => props.detail?.case)
 const action = computed(() => currentCase.value ? primaryActionFor(currentCase.value) : undefined)
-const latestDeployment = computed(() => {
-  const items = props.detail?.deployment_observations || []
-  return items[items.length - 1]
-})
 const expectedDeploymentCommits = computed(() => {
-  const observed = latestDeployment.value?.expected_commits
-  if (observed && Object.keys(observed).length > 0) return observed
-  return Object.fromEntries((props.detail?.code_changes || []).map(change => [change.repo, change.merge_commit || change.fix_commit]))
+  const currentAttemptID = props.detail?.case.current_attempt_id || ''
+  const changes = (props.detail?.code_changes || []).filter(change => change.attempt_id === currentAttemptID && change.push_status === 'pushed')
+  return Object.fromEntries(changes.map(change => [change.repo, change.merge_commit || change.fix_commit]))
+})
+const latestDeployment = computed(() => {
+  const expected = expectedDeploymentCommits.value
+  const entries = Object.entries(expected)
+  const items = props.detail?.deployment_observations || []
+  return [...items].reverse().find(observation => {
+    const observed = observation.expected_commits || {}
+    return Object.keys(observed).length === entries.length && entries.every(([repo, commit]) => observed[repo] === commit)
+  })
 })
 const deploymentVersionSource = computed(() => latestDeployment.value?.verification_source || 'manual')
 const mergeApprovalScopes = computed(() => (props.detail?.code_changes || []).map(change => ({

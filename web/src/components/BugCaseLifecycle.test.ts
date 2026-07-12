@@ -78,6 +78,7 @@ describe('BugCaseLifecycle', () => {
 
   it('previews target environment, expected commits, and verifier before deployment validation', async () => {
     const snapshot = detail('waiting_deployment')
+    snapshot.case.current_attempt_id = 'fix-1'
     snapshot.code_changes = [{ id: 'change-1', case_id: 'case-1', attempt_id: 'fix-1', repo: 'api', base_branch: 'main', fix_branch: 'fix/1', fix_commit: 'fix-abc', test_evidence: [], target_environment_branch: 'test', merge_base_head: 'base', merge_commit: 'merge-def', push_remote: 'origin', push_status: 'pushed' }]
     snapshot.deployment_observations = [{ id: 'observation-1', case_id: 'case-1', environment: 'test', expected_commits: { api: 'merge-def' }, observed_version: '', observed_images: {}, observed_commits: {}, verification_source: 'version endpoint', result: 'unavailable' }]
     const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
@@ -92,6 +93,7 @@ describe('BugCaseLifecycle', () => {
 
   it('submits the displayed version source and optional per-repository observations', async () => {
     const snapshot = detail('waiting_deployment')
+    snapshot.case.current_attempt_id = 'fix-1'
     snapshot.code_changes = [
       { id: 'api', case_id: 'case-1', attempt_id: 'fix-1', repo: 'api', base_branch: 'main', fix_branch: 'fix/1', fix_commit: 'fix-api', test_evidence: [], target_environment_branch: 'test', merge_base_head: 'base', merge_commit: 'merge-api', push_remote: 'origin', push_status: 'pushed' },
       { id: 'worker', case_id: 'case-1', attempt_id: 'fix-1', repo: 'worker', base_branch: 'main', fix_branch: 'fix/1', fix_commit: 'fix-worker', test_evidence: [], target_environment_branch: 'test', merge_base_head: 'base', merge_commit: 'merge-worker', push_remote: 'origin', push_status: 'pushed' },
@@ -106,6 +108,24 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.emitted('primary')?.[0]).toEqual([{
       kind: 'notify_deployed', observedVersion: 'build-42', observedCommits: { api: 'merge-api' }, versionSource: 'manual',
     }])
+  })
+
+  it('previews only the current fix attempt deployment scope in a later cycle', async () => {
+    const snapshot = detail('waiting_deployment')
+    snapshot.case.current_attempt_id = 'fix-2'
+    snapshot.case.cycle_number = 2
+    snapshot.code_changes = [
+      { id: 'old', case_id: 'case-1', attempt_id: 'fix-1', repo: 'api', base_branch: 'main', fix_branch: 'fix/old', fix_commit: 'fix-old', test_evidence: [], target_environment_branch: 'test', merge_base_head: 'base-1', merge_commit: 'merge-old', push_remote: 'origin', push_status: 'pushed' },
+      { id: 'new', case_id: 'case-1', attempt_id: 'fix-2', repo: 'api', base_branch: 'main', fix_branch: 'fix/new', fix_commit: 'fix-new', test_evidence: [], target_environment_branch: 'test', merge_base_head: 'base-2', merge_commit: 'merge-new', push_remote: 'origin', push_status: 'pushed' },
+    ]
+    snapshot.deployment_observations = [{ id: 'old-observation', case_id: 'case-1', environment: 'test', expected_commits: { api: 'merge-old' }, observed_version: 'old', observed_images: {}, observed_commits: { api: 'merge-old' }, verification_source: 'old source', result: 'matched' }]
+    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+
+    await wrapper.find('.primary-action').trigger('click')
+
+    expect(wrapper.find('[role="dialog"]').text()).toContain('api: merge-new')
+    expect(wrapper.find('[role="dialog"]').text()).not.toContain('merge-old')
+    expect(wrapper.find('[role="dialog"]').text()).toContain('manual')
   })
 
   it('restores focus to the primary action when an approval dialog closes', async () => {

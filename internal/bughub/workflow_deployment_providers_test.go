@@ -49,10 +49,27 @@ func TestHTTPVersionVerifierBoundsAndSanitizesFailures(t *testing.T) {
 			t.Fatalf("got=%+v calls=%d err=%v", got, calls, err)
 		}
 	})
+	t.Run("redirect userinfo", func(t *testing.T) {
+		calls := 0
+		client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			calls++
+			if calls > 1 || request.Header.Get("Authorization") != "" {
+				t.Fatal("credential-bearing redirect target was requested")
+			}
+			return &http.Response{StatusCode: http.StatusFound, Header: http.Header{"Location": []string{"https://user:pass@version.example.test/commit"}}, Body: io.NopCloser(strings.NewReader("")), Request: request}, nil
+		})}
+		v := HTTPVersionVerifier{Environment: "test", Config: config.HTTPDeploymentVerification{URL: "https://version.example.test/start", JSONPointer: "/commit"}, Client: client}
+		got, err := v.Verify(context.Background(), DeploymentVerificationRequest{Environment: "test", Source: "http", ExpectedCommits: map[string]string{"repo": "a"}})
+		if err != nil || got.Result != DeploymentResultUnavailable || calls != 1 {
+			t.Fatalf("got=%+v calls=%d err=%v", got, calls, err)
+		}
+	})
 	t.Run("cross host redirect", func(t *testing.T) {
 		target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("cross-host target called") }))
 		defer target.Close()
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { http.Redirect(w, nil, target.URL, http.StatusFound) }))
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			http.Redirect(w, request, target.URL, http.StatusFound)
+		}))
 		defer server.Close()
 		v := HTTPVersionVerifier{Environment: "test", Config: config.HTTPDeploymentVerification{URL: server.URL, JSONPointer: "/commit"}}
 		got, err := v.Verify(context.Background(), DeploymentVerificationRequest{Environment: "test", Source: "http", ExpectedCommits: map[string]string{"repo": "a"}})
@@ -85,6 +102,25 @@ func TestHTTPVersionVerifierBoundsAndSanitizesFailures(t *testing.T) {
 	})
 }
 
+func TestHTTPVersionVerifierRejectsUnsafeArrayIndexesWithoutPanic(t *testing.T) {
+	for _, pointer := range []string{"/items/01", "/items/18446744073709551616", "/items/999999999999999999999999999999999999999999999999999999999"} {
+		t.Run(pointer, func(t *testing.T) {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					t.Fatalf("pointer %q panicked: %v", pointer, recovered)
+				}
+			}()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"items":["a"]}`)) }))
+			defer server.Close()
+			v := HTTPVersionVerifier{Environment: "test", Config: config.HTTPDeploymentVerification{URL: server.URL, JSONPointer: pointer}}
+			got, err := v.Verify(context.Background(), DeploymentVerificationRequest{Environment: "test", Source: "http", ExpectedCommits: map[string]string{"repo": "a"}})
+			if err != nil || got.Result != DeploymentResultUnavailable {
+				t.Fatalf("got=%+v err=%v", got, err)
+			}
+		})
+	}
+}
+
 type fakeK8sDeploymentReader struct {
 	cluster, namespace, deployment string
 	result                         K8sDeploymentVersion
@@ -115,7 +151,7 @@ func TestK8sVersionVerifierImageLabelAndFailures(t *testing.T) {
 
 	reader.err = errors.New("Authorization: Bearer top-secret")
 	got, err = v.Verify(context.Background(), DeploymentVerificationRequest{Environment: "test", Source: "k8s", ExpectedCommits: map[string]string{"repo": "abc123"}})
-	if err != nil || got.Result != DeploymentResultUnavailable || strings.Contains(got.ObservedVersion, "top-secret") {
+	if err != nil || got.Result != DeploymentResultUnavailable || got.DiagnosticCode != "k8s_read_failed" || strings.Contains(got.ObservedVersion+got.DiagnosticMessage, "top-secret") {
 		t.Fatalf("got=%+v err=%v", got, err)
 	}
 

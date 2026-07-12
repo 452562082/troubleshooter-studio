@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +31,7 @@ type HTTPVersionVerifier struct {
 func (v HTTPVersionVerifier) Verify(ctx context.Context, request DeploymentVerificationRequest) (DeploymentObservation, error) {
 	observation := newRuntimeDeploymentObservation(request, "http")
 	if normalizedDeploymentSource(request.Source) != "http" {
+		setDeploymentDiagnostic(&observation, "provider_mismatch", "部署版本验证方式不匹配")
 		return observation, ErrDeploymentVerifierUnavailable
 	}
 	if strings.TrimSpace(request.Environment) != strings.TrimSpace(v.Environment) {
@@ -38,6 +40,7 @@ func (v HTTPVersionVerifier) Verify(ctx context.Context, request DeploymentVerif
 	}
 	target, err := url.Parse(strings.TrimSpace(v.Config.URL))
 	if err != nil || (target.Scheme != "http" && target.Scheme != "https") || target.Host == "" || target.User != nil {
+		setDeploymentDiagnostic(&observation, "invalid_http_config", "HTTP 版本验证配置无效")
 		return observation, nil
 	}
 	timeout := v.Timeout
@@ -54,6 +57,9 @@ func (v HTTPVersionVerifier) Verify(ctx context.Context, request DeploymentVerif
 	}
 	previousRedirect := client.CheckRedirect
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if req.URL.User != nil {
+			return errors.New("deployment version redirect credentials rejected")
+		}
 		if !strings.EqualFold(req.URL.Host, target.Host) {
 			return errors.New("deployment version redirect rejected")
 		}
@@ -77,27 +83,33 @@ func (v HTTPVersionVerifier) Verify(ctx context.Context, request DeploymentVerif
 	}
 	response, err := client.Do(httpRequest)
 	if err != nil {
+		setDeploymentDiagnostic(&observation, "http_request_failed", "版本接口暂不可用")
 		return observation, nil
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		setDeploymentDiagnostic(&observation, "http_status_unavailable", "版本接口未返回成功状态")
 		return observation, nil
 	}
 	limited := io.LimitReader(response.Body, HTTPVersionMaxBodyBytes+1)
 	body, err := io.ReadAll(limited)
 	if err != nil || len(body) > HTTPVersionMaxBodyBytes {
+		setDeploymentDiagnostic(&observation, "http_body_unavailable", "版本接口响应不可读取或过大")
 		return observation, nil
 	}
 	var document any
 	if err := json.Unmarshal(body, &document); err != nil {
+		setDeploymentDiagnostic(&observation, "invalid_json", "版本接口响应不是有效 JSON")
 		return observation, nil
 	}
 	selected, ok := resolveJSONPointer(document, v.Config.JSONPointer)
 	if !ok {
+		setDeploymentDiagnostic(&observation, "json_pointer_not_found", "版本字段未找到")
 		return observation, nil
 	}
 	commits := commitsFromVersionValue(selected, request.ExpectedCommits)
 	if len(commits) == 0 {
+		setDeploymentDiagnostic(&observation, "invalid_version_value", "版本字段不包含可验证的提交")
 		return observation, nil
 	}
 	observation.ObservedCommits = commits
@@ -130,20 +142,14 @@ func resolveJSONPointer(document any, pointer string) (any, bool) {
 				return nil, false
 			}
 		case []any:
-			var index int
-			if token == "" {
+			if token == "" || (len(token) > 1 && token[0] == '0') {
 				return nil, false
 			}
-			for _, c := range token {
-				if c < '0' || c > '9' {
-					return nil, false
-				}
-				index = index*10 + int(c-'0')
-			}
-			if index >= len(node) {
+			parsed, err := strconv.ParseUint(token, 10, 64)
+			if err != nil || parsed >= uint64(len(node)) {
 				return nil, false
 			}
-			current = node[index]
+			current = node[int(parsed)]
 		default:
 			return nil, false
 		}

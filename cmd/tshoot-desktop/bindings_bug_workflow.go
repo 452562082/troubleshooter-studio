@@ -234,9 +234,7 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 			}
 			return filepath.Clean(path), nil
 		})
-		deploymentVerifier := bughub.NewCompositeDeploymentVerifier(map[string]bughub.DeploymentVerifier{
-			"manual": bughub.ManualVersionVerifier{},
-		})
+		deploymentVerifier := &caseConfiguredDeploymentVerifier{app: a, store: store}
 		orchestrator := bughub.NewCaseOrchestrator(store, runner, gitService, deploymentVerifier)
 		runner.SetCompletionCallback(func(callbackCtx context.Context, command bughub.CompleteAttemptCommand) error {
 			incident, completeErr := orchestrator.CompleteAttempt(workflowContext(callbackCtx), command)
@@ -567,7 +565,8 @@ func (a *App) NotifyIncidentDeployed(input NotifyIncidentDeployedInput) (bughub.
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
-	command := bughub.NotifyDeployedCommand{CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID), ObservedVersion: strings.TrimSpace(input.ObservedVersion), ObservedCommits: input.ObservedCommits, Source: strings.TrimSpace(input.VersionSource), Bug: bug, Bot: bot, InputJSON: inputJSON}
+	serverSource := a.configuredDeploymentProvider(a.workflowCommandContext(), input.CaseID)
+	command := bughub.NotifyDeployedCommand{CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID), ObservedVersion: strings.TrimSpace(input.ObservedVersion), ObservedCommits: input.ObservedCommits, Source: serverSource, Bug: bug, Bot: bot, InputJSON: inputJSON}
 	var incident bughub.IncidentCase
 	if strings.TrimSpace(input.NotificationText) != "" {
 		incident, err = orchestrator.NotifyDeployedFromText(a.workflowCommandContext(), input.NotificationText, command)

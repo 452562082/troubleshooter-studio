@@ -31,6 +31,7 @@ type K8sVersionVerifier struct {
 func (v K8sVersionVerifier) Verify(ctx context.Context, request DeploymentVerificationRequest) (DeploymentObservation, error) {
 	observation := newRuntimeDeploymentObservation(request, "k8s")
 	if normalizedDeploymentSource(request.Source) != "k8s" || v.Reader == nil {
+		setDeploymentDiagnostic(&observation, "provider_unavailable", "K8s 版本验证不可用")
 		return observation, ErrDeploymentVerifierUnavailable
 	}
 	if strings.TrimSpace(request.Environment) != strings.TrimSpace(v.Environment) {
@@ -39,6 +40,7 @@ func (v K8sVersionVerifier) Verify(ctx context.Context, request DeploymentVerifi
 	}
 	for repo := range request.ExpectedCommits {
 		if strings.TrimSpace(v.Config.DeploymentsByRepo[repo]) == "" {
+			setDeploymentDiagnostic(&observation, "deployment_mapping_missing", "仓库缺少 Deployment 映射")
 			return observation, fmt.Errorf("%w: repository %q has no deployment mapping", ErrDeploymentVerifierUnavailable, repo)
 		}
 	}
@@ -51,6 +53,7 @@ func (v K8sVersionVerifier) Verify(ctx context.Context, request DeploymentVerifi
 	for _, repo := range repos {
 		deployment, err := v.Reader.ReadDeployment(ctx, v.Config.Cluster, v.Config.Namespace, v.Config.DeploymentsByRepo[repo])
 		if err != nil {
+			setDeploymentDiagnostic(&observation, "k8s_read_failed", "K8s Deployment 暂不可读")
 			return observation, nil
 		}
 		commit := ""
@@ -78,6 +81,7 @@ func newRuntimeDeploymentObservation(request DeploymentVerificationRequest, sour
 		VerificationSource: source,
 		ObservedImages:     map[string]string{},
 		ObservedCommits:    map[string]string{},
+		ObservedAt:         time.Now().UTC(),
 		Result:             DeploymentResultUnavailable,
 	}
 }
@@ -90,11 +94,22 @@ func finishExactRuntimeObservation(observation DeploymentObservation) Deployment
 	for repo, expected := range observation.ExpectedCommits {
 		if observation.ObservedCommits[repo] != expected {
 			observation.Result = DeploymentResultMismatched
+			setDeploymentDiagnostic(&observation, "commit_mismatch", "运行版本与期望提交不一致")
 			return observation
 		}
 	}
 	now := time.Now().UTC()
 	observation.VerifiedAt = &now
 	observation.Result = DeploymentResultMatched
+	observation.DiagnosticCode = ""
+	observation.DiagnosticMessage = ""
 	return observation
+}
+
+func setDeploymentDiagnostic(observation *DeploymentObservation, code, message string) {
+	if observation == nil {
+		return
+	}
+	observation.DiagnosticCode = code
+	observation.DiagnosticMessage = message
 }

@@ -90,7 +90,7 @@ CREATE INDEX IF NOT EXISTS idx_events_case_created ON transition_events(case_id,
 `
 
 const (
-	workflowStoreSchemaVersion   = 2
+	workflowStoreSchemaVersion   = 3
 	workflowStoreSchemaV1Key     = "workflow-schema-v1"
 	workflowStoreSchemaV1Upgrade = `
 ALTER TABLE transition_events ADD COLUMN request_fingerprint TEXT NOT NULL DEFAULT '';
@@ -98,6 +98,12 @@ ALTER TABLE transition_events ADD COLUMN result_case_json TEXT NOT NULL DEFAULT 
 `
 	workflowStoreSchemaV2Upgrade = `
 ALTER TABLE deployment_observations ADD COLUMN verified_commit_ancestors_json TEXT NOT NULL DEFAULT '{}';
+`
+	workflowStoreSchemaV3Upgrade = `
+ALTER TABLE deployment_observations ADD COLUMN observed_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.000000000Z';
+ALTER TABLE deployment_observations ADD COLUMN diagnostic_code TEXT NOT NULL DEFAULT '';
+ALTER TABLE deployment_observations ADD COLUMN diagnostic_message TEXT NOT NULL DEFAULT '';
+UPDATE deployment_observations SET observed_at = COALESCE(verified_at, user_notified_at, observed_at);
 `
 )
 

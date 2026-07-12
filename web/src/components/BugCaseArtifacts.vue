@@ -168,7 +168,9 @@ function limitedMarkdown(value: string): MarkdownBlock[] {
       <article v-for="observation in detail.deployment_observations" :key="observation.id" class="artifact-item">
         <strong>{{ observation.result }} · {{ observation.environment }}</strong>
         <span>{{ observation.verification_source || '验证来源未知' }}</span>
+        <small>{{ observation.observed_at || '观测时间未知' }}</small>
         <code>{{ observation.observed_version || '未识别版本' }}</code>
+        <span v-if="observation.diagnostic_message">{{ observation.diagnostic_code }} · {{ observation.diagnostic_message }}</span>
       </article>
     </section>
   </div>

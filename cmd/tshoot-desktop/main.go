@@ -40,6 +40,7 @@ import (
 	tshoot "github.com/xiaolong/troubleshooter-studio"
 	"github.com/xiaolong/troubleshooter-studio/api"
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
+	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/webui"
 )
 
@@ -87,16 +88,18 @@ type App struct {
 	// workflowMu protects the single durable workflow runtime owned by this App.
 	// Bindings only adapt commands to this runtime; persistence and transitions
 	// remain inside bughub's CaseStore and CaseOrchestrator.
-	workflowMu             sync.Mutex
-	workflowRoot           string
-	workflowStore          *bughub.CaseStore
-	workflowOrchestrator   *bughub.CaseOrchestrator
-	workflowRunner         *bughub.AgentPhaseRunner
-	workflowInitErr        error
-	workflowLoadBug        func(string) (bughub.Bug, error)
-	workflowLoadBot        func(string) (bughub.BotRef, error)
-	workflowEmit           func(string, any)
-	workflowRuntimeFactory func(*bughub.CaseStore, *bughub.InvestigationStore) incidentWorkflowRuntime
+	workflowMu                   sync.Mutex
+	workflowRoot                 string
+	workflowStore                *bughub.CaseStore
+	workflowOrchestrator         *bughub.CaseOrchestrator
+	workflowRunner               *bughub.AgentPhaseRunner
+	workflowInitErr              error
+	workflowLoadBug              func(string) (bughub.Bug, error)
+	workflowLoadBot              func(string) (bughub.BotRef, error)
+	workflowLoadDeploymentConfig func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error)
+	workflowK8sReaderFactory     func(context.Context, *config.SystemConfig, config.Environment) (bughub.K8sDeploymentReader, error)
+	workflowEmit                 func(string, any)
+	workflowRuntimeFactory       func(*bughub.CaseStore, *bughub.InvestigationStore) incidentWorkflowRuntime
 }
 
 var startDesktopTray = startTray

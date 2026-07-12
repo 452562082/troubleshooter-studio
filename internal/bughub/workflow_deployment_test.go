@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -58,8 +59,10 @@ func TestDeploymentProofSchemaMigratesV1Store(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsString(columns["deployment_observations"], "verified_commit_ancestors_json") {
-		t.Fatalf("columns=%v", columns["deployment_observations"])
+	for _, required := range []string{"verified_commit_ancestors_json", "observed_at", "diagnostic_code", "diagnostic_message"} {
+		if !containsString(columns["deployment_observations"], required) {
+			t.Fatalf("missing %s columns=%v", required, columns["deployment_observations"])
+		}
 	}
 }
 
@@ -122,6 +125,40 @@ func TestManualVersionVerifierRejectsInvalidMetadata(t *testing.T) {
 type staticDeploymentVerifier struct {
 	called int
 	result DeploymentResult
+}
+
+type secretFailingDeploymentVerifier struct{}
+
+func (secretFailingDeploymentVerifier) Verify(context.Context, DeploymentVerificationRequest) (DeploymentObservation, error) {
+	return DeploymentObservation{VerificationSource: "http", Result: DeploymentResultUnavailable}, errors.New("Authorization: Bearer raw-secret https://user:pass@example.test")
+}
+
+func TestDeploymentVerifierRawFailureIsNeverPersisted(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident := addPushedWorkflowChange(t, store, createWorkflowCase(t, store, "secret-deployment", CaseWaitingDeployment))
+	o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, secretFailingDeploymentVerifier{})
+	_, err := o.NotifyDeployed(ctx, NotifyDeployedCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "secret-notice", ActorID: "alice"})
+	if err == nil {
+		t.Fatal("expected verifier failure")
+	}
+	events, listErr := store.ListEvents(ctx, incident.ID)
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	observations, listErr := store.ListDeploymentObservations(ctx, incident.ID)
+	if listErr != nil || len(observations) != 1 || observations[0].DiagnosticCode != "verifier_unavailable" || observations[0].ObservedAt.IsZero() {
+		t.Fatalf("observations=%+v err=%v", observations, listErr)
+	}
+	persisted, _ := json.Marshal(struct {
+		Events       []TransitionEvent
+		Observations []DeploymentObservation
+	}{events, observations})
+	for _, secret := range []string{"raw-secret", "user:pass", "Authorization"} {
+		if strings.Contains(string(persisted), secret) {
+			t.Fatalf("persisted verifier secret %q: %s", secret, persisted)
+		}
+	}
 }
 
 func (v *staticDeploymentVerifier) Verify(_ context.Context, request DeploymentVerificationRequest) (DeploymentObservation, error) {

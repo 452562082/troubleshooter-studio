@@ -48,6 +48,7 @@ func (v ManualVersionVerifier) Verify(ctx context.Context, request DeploymentVer
 		ObservedVersion:    strings.TrimSpace(request.ObservedVersion),
 		ObservedCommits:    CloneStringMap(request.ObservedCommits),
 		Result:             DeploymentResultUnavailable,
+		ObservedAt:         time.Now().UTC(),
 	}
 	if observation.VerificationSource == "" || observation.ObservedVersion == "" || observation.Environment == "" || len(observation.ExpectedCommits) == 0 {
 		return observation, nil
@@ -108,12 +109,12 @@ func NewCompositeDeploymentVerifier(providers map[string]DeploymentVerifier) *Co
 
 func (v *CompositeDeploymentVerifier) Verify(ctx context.Context, request DeploymentVerificationRequest) (DeploymentObservation, error) {
 	if v == nil {
-		return DeploymentObservation{Result: DeploymentResultUnavailable}, ErrDeploymentVerifierUnavailable
+		return DeploymentObservation{Result: DeploymentResultUnavailable, ObservedAt: time.Now().UTC()}, ErrDeploymentVerifierUnavailable
 	}
 	source := normalizedDeploymentSource(request.Source)
 	provider := v.providers[source]
 	if provider == nil {
-		return DeploymentObservation{Environment: request.Environment, ExpectedCommits: CloneStringMap(request.ExpectedCommits), VerificationSource: source, ObservedVersion: request.ObservedVersion, ObservedCommits: CloneStringMap(request.ObservedCommits), Result: DeploymentResultUnavailable}, fmt.Errorf("%w: source %q", ErrDeploymentVerifierUnavailable, source)
+		return DeploymentObservation{Environment: request.Environment, ExpectedCommits: CloneStringMap(request.ExpectedCommits), VerificationSource: source, ObservedVersion: request.ObservedVersion, ObservedCommits: CloneStringMap(request.ObservedCommits), ObservedAt: time.Now().UTC(), DiagnosticCode: "provider_unavailable", DiagnosticMessage: "部署版本验证方式不可用", Result: DeploymentResultUnavailable}, fmt.Errorf("%w: source %q", ErrDeploymentVerifierUnavailable, source)
 	}
 	request.Source = source
 	return provider.Verify(ctx, request.Clone())

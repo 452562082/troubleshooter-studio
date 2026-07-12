@@ -458,6 +458,9 @@ type DeploymentObservation struct {
 	ObservedVersion    string            `json:"observed_version"`
 	ObservedImages     map[string]string `json:"observed_images"`
 	ObservedCommits    map[string]string `json:"observed_commits"`
+	ObservedAt         time.Time         `json:"observed_at"`
+	DiagnosticCode     string            `json:"diagnostic_code,omitempty"`
+	DiagnosticMessage  string            `json:"diagnostic_message,omitempty"`
 	// VerifiedCommitAncestors records the expected ancestor proved for an
 	// observed descendant commit. Exact matches do not need an entry.
 	VerifiedCommitAncestors map[string]string `json:"verified_commit_ancestors,omitempty"`
@@ -481,6 +484,12 @@ func (o DeploymentObservation) Validate() error {
 	}
 	if blank(o.Environment) || blank(o.VerificationSource) {
 		return fmt.Errorf("deployment observation environment and verification source are required")
+	}
+	if o.ObservedAt.IsZero() {
+		return fmt.Errorf("deployment observation observed_at is required")
+	}
+	if len(o.DiagnosticCode) > 64 || len(o.DiagnosticMessage) > 256 || strings.ContainsAny(o.DiagnosticCode+o.DiagnosticMessage, "\r\n") {
+		return fmt.Errorf("deployment observation diagnostics must be bounded single-line text")
 	}
 	if err := validateNonEmptyStringMap("deployment expected commits", o.ExpectedCommits); err != nil {
 		return err

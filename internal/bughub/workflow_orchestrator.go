@@ -1101,6 +1101,9 @@ func (o *CaseOrchestrator) recordDeploymentResult(incident IncidentCase, reserva
 	observation.Environment = incident.Environment
 	observation.ExpectedCommits = CloneStringMap(reservation.ExpectedCommits)
 	observation.UserNotifiedAt = &now
+	if observation.ObservedAt.IsZero() {
+		observation.ObservedAt = now
+	}
 	if observation.VerificationSource == "" {
 		observation.VerificationSource = "deployment-verifier"
 	}
@@ -1118,10 +1121,14 @@ func (o *CaseOrchestrator) recordDeploymentResult(incident IncidentCase, reserva
 	} else {
 		if verifyErr != nil {
 			observation.Result = DeploymentResultUnavailable
+			if observation.DiagnosticCode == "" {
+				observation.DiagnosticCode = "verifier_unavailable"
+				observation.DiagnosticMessage = "部署版本验证暂不可用"
+			}
 		}
 		steps = append(steps, CaseMutationStep{To: CaseDeploymentUnverified, AuditOnly: true, Event: TransitionEvent{ID: stableID("event", key), EventType: "deployment_unverified", ActorType: "studio", ActorID: "deployment-verifier", PayloadJSON: mustJSON(observation)}})
 	}
-	mutation, err := o.store.ApplyCaseMutation(durable, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: mustJSON(map[string]any{"observation": observation, "error": fmt.Sprint(verifyErr)}), Observations: []DeploymentObservation{observation}, CreateAttempts: creates, Snapshot: update, Steps: steps})
+	mutation, err := o.store.ApplyCaseMutation(durable, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: mustJSON(map[string]any{"observation": observation, "error_code": observation.DiagnosticCode}), Observations: []DeploymentObservation{observation}, CreateAttempts: creates, Snapshot: update, Steps: steps})
 	if err != nil {
 		return IncidentCase{}, errors.Join(verifyErr, err)
 	}

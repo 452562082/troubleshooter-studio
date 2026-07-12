@@ -766,6 +766,10 @@ export namespace bughub {
 	    observed_version: string;
 	    observed_images: Record<string, string>;
 	    observed_commits: Record<string, string>;
+	    // Go type: time
+	    observed_at: any;
+	    diagnostic_code?: string;
+	    diagnostic_message?: string;
 	    verified_commit_ancestors?: Record<string, string>;
 	    result: string;
 
@@ -785,6 +789,9 @@ export namespace bughub {
 	        this.observed_version = source["observed_version"];
 	        this.observed_images = source["observed_images"];
 	        this.observed_commits = source["observed_commits"];
+	        this.observed_at = this.convertValues(source["observed_at"], null);
+	        this.diagnostic_code = source["diagnostic_code"];
+	        this.diagnostic_message = source["diagnostic_message"];
 	        this.verified_commit_ancestors = source["verified_commit_ancestors"];
 	        this.result = source["result"];
 	    }

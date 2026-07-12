@@ -467,6 +467,7 @@ func TestValidateWorkflowPersistedRecords(t *testing.T) {
 		ExpectedCommits:    map[string]string{"api": "abc123"},
 		VerificationSource: "manual",
 		ObservedCommits:    map[string]string{"api": "abc123"},
+		ObservedAt:         time.Now().UTC(),
 		VerifiedAt:         func() *time.Time { value := time.Now().UTC(); return &value }(),
 		Result:             DeploymentResultMatched,
 	}
@@ -481,6 +482,9 @@ func TestValidateWorkflowPersistedRecords(t *testing.T) {
 		func(v *DeploymentObservation) { v.ExpectedCommits = nil },
 		func(v *DeploymentObservation) { v.ExpectedCommits = map[string]string{"": "abc123"} },
 		func(v *DeploymentObservation) { v.VerificationSource = "" },
+		func(v *DeploymentObservation) { v.ObservedAt = time.Time{} },
+		func(v *DeploymentObservation) { v.DiagnosticCode = strings.Repeat("x", 65) },
+		func(v *DeploymentObservation) { v.DiagnosticMessage = "unsafe\nline" },
 		func(v *DeploymentObservation) { v.Result = DeploymentResult("unknown") },
 		func(v *DeploymentObservation) { v.ObservedImages = map[string]string{"api": ""} },
 		func(v *DeploymentObservation) { v.ObservedCommits = map[string]string{"": "abc123"} },

@@ -29,13 +29,23 @@ import {
   previewBugAttachment,
   saveBugPlatform,
   saveBugSelectedBot,
+  listIncidentCases,
+  getIncidentCase,
+  startIncidentCase,
+  continueIncidentCase,
+  approveIncidentFix,
+  approveIncidentMerge,
+  notifyIncidentDeployed,
+  cancelIncidentAttempt,
+  type IncidentCase,
   startBugFix,
-  startBugInvestigation,
   syncBugPlatform,
 } from '../lib/bridge'
+import BugCaseLifecycle, { type CasePrimaryAction } from '../components/BugCaseLifecycle.vue'
 import { copyToClipboard } from '../lib/clipboard'
 import { confirmDialog } from '../lib/confirm'
 import { toast, toastError } from '../lib/toast'
+import { useIncidentCase } from '../lib/useIncidentCase'
 
 const bugs = ref<BugRecord[]>([])
 const platforms = ref<BugPlatform[]>([])
@@ -89,6 +99,13 @@ const platformDraft = ref({
   poll_interval_minutes: 5,
 })
 let unlistenInvestigationEvents: (() => void) | undefined
+
+const incidentWorkflow = useIncidentCase({ listCases: listIncidentCases, getCase: getIncidentCase })
+const incidentCases = incidentWorkflow.cases
+const incidentDetail = incidentWorkflow.detail
+const incidentPending = incidentWorkflow.pending
+const incidentError = incidentWorkflow.error
+const incidentStartIDs = new Map<string, string>()
 
 const selectedBug = computed(() => bugs.value.find(b => b.id === selectedID.value) || bugs.value[0])
 const selectedPlatform = computed(() => platforms.value.find(p => p.id === selectedPlatformID.value))
@@ -673,13 +690,87 @@ async function startInvestigation() {
   const bugID = bug.id
   outputTab.value = 'validation'
   try {
-    const run = await startBugInvestigation({ bug_id: bugID, bot })
-    if (selectedBug.value?.id === bugID && run.bug_id === bugID) mergeInvestigationRun(run)
-    toast.success('排障已启动')
+    const startKey = `start:${bugID}:${bot.key}`
+    let caseID = incidentStartIDs.get(startKey)
+    if (!caseID) {
+      const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      caseID = `case-${bugID.replace(/[^a-zA-Z0-9_-]/g, '-')}-${suffix}`
+      incidentStartIDs.set(startKey, caseID)
+    }
+    const incident = await incidentWorkflow.runOnce(startKey, () => startIncidentCase({
+      case_id: caseID,
+      bug_id: bugID,
+      bot_key: bot.key,
+      expected_version: 0,
+      idempotency_key: `start:${caseID}`,
+      actor_id: 'desktop-user',
+      input_json: { mode: 'reproduce', expected_behavior: bug.title || '', bug_steps: bug.steps || '', target_environment: bot.env || bug.env || '' },
+    }))
+    await incidentWorkflow.refreshDetail(incident.id)
+    toast.success('故障闭环已启动')
   } catch (e) {
-    toastError('启动排障', e)
+    toastError('启动故障闭环', e)
   } finally {
     investigationStarting.value = false
+  }
+}
+
+async function refreshIncidentWorkflow() {
+  try {
+    await incidentWorkflow.refreshCases()
+    if (incidentWorkflow.selectedCaseID.value) await incidentWorkflow.refreshDetail()
+  } catch (error) {
+    toastError('刷新故障 Case', error)
+  }
+}
+
+function workflowPhaseFor(detail: NonNullable<typeof incidentDetail.value>) {
+  const latest = [...detail.attempts].reverse().find(attempt => attempt.phase !== 'legacy')
+  if (detail.case.status === 'fix_failed') return 'fix' as const
+  if (latest?.phase === 'fix') return 'fix' as const
+  if (latest?.phase === 'investigation') return 'investigation' as const
+  return 'validation' as const
+}
+
+async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind']; input?: string; observedVersion?: string }) {
+  const detail = incidentDetail.value
+  if (!detail) return
+  const incident = detail.case
+  const key = `${payload.kind}:${incident.id}:v${incident.version}`
+  try {
+    const updated = await incidentWorkflow.runOnce(key, async (): Promise<IncidentCase> => {
+      const base = { case_id: incident.id, expected_version: incident.version, idempotency_key: key, actor_id: 'desktop-user' }
+      if (payload.kind === 'continue_legacy' || payload.kind === 'start_validation') {
+        return startIncidentCase({ ...base, bug_id: incident.bug_id, bot_key: incident.selected_bot_key, input_json: { mode: 'reproduce' } })
+      }
+      if (payload.kind === 'supply_evidence' || payload.kind === 'continue_fix') {
+        return continueIncidentCase({ ...base, phase: workflowPhaseFor(detail), input_json: { user_input: payload.input || '' } })
+      }
+      if (payload.kind === 'approve_fix') {
+        const rootCause = [...detail.attempts].reverse().find(attempt => attempt.phase === 'investigation' && attempt.status === 'succeeded')
+        if (!rootCause) throw new Error('未找到可授权的根因结论')
+        return approveIncidentFix({ ...base, root_cause_attempt_id: rootCause.id })
+      }
+      if (payload.kind === 'approve_merge' || payload.kind === 'retry_merge') {
+        return approveIncidentMerge({
+          ...base,
+          fix_commits: Object.fromEntries(detail.code_changes.map(change => [change.repo, change.fix_commit])),
+          target_branches: Object.fromEntries(detail.code_changes.map(change => [change.repo, change.target_environment_branch])),
+        })
+      }
+      if (payload.kind === 'notify_deployed' || payload.kind === 'retry_deployment') {
+        return notifyIncidentDeployed({ ...base, observed_version: payload.observedVersion || '' })
+      }
+      if (payload.kind === 'cancel_attempt') {
+        if (!incident.current_attempt_id) throw new Error('当前没有可停止的阶段')
+        return cancelIncidentAttempt({ ...base, attempt_id: incident.current_attempt_id })
+      }
+      throw new Error(`暂不支持操作 ${payload.kind}`)
+    })
+    await incidentWorkflow.refreshDetail(updated.id)
+    toast.success(payload.kind === 'continue_legacy' ? '已创建新一轮验证 Case' : '操作已提交')
+  } catch (error) {
+    toastError('执行故障流程操作', error)
   }
 }
 
@@ -1352,6 +1443,18 @@ function escapeRegExp(value: string): string {
       </div>
     </section>
 
+    <BugCaseLifecycle
+      v-if="incidentCases.length > 0 || incidentDetail"
+      :cases="incidentCases"
+      :detail="incidentDetail"
+      :pending="incidentPending"
+      :error="incidentError"
+      @select="incidentWorkflow.selectCase"
+      @refresh="refreshIncidentWorkflow"
+      @primary="handleIncidentPrimary"
+    />
+
+    <template v-else>
     <section class="bug-workbench">
       <aside class="bug-list">
         <div class="list-head">
@@ -1576,6 +1679,7 @@ function escapeRegExp(value: string): string {
         </svg>
       </button>
     </section>
+    </template>
 
     <!-- 补充信息弹窗 -->
     <div v-if="supplementDialogOpen" class="supplement-backdrop" @click.self="closeSupplementDialog">

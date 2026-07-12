@@ -1,6 +1,6 @@
 import { mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cancelBugInvestigation, discoverBots, generateBugContext, listBugs, listBugPlatforms, matchBugBots, previewBugAttachment, startBugInvestigation, listBugInvestigationRuns, saveBugPlatform } from '../lib/bridge'
+import { cancelBugInvestigation, discoverBots, generateBugContext, listBugs, listBugPlatforms, matchBugBots, previewBugAttachment, startBugInvestigation, listBugInvestigationRuns, saveBugPlatform, listIncidentCases, getIncidentCase, startIncidentCase } from '../lib/bridge'
 import { copyToClipboard } from '../lib/clipboard'
 import BugWorkbenchPage from './BugWorkbenchPage.vue'
 
@@ -31,12 +31,20 @@ vi.mock('../lib/bridge', () => ({
   generateBugContext: vi.fn(),
   loginBugPlatform: vi.fn(),
   listBugInvestigationRuns: vi.fn().mockResolvedValue([]),
+  listIncidentCases: vi.fn().mockResolvedValue([]),
+  getIncidentCase: vi.fn(),
   listBugPlatforms: vi.fn().mockResolvedValue([]),
   listBugs: vi.fn().mockResolvedValue([]),
   matchBugBots: vi.fn().mockResolvedValue([]),
   previewBugAttachment: vi.fn(),
   saveBugPlatform: vi.fn(),
   startBugInvestigation: vi.fn(),
+  startIncidentCase: vi.fn().mockResolvedValue({ id: 'case-new', bug_id: 'zentao-577', status: 'validating', version: 1 }),
+  continueIncidentCase: vi.fn(),
+  approveIncidentFix: vi.fn(),
+  approveIncidentMerge: vi.fn(),
+  notifyIncidentDeployed: vi.fn(),
+  cancelIncidentAttempt: vi.fn(),
   syncBugPlatform: vi.fn(),
 }))
 
@@ -62,12 +70,16 @@ afterEach(() => {
   vi.mocked(discoverBots).mockResolvedValue([])
   vi.mocked(generateBugContext).mockReset()
   vi.mocked(listBugInvestigationRuns).mockResolvedValue([])
+  vi.mocked(listIncidentCases).mockResolvedValue([])
+  vi.mocked(getIncidentCase).mockReset()
   vi.mocked(listBugPlatforms).mockResolvedValue([])
   vi.mocked(listBugs).mockResolvedValue([])
   vi.mocked(matchBugBots).mockResolvedValue([])
   vi.mocked(previewBugAttachment).mockReset()
   vi.mocked(saveBugPlatform).mockReset()
   vi.mocked(startBugInvestigation).mockReset()
+  vi.mocked(startIncidentCase).mockReset()
+  vi.mocked(startIncidentCase).mockResolvedValue({ id: 'case-new', bug_id: 'zentao-577', status: 'validating', version: 1 } as any)
   vi.mocked(copyToClipboard).mockResolvedValue(true)
 })
 
@@ -346,10 +358,12 @@ describe('BugWorkbenchPage', () => {
     const button = wrapper.findAll('button').find(b => b.text() === '开始排障')
     await button!.trigger('click')
 
-    expect(startBugInvestigation).toHaveBeenCalledWith({
+    expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
       bug_id: 'zentao-577',
-      bot: { key: 'base|codex', system_id: 'base', target: 'codex', path: '/repo', env: 'prod', envs: ['test', 'prod'] },
-    })
+      bot_key: 'base|codex',
+      expected_version: 0,
+      input_json: expect.objectContaining({ mode: 'reproduce', target_environment: 'prod' }),
+    }))
   })
 
   it('shows start investigation for codex bot', async () => {
@@ -388,10 +402,9 @@ describe('BugWorkbenchPage', () => {
     expect(button).toBeTruthy()
     await button!.trigger('click')
 
-    expect(startBugInvestigation).toHaveBeenCalledWith({
-      bug_id: 'zentao-577',
-      bot: { key: 'base|codex', system_id: 'base', target: 'codex', path: '/repo' },
-    })
+    expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
+      bug_id: 'zentao-577', bot_key: 'base|codex', expected_version: 0,
+    }))
   })
 
   it('passes a single bot with internal agents when starting investigation', async () => {
@@ -449,22 +462,10 @@ describe('BugWorkbenchPage', () => {
     const button = wrapper.findAll('button').find(b => b.text() === '开始排障')
     await button!.trigger('click')
 
-    expect(startBugInvestigation).toHaveBeenCalledWith({
-      bug_id: 'zentao-577',
-      bot: {
-        key: '/repo/base-troubleshooter|codex',
-        system_id: 'base',
-        target: 'codex',
-        path: '/repo/base-troubleshooter',
-        agent_id: 'base-troubleshooter',
-        role: 'troubleshooter',
-        internal_agents: [
-          { id: 'base-troubleshooter', role: 'troubleshooter' },
-          { id: 'base-validator', role: 'validator' },
-        ],
-        env: 'test',
-      },
-    })
+    expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
+      bug_id: 'zentao-577', bot_key: '/repo/base-troubleshooter|codex', expected_version: 0,
+      input_json: expect.objectContaining({ target_environment: 'test' }),
+    }))
   })
 
   it('starts claude code investigation from selected bot', async () => {
@@ -489,10 +490,9 @@ describe('BugWorkbenchPage', () => {
     expect(button?.attributes('disabled')).toBeUndefined()
     await button!.trigger('click')
 
-    expect(startBugInvestigation).toHaveBeenCalledWith({
-      bug_id: 'zentao-577',
-      bot: { key: 'base|claude-code', system_id: 'base', target: 'claude-code', path: '/Users/me/.claude/agents/base.md' },
-    })
+    expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
+      bug_id: 'zentao-577', bot_key: 'base|claude-code', expected_version: 0,
+    }))
   })
 
   it('renders final investigation output', async () => {
@@ -926,5 +926,36 @@ describe('BugWorkbenchPage', () => {
     await wrapper.vm.$nextTick()
 
     expect(wrapper.find('.context-preview').text()).toBe('当前 Bug 上下文')
+  })
+
+  it('switches to the durable lifecycle when persisted Cases exist', async () => {
+    const incident = { id: 'case-1', bug_id: 'zentao-577', source: 'zentao', system_id: 'base', environment: 'test', status: 'waiting_fix_approval', cycle_number: 1, current_attempt_id: 'root-1', selected_bot_key: 'base|codex', version: 7, created_at: '', updated_at: '' } as const
+    vi.mocked(listIncidentCases).mockResolvedValue([incident as any])
+    vi.mocked(getIncidentCase).mockResolvedValue({ case: incident, attempts: [], artifacts: [], approvals: [], code_changes: [], deployment_observations: [], events: [] } as any)
+
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.find('.case-lifecycle').exists()).toBe(true)
+    expect(wrapper.text()).toContain('允许修复')
+    expect(wrapper.find('.bug-output-panel').exists()).toBe(false)
+  })
+
+  it('continues a legacy archive by starting a new durable Case', async () => {
+    const archived = { id: 'legacy-1', bug_id: 'zentao-577', source: 'legacy-runs-json', system_id: '', environment: '', status: 'legacy_archived', cycle_number: 1, current_attempt_id: 'legacy-attempt', selected_bot_key: 'base|codex', version: 3, created_at: '', updated_at: '' } as const
+    vi.mocked(listIncidentCases).mockResolvedValue([archived as any])
+    vi.mocked(getIncidentCase).mockResolvedValue({ case: archived, attempts: [], artifacts: [], approvals: [], code_changes: [], deployment_observations: [], events: [] } as any)
+    vi.mocked(startIncidentCase).mockResolvedValue({ ...archived, id: 'case-new', source: 'zentao', status: 'validating', cycle_number: 2, version: 1 } as any)
+
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises()
+    await flushPromises()
+    await wrapper.find('.primary-action').trigger('click')
+    await flushPromises()
+
+    expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
+      case_id: 'legacy-1', bug_id: 'zentao-577', expected_version: 3, bot_key: 'base|codex', actor_id: 'desktop-user',
+    }))
   })
 })

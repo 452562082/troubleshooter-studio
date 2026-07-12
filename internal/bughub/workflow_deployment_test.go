@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -161,7 +162,16 @@ func TestNotifyDeployedManualProofPersistsResultAndReplaysExactly(t *testing.T) 
 	if err != nil || first.Status != CaseRegressionValidating || runner.startCount() != 1 {
 		t.Fatalf("case=%+v starts=%d err=%v", first, runner.startCount(), err)
 	}
-	second, err := orchestrator.NotifyDeployed(ctx, command)
+	reservationEvent, found, err := store.GetEventByIdempotencyKey(ctx, fmt.Sprintf("deployment-reserve:%s:v%d", incident.ID, incident.Version))
+	if err != nil || !found || reservationEvent.ActorID != "alice" {
+		t.Fatalf("reservation event=%+v found=%v err=%v", reservationEvent, found, err)
+	}
+	var reservation DeploymentReservation
+	if err := json.Unmarshal(reservationEvent.PayloadJSON, &reservation); err != nil || reservation.CallerIdempotencyKey != command.IdempotencyKey || reservation.ActorID != command.ActorID {
+		t.Fatalf("reservation=%+v err=%v", reservation, err)
+	}
+	restarted := NewCaseOrchestrator(store, runner, nil, verifier)
+	second, err := restarted.NotifyDeployed(ctx, command)
 	if err != nil || second.Status != CaseRegressionValidating || runner.startCount() != 1 {
 		t.Fatalf("replay=%+v starts=%d err=%v", second, runner.startCount(), err)
 	}
@@ -178,6 +188,21 @@ func TestNotifyDeployedManualProofPersistsResultAndReplaysExactly(t *testing.T) 
 	}
 	if err != nil || regressions != 1 {
 		t.Fatalf("attempts=%+v regressions=%d err=%v", attempts, regressions, err)
+	}
+	changedActor := command
+	changedActor.ActorID = "bob"
+	if _, err := restarted.NotifyDeployed(ctx, changedActor); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("different actor replay error=%v", err)
+	}
+	changedKey := command
+	changedKey.IdempotencyKey = "another-notification"
+	if _, err := restarted.NotifyDeployed(ctx, changedKey); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("different caller key replay error=%v", err)
+	}
+	changedProof := command
+	changedProof.ObservedVersion = "build-43"
+	if _, err := restarted.NotifyDeployed(ctx, changedProof); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("different deployment proof replay error=%v", err)
 	}
 }
 
@@ -206,5 +231,40 @@ func TestNotifyDeployedPersistsMismatchedAndUnavailableWithoutRegression(t *test
 				t.Fatalf("observations=%+v err=%v", observations, listErr)
 			}
 		})
+	}
+}
+
+func TestNotifyDeployedReservationIdentitySurvivesStoreRestart(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "workflow.db")
+	store, err := OpenCaseStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incident := createWorkflowCase(t, store, "restart-deployment", CaseWaitingDeployment)
+	incident = addPushedWorkflowChange(t, store, incident)
+	verifier := &recordingDeploymentVerifier{result: DeploymentObservation{VerificationSource: "manual", Result: DeploymentResultMismatched}}
+	command := NotifyDeployedCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "restart-notice", ActorID: "alice", ObservedVersion: "old"}
+	if _, err := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, verifier).NotifyDeployed(ctx, command); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenCaseStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	restarted := NewCaseOrchestrator(reopened, &recordingPhaseRunner{}, nil, verifier)
+	if _, err := restarted.NotifyDeployed(ctx, command); err != nil {
+		t.Fatalf("exact restart replay error=%v", err)
+	}
+	if len(verifier.requests) != 1 {
+		t.Fatalf("restart replay verifier calls=%d", len(verifier.requests))
+	}
+	command.ActorID = "bob"
+	if _, err := restarted.NotifyDeployed(ctx, command); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("restart actor conflict error=%v", err)
 	}
 }

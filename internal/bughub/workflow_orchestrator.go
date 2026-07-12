@@ -189,6 +189,8 @@ type DeploymentVerificationRequest struct {
 type DeploymentReservation struct {
 	ReservationID           string                        `json:"reservation_id"`
 	ReservationKey          string                        `json:"reservation_key"`
+	CallerIdempotencyKey    string                        `json:"caller_idempotency_key"`
+	ActorID                 string                        `json:"actor_id"`
 	OriginalExpectedVersion int64                         `json:"original_expected_version"`
 	CycleNumber             int                           `json:"cycle_number"`
 	Environment             string                        `json:"environment"`
@@ -1037,6 +1039,9 @@ func (o *CaseOrchestrator) NotifyDeployed(ctx context.Context, cmd NotifyDeploye
 		if err := json.Unmarshal(reservationEvent.PayloadJSON, &reservation); err != nil {
 			return IncidentCase{}, err
 		}
+		if reservation.CallerIdempotencyKey == "" || reservation.ActorID == "" || reservation.CallerIdempotencyKey != cmd.IdempotencyKey || reservation.ActorID != cmd.ActorID {
+			return IncidentCase{}, ErrIdempotencyConflict
+		}
 		supplied := reservation.VerifierInput
 		supplied.ObservedVersion = cmd.ObservedVersion
 		supplied.ObservedCommits = CloneStringMap(cmd.ObservedCommits)
@@ -1061,7 +1066,7 @@ func (o *CaseOrchestrator) NotifyDeployed(ctx context.Context, cmd NotifyDeploye
 			return IncidentCase{}, scopeErr
 		}
 		request := DeploymentVerificationRequest{CaseID: incident.ID, Environment: incident.Environment, ExpectedCommits: expected, ObservedVersion: cmd.ObservedVersion, ObservedCommits: CloneStringMap(cmd.ObservedCommits), Source: normalizedDeploymentSource(cmd.Source)}
-		reservation = DeploymentReservation{ReservationID: stableID("deployment-reservation", reserveKey), ReservationKey: reserveKey, OriginalExpectedVersion: cmd.ExpectedVersion, CycleNumber: scope.CycleNumber, Environment: incident.Environment, ExpectedCommits: expected, Bug: cmd.Bug, Bot: cmd.Bot, VerifierInput: request, RegressionInputJSON: append([]byte(nil), regressionInput...)}
+		reservation = DeploymentReservation{ReservationID: stableID("deployment-reservation", reserveKey), ReservationKey: reserveKey, CallerIdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, OriginalExpectedVersion: cmd.ExpectedVersion, CycleNumber: scope.CycleNumber, Environment: incident.Environment, ExpectedCommits: expected, Bug: cmd.Bug, Bot: cmd.Bot, VerifierInput: request, RegressionInputJSON: append([]byte(nil), regressionInput...)}
 		payload := mustJSON(reservation)
 		reserved, reserveErr := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: cmd.ExpectedVersion, IdempotencyKey: reserveKey, RequestJSON: payload, Steps: []CaseMutationStep{{To: CaseDeploymentUnverified, Event: TransitionEvent{ID: stableID("event", reserveKey), EventType: "deployment_verification_reserved", ActorType: "user", ActorID: cmd.ActorID, PayloadJSON: payload}}, {To: CaseDeploymentUnverified, AuditOnly: true, Event: TransitionEvent{ID: stableID("event", reserveKey+":start"), EventType: "deployment_verification_started", ActorType: "studio", ActorID: "orchestrator", PayloadJSON: payload}}}})
 		if reserveErr != nil {

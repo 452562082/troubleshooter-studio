@@ -711,10 +711,18 @@ func TestOrchestratorConcurrentDeploymentDuplicateAcrossInstancesSchedulesVerifi
 	case <-time.After(100 * time.Millisecond):
 		close(verifier.release)
 	}
+	success, conflicts := 0, 0
 	for range 2 {
-		if err := <-errs; err != nil {
+		if err := <-errs; err == nil {
+			success++
+		} else if errors.Is(err, ErrIdempotencyConflict) {
+			conflicts++
+		} else {
 			t.Fatal(err)
 		}
+	}
+	if success != 1 || conflicts != 1 {
+		t.Fatalf("success=%d conflicts=%d", success, conflicts)
 	}
 	select {
 	case <-verifier.entered:

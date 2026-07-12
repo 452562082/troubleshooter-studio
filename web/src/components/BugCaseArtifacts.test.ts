@@ -39,4 +39,35 @@ describe('BugCaseArtifacts', () => {
     expect(wrapper.text()).toContain('检查 Redis 命中率')
     expect(wrapper.find('.legacy-attempt > pre').exists()).toBe(false)
   })
+
+  it('renders hostile legacy Markdown as inert readable text without HTML or executable URLs', () => {
+    const hostile = [
+      '**结论可读**',
+      '<IMG SRC=x ONERROR=alert(1)>',
+      '[危险链接](JaVaScRiPt:alert(2))',
+      '<svg/onload=alert(3)>',
+      '&lt;img src=x onerror=alert(4)&gt;',
+      '<ScRiPt>alert(5)</sCrIpT>',
+      '[实体链接](jav&#x61;script:alert(6))',
+    ].join('\n')
+    const archived = {
+      ...detail,
+      case: { ...detail.case, status: 'legacy_archived' as const },
+      attempts: [{ ...detail.attempts[0], id: 'legacy-hostile', phase: 'legacy' as const, output_json: { final_message: hostile } }],
+    }
+
+    const wrapper = mount(BugCaseArtifacts, { props: { detail: archived } })
+
+    expect(wrapper.find('.legacy-final strong').text()).toBe('结论可读')
+    expect(wrapper.findAll('.legacy-final img, .legacy-final script, .legacy-final svg, .legacy-final a')).toHaveLength(0)
+    for (const element of wrapper.findAll('.legacy-final *')) {
+      expect(Object.keys(element.attributes()).some(name => name.toLowerCase().startsWith('on'))).toBe(false)
+      expect(`${element.attributes('href') || ''}${element.attributes('src') || ''}`.toLowerCase()).not.toContain('javascript:')
+    }
+    expect(wrapper.find('.legacy-final').text()).toContain('<IMG SRC=x ONERROR=alert(1)>')
+    expect(wrapper.find('.legacy-final').text()).toContain('JaVaScRiPt:alert(2)')
+    expect(wrapper.find('.legacy-final').text()).toContain('<svg/onload=alert(3)>')
+    expect(wrapper.find('.legacy-final').text()).toContain('&lt;img src=x onerror=alert(4)&gt;')
+    expect(wrapper.find('.legacy-final').text()).toContain('jav&#x61;script:alert(6)')
+  })
 })

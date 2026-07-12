@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { marked } from 'marked'
 import type { IncidentCaseDetail, PhaseAttempt } from '../lib/bridge/bugWorkflow'
 
 const props = defineProps<{ detail: IncidentCaseDetail }>()
@@ -15,8 +14,14 @@ const legacyProjection = computed(() => props.detail.attempts.filter(attempt => 
     return message ? [{ type: String(value.type || 'message'), message }] : []
   }) : []
   const finalMessage = typeof output.final_message === 'string' ? output.final_message : ''
-  return { attempt, events, finalHTML: safeMarkdown(finalMessage) }
+  return { attempt, events, finalBlocks: limitedMarkdown(finalMessage) }
 }))
+
+type InlineToken = { kind: 'text' | 'strong' | 'code'; text: string }
+type MarkdownBlock =
+  | { kind: 'heading' | 'paragraph'; tokens: InlineToken[] }
+  | { kind: 'list'; items: InlineToken[][] }
+  | { kind: 'code'; text: string }
 
 function displayJSON(value: unknown): string {
   if (value === null || value === undefined || value === '') return '-'
@@ -34,14 +39,58 @@ function rootCause(attempt?: PhaseAttempt): string {
   return displayJSON(output)
 }
 
-function safeMarkdown(value: string): string {
-  const html = marked.parse(value || '', { async: false }) as string
-  return html
-    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-    .replace(/\son\w+="[^"]*"/gi, '')
-    .replace(/\son\w+='[^']*'/gi, '')
-    .replace(/\s(href|src)="javascript:[^"]*"/gi, ' $1="#"')
-    .replace(/\s(href|src)='javascript:[^']*'/gi, " $1='#'")
+function inlineTokens(value: string): InlineToken[] {
+  const tokens: InlineToken[] = []
+  const pattern = /(\*\*[^*\n]+\*\*|`[^`\n]+`)/g
+  let offset = 0
+  for (const match of value.matchAll(pattern)) {
+    const index = match.index || 0
+    if (index > offset) tokens.push({ kind: 'text', text: value.slice(offset, index) })
+    const raw = match[0]
+    tokens.push(raw.startsWith('**')
+      ? { kind: 'strong', text: raw.slice(2, -2) }
+      : { kind: 'code', text: raw.slice(1, -1) })
+    offset = index + raw.length
+  }
+  if (offset < value.length) tokens.push({ kind: 'text', text: value.slice(offset) })
+  return tokens.length ? tokens : [{ kind: 'text', text: value }]
+}
+
+// Deliberately does not produce HTML. Vue writes every token through textContent,
+// so tags, entities, event attributes, and URL schemes remain inert readable text.
+function limitedMarkdown(value: string): MarkdownBlock[] {
+  const lines = (value || '').replace(/\r\n?/g, '\n').split('\n')
+  const blocks: MarkdownBlock[] = []
+  for (let index = 0; index < lines.length;) {
+    const line = lines[index]
+    if (!line.trim()) { index++; continue }
+    if (/^```/.test(line.trim())) {
+      const code: string[] = []
+      index++
+      while (index < lines.length && !/^```/.test(lines[index].trim())) code.push(lines[index++])
+      if (index < lines.length) index++
+      blocks.push({ kind: 'code', text: code.join('\n') })
+      continue
+    }
+    const heading = line.match(/^#{1,3}\s+(.+)$/)
+    if (heading) {
+      blocks.push({ kind: 'heading', tokens: inlineTokens(heading[1]) })
+      index++
+      continue
+    }
+    if (/^\s*[-*]\s+/.test(line)) {
+      const items: InlineToken[][] = []
+      while (index < lines.length && /^\s*[-*]\s+/.test(lines[index])) {
+        items.push(inlineTokens(lines[index].replace(/^\s*[-*]\s+/, '')))
+        index++
+      }
+      blocks.push({ kind: 'list', items })
+      continue
+    }
+    blocks.push({ kind: 'paragraph', tokens: inlineTokens(line) })
+    index++
+  }
+  return blocks
 }
 </script>
 
@@ -77,7 +126,18 @@ function safeMarkdown(value: string): string {
         <div v-if="projection.events.length" class="legacy-events" role="log" aria-label="历史运行事件">
           <p v-for="(event, index) in projection.events" :key="`${event.type}-${index}`"><span>{{ event.type }}</span>{{ event.message }}</p>
         </div>
-        <article v-if="projection.finalHTML" class="legacy-final" v-html="projection.finalHTML"></article>
+        <article v-if="projection.finalBlocks.length" class="legacy-final">
+          <template v-for="(block, blockIndex) in projection.finalBlocks" :key="blockIndex">
+            <h4 v-if="block.kind === 'heading'">
+              <template v-for="(token, tokenIndex) in block.tokens" :key="tokenIndex"><strong v-if="token.kind === 'strong'">{{ token.text }}</strong><code v-else-if="token.kind === 'code'">{{ token.text }}</code><template v-else>{{ token.text }}</template></template>
+            </h4>
+            <ul v-else-if="block.kind === 'list'">
+              <li v-for="(item, itemIndex) in block.items" :key="itemIndex"><template v-for="(token, tokenIndex) in item" :key="tokenIndex"><strong v-if="token.kind === 'strong'">{{ token.text }}</strong><code v-else-if="token.kind === 'code'">{{ token.text }}</code><template v-else>{{ token.text }}</template></template></li>
+            </ul>
+            <pre v-else-if="block.kind === 'code'"><code>{{ block.text }}</code></pre>
+            <p v-else><template v-for="(token, tokenIndex) in block.tokens" :key="tokenIndex"><strong v-if="token.kind === 'strong'">{{ token.text }}</strong><code v-else-if="token.kind === 'code'">{{ token.text }}</code><template v-else>{{ token.text }}</template></template></p>
+          </template>
+        </article>
         <p v-if="projection.attempt.error_message" class="legacy-error">{{ projection.attempt.error_message }}</p>
       </article>
     </section>
@@ -129,6 +189,10 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .legacy-events p { margin: 0; color: var(--c-text); line-height: 1.5; }
 .legacy-events span { margin-right: 6px; color: var(--c-muted); font-size: var(--fs-xs); }
 .legacy-final { color: var(--c-text); line-height: 1.6; }
-.legacy-final :deep(p) { margin: 0; }
+.legacy-final p, .legacy-final h4, .legacy-final ul, .legacy-final pre { margin: 0 0 6px; }
+.legacy-final p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.legacy-final h4 { color: var(--c-ink); font-size: var(--fs-base); }
+.legacy-final ul { padding-left: 20px; }
+.legacy-final code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .legacy-error { margin: 0; color: var(--c-danger); }
 </style>

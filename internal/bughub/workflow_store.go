@@ -145,7 +145,7 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: workflowStoreSchemaVersion, Fingerprint: fingerprint})
+		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: 1, Fingerprint: fingerprint})
 		if err != nil {
 			return fmt.Errorf("encode workflow schema v1 detail: %w", err)
 		}
@@ -156,6 +156,11 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		if _, err := tx.ExecContext(ctx, `PRAGMA user_version=1`); err != nil {
 			return fmt.Errorf("set workflow schema version: %w", err)
 		}
+		version = 1
+	case 1:
+		if err := verifyWorkflowSchemaMarker(ctx, tx, 1); err != nil {
+			return err
+		}
 	case workflowStoreSchemaVersion:
 		// Verified below before the transaction is committed.
 	default:
@@ -163,12 +168,32 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		// never modified or guessed.
 		return fmt.Errorf("%w: user_version=%d", ErrUnsupportedWorkflowSchema, version)
 	}
+	if version == 1 {
+		if _, err := tx.ExecContext(ctx, workflowStoreSchemaV2Upgrade); err != nil {
+			return fmt.Errorf("apply workflow schema v2: %w", err)
+		}
+		fingerprint, err := workflowSchemaFingerprint(ctx, tx)
+		if err != nil {
+			return err
+		}
+		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: workflowStoreSchemaVersion, Fingerprint: fingerprint})
+		if err != nil {
+			return fmt.Errorf("encode workflow schema v2 detail: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE schema_migrations SET applied_at = ?, detail_json = ? WHERE key = ?`, formatStoreTime(time.Now().UTC()), string(detail), workflowStoreSchemaV1Key); err != nil {
+			return fmt.Errorf("record workflow schema v2: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `PRAGMA user_version=2`); err != nil {
+			return fmt.Errorf("set workflow schema version 2: %w", err)
+		}
+	}
 	tables, err := workflowTableColumns(ctx, tx)
 	if err != nil {
 		return err
 	}
 	v1Columns := cloneWorkflowColumns(legacyWorkflowTableColumns)
 	v1Columns["transition_events"] = append(v1Columns["transition_events"], "request_fingerprint", "result_case_json")
+	v1Columns["deployment_observations"] = append(v1Columns["deployment_observations"], "verified_commit_ancestors_json")
 	if err := verifyWorkflowColumns(tables, v1Columns); err != nil {
 		return err
 	}
@@ -195,6 +220,28 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit workflow schema initialization: %w", err)
+	}
+	return nil
+}
+
+func verifyWorkflowSchemaMarker(ctx context.Context, tx *sql.Tx, expectedVersion int) error {
+	var detailJSON string
+	if err := tx.QueryRowContext(ctx, `SELECT detail_json FROM schema_migrations WHERE key = ?`, workflowStoreSchemaV1Key).Scan(&detailJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: missing workflow schema v1 marker", ErrUnsupportedWorkflowSchema)
+		}
+		return fmt.Errorf("verify workflow schema marker: %w", err)
+	}
+	var detail workflowSchemaMigrationDetail
+	if err := json.Unmarshal([]byte(detailJSON), &detail); err != nil || detail.Version != expectedVersion || detail.Fingerprint == "" {
+		return fmt.Errorf("%w: invalid workflow schema marker", ErrUnsupportedWorkflowSchema)
+	}
+	fingerprint, err := workflowSchemaFingerprint(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if fingerprint != detail.Fingerprint {
+		return fmt.Errorf("%w: workflow schema fingerprint mismatch", ErrUnsupportedWorkflowSchema)
 	}
 	return nil
 }
@@ -721,7 +768,7 @@ func (s *CaseStore) ListCodeChanges(ctx context.Context, caseID string) ([]CodeC
 func (s *CaseStore) ListDeploymentObservations(ctx context.Context, caseID string) ([]DeploymentObservation, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, case_id, environment, expected_commits_json,
 		user_notified_at, verification_source, observed_version, observed_images_json,
-		observed_commits_json, verified_at, result
+		observed_commits_json, verified_commit_ancestors_json, verified_at, result
 		FROM deployment_observations WHERE case_id = ? ORDER BY COALESCE(verified_at, user_notified_at, '') ASC, id ASC`, caseID)
 	if err != nil {
 		return nil, fmt.Errorf("list deployment observations: %w", err)
@@ -730,11 +777,11 @@ func (s *CaseStore) ListDeploymentObservations(ctx context.Context, caseID strin
 	var observations []DeploymentObservation
 	for rows.Next() {
 		var observation DeploymentObservation
-		var expected, images, commits string
+		var expected, images, commits, ancestors string
 		var notifiedAt, verifiedAt sql.NullString
 		if err := rows.Scan(&observation.ID, &observation.CaseID, &observation.Environment,
 			&expected, &notifiedAt, &observation.VerificationSource, &observation.ObservedVersion,
-			&images, &commits, &verifiedAt, &observation.Result); err != nil {
+			&images, &commits, &ancestors, &verifiedAt, &observation.Result); err != nil {
 			return nil, fmt.Errorf("scan deployment observation: %w", err)
 		}
 		if err := json.Unmarshal([]byte(expected), &observation.ExpectedCommits); err != nil {
@@ -745,6 +792,9 @@ func (s *CaseStore) ListDeploymentObservations(ctx context.Context, caseID strin
 		}
 		if err := json.Unmarshal([]byte(commits), &observation.ObservedCommits); err != nil {
 			return nil, fmt.Errorf("decode deployment observed commits: %w", err)
+		}
+		if err := json.Unmarshal([]byte(ancestors), &observation.VerifiedCommitAncestors); err != nil {
+			return nil, fmt.Errorf("decode deployment verified commit ancestors: %w", err)
 		}
 		observation.UserNotifiedAt, err = parseOptionalStoreTime(notifiedAt)
 		if err != nil {
@@ -938,14 +988,18 @@ func (s *CaseStore) RecordDeploymentObservation(ctx context.Context, observation
 	if err != nil {
 		return err
 	}
+	verifiedAncestors, err := marshalStringMap(observation.VerifiedCommitAncestors)
+	if err != nil {
+		return err
+	}
 	result, err := s.db.ExecContext(ctx, `INSERT INTO deployment_observations (
 		id, case_id, environment, expected_commits_json, user_notified_at,
 		verification_source, observed_version, observed_images_json,
-		observed_commits_json, verified_at, result, idempotency_key
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		observed_commits_json, verified_commit_ancestors_json, verified_at, result, idempotency_key
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(idempotency_key) DO NOTHING`, observation.ID, observation.CaseID,
 		observation.Environment, expectedCommits, formatOptionalStoreTime(observation.UserNotifiedAt),
-		observation.VerificationSource, observation.ObservedVersion, observedImages, observedCommits,
+		observation.VerificationSource, observation.ObservedVersion, observedImages, observedCommits, verifiedAncestors,
 		formatOptionalStoreTime(observation.VerifiedAt), observation.Result, idempotencyKey)
 	if err != nil {
 		return fmt.Errorf("record deployment observation: %w", err)
@@ -957,21 +1011,21 @@ func (s *CaseStore) RecordDeploymentObservation(ctx context.Context, observation
 	if rows == 1 {
 		return nil
 	}
-	var id, caseID, environment, storedExpected, source, version, storedImages, storedCommits, resultValue string
+	var id, caseID, environment, storedExpected, source, version, storedImages, storedCommits, storedAncestors, resultValue string
 	var storedUserNotifiedAt, storedVerifiedAt sql.NullString
 	if err := s.db.QueryRowContext(ctx, `SELECT id, case_id, environment, expected_commits_json,
 		user_notified_at, verification_source, observed_version, observed_images_json,
-		observed_commits_json, verified_at, result
+		observed_commits_json, verified_commit_ancestors_json, verified_at, result
 		FROM deployment_observations WHERE idempotency_key = ?`, idempotencyKey).Scan(
 		&id, &caseID, &environment, &storedExpected, &storedUserNotifiedAt, &source, &version,
-		&storedImages, &storedCommits, &storedVerifiedAt, &resultValue,
+		&storedImages, &storedCommits, &storedAncestors, &storedVerifiedAt, &resultValue,
 	); err != nil {
 		return fmt.Errorf("load replayed deployment observation: %w", err)
 	}
 	if id == observation.ID && caseID == observation.CaseID && environment == observation.Environment &&
 		storedExpected == expectedCommits && source == observation.VerificationSource &&
 		version == observation.ObservedVersion && storedImages == observedImages &&
-		storedCommits == observedCommits && resultValue == string(observation.Result) &&
+		storedCommits == observedCommits && storedAncestors == verifiedAncestors && resultValue == string(observation.Result) &&
 		optionalTimeMatches(storedUserNotifiedAt, observation.UserNotifiedAt, userNotifiedAtProvided) &&
 		optionalTimeMatches(storedVerifiedAt, observation.VerifiedAt, verifiedAtProvided) {
 		return nil
@@ -1356,7 +1410,8 @@ func insertObservationTx(ctx context.Context, tx *sql.Tx, o DeploymentObservatio
 	expected, _ := marshalStringMap(o.ExpectedCommits)
 	images, _ := marshalStringMap(o.ObservedImages)
 	commits, _ := marshalStringMap(o.ObservedCommits)
-	_, err := tx.ExecContext(ctx, `INSERT INTO deployment_observations (id,case_id,environment,expected_commits_json,user_notified_at,verification_source,observed_version,observed_images_json,observed_commits_json,verified_at,result,idempotency_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, o.ID, o.CaseID, o.Environment, expected, formatOptionalStoreTime(o.UserNotifiedAt), o.VerificationSource, o.ObservedVersion, images, commits, formatOptionalStoreTime(o.VerifiedAt), o.Result, key)
+	ancestors, _ := marshalStringMap(o.VerifiedCommitAncestors)
+	_, err := tx.ExecContext(ctx, `INSERT INTO deployment_observations (id,case_id,environment,expected_commits_json,user_notified_at,verification_source,observed_version,observed_images_json,observed_commits_json,verified_commit_ancestors_json,verified_at,result,idempotency_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, o.ID, o.CaseID, o.Environment, expected, formatOptionalStoreTime(o.UserNotifiedAt), o.VerificationSource, o.ObservedVersion, images, commits, ancestors, formatOptionalStoreTime(o.VerifiedAt), o.Result, key)
 	return err
 }
 

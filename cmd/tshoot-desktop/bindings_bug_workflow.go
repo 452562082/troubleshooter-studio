@@ -149,13 +149,15 @@ type ApproveIncidentMergeInput struct {
 }
 
 type NotifyIncidentDeployedInput struct {
-	CaseID          string            `json:"case_id"`
-	ExpectedVersion int64             `json:"expected_version"`
-	IdempotencyKey  string            `json:"idempotency_key"`
-	ActorID         string            `json:"actor_id"`
-	ObservedVersion string            `json:"observed_version"`
-	ObservedCommits map[string]string `json:"observed_commits,omitempty"`
-	InputJSON       map[string]any    `json:"input_json,omitempty"`
+	CaseID           string            `json:"case_id"`
+	ExpectedVersion  int64             `json:"expected_version"`
+	IdempotencyKey   string            `json:"idempotency_key"`
+	ActorID          string            `json:"actor_id"`
+	ObservedVersion  string            `json:"observed_version"`
+	ObservedCommits  map[string]string `json:"observed_commits,omitempty"`
+	VersionSource    string            `json:"version_source,omitempty"`
+	NotificationText string            `json:"notification_text,omitempty"`
+	InputJSON        map[string]any    `json:"input_json,omitempty"`
 }
 
 type CancelIncidentAttemptInput struct {
@@ -232,7 +234,10 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 			}
 			return filepath.Clean(path), nil
 		})
-		orchestrator := bughub.NewCaseOrchestrator(store, runner, gitService, nil)
+		deploymentVerifier := bughub.NewCompositeDeploymentVerifier(map[string]bughub.DeploymentVerifier{
+			"manual": bughub.ManualVersionVerifier{},
+		})
+		orchestrator := bughub.NewCaseOrchestrator(store, runner, gitService, deploymentVerifier)
 		runner.SetCompletionCallback(func(callbackCtx context.Context, command bughub.CompleteAttemptCommand) error {
 			incident, completeErr := orchestrator.CompleteAttempt(workflowContext(callbackCtx), command)
 			if completeErr == nil {
@@ -562,7 +567,13 @@ func (a *App) NotifyIncidentDeployed(input NotifyIncidentDeployedInput) (bughub.
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
-	incident, err := orchestrator.NotifyDeployed(a.workflowCommandContext(), bughub.NotifyDeployedCommand{CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID), ObservedVersion: strings.TrimSpace(input.ObservedVersion), ObservedCommits: input.ObservedCommits, Bug: bug, Bot: bot, InputJSON: inputJSON})
+	command := bughub.NotifyDeployedCommand{CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID), ObservedVersion: strings.TrimSpace(input.ObservedVersion), ObservedCommits: input.ObservedCommits, Source: strings.TrimSpace(input.VersionSource), Bug: bug, Bot: bot, InputJSON: inputJSON}
+	var incident bughub.IncidentCase
+	if strings.TrimSpace(input.NotificationText) != "" {
+		incident, err = orchestrator.NotifyDeployedFromText(a.workflowCommandContext(), input.NotificationText, command)
+	} else {
+		incident, err = orchestrator.NotifyDeployed(a.workflowCommandContext(), command)
+	}
 	a.emitIncidentResult(incident, err)
 	return incident, err
 }

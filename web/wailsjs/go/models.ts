@@ -766,6 +766,7 @@ export namespace bughub {
 	    observed_version: string;
 	    observed_images: Record<string, string>;
 	    observed_commits: Record<string, string>;
+	    verified_commit_ancestors?: Record<string, string>;
 	    result: string;
 
 	    static createFrom(source: any = {}) {
@@ -784,6 +785,7 @@ export namespace bughub {
 	        this.observed_version = source["observed_version"];
 	        this.observed_images = source["observed_images"];
 	        this.observed_commits = source["observed_commits"];
+	        this.verified_commit_ancestors = source["verified_commit_ancestors"];
 	        this.result = source["result"];
 	    }
 
@@ -3235,6 +3237,8 @@ export namespace main {
 	    actor_id: string;
 	    observed_version: string;
 	    observed_commits?: Record<string, string>;
+	    version_source?: string;
+	    notification_text?: string;
 	    input_json?: Record<string, any>;
 
 	    static createFrom(source: any = {}) {
@@ -3249,6 +3253,8 @@ export namespace main {
 	        this.actor_id = source["actor_id"];
 	        this.observed_version = source["observed_version"];
 	        this.observed_commits = source["observed_commits"];
+	        this.version_source = source["version_source"];
+	        this.notification_text = source["notification_text"];
 	        this.input_json = source["input_json"];
 	    }
 	}

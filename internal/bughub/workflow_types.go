@@ -458,7 +458,10 @@ type DeploymentObservation struct {
 	ObservedVersion    string            `json:"observed_version"`
 	ObservedImages     map[string]string `json:"observed_images"`
 	ObservedCommits    map[string]string `json:"observed_commits"`
-	Result             DeploymentResult  `json:"result"`
+	// VerifiedCommitAncestors records the expected ancestor proved for an
+	// observed descendant commit. Exact matches do not need an entry.
+	VerifiedCommitAncestors map[string]string `json:"verified_commit_ancestors,omitempty"`
+	Result                  DeploymentResult  `json:"result"`
 }
 
 func (o DeploymentObservation) Clone() DeploymentObservation {
@@ -466,6 +469,7 @@ func (o DeploymentObservation) Clone() DeploymentObservation {
 	cloned.ExpectedCommits = CloneStringMap(o.ExpectedCommits)
 	cloned.ObservedImages = CloneStringMap(o.ObservedImages)
 	cloned.ObservedCommits = CloneStringMap(o.ObservedCommits)
+	cloned.VerifiedCommitAncestors = CloneStringMap(o.VerifiedCommitAncestors)
 	cloned.UserNotifiedAt = cloneTimePtr(o.UserNotifiedAt)
 	cloned.VerifiedAt = cloneTimePtr(o.VerifiedAt)
 	return cloned
@@ -487,13 +491,25 @@ func (o DeploymentObservation) Validate() error {
 	if err := validateStringMapEntries("deployment observed commits", o.ObservedCommits); err != nil {
 		return err
 	}
+	if err := validateStringMapEntries("deployment verified commit ancestors", o.VerifiedCommitAncestors); err != nil {
+		return err
+	}
+	for repo, ancestor := range o.VerifiedCommitAncestors {
+		if expected, ok := o.ExpectedCommits[repo]; !ok || ancestor != expected {
+			return fmt.Errorf("deployment verified commit ancestor must bind an expected repository commit")
+		}
+		if observed, ok := o.ObservedCommits[repo]; !ok || observed == ancestor {
+			return fmt.Errorf("deployment descendant proof requires a distinct observed repository commit")
+		}
+	}
 	switch o.Result {
 	case DeploymentResultMatched:
 		if o.VerifiedAt == nil || o.VerifiedAt.IsZero() {
 			return fmt.Errorf("matched deployment observation requires verified_at")
 		}
 		for repo, expectedCommit := range o.ExpectedCommits {
-			if observedCommit, ok := o.ObservedCommits[repo]; !ok || observedCommit != expectedCommit {
+			observedCommit, ok := o.ObservedCommits[repo]
+			if !ok || (observedCommit != expectedCommit && o.VerifiedCommitAncestors[repo] != expectedCommit) {
 				return fmt.Errorf("matched deployment observation requires every expected repository commit")
 			}
 		}

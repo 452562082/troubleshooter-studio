@@ -183,6 +183,7 @@ type DeploymentVerificationRequest struct {
 	ExpectedCommits map[string]string `json:"expected_commits"`
 	ObservedVersion string            `json:"observed_version,omitempty"`
 	ObservedCommits map[string]string `json:"observed_commits,omitempty"`
+	Source          string            `json:"source"`
 }
 
 type DeploymentReservation struct {
@@ -268,6 +269,7 @@ type NotifyDeployedCommand struct {
 	ExpectedCommits map[string]string
 	ObservedVersion string
 	ObservedCommits map[string]string
+	Source          string
 	Bug             Bug
 	Bot             BotRef
 	InputJSON       json.RawMessage
@@ -1038,6 +1040,7 @@ func (o *CaseOrchestrator) NotifyDeployed(ctx context.Context, cmd NotifyDeploye
 		supplied := reservation.VerifierInput
 		supplied.ObservedVersion = cmd.ObservedVersion
 		supplied.ObservedCommits = CloneStringMap(cmd.ObservedCommits)
+		supplied.Source = normalizedDeploymentSource(cmd.Source)
 		if !reflect.DeepEqual(supplied, reservation.VerifierInput) || !reflect.DeepEqual(cmd.Bot, reservation.Bot) || !reflect.DeepEqual(cmd.Bug, reservation.Bug) || string(regressionInput) != string(reservation.RegressionInputJSON) {
 			return IncidentCase{}, ErrIdempotencyConflict
 		}
@@ -1057,7 +1060,7 @@ func (o *CaseOrchestrator) NotifyDeployed(ctx context.Context, cmd NotifyDeploye
 		if scopeErr != nil {
 			return IncidentCase{}, scopeErr
 		}
-		request := DeploymentVerificationRequest{CaseID: incident.ID, Environment: incident.Environment, ExpectedCommits: expected, ObservedVersion: cmd.ObservedVersion, ObservedCommits: CloneStringMap(cmd.ObservedCommits)}
+		request := DeploymentVerificationRequest{CaseID: incident.ID, Environment: incident.Environment, ExpectedCommits: expected, ObservedVersion: cmd.ObservedVersion, ObservedCommits: CloneStringMap(cmd.ObservedCommits), Source: normalizedDeploymentSource(cmd.Source)}
 		reservation = DeploymentReservation{ReservationID: stableID("deployment-reservation", reserveKey), ReservationKey: reserveKey, OriginalExpectedVersion: cmd.ExpectedVersion, CycleNumber: scope.CycleNumber, Environment: incident.Environment, ExpectedCommits: expected, Bug: cmd.Bug, Bot: cmd.Bot, VerifierInput: request, RegressionInputJSON: append([]byte(nil), regressionInput...)}
 		payload := mustJSON(reservation)
 		reserved, reserveErr := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: cmd.ExpectedVersion, IdempotencyKey: reserveKey, RequestJSON: payload, Steps: []CaseMutationStep{{To: CaseDeploymentUnverified, Event: TransitionEvent{ID: stableID("event", reserveKey), EventType: "deployment_verification_reserved", ActorType: "user", ActorID: cmd.ActorID, PayloadJSON: payload}}, {To: CaseDeploymentUnverified, AuditOnly: true, Event: TransitionEvent{ID: stableID("event", reserveKey+":start"), EventType: "deployment_verification_started", ActorType: "studio", ActorID: "orchestrator", PayloadJSON: payload}}}})
@@ -1072,6 +1075,13 @@ func (o *CaseOrchestrator) NotifyDeployed(ctx context.Context, cmd NotifyDeploye
 	}
 	observation, verifyErr := o.deployment.Verify(ctx, request)
 	return o.recordDeploymentResult(incident, reservation, observation, verifyErr)
+}
+
+func normalizedDeploymentSource(source string) string {
+	if source = strings.ToLower(strings.TrimSpace(source)); source != "" {
+		return source
+	}
+	return "manual"
 }
 
 func (o *CaseOrchestrator) recordDeploymentResult(incident IncidentCase, reservation DeploymentReservation, observation DeploymentObservation, verifyErr error) (IncidentCase, error) {

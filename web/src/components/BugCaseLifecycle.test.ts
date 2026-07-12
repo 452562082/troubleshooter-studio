@@ -87,6 +87,25 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.find('[role="dialog"]').text()).toContain('test')
     expect(wrapper.find('[role="dialog"]').text()).toContain('api: merge-def')
     expect(wrapper.find('[role="dialog"]').text()).toContain('version endpoint')
+    expect(wrapper.find('[role="dialog"]').text()).not.toContain('部署已确认')
+  })
+
+  it('submits the displayed version source and optional per-repository observations', async () => {
+    const snapshot = detail('waiting_deployment')
+    snapshot.code_changes = [
+      { id: 'api', case_id: 'case-1', attempt_id: 'fix-1', repo: 'api', base_branch: 'main', fix_branch: 'fix/1', fix_commit: 'fix-api', test_evidence: [], target_environment_branch: 'test', merge_base_head: 'base', merge_commit: 'merge-api', push_remote: 'origin', push_status: 'pushed' },
+      { id: 'worker', case_id: 'case-1', attempt_id: 'fix-1', repo: 'worker', base_branch: 'main', fix_branch: 'fix/1', fix_commit: 'fix-worker', test_evidence: [], target_environment_branch: 'test', merge_base_head: 'base', merge_commit: 'merge-worker', push_remote: 'origin', push_status: 'pushed' },
+    ]
+    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+
+    await wrapper.find('.primary-action').trigger('click')
+    await wrapper.find('#observed-version').setValue('build-42')
+    await wrapper.find('#observed-commit-api').setValue('merge-api')
+    await wrapper.find('[data-confirm]').trigger('click')
+
+    expect(wrapper.emitted('primary')?.[0]).toEqual([{
+      kind: 'notify_deployed', observedVersion: 'build-42', observedCommits: { api: 'merge-api' }, versionSource: 'manual',
+    }])
   })
 
   it('restores focus to the primary action when an approval dialog closes', async () => {

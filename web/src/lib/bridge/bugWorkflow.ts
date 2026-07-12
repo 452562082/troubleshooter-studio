@@ -52,7 +52,7 @@ export interface PhaseAttempt {
 export interface EvidenceArtifact { id: string; case_id: string; attempt_id: string; kind: string; path_or_reference: string; sha256: string; captured_at: string; environment: string; version: string; request_id: string; trace_id: string; redaction_status: string }
 export interface Approval { id: string; case_id: string; kind: string; actor: string; approved_at: string; case_version: number; scope_json: Record<string, unknown>; fix_commits: Record<string, string>; target_branches: Record<string, string> }
 export interface CodeChange { id: string; case_id: string; attempt_id: string; repo: string; base_branch: string; fix_branch: string; fix_commit: string; test_evidence: unknown; target_environment_branch: string; merge_base_head: string; merge_commit: string; push_remote: string; push_status: string }
-export interface DeploymentObservation { id: string; case_id: string; environment: string; expected_commits: Record<string, string>; observed_version: string; observed_images: Record<string, string>; observed_commits: Record<string, string>; verification_source: string; result: string }
+export interface DeploymentObservation { id: string; case_id: string; environment: string; expected_commits: Record<string, string>; observed_version: string; observed_images: Record<string, string>; observed_commits: Record<string, string>; verified_commit_ancestors?: Record<string, string>; verification_source: string; result: string }
 export interface TransitionEvent { id: string; case_id: string; from_status: CaseStatus; to_status: CaseStatus; event_type: string; actor_type: string; actor_id: string; idempotency_key: string; payload_json: Record<string, unknown>; created_at: string }
 
 export interface IncidentCaseDetail {
@@ -88,7 +88,7 @@ export interface StartIncidentCaseInput extends WorkflowCommandInput { bug_id?: 
 export interface ContinueIncidentCaseInput extends WorkflowCommandInput { phase: Phase; input_json?: Record<string, unknown> }
 export interface ApproveIncidentFixInput extends WorkflowCommandInput { root_cause_attempt_id: string; input_json?: Record<string, unknown> }
 export interface ApproveIncidentMergeInput extends WorkflowCommandInput { fix_commits: Record<string, string>; target_branches: Record<string, string>; target_heads?: Record<string, string> }
-export interface NotifyIncidentDeployedInput extends WorkflowCommandInput { observed_version: string; observed_commits?: Record<string, string>; input_json?: Record<string, unknown> }
+export interface NotifyIncidentDeployedInput extends WorkflowCommandInput { observed_version: string; observed_commits?: Record<string, string>; version_source?: string; notification_text?: string; input_json?: Record<string, unknown> }
 export interface CancelIncidentAttemptInput extends WorkflowCommandInput { attempt_id: string }
 
 export async function listIncidentCases(): Promise<IncidentCase[]> {

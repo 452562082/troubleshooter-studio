@@ -90,11 +90,14 @@ CREATE INDEX IF NOT EXISTS idx_events_case_created ON transition_events(case_id,
 `
 
 const (
-	workflowStoreSchemaVersion   = 1
+	workflowStoreSchemaVersion   = 2
 	workflowStoreSchemaV1Key     = "workflow-schema-v1"
 	workflowStoreSchemaV1Upgrade = `
 ALTER TABLE transition_events ADD COLUMN request_fingerprint TEXT NOT NULL DEFAULT '';
 ALTER TABLE transition_events ADD COLUMN result_case_json TEXT NOT NULL DEFAULT '{}';
+`
+	workflowStoreSchemaV2Upgrade = `
+ALTER TABLE deployment_observations ADD COLUMN verified_commit_ancestors_json TEXT NOT NULL DEFAULT '{}';
 `
 )
 

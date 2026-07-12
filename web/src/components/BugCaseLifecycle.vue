@@ -42,11 +42,12 @@ const props = defineProps<{
 const emit = defineEmits<{
   select: [caseID: string]
   refresh: []
-  primary: [payload: { kind: CasePrimaryAction['kind']; input?: string; observedVersion?: string; rootCauseAttemptID?: string; caseVersion?: number }]
+  primary: [payload: { kind: CasePrimaryAction['kind']; input?: string; observedVersion?: string; observedCommits?: Record<string, string>; versionSource?: string; rootCauseAttemptID?: string; caseVersion?: number }]
 }>()
 
 const dialogOpen = ref(false)
 const dialogInput = ref('')
+const dialogObservedCommits = ref<Record<string, string>>({})
 const confirmButton = ref<HTMLButtonElement | null>(null)
 const dialogElement = ref<HTMLElement | null>(null)
 const actionTrigger = ref<HTMLElement | null>(null)
@@ -63,6 +64,7 @@ const expectedDeploymentCommits = computed(() => {
   if (observed && Object.keys(observed).length > 0) return observed
   return Object.fromEntries((props.detail?.code_changes || []).map(change => [change.repo, change.merge_commit || change.fix_commit]))
 })
+const deploymentVersionSource = computed(() => latestDeployment.value?.verification_source || 'manual')
 const mergeApprovalScopes = computed(() => (props.detail?.code_changes || []).map(change => ({
   repo: change.repo,
   fixCommit: change.fix_commit,
@@ -138,6 +140,7 @@ async function openAction(event: MouseEvent) {
     dialogRootCauseAttemptID.value = ''
   }
   dialogInput.value = ''
+  dialogObservedCommits.value = Object.fromEntries(Object.keys(expectedDeploymentCommits.value).map(repo => [repo, '']))
   dialogOpen.value = true
   await nextTick()
   confirmButton.value?.focus()
@@ -151,13 +154,17 @@ function closeDialog() {
 
 function confirmAction() {
   if (!action.value) return
-  const payload: { kind: CasePrimaryAction['kind']; input?: string; observedVersion?: string; rootCauseAttemptID?: string; caseVersion?: number } = { kind: action.value.kind }
+  const payload: { kind: CasePrimaryAction['kind']; input?: string; observedVersion?: string; observedCommits?: Record<string, string>; versionSource?: string; rootCauseAttemptID?: string; caseVersion?: number } = { kind: action.value.kind }
   if (action.value.kind === 'approve_fix') {
     payload.rootCauseAttemptID = dialogRootCauseAttemptID.value
     payload.caseVersion = dialogCaseVersion.value
   }
   if (['supply_evidence', 'continue_fix', 'supply_merge_decision', 'supply_deployment_proof'].includes(action.value.kind)) payload.input = dialogInput.value.trim()
-  if (action.value.kind === 'notify_deployed') payload.observedVersion = dialogInput.value.trim()
+  if (action.value.kind === 'notify_deployed') {
+    payload.observedVersion = dialogInput.value.trim()
+    payload.observedCommits = Object.fromEntries(Object.entries(dialogObservedCommits.value).filter(([, commit]) => commit.trim()).map(([repo, commit]) => [repo, commit.trim()]))
+    payload.versionSource = deploymentVersionSource.value
+  }
   emit('primary', payload)
   dialogOpen.value = false
   nextTick(() => actionTrigger.value?.focus())
@@ -270,15 +277,22 @@ function dialogTitle(): string {
         <dl v-if="['notify_deployed', 'supply_deployment_proof'].includes(action.kind)" class="deployment-preview">
           <div><dt>目标环境</dt><dd>{{ detail?.case.environment || '未知' }}</dd></div>
           <div><dt>期望 commits</dt><dd><code v-for="(commit, repo) in expectedDeploymentCommits" :key="repo">{{ repo }}: {{ commit }}</code><span v-if="Object.keys(expectedDeploymentCommits).length === 0">尚未记录</span></dd></div>
-          <div><dt>版本验证方式</dt><dd>{{ latestDeployment?.verification_source || '按环境配置自动选择版本接口、K8s 或运行时信息' }}</dd></div>
+          <div><dt>版本来源</dt><dd>{{ deploymentVersionSource }}</dd></div>
         </dl>
-        <label v-if="action.kind === 'notify_deployed'" for="observed-version">已部署版本（可选）</label>
+        <label v-if="action.kind === 'notify_deployed'" for="observed-version">已部署版本</label>
         <input v-if="action.kind === 'notify_deployed'" id="observed-version" v-model="dialogInput" type="text" placeholder="例如 build-20260711 或 commit SHA">
+        <fieldset v-if="action.kind === 'notify_deployed'" class="observed-commits">
+          <legend>各仓库观测 commit（可选；留空将无法确认该仓库）</legend>
+          <label v-for="(_, repo) in expectedDeploymentCommits" :key="repo" :for="`observed-commit-${repo}`">
+            <span>{{ repo }}</span>
+            <input :id="`observed-commit-${repo}`" v-model="dialogObservedCommits[repo]" type="text" :placeholder="`期望 ${expectedDeploymentCommits[repo]}`">
+          </label>
+        </fieldset>
         <label v-if="['supply_evidence', 'continue_fix', 'supply_merge_decision', 'supply_deployment_proof'].includes(action.kind)" for="case-supplement">补充信息</label>
         <textarea v-if="['supply_evidence', 'continue_fix', 'supply_merge_decision', 'supply_deployment_proof'].includes(action.kind)" id="case-supplement" v-model="dialogInput" rows="5" placeholder="输入新证据、处理决定、版本证明或测试信息"></textarea>
         <footer>
           <button class="btn" type="button" :disabled="pending" @click="closeDialog">取消</button>
-          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (action.kind === 'approve_fix' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined)) || (['supply_evidence', 'continue_fix', 'supply_merge_decision', 'supply_deployment_proof'].includes(action.kind) && !dialogInput.trim())" @click="confirmAction">确认</button>
+          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (action.kind === 'approve_fix' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined)) || (action.kind === 'notify_deployed' && !dialogInput.trim()) || (['supply_evidence', 'continue_fix', 'supply_merge_decision', 'supply_deployment_proof'].includes(action.kind) && !dialogInput.trim())" @click="confirmAction">确认</button>
         </footer>
       </section>
     </div>
@@ -348,6 +362,9 @@ h2, h3, p { margin: 0; }
 .deployment-preview dt { color: var(--c-muted); font-size: var(--fs-sm); }
 .deployment-preview dd { min-width: 0; margin: 0; color: var(--c-ink); font-size: var(--fs-sm); overflow-wrap: anywhere; }
 .deployment-preview code { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.observed-commits { display: grid; gap: var(--sp-2); margin: 0; padding: var(--sp-3); border: 1px solid var(--c-line); border-radius: var(--r-md); }
+.observed-commits legend { padding: 0 4px; color: var(--c-muted); font-size: var(--fs-sm); }
+.observed-commits label { display: grid; grid-template-columns: minmax(90px, .35fr) minmax(0, 1fr); align-items: center; gap: var(--sp-2); }
 .approval-dialog input, .approval-dialog textarea { min-height: 44px; }
 .approval-dialog footer { display: flex; justify-content: flex-end; gap: var(--sp-2); }
 .approval-dialog footer .btn { min-height: 44px; min-width: 88px; justify-content: center; }

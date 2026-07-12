@@ -738,7 +738,7 @@ function selectWorkbenchView(view: 'inbox' | 'cases') {
   workbenchViewChosen = true
 }
 
-async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind']; input?: string; observedVersion?: string; rootCauseAttemptID?: string; caseVersion?: number }) {
+async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind']; input?: string; observedVersion?: string; observedCommits?: Record<string, string>; versionSource?: string; rootCauseAttemptID?: string; caseVersion?: number }) {
   const detail = incidentDetail.value
   if (!detail) return
   const incident = detail.case
@@ -781,7 +781,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
         })
       }
       if (payload.kind === 'notify_deployed') {
-        return notifyIncidentDeployed({ ...base, observed_version: payload.observedVersion || '' })
+        return notifyIncidentDeployed({ ...base, observed_version: payload.observedVersion || '', observed_commits: payload.observedCommits || {}, version_source: payload.versionSource || 'manual' })
       }
       if (payload.kind === 'cancel_attempt') {
         if (!incident.current_attempt_id) throw new Error('当前没有可停止的阶段')

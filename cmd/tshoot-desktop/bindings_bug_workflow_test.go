@@ -107,6 +107,49 @@ func TestListIncidentCasesWorksWithoutWailsContext(t *testing.T) {
 	}
 }
 
+func TestGetIncidentWorkflowMetricsIsReadOnly(t *testing.T) {
+	app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "metrics.db"))
+	before := createPendingBindingCase(t, store, "case-metrics")
+
+	metrics, err := app.GetIncidentWorkflowMetrics()
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.GetCase(context.Background(), before.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metrics.OpenCases != 1 || metrics.CompletedCases != 0 {
+		t.Fatalf("metrics=%+v", metrics)
+	}
+	if after.Version != before.Version || after.Status != before.Status || after.CycleNumber != before.CycleNumber {
+		t.Fatalf("metrics changed Case: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestPollWorkflowRemindersUsesLocalWorkflowEvent(t *testing.T) {
+	app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "reminder.db"))
+	waitingSince := time.Now().UTC().Add(-25 * time.Hour)
+	incident := bughub.IncidentCase{ID: "case-reminder", BugID: "bug-reminder", Environment: "test", Status: bughub.CaseMerging, CycleNumber: 1, Version: 1, CreatedAt: waitingSince.Add(-time.Hour), UpdatedAt: waitingSince}
+	if err := store.CreateCase(context.Background(), incident); err != nil {
+		t.Fatal(err)
+	}
+	event := bughub.TransitionEvent{ID: "wait-reminder", CaseID: incident.ID, FromStatus: bughub.CaseMerging, ToStatus: bughub.CaseWaitingDeployment, EventType: "merge_pushed", ActorType: "git", ActorID: "git", IdempotencyKey: "wait-reminder", PayloadJSON: []byte(`{}`), CreatedAt: waitingSince}
+	if _, _, err := store.Transition(context.Background(), incident.ID, 1, bughub.CaseWaitingDeployment, event); err != nil {
+		t.Fatal(err)
+	}
+	var name string
+	var payload any
+	app.workflowEmit = func(gotName string, gotPayload any) { name, payload = gotName, gotPayload }
+
+	app.pollWorkflowReminders(context.Background())
+
+	reminder, ok := payload.(bughub.WorkflowReminder)
+	if name != incidentWorkflowReminderEvent || !ok || reminder.CaseID != incident.ID {
+		t.Fatalf("event=%q payload=%+v", name, payload)
+	}
+}
+
 func TestStartIncidentCaseValidatesScalarsBeforeOpeningRuntime(t *testing.T) {
 	rootFile := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(rootFile, []byte("x"), 0o600); err != nil {

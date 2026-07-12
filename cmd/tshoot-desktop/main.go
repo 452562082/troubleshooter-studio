@@ -89,6 +89,7 @@ type App struct {
 	// Bindings only adapt commands to this runtime; persistence and transitions
 	// remain inside bughub's CaseStore and CaseOrchestrator.
 	workflowMu                   sync.Mutex
+	workflowReminderOnce         sync.Once
 	workflowRoot                 string
 	workflowStore                *bughub.CaseStore
 	workflowOrchestrator         *bughub.CaseOrchestrator

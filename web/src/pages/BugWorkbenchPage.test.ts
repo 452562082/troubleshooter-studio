@@ -1,6 +1,6 @@
 import { mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { approveIncidentFix, approveIncidentMerge, cancelBugInvestigation, continueIncidentCase, discoverBots, generateBugContext, getIncidentCase, listBugInvestigationRuns, listBugPlatforms, listBugs, listIncidentCases, matchBugBots, notifyIncidentDeployed, previewBugAttachment, saveBugPlatform, startBugInvestigation, startIncidentCase } from '../lib/bridge'
+import { approveIncidentFix, approveIncidentMerge, cancelBugInvestigation, continueIncidentCase, discoverBots, generateBugContext, getIncidentCase, getIncidentWorkflowMetrics, listBugInvestigationRuns, listBugPlatforms, listBugs, listIncidentCases, matchBugBots, notifyIncidentDeployed, previewBugAttachment, saveBugPlatform, startBugInvestigation, startIncidentCase } from '../lib/bridge'
 import { copyToClipboard } from '../lib/clipboard'
 import BugWorkbenchPage from './BugWorkbenchPage.vue'
 
@@ -33,6 +33,7 @@ vi.mock('../lib/bridge', () => ({
   listBugInvestigationRuns: vi.fn().mockResolvedValue([]),
   listIncidentCases: vi.fn().mockResolvedValue([]),
   getIncidentCase: vi.fn(),
+  getIncidentWorkflowMetrics: vi.fn().mockResolvedValue({ completed_cases: 0 }),
   listBugPlatforms: vi.fn().mockResolvedValue([]),
   listBugs: vi.fn().mockResolvedValue([]),
   matchBugBots: vi.fn().mockResolvedValue([]),
@@ -72,6 +73,7 @@ afterEach(() => {
   vi.mocked(listBugInvestigationRuns).mockResolvedValue([])
   vi.mocked(listIncidentCases).mockResolvedValue([])
   vi.mocked(getIncidentCase).mockReset()
+  vi.mocked(getIncidentWorkflowMetrics).mockResolvedValue({ completed_cases: 0 } as any)
   vi.mocked(continueIncidentCase).mockReset()
   vi.mocked(approveIncidentFix).mockReset()
   vi.mocked(approveIncidentMerge).mockReset()
@@ -97,6 +99,24 @@ function durableDetail(status: string, overrides: Record<string, unknown> = {}) 
 }
 
 describe('BugWorkbenchPage', () => {
+  it('loads the compact workflow metrics panel for mature case history', async () => {
+    vi.mocked(listIncidentCases).mockResolvedValue(Array.from({ length: 5 }, (_, index) => ({
+      id: `case-${index}`, bug_id: `bug-${index}`, source: 'zentao', system_id: 'base', environment: 'test', status: 'fixed_verified', cycle_number: 1, current_attempt_id: '', selected_bot_key: '', version: 1, created_at: '', updated_at: '', closed_at: '',
+    })) as any)
+    vi.mocked(getIncidentCase).mockResolvedValue(durableDetail('fixed_verified') as any)
+    vi.mocked(getIncidentWorkflowMetrics).mockResolvedValue({
+      completed_cases: 5, open_cases: 1, median_stage_duration: { validation: 60_000_000_000 }, oldest_waiting_deployment_age: 0,
+      agent_execution_duration: 0, human_deployment_wait: 0, retry_count: 0, blocker_distribution: {}, automation_ratio: 1,
+      first_regression_success_rate: 0.8, still_reproduces_rate: 0.2,
+    } as any)
+
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises()
+
+    expect(wrapper.find('[aria-label="故障闭环指标"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('首次回归成功 80%')
+  })
+
   it('keeps platform configuration collapsed by default', async () => {
     const wrapper = mount(BugWorkbenchPage)
 

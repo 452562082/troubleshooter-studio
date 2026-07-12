@@ -7,7 +7,7 @@ import (
 )
 
 func TestNewDesktopOptionsRunsInBackgroundOnClose(t *testing.T) {
-	appState := &App{}
+	appState := &App{workflowRoot: t.TempDir()}
 	opts := newDesktopOptions(appState, http.NewServeMux())
 
 	if opts == nil {
@@ -52,8 +52,10 @@ func TestStartupStartsTrayAfterContextIsSet(t *testing.T) {
 		startDesktopBugPoller = prevPoller
 	})
 
-	appState := &App{}
-	appState.startup(context.Background())
+	appState := &App{workflowRoot: t.TempDir()}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() { cancel(); _ = appState.closeIncidentWorkflow() })
+	appState.startup(ctx)
 
 	if appState.ctx == nil {
 		t.Fatal("startup did not store Wails context")

@@ -54,6 +54,21 @@ export interface Approval { id: string; case_id: string; kind: string; actor: st
 export interface CodeChange { id: string; case_id: string; attempt_id: string; repo: string; base_branch: string; fix_branch: string; fix_commit: string; test_evidence: unknown; target_environment_branch: string; merge_base_head: string; merge_commit: string; push_remote: string; push_status: string }
 export interface DeploymentObservation { id: string; case_id: string; environment: string; expected_commits: Record<string, string>; observed_version: string; observed_images: Record<string, string>; observed_commits: Record<string, string>; verified_commit_ancestors?: Record<string, string>; observed_at?: string; diagnostic_code?: string; diagnostic_message?: string; verification_source: string; result: string }
 export interface TransitionEvent { id: string; case_id: string; from_status: CaseStatus; to_status: CaseStatus; event_type: string; actor_type: string; actor_id: string; idempotency_key: string; payload_json: Record<string, unknown>; created_at: string }
+export interface WorkflowMetrics {
+  completed_cases: number
+  open_cases: number
+  median_stage_duration: Record<string, number>
+  oldest_waiting_deployment_age: number
+  agent_execution_duration: number
+  human_deployment_wait: number
+  retry_count: number
+  agent_input_tokens: number
+  agent_output_tokens: number
+  blocker_distribution: Record<string, number>
+  automation_ratio: number
+  first_regression_success_rate: number
+  still_reproduces_rate: number
+}
 
 export interface IncidentCaseDetail {
   case: IncidentCase
@@ -98,6 +113,11 @@ export async function listIncidentCases(): Promise<IncidentCase[]> {
   return Array.isArray(result) ? result.map(normalizeCase) : []
 }
 
+export async function getIncidentWorkflowMetrics(): Promise<WorkflowMetrics> {
+  if (!isDesktop()) return emptyWorkflowMetrics()
+  return { ...emptyWorkflowMetrics(), ...(await App.GetIncidentWorkflowMetrics()) } as WorkflowMetrics
+}
+
 export async function getIncidentCase(caseID: string): Promise<IncidentCaseDetail> {
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeDetail(await App.GetIncidentCase(caseID))
@@ -130,6 +150,10 @@ export async function cancelIncidentAttempt(input: CancelIncidentAttemptInput): 
 
 function record(raw: unknown): Record<string, unknown> {
   return raw !== null && typeof raw === 'object' ? raw as Record<string, unknown> : {}
+}
+
+function emptyWorkflowMetrics(): WorkflowMetrics {
+  return { completed_cases: 0, open_cases: 0, median_stage_duration: {}, oldest_waiting_deployment_age: 0, agent_execution_duration: 0, human_deployment_wait: 0, retry_count: 0, agent_input_tokens: 0, agent_output_tokens: 0, blocker_distribution: {}, automation_ratio: 0, first_regression_success_rate: 0, still_reproduces_rate: 0 }
 }
 
 function normalizeCase(raw: unknown): IncidentCase {

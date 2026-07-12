@@ -31,6 +31,7 @@ import {
   saveBugSelectedBot,
   listIncidentCases,
   getIncidentCase,
+  getIncidentWorkflowMetrics,
   startIncidentCase,
   continueIncidentCase,
   approveIncidentFix,
@@ -38,10 +39,12 @@ import {
   notifyIncidentDeployed,
   cancelIncidentAttempt,
   type IncidentCase,
+  type WorkflowMetrics,
   startBugFix,
   syncBugPlatform,
 } from '../lib/bridge'
 import BugCaseLifecycle, { type CasePrimaryAction } from '../components/BugCaseLifecycle.vue'
+import BugWorkflowMetrics from '../components/BugWorkflowMetrics.vue'
 import { copyToClipboard } from '../lib/clipboard'
 import { confirmDialog } from '../lib/confirm'
 import { toast, toastError } from '../lib/toast'
@@ -99,6 +102,7 @@ const platformDraft = ref({
   poll_interval_minutes: 5,
 })
 let unlistenInvestigationEvents: (() => void) | undefined
+let unlistenWorkflowReminders: (() => void) | undefined
 
 const incidentWorkflow = useIncidentCase({ listCases: listIncidentCases, getCase: getIncidentCase })
 const incidentCases = incidentWorkflow.cases
@@ -109,6 +113,7 @@ const incidentStartIDs = new Map<string, string>()
 const workbenchView = ref<'inbox' | 'cases'>('inbox')
 let workbenchViewChosen = false
 const explicitlySelectedBots = ref<Record<string, string>>({})
+const workflowMetrics = ref<WorkflowMetrics | null>(null)
 
 const selectedBug = computed(() => bugs.value.find(b => b.id === selectedID.value) || bugs.value[0])
 const selectedPlatform = computed(() => platforms.value.find(p => p.id === selectedPlatformID.value))
@@ -280,6 +285,7 @@ const hookURL = computed(() => {
 
 watch(incidentCases, items => {
   if (items.length > 0 && !workbenchViewChosen) workbenchView.value = 'cases'
+  void loadWorkflowMetrics()
 }, { immediate: true })
 
 watch(selectedPlatform, (p) => {
@@ -342,7 +348,11 @@ watch(outputTab, () => {
 
 onMounted(async () => {
   setupInvestigationEventBridge()
-  await Promise.all([loadInstalledBots(), loadPlatforms(), loadBugs(), loadHookBase()])
+  unlistenWorkflowReminders = EventsOn('incident-workflow:reminder', (reminder: { bug_id?: string; waiting_age?: number }) => {
+    toast.info(`Bug ${reminder?.bug_id || ''} 已等待人工部署超过 24 小时`)
+    void loadWorkflowMetrics()
+  })
+  await Promise.all([loadInstalledBots(), loadPlatforms(), loadBugs(), loadHookBase(), loadWorkflowMetrics()])
 })
 
 onUnmounted(() => {
@@ -350,7 +360,19 @@ onUnmounted(() => {
     unlistenInvestigationEvents()
     unlistenInvestigationEvents = undefined
   }
+  if (unlistenWorkflowReminders) {
+    unlistenWorkflowReminders()
+    unlistenWorkflowReminders = undefined
+  }
 })
+
+async function loadWorkflowMetrics() {
+  try {
+    workflowMetrics.value = await getIncidentWorkflowMetrics()
+  } catch {
+    workflowMetrics.value = null
+  }
+}
 
 async function loadHookBase() {
   try {
@@ -1471,6 +1493,8 @@ function escapeRegExp(value: string): string {
         <button class="btn" type="button" :disabled="!hookURL" @click="copyHookURL">复制 Hook URL</button>
       </div>
     </section>
+
+    <BugWorkflowMetrics v-if="workbenchView === 'cases'" :metrics="workflowMetrics" />
 
     <BugCaseLifecycle
       v-if="workbenchView === 'cases' && (incidentCases.length > 0 || incidentDetail)"

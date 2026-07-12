@@ -1123,6 +1123,42 @@ export namespace bughub {
 	        this.product_count = source["product_count"];
 	    }
 	}
+	export class WorkflowMetrics {
+	    completed_cases: number;
+	    open_cases: number;
+	    median_stage_duration: Record<string, number>;
+	    oldest_waiting_deployment_age: number;
+	    agent_execution_duration: number;
+	    human_deployment_wait: number;
+	    retry_count: number;
+	    agent_input_tokens: number;
+	    agent_output_tokens: number;
+	    blocker_distribution: Record<string, number>;
+	    automation_ratio: number;
+	    first_regression_success_rate: number;
+	    still_reproduces_rate: number;
+
+	    static createFrom(source: any = {}) {
+	        return new WorkflowMetrics(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.completed_cases = source["completed_cases"];
+	        this.open_cases = source["open_cases"];
+	        this.median_stage_duration = source["median_stage_duration"];
+	        this.oldest_waiting_deployment_age = source["oldest_waiting_deployment_age"];
+	        this.agent_execution_duration = source["agent_execution_duration"];
+	        this.human_deployment_wait = source["human_deployment_wait"];
+	        this.retry_count = source["retry_count"];
+	        this.agent_input_tokens = source["agent_input_tokens"];
+	        this.agent_output_tokens = source["agent_output_tokens"];
+	        this.blocker_distribution = source["blocker_distribution"];
+	        this.automation_ratio = source["automation_ratio"];
+	        this.first_regression_success_rate = source["first_regression_success_rate"];
+	        this.still_reproduces_rate = source["still_reproduces_rate"];
+	    }
+	}
 
 }
 
@@ -3538,6 +3574,43 @@ export namespace main {
 	        this.exit_code = source["exit_code"];
 	        this.ok = source["ok"];
 	    }
+	}
+	export class SnoozeIncidentWorkflowReminderInput {
+	    case_id: string;
+	    // Go type: time
+	    until: any;
+	    actor_id: string;
+	    idempotency_key: string;
+
+	    static createFrom(source: any = {}) {
+	        return new SnoozeIncidentWorkflowReminderInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.case_id = source["case_id"];
+	        this.until = this.convertValues(source["until"], null);
+	        this.actor_id = source["actor_id"];
+	        this.idempotency_key = source["idempotency_key"];
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class StartIncidentCaseInput {
 	    case_id: string;

@@ -16,7 +16,12 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/userconfig"
 )
 
-const incidentCaseEvent = "incident-case:event"
+const (
+	incidentCaseEvent             = "incident-case:event"
+	incidentWorkflowReminderEvent = "incident-workflow:reminder"
+)
+
+var incidentWorkflowReminderPollInterval = time.Hour
 
 type incidentWorkflowRuntime struct {
 	orchestrator *bughub.CaseOrchestrator
@@ -282,6 +287,9 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 func (a *App) startIncidentWorkflow(ctx context.Context) error {
 	err := a.initializeIncidentWorkflow(workflowContext(ctx))
 	if err == nil {
+		if runtimeCtx := a.getRuntimeContext(); runtimeCtx != nil {
+			a.startWorkflowReminderPoller(runtimeCtx)
+		}
 		return nil
 	}
 	fmt.Fprintf(os.Stderr, "[warn] incident workflow startup failed: %v\n", err)
@@ -326,6 +334,73 @@ func (a *App) ListIncidentCases() ([]bughub.IncidentCase, error) {
 		items = []bughub.IncidentCase{}
 	}
 	return items, err
+}
+
+func (a *App) GetIncidentWorkflowMetrics() (bughub.WorkflowMetrics, error) {
+	store, _, err := a.workflowComponents()
+	if err != nil {
+		return bughub.WorkflowMetrics{}, err
+	}
+	return store.WorkflowMetrics(a.workflowCommandContext(), time.Now().UTC())
+}
+
+type SnoozeIncidentWorkflowReminderInput struct {
+	CaseID         string    `json:"case_id"`
+	Until          time.Time `json:"until"`
+	ActorID        string    `json:"actor_id"`
+	IdempotencyKey string    `json:"idempotency_key"`
+}
+
+func (a *App) SnoozeIncidentWorkflowReminder(input SnoozeIncidentWorkflowReminderInput) error {
+	store, _, err := a.workflowComponents()
+	if err != nil {
+		return err
+	}
+	service := bughub.NewWorkflowReminderService(store, nil, bughub.DefaultWorkflowReminderAfter, nil)
+	return service.Snooze(a.workflowCommandContext(), input.CaseID, input.Until, input.ActorID, input.IdempotencyKey)
+}
+
+func (a *App) startWorkflowReminderPoller(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	a.workflowReminderOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(incidentWorkflowReminderPollInterval)
+			defer ticker.Stop()
+			a.pollWorkflowReminders(ctx)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					a.pollWorkflowReminders(ctx)
+				}
+			}
+		}()
+	})
+}
+
+func (a *App) pollWorkflowReminders(ctx context.Context) {
+	a.workflowMu.Lock()
+	store := a.workflowStore
+	a.workflowMu.Unlock()
+	if store == nil {
+		return
+	}
+	service := bughub.NewWorkflowReminderService(store, nil, bughub.DefaultWorkflowReminderAfter, func(_ context.Context, reminder bughub.WorkflowReminder) error {
+		if a.workflowEmit != nil {
+			a.workflowEmit(incidentWorkflowReminderEvent, reminder)
+			return nil
+		}
+		if runtimeCtx := a.getRuntimeContext(); runtimeCtx != nil {
+			wailsruntime.EventsEmit(runtimeCtx, incidentWorkflowReminderEvent, reminder)
+		}
+		return nil
+	})
+	if err := service.Poll(workflowContext(ctx)); err != nil && !errors.Is(err, context.Canceled) {
+		fmt.Fprintf(os.Stderr, "[warn] incident workflow reminder poll failed: %v\n", err)
+	}
 }
 
 func (a *App) GetIncidentCase(caseID string) (IncidentCaseDetail, error) {

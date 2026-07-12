@@ -88,6 +88,8 @@ export function GenerateBugContext(arg1:main.BugContextInput):Promise<string>;
 
 export function GetIncidentCase(arg1:string):Promise<main.IncidentCaseDetail>;
 
+export function GetIncidentWorkflowMetrics():Promise<bughub.WorkflowMetrics>;
+
 export function GetMissingRepoPaths(arg1:string):Promise<main.MissingRepoPathsResult>;
 
 export function GetRemoteURL(arg1:string):Promise<string>;
@@ -199,6 +201,8 @@ export function SelfTestAgent(arg1:string):Promise<agent.SelfTestResult>;
 export function SetDefaultReposRoot(arg1:string):Promise<void>;
 
 export function ShowMainWindow():Promise<void>;
+
+export function SnoozeIncidentWorkflowReminder(arg1:main.SnoozeIncidentWorkflowReminderInput):Promise<void>;
 
 export function StartBugFix(arg1:main.BugFixInput):Promise<bughub.InvestigationRun>;
 

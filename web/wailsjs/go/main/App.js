@@ -150,6 +150,10 @@ export function GetIncidentCase(arg1) {
   return window['go']['main']['App']['GetIncidentCase'](arg1);
 }
 
+export function GetIncidentWorkflowMetrics() {
+  return window['go']['main']['App']['GetIncidentWorkflowMetrics']();
+}
+
 export function GetMissingRepoPaths(arg1) {
   return window['go']['main']['App']['GetMissingRepoPaths'](arg1);
 }
@@ -372,6 +376,10 @@ export function SetDefaultReposRoot(arg1) {
 
 export function ShowMainWindow() {
   return window['go']['main']['App']['ShowMainWindow']();
+}
+
+export function SnoozeIncidentWorkflowReminder(arg1) {
+  return window['go']['main']['App']['SnoozeIncidentWorkflowReminder'](arg1);
 }
 
 export function StartBugFix(arg1) {

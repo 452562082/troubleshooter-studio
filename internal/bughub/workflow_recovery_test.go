@@ -96,6 +96,31 @@ func TestRecoverPreparedQueuedAttemptAfterReservationCrash(t *testing.T) {
 	}
 }
 
+func TestRecoverQueuedAttemptUsesResolvedWorkspaceContext(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "recover-context", CasePendingValidation)
+	attempt := PhaseAttempt{ID: "recover-context-attempt", CaseID: incident.ID, CycleNumber: 1, Phase: PhaseValidation, Mode: AttemptReproduce, Status: AttemptStatusQueued, AgentTarget: "codex", BotKey: "bot", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}
+	if err := store.CreateAttempt(ctx, attempt); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingPhaseRunner{}
+	o := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
+	o.SetRecoveryContextResolver(RecoveryContextResolverFunc(func(_ context.Context, gotCase IncidentCase, gotAttempt PhaseAttempt) (Bug, BotRef, error) {
+		if gotCase.ID != incident.ID || gotAttempt.ID != attempt.ID {
+			t.Fatalf("resolver case=%s attempt=%s", gotCase.ID, gotAttempt.ID)
+		}
+		return Bug{ID: incident.BugID, Title: "loaded bug"}, BotRef{Key: "bot", Target: "codex", Path: "/workspace/base", Env: "test"}, nil
+	}))
+
+	if err := o.RecoverInterrupted(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.bots) != 1 || runner.bots[0].Path != "/workspace/base" || len(runner.bugs) != 1 || runner.bugs[0].Title != "loaded bug" {
+		t.Fatalf("bugs=%+v bots=%+v", runner.bugs, runner.bots)
+	}
+}
+
 func TestRecoverInterruptedReadOnlyPhaseStopsAfterOneRetry(t *testing.T) {
 	ctx := context.Background()
 	store := newOrchestratorStore(t)

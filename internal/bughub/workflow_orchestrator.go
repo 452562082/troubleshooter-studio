@@ -94,6 +94,20 @@ type DeploymentVerifier interface {
 	Verify(context.Context, DeploymentVerificationRequest) (DeploymentObservation, error)
 }
 
+// RecoveryContextResolver reloads the full persisted Bug/Bot execution
+// context before a recovered or automatically-created phase is scheduled.
+// In particular, Bot.Path must point at the installed workspace; reconstructing
+// only key/target is not sufficient for CLI execution.
+type RecoveryContextResolver interface {
+	ResolveRecoveryContext(context.Context, IncidentCase, PhaseAttempt) (Bug, BotRef, error)
+}
+
+type RecoveryContextResolverFunc func(context.Context, IncidentCase, PhaseAttempt) (Bug, BotRef, error)
+
+func (fn RecoveryContextResolverFunc) ResolveRecoveryContext(ctx context.Context, incident IncidentCase, attempt PhaseAttempt) (Bug, BotRef, error) {
+	return fn(ctx, incident, attempt)
+}
+
 type MergeRequest struct {
 	CaseID         string            `json:"case_id"`
 	FixCommits     map[string]string `json:"fix_commits"`
@@ -196,6 +210,20 @@ type StartCaseCommand struct {
 	InputJSON       json.RawMessage
 }
 
+// CreateAndStartCaseCommand is the production entrypoint for a Bug that does
+// not have a durable Case yet. ExpectedVersion is zero only for first
+// creation. When CaseID names an immutable legacy archive, the command creates
+// a deterministic new Case for the next cycle and leaves the archive intact.
+type CreateAndStartCaseCommand struct {
+	CaseID          string
+	ExpectedVersion int64
+	IdempotencyKey  string
+	ActorID         string
+	Bug             Bug
+	Bot             BotRef
+	InputJSON       json.RawMessage
+}
+
 type ContinueWithEvidenceCommand struct {
 	CaseID          string
 	ExpectedVersion int64
@@ -280,6 +308,7 @@ type CaseOrchestrator struct {
 	runner          PhaseRunner
 	git             GitIntegration
 	deployment      DeploymentVerifier
+	recoveryContext RecoveryContextResolver
 	mu              sync.Mutex
 	recoveryStarted map[string]struct{}
 	scheduleTimeout time.Duration
@@ -289,6 +318,38 @@ type CaseOrchestrator struct {
 
 func NewCaseOrchestrator(store *CaseStore, runner PhaseRunner, git GitIntegration, deployment DeploymentVerifier) *CaseOrchestrator {
 	return &CaseOrchestrator{store: store, runner: runner, git: git, deployment: deployment, recoveryStarted: make(map[string]struct{}), scheduleTimeout: 30 * time.Second, cancelTimeout: 30 * time.Second, cancelWorkers: make(chan struct{}, cancelWorkerCapacity)}
+}
+
+func (o *CaseOrchestrator) SetRecoveryContextResolver(resolver RecoveryContextResolver) {
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.recoveryContext = resolver
+}
+
+func (o *CaseOrchestrator) resolveRecoveryContext(ctx context.Context, incident IncidentCase, attempt PhaseAttempt) (Bug, BotRef, error) {
+	o.mu.Lock()
+	resolver := o.recoveryContext
+	o.mu.Unlock()
+	if resolver == nil {
+		return Bug{ID: incident.BugID, Source: incident.Source, SystemID: incident.SystemID, Env: incident.Environment}, BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget}, nil
+	}
+	bug, bot, err := resolver.ResolveRecoveryContext(ctx, incident.Clone(), attempt.Clone())
+	if err != nil {
+		return Bug{}, BotRef{}, err
+	}
+	if strings.TrimSpace(bug.ID) != incident.BugID {
+		return Bug{}, BotRef{}, fmt.Errorf("resolved Bug %q does not match Case Bug %q", bug.ID, incident.BugID)
+	}
+	if strings.TrimSpace(bot.Key) != attempt.BotKey || strings.TrimSpace(bot.Target) != attempt.AgentTarget {
+		return Bug{}, BotRef{}, fmt.Errorf("resolved Bot %q/%q does not match attempt Bot %q/%q", bot.Key, bot.Target, attempt.BotKey, attempt.AgentTarget)
+	}
+	if strings.TrimSpace(bot.Path) == "" {
+		return Bug{}, BotRef{}, errors.New("resolved recovery Bot workspace path is required")
+	}
+	return bug, bot, nil
 }
 
 func (o *CaseOrchestrator) startPhase(attempt PhaseAttempt, bug Bug, bot BotRef) error {
@@ -326,6 +387,83 @@ func (o *CaseOrchestrator) StartCase(ctx context.Context, cmd StartCaseCommand) 
 	}
 	attempt := newAttempt(incident, PhaseValidation, AttemptReproduce, cmd.IdempotencyKey, cmd.Bot, cmd.InputJSON, "")
 	return o.beginPhase(ctx, incident, CaseValidating, attempt, cmd.Bug, cmd.Bot, cmd.IdempotencyKey, cmd.ActorID, "validation_started")
+}
+
+func (o *CaseOrchestrator) CreateAndStartCase(ctx context.Context, cmd CreateAndStartCaseCommand) (IncidentCase, error) {
+	if o == nil || o.store == nil {
+		return IncidentCase{}, errors.New("case orchestrator store is required")
+	}
+	if strings.TrimSpace(cmd.CaseID) == "" || strings.TrimSpace(cmd.IdempotencyKey) == "" || strings.TrimSpace(cmd.ActorID) == "" {
+		return IncidentCase{}, errors.New("case ID, idempotency key, and actor ID are required")
+	}
+	if cmd.ExpectedVersion < 0 {
+		return IncidentCase{}, errors.New("expected version must not be negative")
+	}
+	if strings.TrimSpace(cmd.Bug.ID) == "" || strings.TrimSpace(cmd.Bot.Key) == "" || strings.TrimSpace(cmd.Bot.Target) == "" {
+		return IncidentCase{}, errors.New("Bug ID and Bot key/target are required")
+	}
+	if len(cmd.InputJSON) == 0 {
+		cmd.InputJSON = []byte(`{}`)
+	}
+	if err := validateJSONObject("start Case input", cmd.InputJSON, true); err != nil {
+		return IncidentCase{}, err
+	}
+	// Serialize creation by Case ID, not by idempotency key, so two tabs cannot
+	// both observe a missing Case and race separate first-start commands.
+	release := workflowCommandLocks.acquire("create-start:" + cmd.CaseID)
+	defer release()
+
+	targetID := cmd.CaseID
+	targetVersion := cmd.ExpectedVersion
+	cycle := 1
+	existing, getErr := o.store.GetCase(ctx, cmd.CaseID)
+	switch {
+	case errors.Is(getErr, ErrCaseNotFound):
+		if cmd.ExpectedVersion != 0 {
+			return IncidentCase{}, fmt.Errorf("%w: expected %d for missing Case", ErrCaseVersionConflict, cmd.ExpectedVersion)
+		}
+		targetVersion = 1
+	case getErr != nil:
+		return IncidentCase{}, getErr
+	case existing.Status == CaseLegacyArchived:
+		if existing.Version != cmd.ExpectedVersion {
+			return IncidentCase{}, fmt.Errorf("%w: expected %d, current %d", ErrCaseVersionConflict, cmd.ExpectedVersion, existing.Version)
+		}
+		targetID = stableID("case-cycle", existing.ID+":"+cmd.IdempotencyKey)
+		targetVersion = 1
+		cycle = existing.CycleNumber + 1
+	case cmd.ExpectedVersion == 0:
+		found, eventErr := o.hasEvent(ctx, existing.ID, cmd.IdempotencyKey)
+		if eventErr != nil {
+			return IncidentCase{}, eventErr
+		}
+		if !found && (existing.Status != CasePendingValidation || existing.BugID != cmd.Bug.ID || existing.SelectedBotKey != cmd.Bot.Key) {
+			return IncidentCase{}, fmt.Errorf("%w: Case already exists", ErrCaseVersionConflict)
+		}
+		// A matching pending Case may be the durable half of a crash between
+		// creation and first transition. Starting it is safe and closes that gap.
+		targetVersion = 1
+	default:
+		return o.StartCase(ctx, StartCaseCommand{CaseID: existing.ID, ExpectedVersion: cmd.ExpectedVersion, IdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, Bug: cmd.Bug, Bot: cmd.Bot, InputJSON: cmd.InputJSON})
+	}
+
+	target, targetErr := o.store.GetCase(ctx, targetID)
+	if errors.Is(targetErr, ErrCaseNotFound) {
+		environment := strings.TrimSpace(cmd.Bug.Env)
+		if environment == "" {
+			environment = strings.TrimSpace(cmd.Bot.Env)
+		}
+		created := IncidentCase{ID: targetID, BugID: cmd.Bug.ID, Source: cmd.Bug.Source, SystemID: cmd.Bug.SystemID, Environment: environment, Status: CasePendingValidation, CycleNumber: cycle, SelectedBotKey: cmd.Bot.Key}
+		if createErr := o.store.CreateCase(ctx, created); createErr != nil {
+			return IncidentCase{}, createErr
+		}
+		target = created
+	} else if targetErr != nil {
+		return IncidentCase{}, targetErr
+	} else if target.BugID != cmd.Bug.ID || target.CycleNumber != cycle || target.SelectedBotKey != cmd.Bot.Key {
+		return IncidentCase{}, ErrIdempotencyConflict
+	}
+	return o.StartCase(ctx, StartCaseCommand{CaseID: targetID, ExpectedVersion: targetVersion, IdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, Bug: cmd.Bug, Bot: cmd.Bot, InputJSON: cmd.InputJSON})
 }
 
 func (o *CaseOrchestrator) ContinueWithEvidence(ctx context.Context, cmd ContinueWithEvidenceCommand) (IncidentCase, error) {
@@ -1010,7 +1148,14 @@ func (o *CaseOrchestrator) applyOutcome(ctx context.Context, incident IncidentCa
 		return IncidentCase{}, fmt.Errorf("unsupported phase outcome %q", cmd.Outcome)
 	}
 	creates := []PhaseAttempt{}
+	var nextBug Bug
+	var nextBot BotRef
 	if next != nil {
+		var contextErr error
+		nextBug, nextBot, contextErr = o.resolveRecoveryContext(ctx, incident, *next)
+		if contextErr != nil {
+			return IncidentCase{}, fmt.Errorf("resolve next phase context: %w", contextErr)
+		}
 		creates = append(creates, *next)
 	}
 	request := mustJSON(cmd)
@@ -1021,12 +1166,10 @@ func (o *CaseOrchestrator) applyOutcome(ctx context.Context, incident IncidentCa
 	if mutation.Replay || next == nil {
 		return mutation.Case, nil
 	}
-	bug := Bug{ID: mutation.Case.BugID, Source: mutation.Case.Source, SystemID: mutation.Case.SystemID, Env: mutation.Case.Environment}
-	bot := BotRef{Key: next.BotKey, Target: next.AgentTarget}
 	if o.runner == nil {
 		return o.phaseScheduleFailure(ctx, mutation.Case, *next, cmd.IdempotencyKey+":next", errors.New("phase runner is unavailable"))
 	}
-	if err := o.startPhase(*next, bug, bot); err != nil {
+	if err := o.startPhase(*next, nextBug, nextBot); err != nil {
 		return o.phaseScheduleFailure(ctx, mutation.Case, *next, cmd.IdempotencyKey+":next", err)
 	}
 	return mutation.Case, nil

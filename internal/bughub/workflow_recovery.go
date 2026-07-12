@@ -240,6 +240,10 @@ func (o *CaseOrchestrator) reconcileTerminalCurrent(ctx context.Context, inciden
 }
 
 func (o *CaseOrchestrator) recoverPreparedAttempt(ctx context.Context, incident IncidentCase, attempt PhaseAttempt) error {
+	bug, bot, contextErr := o.resolveRecoveryContext(ctx, incident, attempt)
+	if contextErr != nil {
+		return fmt.Errorf("resolve prepared attempt context: %w", contextErr)
+	}
 	key := "recovery:" + attempt.ID + ":prepared"
 	update := CaseSnapshotUpdate{CurrentAttemptID: workflowStringPtr(attempt.ID), SelectedBotKey: workflowStringPtr(attempt.BotKey)}
 	updated, replay, err := o.transition(ctx, incident, statusForPhase(attempt.Phase), key, "recovery", "prepared_attempt_recovered", map[string]string{"attempt_id": attempt.ID}, update)
@@ -250,8 +254,6 @@ func (o *CaseOrchestrator) recoverPreparedAttempt(ctx context.Context, incident 
 		_, scheduleErr := o.phaseScheduleFailure(ctx, updated, attempt, key, errors.New("phase runner is unavailable"))
 		return scheduleErr
 	}
-	bug := Bug{ID: updated.BugID, Source: updated.Source, SystemID: updated.SystemID, Env: updated.Environment}
-	bot := BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget}
 	if err := o.startPhase(attempt, bug, bot); err != nil {
 		_, scheduleErr := o.phaseScheduleFailure(ctx, updated, attempt, key, err)
 		return scheduleErr
@@ -288,8 +290,13 @@ func (o *CaseOrchestrator) recoverReadOnly(ctx context.Context, incident Inciden
 	empty := ""
 	update.CurrentAttemptID = &empty
 	var retry PhaseAttempt
+	var bug Bug
+	var bot BotRef
 	if retryAllowed && count < 2 {
-		bot := BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget}
+		bug, bot, err = o.resolveRecoveryContext(ctx, incident, attempt)
+		if err != nil {
+			return fmt.Errorf("resolve retry context: %w", err)
+		}
 		retry = newAttempt(incident, attempt.Phase, attempt.Mode, key+":retry", bot, attempt.InputJSON, attempt.ID)
 		creates = append(creates, retry)
 		update.CurrentAttemptID = workflowStringPtr(retry.ID)
@@ -302,8 +309,6 @@ func (o *CaseOrchestrator) recoverReadOnly(ctx context.Context, incident Inciden
 	if len(creates) == 0 || mutation.Replay {
 		return nil
 	}
-	bug := Bug{ID: incident.BugID, Source: incident.Source, SystemID: incident.SystemID, Env: incident.Environment}
-	bot := BotRef{Key: retry.BotKey, Target: retry.AgentTarget}
 	if o.runner == nil {
 		_, err = o.phaseScheduleFailure(ctx, mutation.Case, retry, key+":retry", errors.New("phase runner unavailable"))
 		return err

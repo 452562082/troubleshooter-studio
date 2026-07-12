@@ -15,6 +15,8 @@ import (
 type recordingPhaseRunner struct {
 	mu       sync.Mutex
 	starts   []PhaseAttempt
+	bugs     []Bug
+	bots     []BotRef
 	startErr error
 	cancels  []string
 }
@@ -78,6 +80,74 @@ func TestOrchestratorBlockedRunnerUsesBoundedDetachedContext(t *testing.T) {
 	got, err := o.StartCase(context.Background(), StartCaseCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "start:deadline", ActorID: "alice", Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "bot", Target: "codex"}, InputJSON: []byte(`{}`)})
 	if !errors.Is(err, context.DeadlineExceeded) || !runner.sawDeadline || got.Status != CaseWaitingEvidence {
 		t.Fatalf("case=%+v deadline=%v err=%v", got, runner.sawDeadline, err)
+	}
+}
+
+func TestCreateAndStartCaseCreatesFirstCaseAndReplaysExactly(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	runner := &recordingPhaseRunner{}
+	o := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
+	cmd := CreateAndStartCaseCommand{
+		CaseID: "case-first", ExpectedVersion: 0, IdempotencyKey: "create:first", ActorID: "alice",
+		Bug: Bug{ID: "bug-first", Source: "zentao", SystemID: "base", Env: "test"},
+		Bot: BotRef{Key: "base|codex", Target: "codex", Path: "/workspace/base", Env: "test"}, InputJSON: []byte(`{"mode":"reproduce"}`),
+	}
+	first, err := o.CreateAndStartCase(ctx, cmd)
+	if err != nil || first.Status != CaseValidating || first.Version != 2 || first.BugID != cmd.Bug.ID {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	second, err := o.CreateAndStartCase(ctx, cmd)
+	if err != nil || second != first || runner.startCount() != 1 {
+		t.Fatalf("second=%+v starts=%d err=%v", second, runner.startCount(), err)
+	}
+}
+
+func TestCreateAndStartCaseContinuesLegacyArchiveAsNewCase(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	archived := IncidentCase{ID: "legacy-case", BugID: "bug-old", Source: "legacy-runs-json", Status: CaseLegacyArchived, CycleNumber: 1}
+	if err := store.CreateCase(ctx, archived); err != nil {
+		t.Fatal(err)
+	}
+	archived, _ = store.GetCase(ctx, archived.ID)
+	runner := &recordingPhaseRunner{}
+	o := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
+	cmd := CreateAndStartCaseCommand{
+		CaseID: archived.ID, ExpectedVersion: archived.Version, IdempotencyKey: "continue:legacy", ActorID: "alice",
+		Bug: Bug{ID: archived.BugID, Source: "zentao", SystemID: "base", Env: "test"},
+		Bot: BotRef{Key: "base|codex", Target: "codex", Path: "/workspace/base", Env: "test"}, InputJSON: []byte(`{}`),
+	}
+	continued, err := o.CreateAndStartCase(ctx, cmd)
+	if err != nil || continued.ID == archived.ID || continued.Status != CaseValidating || continued.CycleNumber != archived.CycleNumber+1 {
+		t.Fatalf("continued=%+v err=%v", continued, err)
+	}
+	unchanged, err := store.GetCase(ctx, archived.ID)
+	if err != nil || unchanged.Status != CaseLegacyArchived || unchanged.Version != archived.Version {
+		t.Fatalf("archive=%+v err=%v", unchanged, err)
+	}
+	replayed, err := o.CreateAndStartCase(ctx, cmd)
+	if err != nil || replayed != continued || runner.startCount() != 1 {
+		t.Fatalf("replayed=%+v starts=%d err=%v", replayed, runner.startCount(), err)
+	}
+}
+
+func TestCreateAndStartCaseRecoversCrashAfterCreationBeforeStart(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	pending := IncidentCase{ID: "case-created-only", BugID: "bug-created-only", Source: "zentao", SystemID: "base", Environment: "test", Status: CasePendingValidation, CycleNumber: 1, SelectedBotKey: "base|codex"}
+	if err := store.CreateCase(ctx, pending); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingPhaseRunner{}
+	o := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
+	started, err := o.CreateAndStartCase(ctx, CreateAndStartCaseCommand{
+		CaseID: pending.ID, ExpectedVersion: 0, IdempotencyKey: "create:resume", ActorID: "alice",
+		Bug: Bug{ID: pending.BugID, Source: pending.Source, SystemID: pending.SystemID, Env: pending.Environment},
+		Bot: BotRef{Key: pending.SelectedBotKey, Target: "codex", Path: "/workspace/base", Env: "test"}, InputJSON: []byte(`{}`),
+	})
+	if err != nil || started.Status != CaseValidating || runner.startCount() != 1 {
+		t.Fatalf("started=%+v starts=%d err=%v", started, runner.startCount(), err)
 	}
 }
 
@@ -174,10 +244,12 @@ func TestOrchestratorCancelWorkerCapacityBoundsIgnoringDependencies(t *testing.T
 	}
 }
 
-func (r *recordingPhaseRunner) Start(_ context.Context, attempt PhaseAttempt, _ Bug, _ BotRef) error {
+func (r *recordingPhaseRunner) Start(_ context.Context, attempt PhaseAttempt, bug Bug, bot BotRef) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.starts = append(r.starts, attempt.Clone())
+	r.bugs = append(r.bugs, bug)
+	r.bots = append(r.bots, bot)
 	return r.startErr
 }
 

@@ -416,7 +416,7 @@ func (a *App) codexInvestigator() *bughub.CodexInvestigator {
 	// Prefer the durable workflow's shared executor. initializeIncidentWorkflow
 	// is idempotent and also ensures migration/recovery has run when a legacy
 	// binding is invoked before Wails startup completes.
-	_ = a.initializeIncidentWorkflow(a.workflowCommandContext())
+	_ = a.startIncidentWorkflow(a.workflowCommandContext())
 	a.bugInvestigationMu.Lock()
 	defer a.bugInvestigationMu.Unlock()
 	if a.bugInvestigator == nil {

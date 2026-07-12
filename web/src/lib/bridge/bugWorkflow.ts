@@ -1,7 +1,6 @@
 import * as App from '../../../wailsjs/go/main/App'
 import { isDesktop } from './shared'
 
-const desktopApp = App as Record<string, (...args: any[]) => Promise<any>>
 const desktopOnly = 'Incident Case 工作流只在桌面 app 可用'
 
 export type CaseStatus = 'pending_validation' | 'validating' | 'waiting_evidence' | 'reproduced' |
@@ -66,8 +65,26 @@ export interface IncidentCaseDetail {
   events: TransitionEvent[]
 }
 
+export interface IncidentPhaseEvent {
+  at?: string
+  type?: string
+  message?: string
+  raw?: unknown
+  meta: Record<string, unknown>
+}
+
+export type IncidentCaseEventPayload = {
+  kind: 'snapshot'
+  case: IncidentCase
+  snapshot: IncidentCaseDetail
+  phase_event?: IncidentPhaseEvent
+} | {
+  kind: 'startup_error'
+  error: { message: string; retryable: boolean }
+}
+
 interface WorkflowCommandInput { case_id: string; expected_version: number; idempotency_key: string; actor_id: string }
-export interface StartIncidentCaseInput extends WorkflowCommandInput { input_json?: Record<string, unknown> }
+export interface StartIncidentCaseInput extends WorkflowCommandInput { bug_id?: string; bot_key?: string; input_json?: Record<string, unknown> }
 export interface ContinueIncidentCaseInput extends WorkflowCommandInput { phase: Phase; input_json?: Record<string, unknown> }
 export interface ApproveIncidentFixInput extends WorkflowCommandInput { root_cause_attempt_id: string; input_json?: Record<string, unknown> }
 export interface ApproveIncidentMergeInput extends WorkflowCommandInput { fix_commits: Record<string, string>; target_branches: Record<string, string> }
@@ -76,49 +93,89 @@ export interface CancelIncidentAttemptInput extends WorkflowCommandInput { attem
 
 export async function listIncidentCases(): Promise<IncidentCase[]> {
   if (!isDesktop()) return []
-  const result = await desktopApp.ListIncidentCases()
+  const result = await App.ListIncidentCases()
   return Array.isArray(result) ? result.map(normalizeCase) : []
 }
 
 export async function getIncidentCase(caseID: string): Promise<IncidentCaseDetail> {
   if (!isDesktop()) throw new Error(desktopOnly)
-  return normalizeDetail(await desktopApp.GetIncidentCase(caseID))
+  return normalizeDetail(await App.GetIncidentCase(caseID))
 }
 
-export async function startIncidentCase(input: StartIncidentCaseInput): Promise<IncidentCase> { return mutate('StartIncidentCase', input) }
-export async function continueIncidentCase(input: ContinueIncidentCaseInput): Promise<IncidentCase> { return mutate('ContinueIncidentCase', input) }
-export async function approveIncidentFix(input: ApproveIncidentFixInput): Promise<IncidentCase> { return mutate('ApproveIncidentFix', input) }
-export async function approveIncidentMerge(input: ApproveIncidentMergeInput): Promise<IncidentCase> { return mutate('ApproveIncidentMerge', input) }
-export async function notifyIncidentDeployed(input: NotifyIncidentDeployedInput): Promise<IncidentCase> { return mutate('NotifyIncidentDeployed', input) }
-export async function cancelIncidentAttempt(input: CancelIncidentAttemptInput): Promise<IncidentCase> { return mutate('CancelIncidentAttempt', input) }
-
-async function mutate(method: string, input: unknown): Promise<IncidentCase> {
+export async function startIncidentCase(input: StartIncidentCaseInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)
-  return normalizeCase(await desktopApp[method](input))
+  return normalizeCase(await App.StartIncidentCase(input))
+}
+export async function continueIncidentCase(input: ContinueIncidentCaseInput): Promise<IncidentCase> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  return normalizeCase(await App.ContinueIncidentCase(input))
+}
+export async function approveIncidentFix(input: ApproveIncidentFixInput): Promise<IncidentCase> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  return normalizeCase(await App.ApproveIncidentFix(input))
+}
+export async function approveIncidentMerge(input: ApproveIncidentMergeInput): Promise<IncidentCase> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  return normalizeCase(await App.ApproveIncidentMerge(input))
+}
+export async function notifyIncidentDeployed(input: NotifyIncidentDeployedInput): Promise<IncidentCase> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  return normalizeCase(await App.NotifyIncidentDeployed(input))
+}
+export async function cancelIncidentAttempt(input: CancelIncidentAttemptInput): Promise<IncidentCase> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  return normalizeCase(await App.CancelIncidentAttempt(input))
 }
 
-function normalizeCase(raw: any): IncidentCase {
+function record(raw: unknown): Record<string, unknown> {
+  return raw !== null && typeof raw === 'object' ? raw as Record<string, unknown> : {}
+}
+
+function normalizeCase(raw: unknown): IncidentCase {
+  const source = record(raw)
   return {
-    ...raw,
-    id: String(raw?.id ?? ''),
-    bug_id: String(raw?.bug_id ?? ''),
-    source: String(raw?.source ?? ''),
-    system_id: String(raw?.system_id ?? ''),
-    environment: String(raw?.environment ?? ''),
-    current_attempt_id: String(raw?.current_attempt_id ?? ''),
-    selected_bot_key: String(raw?.selected_bot_key ?? ''),
-    version: raw?.version,
+    ...source,
+    id: String(source.id ?? ''),
+    bug_id: String(source.bug_id ?? ''),
+    source: String(source.source ?? ''),
+    system_id: String(source.system_id ?? ''),
+    environment: String(source.environment ?? ''),
+    current_attempt_id: String(source.current_attempt_id ?? ''),
+    selected_bot_key: String(source.selected_bot_key ?? ''),
+    version: source.version,
   } as IncidentCase
 }
 
-function normalizeDetail(raw: any): IncidentCaseDetail {
+function normalizeDetail(raw: unknown): IncidentCaseDetail {
+  const source = record(raw)
   return {
-    case: normalizeCase(raw?.case),
-    attempts: Array.isArray(raw?.attempts) ? raw.attempts : [],
-    artifacts: Array.isArray(raw?.artifacts) ? raw.artifacts : [],
-    approvals: Array.isArray(raw?.approvals) ? raw.approvals : [],
-    code_changes: Array.isArray(raw?.code_changes) ? raw.code_changes : [],
-    deployment_observations: Array.isArray(raw?.deployment_observations) ? raw.deployment_observations : [],
-    events: Array.isArray(raw?.events) ? raw.events : [],
+    case: normalizeCase(source.case),
+    attempts: Array.isArray(source.attempts) ? source.attempts as PhaseAttempt[] : [],
+    artifacts: Array.isArray(source.artifacts) ? source.artifacts as EvidenceArtifact[] : [],
+    approvals: Array.isArray(source.approvals) ? source.approvals as Approval[] : [],
+    code_changes: Array.isArray(source.code_changes) ? source.code_changes as CodeChange[] : [],
+    deployment_observations: Array.isArray(source.deployment_observations) ? source.deployment_observations as DeploymentObservation[] : [],
+    events: Array.isArray(source.events) ? source.events as TransitionEvent[] : [],
+  }
+}
+
+export function normalizeIncidentCaseEvent(raw: unknown): IncidentCaseEventPayload {
+  const source = record(raw)
+  const error = record(source.error)
+  if (source.kind === 'startup_error') {
+    return {
+      kind: 'startup_error',
+      error: {
+        message: String(error.message ?? 'Incident workflow startup failed'),
+        retryable: error.retryable === true,
+      },
+    }
+  }
+  const phase = record(source.phase_event)
+  return {
+    kind: 'snapshot',
+    case: normalizeCase(source.case),
+    snapshot: normalizeDetail(source.snapshot),
+    ...(source.phase_event ? { phase_event: { ...phase, meta: record(phase.meta) } } : {}),
   }
 }

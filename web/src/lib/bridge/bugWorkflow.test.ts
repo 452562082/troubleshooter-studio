@@ -7,6 +7,7 @@ import {
   getIncidentCase,
   listIncidentCases,
   notifyIncidentDeployed,
+  normalizeIncidentCaseEvent,
   startIncidentCase,
 } from './bugWorkflow'
 
@@ -65,5 +66,26 @@ describe('incident workflow bridge', () => {
 
     expect(start).toHaveBeenCalledWith(input)
     expect(result.version).toBe(8)
+  })
+
+  it('normalizes a precise versioned incident-case event payload', () => {
+    const event = normalizeIncidentCaseEvent({
+      kind: 'snapshot',
+      case: { id: 'case-1', status: 'validating', version: 9 },
+      snapshot: { case: { id: 'case-1', status: 'validating', version: 9 }, attempts: null, artifacts: null, approvals: null, code_changes: null, deployment_observations: null, events: null },
+      phase_event: { type: 'agent_message', meta: null },
+    })
+    expect(event.kind).toBe('snapshot')
+    if (event.kind !== 'snapshot') throw new Error('unexpected event kind')
+    expect(event.case.version).toBe(9)
+    expect(event.snapshot.attempts).toEqual([])
+    expect(event.phase_event?.meta).toEqual({})
+  })
+
+  it('normalizes startup errors without inventing a Case snapshot', () => {
+    expect(normalizeIncidentCaseEvent({ kind: 'startup_error', error: { message: 'db unavailable', retryable: true } })).toEqual({
+      kind: 'startup_error',
+      error: { message: 'db unavailable', retryable: true },
+    })
   })
 })

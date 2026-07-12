@@ -154,35 +154,19 @@ func (o *CaseOrchestrator) recoveryRetryAvailable(ctx context.Context, incident 
 }
 
 func (o *CaseOrchestrator) recoverDeploymentVerification(ctx context.Context, incident IncidentCase) error {
-	events, err := o.store.ListEvents(ctx, incident.ID)
+	typed, found, err := o.store.latestDeploymentReservationEvent(ctx, incident.ID)
 	if err != nil {
 		return err
-	}
-	var reservation DeploymentReservation
-	found := false
-	reservationEventKey := ""
-	for i := len(events) - 1; i >= 0; i-- {
-		if events[i].EventType != "deployment_verification_reserved" {
-			continue
-		}
-		typed, ok, getErr := o.store.GetEventByIdempotencyKey(ctx, events[i].IdempotencyKey)
-		if getErr != nil {
-			return getErr
-		}
-		if !ok {
-			continue
-		}
-		reservationEventKey = typed.IdempotencyKey
-		if decodeErr := json.Unmarshal(typed.PayloadJSON, &reservation); decodeErr != nil {
-			return o.recordInvalidDeploymentReservation(ctx, incident, reservationEventKey, fmt.Errorf("decode deployment reservation: %w", decodeErr))
-		}
-		found = true
-		break
 	}
 	if !found {
 		return nil
 	}
-	if identityErr := validateDeploymentReservationIdentity(reservation, reservationEventKey, reservation.CallerIdempotencyKey, reservation.ActorID); identityErr != nil {
+	var reservation DeploymentReservation
+	reservationEventKey := typed.IdempotencyKey
+	if decodeErr := json.Unmarshal(typed.PayloadJSON, &reservation); decodeErr != nil {
+		return o.recordInvalidDeploymentReservation(ctx, incident, reservationEventKey, fmt.Errorf("decode deployment reservation: %w", decodeErr))
+	}
+	if identityErr := validateDeploymentReservationIdentity(reservation, reservationEventKey, reservation.CallerIdempotencyKey, typed.ActorID); identityErr != nil {
 		return o.recordInvalidDeploymentReservation(ctx, incident, reservationEventKey, identityErr)
 	}
 	if _, resultFound, resultErr := o.store.GetEventByIdempotencyKey(ctx, reservation.ReservationKey+":result"); resultErr != nil || resultFound {

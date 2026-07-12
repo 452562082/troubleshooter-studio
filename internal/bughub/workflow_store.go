@@ -1721,6 +1721,25 @@ func (s *CaseStore) GetEventByIdempotencyKey(ctx context.Context, key string) (T
 	return event.Clone(), true, nil
 }
 
+// latestDeploymentReservationEvent reads the reservation envelope without
+// validating actor identity. Recovery must be able to detect and audit a
+// legacy/corrupt empty actor instead of failing before the identity gate.
+func (s *CaseStore) latestDeploymentReservationEvent(ctx context.Context, caseID string) (TransitionEvent, bool, error) {
+	var event TransitionEvent
+	var payload string
+	err := s.db.QueryRowContext(ctx, `SELECT id,case_id,event_type,actor_type,actor_id,idempotency_key,payload_json
+		FROM transition_events WHERE case_id=? AND event_type='deployment_verification_reserved'
+		ORDER BY created_at DESC,id DESC LIMIT 1`, caseID).Scan(&event.ID, &event.CaseID, &event.EventType, &event.ActorType, &event.ActorID, &event.IdempotencyKey, &payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return TransitionEvent{}, false, nil
+	}
+	if err != nil {
+		return TransitionEvent{}, false, fmt.Errorf("load latest deployment reservation event: %w", err)
+	}
+	event.PayloadJSON = CloneRawMessage([]byte(payload))
+	return event, true, nil
+}
+
 func transitionRequestFingerprint(caseID string, expectedVersion int64, from, to CaseStatus, event TransitionEvent, requestedAt string, update CaseSnapshotUpdate) (string, error) {
 	payloadDigest := sha256.Sum256([]byte(event.PayloadJSON))
 	var closedAt *string

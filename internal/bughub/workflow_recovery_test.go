@@ -456,7 +456,7 @@ func TestRecoverDeploymentUsesPersistedReservationContextAndDoesNotRerunResult(t
 	reserveKey := fmt.Sprintf("deployment-reserve:%s:v%d", incident.ID, incident.Version)
 	request := DeploymentVerificationRequest{CaseID: incident.ID, Environment: incident.Environment, ExpectedCommits: map[string]string{"repo": "merge-1"}, ObservedVersion: "persisted-proof", ObservedCommits: map[string]string{"repo": "merge-1"}}
 	regressionInput := []byte(`{"scenario":"persisted-regression"}`)
-	reservation := DeploymentReservation{ReservationID: "reservation", ReservationKey: reserveKey, CallerIdempotencyKey: "notify-deployed", ActorID: "alice", OriginalExpectedVersion: incident.Version, CycleNumber: 1, Environment: incident.Environment, ExpectedCommits: request.ExpectedCommits, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "validator", Target: "codex"}, VerifierInput: request, RegressionInputJSON: regressionInput}
+	reservation := DeploymentReservation{ReservationID: stableID("deployment-reservation", reserveKey), ReservationKey: reserveKey, CallerIdempotencyKey: "notify-deployed", ActorID: "alice", OriginalExpectedVersion: incident.Version, CycleNumber: 1, Environment: incident.Environment, ExpectedCommits: request.ExpectedCommits, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "validator", Target: "codex"}, VerifierInput: request, RegressionInputJSON: regressionInput}
 	payload := mustJSON(reservation)
 	reserved, err := store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: reserveKey, RequestJSON: payload, Steps: []CaseMutationStep{{To: CaseDeploymentUnverified, Event: TransitionEvent{ID: "reserve-event", EventType: "deployment_verification_reserved", ActorType: "user", ActorID: "alice", PayloadJSON: payload}}}})
 	if err != nil {
@@ -466,7 +466,8 @@ func TestRecoverDeploymentUsesPersistedReservationContextAndDoesNotRerunResult(t
 	verifier := &recordingDeploymentVerifier{result: DeploymentObservation{VerificationSource: "manual", Result: DeploymentResultMatched, VerifiedAt: &now, ObservedCommits: map[string]string{"repo": "merge-1"}}}
 	runner := &recordingPhaseRunner{}
 	o := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, verifier)
-	if err := o.recoverDeploymentVerification(ctx, reserved.Case); err != nil {
+	restarted := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, verifier)
+	if err := restarted.recoverDeploymentVerification(ctx, reserved.Case); err != nil {
 		t.Fatal(err)
 	}
 	if err := o.recoverDeploymentVerification(ctx, reserved.Case); err != nil {
@@ -483,11 +484,16 @@ func TestRecoverDeploymentUsesPersistedReservationContextAndDoesNotRerunResult(t
 }
 
 func TestRecoverDeploymentRejectsReservationWithoutDurableCallerIdentity(t *testing.T) {
-	for name, mutate := range map[string]func(*DeploymentReservation){
-		"missing caller key": func(r *DeploymentReservation) { r.CallerIdempotencyKey = "" },
-		"missing actor":      func(r *DeploymentReservation) { r.ActorID = "" },
-		"missing id":         func(r *DeploymentReservation) { r.ReservationID = "" },
-		"malformed key":      func(r *DeploymentReservation) { r.ReservationKey = "wrong-reservation" },
+	for name, fixture := range map[string]struct {
+		mutate     func(*DeploymentReservation)
+		eventActor string
+	}{
+		"missing caller key":     {mutate: func(r *DeploymentReservation) { r.CallerIdempotencyKey = "" }, eventActor: "alice"},
+		"missing payload actor":  {mutate: func(r *DeploymentReservation) { r.ActorID = "" }, eventActor: "alice"},
+		"missing event actor":    {mutate: func(*DeploymentReservation) {}, eventActor: ""},
+		"wrong nonempty id":      {mutate: func(r *DeploymentReservation) { r.ReservationID = "forged-id" }, eventActor: "alice"},
+		"malformed key":          {mutate: func(r *DeploymentReservation) { r.ReservationKey = "wrong-reservation" }, eventActor: "alice"},
+		"event payload mismatch": {mutate: func(r *DeploymentReservation) { r.ActorID = "bob" }, eventActor: "alice"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
@@ -496,12 +502,21 @@ func TestRecoverDeploymentRejectsReservationWithoutDurableCallerIdentity(t *test
 			incident = addPushedWorkflowChange(t, store, incident)
 			reserveKey := fmt.Sprintf("deployment-reserve:%s:v%d", incident.ID, incident.Version)
 			request := DeploymentVerificationRequest{CaseID: incident.ID, Environment: incident.Environment, Source: "manual", ExpectedCommits: map[string]string{"repo": "merge-1"}, ObservedVersion: "build", ObservedCommits: map[string]string{"repo": "merge-1"}}
-			reservation := DeploymentReservation{ReservationID: "reservation", ReservationKey: reserveKey, CallerIdempotencyKey: "notify", ActorID: "alice", OriginalExpectedVersion: incident.Version, CycleNumber: incident.CycleNumber, Environment: incident.Environment, ExpectedCommits: request.ExpectedCommits, VerifierInput: request}
-			mutate(&reservation)
+			reservation := DeploymentReservation{ReservationID: stableID("deployment-reservation", reserveKey), ReservationKey: reserveKey, CallerIdempotencyKey: "notify", ActorID: "alice", OriginalExpectedVersion: incident.Version, CycleNumber: incident.CycleNumber, Environment: incident.Environment, ExpectedCommits: request.ExpectedCommits, VerifierInput: request}
+			fixture.mutate(&reservation)
 			payload := mustJSON(reservation)
-			_, err := store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: reserveKey, RequestJSON: payload, Steps: []CaseMutationStep{{To: CaseDeploymentUnverified, Event: TransitionEvent{ID: stableID("event", reserveKey), EventType: "deployment_verification_reserved", ActorType: "user", ActorID: "alice", PayloadJSON: payload}}}})
+			storedActor := fixture.eventActor
+			if storedActor == "" {
+				storedActor = "alice"
+			}
+			_, err := store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: reserveKey, RequestJSON: payload, Steps: []CaseMutationStep{{To: CaseDeploymentUnverified, Event: TransitionEvent{ID: stableID("event", reserveKey), EventType: "deployment_verification_reserved", ActorType: "user", ActorID: storedActor, PayloadJSON: payload}}}})
 			if err != nil {
 				t.Fatal(err)
+			}
+			if fixture.eventActor == "" {
+				if _, err := store.db.ExecContext(ctx, `UPDATE transition_events SET actor_id = '' WHERE idempotency_key = ?`, reserveKey); err != nil {
+					t.Fatal(err)
+				}
 			}
 			verifier := &recordingDeploymentVerifier{result: DeploymentObservation{VerificationSource: "manual", Result: DeploymentResultMismatched}}
 			runner := &recordingPhaseRunner{}
@@ -513,29 +528,18 @@ func TestRecoverDeploymentRejectsReservationWithoutDurableCallerIdentity(t *test
 			if err != nil || current.Status != CaseDeploymentUnverified || len(verifier.requests) != 0 || runner.startCount() != 0 {
 				t.Fatalf("case=%+v verifies=%d starts=%d err=%v", current, len(verifier.requests), runner.startCount(), err)
 			}
-			events, err := store.ListEvents(ctx, incident.ID)
-			invalid := 0
-			for _, event := range events {
-				if event.EventType == "deployment_reservation_invalid" && event.ActorType == "studio" {
-					invalid++
-				}
-			}
-			if err != nil || invalid != 1 {
-				t.Fatalf("events=%+v invalid=%d err=%v", events, invalid, err)
+			auditKey := reserveKey + ":identity-invalid"
+			audit, found, err := store.GetEventByIdempotencyKey(ctx, auditKey)
+			if err != nil || !found || audit.EventType != "deployment_reservation_invalid" || audit.ActorType != "studio" {
+				t.Fatalf("audit=%+v found=%v err=%v", audit, found, err)
 			}
 			restarted := NewCaseOrchestrator(store, runner, nil, verifier)
 			if err := restarted.RecoverInterrupted(ctx); err != nil {
 				t.Fatal(err)
 			}
-			events, _ = store.ListEvents(ctx, incident.ID)
-			invalid = 0
-			for _, event := range events {
-				if event.EventType == "deployment_reservation_invalid" {
-					invalid++
-				}
-			}
-			if invalid != 1 || len(verifier.requests) != 0 || runner.startCount() != 0 {
-				t.Fatalf("recovery replay events=%d verifies=%d starts=%d", invalid, len(verifier.requests), runner.startCount())
+			auditReplay, found, auditErr := store.GetEventByIdempotencyKey(ctx, auditKey)
+			if auditErr != nil || !found || auditReplay.ID != audit.ID || len(verifier.requests) != 0 || runner.startCount() != 0 {
+				t.Fatalf("recovery replay audit=%+v found=%v verifies=%d starts=%d err=%v", auditReplay, found, len(verifier.requests), runner.startCount(), auditErr)
 			}
 			reopened, err := orchestrator.ContinueWithEvidence(ctx, ContinueWithEvidenceCommand{CaseID: current.ID, ExpectedVersion: current.Version, IdempotencyKey: "replace-invalid-reservation", ActorID: "alice", InputJSON: []byte(`{"proof":"retry"}`)})
 			if err != nil || reopened.Status != CaseWaitingDeployment {

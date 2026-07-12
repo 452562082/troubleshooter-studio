@@ -268,3 +268,26 @@ func TestNotifyDeployedReservationIdentitySurvivesStoreRestart(t *testing.T) {
 		t.Fatalf("restart actor conflict error=%v", err)
 	}
 }
+
+func TestNotifyDeployedReplayRejectsReservationEventPayloadActorMismatch(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "event-actor-mismatch", CaseWaitingDeployment)
+	incident = addPushedWorkflowChange(t, store, incident)
+	verifier := &recordingDeploymentVerifier{result: DeploymentObservation{VerificationSource: "manual", Result: DeploymentResultMismatched}}
+	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, verifier)
+	command := NotifyDeployedCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "actor-bound-notice", ActorID: "alice", ObservedVersion: "old"}
+	if _, err := orchestrator.NotifyDeployed(ctx, command); err != nil {
+		t.Fatal(err)
+	}
+	reserveKey := fmt.Sprintf("deployment-reserve:%s:v%d", incident.ID, incident.Version)
+	if _, err := store.db.ExecContext(ctx, `UPDATE transition_events SET actor_id = 'bob' WHERE idempotency_key = ?`, reserveKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := orchestrator.NotifyDeployed(ctx, command); !errors.Is(err, ErrIdempotencyConflict) || !errors.Is(err, ErrDeploymentReservationIdentityInvalid) {
+		t.Fatalf("event/payload actor mismatch error=%v", err)
+	}
+	if len(verifier.requests) != 1 {
+		t.Fatalf("verifier calls=%d", len(verifier.requests))
+	}
+}

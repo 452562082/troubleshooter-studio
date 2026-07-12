@@ -1039,7 +1039,10 @@ func (o *CaseOrchestrator) NotifyDeployed(ctx context.Context, cmd NotifyDeploye
 		if err := json.Unmarshal(reservationEvent.PayloadJSON, &reservation); err != nil {
 			return IncidentCase{}, err
 		}
-		if identityErr := validateDeploymentReservationIdentity(reservation, reserveKey, cmd.IdempotencyKey, cmd.ActorID); identityErr != nil {
+		if identityErr := validateDeploymentReservationIdentity(reservation, reserveKey, cmd.IdempotencyKey, reservationEvent.ActorID); identityErr != nil || cmd.ActorID != reservationEvent.ActorID {
+			if identityErr == nil {
+				identityErr = fmt.Errorf("%w: command actor does not match reservation event", ErrDeploymentReservationIdentityInvalid)
+			}
 			return IncidentCase{}, errors.Join(ErrIdempotencyConflict, identityErr)
 		}
 		supplied := reservation.VerifierInput

@@ -14,8 +14,11 @@ var (
 )
 
 func validateDeploymentReservationIdentity(reservation DeploymentReservation, expectedReservationKey, callerKey, actorID string) error {
-	if strings.TrimSpace(reservation.ReservationID) == "" || strings.TrimSpace(reservation.ReservationKey) == "" || reservation.ReservationKey != expectedReservationKey {
+	if strings.TrimSpace(reservation.ReservationKey) == "" || reservation.ReservationKey != expectedReservationKey {
 		return fmt.Errorf("%w: reservation key is missing or inconsistent", ErrDeploymentReservationIdentityInvalid)
+	}
+	if reservation.ReservationID != stableID("deployment-reservation", expectedReservationKey) {
+		return fmt.Errorf("%w: reservation ID is not canonical", ErrDeploymentReservationIdentityInvalid)
 	}
 	if strings.TrimSpace(reservation.CallerIdempotencyKey) == "" || strings.TrimSpace(callerKey) == "" || reservation.CallerIdempotencyKey != callerKey {
 		return fmt.Errorf("%w: caller idempotency key is missing or inconsistent", ErrDeploymentReservationIdentityInvalid)

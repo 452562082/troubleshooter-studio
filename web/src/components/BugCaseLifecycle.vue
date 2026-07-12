@@ -63,6 +63,12 @@ const expectedDeploymentCommits = computed(() => {
   if (observed && Object.keys(observed).length > 0) return observed
   return Object.fromEntries((props.detail?.code_changes || []).map(change => [change.repo, change.merge_commit || change.fix_commit]))
 })
+const mergeApprovalScopes = computed(() => (props.detail?.code_changes || []).map(change => ({
+  repo: change.repo,
+  fixCommit: change.fix_commit,
+  targetBranch: change.target_environment_branch,
+  targetHead: change.merge_base_head,
+})))
 
 const stages = [
   { key: 'validation', label: '验证' },
@@ -252,7 +258,12 @@ function dialogTitle(): string {
       <section ref="dialogElement" role="dialog" aria-modal="true" aria-labelledby="case-action-dialog-title" class="approval-dialog" @keydown="trapDialogFocus">
         <header><h2 id="case-action-dialog-title">{{ dialogTitle() }}</h2></header>
         <p v-if="action.kind === 'approve_fix'">将授权修复 Agent 基于当前根因和证据创建最小修复。授权范围：Case v{{ dialogCaseVersion }} / {{ dialogRootCauseAttemptID || '未找到根因 attempt' }}。</p>
-        <p v-else-if="action.kind === 'approve_merge'">将按已记录的修复 commit 和目标环境分支执行合并与 SSH 推送。</p>
+        <template v-else-if="action.kind === 'approve_merge'">
+          <p>将按以下精确 scope 合并并通过 SSH 推送；Studio 会重新检查目标 HEAD，任何变化都会使本次授权失效。</p>
+          <dl class="deployment-preview">
+            <div v-for="scope in mergeApprovalScopes" :key="scope.repo"><dt>{{ scope.repo }}</dt><dd><code>{{ scope.fixCommit }} → {{ scope.targetBranch }} @ {{ scope.targetHead || '待重新检查' }}</code></dd></div>
+          </dl>
+        </template>
         <p v-else-if="action.kind === 'supply_merge_decision'">记录冲突处理结果并返回合并授权门，不会在这一步直接重新合并。</p>
         <p v-else-if="action.kind === 'notify_deployed'">Studio 不执行部署；这里只记录人工部署通知，并核验运行版本是否包含目标 commit。</p>
         <p v-else-if="action.kind === 'supply_deployment_proof'">补充可核验的部署证明并返回人工部署确认门，不会在这一步直接启动回归。</p>

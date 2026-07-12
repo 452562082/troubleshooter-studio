@@ -1826,6 +1826,7 @@ export namespace main {
 	    actor_id: string;
 	    fix_commits: Record<string, string>;
 	    target_branches: Record<string, string>;
+	    target_heads: Record<string, string>;
 
 	    static createFrom(source: any = {}) {
 	        return new ApproveIncidentMergeInput(source);
@@ -1839,6 +1840,7 @@ export namespace main {
 	        this.actor_id = source["actor_id"];
 	        this.fix_commits = source["fix_commits"];
 	        this.target_branches = source["target_branches"];
+	        this.target_heads = source["target_heads"];
 	    }
 	}
 	export class BugAttachmentPreviewInput {

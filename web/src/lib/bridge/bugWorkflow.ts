@@ -87,7 +87,7 @@ interface WorkflowCommandInput { case_id: string; expected_version: number; idem
 export interface StartIncidentCaseInput extends WorkflowCommandInput { bug_id?: string; bot_key?: string; input_json?: Record<string, unknown> }
 export interface ContinueIncidentCaseInput extends WorkflowCommandInput { phase: Phase; input_json?: Record<string, unknown> }
 export interface ApproveIncidentFixInput extends WorkflowCommandInput { root_cause_attempt_id: string; input_json?: Record<string, unknown> }
-export interface ApproveIncidentMergeInput extends WorkflowCommandInput { fix_commits: Record<string, string>; target_branches: Record<string, string> }
+export interface ApproveIncidentMergeInput extends WorkflowCommandInput { fix_commits: Record<string, string>; target_branches: Record<string, string>; target_heads?: Record<string, string> }
 export interface NotifyIncidentDeployedInput extends WorkflowCommandInput { observed_version: string; observed_commits?: Record<string, string>; input_json?: Record<string, unknown> }
 export interface CancelIncidentAttemptInput extends WorkflowCommandInput { attempt_id: string }
 
@@ -116,7 +116,7 @@ export async function approveIncidentFix(input: ApproveIncidentFixInput): Promis
 }
 export async function approveIncidentMerge(input: ApproveIncidentMergeInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)
-  return normalizeCase(await App.ApproveIncidentMerge(input))
+  return normalizeCase(await App.ApproveIncidentMerge({ ...input, target_heads: input.target_heads || {} }))
 }
 export async function notifyIncidentDeployed(input: NotifyIncidentDeployedInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)

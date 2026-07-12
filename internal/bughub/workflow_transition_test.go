@@ -30,6 +30,7 @@ func TestCanTransition(t *testing.T) {
 		{CaseWaitingMergeApproval, CaseMerging},
 		{CaseMerging, CaseWaitingDeployment},
 		{CaseMerging, CaseMergeConflict},
+		{CaseMerging, CaseWaitingMergeApproval},
 		{CaseMergeConflict, CaseWaitingMergeApproval},
 		{CaseWaitingDeployment, CaseDeploymentVerified},
 		{CaseWaitingDeployment, CaseDeploymentUnverified},

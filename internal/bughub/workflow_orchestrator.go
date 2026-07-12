@@ -113,11 +113,13 @@ type MergeRequest struct {
 	FixCommits     map[string]string `json:"fix_commits"`
 	TargetBranches map[string]string `json:"target_branches"`
 	Changes        []CodeChange      `json:"changes,omitempty"`
+	TargetHeads    map[string]string `json:"target_heads,omitempty"`
 }
 
 func (r MergeRequest) Clone() MergeRequest {
 	r.FixCommits = CloneStringMap(r.FixCommits)
 	r.TargetBranches = CloneStringMap(r.TargetBranches)
+	r.TargetHeads = CloneStringMap(r.TargetHeads)
 	cloned := make([]CodeChange, len(r.Changes))
 	for i := range r.Changes {
 		cloned[i] = r.Changes[i].Clone()
@@ -156,6 +158,8 @@ type MergeInspection struct {
 
 type MergeRepositoryResult struct {
 	MergeCommit string `json:"merge_commit,omitempty"`
+	TargetHead  string `json:"target_head,omitempty"`
+	ApprovalKey string `json:"approval_key,omitempty"`
 	Pushed      bool   `json:"pushed"`
 	Conflict    bool   `json:"conflict"`
 	Error       string `json:"error,omitempty"`
@@ -253,6 +257,7 @@ type ApproveMergeCommand struct {
 	ActorID         string
 	FixCommits      map[string]string
 	TargetBranches  map[string]string
+	TargetHeads     map[string]string
 }
 
 type NotifyDeployedCommand struct {
@@ -641,7 +646,12 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 		}
 	} else {
 		for _, change := range changes {
-			if change.AttemptID == incident.CurrentAttemptID && change.PushStatus == "pushed" && change.TargetEnvironmentBranch != "" {
+			// Every change produced by the winning successful fix attempt remains
+			// in scope. PushStatus is subsequently reused for per-repository merge
+			// progress (merge_local/push_unknown/conflict), so filtering only
+			// "pushed" would silently drop the exact blocked repository when a
+			// fresh approval is required after target-head drift.
+			if change.AttemptID == incident.CurrentAttemptID && change.FixCommit != "" && change.TargetEnvironmentBranch != "" {
 				fixes[change.Repo] = change.FixCommit
 				targets[change.Repo] = change.TargetEnvironmentBranch
 				selected = append(selected, change)
@@ -652,8 +662,37 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 		return IncidentCase{}, ErrApprovalScope
 	}
 	approvedChanges := make([]ApprovedCodeChange, 0, len(selected))
+	request := MergeRequest{CaseID: incident.ID, FixCommits: fixes, TargetBranches: targets, Changes: selected}
+	targetHeads := map[string]string{}
+	if !hasReservation && o.git != nil {
+		inspection, inspectErr := o.git.Inspect(ctx, request)
+		if inspectErr != nil {
+			return incident, inspectErr
+		}
+		for index := range selected {
+			repoResult, ok := inspection.Repositories[selected[index].Repo]
+			if !ok || strings.TrimSpace(repoResult.TargetHead) == "" {
+				continue // compatibility with integrations predating target-head scopes
+			}
+			targetHeads[selected[index].Repo] = repoResult.TargetHead
+			selected[index].MergeBaseHead = repoResult.TargetHead
+		}
+		if len(targetHeads) > 0 && !reflect.DeepEqual(targetHeads, cmd.TargetHeads) {
+			return o.recordStaleMergeApproval(incident, cmd.IdempotencyKey, selected, targetHeads)
+		}
+	}
+	if hasReservation {
+		for _, approved := range scopeValue.CodeChanges {
+			if approved.TargetHead != "" {
+				targetHeads[approved.Repo] = approved.TargetHead
+			}
+		}
+	}
+	request.Changes = selected
+	request.TargetHeads = targetHeads
 	for _, change := range selected {
-		approvedChanges = append(approvedChanges, ApprovedCodeChange{ID: change.ID, Repo: change.Repo, FixCommit: change.FixCommit, TargetBranch: change.TargetEnvironmentBranch})
+		head := targetHeads[change.Repo]
+		approvedChanges = append(approvedChanges, ApprovedCodeChange{ID: change.ID, Repo: change.Repo, FixCommit: change.FixCommit, TargetBranch: change.TargetEnvironmentBranch, TargetHead: head, ApprovalKey: MergeApprovalKey(incident.ID, change.Repo, change.FixCommit, change.TargetEnvironmentBranch, head)})
 	}
 	sort.Slice(approvedChanges, func(i, j int) bool { return approvedChanges[i].Repo < approvedChanges[j].Repo })
 	if !hasReservation {
@@ -671,12 +710,11 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 		if loadErr != nil || current.Status != CaseMerging {
 			return current, loadErr
 		}
-		return o.recoverReservedMerge(ctx, current, cmd.IdempotencyKey, selected, MergeRequest{CaseID: incident.ID, FixCommits: fixes, TargetBranches: targets})
+		return o.recoverReservedMerge(ctx, current, cmd.IdempotencyKey, selected, request)
 	}
 	if o.git == nil {
 		return o.recordMergeAmbiguous(reserved.Case, cmd.IdempotencyKey, selected, errors.New("git integration is unavailable"))
 	}
-	request := MergeRequest{CaseID: incident.ID, FixCommits: fixes, TargetBranches: targets}
 	result, callErr := o.git.MergeAndPush(ctx, request)
 	allPushed := len(result.Repositories) == len(selected)
 	for index := range selected {
@@ -705,6 +743,14 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 		}
 	}
 	if callErr != nil {
+		if errors.Is(callErr, ErrMergeApprovalStale) {
+			for i := range selected {
+				if repoResult, ok := result.Repositories[selected[i].Repo]; ok && repoResult.TargetHead != "" {
+					selected[i].MergeBaseHead = repoResult.TargetHead
+				}
+			}
+			return o.recordStaleMergeApproval(reserved.Case, cmd.IdempotencyKey, selected, nil)
+		}
 		inspectCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		inspection, inspectErr := o.git.Inspect(inspectCtx, request)
 		cancel()
@@ -734,6 +780,16 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 		return IncidentCase{}, err
 	}
 	return done.Case, nil
+}
+
+func (o *CaseOrchestrator) recordStaleMergeApproval(incident IncidentCase, key string, changes []CodeChange, heads map[string]string) (IncidentCase, error) {
+	k := key + ":target-head-changed"
+	payload := mustJSON(map[string]any{"target_heads": heads, "changes": changes})
+	mutation, err := o.store.ApplyCaseMutation(context.Background(), CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: k, RequestJSON: payload, CodeChanges: changes, Steps: []CaseMutationStep{{To: CaseWaitingMergeApproval, AuditOnly: incident.Status == CaseWaitingMergeApproval, Event: TransitionEvent{ID: stableID("event", k), EventType: "merge_approval_stale", ActorType: "git", ActorID: "git-integration", PayloadJSON: payload}}}})
+	if err != nil {
+		return IncidentCase{}, errors.Join(ErrMergeApprovalStale, err)
+	}
+	return mutation.Case, ErrMergeApprovalStale
 }
 
 func (o *CaseOrchestrator) recoverReservedMerge(ctx context.Context, incident IncidentCase, key string, changes []CodeChange, request MergeRequest) (IncidentCase, error) {
@@ -787,10 +843,24 @@ func (o *CaseOrchestrator) resumeInspectedMerge(ctx context.Context, incident In
 			unfinished = append(unfinished, change.Clone())
 			pushRequest.FixCommits[change.Repo] = change.FixCommit
 			pushRequest.TargetBranches[change.Repo] = change.TargetEnvironmentBranch
+			if approvedHead := request.TargetHeads[change.Repo]; approvedHead != "" {
+				if pushRequest.TargetHeads == nil {
+					pushRequest.TargetHeads = map[string]string{}
+				}
+				pushRequest.TargetHeads[change.Repo] = approvedHead
+			}
 		}
 		pushRequest.Changes = unfinished
 		pushResult, pushErr := o.git.ResumePush(ctx, pushRequest)
 		if pushErr != nil {
+			if errors.Is(pushErr, ErrMergeApprovalStale) {
+				for i := range changes {
+					if repoResult, ok := pushResult.Repositories[changes[i].Repo]; ok && repoResult.TargetHead != "" {
+						changes[i].MergeBaseHead = repoResult.TargetHead
+					}
+				}
+				return o.recordStaleMergeApproval(incident, key, changes, nil)
+			}
 			return o.recordMergeAmbiguous(incident, key, changes, pushErr)
 		}
 		for i := range changes {
@@ -846,7 +916,18 @@ func (o *CaseOrchestrator) recordMergeAmbiguous(incident IncidentCase, key strin
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	payload := mustJSON(map[string]string{"error": cause.Error()})
+	completed := []string{}
+	blocked := []string{}
+	for _, change := range changes {
+		if change.PushStatus == "pushed" && change.MergeCommit != "" {
+			completed = append(completed, change.Repo)
+		} else {
+			blocked = append(blocked, change.Repo)
+		}
+	}
+	sort.Strings(completed)
+	sort.Strings(blocked)
+	payload := mustJSON(map[string]any{"error": cause.Error(), "completed_repositories": completed, "blocked_repositories": blocked})
 	m, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: k, RequestJSON: payload, CodeChanges: changes, Steps: []CaseMutationStep{{To: CaseMerging, AuditOnly: true, Event: TransitionEvent{ID: stableID("event", k), EventType: "merge_push_ambiguous", ActorType: "git", ActorID: "git-integration", PayloadJSON: payload}}}})
 	if err != nil {
 		return IncidentCase{}, errors.Join(cause, err)

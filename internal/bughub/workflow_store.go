@@ -1026,6 +1026,8 @@ type ApprovedCodeChange struct {
 	Repo         string `json:"repo"`
 	FixCommit    string `json:"fix_commit"`
 	TargetBranch string `json:"target_branch"`
+	TargetHead   string `json:"target_head,omitempty"`
+	ApprovalKey  string `json:"approval_key,omitempty"`
 }
 
 func (m CaseMutation) clone() CaseMutation {
@@ -1139,6 +1141,9 @@ func (s *CaseStore) ApplyCaseMutation(ctx context.Context, mutation CaseMutation
 				var caseID, attemptID, repo, fixCommit, target string
 				if queryErr := tx.QueryRowContext(ctx, `SELECT case_id,attempt_id,repo,fix_commit,target_environment_branch FROM code_changes WHERE id=?`, approved.ID).Scan(&caseID, &attemptID, &repo, &fixCommit, &target); queryErr != nil || caseID != incident.ID || attemptID != scope.FixAttemptID || repo != approved.Repo || fixCommit != approved.FixCommit || target != approved.TargetBranch {
 					return result, errors.New("merge approval references an unrelated code change")
+				}
+				if approved.TargetHead != "" && approved.ApprovalKey != MergeApprovalKey(incident.ID, approved.Repo, approved.FixCommit, approved.TargetBranch, approved.TargetHead) {
+					return result, errors.New("merge approval key does not match its exact repository scope")
 				}
 			}
 		}

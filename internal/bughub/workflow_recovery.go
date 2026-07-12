@@ -218,7 +218,13 @@ func (o *CaseOrchestrator) recoverMergeWithoutAttempt(ctx context.Context, incid
 			}
 			selected = append(selected, change)
 		}
-		request := MergeRequest{CaseID: incident.ID, FixCommits: CloneStringMap(approval.FixCommits), TargetBranches: CloneStringMap(approval.TargetBranches), Changes: selected}
+		targetHeads := map[string]string{}
+		for _, approved := range scope.CodeChanges {
+			if approved.TargetHead != "" {
+				targetHeads[approved.Repo] = approved.TargetHead
+			}
+		}
+		request := MergeRequest{CaseID: incident.ID, FixCommits: CloneStringMap(approval.FixCommits), TargetBranches: CloneStringMap(approval.TargetBranches), TargetHeads: targetHeads, Changes: selected}
 		return o.inspectInterruptedMerge(ctx, incident, request, "recovery:"+incident.ID+":merge")
 	}
 	_, _, err = o.transition(ctx, incident, CaseMergeConflict, "recovery:"+incident.ID+":merge:no-approval", "recovery", "merge_recovery_failed", map[string]string{"error": "merge approval is missing"}, CaseSnapshotUpdate{})

@@ -13,6 +13,7 @@ import (
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
+	"github.com/xiaolong/troubleshooter-studio/internal/userconfig"
 )
 
 const incidentCaseEvent = "incident-case:event"
@@ -144,6 +145,7 @@ type ApproveIncidentMergeInput struct {
 	ActorID         string            `json:"actor_id"`
 	FixCommits      map[string]string `json:"fix_commits"`
 	TargetBranches  map[string]string `json:"target_branches"`
+	TargetHeads     map[string]string `json:"target_heads"`
 }
 
 type NotifyIncidentDeployedInput struct {
@@ -219,7 +221,18 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 	} else {
 		investigator := bughub.NewCodexInvestigator(legacy, "codex")
 		runner := bughub.NewAgentPhaseRunner(store, investigator, legacy, filepath.Join(root, "artifacts"), nil)
-		orchestrator := bughub.NewCaseOrchestrator(store, runner, nil, nil)
+		gitService := bughub.NewGitIntegrationService(filepath.Join(root, "git-worktrees"), func(ctx context.Context, caseID, repo string) (string, error) {
+			incident, loadErr := store.GetCase(ctx, caseID)
+			if loadErr != nil {
+				return "", loadErr
+			}
+			path := strings.TrimSpace(userconfig.GetRepoPathsForSystem(incident.SystemID)[repo])
+			if path == "" {
+				return "", fmt.Errorf("repository %s has no configured local path for system %s", repo, incident.SystemID)
+			}
+			return filepath.Clean(path), nil
+		})
+		orchestrator := bughub.NewCaseOrchestrator(store, runner, gitService, nil)
 		runner.SetCompletionCallback(func(callbackCtx context.Context, command bughub.CompleteAttemptCommand) error {
 			incident, completeErr := orchestrator.CompleteAttempt(workflowContext(callbackCtx), command)
 			if completeErr == nil {
@@ -528,7 +541,7 @@ func (a *App) ApproveIncidentMerge(input ApproveIncidentMergeInput) (bughub.Inci
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
-	incident, err := orchestrator.ApproveMerge(a.workflowCommandContext(), bughub.ApproveMergeCommand{CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID), FixCommits: input.FixCommits, TargetBranches: input.TargetBranches})
+	incident, err := orchestrator.ApproveMerge(a.workflowCommandContext(), bughub.ApproveMergeCommand{CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID), FixCommits: input.FixCommits, TargetBranches: input.TargetBranches, TargetHeads: input.TargetHeads})
 	a.emitIncidentResult(incident, err)
 	return incident, err
 }
@@ -687,8 +700,11 @@ func (a *App) loadBugAndBot(bugID, botKey string) (bughub.Bug, bughub.BotRef, er
 	return bug, bot, nil
 }
 
-func (a *App) emitIncidentResult(incident bughub.IncidentCase, err error) {
-	if err == nil && incident.ID != "" {
+func (a *App) emitIncidentResult(incident bughub.IncidentCase, _ error) {
+	// Some guarded external actions persist a new inspection snapshot while
+	// returning a typed error (for example a stale merge approval). Emit that
+	// durable snapshot so the dialog can request a fresh, exact authorization.
+	if incident.ID != "" {
 		a.emitIncidentCase(incident.ID)
 	}
 }

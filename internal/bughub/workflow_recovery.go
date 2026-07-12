@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 )
 
 // RecoverInterrupted is a synchronous startup pass. It never leaves recovery
@@ -414,7 +416,7 @@ func (o *CaseOrchestrator) recoverFix(ctx context.Context, incident IncidentCase
 		}
 	}
 	if o.git == nil {
-		return o.finishFixRecovery(ctx, incident, attempt, relevant, false, "git integration unavailable")
+		return o.finishFixRecoveryFailure(ctx, incident, attempt, "git integration unavailable")
 	}
 	inspection, inspectErr := o.git.InspectFix(ctx, FixInspectionRequest{CaseID: incident.ID, Attempt: attempt.Clone(), Changes: relevant})
 	if inspectErr != nil || !inspection.Complete || len(inspection.Changes) == 0 {
@@ -422,39 +424,88 @@ func (o *CaseOrchestrator) recoverFix(ctx context.Context, incident IncidentCase
 		if inspectErr != nil {
 			message = inspectErr.Error()
 		}
-		return o.finishFixRecovery(ctx, incident, attempt, relevant, false, message)
+		return o.finishFixRecoveryFailure(ctx, incident, attempt, message)
 	}
 	relevant = inspection.Changes
-	for i := range relevant {
-		if relevant[i].ID == "" {
-			relevant[i].ID = stableID("recovered-change", attempt.ID+":"+relevant[i].Repo)
-		}
-		relevant[i].CaseID = incident.ID
-		relevant[i].AttemptID = attempt.ID
-		if relevant[i].PushStatus != "pushed" || relevant[i].FixCommit == "" {
-			return o.finishFixRecovery(ctx, incident, attempt, nil, false, "fix push is not confirmed")
-		}
+	command, err := buildRecoveredFixCompletion(incident, attempt, relevant)
+	if err != nil {
+		return o.finishFixRecoveryFailure(ctx, incident, attempt, "invalid fix inspection: "+err.Error())
 	}
-	return o.finishFixRecovery(ctx, incident, attempt, relevant, true, "")
+	_, err = o.CompleteAttempt(ctx, command)
+	return err
 }
 
-func (o *CaseOrchestrator) finishFixRecovery(ctx context.Context, incident IncidentCase, attempt PhaseAttempt, changes []CodeChange, pushed bool, message string) error {
-	key := "recovery:" + attempt.ID + ":result"
-	steps := []CaseMutationStep{}
-	attempt.OutputJSON = []byte(`{}`)
-	if pushed {
-		attempt.Status = AttemptStatusSucceeded
-		for i := range changes {
-			changes[i].PushStatus = "pushed"
-		}
-		steps = append(steps, CaseMutationStep{To: CaseFixPushed, Event: TransitionEvent{ID: stableID("event", key), EventType: "fix_push_confirmed", ActorType: "recovery", ActorID: "recovery", PayloadJSON: mustJSON(map[string]string{"attempt_id": attempt.ID})}}, CaseMutationStep{To: CaseWaitingMergeApproval, Event: TransitionEvent{ID: stableID("event", key+":approval"), EventType: "merge_approval_requested", ActorType: "studio", ActorID: "orchestrator", PayloadJSON: mustJSON(map[string]string{"attempt_id": attempt.ID})}})
-	} else {
-		attempt.Status = AttemptStatusFailed
-		attempt.ErrorCode = "fix_recovery_failed"
-		attempt.ErrorMessage = message
-		steps = append(steps, CaseMutationStep{To: CaseFixFailed, Event: TransitionEvent{ID: stableID("event", key), EventType: "fix_recovery_failed", ActorType: "recovery", ActorID: "recovery", PayloadJSON: mustJSON(map[string]string{"error": message})}})
+func buildRecoveredFixCompletion(incident IncidentCase, attempt PhaseAttempt, inspected []CodeChange) (CompleteAttemptCommand, error) {
+	changes := make([]CodeChange, len(inspected))
+	for index := range inspected {
+		change := inspected[index].Clone()
+		change.Repo = strings.TrimSpace(change.Repo)
+		change.BaseBranch = strings.TrimSpace(change.BaseBranch)
+		change.FixBranch = strings.TrimSpace(change.FixBranch)
+		change.FixCommit = strings.TrimSpace(change.FixCommit)
+		change.TargetEnvironmentBranch = strings.TrimSpace(change.TargetEnvironmentBranch)
+		change.PushRemote = strings.TrimSpace(change.PushRemote)
+		change.PushStatus = strings.TrimSpace(change.PushStatus)
+		change.MergeBaseHead = ""
+		change.MergeCommit = ""
+		change.ID = stableID("recovered-change", attempt.ID+":"+change.Repo)
+		change.CaseID = incident.ID
+		change.AttemptID = attempt.ID
+		changes[index] = change
 	}
-	_, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: mustJSON(map[string]any{"pushed": pushed, "message": message}), FinishAttempts: []PhaseAttempt{attempt}, CodeChanges: changes, Steps: steps})
+	sort.Slice(changes, func(i, j int) bool { return changes[i].Repo < changes[j].Repo })
+	result := FixResult{FixStatus: "fixed_pushed", Environment: incident.Environment, Branches: make([]FixBranchResult, 0, len(changes)), Changes: make([]FixChangeResult, 0, len(changes)), Tests: []FixTestResult{}, Risks: []string{}, Evidence: []ArtifactReference{}}
+	repositories := make([]string, 0, len(changes))
+	for _, change := range changes {
+		tests, err := decodeFixTestEvidence(change.TestEvidence)
+		if err != nil {
+			return CompleteAttemptCommand{}, fmt.Errorf("decode %s tests: %w", change.Repo, err)
+		}
+		for index := range tests {
+			tests[index].Repo = strings.TrimSpace(tests[index].Repo)
+			tests[index].Commit = strings.TrimSpace(tests[index].Commit)
+			if tests[index].Repo != change.Repo || tests[index].Commit != change.FixCommit {
+				return CompleteAttemptCommand{}, fmt.Errorf("test evidence for %s is bound to %s@%s", change.Repo, tests[index].Repo, tests[index].Commit)
+			}
+		}
+		result.Branches = append(result.Branches, FixBranchResult{Repo: change.Repo, BaseBranch: change.BaseBranch, FixBranch: change.FixBranch, Commit: change.FixCommit, Pushed: change.PushStatus == "pushed", TargetEnvironmentBranch: change.TargetEnvironmentBranch, PushRemote: change.PushRemote})
+		result.Changes = append(result.Changes, FixChangeResult{Repo: change.Repo, Summary: "recovered pushed fix commit " + change.FixCommit})
+		result.Tests = append(result.Tests, tests...)
+		repositories = append(repositories, change.Repo)
+	}
+	normalizeFixResult(&result)
+	result.DeploymentNotice = "deploy recovered fixes for " + strings.Join(repositories, ", ") + " to " + incident.Environment
+	for index := range changes {
+		repositoryTests := make([]FixTestResult, 0)
+		for _, test := range result.Tests {
+			if test.Repo == changes[index].Repo {
+				repositoryTests = append(repositoryTests, test)
+			}
+		}
+		changes[index].TestEvidence = mustJSON(repositoryTests)
+	}
+	output, err := json.Marshal(result)
+	if err != nil {
+		return CompleteAttemptCommand{}, err
+	}
+	command := CompleteAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "recovery:" + attempt.ID + ":result", ActorID: "recovery", Outcome: PhaseOutcomeFixPushed, OutputJSON: output, CodeChanges: changes}
+	if err := validateCompletionCommand(command); err != nil {
+		return CompleteAttemptCommand{}, err
+	}
+	if err := validateCompletionAttemptPhase(attempt.Phase, command); err != nil {
+		return CompleteAttemptCommand{}, err
+	}
+	return command, nil
+}
+
+func (o *CaseOrchestrator) finishFixRecoveryFailure(ctx context.Context, incident IncidentCase, attempt PhaseAttempt, message string) error {
+	key := "recovery:" + attempt.ID + ":result"
+	attempt.OutputJSON = []byte(`{}`)
+	attempt.Status = AttemptStatusFailed
+	attempt.ErrorCode = "fix_recovery_failed"
+	attempt.ErrorMessage = message
+	steps := []CaseMutationStep{{To: CaseFixFailed, Event: TransitionEvent{ID: stableID("event", key), EventType: "fix_recovery_failed", ActorType: "recovery", ActorID: "recovery", PayloadJSON: mustJSON(map[string]string{"error": message})}}}
+	_, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: mustJSON(map[string]any{"pushed": false, "message": message}), FinishAttempts: []PhaseAttempt{attempt}, Steps: steps})
 	return err
 }
 

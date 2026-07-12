@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -23,6 +24,11 @@ func createRunningPhase(t *testing.T, store *CaseStore, id string, from, running
 		t.Fatal(err)
 	}
 	return updated, attempt
+}
+
+func validRecoveredFixChange(repo, commit string) CodeChange {
+	tests := mustJSON([]FixTestResult{{Repo: repo, Commit: commit, Command: "test " + repo, Result: "passed"}})
+	return CodeChange{Repo: repo, BaseBranch: "test", FixBranch: "fix/" + repo, FixCommit: commit, TestEvidence: tests, TargetEnvironmentBranch: "test", PushRemote: "origin", PushStatus: "pushed"}
 }
 
 func TestRecoverInterruptedReadOnlyPhaseRetriesAtMostOnceAndIsDeterministic(t *testing.T) {
@@ -207,7 +213,7 @@ func TestRecoverInterruptedFixInspectsExternalStateAndNeverBlindlyRetries(t *tes
 	store := newOrchestratorStore(t)
 	incident, _ := createRunningPhase(t, store, "recover-fix", CaseWaitingFixApproval, CaseFixing, PhaseFix, "", []byte(`{"fix_branch":"fix/bug","workspace":"/repo"}`))
 	runner := &recordingPhaseRunner{}
-	git := &recordingGitIntegration{fixInspection: FixInspection{Complete: true, Changes: []CodeChange{{Repo: "repo", BaseBranch: "main", FixBranch: "fix/bug", FixCommit: "fix-1", TestEvidence: []byte(`{}`), TargetEnvironmentBranch: "test", PushRemote: "origin", PushStatus: "pushed"}}}, result: MergeResult{Repositories: map[string]MergeRepositoryResult{"repo": {MergeCommit: "merge-1", Pushed: true}}}}
+	git := &recordingGitIntegration{fixInspection: FixInspection{Complete: true, Changes: []CodeChange{validRecoveredFixChange("repo", "fix-1")}}, result: MergeResult{Repositories: map[string]MergeRepositoryResult{"repo": {MergeCommit: "merge-1", Pushed: true}}}}
 	o := NewCaseOrchestrator(store, runner, git, &recordingDeploymentVerifier{})
 	if err := o.RecoverInterrupted(ctx); err != nil {
 		t.Fatal(err)
@@ -248,7 +254,7 @@ func TestRecoverInterruptedFixReplaysPersistedInspectionReservationAfterReopen(t
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	git := &recordingGitIntegration{fixInspection: FixInspection{Complete: true, Changes: []CodeChange{{Repo: "repo", BaseBranch: "main", FixBranch: "fix/bug", FixCommit: "fix-1", TestEvidence: []byte(`{}`), TargetEnvironmentBranch: "test", PushRemote: "origin", PushStatus: "pushed"}}}}
+	git := &recordingGitIntegration{fixInspection: FixInspection{Complete: true, Changes: []CodeChange{validRecoveredFixChange("repo", "fix-1")}}}
 	reopened := NewCaseOrchestrator(store, &recordingPhaseRunner{}, git, &recordingDeploymentVerifier{})
 	if err := reopened.RecoverInterrupted(ctx); err != nil {
 		t.Fatal(err)
@@ -256,6 +262,111 @@ func TestRecoverInterruptedFixReplaysPersistedInspectionReservationAfterReopen(t
 	got, err := store.GetCase(ctx, incident.ID)
 	if err != nil || got.Status != CaseWaitingMergeApproval || len(git.inspections) != 1 {
 		t.Fatalf("case=%+v inspections=%d err=%v", got, len(git.inspections), err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenCaseStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewCaseOrchestrator(store, &recordingPhaseRunner{}, git, &recordingDeploymentVerifier{})
+	if err := restarted.RecoverInterrupted(ctx); err != nil || len(git.inspections) != 1 {
+		t.Fatalf("idempotent recovery inspections=%d err=%v", len(git.inspections), err)
+	}
+}
+
+func TestRecoverInterruptedFixRejectsInvalidInspectionScope(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*CodeChange)
+	}{
+		{name: "base target mismatch", mutate: func(change *CodeChange) { change.BaseBranch = "main" }},
+		{name: "direct environment fix", mutate: func(change *CodeChange) { change.FixBranch = "test" }},
+		{name: "missing tests", mutate: func(change *CodeChange) { change.TestEvidence = []byte(`[]`) }},
+		{name: "skip without reason", mutate: func(change *CodeChange) {
+			change.TestEvidence = mustJSON([]FixTestResult{{Repo: change.Repo, Commit: change.FixCommit, Command: "go test ./...", Result: "skipped"}})
+		}},
+		{name: "test repository mismatch", mutate: func(change *CodeChange) {
+			change.TestEvidence = mustJSON([]FixTestResult{{Repo: "other", Commit: change.FixCommit, Command: "go test ./...", Result: "passed"}})
+		}},
+		{name: "test commit mismatch", mutate: func(change *CodeChange) {
+			change.TestEvidence = mustJSON([]FixTestResult{{Repo: change.Repo, Commit: "stale", Command: "go test ./...", Result: "passed"}})
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := newOrchestratorStore(t)
+			incident, _ := createRunningPhase(t, store, "recover-invalid-"+strings.ReplaceAll(test.name, " ", "-"), CaseWaitingFixApproval, CaseFixing, PhaseFix, "", []byte(`{}`))
+			change := validRecoveredFixChange("api", "fix-api")
+			test.mutate(&change)
+			git := &recordingGitIntegration{fixInspection: FixInspection{Complete: true, Changes: []CodeChange{change}}}
+			orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, git, &recordingDeploymentVerifier{})
+			if err := orchestrator.RecoverInterrupted(ctx); err != nil {
+				t.Fatal(err)
+			}
+			got, err := store.GetCase(ctx, incident.ID)
+			if err != nil || got.Status != CaseFixFailed {
+				t.Fatalf("case=%+v err=%v", got, err)
+			}
+			attempt, err := store.GetAttempt(ctx, got.CurrentAttemptID)
+			if err != nil || attempt.ErrorCode != "fix_recovery_failed" || !strings.Contains(attempt.ErrorMessage, "inspection") {
+				t.Fatalf("attempt=%+v err=%v", attempt, err)
+			}
+			events, err := store.ListEvents(ctx, got.ID)
+			if err != nil || events[len(events)-1].EventType != "fix_recovery_failed" || !strings.Contains(string(events[len(events)-1].PayloadJSON), "inspection") {
+				t.Fatalf("events=%+v err=%v", events, err)
+			}
+		})
+	}
+}
+
+func TestRecoverInterruptedFixPersistsCanonicalMultiRepoResult(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident, _ := createRunningPhase(t, store, "recover-fix-multi", CaseWaitingFixApproval, CaseFixing, PhaseFix, "", []byte(`{}`))
+	api := validRecoveredFixChange("api", "fix-api")
+	web := validRecoveredFixChange("web", "fix-web")
+	web.TestEvidence = mustJSON([]FixTestResult{{Repo: "web", Commit: "fix-web", Command: "npm test", Result: "skipped", SkippedReason: "browser unavailable"}})
+	git := &recordingGitIntegration{fixInspection: FixInspection{Complete: true, Changes: []CodeChange{api, web}}}
+	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, git, &recordingDeploymentVerifier{})
+	if err := orchestrator.RecoverInterrupted(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetCase(ctx, incident.ID)
+	if err != nil || got.Status != CaseWaitingMergeApproval {
+		t.Fatalf("case=%+v err=%v", got, err)
+	}
+	attempt, err := store.GetAttempt(ctx, got.CurrentAttemptID)
+	if err != nil || attempt.Status != AttemptStatusSucceeded {
+		t.Fatalf("attempt=%+v err=%v", attempt, err)
+	}
+	result, err := ParseFixResult(attempt.OutputJSON)
+	if err != nil || result.FixStatus != "fixed_pushed" || len(result.Branches) != 2 || len(result.Changes) != 2 || len(result.Tests) != 2 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	changes, err := store.ListCodeChanges(ctx, incident.ID)
+	if err != nil || len(changes) != 2 {
+		t.Fatalf("changes=%+v err=%v", changes, err)
+	}
+}
+
+func TestRecoverInterruptedFixRejectsCrossRepositoryTestEvidence(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident, _ := createRunningPhase(t, store, "recover-fix-cross-tests", CaseWaitingFixApproval, CaseFixing, PhaseFix, "", []byte(`{}`))
+	api := validRecoveredFixChange("api", "fix-api")
+	web := validRecoveredFixChange("web", "fix-web")
+	api.TestEvidence, web.TestEvidence = web.TestEvidence, api.TestEvidence
+	git := &recordingGitIntegration{fixInspection: FixInspection{Complete: true, Changes: []CodeChange{api, web}}}
+	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, git, &recordingDeploymentVerifier{})
+	if err := orchestrator.RecoverInterrupted(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetCase(ctx, incident.ID)
+	if err != nil || got.Status != CaseFixFailed {
+		t.Fatalf("case=%+v err=%v", got, err)
 	}
 }
 

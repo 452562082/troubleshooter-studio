@@ -51,13 +51,23 @@ func (v ManualVersionVerifier) Verify(ctx context.Context, request DeploymentVer
 		ObservedAt:         time.Now().UTC(),
 	}
 	if observation.VerificationSource == "" || observation.ObservedVersion == "" || observation.Environment == "" || len(observation.ExpectedCommits) == 0 {
+		switch {
+		case observation.Environment == "":
+			setDeploymentDiagnostic(&observation, "manual_environment_missing", "人工部署证明缺少环境")
+		case observation.ObservedVersion == "":
+			setDeploymentDiagnostic(&observation, "manual_version_missing", "人工部署证明缺少版本")
+		default:
+			setDeploymentDiagnostic(&observation, "manual_scope_missing", "人工部署证明缺少期望仓库")
+		}
 		return observation, nil
 	}
 	if observation.VerificationSource != "manual" {
+		setDeploymentDiagnostic(&observation, "provider_mismatch", "部署版本验证方式不匹配")
 		return observation, fmt.Errorf("%w: manual verifier cannot handle source %q", ErrDeploymentVerifierUnavailable, observation.VerificationSource)
 	}
 	if expectedEnvironment := strings.TrimSpace(v.Environment); expectedEnvironment != "" && observation.Environment != expectedEnvironment {
 		observation.Result = DeploymentResultMismatched
+		setDeploymentDiagnostic(&observation, "environment_mismatch", "部署证明环境与 Case 不一致")
 		return observation, nil
 	}
 	verifiedAncestors := map[string]string{}
@@ -65,6 +75,7 @@ func (v ManualVersionVerifier) Verify(ctx context.Context, request DeploymentVer
 		observed, ok := observation.ObservedCommits[repo]
 		if !ok || strings.TrimSpace(observed) == "" {
 			observation.Result = DeploymentResultMismatched
+			setDeploymentDiagnostic(&observation, "manual_repo_missing", "人工部署证明缺少仓库提交")
 			return observation, nil
 		}
 		if observed == expected {
@@ -72,14 +83,17 @@ func (v ManualVersionVerifier) Verify(ctx context.Context, request DeploymentVer
 		}
 		if v.IsDescendant == nil {
 			observation.Result = DeploymentResultMismatched
+			setDeploymentDiagnostic(&observation, "manual_commit_mismatch", "人工部署提交与期望不一致")
 			return observation, nil
 		}
 		matched, err := v.IsDescendant(ctx, repo, expected, observed)
 		if err != nil {
+			setDeploymentDiagnostic(&observation, "descendant_check_failed", "提交祖先关系暂不可验证")
 			return observation, err
 		}
 		if !matched {
 			observation.Result = DeploymentResultMismatched
+			setDeploymentDiagnostic(&observation, "manual_commit_mismatch", "人工部署提交与期望不一致")
 			return observation, nil
 		}
 		verifiedAncestors[repo] = expected
@@ -90,6 +104,8 @@ func (v ManualVersionVerifier) Verify(ctx context.Context, request DeploymentVer
 	now := time.Now().UTC()
 	observation.VerifiedAt = &now
 	observation.Result = DeploymentResultMatched
+	observation.DiagnosticCode = ""
+	observation.DiagnosticMessage = ""
 	return observation, nil
 }
 
@@ -109,7 +125,7 @@ func NewCompositeDeploymentVerifier(providers map[string]DeploymentVerifier) *Co
 
 func (v *CompositeDeploymentVerifier) Verify(ctx context.Context, request DeploymentVerificationRequest) (DeploymentObservation, error) {
 	if v == nil {
-		return DeploymentObservation{Result: DeploymentResultUnavailable, ObservedAt: time.Now().UTC()}, ErrDeploymentVerifierUnavailable
+		return DeploymentObservation{Result: DeploymentResultUnavailable, ObservedAt: time.Now().UTC(), DiagnosticCode: "provider_unavailable", DiagnosticMessage: "部署版本验证方式不可用"}, ErrDeploymentVerifierUnavailable
 	}
 	source := normalizedDeploymentSource(request.Source)
 	provider := v.providers[source]
@@ -117,5 +133,13 @@ func (v *CompositeDeploymentVerifier) Verify(ctx context.Context, request Deploy
 		return DeploymentObservation{Environment: request.Environment, ExpectedCommits: CloneStringMap(request.ExpectedCommits), VerificationSource: source, ObservedVersion: request.ObservedVersion, ObservedCommits: CloneStringMap(request.ObservedCommits), ObservedAt: time.Now().UTC(), DiagnosticCode: "provider_unavailable", DiagnosticMessage: "部署版本验证方式不可用", Result: DeploymentResultUnavailable}, fmt.Errorf("%w: source %q", ErrDeploymentVerifierUnavailable, source)
 	}
 	request.Source = source
-	return provider.Verify(ctx, request.Clone())
+	observation, err := provider.Verify(ctx, request.Clone())
+	if observation.Result != DeploymentResultMatched && observation.DiagnosticCode == "" {
+		if err != nil {
+			setDeploymentDiagnostic(&observation, "verifier_unavailable", "部署版本验证暂不可用")
+		} else {
+			setDeploymentDiagnostic(&observation, "version_mismatch", "运行版本与期望提交不一致")
+		}
+	}
+	return observation, err
 }

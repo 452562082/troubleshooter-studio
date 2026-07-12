@@ -69,7 +69,8 @@ const latestDeployment = computed(() => {
     return Object.keys(observed).length === entries.length && entries.every(([repo, commit]) => observed[repo] === commit)
   })
 })
-const deploymentVersionSource = computed(() => latestDeployment.value?.verification_source || 'manual')
+const deploymentVersionSource = computed(() => props.detail?.deployment_verification?.provider || latestDeployment.value?.verification_source || 'manual')
+const automaticDeploymentVerification = computed(() => ['http', 'k8s'].includes(deploymentVersionSource.value))
 const mergeApprovalScopes = computed(() => (props.detail?.code_changes || []).map(change => ({
   repo: change.repo,
   fixCommit: change.fix_commit,
@@ -166,9 +167,10 @@ function confirmAction() {
   }
   if (['supply_evidence', 'continue_fix', 'supply_merge_decision', 'supply_deployment_proof'].includes(action.value.kind)) payload.input = dialogInput.value.trim()
   if (action.value.kind === 'notify_deployed') {
-    payload.observedVersion = dialogInput.value.trim()
-    payload.observedCommits = Object.fromEntries(Object.entries(dialogObservedCommits.value).filter(([, commit]) => commit.trim()).map(([repo, commit]) => [repo, commit.trim()]))
-    payload.versionSource = deploymentVersionSource.value
+    if (!automaticDeploymentVerification.value) {
+      payload.observedVersion = dialogInput.value.trim()
+      payload.observedCommits = Object.fromEntries(Object.entries(dialogObservedCommits.value).filter(([, commit]) => commit.trim()).map(([repo, commit]) => [repo, commit.trim()]))
+    }
   }
   emit('primary', payload)
   dialogOpen.value = false
@@ -282,11 +284,12 @@ function dialogTitle(): string {
         <dl v-if="['notify_deployed', 'supply_deployment_proof'].includes(action.kind)" class="deployment-preview">
           <div><dt>目标环境</dt><dd>{{ detail?.case.environment || '未知' }}</dd></div>
           <div><dt>期望 commits</dt><dd><code v-for="(commit, repo) in expectedDeploymentCommits" :key="repo">{{ repo }}: {{ commit }}</code><span v-if="Object.keys(expectedDeploymentCommits).length === 0">尚未记录</span></dd></div>
-          <div><dt>版本来源</dt><dd>{{ deploymentVersionSource }}</dd></div>
+          <div><dt>版本来源</dt><dd>{{ deploymentVersionSource }}<small v-if="detail?.deployment_verification?.hint"> · {{ detail.deployment_verification.hint }}</small></dd></div>
         </dl>
-        <label v-if="action.kind === 'notify_deployed'" for="observed-version">已部署版本</label>
-        <input v-if="action.kind === 'notify_deployed'" id="observed-version" v-model="dialogInput" type="text" placeholder="例如 build-20260711 或 commit SHA">
-        <fieldset v-if="action.kind === 'notify_deployed'" class="observed-commits">
+        <p v-if="action.kind === 'notify_deployed' && automaticDeploymentVerification">确认后将按上述服务端配置自动读取运行版本，无需手工填写版本或 commit。</p>
+        <label v-if="action.kind === 'notify_deployed' && !automaticDeploymentVerification" for="observed-version">已部署版本</label>
+        <input v-if="action.kind === 'notify_deployed' && !automaticDeploymentVerification" id="observed-version" v-model="dialogInput" type="text" placeholder="例如 build-20260711 或 commit SHA">
+        <fieldset v-if="action.kind === 'notify_deployed' && !automaticDeploymentVerification" class="observed-commits">
           <legend>各仓库观测 commit（可选；留空将无法确认该仓库）</legend>
           <label v-for="(_, repo) in expectedDeploymentCommits" :key="repo" :for="`observed-commit-${repo}`">
             <span>{{ repo }}</span>
@@ -297,7 +300,7 @@ function dialogTitle(): string {
         <textarea v-if="['supply_evidence', 'continue_fix', 'supply_merge_decision', 'supply_deployment_proof'].includes(action.kind)" id="case-supplement" v-model="dialogInput" rows="5" placeholder="输入新证据、处理决定、版本证明或测试信息"></textarea>
         <footer>
           <button class="btn" type="button" :disabled="pending" @click="closeDialog">取消</button>
-          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (action.kind === 'approve_fix' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined)) || (action.kind === 'notify_deployed' && !dialogInput.trim()) || (['supply_evidence', 'continue_fix', 'supply_merge_decision', 'supply_deployment_proof'].includes(action.kind) && !dialogInput.trim())" @click="confirmAction">确认</button>
+          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (action.kind === 'approve_fix' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined)) || (action.kind === 'notify_deployed' && !automaticDeploymentVerification && !dialogInput.trim()) || (['supply_evidence', 'continue_fix', 'supply_merge_decision', 'supply_deployment_proof'].includes(action.kind) && !dialogInput.trim())" @click="confirmAction">确认</button>
         </footer>
       </section>
     </div>

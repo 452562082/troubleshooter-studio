@@ -63,6 +63,7 @@ export interface IncidentCaseDetail {
   code_changes: CodeChange[]
   deployment_observations: DeploymentObservation[]
   events: TransitionEvent[]
+  deployment_verification?: { provider: 'manual' | 'http' | 'k8s' | 'unavailable'; available: boolean; hint: string }
 }
 
 export interface IncidentPhaseEvent {

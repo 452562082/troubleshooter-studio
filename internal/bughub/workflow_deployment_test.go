@@ -122,6 +122,23 @@ func TestManualVersionVerifierRejectsInvalidMetadata(t *testing.T) {
 	}
 }
 
+func TestCompositeDeploymentVerifierAddsBoundedDiagnosticToEveryNonMatch(t *testing.T) {
+	tests := map[string]*CompositeDeploymentVerifier{
+		"nil composite": nil,
+		"provider result without diagnostic": NewCompositeDeploymentVerifier(map[string]DeploymentVerifier{
+			"manual": &staticDeploymentVerifier{result: DeploymentResultMismatched},
+		}),
+	}
+	for name, verifier := range tests {
+		t.Run(name, func(t *testing.T) {
+			got, _ := verifier.Verify(context.Background(), DeploymentVerificationRequest{Source: "manual"})
+			if got.Result == DeploymentResultMatched || got.DiagnosticCode == "" || got.DiagnosticMessage == "" || len(got.DiagnosticCode) > 64 || len(got.DiagnosticMessage) > 128 {
+				t.Fatalf("observation=%+v", got)
+			}
+		})
+	}
+}
+
 type staticDeploymentVerifier struct {
 	called int
 	result DeploymentResult

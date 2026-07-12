@@ -2475,6 +2475,22 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class IncidentDeploymentVerification {
+	    provider: string;
+	    available: boolean;
+	    hint: string;
+
+	    static createFrom(source: any = {}) {
+	        return new IncidentDeploymentVerification(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.provider = source["provider"];
+	        this.available = source["available"];
+	        this.hint = source["hint"];
+	    }
+	}
 	export class IncidentTransitionEvent {
 	    id: string;
 	    case_id: string;
@@ -2630,6 +2646,7 @@ export namespace main {
 	    code_changes: IncidentCodeChange[];
 	    deployment_observations: bughub.DeploymentObservation[];
 	    events: IncidentTransitionEvent[];
+	    deployment_verification: IncidentDeploymentVerification;
 
 	    static createFrom(source: any = {}) {
 	        return new IncidentCaseDetail(source);
@@ -2644,6 +2661,7 @@ export namespace main {
 	        this.code_changes = this.convertValues(source["code_changes"], IncidentCodeChange);
 	        this.deployment_observations = this.convertValues(source["deployment_observations"], bughub.DeploymentObservation);
 	        this.events = this.convertValues(source["events"], IncidentTransitionEvent);
+	        this.deployment_verification = this.convertValues(source["deployment_verification"], IncidentDeploymentVerification);
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -2664,6 +2682,7 @@ export namespace main {
 		    return a;
 		}
 	}
+
 
 
 

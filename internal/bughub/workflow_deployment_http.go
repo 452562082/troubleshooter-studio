@@ -36,6 +36,7 @@ func (v HTTPVersionVerifier) Verify(ctx context.Context, request DeploymentVerif
 	}
 	if strings.TrimSpace(request.Environment) != strings.TrimSpace(v.Environment) {
 		observation.Result = DeploymentResultMismatched
+		setDeploymentDiagnostic(&observation, "environment_mismatch", "版本接口环境与 Case 不一致")
 		return observation, nil
 	}
 	target, err := url.Parse(strings.TrimSpace(v.Config.URL))
@@ -79,6 +80,7 @@ func (v HTTPVersionVerifier) Verify(ctx context.Context, request DeploymentVerif
 	}
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
+		setDeploymentDiagnostic(&observation, "invalid_http_request", "HTTP 版本验证请求无效")
 		return observation, nil
 	}
 	response, err := client.Do(httpRequest)

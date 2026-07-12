@@ -781,7 +781,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
         })
       }
       if (payload.kind === 'notify_deployed') {
-        return notifyIncidentDeployed({ ...base, observed_version: payload.observedVersion || '', observed_commits: payload.observedCommits || {}, version_source: payload.versionSource || 'manual' })
+        return notifyIncidentDeployed({ ...base, observed_version: payload.observedVersion || '', observed_commits: payload.observedCommits || {} })
       }
       if (payload.kind === 'cancel_attempt') {
         if (!incident.current_attempt_id) throw new Error('当前没有可停止的阶段')

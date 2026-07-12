@@ -32,6 +32,13 @@ type IncidentCaseDetail struct {
 	CodeChanges            []IncidentCodeChange           `json:"code_changes"`
 	DeploymentObservations []bughub.DeploymentObservation `json:"deployment_observations"`
 	Events                 []IncidentTransitionEvent      `json:"events"`
+	DeploymentVerification IncidentDeploymentVerification `json:"deployment_verification"`
+}
+
+type IncidentDeploymentVerification struct {
+	Provider  string `json:"provider"`
+	Available bool   `json:"available"`
+	Hint      string `json:"hint"`
 }
 
 type IncidentPhaseAttempt struct {
@@ -363,6 +370,7 @@ func (a *App) GetIncidentCase(caseID string) (IncidentCaseDetail, error) {
 	if detail.DeploymentObservations, err = store.ListDeploymentObservations(ctx, caseID); err != nil {
 		return IncidentCaseDetail{}, err
 	}
+	detail.DeploymentVerification = a.deploymentVerificationPreview(ctx, caseID)
 	events, err := store.ListEvents(ctx, caseID)
 	if err != nil {
 		return IncidentCaseDetail{}, err
@@ -565,8 +573,8 @@ func (a *App) NotifyIncidentDeployed(input NotifyIncidentDeployedInput) (bughub.
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
-	serverSource := a.configuredDeploymentProvider(a.workflowCommandContext(), input.CaseID)
-	command := bughub.NotifyDeployedCommand{CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID), ObservedVersion: strings.TrimSpace(input.ObservedVersion), ObservedCommits: input.ObservedCommits, Source: serverSource, Bug: bug, Bot: bot, InputJSON: inputJSON}
+	serverBinding := a.configuredDeploymentBinding(a.workflowCommandContext(), input.CaseID)
+	command := bughub.NotifyDeployedCommand{CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID), ObservedVersion: strings.TrimSpace(input.ObservedVersion), ObservedCommits: input.ObservedCommits, Source: serverBinding.Provider, VerifierConfigFingerprint: serverBinding.Fingerprint, VerifierConfigSnapshot: serverBinding.Snapshot, Bug: bug, Bot: bot, InputJSON: inputJSON}
 	var incident bughub.IncidentCase
 	if strings.TrimSpace(input.NotificationText) != "" {
 		incident, err = orchestrator.NotifyDeployedFromText(a.workflowCommandContext(), input.NotificationText, command)

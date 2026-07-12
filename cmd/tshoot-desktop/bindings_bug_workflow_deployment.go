@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,18 +18,28 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 )
 
+type deploymentVerifierBinding struct {
+	Provider, Fingerprint string
+	Snapshot              json.RawMessage
+}
+
+type deploymentRepositoryMapping struct {
+	Repo       string `json:"repo"`
+	Deployment string `json:"deployment"`
+}
+
 type caseConfiguredDeploymentVerifier struct {
 	app   *App
 	store *bughub.CaseStore
 }
 
-func (a *App) configuredDeploymentProvider(ctx context.Context, caseID string) string {
+func (a *App) configuredDeploymentBinding(ctx context.Context, caseID string) deploymentVerifierBinding {
 	if a == nil || a.workflowStore == nil {
-		return "deployment-config"
+		return unavailableDeploymentBinding()
 	}
 	incident, err := a.workflowStore.GetCase(ctx, strings.TrimSpace(caseID))
 	if err != nil {
-		return "deployment-config"
+		return unavailableDeploymentBinding()
 	}
 	loader := a.workflowLoadDeploymentConfig
 	if loader == nil {
@@ -33,14 +47,99 @@ func (a *App) configuredDeploymentProvider(ctx context.Context, caseID string) s
 	}
 	cfg, err := loader(ctx, incident)
 	if err != nil || cfg == nil || cfg.System.ID != incident.SystemID {
-		return "deployment-config"
+		return unavailableDeploymentBinding()
 	}
 	for _, environment := range cfg.Environments {
 		if environment.ID == incident.Environment {
-			return environment.DeploymentVerification.EffectiveProvider()
+			return canonicalDeploymentVerifierBinding(cfg, environment)
 		}
 	}
-	return "deployment-config"
+	return unavailableDeploymentBinding()
+}
+
+func unavailableDeploymentBinding() deploymentVerifierBinding {
+	return makeDeploymentBinding("deployment-config", map[string]any{"provider": "unavailable", "policy": "deployment-config-v1"})
+}
+
+func (a *App) deploymentVerificationPreview(ctx context.Context, caseID string) IncidentDeploymentVerification {
+	binding := a.configuredDeploymentBinding(ctx, caseID)
+	preview := IncidentDeploymentVerification{Provider: binding.Provider, Available: binding.Provider != "deployment-config"}
+	var snapshot map[string]any
+	_ = json.Unmarshal(binding.Snapshot, &snapshot)
+	switch binding.Provider {
+	case "manual":
+		preview.Hint = "人工提供已部署版本和各仓库 commit"
+	case "http":
+		preview.Hint = "HTTP 版本接口自动验证 · " + fmt.Sprint(snapshot["json_pointer"])
+	case "k8s":
+		preview.Hint = "K8s Deployment 自动验证 · " + fmt.Sprint(snapshot["cluster"]) + "/" + fmt.Sprint(snapshot["namespace"])
+	default:
+		preview.Provider = "unavailable"
+		preview.Hint = "无法读取当前 Case 的部署验证配置"
+	}
+	return preview
+}
+
+func makeDeploymentBinding(provider string, snapshot any) deploymentVerifierBinding {
+	raw, _ := json.Marshal(snapshot)
+	sum := sha256.Sum256(raw)
+	return deploymentVerifierBinding{Provider: provider, Fingerprint: fmt.Sprintf("%x", sum[:]), Snapshot: raw}
+}
+
+func normalizedVerifierURL(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "invalid"
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	u.Host = strings.ToLower(u.Host)
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+
+func k8sVerifierEndpointIdentity(cfg *config.SystemConfig, environmentID string) (string, bool) {
+	for _, endpoint := range cfg.Infrastructure.Observability.K8sRuntime.Endpoints {
+		if endpoint.Env != environmentID {
+			continue
+		}
+		u, err := url.Parse(strings.TrimSpace(endpoint.URL))
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return "invalid", false
+		}
+		return normalizedVerifierURL(endpoint.URL), true
+	}
+	return "unconfigured", false
+}
+
+func canonicalDeploymentVerifierBinding(cfg *config.SystemConfig, environment config.Environment) deploymentVerifierBinding {
+	provider := environment.DeploymentVerification.EffectiveProvider()
+	switch provider {
+	case config.DeploymentVerificationProviderManual:
+		return makeDeploymentBinding(provider, map[string]any{"provider": provider, "policy": "manual-v1"})
+	case config.DeploymentVerificationProviderHTTP:
+		return makeDeploymentBinding(provider, map[string]any{"provider": provider, "url": normalizedVerifierURL(environment.DeploymentVerification.HTTP.URL), "json_pointer": environment.DeploymentVerification.HTTP.JSONPointer, "policy": "http-v1-timeout10s-body1m-samehost"})
+	case config.DeploymentVerificationProviderK8s:
+		endpointIdentity, _ := k8sVerifierEndpointIdentity(cfg, environment.ID)
+		endpointProvider := strings.ToLower(strings.TrimSpace(cfg.Infrastructure.Observability.K8sRuntime.Provider))
+		if endpointProvider == "" {
+			endpointProvider = "kuboard"
+		}
+		k := environment.DeploymentVerification.K8s
+		repositories := make([]string, 0, len(k.DeploymentsByRepo))
+		for repo := range k.DeploymentsByRepo {
+			repositories = append(repositories, repo)
+		}
+		sort.Strings(repositories)
+		mappings := make([]deploymentRepositoryMapping, 0, len(repositories))
+		for _, repo := range repositories {
+			mappings = append(mappings, deploymentRepositoryMapping{Repo: repo, Deployment: k.DeploymentsByRepo[repo]})
+		}
+		return makeDeploymentBinding(provider, map[string]any{"provider": provider, "cluster": k.Cluster, "namespace": k.Namespace, "deployments_by_repo": mappings, "commit_annotation": k.CommitAnnotation, "image_label": k.ImageLabel, "endpoint_provider": endpointProvider, "endpoint_identity": endpointIdentity, "policy": "k8s-readonly-v1"})
+	default:
+		return unavailableDeploymentBinding()
+	}
 }
 
 func (v *caseConfiguredDeploymentVerifier) unavailable(request bughub.DeploymentVerificationRequest, code, message string) bughub.DeploymentObservation {
@@ -74,10 +173,11 @@ func (v *caseConfiguredDeploymentVerifier) Verify(ctx context.Context, request b
 		return v.unavailable(request, "environment_unknown", "机器人配置中不存在 Case 环境"), bughub.ErrDeploymentVerifierUnavailable
 	}
 	provider := environment.DeploymentVerification.EffectiveProvider()
+	binding := canonicalDeploymentVerifierBinding(cfg, *environment)
 	// Source was resolved by the server before reservation. Re-reading the
 	// config here closes the TOCTOU window: a provider change between reserve
 	// and execute fails closed instead of running a different verifier.
-	if strings.ToLower(strings.TrimSpace(request.Source)) != provider {
+	if strings.ToLower(strings.TrimSpace(request.Source)) != provider || request.ConfigFingerprint != binding.Fingerprint || string(request.ConfigSnapshot) != string(binding.Snapshot) {
 		return v.unavailable(request, "config_changed", "部署版本验证配置已变化，请重新确认部署"), bughub.ErrDeploymentVerifierUnavailable
 	}
 	request.Source = provider
@@ -87,6 +187,9 @@ func (v *caseConfiguredDeploymentVerifier) Verify(ctx context.Context, request b
 	case config.DeploymentVerificationProviderHTTP:
 		return (bughub.HTTPVersionVerifier{Environment: incident.Environment, Config: environment.DeploymentVerification.HTTP}).Verify(ctx, request)
 	case config.DeploymentVerificationProviderK8s:
+		if _, safe := k8sVerifierEndpointIdentity(cfg, environment.ID); !safe {
+			return v.unavailable(request, "k8s_endpoint_invalid", "K8s 只读运行时端点未配置或包含不安全 URL 字段"), bughub.ErrDeploymentVerifierUnavailable
+		}
 		factory := v.app.workflowK8sReaderFactory
 		if factory == nil {
 			factory = v.app.newKuboardDeploymentReader

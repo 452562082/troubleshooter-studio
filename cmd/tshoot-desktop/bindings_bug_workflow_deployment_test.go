@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,6 +84,11 @@ meta: {schema_version: "0.1"}
 `
 }
 
+func k8sDeploymentYAML(endpoint string) string {
+	raw := deploymentYAML("    deployment_verification:\n      provider: k8s\n      k8s: {cluster: c, namespace: n, deployments_by_repo: {repo: deploy}, commit_annotation: commit}")
+	return strings.Replace(raw, "repos:\n", "infrastructure:\n  observability:\n    k8s_runtime:\n      provider: kuboard\n      endpoints:\n        - {env: test, url: \""+endpoint+"\"}\nrepos:\n", 1)
+}
+
 func notifyProductionDeployment(t *testing.T, app *App, incident bughub.IncidentCase, forgedSource string) ([]bughub.DeploymentObservation, error) {
 	t.Helper()
 	_, err := app.NotifyIncidentDeployed(NotifyIncidentDeployedInput{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "notify-" + incident.ID, ActorID: "alice", ObservedVersion: "caller", ObservedCommits: map[string]string{"repo": "caller"}, VersionSource: forgedSource, InputJSON: map[string]any{}})
@@ -100,6 +109,9 @@ func assertReservedProvider(t *testing.T, app *App, incident bughub.IncidentCase
 	if err := json.Unmarshal(event.PayloadJSON, &reservation); err != nil || reservation.VerifierInput.Source != want {
 		t.Fatalf("reservation=%+v err=%v", reservation, err)
 	}
+	if reservation.VerifierInput.ConfigFingerprint == "" || len(reservation.VerifierInput.ConfigSnapshot) == 0 || strings.Contains(string(reservation.VerifierInput.ConfigSnapshot), "secret") {
+		t.Fatalf("unsafe or missing verifier binding: %+v", reservation.VerifierInput)
+	}
 }
 
 func TestProductionWorkflowSelectsDeploymentProviderFromInstalledCaseConfig(t *testing.T) {
@@ -108,6 +120,10 @@ func TestProductionWorkflowSelectsDeploymentProviderFromInstalledCaseConfig(t *t
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { calls++; _, _ = w.Write([]byte(`{"commit":"old"}`)) }))
 		defer server.Close()
 		app, incident := newProductionDeploymentApp(t, deploymentYAML("    deployment_verification:\n      provider: http\n      http: {url: \""+server.URL+"\", json_pointer: /commit}"), "test", nil)
+		detail, detailErr := app.GetIncidentCase(incident.ID)
+		if detailErr != nil || detail.DeploymentVerification.Provider != "http" || !detail.DeploymentVerification.Available || !strings.Contains(detail.DeploymentVerification.Hint, "/commit") || strings.Contains(detail.DeploymentVerification.Hint, server.URL) {
+			t.Fatalf("preview=%+v err=%v", detail.DeploymentVerification, detailErr)
+		}
 		observations, err := notifyProductionDeployment(t, app, incident, "k8s")
 		if err != nil || calls != 1 || len(observations) != 1 || observations[0].VerificationSource != "http" {
 			t.Fatalf("calls=%d observations=%+v err=%v", calls, observations, err)
@@ -122,10 +138,30 @@ func TestProductionWorkflowSelectsDeploymentProviderFromInstalledCaseConfig(t *t
 			factoryCalls++
 			return reader, nil
 		}
-		app, incident := newProductionDeploymentApp(t, deploymentYAML("    deployment_verification:\n      provider: k8s\n      k8s: {cluster: c, namespace: n, deployments_by_repo: {repo: deploy}, commit_annotation: commit}"), "test", factory)
+		app, incident := newProductionDeploymentApp(t, k8sDeploymentYAML("https://kuboard.example.com"), "test", factory)
 		observations, err := notifyProductionDeployment(t, app, incident, "manual")
 		if err != nil || factoryCalls != 1 || reader.calls != 1 || len(observations) != 1 || observations[0].VerificationSource != "k8s" {
 			t.Fatalf("factory=%d reader=%d observations=%+v err=%v", factoryCalls, reader.calls, observations, err)
+		}
+		assertReservedProvider(t, app, incident, "k8s")
+	})
+
+	t.Run("k8s unsafe endpoint invokes no reader factory", func(t *testing.T) {
+		factoryCalls := 0
+		factory := func(context.Context, *config.SystemConfig, config.Environment) (bughub.K8sDeploymentReader, error) {
+			factoryCalls++
+			return &productionFakeK8sReader{}, nil
+		}
+		cfg, cfgErr := config.LoadFromBytes([]byte(deploymentYAML("    deployment_verification:\n      provider: k8s\n      k8s: {cluster: c, namespace: n, deployments_by_repo: {repo: deploy}, commit_annotation: commit}")))
+		if cfgErr != nil {
+			t.Fatal(cfgErr)
+		}
+		cfg.Infrastructure.Observability.K8sRuntime.Endpoints = []config.ObsEndpoint{{Env: "test", URL: "https://user:password@kuboard.example.com?token=secret#fragment"}}
+		app, incident := newProductionDeploymentApp(t, deploymentYAML(""), "test", factory)
+		app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) { return cfg, nil }
+		observations, err := notifyProductionDeployment(t, app, incident, "manual")
+		if !errors.Is(err, bughub.ErrDeploymentVerifierUnavailable) || factoryCalls != 0 || len(observations) != 1 || observations[0].DiagnosticCode != "k8s_endpoint_invalid" {
+			t.Fatalf("factory=%d observations=%+v err=%v", factoryCalls, observations, err)
 		}
 		assertReservedProvider(t, app, incident, "k8s")
 	})
@@ -146,6 +182,10 @@ func TestProductionWorkflowSelectsDeploymentProviderFromInstalledCaseConfig(t *t
 			return &productionFakeK8sReader{}, nil
 		}
 		app, incident := newProductionDeploymentApp(t, deploymentYAML("    deployment_verification:\n      provider: http\n      http: {url: \"https://must-not-run.invalid\", json_pointer: /commit}"), "ghost", factory)
+		detail, detailErr := app.GetIncidentCase(incident.ID)
+		if detailErr != nil || detail.DeploymentVerification.Provider != "unavailable" || detail.DeploymentVerification.Available {
+			t.Fatalf("preview=%+v err=%v", detail.DeploymentVerification, detailErr)
+		}
 		observations, err := notifyProductionDeployment(t, app, incident, "http")
 		if err == nil || factoryCalls != 0 || len(observations) != 1 || observations[0].DiagnosticCode != "environment_unknown" {
 			t.Fatalf("factory=%d observations=%+v err=%v", factoryCalls, observations, err)
@@ -176,4 +216,89 @@ func TestProductionWorkflowSelectsDeploymentProviderFromInstalledCaseConfig(t *t
 		}
 		assertReservedProvider(t, app, incident, "http")
 	})
+
+	t.Run("same provider endpoint change invokes no downstream", func(t *testing.T) {
+		serverCalls, loads := 0, 0
+		first := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { serverCalls++ }))
+		defer first.Close()
+		second := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { serverCalls++ }))
+		defer second.Close()
+		cfg1, _ := config.LoadFromBytes([]byte(deploymentYAML("    deployment_verification:\n      provider: http\n      http: {url: \"" + first.URL + "\", json_pointer: /commit}")))
+		cfg2, _ := config.LoadFromBytes([]byte(deploymentYAML("    deployment_verification:\n      provider: http\n      http: {url: \"" + second.URL + "\", json_pointer: /other}")))
+		app, incident := newProductionDeploymentApp(t, deploymentYAML(""), "test", nil)
+		app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) {
+			loads++
+			if loads == 1 {
+				return cfg1, nil
+			}
+			return cfg2, nil
+		}
+		observations, err := notifyProductionDeployment(t, app, incident, "manual")
+		if err == nil || serverCalls != 0 || len(observations) != 1 || observations[0].DiagnosticCode != "config_changed" {
+			t.Fatalf("loads=%d calls=%d observations=%+v err=%v", loads, serverCalls, observations, err)
+		}
+	})
+}
+
+func TestCanonicalK8sDeploymentBindingIsSortedAndOmitsCredentials(t *testing.T) {
+	cfg, err := config.LoadFromBytes([]byte(deploymentYAML("    deployment_verification:\n      provider: k8s\n      k8s: {cluster: c, namespace: n, deployments_by_repo: {repo: deploy}, commit_annotation: commit}")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Environments[0].DeploymentVerification.K8s.DeploymentsByRepo = map[string]string{"z": "deploy-z", "a": "deploy-a"}
+	cfg.Infrastructure.Observability.K8sRuntime.Endpoints = []config.ObsEndpoint{{Env: "test", URL: "https://url-user:url-password@kuboard.example.com?token=url-secret", AccessKey: "secret-access", Password: "secret-password"}}
+	binding := canonicalDeploymentVerifierBinding(cfg, cfg.Environments[0])
+	snapshot := string(binding.Snapshot)
+	if strings.Contains(snapshot, "secret-access") || strings.Contains(snapshot, "secret-password") || strings.Contains(snapshot, "url-user") || strings.Contains(snapshot, "url-password") || strings.Contains(snapshot, "url-secret") {
+		t.Fatalf("snapshot leaked credentials: %s", snapshot)
+	}
+	if strings.Index(snapshot, `"repo":"a"`) > strings.Index(snapshot, `"repo":"z"`) {
+		t.Fatalf("repository mappings are not sorted: %s", snapshot)
+	}
+	before := binding.Fingerprint
+	cfg.Infrastructure.Observability.K8sRuntime.Endpoints[0].URL = "https://kuboard-2.example.com"
+	if after := canonicalDeploymentVerifierBinding(cfg, cfg.Environments[0]).Fingerprint; after == before {
+		t.Fatal("non-secret endpoint identity change did not alter fingerprint")
+	}
+}
+
+func TestDeploymentReservationRecoveryRejectsChangedConfigAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	firstCalls, secondCalls := 0, 0
+	first := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { firstCalls++ }))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { secondCalls++ }))
+	defer second.Close()
+	cfg1, err := config.LoadFromBytes([]byte(deploymentYAML("    deployment_verification:\n      provider: http\n      http: {url: \"" + first.URL + "\", json_pointer: /commit}")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg2, err := config.LoadFromBytes([]byte(deploymentYAML("    deployment_verification:\n      provider: http\n      http: {url: \"" + second.URL + "\", json_pointer: /other}")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, incident := newProductionDeploymentApp(t, deploymentYAML(""), "test", nil)
+	app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) { return cfg1, nil }
+	binding := app.configuredDeploymentBinding(ctx, incident.ID)
+	reserveKey := "deployment-reserve:" + incident.ID + ":v1"
+	digest := sha256.Sum256([]byte("deployment-reservation\x00" + reserveKey))
+	request := bughub.DeploymentVerificationRequest{CaseID: incident.ID, Environment: incident.Environment, Source: binding.Provider, ExpectedCommits: map[string]string{"repo": "merge-1"}, ConfigFingerprint: binding.Fingerprint, ConfigSnapshot: binding.Snapshot}
+	reservation := bughub.DeploymentReservation{ReservationID: "deployment-reservation-" + hex.EncodeToString(digest[:16]), ReservationKey: reserveKey, CallerIdempotencyKey: "notify-restart", ActorID: "alice", OriginalExpectedVersion: incident.Version, CycleNumber: incident.CycleNumber, Environment: incident.Environment, ExpectedCommits: request.ExpectedCommits, VerifierInput: request}
+	payload, _ := json.Marshal(reservation)
+	if _, err := app.workflowStore.ApplyCaseMutation(ctx, bughub.CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: reserveKey, RequestJSON: payload, Steps: []bughub.CaseMutationStep{{To: bughub.CaseDeploymentUnverified, Event: bughub.TransitionEvent{ID: "reserve-restart", EventType: "deployment_verification_reserved", ActorType: "user", ActorID: "alice", PayloadJSON: payload}}}}); err != nil {
+		t.Fatal(err)
+	}
+	root, loadBug, loadBot := app.workflowRoot, app.workflowLoadBug, app.workflowLoadBot
+	if err := app.closeIncidentWorkflow(); err != nil {
+		t.Fatal(err)
+	}
+	restarted := &App{workflowRoot: root, workflowLoadBug: loadBug, workflowLoadBot: loadBot, workflowLoadDeploymentConfig: func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) { return cfg2, nil }}
+	if err := restarted.initializeIncidentWorkflow(ctx); !errors.Is(err, bughub.ErrDeploymentVerifierUnavailable) {
+		t.Fatal(err)
+	}
+	defer restarted.closeIncidentWorkflow()
+	observations, err := restarted.workflowStore.ListDeploymentObservations(ctx, incident.ID)
+	if err != nil || firstCalls != 0 || secondCalls != 0 || len(observations) != 1 || observations[0].DiagnosticCode != "config_changed" {
+		t.Fatalf("first=%d second=%d observations=%+v err=%v", firstCalls, secondCalls, observations, err)
+	}
 }

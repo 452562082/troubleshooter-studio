@@ -36,6 +36,7 @@ func (v K8sVersionVerifier) Verify(ctx context.Context, request DeploymentVerifi
 	}
 	if strings.TrimSpace(request.Environment) != strings.TrimSpace(v.Environment) {
 		observation.Result = DeploymentResultMismatched
+		setDeploymentDiagnostic(&observation, "environment_mismatch", "K8s 环境与 Case 不一致")
 		return observation, nil
 	}
 	for repo := range request.ExpectedCommits {
@@ -89,6 +90,7 @@ func newRuntimeDeploymentObservation(request DeploymentVerificationRequest, sour
 func finishExactRuntimeObservation(observation DeploymentObservation) DeploymentObservation {
 	if len(observation.ExpectedCommits) == 0 {
 		observation.Result = DeploymentResultUnavailable
+		setDeploymentDiagnostic(&observation, "expected_scope_missing", "缺少待验证的仓库提交")
 		return observation
 	}
 	for repo, expected := range observation.ExpectedCommits {

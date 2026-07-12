@@ -178,12 +178,14 @@ func (i MergeInspection) Clone() MergeInspection {
 }
 
 type DeploymentVerificationRequest struct {
-	CaseID          string            `json:"case_id"`
-	Environment     string            `json:"environment"`
-	ExpectedCommits map[string]string `json:"expected_commits"`
-	ObservedVersion string            `json:"observed_version,omitempty"`
-	ObservedCommits map[string]string `json:"observed_commits,omitempty"`
-	Source          string            `json:"source"`
+	CaseID            string            `json:"case_id"`
+	Environment       string            `json:"environment"`
+	ExpectedCommits   map[string]string `json:"expected_commits"`
+	ObservedVersion   string            `json:"observed_version,omitempty"`
+	ObservedCommits   map[string]string `json:"observed_commits,omitempty"`
+	Source            string            `json:"source"`
+	ConfigFingerprint string            `json:"config_fingerprint"`
+	ConfigSnapshot    json.RawMessage   `json:"config_snapshot"`
 }
 
 type DeploymentReservation struct {
@@ -204,6 +206,7 @@ type DeploymentReservation struct {
 func (r DeploymentVerificationRequest) Clone() DeploymentVerificationRequest {
 	r.ExpectedCommits = CloneStringMap(r.ExpectedCommits)
 	r.ObservedCommits = CloneStringMap(r.ObservedCommits)
+	r.ConfigSnapshot = CloneRawMessage(r.ConfigSnapshot)
 	return r
 }
 
@@ -264,17 +267,19 @@ type ApproveMergeCommand struct {
 }
 
 type NotifyDeployedCommand struct {
-	CaseID          string
-	ExpectedVersion int64
-	IdempotencyKey  string
-	ActorID         string
-	ExpectedCommits map[string]string
-	ObservedVersion string
-	ObservedCommits map[string]string
-	Source          string
-	Bug             Bug
-	Bot             BotRef
-	InputJSON       json.RawMessage
+	CaseID                    string
+	ExpectedVersion           int64
+	IdempotencyKey            string
+	ActorID                   string
+	ExpectedCommits           map[string]string
+	ObservedVersion           string
+	ObservedCommits           map[string]string
+	Source                    string
+	VerifierConfigFingerprint string
+	VerifierConfigSnapshot    json.RawMessage
+	Bug                       Bug
+	Bot                       BotRef
+	InputJSON                 json.RawMessage
 }
 
 type CancelAttemptCommand struct {
@@ -1048,7 +1053,7 @@ func (o *CaseOrchestrator) NotifyDeployed(ctx context.Context, cmd NotifyDeploye
 		supplied := reservation.VerifierInput
 		supplied.ObservedVersion = cmd.ObservedVersion
 		supplied.ObservedCommits = CloneStringMap(cmd.ObservedCommits)
-		supplied.Source = normalizedDeploymentSource(cmd.Source)
+		supplied.Source = reservation.VerifierInput.Source
 		if !reflect.DeepEqual(supplied, reservation.VerifierInput) || !reflect.DeepEqual(cmd.Bot, reservation.Bot) || !reflect.DeepEqual(cmd.Bug, reservation.Bug) || string(regressionInput) != string(reservation.RegressionInputJSON) {
 			return IncidentCase{}, ErrIdempotencyConflict
 		}
@@ -1068,7 +1073,7 @@ func (o *CaseOrchestrator) NotifyDeployed(ctx context.Context, cmd NotifyDeploye
 		if scopeErr != nil {
 			return IncidentCase{}, scopeErr
 		}
-		request := DeploymentVerificationRequest{CaseID: incident.ID, Environment: incident.Environment, ExpectedCommits: expected, ObservedVersion: cmd.ObservedVersion, ObservedCommits: CloneStringMap(cmd.ObservedCommits), Source: normalizedDeploymentSource(cmd.Source)}
+		request := DeploymentVerificationRequest{CaseID: incident.ID, Environment: incident.Environment, ExpectedCommits: expected, ObservedVersion: cmd.ObservedVersion, ObservedCommits: CloneStringMap(cmd.ObservedCommits), Source: normalizedDeploymentSource(cmd.Source), ConfigFingerprint: strings.TrimSpace(cmd.VerifierConfigFingerprint), ConfigSnapshot: CloneRawMessage(cmd.VerifierConfigSnapshot)}
 		reservation = DeploymentReservation{ReservationID: stableID("deployment-reservation", reserveKey), ReservationKey: reserveKey, CallerIdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, OriginalExpectedVersion: cmd.ExpectedVersion, CycleNumber: scope.CycleNumber, Environment: incident.Environment, ExpectedCommits: expected, Bug: cmd.Bug, Bot: cmd.Bot, VerifierInput: request, RegressionInputJSON: append([]byte(nil), regressionInput...)}
 		payload := mustJSON(reservation)
 		reserved, reserveErr := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: cmd.ExpectedVersion, IdempotencyKey: reserveKey, RequestJSON: payload, Steps: []CaseMutationStep{{To: CaseDeploymentUnverified, Event: TransitionEvent{ID: stableID("event", reserveKey), EventType: "deployment_verification_reserved", ActorType: "user", ActorID: cmd.ActorID, PayloadJSON: payload}}, {To: CaseDeploymentUnverified, AuditOnly: true, Event: TransitionEvent{ID: stableID("event", reserveKey+":start"), EventType: "deployment_verification_started", ActorType: "studio", ActorID: "orchestrator", PayloadJSON: payload}}}})

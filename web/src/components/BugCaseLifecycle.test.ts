@@ -91,7 +91,7 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.find('[role="dialog"]').text()).not.toContain('部署已确认')
   })
 
-  it('submits the displayed version source and optional per-repository observations', async () => {
+  it('submits manual proof without a caller-controlled version source', async () => {
     const snapshot = detail('waiting_deployment')
     snapshot.case.current_attempt_id = 'fix-1'
     snapshot.code_changes = [
@@ -106,8 +106,20 @@ describe('BugCaseLifecycle', () => {
     await wrapper.find('[data-confirm]').trigger('click')
 
     expect(wrapper.emitted('primary')?.[0]).toEqual([{
-      kind: 'notify_deployed', observedVersion: 'build-42', observedCommits: { api: 'merge-api' }, versionSource: 'manual',
+      kind: 'notify_deployed', observedVersion: 'build-42', observedCommits: { api: 'merge-api' },
     }])
+  })
+
+  it('starts automatic HTTP verification without manual proof fields', async () => {
+    const snapshot = detail('waiting_deployment')
+    snapshot.deployment_verification = { provider: 'http', available: true, hint: 'HTTP 版本接口自动验证 · /git/commit' }
+    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+    await wrapper.find('.primary-action').trigger('click')
+    expect(wrapper.find('#observed-version').exists()).toBe(false)
+    expect(wrapper.find('[role="dialog"]').text()).toContain('HTTP 版本接口自动验证')
+    expect(wrapper.find<HTMLButtonElement>('[data-confirm]').element.disabled).toBe(false)
+    await wrapper.find('[data-confirm]').trigger('click')
+    expect(wrapper.emitted('primary')?.[0]).toEqual([{ kind: 'notify_deployed' }])
   })
 
   it('previews only the current fix attempt deployment scope in a later cycle', async () => {

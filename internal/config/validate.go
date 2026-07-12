@@ -5,6 +5,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -192,6 +193,16 @@ func validateDeploymentVerification(env Environment, repoNames map[string]bool) 
 		}
 		if !strings.HasPrefix(strings.TrimSpace(cfg.HTTP.JSONPointer), "/") {
 			return fmt.Errorf("http.json_pointer must be an RFC 6901 pointer starting with '/'")
+		}
+		parsedURL, err := url.Parse(strings.TrimSpace(cfg.HTTP.URL))
+		if err != nil || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+			return fmt.Errorf("http.url must be an absolute HTTP URL")
+		}
+		if parsedURL.User != nil {
+			return fmt.Errorf("http.url must not contain credentials")
+		}
+		if parsedURL.RawQuery != "" {
+			return fmt.Errorf("http.url must not contain a query")
 		}
 	case DeploymentVerificationProviderK8s:
 		if !cfg.HTTP.IsZero() {

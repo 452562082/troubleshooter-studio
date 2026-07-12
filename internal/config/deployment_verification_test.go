@@ -69,15 +69,17 @@ func TestDeploymentVerificationK8sRoundTrip(t *testing.T) {
 
 func TestDeploymentVerificationValidation(t *testing.T) {
 	tests := map[string]struct{ block, want string }{
-		"mixed blocks":     {`    deployment_verification: {provider: http, http: {url: https://x/version, json_pointer: /commit}, k8s: {cluster: c, namespace: n, deployments_by_repo: {admin-web: d}, commit_annotation: commit}}`, "must not include k8s"},
-		"http url":         {`    deployment_verification: {provider: http, http: {json_pointer: /commit}}`, "http.url required"},
-		"http pointer":     {`    deployment_verification: {provider: http, http: {url: https://x/version}}`, "http.json_pointer required"},
-		"k8s cluster":      {`    deployment_verification: {provider: k8s, k8s: {namespace: n, deployments_by_repo: {admin-web: d}, commit_annotation: commit}}`, "k8s.cluster required"},
-		"k8s namespace":    {`    deployment_verification: {provider: k8s, k8s: {cluster: c, deployments_by_repo: {admin-web: d}, commit_annotation: commit}}`, "k8s.namespace required"},
-		"k8s map":          {`    deployment_verification: {provider: k8s, k8s: {cluster: c, namespace: n, commit_annotation: commit}}`, "deployments_by_repo required"},
-		"unknown repo":     {`    deployment_verification: {provider: k8s, k8s: {cluster: c, namespace: n, deployments_by_repo: {ghost: d}, commit_annotation: commit}}`, "unknown repo"},
-		"missing selector": {`    deployment_verification: {provider: k8s, k8s: {cluster: c, namespace: n, deployments_by_repo: {admin-web: d}}}`, "commit_annotation or image_label required"},
-		"provider":         {`    deployment_verification: {provider: magic}`, "invalid"},
+		"mixed blocks":      {`    deployment_verification: {provider: http, http: {url: https://x/version, json_pointer: /commit}, k8s: {cluster: c, namespace: n, deployments_by_repo: {admin-web: d}, commit_annotation: commit}}`, "must not include k8s"},
+		"http url":          {`    deployment_verification: {provider: http, http: {json_pointer: /commit}}`, "http.url required"},
+		"http pointer":      {`    deployment_verification: {provider: http, http: {url: https://x/version}}`, "http.json_pointer required"},
+		"http credentials":  {`    deployment_verification: {provider: http, http: {url: "https://user:secret@x/version", json_pointer: /commit}}`, "must not contain credentials"},
+		"http secret query": {`    deployment_verification: {provider: http, http: {url: "https://x/version?token=secret", json_pointer: /commit}}`, "must not contain a query"},
+		"k8s cluster":       {`    deployment_verification: {provider: k8s, k8s: {namespace: n, deployments_by_repo: {admin-web: d}, commit_annotation: commit}}`, "k8s.cluster required"},
+		"k8s namespace":     {`    deployment_verification: {provider: k8s, k8s: {cluster: c, deployments_by_repo: {admin-web: d}, commit_annotation: commit}}`, "k8s.namespace required"},
+		"k8s map":           {`    deployment_verification: {provider: k8s, k8s: {cluster: c, namespace: n, commit_annotation: commit}}`, "deployments_by_repo required"},
+		"unknown repo":      {`    deployment_verification: {provider: k8s, k8s: {cluster: c, namespace: n, deployments_by_repo: {ghost: d}, commit_annotation: commit}}`, "unknown repo"},
+		"missing selector":  {`    deployment_verification: {provider: k8s, k8s: {cluster: c, namespace: n, deployments_by_repo: {admin-web: d}}}`, "commit_annotation or image_label required"},
+		"provider":          {`    deployment_verification: {provider: magic}`, "invalid"},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -215,6 +216,240 @@ func TestRegressionRecoveryAppliesStillReproducesIntentWithoutRerunningValidatio
 	next, err := store.GetAttempt(context.Background(), got.CurrentAttemptID)
 	if err != nil || next.Phase != PhaseInvestigation || next.ParentAttemptID != attempt.ID {
 		t.Fatalf("next=%+v err=%v", next, err)
+	}
+}
+
+func TestRegressionStillReproducesCompletionExactReplaySurvivesNextCycle(t *testing.T) {
+	store, incident, _, _ := prepareRegressionCase(t, 1)
+	runner := &recordingPhaseRunner{}
+	newOrchestrator := func() *CaseOrchestrator {
+		o := NewCaseOrchestrator(store, runner, nil, nil)
+		o.SetRecoveryContextResolver(RecoveryContextResolverFunc(func(_ context.Context, incident IncidentCase, attempt PhaseAttempt) (Bug, BotRef, error) {
+			return Bug{ID: incident.BugID}, BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget, Path: "/workspace"}, nil
+		}))
+		return o
+	}
+	o := newOrchestrator()
+	attempt, err := o.StartRegression(context.Background(), incident.ID, incident.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordRegressionArtifact(t, store, attempt, "request-replay", time.Now().UTC().Add(time.Second))
+	current, _ := store.GetCase(context.Background(), incident.ID)
+	command := CompleteAttemptCommand{CaseID: current.ID, AttemptID: attempt.ID, ExpectedVersion: current.Version, IdempotencyKey: "regression-still-exact", ActorID: "validator", Outcome: PhaseOutcomeStillReproduces, OutputJSON: regressionOutput(t, attempt, "still_reproduces", "timeout remains")}
+	completed, err := o.CompleteAttempt(context.Background(), command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := newOrchestrator().CompleteAttempt(context.Background(), command)
+	if err != nil || replayed != completed {
+		t.Fatalf("replayed=%+v completed=%+v err=%v", replayed, completed, err)
+	}
+	changed := command
+	changed.OutputJSON = regressionOutput(t, attempt, "still_reproduces", "different failure")
+	if _, err := newOrchestrator().CompleteAttempt(context.Background(), changed); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("changed replay err=%v", err)
+	}
+	attempts, _ := store.ListAttempts(context.Background(), AttemptFilter{CaseID: incident.ID})
+	next := 0
+	for _, candidate := range attempts {
+		if candidate.Phase == PhaseInvestigation && candidate.CycleNumber == 2 {
+			next++
+		}
+	}
+	if next != 1 || runner.startCount() != 2 {
+		t.Fatalf("next investigations=%d starts=%d attempts=%+v", next, runner.startCount(), attempts)
+	}
+}
+
+func TestRegressionStillReproducesConcurrentCompletionCreatesOneNextAttempt(t *testing.T) {
+	store, incident, _, _ := prepareRegressionCase(t, 1)
+	runner := &recordingPhaseRunner{}
+	newOrchestrator := func() *CaseOrchestrator {
+		o := NewCaseOrchestrator(store, runner, nil, nil)
+		o.SetRecoveryContextResolver(RecoveryContextResolverFunc(func(_ context.Context, incident IncidentCase, attempt PhaseAttempt) (Bug, BotRef, error) {
+			return Bug{ID: incident.BugID}, BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget, Path: "/workspace"}, nil
+		}))
+		return o
+	}
+	attempt, err := newOrchestrator().StartRegression(context.Background(), incident.ID, incident.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordRegressionArtifact(t, store, attempt, "request-concurrent", time.Now().UTC().Add(time.Second))
+	current, _ := store.GetCase(context.Background(), incident.ID)
+	command := CompleteAttemptCommand{CaseID: current.ID, AttemptID: attempt.ID, ExpectedVersion: current.Version, IdempotencyKey: "regression-still-concurrent", ActorID: "validator", Outcome: PhaseOutcomeStillReproduces, OutputJSON: regressionOutput(t, attempt, "still_reproduces", "timeout remains")}
+	const workers = 8
+	errs := make(chan error, workers)
+	for range workers {
+		go func() { _, err := newOrchestrator().CompleteAttempt(context.Background(), command); errs <- err }()
+	}
+	for range workers {
+		if err := <-errs; err != nil {
+			t.Errorf("completion err=%v", err)
+		}
+	}
+	attempts, _ := store.ListAttempts(context.Background(), AttemptFilter{CaseID: incident.ID})
+	next := 0
+	for _, candidate := range attempts {
+		if candidate.Phase == PhaseInvestigation && candidate.CycleNumber == 2 {
+			next++
+		}
+	}
+	if next != 1 {
+		t.Fatalf("next investigations=%d attempts=%+v", next, attempts)
+	}
+}
+
+func TestRegressionEvidenceContinuationExactReplayKeepsImmutableParent(t *testing.T) {
+	store, incident, _, _ := prepareRegressionCase(t, 1)
+	runner := &recordingPhaseRunner{}
+	o := NewCaseOrchestrator(store, runner, nil, nil)
+	original, err := o.StartRegression(context.Background(), incident.ID, incident.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, _ := store.GetCase(context.Background(), incident.ID)
+	waiting, err := o.CompleteAttempt(context.Background(), CompleteAttemptCommand{CaseID: current.ID, AttemptID: original.ID, ExpectedVersion: current.Version, IdempotencyKey: "regression-continuation-wait", ActorID: "validator", Outcome: PhaseOutcomeNeedsEvidence, OutputJSON: regressionOutput(t, original, "insufficient_info", "")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := ContinueWithEvidenceCommand{CaseID: waiting.ID, ExpectedVersion: waiting.Version, IdempotencyKey: "regression-continuation-exact", ActorID: "alice", Phase: PhaseRegression, Bug: Bug{ID: waiting.BugID}, Bot: BotRef{Key: "validator", Target: "codex", Path: "/workspace"}, InputJSON: []byte(`{"account":"fresh"}`)}
+	first, err := o.ContinueWithEvidence(context.Background(), command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := NewCaseOrchestrator(store, runner, nil, nil).ContinueWithEvidence(context.Background(), command)
+	if err != nil || replayed != first {
+		t.Fatalf("replayed=%+v first=%+v err=%v", replayed, first, err)
+	}
+	retry, err := store.GetAttempt(context.Background(), first.CurrentAttemptID)
+	if err != nil || retry.ParentAttemptID != original.ID || retry.ParentAttemptID == retry.ID {
+		t.Fatalf("retry=%+v err=%v", retry, err)
+	}
+	changed := command
+	changed.InputJSON = []byte(`{"account":"different"}`)
+	if _, err := NewCaseOrchestrator(store, runner, nil, nil).ContinueWithEvidence(context.Background(), changed); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("changed replay err=%v", err)
+	}
+	attempts, _ := store.ListAttempts(context.Background(), AttemptFilter{CaseID: incident.ID})
+	regressions := 0
+	for _, candidate := range attempts {
+		if candidate.Phase == PhaseRegression {
+			regressions++
+		}
+	}
+	if regressions != 2 || runner.startCount() != 2 {
+		t.Fatalf("regressions=%d starts=%d", regressions, runner.startCount())
+	}
+}
+
+func TestRegressionEvidenceContinuationConcurrentReplayCreatesOneRetry(t *testing.T) {
+	store, incident, _, _ := prepareRegressionCase(t, 1)
+	runner := &recordingPhaseRunner{}
+	o := NewCaseOrchestrator(store, runner, nil, nil)
+	original, err := o.StartRegression(context.Background(), incident.ID, incident.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, _ := store.GetCase(context.Background(), incident.ID)
+	waiting, err := o.CompleteAttempt(context.Background(), CompleteAttemptCommand{CaseID: current.ID, AttemptID: original.ID, ExpectedVersion: current.Version, IdempotencyKey: "regression-concurrent-wait", ActorID: "validator", Outcome: PhaseOutcomeNeedsEvidence, OutputJSON: regressionOutput(t, original, "insufficient_info", "")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := ContinueWithEvidenceCommand{CaseID: waiting.ID, ExpectedVersion: waiting.Version, IdempotencyKey: "regression-continuation-concurrent", ActorID: "alice", Phase: PhaseRegression, Bug: Bug{ID: waiting.BugID}, Bot: BotRef{Key: "validator", Target: "codex", Path: "/workspace"}, InputJSON: []byte(`{"account":"fresh"}`)}
+	const workers = 8
+	errs := make(chan error, workers)
+	for range workers {
+		go func() {
+			_, err := NewCaseOrchestrator(store, runner, nil, nil).ContinueWithEvidence(context.Background(), command)
+			errs <- err
+		}()
+	}
+	for range workers {
+		if err := <-errs; err != nil {
+			t.Errorf("continuation err=%v", err)
+		}
+	}
+	attempts, _ := store.ListAttempts(context.Background(), AttemptFilter{CaseID: incident.ID})
+	regressions := 0
+	for _, candidate := range attempts {
+		if candidate.Phase == PhaseRegression {
+			regressions++
+			if candidate.ID != original.ID && candidate.ParentAttemptID != original.ID {
+				t.Fatalf("retry parent=%q original=%q", candidate.ParentAttemptID, original.ID)
+			}
+		}
+	}
+	if regressions != 2 || runner.startCount() != 2 {
+		t.Fatalf("regressions=%d starts=%d", regressions, runner.startCount())
+	}
+}
+
+func TestRegressionFreshEvidenceRejectsHistoricalRequestOrTraceIDs(t *testing.T) {
+	for _, field := range []string{"request", "trace"} {
+		t.Run(field, func(t *testing.T) {
+			store, incident, _, _ := prepareRegressionCase(t, 1)
+			now := time.Now().UTC().Add(-time.Minute)
+			history := PhaseAttempt{ID: incident.ID + "-history", CaseID: incident.ID, CycleNumber: 1, Phase: PhaseInvestigation, Status: AttemptStatusSucceeded, AgentTarget: "codex", BotKey: "validator", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`), StartedAt: now, FinishedAt: &now}
+			if err := store.CreateAttempt(context.Background(), history); err != nil {
+				t.Fatal(err)
+			}
+			historicalArtifact := EvidenceArtifact{ID: history.ID + "-artifact", CaseID: incident.ID, AttemptID: history.ID, Kind: "trace", PathOrReference: "/artifacts/history", SHA256: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", CapturedAt: now, Environment: "test", Version: "before", TraceID: "trace-from-investigation", RedactionStatus: RedactionStatusNotRequired}
+			if _, _, err := store.recordEvidenceArtifact(context.Background(), historicalArtifact, nil); err != nil {
+				t.Fatal(err)
+			}
+			o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, nil)
+			attempt, err := o.StartRegression(context.Background(), incident.ID, incident.Version)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var input RegressionValidationInput
+			if json.Unmarshal(attempt.InputJSON, &input) != nil {
+				t.Fatal("input")
+			}
+			artifact := EvidenceArtifact{ID: attempt.ID + "-copied", CaseID: attempt.CaseID, AttemptID: attempt.ID, Kind: "api", PathOrReference: "/artifacts/copied", SHA256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", CapturedAt: attempt.StartedAt.Add(time.Second), Environment: input.TargetEnvironment, Version: input.ObservedDeploymentVersion, RedactionStatus: RedactionStatusNotRequired}
+			if field == "request" {
+				artifact.RequestID = "request-old"
+			} else {
+				artifact.TraceID = "trace-from-investigation"
+			}
+			if _, _, err := store.recordEvidenceArtifact(context.Background(), artifact, nil); err != nil {
+				t.Fatal(err)
+			}
+			current, _ := store.GetCase(context.Background(), incident.ID)
+			cmd := CompleteAttemptCommand{CaseID: current.ID, AttemptID: attempt.ID, ExpectedVersion: current.Version, IdempotencyKey: "regression-reused-" + field, ActorID: "validator", Outcome: PhaseOutcomeFixedVerified, OutputJSON: regressionOutput(t, attempt, "fixed_verified", "")}
+			if _, err := o.CompleteAttempt(context.Background(), cmd); !errors.Is(err, ErrRegressionFreshEvidence) {
+				t.Fatalf("reused %s ID err=%v", field, err)
+			}
+		})
+	}
+}
+
+func TestRegressionFreshEvidenceAllowsSameNewRequestAcrossCurrentArtifacts(t *testing.T) {
+	store, incident, _, _ := prepareRegressionCase(t, 1)
+	o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, nil)
+	attempt, err := o.StartRegression(context.Background(), incident.ID, incident.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var input RegressionValidationInput
+	if json.Unmarshal(attempt.InputJSON, &input) != nil {
+		t.Fatal("input")
+	}
+	for index, digest := range []string{"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"} {
+		artifact := EvidenceArtifact{ID: fmt.Sprintf("%s-new-%d", attempt.ID, index), CaseID: attempt.CaseID, AttemptID: attempt.ID, Kind: fmt.Sprintf("api-%d", index), PathOrReference: fmt.Sprintf("/artifacts/new-%d", index), SHA256: digest, CapturedAt: attempt.StartedAt.Add(time.Second), Environment: input.TargetEnvironment, Version: input.ObservedDeploymentVersion, RequestID: "request-brand-new", RedactionStatus: RedactionStatusNotRequired}
+		if _, _, err := store.recordEvidenceArtifact(context.Background(), artifact, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if fresh, err := o.currentRegressionArtifacts(context.Background(), attempt, input); err != nil || len(fresh) != 2 {
+		t.Fatalf("fresh=%+v err=%v started=%s", fresh, err, attempt.StartedAt)
+	}
+	current, _ := store.GetCase(context.Background(), incident.ID)
+	closed, err := o.CompleteAttempt(context.Background(), CompleteAttemptCommand{CaseID: current.ID, AttemptID: attempt.ID, ExpectedVersion: current.Version, IdempotencyKey: "regression-same-new-id", ActorID: "validator", Outcome: PhaseOutcomeFixedVerified, OutputJSON: regressionOutput(t, attempt, "fixed_verified", "")})
+	if err != nil || closed.Status != CaseFixedVerified {
+		t.Fatalf("closed=%+v err=%v", closed, err)
 	}
 }
 

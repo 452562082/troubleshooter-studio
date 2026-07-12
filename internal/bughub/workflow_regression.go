@@ -71,7 +71,11 @@ func (o *CaseOrchestrator) StartRegression(ctx context.Context, caseID string, e
 	if err != nil {
 		return attempt, err
 	}
-	return attempt, nil
+	persisted, err := o.store.GetAttempt(ctx, attempt.ID)
+	if err != nil {
+		return PhaseAttempt{}, err
+	}
+	return persisted, nil
 }
 
 func (o *CaseOrchestrator) currentRegressionAttempt(ctx context.Context, incident IncidentCase) (PhaseAttempt, bool) {
@@ -322,10 +326,28 @@ func (o *CaseOrchestrator) currentRegressionArtifacts(ctx context.Context, attem
 	if err != nil {
 		return nil, err
 	}
+	historicalIDs := make(map[string]struct{})
+	for _, artifact := range all {
+		if artifact.AttemptID == attempt.ID {
+			continue
+		}
+		for _, identifier := range []string{artifact.RequestID, artifact.TraceID} {
+			if identifier = strings.TrimSpace(identifier); identifier != "" {
+				historicalIDs[identifier] = struct{}{}
+			}
+		}
+	}
 	current := make([]EvidenceArtifact, 0)
 	for _, artifact := range all {
 		if artifact.AttemptID != attempt.ID || !artifact.CapturedAt.After(attempt.StartedAt) || artifact.Environment != input.TargetEnvironment || artifact.Version != input.ObservedDeploymentVersion || (strings.TrimSpace(artifact.RequestID) == "" && strings.TrimSpace(artifact.TraceID) == "") {
 			continue
+		}
+		for _, identifier := range []string{artifact.RequestID, artifact.TraceID} {
+			if identifier = strings.TrimSpace(identifier); identifier != "" {
+				if _, reused := historicalIDs[identifier]; reused {
+					return nil, ErrRegressionFreshEvidence
+				}
+			}
 		}
 		current = append(current, artifact)
 	}

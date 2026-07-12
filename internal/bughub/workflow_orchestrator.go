@@ -1,6 +1,7 @@
 package bughub
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -488,9 +489,21 @@ func (o *CaseOrchestrator) ContinueWithEvidence(ctx context.Context, cmd Continu
 	if err := validateCommand(cmd.CaseID, cmd.ExpectedVersion, cmd.IdempotencyKey, cmd.ActorID); err != nil {
 		return IncidentCase{}, err
 	}
+	if cmd.Phase == PhaseRegression {
+		release := workflowCommandLocks.acquire("continue-regression:" + cmd.IdempotencyKey)
+		defer release()
+		if replayed, found, replayErr := o.replayRegressionContinuation(ctx, cmd); found || replayErr != nil {
+			return replayed, replayErr
+		}
+	}
 	incident, err := o.loadForCommand(ctx, cmd.CaseID, cmd.ExpectedVersion, cmd.IdempotencyKey)
 	if err != nil {
 		return IncidentCase{}, err
+	}
+	if cmd.Phase == PhaseRegression {
+		if replayed, found, replayErr := o.replayRegressionContinuation(ctx, cmd); found || replayErr != nil {
+			return replayed, replayErr
+		}
 	}
 	if incident.Status != CaseWaitingEvidence && incident.Status != CaseNotReproduced && incident.Status != CaseFixFailed && incident.Status != CaseDeploymentUnverified && incident.Status != CaseMergeConflict {
 		return IncidentCase{}, ErrApprovalNotReady
@@ -542,6 +555,50 @@ func (o *CaseOrchestrator) ContinueWithEvidence(ctx context.Context, cmd Continu
 	}
 	attempt := newAttempt(incident, phase, mode, cmd.IdempotencyKey, cmd.Bot, input, incident.CurrentAttemptID)
 	return o.beginPhase(ctx, incident, to, attempt, cmd.Bug, cmd.Bot, cmd.IdempotencyKey, cmd.ActorID, "evidence_continued")
+}
+
+func (o *CaseOrchestrator) replayRegressionContinuation(ctx context.Context, cmd ContinueWithEvidenceCommand) (IncidentCase, bool, error) {
+	replay, found, err := o.store.GetCommittedCaseMutation(ctx, cmd.IdempotencyKey)
+	if err != nil || !found {
+		return IncidentCase{}, found, err
+	}
+	validEvent := replay.Event.EventType == "evidence_continued" &&
+		replay.Event.FromStatus == CaseWaitingEvidence && replay.Event.ActorID == cmd.ActorID &&
+		replay.Event.CaseID == cmd.CaseID && replay.ResultCase.Version >= 2 &&
+		cmd.ExpectedVersion == replay.ResultCase.Version-1 && cmd.Phase == PhaseRegression
+	if !validEvent {
+		return IncidentCase{}, true, ErrIdempotencyConflict
+	}
+	retry, err := o.store.GetAttempt(ctx, replay.ResultCase.CurrentAttemptID)
+	if err != nil || retry.Phase != PhaseRegression || retry.Mode != AttemptRegression || retry.CaseID != cmd.CaseID || retry.ParentAttemptID == "" || retry.ParentAttemptID == retry.ID || retry.BotKey != cmd.Bot.Key || retry.AgentTarget != cmd.Bot.Target {
+		return IncidentCase{}, true, ErrIdempotencyConflict
+	}
+	parent, err := o.store.GetAttempt(ctx, retry.ParentAttemptID)
+	if err != nil || parent.Phase != PhaseRegression || parent.Mode != AttemptRegression || parent.CaseID != cmd.CaseID || parent.CycleNumber != retry.CycleNumber {
+		return IncidentCase{}, true, ErrIdempotencyConflict
+	}
+	var regression RegressionValidationInput
+	if json.Unmarshal(parent.InputJSON, &regression) != nil {
+		return IncidentCase{}, true, ErrIdempotencyConflict
+	}
+	supplement := CloneRawMessage(cmd.InputJSON)
+	if len(supplement) == 0 {
+		supplement = []byte(`{}`)
+	}
+	if validateJSONObject("regression supplemental evidence", supplement, true) != nil || containsSensitiveData(supplement) {
+		return IncidentCase{}, true, ErrIdempotencyConflict
+	}
+	regression.SupplementalEvidence = supplement
+	if !bytes.Equal(mustJSON(regression), retry.InputJSON) {
+		return IncidentCase{}, true, ErrIdempotencyConflict
+	}
+	var payload struct {
+		AttemptID string `json:"attempt_id"`
+	}
+	if json.Unmarshal(replay.Event.PayloadJSON, &payload) != nil || payload.AttemptID != retry.ID {
+		return IncidentCase{}, true, ErrIdempotencyConflict
+	}
+	return replay.ResultCase.Clone(), true, nil
 }
 
 func (o *CaseOrchestrator) ApproveFix(ctx context.Context, cmd ApproveFixCommand) (IncidentCase, error) {
@@ -1269,9 +1326,17 @@ func (o *CaseOrchestrator) CompleteAttempt(ctx context.Context, cmd CompleteAtte
 	if err := validateCompletionCommand(cmd); err != nil {
 		return IncidentCase{}, err
 	}
+	release := workflowCommandLocks.acquire("complete-attempt:" + cmd.IdempotencyKey)
+	defer release()
+	if replayed, found, replayErr := o.replayRegressionCompletion(ctx, cmd); found || replayErr != nil {
+		return replayed, replayErr
+	}
 	incident, err := o.loadForCommand(ctx, cmd.CaseID, cmd.ExpectedVersion, cmd.IdempotencyKey)
 	if err != nil {
 		return IncidentCase{}, err
+	}
+	if replayed, found, replayErr := o.replayRegressionCompletion(ctx, cmd); found || replayErr != nil {
+		return replayed, replayErr
 	}
 	if incident.CurrentAttemptID != cmd.AttemptID {
 		return IncidentCase{}, ErrAttemptNotCurrent
@@ -1299,6 +1364,35 @@ func (o *CaseOrchestrator) CompleteAttempt(ctx context.Context, cmd CompleteAtte
 		attempt.Status = AttemptStatusSucceeded
 	}
 	return o.applyOutcome(ctx, incident, attempt, cmd, expectedAttemptOutput)
+}
+
+func (o *CaseOrchestrator) replayRegressionCompletion(ctx context.Context, cmd CompleteAttemptCommand) (IncidentCase, bool, error) {
+	replay, found, err := o.store.GetCommittedCaseMutation(ctx, cmd.IdempotencyKey)
+	if err != nil || !found {
+		return IncidentCase{}, found, err
+	}
+	attempt, err := o.store.GetAttempt(ctx, cmd.AttemptID)
+	if err != nil {
+		return IncidentCase{}, true, ErrIdempotencyConflict
+	}
+	terminal := attempt.Status == AttemptStatusSucceeded || attempt.Status == AttemptStatusFailed
+	validIdentity := attempt.Phase == PhaseRegression && attempt.CaseID == cmd.CaseID && terminal && attempt.FinishedAt != nil &&
+		replay.Event.CaseID == cmd.CaseID && replay.Event.FromStatus == CaseRegressionValidating &&
+		replay.ResultCase.Version >= 2 && cmd.ExpectedVersion == replay.ResultCase.Version-1 &&
+		bytes.Equal(replay.Event.PayloadJSON, attempt.OutputJSON) && bytes.Equal(cmd.OutputJSON, attempt.OutputJSON)
+	if !validIdentity {
+		return IncidentCase{}, true, ErrIdempotencyConflict
+	}
+	outcomes := map[string]PhaseOutcome{"regression_fixed": PhaseOutcomeFixedVerified, "regression_failed": PhaseOutcomeStillReproduces, "evidence_required": PhaseOutcomeNeedsEvidence}
+	outcome, ok := outcomes[replay.Event.EventType]
+	if !ok {
+		return IncidentCase{}, true, ErrIdempotencyConflict
+	}
+	persisted := CompleteAttemptCommand{CaseID: attempt.CaseID, AttemptID: attempt.ID, ExpectedVersion: replay.ResultCase.Version - 1, IdempotencyKey: replay.Event.IdempotencyKey, ActorID: replay.Event.ActorID, Outcome: outcome, OutputJSON: CloneRawMessage(attempt.OutputJSON), ErrorCode: attempt.ErrorCode, ErrorMessage: attempt.ErrorMessage, Usage: attempt.Usage}
+	if !equivalentCompletionCommands(persisted, cmd) {
+		return IncidentCase{}, true, ErrIdempotencyConflict
+	}
+	return replay.ResultCase.Clone(), true, nil
 }
 
 func (o *CaseOrchestrator) applyOutcome(ctx context.Context, incident IncidentCase, attempt PhaseAttempt, cmd CompleteAttemptCommand, expectedAttemptOutput json.RawMessage) (IncidentCase, error) {

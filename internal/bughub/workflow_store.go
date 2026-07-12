@@ -1771,6 +1771,55 @@ func (s *CaseStore) GetEventByIdempotencyKey(ctx context.Context, key string) (T
 	return event.Clone(), true, nil
 }
 
+// CommittedCaseMutation is the immutable identity and result snapshot stored
+// with the first event of one compound Case mutation.
+type CommittedCaseMutation struct {
+	Event       TransitionEvent
+	Fingerprint string
+	ResultCase  IncidentCase
+}
+
+// GetCommittedCaseMutation returns the durable replay identity without reading
+// the mutable current Case snapshot.
+func (s *CaseStore) GetCommittedCaseMutation(ctx context.Context, key string) (CommittedCaseMutation, bool, error) {
+	var replay CommittedCaseMutation
+	var payload, created, resultJSON string
+	err := s.db.QueryRowContext(ctx, `SELECT id,case_id,from_status,to_status,event_type,actor_type,actor_id,idempotency_key,payload_json,created_at,request_fingerprint,result_case_json FROM transition_events WHERE idempotency_key=?`, key).Scan(&replay.Event.ID, &replay.Event.CaseID, &replay.Event.FromStatus, &replay.Event.ToStatus, &replay.Event.EventType, &replay.Event.ActorType, &replay.Event.ActorID, &replay.Event.IdempotencyKey, &payload, &created, &replay.Fingerprint, &resultJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CommittedCaseMutation{}, false, nil
+	}
+	if err != nil {
+		return CommittedCaseMutation{}, false, err
+	}
+	replay.Event.PayloadJSON = []byte(payload)
+	replay.Event.CreatedAt, err = parseStoreTime(created)
+	if err != nil {
+		return CommittedCaseMutation{}, false, err
+	}
+	fingerprintBytes, decodeErr := hex.DecodeString(replay.Fingerprint)
+	if decodeErr != nil || len(fingerprintBytes) != sha256.Size {
+		return CommittedCaseMutation{}, false, errors.New("committed Case mutation fingerprint is invalid")
+	}
+	if err := json.Unmarshal([]byte(resultJSON), &replay.ResultCase); err != nil {
+		return CommittedCaseMutation{}, false, fmt.Errorf("decode committed Case mutation result: %w", err)
+	}
+	if replay.ResultCase.ID != replay.Event.CaseID {
+		return CommittedCaseMutation{}, false, errors.New("committed Case mutation result belongs to a different Case")
+	}
+	if err := replay.ResultCase.Validate(); err != nil {
+		return CommittedCaseMutation{}, false, err
+	}
+	if replay.Event.FromStatus == replay.Event.ToStatus {
+		err = validateAuditEvent(replay.Event)
+	} else {
+		err = replay.Event.Validate()
+	}
+	if err != nil {
+		return CommittedCaseMutation{}, false, err
+	}
+	return replay, true, nil
+}
+
 // latestDeploymentReservationEvent reads the reservation envelope without
 // validating actor identity. Recovery must be able to detect and audit a
 // legacy/corrupt empty actor instead of failing before the identity gate.

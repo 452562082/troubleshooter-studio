@@ -8,7 +8,23 @@ import (
 	"time"
 )
 
-var ErrDeploymentVerifierUnavailable = errors.New("deployment verifier is unavailable")
+var (
+	ErrDeploymentVerifierUnavailable        = errors.New("deployment verifier is unavailable")
+	ErrDeploymentReservationIdentityInvalid = errors.New("deployment reservation caller identity is invalid")
+)
+
+func validateDeploymentReservationIdentity(reservation DeploymentReservation, expectedReservationKey, callerKey, actorID string) error {
+	if strings.TrimSpace(reservation.ReservationID) == "" || strings.TrimSpace(reservation.ReservationKey) == "" || reservation.ReservationKey != expectedReservationKey {
+		return fmt.Errorf("%w: reservation key is missing or inconsistent", ErrDeploymentReservationIdentityInvalid)
+	}
+	if strings.TrimSpace(reservation.CallerIdempotencyKey) == "" || strings.TrimSpace(callerKey) == "" || reservation.CallerIdempotencyKey != callerKey {
+		return fmt.Errorf("%w: caller idempotency key is missing or inconsistent", ErrDeploymentReservationIdentityInvalid)
+	}
+	if strings.TrimSpace(reservation.ActorID) == "" || strings.TrimSpace(actorID) == "" || reservation.ActorID != actorID {
+		return fmt.Errorf("%w: actor is missing or inconsistent", ErrDeploymentReservationIdentityInvalid)
+	}
+	return nil
+}
 
 // CommitDescendantVerifier must return true only after independently proving
 // expected is an ancestor of observed in repo. User input alone is never proof.

@@ -1039,8 +1039,8 @@ func (o *CaseOrchestrator) NotifyDeployed(ctx context.Context, cmd NotifyDeploye
 		if err := json.Unmarshal(reservationEvent.PayloadJSON, &reservation); err != nil {
 			return IncidentCase{}, err
 		}
-		if reservation.CallerIdempotencyKey == "" || reservation.ActorID == "" || reservation.CallerIdempotencyKey != cmd.IdempotencyKey || reservation.ActorID != cmd.ActorID {
-			return IncidentCase{}, ErrIdempotencyConflict
+		if identityErr := validateDeploymentReservationIdentity(reservation, reserveKey, cmd.IdempotencyKey, cmd.ActorID); identityErr != nil {
+			return IncidentCase{}, errors.Join(ErrIdempotencyConflict, identityErr)
 		}
 		supplied := reservation.VerifierInput
 		supplied.ObservedVersion = cmd.ObservedVersion

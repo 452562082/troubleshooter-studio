@@ -160,6 +160,7 @@ func (o *CaseOrchestrator) recoverDeploymentVerification(ctx context.Context, in
 	}
 	var reservation DeploymentReservation
 	found := false
+	reservationEventKey := ""
 	for i := len(events) - 1; i >= 0; i-- {
 		if events[i].EventType != "deployment_verification_reserved" {
 			continue
@@ -168,14 +169,21 @@ func (o *CaseOrchestrator) recoverDeploymentVerification(ctx context.Context, in
 		if getErr != nil {
 			return getErr
 		}
-		if !ok || json.Unmarshal(typed.PayloadJSON, &reservation) != nil {
+		if !ok {
 			continue
+		}
+		reservationEventKey = typed.IdempotencyKey
+		if decodeErr := json.Unmarshal(typed.PayloadJSON, &reservation); decodeErr != nil {
+			return o.recordInvalidDeploymentReservation(ctx, incident, reservationEventKey, fmt.Errorf("decode deployment reservation: %w", decodeErr))
 		}
 		found = true
 		break
 	}
 	if !found {
 		return nil
+	}
+	if identityErr := validateDeploymentReservationIdentity(reservation, reservationEventKey, reservation.CallerIdempotencyKey, reservation.ActorID); identityErr != nil {
+		return o.recordInvalidDeploymentReservation(ctx, incident, reservationEventKey, identityErr)
 	}
 	if _, resultFound, resultErr := o.store.GetEventByIdempotencyKey(ctx, reservation.ReservationKey+":result"); resultErr != nil || resultFound {
 		return resultErr
@@ -186,6 +194,24 @@ func (o *CaseOrchestrator) recoverDeploymentVerification(ctx context.Context, in
 	observation, verifyErr := o.deployment.Verify(ctx, reservation.VerifierInput)
 	_, recordErr := o.recordDeploymentResult(incident, reservation, observation, verifyErr)
 	return recordErr
+}
+
+func (o *CaseOrchestrator) recordInvalidDeploymentReservation(ctx context.Context, incident IncidentCase, reservationKey string, cause error) error {
+	if strings.TrimSpace(reservationKey) == "" {
+		reservationKey = "deployment-reservation:" + incident.ID
+	}
+	auditKey := reservationKey + ":identity-invalid"
+	payload := mustJSON(map[string]string{"error": cause.Error()})
+	if existing, found, err := o.store.GetEventByIdempotencyKey(ctx, auditKey); err != nil {
+		return err
+	} else if found {
+		if existing.EventType == "deployment_reservation_invalid" && string(existing.PayloadJSON) == string(payload) {
+			return nil
+		}
+		return ErrIdempotencyConflict
+	}
+	_, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: auditKey, RequestJSON: payload, Steps: []CaseMutationStep{{To: CaseDeploymentUnverified, AuditOnly: true, Event: TransitionEvent{ID: stableID("event", auditKey), EventType: "deployment_reservation_invalid", ActorType: "studio", ActorID: "recovery", PayloadJSON: payload}}}})
+	return err
 }
 
 func (o *CaseOrchestrator) recoverMergeWithoutAttempt(ctx context.Context, incident IncidentCase) error {

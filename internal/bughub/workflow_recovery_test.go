@@ -456,7 +456,7 @@ func TestRecoverDeploymentUsesPersistedReservationContextAndDoesNotRerunResult(t
 	reserveKey := fmt.Sprintf("deployment-reserve:%s:v%d", incident.ID, incident.Version)
 	request := DeploymentVerificationRequest{CaseID: incident.ID, Environment: incident.Environment, ExpectedCommits: map[string]string{"repo": "merge-1"}, ObservedVersion: "persisted-proof", ObservedCommits: map[string]string{"repo": "merge-1"}}
 	regressionInput := []byte(`{"scenario":"persisted-regression"}`)
-	reservation := DeploymentReservation{ReservationID: "reservation", ReservationKey: reserveKey, OriginalExpectedVersion: incident.Version, CycleNumber: 1, Environment: incident.Environment, ExpectedCommits: request.ExpectedCommits, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "validator", Target: "codex"}, VerifierInput: request, RegressionInputJSON: regressionInput}
+	reservation := DeploymentReservation{ReservationID: "reservation", ReservationKey: reserveKey, CallerIdempotencyKey: "notify-deployed", ActorID: "alice", OriginalExpectedVersion: incident.Version, CycleNumber: 1, Environment: incident.Environment, ExpectedCommits: request.ExpectedCommits, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "validator", Target: "codex"}, VerifierInput: request, RegressionInputJSON: regressionInput}
 	payload := mustJSON(reservation)
 	reserved, err := store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: reserveKey, RequestJSON: payload, Steps: []CaseMutationStep{{To: CaseDeploymentUnverified, Event: TransitionEvent{ID: "reserve-event", EventType: "deployment_verification_reserved", ActorType: "user", ActorID: "alice", PayloadJSON: payload}}}})
 	if err != nil {
@@ -479,6 +479,73 @@ func TestRecoverDeploymentUsesPersistedReservationContextAndDoesNotRerunResult(t
 	attempt, attemptErr := store.GetAttempt(ctx, got.CurrentAttemptID)
 	if attemptErr != nil || string(attempt.InputJSON) != string(regressionInput) {
 		t.Fatalf("attempt=%+v err=%v", attempt, attemptErr)
+	}
+}
+
+func TestRecoverDeploymentRejectsReservationWithoutDurableCallerIdentity(t *testing.T) {
+	for name, mutate := range map[string]func(*DeploymentReservation){
+		"missing caller key": func(r *DeploymentReservation) { r.CallerIdempotencyKey = "" },
+		"missing actor":      func(r *DeploymentReservation) { r.ActorID = "" },
+		"missing id":         func(r *DeploymentReservation) { r.ReservationID = "" },
+		"malformed key":      func(r *DeploymentReservation) { r.ReservationKey = "wrong-reservation" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			store := newOrchestratorStore(t)
+			incident := createWorkflowCase(t, store, "recover-invalid-"+strings.ReplaceAll(name, " ", "-"), CaseWaitingDeployment)
+			incident = addPushedWorkflowChange(t, store, incident)
+			reserveKey := fmt.Sprintf("deployment-reserve:%s:v%d", incident.ID, incident.Version)
+			request := DeploymentVerificationRequest{CaseID: incident.ID, Environment: incident.Environment, Source: "manual", ExpectedCommits: map[string]string{"repo": "merge-1"}, ObservedVersion: "build", ObservedCommits: map[string]string{"repo": "merge-1"}}
+			reservation := DeploymentReservation{ReservationID: "reservation", ReservationKey: reserveKey, CallerIdempotencyKey: "notify", ActorID: "alice", OriginalExpectedVersion: incident.Version, CycleNumber: incident.CycleNumber, Environment: incident.Environment, ExpectedCommits: request.ExpectedCommits, VerifierInput: request}
+			mutate(&reservation)
+			payload := mustJSON(reservation)
+			_, err := store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: reserveKey, RequestJSON: payload, Steps: []CaseMutationStep{{To: CaseDeploymentUnverified, Event: TransitionEvent{ID: stableID("event", reserveKey), EventType: "deployment_verification_reserved", ActorType: "user", ActorID: "alice", PayloadJSON: payload}}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			verifier := &recordingDeploymentVerifier{result: DeploymentObservation{VerificationSource: "manual", Result: DeploymentResultMismatched}}
+			runner := &recordingPhaseRunner{}
+			orchestrator := NewCaseOrchestrator(store, runner, nil, verifier)
+			if err := orchestrator.RecoverInterrupted(ctx); err != nil {
+				t.Fatal(err)
+			}
+			current, err := store.GetCase(ctx, incident.ID)
+			if err != nil || current.Status != CaseDeploymentUnverified || len(verifier.requests) != 0 || runner.startCount() != 0 {
+				t.Fatalf("case=%+v verifies=%d starts=%d err=%v", current, len(verifier.requests), runner.startCount(), err)
+			}
+			events, err := store.ListEvents(ctx, incident.ID)
+			invalid := 0
+			for _, event := range events {
+				if event.EventType == "deployment_reservation_invalid" && event.ActorType == "studio" {
+					invalid++
+				}
+			}
+			if err != nil || invalid != 1 {
+				t.Fatalf("events=%+v invalid=%d err=%v", events, invalid, err)
+			}
+			restarted := NewCaseOrchestrator(store, runner, nil, verifier)
+			if err := restarted.RecoverInterrupted(ctx); err != nil {
+				t.Fatal(err)
+			}
+			events, _ = store.ListEvents(ctx, incident.ID)
+			invalid = 0
+			for _, event := range events {
+				if event.EventType == "deployment_reservation_invalid" {
+					invalid++
+				}
+			}
+			if invalid != 1 || len(verifier.requests) != 0 || runner.startCount() != 0 {
+				t.Fatalf("recovery replay events=%d verifies=%d starts=%d", invalid, len(verifier.requests), runner.startCount())
+			}
+			reopened, err := orchestrator.ContinueWithEvidence(ctx, ContinueWithEvidenceCommand{CaseID: current.ID, ExpectedVersion: current.Version, IdempotencyKey: "replace-invalid-reservation", ActorID: "alice", InputJSON: []byte(`{"proof":"retry"}`)})
+			if err != nil || reopened.Status != CaseWaitingDeployment {
+				t.Fatalf("reopen case=%+v err=%v", reopened, err)
+			}
+			retried, err := orchestrator.NotifyDeployed(ctx, NotifyDeployedCommand{CaseID: reopened.ID, ExpectedVersion: reopened.Version, IdempotencyKey: "fresh-notification", ActorID: "alice", ObservedVersion: "fresh", ObservedCommits: map[string]string{"repo": "merge-1"}})
+			if err != nil || retried.Status != CaseDeploymentUnverified || len(verifier.requests) != 1 {
+				t.Fatalf("retry case=%+v verifies=%d err=%v", retried, len(verifier.requests), err)
+			}
+		})
 	}
 }
 

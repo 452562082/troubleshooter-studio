@@ -424,7 +424,7 @@ func TestRecoverInterruptedCompletionIntentPreservesFixCodeChanges(t *testing.T)
 	store := newOrchestratorStore(t)
 	incident, attempt := createRunningPhase(t, store, "recover-fix-intent", CaseWaitingFixApproval, CaseFixing, PhaseFix, "", []byte(`{"root_cause":"race"}`))
 	change := CodeChange{ID: "change-fix-intent", CaseID: incident.ID, AttemptID: attempt.ID, Repo: "api", BaseBranch: "test", FixBranch: "fix/race", FixCommit: "deadbeef", TestEvidence: []byte(`[{"repo":"api","commit":"deadbeef","command":"go test ./...","result":"passed"}]`), TargetEnvironmentBranch: "test", PushRemote: "origin", PushStatus: "pushed"}
-	command := CompleteAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "agent-phase:" + attempt.ID, ActorID: "fixer", Outcome: PhaseOutcomeFixPushed, OutputJSON: []byte(`{"fix_status":"fixed_pushed","environment":"test"}`), CodeChanges: []CodeChange{change}}
+	command := CompleteAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "agent-phase:" + attempt.ID, ActorID: "fixer", Outcome: PhaseOutcomeFixPushed, OutputJSON: []byte(`{"fix_status":"fixed_pushed","environment":"test","branches":[{"repo":"api","base_branch":"test","fix_branch":"fix/race","commit":"deadbeef","pushed":true,"target_environment_branch":"test","push_remote":"origin"}],"changes":[{"repo":"api","summary":"repair race"}],"tests":[{"repo":"api","commit":"deadbeef","command":"go test ./...","result":"passed"}],"deployment_notice":"deploy api","risks":[]}`), CodeChanges: []CodeChange{change}}
 	if err := store.SaveCompletionIntentIfRunning(ctx, command); err != nil {
 		t.Fatal(err)
 	}

@@ -537,7 +537,7 @@ func TestOrchestratorRequiresSeparateScopeBoundFixAndMergeApprovals(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	waiting, err := o.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: fixing.ID, AttemptID: fixAttempt.ID, ExpectedVersion: fixing.Version, IdempotencyKey: "fix-finished", Outcome: PhaseOutcomeFixPushed, OutputJSON: []byte(`{"fix_commit":"fix-1"}`), ActorID: "fixer", CodeChanges: []CodeChange{{ID: "change-repo", CaseID: fixing.ID, AttemptID: fixAttempt.ID, Repo: "repo", BaseBranch: "main", FixBranch: "fix/bug", FixCommit: "fix-1", TestEvidence: []byte(`{}`), TargetEnvironmentBranch: "test", PushStatus: "pushed"}}})
+	waiting, err := o.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: fixing.ID, AttemptID: fixAttempt.ID, ExpectedVersion: fixing.Version, IdempotencyKey: "fix-finished", Outcome: PhaseOutcomeFixPushed, OutputJSON: []byte(`{"fix_status":"fixed_pushed","environment":"test","branches":[{"repo":"repo","base_branch":"test","fix_branch":"fix/bug","commit":"fix-1","pushed":true,"target_environment_branch":"test","push_remote":"origin"}],"changes":[{"repo":"repo","summary":"repair bug"}],"tests":[{"repo":"repo","commit":"fix-1","command":"go test ./...","result":"passed"}],"deployment_notice":"deploy repo","risks":[]}`), ActorID: "fixer", CodeChanges: []CodeChange{{ID: "change-repo", CaseID: fixing.ID, AttemptID: fixAttempt.ID, Repo: "repo", BaseBranch: "test", FixBranch: "fix/bug", FixCommit: "fix-1", TestEvidence: []byte(`[{"repo":"repo","commit":"fix-1","command":"go test ./...","result":"passed"}]`), TargetEnvironmentBranch: "test", PushRemote: "origin", PushStatus: "pushed"}}})
 	if err != nil || waiting.Status != CaseWaitingMergeApproval {
 		t.Fatalf("case=%+v err=%v", waiting, err)
 	}

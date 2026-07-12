@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -109,6 +110,54 @@ func TestApproveFixPersistsRootCauseAndSnapshotScope(t *testing.T) {
 	}
 }
 
+func TestApproveFixReplaySurvivesLaterCycleAndRejectsDivergentPayload(t *testing.T) {
+	store, incident, root, runner, orchestrator := prepareFixApprovalCase(t, validRootCauseOutput())
+	command := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version), ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{"root_cause":"race"}`)}
+	committed, err := orchestrator.ApproveFix(context.Background(), command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, _, err := store.Transition(context.Background(), committed.ID, committed.Version, CaseFixFailed, TransitionEvent{ID: "later-failed", IdempotencyKey: "later-failed", EventType: "later_failed", ActorType: "agent", ActorID: "fixer", PayloadJSON: []byte(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cycle2 := 2
+	later, _, err := store.TransitionWithUpdate(context.Background(), failed.ID, failed.Version, CaseFixing, CaseSnapshotUpdate{CycleNumber: &cycle2}, TransitionEvent{ID: "later-cycle", IdempotencyKey: "later-cycle", EventType: "later_cycle", ActorType: "studio", ActorID: "orchestrator", PayloadJSON: []byte(`{}`)})
+	if err != nil || later.CycleNumber != 2 {
+		t.Fatalf("later=%+v err=%v", later, err)
+	}
+
+	replayed, err := orchestrator.ApproveFix(context.Background(), command)
+	if err != nil || replayed != committed || runner.startCount() != 1 {
+		t.Fatalf("replay=%+v committed=%+v starts=%d err=%v", replayed, committed, runner.startCount(), err)
+	}
+	divergent := command
+	divergent.InputJSON = []byte(`{"root_cause":"different"}`)
+	if _, err := orchestrator.ApproveFix(context.Background(), divergent); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("divergent replay err=%v", err)
+	}
+}
+
+func TestApproveFixConcurrentExactCommandSchedulesOnce(t *testing.T) {
+	store, incident, root, runner, _ := prepareFixApprovalCase(t, validRootCauseOutput())
+	command := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version), ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{}`)}
+	orchestrators := []*CaseOrchestrator{NewCaseOrchestrator(store, runner, nil, nil), NewCaseOrchestrator(store, runner, nil, nil)}
+	results := make([]IncidentCase, len(orchestrators))
+	errs := make([]error, len(orchestrators))
+	var wait sync.WaitGroup
+	for index := range orchestrators {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			results[index], errs[index] = orchestrators[index].ApproveFix(context.Background(), command)
+		}(index)
+	}
+	wait.Wait()
+	if errs[0] != nil || errs[1] != nil || results[0] != results[1] || runner.startCount() != 1 {
+		t.Fatalf("results=%+v errs=%v starts=%d", results, errs, runner.startCount())
+	}
+}
+
 func TestParseFixResultRequiresCompletePerRepositoryEvidence(t *testing.T) {
 	valid := `
 fix_status: fixed_pushed
@@ -180,6 +229,41 @@ evidence: []
 `
 	if _, err := ParseFixResult([]byte(document)); err != nil {
 		t.Fatalf("explicit skip rejected: %v", err)
+	}
+}
+
+func TestParseFixResultRejectsUnsafeBranchTopologyAndNormalizesNames(t *testing.T) {
+	base := `
+fix_status: fixed_pushed
+environment: test
+branches:
+  - {repo: " api ", base_branch: " test ", fix_branch: " fix/api ", commit: " aaa111 ", pushed: true, target_environment_branch: " test ", push_remote: " origin "}
+changes:
+  - {repo: " api ", summary: api change}
+tests:
+  - {repo: " api ", commit: " aaa111 ", command: go test ./..., result: passed}
+deployment_notice: deploy api
+risks: []
+evidence: []
+`
+	parsed, err := ParseFixResult([]byte(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	branch := parsed.Branches[0]
+	if branch.Repo != "api" || branch.BaseBranch != "test" || branch.FixBranch != "fix/api" || branch.Commit != "aaa111" || branch.TargetEnvironmentBranch != "test" || branch.PushRemote != "origin" || parsed.Changes[0].Repo != "api" || parsed.Tests[0].Repo != "api" || parsed.Tests[0].Commit != "aaa111" {
+		t.Fatalf("result was not normalized: %+v", parsed)
+	}
+	for name, document := range map[string]string{
+		"base differs from target": strings.Replace(base, `base_branch: " test "`, `base_branch: " main "`, 1),
+		"fix equals base":          strings.Replace(base, `fix_branch: " fix/api "`, `fix_branch: " test "`, 1),
+		"fix equals target":        strings.Replace(base, `fix_branch: " fix/api "`, `fix_branch: "test"`, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseFixResult([]byte(document)); err == nil {
+				t.Fatal("unsafe branch topology accepted")
+			}
+		})
 	}
 }
 
@@ -261,6 +345,110 @@ evidence: []
 	last := events[len(events)-2:]
 	if last[0].EventType != "fix_pushed" || last[0].ToStatus != CaseFixPushed || last[1].EventType != "merge_approval_requested" || last[1].FromStatus != CaseFixPushed || last[1].ToStatus != CaseWaitingMergeApproval {
 		t.Fatalf("completion events=%+v", last)
+	}
+}
+
+func validFixCompletion(t *testing.T, incident IncidentCase, attempt PhaseAttempt) CompleteAttemptCommand {
+	t.Helper()
+	document := []byte(`
+fix_status: fixed_pushed
+environment: test
+branches:
+  - {repo: api, base_branch: test, fix_branch: fix/api, commit: aaa111, pushed: true, target_environment_branch: test, push_remote: origin}
+  - {repo: web, base_branch: test, fix_branch: fix/web, commit: bbb222, pushed: true, target_environment_branch: test, push_remote: origin}
+changes:
+  - {repo: api, summary: api change}
+  - {repo: web, summary: web change}
+tests:
+  - {repo: api, commit: aaa111, command: go test ./..., result: passed}
+  - {repo: web, commit: bbb222, command: npm test, result: passed}
+deployment_notice: deploy both
+risks: []
+evidence: []
+`)
+	parsed, err := ParsePhaseResult(attempt, document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return CompleteAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "agent-phase:" + attempt.ID, ActorID: "fixer", Outcome: parsed.Outcome, OutputJSON: parsed.OutputJSON, CodeChanges: parsed.CodeChanges}
+}
+
+func TestCompleteAttemptRejectsDivergentFixPayloadAndCodeChanges(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*CompleteAttemptCommand)
+	}{
+		{name: "zero changes", mutate: func(command *CompleteAttemptCommand) { command.CodeChanges = nil }},
+		{name: "repository mismatch", mutate: func(command *CompleteAttemptCommand) { command.CodeChanges[0].Repo = "other" }},
+		{name: "branch mismatch", mutate: func(command *CompleteAttemptCommand) { command.CodeChanges[0].BaseBranch = "main" }},
+		{name: "fix branch mismatch", mutate: func(command *CompleteAttemptCommand) { command.CodeChanges[0].FixBranch = "fix/other" }},
+		{name: "target mismatch", mutate: func(command *CompleteAttemptCommand) { command.CodeChanges[0].TargetEnvironmentBranch = "staging" }},
+		{name: "commit mismatch", mutate: func(command *CompleteAttemptCommand) { command.CodeChanges[0].FixCommit = "stale" }},
+		{name: "push mismatch", mutate: func(command *CompleteAttemptCommand) { command.CodeChanges[0].PushStatus = "failed" }},
+		{name: "remote mismatch", mutate: func(command *CompleteAttemptCommand) { command.CodeChanges[0].PushRemote = "upstream" }},
+		{name: "tests mismatch", mutate: func(command *CompleteAttemptCommand) { command.CodeChanges[0].TestEvidence = []byte(`[]`) }},
+		{name: "duplicate repo", mutate: func(command *CompleteAttemptCommand) { command.CodeChanges[1].Repo = command.CodeChanges[0].Repo }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := newOrchestratorStore(t)
+			incident, attempt := createRunningPhase(t, store, "completion-"+strings.ReplaceAll(test.name, " ", "-"), CaseWaitingFixApproval, CaseFixing, PhaseFix, "", []byte(`{}`))
+			command := validFixCompletion(t, incident, attempt)
+			test.mutate(&command)
+			orchestrator := NewCaseOrchestrator(store, nil, nil, nil)
+			if _, err := orchestrator.CompleteAttempt(context.Background(), command); err == nil {
+				t.Fatal("divergent fix completion accepted")
+			}
+		})
+	}
+}
+
+func TestCompleteAttemptRejectsFixChangesOnWrongPhaseOrOutcome(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident, attempt := createRunningPhase(t, store, "completion-wrong-phase", CaseReproduced, CaseInvestigating, PhaseInvestigation, "", []byte(`{}`))
+	command := validFixCompletion(t, incident, PhaseAttempt{ID: attempt.ID, CaseID: attempt.CaseID, CycleNumber: attempt.CycleNumber, Phase: PhaseFix})
+	if _, err := NewCaseOrchestrator(store, nil, nil, nil).CompleteAttempt(context.Background(), command); err == nil {
+		t.Fatal("FixPushed accepted for investigation attempt")
+	}
+
+	store = newOrchestratorStore(t)
+	incident, attempt = createRunningPhase(t, store, "completion-failed-changes", CaseWaitingFixApproval, CaseFixing, PhaseFix, "", []byte(`{}`))
+	command = validFixCompletion(t, incident, attempt)
+	command.Outcome = PhaseOutcomeFixFailed
+	if _, err := NewCaseOrchestrator(store, nil, nil, nil).CompleteAttempt(context.Background(), command); err == nil {
+		t.Fatal("FixFailed accepted CodeChanges")
+	}
+}
+
+func TestCompletionIntentUsesStrictFixBoundaryOnSaveAndReplay(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident, attempt := createRunningPhase(t, store, "completion-intent-strict", CaseWaitingFixApproval, CaseFixing, PhaseFix, "", []byte(`{}`))
+	command := validFixCompletion(t, incident, attempt)
+	invalid := command
+	invalid.CodeChanges = append([]CodeChange(nil), command.CodeChanges...)
+	invalid.CodeChanges[0] = invalid.CodeChanges[0].Clone()
+	invalid.CodeChanges[0].FixCommit = "stale"
+	if err := store.SaveCompletionIntentIfRunning(context.Background(), invalid); err == nil {
+		t.Fatal("divergent completion intent was persisted")
+	}
+	if err := store.SaveCompletionIntentIfRunning(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveCompletionIntentIfRunning(context.Background(), command); err != nil {
+		t.Fatalf("exact intent replay: %v", err)
+	}
+	finished, err := NewCaseOrchestrator(store, nil, nil, nil).CompleteAttempt(context.Background(), command)
+	if err != nil || finished.Status != CaseWaitingMergeApproval {
+		t.Fatalf("case=%+v err=%v", finished, err)
+	}
+}
+
+func TestCompletionIntentRejectsFixPushedForNonFixAttempt(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident, attempt := createRunningPhase(t, store, "completion-intent-wrong-phase", CaseReproduced, CaseInvestigating, PhaseInvestigation, "", []byte(`{}`))
+	command := validFixCompletion(t, incident, PhaseAttempt{ID: attempt.ID, CaseID: attempt.CaseID, CycleNumber: attempt.CycleNumber, Phase: PhaseFix})
+	if err := store.SaveCompletionIntentIfRunning(context.Background(), command); err == nil {
+		t.Fatal("fix-pushed intent was saved for investigation attempt")
 	}
 }
 

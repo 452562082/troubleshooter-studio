@@ -1,9 +1,13 @@
 package bughub
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"reflect"
 	"strings"
 )
 
@@ -78,6 +82,7 @@ func ParseFixResult(data []byte) (FixResult, error) {
 	if err := decodeStrictYAML(data, &result); err != nil {
 		return FixResult{}, fmt.Errorf("parse fix result: %w", err)
 	}
+	normalizeFixResult(&result)
 	if strings.TrimSpace(result.FixStatus) == "" || strings.TrimSpace(result.Environment) == "" {
 		return FixResult{}, errors.New("fix status and environment are required")
 	}
@@ -102,6 +107,35 @@ func ParseFixResult(data []byte) (FixResult, error) {
 	return result, nil
 }
 
+func normalizeFixResult(result *FixResult) {
+	result.FixStatus = strings.TrimSpace(result.FixStatus)
+	result.Environment = strings.TrimSpace(result.Environment)
+	result.DeploymentNotice = strings.TrimSpace(result.DeploymentNotice)
+	result.BlockedReason = strings.TrimSpace(result.BlockedReason)
+	for index := range result.Branches {
+		branch := &result.Branches[index]
+		branch.Repo = strings.TrimSpace(branch.Repo)
+		branch.BaseBranch = strings.TrimSpace(branch.BaseBranch)
+		branch.FixBranch = strings.TrimSpace(branch.FixBranch)
+		branch.Commit = strings.TrimSpace(branch.Commit)
+		branch.TargetEnvironmentBranch = strings.TrimSpace(branch.TargetEnvironmentBranch)
+		branch.PushRemote = strings.TrimSpace(branch.PushRemote)
+	}
+	for index := range result.Changes {
+		result.Changes[index].Repo = strings.TrimSpace(result.Changes[index].Repo)
+		result.Changes[index].Summary = strings.TrimSpace(result.Changes[index].Summary)
+	}
+	for index := range result.Tests {
+		test := &result.Tests[index]
+		test.Repo = strings.TrimSpace(test.Repo)
+		test.Commit = strings.TrimSpace(test.Commit)
+		test.Command = strings.TrimSpace(test.Command)
+		test.Result = strings.TrimSpace(test.Result)
+		test.Note = strings.TrimSpace(test.Note)
+		test.SkippedReason = strings.TrimSpace(test.SkippedReason)
+	}
+}
+
 func validateFixedPushedResult(result FixResult) error {
 	if len(result.Branches) == 0 {
 		return errors.New("fixed_pushed requires branches")
@@ -113,6 +147,12 @@ func validateFixedPushedResult(result FixResult) error {
 		}
 		if _, exists := branches[branch.Repo]; exists {
 			return fmt.Errorf("fixed_pushed contains duplicate repository %q", branch.Repo)
+		}
+		if branch.BaseBranch != branch.TargetEnvironmentBranch {
+			return fmt.Errorf("fixed_pushed base branch for %s must equal target environment branch", branch.Repo)
+		}
+		if branch.FixBranch == branch.BaseBranch || branch.FixBranch == branch.TargetEnvironmentBranch {
+			return fmt.Errorf("fixed_pushed fix branch for %s must differ from the environment branch", branch.Repo)
 		}
 		branches[branch.Repo] = branch
 	}
@@ -152,4 +192,79 @@ func validateFixedPushedResult(result FixResult) error {
 		}
 	}
 	return nil
+}
+
+func validateFixCompletionPayload(command CompleteAttemptCommand) error {
+	if command.Outcome != PhaseOutcomeFixPushed {
+		if len(command.CodeChanges) != 0 {
+			return errors.New("non-fix-pushed completion must not contain code changes")
+		}
+		return nil
+	}
+	if len(command.CodeChanges) == 0 {
+		return errors.New("fix-pushed completion requires at least one code change")
+	}
+	result, err := ParseFixResult(command.OutputJSON)
+	if err != nil {
+		return fmt.Errorf("validate fix-pushed output: %w", err)
+	}
+	if result.FixStatus != "fixed_pushed" {
+		return fmt.Errorf("fix-pushed outcome does not match fix status %q", result.FixStatus)
+	}
+	if len(command.CodeChanges) != len(result.Branches) {
+		return errors.New("fix-pushed code changes do not cover every output repository")
+	}
+	branches := make(map[string]FixBranchResult, len(result.Branches))
+	for _, branch := range result.Branches {
+		branches[branch.Repo] = branch
+	}
+	seen := make(map[string]struct{}, len(command.CodeChanges))
+	for _, change := range command.CodeChanges {
+		if _, duplicate := seen[change.Repo]; duplicate {
+			return fmt.Errorf("fix-pushed completion contains duplicate repository %q", change.Repo)
+		}
+		seen[change.Repo] = struct{}{}
+		branch, found := branches[change.Repo]
+		if !found {
+			return fmt.Errorf("fix-pushed code change repository %q is absent from output", change.Repo)
+		}
+		if change.BaseBranch != branch.BaseBranch || change.FixBranch != branch.FixBranch || change.FixCommit != branch.Commit || change.PushStatus != "pushed" || change.TargetEnvironmentBranch != branch.TargetEnvironmentBranch || change.PushRemote != branch.PushRemote {
+			return fmt.Errorf("fix-pushed code change for %s diverges from output branch scope", change.Repo)
+		}
+		expectedTests := make([]FixTestResult, 0)
+		for _, test := range result.Tests {
+			if test.Repo == change.Repo {
+				expectedTests = append(expectedTests, test)
+			}
+		}
+		actualTests, err := decodeFixTestEvidence(change.TestEvidence)
+		if err != nil {
+			return fmt.Errorf("decode test evidence for %s: %w", change.Repo, err)
+		}
+		if !reflect.DeepEqual(actualTests, expectedTests) {
+			return fmt.Errorf("fix-pushed test evidence for %s diverges from output", change.Repo)
+		}
+	}
+	return nil
+}
+
+func validateCompletionAttemptPhase(phase Phase, command CompleteAttemptCommand) error {
+	if command.Outcome == PhaseOutcomeFixPushed && phase != PhaseFix {
+		return errors.New("fix-pushed completion requires a fix phase attempt")
+	}
+	return nil
+}
+
+func decodeFixTestEvidence(raw json.RawMessage) ([]FixTestResult, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var tests []FixTestResult
+	if err := decoder.Decode(&tests); err != nil {
+		return nil, err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, errors.New("fix test evidence must contain one JSON array")
+	}
+	return tests, nil
 }

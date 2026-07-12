@@ -515,6 +515,11 @@ func (o *CaseOrchestrator) ApproveFix(ctx context.Context, cmd ApproveFixCommand
 	if cmd.IdempotencyKey != StartFixApprovalKey(cmd.CaseID, cmd.RootCauseAttemptID, cmd.ExpectedVersion) {
 		return IncidentCase{}, ErrApprovalScope
 	}
+	if _, found, err := o.store.GetEventByIdempotencyKey(ctx, cmd.IdempotencyKey); err != nil {
+		return IncidentCase{}, err
+	} else if found {
+		return o.replayFixApproval(ctx, cmd)
+	}
 	incident, err := o.loadForCommand(ctx, cmd.CaseID, cmd.ExpectedVersion, cmd.IdempotencyKey)
 	if err != nil {
 		return IncidentCase{}, err
@@ -522,25 +527,18 @@ func (o *CaseOrchestrator) ApproveFix(ctx context.Context, cmd ApproveFixCommand
 	if incident.Status != CaseWaitingFixApproval {
 		return IncidentCase{}, ErrApprovalNotReady
 	}
-	// loadForCommand projects status/version from the original transition on an
-	// idempotent replay. Restore the original approval snapshot's current
-	// investigation attempt so the store can compare the exact request again.
 	if incident.CurrentAttemptID != cmd.RootCauseAttemptID {
 		if replay, replayErr := o.hasEvent(ctx, incident.ID, cmd.IdempotencyKey); replayErr != nil {
 			return IncidentCase{}, replayErr
 		} else if replay {
-			incident.CurrentAttemptID = cmd.RootCauseAttemptID
+			return o.replayFixApproval(ctx, cmd)
 		}
 	}
 	if err := validateFixApprovalRootCause(ctx, o.store, incident, cmd.RootCauseAttemptID); err != nil {
 		return IncidentCase{}, err
 	}
-	scope, _ := json.Marshal(map[string]string{"root_cause_attempt_id": cmd.RootCauseAttemptID})
-	approval := Approval{ID: stableID("approval", cmd.IdempotencyKey), CaseID: incident.ID, Kind: ApprovalStartFix, Actor: cmd.ActorID, CaseVersion: incident.Version, ScopeJSON: scope}
-	attempt := newAttempt(incident, PhaseFix, "", cmd.IdempotencyKey, cmd.Bot, cmd.InputJSON, incident.CurrentAttemptID)
-	update := CaseSnapshotUpdate{CurrentAttemptID: workflowStringPtr(attempt.ID), SelectedBotKey: workflowStringPtr(cmd.Bot.Key)}
-	payload := mustJSON(map[string]string{"attempt_id": attempt.ID, "root_cause_attempt_id": cmd.RootCauseAttemptID})
-	mutation, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: cmd.IdempotencyKey, RequestJSON: mustJSON(cmd), Approvals: []Approval{approval}, CreateAttempts: []PhaseAttempt{attempt}, Snapshot: update, Steps: []CaseMutationStep{{To: CaseFixing, Event: TransitionEvent{ID: stableID("event", cmd.IdempotencyKey), EventType: "fix_approved", ActorType: "user", ActorID: cmd.ActorID, PayloadJSON: payload}}}})
+	attempt, request := buildFixApprovalMutation(cmd, incident.CycleNumber)
+	mutation, err := o.store.ApplyCaseMutation(ctx, request)
 	if err != nil {
 		return IncidentCase{}, err
 	}
@@ -554,6 +552,33 @@ func (o *CaseOrchestrator) ApproveFix(ctx context.Context, cmd ApproveFixCommand
 		return o.phaseScheduleFailure(ctx, mutation.Case, attempt, cmd.IdempotencyKey, err)
 	}
 	return mutation.Case, nil
+}
+
+func buildFixApprovalMutation(cmd ApproveFixCommand, cycleNumber int) (PhaseAttempt, CaseMutation) {
+	incident := IncidentCase{ID: cmd.CaseID, CycleNumber: cycleNumber}
+	scope, _ := json.Marshal(map[string]string{"root_cause_attempt_id": cmd.RootCauseAttemptID})
+	approval := Approval{ID: stableID("approval", cmd.IdempotencyKey), CaseID: cmd.CaseID, Kind: ApprovalStartFix, Actor: cmd.ActorID, CaseVersion: cmd.ExpectedVersion, ScopeJSON: scope}
+	attempt := newAttempt(incident, PhaseFix, "", cmd.IdempotencyKey, cmd.Bot, cmd.InputJSON, cmd.RootCauseAttemptID)
+	update := CaseSnapshotUpdate{CurrentAttemptID: workflowStringPtr(attempt.ID), SelectedBotKey: workflowStringPtr(cmd.Bot.Key)}
+	payload := mustJSON(map[string]string{"attempt_id": attempt.ID, "root_cause_attempt_id": cmd.RootCauseAttemptID})
+	mutation := CaseMutation{CaseID: cmd.CaseID, ExpectedVersion: cmd.ExpectedVersion, IdempotencyKey: cmd.IdempotencyKey, RequestJSON: mustJSON(cmd), Approvals: []Approval{approval}, CreateAttempts: []PhaseAttempt{attempt}, Snapshot: update, Steps: []CaseMutationStep{{To: CaseFixing, Event: TransitionEvent{ID: stableID("event", cmd.IdempotencyKey), EventType: "fix_approved", ActorType: "user", ActorID: cmd.ActorID, PayloadJSON: payload}}}}
+	return attempt, mutation
+}
+
+func (o *CaseOrchestrator) replayFixApproval(ctx context.Context, cmd ApproveFixCommand) (IncidentCase, error) {
+	root, err := o.store.GetAttempt(ctx, cmd.RootCauseAttemptID)
+	if err != nil {
+		return IncidentCase{}, err
+	}
+	_, request := buildFixApprovalMutation(cmd, root.CycleNumber)
+	result, err := o.store.ApplyCaseMutation(ctx, request)
+	if err != nil {
+		return IncidentCase{}, err
+	}
+	if !result.Replay {
+		return IncidentCase{}, ErrIdempotencyConflict
+	}
+	return result.Case, nil
 }
 
 func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCommand) (IncidentCase, error) {
@@ -1085,7 +1110,10 @@ func (o *CaseOrchestrator) recordCancelFailure(incident IncidentCase, key string
 }
 
 func (o *CaseOrchestrator) CompleteAttempt(ctx context.Context, cmd CompleteAttemptCommand) (IncidentCase, error) {
-	if err := validateCommand(cmd.CaseID, cmd.ExpectedVersion, cmd.IdempotencyKey, cmd.ActorID); err != nil {
+	if len(cmd.OutputJSON) == 0 {
+		cmd.OutputJSON = []byte(`{}`)
+	}
+	if err := validateCompletionCommand(cmd); err != nil {
 		return IncidentCase{}, err
 	}
 	incident, err := o.loadForCommand(ctx, cmd.CaseID, cmd.ExpectedVersion, cmd.IdempotencyKey)
@@ -1099,8 +1127,8 @@ func (o *CaseOrchestrator) CompleteAttempt(ctx context.Context, cmd CompleteAtte
 	if err != nil {
 		return IncidentCase{}, err
 	}
-	if len(cmd.OutputJSON) == 0 {
-		cmd.OutputJSON = []byte(`{}`)
+	if err := validateCompletionAttemptPhase(attempt.Phase, cmd); err != nil {
+		return IncidentCase{}, err
 	}
 	expectedAttemptOutput := CloneRawMessage(attempt.OutputJSON)
 	if intent, found, parseErr := parseCompletionIntent(attempt.OutputJSON); parseErr != nil {

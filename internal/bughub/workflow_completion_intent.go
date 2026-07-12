@@ -88,7 +88,7 @@ func validateCompletionCommand(command CompleteAttemptCommand) error {
 			return errors.New("completion code change is not bound to command Case and attempt")
 		}
 	}
-	return nil
+	return validateFixCompletionPayload(command)
 }
 
 func (s *CaseStore) SaveCompletionIntentIfRunning(ctx context.Context, command CompleteAttemptCommand) error {
@@ -102,7 +102,8 @@ func (s *CaseStore) SaveCompletionIntentIfRunning(ctx context.Context, command C
 	}
 	defer tx.Rollback()
 	var caseID, status, existing string
-	if err := tx.QueryRowContext(ctx, `SELECT case_id,status,output_json FROM phase_attempts WHERE id=?`, command.AttemptID).Scan(&caseID, &status, &existing); err != nil {
+	var phase Phase
+	if err := tx.QueryRowContext(ctx, `SELECT case_id,status,output_json,phase FROM phase_attempts WHERE id=?`, command.AttemptID).Scan(&caseID, &status, &existing, &phase); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrCaseNotFound
 		}
@@ -110,6 +111,9 @@ func (s *CaseStore) SaveCompletionIntentIfRunning(ctx context.Context, command C
 	}
 	if caseID != command.CaseID {
 		return errors.New("completion intent attempt belongs to a different Case")
+	}
+	if err := validateCompletionAttemptPhase(phase, command); err != nil {
+		return err
 	}
 	if AttemptStatus(status) != AttemptStatusQueued && AttemptStatus(status) != AttemptStatusRunning {
 		return fmt.Errorf("completion intent requires a runnable attempt, got %s", status)

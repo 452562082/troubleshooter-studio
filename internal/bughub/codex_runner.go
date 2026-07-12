@@ -359,6 +359,7 @@ func fixOutputContract() string {
 	sb.WriteString("blocked_reason: \"<only when blocked/failed>\"\n")
 	sb.WriteString("evidence: []\n")
 	sb.WriteString("```\n")
+	sb.WriteString("每个仓库的 base_branch 必须与 target_environment_branch 完全一致；fix_branch 必须是不同的专用修复分支，禁止直接在环境分支修复或推送。\n")
 	return sb.String()
 }
 

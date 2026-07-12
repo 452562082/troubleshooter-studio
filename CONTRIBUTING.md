@@ -133,6 +133,16 @@ scripts/test-browser-smoke.sh
 
 新加路径要有 happy path。新加 MCP builder 要有注册类 positive test；禁用/跳过类要有 negative test。
 
+持久化故障闭环的改动还必须满足：
+
+- 状态增删或语义变化要更新完整 transition-table 测试，同时覆盖代表性非法跳转。
+- 每个按钮、Agent 回调和外部副作用都要有幂等测试，证明重复请求不会重复 attempt、merge、push、部署观察或回归。
+- 跨事务或进程边界的改动要覆盖 SQLite reopen/crash recovery，副作用阶段恢复前必须检查外部状态。
+- Git 集成测试只使用 `t.TempDir()` 的本地仓库和 bare remote；可以用 test-only URL rewrite 模拟 SSH，禁止连接真实远端、force push 或修改开发者工作区。
+- 部署测试只能使用 fake verifier、`httptest` 或 fake K8s reader；测试和 Studio 都不得执行真实应用部署。
+- 证据、事件、迁移和 verifier 错误测试必须包含 token、Cookie、Authorization、password 和 URL userinfo 等脱敏 fixture，并断言数据库及 artifact 中不含原值。
+- 完整闭环至少覆盖两次独立授权、部署版本 gate、新鲜回归证据、多仓库部分完成、重复通知以及重启后继续。
+
 跨仓库服务拓扑还有以下回归要求：
 
 - 每种新增语言或框架扫描器必须使用 `examples/fake-repos/` 下的离线 fixture，默认测试不得 clone、下载依赖或访问网络。

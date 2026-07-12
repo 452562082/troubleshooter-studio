@@ -6,7 +6,41 @@
 - `templates/workspace/skills/routing/SKILL.md.tmpl`
 - `templates/workspace/skills/routing/references/*.yaml.tmpl`
 
-最后更新：2026-06-26。
+最后更新：2026-07-12。
+
+## Studio 故障闭环状态机
+
+生成物中的 `incident-investigator` 负责单次排障取证；Studio 桌面工作台负责把验证、排障、修复、合并、人工部署和回归组成可恢复的完整 Case。SQLite 是 Case 快照和追加式事件的真源，Agent 只执行一个阶段，Wails/UI、Agent 回调和恢复任务都不能绕过 `CaseOrchestrator` 改状态。
+
+主成功路径如下：
+
+```text
+pending_validation -> validating -> reproduced -> investigating
+-> root_cause_ready -> waiting_fix_approval -> fixing -> fix_pushed
+-> waiting_merge_approval -> merging -> waiting_deployment
+-> deployment_verified -> regression_validating -> fixed_verified
+```
+
+六个阶段的责任边界：
+
+| 阶段 | 执行者 | 推进门槛 |
+|---|---|---|
+| 验证 | 验证 Agent（`reproduce`） | 有可复现结论；关键证据缺失则停在 `waiting_evidence` |
+| 排障 | 排障 Agent | 唯一高置信根因且无关键证据缺口 |
+| 修复 | 修复 Agent | 用户批准“启动修复”，授权绑定根因 attempt 和 Case 版本 |
+| 合并 | Studio Git service | 用户另行批准环境分支合并，授权绑定精确 commit、分支和目标 HEAD |
+| 部署 | 人工/外部平台 | Studio 只等待通知，不执行部署 |
+| 回归 | 同一个验证 Agent（`regression`） | 运行版本先证明包含所有目标 merge commit |
+
+“已部署”按钮和明确的自然语言通知走同一幂等 verifier 路径。`准备部署`、`还没部署`、`部署失败`等表达不会触发校验。manual、HTTP 或 K8s 版本来源返回不匹配、不可用或多仓库只匹配一部分时，Case 保持未验证，不能创建回归 attempt。
+
+### 证据新鲜度
+
+证据属于具体 Case、cycle 和 attempt，发布前由 Studio 放入 attempt 专属暂存目录并计算 SHA256。回归不能复用首次验证的文件冒充结果；`fixed_verified` 和 `still_reproduces` 都必须引用当前回归 attempt 在启动后采集、环境与已验证部署一致的新证据，并拒绝历史 request ID、trace ID 或相同摘要。版本观测也必须绑定当前 cycle 的 merge approval 和部署 reservation。
+
+回归为 `still_reproduces` 时，Studio 保存新证据和本轮部署版本，`cycle_number + 1`，创建带差分输入的新排障 attempt；不会创建割裂的新 Case。`insufficient_info` 回到 `waiting_evidence`，补证后仍保持原部署和场景绑定。
+
+修复和 Git 操作有副作用，不做盲目自动重试。合并冲突不会修改环境分支；push 失败保留本地 merge commit，恢复时先检查远端状态，只重试尚未完成的 push。旧 `runs.json` 一次性导入为不可变的 `legacy_archived` Case，只有用户明确重新开始时才从下一 cycle 的 `pending_validation` 创建活动 Case。
 
 ## 入口
 

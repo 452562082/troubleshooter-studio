@@ -21,7 +21,7 @@ const (
 	incidentWorkflowReminderEvent = "incident-workflow:reminder"
 )
 
-var incidentWorkflowReminderPollInterval = time.Hour
+var incidentWorkflowReminderPollInterval = time.Minute
 
 type incidentWorkflowRuntime struct {
 	orchestrator *bughub.CaseOrchestrator
@@ -360,6 +360,34 @@ func (a *App) SnoozeIncidentWorkflowReminder(input SnoozeIncidentWorkflowReminde
 	return service.Snooze(a.workflowCommandContext(), input.CaseID, input.Until, input.ActorID, input.IdempotencyKey)
 }
 
+type AckIncidentWorkflowReminderInput struct {
+	CaseID          string `json:"case_id"`
+	ReservationKey  string `json:"reservation_key"`
+	DeliveryAttempt int    `json:"delivery_attempt"`
+	ActorID         string `json:"actor_id"`
+}
+
+func (a *App) ListPendingIncidentWorkflowReminders() ([]bughub.WorkflowReminder, error) {
+	store, _, err := a.workflowComponents()
+	if err != nil {
+		return nil, err
+	}
+	items, err := bughub.NewWorkflowReminderService(store, nil, bughub.DefaultWorkflowReminderAfter, nil).Pending(a.workflowCommandContext())
+	if items == nil {
+		items = []bughub.WorkflowReminder{}
+	}
+	return items, err
+}
+
+func (a *App) AckIncidentWorkflowReminder(input AckIncidentWorkflowReminderInput) error {
+	store, _, err := a.workflowComponents()
+	if err != nil {
+		return err
+	}
+	service := bughub.NewWorkflowReminderService(store, nil, bughub.DefaultWorkflowReminderAfter, nil)
+	return service.Ack(a.workflowCommandContext(), input.CaseID, input.ReservationKey, input.DeliveryAttempt, input.ActorID)
+}
+
 func (a *App) startWorkflowReminderPoller(ctx context.Context) {
 	if ctx == nil {
 		return
@@ -395,8 +423,9 @@ func (a *App) pollWorkflowReminders(ctx context.Context) {
 		}
 		if runtimeCtx := a.getRuntimeContext(); runtimeCtx != nil {
 			wailsruntime.EventsEmit(runtimeCtx, incidentWorkflowReminderEvent, reminder)
+			return nil
 		}
-		return nil
+		return errors.New("incident workflow reminder has no desktop runtime receiver")
 	})
 	if err := service.Poll(workflowContext(ctx)); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintf(os.Stderr, "[warn] incident workflow reminder poll failed: %v\n", err)

@@ -1,9 +1,26 @@
 package bughub
 
 import (
+	"math"
 	"testing"
 	"time"
 )
+
+func TestWorkflowMetricsSaturatesExtremeCrossCaseTotals(t *testing.T) {
+	t0 := time.Date(1, 1, 1, 0, 0, 0, 0, time.UTC)
+	t1 := time.Date(9999, 12, 31, 0, 0, 0, 0, time.UTC)
+	histories := []WorkflowCaseHistory{
+		{Case: IncidentCase{ID: "a", BugID: "a", Status: CaseWaitingDeployment, CycleNumber: 1, CreatedAt: t0, UpdatedAt: t0}, Events: []TransitionEvent{metricEvent("a-wait", CaseMerging, CaseWaitingDeployment, "merge_pushed", "git", t0), metricEvent("a-done", CaseWaitingDeployment, CaseDeploymentVerified, "deployment_verified", "studio", t1)}, Attempts: []PhaseAttempt{{ID: "a1", CaseID: "a", CycleNumber: 1, Phase: PhaseFix, Status: AttemptStatusSucceeded, Usage: AgentUsage{Duration: time.Duration(math.MaxInt64), InputTokens: math.MaxInt64, OutputTokens: math.MaxInt64}}}},
+		{Case: IncidentCase{ID: "b", BugID: "b", Status: CaseWaitingDeployment, CycleNumber: 1, CreatedAt: t0, UpdatedAt: t0}, Events: []TransitionEvent{metricEvent("b-wait", CaseMerging, CaseWaitingDeployment, "merge_pushed", "git", t0), metricEvent("b-done", CaseWaitingDeployment, CaseDeploymentVerified, "deployment_verified", "studio", t1)}, Attempts: []PhaseAttempt{{ID: "b1", CaseID: "b", CycleNumber: 1, Phase: PhaseFix, Status: AttemptStatusSucceeded, Usage: AgentUsage{Duration: time.Second, InputTokens: 1, OutputTokens: 1}}}},
+	}
+	metrics := FoldWorkflowMetrics(t1, histories)
+	if metrics.AgentExecutionDuration != time.Duration(math.MaxInt64) || metrics.HumanDeploymentWait != time.Duration(math.MaxInt64) || metrics.AgentInputTokens != math.MaxInt64 || metrics.AgentOutputTokens != math.MaxInt64 {
+		t.Fatalf("overflowed totals=%+v", metrics)
+	}
+	if saturatingAddInt(math.MaxInt, 1) != math.MaxInt || saturatingAddInt64(math.MaxInt64, 1) != math.MaxInt64 || saturatingAddDuration(time.Duration(math.MaxInt64), time.Second) != time.Duration(math.MaxInt64) {
+		t.Fatal("saturating helpers wrapped")
+	}
+}
 
 func TestWorkflowMetricsFoldSeparatesAgentExecutionAndHumanWait(t *testing.T) {
 	t0 := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)

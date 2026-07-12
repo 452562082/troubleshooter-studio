@@ -2,6 +2,7 @@ package bughub
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -18,15 +19,12 @@ func openWorkflowTestStore(t *testing.T) *CaseStore {
 	return store
 }
 
-func TestWorkflowRemindersEmitsAtMostOncePerBoundedInterval(t *testing.T) {
+func TestWorkflowRemindersAckAdvancesTwentyFourHourLimit(t *testing.T) {
 	store := openWorkflowTestStore(t)
 	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
 	incident := reminderCase(t, store, "waiting", "test", now.Add(-25*time.Hour), CaseWaitingDeployment)
-	var mu sync.Mutex
 	var delivered []WorkflowReminder
 	service := NewWorkflowReminderService(store, func() time.Time { return now }, 24*time.Hour, func(_ context.Context, reminder WorkflowReminder) error {
-		mu.Lock()
-		defer mu.Unlock()
 		delivered = append(delivered, reminder)
 		return nil
 	})
@@ -34,29 +32,150 @@ func TestWorkflowRemindersEmitsAtMostOncePerBoundedInterval(t *testing.T) {
 	if err := service.Poll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.Poll(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if len(delivered) != 1 || delivered[0].CaseID != incident.ID {
+	if len(delivered) != 1 || delivered[0].ReservationKey == "" || delivered[0].DeliveryAttempt != 1 {
 		t.Fatalf("delivered=%+v", delivered)
 	}
-	now = now.Add(23 * time.Hour)
+	if err := service.Ack(context.Background(), delivered[0].CaseID, delivered[0].ReservationKey, delivered[0].DeliveryAttempt, "desktop-root"); err != nil {
+		t.Fatal(err)
+	}
 	if err := service.Poll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(delivered) != 1 {
-		t.Fatalf("early repeat delivered=%d", len(delivered))
+		t.Fatalf("duplicate after ack=%d", len(delivered))
 	}
-	now = now.Add(time.Hour)
+	now = now.Add(23*time.Hour + 59*time.Minute)
 	if err := service.Poll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(delivered) != 2 {
-		t.Fatalf("next bounded reminder delivered=%d", len(delivered))
+	if len(delivered) != 1 {
+		t.Fatalf("early next slot=%d", len(delivered))
 	}
-	got, err := store.GetCase(context.Background(), incident.ID)
-	if err != nil || got.Status != CaseWaitingDeployment || got.CycleNumber != incident.CycleNumber || got.CurrentAttemptID != incident.CurrentAttemptID || got.Version != incident.Version {
-		t.Fatalf("reminder changed workflow case=%+v err=%v", got, err)
+	now = now.Add(time.Minute)
+	if err := service.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(delivered) != 2 || delivered[1].Sequence != 2 {
+		t.Fatalf("next slot=%+v", delivered)
+	}
+	got, _ := store.GetCase(context.Background(), incident.ID)
+	if got.Version != incident.Version || got.Status != incident.Status || got.CycleNumber != incident.CycleNumber {
+		t.Fatalf("reminder changed Case: before=%+v after=%+v", incident, got)
+	}
+}
+
+func TestWorkflowRemindersDeliveryFailureAndNoAckRetryAfterBoundedLease(t *testing.T) {
+	for _, fixture := range []struct {
+		name        string
+		deliveryErr error
+	}{
+		{name: "delivery_error", deliveryErr: errors.New("receiver unavailable")},
+		{name: "no_listener_no_ack"},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			store := openWorkflowTestStore(t)
+			now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+			reminderCase(t, store, fixture.name, "test", now.Add(-25*time.Hour), CaseWaitingDeployment)
+			calls := 0
+			service := NewWorkflowReminderServiceWithLease(store, func() time.Time { return now }, 24*time.Hour, 5*time.Minute, func(context.Context, WorkflowReminder) error { calls++; return fixture.deliveryErr })
+			_ = service.Poll(context.Background())
+			if calls != 1 {
+				t.Fatalf("calls=%d", calls)
+			}
+			now = now.Add(4 * time.Minute)
+			_ = service.Poll(context.Background())
+			if calls != 1 {
+				t.Fatalf("spammed before lease calls=%d", calls)
+			}
+			now = now.Add(time.Minute)
+			_ = service.Poll(context.Background())
+			if calls != 2 {
+				t.Fatalf("did not retry after lease calls=%d", calls)
+			}
+		})
+	}
+}
+
+func TestWorkflowRemindersLateMountPullsPendingAndAckReplayIsExact(t *testing.T) {
+	store := openWorkflowTestStore(t)
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	reminderCase(t, store, "late", "test", now.Add(-25*time.Hour), CaseWaitingDeployment)
+	service := NewWorkflowReminderServiceWithLease(store, func() time.Time { return now }, 24*time.Hour, 5*time.Minute, func(context.Context, WorkflowReminder) error { return nil })
+	if err := service.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	} // emitted before UI listener mounted
+	pending, err := service.Pending(context.Background())
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending=%+v err=%v", pending, err)
+	}
+	item := pending[0]
+	if err := service.Ack(context.Background(), item.CaseID, item.ReservationKey, item.DeliveryAttempt, "desktop-root"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Ack(context.Background(), item.CaseID, item.ReservationKey, item.DeliveryAttempt, "desktop-root"); err != nil {
+		t.Fatalf("ack replay: %v", err)
+	}
+	pending, err = service.Pending(context.Background())
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pending after ack=%+v err=%v", pending, err)
+	}
+}
+
+func TestWorkflowRemindersConcurrentDifferentClocksUseStableReservation(t *testing.T) {
+	store := openWorkflowTestStore(t)
+	base := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	reminderCase(t, store, "race", "test", base.Add(-25*time.Hour), CaseWaitingDeployment)
+	var mu sync.Mutex
+	var delivered []WorkflowReminder
+	deliver := func(_ context.Context, reminder WorkflowReminder) error {
+		mu.Lock()
+		delivered = append(delivered, reminder)
+		mu.Unlock()
+		return nil
+	}
+	first := NewWorkflowReminderServiceWithLease(store, func() time.Time { return base }, 24*time.Hour, 5*time.Minute, deliver)
+	second := NewWorkflowReminderServiceWithLease(store, func() time.Time { return base.Add(time.Second) }, 24*time.Hour, 5*time.Minute, deliver)
+	var wg sync.WaitGroup
+	for _, service := range []*WorkflowReminderService{first, second} {
+		wg.Add(1)
+		go func(s *WorkflowReminderService) { defer wg.Done(); _ = s.Poll(context.Background()) }(service)
+	}
+	wg.Wait()
+	if len(delivered) != 1 {
+		t.Fatalf("deliveries=%+v", delivered)
+	}
+	if err := second.Ack(context.Background(), delivered[0].CaseID, delivered[0].ReservationKey, delivered[0].DeliveryAttempt, "desktop-root"); err != nil {
+		t.Fatal(err)
+	}
+	events, _ := store.ListEvents(context.Background(), "race")
+	reservations, attempts, acks := 0, 0, 0
+	for _, event := range events {
+		switch event.EventType {
+		case workflowReminderPendingEvent:
+			reservations++
+		case workflowReminderAttemptEvent:
+			attempts++
+		case workflowReminderAckEvent:
+			acks++
+		}
+	}
+	if reservations != 1 || attempts != 1 || acks != 1 {
+		t.Fatalf("events pending=%d attempts=%d acks=%d", reservations, attempts, acks)
+	}
+}
+
+func TestWorkflowRemindersRestartRecoversUnackedAttempt(t *testing.T) {
+	store := openWorkflowTestStore(t)
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	reminderCase(t, store, "restart", "test", now.Add(-25*time.Hour), CaseWaitingDeployment)
+	firstCalls, secondCalls := 0, 0
+	first := NewWorkflowReminderServiceWithLease(store, func() time.Time { return now }, 24*time.Hour, 5*time.Minute, func(context.Context, WorkflowReminder) error { firstCalls++; return nil })
+	_ = first.Poll(context.Background())
+	now = now.Add(5 * time.Minute)
+	restarted := NewWorkflowReminderServiceWithLease(store, func() time.Time { return now }, 24*time.Hour, 5*time.Minute, func(context.Context, WorkflowReminder) error { secondCalls++; return nil })
+	_ = restarted.Poll(context.Background())
+	if firstCalls != 1 || secondCalls != 1 {
+		t.Fatalf("calls=%d/%d", firstCalls, secondCalls)
 	}
 }
 
@@ -79,34 +198,30 @@ func TestWorkflowRemindersSkipsTerminalProductionAndSnoozedCases(t *testing.T) {
 	}
 }
 
-func TestWorkflowRemindersConcurrentPollDoesNotSpam(t *testing.T) {
+func TestWorkflowRemindersSnoozeHidesAlreadyPendingDelivery(t *testing.T) {
 	store := openWorkflowTestStore(t)
 	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
-	reminderCase(t, store, "race", "test", now.Add(-25*time.Hour), CaseWaitingDeployment)
-	var mu sync.Mutex
-	deliveries := 0
-	deliver := func(_ context.Context, _ WorkflowReminder) error { mu.Lock(); deliveries++; mu.Unlock(); return nil }
-	first := NewWorkflowReminderService(store, func() time.Time { return now }, 24*time.Hour, deliver)
-	second := NewWorkflowReminderService(store, func() time.Time { return now }, 24*time.Hour, deliver)
-	var wg sync.WaitGroup
-	for _, service := range []*WorkflowReminderService{first, second} {
-		wg.Add(1)
-		go func(service *WorkflowReminderService) { defer wg.Done(); _ = service.Poll(context.Background()) }(service)
+	reminderCase(t, store, "pending-snooze", "test", now.Add(-25*time.Hour), CaseWaitingDeployment)
+	service := NewWorkflowReminderServiceWithLease(store, func() time.Time { return now }, 24*time.Hour, 5*time.Minute, func(context.Context, WorkflowReminder) error { return nil })
+	if err := service.Poll(context.Background()); err != nil {
+		t.Fatal(err)
 	}
-	wg.Wait()
-	if deliveries != 1 {
-		t.Fatalf("deliveries=%d", deliveries)
+	if err := service.Snooze(context.Background(), "pending-snooze", now.Add(time.Hour), "alice", "snooze-pending"); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := service.Pending(context.Background())
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("snoozed pending=%+v err=%v", pending, err)
 	}
 }
 
 func reminderCase(t *testing.T, store *CaseStore, id, env string, waitingSince time.Time, status CaseStatus) IncidentCase {
 	t.Helper()
-	created := waitingSince.Add(-time.Hour)
-	initialStatus := status
+	created, initial := waitingSince.Add(-time.Hour), status
 	if status == CaseWaitingDeployment {
-		initialStatus = CaseMerging
+		initial = CaseMerging
 	}
-	incident := IncidentCase{ID: id, BugID: "bug-" + id, Environment: env, Status: initialStatus, CycleNumber: 1, CurrentAttemptID: "attempt-" + id, Version: 1, CreatedAt: created, UpdatedAt: waitingSince}
+	incident := IncidentCase{ID: id, BugID: "bug-" + id, Environment: env, Status: initial, CycleNumber: 1, CurrentAttemptID: "attempt-" + id, Version: 1, CreatedAt: created, UpdatedAt: waitingSince}
 	if status == CaseFixedVerified {
 		closed := waitingSince
 		incident.ClosedAt = &closed

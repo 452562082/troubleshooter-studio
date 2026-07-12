@@ -2,10 +2,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   approveIncidentFix,
   approveIncidentMerge,
+  ackIncidentWorkflowReminder,
   cancelIncidentAttempt,
   continueIncidentCase,
   getIncidentCase,
   listIncidentCases,
+  listPendingIncidentWorkflowReminders,
   notifyIncidentDeployed,
   normalizeIncidentCaseEvent,
   startIncidentCase,
@@ -45,6 +47,19 @@ describe('incident workflow bridge', () => {
 
   it('returns an empty list in browser preview', async () => {
     await expect(listIncidentCases()).resolves.toEqual([])
+    await expect(listPendingIncidentWorkflowReminders()).resolves.toEqual([])
+    await expect(ackIncidentWorkflowReminder({ case_id: 'case-1', reservation_key: 'slot-1', delivery_attempt: 1, actor_id: 'desktop-root' })).rejects.toThrow(/桌面 app/)
+  })
+
+  it('forwards durable reminder pull and acknowledgement', async () => {
+    const reminder = { case_id: 'case-1', reservation_key: 'slot-1', delivery_attempt: 1 }
+    const list = vi.fn().mockResolvedValue([reminder])
+    const ack = vi.fn().mockResolvedValue(undefined)
+    ;(window as any).go = { main: { App: { ListPendingIncidentWorkflowReminders: list, AckIncidentWorkflowReminder: ack } } }
+    await expect(listPendingIncidentWorkflowReminders()).resolves.toEqual([reminder])
+    const input = { ...reminder, actor_id: 'desktop-root' }
+    await ackIncidentWorkflowReminder(input)
+    expect(ack).toHaveBeenCalledWith(input)
   })
 
   it('rejects every mutation in browser preview with a desktop-only error', async () => {

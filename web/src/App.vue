@@ -1,8 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
+import { EventsOn } from '../wailsjs/runtime/runtime'
 import ToastContainer from './components/ToastContainer.vue'
+import { ackIncidentWorkflowReminder, listPendingIncidentWorkflowReminders, type WorkflowReminder } from './lib/bridge'
 import { setupGlobalLogBridges, useLogStore, pushLog } from './lib/logStore'
+import { toast } from './lib/toast'
 // Vite URL import:assets/app-icon.svg 会被打进 bundle,<img src> 直接用。
 // 用 app-icon(方形,1024×1024 viewBox) 而不是 logo.svg(宽 780×220)当侧边栏品牌
 // 标记——侧边栏宽 220px,方形 icon 挤一下更合适。
@@ -13,7 +16,41 @@ const currentPath = computed(() => route.path)
 
 // 全局日志收集:install:log / analyze:log 等事件桥接进 logStore,所有页面都能往里塞,
 // LogsPage 统一展示。App 启动挂一次。
-onMounted(() => setupGlobalLogBridges())
+let unlistenWorkflowReminders: (() => void) | undefined
+const handledWorkflowReminders = new Set<string>()
+
+async function handleWorkflowReminder(reminder: WorkflowReminder) {
+  if (!reminder?.reservation_key || handledWorkflowReminders.has(reminder.reservation_key)) return
+  handledWorkflowReminders.add(reminder.reservation_key)
+  try {
+    toast.info(`Bug ${reminder.bug_id || ''} 已等待人工部署超过 24 小时`)
+  } catch (error) {
+    handledWorkflowReminders.delete(reminder.reservation_key)
+    pushLog('system', 'warn', `故障闭环提醒展示失败: ${error instanceof Error ? error.message : String(error)}`)
+    return
+  }
+  try {
+    await ackIncidentWorkflowReminder({ case_id: reminder.case_id, reservation_key: reminder.reservation_key, delivery_attempt: reminder.delivery_attempt, actor_id: 'desktop-root' })
+  } catch (error) {
+    handledWorkflowReminders.delete(reminder.reservation_key)
+    pushLog('system', 'warn', `故障闭环提醒确认失败: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+onMounted(async () => {
+  setupGlobalLogBridges()
+  unlistenWorkflowReminders = EventsOn('incident-workflow:reminder', (reminder: WorkflowReminder) => { void handleWorkflowReminder(reminder) })
+  try {
+    for (const reminder of await listPendingIncidentWorkflowReminders()) await handleWorkflowReminder(reminder)
+  } catch (error) {
+    pushLog('system', 'warn', `读取待确认故障闭环提醒失败: ${error instanceof Error ? error.message : String(error)}`)
+  }
+})
+
+onUnmounted(() => {
+  unlistenWorkflowReminders?.()
+  unlistenWorkflowReminders = undefined
+})
 // 给 main.ts 里的 errorHandler / window.error / unhandledrejection 留个钩子,
 // 它们触发时除了红 banner 还把错误塞进 logStore —— 即便某页面白屏,侧栏「日志」永远
 // 可点(侧栏不进 keep-alive 子树),用户切过去就能看到完整堆栈 + 时间 + 当前路由。

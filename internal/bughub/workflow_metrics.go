@@ -2,6 +2,7 @@ package bughub
 
 import (
 	"context"
+	"math"
 	"sort"
 	"strconv"
 	"time"
@@ -83,9 +84,9 @@ func FoldWorkflowMetrics(now time.Time, histories []WorkflowCaseHistory) Workflo
 		incident := history.Case
 		if incident.Status != CaseLegacyArchived {
 			if incident.ClosedAt != nil {
-				metrics.CompletedCases++
+				metrics.CompletedCases = saturatingAddInt(metrics.CompletedCases, 1)
 			} else {
-				metrics.OpenCases++
+				metrics.OpenCases = saturatingAddInt(metrics.OpenCases, 1)
 			}
 		}
 
@@ -111,28 +112,29 @@ func FoldWorkflowMetrics(now time.Time, histories []WorkflowCaseHistory) Workflo
 				d := at.Sub(startedAt)
 				durations[stage] = append(durations[stage], d)
 				if stage == WorkflowStageDeploymentWait {
-					metrics.HumanDeploymentWait += d
+					metrics.HumanDeploymentWait = saturatingAddDuration(metrics.HumanDeploymentWait, d)
 				}
 			}
 			if isWorkflowBlocker(event.ToStatus) {
-				metrics.BlockerDistribution[string(event.ToStatus)]++
+				key := string(event.ToStatus)
+				metrics.BlockerDistribution[key] = saturatingAddInt(metrics.BlockerDistribution[key], 1)
 			}
 			if isAutomationOutcome(event.ToStatus) {
-				eligible++
+				eligible = saturatingAddInt(eligible, 1)
 				if event.ActorType != "user" && event.ActorType != "human" {
-					automatic++
+					automatic = saturatingAddInt(automatic, 1)
 				}
 			}
 			if event.FromStatus == CaseRegressionValidating && (event.ToStatus == CaseFixedVerified || event.ToStatus == CaseStillReproduces) {
-				regressionOutcomes++
+				regressionOutcomes = saturatingAddInt(regressionOutcomes, 1)
 				if event.ToStatus == CaseStillReproduces {
-					still++
+					still = saturatingAddInt(still, 1)
 				}
 				if !firstRegressionSeen {
 					firstRegressionSeen = true
-					firstRegressionCases++
+					firstRegressionCases = saturatingAddInt(firstRegressionCases, 1)
 					if event.ToStatus == CaseFixedVerified {
-						firstRegressionSuccesses++
+						firstRegressionSuccesses = saturatingAddInt(firstRegressionSuccesses, 1)
 					}
 				}
 			}
@@ -160,15 +162,15 @@ func FoldWorkflowMetrics(now time.Time, histories []WorkflowCaseHistory) Workflo
 			if attempt.Phase == PhaseLegacy {
 				continue
 			}
-			metrics.AgentExecutionDuration += attempt.Usage.Duration
-			metrics.AgentInputTokens += attempt.Usage.InputTokens
-			metrics.AgentOutputTokens += attempt.Usage.OutputTokens
+			metrics.AgentExecutionDuration = saturatingAddDuration(metrics.AgentExecutionDuration, attempt.Usage.Duration)
+			metrics.AgentInputTokens = saturatingAddInt64(metrics.AgentInputTokens, attempt.Usage.InputTokens)
+			metrics.AgentOutputTokens = saturatingAddInt64(metrics.AgentOutputTokens, attempt.Usage.OutputTokens)
 			key := string(attempt.Phase) + ":" + string(attempt.Mode) + ":" + strconv.Itoa(attempt.CycleNumber)
-			attemptGroups[key]++
+			attemptGroups[key] = saturatingAddInt(attemptGroups[key], 1)
 		}
 		for _, count := range attemptGroups {
 			if count > 1 {
-				metrics.RetryCount += count - 1
+				metrics.RetryCount = saturatingAddInt(metrics.RetryCount, count-1)
 			}
 		}
 	}
@@ -185,6 +187,30 @@ func FoldWorkflowMetrics(now time.Time, histories []WorkflowCaseHistory) Workflo
 		metrics.StillReproducesRate = float64(still) / float64(regressionOutcomes)
 	}
 	return metrics
+}
+
+func saturatingAddInt(left, right int) int {
+	if right > 0 && left > math.MaxInt-right {
+		return math.MaxInt
+	}
+	if right < 0 && left < math.MinInt-right {
+		return math.MinInt
+	}
+	return left + right
+}
+
+func saturatingAddInt64(left, right int64) int64 {
+	if right > 0 && left > math.MaxInt64-right {
+		return math.MaxInt64
+	}
+	if right < 0 && left < math.MinInt64-right {
+		return math.MinInt64
+	}
+	return left + right
+}
+
+func saturatingAddDuration(left, right time.Duration) time.Duration {
+	return time.Duration(saturatingAddInt64(int64(left), int64(right)))
 }
 
 func metricStageForStatus(status CaseStatus) string {

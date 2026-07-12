@@ -69,6 +69,7 @@ export interface WorkflowMetrics {
   first_regression_success_rate: number
   still_reproduces_rate: number
 }
+export interface WorkflowReminder { case_id: string; bug_id: string; environment: string; waiting_since: string; waiting_age: number; sequence: number; reservation_key: string; delivery_attempt: number }
 
 export interface IncidentCaseDetail {
   case: IncidentCase
@@ -116,6 +117,17 @@ export async function listIncidentCases(): Promise<IncidentCase[]> {
 export async function getIncidentWorkflowMetrics(): Promise<WorkflowMetrics> {
   if (!isDesktop()) return emptyWorkflowMetrics()
   return { ...emptyWorkflowMetrics(), ...(await App.GetIncidentWorkflowMetrics()) } as WorkflowMetrics
+}
+
+export async function listPendingIncidentWorkflowReminders(): Promise<WorkflowReminder[]> {
+  if (!isDesktop()) return []
+  const result = await App.ListPendingIncidentWorkflowReminders()
+  return Array.isArray(result) ? result as WorkflowReminder[] : []
+}
+
+export async function ackIncidentWorkflowReminder(input: { case_id: string; reservation_key: string; delivery_attempt: number; actor_id: string }): Promise<void> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  await App.AckIncidentWorkflowReminder(input)
 }
 
 export async function getIncidentCase(caseID: string): Promise<IncidentCaseDetail> {

@@ -148,6 +148,50 @@ func TestPollWorkflowRemindersUsesLocalWorkflowEvent(t *testing.T) {
 	if name != incidentWorkflowReminderEvent || !ok || reminder.CaseID != incident.ID {
 		t.Fatalf("event=%q payload=%+v", name, payload)
 	}
+	pending, err := app.ListPendingIncidentWorkflowReminders()
+	if err != nil || len(pending) != 1 || pending[0].ReservationKey != reminder.ReservationKey {
+		t.Fatalf("pending=%+v err=%v", pending, err)
+	}
+	if err := app.AckIncidentWorkflowReminder(AckIncidentWorkflowReminderInput{CaseID: reminder.CaseID, ReservationKey: reminder.ReservationKey, DeliveryAttempt: reminder.DeliveryAttempt, ActorID: "desktop-root"}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = app.ListPendingIncidentWorkflowReminders()
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pending after ack=%+v err=%v", pending, err)
+	}
+}
+
+func TestPollWorkflowRemindersWithoutRuntimeRemainsPendingForLateMount(t *testing.T) {
+	app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "reminder-no-runtime.db"))
+	waitingSince := time.Now().UTC().Add(-25 * time.Hour)
+	incident := bughub.IncidentCase{ID: "case-no-runtime", BugID: "bug-no-runtime", Environment: "test", Status: bughub.CaseMerging, CycleNumber: 1, Version: 1, CreatedAt: waitingSince.Add(-time.Hour), UpdatedAt: waitingSince}
+	if err := store.CreateCase(context.Background(), incident); err != nil {
+		t.Fatal(err)
+	}
+	event := bughub.TransitionEvent{ID: "wait-no-runtime", CaseID: incident.ID, FromStatus: bughub.CaseMerging, ToStatus: bughub.CaseWaitingDeployment, EventType: "merge_pushed", ActorType: "git", ActorID: "git", IdempotencyKey: "wait-no-runtime", PayloadJSON: []byte(`{}`), CreatedAt: waitingSince}
+	if _, _, err := store.Transition(context.Background(), incident.ID, 1, bughub.CaseWaitingDeployment, event); err != nil {
+		t.Fatal(err)
+	}
+
+	app.pollWorkflowReminders(context.Background())
+
+	pending, err := app.ListPendingIncidentWorkflowReminders()
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending=%+v err=%v", pending, err)
+	}
+	events, err := store.ListEvents(context.Background(), incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundFailure := false
+	for _, item := range events {
+		if item.EventType == "deployment_reminder_delivery_failed" {
+			foundFailure = true
+		}
+	}
+	if !foundFailure {
+		t.Fatal("missing durable delivery failure audit")
+	}
 }
 
 func TestStartIncidentCaseValidatesScalarsBeforeOpeningRuntime(t *testing.T) {

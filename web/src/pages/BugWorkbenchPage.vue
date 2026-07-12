@@ -102,7 +102,6 @@ const platformDraft = ref({
   poll_interval_minutes: 5,
 })
 let unlistenInvestigationEvents: (() => void) | undefined
-let unlistenWorkflowReminders: (() => void) | undefined
 
 const incidentWorkflow = useIncidentCase({ listCases: listIncidentCases, getCase: getIncidentCase })
 const incidentCases = incidentWorkflow.cases
@@ -348,10 +347,6 @@ watch(outputTab, () => {
 
 onMounted(async () => {
   setupInvestigationEventBridge()
-  unlistenWorkflowReminders = EventsOn('incident-workflow:reminder', (reminder: { bug_id?: string; waiting_age?: number }) => {
-    toast.info(`Bug ${reminder?.bug_id || ''} 已等待人工部署超过 24 小时`)
-    void loadWorkflowMetrics()
-  })
   await Promise.all([loadInstalledBots(), loadPlatforms(), loadBugs(), loadHookBase(), loadWorkflowMetrics()])
 })
 
@@ -359,10 +354,6 @@ onUnmounted(() => {
   if (unlistenInvestigationEvents) {
     unlistenInvestigationEvents()
     unlistenInvestigationEvents = undefined
-  }
-  if (unlistenWorkflowReminders) {
-    unlistenWorkflowReminders()
-    unlistenWorkflowReminders = undefined
   }
 })
 

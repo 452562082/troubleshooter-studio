@@ -32,6 +32,27 @@ export interface YAMLGenEnvironment {
   api_domain: string
   web_domain: string
   is_prod: boolean
+  deployment_verification?: DeploymentVerificationState
+}
+
+export interface DeploymentVerificationState {
+  provider: 'manual' | 'http' | 'k8s'
+  http: { url: string; json_pointer: string }
+  k8s: {
+    cluster: string
+    namespace: string
+    deployments_by_repo: Record<string, string>
+    commit_annotation: string
+    image_label: string
+  }
+}
+
+export function emptyDeploymentVerification(): DeploymentVerificationState {
+  return {
+    provider: 'manual',
+    http: { url: '', json_pointer: '' },
+    k8s: { cluster: '', namespace: '', deployments_by_repo: {}, commit_annotation: '', image_label: '' },
+  }
 }
 
 export interface YAMLGenRepo {
@@ -207,6 +228,26 @@ export function generateYAML(ctx: YAMLGenContext): string {
     if (apiD) lines.push(`    api_domain: ${yamlStr(apiD)}     # 后端接口(带 http/https 前缀更明确;不带视为 https)`)
     if (webD) lines.push(`    web_domain: ${yamlStr(webD)}     # 前端入口(同上)`)
     lines.push(`    is_prod: ${env.is_prod}         # 生产环境标记:true 时机器人默认更保守、查询前二次确认`)
+    const verification = env.deployment_verification
+    if (verification?.provider === 'http') {
+      lines.push('    deployment_verification:')
+      lines.push('      provider: http')
+      lines.push('      http:')
+      lines.push(`        url: ${yamlStr(verification.http.url)}`)
+      lines.push(`        json_pointer: ${yamlStr(verification.http.json_pointer)}`)
+    } else if (verification?.provider === 'k8s') {
+      lines.push('    deployment_verification:')
+      lines.push('      provider: k8s')
+      lines.push('      k8s:')
+      lines.push(`        cluster: ${yamlStr(verification.k8s.cluster)}`)
+      lines.push(`        namespace: ${yamlStr(verification.k8s.namespace)}`)
+      lines.push('        deployments_by_repo:')
+      for (const [repo, deployment] of Object.entries(verification.k8s.deployments_by_repo).sort(([a], [b]) => a.localeCompare(b))) {
+        if (repo && deployment) lines.push(`          ${yamlStr(repo)}: ${yamlStr(deployment)}`)
+      }
+      if (verification.k8s.commit_annotation) lines.push(`        commit_annotation: ${yamlStr(verification.k8s.commit_annotation)}`)
+      if (verification.k8s.image_label) lines.push(`        image_label: ${yamlStr(verification.k8s.image_label)}`)
+    }
   }
 
   // repos

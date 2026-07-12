@@ -43,10 +43,25 @@ environments:
     api_domain: api-dev.example.com  # [required if applicable] 主 API 入口
     web_domain: www-dev.example.com  # [optional]
     is_prod: false                   # [required]
+    deployment_verification:        # [optional] 不填等价 manual；Studio 不执行部署
+      provider: http                 # manual / http / k8s
+      http:                          # provider=http 时必填；只发无鉴权 GET
+        url: "https://api-dev.example.com/version"
+        json_pointer: "/git/commit" # RFC 6901；可指向 commit 字符串或 repo→commit 对象
   - id: prod
     api_domain: api.example.com
     web_domain: www.example.com
     is_prod: true
+    # K8s 示例（与 http 互斥）：
+    # deployment_verification:
+    #   provider: k8s
+    #   k8s:
+    #     cluster: prod-cluster
+    #     namespace: my-system
+    #     deployments_by_repo:       # key 必须是 repos[].name
+    #       user-service: user-service
+    #     commit_annotation: app.example.com/git-commit
+    #     # image_label: git-commit  # 与 commit_annotation 二选一
 
 # ---------------------------------------------------------------------------
 # 4. 代码仓库清单 —— 生成 env-branch-map.yaml / repo-stack-map.yaml

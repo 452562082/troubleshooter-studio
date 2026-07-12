@@ -149,6 +149,12 @@ func Validate(c *SystemConfig) error {
 		}
 	}
 
+	for i := range c.Environments {
+		if err := validateDeploymentVerification(c.Environments[i], repoNames); err != nil {
+			return fmt.Errorf("environments[%s].deployment_verification: %w", c.Environments[i].ID, err)
+		}
+	}
+
 	if err := validateServiceTopology(c); err != nil {
 		return err
 	}
@@ -163,6 +169,59 @@ func Validate(c *SystemConfig) error {
 
 	if c.Meta.SchemaVersion == "" {
 		return fmt.Errorf("meta.schema_version required")
+	}
+	return nil
+}
+
+func validateDeploymentVerification(env Environment, repoNames map[string]bool) error {
+	cfg := env.DeploymentVerification
+	switch cfg.EffectiveProvider() {
+	case DeploymentVerificationProviderManual:
+		if !cfg.HTTP.IsZero() || !cfg.K8s.IsZero() {
+			return fmt.Errorf("manual provider must not include http or k8s blocks")
+		}
+	case DeploymentVerificationProviderHTTP:
+		if !cfg.K8s.IsZero() {
+			return fmt.Errorf("http provider must not include k8s block")
+		}
+		if strings.TrimSpace(cfg.HTTP.URL) == "" {
+			return fmt.Errorf("http.url required")
+		}
+		if strings.TrimSpace(cfg.HTTP.JSONPointer) == "" {
+			return fmt.Errorf("http.json_pointer required")
+		}
+		if !strings.HasPrefix(strings.TrimSpace(cfg.HTTP.JSONPointer), "/") {
+			return fmt.Errorf("http.json_pointer must be an RFC 6901 pointer starting with '/'")
+		}
+	case DeploymentVerificationProviderK8s:
+		if !cfg.HTTP.IsZero() {
+			return fmt.Errorf("k8s provider must not include http block")
+		}
+		if strings.TrimSpace(cfg.K8s.Cluster) == "" {
+			return fmt.Errorf("k8s.cluster required")
+		}
+		if strings.TrimSpace(cfg.K8s.Namespace) == "" {
+			return fmt.Errorf("k8s.namespace required")
+		}
+		if len(cfg.K8s.DeploymentsByRepo) == 0 {
+			return fmt.Errorf("k8s.deployments_by_repo required")
+		}
+		if strings.TrimSpace(cfg.K8s.CommitAnnotation) == "" && strings.TrimSpace(cfg.K8s.ImageLabel) == "" {
+			return fmt.Errorf("k8s.commit_annotation or image_label required")
+		}
+		if strings.TrimSpace(cfg.K8s.CommitAnnotation) != "" && strings.TrimSpace(cfg.K8s.ImageLabel) != "" {
+			return fmt.Errorf("k8s.commit_annotation and image_label are mutually exclusive")
+		}
+		for repo, deployment := range cfg.K8s.DeploymentsByRepo {
+			if !repoNames[repo] {
+				return fmt.Errorf("k8s.deployments_by_repo references unknown repo %q", repo)
+			}
+			if strings.TrimSpace(deployment) == "" {
+				return fmt.Errorf("k8s.deployments_by_repo[%s] required", repo)
+			}
+		}
+	default:
+		return fmt.Errorf("provider=%q invalid (valid: manual/http/k8s)", cfg.Provider)
 	}
 	return nil
 }

@@ -13,12 +13,14 @@
 //   - probe(kind, url) —— 用户在某字段输入时触发 800ms 防抖探测,父端接住
 //   - remove() —— 用户点 × 删除本行,父端按 index 删
 
+import { computed, useId } from 'vue'
 import type { URLProbeState } from '../lib/probeTypes'
+import { emptyDeploymentVerification, type DeploymentVerificationState } from '../lib/yamlGenerator'
 import URLProbeBadge from './URLProbeBadge.vue'
 
-defineProps<{
+const props = defineProps<{
   /** 本行的环境对象;reactive 直引,改字段不必 emit */
-  env: { id: string; api_domain: string; web_domain: string; is_prod: boolean }
+  env: { id: string; api_domain: string; web_domain: string; is_prod: boolean; deployment_verification?: DeploymentVerificationState }
   /** API 域名探测态;undefined / status='idle' 时不显示 badge */
   apiProbe: URLProbeState | undefined
   /** Web 域名探测态 */
@@ -30,6 +32,24 @@ defineProps<{
   /** 删除按钮是否 disabled(父端根据 environments.length 算,只剩 1 行时 disabled) */
   disableRemove: boolean
 }>()
+
+if (!props.env.deployment_verification) props.env.deployment_verification = emptyDeploymentVerification()
+const verification = computed(() => props.env.deployment_verification as DeploymentVerificationState)
+const fieldID = useId()
+const deploymentMapText = computed({
+  get: () => Object.entries(verification.value.k8s.deployments_by_repo).map(([repo, deployment]) => `${repo}=${deployment}`).join('\n'),
+  set: (value: string) => {
+    const mappings: Record<string, string> = {}
+    for (const line of value.split('\n')) {
+      const separator = line.indexOf('=')
+      if (separator <= 0) continue
+      const repo = line.slice(0, separator).trim()
+      const deployment = line.slice(separator + 1).trim()
+      if (repo && deployment) mappings[repo] = deployment
+    }
+    verification.value.k8s.deployments_by_repo = mappings
+  },
+})
 
 const emit = defineEmits<{
   probe: [kind: 'api' | 'web', url: string]
@@ -88,5 +108,64 @@ const emit = defineEmits<{
         &times;
       </button>
     </div>
+    <fieldset class="deployment-verification-fields">
+      <legend>部署版本验证</legend>
+      <div class="form-group compact">
+        <label :for="`${fieldID}-provider`">验证方式</label>
+        <select :id="`${fieldID}-provider`" v-model="verification.provider">
+          <option value="manual">人工提供版本证明</option>
+          <option value="http">HTTP 版本接口</option>
+          <option value="k8s">K8s Deployment</option>
+        </select>
+      </div>
+      <template v-if="verification.provider === 'http'">
+        <div class="form-group compact">
+          <label :for="`${fieldID}-http-url`">版本接口 URL</label>
+          <input :id="`${fieldID}-http-url`" v-model="verification.http.url" type="url" placeholder="https://api-test.example.com/version" />
+        </div>
+        <div class="form-group compact">
+          <label :for="`${fieldID}-json-pointer`">JSON Pointer</label>
+          <input :id="`${fieldID}-json-pointer`" v-model="verification.http.json_pointer" type="text" placeholder="/git/commit" />
+        </div>
+      </template>
+      <template v-else-if="verification.provider === 'k8s'">
+        <div class="form-group compact">
+          <label :for="`${fieldID}-cluster`">集群</label>
+          <input :id="`${fieldID}-cluster`" v-model="verification.k8s.cluster" type="text" />
+        </div>
+        <div class="form-group compact">
+          <label :for="`${fieldID}-namespace`">Namespace</label>
+          <input :id="`${fieldID}-namespace`" v-model="verification.k8s.namespace" type="text" />
+        </div>
+        <div class="form-group compact">
+          <label :for="`${fieldID}-deployments`">仓库到 Deployment 映射（每行 repo=deployment）</label>
+          <textarea :id="`${fieldID}-deployments`" v-model="deploymentMapText" rows="2" placeholder="admin-web=admin-web" />
+        </div>
+        <div class="form-group compact">
+          <label :for="`${fieldID}-annotation`">Commit annotation</label>
+          <input :id="`${fieldID}-annotation`" v-model="verification.k8s.commit_annotation" type="text" placeholder="app.example.com/git-commit" @input="verification.k8s.image_label = ''" />
+        </div>
+        <div class="form-group compact">
+          <label :for="`${fieldID}-image-label`">或 image label</label>
+          <input :id="`${fieldID}-image-label`" v-model="verification.k8s.image_label" type="text" placeholder="git-commit" @input="verification.k8s.commit_annotation = ''" />
+        </div>
+      </template>
+    </fieldset>
   </div>
 </template>
+
+<style scoped>
+.deployment-verification-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border-color, #d1d5db);
+  border-radius: 8px;
+}
+.deployment-verification-fields legend { padding: 0 6px; font-weight: 600; }
+.deployment-verification-fields input:focus-visible,
+.deployment-verification-fields select:focus-visible,
+.deployment-verification-fields textarea:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+</style>

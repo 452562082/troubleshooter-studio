@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import yaml from 'js-yaml'
 import { generateYAML, type ServiceTopologyState, type YAMLGenContext } from './yamlGenerator'
-import { importServiceTopologyOverrides } from './yamlImporter'
+import { importServiceTopologyOverrides, parseEnvironment } from './yamlImporter'
 
 // 最小可工作 ctx 工厂:测试用 stub。各测试按需 spread + 覆盖具体字段。
 function makeCtx(overrides: Partial<YAMLGenContext> = {}): YAMLGenContext {
@@ -58,6 +58,53 @@ function makeCtx(overrides: Partial<YAMLGenContext> = {}): YAMLGenContext {
 }
 
 describe('generateYAML', () => {
+  it('round-trips exact HTTP deployment verification values after import restoration', () => {
+    const env = parseEnvironment({
+      id: 'test', api_domain: '', web_domain: '', is_prod: false,
+      deployment_verification: {
+        provider: 'http',
+        http: { url: 'https://admin-test.example.com/version', json_pointer: '/git/commit' },
+      },
+    })
+    const parsed = yaml.load(generateYAML(makeCtx({ environments: [env] }))) as any
+    expect(parsed.environments[0].deployment_verification).toEqual({
+      provider: 'http',
+      http: { url: 'https://admin-test.example.com/version', json_pointer: '/git/commit' },
+    })
+  })
+
+  it('round-trips exact K8s deployment verification values after import restoration', () => {
+    const env = parseEnvironment({
+      id: 'test', api_domain: '', web_domain: '', is_prod: false,
+      deployment_verification: {
+        provider: 'k8s',
+        k8s: {
+          cluster: 'test-cluster', namespace: 'admin-test',
+          deployments_by_repo: { 'admin-web': 'admin-web' },
+          commit_annotation: 'app.example.com/git-commit',
+        },
+      },
+    })
+    const parsed = yaml.load(generateYAML(makeCtx({ environments: [env] }))) as any
+    expect(parsed.environments[0].deployment_verification).toEqual({
+      provider: 'k8s',
+      k8s: {
+        cluster: 'test-cluster', namespace: 'admin-test',
+        deployments_by_repo: { 'admin-web': 'admin-web' },
+        commit_annotation: 'app.example.com/git-commit',
+      },
+    })
+  })
+
+  it('keeps legacy and explicit manual environment YAML byte-semantically identical', () => {
+    const legacy = makeCtx({ environments: [{ id: 'test', api_domain: '', web_domain: '', is_prod: false }] })
+    const manual = makeCtx({ environments: [{
+      id: 'test', api_domain: '', web_domain: '', is_prod: false,
+      deployment_verification: { provider: 'manual', http: { url: '', json_pointer: '' }, k8s: { cluster: '', namespace: '', deployments_by_repo: {}, commit_annotation: '', image_label: '' } },
+    } as any] })
+    expect(generateYAML(manual)).toBe(generateYAML(legacy))
+  })
+
   it('omits code_intelligence by default', () => {
     expect(generateYAML(makeCtx())).not.toContain('code_intelligence:')
   })

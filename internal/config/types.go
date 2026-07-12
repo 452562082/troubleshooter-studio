@@ -89,11 +89,12 @@ func (a Agent) ModelForTarget(target string) string {
 }
 
 type Environment struct {
-	ID        string   `yaml:"id"`
-	Aliases   []string `yaml:"aliases"`
-	APIDomain string   `yaml:"api_domain"`
-	WebDomain string   `yaml:"web_domain"`
-	IsProd    bool     `yaml:"is_prod"`
+	ID                     string                       `yaml:"id"`
+	Aliases                []string                     `yaml:"aliases"`
+	APIDomain              string                       `yaml:"api_domain"`
+	WebDomain              string                       `yaml:"web_domain"`
+	IsProd                 bool                         `yaml:"is_prod"`
+	DeploymentVerification DeploymentVerificationConfig `yaml:"deployment_verification,omitempty"`
 }
 
 type Generation struct {

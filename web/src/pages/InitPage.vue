@@ -309,6 +309,7 @@ interface EnvItem {
   // vs "后端哪个接口报的错"。很多系统就一个域名,这栏留空也没关系。
   web_domain: string
   is_prod: boolean
+  deployment_verification?: import('../lib/yamlGenerator').DeploymentVerificationState
 }
 
 const environments = reactive<EnvItem[]>(
@@ -2782,7 +2783,7 @@ function generateYAML(): string {
   const ctx: YAMLGenContext = {
     system, agent, agentNameDefault: agentNameDefault.value,
     targetModels, enabledTargets, codeIntelligence, serviceTopology, enabledObservability,
-    environments: environments.map(e => ({ id: e.id, api_domain: e.api_domain, web_domain: e.web_domain, is_prod: e.is_prod })),
+    environments: environments.map(e => ({ id: e.id, api_domain: e.api_domain, web_domain: e.web_domain, is_prod: e.is_prod, deployment_verification: e.deployment_verification })),
     repos: repos.map(r => ({
       name: r.name, url: r.url, stack: r.stack, framework: r.framework,
       role: r.role, sub_path: r.sub_path,

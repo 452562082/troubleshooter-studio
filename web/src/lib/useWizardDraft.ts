@@ -21,7 +21,7 @@ import type { DSByService, DSScanState } from './useDataStoreState'
 import type { K8sRtWorkloadState } from './useK8sRtWorkloads'
 import type { RepoScanItem } from './useRepoScan'
 import type { ObsAccessMode } from './useObsAccessMode'
-import type { CodeIntelligenceState, ServiceTopologyState } from './yamlGenerator'
+import type { CodeIntelligenceState, DeploymentVerificationState, ServiceTopologyState } from './yamlGenerator'
 
 export const INIT_WIZARD_KEY = 'tsf-init-wizard-v1'
 export const INIT_KUBOARD_STATE_KEY = 'tsf-init-wizard-kuboard-state-v1'
@@ -34,6 +34,7 @@ export interface DraftEnvItem {
   api_domain: string
   web_domain: string
   is_prod: boolean
+  deployment_verification?: DeploymentVerificationState
 }
 
 /** Step 1 系统基本信息 */

@@ -14,6 +14,11 @@ environments:
     api_domain: api-dev.mall.example.com
     web_domain: www-dev.mall.example.com
     is_prod: false
+    deployment_verification:
+      provider: http
+      http:
+        url: "https://api-dev.mall.example.com/version"
+        json_pointer: "/git/commit"
   - id: prod
     api_domain: api.mall.example.com
     web_domain: www.mall.example.com

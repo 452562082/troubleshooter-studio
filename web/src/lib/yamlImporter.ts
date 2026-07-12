@@ -15,7 +15,9 @@ import type {
   CodeIntelligenceState,
   ServiceTopologyOverrideState,
   ServiceTopologyState,
+  DeploymentVerificationState,
 } from './yamlGenerator'
+import { emptyDeploymentVerification } from './yamlGenerator'
 import { VIA_GRAFANA_ELIGIBLE } from './yamlShared'
 
 /** yaml 字段值是否为模板占位符 "{{XYZ}}";占位符不应当作真值反填。 */
@@ -72,16 +74,42 @@ export interface ParsedEnv {
   api_domain: string
   web_domain: string
   is_prod: boolean
+  deployment_verification?: DeploymentVerificationState
 }
 
 /** parsed.environments[i] → ParsedEnv,字段全 fallback 空串/false。 */
 export function parseEnvironment(e: unknown): ParsedEnv {
   const o = (e ?? {}) as Record<string, unknown>
+  const raw = o.deployment_verification && typeof o.deployment_verification === 'object'
+    ? o.deployment_verification as Record<string, unknown>
+    : undefined
+  let deploymentVerification: DeploymentVerificationState | undefined
+  if (raw) {
+    const provider = raw.provider === 'http' || raw.provider === 'k8s' ? raw.provider : 'manual'
+    const http = raw.http && typeof raw.http === 'object' ? raw.http as Record<string, unknown> : {}
+    const k8s = raw.k8s && typeof raw.k8s === 'object' ? raw.k8s as Record<string, unknown> : {}
+    const mappings: Record<string, string> = {}
+    if (k8s.deployments_by_repo && typeof k8s.deployments_by_repo === 'object') {
+      for (const [repo, deployment] of Object.entries(k8s.deployments_by_repo as Record<string, unknown>)) {
+        if (typeof deployment === 'string') mappings[repo] = deployment
+      }
+    }
+    deploymentVerification = emptyDeploymentVerification()
+    deploymentVerification.provider = provider
+    deploymentVerification.http.url = typeof http.url === 'string' ? http.url : ''
+    deploymentVerification.http.json_pointer = typeof http.json_pointer === 'string' ? http.json_pointer : ''
+    deploymentVerification.k8s.cluster = typeof k8s.cluster === 'string' ? k8s.cluster : ''
+    deploymentVerification.k8s.namespace = typeof k8s.namespace === 'string' ? k8s.namespace : ''
+    deploymentVerification.k8s.deployments_by_repo = mappings
+    deploymentVerification.k8s.commit_annotation = typeof k8s.commit_annotation === 'string' ? k8s.commit_annotation : ''
+    deploymentVerification.k8s.image_label = typeof k8s.image_label === 'string' ? k8s.image_label : ''
+  }
   return {
     id: typeof o.id === 'string' ? o.id : '',
     api_domain: typeof o.api_domain === 'string' ? o.api_domain : '',
     web_domain: typeof o.web_domain === 'string' ? o.web_domain : '',
     is_prod: Boolean(o.is_prod),
+    ...(deploymentVerification ? { deployment_verification: deploymentVerification } : {}),
   }
 }
 
@@ -146,7 +174,7 @@ export interface ApplyImportContext {
   targetModels: Record<string, string>
   codeIntelligence: CodeIntelligenceState
   serviceTopology: ServiceTopologyState
-  environments: Array<{ id: string; api_domain: string; web_domain: string; is_prod: boolean }>
+  environments: ParsedEnv[]
   repos: any[]
   enabledSourceTypes: Record<string, boolean>
   enabledSourceOrder: string[]

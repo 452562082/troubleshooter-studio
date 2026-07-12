@@ -45,7 +45,7 @@ import BugCaseLifecycle, { type CasePrimaryAction } from '../components/BugCaseL
 import { copyToClipboard } from '../lib/clipboard'
 import { confirmDialog } from '../lib/confirm'
 import { toast, toastError } from '../lib/toast'
-import { useIncidentCase } from '../lib/useIncidentCase'
+import { botKeyForLegacyContinuation, continuationForDetail, useIncidentCase } from '../lib/useIncidentCase'
 
 const bugs = ref<BugRecord[]>([])
 const platforms = ref<BugPlatform[]>([])
@@ -106,6 +106,9 @@ const incidentDetail = incidentWorkflow.detail
 const incidentPending = incidentWorkflow.pending
 const incidentError = incidentWorkflow.error
 const incidentStartIDs = new Map<string, string>()
+const workbenchView = ref<'inbox' | 'cases'>('inbox')
+let workbenchViewChosen = false
+const explicitlySelectedBots = ref<Record<string, string>>({})
 
 const selectedBug = computed(() => bugs.value.find(b => b.id === selectedID.value) || bugs.value[0])
 const selectedPlatform = computed(() => platforms.value.find(p => p.id === selectedPlatformID.value))
@@ -274,6 +277,10 @@ const hookURL = computed(() => {
   const secret = p.hook_secret ? `?secret=${encodeURIComponent(p.hook_secret)}` : ''
   return `${hookBaseURL.value}/api/bug-hooks/${encodeURIComponent(p.id)}${secret}`
 })
+
+watch(incidentCases, items => {
+  if (items.length > 0 && !workbenchViewChosen) workbenchView.value = 'cases'
+}, { immediate: true })
 
 watch(selectedPlatform, (p) => {
   if (!p) return
@@ -707,6 +714,8 @@ async function startInvestigation() {
       input_json: { mode: 'reproduce', expected_behavior: bug.title || '', bug_steps: bug.steps || '', target_environment: bot.env || bug.env || '' },
     }))
     await incidentWorkflow.refreshDetail(incident.id)
+    workbenchView.value = 'cases'
+    workbenchViewChosen = true
     toast.success('故障闭环已启动')
   } catch (e) {
     toastError('启动故障闭环', e)
@@ -724,12 +733,9 @@ async function refreshIncidentWorkflow() {
   }
 }
 
-function workflowPhaseFor(detail: NonNullable<typeof incidentDetail.value>) {
-  const latest = [...detail.attempts].reverse().find(attempt => attempt.phase !== 'legacy')
-  if (detail.case.status === 'fix_failed') return 'fix' as const
-  if (latest?.phase === 'fix') return 'fix' as const
-  if (latest?.phase === 'investigation') return 'investigation' as const
-  return 'validation' as const
+function selectWorkbenchView(view: 'inbox' | 'cases') {
+  workbenchView.value = view
+  workbenchViewChosen = true
 }
 
 async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind']; input?: string; observedVersion?: string }) {
@@ -741,24 +747,38 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
     const updated = await incidentWorkflow.runOnce(key, async (): Promise<IncidentCase> => {
       const base = { case_id: incident.id, expected_version: incident.version, idempotency_key: key, actor_id: 'desktop-user' }
       if (payload.kind === 'continue_legacy' || payload.kind === 'start_validation') {
-        return startIncidentCase({ ...base, bug_id: incident.bug_id, bot_key: incident.selected_bot_key, input_json: { mode: 'reproduce' } })
+        const botKey = payload.kind === 'continue_legacy'
+          ? botKeyForLegacyContinuation(detail, selectedBug.value?.id || '', explicitlySelectedBots.value[incident.bug_id] || '')
+          : incident.selected_bot_key
+        if (!botKey) {
+          if (selectedBug.value?.id === incident.bug_id) selectedBotKey.value = ''
+          throw new Error('该历史记录没有机器人信息。请切换到 Bug 收件箱，重新选择当前 Bug 的机器人后再继续。')
+        }
+        return startIncidentCase({ ...base, bug_id: incident.bug_id, bot_key: botKey, input_json: { mode: 'reproduce' } })
       }
       if (payload.kind === 'supply_evidence' || payload.kind === 'continue_fix') {
-        return continueIncidentCase({ ...base, phase: workflowPhaseFor(detail), input_json: { user_input: payload.input || '' } })
+        const continuation = continuationForDetail(detail, payload.input || '')
+        return continueIncidentCase({ ...base, ...continuation })
+      }
+      if (payload.kind === 'supply_merge_decision') {
+        return continueIncidentCase({ ...base, phase: 'fix', input_json: { decision: 'resolve_merge_conflict', evidence: payload.input || '' } })
+      }
+      if (payload.kind === 'supply_deployment_proof') {
+        return continueIncidentCase({ ...base, phase: 'regression', input_json: { decision: 'update_deployment_proof', evidence: payload.input || '' } })
       }
       if (payload.kind === 'approve_fix') {
         const rootCause = [...detail.attempts].reverse().find(attempt => attempt.phase === 'investigation' && attempt.status === 'succeeded')
         if (!rootCause) throw new Error('未找到可授权的根因结论')
         return approveIncidentFix({ ...base, root_cause_attempt_id: rootCause.id })
       }
-      if (payload.kind === 'approve_merge' || payload.kind === 'retry_merge') {
+      if (payload.kind === 'approve_merge') {
         return approveIncidentMerge({
           ...base,
           fix_commits: Object.fromEntries(detail.code_changes.map(change => [change.repo, change.fix_commit])),
           target_branches: Object.fromEntries(detail.code_changes.map(change => [change.repo, change.target_environment_branch])),
         })
       }
-      if (payload.kind === 'notify_deployed' || payload.kind === 'retry_deployment') {
+      if (payload.kind === 'notify_deployed') {
         return notifyIncidentDeployed({ ...base, observed_version: payload.observedVersion || '' })
       }
       if (payload.kind === 'cancel_attempt') {
@@ -770,6 +790,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
     await incidentWorkflow.refreshDetail(updated.id)
     toast.success(payload.kind === 'continue_legacy' ? '已创建新一轮验证 Case' : '操作已提交')
   } catch (error) {
+    incidentWorkflow.error.value = error instanceof Error ? error.message : String(error)
     toastError('执行故障流程操作', error)
   }
 }
@@ -804,6 +825,7 @@ async function rememberSelectedBot(botKey: string) {
   selectedBotKey.value = botKey
   const bug = selectedBug.value
   if (!bug || !botKey) return
+  explicitlySelectedBots.value = { ...explicitlySelectedBots.value, [bug.id]: botKey }
   bugs.value = bugs.value.map(b => b.id === bug.id ? { ...b, selected_bot_key: botKey } : b)
   try {
     await saveBugSelectedBot({ bug_id: bug.id, bot_key: botKey })
@@ -1266,6 +1288,11 @@ function escapeRegExp(value: string): string {
       </button>
     </header>
 
+    <nav class="workbench-view-tabs" aria-label="Bug 工作台视图">
+      <button type="button" :class="{ active: workbenchView === 'inbox' }" :aria-current="workbenchView === 'inbox' ? 'page' : undefined" @click="selectWorkbenchView('inbox')">Bug 收件箱</button>
+      <button type="button" :class="{ active: workbenchView === 'cases' }" :aria-current="workbenchView === 'cases' ? 'page' : undefined" :disabled="incidentCases.length === 0 && !incidentDetail" @click="selectWorkbenchView('cases')">故障闭环 <span>{{ incidentCases.length }}</span></button>
+    </nav>
+
     <section class="platform-config" :class="{ open: configOpen }">
       <div class="platform-list">
         <div class="platform-tabs">
@@ -1444,7 +1471,7 @@ function escapeRegExp(value: string): string {
     </section>
 
     <BugCaseLifecycle
-      v-if="incidentCases.length > 0 || incidentDetail"
+      v-if="workbenchView === 'cases' && (incidentCases.length > 0 || incidentDetail)"
       :cases="incidentCases"
       :detail="incidentDetail"
       :pending="incidentPending"
@@ -1736,6 +1763,13 @@ function escapeRegExp(value: string): string {
 .bug-header { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
 .bug-header h1 { font-size: 24px; color: #0f172a; margin-bottom: 4px; }
 .bug-header p { color: #64748b; font-size: 13px; line-height: 1.5; }
+.workbench-view-tabs { display: flex; gap: 6px; min-width: 0; border-bottom: 1px solid var(--c-line); }
+.workbench-view-tabs button { min-height: 44px; padding: 8px 14px; border: 0; border-bottom: 3px solid transparent; background: transparent; color: var(--c-muted); font: inherit; font-weight: 600; cursor: pointer; }
+.workbench-view-tabs button:hover:not(:disabled) { color: var(--c-ink); background: var(--c-surf-2); }
+.workbench-view-tabs button.active { border-bottom-color: var(--c-accent); color: var(--c-ink); }
+.workbench-view-tabs button:focus-visible { outline: 3px solid rgba(37, 99, 235, .45); outline-offset: -3px; }
+.workbench-view-tabs button:disabled { opacity: .45; cursor: not-allowed; }
+.workbench-view-tabs span { margin-left: 4px; color: var(--c-muted); font-size: var(--fs-xs); }
 .platform-config {
   display: none; width: 100%; min-width: 0; box-sizing: border-box;
   border: 1px solid #e2e8f0; border-radius: 8px; background: #f8fafc; padding: 12px; gap: 10px;

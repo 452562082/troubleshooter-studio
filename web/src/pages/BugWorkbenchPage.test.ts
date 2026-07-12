@@ -1,6 +1,6 @@
 import { mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cancelBugInvestigation, discoverBots, generateBugContext, listBugs, listBugPlatforms, matchBugBots, previewBugAttachment, startBugInvestigation, listBugInvestigationRuns, saveBugPlatform, listIncidentCases, getIncidentCase, startIncidentCase } from '../lib/bridge'
+import { approveIncidentMerge, cancelBugInvestigation, continueIncidentCase, discoverBots, generateBugContext, getIncidentCase, listBugInvestigationRuns, listBugPlatforms, listBugs, listIncidentCases, matchBugBots, notifyIncidentDeployed, previewBugAttachment, saveBugPlatform, startBugInvestigation, startIncidentCase } from '../lib/bridge'
 import { copyToClipboard } from '../lib/clipboard'
 import BugWorkbenchPage from './BugWorkbenchPage.vue'
 
@@ -72,6 +72,9 @@ afterEach(() => {
   vi.mocked(listBugInvestigationRuns).mockResolvedValue([])
   vi.mocked(listIncidentCases).mockResolvedValue([])
   vi.mocked(getIncidentCase).mockReset()
+  vi.mocked(continueIncidentCase).mockReset()
+  vi.mocked(approveIncidentMerge).mockReset()
+  vi.mocked(notifyIncidentDeployed).mockReset()
   vi.mocked(listBugPlatforms).mockResolvedValue([])
   vi.mocked(listBugs).mockResolvedValue([])
   vi.mocked(matchBugBots).mockResolvedValue([])
@@ -85,6 +88,11 @@ afterEach(() => {
 
 function flushPromises() {
   return new Promise(resolve => setTimeout(resolve, 0))
+}
+
+function durableDetail(status: string, overrides: Record<string, unknown> = {}) {
+  const incident = { id: 'case-1', bug_id: 'zentao-577', source: 'zentao', system_id: 'base', environment: 'test', status, cycle_number: 1, current_attempt_id: 'attempt-1', selected_bot_key: 'base|codex', version: 7, created_at: '', updated_at: '' }
+  return { case: incident, attempts: [], artifacts: [], approvals: [], code_changes: [], deployment_observations: [], events: [], ...overrides }
 }
 
 describe('BugWorkbenchPage', () => {
@@ -957,5 +965,68 @@ describe('BugWorkbenchPage', () => {
     expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
       case_id: 'legacy-1', bug_id: 'zentao-577', expected_version: 3, bot_key: 'base|codex', actor_id: 'desktop-user',
     }))
+  })
+
+  it.each([
+    ['merge_conflict', 'approveIncidentMerge', 'resolve_merge_conflict', 'fix'],
+    ['deployment_unverified', 'notifyIncidentDeployed', 'update_deployment_proof', 'regression'],
+  ])('uses ContinueIncidentCase for %s recovery before the gated action', async (status, forbidden, decision, phase) => {
+    const snapshot = durableDetail(status)
+    vi.mocked(listIncidentCases).mockResolvedValue([snapshot.case as any])
+    vi.mocked(getIncidentCase).mockResolvedValue(snapshot as any)
+    vi.mocked(continueIncidentCase).mockResolvedValue({ ...snapshot.case, status: status === 'merge_conflict' ? 'waiting_merge_approval' : 'waiting_deployment', version: 8 } as any)
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises(); await flushPromises()
+
+    await wrapper.find('.primary-action').trigger('click')
+    await wrapper.find('[role="dialog"] textarea').setValue('人工确认已处理')
+    await wrapper.find('[data-confirm]').trigger('click')
+    await flushPromises()
+
+    expect(continueIncidentCase).toHaveBeenCalledWith(expect.objectContaining({ phase, input_json: expect.objectContaining({ decision, evidence: '人工确认已处理' }) }))
+    expect(forbidden === 'approveIncidentMerge' ? approveIncidentMerge : notifyIncidentDeployed).not.toHaveBeenCalled()
+  })
+
+  it('recovers an empty migrated selected_bot_key from the latest legacy attempt', async () => {
+    const snapshot = durableDetail('legacy_archived', {
+      case: { ...durableDetail('legacy_archived').case, selected_bot_key: '' },
+      attempts: [{ id: 'legacy-attempt', case_id: 'case-1', cycle_number: 1, phase: 'legacy', mode: '', status: 'succeeded', agent_target: '', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '2026-07-11', error_code: '', error_message: '', usage: {} }],
+    })
+    vi.mocked(listIncidentCases).mockResolvedValue([snapshot.case as any])
+    vi.mocked(getIncidentCase).mockResolvedValue(snapshot as any)
+    vi.mocked(startIncidentCase).mockResolvedValue({ ...snapshot.case, id: 'new-case', status: 'validating' } as any)
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises(); await flushPromises()
+
+    await wrapper.find('.primary-action').trigger('click')
+    await flushPromises()
+
+    expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({ bot_key: 'base|codex' }))
+  })
+
+  it('keeps the Bug inbox reachable when Cases exist and requires bot reselection for an unbound archive', async () => {
+    const snapshot = durableDetail('legacy_archived', { case: { ...durableDetail('legacy_archived').case, selected_bot_key: '' } })
+    vi.mocked(listIncidentCases).mockResolvedValue([snapshot.case as any])
+    vi.mocked(getIncidentCase).mockResolvedValue(snapshot as any)
+    vi.mocked(listBugs).mockResolvedValue([{ id: 'zentao-577', source: 'zentao', source_id: '577', title: '搜索页异常' }])
+    vi.mocked(matchBugBots).mockResolvedValue([{ bot: { key: 'base|codex', system_id: 'base', target: 'codex', path: '/repo' }, score: 10, reasons: [] }])
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises(); await flushPromises()
+
+    await wrapper.find('.primary-action').trigger('click')
+    await flushPromises()
+    expect(startIncidentCase).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('切换到 Bug 收件箱')
+
+    await wrapper.findAll('.workbench-view-tabs button').find(button => button.text() === 'Bug 收件箱')!.trigger('click')
+    expect(wrapper.find('.bug-workbench').exists()).toBe(true)
+    expect(wrapper.find('.case-lifecycle').exists()).toBe(false)
+    expect((wrapper.find('.bot-match input').element as HTMLInputElement).checked).toBe(false)
+
+    await wrapper.find('.bot-match input').setValue(true)
+    await wrapper.findAll('.workbench-view-tabs button').find(button => button.text().includes('故障闭环'))!.trigger('click')
+    await wrapper.find('.primary-action').trigger('click')
+    await flushPromises()
+    expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({ bot_key: 'base|codex' }))
   })
 })

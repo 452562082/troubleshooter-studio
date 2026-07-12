@@ -1,6 +1,6 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { EventsOn } from '../../wailsjs/runtime/runtime'
-import { getIncidentCase, listIncidentCases, normalizeIncidentCaseEvent, type IncidentCase, type IncidentCaseDetail, type IncidentCaseEventPayload } from './bridge/bugWorkflow'
+import { getIncidentCase, listIncidentCases, normalizeIncidentCaseEvent, type IncidentCase, type IncidentCaseDetail, type IncidentCaseEventPayload, type Phase } from './bridge/bugWorkflow'
 
 type Dependencies = {
   listCases?: () => Promise<IncidentCase[]>
@@ -9,6 +9,28 @@ type Dependencies = {
 }
 
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error)
+
+export function continuationForDetail(detail: IncidentCaseDetail, evidence: string): { phase: Exclude<Phase, 'legacy'>; input_json: Record<string, unknown> } {
+  const latest = detail.attempts.find(attempt => attempt.id === detail.case.current_attempt_id && attempt.phase !== 'legacy')
+  if (!latest || !['validation', 'investigation', 'fix', 'regression'].includes(latest.phase)) {
+    throw new Error('未找到可继续的最近阶段，请刷新 Case 后重试')
+  }
+  const phase = latest.phase as Exclude<Phase, 'legacy'>
+  const input: Record<string, unknown> = { ...(latest.input_json || {}), user_input: evidence }
+  if (phase === 'validation') input.mode = 'reproduce'
+  if (phase === 'regression') input.mode = 'regression'
+  if (phase === 'investigation' || phase === 'fix') delete input.mode
+  return { phase, input_json: input }
+}
+
+export function botKeyForLegacyContinuation(detail: IncidentCaseDetail, selectedBugID: string, selectedBotKey: string): string {
+  if (detail.case.selected_bot_key.trim()) return detail.case.selected_bot_key.trim()
+  const legacyBot = [...detail.attempts]
+    .sort((a, b) => (b.started_at || '').localeCompare(a.started_at || '') || b.id.localeCompare(a.id))
+    .find(attempt => attempt.phase === 'legacy' && attempt.bot_key.trim())?.bot_key.trim()
+  if (legacyBot) return legacyBot
+  return selectedBugID === detail.case.bug_id ? selectedBotKey.trim() : ''
+}
 
 export function createIncidentCaseController(dependencies: Dependencies = {}) {
   const listCases = dependencies.listCases ?? listIncidentCases
@@ -20,17 +42,18 @@ export function createIncidentCaseController(dependencies: Dependencies = {}) {
   const error = ref('')
   const pendingKeys = ref(new Set<string>())
   const pendingPromises = new Map<string, Promise<unknown>>()
+  let detailGeneration = 0
 
   function upsertCase(incoming: IncidentCase) {
     const index = cases.value.findIndex(item => item.id === incoming.id)
-    if (index >= 0 && cases.value[index].version > incoming.version) return
+    if (index >= 0 && cases.value[index].version >= incoming.version) return
     const next = index >= 0 ? cases.value.map(item => item.id === incoming.id ? incoming : item) : [...cases.value, incoming]
     cases.value = next.sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || '') || b.version - a.version)
   }
 
   function applySnapshot(snapshot: IncidentCaseDetail) {
     const current = detail.value
-    if (current?.case.id === snapshot.case.id && current.case.version > snapshot.case.version) return false
+    if (current?.case.id === snapshot.case.id && current.case.version >= snapshot.case.version) return false
     detail.value = snapshot
     selectedCaseID.value = snapshot.case.id
     upsertCase(snapshot.case)
@@ -50,7 +73,7 @@ export function createIncidentCaseController(dependencies: Dependencies = {}) {
   async function refreshCases() {
     loading.value = true
     try {
-      cases.value = (await listCases()).slice().sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''))
+      for (const incident of await listCases()) upsertCase(incident)
       error.value = ''
       return cases.value
     } catch (cause) {
@@ -61,19 +84,22 @@ export function createIncidentCaseController(dependencies: Dependencies = {}) {
 
   async function refreshDetail(caseID = selectedCaseID.value) {
     if (!caseID) return null
+    selectedCaseID.value = caseID
+    const generation = ++detailGeneration
     loading.value = true
     try {
       const snapshot = await getCase(caseID)
-      applySnapshot(snapshot)
+      if (generation === detailGeneration && selectedCaseID.value === caseID) applySnapshot(snapshot)
       return snapshot
     } catch (cause) {
-      error.value = errorMessage(cause)
+      if (generation === detailGeneration) error.value = errorMessage(cause)
       throw cause
-    } finally { loading.value = false }
+    } finally {
+      if (generation === detailGeneration) loading.value = false
+    }
   }
 
   async function selectCase(caseID: string) {
-    selectedCaseID.value = caseID
     return refreshDetail(caseID)
   }
 

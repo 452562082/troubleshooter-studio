@@ -31,10 +31,12 @@ describe('BugCaseArtifacts', () => {
     const archived = {
       ...detail,
       case: { ...detail.case, status: 'legacy_archived' as const },
-      attempts: [{ ...detail.attempts[0], id: 'legacy-1', phase: 'legacy' as const, output_json: { final_message: '旧排障结论：缓存击穿' } }],
+      attempts: [{ ...detail.attempts[0], id: 'legacy-1', phase: 'legacy' as const, output_json: { final_message: '**旧排障结论**：缓存击穿', events: [{ type: 'message', message: '检查 Redis 命中率' }] } }],
     }
     const wrapper = mount(BugCaseArtifacts, { props: { detail: archived } })
     expect(wrapper.text()).toContain('阶段输出')
-    expect(wrapper.text()).toContain('旧排障结论：缓存击穿')
+    expect(wrapper.find('.legacy-final strong').text()).toBe('旧排障结论')
+    expect(wrapper.text()).toContain('检查 Redis 命中率')
+    expect(wrapper.find('.legacy-attempt > pre').exists()).toBe(false)
   })
 })

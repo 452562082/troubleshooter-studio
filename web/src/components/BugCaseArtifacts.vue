@@ -1,10 +1,22 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { marked } from 'marked'
 import type { IncidentCaseDetail, PhaseAttempt } from '../lib/bridge/bugWorkflow'
 
 const props = defineProps<{ detail: IncidentCaseDetail }>()
 
 const investigation = computed(() => [...props.detail.attempts].reverse().find(item => item.phase === 'investigation'))
+const legacyProjection = computed(() => props.detail.attempts.filter(attempt => attempt.phase === 'legacy').map(attempt => {
+  const output = attempt.output_json || {}
+  const events = Array.isArray(output.events) ? output.events.flatMap(event => {
+    if (!event || typeof event !== 'object') return []
+    const value = event as Record<string, unknown>
+    const message = typeof value.message === 'string' ? value.message.trim() : ''
+    return message ? [{ type: String(value.type || 'message'), message }] : []
+  }) : []
+  const finalMessage = typeof output.final_message === 'string' ? output.final_message : ''
+  return { attempt, events, finalHTML: safeMarkdown(finalMessage) }
+}))
 
 function displayJSON(value: unknown): string {
   if (value === null || value === undefined || value === '') return '-'
@@ -20,6 +32,16 @@ function rootCause(attempt?: PhaseAttempt): string {
     if (typeof value === 'string' && value.trim()) return value
   }
   return displayJSON(output)
+}
+
+function safeMarkdown(value: string): string {
+  const html = marked.parse(value || '', { async: false }) as string
+  return html
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+    .replace(/\son\w+="[^"]*"/gi, '')
+    .replace(/\son\w+='[^']*'/gi, '')
+    .replace(/\s(href|src)="javascript:[^"]*"/gi, ' $1="#"')
+    .replace(/\s(href|src)='javascript:[^']*'/gi, " $1='#'")
 }
 </script>
 
@@ -45,10 +67,18 @@ function rootCause(attempt?: PhaseAttempt): string {
     <section class="artifact-card" aria-labelledby="attempt-output-title">
       <h3 id="attempt-output-title">阶段输出</h3>
       <p v-if="detail.attempts.length === 0" class="empty-copy">尚无阶段输出</p>
-      <article v-for="attempt in detail.attempts" :key="attempt.id" class="artifact-item">
+      <article v-for="attempt in detail.attempts.filter(item => item.phase !== 'legacy')" :key="attempt.id" class="artifact-item">
         <strong>{{ attempt.phase }} · {{ attempt.status }}</strong>
         <span v-if="attempt.error_message">{{ attempt.error_message }}</span>
         <pre>{{ displayJSON(attempt.output_json) }}</pre>
+      </article>
+      <article v-for="projection in legacyProjection" :key="projection.attempt.id" class="artifact-item legacy-attempt">
+        <strong>历史运行 · {{ projection.attempt.status }}</strong>
+        <div v-if="projection.events.length" class="legacy-events" role="log" aria-label="历史运行事件">
+          <p v-for="(event, index) in projection.events" :key="`${event.type}-${index}`"><span>{{ event.type }}</span>{{ event.message }}</p>
+        </div>
+        <article v-if="projection.finalHTML" class="legacy-final" v-html="projection.finalHTML"></article>
+        <p v-if="projection.attempt.error_message" class="legacy-error">{{ projection.attempt.error_message }}</p>
       </article>
     </section>
 
@@ -95,4 +125,10 @@ function rootCause(attempt?: PhaseAttempt): string {
 code, pre { max-width: 100%; margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; color: var(--c-text); font: inherit; font-size: var(--fs-sm); line-height: 1.55; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .empty-copy { margin: 0; font-size: var(--fs-sm); }
+.legacy-events { display: grid; gap: 5px; }
+.legacy-events p { margin: 0; color: var(--c-text); line-height: 1.5; }
+.legacy-events span { margin-right: 6px; color: var(--c-muted); font-size: var(--fs-xs); }
+.legacy-final { color: var(--c-text); line-height: 1.6; }
+.legacy-final :deep(p) { margin: 0; }
+.legacy-error { margin: 0; color: var(--c-danger); }
 </style>

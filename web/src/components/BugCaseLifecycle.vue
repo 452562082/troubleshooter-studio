@@ -2,7 +2,7 @@
 import type { IncidentCase } from '../lib/bridge/bugWorkflow'
 
 export type CasePrimaryAction = {
-  kind: 'start_validation' | 'supply_evidence' | 'approve_fix' | 'continue_fix' | 'approve_merge' | 'retry_merge' | 'notify_deployed' | 'retry_deployment' | 'cancel_attempt' | 'continue_legacy'
+  kind: 'start_validation' | 'supply_evidence' | 'approve_fix' | 'continue_fix' | 'approve_merge' | 'supply_merge_decision' | 'notify_deployed' | 'supply_deployment_proof' | 'cancel_attempt' | 'continue_legacy'
   label: string
   approval?: boolean
 }
@@ -18,9 +18,9 @@ export function primaryActionFor(incident: IncidentCase): CasePrimaryAction | un
     fixing: { kind: 'cancel_attempt', label: '停止当前修复' },
     fix_failed: { kind: 'continue_fix', label: '补充信息并继续修复' },
     waiting_merge_approval: { kind: 'approve_merge', label: '允许合并环境分支', approval: true },
-    merge_conflict: { kind: 'retry_merge', label: '重新检查合并', approval: true },
+    merge_conflict: { kind: 'supply_merge_decision', label: '提交合并处理决定' },
     waiting_deployment: { kind: 'notify_deployed', label: '已部署，开始验证', approval: true },
-    deployment_unverified: { kind: 'retry_deployment', label: '重新验证部署版本', approval: true },
+    deployment_unverified: { kind: 'supply_deployment_proof', label: '补充部署证明' },
     regression_validating: { kind: 'cancel_attempt', label: '停止回归验证' },
     legacy_archived: { kind: 'continue_legacy', label: '从新一轮验证继续' },
   }
@@ -115,7 +115,7 @@ function fmtTime(value?: string): string {
 
 async function openAction(event: MouseEvent) {
   if (!action.value || props.pending) return
-  if (!action.value.approval && !['supply_evidence', 'continue_fix'].includes(action.value.kind)) {
+  if (!action.value.approval && !['supply_evidence', 'continue_fix', 'supply_merge_decision', 'supply_deployment_proof'].includes(action.value.kind)) {
     emit('primary', { kind: action.value.kind })
     return
   }
@@ -135,8 +135,8 @@ function closeDialog() {
 function confirmAction() {
   if (!action.value) return
   const payload: { kind: CasePrimaryAction['kind']; input?: string; observedVersion?: string } = { kind: action.value.kind }
-  if (['supply_evidence', 'continue_fix'].includes(action.value.kind)) payload.input = dialogInput.value.trim()
-  if (['notify_deployed', 'retry_deployment'].includes(action.value.kind)) payload.observedVersion = dialogInput.value.trim()
+  if (['supply_evidence', 'continue_fix', 'supply_merge_decision', 'supply_deployment_proof'].includes(action.value.kind)) payload.input = dialogInput.value.trim()
+  if (action.value.kind === 'notify_deployed') payload.observedVersion = dialogInput.value.trim()
   emit('primary', payload)
   dialogOpen.value = false
   nextTick(() => actionTrigger.value?.focus())
@@ -159,8 +159,10 @@ function trapDialogFocus(event: KeyboardEvent) {
 
 function dialogTitle(): string {
   if (action.value?.kind === 'approve_fix') return '确认允许修复'
-  if (['approve_merge', 'retry_merge'].includes(action.value?.kind || '')) return '确认合并环境分支'
-  if (['notify_deployed', 'retry_deployment'].includes(action.value?.kind || '')) return '确认部署并校验版本'
+  if (action.value?.kind === 'approve_merge') return '确认合并环境分支'
+  if (action.value?.kind === 'supply_merge_decision') return '提交合并冲突处理决定'
+  if (action.value?.kind === 'notify_deployed') return '确认部署并校验版本'
+  if (action.value?.kind === 'supply_deployment_proof') return '补充部署版本证明'
   return action.value?.label || '继续处理'
 }
 </script>
@@ -235,20 +237,22 @@ function dialogTitle(): string {
       <section ref="dialogElement" role="dialog" aria-modal="true" aria-labelledby="case-action-dialog-title" class="approval-dialog" @keydown="trapDialogFocus">
         <header><h2 id="case-action-dialog-title">{{ dialogTitle() }}</h2></header>
         <p v-if="action.kind === 'approve_fix'">将授权修复 Agent 基于当前根因和证据创建最小修复。</p>
-        <p v-else-if="['approve_merge', 'retry_merge'].includes(action.kind)">将按已记录的修复 commit 和目标环境分支执行合并与 SSH 推送。</p>
-        <p v-else-if="['notify_deployed', 'retry_deployment'].includes(action.kind)">Studio 不执行部署；这里只记录人工部署通知，并核验运行版本是否包含目标 commit。</p>
-        <dl v-if="['notify_deployed', 'retry_deployment'].includes(action.kind)" class="deployment-preview">
+        <p v-else-if="action.kind === 'approve_merge'">将按已记录的修复 commit 和目标环境分支执行合并与 SSH 推送。</p>
+        <p v-else-if="action.kind === 'supply_merge_decision'">记录冲突处理结果并返回合并授权门，不会在这一步直接重新合并。</p>
+        <p v-else-if="action.kind === 'notify_deployed'">Studio 不执行部署；这里只记录人工部署通知，并核验运行版本是否包含目标 commit。</p>
+        <p v-else-if="action.kind === 'supply_deployment_proof'">补充可核验的部署证明并返回人工部署确认门，不会在这一步直接启动回归。</p>
+        <dl v-if="['notify_deployed', 'supply_deployment_proof'].includes(action.kind)" class="deployment-preview">
           <div><dt>目标环境</dt><dd>{{ detail?.case.environment || '未知' }}</dd></div>
           <div><dt>期望 commits</dt><dd><code v-for="(commit, repo) in expectedDeploymentCommits" :key="repo">{{ repo }}: {{ commit }}</code><span v-if="Object.keys(expectedDeploymentCommits).length === 0">尚未记录</span></dd></div>
           <div><dt>版本验证方式</dt><dd>{{ latestDeployment?.verification_source || '按环境配置自动选择版本接口、K8s 或运行时信息' }}</dd></div>
         </dl>
-        <label v-if="['notify_deployed', 'retry_deployment'].includes(action.kind)" for="observed-version">已部署版本（可选）</label>
-        <input v-if="['notify_deployed', 'retry_deployment'].includes(action.kind)" id="observed-version" v-model="dialogInput" type="text" placeholder="例如 build-20260711 或 commit SHA">
-        <label v-if="['supply_evidence', 'continue_fix'].includes(action.kind)" for="case-supplement">补充信息</label>
-        <textarea v-if="['supply_evidence', 'continue_fix'].includes(action.kind)" id="case-supplement" v-model="dialogInput" rows="5" placeholder="输入新证据、复现条件或测试信息"></textarea>
+        <label v-if="action.kind === 'notify_deployed'" for="observed-version">已部署版本（可选）</label>
+        <input v-if="action.kind === 'notify_deployed'" id="observed-version" v-model="dialogInput" type="text" placeholder="例如 build-20260711 或 commit SHA">
+        <label v-if="['supply_evidence', 'continue_fix', 'supply_merge_decision', 'supply_deployment_proof'].includes(action.kind)" for="case-supplement">补充信息</label>
+        <textarea v-if="['supply_evidence', 'continue_fix', 'supply_merge_decision', 'supply_deployment_proof'].includes(action.kind)" id="case-supplement" v-model="dialogInput" rows="5" placeholder="输入新证据、处理决定、版本证明或测试信息"></textarea>
         <footer>
           <button class="btn" type="button" :disabled="pending" @click="closeDialog">取消</button>
-          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (['supply_evidence', 'continue_fix'].includes(action.kind) && !dialogInput.trim())" @click="confirmAction">确认</button>
+          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (['supply_evidence', 'continue_fix', 'supply_merge_decision', 'supply_deployment_proof'].includes(action.kind) && !dialogInput.trim())" @click="confirmAction">确认</button>
         </footer>
       </section>
     </div>

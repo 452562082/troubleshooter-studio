@@ -34,7 +34,7 @@ describe('BugCaseLifecycle', () => {
     ['pending_validation', 'start_validation'], ['validating', 'cancel_attempt'],
     ['not_reproduced', 'supply_evidence'], ['investigating', 'cancel_attempt'],
     ['fixing', 'cancel_attempt'], ['fix_failed', 'continue_fix'],
-    ['merge_conflict', 'retry_merge'], ['deployment_unverified', 'retry_deployment'],
+    ['merge_conflict', 'supply_merge_decision'], ['deployment_unverified', 'supply_deployment_proof'],
     ['regression_validating', 'cancel_attempt'],
   ] as Array<[CaseStatus, string]>)('keeps exactly one action for actionable state %s', (status, kind) => {
     expect(primaryActionFor(incident(status))?.kind).toBe(kind)

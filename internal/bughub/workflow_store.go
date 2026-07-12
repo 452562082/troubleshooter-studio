@@ -165,6 +165,10 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		if err := verifyWorkflowSchemaMarker(ctx, tx, 2); err != nil {
 			return err
 		}
+	case 3:
+		if err := verifyWorkflowSchemaMarker(ctx, tx, 3); err != nil {
+			return err
+		}
 	case workflowStoreSchemaVersion:
 		// Verified below before the transaction is committed.
 	default:
@@ -200,7 +204,7 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: workflowStoreSchemaVersion, Fingerprint: fingerprint})
+		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: 3, Fingerprint: fingerprint})
 		if err != nil {
 			return fmt.Errorf("encode workflow schema v3 detail: %w", err)
 		}
@@ -209,6 +213,26 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		}
 		if _, err := tx.ExecContext(ctx, `PRAGMA user_version=3`); err != nil {
 			return fmt.Errorf("set workflow schema version 3: %w", err)
+		}
+		version = 3
+	}
+	if version == 3 {
+		if _, err := tx.ExecContext(ctx, workflowStoreSchemaV4Upgrade); err != nil {
+			return fmt.Errorf("apply workflow schema v4: %w", err)
+		}
+		fingerprint, err := workflowSchemaFingerprint(ctx, tx)
+		if err != nil {
+			return err
+		}
+		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: workflowStoreSchemaVersion, Fingerprint: fingerprint})
+		if err != nil {
+			return fmt.Errorf("encode workflow schema v4 detail: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE schema_migrations SET applied_at = ?, detail_json = ? WHERE key = ?`, formatStoreTime(time.Now().UTC()), string(detail), workflowStoreSchemaV1Key); err != nil {
+			return fmt.Errorf("record workflow schema v4: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `PRAGMA user_version=4`); err != nil {
+			return fmt.Errorf("set workflow schema version 4: %w", err)
 		}
 	}
 	tables, err := workflowTableColumns(ctx, tx)
@@ -219,6 +243,7 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 	v1Columns["transition_events"] = append(v1Columns["transition_events"], "request_fingerprint", "result_case_json")
 	v1Columns["deployment_observations"] = append(v1Columns["deployment_observations"], "verified_commit_ancestors_json")
 	v1Columns["deployment_observations"] = append(v1Columns["deployment_observations"], "observed_at", "diagnostic_code", "diagnostic_message")
+	v1Columns["fix_checkpoints"] = []string{"attempt_id", "case_id", "staging_locator", "created_at"}
 	if err := verifyWorkflowColumns(tables, v1Columns); err != nil {
 		return err
 	}
@@ -1081,22 +1106,81 @@ type CaseSnapshotUpdate struct {
 	ClosedAt         *time.Time
 }
 
+type FixCheckpoint struct {
+	AttemptID      string
+	CaseID         string
+	StagingLocator string
+	CreatedAt      time.Time
+}
+
+func (s *CaseStore) SaveFixCheckpoint(ctx context.Context, checkpoint FixCheckpoint) error {
+	if s == nil || s.db == nil || strings.TrimSpace(checkpoint.AttemptID) == "" || strings.TrimSpace(checkpoint.CaseID) == "" {
+		return errors.New("fix checkpoint store, attempt, and Case are required")
+	}
+	if err := validateArtifactComponent("fix checkpoint locator", checkpoint.StagingLocator); err != nil || !strings.HasPrefix(checkpoint.StagingLocator, checkpoint.AttemptID+"-") {
+		return errors.New("fix checkpoint locator is not bound to its attempt")
+	}
+	if checkpoint.CreatedAt.IsZero() {
+		checkpoint.CreatedAt = time.Now().UTC()
+	}
+	var caseID string
+	var phase Phase
+	var status AttemptStatus
+	if err := s.db.QueryRowContext(ctx, `SELECT case_id,phase,status FROM phase_attempts WHERE id=?`, checkpoint.AttemptID).Scan(&caseID, &phase, &status); err != nil {
+		return err
+	}
+	if caseID != checkpoint.CaseID || phase != PhaseFix || (status != AttemptStatusQueued && status != AttemptStatusRunning) {
+		return errors.New("fix checkpoint requires the current runnable fix attempt")
+	}
+	result, err := s.db.ExecContext(ctx, `INSERT INTO fix_checkpoints (attempt_id,case_id,staging_locator,created_at) VALUES (?,?,?,?)
+		ON CONFLICT(attempt_id) DO UPDATE SET staging_locator=excluded.staging_locator
+		WHERE fix_checkpoints.case_id=excluded.case_id AND fix_checkpoints.staging_locator=excluded.staging_locator`, checkpoint.AttemptID, checkpoint.CaseID, checkpoint.StagingLocator, formatStoreTime(checkpoint.CreatedAt))
+	if err != nil {
+		return err
+	}
+	rows, _ := result.RowsAffected()
+	if rows != 1 {
+		return ErrIdempotencyConflict
+	}
+	return nil
+}
+
+func (s *CaseStore) GetFixCheckpoint(ctx context.Context, attemptID string) (FixCheckpoint, bool, error) {
+	var checkpoint FixCheckpoint
+	var created string
+	err := s.db.QueryRowContext(ctx, `SELECT attempt_id,case_id,staging_locator,created_at FROM fix_checkpoints WHERE attempt_id=?`, attemptID).Scan(&checkpoint.AttemptID, &checkpoint.CaseID, &checkpoint.StagingLocator, &created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return FixCheckpoint{}, false, nil
+	}
+	if err != nil {
+		return FixCheckpoint{}, false, err
+	}
+	checkpoint.CreatedAt, err = parseStoreTime(created)
+	return checkpoint, true, err
+}
+
+func (s *CaseStore) DeleteFixCheckpoint(ctx context.Context, attemptID, caseID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM fix_checkpoints WHERE attempt_id=? AND case_id=?`, attemptID, caseID)
+	return err
+}
+
 // CaseMutation is the single typed write boundary used by the orchestrator.
 // All records, attempt changes, ordered transition/audit events, and the final
 // Case snapshot commit or roll back together under one Case-version CAS.
 type CaseMutation struct {
-	CaseID                 string
-	ExpectedVersion        int64
-	IdempotencyKey         string
-	RequestJSON            json.RawMessage
-	Steps                  []CaseMutationStep
-	CreateAttempts         []PhaseAttempt
-	FinishAttempts         []PhaseAttempt
-	Approvals              []Approval
-	CodeChanges            []CodeChange
-	Observations           []DeploymentObservation
-	ExpectedAttemptOutputs map[string]json.RawMessage `json:"-"`
-	Snapshot               CaseSnapshotUpdate
+	CaseID                       string
+	ExpectedVersion              int64
+	IdempotencyKey               string
+	RequestJSON                  json.RawMessage
+	Steps                        []CaseMutationStep
+	CreateAttempts               []PhaseAttempt
+	FinishAttempts               []PhaseAttempt
+	Approvals                    []Approval
+	CodeChanges                  []CodeChange
+	Observations                 []DeploymentObservation
+	ExpectedAttemptOutputs       map[string]json.RawMessage `json:"-"`
+	DeleteFixCheckpointAttemptID string
+	Snapshot                     CaseSnapshotUpdate
 }
 
 type CaseMutationStep struct {
@@ -1368,6 +1452,11 @@ func (s *CaseStore) ApplyCaseMutation(ctx context.Context, mutation CaseMutation
 	}
 	for index := range mutation.Observations {
 		if err = insertObservationTx(ctx, tx, mutation.Observations[index], mutation.IdempotencyKey+":observation:"+mutation.Observations[index].ID); err != nil {
+			return result, err
+		}
+	}
+	if mutation.DeleteFixCheckpointAttemptID != "" {
+		if _, err = tx.ExecContext(ctx, `DELETE FROM fix_checkpoints WHERE attempt_id=? AND case_id=?`, mutation.DeleteFixCheckpointAttemptID, incident.ID); err != nil {
 			return result, err
 		}
 	}

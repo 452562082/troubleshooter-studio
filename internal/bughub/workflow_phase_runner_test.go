@@ -13,6 +13,8 @@ import (
 	"time"
 )
 
+const validReproducedPhaseYAML = "verification_status: reproduced\nenvironment: test\nobserved_behavior: timeout\nexpected_behavior: success\nevidence:\n  - kind: api\n    path: evidence.json\n    environment: test\n    redaction_status: not_required\ngaps: []\n"
+
 func TestPhaseResultValidationStatusMappingIsStrict(t *testing.T) {
 	cases := []struct {
 		status string
@@ -26,7 +28,11 @@ func TestPhaseResultValidationStatusMappingIsStrict(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.status, func(t *testing.T) {
-			got, err := ParseValidationResult([]byte("verification_status: " + tc.status + "\nenvironment: test\nevidence: []\ngaps: []\n"))
+			document := "verification_status: " + tc.status + "\nenvironment: test\nevidence: []\ngaps: []\n"
+			if tc.status == "reproduced" {
+				document = "verification_status: reproduced\nenvironment: test\nobserved_behavior: timeout\nexpected_behavior: success\nevidence:\n  - kind: api\n    path: response.json\n    environment: test\n    redaction_status: not_required\ngaps: []\n"
+			}
+			got, err := ParseValidationResult([]byte(document))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -39,6 +45,24 @@ func TestPhaseResultValidationStatusMappingIsStrict(t *testing.T) {
 		if _, err := ParseValidationResult([]byte("verification_status: \"" + invalid + "\"\nenvironment: test\nevidence: []\ngaps: []\n")); err == nil {
 			t.Fatalf("accepted invalid status %q", invalid)
 		}
+	}
+}
+
+func TestValidationReproducedRequiresCompleteScenarioAndEvidence(t *testing.T) {
+	valid := "verification_status: reproduced\nenvironment: test\nobserved_behavior: timeout\nexpected_behavior: success\nevidence:\n  - kind: api\n    path: response.json\n    environment: test\n    redaction_status: not_required\ngaps: []\n"
+	if _, err := ParseValidationResult([]byte(valid)); err != nil {
+		t.Fatalf("complete reproduced result rejected: %v", err)
+	}
+	for name, document := range map[string]string{
+		"missing observed behavior": strings.Replace(valid, "observed_behavior: timeout\n", "", 1),
+		"missing expected behavior": strings.Replace(valid, "expected_behavior: success\n", "", 1),
+		"missing evidence":          strings.Replace(valid, "evidence:\n  - kind: api\n    path: response.json\n    environment: test\n    redaction_status: not_required\n", "evidence: []\n", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseValidationResult([]byte(document)); err == nil {
+				t.Fatal("accepted incomplete reproduced result")
+			}
+		})
 	}
 }
 
@@ -100,7 +124,7 @@ func (s *flakyCleanupStaging) Cleanup() error {
 	return s.attemptEvidenceStaging.Cleanup()
 }
 
-func (s *phaseExecutorStub) ExecutePhase(_ context.Context, attemptID string, _ BotRef, _ string, emit func(InvestigationEvent)) (PhaseExecutionResult, error) {
+func (s *phaseExecutorStub) ExecutePhase(_ context.Context, attemptID string, _ BotRef, prompt string, emit func(InvestigationEvent)) (PhaseExecutionResult, error) {
 	s.mu.Lock()
 	s.calls++
 	call := s.calls
@@ -111,6 +135,11 @@ func (s *phaseExecutorStub) ExecutePhase(_ context.Context, attemptID string, _ 
 	}
 	event := s.event
 	s.mu.Unlock()
+	if strings.Contains(result.FinalYAML, "path: evidence.json") {
+		if staging := stagingPathFromPrompt(prompt); staging != "" {
+			_ = os.WriteFile(filepath.Join(staging, "evidence.json"), []byte(`{"status":"timeout"}`), 0o600)
+		}
+	}
 	if emit != nil && event.Type != "" {
 		emit(event)
 	}
@@ -129,7 +158,7 @@ func TestAgentPhaseRunnerCompletesOnceAndTagsProjectionEvents(t *testing.T) {
 	incident := createWorkflowCase(t, store, "case-phase-runner", CaseValidating)
 	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
 	legacy := NewInvestigationStore(t.TempDir())
-	executor := &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: "verification_status: reproduced\nenvironment: test\nevidence: []\ngaps: []\n", Usage: AgentUsage{InputTokens: 12, OutputTokens: 7}}, event: InvestigationEvent{Type: "agent_message", Message: "working"}}
+	executor := &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: validReproducedPhaseYAML, Usage: AgentUsage{InputTokens: 12, OutputTokens: 7}}, event: InvestigationEvent{Type: "agent_message", Message: "working"}}
 	completed := make(chan CompleteAttemptCommand, 2)
 	runner := NewAgentPhaseRunner(store, executor, legacy, phaseArtifactsRoot(t), func(_ context.Context, cmd CompleteAttemptCommand) error {
 		completed <- cmd
@@ -193,7 +222,7 @@ func TestAgentPhaseRunnerRetriesReadOnlyOnceButNeverFix(t *testing.T) {
 		yaml  string
 		calls int
 	}{
-		{PhaseValidation, AttemptReproduce, "verification_status: reproduced\nenvironment: test\nevidence: []\ngaps: []\n", 2},
+		{PhaseValidation, AttemptReproduce, validReproducedPhaseYAML, 2},
 		{PhaseInvestigation, "", "investigation_status: root_cause_ready\nenvironment: test\nroot_cause: race\nconfidence: high\nevidence: []\ngaps: []\n", 2},
 		{PhaseFix, "", "fix_status: failed\nenvironment: test\nbranches: []\nchanges: []\ntests: []\ndeployment_notice: no deployment; fix failed\nrisks: []\nblocked_reason: failed\nevidence: []\n", 1},
 	} {
@@ -354,7 +383,7 @@ func TestAgentPhaseRunnerOwnsEvidenceStagingAndUsesFstatMetadata(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(staging, "concurrent-unclaimed.txt"), []byte("must not be registered"), 0o600); err != nil {
 			return PhaseExecutionResult{}, err
 		}
-		return PhaseExecutionResult{FinalYAML: "verification_status: reproduced\nenvironment: test\nevidence:\n  - kind: har\n    path: current.har\n    captured_at: 2000-01-01T00:00:00Z\n    environment: test\n    redaction_status: redacted\ngaps: []\n"}, nil
+		return PhaseExecutionResult{FinalYAML: "verification_status: reproduced\nenvironment: test\nobserved_behavior: timeout\nexpected_behavior: success\nevidence:\n  - kind: har\n    path: current.har\n    captured_at: 2000-01-01T00:00:00Z\n    environment: test\n    redaction_status: redacted\ngaps: []\n"}, nil
 	})
 	completed := make(chan CompleteAttemptCommand, 1)
 	runner := NewAgentPhaseRunner(store, executor, nil, root, func(_ context.Context, command CompleteAttemptCommand) error { completed <- command; return nil })
@@ -405,7 +434,7 @@ func TestAgentPhaseRunnerRejectsOutsideAndFakeRedactedEvidence(t *testing.T) {
 						return PhaseExecutionResult{}, err
 					}
 				}
-				return PhaseExecutionResult{FinalYAML: fmt.Sprintf("verification_status: reproduced\nenvironment: test\nevidence:\n  - kind: command\n    path: %q\n    captured_at: 2099-01-01T00:00:00Z\n    environment: test\n    redaction_status: redacted\ngaps: []\n", tc.path)}, nil
+				return PhaseExecutionResult{FinalYAML: fmt.Sprintf("verification_status: reproduced\nenvironment: test\nobserved_behavior: timeout\nexpected_behavior: success\nevidence:\n  - kind: command\n    path: %q\n    captured_at: 2099-01-01T00:00:00Z\n    environment: test\n    redaction_status: redacted\ngaps: []\n", tc.path)}, nil
 			})
 			completed := make(chan CompleteAttemptCommand, 1)
 			runner := NewAgentPhaseRunner(store, executor, nil, root, func(_ context.Context, command CompleteAttemptCommand) error { completed <- command; return nil })
@@ -431,7 +460,7 @@ func TestAgentPhaseRunnerSecretScansStructuredOutputBeforeIntent(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-output-secret", CaseValidating)
 	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
-	executor := &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: "verification_status: reproduced\nenvironment: test\nobserved_behavior: 'authorization: Bearer abcdefghijklmnopqrstuvwxyz'\nevidence: []\ngaps: []\n"}, event: InvestigationEvent{Type: "agent_message", Message: "authorization: Bearer streamed-secret", Raw: map[string]any{"authorization": "Bearer streamed-secret"}}}
+	executor := &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: "verification_status: reproduced\nenvironment: test\nobserved_behavior: 'authorization: Bearer abcdefghijklmnopqrstuvwxyz'\nexpected_behavior: success\nevidence:\n  - kind: api\n    path: evidence.json\n    environment: test\n    redaction_status: not_required\ngaps: []\n"}, event: InvestigationEvent{Type: "agent_message", Message: "authorization: Bearer streamed-secret", Raw: map[string]any{"authorization": "Bearer streamed-secret"}}}
 	completed := make(chan CompleteAttemptCommand, 1)
 	legacy := NewInvestigationStore(t.TempDir())
 	runner := NewAgentPhaseRunner(store, executor, legacy, phaseArtifactsRoot(t), func(_ context.Context, command CompleteAttemptCommand) error {
@@ -730,15 +759,15 @@ func TestAgentPhaseRunnerCleansUntransferredStagingOnStartFailures(t *testing.T)
 	}
 }
 
-func TestAgentPhaseRunnerCleansConcurrentScheduledRaceStaging(t *testing.T) {
+func TestAgentPhaseRunnerConcurrentFixStartCreatesOneCheckpointStaging(t *testing.T) {
 	store := newOrchestratorStore(t)
-	incident := createWorkflowCase(t, store, "case-start-cleanup-race", CaseValidating)
-	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
-	created := make(chan *lifecycleStaging, 2)
+	incident := createWorkflowCase(t, store, "case-start-cleanup-race", CaseFixing)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseFix, "")
+	created := make(chan *lifecycleStaging, 1)
 	release := make(chan struct{})
-	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: "verification_status: reproduced\nenvironment: test\nevidence: []\ngaps: []\n"}}, nil, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error { return nil })
+	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: "invalid"}}, nil, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error { return nil })
 	runner.openStaging = func(string, string) (attemptEvidenceStaging, error) {
-		staging := &lifecycleStaging{path: filepath.Join(t.TempDir(), "owned")}
+		staging := &lifecycleStaging{path: filepath.Join(t.TempDir(), attempt.ID+"-owned")}
 		created <- staging
 		<-release
 		return staging, nil
@@ -749,7 +778,7 @@ func TestAgentPhaseRunnerCleansConcurrentScheduledRaceStaging(t *testing.T) {
 			results <- runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"})
 		}()
 	}
-	first, second := <-created, <-created
+	first := <-created
 	close(release)
 	if err := <-results; err != nil {
 		t.Fatal(err)
@@ -760,14 +789,18 @@ func TestAgentPhaseRunnerCleansConcurrentScheduledRaceStaging(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for {
 		firstCleanups, firstCloses := first.lifecycle()
-		secondCleanups, secondCloses := second.lifecycle()
-		if firstCleanups == 1 && firstCloses == 1 && secondCleanups == 1 && secondCloses == 1 {
+		if firstCleanups == 1 && firstCloses == 1 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("staging lifecycles first=%d/%d second=%d/%d", firstCleanups, firstCloses, secondCleanups, secondCloses)
+			t.Fatalf("staging lifecycle=%d/%d", firstCleanups, firstCloses)
 		}
 		time.Sleep(time.Millisecond)
+	}
+	select {
+	case extra := <-created:
+		t.Fatalf("duplicate Start created staging %+v", extra)
+	default:
 	}
 }
 
@@ -860,7 +893,7 @@ func TestAgentPhaseRunnerEventSinkWorksWithoutLegacyProjection(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-event-sink", CaseValidating)
 	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
-	executor := &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: "verification_status: reproduced\nenvironment: test\nevidence: []\ngaps: []\n"}, event: InvestigationEvent{Type: "agent_message", Message: "event"}}
+	executor := &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: validReproducedPhaseYAML}, event: InvestigationEvent{Type: "agent_message", Message: "event"}}
 	done := make(chan struct{}, 1)
 	events := make(chan InvestigationEvent, 1)
 	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error { done <- struct{}{}; return nil })
@@ -902,11 +935,183 @@ func TestAgentPhaseRunnerFixPromptIncludesAuthorizedStructuredInput(t *testing.T
 	}
 }
 
+func TestAgentPhaseRunnerFixCheckpointIsConsumedBeforeStagingCleanup(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-fix-checkpoint-normal", CaseFixing)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseFix, "")
+	result := checkpointFixResult("api", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	final, _ := json.Marshal(result)
+	parsed, err := ParsePhaseResult(attempt, final)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(resolvedTempDir(t), "normal-fix-checkpoint")
+	var stagingPath string
+	executor := phaseExecutorFunc(func(_ context.Context, _ string, _ BotRef, prompt string, _ func(InvestigationEvent)) (PhaseExecutionResult, error) {
+		stagingPath = stagingPathFromPrompt(prompt)
+		manifest := FixCheckpointManifest{Kind: fixCheckpointManifestKind, Version: fixCheckpointManifestVersion, CaseID: incident.ID, AttemptID: attempt.ID, State: "pushed", Result: result}
+		encoded, _ := json.Marshal(manifest)
+		if err := os.WriteFile(filepath.Join(stagingPath, fixCheckpointManifestName), encoded, 0o600); err != nil {
+			return PhaseExecutionResult{}, err
+		}
+		return PhaseExecutionResult{FinalYAML: string(final)}, nil
+	})
+	done := make(chan error, 1)
+	var orchestrator *CaseOrchestrator
+	runner := NewAgentPhaseRunner(store, executor, nil, root, func(ctx context.Context, command CompleteAttemptCommand) error {
+		_, err := orchestrator.CompleteAttempt(ctx, command)
+		done <- err
+		return err
+	})
+	orchestrator = NewCaseOrchestrator(store, runner, &recordingGitIntegration{fixInspection: FixInspection{Complete: true, Changes: parsed.CodeChanges}}, nil)
+	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := store.GetFixCheckpoint(context.Background(), attempt.ID); err != nil || found {
+		t.Fatalf("checkpoint found=%v err=%v", found, err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		_, err := os.Stat(stagingPath)
+		if errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("staging retained after transaction: %v", err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestAgentPhaseRunnerPreservesFixCheckpointWhenRemoteInspectionUnavailable(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-fix-checkpoint-transient", CaseFixing)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseFix, "")
+	result := checkpointFixResult("api", strings.Repeat("a", 40))
+	final, _ := json.Marshal(result)
+	root := filepath.Join(resolvedTempDir(t), "transient-fix-checkpoint")
+	var stagingPath string
+	executor := phaseExecutorFunc(func(_ context.Context, _ string, _ BotRef, prompt string, _ func(InvestigationEvent)) (PhaseExecutionResult, error) {
+		stagingPath = stagingPathFromPrompt(prompt)
+		manifest := FixCheckpointManifest{Kind: fixCheckpointManifestKind, Version: fixCheckpointManifestVersion, CaseID: incident.ID, AttemptID: attempt.ID, State: "pushed", Result: result}
+		encoded, _ := json.Marshal(manifest)
+		if err := os.WriteFile(filepath.Join(stagingPath, fixCheckpointManifestName), encoded, 0o600); err != nil {
+			return PhaseExecutionResult{}, err
+		}
+		return PhaseExecutionResult{FinalYAML: string(final)}, nil
+	})
+	done := make(chan error, 1)
+	var orchestrator *CaseOrchestrator
+	runner := NewAgentPhaseRunner(store, executor, nil, root, func(ctx context.Context, command CompleteAttemptCommand) error {
+		_, err := orchestrator.CompleteAttempt(ctx, command)
+		done <- err
+		return err
+	})
+	runner.completionReconcileAttempts = 1
+	orchestrator = NewCaseOrchestrator(store, runner, &recordingGitIntegration{err: errors.New("temporary ssh outage")}, nil)
+	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; !errors.Is(err, ErrFixInspectionUnavailable) {
+		t.Fatalf("err=%v", err)
+	}
+	if _, err := os.Stat(stagingPath); err != nil {
+		t.Fatalf("checkpoint staging was not preserved: %v", err)
+	}
+	if _, found, err := store.GetFixCheckpoint(context.Background(), attempt.ID); err != nil || !found {
+		t.Fatalf("checkpoint found=%v err=%v", found, err)
+	}
+	persisted, err := store.GetAttempt(context.Background(), attempt.ID)
+	if err != nil || persisted.Status != AttemptStatusRunning {
+		t.Fatalf("attempt=%+v err=%v", persisted, err)
+	}
+	if _, found, err := parseCompletionIntent(persisted.OutputJSON); err != nil || !found {
+		t.Fatalf("completion intent found=%v err=%v", found, err)
+	}
+}
+
+func TestAgentPhaseRunnerReconcilesTransientRemoteWithoutRerunningAgent(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-fix-checkpoint-reconcile", CaseFixing)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseFix, "")
+	result := checkpointFixResult("api", strings.Repeat("a", 40))
+	final, _ := json.Marshal(result)
+	parsed, err := ParsePhaseResult(attempt, final)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(resolvedTempDir(t), "reconcile-fix-checkpoint")
+	stagingPaths := make(chan string, 1)
+	executor := &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: string(final)}}
+	wrappedExecutor := phaseExecutorFunc(func(ctx context.Context, attemptID string, bot BotRef, prompt string, emit func(InvestigationEvent)) (PhaseExecutionResult, error) {
+		stagingPath := stagingPathFromPrompt(prompt)
+		stagingPaths <- stagingPath
+		manifest := FixCheckpointManifest{Kind: fixCheckpointManifestKind, Version: fixCheckpointManifestVersion, CaseID: incident.ID, AttemptID: attempt.ID, State: "pushed", Result: result}
+		encoded, _ := json.Marshal(manifest)
+		if err := os.WriteFile(filepath.Join(stagingPath, fixCheckpointManifestName), encoded, 0o600); err != nil {
+			return PhaseExecutionResult{}, err
+		}
+		return executor.ExecutePhase(ctx, attemptID, bot, prompt, emit)
+	})
+	git := &recordingGitIntegration{fixInspection: FixInspection{Complete: true, Changes: parsed.CodeChanges}, fixErrors: []error{errors.New("ssh unavailable 1"), errors.New("ssh unavailable 2"), errors.New("ssh unavailable 3")}}
+	var orchestrator *CaseOrchestrator
+	runner := NewAgentPhaseRunner(store, wrappedExecutor, nil, root, func(ctx context.Context, command CompleteAttemptCommand) error {
+		_, err := orchestrator.CompleteAttempt(ctx, command)
+		return err
+	})
+	runner.completionReconcileDelay = time.Millisecond
+	orchestrator = NewCaseOrchestrator(store, runner, git, nil)
+	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	stagingPath := <-stagingPaths
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		current, _ := store.GetCase(context.Background(), incident.ID)
+		if current.Status == CaseWaitingMergeApproval {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("case did not reconcile: %+v", current)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	executor.mu.Lock()
+	executorCalls := executor.calls
+	executor.mu.Unlock()
+	if executorCalls != 1 {
+		t.Fatalf("agent process calls=%d", executorCalls)
+	}
+	git.mu.Lock()
+	fixCalls := git.fixCalls
+	git.mu.Unlock()
+	if fixCalls != fixInspectionMaxAttempts+1 {
+		t.Fatalf("remote inspection calls=%d", fixCalls)
+	}
+	if _, found, _ := store.GetFixCheckpoint(context.Background(), attempt.ID); found {
+		t.Fatal("reconciled checkpoint row remains")
+	}
+	deadline = time.Now().Add(time.Second)
+	for {
+		_, statErr := os.Stat(stagingPath)
+		if errors.Is(statErr, os.ErrNotExist) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("reconciled staging remains: %v", statErr)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestAgentPhaseRunnerAccumulatesUsageAcrossReadOnlyRetry(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-retry-usage", CaseValidating)
 	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
-	executor := &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: "verification_status: reproduced\nenvironment: test\nevidence: []\ngaps: []\n", Usage: AgentUsage{InputTokens: 4, OutputTokens: 3}}, errors: []error{errors.New("retry")}}
+	executor := &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: validReproducedPhaseYAML, Usage: AgentUsage{InputTokens: 4, OutputTokens: 3}}, errors: []error{errors.New("retry")}}
 	completed := make(chan CompleteAttemptCommand, 1)
 	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(_ context.Context, command CompleteAttemptCommand) error { completed <- command; return nil })
 	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"}); err != nil {
@@ -922,7 +1127,7 @@ func TestAgentPhaseRunnerInvokesCompletionExactlyOnceEvenWhenItFails(t *testing.
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-pending-completion", CaseValidating)
 	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
-	executor := &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: "verification_status: reproduced\nenvironment: test\nevidence: []\ngaps: []\n"}}
+	executor := &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: validReproducedPhaseYAML}}
 	callbacks := make(chan int, 2)
 	var callbackCalls int
 	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error {

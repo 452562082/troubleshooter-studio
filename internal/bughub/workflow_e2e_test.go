@@ -78,7 +78,7 @@ func TestWorkflowE2EFixedVerifiedSurvivesSQLiteReopen(t *testing.T) {
 	if _, _, err := store.recordEvidenceArtifact(ctx, originalArtifact, nil); err != nil {
 		t.Fatal(err)
 	}
-	validationOutput := []byte(`{"verification_status":"reproduced","environment":"test","observed_behavior":"timeout","expected_behavior":"checkout succeeds","evidence":[],"gaps":[]}`)
+	validationOutput := []byte(`{"verification_status":"reproduced","environment":"test","observed_behavior":"timeout","expected_behavior":"checkout succeeds","evidence":[{"kind":"api","path":"response.json","environment":"test","redaction_status":"not_required"}],"gaps":[]}`)
 	incident, err = orchestrator.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: incident.ID, AttemptID: validation.ID, ExpectedVersion: incident.Version, IdempotencyKey: "e2e:validation", ActorID: "validator", Outcome: PhaseOutcomeReproduced, OutputJSON: validationOutput})
 	if err != nil || incident.Status != CaseInvestigating {
 		t.Fatalf("validation=%+v err=%v", incident, err)

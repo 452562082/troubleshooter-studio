@@ -21,6 +21,8 @@ AI 排障机器人工作台。用 `troubleshooter.yaml` 描述一个微服务系
 
 Studio 不执行应用部署。环境分支推送后，Case 保持在“等待部署”，由人工部署并点击“已部署，开始验证”或发送明确的“已部署”通知。通知只启动只读版本校验：`manual`、`http` 或 `k8s` verifier 必须证明每个仓库的目标 merge commit 已在指定环境运行，版本不匹配或少一个仓库都不会启动回归。
 
+HTTP verifier 默认拒绝 loopback、内网、link-local 和云 metadata 地址，并在每次连接时重新校验 DNS 结果；确需访问该环境专用内网版本接口时，在对应环境的 `deployment_verification.http` 显式设置 `allow_private: true`。该开关只放行配置 URL 的精确 host，云 metadata 仍永久禁止，也不会使用系统 HTTP 代理。
+
 回归复用首次验证使用的验证 Agent，但使用独立的 `regression` attempt 和本轮新证据。验证通过后 Case 进入 `fixed_verified`；仍复现时保留本轮部署版本和证据，cycle 加一后回到排障阶段。旧 `runs.json` 只导入为只读 `legacy_archived` Case，用户明确“从新一轮验证继续”时才创建新的活动 Case。
 
 完整状态和证据规则见 [排障链路](docs/troubleshooting-flow.md#studio-故障闭环状态机)。

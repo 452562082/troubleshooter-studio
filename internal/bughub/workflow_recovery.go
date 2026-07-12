@@ -16,6 +16,15 @@ func (o *CaseOrchestrator) RecoverInterrupted(ctx context.Context) error {
 	if o == nil || o.store == nil {
 		return errors.New("case orchestrator store is required")
 	}
+	if sweeper, ok := o.runner.(FixCheckpointSweeper); ok {
+		allAttempts, listErr := o.store.ListAttempts(ctx, AttemptFilter{})
+		if listErr != nil {
+			return listErr
+		}
+		if sweepErr := sweeper.SweepFixCheckpointOrphans(ctx, allAttempts); sweepErr != nil {
+			return sweepErr
+		}
+	}
 	attempts, err := o.store.ListAttempts(ctx, AttemptFilter{Statuses: []AttemptStatus{AttemptStatusQueued, AttemptStatusRunning}})
 	if err != nil {
 		return err
@@ -50,7 +59,11 @@ func (o *CaseOrchestrator) RecoverInterrupted(ctx context.Context) error {
 		}
 		if incident.Status == CaseDeploymentVerified {
 			if _, recoveryErr := o.StartRegression(ctx, incident.ID, incident.Version); recoveryErr != nil && !errors.Is(recoveryErr, ErrRegressionDuplicate) {
-				recoveredErr = errors.Join(recoveredErr, fmt.Errorf("recover verified deployment %s: %w", incident.ID, recoveryErr))
+				if _, handled, readinessErr := o.failSafeRegressionReadiness(ctx, incident, recoveryErr); handled {
+					recoveredErr = errors.Join(recoveredErr, readinessErr)
+				} else {
+					recoveredErr = errors.Join(recoveredErr, fmt.Errorf("recover verified deployment %s: %w", incident.ID, recoveryErr))
+				}
 			}
 			continue
 		}
@@ -270,7 +283,22 @@ func (o *CaseOrchestrator) recoverAttempt(ctx context.Context, attempt PhaseAtte
 			return errors.New("persisted completion intent is not bound to current Case attempt")
 		}
 		completion.ExpectedVersion = incident.Version
+		checkpoint, checkpointFound, checkpointErr := o.store.GetFixCheckpoint(ctx, attempt.ID)
+		if checkpointErr != nil {
+			return checkpointErr
+		}
 		_, err := o.CompleteAttempt(ctx, completion)
+		if errors.Is(err, ErrFixRemoteMismatch) && attempt.Phase == PhaseFix {
+			if current, loadErr := o.store.GetCase(ctx, incident.ID); loadErr == nil && current.Status == CaseFixFailed {
+				return nil
+			}
+			return o.finishFixRecoveryFailure(ctx, incident, attempt, err.Error())
+		}
+		if err == nil && checkpointFound && attempt.Phase == PhaseFix {
+			if cleaner, ok := o.runner.(FixCheckpointCleaner); ok {
+				_ = cleaner.CleanupFixCheckpoint(ctx, attempt, checkpoint.StagingLocator)
+			}
+		}
 		return err
 	}
 	attempt.Status = AttemptStatusInterrupted
@@ -430,6 +458,10 @@ func (o *CaseOrchestrator) recoverReadOnly(ctx context.Context, incident Inciden
 }
 
 func (o *CaseOrchestrator) recoverFix(ctx context.Context, incident IncidentCase, attempt PhaseAttempt) error {
+	checkpoint, checkpointFound, checkpointErr := o.store.GetFixCheckpoint(ctx, attempt.ID)
+	if checkpointErr != nil {
+		return checkpointErr
+	}
 	changes, err := o.store.ListCodeChanges(ctx, incident.ID)
 	if err != nil {
 		return err
@@ -440,23 +472,41 @@ func (o *CaseOrchestrator) recoverFix(ctx context.Context, incident IncidentCase
 			relevant = append(relevant, change)
 		}
 	}
-	if o.git == nil {
-		return o.finishFixRecoveryFailure(ctx, incident, attempt, "git integration unavailable")
-	}
-	inspection, inspectErr := o.git.InspectFix(ctx, FixInspectionRequest{CaseID: incident.ID, Attempt: attempt.Clone(), Changes: relevant})
-	if inspectErr != nil || !inspection.Complete || len(inspection.Changes) == 0 {
-		message := "fix commit is not confirmed pushed"
-		if inspectErr != nil {
-			message = inspectErr.Error()
+	if len(relevant) == 0 {
+		loader, ok := o.runner.(FixCheckpointLoader)
+		if !ok {
+			return o.finishFixRecoveryFailure(ctx, incident, attempt, "durable fix checkpoint loader is unavailable")
 		}
-		return o.finishFixRecoveryFailure(ctx, incident, attempt, message)
+		relevant, err = loader.LoadFixCheckpoint(ctx, attempt)
+		if err != nil {
+			return o.finishFixRecoveryFailure(ctx, incident, attempt, "load durable fix checkpoint: "+err.Error())
+		}
+	}
+	inspection, inspectErr := o.inspectFixWithRetry(ctx, FixInspectionRequest{CaseID: incident.ID, Attempt: attempt.Clone(), Changes: relevant})
+	if inspectErr != nil {
+		if errors.Is(inspectErr, ErrFixRemoteMismatch) {
+			return o.finishFixRecoveryFailure(ctx, incident, attempt, inspectErr.Error())
+		}
+		// DNS, SSH, permissions, and other remote read failures are not evidence
+		// that the push did not happen. Keep the running attempt and checkpoint so
+		// a later bounded recovery pass can retry without repeating the push.
+		return inspectErr
+	}
+	if !inspection.Complete || len(inspection.Changes) == 0 {
+		return o.finishFixRecoveryFailure(ctx, incident, attempt, ErrFixRemoteMismatch.Error())
 	}
 	relevant = inspection.Changes
 	command, err := buildRecoveredFixCompletion(incident, attempt, relevant)
 	if err != nil {
 		return o.finishFixRecoveryFailure(ctx, incident, attempt, "invalid fix inspection: "+err.Error())
 	}
+	command.remoteFixInspected = true
 	_, err = o.CompleteAttempt(ctx, command)
+	if err == nil && checkpointFound {
+		if cleaner, ok := o.runner.(FixCheckpointCleaner); ok {
+			_ = cleaner.CleanupFixCheckpoint(ctx, attempt, checkpoint.StagingLocator)
+		}
+	}
 	return err
 }
 
@@ -524,13 +574,23 @@ func buildRecoveredFixCompletion(incident IncidentCase, attempt PhaseAttempt, in
 }
 
 func (o *CaseOrchestrator) finishFixRecoveryFailure(ctx context.Context, incident IncidentCase, attempt PhaseAttempt, message string) error {
+	checkpoint, checkpointFound, checkpointErr := o.store.GetFixCheckpoint(ctx, attempt.ID)
+	if checkpointErr != nil {
+		return checkpointErr
+	}
+	expectedAttemptOutput := CloneRawMessage(attempt.OutputJSON)
 	key := "recovery:" + attempt.ID + ":result"
 	attempt.OutputJSON = []byte(`{}`)
 	attempt.Status = AttemptStatusFailed
 	attempt.ErrorCode = "fix_recovery_failed"
 	attempt.ErrorMessage = message
 	steps := []CaseMutationStep{{To: CaseFixFailed, Event: TransitionEvent{ID: stableID("event", key), EventType: "fix_recovery_failed", ActorType: "recovery", ActorID: "recovery", PayloadJSON: mustJSON(map[string]string{"error": message})}}}
-	_, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: mustJSON(map[string]any{"pushed": false, "message": message}), FinishAttempts: []PhaseAttempt{attempt}, Steps: steps})
+	_, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: mustJSON(map[string]any{"pushed": false, "message": message}), FinishAttempts: []PhaseAttempt{attempt}, ExpectedAttemptOutputs: map[string]json.RawMessage{attempt.ID: expectedAttemptOutput}, DeleteFixCheckpointAttemptID: attempt.ID, Steps: steps})
+	if err == nil && checkpointFound {
+		if cleaner, ok := o.runner.(FixCheckpointCleaner); ok {
+			_ = cleaner.CleanupFixCheckpoint(ctx, attempt, checkpoint.StagingLocator)
+		}
+	}
 	return err
 }
 

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
+	"github.com/xiaolong/troubleshooter-studio/internal/config"
 )
 
 type workflowBindingRunner struct {
@@ -73,6 +74,9 @@ func newWorkflowBindingApp(t *testing.T, dbPath string) (*App, *bughub.CaseStore
 		workflowLoadBot: func(key string) (bughub.BotRef, error) {
 			return bughub.BotRef{Key: key, Target: "codex", Path: botPath, SystemID: "base", Env: "test"}, nil
 		},
+		workflowLoadDeploymentConfig: func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) {
+			return &config.SystemConfig{System: config.System{ID: "base"}, Environments: []config.Environment{{ID: "test", IsProd: false}}}, nil
+		},
 	}
 	t.Cleanup(func() { _ = app.closeIncidentWorkflow() })
 	return app, store, runner
@@ -130,7 +134,7 @@ func TestGetIncidentWorkflowMetricsIsReadOnly(t *testing.T) {
 func TestPollWorkflowRemindersUsesLocalWorkflowEvent(t *testing.T) {
 	app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "reminder.db"))
 	waitingSince := time.Now().UTC().Add(-25 * time.Hour)
-	incident := bughub.IncidentCase{ID: "case-reminder", BugID: "bug-reminder", Environment: "test", Status: bughub.CaseMerging, CycleNumber: 1, Version: 1, CreatedAt: waitingSince.Add(-time.Hour), UpdatedAt: waitingSince}
+	incident := bughub.IncidentCase{ID: "case-reminder", BugID: "bug-reminder", SystemID: "base", Environment: "test", Status: bughub.CaseMerging, CycleNumber: 1, Version: 1, CreatedAt: waitingSince.Add(-time.Hour), UpdatedAt: waitingSince}
 	if err := store.CreateCase(context.Background(), incident); err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +168,7 @@ func TestPollWorkflowRemindersUsesLocalWorkflowEvent(t *testing.T) {
 func TestPollWorkflowRemindersWithoutRuntimeRemainsPendingForLateMount(t *testing.T) {
 	app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "reminder-no-runtime.db"))
 	waitingSince := time.Now().UTC().Add(-25 * time.Hour)
-	incident := bughub.IncidentCase{ID: "case-no-runtime", BugID: "bug-no-runtime", Environment: "test", Status: bughub.CaseMerging, CycleNumber: 1, Version: 1, CreatedAt: waitingSince.Add(-time.Hour), UpdatedAt: waitingSince}
+	incident := bughub.IncidentCase{ID: "case-no-runtime", BugID: "bug-no-runtime", SystemID: "base", Environment: "test", Status: bughub.CaseMerging, CycleNumber: 1, Version: 1, CreatedAt: waitingSince.Add(-time.Hour), UpdatedAt: waitingSince}
 	if err := store.CreateCase(context.Background(), incident); err != nil {
 		t.Fatal(err)
 	}
@@ -191,6 +195,82 @@ func TestPollWorkflowRemindersWithoutRuntimeRemainsPendingForLateMount(t *testin
 	}
 	if !foundFailure {
 		t.Fatal("missing durable delivery failure audit")
+	}
+}
+
+func TestPollWorkflowRemindersUsesConfiguredProductionFlagForLiveAndOnline(t *testing.T) {
+	for _, environment := range []string{"live", "online"} {
+		t.Run(environment, func(t *testing.T) {
+			app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "reminder-prod.db"))
+			waitingSince := time.Now().UTC().Add(-25 * time.Hour)
+			incident := bughub.IncidentCase{ID: "case-" + environment, BugID: "bug-" + environment, SystemID: "base", Environment: environment, Status: bughub.CaseMerging, CycleNumber: 1, Version: 1, CreatedAt: waitingSince.Add(-time.Hour), UpdatedAt: waitingSince}
+			if err := store.CreateCase(context.Background(), incident); err != nil {
+				t.Fatal(err)
+			}
+			event := bughub.TransitionEvent{ID: "wait-" + environment, CaseID: incident.ID, FromStatus: bughub.CaseMerging, ToStatus: bughub.CaseWaitingDeployment, EventType: "merge_pushed", ActorType: "git", ActorID: "git", IdempotencyKey: "wait-" + environment, PayloadJSON: []byte(`{}`), CreatedAt: waitingSince}
+			if _, _, err := store.Transition(context.Background(), incident.ID, 1, bughub.CaseWaitingDeployment, event); err != nil {
+				t.Fatal(err)
+			}
+			app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) {
+				return &config.SystemConfig{System: config.System{ID: "base"}, Environments: []config.Environment{{ID: environment, IsProd: true}}}, nil
+			}
+			app.workflowEmit = func(string, any) { t.Fatal("configured production Case emitted a reminder") }
+
+			app.pollWorkflowReminders(context.Background())
+
+			pending, err := app.ListPendingIncidentWorkflowReminders()
+			if err != nil || len(pending) != 0 {
+				t.Fatalf("pending=%+v err=%v", pending, err)
+			}
+		})
+	}
+}
+
+func TestPollWorkflowRemindersDoesNotTreatEnvironmentNameAsProductionAuthority(t *testing.T) {
+	app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "reminder-name.db"))
+	waitingSince := time.Now().UTC().Add(-25 * time.Hour)
+	incident := bughub.IncidentCase{ID: "case-production-name", BugID: "bug-production-name", SystemID: "base", Environment: "production", Status: bughub.CaseMerging, CycleNumber: 1, Version: 1, CreatedAt: waitingSince.Add(-time.Hour), UpdatedAt: waitingSince}
+	if err := store.CreateCase(context.Background(), incident); err != nil {
+		t.Fatal(err)
+	}
+	event := bughub.TransitionEvent{ID: "wait-production-name", CaseID: incident.ID, FromStatus: bughub.CaseMerging, ToStatus: bughub.CaseWaitingDeployment, EventType: "merge_pushed", ActorType: "git", ActorID: "git", IdempotencyKey: "wait-production-name", PayloadJSON: []byte(`{}`), CreatedAt: waitingSince}
+	if _, _, err := store.Transition(context.Background(), incident.ID, 1, bughub.CaseWaitingDeployment, event); err != nil {
+		t.Fatal(err)
+	}
+	app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) {
+		return &config.SystemConfig{System: config.System{ID: "base"}, Environments: []config.Environment{{ID: "production", IsProd: false}}}, nil
+	}
+	delivered := false
+	app.workflowEmit = func(string, any) { delivered = true }
+
+	app.pollWorkflowReminders(context.Background())
+
+	if !delivered {
+		t.Fatal("non-production Case was suppressed by its environment name")
+	}
+}
+
+func TestPollWorkflowRemindersFailsClosedWhenEnvironmentConfigCannotBeResolved(t *testing.T) {
+	app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "reminder-unresolved.db"))
+	waitingSince := time.Now().UTC().Add(-25 * time.Hour)
+	incident := bughub.IncidentCase{ID: "case-unresolved", BugID: "bug-unresolved", SystemID: "base", Environment: "test", Status: bughub.CaseMerging, CycleNumber: 1, Version: 1, CreatedAt: waitingSince.Add(-time.Hour), UpdatedAt: waitingSince}
+	if err := store.CreateCase(context.Background(), incident); err != nil {
+		t.Fatal(err)
+	}
+	event := bughub.TransitionEvent{ID: "wait-unresolved", CaseID: incident.ID, FromStatus: bughub.CaseMerging, ToStatus: bughub.CaseWaitingDeployment, EventType: "merge_pushed", ActorType: "git", ActorID: "git", IdempotencyKey: "wait-unresolved", PayloadJSON: []byte(`{}`), CreatedAt: waitingSince}
+	if _, _, err := store.Transition(context.Background(), incident.ID, 1, bughub.CaseWaitingDeployment, event); err != nil {
+		t.Fatal(err)
+	}
+	app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) {
+		return nil, errors.New("configuration unavailable")
+	}
+	app.workflowEmit = func(string, any) { t.Fatal("unresolved Case emitted a reminder") }
+
+	app.pollWorkflowReminders(context.Background())
+
+	pending, err := app.ListPendingIncidentWorkflowReminders()
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pending=%+v err=%v", pending, err)
 	}
 }
 

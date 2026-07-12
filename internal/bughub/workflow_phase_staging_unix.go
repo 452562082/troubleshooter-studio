@@ -91,6 +91,93 @@ func openAttemptEvidenceStaging(root, attemptID string) (attemptEvidenceStaging,
 	return nil, errors.New("create unique attempt evidence staging directory")
 }
 
+func openExistingAttemptEvidenceStaging(root, attemptID, locator string) (attemptEvidenceStaging, error) {
+	if err := validateArtifactComponent("attempt ID", attemptID); err != nil {
+		return nil, err
+	}
+	if err := validateArtifactComponent("fix checkpoint locator", locator); err != nil || !strings.HasPrefix(locator, attemptID+"-") {
+		return nil, errors.New("fix checkpoint locator is not bound to its attempt")
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	rootFD, err := openOrCreateDirectoryPath(absRoot)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(rootFD)
+	stagingFD, err := unix.Openat(rootFD, ".staging", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open fix checkpoint staging root: %w", err)
+	}
+	defer unix.Close(stagingFD)
+	fd, err := unix.Openat(stagingFD, locator, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open fix checkpoint staging directory: %w", err)
+	}
+	parentFD, err := unix.Dup(stagingFD)
+	if err != nil {
+		_ = unix.Close(fd)
+		return nil, err
+	}
+	return &unixAttemptEvidenceStaging{path: filepath.Join(absRoot, ".staging", locator), name: locator, fd: fd, parentFD: parentFD}, nil
+}
+
+func sweepTerminalFixStaging(root string, terminalAttemptIDs []string) error {
+	if len(terminalAttemptIDs) == 0 {
+		return nil
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	rootFD, err := openOrCreateDirectoryPath(absRoot)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(rootFD)
+	stagingFD, err := unix.Openat(rootFD, ".staging", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if errors.Is(err, unix.ENOENT) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer unix.Close(stagingFD)
+	duplicate, err := unix.Dup(stagingFD)
+	if err != nil {
+		return err
+	}
+	directory := os.NewFile(uintptr(duplicate), ".staging")
+	entries, readErr := directory.ReadDir(-1)
+	_ = directory.Close()
+	if readErr != nil {
+		return readErr
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		for _, attemptID := range terminalAttemptIDs {
+			if !strings.HasPrefix(entry.Name(), attemptID+"-") {
+				continue
+			}
+			staging, openErr := openExistingAttemptEvidenceStaging(root, attemptID, entry.Name())
+			if openErr != nil {
+				return openErr
+			}
+			cleanupErr := staging.Cleanup()
+			closeErr := staging.Close()
+			if cleanupErr != nil || closeErr != nil {
+				return errors.Join(cleanupErr, closeErr)
+			}
+			break
+		}
+	}
+	return nil
+}
+
 func createAttemptEvidenceStaging(root, attemptID string) (string, error) {
 	staging, err := openAttemptEvidenceStaging(root, attemptID)
 	if err != nil {

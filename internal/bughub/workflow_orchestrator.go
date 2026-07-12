@@ -305,17 +305,18 @@ const (
 )
 
 type CompleteAttemptCommand struct {
-	CaseID          string
-	AttemptID       string
-	ExpectedVersion int64
-	IdempotencyKey  string
-	ActorID         string
-	Outcome         PhaseOutcome
-	OutputJSON      json.RawMessage
-	ErrorCode       string
-	ErrorMessage    string
-	Usage           AgentUsage
-	CodeChanges     []CodeChange
+	CaseID             string
+	AttemptID          string
+	ExpectedVersion    int64
+	IdempotencyKey     string
+	ActorID            string
+	Outcome            PhaseOutcome
+	OutputJSON         json.RawMessage
+	ErrorCode          string
+	ErrorMessage       string
+	Usage              AgentUsage
+	CodeChanges        []CodeChange
+	remoteFixInspected bool
 }
 
 type CaseOrchestrator struct {
@@ -1214,6 +1215,9 @@ func (o *CaseOrchestrator) recordDeploymentResult(incident IncidentCase, reserva
 	if observation.Result == DeploymentResultMatched && verifyErr == nil && !mutation.Replay {
 		if _, startErr := o.StartRegression(durable, mutation.Case.ID, mutation.Case.Version); startErr != nil {
 			current, _ := o.store.GetCase(durable, mutation.Case.ID)
+			if waiting, handled, readinessErr := o.failSafeRegressionReadiness(durable, current, startErr); handled {
+				return waiting, readinessErr
+			}
 			return current, startErr
 		}
 		current, loadErr := o.store.GetCase(durable, mutation.Case.ID)
@@ -1223,6 +1227,41 @@ func (o *CaseOrchestrator) recordDeploymentResult(incident IncidentCase, reserva
 		return current, nil
 	}
 	return mutation.Case, verifyErr
+}
+
+func (o *CaseOrchestrator) failSafeRegressionReadiness(ctx context.Context, incident IncidentCase, cause error) (IncidentCase, bool, error) {
+	if !errors.Is(cause, ErrRegressionOriginalScenario) && !errors.Is(cause, ErrRegressionOriginalEvidence) {
+		return IncidentCase{}, false, nil
+	}
+	if incident.Status == CaseWaitingEvidence {
+		return incident, true, nil
+	}
+	if incident.Status != CaseDeploymentVerified {
+		return IncidentCase{}, true, cause
+	}
+	reason := "original_validation_scenario_incomplete"
+	if errors.Is(cause, ErrRegressionOriginalEvidence) {
+		reason = "original_validation_evidence_missing"
+	}
+	key := fmt.Sprintf("regression-readiness:%s:cycle:%d:%s", incident.ID, incident.CycleNumber, reason)
+	payload := mustJSON(map[string]string{"reason": reason})
+	update := CaseSnapshotUpdate{}
+	attempts, listErr := o.store.ListAttempts(ctx, AttemptFilter{CaseID: incident.ID})
+	if listErr != nil {
+		return IncidentCase{}, true, listErr
+	}
+	for index := len(attempts) - 1; index >= 0; index-- {
+		candidate := attempts[index]
+		if candidate.Phase == PhaseValidation && candidate.Mode == AttemptReproduce && candidate.Status == AttemptStatusSucceeded {
+			update.CurrentAttemptID = workflowStringPtr(candidate.ID)
+			break
+		}
+	}
+	mutation, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: payload, Snapshot: update, Steps: []CaseMutationStep{{To: CaseWaitingEvidence, Event: TransitionEvent{ID: stableID("event", key), EventType: "regression_readiness_evidence_required", ActorType: "studio", ActorID: "orchestrator", PayloadJSON: payload}}}})
+	if err != nil {
+		return IncidentCase{}, true, err
+	}
+	return mutation.Case, true, nil
 }
 
 func (o *CaseOrchestrator) CancelAttempt(ctx context.Context, cmd CancelAttemptCommand) (IncidentCase, error) {
@@ -1247,7 +1286,11 @@ func (o *CaseOrchestrator) CancelAttempt(ctx context.Context, cmd CancelAttemptC
 	}
 	to := failureStateForPhase(attempt.Phase)
 	payload := mustJSON(map[string]string{"attempt_id": attempt.ID})
-	mutation, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: cmd.IdempotencyKey, RequestJSON: mustJSON(cmd), FinishAttempts: []PhaseAttempt{attempt}, Steps: []CaseMutationStep{{To: to, Event: TransitionEvent{ID: stableID("event", cmd.IdempotencyKey), EventType: "attempt_cancelled", ActorType: "user", ActorID: cmd.ActorID, PayloadJSON: payload}}}})
+	mutationRequest := CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: cmd.IdempotencyKey, RequestJSON: mustJSON(cmd), FinishAttempts: []PhaseAttempt{attempt}, Steps: []CaseMutationStep{{To: to, Event: TransitionEvent{ID: stableID("event", cmd.IdempotencyKey), EventType: "attempt_cancelled", ActorType: "user", ActorID: cmd.ActorID, PayloadJSON: payload}}}}
+	if attempt.Phase == PhaseFix {
+		mutationRequest.DeleteFixCheckpointAttemptID = attempt.ID
+	}
+	mutation, err := o.store.ApplyCaseMutation(ctx, mutationRequest)
 	if err != nil {
 		return IncidentCase{}, err
 	}
@@ -1354,17 +1397,53 @@ func (o *CaseOrchestrator) CompleteAttempt(ctx context.Context, cmd CompleteAtte
 	if err != nil {
 		return IncidentCase{}, err
 	}
-	if err := validateCompletionAttemptPhase(attempt.Phase, cmd); err != nil {
-		return IncidentCase{}, err
-	}
-	if err := o.validateRegressionCompletion(ctx, incident, attempt, cmd); err != nil {
-		return IncidentCase{}, err
-	}
 	expectedAttemptOutput := CloneRawMessage(attempt.OutputJSON)
 	if intent, found, parseErr := parseCompletionIntent(attempt.OutputJSON); parseErr != nil {
 		return IncidentCase{}, parseErr
 	} else if found && !equivalentCompletionCommands(intent, cmd) {
 		return IncidentCase{}, ErrIdempotencyConflict
+	}
+	if err := validateCompletionAttemptPhase(attempt.Phase, cmd); err != nil {
+		return IncidentCase{}, err
+	}
+	if cmd.Outcome == PhaseOutcomeReproduced {
+		result, parseErr := ParseValidationResult(cmd.OutputJSON)
+		if parseErr != nil || result.VerificationStatus != "reproduced" {
+			return IncidentCase{}, errors.Join(errors.New("reproduced completion requires a complete validation result"), parseErr)
+		}
+		artifacts, artifactErr := o.store.ListEvidenceArtifacts(ctx, incident.ID)
+		if artifactErr != nil {
+			return IncidentCase{}, artifactErr
+		}
+		registered := false
+		for _, artifact := range artifacts {
+			if artifact.AttemptID == attempt.ID {
+				registered = true
+				break
+			}
+		}
+		if !registered {
+			return IncidentCase{}, errors.New("reproduced completion requires a registered evidence artifact")
+		}
+	}
+	if cmd.Outcome == PhaseOutcomeFixPushed && !cmd.remoteFixInspected {
+		inspection, inspectErr := o.inspectFixWithRetry(ctx, FixInspectionRequest{CaseID: incident.ID, Attempt: attempt.Clone(), Changes: cmd.CodeChanges})
+		if inspectErr != nil {
+			if errors.Is(inspectErr, ErrFixRemoteMismatch) {
+				finishErr := o.finishFixRecoveryFailure(ctx, incident, attempt, inspectErr.Error())
+				failed, loadErr := o.store.GetCase(ctx, incident.ID)
+				return failed, errors.Join(inspectErr, finishErr, loadErr)
+			}
+			return IncidentCase{}, inspectErr
+		}
+		if !inspection.Complete || len(inspection.Changes) == 0 || validateFixCheckpointMatchesResult(inspection.Changes, cmd.CodeChanges) != nil {
+			finishErr := o.finishFixRecoveryFailure(ctx, incident, attempt, ErrFixRemoteMismatch.Error())
+			failed, loadErr := o.store.GetCase(ctx, incident.ID)
+			return failed, errors.Join(ErrFixRemoteMismatch, finishErr, loadErr)
+		}
+	}
+	if err := o.validateRegressionCompletion(ctx, incident, attempt, cmd); err != nil {
+		return IncidentCase{}, err
 	}
 	attempt.OutputJSON, attempt.ErrorCode, attempt.ErrorMessage, attempt.Usage = CloneRawMessage(cmd.OutputJSON), cmd.ErrorCode, cmd.ErrorMessage, cmd.Usage
 	if cmd.Outcome == PhaseOutcomeFixFailed || cmd.Outcome == PhaseOutcomeNeedsEvidence {
@@ -1373,6 +1452,29 @@ func (o *CaseOrchestrator) CompleteAttempt(ctx context.Context, cmd CompleteAtte
 		attempt.Status = AttemptStatusSucceeded
 	}
 	return o.applyOutcome(ctx, incident, attempt, cmd, expectedAttemptOutput)
+}
+
+const fixInspectionMaxAttempts = 3
+
+func (o *CaseOrchestrator) inspectFixWithRetry(ctx context.Context, request FixInspectionRequest) (FixInspection, error) {
+	if o.git == nil {
+		return FixInspection{}, ErrFixInspectionUnavailable
+	}
+	var inspection FixInspection
+	var err error
+	for attempt := 0; attempt < fixInspectionMaxAttempts; attempt++ {
+		inspection, err = o.git.InspectFix(ctx, request)
+		if err == nil {
+			return inspection, nil
+		}
+		if errors.Is(err, ErrFixRemoteMismatch) {
+			return inspection, err
+		}
+		if ctx.Err() != nil {
+			return inspection, ctx.Err()
+		}
+	}
+	return inspection, errors.Join(ErrFixInspectionUnavailable, err)
 }
 
 func (o *CaseOrchestrator) replayRegressionCompletion(ctx context.Context, cmd CompleteAttemptCommand) (IncidentCase, bool, error) {
@@ -1467,7 +1569,11 @@ func (o *CaseOrchestrator) applyOutcome(ctx context.Context, incident IncidentCa
 		creates = append(creates, *next)
 	}
 	request := mustJSON(cmd)
-	mutation, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: cmd.IdempotencyKey, RequestJSON: request, FinishAttempts: []PhaseAttempt{attempt}, CreateAttempts: creates, CodeChanges: cmd.CodeChanges, ExpectedAttemptOutputs: map[string]json.RawMessage{attempt.ID: expectedAttemptOutput}, Snapshot: update, Steps: steps})
+	mutationRequest := CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: cmd.IdempotencyKey, RequestJSON: request, FinishAttempts: []PhaseAttempt{attempt}, CreateAttempts: creates, CodeChanges: cmd.CodeChanges, ExpectedAttemptOutputs: map[string]json.RawMessage{attempt.ID: expectedAttemptOutput}, Snapshot: update, Steps: steps}
+	if attempt.Phase == PhaseFix {
+		mutationRequest.DeleteFixCheckpointAttemptID = attempt.ID
+	}
+	mutation, err := o.store.ApplyCaseMutation(ctx, mutationRequest)
 	if err != nil {
 		return IncidentCase{}, err
 	}
@@ -1526,7 +1632,11 @@ func (o *CaseOrchestrator) phaseScheduleFailure(ctx context.Context, incident In
 	request := mustJSON(map[string]string{"error": cause.Error(), "attempt_id": attempt.ID})
 	failureCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	mutation, err := o.store.ApplyCaseMutation(failureCtx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: failureKey, RequestJSON: request, FinishAttempts: []PhaseAttempt{attempt}, Steps: []CaseMutationStep{{To: failureStateForPhase(attempt.Phase), Event: TransitionEvent{ID: stableID("event", failureKey), EventType: "phase_schedule_failed", ActorType: "studio", ActorID: "orchestrator", PayloadJSON: request}}}})
+	mutationRequest := CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: failureKey, RequestJSON: request, FinishAttempts: []PhaseAttempt{attempt}, Steps: []CaseMutationStep{{To: failureStateForPhase(attempt.Phase), Event: TransitionEvent{ID: stableID("event", failureKey), EventType: "phase_schedule_failed", ActorType: "studio", ActorID: "orchestrator", PayloadJSON: request}}}}
+	if attempt.Phase == PhaseFix {
+		mutationRequest.DeleteFixCheckpointAttemptID = attempt.ID
+	}
+	mutation, err := o.store.ApplyCaseMutation(failureCtx, mutationRequest)
 	if err != nil {
 		return IncidentCase{}, errors.Join(cause, err)
 	}

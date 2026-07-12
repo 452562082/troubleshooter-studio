@@ -21,8 +21,9 @@ type DeploymentVerificationConfig struct {
 }
 
 type HTTPDeploymentVerification struct {
-	URL         string `yaml:"url,omitempty"`
-	JSONPointer string `yaml:"json_pointer,omitempty"`
+	URL          string `yaml:"url,omitempty"`
+	JSONPointer  string `yaml:"json_pointer,omitempty"`
+	AllowPrivate bool   `yaml:"allow_private,omitempty"`
 }
 
 type K8sDeploymentVerification struct {
@@ -45,7 +46,7 @@ func (c DeploymentVerificationConfig) IsZero() bool {
 }
 
 func (c HTTPDeploymentVerification) IsZero() bool {
-	return strings.TrimSpace(c.URL) == "" && strings.TrimSpace(c.JSONPointer) == ""
+	return strings.TrimSpace(c.URL) == "" && strings.TrimSpace(c.JSONPointer) == "" && !c.AllowPrivate
 }
 
 func (c K8sDeploymentVerification) IsZero() bool {

@@ -36,9 +36,11 @@ func captureArtifactSource(path string) (capturedArtifactSource, error) {
 	if !before.Mode().IsRegular() {
 		return capturedArtifactSource{}, fmt.Errorf("artifact source must be a regular file")
 	}
-	hash := sha256.New()
-	var content bytes.Buffer
-	if _, err := io.Copy(io.MultiWriter(&content, hash), file); err != nil {
+	if before.Size() > maxEvidenceArtifactBytes {
+		return capturedArtifactSource{}, fmt.Errorf("%w: declared size %d exceeds maximum %d bytes", ErrEvidenceArtifactTooLarge, before.Size(), maxEvidenceArtifactBytes)
+	}
+	content, digest, err := readStagedEvidence(file)
+	if err != nil {
 		return capturedArtifactSource{}, fmt.Errorf("read artifact source: %w", err)
 	}
 	after, err := file.Stat()
@@ -48,7 +50,7 @@ func captureArtifactSource(path string) (capturedArtifactSource, error) {
 	if !os.SameFile(before, after) || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
 		return capturedArtifactSource{}, fmt.Errorf("artifact source changed while being captured")
 	}
-	return capturedArtifactSource{Content: content.Bytes(), SHA256: hex.EncodeToString(hash.Sum(nil)), CapturedAt: after.ModTime().UTC()}, nil
+	return capturedArtifactSource{Content: content, SHA256: digest, CapturedAt: after.ModTime().UTC()}, nil
 }
 
 type unixArtifactPublication struct {

@@ -63,13 +63,13 @@ describe('generateYAML', () => {
       id: 'test', api_domain: '', web_domain: '', is_prod: false,
       deployment_verification: {
         provider: 'http',
-        http: { url: 'https://admin-test.example.com/version', json_pointer: '/git/commit' },
+        http: { url: 'https://admin-test.example.com/version', json_pointer: '/git/commit', allow_private: true },
       },
     })
     const parsed = yaml.load(generateYAML(makeCtx({ environments: [env] }))) as any
     expect(parsed.environments[0].deployment_verification).toEqual({
       provider: 'http',
-      http: { url: 'https://admin-test.example.com/version', json_pointer: '/git/commit' },
+      http: { url: 'https://admin-test.example.com/version', json_pointer: '/git/commit', allow_private: true },
     })
   })
 
@@ -100,7 +100,7 @@ describe('generateYAML', () => {
     const legacy = makeCtx({ environments: [{ id: 'test', api_domain: '', web_domain: '', is_prod: false }] })
     const manual = makeCtx({ environments: [{
       id: 'test', api_domain: '', web_domain: '', is_prod: false,
-      deployment_verification: { provider: 'manual', http: { url: '', json_pointer: '' }, k8s: { cluster: '', namespace: '', deployments_by_repo: {}, commit_annotation: '', image_label: '' } },
+      deployment_verification: { provider: 'manual', http: { url: '', json_pointer: '', allow_private: false }, k8s: { cluster: '', namespace: '', deployments_by_repo: {}, commit_annotation: '', image_label: '' } },
     } as any] })
     expect(generateYAML(manual)).toBe(generateYAML(legacy))
   })

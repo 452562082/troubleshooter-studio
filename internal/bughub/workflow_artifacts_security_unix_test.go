@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,6 +14,26 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+func TestRegisterArtifactRejectsOversizedSourceBeforeReading(t *testing.T) {
+	ctx, store, input := secureArtifactFixture(t, "oversized")
+	source := filepath.Join(resolvedTempDir(t), "oversized.bin")
+	file, err := os.OpenFile(source, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(maxEvidenceArtifactBytes + 1); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	input.SourcePath = source
+	if _, err := RegisterArtifact(ctx, store, input); !errors.Is(err, ErrEvidenceArtifactTooLarge) {
+		t.Fatalf("err=%v", err)
+	}
+}
 
 func TestRegisterArtifactRejectsSourceSymlinkAndFIFO(t *testing.T) {
 	ctx, store, input := secureArtifactFixture(t, "source-types")

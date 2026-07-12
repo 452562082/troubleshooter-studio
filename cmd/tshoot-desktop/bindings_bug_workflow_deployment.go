@@ -119,7 +119,7 @@ func canonicalDeploymentVerifierBinding(cfg *config.SystemConfig, environment co
 	case config.DeploymentVerificationProviderManual:
 		return makeDeploymentBinding(provider, map[string]any{"provider": provider, "policy": "manual-v1"})
 	case config.DeploymentVerificationProviderHTTP:
-		return makeDeploymentBinding(provider, map[string]any{"provider": provider, "url": normalizedVerifierURL(environment.DeploymentVerification.HTTP.URL), "json_pointer": environment.DeploymentVerification.HTTP.JSONPointer, "policy": "http-v1-timeout10s-body1m-samehost"})
+		return makeDeploymentBinding(provider, map[string]any{"provider": provider, "url": normalizedVerifierURL(environment.DeploymentVerification.HTTP.URL), "json_pointer": environment.DeploymentVerification.HTTP.JSONPointer, "allow_private": environment.DeploymentVerification.HTTP.AllowPrivate, "policy": "http-v2-ssrf-dialguard-timeout10s-body1m-samehost"})
 	case config.DeploymentVerificationProviderK8s:
 		endpointIdentity, _ := k8sVerifierEndpointIdentity(cfg, environment.ID)
 		endpointProvider := strings.ToLower(strings.TrimSpace(cfg.Infrastructure.Observability.K8sRuntime.Provider))

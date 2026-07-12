@@ -30,6 +30,15 @@ func newProductionDeploymentApp(t *testing.T, yamlText, caseEnvironment string, 
 	t.Helper()
 	root := t.TempDir()
 	botRoot := t.TempDir()
+	var err error
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	botRoot, err = filepath.EvalSymlinks(botRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
 	meta, _ := json.Marshal(discover.Meta{SystemID: "base", Target: "codex", TroubleshooterYAML: yamlText})
 	if err := os.WriteFile(filepath.Join(botRoot, discover.MetaFilename), meta, 0o600); err != nil {
 		t.Fatal(err)
@@ -119,7 +128,7 @@ func TestProductionWorkflowSelectsDeploymentProviderFromInstalledCaseConfig(t *t
 		calls := 0
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { calls++; _, _ = w.Write([]byte(`{"commit":"old"}`)) }))
 		defer server.Close()
-		app, incident := newProductionDeploymentApp(t, deploymentYAML("    deployment_verification:\n      provider: http\n      http: {url: \""+server.URL+"\", json_pointer: /commit}"), "test", nil)
+		app, incident := newProductionDeploymentApp(t, deploymentYAML("    deployment_verification:\n      provider: http\n      http: {url: \""+server.URL+"\", json_pointer: /commit, allow_private: true}"), "test", nil)
 		detail, detailErr := app.GetIncidentCase(incident.ID)
 		if detailErr != nil || detail.DeploymentVerification.Provider != "http" || !detail.DeploymentVerification.Available || !strings.Contains(detail.DeploymentVerification.Hint, "/commit") || strings.Contains(detail.DeploymentVerification.Hint, server.URL) {
 			t.Fatalf("preview=%+v err=%v", detail.DeploymentVerification, detailErr)
@@ -300,5 +309,18 @@ func TestDeploymentReservationRecoveryRejectsChangedConfigAfterRestart(t *testin
 	observations, err := restarted.workflowStore.ListDeploymentObservations(ctx, incident.ID)
 	if err != nil || firstCalls != 0 || secondCalls != 0 || len(observations) != 1 || observations[0].DiagnosticCode != "config_changed" {
 		t.Fatalf("first=%d second=%d observations=%+v err=%v", firstCalls, secondCalls, observations, err)
+	}
+}
+
+func TestHTTPDeploymentBindingIncludesPrivateNetworkPolicy(t *testing.T) {
+	cfg, err := config.LoadFromBytes([]byte(deploymentYAML("    deployment_verification:\n      provider: http\n      http: {url: \"https://version.example.test\", json_pointer: /commit}")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutPrivate := canonicalDeploymentVerifierBinding(cfg, cfg.Environments[0])
+	cfg.Environments[0].DeploymentVerification.HTTP.AllowPrivate = true
+	withPrivate := canonicalDeploymentVerifierBinding(cfg, cfg.Environments[0])
+	if withoutPrivate.Fingerprint == withPrivate.Fingerprint || string(withoutPrivate.Snapshot) == string(withPrivate.Snapshot) || !strings.Contains(string(withPrivate.Snapshot), `"allow_private":true`) {
+		t.Fatalf("without=%s with=%s", withoutPrivate.Snapshot, withPrivate.Snapshot)
 	}
 }

@@ -90,10 +90,10 @@ describe('parseEnvironment', () => {
     expect(parseEnvironment(undefined)).toEqual({ id: '', api_domain: '', web_domain: '', is_prod: false })
   })
   it('imports HTTP and K8s deployment verification provider blocks', () => {
-    expect(parseEnvironment({ deployment_verification: { provider: 'http', http: { url: 'https://x/version', json_pointer: '/git/commit' } } }).deployment_verification)
-      .toEqual({ provider: 'http', http: { url: 'https://x/version', json_pointer: '/git/commit' }, k8s: { cluster: '', namespace: '', deployments_by_repo: {}, commit_annotation: '', image_label: '' } })
+    expect(parseEnvironment({ deployment_verification: { provider: 'http', http: { url: 'https://x/version', json_pointer: '/git/commit', allow_private: true } } }).deployment_verification)
+      .toEqual({ provider: 'http', http: { url: 'https://x/version', json_pointer: '/git/commit', allow_private: true }, k8s: { cluster: '', namespace: '', deployments_by_repo: {}, commit_annotation: '', image_label: '' } })
     expect(parseEnvironment({ deployment_verification: { provider: 'k8s', k8s: { cluster: 'c', namespace: 'n', deployments_by_repo: { repo: 'deploy' }, image_label: 'commit' } } }).deployment_verification)
-      .toEqual({ provider: 'k8s', http: { url: '', json_pointer: '' }, k8s: { cluster: 'c', namespace: 'n', deployments_by_repo: { repo: 'deploy' }, commit_annotation: '', image_label: 'commit' } })
+      .toEqual({ provider: 'k8s', http: { url: '', json_pointer: '', allow_private: false }, k8s: { cluster: 'c', namespace: 'n', deployments_by_repo: { repo: 'deploy' }, commit_annotation: '', image_label: 'commit' } })
   })
 })
 

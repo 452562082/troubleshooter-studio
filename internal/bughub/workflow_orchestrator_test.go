@@ -342,6 +342,10 @@ func (r *recordingPhaseRunner) Start(_ context.Context, attempt PhaseAttempt, bu
 	return r.startErr
 }
 
+func (r *recordingPhaseRunner) LoadFixCheckpoint(context.Context, PhaseAttempt) ([]CodeChange, error) {
+	return nil, nil
+}
+
 func (r *recordingPhaseRunner) Cancel(_ context.Context, attemptID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -362,6 +366,8 @@ type recordingGitIntegration struct {
 	result        MergeResult
 	inspection    MergeInspection
 	fixInspection FixInspection
+	fixErrors     []error
+	fixCalls      int
 	err           error
 	mergeCalls    int
 	resumeCalls   int
@@ -394,6 +400,10 @@ func (g *recordingGitIntegration) InspectFix(_ context.Context, request FixInspe
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.inspections = append(g.inspections, MergeRequest{CaseID: request.CaseID})
+	g.fixCalls++
+	if g.fixCalls <= len(g.fixErrors) {
+		return FixInspection{}, g.fixErrors[g.fixCalls-1]
+	}
 	return g.fixInspection.Clone(), g.err
 }
 
@@ -504,6 +514,26 @@ func TestOrchestratorStartCaseCommitsBeforeSchedulingAndDuplicateDoesNotSchedule
 	}
 }
 
+func TestOrchestratorReproducedCannotAdvanceWithoutRegisteredEvidence(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-reproduced-no-evidence", CasePendingValidation)
+	o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, nil)
+	incident, err := o.StartCase(ctx, StartCaseCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "no-evidence:start", ActorID: "alice", Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "validator", Target: "codex"}, InputJSON: []byte(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, _ := store.GetAttempt(ctx, incident.CurrentAttemptID)
+	output := []byte(`{"verification_status":"reproduced","environment":"test","observed_behavior":"timeout","expected_behavior":"success","evidence":[{"kind":"api","path":"response.json","environment":"test","redaction_status":"not_required"}],"gaps":[]}`)
+	if _, err := o.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "no-evidence:complete", ActorID: "validator", Outcome: PhaseOutcomeReproduced, OutputJSON: output}); err == nil {
+		t.Fatal("reproduced advanced without a registered artifact")
+	}
+	current, _ := store.GetCase(ctx, incident.ID)
+	if current.Status != CaseValidating {
+		t.Fatalf("status=%s", current.Status)
+	}
+}
+
 func TestOrchestratorRejectsStaleCommandBeforeScheduling(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-stale", CasePendingValidation)
@@ -553,7 +583,9 @@ func TestOrchestratorRequiresSeparateScopeBoundFixAndMergeApprovals(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	waiting, err := o.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: fixing.ID, AttemptID: fixAttempt.ID, ExpectedVersion: fixing.Version, IdempotencyKey: "fix-finished", Outcome: PhaseOutcomeFixPushed, OutputJSON: []byte(`{"fix_status":"fixed_pushed","environment":"test","branches":[{"repo":"repo","base_branch":"test","fix_branch":"fix/bug","commit":"fix-1","pushed":true,"target_environment_branch":"test","push_remote":"origin"}],"changes":[{"repo":"repo","summary":"repair bug"}],"tests":[{"repo":"repo","commit":"fix-1","command":"go test ./...","result":"passed"}],"deployment_notice":"deploy repo","risks":[]}`), ActorID: "fixer", CodeChanges: []CodeChange{{ID: "change-repo", CaseID: fixing.ID, AttemptID: fixAttempt.ID, Repo: "repo", BaseBranch: "test", FixBranch: "fix/bug", FixCommit: "fix-1", TestEvidence: []byte(`[{"repo":"repo","commit":"fix-1","command":"go test ./...","result":"passed"}]`), TargetEnvironmentBranch: "test", PushRemote: "origin", PushStatus: "pushed"}}})
+	change := CodeChange{ID: "change-repo", CaseID: fixing.ID, AttemptID: fixAttempt.ID, Repo: "repo", BaseBranch: "test", FixBranch: "fix/bug", FixCommit: "fix-1", TestEvidence: []byte(`[{"repo":"repo","commit":"fix-1","command":"go test ./...","result":"passed"}]`), TargetEnvironmentBranch: "test", PushRemote: "origin", PushStatus: "pushed"}
+	git.fixInspection = FixInspection{Complete: true, Changes: []CodeChange{change}}
+	waiting, err := o.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: fixing.ID, AttemptID: fixAttempt.ID, ExpectedVersion: fixing.Version, IdempotencyKey: "fix-finished", Outcome: PhaseOutcomeFixPushed, OutputJSON: []byte(`{"fix_status":"fixed_pushed","environment":"test","branches":[{"repo":"repo","base_branch":"test","fix_branch":"fix/bug","commit":"fix-1","pushed":true,"target_environment_branch":"test","push_remote":"origin"}],"changes":[{"repo":"repo","summary":"repair bug"}],"tests":[{"repo":"repo","commit":"fix-1","command":"go test ./...","result":"passed"}],"deployment_notice":"deploy repo","risks":[]}`), ActorID: "fixer", CodeChanges: []CodeChange{change}})
 	if err != nil || waiting.Status != CaseWaitingMergeApproval {
 		t.Fatalf("case=%+v err=%v", waiting, err)
 	}
@@ -880,7 +912,7 @@ func TestOrchestratorCancelVsCompleteBindsOneAttemptOutcome(t *testing.T) {
 	errs := make(chan error, 2)
 	go func() {
 		<-start
-		_, err := first.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "race:complete", ActorID: "agent", Outcome: PhaseOutcomeReproduced, OutputJSON: []byte(`{"winner":"complete"}`)})
+		_, err := first.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "race:complete", ActorID: "agent", Outcome: PhaseOutcomeNotReproduced, OutputJSON: []byte(`{"winner":"complete"}`)})
 		errs <- err
 	}()
 	go func() {

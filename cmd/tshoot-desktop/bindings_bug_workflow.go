@@ -250,8 +250,16 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 		orchestrator := bughub.NewCaseOrchestrator(store, runner, gitService, deploymentVerifier)
 		runner.SetCompletionCallback(func(callbackCtx context.Context, command bughub.CompleteAttemptCommand) error {
 			incident, completeErr := orchestrator.CompleteAttempt(workflowContext(callbackCtx), command)
-			if completeErr == nil {
+			if incident.ID != "" {
 				a.emitIncidentCase(incident.ID)
+			}
+			if errors.Is(completeErr, bughub.ErrFixInspectionUnavailable) {
+				// Make the next workflow command run the same bounded durable recovery
+				// pass. This retries remote inspection without rerunning the fixer and
+				// does not require restarting Studio.
+				a.workflowMu.Lock()
+				a.workflowInitErr = completeErr
+				a.workflowMu.Unlock()
 			}
 			return completeErr
 		})
@@ -372,7 +380,7 @@ func (a *App) ListPendingIncidentWorkflowReminders() ([]bughub.WorkflowReminder,
 	if err != nil {
 		return nil, err
 	}
-	items, err := bughub.NewWorkflowReminderService(store, nil, bughub.DefaultWorkflowReminderAfter, nil).Pending(a.workflowCommandContext())
+	items, err := bughub.NewWorkflowReminderService(store, nil, bughub.DefaultWorkflowReminderAfter, nil, a.resolveIncidentProductionEnvironment).Pending(a.workflowCommandContext())
 	if items == nil {
 		items = []bughub.WorkflowReminder{}
 	}
@@ -426,10 +434,30 @@ func (a *App) pollWorkflowReminders(ctx context.Context) {
 			return nil
 		}
 		return errors.New("incident workflow reminder has no desktop runtime receiver")
-	})
+	}, a.resolveIncidentProductionEnvironment)
 	if err := service.Poll(workflowContext(ctx)); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintf(os.Stderr, "[warn] incident workflow reminder poll failed: %v\n", err)
 	}
+}
+
+func (a *App) resolveIncidentProductionEnvironment(ctx context.Context, incident bughub.IncidentCase) (bool, error) {
+	loader := a.workflowLoadDeploymentConfig
+	if loader == nil {
+		loader = a.loadInstalledIncidentConfig
+	}
+	cfg, err := loader(ctx, incident)
+	if err != nil || cfg == nil {
+		return false, errors.New("incident environment configuration unavailable")
+	}
+	if strings.TrimSpace(incident.SystemID) == "" || cfg.System.ID != incident.SystemID {
+		return false, errors.New("incident environment system does not match configuration")
+	}
+	for _, environment := range cfg.Environments {
+		if environment.ID == incident.Environment {
+			return environment.IsProd, nil
+		}
+	}
+	return false, errors.New("incident environment is absent from configuration")
 }
 
 func (a *App) GetIncidentCase(caseID string) (IncidentCaseDetail, error) {

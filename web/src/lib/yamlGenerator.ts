@@ -37,7 +37,7 @@ export interface YAMLGenEnvironment {
 
 export interface DeploymentVerificationState {
   provider: 'manual' | 'http' | 'k8s'
-  http: { url: string; json_pointer: string }
+  http: { url: string; json_pointer: string; allow_private: boolean }
   k8s: {
     cluster: string
     namespace: string
@@ -50,7 +50,7 @@ export interface DeploymentVerificationState {
 export function emptyDeploymentVerification(): DeploymentVerificationState {
   return {
     provider: 'manual',
-    http: { url: '', json_pointer: '' },
+    http: { url: '', json_pointer: '', allow_private: false },
     k8s: { cluster: '', namespace: '', deployments_by_repo: {}, commit_annotation: '', image_label: '' },
   }
 }
@@ -235,6 +235,7 @@ export function generateYAML(ctx: YAMLGenContext): string {
       lines.push('      http:')
       lines.push(`        url: ${yamlStr(verification.http.url)}`)
       lines.push(`        json_pointer: ${yamlStr(verification.http.json_pointer)}`)
+      if (verification.http.allow_private) lines.push('        allow_private: true')
     } else if (verification?.provider === 'k8s') {
       lines.push('    deployment_verification:')
       lines.push('      provider: k8s')

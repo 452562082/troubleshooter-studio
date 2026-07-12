@@ -65,18 +65,24 @@ type workflowReminderSnooze struct {
 }
 
 type WorkflowReminderService struct {
-	store    *CaseStore
-	clock    func() time.Time
-	interval time.Duration
-	lease    time.Duration
-	deliver  func(context.Context, WorkflowReminder) error
+	store             *CaseStore
+	clock             func() time.Time
+	interval          time.Duration
+	lease             time.Duration
+	deliver           func(context.Context, WorkflowReminder) error
+	resolveProduction WorkflowProductionResolver
 }
 
-func NewWorkflowReminderService(store *CaseStore, clock func() time.Time, interval time.Duration, deliver func(context.Context, WorkflowReminder) error) *WorkflowReminderService {
-	return NewWorkflowReminderServiceWithLease(store, clock, interval, DefaultWorkflowReminderLease, deliver)
+// WorkflowProductionResolver reads the authoritative environment configuration
+// for a Case. A missing resolver or any resolution failure is fail-closed: the
+// Case is not eligible for automatic reminders.
+type WorkflowProductionResolver func(context.Context, IncidentCase) (bool, error)
+
+func NewWorkflowReminderService(store *CaseStore, clock func() time.Time, interval time.Duration, deliver func(context.Context, WorkflowReminder) error, resolver ...WorkflowProductionResolver) *WorkflowReminderService {
+	return NewWorkflowReminderServiceWithLease(store, clock, interval, DefaultWorkflowReminderLease, deliver, resolver...)
 }
 
-func NewWorkflowReminderServiceWithLease(store *CaseStore, clock func() time.Time, interval, lease time.Duration, deliver func(context.Context, WorkflowReminder) error) *WorkflowReminderService {
+func NewWorkflowReminderServiceWithLease(store *CaseStore, clock func() time.Time, interval, lease time.Duration, deliver func(context.Context, WorkflowReminder) error, resolver ...WorkflowProductionResolver) *WorkflowReminderService {
 	if clock == nil {
 		clock = func() time.Time { return time.Now().UTC() }
 	}
@@ -91,7 +97,11 @@ func NewWorkflowReminderServiceWithLease(store *CaseStore, clock func() time.Tim
 			return errors.New("workflow reminder receiver unavailable")
 		}
 	}
-	return &WorkflowReminderService{store: store, clock: clock, interval: interval, lease: lease, deliver: deliver}
+	var resolveProduction WorkflowProductionResolver
+	if len(resolver) > 0 {
+		resolveProduction = resolver[0]
+	}
+	return &WorkflowReminderService{store: store, clock: clock, interval: interval, lease: lease, deliver: deliver, resolveProduction: resolveProduction}
 }
 
 // Poll durably reserves one stable slot and one short delivery lease before
@@ -108,7 +118,7 @@ func (s *WorkflowReminderService) Poll(ctx context.Context) error {
 	}
 	var pollErrors []error
 	for _, incident := range cases {
-		if !workflowReminderEligibleCase(incident) {
+		if !s.workflowReminderEligibleCase(ctx, incident) {
 			continue
 		}
 		events, listErr := s.store.ListEvents(ctx, incident.ID)
@@ -195,7 +205,7 @@ func (s *WorkflowReminderService) Pending(ctx context.Context) ([]WorkflowRemind
 	}
 	result := []WorkflowReminder{}
 	for _, incident := range cases {
-		if !workflowReminderEligibleCase(incident) {
+		if !s.workflowReminderEligibleCase(ctx, incident) {
 			continue
 		}
 		events, err := s.store.ListEvents(ctx, incident.ID)
@@ -318,11 +328,15 @@ func foldWorkflowReminderHistory(incident IncidentCase, events []TransitionEvent
 	return h
 }
 
-func workflowReminderEligibleCase(incident IncidentCase) bool {
+func (s *WorkflowReminderService) workflowReminderEligibleCase(ctx context.Context, incident IncidentCase) bool {
 	if incident.Status != CaseWaitingDeployment || incident.ClosedAt != nil {
 		return false
 	}
-	return !strings.HasPrefix(strings.ToLower(strings.TrimSpace(incident.Environment)), "prod")
+	if s.resolveProduction == nil {
+		return false
+	}
+	isProduction, err := s.resolveProduction(ctx, incident)
+	return err == nil && !isProduction
 }
 
 func saturatingDurationBetween(from, to time.Time) time.Duration {

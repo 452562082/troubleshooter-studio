@@ -36,6 +36,7 @@ func TestCanTransition(t *testing.T) {
 		{CaseWaitingDeployment, CaseDeploymentUnverified},
 		{CaseDeploymentUnverified, CaseWaitingDeployment},
 		{CaseDeploymentVerified, CaseRegressionValidating},
+		{CaseDeploymentVerified, CaseWaitingEvidence},
 		{CaseRegressionValidating, CaseFixedVerified},
 		{CaseRegressionValidating, CaseStillReproduces},
 		{CaseRegressionValidating, CaseWaitingEvidence},

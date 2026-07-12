@@ -14,12 +14,14 @@ import (
 )
 
 var (
-	ErrMergeApprovalStale = errors.New("merge approval target HEAD is stale")
-	ErrGitWorktreeDirty   = errors.New("repository worktree is dirty")
-	ErrGitDetachedHEAD    = errors.New("repository is on a detached HEAD")
-	ErrGitRemoteNotSSH    = errors.New("push remote is not SSH")
-	ErrGitMergeConflict   = errors.New("git merge would conflict")
-	ErrStudioWorktree     = errors.New("Studio dedicated worktree is invalid")
+	ErrMergeApprovalStale       = errors.New("merge approval target HEAD is stale")
+	ErrGitWorktreeDirty         = errors.New("repository worktree is dirty")
+	ErrGitDetachedHEAD          = errors.New("repository is on a detached HEAD")
+	ErrGitRemoteNotSSH          = errors.New("push remote is not SSH")
+	ErrGitMergeConflict         = errors.New("git merge would conflict")
+	ErrStudioWorktree           = errors.New("Studio dedicated worktree is invalid")
+	ErrFixRemoteMismatch        = errors.New("remote fix branch does not match the checkpoint")
+	ErrFixInspectionUnavailable = errors.New("remote fix inspection is temporarily unavailable")
 )
 
 type RepositoryPathResolver func(context.Context, string, string) (string, error)
@@ -155,16 +157,35 @@ func (s *GitIntegrationService) ResumePush(ctx context.Context, req MergeRequest
 func (s *GitIntegrationService) InspectFix(ctx context.Context, req FixInspectionRequest) (FixInspection, error) {
 	result := FixInspection{Complete: true, Changes: make([]CodeChange, len(req.Changes))}
 	for i, change := range req.Changes {
-		path, _, err := s.validateRepository(ctx, req.CaseID, change)
+		if strings.TrimSpace(change.Repo) == "" || strings.TrimSpace(change.FixBranch) == "" || !isFullGitObjectID(change.FixCommit) {
+			result.Complete = false
+			result.ErrorMessage = "fix checkpoint repository, branch, and full commit are required"
+			return result, fmt.Errorf("%w: %s", ErrFixRemoteMismatch, result.ErrorMessage)
+		}
+		path, remote, err := s.validateRepository(ctx, req.CaseID, change)
 		if err != nil {
 			result.Complete = false
 			result.ErrorMessage = err.Error()
-			return result, err
+			return result, fmt.Errorf("%w: %v", ErrFixInspectionUnavailable, err)
 		}
-		if err := gitRun(ctx, path, "cat-file", "-e", change.FixCommit+"^{commit}"); err != nil {
+		remoteHead, err := fetchFixHead(ctx, path, remote, change.FixBranch)
+		if err != nil {
 			result.Complete = false
 			result.ErrorMessage = err.Error()
-			return result, err
+			return result, fmt.Errorf("%w: %v", ErrFixInspectionUnavailable, err)
+		}
+		if remoteHead != change.FixCommit {
+			result.Complete = false
+			result.ErrorMessage = "remote fix branch does not point at the checkpoint commit"
+			return result, fmt.Errorf("%w: %s", ErrFixRemoteMismatch, result.ErrorMessage)
+		}
+		// Fetch is the source of truth and materializes the exact remote object in
+		// a freshly cloned or garbage-collected local repository. Only validate
+		// object type after the remote ref has been fetched and matched.
+		if err := gitRun(ctx, path, "cat-file", "-e", remoteHead+"^{commit}"); err != nil {
+			result.Complete = false
+			result.ErrorMessage = err.Error()
+			return result, fmt.Errorf("%w: remote fix ref is not a commit: %v", ErrFixRemoteMismatch, err)
 		}
 		result.Changes[i] = change.Clone()
 	}

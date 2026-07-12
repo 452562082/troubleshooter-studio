@@ -104,9 +104,11 @@ func canonicalTime(value time.Time) time.Time {
 }
 
 var (
-	ErrRegressionDuplicate     = errors.New("identical regression scenario and deployment already exists")
-	ErrRegressionBinding       = errors.New("regression is not bound to the current verified deployment")
-	ErrRegressionFreshEvidence = errors.New("regression requires fresh current-attempt evidence")
+	ErrRegressionDuplicate        = errors.New("identical regression scenario and deployment already exists")
+	ErrRegressionBinding          = errors.New("regression is not bound to the current verified deployment")
+	ErrRegressionFreshEvidence    = errors.New("regression requires fresh current-attempt evidence")
+	ErrRegressionOriginalScenario = errors.New("regression original validation scenario is incomplete")
+	ErrRegressionOriginalEvidence = errors.New("regression original validation evidence is missing")
 )
 
 type NextCycleInvestigationInput struct {
@@ -218,27 +220,16 @@ func (o *CaseOrchestrator) buildRegressionInput(ctx context.Context, incident In
 	if observation.ID == "" || observation.Result != DeploymentResultMatched || observation.VerifiedAt == nil || observation.Environment != incident.Environment || strings.TrimSpace(observation.ObservedVersion) == "" || !equalStringMap(observation.ExpectedCommits, expected) || !observedCommitsCoverExpected(observation, expected) {
 		return RegressionValidationInput{}, DeploymentReservation{}, ErrRegressionBinding
 	}
-	original, validation, err := o.originalValidation(ctx, incident.ID)
+	original, validation, refs, err := o.originalValidation(ctx, incident.ID)
 	if err != nil {
 		return RegressionValidationInput{}, DeploymentReservation{}, err
 	}
-	artifacts, err := o.store.ListEvidenceArtifacts(ctx, incident.ID)
-	if err != nil {
-		return RegressionValidationInput{}, DeploymentReservation{}, err
-	}
-	refs := make([]string, 0)
-	for _, artifact := range artifacts {
-		if artifact.AttemptID == original.ID {
-			refs = append(refs, artifact.ID+":"+artifact.SHA256)
-		}
-	}
-	sort.Strings(refs)
 	reproduction, scenarioHash, err := deterministicOriginalScenario(original, validation)
 	if err != nil {
-		return RegressionValidationInput{}, DeploymentReservation{}, err
+		return RegressionValidationInput{}, DeploymentReservation{}, fmt.Errorf("%w: %v", ErrRegressionOriginalScenario, err)
 	}
 	if len(refs) == 0 {
-		return RegressionValidationInput{}, DeploymentReservation{}, errors.New("original reproduced validation evidence is required")
+		return RegressionValidationInput{}, DeploymentReservation{}, ErrRegressionOriginalEvidence
 	}
 	return RegressionValidationInput{
 		OriginalValidationAttemptID: original.ID,
@@ -308,11 +299,20 @@ func (o *CaseOrchestrator) expectedRegressionCommits(ctx context.Context, incide
 	return expected, nil
 }
 
-func (o *CaseOrchestrator) originalValidation(ctx context.Context, caseID string) (PhaseAttempt, ValidationResult, error) {
+func (o *CaseOrchestrator) originalValidation(ctx context.Context, caseID string) (PhaseAttempt, ValidationResult, []string, error) {
 	attempts, err := o.store.ListAttempts(ctx, AttemptFilter{CaseID: caseID})
 	if err != nil {
-		return PhaseAttempt{}, ValidationResult{}, err
+		return PhaseAttempt{}, ValidationResult{}, nil, err
 	}
+	artifacts, err := o.store.ListEvidenceArtifacts(ctx, caseID)
+	if err != nil {
+		return PhaseAttempt{}, ValidationResult{}, nil, err
+	}
+	references := make(map[string][]string)
+	for _, artifact := range artifacts {
+		references[artifact.AttemptID] = append(references[artifact.AttemptID], artifact.ID+":"+artifact.SHA256)
+	}
+	sawCompleteScenario := false
 	for _, attempt := range attempts {
 		if attempt.Phase != PhaseValidation || attempt.Mode != AttemptReproduce || attempt.Status != AttemptStatusSucceeded {
 			continue
@@ -321,9 +321,21 @@ func (o *CaseOrchestrator) originalValidation(ctx context.Context, caseID string
 		if json.Unmarshal(attempt.OutputJSON, &result) != nil || result.VerificationStatus != "reproduced" || strings.TrimSpace(result.ExpectedBehavior) == "" || strings.TrimSpace(result.ObservedBehavior) == "" {
 			continue
 		}
-		return attempt, result, nil
+		if _, _, scenarioErr := deterministicOriginalScenario(attempt, result); scenarioErr != nil {
+			continue
+		}
+		sawCompleteScenario = true
+		refs := references[attempt.ID]
+		if len(refs) == 0 {
+			continue
+		}
+		sort.Strings(refs)
+		return attempt, result, refs, nil
 	}
-	return PhaseAttempt{}, ValidationResult{}, errors.New("a successful original reproduction with expected behavior is required")
+	if sawCompleteScenario {
+		return PhaseAttempt{}, ValidationResult{}, nil, ErrRegressionOriginalEvidence
+	}
+	return PhaseAttempt{}, ValidationResult{}, nil, ErrRegressionOriginalScenario
 }
 
 func deterministicOriginalScenario(attempt PhaseAttempt, result ValidationResult) (string, string, error) {

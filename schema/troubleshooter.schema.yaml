@@ -48,6 +48,7 @@ environments:
       http:                          # provider=http 时必填；只发无鉴权 GET
         url: "https://api-dev.example.com/version"
         json_pointer: "/git/commit" # RFC 6901；可指向 commit 字符串或 repo→commit 对象
+        allow_private: false        # 内网/loopback 版本接口需该环境显式 opt-in；云 metadata 永远拒绝
   - id: prod
     api_domain: api.example.com
     web_domain: www.example.com

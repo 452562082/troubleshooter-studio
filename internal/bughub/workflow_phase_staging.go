@@ -9,9 +9,11 @@ import (
 	"io"
 )
 
-const maxStagedEvidenceBytes int64 = 16 << 20
+const maxEvidenceArtifactBytes int64 = 16 << 20
+const maxStagedEvidenceBytes int64 = maxEvidenceArtifactBytes
 
-var ErrStagedEvidenceTooLarge = errors.New("staged evidence exceeds the fixed size limit")
+var ErrEvidenceArtifactTooLarge = errors.New("evidence artifact exceeds the fixed size limit")
+var ErrStagedEvidenceTooLarge = ErrEvidenceArtifactTooLarge
 
 type attemptEvidenceStaging interface {
 	Path() string

@@ -19,6 +19,10 @@ func openWorkflowTestStore(t *testing.T) *CaseStore {
 	return store
 }
 
+func testReminderProductionResolver(_ context.Context, incident IncidentCase) (bool, error) {
+	return incident.ID == "prod" || incident.ID == "prod-region", nil
+}
+
 func TestWorkflowRemindersAckAdvancesTwentyFourHourLimit(t *testing.T) {
 	store := openWorkflowTestStore(t)
 	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
@@ -27,7 +31,7 @@ func TestWorkflowRemindersAckAdvancesTwentyFourHourLimit(t *testing.T) {
 	service := NewWorkflowReminderService(store, func() time.Time { return now }, 24*time.Hour, func(_ context.Context, reminder WorkflowReminder) error {
 		delivered = append(delivered, reminder)
 		return nil
-	})
+	}, testReminderProductionResolver)
 
 	if err := service.Poll(context.Background()); err != nil {
 		t.Fatal(err)
@@ -77,7 +81,7 @@ func TestWorkflowRemindersDeliveryFailureAndNoAckRetryAfterBoundedLease(t *testi
 			now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
 			reminderCase(t, store, fixture.name, "test", now.Add(-25*time.Hour), CaseWaitingDeployment)
 			calls := 0
-			service := NewWorkflowReminderServiceWithLease(store, func() time.Time { return now }, 24*time.Hour, 5*time.Minute, func(context.Context, WorkflowReminder) error { calls++; return fixture.deliveryErr })
+			service := NewWorkflowReminderServiceWithLease(store, func() time.Time { return now }, 24*time.Hour, 5*time.Minute, func(context.Context, WorkflowReminder) error { calls++; return fixture.deliveryErr }, testReminderProductionResolver)
 			_ = service.Poll(context.Background())
 			if calls != 1 {
 				t.Fatalf("calls=%d", calls)
@@ -100,7 +104,7 @@ func TestWorkflowRemindersLateMountPullsPendingAndAckReplayIsExact(t *testing.T)
 	store := openWorkflowTestStore(t)
 	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
 	reminderCase(t, store, "late", "test", now.Add(-25*time.Hour), CaseWaitingDeployment)
-	service := NewWorkflowReminderServiceWithLease(store, func() time.Time { return now }, 24*time.Hour, 5*time.Minute, func(context.Context, WorkflowReminder) error { return nil })
+	service := NewWorkflowReminderServiceWithLease(store, func() time.Time { return now }, 24*time.Hour, 5*time.Minute, func(context.Context, WorkflowReminder) error { return nil }, testReminderProductionResolver)
 	if err := service.Poll(context.Background()); err != nil {
 		t.Fatal(err)
 	} // emitted before UI listener mounted
@@ -133,8 +137,8 @@ func TestWorkflowRemindersConcurrentDifferentClocksUseStableReservation(t *testi
 		mu.Unlock()
 		return nil
 	}
-	first := NewWorkflowReminderServiceWithLease(store, func() time.Time { return base }, 24*time.Hour, 5*time.Minute, deliver)
-	second := NewWorkflowReminderServiceWithLease(store, func() time.Time { return base.Add(time.Second) }, 24*time.Hour, 5*time.Minute, deliver)
+	first := NewWorkflowReminderServiceWithLease(store, func() time.Time { return base }, 24*time.Hour, 5*time.Minute, deliver, testReminderProductionResolver)
+	second := NewWorkflowReminderServiceWithLease(store, func() time.Time { return base.Add(time.Second) }, 24*time.Hour, 5*time.Minute, deliver, testReminderProductionResolver)
 	var wg sync.WaitGroup
 	for _, service := range []*WorkflowReminderService{first, second} {
 		wg.Add(1)
@@ -169,10 +173,10 @@ func TestWorkflowRemindersRestartRecoversUnackedAttempt(t *testing.T) {
 	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
 	reminderCase(t, store, "restart", "test", now.Add(-25*time.Hour), CaseWaitingDeployment)
 	firstCalls, secondCalls := 0, 0
-	first := NewWorkflowReminderServiceWithLease(store, func() time.Time { return now }, 24*time.Hour, 5*time.Minute, func(context.Context, WorkflowReminder) error { firstCalls++; return nil })
+	first := NewWorkflowReminderServiceWithLease(store, func() time.Time { return now }, 24*time.Hour, 5*time.Minute, func(context.Context, WorkflowReminder) error { firstCalls++; return nil }, testReminderProductionResolver)
 	_ = first.Poll(context.Background())
 	now = now.Add(5 * time.Minute)
-	restarted := NewWorkflowReminderServiceWithLease(store, func() time.Time { return now }, 24*time.Hour, 5*time.Minute, func(context.Context, WorkflowReminder) error { secondCalls++; return nil })
+	restarted := NewWorkflowReminderServiceWithLease(store, func() time.Time { return now }, 24*time.Hour, 5*time.Minute, func(context.Context, WorkflowReminder) error { secondCalls++; return nil }, testReminderProductionResolver)
 	_ = restarted.Poll(context.Background())
 	if firstCalls != 1 || secondCalls != 1 {
 		t.Fatalf("calls=%d/%d", firstCalls, secondCalls)
@@ -189,7 +193,7 @@ func TestWorkflowRemindersSkipsTerminalProductionAndSnoozedCases(t *testing.T) {
 	service := NewWorkflowReminderService(store, func() time.Time { return now }, 24*time.Hour, func(_ context.Context, reminder WorkflowReminder) error {
 		t.Fatalf("unexpected reminder: %+v", reminder)
 		return nil
-	})
+	}, testReminderProductionResolver)
 	if err := service.Snooze(context.Background(), "snoozed", now.Add(48*time.Hour), "alice", "snooze-1"); err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +206,7 @@ func TestWorkflowRemindersSnoozeHidesAlreadyPendingDelivery(t *testing.T) {
 	store := openWorkflowTestStore(t)
 	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
 	reminderCase(t, store, "pending-snooze", "test", now.Add(-25*time.Hour), CaseWaitingDeployment)
-	service := NewWorkflowReminderServiceWithLease(store, func() time.Time { return now }, 24*time.Hour, 5*time.Minute, func(context.Context, WorkflowReminder) error { return nil })
+	service := NewWorkflowReminderServiceWithLease(store, func() time.Time { return now }, 24*time.Hour, 5*time.Minute, func(context.Context, WorkflowReminder) error { return nil }, testReminderProductionResolver)
 	if err := service.Poll(context.Background()); err != nil {
 		t.Fatal(err)
 	}

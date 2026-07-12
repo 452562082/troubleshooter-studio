@@ -41,6 +41,23 @@ func TestRegressionStartBuildsDeterministicCurrentCycleInput(t *testing.T) {
 	}
 }
 
+func TestOriginalValidationSkipsLegacyAttemptWithoutEvidence(t *testing.T) {
+	store, incident, original, _ := prepareRegressionCase(t, 1)
+	if _, err := store.db.ExecContext(context.Background(), `DELETE FROM evidence_artifacts WHERE attempt_id=?`, original.ID); err != nil {
+		t.Fatal(err)
+	}
+	finishedAt := original.StartedAt.Add(2 * time.Minute)
+	replacement := PhaseAttempt{ID: "replacement-validation", CaseID: incident.ID, CycleNumber: incident.CycleNumber, Phase: PhaseValidation, Mode: AttemptReproduce, Status: AttemptStatusSucceeded, AgentTarget: original.AgentTarget, BotKey: original.BotKey, InputJSON: []byte(`{"mode":"reproduce","step":"replacement"}`), OutputJSON: []byte(`{"verification_status":"reproduced","environment":"test","observed_behavior":"timeout","expected_behavior":"healthy response","evidence":[{"kind":"api","path":"response.json","environment":"test","redaction_status":"not_required"}],"gaps":[]}`), StartedAt: original.StartedAt.Add(time.Minute), FinishedAt: &finishedAt}
+	if err := store.CreateAttempt(context.Background(), replacement); err != nil {
+		t.Fatal(err)
+	}
+	recordRegressionArtifact(t, store, replacement, "replacement-request", finishedAt)
+	selected, _, refs, err := NewCaseOrchestrator(store, nil, nil, nil).originalValidation(context.Background(), incident.ID)
+	if err != nil || selected.ID != replacement.ID || len(refs) != 1 {
+		t.Fatalf("selected=%+v refs=%v err=%v", selected, refs, err)
+	}
+}
+
 func TestRegressionStartRejectsUnverifiedOrDriftedDeployment(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -101,6 +101,17 @@ git commit -m "fix: <short bug fix summary>"
 git push -u origin <fix-branch>
 ```
 
+### Studio durable checkpoint
+
+Studio phase prompt 提供 `STUDIO_EVIDENCE_STAGING_DIR`、Case ID 和 attempt ID 时，修复 Agent 必须维护 `${STUDIO_EVIDENCE_STAGING_DIR}/fix-checkpoint.json`：
+
+1. **第一次 push 前**，先写 `state: prepared`。其中 `result` 是计划完成后将返回的完整 `FixResult`，必须覆盖所有仓库的 base/fix/target branch、完整 commit、push remote 和对应 commit 的测试证据。
+2. 写入使用同目录临时文件，flush/fsync 文件后原子 rename 为 `fix-checkpoint.json`；不得直接原地覆盖半个 JSON，也不得写入 token、SSH key、Cookie 或其它凭据。
+3. 然后逐仓执行精确 fix branch push。全部 push 成功后，以相同原子流程把同一 manifest 更新为 `state: pushed`，再输出最终 YAML。
+4. JSON 顶层固定为：`kind: studio_fix_checkpoint`、`version: 1`、prompt 给出的 `case_id`、`attempt_id`、`state: prepared|pushed`、`result`。
+
+`prepared` 不表示已经推送。正常完成和恢复都会通过 SSH remote 精确检查每个 fix branch 是否指向 manifest commit；只有本地 commit 绝不会被当成已推送。临时 DNS/SSH/权限不可用时 Studio 会保留 checkpoint 并有界重查，远端可读后的 ref mismatch 或少一个仓库才失败关闭。不要为了恢复而重复提交、强推或改写 manifest scope。
+
 ## 多仓库规则
 
 如果一个 Bug 需要改多个仓库：

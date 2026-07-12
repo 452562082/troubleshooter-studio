@@ -19,7 +19,7 @@ var allowedCaseTransitions = map[CaseStatus]map[CaseStatus]struct{}{
 	CaseMergeConflict:        {CaseWaitingMergeApproval: {}},
 	CaseWaitingDeployment:    {CaseDeploymentVerified: {}, CaseDeploymentUnverified: {}},
 	CaseDeploymentUnverified: {CaseWaitingDeployment: {}},
-	CaseDeploymentVerified:   {CaseRegressionValidating: {}},
+	CaseDeploymentVerified:   {CaseRegressionValidating: {}, CaseWaitingEvidence: {}},
 	CaseRegressionValidating: {CaseFixedVerified: {}, CaseStillReproduces: {}, CaseWaitingEvidence: {}},
 	CaseStillReproduces:      {CaseInvestigating: {}},
 }

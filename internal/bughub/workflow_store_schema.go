@@ -90,7 +90,7 @@ CREATE INDEX IF NOT EXISTS idx_events_case_created ON transition_events(case_id,
 `
 
 const (
-	workflowStoreSchemaVersion   = 3
+	workflowStoreSchemaVersion   = 4
 	workflowStoreSchemaV1Key     = "workflow-schema-v1"
 	workflowStoreSchemaV1Upgrade = `
 ALTER TABLE transition_events ADD COLUMN request_fingerprint TEXT NOT NULL DEFAULT '';
@@ -104,6 +104,14 @@ ALTER TABLE deployment_observations ADD COLUMN observed_at TEXT NOT NULL DEFAULT
 ALTER TABLE deployment_observations ADD COLUMN diagnostic_code TEXT NOT NULL DEFAULT '';
 ALTER TABLE deployment_observations ADD COLUMN diagnostic_message TEXT NOT NULL DEFAULT '';
 UPDATE deployment_observations SET observed_at = COALESCE(verified_at, user_notified_at, observed_at);
+`
+	workflowStoreSchemaV4Upgrade = `
+CREATE TABLE fix_checkpoints (
+  attempt_id TEXT PRIMARY KEY REFERENCES phase_attempts(id) ON DELETE CASCADE,
+  case_id TEXT NOT NULL REFERENCES incident_cases(id),
+  staging_locator TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 `
 )
 

@@ -127,6 +127,10 @@ const emit = defineEmits<{
           <label :for="`${fieldID}-json-pointer`">JSON Pointer</label>
           <input :id="`${fieldID}-json-pointer`" v-model="verification.http.json_pointer" type="text" placeholder="/git/commit" />
         </div>
+		<label class="check-row" :for="`${fieldID}-allow-private`">
+		  <input :id="`${fieldID}-allow-private`" v-model="verification.http.allow_private" type="checkbox" />
+		  允许访问该环境明确配置的内网版本接口（云 metadata 始终禁止）
+		</label>
       </template>
       <template v-else-if="verification.provider === 'k8s'">
         <div class="form-group compact">

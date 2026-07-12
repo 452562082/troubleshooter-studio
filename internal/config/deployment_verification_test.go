@@ -31,7 +31,8 @@ func TestDeploymentVerificationHTTPRoundTrip(t *testing.T) {
       provider: http
       http:
         url: "https://admin-test.example.com/version"
-        json_pointer: "/git/commit"`)
+        json_pointer: "/git/commit"
+        allow_private: true`)
 	if err := Validate(&cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +45,7 @@ func TestDeploymentVerificationHTTPRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := roundTrip.Environments[0].DeploymentVerification
-	if got.Provider != "http" || got.HTTP.URL != "https://admin-test.example.com/version" || got.HTTP.JSONPointer != "/git/commit" {
+	if got.Provider != "http" || got.HTTP.URL != "https://admin-test.example.com/version" || got.HTTP.JSONPointer != "/git/commit" || !got.HTTP.AllowPrivate {
 		t.Fatalf("round trip = %+v", got)
 	}
 }

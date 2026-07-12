@@ -72,13 +72,15 @@ type PhaseAgentExecutor interface {
 type PhaseCompletionFunc func(context.Context, CompleteAttemptCommand) error
 
 type AgentPhaseRunner struct {
-	store         *CaseStore
-	executor      PhaseAgentExecutor
-	legacy        *InvestigationStore
-	artifactsRoot string
-	complete      PhaseCompletionFunc
-	eventSink     InvestigationEventSink
-	openStaging   func(string, string) (attemptEvidenceStaging, error)
+	store                       *CaseStore
+	executor                    PhaseAgentExecutor
+	legacy                      *InvestigationStore
+	artifactsRoot               string
+	complete                    PhaseCompletionFunc
+	eventSink                   InvestigationEventSink
+	openStaging                 func(string, string) (attemptEvidenceStaging, error)
+	completionReconcileAttempts int
+	completionReconcileDelay    time.Duration
 
 	mu        sync.Mutex
 	active    map[string]context.CancelFunc
@@ -95,7 +97,7 @@ func (r *AgentPhaseRunner) SetEventSink(sink InvestigationEventSink) {
 }
 
 func NewAgentPhaseRunner(store *CaseStore, executor PhaseAgentExecutor, legacy *InvestigationStore, artifactsRoot string, complete PhaseCompletionFunc) *AgentPhaseRunner {
-	return &AgentPhaseRunner{store: store, executor: executor, legacy: legacy, artifactsRoot: artifactsRoot, complete: complete, openStaging: openAttemptEvidenceStaging, active: make(map[string]context.CancelFunc), scheduled: make(map[string]struct{})}
+	return &AgentPhaseRunner{store: store, executor: executor, legacy: legacy, artifactsRoot: artifactsRoot, complete: complete, openStaging: openAttemptEvidenceStaging, completionReconcileAttempts: 6, completionReconcileDelay: 2 * time.Second, active: make(map[string]context.CancelFunc), scheduled: make(map[string]struct{})}
 }
 
 func (r *AgentPhaseRunner) SetCompletionCallback(complete PhaseCompletionFunc) {
@@ -157,31 +159,56 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 	} else if found {
 		return errors.New("phase attempt already has a persisted completion intent")
 	}
+	r.mu.Lock()
+	if _, exists := r.scheduled[attempt.ID]; exists {
+		r.mu.Unlock()
+		return nil
+	}
+	r.scheduled[attempt.ID] = struct{}{}
+	complete := r.complete
+	r.mu.Unlock()
+	releaseReservation := func() {
+		r.mu.Lock()
+		delete(r.scheduled, attempt.ID)
+		r.mu.Unlock()
+	}
 	openStaging := r.openStaging
 	if openStaging == nil {
 		openStaging = openAttemptEvidenceStaging
 	}
 	staging, err := openStaging(r.artifactsRoot, attempt.ID)
 	if err != nil {
+		releaseReservation()
 		return fmt.Errorf("create Studio evidence staging: %w", err)
+	}
+	if attempt.Phase == PhaseFix {
+		checkpoint := FixCheckpoint{AttemptID: attempt.ID, CaseID: attempt.CaseID, StagingLocator: fixCheckpointLocator(staging)}
+		if err := r.store.SaveFixCheckpoint(ctx, checkpoint); err != nil {
+			releaseReservation()
+			return releaseUntransferredStaging(staging, fmt.Errorf("persist fix checkpoint locator: %w", err))
+		}
 	}
 	prompt, err := r.promptForAttempt(attempt, bug, bot)
 	if err != nil {
+		if attempt.Phase == PhaseFix {
+			_ = r.store.DeleteFixCheckpoint(ctx, attempt.ID, attempt.CaseID)
+		}
+		releaseReservation()
 		return releaseUntransferredStaging(staging, err)
 	}
 	prompt += "\n## Studio evidence staging (mandatory)\n\nSTUDIO_EVIDENCE_STAGING_DIR=" + staging.Path() + "\nWrite every evidence file beneath this exact directory. In final YAML, `path` must be a clean relative path from this directory; absolute paths and `..` are rejected. Studio derives timestamps and redaction status from securely opened file bytes.\n"
-	r.mu.Lock()
-	if _, exists := r.scheduled[attempt.ID]; exists {
-		r.mu.Unlock()
-		return releaseUntransferredStaging(staging, nil)
+	if attempt.Phase == PhaseFix {
+		prompt += "\n## Durable fix checkpoint (mandatory)\n\nBefore the first repository push, atomically write `" + fixCheckpointManifestName + "` in the Studio staging directory (write a temporary sibling, fsync, then rename) with state=`prepared`; include every planned repository commit/branch/remote/test. After all pushes succeed, atomically replace it with the same manifest and state=`pushed` before reporting completion. JSON fields: kind=`" + fixCheckpointManifestKind + "`, version=1, case_id=`" + attempt.CaseID + "`, attempt_id=`" + attempt.ID + "`, state=`prepared|pushed`, result=<the exact structured FixResult also returned as final YAML>. Never include credentials. Recovery treats the SSH remote branch as truth, so a crash after push but before the state update remains recoverable while a pre-push crash cannot be misreported.\n"
 	}
-	complete := r.complete
 	if complete == nil {
-		r.mu.Unlock()
+		if attempt.Phase == PhaseFix {
+			_ = r.store.DeleteFixCheckpoint(ctx, attempt.ID, attempt.CaseID)
+		}
+		releaseReservation()
 		return releaseUntransferredStaging(staging, errors.New("agent phase completion callback is required"))
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
-	r.scheduled[attempt.ID] = struct{}{}
+	r.mu.Lock()
 	r.active[attempt.ID] = cancel
 	r.mu.Unlock()
 
@@ -284,7 +311,13 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, _ Bug,
 			command.ErrorMessage = err.Error()
 		} else {
 			command.Outcome, command.OutputJSON, command.CodeChanges = parsed.Outcome, parsed.OutputJSON, parsed.CodeChanges
-			if err := r.validateResultEnvironment(ctx, attempt, parsed); err != nil {
+			if err := r.validateFixCheckpoint(staging, attempt, parsed); err != nil {
+				command.Outcome = failureOutcome(attempt.Phase)
+				command.OutputJSON = mustJSON(map[string]any{"error_code": "fix_checkpoint_invalid", "error_message": err.Error()})
+				command.ErrorCode = "fix_checkpoint_invalid"
+				command.ErrorMessage = err.Error()
+				command.CodeChanges = nil
+			} else if err := r.validateResultEnvironment(ctx, attempt, parsed); err != nil {
 				command.Outcome = failureOutcome(attempt.Phase)
 				command.OutputJSON = mustJSON(map[string]any{"error_code": "phase_environment_mismatch", "error_message": err.Error()})
 				command.ErrorCode = "phase_environment_mismatch"
@@ -307,14 +340,16 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, _ Bug,
 			}
 		}
 	}
-	cleanupErr := staging.Cleanup()
-	if cleanupErr != nil {
-		command.Outcome = failureOutcome(attempt.Phase)
-		command.OutputJSON = mustJSON(map[string]any{"error_code": "evidence_staging_cleanup_failed", "error_message": cleanupErr.Error(), "evidence_limitation": true})
-		command.ErrorCode = "evidence_staging_cleanup_failed"
-		command.ErrorMessage = cleanupErr.Error()
+	if attempt.Phase != PhaseFix {
+		cleanupErr := staging.Cleanup()
+		if cleanupErr != nil {
+			command.Outcome = failureOutcome(attempt.Phase)
+			command.OutputJSON = mustJSON(map[string]any{"error_code": "evidence_staging_cleanup_failed", "error_message": cleanupErr.Error(), "evidence_limitation": true})
+			command.ErrorCode = "evidence_staging_cleanup_failed"
+			command.ErrorMessage = cleanupErr.Error()
+		}
+		cleaned = cleanupErr == nil
 	}
-	cleaned = cleanupErr == nil
 	if completionContainsSensitiveData(command) {
 		command.Outcome = failureOutcome(attempt.Phase)
 		command.OutputJSON = mustJSON(map[string]any{"error_code": "sensitive_phase_output", "evidence_limitation": true})
@@ -327,15 +362,64 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, _ Bug,
 		r.finishLegacy(attempt.ID, InvestigationFailed, safeLegacyPhaseText(result.FinalYAML), safeLegacyPhaseText(err.Error()))
 		return
 	}
-	if err := complete(ctx, command); err != nil {
-		r.finishLegacy(attempt.ID, InvestigationFailed, safeLegacyPhaseText(result.FinalYAML), safeLegacyPhaseText(err.Error()))
+	completionErr := complete(ctx, command)
+	if attempt.Phase == PhaseFix && errors.Is(completionErr, ErrFixInspectionUnavailable) {
+		attempts := r.completionReconcileAttempts
+		if attempts < 1 {
+			attempts = 1
+		}
+		delay := r.completionReconcileDelay
+		for retry := 1; retry < attempts && errors.Is(completionErr, ErrFixInspectionUnavailable); retry++ {
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				completionErr = ctx.Err()
+			case <-timer.C:
+				completionErr = complete(ctx, command)
+			}
+		}
+	}
+	if completionErr != nil {
+		if attempt.Phase == PhaseFix {
+			// The completion boundary performs the authoritative remote-ref check.
+			// Preserve the durable checkpoint for bounded startup recovery when that
+			// external read is temporarily unavailable or reports a mismatch.
+			cleaned = true
+		}
+		r.finishLegacy(attempt.ID, InvestigationFailed, safeLegacyPhaseText(result.FinalYAML), safeLegacyPhaseText(completionErr.Error()))
 		return
+	}
+	if attempt.Phase == PhaseFix {
+		if cleanupErr := staging.Cleanup(); cleanupErr == nil {
+			cleaned = true
+		}
 	}
 	status := InvestigationSucceeded
 	if command.ErrorCode != "" {
 		status = InvestigationFailed
 	}
 	r.finishLegacy(attempt.ID, status, safeLegacyPhaseText(result.FinalYAML), safeLegacyPhaseText(command.ErrorMessage))
+}
+
+func (r *AgentPhaseRunner) validateFixCheckpoint(staging attemptEvidenceStaging, attempt PhaseAttempt, result PhaseResult) error {
+	if attempt.Phase != PhaseFix || result.Outcome != PhaseOutcomeFixPushed {
+		return nil
+	}
+	captured, err := staging.Capture(fixCheckpointManifestName)
+	if err != nil {
+		return err
+	}
+	changes, err := parseFixCheckpointManifest(captured.Content, attempt, false)
+	if err != nil {
+		return err
+	}
+	return validateFixCheckpointMatchesResult(changes, result.CodeChanges)
 }
 
 func safeLegacyPhaseText(value string) string {
@@ -618,6 +702,14 @@ func ParseValidationResult(data []byte) (ValidationResult, error) {
 	}
 	if status != CaseWaitingEvidence && len(result.Gaps) != 0 {
 		return ValidationResult{}, errors.New("terminal validation result must not contain blocking gaps")
+	}
+	if status == CaseReproduced {
+		if strings.TrimSpace(result.ObservedBehavior) == "" || strings.TrimSpace(result.ExpectedBehavior) == "" {
+			return ValidationResult{}, errors.New("reproduced validation requires observed_behavior and expected_behavior")
+		}
+		if len(result.Evidence) == 0 {
+			return ValidationResult{}, errors.New("reproduced validation requires at least one evidence artifact")
+		}
 	}
 	return result, nil
 }

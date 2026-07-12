@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -55,6 +57,19 @@ func (v HTTPVersionVerifier) Verify(ctx context.Context, request DeploymentVerif
 	if v.Client != nil {
 		*client = *v.Client
 		client.Timeout = timeout
+	}
+	if err := validateHTTPVersionIP(net.ParseIP(target.Hostname()), v.Config.AllowPrivate); err != nil {
+		setDeploymentDiagnostic(&observation, "http_target_rejected", "版本接口目标地址不允许访问")
+		return observation, nil
+	}
+	if client.Transport == nil {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		hardenHTTPVersionTransport(transport, v.Config.AllowPrivate)
+		client.Transport = transport
+	} else if transport, ok := client.Transport.(*http.Transport); ok {
+		cloned := transport.Clone()
+		hardenHTTPVersionTransport(cloned, v.Config.AllowPrivate)
+		client.Transport = cloned
 	}
 	previousRedirect := client.CheckRedirect
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
@@ -121,6 +136,57 @@ func (v HTTPVersionVerifier) Verify(ctx context.Context, request DeploymentVerif
 		observation.ObservedVersion = string(encoded)
 	}
 	return finishExactRuntimeObservation(observation), nil
+}
+
+func hardenHTTPVersionTransport(transport *http.Transport, allowPrivate bool) {
+	transport.Proxy = nil
+	transport.DialTLS = nil
+	transport.DialTLSContext = nil
+	transport.DialContext = guardedHTTPVersionDialContext(transport.DialContext, allowPrivate)
+}
+
+func guardedHTTPVersionDialContext(base func(context.Context, string, string) (net.Conn, error), allowPrivate bool) func(context.Context, string, string) (net.Conn, error) {
+	if base == nil {
+		dialer := &net.Dialer{}
+		base = dialer.DialContext
+	}
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil || len(addresses) == 0 {
+			return nil, errors.New("deployment version host resolution failed")
+		}
+		for _, candidate := range addresses {
+			if err := validateHTTPVersionIP(candidate.IP, allowPrivate); err != nil {
+				return nil, err
+			}
+		}
+		return base(ctx, network, net.JoinHostPort(addresses[0].IP.String(), port))
+	}
+}
+
+func validateHTTPVersionIP(ip net.IP, allowPrivate bool) error {
+	if ip == nil {
+		return nil
+	}
+	address, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return errors.New("deployment version address is invalid")
+	}
+	address = address.Unmap()
+	if address.IsLinkLocalUnicast() || address.IsLinkLocalMulticast() || address == netip.MustParseAddr("100.100.100.200") || address == netip.MustParseAddr("fd00:ec2::254") {
+		return errors.New("cloud metadata address is forbidden")
+	}
+	if address.IsUnspecified() || address.IsMulticast() {
+		return errors.New("unspecified or multicast deployment version address is forbidden")
+	}
+	if (address.IsLoopback() || address.IsPrivate()) && !allowPrivate {
+		return errors.New("private or local deployment version address requires explicit allow_private")
+	}
+	return nil
 }
 
 func resolveJSONPointer(document any, pointer string) (any, bool) {

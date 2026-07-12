@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -23,7 +25,7 @@ func TestHTTPVersionVerifierMatchesRFC6901Pointer(t *testing.T) {
 		_, _ = w.Write([]byte(`{"git":{"a/b":{"~commit":"abc123"}}}`))
 	}))
 	defer server.Close()
-	v := HTTPVersionVerifier{Environment: "test", Config: config.HTTPDeploymentVerification{URL: server.URL, JSONPointer: "/git/a~1b/~0commit"}}
+	v := HTTPVersionVerifier{Environment: "test", Config: config.HTTPDeploymentVerification{URL: server.URL, JSONPointer: "/git/a~1b/~0commit", AllowPrivate: true}}
 	got, err := v.Verify(context.Background(), DeploymentVerificationRequest{Environment: "test", Source: "http", ExpectedCommits: map[string]string{"admin-web": "abc123"}})
 	if err != nil || got.Result != DeploymentResultMatched || got.ObservedCommits["admin-web"] != "abc123" || got.VerifiedAt == nil {
 		t.Fatalf("observation=%+v err=%v", got, err)
@@ -31,6 +33,92 @@ func TestHTTPVersionVerifierMatchesRFC6901Pointer(t *testing.T) {
 	if strings.Contains(got.ObservedVersion, "secret-response-header") {
 		t.Fatal("response headers leaked")
 	}
+}
+
+func TestHTTPVersionVerifierBlocksPrivateTargetsUnlessExplicitlyAllowed(t *testing.T) {
+	t.Run("localhost denied by default", func(t *testing.T) {
+		calls := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { calls++; _, _ = w.Write([]byte(`{"commit":"abc"}`)) }))
+		defer server.Close()
+		got, err := (HTTPVersionVerifier{Environment: "test", Config: config.HTTPDeploymentVerification{URL: server.URL, JSONPointer: "/commit"}}).Verify(context.Background(), DeploymentVerificationRequest{Environment: "test", Source: "http", ExpectedCommits: map[string]string{"repo": "abc"}})
+		if err != nil || got.Result != DeploymentResultUnavailable || calls != 0 {
+			t.Fatalf("got=%+v calls=%d err=%v", got, calls, err)
+		}
+	})
+	t.Run("exact configured private host explicitly allowed", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"commit":"abc"}`)) }))
+		defer server.Close()
+		got, err := (HTTPVersionVerifier{Environment: "test", Config: config.HTTPDeploymentVerification{URL: server.URL, JSONPointer: "/commit", AllowPrivate: true}}).Verify(context.Background(), DeploymentVerificationRequest{Environment: "test", Source: "http", ExpectedCommits: map[string]string{"repo": "abc"}})
+		if err != nil || got.Result != DeploymentResultMatched {
+			t.Fatalf("got=%+v err=%v", got, err)
+		}
+	})
+	for _, tc := range []struct {
+		rawURL       string
+		allowPrivate bool
+	}{{"http://169.254.169.254/latest/meta-data", true}, {"http://169.254.170.2/credentials", true}, {"http://100.100.100.200/latest/meta-data", true}, {"http://[::ffff:169.254.169.254]/latest/meta-data", true}, {"http://[fd00:ec2::254]/latest/meta-data", true}, {"http://127.0.0.1/version", false}, {"http://10.0.0.1/version", false}} {
+		t.Run(tc.rawURL, func(t *testing.T) {
+			calls := 0
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { calls++; return nil, errors.New("must not dial") })}
+			got, err := (HTTPVersionVerifier{Environment: "test", Config: config.HTTPDeploymentVerification{URL: tc.rawURL, JSONPointer: "/commit", AllowPrivate: tc.allowPrivate}, Client: client}).Verify(context.Background(), DeploymentVerificationRequest{Environment: "test", Source: "http", ExpectedCommits: map[string]string{"repo": "abc"}})
+			if err != nil || got.Result != DeploymentResultUnavailable || calls != 0 {
+				t.Fatalf("got=%+v calls=%d err=%v", got, calls, err)
+			}
+		})
+	}
+}
+
+func TestHTTPVersionVerifierDialPolicyRechecksResolvedAddress(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		address      string
+		allowPrivate bool
+		wantDial     bool
+	}{
+		{name: "private rejected", address: "127.0.0.1:80"},
+		{name: "private explicitly allowed", address: "127.0.0.1:80", allowPrivate: true, wantDial: true},
+		{name: "metadata always rejected", address: "169.254.169.254:80", allowPrivate: true},
+		{name: "container credentials always rejected", address: "169.254.170.2:80", allowPrivate: true},
+		{name: "alibaba metadata always rejected", address: "100.100.100.200:80", allowPrivate: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			base := func(context.Context, string, string) (net.Conn, error) {
+				calls++
+				return nil, errors.New("stop after policy")
+			}
+			_, _ = guardedHTTPVersionDialContext(base, tc.allowPrivate)(context.Background(), "tcp", tc.address)
+			if (calls == 1) != tc.wantDial {
+				t.Fatalf("dial calls=%d", calls)
+			}
+		})
+	}
+}
+
+func TestHTTPVersionVerifierDisablesProxyAndCustomTLSDialBypasses(t *testing.T) {
+	t.Run("proxy hook is removed", func(t *testing.T) {
+		proxyCalls := 0
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = func(*http.Request) (*url.URL, error) { proxyCalls++; return url.Parse("http://127.0.0.1:1") }
+		v := HTTPVersionVerifier{Environment: "test", Config: config.HTTPDeploymentVerification{URL: "http://127.0.0.1/version", JSONPointer: "/commit"}, Client: &http.Client{Transport: transport}}
+		_, _ = v.Verify(context.Background(), DeploymentVerificationRequest{Environment: "test", Source: "http", ExpectedCommits: map[string]string{"repo": "abc"}})
+		if proxyCalls != 0 {
+			t.Fatalf("proxy calls=%d", proxyCalls)
+		}
+	})
+	t.Run("custom TLS dial hook is removed", func(t *testing.T) {
+		tlsDialCalls := 0
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.DialTLSContext = func(context.Context, string, string) (net.Conn, error) {
+			tlsDialCalls++
+			return nil, errors.New("bypass")
+		}
+		v := HTTPVersionVerifier{Environment: "test", Config: config.HTTPDeploymentVerification{URL: "https://169.254.169.254/latest/meta-data", JSONPointer: "/commit", AllowPrivate: true}, Client: &http.Client{Transport: transport}}
+		_, _ = v.Verify(context.Background(), DeploymentVerificationRequest{Environment: "test", Source: "http", ExpectedCommits: map[string]string{"repo": "abc"}})
+		if tlsDialCalls != 0 {
+			t.Fatalf("TLS dial calls=%d", tlsDialCalls)
+		}
+	})
 }
 
 func TestHTTPVersionVerifierBoundsAndSanitizesFailures(t *testing.T) {
@@ -71,7 +159,7 @@ func TestHTTPVersionVerifierBoundsAndSanitizesFailures(t *testing.T) {
 			http.Redirect(w, request, target.URL, http.StatusFound)
 		}))
 		defer server.Close()
-		v := HTTPVersionVerifier{Environment: "test", Config: config.HTTPDeploymentVerification{URL: server.URL, JSONPointer: "/commit"}}
+		v := HTTPVersionVerifier{Environment: "test", Config: config.HTTPDeploymentVerification{URL: server.URL, JSONPointer: "/commit", AllowPrivate: true}}
 		got, err := v.Verify(context.Background(), DeploymentVerificationRequest{Environment: "test", Source: "http", ExpectedCommits: map[string]string{"repo": "a"}})
 		if err != nil || got.Result != DeploymentResultUnavailable {
 			t.Fatalf("got=%+v err=%v", got, err)
@@ -82,7 +170,7 @@ func TestHTTPVersionVerifierBoundsAndSanitizesFailures(t *testing.T) {
 			_, _ = w.Write([]byte(strings.Repeat("x", HTTPVersionMaxBodyBytes+1)))
 		}))
 		defer server.Close()
-		v := HTTPVersionVerifier{Environment: "test", Config: config.HTTPDeploymentVerification{URL: server.URL, JSONPointer: "/commit"}}
+		v := HTTPVersionVerifier{Environment: "test", Config: config.HTTPDeploymentVerification{URL: server.URL, JSONPointer: "/commit", AllowPrivate: true}}
 		got, err := v.Verify(context.Background(), DeploymentVerificationRequest{Environment: "test", Source: "http", ExpectedCommits: map[string]string{"repo": "a"}})
 		if err != nil || got.Result != DeploymentResultUnavailable || len(got.ObservedVersion) > 128 {
 			t.Fatalf("got=%+v err=%v", got, err)
@@ -94,7 +182,7 @@ func TestHTTPVersionVerifierBoundsAndSanitizesFailures(t *testing.T) {
 			_, _ = w.Write([]byte(`{"commit":"a"}`))
 		}))
 		defer server.Close()
-		v := HTTPVersionVerifier{Environment: "test", Config: config.HTTPDeploymentVerification{URL: server.URL, JSONPointer: "/commit"}, Timeout: 10 * time.Millisecond}
+		v := HTTPVersionVerifier{Environment: "test", Config: config.HTTPDeploymentVerification{URL: server.URL, JSONPointer: "/commit", AllowPrivate: true}, Timeout: 10 * time.Millisecond}
 		got, err := v.Verify(context.Background(), DeploymentVerificationRequest{Environment: "test", Source: "http", ExpectedCommits: map[string]string{"repo": "a"}})
 		if err != nil || got.Result != DeploymentResultUnavailable {
 			t.Fatalf("got=%+v err=%v", got, err)
@@ -112,7 +200,7 @@ func TestHTTPVersionVerifierRejectsUnsafeArrayIndexesWithoutPanic(t *testing.T) 
 			}()
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"items":["a"]}`)) }))
 			defer server.Close()
-			v := HTTPVersionVerifier{Environment: "test", Config: config.HTTPDeploymentVerification{URL: server.URL, JSONPointer: pointer}}
+			v := HTTPVersionVerifier{Environment: "test", Config: config.HTTPDeploymentVerification{URL: server.URL, JSONPointer: pointer, AllowPrivate: true}}
 			got, err := v.Verify(context.Background(), DeploymentVerificationRequest{Environment: "test", Source: "http", ExpectedCommits: map[string]string{"repo": "a"}})
 			if err != nil || got.Result != DeploymentResultUnavailable {
 				t.Fatalf("got=%+v err=%v", got, err)

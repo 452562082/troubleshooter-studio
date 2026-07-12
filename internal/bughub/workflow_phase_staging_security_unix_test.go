@@ -40,6 +40,34 @@ func TestCaptureAttemptStagedArtifactRejectsOversizedDeclaredAndReadContent(t *t
 	}
 }
 
+func TestFixCheckpointOrphanSweepDeletesOnlyKnownTerminalAttemptDirectory(t *testing.T) {
+	root := filepath.Join(resolvedTempDir(t), "orphan-sweep")
+	staging, err := openAttemptEvidenceStaging(root, "terminal-fix")
+	if err != nil {
+		t.Fatal(err)
+	}
+	known := staging.Path()
+	if err := os.WriteFile(filepath.Join(known, fixCheckpointManifestName), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := staging.Close(); err != nil {
+		t.Fatal(err)
+	}
+	unknown := filepath.Join(root, ".staging", "unknown-owned-directory")
+	if err := os.Mkdir(unknown, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := sweepTerminalFixStaging(root, []string{"terminal-fix"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(known); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("known orphan retained: %v", err)
+	}
+	if info, err := os.Stat(unknown); err != nil || !info.IsDir() {
+		t.Fatalf("unknown directory removed: %v", err)
+	}
+}
+
 func TestCaptureAttemptStagedArtifactRejectsTraversalSymlinkAndWrongAttempt(t *testing.T) {
 	root := filepath.Join(resolvedTempDir(t), "staging-security")
 	first, err := createAttemptEvidenceStaging(root, "attempt-first")

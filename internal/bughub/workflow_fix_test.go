@@ -330,6 +330,7 @@ evidence: []
 	if err != nil {
 		t.Fatal(err)
 	}
+	orchestrator.git = &recordingGitIntegration{fixInspection: FixInspection{Complete: true, Changes: parsed.CodeChanges}}
 	waiting, err := orchestrator.CompleteAttempt(context.Background(), CompleteAttemptCommand{CaseID: approved.ID, AttemptID: attempt.ID, ExpectedVersion: approved.Version, IdempotencyKey: "agent-phase:" + attempt.ID, ActorID: "fixer", Outcome: parsed.Outcome, OutputJSON: parsed.OutputJSON, CodeChanges: parsed.CodeChanges})
 	if err != nil || waiting.Status != CaseWaitingMergeApproval {
 		t.Fatalf("case=%+v err=%v", waiting, err)
@@ -437,9 +438,23 @@ func TestCompletionIntentUsesStrictFixBoundaryOnSaveAndReplay(t *testing.T) {
 	if err := store.SaveCompletionIntentIfRunning(context.Background(), command); err != nil {
 		t.Fatalf("exact intent replay: %v", err)
 	}
-	finished, err := NewCaseOrchestrator(store, nil, nil, nil).CompleteAttempt(context.Background(), command)
+	finished, err := NewCaseOrchestrator(store, nil, &recordingGitIntegration{fixInspection: FixInspection{Complete: true, Changes: command.CodeChanges}}, nil).CompleteAttempt(context.Background(), command)
 	if err != nil || finished.Status != CaseWaitingMergeApproval {
 		t.Fatalf("case=%+v err=%v", finished, err)
+	}
+}
+
+func TestFixCompletionRemoteMismatchFailsAttemptWithoutWaitingForRestart(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident, attempt := createRunningPhase(t, store, "fix-remote-mismatch", CaseWaitingFixApproval, CaseFixing, PhaseFix, "", []byte(`{}`))
+	command := validFixCompletion(t, incident, attempt)
+	failed, err := NewCaseOrchestrator(store, nil, &recordingGitIntegration{err: ErrFixRemoteMismatch}, nil).CompleteAttempt(context.Background(), command)
+	if !errors.Is(err, ErrFixRemoteMismatch) || failed.Status != CaseFixFailed {
+		t.Fatalf("case=%+v err=%v", failed, err)
+	}
+	persisted, loadErr := store.GetAttempt(context.Background(), attempt.ID)
+	if loadErr != nil || persisted.Status != AttemptStatusFailed || persisted.ErrorCode != "fix_recovery_failed" {
+		t.Fatalf("attempt=%+v err=%v", persisted, loadErr)
 	}
 }
 

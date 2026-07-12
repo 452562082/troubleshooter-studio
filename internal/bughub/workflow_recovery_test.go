@@ -5,11 +5,38 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func persistFixCheckpointForTest(t *testing.T, store *CaseStore, root string, attempt PhaseAttempt, result FixResult, state string) string {
+	t.Helper()
+	staging, err := openAttemptEvidenceStaging(root, attempt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := FixCheckpointManifest{Kind: fixCheckpointManifestKind, Version: fixCheckpointManifestVersion, CaseID: attempt.CaseID, AttemptID: attempt.ID, State: state, Result: result}
+	encoded, _ := json.Marshal(manifest)
+	if err := os.WriteFile(filepath.Join(staging.Path(), fixCheckpointManifestName), encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	locator := fixCheckpointLocator(staging)
+	if err := store.SaveFixCheckpoint(context.Background(), FixCheckpoint{AttemptID: attempt.ID, CaseID: attempt.CaseID, StagingLocator: locator}); err != nil {
+		t.Fatal(err)
+	}
+	if err := staging.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return locator
+}
+
+func checkpointFixResult(repo, commit string) FixResult {
+	test := FixTestResult{Repo: repo, Commit: commit, Command: "go test ./...", Result: "passed"}
+	return FixResult{FixStatus: "fixed_pushed", Environment: "test", Branches: []FixBranchResult{{Repo: repo, BaseBranch: "test", FixBranch: "fix/bug", Commit: commit, Pushed: true, TargetEnvironmentBranch: "test", PushRemote: "origin"}}, Changes: []FixChangeResult{{Repo: repo, Summary: "fix"}}, Tests: []FixTestResult{test}, DeploymentNotice: "deploy", Risks: []string{}, Evidence: []ArtifactReference{}}
+}
 
 func createRunningPhase(t *testing.T, store *CaseStore, id string, from, running CaseStatus, phase Phase, mode AttemptMode, input json.RawMessage) (IncidentCase, PhaseAttempt) {
 	t.Helper()
@@ -234,6 +261,207 @@ func TestRecoverInterruptedFixInspectsExternalStateAndNeverBlindlyRetries(t *tes
 	}
 }
 
+func TestRecoverFixCheckpointUsesRemoteBranchAsCrashTruth(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		state           string
+		setup           func(*testing.T, gitFixture) string
+		want            CaseStatus
+		wantUnavailable bool
+	}{
+		{name: "push then crash before manifest update", state: "prepared", setup: func(t *testing.T, f gitFixture) string { return f.makeFix(t, "pushed\n") }, want: CaseWaitingMergeApproval},
+		{name: "local commit before push crash", state: "prepared", setup: func(t *testing.T, f gitFixture) string {
+			runGitTest(t, f.repo, "switch", "-c", "fix/bug")
+			if err := os.WriteFile(filepath.Join(f.repo, "fix.txt"), []byte("local\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			runGitTest(t, f.repo, "add", "fix.txt")
+			runGitTest(t, f.repo, "commit", "-m", "local fix")
+			return strings.TrimSpace(runGitTest(t, f.repo, "rev-parse", "HEAD"))
+		}, want: CaseFixing, wantUnavailable: true},
+		{name: "remote branch drift", state: "pushed", setup: func(t *testing.T, f gitFixture) string {
+			commit := f.makeFix(t, "first\n")
+			if err := os.WriteFile(filepath.Join(f.repo, "drift.txt"), []byte("drift\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			runGitTest(t, f.repo, "add", "drift.txt")
+			runGitTest(t, f.repo, "commit", "-m", "drift")
+			runGitTest(t, f.repo, "push", "origin", "fix/bug")
+			return commit
+		}, want: CaseFixFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newGitFixture(t)
+			commit := tc.setup(t, fixture)
+			store := newOrchestratorStore(t)
+			incident, attempt := createRunningPhase(t, store, "checkpoint-"+strings.ReplaceAll(tc.name, " ", "-"), CaseWaitingFixApproval, CaseFixing, PhaseFix, "", []byte(`{}`))
+			root := filepath.Join(resolvedTempDir(t), "checkpoint-artifacts-"+stableID("test", tc.name))
+			locator := persistFixCheckpointForTest(t, store, root, attempt, checkpointFixResult("api", commit), tc.state)
+			runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, root, nil)
+			o := NewCaseOrchestrator(store, runner, fixture.service(t), nil)
+			recoverErr := o.RecoverInterrupted(context.Background())
+			if tc.wantUnavailable {
+				if !errors.Is(recoverErr, ErrFixInspectionUnavailable) {
+					t.Fatalf("recovery err=%v", recoverErr)
+				}
+			} else if recoverErr != nil {
+				t.Fatal(recoverErr)
+			}
+			got, _ := store.GetCase(context.Background(), incident.ID)
+			if got.Status != tc.want {
+				t.Fatalf("case=%+v", got)
+			}
+			if tc.want == CaseWaitingMergeApproval {
+				changes, _ := store.ListCodeChanges(context.Background(), incident.ID)
+				if len(changes) != 1 || changes[0].FixCommit != commit || changes[0].PushStatus != "pushed" {
+					t.Fatalf("changes=%+v", changes)
+				}
+				if _, found, _ := store.GetFixCheckpoint(context.Background(), attempt.ID); found {
+					t.Fatal("checkpoint row not consumed transactionally")
+				}
+			} else if tc.wantUnavailable {
+				persistedAttempt, _ := store.GetAttempt(context.Background(), attempt.ID)
+				if persistedAttempt.Status != AttemptStatusRunning {
+					t.Fatalf("attempt=%+v", persistedAttempt)
+				}
+				if _, found, _ := store.GetFixCheckpoint(context.Background(), attempt.ID); !found {
+					t.Fatal("transient remote failure consumed checkpoint")
+				}
+			} else if _, found, _ := store.GetFixCheckpoint(context.Background(), attempt.ID); found {
+				t.Fatal("authoritative mismatch left checkpoint row")
+			} else if _, statErr := os.Stat(filepath.Join(root, ".staging", locator)); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("terminal checkpoint staging remains: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestRecoverFixCheckpointFetchesExactRemoteObjectMissingLocally(t *testing.T) {
+	fixture := newGitFixture(t)
+	producer := filepath.Join(filepath.Dir(fixture.remote), "producer")
+	runGitTest(t, filepath.Dir(fixture.remote), "clone", fixture.remote, producer)
+	runGitTest(t, producer, "config", "user.name", "Remote Producer")
+	runGitTest(t, producer, "config", "user.email", "producer@example.test")
+	runGitTest(t, producer, "switch", "-c", "fix/bug", "origin/test")
+	if err := os.WriteFile(filepath.Join(producer, "remote-only.txt"), []byte("remote only\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, producer, "add", "remote-only.txt")
+	runGitTest(t, producer, "commit", "-m", "remote-only fix")
+	commit := strings.TrimSpace(runGitTest(t, producer, "rev-parse", "HEAD"))
+	runGitTest(t, producer, "push", "origin", "fix/bug")
+	if commandErr := gitRun(context.Background(), fixture.repo, "cat-file", "-e", commit+"^{commit}"); commandErr == nil {
+		t.Fatal("fixture local repository unexpectedly already contains remote-only commit")
+	}
+
+	store := newOrchestratorStore(t)
+	incident, attempt := createRunningPhase(t, store, "checkpoint-remote-only", CaseWaitingFixApproval, CaseFixing, PhaseFix, "", []byte(`{}`))
+	root := filepath.Join(resolvedTempDir(t), "checkpoint-remote-only-root")
+	persistFixCheckpointForTest(t, store, root, attempt, checkpointFixResult("api", commit), "prepared")
+	o := NewCaseOrchestrator(store, NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, root, nil), fixture.service(t), nil)
+	if err := o.RecoverInterrupted(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	current, _ := store.GetCase(context.Background(), incident.ID)
+	if current.Status != CaseWaitingMergeApproval {
+		t.Fatalf("case=%+v", current)
+	}
+	if commandErr := gitRun(context.Background(), fixture.repo, "cat-file", "-e", commit+"^{commit}"); commandErr != nil {
+		t.Fatalf("remote exact verifier did not materialize commit: %v", commandErr)
+	}
+}
+
+func TestRecoverPreparedFixCheckpointRequiresEveryRemoteRepository(t *testing.T) {
+	a, b := newGitFixture(t), newGitFixture(t)
+	commits := map[string]string{"a": a.makeFix(t, "a\n"), "b": b.makeFix(t, "b\n")}
+	store := newOrchestratorStore(t)
+	incident, attempt := createRunningPhase(t, store, "checkpoint-multi", CaseWaitingFixApproval, CaseFixing, PhaseFix, "", []byte(`{}`))
+	result := FixResult{FixStatus: "fixed_pushed", Environment: "test", DeploymentNotice: "deploy", Risks: []string{}, Evidence: []ArtifactReference{}}
+	for _, repo := range []string{"a", "b"} {
+		result.Branches = append(result.Branches, FixBranchResult{Repo: repo, BaseBranch: "test", FixBranch: "fix/bug", Commit: commits[repo], Pushed: true, TargetEnvironmentBranch: "test", PushRemote: "origin"})
+		result.Changes = append(result.Changes, FixChangeResult{Repo: repo, Summary: "fix " + repo})
+		result.Tests = append(result.Tests, FixTestResult{Repo: repo, Commit: commits[repo], Command: "go test ./...", Result: "passed"})
+	}
+	root := filepath.Join(resolvedTempDir(t), "checkpoint-multi-root")
+	persistFixCheckpointForTest(t, store, root, attempt, result, "prepared")
+	service := NewGitIntegrationService(filepath.Join(resolvedTempDir(t), "checkpoint-worktrees"), func(_ context.Context, _, repo string) (string, error) {
+		if repo == "a" {
+			return a.repo, nil
+		}
+		if repo == "b" {
+			return b.repo, nil
+		}
+		return "", errors.New("unknown repo")
+	})
+	o := NewCaseOrchestrator(store, NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, root, nil), service, nil)
+	if err := o.RecoverInterrupted(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := store.GetCase(context.Background(), incident.ID)
+	changes, _ := store.ListCodeChanges(context.Background(), incident.ID)
+	if got.Status != CaseWaitingMergeApproval || len(changes) != 2 {
+		t.Fatalf("case=%+v changes=%+v", got, changes)
+	}
+}
+
+func TestRecoverFixCheckpointRetriesTransientInspectionWithoutConsumingState(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident, attempt := createRunningPhase(t, store, "checkpoint-transient", CaseWaitingFixApproval, CaseFixing, PhaseFix, "", []byte(`{}`))
+	root := filepath.Join(resolvedTempDir(t), "checkpoint-transient-root")
+	persistFixCheckpointForTest(t, store, root, attempt, checkpointFixResult("api", strings.Repeat("a", 40)), "pushed")
+	git := &recordingGitIntegration{err: errors.New("temporary ssh outage")}
+	o := NewCaseOrchestrator(store, NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, root, nil), git, nil)
+	if err := o.RecoverInterrupted(context.Background()); !errors.Is(err, ErrFixInspectionUnavailable) {
+		t.Fatalf("err=%v", err)
+	}
+	git.mu.Lock()
+	calls := len(git.inspections)
+	git.mu.Unlock()
+	if calls != fixInspectionMaxAttempts {
+		t.Fatalf("inspection calls=%d", calls)
+	}
+	current, _ := store.GetCase(context.Background(), incident.ID)
+	persistedAttempt, _ := store.GetAttempt(context.Background(), attempt.ID)
+	if current.Status != CaseFixing || persistedAttempt.Status != AttemptStatusRunning {
+		t.Fatalf("case=%+v attempt=%+v", current, persistedAttempt)
+	}
+	if _, found, _ := store.GetFixCheckpoint(context.Background(), attempt.ID); !found {
+		t.Fatal("transient inspection consumed durable checkpoint")
+	}
+}
+
+func TestRecoverFixCompletionIntentConsumesCheckpointOnAuthoritativeMismatch(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident, attempt := createRunningPhase(t, store, "checkpoint-intent-mismatch", CaseWaitingFixApproval, CaseFixing, PhaseFix, "", []byte(`{}`))
+	result := checkpointFixResult("api", strings.Repeat("a", 40))
+	encoded, _ := json.Marshal(result)
+	parsed, err := ParsePhaseResult(attempt, encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(resolvedTempDir(t), "checkpoint-intent-mismatch-root")
+	locator := persistFixCheckpointForTest(t, store, root, attempt, result, "pushed")
+	command := CompleteAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "agent-phase:" + attempt.ID, ActorID: "fixer", Outcome: parsed.Outcome, OutputJSON: parsed.OutputJSON, CodeChanges: parsed.CodeChanges}
+	if err := store.SaveCompletionIntentIfRunning(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	git := &recordingGitIntegration{err: ErrFixRemoteMismatch}
+	o := NewCaseOrchestrator(store, NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, root, nil), git, nil)
+	if err := o.RecoverInterrupted(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	current, _ := store.GetCase(context.Background(), incident.ID)
+	if current.Status != CaseFixFailed {
+		t.Fatalf("case=%+v", current)
+	}
+	if _, found, _ := store.GetFixCheckpoint(context.Background(), attempt.ID); found {
+		t.Fatal("terminal mismatch left checkpoint row")
+	}
+	if _, statErr := os.Stat(filepath.Join(root, ".staging", locator)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("terminal mismatch left staging: %v", statErr)
+	}
+}
+
 func TestRecoverInterruptedFixReplaysPersistedInspectionReservationAfterReopen(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "workflow.db")
@@ -429,6 +657,28 @@ func TestRecoverInterruptedRegressionRequiresLatestMatchedDeployment(t *testing.
 	}
 }
 
+func TestRecoverVerifiedPreReleaseCaseWithoutOriginalEvidenceFailsSafe(t *testing.T) {
+	store, incident, original, _ := prepareRegressionCase(t, 1)
+	if _, err := store.db.ExecContext(context.Background(), `DELETE FROM evidence_artifacts WHERE attempt_id=?`, original.ID); err != nil {
+		t.Fatal(err)
+	}
+	o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, nil)
+	if err := o.RecoverInterrupted(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.GetCase(context.Background(), incident.ID)
+	if err != nil || current.Status != CaseWaitingEvidence {
+		t.Fatalf("case=%+v err=%v", current, err)
+	}
+	if current.CurrentAttemptID != original.ID {
+		t.Fatalf("continuation attempt=%q want validation %q", current.CurrentAttemptID, original.ID)
+	}
+	continued, err := o.ContinueWithEvidence(context.Background(), ContinueWithEvidenceCommand{CaseID: current.ID, ExpectedVersion: current.Version, IdempotencyKey: "legacy-original-evidence", ActorID: "alice", Phase: PhaseValidation, Bug: Bug{ID: current.BugID}, Bot: BotRef{Key: current.SelectedBotKey, Target: original.AgentTarget}, InputJSON: []byte(`{"user_input":"fresh reproduction proof"}`)})
+	if err != nil || continued.Status != CaseValidating {
+		t.Fatalf("continued=%+v err=%v", continued, err)
+	}
+}
+
 func TestRecoverInterruptedReconcilesTerminalCurrentAttempt(t *testing.T) {
 	ctx := context.Background()
 	store := newOrchestratorStore(t)
@@ -558,7 +808,11 @@ func TestRecoverInterruptedAppliesPersistedCompletionIntentWithoutRerunningPhase
 	ctx := context.Background()
 	store := newOrchestratorStore(t)
 	incident, attempt := createRunningPhase(t, store, "recover-completion-intent", CasePendingValidation, CaseValidating, PhaseValidation, AttemptReproduce, []byte(`{"mode":"reproduce"}`))
-	command := CompleteAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "agent-phase:" + attempt.ID, ActorID: "validator", Outcome: PhaseOutcomeReproduced, OutputJSON: []byte(`{"verification_status":"reproduced","environment":"test"}`), Usage: AgentUsage{InputTokens: 3, OutputTokens: 2}}
+	artifact := EvidenceArtifact{ID: "recover-original", CaseID: incident.ID, AttemptID: attempt.ID, Kind: "api", PathOrReference: "/artifact/recover", SHA256: strings.Repeat("a", 64), CapturedAt: attempt.StartedAt.Add(time.Second), Environment: "test", RequestID: "recover-request", RedactionStatus: RedactionStatusNotRequired}
+	if _, _, err := store.recordEvidenceArtifact(ctx, artifact, nil); err != nil {
+		t.Fatal(err)
+	}
+	command := CompleteAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "agent-phase:" + attempt.ID, ActorID: "validator", Outcome: PhaseOutcomeReproduced, OutputJSON: []byte(`{"verification_status":"reproduced","environment":"test","observed_behavior":"timeout","expected_behavior":"success","evidence":[{"kind":"api","path":"response.json","environment":"test","redaction_status":"not_required"}],"gaps":[]}`), Usage: AgentUsage{InputTokens: 3, OutputTokens: 2}}
 	if err := store.SaveCompletionIntentIfRunning(ctx, command); err != nil {
 		t.Fatal(err)
 	}
@@ -612,7 +866,7 @@ func TestRecoverInterruptedCompletionIntentPreservesFixCodeChanges(t *testing.T)
 		t.Fatal(err)
 	}
 	runner := &recordingPhaseRunner{}
-	o := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
+	o := NewCaseOrchestrator(store, runner, &recordingGitIntegration{fixInspection: FixInspection{Complete: true, Changes: []CodeChange{change}}}, &recordingDeploymentVerifier{})
 	if err := o.RecoverInterrupted(ctx); err != nil {
 		t.Fatal(err)
 	}

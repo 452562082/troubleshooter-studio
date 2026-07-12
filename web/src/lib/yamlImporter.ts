@@ -98,6 +98,7 @@ export function parseEnvironment(e: unknown): ParsedEnv {
     deploymentVerification.provider = provider
     deploymentVerification.http.url = typeof http.url === 'string' ? http.url : ''
     deploymentVerification.http.json_pointer = typeof http.json_pointer === 'string' ? http.json_pointer : ''
+    deploymentVerification.http.allow_private = http.allow_private === true
     deploymentVerification.k8s.cluster = typeof k8s.cluster === 'string' ? k8s.cluster : ''
     deploymentVerification.k8s.namespace = typeof k8s.namespace === 'string' ? k8s.namespace : ''
     deploymentVerification.k8s.deployments_by_repo = mappings

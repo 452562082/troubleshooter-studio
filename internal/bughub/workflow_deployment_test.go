@@ -64,6 +64,73 @@ func TestDeploymentProofSchemaMigratesV1Store(t *testing.T) {
 			t.Fatalf("missing %s columns=%v", required, columns["deployment_observations"])
 		}
 	}
+	for _, required := range []string{"attempt_id", "case_id", "staging_locator", "created_at"} {
+		if !containsString(columns["fix_checkpoints"], required) {
+			t.Fatalf("missing fix_checkpoints.%s columns=%v", required, columns["fix_checkpoints"])
+		}
+	}
+}
+
+func TestDeploymentProofSchemaMigratesV2AndV3Stores(t *testing.T) {
+	for _, initialVersion := range []int{2, 3} {
+		t.Run(fmt.Sprintf("v%d", initialVersion), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "workflow.db")
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tx, err := db.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, statement := range []string{legacyWorkflowStoreSchema, workflowStoreSchemaV1Upgrade, workflowStoreSchemaV2Upgrade} {
+				if _, err = tx.Exec(statement); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if initialVersion == 3 {
+				if _, err = tx.Exec(workflowStoreSchemaV3Upgrade); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fingerprint, err := workflowSchemaFingerprint(context.Background(), tx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			detail, _ := json.Marshal(workflowSchemaMigrationDetail{Version: initialVersion, Fingerprint: fingerprint})
+			if _, err = tx.Exec(`INSERT INTO schema_migrations (key, applied_at, detail_json) VALUES (?, ?, ?)`, workflowStoreSchemaV1Key, formatStoreTime(time.Now().UTC()), string(detail)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = tx.Exec(fmt.Sprintf(`PRAGMA user_version=%d`, initialVersion)); err != nil {
+				t.Fatal(err)
+			}
+			if err = tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			if err = db.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			store, err := OpenCaseStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			var version int
+			if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != workflowStoreSchemaVersion {
+				t.Fatalf("version=%d err=%v", version, err)
+			}
+			columns, err := workflowTableColumns(context.Background(), store.db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, required := range []string{"attempt_id", "case_id", "staging_locator", "created_at"} {
+				if !containsString(columns["fix_checkpoints"], required) {
+					t.Fatalf("missing fix_checkpoints.%s columns=%v", required, columns["fix_checkpoints"])
+				}
+			}
+		})
+	}
 }
 
 func containsString(values []string, target string) bool {

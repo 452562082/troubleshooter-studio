@@ -445,6 +445,14 @@ func createWorkflowCase(t *testing.T, store *CaseStore, id string, status CaseSt
 func addPushedWorkflowChange(t *testing.T, store *CaseStore, incident IncidentCase) IncidentCase {
 	t.Helper()
 	now := time.Now().UTC()
+	validation := PhaseAttempt{ID: incident.ID + "-original-validation", CaseID: incident.ID, CycleNumber: 1, Phase: PhaseValidation, Mode: AttemptReproduce, Status: AttemptStatusSucceeded, AgentTarget: "codex", BotKey: "validator", InputJSON: []byte(`{"reproduction_steps":["reproduce original bug"]}`), OutputJSON: []byte(`{"verification_status":"reproduced","environment":"test","observed_behavior":"original bug","expected_behavior":"healthy response","evidence":[],"gaps":[]}`), StartedAt: now.Add(-time.Minute), FinishedAt: &now}
+	if err := store.CreateAttempt(context.Background(), validation); err != nil {
+		t.Fatal(err)
+	}
+	originalArtifact := EvidenceArtifact{ID: incident.ID + "-original-evidence", CaseID: incident.ID, AttemptID: validation.ID, Kind: "api", PathOrReference: "/artifacts/" + incident.ID + "/original", SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", CapturedAt: now, Environment: incident.Environment, Version: "before-fix", RequestID: "original-request", RedactionStatus: RedactionStatusNotRequired}
+	if _, _, err := store.recordEvidenceArtifact(context.Background(), originalArtifact, nil); err != nil {
+		t.Fatal(err)
+	}
 	attempt := PhaseAttempt{ID: incident.ID + "-fix", CaseID: incident.ID, CycleNumber: incident.CycleNumber, Phase: PhaseFix, Status: AttemptStatusSucceeded, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`), FinishedAt: &now}
 	if err := store.CreateAttempt(context.Background(), attempt); err != nil {
 		t.Fatal(err)
@@ -664,10 +672,15 @@ func TestOrchestratorNotifyDeployedCannotReachRegressionWithoutMatchedObservatio
 
 func TestOrchestratorDuplicateRegressionCompletionKeepsExactClosure(t *testing.T) {
 	ctx := context.Background()
-	store := newOrchestratorStore(t)
-	incident, attempt := createRunningPhase(t, store, "case-close", CaseDeploymentVerified, CaseRegressionValidating, PhaseRegression, AttemptRegression, []byte(`{}`))
+	store, incident, _, _ := prepareRegressionCase(t, 1)
 	o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
-	cmd := CompleteAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "regression:fixed", ActorID: "validator", Outcome: PhaseOutcomeFixedVerified, OutputJSON: []byte(`{"result":"fixed"}`)}
+	attempt, err := o.StartRegression(ctx, incident.ID, incident.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordRegressionArtifact(t, store, attempt, "request-close", time.Now().UTC().Add(time.Second))
+	incident, _ = store.GetCase(ctx, incident.ID)
+	cmd := CompleteAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "regression:fixed", ActorID: "validator", Outcome: PhaseOutcomeFixedVerified, OutputJSON: regressionOutput(t, attempt, "fixed_verified", "")}
 	closed, err := o.CompleteAttempt(ctx, cmd)
 	if err != nil || closed.Status != CaseFixedVerified || closed.ClosedAt == nil {
 		t.Fatalf("case=%+v err=%v", closed, err)
@@ -940,11 +953,11 @@ func TestNotifyDeployedMatchedReplayReturnsCommittedRegressionWithoutDuplicate(t
 	incident := createWorkflowCase(t, store, "case-deploy-replay", CaseWaitingDeployment)
 	incident = addPushedWorkflowChange(t, store, incident)
 	now := time.Now().UTC()
-	verifier := &recordingDeploymentVerifier{result: DeploymentObservation{VerificationSource: "manual", Result: DeploymentResultMatched, VerifiedAt: &now, ObservedCommits: map[string]string{"repo": "merge-1"}}}
+	verifier := &recordingDeploymentVerifier{result: DeploymentObservation{VerificationSource: "manual", Result: DeploymentResultMatched, VerifiedAt: &now, ObservedVersion: "build-42", ObservedCommits: map[string]string{"repo": "merge-1"}}}
 	runner := &recordingPhaseRunner{}
 	o := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, verifier)
 	regressionInput := []byte(`{ "scenario" : "original-reproduction", "evidence_id" : "e-1" }`)
-	cmd := NotifyDeployedCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "deploy-replay", ActorID: "alice", ObservedCommits: map[string]string{"repo": "merge-1"}, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "validator", Target: "codex"}, InputJSON: regressionInput}
+	cmd := NotifyDeployedCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "deploy-replay", ActorID: "alice", ObservedVersion: "build-42", ObservedCommits: map[string]string{"repo": "merge-1"}, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "validator", Target: "codex"}, InputJSON: regressionInput}
 	first, err := o.NotifyDeployed(ctx, cmd)
 	if err != nil || first.Status != CaseRegressionValidating {
 		t.Fatalf("case=%+v err=%v", first, err)
@@ -954,13 +967,14 @@ func TestNotifyDeployedMatchedReplayReturnsCommittedRegressionWithoutDuplicate(t
 		t.Fatalf("case=%+v starts=%d verifies=%d err=%v", second, runner.startCount(), len(verifier.requests), err)
 	}
 	attempt, attemptErr := store.GetAttempt(ctx, second.CurrentAttemptID)
-	if attemptErr != nil || string(attempt.InputJSON) != string(regressionInput) {
+	var deterministic RegressionValidationInput
+	if attemptErr != nil || json.Unmarshal(attempt.InputJSON, &deterministic) != nil || deterministic.OriginalValidationAttemptID == "" || deterministic.ObservedDeploymentVersion != "build-42" {
 		t.Fatalf("attempt=%+v err=%v", attempt, attemptErr)
 	}
 	changed := cmd
 	changed.InputJSON = []byte(`{"scenario":"different"}`)
-	if _, changedErr := o.NotifyDeployed(ctx, changed); !errors.Is(changedErr, ErrIdempotencyConflict) {
-		t.Fatalf("changed regression input err=%v", changedErr)
+	if _, changedErr := o.NotifyDeployed(ctx, changed); changedErr != nil {
+		t.Fatalf("caller regression input must be ignored, err=%v", changedErr)
 	}
 }
 
@@ -982,7 +996,7 @@ func TestContinueWithEvidenceReopensDeploymentAndMergeAuthorizationGates(t *test
 		}
 		now := time.Now().UTC()
 		verifier.mu.Lock()
-		verifier.result = DeploymentObservation{VerificationSource: "manual", Result: DeploymentResultMatched, VerifiedAt: &now, ObservedCommits: map[string]string{"repo": "merge-1"}}
+		verifier.result = DeploymentObservation{VerificationSource: "manual", Result: DeploymentResultMatched, VerifiedAt: &now, ObservedVersion: "new", ObservedCommits: map[string]string{"repo": "merge-1"}}
 		verifier.mu.Unlock()
 		regressed, err := o.NotifyDeployed(ctx, NotifyDeployedCommand{CaseID: reopened.ID, ExpectedVersion: reopened.Version, IdempotencyKey: "deploy:second", ActorID: "alice", ObservedVersion: "new", ObservedCommits: map[string]string{"repo": "merge-1"}, InputJSON: []byte(`{"proof":"new"}`)})
 		if err != nil || regressed.Status != CaseRegressionValidating || len(verifier.requests) != 2 {

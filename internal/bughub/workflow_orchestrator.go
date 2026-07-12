@@ -518,7 +518,29 @@ func (o *CaseOrchestrator) ContinueWithEvidence(ctx context.Context, cmd Continu
 	if to == "" {
 		return IncidentCase{}, fmt.Errorf("cannot continue phase %q from %s", cmd.Phase, incident.Status)
 	}
-	attempt := newAttempt(incident, phase, mode, cmd.IdempotencyKey, cmd.Bot, cmd.InputJSON, incident.CurrentAttemptID)
+	input := CloneRawMessage(cmd.InputJSON)
+	if phase == PhaseRegression {
+		previous, loadErr := o.store.GetAttempt(ctx, incident.CurrentAttemptID)
+		if loadErr != nil || previous.Phase != PhaseRegression || previous.Mode != AttemptRegression || previous.CycleNumber != incident.CycleNumber || previous.BotKey != cmd.Bot.Key || previous.AgentTarget != cmd.Bot.Target {
+			return IncidentCase{}, ErrRegressionBinding
+		}
+		var regression RegressionValidationInput
+		if json.Unmarshal(previous.InputJSON, &regression) != nil || o.validatePersistedRegressionBinding(ctx, incident, regression) != nil {
+			return IncidentCase{}, ErrRegressionBinding
+		}
+		if len(input) == 0 {
+			input = []byte(`{}`)
+		}
+		if inputErr := validateJSONObject("regression supplemental evidence", input, true); inputErr != nil {
+			return IncidentCase{}, inputErr
+		}
+		if containsSensitiveData(input) {
+			return IncidentCase{}, errors.New("regression supplemental evidence contains sensitive data")
+		}
+		regression.SupplementalEvidence = input
+		input = mustJSON(regression)
+	}
+	attempt := newAttempt(incident, phase, mode, cmd.IdempotencyKey, cmd.Bot, input, incident.CurrentAttemptID)
 	return o.beginPhase(ctx, incident, to, attempt, cmd.Bug, cmd.Bot, cmd.IdempotencyKey, cmd.ActorID, "evidence_continued")
 }
 
@@ -1021,13 +1043,6 @@ func (o *CaseOrchestrator) NotifyDeployed(ctx context.Context, cmd NotifyDeploye
 	if err := validateCommand(cmd.CaseID, cmd.ExpectedVersion, cmd.IdempotencyKey, cmd.ActorID); err != nil {
 		return IncidentCase{}, err
 	}
-	regressionInput := CloneRawMessage(cmd.InputJSON)
-	if len(regressionInput) == 0 {
-		regressionInput = []byte(`{}`)
-	}
-	if err := validateJSONObject("regression input", regressionInput, true); err != nil {
-		return IncidentCase{}, err
-	}
 	reserveKey := fmt.Sprintf("deployment-reserve:%s:v%d", cmd.CaseID, cmd.ExpectedVersion)
 	release := workflowCommandLocks.acquire(reserveKey)
 	defer release()
@@ -1054,7 +1069,7 @@ func (o *CaseOrchestrator) NotifyDeployed(ctx context.Context, cmd NotifyDeploye
 		supplied.ObservedVersion = cmd.ObservedVersion
 		supplied.ObservedCommits = CloneStringMap(cmd.ObservedCommits)
 		supplied.Source = reservation.VerifierInput.Source
-		if !reflect.DeepEqual(supplied, reservation.VerifierInput) || !reflect.DeepEqual(cmd.Bot, reservation.Bot) || !reflect.DeepEqual(cmd.Bug, reservation.Bug) || string(regressionInput) != string(reservation.RegressionInputJSON) {
+		if !reflect.DeepEqual(supplied, reservation.VerifierInput) || !reflect.DeepEqual(cmd.Bot, reservation.Bot) || !reflect.DeepEqual(cmd.Bug, reservation.Bug) {
 			return IncidentCase{}, ErrIdempotencyConflict
 		}
 		if _, resultFound, resultErr := o.store.GetEventByIdempotencyKey(ctx, reserveKey+":result"); resultErr != nil {
@@ -1074,7 +1089,7 @@ func (o *CaseOrchestrator) NotifyDeployed(ctx context.Context, cmd NotifyDeploye
 			return IncidentCase{}, scopeErr
 		}
 		request := DeploymentVerificationRequest{CaseID: incident.ID, Environment: incident.Environment, ExpectedCommits: expected, ObservedVersion: cmd.ObservedVersion, ObservedCommits: CloneStringMap(cmd.ObservedCommits), Source: normalizedDeploymentSource(cmd.Source), ConfigFingerprint: strings.TrimSpace(cmd.VerifierConfigFingerprint), ConfigSnapshot: CloneRawMessage(cmd.VerifierConfigSnapshot)}
-		reservation = DeploymentReservation{ReservationID: stableID("deployment-reservation", reserveKey), ReservationKey: reserveKey, CallerIdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, OriginalExpectedVersion: cmd.ExpectedVersion, CycleNumber: scope.CycleNumber, Environment: incident.Environment, ExpectedCommits: expected, Bug: cmd.Bug, Bot: cmd.Bot, VerifierInput: request, RegressionInputJSON: append([]byte(nil), regressionInput...)}
+		reservation = DeploymentReservation{ReservationID: stableID("deployment-reservation", reserveKey), ReservationKey: reserveKey, CallerIdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, OriginalExpectedVersion: cmd.ExpectedVersion, CycleNumber: scope.CycleNumber, Environment: incident.Environment, ExpectedCommits: expected, Bug: cmd.Bug, Bot: cmd.Bot, VerifierInput: request}
 		payload := mustJSON(reservation)
 		reserved, reserveErr := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: cmd.ExpectedVersion, IdempotencyKey: reserveKey, RequestJSON: payload, Steps: []CaseMutationStep{{To: CaseDeploymentUnverified, Event: TransitionEvent{ID: stableID("event", reserveKey), EventType: "deployment_verification_reserved", ActorType: "user", ActorID: cmd.ActorID, PayloadJSON: payload}}, {To: CaseDeploymentUnverified, AuditOnly: true, Event: TransitionEvent{ID: stableID("event", reserveKey+":start"), EventType: "deployment_verification_started", ActorType: "studio", ActorID: "orchestrator", PayloadJSON: payload}}}})
 		if reserveErr != nil {
@@ -1114,15 +1129,8 @@ func (o *CaseOrchestrator) recordDeploymentResult(incident IncidentCase, reserva
 	}
 	key := reservation.ReservationKey + ":result"
 	steps := []CaseMutationStep{}
-	creates := []PhaseAttempt{}
-	update := CaseSnapshotUpdate{}
 	if observation.Result == DeploymentResultMatched && verifyErr == nil {
 		steps = append(steps, CaseMutationStep{To: CaseWaitingDeployment, Event: TransitionEvent{ID: stableID("event", key), EventType: "deployment_verification_completed", ActorType: "studio", ActorID: "deployment-verifier", PayloadJSON: mustJSON(observation)}}, CaseMutationStep{To: CaseDeploymentVerified, Event: TransitionEvent{ID: stableID("event", key+":verified"), EventType: "deployment_verified", ActorType: "studio", ActorID: "deployment-verifier", PayloadJSON: mustJSON(observation)}})
-		attempt := newAttempt(incident, PhaseRegression, AttemptRegression, key+":regression", reservation.Bot, CloneRawMessage(reservation.RegressionInputJSON), incident.CurrentAttemptID)
-		creates = append(creates, attempt)
-		update.CurrentAttemptID = workflowStringPtr(attempt.ID)
-		update.SelectedBotKey = workflowStringPtr(reservation.Bot.Key)
-		steps = append(steps, CaseMutationStep{To: CaseRegressionValidating, Event: TransitionEvent{ID: stableID("event", key+":regression"), EventType: "regression_started", ActorType: "studio", ActorID: "orchestrator", PayloadJSON: mustJSON(map[string]string{"attempt_id": attempt.ID})}})
 	} else {
 		if verifyErr != nil {
 			observation.Result = DeploymentResultUnavailable
@@ -1133,14 +1141,20 @@ func (o *CaseOrchestrator) recordDeploymentResult(incident IncidentCase, reserva
 		}
 		steps = append(steps, CaseMutationStep{To: CaseDeploymentUnverified, AuditOnly: true, Event: TransitionEvent{ID: stableID("event", key), EventType: "deployment_unverified", ActorType: "studio", ActorID: "deployment-verifier", PayloadJSON: mustJSON(observation)}})
 	}
-	mutation, err := o.store.ApplyCaseMutation(durable, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: mustJSON(map[string]any{"observation": observation, "error_code": observation.DiagnosticCode}), Observations: []DeploymentObservation{observation}, CreateAttempts: creates, Snapshot: update, Steps: steps})
+	mutation, err := o.store.ApplyCaseMutation(durable, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: mustJSON(map[string]any{"observation": observation, "error_code": observation.DiagnosticCode}), Observations: []DeploymentObservation{observation}, Steps: steps})
 	if err != nil {
 		return IncidentCase{}, errors.Join(verifyErr, err)
 	}
-	if len(creates) > 0 && !mutation.Replay && o.runner != nil {
-		if startErr := o.startPhase(creates[0], reservation.Bug, reservation.Bot); startErr != nil {
-			return o.phaseScheduleFailure(context.Background(), mutation.Case, creates[0], key+":regression", startErr)
+	if observation.Result == DeploymentResultMatched && verifyErr == nil && !mutation.Replay {
+		if _, startErr := o.StartRegression(durable, mutation.Case.ID, mutation.Case.Version); startErr != nil {
+			current, _ := o.store.GetCase(durable, mutation.Case.ID)
+			return current, startErr
 		}
+		current, loadErr := o.store.GetCase(durable, mutation.Case.ID)
+		if loadErr != nil {
+			return IncidentCase{}, loadErr
+		}
+		return current, nil
 	}
 	return mutation.Case, verifyErr
 }
@@ -1269,6 +1283,9 @@ func (o *CaseOrchestrator) CompleteAttempt(ctx context.Context, cmd CompleteAtte
 	if err := validateCompletionAttemptPhase(attempt.Phase, cmd); err != nil {
 		return IncidentCase{}, err
 	}
+	if err := o.validateRegressionCompletion(ctx, incident, attempt, cmd); err != nil {
+		return IncidentCase{}, err
+	}
 	expectedAttemptOutput := CloneRawMessage(attempt.OutputJSON)
 	if intent, found, parseErr := parseCompletionIntent(attempt.OutputJSON); parseErr != nil {
 		return IncidentCase{}, parseErr
@@ -1323,7 +1340,11 @@ func (o *CaseOrchestrator) applyOutcome(ctx context.Context, incident IncidentCa
 		cycle := incident.CycleNumber + 1
 		add(CaseStillReproduces, "regression_failed", "agent", actor, cmd.OutputJSON)
 		add(CaseInvestigating, "next_cycle_investigation_started", "studio", "orchestrator", map[string]int{"cycle": cycle})
-		created := newAttempt(incident, PhaseInvestigation, "", cmd.IdempotencyKey+":investigation", BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget}, []byte(`{}`), attempt.ID)
+		nextInput, err := o.buildNextCycleInvestigationInput(ctx, attempt, cmd.OutputJSON)
+		if err != nil {
+			return IncidentCase{}, err
+		}
+		created := newAttempt(incident, PhaseInvestigation, "", cmd.IdempotencyKey+":investigation", BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget}, nextInput, attempt.ID)
 		created.CycleNumber = cycle
 		next = &created
 		update.CycleNumber = &cycle

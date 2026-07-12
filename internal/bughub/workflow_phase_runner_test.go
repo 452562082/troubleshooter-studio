@@ -266,7 +266,7 @@ func TestPhaseResultRegressionFreshnessIgnoresClaimedTimeAndRejectsEnvironmentMi
 		t.Fatal(err)
 	}
 	makeResult := func(captured time.Time, environment string) PhaseResult {
-		validation := ValidationResult{VerificationStatus: "fixed_verified", Environment: "test", ScenarioHash: "scenario", Evidence: []ArtifactReference{{Kind: "har", Path: evidencePath, CapturedAt: captured, Environment: environment, Version: "version-1", RedactionStatus: RedactionStatusNotRequired}}}
+		validation := ValidationResult{VerificationStatus: "fixed_verified", Environment: "test", ScenarioHash: "scenario", Evidence: []ArtifactReference{{Kind: "har", Path: evidencePath, CapturedAt: captured, Environment: environment, Version: "version-1", RequestID: "request-fresh", RedactionStatus: RedactionStatusNotRequired}}}
 		output, _ := json.Marshal(validation)
 		return PhaseResult{Outcome: PhaseOutcomeFixedVerified, OutputJSON: output, ArtifactInputs: validation.Evidence}
 	}
@@ -772,22 +772,25 @@ func TestAgentPhaseRunnerCleansConcurrentScheduledRaceStaging(t *testing.T) {
 }
 
 func TestAgentPhaseRunnerLegacyPreviewOmitsRegressionSecrets(t *testing.T) {
-	store := newOrchestratorStore(t)
-	incident := createWorkflowCase(t, store, "case-regression-preview", CaseRegressionValidating)
-	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseRegression, AttemptRegression)
-	input := RegressionValidationInput{OriginalReproduction: "Authorization: Bearer preview-secret Cookie: sid=cookie-secret token=token-secret", OriginalScenarioHash: "hash", ExpectedFixCommits: map[string]string{"api": "fix-1"}, ObservedDeploymentVersion: "version-1", TargetEnvironment: "test"}
-	attempt.InputJSON, _ = json.Marshal(input)
-	if _, err := store.db.Exec(`UPDATE phase_attempts SET input_json=? WHERE id=?`, string(attempt.InputJSON), attempt.ID); err != nil {
+	store, incident, _, _ := prepareRegressionCase(t, 1)
+	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, nil)
+	attempt, err := orchestrator.StartRegression(context.Background(), incident.ID, incident.Version)
+	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().UTC()
-	if err := store.RecordDeploymentObservation(context.Background(), DeploymentObservation{ID: "obs-preview-secret", CaseID: incident.ID, Environment: "test", ExpectedCommits: input.ExpectedFixCommits, VerificationSource: "test", ObservedVersion: input.ObservedDeploymentVersion, ObservedCommits: input.ExpectedFixCommits, VerifiedAt: &now, Result: DeploymentResultMatched}, "obs-preview-secret"); err != nil {
+	var input RegressionValidationInput
+	if err := json.Unmarshal(attempt.InputJSON, &input); err != nil {
+		t.Fatal(err)
+	}
+	input.OriginalReproduction = "Authorization: Bearer preview-secret Cookie: sid=cookie-secret token=token-secret"
+	attempt.InputJSON, _ = json.Marshal(input)
+	if _, err := store.db.Exec(`UPDATE phase_attempts SET input_json=? WHERE id=?`, string(attempt.InputJSON), attempt.ID); err != nil {
 		t.Fatal(err)
 	}
 	legacy := NewInvestigationStore(t.TempDir())
 	done := make(chan struct{}, 1)
 	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: "verification_status: fixed_verified\nenvironment: test\nevidence: []\ngaps: []\n"}}, legacy, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error { done <- struct{}{}; return nil })
-	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex"}); err != nil {
+	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, BotRef{Key: "validator", Target: "codex"}); err != nil {
 		t.Fatal(err)
 	}
 	<-done

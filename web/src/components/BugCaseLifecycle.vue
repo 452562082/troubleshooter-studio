@@ -71,6 +71,7 @@ const latestDeployment = computed(() => {
 })
 const deploymentVersionSource = computed(() => props.detail?.deployment_verification?.provider || latestDeployment.value?.verification_source || 'manual')
 const automaticDeploymentVerification = computed(() => ['http', 'k8s'].includes(deploymentVersionSource.value))
+const continuedAfterFailedRegression = computed(() => currentCase.value?.status === 'investigating' && currentCase.value.cycle_number > 1 && (props.detail?.events || []).some(event => event.event_type === 'regression_failed'))
 const mergeApprovalScopes = computed(() => (props.detail?.code_changes || []).map(change => ({
   repo: change.repo,
   fixCommit: change.fix_commit,
@@ -240,6 +241,7 @@ function dialogTitle(): string {
             <h3 id="current-action-title">{{ statusLabel(detail.case.status) }}</h3>
             <p v-if="detail.case.status === 'legacy_archived'">历史记录只读；继续时会通过 CreateAndStart 创建新的 Case，不修改归档 attempt。</p>
             <p v-else-if="detail.case.status === 'waiting_deployment'">环境分支已推送。人工部署后，Studio 将先核对运行版本，再启动回归验证。</p>
+            <p v-else-if="continuedAfterFailedRegression">第 {{ detail.case.cycle_number }} 轮 · 回归仍复现，Studio 已把本轮新证据和差分带入排障。</p>
             <p v-else>第 {{ detail.case.cycle_number }} 轮 · {{ detail.case.environment || '环境未知' }}</p>
           </div>
           <button v-if="action" class="btn primary primary-action" type="button" :disabled="pending" @click="openAction">

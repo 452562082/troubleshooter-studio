@@ -463,7 +463,7 @@ func TestRecoverDeploymentUsesPersistedReservationContextAndDoesNotRerunResult(t
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	verifier := &recordingDeploymentVerifier{result: DeploymentObservation{VerificationSource: "manual", Result: DeploymentResultMatched, VerifiedAt: &now, ObservedCommits: map[string]string{"repo": "merge-1"}}}
+	verifier := &recordingDeploymentVerifier{result: DeploymentObservation{VerificationSource: "manual", Result: DeploymentResultMatched, VerifiedAt: &now, ObservedVersion: "persisted-proof", ObservedCommits: map[string]string{"repo": "merge-1"}}}
 	runner := &recordingPhaseRunner{}
 	o := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, verifier)
 	restarted := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, verifier)
@@ -478,7 +478,8 @@ func TestRecoverDeploymentUsesPersistedReservationContextAndDoesNotRerunResult(t
 		t.Fatalf("case=%+v requests=%+v starts=%d", got, verifier.requests, runner.startCount())
 	}
 	attempt, attemptErr := store.GetAttempt(ctx, got.CurrentAttemptID)
-	if attemptErr != nil || string(attempt.InputJSON) != string(regressionInput) {
+	var deterministic RegressionValidationInput
+	if attemptErr != nil || json.Unmarshal(attempt.InputJSON, &deterministic) != nil || deterministic.ObservedDeploymentVersion != "persisted-proof" || deterministic.OriginalValidationAttemptID == "" {
 		t.Fatalf("attempt=%+v err=%v", attempt, attemptErr)
 	}
 }

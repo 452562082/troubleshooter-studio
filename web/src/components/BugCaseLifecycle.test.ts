@@ -30,6 +30,17 @@ describe('BugCaseLifecycle', () => {
     expect(primaryActionFor(incident('fixed_verified'))).toBeUndefined()
   })
 
+  it('explains that a failed regression carried fresh evidence into the next cycle', () => {
+    const snapshot = detail('investigating')
+    snapshot.case.cycle_number = 2
+    snapshot.events.push({ id: 'regression-failed', case_id: 'case-1', from_status: 'regression_validating', to_status: 'still_reproduces', event_type: 'regression_failed', actor_type: 'agent', actor_id: 'validator', idempotency_key: 'regression-failed', payload_json: {}, created_at: '2026-07-11T12:00:00Z' })
+    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+
+    expect(wrapper.find('.current-action-card').text()).toContain('回归仍复现')
+    expect(wrapper.find('.current-action-card').text()).toContain('新证据和差分')
+    expect(wrapper.find('.current-action-card').text()).toContain('第 2 轮')
+  })
+
   it.each([
     ['pending_validation', 'start_validation'], ['validating', 'cancel_attempt'],
     ['not_reproduced', 'supply_evidence'], ['investigating', 'cancel_attempt'],

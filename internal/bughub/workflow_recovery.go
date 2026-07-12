@@ -48,6 +48,12 @@ func (o *CaseOrchestrator) RecoverInterrupted(ctx context.Context) error {
 			}
 			continue
 		}
+		if incident.Status == CaseDeploymentVerified {
+			if _, recoveryErr := o.StartRegression(ctx, incident.ID, incident.Version); recoveryErr != nil && !errors.Is(recoveryErr, ErrRegressionDuplicate) {
+				recoveredErr = errors.Join(recoveredErr, fmt.Errorf("recover verified deployment %s: %w", incident.ID, recoveryErr))
+			}
+			continue
+		}
 		if incident.Status != CaseMerging {
 			continue
 		}

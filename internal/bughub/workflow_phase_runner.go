@@ -299,6 +299,11 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, _ Bug,
 				command.OutputJSON = mustJSON(map[string]any{"error_code": artifactErrorCode(err), "error_message": err.Error(), "evidence_limitation": true})
 				command.ErrorCode = artifactErrorCode(err)
 				command.ErrorMessage = err.Error()
+			} else if err := r.validateRegisteredRegressionEvidence(ctx, attempt, parsed); err != nil {
+				command.Outcome = PhaseOutcomeNeedsEvidence
+				command.OutputJSON = mustJSON(map[string]any{"error_code": "regression_evidence_invalid", "error_message": err.Error(), "evidence_limitation": true})
+				command.ErrorCode = "regression_evidence_invalid"
+				command.ErrorMessage = err.Error()
 			}
 		}
 	}
@@ -385,7 +390,11 @@ func (r *AgentPhaseRunner) promptForAttempt(attempt PhaseAttempt, bug Bug, bot B
 		}
 		return BuildRegressionValidationPrompt(bug, bot, input), nil
 	case PhaseInvestigation:
-		return buildStructuredInvestigationPrompt(bug, bot), nil
+		prompt := buildStructuredInvestigationPrompt(bug, bot)
+		if len(attempt.InputJSON) != 0 && string(attempt.InputJSON) != "{}" {
+			prompt += "\n## Studio structured investigation input\n\n```json\n" + string(attempt.InputJSON) + "\n```\n"
+		}
+		return prompt, nil
 	case PhaseFix:
 		prompt := BuildCodexFixPrompt(bug, bot, InvestigationRun{}, "")
 		if len(attempt.InputJSON) != 0 && string(attempt.InputJSON) != "{}" {
@@ -398,8 +407,8 @@ func (r *AgentPhaseRunner) promptForAttempt(attempt PhaseAttempt, bug Bug, bot B
 }
 
 func (r *AgentPhaseRunner) validateRegressionInputBinding(ctx context.Context, attempt PhaseAttempt, input RegressionValidationInput) error {
-	if strings.TrimSpace(input.OriginalReproduction) == "" || strings.TrimSpace(input.OriginalScenarioHash) == "" || strings.TrimSpace(input.ObservedDeploymentVersion) == "" || strings.TrimSpace(input.TargetEnvironment) == "" || len(input.ExpectedFixCommits) == 0 {
-		return errors.New("regression input requires original reproduction, scenario hash, expected commits, observed deployment version, and target environment")
+	if strings.TrimSpace(input.OriginalValidationAttemptID) == "" || strings.TrimSpace(input.OriginalReproduction) == "" || strings.TrimSpace(input.ExpectedBehavior) == "" || strings.TrimSpace(input.OriginalObservedBehavior) == "" || strings.TrimSpace(input.OriginalScenarioHash) == "" || input.CycleNumber < 1 || strings.TrimSpace(input.DeploymentObservationID) == "" || strings.TrimSpace(input.DeploymentReservationID) == "" || strings.TrimSpace(input.ObservedDeploymentVersion) == "" || strings.TrimSpace(input.TargetEnvironment) == "" || len(input.ExpectedFixCommits) == 0 {
+		return errors.New("regression input requires original validation, reproduction, expected behavior, scenario hash, cycle, matched deployment, expected commits, observed deployment version, and target environment")
 	}
 	for repo, commit := range input.ExpectedFixCommits {
 		if strings.TrimSpace(repo) == "" || strings.TrimSpace(commit) == "" {
@@ -410,20 +419,10 @@ func (r *AgentPhaseRunner) validateRegressionInputBinding(ctx context.Context, a
 	if err != nil {
 		return err
 	}
-	if input.TargetEnvironment != incident.Environment {
-		return errors.New("regression target environment does not match Case environment")
+	if attempt.CycleNumber != input.CycleNumber {
+		return errors.New("regression attempt cycle does not match its deterministic input")
 	}
-	observations, err := r.store.ListDeploymentObservations(ctx, attempt.CaseID)
-	if err != nil {
-		return err
-	}
-	for index := len(observations) - 1; index >= 0; index-- {
-		observation := observations[index]
-		if observation.Result == DeploymentResultMatched && observation.Environment == input.TargetEnvironment && observation.ObservedVersion == input.ObservedDeploymentVersion && equalStringMap(observation.ExpectedCommits, input.ExpectedFixCommits) {
-			return nil
-		}
-	}
-	return errors.New("regression input is not bound to a matched deployment observation")
+	return (&CaseOrchestrator{store: r.store}).validatePersistedRegressionBinding(ctx, incident, input)
 }
 
 func buildStructuredInvestigationPrompt(bug Bug, bot BotRef) string {
@@ -463,7 +462,7 @@ func (r *AgentPhaseRunner) registerArtifacts(ctx context.Context, attempt PhaseA
 	return nil
 }
 
-func (r *AgentPhaseRunner) validateRegressionEvidence(ctx context.Context, attempt PhaseAttempt, result PhaseResult) error {
+func (r *AgentPhaseRunner) validateRegressionEvidence(_ context.Context, attempt PhaseAttempt, result PhaseResult) error {
 	if attempt.Phase != PhaseRegression || (result.Outcome != PhaseOutcomeFixedVerified && result.Outcome != PhaseOutcomeStillReproduces) {
 		return nil
 	}
@@ -491,18 +490,29 @@ func (r *AgentPhaseRunner) validateRegressionEvidence(ctx context.Context, attem
 		if artifact.Version != input.ObservedDeploymentVersion {
 			return errors.New("regression evidence version does not match the observed deployment version")
 		}
+		if strings.TrimSpace(artifact.RequestID) == "" && strings.TrimSpace(artifact.TraceID) == "" {
+			return errors.New("regression evidence requires a fresh request_id or trace_id")
+		}
 	}
-	observations, err := r.store.ListDeploymentObservations(ctx, attempt.CaseID)
+	return nil
+}
+
+func (r *AgentPhaseRunner) validateRegisteredRegressionEvidence(ctx context.Context, attempt PhaseAttempt, result PhaseResult) error {
+	if attempt.Phase != PhaseRegression || (result.Outcome != PhaseOutcomeFixedVerified && result.Outcome != PhaseOutcomeStillReproduces) {
+		return nil
+	}
+	var input RegressionValidationInput
+	if err := json.Unmarshal(attempt.InputJSON, &input); err != nil {
+		return err
+	}
+	artifacts, err := (&CaseOrchestrator{store: r.store}).currentRegressionArtifacts(ctx, attempt, input)
 	if err != nil {
 		return err
 	}
-	for index := len(observations) - 1; index >= 0; index-- {
-		observation := observations[index]
-		if observation.Result == DeploymentResultMatched && observation.Environment == input.TargetEnvironment && observation.ObservedVersion == input.ObservedDeploymentVersion && equalStringMap(observation.ExpectedCommits, input.ExpectedFixCommits) {
-			return nil
-		}
+	if len(artifacts) == 0 {
+		return ErrRegressionFreshEvidence
 	}
-	return errors.New("regression requires a matched deployment observation for the expected commits, version, and environment")
+	return nil
 }
 
 func (r *AgentPhaseRunner) startLegacyProjection(attempt PhaseAttempt, bug Bug, bot BotRef) {
@@ -579,12 +589,19 @@ func equalStringMap(left, right map[string]string) bool {
 }
 
 type RegressionValidationInput struct {
-	OriginalReproduction       string            `json:"original_reproduction"`
-	OriginalEvidenceReferences []string          `json:"original_evidence_refs"`
-	OriginalScenarioHash       string            `json:"scenario_hash"`
-	ExpectedFixCommits         map[string]string `json:"expected_fix_commits"`
-	ObservedDeploymentVersion  string            `json:"observed_deployment_version"`
-	TargetEnvironment          string            `json:"target_environment"`
+	OriginalValidationAttemptID string            `json:"original_validation_attempt_id"`
+	OriginalReproduction        string            `json:"original_reproduction"`
+	ExpectedBehavior            string            `json:"expected_behavior"`
+	OriginalObservedBehavior    string            `json:"original_observed_behavior"`
+	OriginalEvidenceReferences  []string          `json:"original_evidence_refs"`
+	OriginalScenarioHash        string            `json:"scenario_hash"`
+	CycleNumber                 int               `json:"cycle_number"`
+	ExpectedFixCommits          map[string]string `json:"expected_fix_commits"`
+	DeploymentObservationID     string            `json:"deployment_observation_id"`
+	DeploymentReservationID     string            `json:"deployment_reservation_id"`
+	ObservedDeploymentVersion   string            `json:"observed_deployment_version"`
+	TargetEnvironment           string            `json:"target_environment"`
+	SupplementalEvidence        json.RawMessage   `json:"supplemental_evidence,omitempty"`
 }
 
 func ParseValidationResult(data []byte) (ValidationResult, error) {
@@ -711,7 +728,7 @@ func BuildRegressionValidationPrompt(bug Bug, bot BotRef, input RegressionValida
 	var sb strings.Builder
 	sb.WriteString("你是 Bug 验证 Agent，当前 mode=regression。只复查原始场景，不得读取业务源码，不得分析根因，也不得提出修复建议。\n")
 	sb.WriteString("必须在目标环境重新执行相同场景，并采集 fresh evidence；旧证据只用于对照，不能作为本次结论。\n")
-	fmt.Fprintf(&sb, "original_reproduction: %s\nscenario_hash: %s\ntarget_environment: %s\nobserved_deployment_version: %s\n", input.OriginalReproduction, input.OriginalScenarioHash, input.TargetEnvironment, input.ObservedDeploymentVersion)
+	fmt.Fprintf(&sb, "original_validation_attempt_id: %s\noriginal_reproduction: %s\nexpected_behavior: %s\noriginal_observed_behavior: %s\nscenario_hash: %s\ncycle_number: %d\ntarget_environment: %s\ndeployment_observation_id: %s\ndeployment_reservation_id: %s\nobserved_deployment_version: %s\n", input.OriginalValidationAttemptID, input.OriginalReproduction, input.ExpectedBehavior, input.OriginalObservedBehavior, input.OriginalScenarioHash, input.CycleNumber, input.TargetEnvironment, input.DeploymentObservationID, input.DeploymentReservationID, input.ObservedDeploymentVersion)
 	sb.WriteString("expected_fix_commits:\n")
 	keys := make([]string, 0, len(input.ExpectedFixCommits))
 	for key := range input.ExpectedFixCommits {
@@ -725,7 +742,10 @@ func BuildRegressionValidationPrompt(bug Bug, bot BotRef, input RegressionValida
 	for _, reference := range input.OriginalEvidenceReferences {
 		fmt.Fprintf(&sb, "  - %s\n", reference)
 	}
-	sb.WriteString("每条新证据必须包含 captured_at 和本次 attempt 的 artifact path，并尽量包含新的 request_id 或 trace_id。\n")
+	if len(input.SupplementalEvidence) != 0 {
+		fmt.Fprintf(&sb, "supplemental_evidence: %s\n", input.SupplementalEvidence)
+	}
+	sb.WriteString("每条新证据必须包含本次 attempt 的 artifact path，并包含新的 request_id 或 trace_id；Studio 以安全 fstat 时间校验 captured_at 晚于 attempt 开始时间。\n")
 	sb.WriteString(GenerateContext(bug, bot))
 	sb.WriteString(validationOutputContract())
 	return sb.String()

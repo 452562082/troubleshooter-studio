@@ -103,4 +103,7 @@ gaps: []
 - 没有用户许可时，不做超出复现或回归步骤之外的应用状态变更。
 - 只有同一场景在目标修复版本通过时，才能标记 `fixed_verified`。
 - 如果同一故障仍能用新鲜证据观察到，必须标记 `still_reproduces`。
-- 回归证据的 `captured_at` 必须晚于当前 attempt 开始时间，`environment` 和 `version` 必须与 Studio 提供的已匹配部署观测完全一致；旧 attempt 的 artifact 只能对照，不能复用为新证据。
+- 回归输入中的 `original_validation_attempt_id`、`scenario_hash`、`cycle_number`、`deployment_observation_id`、`deployment_reservation_id`、目标环境、版本和逐仓 commit 是 Studio 从持久化记录生成的完整 scope；不得替换、降级或跨 cycle 复用。
+- 回归证据的 Studio fstat 时间必须晚于当前 attempt 开始时间，`environment` 和 `version` 必须与 Studio 提供的已匹配部署观测完全一致，并且至少携带本次执行的新 `request_id` 或 `trace_id`；旧 attempt 的 artifact 只能对照，不能复用为新证据。
+- `fixed_verified` 必须有当前 regression attempt 的新 artifact；只有旧验证证据时必须返回 `insufficient_info`。
+- `still_reproduces` 的 `observed_behavior` 必须明确写出修复后仍存在的现象，Studio 会把它作为 delta 连同本轮新证据传给下一 cycle 的排障 Agent。

@@ -19,6 +19,27 @@ type workflowBindingRunner struct {
 	starts int
 }
 
+type workflowBindingGit struct{ request bughub.MergeRequest }
+
+func (g *workflowBindingGit) Inspect(_ context.Context, request bughub.MergeRequest) (bughub.MergeInspection, error) {
+	result := bughub.MergeInspection{Repositories: map[string]bughub.MergeRepositoryResult{}}
+	for repo, fix := range request.FixCommits {
+		head := "head-" + repo
+		result.Repositories[repo] = bughub.MergeRepositoryResult{TargetHead: head, ApprovalKey: bughub.MergeApprovalKey(request.CaseID, repo, fix, request.TargetBranches[repo], head)}
+	}
+	return result, nil
+}
+func (g *workflowBindingGit) MergeAndPush(_ context.Context, request bughub.MergeRequest) (bughub.MergeResult, error) {
+	g.request = request.Clone()
+	return bughub.MergeResult{Pushed: true, Repositories: map[string]bughub.MergeRepositoryResult{"api": {MergeCommit: "merge-api", Pushed: true}}}, nil
+}
+func (*workflowBindingGit) ResumePush(context.Context, bughub.MergeRequest) (bughub.MergeResult, error) {
+	return bughub.MergeResult{}, nil
+}
+func (*workflowBindingGit) InspectFix(context.Context, bughub.FixInspectionRequest) (bughub.FixInspection, error) {
+	return bughub.FixInspection{}, nil
+}
+
 func (r *workflowBindingRunner) Start(context.Context, bughub.PhaseAttempt, bughub.Bug, bughub.BotRef) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -107,6 +128,34 @@ func TestApproveIncidentFixRejectsMismatchedDialogScopeBeforeOpeningRuntime(t *t
 	})
 	if err == nil || !strings.Contains(err.Error(), "dialog snapshot scope") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestApproveIncidentMergeForwardsTargetHeadsWithoutGrantingAuthority(t *testing.T) {
+	store, err := bughub.OpenCaseStore(filepath.Join(t.TempDir(), "cases.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	incident := bughub.IncidentCase{ID: "case-merge-binding", BugID: "bug", Status: bughub.CaseWaitingMergeApproval, CycleNumber: 1, CurrentAttemptID: "fix", Version: 1}
+	if err := store.CreateCase(ctx, incident); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateAttempt(ctx, bughub.PhaseAttempt{ID: "fix", CaseID: incident.ID, CycleNumber: 1, Phase: bughub.PhaseFix, Status: bughub.AttemptStatusSucceeded, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordCodeChange(ctx, bughub.CodeChange{ID: "change", CaseID: incident.ID, AttemptID: "fix", Repo: "api", BaseBranch: "test", FixBranch: "fix/bug", FixCommit: "fix-api", TestEvidence: []byte(`{}`), TargetEnvironmentBranch: "test", PushRemote: "origin", PushStatus: "pushed"}); err != nil {
+		t.Fatal(err)
+	}
+	git := &workflowBindingGit{}
+	app := &App{workflowStore: store, workflowOrchestrator: bughub.NewCaseOrchestrator(store, &workflowBindingRunner{}, git, nil)}
+	got, err := app.ApproveIncidentMerge(ApproveIncidentMergeInput{CaseID: incident.ID, ExpectedVersion: 1, IdempotencyKey: "merge-binding", ActorID: "alice", FixCommits: map[string]string{"api": "caller"}, TargetBranches: map[string]string{"api": "prod"}, TargetHeads: map[string]string{"api": "head-api"}})
+	if err != nil || got.Status != bughub.CaseWaitingDeployment {
+		t.Fatalf("case=%+v err=%v", got, err)
+	}
+	if git.request.TargetHeads["api"] != "head-api" || git.request.FixCommits["api"] != "fix-api" || git.request.TargetBranches["api"] != "test" {
+		t.Fatalf("request=%+v", git.request)
 	}
 }
 

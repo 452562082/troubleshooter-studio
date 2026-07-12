@@ -671,21 +671,28 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 		}
 		for index := range selected {
 			repoResult, ok := inspection.Repositories[selected[index].Repo]
-			if !ok || strings.TrimSpace(repoResult.TargetHead) == "" {
-				continue // compatibility with integrations predating target-head scopes
+			if !ok || strings.TrimSpace(repoResult.TargetHead) == "" || repoResult.ApprovalKey != MergeApprovalKey(incident.ID, selected[index].Repo, selected[index].FixCommit, selected[index].TargetEnvironmentBranch, repoResult.TargetHead) {
+				return IncidentCase{}, ErrApprovalScope
 			}
 			targetHeads[selected[index].Repo] = repoResult.TargetHead
 			selected[index].MergeBaseHead = repoResult.TargetHead
 		}
-		if len(targetHeads) > 0 && !reflect.DeepEqual(targetHeads, cmd.TargetHeads) {
+		if len(targetHeads) != len(selected) {
+			return IncidentCase{}, ErrApprovalScope
+		}
+		if !reflect.DeepEqual(targetHeads, cmd.TargetHeads) {
 			return o.recordStaleMergeApproval(incident, cmd.IdempotencyKey, selected, targetHeads)
 		}
 	}
 	if hasReservation {
 		for _, approved := range scopeValue.CodeChanges {
-			if approved.TargetHead != "" {
-				targetHeads[approved.Repo] = approved.TargetHead
+			if approved.TargetHead == "" || approved.ApprovalKey != MergeApprovalKey(incident.ID, approved.Repo, approved.FixCommit, approved.TargetBranch, approved.TargetHead) {
+				return IncidentCase{}, ErrApprovalScope
 			}
+			targetHeads[approved.Repo] = approved.TargetHead
+		}
+		if len(targetHeads) != len(selected) {
+			return IncidentCase{}, ErrApprovalScope
 		}
 	}
 	request.Changes = selected
@@ -758,12 +765,12 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 			result.Conflict = true
 		}
 		if result.Conflict {
-			return o.recordMergeConflict(reserved.Case, cmd.IdempotencyKey, callErr)
+			return o.recordMergeConflict(reserved.Case, cmd.IdempotencyKey, selected, callErr)
 		}
 		return o.recordMergeAmbiguous(reserved.Case, cmd.IdempotencyKey, selected, callErr)
 	}
 	if result.Conflict {
-		return o.recordMergeConflict(reserved.Case, cmd.IdempotencyKey, errors.New("merge conflict"))
+		return o.recordMergeConflict(reserved.Case, cmd.IdempotencyKey, selected, errors.New("merge conflict"))
 	}
 	if !allPushed {
 		return o.recordMergeAmbiguous(reserved.Case, cmd.IdempotencyKey, selected, errors.New("merge push is incomplete"))
@@ -800,15 +807,29 @@ func (o *CaseOrchestrator) recoverReservedMerge(ctx context.Context, incident In
 	if err != nil {
 		return incident, err
 	}
+	if err := validateMergeInspectionScope(request, inspection); err != nil {
+		return incident, err
+	}
 	return o.resumeInspectedMerge(ctx, incident, key, changes, request, inspection)
 }
 
-func (o *CaseOrchestrator) resumeInspectedMerge(ctx context.Context, incident IncidentCase, key string, changes []CodeChange, request MergeRequest, inspection MergeInspection) (IncidentCase, error) {
-	if inspection.Conflict {
-		return o.recordMergeConflict(incident, key, errors.New("merge conflict confirmed"))
+func validateMergeInspectionScope(request MergeRequest, inspection MergeInspection) error {
+	if len(request.FixCommits) == 0 || len(inspection.Repositories) != len(request.FixCommits) {
+		return ErrApprovalScope
 	}
+	for repo, fix := range request.FixCommits {
+		result, ok := inspection.Repositories[repo]
+		if !ok || result.TargetHead == "" || result.ApprovalKey != MergeApprovalKey(request.CaseID, repo, fix, request.TargetBranches[repo], result.TargetHead) {
+			return ErrApprovalScope
+		}
+	}
+	return nil
+}
+
+func (o *CaseOrchestrator) resumeInspectedMerge(ctx context.Context, incident IncidentCase, key string, changes []CodeChange, request MergeRequest, inspection MergeInspection) (IncidentCase, error) {
 	allPushed := true
 	hasLocal := false
+	hasConflict := false
 	for i := range changes {
 		repoResult, ok := inspection.Repositories[changes[i].Repo]
 		if !ok {
@@ -816,7 +837,10 @@ func (o *CaseOrchestrator) resumeInspectedMerge(ctx context.Context, incident In
 			repoResult.Pushed = inspection.MergePushed && repoResult.MergeCommit != ""
 		}
 		if repoResult.Conflict {
-			return o.recordMergeConflict(incident, key, errors.New("merge conflict confirmed"))
+			changes[i].PushStatus = "conflict"
+			hasConflict = true
+			allPushed = false
+			continue
 		}
 		if repoResult.MergeCommit != "" {
 			changes[i].MergeCommit = repoResult.MergeCommit
@@ -832,6 +856,9 @@ func (o *CaseOrchestrator) resumeInspectedMerge(ctx context.Context, incident In
 				changes[i].PushStatus = "push_unknown"
 			}
 		}
+	}
+	if hasConflict {
+		return o.recordMergeConflict(incident, key, changes, errors.New("merge conflict confirmed"))
 	}
 	if !allPushed && hasLocal {
 		unfinished := make([]CodeChange, 0, len(changes))
@@ -893,11 +920,12 @@ func (o *CaseOrchestrator) resumeInspectedMerge(ctx context.Context, incident In
 	return done.Case, nil
 }
 
-func (o *CaseOrchestrator) recordMergeConflict(incident IncidentCase, key string, cause error) (IncidentCase, error) {
+func (o *CaseOrchestrator) recordMergeConflict(incident IncidentCase, key string, changes []CodeChange, cause error) (IncidentCase, error) {
 	k := key + ":conflict"
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	m, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: k, RequestJSON: mustJSON(map[string]string{"error": cause.Error()}), Steps: []CaseMutationStep{{To: CaseMergeConflict, Event: TransitionEvent{ID: stableID("event", k), EventType: "merge_conflict", ActorType: "git", ActorID: "git-integration", PayloadJSON: mustJSON(map[string]string{"error": cause.Error()})}}}})
+	payload := mustJSON(map[string]any{"error": cause.Error(), "repositories": changes})
+	m, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: k, RequestJSON: payload, CodeChanges: changes, Steps: []CaseMutationStep{{To: CaseMergeConflict, Event: TransitionEvent{ID: stableID("event", k), EventType: "merge_conflict", ActorType: "git", ActorID: "git-integration", PayloadJSON: payload}}}})
 	if err != nil {
 		return IncidentCase{}, errors.Join(cause, err)
 	}

@@ -379,7 +379,15 @@ func (g *recordingGitIntegration) Inspect(_ context.Context, request MergeReques
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.inspections = append(g.inspections, request.Clone())
-	return g.inspection.Clone(), g.err
+	inspection := g.inspection.Clone()
+	if inspection.Repositories == nil {
+		inspection.Repositories = map[string]MergeRepositoryResult{}
+		for repo, fix := range request.FixCommits {
+			head := "head-" + repo
+			inspection.Repositories[repo] = MergeRepositoryResult{TargetHead: head, ApprovalKey: MergeApprovalKey(request.CaseID, repo, fix, request.TargetBranches[repo], head)}
+		}
+	}
+	return inspection, g.err
 }
 
 func (g *recordingGitIntegration) InspectFix(_ context.Context, request FixInspectionRequest) (FixInspection, error) {
@@ -541,7 +549,7 @@ func TestOrchestratorRequiresSeparateScopeBoundFixAndMergeApprovals(t *testing.T
 	if err != nil || waiting.Status != CaseWaitingMergeApproval {
 		t.Fatalf("case=%+v err=%v", waiting, err)
 	}
-	mergeCommand := ApproveMergeCommand{CaseID: waiting.ID, ExpectedVersion: waiting.Version, IdempotencyKey: "approve-merge", ActorID: "alice", FixCommits: map[string]string{"repo": "caller-must-not-control"}, TargetBranches: map[string]string{"repo": "production"}}
+	mergeCommand := ApproveMergeCommand{CaseID: waiting.ID, ExpectedVersion: waiting.Version, IdempotencyKey: "approve-merge", ActorID: "alice", FixCommits: map[string]string{"repo": "caller-must-not-control"}, TargetBranches: map[string]string{"repo": "production"}, TargetHeads: map[string]string{"repo": "head-repo"}}
 	merged, err := o.ApproveMerge(ctx, mergeCommand)
 	if err != nil || merged.Status != CaseWaitingDeployment {
 		t.Fatalf("case=%+v err=%v", merged, err)
@@ -991,7 +999,7 @@ func TestContinueWithEvidenceReopensDeploymentAndMergeAuthorizationGates(t *test
 		}
 		git := &recordingGitIntegration{result: MergeResult{Repositories: map[string]MergeRepositoryResult{"repo": {Conflict: true}}}}
 		o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, git, &recordingDeploymentVerifier{})
-		conflicted, conflictErr := o.ApproveMerge(ctx, ApproveMergeCommand{CaseID: incident.ID, ExpectedVersion: 1, IdempotencyKey: "merge:first-approval", ActorID: "alice"})
+		conflicted, conflictErr := o.ApproveMerge(ctx, ApproveMergeCommand{CaseID: incident.ID, ExpectedVersion: 1, IdempotencyKey: "merge:first-approval", ActorID: "alice", TargetHeads: map[string]string{"repo": "head-repo"}})
 		if conflictErr == nil || conflicted.Status != CaseMergeConflict {
 			t.Fatalf("conflicted=%+v err=%v", conflicted, conflictErr)
 		}
@@ -1006,7 +1014,7 @@ func TestContinueWithEvidenceReopensDeploymentAndMergeAuthorizationGates(t *test
 		git.mu.Lock()
 		git.result = MergeResult{Repositories: map[string]MergeRepositoryResult{"repo": {MergeCommit: "merge-2", Pushed: true}}}
 		git.mu.Unlock()
-		merged, mergeErr := o.ApproveMerge(ctx, ApproveMergeCommand{CaseID: incident.ID, ExpectedVersion: reopened.Version, IdempotencyKey: "merge:second-approval", ActorID: "alice"})
+		merged, mergeErr := o.ApproveMerge(ctx, ApproveMergeCommand{CaseID: incident.ID, ExpectedVersion: reopened.Version, IdempotencyKey: "merge:second-approval", ActorID: "alice", TargetHeads: map[string]string{"repo": "head-repo"}})
 		if mergeErr != nil || merged.Status != CaseWaitingDeployment || git.mergeCalls != 2 {
 			t.Fatalf("merged=%+v calls=%d err=%v", merged, git.mergeCalls, mergeErr)
 		}
@@ -1033,7 +1041,7 @@ func TestApproveMergePersistsPartialPerRepoAndGlobalPushedCannotOverride(t *test
 	}
 	git := &recordingGitIntegration{result: MergeResult{Pushed: true, Repositories: map[string]MergeRepositoryResult{"a": {MergeCommit: "merge-a", Pushed: true}, "b": {MergeCommit: "merge-b", Pushed: false}}}}
 	o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, git, &recordingDeploymentVerifier{})
-	cmd := ApproveMergeCommand{CaseID: incident.ID, ExpectedVersion: 1, IdempotencyKey: "partial-merge", ActorID: "alice"}
+	cmd := ApproveMergeCommand{CaseID: incident.ID, ExpectedVersion: 1, IdempotencyKey: "partial-merge", ActorID: "alice", TargetHeads: map[string]string{"a": "head-a", "b": "head-b"}}
 	got, err := o.ApproveMerge(ctx, cmd)
 	if err == nil || got.Status != CaseMerging {
 		t.Fatalf("case=%+v err=%v", got, err)
@@ -1049,7 +1057,10 @@ func TestApproveMergePersistsPartialPerRepoAndGlobalPushedCannotOverride(t *test
 		t.Fatalf("statuses=%v commits=%v", statuses, commits)
 	}
 	git.mu.Lock()
-	git.inspection = MergeInspection{Repositories: map[string]MergeRepositoryResult{"a": {MergeCommit: "merge-a", Pushed: true}, "b": {MergeCommit: "merge-b", Pushed: false}}}
+	git.inspection = MergeInspection{Repositories: map[string]MergeRepositoryResult{
+		"a": {MergeCommit: "merge-a", TargetHead: "head-a", ApprovalKey: MergeApprovalKey(incident.ID, "a", "fix-a", "test", "head-a"), Pushed: true},
+		"b": {MergeCommit: "merge-b", TargetHead: "head-b", ApprovalKey: MergeApprovalKey(incident.ID, "b", "fix-b", "test", "head-b"), Pushed: false},
+	}}
 	git.result = MergeResult{Repositories: map[string]MergeRepositoryResult{"b": {MergeCommit: "merge-b", Pushed: true}}}
 	git.mu.Unlock()
 	resumed, resumeErr := o.ApproveMerge(ctx, cmd)

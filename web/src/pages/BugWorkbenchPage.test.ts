@@ -987,6 +987,30 @@ describe('BugWorkbenchPage', () => {
     }))
   })
 
+  it('forwards the exact persisted target heads with merge approval', async () => {
+    const snapshot = durableDetail('waiting_merge_approval', {
+      code_changes: [
+        { id: 'a', repo: 'api', fix_commit: 'fix-api', target_environment_branch: 'test', merge_base_head: 'head-api' },
+        { id: 'w', repo: 'web', fix_commit: 'fix-web', target_environment_branch: 'test', merge_base_head: 'head-web' },
+      ],
+    })
+    vi.mocked(listIncidentCases).mockResolvedValue([snapshot.case as any])
+    vi.mocked(getIncidentCase).mockResolvedValue(snapshot as any)
+    vi.mocked(approveIncidentMerge).mockResolvedValue({ ...snapshot.case, status: 'merging', version: 8 } as any)
+    const wrapper = mount(BugWorkbenchPage)
+    await flushPromises(); await flushPromises()
+
+    await wrapper.find('.primary-action').trigger('click')
+    await wrapper.find('[data-confirm]').trigger('click')
+    await flushPromises()
+
+    expect(approveIncidentMerge).toHaveBeenCalledWith(expect.objectContaining({
+      target_heads: { api: 'head-api', web: 'head-web' },
+      fix_commits: { api: 'fix-api', web: 'fix-web' },
+      target_branches: { api: 'test', web: 'test' },
+    }))
+  })
+
   it.each([
     ['merge_conflict', 'approveIncidentMerge', 'resolve_merge_conflict', 'fix'],
     ['deployment_unverified', 'notifyIncidentDeployed', 'update_deployment_proof', 'regression'],

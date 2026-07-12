@@ -19,6 +19,7 @@ var (
 	ErrGitDetachedHEAD    = errors.New("repository is on a detached HEAD")
 	ErrGitRemoteNotSSH    = errors.New("push remote is not SSH")
 	ErrGitMergeConflict   = errors.New("git merge would conflict")
+	ErrStudioWorktree     = errors.New("Studio dedicated worktree is invalid")
 )
 
 type RepositoryPathResolver func(context.Context, string, string) (string, error)
@@ -125,6 +126,9 @@ func (s *GitIntegrationService) ResumePush(ctx context.Context, req MergeRequest
 			return result, err
 		}
 		if ancestor, _ := gitAncestor(ctx, path, change.MergeCommit, remoteHead); ancestor {
+			if cleanupErr := s.cleanupStudioWorktree(ctx, path, s.worktreePath(req.CaseID, change.Repo, req.TargetHeads[change.Repo], change.FixCommit)); cleanupErr != nil {
+				return result, cleanupErr
+			}
 			result.Repositories[change.Repo] = MergeRepositoryResult{MergeCommit: change.MergeCommit, TargetHead: remoteHead, Pushed: true}
 			result.MergeCommits[change.Repo] = change.MergeCommit
 			continue
@@ -137,6 +141,9 @@ func (s *GitIntegrationService) ResumePush(ctx context.Context, req MergeRequest
 		}
 		if err := gitRun(ctx, path, "push", remote, change.MergeCommit+":refs/heads/"+change.TargetEnvironmentBranch); err != nil {
 			return result, fmt.Errorf("push repository %s: %w", change.Repo, err)
+		}
+		if cleanupErr := s.cleanupStudioWorktree(ctx, path, s.worktreePath(req.CaseID, change.Repo, req.TargetHeads[change.Repo], change.FixCommit)); cleanupErr != nil {
+			return result, cleanupErr
 		}
 		result.Repositories[change.Repo] = MergeRepositoryResult{MergeCommit: change.MergeCommit, TargetHead: remoteHead, Pushed: true}
 		result.MergeCommits[change.Repo] = change.MergeCommit
@@ -178,6 +185,27 @@ func (s *GitIntegrationService) inspectRepo(ctx context.Context, caseID string, 
 		result.Error = err.Error()
 		return result, err
 	}
+	approvedHead := strings.TrimSpace(change.MergeBaseHead)
+	// MergeRequest.TargetHeads is projected into MergeBaseHead by
+	// normalizedMergeChanges. A target advance invalidates and removes the old
+	// recoverable worktree; a matching scope may recover a merge whose process
+	// result was lost before CaseStore persistence.
+	if approvedHead != "" && approvedHead != targetHead {
+		if cleanupErr := s.cleanupStudioWorktree(ctx, path, s.worktreePath(caseID, change.Repo, approvedHead, change.FixCommit)); cleanupErr != nil {
+			result.Error = cleanupErr.Error()
+			return result, cleanupErr
+		}
+	} else if approvedHead == targetHead {
+		mergeCommit, found, recoverErr := s.inspectStudioWorktree(ctx, path, caseID, change, approvedHead)
+		if recoverErr != nil {
+			result.Error = recoverErr.Error()
+			return result, recoverErr
+		}
+		if found {
+			result.MergeCommit = mergeCommit
+			return result, nil
+		}
+	}
 	if ancestor, ancestorErr := gitAncestor(ctx, path, change.FixCommit, targetHead); ancestorErr != nil {
 		result.Error = ancestorErr.Error()
 		return result, ancestorErr
@@ -218,6 +246,13 @@ func (s *GitIntegrationService) mergeRepo(ctx context.Context, req MergeRequest,
 	// Observing the exact fix commit on the remote target is authoritative and
 	// makes replay safe even though the remote HEAD necessarily moved.
 	if inspection.Pushed {
+		path, _, pathErr := s.validateRepository(ctx, req.CaseID, change)
+		if pathErr != nil {
+			return inspection, pathErr
+		}
+		if cleanupErr := s.cleanupStudioWorktree(ctx, path, s.worktreePath(req.CaseID, change.Repo, strings.TrimSpace(req.TargetHeads[change.Repo]), change.FixCommit)); cleanupErr != nil {
+			return inspection, cleanupErr
+		}
 		return inspection, nil
 	}
 	approvedHead := strings.TrimSpace(req.TargetHeads[change.Repo])
@@ -235,6 +270,9 @@ func (s *GitIntegrationService) mergeRepo(ctx context.Context, req MergeRequest,
 	}
 	if info, statErr := os.Lstat(worktree); errors.Is(statErr, os.ErrNotExist) {
 		if err := gitRun(ctx, path, "worktree", "add", "--detach", worktree, inspection.TargetHead); err != nil {
+			return inspection, err
+		}
+		if err := os.Chmod(worktree, 0o700); err != nil {
 			return inspection, err
 		}
 	} else if statErr != nil {
@@ -269,6 +307,10 @@ func (s *GitIntegrationService) mergeRepo(ctx context.Context, req MergeRequest,
 		return inspection, err
 	}
 	inspection.MergeCommit, inspection.Pushed = mergeCommit, true
+	if cleanupErr := s.cleanupStudioWorktree(ctx, path, worktree); cleanupErr != nil {
+		inspection.Error = cleanupErr.Error()
+		return inspection, cleanupErr
+	}
 	return inspection, nil
 }
 
@@ -322,6 +364,7 @@ func normalizedMergeChanges(req MergeRequest) ([]CodeChange, error) {
 		}
 		change.FixCommit = commit
 		change.TargetEnvironmentBranch = req.TargetBranches[repo]
+		change.MergeBaseHead = req.TargetHeads[repo]
 		if strings.TrimSpace(change.Repo) == "" || strings.TrimSpace(change.FixCommit) == "" || strings.TrimSpace(change.TargetEnvironmentBranch) == "" {
 			return nil, errors.New("merge request repository, fix commit, and target branch are required")
 		}
@@ -443,4 +486,168 @@ func prepareStudioWorktreeRoot(root string) error {
 		return errors.New("Studio worktree root must be a real directory")
 	}
 	return os.Chmod(root, 0o700)
+}
+
+func (s *GitIntegrationService) inspectStudioWorktree(ctx context.Context, source, caseID string, change CodeChange, targetHead string) (string, bool, error) {
+	worktree := s.worktreePath(caseID, change.Repo, targetHead, change.FixCommit)
+	info, err := os.Lstat(worktree)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	invalid := func(cause error) (string, bool, error) {
+		cleanupErr := s.cleanupStudioWorktree(ctx, source, worktree)
+		return "", false, errors.Join(fmt.Errorf("%w: %v", ErrStudioWorktree, cause), cleanupErr)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return invalid(errors.New("path is not a real directory"))
+	}
+	if info.Mode().Perm() != 0o700 {
+		return invalid(fmt.Errorf("directory mode is %o, want 700", info.Mode().Perm()))
+	}
+	registered, commonMatch, identityErr := worktreeIdentity(ctx, source, worktree)
+	if identityErr != nil || !registered || !commonMatch {
+		return invalid(errors.New("worktree is not registered to the configured repository"))
+	}
+	if detached, detachedErr := gitDetachedHEAD(ctx, worktree); detachedErr != nil || !detached {
+		return invalid(errors.New("worktree HEAD is attached to a branch"))
+	}
+	status, statusErr := gitOutput(ctx, worktree, "status", "--porcelain")
+	if statusErr != nil || status != "" {
+		return invalid(errors.New("worktree is dirty"))
+	}
+	head, headErr := gitOutput(ctx, worktree, "rev-parse", "HEAD")
+	if headErr != nil {
+		return invalid(headErr)
+	}
+	if head == targetHead {
+		if cleanupErr := s.cleanupStudioWorktree(ctx, source, worktree); cleanupErr != nil {
+			return "", false, cleanupErr
+		}
+		return "", false, nil
+	}
+	expectedTree, treeErr := mergeTreeObject(ctx, source, targetHead, change.FixCommit)
+	if treeErr != nil {
+		return invalid(treeErr)
+	}
+	headTree, treeErr := gitOutput(ctx, worktree, "rev-parse", head+"^{tree}")
+	if treeErr != nil || headTree != expectedTree {
+		return invalid(errors.New("HEAD tree does not match the approved merge"))
+	}
+	if fastForward, ancestorErr := gitAncestor(ctx, source, targetHead, change.FixCommit); ancestorErr == nil && fastForward {
+		if head != change.FixCommit {
+			return invalid(errors.New("fast-forward HEAD is not the exact fix commit"))
+		}
+		return head, true, nil
+	}
+	parents, parentErr := gitOutput(ctx, worktree, "rev-list", "--parents", "-n", "1", head)
+	fields := strings.Fields(parents)
+	if parentErr != nil || len(fields) != 3 || fields[0] != head || fields[1] != targetHead || fields[2] != change.FixCommit {
+		return invalid(errors.New("merge commit parents do not match target HEAD and exact fix commit"))
+	}
+	return head, true, nil
+}
+
+func worktreeIdentity(ctx context.Context, source, worktree string) (bool, bool, error) {
+	sourceCommon, err := resolvedGitPath(ctx, source, "--git-common-dir")
+	if err != nil {
+		return false, false, err
+	}
+	worktreeCommon, err := resolvedGitPath(ctx, worktree, "--git-common-dir")
+	if err != nil {
+		return false, false, err
+	}
+	listing, err := gitOutput(ctx, source, "worktree", "list", "--porcelain")
+	if err != nil {
+		return false, false, err
+	}
+	want, err := filepath.EvalSymlinks(worktree)
+	if err != nil {
+		return false, false, err
+	}
+	registered := false
+	for _, line := range strings.Split(listing, "\n") {
+		if !strings.HasPrefix(line, "worktree ") {
+			continue
+		}
+		candidate, resolveErr := filepath.EvalSymlinks(strings.TrimPrefix(line, "worktree "))
+		if resolveErr == nil && candidate == want {
+			registered = true
+			break
+		}
+	}
+	return registered, sourceCommon == worktreeCommon, nil
+}
+
+func gitDetachedHEAD(ctx context.Context, dir string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "-q", "HEAD")
+	cmd.Dir = dir
+	cmd.Env = gitEnvironment()
+	err := cmd.Run()
+	if err == nil {
+		return false, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return true, nil
+	}
+	return false, err
+}
+
+func resolvedGitPath(ctx context.Context, dir, arg string) (string, error) {
+	value, err := gitOutput(ctx, dir, "rev-parse", arg)
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(value) {
+		value = filepath.Join(dir, value)
+	}
+	return filepath.EvalSymlinks(filepath.Clean(value))
+}
+
+func mergeTreeObject(ctx context.Context, source, targetHead, fixCommit string) (string, error) {
+	output, err := gitOutput(ctx, source, "merge-tree", "--write-tree", targetHead, fixCommit)
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(output)
+	if len(fields) == 0 || !isFullGitObjectID(fields[0]) {
+		return "", errors.New("merge-tree did not return a tree object")
+	}
+	return fields[0], nil
+}
+
+func (s *GitIntegrationService) cleanupStudioWorktree(ctx context.Context, source, worktree string) error {
+	if strings.TrimSpace(worktree) == "" {
+		return nil
+	}
+	rootAbs, err := filepath.Abs(s.worktreeRoot)
+	if err != nil {
+		return err
+	}
+	pathAbs, err := filepath.Abs(worktree)
+	if err != nil {
+		return err
+	}
+	if filepath.Dir(pathAbs) != filepath.Clean(rootAbs) {
+		return errors.New("refusing to clean a path outside the Studio worktree root")
+	}
+	if _, statErr := os.Lstat(pathAbs); errors.Is(statErr, os.ErrNotExist) {
+		return gitRun(ctx, source, "worktree", "prune")
+	}
+	removeErr := gitRun(ctx, source, "worktree", "remove", "--force", pathAbs)
+	if removeErr != nil {
+		// The deterministic direct child may have been replaced or detached from
+		// Git registration. RemoveAll does not follow symlinks and the direct-child
+		// check above prevents this fallback from touching a user worktree.
+		if fallbackErr := os.RemoveAll(pathAbs); fallbackErr != nil {
+			removeErr = errors.Join(removeErr, fallbackErr)
+		} else {
+			removeErr = nil
+		}
+	}
+	pruneErr := gitRun(ctx, source, "worktree", "prune")
+	return errors.Join(removeErr, pruneErr)
 }

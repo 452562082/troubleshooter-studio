@@ -777,7 +777,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
           ...base,
           fix_commits: Object.fromEntries(detail.code_changes.map(change => [change.repo, change.fix_commit])),
           target_branches: Object.fromEntries(detail.code_changes.map(change => [change.repo, change.target_environment_branch])),
-		  target_heads: Object.fromEntries(detail.code_changes.map(change => [change.repo, change.merge_base_head])),
+          target_heads: Object.fromEntries(detail.code_changes.map(change => [change.repo, change.merge_base_head])),
         })
       }
       if (payload.kind === 'notify_deployed') {

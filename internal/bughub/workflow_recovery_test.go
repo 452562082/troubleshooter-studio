@@ -228,7 +228,7 @@ func TestRecoverInterruptedFixInspectsExternalStateAndNeverBlindlyRetries(t *tes
 	if runner.startCount() != 0 || len(git.inspections) != 1 {
 		t.Fatalf("starts=%d inspections=%d", runner.startCount(), len(git.inspections))
 	}
-	merged, mergeErr := o.ApproveMerge(ctx, ApproveMergeCommand{CaseID: got.ID, ExpectedVersion: got.Version, IdempotencyKey: "recover-fix-merge", ActorID: "alice"})
+	merged, mergeErr := o.ApproveMerge(ctx, ApproveMergeCommand{CaseID: got.ID, ExpectedVersion: got.Version, IdempotencyKey: "recover-fix-merge", ActorID: "alice", TargetHeads: map[string]string{"repo": "head-repo"}})
 	if mergeErr != nil || merged.Status != CaseWaitingDeployment {
 		t.Fatalf("merge after recovered fix=%+v err=%v", merged, mergeErr)
 	}
@@ -373,23 +373,23 @@ func TestRecoverInterruptedFixRejectsCrossRepositoryTestEvidence(t *testing.T) {
 func TestRecoverInterruptedMergeInspectsRemoteBeforeAdvancing(t *testing.T) {
 	ctx := context.Background()
 	store := newOrchestratorStore(t)
-	request := MergeRequest{CaseID: "recover-merge", FixCommits: map[string]string{"repo": "fix-1"}, TargetBranches: map[string]string{"repo": "test"}}
+	request := MergeRequest{CaseID: "recover-merge", FixCommits: map[string]string{"repo": "fix-1"}, TargetBranches: map[string]string{"repo": "test"}, TargetHeads: map[string]string{"repo": "head-repo"}}
 	incident := createWorkflowCase(t, store, request.CaseID, CaseWaitingMergeApproval)
 	now := time.Now().UTC()
 	fixAttempt := PhaseAttempt{ID: "recover-merge-fix", CaseID: incident.ID, CycleNumber: 1, Phase: PhaseFix, Status: AttemptStatusSucceeded, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`), FinishedAt: &now}
 	if err := store.CreateAttempt(ctx, fixAttempt); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RecordCodeChange(ctx, CodeChange{ID: "recover-merge-change", CaseID: incident.ID, AttemptID: fixAttempt.ID, Repo: "repo", BaseBranch: "main", FixBranch: "fix/bug", FixCommit: "fix-1", TestEvidence: []byte(`{}`), TargetEnvironmentBranch: "test", PushStatus: "pushed"}); err != nil {
+	if err := store.RecordCodeChange(ctx, CodeChange{ID: "recover-merge-change", CaseID: incident.ID, AttemptID: fixAttempt.ID, Repo: "repo", BaseBranch: "main", FixBranch: "fix/bug", FixCommit: "fix-1", TestEvidence: []byte(`{}`), TargetEnvironmentBranch: "test", MergeBaseHead: "head-repo", PushStatus: "pushed"}); err != nil {
 		t.Fatal(err)
 	}
-	scope, _ := json.Marshal(MergeApprovalScope{CycleNumber: 1, FixAttemptID: fixAttempt.ID, CodeChanges: []ApprovedCodeChange{{ID: "recover-merge-change", Repo: "repo", FixCommit: "fix-1", TargetBranch: "test"}}})
+	scope, _ := json.Marshal(MergeApprovalScope{CycleNumber: 1, FixAttemptID: fixAttempt.ID, CodeChanges: []ApprovedCodeChange{{ID: "recover-merge-change", Repo: "repo", FixCommit: "fix-1", TargetBranch: "test", TargetHead: "head-repo", ApprovalKey: MergeApprovalKey(incident.ID, "repo", "fix-1", "test", "head-repo")}}})
 	approval := Approval{ID: "recover-merge-approval", CaseID: incident.ID, Kind: ApprovalMergeEnvironmentBranch, Actor: "alice", CaseVersion: incident.Version, ScopeJSON: scope, FixCommits: request.FixCommits, TargetBranches: request.TargetBranches}
 	if err := store.RecordApproval(ctx, approval, "recover-merge-approval"); err != nil {
 		t.Fatal(err)
 	}
 	incident, _, _ = store.TransitionWithUpdate(ctx, incident.ID, incident.Version, CaseMerging, CaseSnapshotUpdate{CurrentAttemptID: workflowStringPointer(fixAttempt.ID)}, TransitionEvent{ID: "recover-merge-start", IdempotencyKey: "recover-merge-start", EventType: "merge_started", ActorType: "studio", ActorID: "test", PayloadJSON: []byte(`{}`)})
-	git := &recordingGitIntegration{inspection: MergeInspection{Repositories: map[string]MergeRepositoryResult{"repo": {MergeCommit: "merge-1", Pushed: false}}}, result: MergeResult{Repositories: map[string]MergeRepositoryResult{"repo": {MergeCommit: "merge-1", Pushed: true}}}}
+	git := &recordingGitIntegration{inspection: MergeInspection{Repositories: map[string]MergeRepositoryResult{"repo": {MergeCommit: "merge-1", TargetHead: "head-repo", ApprovalKey: MergeApprovalKey(incident.ID, "repo", "fix-1", "test", "head-repo"), Pushed: false}}}, result: MergeResult{Repositories: map[string]MergeRepositoryResult{"repo": {MergeCommit: "merge-1", Pushed: true}}}}
 	o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, git, &recordingDeploymentVerifier{})
 	if err := o.RecoverInterrupted(ctx); err != nil {
 		t.Fatal(err)

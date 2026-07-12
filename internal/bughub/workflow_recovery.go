@@ -212,6 +212,9 @@ func (o *CaseOrchestrator) recoverMergeWithoutAttempt(ctx context.Context, incid
 		}
 		selected := []CodeChange{}
 		for _, approved := range scope.CodeChanges {
+			if approved.TargetHead == "" || approved.ApprovalKey != MergeApprovalKey(incident.ID, approved.Repo, approved.FixCommit, approved.TargetBranch, approved.TargetHead) {
+				return ErrApprovalScope
+			}
 			change, ok := byID[approved.ID]
 			if !ok {
 				return ErrApprovalScope

@@ -532,6 +532,7 @@ func (o *CaseOrchestrator) ContinueWithEvidence(ctx context.Context, cmd Continu
 		return IncidentCase{}, fmt.Errorf("cannot continue phase %q from %s", cmd.Phase, incident.Status)
 	}
 	input := CloneRawMessage(cmd.InputJSON)
+	continuationIdentity := ""
 	if phase == PhaseRegression {
 		previous, loadErr := o.store.GetAttempt(ctx, incident.CurrentAttemptID)
 		if loadErr != nil || previous.Phase != PhaseRegression || previous.Mode != AttemptRegression || previous.CycleNumber != incident.CycleNumber || previous.BotKey != cmd.Bot.Key || previous.AgentTarget != cmd.Bot.Target {
@@ -541,19 +542,25 @@ func (o *CaseOrchestrator) ContinueWithEvidence(ctx context.Context, cmd Continu
 		if json.Unmarshal(previous.InputJSON, &regression) != nil || o.validatePersistedRegressionBinding(ctx, incident, regression) != nil {
 			return IncidentCase{}, ErrRegressionBinding
 		}
-		if len(input) == 0 {
-			input = []byte(`{}`)
-		}
-		if inputErr := validateJSONObject("regression supplemental evidence", input, true); inputErr != nil {
+		canonicalInput, inputErr := canonicalJSONObject(input)
+		if inputErr != nil {
 			return IncidentCase{}, inputErr
 		}
-		if containsSensitiveData(input) {
+		if containsSensitiveData(canonicalInput) {
 			return IncidentCase{}, errors.New("regression supplemental evidence contains sensitive data")
 		}
-		regression.SupplementalEvidence = input
+		continuationIdentity, inputErr = regressionContinuationIdentityDigest(cmd)
+		if inputErr != nil {
+			return IncidentCase{}, inputErr
+		}
+		regression.SupplementalEvidence = canonicalInput
 		input = mustJSON(regression)
 	}
 	attempt := newAttempt(incident, phase, mode, cmd.IdempotencyKey, cmd.Bot, input, incident.CurrentAttemptID)
+	if phase == PhaseRegression {
+		payload := mustJSON(map[string]string{"attempt_id": attempt.ID, "continuation_identity_sha256": continuationIdentity})
+		return o.beginPhaseWithUpdateAndPayload(ctx, incident, to, attempt, cmd.Bug, cmd.Bot, cmd.IdempotencyKey, cmd.ActorID, "evidence_continued", CaseSnapshotUpdate{}, payload)
+	}
 	return o.beginPhase(ctx, incident, to, attempt, cmd.Bug, cmd.Bot, cmd.IdempotencyKey, cmd.ActorID, "evidence_continued")
 }
 
@@ -561,6 +568,10 @@ func (o *CaseOrchestrator) replayRegressionContinuation(ctx context.Context, cmd
 	replay, found, err := o.store.GetCommittedCaseMutation(ctx, cmd.IdempotencyKey)
 	if err != nil || !found {
 		return IncidentCase{}, found, err
+	}
+	identityDigest, digestErr := regressionContinuationIdentityDigest(cmd)
+	if digestErr != nil {
+		return IncidentCase{}, true, ErrIdempotencyConflict
 	}
 	validEvent := replay.Event.EventType == "evidence_continued" &&
 		replay.Event.FromStatus == CaseWaitingEvidence && replay.Event.ActorID == cmd.ActorID &&
@@ -581,11 +592,8 @@ func (o *CaseOrchestrator) replayRegressionContinuation(ctx context.Context, cmd
 	if json.Unmarshal(parent.InputJSON, &regression) != nil {
 		return IncidentCase{}, true, ErrIdempotencyConflict
 	}
-	supplement := CloneRawMessage(cmd.InputJSON)
-	if len(supplement) == 0 {
-		supplement = []byte(`{}`)
-	}
-	if validateJSONObject("regression supplemental evidence", supplement, true) != nil || containsSensitiveData(supplement) {
+	supplement, inputErr := canonicalJSONObject(cmd.InputJSON)
+	if inputErr != nil || containsSensitiveData(supplement) {
 		return IncidentCase{}, true, ErrIdempotencyConflict
 	}
 	regression.SupplementalEvidence = supplement
@@ -593,9 +601,10 @@ func (o *CaseOrchestrator) replayRegressionContinuation(ctx context.Context, cmd
 		return IncidentCase{}, true, ErrIdempotencyConflict
 	}
 	var payload struct {
-		AttemptID string `json:"attempt_id"`
+		AttemptID                  string `json:"attempt_id"`
+		ContinuationIdentitySHA256 string `json:"continuation_identity_sha256"`
 	}
-	if json.Unmarshal(replay.Event.PayloadJSON, &payload) != nil || payload.AttemptID != retry.ID {
+	if json.Unmarshal(replay.Event.PayloadJSON, &payload) != nil || payload.AttemptID != retry.ID || payload.ContinuationIdentitySHA256 != identityDigest {
 		return IncidentCase{}, true, ErrIdempotencyConflict
 	}
 	return replay.ResultCase.Clone(), true, nil
@@ -1479,6 +1488,10 @@ func (o *CaseOrchestrator) beginPhase(ctx context.Context, incident IncidentCase
 }
 
 func (o *CaseOrchestrator) beginPhaseWithUpdate(ctx context.Context, incident IncidentCase, to CaseStatus, attempt PhaseAttempt, bug Bug, bot BotRef, key, actor, eventType string, update CaseSnapshotUpdate) (IncidentCase, error) {
+	return o.beginPhaseWithUpdateAndPayload(ctx, incident, to, attempt, bug, bot, key, actor, eventType, update, nil)
+}
+
+func (o *CaseOrchestrator) beginPhaseWithUpdateAndPayload(ctx context.Context, incident IncidentCase, to CaseStatus, attempt PhaseAttempt, bug Bug, bot BotRef, key, actor, eventType string, update CaseSnapshotUpdate, payload json.RawMessage) (IncidentCase, error) {
 	update.CurrentAttemptID = workflowStringPtr(attempt.ID)
 	update.SelectedBotKey = workflowStringPtr(bot.Key)
 	request, _ := json.Marshal(map[string]any{"attempt": attempt, "to": to, "event_type": eventType, "actor": actor})
@@ -1488,7 +1501,10 @@ func (o *CaseOrchestrator) beginPhaseWithUpdate(ctx context.Context, incident In
 	} else if actor == "studio" {
 		actorType = "studio"
 	}
-	mutation, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: request, CreateAttempts: []PhaseAttempt{attempt}, Snapshot: update, Steps: []CaseMutationStep{{To: to, Event: TransitionEvent{ID: stableID("event", key), EventType: eventType, ActorType: actorType, ActorID: actor, PayloadJSON: mustJSON(map[string]string{"attempt_id": attempt.ID})}}}})
+	if len(payload) == 0 {
+		payload = mustJSON(map[string]string{"attempt_id": attempt.ID})
+	}
+	mutation, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: request, CreateAttempts: []PhaseAttempt{attempt}, Snapshot: update, Steps: []CaseMutationStep{{To: to, Event: TransitionEvent{ID: stableID("event", key), EventType: eventType, ActorType: actorType, ActorID: actor, PayloadJSON: payload}}}})
 	if err != nil {
 		return IncidentCase{}, err
 	}

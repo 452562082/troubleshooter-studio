@@ -1,15 +1,107 @@
 package bughub
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
+	"time"
 )
+
+type regressionContinuationIdentity struct {
+	CaseID          string          `json:"case_id"`
+	ExpectedVersion int64           `json:"expected_version"`
+	IdempotencyKey  string          `json:"idempotency_key"`
+	ActorID         string          `json:"actor_id"`
+	Phase           Phase           `json:"phase"`
+	InputJSON       json.RawMessage `json:"input_json"`
+	Bug             Bug             `json:"bug"`
+	Bot             BotRef          `json:"bot"`
+}
+
+func regressionContinuationIdentityDigest(command ContinueWithEvidenceCommand) (string, error) {
+	input, err := canonicalJSONObject(command.InputJSON)
+	if err != nil {
+		return "", err
+	}
+	identity := regressionContinuationIdentity{CaseID: command.CaseID, ExpectedVersion: command.ExpectedVersion, IdempotencyKey: command.IdempotencyKey, ActorID: command.ActorID, Phase: command.Phase, InputJSON: input, Bug: canonicalBug(command.Bug), Bot: canonicalBot(command.Bot)}
+	encoded, err := json.Marshal(identity)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func canonicalJSONObject(raw json.RawMessage) (json.RawMessage, error) {
+	if len(raw) == 0 {
+		raw = []byte(`{}`)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var object map[string]any
+	if err := decoder.Decode(&object); err != nil || object == nil {
+		return nil, errors.New("continuation input must be one JSON object")
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, errors.New("continuation input must be one JSON object")
+	}
+	return json.Marshal(object)
+}
+
+func canonicalBug(value Bug) Bug {
+	cloned := value
+	cloned.CreatedAt = canonicalTime(value.CreatedAt)
+	cloned.UpdatedAt = canonicalTime(value.UpdatedAt)
+	cloned.LastContextAt = canonicalTime(value.LastContextAt)
+	cloned.ServiceHints = sortedStrings(value.ServiceHints)
+	cloned.APIPaths = sortedStrings(value.APIPaths)
+	cloned.TraceIDs = sortedStrings(value.TraceIDs)
+	cloned.RequestIDs = sortedStrings(value.RequestIDs)
+	cloned.Attachments = append([]Attachment(nil), value.Attachments...)
+	sort.Slice(cloned.Attachments, func(i, j int) bool {
+		left, _ := json.Marshal(cloned.Attachments[i])
+		right, _ := json.Marshal(cloned.Attachments[j])
+		return bytes.Compare(left, right) < 0
+	})
+	return cloned
+}
+
+func canonicalBot(value BotRef) BotRef {
+	cloned := value
+	cloned.Envs = sortedStrings(value.Envs)
+	cloned.InternalAgents = append([]BotInternalAgent(nil), value.InternalAgents...)
+	sort.Slice(cloned.InternalAgents, func(i, j int) bool {
+		if cloned.InternalAgents[i].ID != cloned.InternalAgents[j].ID {
+			return cloned.InternalAgents[i].ID < cloned.InternalAgents[j].ID
+		}
+		return cloned.InternalAgents[i].Role < cloned.InternalAgents[j].Role
+	})
+	return cloned
+}
+
+func sortedStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	cloned := append([]string(nil), values...)
+	sort.Strings(cloned)
+	return cloned
+}
+
+func canonicalTime(value time.Time) time.Time {
+	if value.IsZero() {
+		return time.Time{}
+	}
+	return value.UTC()
+}
 
 var (
 	ErrRegressionDuplicate     = errors.New("identical regression scenario and deployment already exists")

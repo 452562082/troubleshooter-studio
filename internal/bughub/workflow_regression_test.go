@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -386,6 +387,135 @@ func TestRegressionEvidenceContinuationConcurrentReplayCreatesOneRetry(t *testin
 	}
 }
 
+func TestRegressionEvidenceContinuationReplayBindsCompleteExecutionContext(t *testing.T) {
+	store, incident, _, _ := prepareRegressionCase(t, 1)
+	runner := &recordingPhaseRunner{}
+	o := NewCaseOrchestrator(store, runner, nil, nil)
+	original, err := o.StartRegression(context.Background(), incident.ID, incident.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, _ := store.GetCase(context.Background(), incident.ID)
+	waiting, err := o.CompleteAttempt(context.Background(), CompleteAttemptCommand{CaseID: current.ID, AttemptID: original.ID, ExpectedVersion: current.Version, IdempotencyKey: "regression-context-wait", ActorID: "validator", Outcome: PhaseOutcomeNeedsEvidence, OutputJSON: regressionOutput(t, original, "insufficient_info", "")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := fullRegressionContinuationCommand(waiting)
+	first, err := o.ContinueWithEvidence(context.Background(), command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, found, err := store.GetEventByIdempotencyKey(context.Background(), command.IdempotencyKey)
+	if err != nil || !found || !strings.Contains(string(event.PayloadJSON), "continuation_identity_sha256") {
+		t.Fatalf("event=%+v found=%v err=%v", event, found, err)
+	}
+	for _, secret := range []string{"Bearer continuation-secret", "workspace-secret", "attachment-secret"} {
+		if strings.Contains(string(event.PayloadJSON), secret) {
+			t.Fatalf("event leaked %q: %s", secret, event.PayloadJSON)
+		}
+	}
+
+	reordered := command
+	reordered.InputJSON = []byte(`{"z":1,"account":"fresh"}`)
+	reordered.Bug.ServiceHints = []string{"svc-a", "svc-b"}
+	reordered.Bug.APIPaths = []string{"/a", "/z"}
+	reordered.Bug.Attachments = []Attachment{command.Bug.Attachments[1], command.Bug.Attachments[0]}
+	reordered.Bot.InternalAgents = []BotInternalAgent{command.Bot.InternalAgents[1], command.Bot.InternalAgents[0]}
+	reordered.Bot.Envs = []string{"prod", "test"}
+	reordered.Bug.CreatedAt = command.Bug.CreatedAt.UTC()
+	reordered.Bug.UpdatedAt = command.Bug.UpdatedAt.UTC()
+	reordered.Bug.LastContextAt = command.Bug.LastContextAt.UTC()
+	replayed, err := NewCaseOrchestrator(store, runner, nil, nil).ContinueWithEvidence(context.Background(), reordered)
+	if err != nil || replayed != first {
+		t.Fatalf("canonical replay=%+v first=%+v err=%v", replayed, first, err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*ContinueWithEvidenceCommand)
+	}{
+		{"case_id", func(c *ContinueWithEvidenceCommand) { c.CaseID += "-other" }},
+		{"expected_version", func(c *ContinueWithEvidenceCommand) { c.ExpectedVersion++ }},
+		{"actor", func(c *ContinueWithEvidenceCommand) { c.ActorID = "bob" }},
+		{"phase", func(c *ContinueWithEvidenceCommand) { c.Phase = PhaseValidation }},
+		{"input", func(c *ContinueWithEvidenceCommand) { c.InputJSON = []byte(`{"account":"other","z":1}`) }},
+		{"bug_id", func(c *ContinueWithEvidenceCommand) { c.Bug.ID += "x" }},
+		{"bug_source", func(c *ContinueWithEvidenceCommand) { c.Bug.Source += "x" }},
+		{"bug_source_id", func(c *ContinueWithEvidenceCommand) { c.Bug.SourceID += "x" }},
+		{"bug_platform_id", func(c *ContinueWithEvidenceCommand) { c.Bug.PlatformID += "x" }},
+		{"bug_title", func(c *ContinueWithEvidenceCommand) { c.Bug.Title += "x" }},
+		{"bug_description", func(c *ContinueWithEvidenceCommand) { c.Bug.Description += "x" }},
+		{"bug_steps", func(c *ContinueWithEvidenceCommand) { c.Bug.Steps += "x" }},
+		{"bug_expected", func(c *ContinueWithEvidenceCommand) { c.Bug.Expected += "x" }},
+		{"bug_actual", func(c *ContinueWithEvidenceCommand) { c.Bug.Actual += "x" }},
+		{"bug_status", func(c *ContinueWithEvidenceCommand) { c.Bug.Status += "x" }},
+		{"bug_severity", func(c *ContinueWithEvidenceCommand) { c.Bug.Severity += "x" }},
+		{"bug_priority", func(c *ContinueWithEvidenceCommand) { c.Bug.Priority += "x" }},
+		{"bug_product", func(c *ContinueWithEvidenceCommand) { c.Bug.Product += "x" }},
+		{"bug_module", func(c *ContinueWithEvidenceCommand) { c.Bug.Module += "x" }},
+		{"bug_type", func(c *ContinueWithEvidenceCommand) { c.Bug.BugType += "x" }},
+		{"bug_os", func(c *ContinueWithEvidenceCommand) { c.Bug.OS += "x" }},
+		{"bug_browser", func(c *ContinueWithEvidenceCommand) { c.Bug.Browser += "x" }},
+		{"bug_keywords", func(c *ContinueWithEvidenceCommand) { c.Bug.Keywords += "x" }},
+		{"bug_assignee", func(c *ContinueWithEvidenceCommand) { c.Bug.Assignee += "x" }},
+		{"bug_reporter", func(c *ContinueWithEvidenceCommand) { c.Bug.Reporter += "x" }},
+		{"bug_created", func(c *ContinueWithEvidenceCommand) { c.Bug.CreatedAt = c.Bug.CreatedAt.Add(time.Second) }},
+		{"bug_updated", func(c *ContinueWithEvidenceCommand) { c.Bug.UpdatedAt = c.Bug.UpdatedAt.Add(time.Second) }},
+		{"bug_env", func(c *ContinueWithEvidenceCommand) { c.Bug.Env += "x" }},
+		{"bug_bot_env", func(c *ContinueWithEvidenceCommand) { c.Bug.BotEnv += "x" }},
+		{"bug_system", func(c *ContinueWithEvidenceCommand) { c.Bug.SystemID += "x" }},
+		{"bug_frontend_repo", func(c *ContinueWithEvidenceCommand) { c.Bug.FrontendRepo += "x" }},
+		{"bug_service_hints", func(c *ContinueWithEvidenceCommand) { c.Bug.ServiceHints[0] += "x" }},
+		{"bug_frontend_url", func(c *ContinueWithEvidenceCommand) { c.Bug.FrontendURL += "x" }},
+		{"bug_api_paths", func(c *ContinueWithEvidenceCommand) { c.Bug.APIPaths[0] += "x" }},
+		{"bug_trace_ids", func(c *ContinueWithEvidenceCommand) { c.Bug.TraceIDs[0] += "x" }},
+		{"bug_request_ids", func(c *ContinueWithEvidenceCommand) { c.Bug.RequestIDs[0] += "x" }},
+		{"bug_attachments", func(c *ContinueWithEvidenceCommand) { c.Bug.Attachments[0].Name += "x" }},
+		{"bug_selected_bot", func(c *ContinueWithEvidenceCommand) { c.Bug.SelectedBotKey += "x" }},
+		{"bug_last_context", func(c *ContinueWithEvidenceCommand) { c.Bug.LastContext += "x" }},
+		{"bug_last_context_at", func(c *ContinueWithEvidenceCommand) { c.Bug.LastContextAt = c.Bug.LastContextAt.Add(time.Second) }},
+		{"bug_raw_preview", func(c *ContinueWithEvidenceCommand) { c.Bug.RawPreview += "x" }},
+		{"bot_key", func(c *ContinueWithEvidenceCommand) { c.Bot.Key += "x" }},
+		{"bot_system", func(c *ContinueWithEvidenceCommand) { c.Bot.SystemID += "x" }},
+		{"bot_target", func(c *ContinueWithEvidenceCommand) { c.Bot.Target += "x" }},
+		{"bot_path", func(c *ContinueWithEvidenceCommand) { c.Bot.Path += "x" }},
+		{"bot_name", func(c *ContinueWithEvidenceCommand) { c.Bot.Name += "x" }},
+		{"bot_agent_id", func(c *ContinueWithEvidenceCommand) { c.Bot.AgentID += "x" }},
+		{"bot_role", func(c *ContinueWithEvidenceCommand) { c.Bot.Role += "x" }},
+		{"bot_internal_agents", func(c *ContinueWithEvidenceCommand) { c.Bot.InternalAgents[0].Role += "x" }},
+		{"bot_env", func(c *ContinueWithEvidenceCommand) { c.Bot.Env += "x" }},
+		{"bot_envs", func(c *ContinueWithEvidenceCommand) { c.Bot.Envs[0] += "x" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			changed := cloneContinueWithEvidenceCommand(command)
+			test.mutate(&changed)
+			if _, err := NewCaseOrchestrator(store, runner, nil, nil).ContinueWithEvidence(context.Background(), changed); !errors.Is(err, ErrIdempotencyConflict) {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestRegressionContinuationIdentityCanonicalizationDoesNotMutateCommand(t *testing.T) {
+	command := fullRegressionContinuationCommand(IncidentCase{ID: "case", Version: 2, BugID: "bug"})
+	original := cloneContinueWithEvidenceCommand(command)
+	first, err := regressionContinuationIdentityDigest(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := regressionContinuationIdentityDigest(command)
+	if err != nil || first != second || !reflect.DeepEqual(command, original) {
+		t.Fatalf("first=%q second=%q mutated=%v err=%v", first, second, !reflect.DeepEqual(command, original), err)
+	}
+	changed := cloneContinueWithEvidenceCommand(command)
+	changed.IdempotencyKey += "-different"
+	different, err := regressionContinuationIdentityDigest(changed)
+	if err != nil || different == first {
+		t.Fatalf("idempotency digest=%q original=%q err=%v", different, first, err)
+	}
+}
+
 func TestRegressionFreshEvidenceRejectsHistoricalRequestOrTraceIDs(t *testing.T) {
 	for _, field := range []string{"request", "trace"} {
 		t.Run(field, func(t *testing.T) {
@@ -530,4 +660,27 @@ func recordRegressionArtifact(t *testing.T, store *CaseStore, attempt PhaseAttem
 	if _, _, err := store.recordEvidenceArtifact(context.Background(), artifact, nil); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func fullRegressionContinuationCommand(incident IncidentCase) ContinueWithEvidenceCommand {
+	fixed := time.Date(2026, 7, 12, 8, 0, 0, 123, time.FixedZone("CST", 8*60*60))
+	return ContinueWithEvidenceCommand{
+		CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "regression-context-exact", ActorID: "alice", Phase: PhaseRegression,
+		InputJSON: []byte(`{"account":"fresh","z":1}`),
+		Bug:       Bug{ID: incident.BugID, Source: "zentao", SourceID: "source-1", PlatformID: "platform-1", Title: "checkout", Description: "Authorization: Bearer continuation-secret", Steps: "submit", Expected: "ok", Actual: "timeout", Status: "open", Severity: "major", Priority: "high", Product: "shop", Module: "order", BugType: "code", OS: "linux", Browser: "chrome", Keywords: "payment", Assignee: "alice", Reporter: "bob", CreatedAt: fixed, UpdatedAt: fixed.Add(time.Minute), Env: "test", BotEnv: "test", SystemID: "shop", FrontendRepo: "web", ServiceHints: []string{"svc-b", "svc-a"}, FrontendURL: "https://example.test/checkout", APIPaths: []string{"/z", "/a"}, TraceIDs: []string{"trace-b", "trace-a"}, RequestIDs: []string{"request-b", "request-a"}, Attachments: []Attachment{{ID: "b", Name: "attachment-secret-b", Type: "har", LocalPath: "/tmp/workspace-secret-b", RemoteURL: "https://example.test/b"}, {ID: "a", Name: "a", Type: "png", LocalPath: "/tmp/a", RemoteURL: "https://example.test/a"}}, SelectedBotKey: "validator", LastContext: "context", LastContextAt: fixed.Add(2 * time.Minute), RawPreview: "preview"},
+		Bot:       BotRef{Key: "validator", SystemID: "shop", Target: "codex", Path: "/tmp/workspace-secret", Name: "validator", AgentID: "agent-1", Role: "validator", InternalAgents: []BotInternalAgent{{ID: "z", Role: "verifier"}, {ID: "a", Role: "browser"}}, Env: "test", Envs: []string{"test", "prod"}},
+	}
+}
+
+func cloneContinueWithEvidenceCommand(command ContinueWithEvidenceCommand) ContinueWithEvidenceCommand {
+	cloned := command
+	cloned.InputJSON = CloneRawMessage(command.InputJSON)
+	cloned.Bug.ServiceHints = append([]string(nil), command.Bug.ServiceHints...)
+	cloned.Bug.APIPaths = append([]string(nil), command.Bug.APIPaths...)
+	cloned.Bug.TraceIDs = append([]string(nil), command.Bug.TraceIDs...)
+	cloned.Bug.RequestIDs = append([]string(nil), command.Bug.RequestIDs...)
+	cloned.Bug.Attachments = append([]Attachment(nil), command.Bug.Attachments...)
+	cloned.Bot.InternalAgents = append([]BotInternalAgent(nil), command.Bot.InternalAgents...)
+	cloned.Bot.Envs = append([]string(nil), command.Bot.Envs...)
+	return cloned
 }

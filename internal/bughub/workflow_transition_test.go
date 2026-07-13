@@ -68,7 +68,13 @@ func TestCanTransition(t *testing.T) {
 		CaseFixedVerified,
 		CaseStillReproduces,
 		CaseLegacyArchived,
+		CaseResetArchived,
 		CaseStatus("unknown"),
+	}
+	for _, from := range statuses {
+		if from.valid() && !IsTerminalCaseStatus(from) {
+			allowed[[2]CaseStatus{from, CaseResetArchived}] = struct{}{}
+		}
 	}
 	for _, from := range statuses {
 		for _, to := range statuses {
@@ -76,6 +82,48 @@ func TestCanTransition(t *testing.T) {
 			if got := CanTransition(from, to); got != want {
 				t.Fatalf("CanTransition(%s, %s) = %v, want %v", from, to, got, want)
 			}
+		}
+	}
+}
+
+func TestResetArchiveTransitions(t *testing.T) {
+	for _, from := range []CaseStatus{
+		CasePendingValidation,
+		CaseValidating,
+		CaseWaitingEvidence,
+		CaseInvestigating,
+		CaseWaitingFixApproval,
+		CaseFixing,
+		CaseWaitingMergeApproval,
+		CaseMerging,
+		CaseWaitingDeployment,
+		CaseRegressionValidating,
+	} {
+		if !CanTransition(from, CaseResetArchived) {
+			t.Fatalf("%s must reset", from)
+		}
+	}
+	for _, from := range []CaseStatus{CaseFixedVerified, CaseLegacyArchived, CaseResetArchived} {
+		if CanTransition(from, CaseResetArchived) {
+			t.Fatalf("terminal %s reset unexpectedly", from)
+		}
+		for _, to := range []CaseStatus{CasePendingValidation, CaseInvestigating, CaseResetArchived} {
+			if CanTransition(from, to) {
+				t.Fatalf("terminal %s transitioned to %s unexpectedly", from, to)
+			}
+		}
+	}
+}
+
+func TestIsTerminalCaseStatus(t *testing.T) {
+	for _, status := range []CaseStatus{CaseFixedVerified, CaseLegacyArchived, CaseResetArchived} {
+		if !IsTerminalCaseStatus(status) {
+			t.Fatalf("%s must be terminal", status)
+		}
+	}
+	for _, status := range []CaseStatus{CasePendingValidation, CaseStillReproduces, CaseStatus("unknown")} {
+		if IsTerminalCaseStatus(status) {
+			t.Fatalf("%s must not be terminal", status)
 		}
 	}
 }
@@ -215,6 +263,7 @@ func TestValidateWorkflowCaseStatusMembership(t *testing.T) {
 		CaseFixedVerified,
 		CaseStillReproduces,
 		CaseLegacyArchived,
+		CaseResetArchived,
 	} {
 		incident := base
 		incident.Status = status

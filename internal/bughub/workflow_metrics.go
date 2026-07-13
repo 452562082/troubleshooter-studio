@@ -82,7 +82,7 @@ func FoldWorkflowMetrics(now time.Time, histories []WorkflowCaseHistory) Workflo
 
 	for _, history := range histories {
 		incident := history.Case
-		if incident.Status != CaseLegacyArchived {
+		if incident.Status != CaseLegacyArchived && incident.Status != CaseResetArchived {
 			if incident.ClosedAt != nil {
 				metrics.CompletedCases = saturatingAddInt(metrics.CompletedCases, 1)
 			} else {
@@ -153,7 +153,7 @@ func FoldWorkflowMetrics(now time.Time, histories []WorkflowCaseHistory) Workflo
 		if incident.ClosedAt != nil {
 			leadEnd = incident.ClosedAt.UTC()
 		}
-		if !leadEnd.Before(incident.CreatedAt) && incident.Status != CaseLegacyArchived {
+		if !leadEnd.Before(incident.CreatedAt) && incident.Status != CaseLegacyArchived && incident.Status != CaseResetArchived {
 			durations[WorkflowStageLeadTime] = append(durations[WorkflowStageLeadTime], leadEnd.Sub(incident.CreatedAt.UTC()))
 		}
 

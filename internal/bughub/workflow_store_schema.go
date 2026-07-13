@@ -90,7 +90,7 @@ CREATE INDEX IF NOT EXISTS idx_events_case_created ON transition_events(case_id,
 `
 
 const (
-	workflowStoreSchemaVersion   = 5
+	workflowStoreSchemaVersion   = 6
 	workflowStoreSchemaV1Key     = "workflow-schema-v1"
 	workflowStoreSchemaV1Upgrade = `
 ALTER TABLE transition_events ADD COLUMN request_fingerprint TEXT NOT NULL DEFAULT '';
@@ -117,10 +117,15 @@ CREATE TABLE fix_checkpoints (
 ALTER TABLE phase_attempts ADD COLUMN completion_identity_sha256 TEXT NOT NULL DEFAULT '';
 ALTER TABLE phase_attempts ADD COLUMN run_claim_token TEXT NOT NULL DEFAULT '';
 `
+	workflowStoreSchemaV6Upgrade = `
+ALTER TABLE incident_cases ADD COLUMN reset_from_case_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE incident_cases ADD COLUMN superseded_by_case_id TEXT NOT NULL DEFAULT '';
+CREATE INDEX idx_cases_bug_updated ON incident_cases(bug_id, updated_at);
+`
 )
 
 var legacyWorkflowTableColumns = map[string][]string{
-	"incident_cases":          {"id", "bug_id", "source", "system_id", "environment", "status", "cycle_number", "current_attempt_id", "selected_bot_key", "version", "created_at", "updated_at", "closed_at"},
+	"incident_cases":          {"id", "bug_id", "source", "system_id", "environment", "status", "cycle_number", "current_attempt_id", "selected_bot_key", "version", "created_at", "updated_at", "closed_at", "reset_from_case_id", "superseded_by_case_id"},
 	"phase_attempts":          {"id", "case_id", "cycle_number", "phase", "mode", "status", "agent_target", "bot_key", "input_json", "output_json", "parent_attempt_id", "started_at", "finished_at", "error_code", "error_message", "input_tokens", "output_tokens", "duration_nanos"},
 	"transition_events":       {"id", "case_id", "from_status", "to_status", "event_type", "actor_type", "actor_id", "idempotency_key", "payload_json", "created_at"},
 	"evidence_artifacts":      {"id", "case_id", "attempt_id", "kind", "path_or_reference", "sha256", "captured_at", "environment", "version", "request_id", "trace_id", "redaction_status"},
@@ -132,6 +137,7 @@ var legacyWorkflowTableColumns = map[string][]string{
 
 var requiredWorkflowIndexes = map[string]string{
 	"idx_cases_status_updated":  "incident_cases",
+	"idx_cases_bug_updated":     "incident_cases",
 	"idx_attempts_case_started": "phase_attempts",
 	"idx_events_case_created":   "transition_events",
 }

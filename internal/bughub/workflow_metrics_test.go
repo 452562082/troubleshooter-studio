@@ -99,6 +99,23 @@ func TestWorkflowMetricsFoldCountsBlockersStillReproducesAndCurrentWaitAge(t *te
 	}
 }
 
+func TestWorkflowMetricsExcludesArchivedCasesFromOutcomes(t *testing.T) {
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	closed := now.Add(-time.Hour)
+	histories := []WorkflowCaseHistory{
+		{Case: IncidentCase{ID: "legacy", BugID: "legacy", Status: CaseLegacyArchived, CycleNumber: 1, CreatedAt: now.Add(-3 * time.Hour), ClosedAt: &closed}},
+		{Case: IncidentCase{ID: "reset", BugID: "reset", Status: CaseResetArchived, CycleNumber: 1, CreatedAt: now.Add(-2 * time.Hour), ClosedAt: &closed}},
+	}
+
+	metrics := FoldWorkflowMetrics(now, histories)
+	if metrics.CompletedCases != 0 || metrics.OpenCases != 0 {
+		t.Fatalf("archived cases counted in outcomes: %+v", metrics)
+	}
+	if _, found := metrics.MedianStageDuration[WorkflowStageLeadTime]; found {
+		t.Fatalf("archived cases contributed lead time: %+v", metrics.MedianStageDuration)
+	}
+}
+
 func metricEvent(id string, from, to CaseStatus, eventType, actor string, at time.Time) TransitionEvent {
 	return TransitionEvent{ID: id, CaseID: "case", FromStatus: from, ToStatus: to, EventType: eventType, ActorType: actor, ActorID: actor, IdempotencyKey: id, PayloadJSON: []byte(`{}`), CreatedAt: at}
 }

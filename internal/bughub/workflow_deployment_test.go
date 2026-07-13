@@ -75,10 +75,15 @@ func TestDeploymentProofSchemaMigratesV1Store(t *testing.T) {
 	if !containsString(columns["phase_attempts"], "run_claim_token") {
 		t.Fatalf("missing phase_attempts.run_claim_token columns=%v", columns["phase_attempts"])
 	}
+	for _, required := range []string{"reset_from_case_id", "superseded_by_case_id"} {
+		if !containsString(columns["incident_cases"], required) {
+			t.Fatalf("missing incident_cases.%s columns=%v", required, columns["incident_cases"])
+		}
+	}
 }
 
-func TestDeploymentProofSchemaMigratesV2ThroughV4Stores(t *testing.T) {
-	for _, initialVersion := range []int{2, 3, 4} {
+func TestDeploymentProofSchemaMigratesV2ThroughV5Stores(t *testing.T) {
+	for _, initialVersion := range []int{2, 3, 4, 5} {
 		t.Run(fmt.Sprintf("v%d", initialVersion), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "workflow.db")
 			db, err := sql.Open("sqlite", path)
@@ -94,18 +99,18 @@ func TestDeploymentProofSchemaMigratesV2ThroughV4Stores(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if initialVersion == 3 {
+			if initialVersion >= 3 {
 				if _, err = tx.Exec(workflowStoreSchemaV3Upgrade); err != nil {
 					t.Fatal(err)
 				}
 			}
 			if initialVersion >= 4 {
-				if initialVersion == 4 {
-					if _, err = tx.Exec(workflowStoreSchemaV3Upgrade); err != nil {
-						t.Fatal(err)
-					}
-				}
 				if _, err = tx.Exec(workflowStoreSchemaV4Upgrade); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if initialVersion == 5 {
+				if _, err = tx.Exec(workflowStoreSchemaV5Upgrade); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -150,6 +155,11 @@ func TestDeploymentProofSchemaMigratesV2ThroughV4Stores(t *testing.T) {
 			}
 			if !containsString(columns["phase_attempts"], "run_claim_token") {
 				t.Fatalf("missing run claim columns=%v", columns["phase_attempts"])
+			}
+			for _, required := range []string{"reset_from_case_id", "superseded_by_case_id"} {
+				if !containsString(columns["incident_cases"], required) {
+					t.Fatalf("missing incident_cases.%s columns=%v", required, columns["incident_cases"])
+				}
 			}
 		})
 	}

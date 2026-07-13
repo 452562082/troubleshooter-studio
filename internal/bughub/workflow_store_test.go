@@ -26,6 +26,42 @@ func openTestCaseStore(t *testing.T) *CaseStore {
 	return store
 }
 
+func TestResetRelationshipFieldsSurviveReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "workflow.db")
+	store, err := OpenCaseStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := time.Now().UTC()
+	old := IncidentCase{ID: "case-old", BugID: "bug-840", Status: CaseResetArchived, CycleNumber: 1, Version: 2, SupersededByCaseID: "case-new", ClosedAt: &closed}
+	next := IncidentCase{ID: "case-new", BugID: "bug-840", Status: CasePendingValidation, CycleNumber: 1, Version: 1, ResetFromCaseID: "case-old"}
+	if err := store.CreateCase(context.Background(), old); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateCase(context.Background(), next); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenCaseStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	gotOld, err := reopened.GetCase(context.Background(), old.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotNext, err := reopened.GetCase(context.Background(), next.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotOld.SupersededByCaseID != next.ID || gotNext.ResetFromCaseID != old.ID {
+		t.Fatalf("old=%+v next=%+v", gotOld, gotNext)
+	}
+}
+
 func TestCaseStoreTransitionIsTransactionalAndIdempotent(t *testing.T) {
 	store := openTestCaseStore(t)
 	ctx := context.Background()
@@ -627,6 +663,7 @@ func TestCaseStoreInitializesAndMigratesVersionedSchema(t *testing.T) {
 			t.Fatalf("migration count=%d err=%v", count, err)
 		}
 		assertTableColumns(t, store.db, "transition_events", "request_fingerprint", "result_case_json")
+		assertTableColumns(t, store.db, "incident_cases", "reset_from_case_id", "superseded_by_case_id")
 	})
 
 	t.Run("pre-release unversioned schema with explicit event time is rejected without mutation", func(t *testing.T) {

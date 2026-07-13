@@ -32,6 +32,7 @@ const (
 	CaseFixedVerified        CaseStatus = "fixed_verified"
 	CaseStillReproduces      CaseStatus = "still_reproduces"
 	CaseLegacyArchived       CaseStatus = "legacy_archived"
+	CaseResetArchived        CaseStatus = "reset_archived"
 )
 
 func (s CaseStatus) valid() bool {
@@ -56,11 +57,16 @@ func (s CaseStatus) valid() bool {
 		CaseRegressionValidating,
 		CaseFixedVerified,
 		CaseStillReproduces,
-		CaseLegacyArchived:
+		CaseLegacyArchived,
+		CaseResetArchived:
 		return true
 	default:
 		return false
 	}
+}
+
+func IsTerminalCaseStatus(status CaseStatus) bool {
+	return status == CaseFixedVerified || status == CaseLegacyArchived || status == CaseResetArchived
 }
 
 type Phase string
@@ -121,19 +127,21 @@ func (s AttemptStatus) valid() bool {
 }
 
 type IncidentCase struct {
-	ID               string     `json:"id"`
-	BugID            string     `json:"bug_id"`
-	Source           string     `json:"source"`
-	SystemID         string     `json:"system_id"`
-	Environment      string     `json:"environment"`
-	Status           CaseStatus `json:"status"`
-	CycleNumber      int        `json:"cycle_number"`
-	CurrentAttemptID string     `json:"current_attempt_id"`
-	SelectedBotKey   string     `json:"selected_bot_key"`
-	Version          int64      `json:"version"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
-	ClosedAt         *time.Time `json:"closed_at"`
+	ID                 string     `json:"id"`
+	BugID              string     `json:"bug_id"`
+	Source             string     `json:"source"`
+	SystemID           string     `json:"system_id"`
+	Environment        string     `json:"environment"`
+	Status             CaseStatus `json:"status"`
+	CycleNumber        int        `json:"cycle_number"`
+	CurrentAttemptID   string     `json:"current_attempt_id"`
+	SelectedBotKey     string     `json:"selected_bot_key"`
+	ResetFromCaseID    string     `json:"reset_from_case_id,omitempty"`
+	SupersededByCaseID string     `json:"superseded_by_case_id,omitempty"`
+	Version            int64      `json:"version"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	ClosedAt           *time.Time `json:"closed_at"`
 }
 
 func (c IncidentCase) Clone() IncidentCase {

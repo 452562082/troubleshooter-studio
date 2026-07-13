@@ -19,7 +19,7 @@
 
 ---
 
-## Task 1: Lock the sizing and responsive contracts with a failing test
+## Task 1: Implement and verify the select sizing through TDD
 
 **Files:**
 - Modify: `web/src/pages/BugInboxPage.test.ts`
@@ -60,7 +60,7 @@ Expected: FAIL；错误应指向缺少 40px 变量、200px/240–280px 宽度或
 
 默认不单独提交失败测试；在同一任务完成绿色实现后统一提交。
 
-## Task 2: Implement the consistent sizing and responsive grid
+### Implementation Phase: Make the sizing contract pass
 
 **Files:**
 - Modify: `web/src/pages/BugInboxPage.vue:576-683`

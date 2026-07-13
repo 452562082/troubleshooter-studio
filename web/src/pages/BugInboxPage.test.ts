@@ -258,6 +258,33 @@ describe('BugInboxPage', () => {
     expect(config.get('.login-status-badge').text()).toBe('未登录')
   })
 
+  it('keeps save beside platform status and persists disabling the platform', async () => {
+    const platform = {
+      id: 'zentao-main', name: '测试环境', type: 'zentao', base_url: 'https://zentao.example.com',
+      auth_mode: 'feishu_sso', enabled: true,
+    }
+    vi.mocked(listBugPlatforms).mockResolvedValue([platform])
+    vi.mocked(saveBugPlatform).mockResolvedValue({ ...platform, enabled: false })
+    const wrapper = await mountedInbox()
+    await wrapper.get('[data-action="toggle-platform-config"]').trigger('click')
+
+    const details = wrapper.get('.platform-details-section')
+    const footer = wrapper.get('.config-footer')
+    expect(details.element.nextElementSibling).toBe(footer.element)
+    expect(footer.text()).toContain('修改后需保存才会生效')
+
+    await details.get('.toggle-control input').setValue(false)
+    await footer.get('[data-action="save-platform"]').trigger('click')
+
+    expect(saveBugPlatform).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'zentao-main',
+      enabled: false,
+    }))
+
+    const source = readFileSync('src/pages/BugInboxPage.vue', 'utf8')
+    expect(source).toMatch(/\.config-footer \{[^}]*position: sticky;[^}]*top: var\(--sp-2\);[^}]*z-index: 5;/)
+  })
+
   it('uses SVG actions and separates destructive platform deletion from the primary save action', async () => {
     vi.mocked(discoverBots).mockResolvedValue([{
       path: '/repo/base', ghost: false,

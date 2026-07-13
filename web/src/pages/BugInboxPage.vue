@@ -439,6 +439,15 @@ function eventValue(event: Event): string {
         </div>
       </section>
 
+      <footer class="config-footer">
+        <button class="danger-link" type="button" data-action="delete-platform" :disabled="platformDeleting || !platformDraft.id" @click="deleteSelectedPlatform">
+          <svg aria-hidden="true" viewBox="0 0 24 24" fill="none"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+          删除平台
+        </button>
+        <span class="config-save-hint">修改后需保存才会生效</span>
+        <button class="compact-button primary-button" type="button" data-action="save-platform" :disabled="platformSaving || platformLoggingIn" @click="savePlatform">{{ platformSaving ? '保存中…' : '保存配置' }}</button>
+      </footer>
+
       <section class="platform-config-section bot-mapping-section" aria-labelledby="bot-mapping-title">
         <header class="section-heading bot-config-title">
           <div><h2 id="bot-mapping-title">排障机器人</h2><p>平台映射只用于后续故障闭环选人。</p></div>
@@ -497,13 +506,6 @@ function eventValue(event: Event): string {
         <div class="hook-row"><strong>Hook URL</strong><code>{{ hookURL || '保存平台后生成' }}</code><button class="compact-button secondary-button" type="button" data-action="copy-hook-url" :disabled="!hookURL" @click="copyHookURL">复制</button></div>
       </section>
 
-      <footer class="config-footer">
-        <button class="danger-link" type="button" data-action="delete-platform" :disabled="platformDeleting || !platformDraft.id" @click="deleteSelectedPlatform">
-          <svg aria-hidden="true" viewBox="0 0 24 24" fill="none"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
-          删除平台
-        </button>
-        <button class="compact-button primary-button" type="button" data-action="save-platform" :disabled="platformSaving || platformLoggingIn" @click="savePlatform">保存配置</button>
-      </footer>
     </section>
 
     <section class="inbox-workspace" data-overflow-safe="true">
@@ -571,6 +573,8 @@ function eventValue(event: Event): string {
 .platform-config-section { min-width: 0; display: grid; gap: var(--sp-2); padding: var(--sp-3); border: 1px solid var(--c-line); border-radius: var(--r-lg); background: var(--c-surf); }
 .section-heading, .platform-list, .platform-tabs, .config-footer, .hook-row { min-width: 0; display: flex; align-items: center; gap: var(--sp-2); }
 .section-heading, .platform-list, .config-footer { justify-content: space-between; }
+.config-footer { position: sticky; top: var(--sp-2); z-index: 5; padding: var(--sp-2) var(--sp-3); border: 1px solid #bfdbfe; border-radius: var(--r-lg); background: rgba(255, 255, 255, .96); box-shadow: 0 6px 18px rgba(15, 23, 42, .1); backdrop-filter: blur(8px); }
+.config-save-hint { min-width: 0; flex: 1; color: var(--c-muted); font-size: var(--fs-sm); }
 .section-heading h2 { margin: 0; color: var(--c-ink); font-size: var(--fs-md); }
 .section-heading p { margin: 2px 0 0; color: var(--c-muted); font-size: var(--fs-sm); }
 .platform-tabs { flex-wrap: wrap; }
@@ -668,6 +672,7 @@ function eventValue(event: Event): string {
   .bot-config-row .icon-button { justify-self: end; width: 44px; height: 44px; }
   .config-footer { align-items: stretch; flex-direction: column; }
   .config-footer .danger-link { align-self: flex-start; }
+  .config-save-hint { text-align: left; }
   .config-footer .primary-button { width: 100%; min-width: 0; }
 }
 </style>

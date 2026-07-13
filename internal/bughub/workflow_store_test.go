@@ -26,6 +26,54 @@ func openTestCaseStore(t *testing.T) *CaseStore {
 	return store
 }
 
+func TestCreateCaseWithIdentityReturnsExistingOpenCaseForBug(t *testing.T) {
+	ctx := context.Background()
+	store := openTestCaseStore(t)
+	runner := &recordingPhaseRunner{}
+	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	firstCommand := CreateAndStartCaseCommand{
+		CaseID: "case-a", IdempotencyKey: "create:case-a", ActorID: "alice",
+		Bug: Bug{ID: "bug-840", Source: "zentao", SystemID: "base", Env: "test"},
+		Bot: BotRef{Key: "base|codex", Target: "codex", Path: "/workspace/base", Env: "test"}, InputJSON: []byte(`{}`),
+	}
+	first, err := orchestrator.CreateAndStartCase(ctx, firstCommand)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requested := IncidentCase{ID: "case-b", BugID: first.BugID, Source: first.Source, SystemID: first.SystemID, Environment: first.Environment, Status: CasePendingValidation, CycleNumber: 1, SelectedBotKey: first.SelectedBotKey}
+	creation := CaseCreation{Case: requested, IdempotencyKey: "create:case-b", ActorID: "bob", RequestJSON: json.RawMessage(`{"case_id":"case-b"}`)}
+	result, err := store.CreateCaseWithIdentity(ctx, creation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Case.ID != first.ID || result.Replay || !result.ExistingOpen {
+		t.Fatalf("result=%+v", result)
+	}
+	cases, err := store.ListCases(ctx)
+	if err != nil || len(cases) != 1 {
+		t.Fatalf("cases=%+v err=%v", cases, err)
+	}
+	attempts, err := store.ListAttempts(ctx, AttemptFilter{})
+	if err != nil || len(attempts) != 1 {
+		t.Fatalf("attempts=%+v err=%v", attempts, err)
+	}
+	stored, err := store.GetCase(ctx, first.ID)
+	if err != nil || stored.Version != first.Version {
+		t.Fatalf("stored=%+v first=%+v err=%v", stored, first, err)
+	}
+	event, found, err := store.GetEventByIdempotencyKey(ctx, creation.IdempotencyKey)
+	if err != nil || !found || event.EventType != "open_case_reused" {
+		t.Fatalf("event=%+v found=%v err=%v", event, found, err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE incident_cases SET status = ?, version = version + 1 WHERE id = ?`, CaseFixedVerified, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := store.CreateCaseWithIdentity(ctx, creation)
+	if err != nil || !replayed.Replay || !replayed.ExistingOpen || replayed.Case != result.Case {
+		t.Fatalf("replayed=%+v result=%+v err=%v", replayed, result, err)
+	}
+}
+
 func TestResetRelationshipFieldsSurviveReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "workflow.db")
 	store, err := OpenCaseStore(path)

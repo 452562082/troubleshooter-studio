@@ -448,9 +448,9 @@ func (o *CaseOrchestrator) CreateAndStartCase(ctx context.Context, cmd CreateAnd
 	if err := validateJSONObject("start Case input", cmd.InputJSON, true); err != nil {
 		return IncidentCase{}, err
 	}
-	// Serialize creation by Case ID, not by idempotency key, so two tabs cannot
-	// both observe a missing Case and race separate first-start commands.
-	release := workflowCommandLocks.acquire("create-start:" + cmd.CaseID)
+	// Serialize creation and scheduling by Bug ID so different client-generated
+	// Case IDs for the same Bug converge before either can schedule twice.
+	release := workflowCommandLocks.acquire("create-start-bug:" + cmd.Bug.ID)
 	defer release()
 
 	targetID := cmd.CaseID
@@ -479,11 +479,14 @@ func (o *CaseOrchestrator) CreateAndStartCase(ctx context.Context, cmd CreateAnd
 		environment = strings.TrimSpace(cmd.Bot.Env)
 	}
 	pending := IncidentCase{ID: targetID, BugID: cmd.Bug.ID, Source: cmd.Bug.Source, SystemID: cmd.Bug.SystemID, Environment: environment, Status: CasePendingValidation, CycleNumber: cycle, SelectedBotKey: cmd.Bot.Key}
-	created, _, createErr := o.store.CreateCaseWithIdentity(ctx, CaseCreation{Case: pending, IdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, RequestJSON: mustJSON(cmd)})
+	creation, createErr := o.store.CreateCaseWithIdentity(ctx, CaseCreation{Case: pending, IdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, RequestJSON: mustJSON(cmd)})
 	if createErr != nil {
 		return IncidentCase{}, createErr
 	}
-	return o.StartCase(ctx, StartCaseCommand{CaseID: created.ID, ExpectedVersion: created.Version, IdempotencyKey: cmd.IdempotencyKey + ":start", ActorID: cmd.ActorID, Bug: cmd.Bug, Bot: cmd.Bot, InputJSON: cmd.InputJSON})
+	if creation.ExistingOpen {
+		return creation.Case.Clone(), nil
+	}
+	return o.StartCase(ctx, StartCaseCommand{CaseID: creation.Case.ID, ExpectedVersion: creation.Case.Version, IdempotencyKey: cmd.IdempotencyKey + ":start", ActorID: cmd.ActorID, Bug: cmd.Bug, Bot: cmd.Bot, InputJSON: cmd.InputJSON})
 }
 
 func (o *CaseOrchestrator) ContinueWithEvidence(ctx context.Context, cmd ContinueWithEvidenceCommand) (IncidentCase, error) {

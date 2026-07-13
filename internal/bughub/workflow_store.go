@@ -43,6 +43,14 @@ type CaseCreation struct {
 	RequestJSON    json.RawMessage `json:"request_json"`
 }
 
+// CaseCreationResult reports whether durable creation created a new Case,
+// replayed the same command, or reused the Bug's current open Case.
+type CaseCreationResult struct {
+	Case         IncidentCase
+	Replay       bool
+	ExistingOpen bool
+}
+
 type legacyImportBatch struct {
 	MigrationKey string
 	Cases        []IncidentCase
@@ -392,24 +400,24 @@ func (s *CaseStore) CreateCase(ctx context.Context, incident IncidentCase) error
 	return nil
 }
 
-func (s *CaseStore) CreateCaseWithIdentity(ctx context.Context, creation CaseCreation) (created IncidentCase, replay bool, err error) {
+func (s *CaseStore) CreateCaseWithIdentity(ctx context.Context, creation CaseCreation) (result CaseCreationResult, err error) {
 	creation.Case = creation.Case.Clone()
 	if creation.Case.Status != CasePendingValidation || creation.Case.CurrentAttemptID != "" || creation.Case.ClosedAt != nil {
-		return created, false, errors.New("durable Case creation requires an open pending_validation Case without an attempt")
+		return result, errors.New("durable Case creation requires an open pending_validation Case without an attempt")
 	}
 	if blank(creation.IdempotencyKey) || blank(creation.ActorID) || len(creation.RequestJSON) == 0 || !json.Valid(creation.RequestJSON) {
-		return created, false, errors.New("durable Case creation requires idempotency key, actor, and valid request JSON")
+		return result, errors.New("durable Case creation requires idempotency key, actor, and valid request JSON")
 	}
 	if err := creation.Case.Validate(); err != nil {
-		return created, false, err
+		return result, err
 	}
 	fingerprint, err := caseCreationFingerprint(creation)
 	if err != nil {
-		return created, false, err
+		return result, err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return created, false, fmt.Errorf("begin durable Case creation: %w", err)
+		return result, fmt.Errorf("begin durable Case creation: %w", err)
 	}
 	defer func() {
 		if err != nil {
@@ -419,32 +427,60 @@ func (s *CaseStore) CreateCaseWithIdentity(ctx context.Context, creation CaseCre
 	var eventType, storedFingerprint, resultJSON string
 	queryErr := tx.QueryRowContext(ctx, `SELECT event_type,request_fingerprint,result_case_json FROM transition_events WHERE idempotency_key=?`, creation.IdempotencyKey).Scan(&eventType, &storedFingerprint, &resultJSON)
 	if queryErr == nil {
-		if eventType != "case_created" || storedFingerprint != fingerprint {
-			return created, false, ErrIdempotencyConflict
+		if (eventType != "case_created" && eventType != "open_case_reused") || storedFingerprint != fingerprint {
+			return result, ErrIdempotencyConflict
 		}
-		if err = json.Unmarshal([]byte(resultJSON), &created); err != nil {
-			return created, false, fmt.Errorf("decode durable Case creation replay: %w", err)
+		if err = json.Unmarshal([]byte(resultJSON), &result.Case); err != nil {
+			return result, fmt.Errorf("decode durable Case creation replay: %w", err)
 		}
+		result.Replay = true
+		result.ExistingOpen = eventType == "open_case_reused"
 		if err = tx.Commit(); err != nil {
-			return IncidentCase{}, false, err
+			return CaseCreationResult{}, err
 		}
-		return created.Clone(), true, nil
+		result.Case = result.Case.Clone()
+		return result, nil
 	}
 	if !errors.Is(queryErr, sql.ErrNoRows) {
-		return created, false, queryErr
+		return result, queryErr
+	}
+	openCase, openErr := scanCase(tx.QueryRowContext(ctx, `SELECT id, bug_id, source, system_id,
+		environment, status, cycle_number, current_attempt_id, selected_bot_key,
+		reset_from_case_id, superseded_by_case_id, version, created_at, updated_at, closed_at
+		FROM incident_cases WHERE bug_id = ? AND status NOT IN (?, ?, ?)
+		ORDER BY updated_at DESC, id DESC LIMIT 1`, creation.Case.BugID, CaseFixedVerified, CaseLegacyArchived, CaseResetArchived))
+	if openErr == nil {
+		result.Case = openCase.Clone()
+		result.ExistingOpen = true
+		resultBytes, marshalErr := json.Marshal(result.Case)
+		if marshalErr != nil {
+			return CaseCreationResult{}, marshalErr
+		}
+		payload := mustJSON(map[string]any{"case_id": result.Case.ID, "requested_case_id": creation.Case.ID})
+		now := time.Now().UTC()
+		if _, err = tx.ExecContext(ctx, `INSERT INTO transition_events (id,case_id,from_status,to_status,event_type,actor_type,actor_id,idempotency_key,payload_json,created_at,request_fingerprint,result_case_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, stableID("event", "open-case-reused:"+creation.IdempotencyKey), result.Case.ID, result.Case.Status, result.Case.Status, "open_case_reused", "user", creation.ActorID, creation.IdempotencyKey, string(payload), formatStoreTime(now), fingerprint, string(resultBytes)); err != nil {
+			return CaseCreationResult{}, fmt.Errorf("insert open Case reuse identity: %w", err)
+		}
+		if err = tx.Commit(); err != nil {
+			return CaseCreationResult{}, err
+		}
+		return result, nil
+	}
+	if !errors.Is(openErr, sql.ErrNoRows) {
+		return result, openErr
 	}
 	if _, caseErr := getCase(ctx, tx, creation.Case.ID); caseErr == nil {
-		return created, false, ErrIdempotencyConflict
+		return result, ErrIdempotencyConflict
 	} else if !errors.Is(caseErr, ErrCaseNotFound) {
-		return created, false, caseErr
+		return result, caseErr
 	}
 	now := time.Now().UTC()
-	created = creation.Case.Clone()
+	created := creation.Case.Clone()
 	if created.Version == 0 {
 		created.Version = 1
 	}
 	if created.Version != 1 {
-		return IncidentCase{}, false, errors.New("new durable Case version must be one")
+		return CaseCreationResult{}, errors.New("new durable Case version must be one")
 	}
 	if created.CreatedAt.IsZero() {
 		created.CreatedAt = now
@@ -453,21 +489,22 @@ func (s *CaseStore) CreateCaseWithIdentity(ctx context.Context, creation CaseCre
 		created.UpdatedAt = created.CreatedAt
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO incident_cases (id,bug_id,source,system_id,environment,status,cycle_number,current_attempt_id,selected_bot_key,reset_from_case_id,superseded_by_case_id,version,created_at,updated_at,closed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, created.ID, created.BugID, created.Source, created.SystemID, created.Environment, created.Status, created.CycleNumber, created.CurrentAttemptID, created.SelectedBotKey, created.ResetFromCaseID, created.SupersededByCaseID, created.Version, formatStoreTime(created.CreatedAt), formatStoreTime(created.UpdatedAt), nil); err != nil {
-		return IncidentCase{}, false, fmt.Errorf("insert durable Case: %w", err)
+		return CaseCreationResult{}, fmt.Errorf("insert durable Case: %w", err)
 	}
 	resultBytes, marshalErr := json.Marshal(created)
 	if marshalErr != nil {
-		return IncidentCase{}, false, marshalErr
+		return CaseCreationResult{}, marshalErr
 	}
 	resultJSON = string(resultBytes)
 	payload := mustJSON(map[string]any{"case_id": created.ID, "cycle_number": created.CycleNumber})
 	if _, err = tx.ExecContext(ctx, `INSERT INTO transition_events (id,case_id,from_status,to_status,event_type,actor_type,actor_id,idempotency_key,payload_json,created_at,request_fingerprint,result_case_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, stableID("event", "case-created:"+creation.IdempotencyKey), created.ID, created.Status, created.Status, "case_created", "user", creation.ActorID, creation.IdempotencyKey, string(payload), formatStoreTime(now), fingerprint, resultJSON); err != nil {
-		return IncidentCase{}, false, fmt.Errorf("insert durable Case creation identity: %w", err)
+		return CaseCreationResult{}, fmt.Errorf("insert durable Case creation identity: %w", err)
 	}
 	if err = tx.Commit(); err != nil {
-		return IncidentCase{}, false, err
+		return CaseCreationResult{}, err
 	}
-	return created.Clone(), false, nil
+	result.Case = created.Clone()
+	return result, nil
 }
 
 func caseCreationFingerprint(creation CaseCreation) (string, error) {

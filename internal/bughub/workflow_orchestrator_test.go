@@ -143,8 +143,8 @@ func TestCreateAndStartCaseRecoversCrashAfterCreationBeforeStart(t *testing.T) {
 		Bug: Bug{ID: pending.BugID, Source: pending.Source, SystemID: pending.SystemID, Env: pending.Environment},
 		Bot: BotRef{Key: pending.SelectedBotKey, Target: "codex", Path: "/workspace/base", Env: "test"}, InputJSON: []byte(`{}`),
 	}
-	if _, replay, err := store.CreateCaseWithIdentity(ctx, CaseCreation{Case: pending, IdempotencyKey: command.IdempotencyKey, ActorID: command.ActorID, RequestJSON: mustJSON(command)}); err != nil || replay {
-		t.Fatalf("creation replay=%v err=%v", replay, err)
+	if result, err := store.CreateCaseWithIdentity(ctx, CaseCreation{Case: pending, IdempotencyKey: command.IdempotencyKey, ActorID: command.ActorID, RequestJSON: mustJSON(command)}); err != nil || result.Replay {
+		t.Fatalf("creation result=%+v err=%v", result, err)
 	}
 	started, err := o.CreateAndStartCase(ctx, command)
 	if err != nil || started.Status != CaseValidating || runner.startCount() != 1 {
@@ -152,21 +152,26 @@ func TestCreateAndStartCaseRecoversCrashAfterCreationBeforeStart(t *testing.T) {
 	}
 }
 
-func TestCreateAndStartCaseRejectsDifferentIdentityAfterCreationCrash(t *testing.T) {
+func TestCreateAndStartCaseReusesDifferentKeyButRejectsMutatedIdentityAfterCreationCrash(t *testing.T) {
 	ctx := context.Background()
 	store := newOrchestratorStore(t)
 	pending := IncidentCase{ID: "case-identity", BugID: "bug-identity", Source: "zentao", SystemID: "base", Environment: "test", Status: CasePendingValidation, CycleNumber: 1, SelectedBotKey: "base|codex"}
 	base := CreateAndStartCaseCommand{CaseID: pending.ID, ExpectedVersion: 0, IdempotencyKey: "create:identity", ActorID: "alice", Bug: Bug{ID: pending.BugID, Source: pending.Source, SystemID: pending.SystemID, Env: pending.Environment}, Bot: BotRef{Key: pending.SelectedBotKey, Target: "codex", Path: "/workspace/base", Env: "test"}, InputJSON: []byte(`{"mode":"reproduce"}`)}
-	if _, _, err := store.CreateCaseWithIdentity(ctx, CaseCreation{Case: pending, IdempotencyKey: base.IdempotencyKey, ActorID: base.ActorID, RequestJSON: mustJSON(base)}); err != nil {
+	if _, err := store.CreateCaseWithIdentity(ctx, CaseCreation{Case: pending, IdempotencyKey: base.IdempotencyKey, ActorID: base.ActorID, RequestJSON: mustJSON(base)}); err != nil {
 		t.Fatal(err)
 	}
 	o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, nil)
-	mutations := []CreateAndStartCaseCommand{base, base, base, base, base}
-	mutations[0].IdempotencyKey = "different-key"
-	mutations[1].ActorID = "bob"
-	mutations[2].InputJSON = []byte(`{"mode":"different"}`)
-	mutations[3].Bot.Target = "claude-code"
-	mutations[4].Bot.Path = "/workspace/other"
+	differentKey := base
+	differentKey.IdempotencyKey = "different-key"
+	reused, err := o.CreateAndStartCase(ctx, differentKey)
+	if err != nil || reused.ID != pending.ID || reused.Status != CasePendingValidation {
+		t.Fatalf("reused=%+v err=%v", reused, err)
+	}
+	mutations := []CreateAndStartCaseCommand{base, base, base, base}
+	mutations[0].ActorID = "bob"
+	mutations[1].InputJSON = []byte(`{"mode":"different"}`)
+	mutations[2].Bot.Target = "claude-code"
+	mutations[3].Bot.Path = "/workspace/other"
 	for index, command := range mutations {
 		if _, err := o.CreateAndStartCase(ctx, command); !errors.Is(err, ErrIdempotencyConflict) {
 			t.Fatalf("mutation %d err=%v", index, err)
@@ -174,7 +179,7 @@ func TestCreateAndStartCaseRejectsDifferentIdentityAfterCreationCrash(t *testing
 	}
 }
 
-func TestCreateAndStartLegacyRefreshCannotCreateAnotherSuccessor(t *testing.T) {
+func TestCreateAndStartLegacyRefreshReusesOpenSuccessor(t *testing.T) {
 	ctx := context.Background()
 	store := newOrchestratorStore(t)
 	archived := IncidentCase{ID: "legacy-refresh", BugID: "bug-refresh", Source: "legacy-runs-json", Status: CaseLegacyArchived, CycleNumber: 1}
@@ -190,8 +195,9 @@ func TestCreateAndStartLegacyRefreshCannotCreateAnotherSuccessor(t *testing.T) {
 	}
 	refresh := base
 	refresh.IdempotencyKey = "legacy:refresh"
-	if _, err := o.CreateAndStartCase(ctx, refresh); !errors.Is(err, ErrIdempotencyConflict) {
-		t.Fatalf("refresh err=%v", err)
+	reused, err := o.CreateAndStartCase(ctx, refresh)
+	if err != nil || reused.ID != first.ID {
+		t.Fatalf("reused=%+v first=%+v err=%v", reused, first, err)
 	}
 	cases, err := store.ListCases(ctx)
 	if err != nil || len(cases) != 2 {
@@ -233,6 +239,58 @@ func TestCreateAndStartCaseConcurrentExactCommandRunsAgentOnce(t *testing.T) {
 		}
 		if result != first {
 			t.Fatalf("result=%+v first=%+v", result, first)
+		}
+	}
+	if runner.startCount() != 1 {
+		t.Fatalf("starts=%d", runner.startCount())
+	}
+}
+
+func TestCreateAndStartCaseConcurrentDifferentIDsSchedulesOnce(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	runner := &recordingPhaseRunner{}
+	o := NewCaseOrchestrator(store, runner, nil, nil)
+	commands := []CreateAndStartCaseCommand{
+		{CaseID: "case-concurrent-a", IdempotencyKey: "create:concurrent-a", ActorID: "alice", Bug: Bug{ID: "bug-concurrent-different", Source: "zentao", SystemID: "base", Env: "test"}, Bot: BotRef{Key: "base|codex", Target: "codex", Path: "/workspace/base", Env: "test"}, InputJSON: []byte(`{}`)},
+		{CaseID: "case-concurrent-b", IdempotencyKey: "create:concurrent-b", ActorID: "bob", Bug: Bug{ID: "bug-concurrent-different", Source: "zentao", SystemID: "base", Env: "test"}, Bot: BotRef{Key: "base|codex", Target: "codex", Path: "/workspace/base", Env: "test"}, InputJSON: []byte(`{}`)},
+	}
+	ready := make(chan struct{}, len(commands))
+	release := make(chan struct{})
+	results := make(chan IncidentCase, len(commands))
+	errs := make(chan error, len(commands))
+	var wg sync.WaitGroup
+	for _, command := range commands {
+		command := command
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ready <- struct{}{}
+			<-release
+			result, err := o.CreateAndStartCase(ctx, command)
+			results <- result
+			errs <- err
+		}()
+	}
+	for range commands {
+		<-ready
+	}
+	close(release)
+	wg.Wait()
+	close(results)
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var returnedID string
+	for result := range results {
+		if returnedID == "" {
+			returnedID = result.ID
+		}
+		if result.ID != returnedID {
+			t.Fatalf("returned case IDs differ: %q and %q", returnedID, result.ID)
 		}
 	}
 	if runner.startCount() != 1 {

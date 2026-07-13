@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -27,6 +28,7 @@ var (
 	ErrAttemptAlreadyFinished    = errors.New("phase attempt is already finished")
 	ErrAttemptRunClaimConflict   = errors.New("phase attempt run claim conflicts with another starter")
 	ErrUnsupportedWorkflowSchema = errors.New("unsupported workflow store schema")
+	resetURLUserinfoPattern      = regexp.MustCompile(`(?i)\bhttps?://[^\s/@]+(?::[^\s/@]*)?@`)
 )
 
 type CaseStore struct {
@@ -49,6 +51,27 @@ type CaseCreationResult struct {
 	Case         IncidentCase
 	Replay       bool
 	ExistingOpen bool
+}
+
+// CaseReset identifies one exact request to archive a non-terminal Case and
+// create its pending replacement in the same transaction.
+type CaseReset struct {
+	CaseID          string
+	NewCaseID       string
+	IdempotencyKey  string
+	ActorID         string
+	ExpectedVersion int64
+	SelectedBotKey  string
+	RequestJSON     json.RawMessage
+}
+
+// CaseResetResult is the immutable result stored with the reset event. Replay
+// returns this snapshot rather than rebuilding it from mutable current rows.
+type CaseResetResult struct {
+	Archived           IncidentCase
+	Replacement        IncidentCase
+	CancelledAttemptID string
+	Replay             bool
 }
 
 type legacyImportBatch struct {
@@ -537,6 +560,240 @@ func caseCreationFingerprint(creation CaseCreation) (string, error) {
 	}
 	hash := sha256.Sum256(encoded)
 	return hex.EncodeToString(hash[:]), nil
+}
+
+// ResetCaseWithReplacement archives one Case and creates its replacement as a
+// single durable mutation. Historical attempts and related records remain
+// attached to the archived Case.
+func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseReset) (result CaseResetResult, err error) {
+	reset.RequestJSON = CloneRawMessage(reset.RequestJSON)
+	if s == nil || s.db == nil || blank(reset.CaseID) || blank(reset.NewCaseID) ||
+		blank(reset.IdempotencyKey) || blank(reset.ActorID) || blank(reset.SelectedBotKey) || reset.ExpectedVersion < 1 {
+		return result, errors.New("Case reset requires store, old and new Case IDs, positive version, idempotency key, actor, and Bot")
+	}
+	if reset.CaseID == reset.NewCaseID {
+		return result, errors.New("replacement Case ID must differ from archived Case ID")
+	}
+	if len(reset.RequestJSON) == 0 || !json.Valid(reset.RequestJSON) {
+		return result, errors.New("Case reset request must be valid JSON")
+	}
+	fingerprint, err := caseResetFingerprint(reset)
+	if err != nil {
+		return result, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return result, fmt.Errorf("begin Case reset: %w", err)
+	}
+	defer tx.Rollback()
+
+	var eventType, storedFingerprint, resultJSON string
+	queryErr := tx.QueryRowContext(ctx, `SELECT event_type,request_fingerprint,result_case_json FROM transition_events WHERE idempotency_key=?`, reset.IdempotencyKey).Scan(&eventType, &storedFingerprint, &resultJSON)
+	if queryErr == nil {
+		if eventType != "case_reset" || storedFingerprint != fingerprint {
+			return result, fmt.Errorf("%w: Case reset key %q", ErrIdempotencyConflict, reset.IdempotencyKey)
+		}
+		if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+			return CaseResetResult{}, fmt.Errorf("decode Case reset replay: %w", err)
+		}
+		if err := validateCaseResetResult(result, reset.CaseID, reset.NewCaseID); err != nil {
+			return CaseResetResult{}, err
+		}
+		result.Replay = true
+		if err := tx.Commit(); err != nil {
+			return CaseResetResult{}, fmt.Errorf("commit Case reset replay: %w", err)
+		}
+		return cloneCaseResetResult(result), nil
+	}
+	if !errors.Is(queryErr, sql.ErrNoRows) {
+		return result, fmt.Errorf("load Case reset identity: %w", queryErr)
+	}
+
+	incident, err := getCase(ctx, tx, reset.CaseID)
+	if err != nil {
+		return result, err
+	}
+	if incident.Version != reset.ExpectedVersion {
+		return result, fmt.Errorf("%w: expected %d, current %d", ErrCaseVersionConflict, reset.ExpectedVersion, incident.Version)
+	}
+	if IsTerminalCaseStatus(incident.Status) {
+		return result, fmt.Errorf("terminal Case status %s cannot be reset", incident.Status)
+	}
+	if _, duplicateErr := getCase(ctx, tx, reset.NewCaseID); duplicateErr == nil {
+		return result, fmt.Errorf("replacement Case %q already exists", reset.NewCaseID)
+	} else if !errors.Is(duplicateErr, ErrCaseNotFound) {
+		return result, duplicateErr
+	}
+
+	now := time.Now().UTC()
+	if incident.CurrentAttemptID != "" {
+		cancelled, cancelErr := tx.ExecContext(ctx, `UPDATE phase_attempts SET status=?,finished_at=?,run_claim_token='' WHERE id=? AND case_id=? AND status IN (?,?)`, AttemptStatusCancelled, formatStoreTime(now), incident.CurrentAttemptID, incident.ID, AttemptStatusQueued, AttemptStatusRunning)
+		if cancelErr != nil {
+			return result, fmt.Errorf("cancel current Case attempt: %w", cancelErr)
+		}
+		rows, rowsErr := cancelled.RowsAffected()
+		if rowsErr != nil {
+			return result, fmt.Errorf("inspect current Case attempt cancellation: %w", rowsErr)
+		}
+		if rows == 1 {
+			result.CancelledAttemptID = incident.CurrentAttemptID
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM fix_checkpoints WHERE attempt_id=? AND case_id=?`, incident.CurrentAttemptID, incident.ID); err != nil {
+			return result, fmt.Errorf("delete reset Case fix checkpoint: %w", err)
+		}
+	}
+
+	fromStatus := incident.Status
+	archived := incident.Clone()
+	archived.Status = CaseResetArchived
+	archived.CurrentAttemptID = ""
+	archived.SupersededByCaseID = reset.NewCaseID
+	archived.Version++
+	archived.UpdatedAt = now
+	archived.ClosedAt = cloneTimePtr(&now)
+	if err := archived.Validate(); err != nil {
+		return result, err
+	}
+	updated, err := tx.ExecContext(ctx, `UPDATE incident_cases SET status=?,current_attempt_id='',superseded_by_case_id=?,version=?,updated_at=?,closed_at=? WHERE id=? AND version=?`, archived.Status, archived.SupersededByCaseID, archived.Version, formatStoreTime(now), formatStoreTime(now), archived.ID, reset.ExpectedVersion)
+	if err != nil {
+		return result, fmt.Errorf("archive reset Case: %w", err)
+	}
+	rows, err := updated.RowsAffected()
+	if err != nil {
+		return result, fmt.Errorf("inspect reset Case archive: %w", err)
+	}
+	if rows != 1 {
+		return result, ErrCaseVersionConflict
+	}
+
+	replacement := IncidentCase{
+		ID:              reset.NewCaseID,
+		BugID:           incident.BugID,
+		Source:          incident.Source,
+		SystemID:        incident.SystemID,
+		Environment:     incident.Environment,
+		Status:          CasePendingValidation,
+		CycleNumber:     1,
+		SelectedBotKey:  reset.SelectedBotKey,
+		ResetFromCaseID: incident.ID,
+		Version:         1,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if err := replacement.Validate(); err != nil {
+		return result, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO incident_cases (id,bug_id,source,system_id,environment,status,cycle_number,current_attempt_id,selected_bot_key,reset_from_case_id,superseded_by_case_id,version,created_at,updated_at,closed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, replacement.ID, replacement.BugID, replacement.Source, replacement.SystemID, replacement.Environment, replacement.Status, replacement.CycleNumber, replacement.CurrentAttemptID, replacement.SelectedBotKey, replacement.ResetFromCaseID, replacement.SupersededByCaseID, replacement.Version, formatStoreTime(now), formatStoreTime(now), nil); err != nil {
+		return result, fmt.Errorf("insert reset replacement Case: %w", err)
+	}
+
+	result.Archived = archived.Clone()
+	result.Replacement = replacement.Clone()
+	resultJSONBytes, err := json.Marshal(result)
+	if err != nil {
+		return CaseResetResult{}, fmt.Errorf("encode Case reset result: %w", err)
+	}
+	payload, err := caseResetEventPayload(reset, result)
+	if err != nil {
+		return CaseResetResult{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO transition_events (id,case_id,from_status,to_status,event_type,actor_type,actor_id,idempotency_key,payload_json,created_at,request_fingerprint,result_case_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, stableID("event", "case-reset:"+reset.IdempotencyKey), archived.ID, fromStatus, archived.Status, "case_reset", "user", reset.ActorID, reset.IdempotencyKey, string(payload), formatStoreTime(now), fingerprint, string(resultJSONBytes)); err != nil {
+		return CaseResetResult{}, fmt.Errorf("insert Case reset event: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO transition_events (id,case_id,from_status,to_status,event_type,actor_type,actor_id,idempotency_key,payload_json,created_at,request_fingerprint,result_case_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, stableID("event", "case-created-from-reset:"+reset.IdempotencyKey), replacement.ID, replacement.Status, replacement.Status, "case_created_from_reset", "user", reset.ActorID, reset.IdempotencyKey+":replacement", string(payload), formatStoreTime(now.Add(time.Nanosecond)), fingerprint, string(resultJSONBytes)); err != nil {
+		return CaseResetResult{}, fmt.Errorf("insert reset replacement event: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return CaseResetResult{}, fmt.Errorf("commit Case reset: %w", err)
+	}
+	return cloneCaseResetResult(result), nil
+}
+
+func caseResetFingerprint(reset CaseReset) (string, error) {
+	identity := struct {
+		CaseID          string          `json:"case_id"`
+		NewCaseID       string          `json:"new_case_id"`
+		ExpectedVersion int64           `json:"expected_version"`
+		SelectedBotKey  string          `json:"selected_bot_key"`
+		ActorID         string          `json:"actor_id"`
+		IdempotencyKey  string          `json:"idempotency_key"`
+		RequestJSON     json.RawMessage `json:"request_json"`
+	}{reset.CaseID, reset.NewCaseID, reset.ExpectedVersion, reset.SelectedBotKey, reset.ActorID, reset.IdempotencyKey, CloneRawMessage(reset.RequestJSON)}
+	encoded, err := json.Marshal(identity)
+	if err != nil {
+		return "", fmt.Errorf("encode Case reset fingerprint: %w", err)
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func caseResetEventPayload(reset CaseReset, result CaseResetResult) (json.RawMessage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(reset.RequestJSON))
+	decoder.UseNumber()
+	var request any
+	if err := decoder.Decode(&request); err != nil {
+		return nil, fmt.Errorf("decode Case reset request for audit: %w", err)
+	}
+	request = redactResetURLUserinfo(redactSensitiveAny(request))
+	payload, err := json.Marshal(map[string]any{
+		"archived_case_id":     result.Archived.ID,
+		"replacement_case_id":  result.Replacement.ID,
+		"cancelled_attempt_id": result.CancelledAttemptID,
+		"selected_bot_key":     reset.SelectedBotKey,
+		"request":              request,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode Case reset audit payload: %w", err)
+	}
+	return payload, nil
+}
+
+func redactResetURLUserinfo(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			typed[key] = redactResetURLUserinfo(child)
+		}
+		return typed
+	case []any:
+		for index, child := range typed {
+			typed[index] = redactResetURLUserinfo(child)
+		}
+		return typed
+	case string:
+		redacted := redactSensitiveText(typed)
+		redacted = resetURLUserinfoPattern.ReplaceAllStringFunc(redacted, func(match string) string {
+			separator := strings.Index(match, "://")
+			return match[:separator+3] + redactedValue + "@"
+		})
+		parsed, err := url.Parse(redacted)
+		if err == nil && parsed.IsAbs() && parsed.Host != "" && parsed.User != nil {
+			parsed.User = url.User(redactedValue)
+			return parsed.String()
+		}
+		return redacted
+	default:
+		return value
+	}
+}
+
+func validateCaseResetResult(result CaseResetResult, oldCaseID, newCaseID string) error {
+	if result.Archived.ID != oldCaseID || result.Archived.Status != CaseResetArchived || result.Archived.SupersededByCaseID != newCaseID || result.Archived.ClosedAt == nil {
+		return errors.New("stored Case reset archive result is invalid")
+	}
+	if result.Replacement.ID != newCaseID || result.Replacement.Status != CasePendingValidation || result.Replacement.ResetFromCaseID != oldCaseID {
+		return errors.New("stored Case reset replacement result is invalid")
+	}
+	if err := result.Archived.Validate(); err != nil {
+		return err
+	}
+	return result.Replacement.Validate()
+}
+
+func cloneCaseResetResult(result CaseResetResult) CaseResetResult {
+	result.Archived = result.Archived.Clone()
+	result.Replacement = result.Replacement.Clone()
+	return result
 }
 
 func (s *CaseStore) GetCase(ctx context.Context, id string) (IncidentCase, error) {

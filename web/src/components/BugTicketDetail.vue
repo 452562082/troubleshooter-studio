@@ -77,7 +77,14 @@ function safeLink(href: string): boolean {
 </script>
 
 <template>
-  <section v-if="bug" class="ticket-detail" :data-mode="mode" :aria-labelledby="`${detailInstanceID}-title`">
+  <section
+    v-if="bug"
+    class="ticket-detail"
+    :data-mode="mode"
+    data-responsive-viewports="375,768,1024,1440"
+    data-overflow-safe="true"
+    :aria-labelledby="`${detailInstanceID}-title`"
+  >
     <header class="detail-head">
       <div class="heading-copy">
         <div class="detail-source">{{ sourceLabel(bug) }}</div>
@@ -130,11 +137,13 @@ function safeLink(href: string): boolean {
             type="button"
             class="attachment-item"
             :data-attachment-index="index"
+            :title="attachment.name"
+            :aria-label="`预览附件：${attachment.name}`"
             @click="emit('previewAttachment', index)"
           >
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8.2L19 7.8V19a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm7.3 1.8V8.7h3.9L13.3 4.8ZM6 4.7a.3.3 0 0 0-.3.3v14c0 .17.13.3.3.3h11a.3.3 0 0 0 .3-.3V10.4h-4.8a.9.9 0 0 1-.9-.9V4.7H6Z" /></svg>
-            <span><strong>{{ attachment.name }}</strong><small>{{ attachmentSubtitle(attachment) }}</small></span>
-            <span class="attachment-action">预览</span>
+            <span class="attachment-copy"><strong>{{ attachment.name }}</strong><small>{{ attachmentSubtitle(attachment) }}</small></span>
+            <span class="attachment-action" aria-hidden="true">预览</span>
           </button>
         </div>
       </section>
@@ -148,9 +157,9 @@ function safeLink(href: string): boolean {
 </template>
 
 <style scoped>
-.ticket-detail { min-width: 0; color: var(--c-text); }
+.ticket-detail { min-width: 0; container: ticket-detail / inline-size; color: var(--c-text); }
 .detail-head { min-width: 0; margin-bottom: 14px; display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-3); }
-.heading-copy { min-width: 0; }
+.heading-copy, .detail-tags, .ticket-fields, .summary-fields, .text-block, .attachments-block { min-width: 0; }
 .detail-source { margin-bottom: var(--sp-1); color: var(--c-accent-hover); font-size: var(--fs-sm); font-weight: 700; overflow-wrap: anywhere; }
 .detail-head h2 { margin: 0; color: var(--c-ink); font-size: 20px; line-height: 1.35; overflow-wrap: anywhere; }
 .detail-tags { display: flex; flex: 0 1 auto; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
@@ -162,12 +171,22 @@ dt { margin-bottom: 3px; color: var(--c-muted); font-size: var(--fs-xs); }
 dd { margin: 0; color: var(--c-ink); font-size: var(--fs-base); overflow-wrap: anywhere; }
 .text-block, .attachments-block { margin-top: var(--sp-3); }
 .text-block h3, .attachments-block h3 { margin: 0 0 6px; color: var(--c-ink); font-size: var(--fs-base); }
-.ticket-markdown { max-width: 100%; padding: 10px; overflow-wrap: anywhere; border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf-2); color: var(--c-text); font-size: var(--fs-base); line-height: 1.6; }
+.ticket-markdown { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; padding: 10px; overflow-wrap: anywhere; border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf-2); color: var(--c-text); font-size: var(--fs-base); line-height: 1.6; }
 .ticket-markdown :deep(:first-child) { margin-top: 0; }
 .ticket-markdown :deep(:last-child) { margin-bottom: 0; }
-.ticket-markdown :deep(pre) { max-width: 100%; overflow: auto; white-space: pre-wrap; }
+.ticket-markdown :deep(ol), .ticket-markdown :deep(ul) {
+  margin: .5rem 0;
+  padding-inline-start: 1.75rem;
+  list-style-position: outside;
+}
+.ticket-markdown :deep(li) { padding-inline-start: .15rem; overflow-wrap: anywhere; }
+.ticket-markdown :deep(p), .ticket-markdown :deep(h1), .ticket-markdown :deep(h2),
+.ticket-markdown :deep(h3), .ticket-markdown :deep(h4), .ticket-markdown :deep(h5),
+.ticket-markdown :deep(h6), .ticket-markdown :deep(code) { overflow-wrap: anywhere; word-break: break-word; }
+.ticket-markdown :deep(pre), .ticket-markdown :deep(table) { display: block; max-width: 100%; overflow-x: auto; }
+.ticket-markdown :deep(pre) { white-space: pre; }
 .ticket-markdown :deep(a) { color: #1d4ed8; overflow-wrap: anywhere; }
-.attachment-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: var(--sp-2); min-width: 0; }
+.attachment-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-2); min-width: 0; }
 .attachment-item {
   width: 100%; min-width: 0; min-height: 56px; padding: var(--sp-2) 10px;
   display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; align-items: center; gap: 10px;
@@ -178,18 +197,30 @@ dd { margin: 0; color: var(--c-ink); font-size: var(--fs-base); overflow-wrap: a
 .attachment-item:hover { border-color: var(--c-accent); background: #eff6ff; }
 .attachment-item:focus-visible, .detail-actions .btn:focus-visible { outline: 2px solid var(--c-accent-hover); outline-offset: 2px; }
 .attachment-item svg { width: 28px; height: 28px; fill: var(--c-muted); }
-.attachment-item span { min-width: 0; display: grid; gap: 3px; }
-.attachment-item strong, .attachment-item small { overflow-wrap: anywhere; }
-.attachment-item strong { color: var(--c-ink); font-size: var(--fs-base); }
-.attachment-item small { color: var(--c-muted); font-size: var(--fs-xs); }
-.attachment-action { color: #1d4ed8; font-size: var(--fs-xs); font-weight: 700; }
+.attachment-copy { min-width: 0; display: grid; gap: 3px; }
+.attachment-copy strong {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--c-ink);
+  font-size: var(--fs-base);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.attachment-copy small { color: var(--c-muted); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.attachment-action { width: 42px; display: grid; justify-items: end; color: #1d4ed8; font-size: var(--fs-xs); font-weight: 700; white-space: nowrap; }
 .detail-actions { margin-top: var(--sp-4); display: flex; justify-content: flex-end; }
 .detail-actions .btn { min-height: 44px; }
 .detail-empty { min-height: 160px; margin: 0; display: grid; place-items: center; color: var(--c-muted); font-size: var(--fs-sm); }
-@media (max-width: 640px) {
+@container ticket-detail (max-width: 720px) {
   .detail-head { flex-direction: column; }
   .detail-tags { justify-content: flex-start; }
+  .attachment-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@container ticket-detail (max-width: 520px) {
   .ticket-fields, .summary-fields { grid-template-columns: minmax(0, 1fr); }
+  .detail-actions, .detail-actions .btn { width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) { .attachment-item { transition: none; } }
 </style>

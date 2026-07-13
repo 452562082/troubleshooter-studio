@@ -2,6 +2,7 @@ import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
 import type { BugRecord } from '../lib/bridge/bugs'
 import BugTicketDetail from './BugTicketDetail.vue'
+import detailSource from './BugTicketDetail.vue?raw'
 
 const bug: BugRecord = {
   id: 'zentao-840',
@@ -33,6 +34,45 @@ const bug: BugRecord = {
 }
 
 describe('BugTicketDetail', () => {
+  it('keeps lists and wide rich content inside the detail card', () => {
+    const wrapper = mount(BugTicketDetail, {
+      props: {
+        bug: {
+          ...bug,
+          steps: '1. 打开搜索页并输入超长关键字\n2. 对比后端返回结果\n\n```text\nvery-long-line\n```',
+        },
+        mode: 'full',
+      },
+    })
+
+    expect(wrapper.get('.ticket-markdown ol').findAll('li')).toHaveLength(2)
+    expect(detailSource).toContain('padding-inline-start: 1.75rem')
+    expect(detailSource).toContain('.ticket-markdown :deep(table)')
+    expect(detailSource).toContain('overflow-x: auto')
+  })
+
+  it('declares component-width responsive layout for supported viewports', () => {
+    const wrapper = mount(BugTicketDetail, { props: { bug, mode: 'full' } })
+
+    expect(wrapper.get('.ticket-detail').attributes('data-responsive-viewports')).toBe('375,768,1024,1440')
+    expect(wrapper.get('.ticket-detail').attributes('data-overflow-safe')).toBe('true')
+    expect(detailSource).toContain('container: ticket-detail / inline-size')
+    expect(detailSource).toContain('@container ticket-detail')
+  })
+
+  it('keeps a long attachment name accessible without displacing the preview action', () => {
+    const longName = 'app_user_search_backend_two_results_with_environment_and_timestamp.png'
+    const wrapper = mount(BugTicketDetail, {
+      props: { bug: { ...bug, attachments: [{ id: 'long', name: longName, type: 'image/png' }] }, mode: 'full' },
+    })
+    const attachment = wrapper.get('[data-attachment-index="0"]')
+
+    expect(attachment.attributes('title')).toBe(longName)
+    expect(attachment.attributes('aria-label')).toBe(`预览附件：${longName}`)
+    expect(attachment.get('.attachment-copy strong').text()).toBe(longName)
+    expect(attachment.get('.attachment-action').text()).toBe('预览')
+  })
+
   it('renders full ticket fields, sanitized Markdown, attachments, and open action', async () => {
     const wrapper = mount(BugTicketDetail, { props: { bug, mode: 'full' } })
 

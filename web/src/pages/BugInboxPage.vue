@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, useId, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import BugTicketDetail from '../components/BugTicketDetail.vue'
 import BugTicketList from '../components/BugTicketList.vue'
@@ -27,6 +27,9 @@ import { useBugTickets } from '../lib/useBugTickets'
 
 const router = useRouter()
 const tickets = useBugTickets({ listBugs, fetchBugByID })
+const platformConfigInstanceID = useId()
+const botSearchID = `${platformConfigInstanceID}-bot-search`
+const manualBugFieldID = `${platformConfigInstanceID}-manual-bug`
 const platforms = ref<BugPlatform[]>([])
 const installedBots = ref<DiscoveredBot[]>([])
 const hookBaseURL = ref('')
@@ -446,17 +449,35 @@ function eventValue(event: Event): string {
         </header>
         <p v-if="configuredPlatformBots.length === 0" class="empty compact">{{ allBotRefs.length ? '还未添加排障机器人' : '暂无已安装机器人' }}</p>
         <div v-else class="bot-config-list">
-          <div v-for="item in configuredPlatformBots" :key="item.mapping.bot_key" class="bot-config-row">
-            <span class="bot-config-main"><strong>{{ botDisplayName(item.bot) }}</strong><small>{{ item.bot.target || '未知类型' }} · {{ item.bot.path }}</small></span>
-            <select v-if="item.bot.envs?.length" class="form-control" :value="item.mapping.env" @change="setPlatformBotEnv(item.mapping.bot_key, eventValue($event))"><option v-for="env in item.bot.envs" :key="env" :value="env">{{ env }}</option></select>
-            <input v-else class="form-control" :value="item.mapping.env" placeholder="机器人环境" @input="setPlatformBotEnv(item.mapping.bot_key, eventValue($event))">
+          <div v-for="(item, botIndex) in configuredPlatformBots" :key="item.mapping.bot_key" class="bot-config-row">
+            <span class="bot-config-main"><strong :id="`${platformConfigInstanceID}-bot-${botIndex}-name`">{{ botDisplayName(item.bot) }}</strong><small>{{ item.bot.target || '未知类型' }} · {{ item.bot.path }}</small></span>
+            <label class="field-label bot-env-field" :for="`${platformConfigInstanceID}-bot-${botIndex}-env`">
+              <span :id="`${platformConfigInstanceID}-bot-${botIndex}-env-label`">机器人环境</span>
+              <select
+                v-if="item.bot.envs?.length"
+                :id="`${platformConfigInstanceID}-bot-${botIndex}-env`"
+                class="form-control"
+                :aria-labelledby="`${platformConfigInstanceID}-bot-${botIndex}-name ${platformConfigInstanceID}-bot-${botIndex}-env-label`"
+                :value="item.mapping.env"
+                @change="setPlatformBotEnv(item.mapping.bot_key, eventValue($event))"
+              ><option v-for="env in item.bot.envs" :key="env" :value="env">{{ env }}</option></select>
+              <input
+                v-else
+                :id="`${platformConfigInstanceID}-bot-${botIndex}-env`"
+                class="form-control"
+                :aria-labelledby="`${platformConfigInstanceID}-bot-${botIndex}-name ${platformConfigInstanceID}-bot-${botIndex}-env-label`"
+                :value="item.mapping.env"
+                placeholder="机器人环境"
+                @input="setPlatformBotEnv(item.mapping.bot_key, eventValue($event))"
+              >
+            </label>
             <button class="icon-button danger-icon-button" type="button" aria-label="移除机器人" @click="removePlatformBot(item.mapping.bot_key)">
               <svg aria-hidden="true" viewBox="0 0 24 24" fill="none"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13M10 11v5m4-5v5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
             </button>
           </div>
         </div>
         <div v-if="botPickerOpen" class="bot-picker">
-          <input v-model="botPickerQuery" class="form-control" placeholder="搜索机器人名称、类型、路径">
+          <label class="field-label bot-search-field" :for="botSearchID"><span>搜索机器人</span><input :id="botSearchID" v-model="botPickerQuery" class="form-control" placeholder="名称、类型或路径"></label>
           <p v-if="addableBotRefs.length === 0" class="empty compact">没有可添加的机器人</p>
           <button v-for="bot in addableBotRefs" :key="bot.key" type="button" class="bot-picker-row" :data-bot-key="bot.key" @click="addPlatformBot(bot)"><span class="bot-config-main"><strong>{{ botDisplayName(bot) }}</strong><small>{{ bot.target }} · {{ bot.path }}</small></span><span>添加</span></button>
         </div>
@@ -469,8 +490,8 @@ function eventValue(event: Event): string {
           <label class="interval-control">每 <input v-model.number="platformDraft.poll_interval_minutes" aria-label="后台同步间隔分钟" type="number" min="1" :disabled="!platformDraft.poll_enabled"> 分钟</label>
         </div>
         <div class="trigger-row">
-          <button class="compact-button accent-button" type="button" data-action="sync-platform" :disabled="!selectedPlatform || syncingBugs" @click="syncSelectedPlatform">同步我的 Bug</button>
-          <input v-model="manualBugID" class="form-control" placeholder="Bug ID 或飞书消息" @keyup.enter="fetchManualBug">
+          <button class="compact-button secondary-button" type="button" data-action="sync-platform" :disabled="!selectedPlatform || syncingBugs" @click="syncSelectedPlatform">同步我的 Bug</button>
+          <label class="field-label manual-bug-field" :for="manualBugFieldID"><span>指定 Bug</span><input :id="manualBugFieldID" v-model="manualBugID" class="form-control" placeholder="Bug ID 或飞书消息" @keyup.enter="fetchManualBug"></label>
           <button class="compact-button secondary-button" type="button" data-action="fetch-bug" :disabled="!selectedPlatform || !manualBugID.trim() || fetchingBug" @click="fetchManualBug">拉取指定 Bug</button>
         </div>
         <div class="hook-row"><strong>Hook URL</strong><code>{{ hookURL || '保存平台后生成' }}</code><button class="compact-button secondary-button" type="button" data-action="copy-hook-url" :disabled="!hookURL" @click="copyHookURL">复制</button></div>
@@ -573,9 +594,9 @@ function eventValue(event: Event): string {
 .ghost-button:hover:not(:disabled) { background: var(--c-surf-3); color: var(--c-text); }
 .primary-button { border-color: var(--c-accent-hover); background: var(--c-accent-hover); color: #fff; }
 .primary-button:hover:not(:disabled) { border-color: #1d4ed8; background: #1d4ed8; }
-.accent-button { border-color: var(--c-primary); background: var(--c-primary); color: #fff; }
-.accent-button:hover:not(:disabled) { border-color: var(--c-primary-hover); background: var(--c-primary-hover); }
-.compact-button:disabled, .danger-link:disabled { opacity: .5; cursor: not-allowed; }
+.compact-button:disabled, .danger-link:disabled, .icon-button:disabled { border-color: var(--c-line); background: var(--c-surf-3); color: #64748b; cursor: not-allowed; }
+.compact-button:disabled svg, .danger-link:disabled svg, .icon-button:disabled svg { color: #64748b; }
+.platform-config input:disabled, .platform-config select:disabled { border-color: var(--c-line); background: var(--c-surf-3); color: #64748b; cursor: not-allowed; }
 .compact-button:focus-visible, .danger-link:focus-visible, .icon-button:focus-visible { outline: 2px solid var(--c-accent-hover); outline-offset: 2px; }
 .toggle-control { min-height: 36px; display: inline-flex; align-items: center; gap: 7px; color: var(--c-text); white-space: nowrap; cursor: pointer; }
 .toggle-control input { position: absolute; opacity: 0; pointer-events: none; }
@@ -590,11 +611,11 @@ function eventValue(event: Event): string {
 .bot-config-main small { color: var(--c-muted); font-size: var(--fs-xs); overflow-wrap: anywhere; }
 .icon-button { width: 40px; height: 40px; padding: 0; display: inline-grid; place-items: center; border: 0; border-radius: 999px; background: transparent; color: var(--c-muted); cursor: pointer; transition: background-color 180ms ease, color 180ms ease; }
 .icon-button svg { width: 18px; height: 18px; }
-.danger-icon-button:hover { background: var(--c-danger-bg); color: var(--c-danger); }
+.danger-icon-button:hover, .danger-icon-button:focus-visible { background: var(--c-danger-bg); color: var(--c-danger); }
 .bot-picker-row { width: 100%; min-width: 0; min-height: 40px; padding: 8px 10px; display: flex; justify-content: space-between; gap: var(--sp-2); border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf); color: var(--c-text); text-align: left; cursor: pointer; }
 .interval-control { min-height: 36px; display: inline-flex; align-items: center; gap: 6px; color: var(--c-muted); }
 .interval-control input { width: 72px; min-height: 36px; padding: 0 8px; }
-.trigger-row { min-width: 0; display: grid; grid-template-columns: auto minmax(180px, 1fr) auto; gap: var(--sp-2); }
+.trigger-row { min-width: 0; display: grid; grid-template-columns: auto minmax(180px, 1fr) auto; align-items: end; gap: var(--sp-2); }
 .hook-row { flex-wrap: wrap; }
 .hook-row code { min-width: 0; flex: 1; padding: 7px 9px; overflow-wrap: anywhere; border-radius: var(--r-sm); background: var(--c-surf-2); color: var(--c-muted); }
 .danger-link { min-height: 36px; padding: 0 6px; display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: var(--c-danger); font: inherit; font-size: var(--fs-sm); font-weight: 600; cursor: pointer; }
@@ -641,10 +662,12 @@ function eventValue(event: Event): string {
 }
 @media (max-width: 640px) {
   .bug-header, .section-heading, .platform-list, .hook-row { align-items: stretch; flex-direction: column; }
+  .config-disclosure, .platform-chip, .bot-picker-row, .interval-control input { min-height: 44px; }
   .platform-config .form-control, .compact-button, .danger-link, .toggle-control { min-height: 44px; }
   .trigger-row, .bot-config-row { grid-template-columns: minmax(0, 1fr); }
   .bot-config-row .icon-button { justify-self: end; width: 44px; height: 44px; }
-  .config-footer { align-items: stretch; }
-  .config-footer .primary-button { min-width: 140px; }
+  .config-footer { align-items: stretch; flex-direction: column; }
+  .config-footer .danger-link { align-self: flex-start; }
+  .config-footer .primary-button { width: 100%; min-width: 0; }
 }
 </style>

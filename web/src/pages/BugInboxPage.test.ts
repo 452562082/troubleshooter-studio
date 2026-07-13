@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -131,6 +132,28 @@ describe('BugInboxPage', () => {
     wrapper.unmount()
   })
 
+  it('declares concrete mobile touch-target and full-width save contracts', () => {
+    const source = readFileSync('src/pages/BugInboxPage.vue', 'utf8')
+    const mobileCSS = source.split('@media (max-width: 640px) {')[1]?.split('\n}')[0] || ''
+
+    expect(mobileCSS).toMatch(/\.config-disclosure,[^{]*\.platform-chip,[^{]*\.bot-picker-row,[^{]*\.interval-control input \{ min-height: 44px; \}/)
+    expect(mobileCSS).toContain('.platform-config .form-control, .compact-button, .danger-link, .toggle-control { min-height: 44px; }')
+    expect(mobileCSS).toContain('.bot-config-row .icon-button { justify-self: end; width: 44px; height: 44px; }')
+    expect(mobileCSS).toContain('.config-footer { align-items: stretch; flex-direction: column; }')
+    expect(mobileCSS).toContain('.config-footer .danger-link { align-self: flex-start; }')
+    expect(mobileCSS).toContain('.config-footer .primary-button { width: 100%; min-width: 0; }')
+  })
+
+  it('declares readable panel disabled colors and red danger-icon focus treatment', () => {
+    const source = readFileSync('src/pages/BugInboxPage.vue', 'utf8')
+
+    expect(source).not.toMatch(/\.compact-button:disabled[^}]*opacity/)
+    expect(source).toMatch(/\.compact-button:disabled,[\s\S]*?\.icon-button:disabled \{[^}]*border-color:[^;]+;[^}]*background:[^;]+;[^}]*color:[^;]+;[^}]*cursor: not-allowed;/)
+    expect(source).toMatch(/\.compact-button:disabled svg,[\s\S]*?\.icon-button:disabled svg \{ color: [^;]+; \}/)
+    expect(source).toMatch(/\.platform-config input:disabled, \.platform-config select:disabled \{[^}]*border-color:[^;]+;[^}]*background:[^;]+;[^}]*color:[^;]+;[^}]*cursor: not-allowed;/)
+    expect(source).toContain('.danger-icon-button:hover, .danger-icon-button:focus-visible { background: var(--c-danger-bg); color: var(--c-danger); }')
+  })
+
   it('is a browse-only inbox and opens the selected ticket in the incident route', async () => {
     vi.mocked(listBugs).mockResolvedValue([bug])
     const wrapper = await mountedInbox()
@@ -256,6 +279,11 @@ describe('BugInboxPage', () => {
     const addBot = wrapper.get('[data-action="toggle-bot-picker"]')
     expect(addBot.find('svg[aria-hidden="true"]').exists()).toBe(true)
 
+    const sync = wrapper.get('[data-action="sync-platform"]')
+    expect(sync.classes()).toContain('secondary-button')
+    expect(sync.classes()).not.toContain('accent-button')
+    expect(sync.classes()).not.toContain('primary-button')
+
     const removeBot = wrapper.get('button.icon-button[aria-label="移除机器人"]')
     expect(removeBot.find('svg[aria-hidden="true"]').exists()).toBe(true)
     expect(removeBot.text()).toBe('')
@@ -267,6 +295,53 @@ describe('BugInboxPage', () => {
     expect(footer.findAll('button').slice(-1)[0]?.attributes('data-action')).toBe('save-platform')
     expect(footer.get('[data-action="delete-platform"]').classes()).toContain('danger-link')
     expect(footer.get('[data-action="save-platform"]').classes()).toContain('primary-button')
+  })
+
+  it('associates visible labels with bot environment, bot search, and manual Bug controls', async () => {
+    vi.mocked(discoverBots).mockResolvedValue([
+      {
+        path: '/repo/base', ghost: false,
+        meta: { system_id: 'base', system_name: 'Base', target: 'codex', agent_id: 'base-troubleshooter' },
+        environments: ['test'],
+      } as any,
+      {
+        path: '/repo/payments', ghost: false,
+        meta: { system_id: 'payments', system_name: 'Payments', target: 'codex', agent_id: 'payments-troubleshooter' },
+        environments: ['staging'],
+      } as any,
+    ])
+    vi.mocked(listBugPlatforms).mockResolvedValue([{
+      id: 'zentao-main', name: '测试环境', type: 'zentao', auth_mode: 'feishu_sso',
+      bot_mappings: [
+        { bot_key: '/repo/base|codex', env: 'test' },
+        { bot_key: '/repo/payments|codex', env: 'staging' },
+      ], enabled: true,
+    }])
+    const wrapper = await mountedInbox()
+    await wrapper.get('[data-action="toggle-platform-config"]').trigger('click')
+
+    const environmentLabels = wrapper.findAll('.bot-env-field')
+    expect(environmentLabels).toHaveLength(2)
+    expect(new Set(environmentLabels.map(label => label.get('.form-control').attributes('id'))).size).toBe(2)
+    const environmentLabel = environmentLabels[0]
+    const environmentControl = environmentLabel.get('.form-control')
+    expect(environmentLabel.text()).toContain('机器人环境')
+    expect(environmentLabel.attributes('for')).toBe(environmentControl.attributes('id'))
+    const accessibleNameIDs = environmentControl.attributes('aria-labelledby')
+    expect(accessibleNameIDs).toBeDefined()
+    const labelledBy = accessibleNameIDs!.split(' ')
+    expect(labelledBy).toHaveLength(2)
+    expect(wrapper.get(`[id="${labelledBy[0]}"]`).text()).toBe('Base')
+    expect(wrapper.get(`[id="${labelledBy[1]}"]`).text()).toBe('机器人环境')
+
+    await wrapper.get('[data-action="toggle-bot-picker"]').trigger('click')
+    const searchLabel = wrapper.get('.bot-search-field')
+    expect(searchLabel.text()).toContain('搜索机器人')
+    expect(searchLabel.attributes('for')).toBe(searchLabel.get('input').attributes('id'))
+
+    const manualLabel = wrapper.get('.manual-bug-field')
+    expect(manualLabel.text()).toContain('指定 Bug')
+    expect(manualLabel.attributes('for')).toBe(manualLabel.get('input').attributes('id'))
   })
 
   it('exposes the selected platform chip to assistive technology', async () => {

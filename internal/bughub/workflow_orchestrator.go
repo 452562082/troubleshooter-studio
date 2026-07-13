@@ -469,6 +469,31 @@ func (o *CaseOrchestrator) ResetCase(ctx context.Context, cmd ResetCaseCommand) 
 	if incident.BugID != strings.TrimSpace(cmd.Bug.ID) {
 		return IncidentCase{}, fmt.Errorf("reset Bug %q does not match Case Bug %q", cmd.Bug.ID, incident.BugID)
 	}
+	if cmd.Bot.Key != incident.SelectedBotKey {
+		return IncidentCase{}, fmt.Errorf("reset Bot %q does not match Case Bot %q", cmd.Bot.Key, incident.SelectedBotKey)
+	}
+	if incident.Source != "" && cmd.Bug.Source != incident.Source {
+		return IncidentCase{}, fmt.Errorf("reset Bug source %q does not match Case source %q", cmd.Bug.Source, incident.Source)
+	}
+	if incident.SystemID != "" && cmd.Bug.SystemID != incident.SystemID {
+		return IncidentCase{}, fmt.Errorf("reset Bug system %q does not match Case system %q", cmd.Bug.SystemID, incident.SystemID)
+	}
+	environment := strings.TrimSpace(cmd.Bug.Env)
+	if environment == "" {
+		environment = strings.TrimSpace(cmd.Bot.Env)
+	}
+	if incident.Environment != "" && environment != incident.Environment {
+		return IncidentCase{}, fmt.Errorf("reset environment %q does not match Case environment %q", environment, incident.Environment)
+	}
+	if incident.CurrentAttemptID != "" {
+		attempt, loadErr := o.store.GetAttempt(ctx, incident.CurrentAttemptID)
+		if loadErr != nil {
+			return IncidentCase{}, loadErr
+		}
+		if attempt.BotKey != cmd.Bot.Key || attempt.AgentTarget != cmd.Bot.Target {
+			return IncidentCase{}, fmt.Errorf("reset Bot %q/%q does not match current attempt Bot %q/%q", cmd.Bot.Key, cmd.Bot.Target, attempt.BotKey, attempt.AgentTarget)
+		}
+	}
 	result, err := o.store.ResetCaseWithReplacement(ctx, CaseReset{
 		CaseID:          cmd.CaseID,
 		NewCaseID:       cmd.NewCaseID,

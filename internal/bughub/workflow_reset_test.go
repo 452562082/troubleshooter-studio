@@ -173,6 +173,59 @@ func TestResetCaseRacingCompletionHasOneWinningState(t *testing.T) {
 	}
 }
 
+func TestResetCaseLateCompletionCannotRewriteArchivedCase(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	old, attempt := prepareResetCase(t, store, "case-reset-late-completion")
+	runner := &recordingPhaseRunner{}
+	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	cmd := resetOrchestratorCommand(old, "case-reset-late-completion-next", "reset-late-completion")
+
+	replacement, err := orchestrator.ResetCase(ctx, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivedBeforeCallback, err := store.GetCase(ctx, old.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementBeforeCallback, err := store.GetCase(ctx, replacement.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, completionErr := orchestrator.CompleteAttempt(ctx, CompleteAttemptCommand{
+		CaseID:          old.ID,
+		AttemptID:       attempt.ID,
+		ExpectedVersion: old.Version,
+		IdempotencyKey:  "complete-after-reset",
+		ActorID:         "agent",
+		Outcome:         PhaseOutcomeNeedsEvidence,
+		OutputJSON:      []byte(`{"gaps":["late callback"]}`),
+	})
+	if completionErr == nil {
+		t.Fatal("late completion succeeded after durable reset")
+	}
+
+	archivedAfterCallback, err := store.GetCase(ctx, old.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(archivedBeforeCallback, archivedAfterCallback) {
+		t.Fatalf("late completion changed archived Case:\nbefore=%+v\nafter=%+v", archivedBeforeCallback, archivedAfterCallback)
+	}
+	if archivedAfterCallback.Status != CaseResetArchived || archivedAfterCallback.Version != old.Version+1 || archivedAfterCallback.SupersededByCaseID != replacement.ID || archivedAfterCallback.ClosedAt == nil || archivedAfterCallback.CurrentAttemptID != "" {
+		t.Fatalf("archived Case lost reset state: %+v", archivedAfterCallback)
+	}
+	replacementAfterCallback, err := store.GetCase(ctx, replacement.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(replacementBeforeCallback, replacementAfterCallback) || replacementAfterCallback.Status != CaseValidating || replacementAfterCallback.ResetFromCaseID != old.ID || replacementAfterCallback.CurrentAttemptID == "" {
+		t.Fatalf("late completion changed replacement:\nbefore=%+v\nafter=%+v", replacementBeforeCallback, replacementAfterCallback)
+	}
+}
+
 func TestResetCaseValidatesCommand(t *testing.T) {
 	store := newOrchestratorStore(t)
 	old, _ := prepareResetCase(t, store, "case-reset-validation")
@@ -200,8 +253,83 @@ func TestResetCaseValidatesCommand(t *testing.T) {
 	}
 }
 
+func TestResetCaseValidatesDurableExecutionBindingBeforeMutation(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutateCase func(*testing.T, *CaseStore, IncidentCase, PhaseAttempt)
+		mutateCmd  func(*ResetCaseCommand)
+		wantError  bool
+	}{
+		{name: "valid binding"},
+		{name: "Bot key mismatch", mutateCmd: func(cmd *ResetCaseCommand) { cmd.Bot.Key = "other-bot" }, wantError: true},
+		{name: "attempt Bot key mismatch", mutateCase: func(t *testing.T, store *CaseStore, _ IncidentCase, attempt PhaseAttempt) {
+			if _, err := store.db.Exec(`UPDATE phase_attempts SET bot_key=? WHERE id=?`, "other-bot", attempt.ID); err != nil {
+				t.Fatal(err)
+			}
+		}, wantError: true},
+		{name: "target mismatch", mutateCmd: func(cmd *ResetCaseCommand) { cmd.Bot.Target = "claude" }, wantError: true},
+		{name: "source mismatch", mutateCmd: func(cmd *ResetCaseCommand) { cmd.Bug.Source = "other-source" }, wantError: true},
+		{name: "system mismatch", mutateCmd: func(cmd *ResetCaseCommand) { cmd.Bug.SystemID = "other-system" }, wantError: true},
+		{name: "Bug environment mismatch", mutateCmd: func(cmd *ResetCaseCommand) { cmd.Bug.Env = "prod" }, wantError: true},
+		{name: "Bot fallback environment mismatch", mutateCmd: func(cmd *ResetCaseCommand) { cmd.Bug.Env = ""; cmd.Bot.Env = "prod" }, wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := newOrchestratorStore(t)
+			old, attempt := prepareResetCase(t, store, "case-reset-binding-"+strings.ReplaceAll(test.name, " ", "-"))
+			if test.mutateCase != nil {
+				test.mutateCase(t, store, old, attempt)
+			}
+			runner := &recordingPhaseRunner{}
+			orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+			cmd := resetOrchestratorCommand(old, old.ID+"-next", "reset-binding-"+test.name)
+			cmd.Bug.Source = old.Source
+			cmd.Bug.SystemID = old.SystemID
+			if test.mutateCmd != nil {
+				test.mutateCmd(&cmd)
+			}
+
+			beforeCase, err := store.GetCase(ctx, old.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeAttempt, err := store.GetAttempt(ctx, attempt.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, resetErr := orchestrator.ResetCase(ctx, cmd)
+			if test.wantError {
+				if resetErr == nil {
+					t.Fatal("durable binding mismatch succeeded")
+				}
+				afterCase, loadErr := store.GetCase(ctx, old.ID)
+				if loadErr != nil || !reflect.DeepEqual(beforeCase, afterCase) {
+					t.Fatalf("rejected reset changed old Case: before=%+v after=%+v err=%v", beforeCase, afterCase, loadErr)
+				}
+				afterAttempt, loadErr := store.GetAttempt(ctx, attempt.ID)
+				if loadErr != nil || !reflect.DeepEqual(beforeAttempt, afterAttempt) {
+					t.Fatalf("rejected reset changed attempt: before=%+v after=%+v err=%v", beforeAttempt, afterAttempt, loadErr)
+				}
+				if _, loadErr := store.GetCase(ctx, cmd.NewCaseID); !errors.Is(loadErr, ErrCaseNotFound) {
+					t.Fatalf("rejected reset created replacement: %v", loadErr)
+				}
+				runner.mu.Lock()
+				defer runner.mu.Unlock()
+				if len(runner.cancels) != 0 || len(runner.starts) != 0 {
+					t.Fatalf("rejected reset invoked runner: cancels=%v starts=%+v", runner.cancels, runner.starts)
+				}
+				return
+			}
+			if resetErr != nil {
+				t.Fatalf("valid durable binding rejected: %v", resetErr)
+			}
+		})
+	}
+}
+
 func resetOrchestratorCommand(incident IncidentCase, newCaseID, key string) ResetCaseCommand {
-	return ResetCaseCommand{CaseID: incident.ID, NewCaseID: newCaseID, ExpectedVersion: incident.Version, IdempotencyKey: key, ActorID: "alice", Bug: Bug{ID: incident.BugID, Env: incident.Environment}, Bot: BotRef{Key: "validator", Target: "codex"}, InputJSON: []byte(`{"reason":"retry"}`)}
+	return ResetCaseCommand{CaseID: incident.ID, NewCaseID: newCaseID, ExpectedVersion: incident.Version, IdempotencyKey: key, ActorID: "alice", Bug: Bug{ID: incident.BugID, Source: incident.Source, SystemID: incident.SystemID, Env: incident.Environment}, Bot: BotRef{Key: "validator", Target: "codex"}, InputJSON: []byte(`{"reason":"retry"}`)}
 }
 
 func TestResetCaseWithReplacementIsAtomic(t *testing.T) {

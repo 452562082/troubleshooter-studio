@@ -247,7 +247,11 @@ function trapResetDialogFocus(event: KeyboardEvent) {
   }
   const first = focusable[0]
   const last = focusable[focusable.length - 1]
-  if (event.shiftKey && document.activeElement === first) {
+  if (document.activeElement === resetDialogElement.value) {
+    event.preventDefault()
+    const target = event.shiftKey ? last : first
+    target.focus()
+  } else if (event.shiftKey && document.activeElement === first) {
     event.preventDefault()
     last.focus()
   } else if (!event.shiftKey && document.activeElement === last) {
@@ -259,9 +263,17 @@ function trapResetDialogFocus(event: KeyboardEvent) {
 async function confirmReset() {
   const request = resetDialog.value
   if (!request || resetting.value || !request.botKey) return
-  const isOriginalCurrent = () => {
+  const isExpectedResetContext = (replacement?: IncidentCase) => {
     const current = displayedDetail.value?.case
-    return isCurrentBug(request.bugID) && current?.id === request.caseID && current.version === request.caseVersion
+    if (!isCurrentBug(request.bugID) || current?.bug_id !== request.bugID) return false
+    if (current.id === request.caseID && current.version === request.caseVersion) return true
+    return Boolean(
+      replacement &&
+      replacement.bug_id === request.bugID &&
+      replacement.reset_from_case_id === request.caseID &&
+      current.id === replacement.id &&
+      current.reset_from_case_id === request.caseID,
+    )
   }
   resetting.value = true
   resetError.value = ''
@@ -274,17 +286,17 @@ async function confirmReset() {
       actor_id: 'desktop-user',
       bot_key: request.botKey,
     }))
-    if (!isOriginalCurrent()) return
+    if (!isExpectedResetContext(replacement)) return
     const snapshot = await getIncidentCase(replacement.id)
-    if (!isOriginalCurrent()) return
+    if (!isExpectedResetContext(replacement)) return
     incidentWorkflow.applySnapshot(snapshot)
     resetting.value = false
     closeResetDialog()
     await incidentWorkflow.refreshCases()
-    if (!isCurrentBug(request.bugID) || displayedDetail.value?.case.id !== replacement.id) return
+    if (!isExpectedResetContext(replacement) || displayedDetail.value?.case.id !== replacement.id) return
     toast.success('Case 已重置，接替 Case 已创建')
   } catch (error) {
-    if (!isOriginalCurrent()) return
+    if (!isExpectedResetContext()) return
     const message = error instanceof Error ? error.message : String(error)
     resetError.value = message
     incidentWorkflow.error.value = message

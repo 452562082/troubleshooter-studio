@@ -21,7 +21,7 @@ import IncidentWorkbenchPage from './IncidentWorkbenchPage.vue'
 
 const route = vi.hoisted(() => ({ query: {} as Record<string, string> }))
 const router = vi.hoisted(() => ({ replace: vi.fn() }))
-const runtime = vi.hoisted(() => ({ EventsOn: vi.fn(() => vi.fn()) }))
+const runtime = vi.hoisted(() => ({ EventsOn: vi.fn((_name: string, _handler: (payload: unknown) => void) => vi.fn()) }))
 const notifications = vi.hoisted(() => ({
   error: vi.fn(),
   success: vi.fn(),
@@ -421,6 +421,55 @@ describe('IncidentWorkbenchPage', () => {
     expect(getIncidentCase).toHaveBeenLastCalledWith('case-reset-replacement')
   })
 
+  it('finishes reset when the exact replacement event is selected before the bridge Promise resolves', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-1', 'waiting_evidence', '2026-07-13T00:00:00Z')
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    const pendingReset = deferred<IncidentCase>()
+    vi.mocked(resetIncidentCase).mockReturnValue(pendingReset.promise)
+    vi.mocked(getIncidentCase).mockImplementation(async caseID => {
+      if (caseID === item.id) return detail(item)
+      const replacement = incident(caseID, 'pending_validation', '2026-07-13T00:01:00Z', {
+        version: 1,
+        current_attempt_id: '',
+        reset_from_case_id: item.id,
+      })
+      return detail(replacement)
+    })
+    const wrapper = await mountedPage()
+
+    await wrapper.get('.reset-action').trigger('click')
+    await wrapper.get('[data-reset-confirm]').trigger('click')
+    const input = vi.mocked(resetIncidentCase).mock.calls[0][0]
+    const replacement = incident(input.new_case_id, 'pending_validation', '2026-07-13T00:01:00Z', {
+      version: 1,
+      current_attempt_id: '',
+      reset_from_case_id: item.id,
+    })
+    const archived = { ...item, status: 'reset_archived' as const, version: 8, superseded_by_case_id: replacement.id }
+    vi.mocked(listIncidentCases).mockResolvedValueOnce([archived, replacement])
+    const eventHandler = runtime.EventsOn.mock.calls.find(call => call[0] === 'incident-case:event')?.[1]
+    expect(eventHandler).toBeTypeOf('function')
+
+    eventHandler?.({ kind: 'snapshot', case: replacement, snapshot: detail(replacement) })
+    await flushPromises()
+    await flushPromises()
+    expect(wrapper.get('.case-heading').text()).toContain(replacement.id)
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
+
+    pendingReset.resolve(replacement)
+    await flushPromises()
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(wrapper.get('.case-heading').text()).toContain(replacement.id)
+    expect(listIncidentCases).toHaveBeenCalledTimes(2)
+    expect(getIncidentCase).toHaveBeenLastCalledWith(replacement.id)
+    expect(notifications.success).toHaveBeenCalledWith('Case 已重置，接替 Case 已创建')
+  })
+
   it('keeps the reset dialog cancellation-first, focus-trapped, dismissible, and focus-restoring', async () => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])
@@ -490,8 +539,17 @@ describe('IncidentWorkbenchPage', () => {
     await flushPromises()
 
     expect(wrapper.get('[role="dialog"]').text()).toContain('reset conflict; refresh and retry')
-    expect(wrapper.get<HTMLButtonElement>('[data-reset-cancel]').element.disabled).toBe(false)
-    expect(wrapper.get<HTMLButtonElement>('[data-reset-confirm]').element.disabled).toBe(false)
+    const cancel = wrapper.get<HTMLButtonElement>('[data-reset-cancel]')
+    const confirm = wrapper.get<HTMLButtonElement>('[data-reset-confirm]')
+    expect(cancel.element.disabled).toBe(false)
+    expect(confirm.element.disabled).toBe(false)
+    expect(document.activeElement).toBe(dialog.element)
+
+    await dialog.trigger('keydown', { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(confirm.element)
+    dialog.element.focus()
+    await dialog.trigger('keydown', { key: 'Tab' })
+    expect(document.activeElement).toBe(cancel.element)
     wrapper.unmount()
   })
 

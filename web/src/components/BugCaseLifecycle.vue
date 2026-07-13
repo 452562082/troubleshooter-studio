@@ -248,7 +248,7 @@ function dialogTitle(): string {
           <button v-if="action" class="btn primary primary-action" type="button" :disabled="pending" @click="openAction">
             {{ pending ? '处理中…' : action.label }}
           </button>
-          <span v-else class="terminal-copy">{{ detail.case.status === 'fixed_verified' ? '闭环完成' : '当前阶段自动推进' }}</span>
+          <span v-else class="terminal-copy">{{ detail.case.status === 'fixed_verified' ? '闭环完成' : detail.case.status === 'reset_archived' ? '已归档，由新 Case 接替' : '当前阶段自动推进' }}</span>
         </section>
 
         <p class="live-error" role="status" aria-live="assertive">{{ error }}</p>

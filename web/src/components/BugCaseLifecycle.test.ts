@@ -181,6 +181,8 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.text()).toContain('历史记录只读')
     expect(wrapper.find('.primary-action').exists()).toBe(false)
     expect(wrapper.findAll('.lifecycle-stage').every(stage => stage.attributes('data-state') === 'archived')).toBe(true)
+    expect(wrapper.find('.terminal-copy').text()).toBe('已归档，由新 Case 接替')
+    expect(wrapper.text()).not.toContain('当前阶段自动推进')
   })
 
   it('contains responsive no-overflow contracts for all supported viewport fixtures', () => {

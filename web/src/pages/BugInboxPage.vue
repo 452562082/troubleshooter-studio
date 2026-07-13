@@ -499,7 +499,10 @@ function eventValue(event: Event): string {
           <label class="interval-control">每 <input v-model.number="platformDraft.poll_interval_minutes" aria-label="后台同步间隔分钟" type="number" min="1" :disabled="!platformDraft.poll_enabled"> 分钟</label>
         </div>
         <div class="trigger-row">
-          <button class="compact-button secondary-button" type="button" data-action="sync-platform" :disabled="!selectedPlatform || syncingBugs" @click="syncSelectedPlatform">同步我的 Bug</button>
+          <button class="compact-button secondary-button" type="button" data-action="sync-platform" :disabled="!selectedPlatform || syncingBugs" @click="syncSelectedPlatform">
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none"><path d="M20 7h-5V2M4 17h5v5M18.5 11a7 7 0 0 0-11.9-4.9L4 8M5.5 13a7 7 0 0 0 11.9 4.9L20 16" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            {{ syncingBugs ? '同步中…' : '从平台同步' }}
+          </button>
           <label class="field-label manual-bug-field" :for="manualBugFieldID"><span>指定 Bug</span><input :id="manualBugFieldID" v-model="manualBugID" class="form-control" placeholder="Bug ID 或飞书消息" @keyup.enter="fetchManualBug"></label>
           <button class="compact-button secondary-button" type="button" data-action="fetch-bug" :disabled="!selectedPlatform || !manualBugID.trim() || fetchingBug" @click="fetchManualBug">拉取指定 Bug</button>
         </div>
@@ -510,7 +513,10 @@ function eventValue(event: Event): string {
 
     <section class="inbox-workspace" data-overflow-safe="true">
       <aside class="ticket-list-panel" data-overflow-safe="true">
-        <button class="btn small refresh-button" type="button" :disabled="tickets.loading.value" @click="loadTickets">刷新</button>
+        <button class="compact-button secondary-button refresh-button" type="button" data-action="refresh-tickets" :aria-label="tickets.loading.value ? '正在刷新本地 Bug 列表' : '刷新本地 Bug 列表'" :disabled="tickets.loading.value" @click="loadTickets">
+          <svg aria-hidden="true" :class="{ spinning: tickets.loading.value }" viewBox="0 0 24 24" fill="none"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
+          {{ tickets.loading.value ? '刷新中…' : '刷新列表' }}
+        </button>
         <BugTicketList
           :bugs="tickets.filteredBugs.value"
           :selected-id="tickets.selectedID.value"
@@ -627,8 +633,11 @@ function eventValue(event: Event): string {
 .inbox-workspace { min-width: 0; display: grid; grid-template-columns: minmax(250px, 330px) minmax(0, 1fr); gap: var(--sp-3); }
 .ticket-list-panel, .ticket-detail-panel { min-width: 0; border: 1px solid var(--c-line); border-radius: var(--r-lg); background: var(--c-surf); }
 .ticket-list-panel { position: relative; padding: var(--sp-3); overflow: auto; }
-.ticket-list-panel :deep(.list-heading) { padding-right: 66px; }
+.ticket-list-panel :deep(.list-heading) { padding-right: 112px; }
 .refresh-button { position: absolute; z-index: 1; top: var(--sp-2); right: var(--sp-2); }
+.refresh-button svg { width: 16px; height: 16px; }
+.refresh-button svg.spinning { animation: refresh-spin 800ms linear infinite; }
+@keyframes refresh-spin { to { transform: rotate(360deg); } }
 .ticket-detail-panel { padding: var(--sp-3); overflow: auto; }
 .empty { min-height: 44px; margin: 0; display: grid; place-items: center; color: var(--c-muted); font-size: var(--fs-sm); text-align: center; }
 .empty.compact { min-height: 44px; }
@@ -658,6 +667,7 @@ function eventValue(event: Event): string {
 .attachment-preview-fallback { min-height: 220px; padding: var(--sp-4); display: grid; place-items: center; color: var(--c-muted); }
 @media (prefers-reduced-motion: reduce) {
   .config-disclosure, .compact-button, .toggle-track, .toggle-track > span, .icon-button, .attachment-preview-close { transition: none; }
+  .refresh-button svg.spinning { animation: none; }
 }
 @media (max-width: 900px) {
   .basic-row, .auth-row { grid-template-columns: minmax(0, 1fr); }

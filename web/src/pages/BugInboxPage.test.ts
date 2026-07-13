@@ -324,6 +324,84 @@ describe('BugInboxPage', () => {
     expect(footer.get('[data-action="save-platform"]').classes()).toContain('primary-button')
   })
 
+  it('keeps platform sync separate from local list refresh', async () => {
+    const platform = {
+      id: 'zentao-main', name: '测试环境', type: 'zentao',
+      auth_mode: 'feishu_sso', enabled: true,
+    }
+    vi.mocked(listBugPlatforms).mockResolvedValue([platform])
+    vi.mocked(listBugs).mockResolvedValue([bug])
+    vi.mocked(syncBugPlatform).mockResolvedValue({
+      platform_id: 'zentao-main', fetched: 1, stored: 1,
+    })
+    const wrapper = await mountedInbox()
+    await wrapper.get('[data-action="toggle-platform-config"]').trigger('click')
+
+    vi.mocked(listBugs).mockClear()
+    vi.mocked(syncBugPlatform).mockClear()
+    const refresh = wrapper.get('[data-action="refresh-tickets"]')
+    expect(refresh.text()).toContain('刷新列表')
+    expect(refresh.find('svg[aria-hidden="true"]').exists()).toBe(true)
+    await refresh.trigger('click')
+    await flushPromises()
+    expect(listBugs).toHaveBeenCalledTimes(1)
+    expect(syncBugPlatform).not.toHaveBeenCalled()
+
+    vi.mocked(listBugs).mockClear()
+    const sync = wrapper.get('[data-action="sync-platform"]')
+    expect(sync.text()).toContain('从平台同步')
+    expect(sync.find('svg[aria-hidden="true"]').exists()).toBe(true)
+    await sync.trigger('click')
+    await flushPromises()
+    expect(syncBugPlatform).toHaveBeenCalledWith('zentao-main')
+    expect(listBugs).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows a disabled loading state while refreshing the local list', async () => {
+    const wrapper = await mountedInbox()
+    let resolveRefresh!: (bugs: (typeof bug)[]) => void
+    vi.mocked(listBugs).mockImplementationOnce(() => new Promise(resolve => {
+      resolveRefresh = resolve
+    }))
+
+    const refresh = wrapper.get('[data-action="refresh-tickets"]')
+    await refresh.trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(refresh.attributes('disabled')).toBeDefined()
+    expect(refresh.text()).toContain('刷新中…')
+    expect(refresh.get('svg').classes()).toContain('spinning')
+
+    resolveRefresh([bug])
+    await flushPromises()
+    expect(refresh.attributes('disabled')).toBeUndefined()
+    expect(refresh.text()).toContain('刷新列表')
+  })
+
+  it('shows a disabled loading state while synchronizing the platform', async () => {
+    const platform = {
+      id: 'zentao-main', name: '测试环境', type: 'zentao',
+      auth_mode: 'feishu_sso', enabled: true,
+    }
+    vi.mocked(listBugPlatforms).mockResolvedValue([platform])
+    const wrapper = await mountedInbox()
+    await wrapper.get('[data-action="toggle-platform-config"]').trigger('click')
+    let resolveSync!: (result: { platform_id: string; fetched: number; stored: number }) => void
+    vi.mocked(syncBugPlatform).mockImplementationOnce(() => new Promise(resolve => {
+      resolveSync = resolve
+    }))
+
+    const sync = wrapper.get('[data-action="sync-platform"]')
+    await sync.trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(sync.attributes('disabled')).toBeDefined()
+    expect(sync.text()).toContain('同步中…')
+
+    resolveSync({ platform_id: 'zentao-main', fetched: 1, stored: 1 })
+    await flushPromises()
+    expect(sync.attributes('disabled')).toBeUndefined()
+    expect(sync.text()).toContain('从平台同步')
+  })
+
   it('associates visible labels with bot environment, bot search, and manual Bug controls', async () => {
     vi.mocked(discoverBots).mockResolvedValue([
       {
@@ -404,7 +482,7 @@ describe('BugInboxPage', () => {
     const newPlatform = wrapper.get('[data-action="new-platform"]')
     expect(newPlatform.text()).toContain('新建平台')
     expect(newPlatform.find('svg[aria-hidden="true"]').exists()).toBe(true)
-    expect(wrapper.text()).toContain('同步我的 Bug')
+    expect(wrapper.text()).toContain('从平台同步')
     expect(wrapper.find('input[placeholder="指派人账号,仅后台同步时用于筛选"]').exists()).toBe(false)
     expect(wrapper.find('input[placeholder="Hook Secret,留空自动生成"]').exists()).toBe(false)
     expect(wrapper.get('[data-action="login-platform"]').attributes('disabled')).toBeUndefined()

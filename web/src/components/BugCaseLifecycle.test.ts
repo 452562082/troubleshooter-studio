@@ -174,6 +174,15 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.find('.primary-action').text()).toBe('从新一轮验证继续')
   })
 
+  it('shows reset archives as terminal read-only history', () => {
+    const wrapper = mount(BugCaseLifecycle, { props: { cases: [incident('reset_archived')], detail: detail('reset_archived') } })
+
+    expect(wrapper.text()).toContain('已重置归档')
+    expect(wrapper.text()).toContain('历史记录只读')
+    expect(wrapper.find('.primary-action').exists()).toBe(false)
+    expect(wrapper.findAll('.lifecycle-stage').every(stage => stage.attributes('data-state') === 'archived')).toBe(true)
+  })
+
   it('contains responsive no-overflow contracts for all supported viewport fixtures', () => {
     const css = (BugCaseLifecycle as any).__cssModules ? '' : String((BugCaseLifecycle as any).__scopeId || '')
     expect(css).not.toContain('emoji')

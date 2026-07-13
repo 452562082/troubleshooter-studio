@@ -93,7 +93,7 @@ const statusPosition: Record<CaseStatus, number> = {
   investigating: 1, root_cause_ready: 2, waiting_fix_approval: 2, fixing: 2, fix_failed: 2,
   fix_pushed: 3, waiting_merge_approval: 3, merging: 3, merge_conflict: 3,
   waiting_deployment: 4, deployment_unverified: 4, deployment_verified: 5,
-  regression_validating: 5, fixed_verified: 6, still_reproduces: 1, legacy_archived: -1,
+  regression_validating: 5, fixed_verified: 6, still_reproduces: 1, legacy_archived: -1, reset_archived: -1,
 }
 
 const activeStatuses = new Set<CaseStatus>(['validating', 'investigating', 'fixing', 'merging', 'regression_validating'])
@@ -101,7 +101,7 @@ const blockedStatuses = new Set<CaseStatus>(['waiting_evidence', 'not_reproduced
 
 function stageState(index: number): 'complete' | 'current' | 'blocked' | 'pending' | 'archived' {
   const status = currentCase.value?.status
-  if (!status || status === 'legacy_archived') return status === 'legacy_archived' ? 'archived' : 'pending'
+  if (!status || status === 'legacy_archived' || status === 'reset_archived') return status ? 'archived' : 'pending'
   const position = statusPosition[status]
   if (index < position || position === 6) return 'complete'
   if (index > position) return 'pending'
@@ -119,7 +119,7 @@ function statusLabel(status: CaseStatus): string {
     investigating: '排障中', root_cause_ready: '根因已确认', waiting_fix_approval: '等待修复授权', fixing: '修复中', fix_failed: '修复失败',
     fix_pushed: '修复已推送', waiting_merge_approval: '等待合并授权', merging: '合并中', merge_conflict: '合并冲突',
     waiting_deployment: '等待人工部署', deployment_unverified: '部署版本未确认', deployment_verified: '部署已确认', regression_validating: '回归中',
-    fixed_verified: '修复已验证', still_reproduces: '回归仍复现', legacy_archived: '历史归档',
+    fixed_verified: '修复已验证', still_reproduces: '回归仍复现', legacy_archived: '历史归档', reset_archived: '已重置归档',
   }
   return labels[status] || status
 }
@@ -240,6 +240,7 @@ function dialogTitle(): string {
             <span>当前状态</span>
             <h3 id="current-action-title">{{ statusLabel(detail.case.status) }}</h3>
             <p v-if="detail.case.status === 'legacy_archived'">历史记录只读；继续时会通过 CreateAndStart 创建新的 Case，不修改归档 attempt。</p>
+            <p v-else-if="detail.case.status === 'reset_archived'">历史记录只读；重置后的新 Case 已保留原闭环的证据和审计关系。</p>
             <p v-else-if="detail.case.status === 'waiting_deployment'">环境分支已推送。人工部署后，Studio 将先核对运行版本，再启动回归验证。</p>
             <p v-else-if="continuedAfterFailedRegression">第 {{ detail.case.cycle_number }} 轮 · 回归仍复现，Studio 已把本轮新证据和差分带入排障。</p>
             <p v-else>第 {{ detail.case.cycle_number }} 轮 · {{ detail.case.environment || '环境未知' }}</p>

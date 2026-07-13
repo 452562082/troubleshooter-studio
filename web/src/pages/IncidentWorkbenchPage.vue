@@ -263,6 +263,15 @@ function trapResetDialogFocus(event: KeyboardEvent) {
 async function confirmReset() {
   const request = resetDialog.value
   if (!request || resetting.value || !request.botKey) return
+  const isCurrentLinkedReplacement = (replacementID: string) => {
+    const current = displayedDetail.value?.case
+    return Boolean(
+      isCurrentBug(request.bugID) &&
+      current?.bug_id === request.bugID &&
+      current.id === replacementID &&
+      current.reset_from_case_id === request.caseID,
+    )
+  }
   const isExpectedResetContext = (replacement?: IncidentCase) => {
     const current = displayedDetail.value?.case
     if (!isCurrentBug(request.bugID) || current?.bug_id !== request.bugID) return false
@@ -271,8 +280,7 @@ async function confirmReset() {
       replacement &&
       replacement.bug_id === request.bugID &&
       replacement.reset_from_case_id === request.caseID &&
-      current.id === replacement.id &&
-      current.reset_from_case_id === request.caseID,
+      isCurrentLinkedReplacement(replacement.id),
     )
   }
   resetting.value = true
@@ -296,6 +304,19 @@ async function confirmReset() {
     if (!isExpectedResetContext(replacement) || displayedDetail.value?.case.id !== replacement.id) return
     toast.success('Case 已重置，接替 Case 已创建')
   } catch (error) {
+    if (isCurrentLinkedReplacement(request.newCaseID)) {
+      resetting.value = false
+      closeResetDialog()
+      try { await incidentWorkflow.refreshCases() } catch { /* retain the durable event snapshot and surface the scheduling failure below */ }
+      if (!isCurrentLinkedReplacement(request.newCaseID)) return
+      try { await incidentWorkflow.refreshDetail(request.newCaseID) } catch { /* the selected event snapshot remains usable and recoverable */ }
+      if (!isCurrentLinkedReplacement(request.newCaseID)) return
+      const cause = error instanceof Error ? error.message : String(error)
+      const message = `接替 Case 已创建，但新阶段启动失败：${cause}。请刷新 Case 或重试开始验证。`
+      incidentWorkflow.error.value = message
+      toast.error(message)
+      return
+    }
     if (!isExpectedResetContext()) return
     const message = error instanceof Error ? error.message : String(error)
     resetError.value = message

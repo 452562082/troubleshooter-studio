@@ -470,6 +470,56 @@ describe('IncidentWorkbenchPage', () => {
     expect(notifications.success).toHaveBeenCalledWith('Case 已重置，接替 Case 已创建')
   })
 
+  it('keeps the durable replacement and reports a recoverable scheduling failure when reset rejects after its event', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-1', 'waiting_evidence', '2026-07-13T00:00:00Z')
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    const pendingReset = deferred<IncidentCase>()
+    vi.mocked(resetIncidentCase).mockReturnValue(pendingReset.promise)
+    vi.mocked(getIncidentCase).mockImplementation(async caseID => {
+      if (caseID === item.id) return detail(item)
+      return detail(incident(caseID, 'pending_validation', '2026-07-13T00:01:00Z', {
+        version: 1,
+        current_attempt_id: '',
+        reset_from_case_id: item.id,
+      }))
+    })
+    const wrapper = await mountedPage()
+
+    await wrapper.get('.reset-action').trigger('click')
+    await wrapper.get('[data-reset-confirm]').trigger('click')
+    const input = vi.mocked(resetIncidentCase).mock.calls[0][0]
+    const replacement = incident(input.new_case_id, 'pending_validation', '2026-07-13T00:01:00Z', {
+      version: 1,
+      current_attempt_id: '',
+      reset_from_case_id: item.id,
+    })
+    const archived = { ...item, status: 'reset_archived' as const, version: 8, superseded_by_case_id: replacement.id }
+    vi.mocked(listIncidentCases).mockResolvedValueOnce([archived, replacement])
+    const eventHandler = runtime.EventsOn.mock.calls.find(call => call[0] === 'incident-case:event')?.[1]
+    eventHandler?.({ kind: 'snapshot', case: replacement, snapshot: detail(replacement) })
+    await flushPromises()
+    await flushPromises()
+    expect(wrapper.get('.case-heading').text()).toContain(replacement.id)
+
+    pendingReset.reject(new Error('validation phase schedule failed'))
+    await flushPromises()
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(wrapper.get('.case-heading').text()).toContain(replacement.id)
+    expect(listIncidentCases).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(getIncidentCase).mock.calls.filter(([caseID]) => caseID === replacement.id)).toHaveLength(2)
+    expect(wrapper.get('.live-error').text()).toContain('接替 Case 已创建，但新阶段启动失败')
+    expect(wrapper.get('.live-error').text()).toContain('validation phase schedule failed')
+    expect(wrapper.get('.live-error').text()).toContain('请刷新 Case 或重试开始验证')
+    expect(notifications.error).toHaveBeenCalledWith(expect.stringContaining('接替 Case 已创建，但新阶段启动失败'))
+    expect(notifications.toastError).not.toHaveBeenCalledWith('重置故障 Case', expect.anything())
+    expect(notifications.success).not.toHaveBeenCalled()
+  })
+
   it('keeps the reset dialog cancellation-first, focus-trapped, dismissible, and focus-restoring', async () => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])

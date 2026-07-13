@@ -182,6 +182,8 @@ export function RecommendRoleForRepo(arg1:string,arg2:string,arg3:string):Promis
 
 export function ReindexCodeGraph(arg1:string,arg2:Record<string, string>):Promise<agent.CodeGraphIndexReport>;
 
+export function ResetIncidentCase(arg1:main.ResetIncidentCaseInput):Promise<bughub.IncidentCase>;
+
 export function RevealInFinder(arg1:string):Promise<void>;
 
 export function RunInstall(arg1:string,arg2:Record<string, string>):Promise<main.RunInstallResult>;

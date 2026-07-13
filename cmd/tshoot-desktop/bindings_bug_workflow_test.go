@@ -16,8 +16,9 @@ import (
 )
 
 type workflowBindingRunner struct {
-	mu     sync.Mutex
-	starts int
+	mu      sync.Mutex
+	starts  int
+	cancels int
 }
 
 type workflowBindingGit struct{ request bughub.MergeRequest }
@@ -48,12 +49,23 @@ func (r *workflowBindingRunner) Start(context.Context, bughub.PhaseAttempt, bugh
 	return nil
 }
 
-func (*workflowBindingRunner) Cancel(context.Context, string) error { return nil }
+func (r *workflowBindingRunner) Cancel(context.Context, string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cancels++
+	return nil
+}
 
 func (r *workflowBindingRunner) count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.starts
+}
+
+func (r *workflowBindingRunner) cancelCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cancels
 }
 
 func newWorkflowBindingApp(t *testing.T, dbPath string) (*App, *bughub.CaseStore, *workflowBindingRunner) {
@@ -69,7 +81,7 @@ func newWorkflowBindingApp(t *testing.T, dbPath string) (*App, *bughub.CaseStore
 		workflowStore:        store,
 		workflowOrchestrator: orchestrator,
 		workflowLoadBug: func(id string) (bughub.Bug, error) {
-			return bughub.Bug{ID: id, Title: "checkout fails", Env: "test", SystemID: "base"}, nil
+			return bughub.Bug{ID: id, Source: "zentao", Title: "checkout fails", Env: "test", SystemID: "base"}, nil
 		},
 		workflowLoadBot: func(key string) (bughub.BotRef, error) {
 			return bughub.BotRef{Key: key, Target: "codex", Path: botPath, SystemID: "base", Env: "test"}, nil
@@ -282,6 +294,101 @@ func TestStartIncidentCaseValidatesScalarsBeforeOpeningRuntime(t *testing.T) {
 	_, err := (&App{workflowRoot: rootFile}).StartIncidentCase(StartIncidentCaseInput{})
 	if err == nil || err.Error() != "case_id is required" {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestResetIncidentCaseValidatesScalarsBeforeOpeningRuntime(t *testing.T) {
+	factoryCalls := 0
+	app := &App{workflowRuntimeFactory: func(*bughub.CaseStore, *bughub.InvestigationStore) incidentWorkflowRuntime {
+		factoryCalls++
+		return incidentWorkflowRuntime{}
+	}}
+	_, err := app.ResetIncidentCase(ResetIncidentCaseInput{
+		CaseID: "case-old", ExpectedVersion: 1, IdempotencyKey: "reset-case-old", ActorID: "user-1", BotKey: "base|codex",
+	})
+	if err == nil || err.Error() != "new_case_id is required" {
+		t.Fatalf("error = %v", err)
+	}
+	if factoryCalls != 0 {
+		t.Fatalf("runtime factory calls = %d", factoryCalls)
+	}
+}
+
+func TestResetIncidentCaseForwardsContextAndEmitsReplacement(t *testing.T) {
+	app, store, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
+	ctx := context.Background()
+	old := bughub.IncidentCase{
+		ID: "case-reset-old", BugID: "bug-1", Source: "zentao", SystemID: "base", Environment: "test",
+		Status: bughub.CaseValidating, CycleNumber: 1, CurrentAttemptID: "attempt-reset-old", SelectedBotKey: "base|codex",
+	}
+	if err := store.CreateCase(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	attempt := bughub.PhaseAttempt{ID: old.CurrentAttemptID, CaseID: old.ID, CycleNumber: 1, Phase: bughub.PhaseValidation, Mode: bughub.AttemptReproduce, Status: bughub.AttemptStatusRunning, AgentTarget: "codex", BotKey: old.SelectedBotKey, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}
+	if err := store.CreateAttempt(ctx, attempt); err != nil {
+		t.Fatal(err)
+	}
+	old, err := store.GetCase(ctx, old.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload IncidentCaseEventPayload
+	app.workflowEmit = func(name string, value any) {
+		if name == incidentCaseEvent {
+			payload = value.(IncidentCaseEventPayload)
+		}
+	}
+	input := ResetIncidentCaseInput{
+		CaseID: old.ID, NewCaseID: "case-reset-new", BotKey: old.SelectedBotKey, ExpectedVersion: old.Version,
+		IdempotencyKey: "reset-case-old", ActorID: "user-1", InputJSON: map[string]any{"reason": "retry"},
+	}
+
+	replacement, err := app.ResetIncidentCase(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archived, err := store.GetCase(ctx, old.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement.ID != input.NewCaseID || replacement.ResetFromCaseID != old.ID || replacement.Status != bughub.CaseValidating {
+		t.Fatalf("replacement = %+v", replacement)
+	}
+	if archived.Status != bughub.CaseResetArchived || archived.SupersededByCaseID != replacement.ID {
+		t.Fatalf("archived = %+v", archived)
+	}
+	if runner.count() != 1 || runner.cancelCount() != 1 {
+		t.Fatalf("starts=%d cancels=%d", runner.count(), runner.cancelCount())
+	}
+	if payload.Case == nil || payload.Snapshot == nil || payload.Case.ID != replacement.ID || payload.Snapshot.Case.ID != replacement.ID {
+		t.Fatalf("payload = %+v", payload)
+	}
+}
+
+func TestResetIncidentCaseDuplicateCommandSchedulesOnce(t *testing.T) {
+	app, store, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
+	ctx := context.Background()
+	old := bughub.IncidentCase{ID: "case-reset-replay", BugID: "bug-1", Source: "zentao", SystemID: "base", Environment: "test", Status: bughub.CasePendingValidation, CycleNumber: 1, SelectedBotKey: "base|codex"}
+	if err := store.CreateCase(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	old, err := store.GetCase(ctx, old.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := ResetIncidentCaseInput{CaseID: old.ID, NewCaseID: "case-reset-replay-next", BotKey: old.SelectedBotKey, ExpectedVersion: old.Version, IdempotencyKey: "reset-replay", ActorID: "user-1"}
+
+	first, err := app.ResetIncidentCase(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	starts, cancels := runner.count(), runner.cancelCount()
+	second, err := app.ResetIncidentCase(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ID != first.ID || second.CurrentAttemptID != first.CurrentAttemptID || runner.count() != starts || runner.cancelCount() != cancels {
+		t.Fatalf("first=%+v second=%+v starts=%d/%d cancels=%d/%d", first, second, starts, runner.count(), cancels, runner.cancelCount())
 	}
 }
 

@@ -877,6 +877,8 @@ export namespace bughub {
 	    cycle_number: number;
 	    current_attempt_id: string;
 	    selected_bot_key: string;
+	    reset_from_case_id?: string;
+	    superseded_by_case_id?: string;
 	    version: number;
 	    // Go type: time
 	    created_at: any;
@@ -900,6 +902,8 @@ export namespace bughub {
 	        this.cycle_number = source["cycle_number"];
 	        this.current_attempt_id = source["current_attempt_id"];
 	        this.selected_bot_key = source["selected_bot_key"];
+	        this.reset_from_case_id = source["reset_from_case_id"];
+	        this.superseded_by_case_id = source["superseded_by_case_id"];
 	        this.version = source["version"];
 	        this.created_at = this.convertValues(source["created_at"], null);
 	        this.updated_at = this.convertValues(source["updated_at"], null);
@@ -3620,6 +3624,30 @@ export namespace main {
 	        this.is_binary = source["is_binary"];
 	        this.truncated = source["truncated"];
 	        this.size = source["size"];
+	    }
+	}
+	export class ResetIncidentCaseInput {
+	    case_id: string;
+	    new_case_id: string;
+	    bot_key: string;
+	    expected_version: number;
+	    idempotency_key: string;
+	    actor_id: string;
+	    input_json?: Record<string, any>;
+
+	    static createFrom(source: any = {}) {
+	        return new ResetIncidentCaseInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.case_id = source["case_id"];
+	        this.new_case_id = source["new_case_id"];
+	        this.bot_key = source["bot_key"];
+	        this.expected_version = source["expected_version"];
+	        this.idempotency_key = source["idempotency_key"];
+	        this.actor_id = source["actor_id"];
+	        this.input_json = source["input_json"];
 	    }
 	}
 	export class RunInstallResult {

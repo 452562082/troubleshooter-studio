@@ -10,6 +10,7 @@ import {
   listPendingIncidentWorkflowReminders,
   notifyIncidentDeployed,
   normalizeIncidentCaseEvent,
+  resetIncidentCase,
   startIncidentCase,
 } from './bugWorkflow'
 
@@ -70,6 +71,7 @@ describe('incident workflow bridge', () => {
     await expect(approveIncidentMerge({ ...base, fix_commits: { api: 'abc' }, target_branches: { api: 'test' } })).rejects.toThrow(/桌面 app/)
     await expect(notifyIncidentDeployed({ ...base, observed_version: 'build-1' })).rejects.toThrow(/桌面 app/)
     await expect(cancelIncidentAttempt({ ...base, attempt_id: 'attempt-1' })).rejects.toThrow(/桌面 app/)
+    await expect(resetIncidentCase({ ...base, new_case_id: 'case-2', bot_key: 'base|codex' })).rejects.toThrow(/桌面 app/)
   })
 
   it('forwards mutation inputs without coercing expected_version', async () => {
@@ -81,6 +83,17 @@ describe('incident workflow bridge', () => {
 
     expect(start).toHaveBeenCalledWith(input)
     expect(result.version).toBe(8)
+  })
+
+  it('forwards resetIncidentCase to Wails', async () => {
+    const reset = vi.fn().mockResolvedValue({ id: 'case-2', status: 'validating', version: 2, reset_from_case_id: 'case-1' })
+    ;(window as any).go = { main: { App: { ResetIncidentCase: reset } } }
+    const input = { case_id: 'case-1', new_case_id: 'case-2', expected_version: 7, idempotency_key: 'reset:case-1:v7', actor_id: 'desktop-user', bot_key: 'base|codex' }
+
+    const result = await resetIncidentCase(input)
+
+    expect(reset).toHaveBeenCalledWith(input)
+    expect(result.reset_from_case_id).toBe('case-1')
   })
 
   it('normalizes a precise versioned incident-case event payload', () => {

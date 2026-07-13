@@ -338,6 +338,10 @@ export function ReindexCodeGraph(arg1, arg2) {
   return window['go']['main']['App']['ReindexCodeGraph'](arg1, arg2);
 }
 
+export function ResetIncidentCase(arg1) {
+  return window['go']['main']['App']['ResetIncidentCase'](arg1);
+}
+
 export function RevealInFinder(arg1) {
   return window['go']['main']['App']['RevealInFinder'](arg1);
 }

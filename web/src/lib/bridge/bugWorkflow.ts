@@ -8,7 +8,7 @@ export type CaseStatus = 'pending_validation' | 'validating' | 'waiting_evidence
   'fixing' | 'fix_failed' | 'fix_pushed' | 'waiting_merge_approval' | 'merging' |
   'merge_conflict' | 'waiting_deployment' | 'deployment_unverified' |
   'deployment_verified' | 'regression_validating' | 'fixed_verified' |
-  'still_reproduces' | 'legacy_archived'
+  'still_reproduces' | 'legacy_archived' | 'reset_archived'
 
 export type Phase = 'validation' | 'investigation' | 'fix' | 'regression' | 'legacy'
 export type AttemptMode = 'reproduce' | 'regression' | ''
@@ -24,6 +24,8 @@ export interface IncidentCase {
   cycle_number: number
   current_attempt_id: string
   selected_bot_key: string
+  reset_from_case_id?: string
+  superseded_by_case_id?: string
   version: number
   created_at: string
   updated_at: string
@@ -102,6 +104,7 @@ export type IncidentCaseEventPayload = {
 
 interface WorkflowCommandInput { case_id: string; expected_version: number; idempotency_key: string; actor_id: string }
 export interface StartIncidentCaseInput extends WorkflowCommandInput { bug_id?: string; bot_key?: string; input_json?: Record<string, unknown> }
+export interface ResetIncidentCaseInput extends WorkflowCommandInput { new_case_id: string; bot_key: string; input_json?: Record<string, unknown> }
 export interface ContinueIncidentCaseInput extends WorkflowCommandInput { phase: Phase; input_json?: Record<string, unknown> }
 export interface ApproveIncidentFixInput extends WorkflowCommandInput { root_cause_attempt_id: string; input_json?: Record<string, unknown> }
 export interface ApproveIncidentMergeInput extends WorkflowCommandInput { fix_commits: Record<string, string>; target_branches: Record<string, string>; target_heads?: Record<string, string> }
@@ -138,6 +141,10 @@ export async function getIncidentCase(caseID: string): Promise<IncidentCaseDetai
 export async function startIncidentCase(input: StartIncidentCaseInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeCase(await App.StartIncidentCase(input))
+}
+export async function resetIncidentCase(input: ResetIncidentCaseInput): Promise<IncidentCase> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  return normalizeCase(await App.ResetIncidentCase(input))
 }
 export async function continueIncidentCase(input: ContinueIncidentCaseInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)
@@ -179,6 +186,8 @@ function normalizeCase(raw: unknown): IncidentCase {
     environment: String(source.environment ?? ''),
     current_attempt_id: String(source.current_attempt_id ?? ''),
     selected_bot_key: String(source.selected_bot_key ?? ''),
+    reset_from_case_id: String(source.reset_from_case_id ?? ''),
+    superseded_by_case_id: String(source.superseded_by_case_id ?? ''),
     version: source.version,
   } as IncidentCase
 }

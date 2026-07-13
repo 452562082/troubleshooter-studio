@@ -132,6 +132,16 @@ type StartIncidentCaseInput struct {
 	InputJSON       map[string]any `json:"input_json,omitempty"`
 }
 
+type ResetIncidentCaseInput struct {
+	CaseID          string         `json:"case_id"`
+	NewCaseID       string         `json:"new_case_id"`
+	BotKey          string         `json:"bot_key"`
+	ExpectedVersion int64          `json:"expected_version"`
+	IdempotencyKey  string         `json:"idempotency_key"`
+	ActorID         string         `json:"actor_id"`
+	InputJSON       map[string]any `json:"input_json,omitempty"`
+}
+
 type ContinueIncidentCaseInput struct {
 	CaseID          string         `json:"case_id"`
 	ExpectedVersion int64          `json:"expected_version"`
@@ -620,6 +630,47 @@ func (a *App) StartIncidentCase(input StartIncidentCaseInput) (bughub.IncidentCa
 		return bughub.IncidentCase{}, err
 	}
 	incident, err := orchestrator.CreateAndStartCase(a.workflowCommandContext(), bughub.CreateAndStartCaseCommand{CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID), Bug: bug, Bot: bot, InputJSON: inputJSON})
+	a.emitIncidentResult(incident, err)
+	return incident, err
+}
+
+func (a *App) ResetIncidentCase(input ResetIncidentCaseInput) (bughub.IncidentCase, error) {
+	if err := validateWorkflowCommandScalars(input.CaseID, input.ExpectedVersion, input.IdempotencyKey, input.ActorID); err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	if strings.TrimSpace(input.NewCaseID) == "" {
+		return bughub.IncidentCase{}, errors.New("new_case_id is required")
+	}
+	if strings.TrimSpace(input.NewCaseID) == strings.TrimSpace(input.CaseID) {
+		return bughub.IncidentCase{}, errors.New("new_case_id must differ from case_id")
+	}
+	if strings.TrimSpace(input.BotKey) == "" {
+		return bughub.IncidentCase{}, errors.New("bot_key is required")
+	}
+	store, orchestrator, err := a.workflowComponents()
+	if err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	original, err := store.GetCase(a.workflowCommandContext(), strings.TrimSpace(input.CaseID))
+	if err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	if strings.TrimSpace(input.BotKey) != original.SelectedBotKey {
+		return bughub.IncidentCase{}, errors.New("bot_key does not match existing Case")
+	}
+	bug, bot, err := a.loadBugAndBot(original.BugID, original.SelectedBotKey)
+	if err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	inputJSON, err := normalizeWorkflowJSON(input.InputJSON)
+	if err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	incident, err := orchestrator.ResetCase(a.workflowCommandContext(), bughub.ResetCaseCommand{
+		CaseID: strings.TrimSpace(input.CaseID), NewCaseID: strings.TrimSpace(input.NewCaseID),
+		ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID),
+		Bug: bug, Bot: bot, InputJSON: inputJSON,
+	})
 	a.emitIncidentResult(incident, err)
 	return incident, err
 }

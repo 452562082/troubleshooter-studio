@@ -365,115 +365,124 @@ function eventValue(event: Event): string {
         <h1>Bug 工单</h1>
         <p>配置 Bug 平台登录方式，后台可按间隔同步，也可以主动拉取指定 Bug。</p>
       </div>
-      <button class="btn accent" type="button" data-action="toggle-platform-config" @click="configOpen = !configOpen">
-        {{ configOpen ? '收起配置' : '平台配置' }}
+      <button
+        class="config-disclosure"
+        :class="{ expanded: configOpen }"
+        type="button"
+        data-action="toggle-platform-config"
+        :aria-expanded="configOpen"
+        aria-controls="bug-platform-config"
+        @click="configOpen = !configOpen"
+      >
+        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none">
+          <path d="M4 7h10M18 7h2M4 17h2M10 17h10M14 4v6M6 14v6" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+        </svg>
+        <span>{{ configOpen ? '收起配置' : '平台配置' }}</span>
+        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none">
+          <path :d="configOpen ? 'm6 15 6-6 6 6' : 'm6 9 6 6 6-6'" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
       </button>
     </header>
 
-    <section class="platform-config" :class="{ open: configOpen }" aria-label="Bug 平台配置">
-      <div class="platform-list">
-        <div class="platform-tabs">
-          <button
-            v-for="platform in platforms"
-            :key="platform.id"
-            type="button"
-            class="platform-chip"
-            :class="{ active: selectedPlatformID === platform.id }"
-            :aria-pressed="selectedPlatformID === platform.id"
-            @click="selectedPlatformID = platform.id"
-          >
-            {{ platform.name }}<span>{{ platform.enabled ? '启用' : '停用' }}</span>
+    <section
+      id="bug-platform-config"
+      class="platform-config"
+      :class="{ open: configOpen }"
+      aria-label="Bug 平台配置"
+      data-density="compact"
+      data-responsive-viewports="375,768,1024,1440"
+      data-overflow-safe="true"
+    >
+      <section class="platform-config-section platform-details-section" aria-labelledby="platform-details-title">
+        <header class="section-heading">
+          <div><h2 id="platform-details-title">平台信息</h2><p>管理平台连接、授权方式和启用状态。</p></div>
+        </header>
+        <div class="platform-list">
+          <div class="platform-tabs">
+            <button
+              v-for="platform in platforms"
+              :key="platform.id"
+              type="button"
+              class="platform-chip"
+              :class="{ active: selectedPlatformID === platform.id }"
+              :aria-pressed="selectedPlatformID === platform.id"
+              @click="selectedPlatformID = platform.id"
+            >
+              {{ platform.name }}<span>{{ platform.enabled ? '启用' : '停用' }}</span>
+            </button>
+          </div>
+          <button class="compact-button secondary-button add-platform" type="button" data-action="new-platform" @click="newPlatform">
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" /></svg>
+            新建平台
           </button>
         </div>
-        <button class="btn icon add-platform" type="button" aria-label="新增平台" @click="newPlatform">+</button>
-      </div>
-
-      <div class="config-grid">
-        <div class="config-row basic-row">
-          <input v-model="platformDraft.name" class="form-control" placeholder="平台名称,如 测试环境 Bug 平台">
-          <select v-model="platformDraft.type" class="form-control">
-            <option value="zentao">禅道</option>
-            <option value="generic">通用 Webhook</option>
-          </select>
-          <input v-model="platformDraft.base_url" class="form-control" placeholder="平台地址 https://bug-platform.example.com">
-        </div>
-
-        <div class="config-row auth-row">
-          <select v-model="platformDraft.auth_mode" class="form-control">
-            <option value="feishu_sso">飞书授权登录</option>
-            <option value="api_token">API Token</option>
-            <option value="password">账号密码</option>
-          </select>
-          <input v-if="platformDraft.auth_mode === 'password'" v-model="platformDraft.password" class="form-control" type="password" placeholder="密码,留空沿用已保存值">
-          <input v-if="platformDraft.auth_mode === 'api_token'" v-model="platformDraft.token" class="form-control" type="password" placeholder="Token,可选,留空沿用已保存值">
-          <div v-if="platformDraft.auth_mode === 'feishu_sso'" class="login-field">
-            <span class="login-state">登录状态 <strong :class="{ ok: selectedPlatformHasSession }">{{ selectedPlatformHasSession ? '已保存' : '未登录' }}</strong></span>
-            <button class="btn" type="button" data-action="login-platform" :disabled="platformSaving || platformLoggingIn" @click="loginSelectedPlatform">
-              {{ platformLoggingIn ? '等待授权' : '登录平台' }}
-            </button>
-            <button class="btn" type="button" data-action="clear-platform-login" :disabled="loginClearing || platformLoggingIn || !selectedPlatformHasSession" @click="clearSelectedPlatformLogin">清除登录态</button>
+        <div class="config-grid">
+          <div class="config-row basic-row">
+            <label class="field-label"><span>平台名称</span><input v-model="platformDraft.name" class="form-control" placeholder="如：测试环境"></label>
+            <label class="field-label"><span>平台类型</span><select v-model="platformDraft.type" class="form-control"><option value="zentao">禅道</option><option value="generic">通用 Webhook</option></select></label>
+            <label class="field-label"><span>平台地址</span><input v-model="platformDraft.base_url" class="form-control" placeholder="https://bug-platform.example.com"></label>
           </div>
-          <label class="enabled-toggle"><input v-model="platformDraft.enabled" type="checkbox"> 启用平台</label>
-        </div>
-
-        <div class="bot-config-block">
-          <div class="bot-config-title">
-            <div><strong>可用于该平台的排障机器人</strong><span>平台映射只用于后续故障闭环选人。</span></div>
-            <button class="btn small" type="button" data-action="toggle-bot-picker" :disabled="allBotRefs.length === 0" @click="botPickerOpen = !botPickerOpen">
-              {{ botPickerOpen ? '收起' : '+ 添加' }}
-            </button>
-          </div>
-          <p v-if="configuredPlatformBots.length === 0" class="empty compact">{{ allBotRefs.length ? '还未添加排障机器人' : '暂无已安装机器人' }}</p>
-          <div v-else class="bot-config-list">
-            <div v-for="item in configuredPlatformBots" :key="item.mapping.bot_key" class="bot-config-row">
-              <span class="bot-config-main"><strong>{{ botDisplayName(item.bot) }}</strong><small>{{ item.bot.target || '未知类型' }} · {{ item.bot.path }}</small></span>
-              <select
-                v-if="item.bot.envs?.length"
-                class="form-control"
-                :value="item.mapping.env"
-                @change="setPlatformBotEnv(item.mapping.bot_key, eventValue($event))"
-              >
-                <option v-for="env in item.bot.envs" :key="env" :value="env">{{ env }}</option>
-              </select>
-              <input v-else class="form-control" :value="item.mapping.env" placeholder="机器人环境" @input="setPlatformBotEnv(item.mapping.bot_key, eventValue($event))">
-              <button class="btn icon" type="button" aria-label="移除机器人" @click="removePlatformBot(item.mapping.bot_key)">×</button>
+          <div class="config-row auth-row">
+            <label class="field-label"><span>登录方式</span><select v-model="platformDraft.auth_mode" class="form-control"><option value="feishu_sso">飞书授权登录</option><option value="api_token">API Token</option><option value="password">账号密码</option></select></label>
+            <label v-if="platformDraft.auth_mode === 'password'" class="field-label"><span>密码</span><input v-model="platformDraft.password" class="form-control" type="password" placeholder="留空沿用已保存值"></label>
+            <label v-if="platformDraft.auth_mode === 'api_token'" class="field-label"><span>API Token</span><input v-model="platformDraft.token" class="form-control" type="password" placeholder="留空沿用已保存值"></label>
+            <div v-if="platformDraft.auth_mode === 'feishu_sso'" class="login-field">
+              <span class="login-status-badge" :class="{ ok: selectedPlatformHasSession }">{{ selectedPlatformHasSession ? '已登录' : '未登录' }}</span>
+              <button class="compact-button secondary-button" type="button" data-action="login-platform" :disabled="platformSaving || platformLoggingIn" @click="loginSelectedPlatform">{{ platformLoggingIn ? '等待授权' : '登录平台' }}</button>
+              <button class="compact-button ghost-button" type="button" data-action="clear-platform-login" :disabled="loginClearing || platformLoggingIn || !selectedPlatformHasSession" @click="clearSelectedPlatformLogin">清除登录态</button>
             </div>
+            <label class="toggle-control"><input v-model="platformDraft.enabled" type="checkbox"><span class="toggle-track" aria-hidden="true"><span></span></span><span>启用平台</span></label>
           </div>
-          <div v-if="botPickerOpen" class="bot-picker">
-            <input v-model="botPickerQuery" class="form-control" placeholder="搜索机器人名称、类型、路径">
-            <p v-if="addableBotRefs.length === 0" class="empty compact">没有可添加的机器人</p>
-            <button
-              v-for="bot in addableBotRefs"
-              :key="bot.key"
-              type="button"
-              class="bot-picker-row"
-              :data-bot-key="bot.key"
-              @click="addPlatformBot(bot)"
-            >
-              <span class="bot-config-main"><strong>{{ botDisplayName(bot) }}</strong><small>{{ bot.target }} · {{ bot.path }}</small></span>
-              <span>添加</span>
+        </div>
+      </section>
+
+      <section class="platform-config-section bot-mapping-section" aria-labelledby="bot-mapping-title">
+        <header class="section-heading bot-config-title">
+          <div><h2 id="bot-mapping-title">排障机器人</h2><p>平台映射只用于后续故障闭环选人。</p></div>
+          <button class="compact-button secondary-button" type="button" data-action="toggle-bot-picker" :disabled="allBotRefs.length === 0" @click="botPickerOpen = !botPickerOpen">
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" /></svg>
+            {{ botPickerOpen ? '收起' : '添加机器人' }}
+          </button>
+        </header>
+        <p v-if="configuredPlatformBots.length === 0" class="empty compact">{{ allBotRefs.length ? '还未添加排障机器人' : '暂无已安装机器人' }}</p>
+        <div v-else class="bot-config-list">
+          <div v-for="item in configuredPlatformBots" :key="item.mapping.bot_key" class="bot-config-row">
+            <span class="bot-config-main"><strong>{{ botDisplayName(item.bot) }}</strong><small>{{ item.bot.target || '未知类型' }} · {{ item.bot.path }}</small></span>
+            <select v-if="item.bot.envs?.length" class="form-control" :value="item.mapping.env" @change="setPlatformBotEnv(item.mapping.bot_key, eventValue($event))"><option v-for="env in item.bot.envs" :key="env" :value="env">{{ env }}</option></select>
+            <input v-else class="form-control" :value="item.mapping.env" placeholder="机器人环境" @input="setPlatformBotEnv(item.mapping.bot_key, eventValue($event))">
+            <button class="icon-button danger-icon-button" type="button" aria-label="移除机器人" @click="removePlatformBot(item.mapping.bot_key)">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13M10 11v5m4-5v5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
             </button>
           </div>
         </div>
-
-        <div class="config-row ops-row">
-          <div class="sync-settings">
-            <label class="enabled-toggle"><input v-model="platformDraft.poll_enabled" type="checkbox"> 后台定时同步</label>
-            <label class="interval-control">每 <input v-model.number="platformDraft.poll_interval_minutes" aria-label="后台同步间隔分钟" type="number" min="1" :disabled="!platformDraft.poll_enabled"> 分钟</label>
-          </div>
-          <div class="config-actions">
-            <button class="btn danger" type="button" data-action="delete-platform" :disabled="platformDeleting || !platformDraft.id" @click="deleteSelectedPlatform">删除平台</button>
-            <button class="btn primary" type="button" data-action="save-platform" :disabled="platformSaving || platformLoggingIn" @click="savePlatform">保存配置</button>
-          </div>
+        <div v-if="botPickerOpen" class="bot-picker">
+          <input v-model="botPickerQuery" class="form-control" placeholder="搜索机器人名称、类型、路径">
+          <p v-if="addableBotRefs.length === 0" class="empty compact">没有可添加的机器人</p>
+          <button v-for="bot in addableBotRefs" :key="bot.key" type="button" class="bot-picker-row" :data-bot-key="bot.key" @click="addPlatformBot(bot)"><span class="bot-config-main"><strong>{{ botDisplayName(bot) }}</strong><small>{{ bot.target }} · {{ bot.path }}</small></span><span>添加</span></button>
         </div>
-      </div>
+      </section>
 
-      <div class="trigger-row">
-        <button class="btn primary" type="button" data-action="sync-platform" :disabled="!selectedPlatform || syncingBugs" @click="syncSelectedPlatform">同步我的 Bug</button>
-        <input v-model="manualBugID" class="form-control" placeholder="Bug ID 或飞书消息" @keyup.enter="fetchManualBug">
-        <button class="btn" type="button" data-action="fetch-bug" :disabled="!selectedPlatform || !manualBugID.trim() || fetchingBug" @click="fetchManualBug">拉取指定 Bug</button>
-      </div>
-      <div class="hook-row"><strong>Hook URL 可选</strong><code>{{ hookURL || '保存平台后生成' }}</code><button class="btn" type="button" data-action="copy-hook-url" :disabled="!hookURL" @click="copyHookURL">复制 Hook URL</button></div>
+      <section class="platform-config-section sync-access-section" aria-labelledby="sync-access-title">
+        <header class="section-heading"><div><h2 id="sync-access-title">同步与接入</h2><p>同步指派给我的 Bug，或按 ID 主动拉取。</p></div></header>
+        <div class="sync-settings">
+          <label class="toggle-control"><input v-model="platformDraft.poll_enabled" type="checkbox"><span class="toggle-track" aria-hidden="true"><span></span></span><span>后台定时同步</span></label>
+          <label class="interval-control">每 <input v-model.number="platformDraft.poll_interval_minutes" aria-label="后台同步间隔分钟" type="number" min="1" :disabled="!platformDraft.poll_enabled"> 分钟</label>
+        </div>
+        <div class="trigger-row">
+          <button class="compact-button accent-button" type="button" data-action="sync-platform" :disabled="!selectedPlatform || syncingBugs" @click="syncSelectedPlatform">同步我的 Bug</button>
+          <input v-model="manualBugID" class="form-control" placeholder="Bug ID 或飞书消息" @keyup.enter="fetchManualBug">
+          <button class="compact-button secondary-button" type="button" data-action="fetch-bug" :disabled="!selectedPlatform || !manualBugID.trim() || fetchingBug" @click="fetchManualBug">拉取指定 Bug</button>
+        </div>
+        <div class="hook-row"><strong>Hook URL</strong><code>{{ hookURL || '保存平台后生成' }}</code><button class="compact-button secondary-button" type="button" data-action="copy-hook-url" :disabled="!hookURL" @click="copyHookURL">复制</button></div>
+      </section>
+
+      <footer class="config-footer">
+        <button class="danger-link" type="button" data-action="delete-platform" :disabled="platformDeleting || !platformDraft.id" @click="deleteSelectedPlatform">
+          <svg aria-hidden="true" viewBox="0 0 24 24" fill="none"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+          删除平台
+        </button>
+        <button class="compact-button primary-button" type="button" data-action="save-platform" :disabled="platformSaving || platformLoggingIn" @click="savePlatform">保存配置</button>
+      </footer>
     </section>
 
     <section class="inbox-workspace" data-overflow-safe="true">
@@ -530,37 +539,66 @@ function eventValue(event: Event): string {
 .btn.icon { width: 44px; padding: 0; font-size: 20px; }
 .form-control, input, select { max-width: 100%; min-width: 0; min-height: 44px; box-sizing: border-box; border: 1px solid var(--c-line-2); border-radius: var(--r-md); background: var(--c-surf); color: var(--c-text); font: inherit; }
 .form-control { width: 100%; padding: 0 10px; }
-.platform-config { min-width: 0; display: none; gap: var(--sp-3); padding: var(--sp-3); border: 1px solid var(--c-line); border-radius: var(--r-lg); background: var(--c-surf); }
+.config-disclosure { min-height: 38px; padding: 0 12px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--c-accent-hover); border-radius: var(--r-md); background: var(--c-accent-hover); color: #fff; font: inherit; font-weight: 600; cursor: pointer; transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease; }
+.config-disclosure svg { width: 17px; height: 17px; flex: 0 0 auto; }
+.config-disclosure:hover { background: #1d4ed8; border-color: #1d4ed8; }
+.config-disclosure.expanded { background: #eff6ff; border-color: #93c5fd; color: #1d4ed8; }
+.config-disclosure.expanded:hover { background: #dbeafe; border-color: #60a5fa; color: #1e40af; }
+.config-disclosure:focus-visible { outline: 2px solid var(--c-accent-hover); outline-offset: 2px; }
+.platform-config { min-width: 0; display: none; gap: var(--sp-2); padding: var(--sp-2); border: 1px solid var(--c-line); border-radius: var(--r-lg); background: var(--c-surf-2); }
 .platform-config.open { display: grid; }
-.platform-list, .platform-tabs, .config-actions, .hook-row { min-width: 0; display: flex; align-items: center; gap: var(--sp-2); }
-.platform-list { justify-content: space-between; }
+.platform-config-section { min-width: 0; display: grid; gap: var(--sp-2); padding: var(--sp-3); border: 1px solid var(--c-line); border-radius: var(--r-lg); background: var(--c-surf); }
+.section-heading, .platform-list, .platform-tabs, .config-footer, .hook-row { min-width: 0; display: flex; align-items: center; gap: var(--sp-2); }
+.section-heading, .platform-list, .config-footer { justify-content: space-between; }
+.section-heading h2 { margin: 0; color: var(--c-ink); font-size: var(--fs-md); }
+.section-heading p { margin: 2px 0 0; color: var(--c-muted); font-size: var(--fs-sm); }
 .platform-tabs { flex-wrap: wrap; }
-.platform-chip { min-height: 44px; padding: 6px 10px; border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf); color: var(--c-text); cursor: pointer; }
-.platform-chip.active { border-color: var(--c-accent); background: #eff6ff; }
+.platform-chip { min-height: 36px; padding: 4px 10px; border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf); color: var(--c-text); cursor: pointer; }
+.platform-chip.active { border-color: #93c5fd; background: #eff6ff; color: #1d4ed8; box-shadow: inset 0 0 0 1px #bfdbfe; }
 .platform-chip span { display: block; color: var(--c-muted); font-size: var(--fs-xs); }
 .config-grid { min-width: 0; display: grid; gap: var(--sp-2); }
 .config-row { min-width: 0; display: grid; gap: var(--sp-2); }
 .basic-row { grid-template-columns: minmax(160px, 1fr) 150px minmax(220px, 1.4fr); }
-.auth-row { grid-template-columns: minmax(150px, .7fr) minmax(300px, 1.4fr) auto; align-items: center; }
+.auth-row { grid-template-columns: minmax(160px, .8fr) minmax(280px, 1.4fr) auto; align-items: end; }
+.field-label { min-width: 0; display: grid; gap: 4px; color: var(--c-muted); font-size: var(--fs-sm); }
+.platform-config .form-control { min-height: 36px; }
 .login-field, .sync-settings { min-width: 0; display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
-.login-state { color: var(--c-muted); font-size: var(--fs-xs); }
-.login-state strong { margin-left: 4px; color: #b45309; }
-.login-state strong.ok { color: #047857; }
-.enabled-toggle { min-height: 44px; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
-.enabled-toggle input { min-height: auto; }
-.bot-config-block { min-width: 0; display: grid; gap: var(--sp-2); padding: var(--sp-2); border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf-2); }
-.bot-config-title { min-width: 0; display: flex; justify-content: space-between; align-items: center; gap: var(--sp-2); }
-.bot-config-title div, .bot-config-main { min-width: 0; display: grid; gap: 2px; }
-.bot-config-title span, .bot-config-main small { color: var(--c-muted); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.login-status-badge { padding: 3px 8px; border: 1px solid #fed7aa; border-radius: 999px; background: #fff7ed; color: #9a3412; font-size: var(--fs-xs); font-weight: 600; }
+.login-status-badge.ok { border-color: #bbf7d0; background: #f0fdf4; color: #166534; }
+.compact-button { min-height: 36px; padding: 0 11px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid transparent; border-radius: var(--r-md); font: inherit; font-size: var(--fs-sm); font-weight: 600; cursor: pointer; transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease; }
+.compact-button svg, .danger-link svg { width: 16px; height: 16px; flex: 0 0 auto; }
+.secondary-button { border-color: var(--c-line-2); background: var(--c-surf); color: var(--c-text); }
+.secondary-button:hover:not(:disabled) { border-color: #93c5fd; background: #eff6ff; color: #1d4ed8; }
+.ghost-button { background: transparent; color: var(--c-muted); }
+.ghost-button:hover:not(:disabled) { background: var(--c-surf-3); color: var(--c-text); }
+.primary-button { border-color: var(--c-accent-hover); background: var(--c-accent-hover); color: #fff; }
+.primary-button:hover:not(:disabled) { border-color: #1d4ed8; background: #1d4ed8; }
+.accent-button { border-color: var(--c-primary); background: var(--c-primary); color: #fff; }
+.accent-button:hover:not(:disabled) { border-color: var(--c-primary-hover); background: var(--c-primary-hover); }
+.compact-button:disabled, .danger-link:disabled { opacity: .5; cursor: not-allowed; }
+.compact-button:focus-visible, .danger-link:focus-visible, .icon-button:focus-visible { outline: 2px solid var(--c-accent-hover); outline-offset: 2px; }
+.toggle-control { min-height: 36px; display: inline-flex; align-items: center; gap: 7px; color: var(--c-text); white-space: nowrap; cursor: pointer; }
+.toggle-control input { position: absolute; opacity: 0; pointer-events: none; }
+.toggle-track { width: 34px; height: 20px; padding: 2px; display: inline-flex; align-items: center; border-radius: 999px; background: var(--c-line-2); transition: background-color 180ms ease; }
+.toggle-track > span { width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(15, 23, 42, .2); transition: transform 180ms ease; }
+.toggle-control input:checked + .toggle-track { background: var(--c-accent-hover); }
+.toggle-control input:checked + .toggle-track > span { transform: translateX(14px); }
+.toggle-control input:focus-visible + .toggle-track { outline: 2px solid var(--c-accent-hover); outline-offset: 2px; }
 .bot-config-list, .bot-picker { min-width: 0; display: grid; gap: var(--sp-2); }
-.bot-config-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(120px, 180px) 44px; align-items: center; gap: var(--sp-2); }
-.bot-picker-row { width: 100%; min-width: 0; min-height: 44px; padding: 8px 10px; display: flex; justify-content: space-between; gap: var(--sp-2); border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf); color: var(--c-text); text-align: left; cursor: pointer; }
-.ops-row { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
-.interval-control { min-height: 44px; display: inline-flex; align-items: center; gap: 6px; color: var(--c-muted); }
-.interval-control input { width: 80px; padding: 0 8px; }
+.bot-config-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(120px, 180px) 40px; align-items: center; gap: var(--sp-2); padding: 7px 8px; border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf-2); }
+.bot-config-main { min-width: 0; display: grid; gap: 2px; }
+.bot-config-main small { color: var(--c-muted); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.icon-button { width: 40px; height: 40px; padding: 0; display: inline-grid; place-items: center; border: 0; border-radius: 999px; background: transparent; color: var(--c-muted); cursor: pointer; transition: background-color 180ms ease, color 180ms ease; }
+.icon-button svg { width: 18px; height: 18px; }
+.danger-icon-button:hover { background: var(--c-danger-bg); color: var(--c-danger); }
+.bot-picker-row { width: 100%; min-width: 0; min-height: 40px; padding: 8px 10px; display: flex; justify-content: space-between; gap: var(--sp-2); border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf); color: var(--c-text); text-align: left; cursor: pointer; }
+.interval-control { min-height: 36px; display: inline-flex; align-items: center; gap: 6px; color: var(--c-muted); }
+.interval-control input { width: 72px; min-height: 36px; padding: 0 8px; }
 .trigger-row { min-width: 0; display: grid; grid-template-columns: auto minmax(180px, 1fr) auto; gap: var(--sp-2); }
 .hook-row { flex-wrap: wrap; }
-.hook-row code { min-width: 0; flex: 1; overflow-wrap: anywhere; color: var(--c-muted); }
+.hook-row code { min-width: 0; flex: 1; padding: 7px 9px; overflow-wrap: anywhere; border-radius: var(--r-sm); background: var(--c-surf-2); color: var(--c-muted); }
+.danger-link { min-height: 36px; padding: 0 6px; display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: var(--c-danger); font: inherit; font-size: var(--fs-sm); font-weight: 600; cursor: pointer; }
+.danger-link:hover:not(:disabled) { color: #7f1d1d; text-decoration: underline; text-underline-offset: 3px; }
 .inbox-workspace { min-width: 0; display: grid; grid-template-columns: minmax(250px, 330px) minmax(0, 1fr); gap: var(--sp-3); }
 .ticket-list-panel, .ticket-detail-panel { min-width: 0; border: 1px solid var(--c-line); border-radius: var(--r-lg); background: var(--c-surf); }
 .ticket-list-panel { position: relative; padding: var(--sp-3); overflow: auto; }
@@ -594,16 +632,19 @@ function eventValue(event: Event): string {
 .attachment-preview-image { display: block; max-width: 100%; max-height: calc(88vh - 56px); margin: auto; object-fit: contain; background: #0f172a; }
 .attachment-preview-fallback { min-height: 220px; padding: var(--sp-4); display: grid; place-items: center; color: var(--c-muted); }
 @media (prefers-reduced-motion: reduce) {
-  .attachment-preview-close { transition: none; }
+  .config-disclosure, .compact-button, .toggle-track, .toggle-track > span, .icon-button, .attachment-preview-close { transition: none; }
 }
 @media (max-width: 900px) {
-  .basic-row, .auth-row, .ops-row { grid-template-columns: minmax(0, 1fr); }
+  .basic-row, .auth-row { grid-template-columns: minmax(0, 1fr); }
   .inbox-workspace { grid-template-columns: minmax(0, 1fr); }
   .ticket-list-panel { max-height: 360px; }
 }
 @media (max-width: 640px) {
-  .bug-header, .bot-config-title, .hook-row { align-items: stretch; flex-direction: column; }
+  .bug-header, .section-heading, .platform-list, .hook-row { align-items: stretch; flex-direction: column; }
+  .platform-config .form-control, .compact-button, .danger-link, .toggle-control { min-height: 44px; }
   .trigger-row, .bot-config-row { grid-template-columns: minmax(0, 1fr); }
-  .config-actions { flex-direction: column-reverse; align-items: stretch; }
+  .bot-config-row .icon-button { justify-self: end; width: 44px; height: 44px; }
+  .config-footer { align-items: stretch; }
+  .config-footer .primary-button { min-width: 140px; }
 }
 </style>

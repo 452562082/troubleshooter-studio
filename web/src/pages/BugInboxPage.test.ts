@@ -191,8 +191,8 @@ describe('BugInboxPage', () => {
     expect(wrapper.find('input[aria-label="后台同步间隔分钟"]').exists()).toBe(true)
     expect(wrapper.find('input[placeholder="我的禅道账号"]').exists()).toBe(false)
 
-    await wrapper.get('input[placeholder="平台名称,如 测试环境 Bug 平台"]').setValue('禅道')
-    await wrapper.get('input[placeholder="平台地址 https://bug-platform.example.com"]').setValue('https://zentao.example.com')
+    await wrapper.get('input[placeholder="如：测试环境"]').setValue('禅道')
+    await wrapper.get('input[placeholder="https://bug-platform.example.com"]').setValue('https://zentao.example.com')
     await wrapper.get('[data-action="toggle-bot-picker"]').trigger('click')
     await wrapper.get('[data-bot-key="/repo/base|codex"]').trigger('click')
     await wrapper.get('.bot-config-row select').setValue('prod')
@@ -203,6 +203,70 @@ describe('BugInboxPage', () => {
       base_url: 'https://zentao.example.com',
       bot_mappings: [{ bot_key: '/repo/base|codex', env: 'prod' }],
     }))
+  })
+
+  it('presents platform configuration as labelled compact sections with a readable disclosure state', async () => {
+    vi.mocked(listBugPlatforms).mockResolvedValue([{
+      id: 'zentao-main', name: '测试环境', type: 'zentao', base_url: 'https://zentao.example.com',
+      auth_mode: 'feishu_sso', enabled: true,
+    }])
+    const wrapper = await mountedInbox()
+    const disclosure = wrapper.get('[data-action="toggle-platform-config"]')
+
+    expect(disclosure.attributes('aria-expanded')).toBe('false')
+    expect(disclosure.attributes('aria-controls')).toBe('bug-platform-config')
+    expect(disclosure.text()).toContain('平台配置')
+    expect(disclosure.findAll('svg')).toHaveLength(2)
+
+    await disclosure.trigger('click')
+
+    expect(disclosure.attributes('aria-expanded')).toBe('true')
+    expect(disclosure.classes()).toContain('expanded')
+    expect(disclosure.text()).toContain('收起配置')
+    const config = wrapper.get('#bug-platform-config')
+    expect(config.attributes('data-density')).toBe('compact')
+    expect(config.attributes('data-responsive-viewports')).toBe('375,768,1024,1440')
+    expect(config.findAll('.platform-config-section h2').map(node => node.text())).toEqual([
+      '平台信息', '排障机器人', '同步与接入',
+    ])
+    expect(config.findAll('.field-label > span').map(node => node.text())).toEqual(expect.arrayContaining([
+      '平台名称', '平台类型', '平台地址', '登录方式',
+    ]))
+    expect(config.get('.login-status-badge').text()).toBe('未登录')
+  })
+
+  it('uses SVG actions and separates destructive platform deletion from the primary save action', async () => {
+    vi.mocked(discoverBots).mockResolvedValue([{
+      path: '/repo/base', ghost: false,
+      meta: { system_id: 'base', system_name: 'Base', target: 'codex', agent_id: 'base-troubleshooter' },
+      environments: ['test'],
+    } as any])
+    vi.mocked(listBugPlatforms).mockResolvedValue([{
+      id: 'zentao-main', name: '测试环境', type: 'zentao', auth_mode: 'feishu_sso',
+      bot_mappings: [{ bot_key: '/repo/base|codex', env: 'test' }], enabled: true,
+    }])
+    const wrapper = await mountedInbox()
+    await wrapper.get('[data-action="toggle-platform-config"]').trigger('click')
+
+    const newPlatform = wrapper.get('[data-action="new-platform"]')
+    expect(newPlatform.text()).toContain('新建平台')
+    expect(newPlatform.find('svg[aria-hidden="true"]').exists()).toBe(true)
+    expect(newPlatform.text()).not.toBe('+')
+
+    const addBot = wrapper.get('[data-action="toggle-bot-picker"]')
+    expect(addBot.find('svg[aria-hidden="true"]').exists()).toBe(true)
+
+    const removeBot = wrapper.get('button.icon-button[aria-label="移除机器人"]')
+    expect(removeBot.find('svg[aria-hidden="true"]').exists()).toBe(true)
+    expect(removeBot.text()).toBe('')
+    await removeBot.trigger('click')
+    expect(wrapper.find('.bot-config-row').exists()).toBe(false)
+
+    const footer = wrapper.get('.config-footer')
+    expect(footer.findAll('button')[0].attributes('data-action')).toBe('delete-platform')
+    expect(footer.findAll('button').slice(-1)[0]?.attributes('data-action')).toBe('save-platform')
+    expect(footer.get('[data-action="delete-platform"]').classes()).toContain('danger-link')
+    expect(footer.get('[data-action="save-platform"]').classes()).toContain('primary-button')
   })
 
   it('exposes the selected platform chip to assistive technology', async () => {
@@ -233,8 +297,11 @@ describe('BugInboxPage', () => {
 
     expect(wrapper.find('.config-row.basic-row').exists()).toBe(true)
     expect(wrapper.find('.config-row.auth-row').exists()).toBe(true)
-    expect(wrapper.find('.config-row.ops-row').exists()).toBe(true)
-    expect(wrapper.get('button.add-platform[aria-label="新增平台"]').text()).toBe('+')
+    expect(wrapper.find('.sync-access-section').exists()).toBe(true)
+    expect(wrapper.find('.config-footer').exists()).toBe(true)
+    const newPlatform = wrapper.get('[data-action="new-platform"]')
+    expect(newPlatform.text()).toContain('新建平台')
+    expect(newPlatform.find('svg[aria-hidden="true"]').exists()).toBe(true)
     expect(wrapper.text()).toContain('同步我的 Bug')
     expect(wrapper.find('input[placeholder="指派人账号,仅后台同步时用于筛选"]').exists()).toBe(false)
     expect(wrapper.find('input[placeholder="Hook Secret,留空自动生成"]').exists()).toBe(false)
@@ -255,7 +322,7 @@ describe('BugInboxPage', () => {
     const wrapper = await mountedInbox()
     await wrapper.get('[data-action="toggle-platform-config"]').trigger('click')
 
-    expect(wrapper.text()).toContain('已保存')
+    expect(wrapper.text()).toContain('已登录')
     await wrapper.get('[data-action="clear-platform-login"]').trigger('click')
     await flushPromises()
 

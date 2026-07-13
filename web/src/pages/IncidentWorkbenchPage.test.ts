@@ -1,5 +1,6 @@
 import { mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 import {
   approveIncidentFix,
   approveIncidentMerge,
@@ -9,6 +10,7 @@ import {
   listIncidentCases,
   matchBugBots,
   notifyIncidentDeployed,
+  resetIncidentCase,
   saveBugSelectedBot,
   startIncidentCase,
   type CaseStatus,
@@ -40,6 +42,7 @@ vi.mock('../lib/bridge', () => ({
   listIncidentCases: vi.fn().mockResolvedValue([]),
   matchBugBots: vi.fn().mockResolvedValue([]),
   notifyIncidentDeployed: vi.fn(),
+  resetIncidentCase: vi.fn(),
   saveBugSelectedBot: vi.fn(),
   startIncidentCase: vi.fn(),
 }))
@@ -137,6 +140,7 @@ afterEach(() => {
   vi.mocked(approveIncidentFix).mockReset()
   vi.mocked(approveIncidentMerge).mockReset()
   vi.mocked(notifyIncidentDeployed).mockReset()
+  vi.mocked(resetIncidentCase).mockReset()
   notifications.error.mockReset()
   notifications.success.mockReset()
   notifications.info.mockReset()
@@ -373,6 +377,175 @@ describe('IncidentWorkbenchPage', () => {
     expect(approveIncidentFix).toHaveBeenCalledWith(expect.objectContaining({
       case_id: 'case-1', expected_version: 7, root_cause_attempt_id: 'attempt-1', idempotency_key: 'start-fix:case-1:attempt-1:7', actor_id: 'desktop-user',
     }))
+  })
+
+  it('confirms reset with the exact Case snapshot and bound Bot, then selects the replacement', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    vi.mocked(matchBugBots).mockResolvedValue([botMatch, prodBotMatch])
+    const item = incident('case-1', 'waiting_evidence', '2026-07-13T00:00:00Z')
+    const archived = { ...item, status: 'reset_archived' as const, version: 8, superseded_by_case_id: 'case-reset-replacement' }
+    const replacement = incident('case-reset-replacement', 'pending_validation', '2026-07-13T00:01:00Z', {
+      version: 1,
+      current_attempt_id: '',
+      reset_from_case_id: 'case-1',
+    })
+    vi.mocked(listIncidentCases).mockResolvedValueOnce([item]).mockResolvedValueOnce([archived, replacement])
+    mockCaseDetails(detail(item), detail(replacement))
+    vi.mocked(resetIncidentCase).mockResolvedValue(replacement)
+    const wrapper = await mountedPage()
+
+    await wrapper.findAll('.bot-picker input[type="radio"]')[1].setValue(true)
+    await wrapper.get('.reset-action').trigger('click')
+    const dialog = wrapper.get('[role="dialog"]')
+    expect(dialog.attributes('aria-modal')).toBe('true')
+    expect(dialog.attributes('aria-labelledby')).toBeTruthy()
+    expect(dialog.attributes('aria-describedby')).toBeTruthy()
+    expect(dialog.text()).toContain('不会撤销已发生的提交、推送或部署')
+    expect(dialog.text()).toContain('原 Case、证据和审计记录保持不可变')
+    await dialog.get('[data-reset-confirm]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+
+    expect(resetIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
+      case_id: 'case-1',
+      new_case_id: expect.stringMatching(/^case-reset-/),
+      expected_version: 7,
+      idempotency_key: expect.stringMatching(/^reset:case-1:v7:/),
+      actor_id: 'desktop-user',
+      bot_key: 'base|codex',
+    }))
+    expect(startIncidentCase).not.toHaveBeenCalled()
+    expect(continueIncidentCase).not.toHaveBeenCalled()
+    expect(wrapper.get('.case-heading').text()).toContain('case-reset-replacement')
+    expect(getIncidentCase).toHaveBeenLastCalledWith('case-reset-replacement')
+  })
+
+  it('keeps the reset dialog cancellation-first, focus-trapped, dismissible, and focus-restoring', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-1', 'waiting_evidence', '2026-07-13T00:00:00Z')
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    mockCaseDetails(detail(item))
+    const wrapper = mount(IncidentWorkbenchPage, { attachTo: document.body })
+    await flushPromises()
+    await flushPromises()
+    await flushPromises()
+
+    const trigger = wrapper.get<HTMLButtonElement>('.reset-action')
+    trigger.element.focus()
+    await trigger.trigger('click')
+    const cancel = wrapper.get<HTMLButtonElement>('[data-reset-cancel]')
+    const confirm = wrapper.get<HTMLButtonElement>('[data-reset-confirm]')
+    expect(document.activeElement).toBe(cancel.element)
+
+    await cancel.trigger('keydown', { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(confirm.element)
+    await confirm.trigger('keydown', { key: 'Tab' })
+    expect(document.activeElement).toBe(cancel.element)
+
+    await wrapper.get('.reset-dialog-backdrop').trigger('keydown', { key: 'Escape' })
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(document.activeElement).toBe(trigger.element)
+
+    await trigger.trigger('click')
+    await wrapper.get('.reset-dialog-backdrop').trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(document.activeElement).toBe(trigger.element)
+
+    const source = readFileSync('src/pages/IncidentWorkbenchPage.vue', 'utf8')
+    expect(source).toMatch(/\.reset-dialog[^}]*width: min\([^;]+, 100%\)/)
+    expect(source).toMatch(/\.reset-dialog[\s\S]*?max-height: calc\(100vh - 32px\)/)
+    expect(source).toMatch(/\.reset-dialog[\s\S]*?\.btn[^}]*min-height: 44px/)
+    wrapper.unmount()
+  })
+
+  it('keeps reset controls disabled while pending and reports a retryable live error', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-1', 'waiting_evidence', '2026-07-13T00:00:00Z')
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    mockCaseDetails(detail(item))
+    const pendingReset = deferred<IncidentCase>()
+    vi.mocked(resetIncidentCase).mockReturnValue(pendingReset.promise)
+    const wrapper = mount(IncidentWorkbenchPage, { attachTo: document.body })
+    await flushPromises()
+    await flushPromises()
+    await flushPromises()
+
+    await wrapper.get('.reset-action').trigger('click')
+    await wrapper.get('[data-reset-confirm]').trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get<HTMLButtonElement>('[data-reset-cancel]').element.disabled).toBe(true)
+    expect(wrapper.get<HTMLButtonElement>('[data-reset-confirm]').element.disabled).toBe(true)
+    const dialog = wrapper.get<HTMLElement>('[role="dialog"]')
+    expect(wrapper.get('[data-reset-error]').attributes('aria-live')).toBe('assertive')
+    await dialog.trigger('keydown', { key: 'Tab' })
+    expect(document.activeElement).toBe(dialog.element)
+
+    pendingReset.reject(new Error('reset conflict; refresh and retry'))
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.get('[role="dialog"]').text()).toContain('reset conflict; refresh and retry')
+    expect(wrapper.get<HTMLButtonElement>('[data-reset-cancel]').element.disabled).toBe(false)
+    expect(wrapper.get<HTMLButtonElement>('[data-reset-confirm]').element.disabled).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('ignores a delayed reset completion after another Bug and Case are selected', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA, bugB])
+    const caseA = incident('case-a', 'waiting_evidence', '2026-07-13T00:00:00Z')
+    const caseB = incident('case-b', 'waiting_evidence', '2026-07-13T00:00:00Z', { bug_id: 'bug-b', version: 3 })
+    vi.mocked(listIncidentCases).mockResolvedValue([caseA, caseB])
+    mockCaseDetails(detail(caseA), detail(caseB))
+    const pendingReset = deferred<IncidentCase>()
+    vi.mocked(resetIncidentCase).mockReturnValue(pendingReset.promise)
+    const wrapper = await mountedPage()
+
+    await wrapper.get('.reset-action').trigger('click')
+    await wrapper.get('[data-reset-confirm]').trigger('click')
+    await wrapper.get('[data-ticket-id="bug-b"]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+    vi.mocked(getIncidentCase).mockClear()
+    notifications.success.mockClear()
+    pendingReset.resolve(incident('case-reset-stale', 'pending_validation', '2026-07-13T00:01:00Z', { version: 1, reset_from_case_id: 'case-a' }))
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.get('.case-heading').text()).toContain('case-b')
+    expect(getIncidentCase).not.toHaveBeenCalled()
+    expect(notifications.success).not.toHaveBeenCalled()
+  })
+
+  it('does not expose a delayed reset error after another Bug and Case are selected', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA, bugB])
+    const caseA = incident('case-a', 'waiting_evidence', '2026-07-13T00:00:00Z')
+    const caseB = incident('case-b', 'waiting_evidence', '2026-07-13T00:00:00Z', { bug_id: 'bug-b', version: 3 })
+    vi.mocked(listIncidentCases).mockResolvedValue([caseA, caseB])
+    mockCaseDetails(detail(caseA), detail(caseB))
+    const pendingReset = deferred<IncidentCase>()
+    vi.mocked(resetIncidentCase).mockReturnValue(pendingReset.promise)
+    const wrapper = await mountedPage()
+
+    await wrapper.get('.reset-action').trigger('click')
+    await wrapper.get('[data-reset-confirm]').trigger('click')
+    await wrapper.get('[data-ticket-id="bug-b"]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+    notifications.toastError.mockClear()
+    pendingReset.reject(new Error('stale reset failed'))
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.get('.case-heading').text()).toContain('case-b')
+    expect(wrapper.text()).not.toContain('stale reset failed')
+    expect(notifications.toastError).not.toHaveBeenCalled()
   })
 
   it('does not apply a delayed primary-action completion after another Bug and Case are selected', async () => {

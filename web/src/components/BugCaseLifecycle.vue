@@ -43,6 +43,7 @@ const emit = defineEmits<{
   select: [caseID: string]
   refresh: []
   primary: [payload: { kind: CasePrimaryAction['kind']; input?: string; observedVersion?: string; observedCommits?: Record<string, string>; versionSource?: string; rootCauseAttemptID?: string; caseVersion?: number }]
+  reset: [incident: IncidentCase]
 }>()
 
 const dialogOpen = ref(false)
@@ -55,6 +56,7 @@ const dialogCaseVersion = ref<number>()
 const dialogRootCauseAttemptID = ref('')
 const currentCase = computed(() => props.detail?.case)
 const action = computed(() => currentCase.value ? primaryActionFor(currentCase.value) : undefined)
+const resettable = computed(() => Boolean(currentCase.value && !['fixed_verified', 'legacy_archived', 'reset_archived'].includes(currentCase.value.status)))
 const expectedDeploymentCommits = computed(() => {
   const currentAttemptID = props.detail?.case.current_attempt_id || ''
   const changes = (props.detail?.code_changes || []).filter(change => change.attempt_id === currentAttemptID && change.push_status === 'pushed')
@@ -245,10 +247,15 @@ function dialogTitle(): string {
             <p v-else-if="continuedAfterFailedRegression">第 {{ detail.case.cycle_number }} 轮 · 回归仍复现，Studio 已把本轮新证据和差分带入排障。</p>
             <p v-else>第 {{ detail.case.cycle_number }} 轮 · {{ detail.case.environment || '环境未知' }}</p>
           </div>
-          <button v-if="action" class="btn primary primary-action" type="button" :disabled="pending" @click="openAction">
-            {{ pending ? '处理中…' : action.label }}
-          </button>
-          <span v-else class="terminal-copy">{{ detail.case.status === 'fixed_verified' ? '闭环完成' : detail.case.status === 'reset_archived' ? '已归档，由新 Case 接替' : '当前阶段自动推进' }}</span>
+          <div class="current-action-controls">
+            <button v-if="action" class="btn primary primary-action" type="button" :disabled="pending" @click="openAction">
+              {{ pending ? '处理中…' : action.label }}
+            </button>
+            <span v-else class="terminal-copy">{{ detail.case.status === 'fixed_verified' ? '闭环完成' : detail.case.status === 'reset_archived' ? '已归档，由新 Case 接替' : '当前阶段自动推进' }}</span>
+            <button v-if="resettable" class="btn danger-secondary reset-action" type="button" :disabled="pending" @click="emit('reset', detail.case)">
+              重置并新建 Case
+            </button>
+          </div>
         </section>
 
         <p class="live-error" role="status" aria-live="assertive">{{ error }}</p>
@@ -267,7 +274,7 @@ function dialogTitle(): string {
     </main>
 
     <aside class="case-column case-detail-column" aria-label="Case 证据与详情">
-      <BugCaseArtifacts v-if="detail" :detail="detail" />
+      <BugCaseArtifacts v-if="detail" :detail="detail" @select-case="emit('select', $event)" />
       <p v-else class="empty-state">证据与变更将在这里显示</p>
     </aside>
 
@@ -352,6 +359,9 @@ h2, h3, p { margin: 0; }
 .current-action-card h3 { margin: 3px 0; color: var(--c-ink); font-size: var(--fs-lg); }
 .current-action-card p { max-width: 62ch; color: var(--c-muted); font-size: var(--fs-sm); line-height: 1.55; }
 .primary-action { min-height: 44px; flex: 0 0 auto; }
+.current-action-controls { min-width: 0; display: flex; align-items: stretch; justify-content: flex-end; gap: var(--sp-2); flex: 0 0 auto; }
+.danger-secondary { min-height: 44px; border-color: #fca5a5; background: #fff; color: #b91c1c; }
+.danger-secondary:hover:not(:disabled) { border-color: #dc2626; background: #fef2f2; }
 .terminal-copy { padding: 8px 0; font-weight: 600; }
 .live-error { min-height: 1.5em; color: var(--c-danger); font-size: var(--fs-sm); }
 .live-error:empty { display: none; }
@@ -391,7 +401,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px
   .case-detail-column :deep(.artifact-sections) { grid-template-columns: minmax(0, 1fr); }
   .case-list-column { max-height: 310px; overflow-y: auto; }
   .current-action-card { align-items: stretch; flex-direction: column; }
-  .primary-action { width: 100%; justify-content: center; }
+  .current-action-controls { width: 100%; flex-direction: column; }
+  .primary-action, .reset-action { width: 100%; justify-content: center; }
 }
 @media (max-width: 560px) {
   .stage-progress { grid-template-columns: repeat(2, minmax(0, 1fr)); }

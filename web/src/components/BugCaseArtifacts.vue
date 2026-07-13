@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import type { IncidentCaseDetail, PhaseAttempt } from '../lib/bridge/bugWorkflow'
 
 const props = defineProps<{ detail: IncidentCaseDetail }>()
+const emit = defineEmits<{ 'select-case': [caseID: string] }>()
 
 const investigation = computed(() => [...props.detail.attempts].reverse().find(item => item.phase === 'investigation'))
 const legacyProjection = computed(() => props.detail.attempts.filter(attempt => attempt.phase === 'legacy').map(attempt => {
@@ -96,6 +97,21 @@ function limitedMarkdown(value: string): MarkdownBlock[] {
 
 <template>
   <div class="artifact-sections">
+    <section v-if="detail.case.reset_from_case_id || detail.case.superseded_by_case_id" class="artifact-card reset-relations" aria-labelledby="reset-relations-title">
+      <h3 id="reset-relations-title">重置关系</h3>
+      <dl>
+        <div v-if="detail.case.reset_from_case_id">
+          <dt>来源 Case</dt>
+          <dd><a :href="`#${detail.case.reset_from_case_id}`" data-case-reference @click.prevent="emit('select-case', detail.case.reset_from_case_id!)">{{ detail.case.reset_from_case_id }}</a></dd>
+        </div>
+        <div v-if="detail.case.superseded_by_case_id">
+          <dt>接替 Case</dt>
+          <dd><a :href="`#${detail.case.superseded_by_case_id}`" data-case-reference @click.prevent="emit('select-case', detail.case.superseded_by_case_id!)">{{ detail.case.superseded_by_case_id }}</a></dd>
+        </div>
+      </dl>
+      <p>关系与历史记录只读，不会修改原 Case 的证据和审计信息。</p>
+    </section>
+
     <section class="artifact-card" aria-labelledby="evidence-title">
       <h3 id="evidence-title">验证证据</h3>
       <p v-if="detail.artifacts.length === 0" class="empty-copy">尚无证据</p>
@@ -197,4 +213,11 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .legacy-final ul { padding-left: 20px; }
 .legacy-final code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .legacy-error { margin: 0; color: var(--c-danger); }
+.reset-relations dl { display: grid; gap: var(--sp-2); margin: 0; }
+.reset-relations dl > div { min-width: 0; display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: var(--sp-2); }
+.reset-relations dt { color: var(--c-muted); font-size: var(--fs-sm); }
+.reset-relations dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.reset-relations a { color: var(--c-accent-hover); font-size: var(--fs-sm); font-weight: 600; }
+.reset-relations a:focus-visible { outline: 3px solid rgba(37, 99, 235, .55); outline-offset: 2px; }
+.reset-relations p { margin: var(--sp-2) 0 0; color: var(--c-muted); font-size: var(--fs-xs); line-height: 1.5; }
 </style>

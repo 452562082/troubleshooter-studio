@@ -61,6 +61,30 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.findAll('.current-action-card .primary-action')).toHaveLength(1)
   })
 
+  it('offers reset as a separate dangerous secondary action without changing the one-primary-action rule', async () => {
+    const snapshot = detail('waiting_fix_approval')
+    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+
+    expect(wrapper.findAll('.current-action-card .primary-action')).toHaveLength(1)
+    const reset = wrapper.get('.reset-action')
+    expect(reset.classes()).toContain('danger-secondary')
+    expect(reset.classes()).not.toContain('primary')
+    await reset.trigger('click')
+
+    expect(wrapper.emitted('reset')?.[0]).toEqual([snapshot.case])
+    expect(wrapper.emitted('primary')).toBeUndefined()
+  })
+
+  it.each(['fixed_verified', 'legacy_archived', 'reset_archived'] as CaseStatus[])('does not offer reset for terminal state %s', status => {
+    const wrapper = mount(BugCaseLifecycle, { props: { cases: [incident(status)], detail: detail(status) } })
+    expect(wrapper.find('.reset-action').exists()).toBe(false)
+  })
+
+  it('disables reset while another Case operation is pending', () => {
+    const wrapper = mount(BugCaseLifecycle, { props: { cases: [incident('waiting_evidence')], detail: detail('waiting_evidence'), pending: true } })
+    expect(wrapper.get<HTMLButtonElement>('.reset-action').element.disabled).toBe(true)
+  })
+
   it('opens an accessible approval dialog before emitting approval', async () => {
     const wrapper = mount(BugCaseLifecycle, { props: { cases: [incident('waiting_merge_approval')], detail: detail('waiting_merge_approval') } })
 

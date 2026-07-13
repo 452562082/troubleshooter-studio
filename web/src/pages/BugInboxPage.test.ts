@@ -144,6 +144,19 @@ describe('BugInboxPage', () => {
     expect(mobileCSS).toContain('.config-footer .primary-button { width: 100%; min-width: 0; }')
   })
 
+  it('declares consistent desktop control sizing and responsive select widths', () => {
+    const source = readFileSync('src/pages/BugInboxPage.vue', 'utf8')
+    const mediumCSS = source.split('@media (max-width: 1200px) {')[1]?.split('\n}')[0] || ''
+
+    expect(source).toContain('.platform-config { --config-control-height: 40px;')
+    expect(source).toContain('.platform-config .form-control { min-height: var(--config-control-height); }')
+    expect(source).toContain('.platform-config select.form-control { padding-right: 36px; }')
+    expect(source).toContain('.basic-row { grid-template-columns: minmax(220px, 1fr) minmax(200px, .6fr) minmax(320px, 1.35fr); }')
+    expect(source).toContain('grid-template-columns: minmax(0, 1fr) minmax(240px, 280px) 40px;')
+    expect(mediumCSS).toContain('.basic-row { grid-template-columns: minmax(0, 1fr) minmax(200px, .65fr); }')
+    expect(mediumCSS).toContain('.basic-row .field-label:last-child { grid-column: 1 / -1; }')
+  })
+
   it('declares readable panel disabled colors and red danger-icon focus treatment', () => {
     const source = readFileSync('src/pages/BugInboxPage.vue', 'utf8')
 

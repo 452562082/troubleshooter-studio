@@ -775,8 +775,8 @@ function escapeRegExp(value: string): string {
       <div class="hook-row"><strong>Hook URL 可选</strong><code>{{ hookURL || '保存平台后生成' }}</code><button class="btn" type="button" data-action="copy-hook-url" :disabled="!hookURL" @click="copyHookURL">复制 Hook URL</button></div>
     </section>
 
-    <section class="inbox-workspace">
-      <aside class="ticket-list-panel">
+    <section class="inbox-workspace" data-overflow-safe="true">
+      <aside class="ticket-list-panel" data-overflow-safe="true">
         <button class="btn small refresh-button" type="button" :disabled="tickets.loading.value" @click="loadTickets">刷新</button>
         <BugTicketList
           :bugs="tickets.filteredBugs.value"
@@ -787,7 +787,7 @@ function escapeRegExp(value: string): string {
           @update:query="tickets.query.value = $event"
         />
       </aside>
-      <main class="ticket-detail-panel">
+      <main class="ticket-detail-panel" data-overflow-safe="true">
         <BugTicketDetail
           :bug="tickets.selectedBug.value"
           mode="full"

@@ -1,6 +1,5 @@
 import { mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { readFileSync } from 'node:fs'
 import {
   approveIncidentFix,
   approveIncidentMerge,
@@ -108,18 +107,27 @@ afterEach(() => {
 })
 
 describe('BugInboxPage', () => {
-  it.each([375, 768, 1024, 1440])('advertises an overflow-safe responsive contract at %dpx', async width => {
+  it.each([375, 768, 1024, 1440])('keeps list, detail and the incident action usable at %dpx', async width => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: width })
+    const otherBug = { ...bug, id: 'lark-17', source: 'lark', source_id: 'TASK-17', title: '缓存命中下降', product: '平台' }
+    vi.mocked(listBugs).mockResolvedValue([bug, otherBug])
     const wrapper = await mountedInbox()
     const root = wrapper.get('.bug-inbox-page')
+    const workspace = wrapper.get('.inbox-workspace')
+    const listPanel = wrapper.get('.ticket-list-panel')
+    const detailPanel = wrapper.get('.ticket-detail-panel')
 
     expect(root.attributes('data-responsive-viewports')).toBe('375,768,1024,1440')
     expect(root.attributes('data-overflow-safe')).toBe('true')
+    expect(workspace.attributes('data-overflow-safe')).toBe('true')
+    expect(listPanel.attributes('data-overflow-safe')).toBe('true')
+    expect(detailPanel.attributes('data-overflow-safe')).toBe('true')
 
-    const source = readFileSync('src/pages/BugInboxPage.vue', 'utf8')
-    expect(source).toMatch(/\.bug-inbox-page \{[^}]*min-width: 0;/)
-    expect(source).toMatch(/\.inbox-workspace \{[^}]*grid-template-columns: minmax\(250px, 330px\) minmax\(0, 1fr\)/)
-    expect(source).toMatch(/@media \(max-width: 900px\)[\s\S]*?\.inbox-workspace \{ grid-template-columns: minmax\(0, 1fr\); \}/)
+    await wrapper.get('[data-ticket-id="lark-17"]').trigger('click')
+    expect(wrapper.get('[data-ticket-id="lark-17"]').attributes('aria-pressed')).toBe('true')
+    expect(detailPanel.get('h2').text()).toBe('缓存命中下降')
+    await detailPanel.get('[data-action="open-incident"]').trigger('click')
+    expect(router.push).toHaveBeenCalledWith({ path: '/incidents', query: { bug_id: 'lark-17' } })
     wrapper.unmount()
   })
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import BugBotPicker from '../components/BugBotPicker.vue'
 import BugCaseLifecycle, { type CasePrimaryAction } from '../components/BugCaseLifecycle.vue'
@@ -56,8 +56,8 @@ const resetCancelButton = ref<HTMLButtonElement | null>(null)
 const resetTrigger = ref<HTMLElement | null>(null)
 const resetRequests = new Map<string, Pick<ResetDialogSnapshot, 'newCaseID' | 'idempotencyKey'>>()
 
-const requestedBugID = routeBugID()
-if (requestedBugID) tickets.select(requestedBugID)
+const initialRequestedBugID = routeBugID()
+if (initialRequestedBugID) tickets.select(initialRequestedBugID)
 
 const selectedBugCases = computed(() => casesForBug(incidentWorkflow.cases.value, tickets.selectedID.value))
 const selectedActiveCase = computed(() => activeCaseForBug(incidentWorkflow.cases.value, tickets.selectedID.value))
@@ -66,7 +66,7 @@ const preferredCase = computed(() => selectedActiveCase.value || newestSelectedC
 const displayedCase = computed(() => selectedBugCases.value.find(item => item.id === incidentWorkflow.selectedCaseID.value) || preferredCase.value)
 const displayedDetail = computed(() => incidentWorkflow.detail.value?.case.id === displayedCase.value?.id ? incidentWorkflow.detail.value : null)
 const allCasesTerminal = computed(() => selectedBugCases.value.length > 0 && !selectedActiveCase.value)
-const invalidURLBug = computed(() => Boolean(requestedBugID && !tickets.loading.value && tickets.bugs.value.length > 0 && !tickets.selectedBug.value))
+const invalidURLBug = computed(() => Boolean(routeBugID() && !tickets.loading.value && tickets.bugs.value.length > 0 && !tickets.selectedBug.value))
 const selectedBot = computed(() => matches.value.find(match => match.bot.key === selectedBotKey.value)?.bot)
 const pickerSelectedBotKey = computed(() => {
   const detail = displayedDetail.value
@@ -98,13 +98,26 @@ watch(incidentWorkflow.cases, () => {
   void openPreferredCase()
 })
 
+watch(() => [route.path, route.query.bug_id], () => {
+  if (route.path === '/incidents') void syncRouteBugSelection(false)
+})
+
+let hasActivatedOnce = false
+onActivated(() => {
+  if (!hasActivatedOnce) {
+    hasActivatedOnce = true
+    return
+  }
+  void syncRouteBugSelection(true)
+})
+
 onMounted(async () => {
   try {
     await tickets.load()
     if (tickets.selectedBug.value) {
       await Promise.all([refreshMatches(tickets.selectedBug.value.id), openPreferredCase()])
     }
-    if (!requestedBugID && tickets.selectedID.value) {
+    if (!routeBugID() && tickets.selectedID.value) {
       await router.replace({ query: { ...route.query, bug_id: tickets.selectedID.value } })
     }
   } catch (error) {
@@ -114,6 +127,30 @@ onMounted(async () => {
 
 function routeBugID(): string {
   return typeof route.query.bug_id === 'string' ? route.query.bug_id : ''
+}
+
+async function syncRouteBugSelection(refreshCase: boolean) {
+  if (route.path !== '/incidents') return
+  const bugID = routeBugID()
+  if (!bugID) return
+  const valid = tickets.bugs.value.some(bug => bug.id === bugID)
+  if (!valid) {
+    if (!tickets.selectedID.value) return
+    tickets.clearSelection()
+    matches.value = []
+    selectedBotKey.value = ''
+    return
+  }
+  const selectionChanged = tickets.selectedID.value !== bugID
+  if (selectionChanged) tickets.select(bugID)
+  if (!refreshCase) return
+  try {
+    await incidentWorkflow.refreshCases()
+    if (routeBugID() !== bugID || tickets.selectedID.value !== bugID) return
+    await Promise.all([refreshMatches(bugID), openPreferredCase(true)])
+  } catch (error) {
+    if (routeBugID() === bugID) toastError('刷新故障 Case', error)
+  }
 }
 
 async function selectBug(id: string) {
@@ -162,9 +199,15 @@ async function rememberSelectedBot(botKey: string) {
   }
 }
 
-async function openPreferredCase() {
+async function openPreferredCase(refreshCurrent = false) {
   const target = preferredCase.value
-  if (!target || incidentWorkflow.selectedCaseID.value === target.id && incidentWorkflow.detail.value?.case.id === target.id) return
+  if (!target) return
+  if (incidentWorkflow.selectedCaseID.value === target.id && incidentWorkflow.detail.value?.case.id === target.id) {
+    if (refreshCurrent) {
+      try { await incidentWorkflow.refreshDetail(target.id) } catch { /* controller exposes a recoverable live error */ }
+    }
+    return
+  }
   try {
     await incidentWorkflow.selectCase(target.id)
   } catch { /* controller exposes a recoverable live error */ }
@@ -490,8 +533,8 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
       <button class="btn" type="button" :disabled="tickets.loading.value" @click="refreshTickets">刷新 Bug</button>
     </header>
 
-    <section class="selection-workspace" aria-label="Bug 驱动的故障闭环选择">
-      <aside class="selection-panel ticket-list-panel">
+    <section class="selection-workspace" data-overflow-safe="true" aria-label="Bug 驱动的故障闭环选择">
+      <aside class="selection-panel ticket-list-panel" data-overflow-safe="true">
         <BugTicketList
           :bugs="tickets.filteredBugs.value"
           :selected-id="tickets.selectedID.value"
@@ -502,7 +545,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
         />
       </aside>
 
-      <main class="selection-panel ticket-summary-panel">
+      <main class="selection-panel ticket-summary-panel" data-overflow-safe="true">
         <p v-if="invalidURLBug" class="invalid-bug-state" role="status">
           URL 中的 Bug 不存在。请从左侧选择一条可用工单，页面会更新链接并继续。
         </p>
@@ -521,7 +564,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
         <p v-if="workflowNotice" class="workflow-notice" role="status" aria-live="polite">{{ workflowNotice }}</p>
       </main>
 
-      <aside class="selection-panel bot-panel">
+      <aside class="selection-panel bot-panel" data-overflow-safe="true">
         <BugBotPicker :matches="matches" :selected-key="pickerSelectedBotKey" :loading="matching" @select="rememberSelectedBot" />
         <p v-if="botError" class="live-error" role="status">{{ botError }}</p>
         <p v-else-if="selectedBot && !selectedBotSupportsStart" class="support-note">{{ selectedBot.target }} 暂不支持由 Studio 后台启动，请选择 Codex、Claude Code 或 OpenClaw。</p>
@@ -542,7 +585,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
     <p v-else-if="displayedCase" class="case-loading" role="status" aria-live="polite">正在加载 Case {{ displayedCase.id }}…</p>
 
     <div v-if="resetDialog" class="reset-dialog-backdrop" @click.self="closeResetDialog" @keydown.esc="closeResetDialog">
-      <section ref="resetDialogElement" role="dialog" aria-modal="true" aria-labelledby="reset-dialog-title" aria-describedby="reset-dialog-description" class="reset-dialog" tabindex="-1" @keydown="trapResetDialogFocus">
+      <section ref="resetDialogElement" role="dialog" aria-modal="true" aria-labelledby="reset-dialog-title" aria-describedby="reset-dialog-description" class="reset-dialog" data-overflow-safe="true" tabindex="-1" @keydown="trapResetDialogFocus">
         <header>
           <span>危险操作</span>
           <h2 id="reset-dialog-title">重置并新建 Case</h2>

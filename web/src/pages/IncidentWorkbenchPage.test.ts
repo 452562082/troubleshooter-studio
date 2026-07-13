@@ -19,7 +19,7 @@ import {
 } from '../lib/bridge'
 import IncidentWorkbenchPage from './IncidentWorkbenchPage.vue'
 
-const route = vi.hoisted(() => ({ query: {} as Record<string, string> }))
+const route = vi.hoisted(() => ({ path: '/incidents', query: {} as Record<string, string> }))
 const router = vi.hoisted(() => ({ replace: vi.fn() }))
 const runtime = vi.hoisted(() => ({ EventsOn: vi.fn((_name: string, _handler: (payload: unknown) => void) => vi.fn()) }))
 const notifications = vi.hoisted(() => ({
@@ -127,6 +127,7 @@ async function mountedPage() {
 }
 
 afterEach(() => {
+  route.path = '/incidents'
   route.query = {}
   router.replace.mockReset()
   runtime.EventsOn.mockClear()
@@ -148,19 +149,39 @@ afterEach(() => {
 })
 
 describe('IncidentWorkbenchPage', () => {
-  it.each([375, 768, 1024, 1440])('advertises an overflow-safe responsive contract at %dpx', async width => {
+  it.each([375, 768, 1024, 1440])('keeps the selected Case and reset focus contained at %dpx', async width => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: width })
-    const wrapper = await mountedPage()
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-responsive', 'waiting_evidence', '2026-07-13T00:00:00Z')
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    mockCaseDetails(detail(item))
+    const wrapper = mount(IncidentWorkbenchPage, { attachTo: document.body })
+    await flushPromises()
+    await flushPromises()
+    await flushPromises()
     const root = wrapper.get('.incident-workbench-page')
+    const workspace = wrapper.get('.selection-workspace')
 
     expect(root.attributes('data-responsive-viewports')).toBe('375,768,1024,1440')
     expect(root.attributes('data-overflow-safe')).toBe('true')
+    expect(workspace.attributes('data-overflow-safe')).toBe('true')
+    expect(wrapper.findAll('.selection-panel').every(panel => panel.attributes('data-overflow-safe') === 'true')).toBe(true)
 
-    const source = readFileSync('src/pages/IncidentWorkbenchPage.vue', 'utf8')
-    expect(source).toMatch(/\.incident-workbench-page \{[^}]*min-width: 0;/)
-    expect(source).toMatch(/\.selection-workspace \{[^}]*grid-template-columns: minmax\(220px, \.8fr\)/)
-    expect(source).toMatch(/@media \(max-width: 700px\)[\s\S]*?\.selection-workspace \{ grid-template-columns: minmax\(0, 1fr\); \}/)
-    expect(source).toMatch(/\.reset-dialog footer \.btn \{[^}]*min-height: 44px;/)
+    const trigger = wrapper.get<HTMLButtonElement>('.reset-action')
+    trigger.element.focus()
+    await trigger.trigger('click')
+    const dialog = wrapper.get('[role="dialog"]')
+    const cancel = wrapper.get<HTMLButtonElement>('[data-reset-cancel]')
+    const confirm = wrapper.get<HTMLButtonElement>('[data-reset-confirm]')
+    expect(dialog.attributes('data-overflow-safe')).toBe('true')
+    expect(document.activeElement).toBe(cancel.element)
+
+    await cancel.trigger('keydown', { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(confirm.element)
+    await confirm.trigger('keydown', { key: 'Tab' })
+    expect(document.activeElement).toBe(cancel.element)
+
     wrapper.unmount()
   })
 

@@ -364,6 +364,39 @@ func TestResetCaseCancelFailureStillReturnsStartedReplacement(t *testing.T) {
 	}
 }
 
+func TestResetCaseCancelAndReplacementStartFailureReturnsTwoWarningsAndReplays(t *testing.T) {
+	store := newOrchestratorStore(t)
+	old, oldAttempt := prepareResetCase(t, store, "case-reset-double-warning")
+	runner := &resetCancelFailureRunner{
+		recordingPhaseRunner: recordingPhaseRunner{startErr: errors.New("secret replacement runner failure")},
+		cancelErr:            errors.New("secret old runner failure"),
+	}
+	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	cmd := resetOrchestratorCommand(old, "case-reset-double-warning-next", "reset-double-warning")
+	wantWarnings := []WorkflowWarning{
+		{Code: "reset_runner_cancel_failed", Message: "旧阶段 Agent 未能确认停止，请人工检查其运行状态。"},
+		{Code: "reset_replacement_start_failed", Message: "接替 Case 的新阶段未能启动，已保留为可恢复状态；请刷新 Case 或重试开始验证。"},
+	}
+
+	first, err := orchestrator.ResetCaseWithOutcome(context.Background(), cmd)
+	if err != nil || first.Case.ID != cmd.NewCaseID || first.Case.Status != CaseWaitingEvidence || !reflect.DeepEqual(first.Warnings, wantWarnings) {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	replayed, err := orchestrator.ResetCaseWithOutcome(context.Background(), cmd)
+	if err != nil || replayed.Case.ID != first.Case.ID || !reflect.DeepEqual(replayed.Warnings, wantWarnings) {
+		t.Fatalf("replayed=%+v err=%v", replayed, err)
+	}
+	legacyCase, legacyErr := orchestrator.ResetCase(context.Background(), cmd)
+	if legacyErr == nil || legacyCase.ID != first.Case.ID {
+		t.Fatalf("legacy case=%+v err=%v", legacyCase, legacyErr)
+	}
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if !reflect.DeepEqual(runner.cancels, []string{oldAttempt.ID}) || len(runner.starts) != 1 {
+		t.Fatalf("cancels=%v starts=%+v", runner.cancels, runner.starts)
+	}
+}
+
 func TestResetCaseRacingCompletionHasOneWinningState(t *testing.T) {
 	store := newOrchestratorStore(t)
 	old, attempt := createRunningPhase(t, store, "case-reset-completion-race", CasePendingValidation, CaseValidating, PhaseValidation, AttemptReproduce, []byte(`{}`))

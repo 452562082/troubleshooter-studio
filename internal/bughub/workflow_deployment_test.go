@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -178,6 +179,181 @@ func TestDeploymentProofSchemaMigratesV2ThroughV6Stores(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWorkflowSchemaV7BackfillsCommittedV6ResetCancellationWithoutRepeatingRunnerCancel(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		auditType    string
+		auditPayload string
+		wantStatus   ResetCancellationStatus
+		wantOutcome  string
+		wantWarning  string
+	}{
+		{name: "known success", auditType: "reset_runner_cancel_succeeded", auditPayload: `{"attempt_id":"legacy-reset-attempt","outcome":"succeeded"}`, wantStatus: ResetCancellationSucceeded, wantOutcome: "succeeded"},
+		{name: "known failure", auditType: "reset_runner_cancel_failed", auditPayload: `{"attempt_id":"legacy-reset-attempt","outcome":"failed","warning_code":"reset_runner_cancel_failed"}`, wantStatus: ResetCancellationFailed, wantOutcome: "runner_cancel_failed", wantWarning: "reset_runner_cancel_failed"},
+		{name: "missing audit is unknown", wantStatus: ResetCancellationClaimed, wantWarning: "reset_runner_cancel_unknown"},
+		{name: "mismatched audit is unknown", auditType: "reset_runner_cancel_succeeded", auditPayload: `{"attempt_id":"different-attempt","outcome":"succeeded"}`, wantStatus: ResetCancellationClaimed, wantWarning: "reset_runner_cancel_unknown"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path, command, fingerprint := createV6CommittedResetFixture(t, test.auditType, test.auditPayload)
+			store, err := OpenCaseStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+
+			operation, found, err := store.GetResetCancellationOperation(context.Background(), command.IdempotencyKey, fingerprint)
+			if err != nil || !found || operation.CaseID != command.CaseID || operation.AttemptID != "legacy-reset-attempt" || operation.Status != test.wantStatus || operation.OutcomeCode != test.wantOutcome || operation.ClaimToken == "" {
+				t.Fatalf("operation=%+v found=%v err=%v", operation, found, err)
+			}
+			runner := &recordingPhaseRunner{}
+			orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+			outcome, err := orchestrator.ResetCaseWithOutcome(context.Background(), command)
+			if err != nil || outcome.Case.ID != command.NewCaseID {
+				t.Fatalf("outcome=%+v err=%v", outcome, err)
+			}
+			if test.wantWarning == "" {
+				if len(outcome.Warnings) != 0 {
+					t.Fatalf("warnings=%+v", outcome.Warnings)
+				}
+			} else if len(outcome.Warnings) != 1 || outcome.Warnings[0].Code != test.wantWarning {
+				t.Fatalf("warnings=%+v", outcome.Warnings)
+			}
+			if len(runner.cancels) != 0 {
+				t.Fatalf("legacy runner cancellation repeated: %v", runner.cancels)
+			}
+			replayed, err := orchestrator.ResetCaseWithOutcome(context.Background(), command)
+			if err != nil || replayed.Case.ID != outcome.Case.ID || !reflect.DeepEqual(replayed.Warnings, outcome.Warnings) || len(runner.cancels) != 0 || len(runner.starts) != 1 {
+				t.Fatalf("replayed=%+v err=%v cancels=%v starts=%v", replayed, err, runner.cancels, runner.starts)
+			}
+		})
+	}
+}
+
+func TestWorkflowSchemaV7SkipsCommittedV6ResetWithoutCancelledAttempt(t *testing.T) {
+	path, command, fingerprint := createV6CommittedResetFixture(t, "", "")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resultJSON string
+	if err := db.QueryRow(`SELECT result_case_json FROM transition_events WHERE idempotency_key=?`, command.IdempotencyKey).Scan(&resultJSON); err != nil {
+		t.Fatal(err)
+	}
+	var result CaseResetResult
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+		t.Fatal(err)
+	}
+	result.CancelledAttemptID = ""
+	resultJSONBytes, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE transition_events SET result_case_json=? WHERE idempotency_key=?`, string(resultJSONBytes), command.IdempotencyKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenCaseStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, found, err := store.GetResetCancellationOperation(context.Background(), command.IdempotencyKey, fingerprint); err != nil || found {
+		t.Fatalf("found=%v err=%v", found, err)
+	}
+}
+
+func TestWorkflowSchemaV7RejectsCollidingCommittedV6ResetCancellationIdentity(t *testing.T) {
+	path, command, _ := createV6CommittedResetFixture(t, "", "")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO transition_events (id,case_id,from_status,to_status,event_type,actor_type,actor_id,idempotency_key,payload_json,created_at,request_fingerprint,result_case_json) SELECT ?,case_id,from_status,to_status,event_type,actor_type,actor_id,?,payload_json,created_at,request_fingerprint,result_case_json FROM transition_events WHERE idempotency_key=?`, "legacy-reset-event-collision", "legacy-reset-key-collision", command.IdempotencyKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if store, err := OpenCaseStore(path); err == nil {
+		_ = store.Close()
+		t.Fatal("colliding v6 reset cancellation identity was accepted")
+	}
+}
+
+func createV6CommittedResetFixture(t *testing.T, auditType, auditPayload string) (string, ResetCaseCommand, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "workflow-v6.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{legacyWorkflowStoreSchema, workflowStoreSchemaV1Upgrade, workflowStoreSchemaV2Upgrade, workflowStoreSchemaV3Upgrade, workflowStoreSchemaV4Upgrade, workflowStoreSchemaV5Upgrade, workflowStoreSchemaV6Upgrade} {
+		if _, err := tx.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fingerprint, err := workflowSchemaFingerprint(context.Background(), tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, _ := json.Marshal(workflowSchemaMigrationDetail{Version: 6, Fingerprint: fingerprint})
+	if _, err := tx.Exec(`INSERT INTO schema_migrations (key,applied_at,detail_json) VALUES (?,?,?)`, workflowStoreSchemaV1Key, formatStoreTime(time.Now().UTC()), string(detail)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`PRAGMA user_version=6`); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	store := &CaseStore{db: db}
+	now := time.Now().UTC()
+	closedAt := now
+	archived := IncidentCase{ID: "legacy-reset-case", BugID: "legacy-reset-bug", Source: "zentao", SystemID: "base", Environment: "test", Status: CaseResetArchived, CycleNumber: 1, SelectedBotKey: "validator", SupersededByCaseID: "legacy-reset-replacement", Version: 2, CreatedAt: now.Add(-time.Minute), UpdatedAt: now, ClosedAt: &closedAt}
+	replacement := IncidentCase{ID: "legacy-reset-replacement", BugID: archived.BugID, Source: archived.Source, SystemID: archived.SystemID, Environment: archived.Environment, Status: CasePendingValidation, CycleNumber: 2, SelectedBotKey: archived.SelectedBotKey, ResetFromCaseID: archived.ID, Version: 1, CreatedAt: now, UpdatedAt: now}
+	if err := store.CreateCase(context.Background(), archived); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateCase(context.Background(), replacement); err != nil {
+		t.Fatal(err)
+	}
+	finishedAt := now
+	attempt := PhaseAttempt{ID: "legacy-reset-attempt", CaseID: archived.ID, CycleNumber: 1, Phase: PhaseFix, Status: AttemptStatusCancelled, AgentTarget: "codex", BotKey: archived.SelectedBotKey, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`), StartedAt: now.Add(-time.Minute), FinishedAt: &finishedAt}
+	if err := store.CreateAttempt(context.Background(), attempt); err != nil {
+		t.Fatal(err)
+	}
+	command := ResetCaseCommand{CaseID: archived.ID, NewCaseID: replacement.ID, ExpectedVersion: 1, IdempotencyKey: "legacy-reset-key", ActorID: "alice", Bug: Bug{ID: archived.BugID, Source: archived.Source, SystemID: archived.SystemID, Env: archived.Environment}, Bot: BotRef{Key: archived.SelectedBotKey, Target: "codex", Env: archived.Environment}, InputJSON: []byte(`{}`)}
+	reset := CaseReset{CaseID: command.CaseID, NewCaseID: command.NewCaseID, IdempotencyKey: command.IdempotencyKey, ActorID: command.ActorID, ExpectedVersion: command.ExpectedVersion, SelectedBotKey: command.Bot.Key, RequestJSON: mustJSON(command)}
+	resetFingerprint, err := caseResetFingerprint(reset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultJSON, err := json.Marshal(CaseResetResult{Archived: archived, Replacement: replacement, CancelledAttemptID: attempt.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO transition_events (id,case_id,from_status,to_status,event_type,actor_type,actor_id,idempotency_key,payload_json,created_at,request_fingerprint,result_case_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, "legacy-reset-event", archived.ID, CaseFixing, CaseResetArchived, "case_reset", "user", command.ActorID, command.IdempotencyKey, `{}`, formatStoreTime(now), resetFingerprint, string(resultJSON)); err != nil {
+		t.Fatal(err)
+	}
+	if auditType != "" {
+		if _, err := db.Exec(`INSERT INTO transition_events (id,case_id,from_status,to_status,event_type,actor_type,actor_id,idempotency_key,payload_json,created_at,request_fingerprint,result_case_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, "legacy-reset-audit", archived.ID, CaseResetArchived, CaseResetArchived, auditType, "studio", "orchestrator", command.IdempotencyKey+":runner-cancel", auditPayload, formatStoreTime(now), strings.Repeat("a", 64), string(resultJSON)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path, command, resetFingerprint
 }
 
 func containsString(values []string, target string) bool {

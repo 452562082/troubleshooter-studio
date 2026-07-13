@@ -457,6 +457,9 @@ func (o *CaseOrchestrator) StartCase(ctx context.Context, cmd StartCaseCommand) 
 
 func (o *CaseOrchestrator) ResetCase(ctx context.Context, cmd ResetCaseCommand) (IncidentCase, error) {
 	outcome, err := o.ResetCaseWithOutcome(ctx, cmd)
+	if err == nil && hasWorkflowWarning(outcome.Warnings, "reset_replacement_start_failed") {
+		err = errors.New("replacement Case phase start failed; retry validation from the preserved Case")
+	}
 	return outcome.Case, err
 }
 
@@ -536,6 +539,17 @@ func (o *CaseOrchestrator) ResetCaseWithOutcome(ctx context.Context, cmd ResetCa
 	if cancellationErr != nil {
 		return ResetCaseOutcome{Case: result.Replacement, Warnings: warnings}, cancellationErr
 	}
+	if result.Replay {
+		failureEvent, found, loadErr := o.store.GetEventByIdempotencyKey(ctx, cmd.IdempotencyKey+":start:schedule-failed")
+		if loadErr == nil && found && failureEvent.CaseID == result.Replacement.ID && failureEvent.EventType == "phase_schedule_failed" {
+			replacement := result.Replacement
+			if persisted, err := o.store.GetCase(ctx, result.Replacement.ID); err == nil {
+				replacement = persisted
+			}
+			warnings = append(warnings, resetReplacementStartFailedWarning()...)
+			return ResetCaseOutcome{Case: replacement, Warnings: warnings}, nil
+		}
+	}
 	replacement, startErr := o.StartCase(ctx, StartCaseCommand{
 		CaseID:          result.Replacement.ID,
 		ExpectedVersion: result.Replacement.Version,
@@ -546,9 +560,27 @@ func (o *CaseOrchestrator) ResetCaseWithOutcome(ctx context.Context, cmd ResetCa
 		InputJSON:       cmd.InputJSON,
 	})
 	if startErr != nil {
-		return ResetCaseOutcome{Case: replacement, Warnings: warnings}, startErr
+		if replacement.ID == "" {
+			persisted, loadErr := o.store.GetCase(context.Background(), result.Replacement.ID)
+			if loadErr == nil {
+				replacement = persisted
+			} else {
+				replacement = result.Replacement
+			}
+		}
+		warnings = append(warnings, resetReplacementStartFailedWarning()...)
+		return ResetCaseOutcome{Case: replacement, Warnings: warnings}, nil
 	}
 	return ResetCaseOutcome{Case: replacement, Warnings: warnings}, nil
+}
+
+func hasWorkflowWarning(warnings []WorkflowWarning, code string) bool {
+	for _, warning := range warnings {
+		if warning.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 func (o *CaseOrchestrator) processResetRunnerCancellation(result CaseResetResult, resetKey, fingerprint string) ([]WorkflowWarning, error) {
@@ -610,6 +642,10 @@ func resetCancellationUnknownWarning() []WorkflowWarning {
 
 func resetCancellationStateUnavailableWarning() []WorkflowWarning {
 	return []WorkflowWarning{{Code: "reset_runner_cancel_state_unavailable", Message: "无法读取旧阶段 Agent 的停止状态，请人工检查；系统不会在状态未知时自动停止。"}}
+}
+
+func resetReplacementStartFailedWarning() []WorkflowWarning {
+	return []WorkflowWarning{{Code: "reset_replacement_start_failed", Message: "接替 Case 的新阶段未能启动，已保留为可恢复状态；请刷新 Case 或重试开始验证。"}}
 }
 
 func (o *CaseOrchestrator) CreateAndStartCase(ctx context.Context, cmd CreateAndStartCaseCommand) (IncidentCase, error) {

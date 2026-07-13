@@ -555,16 +555,19 @@ describe('IncidentWorkbenchPage', () => {
     expect(secondDialog.text()).not.toContain(firstReplacementID)
   })
 
-  it('surfaces a structured Agent cancellation warning after the replacement is selected', async () => {
+  it('surfaces cancellation and replacement start warnings together after the replacement is selected', async () => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])
     const item = incident('case-reset-warning', 'waiting_evidence', '2026-07-13T00:00:00Z')
-    const replacement = incident('case-reset-warning-next', 'validating', '2026-07-13T00:01:00Z', { version: 2, reset_from_case_id: item.id })
+    const replacement = incident('case-reset-warning-next', 'waiting_evidence', '2026-07-13T00:01:00Z', { version: 3, reset_from_case_id: item.id })
     vi.mocked(listIncidentCases).mockResolvedValueOnce([item]).mockResolvedValue([replacement])
     mockCaseDetails(detail(item), detail(replacement))
     vi.mocked(resetIncidentCaseWithWarnings).mockResolvedValue({
       case: replacement,
-      warnings: [{ code: 'reset_runner_cancel_failed', message: '旧阶段 Agent 未能确认停止，请人工检查其运行状态。' }],
+      warnings: [
+        { code: 'reset_runner_cancel_failed', message: '旧阶段 Agent 未能确认停止，请人工检查其运行状态。' },
+        { code: 'reset_replacement_start_failed', message: '接替 Case 的新阶段未能启动，已保留为可恢复状态；请刷新 Case 或重试开始验证。' },
+      ],
     })
     const wrapper = await mountedPage()
 
@@ -574,7 +577,10 @@ describe('IncidentWorkbenchPage', () => {
     await flushPromises()
 
     expect(wrapper.get('.live-error').text()).toContain('旧阶段 Agent 未能确认停止')
+		expect(wrapper.get('.live-error').text()).toContain('接替 Case 的新阶段未能启动')
     expect(notifications.error).toHaveBeenCalledWith(expect.stringContaining('旧阶段 Agent 未能确认停止'))
+		expect(notifications.error).toHaveBeenCalledWith(expect.stringContaining('接替 Case 的新阶段未能启动'))
+		expect(notifications.success).not.toHaveBeenCalled()
   })
 
   it('finishes reset when the exact replacement event is selected before the bridge Promise resolves', async () => {

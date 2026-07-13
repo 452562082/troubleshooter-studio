@@ -349,6 +349,9 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		if _, err := tx.ExecContext(ctx, workflowStoreSchemaV7Upgrade); err != nil {
 			return fmt.Errorf("apply workflow schema v7: %w", err)
 		}
+		if err := backfillV6ResetCancellations(ctx, tx); err != nil {
+			return fmt.Errorf("backfill workflow schema v7 reset cancellations: %w", err)
+		}
 		fingerprint, err := workflowSchemaFingerprint(ctx, tx)
 		if err != nil {
 			return err
@@ -402,6 +405,101 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit workflow schema initialization: %w", err)
+	}
+	return nil
+}
+
+type legacyResetCancellation struct {
+	ResetKey           string
+	CaseID             string
+	AttemptID          string
+	RequestFingerprint string
+	CreatedAt          string
+}
+
+func backfillV6ResetCancellations(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `SELECT idempotency_key,case_id,request_fingerprint,result_case_json,created_at FROM transition_events WHERE event_type='case_reset' ORDER BY created_at,id`)
+	if err != nil {
+		return err
+	}
+	var resets []legacyResetCancellation
+	for rows.Next() {
+		var reset legacyResetCancellation
+		var resultJSON string
+		if err := rows.Scan(&reset.ResetKey, &reset.CaseID, &reset.RequestFingerprint, &resultJSON, &reset.CreatedAt); err != nil {
+			rows.Close()
+			return err
+		}
+		var result CaseResetResult
+		if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+			rows.Close()
+			return fmt.Errorf("decode committed reset %q: %w", reset.ResetKey, err)
+		}
+		if blank(reset.ResetKey) || result.Archived.ID != reset.CaseID || result.Replacement.ID == "" {
+			rows.Close()
+			return fmt.Errorf("committed reset %q has invalid cancellation identity", reset.ResetKey)
+		}
+		if err := validateCaseResetResult(result, reset.CaseID, result.Replacement.ID); err != nil {
+			rows.Close()
+			return fmt.Errorf("validate committed reset %q: %w", reset.ResetKey, err)
+		}
+		if result.CancelledAttemptID == "" {
+			continue
+		}
+		decodedFingerprint, decodeErr := hex.DecodeString(reset.RequestFingerprint)
+		if decodeErr != nil || len(decodedFingerprint) != sha256.Size || reset.RequestFingerprint != strings.ToLower(reset.RequestFingerprint) {
+			rows.Close()
+			return fmt.Errorf("committed reset %q has invalid request fingerprint", reset.ResetKey)
+		}
+		if _, err := parseStoreTime(reset.CreatedAt); err != nil {
+			rows.Close()
+			return fmt.Errorf("committed reset %q has invalid timestamp", reset.ResetKey)
+		}
+		reset.AttemptID = result.CancelledAttemptID
+		resets = append(resets, reset)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	for _, reset := range resets {
+		var attemptCaseID string
+		var attemptStatus AttemptStatus
+		if err := tx.QueryRowContext(ctx, `SELECT case_id,status FROM phase_attempts WHERE id=?`, reset.AttemptID).Scan(&attemptCaseID, &attemptStatus); err != nil {
+			return fmt.Errorf("load committed reset %q attempt: %w", reset.ResetKey, err)
+		}
+		if attemptCaseID != reset.CaseID || attemptStatus != AttemptStatusCancelled {
+			return fmt.Errorf("committed reset %q attempt binding is invalid", reset.ResetKey)
+		}
+		status, outcome := ResetCancellationClaimed, ""
+		var auditCaseID, auditType, actorType, actorID, payloadJSON string
+		err := tx.QueryRowContext(ctx, `SELECT case_id,event_type,actor_type,actor_id,payload_json FROM transition_events WHERE idempotency_key=?`, reset.ResetKey+":runner-cancel").Scan(&auditCaseID, &auditType, &actorType, &actorID, &payloadJSON)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("load committed reset %q cancellation audit: %w", reset.ResetKey, err)
+		}
+		if err == nil && auditCaseID == reset.CaseID && actorType == "studio" && actorID == "orchestrator" {
+			var payload struct {
+				AttemptID   string `json:"attempt_id"`
+				Outcome     string `json:"outcome"`
+				WarningCode string `json:"warning_code"`
+			}
+			if json.Unmarshal([]byte(payloadJSON), &payload) == nil && payload.AttemptID == reset.AttemptID {
+				switch {
+				case auditType == "reset_runner_cancel_succeeded" && payload.Outcome == "succeeded" && payload.WarningCode == "":
+					status, outcome = ResetCancellationSucceeded, "succeeded"
+				case auditType == "reset_runner_cancel_failed" && payload.Outcome == "failed" && payload.WarningCode == "reset_runner_cancel_failed":
+					status, outcome = ResetCancellationFailed, "runner_cancel_failed"
+				}
+			}
+		}
+		claimToken := "migration-v6:" + reset.ResetKey
+		if _, err := tx.ExecContext(ctx, `INSERT INTO reset_cancellation_operations (reset_key,case_id,attempt_id,request_fingerprint,status,claim_token,outcome_code,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`, reset.ResetKey, reset.CaseID, reset.AttemptID, reset.RequestFingerprint, status, claimToken, outcome, reset.CreatedAt, reset.CreatedAt); err != nil {
+			return fmt.Errorf("insert committed reset %q cancellation: %w", reset.ResetKey, err)
+		}
 	}
 	return nil
 }

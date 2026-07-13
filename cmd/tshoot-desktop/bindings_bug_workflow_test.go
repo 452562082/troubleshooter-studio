@@ -20,6 +20,7 @@ type workflowBindingRunner struct {
 	mu        sync.Mutex
 	starts    int
 	cancels   int
+	startErr  error
 	cancelErr error
 }
 
@@ -48,7 +49,7 @@ func (r *workflowBindingRunner) Start(context.Context, bughub.PhaseAttempt, bugh
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.starts++
-	return nil
+	return r.startErr
 }
 
 func (r *workflowBindingRunner) Cancel(context.Context, string) error {
@@ -394,6 +395,36 @@ func TestResetIncidentCaseWithWarningsReturnsStructuredCancelWarning(t *testing.
 		t.Fatal(err)
 	}
 	if result.Case.ID != "case-reset-warning-new" || !reflect.DeepEqual(result.Warnings, []bughub.WorkflowWarning{{Code: "reset_runner_cancel_failed", Message: "旧阶段 Agent 未能确认停止，请人工检查其运行状态。"}}) {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestResetIncidentCaseWithWarningsResolvesCancelAndReplacementStartWarnings(t *testing.T) {
+	app, store, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
+	ctx := context.Background()
+	old := bughub.IncidentCase{ID: "case-reset-double-warning-old", BugID: "bug-1", Source: "zentao", SystemID: "base", Environment: "test", Status: bughub.CaseValidating, CycleNumber: 1, CurrentAttemptID: "attempt-reset-double-warning-old", SelectedBotKey: "base|codex"}
+	if err := store.CreateCase(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateAttempt(ctx, bughub.PhaseAttempt{ID: old.CurrentAttemptID, CaseID: old.ID, CycleNumber: 1, Phase: bughub.PhaseValidation, Mode: bughub.AttemptReproduce, Status: bughub.AttemptStatusRunning, AgentTarget: "codex", BotKey: old.SelectedBotKey, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	old, err := store.GetCase(ctx, old.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.cancelErr = errors.New("secret cancel failure")
+	runner.startErr = errors.New("secret start failure")
+
+	result, err := app.ResetIncidentCaseWithWarnings(ResetIncidentCaseInput{CaseID: old.ID, NewCaseID: "case-reset-double-warning-new", BotKey: old.SelectedBotKey, ExpectedVersion: old.Version, IdempotencyKey: "reset-case-double-warning", ActorID: "user-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []bughub.WorkflowWarning{
+		{Code: "reset_runner_cancel_failed", Message: "旧阶段 Agent 未能确认停止，请人工检查其运行状态。"},
+		{Code: "reset_replacement_start_failed", Message: "接替 Case 的新阶段未能启动，已保留为可恢复状态；请刷新 Case 或重试开始验证。"},
+	}
+	if result.Case.ID != "case-reset-double-warning-new" || result.Case.Status != bughub.CaseWaitingEvidence || !reflect.DeepEqual(result.Warnings, want) {
 		t.Fatalf("result=%+v", result)
 	}
 }

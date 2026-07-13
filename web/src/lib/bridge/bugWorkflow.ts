@@ -118,10 +118,11 @@ export class IncidentWorkflowCommandError extends Error {
 
 function incidentWorkflowConflictCode(error: unknown): IncidentWorkflowConflictCode | '' {
   if (error instanceof IncidentWorkflowCommandError) return error.code
-  const message = (error instanceof Error ? error.message : String(error)).toLocaleLowerCase()
-  if (/idempoten|幂等/.test(message) && /conflict|冲突|committed|提交/.test(message)) return 'idempotency_conflict'
-  if (/(case\s+)?version/.test(message) && /conflict|expected.+current|stale/.test(message)) return 'case_version_conflict'
-  if (/版本/.test(message) && /冲突|已更新|过期/.test(message)) return 'case_version_conflict'
+  const message = (error instanceof Error ? error.message : String(error)).trim().toLocaleLowerCase()
+  const sentinel = /^workflow_conflict:(case_version_conflict|idempotency_conflict)(?::|$)/.exec(message)
+  if (sentinel) return sentinel[1] as IncidentWorkflowConflictCode
+  if (/^incident case version conflict(?::\s*expected\s+\d+,\s*current\s+\d+)?$/.test(message)) return 'case_version_conflict'
+  if (/^idempotency key conflicts with committed request(?::[^\r\n]*)?$/.test(message) || message === '幂等键与已提交请求冲突') return 'idempotency_conflict'
   return ''
 }
 

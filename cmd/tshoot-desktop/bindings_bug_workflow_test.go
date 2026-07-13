@@ -398,6 +398,21 @@ func TestResetIncidentCaseWithWarningsReturnsStructuredCancelWarning(t *testing.
 	}
 }
 
+func TestResetIncidentCaseWithWarningsReturnsStableConflictCode(t *testing.T) {
+	app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
+	old := bughub.IncidentCase{ID: "case-reset-conflict-code", BugID: "bug-1", Source: "zentao", SystemID: "base", Environment: "test", Status: bughub.CasePendingValidation, CycleNumber: 1, SelectedBotKey: "base|codex"}
+	if err := store.CreateCase(context.Background(), old); err != nil {
+		t.Fatal(err)
+	}
+	_, err := app.ResetIncidentCaseWithWarnings(ResetIncidentCaseInput{
+		CaseID: old.ID, NewCaseID: old.ID + "-next", BotKey: old.SelectedBotKey, ExpectedVersion: 2,
+		IdempotencyKey: "reset-conflict-code", ActorID: "user-1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "workflow_conflict:case_version_conflict") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestResetIncidentCaseDuplicateCommandSchedulesOnce(t *testing.T) {
 	app, store, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
 	ctx := context.Background()

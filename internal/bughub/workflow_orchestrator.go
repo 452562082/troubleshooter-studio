@@ -514,7 +514,7 @@ func (o *CaseOrchestrator) ResetCaseWithOutcome(ctx context.Context, cmd ResetCa
 			return ResetCaseOutcome{}, fmt.Errorf("reset Bot %q/%q does not match current attempt Bot %q/%q", cmd.Bot.Key, cmd.Bot.Target, attempt.BotKey, attempt.AgentTarget)
 		}
 	}
-	result, err := o.store.ResetCaseWithReplacement(ctx, CaseReset{
+	resetRequest := CaseReset{
 		CaseID:          cmd.CaseID,
 		NewCaseID:       cmd.NewCaseID,
 		IdempotencyKey:  cmd.IdempotencyKey,
@@ -522,12 +522,20 @@ func (o *CaseOrchestrator) ResetCaseWithOutcome(ctx context.Context, cmd ResetCa
 		ExpectedVersion: cmd.ExpectedVersion,
 		SelectedBotKey:  cmd.Bot.Key,
 		RequestJSON:     mustJSON(cmd),
-	})
+	}
+	fingerprint, err := caseResetFingerprint(resetRequest)
+	if err != nil {
+		return ResetCaseOutcome{}, err
+	}
+	result, err := o.store.ResetCaseWithReplacement(ctx, resetRequest)
 	if err != nil {
 		return ResetCaseOutcome{}, err
 	}
 
-	warnings := o.ensureResetRunnerCancellation(result, cmd.IdempotencyKey)
+	warnings, cancellationErr := o.processResetRunnerCancellation(result, cmd.IdempotencyKey, fingerprint)
+	if cancellationErr != nil {
+		return ResetCaseOutcome{Case: result.Replacement, Warnings: warnings}, cancellationErr
+	}
 	replacement, startErr := o.StartCase(ctx, StartCaseCommand{
 		CaseID:          result.Replacement.ID,
 		ExpectedVersion: result.Replacement.Version,
@@ -543,38 +551,65 @@ func (o *CaseOrchestrator) ResetCaseWithOutcome(ctx context.Context, cmd ResetCa
 	return ResetCaseOutcome{Case: replacement, Warnings: warnings}, nil
 }
 
-func (o *CaseOrchestrator) ensureResetRunnerCancellation(result CaseResetResult, resetKey string) []WorkflowWarning {
-	if result.CancelledAttemptID == "" || o.runner == nil {
-		return nil
+func (o *CaseOrchestrator) processResetRunnerCancellation(result CaseResetResult, resetKey, fingerprint string) ([]WorkflowWarning, error) {
+	if result.CancelledAttemptID == "" {
+		return nil, nil
 	}
-	auditKey := resetKey + ":runner-cancel"
-	if event, found, err := o.store.GetEventByIdempotencyKey(context.Background(), auditKey); err == nil && found {
-		return resetCancelWarnings(event.EventType)
+	if o.runner == nil {
+		operation, found, err := o.store.GetResetCancellationOperation(context.Background(), resetKey, fingerprint)
+		if err != nil || !found {
+			return resetCancellationStateUnavailableWarning(), nil
+		}
+		return warningsForResetCancellation(operation), nil
 	}
-
-	eventType := "reset_runner_cancel_succeeded"
-	payload := map[string]string{"attempt_id": result.CancelledAttemptID, "outcome": "succeeded"}
-	if err := o.cancelPhase(result.CancelledAttemptID); err != nil {
-		eventType = "reset_runner_cancel_failed"
-		payload["outcome"] = "failed"
-		payload["warning_code"] = "reset_runner_cancel_failed"
+	claimToken, err := newAttemptRunClaimToken()
+	if err != nil {
+		return resetCancellationStateUnavailableWarning(), nil
 	}
 	durable, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, err := o.store.recordCaseAudit(durable, result.Archived.ID, auditKey, TransitionEvent{
-		ID: stableID("event", auditKey), EventType: eventType, ActorType: "studio", ActorID: "orchestrator", PayloadJSON: mustJSON(payload),
-	})
+	operation, acquired, err := o.store.ClaimResetCancellation(durable, resetKey, fingerprint, claimToken)
+	cancel()
 	if err != nil {
-		return []WorkflowWarning{{Code: "reset_runner_cancel_audit_failed", Message: "旧阶段 Agent 的停止结果未能写入审计，请人工检查其运行状态。"}}
+		if errors.Is(err, ErrIdempotencyConflict) {
+			return nil, err
+		}
+		return resetCancellationStateUnavailableWarning(), nil
 	}
-	return resetCancelWarnings(eventType)
+	if !acquired {
+		return warningsForResetCancellation(operation), nil
+	}
+	completionStatus := ResetCancellationSucceeded
+	if err := o.cancelPhase(result.CancelledAttemptID); err != nil {
+		completionStatus = ResetCancellationFailed
+	}
+	durable, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	completed, err := o.store.CompleteResetCancellation(durable, resetKey, fingerprint, claimToken, completionStatus)
+	cancel()
+	if err != nil {
+		return resetCancellationUnknownWarning(), nil
+	}
+	return warningsForResetCancellation(completed), nil
 }
 
-func resetCancelWarnings(eventType string) []WorkflowWarning {
-	if eventType == "reset_runner_cancel_failed" {
+func warningsForResetCancellation(operation ResetCancellationOperation) []WorkflowWarning {
+	switch operation.Status {
+	case ResetCancellationSucceeded:
+		return nil
+	case ResetCancellationFailed:
 		return []WorkflowWarning{{Code: "reset_runner_cancel_failed", Message: "旧阶段 Agent 未能确认停止，请人工检查其运行状态。"}}
+	case ResetCancellationClaimed:
+		return resetCancellationUnknownWarning()
+	default:
+		return resetCancellationStateUnavailableWarning()
 	}
-	return nil
+}
+
+func resetCancellationUnknownWarning() []WorkflowWarning {
+	return []WorkflowWarning{{Code: "reset_runner_cancel_unknown", Message: "旧阶段 Agent 的停止结果未知，请人工检查其运行状态；系统不会自动重复停止。"}}
+}
+
+func resetCancellationStateUnavailableWarning() []WorkflowWarning {
+	return []WorkflowWarning{{Code: "reset_runner_cancel_state_unavailable", Message: "无法读取旧阶段 Agent 的停止状态，请人工检查；系统不会在状态未知时自动停止。"}}
 }
 
 func (o *CaseOrchestrator) CreateAndStartCase(ctx context.Context, cmd CreateAndStartCaseCommand) (IncidentCase, error) {

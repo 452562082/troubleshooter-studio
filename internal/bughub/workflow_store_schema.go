@@ -90,7 +90,7 @@ CREATE INDEX IF NOT EXISTS idx_events_case_created ON transition_events(case_id,
 `
 
 const (
-	workflowStoreSchemaVersion   = 6
+	workflowStoreSchemaVersion   = 7
 	workflowStoreSchemaV1Key     = "workflow-schema-v1"
 	workflowStoreSchemaV1Upgrade = `
 ALTER TABLE transition_events ADD COLUMN request_fingerprint TEXT NOT NULL DEFAULT '';
@@ -122,22 +122,43 @@ ALTER TABLE incident_cases ADD COLUMN reset_from_case_id TEXT NOT NULL DEFAULT '
 ALTER TABLE incident_cases ADD COLUMN superseded_by_case_id TEXT NOT NULL DEFAULT '';
 CREATE INDEX idx_cases_bug_updated ON incident_cases(bug_id, updated_at);
 `
+	workflowStoreSchemaV7Upgrade = `
+CREATE TABLE reset_cancellation_operations (
+  reset_key TEXT PRIMARY KEY,
+  case_id TEXT NOT NULL REFERENCES incident_cases(id),
+  attempt_id TEXT NOT NULL REFERENCES phase_attempts(id),
+  request_fingerprint TEXT NOT NULL CHECK (length(request_fingerprint) = 64 AND request_fingerprint NOT GLOB '*[^0-9a-f]*'),
+  status TEXT NOT NULL CHECK (status IN ('pending','claimed','succeeded','failed')),
+  claim_token TEXT NOT NULL DEFAULT '',
+  outcome_code TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(case_id, attempt_id),
+  CHECK ((status = 'pending' AND claim_token = '' AND outcome_code = '') OR
+         (status = 'claimed' AND claim_token <> '' AND outcome_code = '') OR
+         (status = 'succeeded' AND claim_token <> '' AND outcome_code = 'succeeded') OR
+         (status = 'failed' AND claim_token <> '' AND outcome_code = 'runner_cancel_failed'))
+);
+CREATE INDEX idx_reset_cancellations_status_updated ON reset_cancellation_operations(status, updated_at);
+`
 )
 
 var legacyWorkflowTableColumns = map[string][]string{
-	"incident_cases":          {"id", "bug_id", "source", "system_id", "environment", "status", "cycle_number", "current_attempt_id", "selected_bot_key", "version", "created_at", "updated_at", "closed_at", "reset_from_case_id", "superseded_by_case_id"},
-	"phase_attempts":          {"id", "case_id", "cycle_number", "phase", "mode", "status", "agent_target", "bot_key", "input_json", "output_json", "parent_attempt_id", "started_at", "finished_at", "error_code", "error_message", "input_tokens", "output_tokens", "duration_nanos"},
-	"transition_events":       {"id", "case_id", "from_status", "to_status", "event_type", "actor_type", "actor_id", "idempotency_key", "payload_json", "created_at"},
-	"evidence_artifacts":      {"id", "case_id", "attempt_id", "kind", "path_or_reference", "sha256", "captured_at", "environment", "version", "request_id", "trace_id", "redaction_status"},
-	"code_changes":            {"id", "case_id", "attempt_id", "repo", "base_branch", "fix_branch", "fix_commit", "test_evidence_json", "target_environment_branch", "merge_base_head", "merge_commit", "push_remote", "push_status"},
-	"approvals":               {"id", "case_id", "kind", "actor", "approved_at", "case_version", "scope_json", "fix_commits_json", "target_branches_json", "idempotency_key"},
-	"deployment_observations": {"id", "case_id", "environment", "expected_commits_json", "user_notified_at", "verification_source", "observed_version", "observed_images_json", "observed_commits_json", "verified_at", "result", "idempotency_key"},
-	"schema_migrations":       {"key", "applied_at", "detail_json"},
+	"incident_cases":                {"id", "bug_id", "source", "system_id", "environment", "status", "cycle_number", "current_attempt_id", "selected_bot_key", "version", "created_at", "updated_at", "closed_at", "reset_from_case_id", "superseded_by_case_id"},
+	"phase_attempts":                {"id", "case_id", "cycle_number", "phase", "mode", "status", "agent_target", "bot_key", "input_json", "output_json", "parent_attempt_id", "started_at", "finished_at", "error_code", "error_message", "input_tokens", "output_tokens", "duration_nanos"},
+	"transition_events":             {"id", "case_id", "from_status", "to_status", "event_type", "actor_type", "actor_id", "idempotency_key", "payload_json", "created_at"},
+	"evidence_artifacts":            {"id", "case_id", "attempt_id", "kind", "path_or_reference", "sha256", "captured_at", "environment", "version", "request_id", "trace_id", "redaction_status"},
+	"code_changes":                  {"id", "case_id", "attempt_id", "repo", "base_branch", "fix_branch", "fix_commit", "test_evidence_json", "target_environment_branch", "merge_base_head", "merge_commit", "push_remote", "push_status"},
+	"approvals":                     {"id", "case_id", "kind", "actor", "approved_at", "case_version", "scope_json", "fix_commits_json", "target_branches_json", "idempotency_key"},
+	"deployment_observations":       {"id", "case_id", "environment", "expected_commits_json", "user_notified_at", "verification_source", "observed_version", "observed_images_json", "observed_commits_json", "verified_at", "result", "idempotency_key"},
+	"schema_migrations":             {"key", "applied_at", "detail_json"},
+	"reset_cancellation_operations": {"reset_key", "case_id", "attempt_id", "request_fingerprint", "status", "claim_token", "outcome_code", "created_at", "updated_at"},
 }
 
 var requiredWorkflowIndexes = map[string]string{
-	"idx_cases_status_updated":  "incident_cases",
-	"idx_cases_bug_updated":     "incident_cases",
-	"idx_attempts_case_started": "phase_attempts",
-	"idx_events_case_created":   "transition_events",
+	"idx_cases_status_updated":               "incident_cases",
+	"idx_cases_bug_updated":                  "incident_cases",
+	"idx_attempts_case_started":              "phase_attempts",
+	"idx_events_case_created":                "transition_events",
+	"idx_reset_cancellations_status_updated": "reset_cancellation_operations",
 }

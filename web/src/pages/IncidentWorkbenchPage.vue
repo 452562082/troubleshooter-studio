@@ -42,6 +42,7 @@ const starting = ref(false)
 const workflowNotice = ref('')
 const startCaseIDs = new Map<string, string>()
 type ResetDialogSnapshot = {
+  generation: number
   bugID: string
   caseID: string
   caseVersion: number
@@ -60,6 +61,7 @@ const resetDialogElement = ref<HTMLElement | null>(null)
 const resetCancelButton = ref<HTMLButtonElement | null>(null)
 const resetTrigger = ref<HTMLElement | null>(null)
 const resetRequests = new Map<string, Pick<ResetDialogSnapshot, 'newCaseID' | 'idempotencyKey'>>()
+let resetGeneration = 0
 
 const initialRequestedBugID = routeBugID()
 if (initialRequestedBugID) tickets.select(initialRequestedBugID)
@@ -90,7 +92,10 @@ const standaloneStartDisabled = computed(() => starting.value || incidentWorkflo
 
 watch(() => tickets.selectedID.value, async bugID => {
   workflowNotice.value = ''
-  if (resetDialog.value && resetDialog.value.bugID !== bugID) discardResetDialog()
+  if (resetDialog.value && resetDialog.value.bugID !== bugID) {
+    resetGeneration++
+    discardResetDialog()
+  }
   if (!bugID || !tickets.selectedBug.value) {
     matches.value = []
     selectedBotKey.value = ''
@@ -263,6 +268,7 @@ async function openResetDialog(incident: IncidentCase) {
   const detail = displayedDetail.value?.case.id === incident.id ? displayedDetail.value : null
   const attempt = detail?.attempts.find(item => item.id === incident.current_attempt_id)
   resetDialog.value = {
+    generation: ++resetGeneration,
     bugID,
     caseID: incident.id,
     caseVersion: incident.version,
@@ -317,6 +323,7 @@ function trapResetDialogFocus(event: KeyboardEvent) {
 async function confirmReset() {
   const request = resetDialog.value
   if (!request || resetting.value || !request.botKey) return
+  const isCurrentResetRequest = () => isCurrentBug(request.bugID) && resetGeneration === request.generation
   const isCurrentLinkedReplacement = (replacementID: string) => {
     const current = displayedDetail.value?.case
     return Boolean(
@@ -365,6 +372,31 @@ async function confirmReset() {
       toast.success('Case 已重置，接替 Case 已创建')
     }
   } catch (error) {
+    if (isIncidentWorkflowConflict(error)) {
+      if (!isCurrentResetRequest()) return
+      const identity = `${request.caseID}:v${request.caseVersion}:${request.botKey}`
+      resetRequests.delete(identity)
+      resetting.value = false
+      closeResetDialog()
+      try {
+        await incidentWorkflow.refreshCases()
+        if (!isCurrentResetRequest()) return
+        const refreshed = activeCaseForBug(incidentWorkflow.cases.value, request.bugID) || casesForBug(incidentWorkflow.cases.value, request.bugID)[0]
+        if (refreshed) await incidentWorkflow.refreshDetail(refreshed.id)
+      } catch (refreshError) {
+        if (!isCurrentResetRequest()) return
+        const cause = refreshError instanceof Error ? refreshError.message : String(refreshError)
+        const message = `Case 已被其他操作更新，但刷新最新状态失败：${cause}。请手动刷新后重新确认。`
+        incidentWorkflow.error.value = message
+        toast.error(message)
+        return
+      }
+      if (!isCurrentResetRequest()) return
+      const message = 'Case 已被其他操作更新，已刷新到最新状态。请重新确认后再重置。'
+      incidentWorkflow.error.value = message
+      toast.info(message)
+      return
+    }
     if (isCurrentLinkedReplacement(request.newCaseID)) {
       resetting.value = false
       closeResetDialog()
@@ -379,23 +411,6 @@ async function confirmReset() {
       return
     }
     if (!isExpectedResetContext()) return
-    if (isIncidentWorkflowConflict(error)) {
-      const identity = `${request.caseID}:v${request.caseVersion}:${request.botKey}`
-      resetRequests.delete(identity)
-      resetting.value = false
-      closeResetDialog()
-      try {
-        await incidentWorkflow.refreshCases()
-        if (!isCurrentBug(request.bugID)) return
-        const refreshed = activeCaseForBug(incidentWorkflow.cases.value, request.bugID) || casesForBug(incidentWorkflow.cases.value, request.bugID)[0]
-        if (refreshed) await incidentWorkflow.refreshDetail(refreshed.id)
-      } catch { /* controller keeps a recoverable refresh error */ }
-      if (!isCurrentBug(request.bugID)) return
-      const message = 'Case 已被其他操作更新，已刷新到最新状态。请重新确认后再重置。'
-      incidentWorkflow.error.value = message
-      toast.info(message)
-      return
-    }
     const message = error instanceof Error ? error.message : String(error)
     resetError.value = message
     incidentWorkflow.error.value = message
@@ -628,6 +643,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
         <p id="reset-dialog-description">当前 Case 将归档为“已重置归档”，并创建一个绑定同一机器人的新 Case，从验证阶段重新开始。<strong>当前 Agent 将被停止。</strong></p>
         <p class="reset-warning" role="note"><strong>重置不会撤销已发生的提交、推送或部署。</strong>原 Case、证据和审计记录保持不可变；外部副作用需要人工另行处理。</p>
         <dl class="reset-scope">
+          <div><dt>Bug ID</dt><dd>{{ resetDialog.bugID }}</dd></div>
           <div><dt>原 Case</dt><dd>{{ resetDialog.caseID }} · v{{ resetDialog.caseVersion }}</dd></div>
           <div><dt>状态</dt><dd>{{ resetDialog.caseStatus }}</dd></div>
           <div><dt>阶段</dt><dd>{{ resetDialog.phase }}</dd></div>

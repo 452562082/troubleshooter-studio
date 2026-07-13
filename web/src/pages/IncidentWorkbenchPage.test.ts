@@ -477,7 +477,54 @@ describe('IncidentWorkbenchPage', () => {
     expect(dialog.text()).toContain('investigation')
     expect(dialog.text()).toContain('attempt-investigation')
     expect(dialog.text()).toContain('base|codex')
+    expect(dialog.text()).toContain('bug-a')
     expect(dialog.text()).toContain('当前 Agent 将被停止')
+  })
+
+  it('refreshes after a v8 realtime snapshot arrives before the v7 reset conflict', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const stale = incident('case-reset-realtime-conflict', 'waiting_evidence', '2026-07-13T00:00:00Z', { version: 7 })
+    const fresh = incident('case-reset-realtime-conflict', 'waiting_evidence', '2026-07-13T00:01:00Z', { version: 8 })
+    vi.mocked(listIncidentCases).mockResolvedValueOnce([stale]).mockResolvedValue([fresh])
+    vi.mocked(getIncidentCase).mockResolvedValueOnce(detail(stale)).mockResolvedValue(detail(fresh))
+    const pendingReset = deferred<{ case: IncidentCase; warnings: [] }>()
+    vi.mocked(resetIncidentCaseWithWarnings).mockReturnValue(pendingReset.promise)
+    const wrapper = await mountedPage()
+
+    await wrapper.get('.reset-action').trigger('click')
+    await wrapper.get('[data-reset-confirm]').trigger('click')
+    const eventHandler = runtime.EventsOn.mock.calls.find(call => call[0] === 'incident-case:event')?.[1]
+    eventHandler?.({ kind: 'snapshot', case: fresh, snapshot: detail(fresh) })
+    await flushPromises()
+    pendingReset.reject(new IncidentWorkflowCommandError('case_version_conflict', 'Case 已更新'))
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(listIncidentCases).toHaveBeenCalledTimes(2)
+    expect(getIncidentCase).toHaveBeenLastCalledWith(fresh.id)
+    expect(notifications.info).toHaveBeenCalledWith(expect.stringContaining('已刷新'))
+  })
+
+  it('reports the actual refresh failure after a reset conflict instead of claiming refresh succeeded', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const stale = incident('case-reset-refresh-failure', 'waiting_evidence', '2026-07-13T00:00:00Z', { version: 7 })
+    vi.mocked(listIncidentCases).mockResolvedValueOnce([stale]).mockRejectedValueOnce(new Error('Case 列表暂时不可用'))
+    vi.mocked(getIncidentCase).mockResolvedValue(detail(stale))
+    vi.mocked(resetIncidentCaseWithWarnings).mockRejectedValue(new IncidentWorkflowCommandError('idempotency_conflict', '请求身份冲突'))
+    const wrapper = await mountedPage()
+
+    await wrapper.get('.reset-action').trigger('click')
+    await wrapper.get('[data-reset-confirm]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(wrapper.get('.live-error').text()).toContain('Case 列表暂时不可用')
+    expect(wrapper.get('.live-error').text()).toContain('请手动刷新')
+    expect(notifications.info).not.toHaveBeenCalledWith(expect.stringContaining('已刷新'))
   })
 
   it('refreshes the Case and discards the stale reset identity after a version conflict', async () => {

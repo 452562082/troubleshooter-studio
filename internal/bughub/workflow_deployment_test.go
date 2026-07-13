@@ -80,10 +80,15 @@ func TestDeploymentProofSchemaMigratesV1Store(t *testing.T) {
 			t.Fatalf("missing incident_cases.%s columns=%v", required, columns["incident_cases"])
 		}
 	}
+	for _, required := range []string{"reset_key", "case_id", "attempt_id", "request_fingerprint", "status", "claim_token", "outcome_code", "created_at", "updated_at"} {
+		if !containsString(columns["reset_cancellation_operations"], required) {
+			t.Fatalf("missing reset_cancellation_operations.%s columns=%v", required, columns["reset_cancellation_operations"])
+		}
+	}
 }
 
-func TestDeploymentProofSchemaMigratesV2ThroughV5Stores(t *testing.T) {
-	for _, initialVersion := range []int{2, 3, 4, 5} {
+func TestDeploymentProofSchemaMigratesV2ThroughV6Stores(t *testing.T) {
+	for _, initialVersion := range []int{2, 3, 4, 5, 6} {
 		t.Run(fmt.Sprintf("v%d", initialVersion), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "workflow.db")
 			db, err := sql.Open("sqlite", path)
@@ -109,8 +114,13 @@ func TestDeploymentProofSchemaMigratesV2ThroughV5Stores(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if initialVersion == 5 {
+			if initialVersion >= 5 {
 				if _, err = tx.Exec(workflowStoreSchemaV5Upgrade); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if initialVersion >= 6 {
+				if _, err = tx.Exec(workflowStoreSchemaV6Upgrade); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -159,6 +169,11 @@ func TestDeploymentProofSchemaMigratesV2ThroughV5Stores(t *testing.T) {
 			for _, required := range []string{"reset_from_case_id", "superseded_by_case_id"} {
 				if !containsString(columns["incident_cases"], required) {
 					t.Fatalf("missing incident_cases.%s columns=%v", required, columns["incident_cases"])
+				}
+			}
+			for _, required := range []string{"reset_key", "case_id", "attempt_id", "request_fingerprint", "status", "claim_token", "outcome_code", "created_at", "updated_at"} {
+				if !containsString(columns["reset_cancellation_operations"], required) {
+					t.Fatalf("missing reset cancellation operation %s columns=%v", required, columns["reset_cancellation_operations"])
 				}
 			}
 		})

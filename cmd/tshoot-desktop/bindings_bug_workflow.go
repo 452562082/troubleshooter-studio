@@ -682,6 +682,11 @@ func (a *App) resetIncidentCaseWithWarnings(input ResetIncidentCaseInput) (bughu
 		ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID),
 		Bug: bug, Bot: bot, InputJSON: inputJSON,
 	})
+	if errors.Is(err, bughub.ErrCaseVersionConflict) {
+		err = fmt.Errorf("workflow_conflict:case_version_conflict: %w", err)
+	} else if errors.Is(err, bughub.ErrIdempotencyConflict) {
+		err = fmt.Errorf("workflow_conflict:idempotency_conflict: %w", err)
+	}
 	a.emitIncidentResult(result.Case, err)
 	return result, err
 }

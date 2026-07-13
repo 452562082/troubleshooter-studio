@@ -55,19 +55,209 @@ func TestResetCaseAuditsSuccessfulExternalRunnerCancellation(t *testing.T) {
 	if outcome.Case.ID != cmd.NewCaseID || len(outcome.Warnings) != 0 {
 		t.Fatalf("outcome=%+v", outcome)
 	}
-	event, found, err := store.GetEventByIdempotencyKey(context.Background(), cmd.IdempotencyKey+":runner-cancel")
-	if err != nil || !found {
-		t.Fatalf("cancel audit found=%v err=%v", found, err)
-	}
-	if event.EventType != "reset_runner_cancel_succeeded" {
-		t.Fatalf("event=%+v", event)
-	}
-	var payload map[string]string
-	if err := json.Unmarshal(event.PayloadJSON, &payload); err != nil {
+	fingerprint, err := caseResetFingerprint(CaseReset{CaseID: cmd.CaseID, NewCaseID: cmd.NewCaseID, IdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, ExpectedVersion: cmd.ExpectedVersion, SelectedBotKey: cmd.Bot.Key, RequestJSON: mustJSON(cmd)})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(payload, map[string]string{"attempt_id": oldAttempt.ID, "outcome": "succeeded"}) {
-		t.Fatalf("payload=%v", payload)
+	operation, found, err := store.GetResetCancellationOperation(context.Background(), cmd.IdempotencyKey, fingerprint)
+	if err != nil || !found {
+		t.Fatalf("cancel operation found=%v err=%v", found, err)
+	}
+	if operation.Status != ResetCancellationSucceeded || operation.AttemptID != oldAttempt.ID || operation.OutcomeCode != "succeeded" {
+		t.Fatalf("operation=%+v", operation)
+	}
+}
+
+func TestResetCancellationOperationIsCreatedAtomicallyWithReset(t *testing.T) {
+	store := newOrchestratorStore(t)
+	old, attempt := prepareResetCase(t, store, "case-reset-cancel-operation")
+	command := resetCommand(old, "case-reset-cancel-operation-next", "reset-cancel-operation")
+	fingerprint, err := caseResetFingerprint(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ResetCaseWithReplacement(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	operation, found, err := store.GetResetCancellationOperation(context.Background(), command.IdempotencyKey, fingerprint)
+	if err != nil || !found {
+		t.Fatalf("operation=%+v found=%v err=%v", operation, found, err)
+	}
+	if operation.ResetKey != command.IdempotencyKey || operation.CaseID != old.ID || operation.AttemptID != attempt.ID || operation.RequestFingerprint != fingerprint || operation.Status != ResetCancellationPending {
+		t.Fatalf("operation=%+v", operation)
+	}
+}
+
+func TestResetCancellationOperationInsertFailureRollsBackResetWithoutReportingIdentityConflict(t *testing.T) {
+	store := newOrchestratorStore(t)
+	old, _ := prepareResetCase(t, store, "case-reset-cancel-insert-failure")
+	command := resetCommand(old, "case-reset-cancel-insert-failure-next", "reset-cancel-insert-failure")
+	if _, err := store.db.Exec(`CREATE TRIGGER fail_reset_cancel_insert BEFORE INSERT ON reset_cancellation_operations BEGIN SELECT RAISE(FAIL, 'secret persistence detail'); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.ResetCaseWithReplacement(context.Background(), command); err == nil || errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("err=%v", err)
+	}
+	persisted, err := store.GetCase(context.Background(), old.ID)
+	if err != nil || persisted.Status != old.Status || persisted.Version != old.Version {
+		t.Fatalf("persisted=%+v err=%v", persisted, err)
+	}
+	if _, err := store.GetCase(context.Background(), command.NewCaseID); !errors.Is(err, ErrCaseNotFound) {
+		t.Fatalf("replacement err=%v", err)
+	}
+}
+
+func TestResetCancellationClaimAcrossTwoStoresAllowsOneRunnerCall(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cases.db")
+	first, err := OpenCaseStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = first.Close() })
+	old, _ := prepareResetCase(t, first, "case-reset-two-stores")
+	command := resetCommand(old, "case-reset-two-stores-next", "reset-two-stores")
+	result, err := first.ResetCaseWithReplacement(context.Background(), command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := caseResetFingerprint(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := OpenCaseStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+	runnerA, runnerB := &recordingPhaseRunner{}, &recordingPhaseRunner{}
+	orchestrators := []*CaseOrchestrator{NewCaseOrchestrator(first, runnerA, nil, nil), NewCaseOrchestrator(second, runnerB, nil, nil)}
+	warnings := make([][]WorkflowWarning, 2)
+	errs := make([]error, 2)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for index := range orchestrators {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			<-start
+			warnings[index], errs[index] = orchestrators[index].processResetRunnerCancellation(result, command.IdempotencyKey, fingerprint)
+		}(index)
+	}
+	close(start)
+	wg.Wait()
+	if errs[0] != nil || errs[1] != nil {
+		t.Fatalf("errors=%v", errs)
+	}
+	runnerA.mu.Lock()
+	callsA := len(runnerA.cancels)
+	runnerA.mu.Unlock()
+	runnerB.mu.Lock()
+	callsB := len(runnerB.cancels)
+	runnerB.mu.Unlock()
+	if callsA+callsB != 1 {
+		t.Fatalf("runner cancellations=%d+%d warnings=%+v", callsA, callsB, warnings)
+	}
+	operation, found, err := first.GetResetCancellationOperation(context.Background(), command.IdempotencyKey, fingerprint)
+	if err != nil || !found || operation.Status != ResetCancellationSucceeded {
+		t.Fatalf("operation=%+v found=%v err=%v", operation, found, err)
+	}
+}
+
+func TestResetCancellationClaimedReplayReturnsUnknownWithoutCallingRunner(t *testing.T) {
+	store := newOrchestratorStore(t)
+	old, _ := prepareResetCase(t, store, "case-reset-claimed")
+	command := resetOrchestratorCommand(old, "case-reset-claimed-next", "reset-claimed")
+	storeCommand := CaseReset{CaseID: command.CaseID, NewCaseID: command.NewCaseID, IdempotencyKey: command.IdempotencyKey, ActorID: command.ActorID, ExpectedVersion: command.ExpectedVersion, SelectedBotKey: command.Bot.Key, RequestJSON: mustJSON(command)}
+	if _, err := store.ResetCaseWithReplacement(context.Background(), storeCommand); err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := caseResetFingerprint(storeCommand)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, acquired, err := store.ClaimResetCancellation(context.Background(), command.IdempotencyKey, fingerprint, "crashed-process-claim"); err != nil || !acquired {
+		t.Fatalf("acquired=%v err=%v", acquired, err)
+	}
+	runner := &recordingPhaseRunner{}
+	outcome, err := NewCaseOrchestrator(store, runner, nil, nil).ResetCaseWithOutcome(context.Background(), command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(outcome.Warnings, []WorkflowWarning{{Code: "reset_runner_cancel_unknown", Message: "旧阶段 Agent 的停止结果未知，请人工检查其运行状态；系统不会自动重复停止。"}}) {
+		t.Fatalf("outcome=%+v", outcome)
+	}
+	if len(runner.cancels) != 0 {
+		t.Fatalf("runner cancellations=%v", runner.cancels)
+	}
+}
+
+func TestResetCancellationStateReadFailureReturnsStructuredWarning(t *testing.T) {
+	store := newOrchestratorStore(t)
+	old, _ := prepareResetCase(t, store, "case-reset-read-failure")
+	command := resetCommand(old, "case-reset-read-failure-next", "reset-read-failure")
+	result, err := store.ResetCaseWithReplacement(context.Background(), command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := caseResetFingerprint(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingPhaseRunner{}
+	warnings, processErr := NewCaseOrchestrator(store, runner, nil, nil).processResetRunnerCancellation(result, command.IdempotencyKey, fingerprint)
+	if processErr != nil {
+		t.Fatal(processErr)
+	}
+	if !reflect.DeepEqual(warnings, []WorkflowWarning{{Code: "reset_runner_cancel_state_unavailable", Message: "无法读取旧阶段 Agent 的停止状态，请人工检查；系统不会在状态未知时自动停止。"}}) {
+		t.Fatalf("warnings=%+v", warnings)
+	}
+	if len(runner.cancels) != 0 {
+		t.Fatalf("runner cancellations=%v", runner.cancels)
+	}
+}
+
+func TestResetCancellationCompletionPersistenceFailureReturnsUnknownWithoutLeakingError(t *testing.T) {
+	store := newOrchestratorStore(t)
+	old, _ := prepareResetCase(t, store, "case-reset-complete-failure")
+	command := resetCommand(old, "case-reset-complete-failure-next", "reset-complete-failure")
+	result, err := store.ResetCaseWithReplacement(context.Background(), command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := caseResetFingerprint(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`CREATE TRIGGER fail_reset_cancel_completion BEFORE UPDATE ON reset_cancellation_operations WHEN NEW.status IN ('succeeded','failed') BEGIN SELECT RAISE(FAIL, 'secret persistence detail'); END`); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingPhaseRunner{}
+	warnings, processErr := NewCaseOrchestrator(store, runner, nil, nil).processResetRunnerCancellation(result, command.IdempotencyKey, fingerprint)
+	if processErr != nil {
+		t.Fatal(processErr)
+	}
+	if len(runner.cancels) != 1 || len(warnings) != 1 || warnings[0].Code != "reset_runner_cancel_unknown" || strings.Contains(warnings[0].Message, "secret persistence detail") {
+		t.Fatalf("cancels=%v warnings=%+v", runner.cancels, warnings)
+	}
+}
+
+func TestResetCancellationIdentityCollisionRejectsReset(t *testing.T) {
+	store := newOrchestratorStore(t)
+	old, _ := prepareResetCase(t, store, "case-reset-operation-collision")
+	command := resetCommand(old, "case-reset-operation-collision-next", "reset-operation-collision")
+	if _, err := store.db.Exec(`INSERT INTO reset_cancellation_operations (reset_key,case_id,attempt_id,request_fingerprint,status,claim_token,outcome_code,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`, command.IdempotencyKey, old.ID, old.CurrentAttemptID, strings.Repeat("f", 64), "pending", "", "", formatStoreTime(time.Now().UTC()), formatStoreTime(time.Now().UTC())); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ResetCaseWithReplacement(context.Background(), command); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("err=%v", err)
+	}
+	persisted, err := store.GetCase(context.Background(), old.ID)
+	if err != nil || persisted.Status != old.Status || persisted.Version != old.Version {
+		t.Fatalf("persisted=%+v err=%v", persisted, err)
 	}
 }
 
@@ -150,19 +340,17 @@ func TestResetCaseCancelFailureStillReturnsStartedReplacement(t *testing.T) {
 	if !reflect.DeepEqual(outcome.Warnings, []WorkflowWarning{{Code: "reset_runner_cancel_failed", Message: "旧阶段 Agent 未能确认停止，请人工检查其运行状态。"}}) {
 		t.Fatalf("warnings=%+v", outcome.Warnings)
 	}
-	event, found, err := store.GetEventByIdempotencyKey(context.Background(), cmd.IdempotencyKey+":runner-cancel")
-	if err != nil || !found || event.EventType != "reset_runner_cancel_failed" {
-		t.Fatalf("cancel audit=%+v found=%v err=%v", event, found, err)
-	}
-	if strings.Contains(string(event.PayloadJSON), "old runner unavailable") {
-		t.Fatalf("cancel audit leaked runner error: %s", event.PayloadJSON)
-	}
-	var payload map[string]string
-	if err := json.Unmarshal(event.PayloadJSON, &payload); err != nil {
+	fingerprint, err := caseResetFingerprint(CaseReset{CaseID: cmd.CaseID, NewCaseID: cmd.NewCaseID, IdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, ExpectedVersion: cmd.ExpectedVersion, SelectedBotKey: cmd.Bot.Key, RequestJSON: mustJSON(cmd)})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(payload, map[string]string{"attempt_id": oldAttempt.ID, "outcome": "failed", "warning_code": "reset_runner_cancel_failed"}) {
-		t.Fatalf("payload=%v", payload)
+	operation, found, err := store.GetResetCancellationOperation(context.Background(), cmd.IdempotencyKey, fingerprint)
+	if err != nil || !found || operation.Status != ResetCancellationFailed || operation.OutcomeCode != "runner_cancel_failed" {
+		t.Fatalf("cancel operation=%+v found=%v err=%v", operation, found, err)
+	}
+	rows := snapshotRows(t, store, `SELECT reset_key,case_id,attempt_id,request_fingerprint,status,claim_token,outcome_code FROM reset_cancellation_operations WHERE reset_key=?`, cmd.IdempotencyKey)
+	if strings.Contains(fmt.Sprint(rows), "old runner unavailable") {
+		t.Fatalf("cancel operation leaked runner error: %+v", rows)
 	}
 
 	replayed, replayErr := orchestrator.ResetCaseWithOutcome(context.Background(), cmd)

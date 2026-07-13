@@ -712,6 +712,20 @@ func TestCaseStoreInitializesAndMigratesVersionedSchema(t *testing.T) {
 		}
 		assertTableColumns(t, store.db, "transition_events", "request_fingerprint", "result_case_json")
 		assertTableColumns(t, store.db, "incident_cases", "reset_from_case_id", "superseded_by_case_id")
+		assertTableColumns(t, store.db, "reset_cancellation_operations", "reset_key", "case_id", "attempt_id", "request_fingerprint", "status", "claim_token", "outcome_code", "created_at", "updated_at")
+		var cancellationDDL string
+		if err := store.db.QueryRow(`SELECT lower(sql) FROM sqlite_master WHERE type='table' AND name='reset_cancellation_operations'`).Scan(&cancellationDDL); err != nil {
+			t.Fatal(err)
+		}
+		for _, required := range []string{"primary key", "unique(case_id, attempt_id)", "status in ('pending','claimed','succeeded','failed')", "length(request_fingerprint) = 64", "request_fingerprint not glob '*[^0-9a-f]*'"} {
+			if !strings.Contains(strings.ReplaceAll(cancellationDDL, "\n", " "), required) {
+				t.Fatalf("reset cancellation schema missing %q: %s", required, cancellationDDL)
+			}
+		}
+		var cancellationIndexTable string
+		if err := store.db.QueryRow(`SELECT tbl_name FROM sqlite_master WHERE type='index' AND name='idx_reset_cancellations_status_updated'`).Scan(&cancellationIndexTable); err != nil || cancellationIndexTable != "reset_cancellation_operations" {
+			t.Fatalf("reset cancellation index table=%q err=%v", cancellationIndexTable, err)
+		}
 	})
 
 	t.Run("pre-release unversioned schema with explicit event time is rejected without mutation", func(t *testing.T) {

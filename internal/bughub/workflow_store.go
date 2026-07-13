@@ -74,6 +74,31 @@ type CaseResetResult struct {
 	Replay             bool
 }
 
+type ResetCancellationStatus string
+
+const (
+	ResetCancellationPending   ResetCancellationStatus = "pending"
+	ResetCancellationClaimed   ResetCancellationStatus = "claimed"
+	ResetCancellationSucceeded ResetCancellationStatus = "succeeded"
+	ResetCancellationFailed    ResetCancellationStatus = "failed"
+)
+
+// ResetCancellationOperation is the durable outbox entry for stopping the
+// runner that belonged to a reset Case. A claimed entry is intentionally not
+// leased: if its owner crashes, replay reports an unknown outcome and never
+// calls a runner API that has no idempotency key a second time.
+type ResetCancellationOperation struct {
+	ResetKey           string
+	CaseID             string
+	AttemptID          string
+	RequestFingerprint string
+	Status             ResetCancellationStatus
+	ClaimToken         string
+	OutcomeCode        string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+}
+
 type legacyImportBatch struct {
 	MigrationKey string
 	Cases        []IncidentCase
@@ -209,6 +234,10 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		if err := verifyWorkflowSchemaMarker(ctx, tx, 5); err != nil {
 			return err
 		}
+	case 6:
+		if err := verifyWorkflowSchemaMarker(ctx, tx, 6); err != nil {
+			return err
+		}
 	case workflowStoreSchemaVersion:
 		// Verified below before the transaction is committed.
 	default:
@@ -304,7 +333,7 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: workflowStoreSchemaVersion, Fingerprint: fingerprint})
+		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: 6, Fingerprint: fingerprint})
 		if err != nil {
 			return fmt.Errorf("encode workflow schema v6 detail: %w", err)
 		}
@@ -313,6 +342,26 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		}
 		if _, err := tx.ExecContext(ctx, `PRAGMA user_version=6`); err != nil {
 			return fmt.Errorf("set workflow schema version 6: %w", err)
+		}
+		version = 6
+	}
+	if version == 6 {
+		if _, err := tx.ExecContext(ctx, workflowStoreSchemaV7Upgrade); err != nil {
+			return fmt.Errorf("apply workflow schema v7: %w", err)
+		}
+		fingerprint, err := workflowSchemaFingerprint(ctx, tx)
+		if err != nil {
+			return err
+		}
+		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: workflowStoreSchemaVersion, Fingerprint: fingerprint})
+		if err != nil {
+			return fmt.Errorf("encode workflow schema v7 detail: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE schema_migrations SET applied_at = ?, detail_json = ? WHERE key = ?`, formatStoreTime(time.Now().UTC()), string(detail), workflowStoreSchemaV1Key); err != nil {
+			return fmt.Errorf("record workflow schema v7: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `PRAGMA user_version=7`); err != nil {
+			return fmt.Errorf("set workflow schema version 7: %w", err)
 		}
 	}
 	tables, err := workflowTableColumns(ctx, tx)
@@ -326,6 +375,7 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 	v1Columns["fix_checkpoints"] = []string{"attempt_id", "case_id", "staging_locator", "created_at"}
 	v1Columns["phase_attempts"] = append(v1Columns["phase_attempts"], "completion_identity_sha256")
 	v1Columns["phase_attempts"] = append(v1Columns["phase_attempts"], "run_claim_token")
+	v1Columns["reset_cancellation_operations"] = []string{"reset_key", "case_id", "attempt_id", "request_fingerprint", "status", "claim_token", "outcome_code", "created_at", "updated_at"}
 	if err := verifyWorkflowColumns(tables, v1Columns); err != nil {
 		return err
 	}
@@ -599,6 +649,15 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 		if err := validateCaseResetResult(result, reset.CaseID, reset.NewCaseID); err != nil {
 			return CaseResetResult{}, err
 		}
+		if result.CancelledAttemptID != "" {
+			operation, found, operationErr := getResetCancellationOperation(ctx, tx, reset.IdempotencyKey)
+			if operationErr != nil {
+				return CaseResetResult{}, fmt.Errorf("load replayed reset cancellation: %w", operationErr)
+			}
+			if !found || operation.CaseID != result.Archived.ID || operation.AttemptID != result.CancelledAttemptID || operation.RequestFingerprint != fingerprint {
+				return CaseResetResult{}, fmt.Errorf("%w: reset cancellation identity %q", ErrIdempotencyConflict, reset.IdempotencyKey)
+			}
+		}
 		result.Replay = true
 		if err := tx.Commit(); err != nil {
 			return CaseResetResult{}, fmt.Errorf("commit Case reset replay: %w", err)
@@ -607,6 +666,11 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 	}
 	if !errors.Is(queryErr, sql.ErrNoRows) {
 		return result, fmt.Errorf("load Case reset identity: %w", queryErr)
+	}
+	if _, found, operationErr := getResetCancellationOperation(ctx, tx, reset.IdempotencyKey); operationErr != nil {
+		return result, fmt.Errorf("load reset cancellation identity: %w", operationErr)
+	} else if found {
+		return result, fmt.Errorf("%w: reset cancellation key %q", ErrIdempotencyConflict, reset.IdempotencyKey)
 	}
 
 	incident, err := getCase(ctx, tx, reset.CaseID)
@@ -640,6 +704,11 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM fix_checkpoints WHERE attempt_id=? AND case_id=?`, incident.CurrentAttemptID, incident.ID); err != nil {
 			return result, fmt.Errorf("delete reset Case fix checkpoint: %w", err)
+		}
+	}
+	if result.CancelledAttemptID != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO reset_cancellation_operations (reset_key,case_id,attempt_id,request_fingerprint,status,claim_token,outcome_code,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`, reset.IdempotencyKey, incident.ID, result.CancelledAttemptID, fingerprint, ResetCancellationPending, "", "", formatStoreTime(now), formatStoreTime(now)); err != nil {
+			return result, fmt.Errorf("insert reset cancellation operation: %w", err)
 		}
 	}
 
@@ -707,6 +776,125 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 		return CaseResetResult{}, fmt.Errorf("commit Case reset: %w", err)
 	}
 	return cloneCaseResetResult(result), nil
+}
+
+func getResetCancellationOperation(ctx context.Context, query caseQuery, resetKey string) (ResetCancellationOperation, bool, error) {
+	var operation ResetCancellationOperation
+	var createdAt, updatedAt string
+	err := query.QueryRowContext(ctx, `SELECT reset_key,case_id,attempt_id,request_fingerprint,status,claim_token,outcome_code,created_at,updated_at FROM reset_cancellation_operations WHERE reset_key=?`, resetKey).Scan(&operation.ResetKey, &operation.CaseID, &operation.AttemptID, &operation.RequestFingerprint, &operation.Status, &operation.ClaimToken, &operation.OutcomeCode, &createdAt, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ResetCancellationOperation{}, false, nil
+	}
+	if err != nil {
+		return ResetCancellationOperation{}, false, err
+	}
+	operation.CreatedAt, err = parseStoreTime(createdAt)
+	if err != nil {
+		return ResetCancellationOperation{}, false, err
+	}
+	operation.UpdatedAt, err = parseStoreTime(updatedAt)
+	if err != nil {
+		return ResetCancellationOperation{}, false, err
+	}
+	decodedFingerprint, decodeErr := hex.DecodeString(operation.RequestFingerprint)
+	if operation.ResetKey == "" || operation.CaseID == "" || operation.AttemptID == "" || decodeErr != nil || len(decodedFingerprint) != sha256.Size {
+		return ResetCancellationOperation{}, false, errors.New("reset cancellation operation identity is invalid")
+	}
+	switch operation.Status {
+	case ResetCancellationPending:
+		if operation.ClaimToken != "" || operation.OutcomeCode != "" {
+			return ResetCancellationOperation{}, false, errors.New("pending reset cancellation operation is invalid")
+		}
+	case ResetCancellationClaimed:
+		if operation.ClaimToken == "" || operation.OutcomeCode != "" {
+			return ResetCancellationOperation{}, false, errors.New("claimed reset cancellation operation is invalid")
+		}
+	case ResetCancellationSucceeded:
+		if operation.ClaimToken == "" || operation.OutcomeCode != "succeeded" {
+			return ResetCancellationOperation{}, false, errors.New("successful reset cancellation operation is invalid")
+		}
+	case ResetCancellationFailed:
+		if operation.ClaimToken == "" || operation.OutcomeCode != "runner_cancel_failed" {
+			return ResetCancellationOperation{}, false, errors.New("failed reset cancellation operation is invalid")
+		}
+	default:
+		return ResetCancellationOperation{}, false, errors.New("reset cancellation operation status is invalid")
+	}
+	return operation, true, nil
+}
+
+func (s *CaseStore) GetResetCancellationOperation(ctx context.Context, resetKey, fingerprint string) (ResetCancellationOperation, bool, error) {
+	if s == nil || s.db == nil || blank(resetKey) || len(fingerprint) != sha256.Size*2 {
+		return ResetCancellationOperation{}, false, errors.New("reset cancellation key and fingerprint are required")
+	}
+	operation, found, err := getResetCancellationOperation(ctx, s.db, resetKey)
+	if err != nil || !found {
+		return operation, found, err
+	}
+	if operation.RequestFingerprint != fingerprint {
+		return ResetCancellationOperation{}, false, fmt.Errorf("%w: reset cancellation key %q", ErrIdempotencyConflict, resetKey)
+	}
+	return operation, true, nil
+}
+
+func (s *CaseStore) ClaimResetCancellation(ctx context.Context, resetKey, fingerprint, claimToken string) (ResetCancellationOperation, bool, error) {
+	if blank(claimToken) {
+		return ResetCancellationOperation{}, false, errors.New("reset cancellation claim token is required")
+	}
+	now := formatStoreTime(time.Now().UTC())
+	result, err := s.db.ExecContext(ctx, `UPDATE reset_cancellation_operations SET status=?,claim_token=?,updated_at=? WHERE reset_key=? AND request_fingerprint=? AND status=?`, ResetCancellationClaimed, claimToken, now, resetKey, fingerprint, ResetCancellationPending)
+	if err != nil {
+		return ResetCancellationOperation{}, false, fmt.Errorf("claim reset cancellation operation: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return ResetCancellationOperation{}, false, err
+	}
+	operation, found, err := s.GetResetCancellationOperation(ctx, resetKey, fingerprint)
+	if err != nil {
+		return ResetCancellationOperation{}, false, err
+	}
+	if !found {
+		return ResetCancellationOperation{}, false, errors.New("reset cancellation operation is missing")
+	}
+	if rows == 1 {
+		if operation.Status != ResetCancellationClaimed || operation.ClaimToken != claimToken {
+			return ResetCancellationOperation{}, false, errors.New("reset cancellation claim was not persisted")
+		}
+		return operation, true, nil
+	}
+	return operation, false, nil
+}
+
+func (s *CaseStore) CompleteResetCancellation(ctx context.Context, resetKey, fingerprint, claimToken string, status ResetCancellationStatus) (ResetCancellationOperation, error) {
+	outcomeCode := ""
+	switch status {
+	case ResetCancellationSucceeded:
+		outcomeCode = "succeeded"
+	case ResetCancellationFailed:
+		outcomeCode = "runner_cancel_failed"
+	default:
+		return ResetCancellationOperation{}, errors.New("reset cancellation completion status is invalid")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE reset_cancellation_operations SET status=?,outcome_code=?,updated_at=? WHERE reset_key=? AND request_fingerprint=? AND status=? AND claim_token=?`, status, outcomeCode, formatStoreTime(time.Now().UTC()), resetKey, fingerprint, ResetCancellationClaimed, claimToken)
+	if err != nil {
+		return ResetCancellationOperation{}, fmt.Errorf("complete reset cancellation operation: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return ResetCancellationOperation{}, err
+	}
+	operation, found, err := s.GetResetCancellationOperation(ctx, resetKey, fingerprint)
+	if err != nil {
+		return ResetCancellationOperation{}, err
+	}
+	if !found {
+		return ResetCancellationOperation{}, errors.New("reset cancellation operation is missing")
+	}
+	if rows == 1 || (operation.Status == status && operation.ClaimToken == claimToken && operation.OutcomeCode == outcomeCode) {
+		return operation, nil
+	}
+	return ResetCancellationOperation{}, fmt.Errorf("%w: reset cancellation completion %q", ErrIdempotencyConflict, resetKey)
 }
 
 func caseResetFingerprint(reset CaseReset) (string, error) {
@@ -2341,66 +2529,6 @@ func (s *CaseStore) GetEventByIdempotencyKey(ctx context.Context, key string) (T
 		return TransitionEvent{}, false, err
 	}
 	return event.Clone(), true, nil
-}
-
-// recordCaseAudit appends an idempotent audit event without changing the Case
-// snapshot or version. It is used for external side-effect results that occur
-// after the durable Case transition has already committed.
-func (s *CaseStore) recordCaseAudit(ctx context.Context, caseID, key string, event TransitionEvent) (bool, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback()
-	var storedCaseID, storedType, storedActorType, storedActorID, storedPayload string
-	queryErr := tx.QueryRowContext(ctx, `SELECT case_id,event_type,actor_type,actor_id,payload_json FROM transition_events WHERE idempotency_key=?`, key).Scan(&storedCaseID, &storedType, &storedActorType, &storedActorID, &storedPayload)
-	if queryErr == nil {
-		if storedCaseID != caseID || storedType != event.EventType || storedActorType != event.ActorType || storedActorID != event.ActorID || storedPayload != string(event.PayloadJSON) {
-			return false, fmt.Errorf("%w: Case audit key %q", ErrIdempotencyConflict, key)
-		}
-		if err := tx.Commit(); err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-	if !errors.Is(queryErr, sql.ErrNoRows) {
-		return false, queryErr
-	}
-	incident, err := getCase(ctx, tx, caseID)
-	if err != nil {
-		return false, err
-	}
-	event.CaseID, event.FromStatus, event.ToStatus, event.IdempotencyKey = incident.ID, incident.Status, incident.Status, key
-	if event.CreatedAt.IsZero() {
-		event.CreatedAt = time.Now().UTC()
-	}
-	if err := validateAuditEvent(event); err != nil {
-		return false, err
-	}
-	resultJSON, err := json.Marshal(incident)
-	if err != nil {
-		return false, err
-	}
-	fingerprintMaterial, err := json.Marshal(struct {
-		CaseID      string          `json:"case_id"`
-		Key         string          `json:"key"`
-		EventType   string          `json:"event_type"`
-		ActorType   string          `json:"actor_type"`
-		ActorID     string          `json:"actor_id"`
-		PayloadJSON json.RawMessage `json:"payload_json"`
-	}{caseID, key, event.EventType, event.ActorType, event.ActorID, event.PayloadJSON})
-	if err != nil {
-		return false, err
-	}
-	digest := sha256.Sum256(fingerprintMaterial)
-	_, err = tx.ExecContext(ctx, `INSERT INTO transition_events (id,case_id,from_status,to_status,event_type,actor_type,actor_id,idempotency_key,payload_json,created_at,request_fingerprint,result_case_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, event.ID, event.CaseID, event.FromStatus, event.ToStatus, event.EventType, event.ActorType, event.ActorID, event.IdempotencyKey, string(event.PayloadJSON), formatStoreTime(event.CreatedAt), hex.EncodeToString(digest[:]), string(resultJSON))
-	if err != nil {
-		return false, err
-	}
-	if err := tx.Commit(); err != nil {
-		return false, err
-	}
-	return false, nil
 }
 
 // CommittedCaseMutation is the immutable identity and result snapshot stored

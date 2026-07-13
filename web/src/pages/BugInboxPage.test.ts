@@ -368,121 +368,19 @@ describe('BugInboxPage', () => {
     expect(detail.text()).not.toContain('trace-1')
   })
 
-  it('keeps legacy runs collapsed, rendered, and read-only', async () => {
-    vi.mocked(listBugs).mockResolvedValue([bug])
+  it('does not load or render legacy runs and saved bot context', async () => {
+    vi.mocked(listBugs).mockResolvedValue([{ ...bug, last_context: '旧机器人上下文' }])
     vi.mocked(listBugInvestigationRuns).mockResolvedValue([{
       id: 'run-1', bug_id: 'zentao-840', bot_key: 'base|codex', status: 'succeeded',
       final_message: '## 历史结论\n\n缓存配置错误',
-      events: [{ type: 'agent_message', message: '读取缓存配置' }],
     }])
+
     const wrapper = await mountedInbox()
 
-    const history = wrapper.get('.legacy-history')
-    expect(history.attributes('open')).toBeUndefined()
-    expect(history.get('summary').text()).toContain('历史运行记录（只读）')
-    expect(history.text()).not.toContain('停止')
-    expect(history.text()).not.toContain('启动修复 Agent')
-
-    await history.get('summary').trigger('click')
-    expect(history.get('.markdown-result h2').text()).toBe('历史结论')
-    expect(history.text()).toContain('读取缓存配置')
-
-    await history.get('[data-action="copy-legacy-result"]').trigger('click')
-    expect(copyToClipboard).toHaveBeenCalledWith('## 历史结论\n\n缓存配置错误')
-  })
-
-  it('separates validation, investigation, and fix snapshots and copies the fix final first', async () => {
-    vi.mocked(listBugs).mockResolvedValue([bug])
-    vi.mocked(listBugInvestigationRuns).mockResolvedValue([{
-      id: 'run-fix', bug_id: 'zentao-840', bot_key: 'base|codex', status: 'succeeded',
-      prompt_preview: '启动修复 Agent', final_message: '## 修复结果\n\n提交 `fix-123`',
-      events: [
-        { type: 'stage', message: '验证 Agent 开始取证', meta: { phase: 'validation' } },
-        { type: 'agent_message', message: 'verification_status: reproduced', meta: { phase: 'validation' } },
-        { type: 'agent_message', message: '定位缓存根因', meta: { phase: 'investigation' } },
-        { type: 'agent_message', message: '修改缓存配置', meta: { phase: 'fix' } },
-      ],
-    }])
-    const wrapper = await mountedInbox()
-    const history = wrapper.get('.legacy-history')
-    await history.get('summary').trigger('click')
-
-    expect(history.get('[role="tablist"]').attributes('aria-label')).toContain('历史验证与排障输出')
-    expect(history.get('.output-tab.active').text()).toContain('修复提交')
-    expect(history.get('.context-preview').text()).toContain('修改缓存配置')
-    expect(history.get('.context-preview').text()).toContain('提交 fix-123')
-    expect(history.get('.context-preview').text()).not.toContain('定位缓存根因')
-
-    const validationTab = history.findAll('.output-tab').find(tab => tab.text().includes('验证证据'))!
-    await validationTab.trigger('click')
-    expect(history.get('.context-preview').text()).toContain('verification_status: reproduced')
-    expect(history.get('.context-preview').text()).not.toContain('定位缓存根因')
-
-    const investigationTab = history.findAll('.output-tab').find(tab => tab.text().includes('排障分析'))!
-    await investigationTab.trigger('click')
-    expect(history.get('.context-preview').text()).toContain('定位缓存根因')
-    expect(history.get('.context-preview').text()).not.toContain('修改缓存配置')
-
-    await history.get('[data-action="copy-legacy-result"]').trigger('click')
-    expect(copyToClipboard).toHaveBeenCalledWith('## 修复结果\n\n提交 `fix-123`')
-  })
-
-  it('normalizes a validation final and selects its current phase', async () => {
-    vi.mocked(listBugs).mockResolvedValue([bug])
-    vi.mocked(listBugInvestigationRuns).mockResolvedValue([{
-      id: 'run-validation', bug_id: 'zentao-840', bot_key: 'base|codex', status: 'succeeded',
-      prompt_preview: '验证 Agent',
-      final_message: '### 验证报告 | bug env: -, bot env: test | 未复现\n\n- 结论: 未复现原始 Bug',
-      events: [{ type: 'stage', message: '验证完成', meta: { phase: 'validation' } }],
-    }])
-    const wrapper = await mountedInbox()
-
-    expect(wrapper.get('.output-tab.active').text()).toContain('验证证据')
-    expect(wrapper.get('.context-preview').text()).toContain('验证报告 | test | 未复现')
-    expect(wrapper.get('.context-preview').text()).not.toContain('bug env: -')
-  })
-
-  it('promotes a terminal investigation report above completion markers', async () => {
-    vi.mocked(listBugs).mockResolvedValue([bug])
-    vi.mocked(listBugInvestigationRuns).mockResolvedValue([{
-      id: 'run-report', bug_id: 'zentao-840', bot_key: 'base|codex', status: 'succeeded',
-      events: [
-        { type: 'agent_message', message: '### 1. 现象复述\n\n| # | 事实 |\n|---|---|\n| 1 | 搜索结果显示一集全 |', meta: { phase: 'investigation' } },
-        { type: 'turn_completed', message: '排障完成', meta: { phase: 'investigation' } },
-      ],
-    }])
-    const wrapper = await mountedInbox()
-
-    expect(wrapper.get('.context-preview .markdown-result h3').text()).toBe('1. 现象复述')
-    expect(wrapper.find('.process-log').text()).not.toContain('|---|')
-  })
-
-  it('selects investigation errors and does not copy running process logs', async () => {
-    vi.mocked(listBugs).mockResolvedValue([bug])
-    vi.mocked(listBugInvestigationRuns).mockResolvedValue([{
-      id: 'run-failed', bug_id: 'zentao-840', bot_key: 'base|codex', status: 'failed', error: 'request timed out',
-      events: [{ type: 'agent_message', message: 'verification_status: reproduced', meta: { phase: 'validation' } }],
-    }])
-    const failed = await mountedInbox()
-    expect(failed.get('.output-tab.active').text()).toContain('排障分析')
-    expect(failed.get('.context-preview').text()).toContain('request timed out')
-    expect(failed.get('.context-preview').text()).not.toContain('verification_status')
-
-    vi.mocked(listBugInvestigationRuns).mockResolvedValue([{
-      id: 'run-running', bug_id: 'zentao-840', bot_key: 'base|codex', status: 'running',
-      events: [{ type: 'agent_message', message: '正在读取配置', meta: { phase: 'investigation' } }],
-    }])
-    const running = await mountedInbox()
-    expect(running.get('.context-preview').text()).toContain('正在读取配置')
-    expect(running.find('[data-action="copy-legacy-result"]').exists()).toBe(false)
-  })
-
-  it('shows and copies saved context when no legacy run exists', async () => {
-    vi.mocked(listBugs).mockResolvedValue([{ ...bug, last_context: '只读机器人上下文' }])
-    const wrapper = await mountedInbox()
-
-    expect(wrapper.get('.generated-context-panel').text()).toContain('只读机器人上下文')
-    await wrapper.get('[data-action="copy-legacy-context"]').trigger('click')
-    expect(copyToClipboard).toHaveBeenCalledWith('只读机器人上下文')
+    expect(listBugInvestigationRuns).not.toHaveBeenCalled()
+    expect(wrapper.find('.legacy-history').exists()).toBe(false)
+    expect(wrapper.find('.generated-context-panel').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('历史运行记录（只读）')
+    expect(wrapper.text()).not.toContain('旧机器人上下文')
   })
 })

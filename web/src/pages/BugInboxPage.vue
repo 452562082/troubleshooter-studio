@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { marked } from 'marked'
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import BugTicketDetail from '../components/BugTicketDetail.vue'
@@ -9,14 +8,11 @@ import {
   type BugAttachmentPreviewResult,
   type BugPlatform,
   type DiscoveredBot,
-  type InvestigationEvent,
-  type InvestigationRun,
   bugHookBaseURL,
   clearBugPlatformLogin,
   deleteBugPlatform,
   discoverBots,
   fetchBugByID,
-  listBugInvestigationRuns,
   listBugPlatforms,
   listBugs,
   loginBugPlatform,
@@ -47,9 +43,6 @@ const syncingBugs = ref(false)
 const fetchingBug = ref(false)
 const attachmentPreviewing = ref(false)
 const attachmentPreview = ref<BugAttachmentPreviewResult | null>(null)
-const investigationRuns = ref<InvestigationRun[]>([])
-const outputTab = ref<'validation' | 'investigation' | 'fix'>('investigation')
-
 const platformDraft = ref(emptyPlatformDraft())
 const selectedPlatform = computed(() => platforms.value.find(platform => platform.id === selectedPlatformID.value))
 const selectedPlatformHasSession = computed(() => Boolean(selectedPlatform.value?.session_header))
@@ -64,77 +57,6 @@ const addableBotRefs = computed(() => {
   return allBotRefs.value
     .filter(bot => !configured.has(bot.key))
     .filter(bot => !keyword || [botDisplayName(bot), bot.target, bot.path, bot.system_id].join(' ').toLowerCase().includes(keyword))
-})
-const selectedRun = computed(() => investigationRuns.value[0])
-const contextText = computed(() => tickets.selectedBug.value?.last_context || '')
-const investigationEventLines = computed(() => {
-  const run = selectedRun.value
-  if (!run) return []
-  const finalText = investigationFinalText.value.trim()
-  return (run.events || [])
-    .filter(event => eventPhase(event) === 'investigation' || !eventPhase(event))
-    .filter(event => !isFinalInvestigationEvent(event))
-    .filter(event => !(isTerminalInvestigationRun(run) && isLikelyInvestigationReport(event.message || '')))
-    .map(event => event.message)
-    .filter(message => {
-      const text = (message || '').trim()
-      return Boolean(text) && (!finalText || (text !== finalText && !(text.length > 120 && finalText.includes(text))))
-    })
-})
-const validationEventLines = computed(() => {
-  const run = selectedRun.value
-  if (!run) return []
-  const finalText = validationFinalText.value.trim()
-  return (run.events || [])
-    .filter(event => eventPhase(event) === 'validation')
-    .filter(event => !isFinalInvestigationEvent(event))
-    .map(event => event.message)
-    .filter(message => {
-      const text = (message || '').trim()
-      return Boolean(text) && (!finalText || (text !== finalText && !isLikelyValidationStructuredResult(text)))
-    })
-})
-const fixEventLines = computed(() => {
-  const run = selectedRun.value
-  if (!run) return []
-  const finalText = fixFinalText.value.trim()
-  return (run.events || [])
-    .filter(event => eventPhase(event) === 'fix')
-    .filter(event => !isFinalInvestigationEvent(event))
-    .map(event => event.message)
-    .filter(message => {
-      const text = (message || '').trim()
-      return Boolean(text) && (!finalText || (text !== finalText && !(text.length > 120 && finalText.includes(text))))
-    })
-})
-const investigationFinalText = computed(() => {
-  const run = selectedRun.value
-  if (!run || currentRunPhase(run) === 'fix') return ''
-  return run.final_message || run.error || fallbackInvestigationFinalMessage(run)
-})
-const validationFinalText = computed(() => {
-  const run = selectedRun.value
-  if (!run) return ''
-  if (currentRunPhase(run) === 'validation' && (run.final_message || run.error)) {
-    return normalizeValidationReportForDisplay(run.final_message || run.error || '')
-  }
-  const report = [...(run.events || [])].reverse()
-    .find(event => eventPhase(event) === 'validation' && isLikelyValidationStructuredResult(event.message || ''))
-  return report?.message ? formatValidationReportForDisplay(report.message) : ''
-})
-const fixFinalText = computed(() => {
-  const run = selectedRun.value
-  if (!run || currentRunPhase(run) !== 'fix') return ''
-  return run.final_message || run.error || fallbackInvestigationFinalMessage(run)
-})
-const renderedInvestigationMarkdown = computed(() => safeMarkdown(investigationFinalText.value || contextText.value))
-const renderedValidationMarkdown = computed(() => safeMarkdown(validationFinalText.value))
-const renderedFixMarkdown = computed(() => safeMarkdown(fixFinalText.value))
-const hasFixOutput = computed(() => fixEventLines.value.length > 0 || Boolean(fixFinalText.value.trim()) || (selectedRun.value ? currentRunPhase(selectedRun.value) === 'fix' : false))
-const copyableLegacyText = computed(() => {
-  if (fixFinalText.value.trim()) return fixFinalText.value.trim()
-  if (investigationFinalText.value.trim()) return investigationFinalText.value.trim()
-  return selectedRun.value ? '' : contextText.value.trim()
 })
 const hookURL = computed(() => {
   const platform = selectedPlatform.value
@@ -161,18 +83,6 @@ watch(selectedPlatform, platform => {
     poll_enabled: Boolean(platform.poll_enabled),
     poll_interval_minutes: platform.poll_interval_minutes || 5,
   }
-})
-
-watch(tickets.selectedID, bugID => {
-  void loadInvestigationRuns(bugID)
-})
-
-watch(selectedRun, (run, previousRun) => {
-  if (!run) {
-    outputTab.value = 'investigation'
-    return
-  }
-  if (run.id !== previousRun?.id) followRunPhase(run)
 })
 
 onMounted(async () => {
@@ -216,20 +126,6 @@ async function loadHookBase() {
     hookBaseURL.value = await bugHookBaseURL()
   } catch (error) {
     toastError('读取 Hook 地址', error)
-  }
-}
-
-async function loadInvestigationRuns(bugID: string) {
-  if (!bugID) {
-    investigationRuns.value = []
-    return
-  }
-  try {
-    const runs = await listBugInvestigationRuns(bugID)
-    if (tickets.selectedID.value === bugID) investigationRuns.value = runs
-  } catch (error) {
-    if (tickets.selectedID.value === bugID) investigationRuns.value = []
-    toastError('读取历史运行记录', error)
   }
 }
 
@@ -457,203 +353,8 @@ async function copyHookURL() {
   ;(await copyToClipboard(hookURL.value)) ? toast.success('Hook URL 已复制') : toast.error('复制失败')
 }
 
-async function copyLegacyResult() {
-  if (!copyableLegacyText.value) return
-  ;(await copyToClipboard(copyableLegacyText.value)) ? toast.success('已复制') : toast.error('复制失败')
-}
-
 function eventValue(event: Event): string {
   return (event.target as HTMLInputElement | HTMLSelectElement).value
-}
-
-function safeMarkdown(text: string): string {
-  const parsed = marked.parse(text || '', { async: false }) as string
-  const document = new DOMParser().parseFromString(parsed, 'text/html')
-  const allowed = new Set(['BLOCKQUOTE', 'BR', 'CODE', 'DEL', 'EM', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'HR', 'LI', 'OL', 'P', 'PRE', 'STRONG', 'TABLE', 'TBODY', 'TD', 'TH', 'THEAD', 'TR', 'UL'])
-  for (const element of Array.from(document.body.querySelectorAll('*'))) {
-    if (!allowed.has(element.tagName)) {
-      element.replaceWith(document.createTextNode(element.textContent || ''))
-      continue
-    }
-    for (const attribute of Array.from(element.attributes)) element.removeAttribute(attribute.name)
-  }
-  return document.body.innerHTML
-}
-
-function followRunPhase(run: InvestigationRun) {
-  outputTab.value = currentRunPhase(run)
-}
-
-function currentRunPhase(run: InvestigationRun): 'validation' | 'investigation' | 'fix' {
-  if ((run.prompt_preview || '').includes('修复 Agent')) return 'fix'
-  if ((run.status === 'failed' || run.status === 'cancelled') && (run.error || run.final_message)) return 'investigation'
-  const events = run.events || []
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const phase = eventPhase(events[index])
-    if (phase === 'validation' || phase === 'investigation' || phase === 'fix') return phase
-  }
-  if ((run.prompt_preview || '').includes('验证 Agent')) return 'validation'
-  if (run.status === 'running') return 'investigation'
-  return (run.final_message || run.error || fallbackInvestigationFinalMessage(run)).trim() ? 'investigation' : 'validation'
-}
-
-function fallbackInvestigationFinalMessage(run: InvestigationRun): string {
-  const events = [...(run.events || [])].reverse()
-  const finalEvent = events.find(isFinalInvestigationEvent)
-  if (finalEvent?.message?.trim()) return finalEvent.message
-  if (isTerminalInvestigationRun(run)) {
-    const reportEvent = events.find(event => isLikelyInvestigationReport(event.message || ''))
-    if (reportEvent?.message?.trim()) return reportEvent.message
-    return events.find(event => !isCompletionMarkerEvent(event) && event.message?.trim())?.message || ''
-  }
-  return ''
-}
-
-function isFinalInvestigationEvent(event: InvestigationEvent): boolean {
-  return ['final', 'result'].includes(event.type)
-}
-
-function eventPhase(event: InvestigationEvent): string {
-  const phase = event?.meta?.phase
-  return typeof phase === 'string' ? phase : ''
-}
-
-function isTerminalInvestigationRun(run: InvestigationRun): boolean {
-  return ['succeeded', 'failed', 'cancelled'].includes(run.status)
-}
-
-function isCompletionMarkerEvent(event: InvestigationEvent): boolean {
-  const message = (event.message || '').trim()
-  return event.type === 'status' || event.type === 'turn_completed' || ['排障完成', 'succeeded', 'failed', 'cancelled'].includes(message)
-}
-
-function isLikelyInvestigationReport(message: string): boolean {
-  const text = message.trim()
-  if (!text) return false
-  if (/^#{1,6}\s+/m.test(text) && /\n\|.+\|\n\|[-:\s|]+\|/m.test(text)) return true
-  if (/^#{1,6}\s+/.test(text) && /(故障快报|现象复述|已验证事实|根因|结论|建议)/.test(text)) return true
-  return /\*\*(结论|根因|现象|时间)\*\*/.test(text) && text.length > 120
-}
-
-function isLikelyValidationStructuredResult(message: string): boolean {
-  const text = message.trim()
-  return Boolean(text) && (/^verification_status\s*:/mi.test(text) || /^#{1,6}\s*验证报告\s*\|/m.test(text))
-}
-
-function formatValidationReportForDisplay(message: string): string {
-  const raw = message.trim().split('\\n').join('\n')
-  if (!raw) return ''
-  if (/^#{1,6}\s*验证报告\s*\|/m.test(raw)) return normalizeValidationReportForDisplay(raw)
-  const status = yamlScalar(raw, 'verification_status')
-  const env = yamlScalar(raw, 'environment') || '-'
-  const observed = yamlScalar(raw, 'observed_behavior') || '-'
-  const expected = yamlScalar(raw, 'expected_behavior') || '-'
-  const evidence = yamlNestedScalar(raw, 'handoff_to_troubleshooter', 'evidence_summary') || '-'
-  const gaps = yamlBlockSummary(raw, 'gaps') || '[]'
-  return [
-    `### 验证报告 | ${env} | ${validationStatusLabel(status)}`,
-    '',
-    `- 结论: ${validationConclusion(status)}`,
-    `- 实际现象: ${observed}`,
-    `- 期望表现: ${expected}`,
-    `- 关键证据: ${evidence}`,
-    `- 需补信息: ${gaps}`,
-    '',
-    '#### 原始结构化结果',
-    '',
-    '```yaml',
-    raw,
-    '```',
-  ].join('\n')
-}
-
-function normalizeValidationReportForDisplay(message: string): string {
-  const text = message.trim()
-  if (!text) return ''
-  return text.replace(/^(#{1,6}\s*验证报告\s*\|\s*)([^|\n]+?)(\s*\|\s*[^\n]+)$/m, (_match, prefix, env, suffix) => {
-    return `${prefix}${normalizeValidationEnvLabel(env)}${suffix}`
-  })
-}
-
-function normalizeValidationEnvLabel(env: string): string {
-  const text = env.trim()
-  if (!/bug env|bot env/i.test(text)) return text || '-'
-  return firstDisplayEnv(looseEnvField(text, 'bug env'), looseEnvField(text, 'bot env'), text)
-}
-
-function looseEnvField(text: string, key: string): string {
-  const match = text.match(new RegExp(`${escapeRegExp(key)}\\s*[:=：]?\\s*([^,，|;；]+)`, 'i'))
-  return stripYamlQuotes(match?.[1] || '')
-}
-
-function firstDisplayEnv(...values: string[]): string {
-  for (const value of values) {
-    const trimmed = value.trim()
-    if (trimmed && trimmed !== '-') return trimmed
-  }
-  return '-'
-}
-
-function validationStatusLabel(status: string): string {
-  return ({
-    reproduced: '已复现',
-    not_reproduced: '未复现',
-    insufficient_info: '信息不足',
-    fixed_verified: '修复已验证',
-    still_reproduces: '修复后仍复现',
-  } as Record<string, string>)[status] || '结论不完整'
-}
-
-function validationConclusion(status: string): string {
-  return ({
-    reproduced: '已复现原始 Bug，可以进入排障 Agent。',
-    not_reproduced: '未复现原始 Bug，已暂停进入排障 Agent。',
-    insufficient_info: '验证所需信息不足，用户补充后应继续验证。',
-    fixed_verified: '修复验证通过，已暂停进入排障 Agent。',
-    still_reproduces: '修复后仍可复现，需要进入排障 Agent。',
-  } as Record<string, string>)[status] || '验证 Agent 未输出可进入排障的完整结构化结论。'
-}
-
-function yamlScalar(text: string, key: string): string {
-  return stripYamlQuotes(text.match(new RegExp(`^\\s*${escapeRegExp(key)}\\s*:\\s*(.*)$`, 'mi'))?.[1] || '')
-}
-
-function yamlNestedScalar(text: string, parent: string, key: string): string {
-  return yamlScalar(yamlRawBlock(text, parent), key)
-}
-
-function yamlBlockSummary(text: string, key: string): string {
-  const direct = yamlScalar(text, key)
-  if (direct) return direct
-  const block = yamlRawBlock(text, key).replace(/\s+/g, ' ').trim()
-  return block.length > 420 ? `${block.slice(0, 420)}...` : block
-}
-
-function yamlRawBlock(text: string, key: string): string {
-  const lines = text.split('\\n').join('\n').split('\n')
-  const keyPattern = new RegExp(`^\\s*${escapeRegExp(key)}\\s*:\\s*(.*)$`, 'i')
-  for (let index = 0; index < lines.length; index += 1) {
-    const match = lines[index].match(keyPattern)
-    if (!match) continue
-    const direct = stripYamlQuotes(match[1] || '')
-    if (direct) return direct
-    const block: string[] = []
-    for (const next of lines.slice(index + 1)) {
-      if (!next.trim()) continue
-      if (/^[A-Za-z_][A-Za-z0-9_-]*\s*:/.test(next)) break
-      block.push(next.trim())
-    }
-    return block.join('\n')
-  }
-  return ''
-}
-
-function stripYamlQuotes(value: string): string {
-  return value.trim().replace(/^["'`]+|["'`]+$/g, '')
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 </script>
 
@@ -797,54 +498,6 @@ function escapeRegExp(value: string): string {
       </main>
     </section>
 
-    <details v-if="selectedRun" class="legacy-history">
-      <summary>
-        <span class="legacy-history-title"><strong>历史运行记录（只读）</strong><small>旧版验证 / 排障结果，新操作请进入故障闭环。</small></span>
-        <span class="legacy-history-status">{{ selectedRun.status }}</span>
-      </summary>
-      <div class="legacy-history-body">
-        <div class="legacy-history-toolbar">
-          <div class="output-tabs" role="tablist" aria-label="历史验证与排障输出">
-            <button id="legacy-validation-tab" class="output-tab" :class="{ active: outputTab === 'validation' }" type="button" role="tab" aria-controls="legacy-output-panel" :aria-selected="outputTab === 'validation'" @click="outputTab = 'validation'">验证证据</button>
-            <button id="legacy-investigation-tab" class="output-tab" :class="{ active: outputTab === 'investigation' }" type="button" role="tab" aria-controls="legacy-output-panel" :aria-selected="outputTab === 'investigation'" @click="outputTab = 'investigation'">排障分析</button>
-            <button v-if="hasFixOutput" id="legacy-fix-tab" class="output-tab" :class="{ active: outputTab === 'fix' }" type="button" role="tab" aria-controls="legacy-output-panel" :aria-selected="outputTab === 'fix'" @click="outputTab = 'fix'">修复提交</button>
-          </div>
-          <button v-if="copyableLegacyText" class="btn" type="button" data-action="copy-legacy-result" @click="copyLegacyResult">复制结果</button>
-        </div>
-        <div id="legacy-output-panel" class="context-preview" role="tabpanel" :aria-labelledby="`legacy-${outputTab}-tab`">
-          <template v-if="outputTab === 'validation'">
-            <div v-if="validationEventLines.length" class="process-log">
-              <div v-for="(line, index) in validationEventLines" :key="index" class="process-line">{{ line }}</div>
-            </div>
-            <article v-if="validationFinalText" class="markdown-result validation-result" v-html="renderedValidationMarkdown"></article>
-            <p v-if="!validationEventLines.length && !validationFinalText" class="preview-placeholder">该历史运行没有验证输出。</p>
-          </template>
-          <template v-else-if="outputTab === 'fix'">
-            <div v-if="fixEventLines.length" class="process-log">
-              <div v-for="(line, index) in fixEventLines" :key="index" class="process-line">{{ line }}</div>
-            </div>
-            <article v-if="fixFinalText" class="markdown-result" v-html="renderedFixMarkdown"></article>
-            <p v-if="!fixEventLines.length && !fixFinalText" class="preview-placeholder">该历史运行没有修复输出。</p>
-          </template>
-          <template v-else>
-            <div v-if="investigationEventLines.length" class="process-log">
-              <div v-for="(line, index) in investigationEventLines" :key="index" class="process-line">{{ line }}</div>
-            </div>
-            <article v-if="investigationFinalText" class="markdown-result" v-html="renderedInvestigationMarkdown"></article>
-            <p v-if="!investigationEventLines.length && !investigationFinalText" class="preview-placeholder">该历史运行没有排障输出。</p>
-          </template>
-        </div>
-      </div>
-    </details>
-
-    <section v-else-if="contextText" class="generated-context-panel">
-      <header>
-        <span class="legacy-history-title"><strong>机器人上下文</strong><small>历史生成内容，仅供复制查看。</small></span>
-        <button class="btn" type="button" data-action="copy-legacy-context" @click="copyLegacyResult">复制上下文</button>
-      </header>
-      <article class="context-preview markdown-result" v-html="renderedInvestigationMarkdown"></article>
-    </section>
-
     <div v-if="attachmentPreview" class="attachment-preview-backdrop" @click.self="attachmentPreview = null">
       <section class="attachment-preview-modal" role="dialog" aria-modal="true" aria-label="附件预览">
         <header><strong>{{ attachmentPreview.name }}</strong><button class="btn icon" type="button" aria-label="关闭附件预览" @click="attachmentPreview = null">×</button></header>
@@ -862,7 +515,7 @@ function escapeRegExp(value: string): string {
 .bug-header p { margin: 4px 0 0; color: var(--c-muted); font-size: var(--fs-sm); }
 .btn { min-height: 44px; padding: 0 12px; border: 1px solid var(--c-line-2); border-radius: var(--r-md); background: var(--c-surf); color: var(--c-text); font: inherit; cursor: pointer; }
 .btn:hover:not(:disabled) { border-color: var(--c-accent); background: var(--c-surf-2); }
-.btn:focus-visible, input:focus-visible, select:focus-visible, .legacy-history > summary:focus-visible { outline: 2px solid var(--c-accent-hover); outline-offset: 2px; }
+.btn:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--c-accent-hover); outline-offset: 2px; }
 .btn:disabled { opacity: .55; cursor: not-allowed; }
 .btn.primary, .btn.accent { border-color: var(--c-accent-hover); background: var(--c-accent-hover); color: white; }
 .btn.danger { border-color: #fecaca; color: #b91c1c; }
@@ -902,34 +555,11 @@ function escapeRegExp(value: string): string {
 .hook-row { flex-wrap: wrap; }
 .hook-row code { min-width: 0; flex: 1; overflow-wrap: anywhere; color: var(--c-muted); }
 .inbox-workspace { min-width: 0; display: grid; grid-template-columns: minmax(250px, 330px) minmax(0, 1fr); gap: var(--sp-3); }
-.ticket-list-panel, .ticket-detail-panel, .legacy-history, .generated-context-panel { min-width: 0; border: 1px solid var(--c-line); border-radius: var(--r-lg); background: var(--c-surf); }
+.ticket-list-panel, .ticket-detail-panel { min-width: 0; border: 1px solid var(--c-line); border-radius: var(--r-lg); background: var(--c-surf); }
 .ticket-list-panel { position: relative; padding: var(--sp-3); overflow: auto; }
 .ticket-list-panel :deep(.list-heading) { padding-right: 66px; }
 .refresh-button { position: absolute; z-index: 1; top: var(--sp-2); right: var(--sp-2); }
 .ticket-detail-panel { padding: var(--sp-3); overflow: auto; }
-.legacy-history { overflow: hidden; }
-.legacy-history > summary { min-height: 44px; padding: 10px 44px 10px 12px; position: relative; display: flex; justify-content: space-between; align-items: center; gap: var(--sp-2); cursor: pointer; list-style: none; }
-.legacy-history > summary::-webkit-details-marker { display: none; }
-.legacy-history > summary::after { content: '展开'; position: absolute; right: 12px; color: var(--c-accent-hover); font-size: var(--fs-xs); font-weight: 700; }
-.legacy-history[open] > summary::after { content: '收起'; }
-.legacy-history-title { min-width: 0; padding-right: 40px; display: grid; gap: 2px; }
-.legacy-history-title small { color: var(--c-muted); font-size: var(--fs-xs); }
-.legacy-history-status { flex: 0 0 auto; margin-right: 40px; padding: 2px 7px; border: 1px solid var(--c-line-2); border-radius: 999px; color: var(--c-muted); font-size: var(--fs-xs); }
-.legacy-history-body { min-width: 0; padding: var(--sp-3); border-top: 1px solid var(--c-line); }
-.legacy-history-toolbar { min-width: 0; margin-bottom: var(--sp-2); display: flex; align-items: stretch; gap: var(--sp-2); }
-.output-tabs { min-width: 0; flex: 1; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(140px, 100%), 1fr)); gap: var(--sp-2); }
-.output-tab { min-height: 44px; border: 1px solid var(--c-line-2); border-radius: var(--r-md); background: var(--c-surf); color: var(--c-muted); font: inherit; font-weight: 700; cursor: pointer; }
-.output-tab:hover { border-color: var(--c-accent); color: var(--c-accent-hover); }
-.output-tab:focus-visible { outline: 2px solid var(--c-accent-hover); outline-offset: 2px; }
-.output-tab.active { border-color: var(--c-accent); background: #eff6ff; color: var(--c-accent-hover); }
-.context-preview { min-width: 0; min-height: 160px; max-height: 520px; padding: var(--sp-2); overflow: auto; border: 1px solid var(--c-line); border-radius: var(--r-md); }
-.process-log { margin-bottom: var(--sp-2); padding: var(--sp-2); overflow-wrap: anywhere; border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf-2); color: var(--c-muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--fs-xs); }
-.process-line + .process-line { margin-top: 4px; }
-.markdown-result { max-width: 100%; overflow-wrap: anywhere; color: var(--c-text); }
-.markdown-result :deep(pre), .markdown-result :deep(table) { max-width: 100%; overflow: auto; }
-.preview-placeholder { min-height: 140px; margin: 0; display: grid; place-items: center; color: var(--c-muted); text-align: center; }
-.generated-context-panel { padding: var(--sp-3); }
-.generated-context-panel header { margin-bottom: var(--sp-2); display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
 .empty { min-height: 44px; margin: 0; display: grid; place-items: center; color: var(--c-muted); font-size: var(--fs-sm); text-align: center; }
 .empty.compact { min-height: 44px; }
 .attachment-preview-backdrop { position: fixed; inset: 0; z-index: 60; padding: 24px; display: grid; place-items: center; background: rgba(15, 23, 42, .58); }
@@ -947,7 +577,5 @@ function escapeRegExp(value: string): string {
   .bug-header, .bot-config-title, .hook-row { align-items: stretch; flex-direction: column; }
   .trigger-row, .bot-config-row { grid-template-columns: minmax(0, 1fr); }
   .config-actions { flex-direction: column-reverse; align-items: stretch; }
-  .legacy-history > summary { align-items: flex-start; flex-direction: column; }
-  .legacy-history-status { margin-right: 40px; }
 }
 </style>

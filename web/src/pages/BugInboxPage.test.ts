@@ -149,6 +149,7 @@ describe('BugInboxPage', () => {
     const source = readFileSync('src/pages/BugInboxPage.vue', 'utf8')
     const selectRule = source.match(/\.platform-config select\.form-control \{([^}]*)\}/)?.[1] || ''
     const reducedMotionCSS = source.split('@media (prefers-reduced-motion: reduce) {')[1]?.split('\n}')[0] || ''
+    const reducedMotionSelectRule = reducedMotionCSS.match(/[^{}]*\.platform-config select\.form-control[^{}]*\{([^}]*)\}/)?.[1] || ''
     const mediumCSS = source.split('@media (max-width: 1200px) {')[1]?.split('\n}')[0] || ''
     const narrowCSS = source.split('@media (max-width: 900px) {')[1]?.split('\n}')[0] || ''
     const mediumBreakpointIndex = source.indexOf('@media (max-width: 1200px) {')
@@ -174,8 +175,7 @@ describe('BugInboxPage', () => {
     expect(source).toContain('.platform-config select.form-control:hover:not(:disabled) { border-color: #93c5fd; }')
     expect(source).toContain('.platform-config select.form-control:focus-visible { border-color: var(--c-accent-hover); }')
     expect(source).toContain('.platform-config input:disabled, .platform-config select:disabled {')
-    expect(reducedMotionCSS).toContain('.platform-config select.form-control')
-    expect(reducedMotionCSS).toContain('transition: none;')
+    expect(reducedMotionSelectRule).toContain('transition: none;')
     expect(source).toContain('.basic-row { grid-template-columns: minmax(220px, 1fr) minmax(200px, .6fr) minmax(320px, 1.35fr); }')
     expect(source).toContain('.bot-config-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 280px) 40px;')
     expect(source).toContain('.icon-button { width: 40px; height: 40px;')
@@ -189,11 +189,21 @@ describe('BugInboxPage', () => {
 
   it('declares readable panel disabled colors and red danger-icon focus treatment', () => {
     const source = readFileSync('src/pages/BugInboxPage.vue', 'utf8')
+    const selectRuleIndex = source.indexOf('.platform-config select.form-control {')
+    const disabledRuleMatch = source.match(/\.platform-config input:disabled, \.platform-config select:disabled \{([^}]*)\}/)
+    const disabledRule = disabledRuleMatch?.[1] || ''
+    const disabledRuleIndex = disabledRuleMatch ? source.indexOf(disabledRuleMatch[0]) : -1
 
     expect(source).not.toMatch(/\.compact-button:disabled[^}]*opacity/)
     expect(source).toMatch(/\.compact-button:disabled,[\s\S]*?\.icon-button:disabled \{[^}]*border-color:[^;]+;[^}]*background:[^;]+;[^}]*color:[^;]+;[^}]*cursor: not-allowed;/)
     expect(source).toMatch(/\.compact-button:disabled svg,[\s\S]*?\.icon-button:disabled svg \{ color: [^;]+; \}/)
-    expect(source).toMatch(/\.platform-config input:disabled, \.platform-config select:disabled \{[^}]*border-color:[^;]+;[^}]*background:[^;]+;[^}]*color:[^;]+;[^}]*cursor: not-allowed;/)
+    expect(selectRuleIndex).toBeGreaterThan(-1)
+    expect(disabledRuleIndex).toBeGreaterThan(selectRuleIndex)
+    expect(disabledRule).toContain('border-color: var(--c-line);')
+    expect(disabledRule).toContain('background-color: var(--c-surf-3);')
+    expect(disabledRule).not.toMatch(/(?:^|;)\s*background\s*:/)
+    expect(disabledRule).toContain('color: #64748b;')
+    expect(disabledRule).toContain('cursor: not-allowed;')
     expect(source).toContain('.danger-icon-button:hover, .danger-icon-button:focus-visible { background: var(--c-danger-bg); color: var(--c-danger); }')
   })
 

@@ -620,7 +620,7 @@ function eventValue(event: Event): string {
 .primary-button:hover:not(:disabled) { border-color: #1d4ed8; background: #1d4ed8; }
 .compact-button:disabled, .danger-link:disabled, .icon-button:disabled { border-color: var(--c-line); background: var(--c-surf-3); color: #64748b; cursor: not-allowed; }
 .compact-button:disabled svg, .danger-link:disabled svg, .icon-button:disabled svg { color: #64748b; }
-.platform-config input:disabled, .platform-config select:disabled { border-color: var(--c-line); background: var(--c-surf-3); color: #64748b; cursor: not-allowed; }
+.platform-config input:disabled, .platform-config select:disabled { border-color: var(--c-line); background-color: var(--c-surf-3); color: #64748b; cursor: not-allowed; }
 .compact-button:focus-visible, .danger-link:focus-visible, .icon-button:focus-visible { outline: 2px solid var(--c-accent-hover); outline-offset: 2px; }
 .toggle-control { min-height: 36px; display: inline-flex; align-items: center; gap: 7px; color: var(--c-text); white-space: nowrap; cursor: pointer; }
 .platform-config .toggle-control { min-height: var(--config-control-height); }

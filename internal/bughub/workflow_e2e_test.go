@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -169,6 +170,161 @@ func TestWorkflowE2EFixedVerifiedSurvivesSQLiteReopen(t *testing.T) {
 	}
 	if next != len(wantPath) {
 		t.Fatalf("success path stopped at %d/%d: visited=%v", next, len(wantPath), visited)
+	}
+}
+
+func TestWorkflowE2E_ResetStartsFreshAuditedCase(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "workflow-reset.db")
+	store, err := OpenCaseStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &recordingPhaseRunner{}
+	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	bug := Bug{ID: "840", Source: "zentao", SystemID: "shop", Env: "test", Expected: "checkout succeeds"}
+	bot := BotRef{Key: "validator", Target: "codex", Path: t.TempDir(), Env: "test"}
+	first, err := orchestrator.CreateAndStartCase(ctx, CreateAndStartCaseCommand{CaseID: "case-840-candidate-a", IdempotencyKey: "e2e:840:start:a", ActorID: "alice", Bug: bug, Bot: bot, InputJSON: []byte(`{"reproduction_steps":["submit checkout"]}`)})
+	if err != nil || first.Status != CaseValidating {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	reused, err := orchestrator.CreateAndStartCase(ctx, CreateAndStartCaseCommand{CaseID: "case-840-candidate-b", IdempotencyKey: "e2e:840:start:b", ActorID: "alice", Bug: bug, Bot: bot, InputJSON: []byte(`{"reproduction_steps":["retry checkout"]}`)})
+	if err != nil || reused.ID != first.ID || reused.Status != CaseValidating || runner.startCount() != 1 {
+		t.Fatalf("first=%+v reused=%+v starts=%d err=%v", first, reused, runner.startCount(), err)
+	}
+	if _, err := store.GetCase(ctx, "case-840-candidate-b"); !errors.Is(err, ErrCaseNotFound) {
+		t.Fatalf("unused candidate exists: err=%v", err)
+	}
+
+	validation, err := store.GetAttempt(ctx, first.CurrentAttemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observedAt := time.Now().UTC()
+	artifact := EvidenceArtifact{ID: "e2e-840-evidence", CaseID: first.ID, AttemptID: validation.ID, Kind: "api", PathOrReference: "/artifacts/e2e/840-response", SHA256: strings.Repeat("a", 64), CapturedAt: observedAt, Environment: "test", Version: "before-reset", RequestID: "request-e2e-840", RedactionStatus: RedactionStatusNotRequired}
+	if _, _, err := store.recordEvidenceArtifact(ctx, artifact, nil); err != nil {
+		t.Fatal(err)
+	}
+	approval := Approval{ID: "e2e-840-approval", CaseID: first.ID, Kind: ApprovalStartFix, Actor: "alice", ApprovedAt: observedAt, CaseVersion: first.Version, ScopeJSON: mustJSON(map[string]string{"root_cause_attempt_id": validation.ID})}
+	if err := store.RecordApproval(ctx, approval, "e2e:840:approval"); err != nil {
+		t.Fatal(err)
+	}
+	change := CodeChange{ID: "e2e-840-change", CaseID: first.ID, AttemptID: validation.ID, Repo: "api", BaseBranch: "test", FixBranch: "fix/840", FixCommit: "commit-840", TestEvidence: []byte(`{"command":"go test ./...","result":"passed"}`), TargetEnvironmentBranch: "test", PushRemote: "origin", PushStatus: "pushed"}
+	if err := store.RecordCodeChange(ctx, change); err != nil {
+		t.Fatal(err)
+	}
+	notifiedAt := observedAt
+	observation := DeploymentObservation{ID: "e2e-840-observation", CaseID: first.ID, Environment: "test", ExpectedCommits: map[string]string{"api": "commit-840"}, UserNotifiedAt: &notifiedAt, VerificationSource: "manual", ObservedVersion: "build-before-reset", ObservedCommits: map[string]string{"api": "commit-840"}, ObservedAt: observedAt, Result: DeploymentResultUnavailable}
+	if err := store.RecordDeploymentObservation(ctx, observation, "e2e:840:observation"); err != nil {
+		t.Fatal(err)
+	}
+	artifactsBefore, err := store.ListEvidenceArtifacts(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approvalsBefore, err := store.ListApprovals(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changesBefore, err := store.ListCodeChanges(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observationsBefore, err := store.ListDeploymentObservations(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reset := ResetCaseCommand{CaseID: first.ID, NewCaseID: "case-840-reset", ExpectedVersion: first.Version, IdempotencyKey: "e2e:840:reset", ActorID: "alice", Bug: bug, Bot: bot, InputJSON: []byte(`{"reason":"retry from validation"}`)}
+	replacement, err := orchestrator.ResetCase(ctx, reset)
+	if err != nil || replacement.ID != reset.NewCaseID || replacement.Status != CaseValidating || replacement.ResetFromCaseID != first.ID || runner.startCount() != 2 {
+		t.Fatalf("replacement=%+v starts=%d err=%v", replacement, runner.startCount(), err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenCaseStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	archived, err := store.GetCase(ctx, first.ID)
+	if err != nil || archived.Status != CaseResetArchived || archived.SupersededByCaseID != replacement.ID || archived.CurrentAttemptID != "" || archived.ClosedAt == nil {
+		t.Fatalf("archived=%+v err=%v", archived, err)
+	}
+	reopenedReplacement, err := store.GetCase(ctx, replacement.ID)
+	if err != nil || reopenedReplacement.Status != CaseValidating || reopenedReplacement.ResetFromCaseID != archived.ID || reopenedReplacement.CurrentAttemptID == "" || reopenedReplacement.ClosedAt != nil {
+		t.Fatalf("replacement=%+v err=%v", reopenedReplacement, err)
+	}
+	oldAttempt, err := store.GetAttempt(ctx, validation.ID)
+	if err != nil || oldAttempt.Status != AttemptStatusCancelled || oldAttempt.FinishedAt == nil {
+		t.Fatalf("old attempt=%+v err=%v", oldAttempt, err)
+	}
+	artifactsAfter, err := store.ListEvidenceArtifacts(ctx, archived.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approvalsAfter, err := store.ListApprovals(ctx, archived.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changesAfter, err := store.ListCodeChanges(ctx, archived.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observationsAfter, err := store.ListDeploymentObservations(ctx, archived.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(artifactsBefore, artifactsAfter) || !reflect.DeepEqual(approvalsBefore, approvalsAfter) || !reflect.DeepEqual(changesBefore, changesAfter) || !reflect.DeepEqual(observationsBefore, observationsAfter) {
+		t.Fatalf("archived audit records changed: artifacts=%+v approvals=%+v changes=%+v observations=%+v", artifactsAfter, approvalsAfter, changesAfter, observationsAfter)
+	}
+
+	immutable := archived.Clone()
+	if _, err := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, nil).CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: archived.ID, AttemptID: validation.ID, ExpectedVersion: archived.Version, IdempotencyKey: "e2e:840:late-completion", ActorID: "validator", Outcome: PhaseOutcomeNeedsEvidence, OutputJSON: []byte(`{"verification_status":"insufficient_info","environment":"test","evidence":[],"gaps":["trace"]}`)}); err == nil {
+		t.Fatal("late completion mutated reset archive")
+	}
+	archivedAfterLateCompletion, err := store.GetCase(ctx, archived.ID)
+	if err != nil || !reflect.DeepEqual(immutable, archivedAfterLateCompletion) {
+		t.Fatalf("archive changed after late completion: before=%+v after=%+v err=%v", immutable, archivedAfterLateCompletion, err)
+	}
+
+	restartedRunner := &recordingPhaseRunner{}
+	restarted := NewCaseOrchestrator(store, restartedRunner, nil, nil)
+	restarted.SetRecoveryContextResolver(RecoveryContextResolverFunc(func(_ context.Context, incident IncidentCase, attempt PhaseAttempt) (Bug, BotRef, error) {
+		return Bug{ID: incident.BugID, Source: incident.Source, SystemID: incident.SystemID, Env: incident.Environment, Expected: bug.Expected}, BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget, Path: bot.Path, Env: incident.Environment}, nil
+	}))
+	if err := restarted.RecoverInterrupted(ctx); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := store.GetCase(ctx, replacement.ID)
+	if err != nil || recovered.Status != CaseValidating || recovered.CurrentAttemptID == reopenedReplacement.CurrentAttemptID || restartedRunner.startCount() != 1 {
+		t.Fatalf("recovered=%+v starts=%d err=%v", recovered, restartedRunner.startCount(), err)
+	}
+	recoveredAttempt, err := store.GetAttempt(ctx, recovered.CurrentAttemptID)
+	if err != nil || recoveredAttempt.Status != AttemptStatusRunning || recoveredAttempt.Phase != PhaseValidation {
+		t.Fatalf("recovered attempt=%+v err=%v", recoveredAttempt, err)
+	}
+
+	startsBeforeReplay := restartedRunner.startCount()
+	replayed, err := restarted.ResetCase(ctx, reset)
+	if err != nil || replayed.ID != replacement.ID || restartedRunner.startCount() != startsBeforeReplay {
+		t.Fatalf("replay=%+v starts before=%d after=%d err=%v", replayed, startsBeforeReplay, restartedRunner.startCount(), err)
+	}
+	replacementArtifact := EvidenceArtifact{ID: "e2e-840-replacement-evidence", CaseID: recovered.ID, AttemptID: recoveredAttempt.ID, Kind: "api", PathOrReference: "/artifacts/e2e/840-retry-response", SHA256: strings.Repeat("b", 64), CapturedAt: time.Now().UTC().Add(time.Second), Environment: "test", Version: "after-reset", RequestID: "request-e2e-840-retry", RedactionStatus: RedactionStatusNotRequired}
+	if _, _, err := store.recordEvidenceArtifact(ctx, replacementArtifact, nil); err != nil {
+		t.Fatal(err)
+	}
+	progressed, err := restarted.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: recovered.ID, AttemptID: recoveredAttempt.ID, ExpectedVersion: recovered.Version, IdempotencyKey: "e2e:840:replacement-validation", ActorID: "validator", Outcome: PhaseOutcomeReproduced, OutputJSON: []byte(`{"verification_status":"reproduced","environment":"test","observed_behavior":"timeout","expected_behavior":"checkout succeeds","evidence":[{"kind":"api","path":"response.json","environment":"test","redaction_status":"not_required"}],"gaps":[]}`)})
+	if err != nil || progressed.Status != CaseInvestigating || progressed.ID != replacement.ID {
+		t.Fatalf("progressed=%+v err=%v", progressed, err)
+	}
+	archivedAfterProgress, err := store.GetCase(ctx, archived.ID)
+	if err != nil || !reflect.DeepEqual(immutable, archivedAfterProgress) {
+		t.Fatalf("replacement changed archive: before=%+v after=%+v err=%v", immutable, archivedAfterProgress, err)
 	}
 }
 

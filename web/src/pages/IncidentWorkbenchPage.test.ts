@@ -20,6 +20,12 @@ import IncidentWorkbenchPage from './IncidentWorkbenchPage.vue'
 const route = vi.hoisted(() => ({ query: {} as Record<string, string> }))
 const router = vi.hoisted(() => ({ replace: vi.fn() }))
 const runtime = vi.hoisted(() => ({ EventsOn: vi.fn(() => vi.fn()) }))
+const notifications = vi.hoisted(() => ({
+  error: vi.fn(),
+  success: vi.fn(),
+  info: vi.fn(),
+  toastError: vi.fn(),
+}))
 
 vi.mock('vue-router', () => ({ useRoute: () => route, useRouter: () => router }))
 vi.mock('../../wailsjs/runtime/runtime', () => ({ EventsOn: runtime.EventsOn }))
@@ -38,8 +44,8 @@ vi.mock('../lib/bridge', () => ({
   startIncidentCase: vi.fn(),
 }))
 vi.mock('../lib/toast', () => ({
-  toast: { error: vi.fn(), success: vi.fn(), info: vi.fn() },
-  toastError: vi.fn(),
+  toast: { error: notifications.error, success: notifications.success, info: notifications.info },
+  toastError: notifications.toastError,
 }))
 
 const bugA = {
@@ -50,6 +56,9 @@ const bugB = {
 }
 const botMatch = {
   bot: { key: 'base|codex', system_id: 'base', target: 'codex', path: '/repo/base', name: 'Base', env: 'test' }, score: 10, reasons: ['系统匹配'],
+}
+const prodBotMatch = {
+  bot: { key: 'base-prod|codex', system_id: 'base', target: 'codex', path: '/repo/base-prod', name: 'Base Prod', env: 'prod' }, score: 9, reasons: ['系统匹配'],
 }
 
 function incident(id: string, status: CaseStatus, updatedAt: string, overrides: Partial<IncidentCase> = {}): IncidentCase {
@@ -96,6 +105,16 @@ function flushPromises() {
   return new Promise(resolve => setTimeout(resolve, 0))
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (error: unknown) => void
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done
+    reject = fail
+  })
+  return { promise, resolve, reject }
+}
+
 async function mountedPage() {
   const wrapper = mount(IncidentWorkbenchPage)
   await flushPromises()
@@ -118,6 +137,10 @@ afterEach(() => {
   vi.mocked(approveIncidentFix).mockReset()
   vi.mocked(approveIncidentMerge).mockReset()
   vi.mocked(notifyIncidentDeployed).mockReset()
+  notifications.error.mockReset()
+  notifications.success.mockReset()
+  notifications.info.mockReset()
+  notifications.toastError.mockReset()
 })
 
 describe('IncidentWorkbenchPage', () => {
@@ -186,6 +209,71 @@ describe('IncidentWorkbenchPage', () => {
     expect(wrapper.get('.case-heading').text()).toContain('case-fixed')
   })
 
+  it.each(['fixed_verified', 'reset_archived'] as const)('starts a %s terminal round with the explicitly selected Bot key and its environment', async status => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    vi.mocked(matchBugBots).mockResolvedValue([botMatch, prodBotMatch])
+    const terminal = incident('case-terminal', status, '2026-07-13T00:00:00Z', { selected_bot_key: 'base|codex' })
+    const opened = incident('case-new', 'validating', '2026-07-13T00:01:00Z', { selected_bot_key: 'base-prod|codex', environment: 'prod', version: 1 })
+    vi.mocked(listIncidentCases).mockResolvedValue([terminal])
+    mockCaseDetails(detail(terminal), detail(opened))
+    vi.mocked(startIncidentCase).mockResolvedValue(opened)
+    const wrapper = await mountedPage()
+
+    await wrapper.findAll('.bot-picker input[type="radio"]')[1].setValue(true)
+    await wrapper.get('[data-action="start-case"]').trigger('click')
+    await flushPromises()
+
+    expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
+      bot_key: 'base-prod|codex',
+      input_json: expect.objectContaining({ target_environment: 'prod' }),
+    }))
+  })
+
+  it('uses the recovered legacy Bot object for both key and environment without an explicit selection', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    vi.mocked(matchBugBots).mockResolvedValue([prodBotMatch, botMatch])
+    const archived = incident('legacy-1', 'legacy_archived', '2026-07-13T00:00:00Z', { selected_bot_key: '' })
+    const opened = incident('case-new', 'validating', '2026-07-13T00:01:00Z', { selected_bot_key: 'base|codex', environment: 'test', version: 1 })
+    const snapshot = detail(archived, {
+      attempts: [{ id: 'legacy-attempt', case_id: 'legacy-1', cycle_number: 1, phase: 'legacy', mode: '', status: 'succeeded', agent_target: '', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '2026-07-11T00:00:00Z', error_code: '', error_message: '', usage: {} }],
+    })
+    vi.mocked(listIncidentCases).mockResolvedValue([archived])
+    mockCaseDetails(snapshot, detail(opened))
+    vi.mocked(startIncidentCase).mockResolvedValue(opened)
+    const wrapper = await mountedPage()
+
+    await wrapper.get('.primary-action').trigger('click')
+    await flushPromises()
+
+    expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
+      bot_key: 'base|codex',
+      input_json: expect.objectContaining({ target_environment: 'test' }),
+    }))
+  })
+
+  it('lets an explicit Bot override legacy recovery for both key and environment', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    vi.mocked(matchBugBots).mockResolvedValue([botMatch, prodBotMatch])
+    const archived = incident('legacy-1', 'legacy_archived', '2026-07-13T00:00:00Z', { selected_bot_key: 'base|codex' })
+    const opened = incident('case-new', 'validating', '2026-07-13T00:01:00Z', { selected_bot_key: 'base-prod|codex', environment: 'prod', version: 1 })
+    vi.mocked(listIncidentCases).mockResolvedValue([archived])
+    mockCaseDetails(detail(archived), detail(opened))
+    vi.mocked(startIncidentCase).mockResolvedValue(opened)
+    const wrapper = await mountedPage()
+
+    await wrapper.findAll('.bot-picker input[type="radio"]')[1].setValue(true)
+    await wrapper.get('.primary-action').trigger('click')
+    await flushPromises()
+
+    expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
+      bot_key: 'base-prod|codex',
+      input_json: expect.objectContaining({ target_environment: 'prod' }),
+    }))
+  })
+
   it('uses an existing Case returned by the backend', async () => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])
@@ -203,6 +291,33 @@ describe('IncidentWorkbenchPage', () => {
     expect(input).toMatchObject({ bug_id: 'bug-a', bot_key: 'base|codex', expected_version: 0, actor_id: 'desktop-user' })
     expect(getIncidentCase).toHaveBeenCalledWith('case-existing')
     expect(wrapper.text()).toContain('已打开现有闭环')
+  })
+
+  it('does not apply a delayed Start completion after another Bug is selected', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA, bugB])
+    const pendingStart = deferred<IncidentCase>()
+    vi.mocked(startIncidentCase).mockReturnValue(pendingStart.promise)
+    const staleOpened = incident('case-a-new', 'validating', '2026-07-13T00:01:00Z', { version: 1 })
+    mockCaseDetails(detail(staleOpened))
+    const wrapper = await mountedPage()
+
+    await wrapper.get('[data-action="start-case"]').trigger('click')
+    await wrapper.get('[data-ticket-id="bug-b"]').trigger('click')
+    await flushPromises()
+    vi.mocked(getIncidentCase).mockClear()
+    notifications.info.mockClear()
+    notifications.success.mockClear()
+
+    pendingStart.resolve(staleOpened)
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.get('.ticket-detail h2').text()).toBe('缓存命中下降')
+    expect(getIncidentCase).not.toHaveBeenCalled()
+    expect(wrapper.text()).not.toContain('已打开现有闭环')
+    expect(notifications.info).not.toHaveBeenCalled()
+    expect(notifications.success).not.toHaveBeenCalled()
   })
 
   it('shows a recoverable empty state for an invalid URL Bug', async () => {
@@ -258,6 +373,69 @@ describe('IncidentWorkbenchPage', () => {
     expect(approveIncidentFix).toHaveBeenCalledWith(expect.objectContaining({
       case_id: 'case-1', expected_version: 7, root_cause_attempt_id: 'attempt-1', idempotency_key: 'start-fix:case-1:attempt-1:7', actor_id: 'desktop-user',
     }))
+  })
+
+  it('does not apply a delayed primary-action completion after another Bug and Case are selected', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA, bugB])
+    const caseA = incident('case-a', 'waiting_fix_approval', '2026-07-13T00:00:00Z')
+    const caseB = incident('case-b', 'waiting_evidence', '2026-07-13T00:00:00Z', { bug_id: 'bug-b', version: 3 })
+    const snapshotA = detail(caseA, {
+      attempts: [{ id: 'attempt-1', case_id: 'case-a', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }],
+    })
+    const snapshotB = detail(caseB)
+    vi.mocked(listIncidentCases).mockResolvedValue([caseA, caseB])
+    mockCaseDetails(snapshotA, snapshotB)
+    const pendingApproval = deferred<IncidentCase>()
+    vi.mocked(approveIncidentFix).mockReturnValue(pendingApproval.promise)
+    const wrapper = await mountedPage()
+
+    await wrapper.get('.primary-action').trigger('click')
+    await wrapper.get('[data-confirm]').trigger('click')
+    await wrapper.get('[data-ticket-id="bug-b"]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+    expect(wrapper.get('.case-heading').text()).toContain('case-b')
+    vi.mocked(getIncidentCase).mockClear()
+    notifications.success.mockClear()
+
+    pendingApproval.resolve({ ...caseA, status: 'fixing', version: 8 })
+    await flushPromises()
+    await flushPromises()
+
+    expect(getIncidentCase).not.toHaveBeenCalled()
+    expect(wrapper.get('.case-heading').text()).toContain('case-b')
+    expect(notifications.success).not.toHaveBeenCalled()
+  })
+
+  it('does not expose a delayed primary-action error after another Bug and Case are selected', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA, bugB])
+    const caseA = incident('case-a', 'waiting_fix_approval', '2026-07-13T00:00:00Z')
+    const caseB = incident('case-b', 'waiting_evidence', '2026-07-13T00:00:00Z', { bug_id: 'bug-b', version: 3 })
+    const snapshotA = detail(caseA, {
+      attempts: [{ id: 'attempt-1', case_id: 'case-a', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }],
+    })
+    vi.mocked(listIncidentCases).mockResolvedValue([caseA, caseB])
+    mockCaseDetails(snapshotA, detail(caseB))
+    const pendingApproval = deferred<IncidentCase>()
+    vi.mocked(approveIncidentFix).mockReturnValue(pendingApproval.promise)
+    const wrapper = await mountedPage()
+
+    await wrapper.get('.primary-action').trigger('click')
+    await wrapper.get('[data-confirm]').trigger('click')
+    await wrapper.get('[data-ticket-id="bug-b"]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+    notifications.toastError.mockClear()
+
+    pendingApproval.reject(new Error('stale approval failed'))
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.get('.case-heading').text()).toContain('case-b')
+    expect(wrapper.text()).not.toContain('stale approval failed')
+    expect(notifications.toastError).not.toHaveBeenCalled()
   })
 
   it('forwards the exact persisted target heads with merge approval', async () => {

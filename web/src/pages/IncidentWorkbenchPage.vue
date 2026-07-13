@@ -19,12 +19,13 @@ import {
   saveBugSelectedBot,
   startIncidentCase,
   type BotMatch,
+  type BotRef,
   type IncidentCase,
   type IncidentCaseDetail,
 } from '../lib/bridge'
 import { toast, toastError } from '../lib/toast'
 import { useBugTickets } from '../lib/useBugTickets'
-import { activeCaseForBug, botKeyForLegacyContinuation, casesForBug, continuationForDetail, terminalCaseStatuses, useIncidentCase } from '../lib/useIncidentCase'
+import { activeCaseForBug, botKeyForLegacyContinuation, casesForBug, continuationForDetail, useIncidentCase } from '../lib/useIncidentCase'
 
 const route = useRoute()
 const router = useRouter()
@@ -55,7 +56,7 @@ const pickerSelectedBotKey = computed(() => {
   const detail = displayedDetail.value
   const bug = tickets.selectedBug.value
   if (!detail || !bug || detail.case.status !== 'legacy_archived') return selectedBotKey.value
-  return botKeyForLegacyContinuation(detail, bug.id, explicitlySelectedBots.value[bug.id] || '') ? selectedBotKey.value : ''
+  return explicitlySelectedBots.value[bug.id] || botKeyForLegacyContinuation(detail, bug.id, '')
 })
 const selectedBotSupportsStart = computed(() => !selectedBot.value || ['codex', 'claude-code', 'openclaw'].includes(selectedBot.value.target))
 const showStandaloneStart = computed(() => {
@@ -64,7 +65,7 @@ const showStandaloneStart = computed(() => {
   return displayedCase.value.status !== 'legacy_archived'
 })
 const standaloneStartLabel = computed(() => allCasesTerminal.value ? '开始新一轮' : '开始故障闭环')
-const standaloneStartDisabled = computed(() => starting.value || incidentWorkflow.pending.value || !selectedBotSupportsStart.value || !startBotKey(displayedDetail.value))
+const standaloneStartDisabled = computed(() => starting.value || incidentWorkflow.pending.value || !selectedBotSupportsStart.value || !startBotChoice(displayedDetail.value).key)
 
 watch(() => tickets.selectedID.value, async bugID => {
   workflowNotice.value = ''
@@ -160,16 +161,16 @@ async function selectWorkflowCase(caseID: string) {
   }
 }
 
-function startBotKey(terminalDetail: IncidentCaseDetail | null): string {
+type StartBotChoice = { key: string; bot?: BotRef }
+
+function startBotChoice(terminalDetail: IncidentCaseDetail | null): StartBotChoice {
   const bug = tickets.selectedBug.value
-  if (!bug) return ''
-  if (terminalDetail && terminalCaseStatuses.has(terminalDetail.case.status)) {
-    return botKeyForLegacyContinuation(terminalDetail, bug.id, explicitlySelectedBots.value[bug.id] || '')
+  if (!bug) return { key: '' }
+  let key = selectedBotKey.value.trim()
+  if (terminalDetail?.case.status === 'legacy_archived') {
+    key = explicitlySelectedBots.value[bug.id] || botKeyForLegacyContinuation(terminalDetail, bug.id, '')
   }
-  if (displayedCase.value && terminalCaseStatuses.has(displayedCase.value.status)) {
-    return displayedCase.value.selected_bot_key.trim() || explicitlySelectedBots.value[bug.id] || ''
-  }
-  return selectedBotKey.value.trim()
+  return { key, bot: matches.value.find(match => match.bot.key === key)?.bot }
 }
 
 function freshCaseID(bugID: string): string {
@@ -179,15 +180,16 @@ function freshCaseID(bugID: string): string {
 
 async function startNewCase(terminalDetail: IncidentCaseDetail | null = displayedDetail.value) {
   const bug = tickets.selectedBug.value
-  const botKey = startBotKey(terminalDetail)
   if (!bug) return
-  if (!botKey) {
+  const initiatingBugID = bug.id
+  const choice = startBotChoice(terminalDetail)
+  if (!choice.key) {
     const error = new Error('该历史记录没有机器人信息。请重新选择当前 Bug 的机器人后再继续。')
     incidentWorkflow.error.value = error.message
     toastError('启动故障闭环', error)
     return
   }
-  const roundIdentity = `${bug.id}:${displayedCase.value?.id || 'none'}:${displayedCase.value?.version || 0}:${botKey}`
+  const roundIdentity = `${bug.id}:${displayedCase.value?.id || 'none'}:${displayedCase.value?.version || 0}:${choice.key}`
   const actionKey = `start-round:${roundIdentity}`
   let candidateID = startCaseIDs.get(roundIdentity)
   if (!candidateID) {
@@ -201,7 +203,7 @@ async function startNewCase(terminalDetail: IncidentCaseDetail | null = displaye
     const opened = await incidentWorkflow.runOnce(actionKey, () => startIncidentCase({
       case_id: candidate,
       bug_id: bug.id,
-      bot_key: botKey,
+      bot_key: choice.key,
       expected_version: 0,
       idempotency_key: `start:${candidate}`,
       actor_id: 'desktop-user',
@@ -209,10 +211,12 @@ async function startNewCase(terminalDetail: IncidentCaseDetail | null = displaye
         mode: 'reproduce',
         expected_behavior: bug.title || '',
         bug_steps: bug.steps || '',
-        target_environment: selectedBot.value?.env || bug.bot_env || bug.env || '',
+        target_environment: choice.bot?.env || '',
       },
     }))
-    await incidentWorkflow.refreshDetail(opened.id)
+    if (!isCurrentBug(initiatingBugID)) return
+    const refreshed = await refreshCaseSnapshotIfCurrent(opened.id, () => isCurrentBug(initiatingBugID))
+    if (!refreshed || !isCurrentBug(initiatingBugID)) return
     if (opened.id !== candidate) {
       workflowNotice.value = '已打开现有闭环'
       toast.info('已打开现有闭环')
@@ -221,10 +225,28 @@ async function startNewCase(terminalDetail: IncidentCaseDetail | null = displaye
       toast.success(workflowNotice.value)
     }
   } catch (error) {
+    if (!isCurrentBug(initiatingBugID)) return
     incidentWorkflow.error.value = error instanceof Error ? error.message : String(error)
     toastError('启动故障闭环', error)
   } finally {
     starting.value = false
+  }
+}
+
+function isCurrentBug(bugID: string): boolean {
+  return tickets.selectedID.value === bugID && tickets.selectedBug.value?.id === bugID
+}
+
+async function refreshCaseSnapshotIfCurrent(caseID: string, isCurrent: () => boolean): Promise<boolean> {
+  if (!isCurrent()) return false
+  try {
+    const snapshot = await getIncidentCase(caseID)
+    if (!isCurrent()) return false
+    incidentWorkflow.applySnapshot(snapshot)
+    return true
+  } catch (error) {
+    if (!isCurrent()) return false
+    throw error
   }
 }
 
@@ -244,6 +266,15 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
   if (payload.kind === 'continue_legacy') {
     await startNewCase(detail)
     return
+  }
+  const context = {
+    bugID: tickets.selectedID.value,
+    caseID: incident.id,
+    caseVersion: incident.version,
+  }
+  const isCurrent = () => {
+    const current = displayedDetail.value?.case
+    return isCurrentBug(context.bugID) && current?.id === context.caseID && current.version === context.caseVersion
   }
   const key = `${payload.kind}:${incident.id}:v${incident.version}`
   try {
@@ -288,9 +319,12 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
       }
       throw new Error(`暂不支持操作 ${payload.kind}`)
     })
-    await incidentWorkflow.refreshDetail(updated.id)
+    if (!isCurrent()) return
+    const refreshed = await refreshCaseSnapshotIfCurrent(updated.id, isCurrent)
+    if (!refreshed) return
     toast.success('操作已提交')
   } catch (error) {
+    if (!isCurrent()) return
     incidentWorkflow.error.value = error instanceof Error ? error.message : String(error)
     toastError('执行故障流程操作', error)
   }

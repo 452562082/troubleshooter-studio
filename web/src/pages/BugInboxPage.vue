@@ -500,7 +500,14 @@ function eventValue(event: Event): string {
 
     <div v-if="attachmentPreview" class="attachment-preview-backdrop" @click.self="attachmentPreview = null">
       <section class="attachment-preview-modal" role="dialog" aria-modal="true" aria-label="附件预览">
-        <header><strong>{{ attachmentPreview.name }}</strong><button class="btn icon" type="button" aria-label="关闭附件预览" @click="attachmentPreview = null">×</button></header>
+        <header>
+          <strong>{{ attachmentPreview.name }}</strong>
+          <button class="attachment-preview-close" type="button" aria-label="关闭附件预览" @click="attachmentPreview = null">
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none">
+              <path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+            </svg>
+          </button>
+        </header>
         <img v-if="attachmentPreview.content_type.startsWith('image/')" class="attachment-preview-image" :src="attachmentPreview.data_url" :alt="attachmentPreview.name">
         <div v-else class="attachment-preview-fallback"><span>当前附件类型不支持内嵌预览</span><a class="btn" :href="attachmentPreview.data_url" :download="attachmentPreview.name">下载附件</a></div>
       </section>
@@ -566,8 +573,29 @@ function eventValue(event: Event): string {
 .attachment-preview-modal { width: min(1080px, 92vw); max-height: 88vh; min-width: 0; overflow: hidden; border-radius: var(--r-lg); background: var(--c-surf); box-shadow: 0 20px 60px rgba(15, 23, 42, .28); }
 .attachment-preview-modal header { min-height: 44px; padding: 6px 8px 6px 12px; display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
 .attachment-preview-modal header strong { min-width: 0; overflow-wrap: anywhere; }
+.attachment-preview-close {
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--c-muted);
+  cursor: pointer;
+  transition: background-color 160ms ease, color 160ms ease;
+}
+.attachment-preview-close svg { width: 20px; height: 20px; }
+.attachment-preview-close:hover { background: var(--c-surf-2); color: var(--c-text); }
+.attachment-preview-close:active { background: var(--c-line); }
+.attachment-preview-close:focus-visible { outline: 2px solid var(--c-accent-hover); outline-offset: 2px; }
 .attachment-preview-image { display: block; max-width: 100%; max-height: calc(88vh - 56px); margin: auto; object-fit: contain; background: #0f172a; }
 .attachment-preview-fallback { min-height: 220px; padding: var(--sp-4); display: grid; place-items: center; color: var(--c-muted); }
+@media (prefers-reduced-motion: reduce) {
+  .attachment-preview-close { transition: none; }
+}
 @media (max-width: 900px) {
   .basic-row, .auth-row, .ops-row { grid-template-columns: minmax(0, 1fr); }
   .inbox-workspace { grid-template-columns: minmax(0, 1fr); }

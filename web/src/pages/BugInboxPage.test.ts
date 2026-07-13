@@ -340,6 +340,14 @@ describe('BugInboxPage', () => {
       platform_id: 'zentao-main', bug_id: 'zentao-840', attachment_index: 0,
     })
     expect(wrapper.get('.attachment-preview-image').attributes('src')).toBe('data:image/png;base64,AA==')
+
+    const closeButton = wrapper.get('button.attachment-preview-close[aria-label="关闭附件预览"]')
+    expect(closeButton.find('svg[aria-hidden="true"]').exists()).toBe(true)
+    expect(closeButton.text()).toBe('')
+
+    await closeButton.trigger('click')
+
+    expect(wrapper.find('.attachment-preview-modal').exists()).toBe(false)
   })
 
   it('renders ZenTao raw HTML as rich text with the complete public Bug fields', async () => {

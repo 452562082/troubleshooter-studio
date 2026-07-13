@@ -9,9 +9,6 @@ import {
   type BugAttachmentPreviewResult,
   type BugPlatform,
   type BugRecord,
-  cancelBugInvestigation,
-  continueBugInvestigation,
-  type InvestigationContinueInput,
   bugHookBaseURL,
   clearBugPlatformLogin,
   deleteBugPlatform,
@@ -40,7 +37,6 @@ import {
   cancelIncidentAttempt,
   type IncidentCase,
   type WorkflowMetrics,
-  startBugFix,
   syncBugPlatform,
 } from '../lib/bridge'
 import BugCaseLifecycle, { type CasePrimaryAction } from '../components/BugCaseLifecycle.vue'
@@ -73,12 +69,6 @@ const attachmentPreview = ref<BugAttachmentPreviewResult | null>(null)
 const attachmentThumbnails = ref<Record<string, BugAttachmentPreviewResult | 'loading' | 'failed'>>({})
 const investigationRuns = ref<InvestigationRun[]>([])
 const investigationStarting = ref(false)
-const fixStarting = ref(false)
-const investigationCancelling = ref(false)
-const continuingInvestigation = ref(false)
-const supplementDialogOpen = ref(false)
-const userSupplementInput = ref('')
-const supplementPhase = ref<'validation' | 'investigation' | 'fix'>('investigation')
 const outputScrollRef = ref<HTMLElement | null>(null)
 const query = ref('')
 const manualBugID = ref('')
@@ -148,18 +138,6 @@ const selectedBotUnsupportedReason = computed(() => {
   if (selectedBot.value.target === 'cursor') return 'Cursor 暂不支持后台直启,请复制上下文后在 Cursor Custom Agent 中发起。'
   return '该机器人暂不支持后台直启。'
 })
-
-const latestRunNeedsUserInput = computed(() => {
-	const run = selectedRun.value
-	if (!run) return false
-	const phase = outputTab.value
-	const finalText = phase === currentRunPhase(run) ? (run.final_message || run.error || '') : ''
-	const text = finalText + (run.events || []).filter(e => eventPhase(e) === phase).map(e => e.message).join('\n')
-	return /insufficient_info|需要用户补充|需要补充信息|请提供|缺少.*信息|未提供|无法确认|无法采集|登录态|测试账号|无法.*请.*输入/i.test(text)
-})
-const outputPhaseLabel = computed(() => phaseLabel(outputTab.value))
-const supplementPhaseLabel = computed(() => phaseLabel(supplementPhase.value))
-const supplementActionLabel = computed(() => supplementPhase.value === 'validation' ? '继续验证' : supplementPhase.value === 'fix' ? '继续修复' : '继续排障')
 
 const investigationEventLines = computed(() => {
   const run = selectedRun.value
@@ -256,15 +234,10 @@ const copyableInvestigationText = computed(() => {
   return ''
 })
 const copyInvestigationLabel = computed(() => fixFinalText.value.trim() || investigationFinalText.value.trim() ? '复制结果' : '复制上下文')
-const canCancelInvestigation = computed(() => selectedRun.value?.status === 'running')
 const renderedInvestigationMarkdown = computed(() => safeMarkdown(investigationFinalText.value || contextText.value))
 const renderedValidationMarkdown = computed(() => safeMarkdown(validationFinalText.value))
 const renderedFixMarkdown = computed(() => safeMarkdown(fixFinalText.value))
 const hasFixOutput = computed(() => fixEventLines.value.length > 0 || Boolean(fixFinalText.value.trim()) || currentRunPhase(selectedRun.value || ({} as InvestigationRun)) === 'fix')
-const canStartFix = computed(() => {
-  const run = selectedRun.value
-  return Boolean(run && run.status === 'succeeded' && selectedBotSupportsDirectLaunch.value && investigationFinalText.value.trim() && !hasFixOutput.value)
-})
 const selectedBugStepsHTML = computed(() => selectedBug.value?.steps ? safeMarkdown(selectedBug.value.steps) : '-')
 const selectedBugDescriptionHTML = computed(() => selectedBug.value?.description ? safeMarkdown(selectedBug.value.description) : '')
 const selectedBugAttachments = computed(() => selectedBug.value?.attachments || [])
@@ -810,32 +783,6 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
   }
 }
 
-async function startFix() {
-  const bug = selectedBug.value
-  const bot = selectedBot.value
-  const run = selectedRun.value
-  if (!bug || !bot || !run) {
-    toast.error('请先完成排障并选择机器人')
-    return
-  }
-  if (!canStartFix.value) {
-    toast.error('需要排障 Agent 完成结论后才能启动修复')
-    return
-  }
-  fixStarting.value = true
-  const bugID = bug.id
-  outputTab.value = 'fix'
-  try {
-    const nextRun = await startBugFix({ bug_id: bugID, bot, previous_run_id: run.id })
-    if (selectedBug.value?.id === bugID && nextRun.bug_id === bugID) mergeInvestigationRun(nextRun)
-    toast.success('修复 Agent 已启动')
-  } catch (e) {
-    toastError('启动修复', e)
-  } finally {
-    fixStarting.value = false
-  }
-}
-
 async function rememberSelectedBot(botKey: string) {
   selectedBotKey.value = botKey
   const bug = selectedBug.value
@@ -926,71 +873,6 @@ function currentRunPhase(run: InvestigationRun): 'validation' | 'investigation' 
   if ((run.prompt_preview || '').includes('验证 Agent')) return 'validation'
   if (run.status === 'running') return 'investigation'
   return (run.final_message || run.error || fallbackInvestigationFinalMessage(run)).trim() ? 'investigation' : 'validation'
-}
-
-async function cancelInvestigation() {
-  const run = selectedRun.value
-  const bug = selectedBug.value
-  if (!run || run.status !== 'running') return
-  investigationCancelling.value = true
-  try {
-    await cancelBugInvestigation({ run_id: run.id })
-    if (bug) await loadInvestigationRuns(bug.id)
-    toast.success('已停止排障')
-  } catch (e) {
-    toastError('停止排障', e)
-  } finally {
-    investigationCancelling.value = false
-  }
-}
-
-function openSupplementDialog() {
-  supplementPhase.value = outputTab.value
-  supplementDialogOpen.value = true
-}
-
-function closeSupplementDialog() {
-  if (continuingInvestigation.value) return
-  supplementDialogOpen.value = false
-}
-
-async function submitSupplement() {
-  const bug = selectedBug.value
-  const bot = selectedBot.value
-  const inputText = userSupplementInput.value.trim()
-  if (!bug || !bot) {
-    toast.error('请先选择 Bug 和机器人')
-    return
-  }
-  if (!selectedBotSupportsDirectLaunch.value) {
-    toast.error(selectedBotUnsupportedReason.value || '该机器人暂不支持后台直启。')
-    return
-  }
-  if (!inputText) {
-    toast.error('请输入补充信息')
-    return
-  }
-  continuingInvestigation.value = true
-  const bugID = bug.id
-  const prevRunID = selectedRun.value?.id || ''
-  outputTab.value = supplementPhase.value
-  try {
-    const run = await continueBugInvestigation({
-      bug_id: bugID,
-      bot,
-      user_input: inputText,
-      previous_run_id: prevRunID,
-      phase: supplementPhase.value,
-    } as InvestigationContinueInput)
-    if (selectedBug.value?.id === bugID && run.bug_id === bugID) mergeInvestigationRun(run)
-    userSupplementInput.value = ''
-    supplementDialogOpen.value = false
-    toast.success(`${supplementActionLabel.value}已启动（基于用户补充信息）`)
-  } catch (e) {
-    toastError('继续排障', e)
-  } finally {
-    continuingInvestigation.value = false
-  }
 }
 
 async function copyHookURL() {
@@ -1130,12 +1012,6 @@ function isFinalInvestigationEvent(event: InvestigationEvent): boolean {
 function eventPhase(event: InvestigationEvent): string {
   const phase = event?.meta?.phase
   return typeof phase === 'string' ? phase : ''
-}
-
-function phaseLabel(phase: 'validation' | 'investigation' | 'fix'): string {
-  if (phase === 'validation') return '验证 Agent'
-  if (phase === 'fix') return '修复 Agent'
-  return '排障 Agent'
 }
 
 function isTerminalInvestigationRun(run: InvestigationRun): boolean {
@@ -1376,7 +1252,7 @@ function escapeRegExp(value: string): string {
           <div class="bot-config-title">
             <div>
               <strong>可用于该平台的排障机器人</strong>
-              <span>只展示已添加机器人,开始排障时只能从这里选择。</span>
+              <span>只展示已添加机器人，开始故障闭环时只能从这里选择。</span>
             </div>
             <button
               class="btn small add-bot-btn"
@@ -1623,29 +1499,26 @@ function escapeRegExp(value: string): string {
         </label>
         <div class="bot-actions">
           <button class="btn primary" type="button" :disabled="!selectedBug || !selectedBotKey || !selectedBotSupportsDirectLaunch || investigationStarting" @click="startInvestigation">
-            {{ investigationStarting ? '启动中...' : '开始排障' }}
+            {{ investigationStarting ? '启动中...' : '开始故障闭环' }}
           </button>
           <button v-if="selectedBot && !selectedBotSupportsDirectLaunch" class="btn" type="button" :disabled="contextGenerating" @click="generateContext">
             {{ contextGenerating ? '生成中...' : '生成上下文' }}
           </button>
-          <button v-if="canCancelInvestigation" class="btn" type="button" :disabled="investigationCancelling" @click="cancelInvestigation">
-            停止
-          </button>
-          <button v-if="canStartFix" class="btn accent" type="button" :disabled="fixStarting" @click="startFix">
-            {{ fixStarting ? '启动中...' : '启动修复 Agent' }}
-          </button>
-          <button v-if="copyableInvestigationText" class="btn" type="button" @click="copyInvestigationOutput">{{ copyInvestigationLabel }}</button>
         </div>
         <p v-if="selectedBotUnsupportedReason" class="muted direct-launch-note">{{ selectedBotUnsupportedReason }}</p>
       </aside>
     </section>
 
-    <section class="bug-output-panel">
-      <div class="output-head">
-        <strong>验证 / 排障</strong>
-        <span>{{ selectedRun ? selectedRun.status : '未开始' }}</span>
-      </div>
-      <div v-if="selectedRun" class="output-tabs" role="tablist" aria-label="验证与排障输出">
+    <details v-if="selectedRun" class="bug-output-panel legacy-history">
+      <summary class="output-head">
+        <span class="legacy-history-title">
+          <strong>历史运行记录（只读）</strong>
+          <small>旧版验证 / 排障结果，新操作请使用故障闭环</small>
+        </span>
+        <span class="legacy-history-status">{{ selectedRun.status }}</span>
+      </summary>
+      <div class="legacy-history-body">
+      <div class="output-tabs" role="tablist" aria-label="历史验证与排障输出">
         <button
           class="output-tab"
           :class="{ active: outputTab === 'validation' }"
@@ -1677,9 +1550,9 @@ function escapeRegExp(value: string): string {
         >
           修复提交
         </button>
+        <button v-if="copyableInvestigationText" class="btn legacy-copy" type="button" @click="copyInvestigationOutput">{{ copyInvestigationLabel }}</button>
       </div>
       <div ref="outputScrollRef" class="context-preview" role="log" aria-live="polite">
-        <template v-if="selectedRun">
           <template v-if="outputTab === 'validation'">
             <div v-if="validationEventLines.length" class="process-log">
               <div v-for="(line, idx) in validationEventLines" :key="idx" class="process-line">{{ line }}</div>
@@ -1703,56 +1576,22 @@ function escapeRegExp(value: string): string {
             <div v-if="!investigationEventLines.length && !investigationFinalText" class="preview-placeholder">验证完成后在这里显示排障过程和结论</div>
             </template>
           </template>
-        </template>
-        <article v-else-if="contextText" class="markdown-result" v-html="renderedInvestigationMarkdown"></article>
-        <div v-else class="preview-placeholder">开始排障后在这里显示过程和结论</div>
       </div>
-      <button
-        v-if="selectedRun"
-        class="supplement-fab"
-        :class="{ needsInput: latestRunNeedsUserInput }"
-        type="button"
-        :title="`补充信息给${outputPhaseLabel}`"
-        :aria-label="`补充信息给${outputPhaseLabel}`"
-        :disabled="canCancelInvestigation"
-        @click="openSupplementDialog"
-      >
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <line x1="22" y1="2" x2="11" y2="13"></line>
-          <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-        </svg>
-      </button>
+      </div>
+    </details>
+    <section v-else-if="contextText" class="bug-output-panel generated-context-panel">
+      <div class="output-head">
+        <span class="legacy-history-title">
+          <strong>机器人上下文</strong>
+          <small>用于在不支持后台直启的客户端中手动发起</small>
+        </span>
+        <button class="btn" type="button" @click="copyInvestigationOutput">复制上下文</button>
+      </div>
+      <div class="context-preview">
+        <article class="markdown-result" v-html="renderedInvestigationMarkdown"></article>
+      </div>
     </section>
     </template>
-
-    <!-- 补充信息弹窗 -->
-    <div v-if="supplementDialogOpen" class="supplement-backdrop" @click.self="closeSupplementDialog">
-      <div class="supplement-modal">
-        <div class="supplement-modal-head">
-          <strong>补充信息给{{ supplementPhaseLabel }}</strong>
-          <span v-if="latestRunNeedsUserInput" class="supplement-modal-hint">{{ supplementPhaseLabel }} 需要更多信息才能继续</span>
-          <button class="btn icon" type="button" aria-label="关闭" @click="closeSupplementDialog">×</button>
-        </div>
-        <textarea
-          v-model="userSupplementInput"
-          class="supplement-textarea"
-          rows="6"
-          :placeholder="supplementPhase === 'validation' ? '输入验证 Agent 缺失的信息，如入口 URL、测试账号、复现条件、截图说明等' : supplementPhase === 'fix' ? '输入修复 Agent 需要补充的要求，如期望分支名、测试命令、修复范围或提交说明等' : '输入排障 Agent 缺失的信息，如日志片段、trace id、服务线索、配置变更等'"
-          :disabled="continuingInvestigation"
-        ></textarea>
-        <div class="supplement-modal-actions">
-          <button class="btn" type="button" @click="closeSupplementDialog">取消</button>
-          <button
-            class="btn primary"
-            type="button"
-            :disabled="!userSupplementInput.trim() || continuingInvestigation"
-            @click="submitSupplement"
-          >
-            {{ continuingInvestigation ? '启动中...' : `提交并${supplementActionLabel}` }}
-          </button>
-        </div>
-      </div>
-    </div>
 
     <div v-if="attachmentPreview" class="attachment-preview-backdrop" @click.self="attachmentPreview = null">
       <div class="attachment-preview-modal">
@@ -2132,6 +1971,69 @@ select.form-control { padding-right: 28px; }
   background: #fff;
   padding: 12px;
 }
+.bug-output-panel.legacy-history {
+  flex: 0 0 auto;
+  min-height: 0;
+  padding: 0;
+  display: block;
+  overflow: hidden;
+}
+.bug-output-panel.legacy-history[open] {
+  flex: 1 1 clamp(380px, 45vh, 700px);
+}
+.legacy-history > summary {
+  min-height: 44px;
+  padding: 10px 44px 10px 12px;
+  box-sizing: border-box;
+  position: relative;
+  cursor: pointer;
+  list-style: none;
+  transition: background-color .18s ease;
+}
+.legacy-history > summary::-webkit-details-marker { display: none; }
+.legacy-history > summary::after {
+  content: '展开';
+  position: absolute;
+  right: 12px;
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 700;
+}
+.legacy-history[open] > summary::after { content: '收起'; }
+.legacy-history > summary:hover { background: #f8fafc; }
+.legacy-history > summary:focus-visible {
+  outline: 3px solid rgba(37, 99, 235, .45);
+  outline-offset: -3px;
+}
+.legacy-history-title {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.output-head .legacy-history-title small {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.4;
+}
+.legacy-history-status {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  background: #f8fafc;
+}
+.legacy-history-body {
+  min-height: 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-top: 1px solid #e2e8f0;
+}
+.legacy-copy { min-height: 34px; justify-content: center; }
+.generated-context-panel { flex: 0 0 auto; min-height: 240px; }
 .output-head {
   display: flex;
   justify-content: space-between;
@@ -2387,134 +2289,6 @@ select.form-control { padding-right: 28px; }
   min-height: 220px; display: flex; align-items: center; justify-content: center;
   color: #94a3b8; font-size: 13px;
 }
-/* 补充信息 FAB 按钮 */
-.supplement-fab {
-  position: absolute;
-  bottom: 12px;
-  right: 12px;
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  border: 1px solid #cbd5e1;
-  background: #fff;
-  color: #64748b;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
-  transition: all 0.18s ease;
-  z-index: 10;
-}
-.supplement-fab:hover:not(:disabled) {
-  border-color: #3b82f6;
-  background: #eff6ff;
-  color: #2563eb;
-  transform: scale(1.08);
-  box-shadow: 0 4px 14px rgba(59, 130, 246, 0.22);
-}
-.supplement-fab.needsInput {
-  border-color: #f59e0b;
-  background: #fffbeb;
-  color: #d97706;
-  animation: fab-pulse 2s ease-in-out infinite;
-}
-.supplement-fab.needsInput:hover:not(:disabled) {
-  border-color: #d97706;
-  background: #fef3c7;
-}
-.supplement-fab:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-@keyframes fab-pulse {
-  0%, 100% { box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12); }
-  50% { box-shadow: 0 2px 18px rgba(245, 158, 11, 0.45); }
-}
-
-/* 补充信息弹窗 */
-.supplement-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 70;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 28px;
-  background: rgba(15, 23, 42, 0.5);
-}
-.supplement-modal {
-  width: min(560px, 92vw);
-  max-height: 88vh;
-  display: flex;
-  flex-direction: column;
-  border-radius: 10px;
-  border: 1px solid #cbd5e1;
-  background: #fff;
-  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.28);
-  overflow: hidden;
-}
-.supplement-modal-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 14px;
-  border-bottom: 1px solid #e2e8f0;
-}
-.supplement-modal-head strong {
-  color: #0f172a;
-  font-size: 14px;
-  white-space: nowrap;
-}
-.supplement-modal-hint {
-  color: #d97706;
-  font-size: 12px;
-  font-weight: 600;
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.supplement-textarea {
-  flex: 1;
-  min-height: 140px;
-  border: none;
-  border-radius: 0;
-  background: #fff;
-  color: #0f172a;
-  padding: 12px 14px;
-  font-family: inherit;
-  font-size: 13px;
-  line-height: 1.55;
-  resize: vertical;
-  outline: none;
-}
-.supplement-textarea::placeholder {
-  color: #94a3b8;
-  opacity: 1;
-}
-.supplement-textarea:focus {
-  outline: none;
-  box-shadow: inset 0 0 0 2px #3b82f6;
-}
-.supplement-textarea:disabled {
-  background: #f8fafc;
-  color: #94a3b8;
-}
-.supplement-modal-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  padding: 10px 14px;
-  border-top: 1px solid #e2e8f0;
-}
-.supplement-modal-actions .btn {
-  height: 38px;
-  min-width: 90px;
-  justify-content: center;
-}
-
 .empty {
   color: #94a3b8; background: #f8fafc; border: 1px dashed #cbd5e1;
   border-radius: 6px; padding: 18px 12px; text-align: center; font-size: 13px;

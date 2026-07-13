@@ -384,7 +384,7 @@ describe('BugWorkbenchPage', () => {
     expect(wrapper.text()).not.toContain('score 10')
     expect(wrapper.text()).not.toContain('claude-code')
 
-    const button = wrapper.findAll('button').find(b => b.text() === '开始排障')
+    const button = wrapper.findAll('button').find(b => b.text() === '开始故障闭环')
     await button!.trigger('click')
 
     expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
@@ -406,7 +406,7 @@ describe('BugWorkbenchPage', () => {
     await flushPromises()
     await flushPromises()
 
-    expect(wrapper.text()).toContain('开始排障')
+    expect(wrapper.text()).toContain('开始故障闭环')
   })
 
   it('starts codex investigation from selected bug and bot', async () => {
@@ -427,13 +427,14 @@ describe('BugWorkbenchPage', () => {
     await flushPromises()
     await flushPromises()
 
-    const button = wrapper.findAll('button').find(b => b.text() === '开始排障')
+    const button = wrapper.findAll('button').find(b => b.text() === '开始故障闭环')
     expect(button).toBeTruthy()
     await button!.trigger('click')
 
     expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
       bug_id: 'zentao-577', bot_key: 'base|codex', expected_version: 0,
     }))
+    expect(startBugInvestigation).not.toHaveBeenCalled()
   })
 
   it('passes a single bot with internal agents when starting investigation', async () => {
@@ -488,7 +489,7 @@ describe('BugWorkbenchPage', () => {
     await flushPromises()
     await flushPromises()
 
-    const button = wrapper.findAll('button').find(b => b.text() === '开始排障')
+    const button = wrapper.findAll('button').find(b => b.text() === '开始故障闭环')
     await button!.trigger('click')
 
     expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
@@ -515,7 +516,7 @@ describe('BugWorkbenchPage', () => {
     await flushPromises()
     await flushPromises()
 
-    const button = wrapper.findAll('button').find(b => b.text() === '开始排障')
+    const button = wrapper.findAll('button').find(b => b.text() === '开始故障闭环')
     expect(button?.attributes('disabled')).toBeUndefined()
     await button!.trigger('click')
 
@@ -582,7 +583,7 @@ describe('BugWorkbenchPage', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('Cursor 暂不支持后台直启')
-    const button = wrapper.findAll('button').find(b => b.text() === '开始排障')
+    const button = wrapper.findAll('button').find(b => b.text() === '开始故障闭环')
     expect(button?.attributes('disabled')).toBeDefined()
     expect(wrapper.findAll('button').some(b => b.text() === '生成上下文')).toBe(true)
   })
@@ -620,9 +621,12 @@ describe('BugWorkbenchPage', () => {
     await flushPromises()
     await flushPromises()
 
-    const actionText = wrapper.find('.bot-actions').text()
-    expect(actionText).not.toContain('停止')
-    expect(actionText).toContain('复制结果')
+    const history = wrapper.find('.legacy-history')
+    expect(history.exists()).toBe(true)
+    expect(history.attributes('open')).toBeUndefined()
+    expect(history.find('summary').text()).toContain('历史运行记录（只读）')
+    expect(history.text()).not.toContain('停止')
+    expect(history.text()).toContain('复制结果')
   })
 
   it('does not show copy for running process logs without final result', async () => {
@@ -647,7 +651,7 @@ describe('BugWorkbenchPage', () => {
     await flushPromises()
 
     expect(wrapper.find('.context-preview').text()).toContain('正在读取配置')
-    expect(wrapper.find('.bot-actions').text()).not.toContain('复制')
+    expect(wrapper.find('.legacy-history').text()).not.toContain('复制')
   })
 
   it('copies final result without process logs', async () => {
@@ -672,13 +676,13 @@ describe('BugWorkbenchPage', () => {
     await flushPromises()
     await flushPromises()
 
-    const copyButton = wrapper.findAll('.bot-actions button').find(b => b.text() === '复制结果')
+    const copyButton = wrapper.findAll('.legacy-history button').find(b => b.text() === '复制结果')
     await copyButton!.trigger('click')
 
     expect(copyToClipboard).toHaveBeenCalledWith('最终根因')
   })
 
-  it('shows stop for running investigation and cancels the active run', async () => {
+  it('keeps a running legacy investigation collapsed and read-only', async () => {
     vi.mocked(cancelBugInvestigation).mockResolvedValue()
     vi.mocked(listBugs).mockResolvedValue([
       { id: 'zentao-577', source: 'zentao', source_id: '577', title: '搜索页异常' },
@@ -694,11 +698,14 @@ describe('BugWorkbenchPage', () => {
     await flushPromises()
     await flushPromises()
 
-    const stopButton = wrapper.findAll('.bot-actions button').find(b => b.text() === '停止')
-    expect(stopButton?.exists()).toBe(true)
-    await stopButton!.trigger('click')
-
-    expect(cancelBugInvestigation).toHaveBeenCalledWith({ run_id: 'run-1' })
+    const history = wrapper.find('.legacy-history')
+    expect(history.exists()).toBe(true)
+    expect(history.attributes('open')).toBeUndefined()
+    expect(history.find('summary').text()).toContain('历史运行记录（只读）')
+    expect(wrapper.findAll('button').some(button => button.text() === '停止')).toBe(false)
+    expect(wrapper.text()).not.toContain('启动修复 Agent')
+    expect(wrapper.find('.supplement-fab').exists()).toBe(false)
+    expect(cancelBugInvestigation).not.toHaveBeenCalled()
   })
 
   it('streams investigation events into the selected run output', async () => {

@@ -136,8 +136,9 @@ describe('BugInboxPage', () => {
     const source = readFileSync('src/pages/BugInboxPage.vue', 'utf8')
     const mobileCSS = source.split('@media (max-width: 640px) {')[1]?.split('\n}')[0] || ''
 
-    expect(mobileCSS).toMatch(/\.config-disclosure,[^{]*\.platform-chip,[^{]*\.bot-picker-row,[^{]*\.interval-control input \{ min-height: 44px; \}/)
-    expect(mobileCSS).toContain('.platform-config .form-control, .compact-button, .danger-link, .toggle-control { min-height: 44px; }')
+    expect(mobileCSS).toMatch(/\.config-disclosure,[^{]*\.platform-chip,[^{]*\.bot-picker-row,[^{]*\.platform-config \.interval-control input \{ min-height: 44px; \}/)
+    expect(mobileCSS).toContain('.compact-button, .danger-link, .toggle-control { min-height: 44px; }')
+    expect(mobileCSS).toContain('.platform-config .form-control, .platform-config .compact-button, .platform-config .toggle-control { min-height: 44px; }')
     expect(mobileCSS).toContain('.bot-config-row .icon-button { justify-self: end; width: 44px; height: 44px; }')
     expect(mobileCSS).toContain('.config-footer { align-items: stretch; flex-direction: column; }')
     expect(mobileCSS).toContain('.config-footer .danger-link { align-self: flex-start; }')
@@ -147,14 +148,28 @@ describe('BugInboxPage', () => {
   it('declares consistent desktop control sizing and responsive select widths', () => {
     const source = readFileSync('src/pages/BugInboxPage.vue', 'utf8')
     const mediumCSS = source.split('@media (max-width: 1200px) {')[1]?.split('\n}')[0] || ''
+    const narrowCSS = source.split('@media (max-width: 900px) {')[1]?.split('\n}')[0] || ''
+    const mediumBreakpointIndex = source.indexOf('@media (max-width: 1200px) {')
+    const narrowBreakpointIndex = source.indexOf('@media (max-width: 900px) {')
+    const mobileBreakpointIndex = source.indexOf('@media (max-width: 640px) {')
 
     expect(source).toContain('.platform-config { --config-control-height: 40px;')
     expect(source).toContain('.platform-config .form-control { min-height: var(--config-control-height); }')
+    expect(source).toContain('.compact-button { min-height: 36px;')
+    expect(source).toContain('.platform-config .compact-button { min-height: var(--config-control-height); }')
+    expect(source).toContain('.platform-config .toggle-control { min-height: var(--config-control-height); }')
+    expect(source).toContain('.platform-config .interval-control { min-height: var(--config-control-height); }')
+    expect(source).toContain('.platform-config .interval-control input { min-height: var(--config-control-height); }')
     expect(source).toContain('.platform-config select.form-control { padding-right: 36px; }')
     expect(source).toContain('.basic-row { grid-template-columns: minmax(220px, 1fr) minmax(200px, .6fr) minmax(320px, 1.35fr); }')
-    expect(source).toContain('grid-template-columns: minmax(0, 1fr) minmax(240px, 280px) 40px;')
+    expect(source).toContain('.bot-config-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 280px) 40px;')
+    expect(source).toContain('.icon-button { width: 40px; height: 40px;')
     expect(mediumCSS).toContain('.basic-row { grid-template-columns: minmax(0, 1fr) minmax(200px, .65fr); }')
     expect(mediumCSS).toContain('.basic-row .field-label:last-child { grid-column: 1 / -1; }')
+    expect(narrowCSS).toContain('.basic-row, .auth-row { grid-template-columns: minmax(0, 1fr); }')
+    expect(mediumBreakpointIndex).toBeGreaterThan(-1)
+    expect(narrowBreakpointIndex).toBeGreaterThan(mediumBreakpointIndex)
+    expect(mobileBreakpointIndex).toBeGreaterThan(narrowBreakpointIndex)
   })
 
   it('declares readable panel disabled colors and red danger-icon focus treatment', () => {

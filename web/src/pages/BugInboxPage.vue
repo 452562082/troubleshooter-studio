@@ -597,7 +597,8 @@ function eventValue(event: Event): string {
 .login-field, .sync-settings { min-width: 0; display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
 .login-status-badge { padding: 3px 8px; border: 1px solid #fed7aa; border-radius: 999px; background: #fff7ed; color: #9a3412; font-size: var(--fs-xs); font-weight: 600; }
 .login-status-badge.ok { border-color: #bbf7d0; background: #f0fdf4; color: #166534; }
-.compact-button { min-height: var(--config-control-height, 40px); padding: 0 11px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid transparent; border-radius: var(--r-md); font: inherit; font-size: var(--fs-sm); font-weight: 600; cursor: pointer; transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease; }
+.compact-button { min-height: 36px; padding: 0 11px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid transparent; border-radius: var(--r-md); font: inherit; font-size: var(--fs-sm); font-weight: 600; cursor: pointer; transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease; }
+.platform-config .compact-button { min-height: var(--config-control-height); }
 .compact-button svg, .danger-link svg { width: 16px; height: 16px; flex: 0 0 auto; }
 .secondary-button { border-color: var(--c-line-2); background: var(--c-surf); color: var(--c-text); }
 .secondary-button:hover:not(:disabled) { border-color: #93c5fd; background: #eff6ff; color: #1d4ed8; }
@@ -609,7 +610,8 @@ function eventValue(event: Event): string {
 .compact-button:disabled svg, .danger-link:disabled svg, .icon-button:disabled svg { color: #64748b; }
 .platform-config input:disabled, .platform-config select:disabled { border-color: var(--c-line); background: var(--c-surf-3); color: #64748b; cursor: not-allowed; }
 .compact-button:focus-visible, .danger-link:focus-visible, .icon-button:focus-visible { outline: 2px solid var(--c-accent-hover); outline-offset: 2px; }
-.toggle-control { min-height: var(--config-control-height, 40px); display: inline-flex; align-items: center; gap: 7px; color: var(--c-text); white-space: nowrap; cursor: pointer; }
+.toggle-control { min-height: 36px; display: inline-flex; align-items: center; gap: 7px; color: var(--c-text); white-space: nowrap; cursor: pointer; }
+.platform-config .toggle-control { min-height: var(--config-control-height); }
 .toggle-control input { position: absolute; opacity: 0; pointer-events: none; }
 .toggle-track { width: 34px; height: 20px; padding: 2px; display: inline-flex; align-items: center; border-radius: 999px; background: var(--c-line-2); transition: background-color 180ms ease; }
 .toggle-track > span { width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(15, 23, 42, .2); transition: transform 180ms ease; }
@@ -624,8 +626,10 @@ function eventValue(event: Event): string {
 .icon-button svg { width: 18px; height: 18px; }
 .danger-icon-button:hover, .danger-icon-button:focus-visible { background: var(--c-danger-bg); color: var(--c-danger); }
 .bot-picker-row { width: 100%; min-width: 0; min-height: 40px; padding: 8px 10px; display: flex; justify-content: space-between; gap: var(--sp-2); border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf); color: var(--c-text); text-align: left; cursor: pointer; }
-.interval-control { min-height: var(--config-control-height, 40px); display: inline-flex; align-items: center; gap: 6px; color: var(--c-muted); }
-.interval-control input { width: 72px; min-height: var(--config-control-height, 40px); padding: 0 8px; }
+.interval-control { min-height: 36px; display: inline-flex; align-items: center; gap: 6px; color: var(--c-muted); }
+.platform-config .interval-control { min-height: var(--config-control-height); }
+.interval-control input { width: 72px; min-height: 36px; padding: 0 8px; }
+.platform-config .interval-control input { min-height: var(--config-control-height); }
 .trigger-row { min-width: 0; display: grid; grid-template-columns: auto minmax(180px, 1fr) auto; align-items: end; gap: var(--sp-2); }
 .hook-row { flex-wrap: wrap; }
 .hook-row code { min-width: 0; flex: 1; padding: 7px 9px; overflow-wrap: anywhere; border-radius: var(--r-sm); background: var(--c-surf-2); color: var(--c-muted); }
@@ -681,8 +685,9 @@ function eventValue(event: Event): string {
 }
 @media (max-width: 640px) {
   .bug-header, .section-heading, .platform-list, .hook-row { align-items: stretch; flex-direction: column; }
-  .config-disclosure, .platform-chip, .bot-picker-row, .interval-control input { min-height: 44px; }
-  .platform-config .form-control, .compact-button, .danger-link, .toggle-control { min-height: 44px; }
+  .config-disclosure, .platform-chip, .bot-picker-row, .platform-config .interval-control input { min-height: 44px; }
+  .compact-button, .danger-link, .toggle-control { min-height: 44px; }
+  .platform-config .form-control, .platform-config .compact-button, .platform-config .toggle-control { min-height: 44px; }
   .trigger-row, .bot-config-row { grid-template-columns: minmax(0, 1fr); }
   .bot-config-row .icon-button { justify-self: end; width: 44px; height: 44px; }
   .config-footer { align-items: stretch; flex-direction: column; }

@@ -1,6 +1,6 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { EventsOn } from '../../wailsjs/runtime/runtime'
-import { getIncidentCase, listIncidentCases, normalizeIncidentCaseEvent, type IncidentCase, type IncidentCaseDetail, type IncidentCaseEventPayload, type Phase } from './bridge/bugWorkflow'
+import { getIncidentCase, listIncidentCases, normalizeIncidentCaseEvent, type CaseStatus, type IncidentCase, type IncidentCaseDetail, type IncidentCaseEventPayload, type Phase } from './bridge/bugWorkflow'
 
 type Dependencies = {
   listCases?: () => Promise<IncidentCase[]>
@@ -9,6 +9,18 @@ type Dependencies = {
 }
 
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error)
+
+export const terminalCaseStatuses = new Set<CaseStatus>(['fixed_verified', 'legacy_archived', 'reset_archived'])
+
+export function casesForBug(cases: IncidentCase[], bugID: string): IncidentCase[] {
+  return cases
+    .filter(item => item.bug_id === bugID)
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || a.id.localeCompare(b.id))
+}
+
+export function activeCaseForBug(cases: IncidentCase[], bugID: string): IncidentCase | undefined {
+  return casesForBug(cases, bugID).find(item => !terminalCaseStatuses.has(item.status))
+}
 
 export function continuationForDetail(detail: IncidentCaseDetail, evidence: string): { phase: Exclude<Phase, 'legacy'>; input_json: Record<string, unknown> } {
   const latest = detail.attempts.find(attempt => attempt.id === detail.case.current_attempt_id && attempt.phase !== 'legacy')

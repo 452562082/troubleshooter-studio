@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { IncidentCaseDetail, IncidentCaseEventPayload } from './bridge/bugWorkflow'
-import { botKeyForLegacyContinuation, continuationForDetail, createIncidentCaseController } from './useIncidentCase'
+import type { IncidentCase, IncidentCaseDetail, IncidentCaseEventPayload } from './bridge/bugWorkflow'
+import { activeCaseForBug, botKeyForLegacyContinuation, casesForBug, continuationForDetail, createIncidentCaseController, terminalCaseStatuses } from './useIncidentCase'
 
 function detail(version: number, id = 'case-1'): IncidentCaseDetail {
   return {
@@ -14,6 +14,29 @@ function event(version: number): IncidentCaseEventPayload {
 }
 
 describe('incident Case controller', () => {
+  it('orders only the requested Bug Cases by newest update with a stable ID tie break', () => {
+    const cases = [
+      { ...detail(1, 'case-z').case, bug_id: 'bug-a', updated_at: '2026-07-12T12:00:00Z' },
+      { ...detail(1, 'case-other').case, bug_id: 'bug-b', updated_at: '2026-07-13T12:00:00Z' },
+      { ...detail(1, 'case-a').case, bug_id: 'bug-a', updated_at: '2026-07-12T12:00:00Z' },
+      { ...detail(1, 'case-new').case, bug_id: 'bug-a', updated_at: '2026-07-13T12:00:00Z' },
+    ] as IncidentCase[]
+
+    expect(casesForBug(cases, 'bug-a').map(item => item.id)).toEqual(['case-new', 'case-a', 'case-z'])
+  })
+
+  it('selects the newest non-terminal Case and treats only durable terminal statuses as terminal', () => {
+    const cases = [
+      { ...detail(1, 'case-fixed').case, bug_id: 'bug-a', status: 'fixed_verified', updated_at: '2026-07-13T12:00:00Z' },
+      { ...detail(1, 'case-active-old').case, bug_id: 'bug-a', status: 'waiting_evidence', updated_at: '2026-07-11T12:00:00Z' },
+      { ...detail(1, 'case-active-new').case, bug_id: 'bug-a', status: 'investigating', updated_at: '2026-07-12T12:00:00Z' },
+    ] as IncidentCase[]
+
+    expect([...terminalCaseStatuses]).toEqual(['fixed_verified', 'legacy_archived', 'reset_archived'])
+    expect(activeCaseForBug(cases, 'bug-a')?.id).toBe('case-active-new')
+    expect(activeCaseForBug(cases.filter(item => terminalCaseStatuses.has(item.status)), 'bug-a')).toBeUndefined()
+  })
+
   it('accepts a newer snapshot and ignores an older out-of-order event', () => {
     const controller = createIncidentCaseController()
     controller.applySnapshot(detail(6))

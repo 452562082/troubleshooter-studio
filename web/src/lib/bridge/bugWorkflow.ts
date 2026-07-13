@@ -105,6 +105,29 @@ export type IncidentCaseEventPayload = {
 interface WorkflowCommandInput { case_id: string; expected_version: number; idempotency_key: string; actor_id: string }
 export interface StartIncidentCaseInput extends WorkflowCommandInput { bug_id?: string; bot_key?: string; input_json?: Record<string, unknown> }
 export interface ResetIncidentCaseInput extends WorkflowCommandInput { new_case_id: string; bot_key: string; input_json?: Record<string, unknown> }
+export interface WorkflowWarning { code: string; message: string }
+export interface ResetIncidentCaseResult { case: IncidentCase; warnings: WorkflowWarning[] }
+export type IncidentWorkflowConflictCode = 'case_version_conflict' | 'idempotency_conflict'
+
+export class IncidentWorkflowCommandError extends Error {
+  constructor(public readonly code: IncidentWorkflowConflictCode, message: string) {
+    super(message)
+    this.name = 'IncidentWorkflowCommandError'
+  }
+}
+
+function incidentWorkflowConflictCode(error: unknown): IncidentWorkflowConflictCode | '' {
+  if (error instanceof IncidentWorkflowCommandError) return error.code
+  const message = (error instanceof Error ? error.message : String(error)).toLocaleLowerCase()
+  if (/idempoten|幂等/.test(message) && /conflict|冲突|committed|提交/.test(message)) return 'idempotency_conflict'
+  if (/(case\s+)?version/.test(message) && /conflict|expected.+current|stale/.test(message)) return 'case_version_conflict'
+  if (/版本/.test(message) && /冲突|已更新|过期/.test(message)) return 'case_version_conflict'
+  return ''
+}
+
+export function isIncidentWorkflowConflict(error: unknown): boolean {
+  return incidentWorkflowConflictCode(error) !== ''
+}
 export interface ContinueIncidentCaseInput extends WorkflowCommandInput { phase: Phase; input_json?: Record<string, unknown> }
 export interface ApproveIncidentFixInput extends WorkflowCommandInput { root_cause_attempt_id: string; input_json?: Record<string, unknown> }
 export interface ApproveIncidentMergeInput extends WorkflowCommandInput { fix_commits: Record<string, string>; target_branches: Record<string, string>; target_heads?: Record<string, string> }
@@ -145,6 +168,25 @@ export async function startIncidentCase(input: StartIncidentCaseInput): Promise<
 export async function resetIncidentCase(input: ResetIncidentCaseInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeCase(await App.ResetIncidentCase(input))
+}
+export async function resetIncidentCaseWithWarnings(input: ResetIncidentCaseInput): Promise<ResetIncidentCaseResult> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  let raw: unknown
+  try {
+    raw = await App.ResetIncidentCaseWithWarnings(input)
+  } catch (error) {
+    const code = incidentWorkflowConflictCode(error)
+    if (code) throw new IncidentWorkflowCommandError(code, error instanceof Error ? error.message : String(error))
+    throw error
+  }
+  const result = record(raw)
+  const warnings = Array.isArray(result.warnings)
+    ? result.warnings.map(item => {
+      const warning = record(item)
+      return { code: String(warning.code ?? ''), message: String(warning.message ?? '') }
+    })
+    : []
+  return { case: normalizeCase(result.case), warnings }
 }
 export async function continueIncidentCase(input: ContinueIncidentCaseInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)

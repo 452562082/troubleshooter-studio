@@ -635,44 +635,55 @@ func (a *App) StartIncidentCase(input StartIncidentCaseInput) (bughub.IncidentCa
 }
 
 func (a *App) ResetIncidentCase(input ResetIncidentCaseInput) (bughub.IncidentCase, error) {
+	result, err := a.resetIncidentCaseWithWarnings(input)
+	return result.Case, err
+}
+
+// ResetIncidentCaseWithWarnings is the structured desktop binding used by the
+// incident workbench. ResetIncidentCase remains available for older clients.
+func (a *App) ResetIncidentCaseWithWarnings(input ResetIncidentCaseInput) (bughub.ResetCaseOutcome, error) {
+	return a.resetIncidentCaseWithWarnings(input)
+}
+
+func (a *App) resetIncidentCaseWithWarnings(input ResetIncidentCaseInput) (bughub.ResetCaseOutcome, error) {
 	if err := validateWorkflowCommandScalars(input.CaseID, input.ExpectedVersion, input.IdempotencyKey, input.ActorID); err != nil {
-		return bughub.IncidentCase{}, err
+		return bughub.ResetCaseOutcome{}, err
 	}
 	if strings.TrimSpace(input.NewCaseID) == "" {
-		return bughub.IncidentCase{}, errors.New("new_case_id is required")
+		return bughub.ResetCaseOutcome{}, errors.New("new_case_id is required")
 	}
 	if strings.TrimSpace(input.NewCaseID) == strings.TrimSpace(input.CaseID) {
-		return bughub.IncidentCase{}, errors.New("new_case_id must differ from case_id")
+		return bughub.ResetCaseOutcome{}, errors.New("new_case_id must differ from case_id")
 	}
 	if strings.TrimSpace(input.BotKey) == "" {
-		return bughub.IncidentCase{}, errors.New("bot_key is required")
+		return bughub.ResetCaseOutcome{}, errors.New("bot_key is required")
 	}
 	store, orchestrator, err := a.workflowComponents()
 	if err != nil {
-		return bughub.IncidentCase{}, err
+		return bughub.ResetCaseOutcome{}, err
 	}
 	original, err := store.GetCase(a.workflowCommandContext(), strings.TrimSpace(input.CaseID))
 	if err != nil {
-		return bughub.IncidentCase{}, err
+		return bughub.ResetCaseOutcome{}, err
 	}
 	if strings.TrimSpace(input.BotKey) != original.SelectedBotKey {
-		return bughub.IncidentCase{}, errors.New("bot_key does not match existing Case")
+		return bughub.ResetCaseOutcome{}, errors.New("bot_key does not match existing Case")
 	}
 	bug, bot, err := a.loadBugAndBot(original.BugID, original.SelectedBotKey)
 	if err != nil {
-		return bughub.IncidentCase{}, err
+		return bughub.ResetCaseOutcome{}, err
 	}
 	inputJSON, err := normalizeWorkflowJSON(input.InputJSON)
 	if err != nil {
-		return bughub.IncidentCase{}, err
+		return bughub.ResetCaseOutcome{}, err
 	}
-	incident, err := orchestrator.ResetCase(a.workflowCommandContext(), bughub.ResetCaseCommand{
+	result, err := orchestrator.ResetCaseWithOutcome(a.workflowCommandContext(), bughub.ResetCaseCommand{
 		CaseID: strings.TrimSpace(input.CaseID), NewCaseID: strings.TrimSpace(input.NewCaseID),
 		ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID),
 		Bug: bug, Bot: bot, InputJSON: inputJSON,
 	})
-	a.emitIncidentResult(incident, err)
-	return incident, err
+	a.emitIncidentResult(result.Case, err)
+	return result, err
 }
 
 func (a *App) ContinueIncidentCase(input ContinueIncidentCaseInput) (bughub.IncidentCase, error) {

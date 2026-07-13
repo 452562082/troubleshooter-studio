@@ -232,6 +232,21 @@ type ResetCaseCommand struct {
 	InputJSON       json.RawMessage
 }
 
+// WorkflowWarning reports a durable workflow side-effect that needs operator
+// attention without turning the already-committed command into a retryable
+// failure.
+type WorkflowWarning struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// ResetCaseOutcome keeps the historical ResetCase API compatible while giving
+// newer callers structured warnings about external runner cancellation.
+type ResetCaseOutcome struct {
+	Case     IncidentCase      `json:"case"`
+	Warnings []WorkflowWarning `json:"warnings"`
+}
+
 // CreateAndStartCaseCommand is the production entrypoint for a Bug that does
 // not have a durable Case yet. ExpectedVersion is zero only for first
 // creation. When CaseID names an immutable legacy archive, the command creates
@@ -441,57 +456,62 @@ func (o *CaseOrchestrator) StartCase(ctx context.Context, cmd StartCaseCommand) 
 }
 
 func (o *CaseOrchestrator) ResetCase(ctx context.Context, cmd ResetCaseCommand) (IncidentCase, error) {
+	outcome, err := o.ResetCaseWithOutcome(ctx, cmd)
+	return outcome.Case, err
+}
+
+func (o *CaseOrchestrator) ResetCaseWithOutcome(ctx context.Context, cmd ResetCaseCommand) (ResetCaseOutcome, error) {
 	if o == nil || o.store == nil {
-		return IncidentCase{}, errors.New("case orchestrator store is required")
+		return ResetCaseOutcome{}, errors.New("case orchestrator store is required")
 	}
 	if err := validateCommand(cmd.CaseID, cmd.ExpectedVersion, cmd.IdempotencyKey, cmd.ActorID); err != nil {
-		return IncidentCase{}, err
+		return ResetCaseOutcome{}, err
 	}
 	if strings.TrimSpace(cmd.NewCaseID) == "" {
-		return IncidentCase{}, errors.New("replacement Case ID is required")
+		return ResetCaseOutcome{}, errors.New("replacement Case ID is required")
 	}
 	if cmd.CaseID == cmd.NewCaseID {
-		return IncidentCase{}, errors.New("replacement Case ID must differ from archived Case ID")
+		return ResetCaseOutcome{}, errors.New("replacement Case ID must differ from archived Case ID")
 	}
 	if strings.TrimSpace(cmd.Bug.ID) == "" || strings.TrimSpace(cmd.Bot.Key) == "" || strings.TrimSpace(cmd.Bot.Target) == "" {
-		return IncidentCase{}, errors.New("Bug ID and Bot key/target are required")
+		return ResetCaseOutcome{}, errors.New("Bug ID and Bot key/target are required")
 	}
 	if err := validateJSONObject("reset Case input", cmd.InputJSON, true); err != nil {
-		return IncidentCase{}, err
+		return ResetCaseOutcome{}, err
 	}
 
 	release := workflowCommandLocks.acquire("reset-case:" + cmd.CaseID)
 	defer release()
 	incident, err := o.store.GetCase(ctx, cmd.CaseID)
 	if err != nil {
-		return IncidentCase{}, err
+		return ResetCaseOutcome{}, err
 	}
 	if incident.BugID != strings.TrimSpace(cmd.Bug.ID) {
-		return IncidentCase{}, fmt.Errorf("reset Bug %q does not match Case Bug %q", cmd.Bug.ID, incident.BugID)
+		return ResetCaseOutcome{}, fmt.Errorf("reset Bug %q does not match Case Bug %q", cmd.Bug.ID, incident.BugID)
 	}
 	if cmd.Bot.Key != incident.SelectedBotKey {
-		return IncidentCase{}, fmt.Errorf("reset Bot %q does not match Case Bot %q", cmd.Bot.Key, incident.SelectedBotKey)
+		return ResetCaseOutcome{}, fmt.Errorf("reset Bot %q does not match Case Bot %q", cmd.Bot.Key, incident.SelectedBotKey)
 	}
 	if incident.Source != "" && cmd.Bug.Source != incident.Source {
-		return IncidentCase{}, fmt.Errorf("reset Bug source %q does not match Case source %q", cmd.Bug.Source, incident.Source)
+		return ResetCaseOutcome{}, fmt.Errorf("reset Bug source %q does not match Case source %q", cmd.Bug.Source, incident.Source)
 	}
 	if incident.SystemID != "" && cmd.Bug.SystemID != incident.SystemID {
-		return IncidentCase{}, fmt.Errorf("reset Bug system %q does not match Case system %q", cmd.Bug.SystemID, incident.SystemID)
+		return ResetCaseOutcome{}, fmt.Errorf("reset Bug system %q does not match Case system %q", cmd.Bug.SystemID, incident.SystemID)
 	}
 	environment := strings.TrimSpace(cmd.Bug.Env)
 	if environment == "" {
 		environment = strings.TrimSpace(cmd.Bot.Env)
 	}
 	if incident.Environment != "" && environment != incident.Environment {
-		return IncidentCase{}, fmt.Errorf("reset environment %q does not match Case environment %q", environment, incident.Environment)
+		return ResetCaseOutcome{}, fmt.Errorf("reset environment %q does not match Case environment %q", environment, incident.Environment)
 	}
 	if incident.CurrentAttemptID != "" {
 		attempt, loadErr := o.store.GetAttempt(ctx, incident.CurrentAttemptID)
 		if loadErr != nil {
-			return IncidentCase{}, loadErr
+			return ResetCaseOutcome{}, loadErr
 		}
 		if attempt.BotKey != cmd.Bot.Key || attempt.AgentTarget != cmd.Bot.Target {
-			return IncidentCase{}, fmt.Errorf("reset Bot %q/%q does not match current attempt Bot %q/%q", cmd.Bot.Key, cmd.Bot.Target, attempt.BotKey, attempt.AgentTarget)
+			return ResetCaseOutcome{}, fmt.Errorf("reset Bot %q/%q does not match current attempt Bot %q/%q", cmd.Bot.Key, cmd.Bot.Target, attempt.BotKey, attempt.AgentTarget)
 		}
 	}
 	result, err := o.store.ResetCaseWithReplacement(ctx, CaseReset{
@@ -504,16 +524,10 @@ func (o *CaseOrchestrator) ResetCase(ctx context.Context, cmd ResetCaseCommand) 
 		RequestJSON:     mustJSON(cmd),
 	})
 	if err != nil {
-		return IncidentCase{}, err
+		return ResetCaseOutcome{}, err
 	}
 
-	if !result.Replay && result.CancelledAttemptID != "" && o.runner != nil {
-		// The store already made the old attempt terminal, so a stale callback
-		// cannot win. External cancellation is best-effort and must not turn a
-		// durable reset plus successful replacement start into a caller-visible
-		// failure that invites replay.
-		_ = o.cancelPhase(result.CancelledAttemptID)
-	}
+	warnings := o.ensureResetRunnerCancellation(result, cmd.IdempotencyKey)
 	replacement, startErr := o.StartCase(ctx, StartCaseCommand{
 		CaseID:          result.Replacement.ID,
 		ExpectedVersion: result.Replacement.Version,
@@ -524,9 +538,43 @@ func (o *CaseOrchestrator) ResetCase(ctx context.Context, cmd ResetCaseCommand) 
 		InputJSON:       cmd.InputJSON,
 	})
 	if startErr != nil {
-		return replacement, startErr
+		return ResetCaseOutcome{Case: replacement, Warnings: warnings}, startErr
 	}
-	return replacement, nil
+	return ResetCaseOutcome{Case: replacement, Warnings: warnings}, nil
+}
+
+func (o *CaseOrchestrator) ensureResetRunnerCancellation(result CaseResetResult, resetKey string) []WorkflowWarning {
+	if result.CancelledAttemptID == "" || o.runner == nil {
+		return nil
+	}
+	auditKey := resetKey + ":runner-cancel"
+	if event, found, err := o.store.GetEventByIdempotencyKey(context.Background(), auditKey); err == nil && found {
+		return resetCancelWarnings(event.EventType)
+	}
+
+	eventType := "reset_runner_cancel_succeeded"
+	payload := map[string]string{"attempt_id": result.CancelledAttemptID, "outcome": "succeeded"}
+	if err := o.cancelPhase(result.CancelledAttemptID); err != nil {
+		eventType = "reset_runner_cancel_failed"
+		payload["outcome"] = "failed"
+		payload["warning_code"] = "reset_runner_cancel_failed"
+	}
+	durable, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := o.store.recordCaseAudit(durable, result.Archived.ID, auditKey, TransitionEvent{
+		ID: stableID("event", auditKey), EventType: eventType, ActorType: "studio", ActorID: "orchestrator", PayloadJSON: mustJSON(payload),
+	})
+	if err != nil {
+		return []WorkflowWarning{{Code: "reset_runner_cancel_audit_failed", Message: "旧阶段 Agent 的停止结果未能写入审计，请人工检查其运行状态。"}}
+	}
+	return resetCancelWarnings(eventType)
+}
+
+func resetCancelWarnings(eventType string) []WorkflowWarning {
+	if eventType == "reset_runner_cancel_failed" {
+		return []WorkflowWarning{{Code: "reset_runner_cancel_failed", Message: "旧阶段 Agent 未能确认停止，请人工检查其运行状态。"}}
+	}
+	return nil
 }
 
 func (o *CaseOrchestrator) CreateAndStartCase(ctx context.Context, cmd CreateAndStartCaseCommand) (IncidentCase, error) {

@@ -2343,6 +2343,66 @@ func (s *CaseStore) GetEventByIdempotencyKey(ctx context.Context, key string) (T
 	return event.Clone(), true, nil
 }
 
+// recordCaseAudit appends an idempotent audit event without changing the Case
+// snapshot or version. It is used for external side-effect results that occur
+// after the durable Case transition has already committed.
+func (s *CaseStore) recordCaseAudit(ctx context.Context, caseID, key string, event TransitionEvent) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var storedCaseID, storedType, storedActorType, storedActorID, storedPayload string
+	queryErr := tx.QueryRowContext(ctx, `SELECT case_id,event_type,actor_type,actor_id,payload_json FROM transition_events WHERE idempotency_key=?`, key).Scan(&storedCaseID, &storedType, &storedActorType, &storedActorID, &storedPayload)
+	if queryErr == nil {
+		if storedCaseID != caseID || storedType != event.EventType || storedActorType != event.ActorType || storedActorID != event.ActorID || storedPayload != string(event.PayloadJSON) {
+			return false, fmt.Errorf("%w: Case audit key %q", ErrIdempotencyConflict, key)
+		}
+		if err := tx.Commit(); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if !errors.Is(queryErr, sql.ErrNoRows) {
+		return false, queryErr
+	}
+	incident, err := getCase(ctx, tx, caseID)
+	if err != nil {
+		return false, err
+	}
+	event.CaseID, event.FromStatus, event.ToStatus, event.IdempotencyKey = incident.ID, incident.Status, incident.Status, key
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+	if err := validateAuditEvent(event); err != nil {
+		return false, err
+	}
+	resultJSON, err := json.Marshal(incident)
+	if err != nil {
+		return false, err
+	}
+	fingerprintMaterial, err := json.Marshal(struct {
+		CaseID      string          `json:"case_id"`
+		Key         string          `json:"key"`
+		EventType   string          `json:"event_type"`
+		ActorType   string          `json:"actor_type"`
+		ActorID     string          `json:"actor_id"`
+		PayloadJSON json.RawMessage `json:"payload_json"`
+	}{caseID, key, event.EventType, event.ActorType, event.ActorID, event.PayloadJSON})
+	if err != nil {
+		return false, err
+	}
+	digest := sha256.Sum256(fingerprintMaterial)
+	_, err = tx.ExecContext(ctx, `INSERT INTO transition_events (id,case_id,from_status,to_status,event_type,actor_type,actor_id,idempotency_key,payload_json,created_at,request_fingerprint,result_case_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, event.ID, event.CaseID, event.FromStatus, event.ToStatus, event.EventType, event.ActorType, event.ActorID, event.IdempotencyKey, string(event.PayloadJSON), formatStoreTime(event.CreatedAt), hex.EncodeToString(digest[:]), string(resultJSON))
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
 // CommittedCaseMutation is the immutable identity and result snapshot stored
 // with the first event of one compound Case mutation.
 type CommittedCaseMutation struct {

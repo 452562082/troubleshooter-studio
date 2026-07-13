@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -16,9 +17,10 @@ import (
 )
 
 type workflowBindingRunner struct {
-	mu      sync.Mutex
-	starts  int
-	cancels int
+	mu        sync.Mutex
+	starts    int
+	cancels   int
+	cancelErr error
 }
 
 type workflowBindingGit struct{ request bughub.MergeRequest }
@@ -53,7 +55,7 @@ func (r *workflowBindingRunner) Cancel(context.Context, string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.cancels++
-	return nil
+	return r.cancelErr
 }
 
 func (r *workflowBindingRunner) count() int {
@@ -362,6 +364,37 @@ func TestResetIncidentCaseForwardsContextAndEmitsReplacement(t *testing.T) {
 	}
 	if payload.Case == nil || payload.Snapshot == nil || payload.Case.ID != replacement.ID || payload.Snapshot.Case.ID != replacement.ID {
 		t.Fatalf("payload = %+v", payload)
+	}
+}
+
+func TestResetIncidentCaseWithWarningsReturnsStructuredCancelWarning(t *testing.T) {
+	app, store, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
+	ctx := context.Background()
+	old := bughub.IncidentCase{
+		ID: "case-reset-warning-old", BugID: "bug-1", Source: "zentao", SystemID: "base", Environment: "test",
+		Status: bughub.CaseValidating, CycleNumber: 1, CurrentAttemptID: "attempt-reset-warning-old", SelectedBotKey: "base|codex",
+	}
+	if err := store.CreateCase(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateAttempt(ctx, bughub.PhaseAttempt{ID: old.CurrentAttemptID, CaseID: old.ID, CycleNumber: 1, Phase: bughub.PhaseValidation, Mode: bughub.AttemptReproduce, Status: bughub.AttemptStatusRunning, AgentTarget: "codex", BotKey: old.SelectedBotKey, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	old, err := store.GetCase(ctx, old.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.cancelErr = errors.New("secret runner transport detail")
+
+	result, err := app.ResetIncidentCaseWithWarnings(ResetIncidentCaseInput{
+		CaseID: old.ID, NewCaseID: "case-reset-warning-new", BotKey: old.SelectedBotKey, ExpectedVersion: old.Version,
+		IdempotencyKey: "reset-case-warning", ActorID: "user-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Case.ID != "case-reset-warning-new" || !reflect.DeepEqual(result.Warnings, []bughub.WorkflowWarning{{Code: "reset_runner_cancel_failed", Message: "旧阶段 Agent 未能确认停止，请人工检查其运行状态。"}}) {
+		t.Fatalf("result=%+v", result)
 	}
 }
 

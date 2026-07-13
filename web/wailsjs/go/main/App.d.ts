@@ -184,6 +184,8 @@ export function ReindexCodeGraph(arg1:string,arg2:Record<string, string>):Promis
 
 export function ResetIncidentCase(arg1:main.ResetIncidentCaseInput):Promise<bughub.IncidentCase>;
 
+export function ResetIncidentCaseWithWarnings(arg1:main.ResetIncidentCaseInput):Promise<bughub.ResetCaseOutcome>;
+
 export function RevealInFinder(arg1:string):Promise<void>;
 
 export function RunInstall(arg1:string,arg2:Record<string, string>):Promise<main.RunInstallResult>;

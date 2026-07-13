@@ -342,6 +342,10 @@ export function ResetIncidentCase(arg1) {
   return window['go']['main']['App']['ResetIncidentCase'](arg1);
 }
 
+export function ResetIncidentCaseWithWarnings(arg1) {
+  return window['go']['main']['App']['ResetIncidentCaseWithWarnings'](arg1);
+}
+
 export function RevealInFinder(arg1) {
   return window['go']['main']['App']['RevealInFinder'](arg1);
 }

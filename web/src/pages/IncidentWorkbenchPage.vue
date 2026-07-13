@@ -16,7 +16,8 @@ import {
   listIncidentCases,
   matchBugBots,
   notifyIncidentDeployed,
-  resetIncidentCase,
+  isIncidentWorkflowConflict,
+  resetIncidentCaseWithWarnings,
   saveBugSelectedBot,
   startIncidentCase,
   type BotMatch,
@@ -44,6 +45,10 @@ type ResetDialogSnapshot = {
   bugID: string
   caseID: string
   caseVersion: number
+  caseStatus: string
+  phase: string
+  attemptID: string
+  agentTarget: string
   botKey: string
   newCaseID: string
   idempotencyKey: string
@@ -255,10 +260,16 @@ async function openResetDialog(incident: IncidentCase) {
   }
   resetTrigger.value = document.activeElement instanceof HTMLElement ? document.activeElement : null
   resetError.value = incident.selected_bot_key ? '' : '当前 Case 没有绑定排障机器人，无法创建接替 Case。'
+  const detail = displayedDetail.value?.case.id === incident.id ? displayedDetail.value : null
+  const attempt = detail?.attempts.find(item => item.id === incident.current_attempt_id)
   resetDialog.value = {
     bugID,
     caseID: incident.id,
     caseVersion: incident.version,
+    caseStatus: incident.status,
+    phase: attempt?.phase || '无活动阶段',
+    attemptID: incident.current_attempt_id || '无',
+    agentTarget: attempt?.agent_target || matches.value.find(match => match.bot.key === incident.selected_bot_key)?.bot.target || '未知',
     botKey: incident.selected_bot_key,
     ...request,
   }
@@ -329,7 +340,7 @@ async function confirmReset() {
   resetting.value = true
   resetError.value = ''
   try {
-    const replacement = await incidentWorkflow.runOnce(request.idempotencyKey, () => resetIncidentCase({
+    const result = await incidentWorkflow.runOnce(request.idempotencyKey, () => resetIncidentCaseWithWarnings({
       case_id: request.caseID,
       new_case_id: request.newCaseID,
       expected_version: request.caseVersion,
@@ -337,6 +348,7 @@ async function confirmReset() {
       actor_id: 'desktop-user',
       bot_key: request.botKey,
     }))
+    const replacement = result.case
     if (!isExpectedResetContext(replacement)) return
     const snapshot = await getIncidentCase(replacement.id)
     if (!isExpectedResetContext(replacement)) return
@@ -345,7 +357,13 @@ async function confirmReset() {
     closeResetDialog()
     await incidentWorkflow.refreshCases()
     if (!isExpectedResetContext(replacement) || displayedDetail.value?.case.id !== replacement.id) return
-    toast.success('Case 已重置，接替 Case 已创建')
+    if (result.warnings.length > 0) {
+      const message = `Case 已重置，但${result.warnings.map(warning => warning.message).join('；')}`
+      incidentWorkflow.error.value = message
+      toast.error(message)
+    } else {
+      toast.success('Case 已重置，接替 Case 已创建')
+    }
   } catch (error) {
     if (isCurrentLinkedReplacement(request.newCaseID)) {
       resetting.value = false
@@ -361,6 +379,23 @@ async function confirmReset() {
       return
     }
     if (!isExpectedResetContext()) return
+    if (isIncidentWorkflowConflict(error)) {
+      const identity = `${request.caseID}:v${request.caseVersion}:${request.botKey}`
+      resetRequests.delete(identity)
+      resetting.value = false
+      closeResetDialog()
+      try {
+        await incidentWorkflow.refreshCases()
+        if (!isCurrentBug(request.bugID)) return
+        const refreshed = activeCaseForBug(incidentWorkflow.cases.value, request.bugID) || casesForBug(incidentWorkflow.cases.value, request.bugID)[0]
+        if (refreshed) await incidentWorkflow.refreshDetail(refreshed.id)
+      } catch { /* controller keeps a recoverable refresh error */ }
+      if (!isCurrentBug(request.bugID)) return
+      const message = 'Case 已被其他操作更新，已刷新到最新状态。请重新确认后再重置。'
+      incidentWorkflow.error.value = message
+      toast.info(message)
+      return
+    }
     const message = error instanceof Error ? error.message : String(error)
     resetError.value = message
     incidentWorkflow.error.value = message
@@ -590,11 +625,14 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
           <span>危险操作</span>
           <h2 id="reset-dialog-title">重置并新建 Case</h2>
         </header>
-        <p id="reset-dialog-description">当前 Case 将归档为“已重置归档”，并创建一个绑定同一机器人的新 Case，从验证阶段重新开始。</p>
+        <p id="reset-dialog-description">当前 Case 将归档为“已重置归档”，并创建一个绑定同一机器人的新 Case，从验证阶段重新开始。<strong>当前 Agent 将被停止。</strong></p>
         <p class="reset-warning" role="note"><strong>重置不会撤销已发生的提交、推送或部署。</strong>原 Case、证据和审计记录保持不可变；外部副作用需要人工另行处理。</p>
         <dl class="reset-scope">
           <div><dt>原 Case</dt><dd>{{ resetDialog.caseID }} · v{{ resetDialog.caseVersion }}</dd></div>
-          <div><dt>绑定机器人</dt><dd>{{ resetDialog.botKey || '未绑定' }}</dd></div>
+          <div><dt>状态</dt><dd>{{ resetDialog.caseStatus }}</dd></div>
+          <div><dt>阶段</dt><dd>{{ resetDialog.phase }}</dd></div>
+          <div><dt>当前 Attempt</dt><dd>{{ resetDialog.attemptID }}</dd></div>
+          <div><dt>绑定 Agent/机器人</dt><dd>{{ resetDialog.agentTarget }} · {{ resetDialog.botKey || '未绑定' }}</dd></div>
           <div><dt>接替 Case</dt><dd>{{ resetDialog.newCaseID }}</dd></div>
         </dl>
         <p data-reset-error class="reset-live-error" role="status" aria-live="assertive">{{ resetError }}</p>

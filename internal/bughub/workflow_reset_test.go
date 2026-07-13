@@ -41,6 +41,36 @@ func TestResetCaseCancelsOldRunnerAndStartsReplacementValidation(t *testing.T) {
 	}
 }
 
+func TestResetCaseAuditsSuccessfulExternalRunnerCancellation(t *testing.T) {
+	store := newOrchestratorStore(t)
+	old, oldAttempt := prepareResetCase(t, store, "case-reset-cancel-audit-success")
+	runner := &recordingPhaseRunner{}
+	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	cmd := resetOrchestratorCommand(old, "case-reset-cancel-audit-success-next", "reset-cancel-audit-success")
+
+	outcome, err := orchestrator.ResetCaseWithOutcome(context.Background(), cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Case.ID != cmd.NewCaseID || len(outcome.Warnings) != 0 {
+		t.Fatalf("outcome=%+v", outcome)
+	}
+	event, found, err := store.GetEventByIdempotencyKey(context.Background(), cmd.IdempotencyKey+":runner-cancel")
+	if err != nil || !found {
+		t.Fatalf("cancel audit found=%v err=%v", found, err)
+	}
+	if event.EventType != "reset_runner_cancel_succeeded" {
+		t.Fatalf("event=%+v", event)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(event.PayloadJSON, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(payload, map[string]string{"attempt_id": oldAttempt.ID, "outcome": "succeeded"}) {
+		t.Fatalf("payload=%v", payload)
+	}
+}
+
 func TestResetCaseReplayDoesNotCancelOrStartTwice(t *testing.T) {
 	store := newOrchestratorStore(t)
 	old, _ := prepareResetCase(t, store, "case-reset-orchestrated-replay")
@@ -109,12 +139,35 @@ func TestResetCaseCancelFailureStillReturnsStartedReplacement(t *testing.T) {
 	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
 	cmd := resetOrchestratorCommand(old, "case-reset-cancel-failure-next", "reset-cancel-failure")
 
-	replacement, err := orchestrator.ResetCase(context.Background(), cmd)
+	outcome, err := orchestrator.ResetCaseWithOutcome(context.Background(), cmd)
 	if err != nil {
 		t.Fatalf("durable reset and replacement start must succeed despite cancel failure: %v", err)
 	}
+	replacement := outcome.Case
 	if replacement.Status != CaseValidating {
 		t.Fatalf("replacement=%+v", replacement)
+	}
+	if !reflect.DeepEqual(outcome.Warnings, []WorkflowWarning{{Code: "reset_runner_cancel_failed", Message: "旧阶段 Agent 未能确认停止，请人工检查其运行状态。"}}) {
+		t.Fatalf("warnings=%+v", outcome.Warnings)
+	}
+	event, found, err := store.GetEventByIdempotencyKey(context.Background(), cmd.IdempotencyKey+":runner-cancel")
+	if err != nil || !found || event.EventType != "reset_runner_cancel_failed" {
+		t.Fatalf("cancel audit=%+v found=%v err=%v", event, found, err)
+	}
+	if strings.Contains(string(event.PayloadJSON), "old runner unavailable") {
+		t.Fatalf("cancel audit leaked runner error: %s", event.PayloadJSON)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(event.PayloadJSON, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(payload, map[string]string{"attempt_id": oldAttempt.ID, "outcome": "failed", "warning_code": "reset_runner_cancel_failed"}) {
+		t.Fatalf("payload=%v", payload)
+	}
+
+	replayed, replayErr := orchestrator.ResetCaseWithOutcome(context.Background(), cmd)
+	if replayErr != nil || replayed.Case.ID != replacement.ID || !reflect.DeepEqual(replayed.Warnings, outcome.Warnings) {
+		t.Fatalf("replayed=%+v err=%v", replayed, replayErr)
 	}
 	runner.mu.Lock()
 	defer runner.mu.Unlock()
@@ -377,8 +430,14 @@ func TestResetCaseWithReplacementIsAtomic(t *testing.T) {
 	if _, found, err := store.GetFixCheckpoint(context.Background(), attempt.ID); err != nil || found {
 		t.Fatalf("checkpoint found=%v err=%v", found, err)
 	}
-	oldEvents, _ := store.ListEvents(context.Background(), incident.ID)
-	newEvents, _ := store.ListEvents(context.Background(), result.Replacement.ID)
+	oldEvents, err := store.ListEvents(context.Background(), incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newEvents, err := store.ListEvents(context.Background(), result.Replacement.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(oldEvents) != 1 || oldEvents[0].EventType != "case_reset" || len(newEvents) != 1 || newEvents[0].EventType != "case_created_from_reset" {
 		t.Fatalf("old events=%+v new events=%+v", oldEvents, newEvents)
 	}

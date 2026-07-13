@@ -11,6 +11,9 @@ import {
   notifyIncidentDeployed,
   normalizeIncidentCaseEvent,
   resetIncidentCase,
+  resetIncidentCaseWithWarnings,
+  IncidentWorkflowCommandError,
+  isIncidentWorkflowConflict,
   startIncidentCase,
 } from './bugWorkflow'
 
@@ -94,6 +97,29 @@ describe('incident workflow bridge', () => {
 
     expect(reset).toHaveBeenCalledWith(input)
     expect(result.reset_from_case_id).toBe('case-1')
+  })
+
+  it('normalizes structured reset warnings from the compatible Wails binding', async () => {
+	const reset = vi.fn().mockResolvedValue({
+	  case: { id: 'case-2', status: 'validating', version: 2, reset_from_case_id: 'case-1' },
+	  warnings: [{ code: 'reset_runner_cancel_failed', message: '旧阶段 Agent 未能确认停止，请人工检查其运行状态。' }],
+	})
+	;(window as any).go = { main: { App: { ResetIncidentCaseWithWarnings: reset } } }
+	const input = { case_id: 'case-1', new_case_id: 'case-2', expected_version: 7, idempotency_key: 'reset:case-1:v7', actor_id: 'desktop-user', bot_key: 'base|codex' }
+
+	const result = await resetIncidentCaseWithWarnings(input)
+
+	expect(reset).toHaveBeenCalledWith(input)
+	expect(result.case.reset_from_case_id).toBe('case-1')
+	expect(result.warnings).toEqual([{ code: 'reset_runner_cancel_failed', message: '旧阶段 Agent 未能确认停止，请人工检查其运行状态。' }])
+  })
+
+  it.each([
+	new IncidentWorkflowCommandError('case_version_conflict', 'Case 已更新'),
+	new Error('incident case version conflict: expected 7, current 8'),
+	new Error('幂等键与已提交请求冲突'),
+  ])('classifies workflow conflicts without requiring one exact English error string', error => {
+	expect(isIncidentWorkflowConflict(error)).toBe(true)
   })
 
   it('normalizes a precise versioned incident-case event payload', () => {

@@ -10,7 +10,8 @@ import {
   listIncidentCases,
   matchBugBots,
   notifyIncidentDeployed,
-  resetIncidentCase,
+  IncidentWorkflowCommandError,
+  resetIncidentCaseWithWarnings,
   saveBugSelectedBot,
   startIncidentCase,
   type CaseStatus,
@@ -31,7 +32,8 @@ const notifications = vi.hoisted(() => ({
 
 vi.mock('vue-router', () => ({ useRoute: () => route, useRouter: () => router }))
 vi.mock('../../wailsjs/runtime/runtime', () => ({ EventsOn: runtime.EventsOn }))
-vi.mock('../lib/bridge', () => ({
+vi.mock('../lib/bridge', async importOriginal => ({
+  ...(await importOriginal<typeof import('../lib/bridge')>()),
   approveIncidentFix: vi.fn(),
   approveIncidentMerge: vi.fn(),
   cancelIncidentAttempt: vi.fn(),
@@ -42,7 +44,7 @@ vi.mock('../lib/bridge', () => ({
   listIncidentCases: vi.fn().mockResolvedValue([]),
   matchBugBots: vi.fn().mockResolvedValue([]),
   notifyIncidentDeployed: vi.fn(),
-  resetIncidentCase: vi.fn(),
+  resetIncidentCaseWithWarnings: vi.fn(),
   saveBugSelectedBot: vi.fn(),
   startIncidentCase: vi.fn(),
 }))
@@ -141,7 +143,7 @@ afterEach(() => {
   vi.mocked(approveIncidentFix).mockReset()
   vi.mocked(approveIncidentMerge).mockReset()
   vi.mocked(notifyIncidentDeployed).mockReset()
-  vi.mocked(resetIncidentCase).mockReset()
+  vi.mocked(resetIncidentCaseWithWarnings).mockReset()
   notifications.error.mockReset()
   notifications.success.mockReset()
   notifications.info.mockReset()
@@ -429,7 +431,7 @@ describe('IncidentWorkbenchPage', () => {
     })
     vi.mocked(listIncidentCases).mockResolvedValueOnce([item]).mockResolvedValueOnce([archived, replacement])
     mockCaseDetails(detail(item), detail(replacement))
-    vi.mocked(resetIncidentCase).mockResolvedValue(replacement)
+    vi.mocked(resetIncidentCaseWithWarnings).mockResolvedValue({ case: replacement, warnings: [] })
     const wrapper = await mountedPage()
 
     await wrapper.findAll('.bot-picker input[type="radio"]')[1].setValue(true)
@@ -444,7 +446,7 @@ describe('IncidentWorkbenchPage', () => {
     await flushPromises()
     await flushPromises()
 
-    expect(resetIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
+    expect(resetIncidentCaseWithWarnings).toHaveBeenCalledWith(expect.objectContaining({
       case_id: 'case-1',
       new_case_id: expect.stringMatching(/^case-reset-/),
       expected_version: 7,
@@ -458,13 +460,83 @@ describe('IncidentWorkbenchPage', () => {
     expect(getIncidentCase).toHaveBeenLastCalledWith('case-reset-replacement')
   })
 
+  it('snapshots phase, status, current attempt and bound Agent before confirming reset', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-reset-context', 'waiting_evidence', '2026-07-13T00:00:00Z', { current_attempt_id: 'attempt-investigation' })
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    mockCaseDetails(detail(item, {
+      attempts: [{ id: 'attempt-investigation', case_id: item.id, cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }],
+    }))
+    const wrapper = await mountedPage()
+
+    await wrapper.get('.reset-action').trigger('click')
+    const dialog = wrapper.get('[role="dialog"]')
+
+    expect(dialog.text()).toContain('waiting_evidence')
+    expect(dialog.text()).toContain('investigation')
+    expect(dialog.text()).toContain('attempt-investigation')
+    expect(dialog.text()).toContain('base|codex')
+    expect(dialog.text()).toContain('当前 Agent 将被停止')
+  })
+
+  it('refreshes the Case and discards the stale reset identity after a version conflict', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const stale = incident('case-reset-conflict', 'waiting_evidence', '2026-07-13T00:00:00Z', { version: 7 })
+    const fresh = incident('case-reset-conflict', 'waiting_evidence', '2026-07-13T00:01:00Z', { version: 8 })
+    vi.mocked(listIncidentCases).mockResolvedValueOnce([stale]).mockResolvedValue([fresh])
+    vi.mocked(getIncidentCase).mockResolvedValueOnce(detail(stale)).mockResolvedValue(detail(fresh))
+    vi.mocked(resetIncidentCaseWithWarnings).mockRejectedValue(new IncidentWorkflowCommandError('case_version_conflict', 'Case 已被其他操作更新'))
+    const wrapper = await mountedPage()
+
+    await wrapper.get('.reset-action').trigger('click')
+    await wrapper.get('[data-reset-confirm]').trigger('click')
+    const firstReplacementID = vi.mocked(resetIncidentCaseWithWarnings).mock.calls[0][0].new_case_id
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(listIncidentCases).toHaveBeenCalledTimes(2)
+    expect(getIncidentCase).toHaveBeenLastCalledWith(stale.id)
+    expect(notifications.info).toHaveBeenCalledWith(expect.stringContaining('已刷新'))
+    expect(notifications.toastError).not.toHaveBeenCalled()
+
+    await wrapper.get('.reset-action').trigger('click')
+    const secondDialog = wrapper.get('[role="dialog"]')
+    expect(secondDialog.text()).toContain('v8')
+    expect(secondDialog.text()).not.toContain(firstReplacementID)
+  })
+
+  it('surfaces a structured Agent cancellation warning after the replacement is selected', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-reset-warning', 'waiting_evidence', '2026-07-13T00:00:00Z')
+    const replacement = incident('case-reset-warning-next', 'validating', '2026-07-13T00:01:00Z', { version: 2, reset_from_case_id: item.id })
+    vi.mocked(listIncidentCases).mockResolvedValueOnce([item]).mockResolvedValue([replacement])
+    mockCaseDetails(detail(item), detail(replacement))
+    vi.mocked(resetIncidentCaseWithWarnings).mockResolvedValue({
+      case: replacement,
+      warnings: [{ code: 'reset_runner_cancel_failed', message: '旧阶段 Agent 未能确认停止，请人工检查其运行状态。' }],
+    })
+    const wrapper = await mountedPage()
+
+    await wrapper.get('.reset-action').trigger('click')
+    await wrapper.get('[data-reset-confirm]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.get('.live-error').text()).toContain('旧阶段 Agent 未能确认停止')
+    expect(notifications.error).toHaveBeenCalledWith(expect.stringContaining('旧阶段 Agent 未能确认停止'))
+  })
+
   it('finishes reset when the exact replacement event is selected before the bridge Promise resolves', async () => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])
     const item = incident('case-1', 'waiting_evidence', '2026-07-13T00:00:00Z')
     vi.mocked(listIncidentCases).mockResolvedValue([item])
-    const pendingReset = deferred<IncidentCase>()
-    vi.mocked(resetIncidentCase).mockReturnValue(pendingReset.promise)
+    const pendingReset = deferred<{ case: IncidentCase; warnings: [] }>()
+    vi.mocked(resetIncidentCaseWithWarnings).mockReturnValue(pendingReset.promise)
     vi.mocked(getIncidentCase).mockImplementation(async caseID => {
       if (caseID === item.id) return detail(item)
       const replacement = incident(caseID, 'pending_validation', '2026-07-13T00:01:00Z', {
@@ -478,7 +550,7 @@ describe('IncidentWorkbenchPage', () => {
 
     await wrapper.get('.reset-action').trigger('click')
     await wrapper.get('[data-reset-confirm]').trigger('click')
-    const input = vi.mocked(resetIncidentCase).mock.calls[0][0]
+    const input = vi.mocked(resetIncidentCaseWithWarnings).mock.calls[0][0]
     const replacement = incident(input.new_case_id, 'pending_validation', '2026-07-13T00:01:00Z', {
       version: 1,
       current_attempt_id: '',
@@ -495,7 +567,7 @@ describe('IncidentWorkbenchPage', () => {
     expect(wrapper.get('.case-heading').text()).toContain(replacement.id)
     expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
 
-    pendingReset.resolve(replacement)
+    pendingReset.resolve({ case: replacement, warnings: [] })
     await flushPromises()
     await flushPromises()
     await flushPromises()
@@ -512,8 +584,8 @@ describe('IncidentWorkbenchPage', () => {
     vi.mocked(listBugs).mockResolvedValue([bugA])
     const item = incident('case-1', 'waiting_evidence', '2026-07-13T00:00:00Z')
     vi.mocked(listIncidentCases).mockResolvedValue([item])
-    const pendingReset = deferred<IncidentCase>()
-    vi.mocked(resetIncidentCase).mockReturnValue(pendingReset.promise)
+    const pendingReset = deferred<{ case: IncidentCase; warnings: [] }>()
+    vi.mocked(resetIncidentCaseWithWarnings).mockReturnValue(pendingReset.promise)
     vi.mocked(getIncidentCase).mockImplementation(async caseID => {
       if (caseID === item.id) return detail(item)
       return detail(incident(caseID, 'pending_validation', '2026-07-13T00:01:00Z', {
@@ -526,7 +598,7 @@ describe('IncidentWorkbenchPage', () => {
 
     await wrapper.get('.reset-action').trigger('click')
     await wrapper.get('[data-reset-confirm]').trigger('click')
-    const input = vi.mocked(resetIncidentCase).mock.calls[0][0]
+    const input = vi.mocked(resetIncidentCaseWithWarnings).mock.calls[0][0]
     const replacement = incident(input.new_case_id, 'pending_validation', '2026-07-13T00:01:00Z', {
       version: 1,
       current_attempt_id: '',
@@ -604,8 +676,8 @@ describe('IncidentWorkbenchPage', () => {
     const item = incident('case-1', 'waiting_evidence', '2026-07-13T00:00:00Z')
     vi.mocked(listIncidentCases).mockResolvedValue([item])
     mockCaseDetails(detail(item))
-    const pendingReset = deferred<IncidentCase>()
-    vi.mocked(resetIncidentCase).mockReturnValue(pendingReset.promise)
+    const pendingReset = deferred<{ case: IncidentCase; warnings: [] }>()
+    vi.mocked(resetIncidentCaseWithWarnings).mockReturnValue(pendingReset.promise)
     const wrapper = mount(IncidentWorkbenchPage, { attachTo: document.body })
     await flushPromises()
     await flushPromises()
@@ -647,8 +719,8 @@ describe('IncidentWorkbenchPage', () => {
     const caseB = incident('case-b', 'waiting_evidence', '2026-07-13T00:00:00Z', { bug_id: 'bug-b', version: 3 })
     vi.mocked(listIncidentCases).mockResolvedValue([caseA, caseB])
     mockCaseDetails(detail(caseA), detail(caseB))
-    const pendingReset = deferred<IncidentCase>()
-    vi.mocked(resetIncidentCase).mockReturnValue(pendingReset.promise)
+    const pendingReset = deferred<{ case: IncidentCase; warnings: [] }>()
+    vi.mocked(resetIncidentCaseWithWarnings).mockReturnValue(pendingReset.promise)
     const wrapper = await mountedPage()
 
     await wrapper.get('.reset-action').trigger('click')
@@ -658,7 +730,7 @@ describe('IncidentWorkbenchPage', () => {
     await flushPromises()
     vi.mocked(getIncidentCase).mockClear()
     notifications.success.mockClear()
-    pendingReset.resolve(incident('case-reset-stale', 'pending_validation', '2026-07-13T00:01:00Z', { version: 1, reset_from_case_id: 'case-a' }))
+    pendingReset.resolve({ case: incident('case-reset-stale', 'pending_validation', '2026-07-13T00:01:00Z', { version: 1, reset_from_case_id: 'case-a' }), warnings: [] })
     await flushPromises()
     await flushPromises()
 
@@ -674,8 +746,8 @@ describe('IncidentWorkbenchPage', () => {
     const caseB = incident('case-b', 'waiting_evidence', '2026-07-13T00:00:00Z', { bug_id: 'bug-b', version: 3 })
     vi.mocked(listIncidentCases).mockResolvedValue([caseA, caseB])
     mockCaseDetails(detail(caseA), detail(caseB))
-    const pendingReset = deferred<IncidentCase>()
-    vi.mocked(resetIncidentCase).mockReturnValue(pendingReset.promise)
+    const pendingReset = deferred<{ case: IncidentCase; warnings: [] }>()
+    vi.mocked(resetIncidentCaseWithWarnings).mockReturnValue(pendingReset.promise)
     const wrapper = await mountedPage()
 
     await wrapper.get('.reset-action').trigger('click')

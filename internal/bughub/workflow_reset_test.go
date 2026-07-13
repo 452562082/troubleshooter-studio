@@ -8,9 +8,201 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+func TestResetCaseCancelsOldRunnerAndStartsReplacementValidation(t *testing.T) {
+	store := newOrchestratorStore(t)
+	old, oldAttempt := prepareResetCase(t, store, "case-reset-orchestrated")
+	runner := &recordingPhaseRunner{}
+	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	cmd := resetOrchestratorCommand(old, "case-reset-orchestrated-next", "reset-orchestrated")
+
+	replacement, err := orchestrator.ResetCase(context.Background(), cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement.ID != cmd.NewCaseID || replacement.Status != CaseValidating || replacement.ResetFromCaseID != old.ID {
+		t.Fatalf("replacement=%+v", replacement)
+	}
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if !reflect.DeepEqual(runner.cancels, []string{oldAttempt.ID}) {
+		t.Fatalf("cancels=%v", runner.cancels)
+	}
+	if len(runner.starts) != 1 || runner.starts[0].CaseID != cmd.NewCaseID || runner.starts[0].Phase != PhaseValidation {
+		t.Fatalf("starts=%+v", runner.starts)
+	}
+	archived, err := store.GetCase(context.Background(), old.ID)
+	if err != nil || archived.Status != CaseResetArchived || archived.SupersededByCaseID != cmd.NewCaseID {
+		t.Fatalf("archived=%+v err=%v", archived, err)
+	}
+}
+
+func TestResetCaseReplayDoesNotCancelOrStartTwice(t *testing.T) {
+	store := newOrchestratorStore(t)
+	old, _ := prepareResetCase(t, store, "case-reset-orchestrated-replay")
+	runner := &recordingPhaseRunner{}
+	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	cmd := resetOrchestratorCommand(old, "case-reset-orchestrated-replay-next", "reset-orchestrated-replay")
+
+	first, err := orchestrator.ResetCase(context.Background(), cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := orchestrator.ResetCase(context.Background(), cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID != second.ID || first.Status != second.Status || first.CurrentAttemptID != second.CurrentAttemptID {
+		t.Fatalf("first=%+v second=%+v", first, second)
+	}
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if len(runner.cancels) != 1 || len(runner.starts) != 1 {
+		t.Fatalf("cancels=%v starts=%+v", runner.cancels, runner.starts)
+	}
+}
+
+func TestResetCaseStartFailureArchivesOldAndRecoversReplacementState(t *testing.T) {
+	store := newOrchestratorStore(t)
+	old, _ := prepareResetCase(t, store, "case-reset-schedule-failure")
+	runner := &recordingPhaseRunner{startErr: errors.New("runner unavailable")}
+	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	cmd := resetOrchestratorCommand(old, "case-reset-schedule-failure-next", "reset-schedule-failure")
+
+	if _, err := orchestrator.ResetCase(context.Background(), cmd); err == nil {
+		t.Fatal("reset start failure returned nil error")
+	}
+	archived, err := store.GetCase(context.Background(), old.ID)
+	if err != nil || archived.Status != CaseResetArchived {
+		t.Fatalf("archived=%+v err=%v", archived, err)
+	}
+	replacement, err := store.GetCase(context.Background(), cmd.NewCaseID)
+	if err != nil || replacement.Status != CaseWaitingEvidence {
+		t.Fatalf("replacement=%+v err=%v", replacement, err)
+	}
+	attempt, err := store.GetAttempt(context.Background(), replacement.CurrentAttemptID)
+	if err != nil || attempt.Status != AttemptStatusFailed || attempt.ErrorCode != "schedule_failed" {
+		t.Fatalf("attempt=%+v err=%v", attempt, err)
+	}
+}
+
+type resetCancelFailureRunner struct {
+	recordingPhaseRunner
+	cancelErr error
+}
+
+func (r *resetCancelFailureRunner) Cancel(_ context.Context, attemptID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cancels = append(r.cancels, attemptID)
+	return r.cancelErr
+}
+
+func TestResetCaseCancelFailureStillReturnsStartedReplacement(t *testing.T) {
+	store := newOrchestratorStore(t)
+	old, oldAttempt := prepareResetCase(t, store, "case-reset-cancel-failure")
+	runner := &resetCancelFailureRunner{cancelErr: errors.New("old runner unavailable")}
+	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	cmd := resetOrchestratorCommand(old, "case-reset-cancel-failure-next", "reset-cancel-failure")
+
+	replacement, err := orchestrator.ResetCase(context.Background(), cmd)
+	if err != nil {
+		t.Fatalf("durable reset and replacement start must succeed despite cancel failure: %v", err)
+	}
+	if replacement.Status != CaseValidating {
+		t.Fatalf("replacement=%+v", replacement)
+	}
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if !reflect.DeepEqual(runner.cancels, []string{oldAttempt.ID}) || len(runner.starts) != 1 {
+		t.Fatalf("cancels=%v starts=%+v", runner.cancels, runner.starts)
+	}
+}
+
+func TestResetCaseRacingCompletionHasOneWinningState(t *testing.T) {
+	store := newOrchestratorStore(t)
+	old, attempt := createRunningPhase(t, store, "case-reset-completion-race", CasePendingValidation, CaseValidating, PhaseValidation, AttemptReproduce, []byte(`{}`))
+	runner := &recordingPhaseRunner{}
+	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	reset := resetOrchestratorCommand(old, "case-reset-completion-race-next", "reset-completion-race")
+	complete := CompleteAttemptCommand{CaseID: old.ID, AttemptID: attempt.ID, ExpectedVersion: old.Version, IdempotencyKey: "complete-reset-race", ActorID: "agent", Outcome: PhaseOutcomeNeedsEvidence, OutputJSON: []byte(`{"gaps":["proof"]}`)}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	var resetResult, completeResult IncidentCase
+	var resetErr, completeErr error
+	go func() {
+		defer wg.Done()
+		<-start
+		resetResult, resetErr = orchestrator.ResetCase(context.Background(), reset)
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		completeResult, completeErr = orchestrator.CompleteAttempt(context.Background(), complete)
+	}()
+	close(start)
+	wg.Wait()
+
+	if (resetErr == nil) == (completeErr == nil) {
+		t.Fatalf("exactly one command must win: reset=%+v err=%v complete=%+v err=%v", resetResult, resetErr, completeResult, completeErr)
+	}
+	storedOld, err := store.GetCase(context.Background(), old.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resetErr == nil {
+		if storedOld.Status != CaseResetArchived || resetResult.Status != CaseValidating {
+			t.Fatalf("reset winner old=%+v replacement=%+v", storedOld, resetResult)
+		}
+		if _, err := store.GetCase(context.Background(), reset.NewCaseID); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		if storedOld.Status != CaseWaitingEvidence || completeResult.Status != CaseWaitingEvidence {
+			t.Fatalf("completion winner old=%+v result=%+v", storedOld, completeResult)
+		}
+		if _, err := store.GetCase(context.Background(), reset.NewCaseID); !errors.Is(err, ErrCaseNotFound) {
+			t.Fatalf("losing reset created replacement: %v", err)
+		}
+	}
+}
+
+func TestResetCaseValidatesCommand(t *testing.T) {
+	store := newOrchestratorStore(t)
+	old, _ := prepareResetCase(t, store, "case-reset-validation")
+	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, nil)
+	valid := resetOrchestratorCommand(old, "case-reset-validation-next", "reset-validation")
+	tests := []struct {
+		name string
+		edit func(*ResetCaseCommand)
+	}{
+		{name: "new Case ID", edit: func(cmd *ResetCaseCommand) { cmd.NewCaseID = "" }},
+		{name: "different Case IDs", edit: func(cmd *ResetCaseCommand) { cmd.NewCaseID = cmd.CaseID }},
+		{name: "Bug", edit: func(cmd *ResetCaseCommand) { cmd.Bug.ID = "" }},
+		{name: "matching Bug", edit: func(cmd *ResetCaseCommand) { cmd.Bug.ID = "different-bug" }},
+		{name: "Bot", edit: func(cmd *ResetCaseCommand) { cmd.Bot.Target = "" }},
+		{name: "JSON object", edit: func(cmd *ResetCaseCommand) { cmd.InputJSON = []byte(`[]`) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := valid
+			test.edit(&cmd)
+			if _, err := orchestrator.ResetCase(context.Background(), cmd); err == nil {
+				t.Fatal("invalid reset command succeeded")
+			}
+		})
+	}
+}
+
+func resetOrchestratorCommand(incident IncidentCase, newCaseID, key string) ResetCaseCommand {
+	return ResetCaseCommand{CaseID: incident.ID, NewCaseID: newCaseID, ExpectedVersion: incident.Version, IdempotencyKey: key, ActorID: "alice", Bug: Bug{ID: incident.BugID, Env: incident.Environment}, Bot: BotRef{Key: "validator", Target: "codex"}, InputJSON: []byte(`{"reason":"retry"}`)}
+}
 
 func TestResetCaseWithReplacementIsAtomic(t *testing.T) {
 	store := openTestCaseStore(t)

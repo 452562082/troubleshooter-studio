@@ -221,6 +221,17 @@ type StartCaseCommand struct {
 	InputJSON       json.RawMessage
 }
 
+type ResetCaseCommand struct {
+	CaseID          string
+	NewCaseID       string
+	IdempotencyKey  string
+	ActorID         string
+	ExpectedVersion int64
+	Bug             Bug
+	Bot             BotRef
+	InputJSON       json.RawMessage
+}
+
 // CreateAndStartCaseCommand is the production entrypoint for a Bug that does
 // not have a durable Case yet. ExpectedVersion is zero only for first
 // creation. When CaseID names an immutable legacy archive, the command creates
@@ -427,6 +438,70 @@ func (o *CaseOrchestrator) StartCase(ctx context.Context, cmd StartCaseCommand) 
 	}
 	attempt := newAttempt(incident, PhaseValidation, AttemptReproduce, cmd.IdempotencyKey, cmd.Bot, cmd.InputJSON, "")
 	return o.beginPhase(ctx, incident, CaseValidating, attempt, cmd.Bug, cmd.Bot, cmd.IdempotencyKey, cmd.ActorID, "validation_started")
+}
+
+func (o *CaseOrchestrator) ResetCase(ctx context.Context, cmd ResetCaseCommand) (IncidentCase, error) {
+	if o == nil || o.store == nil {
+		return IncidentCase{}, errors.New("case orchestrator store is required")
+	}
+	if err := validateCommand(cmd.CaseID, cmd.ExpectedVersion, cmd.IdempotencyKey, cmd.ActorID); err != nil {
+		return IncidentCase{}, err
+	}
+	if strings.TrimSpace(cmd.NewCaseID) == "" {
+		return IncidentCase{}, errors.New("replacement Case ID is required")
+	}
+	if cmd.CaseID == cmd.NewCaseID {
+		return IncidentCase{}, errors.New("replacement Case ID must differ from archived Case ID")
+	}
+	if strings.TrimSpace(cmd.Bug.ID) == "" || strings.TrimSpace(cmd.Bot.Key) == "" || strings.TrimSpace(cmd.Bot.Target) == "" {
+		return IncidentCase{}, errors.New("Bug ID and Bot key/target are required")
+	}
+	if err := validateJSONObject("reset Case input", cmd.InputJSON, true); err != nil {
+		return IncidentCase{}, err
+	}
+
+	release := workflowCommandLocks.acquire("reset-case:" + cmd.CaseID)
+	defer release()
+	incident, err := o.store.GetCase(ctx, cmd.CaseID)
+	if err != nil {
+		return IncidentCase{}, err
+	}
+	if incident.BugID != strings.TrimSpace(cmd.Bug.ID) {
+		return IncidentCase{}, fmt.Errorf("reset Bug %q does not match Case Bug %q", cmd.Bug.ID, incident.BugID)
+	}
+	result, err := o.store.ResetCaseWithReplacement(ctx, CaseReset{
+		CaseID:          cmd.CaseID,
+		NewCaseID:       cmd.NewCaseID,
+		IdempotencyKey:  cmd.IdempotencyKey,
+		ActorID:         cmd.ActorID,
+		ExpectedVersion: cmd.ExpectedVersion,
+		SelectedBotKey:  cmd.Bot.Key,
+		RequestJSON:     mustJSON(cmd),
+	})
+	if err != nil {
+		return IncidentCase{}, err
+	}
+
+	if !result.Replay && result.CancelledAttemptID != "" && o.runner != nil {
+		// The store already made the old attempt terminal, so a stale callback
+		// cannot win. External cancellation is best-effort and must not turn a
+		// durable reset plus successful replacement start into a caller-visible
+		// failure that invites replay.
+		_ = o.cancelPhase(result.CancelledAttemptID)
+	}
+	replacement, startErr := o.StartCase(ctx, StartCaseCommand{
+		CaseID:          result.Replacement.ID,
+		ExpectedVersion: result.Replacement.Version,
+		IdempotencyKey:  cmd.IdempotencyKey + ":start",
+		ActorID:         cmd.ActorID,
+		Bug:             cmd.Bug,
+		Bot:             cmd.Bot,
+		InputJSON:       cmd.InputJSON,
+	})
+	if startErr != nil {
+		return replacement, startErr
+	}
+	return replacement, nil
 }
 
 func (o *CaseOrchestrator) CreateAndStartCase(ctx context.Context, cmd CreateAndStartCaseCommand) (IncidentCase, error) {

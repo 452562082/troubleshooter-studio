@@ -329,6 +329,9 @@ func foldWorkflowReminderHistory(incident IncidentCase, events []TransitionEvent
 }
 
 func (s *WorkflowReminderService) workflowReminderEligibleCase(ctx context.Context, incident IncidentCase) bool {
+	if IsTerminalCaseStatus(incident.Status) {
+		return false
+	}
 	if incident.Status != CaseWaitingDeployment || incident.ClosedAt != nil {
 		return false
 	}

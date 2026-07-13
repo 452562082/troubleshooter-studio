@@ -41,6 +41,14 @@ func (o *CaseOrchestrator) RecoverInterrupted(ctx context.Context) error {
 		if o.wasRecoveryStarted(attempt.ID) {
 			continue
 		}
+		incident, loadErr := o.store.GetCase(ctx, attempt.CaseID)
+		if loadErr != nil {
+			recoveredErr = errors.Join(recoveredErr, fmt.Errorf("load attempt %s Case: %w", attempt.ID, loadErr))
+			continue
+		}
+		if IsTerminalCaseStatus(incident.Status) {
+			continue
+		}
 		if err := o.recoverAttempt(ctx, attempt); err != nil {
 			recoveredErr = errors.Join(recoveredErr, fmt.Errorf("recover attempt %s: %w", attempt.ID, err))
 		}
@@ -51,6 +59,9 @@ func (o *CaseOrchestrator) RecoverInterrupted(ctx context.Context) error {
 		return errors.Join(recoveredErr, err)
 	}
 	for _, incident := range cases {
+		if IsTerminalCaseStatus(incident.Status) {
+			continue
+		}
 		if incident.Status == CaseDeploymentUnverified {
 			if recoveryErr := o.recoverDeploymentVerification(ctx, incident); recoveryErr != nil {
 				recoveredErr = errors.Join(recoveredErr, recoveryErr)
@@ -78,6 +89,9 @@ func (o *CaseOrchestrator) RecoverInterrupted(ctx context.Context) error {
 		}
 	}
 	for _, incident := range cases {
+		if IsTerminalCaseStatus(incident.Status) {
+			continue
+		}
 		if incident.CurrentAttemptID == "" {
 			continue
 		}
@@ -109,6 +123,9 @@ func (o *CaseOrchestrator) preflightRecoveryContexts(ctx context.Context, attemp
 		incident, err := o.store.GetCase(ctx, attempt.CaseID)
 		if err != nil {
 			return nil, err
+		}
+		if IsTerminalCaseStatus(incident.Status) {
+			continue
 		}
 		needsContext, err := o.recoveryAttemptNeedsPhaseContext(ctx, incident, attempt)
 		if err != nil {

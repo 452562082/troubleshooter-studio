@@ -202,6 +202,34 @@ func TestWorkflowRemindersSkipsTerminalProductionAndSnoozedCases(t *testing.T) {
 	}
 }
 
+func TestReminderNeverEmitsForResetArchive(t *testing.T) {
+	store := openWorkflowTestStore(t)
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	old := reminderCase(t, store, "reset-reminder", "test", now.Add(-30*time.Hour), CaseWaitingDeployment)
+	reset, err := store.ResetCaseWithReplacement(context.Background(), CaseReset{CaseID: old.ID, NewCaseID: "reset-reminder-next", ExpectedVersion: old.Version, IdempotencyKey: "reset-reminder-key", ActorID: "alice", SelectedBotKey: "validator", RequestJSON: []byte(`{"reason":"retry"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reset.Archived.Status != CaseResetArchived {
+		t.Fatalf("archived=%+v", reset.Archived)
+	}
+	deliveries := 0
+	service := NewWorkflowReminderService(store, func() time.Time { return now }, 24*time.Hour, func(context.Context, WorkflowReminder) error {
+		deliveries++
+		return nil
+	}, testReminderProductionResolver)
+	if err := service.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := service.Pending(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deliveries != 0 || len(pending) != 0 {
+		t.Fatalf("deliveries=%d pending=%+v", deliveries, pending)
+	}
+}
+
 func TestWorkflowRemindersSnoozeHidesAlreadyPendingDelivery(t *testing.T) {
 	store := openWorkflowTestStore(t)
 	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)

@@ -89,6 +89,43 @@ func TestRecoverInterruptedReadOnlyPhaseRetriesAtMostOnceAndIsDeterministic(t *t
 	}
 }
 
+func TestRecoveryIgnoresResetArchiveAndRecoversReplacement(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	old, oldAttempt := prepareResetCase(t, store, "recover-reset-archive")
+	reset, err := store.ResetCaseWithReplacement(ctx, resetCommand(old, "recover-reset-replacement", "recover-reset"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Model a stale runner row observed after reset commit. Terminal Case state is
+	// authoritative, so recovery must not mutate or schedule this old attempt.
+	if _, err := store.db.Exec(`UPDATE phase_attempts SET status=?,finished_at=NULL WHERE id=?`, AttemptStatusRunning, oldAttempt.ID); err != nil {
+		t.Fatal(err)
+	}
+	replacementAttempt := PhaseAttempt{ID: "recover-reset-replacement-attempt", CaseID: reset.Replacement.ID, CycleNumber: reset.Replacement.CycleNumber, Phase: PhaseValidation, Mode: AttemptReproduce, Status: AttemptStatusQueued, AgentTarget: "codex", BotKey: "validator", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}
+	if err := store.CreateAttempt(ctx, replacementAttempt); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingPhaseRunner{}
+	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	if err := orchestrator.RecoverInterrupted(ctx); err != nil {
+		t.Fatal(err)
+	}
+	archivedAttempt, err := store.GetAttempt(ctx, oldAttempt.ID)
+	if err != nil || archivedAttempt.Status != AttemptStatusRunning {
+		t.Fatalf("archived attempt=%+v err=%v", archivedAttempt, err)
+	}
+	replacement, err := store.GetCase(ctx, reset.Replacement.ID)
+	if err != nil || replacement.Status != CaseValidating || replacement.CurrentAttemptID != replacementAttempt.ID {
+		t.Fatalf("replacement=%+v err=%v", replacement, err)
+	}
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if len(runner.starts) != 1 || runner.starts[0].ID != replacementAttempt.ID {
+		t.Fatalf("starts=%+v", runner.starts)
+	}
+}
+
 func TestRecoverPreparedAttemptAfterCrashBeforeTransition(t *testing.T) {
 	ctx := context.Background()
 	store := newOrchestratorStore(t)

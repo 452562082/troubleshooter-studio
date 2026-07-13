@@ -593,7 +593,19 @@ function eventValue(event: Event): string {
 .auth-row { grid-template-columns: minmax(160px, .8fr) minmax(280px, 1.4fr) auto; align-items: end; }
 .field-label { min-width: 0; display: grid; gap: 4px; color: var(--c-muted); font-size: var(--fs-sm); }
 .platform-config .form-control { min-height: var(--config-control-height); }
-.platform-config select.form-control { padding-right: 36px; }
+.platform-config select.form-control {
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 0 40px 0 12px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none'%3E%3Cpath d='m7 9 5 5 5-5' stroke='%2364758b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 16px 16px;
+  cursor: pointer;
+  transition: border-color 180ms ease, box-shadow 180ms ease, background-color 180ms ease;
+}
+.platform-config select.form-control:hover:not(:disabled) { border-color: #93c5fd; }
+.platform-config select.form-control:focus-visible { border-color: var(--c-accent-hover); }
 .login-field, .sync-settings { min-width: 0; display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
 .login-status-badge { padding: 3px 8px; border: 1px solid #fed7aa; border-radius: 999px; background: #fff7ed; color: #9a3412; font-size: var(--fs-xs); font-weight: 600; }
 .login-status-badge.ok { border-color: #bbf7d0; background: #f0fdf4; color: #166534; }
@@ -671,7 +683,7 @@ function eventValue(event: Event): string {
 .attachment-preview-image { display: block; max-width: 100%; max-height: calc(88vh - 56px); margin: auto; object-fit: contain; background: #0f172a; }
 .attachment-preview-fallback { min-height: 220px; padding: var(--sp-4); display: grid; place-items: center; color: var(--c-muted); }
 @media (prefers-reduced-motion: reduce) {
-  .config-disclosure, .compact-button, .toggle-track, .toggle-track > span, .icon-button, .attachment-preview-close { transition: none; }
+  .config-disclosure, .compact-button, .toggle-track, .toggle-track > span, .icon-button, .attachment-preview-close, .platform-config select.form-control { transition: none; }
   .refresh-button svg.spinning { animation: none; }
 }
 @media (max-width: 1200px) {

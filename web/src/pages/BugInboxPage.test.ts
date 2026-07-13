@@ -147,6 +147,8 @@ describe('BugInboxPage', () => {
 
   it('declares consistent desktop control sizing and responsive select widths', () => {
     const source = readFileSync('src/pages/BugInboxPage.vue', 'utf8')
+    const selectRule = source.match(/\.platform-config select\.form-control \{([^}]*)\}/)?.[1] || ''
+    const reducedMotionCSS = source.split('@media (prefers-reduced-motion: reduce) {')[1]?.split('\n}')[0] || ''
     const mediumCSS = source.split('@media (max-width: 1200px) {')[1]?.split('\n}')[0] || ''
     const narrowCSS = source.split('@media (max-width: 900px) {')[1]?.split('\n}')[0] || ''
     const mediumBreakpointIndex = source.indexOf('@media (max-width: 1200px) {')
@@ -160,7 +162,20 @@ describe('BugInboxPage', () => {
     expect(source).toContain('.platform-config .toggle-control { min-height: var(--config-control-height); }')
     expect(source).toContain('.platform-config .interval-control { min-height: var(--config-control-height); }')
     expect(source).toContain('.platform-config .interval-control input { min-height: var(--config-control-height); }')
-    expect(source).toContain('.platform-config select.form-control { padding-right: 36px; }')
+    expect(selectRule).toContain('appearance: none;')
+    expect(selectRule).toContain('-webkit-appearance: none;')
+    expect(selectRule).toContain('padding: 0 40px 0 12px;')
+    expect(selectRule).toContain('background-image: url("data:image/svg+xml,')
+    expect(selectRule).toContain('background-repeat: no-repeat;')
+    expect(selectRule).toContain('background-position: right 12px center;')
+    expect(selectRule).toContain('background-size: 16px 16px;')
+    expect(selectRule).toContain('cursor: pointer;')
+    expect(selectRule).toContain('transition: border-color 180ms ease, box-shadow 180ms ease, background-color 180ms ease;')
+    expect(source).toContain('.platform-config select.form-control:hover:not(:disabled) { border-color: #93c5fd; }')
+    expect(source).toContain('.platform-config select.form-control:focus-visible { border-color: var(--c-accent-hover); }')
+    expect(source).toContain('.platform-config input:disabled, .platform-config select:disabled {')
+    expect(reducedMotionCSS).toContain('.platform-config select.form-control')
+    expect(reducedMotionCSS).toContain('transition: none;')
     expect(source).toContain('.basic-row { grid-template-columns: minmax(220px, 1fr) minmax(200px, .6fr) minmax(320px, 1.35fr); }')
     expect(source).toContain('.bot-config-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 280px) 40px;')
     expect(source).toContain('.icon-button { width: 40px; height: 40px;')

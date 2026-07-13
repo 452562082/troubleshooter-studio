@@ -10,6 +10,7 @@ interface EnvItem {
   api_domain: string
   web_domain: string
   is_prod: boolean
+  deployment_verification?: import('../lib/yamlGenerator').DeploymentVerificationState
 }
 
 defineProps<{

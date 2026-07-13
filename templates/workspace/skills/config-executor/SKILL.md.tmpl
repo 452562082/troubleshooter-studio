@@ -3,7 +3,7 @@ name: config-executor
 description: 通用配置中心执行技能（后端：{{.Infrastructure.PrimaryConfigCenter.Type}}）。负责按 namespace/group/dataId 读取配置、查看历史、提取配置块、对比差异与风险摘要；不负责项目/环境路由，路由由 `routing` 技能动态提供。
 ---
 
-# Config Executor（{{.Infrastructure.PrimaryConfigCenter.Type}}）
+# 配置中心执行器（{{.Infrastructure.PrimaryConfigCenter.Type}}）
 
 本技能只负责配置层执行：
 - 读取配置
@@ -15,7 +15,7 @@ description: 通用配置中心执行技能（后端：{{.Infrastructure.Primary
 
 ## 前置(每次调用前必读)
 
-1. **先调 `routing` 拿坐标** — `namespaceId / group / dataId`(nacos) / `appId / cluster / namespaces[]`(apollo) / `kv_prefix / default_context`(consul)都必须从 routing 输出取,**不许自己拼或猜**。routing 会在每条服务上标 `runtime`:`nacos-mcp` 走 nacos MCP 工具,`apollo-http` / `consul-http` / `kuboard-http` 走对应 HTTP 脚本。
+1. **先调 `routing` 拿坐标** — `namespaceId / group / dataId`(nacos) / `appId / cluster / namespaces[]`(apollo) / `kv_prefix / default_context`(consul) / `cluster / namespace / configmap`(kuboard)都必须从 routing 输出取,**不许自己拼或猜**。routing 会在每条服务上标 `runtime`:`nacos-mcp` 走 nacos MCP 工具,`apollo-http` / `consul-http` 走对应 HTTP 脚本,`kuboard-http` 表示使用 routing 已生成的 Kuboard ConfigMap 坐标。
 2. **凭据**:
    - **nacos 主路径走 MCP,凭据已在 MCP env 里,不需要 source 任何东西**,直接调 `{{.System.ID}}-nacos-<env>` 的工具。
    - nacos **HTTP fallback** 才需 `source scripts/.env`(拿 `CC_ADDR_<ENV>` 等)。
@@ -157,35 +157,40 @@ python3 scripts/resolve_runtime_static.py --agent-id {{.AgentID}} --env <env>
 如需查看应用实际加载的配置，可直接读仓库代码中的 `.env` / `config/*.yaml` 文件。
 {{- end}}
 
-{{- if eq .Infrastructure.PrimaryConfigCenter.Type "kubernetes"}}
+{{- if eq .Infrastructure.PrimaryConfigCenter.Type "kuboard"}}
 
-### 当前后端：Kubernetes（ConfigMap / Secret）
+### 当前后端：Kuboard（HTTP 脚本读取 ConfigMap）
 
-本系统配置通过 K8s ConfigMap 和 Secret 管理。
-install.sh 已把 context/namespace/configmap/secret 按 env 写入 `~/.openclaw/{{.AgentID}}-creds.json`。
+本系统通过 Kuboard 管理 K8s ConfigMap。`routing` 会返回 `runtime: kuboard-http`
+以及向导挑出的 `cluster / namespace / configmap / configmap_key` 坐标。
 
-读取 ConfigMap 并解析数据层连接信息：
+读取 ConfigMap：
 ```bash
-python3 scripts/resolve_runtime_k8s.py --agent-id {{.AgentID}} --env <env> --resource configmap
+python3 scripts/kuboard_config.py get \
+  --agent-id {{.AgentID}} --env <env> \
+  --cluster <cluster> --namespace <namespace> --configmap <configmap>
 ```
 
-读取 Secret：
-```bash
-python3 scripts/resolve_runtime_k8s.py --agent-id {{.AgentID}} --env <env> --resource secret
-```
+支持 Kuboard v4 access key / 用户名密码；Kuboard v3 access key 形态为 `<密钥ID>.<密钥>`,
+同时需要用户名用于 `KuboardUsername` Cookie。
 
-也可直接用 kubectl 查看完整配置（需要对应 context 权限）：
-```bash
-kubectl get configmap <name> -n <namespace> --context <context> -o yaml
-```
+脚本输出：
+- `format: k8s-env-flat`
+- `data`: ConfigMap 的 `.data` 平铺 KV
+- `content`: 同一份 data 的 JSON 字符串，方便交给解析脚本/本地处理
+- `runtime`: 从常见 env-flat 键解析出的 Redis / MySQL / Mongo / Elasticsearch 摘要；
+  `resolved=false` 时不得猜测，继续查配置全文或向用户索取缺失字段
+
+**约束**：
+1. 不要尝试找 `mcp_server` 字段；kuboard 不注册 MCP。
+2. 不要调用旧 kubectl 脚本；`kubernetes` 配置中心类型已下线。
+3. cluster / namespace / configmap 必须来自 routing 返回坐标，不要凭服务名猜。
 
 **排障流程**：
-1. `routing` 确认 env
-2. `resolve_runtime_k8s.py --env <env>` 拿连接串
-3. 按需调 runtime-query skills（redis/mongo/es）
-4. 需要看配置全文：`kubectl get configmap/secret` 直接查
-
-需要：kubectl 已安装且有对应 context 的 RBAC 访问权限。
+1. `routing` 确认 env + service 对应的 Kuboard 坐标
+2. 调 `kuboard_config.py get` 读取当前 ConfigMap `.data`
+3. 优先使用脚本输出的 `runtime` 字段；缺失时再从 `data/content` 补充解析；
+   解析不到时再参考生成时扫描出的 `data-schema-map` / `service-to-datastore-source`
 {{- end}}
 
 {{- if eq .Infrastructure.PrimaryConfigCenter.Type "one2all"}}
@@ -234,11 +239,11 @@ MCP server 名 = `{{.System.ID}}-one2all`（单一 streamable-http 实例,所有
 {{- if eq .Infrastructure.PrimaryConfigCenter.Type "consul"}}
 - `scripts/consul_config.py`（KV HTTP 客户端）
 {{- end}}
+{{- if eq .Infrastructure.PrimaryConfigCenter.Type "kuboard"}}
+- `scripts/kuboard_config.py`（Kuboard v3/v4 HTTP 客户端，读取 ConfigMap `.data`）
+{{- end}}
 {{- if eq .Infrastructure.PrimaryConfigCenter.Type "env-vars"}}
 - `scripts/resolve_runtime_static.py`（从 creds.json 读静态连接串）
-{{- end}}
-{{- if eq .Infrastructure.PrimaryConfigCenter.Type "kubernetes"}}
-- `scripts/resolve_runtime_k8s.py`（kubectl get configmap/secret → 解析连接串）
 {{- end}}
 {{- if eq .Infrastructure.PrimaryConfigCenter.Type "one2all"}}
 - one2all-remote MCP server `{{.System.ID}}-one2all`（streamable-http,40 工具）

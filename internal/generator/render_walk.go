@@ -4,6 +4,7 @@
 // .tmpl 走 text/template 渲染并去掉后缀,其它文件原样 copy。
 // shouldSkipDir 在遍历过程里挑掉:
 //   - skills_whitelist 没列的 skill 目录
+//   - 需要显式配置但未启用的 skill(当前为 code-intelligence-query)
 //   - infra 里 disabled 的 data store 对应的 *-runtime-query
 //   - 没声明 config_center 时跳 config-executor
 package generator
@@ -32,15 +33,19 @@ func (g *Generator) walkAndRender(srcRoot, dstRoot string) error {
 		}
 
 		if d.IsDir() {
+			if shouldSkipGeneratedArtifact(d.Name()) {
+				return fs.SkipDir
+			}
 			if g.shouldSkipDir(rel) {
 				return fs.SkipDir
 			}
 			return os.MkdirAll(filepath.Join(dstRoot, rel), 0o755)
 		}
 
-		// Skill scripts ship with pytest files (e.g. test_nacos_mcp.py) for repo-side CI.
-		// They're dev artifacts — don't render them into the bot workspace product.
-		if name := d.Name(); strings.HasPrefix(name, "test_") && strings.HasSuffix(name, ".py") {
+		if shouldSkipGeneratedArtifact(d.Name()) {
+			return nil
+		}
+		if g.shouldSkipFile(rel) {
 			return nil
 		}
 
@@ -51,6 +56,53 @@ func (g *Generator) walkAndRender(srcRoot, dstRoot string) error {
 		}
 		return copyFile(path, outPath)
 	})
+}
+
+func shouldSkipGeneratedArtifact(name string) bool {
+	if name == "__pycache__" {
+		return true
+	}
+	if strings.HasPrefix(name, "test_") && strings.HasSuffix(name, ".py") {
+		return true
+	}
+	if strings.HasSuffix(name, ".pyc") || strings.HasSuffix(name, ".pyo") {
+		return true
+	}
+	return false
+}
+
+func (g *Generator) shouldSkipFile(rel string) bool {
+	rel = filepath.ToSlash(rel)
+	if !strings.HasPrefix(rel, "skills/config-executor/") {
+		return false
+	}
+	configType := g.Ctx.Infrastructure.PrimaryConfigCenter().Type
+	if rel == "skills/config-executor/references/nacos-api-notes.md" {
+		return configType != "nacos"
+	}
+	if !strings.HasPrefix(rel, "skills/config-executor/scripts/") {
+		return false
+	}
+	name := filepath.Base(rel)
+	switch configType {
+	case "nacos":
+		return !map[string]bool{
+			"nacos_config.py":               true,
+			"nacos_diff.py":                 true,
+			"nacos_mcp.py":                  true,
+			"resolve_runtime_from_nacos.py": true,
+		}[name]
+	case "apollo":
+		return name != "apollo_config.py"
+	case "consul":
+		return name != "consul_config.py"
+	case "kuboard":
+		return name != "kuboard_config.py"
+	case "env-vars":
+		return name != "resolve_runtime_static.py"
+	default:
+		return true
+	}
 }
 
 func (g *Generator) shouldSkipDir(rel string) bool {
@@ -64,18 +116,8 @@ func (g *Generator) shouldSkipDir(rel string) bool {
 	}
 	skillName := parts[1]
 
-	whitelist := g.Ctx.Generation.SkillsWhitelist
-	if len(whitelist) > 0 {
-		found := false
-		for _, w := range whitelist {
-			if w == skillName {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return true
-		}
+	if !g.alwaysIncludeSkill(skillName) && !skillEnabled(g.Ctx, skillName) {
+		return true
 	}
 
 	for _, ds := range g.Ctx.Infrastructure.DataStores {
@@ -90,6 +132,55 @@ func (g *Generator) shouldSkipDir(rel string) bool {
 		}
 	}
 	return false
+}
+
+// serviceTopologySkillEnabled mirrors analyzerpipe's activation boundary: a
+// cross-repository topology needs routing plus at least two runtime service
+// nodes backed by existing local checkout directories.
+func serviceTopologySkillEnabled(ctx *Context) bool {
+	if ctx == nil || !skillEnabledForWhitelist(ctx, "routing") {
+		return false
+	}
+	runnable := 0
+	for _, repo := range ctx.Repos {
+		if !repo.IsServiceNode() {
+			continue
+		}
+		path := strings.TrimSpace(ctx.RepoLocalPaths[repo.Name])
+		if path == "" {
+			continue
+		}
+		info, err := os.Stat(path)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		runnable++
+	}
+	return runnable >= 2
+}
+
+func skillEnabledForWhitelist(ctx *Context, name string) bool {
+	if ctx == nil || len(ctx.Generation.SkillsWhitelist) == 0 {
+		return ctx != nil
+	}
+	for _, allowed := range ctx.Generation.SkillsWhitelist {
+		if allowed == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (g *Generator) alwaysIncludeSkill(skillName string) bool {
+	switch skillName {
+	case "bug-fixer", "bug-verifier", "api-verifier", "attachment-evidence-verifier", "frontend-repro-investigator":
+		return true
+	case "grafana-observability-query":
+		obs := g.Ctx.Infrastructure.Observability
+		return obs.Grafana.Enabled || obs.Loki.Enabled || obs.Prometheus.Enabled
+	default:
+		return false
+	}
 }
 
 func (g *Generator) renderFile(src, dst string) error {

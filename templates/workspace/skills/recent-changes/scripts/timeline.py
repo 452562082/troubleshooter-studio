@@ -247,7 +247,7 @@ def collect_config_history(env: str, service: str, ws_root: Path,
     apollo:apollo_config.py history(走 appId/cluster/namespace)
     consul:consul_config.py history(走 kv_prefix + key)
     one2all / kuboard:无原生 config history API → 返空 + **显式 note**(别静默,提醒手动核对)。
-    其它后端(env-vars / kubernetes ConfigMap)无原生 history,返空 + note。
+    其它后端(env-vars / kuboard / one2all ConfigMap)无原生 history,返空 + note。
 
     后端判定优先级(2026-06 修):先按 **本 service 的 runtime 字段**(多源场景 per-service
     config_source 覆盖主源),拿不到再回落顶层 `config_center` 主源。旧版只读顶层主源 →

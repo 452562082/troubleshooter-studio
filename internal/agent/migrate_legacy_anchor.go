@@ -51,15 +51,15 @@ func MigrateLegacyAnchors() int {
 			if _, err := os.Stat(stagingMeta); err != nil {
 				continue // staging 没 tshoot.json 跳过
 			}
-			// 推断 agent name(从 staging agents/*.md 的文件名),用来定位真实部署位置。
-			agentName, err := readStagingAgentName(stagingDir)
+			// 推断主 agent name,用来定位真实部署位置。
+			agentName, err := readStagingPrimaryAgentName(stagingDir, target)
 			if err != nil || agentName == "" {
 				continue
 			}
 			// 真实部署位置必须有 agent.md(说明 native install 真跑过了),否则不迁移
-			realAgentMD := filepath.Join(realRoot, "agents", agentName+".md")
-			if _, err := os.Stat(realAgentMD); err != nil {
-				continue // 真实位置没 agent.md → 这个 staging 是装失败 / 没装的草稿,别误标"已装"
+			realAgentFile := filepath.Join(realRoot, "agents", agentName+userAgentExtForLegacyTarget(target))
+			if _, err := os.Stat(realAgentFile); err != nil {
+				continue // 真实位置没 agent 文件 → 这个 staging 是装失败 / 没装的草稿,别误标"已装"
 			}
 			// 真实 skills/<name>/tshoot.json 已经存在 → 已迁移过 / 是新装的,不重复操作
 			realMeta := filepath.Join(realRoot, "skills", agentName, discover.MetaFilename)
@@ -79,22 +79,43 @@ func MigrateLegacyAnchors() int {
 	return migrated
 }
 
-// readStagingAgentName 跟 install_native.go::findAgentMD 同思路,但只取名字 trim 后缀。
-// 复制过来避免暴露 findAgentMD,本函数仅供迁移用。
-func readStagingAgentName(stagingDir string) (string, error) {
+// readStagingPrimaryAgentName 跟 install_native.go 的主锚点选择保持一致:
+// 优先 root/agents-meta 里的 troubleshooter,再从 agents 文件名兜底。
+func readStagingPrimaryAgentName(stagingDir, target string) (string, error) {
+	if name := primaryAgentNameFromStagingMeta(stagingDir); name != "" {
+		return name, nil
+	}
 	entries, err := os.ReadDir(filepath.Join(stagingDir, "agents"))
 	if err != nil {
 		return "", err
 	}
+	ext := userAgentExtForLegacyTarget(target)
+	var fallback string
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
 		n := e.Name()
-		if !strings.HasSuffix(n, ".md") || strings.Contains(n, ".bak.") {
+		if !strings.HasSuffix(n, ext) || strings.Contains(n, ".bak.") {
 			continue
 		}
-		return strings.TrimSuffix(n, ".md"), nil
+		name := strings.TrimSuffix(n, ext)
+		if strings.Contains(strings.ToLower(name), "troubleshooter") {
+			return name, nil
+		}
+		if fallback == "" {
+			fallback = name
+		}
+	}
+	if fallback != "" {
+		return fallback, nil
 	}
 	return "", os.ErrNotExist
+}
+
+func userAgentExtForLegacyTarget(target string) string {
+	if target == "codex" {
+		return ".toml"
+	}
+	return ".md"
 }

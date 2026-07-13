@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	tshoot "github.com/xiaolong/troubleshooter-studio"
 	"github.com/xiaolong/troubleshooter-studio/internal/agent"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/doctor"
@@ -118,8 +119,11 @@ func (s *Server) HandleSchema(w http.ResponseWriter, r *http.Request) {
 	schemaPath := filepath.Join(filepath.Dir(s.TemplateRoot), "schema", "troubleshooter.schema.yaml")
 	data, err := os.ReadFile(schemaPath)
 	if err != nil {
-		jsonError(w, http.StatusNotFound, "schema file not found: "+err.Error())
-		return
+		data, err = tshoot.SchemaFS.ReadFile("schema/troubleshooter.schema.yaml")
+		if err != nil {
+			jsonError(w, http.StatusNotFound, "schema file not found: "+err.Error())
+			return
+		}
 	}
 	w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
 	w.Write(data)

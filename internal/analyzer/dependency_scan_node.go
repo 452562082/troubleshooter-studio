@@ -2,6 +2,7 @@
 package analyzer
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -21,8 +22,8 @@ var (
 	reJsClickHouse = regexp.MustCompile(`(?:@clickhouse/client|clickhouse)`)
 )
 
-func scanNodeDeps(repoPath string, include []string) ([]DownstreamCall, []DataStoreUsage) {
-	files, _ := walkFiles(repoPath, include, func(p string) bool {
+func scanNodeDeps(ctx context.Context, repoPath string, include []string) ([]DownstreamCall, []DataStoreUsage) {
+	files, _ := walkFilesContext(ctx, repoPath, include, func(p string) bool {
 		return strings.HasSuffix(p, ".js") || strings.HasSuffix(p, ".ts") ||
 			strings.HasSuffix(p, ".jsx") || strings.HasSuffix(p, ".tsx") ||
 			strings.HasSuffix(p, ".mjs")
@@ -30,6 +31,9 @@ func scanNodeDeps(repoPath string, include []string) ([]DownstreamCall, []DataSt
 	var calls []DownstreamCall
 	var usages []DataStoreUsage
 	for _, fp := range files {
+		if ctx != nil && ctx.Err() != nil {
+			break
+		}
 		data, err := os.ReadFile(fp)
 		if err != nil {
 			continue

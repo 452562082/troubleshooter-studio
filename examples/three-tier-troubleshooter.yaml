@@ -14,6 +14,11 @@ environments:
     api_domain: api-dev.mall.example.com
     web_domain: www-dev.mall.example.com
     is_prod: false
+    deployment_verification:
+      provider: http
+      http:
+        url: "https://api-dev.mall.example.com/version"
+        json_pointer: "/git/commit"
   - id: prod
     api_domain: api.mall.example.com
     web_domain: www.mall.example.com
@@ -25,6 +30,7 @@ repos:
     url: git@github.com:mall/mall-web.git
     stack: node
     framework: next.js
+    role: frontend
     env_branches:
       dev: develop
       prod: main
@@ -34,6 +40,7 @@ repos:
     url: git@github.com:mall/mall-bff.git
     stack: php
     framework: laravel
+    role: gateway
     service_names:
       - mall-bff
     env_branches:
@@ -49,6 +56,14 @@ repos:
     env_branches:
       dev: develop
       prod: main
+
+code_intelligence:
+  enabled: false                    # 显式 opt-in；关闭时不下载、不索引、不注册 MCP
+  provider: codegraph               # 首版只支持 codegraph
+
+# 跨仓库拓扑由部署期扫描自动生成；工作台确认/拒绝/补录后只把人工决策写回这里。
+service_topology:
+  overrides: []
 
 infrastructure:
   config_center:
@@ -100,7 +115,10 @@ generation:
   targets: [openclaw]
   skills_whitelist:
     - routing
+    - incident-investigator
     - config-executor
+    - frontend-repro-investigator
+    - service-topology-query
     - redis-runtime-query
     - diagram-generator
 meta:

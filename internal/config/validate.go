@@ -5,8 +5,11 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/xiaolong/troubleshooter-studio/internal/topology"
 )
 
 var idPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
@@ -56,6 +59,13 @@ func Validate(c *SystemConfig) error {
 			return fmt.Errorf("duplicate environment id: %s", env.ID)
 		}
 		envIDs[env.ID] = true
+	}
+
+	if c.CodeIntelligence.Enabled && c.CodeIntelligence.Provider == "" {
+		return fmt.Errorf("code_intelligence.provider required when enabled")
+	}
+	if p := c.CodeIntelligence.Provider; p != "" && p != CodeIntelligenceProviderCodeGraph {
+		return fmt.Errorf("code_intelligence.provider=%q invalid (valid: codegraph)", p)
 	}
 
 	// ── 配置中心:多源 schema ──
@@ -140,6 +150,16 @@ func Validate(c *SystemConfig) error {
 		}
 	}
 
+	for i := range c.Environments {
+		if err := validateDeploymentVerification(c.Environments[i], repoNames); err != nil {
+			return fmt.Errorf("environments[%s].deployment_verification: %w", c.Environments[i].ID, err)
+		}
+	}
+
+	if err := validateServiceTopology(c); err != nil {
+		return err
+	}
+
 	validTargets := map[string]bool{"openclaw": true, "claude-code": true, "cursor": true, "codex": true}
 	targets := c.Generation.ResolvedTargets()
 	for _, t := range targets {
@@ -150,6 +170,128 @@ func Validate(c *SystemConfig) error {
 
 	if c.Meta.SchemaVersion == "" {
 		return fmt.Errorf("meta.schema_version required")
+	}
+	return nil
+}
+
+func validateDeploymentVerification(env Environment, repoNames map[string]bool) error {
+	cfg := env.DeploymentVerification
+	switch cfg.EffectiveProvider() {
+	case DeploymentVerificationProviderManual:
+		if !cfg.HTTP.IsZero() || !cfg.K8s.IsZero() {
+			return fmt.Errorf("manual provider must not include http or k8s blocks")
+		}
+	case DeploymentVerificationProviderHTTP:
+		if !cfg.K8s.IsZero() {
+			return fmt.Errorf("http provider must not include k8s block")
+		}
+		if strings.TrimSpace(cfg.HTTP.URL) == "" {
+			return fmt.Errorf("http.url required")
+		}
+		if strings.TrimSpace(cfg.HTTP.JSONPointer) == "" {
+			return fmt.Errorf("http.json_pointer required")
+		}
+		if !strings.HasPrefix(strings.TrimSpace(cfg.HTTP.JSONPointer), "/") {
+			return fmt.Errorf("http.json_pointer must be an RFC 6901 pointer starting with '/'")
+		}
+		parsedURL, err := url.Parse(strings.TrimSpace(cfg.HTTP.URL))
+		if err != nil || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+			return fmt.Errorf("http.url must be an absolute HTTP URL")
+		}
+		if parsedURL.User != nil {
+			return fmt.Errorf("http.url must not contain credentials")
+		}
+		if parsedURL.RawQuery != "" {
+			return fmt.Errorf("http.url must not contain a query")
+		}
+	case DeploymentVerificationProviderK8s:
+		if !cfg.HTTP.IsZero() {
+			return fmt.Errorf("k8s provider must not include http block")
+		}
+		if strings.TrimSpace(cfg.K8s.Cluster) == "" {
+			return fmt.Errorf("k8s.cluster required")
+		}
+		if strings.TrimSpace(cfg.K8s.Namespace) == "" {
+			return fmt.Errorf("k8s.namespace required")
+		}
+		if len(cfg.K8s.DeploymentsByRepo) == 0 {
+			return fmt.Errorf("k8s.deployments_by_repo required")
+		}
+		if strings.TrimSpace(cfg.K8s.CommitAnnotation) == "" && strings.TrimSpace(cfg.K8s.ImageLabel) == "" {
+			return fmt.Errorf("k8s.commit_annotation or image_label required")
+		}
+		if strings.TrimSpace(cfg.K8s.CommitAnnotation) != "" && strings.TrimSpace(cfg.K8s.ImageLabel) != "" {
+			return fmt.Errorf("k8s.commit_annotation and image_label are mutually exclusive")
+		}
+		for repo, deployment := range cfg.K8s.DeploymentsByRepo {
+			if !repoNames[repo] {
+				return fmt.Errorf("k8s.deployments_by_repo references unknown repo %q", repo)
+			}
+			if strings.TrimSpace(deployment) == "" {
+				return fmt.Errorf("k8s.deployments_by_repo[%s] required", repo)
+			}
+		}
+	default:
+		return fmt.Errorf("provider=%q invalid (valid: manual/http/k8s)", cfg.Provider)
+	}
+	return nil
+}
+
+func validateServiceTopology(c *SystemConfig) error {
+	serviceNames := make(map[string]bool)
+	for _, repo := range c.Repos {
+		if !repo.IsServiceNode() {
+			continue
+		}
+		if len(repo.ServiceNames) == 0 {
+			serviceNames[repo.Name] = true
+			continue
+		}
+		for _, serviceName := range repo.ServiceNames {
+			if serviceName != "" {
+				serviceNames[serviceName] = true
+			}
+		}
+	}
+
+	semanticKeys := make(map[string]bool)
+	for i, override := range c.ServiceTopology.Overrides {
+		field := fmt.Sprintf("service_topology.overrides[%d]", i)
+		if override.Action != "confirm" && override.Action != "reject" && override.Action != "add" {
+			return fmt.Errorf("%s.action=%q invalid (valid: confirm/reject/add)", field, override.Action)
+		}
+		if !serviceNames[override.FromService] {
+			return fmt.Errorf("%s.from_service=%q is not an effective service name", field, override.FromService)
+		}
+		if !serviceNames[override.ToService] {
+			return fmt.Errorf("%s.to_service=%q is not an effective service name", field, override.ToService)
+		}
+
+		override.Protocol = strings.ToLower(override.Protocol)
+		override.Method = strings.ToUpper(override.Method)
+		override.Path = topology.NormalizePath(override.Path)
+		switch override.Protocol {
+		case "http":
+			if override.Method == "" || override.Path == "" || override.RPCMethod != "" {
+				return fmt.Errorf("%s: http override requires method and path only", field)
+			}
+			if !strings.HasPrefix(override.Path, "/") {
+				return fmt.Errorf("%s.path=%q must start with '/'", field, override.Path)
+			}
+		case "grpc":
+			if override.RPCMethod == "" || override.Method != "" || override.Path != "" {
+				return fmt.Errorf("%s: grpc override requires rpc_method only", field)
+			}
+		default:
+			return fmt.Errorf("%s.protocol=%q invalid (valid: http/grpc)", field, override.Protocol)
+		}
+
+		key := override.SemanticKey()
+		if semanticKeys[key] {
+			return fmt.Errorf("%s has duplicate semantic key", field)
+		}
+		semanticKeys[key] = true
+		c.ServiceTopology.Overrides[i] = override
 	}
 	return nil
 }

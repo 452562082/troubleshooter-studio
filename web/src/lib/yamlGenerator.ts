@@ -32,6 +32,27 @@ export interface YAMLGenEnvironment {
   api_domain: string
   web_domain: string
   is_prod: boolean
+  deployment_verification?: DeploymentVerificationState
+}
+
+export interface DeploymentVerificationState {
+  provider: 'manual' | 'http' | 'k8s'
+  http: { url: string; json_pointer: string; allow_private: boolean }
+  k8s: {
+    cluster: string
+    namespace: string
+    deployments_by_repo: Record<string, string>
+    commit_annotation: string
+    image_label: string
+  }
+}
+
+export function emptyDeploymentVerification(): DeploymentVerificationState {
+  return {
+    provider: 'manual',
+    http: { url: '', json_pointer: '', allow_private: false },
+    k8s: { cluster: '', namespace: '', deployments_by_repo: {}, commit_annotation: '', image_label: '' },
+  }
 }
 
 export interface YAMLGenRepo {
@@ -46,6 +67,25 @@ export interface YAMLGenRepo {
   service_names: string
   env_branches: Record<string, string>
   _serviceEntries?: Record<string, string>
+}
+
+export interface CodeIntelligenceState {
+  enabled: boolean
+  provider: 'codegraph'
+}
+
+export interface ServiceTopologyOverrideState {
+  action: 'confirm' | 'reject' | 'add'
+  fromService: string
+  toService: string
+  protocol: 'http' | 'grpc'
+  method?: string
+  path?: string
+  rpcMethod?: string
+}
+
+export interface ServiceTopologyState {
+  overrides: ServiceTopologyOverrideState[]
 }
 
 export interface YAMLGenSourceData {
@@ -83,6 +123,8 @@ export interface YAMLGenContext {
   agentNameDefault: string
   targetModels: Record<string, string>
   enabledTargets: Record<string, boolean>
+  codeIntelligence: CodeIntelligenceState
+  serviceTopology: ServiceTopologyState
   enabledObservability: Record<string, boolean>
   environments: YAMLGenEnvironment[]
   repos: YAMLGenRepo[]
@@ -186,6 +228,27 @@ export function generateYAML(ctx: YAMLGenContext): string {
     if (apiD) lines.push(`    api_domain: ${yamlStr(apiD)}     # 后端接口(带 http/https 前缀更明确;不带视为 https)`)
     if (webD) lines.push(`    web_domain: ${yamlStr(webD)}     # 前端入口(同上)`)
     lines.push(`    is_prod: ${env.is_prod}         # 生产环境标记:true 时机器人默认更保守、查询前二次确认`)
+    const verification = env.deployment_verification
+    if (verification?.provider === 'http') {
+      lines.push('    deployment_verification:')
+      lines.push('      provider: http')
+      lines.push('      http:')
+      lines.push(`        url: ${yamlStr(verification.http.url)}`)
+      lines.push(`        json_pointer: ${yamlStr(verification.http.json_pointer)}`)
+      if (verification.http.allow_private) lines.push('        allow_private: true')
+    } else if (verification?.provider === 'k8s') {
+      lines.push('    deployment_verification:')
+      lines.push('      provider: k8s')
+      lines.push('      k8s:')
+      lines.push(`        cluster: ${yamlStr(verification.k8s.cluster)}`)
+      lines.push(`        namespace: ${yamlStr(verification.k8s.namespace)}`)
+      lines.push('        deployments_by_repo:')
+      for (const [repo, deployment] of Object.entries(verification.k8s.deployments_by_repo).sort(([a], [b]) => a.localeCompare(b))) {
+        if (repo && deployment) lines.push(`          ${yamlStr(repo)}: ${yamlStr(deployment)}`)
+      }
+      if (verification.k8s.commit_annotation) lines.push(`        commit_annotation: ${yamlStr(verification.k8s.commit_annotation)}`)
+      if (verification.k8s.image_label) lines.push(`        image_label: ${yamlStr(verification.k8s.image_label)}`)
+    }
   }
 
   // repos
@@ -237,6 +300,28 @@ export function generateYAML(ctx: YAMLGenContext): string {
       if (src && src !== ctx.activeSourceTypes[0]) {
         lines.push(`    config_source: ${src}    # 引用 infrastructure.config_centers[].id`)
       }
+    }
+  }
+
+  if (ctx.codeIntelligence.enabled) {
+    lines.push('')
+    lines.push('code_intelligence:')
+    lines.push('  enabled: true')
+    lines.push('  provider: codegraph')
+  }
+
+  if (ctx.serviceTopology.overrides.length > 0) {
+    lines.push('')
+    lines.push('service_topology:')
+    lines.push('  overrides:')
+    for (const override of ctx.serviceTopology.overrides) {
+      lines.push(`    - action: ${override.action}`)
+      lines.push(`      from_service: ${yamlStr(override.fromService)}`)
+      lines.push(`      to_service: ${yamlStr(override.toService)}`)
+      lines.push(`      protocol: ${override.protocol}`)
+      if (override.method) lines.push(`      method: ${yamlStr(override.method)}`)
+      if (override.path) lines.push(`      path: ${yamlStr(override.path)}`)
+      if (override.rpcMethod) lines.push(`      rpc_method: ${yamlStr(override.rpcMethod)}`)
     }
   }
 
@@ -362,7 +447,7 @@ export function generateYAML(ctx: YAMLGenContext): string {
     lines.push('    type: none')
   } else if (active.length === 1) {
     const t = active[0]
-    lines.push('  config_center:        # 配置中心:nacos/apollo/consul/kubernetes/env-vars/none')
+    lines.push('  config_center:        # 配置中心:nacos/apollo/consul/kuboard/one2all/env-vars/none')
     lines.push(`    type: ${t}`)
     emitSourceBody(lines, '    ', t, 'default', true)
   } else {

@@ -60,6 +60,10 @@ repos:
     service_names: [notification-service]
     env_branches: {dev: develop, prod: main}
 
+code_intelligence:
+  enabled: false                    # 显式 opt-in；关闭时不下载、不索引、不注册 MCP
+  provider: codegraph               # 首版只支持 codegraph
+
 infrastructure:
   config_center:
     type: nacos

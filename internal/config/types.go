@@ -89,11 +89,12 @@ func (a Agent) ModelForTarget(target string) string {
 }
 
 type Environment struct {
-	ID        string   `yaml:"id"`
-	Aliases   []string `yaml:"aliases"`
-	APIDomain string   `yaml:"api_domain"`
-	WebDomain string   `yaml:"web_domain"`
-	IsProd    bool     `yaml:"is_prod"`
+	ID                     string                       `yaml:"id"`
+	Aliases                []string                     `yaml:"aliases"`
+	APIDomain              string                       `yaml:"api_domain"`
+	WebDomain              string                       `yaml:"web_domain"`
+	IsProd                 bool                         `yaml:"is_prod"`
+	DeploymentVerification DeploymentVerificationConfig `yaml:"deployment_verification,omitempty"`
 }
 
 type Generation struct {
@@ -126,11 +127,13 @@ type Meta struct {
 }
 
 type SystemConfig struct {
-	System         System         `yaml:"system"`
-	Agent          Agent          `yaml:"agent"`
-	Environments   []Environment  `yaml:"environments"`
-	Repos          []Repo         `yaml:"repos"`
-	Infrastructure Infrastructure `yaml:"infrastructure"`
-	Generation     Generation     `yaml:"generation"`
-	Meta           Meta           `yaml:"meta"`
+	System           System           `yaml:"system"`
+	Agent            Agent            `yaml:"agent"`
+	Environments     []Environment    `yaml:"environments"`
+	Repos            []Repo           `yaml:"repos"`
+	CodeIntelligence CodeIntelligence `yaml:"code_intelligence,omitempty"`
+	ServiceTopology  ServiceTopology  `yaml:"service_topology,omitempty"`
+	Infrastructure   Infrastructure   `yaml:"infrastructure"`
+	Generation       Generation       `yaml:"generation"`
+	Meta             Meta             `yaml:"meta"`
 }

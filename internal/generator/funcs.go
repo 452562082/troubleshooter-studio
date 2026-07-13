@@ -1,12 +1,16 @@
 package generator
 
 import (
+	"net/url"
 	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"text/template"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/analyzer"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
+	"github.com/xiaolong/troubleshooter-studio/internal/topology"
 )
 
 func toFindingView(f analyzer.Finding) *findingView {
@@ -36,17 +40,397 @@ func dataStoreSkillName(typ string) string {
 	return typ + "-runtime-query"
 }
 
+func skillEnabled(ctx *Context, name string) bool {
+	whitelist := ctx.Generation.SkillsWhitelist
+	if len(whitelist) > 0 && !slices.Contains(whitelist, name) {
+		return false
+	}
+	if name == "service-topology-query" {
+		return serviceTopologySkillEnabled(ctx)
+	}
+	if name == "code-intelligence-query" {
+		return ctx.CodeIntelligence.UsesCodeGraph() &&
+			(len(whitelist) == 0 || slices.Contains(whitelist, "routing"))
+	}
+	return true
+}
+
+func frontendEndpointsForRepo(ctx *Context, repoName string) []string {
+	if ctx == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, endpoint := range ctx.FrontendEndpointsByRepo[repoName] {
+		path := normalizeRoutePathForTemplate(endpoint)
+		if path == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		out = append(out, path)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func frontendCandidateServicesForRepo(ctx *Context, repoName string) []string {
+	if ctx == nil {
+		return nil
+	}
+	var services []string
+	for _, repo := range ctx.Repos {
+		if !repo.RequiresServiceNames() || repo.Name == repoName {
+			continue
+		}
+		services = append(services, repo.ServiceNames...)
+	}
+	return services
+}
+
+type frontendRouteCandidate struct {
+	Service string
+	Match   string
+	Route   string
+	Method  string
+	Source  string
+}
+
+func frontendRouteCandidatesForRepoEndpoint(ctx *Context, frontendRepo, endpoint string) []frontendRouteCandidate {
+	if ctx == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []frontendRouteCandidate
+	for _, repo := range ctx.Repos {
+		if repo.Name == frontendRepo || !repo.RequiresServiceNames() {
+			continue
+		}
+		names := repo.ServiceNames
+		if len(names) == 0 {
+			names = []string{repo.Name}
+		}
+		for _, route := range ctx.APIRoutesByRepo[repo.Name] {
+			routePath := normalizeRoutePathForTemplate(route.Path)
+			match := routeMatchStrengthForTemplate(routePath, endpoint)
+			if match == "" {
+				continue
+			}
+			for _, svc := range names {
+				key := svc + "|" + match + "|" + routePath + "|" + route.Method + "|" + route.Source
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				out = append(out, frontendRouteCandidate{
+					Service: svc,
+					Match:   match,
+					Route:   routePath,
+					Method:  route.Method,
+					Source:  route.Source,
+				})
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if routeMatchRank(out[i].Match) != routeMatchRank(out[j].Match) {
+			return routeMatchRank(out[i].Match) < routeMatchRank(out[j].Match)
+		}
+		if out[i].Service != out[j].Service {
+			return out[i].Service < out[j].Service
+		}
+		if out[i].Route != out[j].Route {
+			return out[i].Route < out[j].Route
+		}
+		if out[i].Method != out[j].Method {
+			return out[i].Method < out[j].Method
+		}
+		return out[i].Source < out[j].Source
+	})
+	return out
+}
+
+func routeMatchStrengthForTemplate(routePath, endpointPath string) string {
+	routePath = normalizeRoutePathForTemplate(routePath)
+	endpointPath = normalizeRoutePathForTemplate(endpointPath)
+	if routePath == "" || endpointPath == "" {
+		return ""
+	}
+	if routePath == endpointPath {
+		return "exact"
+	}
+
+	routeParts := strings.Split(strings.Trim(routePath, "/"), "/")
+	endpointParts := strings.Split(strings.Trim(endpointPath, "/"), "/")
+	if len(routeParts) == len(endpointParts) {
+		matched := true
+		hasParam := false
+		for i := range routeParts {
+			if isRouteParamForTemplate(routeParts[i]) {
+				hasParam = true
+				continue
+			}
+			if routeParts[i] != endpointParts[i] {
+				matched = false
+				break
+			}
+		}
+		if matched && hasParam {
+			return "pattern"
+		}
+	}
+
+	if strings.HasPrefix(endpointPath, strings.TrimRight(routePath, "/")+"/") {
+		return "prefix"
+	}
+	return ""
+}
+
+func normalizeRoutePathForTemplate(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if u, err := url.Parse(path); err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" {
+		path = u.Path
+	}
+	if before, _, ok := strings.Cut(path, "#"); ok {
+		path = before
+	}
+	if before, _, ok := strings.Cut(path, "?"); ok {
+		path = before
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	path = strings.TrimRight(path, "/")
+	if path == "" {
+		path = "/"
+	}
+	if path != "/graphql" && path != "/api" && !strings.HasPrefix(path, "/api/") {
+		return ""
+	}
+	return path
+}
+
+func isRouteParamForTemplate(part string) bool {
+	return part == "*" ||
+		strings.HasPrefix(part, ":") ||
+		(strings.HasPrefix(part, "{") && strings.HasSuffix(part, "}")) ||
+		(strings.HasPrefix(part, "<") && strings.HasSuffix(part, ">"))
+}
+
+func routeMatchRank(match string) int {
+	switch match {
+	case "exact":
+		return 0
+	case "pattern":
+		return 1
+	case "prefix":
+		return 2
+	default:
+		return 3
+	}
+}
+
+func topologyServiceNodes(ctx *Context) []topology.ServiceNode {
+	if ctx == nil {
+		return nil
+	}
+	names := make([]string, 0, len(ctx.ServiceGraph.Services))
+	for name := range ctx.ServiceGraph.Services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	result := make([]topology.ServiceNode, 0, len(names))
+	for _, name := range names {
+		result = append(result, ctx.ServiceGraph.Services[name])
+	}
+	return result
+}
+
+func canonicalRepoServices(repo config.Repo) []string {
+	seen := make(map[string]bool, len(repo.ServiceNames)+1)
+	services := make([]string, 0, len(repo.ServiceNames)+1)
+	for _, raw := range repo.ServiceNames {
+		service := strings.TrimSpace(raw)
+		if service == "" || seen[service] {
+			continue
+		}
+		seen[service] = true
+		services = append(services, service)
+	}
+	if len(services) == 0 {
+		if name := strings.TrimSpace(repo.Name); name != "" {
+			services = append(services, name)
+		}
+	}
+	sort.Strings(services)
+	return services
+}
+
+// dependencyServicesForRepo returns the canonical service keys emitted by the
+// compatibility dependency map. Once topology analysis has been attempted,
+// the formal graph/catalog owns those keys; raw YAML service_names must not
+// reintroduce whitespace variants, duplicates, or services absent from the
+// analyzed catalog. Legacy reports retain the old repo-derived behavior after
+// applying the same trim/deduplicate normalization as the topology pipeline.
+func dependencyServicesForRepo(ctx *Context, repo config.Repo) []string {
+	if ctx == nil || !repo.IsServiceNode() {
+		return nil
+	}
+	if ctx.Topology.SchemaVersion == "" {
+		ownerByService := make(map[string]string)
+		for _, candidateRepo := range ctx.Repos {
+			if !candidateRepo.IsServiceNode() {
+				continue
+			}
+			owner := strings.TrimSpace(candidateRepo.Name)
+			for _, service := range canonicalRepoServices(candidateRepo) {
+				if _, exists := ownerByService[service]; !exists {
+					ownerByService[service] = owner
+				}
+			}
+		}
+		owner := strings.TrimSpace(repo.Name)
+		services := canonicalRepoServices(repo)
+		return slices.DeleteFunc(services, func(service string) bool {
+			return ownerByService[service] != owner
+		})
+	}
+
+	repoName := strings.TrimSpace(repo.Name)
+	services := make([]string, 0, len(ctx.ServiceGraph.Services))
+	for name, node := range ctx.ServiceGraph.Services {
+		service := strings.TrimSpace(name)
+		if service == "" || strings.TrimSpace(node.Repo) != repoName {
+			continue
+		}
+		services = append(services, service)
+	}
+	sort.Strings(services)
+	return services
+}
+
+func scannedDownstreamsForService(ctx *Context, service string) []string {
+	if ctx == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var result []string
+	for _, repo := range ctx.Repos {
+		matches := false
+		for _, name := range canonicalRepoServices(repo) {
+			if name == service {
+				matches = true
+				break
+			}
+		}
+		if !matches {
+			continue
+		}
+		for _, call := range ctx.DownstreamCallsByRepo[repo.Name] {
+			if call.Target == "" || seen[call.Target] {
+				continue
+			}
+			seen[call.Target] = true
+			result = append(result, call.Target)
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
+func legacyUpstreamsForService(ctx *Context, service string) []string {
+	if ctx == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var result []string
+	for _, repo := range ctx.Repos {
+		matched := false
+		for _, call := range ctx.DownstreamCallsByRepo[repo.Name] {
+			if call.Target == service {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		for _, name := range canonicalRepoServices(repo) {
+			if name == service || seen[name] {
+				continue
+			}
+			seen[name] = true
+			result = append(result, name)
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
+func topologyDownstreamsForService(ctx *Context, service string) []string {
+	if ctx == nil {
+		return nil
+	}
+	if ctx.Topology.SchemaVersion == "" {
+		return scannedDownstreamsForService(ctx, service)
+	}
+	node, ok := ctx.ServiceGraph.Services[service]
+	if !ok {
+		return nil
+	}
+	return append([]string(nil), node.Downstream...)
+}
+
+func topologyUpstreamsForService(ctx *Context, service string) []string {
+	if ctx == nil {
+		return nil
+	}
+	if ctx.Topology.SchemaVersion == "" {
+		return legacyUpstreamsForService(ctx, service)
+	}
+	node, ok := ctx.ServiceGraph.Services[service]
+	if !ok {
+		return nil
+	}
+	return append([]string(nil), node.Upstream...)
+}
+
+func topologyEvidenceID(edge topology.CandidateEdge) string {
+	if edge.FromEndpoint != "" || edge.ToEndpoint != "" {
+		return edge.FromEndpoint + ">" + edge.ToEndpoint
+	}
+	formal := edge
+	formal.Status = "automatic"
+	graph := topology.ProjectServiceGraph(topology.Snapshot{Edges: []topology.CandidateEdge{formal}})
+	if len(graph.Edges) == 1 && len(graph.Edges[0].Routes) == 1 {
+		return graph.Edges[0].Routes[0].EndpointEdge
+	}
+	return strings.Join([]string{edge.FromService, edge.ToService, edge.Protocol, edge.Method, edge.Path, edge.RPCMethod}, "|")
+}
+
+func yamlQuote(value string) string {
+	return strconv.Quote(value)
+}
+
 func funcMap() template.FuncMap {
 	return template.FuncMap{
-		"upper":          strings.ToUpper,
-		"lower":          strings.ToLower,
-		"dataStoreSkill": dataStoreSkillName,
-		"list":           func(items ...string) []string { return items },
+		"upper":                                  strings.ToUpper,
+		"lower":                                  strings.ToLower,
+		"dataStoreSkill":                         dataStoreSkillName,
+		"frontendEndpointsForRepo":               frontendEndpointsForRepo,
+		"frontendCandidateServicesForRepo":       frontendCandidateServicesForRepo,
+		"frontendRouteCandidatesForRepoEndpoint": frontendRouteCandidatesForRepoEndpoint,
+		"dependencyServicesForRepo":              dependencyServicesForRepo,
+		"topologyServiceNodes":                   topologyServiceNodes,
+		"topologyEvidenceID":                     topologyEvidenceID,
+		"topologyDownstreamsForService":          topologyDownstreamsForService,
+		"topologyUpstreamsForService":            topologyUpstreamsForService,
+		"yamlQuote":                              yamlQuote,
+		"list":                                   func(items ...string) []string { return items },
 		"hasSkill": func(ctx *Context, name string) bool {
-			if len(ctx.Generation.SkillsWhitelist) == 0 {
-				return true
-			}
-			return slices.Contains(ctx.Generation.SkillsWhitelist, name)
+			return skillEnabled(ctx, name)
 		},
 		// findConfig 返回给定 service+env 的 analyzer finding 视图；命中优先级：精确 env > 无 env 默认 > nil
 		"findConfig": func(ctx *Context, service, env string) *findingView {
@@ -160,40 +544,6 @@ func funcMap() template.FuncMap {
 			}
 			return out
 		},
-		// upstreamForService 反推图:谁的 downstream 包含 svc → 那个就是 svc 的 upstream。
-		// 只要 analyzer 在部署期跑过(dependency_scan 填了 ctx.DownstreamCallsByRepo),或者
-		// 用户手填过任一服务的 downstream,本服务的 upstream 自动出来。
-		// 跟 scannedDownstreamsForService 一样基于 repo 级 regex 扫,精度 50-70%,可手动校正。
-		"upstreamForService": func(ctx *Context, svc string) []string {
-			seen := map[string]bool{}
-			var out []string
-			for _, repo := range ctx.Repos {
-				calls := ctx.DownstreamCallsByRepo[repo.Name]
-				hits := false
-				for _, c := range calls {
-					if c.Target == svc {
-						hits = true
-						break
-					}
-				}
-				if !hits {
-					continue
-				}
-				// repo 调用了 svc → repo 内每个 service 都视为 svc 的上游
-				names := repo.ServiceNames
-				if len(names) == 0 {
-					names = []string{repo.Name}
-				}
-				for _, n := range names {
-					if n == svc || seen[n] {
-						continue
-					}
-					seen[n] = true
-					out = append(out, n)
-				}
-			}
-			return out
-		},
 		// lokiAppForService 从 loki.label_mapping_by_env[env].service_map[service].app
 		// 抽出"用户在 wizard 里手挑过的 Loki app 名"。命中即返回真实 app 名,没填回空串。
 		// log-app-map.yaml 用这个填 verifiedApp,免得每条都让用户再手填一遍 ——
@@ -217,37 +567,6 @@ func funcMap() template.FuncMap {
 				return prefix + "-" + envID
 			}
 			return prefix + "-" + sourceID + "-" + envID
-		},
-		// scannedDownstreamsForService 给 service-dependency-map.yaml.tmpl 用:从 ctx 找指定服务名
-		// 对应 repo 的 DownstreamCalls,提取去重后的目标服务名列表。同 repo 多服务时复用 repo 的
-		// 下游列表(无法精确到 service 级,因为 dependency_scan 是 repo 级 regex 扫)。
-		"scannedDownstreamsForService": func(ctx *Context, svc string) []string {
-			seen := map[string]bool{}
-			var out []string
-			for _, repo := range ctx.Repos {
-				match := false
-				if repo.Name == svc {
-					match = true
-				}
-				for _, sn := range repo.ServiceNames {
-					if sn == svc {
-						match = true
-						break
-					}
-				}
-				if !match {
-					continue
-				}
-				calls := ctx.DownstreamCallsByRepo[repo.Name]
-				for _, c := range calls {
-					if c.Target == "" || seen[c.Target] {
-						continue
-					}
-					seen[c.Target] = true
-					out = append(out, c.Target)
-				}
-			}
-			return out
 		},
 		// scannedDataStoresForService 给 service-dependency-map.yaml.tmpl 用:类似上面,提数据层使用。
 		// 输出格式 "<type>:scanned"(没 logical 名字时占位 "scanned",用户填具体逻辑名)。

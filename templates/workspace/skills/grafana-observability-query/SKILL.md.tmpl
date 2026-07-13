@@ -1,0 +1,93 @@
+---
+name: grafana-observability-query
+description: 通过 Grafana MCP 查询 Loki 日志、Prometheus 指标和 Grafana datasource，只做验证取证与只读观测，不做根因推断。
+---
+
+# Grafana 观测取证
+
+## 使用场景
+
+当验证需要从 Grafana 获取观测证据时使用本 skill：
+
+- 按 request id、trace id、user id、endpoint、service 或时间窗口查询 Loki 日志。
+- 查询 HTTP 状态、延迟、错误率、pod/container 健康或流量形态等 Prometheus 指标。
+- 在通过 Grafana 查询 Loki / Prometheus / Tempo 前查找 datasource。
+- 为 `bug-verifier`、`api-verifier` 或 `frontend-repro-investigator` 补充观测证据。
+
+本 skill 不做根因分析，只返回观察到的日志、指标、缺口和证据。
+
+## 路由
+
+1. 读取 `routing/SKILL.md` 和 `routing/references/observability-map.yaml`。
+2. 确认：
+   - env。
+   - service 或 frontend route。
+   - 带时区的时间窗口。
+   - request id、trace id、endpoint、user id 或关键词。
+3. 使用该 env 注册的 Grafana MCP server，通常命名为 `<system>-grafana-<env>`。
+4. 如果有多个工具，先列工具，只选择 Loki / Prometheus / datasource 只读工具。
+
+## 查询流程
+
+### Loki 日志
+
+验证复现请求发生了什么时使用：
+
+1. 从 `observability-map.yaml` 构造 selector：
+   - 优先使用配置的 `loki.label_mapping_by_env`。
+   - 然后尝试 map 里的 `namespace`、`app`、`service`、`container` 或 workload labels。
+2. 先查询最小有效时间窗口：
+   - 请求证据：请求时间前后 2 分钟。
+   - 历史工单：工单报告的起止时间窗口。
+3. 优先使用最强关联键搜索：
+   - trace id。
+   - request id。
+   - endpoint path。
+   - user id 或 entity id。
+   - 精确错误关键词。
+4. 只摘要相关日志行，必须脱敏密钥和个人数据。
+
+### Prometheus 指标
+
+验证问题是否能在运行时信号中看到时使用：
+
+1. 只查询范围内的 service 或 workload。
+2. 优先使用复现或报告时间附近的短窗口。
+3. 常用检查：
+   - HTTP 5xx / error-rate spike。
+   - 场景附近的 latency percentile。
+   - restart count / container status / OOM signal。
+   - traffic volume，用来确认场景是否打到服务。
+4. 报告 metric name、selector、time window 和 observed values。
+
+### Datasource 查询
+
+Datasource lookup 只用于找到正确的 Loki / Prometheus datasource UID。除非用户要求看 dashboard 上下文，否则不要浏览 dashboard。
+
+## 输出契约
+
+按下面结构返回证据：
+
+```yaml
+observability_evidence:
+  environment: "<env>"
+  time_window: "<absolute-time-and-timezone>"
+  queries:
+    - type: "loki|prometheus|datasource"
+      selector_or_query: "<redacted-query>"
+      result_summary: "<short-summary>"
+      sample_count: "<count-or-empty>"
+  correlation:
+    request_ids: []
+    trace_ids: []
+  gaps:
+    - "<missing-selector-or-empty-result-explanation>"
+```
+
+## 硬约束
+
+- 只使用 Grafana / Loki / Prometheus 的只读工具。
+- 不修改 dashboard、alert、datasource、annotation 或 incident。
+- 不输出根因判断。
+- 必须脱敏 token、cookie、password、authorization header、手机号、邮箱和个人标识。
+- 查询为空时，先记录精确 selector 和时间窗口，再扩大范围。

@@ -16,11 +16,12 @@
 //   bridge/loki.ts          —— Loki + Grafana datasources
 //   bridge/openclaw.ts      —— OpenClaw 模型探测
 //   bridge/aitools.ts       —— Claude Code / Cursor / Codex 安装探测
+//   bridge/bugs.ts          —— Bug 工单收件箱 / 平台同步 / 机器人匹配
 // 本文件只保留:isDesktop re-export + YAML core(validate / plan / analyze / doctor / gen)
 //          —— 这一组共用 yaml 文本入参 + JSON 出参的 fetch 模板,集中放着。
 
 import * as App from '../../wailsjs/go/main/App'
-import { analyzerpipe, generator, main } from '../../wailsjs/go/models'
+import { analyzerpipe, generator, main, topology } from '../../wailsjs/go/models'
 
 // 各域 binding re-export(import path 兼容,新代码也可直接 from './bridge/<domain>')
 export { isDesktop } from './bridge/shared'
@@ -35,6 +36,8 @@ export * from './bridge/configCenter'
 export * from './bridge/loki'
 export * from './bridge/openclaw'
 export * from './bridge/aitools'
+export * from './bridge/bugs'
+export * from './bridge/bugWorkflow'
 
 import { isDesktop } from './bridge/shared'
 
@@ -43,6 +46,7 @@ export type GenSummary = generator.GenSummary
 export type Plan = generator.Plan
 export type AnalyzeResult = analyzerpipe.Result
 export type RepoSummary = analyzerpipe.RepoSummary
+export type ServiceTopologySnapshot = topology.Snapshot
 export type DoctorReport = Record<string, unknown> // doctor.Report 字段较多且业务后续会扩,先 loose
 
 /** Validate troubleshooter.yaml；失败抛 Error（message 已带解析原因） */
@@ -106,6 +110,20 @@ export async function analyzeV2(
     auto_clone: autoClone,
     repo_name: repoName ?? '',
   } as Parameters<typeof App.AnalyzeV2>[0])
+}
+
+export async function cancelAnalyze(): Promise<boolean> {
+  if (!isDesktop()) return false
+  return App.CancelAnalyze()
+}
+
+/** 显式刷新跨仓服务拓扑。候选扫描数据仅作为返回值存在，不写回 YAML。 */
+export async function analyzeServiceTopology(
+  yamlText: string,
+  repoPaths: Record<string, string>,
+): Promise<ServiceTopologySnapshot> {
+  if (!isDesktop()) throw new Error('服务拓扑分析仅在桌面 app 可用')
+  return App.AnalyzeServiceTopology(yamlText, repoPaths)
 }
 
 // 注:曾经的 diff() bridge + DiffPage 已删 —— 功能被 BotsPage 的"编辑配置 → 预演"

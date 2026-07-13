@@ -1,0 +1,111 @@
+---
+name: bug-verifier
+description: Bug 验证 Agent 统一入口。用于主动复现、修复后回归、截图/Network/console/API/trace 证据收集，并只输出验证报告。
+---
+
+# Bug 验证
+
+## 使用场景
+
+当任务是验证 Bug 工单或验证修复结果时使用本 skill：
+
+- 按用户步骤主动复现前端或 API 问题。
+- 修复后对同一场景做回归。
+- 收集附件、截图、Network、console、API 响应、日志或 trace 证据。
+- 判断原始问题是否复现、未复现、信息不足、已修复，或修复后仍复现。
+
+本 skill 不做根因分析，不排序候选原因，不输出推测性结论，只输出验证证据。
+验证 Agent 可以确认入口、请求、响应、截图、console、trace、日志和附件事实；不要读取业务源码来定位函数、文件行号或实现原因。代码分析、根因判断和修复建议交给排障 Agent。
+
+## 必要输入
+
+缺信息时一次只问一个最小阻塞项：
+
+- env。
+- 受影响 URL、route、API 或 job 名称。
+- 精确复现步骤。
+- 期望表现。
+- 实际表现。
+- 如果验证修复，需要 fix build / version / commit。
+- 如果查历史证据，需要发生时间和时区。
+
+## 验证流程
+
+1. 把场景复述成具体步骤和成功标准。
+2. 可行时先复现原始 Bug，再验证修复。
+3. 如果工单包含附件、预览 URL、截图、录屏、HAR、console 日志或下载文件，先使用 `attachment-evidence-verifier` 归一化附件元数据和可观察事实。
+4. 采集直接证据：
+   - UI 状态截图或录屏。
+   - 浏览器 Network 请求和响应详情。
+   - console error / warning。
+   - API request、response status、body 摘要和 request id。
+   - 与同一请求、同一时间窗口绑定的 trace id 或日志片段。
+5. 如果问题来自浏览器流程，先用 `frontend-repro-investigator` 归一化 HAR、console、screenshot、RUM/Sentry、request id 或 trace id 证据。
+6. 如果问题来自 API、webhook、callback、scheduled job 或可重放请求，用 `api-verifier` 采集请求和响应证据。
+7. 在修复版本或目标构建中运行同一场景。
+8. 对比修复前后证据与期望表现。
+9. 停在验证状态，不继续做原因分析。
+10. 如果已拿到能复现问题的证据，停止扩展排查；不要继续 grep 业务代码或生成修复方案。
+
+## 状态规则
+
+`verification_status` 必须只使用下面一个值：
+
+- `reproduced`：用新鲜证据复现了原始问题。
+- `not_reproduced`：环境、步骤和证据足够，但原始问题没有出现。
+- `insufficient_info`：缺少必要输入、环境访问、构建版本或证据，无法完成验证。
+- `fixed_verified`：验证修复时，同一场景在目标修复版本通过。
+- `still_reproduces`：验证修复时，同一故障在新鲜证据中仍可见。
+
+## 证据规则
+
+- 优先使用可复查证据：HAR、截图、console 导出、API 响应、trace id、日志查询和命令输出。
+- 引用前必须脱敏 token、cookie、password、authorization header、个人标识和敏感 query 值。
+- 每个结论都必须绑定具体 artifact、timestamp、request 或 command。
+- `reproduced` 必须同时填写非空 `observed_behavior`、`expected_behavior`，并至少登记一个本次 attempt 新采集且可由 Studio 注册的 artifact；只有文字描述、空 `evidence` 或无法注册的路径必须返回 `insufficient_info`。
+- 证据或环境访问不足时，使用 `insufficient_info` 并列出阻塞缺口。
+- 后台运行时不保证有 in-app browser / iab / 可视化浏览器控制能力；这类工具不可用属于执行环境限制，不要作为用户需补充的 `gaps`。
+- 如果浏览器工具不可用，优先改用工单附件、本地附件路径、HAR/Network 导出、curl/API 请求、trace/request id、日志或已有截图取证。
+- 只有缺少业务验证必需资料时才写入 `gaps`，例如后台登录态/测试账号、受影响 URL/route/API、测试数据、HAR/Network 导出、request id 或 trace id。
+- 工具能力限制但不阻塞已有证据判断时，在 `gaps` 之外由过程事件说明；最终 YAML 仍不得增加字段。
+- 旧版只读展示可能把证据分组为 `attachments`、`screenshots`、`network`、`console_errors`、`trace_ids`、`request_ids`，并显示 `entry:` / `frontend_url` / `api_url` / `handoff_to_troubleshooter`；这些仅是兼容读取术语，新结果必须统一写入下方 `evidence` 列表，不得输出旧字段。
+
+## 输出契约
+
+始终返回这个严格结构，不得增加字段：
+
+```yaml
+verification_status: reproduced | not_reproduced | insufficient_info | fixed_verified | still_reproduces
+environment: "<有效目标环境>"
+observed_behavior: "<what-was-observed-during-verification>"
+expected_behavior: "<expected>"
+scenario_hash: "<原始场景哈希；首次验证可为空，回归必须原样返回>"
+evidence:
+  - kind: "<har|screenshot|network|console|api|trace|log|command>"
+    path: "<Studio staging 目录内的相对路径>"
+    captured_at: "<RFC3339；仅兼容输出，Studio 以 fstat 为准>"
+    environment: "<env>"
+    version: "<运行版本；回归必填>"
+    request_id: "<可空>"
+    trace_id: "<可空>"
+    redaction_status: redacted | not_required # 仅兼容输出，Studio 总会重新扫描
+gaps: []
+```
+
+证据必须先写入 prompt 指定的 Studio staging 目录，`path` 只写该目录内的干净相对路径。绝对路径、`..`、符号链接和其它 attempt 的 staging 路径都会被拒绝。Studio 使用安全文件描述符读取、计算 SHA256 和 fstat 时间，并始终重新扫描 token、cookie、password、Authorization；Agent 声称 `redacted` 不能绕过扫描。Windows 若安全 artifact store 不可用，Studio 会以 `secure_artifact_store_unsupported` 证据限制结束当前 attempt，不能把它当作验证成功。
+
+## 硬约束
+
+- 只输出验证结论和证据。
+- 不做原因判断。
+- 不输出根因报告。
+- 不读取业务源码来定位具体实现、函数、文件行号或补丁点。
+- 不输出“代码原因分析”“最可能原因”“修复建议”“候选原因”“建议改动”等章节。
+- 没有用户许可时，不做超出复现或回归步骤之外的应用状态变更。
+- 只有同一场景在目标修复版本通过时，才能标记 `fixed_verified`。
+- 如果同一故障仍能用新鲜证据观察到，必须标记 `still_reproduces`。
+- 回归输入中的 `original_validation_attempt_id`、`scenario_hash`、`cycle_number`、`deployment_observation_id`、`deployment_reservation_id`、目标环境、版本和逐仓 commit 是 Studio 从持久化记录生成的完整 scope；不得替换、降级或跨 cycle 复用。
+- 回归证据的 Studio fstat 时间必须晚于当前 attempt 开始时间，`environment` 和 `version` 必须与 Studio 提供的已匹配部署观测完全一致，并且至少携带本次执行的新 `request_id` 或 `trace_id`；旧 attempt 的 artifact 只能对照，不能复用为新证据。
+- `fixed_verified` 必须有当前 regression attempt 的新 artifact；只有旧验证证据时必须返回 `insufficient_info`。
+- 首次验证的 `reproduced` 证据会成为回归场景基线；缺少完整现象、预期或已注册 artifact 时不得进入排障和修复链。
+- `still_reproduces` 的 `observed_behavior` 必须明确写出修复后仍存在的现象，Studio 会把它作为 delta 连同本轮新证据传给下一 cycle 的排障 Agent。

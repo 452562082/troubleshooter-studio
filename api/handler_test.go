@@ -113,6 +113,93 @@ func TestHandleValidate_HappyPath(t *testing.T) {
 	}
 }
 
+func TestHandleValidate_CodeIntelligence(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.Close()
+
+	enabledYAML := strings.Replace(minimalYAML, "infrastructure:\n", `code_intelligence:
+  enabled: true
+  provider: codegraph
+infrastructure:
+`, 1)
+	status, body := post(t, srv, "/api/validate", enabledYAML)
+	if status != http.StatusOK {
+		t.Fatalf("enabled code intelligence status = %d, body=%s", status, body)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("unmarshal enabled response: %v\nbody=%s", err, body)
+	}
+	if out["valid"] != true {
+		t.Fatalf("enabled code intelligence should be valid, got %v", out["valid"])
+	}
+
+	invalidYAML := strings.Replace(enabledYAML, "provider: codegraph", "provider: lsp", 1)
+	status, body = post(t, srv, "/api/validate", invalidYAML)
+	if status != http.StatusBadRequest {
+		t.Fatalf("unknown provider status = %d, body=%s", status, body)
+	}
+	if !strings.Contains(string(body), "code_intelligence.provider") {
+		t.Fatalf("unknown provider error missing field name: %s", body)
+	}
+}
+
+func TestHandleValidate_ServiceTopology(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.Close()
+
+	topologyYAML := strings.Replace(minimalYAML, "infrastructure:\n", `  - name: bff
+    url: https://github.com/example/bff
+    stack: php
+    service_names: [mall-bff]
+  - name: orders
+    url: https://github.com/example/orders
+    stack: go
+    service_names: [order-service]
+service_topology:
+  overrides:
+    - action: confirm
+      from_service: example
+      to_service: mall-bff
+      protocol: http
+      method: get
+      path: /api/orders/:id
+    - action: reject
+      from_service: mall-bff
+      to_service: order-service
+      protocol: grpc
+      rpc_method: orders.v1.OrderService/GetOrder
+    - action: add
+      from_service: example
+      to_service: order-service
+      protocol: http
+      method: POST
+      path: /api/orders
+infrastructure:
+`, 1)
+
+	status, body := post(t, srv, "/api/validate", topologyYAML)
+	if status != http.StatusOK {
+		t.Fatalf("valid topology status = %d, body=%s", status, body)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("unmarshal valid topology response: %v\nbody=%s", err, body)
+	}
+	if out["valid"] != true {
+		t.Fatalf("valid topology should return valid:true, got %v", out["valid"])
+	}
+
+	invalidYAML := strings.Replace(topologyYAML, "action: confirm", "action: guess", 1)
+	status, body = post(t, srv, "/api/validate", invalidYAML)
+	if status != http.StatusBadRequest {
+		t.Fatalf("invalid topology status = %d, body=%s", status, body)
+	}
+	if !strings.Contains(string(body), "service_topology.overrides") {
+		t.Fatalf("invalid topology error missing field name: %s", body)
+	}
+}
+
 // TestHandleValidate_BadYAML: 错误 yaml → 400 + error message
 func TestHandleValidate_BadYAML(t *testing.T) {
 	srv := newTestServer(t)
@@ -168,6 +255,33 @@ func TestHandleSchema_HappyPath(t *testing.T) {
 	// schema yaml 应至少含一些显眼字段
 	if !strings.Contains(string(data), "schema_version") && !strings.Contains(string(data), "system") {
 		t.Errorf("schema content looks empty/wrong: %.200s", data)
+	}
+}
+
+// TestHandleSchema_EmbeddedFallback: go install / tshoot serve 场景下 templates
+// 可能从 embed 解压到临时目录,旁边没有 repo 的 schema/ 目录;此时仍应返回内嵌 schema。
+func TestHandleSchema_EmbeddedFallback(t *testing.T) {
+	tmp := t.TempDir()
+	tplRoot := filepath.Join(tmp, "templates")
+	if err := os.MkdirAll(tplRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{TemplateRoot: tplRoot}
+	server := httptest.NewServer(NewRouter(srv, nil))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/api/schema")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := readAll(resp.Body)
+		t.Fatalf("status = %d, body=%s", resp.StatusCode, data)
+	}
+	data, _ := readAll(resp.Body)
+	if !strings.Contains(string(data), "schema_version") {
+		t.Fatalf("embedded schema fallback looks wrong: %.200s", data)
 	}
 }
 

@@ -11,6 +11,9 @@ export const Target = {
 
 export type TargetId = (typeof Target)[keyof typeof Target]
 
+/** 全部后端支持的 generation.targets。新增 target 时这里和 Go validate 枚举必须同步。 */
+export const TARGETS: TargetId[] = [Target.Openclaw, Target.ClaudeCode, Target.Cursor, Target.Codex]
+
 /** IDE 三家(Claude Code / Cursor / Codex)—— 跟 OpenClaw 区分,装机走 install_native.go 而非 openclaw 那套。 */
 export const IDE_TARGETS: TargetId[] = [Target.ClaudeCode, Target.Cursor, Target.Codex]
 

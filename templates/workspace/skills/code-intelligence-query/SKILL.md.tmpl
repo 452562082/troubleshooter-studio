@@ -1,0 +1,79 @@
+---
+name: code-intelligence-query
+description: routing 识别仓库后，用于函数级源码、调用关系与影响面证据取证；CodeGraph 不可用时回退 rg/read。
+---
+
+# CodeGraph 代码取证
+
+本 skill 只在 `routing` 已确定环境、仓库和本地路径后使用。它补充函数、调用关系和影响面证据，不替代源码逐行核验，也不能单独证明根因。
+
+## 固定协议
+
+### 1. 读取路由坐标
+
+先 Read 以下三份生成文件：
+
+- `skills/routing/references/repo-path-map.yaml`
+- `skills/routing/references/env-branch-map.yaml`
+- `skills/routing/references/repo-stack-map.yaml`
+
+从 `repo-path-map.yaml` 取目标仓库的 `local_path`，把它原样设为 CodeGraph 的 `projectPath`。`projectPath` 永远是仓库/索引根目录，不能改成服务子目录。
+
+若仓库带 `sub_path`，另行计算 `servicePath = local_path/sub_path`。只用 `servicePath` 缩小问题描述以及后续 `rg` / Read fallback 的范围；调用 CodeGraph 时仍传 `projectPath=local_path`。
+
+### 2. 校验当前代码和目标分支
+
+```bash
+git -C "$projectPath" branch --show-current
+git -C "$projectPath" rev-parse HEAD
+```
+
+把当前分支与 `env-branch-map.yaml` 的 `environments.${env}.repos.${repo}` 比较。全程只读：**禁止 checkout、pull、reset、修改文件或以任何方式切换仓库状态**。
+
+记录仓库名、当前分支、目标分支和 HEAD。当前分支与目标分支不一致时，CodeGraph 证据必须标为 `low confidence`，只可作为候选，不能作为结论。
+
+### 3. 检查索引状态
+
+稳定 CLI 路径为 `$HOME/.tshoot/bin/codegraph`，Windows 使用 `%USERPROFILE%\.tshoot\bin\codegraph.cmd`。读取该路径并执行：
+
+```bash
+"$HOME/.tshoot/bin/codegraph" status "$projectPath" --json
+```
+
+只在 `initialized=true`、`state=complete`，且当前分支、status 返回的索引分支与环境目标分支一致时尝试同步。同步必须使用 Python 的 30 秒 portable timeout wrapper，不依赖 GNU `timeout`：
+
+```bash
+python3 -c 'import subprocess, sys; subprocess.run([sys.argv[1], "sync", sys.argv[2]], check=True, timeout=30)' "$HOME/.tshoot/bin/codegraph" "$projectPath"
+```
+
+同步成功后调用 MCP 工具 `codegraph_explore`，固定传 `projectPath` 和 `maxFiles=4`。
+
+### 4. 提问范围
+
+查询必须用一个具体锚点缩小范围：错误字符串、endpoint、业务字段、stack symbol 或文件名。问题中带上目标 service / `servicePath` 语境。**禁止提“解释整个架构”之类宽泛问题**。
+
+合适示例：
+
+- “错误串 `order status transition denied` 在哪些函数产生，谁调用这些函数？”
+- “endpoint `/api/orders/:id/pay` 到持久化状态字段的调用路径是什么？”
+- “修改 `CalculateDiscount` 可能影响哪些直接调用者？”
+
+### 5. 失败与陈旧索引处理
+
+- 当前分支不匹配目标分支：结果标 `low confidence`，只作候选；关键点必须用目标环境运行时证据交叉验证。
+- 同步失败但现有索引仍为 `complete`：允许查询旧索引，但 freshness 标 `stale`；每个关键文件和行号都必须用 `rg` 加 Read 文件正文复核。
+- status 不存在/不完整、MCP 首次失败，或 `projectPath` 缺失：本 session **停止重试 CodeGraph**，立即回退到 `git diff + rg + Read`。
+- 回退扫描 monorepo 时优先使用 `servicePath`；仍需按需扩大到 `projectPath` 查公共库和跨模块调用。
+
+CodeGraph 返回的源码行可以当作代码事实；调用关系、动态分派和 blast radius 都只是启发式静态分析结论，必须明确标成 graph inference。
+
+## 输出契约
+
+每次输出都必须包含：
+
+- repository、当前 branch、目标 branch、HEAD；
+- freshness：`fresh` / `stale` / `branch-mismatch` / `fallback`；
+- `file:line` 与关键 snippet；
+- graph inference：调用、动态分派或影响面推断，并标注启发式性质；
+- corroborating runtime evidence：与日志、trace、指标、配置或数据事实的交叉证据；
+- fallback 时写明 CodeGraph 停止重试的原因，以及实际使用的 `git diff`、`rg`、Read 范围。

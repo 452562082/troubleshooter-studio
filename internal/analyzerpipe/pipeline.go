@@ -12,11 +12,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/analyzer"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/gitclone"
+	"github.com/xiaolong/troubleshooter-studio/internal/topology"
 )
 
 // Options 控制 Run 行为。
@@ -67,16 +69,17 @@ type RepoSummary struct {
 
 // Result 是 Run 的完整结果:analyzer.Report(可以 Marshal 成 analysis.json) + 每仓库摘要。
 type Result struct {
-	Report  analyzer.Report `json:"report"`
-	PerRepo []RepoSummary   `json:"per_repo"`
+	Report   analyzer.Report   `json:"report"`
+	PerRepo  []RepoSummary     `json:"per_repo"`
+	Topology topology.Snapshot `json:"topology"`
 }
 
 // Run 执行 analyze 流水线。入参已解析过的 config,不读文件;出参 Result 可序列化。
 // 任一 repo 的 a.Analyze 实际失败(不是 skip 类)会中断并返回 error;skip / clone-failed
 // 都会变成 RepoSummary 里的 Error 字段,不中断整体。
 // Run 跑全套 analyzer。ctx 支持取消:每个 repo 处理之前 check ctx.Err(),
-// 上层 timeout / 用户主动取消能在 step 之间生效,不再"goroutine 后台跑到死"。
-// 单个 repo 的 scan 内部目前没穿透 ctx(WalkDir 不响应 ctx),后续可改。
+// 上层 timeout / 用户主动取消能在 step 之间生效。补充扫描依赖图 /
+// API route / schema 时也会把 ctx 继续传给 walkFilesContext。
 func Run(ctx context.Context, cfg *config.SystemConfig, opts Options) (*Result, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -105,6 +108,11 @@ func Run(ctx context.Context, cfg *config.SystemConfig, opts Options) (*Result, 
 		ConfigCenter:  primaryCC,
 	}
 	perRepo := []RepoSummary{}
+	topologySnapshot := topology.Snapshot{
+		SchemaVersion: topology.SchemaVersion,
+		Services:      topologyServiceDescriptors(cfg, opts.RepoName),
+	}
+	runnableTopologyRepos := 0
 
 	// urlClonedTo 跟踪"同一 URL 已经 clone 到的目录",同 url 多 repo 条目(monorepo
 	// 拆分成多 service 时常见)只 clone 一次,后续 repo 直接复用同一 clone root,
@@ -116,6 +124,7 @@ func Run(ctx context.Context, cfg *config.SystemConfig, opts Options) (*Result, 
 	// 走到这里,过滤掉的 parent 在 child 处理时也用不到(那种场景只单扫子模块,parent 路径
 	// 走 RepoPaths 显式 / autoClone 兜底)。
 	resolvedPaths := map[string]string{}
+	explicitPathsOnly := opts.ReposRoot == "" && len(opts.RepoPaths) > 0
 
 	for _, repo := range topoSortReposByParent(cfg.Repos) {
 		// 每个 repo 处理前 check ctx —— 上层 timeout(auto-analyze 60s)/ 用户取消能在
@@ -134,21 +143,27 @@ func Run(ctx context.Context, cfg *config.SystemConfig, opts Options) (*Result, 
 		//     (典型:commerce 从 truss 切出,本地放 ~/.../truss/commerce/)
 		//  3. urlClonedTo[url] → 同 URL 多 repo 条目复用同一 clone(monorepo 多 service)
 		//  4. ReposRoot/Name → 兜底
+		// 仅传 RepoPaths 且 ReposRoot 为空时是 strict explicit 模式:未列出的 repo 不做
+		// parent/URL/root 推导,稳定标记为 missing。
 		var repoPath string
 		if p, ok := opts.RepoPaths[repo.Name]; ok && p != "" {
 			repoPath = p
-		} else if repo.ParentRepo != "" {
-			if parentPath, ok := resolvedPaths[repo.ParentRepo]; ok && parentPath != "" {
-				mount := repo.ParentPath
-				if mount == "" {
-					mount = repo.Name
+		} else if !explicitPathsOnly {
+			if repo.ParentRepo != "" {
+				if parentPath, ok := resolvedPaths[repo.ParentRepo]; ok && parentPath != "" {
+					mount := repo.ParentPath
+					if mount == "" {
+						mount = repo.Name
+					}
+					repoPath = filepath.Join(parentPath, mount)
 				}
-				repoPath = filepath.Join(parentPath, mount)
 			}
-		} else if cloned, ok := urlClonedTo[repo.URL]; ok && cloned != "" {
-			repoPath = cloned
-		} else if opts.ReposRoot != "" {
-			repoPath = filepath.Join(opts.ReposRoot, repo.Name)
+			if repoPath == "" && repo.URL != "" {
+				repoPath = urlClonedTo[repo.URL]
+			}
+			if repoPath == "" && opts.ReposRoot != "" {
+				repoPath = filepath.Join(opts.ReposRoot, repo.Name)
+			}
 		}
 		status := "analyzed"
 
@@ -176,6 +191,7 @@ func Run(ctx context.Context, cfg *config.SystemConfig, opts Options) (*Result, 
 		if pathMissing {
 			if !opts.AutoClone {
 				perRepo = append(perRepo, RepoSummary{Name: repo.Name, Status: "skipped", Error: "not-found", Role: repo.EffectiveRole()})
+				topologySnapshot.Repositories = append(topologySnapshot.Repositories, topologyRepositoryFailure(repo, "not-found"))
 				progress(fmt.Sprintf("[skip] repo %s not found at %s", repo.Name, repoPath))
 				continue
 			}
@@ -185,6 +201,8 @@ func Run(ctx context.Context, cfg *config.SystemConfig, opts Options) (*Result, 
 				if opts.ReposRoot == "" {
 					perRepo = append(perRepo, RepoSummary{Name: repo.Name, Status: "skipped",
 						Error: "no path hint and no repos_root to auto-clone into", Role: repo.EffectiveRole()})
+					topologySnapshot.Repositories = append(topologySnapshot.Repositories,
+						topologyRepositoryFailure(repo, "no path hint and no repos_root to auto-clone into"))
 					continue
 				}
 				repoPath = filepath.Join(opts.ReposRoot, repo.Name)
@@ -199,13 +217,16 @@ func Run(ctx context.Context, cfg *config.SystemConfig, opts Options) (*Result, 
 				Depth:  repo.Analysis.ShallowDepth,
 			}); err != nil {
 				perRepo = append(perRepo, RepoSummary{Name: repo.Name, Status: "clone-failed", Error: err.Error(), Role: repo.EffectiveRole()})
+				topologySnapshot.Repositories = append(topologySnapshot.Repositories, topologyRepositoryFailure(repo, err.Error()))
 				progress(fmt.Sprintf("[skip] clone %s failed: %v", repo.Name, err))
 				continue
 			}
 			status = "cloned-then-analyzed"
 		}
 		// 记下"这个 URL 的 clone root",同 url 后续 repo 条目复用(monorepo 多 service)
-		urlClonedTo[repo.URL] = repoPath
+		if repo.URL != "" {
+			urlClonedTo[repo.URL] = repoPath
+		}
 		// 记下"这个 repo 名最终解析到的本地路径",后续子模块(parent_repo 指向本仓的)
 		// 直接拼 <这个路径>/<sub_path 或 child.name> 当落地点
 		resolvedPaths[repo.Name] = repoPath
@@ -272,6 +293,7 @@ func Run(ctx context.Context, cfg *config.SystemConfig, opts Options) (*Result, 
 				Branches:          branches,
 				Role:              repo.EffectiveRole(),
 			})
+			topologySnapshot.Repositories = append(topologySnapshot.Repositories, topologyRepositoryFailure(repo, err.Error()))
 			progress(fmt.Sprintf("[skip] %s: %v", repo.Name, err))
 			continue
 		}
@@ -287,10 +309,44 @@ func Run(ctx context.Context, cfg *config.SystemConfig, opts Options) (*Result, 
 		// 没有 cmd 入口信号:保留 ra.ServiceNames 原值(单仓单服务场景,go.mod 的 module 名就是服务名)
 		// 顺带扫"下游调用 + 数据层使用"——给 service-dependency-map.yaml 自动填种子值,
 		// 用户拿到种子改比从空白起强 10 倍。即使扫漏 50% 也比 0% 强,保守 best-effort。
-		ra.DownstreamCalls, ra.DataStoreUsages = analyzer.ScanDependencies(effectiveStack, repoPath, repo.Analysis.IncludePaths)
+		ra.DownstreamCalls, ra.DataStoreUsages = analyzer.ScanDependenciesContext(ctx, effectiveStack, repoPath, repo.Analysis.IncludePaths)
+		ra.APIRoutes = analyzer.ScanAPIRoutesContext(ctx, effectiveStack, repoPath, repo.Analysis.IncludePaths)
 		// 扫"业务表 / collection / 缓存 prefix"——给 data-schema-map.yaml 自动填种子值,
 		// 多策略叠加(orm_annotation > orm_api_call > sql_literal > file_name)同 (name,kind) 去重保最高优先级。
-		ra.SchemaTables = analyzer.ScanSchema(effectiveStack, repoPath, repo.Analysis.IncludePaths)
+		ra.SchemaTables = analyzer.ScanSchemaContext(ctx, effectiveStack, repoPath, repo.Analysis.IncludePaths)
+		if repo.IsServiceNode() {
+			runnableTopologyRepos++
+			effectiveFramework := repo.Framework
+			if effectiveFramework == "" {
+				effectiveFramework = detectedFramework
+			}
+			services := effectiveTopologyServices(repo)
+			endpoints, endpointErr := analyzer.ScanEndpointsContext(ctx, analyzer.EndpointScanOptions{
+				Repo:         repo.Name,
+				Stack:        effectiveStack,
+				Framework:    effectiveFramework,
+				RepoPath:     repoPath,
+				Services:     services,
+				IncludePaths: repo.Analysis.IncludePaths,
+			})
+			if endpointErr != nil {
+				topologySnapshot.Repositories = append(topologySnapshot.Repositories, topology.RepositoryStatus{
+					Repo: repo.Name, State: "failed", Error: endpointErr.Error(),
+				})
+				progress(fmt.Sprintf("[warn] endpoint scan %s failed: %v", repo.Name, endpointErr))
+			} else {
+				endpoints = assignTopologyEndpointServices(endpoints, services)
+				ra.Endpoints = endpoints
+				topologySnapshot.Endpoints = append(topologySnapshot.Endpoints, endpoints...)
+				topologySnapshot.Repositories = append(topologySnapshot.Repositories, topology.RepositoryStatus{
+					Repo: repo.Name, State: "scanned", EndpointCount: len(endpoints),
+				})
+			}
+		} else {
+			topologySnapshot.Repositories = append(topologySnapshot.Repositories, topology.RepositoryStatus{
+				Repo: repo.Name, State: "skipped", Error: "non-service-role",
+			})
+		}
 		// role 推荐:基于仓库名 + 顶层目录 + stack 专属文件(package.json/pom.xml/go.mod/...)。
 		// 用户在 yaml 显式 set 了 role 时不覆盖(只是产物里仍记录 hint,UI 给"📍 推荐 vs 实际"对比)。
 		hint := analyzer.RecommendRole(effectiveStack, repo.Name, repoPath)
@@ -316,7 +372,164 @@ func Run(ctx context.Context, cfg *config.SystemConfig, opts Options) (*Result, 
 			repo.Name, effectiveStack, len(ra.ServiceNames), len(ra.Findings)))
 	}
 
-	return &Result{Report: report, PerRepo: perRepo}, nil
+	sortTopologySnapshot(&topologySnapshot)
+	if runnableTopologyRepos >= 2 {
+		matched := topology.Match(topology.MatchInput{
+			Endpoints: topologySnapshot.Endpoints,
+			Services:  topologySnapshot.Services,
+		})
+		allCandidates := append(append([]topology.CandidateEdge(nil), matched.Edges...), matched.Hints...)
+		topologySnapshot.Edges = topology.Merge(allCandidates, topologyOverrides(cfg.ServiceTopology.Overrides))
+	}
+
+	return &Result{Report: report, PerRepo: perRepo, Topology: topologySnapshot}, nil
+}
+
+func topologyServiceDescriptors(cfg *config.SystemConfig, repoName string) []topology.ServiceDescriptor {
+	var descriptors []topology.ServiceDescriptor
+	for _, repo := range cfg.Repos {
+		if repoName != "" && repo.Name != repoName || !repo.IsServiceNode() {
+			continue
+		}
+		for _, service := range effectiveTopologyServices(repo) {
+			descriptors = append(descriptors, topology.ServiceDescriptor{
+				Repo:    repo.Name,
+				Service: service,
+				Role:    repo.EffectiveRole(),
+				Aliases: topologyServiceAliases(repo, service, cfg.Infrastructure.Observability.K8sRuntime.ServiceMap),
+				Hosts:   topologyServiceHosts(repo.EffectiveRole(), cfg.Environments),
+			})
+		}
+	}
+	sort.Slice(descriptors, func(i, j int) bool {
+		if descriptors[i].Repo != descriptors[j].Repo {
+			return descriptors[i].Repo < descriptors[j].Repo
+		}
+		return descriptors[i].Service < descriptors[j].Service
+	})
+	return descriptors
+}
+
+func effectiveTopologyServices(repo config.Repo) []string {
+	seen := make(map[string]struct{}, len(repo.ServiceNames)+1)
+	services := make([]string, 0, len(repo.ServiceNames)+1)
+	for _, raw := range repo.ServiceNames {
+		service := strings.TrimSpace(raw)
+		if service == "" {
+			continue
+		}
+		if _, ok := seen[service]; ok {
+			continue
+		}
+		seen[service] = struct{}{}
+		services = append(services, service)
+	}
+	if len(services) == 0 && strings.TrimSpace(repo.Name) != "" {
+		services = append(services, strings.TrimSpace(repo.Name))
+	}
+	sort.Strings(services)
+	return services
+}
+
+func topologyServiceAliases(repo config.Repo, service string, serviceMap []config.K8sRuntimeServiceMapEntry) []string {
+	service = strings.TrimSpace(service)
+	aliases := []string{service}
+	if len(effectiveTopologyServices(repo)) == 1 {
+		aliases = append(aliases, strings.TrimSpace(repo.Name))
+	}
+	for _, mapping := range serviceMap {
+		if strings.TrimSpace(mapping.Service) != service {
+			continue
+		}
+		namespace := strings.TrimSpace(mapping.Namespace)
+		if namespace == "" {
+			continue
+		}
+		serviceNamespace := service + "." + namespace
+		aliases = append(aliases,
+			serviceNamespace,
+			serviceNamespace+".svc",
+			serviceNamespace+".svc.cluster.local",
+		)
+	}
+	return sortedNonEmptyStrings(aliases)
+}
+
+func assignTopologyEndpointServices(endpoints []topology.Endpoint, services []string) []topology.Endpoint {
+	result := make([]topology.Endpoint, 0, len(endpoints)*max(1, len(services)))
+	for _, endpoint := range endpoints {
+		if strings.TrimSpace(endpoint.Service) != "" || len(services) == 0 {
+			endpoint.ID = endpoint.SemanticID()
+			result = append(result, endpoint)
+			continue
+		}
+		for _, service := range services {
+			assigned := endpoint
+			assigned.Service = service
+			assigned.ID = assigned.SemanticID()
+			result = append(result, assigned)
+		}
+	}
+	return result
+}
+
+func topologyServiceHosts(role string, environments []config.Environment) []string {
+	var hosts []string
+	for _, environment := range environments {
+		switch role {
+		case config.RoleFrontend, config.RoleMobile, config.RoleAdmin:
+			hosts = append(hosts, environment.WebDomain)
+		case config.RoleGateway:
+			hosts = append(hosts, environment.APIDomain)
+		}
+	}
+	return sortedNonEmptyStrings(hosts)
+}
+
+func sortedNonEmptyStrings(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func topologyRepositoryFailure(repo config.Repo, message string) topology.RepositoryStatus {
+	if !repo.IsServiceNode() {
+		return topology.RepositoryStatus{Repo: repo.Name, State: "skipped", Error: "non-service-role"}
+	}
+	return topology.RepositoryStatus{Repo: repo.Name, State: "failed", Error: message}
+}
+
+func topologyOverrides(configured []config.ServiceTopologyOverride) []topology.Override {
+	overrides := make([]topology.Override, 0, len(configured))
+	for _, override := range configured {
+		overrides = append(overrides, topology.Override{
+			Action:      override.Action,
+			FromService: override.FromService,
+			ToService:   override.ToService,
+			Protocol:    override.Protocol,
+			Method:      override.Method,
+			Path:        override.Path,
+			RPCMethod:   override.RPCMethod,
+		})
+	}
+	return overrides
+}
+
+func sortTopologySnapshot(snapshot *topology.Snapshot) {
+	sort.Slice(snapshot.Endpoints, func(i, j int) bool { return snapshot.Endpoints[i].ID < snapshot.Endpoints[j].ID })
+	sort.Slice(snapshot.Repositories, func(i, j int) bool { return snapshot.Repositories[i].Repo < snapshot.Repositories[j].Repo })
 }
 
 // pickCloneBranch 选择 auto-clone 时的分支:CLI 显式指定 > env 对应分支 > 仓库默认。

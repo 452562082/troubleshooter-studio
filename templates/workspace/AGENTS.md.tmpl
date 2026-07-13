@@ -101,8 +101,8 @@ python3 ~/.openclaw/workspace/{{.AgentID}}/skills/<skill>/scripts/<file>.py ...
 
 1. 影响范围：用户影响 / 接口 / 错误量（环比）
 2. 关键信号：TOP 3 错误 + 次数
-3. 证据维度：日志 ✓/✗ | 指标 ✓/✗ | 代码 ✓/✗ | 数据库 ✓/✗{{if .Infrastructure.Observability.Jaeger.Enabled}} | 链路 ✓/✗{{end}}
-   对 ✗ 说明原因：N/A / 未查 / 查不到
+3. 证据维度：日志 ✓/失败/— | 指标 ✓/失败/— | 代码 ✓/失败/— | 数据库 ✓/失败/—{{if .Infrastructure.Observability.Jaeger.Enabled}} | 链路 ✓/失败/—{{end}}
+   说明：`—` 表示该维度对当前故障不适用；只有真实查询失败、应该查询但未查、或查不到关键证据时才写 `失败`。不要把不适用写成 `✗`。
 4. 证据：
    - 日志：time + trace_id + 核心报错
    - 指标：PromQL 结论

@@ -1,7 +1,7 @@
 // Package webui 把前端构建产物嵌入 tshoot 二进制，让 `tshoot serve` 一键提供 API + 前端。
 //
 // 生产构建流程：
-//  1. cd web && npm install && npm run build        # 生成 web/dist/
+//  1. cd web && npm ci --ignore-scripts && npm run build # 生成 web/dist/
 //  2. cp -R web/dist/. internal/webui/dist/         # 把产物拷贝到 embed 目标
 //  3. go build -o bin/tshoot ./cmd/tshoot
 //

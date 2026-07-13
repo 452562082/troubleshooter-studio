@@ -34,18 +34,20 @@ func (g *Generator) GenerateClaudeCode() error {
 	}
 	defer cleanup()
 
-	// 1) 生成 agents/<workspace_name>.md (subagent 定义)
-	agentName := agentSlug(g.Ctx)
-	agentMD, err := buildClaudeAgentMD(wsRoot, g.Ctx, agentName)
-	if err != nil {
-		return fmt.Errorf("build agent .md: %w", err)
-	}
 	agentsDir := filepath.Join(outDir, "agents")
 	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(agentsDir, agentName+".md"), []byte(agentMD), 0o644); err != nil {
-		return err
+	// 1) 生成两个 agent 定义:排障 agent + 验证 agent。两者共享下面同一份 skills/scripts。
+	for _, role := range internalAgentRoles() {
+		agentName := agentIDForRole(g.Ctx, role)
+		agentMD, err := buildClaudeAgentMD(wsRoot, g.Ctx, agentName, role)
+		if err != nil {
+			return fmt.Errorf("build %s agent .md: %w", role, err)
+		}
+		if err := os.WriteFile(filepath.Join(agentsDir, agentName+".md"), []byte(agentMD), 0o644); err != nil {
+			return err
+		}
 	}
 
 	// 2) 拷贝 skills/ (subagent 内通过路径引用)
@@ -64,7 +66,7 @@ func (g *Generator) GenerateClaudeCode() error {
 		}
 	}
 
-	if err := g.writeTshootMeta(outDir, "claude-code"); err != nil {
+	if err := g.writeIDEAgentMetas(outDir, "claude-code"); err != nil {
 		return fmt.Errorf("write tshoot meta: %w", err)
 	}
 	return nil
@@ -110,17 +112,48 @@ func agentSlug(ctx *Context) string {
 // id(可能是 openai-codex/gpt-5.4 之类的非 Claude 模型)。Claude Code 拿到那个值会让"你以为
 // 它会用的 Claude 模型"被替换或忽略。现在只认 target_models["claude-code"],没显式配就不写
 // model frontmatter,让 Claude Code 用 IDE 当前选的模型。
-func buildClaudeAgentMD(wsRoot string, ctx *Context, agentName string) (string, error) {
+func buildClaudeAgentMD(wsRoot string, ctx *Context, agentName string, role AgentRole) (string, error) {
 	var sb strings.Builder
 	sb.WriteString("---\n")
 	fmt.Fprintf(&sb, "name: %s\n", agentName)
-	fmt.Fprintf(&sb, "description: %s\n", ctx.System.Name)
+	fmt.Fprintf(&sb, "description: %s\n", roleDisplayName(ctx, role))
 	if m := strings.TrimSpace(ctx.Agent.TargetModels["claude-code"]); m != "" {
 		fmt.Fprintf(&sb, "model: %s\n", m)
 	}
 	sb.WriteString("---\n\n")
 
-	fmt.Fprintf(&sb, "# %s 排障机器人\n\n", ctx.System.Name)
+	fmt.Fprintf(&sb, "# %s\n\n", roleDisplayName(ctx, role))
+
+	if role == AgentRoleValidator {
+		intro := "本 agent 在 Claude Code 通过 `@" + agentName + "` 调用 subagent,负责 **验证 / 主动复现 / 修复后复查**,只输出验证报告,不做原因定位。\n\n" +
+			"运行环境:\n" +
+			"- 可直接用 Bash / Read / Glob / Grep / WebFetch / TodoWrite 工具收集验证证据\n" +
+			"- MCP server 已写入 `~/.claude.json` user-scope dotfile,Claude Code 启动自动加载,需要取日志 / trace / 配置证据时直接调对应 mcp_server\n" +
+			"- skills 脚本用**绝对路径**调用:`python3 ~/.claude/skills/" + agentName + "/<skill>/scripts/<file>.py ...` —— 当前 cwd 不一定在本 agent 的 skills 目录\n" +
+			"- 不读取业务源码定位函数/文件行号/补丁点;代码分析和原因判断交给排障 Agent\n" +
+			"- 第一动作是 Read `~/.claude/skills/" + agentName + "/bug-verifier/SKILL.md`,按其中流程复现、回归并输出验证报告"
+
+		writeIDEValidatorAgentBody(&sb, IDEPlatform{
+			Intro:                  intro,
+			SkillsScriptPathPrefix: "~/.claude/skills/" + agentName,
+		})
+		return sb.String(), nil
+	}
+	if role == AgentRoleFixer {
+		fmt.Fprintf(&sb, "本 agent 在 Claude Code 通过 `@%s` 调用 subagent,负责 **修复 Bug / 创建修复分支 / 提交并推送**,只在用户明确触发修复后执行。\n\n", agentName)
+		sb.WriteString("第一动作是 Read `~/.claude/skills/" + agentName + "/bug-fixer/SKILL.md`,按其中流程执行。\n\n")
+		sb.WriteString("## 强制流程\n\n")
+		sb.WriteString("1. 确认当前工作区已经在目标环境分支；如果不是或无法确认，停止并说明。\n")
+		sb.WriteString("2. 从当前环境分支创建独立修复分支，分支名使用 `fix/bug-<source>-<id>-<short>` 风格。\n")
+		sb.WriteString("3. 基于验证证据和排障结论做最小必要修改，不做无关重构。\n")
+		sb.WriteString("4. 运行相关测试或构建；无法运行时说明原因和残余风险。\n")
+		sb.WriteString("5. 提交并推送修复分支；完成后告知用户分支、提交、测试结果和需要部署的分支。\n\n")
+		sb.WriteString("## 边界\n\n")
+		sb.WriteString("- 如果工作区有用户未提交改动，停止并说明，不要覆盖。\n")
+		sb.WriteString("- 不自行部署，不修改生产配置，不执行破坏性命令。\n")
+		sb.WriteString("- 输出聚焦修复结果、验证方式和部署提示。\n")
+		return sb.String(), nil
+	}
 
 	intro := "本 agent 在 Claude Code 通过 `@" + agentName + "` 调用 subagent,做 **只读** 排障(日志 / 指标 / trace / 配置 / 代码),**不**直接落地修改。\n\n" +
 		"运行环境:\n" +
@@ -145,11 +178,12 @@ func copyDirRecursive(src, dst string) error {
 		rel, _ := filepath.Rel(src, p)
 		target := filepath.Join(dst, rel)
 		if d.IsDir() {
+			if shouldSkipGeneratedArtifact(d.Name()) {
+				return fs.SkipDir
+			}
 			return os.MkdirAll(target, 0o755)
 		}
-		// Skill scripts carry their own pytest files (e.g. test_nacos_mcp.py) for repo-side
-		// CI; those are dev artifacts and must not ship into the generated bot workspace.
-		if name := d.Name(); strings.HasPrefix(name, "test_") && strings.HasSuffix(name, ".py") {
+		if shouldSkipGeneratedArtifact(d.Name()) {
 			return nil
 		}
 		data, err := os.ReadFile(p)

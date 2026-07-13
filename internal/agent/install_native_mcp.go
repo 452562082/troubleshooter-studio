@@ -122,13 +122,23 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 		}
 	}
 
+	codeGraphBinPath := ""
+	if CfgUsesCodeGraph(cfg) {
+		var err error
+		codeGraphBinPath, err = EnsureCodeGraphInstalled(emit)
+		if err != nil {
+			emit(fmt.Sprintf("[warn] CodeGraph 安装失败,跳过 MCP 注册并启用 rg/read fallback: %v", err))
+		}
+	}
+
 	// 避免 server_key + tool_name 拼起来超过 IDE 60 字符的 tool 名限制。
 	// IDE 走 PruneEmpty=true 模式 —— 避免把 "" 当真值喂给后端进程触发无效连接。
 	servers := BuildMCPServers(cfg, MCPBuildOptions{
-		AgentID:            cfg.MCPKeyPrefix(),
-		PruneEmpty:         true,
-		KafkaMCPBinaryPath: kafkaBinPath,
-		NacosMCPScriptPath: nacosScriptPath,
+		AgentID:             cfg.MCPKeyPrefix(),
+		PruneEmpty:          true,
+		KafkaMCPBinaryPath:  kafkaBinPath,
+		NacosMCPScriptPath:  nacosScriptPath,
+		CodeGraphBinaryPath: codeGraphBinPath,
 	}, get)
 
 	if t == TargetCodex {
@@ -187,9 +197,10 @@ const mcpWriteMaxRetries = 3
 //     清掉"前缀属于本系统但本次不再生成"的死 key(env 缩容 / 数据层删了 / multi-source nacos
 //     删 source / system.id 改名 等场景留下的死引用)。每条删的会打 [info] 让用户感知。
 //     用户手加同前缀的别名会被一起清 — 不常见,且 [info] log 兜底,比死 key 永远留更干净。
-//   - mergeOnlyNew=true(无 creds 兜底):existing 已有的派生 key **不动**(env 段保持
-//     首次部署灌入的真凭证),只 add existing 没有的(数据层 mcp 首次注册场景)。这条路径下
-//     **不做 prefix 清理** — 因为没 creds 时拿不到完整意图,清了可能误删用户在线生效的 mcp。
+//   - mergeOnlyNew=true(无 creds 兜底):existing 已有的凭证型派生 key **不动**(env 段保持
+//     首次部署灌入的真凭证),只 add existing 没有的(数据层 mcp 首次注册场景)。CodeGraph
+//     不含用户凭证,其固定 key 例外地按本次 ensure 结果覆盖或删除,避免 fallback 时残留死引用。
+//     除这个固定 key 外不做 prefix 清理 — 没 creds 时拿不到完整意图,清了可能误删在线 mcp。
 //
 // agentPrefix 通常是 `<system.id>-`(BuildMCPServers 的 AgentID + "-"),空串关闭 prefix 清理。
 func writeMCPServersWithVerify(path string, servers map[string]any, maxRetries int, mergeOnlyNew bool, agentPrefix string) error {
@@ -203,7 +214,8 @@ func writeMCPServersWithVerify(path string, servers map[string]any, maxRetries i
 			existing = map[string]any{}
 		}
 		if mergeOnlyNew {
-			// 只 add existing 没有的派生 key,不删/不覆盖 — 保护老条目的 env 段真凭证
+			reconcileCodeGraphServer(existing, servers, strings.TrimSuffix(agentPrefix, "-"))
+			// 除无凭证的 CodeGraph 固定 key 外,只 add 不删/不覆盖 — 保护老条目的 env 真凭证。
 			for k, v := range servers {
 				if _, hit := existing[k]; !hit {
 					existing[k] = v
@@ -326,29 +338,51 @@ func pruneLegacyClaudeSettingsMCP(legacyPath string, servers map[string]any) err
 // 用户手改 toml 时只要保留两行 marker 就能继续重装;两行都丢了 install 报错而不是默默
 // 拼到末尾(避免无限堆叠出多个 [mcp_servers.*] 段、codex 加载时冲突)。
 func injectMCPIntoCodexAgentTOML(root string, cfg *config.SystemConfig, servers map[string]any) error {
-	agentName := cfg.ResolveID()
-	tomlPath := filepath.Join(root, "agents", agentName+".toml")
-	raw, err := os.ReadFile(tomlPath)
-	if err != nil {
-		return fmt.Errorf("read codex agent toml %s: %w", tomlPath, err)
-	}
+	for _, agentName := range codexAgentNamesForConfig(cfg) {
+		tomlPath := filepath.Join(root, "agents", agentName+".toml")
+		raw, err := os.ReadFile(tomlPath)
+		if err != nil {
+			if os.IsNotExist(err) && agentName != cfg.ResolveID() {
+				continue
+			}
+			return fmt.Errorf("read codex agent toml %s: %w", tomlPath, err)
+		}
 
-	patched, err := replaceCodexMCPRegion(string(raw), renderCodexMCPSection(servers))
-	if err != nil {
-		return fmt.Errorf("patch codex agent toml %s: %w", tomlPath, err)
-	}
+		patched, err := replaceCodexMCPRegion(string(raw), renderCodexMCPSection(servers))
+		if err != nil {
+			return fmt.Errorf("patch codex agent toml %s: %w", tomlPath, err)
+		}
 
-	// 0o600:codex agent toml 的 [mcp_servers.*.env] 段含 plaintext creds(同 ~/.claude.json
-	// / ~/.cursor/mcp.json),不能 world-readable。
-	// 注意:os.WriteFile 在文件**已存在**时不改 mode,而本函数总是 patch 已经存在的 toml,
-	// 所以必须 chmod 显式收 mode 否则继承先前 install_native.go 第一次写时的 0o644。
-	if err := os.WriteFile(tomlPath, []byte(patched), 0o600); err != nil {
-		return fmt.Errorf("write codex agent toml %s: %w", tomlPath, err)
-	}
-	if err := os.Chmod(tomlPath, 0o600); err != nil {
-		return fmt.Errorf("chmod codex agent toml %s: %w", tomlPath, err)
+		// 0o600:codex agent toml 的 [mcp_servers.*.env] 段含 plaintext creds(同 ~/.claude.json
+		// / ~/.cursor/mcp.json),不能 world-readable。
+		// 注意:os.WriteFile 在文件**已存在**时不改 mode,而本函数总是 patch 已经存在的 toml,
+		// 所以必须 chmod 显式收 mode 否则继承先前 install_native.go 第一次写时的 0o644。
+		if err := os.WriteFile(tomlPath, []byte(patched), 0o600); err != nil {
+			return fmt.Errorf("write codex agent toml %s: %w", tomlPath, err)
+		}
+		if err := os.Chmod(tomlPath, 0o600); err != nil {
+			return fmt.Errorf("chmod codex agent toml %s: %w", tomlPath, err)
+		}
 	}
 	return nil
+}
+
+func codexAgentNamesForConfig(cfg *config.SystemConfig) []string {
+	troubleshooter := cfg.ResolveID()
+	base := strings.TrimSpace(cfg.System.ID)
+	if base == "" {
+		base = strings.TrimSuffix(troubleshooter, "-troubleshooter")
+	}
+	validator := base + "-validator"
+	fixer := base + "-fixer"
+	names := []string{troubleshooter}
+	for _, candidate := range []string{validator, fixer} {
+		if strings.TrimSpace(candidate) == "" || candidate == troubleshooter {
+			continue
+		}
+		names = append(names, candidate)
+	}
+	return names
 }
 
 // replaceCodexMCPRegion 找 begin..end 两行 marker,把中间(含两行)整体换成

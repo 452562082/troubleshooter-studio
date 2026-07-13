@@ -113,6 +113,15 @@ func TestFindOpenclawCLI_AllMiss(t *testing.T) {
 func TestInstallNativeOpenclaw_FreshInstall(t *testing.T) {
 	cfg := nacosCfg()
 	staging, fakeHome := setupOpenclawStaging(t, cfg)
+	addOpenclawStagingSkills(t, staging, []string{
+		"api-verifier",
+		"attachment-evidence-verifier",
+		"bug-verifier",
+		"frontend-repro-investigator",
+		"incident-investigator",
+		"recent-changes",
+		"routing",
+	})
 
 	creds := map[string]string{
 		"CC_ADDR_DEV":       "nacos-dev.example.com:8848",
@@ -142,8 +151,15 @@ func TestInstallNativeOpenclaw_FreshInstall(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(wsDir, discover.MetaFilename)); err != nil {
 		t.Errorf("workspace tshoot.json missing: %v", err)
 	}
+	discovered, err := discover.Scan([]string{filepath.Join(fakeHome, ".openclaw", "workspace")})
+	if err != nil {
+		t.Fatalf("discover openclaw workspace: %v", err)
+	}
+	if len(discovered) != 1 {
+		t.Fatalf("discover should see one bot, got %d: %+v", len(discovered), discovered)
+	}
 
-	// openclaw.json 应有 agents.list[shop-troubleshooter] + mcp.servers
+	// openclaw.json 应只暴露主机器人;验证能力由主机器人内部 prompt/skill 承载。
 	cfgPath := filepath.Join(fakeHome, ".openclaw", "openclaw.json")
 	// H1 回归护栏:openclaw.json 的 mcp.servers env 段含 plaintext creds,必须 0o600
 	// (对齐 IDE 三家 install_e2e_test.go 的 0o600 断言)。world-readable 0o644 是真 leak。
@@ -157,7 +173,7 @@ func TestInstallNativeOpenclaw_FreshInstall(t *testing.T) {
 	if len(agents) != 1 {
 		t.Fatalf("agents.list want 1 entry, got %d: %+v", len(agents), agents)
 	}
-	a := agents[0].(map[string]any)
+	a := findAgentByID(t, agents, "shop-troubleshooter")
 	if a["id"] != "shop-troubleshooter" {
 		t.Errorf("agent.id want shop-troubleshooter, got %v", a["id"])
 	}
@@ -167,6 +183,18 @@ func TestInstallNativeOpenclaw_FreshInstall(t *testing.T) {
 	if !strings.HasSuffix(a["workspace"].(string), "/.openclaw/workspace/shop-troubleshooter") {
 		t.Errorf("agent.workspace path wrong: %v", a["workspace"])
 	}
+	assertFileExists(t, filepath.Join(wsDir, "agents", "shop-troubleshooter.md"))
+	assertFileExists(t, filepath.Join(wsDir, "agents", "shop-validator.md"))
+	assertFileExists(t, filepath.Join(wsDir, "skills", "shop-troubleshooter", "incident-investigator", "SKILL.md"))
+	assertFileExists(t, filepath.Join(wsDir, "skills", "shop-troubleshooter", "recent-changes", "SKILL.md"))
+	assertFileMissing(t, filepath.Join(wsDir, "skills", "shop-troubleshooter", "attachment-evidence-verifier", "SKILL.md"))
+	assertFileMissing(t, filepath.Join(wsDir, "skills", "shop-troubleshooter", "bug-verifier", "SKILL.md"))
+	assertFileExists(t, filepath.Join(wsDir, "skills", "shop-validator", "api-verifier", "SKILL.md"))
+	assertFileExists(t, filepath.Join(wsDir, "skills", "shop-validator", "attachment-evidence-verifier", "SKILL.md"))
+	assertFileExists(t, filepath.Join(wsDir, "skills", "shop-validator", "bug-verifier", "SKILL.md"))
+	assertFileExists(t, filepath.Join(wsDir, "skills", "shop-validator", "frontend-repro-investigator", "SKILL.md"))
+	assertFileMissing(t, filepath.Join(wsDir, "skills", "shop-validator", "incident-investigator", "SKILL.md"))
+	assertFileMissing(t, filepath.Join(wsDir, "skills", "shop-validator", "recent-changes", "SKILL.md"))
 
 	// mcp.servers per env
 	//
@@ -207,6 +235,115 @@ func TestInstallNativeOpenclaw_FreshInstall(t *testing.T) {
 	info, _ := os.Stat(envFile)
 	if info.Mode().Perm() != 0o600 {
 		t.Errorf(".env mode want 0600, got %o", info.Mode().Perm())
+	}
+}
+
+func TestInstallNativeOpenclaw_CodeGraphEnsureFailureIsNonBlocking(t *testing.T) {
+	oldGOOS := codeGraphGOOS
+	codeGraphGOOS = "unsupported"
+	t.Cleanup(func() { codeGraphGOOS = oldGOOS })
+
+	cfg := nacosCfg()
+	cfg.Infrastructure = config.Infrastructure{}
+	cfg.CodeIntelligence = config.CodeIntelligence{Enabled: true, Provider: "codegraph"}
+	staging, fakeHome := setupOpenclawStaging(t, cfg)
+	ocConfigPath := filepath.Join(fakeHome, ".openclaw", "openclaw.json")
+	if err := os.MkdirAll(filepath.Dir(ocConfigPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, ocConfigPath, map[string]any{
+		"mcp": map[string]any{
+			"servers": map[string]any{
+				"shop-codegraph": map[string]any{"command": "/stale/codegraph"},
+			},
+		},
+	})
+
+	stderrPath := filepath.Join(t.TempDir(), "stderr.log")
+	stderr, err := os.Create(stderrPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = stderr
+	t.Cleanup(func() {
+		os.Stderr = oldStderr
+		_ = stderr.Close()
+	})
+
+	installErr := InstallNativeOpenclaw(context.Background(), staging, InstallOpenclawOptions{SkipGatewayRestart: true})
+	os.Stderr = oldStderr
+	if err := stderr.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if installErr != nil {
+		t.Fatalf("InstallNativeOpenclaw() error = %v", installErr)
+	}
+	stderrBytes, err := os.ReadFile(stderrPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(stderrBytes); !strings.Contains(got, "CodeGraph 安装失败,跳过 MCP 注册并启用 rg/read fallback") {
+		t.Fatalf("missing CodeGraph fallback warning on stderr: %q", got)
+	}
+	root := readJSON(t, ocConfigPath)
+	servers := getMap(root, "mcp", "servers")
+	if _, exists := servers["shop-codegraph"]; exists {
+		t.Fatalf("CodeGraph server registered after ensure failure: %#v", servers)
+	}
+}
+
+func TestInstallNativeOpenclaw_CodeGraphDisabledRemovesStaleServer(t *testing.T) {
+	cfg := nacosCfg()
+	cfg.Infrastructure = config.Infrastructure{}
+	staging, fakeHome := setupOpenclawStaging(t, cfg)
+	ocConfigPath := filepath.Join(fakeHome, ".openclaw", "openclaw.json")
+	if err := os.MkdirAll(filepath.Dir(ocConfigPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, ocConfigPath, map[string]any{
+		"mcp": map[string]any{
+			"servers": map[string]any{
+				"shop-codegraph": map[string]any{"command": "/stale/codegraph"},
+			},
+		},
+	})
+
+	if err := InstallNativeOpenclaw(context.Background(), staging, InstallOpenclawOptions{SkipGatewayRestart: true}); err != nil {
+		t.Fatalf("InstallNativeOpenclaw() error = %v", err)
+	}
+	root := readJSON(t, ocConfigPath)
+	servers := getMap(root, "mcp", "servers")
+	if _, exists := servers["shop-codegraph"]; exists {
+		t.Fatalf("disabled CodeGraph left stale server registered: %#v", servers)
+	}
+}
+
+func addOpenclawStagingSkills(t *testing.T, staging string, names []string) {
+	t.Helper()
+	wsTpl := filepath.Join(staging, "templates", "workspace-template")
+	for _, name := range names {
+		dir := filepath.Join(wsTpl, "skills", name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("# "+name+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func assertFileExists(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected file %s: %v", path, err)
+	}
+}
+
+func assertFileMissing(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected missing file %s, err=%v", path, err)
 	}
 }
 
@@ -261,7 +398,7 @@ func TestInstallNativeOpenclaw_AgentNotDuplicated(t *testing.T) {
 	data := readJSON(t, cfgPath)
 	agents := getList(data, "agents", "list")
 	if len(agents) != 1 {
-		t.Errorf("二次 install 后 agents.list 应仍只有 1 条(去重),got %d", len(agents))
+		t.Errorf("二次 install 后 agents.list 应仍只有 1 条主机器人,got %d", len(agents))
 	}
 }
 
@@ -469,6 +606,52 @@ func TestInstallNativeOpenclaw_PreservesExistingAgents(t *testing.T) {
 	}
 }
 
+func TestInstallNativeOpenclaw_NoCredsPreservesExistingMCPEnv(t *testing.T) {
+	cfg := &config.SystemConfig{
+		System:       config.System{ID: "shop", Name: "Shop"},
+		Agent:        config.Agent{Name: "Shop Bot", Model: "openai/gpt-4"},
+		Environments: []config.Environment{{ID: "dev"}},
+		Meta:         config.Meta{SchemaVersion: "0.1"},
+	}
+	cfg.Infrastructure.Observability.Jaeger.Enabled = true
+	staging, fakeHome := setupOpenclawStaging(t, cfg)
+
+	cfgDir := filepath.Join(fakeHome, ".openclaw")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	preExisting := map[string]any{
+		"mcp": map[string]any{
+			"servers": map[string]any{
+				"shop-jaeger-dev": map[string]any{
+					"command": "uvx",
+					"args":    []any{"opentelemetry-mcp"},
+					"env": map[string]any{
+						"BACKEND_TYPE": "jaeger",
+						"BACKEND_URL":  "http://jaeger-dev.example.com/search",
+					},
+				},
+			},
+		},
+	}
+	mb, _ := json.MarshalIndent(preExisting, "", "  ")
+	if err := os.WriteFile(filepath.Join(cfgDir, "openclaw.json"), mb, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := InstallNativeOpenclaw(context.Background(), staging, InstallOpenclawOptions{SkipGatewayRestart: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	data := readJSON(t, filepath.Join(cfgDir, "openclaw.json"))
+	servers := getMap(data, "mcp", "servers")
+	jaeger, _ := servers["shop-jaeger-dev"].(map[string]any)
+	env, _ := jaeger["env"].(map[string]any)
+	if got := env["BACKEND_URL"]; got != "http://jaeger-dev.example.com/search" {
+		t.Errorf("无凭据重装不应覆盖已有 Jaeger URL, got %v", got)
+	}
+}
+
 // ── 测试小工具 ──
 
 func readJSON(t *testing.T, path string) map[string]any {
@@ -503,4 +686,19 @@ func getList(root map[string]any, keys ...string) []any {
 	parent := getMap(root, keys[:len(keys)-1]...)
 	list, _ := parent[keys[len(keys)-1]].([]any)
 	return list
+}
+
+func findAgentByID(t *testing.T, agents []any, id string) map[string]any {
+	t.Helper()
+	for _, item := range agents {
+		m, _ := item.(map[string]any)
+		if m == nil {
+			continue
+		}
+		if got, _ := m["id"].(string); got == id {
+			return m
+		}
+	}
+	t.Fatalf("missing agent %s in %+v", id, agents)
+	return nil
 }

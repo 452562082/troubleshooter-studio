@@ -4,12 +4,17 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/xiaolong/troubleshooter-studio/internal/analyzer"
+	"github.com/xiaolong/troubleshooter-studio/internal/analyzerpipe"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
+	"github.com/xiaolong/troubleshooter-studio/internal/topology"
 )
 
 // projectRoot 返回 troubleshooter-studio 仓库根目录（便于测试定位 templates/ 与 examples/）
@@ -30,6 +35,470 @@ func loadCfg(t *testing.T, rel string) *config.SystemConfig {
 		t.Fatalf("load %s: %v", rel, err)
 	}
 	return cfg
+}
+
+func writeAnalysisResult(t *testing.T, result analyzerpipe.Result) string {
+	t.Helper()
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal analysis result: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "analysis.json")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write analysis result: %v", err)
+	}
+	return path
+}
+
+func TestGenerate_ServiceTopology(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	out := t.TempDir()
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+	result := analyzerpipe.Result{
+		Report: analyzer.Report{Repos: []analyzer.RepoAnalysis{{
+			Name:            "mall-web",
+			DownstreamCalls: []analyzer.DownstreamCall{{Target: "legacy-bff"}},
+		}}},
+		Topology: topology.Snapshot{
+			SchemaVersion: topology.SchemaVersion,
+			Services: []topology.ServiceDescriptor{
+				{Repo: "mall-order", Service: "mall-order", Role: "backend"},
+				{Repo: "mall-web", Service: "mall-web", Role: "frontend"},
+				{Repo: "mall-bff", Service: "mall-bff", Role: "gateway"},
+			},
+			Endpoints: []topology.Endpoint{
+				{ID: "mall-order:in", Repo: "mall-order", Service: "mall-order", Direction: topology.DirectionInbound, Protocol: "http", Method: "POST", Path: "/internal/orders", Location: "internal/order.go:42", Source: "gin-route"},
+				{ID: "mall-web:out", Repo: "mall-web", Service: "mall-web", Direction: topology.DirectionOutbound, Protocol: "http", Method: "GET", Path: "/api/orders", Location: "src/api/order.ts:18", Source: "fetch"},
+				{ID: "mall-bff:in", Repo: "mall-bff", Service: "mall-bff", Direction: topology.DirectionInbound, Protocol: "http", Method: "GET", Path: "/api/orders", Location: "routes/api.php:7", Source: "laravel-route"},
+			},
+			Edges: []topology.CandidateEdge{
+				{FromEndpoint: "mall-bff:out", ToEndpoint: "mall-order:in", FromService: "mall-bff", ToService: "mall-order", Protocol: "http", Method: "POST", Path: "/internal/orders", Confidence: .74, Status: "candidate", Reasons: []string{"path_exact", "method_exact"}},
+				{FromEndpoint: "mall-web:out", ToEndpoint: "legacy-bff:in", FromService: "mall-web", ToService: "legacy-bff", Protocol: "http", Method: "GET", Path: "/legacy", Confidence: .91, Status: "rejected", Reasons: []string{"human_override_reject"}},
+				{FromEndpoint: "mall-bff:old", ToEndpoint: "mall-order:old", FromService: "mall-bff", ToService: "mall-order", Protocol: "http", Method: "GET", Path: "/old", Confidence: 0, Status: "stale", Reasons: []string{"human_override_confirm_stale"}},
+				{FromEndpoint: "mall-web:out", ToEndpoint: "mall-bff:in", FromService: "mall-web", ToService: "mall-bff", Protocol: "http", Method: "GET", Path: "/api/orders", Confidence: .98, Status: "automatic", Reasons: []string{"target_service_exact", "method_path_exact"}},
+			},
+			Repositories: []topology.RepositoryStatus{
+				{Repo: "mall-web", State: "analyzed", EndpointCount: 1},
+				{Repo: "mall-bff", State: "failed", Error: "fixture failure"},
+			},
+		},
+	}
+	if err := g.LoadAnalysis(writeAnalysisResult(t, result)); err != nil {
+		t.Fatalf("load analysis result: %v", err)
+	}
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	refs := filepath.Join(out, "templates/workspace-template/skills/routing/references")
+	serviceTopology := readFile(t, filepath.Join(refs, "service-topology.yaml"))
+	var serviceTopologyDocument map[string]any
+	if err := yaml.Unmarshal([]byte(serviceTopology), &serviceTopologyDocument); err != nil {
+		t.Fatalf("service topology is not valid yaml: %v\n%s", err, serviceTopology)
+	}
+	for _, want := range []string{`from: "mall-web"`, `to: "mall-bff"`, `status: "automatic"`, `repo: "mall-web"`, `role: "frontend"`, `mall-web:out>mall-bff:in`} {
+		if !strings.Contains(serviceTopology, want) {
+			t.Fatalf("service topology missing %q:\n%s", want, serviceTopology)
+		}
+	}
+	for _, forbidden := range []string{`to: "legacy-bff"`, `status: "candidate"`, `status: "rejected"`, `status: "stale"`} {
+		if strings.Contains(serviceTopology, forbidden) {
+			t.Fatalf("formal topology contains %q:\n%s", forbidden, serviceTopology)
+		}
+	}
+
+	evidence := readFile(t, filepath.Join(refs, "endpoint-evidence.yaml"))
+	var evidenceDocument map[string]any
+	if err := yaml.Unmarshal([]byte(evidence), &evidenceDocument); err != nil {
+		t.Fatalf("endpoint evidence is not valid yaml: %v\n%s", err, evidence)
+	}
+	for _, want := range []string{`status: "automatic"`, `status: "candidate"`, `status: "rejected"`, `status: "stale"`, `src/api/order.ts:18`, `state: "failed"`, `fixture failure`} {
+		if !strings.Contains(evidence, want) {
+			t.Fatalf("endpoint evidence missing %q:\n%s", want, evidence)
+		}
+	}
+	if strings.Index(evidence, `- "method_path_exact"`) > strings.Index(evidence, `- "target_service_exact"`) {
+		t.Fatalf("edge reasons are not sorted:\n%s", evidence)
+	}
+	if strings.Index(evidence, `id: "mall-bff:in"`) > strings.Index(evidence, `id: "mall-web:out"`) {
+		t.Fatalf("endpoints are not sorted by id:\n%s", evidence)
+	}
+
+	deps := readFile(t, filepath.Join(refs, "service-dependency-map.yaml"))
+	if !strings.Contains(deps, `- "mall-bff"`) || strings.Contains(deps, `legacy-bff`) {
+		t.Fatalf("dependency projection drifted:\n%s", deps)
+	}
+
+	routing := readFile(t, filepath.Join(out, "templates/workspace-template/skills/routing/SKILL.md"))
+	for _, want := range []string{"references/service-topology.yaml", "references/endpoint-evidence.yaml"} {
+		if !strings.Contains(routing, want) {
+			t.Fatalf("routing skill missing %q:\n%s", want, routing)
+		}
+	}
+}
+
+func TestLoadAnalysisResult_ServiceTopologyCopiesAndProjectsOnce(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), t.TempDir())
+	result := &analyzerpipe.Result{Topology: topology.Snapshot{
+		SchemaVersion: topology.SchemaVersion,
+		Services: []topology.ServiceDescriptor{
+			{Repo: "mall-web", Service: "mall-web", Role: "frontend"},
+			{Repo: "mall-bff", Service: "mall-bff", Role: "gateway"},
+		},
+		Edges: []topology.CandidateEdge{
+			{FromService: "mall-web", ToService: "mall-order", Protocol: "http", Method: "GET", Path: "/candidate", Status: "candidate", Confidence: .74},
+			{FromService: "mall-web", ToService: "mall-bff", Protocol: "http", Method: "GET", Path: "/api/orders", Status: "automatic", Confidence: .98, Reasons: []string{"target_service_exact", "method_path_exact"}},
+		},
+	}}
+
+	g.LoadAnalysisResult(result)
+	if got := result.Topology.Edges[1].Reasons; len(got) != 2 || got[0] != "target_service_exact" {
+		t.Fatalf("LoadAnalysisResult mutated caller snapshot: %#v", got)
+	}
+	result.Topology.Edges[1].Reasons[0] = "caller_mutation"
+	if got := g.Ctx.Topology.Edges[0].Reasons; len(got) != 2 || got[0] != "method_path_exact" {
+		t.Fatalf("context did not keep sorted independent copy: %#v", got)
+	}
+	if len(g.Ctx.ServiceGraph.Edges) != 1 || g.Ctx.ServiceGraph.Edges[0].To != "mall-bff" || g.Ctx.ServiceGraph.Edges[0].Status != "automatic" {
+		t.Fatalf("formal graph includes non-formal status: %#v", g.Ctx.ServiceGraph.Edges)
+	}
+}
+
+func TestGenerate_ServiceTopologyEmptyDocuments(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	out := t.TempDir()
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+	result := analyzerpipe.Result{Topology: topology.Snapshot{SchemaVersion: topology.SchemaVersion}}
+	if err := g.LoadAnalysis(writeAnalysisResult(t, result)); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Generate(); err != nil {
+		t.Fatal(err)
+	}
+
+	refs := filepath.Join(out, "templates/workspace-template/skills/routing/references")
+	for _, name := range []string{"service-topology.yaml", "endpoint-evidence.yaml"} {
+		data := readFile(t, filepath.Join(refs, name))
+		var document map[string]any
+		if err := yaml.Unmarshal([]byte(data), &document); err != nil {
+			t.Fatalf("%s is not valid yaml: %v\n%s", name, err, data)
+		}
+		if _, ok := document["edges"]; !ok {
+			t.Fatalf("%s missing empty edges collection:\n%s", name, data)
+		}
+	}
+}
+
+func TestGenerate_ServiceDependencyTopologyAttemptedEmptyDoesNotFallback(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	out := t.TempDir()
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+	result := analyzerpipe.Result{
+		Report: analyzer.Report{Repos: []analyzer.RepoAnalysis{{
+			Name:            "mall-web",
+			DownstreamCalls: []analyzer.DownstreamCall{{Target: "legacy-bff"}},
+		}}},
+		Topology: topology.Snapshot{SchemaVersion: topology.SchemaVersion},
+	}
+	if err := g.LoadAnalysis(writeAnalysisResult(t, result)); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	deps := readFile(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/service-dependency-map.yaml"))
+	if strings.Contains(deps, "legacy-bff") {
+		t.Fatalf("attempted empty topology must not fall back to legacy scan:\n%s", deps)
+	}
+}
+
+func TestGenerate_ServiceDependencyLegacyAnalysisFallback(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	out := t.TempDir()
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+	g.LoadAnalysisReport(analyzer.Report{Repos: []analyzer.RepoAnalysis{{
+		Name:            "mall-web",
+		DownstreamCalls: []analyzer.DownstreamCall{{Target: "mall-bff"}},
+	}}})
+	if err := g.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	deps := readFile(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/service-dependency-map.yaml"))
+	if !strings.Contains(deps, `- "mall-bff"`) {
+		t.Fatalf("legacy analysis downstream fallback missing:\n%s", deps)
+	}
+}
+
+func TestGenerate_ServiceDependencyTopologyUsesCanonicalCatalogServices(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	cfg.Repos[0].ServiceNames = []string{" mall-web ", "mall-web", "legacy-web"}
+	cfg.Repos[1].ServiceNames = []string{" mall-bff ", "mall-bff"}
+	cfg.Repos[2].ServiceNames = []string{"mall-order", " mall-order "}
+
+	out := t.TempDir()
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+	g.LoadAnalysisResult(&analyzerpipe.Result{Topology: topology.Snapshot{
+		SchemaVersion: topology.SchemaVersion,
+		Services: []topology.ServiceDescriptor{
+			{Repo: "mall-web", Service: "mall-web", Role: config.RoleFrontend},
+			{Repo: "mall-bff", Service: "mall-bff", Role: config.RoleGateway},
+			{Repo: "mall-order", Service: "mall-order", Role: config.RoleBackend},
+		},
+		Edges: []topology.CandidateEdge{
+			{FromService: "mall-web", ToService: "mall-bff", Protocol: "http", Method: "GET", Path: "/api/orders", Status: "automatic", Confidence: .98},
+			{FromService: "mall-bff", ToService: "mall-order", Protocol: "http", Method: "POST", Path: "/internal/orders", Status: "automatic", Confidence: .97},
+		},
+	}})
+	if err := g.Generate(); err != nil {
+		t.Fatal(err)
+	}
+
+	refs := filepath.Join(out, "templates/workspace-template/skills/routing/references")
+	formal := yamlMappingKeys(t, readFile(t, filepath.Join(refs, "service-topology.yaml")), "services")
+	compatibility := yamlMappingKeys(t, readFile(t, filepath.Join(refs, "service-dependency-map.yaml")), "services")
+	if !reflect.DeepEqual(compatibility, formal) {
+		t.Fatalf("compatibility services = %q, want exact formal services %q", compatibility, formal)
+	}
+}
+
+func TestGenerate_ServiceDependencyLegacyCanonicalizesEffectiveRepoServices(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	cfg.Repos[0].ServiceNames = []string{" legacy-web ", "legacy-web", " shared ", " "}
+	cfg.Repos[1].ServiceNames = []string{" ", "\t"}
+	cfg.Repos[2].ServiceNames = []string{" mall-order ", "mall-order", "shared"}
+
+	out := t.TempDir()
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+	g.LoadAnalysisReport(analyzer.Report{Repos: []analyzer.RepoAnalysis{{
+		Name:            "mall-web",
+		DownstreamCalls: []analyzer.DownstreamCall{{Target: "mall-bff"}},
+	}}})
+	if err := g.Generate(); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(out, "templates/workspace-template/skills/routing/references/service-dependency-map.yaml")
+	services := yamlMappingKeys(t, readFile(t, path), "services")
+	want := []string{"legacy-web", "mall-bff", "mall-order", "shared"}
+	if !reflect.DeepEqual(services, want) {
+		t.Fatalf("legacy compatibility services = %q, want canonical effective services %q", services, want)
+	}
+}
+
+func TestGenerate_TopologyArtifactsQuoteDynamicYAMLKeys(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	cfg.Repos[0].ServiceNames = []string{" null ", "null"}
+	cfg.Repos[1].ServiceNames = []string{" true ", "true"}
+	cfg.Repos[2].ServiceNames = []string{"api: v1", " api: v1 "}
+	cfg.Repos = append(cfg.Repos, config.Repo{Name: "false", Stack: "markdown", Role: config.RoleCommonLib})
+
+	out := t.TempDir()
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+	g.LoadAnalysisResult(&analyzerpipe.Result{Topology: topology.Snapshot{
+		SchemaVersion: topology.SchemaVersion,
+		Services: []topology.ServiceDescriptor{
+			{Repo: "mall-web", Service: "null", Role: config.RoleFrontend},
+			{Repo: "mall-bff", Service: "true", Role: config.RoleGateway},
+			{Repo: "mall-order", Service: "api: v1", Role: config.RoleBackend},
+		},
+		Edges: []topology.CandidateEdge{
+			{FromService: "null", ToService: "true", Protocol: "http", Method: "GET", Path: "/api/orders", Status: "automatic", Confidence: .98},
+			{FromService: "true", ToService: "api: v1", Protocol: "http", Method: "POST", Path: "/internal/orders", Status: "automatic", Confidence: .97},
+		},
+	}})
+	if err := g.Generate(); err != nil {
+		t.Fatal(err)
+	}
+
+	refs := filepath.Join(out, "templates/workspace-template/skills/routing/references")
+	wantServices := []string{"api: v1", "null", "true"}
+	formal := yamlMappingKeys(t, readFile(t, filepath.Join(refs, "service-topology.yaml")), "services")
+	if !reflect.DeepEqual(formal, wantServices) {
+		t.Fatalf("formal service keys = %q, want %q", formal, wantServices)
+	}
+	compatibilityDocument := readFile(t, filepath.Join(refs, "service-dependency-map.yaml"))
+	compatibility := yamlMappingKeys(t, compatibilityDocument, "services")
+	if !reflect.DeepEqual(compatibility, wantServices) {
+		t.Fatalf("compatibility service keys = %q, want %q", compatibility, wantServices)
+	}
+	if got := yamlMappingKeys(t, compatibilityDocument, "lib_repos"); !reflect.DeepEqual(got, []string{"false"}) {
+		t.Fatalf("lib repo keys = %q, want [false]", got)
+	}
+}
+
+func yamlMappingKeys(t *testing.T, document, field string) []string {
+	t.Helper()
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(document), &root); err != nil {
+		t.Fatalf("parse generated yaml: %v\n%s", err, document)
+	}
+	if len(root.Content) != 1 || root.Content[0].Kind != yaml.MappingNode {
+		t.Fatalf("generated yaml root is not a mapping:\n%s", document)
+	}
+	fields := root.Content[0]
+	for i := 0; i < len(fields.Content); i += 2 {
+		if fields.Content[i].Value != field {
+			continue
+		}
+		mapping := fields.Content[i+1]
+		if mapping.Kind != yaml.MappingNode {
+			t.Fatalf("%s is not a mapping:\n%s", field, document)
+		}
+		keys := make([]string, 0, len(mapping.Content)/2)
+		for j := 0; j < len(mapping.Content); j += 2 {
+			key := mapping.Content[j]
+			if key.Tag != "!!str" {
+				t.Fatalf("%s key %q resolved as %s, want !!str:\n%s", field, key.Value, key.Tag, document)
+			}
+			keys = append(keys, key.Value)
+		}
+		sort.Strings(keys)
+		return keys
+	}
+	t.Fatalf("generated yaml missing %s:\n%s", field, document)
+	return nil
+}
+
+func TestGenerate_CodeIntelligenceOptIn(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
+	cfg.CodeIntelligence = config.CodeIntelligence{Enabled: true, Provider: "codegraph"}
+	cfg.Generation.SkillsWhitelist = []string{"routing", "incident-investigator", "code-intelligence-query"}
+	out := t.TempDir()
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+	if err := g.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	assertExists(t, out, []string{"templates/workspace-template/skills/code-intelligence-query/SKILL.md"})
+	if got := readFile(t, filepath.Join(out, "templates/workspace-template/skills/code-intelligence-query/SKILL.md")); !strings.Contains(got, "codegraph_explore") {
+		t.Fatal(got)
+	}
+	if got := readFile(t, filepath.Join(out, "templates/workspace-template/skills/incident-investigator/SKILL.md")); !strings.Contains(got, "code-intelligence-query") {
+		t.Fatal(got)
+	}
+	readme := readFile(t, filepath.Join(out, "README.md"))
+	for _, want := range []string{
+		"CodeGraph 函数级源码、调用关系与影响面取证；失败自动回退 rg/read",
+		".codegraph/",
+		"目标分支",
+		"不能独立证明根因",
+	} {
+		if !strings.Contains(readme, want) {
+			t.Fatalf("README missing %q:\n%s", want, readme)
+		}
+	}
+}
+
+func TestGenerate_CodeIntelligenceDisabledEvenWithOpenWhitelist(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
+	cfg.Generation.SkillsWhitelist = nil
+	out := t.TempDir()
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+	if err := g.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	assertNotExists(t, out, []string{"templates/workspace-template/skills/code-intelligence-query"})
+	if got := readFile(t, filepath.Join(out, "templates/workspace-template/skills/incident-investigator/SKILL.md")); strings.Contains(got, "调用 code-intelligence-query") {
+		t.Fatal(got)
+	}
+	if got := skipReason(g, "code-intelligence-query"); got != "code_intelligence.enabled=false" {
+		t.Fatalf("skip reason = %q", got)
+	}
+	if got := readFile(t, filepath.Join(out, "README.md")); !strings.Contains(got, "除需显式配置的能力外，所有 skill 默认启用") {
+		t.Fatalf("README should distinguish config-gated capabilities:\n%s", got)
+	}
+}
+
+func TestGenerate_CodeIntelligenceWhitelistCanTrimSkill(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
+	cfg.CodeIntelligence = config.CodeIntelligence{Enabled: true, Provider: "codegraph"}
+	cfg.Generation.SkillsWhitelist = []string{"routing", "incident-investigator"}
+	out := t.TempDir()
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+	if err := g.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	assertNotExists(t, out, []string{"templates/workspace-template/skills/code-intelligence-query"})
+	incident := readFile(t, filepath.Join(out, "templates/workspace-template/skills/incident-investigator/SKILL.md"))
+	for _, forbidden := range []string{"skills/code-intelligence-query/SKILL.md", "调用 CodeGraph"} {
+		if strings.Contains(incident, forbidden) {
+			t.Fatalf("trimmed CodeGraph skill leaked incident reference %q:\n%s", forbidden, incident)
+		}
+	}
+	if got := skipReason(g, "code-intelligence-query"); got != "not in skills_whitelist" {
+		t.Fatalf("skip reason = %q", got)
+	}
+}
+
+func TestGenerate_CodeIntelligenceRequiresRouting(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
+	cfg.CodeIntelligence = config.CodeIntelligence{Enabled: true, Provider: "codegraph"}
+	cfg.Generation.SkillsWhitelist = []string{"code-intelligence-query"}
+	out := t.TempDir()
+	g := New(cfg, filepath.Join(projectRoot(t), "templates"), out)
+	if err := g.Generate(); err != nil {
+		t.Fatal(err)
+	}
+	assertNotExists(t, out, []string{
+		"templates/workspace-template/skills/code-intelligence-query",
+		"templates/workspace-template/skills/incident-investigator",
+	})
+	if got := skipReason(g, "code-intelligence-query"); got != "requires routing skill" {
+		t.Fatalf("skip reason = %q", got)
+	}
+	readme := readFile(t, filepath.Join(out, "README.md"))
+	for _, forbidden := range []string{"**code-intelligence-query**", "CodeGraph"} {
+		if strings.Contains(readme, forbidden) {
+			t.Fatalf("README advertised skipped CodeGraph capability %q:\n%s", forbidden, readme)
+		}
+	}
+
+	// incident-investigator may still be selected independently; the unavailable CodeGraph
+	// dependency must not leak into its rendered Step 5.2 branch.
+	cfg.Generation.SkillsWhitelist = []string{"incident-investigator", "code-intelligence-query"}
+	outWithIncident := t.TempDir()
+	if err := New(cfg, filepath.Join(projectRoot(t), "templates"), outWithIncident).Generate(); err != nil {
+		t.Fatal(err)
+	}
+	assertNotExists(t, outWithIncident, []string{"templates/workspace-template/skills/code-intelligence-query"})
+	incident := readFile(t, filepath.Join(outWithIncident, "templates/workspace-template/skills/incident-investigator/SKILL.md"))
+	for _, forbidden := range []string{"skills/code-intelligence-query/SKILL.md", "调用 CodeGraph"} {
+		if strings.Contains(incident, forbidden) {
+			t.Fatalf("missing routing dependency leaked incident reference %q:\n%s", forbidden, incident)
+		}
+	}
+}
+
+func TestWriteTshootMetaIncludesAgentRole(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
+	out := filepath.Join(t.TempDir(), "sys")
+	tr := filepath.Join(projectRoot(t), "templates")
+	g := New(cfg, tr, out)
+	g.TroubleshooterYAMLSource = []byte("system:\n  id: shop\n")
+
+	dir := filepath.Join(out, "meta")
+	if err := g.writeTshootMetaForRole(dir, "codex", AgentRoleValidator); err != nil {
+		t.Fatalf("writeTshootMetaForRole: %v", err)
+	}
+	data := readFile(t, filepath.Join(dir, "tshoot.json"))
+	if !strings.Contains(data, `"agent_id": "shop-validator"`) {
+		t.Fatalf("agent_id missing from meta:\n%s", data)
+	}
+	if !strings.Contains(data, `"role": "validator"`) {
+		t.Fatalf("role missing from meta:\n%s", data)
+	}
+
+	troubleshooterDir := filepath.Join(out, "troubleshooter-meta")
+	if err := g.writeTshootMetaForRole(troubleshooterDir, "codex", AgentRoleTroubleshooter); err != nil {
+		t.Fatalf("writeTshootMetaForRole troubleshooter: %v", err)
+	}
+	troubleshooterData := readFile(t, filepath.Join(troubleshooterDir, "tshoot.json"))
+	if !strings.Contains(troubleshooterData, `"agent_id": "shop-bot"`) {
+		t.Fatalf("troubleshooter agent_id should preserve existing ResolveID/agentSlug:\n%s", troubleshooterData)
+	}
+	if !strings.Contains(troubleshooterData, `"role": "troubleshooter"`) {
+		t.Fatalf("troubleshooter role missing from meta:\n%s", troubleshooterData)
+	}
 }
 
 // TestGenerate_MultiSource_ConfigMapRoutesPerService 验证多源场景下 config-map.yaml
@@ -149,6 +618,252 @@ func TestGenerate_One2AllConfigMapWithK8sRuntimeServiceMap(t *testing.T) {
 	}
 }
 
+func TestGenerate_FrontendEntryMap(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+	if err := New(cfg, tr, out).Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	fm := readFile(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/frontend-entry-map.yaml"))
+	if !strings.Contains(fm, "frontend_entries:") {
+		t.Fatalf("frontend-entry-map should contain frontend_entries root, got:\n%s", fm)
+	}
+	if !strings.Contains(fm, "candidate_downstream:") {
+		t.Errorf("frontend-entry-map should include candidate_downstream, got:\n%s", fm)
+	}
+}
+
+func TestGenerate_FrontendEntryMapIncludesAnalysisEndpoints(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	for i := range cfg.Repos {
+		if cfg.Repos[i].Name != "mall-web" {
+			cfg.Repos[i].ServiceNames = nil
+		}
+	}
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+	g := New(cfg, tr, out)
+	g.LoadAnalysisReport(analyzer.Report{
+		Repos: []analyzer.RepoAnalysis{
+			{
+				Name: "mall-web",
+				Notes: []string{
+					"api_endpoint[src/api.ts]=/api/orders",
+					"api_endpoint[src/pay.ts]=/api/payments/submit",
+					"api_endpoint[src/root.ts]=/api?debug=1",
+					"api_endpoint[src/graphql.ts]=/graphql?op=Order",
+					"api_endpoint[src/ignored.ts]=/healthz",
+				},
+			},
+		},
+	})
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	fm := readFile(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/frontend-entry-map.yaml"))
+	for _, want := range []string{
+		`endpoint_paths:`,
+		`- "/api"`,
+		`- "/graphql"`,
+		`- "/api/orders"`,
+		`- "/api/payments/submit"`,
+		`path_candidates:`,
+	} {
+		if !strings.Contains(fm, want) {
+			t.Fatalf("frontend-entry-map missing %q:\n%s", want, fm)
+		}
+	}
+	if strings.Contains(fm, "/healthz") {
+		t.Fatalf("frontend-entry-map should not include non-api endpoint:\n%s", fm)
+	}
+	entries := loadFrontendEntryMap(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/frontend-entry-map.yaml"))
+	mallWeb, ok := entries.FrontendEntries["mall-web"]
+	if !ok {
+		t.Fatalf("frontend-entry-map missing mall-web entry: %#v", entries.FrontendEntries)
+	}
+	if !stringSliceContains(mallWeb.EndpointPaths, "/api/orders") {
+		t.Fatalf("mall-web endpoint_paths missing /api/orders: %#v", mallWeb.EndpointPaths)
+	}
+	if !stringSliceContains(mallWeb.EndpointPaths, "/api/payments/submit") {
+		t.Fatalf("mall-web endpoint_paths missing /api/payments/submit: %#v", mallWeb.EndpointPaths)
+	}
+	if !stringSliceContains(mallWeb.EndpointPaths, "/api") {
+		t.Fatalf("mall-web endpoint_paths missing /api: %#v", mallWeb.EndpointPaths)
+	}
+	if !stringSliceContains(mallWeb.EndpointPaths, "/graphql") {
+		t.Fatalf("mall-web endpoint_paths missing /graphql: %#v", mallWeb.EndpointPaths)
+	}
+	if stringSliceContains(mallWeb.EndpointPaths, "/api?debug=1") {
+		t.Fatalf("mall-web endpoint_paths should normalize /api query: %#v", mallWeb.EndpointPaths)
+	}
+	if stringSliceContains(mallWeb.EndpointPaths, "/healthz") {
+		t.Fatalf("mall-web endpoint_paths should not contain /healthz: %#v", mallWeb.EndpointPaths)
+	}
+	orders, ok := mallWeb.PathCandidates["/api/orders"]
+	if !ok {
+		t.Fatalf("mall-web path_candidates missing /api/orders: %#v", mallWeb.PathCandidates)
+	}
+	if _, ok := orders.CandidateServices.([]interface{}); !ok {
+		t.Fatalf("/api/orders candidate_services should be a list, got %T (%#v)", orders.CandidateServices, orders.CandidateServices)
+	}
+}
+
+func TestGenerate_FrontendEntryMapMatchesBackendRoutes(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	cfg.Repos = append(cfg.Repos,
+		config.Repo{
+			Name:         "order-service",
+			Stack:        "go",
+			Role:         config.RoleBackend,
+			ServiceNames: []string{"order-service"},
+		},
+		config.Repo{
+			Name:         "payment-service",
+			Stack:        "node",
+			Role:         config.RoleBackend,
+			ServiceNames: []string{"payment-service"},
+		},
+		config.Repo{
+			Name:         "search-service",
+			Stack:        "go",
+			Role:         config.RoleBackend,
+			ServiceNames: []string{"search-service", "search-service"},
+		},
+		config.Repo{
+			Name:         "sort-service",
+			Stack:        "go",
+			Role:         config.RoleBackend,
+			ServiceNames: []string{"sort-service"},
+		},
+		config.Repo{
+			Name:         "legacy-order-service",
+			Stack:        "go",
+			Role:         config.RoleBackend,
+			ServiceNames: []string{"legacy-order-service"},
+		},
+	)
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+	g := New(cfg, tr, out)
+	g.LoadAnalysisReport(analyzer.Report{Repos: []analyzer.RepoAnalysis{
+		{
+			Name: "mall-web",
+			Notes: []string{
+				"api_endpoint[src/api.ts]=https://api.example.com/api/orders/42?debug=1",
+				"api_endpoint[src/pay.ts]=/api/payments/submit?x=1",
+				"api_endpoint[src/search.ts]=/api/search/items?q=x",
+				"api_endpoint[src/no_route.ts]=/api/no-route",
+				"api_endpoint[src/sort.ts]=/api/sort/42",
+			},
+		},
+		{
+			Name:         "order-service",
+			ServiceNames: []string{"order-service"},
+			APIRoutes: []analyzer.APIRoute{
+				{Path: "/api/orders/:id", Method: "GET", Source: "handler.go", Strength: "scanned"},
+			},
+		},
+		{
+			Name:         "payment-service",
+			ServiceNames: []string{"payment-service"},
+			APIRoutes: []analyzer.APIRoute{
+				{Path: "/api/payments/submit", Method: "POST", Source: "routes.ts", Strength: "scanned"},
+			},
+		},
+		{
+			Name:         "search-service",
+			ServiceNames: []string{"search-service", "search-service"},
+			APIRoutes: []analyzer.APIRoute{
+				{Path: "/api/search", Method: "GET", Source: "search.go", Strength: "scanned"},
+				{Path: "/api/search", Method: "GET", Source: "search.go", Strength: "scanned"},
+			},
+		},
+		{
+			Name:         "sort-service",
+			ServiceNames: []string{"sort-service"},
+			APIRoutes: []analyzer.APIRoute{
+				{Path: "/api/sort", Method: "GET", Source: "sort.go", Strength: "scanned"},
+				{Path: "/api/sort/:id", Method: "GET", Source: "sort.go", Strength: "scanned"},
+				{Path: "/api/sort/42", Method: "GET", Source: "sort.go", Strength: "scanned"},
+			},
+		},
+		{
+			Name:         "legacy-order-service",
+			ServiceNames: []string{"legacy-order-service"},
+			APIRoutes: []analyzer.APIRoute{
+				{Path: "/api/order", Method: "GET", Source: "legacy.go", Strength: "scanned"},
+			},
+		},
+	}})
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	entries := loadFrontendEntryMap(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/frontend-entry-map.yaml"))
+	mallWeb := entries.FrontendEntries["mall-web"]
+	for _, endpoint := range []string{
+		"/api/orders/42",
+		"/api/payments/submit",
+		"/api/search/items",
+		"/api/no-route",
+		"/api/sort/42",
+	} {
+		if !stringSliceContains(mallWeb.EndpointPaths, endpoint) {
+			t.Fatalf("mall-web endpoint_paths missing normalized endpoint %s: %#v", endpoint, mallWeb.EndpointPaths)
+		}
+	}
+	for _, rawEndpoint := range []string{
+		"https://api.example.com/api/orders/42?debug=1",
+		"/api/payments/submit?x=1",
+		"/api/search/items?q=x",
+	} {
+		if stringSliceContains(mallWeb.EndpointPaths, rawEndpoint) {
+			t.Fatalf("mall-web endpoint_paths should normalize %s: %#v", rawEndpoint, mallWeb.EndpointPaths)
+		}
+	}
+	candidates := mallWeb.PathCandidates
+	orderCandidates := candidates["/api/orders/42"].RouteCandidates
+	if len(orderCandidates) != 1 {
+		t.Fatalf("order route candidates = %#v", orderCandidates)
+	}
+	orderCandidate := orderCandidates[0]
+	if orderCandidate.Service != "order-service" || orderCandidate.Match != "pattern" ||
+		orderCandidate.Route != "/api/orders/:id" || orderCandidate.Method != "GET" || orderCandidate.Source != "handler.go" {
+		t.Fatalf("order route candidate = %#v", orderCandidate)
+	}
+	paymentCandidates := candidates["/api/payments/submit"].RouteCandidates
+	if len(paymentCandidates) != 1 {
+		t.Fatalf("payment route candidates = %#v", paymentCandidates)
+	}
+	paymentCandidate := paymentCandidates[0]
+	if paymentCandidate.Service != "payment-service" || paymentCandidate.Match != "exact" ||
+		paymentCandidate.Route != "/api/payments/submit" || paymentCandidate.Method != "POST" || paymentCandidate.Source != "routes.ts" {
+		t.Fatalf("payment route candidate = %#v", paymentCandidate)
+	}
+	searchCandidates := candidates["/api/search/items"].RouteCandidates
+	if len(searchCandidates) != 1 {
+		t.Fatalf("search route candidates should be deduplicated, got %#v", searchCandidates)
+	}
+	searchCandidate := searchCandidates[0]
+	if searchCandidate.Service != "search-service" || searchCandidate.Match != "prefix" ||
+		searchCandidate.Route != "/api/search" || searchCandidate.Method != "GET" || searchCandidate.Source != "search.go" {
+		t.Fatalf("search route candidate = %#v", searchCandidate)
+	}
+	noRouteCandidates := candidates["/api/no-route"].RouteCandidates
+	if noRouteCandidates == nil || len(noRouteCandidates) != 0 {
+		t.Fatalf("no-route route_candidates should parse as empty slice, got %#v", noRouteCandidates)
+	}
+	sortCandidates := candidates["/api/sort/42"].RouteCandidates
+	if len(sortCandidates) != 3 {
+		t.Fatalf("sort route candidates = %#v", sortCandidates)
+	}
+	for i, want := range []string{"exact", "pattern", "prefix"} {
+		if sortCandidates[i].Match != want {
+			t.Fatalf("sort route candidates should be ordered exact, pattern, prefix; got %#v", sortCandidates)
+		}
+	}
+}
+
 func readFile(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -171,6 +886,50 @@ func loadConfigMap(t *testing.T, path string) map[string]map[string]map[string]a
 		t.Fatalf("parse %s: %v", path, err)
 	}
 	return root.Environments
+}
+
+type frontendEntryMapFixture struct {
+	FrontendEntries map[string]frontendEntryFixture `yaml:"frontend_entries"`
+}
+
+type frontendEntryFixture struct {
+	EndpointPaths  []string                        `yaml:"endpoint_paths"`
+	PathCandidates map[string]pathCandidateFixture `yaml:"path_candidates"`
+}
+
+type pathCandidateFixture struct {
+	CandidateServices interface{}             `yaml:"candidate_services"`
+	RouteCandidates   []routeCandidateFixture `yaml:"route_candidates"`
+}
+
+type routeCandidateFixture struct {
+	Service string `yaml:"service"`
+	Match   string `yaml:"match"`
+	Route   string `yaml:"route"`
+	Method  string `yaml:"method"`
+	Source  string `yaml:"source"`
+}
+
+func loadFrontendEntryMap(t *testing.T, path string) frontendEntryMapFixture {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var root frontendEntryMapFixture
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	return root
+}
+
+func stringSliceContains(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestGenerate_Nacos_Shop(t *testing.T) {
@@ -242,6 +1001,44 @@ func TestGenerate_Nacos_Shop(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(ceScripts, "test_nacos_mcp.py")); err == nil {
 		t.Errorf("test_nacos_mcp.py 不应进 bot workspace(generator 应过滤 test_*.py)")
 	}
+
+	frontendSkill := filepath.Join(wsRoot, "skills", "frontend-repro-investigator")
+	if _, err := os.Stat(filepath.Join(frontendSkill, "SKILL.md")); err != nil {
+		t.Errorf("frontend-repro-investigator skill should be generated: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", "har_analyzer.py")); err != nil {
+		t.Errorf("har_analyzer.py should be generated: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", "console_analyzer.py")); err != nil {
+		t.Errorf("console_analyzer.py should be generated: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", "browser_collect.mjs")); err != nil {
+		t.Errorf("browser_collect.mjs should be generated: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", "sentry_fetch.py")); err != nil {
+		t.Errorf("sentry_fetch.py should be generated: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", "evidence_merge.py")); err != nil {
+		t.Errorf("evidence_merge.py should be generated: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", "test_har_analyzer.py")); err == nil {
+		t.Errorf("test_har_analyzer.py should not be generated")
+	}
+	for _, testScript := range []string{
+		"test_console_analyzer.py",
+		"test_browser_collect.py",
+		"test_sentry_fetch.py",
+		"test_evidence_merge.py",
+	} {
+		if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", testScript)); err == nil {
+			t.Errorf("%s should not be generated", testScript)
+		}
+	}
+
+	ii := readFile(t, filepath.Join(wsRoot, "skills", "incident-investigator", "SKILL.md"))
+	if !strings.Contains(ii, "frontend-repro-investigator") {
+		t.Errorf("incident-investigator should hand client symptoms to frontend-repro-investigator")
+	}
 }
 
 // 配置中心 prompt 派生由 agent.DerivePrompts 验证,
@@ -273,6 +1070,33 @@ func TestGenerate_Apollo(t *testing.T) {
 	if !strings.Contains(skillMD, "apollo_config.py") {
 		t.Errorf("config-executor SKILL.md should reference apollo_config.py")
 	}
+}
+
+func TestGenerate_ConfigExecutorScriptsScopedToConfigCenter(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	cfg.Infrastructure.ConfigCenter.Type = "one2all"
+	cfg.Infrastructure.ConfigCenters[0].Type = "one2all"
+	cfg.Generation.SkillsWhitelist = []string{"config-executor"}
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+	if err := New(cfg, tr, out).Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	root := filepath.Join(out, "templates/workspace-template")
+	assertExists(t, root, []string{
+		"skills/config-executor/SKILL.md",
+	})
+	assertNotExists(t, root, []string{
+		"skills/config-executor/scripts/nacos_config.py",
+		"skills/config-executor/scripts/nacos_diff.py",
+		"skills/config-executor/scripts/nacos_mcp.py",
+		"skills/config-executor/scripts/resolve_runtime_from_nacos.py",
+		"skills/config-executor/scripts/apollo_config.py",
+		"skills/config-executor/scripts/consul_config.py",
+		"skills/config-executor/scripts/kuboard_config.py",
+		"skills/config-executor/scripts/resolve_runtime_static.py",
+		"skills/config-executor/references/nacos-api-notes.md",
+	})
 }
 
 func TestGenerate_Consul(t *testing.T) {
@@ -328,8 +1152,21 @@ func TestGenerate_ClawhubLock(t *testing.T) {
 	if lock.Version != 1 {
 		t.Errorf("lock.version expected 1, got %d", lock.Version)
 	}
-	// shop-troubleshooter.yaml 的 skills_whitelist 列了 8 个 skills
-	wantSkills := []string{"routing", "config-executor", "redis-runtime-query", "mongodb-runtime-query", "es-runtime-query", "mysql-runtime-query", "kafka-runtime-query", "diagram-generator"}
+	// shop-troubleshooter.yaml 的 skills_whitelist 应完整写入 lock.json。
+	wantSkills := []string{
+		"routing",
+		"incident-investigator",
+		"config-executor",
+		"redis-runtime-query",
+		"mongodb-runtime-query",
+		"es-runtime-query",
+		"mysql-runtime-query",
+		"kafka-runtime-query",
+		"tracing-query",
+		"elk-log-query",
+		"frontend-repro-investigator",
+		"diagram-generator",
+	}
 	for _, s := range wantSkills {
 		entry, ok := lock.Skills[s]
 		if !ok {
@@ -353,8 +1190,8 @@ func TestGenerate_ClawhubLock(t *testing.T) {
 
 func TestGenerate_ClawhubLock_EmptySkills(t *testing.T) {
 	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
-	// 清空白名单 + 禁用所有 data stores，还要清掉 config center，
-	// 确保没有 skills 目录会被生成
+	// 清空白名单 + 禁用所有 data stores，还要清掉 config center；
+	// 验证必备 skill 仍应生成,避免 validator agent 指向不存在的入口。
 	cfg.Generation.SkillsWhitelist = []string{"__none__"}
 	out := t.TempDir()
 	tr := filepath.Join(projectRoot(t), "templates")
@@ -376,8 +1213,168 @@ func TestGenerate_ClawhubLock_EmptySkills(t *testing.T) {
 	if lock.Version != 1 {
 		t.Errorf("version expected 1, got %d", lock.Version)
 	}
-	if len(lock.Skills) != 0 {
-		t.Errorf("expected empty skills, got %v", lock.Skills)
+	want := map[string]bool{
+		"api-verifier":                 true,
+		"attachment-evidence-verifier": true,
+		"bug-fixer":                    true,
+		"bug-verifier":                 true,
+		"frontend-repro-investigator":  true,
+		"grafana-observability-query":  true,
+	}
+	if len(lock.Skills) != len(want) {
+		t.Fatalf("expected validator baseline and observability skills, got %v", lock.Skills)
+	}
+	for skill := range want {
+		if _, ok := lock.Skills[skill]; !ok {
+			t.Errorf("lock.json missing validator baseline skill %q: %v", skill, lock.Skills)
+		}
+	}
+}
+
+func TestGenerate_FrontendReproArtifacts(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+	if err := New(cfg, tr, out).Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	root := filepath.Join(out, "templates/workspace-template")
+	assertExists(t, root, []string{
+		"skills/frontend-repro-investigator/SKILL.md",
+		"skills/frontend-repro-investigator/scripts/har_analyzer.py",
+		"skills/routing/references/frontend-entry-map.yaml",
+	})
+	assertNotExists(t, root, []string{
+		"skills/frontend-repro-investigator/scripts/test_har_analyzer.py",
+	})
+}
+
+func TestGenerateIncludesBugVerifierSkill(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	cfg.Generation.SkillsWhitelist = nil
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+	if err := New(cfg, tr, out).Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	root := filepath.Join(out, "templates/workspace-template")
+	assertExists(t, root, []string{
+		"skills/api-verifier/SKILL.md",
+		"skills/attachment-evidence-verifier/SKILL.md",
+		"skills/attachment-evidence-verifier/scripts/attachment_manifest.py",
+		"skills/bug-fixer/SKILL.md",
+		"skills/bug-verifier/SKILL.md",
+		"skills/frontend-repro-investigator/SKILL.md",
+	})
+
+	data := readFile(t, filepath.Join(root, "skills/bug-verifier/SKILL.md"))
+	for _, want := range []string{
+		"verification_status",
+		"environment",
+		"observed_behavior",
+		"expected_behavior",
+		"evidence",
+		"screenshots",
+		"network",
+		"reproduced",
+		"not_reproduced",
+		"insufficient_info",
+		"fixed_verified",
+		"still_reproduces",
+		"gaps",
+		"entry:",
+		"frontend_url",
+		"api_url",
+		"console_errors",
+		"trace_ids",
+		"request_ids",
+		"attachments",
+		"attachment-evidence-verifier",
+		"api-verifier",
+		"frontend-repro-investigator",
+		"handoff_to_troubleshooter",
+		"不读取业务源码",
+		"建议改动",
+	} {
+		if !strings.Contains(data, want) {
+			t.Fatalf("bug-verifier skill missing %q:\n%s", want, data)
+		}
+	}
+	for _, forbidden := range []string{"最可能根因", "RCA", "inconclusive"} {
+		if strings.Contains(data, forbidden) {
+			t.Fatalf("bug-verifier skill should not contain %q:\n%s", forbidden, data)
+		}
+	}
+}
+
+func TestGenerateIncludesValidatorSkillsEvenWhenWhitelistOmitsThem(t *testing.T) {
+	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
+	cfg.Generation.SkillsWhitelist = []string{"routing", "incident-investigator"}
+	cfg.Infrastructure.Observability.Grafana.Enabled = true
+	cfg.Infrastructure.Observability.Loki.Enabled = true
+	out := t.TempDir()
+	tr := filepath.Join(projectRoot(t), "templates")
+	if err := New(cfg, tr, out).Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	root := filepath.Join(out, "templates/workspace-template")
+	assertExists(t, root, []string{
+		"skills/api-verifier/SKILL.md",
+		"skills/attachment-evidence-verifier/SKILL.md",
+		"skills/bug-fixer/SKILL.md",
+		"skills/bug-verifier/SKILL.md",
+		"skills/frontend-repro-investigator/SKILL.md",
+		"skills/grafana-observability-query/SKILL.md",
+	})
+}
+
+func TestSkillAllowedForAgentRoleScopesValidatorAndTroubleshooter(t *testing.T) {
+	validatorAllowed := []string{
+		"bug-verifier",
+		"api-verifier",
+		"attachment-evidence-verifier",
+		"frontend-repro-investigator",
+		"routing",
+		"postgresql-runtime-query",
+		"elk-log-query",
+		"tracing-query",
+	}
+	for _, skill := range validatorAllowed {
+		if !SkillAllowedForAgentRole(skill, AgentRoleValidator) {
+			t.Fatalf("validator should allow %s", skill)
+		}
+	}
+	validatorDenied := []string{
+		"incident-investigator",
+		"recent-changes",
+		"diagram-generator",
+		"postgres-runtime-query",
+	}
+	for _, skill := range validatorDenied {
+		if SkillAllowedForAgentRole(skill, AgentRoleValidator) {
+			t.Fatalf("validator should not allow %s", skill)
+		}
+	}
+	if SkillAllowedForAgentRole("bug-verifier", AgentRoleTroubleshooter) {
+		t.Fatalf("troubleshooter should not install validator entry skill")
+	}
+	if SkillAllowedForAgentRole("bug-fixer", AgentRoleTroubleshooter) {
+		t.Fatalf("troubleshooter should not install fixer entry skill")
+	}
+	if SkillAllowedForAgentRole("api-verifier", AgentRoleTroubleshooter) {
+		t.Fatalf("troubleshooter should not install validator API replay skill")
+	}
+	if SkillAllowedForAgentRole("attachment-evidence-verifier", AgentRoleTroubleshooter) {
+		t.Fatalf("troubleshooter should not install validator attachment evidence skill")
+	}
+	if !SkillAllowedForAgentRole("incident-investigator", AgentRoleTroubleshooter) {
+		t.Fatalf("troubleshooter should keep incident-investigator")
+	}
+	if !SkillAllowedForAgentRole("bug-fixer", AgentRoleFixer) {
+		t.Fatalf("fixer should install bug-fixer entry skill")
+	}
+	if SkillAllowedForAgentRole("bug-verifier", AgentRoleFixer) {
+		t.Fatalf("fixer should not install validator entry skill")
 	}
 }
 
@@ -387,6 +1384,15 @@ func assertExists(t *testing.T, base string, rels []string) {
 	for _, rel := range rels {
 		if _, err := os.Stat(filepath.Join(base, rel)); err != nil {
 			t.Errorf("expected %s under %s (%v)", rel, base, err)
+		}
+	}
+}
+
+func assertNotExists(t *testing.T, base string, rels []string) {
+	t.Helper()
+	for _, rel := range rels {
+		if _, err := os.Stat(filepath.Join(base, rel)); err == nil {
+			t.Fatalf("%s should not exist", rel)
 		}
 	}
 }
@@ -414,6 +1420,9 @@ func TestGenerate_MultiTargets_All(t *testing.T) {
 	if err := g.GenerateCursor(); err != nil {
 		t.Fatalf("cursor: %v", err)
 	}
+	if err := g.GenerateCodex(); err != nil {
+		t.Fatalf("codex: %v", err)
+	}
 
 	assertExists(t, out, []string{
 		"templates/workspace-template/SOUL.md",
@@ -423,16 +1432,48 @@ func TestGenerate_MultiTargets_All(t *testing.T) {
 	// install.sh 已删除 —— 装到 ~/.claude|cursor/ 现在由 agent.InstallNative 完成
 	assertExists(t, out+"-claude-code", []string{
 		"agents/shop-bot.md",
+		"agents/shop-validator.md",
+		"agents/shop-fixer.md",
+		"agents-meta/shop-bot/tshoot.json",
+		"agents-meta/shop-validator/tshoot.json",
+		"agents-meta/shop-fixer/tshoot.json",
 		"skills/routing/SKILL.md",
 	})
 	assertExists(t, out+"-cursor", []string{
 		"agents/shop-bot.md",
+		"agents/shop-validator.md",
+		"agents/shop-fixer.md",
+		"agents-meta/shop-bot/tshoot.json",
+		"agents-meta/shop-validator/tshoot.json",
+		"agents-meta/shop-fixer/tshoot.json",
 		"skills/routing/SKILL.md",
 	})
+	assertExists(t, out+"-codex", []string{
+		"agents/shop-bot.toml",
+		"agents/shop-validator.toml",
+		"agents/shop-fixer.toml",
+		"agents-meta/shop-bot/tshoot.json",
+		"agents-meta/shop-validator/tshoot.json",
+		"agents-meta/shop-fixer/tshoot.json",
+		"skills/routing/SKILL.md",
+	})
+	assertAgentMetaRole(t, filepath.Join(out+"-claude-code", "agents-meta/shop-bot/tshoot.json"), "shop-bot", "troubleshooter")
+	assertAgentMetaRole(t, filepath.Join(out+"-claude-code", "agents-meta/shop-validator/tshoot.json"), "shop-validator", "validator")
+	assertAgentMetaRole(t, filepath.Join(out+"-claude-code", "agents-meta/shop-fixer/tshoot.json"), "shop-fixer", "fixer")
+
+	assertTroubleshooterAgentDefinition(t, filepath.Join(out+"-claude-code", "agents/shop-bot.md"))
+	assertValidatorAgentDefinition(t, filepath.Join(out+"-claude-code", "agents/shop-validator.md"))
+	assertFixerAgentDefinition(t, filepath.Join(out+"-claude-code", "agents/shop-fixer.md"))
+	assertTroubleshooterAgentDefinition(t, filepath.Join(out+"-cursor", "agents/shop-bot.md"))
+	assertValidatorAgentDefinition(t, filepath.Join(out+"-cursor", "agents/shop-validator.md"))
+	assertFixerAgentDefinition(t, filepath.Join(out+"-cursor", "agents/shop-fixer.md"))
+	assertTroubleshooterAgentDefinition(t, filepath.Join(out+"-codex", "agents/shop-bot.toml"))
+	assertValidatorAgentDefinition(t, filepath.Join(out+"-codex", "agents/shop-validator.toml"))
+	assertFixerAgentDefinition(t, filepath.Join(out+"-codex", "agents/shop-fixer.toml"))
 
 	// copyDirRecursive (claude-code / cursor 路径) 也必须过滤 test_*.py。脚本被复制两份:
 	// skills/config-executor/scripts/ 和顶层 scripts/,两处都不应出现 test 文件。
-	for _, base := range []string{out + "-claude-code", out + "-cursor"} {
+	for _, base := range []string{out + "-claude-code", out + "-cursor", out + "-codex"} {
 		for _, rel := range []string{
 			"skills/config-executor/scripts/test_nacos_mcp.py",
 			"scripts/test_nacos_mcp.py",
@@ -467,6 +1508,9 @@ func TestGenerate_MultiTargets_NoOpenclaw(t *testing.T) {
 	if err := g.GenerateClaudeCode(); err != nil {
 		t.Fatalf("claude-code: %v", err)
 	}
+	if err := g.GenerateCodex(); err != nil {
+		t.Fatalf("codex: %v", err)
+	}
 
 	// openclaw 目录不应存在
 	if _, err := os.Stat(out); err == nil {
@@ -474,7 +1518,94 @@ func TestGenerate_MultiTargets_NoOpenclaw(t *testing.T) {
 	}
 
 	// 其它 target 产物存在(install.sh 已挪到 InstallNative,产物里只剩纯素材)
-	assertExists(t, out+"-claude-code", []string{"agents/shop-bot.md"})
+	assertExists(t, out+"-claude-code", []string{
+		"agents/shop-bot.md",
+		"agents/shop-validator.md",
+		"agents/shop-fixer.md",
+		"agents-meta/shop-bot/tshoot.json",
+		"agents-meta/shop-validator/tshoot.json",
+		"agents-meta/shop-fixer/tshoot.json",
+	})
+	assertExists(t, out+"-codex", []string{
+		"agents/shop-bot.toml",
+		"agents/shop-validator.toml",
+		"agents/shop-fixer.toml",
+		"agents-meta/shop-bot/tshoot.json",
+		"agents-meta/shop-validator/tshoot.json",
+		"agents-meta/shop-fixer/tshoot.json",
+	})
+}
+
+func assertAgentMetaRole(t *testing.T, path, agentID, role string) {
+	t.Helper()
+	data := readFile(t, path)
+	for _, want := range []string{
+		`"agent_id": "` + agentID + `"`,
+		`"role": "` + role + `"`,
+	} {
+		if !strings.Contains(data, want) {
+			t.Fatalf("meta %s missing %q:\n%s", path, want, data)
+		}
+	}
+}
+
+func assertTroubleshooterAgentDefinition(t *testing.T, path string) {
+	t.Helper()
+	data := readFile(t, path)
+	for _, want := range []string{
+		"排障",
+		"只读",
+		"incident-investigator",
+	} {
+		if !strings.Contains(data, want) {
+			t.Fatalf("troubleshooter agent %s missing %q:\n%s", path, want, data)
+		}
+	}
+}
+
+func assertValidatorAgentDefinition(t *testing.T, path string) {
+	t.Helper()
+	data := readFile(t, path)
+	for _, want := range []string{
+		"bug-verifier",
+		"验证",
+		"主动复现",
+		"修复后复查",
+		"验证报告",
+		"不读取业务源码",
+		"原因判断交给排障 Agent",
+	} {
+		if !strings.Contains(data, want) {
+			t.Fatalf("validator agent %s missing %q:\n%s", path, want, data)
+		}
+	}
+	for _, forbidden := range []string{
+		"RCA",
+		"根因",
+		"incident-investigator",
+		"故障快报",
+	} {
+		if strings.Contains(data, forbidden) {
+			t.Fatalf("validator agent %s should not contain %q:\n%s", path, forbidden, data)
+		}
+	}
+}
+
+func assertFixerAgentDefinition(t *testing.T, path string) {
+	t.Helper()
+	data := readFile(t, path)
+	for _, want := range []string{
+		"bug-fixer",
+		"修复",
+		"修复分支",
+		"提交",
+		"推送",
+		"部署",
+	} {
+		if !strings.Contains(data, want) {
+			t.Fatalf("fixer agent %s missing %q:\n%s", path, want, data)
+		}
+	}
 }
 
 func TestGenerate_WithAnalysis_UpgradesInferredToVerified(t *testing.T) {

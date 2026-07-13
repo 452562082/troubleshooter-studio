@@ -10,6 +10,7 @@
 #
 # 触发(workflow rules):
 #   - main push          → 跑全套
+#   - test push          → 跑全套(当前开发分支直接 push 验证)
 #   - merge_request      → 跑 go:lint / go:test / web(desktop 改成 manual 按钮可选)
 #   - tag push(v*)      → 不跑(release job 已经在打 tag 那次 pipeline 里产出,
 #                         tag 二次触发 pipeline 是浪费,且 release job 不会再选自己)
@@ -28,6 +29,8 @@ workflow:
       when: never
     # main 分支 push → 跑
     - if: '$CI_COMMIT_BRANCH == "main"'
+    # test 分支 push → 跑,匹配当前开发分支的直接推送流程
+    - if: '$CI_COMMIT_BRANCH == "test"'
     # MR pipeline → 跑(开 MR 时所有 commit 上 push 都触发)
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     # 其它情况不跑(feature 分支 push 不开 MR 时不消耗 CI)
@@ -64,7 +67,7 @@ variables:
 #     ephemeral,被 GitLab 跨 image 打包/解包会出现"索引在但文件不在"导致 vet/build
 #     报 no such file or directory。让每个 job 本地新建)
 #   - lint / test 用不同 cache key 前缀:两 job image 不同(golangci-lint vs
-#     golang:1.25.10),理论上 go-mod 内容兼容,但隔离避免任何"并行 job 同 key 写同一份"
+#     golang:1.25.11),理论上 go-mod 内容兼容,但隔离避免任何"并行 job 同 key 写同一份"
 #     的潜在竞态。
 #   - go vet 那行删了 — golangci-lint 默认开 govet linter,重复且就是它在崩。
 go:lint:
@@ -88,9 +91,9 @@ go:lint:
     - |
       # gofmt 接到目录参数会**递归扫子目录**;`gofmt -l .` 或 `gofmt -l $(go list ...)`
       # 都会进 $GOMODCACHE=.cache/go-mod 把第三方源码扫上(那不归我们格式化)。
-      # 用 `git ls-files '*.go'` 只列**入库**的 .go 文件,.cache 是 gitignored 自动跳过,
+      # 用 `git ls-files -z '*.go'` 只列**入库**的 .go 文件,.cache 是 gitignored 自动跳过,
       # 且 CI 本来就只该校验提交代码的格式。
-      out=$(git ls-files '*.go' | xargs gofmt -l)
+      out=$(git ls-files -z '*.go' | xargs -0 gofmt -l)
       if [ -n "$out" ]; then
         echo "unformatted files detected:"
         echo "$out"
@@ -107,9 +110,9 @@ go:lint:
 # ── Go test:build + test -race -cover ──────────────────────────────────
 go:test:
   stage: test
-  # 锁定 patch 版本(避免 cache 锁住老 patch + 跟 go.mod `go 1.25.10` 一致)。
-  # 1.25.10 修了 7 个 stdlib CVE(GO-2026-4870/4918/4946/4947/4971 等),govulncheck 干净。
-  image: golang:1.25.10
+  # 锁定 patch 版本(避免 cache 锁住老 patch + 跟 go.mod `go 1.25.11` 一致)。
+  # 1.25.11 修复当前 govulncheck 命中的 stdlib CVE,保持工具链审计干净。
+  image: golang:1.25.11
   interruptible: true
   cache:
     # cache 策略说明见 go:lint 上方注释。test job 独立 key 前缀,避免与 lint job 并行写竞态。
@@ -121,7 +124,11 @@ go:test:
       - .cache/go-mod
   script:
     - go build ./...
+    - go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
+    - |
+      "$(go env GOPATH)/bin/govulncheck" ./...
     - go test -race -cover -coverprofile=coverage.out ./...
+    - scripts/check-go-coverage.sh
     - go tool cover -func=coverage.out | tail -1
   # 覆盖率 % 抽到 GitLab UI 显示(总覆盖率那行是 "total: (statements) XX.X%")
   coverage: '/total:\s+\(statements\)\s+(\d+\.\d+)%/'
@@ -131,11 +138,37 @@ go:test:
       - coverage.out
     expire_in: 1 week
 
+# ── Workspace skill scripts:生成物机器人脚本单测 ─────────────────────────────
+skill-scripts:
+  stage: test
+  image: python:3.12-slim
+  interruptible: true
+  before_script:
+    - python3 -m pip install --no-cache-dir pytest PyYAML uv
+  script:
+    - scripts/test-skill-scripts.sh
+
+# ── Browser collector real smoke:手动触发,安装 Chromium 后跑真实 Playwright 路径 ─────
+browser-smoke:
+  stage: test
+  image: node:20.19.0
+  interruptible: true
+  rules:
+    - when: manual
+      allow_failure: true
+  before_script:
+    - apt-get update
+    - apt-get install -y --no-install-recommends python3
+    - npm install --no-save --no-package-lock playwright
+    - npx playwright install --with-deps chromium
+  script:
+    - scripts/test-browser-smoke.sh
+
 # ── Web:vue-tsc 类型检查 + vite 产物构建 ─────────────────────────────────
 # artifact 给 desktop job 复用,desktop 不再重跑 web build。
 web:
   stage: test
-  image: node:20
+  image: node:20.19.0
   interruptible: true
   cache:
     key:
@@ -145,9 +178,9 @@ web:
       - web/node_modules
   # 双执行器兼容(2026-06:runner 从 macOS shell 切到 docker executor 后,旧的 brew/nvm
   # 硬假设在 node:20 容器里 `exit 1` —— 容器没 brew、/root/.nvm/nvm.sh 也不存在):
-  #   - docker executor(现状,240-docker-runner):直接跑 `image: node:20`,node 已是 20
-  #     (= .nvmrc),无 brew / 无 nvm → 直接用镜像自带 node。
-  #   - macOS shell executor(历史/兜底):host 默认 node 25,需 nvm 读 .nvmrc 切到 20,
+  #   - docker executor(现状,240-docker-runner):直接跑 `image: node:20.19.0`,
+  #     满足 Vite 8 的 Node 下限,无 brew / 无 nvm → 直接用镜像自带 node。
+  #   - macOS shell executor(历史/兜底):host 默认 node 25,需 nvm 读 .nvmrc 切换到项目指定版本,
   #     绕开 esbuild postinstall SIGKILL / vitest worker 死锁。
   # 策略:能找到 nvm 就用它切 .nvmrc;找不到回落系统 node。两种执行器都能跑,不再硬 exit 1。
   before_script:
@@ -165,7 +198,7 @@ web:
         . "$NVM_SH"
         command -v nvm >/dev/null 2>&1 && { nvm install && nvm use; }
       else
-        echo "[ci] 未找到 nvm(docker executor 场景),用 node:20 镜像自带 node"
+        echo "[ci] 未找到 nvm(docker executor 场景),用 node:20.19.0 镜像自带 node"
       fi
       node --version || { echo "[ci] ERROR: 既无 nvm 也无系统 node,执行器环境异常"; exit 1; }
       npm --version
@@ -177,6 +210,7 @@ web:
     # 脚本——跳过不影响 vite build / vitest,且在 mac shell executor 的 node 25 上能避开
     # 旧 esbuild install.js SIGKILL(pipeline #652)。docker node:20 上同样安全。
     - npm ci --prefer-offline --no-audit --no-fund --ignore-scripts
+    - npm audit --audit-level=moderate
     # vitest: bridge / toast lib 层单测(regression guard)
     - npm test
     # npm run build 实际跑 vue-tsc --noEmit && vite build
@@ -200,7 +234,7 @@ desktop:
   stage: build
   tags:
     - macos
-  # 复用 web 已 build 的 internal/webui/dist,跳过 npm install + vite build(原来重复跑 ~2-3 min)
+  # 复用 web 已 build 的 internal/webui/dist,跳过 npm ci + vite build(原来重复跑 ~2-3 min)
   needs:
     - job: web
       artifacts: true

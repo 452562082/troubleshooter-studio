@@ -18,22 +18,26 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 )
 
 // readSystemIDFromMeta 从 tshoot.json 读 system_id 字段。读不到返回空串(调用方 fallback)。
 func readSystemIDFromMeta(metaPath string) string {
+	m := readMetaFromPath(metaPath)
+	return m.SystemID
+}
+
+func readMetaFromPath(metaPath string) discover.Meta {
 	data, err := os.ReadFile(metaPath)
 	if err != nil {
-		return ""
+		return discover.Meta{}
 	}
-	var m struct {
-		SystemID string `json:"system_id"`
-	}
+	var m discover.Meta
 	if err := json.Unmarshal(data, &m); err != nil {
-		return ""
+		return discover.Meta{}
 	}
-	return m.SystemID
+	return m
 }
 
 // UninstallNativeResult 通用卸载结果(claude-code / cursor / codex 共用一个)。
@@ -81,23 +85,30 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 	// system_id 单独从 tshoot.json 读 —— staging 用 system_id 命名,跟 agent name 不同
 	// (常见:agent name=truss-troubleshooter,system_id=truss)。
 	agentName := filepath.Base(installedDir)
-	systemID := readSystemIDFromMeta(filepath.Join(installedDir, discover.MetaFilename))
+	meta := readMetaFromPath(filepath.Join(installedDir, discover.MetaFilename))
+	systemID := meta.SystemID
+	agentNames := uninstallAgentNames(agentName, meta)
 
 	// 1) 真实部署目录 → ~/.Trash(出错回退 RemoveAll)。从 Trash 走避免误删后无法恢复。
 	// nanoTimestamp 防 1 秒内连点两次卸载撞 bk(秒精度时第二次 Rename 失败会 fallthrough 删数据)。
-	bk := filepath.Join(home, ".Trash", agentName+"-"+target+"-uninstall-"+nanoTimestamp())
-	movedTo, existed, mvErr := moveOutOrRemove(installedDir, bk)
-	if mvErr != nil {
-		return res, fmt.Errorf("uninstall installedDir: %w", mvErr)
-	}
-	switch {
-	case !existed:
-		logf("[skip] 已装目录 %s 不存在", installedDir)
-	case movedTo != "":
-		res.StagingMovedTo = movedTo
-		logf("[ok] 已装目录移到 %s", movedTo)
-	default:
-		logf("[ok] 已装目录已删除(rename to Trash 失败,直接 rm)")
+	for _, name := range agentNames {
+		dir := filepath.Join(root, "skills", name)
+		bk := filepath.Join(home, ".Trash", name+"-"+target+"-uninstall-"+nanoTimestamp())
+		movedTo, existed, mvErr := moveOutOrRemove(dir, bk)
+		if mvErr != nil {
+			return res, fmt.Errorf("uninstall installedDir %s: %w", dir, mvErr)
+		}
+		switch {
+		case !existed:
+			logf("[skip] 已装目录 %s 不存在", dir)
+		case movedTo != "":
+			if res.StagingMovedTo == "" {
+				res.StagingMovedTo = movedTo
+			}
+			logf("[ok] 已装目录移到 %s", movedTo)
+		default:
+			logf("[ok] 已装目录已删除(rename to Trash 失败,直接 rm)")
+		}
 	}
 
 	// 1b) staging 中间包(~/.tshoot/<target>/<system_id>/)— 部署中途临时落盘,装完已无用。
@@ -115,18 +126,22 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 	// 2) agent 文件(及备份):
 	//    claude / cursor: ~/.<root>/agents/<name>.md
 	//    codex        : ~/.codex/agents/<name>.toml
-	agentFile := filepath.Join(root, "agents", agentName+t.UserAgentExt())
-	if err := os.Remove(agentFile); err == nil {
-		res.UserAgentMD = agentFile
-		logf("[ok] %s 已删除", agentFile)
-	} else if !os.IsNotExist(err) {
-		logf("[warn] 删 %s 失败:%v", agentFile, err)
-	}
-	// 顺手清备份(install_native 生成的 .bak.YYYYMMDD-HHMMSS)
-	bakMatches, _ := filepath.Glob(agentFile + ".bak.*")
-	for _, bak := range bakMatches {
-		if err := os.Remove(bak); err == nil {
-			logf("[ok] %s 已删除", bak)
+	for _, name := range agentNames {
+		agentFile := filepath.Join(root, "agents", name+t.UserAgentExt())
+		if err := os.Remove(agentFile); err == nil {
+			if res.UserAgentMD == "" {
+				res.UserAgentMD = agentFile
+			}
+			logf("[ok] %s 已删除", agentFile)
+		} else if !os.IsNotExist(err) {
+			logf("[warn] 删 %s 失败:%v", agentFile, err)
+		}
+		// 顺手清备份(install_native 生成的 .bak.YYYYMMDD-HHMMSS)
+		bakMatches, _ := filepath.Glob(agentFile + ".bak.*")
+		for _, bak := range bakMatches {
+			if err := os.Remove(bak); err == nil {
+				logf("[ok] %s 已删除", bak)
+			}
 		}
 	}
 
@@ -157,18 +172,24 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 	}
 
 	// 3) skills / scripts 整目录
-	skillsDir := filepath.Join(root, "skills", agentName)
-	if err := os.RemoveAll(skillsDir); err == nil {
-		if _, statErr := os.Stat(skillsDir); os.IsNotExist(statErr) {
-			res.UserSkillsDir = skillsDir
-			logf("[ok] %s 已删除", skillsDir)
+	for _, name := range agentNames {
+		skillsDir := filepath.Join(root, "skills", name)
+		if err := os.RemoveAll(skillsDir); err == nil {
+			if _, statErr := os.Stat(skillsDir); os.IsNotExist(statErr) {
+				if res.UserSkillsDir == "" {
+					res.UserSkillsDir = skillsDir
+				}
+				logf("[ok] %s 已删除", skillsDir)
+			}
 		}
-	}
-	scriptsDir := filepath.Join(root, "scripts", agentName)
-	if err := os.RemoveAll(scriptsDir); err == nil {
-		if _, statErr := os.Stat(scriptsDir); os.IsNotExist(statErr) {
-			res.UserScriptsDir = scriptsDir
-			logf("[ok] %s 已删除", scriptsDir)
+		scriptsDir := filepath.Join(root, "scripts", name)
+		if err := os.RemoveAll(scriptsDir); err == nil {
+			if _, statErr := os.Stat(scriptsDir); os.IsNotExist(statErr) {
+				if res.UserScriptsDir == "" {
+					res.UserScriptsDir = scriptsDir
+				}
+				logf("[ok] %s 已删除", scriptsDir)
+			}
 		}
 	}
 
@@ -194,6 +215,39 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 
 	logf("[done] uninstall(%s) 完成", target)
 	return res, nil
+}
+
+func uninstallAgentNames(currentName string, meta discover.Meta) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	add(currentName)
+	add(meta.AgentID)
+	for _, ag := range meta.InternalAgents {
+		add(ag.ID)
+	}
+	if strings.TrimSpace(meta.TroubleshooterYAML) != "" {
+		if cfg, err := config.LoadFromBytes([]byte(meta.TroubleshooterYAML)); err == nil {
+			add(cfg.ResolveID())
+			if base := strings.TrimSpace(cfg.System.ID); base != "" {
+				add(base + "-validator")
+				add(base + "-fixer")
+			}
+		}
+	}
+	if meta.SystemID != "" {
+		add(meta.SystemID + "-troubleshooter")
+		add(meta.SystemID + "-validator")
+		add(meta.SystemID + "-fixer")
+	}
+	return out
 }
 
 // deriveInstallRoot 从 installedDir(= "<root>/skills/<name>/")反推 <root> 祖父目录。

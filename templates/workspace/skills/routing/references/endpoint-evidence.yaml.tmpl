@@ -1,0 +1,55 @@
+# endpoint-evidence.yaml
+# 可重建的静态拓扑证据。保留所有 endpoint、仓库扫描状态和所有边状态；
+# 本文件用于解释/复核，不得把 candidate / rejected / stale 当成正式依赖。
+schema_version: {{.Topology.SchemaVersion | printf "%q"}}
+analysis_attempted: {{if .Topology.SchemaVersion}}true{{else}}false{{end}}
+repositories:{{if .Topology.Repositories}}
+{{range .Topology.Repositories}}
+  - repo: {{.Repo | printf "%q"}}
+    state: {{.State | printf "%q"}}
+    endpoint_count: {{.EndpointCount}}
+{{if .Error}}    error: {{.Error | printf "%q"}}
+{{end}}{{end}}{{else}} []
+{{end}}endpoints:{{if .Topology.Endpoints}}
+{{range .Topology.Endpoints}}
+  - id: {{.ID | printf "%q"}}
+    repo: {{.Repo | printf "%q"}}
+    service: {{.Service | printf "%q"}}
+    direction: {{.Direction | printf "%q"}}
+    protocol: {{.Protocol | printf "%q"}}
+{{if .Method}}    method: {{.Method | printf "%q"}}
+{{end}}{{if .Path}}    path: {{.Path | printf "%q"}}
+{{end}}{{if .RPCMethod}}    rpc_method: {{.RPCMethod | printf "%q"}}
+{{end}}{{if .TargetHint}}    target_hint: {{.TargetHint | printf "%q"}}
+{{end}}    location: {{.Location | printf "%q"}}
+    source: {{.Source | printf "%q"}}
+    transforms:{{if .Transforms}}
+{{range .Transforms}}
+      - kind: {{.Kind | printf "%q"}}
+        from: {{.From | printf "%q"}}
+        to: {{.To | printf "%q"}}
+{{end}}{{else}} []
+{{end}}{{end}}{{else}} []
+{{end}}edges:{{if .Topology.Edges}}
+{{range .Topology.Edges}}
+  - id: {{topologyEvidenceID . | printf "%q"}}
+    from_endpoint: {{.FromEndpoint | printf "%q"}}
+    to_endpoint: {{.ToEndpoint | printf "%q"}}
+    from_service: {{.FromService | printf "%q"}}
+    to_service: {{.ToService | printf "%q"}}
+    protocol: {{.Protocol | printf "%q"}}
+{{if .Method}}    method: {{.Method | printf "%q"}}
+{{end}}{{if .Path}}    path: {{.Path | printf "%q"}}
+{{end}}{{if .RPCMethod}}    rpc_method: {{.RPCMethod | printf "%q"}}
+{{end}}    confidence: {{printf "%g" .Confidence}}
+    status: {{.Status | printf "%q"}}
+    reasons:{{if .Reasons}}
+{{range .Reasons}}
+      - {{. | printf "%q"}}
+{{end}}{{else}} []
+{{end}}    conflicts:{{if .Conflicts}}
+{{range .Conflicts}}
+      - {{. | printf "%q"}}
+{{end}}{{else}} []
+{{end}}{{end}}{{else}} []
+{{end}}

@@ -87,6 +87,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
+	case "serve":
+		if err := runServe(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
 	case "apply":
 		if err := runApply(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
@@ -138,6 +143,7 @@ func printWelcome() {
 
 已有 troubleshooter.yaml 的常用命令:
   tshoot validate -i troubleshooter.yaml                 # 校验格式
+  tshoot serve --addr 127.0.0.1:8080                     # 启动 HTTP API + Web UI
   tshoot plan     -i troubleshooter.yaml                 # 预览会生成什么
   tshoot gen      -i troubleshooter.yaml                 # 真落盘 staging
   tshoot install  --path <staging> --target X    # 部署到本机(openclaw / claude-code / cursor / codex)
@@ -160,6 +166,7 @@ func usage() {
   tshoot gen -i <troubleshooter.yaml> [-o <output_dir>] [-t <template_dir>] [--analysis <analysis.json>]
   tshoot plan -i <troubleshooter.yaml> [--analysis <analysis.json>] [--against <dir>] [--format=text|json]
   tshoot watch -i <troubleshooter.yaml> [--analysis <analysis.json>] [--interval 1s]
+  tshoot serve [--addr 127.0.0.1:8080]
   tshoot analyze -i <troubleshooter.yaml> --repos-root <dir> [-o <analysis.json>] [--auto-clone] [--branch <name>]
   tshoot doctor -i <troubleshooter.yaml> [--repos-root <dir>] [--format=text|json]
   tshoot diff -i <troubleshooter.yaml> [--analysis <analysis.json>] [--against <dir>]
@@ -178,6 +185,7 @@ func usage() {
   gen        基于 troubleshooter.yaml 生成机器人产物（人工 verified 行保留,模板派生文件按模板覆盖）
   plan       干跑一次 gen，展示将生成/应用的内容与 config-map 分布（不写盘）
   watch      文件变化时自动重跑 plan（troubleshooter.yaml / templates/ / analysis.json）
+  serve      启动本机 HTTP API + Web UI（默认 127.0.0.1:8080）
   analyze    扫描已 clone 的仓库，抽取 service_names 与配置中心线索
   doctor     对比 troubleshooter.yaml 声明与 analyzer 实测，报告漂移
   diff       预览本次生成相对现有产物的变化（不写盘）

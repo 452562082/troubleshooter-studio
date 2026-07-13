@@ -45,6 +45,7 @@ func UninstallNativeOpenclaw(installedDir string) (*UninstallOpenclawResult, err
 	logf := func(format string, a ...any) { res.Log = append(res.Log, fmt.Sprintf(format, a...)) }
 
 	agentID := cfg.ResolveID()
+	agentDescriptors := openclawAgentDescriptors(cfg)
 	wsDir := filepath.Join(home, ".openclaw", "workspace", wsName)
 	if _, err := os.Stat(wsDir); err == nil {
 		// nanoTimestamp 防 1 秒内连点两次卸载撞 bk(秒精度时第二次 Rename 失败可能丢 workspace)。
@@ -70,12 +71,24 @@ func UninstallNativeOpenclaw(installedDir string) (*UninstallOpenclawResult, err
 	cfgPath := filepath.Join(home, ".openclaw", "openclaw.json")
 	if data, err := readJSONOrEmpty(cfgPath); err == nil {
 		dirty := false
-		if removeAgentEntry(data, agentID) {
+		removedAgents := []string{}
+		for _, ag := range agentDescriptors {
+			if removeAgentEntry(data, ag.ID) {
+				removedAgents = append(removedAgents, ag.ID)
+				dirty = true
+			}
+		}
+		if legacyID := legacyOpenclawValidatorID(cfg); legacyID != "" {
+			if removeAgentEntry(data, legacyID) {
+				removedAgents = append(removedAgents, legacyID)
+				dirty = true
+			}
+		}
+		if len(removedAgents) > 0 {
 			res.OpenclawJSONClean = true
-			dirty = true
-			logf("[ok] %s 里 agents.list 已摘掉 %s", cfgPath, agentID)
+			logf("[ok] %s 里 agents.list 已摘掉 %s", cfgPath, strings.Join(removedAgents, ", "))
 		} else {
-			logf("[skip] openclaw.json 里没找到 %s,无需清理", agentID)
+			logf("[skip] openclaw.json 里没找到本系统 agent,无需清理")
 		}
 		// 删自家 MCP server keys。从 cfg 推 key 集合,跟 install 时 inject 的同款规则,
 		// 用 system.id 当短前缀,不会跟别的 agent 撞名。改了 yaml 再装时残留的废 key
@@ -111,12 +124,14 @@ func UninstallNativeOpenclaw(installedDir string) (*UninstallOpenclawResult, err
 	}
 
 	// 清 creds.json
-	credsPath := filepath.Join(home, ".openclaw", agentID+"-creds.json")
-	if err := os.Remove(credsPath); err == nil {
-		res.CredsRemoved = true
-		logf("[ok] %s 已删除", credsPath)
-	} else if !os.IsNotExist(err) {
-		logf("[warn] 删 %s 失败:%v", credsPath, err)
+	for _, ag := range agentDescriptors {
+		credsPath := filepath.Join(home, ".openclaw", ag.ID+"-creds.json")
+		if err := os.Remove(credsPath); err == nil {
+			res.CredsRemoved = true
+			logf("[ok] %s 已删除", credsPath)
+		} else if !os.IsNotExist(err) {
+			logf("[warn] 删 %s 失败:%v", credsPath, err)
+		}
 	}
 
 	logf("[done] uninstall 完成。本 agent 的 MCP servers 已从 openclaw.json 摘掉,不留垃圾条目。")

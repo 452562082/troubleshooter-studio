@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,9 +35,12 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
 	tshoot "github.com/xiaolong/troubleshooter-studio"
 	"github.com/xiaolong/troubleshooter-studio/api"
+	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
+	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/webui"
 )
 
@@ -55,7 +59,8 @@ type App struct {
 
 	// ctx 是 Wails 运行时 ctx，在 startup 阶段注入。所有需要原生能力（SaveFileDialog /
 	// OpenDirectoryDialog / WindowShow / EventsEmit 等）的 binding 都用这个。
-	ctx context.Context
+	ctxMu sync.RWMutex
+	ctx   context.Context
 
 	// installMu 保护 installCancel 字段；install 和 cancel 是不同 Wails goroutine
 	// 过来的,没锁会 race。
@@ -64,11 +69,68 @@ type App struct {
 	// RunInstall 赋值并 defer 清空;CancelInstall 读取并调用。同一时刻只允许一个
 	// install 跑,前端 UI 会禁用"部署"按钮避免并发。
 	installCancel context.CancelFunc
+
+	// analyzeMu/analyzeCancel 保护代码扫描长任务。Analyze 和 CancelAnalyze 来自不同
+	// Wails goroutine,必须加锁避免 race。
+	analyzeMu     sync.Mutex
+	analyzeCancel context.CancelFunc
+	analyzeID     uint64
+
+	trayOnce       sync.Once
+	bugPollOnce    sync.Once
+	bugHookOnce    sync.Once
+	bugHookBaseURL string
+	bugHookErr     error
+
+	bugInvestigationMu sync.Mutex
+	bugInvestigator    *bughub.CodexInvestigator
+
+	// workflowMu protects the single durable workflow runtime owned by this App.
+	// Bindings only adapt commands to this runtime; persistence and transitions
+	// remain inside bughub's CaseStore and CaseOrchestrator.
+	workflowMu                   sync.Mutex
+	workflowReminderOnce         sync.Once
+	workflowRoot                 string
+	workflowStore                *bughub.CaseStore
+	workflowOrchestrator         *bughub.CaseOrchestrator
+	workflowRunner               *bughub.AgentPhaseRunner
+	workflowInitErr              error
+	workflowLoadBug              func(string) (bughub.Bug, error)
+	workflowLoadBot              func(string) (bughub.BotRef, error)
+	workflowLoadDeploymentConfig func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error)
+	workflowK8sReaderFactory     func(context.Context, *config.SystemConfig, config.Environment) (bughub.K8sDeploymentReader, error)
+	workflowEmit                 func(string, any)
+	workflowRuntimeFactory       func(*bughub.CaseStore, *bughub.InvestigationStore) incidentWorkflowRuntime
 }
+
+var startDesktopTray = startTray
+var startDesktopBugPoller = startBugPoller
 
 // startup 由 Wails 在窗口创建完成时调用，注入 runtime ctx。私有也能被 Wails 识别。
 func (a *App) startup(ctx context.Context) {
+	a.setRuntimeContext(ctx)
+	_ = a.startIncidentWorkflow(workflowContext(ctx))
+	a.trayOnce.Do(func() {
+		startDesktopTray(a)
+	})
+	a.bugPollOnce.Do(func() {
+		startDesktopBugPoller(ctx, a)
+	})
+	a.bugHookOnce.Do(func() {
+		a.bugHookBaseURL, a.bugHookErr = startBugHookReceiver(a.templateRoot)
+	})
+}
+
+func (a *App) setRuntimeContext(ctx context.Context) {
+	a.ctxMu.Lock()
+	defer a.ctxMu.Unlock()
 	a.ctx = ctx
+}
+
+func (a *App) getRuntimeContext() context.Context {
+	a.ctxMu.RLock()
+	defer a.ctxMu.RUnlock()
+	return a.ctx
 }
 
 func main() {
@@ -81,10 +143,20 @@ func main() {
 		templateRoot: tr,
 	}
 
-	err := wails.Run(&options.App{
+	err := wails.Run(newDesktopOptions(appState, router))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "wails run:", err)
+		os.Exit(1)
+	}
+}
+
+func newDesktopOptions(appState *App, router http.Handler) *options.App {
+	return &options.App{
 		Title:  "Troubleshooter Studio",
 		Width:  1280,
 		Height: 860,
+		// 关闭主窗口时只隐藏,让桌面端继续在系统托盘/菜单栏图标里运行。
+		HideWindowOnClose: true,
 
 		// AssetServer.Handler = 所有 HTTP 请求（静态 SPA 资源 + /api/*）走这里。
 		// 不设 Assets，让 router 一肩挑（NewRouter 里已经做了 SPA fallback + CORS）。
@@ -106,11 +178,28 @@ func main() {
 
 		Bind:      []any{appState},
 		OnStartup: appState.startup,
-	})
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "wails run:", err)
-		os.Exit(1)
+		OnShutdown: func(ctx context.Context) {
+			_ = appState.closeIncidentWorkflow()
+		},
 	}
+}
+
+func (a *App) ShowMainWindow() {
+	ctx := a.getRuntimeContext()
+	if ctx == nil {
+		return
+	}
+	wailsruntime.Show(ctx)
+	wailsruntime.WindowShow(ctx)
+	wailsruntime.WindowUnminimise(ctx)
+}
+
+func (a *App) QuitApp() {
+	ctx := a.getRuntimeContext()
+	if ctx == nil {
+		os.Exit(0)
+	}
+	wailsruntime.Quit(ctx)
 }
 
 // fixGUIPath 修 macOS 桌面 app 由 launchd / Finder 启动时 PATH 被精简到

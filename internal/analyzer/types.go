@@ -1,5 +1,7 @@
 package analyzer
 
+import "github.com/xiaolong/troubleshooter-studio/internal/topology"
+
 // ConfigCenter 枚举
 const (
 	CenterNacos  = "nacos"
@@ -40,6 +42,15 @@ type DownstreamCall struct {
 	Hint     string `json:"hint,omitempty"`     // 原始字符串(URL / 调用表达式),给人核对用
 }
 
+type APIRoute struct {
+	Path     string `json:"path"`
+	Method   string `json:"method,omitempty"`
+	Source   string `json:"source,omitempty"`
+	Line     int    `json:"line,omitempty"`
+	Pattern  string `json:"pattern,omitempty"`
+	Strength string `json:"strength,omitempty"`
+}
+
 // DataStoreUsage 单次数据层使用线索 —— "本仓库初始化了哪个数据层连接"。
 type DataStoreUsage struct {
 	Type     string `json:"type"`              // mysql / doris / postgresql / redis / mongodb / elasticsearch / kafka / rabbitmq / clickhouse
@@ -74,16 +85,18 @@ type RoleHint struct {
 
 // RepoAnalysis 单仓库分析产物
 type RepoAnalysis struct {
-	Name            string           `json:"name"`
-	Stack           string           `json:"stack"`
-	RepoPath        string           `json:"repo_path"`
-	ServiceNames    []string         `json:"service_names,omitempty"`
-	Findings        []Finding        `json:"findings,omitempty"`
-	DownstreamCalls []DownstreamCall `json:"downstream_calls,omitempty"`
-	DataStoreUsages []DataStoreUsage `json:"data_store_usages,omitempty"`
-	SchemaTables    []SchemaTable    `json:"schema_tables,omitempty"`
-	RoleHint        *RoleHint        `json:"role_hint,omitempty"` // 自动推断的角色 + 理由(用户可改)
-	Warnings        []string         `json:"warnings,omitempty"`
+	Name            string              `json:"name"`
+	Stack           string              `json:"stack"`
+	RepoPath        string              `json:"repo_path"`
+	ServiceNames    []string            `json:"service_names,omitempty"`
+	Findings        []Finding           `json:"findings,omitempty"`
+	DownstreamCalls []DownstreamCall    `json:"downstream_calls,omitempty"`
+	APIRoutes       []APIRoute          `json:"api_routes,omitempty"`
+	Endpoints       []topology.Endpoint `json:"endpoints,omitempty"`
+	DataStoreUsages []DataStoreUsage    `json:"data_store_usages,omitempty"`
+	SchemaTables    []SchemaTable       `json:"schema_tables,omitempty"`
+	RoleHint        *RoleHint           `json:"role_hint,omitempty"` // 自动推断的角色 + 理由(用户可改)
+	Warnings        []string            `json:"warnings,omitempty"`
 	// Notes 是"信息性扫描发现",非错误也非警告 —— frontend_framework=next、
 	// api_url[apps/...]=https://... 这种"顺手扫到的资料"。区别于 Warnings:
 	//   Warnings  → "go.mod not found" / "scan failed" 这类需要用户注意的异常

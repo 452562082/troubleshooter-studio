@@ -14,17 +14,17 @@
 </head>
 <body>
   <h1>⚠ 前端尚未构建到二进制</h1>
-  <p>当前 <code>factory serve</code> 已在运行，<code>/api/*</code> 接口可用，但前端静态资源还是占位。</p>
+  <p>当前 <code>tshoot serve</code> 已在运行，<code>/api/*</code> 接口可用，但前端静态资源还是占位。</p>
 
   <h2>方式一：构建前端并重新编译 Go</h2>
-  <pre>cd web && npm install && npm run build
+  <pre>cd web && npm ci --ignore-scripts && npm run build
 cp -R dist/. ../internal/webui/dist/
-cd .. && go build -o bin/factory ./cmd/factory
-./bin/factory serve</pre>
+cd .. && go build -o bin/tshoot ./cmd/tshoot
+./bin/tshoot serve</pre>
 
   <h2>方式二：开发模式（两个进程）</h2>
   <p>保持 Go 后端运行，另起终端：</p>
-  <pre>cd web && npm install && npm run dev</pre>
+  <pre>cd web && npm ci --ignore-scripts && npm run dev</pre>
   <p class="hint">Vite 会把 <code>/api</code> 请求代理到 Go 后端，热重载生效。</p>
 </body>
 </html>

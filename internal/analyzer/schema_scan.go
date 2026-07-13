@@ -28,6 +28,7 @@
 package analyzer
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -37,19 +38,23 @@ import (
 // ScanSchema 单仓库扫,产出 SchemaTable 列表。stack 决定优先用哪种 ORM 模式扫,
 // 但 SQL string + 文件名两种通用策略所有 stack 都会跑(万一 ORM 没识别还能兜)。
 func ScanSchema(stack, repoPath string, includePaths []string) []SchemaTable {
+	return ScanSchemaContext(context.Background(), stack, repoPath, includePaths)
+}
+
+func ScanSchemaContext(ctx context.Context, stack, repoPath string, includePaths []string) []SchemaTable {
 	var all []SchemaTable
 	switch stack {
 	case "go":
-		all = append(all, scanGoSchema(repoPath, includePaths)...)
+		all = append(all, scanGoSchema(ctx, repoPath, includePaths)...)
 	case "java":
-		all = append(all, scanJavaSchema(repoPath, includePaths)...)
+		all = append(all, scanJavaSchema(ctx, repoPath, includePaths)...)
 	case "python":
-		all = append(all, scanPythonSchema(repoPath, includePaths)...)
+		all = append(all, scanPythonSchema(ctx, repoPath, includePaths)...)
 	case "node":
-		all = append(all, scanNodeSchema(repoPath, includePaths)...)
+		all = append(all, scanNodeSchema(ctx, repoPath, includePaths)...)
 	}
 	// 通用 SQL 字符串扫(所有 stack 都跑)
-	all = append(all, scanSQLLiterals(stack, repoPath, includePaths)...)
+	all = append(all, scanSQLLiterals(ctx, stack, repoPath, includePaths)...)
 	return dedupeSchemaTables(all)
 }
 
@@ -84,9 +89,9 @@ var (
 	reSQLUpdate = regexp.MustCompile(`(?i)UPDATE\s+` + "`" + `?(\w+)` + "`" + `?\s+SET`)
 )
 
-func scanSQLLiterals(stack, repoPath string, include []string) []SchemaTable {
+func scanSQLLiterals(ctx context.Context, stack, repoPath string, include []string) []SchemaTable {
 	exts := []string{".go", ".java", ".kt", ".py", ".js", ".ts", ".jsx", ".tsx", ".mjs", ".sql", ".xml", ".rb", ".php"}
-	files, _ := walkFiles(repoPath, include, func(p string) bool {
+	files, _ := walkFilesContext(ctx, repoPath, include, func(p string) bool {
 		for _, e := range exts {
 			if strings.HasSuffix(p, e) {
 				return true
@@ -96,6 +101,9 @@ func scanSQLLiterals(stack, repoPath string, include []string) []SchemaTable {
 	})
 	out := []SchemaTable{}
 	for _, fp := range files {
+		if ctx != nil && ctx.Err() != nil {
+			return out
+		}
 		data, err := os.ReadFile(fp)
 		if err != nil {
 			continue

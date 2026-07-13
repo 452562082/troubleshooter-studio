@@ -11,6 +11,13 @@
 // 它依赖 runCCHubPreload / crossCheckImported* 等 closure 函数,跨边界不值得。
 
 import type { CredField } from './credFields'
+import type {
+  CodeIntelligenceState,
+  ServiceTopologyOverrideState,
+  ServiceTopologyState,
+  DeploymentVerificationState,
+} from './yamlGenerator'
+import { emptyDeploymentVerification } from './yamlGenerator'
 import { VIA_GRAFANA_ELIGIBLE } from './yamlShared'
 
 /** yaml 字段值是否为模板占位符 "{{XYZ}}";占位符不应当作真值反填。 */
@@ -67,16 +74,43 @@ export interface ParsedEnv {
   api_domain: string
   web_domain: string
   is_prod: boolean
+  deployment_verification?: DeploymentVerificationState
 }
 
 /** parsed.environments[i] → ParsedEnv,字段全 fallback 空串/false。 */
 export function parseEnvironment(e: unknown): ParsedEnv {
   const o = (e ?? {}) as Record<string, unknown>
+  const raw = o.deployment_verification && typeof o.deployment_verification === 'object'
+    ? o.deployment_verification as Record<string, unknown>
+    : undefined
+  let deploymentVerification: DeploymentVerificationState | undefined
+  if (raw) {
+    const provider = raw.provider === 'http' || raw.provider === 'k8s' ? raw.provider : 'manual'
+    const http = raw.http && typeof raw.http === 'object' ? raw.http as Record<string, unknown> : {}
+    const k8s = raw.k8s && typeof raw.k8s === 'object' ? raw.k8s as Record<string, unknown> : {}
+    const mappings: Record<string, string> = {}
+    if (k8s.deployments_by_repo && typeof k8s.deployments_by_repo === 'object') {
+      for (const [repo, deployment] of Object.entries(k8s.deployments_by_repo as Record<string, unknown>)) {
+        if (typeof deployment === 'string') mappings[repo] = deployment
+      }
+    }
+    deploymentVerification = emptyDeploymentVerification()
+    deploymentVerification.provider = provider
+    deploymentVerification.http.url = typeof http.url === 'string' ? http.url : ''
+    deploymentVerification.http.json_pointer = typeof http.json_pointer === 'string' ? http.json_pointer : ''
+    deploymentVerification.http.allow_private = http.allow_private === true
+    deploymentVerification.k8s.cluster = typeof k8s.cluster === 'string' ? k8s.cluster : ''
+    deploymentVerification.k8s.namespace = typeof k8s.namespace === 'string' ? k8s.namespace : ''
+    deploymentVerification.k8s.deployments_by_repo = mappings
+    deploymentVerification.k8s.commit_annotation = typeof k8s.commit_annotation === 'string' ? k8s.commit_annotation : ''
+    deploymentVerification.k8s.image_label = typeof k8s.image_label === 'string' ? k8s.image_label : ''
+  }
   return {
     id: typeof o.id === 'string' ? o.id : '',
     api_domain: typeof o.api_domain === 'string' ? o.api_domain : '',
     web_domain: typeof o.web_domain === 'string' ? o.web_domain : '',
     is_prod: Boolean(o.is_prod),
+    ...(deploymentVerification ? { deployment_verification: deploymentVerification } : {}),
   }
 }
 
@@ -139,7 +173,9 @@ export interface ApplyImportContext {
   system: { id: string; name: string; description: string }
   agent: { id: string; name: string; workspace_name: string; model: string }
   targetModels: Record<string, string>
-  environments: Array<{ id: string; api_domain: string; web_domain: string; is_prod: boolean }>
+  codeIntelligence: CodeIntelligenceState
+  serviceTopology: ServiceTopologyState
+  environments: ParsedEnv[]
   repos: any[]
   enabledSourceTypes: Record<string, boolean>
   enabledSourceOrder: string[]
@@ -186,6 +222,30 @@ export interface ApplyImportContext {
   setRepoBranches: (name: string, branches: string[]) => void
 }
 
+/** Convert backend-valid YAML override records into wizard state.
+ * Protocol and HTTP method use the same case normalization as Go validation;
+ * paths stay byte-for-byte intact for the backend to canonicalize. */
+export function importServiceTopologyOverrides(rawOverrides: unknown): ServiceTopologyOverrideState[] {
+  if (!Array.isArray(rawOverrides)) return []
+  return rawOverrides.flatMap((raw: unknown): ServiceTopologyOverrideState[] => {
+    if (!raw || typeof raw !== 'object') return []
+    const value = raw as Record<string, unknown>
+    if (value.action !== 'confirm' && value.action !== 'reject' && value.action !== 'add') return []
+    const protocol = typeof value.protocol === 'string' ? value.protocol.trim().toLowerCase() : ''
+    if (protocol !== 'http' && protocol !== 'grpc') return []
+    if (typeof value.from_service !== 'string' || typeof value.to_service !== 'string') return []
+    return [{
+      action: value.action,
+      fromService: value.from_service,
+      toService: value.to_service,
+      protocol,
+      ...(typeof value.method === 'string' ? { method: value.method.trim().toUpperCase() } : {}),
+      ...(typeof value.path === 'string' ? { path: value.path } : {}),
+      ...(typeof value.rpc_method === 'string' ? { rpcMethod: value.rpc_method } : {}),
+    }]
+  })
+}
+
 /**
  * 把 parsed yaml 反填到 wizard 的 reactive state(同步部分,async cross-check tail 留 InitPage)。
  * 返回主源 type(InitPage 用作 setTimeout cross-check 的 envID 输入)。
@@ -194,6 +254,13 @@ export async function applyParsedYAMLToWizardState(
   parsed: any,
   ctx: ApplyImportContext,
 ): Promise<{ primaryConfigCenter: string }> {
+  const codeIntelligence = parsed?.code_intelligence
+  ctx.codeIntelligence.enabled = codeIntelligence?.enabled === true
+    && (codeIntelligence.provider === undefined || codeIntelligence.provider === 'codegraph')
+  ctx.codeIntelligence.provider = 'codegraph'
+
+  ctx.serviceTopology.overrides = importServiceTopologyOverrides(parsed?.service_topology?.overrides)
+
   // system
   if (parsed.system && typeof parsed.system === 'object') {
     ctx.system.id = parsed.system.id ?? ''

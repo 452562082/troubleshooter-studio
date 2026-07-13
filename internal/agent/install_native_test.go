@@ -76,6 +76,126 @@ func TestInstallNative_Cursor(t *testing.T) {
 	}
 }
 
+func TestInstallNative_InstallsMultipleClaudeAgents(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	staging := t.TempDir()
+	must := func(err error) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(os.MkdirAll(filepath.Join(staging, "agents"), 0o755))
+	must(os.WriteFile(filepath.Join(staging, "agents", "shop-troubleshooter.md"), []byte("---\nname: shop-troubleshooter\n---\n"), 0o644))
+	must(os.WriteFile(filepath.Join(staging, "agents", "shop-validator.md"), []byte("---\nname: shop-validator\n---\n"), 0o644))
+	for _, skill := range []string{
+		"api-verifier",
+		"attachment-evidence-verifier",
+		"bug-verifier",
+		"frontend-repro-investigator",
+		"incident-investigator",
+		"postgresql-runtime-query",
+		"recent-changes",
+	} {
+		must(os.MkdirAll(filepath.Join(staging, "skills", skill), 0o755))
+		must(os.WriteFile(filepath.Join(staging, "skills", skill, "SKILL.md"), []byte("# "+skill+"\n"), 0o644))
+	}
+	must(os.MkdirAll(filepath.Join(staging, "scripts"), 0o755))
+	must(os.WriteFile(filepath.Join(staging, "scripts", "helper.py"), []byte("# helper\n"), 0o644))
+	must(os.WriteFile(filepath.Join(staging, "tshoot.json"), []byte(`{"schema_version":1,"system_id":"shop","target":"claude-code","agent_id":"shop-troubleshooter","role":"troubleshooter","internal_agents":[{"id":"shop-troubleshooter","role":"troubleshooter"},{"id":"shop-validator","role":"validator"}]}`), 0o644))
+	must(os.MkdirAll(filepath.Join(staging, "agents-meta", "shop-troubleshooter"), 0o755))
+	must(os.WriteFile(filepath.Join(staging, "agents-meta", "shop-troubleshooter", "tshoot.json"), []byte(`{"schema_version":1,"system_id":"shop","target":"claude-code","agent_id":"shop-troubleshooter","role":"troubleshooter"}`), 0o644))
+	must(os.MkdirAll(filepath.Join(staging, "agents-meta", "shop-validator"), 0o755))
+	must(os.WriteFile(filepath.Join(staging, "agents-meta", "shop-validator", "tshoot.json"), []byte(`{"schema_version":1,"system_id":"shop","target":"claude-code","agent_id":"shop-validator","role":"validator"}`), 0o644))
+
+	if err := InstallNative(staging, "claude-code"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"shop-troubleshooter", "shop-validator"} {
+		if _, err := os.Stat(filepath.Join(fakeHome, ".claude", "agents", name+".md")); err != nil {
+			t.Fatalf("%s agent not installed: %v", name, err)
+		}
+		if _, err := os.Stat(filepath.Join(fakeHome, ".claude", "scripts", name, "helper.py")); err != nil {
+			t.Fatalf("%s scripts not installed: %v", name, err)
+		}
+		metaPath := filepath.Join(fakeHome, ".claude", "skills", name, "tshoot.json")
+		body, err := os.ReadFile(metaPath)
+		if name == "shop-troubleshooter" {
+			if err != nil {
+				t.Fatalf("%s meta missing: %v", name, err)
+			}
+			if !strings.Contains(string(body), `"agent_id":"shop-troubleshooter"`) || !strings.Contains(string(body), `"id":"shop-validator"`) {
+				t.Fatalf("%s meta wrong: %s", name, body)
+			}
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("%s internal agent should not have discover meta, err=%v body=%s", name, err, body)
+		}
+	}
+	assertExists := func(rel string) {
+		t.Helper()
+		if _, err := os.Stat(filepath.Join(fakeHome, ".claude", "skills", rel, "SKILL.md")); err != nil {
+			t.Fatalf("expected skill %s: %v", rel, err)
+		}
+	}
+	assertMissing := func(rel string) {
+		t.Helper()
+		if _, err := os.Stat(filepath.Join(fakeHome, ".claude", "skills", rel, "SKILL.md")); !os.IsNotExist(err) {
+			t.Fatalf("skill %s should be absent, err=%v", rel, err)
+		}
+	}
+	assertExists("shop-troubleshooter/incident-investigator")
+	assertExists("shop-troubleshooter/recent-changes")
+	assertExists("shop-troubleshooter/frontend-repro-investigator")
+	assertMissing("shop-troubleshooter/api-verifier")
+	assertMissing("shop-troubleshooter/attachment-evidence-verifier")
+	assertMissing("shop-troubleshooter/bug-verifier")
+
+	assertExists("shop-validator/api-verifier")
+	assertExists("shop-validator/attachment-evidence-verifier")
+	assertExists("shop-validator/bug-verifier")
+	assertExists("shop-validator/frontend-repro-investigator")
+	assertExists("shop-validator/postgresql-runtime-query")
+	assertMissing("shop-validator/incident-investigator")
+	assertMissing("shop-validator/recent-changes")
+}
+
+func TestInstallNative_PrimaryAnchorUsesTroubleshooterWhenRootMetaIsLegacy(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	staging := t.TempDir()
+	must := func(err error) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(os.MkdirAll(filepath.Join(staging, "agents"), 0o755))
+	for _, name := range []string{"base-fixer", "base-troubleshooter", "base-validator"} {
+		must(os.WriteFile(filepath.Join(staging, "agents", name+".toml"), []byte("name = \""+name+"\"\n"), 0o644))
+		must(os.MkdirAll(filepath.Join(staging, "agents-meta", name), 0o755))
+	}
+	must(os.WriteFile(filepath.Join(staging, "agents-meta", "base-fixer", "tshoot.json"), []byte(`{"schema_version":1,"system_id":"base","target":"codex","agent_id":"base-fixer","role":"fixer"}`), 0o644))
+	must(os.WriteFile(filepath.Join(staging, "agents-meta", "base-troubleshooter", "tshoot.json"), []byte(`{"schema_version":1,"system_id":"base","target":"codex","agent_id":"base-troubleshooter","role":"troubleshooter"}`), 0o644))
+	must(os.WriteFile(filepath.Join(staging, "agents-meta", "base-validator", "tshoot.json"), []byte(`{"schema_version":1,"system_id":"base","target":"codex","agent_id":"base-validator","role":"validator"}`), 0o644))
+	must(os.MkdirAll(filepath.Join(staging, "skills", "incident-investigator"), 0o755))
+	must(os.WriteFile(filepath.Join(staging, "skills", "incident-investigator", "SKILL.md"), []byte("# incident\n"), 0o644))
+	must(os.MkdirAll(filepath.Join(staging, "skills", "bug-fixer"), 0o755))
+	must(os.WriteFile(filepath.Join(staging, "skills", "bug-fixer", "SKILL.md"), []byte("# fix\n"), 0o644))
+	must(os.MkdirAll(filepath.Join(staging, "scripts"), 0o755))
+	must(os.WriteFile(filepath.Join(staging, "tshoot.json"), []byte(`{"schema_version":1,"system_id":"base","system_name":"Base","target":"codex"}`), 0o644))
+
+	if err := InstallNative(staging, "codex"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(filepath.Join(fakeHome, ".codex", "skills", "base-troubleshooter", "tshoot.json")); err != nil {
+		t.Fatalf("troubleshooter meta missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(fakeHome, ".codex", "skills", "base-fixer", "tshoot.json")); !os.IsNotExist(err) {
+		t.Fatalf("fixer should not expose discover meta, err=%v", err)
+	}
+}
+
 func TestInstallNative_BackupExistingAgent(t *testing.T) {
 	fakeHome := t.TempDir()
 	t.Setenv("HOME", fakeHome)

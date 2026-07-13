@@ -1,9 +1,14 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   applyParsedYAMLToWizardState,
   isPlaceholder, isLiveString, inferAuthMode, parseEnvironment, parseRepoCore, placeholderName,
 } from './yamlImporter'
 import type { CredField } from './credFields'
+import {
+  INIT_WIZARD_KEY,
+  loadInitWizardDraft,
+  type WizardDraft,
+} from './useWizardDraft'
 
 describe('isPlaceholder / isLiveString', () => {
   it('isPlaceholder identifies {{XXX}}', () => {
@@ -84,6 +89,12 @@ describe('parseEnvironment', () => {
     expect(parseEnvironment(null)).toEqual({ id: '', api_domain: '', web_domain: '', is_prod: false })
     expect(parseEnvironment(undefined)).toEqual({ id: '', api_domain: '', web_domain: '', is_prod: false })
   })
+  it('imports HTTP and K8s deployment verification provider blocks', () => {
+    expect(parseEnvironment({ deployment_verification: { provider: 'http', http: { url: 'https://x/version', json_pointer: '/git/commit', allow_private: true } } }).deployment_verification)
+      .toEqual({ provider: 'http', http: { url: 'https://x/version', json_pointer: '/git/commit', allow_private: true }, k8s: { cluster: '', namespace: '', deployments_by_repo: {}, commit_annotation: '', image_label: '' } })
+    expect(parseEnvironment({ deployment_verification: { provider: 'k8s', k8s: { cluster: 'c', namespace: 'n', deployments_by_repo: { repo: 'deploy' }, image_label: 'commit' } } }).deployment_verification)
+      .toEqual({ provider: 'k8s', http: { url: '', json_pointer: '', allow_private: false }, k8s: { cluster: 'c', namespace: 'n', deployments_by_repo: { repo: 'deploy' }, commit_annotation: '', image_label: 'commit' } })
+  })
 })
 
 describe('parseRepoCore', () => {
@@ -133,6 +144,8 @@ describe('applyParsedYAMLToWizardState observability import', () => {
       system: { id: '', name: '', description: '' },
       agent: { id: '', name: '', workspace_name: '', model: '' },
       targetModels: {},
+      codeIntelligence: { enabled: false, provider: 'codegraph' },
+      serviceTopology: { overrides: [] },
       environments: [],
       repos: [],
       enabledSourceTypes: {},
@@ -180,6 +193,79 @@ describe('applyParsedYAMLToWizardState observability import', () => {
     }
     return ctx
   }
+
+  it('imports code intelligence and defaults old YAML to disabled', async () => {
+    const ctx = makeImportCtx({ codeIntelligence: { enabled: false, provider: 'codegraph' } })
+    await applyParsedYAMLToWizardState({
+      code_intelligence: { enabled: true, provider: 'codegraph' },
+    }, ctx)
+    expect(ctx.codeIntelligence).toEqual({ enabled: true, provider: 'codegraph' })
+
+    await applyParsedYAMLToWizardState({}, ctx)
+    expect(ctx.codeIntelligence).toEqual({ enabled: false, provider: 'codegraph' })
+  })
+
+  it('imports all topology override actions and ignores scan data', async () => {
+    const ctx = makeImportCtx()
+    await applyParsedYAMLToWizardState({
+      service_topology: {
+        overrides: [
+          { action: 'confirm', from_service: 'web', to_service: 'bff', protocol: 'http', method: 'GET', path: '/api/orders' },
+          { action: 'reject', from_service: 'bff', to_service: 'legacy', protocol: 'grpc', rpc_method: 'legacy.Order/Get' },
+          { action: 'add', from_service: 'bff', to_service: 'order', protocol: 'http', method: 'POST', path: '/internal/orders' },
+        ],
+        endpoints: [{ id: 'runtime-only-endpoint' }],
+        edges: [{ status: 'candidate' }],
+      },
+    }, ctx)
+
+    expect(ctx.serviceTopology).toEqual({
+      overrides: [
+        { action: 'confirm', fromService: 'web', toService: 'bff', protocol: 'http', method: 'GET', path: '/api/orders' },
+        { action: 'reject', fromService: 'bff', toService: 'legacy', protocol: 'grpc', rpcMethod: 'legacy.Order/Get' },
+        { action: 'add', fromService: 'bff', toService: 'order', protocol: 'http', method: 'POST', path: '/internal/orders' },
+      ],
+    })
+  })
+
+  it('normalizes uppercase HTTP and gRPC overrides without dropping semantic fields', async () => {
+    const ctx = makeImportCtx()
+    await applyParsedYAMLToWizardState({
+      service_topology: {
+        overrides: [
+          {
+            action: 'confirm', from_service: 'web', to_service: 'files',
+            protocol: 'HTTP', method: 'get', path: '/files/:path*',
+          },
+          {
+            action: 'reject', from_service: 'web', to_service: 'orders',
+            protocol: 'GRPC', rpc_method: 'orders.v1.OrderService/GetOrder',
+          },
+        ],
+      },
+    }, ctx)
+
+    expect(ctx.serviceTopology.overrides).toEqual([
+      {
+        action: 'confirm', fromService: 'web', toService: 'files',
+        protocol: 'http', method: 'GET', path: '/files/:path*',
+      },
+      {
+        action: 'reject', fromService: 'web', toService: 'orders',
+        protocol: 'grpc', rpcMethod: 'orders.v1.OrderService/GetOrder',
+      },
+    ])
+  })
+
+  it('defaults old YAML topology overrides to an empty array', async () => {
+    const ctx = makeImportCtx({ serviceTopology: { overrides: [{
+      action: 'add', fromService: 'old', toService: 'old-peer', protocol: 'http', method: 'GET', path: '/old',
+    }] } })
+
+    await applyParsedYAMLToWizardState({}, ctx)
+
+    expect(ctx.serviceTopology).toEqual({ overrides: [] })
+  })
 
   it('restores one2all global endpoint url/token into shared creds and visible inputs', async () => {
     const ctx = makeImportCtx({
@@ -284,5 +370,30 @@ describe('applyParsedYAMLToWizardState observability import', () => {
       dev: 'feature/saved-dev',
       prod: 'release/2026',
     })
+  })
+})
+
+describe('wizard draft service topology state', () => {
+  it('restores topology overrides from the saved draft', () => {
+    const draft: WizardDraft = {
+      serviceTopology: {
+        overrides: [{
+          action: 'confirm', fromService: 'web', toService: 'bff', protocol: 'http', method: 'GET', path: '/api/orders',
+        }],
+      },
+    }
+    const values = new Map<string, string>()
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    })
+    localStorage.setItem(INIT_WIZARD_KEY, JSON.stringify(draft))
+    try {
+      expect(loadInitWizardDraft()?.serviceTopology).toEqual(draft.serviceTopology)
+    } finally {
+      localStorage.removeItem(INIT_WIZARD_KEY)
+      vi.unstubAllGlobals()
+    }
   })
 })

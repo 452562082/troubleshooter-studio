@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // 重要:import 里 App 模块会 eagerly 读 window.go —— 但 Wails 生成的 App.js 只在
 // 函数调用时访问,所以 import 本身不 throw。
-import { discoverBots, isDesktop, validate } from './bridge'
+import { analyzeServiceTopology, discoverBots, isDesktop, validate } from './bridge'
 
 describe('bridge.isDesktop', () => {
   afterEach(() => {
@@ -102,5 +102,26 @@ describe('bridge.validate', () => {
       json: vi.fn().mockResolvedValue({ error: 'bad yaml' }),
     }) as any
     await expect(validate('broken')).rejects.toThrow('bad yaml')
+  })
+})
+
+describe('bridge.analyzeServiceTopology', () => {
+  afterEach(() => {
+    delete (window as any).go
+    vi.restoreAllMocks()
+  })
+
+  it('桌面模式转发 yaml 和 repo paths', async () => {
+    const snapshot = { schema_version: '1', services: [], endpoints: [], edges: [], repositories: [] }
+    const spy = vi.fn().mockResolvedValue(snapshot)
+    ;(window as any).go = { main: { App: { AnalyzeServiceTopology: spy } } }
+
+    await expect(analyzeServiceTopology('system:\n  id: mall', { web: '/repos/web' })).resolves.toEqual(snapshot)
+    expect(spy).toHaveBeenCalledWith('system:\n  id: mall', { web: '/repos/web' })
+  })
+
+  it('浏览器模式明确拒绝', async () => {
+    delete (window as any).go
+    await expect(analyzeServiceTopology('yaml', {})).rejects.toThrow('仅在桌面 app 可用')
   })
 })

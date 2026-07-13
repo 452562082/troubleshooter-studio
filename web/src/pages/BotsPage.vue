@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onActivated, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onActivated, onMounted, onUnmounted, reactive, ref } from 'vue'
 import {
   applyBot,
   discoverBots,
@@ -23,11 +23,29 @@ const error = ref<string | null>(null)
 // 工作目录浏览器:点击卡片"📂 浏览工作目录"打开,modal 包一层 WorkspaceBrowser。
 // 一次只开一个,重选机器人时换 rootPath 即可,没必要多开。
 const browserBot = ref<DiscoveredBot | null>(null)
-function openBrowser(b: DiscoveredBot) {
+const browserInitialPath = ref('')
+const browserAgentScope = ref('')
+const browserKey = computed(() => {
+  if (!browserBot.value) return ''
+  return [
+    browserBot.value.path,
+    browserInitialPath.value || '-',
+    browserAgentScope.value || '-',
+  ].join('|')
+})
+type BrowserOpenPayload = { initialPath: string; agentId: string }
+function openBrowser(b: DiscoveredBot, initialPath = '', agentScope = '') {
   browserBot.value = b
+  browserInitialPath.value = initialPath
+  browserAgentScope.value = agentScope
+}
+function openBrowserAt(b: DiscoveredBot, payload: BrowserOpenPayload) {
+  openBrowser(b, payload.initialPath, payload.agentId)
 }
 function closeBrowser() {
   browserBot.value = null
+  browserInitialPath.value = ''
+  browserAgentScope.value = ''
 }
 // extraRoots 仍然保留(空 array),让 discoverBots(extraRoots.value) 调用签名不变;
 // UI 已下线,所以永远是 [] —— 等同于"只扫 3 条默认路径"。需要传自定义路径走 CLI。
@@ -151,7 +169,7 @@ async function scan() {
 }
 
 function regenKey(b: DiscoveredBot) {
-  return `${b.path}|${b.meta.target}`
+  return `${b.meta.system_id}|${b.meta.target}|${b.path}`
 }
 
 // 重新生成:用 tshoot.json 里现存的 troubleshooter_yaml 重新渲染产物 + 刷到这张卡的真实部署目录,
@@ -335,7 +353,7 @@ onActivated(() => { scan() })
     <div v-else class="bot-grid">
       <BotCard
         v-for="b in bots"
-        :key="b.path + b.meta.target"
+        :key="regenKey(b)"
         v-model:editor-draft="editorDraft"
         :bot="b"
         :doctor="doctorState[regenKey(b)]"
@@ -348,6 +366,7 @@ onActivated(() => { scan() })
         @run-doctor="runDoctor(b)"
         @close-doctor="doctorState[regenKey(b)].open = false"
         @open-browser="openBrowser(b)"
+        @open-browser-at="(payload) => openBrowserAt(b, payload)"
         @toggle-menu="toggleMenu(regenKey(b))"
         @close-menu="closeMenu"
         @regen="regen(b)"
@@ -361,8 +380,11 @@ onActivated(() => { scan() })
     <!-- 工作目录浏览器:点击卡片"📂 浏览工作目录"打开。 -->
     <WorkspaceBrowser
       v-if="browserBot"
+      :key="browserKey"
       :root-path="browserBot.path"
       :bot="browserBot"
+      :initial-path="browserInitialPath"
+      :agent-scope="browserAgentScope"
       @close="closeBrowser"
     />
   </div>

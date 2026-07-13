@@ -21,6 +21,7 @@ cascade_check = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(cascade_check)
 parse_dep_map = cascade_check.parse_dep_map
 summarize = cascade_check.summarize
+namespace_for_downstream = cascade_check.namespace_for_downstream
 
 
 # 跟 service-dependency-map.yaml.tmpl 渲染出的形状逐字对齐(block 列表 + 引号包裹)。
@@ -34,6 +35,9 @@ GENERATED_BLOCK = """services:
       - "user"
       - "order"
       - "inventory"
+    downstream_namespaces:
+      user: "identity-prod"
+      inventory: "warehouse-prod"
     data_stores:
       - "mysql:order_db"
       - "redis:session"
@@ -51,6 +55,7 @@ INLINE = """services:
   commerce:
     role: "backend"
     downstream: ["user", "order", "inventory"]
+    downstream_namespaces: {"user": "identity-prod", "order": "order-prod"}
     data_stores: ["mysql:order_db"]
     critical: true
 """
@@ -60,6 +65,10 @@ def test_block_lists_parse():
     """生成器实际产出的 block 风格必须被正确解析(核心回归)。"""
     r = parse_dep_map(GENERATED_BLOCK)
     assert r["commerce"]["downstream"] == ["user", "order", "inventory"]
+    assert r["commerce"]["downstream_namespaces"] == {
+        "user": "identity-prod",
+        "inventory": "warehouse-prod",
+    }
     assert r["commerce"]["upstream"] == ["api-gateway", "web-bff"]
     assert r["commerce"]["data_stores"] == ["mysql:order_db", "redis:session"]
     assert r["commerce"]["critical"] is False
@@ -69,6 +78,10 @@ def test_inline_lists_still_parse():
     """inline 风格(手填用户可能用)继续支持,不能因加 block 支持而回归。"""
     r = parse_dep_map(INLINE)
     assert r["commerce"]["downstream"] == ["user", "order", "inventory"]
+    assert r["commerce"]["downstream_namespaces"] == {
+        "user": "identity-prod",
+        "order": "order-prod",
+    }
     assert r["commerce"]["data_stores"] == ["mysql:order_db"]
     assert r["commerce"]["critical"] is True
 
@@ -88,6 +101,28 @@ def test_block_field_isolation():
     # user 的 downstream 不能混入 commerce 的项
     assert "user" not in r["user"]["downstream"]
     assert set(r["commerce"]["downstream"]).isdisjoint(r["user"]["downstream"])
+
+
+def test_namespace_for_downstream_uses_override_or_default():
+    r = parse_dep_map(GENERATED_BLOCK)
+    entry = r["commerce"]
+    assert namespace_for_downstream(entry, "user", "base-prod") == "identity-prod"
+    assert namespace_for_downstream(entry, "order", "base-prod") == "base-prod"
+
+
+def test_pyyaml_path_handles_comments_after_block_items():
+    """PyYAML 可用时,block item 行尾注释不能污染服务名或数据层名。"""
+    r = parse_dep_map("""services:
+  commerce:
+    upstream: []
+    downstream:
+      - "user"  # identity service
+    data_stores:
+      - "mysql:order_db"  # primary
+    critical: false
+""")
+    assert r["commerce"]["downstream"] == ["user"]
+    assert r["commerce"]["data_stores"] == ["mysql:order_db"]
 
 
 # ── summarize:unknown 下游不得被当成 healthy(2026-06 正确性回归) ──────────────

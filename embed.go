@@ -22,3 +22,8 @@ var TemplatesFS embed.FS
 //
 //go:embed all:examples
 var ExamplesFS embed.FS
+
+// SchemaFS 根含子目录 "schema/"
+//
+//go:embed all:schema
+var SchemaFS embed.FS

@@ -23,6 +23,25 @@ func checkGeneration(c *SystemConfig) []HealthIssue {
 		}
 	}
 
+	if c.CodeIntelligence.UsesCodeGraph() && len(c.Generation.SkillsWhitelist) > 0 {
+		hasCodeIntelligenceSkill := false
+		for _, skill := range c.Generation.SkillsWhitelist {
+			if skill == "code-intelligence-query" {
+				hasCodeIntelligenceSkill = true
+				break
+			}
+		}
+		if !hasCodeIntelligenceSkill {
+			out = append(out, HealthIssue{
+				Severity: "info",
+				Category: "generation",
+				Field:    "generation.skills_whitelist",
+				Message:  "code_intelligence 已启用,但 skills_whitelist 未包含 code-intelligence-query,代码图谱能力会被裁剪",
+				Hint:     "加入 code-intelligence-query,或关闭 code_intelligence.enabled",
+			})
+		}
+	}
+
 	// 已 whitelist 的 *-runtime-query 但对应 data_store 没启用 → 会被静默跳过
 	dsCheck := func(skill, dsType string) {
 		for _, w := range c.Generation.SkillsWhitelist {

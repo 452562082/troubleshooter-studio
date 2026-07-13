@@ -201,3 +201,29 @@ NEXT_PUBLIC_API_URL=http://api.test.com
 		t.Errorf("expected API URL in notes: %v", ra.Notes)
 	}
 }
+
+func TestNodeAnalyzer_ExtractsAPIEndpointPaths(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"shop-web","dependencies":{"vite":"latest","vue":"latest"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := `fetch("/api/orders"); axios.post('/api/payments/submit');`
+	if err := os.WriteFile(filepath.Join(dir, "src", "api.ts"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ra, err := NewNodeAnalyzer().Analyze(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(ra.Notes, "\n")
+	if !strings.Contains(joined, "api_endpoint[src/api.ts]=/api/orders") {
+		t.Fatalf("expected /api/orders endpoint note, got %v", ra.Notes)
+	}
+	if !strings.Contains(joined, "api_endpoint[src/api.ts]=/api/payments/submit") {
+		t.Fatalf("expected /api/payments/submit endpoint note, got %v", ra.Notes)
+	}
+}

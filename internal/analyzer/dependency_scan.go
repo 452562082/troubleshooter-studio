@@ -21,6 +21,7 @@
 package analyzer
 
 import (
+	"context"
 	"net/url"
 	"strings"
 )
@@ -28,15 +29,19 @@ import (
 // ScanDependencies 给定 repoPath,扫所有 stack 适用文件,产出 downstream calls + data store usages。
 // includePaths 跟 walker 一样的过滤语义。
 func ScanDependencies(stack, repoPath string, includePaths []string) (calls []DownstreamCall, usages []DataStoreUsage) {
+	return ScanDependenciesContext(context.Background(), stack, repoPath, includePaths)
+}
+
+func ScanDependenciesContext(ctx context.Context, stack, repoPath string, includePaths []string) (calls []DownstreamCall, usages []DataStoreUsage) {
 	switch stack {
 	case "go":
-		return scanGoDeps(repoPath, includePaths)
+		return scanGoDeps(ctx, repoPath, includePaths)
 	case "java":
-		return scanJavaDeps(repoPath, includePaths)
+		return scanJavaDeps(ctx, repoPath, includePaths)
 	case "python":
-		return scanPythonDeps(repoPath, includePaths)
+		return scanPythonDeps(ctx, repoPath, includePaths)
 	case "node":
-		return scanNodeDeps(repoPath, includePaths)
+		return scanNodeDeps(ctx, repoPath, includePaths)
 	default:
 		return nil, nil
 	}

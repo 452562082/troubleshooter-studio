@@ -10,11 +10,50 @@
 package agent
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 )
+
+func TestBuildMCPServers_CodeGraph(t *testing.T) {
+	cfg := &config.SystemConfig{
+		System:           config.System{ID: "shop"},
+		CodeIntelligence: config.CodeIntelligence{Enabled: true, Provider: "codegraph"},
+	}
+	got := BuildMCPServers(cfg, MCPBuildOptions{AgentID: "shop", CodeGraphBinaryPath: "/opt/tshoot/codegraph"}, func(string) string { return "" })
+	srv := got["shop-codegraph"].(map[string]any)
+	if srv["command"] != "/opt/tshoot/codegraph" {
+		t.Fatalf("%#v", srv)
+	}
+	if want := []any{"serve", "--mcp"}; !reflect.DeepEqual(srv["args"], want) {
+		t.Fatalf("args = %#v, want %#v", srv["args"], want)
+	}
+	env := srv["env"].(map[string]any)
+	if env["CODEGRAPH_TELEMETRY"] != "0" || env["DO_NOT_TRACK"] != "1" {
+		t.Fatalf("%#v", env)
+	}
+	if _, exists := env["CODEGRAPH_MCP_TOOLS"]; exists {
+		t.Fatal("must retain default one-tool surface")
+	}
+}
+
+func TestBuildMCPServers_CodeGraphDisabledOrMissingBinary(t *testing.T) {
+	for _, tc := range []struct {
+		enabled bool
+		binary  string
+	}{{false, "/opt/tshoot/codegraph"}, {true, ""}} {
+		cfg := &config.SystemConfig{System: config.System{ID: "shop"}}
+		if tc.enabled {
+			cfg.CodeIntelligence = config.CodeIntelligence{Enabled: true, Provider: "codegraph"}
+		}
+		got := BuildMCPServers(cfg, MCPBuildOptions{AgentID: "shop", CodeGraphBinaryPath: tc.binary}, func(string) string { return "" })
+		if _, exists := got["shop-codegraph"]; exists {
+			t.Fatalf("unexpected server: %#v", got)
+		}
+	}
+}
 
 func TestParseMySQLDSN(t *testing.T) {
 	cases := []struct {
@@ -900,7 +939,7 @@ func TestBuildMCPServers_DataStores_Kafka_MultiCluster(t *testing.T) {
 	}
 }
 
-// TestBuildMCPServers_DataStores_RabbitMQ_Disabled 2026-05-15 起 rabbitmq mcp 不注册(同 nacos / feishu_project 方案 B)。
+// TestBuildMCPServers_DataStores_RabbitMQ_Disabled 2026-05-15 起 rabbitmq mcp 不注册(方案 B:HTTP Management API fallback)。
 // 两个 PyPI 候选 amq-mcp-server-rabbitmq / rabbitmq-mcp-server 实测都跑不起来:
 //   - amq 包源码引用 fastmcp 不存在的 BearerAuthProvider(任何版本都没有)
 //   - rabbitmq-mcp-server 依赖声明缺一堆(tabulate / tomli / requests)
@@ -924,6 +963,28 @@ func TestBuildMCPServers_DataStores_RabbitMQ_NotRegistered(t *testing.T) {
 	for k := range servers {
 		if strings.Contains(k, "rabbitmq") {
 			t.Errorf("rabbitmq mcp 不应注册(方案 B,上游包 broken),got: %s", k)
+		}
+	}
+}
+
+// TestBuildMCPServers_FeishuProject_NotRegistered 守 3b 真禁用语义:
+// feishu_project 不同于 rabbitmq 方案 B,当前没有 HTTP/OpenAPI fallback,install 也停收凭据。
+// 即使 yaml 合法且 enabled=true,也不能注册 @lark-project/mcp 这类 prototype MCP。
+func TestBuildMCPServers_FeishuProject_NotRegistered(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Infrastructure: config.Infrastructure{
+			ProjectTracking: []config.ProjectTracking{{
+				Platform: "feishu_project",
+				Enabled:  true,
+			}},
+		},
+	}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(_ string) string { return "" })
+
+	for k := range servers {
+		lower := strings.ToLower(k)
+		if strings.Contains(lower, "feishu") || strings.Contains(lower, "project") {
+			t.Errorf("feishu_project mcp 不应注册(3b 真禁用,无替代能力),got: %s", k)
 		}
 	}
 }

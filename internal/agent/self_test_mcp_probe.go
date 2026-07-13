@@ -10,7 +10,8 @@
 //     "包能起 / 凭据被接受 / 协议没崩"的真错配。
 //
 // **不做**的事(避免过度规约):
-//   - 不强制工具名清单跟 SKILL.md 文档对照 —— 那是 doc 漂移检测,做 driftcheck 单独工具更合适
+//   - 不为通用 MCP 强制工具名清单跟 SKILL.md 文档对照 —— CodeGraph 是例外:它只有
+//     codegraph_explore 这一个关键工具,tools/list 缺它等价于能力不可用
 //   - 不真调任何工具(无副作用),只 tools/list
 //   - 不验证写工具是否被拦截(那是 LLM SKILL 软约束的事,跟 mcp probe 无关)
 //
@@ -27,6 +28,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -250,15 +252,16 @@ func (b *boundedWriter) Write(p []byte) (int, error) {
 //
 // 跳过场景:cfg 期望 mcp 但 servers 没注册(已被 "mcp.servers 齐全" 那条检查 FAIL 覆盖)。
 //
-// 并发 + 短 timeout:之前串行 11 个 npx mcp × 60s/个 = 最坏 660s,被 SelfTestAgent 120s
-// total timeout 砍掉一半;现在并发跑,总耗时 ≈ max(单个) 而非 sum。timeout 15s 接受
-// "首次冷启动起不来就算 FAIL",cache 命中本来秒级就过 — 比"卡 660s 才知道结果"好得多。
+// 并发 + 有界 timeout:之前串行 11 个 npx mcp × 60s/个 = 最坏 660s,被 SelfTestAgent 120s
+// total timeout 砍掉一半;现在并发跑,总耗时 ≈ max(单个) 而非 sum。timeout 给 30s:
+// 缓存命中通常秒级,冷启动/网络慢时给一点余量;仍超时则降级为 WARN,避免把本机瞬时资源
+// 或 npx/uvx 首次拉包误判成机器人不可用。
 // add() 在多 goroutine 调要加 mutex 保护 res.Checks 切片 append。
 func probeMCPServersFromConfig(ctx context.Context, servers map[string]any, add func(name, status, detail string)) {
 	if len(servers) == 0 {
 		return // 没注册任何 mcp(配置太精简或 install 没跑过),跳过
 	}
-	const probeTimeout = 15 * time.Second
+	const probeTimeout = 30 * time.Second
 	var mu sync.Mutex
 	safeAdd := func(name, status, detail string) {
 		mu.Lock()
@@ -269,10 +272,17 @@ func probeMCPServersFromConfig(ctx context.Context, servers map[string]any, add 
 	for name, spec := range servers {
 		specMap, ok := spec.(map[string]any)
 		if !ok {
+			if isCodeGraphMCP(name, "") {
+				safeAdd("mcp probe "+name, "FAIL", "CodeGraph MCP spec 必须是对象,无法验证 codegraph_explore")
+			}
 			continue
 		}
 		command, _ := specMap["command"].(string)
-		if command == "" {
+		if command == "" || (isCodeGraphMCP(name, command) && strings.TrimSpace(command) == "") {
+			if isCodeGraphMCP(name, command) {
+				safeAdd("mcp probe "+name, "FAIL", "CodeGraph MCP spec 缺 command,无法验证 codegraph_explore")
+				continue
+			}
 			safeAdd("mcp probe "+name, "WARN", "spec 缺 command,跳过 probe")
 			continue
 		}
@@ -285,19 +295,14 @@ func probeMCPServersFromConfig(ctx context.Context, servers map[string]any, add 
 			}
 		}
 		// env 段是 map[string]any,转 []string{"K=V"} 给 exec.Cmd.Env。
-		// 不继承 os.Environ() — mcp 进程应该跑在 install 配的隔离环境里(凭据走 spec env 段),
-		// 但 PATH / HOME 必须保留:PATH 让 npx/uvx 二进制找得到,HOME 让 npm/uv cache 命中
-		// (~/.npm/_npx / ~/.cache/uv),否则冷启动每次都重下包。
-		var env []string
-		for _, k := range []string{"PATH", "HOME"} {
-			if v := os.Getenv(k); v != "" {
-				env = append(env, k+"="+v)
-			}
-		}
+		// 继承完整 os.Environ(),再用 mcp spec env 覆盖。之前只保留 PATH/HOME,
+		// 在桌面 GUI 场景会丢掉 Go/Node/Python runtime 依赖的一些环境变量,导致二进制
+		// MCP 在 probe 时因环境不完整误报 EOF。凭据仍以 spec env 为准,同名覆盖父进程。
+		env := os.Environ()
 		if envMap, ok := specMap["env"].(map[string]any); ok {
 			for k, v := range envMap {
 				if s, ok := v.(string); ok {
-					env = append(env, k+"="+s)
+					env = upsertEnv(env, k, s)
 				}
 			}
 		}
@@ -311,7 +316,17 @@ func probeMCPServersFromConfig(ctx context.Context, servers map[string]any, add 
 				if r.StderrTail != "" {
 					detail += "\nstderr tail: " + r.StderrTail
 				}
-				safeAdd("mcp probe "+probeName, "FAIL", detail)
+				if shouldWarnMCPProbeFailure(probeName, cmd, r) {
+					safeAdd("mcp probe "+probeName, "WARN", detail+"\nKafka MCP 已注册,但本机当前连不上 broker 或 broker 初始化失败;不阻断机器人安装。排障时该 Kafka 工具可能不可用。")
+				} else if isTransientMCPProbeStartupTimeout(r.Err) {
+					safeAdd("mcp probe "+probeName, "WARN", detail+"\nMCP 已注册,但本次自检在启动/初始化阶段超时。常见原因是 npx/uvx 冷启动、依赖首次拉取或本机资源占用;不阻断机器人安装。首次使用该工具时可能仍会较慢。")
+				} else {
+					safeAdd("mcp probe "+probeName, "FAIL", detail)
+				}
+			case isCodeGraphMCP(probeName, cmd) && !containsMCPTool(r.Tools, "codegraph_explore"):
+				safeAdd("mcp probe "+probeName, "FAIL", fmt.Sprintf(
+					"MCP %s tool surface: expected codegraph_explore, got %s",
+					probeName, strings.Join(r.Tools, ", ")))
 			case len(r.Tools) == 0:
 				safeAdd("mcp probe "+probeName, "WARN", "进程起了但 tools/list 返空(可能凭据被拒或上游协议变化)")
 			default:
@@ -321,4 +336,63 @@ func probeMCPServersFromConfig(ctx context.Context, servers map[string]any, add 
 		}(name, command, args, env)
 	}
 	wg.Wait()
+}
+
+func isCodeGraphMCP(name, command string) bool {
+	if strings.HasSuffix(strings.ToLower(name), "-codegraph") {
+		return true
+	}
+	// filepath.Base follows the host OS. Normalize separators first so a Windows
+	// codegraph.cmd spec can also be inspected by tests/tools running on Unix.
+	base := filepath.Base(strings.ReplaceAll(command, "\\", "/"))
+	base = strings.ToLower(base)
+	return base == "codegraph" || base == "codegraph.cmd"
+}
+
+func containsMCPTool(tools []string, expected string) bool {
+	for _, tool := range tools {
+		if tool == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldWarnMCPProbeFailure(name, command string, r MCPProbeResult) bool {
+	if !isKafkaMCP(name, command) || r.Err == nil {
+		return false
+	}
+	errText := r.Err.Error()
+	if strings.Contains(errText, "start ") {
+		return false
+	}
+	return strings.Contains(errText, "read initialize resp") ||
+		strings.Contains(errText, "read tools/list resp") ||
+		strings.Contains(errText, "timeout / canceled before mcp response")
+}
+
+func isTransientMCPProbeStartupTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	errText := strings.ToLower(err.Error())
+	return strings.Contains(errText, "timeout / canceled before mcp response") ||
+		strings.Contains(errText, "context deadline exceeded") ||
+		strings.Contains(errText, "context canceled")
+}
+
+func isKafkaMCP(name, command string) bool {
+	return strings.Contains(strings.ToLower(name), "kafka") ||
+		strings.Contains(strings.ToLower(filepath.Base(command)), "kafka")
+}
+
+func upsertEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	for i, item := range env {
+		if strings.HasPrefix(item, prefix) {
+			env[i] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
 }

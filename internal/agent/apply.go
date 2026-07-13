@@ -9,15 +9,22 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 	"github.com/xiaolong/troubleshooter-studio/internal/generator"
 )
+
+var ensureCodeGraphForDeploy = EnsureCodeGraphInstalled
+var prepareCodeGraphForDeploy = PrepareCodeGraphIndexes
+var installNativeForApply = InstallNative
+var mergeMCPIntoIDESettingsForApply = MergeMCPIntoIDESettings
 
 // ApplyOptions 控制 apply 的行为。
 type ApplyOptions struct {
@@ -47,12 +54,41 @@ type ApplyOptions struct {
 
 // Result 是 apply 的摘要，给 CLI 用来打印下一步。
 type Result struct {
-	AgentPath        string   `json:"agent_path"`
-	Target           string   `json:"target"`
-	FilesWritten     int      `json:"files_written"`
-	FilesRemoved     []string `json:"files_removed,omitempty"`
-	TSFJSONUpdated   bool     `json:"tsf_json_updated"`
-	NeedsRestartHint string   `json:"needs_restart_hint,omitempty"`
+	AgentPath        string                `json:"agent_path"`
+	Target           string                `json:"target"`
+	FilesWritten     int                   `json:"files_written"`
+	FilesRemoved     []string              `json:"files_removed,omitempty"`
+	TSFJSONUpdated   bool                  `json:"tsf_json_updated"`
+	NeedsRestartHint string                `json:"needs_restart_hint,omitempty"`
+	CodeGraph        *CodeGraphIndexReport `json:"codegraph,omitempty"`
+}
+
+// PrepareCodeGraphForDeploy best-effort prepares CodeGraph indexes for an opted-in
+// system. Setup failures are reported as a visible fallback and never fail deploy.
+func PrepareCodeGraphForDeploy(ctx context.Context, cfg *config.SystemConfig, repoPaths map[string]string, onLog func(string)) *CodeGraphIndexReport {
+	if cfg == nil || !cfg.CodeIntelligence.UsesCodeGraph() {
+		return nil
+	}
+	log := onLog
+	if log == nil {
+		log = func(string) {}
+	}
+	repos := BuildCodeGraphRepoTargets(cfg, repoPaths)
+	binary, err := ensureCodeGraphForDeploy(onLog)
+	if err != nil {
+		log("[codegraph] warn: binary unavailable; rg/read fallback enabled: " + err.Error())
+		return &CodeGraphIndexReport{Total: len(repos)}
+	}
+	report := prepareCodeGraphForDeploy(ctx, CodeGraphIndexOptions{
+		BinaryPath:     binary,
+		SystemID:       cfg.System.ID,
+		Repos:          repos,
+		OnProgress:     onLog,
+		InitTimeout:    120 * time.Second,
+		SyncTimeout:    30 * time.Second,
+		MaxConcurrency: 2,
+	})
+	return &report
 }
 
 // Apply 用 NewYAML 替换 agent 的活配置，重新 render 并 rsync 到工作目录。
@@ -97,7 +133,7 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 		RepoPaths: opts.RepoLocalPaths,
 		OnLog:     opts.OnLog,
 	}); aerr == nil && result != nil {
-		g.LoadAnalysisReport(result.Report)
+		g.LoadAnalysisResult(result)
 	}
 
 	// 按 target 渲染
@@ -184,14 +220,14 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 	// 注意:本路径同时覆盖"重新 apply"(改了 yaml 后回写)的场景,避免活配置和用户级
 	// 目录脱节。
 	if !opts.DryRun && (ag.Meta.Target == "claude-code" || ag.Meta.Target == "cursor" || ag.Meta.Target == "codex") {
-		if err := InstallNative(workDir, ag.Meta.Target); err != nil {
+		if err := installNativeForApply(workDir, ag.Meta.Target); err != nil {
 			return nil, fmt.Errorf("native install (%s): %w", ag.Meta.Target, err)
 		}
 		// 顺带把 cfg 派生的 mcpServers 注入 IDE 配置(claude-code → ~/.claude.json,
 		// cursor → ~/.cursor/mcp.json,codex → agent toml 内联段),让装完的 agent
 		// 能直接调到 nacos / grafana / loki 等 MCP。creds 走 opts.IDECreds(桌面端 wizard 传),
 		// 没有(CLI 装时)就用 {{ENV_VAR}} 占位符,用户事后自己填。
-		if err := MergeMCPIntoIDESettings(ag.Meta.Target, cfg, opts.IDECreds, opts.OnLog); err != nil {
+		if err := mergeMCPIntoIDESettingsForApply(ag.Meta.Target, cfg, opts.IDECreds, opts.OnLog); err != nil {
 			return nil, fmt.Errorf("merge mcp settings (%s): %w", ag.Meta.Target, err)
 		}
 		// kuboard / apollo / consul / env-vars 类型走脚本读 creds.json,**不通过 MCP**。
@@ -205,6 +241,10 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 		}
 	}
 
+	var codeGraph *CodeGraphIndexReport
+	if !opts.DryRun {
+		codeGraph = PrepareCodeGraphForDeploy(context.Background(), cfg, opts.RepoLocalPaths, opts.OnLog)
+	}
 	return &Result{
 		AgentPath:        ag.Path,
 		Target:           ag.Meta.Target,
@@ -212,6 +252,7 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 		FilesRemoved:     removed,
 		TSFJSONUpdated:   tsfUpdated,
 		NeedsRestartHint: restartHint,
+		CodeGraph:        codeGraph,
 	}, nil
 }
 
@@ -260,18 +301,20 @@ func ImportAndApply(yamlBytes []byte, target, destPath string, opts ApplyOptions
 			RepoPaths: opts.RepoLocalPaths,
 			OnLog:     opts.OnLog,
 		}); aerr == nil && result != nil {
-			g.LoadAnalysisReport(result.Report)
+			g.LoadAnalysisResult(result)
 		}
 		if err := g.Generate(); err != nil {
 			return nil, fmt.Errorf("openclaw gen: %w", err)
 		}
 		written := countFilesUnder(destPath)
+		codeGraph := PrepareCodeGraphForDeploy(context.Background(), cfg, opts.RepoLocalPaths, opts.OnLog)
 		return &Result{
 			AgentPath:        destPath,
 			Target:           target,
 			FilesWritten:     written,
 			TSFJSONUpdated:   true,
 			NeedsRestartHint: "已生成 openclaw staging。桌面端下一步会跑 RunInstall(原生 Go,无 bash 依赖)注入 ~/.openclaw/openclaw.json 并安装 workspace。",
+			CodeGraph:        codeGraph,
 		}, nil
 	}
 

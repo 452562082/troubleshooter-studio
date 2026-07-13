@@ -36,6 +36,39 @@ type InstallOpenclawOptions struct {
 	SkipGatewayRestart bool
 }
 
+type openclawAgentDescriptor struct {
+	ID   string
+	Name string
+}
+
+func openclawAgentDescriptors(cfg *config.SystemConfig) []openclawAgentDescriptor {
+	troubleshooterID := cfg.ResolveID()
+	base := strings.TrimSpace(cfg.System.ID)
+	if base == "" {
+		base = strings.TrimSuffix(troubleshooterID, "-troubleshooter")
+	}
+	systemName := strings.TrimSpace(cfg.System.Name)
+	if systemName == "" {
+		systemName = strings.TrimSpace(cfg.Agent.Name)
+	}
+	if systemName == "" {
+		systemName = base
+	}
+	return []openclawAgentDescriptor{{ID: troubleshooterID, Name: systemName + " 排障"}}
+}
+
+func legacyOpenclawValidatorID(cfg *config.SystemConfig) string {
+	base := strings.TrimSpace(cfg.System.ID)
+	if base == "" {
+		return ""
+	}
+	validatorID := base + "-validator"
+	if validatorID == cfg.ResolveID() {
+		return ""
+	}
+	return validatorID
+}
+
 // InstallNativeOpenclaw 把 stagingDir 里的产物装到 ~/.openclaw/。
 // stagingDir 是 generator 的产物目录(含 templates/workspace-template/ 和 tshoot.json)。
 //
@@ -124,6 +157,12 @@ func InstallNativeOpenclaw(ctx context.Context, stagingDir string, opts InstallO
 	if err := copyDirAll(tplSrc, wsDir); err != nil {
 		return fmt.Errorf("install workspace: %w", err)
 	}
+	if err := installOpenclawAgentViews(wsDir, cfg); err != nil {
+		return fmt.Errorf("install openclaw agent views: %w", err)
+	}
+	if err := syncOpenclawInternalAgentsToMeta(wsDir, cfg); err != nil {
+		return fmt.Errorf("sync openclaw agent meta: %w", err)
+	}
 	log(fmt.Sprintf("[ok] workspace 安装到 %s", wsDir))
 
 	// 5) 改写 ~/.openclaw/openclaw.json
@@ -132,15 +171,20 @@ func InstallNativeOpenclaw(ctx context.Context, stagingDir string, opts InstallO
 	if err != nil {
 		return fmt.Errorf("read %s: %w", cfgPath, err)
 	}
-	agentID := cfg.ResolveID()
 	model := get("MODEL")
 	if model == "" {
 		model = cfg.Agent.ModelForTarget("openclaw")
 	}
-	if err := injectAgent(ocData, agentID, cfg.Agent.Name, model, wsDir); err != nil {
-		return err
+	for _, ag := range openclawAgentDescriptors(cfg) {
+		if err := injectAgent(ocData, ag.ID, ag.Name, model, wsDir); err != nil {
+			return err
+		}
 	}
-	if err := injectMCPServers(ocData, cfg, get, ocHome); err != nil {
+	if legacyID := legacyOpenclawValidatorID(cfg); legacyID != "" {
+		removeAgentEntry(ocData, legacyID)
+	}
+	agentID := cfg.ResolveID()
+	if err := injectMCPServers(ocData, cfg, get, ocHome, len(creds) == 0); err != nil {
 		return err
 	}
 	// 0o600:mcp.servers env 段含 injectMCPServers 注入的 plaintext creds(NACOS_PASSWORD /

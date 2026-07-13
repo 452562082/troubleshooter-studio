@@ -183,3 +183,39 @@ func writeIDEAgentBody(sb *strings.Builder, wsRoot string, ctx *Context, profile
 	}
 	sb.WriteString("\n")
 }
+
+// writeIDEValidatorAgentBody 写验证 agent 的精简提示词。它不复用 SOUL / IDENTITY /
+// AGENTS.md 的排障段，避免把排查主线、故障快报模板等内容带进验证角色。
+func writeIDEValidatorAgentBody(sb *strings.Builder, profile IDEPlatform) {
+	if intro := strings.TrimSpace(profile.Intro); intro != "" {
+		sb.WriteString(intro)
+		sb.WriteString("\n\n")
+	}
+
+	sb.WriteString("## 角色边界\n\n")
+	sb.WriteString("- 只处理 bug 验证、主动复现、修复后复查和证据收集。\n")
+	sb.WriteString("- 第一入口固定为 `bug-verifier/SKILL.md`;按它的状态枚举和输出结构返回验证报告。\n")
+	sb.WriteString("- 可按验证流程读取 attachment-evidence-verifier、api-verifier、routing、frontend-repro-investigator、日志 / trace / 配置相关 skill 来补证据。\n")
+	sb.WriteString("- 不读取业务源码定位函数/文件行号/补丁点；不输出故障定位报告,不排序候选原因,不把验证结论扩展成处置建议。\n\n")
+
+	sb.WriteString("## 输出要求\n\n")
+	sb.WriteString("- 输出必须围绕 `verification_status`、环境、复现步骤、实际表现、期望表现、证据和缺口。\n")
+	sb.WriteString("- 结论必须绑定截图、Network、console、API 响应、request id、trace id、日志或命令输出等可复查证据。\n")
+	sb.WriteString("- 如果已复现,输出 `handoff_to_troubleshooter` 事实摘要后停止；不要继续做代码分析或修复建议。\n")
+	sb.WriteString("- 信息不足时使用 `insufficient_info`,列出最小阻塞项,不要猜测。\n\n")
+
+	sb.WriteString("## 验证入口\n\n")
+	if profile.SkillsScriptPathPrefix != "" {
+		fmt.Fprintf(sb, "第一步 Read `%s/bug-verifier/SKILL.md`。\n\n", profile.SkillsScriptPathPrefix)
+	} else {
+		sb.WriteString("第一步 Read `bug-verifier/SKILL.md`。\n\n")
+	}
+	sb.WriteString("常用辅助 skill:\n\n")
+	sb.WriteString("- **attachment-evidence-verifier** — Bug 工单附件、截图、录屏、HAR、console 文件证据归一化。\n")
+	sb.WriteString("- **bug-verifier** — 验证 agent 统一入口,负责复现、回归、证据收集和验证报告。\n")
+	sb.WriteString("- **api-verifier** — API / webhook / job 场景的请求重放、响应对比和修复验证。\n")
+	sb.WriteString("- **frontend-repro-investigator** — 浏览器场景的 HAR / screenshot / console / Network / RUM 证据整理。\n")
+	sb.WriteString("- **routing** — 查询环境、域名、服务、仓库和配置映射。\n")
+
+	sb.WriteString("\n")
+}

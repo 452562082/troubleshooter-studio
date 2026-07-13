@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -40,6 +41,12 @@ func Scan(roots []string) ([]DiscoveredAgent, error) {
 		for _, a := range agents {
 			key := a.Meta.SystemID + "|" + a.Meta.Target
 			if seen[key] {
+				for i := range out {
+					if out[i].Meta.SystemID+"|"+out[i].Meta.Target == key && preferDiscoveredAgent(a, out[i]) {
+						out[i] = a
+						break
+					}
+				}
 				continue
 			}
 			seen[key] = true
@@ -54,6 +61,22 @@ func Scan(roots []string) ([]DiscoveredAgent, error) {
 		return out[i].Meta.Target < out[j].Meta.Target
 	})
 	return out, nil
+}
+
+func preferDiscoveredAgent(candidate, current DiscoveredAgent) bool {
+	candidateBase := filepath.Base(candidate.Path)
+	currentBase := filepath.Base(current.Path)
+	candidateMatchesAgent := candidateBase == strings.TrimSpace(candidate.Meta.AgentID)
+	currentMatchesAgent := currentBase == strings.TrimSpace(current.Meta.AgentID)
+	if candidateMatchesAgent != currentMatchesAgent {
+		return candidateMatchesAgent
+	}
+	candidatePrimary := strings.EqualFold(strings.TrimSpace(candidate.Meta.Role), RoleTroubleshooter)
+	currentPrimary := strings.EqualFold(strings.TrimSpace(current.Meta.Role), RoleTroubleshooter)
+	if candidatePrimary != currentPrimary {
+		return candidatePrimary
+	}
+	return candidate.Path < current.Path
 }
 
 // WorkDirFor 返回 Apply / 重 gen / 卸载 实际写入产物的"工作目录"。跟 ag.Path("UI 显示用的
@@ -147,6 +170,7 @@ func readAgent(metaPath string) (DiscoveredAgent, error) {
 	if err := json.Unmarshal(data, &meta); err != nil {
 		return DiscoveredAgent{}, err
 	}
+	NormalizeMetaForPath(&meta, metaPath)
 	if meta.SystemID == "" || meta.Target == "" {
 		return DiscoveredAgent{}, os.ErrInvalid // 无效元数据（不是 tshoot 生成的）
 	}
@@ -172,6 +196,128 @@ func readAgent(metaPath string) (DiscoveredAgent, error) {
 	return a, nil
 }
 
+func normalizeMeta(meta *Meta) {
+	if meta == nil {
+		return
+	}
+	if strings.TrimSpace(meta.Role) == "" {
+		meta.Role = RoleTroubleshooter
+	}
+	if strings.TrimSpace(meta.AgentID) == "" && strings.TrimSpace(meta.SystemID) != "" {
+		meta.AgentID = meta.SystemID + "-" + meta.Role
+	}
+	if len(meta.InternalAgents) == 0 && strings.TrimSpace(meta.AgentID) != "" {
+		meta.InternalAgents = []InternalAgent{{ID: meta.AgentID, Role: meta.Role}}
+	}
+}
+
+// NormalizeMetaForPath applies schema defaults and, for IDE installs, backfills
+// internal_agents from sibling agents/skills directories. This keeps old
+// tshoot.json anchors usable after the single-bot/multi-agent layout change.
+func NormalizeMetaForPath(meta *Meta, metaPath string) {
+	normalizeMeta(meta)
+	inferInternalAgentsFromIDELayout(meta, metaPath)
+}
+
+func inferInternalAgentsFromIDELayout(meta *Meta, metaPath string) {
+	if meta == nil || len(meta.InternalAgents) > 1 {
+		return
+	}
+	ext := ""
+	switch meta.Target {
+	case "claude-code", "cursor":
+		ext = ".md"
+	case "codex":
+		ext = ".toml"
+	default:
+		return
+	}
+	botRoot := filepath.Dir(metaPath)
+	skillsRoot := filepath.Dir(botRoot)
+	if filepath.Base(skillsRoot) != "skills" {
+		return
+	}
+	platformRoot := filepath.Dir(skillsRoot)
+	ids := map[string]string{}
+	add := func(id, role string) {
+		id = strings.TrimSpace(id)
+		if id == "" || !belongsToMetaAgent(meta, id) {
+			return
+		}
+		if role = strings.TrimSpace(role); role == "" {
+			role = inferRoleFromAgentID(meta, id)
+		}
+		if _, ok := ids[id]; !ok {
+			ids[id] = role
+		}
+	}
+	add(meta.AgentID, meta.Role)
+	for _, ag := range meta.InternalAgents {
+		add(ag.ID, ag.Role)
+	}
+	if entries, err := os.ReadDir(filepath.Join(platformRoot, "agents")); err == nil {
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || strings.Contains(name, ".bak.") || !strings.HasSuffix(name, ext) {
+				continue
+			}
+			add(strings.TrimSuffix(name, ext), "")
+		}
+	}
+	if entries, err := os.ReadDir(skillsRoot); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				add(e.Name(), "")
+			}
+		}
+	}
+	if len(ids) <= 1 {
+		return
+	}
+	out := make([]InternalAgent, 0, len(ids))
+	addOut := func(id string) {
+		if role, ok := ids[id]; ok {
+			out = append(out, InternalAgent{ID: id, Role: role})
+			delete(ids, id)
+		}
+	}
+	addOut(meta.AgentID)
+	addOut(meta.SystemID + "-" + RoleTroubleshooter)
+	addOut(meta.SystemID + "-" + RoleValidator)
+	addOut(meta.SystemID + "-" + RoleFixer)
+	rest := make([]string, 0, len(ids))
+	for id := range ids {
+		rest = append(rest, id)
+	}
+	sort.Strings(rest)
+	for _, id := range rest {
+		addOut(id)
+	}
+	meta.InternalAgents = out
+}
+
+func belongsToMetaAgent(meta *Meta, id string) bool {
+	if id == strings.TrimSpace(meta.AgentID) {
+		return true
+	}
+	systemID := strings.TrimSpace(meta.SystemID)
+	return systemID != "" && strings.HasPrefix(id, systemID+"-")
+}
+
+func inferRoleFromAgentID(meta *Meta, id string) string {
+	if id == strings.TrimSpace(meta.AgentID) && strings.TrimSpace(meta.Role) != "" {
+		return meta.Role
+	}
+	lower := strings.ToLower(id)
+	if strings.Contains(lower, "fix") || strings.Contains(lower, "repair") {
+		return RoleFixer
+	}
+	if strings.Contains(lower, "valid") || strings.Contains(lower, "verif") {
+		return RoleValidator
+	}
+	return RoleTroubleshooter
+}
+
 type yamlProbe struct {
 	Environments []struct{ ID string }   `yaml:"environments"`
 	Repos        []struct{ Name string } `yaml:"repos"`
@@ -187,6 +333,12 @@ func derive(a *DiscoveredAgent, yamlSrc string) {
 		return
 	}
 	a.EnvCount = len(p.Environments)
+	a.Environments = make([]string, 0, len(p.Environments))
+	for _, env := range p.Environments {
+		if env.ID != "" {
+			a.Environments = append(a.Environments, env.ID)
+		}
+	}
 	a.RepoCount = len(p.Repos)
 	a.SkillCount = len(p.Generation.SkillsWhitelist)
 	a.Targets = p.Generation.Targets

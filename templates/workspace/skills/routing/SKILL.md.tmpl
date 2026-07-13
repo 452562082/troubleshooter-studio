@@ -17,7 +17,7 @@ config-map.yaml 里每条服务定位都带**两类指针之一**:
 **配置中心访问方式(2026 plan D 起)**:
 - **nacos → MCP 主路径**(`runtime: nacos-mcp`):config-executor 调 `{{.System.ID}}-nacos[-source]-<env>` 这个 MCP 的 `get_config` / `list_configs` / `get_config_history` / `list_config_history` 工具。MCP 进程自己拿 username/password 跑 login + 后台 refresh,token 短 TTL 无所谓 —— 这是 plan D 相比当年 bake-token 方案的本质区别。MCP 不可用时 config-executor 回落 `scripts/nacos_config.py` HTTP 脚本。
 - apollo / consul:生态暂无稳定 MCP,走 HTTP 脚本(`apollo-http` / `consul-http`)
-- kuboard:历来 HTTP API + `scripts/resolve_runtime_k8s.py`(`kuboard-http`)
+- kuboard:`runtime: kuboard-http` 仅表示配置坐标来自 Kuboard service_map；不要找 MCP server 或 kubectl 脚本。
 - one2all:走 one2all-remote MCP(`platform_get_configmap / platform_get_secret`,单一 streamable-http 实例,键 `one2all-mcp`)
 
 五个 runtime 值:`nacos-mcp` / `apollo-http` / `consul-http` / `kuboard-http` / `one2all-mcp`。**LLM 看到 runtime 字段就交给 config-executor SKILL,不要因为是 nacos-mcp 或 one2all-mcp 就跳过 config-executor 直接乱猜工具名**。
@@ -66,7 +66,10 @@ create_annotation / create_folder / update_annotation / update_dashboard / gener
 | 日志 app | `references/log-app-map.yaml` |
 | 监控 / 数据源 / selector_chain / baseline 模板 | `references/observability-map.yaml` |
 | 仓库技术栈 | `references/repo-stack-map.yaml` |
-| 服务依赖图(下游/数据层) | `references/service-dependency-map.yaml` |
+| 前端复现入口 / 页面到 API 映射 | `references/frontend-entry-map.yaml` |
+| 正式服务拓扑(仅 automatic/confirmed/manual 边) | `references/service-topology.yaml` |
+| 端点、代码位置、候选/拒绝/过期边证据 | `references/endpoint-evidence.yaml` |
+| 兼容依赖图(正式拓扑投影的下游/数据层) | `references/service-dependency-map.yaml` |
 | 业务表 schema | `references/data-schema-map.yaml` |
 | 经典错误模式(模板内置) | `references/known-errors.yaml` |
 | 经典错误模式(用户私有沉淀) | `references/known-errors.local.yaml`(可能不存在,排障沉淀后才生成) |
@@ -74,6 +77,11 @@ create_annotation / create_folder / update_annotation / update_dashboard / gener
 | service → 数据层 MCP source 映射(多 cluster 才需要) | `references/service-to-datastore-source.yaml` |
 
 读大文件优先用 `grep` 精确取目标行,不是 `Read` 全文。
+
+`service-topology.yaml` 是服务依赖导航的唯一正式图；`service-dependency-map.yaml` 的
+upstream/downstream 由同一正式图投影，仅用于兼容现有 cascade/runtime 检查。需要解释某条边时再按
+`endpoint_edge` 去 `endpoint-evidence.yaml` 找位置、置信度和 reasons。candidate / rejected / stale
+只能作为待复核证据，不能当成真实调用关系。
 
 ## 关键用法 4 条
 
@@ -86,7 +94,7 @@ create_annotation / create_folder / update_annotation / update_dashboard / gener
 grep -E "<error pattern>" references/known-errors.yaml references/known-errors.local.yaml 2>/dev/null
 ```
 
-带 `causation_chain.check_downstream_for` 的 pattern:**主动跑 cascade_check** 看下游是否出现 chain 列出的模式。命中 → 真因在下游,把那个下游当主角递归 7 步(含 Step 7 沉淀);不命中 → 走 `next_actions`。
+带 `causation_chain.check_downstream_for` 的 pattern:**主动跑 cascade_check** 看下游是否出现 chain 列出的模式。命中 → 真因在下游,把那个下游当主角递归 7 步(含 步骤 7 沉淀);不命中 → 走 `next_actions`。
 
 ### 2. selector_chain:按顺序试,命中即停
 

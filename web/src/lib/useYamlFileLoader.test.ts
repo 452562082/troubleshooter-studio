@@ -62,7 +62,9 @@ describe('useYamlFileLoader', () => {
 
   describe('loadFileBrowser', () => {
     it('reads file content via FileReader and calls onLoaded', async () => {
-      const onLoaded = vi.fn()
+      let resolveLoaded!: (content: string) => void
+      const loaded = new Promise<string>(resolve => { resolveLoaded = resolve })
+      const onLoaded = vi.fn((content: string) => resolveLoaded(content))
       const { loadFileBrowser } = useYamlFileLoader({ onLoaded })
       const file = new File(['system:\n  id: y\n'], 'x.yaml', { type: 'application/yaml' })
       const input = document.createElement('input')
@@ -71,8 +73,7 @@ describe('useYamlFileLoader', () => {
       Object.defineProperty(input, 'files', { value: [file], writable: false })
       const ev = { target: input } as unknown as Event
       loadFileBrowser(ev)
-      // 异步 reader,等一下
-      await new Promise(r => setTimeout(r, 10))
+      await expect(loaded).resolves.toBe('system:\n  id: y\n')
       expect(onLoaded).toHaveBeenCalledWith('system:\n  id: y\n')
     })
 

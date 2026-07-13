@@ -43,10 +43,26 @@ environments:
     api_domain: api-dev.example.com  # [required if applicable] 主 API 入口
     web_domain: www-dev.example.com  # [optional]
     is_prod: false                   # [required]
+    deployment_verification:        # [optional] 不填等价 manual；Studio 不执行部署
+      provider: http                 # manual / http / k8s
+      http:                          # provider=http 时必填；只发无鉴权 GET
+        url: "https://api-dev.example.com/version"
+        json_pointer: "/git/commit" # RFC 6901；可指向 commit 字符串或 repo→commit 对象
+        allow_private: false        # 内网/loopback 版本接口需该环境显式 opt-in；云 metadata 永远拒绝
   - id: prod
     api_domain: api.example.com
     web_domain: www.example.com
     is_prod: true
+    # K8s 示例（与 http 互斥）：
+    # deployment_verification:
+    #   provider: k8s
+    #   k8s:
+    #     cluster: prod-cluster
+    #     namespace: my-system
+    #     deployments_by_repo:       # key 必须是 repos[].name
+    #       user-service: user-service
+    #     commit_annotation: app.example.com/git-commit
+    #     # image_label: git-commit  # 与 commit_annotation 二选一
 
 # ---------------------------------------------------------------------------
 # 4. 代码仓库清单 —— 生成 env-branch-map.yaml / repo-stack-map.yaml
@@ -66,6 +82,23 @@ repos:
       enabled: true
       shallow_depth: 50
       include_paths: []              # 留空=默认扫全部；填则仅扫这些路径
+
+# ---------------------------------------------------------------------------
+code_intelligence:
+  enabled: false                    # 显式 opt-in；关闭时不下载、不索引、不注册 MCP
+  provider: codegraph               # 首版只支持 codegraph
+
+# 人工确认/拒绝/补录的跨服务调用边；服务名来自 service-node repo 的 service_names，
+# 未声明 service_names 时回落到 repo.name。HTTP path 参数统一归一化为 {param}。
+service_topology:
+  overrides: []                     # [optional] 持久化拓扑审核结果；action: confirm / reject / add
+  # overrides 示例：
+  #   - action: confirm
+  #     from_service: mall-web
+  #     to_service: user-service
+  #     protocol: http               # http 需 method + path，grpc 需 rpc_method
+  #     method: GET
+  #     path: /api/users/:id
 
 # ---------------------------------------------------------------------------
 # 5. 基础组件 —— 决定 mcp.servers.json 和 skills/ 生成内容
@@ -182,7 +215,7 @@ infrastructure:
       discovery: from_config_center
       readonly_enforced: true        # 必须 true，生成的 skill 禁止写
       static_endpoints: []           # discovery=static/both 时用（legacy flat list）
-      endpoints_by_env:              # [optional] 按 env 声明静态连接串（env-vars/kubernetes 模式常用）
+      endpoints_by_env:              # [optional] 按 env 声明静态连接串（env-vars/kuboard/one2all 模式常用）
         dev: "redis-dev:6379"
         prod: "redis-prod:6379"
     - type: mongodb

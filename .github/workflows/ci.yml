@@ -2,8 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, test]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -33,12 +34,12 @@ jobs:
 
       - name: gofmt -l
         run: |
-          out=$(gofmt -l .)
+          out=$(git ls-files -z '*.go' | xargs -0 gofmt -l)
           if [ -n "$out" ]; then
             echo "unformatted files detected:"
             echo "$out"
             echo ""
-            echo "请在本地运行: gofmt -w ."
+            echo "请在本地运行: gofmt -w <files>"
             exit 1
           fi
 
@@ -53,11 +54,16 @@ jobs:
       - name: build
         run: go build ./...
 
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
       - name: test
         run: go test -race -cover -coverprofile=coverage.out ./...
 
-      - name: coverage summary
-        run: go tool cover -func=coverage.out | tail -1
+      - name: coverage gate
+        run: scripts/check-go-coverage.sh
 
   web:
     name: Web (vue-tsc / vite build)
@@ -70,12 +76,15 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '20.19.0'
           cache: npm
           cache-dependency-path: web/package-lock.json
 
       - name: npm ci
-        run: npm ci
+        run: npm ci --ignore-scripts
+
+      - name: npm audit
+        run: npm audit --audit-level=moderate
 
       # vitest:bridge / toast 等 lib 层单测。null.length 崩页 regression guard 在这里。
       - name: vitest
@@ -84,6 +93,45 @@ jobs:
       # npm run build = vue-tsc --noEmit && vite build,类型检查 + 产物构建
       - name: vue-tsc + vite build
         run: npm run build
+
+  skill-scripts:
+    name: Workspace Skill Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: install python test tools
+        run: python3 -m pip install pytest PyYAML uv
+
+      - name: skill script tests
+        run: scripts/test-skill-scripts.sh
+
+  browser-smoke:
+    name: Browser Collector Smoke (manual)
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.19.0'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: install playwright chromium
+        run: |
+          npm install --no-save --no-package-lock playwright
+          npx playwright install --with-deps chromium
+
+      - name: real browser collector smoke
+        run: scripts/test-browser-smoke.sh
 
   desktop:
     name: Desktop (macOS .app build)
@@ -101,7 +149,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '20.19.0'
           cache: npm
           cache-dependency-path: web/package-lock.json
 
@@ -135,7 +183,7 @@ jobs:
   release-patch:
     name: Release (patch — auto)
     runs-on: macos-latest
-    needs: [go, web, desktop]
+    needs: [go, web, skill-scripts, desktop]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && !contains(github.event.head_commit.message, '[release:minor]') && !contains(github.event.head_commit.message, '[release:major]') }}
     permissions:
       contents: write
@@ -152,7 +200,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '20.19.0'
           cache: npm
           cache-dependency-path: web/package-lock.json
 
@@ -173,7 +221,7 @@ jobs:
   release-minor:
     name: Release (minor — commit msg [release:minor])
     runs-on: macos-latest
-    needs: [go, web, desktop]
+    needs: [go, web, skill-scripts, desktop]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release:minor]') }}
     permissions:
       contents: write
@@ -188,7 +236,7 @@ jobs:
           cache: true
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '20.19.0'
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: setup git identity & checkout main
@@ -206,7 +254,7 @@ jobs:
   release-major:
     name: Release (major — commit msg [release:major])
     runs-on: macos-latest
-    needs: [go, web, desktop]
+    needs: [go, web, skill-scripts, desktop]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release:major]') }}
     permissions:
       contents: write
@@ -221,7 +269,7 @@ jobs:
           cache: true
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '20.19.0'
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: setup git identity & checkout main

@@ -48,6 +48,10 @@ func (a *App) ApplyBot(agentPath, newYamlText string, dryRun bool) (*agent.Resul
 		TshootVersion:  version,
 		DryRun:         dryRun,
 		RepoLocalPaths: repoPaths,
+		OnLog: func(line string) {
+			wailsruntime.EventsEmit(a.ctx, "install:log",
+				fmt.Sprintf("[target=%s] %s", ag.Meta.Target, line))
+		},
 	})
 }
 

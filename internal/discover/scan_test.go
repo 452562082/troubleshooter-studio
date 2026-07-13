@@ -77,14 +77,47 @@ generation:
 	if a.EnvCount != 2 || a.RepoCount != 1 || a.SkillCount != 2 {
 		t.Errorf("derive 错:envs=%d repos=%d skills=%d", a.EnvCount, a.RepoCount, a.SkillCount)
 	}
+	if len(a.Environments) != 2 || a.Environments[0] != "dev" || a.Environments[1] != "prod" {
+		t.Errorf("environments = %+v", a.Environments)
+	}
 }
 
-func TestScanDedupBySystemIDAndTarget(t *testing.T) {
-	// 两个 root 都指向同一个 agent 目录(或两个 root 扫到同 systemID+target 的不同文件),
+func TestMetaDefaultsMissingRoleToTroubleshooter(t *testing.T) {
+	root := t.TempDir()
+	writeMeta(t, filepath.Join(root, "old"), Meta{
+		SchemaVersion: 1,
+		SystemID:      "shop",
+		SystemName:    "Shop",
+		Target:        "codex",
+	})
+	agents, err := Scan([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 1 {
+		t.Fatalf("want 1 agent, got %d", len(agents))
+	}
+	if agents[0].Meta.Role != RoleTroubleshooter {
+		t.Fatalf("missing role should default to %q, got %+v", RoleTroubleshooter, agents[0].Meta)
+	}
+	if agents[0].Meta.AgentID != "shop-troubleshooter" {
+		t.Fatalf("missing agent_id should derive from system+role, got %+v", agents[0].Meta)
+	}
+}
+
+func TestScanDedupByAgentIDAndTarget(t *testing.T) {
+	// 两个 root 都指向同一个 system+target 的机器人,
 	// 返回应该只有一个。
 	root1 := t.TempDir()
 	root2 := t.TempDir()
-	m := Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "openclaw"}
+	m := Meta{
+		SchemaVersion: 1,
+		SystemID:      "shop",
+		SystemName:    "Shop",
+		AgentID:       "shop-troubleshooter",
+		Role:          RoleTroubleshooter,
+		Target:        "openclaw",
+	}
 	writeMeta(t, filepath.Join(root1, "a"), m)
 	writeMeta(t, filepath.Join(root2, "b"), m)
 
@@ -94,6 +127,139 @@ func TestScanDedupBySystemIDAndTarget(t *testing.T) {
 	}
 	if len(agents) != 1 {
 		t.Errorf("want 1 dedup-ed agent, got %d", len(agents))
+	}
+}
+
+func TestScanDedupsTroubleshooterAndValidatorAnchorsAsOneBot(t *testing.T) {
+	root := t.TempDir()
+	writeMeta(t, filepath.Join(root, "troubleshooter"), Meta{
+		SchemaVersion: 1,
+		SystemID:      "shop",
+		AgentID:       "shop-troubleshooter",
+		Role:          RoleTroubleshooter,
+		Target:        "codex",
+	})
+	writeMeta(t, filepath.Join(root, "validator"), Meta{
+		SchemaVersion: 1,
+		SystemID:      "shop",
+		AgentID:       "shop-validator",
+		Role:          RoleValidator,
+		Target:        "codex",
+	})
+
+	agents, err := Scan([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 1 {
+		t.Fatalf("want 1 bot with internal agents, got %d", len(agents))
+	}
+	if agents[0].Meta.SystemID != "shop" || agents[0].Meta.Target != "codex" {
+		t.Fatalf("wrong bot: %+v", agents[0])
+	}
+}
+
+func TestScanKeepsInternalAgentsInSingleBotMeta(t *testing.T) {
+	root := t.TempDir()
+	ws := filepath.Join(root, "shop-troubleshooter")
+	writeMeta(t, ws, Meta{
+		SchemaVersion: 1,
+		SystemID:      "shop",
+		AgentID:       "shop-troubleshooter",
+		Role:          RoleTroubleshooter,
+		Target:        "openclaw",
+		InternalAgents: []InternalAgent{
+			{ID: "shop-troubleshooter", Role: RoleTroubleshooter},
+			{ID: "shop-validator", Role: RoleValidator},
+		},
+	})
+
+	agents, err := Scan([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 1 {
+		t.Fatalf("want one bot, got %d", len(agents))
+	}
+	if agents[0].Path != ws {
+		t.Fatalf("path should be workspace %s, got %s", ws, agents[0].Path)
+	}
+	if len(agents[0].Meta.InternalAgents) != 2 {
+		t.Fatalf("internal agents missing: %+v", agents[0].Meta.InternalAgents)
+	}
+}
+
+func TestScanBackfillsInternalAgentsFromIDELayout(t *testing.T) {
+	root := t.TempDir()
+	platformRoot := filepath.Join(root, ".claude")
+	for _, dir := range []string{
+		filepath.Join(platformRoot, "agents"),
+		filepath.Join(platformRoot, "skills", "base-troubleshooter"),
+		filepath.Join(platformRoot, "skills", "base-validator"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(platformRoot, "agents", "base-troubleshooter.md"), []byte("t"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(platformRoot, "agents", "base-validator.md"), []byte("v"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeMeta(t, filepath.Join(platformRoot, "skills", "base-troubleshooter"), Meta{
+		SchemaVersion: 1,
+		SystemID:      "base",
+		SystemName:    "Base",
+		Target:        "claude-code",
+	})
+
+	agents, err := Scan([]string{filepath.Join(platformRoot, "skills")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 1 {
+		t.Fatalf("want 1 bot, got %d", len(agents))
+	}
+	got := agents[0].Meta.InternalAgents
+	if len(got) != 2 {
+		t.Fatalf("want backfilled troubleshooter+validator, got %+v", got)
+	}
+	if got[0].ID != "base-troubleshooter" || got[0].Role != RoleTroubleshooter {
+		t.Fatalf("wrong primary agent: %+v", got)
+	}
+	if got[1].ID != "base-validator" || got[1].Role != RoleValidator {
+		t.Fatalf("wrong validator agent: %+v", got)
+	}
+}
+
+func TestScanPrefersPrimaryAgentAnchorOverStaleInternalAnchor(t *testing.T) {
+	root := t.TempDir()
+	platformRoot := filepath.Join(root, ".claude")
+	writeMeta(t, filepath.Join(platformRoot, "skills", "base-fixer"), Meta{
+		SchemaVersion: 1,
+		SystemID:      "base",
+		SystemName:    "Base",
+		Target:        "claude-code",
+	})
+	writeMeta(t, filepath.Join(platformRoot, "skills", "base-troubleshooter"), Meta{
+		SchemaVersion: 1,
+		SystemID:      "base",
+		SystemName:    "Base",
+		AgentID:       "base-troubleshooter",
+		Role:          RoleTroubleshooter,
+		Target:        "claude-code",
+	})
+
+	agents, err := Scan([]string{filepath.Join(platformRoot, "skills")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 1 {
+		t.Fatalf("want 1 bot, got %d", len(agents))
+	}
+	if filepath.Base(agents[0].Path) != "base-troubleshooter" {
+		t.Fatalf("stale internal anchor won dedup: %+v", agents[0])
 	}
 }
 

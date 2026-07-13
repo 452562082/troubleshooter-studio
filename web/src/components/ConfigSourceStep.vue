@@ -132,7 +132,7 @@ const emit = defineEmits<{
     </div>
 
     <!-- 凭证表单:主源(activeSourceTypes[0])完整功能(连接 + 预读 + namespace + 服务 dataId 选择)。
-         nacos/apollo/consul 才展;env-vars/kubernetes/none 不需要。
+         nacos/apollo/consul 才展;env-vars/kuboard/one2all/none 不需要。
          副源在主源块下方独立渲染只填连接信息(预读 + namespace 下拉留给主源,副源走 yaml 手填或 CLI)。 -->
     <div v-if="ccFieldsByType[configCenterType]" class="form-group">
       <label>

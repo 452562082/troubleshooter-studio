@@ -107,6 +107,12 @@ func SelfTestOpenclaw(ctx context.Context, dir string) (*SelfTestResult, error) 
 		}
 	}
 	probeMCPServersFromConfig(ctx, ownServers, add)
+	if spec, ok := servers[mcpPrefix+"-codegraph"].(map[string]any); ok {
+		if binary, _ := spec["command"].(string); strings.TrimSpace(binary) != "" {
+			binary = strings.TrimSpace(binary)
+			probeCodeGraphIndexes(ctx, cfg, wsDir, binary, add)
+		}
+	}
 
 	// nacos TCP 探活:多源逐个测。读 cfg 的 ConfigCenter.Endpoints[].Addr(跟 buildNacos /
 	// scripts/.env 同源)。这是 MCP 工具探针(probeMCPServersFromConfig)之外的补充 —— MCP probe

@@ -92,6 +92,8 @@ def parse_dep_map(yaml_text: str) -> dict[str, dict[str, Any]]:
               - b
             downstream:
               - c
+            downstream_namespaces:
+              c: "base-prod"
             data_stores:
               - "mysql:foo"
             critical: true
@@ -99,9 +101,13 @@ def parse_dep_map(yaml_text: str) -> dict[str, dict[str, Any]]:
     历史坑(2026-06):旧版只认 inline,block 风格被静默跳过 → 自动生成的依赖图
     downstream 永远空 → incident-investigator Step 4 形同虚设。block 解析是核心,不是 nice-to-have。
     """
+    parsed = parse_dep_map_with_pyyaml(yaml_text)
+    if parsed is not None:
+        return parsed
+
     result: dict[str, dict[str, Any]] = {}
     cur_svc = ''
-    cur_field = ''  # 非空表示正在收集该字段的 block 列表项(`- xxx`)
+    cur_field = ''  # 非空表示正在收集 block 列表项或 mapping
     in_services = False
     for raw in yaml_text.splitlines():
         if raw.strip().startswith('#') or not raw.strip():
@@ -119,23 +125,41 @@ def parse_dep_map(yaml_text: str) -> dict[str, dict[str, Any]]:
             if item:
                 result[cur_svc][cur_field].append(item)
             continue
+        mm = re.match(r'^\s{6,}([\w\-\.]+):\s*(.*)$', raw)
+        if mm and cur_svc and cur_field == 'downstream_namespaces':
+            svc = mm.group(1).strip()
+            namespace = strip_yaml_scalar(mm.group(2))
+            if svc and namespace:
+                result[cur_svc]['downstream_namespaces'][svc] = namespace
+            continue
         # 服务名层(2 空格缩进)
         m = re.match(r'^  ([\w\-\.]+):\s*$', raw)
         if m:
             cur_svc = m.group(1)
             cur_field = ''
-            result[cur_svc] = {'upstream': [], 'downstream': [], 'data_stores': [], 'critical': False}
+            result[cur_svc] = {
+                'upstream': [],
+                'downstream': [],
+                'downstream_namespaces': {},
+                'data_stores': [],
+                'critical': False,
+            }
             continue
         if not cur_svc:
             continue
         # 字段层(4 空格缩进)
-        ms = re.match(r'^    (upstream|downstream|data_stores|critical):\s*(.*)$', raw)
+        ms = re.match(r'^    (upstream|downstream|downstream_namespaces|data_stores|critical):\s*(.*)$', raw)
         if not ms:
             continue
         field, val = ms.group(1), ms.group(2).strip()
         cur_field = ''  # 默认退出 block 收集;命中 block 字段时下面再开启
         if field == 'critical':
             result[cur_svc]['critical'] = val.lower() == 'true'
+        elif field == 'downstream_namespaces':
+            if val.startswith('{') and val.endswith('}'):
+                result[cur_svc]['downstream_namespaces'] = parse_inline_map(val)
+            elif val == '':
+                cur_field = field
         elif val.startswith('['):
             # inline 列表 ["a", "b"](含空 []:inner 为空 → 空列表)
             inner = val.strip('[]').strip()
@@ -145,6 +169,81 @@ def parse_dep_map(yaml_text: str) -> dict[str, dict[str, Any]]:
             # block 列表:进入收集模式,后续更深缩进的 `- item` 行累加到本字段
             cur_field = field
     return result
+
+
+def parse_dep_map_with_pyyaml(yaml_text: str) -> dict[str, dict[str, Any]] | None:
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        return None
+    try:
+        data = yaml.safe_load(yaml_text) or {}
+    except Exception:
+        return None
+    services = data.get('services') if isinstance(data, dict) else None
+    if not isinstance(services, dict):
+        return None
+
+    result: dict[str, dict[str, Any]] = {}
+    for svc, raw_entry in services.items():
+        if not isinstance(raw_entry, dict):
+            raw_entry = {}
+        entry = raw_entry
+        result[str(svc)] = {
+            'upstream': scalar_list(entry.get('upstream')),
+            'downstream': scalar_list(entry.get('downstream')),
+            'downstream_namespaces': scalar_map(entry.get('downstream_namespaces')),
+            'data_stores': scalar_list(entry.get('data_stores')),
+            'critical': bool(entry.get('critical', False)),
+        }
+    return result
+
+
+def scalar_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if item is not None and str(item)]
+    if isinstance(value, str) and value:
+        return [value]
+    return []
+
+
+def scalar_map(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(k): str(v)
+        for k, v in value.items()
+        if k is not None and v is not None and str(k) and str(v)
+    }
+
+
+def strip_yaml_scalar(value: str) -> str:
+    value = value.strip()
+    if '#' in value:
+        value = value.split('#', 1)[0].strip()
+    return value.strip('"\'')
+
+
+def parse_inline_map(value: str) -> dict[str, str]:
+    inner = value.strip().strip('{}').strip()
+    out: dict[str, str] = {}
+    if not inner:
+        return out
+    for item in inner.split(','):
+        if ':' not in item:
+            continue
+        key, val = item.split(':', 1)
+        key = strip_yaml_scalar(key)
+        val = strip_yaml_scalar(val)
+        if key and val:
+            out[key] = val
+    return out
+
+
+def namespace_for_downstream(entry: dict[str, Any], service: str, default_namespace: str) -> str:
+    return (entry.get('downstream_namespaces') or {}).get(service) or default_namespace
 
 
 def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -195,6 +294,7 @@ def check_one_service(env: str, cluster: str, namespace: str, service: str,
     k8s_script = ws_root / 'skills' / 'k8s-runtime-query' / 'scripts' / 'k8s_query.py'
     if not k8s_script.exists():
         return {'target': service, 'kind': 'service', 'verdict': 'unknown',
+                'namespace': namespace,
                 'error': 'k8s_query.py 不存在'}
     cmd = [sys.executable, str(k8s_script),
            '--env', env, '--cluster', cluster, 'ns-snapshot',
@@ -204,12 +304,15 @@ def check_one_service(env: str, cluster: str, namespace: str, service: str,
         data = json.loads(out)
     except subprocess.CalledProcessError as e:
         return {'target': service, 'kind': 'service', 'verdict': 'unknown',
+                'namespace': namespace,
                 'error': e.output.decode('utf-8', errors='ignore')[:200]}
     except subprocess.TimeoutExpired:
         return {'target': service, 'kind': 'service', 'verdict': 'unknown',
+                'namespace': namespace,
                 'error': f'timeout > {timeout}s'}
     except Exception as e:
         return {'target': service, 'kind': 'service', 'verdict': 'unknown',
+                'namespace': namespace,
                 'error': str(e)[:200]}
 
     # ns-snapshot verdict:healthy / isolated / widespread / no_pods_matched。
@@ -235,6 +338,7 @@ def check_one_service(env: str, cluster: str, namespace: str, service: str,
     return {
         'target': service,
         'kind': 'service',
+        'namespace': namespace,
         'verdict': verdict,
         'detail': detail,
     }
@@ -276,13 +380,25 @@ def main() -> None:
                     if c not in seen:
                         downstream.append(c)
                         seen.add(c)
+    downstream_namespaces = {
+        svc: namespace_for_downstream(self_entry, svc, args.namespace_default)
+        for svc in downstream
+    }
+    if args.depth > 1:
+        for svc in downstream:
+            if downstream_namespaces.get(svc) != args.namespace_default:
+                continue
+            for parent, entry in dep_map.items():
+                if svc in (entry.get('downstream') or []):
+                    downstream_namespaces[svc] = namespace_for_downstream(entry, svc, args.namespace_default)
+                    break
 
     # 并发查每个 downstream service
     results: list[dict[str, Any]] = []
     if downstream:
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(downstream))) as pool:
             futures = {
-                pool.submit(check_one_service, args.env, args.cluster, args.namespace_default, svc, ws_root): svc
+                pool.submit(check_one_service, args.env, args.cluster, downstream_namespaces[svc], svc, ws_root): svc
                 for svc in downstream
             }
             for f in concurrent.futures.as_completed(futures):
@@ -325,6 +441,7 @@ def main() -> None:
         'service': args.service,
         'depth': args.depth,
         'downstream': downstream,
+        'downstream_namespaces': downstream_namespaces,
         'data_stores': data_stores,
         'results': results,
         'data_store_hints': data_store_hints,

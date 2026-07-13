@@ -13,6 +13,20 @@ AI 排障机器人工作台。用 `troubleshooter.yaml` 描述一个微服务系
 | 本仓库 | 研制环境：CLI、桌面 app、HTTP server 三入口共享 `internal/`，负责建模、扫描、校验、生成、部署 |
 | 产出物 | 独立运行的排障机器人：skills、MCP、路由表、故障话术，安装后脱离 studio 使用 |
 
+## 故障闭环工作台
+
+桌面工作台用一个持久化 Case 串联六个阶段：验证、排障、修复、合并、人工部署、回归。阶段状态、证据、授权、代码提交、部署观察和回归结果写入本地 SQLite；Studio 重启后从同一 Case 继续，不再根据 Agent 最终文本猜测进度。
+
+流程有两个彼此独立的用户授权点：根因和证据达到修复门槛后，用户先批准启动修复；修复分支完成并推送后，用户再批准把指定 commit 合并并推送到环境分支。授权绑定 Case 版本、仓库、commit、目标分支和目标分支 HEAD，任一范围变化都要重新确认。
+
+Studio 不执行应用部署。环境分支推送后，Case 保持在“等待部署”，由人工部署并点击“已部署，开始验证”或发送明确的“已部署”通知。通知只启动只读版本校验：`manual`、`http` 或 `k8s` verifier 必须证明每个仓库的目标 merge commit 已在指定环境运行，版本不匹配或少一个仓库都不会启动回归。
+
+HTTP verifier 默认拒绝 loopback、内网、link-local 和云 metadata 地址，并在每次连接时重新校验 DNS 结果；确需访问该环境专用内网版本接口时，在对应环境的 `deployment_verification.http` 显式设置 `allow_private: true`。该开关只放行配置 URL 的精确 host，云 metadata 仍永久禁止，也不会使用系统 HTTP 代理。
+
+回归复用首次验证使用的验证 Agent，但使用独立的 `regression` attempt 和本轮新证据。验证通过后 Case 进入 `fixed_verified`；仍复现时保留本轮部署版本和证据，cycle 加一后回到排障阶段。旧 `runs.json` 只导入为只读 `legacy_archived` Case，用户明确“从新一轮验证继续”时才创建新的活动 Case。
+
+完整状态和证据规则见 [排障链路](docs/troubleshooting-flow.md#studio-故障闭环状态机)。
+
 ## 从哪里开始
 
 | 目标 | 入口 |
@@ -29,6 +43,7 @@ AI 排障机器人工作台。用 `troubleshooter.yaml` 描述一个微服务系
 |---|---|
 | 桌面 app | 推荐给个人使用；覆盖建模、扫描、部署、已装管理、工作目录浏览 |
 | CLI `tshoot` | 推荐给脚本、SSH、CI；覆盖 yaml 计算和 4 平台安装 |
+| HTTP server `tshoot serve` | 推荐给浏览器调试和轻量 Web UI；提供校验、计划、生成、doctor、schema API；代码扫描/安装等本机原生能力仍用桌面 app 或 CLI |
 
 ## 部署目标
 
@@ -49,6 +64,44 @@ AI 排障机器人工作台。用 `troubleshooter.yaml` 描述一个微服务系
 Codex 需要网络访问时，安装流程会自动 patch `~/.codex/config.toml` 的 `[sandbox_workspace_write].network_access` 并备份原文件。
 
 ## 下载与安装
+
+### 可选代码图谱（CodeGraph）
+
+需要在故障期获得符号、调用链和影响面证据时，可显式开启：
+
+```yaml
+code_intelligence:
+  enabled: true
+  provider: codegraph
+```
+
+CodeGraph 首次安装约占 200 MB+，每个仓库在本地生成 `.codegraph/` 索引；索引不上传，遥测已关闭。安装使用固定 v1.3.1 及逐平台 SHA256 校验，并注册一个共享 MCP，通过显式 `projectPath` 查询；不会自动 checkout 或创建 worktree。分支不一致时图谱证据置信度低，机器人会回落 `rg`/`read` 路径。卸载默认保留索引，便于重新启用；需要释放空间时可手动删除 `.codegraph/`。
+
+### 跨仓库服务拓扑
+
+配置了至少两个有本地路径的可运行服务仓库后，部署或重新生成机器人时会扫描 HTTP/HTTPS、Feign 和 gRPC 端点，按“调用端点 → 接收端点”建立跨仓库候选关系。桌面工作台会展示端点位置、匹配理由和冲突，供用户确认、拒绝、改目标或手工补边；人工决定写回 `troubleshooter.yaml` 的 `service_topology.overrides`，它是需要评审和版本管理的真源，自动扫描结果则可随代码重建。
+
+状态含义：
+
+- `automatic`：证据超过确定性门槛，进入正式服务图。
+- `confirmed` / `manual`：人工确认或补录，优先于自动结果，进入正式服务图。
+- `candidate`：证据不足，只在工作台和证据文件展示，不参与自动导航。
+- `rejected` / `stale`：已拒绝，或人工决定找不到当前端点证据，需要复查，不参与正式服务图。
+
+生成物中的 `service-topology-query` 最多沿正式服务图向下游走三跳，并返回每条边的源码位置和确定性理由；运行时 trace 能确定真实链路时仍以 trace 为准。定位到具体仓库和入口端点后，如果启用了 CodeGraph，机器人再把 `projectPath` 和端点位置交给 CodeGraph 做仓库内符号、调用链和影响面分析；CodeGraph 不负责猜跨仓库边，索引不可用时继续回落 `routing`、`rg` 和文件读取。
+
+示例：
+
+```yaml
+service_topology:
+  overrides:
+    - action: confirm
+      from_service: mall-bff
+      to_service: mall-order
+      protocol: http
+      method: POST
+      path: /internal/orders
+```
 
 Release 同步发布到 GitHub 和 GitLab，任选一个源。
 
@@ -188,6 +241,7 @@ repos:
 | 命令 | 功能 |
 |---|---|
 | `init` | 交互生成 `troubleshooter.yaml` |
+| `serve` | 启动本机轻量 HTTP API + Web UI，默认监听 `127.0.0.1:8080` |
 | `validate` | 校验 yaml |
 | `analyze` | 扫代码，抽取服务、配置中心、依赖图、schema |
 | `plan` / `diff` / `watch` | 干跑、diff、文件变化重跑 |
@@ -199,6 +253,8 @@ repos:
 | `doctor` | 声明与代码实态漂移检测，支持 `--fix` |
 | `demo` | 零配置试跑 |
 | `skill new` | 新建 skill 模板 |
+
+`tshoot serve` 当前覆盖浏览器可安全完成的轻量操作：`/api/validate`、`/api/plan`、`/api/gen`、`/api/doctor`、`/api/schema` 与静态 Web UI。涉及本机文件选择、代码扫描、安装、self-test、钥匙串、OpenClaw 探测等原生能力时，请用桌面 app 或对应 CLI 子命令。
 
 典型流程：
 
@@ -217,6 +273,7 @@ repos:
 | 能力 | skill |
 |---|---|
 | 路由 | `routing`：env 到域名、分支、配置、日志 app、MCP、依赖图、schema 的映射 |
+| 服务拓扑 | `service-topology-query`：按入口接口查询最多三跳的正式跨仓库路径和端点证据 |
 | 主流程 | `incident-investigator`：症状、时间轴、横向、纵向、多向交叉、根因、沉淀 |
 | 最近变更 | `recent-changes`：K8s rollout、配置 history、git log 聚合 |
 | 配置中心 | `config-executor`：Nacos、Apollo、Consul、Kuboard(K8s ConfigMap)、One2All、环境变量 |

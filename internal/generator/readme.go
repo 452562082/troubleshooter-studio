@@ -62,28 +62,34 @@ func (g *Generator) writeReadme() error {
 func readmeSkillsSection(ctx *Context) string {
 	var sb strings.Builder
 	if len(ctx.Generation.SkillsWhitelist) == 0 {
-		sb.WriteString("（未列白名单，所有 skill 默认启用）\n")
+		sb.WriteString("（未列白名单，除需显式配置的能力外，所有 skill 默认启用）\n")
 		return sb.String()
 	}
 	skillDesc := map[string]string{
-		"routing":                  "根据 service + env 定位代码路径、域名、分支、配置标识",
-		"config-executor":          "从配置中心读取/对比配置值，支持历史版本",
-		"redis-runtime-query":      "查询 Redis key / TTL / 值（只读）",
-		"mongodb-runtime-query":    "MongoDB query / aggregate / count（只读）",
-		"es-runtime-query":         "Elasticsearch _search（只读）",
-		"mysql-runtime-query":      "MySQL 只读 SELECT（数据一致性 / 慢查询）",
-		"doris-runtime-query":      "Doris 数仓只读 SQL（分区 / 慢查询 / 明细核对）",
-		"postgresql-runtime-query": "PostgreSQL 只读查询（pg_stat / 连接数 / 表大小）",
-		"kafka-runtime-query":      "Kafka topic / 消费积压 / 死信",
-		"rabbitmq-runtime-query":   "RabbitMQ queue / exchange / 消息数",
-		"clickhouse-runtime-query": "ClickHouse 只读 OLAP 查询 / 分区 / 慢查询日志",
-		"diagram-generator":        "生成架构图 / 流程图 / 链路拓扑",
-		"tracing-query":            "Jaeger trace_id → span 树 / 耗时 TOP / 错误 span",
-		"tempo-query":              "Tempo trace 查询（Grafana 生态）",
-		"skywalking-query":         "SkyWalking APM：服务拓扑 + trace + 慢端点",
-		"elk-log-query":            "ELK 日志搜索（ES _search + Kibana）",
+		"routing":                      "根据 service + env 定位代码路径、域名、分支、配置标识",
+		"code-intelligence-query":      "CodeGraph 函数级源码、调用关系与影响面取证；失败自动回退 rg/read",
+		"config-executor":              "从配置中心读取/对比配置值，支持历史版本",
+		"attachment-evidence-verifier": "Bug 附件 / 截图 / 录屏 / HAR 证据归一化",
+		"redis-runtime-query":          "查询 Redis key / TTL / 值（只读）",
+		"mongodb-runtime-query":        "MongoDB query / aggregate / count（只读）",
+		"es-runtime-query":             "Elasticsearch _search（只读）",
+		"mysql-runtime-query":          "MySQL 只读 SELECT（数据一致性 / 慢查询）",
+		"doris-runtime-query":          "Doris 数仓只读 SQL（分区 / 慢查询 / 明细核对）",
+		"postgresql-runtime-query":     "PostgreSQL 只读查询（pg_stat / 连接数 / 表大小）",
+		"kafka-runtime-query":          "Kafka topic / 消费积压 / 死信",
+		"rabbitmq-runtime-query":       "RabbitMQ queue / exchange / 消息数",
+		"clickhouse-runtime-query":     "ClickHouse 只读 OLAP 查询 / 分区 / 慢查询日志",
+		"diagram-generator":            "生成架构图 / 流程图 / 链路拓扑",
+		"tracing-query":                "Jaeger trace_id → span 树 / 耗时 TOP / 错误 span",
+		"tempo-query":                  "Tempo trace 查询（Grafana 生态）",
+		"skywalking-query":             "SkyWalking APM：服务拓扑 + trace + 慢端点",
+		"grafana-observability-query":  "Grafana / Loki / Prometheus 只读取证查询",
+		"elk-log-query":                "ELK 日志搜索（ES _search + Kibana）",
 	}
 	for _, s := range ctx.Generation.SkillsWhitelist {
+		if !skillEnabled(ctx, s) {
+			continue
+		}
 		desc, ok := skillDesc[s]
 		if !ok {
 			desc = "（自定义 skill，见 templates/workspace-template/skills/" + s + "/SKILL.md）"
@@ -168,6 +174,11 @@ func readmeFAQSection(ctx *Context) string {
 	if ctx.Infrastructure.PrimaryConfigCenter().Type != "" && ctx.Infrastructure.PrimaryConfigCenter().Type != "none" {
 		sb.WriteString("**Q: 某个 env 的配置查不到？**\n")
 		sb.WriteString("A: (1) 检查 `scripts/.env` 里该 env 的地址/凭证；(2) 对比 `templates/workspace-template/skills/routing/references/config-map.yaml` 里的 namespace/dataId/group 是否对；(3) 在 tshoot 仓库跑 `tshoot doctor -i troubleshooter.yaml --repos-root <dir>` 看声明与实态是否漂移。\n\n")
+	}
+
+	if skillEnabled(ctx, "code-intelligence-query") {
+		sb.WriteString("**Q: CodeGraph 索引不可用、过期或和目标分支不一致？**\n")
+		sb.WriteString("A: CodeGraph 索引保存在仓库根目录的 `.codegraph/`；当前 checkout 与环境目标分支不匹配时，只能把图谱结果当低置信度候选。索引缺失、同步失败或 MCP 不可用会自动回退到 git diff + rg/read。CodeGraph 的调用关系和影响面属于静态分析推断，不能独立证明根因，必须用源码行和运行时证据交叉验证。\n\n")
 	}
 
 	sb.WriteString("**Q: 改了 troubleshooter.yaml，怎么更新部署？**\n")

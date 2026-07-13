@@ -2,6 +2,7 @@
 package analyzer
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -22,14 +23,17 @@ var (
 	rePrismaMap   = regexp.MustCompile(`@@map\s*\(\s*"(\w+)"\s*\)`)
 )
 
-func scanNodeSchema(repoPath string, include []string) []SchemaTable {
-	files, _ := walkFiles(repoPath, include, func(p string) bool {
+func scanNodeSchema(ctx context.Context, repoPath string, include []string) []SchemaTable {
+	files, _ := walkFilesContext(ctx, repoPath, include, func(p string) bool {
 		return strings.HasSuffix(p, ".js") || strings.HasSuffix(p, ".ts") ||
 			strings.HasSuffix(p, ".jsx") || strings.HasSuffix(p, ".tsx") ||
 			strings.HasSuffix(p, ".mjs") || strings.HasSuffix(p, ".prisma")
 	})
 	out := []SchemaTable{}
 	for _, fp := range files {
+		if ctx != nil && ctx.Err() != nil {
+			break
+		}
 		data, err := os.ReadFile(fp)
 		if err != nil {
 			continue

@@ -20,6 +20,7 @@ func NewRouter(srv *Server, webFS fs.FS) http.Handler {
 	mux.HandleFunc("POST /api/gen", srv.HandleGen)
 	mux.HandleFunc("POST /api/doctor", srv.HandleDoctor)
 	mux.HandleFunc("GET /api/schema", srv.HandleSchema)
+	mux.HandleFunc("POST /api/bug-hooks/", srv.HandleBugHook)
 
 	// 前端静态文件（生产模式：embed；开发模式：Vite dev server proxy）
 	if webFS != nil {

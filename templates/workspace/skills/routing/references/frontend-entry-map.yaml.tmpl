@@ -1,0 +1,66 @@
+# frontend-entry-map.yaml
+# 前端复现入口图:把页面/浏览器证据转成 API endpoint 和候选后端服务。
+# 来源:
+#   - repos[].role in troubleshooter.yaml
+#   - env web_domain / api_domain
+#   - service-dependency-map downstream edges and service_names
+
+frontend_entries:
+{{- $ctx := .}}
+{{- range .Repos}}
+  {{- $repo := .}}
+  {{- $role := .EffectiveRole}}
+  {{- if or (eq $role "frontend") (eq $role "admin") (eq $role "mobile")}}
+  {{$repo.Name}}:
+    role: {{$role | printf "%q"}}
+    stack: {{$repo.Stack | printf "%q"}}
+    framework: {{if $repo.Framework}}{{$repo.Framework | printf "%q"}}{{else}}"unknown"{{end}}
+    web_domains:
+    {{- range $ctx.Environments}}
+      {{.ID}}: {{if .WebDomain}}{{.WebDomain | printf "%q"}}{{else}}""{{end}}
+    {{- end}}
+    api_domains:
+    {{- range $ctx.Environments}}
+      {{.ID}}: {{.APIDomain | printf "%q"}}
+    {{- end}}
+    endpoint_paths:
+    {{- range frontendEndpointsForRepo $ctx $repo.Name}}
+      - {{. | printf "%q"}}
+    {{- else}}
+      []
+    {{- end}}
+    path_candidates:
+    {{- range frontendEndpointsForRepo $ctx $repo.Name}}
+      {{. | printf "%q"}}:
+        route_candidates:
+        {{- range frontendRouteCandidatesForRepoEndpoint $ctx $repo.Name .}}
+          - service: {{.Service | printf "%q"}}
+            match: {{.Match | printf "%q"}}
+            route: {{.Route | printf "%q"}}
+            method: {{.Method | printf "%q"}}
+            source: {{.Source | printf "%q"}}
+        {{- else}}
+          []
+        {{- end}}
+        candidate_services:
+        {{- range frontendCandidateServicesForRepo $ctx $repo.Name}}
+          - {{. | printf "%q"}}
+        {{- else}}
+          []
+        {{- end}}
+        hint: "Match this endpoint with gateway routes, access logs, or trace spans before selecting the backend service."
+    {{- else}}
+      {}
+    {{- end}}
+    candidate_downstream:
+    {{- range $ctx.Repos}}
+      {{- if and (.RequiresServiceNames) (ne .Name $repo.Name)}}
+        {{- range .ServiceNames}}
+      - {{. | printf "%q"}}
+        {{- end}}
+      {{- end}}
+    {{- end}}
+    notes:
+      - "Use HAR candidate_endpoints to match api_domains, then trace/log by trace_id or endpoint path."
+  {{- end}}
+{{- end}}

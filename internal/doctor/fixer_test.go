@@ -32,7 +32,7 @@ repos:
 
 infrastructure:
   config_center:
-    type: nacos               # nacos / apollo / consul / kubernetes / env-vars / none
+    type: nacos               # nacos / apollo / consul / kuboard / one2all / env-vars / none
     endpoints:
       - env: dev
         addr: "x"

@@ -45,7 +45,7 @@ func (g *Generator) GenerateCodex() error {
 	}
 	defer cleanup()
 
-	agentName := agentSlug(g.Ctx)
+	troubleshooterAgentName := agentIDForRole(g.Ctx, AgentRoleTroubleshooter)
 
 	// 1) skills/(11 个子能力)
 	skillsSrc := filepath.Join(wsRoot, "skills")
@@ -54,9 +54,9 @@ func (g *Generator) GenerateCodex() error {
 		return fmt.Errorf("copy skills: %w", err)
 	}
 
-	// 2) skills/<name>/SKILL.md 顶层入口(让 codex /skills picker 显单条 truss-troubleshooter
-	//    而不是散成 11 条子 skill)。这条 SKILL.md 本身充当路由文档。
-	rootSkill, err := buildCodexRootSkillMD(wsRoot, g.Ctx, agentName)
+	// 2) skills/SKILL.md 顶层排障入口(装机时按 agent 名命名空间隔离)。validator agent
+	//    不走这个入口,它在 TOML developer_instructions 里直接 Read bug-verifier。
+	rootSkill, err := buildCodexRootSkillMD(wsRoot, g.Ctx, troubleshooterAgentName)
 	if err != nil {
 		return fmt.Errorf("build root SKILL.md: %w", err)
 	}
@@ -79,19 +79,22 @@ func (g *Generator) GenerateCodex() error {
 	// 4) agents/<name>.toml 主体(name/description/developer_instructions/skills.config)
 	//    [mcp_servers.*] 段在 install 时按 cfg 拼接;skills.config.path 用 SKILLS_ROOT 占位
 	//    install 时替换成绝对路径(codex 不解析 ~ / 环境变量)。
-	agentTOML, err := buildCodexAgentTOML(wsRoot, g.Ctx, agentName)
-	if err != nil {
-		return fmt.Errorf("build agent toml: %w", err)
-	}
 	agentsDir := filepath.Join(outDir, "agents")
 	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(agentsDir, agentName+".toml"), []byte(agentTOML), 0o644); err != nil {
-		return err
+	for _, role := range internalAgentRoles() {
+		agentName := agentIDForRole(g.Ctx, role)
+		agentTOML, err := buildCodexAgentTOML(wsRoot, g.Ctx, agentName, role)
+		if err != nil {
+			return fmt.Errorf("build %s agent toml: %w", role, err)
+		}
+		if err := os.WriteFile(filepath.Join(agentsDir, agentName+".toml"), []byte(agentTOML), 0o644); err != nil {
+			return err
+		}
 	}
 
-	if err := g.writeTshootMeta(outDir, "codex"); err != nil {
+	if err := g.writeIDEAgentMetas(outDir, "codex"); err != nil {
 		return fmt.Errorf("write tshoot meta: %w", err)
 	}
 	return nil
@@ -112,7 +115,7 @@ var codexNicknameSafe = regexp.MustCompile(`^[A-Za-z0-9]+$`)
 //
 // [mcp_servers.*] 段不在 staging 写,InstallNative 时按 cfg + IDECreds 现拼接 —— 因为
 // MCP env 含真凭证(GRAFANA_PASSWORD 等),凭证只在 install 阶段才有(staging 是无凭证版)。
-func buildCodexAgentTOML(wsRoot string, ctx *Context, agentName string) (string, error) {
+func buildCodexAgentTOML(wsRoot string, ctx *Context, agentName string, role AgentRole) (string, error) {
 	var sb strings.Builder
 
 	// frontmatter 字段(顶层)
@@ -124,14 +127,15 @@ func buildCodexAgentTOML(wsRoot string, ctx *Context, agentName string) (string,
 	// 读不到必须立刻报错 —— 之前这里吞掉错误 + 下面再做"if nil 重试一次"假兜底,
 	// IO 失败时静默生成 description="路由到 0 个子 skill" + 空 skills.config 段,
 	// codex 还能 spawn agent 但起来啥也调不了。
-	subSkills, err := listCodexSubSkills(wsRoot)
+	allSubSkills, err := listCodexSubSkills(wsRoot)
 	if err != nil {
 		return "", fmt.Errorf("list sub skills: %w", err)
 	}
+	subSkills := codexSubSkillsForRole(allSubSkills, role)
 
 	// description:codex 用它判断"用户意图是否要 spawn 这个 agent",写**短而精准**(关键词触发)。
 	// 子 skill 数量 + 配置中心类型从 ctx 派生,避免硬编码漂移。
-	desc := buildCodexAgentDescription(ctx, len(subSkills))
+	desc := buildCodexAgentDescription(ctx, len(subSkills), role)
 	TomlWriteString(&sb, "description", desc)
 
 	// nickname_candidates:codex 给 spawn 出的 thread instance 起的可读 display name。
@@ -161,7 +165,7 @@ func buildCodexAgentTOML(wsRoot string, ctx *Context, agentName string) (string,
 	TomlWriteString(&sb, "sandbox_mode", "workspace-write")
 
 	// developer_instructions:三引号 multi-line,人格 + 路由 + 故障快报模板全装进去
-	instr := buildCodexDeveloperInstructions(wsRoot, ctx, agentName)
+	instr := buildCodexDeveloperInstructions(wsRoot, ctx, agentName, role)
 	sb.WriteString("developer_instructions = \"\"\"\n")
 	sb.WriteString(instr)
 	if !strings.HasSuffix(instr, "\n") {
@@ -214,7 +218,19 @@ func codexNicknameFromAgentID(agentID string) string {
 // 只负责"用户一句话里有没有触发词"这一道判定。<80 字基线。
 //
 // 第二参数 _ 兼容旧签名(skillCount 之前用于"路由到 N 个子 skill",已挪到 root SKILL.md)。
-func buildCodexAgentDescription(ctx *Context, _ int) string {
+func buildCodexAgentDescription(ctx *Context, _ int, role AgentRole) string {
+	if role == AgentRoleValidator {
+		return fmt.Sprintf(
+			"%s 验证。触发词:验证/复现/回归/修复后复查/证据/截图/Network/console/API/trace/是否修好。",
+			ctx.System.Name,
+		)
+	}
+	if role == AgentRoleFixer {
+		return fmt.Sprintf(
+			"%s 修复。触发词:修复/改代码/打补丁/fix/提交/推送/修复分支/部署。",
+			ctx.System.Name,
+		)
+	}
 	return fmt.Sprintf(
 		"%s 排障(只读)。触发词:5xx/报错/超时/慢/不通/突增/失败/卡住/排查/故障/定位/为什么/查日志/查指标/查配置/查链路。",
 		ctx.System.Name,
@@ -234,12 +250,40 @@ func buildCodexAgentDescription(ctx *Context, _ int) string {
 //
 // agentName 用来拼绝对路径,wsRoot/ctx 暂不用但保留签名以便后续按 ctx 动态调整(如不同
 // 系统给不同的入口 skill 名)。
-func buildCodexDeveloperInstructions(_ string, ctx *Context, agentName string) string {
+func buildCodexDeveloperInstructions(_ string, ctx *Context, agentName string, role AgentRole) string {
+	if role == AgentRoleValidator {
+		return fmt.Sprintf(`你是 **%s 验证机器人**,从 codex 主 chat spawn 出来做 **验证 / 主动复现 / 修复后复查**,只输出验证报告,不做原因定位。
+
+第一步:Read `+"`~/.codex/skills/%s/bug-verifier/SKILL.md`"+` —— 那里有复现、回归、证据收集、状态枚举和验证报告结构。信息不足时列阻塞项,不要猜测。
+
+边界:不读取业务源码定位函数/文件行号/补丁点;只收集可复查证据和交接摘要,代码分析与原因判断交给排障 Agent。
+
+`, ctx.System.Name, agentName)
+	}
+	if role == AgentRoleFixer {
+		return fmt.Sprintf(`你是 **%s 修复机器人**,从 codex 主 chat spawn 出来做 Bug 修复落地。只有用户明确要求修复时才执行。
+
+第一步:Read `+"`~/.codex/skills/%s/bug-fixer/SKILL.md`"+` —— 那里有分支确认、脏工作区保护、最小改动、测试、提交、推送和部署通知契约。
+
+边界:不要扩大重构;不要改无关文件;如果工作区已有用户未提交改动、无法确认分支、无法推送,立刻停止并说明阻塞。完成后只通知用户部署修复分支,不要自行部署。
+
+`, ctx.System.Name, agentName)
+	}
 	return fmt.Sprintf(`你是 **%s 排障机器人**,从 codex 主 chat spawn 出来做 **只读** 排障(日志 / 指标 / trace / 配置 / 代码),**不**直接落地修改。
 
 第一步:Read `+"`~/.codex/skills/%s/SKILL.md`"+` —— 那里有完整的路由表 / 行为规则 / 输出模板,按形态指引你 Read 子 SKILL.md 走 7 步流程(含 Step 7 沉淀)。
 
 `, ctx.System.Name, agentName)
+}
+
+func codexSubSkillsForRole(subSkills []string, role AgentRole) []string {
+	filtered := make([]string, 0, len(subSkills))
+	for _, s := range subSkills {
+		if SkillAllowedForAgentRole(s, role) {
+			filtered = append(filtered, s)
+		}
+	}
+	return filtered
 }
 
 // buildCodexRootSkillMD 写顶层调度 SKILL.md(放在 staging skills/SKILL.md,装机时落到

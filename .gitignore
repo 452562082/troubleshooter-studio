@@ -51,6 +51,9 @@ __pycache__/
 # 本地也可能有人 export 同样的路径调试 —— 一律不入库
 /.cache/
 
+# AI 开发助手的隔离 git worktree；真实分支由 git 管理，目录内容不入主工作区索引
+/.worktrees/
+
 # Editor swap files (vim/emacs)
 *.swp
 *.swo

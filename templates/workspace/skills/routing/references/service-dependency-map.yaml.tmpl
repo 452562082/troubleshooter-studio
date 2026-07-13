@@ -2,8 +2,8 @@
 # 服务依赖图(谁调谁 + 用什么数据层)。incident-investigator Step 4(纵向沿依赖追)的核心数据。
 #
 # 自动填来源(优先级):
-#   1. 部署期 analyzer 扫码(dependency_scan.go 抓 http/grpc/FeignClient 等)→ downstream
-#   2. downstream 图反推 → upstream(谁的 downstream 含我,谁就是我的 upstream)
+#   1. 部署期 topology 正式边(automatic/confirmed/manual)→ downstream/upstream
+#   2. 旧 analysis.json 无 topology 时才回退 dependency_scan.go 的 repo 级扫描
 #   3. yaml data_stores[].endpoints[].service → data_stores
 #   4. repo.role 决定节点形态(下方"role hint"表)
 #   只要本机有仓库 clone 路径(ImportAndDeploy 时填过 / wizard Step 4),analyzer 自动跑,
@@ -26,6 +26,8 @@
 #     role        : 来自 repo.role(backend / frontend / gateway / ...)
 #     upstream    : 调用本服务的上游(谁会受我影响)
 #     downstream  : 本服务调用的下游(我挂了谁不一定挂,但我挂常因为他们)
+#     downstream_namespaces : 可选;下游服务不在 `cascade_check --namespace-default` 时填
+#                              service → namespace 映射,例如 `order: "order-prod"`
 #     data_stores : 本服务用的数据层,格式 "<type>:<logical-name>"
 #     critical    : 关键路径标记;true=核心交易服务,P0 故障要更谨慎诊断 + 严格止血策略
 #
@@ -42,18 +44,17 @@ services:
   {{- $repo := .}}
   {{- if $repo.IsServiceNode}}
   {{- $role := $repo.EffectiveRole}}
-  {{- $svcs := .ServiceNames}}
-  {{- if not $svcs}}{{$svcs = list .Name}}{{end}}
+  {{- $svcs := dependencyServicesForRepo $ctx $repo}}
   {{- range $svcs}}
   {{- $svc := .}}
-  {{- $scannedDown := scannedDownstreamsForService $ctx $svc}}
-  {{- $upstream := upstreamForService $ctx $svc}}
+  {{- $scannedDown := topologyDownstreamsForService $ctx $svc}}
+  {{- $upstream := topologyUpstreamsForService $ctx $svc}}
   {{- $scannedDS := scannedDataStoresForService $ctx $svc}}
   {{- $yamlDS := yamlDataStoresForService $ctx $svc}}
-  {{$svc}}:
+  {{$svc | yamlQuote}}:
     role: {{$role | printf "%q"}}
     {{- if $upstream}}
-    # ↓ 由 downstream 图反推(谁的 downstream 含我,谁就是我的上游);analyzer 跑过则自动得
+    # ↓ 由正式 topology 图反推(谁的 downstream 含我,谁就是我的上游)
     upstream:
     {{- range $upstream}}
       - {{. | printf "%q"}}
@@ -64,7 +65,7 @@ services:
     upstream: []         # 没人在代码里调本服务(可能 analyzer 没跑 / 路径没填,或它确实是叶子服务)
     {{- end}}
     {{- if $scannedDown}}
-    # ↓ 从代码扫到的下游调用(http/grpc URL host / @FeignClient name);精度 50-70%,可手动校正
+    # ↓ topology 正式边汇总;仅旧 analysis.json 会回退 repo 级 regex 扫描
     downstream:
     {{- range $scannedDown}}
       - {{. | printf "%q"}}
@@ -72,6 +73,7 @@ services:
     {{- else}}
     downstream: []       # 没扫到下游(analyzer 没跑或路径未填;wizard Step 4 / BotsPage 部署时填本地路径自动跑)
     {{- end}}
+    downstream_namespaces: {}  # 跨 namespace 下游在这里手填,未填则 cascade_check 使用 --namespace-default
     {{- if $scannedDS}}
     # ↓ 从代码扫到的数据层(import / 客户端构造);":scanned" 占位需替换成真实逻辑名
     data_stores:
@@ -100,7 +102,7 @@ services:
 lib_repos:
 {{- range .Repos}}
   {{- if not .IsServiceNode}}
-  {{.Name}}:
+  {{.Name | yamlQuote}}:
     role: {{.EffectiveRole | printf "%q"}}
     stack: {{.Stack}}
   {{- end}}
@@ -110,6 +112,9 @@ lib_repos:
 # commerce:
 #   upstream: [api-gateway, web-bff]
 #   downstream: [user, order, inventory]
+#   downstream_namespaces:
+#     order: "order-prod"
+#     inventory: "warehouse-prod"
 #   data_stores:
 #     - "mysql:order_db"
 #     - "redis:session"

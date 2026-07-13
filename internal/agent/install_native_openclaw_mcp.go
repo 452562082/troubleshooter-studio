@@ -30,15 +30,19 @@ func injectMCPServers(
 	cfg *config.SystemConfig,
 	get func(string) string,
 	ocHome string,
+	mergeOnlyNew bool,
 ) error {
 	// MCP server key 用短 prefix(system.id),跟 IDE 平台对齐 + 避免 tool 名超 60 字限制。
 	// 清老版本下载到 <ocHome>/bin/ 的 mcp-grafana 孤儿二进制(改 npx 后留着没用)
 	removeLegacyGrafanaBin(ocHome)
+	emit := func(line string) {
+		fmt.Fprintln(os.Stderr, line)
+	}
 
 	// uvx 探测,跟 IDE 路径同款 — 缺 uv 时 nacos/jaeger/clickhouse 都启不来。
 	if CfgUsesUvx(cfg) {
 		if err := CheckUvxAvailable(); err != nil {
-			fmt.Fprintf(os.Stderr, "[warn] openclaw install:\n%v\n", err)
+			emit(fmt.Sprintf("[warn] openclaw install:\n%v", err))
 		}
 	}
 
@@ -47,11 +51,9 @@ func injectMCPServers(
 	kafkaBinPath := ""
 	if CfgUsesKafkaMCP(cfg) {
 		var err error
-		kafkaBinPath, err = EnsureKafkaMCPInstalled(func(line string) {
-			fmt.Fprintln(os.Stderr, line)
-		})
+		kafkaBinPath, err = EnsureKafkaMCPInstalled(emit)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[warn] openclaw install:\n%v\n", err)
+			emit(fmt.Sprintf("[warn] openclaw install:\n%v", err))
 		}
 	}
 
@@ -60,19 +62,27 @@ func injectMCPServers(
 	nacosScriptPath := ""
 	if CfgUsesNacosMCP(cfg) {
 		var err error
-		nacosScriptPath, err = EnsureNacosMCPScript(func(line string) {
-			fmt.Fprintln(os.Stderr, line)
-		})
+		nacosScriptPath, err = EnsureNacosMCPScript(emit)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[warn] openclaw install:\n%v\n", err)
+			emit(fmt.Sprintf("[warn] openclaw install:\n%v", err))
+		}
+	}
+
+	codeGraphBinPath := ""
+	if CfgUsesCodeGraph(cfg) {
+		var err error
+		codeGraphBinPath, err = EnsureCodeGraphInstalled(emit)
+		if err != nil {
+			emit(fmt.Sprintf("[warn] CodeGraph 安装失败,跳过 MCP 注册并启用 rg/read fallback: %v", err))
 		}
 	}
 
 	servers := BuildMCPServers(cfg, MCPBuildOptions{
-		AgentID:            cfg.MCPKeyPrefix(),
-		PruneEmpty:         false, // 留全 schema,agent 自决
-		KafkaMCPBinaryPath: kafkaBinPath,
-		NacosMCPScriptPath: nacosScriptPath,
+		AgentID:             cfg.MCPKeyPrefix(),
+		PruneEmpty:          false, // 留全 schema,agent 自决
+		KafkaMCPBinaryPath:  kafkaBinPath,
+		NacosMCPScriptPath:  nacosScriptPath,
+		CodeGraphBinaryPath: codeGraphBinPath,
 	}, get)
 
 	mcp, _ := root["mcp"].(map[string]any)
@@ -85,6 +95,18 @@ func injectMCPServers(
 		existing = map[string]any{}
 		mcp["servers"] = existing
 	}
+	// 无凭据刷新:除不含凭证的 CodeGraph 固定 key 按本次 ensure 结果对齐外,只补新增 key,
+	// 不覆盖老 key 的 env。否则会把首次部署灌入的 URL/token 用空值抹掉。
+	if mergeOnlyNew {
+		reconcileCodeGraphServer(existing, servers, cfg.MCPKeyPrefix())
+		for k, v := range servers {
+			if _, hit := existing[k]; !hit {
+				existing[k] = v
+			}
+		}
+		return nil
+	}
+
 	// 重灌:同名覆盖 + 按 agentID 前缀清死引用(env 缩容 / 切配置中心类型 / system.id 改名等
 	// 场景),跟 IDE 路径同款。用户手加同前缀别名会被一起清,打 [info] 让用户感知。
 	agentPrefix := cfg.MCPKeyPrefix() + "-"

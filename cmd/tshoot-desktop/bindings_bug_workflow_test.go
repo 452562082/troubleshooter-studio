@@ -387,15 +387,20 @@ func TestResetIncidentCaseWithWarningsReturnsStructuredCancelWarning(t *testing.
 	}
 	runner.cancelErr = errors.New("secret runner transport detail")
 
-	result, err := app.ResetIncidentCaseWithWarnings(ResetIncidentCaseInput{
+	input := ResetIncidentCaseInput{
 		CaseID: old.ID, NewCaseID: "case-reset-warning-new", BotKey: old.SelectedBotKey, ExpectedVersion: old.Version,
 		IdempotencyKey: "reset-case-warning", ActorID: "user-1",
-	})
+	}
+	result, err := app.ResetIncidentCaseWithWarnings(input)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.Case.ID != "case-reset-warning-new" || !reflect.DeepEqual(result.Warnings, []bughub.WorkflowWarning{{Code: "reset_runner_cancel_failed", Message: "旧阶段 Agent 未能确认停止，请人工检查其运行状态。"}}) {
 		t.Fatalf("result=%+v", result)
+	}
+	legacy, legacyErr := app.ResetIncidentCase(input)
+	if legacyErr != nil || legacy.ID != result.Case.ID {
+		t.Fatalf("cancel-only legacy result=%+v err=%v", legacy, legacyErr)
 	}
 }
 
@@ -416,7 +421,8 @@ func TestResetIncidentCaseWithWarningsResolvesCancelAndReplacementStartWarnings(
 	runner.cancelErr = errors.New("secret cancel failure")
 	runner.startErr = errors.New("secret start failure")
 
-	result, err := app.ResetIncidentCaseWithWarnings(ResetIncidentCaseInput{CaseID: old.ID, NewCaseID: "case-reset-double-warning-new", BotKey: old.SelectedBotKey, ExpectedVersion: old.Version, IdempotencyKey: "reset-case-double-warning", ActorID: "user-1"})
+	input := ResetIncidentCaseInput{CaseID: old.ID, NewCaseID: "case-reset-double-warning-new", BotKey: old.SelectedBotKey, ExpectedVersion: old.Version, IdempotencyKey: "reset-case-double-warning", ActorID: "user-1"}
+	result, err := app.ResetIncidentCaseWithWarnings(input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,6 +432,10 @@ func TestResetIncidentCaseWithWarningsResolvesCancelAndReplacementStartWarnings(
 	}
 	if result.Case.ID != "case-reset-double-warning-new" || result.Case.Status != bughub.CaseWaitingEvidence || !reflect.DeepEqual(result.Warnings, want) {
 		t.Fatalf("result=%+v", result)
+	}
+	legacy, legacyErr := app.ResetIncidentCase(input)
+	if legacyErr == nil || legacy.ID != result.Case.ID {
+		t.Fatalf("start-failed legacy result=%+v err=%v", legacy, legacyErr)
 	}
 }
 

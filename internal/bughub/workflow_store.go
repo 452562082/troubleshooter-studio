@@ -415,6 +415,7 @@ type legacyResetCancellation struct {
 	AttemptID          string
 	RequestFingerprint string
 	CreatedAt          string
+	Archived           IncidentCase
 }
 
 func backfillV6ResetCancellations(ctx context.Context, tx *sql.Tx) error {
@@ -456,6 +457,7 @@ func backfillV6ResetCancellations(ctx context.Context, tx *sql.Tx) error {
 			return fmt.Errorf("committed reset %q has invalid timestamp", reset.ResetKey)
 		}
 		reset.AttemptID = result.CancelledAttemptID
+		reset.Archived = result.Archived
 		resets = append(resets, reset)
 	}
 	if err := rows.Err(); err != nil {
@@ -475,26 +477,9 @@ func backfillV6ResetCancellations(ctx context.Context, tx *sql.Tx) error {
 		if attemptCaseID != reset.CaseID || attemptStatus != AttemptStatusCancelled {
 			return fmt.Errorf("committed reset %q attempt binding is invalid", reset.ResetKey)
 		}
-		status, outcome := ResetCancellationClaimed, ""
-		var auditCaseID, auditType, actorType, actorID, payloadJSON string
-		err := tx.QueryRowContext(ctx, `SELECT case_id,event_type,actor_type,actor_id,payload_json FROM transition_events WHERE idempotency_key=?`, reset.ResetKey+":runner-cancel").Scan(&auditCaseID, &auditType, &actorType, &actorID, &payloadJSON)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		status, outcome, err := legacyResetCancellationAuditOutcome(ctx, tx, reset)
+		if err != nil {
 			return fmt.Errorf("load committed reset %q cancellation audit: %w", reset.ResetKey, err)
-		}
-		if err == nil && auditCaseID == reset.CaseID && actorType == "studio" && actorID == "orchestrator" {
-			var payload struct {
-				AttemptID   string `json:"attempt_id"`
-				Outcome     string `json:"outcome"`
-				WarningCode string `json:"warning_code"`
-			}
-			if json.Unmarshal([]byte(payloadJSON), &payload) == nil && payload.AttemptID == reset.AttemptID {
-				switch {
-				case auditType == "reset_runner_cancel_succeeded" && payload.Outcome == "succeeded" && payload.WarningCode == "":
-					status, outcome = ResetCancellationSucceeded, "succeeded"
-				case auditType == "reset_runner_cancel_failed" && payload.Outcome == "failed" && payload.WarningCode == "reset_runner_cancel_failed":
-					status, outcome = ResetCancellationFailed, "runner_cancel_failed"
-				}
-			}
 		}
 		claimToken := "migration-v6:" + reset.ResetKey
 		if _, err := tx.ExecContext(ctx, `INSERT INTO reset_cancellation_operations (reset_key,case_id,attempt_id,request_fingerprint,status,claim_token,outcome_code,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`, reset.ResetKey, reset.CaseID, reset.AttemptID, reset.RequestFingerprint, status, claimToken, outcome, reset.CreatedAt, reset.CreatedAt); err != nil {
@@ -502,6 +487,82 @@ func backfillV6ResetCancellations(ctx context.Context, tx *sql.Tx) error {
 		}
 	}
 	return nil
+}
+
+func legacyResetCancellationAuditOutcome(ctx context.Context, tx *sql.Tx, reset legacyResetCancellation) (ResetCancellationStatus, string, error) {
+	unknown := func() (ResetCancellationStatus, string, error) { return ResetCancellationClaimed, "", nil }
+	auditKey := reset.ResetKey + ":runner-cancel"
+	var eventID, auditCaseID, fromStatus, toStatus, auditType, actorType, actorID, payloadJSON, createdAt, requestFingerprint, resultJSON string
+	err := tx.QueryRowContext(ctx, `SELECT id,case_id,from_status,to_status,event_type,actor_type,actor_id,payload_json,created_at,request_fingerprint,result_case_json FROM transition_events WHERE idempotency_key=?`, auditKey).Scan(&eventID, &auditCaseID, &fromStatus, &toStatus, &auditType, &actorType, &actorID, &payloadJSON, &createdAt, &requestFingerprint, &resultJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return unknown()
+	}
+	if err != nil {
+		return "", "", err
+	}
+	if eventID != stableID("event", auditKey) || auditCaseID != reset.CaseID || CaseStatus(fromStatus) != CaseResetArchived || CaseStatus(toStatus) != CaseResetArchived || actorType != "studio" || actorID != "orchestrator" {
+		return unknown()
+	}
+	if _, err := parseStoreTime(createdAt); err != nil {
+		return unknown()
+	}
+	var payload struct {
+		AttemptID   string `json:"attempt_id"`
+		Outcome     string `json:"outcome"`
+		WarningCode string `json:"warning_code"`
+	}
+	if json.Unmarshal([]byte(payloadJSON), &payload) != nil || payload.AttemptID != reset.AttemptID {
+		return unknown()
+	}
+	status, outcome := ResetCancellationClaimed, ""
+	expectedPayload := map[string]string{"attempt_id": reset.AttemptID}
+	switch {
+	case auditType == "reset_runner_cancel_succeeded" && payload.Outcome == "succeeded" && payload.WarningCode == "":
+		status, outcome = ResetCancellationSucceeded, "succeeded"
+		expectedPayload["outcome"] = "succeeded"
+	case auditType == "reset_runner_cancel_failed" && payload.Outcome == "failed" && payload.WarningCode == "reset_runner_cancel_failed":
+		status, outcome = ResetCancellationFailed, "runner_cancel_failed"
+		expectedPayload["outcome"] = "failed"
+		expectedPayload["warning_code"] = "reset_runner_cancel_failed"
+	default:
+		return unknown()
+	}
+	expectedPayloadJSON, err := json.Marshal(expectedPayload)
+	if err != nil || payloadJSON != string(expectedPayloadJSON) {
+		return unknown()
+	}
+	fingerprintMaterial, err := json.Marshal(struct {
+		CaseID      string          `json:"case_id"`
+		Key         string          `json:"key"`
+		EventType   string          `json:"event_type"`
+		ActorType   string          `json:"actor_type"`
+		ActorID     string          `json:"actor_id"`
+		PayloadJSON json.RawMessage `json:"payload_json"`
+	}{reset.CaseID, auditKey, auditType, actorType, actorID, json.RawMessage(payloadJSON)})
+	if err != nil {
+		return unknown()
+	}
+	digest := sha256.Sum256(fingerprintMaterial)
+	if requestFingerprint != hex.EncodeToString(digest[:]) {
+		return unknown()
+	}
+	storedArchived, err := getCase(ctx, tx, reset.CaseID)
+	if err != nil {
+		return "", "", err
+	}
+	expectedResultJSON, err := json.Marshal(storedArchived)
+	if err != nil {
+		return "", "", err
+	}
+	resetArchivedJSON, err := json.Marshal(reset.Archived)
+	if err != nil {
+		return "", "", err
+	}
+	var decodedResult IncidentCase
+	if json.Unmarshal([]byte(resultJSON), &decodedResult) != nil || !bytes.Equal([]byte(resultJSON), expectedResultJSON) || !bytes.Equal(resetArchivedJSON, expectedResultJSON) {
+		return unknown()
+	}
+	return status, outcome, nil
 }
 
 func verifyWorkflowSchemaMarker(ctx context.Context, tx *sql.Tx, expectedVersion int) error {

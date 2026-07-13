@@ -2,7 +2,9 @@ package bughub
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -231,6 +233,80 @@ func TestWorkflowSchemaV7BackfillsCommittedV6ResetCancellationWithoutRepeatingRu
 	}
 }
 
+func TestWorkflowSchemaV7DowngradesTamperedV6ResetCancellationAuditToUnknown(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		query string
+		value any
+	}{
+		{name: "event ID", query: `UPDATE transition_events SET id=? WHERE idempotency_key='legacy-reset-key:runner-cancel'`, value: "tampered-audit-id"},
+		{name: "archive status", query: `UPDATE transition_events SET from_status=? WHERE idempotency_key='legacy-reset-key:runner-cancel'`, value: CaseFixing},
+		{name: "request fingerprint", query: `UPDATE transition_events SET request_fingerprint=? WHERE idempotency_key='legacy-reset-key:runner-cancel'`, value: strings.Repeat("b", 64)},
+		{name: "result snapshot", query: `UPDATE transition_events SET result_case_json=? WHERE idempotency_key='legacy-reset-key:runner-cancel'`, value: `{}`},
+		{name: "created timestamp", query: `UPDATE transition_events SET created_at=? WHERE idempotency_key='legacy-reset-key:runner-cancel'`, value: "not-a-time"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path, command, fingerprint := createV6CommittedResetFixture(t, "reset_runner_cancel_succeeded", `{"attempt_id":"legacy-reset-attempt","outcome":"succeeded"}`)
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(test.query, test.value); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			store, err := OpenCaseStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			operation, found, err := store.GetResetCancellationOperation(context.Background(), command.IdempotencyKey, fingerprint)
+			if err != nil || !found || operation.Status != ResetCancellationClaimed || operation.OutcomeCode != "" {
+				t.Fatalf("operation=%+v found=%v err=%v", operation, found, err)
+			}
+		})
+	}
+	t.Run("payload extension with matching fingerprint", func(t *testing.T) {
+		path, command, fingerprint := createV6CommittedResetFixture(t, "reset_runner_cancel_succeeded", `{"attempt_id":"legacy-reset-attempt","outcome":"succeeded"}`)
+		auditKey := command.IdempotencyKey + ":runner-cancel"
+		payload := `{"attempt_id":"legacy-reset-attempt","outcome":"succeeded","extra":"tampered"}`
+		material, err := json.Marshal(struct {
+			CaseID      string          `json:"case_id"`
+			Key         string          `json:"key"`
+			EventType   string          `json:"event_type"`
+			ActorType   string          `json:"actor_type"`
+			ActorID     string          `json:"actor_id"`
+			PayloadJSON json.RawMessage `json:"payload_json"`
+		}{command.CaseID, auditKey, "reset_runner_cancel_succeeded", "studio", "orchestrator", json.RawMessage(payload)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(material)
+		db, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE transition_events SET payload_json=?,request_fingerprint=? WHERE idempotency_key=?`, payload, hex.EncodeToString(digest[:]), auditKey); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		store, err := OpenCaseStore(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		operation, found, err := store.GetResetCancellationOperation(context.Background(), command.IdempotencyKey, fingerprint)
+		if err != nil || !found || operation.Status != ResetCancellationClaimed {
+			t.Fatalf("operation=%+v found=%v err=%v", operation, found, err)
+		}
+	})
+}
+
 func TestWorkflowSchemaV7SkipsCommittedV6ResetWithoutCancelledAttempt(t *testing.T) {
 	path, command, fingerprint := createV6CommittedResetFixture(t, "", "")
 	db, err := sql.Open("sqlite", path)
@@ -327,6 +403,10 @@ func createV6CommittedResetFixture(t *testing.T, auditType, auditPayload string)
 	if err := store.CreateCase(context.Background(), replacement); err != nil {
 		t.Fatal(err)
 	}
+	archived, err = store.GetCase(context.Background(), archived.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	finishedAt := now
 	attempt := PhaseAttempt{ID: "legacy-reset-attempt", CaseID: archived.ID, CycleNumber: 1, Phase: PhaseFix, Status: AttemptStatusCancelled, AgentTarget: "codex", BotKey: archived.SelectedBotKey, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`), StartedAt: now.Add(-time.Minute), FinishedAt: &finishedAt}
 	if err := store.CreateAttempt(context.Background(), attempt); err != nil {
@@ -346,7 +426,24 @@ func createV6CommittedResetFixture(t *testing.T, auditType, auditPayload string)
 		t.Fatal(err)
 	}
 	if auditType != "" {
-		if _, err := db.Exec(`INSERT INTO transition_events (id,case_id,from_status,to_status,event_type,actor_type,actor_id,idempotency_key,payload_json,created_at,request_fingerprint,result_case_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, "legacy-reset-audit", archived.ID, CaseResetArchived, CaseResetArchived, auditType, "studio", "orchestrator", command.IdempotencyKey+":runner-cancel", auditPayload, formatStoreTime(now), strings.Repeat("a", 64), string(resultJSON)); err != nil {
+		auditKey := command.IdempotencyKey + ":runner-cancel"
+		fingerprintMaterial, err := json.Marshal(struct {
+			CaseID      string          `json:"case_id"`
+			Key         string          `json:"key"`
+			EventType   string          `json:"event_type"`
+			ActorType   string          `json:"actor_type"`
+			ActorID     string          `json:"actor_id"`
+			PayloadJSON json.RawMessage `json:"payload_json"`
+		}{archived.ID, auditKey, auditType, "studio", "orchestrator", json.RawMessage(auditPayload)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(fingerprintMaterial)
+		auditResultJSON, err := json.Marshal(archived)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO transition_events (id,case_id,from_status,to_status,event_type,actor_type,actor_id,idempotency_key,payload_json,created_at,request_fingerprint,result_case_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, stableID("event", auditKey), archived.ID, CaseResetArchived, CaseResetArchived, auditType, "studio", "orchestrator", auditKey, auditPayload, formatStoreTime(now), hex.EncodeToString(digest[:]), string(auditResultJSON)); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -636,7 +636,19 @@ func (a *App) StartIncidentCase(input StartIncidentCaseInput) (bughub.IncidentCa
 
 func (a *App) ResetIncidentCase(input ResetIncidentCaseInput) (bughub.IncidentCase, error) {
 	result, err := a.resetIncidentCaseWithWarnings(input)
+	if err == nil && workflowWarningCodePresent(result.Warnings, "reset_replacement_start_failed") {
+		err = errors.New("replacement Case phase start failed; retry validation from the preserved Case")
+	}
 	return result.Case, err
+}
+
+func workflowWarningCodePresent(warnings []bughub.WorkflowWarning, code string) bool {
+	for _, warning := range warnings {
+		if warning.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 // ResetIncidentCaseWithWarnings is the structured desktop binding used by the

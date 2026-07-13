@@ -98,6 +98,8 @@ async function onPrimaryCardClick(card: { path: string; label: string }) {
 const primaryCards = [
   { path: '/init', icon: '🧙', label: '创建向导', desc: '一步步带你创建一个新的排障机器人', tag: '推荐新用户' },
   { path: '/bots', icon: '🤖', label: '已装机器人', desc: '管理已部署的机器人,新建 / 重部 / 卸载' },
+  { path: '/bugs', icon: '🐞', label: 'Bug 工单', desc: '同步工单平台，查看完整 Bug 详情' },
+  { path: '/incidents', icon: '🔁', label: '故障闭环', desc: '选择 Bug，完成验证、排障、修复和回归' },
 ]
 // 诊断工具:YAML 沙盒 + 代码扫描。两者职责对齐(2026-04-30):
 //   YAML 沙盒  → 操作 yaml 文件(验证/生成预览/产物预览)
@@ -178,9 +180,11 @@ const nextStep = computed(() => {
     <h2 class="section-title">主路径</h2>
     <p class="section-hint">典型流:创建 yaml → 编辑 / 生成 → 导入或部署到机器人。每个页面可独立使用。</p>
     <div class="nav-card-grid">
-      <div
+      <button
         v-for="(c, i) in primaryCards"
         :key="c.path"
+        type="button"
+        :data-path="c.path"
         class="nav-card primary"
         @click="onPrimaryCardClick(c)"
       >
@@ -197,20 +201,20 @@ const nextStep = computed(() => {
             · 已有草稿(第 {{ draftStepNormalized }} / {{ WIZARD_TOTAL_STEPS }} 步)
           </span>
         </div>
-      </div>
+      </button>
     </div>
 
     <!-- 高级 / 诊断:折叠入口弱化,避免跟主路径抢视觉焦点 -->
     <h2 class="section-title secondary">高级 · 诊断</h2>
     <p class="section-hint">辅助工具:YAML 沙盒(yaml 文件验证/预览)、代码扫描(从代码反推配置,可应用回 yaml)。</p>
     <div class="nav-card-grid compact">
-      <div v-for="c in advancedCards" :key="c.path" class="nav-card advanced" @click="router.push(c.path)">
+      <button v-for="c in advancedCards" :key="c.path" type="button" :data-path="c.path" class="nav-card advanced" @click="router.push(c.path)">
         <div class="nav-card-head">
           <span class="nav-card-icon">{{ c.icon }}</span>
           <span class="nav-card-label">{{ c.label }}</span>
         </div>
         <div class="nav-card-desc">{{ c.desc }}</div>
-      </div>
+      </button>
     </div>
 
     <!-- 快速了解 -->
@@ -320,10 +324,12 @@ const nextStep = computed(() => {
 /* compact:高级/诊断用小一号密度,视觉上让开主路径 */
 .nav-card-grid.compact { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--sp-2); }
 .nav-card {
+  width: 100%; font: inherit; text-align: left;
   border: 1px solid var(--c-line); border-radius: var(--r-lg); padding: var(--sp-3) var(--sp-4);
   background: var(--c-surf); cursor: pointer; transition: all 0.15s;
   display: flex; flex-direction: column; gap: 6px;
 }
+.nav-card:focus-visible { outline: 2px solid var(--c-accent-hover); outline-offset: 2px; }
 .nav-card:hover { border-color: var(--c-accent); box-shadow: 0 2px 6px rgba(59,130,246,0.1); transform: translateY(-1px); }
 /* primary:主路径卡片,边框略深 + hover 动效更明显。 */
 .nav-card.primary { border-color: var(--c-line-2); }

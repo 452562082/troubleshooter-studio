@@ -1,5 +1,6 @@
 import { mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 import {
   approveIncidentFix,
   approveIncidentMerge,
@@ -107,6 +108,21 @@ afterEach(() => {
 })
 
 describe('BugInboxPage', () => {
+  it.each([375, 768, 1024, 1440])('advertises an overflow-safe responsive contract at %dpx', async width => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: width })
+    const wrapper = await mountedInbox()
+    const root = wrapper.get('.bug-inbox-page')
+
+    expect(root.attributes('data-responsive-viewports')).toBe('375,768,1024,1440')
+    expect(root.attributes('data-overflow-safe')).toBe('true')
+
+    const source = readFileSync('src/pages/BugInboxPage.vue', 'utf8')
+    expect(source).toMatch(/\.bug-inbox-page \{[^}]*min-width: 0;/)
+    expect(source).toMatch(/\.inbox-workspace \{[^}]*grid-template-columns: minmax\(250px, 330px\) minmax\(0, 1fr\)/)
+    expect(source).toMatch(/@media \(max-width: 900px\)[\s\S]*?\.inbox-workspace \{ grid-template-columns: minmax\(0, 1fr\); \}/)
+    wrapper.unmount()
+  })
+
   it('is a browse-only inbox and opens the selected ticket in the incident route', async () => {
     vi.mocked(listBugs).mockResolvedValue([bug])
     const wrapper = await mountedInbox()

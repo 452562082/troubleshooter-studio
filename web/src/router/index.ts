@@ -16,7 +16,12 @@ const router = createRouter({
     {
       path: '/bugs',
       name: 'Bugs',
-      component: () => import('../pages/BugWorkbenchPage.vue'),
+      component: () => import('../pages/BugInboxPage.vue'),
+    },
+    {
+      path: '/incidents',
+      name: 'Incidents',
+      component: () => import('../pages/IncidentWorkbenchPage.vue'),
     },
     {
       path: '/init',

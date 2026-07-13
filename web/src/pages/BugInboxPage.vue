@@ -658,7 +658,7 @@ function escapeRegExp(value: string): string {
 </script>
 
 <template>
-  <div class="bug-inbox-page">
+  <div class="bug-inbox-page" data-responsive-viewports="375,768,1024,1440" data-overflow-safe="true">
     <header class="bug-header">
       <div>
         <h1>Bug 工单</h1>

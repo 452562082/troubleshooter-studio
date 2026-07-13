@@ -72,7 +72,8 @@ const { count: logCount } = useLogStore()
 const navItems = [
   { path: '/', icon: '🏠', label: '首页', desc: '概览 + 下一步推荐' },
   { path: '/bots', icon: '🤖', label: '已装机器人', desc: '管理已部署机器人,可重部 / 卸载' },
-  { path: '/bugs', icon: '🐞', label: 'Bug 工单', desc: '接入工单平台,选择机器人排障' },
+  { path: '/bugs', icon: '🐞', label: 'Bug 工单', desc: '同步工单平台，查看完整 Bug 详情' },
+  { path: '/incidents', icon: '🔁', label: '故障闭环', desc: '选择 Bug，完成验证、排障、修复和回归' },
   { path: '/init', icon: '🧙', label: '创建向导', desc: '一步步创建一个新机器人' },
   // ── 诊断工具(下面几项) ──
   { path: '/editor', icon: '📝', label: 'YAML 沙盒', desc: '验证 yaml + 干跑生成 + 预览产物' },
@@ -124,7 +125,7 @@ const navItems = [
            最新 localStorage → 拿到正确状态(干净 / 草稿)。重 mount 的代价 ms 级,可接受。 -->
       <router-view v-slot="{ Component, route }">
         <keep-alive :exclude="['InitPage']">
-          <component :is="Component" :key="route.path === '/init' ? route.fullPath : undefined" />
+          <component :is="Component" :key="route.path === '/init' ? route.fullPath : route.path" />
         </keep-alive>
       </router-view>
     </main>

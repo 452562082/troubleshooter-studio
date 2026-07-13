@@ -148,6 +148,22 @@ afterEach(() => {
 })
 
 describe('IncidentWorkbenchPage', () => {
+  it.each([375, 768, 1024, 1440])('advertises an overflow-safe responsive contract at %dpx', async width => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: width })
+    const wrapper = await mountedPage()
+    const root = wrapper.get('.incident-workbench-page')
+
+    expect(root.attributes('data-responsive-viewports')).toBe('375,768,1024,1440')
+    expect(root.attributes('data-overflow-safe')).toBe('true')
+
+    const source = readFileSync('src/pages/IncidentWorkbenchPage.vue', 'utf8')
+    expect(source).toMatch(/\.incident-workbench-page \{[^}]*min-width: 0;/)
+    expect(source).toMatch(/\.selection-workspace \{[^}]*grid-template-columns: minmax\(220px, \.8fr\)/)
+    expect(source).toMatch(/@media \(max-width: 700px\)[\s\S]*?\.selection-workspace \{ grid-template-columns: minmax\(0, 1fr\); \}/)
+    expect(source).toMatch(/\.reset-dialog footer \.btn \{[^}]*min-height: 44px;/)
+    wrapper.unmount()
+  })
+
   it('restores the exact bug_id from the route without guessing', async () => {
     route.query = { bug_id: 'bug-b' }
     vi.mocked(listBugs).mockResolvedValue([bugA, bugB])

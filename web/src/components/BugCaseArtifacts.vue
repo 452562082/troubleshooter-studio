@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import type { IncidentCaseDetail, PhaseAttempt } from '../lib/bridge/bugWorkflow'
 import BugStageAttemptOutput from './BugStageAttemptOutput.vue'
 
@@ -9,6 +9,7 @@ const emit = defineEmits<{ 'select-case': [caseID: string] }>()
 const investigation = computed(() => [...props.detail.attempts].reverse().find(item => item.phase === 'investigation'))
 const currentAttempts = computed(() => props.detail.attempts.filter(item => item.phase !== 'legacy'))
 const latestCurrentAttemptID = computed(() => currentAttempts.value[currentAttempts.value.length - 1]?.id || '')
+const attemptOutputScroll = ref<HTMLElement | null>(null)
 const legacyProjection = computed(() => props.detail.attempts.filter(attempt => attempt.phase === 'legacy').map(attempt => {
   const output = attempt.output_json || {}
   const events = Array.isArray(output.events) ? output.events.flatMap(event => {
@@ -96,6 +97,18 @@ function limitedMarkdown(value: string): MarkdownBlock[] {
   }
   return blocks
 }
+
+async function followLatestStageOutput(): Promise<void> {
+  await nextTick()
+  const viewport = attemptOutputScroll.value
+  if (viewport) viewport.scrollTop = viewport.scrollHeight
+}
+
+watch(
+  () => [props.detail.case.id, props.detail.attempts],
+  followLatestStageOutput,
+  { immediate: true, deep: true },
+)
 </script>
 
 <template>
@@ -134,7 +147,7 @@ function limitedMarkdown(value: string): MarkdownBlock[] {
 
     <section class="artifact-card attempt-output-card" aria-labelledby="attempt-output-title">
       <h3 id="attempt-output-title">阶段输出</h3>
-      <div class="attempt-output-scroll" role="region" aria-label="阶段输出内容" tabindex="0" aria-live="polite" aria-relevant="additions text">
+      <div ref="attemptOutputScroll" class="attempt-output-scroll" role="region" aria-label="阶段输出内容" aria-live="polite" aria-relevant="additions text" tabindex="0">
         <p v-if="detail.attempts.length === 0" class="empty-copy">尚无阶段输出</p>
         <BugStageAttemptOutput
           v-for="attempt in currentAttempts"

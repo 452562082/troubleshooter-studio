@@ -1,8 +1,10 @@
 import { mount } from '@vue/test-utils'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { IncidentCaseDetail } from '../lib/bridge/bugWorkflow'
 import BugCaseArtifacts from './BugCaseArtifacts.vue'
 import artifactSource from './BugCaseArtifacts.vue?raw'
+
+afterEach(() => vi.restoreAllMocks())
 
 const detail: IncidentCaseDetail = {
   case: { id: 'case-1', bug_id: 'bug-1', source: 'zentao', system_id: 'base', environment: 'test', status: 'waiting_deployment', cycle_number: 1, current_attempt_id: 'fix-1', selected_bot_key: 'base|codex', version: 9, created_at: '', updated_at: '' },
@@ -48,6 +50,44 @@ describe('BugCaseArtifacts', () => {
     expect(artifactSource).toMatch(/\.attempt-output-scroll \{[^}]*scrollbar-gutter: stable;/)
     expect(artifactSource).toMatch(/\.attempt-output-scroll \{[^}]*overscroll-behavior: contain;/)
     expect(artifactSource).toContain('.attempt-output-scroll:focus-visible')
+  })
+
+  it('scrolls the stage viewport to the bottom initially and after nested attempt updates', async () => {
+    vi.spyOn(Element.prototype, 'scrollHeight', 'get').mockReturnValue(640)
+    const pageScroll = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined)
+    const scrollIntoView = vi.spyOn(HTMLElement.prototype, 'scrollIntoView').mockImplementation(() => undefined)
+
+    const wrapper = mount(BugCaseArtifacts, { props: { detail } })
+    await wrapper.vm.$nextTick()
+    await wrapper.vm.$nextTick()
+    const viewport = wrapper.get<HTMLElement>('.attempt-output-scroll').element
+    expect(viewport.scrollTop).toBe(640)
+
+    viewport.scrollTop = 120
+    const appended = { ...detail.attempts[0], id: 'investigate-2', status: 'failed' as const, output_json: { summary: '新的阶段结论' }, error_message: '新错误' }
+    await wrapper.setProps({ detail: { ...detail, attempts: [...detail.attempts, appended] } })
+    await wrapper.vm.$nextTick()
+    await wrapper.vm.$nextTick()
+    expect(viewport.scrollTop).toBe(640)
+    expect(scrollIntoView).not.toHaveBeenCalled()
+    expect(pageScroll).not.toHaveBeenCalled()
+  })
+
+  it('follows a switched Case and does not reset scrolling without a data change', async () => {
+    vi.spyOn(Element.prototype, 'scrollHeight', 'get').mockReturnValue(480)
+    const wrapper = mount(BugCaseArtifacts, { props: { detail } })
+    await wrapper.vm.$nextTick()
+    await wrapper.vm.$nextTick()
+    const viewport = wrapper.get<HTMLElement>('.attempt-output-scroll').element
+
+    viewport.scrollTop = 90
+    await wrapper.vm.$nextTick()
+    expect(viewport.scrollTop).toBe(90)
+
+    await wrapper.setProps({ detail: { ...detail, case: { ...detail.case, id: 'case-2' } } })
+    await wrapper.vm.$nextTick()
+    await wrapper.vm.$nextTick()
+    expect(viewport.scrollTop).toBe(480)
   })
 
   it('renders current attempts as semantic history with only the latest expanded', () => {

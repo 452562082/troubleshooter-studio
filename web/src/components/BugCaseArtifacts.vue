@@ -129,33 +129,35 @@ function limitedMarkdown(value: string): MarkdownBlock[] {
       <pre>{{ rootCause(investigation) }}</pre>
     </section>
 
-    <section class="artifact-card" aria-labelledby="attempt-output-title">
+    <section class="artifact-card attempt-output-card" aria-labelledby="attempt-output-title">
       <h3 id="attempt-output-title">阶段输出</h3>
-      <p v-if="detail.attempts.length === 0" class="empty-copy">尚无阶段输出</p>
-      <article v-for="attempt in detail.attempts.filter(item => item.phase !== 'legacy')" :key="attempt.id" class="artifact-item">
-        <strong>{{ attempt.phase }} · {{ attempt.status }}</strong>
-        <span v-if="attempt.error_message">{{ attempt.error_message }}</span>
-        <pre>{{ displayJSON(attempt.output_json) }}</pre>
-      </article>
-      <article v-for="projection in legacyProjection" :key="projection.attempt.id" class="artifact-item legacy-attempt">
-        <strong>历史运行 · {{ projection.attempt.status }}</strong>
-        <div v-if="projection.events.length" class="legacy-events" role="log" aria-label="历史运行事件">
-          <p v-for="(event, index) in projection.events" :key="`${event.type}-${index}`"><span>{{ event.type }}</span>{{ event.message }}</p>
-        </div>
-        <article v-if="projection.finalBlocks.length" class="legacy-final">
-          <template v-for="(block, blockIndex) in projection.finalBlocks" :key="blockIndex">
-            <h4 v-if="block.kind === 'heading'">
-              <template v-for="(token, tokenIndex) in block.tokens" :key="tokenIndex"><strong v-if="token.kind === 'strong'">{{ token.text }}</strong><code v-else-if="token.kind === 'code'">{{ token.text }}</code><template v-else>{{ token.text }}</template></template>
-            </h4>
-            <ul v-else-if="block.kind === 'list'">
-              <li v-for="(item, itemIndex) in block.items" :key="itemIndex"><template v-for="(token, tokenIndex) in item" :key="tokenIndex"><strong v-if="token.kind === 'strong'">{{ token.text }}</strong><code v-else-if="token.kind === 'code'">{{ token.text }}</code><template v-else>{{ token.text }}</template></template></li>
-            </ul>
-            <pre v-else-if="block.kind === 'code'"><code>{{ block.text }}</code></pre>
-            <p v-else><template v-for="(token, tokenIndex) in block.tokens" :key="tokenIndex"><strong v-if="token.kind === 'strong'">{{ token.text }}</strong><code v-else-if="token.kind === 'code'">{{ token.text }}</code><template v-else>{{ token.text }}</template></template></p>
-          </template>
+      <div class="attempt-output-scroll" role="region" aria-label="阶段输出内容" tabindex="0">
+        <p v-if="detail.attempts.length === 0" class="empty-copy">尚无阶段输出</p>
+        <article v-for="attempt in detail.attempts.filter(item => item.phase !== 'legacy')" :key="attempt.id" class="artifact-item">
+          <strong>{{ attempt.phase }} · {{ attempt.status }}</strong>
+          <span v-if="attempt.error_message">{{ attempt.error_message }}</span>
+          <pre>{{ displayJSON(attempt.output_json) }}</pre>
         </article>
-        <p v-if="projection.attempt.error_message" class="legacy-error">{{ projection.attempt.error_message }}</p>
-      </article>
+        <article v-for="projection in legacyProjection" :key="projection.attempt.id" class="artifact-item legacy-attempt">
+          <strong>历史运行 · {{ projection.attempt.status }}</strong>
+          <div v-if="projection.events.length" class="legacy-events" role="log" aria-label="历史运行事件">
+            <p v-for="(event, index) in projection.events" :key="`${event.type}-${index}`"><span>{{ event.type }}</span>{{ event.message }}</p>
+          </div>
+          <article v-if="projection.finalBlocks.length" class="legacy-final">
+            <template v-for="(block, blockIndex) in projection.finalBlocks" :key="blockIndex">
+              <h4 v-if="block.kind === 'heading'">
+                <template v-for="(token, tokenIndex) in block.tokens" :key="tokenIndex"><strong v-if="token.kind === 'strong'">{{ token.text }}</strong><code v-else-if="token.kind === 'code'">{{ token.text }}</code><template v-else>{{ token.text }}</template></template>
+              </h4>
+              <ul v-else-if="block.kind === 'list'">
+                <li v-for="(item, itemIndex) in block.items" :key="itemIndex"><template v-for="(token, tokenIndex) in item" :key="tokenIndex"><strong v-if="token.kind === 'strong'">{{ token.text }}</strong><code v-else-if="token.kind === 'code'">{{ token.text }}</code><template v-else>{{ token.text }}</template></template></li>
+              </ul>
+              <pre v-else-if="block.kind === 'code'"><code>{{ block.text }}</code></pre>
+              <p v-else><template v-for="(token, tokenIndex) in block.tokens" :key="tokenIndex"><strong v-if="token.kind === 'strong'">{{ token.text }}</strong><code v-else-if="token.kind === 'code'">{{ token.text }}</code><template v-else>{{ token.text }}</template></template></p>
+            </template>
+          </article>
+          <p v-if="projection.attempt.error_message" class="legacy-error">{{ projection.attempt.error_message }}</p>
+        </article>
+      </div>
     </section>
 
     <section class="artifact-card" aria-labelledby="changes-title">
@@ -193,7 +195,18 @@ function limitedMarkdown(value: string): MarkdownBlock[] {
 </template>
 
 <style scoped>
-.artifact-sections { display: grid; gap: var(--sp-3); min-width: 0; }
+.artifact-sections { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: var(--sp-3); min-width: 0; }
+.attempt-output-card { grid-column: 1 / -1; }
+.attempt-output-scroll {
+  height: clamp(320px, 45vh, 640px);
+  min-width: 0;
+  padding-right: var(--sp-1);
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.attempt-output-scroll:focus-visible { outline: 3px solid rgba(37, 99, 235, .55); outline-offset: 2px; border-radius: var(--r-md); }
 .artifact-card { min-width: 0; border: 1px solid var(--c-line); border-radius: var(--r-lg); background: var(--c-surf); padding: var(--sp-3); }
 .artifact-card h3 { margin: 0 0 var(--sp-2); color: var(--c-ink); font-size: var(--fs-base); }
 .artifact-item { display: grid; gap: 4px; min-width: 0; padding: 9px 0; border-top: 1px solid var(--c-line); color: var(--c-text); font-size: var(--fs-sm); }
@@ -220,4 +233,9 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .reset-relations a { color: var(--c-accent-hover); font-size: var(--fs-sm); font-weight: 600; }
 .reset-relations a:focus-visible { outline: 3px solid rgba(37, 99, 235, .55); outline-offset: 2px; }
 .reset-relations p { margin: var(--sp-2) 0 0; color: var(--c-muted); font-size: var(--fs-xs); line-height: 1.5; }
+@media (max-width: 899px) {
+  .artifact-sections { grid-template-columns: minmax(0, 1fr); }
+  .attempt-output-card { grid-column: auto; }
+  .attempt-output-scroll { height: clamp(280px, 42vh, 480px); }
+}
 </style>

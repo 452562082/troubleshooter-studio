@@ -2,6 +2,7 @@ import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
 import type { IncidentCaseDetail } from '../lib/bridge/bugWorkflow'
 import BugCaseArtifacts from './BugCaseArtifacts.vue'
+import artifactSource from './BugCaseArtifacts.vue?raw'
 
 const detail: IncidentCaseDetail = {
   case: { id: 'case-1', bug_id: 'bug-1', source: 'zentao', system_id: 'base', environment: 'test', status: 'waiting_deployment', cycle_number: 1, current_attempt_id: 'fix-1', selected_bot_key: 'base|codex', version: 9, created_at: '', updated_at: '' },
@@ -29,6 +30,26 @@ describe('BugCaseArtifacts', () => {
     expect(wrapper.text()).toContain('commit_mismatch')
   })
 
+  it('keeps the stage title outside a responsive keyboard-scrollable output region', () => {
+    const wrapper = mount(BugCaseArtifacts, { props: { detail } })
+    const card = wrapper.get('.attempt-output-card')
+    const scroll = card.get('.attempt-output-scroll')
+
+    expect(card.get(':scope > h3').text()).toBe('阶段输出')
+    expect(scroll.attributes('role')).toBe('region')
+    expect(scroll.attributes('aria-label')).toBe('阶段输出内容')
+    expect(scroll.attributes('tabindex')).toBe('0')
+    expect(scroll.findAll('.artifact-item')).toHaveLength(detail.attempts.length)
+    expect(artifactSource).toMatch(/\.artifact-sections \{[^}]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);/)
+    expect(artifactSource).toMatch(/\.attempt-output-card \{[^}]*grid-column: 1 \/ -1;/)
+    expect(artifactSource).toMatch(/\.attempt-output-scroll \{[^}]*height: clamp\(320px, 45vh, 640px\);/)
+    expect(artifactSource).toMatch(/\.attempt-output-scroll \{[^}]*overflow-y: auto;/)
+    expect(artifactSource).toMatch(/\.attempt-output-scroll \{[^}]*overflow-x: hidden;/)
+    expect(artifactSource).toMatch(/\.attempt-output-scroll \{[^}]*scrollbar-gutter: stable;/)
+    expect(artifactSource).toMatch(/\.attempt-output-scroll \{[^}]*overscroll-behavior: contain;/)
+    expect(artifactSource).toContain('.attempt-output-scroll:focus-visible')
+  })
+
   it('keeps imported legacy attempt output readable', () => {
     const archived = {
       ...detail,
@@ -40,6 +61,14 @@ describe('BugCaseArtifacts', () => {
     expect(wrapper.find('.legacy-final strong').text()).toBe('旧排障结论')
     expect(wrapper.text()).toContain('检查 Redis 命中率')
     expect(wrapper.find('.legacy-attempt > pre').exists()).toBe(false)
+    expect(wrapper.get('.attempt-output-scroll').find('.legacy-attempt').exists()).toBe(true)
+    expect(wrapper.get('.attempt-output-card > h3').text()).toBe('阶段输出')
+  })
+
+  it('stacks artifact cards and scales the output viewport on narrow screens', () => {
+    expect(artifactSource).toMatch(/@media \(max-width: 899px\)[\s\S]*?\.artifact-sections \{ grid-template-columns: minmax\(0, 1fr\); \}/)
+    expect(artifactSource).toMatch(/@media \(max-width: 899px\)[\s\S]*?\.attempt-output-card \{ grid-column: auto; \}/)
+    expect(artifactSource).toMatch(/@media \(max-width: 899px\)[\s\S]*?\.attempt-output-scroll \{ height: clamp\(280px, 42vh, 480px\); \}/)
   })
 
   it('renders hostile legacy Markdown as inert readable text without HTML or executable URLs', () => {

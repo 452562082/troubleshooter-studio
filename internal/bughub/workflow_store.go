@@ -56,13 +56,15 @@ type CaseCreationResult struct {
 // CaseReset identifies one exact request to archive a non-terminal Case and
 // create its pending replacement in the same transaction.
 type CaseReset struct {
-	CaseID          string
-	NewCaseID       string
-	IdempotencyKey  string
-	ActorID         string
-	ExpectedVersion int64
-	SelectedBotKey  string
-	RequestJSON     json.RawMessage
+	CaseID                 string
+	NewCaseID              string
+	IdempotencyKey         string
+	ActorID                string
+	ExpectedVersion        int64
+	SelectedBotKey         string
+	ReplacementBotTarget   string
+	ReplacementEnvironment string
+	RequestJSON            json.RawMessage
 }
 
 // CaseResetResult is the immutable result stored with the reset event. Replay
@@ -777,8 +779,9 @@ func caseCreationFingerprint(creation CaseCreation) (string, error) {
 func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseReset) (result CaseResetResult, err error) {
 	reset.RequestJSON = CloneRawMessage(reset.RequestJSON)
 	if s == nil || s.db == nil || blank(reset.CaseID) || blank(reset.NewCaseID) ||
-		blank(reset.IdempotencyKey) || blank(reset.ActorID) || blank(reset.SelectedBotKey) || reset.ExpectedVersion < 1 {
-		return result, errors.New("Case reset requires store, old and new Case IDs, positive version, idempotency key, actor, and Bot")
+		blank(reset.IdempotencyKey) || blank(reset.ActorID) || blank(reset.SelectedBotKey) ||
+		blank(reset.ReplacementBotTarget) || blank(reset.ReplacementEnvironment) || reset.ExpectedVersion < 1 {
+		return result, errors.New("Case reset requires store, old and new Case IDs, positive version, idempotency key, actor, and replacement Bot binding")
 	}
 	if reset.CaseID == reset.NewCaseID {
 		return result, errors.New("replacement Case ID must differ from archived Case ID")
@@ -899,7 +902,7 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 		BugID:           incident.BugID,
 		Source:          incident.Source,
 		SystemID:        incident.SystemID,
-		Environment:     incident.Environment,
+		Environment:     reset.ReplacementEnvironment,
 		Status:          CasePendingValidation,
 		CycleNumber:     1,
 		SelectedBotKey:  reset.SelectedBotKey,
@@ -1058,14 +1061,16 @@ func (s *CaseStore) CompleteResetCancellation(ctx context.Context, resetKey, fin
 
 func caseResetFingerprint(reset CaseReset) (string, error) {
 	identity := struct {
-		CaseID          string          `json:"case_id"`
-		NewCaseID       string          `json:"new_case_id"`
-		ExpectedVersion int64           `json:"expected_version"`
-		SelectedBotKey  string          `json:"selected_bot_key"`
-		ActorID         string          `json:"actor_id"`
-		IdempotencyKey  string          `json:"idempotency_key"`
-		RequestJSON     json.RawMessage `json:"request_json"`
-	}{reset.CaseID, reset.NewCaseID, reset.ExpectedVersion, reset.SelectedBotKey, reset.ActorID, reset.IdempotencyKey, CloneRawMessage(reset.RequestJSON)}
+		CaseID                 string          `json:"case_id"`
+		NewCaseID              string          `json:"new_case_id"`
+		ExpectedVersion        int64           `json:"expected_version"`
+		SelectedBotKey         string          `json:"selected_bot_key"`
+		ReplacementBotTarget   string          `json:"replacement_bot_target"`
+		ReplacementEnvironment string          `json:"replacement_environment"`
+		ActorID                string          `json:"actor_id"`
+		IdempotencyKey         string          `json:"idempotency_key"`
+		RequestJSON            json.RawMessage `json:"request_json"`
+	}{reset.CaseID, reset.NewCaseID, reset.ExpectedVersion, reset.SelectedBotKey, reset.ReplacementBotTarget, reset.ReplacementEnvironment, reset.ActorID, reset.IdempotencyKey, CloneRawMessage(reset.RequestJSON)}
 	encoded, err := json.Marshal(identity)
 	if err != nil {
 		return "", fmt.Errorf("encode Case reset fingerprint: %w", err)
@@ -1083,11 +1088,13 @@ func caseResetEventPayload(reset CaseReset, result CaseResetResult) (json.RawMes
 	}
 	request = redactResetURLUserinfo(redactSensitiveAny(request))
 	payload, err := json.Marshal(map[string]any{
-		"archived_case_id":     result.Archived.ID,
-		"replacement_case_id":  result.Replacement.ID,
-		"cancelled_attempt_id": result.CancelledAttemptID,
-		"selected_bot_key":     reset.SelectedBotKey,
-		"request":              request,
+		"archived_case_id":        result.Archived.ID,
+		"replacement_case_id":     result.Replacement.ID,
+		"cancelled_attempt_id":    result.CancelledAttemptID,
+		"selected_bot_key":        reset.SelectedBotKey,
+		"replacement_bot_target":  reset.ReplacementBotTarget,
+		"replacement_environment": reset.ReplacementEnvironment,
+		"request":                 request,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode Case reset audit payload: %w", err)

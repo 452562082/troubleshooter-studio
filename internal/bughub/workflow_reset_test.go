@@ -620,7 +620,13 @@ func TestResetCaseWithReplacementIsAtomic(t *testing.T) {
 	if result.Archived.Status != CaseResetArchived || result.Archived.Version != incident.Version+1 || result.Archived.ClosedAt == nil || result.Archived.CurrentAttemptID != "" || result.Archived.SupersededByCaseID != result.Replacement.ID {
 		t.Fatalf("archived=%+v", result.Archived)
 	}
-	if result.Replacement.Status != CasePendingValidation || result.Replacement.Version != 1 || result.Replacement.ResetFromCaseID != incident.ID || result.Replacement.SelectedBotKey != "validator" || result.Replacement.CurrentAttemptID != "" || result.Replacement.ClosedAt != nil {
+	if result.Archived.SelectedBotKey != "original|codex" || result.Archived.Environment != "test" {
+		t.Fatalf("archived binding changed: %+v", result.Archived)
+	}
+	if result.Replacement.SelectedBotKey != "replacement|claude-code" || result.Replacement.Environment != "prod" {
+		t.Fatalf("replacement binding = %+v", result.Replacement)
+	}
+	if result.Replacement.Status != CasePendingValidation || result.Replacement.Version != 1 || result.Replacement.ResetFromCaseID != incident.ID || result.Replacement.CurrentAttemptID != "" || result.Replacement.ClosedAt != nil {
 		t.Fatalf("replacement=%+v", result.Replacement)
 	}
 	storedOld, err := store.GetCase(context.Background(), incident.ID)
@@ -714,6 +720,8 @@ func TestResetCaseWithReplacementReplaysSameReplacement(t *testing.T) {
 		{"actor", func(reset *CaseReset) { reset.ActorID = "bob" }},
 		{"request", func(reset *CaseReset) { reset.RequestJSON = json.RawMessage(`{"reason":"different"}`) }},
 		{"Bot", func(reset *CaseReset) { reset.SelectedBotKey = "different-bot" }},
+		{"Bot target", func(reset *CaseReset) { reset.ReplacementBotTarget = "different-target" }},
+		{"environment", func(reset *CaseReset) { reset.ReplacementEnvironment = "different-environment" }},
 	}
 	for _, conflict := range conflicts {
 		t.Run("fingerprint conflict "+conflict.name, func(t *testing.T) {
@@ -722,6 +730,34 @@ func TestResetCaseWithReplacementReplaysSameReplacement(t *testing.T) {
 			conflict.mutate(&changed)
 			if _, err := store.ResetCaseWithReplacement(context.Background(), changed); !errors.Is(err, ErrIdempotencyConflict) {
 				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestResetCaseWithReplacementRejectsBlankReplacementBindingWithoutMutation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*CaseReset)
+	}{
+		{name: "Bot target", mutate: func(reset *CaseReset) { reset.ReplacementBotTarget = "" }},
+		{name: "environment", mutate: func(reset *CaseReset) { reset.ReplacementEnvironment = "" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := openTestCaseStore(t)
+			incident, _ := prepareResetCase(t, store, "case-reset-blank-"+strings.ReplaceAll(test.name, " ", "-"))
+			command := resetCommand(incident, incident.ID+"-next", "reset-blank-"+test.name)
+			test.mutate(&command)
+			before := resetDatabaseEffectsSnapshot(t, store)
+
+			if _, err := store.ResetCaseWithReplacement(context.Background(), command); err == nil {
+				t.Fatal("blank replacement binding succeeded")
+			}
+
+			after := resetDatabaseEffectsSnapshot(t, store)
+			if !reflect.DeepEqual(before, after) {
+				t.Fatalf("rejected reset changed database effects:\nbefore=%+v\nafter=%+v", before, after)
 			}
 		})
 	}
@@ -856,6 +892,20 @@ func TestResetCaseWithReplacementSurvivesReopen(t *testing.T) {
 	if err != nil || !replay.Replay || replay.Replacement.ID != first.Replacement.ID || replay.Archived.ID != first.Archived.ID {
 		t.Fatalf("replay=%+v err=%v", replay, err)
 	}
+	archived, err := store.GetCase(context.Background(), incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := store.GetCase(context.Background(), command.NewCaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if archived.SelectedBotKey != "original|codex" || archived.Environment != "test" || archived.SupersededByCaseID != replacement.ID {
+		t.Fatalf("reopened archived Case=%+v", archived)
+	}
+	if replacement.SelectedBotKey != "replacement|claude-code" || replacement.Environment != "prod" || replacement.ResetFromCaseID != archived.ID {
+		t.Fatalf("reopened replacement Case=%+v", replacement)
+	}
 }
 
 func TestResetCaseWithReplacementRedactsStoredRequest(t *testing.T) {
@@ -888,6 +938,13 @@ func TestResetCaseWithReplacementRedactsStoredRequest(t *testing.T) {
 		if err := rows.Scan(&payload, &fingerprint, &result); err != nil {
 			t.Fatal(err)
 		}
+		var audit map[string]any
+		if err := json.Unmarshal([]byte(payload), &audit); err != nil {
+			t.Fatal(err)
+		}
+		if audit["replacement_bot_target"] != command.ReplacementBotTarget || audit["replacement_environment"] != command.ReplacementEnvironment {
+			t.Fatalf("reset audit binding=%+v", audit)
+		}
 		stored := payload + fingerprint + result
 		for _, secret := range secrets {
 			if strings.Contains(stored, secret) {
@@ -903,7 +960,7 @@ func TestResetCaseWithReplacementRedactsStoredRequest(t *testing.T) {
 func prepareResetCase(t *testing.T, store *CaseStore, caseID string) (IncidentCase, PhaseAttempt) {
 	t.Helper()
 	incident := createWorkflowCase(t, store, caseID, CaseFixing)
-	attempt := PhaseAttempt{ID: caseID + "-attempt", CaseID: caseID, CycleNumber: incident.CycleNumber, Phase: PhaseFix, Status: AttemptStatusRunning, AgentTarget: "codex", BotKey: "validator", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`), StartedAt: time.Now().UTC()}
+	attempt := PhaseAttempt{ID: caseID + "-attempt", CaseID: caseID, CycleNumber: incident.CycleNumber, Phase: PhaseFix, Status: AttemptStatusRunning, AgentTarget: "codex", BotKey: "original|codex", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`), StartedAt: time.Now().UTC()}
 	if err := store.CreateAttempt(context.Background(), attempt); err != nil {
 		t.Fatal(err)
 	}
@@ -924,7 +981,17 @@ func prepareResetCase(t *testing.T, store *CaseStore, caseID string) (IncidentCa
 }
 
 func resetCommand(incident IncidentCase, newCaseID, key string) CaseReset {
-	return CaseReset{CaseID: incident.ID, NewCaseID: newCaseID, ExpectedVersion: incident.Version, IdempotencyKey: key, ActorID: "alice", SelectedBotKey: "validator", RequestJSON: json.RawMessage(`{"reason":"retry from validation"}`)}
+	return CaseReset{
+		CaseID:                 incident.ID,
+		NewCaseID:              newCaseID,
+		ExpectedVersion:        incident.Version,
+		IdempotencyKey:         key,
+		ActorID:                "alice",
+		SelectedBotKey:         "replacement|claude-code",
+		ReplacementBotTarget:   "claude-code",
+		ReplacementEnvironment: "prod",
+		RequestJSON:            json.RawMessage(`{"reason":"retry"}`),
+	}
 }
 
 type resetRelatedRecordsSnapshot struct {
@@ -935,11 +1002,12 @@ type resetRelatedRecordsSnapshot struct {
 }
 
 type resetDatabaseSnapshot struct {
-	Cases       [][]string
-	Attempts    [][]string
-	Checkpoints [][]string
-	Events      [][]string
-	Related     resetRelatedRecordsSnapshot
+	Cases                  [][]string
+	Attempts               [][]string
+	Checkpoints            [][]string
+	Events                 [][]string
+	CancellationOperations [][]string
+	Related                resetRelatedRecordsSnapshot
 }
 
 func seedResetRelatedRecords(t *testing.T, store *CaseStore, incident IncidentCase, attempt PhaseAttempt, suffix string) {
@@ -985,6 +1053,8 @@ func resetDatabaseEffectsSnapshot(t *testing.T, store *CaseStore) resetDatabaseS
 		Attempts:    snapshotRows(t, store, `SELECT * FROM phase_attempts ORDER BY id`),
 		Checkpoints: snapshotRows(t, store, `SELECT * FROM fix_checkpoints ORDER BY attempt_id`),
 		Events:      snapshotRows(t, store, `SELECT * FROM transition_events ORDER BY id`),
+		CancellationOperations: snapshotRows(t, store,
+			`SELECT * FROM reset_cancellation_operations ORDER BY reset_key`),
 		Related: resetRelatedRecordsSnapshot{
 			Artifacts:              snapshotRows(t, store, `SELECT * FROM evidence_artifacts ORDER BY id`),
 			Approvals:              snapshotRows(t, store, `SELECT * FROM approvals ORDER BY id`),

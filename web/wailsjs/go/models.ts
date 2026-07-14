@@ -3676,6 +3676,7 @@ export namespace main {
 	    case_id: string;
 	    new_case_id: string;
 	    bot_key: string;
+	    bot_environment?: string;
 	    expected_version: number;
 	    idempotency_key: string;
 	    actor_id: string;
@@ -3690,6 +3691,7 @@ export namespace main {
 	        this.case_id = source["case_id"];
 	        this.new_case_id = source["new_case_id"];
 	        this.bot_key = source["bot_key"];
+	        this.bot_environment = source["bot_environment"];
 	        this.expected_version = source["expected_version"];
 	        this.idempotency_key = source["idempotency_key"];
 	        this.actor_id = source["actor_id"];
@@ -3753,6 +3755,7 @@ export namespace main {
 	    case_id: string;
 	    bug_id?: string;
 	    bot_key?: string;
+	    bot_environment?: string;
 	    expected_version: number;
 	    idempotency_key: string;
 	    actor_id: string;
@@ -3767,6 +3770,7 @@ export namespace main {
 	        this.case_id = source["case_id"];
 	        this.bug_id = source["bug_id"];
 	        this.bot_key = source["bot_key"];
+	        this.bot_environment = source["bot_environment"];
 	        this.expected_version = source["expected_version"];
 	        this.idempotency_key = source["idempotency_key"];
 	        this.actor_id = source["actor_id"];

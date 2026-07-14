@@ -400,6 +400,8 @@ async function confirmReset() {
       idempotency_key: request.idempotencyKey,
       actor_id: 'desktop-user',
       bot_key: request.newBotKey,
+      bot_environment: request.newEnvironment,
+      input_json: { target_environment: request.newEnvironment },
     }))
     const replacement = result.case
     if (!isExpectedResetContext(replacement)) return
@@ -479,7 +481,8 @@ async function startNewCase() {
     toastError('启动故障闭环', error)
     return
   }
-  const roundIdentity = `${bug.id}:${displayedCase.value?.id || 'none'}:${displayedCase.value?.version || 0}:${choice.key}`
+  const selectedEnvironment = choice.bot?.env?.trim() || ''
+  const roundIdentity = `${bug.id}:${displayedCase.value?.id || 'none'}:${displayedCase.value?.version || 0}:${choice.key}:${selectedEnvironment}`
   const actionKey = `start-round:${roundIdentity}`
   let candidateID = startCaseIDs.get(roundIdentity)
   if (!candidateID) {
@@ -494,6 +497,7 @@ async function startNewCase() {
       case_id: candidate,
       bug_id: bug.id,
       bot_key: choice.key,
+      bot_environment: selectedEnvironment,
       expected_version: 0,
       idempotency_key: `start:${candidate}`,
       actor_id: 'desktop-user',
@@ -501,7 +505,7 @@ async function startNewCase() {
         mode: 'reproduce',
         expected_behavior: bug.title || '',
         bug_steps: bug.steps || '',
-        target_environment: choice.bot?.env || '',
+        target_environment: selectedEnvironment,
       },
     }))
     if (!isCurrentBug(initiatingBugID)) return
@@ -575,7 +579,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
       const base = { case_id: incident.id, expected_version: incident.version, idempotency_key: key, actor_id: 'desktop-user' }
       if (payload.kind === 'start_validation') {
         if (!incident.selected_bot_key) throw new Error('当前 Case 没有绑定排障机器人')
-        return startIncidentCase({ ...base, bug_id: incident.bug_id, bot_key: incident.selected_bot_key, input_json: { mode: 'reproduce' } })
+        return startIncidentCase({ ...base, bug_id: incident.bug_id, bot_key: incident.selected_bot_key, bot_environment: incident.environment, input_json: { mode: 'reproduce', target_environment: incident.environment } })
       }
       if (payload.kind === 'supply_evidence' || payload.kind === 'continue_fix') {
         return continueIncidentCase({ ...base, ...continuationForDetail(detail, payload.input || '') })

@@ -497,6 +497,7 @@ describe('IncidentWorkbenchPage', () => {
     expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
       case_id: expect.stringMatching(/^case-bug-a-/),
       bot_key: 'base-prod|codex',
+      bot_environment: 'prod',
       input_json: expect.objectContaining({ target_environment: 'prod' }),
     }))
     expect(resetIncidentCaseWithWarnings).not.toHaveBeenCalled()
@@ -521,6 +522,7 @@ describe('IncidentWorkbenchPage', () => {
 
     expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
       bot_key: 'base|codex',
+      bot_environment: 'test',
       input_json: expect.objectContaining({ target_environment: 'test' }),
     }))
   })
@@ -752,6 +754,8 @@ describe('IncidentWorkbenchPage', () => {
       idempotency_key: expect.stringMatching(/^reset:case-1:v7:/),
       actor_id: 'desktop-user',
       bot_key: 'base-prod|claude-code',
+      bot_environment: 'prod',
+      input_json: expect.objectContaining({ target_environment: 'prod' }),
     }))
     expect(startIncidentCase).not.toHaveBeenCalled()
     expect(continueIncidentCase).not.toHaveBeenCalled()

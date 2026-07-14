@@ -103,8 +103,8 @@ export type IncidentCaseEventPayload = {
 }
 
 interface WorkflowCommandInput { case_id: string; expected_version: number; idempotency_key: string; actor_id: string }
-export interface StartIncidentCaseInput extends WorkflowCommandInput { bug_id?: string; bot_key?: string; input_json?: Record<string, unknown> }
-export interface ResetIncidentCaseInput extends WorkflowCommandInput { new_case_id: string; bot_key: string; input_json?: Record<string, unknown> }
+export interface StartIncidentCaseInput extends WorkflowCommandInput { bug_id?: string; bot_key?: string; bot_environment?: string; input_json?: Record<string, unknown> }
+export interface ResetIncidentCaseInput extends WorkflowCommandInput { new_case_id: string; bot_key: string; bot_environment?: string; input_json?: Record<string, unknown> }
 export interface WorkflowWarning { code: string; message: string }
 export interface ResetIncidentCaseResult { case: IncidentCase; warnings: WorkflowWarning[] }
 export type IncidentWorkflowConflictCode = 'case_version_conflict' | 'idempotency_conflict'

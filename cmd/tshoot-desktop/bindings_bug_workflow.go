@@ -126,6 +126,7 @@ type StartIncidentCaseInput struct {
 	CaseID          string         `json:"case_id"`
 	BugID           string         `json:"bug_id,omitempty"`
 	BotKey          string         `json:"bot_key,omitempty"`
+	BotEnvironment  string         `json:"bot_environment,omitempty"`
 	ExpectedVersion int64          `json:"expected_version"`
 	IdempotencyKey  string         `json:"idempotency_key"`
 	ActorID         string         `json:"actor_id"`
@@ -136,6 +137,7 @@ type ResetIncidentCaseInput struct {
 	CaseID          string         `json:"case_id"`
 	NewCaseID       string         `json:"new_case_id"`
 	BotKey          string         `json:"bot_key"`
+	BotEnvironment  string         `json:"bot_environment,omitempty"`
 	ExpectedVersion int64          `json:"expected_version"`
 	IdempotencyKey  string         `json:"idempotency_key"`
 	ActorID         string         `json:"actor_id"`
@@ -630,7 +632,7 @@ func (a *App) StartIncidentCase(input StartIncidentCaseInput) (bughub.IncidentCa
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
-	inputJSON, err := normalizeWorkflowJSON(input.InputJSON)
+	inputJSON, err := normalizeWorkflowInputEnvironment(input.InputJSON, bot.Env, strings.TrimSpace(input.BotEnvironment) != "")
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
@@ -683,11 +685,11 @@ func (a *App) resetIncidentCaseWithWarnings(input ResetIncidentCaseInput) (bughu
 	if err != nil {
 		return bughub.ResetCaseOutcome{}, err
 	}
-	bug, bot, err := a.loadBugAndBot(original.BugID, strings.TrimSpace(input.BotKey))
+	bug, bot, err := a.loadFreshBugAndBot(original.BugID, strings.TrimSpace(input.BotKey), input.BotEnvironment)
 	if err != nil {
 		return bughub.ResetCaseOutcome{}, err
 	}
-	inputJSON, err := normalizeWorkflowJSON(input.InputJSON)
+	inputJSON, err := normalizeWorkflowInputEnvironment(input.InputJSON, bot.Env, strings.TrimSpace(input.BotEnvironment) != "")
 	if err != nil {
 		return bughub.ResetCaseOutcome{}, err
 	}
@@ -851,6 +853,27 @@ func normalizeWorkflowJSON(value map[string]any) (json.RawMessage, error) {
 	return encoded, nil
 }
 
+func normalizeWorkflowInputEnvironment(value map[string]any, environment string, snapshotProvided bool) (json.RawMessage, error) {
+	environment = strings.TrimSpace(environment)
+	cloned := make(map[string]any, len(value)+1)
+	for key, item := range value {
+		cloned[key] = item
+	}
+	if target, ok := cloned["target_environment"]; ok {
+		text, textOK := target.(string)
+		if !textOK {
+			return nil, errors.New("input_json target_environment must be a string")
+		}
+		if targetEnvironment := strings.TrimSpace(text); targetEnvironment != "" && targetEnvironment != environment {
+			return nil, errors.New("input_json target_environment does not match bot_environment")
+		}
+	}
+	if snapshotProvided && environment != "" {
+		cloned["target_environment"] = environment
+	}
+	return normalizeWorkflowJSON(cloned)
+}
+
 func (a *App) loadIncidentContext(caseID string) (bughub.Bug, bughub.BotRef, error) {
 	store, _, err := a.workflowComponents()
 	if err != nil {
@@ -905,8 +928,9 @@ func (a *App) loadIncidentStartContext(input StartIncidentCaseInput) (bughub.Bug
 	}
 	if usePersistedEnvironment {
 		bot.Env = persistedEnvironment
+		return bug, bot, nil
 	}
-	return bug, bot, nil
+	return a.applyFreshIncidentBotEnvironment(bug, bot, input.BotEnvironment)
 }
 
 func (a *App) loadBugAndBot(bugID, botKey string) (bughub.Bug, bughub.BotRef, error) {
@@ -930,7 +954,7 @@ func (a *App) loadBugAndBot(bugID, botKey string) (bughub.Bug, bughub.BotRef, er
 	loadBot := a.workflowLoadBot
 	if loadBot == nil {
 		loadBot = func(key string) (bughub.BotRef, error) {
-			bots, listErr := a.resolvedBugBotRefs(bug)
+			bots, listErr := a.bugBotRefs()
 			if listErr != nil {
 				return bughub.BotRef{}, listErr
 			}
@@ -947,6 +971,46 @@ func (a *App) loadBugAndBot(bugID, botKey string) (bughub.Bug, bughub.BotRef, er
 		return bughub.Bug{}, bughub.BotRef{}, fmt.Errorf("load incident bot: %w", err)
 	}
 	return bug, bot, nil
+}
+
+func (a *App) loadFreshBugAndBot(bugID, botKey, environment string) (bughub.Bug, bughub.BotRef, error) {
+	bug, bot, err := a.loadBugAndBot(bugID, botKey)
+	if err != nil {
+		return bughub.Bug{}, bughub.BotRef{}, err
+	}
+	return a.applyFreshIncidentBotEnvironment(bug, bot, environment)
+}
+
+func (a *App) applyFreshIncidentBotEnvironment(bug bughub.Bug, bot bughub.BotRef, environment string) (bughub.Bug, bughub.BotRef, error) {
+	environment = strings.TrimSpace(environment)
+	if environment != "" {
+		if err := validateIncidentBotEnvironment(bot, environment); err != nil {
+			return bughub.Bug{}, bughub.BotRef{}, err
+		}
+		bot.Env = environment
+		return bug, bot, nil
+	}
+	if strings.TrimSpace(bot.Env) != "" {
+		bot.Env = strings.TrimSpace(bot.Env)
+		return bug, bot, nil
+	}
+	resolved, err := a.applyStoredBugBotEnvironments(bug, []bughub.BotRef{bot})
+	if err != nil {
+		return bughub.Bug{}, bughub.BotRef{}, err
+	}
+	return bug, resolved[0], nil
+}
+
+func validateIncidentBotEnvironment(bot bughub.BotRef, environment string) error {
+	if len(bot.Envs) == 0 {
+		return nil
+	}
+	for _, candidate := range bot.Envs {
+		if strings.TrimSpace(candidate) == environment {
+			return nil
+		}
+	}
+	return fmt.Errorf("bot environment %q is not allowed by Bot %q", environment, bot.Key)
 }
 
 func (a *App) emitIncidentResult(incident bughub.IncidentCase, _ error) {

@@ -327,6 +327,10 @@ func (a *App) resolvedBugBotRefs(bug bughub.Bug) ([]bughub.BotRef, error) {
 	if err != nil {
 		return nil, err
 	}
+	return a.applyStoredBugBotEnvironments(bug, bots)
+}
+
+func (a *App) applyStoredBugBotEnvironments(bug bughub.Bug, bots []bughub.BotRef) ([]bughub.BotRef, error) {
 	var platform *bughub.PlatformConfig
 	configured, ok, err := bugPlatformStore().Get(bug.PlatformID)
 	if err != nil {

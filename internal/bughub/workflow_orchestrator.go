@@ -482,6 +482,13 @@ func (o *CaseOrchestrator) ResetCaseWithOutcome(ctx context.Context, cmd ResetCa
 	if err := validateJSONObject("reset Case input", cmd.InputJSON, true); err != nil {
 		return ResetCaseOutcome{}, err
 	}
+	if !SupportsIncidentWorkflowTarget(cmd.Bot.Target) {
+		return ResetCaseOutcome{}, fmt.Errorf("unsupported incident workflow target %q", cmd.Bot.Target)
+	}
+	environment := resolveIncidentEnvironment(cmd.Bug, cmd.Bot)
+	if environment == "" {
+		return ResetCaseOutcome{}, errors.New("replacement environment is required")
+	}
 
 	release := workflowCommandLocks.acquire("reset-case:" + cmd.CaseID)
 	defer release()
@@ -492,30 +499,11 @@ func (o *CaseOrchestrator) ResetCaseWithOutcome(ctx context.Context, cmd ResetCa
 	if incident.BugID != strings.TrimSpace(cmd.Bug.ID) {
 		return ResetCaseOutcome{}, fmt.Errorf("reset Bug %q does not match Case Bug %q", cmd.Bug.ID, incident.BugID)
 	}
-	if cmd.Bot.Key != incident.SelectedBotKey {
-		return ResetCaseOutcome{}, fmt.Errorf("reset Bot %q does not match Case Bot %q", cmd.Bot.Key, incident.SelectedBotKey)
-	}
 	if incident.Source != "" && cmd.Bug.Source != incident.Source {
 		return ResetCaseOutcome{}, fmt.Errorf("reset Bug source %q does not match Case source %q", cmd.Bug.Source, incident.Source)
 	}
 	if incident.SystemID != "" && cmd.Bug.SystemID != incident.SystemID {
 		return ResetCaseOutcome{}, fmt.Errorf("reset Bug system %q does not match Case system %q", cmd.Bug.SystemID, incident.SystemID)
-	}
-	environment := strings.TrimSpace(cmd.Bug.Env)
-	if environment == "" {
-		environment = strings.TrimSpace(cmd.Bot.Env)
-	}
-	if incident.Environment != "" && environment != incident.Environment {
-		return ResetCaseOutcome{}, fmt.Errorf("reset environment %q does not match Case environment %q", environment, incident.Environment)
-	}
-	if incident.CurrentAttemptID != "" {
-		attempt, loadErr := o.store.GetAttempt(ctx, incident.CurrentAttemptID)
-		if loadErr != nil {
-			return ResetCaseOutcome{}, loadErr
-		}
-		if attempt.BotKey != cmd.Bot.Key || attempt.AgentTarget != cmd.Bot.Target {
-			return ResetCaseOutcome{}, fmt.Errorf("reset Bot %q/%q does not match current attempt Bot %q/%q", cmd.Bot.Key, cmd.Bot.Target, attempt.BotKey, attempt.AgentTarget)
-		}
 	}
 	resetRequest := CaseReset{
 		CaseID:                 cmd.CaseID,
@@ -698,10 +686,7 @@ func (o *CaseOrchestrator) CreateAndStartCase(ctx context.Context, cmd CreateAnd
 	default:
 		return o.StartCase(ctx, StartCaseCommand{CaseID: existing.ID, ExpectedVersion: cmd.ExpectedVersion, IdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, Bug: cmd.Bug, Bot: cmd.Bot, InputJSON: cmd.InputJSON})
 	}
-	environment := strings.TrimSpace(cmd.Bug.Env)
-	if environment == "" {
-		environment = strings.TrimSpace(cmd.Bot.Env)
-	}
+	environment := resolveIncidentEnvironment(cmd.Bug, cmd.Bot)
 	pending := IncidentCase{ID: targetID, BugID: cmd.Bug.ID, Source: cmd.Bug.Source, SystemID: cmd.Bug.SystemID, Environment: environment, Status: CasePendingValidation, CycleNumber: cycle, SelectedBotKey: cmd.Bot.Key}
 	creation, createErr := o.store.CreateCaseWithIdentity(ctx, CaseCreation{Case: pending, IdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, RequestJSON: mustJSON(cmd)})
 	if createErr != nil {
@@ -711,6 +696,16 @@ func (o *CaseOrchestrator) CreateAndStartCase(ctx context.Context, cmd CreateAnd
 		return creation.Case.Clone(), nil
 	}
 	return o.StartCase(ctx, StartCaseCommand{CaseID: creation.Case.ID, ExpectedVersion: creation.Case.Version, IdempotencyKey: cmd.IdempotencyKey + ":start", ActorID: cmd.ActorID, Bug: cmd.Bug, Bot: cmd.Bot, InputJSON: cmd.InputJSON})
+}
+
+func resolveIncidentEnvironment(bug Bug, bot BotRef) string {
+	if env := strings.TrimSpace(bot.Env); env != "" {
+		return env
+	}
+	if env := strings.TrimSpace(bug.BotEnv); env != "" {
+		return env
+	}
+	return strings.TrimSpace(bug.Env)
 }
 
 func (o *CaseOrchestrator) ContinueWithEvidence(ctx context.Context, cmd ContinueWithEvidenceCommand) (IncidentCase, error) {

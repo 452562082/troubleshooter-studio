@@ -678,10 +678,7 @@ func (a *App) resetIncidentCaseWithWarnings(input ResetIncidentCaseInput) (bughu
 	if err != nil {
 		return bughub.ResetCaseOutcome{}, err
 	}
-	if strings.TrimSpace(input.BotKey) != original.SelectedBotKey {
-		return bughub.ResetCaseOutcome{}, errors.New("bot_key does not match existing Case")
-	}
-	bug, bot, err := a.loadBugAndBot(original.BugID, original.SelectedBotKey)
+	bug, bot, err := a.loadBugAndBot(original.BugID, strings.TrimSpace(input.BotKey))
 	if err != nil {
 		return bughub.ResetCaseOutcome{}, err
 	}

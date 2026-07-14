@@ -319,6 +319,10 @@ func TestResetIncidentCaseValidatesScalarsBeforeOpeningRuntime(t *testing.T) {
 
 func TestResetIncidentCaseForwardsContextAndEmitsReplacement(t *testing.T) {
 	app, store, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
+	botPath := t.TempDir()
+	app.workflowLoadBot = func(key string) (bughub.BotRef, error) {
+		return bughub.BotRef{Key: key, Target: "claude-code", Path: botPath, SystemID: "base", Env: "prod"}, nil
+	}
 	ctx := context.Background()
 	old := bughub.IncidentCase{
 		ID: "case-reset-old", BugID: "bug-1", Source: "zentao", SystemID: "base", Environment: "test",
@@ -342,7 +346,7 @@ func TestResetIncidentCaseForwardsContextAndEmitsReplacement(t *testing.T) {
 		}
 	}
 	input := ResetIncidentCaseInput{
-		CaseID: old.ID, NewCaseID: "case-reset-new", BotKey: old.SelectedBotKey, ExpectedVersion: old.Version,
+		CaseID: old.ID, NewCaseID: "case-reset-new", BotKey: "base|claude-code", ExpectedVersion: old.Version,
 		IdempotencyKey: "reset-case-old", ActorID: "user-1", InputJSON: map[string]any{"reason": "retry"},
 	}
 
@@ -354,7 +358,7 @@ func TestResetIncidentCaseForwardsContextAndEmitsReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if replacement.ID != input.NewCaseID || replacement.ResetFromCaseID != old.ID || replacement.Status != bughub.CaseValidating {
+	if replacement.ID != input.NewCaseID || replacement.ResetFromCaseID != old.ID || replacement.Status != bughub.CaseValidating || replacement.SelectedBotKey != input.BotKey || replacement.Environment != "prod" {
 		t.Fatalf("replacement = %+v", replacement)
 	}
 	if archived.Status != bughub.CaseResetArchived || archived.SupersededByCaseID != replacement.ID {
@@ -363,8 +367,11 @@ func TestResetIncidentCaseForwardsContextAndEmitsReplacement(t *testing.T) {
 	if runner.count() != 1 || runner.cancelCount() != 1 {
 		t.Fatalf("starts=%d cancels=%d", runner.count(), runner.cancelCount())
 	}
-	if payload.Case == nil || payload.Snapshot == nil || payload.Case.ID != replacement.ID || payload.Snapshot.Case.ID != replacement.ID {
+	if payload.Case == nil || payload.Snapshot == nil || payload.Case.ID != replacement.ID || payload.Snapshot.Case.ID != replacement.ID || payload.Snapshot.Case.SelectedBotKey != input.BotKey || payload.Snapshot.Case.Environment != "prod" {
 		t.Fatalf("payload = %+v", payload)
+	}
+	if len(payload.Snapshot.Attempts) != 1 || payload.Snapshot.Attempts[0].BotKey != input.BotKey || payload.Snapshot.Attempts[0].AgentTarget != "claude-code" {
+		t.Fatalf("snapshot attempts = %+v", payload.Snapshot.Attempts)
 	}
 }
 

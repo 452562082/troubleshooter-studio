@@ -39,7 +39,7 @@ describe('BugCaseArtifacts', () => {
     expect(scroll.attributes('role')).toBe('region')
     expect(scroll.attributes('aria-label')).toBe('阶段输出内容')
     expect(scroll.attributes('tabindex')).toBe('0')
-    expect(scroll.findAll('.artifact-item')).toHaveLength(detail.attempts.length)
+    expect(scroll.findAll('.stage-attempt, .legacy-attempt')).toHaveLength(detail.attempts.length)
     expect(artifactSource).toMatch(/\.artifact-sections \{[^}]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);/)
     expect(artifactSource).toMatch(/\.attempt-output-card \{[^}]*grid-column: 1 \/ -1;/)
     expect(artifactSource).toMatch(/\.attempt-output-scroll \{[^}]*height: clamp\(320px, 45vh, 640px\);/)
@@ -48,6 +48,18 @@ describe('BugCaseArtifacts', () => {
     expect(artifactSource).toMatch(/\.attempt-output-scroll \{[^}]*scrollbar-gutter: stable;/)
     expect(artifactSource).toMatch(/\.attempt-output-scroll \{[^}]*overscroll-behavior: contain;/)
     expect(artifactSource).toContain('.attempt-output-scroll:focus-visible')
+  })
+
+  it('renders current attempts as semantic history with only the latest expanded', () => {
+    const first = { ...detail.attempts[0], id: 'validation-old', phase: 'validation' as const, mode: 'reproduce' as const, output_json: { verification_status: 'not_reproduced', environment: 'test', evidence: [], gaps: [] } }
+    const latest = { ...first, id: 'validation-latest', status: 'failed' as const, output_json: { verification_status: 'insufficient_info', environment: 'test', expected_behavior: '显示两名用户', observed_behavior: '只显示一名用户', evidence: [], gaps: ['缺少 Network 导出'] } }
+    const wrapper = mount(BugCaseArtifacts, { props: { detail: { ...detail, attempts: [first, latest] } } })
+    const attempts = wrapper.findAll('.stage-attempt')
+    expect(attempts).toHaveLength(2)
+    expect(attempts[0].attributes('open')).toBeUndefined()
+    expect(attempts[1].attributes()).toHaveProperty('open')
+    expect(wrapper.text()).not.toContain('verification_status')
+    expect(wrapper.find('[data-raw-output]').exists()).toBe(false)
   })
 
   it('keeps imported legacy attempt output readable', () => {

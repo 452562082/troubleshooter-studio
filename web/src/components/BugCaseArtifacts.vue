@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { IncidentCaseDetail, PhaseAttempt } from '../lib/bridge/bugWorkflow'
+import BugStageAttemptOutput from './BugStageAttemptOutput.vue'
 
 const props = defineProps<{ detail: IncidentCaseDetail }>()
 const emit = defineEmits<{ 'select-case': [caseID: string] }>()
 
 const investigation = computed(() => [...props.detail.attempts].reverse().find(item => item.phase === 'investigation'))
+const currentAttempts = computed(() => props.detail.attempts.filter(item => item.phase !== 'legacy'))
+const latestCurrentAttemptID = computed(() => currentAttempts.value[currentAttempts.value.length - 1]?.id || '')
 const legacyProjection = computed(() => props.detail.attempts.filter(attempt => attempt.phase === 'legacy').map(attempt => {
   const output = attempt.output_json || {}
   const events = Array.isArray(output.events) ? output.events.flatMap(event => {
@@ -131,13 +134,14 @@ function limitedMarkdown(value: string): MarkdownBlock[] {
 
     <section class="artifact-card attempt-output-card" aria-labelledby="attempt-output-title">
       <h3 id="attempt-output-title">阶段输出</h3>
-      <div class="attempt-output-scroll" role="region" aria-label="阶段输出内容" tabindex="0">
+      <div class="attempt-output-scroll" role="region" aria-label="阶段输出内容" tabindex="0" aria-live="polite" aria-relevant="additions text">
         <p v-if="detail.attempts.length === 0" class="empty-copy">尚无阶段输出</p>
-        <article v-for="attempt in detail.attempts.filter(item => item.phase !== 'legacy')" :key="attempt.id" class="artifact-item">
-          <strong>{{ attempt.phase }} · {{ attempt.status }}</strong>
-          <span v-if="attempt.error_message">{{ attempt.error_message }}</span>
-          <pre>{{ displayJSON(attempt.output_json) }}</pre>
-        </article>
+        <BugStageAttemptOutput
+          v-for="attempt in currentAttempts"
+          :key="attempt.id"
+          :attempt="attempt"
+          :latest="attempt.id === latestCurrentAttemptID"
+        />
         <article v-for="projection in legacyProjection" :key="projection.attempt.id" class="artifact-item legacy-attempt">
           <strong>历史运行 · {{ projection.attempt.status }}</strong>
           <div v-if="projection.events.length" class="legacy-events" role="log" aria-label="历史运行事件">

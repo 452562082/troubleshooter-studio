@@ -266,21 +266,34 @@ async function enterIncidentCase() {
   await focusIncidentCase(target.id)
 }
 
-async function restartIncidentCase() {
-  const target = preferredCase.value
-  if (!target || writeActionDisabled.value) return
-  const initiatingBugID = tickets.selectedID.value
+async function restartIncidentCase(targetOverride?: IncidentCase) {
+  const target = targetOverride || preferredCase.value
+  if (!target) return
   const choice = startBotChoice()
+  if (writeActionDisabled.value) {
+    if (targetOverride && !choice.key) {
+      const error = new Error('该历史记录没有机器人信息。请重新选择当前 Bug 的机器人后再继续。')
+      incidentWorkflow.error.value = error.message
+      toastError('启动故障闭环', error)
+    }
+    return
+  }
+  const initiatingBugID = tickets.selectedID.value
+  const targetIsCurrent = () => isCurrentBug(initiatingBugID) && (
+    targetOverride
+      ? displayedDetail.value?.case.id === target.id
+      : preferredCase.value?.id === target.id
+  )
   restartPreparing.value = true
   incidentWorkflow.error.value = ''
   try {
     const cached = incidentWorkflow.detail.value?.case.id === target.id ? incidentWorkflow.detail.value : null
     const snapshot = cached || await getIncidentCase(target.id)
     if (snapshot.case.id !== target.id) throw new Error(`读取到错误的重启目标 Case：期望 ${target.id}，实际 ${snapshot.case.id}`)
-    if (!isCurrentBug(initiatingBugID) || preferredCase.value?.id !== target.id) return
+    if (!targetIsCurrent()) return
     await openResetDialog(snapshot.case, snapshot, choice)
   } catch (error) {
-    if (!isCurrentBug(initiatingBugID) || preferredCase.value?.id !== target.id) return
+    if (!targetIsCurrent()) return
     const message = error instanceof Error ? error.message : String(error)
     incidentWorkflow.error.value = message
     toastError('读取重启目标 Case', error)
@@ -644,7 +657,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
   if (!detail) return
   const incident = detail.case
   if (payload.kind === 'continue_legacy') {
-    await startNewCase()
+    await restartIncidentCase(incident)
     return
   }
   const context = {
@@ -751,7 +764,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
             </button>
             <template v-else>
               <button class="btn primary" type="button" data-action="enter-case" @click="enterIncidentCase">进入故障闭环</button>
-              <button class="btn danger-secondary" type="button" data-action="restart-case" :disabled="writeActionDisabled" @click="restartIncidentCase">
+              <button class="btn danger-secondary" type="button" data-action="restart-case" :disabled="writeActionDisabled" @click="restartIncidentCase()">
                 {{ starting || resetting || restartPreparing ? '处理中…' : '重新开始故障闭环' }}
               </button>
             </template>

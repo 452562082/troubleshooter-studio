@@ -549,6 +549,8 @@ describe('IncidentWorkbenchPage', () => {
     const wrapper = await mountedPage()
 
     await wrapper.get('.primary-action').trigger('click')
+    expect(startIncidentCase).not.toHaveBeenCalled()
+    await wrapper.get('[data-reset-confirm]').trigger('click')
     await flushPromises()
 
     expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
@@ -661,6 +663,8 @@ describe('IncidentWorkbenchPage', () => {
 
     await wrapper.findAll('.bot-picker input[type="radio"]')[1].setValue(true)
     await wrapper.get('.primary-action').trigger('click')
+    expect(startIncidentCase).not.toHaveBeenCalled()
+    await wrapper.get('[data-reset-confirm]').trigger('click')
     await flushPromises()
 
     expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
@@ -739,22 +743,88 @@ describe('IncidentWorkbenchPage', () => {
     expect(wrapper.get('.incident-bug-summary h2').text()).toBe('支付页超时')
   })
 
-  it('continues a legacy archive by starting a fresh durable Case round', async () => {
+  it('confirms a legacy lifecycle continuation with the snapshotted Bot before starting a fresh Case round', async () => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])
+    vi.mocked(matchBugBots).mockResolvedValue([botMatch, prodBotMatch])
     const archived = incident('legacy-1', 'legacy_archived', '2026-07-13T00:00:00Z', { source: 'legacy-runs-json', version: 3 })
+    const opened = incident('case-new', 'validating', '2026-07-13T00:01:00Z', { version: 1, selected_bot_key: 'base-prod|codex', environment: 'prod' })
     vi.mocked(listIncidentCases).mockResolvedValue([archived])
-    mockCaseDetails(detail(archived))
-    vi.mocked(startIncidentCase).mockResolvedValue(incident('case-new', 'validating', '2026-07-13T00:01:00Z', { version: 1 }))
+    mockCaseDetails(detail(archived), detail(opened))
+    vi.mocked(startIncidentCase).mockResolvedValue(opened)
     const wrapper = await mountedPage()
 
+    await wrapper.findAll('.bot-picker input[type="radio"]')[1].setValue(true)
     await wrapper.get('.primary-action').trigger('click')
+
+    const dialog = wrapper.get('[role="dialog"]')
+    expect(dialog.text()).toContain('开启新一轮')
+    expect(dialog.text()).toContain(archived.id)
+    expect(dialog.text()).toContain('base-prod|codex')
+    expect(dialog.text()).toContain('prod')
+    expect(startIncidentCase).not.toHaveBeenCalled()
+    expect(resetIncidentCaseWithWarnings).not.toHaveBeenCalled()
+
+    await wrapper.findAll('.bot-picker input[type="radio"]')[0].setValue(true)
+    expect(dialog.text()).toContain('base-prod|codex')
+    await dialog.get('[data-reset-confirm]').trigger('click')
     await flushPromises()
 
     expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
-      bug_id: 'bug-a', expected_version: 0, bot_key: 'base|codex', actor_id: 'desktop-user',
+      bug_id: 'bug-a', expected_version: 0, bot_key: 'base-prod|codex', bot_environment: 'prod', actor_id: 'desktop-user',
     }))
     expect(vi.mocked(startIncidentCase).mock.calls[0][0].case_id).not.toBe('legacy-1')
+    expect(resetIncidentCaseWithWarnings).not.toHaveBeenCalled()
+  })
+
+  it.each(['cancel', 'escape'] as const)('does not write a legacy lifecycle continuation after %s', async dismissal => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const archived = incident('legacy-lifecycle-cancel', 'legacy_archived', '2026-07-13T00:00:00Z', { source: 'legacy-runs-json', version: 3 })
+    vi.mocked(listIncidentCases).mockResolvedValue([archived])
+    mockCaseDetails(detail(archived))
+    const wrapper = await mountedPage()
+
+    await wrapper.get('.primary-action').trigger('click')
+    const dialog = wrapper.get('[role="dialog"]')
+    if (dismissal === 'cancel') await dialog.get('[data-reset-cancel]').trigger('click')
+    else await wrapper.get('.reset-dialog-backdrop').trigger('keydown', { key: 'Escape' })
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(startIncidentCase).not.toHaveBeenCalled()
+    expect(resetIncidentCaseWithWarnings).not.toHaveBeenCalled()
+  })
+
+  it('keeps a displayed legacy lifecycle continuation in terminal-new-round mode when an active Case also exists', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    vi.mocked(matchBugBots).mockResolvedValue([botMatch])
+    const active = incident('active-alongside-legacy', 'waiting_evidence', '2026-07-12T00:00:00Z')
+    const archived = incident('displayed-legacy', 'legacy_archived', '2026-07-13T00:00:00Z', { source: 'legacy-runs-json', version: 3 })
+    const opened = incident('case-new-from-legacy', 'validating', '2026-07-13T00:01:00Z', { version: 1 })
+    vi.mocked(listIncidentCases).mockResolvedValue([archived, active])
+    mockCaseDetails(detail(active), detail(archived), detail(opened))
+    vi.mocked(startIncidentCase).mockResolvedValue(opened)
+    const wrapper = await mountedPage()
+
+    await wrapper.findAll('.case-row')[0].trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.case-heading').text()).toContain(archived.id)
+    await wrapper.get('.primary-action').trigger('click')
+
+    const dialog = wrapper.get('[role="dialog"]')
+    expect(dialog.text()).toContain('开启新一轮')
+    expect(dialog.text()).toContain(archived.id)
+    expect(dialog.text()).not.toContain(active.id)
+    expect(startIncidentCase).not.toHaveBeenCalled()
+    expect(resetIncidentCaseWithWarnings).not.toHaveBeenCalled()
+
+    await dialog.get('[data-reset-confirm]').trigger('click')
+    await flushPromises()
+
+    expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({ bug_id: 'bug-a', expected_version: 0 }))
+    expect(resetIncidentCaseWithWarnings).not.toHaveBeenCalled()
   })
 
   it('submits fix approval with the dialog-captured root cause and exact Case version key', async () => {
@@ -1317,11 +1387,14 @@ describe('IncidentWorkbenchPage', () => {
       attempts: [{ id: 'legacy-attempt', case_id: 'case-1', cycle_number: 1, phase: 'legacy', mode: '', status: 'succeeded', agent_target: '', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '2026-07-11T00:00:00Z', error_code: '', error_message: '', usage: {} }],
     })
     vi.mocked(listIncidentCases).mockResolvedValue([item])
-    mockCaseDetails(snapshot)
-    vi.mocked(startIncidentCase).mockResolvedValue(incident('new-case', 'validating', '2026-07-13T00:01:00Z', { version: 1 }))
+    const opened = incident('new-case', 'validating', '2026-07-13T00:01:00Z', { version: 1 })
+    mockCaseDetails(snapshot, detail(opened))
+    vi.mocked(startIncidentCase).mockResolvedValue(opened)
     const wrapper = await mountedPage()
 
     await wrapper.get('.primary-action').trigger('click')
+    expect(startIncidentCase).not.toHaveBeenCalled()
+    await wrapper.get('[data-reset-confirm]').trigger('click')
     await flushPromises()
 
     expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({ bot_key: 'base|codex' }))
@@ -1332,8 +1405,9 @@ describe('IncidentWorkbenchPage', () => {
     vi.mocked(listBugs).mockResolvedValue([bugA])
     const item = incident('case-1', 'legacy_archived', '2026-07-13T00:00:00Z', { selected_bot_key: '' })
     vi.mocked(listIncidentCases).mockResolvedValue([item])
-    mockCaseDetails(detail(item))
-    vi.mocked(startIncidentCase).mockResolvedValue(incident('new-case', 'validating', '2026-07-13T00:01:00Z', { version: 1 }))
+    const opened = incident('new-case', 'validating', '2026-07-13T00:01:00Z', { version: 1 })
+    mockCaseDetails(detail(item), detail(opened))
+    vi.mocked(startIncidentCase).mockResolvedValue(opened)
     const wrapper = await mountedPage()
 
     await wrapper.get('.primary-action').trigger('click')
@@ -1343,6 +1417,8 @@ describe('IncidentWorkbenchPage', () => {
 
     await wrapper.get('.bot-picker input[type="radio"]').setValue(true)
     await wrapper.get('.primary-action').trigger('click')
+    expect(startIncidentCase).not.toHaveBeenCalled()
+    await wrapper.get('[data-reset-confirm]').trigger('click')
     await flushPromises()
     expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({ bot_key: 'base|codex' }))
   })

@@ -164,7 +164,7 @@ func normalizePlatformBotMappings(items []PlatformBotMapping) []PlatformBotMappi
 	seen := map[string]bool{}
 	for _, item := range items {
 		key := strings.TrimSpace(item.BotKey)
-		if key == "" || seen[key] || !SupportsIncidentWorkflowTarget(incidentWorkflowTargetFromBotKey(key)) {
+		if key == "" || seen[key] {
 			continue
 		}
 		seen[key] = true

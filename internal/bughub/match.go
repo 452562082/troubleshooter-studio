@@ -10,9 +10,6 @@ import (
 func MatchBots(b Bug, bots []BotRef) []BotMatch {
 	out := make([]BotMatch, 0, len(bots))
 	for _, bot := range bots {
-		if !SupportsIncidentWorkflowTarget(bot.Target) {
-			continue
-		}
 		score := 0
 		var reasons []string
 		if sameText(bot.SystemID, b.SystemID) && b.SystemID != "" {
@@ -40,26 +37,6 @@ func MatchBots(b Bug, bots []BotRef) []BotMatch {
 		return out[i].Bot.Key < out[j].Bot.Key
 	})
 	return out
-}
-
-// SupportsIncidentWorkflowTarget reports whether Studio can start every phase
-// of the persisted incident workflow through the target's background CLI.
-func SupportsIncidentWorkflowTarget(target string) bool {
-	switch strings.ToLower(strings.TrimSpace(target)) {
-	case "codex", "claude-code", "openclaw":
-		return true
-	default:
-		return false
-	}
-}
-
-func incidentWorkflowTargetFromBotKey(key string) string {
-	key = strings.TrimSpace(key)
-	separator := strings.LastIndex(key, "|")
-	if separator < 0 || separator == len(key)-1 {
-		return ""
-	}
-	return key[separator+1:]
 }
 
 func ValidatorBotFor(selected BotRef) BotRef {

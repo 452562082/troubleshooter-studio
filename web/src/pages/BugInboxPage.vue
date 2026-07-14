@@ -49,9 +49,7 @@ const attachmentPreview = ref<BugAttachmentPreviewResult | null>(null)
 const platformDraft = ref(emptyPlatformDraft())
 const selectedPlatform = computed(() => platforms.value.find(platform => platform.id === selectedPlatformID.value))
 const selectedPlatformHasSession = computed(() => Boolean(selectedPlatform.value?.session_header))
-const allBotRefs = computed(() => installedBots.value
-  .filter(bot => !bot.ghost && supportsIncidentWorkflowTarget(bot.meta.target))
-  .map(discoveredBotToRef))
+const allBotRefs = computed(() => installedBots.value.filter(bot => !bot.ghost).map(discoveredBotToRef))
 const configuredPlatformBots = computed(() => platformDraft.value.bot_mappings.map(mapping => ({
   mapping,
   bot: botRefByKey(mapping.bot_key),
@@ -83,9 +81,7 @@ watch(selectedPlatform, platform => {
     password: '',
     token: '',
     hook_secret: platform.hook_secret || '',
-    bot_mappings: (platform.bot_mappings || [])
-      .filter(mapping => supportsIncidentWorkflowTarget(botTargetFromKey(mapping.bot_key)))
-      .map(mapping => ({ bot_key: mapping.bot_key, env: mapping.env || '' })),
+    bot_mappings: (platform.bot_mappings || []).map(mapping => ({ bot_key: mapping.bot_key, env: mapping.env || '' })),
     enabled: platform.enabled,
     poll_enabled: Boolean(platform.poll_enabled),
     poll_interval_minutes: platform.poll_interval_minutes || 5,
@@ -236,37 +232,17 @@ async function deleteSelectedPlatform() {
   }
 }
 
-function syncErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String((error as any)?.message ?? error)
-}
-
-async function syncEnabledPlatforms() {
-  const enabled = platforms.value.filter(platform => platform.enabled)
-  if (!enabled.length) {
-    toast.info('请先启用 Bug 平台')
-    return
-  }
+async function syncSelectedPlatform() {
+  const platform = selectedPlatform.value
+  if (!platform) return toast.error('请先选择平台')
   syncingBugs.value = true
-  let stored = 0
-  const failures: string[] = []
   try {
-    for (const platform of enabled) {
-      try {
-        const result = await syncBugPlatform(platform.id)
-        stored += result.stored
-      } catch (error) {
-        failures.push(`${platform.name || platform.id}：${syncErrorMessage(error)}`)
-      }
-    }
+    const result = await syncBugPlatform(platform.id)
+    if (result.selected_bug_id) tickets.select(result.selected_bug_id)
     await loadTickets()
-    const succeeded = enabled.length - failures.length
-    if (!failures.length) {
-      toast.success(`已同步 ${succeeded} 个平台，新增/更新 ${stored} 条`)
-    } else if (succeeded > 0) {
-      toast.error(`已同步 ${succeeded} 个平台，${failures.length} 个平台失败；新增/更新 ${stored} 条。${failures.join('；')}`)
-    } else {
-      toast.error(`所有已启用平台同步失败：${failures.join('；')}`)
-    }
+    toast.success(`已同步指派给我的 Bug,新增/更新 ${result.stored} 条`)
+  } catch (error) {
+    toastError('同步 Bug', error)
   } finally {
     syncingBugs.value = false
   }
@@ -349,15 +325,6 @@ function discoveredBotToRef(bot: DiscoveredBot): BotRef {
     internal_agents: bot.meta.internal_agents || [],
     envs: bot.environments || [],
   }
-}
-
-function supportsIncidentWorkflowTarget(target: string): boolean {
-  return ['codex', 'claude-code', 'openclaw'].includes(target.trim().toLowerCase())
-}
-
-function botTargetFromKey(key: string): string {
-  const separator = key.lastIndexOf('|')
-  return separator >= 0 ? key.slice(separator + 1) : ''
 }
 
 function botRefByKey(key: string): BotRef {
@@ -531,7 +498,11 @@ function eventValue(event: Event): string {
           <label class="toggle-control"><input v-model="platformDraft.poll_enabled" type="checkbox"><span class="toggle-track" aria-hidden="true"><span></span></span><span>后台定时同步</span></label>
           <label class="interval-control">每 <input v-model.number="platformDraft.poll_interval_minutes" aria-label="后台同步间隔分钟" type="number" min="1" :disabled="!platformDraft.poll_enabled"> 分钟</label>
         </div>
-        <div class="manual-bug-row">
+        <div class="trigger-row">
+          <button class="compact-button secondary-button" type="button" data-action="sync-platform" :disabled="!selectedPlatform || syncingBugs" @click="syncSelectedPlatform">
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none"><path d="M20 7h-5V2M4 17h5v5M18.5 11a7 7 0 0 0-11.9-4.9L4 8M5.5 13a7 7 0 0 0 11.9 4.9L20 16" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            {{ syncingBugs ? '同步中…' : '从平台同步' }}
+          </button>
           <label class="field-label manual-bug-field" :for="manualBugFieldID"><span>指定 Bug</span><input :id="manualBugFieldID" v-model="manualBugID" class="form-control" placeholder="Bug ID 或飞书消息" @keyup.enter="fetchManualBug"></label>
           <button class="compact-button secondary-button" type="button" data-action="fetch-bug" :disabled="!selectedPlatform || !manualBugID.trim() || fetchingBug" @click="fetchManualBug">拉取指定 Bug</button>
         </div>
@@ -542,9 +513,9 @@ function eventValue(event: Event): string {
 
     <section class="inbox-workspace" data-overflow-safe="true">
       <aside class="ticket-list-panel" data-overflow-safe="true">
-        <button class="compact-button secondary-button refresh-button" type="button" data-action="sync-enabled-platforms" :aria-label="syncingBugs ? '正在同步我的 Bug' : '同步我的 Bug'" :disabled="syncingBugs || tickets.loading.value" @click="syncEnabledPlatforms">
-          <svg aria-hidden="true" :class="{ spinning: syncingBugs }" viewBox="0 0 24 24" fill="none"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
-          {{ syncingBugs ? '同步中…' : '同步我的 Bug' }}
+        <button class="compact-button secondary-button refresh-button" type="button" data-action="refresh-tickets" :aria-label="tickets.loading.value ? '正在刷新本地 Bug 列表' : '刷新本地 Bug 列表'" :disabled="tickets.loading.value" @click="loadTickets">
+          <svg aria-hidden="true" :class="{ spinning: tickets.loading.value }" viewBox="0 0 24 24" fill="none"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
+          {{ tickets.loading.value ? '刷新中…' : '刷新列表' }}
         </button>
         <BugTicketList
           :bugs="tickets.filteredBugs.value"
@@ -671,7 +642,7 @@ function eventValue(event: Event): string {
 .platform-config .interval-control { min-height: var(--config-control-height); }
 .interval-control input { width: 72px; min-height: 36px; padding: 0 8px; }
 .platform-config .interval-control input { min-height: var(--config-control-height); }
-.manual-bug-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: var(--sp-2); }
+.trigger-row { min-width: 0; display: grid; grid-template-columns: auto minmax(180px, 1fr) auto; align-items: end; gap: var(--sp-2); }
 .hook-row { flex-wrap: wrap; }
 .hook-row code { min-width: 0; flex: 1; padding: 7px 9px; overflow-wrap: anywhere; border-radius: var(--r-sm); background: var(--c-surf-2); color: var(--c-muted); }
 .danger-link { min-height: 36px; padding: 0 6px; display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: var(--c-danger); font: inherit; font-size: var(--fs-sm); font-weight: 600; cursor: pointer; }
@@ -729,8 +700,7 @@ function eventValue(event: Event): string {
   .config-disclosure, .platform-chip, .bot-picker-row, .platform-config .interval-control input { min-height: 44px; }
   .compact-button, .danger-link, .toggle-control { min-height: 44px; }
   .platform-config .form-control, .platform-config .compact-button, .platform-config .toggle-control { min-height: 44px; }
-  .manual-bug-row, .bot-config-row { grid-template-columns: minmax(0, 1fr); }
-  .manual-bug-row .compact-button { width: 100%; }
+  .trigger-row, .bot-config-row { grid-template-columns: minmax(0, 1fr); }
   .bot-config-row .icon-button { justify-self: end; width: 44px; height: 44px; }
   .config-footer { align-items: stretch; flex-direction: column; }
   .config-footer .danger-link { align-self: flex-start; }

@@ -9,8 +9,8 @@ import (
 func TestMatchBotsScoresSystemAndEnv(t *testing.T) {
 	bug := Bug{SystemID: "shop", Env: "stage", BotEnv: "prod", FrontendRepo: "mall-web", ServiceHints: []string{"pay-service"}}
 	bots := []BotRef{
-		{Key: "shop", SystemID: "shop", Target: "codex", Envs: []string{"test", "prod"}, Name: "shop-troubleshooter"},
-		{Key: "crm", SystemID: "crm", Target: "claude-code", Env: "test", Name: "crm-troubleshooter"},
+		{Key: "shop", SystemID: "shop", Envs: []string{"test", "prod"}, Name: "shop-troubleshooter"},
+		{Key: "crm", SystemID: "crm", Env: "test", Name: "crm-troubleshooter"},
 	}
 
 	matches := MatchBots(bug, bots)
@@ -37,20 +37,6 @@ func TestMatchBotsExcludesValidatorByDefault(t *testing.T) {
 
 	if len(got) != 1 || got[0].Bot.Key != "t" {
 		t.Fatalf("want bot match, got %+v", got)
-	}
-}
-
-func TestMatchBotsExcludesTargetsThatCannotRunIncidentWorkflow(t *testing.T) {
-	bug := Bug{ID: "b1", SystemID: "shop", Env: "test"}
-	bots := []BotRef{
-		{Key: "codex", SystemID: "shop", Target: "codex", Env: "test"},
-		{Key: "cursor", SystemID: "shop", Target: "cursor", Env: "test"},
-	}
-
-	got := MatchBots(bug, bots)
-
-	if len(got) != 1 || got[0].Bot.Key != "codex" {
-		t.Fatalf("want only incident-capable bot, got %+v", got)
 	}
 }
 

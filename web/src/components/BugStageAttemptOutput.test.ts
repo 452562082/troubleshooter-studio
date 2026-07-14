@@ -22,6 +22,12 @@ describe('BugStageAttemptOutput', () => {
     expect(wrapper.text()).not.toContain('verification_status')
     expect(wrapper.text()).not.toContain('{')
     expect(wrapper.find('img').exists()).toBe(false)
+    const expectedSection = wrapper.findAll('.stage-section').find(section => section.get('h4').text() === '预期表现')
+    expect(expectedSection?.get('p.stage-text').text()).toBe('显示两名用户')
+    expect(expectedSection?.find('dd').exists()).toBe(false)
+    for (const definitionList of wrapper.findAll('dl')) {
+      expect(definitionList.findAll('dd')).toHaveLength(definitionList.findAll('dt').length)
+    }
   })
 
   it('keeps an older result collapsed and exposes its error in readable text', () => {
@@ -29,5 +35,24 @@ describe('BugStageAttemptOutput', () => {
     expect(wrapper.get('details').attributes('open')).toBeUndefined()
     expect(wrapper.get('[data-attempt-error]').text()).toBe('证据不足')
     expect(wrapper.get('summary').attributes('aria-label')).toContain('验证')
+  })
+
+  it('renders multiple unknown fields with Chinese fallback labels and stable keyed sections', async () => {
+    const unknown = {
+      ...validation,
+      phase: 'investigation' as const,
+      output_json: { first_machine_key: '第一项可读值', second_machine_key: '第二项可读值' },
+    }
+    const wrapper = mount(BugStageAttemptOutput, { props: { attempt: unknown, latest: true } })
+
+    expect(wrapper.text()).toContain('第一项可读值')
+    expect(wrapper.text()).toContain('第二项可读值')
+    expect(wrapper.text()).not.toContain('first_machine_key')
+    expect(wrapper.text()).not.toContain('second_machine_key')
+    expect(wrapper.findAll('.stage-section').map(section => section.get('h4').text())).toEqual(['补充信息', '补充信息'])
+
+    await wrapper.setProps({ attempt: { ...unknown, output_json: { first_machine_key: '第一项更新值', second_machine_key: '第二项更新值' } } })
+    expect(wrapper.text()).toContain('第一项更新值')
+    expect(wrapper.text()).toContain('第二项更新值')
   })
 })

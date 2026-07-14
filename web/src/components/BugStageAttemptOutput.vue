@@ -19,11 +19,12 @@ const view = computed(() => presentStageAttempt(props.attempt))
       <p v-if="view.environment" class="stage-environment">环境 <strong>{{ view.environment }}</strong></p>
       <p v-if="attempt.error_message" data-attempt-error class="stage-error" role="alert">{{ attempt.error_message }}</p>
       <p v-if="view.sections.length === 0" class="stage-empty">本次暂无可展示的阶段结果</p>
-      <section v-for="section in view.sections" :key="section.title" class="stage-section" :class="section.tone ? `tone-${section.tone}` : ''">
+      <section v-for="(section, sectionIndex) in view.sections" :key="`${sectionIndex}-${section.title}`" class="stage-section" :class="section.tone ? `tone-${section.tone}` : ''">
         <h4>{{ section.title }}</h4>
-        <dl v-if="section.fields?.length" class="stage-fields"><div v-for="field in section.fields" :key="`${field.label}-${field.value}`"><dt v-if="field.label">{{ field.label }}</dt><dd :class="{ mono: field.mono }">{{ field.value }}</dd></div></dl>
-        <ul v-if="section.items?.length"><li v-for="item in section.items" :key="item">{{ item }}</li></ul>
-        <div v-if="section.groups?.length" class="stage-groups"><dl v-for="(group, index) in section.groups" :key="index"><div v-for="field in group" :key="`${field.label}-${field.value}`"><dt>{{ field.label }}</dt><dd :class="{ mono: field.mono }">{{ field.value }}</dd></div></dl></div>
+        <p v-if="section.text" class="stage-text">{{ section.text }}</p>
+        <dl v-if="section.fields?.length" class="stage-fields"><div v-for="(field, fieldIndex) in section.fields" :key="fieldIndex"><dt>{{ field.label }}</dt><dd :class="{ mono: field.mono }">{{ field.value }}</dd></div></dl>
+        <ul v-if="section.items?.length"><li v-for="(item, itemIndex) in section.items" :key="itemIndex">{{ item }}</li></ul>
+        <div v-if="section.groups?.length" class="stage-groups"><dl v-for="(group, index) in section.groups" :key="index"><div v-for="(field, fieldIndex) in group" :key="fieldIndex"><dt>{{ field.label }}</dt><dd :class="{ mono: field.mono }">{{ field.value }}</dd></div></dl></div>
         <p v-if="section.emptyText" class="stage-empty">{{ section.emptyText }}</p>
       </section>
     </div>
@@ -58,6 +59,7 @@ time { margin-left: auto; overflow-wrap: anywhere; }
 .stage-section { min-width: 0; border-top: 1px solid var(--c-line); padding-top: var(--sp-2); }
 .stage-section.tone-warning { border-left: 3px solid #d97706; padding-left: 10px; }
 .stage-section h4 { margin: 0 0 6px; color: var(--c-ink); font-size: var(--fs-sm); }
+.stage-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; }
 .stage-section ul { margin: 0; padding-left: 20px; }
 .stage-section li { margin: 3px 0; line-height: 1.55; overflow-wrap: anywhere; }
 .stage-fields, .stage-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; }

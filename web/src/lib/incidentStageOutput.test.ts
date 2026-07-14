@@ -21,14 +21,66 @@ describe('presentStageAttempt', () => {
     expect(JSON.stringify(view)).not.toContain('scenario_hash')
   })
 
+  it('presents the nested phase result from the persisted completion-intent envelope', () => {
+    const view = presentStageAttempt(attempt('validation', {
+      kind: 'phase_completion_intent',
+      version: 1,
+      command: {
+        CaseID: 'case-sensitive-1',
+        AttemptID: 'validation-1',
+        ExpectedVersion: 7,
+        IdempotencyKey: 'agent-phase:validation-1',
+        ActorID: 'validator-bot',
+        Outcome: 'reproduced',
+        OutputJSON: {
+          verification_status: 'reproduced', environment: 'test',
+          expected_behavior: '返回两名匹配用户', observed_behavior: '已稳定返回两名匹配用户',
+          gaps: [], evidence: [], scenario_hash: 'internal-only',
+        },
+        ErrorCode: '', ErrorMessage: '', Usage: {}, CodeChanges: [],
+      },
+    }))
+
+    expect(view).toMatchObject({ phaseLabel: '验证', resultLabel: '已复现', environment: 'test' })
+    expect(view.sections.map(section => section.title)).toEqual(['预期表现', '实际观察', '验证证据'])
+    const visible = JSON.stringify(view)
+    expect(visible).toContain('已稳定返回两名匹配用户')
+    for (const machineValue of ['phase_completion_intent', 'case-sensitive-1', 'agent-phase:validation-1', 'validator-bot', 'CaseID', 'IdempotencyKey', 'ActorID', 'OutputJSON', 'scenario_hash']) {
+      expect(visible).not.toContain(machineValue)
+    }
+  })
+
+  it.each([
+    ['missing nested output', { kind: 'phase_completion_intent', version: 1, command: { CaseID: 'secret-case', ActorID: 'secret-actor' } }],
+    ['malformed nested output', { kind: 'phase_completion_intent', version: 1, command: { OutputJSON: 'raw-command-json', IdempotencyKey: 'secret-key' }, arbitrary_envelope_field: 'secret-envelope' }],
+  ])('safely presents a completion intent with %s', (_name, output) => {
+    const view = presentStageAttempt(attempt('validation', output))
+
+    expect(view).toMatchObject({ resultLabel: '结果待恢复', tone: 'info' })
+    expect(view.sections).toEqual([{ title: '阶段结果', text: '阶段结果正在恢复，请稍后刷新' }])
+    const visible = JSON.stringify(view)
+    for (const machineValue of ['phase_completion_intent', 'secret-case', 'secret-actor', 'raw-command-json', 'secret-key', 'secret-envelope', 'CaseID', 'ActorID', 'IdempotencyKey', 'arbitrary_envelope_field']) {
+      expect(visible).not.toContain(machineValue)
+    }
+  })
+
   it('presents investigation root cause and confidence', () => {
     const view = presentStageAttempt(attempt('investigation', {
       investigation_status: 'root_cause_ready', environment: 'test', root_cause: '昵称搜索只取首条精确匹配', confidence: 'high', gaps: [], evidence: [],
     }))
 
     expect(view).toMatchObject({ phaseLabel: '排障', resultLabel: '根因已确认', tone: 'success', environment: 'test' })
-    expect(view.sections[0]).toMatchObject({ title: '根因结论', fields: [{ label: '', value: '昵称搜索只取首条精确匹配' }] })
-    expect(view.sections[1]).toMatchObject({ title: '置信度', fields: [{ label: '', value: '高' }] })
+    expect(view.sections[0]).toMatchObject({ title: '根因结论', text: '昵称搜索只取首条精确匹配' })
+    expect(view.sections[1]).toMatchObject({ title: '置信度', text: '高' })
+  })
+
+  it('presents a successful regression result directly', () => {
+    const view = presentStageAttempt(attempt('regression', {
+      verification_status: 'fixed_verified', environment: 'test',
+      expected_behavior: '昵称搜索返回全部匹配项', observed_behavior: '回归验证通过', gaps: [], evidence: [],
+    }))
+
+    expect(view).toMatchObject({ phaseLabel: '回归验证', resultLabel: '修复已验证', tone: 'success' })
   })
 
   it('presents fix changes, tests, branches, deployment notice and risks', () => {
@@ -50,7 +102,7 @@ describe('presentStageAttempt', () => {
     const view = presentStageAttempt(attempt('investigation', { summary: '旧版阶段结论', notes: ['第一项', '第二项'], metadata: { owner: 'search-team', retried: true } }))
     expect(view.resultLabel).toBe('阶段结果')
     expect(view.sections).toEqual([
-      { title: '阶段结论', fields: [{ label: '', value: '旧版阶段结论' }] },
+      { title: '阶段结论', text: '旧版阶段结论' },
       { title: '备注', items: ['第一项', '第二项'] },
       { title: '元数据', groups: [[{ label: '负责人', value: 'search-team' }, { label: '是否重试', value: '是' }]] },
     ])
@@ -60,5 +112,21 @@ describe('presentStageAttempt', () => {
       ...(section.groups || []).flatMap(group => group.map(field => `${field.label}${field.value}`)),
     ]).join(' ')
     expect(visibleText).not.toContain('{"')
+  })
+
+  it('keeps unknown fallback values readable without exposing machine key names', () => {
+    const view = presentStageAttempt(attempt('investigation', {
+      queue_depth_limit: 27,
+      retry_window_seconds: '60 秒',
+      custom_operator_notes: ['首次重试成功', '继续观察'],
+      opaque_runtime_group: { current_value: true, threshold_value: 30 },
+    }))
+
+    const visible = JSON.stringify(view)
+    for (const value of ['27', '60 秒', '首次重试成功', '继续观察', '是', '30']) expect(visible).toContain(value)
+    for (const machineKey of ['queue_depth_limit', 'retry_window_seconds', 'custom_operator_notes', 'opaque_runtime_group', 'current_value', 'threshold_value', 'queue depth limit', 'retry window seconds']) {
+      expect(visible).not.toContain(machineKey)
+    }
+    expect(view.sections.map(section => section.title)).toEqual(['补充信息', '补充信息', '补充信息', '补充信息'])
   })
 })

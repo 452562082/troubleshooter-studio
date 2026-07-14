@@ -2,7 +2,7 @@ import type { PhaseAttempt } from './bridge/bugWorkflow'
 
 export type StageTone = 'neutral' | 'success' | 'warning' | 'danger' | 'info'
 export interface StageField { label: string; value: string; mono?: boolean }
-export interface StageSection { title: string; tone?: StageTone; fields?: StageField[]; items?: string[]; groups?: StageField[][]; emptyText?: string }
+export interface StageSection { title: string; tone?: StageTone; text?: string; fields?: StageField[]; items?: string[]; groups?: StageField[][]; emptyText?: string }
 export interface StageAttemptPresentation {
   phaseLabel: string
   attemptStatusLabel: string
@@ -45,6 +45,10 @@ function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.flatMap(item => typeof item === 'string' && item.trim() ? [item.trim()] : []) : []
 }
 
+function scalarList(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(scalarText).filter(Boolean) : []
+}
+
 function objectList(value: unknown): DataRecord[] {
   return Array.isArray(value) ? value.map(recordValue).filter(item => Object.keys(item).length > 0) : []
 }
@@ -58,16 +62,16 @@ function scalarText(value: unknown): string {
   return ''
 }
 
-function fieldLabel(key: string): string {
-  return fieldLabels[key] || key.split('_').join(' ')
+function fieldLabel(key: string, generic = false): string {
+  return fieldLabels[key] || (generic ? '内容' : key.split('_').join(' '))
 }
 
-function fieldsFromRecord(value: DataRecord, renameSummary = false): StageField[] {
+function fieldsFromRecord(value: DataRecord, renameSummary = false, generic = false): StageField[] {
   return Object.entries(value).flatMap(([key, raw]) => {
     const text = scalarText(raw)
     if (!text) return []
     const normalizedKey = renameSummary && key === 'summary' ? 'summary_text' : key
-    return [{ label: fieldLabel(normalizedKey), value: text, ...(monoKeys.has(key) ? { mono: true } : {}) }]
+    return [{ label: fieldLabel(normalizedKey, generic), value: text, ...(monoKeys.has(key) ? { mono: true } : {}) }]
   })
 }
 
@@ -84,7 +88,7 @@ function basePresentation(attempt: PhaseAttempt, result: { label: string; tone: 
 
 function textSection(title: string, value: unknown, tone?: StageTone): StageSection | undefined {
   const text = stringValue(value)
-  return text ? { title, ...(tone ? { tone } : {}), fields: [{ label: '', value: text }] } : undefined
+  return text ? { title, ...(tone ? { tone } : {}), text } : undefined
 }
 
 function listSection(title: string, value: unknown, tone?: StageTone): StageSection | undefined {
@@ -141,33 +145,29 @@ function presentFix(attempt: PhaseAttempt, output: DataRecord): StageAttemptPres
 function fallbackSections(output: DataRecord): StageSection[] {
   const sections: StageSection[] = []
   const conclusionKey = ['summary', 'conclusion', 'report'].find(key => stringValue(output[key]))
-  if (conclusionKey) sections.push({ title: '阶段结论', fields: [{ label: '', value: stringValue(output[conclusionKey]) }] })
+  if (conclusionKey) sections.push({ title: '阶段结论', text: stringValue(output[conclusionKey]) })
   const ignored = new Set(['summary', 'conclusion', 'report', 'environment', 'scenario_hash', 'verification_status', 'investigation_status', 'fix_status'])
   for (const [key, value] of Object.entries(output)) {
     if (ignored.has(key)) continue
-    const title = fieldLabel(key)
+    const title = fieldLabels[key] || '补充信息'
     if (Array.isArray(value)) {
-      const items = stringList(value)
-      if (items.length === value.length && items.length) sections.push({ title, items })
-      else {
-        const groups = objectList(value).map(item => fieldsFromRecord(item)).filter(group => group.length > 0)
-        if (groups.length) sections.push({ title, groups })
-      }
+      const items = scalarList(value)
+      const groups = objectList(value).map(item => fieldsFromRecord(item, false, true)).filter(group => group.length > 0)
+      if (items.length || groups.length) sections.push({ title, ...(items.length ? { items } : {}), ...(groups.length ? { groups } : {}) })
       continue
     }
     if (value !== null && typeof value === 'object') {
-      const group = fieldsFromRecord(recordValue(value))
+      const group = fieldsFromRecord(recordValue(value), false, true)
       if (group.length) sections.push({ title, groups: [group] })
       continue
     }
     const text = scalarText(value)
-    if (text) sections.push({ title, fields: [{ label: '', value: text }] })
+    if (text) sections.push({ title, text })
   }
   return sections
 }
 
-export function presentStageAttempt(attempt: PhaseAttempt): StageAttemptPresentation {
-  const output = recordValue(attempt.output_json)
+function presentOutput(attempt: PhaseAttempt, output: DataRecord): StageAttemptPresentation {
   if ((attempt.phase === 'validation' || attempt.phase === 'regression') && typeof output.verification_status === 'string') return presentValidation(attempt, output)
   if (attempt.phase === 'investigation' && typeof output.investigation_status === 'string') return presentInvestigation(attempt, output)
   if (attempt.phase === 'fix' && typeof output.fix_status === 'string') return presentFix(attempt, output)
@@ -175,4 +175,17 @@ export function presentStageAttempt(attempt: PhaseAttempt): StageAttemptPresenta
     phaseLabel: phaseLabels[attempt.phase], attemptStatusLabel: attemptStatusLabels[attempt.status], resultLabel: '阶段结果', tone: attempt.status === 'failed' ? 'danger' : 'neutral',
     environment: stringValue(output.environment), startedAt: attempt.started_at, finishedAt: attempt.finished_at || '', sections: fallbackSections(output),
   }
+}
+
+export function presentStageAttempt(attempt: PhaseAttempt): StageAttemptPresentation {
+  const output = recordValue(attempt.output_json)
+  if (output.kind !== 'phase_completion_intent') return presentOutput(attempt, output)
+
+  const command = recordValue(output.command)
+  const nestedOutput = recordValue(command.OutputJSON)
+  if (output.version === 1 && Object.keys(nestedOutput).length > 0) return presentOutput(attempt, nestedOutput)
+
+  const pending = basePresentation(attempt, { label: '结果待恢复', tone: 'info' }, '')
+  pending.sections.push({ title: '阶段结果', text: '阶段结果正在恢复，请稍后刷新' })
+  return pending
 }

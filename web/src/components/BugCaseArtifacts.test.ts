@@ -1,4 +1,5 @@
 import { mount } from '@vue/test-utils'
+import { reactive } from 'vue'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { IncidentCaseDetail } from '../lib/bridge/bugWorkflow'
 import BugCaseArtifacts from './BugCaseArtifacts.vue'
@@ -71,6 +72,33 @@ describe('BugCaseArtifacts', () => {
     expect(viewport.scrollTop).toBe(640)
     expect(scrollIntoView).not.toHaveBeenCalled()
     expect(pageScroll).not.toHaveBeenCalled()
+  })
+
+  it('scrolls after output, status and error mutate in place inside an existing attempt', async () => {
+    vi.spyOn(Element.prototype, 'scrollHeight', 'get').mockReturnValue(720)
+    const mutableDetail = reactive(structuredClone(detail))
+    const wrapper = mount(BugCaseArtifacts, { props: { detail: mutableDetail } })
+    await wrapper.vm.$nextTick()
+    await wrapper.vm.$nextTick()
+    const viewport = wrapper.get<HTMLElement>('.attempt-output-scroll').element
+
+    viewport.scrollTop = 100
+    mutableDetail.attempts[0].output_json.summary = '原地更新的阶段结论'
+    await wrapper.vm.$nextTick()
+    await wrapper.vm.$nextTick()
+    expect(viewport.scrollTop).toBe(720)
+
+    viewport.scrollTop = 110
+    mutableDetail.attempts[0].status = 'failed'
+    await wrapper.vm.$nextTick()
+    await wrapper.vm.$nextTick()
+    expect(viewport.scrollTop).toBe(720)
+
+    viewport.scrollTop = 120
+    mutableDetail.attempts[0].error_message = '原地更新的错误'
+    await wrapper.vm.$nextTick()
+    await wrapper.vm.$nextTick()
+    expect(viewport.scrollTop).toBe(720)
   })
 
   it('follows a switched Case and does not reset scrolling without a data change', async () => {

@@ -55,7 +55,7 @@ func TestResetCaseAuditsSuccessfulExternalRunnerCancellation(t *testing.T) {
 	if outcome.Case.ID != cmd.NewCaseID || len(outcome.Warnings) != 0 {
 		t.Fatalf("outcome=%+v", outcome)
 	}
-	fingerprint, err := caseResetFingerprint(CaseReset{CaseID: cmd.CaseID, NewCaseID: cmd.NewCaseID, IdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, ExpectedVersion: cmd.ExpectedVersion, SelectedBotKey: cmd.Bot.Key, RequestJSON: mustJSON(cmd)})
+	fingerprint, err := caseResetFingerprint(CaseReset{CaseID: cmd.CaseID, NewCaseID: cmd.NewCaseID, IdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, ExpectedVersion: cmd.ExpectedVersion, SelectedBotKey: cmd.Bot.Key, ReplacementBotTarget: cmd.Bot.Target, ReplacementEnvironment: cmd.Bug.Env, RequestJSON: mustJSON(cmd)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestResetCancellationClaimedReplayReturnsUnknownWithoutCallingRunner(t *tes
 	store := newOrchestratorStore(t)
 	old, _ := prepareResetCase(t, store, "case-reset-claimed")
 	command := resetOrchestratorCommand(old, "case-reset-claimed-next", "reset-claimed")
-	storeCommand := CaseReset{CaseID: command.CaseID, NewCaseID: command.NewCaseID, IdempotencyKey: command.IdempotencyKey, ActorID: command.ActorID, ExpectedVersion: command.ExpectedVersion, SelectedBotKey: command.Bot.Key, RequestJSON: mustJSON(command)}
+	storeCommand := CaseReset{CaseID: command.CaseID, NewCaseID: command.NewCaseID, IdempotencyKey: command.IdempotencyKey, ActorID: command.ActorID, ExpectedVersion: command.ExpectedVersion, SelectedBotKey: command.Bot.Key, ReplacementBotTarget: command.Bot.Target, ReplacementEnvironment: command.Bug.Env, RequestJSON: mustJSON(command)}
 	if _, err := store.ResetCaseWithReplacement(context.Background(), storeCommand); err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +340,7 @@ func TestResetCaseCancelFailureStillReturnsStartedReplacement(t *testing.T) {
 	if !reflect.DeepEqual(outcome.Warnings, []WorkflowWarning{{Code: "reset_runner_cancel_failed", Message: "旧阶段 Agent 未能确认停止，请人工检查其运行状态。"}}) {
 		t.Fatalf("warnings=%+v", outcome.Warnings)
 	}
-	fingerprint, err := caseResetFingerprint(CaseReset{CaseID: cmd.CaseID, NewCaseID: cmd.NewCaseID, IdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, ExpectedVersion: cmd.ExpectedVersion, SelectedBotKey: cmd.Bot.Key, RequestJSON: mustJSON(cmd)})
+	fingerprint, err := caseResetFingerprint(CaseReset{CaseID: cmd.CaseID, NewCaseID: cmd.NewCaseID, IdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, ExpectedVersion: cmd.ExpectedVersion, SelectedBotKey: cmd.Bot.Key, ReplacementBotTarget: cmd.Bot.Target, ReplacementEnvironment: cmd.Bug.Env, RequestJSON: mustJSON(cmd)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -603,7 +603,7 @@ func TestResetCaseValidatesDurableExecutionBindingBeforeMutation(t *testing.T) {
 }
 
 func resetOrchestratorCommand(incident IncidentCase, newCaseID, key string) ResetCaseCommand {
-	return ResetCaseCommand{CaseID: incident.ID, NewCaseID: newCaseID, ExpectedVersion: incident.Version, IdempotencyKey: key, ActorID: "alice", Bug: Bug{ID: incident.BugID, Source: incident.Source, SystemID: incident.SystemID, Env: incident.Environment}, Bot: BotRef{Key: "validator", Target: "codex"}, InputJSON: []byte(`{"reason":"retry"}`)}
+	return ResetCaseCommand{CaseID: incident.ID, NewCaseID: newCaseID, ExpectedVersion: incident.Version, IdempotencyKey: key, ActorID: "alice", Bug: Bug{ID: incident.BugID, Source: incident.Source, SystemID: incident.SystemID, Env: incident.Environment}, Bot: BotRef{Key: incident.SelectedBotKey, Target: "codex"}, InputJSON: []byte(`{"reason":"retry"}`)}
 }
 
 func TestResetCaseWithReplacementIsAtomic(t *testing.T) {

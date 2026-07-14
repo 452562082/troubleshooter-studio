@@ -413,7 +413,7 @@ func createV6CommittedResetFixture(t *testing.T, auditType, auditPayload string)
 		t.Fatal(err)
 	}
 	command := ResetCaseCommand{CaseID: archived.ID, NewCaseID: replacement.ID, ExpectedVersion: 1, IdempotencyKey: "legacy-reset-key", ActorID: "alice", Bug: Bug{ID: archived.BugID, Source: archived.Source, SystemID: archived.SystemID, Env: archived.Environment}, Bot: BotRef{Key: archived.SelectedBotKey, Target: "codex", Env: archived.Environment}, InputJSON: []byte(`{}`)}
-	reset := CaseReset{CaseID: command.CaseID, NewCaseID: command.NewCaseID, IdempotencyKey: command.IdempotencyKey, ActorID: command.ActorID, ExpectedVersion: command.ExpectedVersion, SelectedBotKey: command.Bot.Key, RequestJSON: mustJSON(command)}
+	reset := CaseReset{CaseID: command.CaseID, NewCaseID: command.NewCaseID, IdempotencyKey: command.IdempotencyKey, ActorID: command.ActorID, ExpectedVersion: command.ExpectedVersion, SelectedBotKey: command.Bot.Key, ReplacementBotTarget: command.Bot.Target, ReplacementEnvironment: command.Bug.Env, RequestJSON: mustJSON(command)}
 	resetFingerprint, err := caseResetFingerprint(reset)
 	if err != nil {
 		t.Fatal(err)

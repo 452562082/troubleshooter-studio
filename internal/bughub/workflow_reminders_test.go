@@ -206,7 +206,7 @@ func TestReminderNeverEmitsForResetArchive(t *testing.T) {
 	store := openWorkflowTestStore(t)
 	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
 	old := reminderCase(t, store, "reset-reminder", "test", now.Add(-30*time.Hour), CaseWaitingDeployment)
-	reset, err := store.ResetCaseWithReplacement(context.Background(), CaseReset{CaseID: old.ID, NewCaseID: "reset-reminder-next", ExpectedVersion: old.Version, IdempotencyKey: "reset-reminder-key", ActorID: "alice", SelectedBotKey: "validator", RequestJSON: []byte(`{"reason":"retry"}`)})
+	reset, err := store.ResetCaseWithReplacement(context.Background(), CaseReset{CaseID: old.ID, NewCaseID: "reset-reminder-next", ExpectedVersion: old.Version, IdempotencyKey: "reset-reminder-key", ActorID: "alice", SelectedBotKey: "validator", ReplacementBotTarget: "codex", ReplacementEnvironment: old.Environment, RequestJSON: []byte(`{"reason":"retry"}`)})
 	if err != nil {
 		t.Fatal(err)
 	}

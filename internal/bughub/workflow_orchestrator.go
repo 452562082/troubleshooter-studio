@@ -518,13 +518,15 @@ func (o *CaseOrchestrator) ResetCaseWithOutcome(ctx context.Context, cmd ResetCa
 		}
 	}
 	resetRequest := CaseReset{
-		CaseID:          cmd.CaseID,
-		NewCaseID:       cmd.NewCaseID,
-		IdempotencyKey:  cmd.IdempotencyKey,
-		ActorID:         cmd.ActorID,
-		ExpectedVersion: cmd.ExpectedVersion,
-		SelectedBotKey:  cmd.Bot.Key,
-		RequestJSON:     mustJSON(cmd),
+		CaseID:                 cmd.CaseID,
+		NewCaseID:              cmd.NewCaseID,
+		IdempotencyKey:         cmd.IdempotencyKey,
+		ActorID:                cmd.ActorID,
+		ExpectedVersion:        cmd.ExpectedVersion,
+		SelectedBotKey:         cmd.Bot.Key,
+		ReplacementBotTarget:   cmd.Bot.Target,
+		ReplacementEnvironment: environment,
+		RequestJSON:            mustJSON(cmd),
 	}
 	fingerprint, err := caseResetFingerprint(resetRequest)
 	if err != nil {

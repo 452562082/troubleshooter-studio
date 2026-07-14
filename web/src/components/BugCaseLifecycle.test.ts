@@ -231,4 +231,11 @@ describe('BugCaseLifecycle', () => {
     expect(source).toMatch(/\.case-lifecycle \{[^}]*min-width: 0;/)
     expect(source).toMatch(/\.case-column \{[^}]*min-width: 0;/)
   })
+
+  it('allows all six stage columns to shrink until the 560px two-column breakpoint', () => {
+    const source = readFileSync('src/components/BugCaseLifecycle.vue', 'utf8')
+
+    expect(source).toMatch(/\.stage-progress \{[^}]*grid-template-columns: repeat\(6, minmax\(0, 1fr\)\);/)
+    expect(source).toMatch(/@media \(max-width: 560px\)[\s\S]*?\.stage-progress \{ grid-template-columns: repeat\(2, minmax\(0, 1fr\)\); \}/)
+  })
 })

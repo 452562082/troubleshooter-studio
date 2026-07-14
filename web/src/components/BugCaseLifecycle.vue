@@ -343,7 +343,7 @@ h2, h3, p { margin: 0; }
 .case-heading > div { min-width: 0; }
 .case-heading > div > span { display: block; margin-bottom: 2px; }
 .status-pill { flex: 0 0 auto; padding: 6px 9px; border: 1px solid var(--c-line); border-radius: 999px; background: var(--c-surf-2); }
-.stage-progress { display: grid; grid-template-columns: repeat(6, minmax(60px, 1fr)); gap: 5px; margin: 0; padding: 0; list-style: none; }
+.stage-progress { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 5px; margin: 0; padding: 0; list-style: none; }
 .lifecycle-stage { min-width: 0; display: flex; align-items: center; gap: 6px; padding: 8px 5px; border-top: 3px solid var(--c-line-2); }
 .stage-marker { flex: 0 0 25px; width: 25px; height: 25px; display: grid; place-items: center; border-radius: 50%; background: var(--c-surf-3); color: var(--c-muted); font-size: var(--fs-xs); font-weight: 700; }
 .lifecycle-stage > span:last-child { min-width: 0; display: grid; gap: 1px; }

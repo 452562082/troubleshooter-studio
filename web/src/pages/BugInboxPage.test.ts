@@ -23,6 +23,7 @@ import {
 } from '../lib/bridge'
 import { copyToClipboard } from '../lib/clipboard'
 import { confirmDialog } from '../lib/confirm'
+import { toast } from '../lib/toast'
 import BugInboxPage from './BugInboxPage.vue'
 
 const router = vi.hoisted(() => ({ push: vi.fn() }))
@@ -359,7 +360,7 @@ describe('BugInboxPage', () => {
     const addBot = wrapper.get('[data-action="toggle-bot-picker"]')
     expect(addBot.find('svg[aria-hidden="true"]').exists()).toBe(true)
 
-    const sync = wrapper.get('[data-action="sync-platform"]')
+    const sync = wrapper.get('[data-action="sync-enabled-platforms"]')
     expect(sync.classes()).toContain('secondary-button')
     expect(sync.classes()).not.toContain('accent-button')
     expect(sync.classes()).not.toContain('primary-button')
@@ -377,82 +378,89 @@ describe('BugInboxPage', () => {
     expect(footer.get('[data-action="save-platform"]').classes()).toContain('primary-button')
   })
 
-  it('keeps platform sync separate from local list refresh', async () => {
-    const platform = {
-      id: 'zentao-main', name: '测试环境', type: 'zentao',
-      auth_mode: 'feishu_sso', enabled: true,
-    }
-    vi.mocked(listBugPlatforms).mockResolvedValue([platform])
-    vi.mocked(listBugs).mockResolvedValue([bug])
-    vi.mocked(syncBugPlatform).mockResolvedValue({
-      platform_id: 'zentao-main', fetched: 1, stored: 1,
-    })
+  it('synchronizes every enabled platform and refreshes the local list once', async () => {
+    vi.mocked(listBugPlatforms).mockResolvedValue([
+      { id: 'zentao-a', name: '禅道 A', type: 'zentao', enabled: true },
+      { id: 'zentao-off', name: '停用平台', type: 'zentao', enabled: false },
+      { id: 'zentao-b', name: '禅道 B', type: 'zentao', enabled: true },
+    ])
+    let resolveFirst!: (result: { platform_id: string; fetched: number; stored: number }) => void
+    vi.mocked(syncBugPlatform)
+      .mockImplementationOnce(() => new Promise(resolve => {
+        resolveFirst = resolve
+      }))
+      .mockResolvedValueOnce({ platform_id: 'zentao-b', fetched: 1, stored: 1 })
     const wrapper = await mountedInbox()
-    await wrapper.get('[data-action="toggle-platform-config"]').trigger('click')
-
     vi.mocked(listBugs).mockClear()
-    vi.mocked(syncBugPlatform).mockClear()
-    const refresh = wrapper.get('[data-action="refresh-tickets"]')
-    expect(refresh.text()).toContain('刷新列表')
-    expect(refresh.find('svg[aria-hidden="true"]').exists()).toBe(true)
-    await refresh.trigger('click')
-    await flushPromises()
-    expect(listBugs).toHaveBeenCalledTimes(1)
-    expect(syncBugPlatform).not.toHaveBeenCalled()
 
-    vi.mocked(listBugs).mockClear()
-    const sync = wrapper.get('[data-action="sync-platform"]')
-    expect(sync.text()).toContain('从平台同步')
-    expect(sync.find('svg[aria-hidden="true"]').exists()).toBe(true)
-    await sync.trigger('click')
-    await flushPromises()
-    expect(syncBugPlatform).toHaveBeenCalledWith('zentao-main')
-    expect(listBugs).toHaveBeenCalledTimes(1)
-  })
-
-  it('shows a disabled loading state while refreshing the local list', async () => {
-    const wrapper = await mountedInbox()
-    let resolveRefresh!: (bugs: (typeof bug)[]) => void
-    vi.mocked(listBugs).mockImplementationOnce(() => new Promise(resolve => {
-      resolveRefresh = resolve
-    }))
-
-    const refresh = wrapper.get('[data-action="refresh-tickets"]')
-    await refresh.trigger('click')
+    await wrapper.get('[data-action="sync-enabled-platforms"]').trigger('click')
     await wrapper.vm.$nextTick()
-    expect(refresh.attributes('disabled')).toBeDefined()
-    expect(refresh.text()).toContain('刷新中…')
-    expect(refresh.get('svg').classes()).toContain('spinning')
 
-    resolveRefresh([bug])
+    expect(vi.mocked(syncBugPlatform).mock.calls).toEqual([['zentao-a']])
+    resolveFirst({ platform_id: 'zentao-a', fetched: 2, stored: 2 })
     await flushPromises()
-    expect(refresh.attributes('disabled')).toBeUndefined()
-    expect(refresh.text()).toContain('刷新列表')
+
+    expect(vi.mocked(syncBugPlatform).mock.calls).toEqual([['zentao-a'], ['zentao-b']])
+    expect(listBugs).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('[data-action="sync-platform"]').exists()).toBe(false)
   })
 
-  it('shows a disabled loading state while synchronizing the platform', async () => {
-    const platform = {
-      id: 'zentao-main', name: '测试环境', type: 'zentao',
-      auth_mode: 'feishu_sso', enabled: true,
-    }
-    vi.mocked(listBugPlatforms).mockResolvedValue([platform])
+  it('continues synchronizing after a failed platform and reports its name', async () => {
+    vi.mocked(listBugPlatforms).mockResolvedValue([
+      { id: 'zentao-a', name: '禅道 A', type: 'zentao', enabled: true },
+      { id: 'zentao-b', name: '禅道 B', type: 'zentao', enabled: true },
+    ])
+    vi.mocked(syncBugPlatform)
+      .mockRejectedValueOnce(new Error('登录过期'))
+      .mockResolvedValueOnce({ platform_id: 'zentao-b', fetched: 1, stored: 1 })
     const wrapper = await mountedInbox()
-    await wrapper.get('[data-action="toggle-platform-config"]').trigger('click')
+    vi.mocked(listBugs).mockClear()
+
+    await wrapper.get('[data-action="sync-enabled-platforms"]').trigger('click')
+    await flushPromises()
+
+    expect(vi.mocked(syncBugPlatform).mock.calls).toEqual([['zentao-a'], ['zentao-b']])
+    expect(listBugs).toHaveBeenCalledTimes(1)
+    expect(toast.error).toHaveBeenCalledWith(expect.stringContaining('禅道 A'))
+  })
+
+  it('shows 请先启用 Bug 平台 when no enabled platform exists', async () => {
+    vi.mocked(listBugPlatforms).mockResolvedValue([
+      { id: 'zentao-off', name: '停用平台', type: 'zentao', enabled: false },
+    ])
+    const wrapper = await mountedInbox()
+    vi.mocked(listBugs).mockClear()
+
+    await wrapper.get('[data-action="sync-enabled-platforms"]').trigger('click')
+    await flushPromises()
+
+    expect(syncBugPlatform).not.toHaveBeenCalled()
+    expect(listBugs).not.toHaveBeenCalled()
+    expect(toast.info).toHaveBeenCalledWith('请先启用 Bug 平台')
+  })
+
+  it('shows a disabled loading state while synchronizing enabled platforms', async () => {
+    vi.mocked(listBugPlatforms).mockResolvedValue([
+      { id: 'zentao-main', name: '测试环境', type: 'zentao', enabled: true },
+    ])
     let resolveSync!: (result: { platform_id: string; fetched: number; stored: number }) => void
     vi.mocked(syncBugPlatform).mockImplementationOnce(() => new Promise(resolve => {
       resolveSync = resolve
     }))
+    const wrapper = await mountedInbox()
 
-    const sync = wrapper.get('[data-action="sync-platform"]')
+    const sync = wrapper.get('[data-action="sync-enabled-platforms"]')
     await sync.trigger('click')
     await wrapper.vm.$nextTick()
     expect(sync.attributes('disabled')).toBeDefined()
     expect(sync.text()).toContain('同步中…')
+    expect(sync.get('svg').classes()).toContain('spinning')
 
     resolveSync({ platform_id: 'zentao-main', fetched: 1, stored: 1 })
     await flushPromises()
     expect(sync.attributes('disabled')).toBeUndefined()
-    expect(sync.text()).toContain('从平台同步')
+    expect(sync.text()).toContain('同步我的 Bug')
+    expect(sync.get('svg').classes()).not.toContain('spinning')
   })
 
   it('associates visible labels with bot environment, bot search, and manual Bug controls', async () => {
@@ -535,7 +543,7 @@ describe('BugInboxPage', () => {
     const newPlatform = wrapper.get('[data-action="new-platform"]')
     expect(newPlatform.text()).toContain('新建平台')
     expect(newPlatform.find('svg[aria-hidden="true"]').exists()).toBe(true)
-    expect(wrapper.text()).toContain('从平台同步')
+    expect(wrapper.get('[data-action="sync-enabled-platforms"]').text()).toContain('同步我的 Bug')
     expect(wrapper.find('input[placeholder="指派人账号,仅后台同步时用于筛选"]').exists()).toBe(false)
     expect(wrapper.find('input[placeholder="Hook Secret,留空自动生成"]').exists()).toBe(false)
     expect(wrapper.get('[data-action="login-platform"]').attributes('disabled')).toBeUndefined()
@@ -613,7 +621,7 @@ describe('BugInboxPage', () => {
     await flushPromises()
     expect(loginBugPlatform).toHaveBeenCalledWith({ platform_id: 'zentao-main' })
 
-    await wrapper.get('[data-action="sync-platform"]').trigger('click')
+    await wrapper.get('[data-action="sync-enabled-platforms"]').trigger('click')
     await flushPromises()
     expect(syncBugPlatform).toHaveBeenCalledWith('zentao-main')
 

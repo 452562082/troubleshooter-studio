@@ -232,17 +232,37 @@ async function deleteSelectedPlatform() {
   }
 }
 
-async function syncSelectedPlatform() {
-  const platform = selectedPlatform.value
-  if (!platform) return toast.error('请先选择平台')
+function syncErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String((error as any)?.message ?? error)
+}
+
+async function syncEnabledPlatforms() {
+  const enabled = platforms.value.filter(platform => platform.enabled)
+  if (!enabled.length) {
+    toast.info('请先启用 Bug 平台')
+    return
+  }
   syncingBugs.value = true
+  let stored = 0
+  const failures: string[] = []
   try {
-    const result = await syncBugPlatform(platform.id)
-    if (result.selected_bug_id) tickets.select(result.selected_bug_id)
+    for (const platform of enabled) {
+      try {
+        const result = await syncBugPlatform(platform.id)
+        stored += result.stored
+      } catch (error) {
+        failures.push(`${platform.name || platform.id}：${syncErrorMessage(error)}`)
+      }
+    }
     await loadTickets()
-    toast.success(`已同步指派给我的 Bug,新增/更新 ${result.stored} 条`)
-  } catch (error) {
-    toastError('同步 Bug', error)
+    const succeeded = enabled.length - failures.length
+    if (!failures.length) {
+      toast.success(`已同步 ${succeeded} 个平台，新增/更新 ${stored} 条`)
+    } else if (succeeded > 0) {
+      toast.error(`已同步 ${succeeded} 个平台，${failures.length} 个平台失败；新增/更新 ${stored} 条。${failures.join('；')}`)
+    } else {
+      toast.error(`所有已启用平台同步失败：${failures.join('；')}`)
+    }
   } finally {
     syncingBugs.value = false
   }
@@ -499,10 +519,6 @@ function eventValue(event: Event): string {
           <label class="interval-control">每 <input v-model.number="platformDraft.poll_interval_minutes" aria-label="后台同步间隔分钟" type="number" min="1" :disabled="!platformDraft.poll_enabled"> 分钟</label>
         </div>
         <div class="trigger-row">
-          <button class="compact-button secondary-button" type="button" data-action="sync-platform" :disabled="!selectedPlatform || syncingBugs" @click="syncSelectedPlatform">
-            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none"><path d="M20 7h-5V2M4 17h5v5M18.5 11a7 7 0 0 0-11.9-4.9L4 8M5.5 13a7 7 0 0 0 11.9 4.9L20 16" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
-            {{ syncingBugs ? '同步中…' : '从平台同步' }}
-          </button>
           <label class="field-label manual-bug-field" :for="manualBugFieldID"><span>指定 Bug</span><input :id="manualBugFieldID" v-model="manualBugID" class="form-control" placeholder="Bug ID 或飞书消息" @keyup.enter="fetchManualBug"></label>
           <button class="compact-button secondary-button" type="button" data-action="fetch-bug" :disabled="!selectedPlatform || !manualBugID.trim() || fetchingBug" @click="fetchManualBug">拉取指定 Bug</button>
         </div>
@@ -513,9 +529,9 @@ function eventValue(event: Event): string {
 
     <section class="inbox-workspace" data-overflow-safe="true">
       <aside class="ticket-list-panel" data-overflow-safe="true">
-        <button class="compact-button secondary-button refresh-button" type="button" data-action="refresh-tickets" :aria-label="tickets.loading.value ? '正在刷新本地 Bug 列表' : '刷新本地 Bug 列表'" :disabled="tickets.loading.value" @click="loadTickets">
-          <svg aria-hidden="true" :class="{ spinning: tickets.loading.value }" viewBox="0 0 24 24" fill="none"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
-          {{ tickets.loading.value ? '刷新中…' : '刷新列表' }}
+        <button class="compact-button secondary-button refresh-button" type="button" data-action="sync-enabled-platforms" :aria-label="syncingBugs ? '正在同步我的 Bug' : '同步我的 Bug'" :disabled="syncingBugs || tickets.loading.value" @click="syncEnabledPlatforms">
+          <svg aria-hidden="true" :class="{ spinning: syncingBugs }" viewBox="0 0 24 24" fill="none"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
+          {{ syncingBugs ? '同步中…' : '同步我的 Bug' }}
         </button>
         <BugTicketList
           :bugs="tickets.filteredBugs.value"

@@ -33,8 +33,8 @@ function bugGrade(bug?: BugRecord): string {
   return [gradePart('S', bug.severity), gradePart('P', bug.priority)].filter(Boolean).join(' · ') || '-'
 }
 
-function isValidHTMLDateTime(value: string, parsed: Date): boolean {
-  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}:\d{2})?$/.exec(value)
+function isValidSourceDateTime(value: string, parsed: Date): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(Z|[+-]\d{2}:\d{2})?$/.exec(value)
   if (!match) return false
 
   const year = Number(match[1])
@@ -43,7 +43,7 @@ function isValidHTMLDateTime(value: string, parsed: Date): boolean {
   const hour = Number(match[4])
   const minute = Number(match[5])
   const second = Number(match[6] || 0)
-  const millisecond = Number((match[7] || '').padEnd(3, '0') || 0)
+  const millisecond = Number((match[7] || '').slice(0, 3).padEnd(3, '0') || 0)
   const zone = match[8]
   const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
   const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
@@ -75,13 +75,18 @@ function isValidHTMLDateTime(value: string, parsed: Date): boolean {
   return parsed.getTime() === expected.getTime() - offsetMinutes * 60_000
 }
 
+function normalizedHTMLDateTime(value: string, date: Date): string {
+  if (/(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return date.toISOString()
+  return value.replace(/(\.\d{3})\d+$/, '$1')
+}
+
 function formatTime(value?: string): DisplayTime {
   if (!value) return { text: '-' }
   const date = new Date(value)
-  if (Number.isNaN(date.getTime()) || !isValidHTMLDateTime(value, date)) return { text: value }
+  if (Number.isNaN(date.getTime()) || !isValidSourceDateTime(value, date)) return { text: value }
   return {
     text: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`,
-    datetime: value,
+    datetime: normalizedHTMLDateTime(value, date),
   }
 }
 </script>

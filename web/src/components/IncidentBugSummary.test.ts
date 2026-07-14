@@ -87,6 +87,21 @@ describe('IncidentBugSummary', () => {
     expect(value.element.tagName).toBe('SPAN')
   })
 
+  it.each([
+    ['UTC', '2026-07-14T10:20:30.123456789Z'],
+    ['numeric offset', '2026-07-14T10:20:30.123456789+08:00'],
+  ])('renders a nine-digit %s timestamp as semantic normalized time', (_, sourceTime) => {
+    const wrapper = mount(IncidentBugSummary, {
+      props: { bug: { ...bug, created_at: sourceTime } },
+    })
+    const value = wrapper.findAll('.incident-bug-time')[0]
+
+    expect(value.element.tagName).toBe('TIME')
+    expect(value.text()).not.toBe(sourceTime)
+    expect(value.text()).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/)
+    expect(value.attributes('datetime')).toBe(new Date(sourceTime).toISOString())
+  })
+
   it('renders an accessible empty state and responsive overflow contract', () => {
     const empty = mount(IncidentBugSummary)
     const selected = mount(IncidentBugSummary, { props: { bug } })

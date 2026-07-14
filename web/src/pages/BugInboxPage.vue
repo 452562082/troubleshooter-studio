@@ -542,10 +542,6 @@ function eventValue(event: Event): string {
 
     <section class="inbox-workspace" data-overflow-safe="true">
       <aside class="ticket-list-panel" data-overflow-safe="true">
-        <button class="compact-button secondary-button refresh-button" type="button" data-action="sync-enabled-platforms" :aria-label="syncingBugs ? '正在同步我的 Bug' : '同步我的 Bug'" :disabled="syncingBugs || tickets.loading.value" @click="syncEnabledPlatforms">
-          <svg aria-hidden="true" :class="{ spinning: syncingBugs }" viewBox="0 0 24 24" fill="none"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
-          {{ syncingBugs ? '同步中…' : '同步我的 Bug' }}
-        </button>
         <BugTicketList
           :bugs="tickets.filteredBugs.value"
           :selected-id="tickets.selectedID.value"
@@ -553,7 +549,14 @@ function eventValue(event: Event): string {
           :query="tickets.query.value"
           @select="tickets.select"
           @update:query="tickets.query.value = $event"
-        />
+        >
+          <template #actions>
+            <button class="compact-button secondary-button refresh-button" type="button" data-action="sync-enabled-platforms" :aria-label="syncingBugs ? '正在同步我的 Bug' : '同步我的 Bug'" :disabled="syncingBugs || tickets.loading.value" @click="syncEnabledPlatforms">
+              <svg aria-hidden="true" :class="{ spinning: syncingBugs }" viewBox="0 0 24 24" fill="none"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
+              {{ syncingBugs ? '同步中…' : '同步我的 Bug' }}
+            </button>
+          </template>
+        </BugTicketList>
       </aside>
       <main class="ticket-detail-panel" data-overflow-safe="true">
         <BugTicketDetail
@@ -679,8 +682,6 @@ function eventValue(event: Event): string {
 .inbox-workspace { min-width: 0; display: grid; grid-template-columns: minmax(250px, 330px) minmax(0, 1fr); gap: var(--sp-3); }
 .ticket-list-panel, .ticket-detail-panel { min-width: 0; border: 1px solid var(--c-line); border-radius: var(--r-lg); background: var(--c-surf); }
 .ticket-list-panel { position: relative; padding: var(--sp-3); overflow: auto; }
-.ticket-list-panel :deep(.list-heading) { padding-right: 112px; }
-.refresh-button { position: absolute; z-index: 1; top: var(--sp-2); right: var(--sp-2); }
 .refresh-button svg { width: 16px; height: 16px; }
 .refresh-button svg.spinning { animation: refresh-spin 800ms linear infinite; }
 @keyframes refresh-spin { to { transform: rotate(360deg); } }

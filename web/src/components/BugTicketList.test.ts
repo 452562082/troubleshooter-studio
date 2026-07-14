@@ -56,4 +56,20 @@ describe('BugTicketList', () => {
     expect(first.get('.ticket-list').attributes('aria-labelledby'))
       .not.toBe(second.get('.ticket-list').attributes('aria-labelledby'))
   })
+
+  it('renders an optional action beside the title and count in normal flow', () => {
+    const withAction = mount(BugTicketList, {
+      props: { bugs, selectedId: '', query: '' },
+      slots: { actions: '<button data-test="list-action">同步</button>' },
+    })
+    const heading = withAction.get('.list-heading')
+    expect(heading.get('.list-heading-summary strong').text()).toBe('Bug 收件箱')
+    expect(heading.get('.list-heading-summary span').text()).toBe('2 条')
+    expect(heading.get('.list-actions [data-test="list-action"]').text()).toBe('同步')
+
+    const withoutAction = mount(BugTicketList, {
+      props: { bugs, selectedId: '', query: '' },
+    })
+    expect(withoutAction.find('.list-actions').exists()).toBe(false)
+  })
 })

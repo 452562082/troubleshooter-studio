@@ -24,8 +24,13 @@ function inputValue(event: Event): string {
 <template>
   <section class="ticket-list" :aria-labelledby="`${listInstanceID}-title`">
     <header class="list-heading">
-      <strong :id="`${listInstanceID}-title`">Bug 收件箱</strong>
-      <span>{{ bugs.length }} 条</span>
+      <div class="list-heading-summary">
+        <strong :id="`${listInstanceID}-title`">Bug 收件箱</strong>
+        <span>{{ bugs.length }} 条</span>
+      </div>
+      <div v-if="$slots.actions" class="list-actions">
+        <slot name="actions" />
+      </div>
     </header>
 
     <div class="search-field">
@@ -66,9 +71,11 @@ function inputValue(event: Event): string {
 
 <style scoped>
 .ticket-list { min-width: 0; display: flex; flex-direction: column; gap: var(--sp-2); color: var(--c-text); }
-.list-heading { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-2); }
+.list-heading { min-width: 0; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--sp-2); }
+.list-heading-summary { min-width: 0; display: flex; align-items: baseline; gap: var(--sp-2); }
+.list-actions { min-width: 0; margin-left: auto; display: flex; align-items: center; }
 .list-heading strong { color: var(--c-ink); font-size: var(--fs-md); }
-.list-heading span, .search-field label { color: var(--c-muted); font-size: var(--fs-xs); }
+.list-heading-summary span, .search-field label { color: var(--c-muted); font-size: var(--fs-xs); }
 .search-field { display: grid; gap: var(--sp-1); min-width: 0; }
 .search-field label { font-weight: 600; }
 .ticket-rows { display: grid; gap: var(--sp-2); min-width: 0; }

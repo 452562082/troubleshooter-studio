@@ -133,6 +133,20 @@ describe('BugInboxPage', () => {
     wrapper.unmount()
   })
 
+  it('keeps the sync action in the Bug list heading without absolute overlap', async () => {
+    vi.mocked(listBugs).mockResolvedValue([bug])
+    const wrapper = await mountedInbox()
+    const panel = wrapper.get('.ticket-list-panel')
+    const action = panel.get('.list-heading .list-actions [data-action="sync-enabled-platforms"]')
+
+    expect(action.text()).toContain('同步我的 Bug')
+    expect(panel.find(':scope > [data-action="sync-enabled-platforms"]').exists()).toBe(false)
+
+    const source = readFileSync('src/pages/BugInboxPage.vue', 'utf8')
+    expect(source).not.toMatch(/\.refresh-button\s*\{[^}]*position:\s*absolute/)
+    expect(source).not.toContain('.ticket-list-panel :deep(.list-heading) { padding-right: 112px; }')
+  })
+
   it('declares concrete mobile touch-target and full-width save contracts', () => {
     const source = readFileSync('src/pages/BugInboxPage.vue', 'utf8')
     const mobileCSS = source.split('@media (max-width: 640px) {')[1]?.split('\n}')[0] || ''

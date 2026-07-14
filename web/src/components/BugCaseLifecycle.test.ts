@@ -51,10 +51,17 @@ describe('BugCaseLifecycle', () => {
     expect(primaryActionFor(incident(status))?.kind).toBe(kind)
   })
 
-  it('renders three semantic columns, six stages, timeline and one primary button', () => {
+  it('renders Cases and the current Case above a full-width detail region', () => {
     const wrapper = mount(BugCaseLifecycle, { props: { cases: [incident('waiting_fix_approval')], detail: detail('waiting_fix_approval') } })
+    const columns = wrapper.findAll('.case-column')
+    const source = readFileSync('src/components/BugCaseLifecycle.vue', 'utf8')
 
-    expect(wrapper.findAll('.case-column')).toHaveLength(3)
+    expect(columns).toHaveLength(3)
+    expect(columns[0].classes()).toContain('case-list-column')
+    expect(columns[1].classes()).toContain('case-main-column')
+    expect(columns[2].classes()).toContain('case-detail-column')
+    expect(source).toMatch(/\.case-lifecycle \{[^}]*grid-template-columns: minmax\(210px, \.72fr\) minmax\(0, 1\.65fr\);/)
+    expect(source).toMatch(/\.case-detail-column \{[^}]*grid-column: 1 \/ -1;/)
     expect(wrapper.findAll('.lifecycle-stage')).toHaveLength(6)
     expect(wrapper.find('[aria-label="故障处理阶段"]').exists()).toBe(true)
     expect(wrapper.find('[aria-label="Case 时间线"]').text()).toContain('transition')
@@ -217,7 +224,9 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.find('.case-lifecycle').attributes('data-overflow-safe')).toBe('true')
     const source = readFileSync('src/components/BugCaseLifecycle.vue', 'utf8')
     expect(source).toContain('@media (max-width: 899px)')
+    expect(source).not.toContain('@media (max-width: 1180px)')
     expect(source).toMatch(/@media \(max-width: 899px\)[\s\S]*?\.case-lifecycle \{ grid-template-columns: minmax\(0, 1fr\); \}/)
+    expect(source).toMatch(/@media \(max-width: 899px\)[\s\S]*?\.case-detail-column \{ grid-column: auto; \}/)
     expect(source).toContain('@media (max-width: 560px)')
     expect(source).toMatch(/\.case-lifecycle \{[^}]*min-width: 0;/)
     expect(source).toMatch(/\.case-column \{[^}]*min-width: 0;/)

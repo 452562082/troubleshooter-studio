@@ -318,7 +318,7 @@ function dialogTitle(): string {
 </template>
 
 <style scoped>
-.case-lifecycle { width: 100%; min-width: 0; display: grid; grid-template-columns: minmax(210px, .72fr) minmax(420px, 1.65fr) minmax(270px, 1fr); gap: var(--sp-3); color: var(--c-text); }
+.case-lifecycle { width: 100%; min-width: 0; display: grid; grid-template-columns: minmax(210px, .72fr) minmax(0, 1.65fr); align-items: start; gap: var(--sp-3); color: var(--c-text); }
 .case-column { min-width: 0; border: 1px solid var(--c-line); border-radius: var(--r-lg); background: var(--c-surf-2); padding: var(--sp-3); overflow-wrap: anywhere; }
 .case-list-column { display: flex; flex-direction: column; gap: var(--sp-2); }
 .column-head, .column-head > div, .case-heading, .current-action-card { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
@@ -339,6 +339,7 @@ h2, h3, p { margin: 0; }
 [data-status="waiting_evidence"]::before, [data-status="fix_failed"]::before, [data-status="merge_conflict"]::before, [data-status="deployment_unverified"]::before { background: #c2410c; }
 [data-status="validating"]::before, [data-status="investigating"]::before, [data-status="fixing"]::before, [data-status="merging"]::before, [data-status="regression_validating"]::before { background: #2563eb; }
 .case-main-column { display: flex; flex-direction: column; gap: var(--sp-4); background: var(--c-surf); }
+.case-detail-column { grid-column: 1 / -1; }
 .case-heading > div { min-width: 0; }
 .case-heading > div > span { display: block; margin-bottom: 2px; }
 .status-pill { flex: 0 0 auto; padding: 6px 9px; border: 1px solid var(--c-line); border-radius: 999px; background: var(--c-surf-2); }
@@ -390,15 +391,9 @@ h2, h3, p { margin: 0; }
 .approval-dialog footer { display: flex; justify-content: flex-end; gap: var(--sp-2); }
 .approval-dialog footer .btn { min-height: 44px; min-width: 88px; justify-content: center; }
 button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px solid rgba(37, 99, 235, .55); outline-offset: 2px; }
-@media (max-width: 1180px) {
-  .case-lifecycle { grid-template-columns: minmax(190px, .7fr) minmax(0, 1.6fr); }
-  .case-detail-column { grid-column: 1 / -1; }
-  .case-detail-column :deep(.artifact-sections) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
 @media (max-width: 899px) {
   .case-lifecycle { grid-template-columns: minmax(0, 1fr); }
   .case-detail-column { grid-column: auto; }
-  .case-detail-column :deep(.artifact-sections) { grid-template-columns: minmax(0, 1fr); }
   .case-list-column { max-height: 310px; overflow-y: auto; }
   .current-action-card { align-items: stretch; flex-direction: column; }
   .current-action-controls { width: 100%; flex-direction: column; }

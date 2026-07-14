@@ -3,7 +3,7 @@ import { computed, nextTick, onActivated, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import BugBotPicker from '../components/BugBotPicker.vue'
 import BugCaseLifecycle, { type CasePrimaryAction } from '../components/BugCaseLifecycle.vue'
-import BugTicketDetail from '../components/BugTicketDetail.vue'
+import IncidentBugSummary from '../components/IncidentBugSummary.vue'
 import BugTicketList from '../components/BugTicketList.vue'
 import {
   approveIncidentFix,
@@ -166,14 +166,6 @@ async function syncRouteBugSelection(refreshCase: boolean) {
 async function selectBug(id: string) {
   tickets.select(id)
   await router.replace({ query: { ...route.query, bug_id: id } })
-}
-
-async function refreshTickets() {
-  try {
-    await tickets.load()
-  } catch (error) {
-    toastError('读取 Bug 工单', error)
-  }
 }
 
 async function refreshMatches(bugID: string) {
@@ -578,9 +570,8 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
     <header class="incident-header">
       <div>
         <h1>故障闭环</h1>
-        <p>从 Bug 工单选择入口，打开已有 Case 或启动一轮可恢复的验证、排障与修复流程。</p>
+        <p>Bug 数据由 Bug 工单统一同步；本页用于选择工单并推进可恢复的验证、排障与修复流程。</p>
       </div>
-      <button class="btn" type="button" :disabled="tickets.loading.value" @click="refreshTickets">刷新 Bug</button>
     </header>
 
     <section class="selection-workspace" data-overflow-safe="true" aria-label="Bug 驱动的故障闭环选择">
@@ -599,7 +590,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
         <p v-if="invalidURLBug" class="invalid-bug-state" role="status">
           URL 中的 Bug 不存在。请从左侧选择一条可用工单，页面会更新链接并继续。
         </p>
-        <BugTicketDetail :bug="tickets.selectedBug.value" mode="summary" />
+        <IncidentBugSummary :bug="tickets.selectedBug.value" />
 
         <section v-if="showStandaloneStart" class="start-card" aria-labelledby="start-card-title">
           <div>
@@ -663,7 +654,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
 
 <style scoped>
 .incident-workbench-page { min-width: 0; display: grid; gap: var(--sp-3); color: var(--c-text); }
-.incident-header { min-width: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-3); }
+.incident-header { min-width: 0; }
 .incident-header h1 { margin: 0; color: var(--c-ink); font-size: 24px; }
 .incident-header p { max-width: 760px; margin: 4px 0 0; color: var(--c-muted); font-size: var(--fs-sm); line-height: 1.55; }
 .btn { min-height: 44px; padding: 0 12px; border: 1px solid var(--c-line-2); border-radius: var(--r-md); background: var(--c-surf); color: var(--c-text); font: inherit; cursor: pointer; }
@@ -710,7 +701,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
   .bot-panel { grid-column: 1 / -1; max-height: none; }
 }
 @media (max-width: 700px) {
-  .incident-header, .start-card { align-items: stretch; flex-direction: column; }
+  .start-card { align-items: stretch; flex-direction: column; }
   .selection-workspace { grid-template-columns: minmax(0, 1fr); }
   .bot-panel { grid-column: auto; }
   .ticket-list-panel, .bot-panel { max-height: none; }

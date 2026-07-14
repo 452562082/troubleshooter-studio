@@ -54,7 +54,20 @@ vi.mock('../lib/toast', () => ({
 }))
 
 const bugA = {
-  id: 'bug-a', source: 'zentao', source_id: '840', title: '支付页超时', steps: '打开支付页', env: 'test', system_id: 'base', service_hints: ['checkout'],
+  id: 'bug-a',
+  source: 'zentao',
+  source_id: '840',
+  title: '支付页超时',
+  status: 'active',
+  severity: '3',
+  priority: '2',
+  created_at: '2026-07-08T11:12:00',
+  updated_at: '2026-07-10T12:24:00',
+  description: '支付接口返回超时',
+  steps: '打开支付页',
+  env: 'test',
+  system_id: 'base',
+  service_hints: ['checkout'],
 }
 const bugB = {
   id: 'bug-b', source: 'lark', source_id: 'TASK-17', title: '缓存命中下降', steps: '查看缓存指标', env: 'prod', system_id: 'base', service_hints: ['cache'],
@@ -151,6 +164,36 @@ afterEach(() => {
 })
 
 describe('IncidentWorkbenchPage', () => {
+  it('loads locally stored Bugs on mount without exposing a duplicate refresh action', async () => {
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+
+    const wrapper = await mountedPage()
+
+    expect(listBugs).toHaveBeenCalledTimes(1)
+    expect(wrapper.text()).not.toContain('刷新 Bug')
+    expect(wrapper.get('.incident-header p').text()).toContain('Bug 工单')
+  })
+
+  it('renders the selected Bug as a compact incident summary', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+
+    const wrapper = await mountedPage()
+    const summary = wrapper.get('.incident-bug-summary')
+
+    expect(summary.get('.incident-bug-source').text()).toBe('禅道 #840')
+    expect(summary.get('h2').text()).toBe('支付页超时')
+    expect(summary.get('.incident-bug-grade').text()).toBe('S3 · P2')
+    expect(summary.text()).toContain('2026-07-08 11:12')
+    expect(summary.text()).toContain('2026-07-10 12:24')
+    expect(summary.get('.incident-bug-status').text()).toBe('active')
+    expect(summary.text()).not.toContain('base')
+    expect(summary.text()).not.toContain('test')
+    expect(summary.text()).not.toContain('checkout')
+    expect(summary.text()).not.toContain('支付接口返回超时')
+    expect(summary.text()).not.toContain('打开支付页')
+  })
+
   it.each([375, 768, 1024, 1440])('keeps the selected Case and reset focus contained at %dpx', async width => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: width })
     route.query = { bug_id: 'bug-a' }
@@ -194,7 +237,7 @@ describe('IncidentWorkbenchPage', () => {
     const wrapper = await mountedPage()
 
     expect(wrapper.get('[data-ticket-id="bug-b"]').attributes('aria-pressed')).toBe('true')
-    expect(wrapper.get('.ticket-detail h2').text()).toBe('缓存命中下降')
+    expect(wrapper.get('.incident-bug-summary h2').text()).toBe('缓存命中下降')
     expect(wrapper.get('[data-ticket-id="bug-a"]').attributes('aria-pressed')).toBe('false')
   })
 
@@ -207,7 +250,7 @@ describe('IncidentWorkbenchPage', () => {
     await flushPromises()
 
     expect(router.replace).toHaveBeenCalledWith({ query: { bug_id: 'bug-b', view: 'audit' } })
-    expect(wrapper.get('.ticket-detail h2').text()).toBe('缓存命中下降')
+    expect(wrapper.get('.incident-bug-summary h2').text()).toBe('缓存命中下降')
   })
 
   it('opens the newest active Case without calling Start', async () => {
@@ -356,7 +399,7 @@ describe('IncidentWorkbenchPage', () => {
     await flushPromises()
     await flushPromises()
 
-    expect(wrapper.get('.ticket-detail h2').text()).toBe('缓存命中下降')
+    expect(wrapper.get('.incident-bug-summary h2').text()).toBe('缓存命中下降')
     expect(getIncidentCase).not.toHaveBeenCalled()
     expect(wrapper.text()).not.toContain('已打开现有闭环')
     expect(notifications.info).not.toHaveBeenCalled()
@@ -376,7 +419,7 @@ describe('IncidentWorkbenchPage', () => {
     await wrapper.get('[data-ticket-id="bug-a"]').trigger('click')
     await flushPromises()
     expect(router.replace).toHaveBeenCalledWith({ query: { bug_id: 'bug-a' } })
-    expect(wrapper.get('.ticket-detail h2').text()).toBe('支付页超时')
+    expect(wrapper.get('.incident-bug-summary h2').text()).toBe('支付页超时')
   })
 
   it('continues a legacy archive by starting a fresh durable Case round', async () => {

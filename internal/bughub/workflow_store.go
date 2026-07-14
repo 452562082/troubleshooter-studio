@@ -74,6 +74,9 @@ type CaseResetResult struct {
 	Replacement        IncidentCase
 	CancelledAttemptID string
 	Replay             bool
+	// requestFingerprint is runtime-only metadata for the cancellation outbox;
+	// result_case_json remains the immutable public reset snapshot.
+	requestFingerprint string
 }
 
 type ResetCancellationStatus string
@@ -793,6 +796,10 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 	if err != nil {
 		return result, err
 	}
+	legacyFingerprint, err := legacyCaseResetFingerprint(reset)
+	if err != nil {
+		return result, err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return result, fmt.Errorf("begin Case reset: %w", err)
@@ -802,7 +809,7 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 	var eventType, storedFingerprint, resultJSON string
 	queryErr := tx.QueryRowContext(ctx, `SELECT event_type,request_fingerprint,result_case_json FROM transition_events WHERE idempotency_key=?`, reset.IdempotencyKey).Scan(&eventType, &storedFingerprint, &resultJSON)
 	if queryErr == nil {
-		if eventType != "case_reset" || storedFingerprint != fingerprint {
+		if eventType != "case_reset" || (storedFingerprint != fingerprint && storedFingerprint != legacyFingerprint) {
 			return result, fmt.Errorf("%w: Case reset key %q", ErrIdempotencyConflict, reset.IdempotencyKey)
 		}
 		if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
@@ -811,16 +818,20 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 		if err := validateCaseResetResult(result, reset.CaseID, reset.NewCaseID); err != nil {
 			return CaseResetResult{}, err
 		}
+		if storedFingerprint == legacyFingerprint && !legacyCaseResetBindingMatches(reset, result.Replacement) {
+			return CaseResetResult{}, fmt.Errorf("%w: legacy Case reset binding %q", ErrIdempotencyConflict, reset.IdempotencyKey)
+		}
 		if result.CancelledAttemptID != "" {
 			operation, found, operationErr := getResetCancellationOperation(ctx, tx, reset.IdempotencyKey)
 			if operationErr != nil {
 				return CaseResetResult{}, fmt.Errorf("load replayed reset cancellation: %w", operationErr)
 			}
-			if !found || operation.CaseID != result.Archived.ID || operation.AttemptID != result.CancelledAttemptID || operation.RequestFingerprint != fingerprint {
+			if !found || operation.CaseID != result.Archived.ID || operation.AttemptID != result.CancelledAttemptID || operation.RequestFingerprint != storedFingerprint {
 				return CaseResetResult{}, fmt.Errorf("%w: reset cancellation identity %q", ErrIdempotencyConflict, reset.IdempotencyKey)
 			}
 		}
 		result.Replay = true
+		result.requestFingerprint = storedFingerprint
 		if err := tx.Commit(); err != nil {
 			return CaseResetResult{}, fmt.Errorf("commit Case reset replay: %w", err)
 		}
@@ -920,6 +931,7 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 
 	result.Archived = archived.Clone()
 	result.Replacement = replacement.Clone()
+	result.requestFingerprint = fingerprint
 	resultJSONBytes, err := json.Marshal(result)
 	if err != nil {
 		return CaseResetResult{}, fmt.Errorf("encode Case reset result: %w", err)
@@ -1077,6 +1089,32 @@ func caseResetFingerprint(reset CaseReset) (string, error) {
 	}
 	digest := sha256.Sum256(encoded)
 	return hex.EncodeToString(digest[:]), nil
+}
+
+func legacyCaseResetFingerprint(reset CaseReset) (string, error) {
+	identity := struct {
+		CaseID          string          `json:"case_id"`
+		NewCaseID       string          `json:"new_case_id"`
+		ExpectedVersion int64           `json:"expected_version"`
+		SelectedBotKey  string          `json:"selected_bot_key"`
+		ActorID         string          `json:"actor_id"`
+		IdempotencyKey  string          `json:"idempotency_key"`
+		RequestJSON     json.RawMessage `json:"request_json"`
+	}{reset.CaseID, reset.NewCaseID, reset.ExpectedVersion, reset.SelectedBotKey, reset.ActorID, reset.IdempotencyKey, CloneRawMessage(reset.RequestJSON)}
+	encoded, err := json.Marshal(identity)
+	if err != nil {
+		return "", fmt.Errorf("encode legacy Case reset fingerprint: %w", err)
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func legacyCaseResetBindingMatches(reset CaseReset, replacement IncidentCase) bool {
+	if reset.SelectedBotKey != replacement.SelectedBotKey || reset.ReplacementEnvironment != replacement.Environment {
+		return false
+	}
+	persistedTarget := incidentWorkflowTargetFromBotKey(replacement.SelectedBotKey)
+	return persistedTarget != "" && reset.ReplacementBotTarget == persistedTarget
 }
 
 func caseResetEventPayload(reset CaseReset, result CaseResetResult) (json.RawMessage, error) {

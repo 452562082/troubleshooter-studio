@@ -395,7 +395,7 @@ func createV6CommittedResetFixture(t *testing.T, auditType, auditPayload string)
 	store := &CaseStore{db: db}
 	now := time.Now().UTC()
 	closedAt := now
-	archived := IncidentCase{ID: "legacy-reset-case", BugID: "legacy-reset-bug", Source: "zentao", SystemID: "base", Environment: "test", Status: CaseResetArchived, CycleNumber: 1, SelectedBotKey: "validator", SupersededByCaseID: "legacy-reset-replacement", Version: 2, CreatedAt: now.Add(-time.Minute), UpdatedAt: now, ClosedAt: &closedAt}
+	archived := IncidentCase{ID: "legacy-reset-case", BugID: "legacy-reset-bug", Source: "zentao", SystemID: "base", Environment: "test", Status: CaseResetArchived, CycleNumber: 1, SelectedBotKey: "validator|codex", SupersededByCaseID: "legacy-reset-replacement", Version: 2, CreatedAt: now.Add(-time.Minute), UpdatedAt: now, ClosedAt: &closedAt}
 	replacement := IncidentCase{ID: "legacy-reset-replacement", BugID: archived.BugID, Source: archived.Source, SystemID: archived.SystemID, Environment: archived.Environment, Status: CasePendingValidation, CycleNumber: 2, SelectedBotKey: archived.SelectedBotKey, ResetFromCaseID: archived.ID, Version: 1, CreatedAt: now, UpdatedAt: now}
 	if err := store.CreateCase(context.Background(), archived); err != nil {
 		t.Fatal(err)
@@ -414,7 +414,7 @@ func createV6CommittedResetFixture(t *testing.T, auditType, auditPayload string)
 	}
 	command := ResetCaseCommand{CaseID: archived.ID, NewCaseID: replacement.ID, ExpectedVersion: 1, IdempotencyKey: "legacy-reset-key", ActorID: "alice", Bug: Bug{ID: archived.BugID, Source: archived.Source, SystemID: archived.SystemID, Env: archived.Environment}, Bot: BotRef{Key: archived.SelectedBotKey, Target: "codex", Env: archived.Environment}, InputJSON: []byte(`{}`)}
 	reset := CaseReset{CaseID: command.CaseID, NewCaseID: command.NewCaseID, IdempotencyKey: command.IdempotencyKey, ActorID: command.ActorID, ExpectedVersion: command.ExpectedVersion, SelectedBotKey: command.Bot.Key, ReplacementBotTarget: command.Bot.Target, ReplacementEnvironment: command.Bug.Env, RequestJSON: mustJSON(command)}
-	resetFingerprint, err := caseResetFingerprint(reset)
+	resetFingerprint, err := legacyCaseResetFingerprint(reset)
 	if err != nil {
 		t.Fatal(err)
 	}

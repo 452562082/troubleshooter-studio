@@ -589,6 +589,9 @@ func (o *CaseOrchestrator) processResetRunnerCancellation(result CaseResetResult
 	if result.CancelledAttemptID == "" {
 		return nil, nil
 	}
+	if result.requestFingerprint != "" {
+		fingerprint = result.requestFingerprint
+	}
 	if o.runner == nil {
 		operation, found, err := o.store.GetResetCancellationOperation(context.Background(), resetKey, fingerprint)
 		if err != nil || !found {

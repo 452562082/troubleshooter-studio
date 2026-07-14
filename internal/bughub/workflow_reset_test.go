@@ -908,6 +908,79 @@ func TestResetCaseWithReplacementSurvivesReopen(t *testing.T) {
 	}
 }
 
+func TestResetCaseWithReplacementReplaysLegacyFingerprintWithoutCancellationSideEffects(t *testing.T) {
+	path, command, legacyFingerprint := createV6CommittedResetFixture(t, "reset_runner_cancel_succeeded", `{"attempt_id":"legacy-reset-attempt","outcome":"succeeded"}`)
+	store, err := OpenCaseStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	reset := CaseReset{
+		CaseID:                 command.CaseID,
+		NewCaseID:              command.NewCaseID,
+		IdempotencyKey:         command.IdempotencyKey,
+		ActorID:                command.ActorID,
+		ExpectedVersion:        command.ExpectedVersion,
+		SelectedBotKey:         command.Bot.Key,
+		ReplacementBotTarget:   command.Bot.Target,
+		ReplacementEnvironment: command.Bug.Env,
+		RequestJSON:            mustJSON(command),
+	}
+	newFingerprint, err := caseResetFingerprint(reset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newFingerprint == legacyFingerprint {
+		t.Fatal("legacy reset fixture used the expanded fingerprint")
+	}
+	before := resetDatabaseEffectsSnapshot(t, store)
+
+	replayed, err := store.ResetCaseWithReplacement(context.Background(), reset)
+	if err != nil || !replayed.Replay {
+		t.Fatalf("replayed=%+v err=%v", replayed, err)
+	}
+	runner := &recordingPhaseRunner{}
+	warnings, err := NewCaseOrchestrator(store, runner, nil, nil).processResetRunnerCancellation(replayed, reset.IdempotencyKey, newFingerprint)
+	if err != nil || len(warnings) != 0 {
+		t.Fatalf("warnings=%+v err=%v", warnings, err)
+	}
+	runner.mu.Lock()
+	cancels := append([]string(nil), runner.cancels...)
+	starts := len(runner.starts)
+	runner.mu.Unlock()
+	if len(cancels) != 0 || starts != 0 {
+		t.Fatalf("legacy replay invoked runner: cancels=%v starts=%d", cancels, starts)
+	}
+	after := resetDatabaseEffectsSnapshot(t, store)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("legacy replay changed database effects:\nbefore=%+v\nafter=%+v", before, after)
+	}
+	operation, found, err := store.GetResetCancellationOperation(context.Background(), reset.IdempotencyKey, legacyFingerprint)
+	if err != nil || !found || operation.Status != ResetCancellationSucceeded || operation.RequestFingerprint != legacyFingerprint {
+		t.Fatalf("operation=%+v found=%v err=%v", operation, found, err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*CaseReset)
+	}{
+		{name: "environment", mutate: func(reset *CaseReset) { reset.ReplacementEnvironment = "prod" }},
+		{name: "target", mutate: func(reset *CaseReset) { reset.ReplacementBotTarget = "claude-code" }},
+	} {
+		t.Run("conflicts on "+test.name, func(t *testing.T) {
+			changed := reset
+			changed.RequestJSON = CloneRawMessage(reset.RequestJSON)
+			test.mutate(&changed)
+			if _, err := store.ResetCaseWithReplacement(context.Background(), changed); !errors.Is(err, ErrIdempotencyConflict) {
+				t.Fatalf("err=%v", err)
+			}
+			if got := resetDatabaseEffectsSnapshot(t, store); !reflect.DeepEqual(after, got) {
+				t.Fatalf("legacy conflict changed database effects:\nbefore=%+v\nafter=%+v", after, got)
+			}
+		})
+	}
+}
+
 func TestResetCaseWithReplacementRedactsStoredRequest(t *testing.T) {
 	store := openTestCaseStore(t)
 	incident := createWorkflowCase(t, store, "case-reset-redact", CaseWaitingEvidence)

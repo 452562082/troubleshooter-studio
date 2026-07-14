@@ -359,23 +359,24 @@ describe('BugInboxPage', () => {
 
     const syncAccess = wrapper.get('.sync-access-section')
     expect(syncAccess.find('[data-action="sync-platform"]').exists()).toBe(false)
-    expect(syncAccess.findAll(':scope > .sync-settings')).toHaveLength(1)
-    expect(syncAccess.findAll(':scope > .manual-bug-row')).toHaveLength(1)
-    expect(syncAccess.findAll(':scope > .hook-row')).toHaveLength(1)
-    expect(Array.from(syncAccess.element.children)
-      .filter(element => element.matches('.sync-settings, .manual-bug-row, .hook-row'))
-      .map(element => element.getAttribute('class'))).toEqual([
+    const controlRow = syncAccess.get(':scope > .sync-control-row')
+    expect(Array.from(controlRow.element.children).map(element => element.classList[0])).toEqual([
       'sync-settings',
+      'sync-control-divider',
       'manual-bug-row',
-      'hook-row',
     ])
-    expect(syncAccess.find('.manual-bug-row .manual-bug-field').exists()).toBe(true)
-    expect(syncAccess.find('.manual-bug-row [data-action="fetch-bug"]').exists()).toBe(true)
+    expect(controlRow.get('.sync-control-divider').attributes('aria-hidden')).toBe('true')
+    expect(controlRow.find('.manual-bug-row .manual-bug-field').exists()).toBe(true)
+    expect(controlRow.find('.manual-bug-row [data-action="fetch-bug"]').exists()).toBe(true)
+    expect(controlRow.element.nextElementSibling).toBe(syncAccess.get(':scope > .hook-row').element)
 
     const source = readFileSync('src/pages/BugInboxPage.vue', 'utf8')
+    const tabletCSS = source.split('@media (max-width: 900px) {')[1]?.split('\n}')[0] || ''
     const mobileCSS = source.split('@media (max-width: 640px) {')[1]?.split('\n}')[0] || ''
-    expect(source).toContain('.manual-bug-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto;')
-    expect(mobileCSS).toContain('.manual-bug-row, .bot-config-row { grid-template-columns: minmax(0, 1fr); }')
+    expect(source).toContain('.sync-control-row { min-width: 0; display: grid; grid-template-columns: auto 1px minmax(0, 1fr);')
+    expect(source).toContain('.sync-control-divider { align-self: stretch; width: 1px; background: var(--c-line); }')
+    expect(tabletCSS).toContain('.sync-control-row { grid-template-columns: minmax(0, 1fr); }')
+    expect(tabletCSS).toContain('.sync-control-divider { width: 100%; height: 1px; }')
     expect(mobileCSS).toContain('.manual-bug-row .compact-button { width: 100%; }')
   })
 

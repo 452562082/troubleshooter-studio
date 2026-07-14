@@ -527,13 +527,16 @@ function eventValue(event: Event): string {
 
       <section class="platform-config-section sync-access-section" aria-labelledby="sync-access-title">
         <header class="section-heading"><div><h2 id="sync-access-title">同步与接入</h2><p>同步指派给我的 Bug，或按 ID 主动拉取。</p></div></header>
-        <div class="sync-settings">
-          <label class="toggle-control"><input v-model="platformDraft.poll_enabled" type="checkbox"><span class="toggle-track" aria-hidden="true"><span></span></span><span>后台定时同步</span></label>
-          <label class="interval-control">每 <input v-model.number="platformDraft.poll_interval_minutes" aria-label="后台同步间隔分钟" type="number" min="1" :disabled="!platformDraft.poll_enabled"> 分钟</label>
-        </div>
-        <div class="manual-bug-row">
-          <label class="field-label manual-bug-field" :for="manualBugFieldID"><span>指定 Bug</span><input :id="manualBugFieldID" v-model="manualBugID" class="form-control" placeholder="Bug ID 或飞书消息" @keyup.enter="fetchManualBug"></label>
-          <button class="compact-button secondary-button" type="button" data-action="fetch-bug" :disabled="!selectedPlatform || !manualBugID.trim() || fetchingBug" @click="fetchManualBug">拉取指定 Bug</button>
+        <div class="sync-control-row">
+          <div class="sync-settings">
+            <label class="toggle-control"><input v-model="platformDraft.poll_enabled" type="checkbox"><span class="toggle-track" aria-hidden="true"><span></span></span><span>后台定时同步</span></label>
+            <label class="interval-control">每 <input v-model.number="platformDraft.poll_interval_minutes" aria-label="后台同步间隔分钟" type="number" min="1" :disabled="!platformDraft.poll_enabled"> 分钟</label>
+          </div>
+          <span class="sync-control-divider" aria-hidden="true"></span>
+          <div class="manual-bug-row">
+            <label class="field-label manual-bug-field" :for="manualBugFieldID"><span>指定 Bug</span><input :id="manualBugFieldID" v-model="manualBugID" class="form-control" placeholder="Bug ID 或飞书消息" @keyup.enter="fetchManualBug"></label>
+            <button class="compact-button secondary-button" type="button" data-action="fetch-bug" :disabled="!selectedPlatform || !manualBugID.trim() || fetchingBug" @click="fetchManualBug">拉取指定 Bug</button>
+          </div>
         </div>
         <div class="hook-row"><strong>Hook URL</strong><code>{{ hookURL || '保存平台后生成' }}</code><button class="compact-button secondary-button" type="button" data-action="copy-hook-url" :disabled="!hookURL" @click="copyHookURL">复制</button></div>
       </section>
@@ -674,6 +677,8 @@ function eventValue(event: Event): string {
 .platform-config .interval-control { min-height: var(--config-control-height); }
 .interval-control input { width: 72px; min-height: 36px; padding: 0 8px; }
 .platform-config .interval-control input { min-height: var(--config-control-height); }
+.sync-control-row { min-width: 0; display: grid; grid-template-columns: auto 1px minmax(0, 1fr); align-items: end; gap: var(--sp-3); }
+.sync-control-divider { align-self: stretch; width: 1px; background: var(--c-line); }
 .manual-bug-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: var(--sp-2); }
 .hook-row { flex-wrap: wrap; }
 .hook-row code { min-width: 0; flex: 1; padding: 7px 9px; overflow-wrap: anywhere; border-radius: var(--r-sm); background: var(--c-surf-2); color: var(--c-muted); }
@@ -722,6 +727,8 @@ function eventValue(event: Event): string {
 }
 @media (max-width: 900px) {
   .basic-row, .auth-row { grid-template-columns: minmax(0, 1fr); }
+  .sync-control-row { grid-template-columns: minmax(0, 1fr); }
+  .sync-control-divider { width: 100%; height: 1px; }
   .inbox-workspace { grid-template-columns: minmax(0, 1fr); }
   .ticket-list-panel { max-height: 360px; }
 }

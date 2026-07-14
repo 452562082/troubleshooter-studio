@@ -829,7 +829,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
 .btn:hover:not(:disabled) { border-color: var(--c-accent); background: var(--c-surf-2); }
 .btn:focus-visible { outline: 2px solid var(--c-accent-hover); outline-offset: 2px; }
 .btn:disabled { opacity: .55; cursor: not-allowed; }
-.btn.primary { border-color: var(--c-accent-hover); background: var(--c-accent-hover); color: white; }
+.btn.primary { border-color: #2563eb; background: #2563eb; color: #fff; }
 .btn.danger { border-color: #b91c1c; background: #b91c1c; color: white; }
 .btn.danger:hover:not(:disabled) { border-color: #991b1b; background: #991b1b; }
 .danger-secondary { border-color: #fca5a5; background: #fff; color: #b91c1c; }

@@ -319,6 +319,7 @@ describe('IncidentWorkbenchPage', () => {
     const source = readFileSync('src/pages/IncidentWorkbenchPage.vue', 'utf8')
 
     expect(source).toContain('.bot-action-controls .btn { flex: 1 1 160px; min-height: 44px; transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease; }')
+    expect(source).toContain('.btn.primary { border-color: #2563eb; background: #2563eb; color: #fff; }')
     expect(source).toContain('.bot-action-controls .btn.primary:hover:not(:disabled) { border-color: #1d4ed8; background: #1d4ed8; color: #fff; }')
     expect(source).toContain('.bot-action-controls .btn.primary:focus-visible { border-color: #2563eb; background: #2563eb; color: #fff; outline: 2px solid #1e40af; outline-offset: 2px; }')
     expect(source).toContain('.bot-action-controls .btn.primary:disabled { opacity: 1; border-color: #cbd5e1; background: #e2e8f0; color: #475569; cursor: not-allowed; }')

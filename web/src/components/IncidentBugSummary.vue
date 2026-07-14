@@ -25,7 +25,7 @@ function sourceLabel(bug: BugRecord): string {
 function gradePart(prefix: 'S' | 'P', value?: string): string {
   const normalized = value?.trim()
   if (!normalized) return ''
-  return normalized.toUpperCase().startsWith(prefix) ? normalized : `${prefix}${normalized}`
+  return normalized.toUpperCase().startsWith(prefix) ? `${prefix}${normalized.slice(1)}` : `${prefix}${normalized}`
 }
 
 function bugGrade(bug?: BugRecord): string {
@@ -33,10 +33,52 @@ function bugGrade(bug?: BugRecord): string {
   return [gradePart('S', bug.severity), gradePart('P', bug.priority)].filter(Boolean).join(' · ') || '-'
 }
 
+function isValidHTMLDateTime(value: string, parsed: Date): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}:\d{2})?$/.exec(value)
+  if (!match) return false
+
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const hour = Number(match[4])
+  const minute = Number(match[5])
+  const second = Number(match[6] || 0)
+  const millisecond = Number((match[7] || '').padEnd(3, '0') || 0)
+  const zone = match[8]
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+
+  if (year === 0 || month < 1 || month > 12 || day < 1 || day > daysInMonth[month - 1]) return false
+  if (hour > 23 || minute > 59 || second > 59) return false
+
+  if (!zone) {
+    return parsed.getFullYear() === year
+      && parsed.getMonth() === month - 1
+      && parsed.getDate() === day
+      && parsed.getHours() === hour
+      && parsed.getMinutes() === minute
+      && parsed.getSeconds() === second
+      && parsed.getMilliseconds() === millisecond
+  }
+
+  let offsetMinutes = 0
+  if (zone !== 'Z') {
+    const offsetHour = Number(zone.slice(1, 3))
+    const offsetMinute = Number(zone.slice(4, 6))
+    if (offsetHour > 23 || offsetMinute > 59) return false
+    offsetMinutes = (offsetHour * 60 + offsetMinute) * (zone.startsWith('+') ? 1 : -1)
+  }
+
+  const expected = new Date(0)
+  expected.setUTCFullYear(year, month - 1, day)
+  expected.setUTCHours(hour, minute, second, millisecond)
+  return parsed.getTime() === expected.getTime() - offsetMinutes * 60_000
+}
+
 function formatTime(value?: string): DisplayTime {
   if (!value) return { text: '-' }
   const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return { text: value }
+  if (Number.isNaN(date.getTime()) || !isValidHTMLDateTime(value, date)) return { text: value }
   return {
     text: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`,
     datetime: value,

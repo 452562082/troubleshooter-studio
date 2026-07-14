@@ -41,6 +41,9 @@ describe('IncidentBugSummary', () => {
     expect(wrapper.text()).not.toContain('系统')
     expect(wrapper.text()).not.toContain('环境')
     expect(wrapper.text()).not.toContain('服务')
+    expect(wrapper.text()).not.toContain('base')
+    expect(wrapper.text()).not.toContain('test')
+    expect(wrapper.text()).not.toContain('user-api')
     expect(wrapper.text()).not.toContain('搜索结果只显示一个用户')
     expect(wrapper.text()).not.toContain('输入昵称后搜索')
     expect(wrapper.text()).not.toContain('result.png')
@@ -51,6 +54,7 @@ describe('IncidentBugSummary', () => {
     [{ severity: undefined, priority: '1' }, 'P1'],
     [{ severity: undefined, priority: undefined }, '-'],
     [{ severity: 'S4', priority: 'P2' }, 'S4 · P2'],
+    [{ severity: 's4', priority: 'p2' }, 'S4 · P2'],
   ])('formats partial and prefixed grades without duplicate prefixes', (grade, expected) => {
     const wrapper = mount(IncidentBugSummary, { props: { bug: { ...bug, ...grade } } })
 
@@ -67,6 +71,20 @@ describe('IncidentBugSummary', () => {
     expect(values[0].attributes('datetime')).toBeUndefined()
     expect(values[1].text()).toBe('-')
     expect(values[1].element.tagName).toBe('SPAN')
+  })
+
+  it.each([
+    'July 8, 2026 11:12',
+    '2026-02-30T11:12:00',
+  ])('keeps parseable non-HTML or impossible source time %s out of datetime', (sourceTime) => {
+    const wrapper = mount(IncidentBugSummary, {
+      props: { bug: { ...bug, created_at: sourceTime } },
+    })
+    const value = wrapper.findAll('.incident-bug-time')[0]
+
+    expect(value.text()).toBe(sourceTime)
+    expect(value.attributes('datetime')).toBeUndefined()
+    expect(value.element.tagName).toBe('SPAN')
   })
 
   it('renders an accessible empty state and responsive overflow contract', () => {

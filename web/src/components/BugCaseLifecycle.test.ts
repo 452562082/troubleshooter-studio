@@ -68,17 +68,12 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.findAll('.current-action-card .primary-action')).toHaveLength(1)
   })
 
-  it('offers reset as a separate dangerous secondary action without changing the one-primary-action rule', async () => {
+  it('keeps the current-stage primary action without exposing a duplicate reset action', () => {
     const snapshot = detail('waiting_fix_approval')
     const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
 
     expect(wrapper.findAll('.current-action-card .primary-action')).toHaveLength(1)
-    const reset = wrapper.get('.reset-action')
-    expect(reset.classes()).toContain('danger-secondary')
-    expect(reset.classes()).not.toContain('primary')
-    await reset.trigger('click')
-
-    expect(wrapper.emitted('reset')?.[0]).toEqual([snapshot.case])
+    expect(wrapper.find('.reset-action').exists()).toBe(false)
     expect(wrapper.emitted('primary')).toBeUndefined()
   })
 
@@ -87,9 +82,9 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.find('.reset-action').exists()).toBe(false)
   })
 
-  it('disables reset while another Case operation is pending', () => {
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [incident('waiting_evidence')], detail: detail('waiting_evidence'), pending: true } })
-    expect(wrapper.get<HTMLButtonElement>('.reset-action').element.disabled).toBe(true)
+  it('makes the Case heading a programmatic terminal focus target', () => {
+    const wrapper = mount(BugCaseLifecycle, { props: { cases: [incident('fixed_verified')], detail: detail('fixed_verified') } })
+    expect(wrapper.get('.case-heading').attributes('tabindex')).toBe('-1')
   })
 
   it('opens an accessible approval dialog before emitting approval', async () => {

@@ -78,6 +78,9 @@ const botMatch = {
 const prodBotMatch = {
   bot: { key: 'base-prod|codex', system_id: 'base', target: 'codex', path: '/repo/base-prod', name: 'Base Prod', env: 'prod' }, score: 9, reasons: ['系统匹配'],
 }
+const replacementBotMatch = {
+  bot: { key: 'base-prod|claude-code', system_id: 'base', target: 'claude-code', path: '/repo/base-prod', name: 'Base Prod', env: 'prod' }, score: 9, reasons: ['系统匹配'],
+}
 
 function incident(id: string, status: CaseStatus, updatedAt: string, overrides: Partial<IncidentCase> = {}): IncidentCase {
   return {
@@ -194,7 +197,7 @@ describe('IncidentWorkbenchPage', () => {
     expect(summary.text()).not.toContain('打开支付页')
   })
 
-  it.each([375, 768, 1024, 1440])('keeps the selected Case and reset focus contained at %dpx', async width => {
+  it.each([375, 768, 1024, 1440])('keeps the selected Case and restart focus contained at %dpx', async width => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: width })
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])
@@ -213,7 +216,7 @@ describe('IncidentWorkbenchPage', () => {
     expect(workspace.attributes('data-overflow-safe')).toBe('true')
     expect(wrapper.findAll('.selection-panel').every(panel => panel.attributes('data-overflow-safe') === 'true')).toBe(true)
 
-    const trigger = wrapper.get<HTMLButtonElement>('.reset-action')
+    const trigger = wrapper.get<HTMLButtonElement>('[data-action="restart-case"]')
     trigger.element.focus()
     await trigger.trigger('click')
     const dialog = wrapper.get('[role="dialog"]')
@@ -270,29 +273,110 @@ describe('IncidentWorkbenchPage', () => {
     expect(wrapper.find('[data-action="start-case"]').exists()).toBe(false)
   })
 
-  it('shows start for a Bug with no Case', async () => {
+  it('shows only open in the Bot action panel for a Bug with no Case', async () => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])
 
     const wrapper = await mountedPage()
 
-    const start = wrapper.get('[data-action="start-case"]')
-    expect(start.text()).toContain('开始故障闭环')
+    const panel = wrapper.get('.bot-action-panel')
+    const start = panel.get('[data-action="start-case"]')
+    expect(start.text()).toContain('开启故障闭环')
     expect(start.attributes('disabled')).toBeUndefined()
+    expect(panel.find('[data-action="enter-case"]').exists()).toBe(false)
+    expect(panel.find('[data-action="restart-case"]').exists()).toBe(false)
+    expect(wrapper.find('.start-card').exists()).toBe(false)
   })
 
-  it('shows new round when all Cases are terminal', async () => {
+  it.each(['waiting_evidence', 'fixed_verified'] as const)('shows enter and restart in the Bot action panel for %s', async status => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])
-    const fixed = incident('case-fixed', 'fixed_verified', '2026-07-13T00:00:00Z')
-    const archived = incident('case-archive', 'legacy_archived', '2026-07-12T00:00:00Z')
-    vi.mocked(listIncidentCases).mockResolvedValue([archived, fixed])
-    mockCaseDetails(detail(archived), detail(fixed))
+    const item = incident(`case-${status}`, status, '2026-07-13T00:00:00Z')
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    mockCaseDetails(detail(item))
+
+    const wrapper = await mountedPage()
+    const panel = wrapper.get('.bot-action-panel')
+
+    expect(panel.get('[data-action="enter-case"]').text()).toContain('进入故障闭环')
+    expect(panel.get('[data-action="restart-case"]').text()).toContain('重新开始故障闭环')
+    expect(panel.find('[data-action="start-case"]').exists()).toBe(false)
+    expect(wrapper.find('.start-card').exists()).toBe(false)
+  })
+
+  it.each([
+    ['no selected Bot', [], '请选择排障机器人'],
+    ['unsupported target', [{ bot: { ...botMatch.bot, key: 'base|cursor', target: 'cursor' }, score: 8, reasons: [] }], '暂不支持由 Studio 后台启动'],
+    ['empty environment', [{ bot: { ...botMatch.bot, env: '' }, score: 8, reasons: [] }], '缺少目标环境'],
+  ] as const)('keeps enter enabled but disables restart for %s', async (_label, availableMatches, reason) => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    vi.mocked(matchBugBots).mockResolvedValue(availableMatches as any)
+    const item = incident('case-disabled-restart', 'waiting_evidence', '2026-07-13T00:00:00Z')
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    mockCaseDetails(detail(item))
 
     const wrapper = await mountedPage()
 
-    expect(wrapper.get('[data-action="start-case"]').text()).toContain('开始新一轮')
-    expect(wrapper.get('.case-heading').text()).toContain('case-fixed')
+    expect(wrapper.get<HTMLButtonElement>('[data-action="enter-case"]').element.disabled).toBe(false)
+    expect(wrapper.get<HTMLButtonElement>('[data-action="restart-case"]').element.disabled).toBe(true)
+    expect(wrapper.get('.bot-action-disabled-reason').text()).toContain(reason)
+  })
+
+  it('scrolls smoothly to an active Case and focuses its current-stage action', async () => {
+    const scrollIntoView = vi.fn()
+    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: scrollIntoView })
+    vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({ matches: false }))
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-enter-active', 'waiting_evidence', '2026-07-13T00:00:00Z')
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    mockCaseDetails(detail(item))
+    const wrapper = mount(IncidentWorkbenchPage, { attachTo: document.body })
+    await flushPromises()
+    await flushPromises()
+    await flushPromises()
+
+    await wrapper.get('[data-action="enter-case"]').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' })
+    expect(document.activeElement).toBe(wrapper.get('.primary-action').element)
+
+    wrapper.unmount()
+    if (originalScrollIntoView) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: originalScrollIntoView })
+    else delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView
+    vi.unstubAllGlobals()
+  })
+
+  it('uses immediate scrolling and focuses the heading for a terminal Case', async () => {
+    const scrollIntoView = vi.fn()
+    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: scrollIntoView })
+    vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({ matches: true }))
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-enter-terminal', 'fixed_verified', '2026-07-13T00:00:00Z')
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    mockCaseDetails(detail(item))
+    const wrapper = mount(IncidentWorkbenchPage, { attachTo: document.body })
+    await flushPromises()
+    await flushPromises()
+    await flushPromises()
+
+    await wrapper.get('[data-action="enter-case"]').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'auto', block: 'start' })
+    const heading = wrapper.get<HTMLElement>('.case-heading')
+    expect(heading.attributes('tabindex')).toBe('-1')
+    expect(document.activeElement).toBe(heading.element)
+
+    wrapper.unmount()
+    if (originalScrollIntoView) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: originalScrollIntoView })
+    else delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView
+    vi.unstubAllGlobals()
   })
 
   it.each(['fixed_verified', 'reset_archived'] as const)('starts a %s terminal round with the explicitly selected Bot key and its environment', async status => {
@@ -307,13 +391,15 @@ describe('IncidentWorkbenchPage', () => {
     const wrapper = await mountedPage()
 
     await wrapper.findAll('.bot-picker input[type="radio"]')[1].setValue(true)
-    await wrapper.get('[data-action="start-case"]').trigger('click')
+    await wrapper.get('[data-action="restart-case"]').trigger('click')
     await flushPromises()
 
     expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
+      case_id: expect.stringMatching(/^case-bug-a-/),
       bot_key: 'base-prod|codex',
       input_json: expect.objectContaining({ target_environment: 'prod' }),
     }))
+    expect(resetIncidentCaseWithWarnings).not.toHaveBeenCalled()
   })
 
   it('uses the recovered legacy Bot object for both key and environment without an explicit selection', async () => {
@@ -337,6 +423,23 @@ describe('IncidentWorkbenchPage', () => {
       bot_key: 'base|codex',
       input_json: expect.objectContaining({ target_environment: 'test' }),
     }))
+  })
+
+  it('validates restart against the Bot visibly recovered for a legacy archive', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    vi.mocked(matchBugBots).mockResolvedValue([prodBotMatch, { ...botMatch, bot: { ...botMatch.bot, env: '' } }])
+    const archived = incident('legacy-visible', 'legacy_archived', '2026-07-13T00:00:00Z', { selected_bot_key: '' })
+    vi.mocked(listIncidentCases).mockResolvedValue([archived])
+    mockCaseDetails(detail(archived, {
+      attempts: [{ id: 'legacy-attempt', case_id: archived.id, cycle_number: 1, phase: 'legacy', mode: '', status: 'succeeded', agent_target: '', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '2026-07-11T00:00:00Z', error_code: '', error_message: '', usage: {} }],
+    }))
+
+    const wrapper = await mountedPage()
+
+    expect(wrapper.findAll<HTMLInputElement>('.bot-picker input[type="radio"]')[1].element.checked).toBe(true)
+    expect(wrapper.get<HTMLButtonElement>('[data-action="restart-case"]').element.disabled).toBe(true)
+    expect(wrapper.get('.bot-action-disabled-reason').text()).toContain('缺少目标环境')
   })
 
   it('lets an explicit Bot override legacy recovery for both key and environment', async () => {
@@ -461,16 +564,18 @@ describe('IncidentWorkbenchPage', () => {
     }))
   })
 
-  it('confirms reset with the exact Case snapshot and bound Bot, then selects the replacement', async () => {
+  it('snapshots the old and selected replacement bindings before confirming reset', async () => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])
-    vi.mocked(matchBugBots).mockResolvedValue([botMatch, prodBotMatch])
+    vi.mocked(matchBugBots).mockResolvedValue([botMatch, replacementBotMatch])
     const item = incident('case-1', 'waiting_evidence', '2026-07-13T00:00:00Z')
     const archived = { ...item, status: 'reset_archived' as const, version: 8, superseded_by_case_id: 'case-reset-replacement' }
     const replacement = incident('case-reset-replacement', 'pending_validation', '2026-07-13T00:01:00Z', {
       version: 1,
       current_attempt_id: '',
       reset_from_case_id: 'case-1',
+      selected_bot_key: 'base-prod|claude-code',
+      environment: 'prod',
     })
     vi.mocked(listIncidentCases).mockResolvedValueOnce([item]).mockResolvedValueOnce([archived, replacement])
     mockCaseDetails(detail(item), detail(replacement))
@@ -478,13 +583,18 @@ describe('IncidentWorkbenchPage', () => {
     const wrapper = await mountedPage()
 
     await wrapper.findAll('.bot-picker input[type="radio"]')[1].setValue(true)
-    await wrapper.get('.reset-action').trigger('click')
+    await wrapper.get('[data-action="restart-case"]').trigger('click')
     const dialog = wrapper.get('[role="dialog"]')
     expect(dialog.attributes('aria-modal')).toBe('true')
     expect(dialog.attributes('aria-labelledby')).toBeTruthy()
     expect(dialog.attributes('aria-describedby')).toBeTruthy()
     expect(dialog.text()).toContain('不会撤销已发生的提交、推送或部署')
     expect(dialog.text()).toContain('原 Case、证据和审计记录保持不可变')
+    expect(dialog.text()).toContain('base|codex')
+    expect(dialog.text()).toContain('test')
+    expect(dialog.text()).toContain('base-prod|claude-code')
+    expect(dialog.text()).toContain('prod')
+    await wrapper.findAll('.bot-picker input[type="radio"]')[0].setValue(true)
     await dialog.get('[data-reset-confirm]').trigger('click')
     await flushPromises()
     await flushPromises()
@@ -495,7 +605,7 @@ describe('IncidentWorkbenchPage', () => {
       expected_version: 7,
       idempotency_key: expect.stringMatching(/^reset:case-1:v7:/),
       actor_id: 'desktop-user',
-      bot_key: 'base|codex',
+      bot_key: 'base-prod|claude-code',
     }))
     expect(startIncidentCase).not.toHaveBeenCalled()
     expect(continueIncidentCase).not.toHaveBeenCalled()
@@ -513,7 +623,7 @@ describe('IncidentWorkbenchPage', () => {
     }))
     const wrapper = await mountedPage()
 
-    await wrapper.get('.reset-action').trigger('click')
+    await wrapper.get('[data-action="restart-case"]').trigger('click')
     const dialog = wrapper.get('[role="dialog"]')
 
     expect(dialog.text()).toContain('waiting_evidence')
@@ -535,7 +645,7 @@ describe('IncidentWorkbenchPage', () => {
     vi.mocked(resetIncidentCaseWithWarnings).mockReturnValue(pendingReset.promise)
     const wrapper = await mountedPage()
 
-    await wrapper.get('.reset-action').trigger('click')
+    await wrapper.get('[data-action="restart-case"]').trigger('click')
     await wrapper.get('[data-reset-confirm]').trigger('click')
     const eventHandler = runtime.EventsOn.mock.calls.find(call => call[0] === 'incident-case:event')?.[1]
     eventHandler?.({ kind: 'snapshot', case: fresh, snapshot: detail(fresh) })
@@ -559,7 +669,7 @@ describe('IncidentWorkbenchPage', () => {
     vi.mocked(resetIncidentCaseWithWarnings).mockRejectedValue(new IncidentWorkflowCommandError('idempotency_conflict', '请求身份冲突'))
     const wrapper = await mountedPage()
 
-    await wrapper.get('.reset-action').trigger('click')
+    await wrapper.get('[data-action="restart-case"]').trigger('click')
     await wrapper.get('[data-reset-confirm]').trigger('click')
     await flushPromises()
     await flushPromises()
@@ -580,7 +690,7 @@ describe('IncidentWorkbenchPage', () => {
     vi.mocked(resetIncidentCaseWithWarnings).mockRejectedValue(new IncidentWorkflowCommandError('case_version_conflict', 'Case 已被其他操作更新'))
     const wrapper = await mountedPage()
 
-    await wrapper.get('.reset-action').trigger('click')
+    await wrapper.get('[data-action="restart-case"]').trigger('click')
     await wrapper.get('[data-reset-confirm]').trigger('click')
     const firstReplacementID = vi.mocked(resetIncidentCaseWithWarnings).mock.calls[0][0].new_case_id
     await flushPromises()
@@ -592,7 +702,7 @@ describe('IncidentWorkbenchPage', () => {
     expect(notifications.info).toHaveBeenCalledWith(expect.stringContaining('已刷新'))
     expect(notifications.toastError).not.toHaveBeenCalled()
 
-    await wrapper.get('.reset-action').trigger('click')
+    await wrapper.get('[data-action="restart-case"]').trigger('click')
     const secondDialog = wrapper.get('[role="dialog"]')
     expect(secondDialog.text()).toContain('v8')
     expect(secondDialog.text()).not.toContain(firstReplacementID)
@@ -614,7 +724,7 @@ describe('IncidentWorkbenchPage', () => {
     })
     const wrapper = await mountedPage()
 
-    await wrapper.get('.reset-action').trigger('click')
+    await wrapper.get('[data-action="restart-case"]').trigger('click')
     await wrapper.get('[data-reset-confirm]').trigger('click')
     await flushPromises()
     await flushPromises()
@@ -644,7 +754,7 @@ describe('IncidentWorkbenchPage', () => {
     })
     const wrapper = await mountedPage()
 
-    await wrapper.get('.reset-action').trigger('click')
+    await wrapper.get('[data-action="restart-case"]').trigger('click')
     await wrapper.get('[data-reset-confirm]').trigger('click')
     const input = vi.mocked(resetIncidentCaseWithWarnings).mock.calls[0][0]
     const replacement = incident(input.new_case_id, 'pending_validation', '2026-07-13T00:01:00Z', {
@@ -692,7 +802,7 @@ describe('IncidentWorkbenchPage', () => {
     })
     const wrapper = await mountedPage()
 
-    await wrapper.get('.reset-action').trigger('click')
+    await wrapper.get('[data-action="restart-case"]').trigger('click')
     await wrapper.get('[data-reset-confirm]').trigger('click')
     const input = vi.mocked(resetIncidentCaseWithWarnings).mock.calls[0][0]
     const replacement = incident(input.new_case_id, 'pending_validation', '2026-07-13T00:01:00Z', {
@@ -736,7 +846,7 @@ describe('IncidentWorkbenchPage', () => {
     await flushPromises()
     await flushPromises()
 
-    const trigger = wrapper.get<HTMLButtonElement>('.reset-action')
+    const trigger = wrapper.get<HTMLButtonElement>('[data-action="restart-case"]')
     trigger.element.focus()
     await trigger.trigger('click')
     const cancel = wrapper.get<HTMLButtonElement>('[data-reset-cancel]')
@@ -779,7 +889,7 @@ describe('IncidentWorkbenchPage', () => {
     await flushPromises()
     await flushPromises()
 
-    await wrapper.get('.reset-action').trigger('click')
+    await wrapper.get('[data-action="restart-case"]').trigger('click')
     await wrapper.get('[data-reset-confirm]').trigger('click')
     await wrapper.vm.$nextTick()
     expect(wrapper.get<HTMLButtonElement>('[data-reset-cancel]').element.disabled).toBe(true)
@@ -819,7 +929,7 @@ describe('IncidentWorkbenchPage', () => {
     vi.mocked(resetIncidentCaseWithWarnings).mockReturnValue(pendingReset.promise)
     const wrapper = await mountedPage()
 
-    await wrapper.get('.reset-action').trigger('click')
+    await wrapper.get('[data-action="restart-case"]').trigger('click')
     await wrapper.get('[data-reset-confirm]').trigger('click')
     await wrapper.get('[data-ticket-id="bug-b"]').trigger('click')
     await flushPromises()
@@ -846,7 +956,7 @@ describe('IncidentWorkbenchPage', () => {
     vi.mocked(resetIncidentCaseWithWarnings).mockReturnValue(pendingReset.promise)
     const wrapper = await mountedPage()
 
-    await wrapper.get('.reset-action').trigger('click')
+    await wrapper.get('[data-action="restart-case"]').trigger('click')
     await wrapper.get('[data-reset-confirm]').trigger('click')
     await wrapper.get('[data-ticket-id="bug-b"]').trigger('click')
     await flushPromises()

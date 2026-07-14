@@ -27,7 +27,7 @@ import {
 } from '../lib/bridge'
 import { toast, toastError } from '../lib/toast'
 import { useBugTickets } from '../lib/useBugTickets'
-import { activeCaseForBug, botKeyForLegacyContinuation, casesForBug, continuationForDetail, useIncidentCase } from '../lib/useIncidentCase'
+import { activeCaseForBug, botKeyForLegacyContinuation, casesForBug, continuationForDetail, terminalCaseStatuses, useIncidentCase } from '../lib/useIncidentCase'
 
 const route = useRoute()
 const router = useRouter()
@@ -49,8 +49,11 @@ type ResetDialogSnapshot = {
   caseStatus: string
   phase: string
   attemptID: string
-  agentTarget: string
-  botKey: string
+  oldBotKey: string
+  oldEnvironment: string
+  newBotKey: string
+  newBotTarget: string
+  newEnvironment: string
   newCaseID: string
   idempotencyKey: string
 }
@@ -60,6 +63,7 @@ const resetError = ref('')
 const resetDialogElement = ref<HTMLElement | null>(null)
 const resetCancelButton = ref<HTMLButtonElement | null>(null)
 const resetTrigger = ref<HTMLElement | null>(null)
+const lifecycleRegion = ref<HTMLElement | null>(null)
 const resetRequests = new Map<string, Pick<ResetDialogSnapshot, 'newCaseID' | 'idempotencyKey'>>()
 let resetGeneration = 0
 
@@ -74,21 +78,30 @@ const displayedCase = computed(() => selectedBugCases.value.find(item => item.id
 const displayedDetail = computed(() => incidentWorkflow.detail.value?.case.id === displayedCase.value?.id ? incidentWorkflow.detail.value : null)
 const allCasesTerminal = computed(() => selectedBugCases.value.length > 0 && !selectedActiveCase.value)
 const invalidURLBug = computed(() => Boolean(routeBugID() && !tickets.loading.value && tickets.bugs.value.length > 0 && !tickets.selectedBug.value))
-const selectedBot = computed(() => matches.value.find(match => match.bot.key === selectedBotKey.value)?.bot)
 const pickerSelectedBotKey = computed(() => {
   const detail = displayedDetail.value
   const bug = tickets.selectedBug.value
   if (!detail || !bug || detail.case.status !== 'legacy_archived') return selectedBotKey.value
   return explicitlySelectedBots.value[bug.id] || botKeyForLegacyContinuation(detail, bug.id, '')
 })
-const selectedBotSupportsStart = computed(() => !selectedBot.value || ['codex', 'claude-code', 'openclaw'].includes(selectedBot.value.target))
-const showStandaloneStart = computed(() => {
-  if (!tickets.selectedBug.value || selectedActiveCase.value) return false
-  if (!displayedCase.value) return true
-  return displayedCase.value.status !== 'legacy_archived'
+const selectedBot = computed(() => matches.value.find(match => match.bot.key === pickerSelectedBotKey.value)?.bot)
+const selectedBotSupportsStart = computed(() => Boolean(selectedBot.value && ['codex', 'claude-code', 'openclaw'].includes(selectedBot.value.target)))
+const writeActionPending = computed(() => matching.value || starting.value || resetting.value || incidentWorkflow.pending.value)
+const writeActionDisabled = computed(() => writeActionPending.value || !tickets.selectedBug.value || !selectedBot.value || !selectedBotSupportsStart.value || !selectedBot.value.env?.trim())
+const writeActionDisabledReason = computed(() => {
+  if (matching.value) return '正在匹配排障机器人…'
+  if (starting.value || resetting.value || incidentWorkflow.pending.value) return '故障闭环操作正在处理中…'
+  if (!tickets.selectedBug.value) return '请先选择一条 Bug。'
+  if (!selectedBot.value) return '请选择排障机器人后继续。'
+  if (!selectedBotSupportsStart.value) return `${selectedBot.value.target} 暂不支持由 Studio 后台启动，请选择 Codex、Claude Code 或 OpenClaw。`
+  if (!selectedBot.value.env?.trim()) return '所选机器人缺少目标环境，请先完善平台机器人映射。'
+  return ''
 })
-const standaloneStartLabel = computed(() => allCasesTerminal.value ? '开始新一轮' : '开始故障闭环')
-const standaloneStartDisabled = computed(() => starting.value || incidentWorkflow.pending.value || !selectedBotSupportsStart.value || !startBotChoice(displayedDetail.value).key)
+const botActionStatus = computed(() => {
+  const current = preferredCase.value
+  if (!current) return '尚未建立 Case'
+  return terminalCaseStatuses.has(current.status) ? `已有历史 Case · ${current.status}` : `已有进行中的 Case · ${current.status}`
+})
 
 watch(() => tickets.selectedID.value, async bugID => {
   workflowNotice.value = ''
@@ -223,6 +236,30 @@ async function selectWorkflowCase(caseID: string) {
   }
 }
 
+async function enterIncidentCase() {
+  const target = preferredCase.value
+  if (!target) return
+  if (incidentWorkflow.selectedCaseID.value !== target.id) await selectWorkflowCase(target.id)
+  await nextTick()
+  const region = lifecycleRegion.value
+  if (!region) return
+  const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  region.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' })
+  ;(region.querySelector<HTMLElement>('.primary-action')
+    || region.querySelector<HTMLElement>('.case-heading'))?.focus()
+}
+
+async function restartIncidentCase() {
+  const target = preferredCase.value
+  if (!target || writeActionDisabled.value) return
+  if (terminalCaseStatuses.has(target.status)) {
+    const terminalDetail = displayedDetail.value?.case.id === target.id ? displayedDetail.value : null
+    await startNewCase(terminalDetail)
+    return
+  }
+  await openResetDialog(target)
+}
+
 type StartBotChoice = { key: string; bot?: BotRef }
 
 function startBotChoice(terminalDetail: IncidentCaseDetail | null): StartBotChoice {
@@ -248,7 +285,12 @@ function freshResetCaseID(caseID: string): string {
 async function openResetDialog(incident: IncidentCase) {
   if (resetting.value) return
   const bugID = tickets.selectedID.value
-  const identity = `${incident.id}:v${incident.version}:${incident.selected_bot_key}`
+  const detail = displayedDetail.value?.case.id === incident.id ? displayedDetail.value : null
+  const choice = startBotChoice(detail)
+  const newBot = choice.bot
+  const newEnvironment = newBot?.env?.trim() || ''
+  if (!choice.key || !newBot || !['codex', 'claude-code', 'openclaw'].includes(newBot.target) || !newEnvironment) return
+  const identity = `${incident.id}:v${incident.version}:${choice.key}:${newBot.target}:${newEnvironment}`
   let request = resetRequests.get(identity)
   if (!request) {
     const newCaseID = freshResetCaseID(incident.id)
@@ -256,8 +298,7 @@ async function openResetDialog(incident: IncidentCase) {
     resetRequests.set(identity, request)
   }
   resetTrigger.value = document.activeElement instanceof HTMLElement ? document.activeElement : null
-  resetError.value = incident.selected_bot_key ? '' : '当前 Case 没有绑定排障机器人，无法创建接替 Case。'
-  const detail = displayedDetail.value?.case.id === incident.id ? displayedDetail.value : null
+  resetError.value = ''
   const attempt = detail?.attempts.find(item => item.id === incident.current_attempt_id)
   resetDialog.value = {
     generation: ++resetGeneration,
@@ -267,8 +308,11 @@ async function openResetDialog(incident: IncidentCase) {
     caseStatus: incident.status,
     phase: attempt?.phase || '无活动阶段',
     attemptID: incident.current_attempt_id || '无',
-    agentTarget: attempt?.agent_target || matches.value.find(match => match.bot.key === incident.selected_bot_key)?.bot.target || '未知',
-    botKey: incident.selected_bot_key,
+    oldBotKey: incident.selected_bot_key,
+    oldEnvironment: incident.environment,
+    newBotKey: choice.key,
+    newBotTarget: newBot.target,
+    newEnvironment,
     ...request,
   }
   await nextTick()
@@ -314,7 +358,7 @@ function trapResetDialogFocus(event: KeyboardEvent) {
 
 async function confirmReset() {
   const request = resetDialog.value
-  if (!request || resetting.value || !request.botKey) return
+  if (!request || resetting.value || !request.newBotKey) return
   const isCurrentResetRequest = () => isCurrentBug(request.bugID) && resetGeneration === request.generation
   const isCurrentLinkedReplacement = (replacementID: string) => {
     const current = displayedDetail.value?.case
@@ -345,7 +389,7 @@ async function confirmReset() {
       expected_version: request.caseVersion,
       idempotency_key: request.idempotencyKey,
       actor_id: 'desktop-user',
-      bot_key: request.botKey,
+      bot_key: request.newBotKey,
     }))
     const replacement = result.case
     if (!isExpectedResetContext(replacement)) return
@@ -356,6 +400,7 @@ async function confirmReset() {
     closeResetDialog()
     await incidentWorkflow.refreshCases()
     if (!isExpectedResetContext(replacement) || displayedDetail.value?.case.id !== replacement.id) return
+    await enterIncidentCase()
     if (result.warnings.length > 0) {
       const message = `Case 已重置，但${result.warnings.map(warning => warning.message).join('；')}`
       incidentWorkflow.error.value = message
@@ -366,7 +411,7 @@ async function confirmReset() {
   } catch (error) {
     if (isIncidentWorkflowConflict(error)) {
       if (!isCurrentResetRequest()) return
-      const identity = `${request.caseID}:v${request.caseVersion}:${request.botKey}`
+      const identity = `${request.caseID}:v${request.caseVersion}:${request.newBotKey}:${request.newBotTarget}:${request.newEnvironment}`
       resetRequests.delete(identity)
       resetting.value = false
       closeResetDialog()
@@ -451,6 +496,7 @@ async function startNewCase(terminalDetail: IncidentCaseDetail | null = displaye
     if (!isCurrentBug(initiatingBugID)) return
     const refreshed = await refreshCaseSnapshotIfCurrent(opened.id, () => isCurrentBug(initiatingBugID))
     if (!refreshed || !isCurrentBug(initiatingBugID)) return
+    await enterIncidentCase()
     if (opened.id !== candidate) {
       workflowNotice.value = '已打开现有闭环'
       toast.info('已打开现有闭环')
@@ -591,39 +637,44 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
           URL 中的 Bug 不存在。请从左侧选择一条可用工单，页面会更新链接并继续。
         </p>
         <IncidentBugSummary :bug="tickets.selectedBug.value" />
-
-        <section v-if="showStandaloneStart" class="start-card" aria-labelledby="start-card-title">
-          <div>
-            <span>{{ allCasesTerminal ? '历史已闭环' : '尚未建立 Case' }}</span>
-            <h2 id="start-card-title">{{ allCasesTerminal ? '可以开始新一轮验证' : '为当前 Bug 建立故障闭环' }}</h2>
-            <p>{{ allCasesTerminal ? '历史 Case 保持只读，新一轮会使用新的 Case ID。' : '启动前请确认右侧机器人和目标环境。' }}</p>
-          </div>
-          <button class="btn primary" type="button" data-action="start-case" :disabled="standaloneStartDisabled" @click="startNewCase()">
-            {{ starting ? '启动中…' : standaloneStartLabel }}
-          </button>
-        </section>
-        <p v-if="workflowNotice" class="workflow-notice" role="status" aria-live="polite">{{ workflowNotice }}</p>
       </main>
 
       <aside class="selection-panel bot-panel" data-overflow-safe="true">
         <BugBotPicker :matches="matches" :selected-key="pickerSelectedBotKey" :loading="matching" @select="rememberSelectedBot" />
         <p v-if="botError" class="live-error" role="status">{{ botError }}</p>
         <p v-else-if="selectedBot && !selectedBotSupportsStart" class="support-note">{{ selectedBot.target }} 暂不支持由 Studio 后台启动，请选择 Codex、Claude Code 或 OpenClaw。</p>
+        <section v-if="tickets.selectedBug.value" class="bot-action-panel" aria-label="故障闭环操作">
+          <p class="bot-action-status" role="status">{{ botActionStatus }}</p>
+          <div class="bot-action-controls">
+            <button v-if="!displayedCase" class="btn primary" type="button" data-action="start-case" :disabled="writeActionDisabled" @click="startNewCase()">
+              {{ starting ? '开启中…' : '开启故障闭环' }}
+            </button>
+            <template v-else>
+              <button class="btn primary" type="button" data-action="enter-case" @click="enterIncidentCase">进入故障闭环</button>
+              <button class="btn danger-secondary" type="button" data-action="restart-case" :disabled="writeActionDisabled" @click="restartIncidentCase">
+                {{ starting || resetting ? '处理中…' : '重新开始故障闭环' }}
+              </button>
+            </template>
+          </div>
+          <p v-if="writeActionDisabledReason" class="bot-action-disabled-reason" role="status">{{ writeActionDisabledReason }}</p>
+          <p v-if="workflowNotice" class="workflow-notice" role="status" aria-live="polite">{{ workflowNotice }}</p>
+        </section>
       </aside>
     </section>
 
-    <BugCaseLifecycle
-      v-if="displayedCase && displayedDetail"
-      :cases="selectedBugCases"
-      :detail="displayedDetail"
-      :pending="incidentWorkflow.pending.value || starting"
-      :error="incidentWorkflow.error.value"
-      @select="selectWorkflowCase"
-      @refresh="refreshIncidentWorkflow"
-      @primary="handleIncidentPrimary"
-      @reset="openResetDialog"
-    />
-    <p v-else-if="displayedCase" class="case-loading" role="status" aria-live="polite">正在加载 Case {{ displayedCase.id }}…</p>
+    <div v-if="displayedCase" ref="lifecycleRegion" class="lifecycle-region">
+      <BugCaseLifecycle
+        v-if="displayedDetail"
+        :cases="selectedBugCases"
+        :detail="displayedDetail"
+        :pending="incidentWorkflow.pending.value || starting"
+        :error="incidentWorkflow.error.value"
+        @select="selectWorkflowCase"
+        @refresh="refreshIncidentWorkflow"
+        @primary="handleIncidentPrimary"
+      />
+      <p v-else class="case-loading" role="status" aria-live="polite">正在加载 Case {{ displayedCase.id }}…</p>
+    </div>
 
     <div v-if="resetDialog" class="reset-dialog-backdrop" @click.self="closeResetDialog" @keydown.esc="closeResetDialog">
       <section ref="resetDialogElement" role="dialog" aria-modal="true" aria-labelledby="reset-dialog-title" aria-describedby="reset-dialog-description" class="reset-dialog" data-overflow-safe="true" tabindex="-1" @keydown="trapResetDialogFocus">
@@ -631,7 +682,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
           <span>危险操作</span>
           <h2 id="reset-dialog-title">重置并新建 Case</h2>
         </header>
-        <p id="reset-dialog-description">当前 Case 将归档为“已重置归档”，并创建一个绑定同一机器人的新 Case，从验证阶段重新开始。<strong>当前 Agent 将被停止。</strong></p>
+        <p id="reset-dialog-description">当前 Case 将归档为“已重置归档”，并用当前选择的机器人和环境创建新 Case，从验证阶段重新开始。<strong>当前 Agent 将被停止。</strong></p>
         <p class="reset-warning" role="note"><strong>重置不会撤销已发生的提交、推送或部署。</strong>原 Case、证据和审计记录保持不可变；外部副作用需要人工另行处理。</p>
         <dl class="reset-scope">
           <div><dt>Bug ID</dt><dd>{{ resetDialog.bugID }}</dd></div>
@@ -639,13 +690,14 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
           <div><dt>状态</dt><dd>{{ resetDialog.caseStatus }}</dd></div>
           <div><dt>阶段</dt><dd>{{ resetDialog.phase }}</dd></div>
           <div><dt>当前 Attempt</dt><dd>{{ resetDialog.attemptID }}</dd></div>
-          <div><dt>绑定 Agent/机器人</dt><dd>{{ resetDialog.agentTarget }} · {{ resetDialog.botKey || '未绑定' }}</dd></div>
+          <div><dt>旧绑定</dt><dd>{{ resetDialog.oldBotKey || '未绑定' }} · {{ resetDialog.oldEnvironment || '环境未知' }}</dd></div>
+          <div><dt>新绑定</dt><dd>{{ resetDialog.newBotTarget }} · {{ resetDialog.newBotKey }} · {{ resetDialog.newEnvironment }}</dd></div>
           <div><dt>接替 Case</dt><dd>{{ resetDialog.newCaseID }}</dd></div>
         </dl>
         <p data-reset-error class="reset-live-error" role="status" aria-live="assertive">{{ resetError }}</p>
         <footer>
           <button ref="resetCancelButton" class="btn" data-reset-cancel type="button" :disabled="resetting" @click="closeResetDialog">取消</button>
-          <button class="btn danger" data-reset-confirm type="button" :disabled="resetting || !resetDialog.botKey" @click="confirmReset">{{ resetting ? '重置中…' : '确认重置并新建' }}</button>
+          <button class="btn danger" data-reset-confirm type="button" :disabled="resetting || !resetDialog.newBotKey" @click="confirmReset">{{ resetting ? '重置中…' : '确认重置并新建' }}</button>
         </footer>
       </section>
     </div>
@@ -664,6 +716,8 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
 .btn.primary { border-color: var(--c-accent-hover); background: var(--c-accent-hover); color: white; }
 .btn.danger { border-color: #b91c1c; background: #b91c1c; color: white; }
 .btn.danger:hover:not(:disabled) { border-color: #991b1b; background: #991b1b; }
+.danger-secondary { border-color: #fca5a5; background: #fff; color: #b91c1c; }
+.danger-secondary:hover:not(:disabled) { border-color: #dc2626; background: #fef2f2; }
 .selection-workspace { min-width: 0; display: grid; grid-template-columns: minmax(220px, .8fr) minmax(300px, 1.35fr) minmax(240px, .9fr); align-items: start; gap: var(--sp-3); }
 .selection-panel { min-width: 0; padding: var(--sp-3); border: 1px solid var(--c-line); border-radius: var(--r-lg); background: var(--c-surf); }
 .ticket-list-panel { max-height: min(560px, 58vh); overflow: auto; }
@@ -675,12 +729,12 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
 .support-note { margin-top: var(--sp-2); background: var(--c-surf-2); color: var(--c-muted); }
 .live-error { margin-top: var(--sp-2); border: 1px solid #fecaca; background: #fef2f2; color: #b91c1c; }
 .workflow-notice { border: 1px solid #bbf7d0; background: #f0fdf4; color: #166534; }
-.start-card { min-width: 0; padding: var(--sp-3); display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); border: 1px solid #bfdbfe; border-radius: var(--r-lg); background: #eff6ff; }
-.start-card div { min-width: 0; }
-.start-card span { color: #1d4ed8; font-size: var(--fs-xs); font-weight: 700; }
-.start-card h2 { margin: 3px 0 0; color: var(--c-ink); font-size: var(--fs-md); }
-.start-card p { margin: 4px 0 0; color: var(--c-muted); font-size: var(--fs-sm); }
-.start-card .btn { flex: 0 0 auto; }
+.bot-action-panel { margin-top: var(--sp-3); padding-top: var(--sp-3); display: grid; gap: var(--sp-2); border-top: 1px solid var(--c-line); }
+.bot-action-status, .bot-action-disabled-reason { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--c-muted); font-size: var(--fs-sm); line-height: 1.5; }
+.bot-action-disabled-reason { color: #92400e; }
+.bot-action-controls { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.bot-action-controls .btn { flex: 1 1 160px; min-height: 44px; }
+.lifecycle-region { min-width: 0; scroll-margin-top: var(--sp-3); }
 .reset-dialog-backdrop { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: var(--sp-4); background: rgba(15, 23, 42, .6); }
 .reset-dialog { width: min(560px, 100%); max-height: calc(100vh - 32px); overflow: auto; box-sizing: border-box; display: grid; gap: var(--sp-3); padding: var(--sp-5); border: 1px solid #fecaca; border-radius: var(--r-lg); background: var(--c-surf); box-shadow: 0 18px 50px rgba(15, 23, 42, .28); }
 .reset-dialog h2, .reset-dialog p { margin: 0; }
@@ -701,11 +755,11 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
   .bot-panel { grid-column: 1 / -1; max-height: none; }
 }
 @media (max-width: 700px) {
-  .start-card { align-items: stretch; flex-direction: column; }
   .selection-workspace { grid-template-columns: minmax(0, 1fr); }
   .bot-panel { grid-column: auto; }
   .ticket-list-panel, .bot-panel { max-height: none; }
-  .start-card .btn { width: 100%; }
+  .bot-action-controls { flex-direction: column; }
+  .bot-action-controls .btn { width: 100%; flex-basis: auto; }
   .reset-dialog footer { flex-direction: column; }
   .reset-dialog footer .btn { width: 100%; }
 }

@@ -479,7 +479,7 @@ describe('IncidentWorkbenchPage', () => {
     wrapper.unmount()
   })
 
-  it.each(['fixed_verified', 'reset_archived'] as const)('starts a %s terminal round with the explicitly selected Bot key and its environment', async status => {
+  it.each(['fixed_verified', 'legacy_archived', 'reset_archived'] as const)('confirms a %s terminal round using the snapshotted Bot key and environment', async status => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])
     vi.mocked(matchBugBots).mockResolvedValue([botMatch, prodBotMatch])
@@ -492,14 +492,45 @@ describe('IncidentWorkbenchPage', () => {
 
     await wrapper.findAll('.bot-picker input[type="radio"]')[1].setValue(true)
     await wrapper.get('[data-action="restart-case"]').trigger('click')
+
+    const dialog = wrapper.get('[role="dialog"]')
+    expect(dialog.text()).toContain('开启新一轮')
+    expect(dialog.text()).toContain(terminal.id)
+    expect(dialog.text()).toContain('base-prod|codex')
+    expect(dialog.text()).toContain('prod')
+    expect(startIncidentCase).not.toHaveBeenCalled()
+    expect(resetIncidentCaseWithWarnings).not.toHaveBeenCalled()
+
+    await wrapper.findAll('.bot-picker input[type="radio"]')[0].setValue(true)
+    expect(dialog.text()).toContain('base-prod|codex')
+    await dialog.get('[data-reset-confirm]').trigger('click')
     await flushPromises()
 
     expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
-      case_id: expect.stringMatching(/^case-bug-a-/),
+      case_id: expect.stringMatching(/^case-reset-case-terminal-/),
       bot_key: 'base-prod|codex',
       bot_environment: 'prod',
       input_json: expect.objectContaining({ target_environment: 'prod' }),
     }))
+    expect(resetIncidentCaseWithWarnings).not.toHaveBeenCalled()
+  })
+
+  it.each(['cancel', 'escape'] as const)('does not write a terminal new round after %s', async dismissal => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const terminal = incident('case-terminal-cancel', 'fixed_verified', '2026-07-13T00:00:00Z')
+    vi.mocked(listIncidentCases).mockResolvedValue([terminal])
+    mockCaseDetails(detail(terminal))
+    const wrapper = await mountedPage()
+
+    await wrapper.get('[data-action="restart-case"]').trigger('click')
+    const dialog = wrapper.get('[role="dialog"]')
+    if (dismissal === 'cancel') await dialog.get('[data-reset-cancel]').trigger('click')
+    else await wrapper.get('.reset-dialog-backdrop').trigger('keydown', { key: 'Escape' })
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(startIncidentCase).not.toHaveBeenCalled()
     expect(resetIncidentCaseWithWarnings).not.toHaveBeenCalled()
   })
 
@@ -548,10 +579,13 @@ describe('IncidentWorkbenchPage', () => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([{ ...bugA, selected_bot_key: 'base-prod|claude-code' }])
     vi.mocked(matchBugBots).mockResolvedValue([botMatch, replacementBotMatch])
-    const active = incident('case-active-canonical', 'waiting_evidence', '2026-07-12T00:00:00Z')
+    const active = incident('case-active-canonical', 'waiting_evidence', '2026-07-12T00:00:00Z', { current_attempt_id: 'active-attempt' })
     const archived = incident('case-legacy-canonical', 'legacy_archived', '2026-07-13T00:00:00Z', { selected_bot_key: 'base|codex' })
     vi.mocked(listIncidentCases).mockResolvedValue([archived, active])
-    mockCaseDetails(detail(active), detail(archived, {
+    const activeSnapshot = detail(active, {
+      attempts: [{ id: 'active-attempt', case_id: active.id, cycle_number: 1, phase: 'investigation', mode: 'reproduce', status: 'running', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '2026-07-12T00:00:00Z', error_code: '', error_message: '', usage: {} }],
+    })
+    mockCaseDetails(activeSnapshot, detail(archived, {
       attempts: [{ id: 'legacy-attempt', case_id: archived.id, cycle_number: 1, phase: 'legacy', mode: '', status: 'succeeded', agent_target: '', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '2026-07-11T00:00:00Z', error_code: '', error_message: '', usage: {} }],
     }))
     const pendingReset = deferred<{ case: IncidentCase; warnings: [] }>()
@@ -566,8 +600,14 @@ describe('IncidentWorkbenchPage', () => {
     expect(radios[1].element.checked).toBe(true)
     expect(wrapper.get<HTMLButtonElement>('[data-action="restart-case"]').element.disabled).toBe(false)
 
+    vi.mocked(getIncidentCase).mockClear()
     await wrapper.get('[data-action="restart-case"]').trigger('click')
     const dialog = wrapper.get('[role="dialog"]')
+    expect(getIncidentCase).toHaveBeenCalledWith(active.id)
+    expect(wrapper.get('.case-heading').text()).toContain(archived.id)
+    expect(dialog.text()).toContain('investigation')
+    expect(dialog.text()).toContain('active-attempt')
+    expect(dialog.text()).not.toContain('无活动阶段')
     expect(dialog.text()).toContain('base-prod|claude-code')
     expect(dialog.text()).toContain('prod')
     await dialog.get('[data-reset-confirm]').trigger('click')
@@ -576,6 +616,36 @@ describe('IncidentWorkbenchPage', () => {
       case_id: active.id,
       bot_key: 'base-prod|claude-code',
     }))
+  })
+
+  it('keeps historical detail visible and reports a recoverable error when the restart target detail cannot load', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const active = incident('case-active-load-failure', 'waiting_evidence', '2026-07-12T00:00:00Z', { current_attempt_id: 'active-attempt' })
+    const archived = incident('case-history-load-failure', 'fixed_verified', '2026-07-13T00:00:00Z')
+    vi.mocked(listIncidentCases).mockResolvedValue([archived, active])
+    mockCaseDetails(detail(active), detail(archived))
+    const wrapper = await mountedPage()
+
+    await wrapper.findAll('.case-row')[0].trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.case-heading').text()).toContain(archived.id)
+    vi.mocked(getIncidentCase).mockClear()
+    vi.mocked(getIncidentCase).mockImplementation(async caseID => {
+      if (caseID === active.id) throw new Error('active detail unavailable')
+      return detail(archived)
+    })
+
+    await wrapper.get('[data-action="restart-case"]').trigger('click')
+    await flushPromises()
+
+    expect(getIncidentCase).toHaveBeenCalledWith(active.id)
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(wrapper.get('.case-heading').text()).toContain(archived.id)
+    expect(wrapper.get('.live-error').text()).toContain('active detail unavailable')
+    expect(notifications.toastError).toHaveBeenCalledWith('读取重启目标 Case', expect.any(Error))
+    expect(startIncidentCase).not.toHaveBeenCalled()
+    expect(resetIncidentCaseWithWarnings).not.toHaveBeenCalled()
   })
 
   it('lets an explicit Bot override legacy recovery for both key and environment', async () => {

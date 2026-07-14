@@ -65,6 +65,10 @@ type CaseReset struct {
 	ReplacementBotTarget   string
 	ReplacementEnvironment string
 	RequestJSON            json.RawMessage
+	// replayOnlyLegacyEnvironment is the environment that the pre-selected-Bot
+	// resolver would have used. It is consulted only for an already committed
+	// event and is excluded from new fingerprints, payloads, and writes.
+	replayOnlyLegacyEnvironment string
 }
 
 // CaseResetResult is the immutable result stored with the reset event. Replay
@@ -809,7 +813,36 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 	var eventType, storedFingerprint, resultJSON string
 	queryErr := tx.QueryRowContext(ctx, `SELECT event_type,request_fingerprint,result_case_json FROM transition_events WHERE idempotency_key=?`, reset.IdempotencyKey).Scan(&eventType, &storedFingerprint, &resultJSON)
 	if queryErr == nil {
-		if eventType != "case_reset" || (storedFingerprint != fingerprint && storedFingerprint != legacyFingerprint) {
+		if eventType != "case_reset" {
+			return result, fmt.Errorf("%w: Case reset key %q", ErrIdempotencyConflict, reset.IdempotencyKey)
+		}
+		type replayBinding struct {
+			environment          string
+			requireDerivedTarget bool
+		}
+		acceptedBindings := []replayBinding{}
+		switch storedFingerprint {
+		case fingerprint:
+			acceptedBindings = append(acceptedBindings, replayBinding{environment: reset.ReplacementEnvironment})
+		case legacyFingerprint:
+			acceptedBindings = append(acceptedBindings, replayBinding{environment: reset.ReplacementEnvironment, requireDerivedTarget: true})
+			if !blank(reset.replayOnlyLegacyEnvironment) && reset.replayOnlyLegacyEnvironment != reset.ReplacementEnvironment {
+				acceptedBindings = append(acceptedBindings, replayBinding{environment: reset.replayOnlyLegacyEnvironment, requireDerivedTarget: true})
+			}
+		default:
+			if !blank(reset.replayOnlyLegacyEnvironment) {
+				legacyReset := reset
+				legacyReset.ReplacementEnvironment = reset.replayOnlyLegacyEnvironment
+				legacyExpandedFingerprint, fingerprintErr := caseResetFingerprint(legacyReset)
+				if fingerprintErr != nil {
+					return CaseResetResult{}, fingerprintErr
+				}
+				if storedFingerprint == legacyExpandedFingerprint {
+					acceptedBindings = append(acceptedBindings, replayBinding{environment: reset.replayOnlyLegacyEnvironment})
+				}
+			}
+		}
+		if len(acceptedBindings) == 0 {
 			return result, fmt.Errorf("%w: Case reset key %q", ErrIdempotencyConflict, reset.IdempotencyKey)
 		}
 		if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
@@ -818,8 +851,15 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 		if err := validateCaseResetResult(result, reset.CaseID, reset.NewCaseID); err != nil {
 			return CaseResetResult{}, err
 		}
-		if storedFingerprint == legacyFingerprint && !legacyCaseResetBindingMatches(reset, result.Replacement) {
-			return CaseResetResult{}, fmt.Errorf("%w: legacy Case reset binding %q", ErrIdempotencyConflict, reset.IdempotencyKey)
+		bindingMatches := false
+		for _, accepted := range acceptedBindings {
+			if caseResetBindingMatches(reset, result.Replacement, accepted.environment, accepted.requireDerivedTarget) {
+				bindingMatches = true
+				break
+			}
+		}
+		if !bindingMatches {
+			return CaseResetResult{}, fmt.Errorf("%w: Case reset binding %q", ErrIdempotencyConflict, reset.IdempotencyKey)
 		}
 		if result.CancelledAttemptID != "" {
 			operation, found, operationErr := getResetCancellationOperation(ctx, tx, reset.IdempotencyKey)
@@ -1109,12 +1149,15 @@ func legacyCaseResetFingerprint(reset CaseReset) (string, error) {
 	return hex.EncodeToString(digest[:]), nil
 }
 
-func legacyCaseResetBindingMatches(reset CaseReset, replacement IncidentCase) bool {
-	if reset.SelectedBotKey != replacement.SelectedBotKey || reset.ReplacementEnvironment != replacement.Environment {
+func caseResetBindingMatches(reset CaseReset, replacement IncidentCase, environment string, requireDerivedTarget bool) bool {
+	if reset.SelectedBotKey != replacement.SelectedBotKey || environment != replacement.Environment {
 		return false
 	}
 	persistedTarget := incidentWorkflowTargetFromBotKey(replacement.SelectedBotKey)
-	return persistedTarget != "" && reset.ReplacementBotTarget == persistedTarget
+	if persistedTarget == "" {
+		return !requireDerivedTarget
+	}
+	return reset.ReplacementBotTarget == persistedTarget
 }
 
 func caseResetEventPayload(reset CaseReset, result CaseResetResult) (json.RawMessage, error) {

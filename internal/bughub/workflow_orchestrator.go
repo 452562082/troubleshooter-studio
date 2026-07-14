@@ -506,15 +506,16 @@ func (o *CaseOrchestrator) ResetCaseWithOutcome(ctx context.Context, cmd ResetCa
 		return ResetCaseOutcome{}, fmt.Errorf("reset Bug system %q does not match Case system %q", cmd.Bug.SystemID, incident.SystemID)
 	}
 	resetRequest := CaseReset{
-		CaseID:                 cmd.CaseID,
-		NewCaseID:              cmd.NewCaseID,
-		IdempotencyKey:         cmd.IdempotencyKey,
-		ActorID:                cmd.ActorID,
-		ExpectedVersion:        cmd.ExpectedVersion,
-		SelectedBotKey:         cmd.Bot.Key,
-		ReplacementBotTarget:   cmd.Bot.Target,
-		ReplacementEnvironment: environment,
-		RequestJSON:            mustJSON(cmd),
+		CaseID:                      cmd.CaseID,
+		NewCaseID:                   cmd.NewCaseID,
+		IdempotencyKey:              cmd.IdempotencyKey,
+		ActorID:                     cmd.ActorID,
+		ExpectedVersion:             cmd.ExpectedVersion,
+		SelectedBotKey:              cmd.Bot.Key,
+		ReplacementBotTarget:        cmd.Bot.Target,
+		ReplacementEnvironment:      environment,
+		RequestJSON:                 mustJSON(cmd),
+		replayOnlyLegacyEnvironment: resolveLegacyResetEnvironment(cmd.Bug, cmd.Bot),
 	}
 	fingerprint, err := caseResetFingerprint(resetRequest)
 	if err != nil {
@@ -706,6 +707,13 @@ func resolveIncidentEnvironment(bug Bug, bot BotRef) string {
 		return env
 	}
 	return strings.TrimSpace(bug.Env)
+}
+
+func resolveLegacyResetEnvironment(bug Bug, bot BotRef) string {
+	if env := strings.TrimSpace(bug.Env); env != "" {
+		return env
+	}
+	return strings.TrimSpace(bot.Env)
 }
 
 func (o *CaseOrchestrator) ContinueWithEvidence(ctx context.Context, cmd ContinueWithEvidenceCommand) (IncidentCase, error) {

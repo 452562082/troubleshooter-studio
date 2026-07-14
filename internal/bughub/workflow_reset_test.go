@@ -960,6 +960,132 @@ func TestResetCaseWithReplacementReplaysLegacyFingerprintWithoutCancellationSide
 	}
 }
 
+func TestResetCaseReplaysOldEnvironmentFingerprintVariantsWithoutSideEffects(t *testing.T) {
+	for _, variant := range []string{"expanded-old-environment", "field-less-legacy"} {
+		t.Run(variant, func(t *testing.T) {
+			store, orchestrator, runner, command, storedFingerprint := prepareOldEnvironmentResetReplay(t, variant)
+			before := resetDatabaseEffectsSnapshot(t, store)
+			runner.mu.Lock()
+			startsBefore := len(runner.starts)
+			cancelsBefore := len(runner.cancels)
+			runner.mu.Unlock()
+
+			outcome, err := orchestrator.ResetCaseWithOutcome(context.Background(), command)
+			if err != nil {
+				t.Fatalf("replay: %v", err)
+			}
+			if outcome.Case.ID != command.NewCaseID || outcome.Case.SelectedBotKey != command.Bot.Key || outcome.Case.Environment != "test" {
+				t.Fatalf("outcome=%+v", outcome)
+			}
+			after := resetDatabaseEffectsSnapshot(t, store)
+			if !reflect.DeepEqual(before, after) {
+				t.Fatalf("replay changed database effects:\nbefore=%+v\nafter=%+v", before, after)
+			}
+			runner.mu.Lock()
+			startsAfter := len(runner.starts)
+			cancelsAfter := len(runner.cancels)
+			runner.mu.Unlock()
+			if startsBefore != 1 || cancelsBefore != 1 || startsAfter != startsBefore || cancelsAfter != cancelsBefore {
+				t.Fatalf("runner calls starts=%d->%d cancels=%d->%d", startsBefore, startsAfter, cancelsBefore, cancelsAfter)
+			}
+			operation, found, err := store.GetResetCancellationOperation(context.Background(), command.IdempotencyKey, storedFingerprint)
+			if err != nil || !found || operation.Status != ResetCancellationSucceeded || operation.RequestFingerprint != storedFingerprint {
+				t.Fatalf("operation=%+v found=%v err=%v", operation, found, err)
+			}
+		})
+	}
+}
+
+func TestResetCaseOldEnvironmentReplayVariantsRejectChangedIdentity(t *testing.T) {
+	for _, variant := range []string{"expanded-old-environment", "field-less-legacy"} {
+		for _, mismatch := range []struct {
+			name   string
+			mutate func(*ResetCaseCommand)
+		}{
+			{name: "Bug environment", mutate: func(command *ResetCaseCommand) { command.Bug.Env = "stage" }},
+			{name: "Bot environment", mutate: func(command *ResetCaseCommand) { command.Bot.Env = "stage" }},
+			{name: "Bot key", mutate: func(command *ResetCaseCommand) { command.Bot.Key = "different|claude-code" }},
+			{name: "Bot target", mutate: func(command *ResetCaseCommand) { command.Bot.Target = "codex" }},
+		} {
+			t.Run(variant+"/"+mismatch.name, func(t *testing.T) {
+				store, orchestrator, runner, command, _ := prepareOldEnvironmentResetReplay(t, variant)
+				before := resetDatabaseEffectsSnapshot(t, store)
+				mismatch.mutate(&command)
+
+				if _, err := orchestrator.ResetCaseWithOutcome(context.Background(), command); !errors.Is(err, ErrIdempotencyConflict) {
+					t.Fatalf("err=%v", err)
+				}
+				after := resetDatabaseEffectsSnapshot(t, store)
+				if !reflect.DeepEqual(before, after) {
+					t.Fatalf("conflict changed database effects:\nbefore=%+v\nafter=%+v", before, after)
+				}
+				runner.mu.Lock()
+				starts, cancels := len(runner.starts), len(runner.cancels)
+				runner.mu.Unlock()
+				if starts != 1 || cancels != 1 {
+					t.Fatalf("conflict invoked runner: starts=%d cancels=%d", starts, cancels)
+				}
+			})
+		}
+	}
+}
+
+func prepareOldEnvironmentResetReplay(t *testing.T, variant string) (*CaseStore, *CaseOrchestrator, *recordingPhaseRunner, ResetCaseCommand, string) {
+	t.Helper()
+	store := newOrchestratorStore(t)
+	old, _ := prepareResetCase(t, store, "case-reset-old-environment-"+variant)
+	runner := &recordingPhaseRunner{}
+	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	command := resetOrchestratorCommand(old, old.ID+"-next", "reset-old-environment-"+variant)
+	command.Bot = BotRef{Key: "replacement|claude-code", Target: "claude-code", Path: "/workspace/replacement", Env: "prod"}
+	command.Bug.Env = "test"
+	reset := CaseReset{
+		CaseID: command.CaseID, NewCaseID: command.NewCaseID, IdempotencyKey: command.IdempotencyKey,
+		ActorID: command.ActorID, ExpectedVersion: command.ExpectedVersion, SelectedBotKey: command.Bot.Key,
+		ReplacementBotTarget: command.Bot.Target, ReplacementEnvironment: command.Bug.Env, RequestJSON: mustJSON(command),
+	}
+	result, err := store.ResetCaseWithReplacement(context.Background(), reset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storedFingerprint, err := caseResetFingerprint(reset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := orchestrator.processResetRunnerCancellation(result, reset.IdempotencyKey, storedFingerprint); err != nil {
+		t.Fatal(err)
+	}
+	started, err := orchestrator.StartCase(context.Background(), StartCaseCommand{
+		CaseID: result.Replacement.ID, ExpectedVersion: result.Replacement.Version, IdempotencyKey: command.IdempotencyKey + ":start",
+		ActorID: command.ActorID, Bug: command.Bug, Bot: command.Bot, InputJSON: command.InputJSON,
+	})
+	if err != nil || started.Status != CaseValidating || started.Environment != "test" {
+		t.Fatalf("started=%+v err=%v", started, err)
+	}
+	currentReset := reset
+	currentReset.ReplacementEnvironment = command.Bot.Env
+	currentFingerprint, err := caseResetFingerprint(currentReset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if currentFingerprint == storedFingerprint {
+		t.Fatal("old and selected-Bot environment fingerprints unexpectedly match")
+	}
+	if variant == "field-less-legacy" {
+		storedFingerprint, err = legacyCaseResetFingerprint(reset)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.db.Exec(`UPDATE transition_events SET request_fingerprint=? WHERE idempotency_key IN (?,?)`, storedFingerprint, reset.IdempotencyKey, reset.IdempotencyKey+":replacement"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.db.Exec(`UPDATE reset_cancellation_operations SET request_fingerprint=? WHERE reset_key=?`, storedFingerprint, reset.IdempotencyKey); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return store, orchestrator, runner, command, storedFingerprint
+}
+
 func TestResetCaseWithReplacementRedactsStoredRequest(t *testing.T) {
 	store := openTestCaseStore(t)
 	incident := createWorkflowCase(t, store, "case-reset-redact", CaseWaitingEvidence)

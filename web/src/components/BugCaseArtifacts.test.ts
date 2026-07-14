@@ -62,6 +62,23 @@ describe('BugCaseArtifacts', () => {
     expect(wrapper.find('[data-raw-output]').exists()).toBe(false)
   })
 
+  it('keeps an investigation without a root cause semantic in the root-cause card', () => {
+    const investigation = {
+      ...detail.attempts[0],
+      output_json: {
+        investigation_status: 'insufficient_info',
+        environment: 'test',
+        evidence: [],
+        gaps: ['缺少 trace'],
+      },
+    }
+    const wrapper = mount(BugCaseArtifacts, { props: { detail: { ...detail, attempts: [investigation] } } })
+
+    expect(wrapper.get('[aria-labelledby="cause-title"]').text()).toContain('尚无根因结论')
+    expect(wrapper.text()).not.toContain('investigation_status')
+    expect(wrapper.text()).not.toContain('{')
+  })
+
   it('keeps imported legacy attempt output readable', () => {
     const archived = {
       ...detail,

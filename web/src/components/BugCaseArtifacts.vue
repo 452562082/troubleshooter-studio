@@ -40,7 +40,7 @@ function rootCause(attempt?: PhaseAttempt): string {
     const value = output[key]
     if (typeof value === 'string' && value.trim()) return value
   }
-  return displayJSON(output)
+  return '尚无根因结论'
 }
 
 function inlineTokens(value: string): InlineToken[] {

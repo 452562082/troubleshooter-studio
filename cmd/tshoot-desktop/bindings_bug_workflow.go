@@ -316,7 +316,12 @@ func (a *App) startIncidentWorkflow(ctx context.Context) error {
 }
 
 func (a *App) resolveIncidentRecoveryContext(_ context.Context, incident bughub.IncidentCase, attempt bughub.PhaseAttempt) (bughub.Bug, bughub.BotRef, error) {
-	return a.loadBugAndBot(incident.BugID, attempt.BotKey)
+	bug, bot, err := a.loadBugAndBot(incident.BugID, attempt.BotKey)
+	if err != nil {
+		return bughub.Bug{}, bughub.BotRef{}, err
+	}
+	bot.Env = strings.TrimSpace(incident.Environment)
+	return bug, bot, nil
 }
 
 func (a *App) closeIncidentWorkflow() error {
@@ -855,7 +860,12 @@ func (a *App) loadIncidentContext(caseID string) (bughub.Bug, bughub.BotRef, err
 	if err != nil {
 		return bughub.Bug{}, bughub.BotRef{}, err
 	}
-	return a.loadBugAndBot(incident.BugID, incident.SelectedBotKey)
+	bug, bot, err := a.loadBugAndBot(incident.BugID, incident.SelectedBotKey)
+	if err != nil {
+		return bughub.Bug{}, bughub.BotRef{}, err
+	}
+	bot.Env = strings.TrimSpace(incident.Environment)
+	return bug, bot, nil
 }
 
 func (a *App) loadIncidentStartContext(input StartIncidentCaseInput) (bughub.Bug, bughub.BotRef, error) {
@@ -865,6 +875,8 @@ func (a *App) loadIncidentStartContext(input StartIncidentCaseInput) (bughub.Bug
 	}
 	bugID := strings.TrimSpace(input.BugID)
 	botKey := strings.TrimSpace(input.BotKey)
+	persistedEnvironment := ""
+	usePersistedEnvironment := false
 	incident, getErr := store.GetCase(a.workflowCommandContext(), strings.TrimSpace(input.CaseID))
 	if getErr == nil {
 		if bugID != "" && bugID != incident.BugID {
@@ -877,13 +889,24 @@ func (a *App) loadIncidentStartContext(input StartIncidentCaseInput) (bughub.Bug
 			}
 			botKey = incident.SelectedBotKey
 		}
+		if incident.Status != bughub.CaseLegacyArchived {
+			persistedEnvironment = strings.TrimSpace(incident.Environment)
+			usePersistedEnvironment = true
+		}
 	} else if !errors.Is(getErr, bughub.ErrCaseNotFound) {
 		return bughub.Bug{}, bughub.BotRef{}, getErr
 	}
 	if bugID == "" || botKey == "" {
 		return bughub.Bug{}, bughub.BotRef{}, errors.New("bug_id and bot_key are required when creating or continuing a Case")
 	}
-	return a.loadBugAndBot(bugID, botKey)
+	bug, bot, err := a.loadBugAndBot(bugID, botKey)
+	if err != nil {
+		return bughub.Bug{}, bughub.BotRef{}, err
+	}
+	if usePersistedEnvironment {
+		bot.Env = persistedEnvironment
+	}
+	return bug, bot, nil
 }
 
 func (a *App) loadBugAndBot(bugID, botKey string) (bughub.Bug, bughub.BotRef, error) {
@@ -907,7 +930,7 @@ func (a *App) loadBugAndBot(bugID, botKey string) (bughub.Bug, bughub.BotRef, er
 	loadBot := a.workflowLoadBot
 	if loadBot == nil {
 		loadBot = func(key string) (bughub.BotRef, error) {
-			bots, listErr := a.bugBotRefs()
+			bots, listErr := a.resolvedBugBotRefs(bug)
 			if listErr != nil {
 				return bughub.BotRef{}, listErr
 			}

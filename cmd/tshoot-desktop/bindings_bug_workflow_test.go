@@ -20,6 +20,7 @@ type workflowBindingRunner struct {
 	mu        sync.Mutex
 	starts    int
 	cancels   int
+	bots      []bughub.BotRef
 	startErr  error
 	cancelErr error
 }
@@ -45,10 +46,11 @@ func (*workflowBindingGit) InspectFix(context.Context, bughub.FixInspectionReque
 	return bughub.FixInspection{}, nil
 }
 
-func (r *workflowBindingRunner) Start(context.Context, bughub.PhaseAttempt, bughub.Bug, bughub.BotRef) error {
+func (r *workflowBindingRunner) Start(_ context.Context, _ bughub.PhaseAttempt, _ bughub.Bug, bot bughub.BotRef) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.starts++
+	r.bots = append(r.bots, bot)
 	return r.startErr
 }
 
@@ -69,6 +71,15 @@ func (r *workflowBindingRunner) cancelCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.cancels
+}
+
+func (r *workflowBindingRunner) lastBot() bughub.BotRef {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.bots) == 0 {
+		return bughub.BotRef{}
+	}
+	return r.bots[len(r.bots)-1]
 }
 
 func newWorkflowBindingApp(t *testing.T, dbPath string) (*App, *bughub.CaseStore, *workflowBindingRunner) {
@@ -558,6 +569,273 @@ func TestStartIncidentCaseCreatesFirstDurableCase(t *testing.T) {
 	second, err := app.StartIncidentCase(input)
 	if err != nil || second != first || runner.count() != 1 {
 		t.Fatalf("second=%+v starts=%d err=%v", second, runner.count(), err)
+	}
+}
+
+func TestStartIncidentCaseUsesPlatformMappedEnvironmentAcrossDesktopBinding(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	botKey := writeDiscoveredBugBot(t, root, "claude-code")
+	platform, err := bugPlatformStore().Upsert(bughub.PlatformConfig{
+		ID: "zentao-main", Name: "Zentao", Type: "zentao", Enabled: true,
+		BotMappings: []bughub.PlatformBotMapping{{BotKey: botKey, Env: "prod"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bug := bughub.Bug{
+		ID: "zentao-start-mapped", PlatformID: platform.ID, Source: "zentao",
+		SystemID: "base", Title: "checkout fails", Env: "stage", BotEnv: "legacy-test",
+	}
+	if err := bugStore().Upsert(bug); err != nil {
+		t.Fatal(err)
+	}
+	store, err := bughub.OpenCaseStore(filepath.Join(root, "workflows.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &workflowBindingRunner{}
+	app := &App{workflowStore: store, workflowOrchestrator: bughub.NewCaseOrchestrator(store, runner, nil, nil)}
+	t.Cleanup(func() { _ = app.closeIncidentWorkflow() })
+
+	matches, err := app.MatchBugBots(bug.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 || matches[0].Bot.Key != botKey || matches[0].Bot.Env != "prod" {
+		t.Fatalf("UI matches = %+v", matches)
+	}
+	created, err := app.StartIncidentCase(StartIncidentCaseInput{
+		CaseID: "case-start-mapped", BugID: bug.ID, BotKey: botKey,
+		IdempotencyKey: "start:mapped", ActorID: "user-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := store.GetCase(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Environment != "prod" || persisted.Environment != "prod" {
+		t.Fatalf("created environment=%q persisted environment=%q, want platform mapping prod", created.Environment, persisted.Environment)
+	}
+	if got := runner.lastBot(); got.Key != botKey || got.Target != "claude-code" || got.Env != "prod" {
+		t.Fatalf("runner Bot = %+v, want mapped environment prod", got)
+	}
+}
+
+func TestResetIncidentCaseUsesPlatformMappedEnvironmentAcrossDesktopBinding(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	botKey := writeDiscoveredBugBot(t, root, "claude-code")
+	platform, err := bugPlatformStore().Upsert(bughub.PlatformConfig{
+		ID: "zentao-main", Name: "Zentao", Type: "zentao", Enabled: true,
+		BotMappings: []bughub.PlatformBotMapping{{BotKey: botKey, Env: "prod"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bug := bughub.Bug{
+		ID: "zentao-reset-mapped", PlatformID: platform.ID, Source: "zentao",
+		SystemID: "base", Title: "checkout fails", Env: "stage", BotEnv: "legacy-test",
+	}
+	if err := bugStore().Upsert(bug); err != nil {
+		t.Fatal(err)
+	}
+	store, err := bughub.OpenCaseStore(filepath.Join(root, "workflows.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &workflowBindingRunner{}
+	app := &App{workflowStore: store, workflowOrchestrator: bughub.NewCaseOrchestrator(store, runner, nil, nil)}
+	t.Cleanup(func() { _ = app.closeIncidentWorkflow() })
+	ctx := context.Background()
+	original := bughub.IncidentCase{
+		ID: "case-reset-mapped-old", BugID: bug.ID, Source: bug.Source, SystemID: bug.SystemID,
+		Environment: "test", Status: bughub.CaseValidating, CycleNumber: 1,
+		CurrentAttemptID: "attempt-reset-mapped-old", SelectedBotKey: "base|codex",
+	}
+	if err := store.CreateCase(ctx, original); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateAttempt(ctx, bughub.PhaseAttempt{
+		ID: original.CurrentAttemptID, CaseID: original.ID, CycleNumber: 1,
+		Phase: bughub.PhaseValidation, Mode: bughub.AttemptReproduce, Status: bughub.AttemptStatusRunning,
+		AgentTarget: "codex", BotKey: original.SelectedBotKey, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	original, err = store.GetCase(ctx, original.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	matches, err := app.MatchBugBots(bug.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 || matches[0].Bot.Key != botKey || matches[0].Bot.Env != "prod" {
+		t.Fatalf("UI matches = %+v", matches)
+	}
+	replacement, err := app.ResetIncidentCase(ResetIncidentCaseInput{
+		CaseID: original.ID, NewCaseID: "case-reset-mapped-new", BotKey: botKey,
+		ExpectedVersion: original.Version, IdempotencyKey: "reset:mapped", ActorID: "user-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := store.GetCase(ctx, replacement.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archived, err := store.GetCase(ctx, original.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement.Environment != "prod" || persisted.Environment != "prod" {
+		t.Fatalf("replacement environment=%q persisted environment=%q, want platform mapping prod", replacement.Environment, persisted.Environment)
+	}
+	if archived.Environment != "test" || archived.SelectedBotKey != original.SelectedBotKey {
+		t.Fatalf("archived binding changed: %+v", archived)
+	}
+	if got := runner.lastBot(); got.Key != botKey || got.Target != "claude-code" || got.Env != "prod" {
+		t.Fatalf("runner Bot = %+v, want mapped environment prod", got)
+	}
+}
+
+func TestContinueIncidentCaseKeepsPersistedEnvironmentAcrossPlatformMappingChange(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	botKey := writeDiscoveredBugBot(t, root, "claude-code")
+	platform, err := bugPlatformStore().Upsert(bughub.PlatformConfig{
+		ID: "zentao-main", Name: "Zentao", Type: "zentao", Enabled: true,
+		BotMappings: []bughub.PlatformBotMapping{{BotKey: botKey, Env: "prod"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bug := bughub.Bug{
+		ID: "zentao-continue-persisted", PlatformID: platform.ID, Source: "zentao",
+		SystemID: "base", Title: "checkout fails", Env: "stage", BotEnv: "legacy-test",
+	}
+	if err := bugStore().Upsert(bug); err != nil {
+		t.Fatal(err)
+	}
+	store, err := bughub.OpenCaseStore(filepath.Join(root, "workflows.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &workflowBindingRunner{}
+	app := &App{workflowStore: store, workflowOrchestrator: bughub.NewCaseOrchestrator(store, runner, nil, nil)}
+	t.Cleanup(func() { _ = app.closeIncidentWorkflow() })
+	incident := bughub.IncidentCase{
+		ID: "case-continue-persisted", BugID: bug.ID, Source: bug.Source, SystemID: bug.SystemID,
+		Environment: "test", Status: bughub.CaseWaitingEvidence, CycleNumber: 1, SelectedBotKey: botKey,
+	}
+	if err := store.CreateCase(context.Background(), incident); err != nil {
+		t.Fatal(err)
+	}
+	incident, err = store.GetCase(context.Background(), incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	continued, err := app.ContinueIncidentCase(ContinueIncidentCaseInput{
+		CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "continue:persisted",
+		ActorID: "user-1", Phase: bughub.PhaseInvestigation,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if continued.Environment != "test" {
+		t.Fatalf("continued Case environment=%q, want persisted test", continued.Environment)
+	}
+	if got := runner.lastBot(); got.Key != botKey || got.Env != "test" {
+		t.Fatalf("continuation runner Bot = %+v, want persisted environment test", got)
+	}
+}
+
+func TestStartIncidentCaseWithoutBotMappingKeepsBugEnvironmentFallback(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	botKey := writeDiscoveredBugBot(t, root, "codex")
+	platform, err := bugPlatformStore().Upsert(bughub.PlatformConfig{
+		ID: "zentao-main", Name: "Zentao", Type: "zentao", Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bug := bughub.Bug{
+		ID: "zentao-start-fallback", PlatformID: platform.ID, Source: "zentao",
+		SystemID: "base", Title: "checkout fails", Env: "stage", BotEnv: "legacy-test",
+	}
+	if err := bugStore().Upsert(bug); err != nil {
+		t.Fatal(err)
+	}
+	store, err := bughub.OpenCaseStore(filepath.Join(root, "workflows.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &workflowBindingRunner{}
+	app := &App{workflowStore: store, workflowOrchestrator: bughub.NewCaseOrchestrator(store, runner, nil, nil)}
+	t.Cleanup(func() { _ = app.closeIncidentWorkflow() })
+
+	created, err := app.StartIncidentCase(StartIncidentCaseInput{
+		CaseID: "case-start-fallback", BugID: bug.ID, BotKey: botKey,
+		IdempotencyKey: "start:fallback", ActorID: "user-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Environment != "legacy-test" {
+		t.Fatalf("created environment=%q, want Bug.BotEnv fallback legacy-test", created.Environment)
+	}
+	if got := runner.lastBot(); got.Key != botKey || got.Env != "legacy-test" {
+		t.Fatalf("runner Bot = %+v, want Bug.BotEnv fallback legacy-test", got)
+	}
+}
+
+func TestStartIncidentCaseExistingCaseKeepsPersistedEnvironment(t *testing.T) {
+	app, store, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
+	botPath := t.TempDir()
+	app.workflowLoadBot = func(key string) (bughub.BotRef, error) {
+		return bughub.BotRef{Key: key, Target: "codex", Path: botPath, SystemID: "base", Env: "prod"}, nil
+	}
+	incident := createPendingBindingCase(t, store, "case-start-persisted")
+
+	started, err := app.StartIncidentCase(StartIncidentCaseInput{
+		CaseID: incident.ID, ExpectedVersion: incident.Version,
+		IdempotencyKey: "start:persisted", ActorID: "user-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started.Environment != "test" {
+		t.Fatalf("started Case environment=%q, want persisted test", started.Environment)
+	}
+	if got := runner.lastBot(); got.Env != "test" {
+		t.Fatalf("runner Bot = %+v, want persisted environment test", got)
+	}
+}
+
+func TestResolveIncidentRecoveryContextKeepsPersistedEnvironment(t *testing.T) {
+	app := &App{
+		workflowLoadBug: func(id string) (bughub.Bug, error) {
+			return bughub.Bug{ID: id, Source: "zentao", SystemID: "base", BotEnv: "legacy-test", Env: "stage"}, nil
+		},
+		workflowLoadBot: func(key string) (bughub.BotRef, error) {
+			return bughub.BotRef{Key: key, Target: "claude-code", Path: t.TempDir(), Env: "prod"}, nil
+		},
+	}
+	incident := bughub.IncidentCase{ID: "case-recovery-persisted", BugID: "bug-1", Environment: "test"}
+	attempt := bughub.PhaseAttempt{ID: "attempt-recovery-persisted", BotKey: "base|claude-code", AgentTarget: "claude-code"}
+
+	_, bot, err := app.resolveIncidentRecoveryContext(context.Background(), incident, attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bot.Env != "test" {
+		t.Fatalf("recovery Bot = %+v, want persisted environment test", bot)
 	}
 }
 

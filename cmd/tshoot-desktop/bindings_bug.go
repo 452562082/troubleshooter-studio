@@ -315,20 +315,27 @@ func (a *App) MatchBugBots(bugID string) ([]bughub.BotMatch, error) {
 	if !ok {
 		return nil, os.ErrNotExist
 	}
+	bots, err := a.resolvedBugBotRefs(selected)
+	if err != nil {
+		return nil, err
+	}
+	return bughub.MatchBots(selected, bots), nil
+}
+
+func (a *App) resolvedBugBotRefs(bug bughub.Bug) ([]bughub.BotRef, error) {
 	bots, err := a.bugBotRefs()
 	if err != nil {
 		return nil, err
 	}
 	var platform *bughub.PlatformConfig
-	configured, ok, err := bugPlatformStore().Get(selected.PlatformID)
+	configured, ok, err := bugPlatformStore().Get(bug.PlatformID)
 	if err != nil {
 		return nil, err
 	}
 	if ok {
 		platform = &configured
 	}
-	bots = applyBugBotEnvironments(selected, bots, platform)
-	return bughub.MatchBots(selected, bots), nil
+	return applyBugBotEnvironments(bug, bots, platform), nil
 }
 
 func applyBugBotEnvironments(bug bughub.Bug, bots []bughub.BotRef, platform *bughub.PlatformConfig) []bughub.BotRef {

@@ -315,6 +315,15 @@ describe('IncidentWorkbenchPage', () => {
     expect(wrapper.find('.start-card').exists()).toBe(false)
   })
 
+  it('keeps Bot action primary buttons readable across interaction states', () => {
+    const source = readFileSync('src/pages/IncidentWorkbenchPage.vue', 'utf8')
+
+    expect(source).toContain('.bot-action-controls .btn { flex: 1 1 160px; min-height: 44px; transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease; }')
+    expect(source).toContain('.bot-action-controls .btn.primary:hover:not(:disabled) { border-color: #1d4ed8; background: #1d4ed8; color: #fff; }')
+    expect(source).toContain('.bot-action-controls .btn.primary:focus-visible { border-color: #2563eb; background: #2563eb; color: #fff; outline: 2px solid #1e40af; outline-offset: 2px; }')
+    expect(source).toContain('.bot-action-controls .btn.primary:disabled { opacity: 1; border-color: #cbd5e1; background: #e2e8f0; color: #475569; cursor: not-allowed; }')
+  })
+
   it.each([
     ['no selected Bot', [], '请选择排障机器人'],
     ['unsupported target', [{ bot: { ...botMatch.bot, key: 'base|cursor', target: 'cursor' }, score: 8, reasons: [] }], '暂不支持由 Studio 后台启动'],

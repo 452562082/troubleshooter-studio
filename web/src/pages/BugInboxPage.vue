@@ -518,7 +518,7 @@ function eventValue(event: Event): string {
           <label class="toggle-control"><input v-model="platformDraft.poll_enabled" type="checkbox"><span class="toggle-track" aria-hidden="true"><span></span></span><span>后台定时同步</span></label>
           <label class="interval-control">每 <input v-model.number="platformDraft.poll_interval_minutes" aria-label="后台同步间隔分钟" type="number" min="1" :disabled="!platformDraft.poll_enabled"> 分钟</label>
         </div>
-        <div class="trigger-row">
+        <div class="manual-bug-row">
           <label class="field-label manual-bug-field" :for="manualBugFieldID"><span>指定 Bug</span><input :id="manualBugFieldID" v-model="manualBugID" class="form-control" placeholder="Bug ID 或飞书消息" @keyup.enter="fetchManualBug"></label>
           <button class="compact-button secondary-button" type="button" data-action="fetch-bug" :disabled="!selectedPlatform || !manualBugID.trim() || fetchingBug" @click="fetchManualBug">拉取指定 Bug</button>
         </div>
@@ -658,7 +658,7 @@ function eventValue(event: Event): string {
 .platform-config .interval-control { min-height: var(--config-control-height); }
 .interval-control input { width: 72px; min-height: 36px; padding: 0 8px; }
 .platform-config .interval-control input { min-height: var(--config-control-height); }
-.trigger-row { min-width: 0; display: grid; grid-template-columns: auto minmax(180px, 1fr) auto; align-items: end; gap: var(--sp-2); }
+.manual-bug-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: var(--sp-2); }
 .hook-row { flex-wrap: wrap; }
 .hook-row code { min-width: 0; flex: 1; padding: 7px 9px; overflow-wrap: anywhere; border-radius: var(--r-sm); background: var(--c-surf-2); color: var(--c-muted); }
 .danger-link { min-height: 36px; padding: 0 6px; display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: var(--c-danger); font: inherit; font-size: var(--fs-sm); font-weight: 600; cursor: pointer; }
@@ -716,7 +716,8 @@ function eventValue(event: Event): string {
   .config-disclosure, .platform-chip, .bot-picker-row, .platform-config .interval-control input { min-height: 44px; }
   .compact-button, .danger-link, .toggle-control { min-height: 44px; }
   .platform-config .form-control, .platform-config .compact-button, .platform-config .toggle-control { min-height: 44px; }
-  .trigger-row, .bot-config-row { grid-template-columns: minmax(0, 1fr); }
+  .manual-bug-row, .bot-config-row { grid-template-columns: minmax(0, 1fr); }
+  .manual-bug-row .compact-button { width: 100%; }
   .bot-config-row .icon-button { justify-self: end; width: 44px; height: 44px; }
   .config-footer { align-items: stretch; flex-direction: column; }
   .config-footer .danger-link { align-self: flex-start; }

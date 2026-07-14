@@ -312,6 +312,25 @@ describe('BugInboxPage', () => {
     expect(config.get('.login-status-badge').text()).toBe('未登录')
   })
 
+  it('keeps the sync/access layout ordered and responsive', async () => {
+    const wrapper = await mountedInbox()
+    await wrapper.get('[data-action="toggle-platform-config"]').trigger('click')
+
+    const syncAccess = wrapper.get('.sync-access-section')
+    expect(syncAccess.find('[data-action="sync-platform"]').exists()).toBe(false)
+    expect(syncAccess.findAll(':scope > .sync-settings')).toHaveLength(1)
+    expect(syncAccess.findAll(':scope > .manual-bug-row')).toHaveLength(1)
+    expect(syncAccess.findAll(':scope > .hook-row')).toHaveLength(1)
+    expect(syncAccess.get('.manual-bug-row .manual-bug-field').exists()).toBe(true)
+    expect(syncAccess.get('.manual-bug-row [data-action="fetch-bug"]').exists()).toBe(true)
+
+    const source = readFileSync('src/pages/BugInboxPage.vue', 'utf8')
+    const mobileCSS = source.split('@media (max-width: 640px) {')[1]?.split('\n}')[0] || ''
+    expect(source).toContain('.manual-bug-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto;')
+    expect(mobileCSS).toContain('.manual-bug-row, .bot-config-row { grid-template-columns: minmax(0, 1fr); }')
+    expect(mobileCSS).toContain('.manual-bug-row .compact-button { width: 100%; }')
+  })
+
   it('keeps save beside platform status and persists disabling the platform', async () => {
     const platform = {
       id: 'zentao-main', name: '测试环境', type: 'zentao', base_url: 'https://zentao.example.com',

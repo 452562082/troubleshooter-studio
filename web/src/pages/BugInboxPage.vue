@@ -49,7 +49,9 @@ const attachmentPreview = ref<BugAttachmentPreviewResult | null>(null)
 const platformDraft = ref(emptyPlatformDraft())
 const selectedPlatform = computed(() => platforms.value.find(platform => platform.id === selectedPlatformID.value))
 const selectedPlatformHasSession = computed(() => Boolean(selectedPlatform.value?.session_header))
-const allBotRefs = computed(() => installedBots.value.filter(bot => !bot.ghost).map(discoveredBotToRef))
+const allBotRefs = computed(() => installedBots.value
+  .filter(bot => !bot.ghost && supportsIncidentWorkflowTarget(bot.meta.target))
+  .map(discoveredBotToRef))
 const configuredPlatformBots = computed(() => platformDraft.value.bot_mappings.map(mapping => ({
   mapping,
   bot: botRefByKey(mapping.bot_key),
@@ -81,7 +83,9 @@ watch(selectedPlatform, platform => {
     password: '',
     token: '',
     hook_secret: platform.hook_secret || '',
-    bot_mappings: (platform.bot_mappings || []).map(mapping => ({ bot_key: mapping.bot_key, env: mapping.env || '' })),
+    bot_mappings: (platform.bot_mappings || [])
+      .filter(mapping => supportsIncidentWorkflowTarget(botTargetFromKey(mapping.bot_key)))
+      .map(mapping => ({ bot_key: mapping.bot_key, env: mapping.env || '' })),
     enabled: platform.enabled,
     poll_enabled: Boolean(platform.poll_enabled),
     poll_interval_minutes: platform.poll_interval_minutes || 5,
@@ -345,6 +349,15 @@ function discoveredBotToRef(bot: DiscoveredBot): BotRef {
     internal_agents: bot.meta.internal_agents || [],
     envs: bot.environments || [],
   }
+}
+
+function supportsIncidentWorkflowTarget(target: string): boolean {
+  return ['codex', 'claude-code', 'openclaw'].includes(target.trim().toLowerCase())
+}
+
+function botTargetFromKey(key: string): string {
+  const separator = key.lastIndexOf('|')
+  return separator >= 0 ? key.slice(separator + 1) : ''
 }
 
 function botRefByKey(key: string): BotRef {

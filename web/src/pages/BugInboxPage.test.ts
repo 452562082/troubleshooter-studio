@@ -282,6 +282,33 @@ describe('BugInboxPage', () => {
     }))
   })
 
+  it('does not expose Cursor as a configurable incident workflow bot', async () => {
+    vi.mocked(discoverBots).mockResolvedValue([
+      {
+        path: '/repo/base-codex', ghost: false,
+        meta: { system_id: 'base', system_name: 'Base Codex', target: 'codex', agent_id: 'base-troubleshooter' },
+        environments: ['test'],
+      } as any,
+      {
+        path: '/repo/base-cursor', ghost: false,
+        meta: { system_id: 'base', system_name: 'Base Cursor', target: 'cursor', agent_id: 'base-troubleshooter' },
+        environments: ['test'],
+      } as any,
+    ])
+    vi.mocked(listBugPlatforms).mockResolvedValue([{
+      id: 'zentao-main', name: '测试环境', type: 'zentao', auth_mode: 'feishu_sso',
+      bot_mappings: [{ bot_key: '/repo/base-cursor|cursor', env: 'test' }], enabled: true,
+    }])
+
+    const wrapper = await mountedInbox()
+    await wrapper.get('[data-action="toggle-platform-config"]').trigger('click')
+
+    expect(wrapper.findAll('.bot-config-row')).toHaveLength(0)
+    await wrapper.get('[data-action="toggle-bot-picker"]').trigger('click')
+    expect(wrapper.find('[data-bot-key="/repo/base-cursor|cursor"]').exists()).toBe(false)
+    expect(wrapper.find('[data-bot-key="/repo/base-codex|codex"]').exists()).toBe(true)
+  })
+
   it('presents platform configuration as labelled compact sections with a readable disclosure state', async () => {
     vi.mocked(listBugPlatforms).mockResolvedValue([{
       id: 'zentao-main', name: '测试环境', type: 'zentao', base_url: 'https://zentao.example.com',
@@ -328,8 +355,8 @@ describe('BugInboxPage', () => {
       'manual-bug-row',
       'hook-row',
     ])
-    expect(syncAccess.get('.manual-bug-row .manual-bug-field').exists()).toBe(true)
-    expect(syncAccess.get('.manual-bug-row [data-action="fetch-bug"]').exists()).toBe(true)
+    expect(syncAccess.find('.manual-bug-row .manual-bug-field').exists()).toBe(true)
+    expect(syncAccess.find('.manual-bug-row [data-action="fetch-bug"]').exists()).toBe(true)
 
     const source = readFileSync('src/pages/BugInboxPage.vue', 'utf8')
     const mobileCSS = source.split('@media (max-width: 640px) {')[1]?.split('\n}')[0] || ''

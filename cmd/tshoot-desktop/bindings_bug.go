@@ -372,7 +372,7 @@ func (a *App) bugBotRefs() ([]bughub.BotRef, error) {
 	}
 	bots := make([]bughub.BotRef, 0, len(agents))
 	for _, ag := range agents {
-		if ag.Ghost {
+		if ag.Ghost || !bughub.SupportsIncidentWorkflowTarget(ag.Meta.Target) {
 			continue
 		}
 		key := ag.Path + "|" + ag.Meta.Target

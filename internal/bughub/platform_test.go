@@ -48,6 +48,7 @@ func TestPlatformStoreUpsertNormalizesBotMappings(t *testing.T) {
 			{BotKey: "  /repo/base|codex  ", Env: " prod "},
 			{BotKey: "/repo/base|codex", Env: "test"},
 			{BotKey: "  ", Env: "dev"},
+			{BotKey: "/repo/base|cursor", Env: "test"},
 			{BotKey: "/repo/base|claude-code"},
 		},
 	})

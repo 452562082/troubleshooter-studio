@@ -567,6 +567,136 @@ generation:
 	}
 }
 
+func TestMatchBugBotsUsesPerBotPlatformEnvironments(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	codexKey := writeDiscoveredBugBot(t, root, "codex")
+	claudeKey := writeDiscoveredBugBot(t, root, "claude-code")
+	platform, err := bugPlatformStore().Upsert(bughub.PlatformConfig{
+		ID: "zentao-main", Name: "Zentao", Type: "zentao", Enabled: true,
+		BotEnv: "legacy-test",
+		BotMappings: []bughub.PlatformBotMapping{
+			{BotKey: codexKey, Env: "test"},
+			{BotKey: claudeKey, Env: "prod"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bugStore().Upsert(bughub.Bug{
+		ID: "zentao-1842", PlatformID: platform.ID, Title: "支付页 500", Env: "stage",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	matches, err := (&App{}).MatchBugBots("zentao-1842")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, match := range matches {
+		got[match.Bot.Key] = match.Bot.Env
+	}
+	if got[codexKey] != "test" || got[claudeKey] != "prod" {
+		t.Fatalf("mapped environments = %+v", got)
+	}
+}
+
+func TestMatchBugBotsEnvironmentFallbacks(t *testing.T) {
+	tests := []struct {
+		name            string
+		platformPresent bool
+		mappingEnv      *string
+		botEnv          string
+		bugEnv          string
+		want            string
+	}{
+		{
+			name: "empty mapping uses Bug.BotEnv", platformPresent: true,
+			mappingEnv: stringPointer("  "), botEnv: " legacy-test ", bugEnv: "stage", want: "legacy-test",
+		},
+		{
+			name: "missing mapping uses Bug.Env", platformPresent: true,
+			botEnv: "  ", bugEnv: " stage ", want: "stage",
+		},
+		{
+			name: "missing platform uses bug fallback", platformPresent: false,
+			botEnv: " test ", bugEnv: "stage", want: "test",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("HOME", root)
+			botKey := writeDiscoveredBugBot(t, root, "codex")
+			platformID := "zentao-main"
+			if tt.platformPresent {
+				platform := bughub.PlatformConfig{
+					ID: platformID, Name: "Zentao", Type: "zentao", Enabled: true,
+				}
+				if tt.mappingEnv != nil {
+					platform.BotMappings = []bughub.PlatformBotMapping{{BotKey: botKey, Env: *tt.mappingEnv}}
+				}
+				if _, err := bugPlatformStore().Upsert(platform); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := bugStore().Upsert(bughub.Bug{
+				ID: "zentao-1842", PlatformID: platformID, Title: "支付页 500", BotEnv: tt.botEnv, Env: tt.bugEnv,
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			matches, err := (&App{}).MatchBugBots("zentao-1842")
+			if err != nil {
+				t.Fatalf("MatchBugBots: %v", err)
+			}
+			if len(matches) != 1 || matches[0].Bot.Env != tt.want {
+				t.Fatalf("matches = %+v, want env %q", matches, tt.want)
+			}
+		})
+	}
+}
+
+func writeDiscoveredBugBot(t *testing.T, root, target string) string {
+	t.Helper()
+	platformDir := "." + target
+	if target == "claude-code" {
+		platformDir = ".claude"
+	}
+	botDir := filepath.Join(root, platformDir, "skills", "base")
+	if err := os.MkdirAll(botDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta := discover.Meta{
+		SchemaVersion: 1,
+		SystemID:      "base",
+		SystemName:    "Base",
+		Target:        target,
+		TroubleshooterYAML: `system:
+  id: base
+environments:
+  - id: test
+  - id: stage
+  - id: prod
+generation:
+  targets: [` + target + `]
+`,
+	}
+	data, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(botDir, discover.MetaFilename), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return botDir + "|" + target
+}
+
+func stringPointer(value string) *string {
+	return &value
+}
+
 func TestSaveBugSelectedBotPersistsChoice(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", root)

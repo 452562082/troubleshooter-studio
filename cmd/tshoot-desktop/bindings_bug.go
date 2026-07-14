@@ -319,7 +319,39 @@ func (a *App) MatchBugBots(bugID string) ([]bughub.BotMatch, error) {
 	if err != nil {
 		return nil, err
 	}
+	var platform *bughub.PlatformConfig
+	configured, ok, err := bugPlatformStore().Get(selected.PlatformID)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		platform = &configured
+	}
+	bots = applyBugBotEnvironments(selected, bots, platform)
 	return bughub.MatchBots(selected, bots), nil
+}
+
+func applyBugBotEnvironments(bug bughub.Bug, bots []bughub.BotRef, platform *bughub.PlatformConfig) []bughub.BotRef {
+	mapped := map[string]string{}
+	if platform != nil {
+		for _, item := range platform.BotMappings {
+			mapped[strings.TrimSpace(item.BotKey)] = strings.TrimSpace(item.Env)
+		}
+	}
+	fallback := strings.TrimSpace(bug.BotEnv)
+	if fallback == "" {
+		fallback = strings.TrimSpace(bug.Env)
+	}
+	out := make([]bughub.BotRef, len(bots))
+	copy(out, bots)
+	for i := range out {
+		env, found := mapped[out[i].Key]
+		if !found || env == "" {
+			env = fallback
+		}
+		out[i].Env = env
+	}
+	return out
 }
 
 func (a *App) SaveBugSelectedBot(input BugSelectedBotInput) (bughub.Bug, error) {

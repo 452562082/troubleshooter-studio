@@ -321,6 +321,13 @@ describe('BugInboxPage', () => {
     expect(syncAccess.findAll(':scope > .sync-settings')).toHaveLength(1)
     expect(syncAccess.findAll(':scope > .manual-bug-row')).toHaveLength(1)
     expect(syncAccess.findAll(':scope > .hook-row')).toHaveLength(1)
+    expect(Array.from(syncAccess.element.children)
+      .filter(element => element.matches('.sync-settings, .manual-bug-row, .hook-row'))
+      .map(element => element.getAttribute('class'))).toEqual([
+      'sync-settings',
+      'manual-bug-row',
+      'hook-row',
+    ])
     expect(syncAccess.get('.manual-bug-row .manual-bug-field').exists()).toBe(true)
     expect(syncAccess.get('.manual-bug-row [data-action="fetch-bug"]').exists()).toBe(true)
 

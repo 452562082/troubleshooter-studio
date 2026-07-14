@@ -29,6 +29,7 @@ const notifications = vi.hoisted(() => ({
   info: vi.fn(),
   toastError: vi.fn(),
 }))
+const originalScrollIntoView = HTMLElement.prototype.scrollIntoView
 
 vi.mock('vue-router', () => ({ useRoute: () => route, useRouter: () => router }))
 vi.mock('../../wailsjs/runtime/runtime', () => ({ EventsOn: runtime.EventsOn }))
@@ -136,6 +137,13 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
+function stubIncidentEntry(reducedMotion = false) {
+  const scrollIntoView = vi.fn()
+  Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: scrollIntoView })
+  vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({ matches: reducedMotion }))
+  return scrollIntoView
+}
+
 async function mountedPage() {
   const wrapper = mount(IncidentWorkbenchPage)
   await flushPromises()
@@ -145,6 +153,9 @@ async function mountedPage() {
 }
 
 afterEach(() => {
+  if (originalScrollIntoView) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: originalScrollIntoView })
+  else delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView
+  vi.unstubAllGlobals()
   route.path = '/incidents'
   route.query = {}
   router.replace.mockReset()
@@ -323,6 +334,66 @@ describe('IncidentWorkbenchPage', () => {
     expect(wrapper.get('.bot-action-disabled-reason').text()).toContain(reason)
   })
 
+  it.each([
+    ['no selected Bot', [], '请选择排障机器人'],
+    ['unsupported target', [{ bot: { ...botMatch.bot, key: 'base|cursor', target: 'cursor' }, score: 8, reasons: [] }], '暂不支持由 Studio 后台启动'],
+    ['empty environment', [{ bot: { ...botMatch.bot, env: '' }, score: 8, reasons: [] }], '缺少目标环境'],
+  ] as const)('disables open for a no-Case Bug with %s', async (_label, availableMatches, reason) => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    vi.mocked(matchBugBots).mockResolvedValue(availableMatches as any)
+
+    const wrapper = await mountedPage()
+
+    expect(wrapper.get<HTMLButtonElement>('[data-action="start-case"]').element.disabled).toBe(true)
+    expect(wrapper.get('.bot-action-disabled-reason').text()).toContain(reason)
+  })
+
+  it('disables open while Bot matching is pending', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const pendingMatches = deferred<(typeof botMatch)[]>()
+    vi.mocked(matchBugBots).mockReturnValue(pendingMatches.promise)
+
+    const wrapper = await mountedPage()
+
+    expect(wrapper.get<HTMLButtonElement>('[data-action="start-case"]').element.disabled).toBe(true)
+    expect(wrapper.get('.bot-action-disabled-reason').text()).toContain('正在匹配')
+
+    pendingMatches.resolve([botMatch])
+    await flushPromises()
+  })
+
+  it('clears Start pending before scrolling and focusing the opened Case', async () => {
+    const scrollIntoView = stubIncidentEntry()
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const pendingStart = deferred<IncidentCase>()
+    const opened = incident('case-start-focused', 'waiting_evidence', '2026-07-13T00:01:00Z', { version: 1 })
+    vi.mocked(startIncidentCase).mockReturnValue(pendingStart.promise)
+    mockCaseDetails(detail(opened))
+    const wrapper = mount(IncidentWorkbenchPage, { attachTo: document.body })
+    await flushPromises()
+    await flushPromises()
+    await flushPromises()
+
+    await wrapper.get('[data-action="start-case"]').trigger('click')
+    expect(wrapper.get<HTMLButtonElement>('[data-action="start-case"]').element.disabled).toBe(true)
+    expect(wrapper.get('.bot-action-disabled-reason').text()).toContain('处理中')
+    expect(scrollIntoView).not.toHaveBeenCalled()
+
+    pendingStart.resolve(opened)
+    await flushPromises()
+    await flushPromises()
+    await flushPromises()
+
+    expect(scrollIntoView).toHaveBeenLastCalledWith({ behavior: 'smooth', block: 'start' })
+    const primary = wrapper.get<HTMLButtonElement>('.primary-action')
+    expect(primary.element.disabled).toBe(false)
+    expect(document.activeElement).toBe(primary.element)
+    wrapper.unmount()
+  })
+
   it('scrolls smoothly to an active Case and focuses its current-stage action', async () => {
     const scrollIntoView = vi.fn()
     const originalScrollIntoView = HTMLElement.prototype.scrollIntoView
@@ -377,6 +448,35 @@ describe('IncidentWorkbenchPage', () => {
     if (originalScrollIntoView) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: originalScrollIntoView })
     else delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView
     vi.unstubAllGlobals()
+  })
+
+  it('finishes a loading Enter by focusing after the requested Case detail resolves', async () => {
+    const scrollIntoView = stubIncidentEntry()
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-loading-enter', 'waiting_evidence', '2026-07-13T00:00:00Z')
+    const pendingDetail = deferred<IncidentCaseDetail>()
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    vi.mocked(getIncidentCase).mockReturnValue(pendingDetail.promise)
+    const wrapper = mount(IncidentWorkbenchPage, { attachTo: document.body })
+    await flushPromises()
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.find('.case-loading').exists()).toBe(true)
+    await wrapper.get('[data-action="enter-case"]').trigger('click')
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('.primary-action').exists()).toBe(false)
+
+    pendingDetail.resolve(detail(item))
+    await flushPromises()
+    await flushPromises()
+    await flushPromises()
+
+    expect(scrollIntoView).toHaveBeenCalledTimes(2)
+    expect(scrollIntoView).toHaveBeenLastCalledWith({ behavior: 'smooth', block: 'start' })
+    expect(document.activeElement).toBe(wrapper.get('.primary-action').element)
+    wrapper.unmount()
   })
 
   it.each(['fixed_verified', 'reset_archived'] as const)('starts a %s terminal round with the explicitly selected Bot key and its environment', async status => {
@@ -442,6 +542,40 @@ describe('IncidentWorkbenchPage', () => {
     expect(wrapper.get('.bot-action-disabled-reason').text()).toContain('缺少目标环境')
   })
 
+  it('keeps one canonical Bot when an active Case and displayed legacy history coexist', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([{ ...bugA, selected_bot_key: 'base-prod|claude-code' }])
+    vi.mocked(matchBugBots).mockResolvedValue([botMatch, replacementBotMatch])
+    const active = incident('case-active-canonical', 'waiting_evidence', '2026-07-12T00:00:00Z')
+    const archived = incident('case-legacy-canonical', 'legacy_archived', '2026-07-13T00:00:00Z', { selected_bot_key: 'base|codex' })
+    vi.mocked(listIncidentCases).mockResolvedValue([archived, active])
+    mockCaseDetails(detail(active), detail(archived, {
+      attempts: [{ id: 'legacy-attempt', case_id: archived.id, cycle_number: 1, phase: 'legacy', mode: '', status: 'succeeded', agent_target: '', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '2026-07-11T00:00:00Z', error_code: '', error_message: '', usage: {} }],
+    }))
+    const pendingReset = deferred<{ case: IncidentCase; warnings: [] }>()
+    vi.mocked(resetIncidentCaseWithWarnings).mockReturnValue(pendingReset.promise)
+    const wrapper = await mountedPage()
+
+    await wrapper.findAll('.case-row')[0].trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.case-heading').text()).toContain(archived.id)
+    const radios = wrapper.findAll<HTMLInputElement>('.bot-picker input[type="radio"]')
+    expect(radios[0].element.checked).toBe(false)
+    expect(radios[1].element.checked).toBe(true)
+    expect(wrapper.get<HTMLButtonElement>('[data-action="restart-case"]').element.disabled).toBe(false)
+
+    await wrapper.get('[data-action="restart-case"]').trigger('click')
+    const dialog = wrapper.get('[role="dialog"]')
+    expect(dialog.text()).toContain('base-prod|claude-code')
+    expect(dialog.text()).toContain('prod')
+    await dialog.get('[data-reset-confirm]').trigger('click')
+
+    expect(resetIncidentCaseWithWarnings).toHaveBeenCalledWith(expect.objectContaining({
+      case_id: active.id,
+      bot_key: 'base-prod|claude-code',
+    }))
+  })
+
   it('lets an explicit Bot override legacy recovery for both key and environment', async () => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])
@@ -464,12 +598,16 @@ describe('IncidentWorkbenchPage', () => {
   })
 
   it('uses an existing Case returned by the backend', async () => {
+    const scrollIntoView = stubIncidentEntry()
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])
     const existing = incident('case-existing', 'validating', '2026-07-13T00:00:00Z', { version: 4 })
     vi.mocked(startIncidentCase).mockResolvedValue(existing)
     mockCaseDetails(detail(existing))
-    const wrapper = await mountedPage()
+    const wrapper = mount(IncidentWorkbenchPage, { attachTo: document.body })
+    await flushPromises()
+    await flushPromises()
+    await flushPromises()
 
     await wrapper.get('[data-action="start-case"]').trigger('click')
     await flushPromises()
@@ -480,6 +618,10 @@ describe('IncidentWorkbenchPage', () => {
     expect(input).toMatchObject({ bug_id: 'bug-a', bot_key: 'base|codex', expected_version: 0, actor_id: 'desktop-user' })
     expect(getIncidentCase).toHaveBeenCalledWith('case-existing')
     expect(wrapper.text()).toContain('已打开现有闭环')
+    expect(scrollIntoView).toHaveBeenLastCalledWith({ behavior: 'smooth', block: 'start' })
+    expect(wrapper.get<HTMLButtonElement>('.primary-action').element.disabled).toBe(false)
+    expect(document.activeElement).toBe(wrapper.get('.primary-action').element)
+    wrapper.unmount()
   })
 
   it('does not apply a delayed Start completion after another Bug is selected', async () => {
@@ -565,6 +707,7 @@ describe('IncidentWorkbenchPage', () => {
   })
 
   it('snapshots the old and selected replacement bindings before confirming reset', async () => {
+    const scrollIntoView = stubIncidentEntry()
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])
     vi.mocked(matchBugBots).mockResolvedValue([botMatch, replacementBotMatch])
@@ -580,7 +723,10 @@ describe('IncidentWorkbenchPage', () => {
     vi.mocked(listIncidentCases).mockResolvedValueOnce([item]).mockResolvedValueOnce([archived, replacement])
     mockCaseDetails(detail(item), detail(replacement))
     vi.mocked(resetIncidentCaseWithWarnings).mockResolvedValue({ case: replacement, warnings: [] })
-    const wrapper = await mountedPage()
+    const wrapper = mount(IncidentWorkbenchPage, { attachTo: document.body })
+    await flushPromises()
+    await flushPromises()
+    await flushPromises()
 
     await wrapper.findAll('.bot-picker input[type="radio"]')[1].setValue(true)
     await wrapper.get('[data-action="restart-case"]').trigger('click')
@@ -611,6 +757,11 @@ describe('IncidentWorkbenchPage', () => {
     expect(continueIncidentCase).not.toHaveBeenCalled()
     expect(wrapper.get('.case-heading').text()).toContain('case-reset-replacement')
     expect(getIncidentCase).toHaveBeenLastCalledWith('case-reset-replacement')
+    expect(scrollIntoView).toHaveBeenLastCalledWith({ behavior: 'smooth', block: 'start' })
+    const primary = wrapper.get<HTMLButtonElement>('.primary-action')
+    expect(primary.element.disabled).toBe(false)
+    expect(document.activeElement).toBe(primary.element)
+    wrapper.unmount()
   })
 
   it('snapshots phase, status, current attempt and bound Agent before confirming reset', async () => {
@@ -894,6 +1045,9 @@ describe('IncidentWorkbenchPage', () => {
     await wrapper.vm.$nextTick()
     expect(wrapper.get<HTMLButtonElement>('[data-reset-cancel]').element.disabled).toBe(true)
     expect(wrapper.get<HTMLButtonElement>('[data-reset-confirm]').element.disabled).toBe(true)
+    expect(wrapper.get<HTMLButtonElement>('[data-action="restart-case"]').element.disabled).toBe(true)
+    expect(wrapper.get<HTMLButtonElement>('[data-action="enter-case"]').element.disabled).toBe(false)
+    expect(wrapper.get('.bot-action-disabled-reason').text()).toContain('处理中')
     const dialog = wrapper.get<HTMLElement>('[role="dialog"]')
     expect(wrapper.get('[data-reset-error]').attributes('aria-live')).toBe('assertive')
     await dialog.trigger('keydown', { key: 'Tab' })

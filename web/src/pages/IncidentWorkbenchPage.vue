@@ -23,7 +23,6 @@ import {
   type BotMatch,
   type BotRef,
   type IncidentCase,
-  type IncidentCaseDetail,
 } from '../lib/bridge'
 import { toast, toastError } from '../lib/toast'
 import { useBugTickets } from '../lib/useBugTickets'
@@ -64,6 +63,7 @@ const resetDialogElement = ref<HTMLElement | null>(null)
 const resetCancelButton = ref<HTMLButtonElement | null>(null)
 const resetTrigger = ref<HTMLElement | null>(null)
 const lifecycleRegion = ref<HTMLElement | null>(null)
+const pendingEnterCaseID = ref('')
 const resetRequests = new Map<string, Pick<ResetDialogSnapshot, 'newCaseID' | 'idempotencyKey'>>()
 let resetGeneration = 0
 
@@ -79,7 +79,7 @@ const displayedDetail = computed(() => incidentWorkflow.detail.value?.case.id ==
 const allCasesTerminal = computed(() => selectedBugCases.value.length > 0 && !selectedActiveCase.value)
 const invalidURLBug = computed(() => Boolean(routeBugID() && !tickets.loading.value && tickets.bugs.value.length > 0 && !tickets.selectedBug.value))
 const pickerSelectedBotKey = computed(() => {
-  const detail = displayedDetail.value
+  const detail = incidentWorkflow.detail.value?.case.id === preferredCase.value?.id ? incidentWorkflow.detail.value : null
   const bug = tickets.selectedBug.value
   if (!detail || !bug || detail.case.status !== 'legacy_archived') return selectedBotKey.value
   return explicitlySelectedBots.value[bug.id] || botKeyForLegacyContinuation(detail, bug.id, '')
@@ -105,6 +105,7 @@ const botActionStatus = computed(() => {
 
 watch(() => tickets.selectedID.value, async bugID => {
   workflowNotice.value = ''
+  pendingEnterCaseID.value = ''
   if (resetDialog.value && resetDialog.value.bugID !== bugID) {
     resetGeneration++
     discardResetDialog()
@@ -119,6 +120,10 @@ watch(() => tickets.selectedID.value, async bugID => {
 
 watch(incidentWorkflow.cases, () => {
   void openPreferredCase()
+})
+
+watch(displayedDetail, detail => {
+  if (detail?.case.id === pendingEnterCaseID.value) void focusIncidentCase(detail.case.id)
 })
 
 watch(() => [route.path, route.query.bug_id], () => {
@@ -236,25 +241,33 @@ async function selectWorkflowCase(caseID: string) {
   }
 }
 
-async function enterIncidentCase() {
-  const target = preferredCase.value
-  if (!target) return
-  if (incidentWorkflow.selectedCaseID.value !== target.id) await selectWorkflowCase(target.id)
+async function focusIncidentCase(caseID: string) {
   await nextTick()
+  if (pendingEnterCaseID.value !== caseID) return
   const region = lifecycleRegion.value
   if (!region) return
   const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
   region.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' })
-  ;(region.querySelector<HTMLElement>('.primary-action')
-    || region.querySelector<HTMLElement>('.case-heading'))?.focus()
+  const focusTarget = region.querySelector<HTMLElement>('.primary-action:not(:disabled)')
+    || region.querySelector<HTMLElement>('.case-heading')
+  if (!focusTarget || displayedDetail.value?.case.id !== caseID) return
+  focusTarget.focus()
+  pendingEnterCaseID.value = ''
+}
+
+async function enterIncidentCase() {
+  const target = preferredCase.value
+  if (!target) return
+  pendingEnterCaseID.value = target.id
+  if (incidentWorkflow.selectedCaseID.value !== target.id) await selectWorkflowCase(target.id)
+  await focusIncidentCase(target.id)
 }
 
 async function restartIncidentCase() {
   const target = preferredCase.value
   if (!target || writeActionDisabled.value) return
   if (terminalCaseStatuses.has(target.status)) {
-    const terminalDetail = displayedDetail.value?.case.id === target.id ? displayedDetail.value : null
-    await startNewCase(terminalDetail)
+    await startNewCase()
     return
   }
   await openResetDialog(target)
@@ -262,13 +275,10 @@ async function restartIncidentCase() {
 
 type StartBotChoice = { key: string; bot?: BotRef }
 
-function startBotChoice(terminalDetail: IncidentCaseDetail | null): StartBotChoice {
+function startBotChoice(): StartBotChoice {
   const bug = tickets.selectedBug.value
   if (!bug) return { key: '' }
-  let key = selectedBotKey.value.trim()
-  if (terminalDetail?.case.status === 'legacy_archived') {
-    key = explicitlySelectedBots.value[bug.id] || botKeyForLegacyContinuation(terminalDetail, bug.id, '')
-  }
+  const key = pickerSelectedBotKey.value.trim()
   return { key, bot: matches.value.find(match => match.bot.key === key)?.bot }
 }
 
@@ -286,7 +296,7 @@ async function openResetDialog(incident: IncidentCase) {
   if (resetting.value) return
   const bugID = tickets.selectedID.value
   const detail = displayedDetail.value?.case.id === incident.id ? displayedDetail.value : null
-  const choice = startBotChoice(detail)
+  const choice = startBotChoice()
   const newBot = choice.bot
   const newEnvironment = newBot?.env?.trim() || ''
   if (!choice.key || !newBot || !['codex', 'claude-code', 'openclaw'].includes(newBot.target) || !newEnvironment) return
@@ -397,6 +407,7 @@ async function confirmReset() {
     if (!isExpectedResetContext(replacement)) return
     incidentWorkflow.applySnapshot(snapshot)
     resetting.value = false
+    await nextTick()
     closeResetDialog()
     await incidentWorkflow.refreshCases()
     if (!isExpectedResetContext(replacement) || displayedDetail.value?.case.id !== replacement.id) return
@@ -457,11 +468,11 @@ async function confirmReset() {
   }
 }
 
-async function startNewCase(terminalDetail: IncidentCaseDetail | null = displayedDetail.value) {
+async function startNewCase() {
   const bug = tickets.selectedBug.value
   if (!bug) return
   const initiatingBugID = bug.id
-  const choice = startBotChoice(terminalDetail)
+  const choice = startBotChoice()
   if (!choice.key) {
     const error = new Error('该历史记录没有机器人信息。请重新选择当前 Bug 的机器人后再继续。')
     incidentWorkflow.error.value = error.message
@@ -496,6 +507,8 @@ async function startNewCase(terminalDetail: IncidentCaseDetail | null = displaye
     if (!isCurrentBug(initiatingBugID)) return
     const refreshed = await refreshCaseSnapshotIfCurrent(opened.id, () => isCurrentBug(initiatingBugID))
     if (!refreshed || !isCurrentBug(initiatingBugID)) return
+    starting.value = false
+    await nextTick()
     await enterIncidentCase()
     if (opened.id !== candidate) {
       workflowNotice.value = '已打开现有闭环'
@@ -544,7 +557,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
   if (!detail) return
   const incident = detail.case
   if (payload.kind === 'continue_legacy') {
-    await startNewCase(detail)
+    await startNewCase()
     return
   }
   const context = {

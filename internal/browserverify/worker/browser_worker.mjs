@@ -349,12 +349,12 @@ async function loginPageState(page, policy, authFailure) {
   return { required: passwordVisible || knownRoute || knownAuthOrigin(page.url(), policy) || authFailure, passwordVisible };
 }
 
-export async function captureSafePNG(page, request, name, authFailure, capture = capturePNG) {
-  if ((await loginPageState(page, request.policy, authFailure)).required) {
+export async function captureSafePNG(page, request, name, getAuthFailure, capture = capturePNG) {
+  if ((await loginPageState(page, request.policy, getAuthFailure())).required) {
     return { loginRequired: true, path: '' };
   }
   const path = await capture(page, request.staging_dir, name);
-  if ((await loginPageState(page, request.policy, authFailure)).required) {
+  if ((await loginPageState(page, request.policy, getAuthFailure())).required) {
     await rm(join(request.staging_dir, path.replace(/^browser\//, '')), { force: true });
     return { loginRequired: true, path: '' };
   }
@@ -498,7 +498,7 @@ async function executeWorker(request) {
       pendingResponses.add(pending);
     });
 
-    const captureScreenshot = (name) => captureSafePNG(page, request, name, authFailure);
+    const captureScreenshot = (name) => captureSafePNG(page, request, name, () => authFailure);
     const finishLogin = async () => {
       for (const screenshot of screenshots) await rm(join(request.staging_dir, screenshot.replace('browser/', '')), { force: true });
       await Promise.allSettled([...pendingResponses]);

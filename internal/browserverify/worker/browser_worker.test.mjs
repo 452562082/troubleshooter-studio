@@ -294,13 +294,38 @@ test('safe screenshot deletes the PNG when a password field appears during captu
   const request = baseRequest();
   request.staging_dir = temporary;
   try {
-    const captured = await captureSafePNG(page, request, 'transient.png', false, async () => {
+    const captured = await captureSafePNG(page, request, 'transient.png', () => false, async () => {
       writeFileSync(output, Buffer.from('png bytes'));
       visibility[1] = true;
       return 'browser/transient.png';
     });
     assert.deepEqual(captured, { loginRequired: true, path: '' });
     assert.equal(existsSync(output), false);
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test('safe screenshot rechecks auth failure raised during capture', async () => {
+  const temporary = mkdtempSync(join(tmpdir(), 'tshoot-live-auth-screenshot-'));
+  const output = join(temporary, 'transient.png');
+  let authFailure = false;
+  const page = {
+    url: () => 'https://app.test/users',
+    locator: () => ({ count: async () => 0 }),
+  };
+  const request = baseRequest();
+  request.staging_dir = temporary;
+  try {
+    const captured = await captureSafePNG(page, request, 'transient.png', () => authFailure, async () => {
+      writeFileSync(output, Buffer.from('png bytes'));
+      authFailure = true;
+      return 'browser/transient.png';
+    });
+    assert.deepEqual(
+      { captured, pngExists: existsSync(output) },
+      { captured: { loginRequired: true, path: '' }, pngExists: false },
+    );
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }

@@ -311,14 +311,28 @@ func (o *CaseOrchestrator) recoverAttempt(ctx context.Context, attempt PhaseAtte
 			}
 			return o.finishFixRecoveryFailure(ctx, incident, attempt, err.Error())
 		}
-		if err == nil && checkpointFound && attempt.Phase == PhaseFix {
-			if cleaner, ok := o.runner.(FixCheckpointCleaner); ok {
-				_ = cleaner.CleanupFixCheckpoint(ctx, attempt, checkpoint.StagingLocator)
+		if err == nil {
+			if cleaner, ok := o.runner.(AttemptStagingCleaner); ok {
+				_ = cleaner.CleanupAttemptStaging(ctx, attempt)
+			} else if checkpointFound && attempt.Phase == PhaseFix {
+				if cleaner, ok := o.runner.(FixCheckpointCleaner); ok {
+					_ = cleaner.CleanupFixCheckpoint(ctx, attempt, checkpoint.StagingLocator)
+				}
 			}
 		}
 		return err
 	}
 	if attempt.Phase == PhaseValidation || attempt.Phase == PhaseRegression {
+		if routeReader, ok := o.runner.(BrowserRouteRecoveryReader); ok {
+			if _, routeErr := routeReader.BrowserRouteForRecovery(ctx, attempt); routeErr != nil {
+				return fmt.Errorf("read durable browser recovery route: %w", routeErr)
+			}
+			bug, bot, contextErr := o.resolveRecoveryContext(ctx, incident, attempt)
+			if contextErr != nil {
+				return fmt.Errorf("resolve durable route recovery context: %w", contextErr)
+			}
+			return o.recoverBrowserAttempt(ctx, incident, attempt, bug, bot)
+		}
 		bug, bot, contextErr := o.resolveRecoveryContext(ctx, incident, attempt)
 		if contextErr != nil {
 			return fmt.Errorf("resolve browser recovery context: %w", contextErr)

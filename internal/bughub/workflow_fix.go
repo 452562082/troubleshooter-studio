@@ -252,6 +252,9 @@ func validateCompletionAttemptPhase(phase Phase, command CompleteAttemptCommand)
 	if command.Outcome == PhaseOutcomeFixPushed && phase != PhaseFix {
 		return errors.New("fix-pushed completion requires a fix phase attempt")
 	}
+	if command.Outcome == PhaseOutcomeSystemFailed && phase != PhaseValidation && phase != PhaseRegression {
+		return errors.New("system-failed completion requires a validation or regression attempt")
+	}
 	return nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -148,6 +149,27 @@ func browserCoordinatorRequest(t *testing.T) BrowserCoordinatorRequest {
 		BasePrompt: "bounded validation scope",
 		Policy:     BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.example.com"}},
 		StagingDir: t.TempDir(),
+		FreezeArtifacts: func(context.Context, []BrowserArtifactReference) error {
+			return nil
+		},
+	}
+}
+
+func TestBrowserCoordinatorDirectorySyncFailurePreventsPlannerAndHost(t *testing.T) {
+	originalSync := browserDurabilitySync
+	browserDurabilitySync = func(string) error { return errors.New("injected browser staging directory fsync failure") }
+	defer func() { browserDurabilitySync = originalSync }()
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{{FinalYAML: validBrowserPlanYAML()}}}
+	verifier := &fakeBrowserVerifier{Results: []BrowserVerificationResult{completedBrowserResult("browser/final.png")}}
+	request := browserCoordinatorRequest(t)
+	for retry := 0; retry < 3; retry++ {
+		result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.ErrorCode != "browser_execution_interrupted" || executor.Calls != 0 || verifier.Calls != 0 {
+			t.Fatalf("retry=%d agent=%d host=%d result=%+v", retry, executor.Calls, verifier.Calls, result)
+		}
 	}
 }
 
@@ -254,28 +276,33 @@ func TestBrowserCoordinatorRecoveryReusesDurablePrimaryAndRepairPlans(t *testing
 }
 
 func TestBrowserCoordinatorRejectsCredentialBearingPlanBeforeJournal(t *testing.T) {
-	request := browserCoordinatorRequest(t)
-	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{{FinalYAML: `version: 1
-start_url: https://app.example.com/users
-actions:
-  - id: enter-password
-    action: fill
-    locator: {kind: label, value: Password}
-    value: hunter2
-assertions:
-  - kind: visible_text
-    value: 用户管理
-`}}}
-	verifier := &fakeBrowserVerifier{}
-	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), request)
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name, id, locator, value string
+	}{
+		{name: "password action id", id: "enter-password", locator: "#p", value: "hunter2"},
+		{name: "pin locator", id: "enter-code", locator: "#pin", value: "1234"},
+		{name: "otp action", id: "submit_otp", locator: "#code", value: "123456"},
+		{name: "mfa locator", id: "enter-code", locator: "[name=mfa-code]", value: "123456"},
+		{name: "chinese verification code", id: "enter-code", locator: "验证码", value: "123456"},
+		{name: "chinese account", id: "填写账号", locator: "#user", value: "alice"},
 	}
-	if result.ErrorCode != "browser_validator_plan_invalid" || verifier.Calls != 0 {
-		t.Fatalf("browser=%d result=%+v", verifier.Calls, result)
-	}
-	if _, err := os.Stat(filepath.Join(request.StagingDir, "browser-executions", "primary", "coordinator-plan.json")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("credential-bearing plan was journaled: %v", err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := browserCoordinatorRequest(t)
+			plan := fmt.Sprintf("version: 1\nstart_url: https://app.example.com/users\nactions:\n  - id: %q\n    action: fill\n    locator: {kind: css, value: %q}\n    value: %q\nassertions:\n  - kind: visible_text\n    value: 用户管理\n", test.id, test.locator, test.value)
+			executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{{FinalYAML: plan}}}
+			verifier := &fakeBrowserVerifier{}
+			result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.ErrorCode != "browser_validator_plan_invalid" || verifier.Calls != 0 {
+				t.Fatalf("browser=%d result=%+v", verifier.Calls, result)
+			}
+			if _, err := os.Stat(filepath.Join(request.StagingDir, "browser-executions", "primary", "coordinator-plan.json")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("credential-bearing plan was journaled: %v", err)
+			}
+		})
 	}
 }
 

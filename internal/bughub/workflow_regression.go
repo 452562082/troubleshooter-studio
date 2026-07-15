@@ -368,8 +368,8 @@ func (o *CaseOrchestrator) validateRegressionCompletion(ctx context.Context, inc
 		return err
 	}
 	if cmd.ErrorCode != "" {
-		if cmd.Outcome != PhaseOutcomeNeedsEvidence {
-			return errors.New("failed regression completion must require evidence")
+		if cmd.Outcome != PhaseOutcomeNeedsEvidence && cmd.Outcome != PhaseOutcomeSystemFailed {
+			return errors.New("failed regression completion must require evidence or report a system failure")
 		}
 		return nil
 	}

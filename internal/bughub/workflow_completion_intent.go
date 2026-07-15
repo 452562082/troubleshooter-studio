@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 )
 
 const completionIntentKind = "phase_completion_intent"
@@ -70,11 +71,14 @@ func validateCompletionCommand(command CompleteAttemptCommand) error {
 		return errors.New("completion attempt ID is required")
 	}
 	switch command.Outcome {
-	case PhaseOutcomeReproduced, PhaseOutcomeNotReproduced, PhaseOutcomeNeedsEvidence,
+	case PhaseOutcomeReproduced, PhaseOutcomeNotReproduced, PhaseOutcomeNeedsEvidence, PhaseOutcomeSystemFailed,
 		PhaseOutcomeRootCauseReady, PhaseOutcomeFixPushed, PhaseOutcomeFixFailed,
 		PhaseOutcomeFixedVerified, PhaseOutcomeStillReproduces:
 	default:
 		return fmt.Errorf("unsupported completion outcome %q", command.Outcome)
+	}
+	if command.Outcome == PhaseOutcomeSystemFailed && !strings.HasPrefix(strings.TrimSpace(command.ErrorCode), "browser_") {
+		return errors.New("system-failed completion requires a browser error code")
 	}
 	if err := validateJSONObject("completion output", command.OutputJSON, true); err != nil {
 		return err

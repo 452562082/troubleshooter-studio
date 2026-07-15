@@ -596,6 +596,9 @@ func TestHostVerifierReturnsOnlyManifestArtifacts(t *testing.T) {
 		if filepath.IsAbs(artifact.Path) || strings.Contains(artifact.Path, "..") {
 			t.Fatalf("unsafe artifact: %+v", artifact)
 		}
+		if len(artifact.SHA256) != 64 || artifact.Size != int64(len(workerFixtureBytes(artifact.Kind))) {
+			t.Fatalf("artifact is not bound to verified bytes: %+v", artifact)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(request.StagingDir, "browser", "result.json")); err != nil {
 		t.Fatalf("result manifest is missing: %v", err)

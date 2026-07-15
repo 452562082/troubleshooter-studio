@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -211,7 +212,7 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 	}
 	openStaging := r.openStaging
 	if openStaging == nil {
-		if browserAssistedAttempt(bug, attempt) {
+		if attempt.Phase == PhaseValidation || attempt.Phase == PhaseRegression {
 			openStaging = openOrCreateBrowserAttemptStaging
 		} else {
 			openStaging = openAttemptEvidenceStaging
@@ -252,7 +253,7 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 		releaseReservation()
 		return releaseUntransferredStaging(staging, err)
 	}
-	prompt += "\n## Studio evidence staging (mandatory)\n\nSTUDIO_EVIDENCE_STAGING_DIR=" + staging.Path() + "\nWrite every evidence file beneath this exact directory. In final YAML, `path` must be a clean relative path from this directory; absolute paths and `..` are rejected. Studio derives timestamps and redaction status from securely opened file bytes.\n"
+	prompt += evidenceStagingPrompt(staging.Path())
 	if attempt.Phase == PhaseFix {
 		prompt += "\n## Durable fix checkpoint (mandatory)\n\nBefore the first repository push, atomically write `" + fixCheckpointManifestName + "` in the Studio staging directory (write a temporary sibling, fsync, then rename) with state=`prepared`; include every planned repository commit/branch/remote/test. After all pushes succeed, atomically replace it with the same manifest and state=`pushed` before reporting completion. JSON fields: kind=`" + fixCheckpointManifestKind + "`, version=1, case_id=`" + attempt.CaseID + "`, attempt_id=`" + attempt.ID + "`, state=`prepared|pushed`, result=<the exact structured FixResult also returned as final YAML>. Never include credentials. Recovery treats the SSH remote branch as truth, so a crash after push but before the state update remains recoverable while a pre-push crash cannot be misreported.\n"
 	}
@@ -308,13 +309,14 @@ func (r *AgentPhaseRunner) Cancel(ctx context.Context, attemptID string) error {
 func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incident IncidentCase, bug Bug, bot BotRef, prompt string, staging attemptEvidenceStaging, expectedVersion int64, claimToken string, complete PhaseCompletionFunc, browserVerifier BrowserVerifier, browserPolicyResolver BrowserPolicyResolver) {
 	started := time.Now()
 	cleaned := false
+	preserveStaging := false
 	releaseClaim := func() {
 		durable, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = r.store.ReleaseAttemptRunClaim(durable, attempt.ID, attempt.CaseID, claimToken)
 	}
 	defer func() {
-		if !cleaned {
+		if !cleaned && !preserveStaging {
 			_ = staging.Cleanup()
 		}
 		_ = staging.Close()
@@ -346,32 +348,46 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incide
 	var result PhaseExecutionResult
 	var runErr error
 	var coordinated *BrowserCoordinatorResult
-	if browserAssistedAttempt(bug, attempt) {
-		browserBug := bug
-		browserBug.Env = incident.Environment
-		browserBug.BotEnv = incident.Environment
-		browserBug.SystemID = incident.SystemID
-		coordinatorResult := BrowserCoordinatorResult{}
-		if strings.TrimSpace(bug.FrontendURL) == "" {
-			coordinatorResult, runErr = (BrowserCoordinator{Executor: r.executor, Verifier: browserVerifier}).Execute(ctx, BrowserCoordinatorRequest{Attempt: attempt, Bug: browserBug, Bot: bot, BasePrompt: prompt, StagingDir: staging.Path(), Emit: emit})
-		} else if browserPolicyResolver == nil {
-			coordinatorResult = browserCoordinatorFailure(coordinatorResult, "browser_policy_unavailable")
-		} else {
-			policy, policyErr := browserPolicyResolver.ResolveBrowserPolicy(ctx, incident, browserBug)
-			if policyErr != nil {
-				if ctxErr := ctx.Err(); ctxErr != nil {
-					runErr = ctxErr
-				} else {
-					coordinatorResult = browserCoordinatorFailure(coordinatorResult, "browser_policy_unavailable")
-				}
+	freezeBrowserArtifacts := func(ctx context.Context, references []BrowserArtifactReference) error {
+		return r.freezeBrowserArtifacts(ctx, attempt, staging, references)
+	}
+	route := browserRouteJournal{}
+	if attempt.Phase == PhaseValidation || attempt.Phase == PhaseRegression {
+		var routeCode string
+		var routeErr error
+		route, routeCode, routeErr = r.resolveBrowserRoute(ctx, attempt, incident, bug, browserPolicyResolver, staging)
+		if routeErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				runErr = ctxErr
 			} else {
-				coordinatorResult, runErr = (BrowserCoordinator{Executor: r.executor, Verifier: browserVerifier}).Execute(ctx, BrowserCoordinatorRequest{Attempt: attempt, Bug: browserBug, Bot: bot, BasePrompt: prompt, Policy: policy, StagingDir: staging.Path(), Emit: emit})
+				coordinatorResult := browserCoordinatorFailure(BrowserCoordinatorResult{}, "browser_execution_interrupted")
+				coordinated = &coordinatorResult
+			}
+		} else if routeCode != "" {
+			coordinatorResult := browserCoordinatorFailure(BrowserCoordinatorResult{}, routeCode)
+			coordinated = &coordinatorResult
+		} else {
+			boundPrompt, promptErr := r.promptForAttempt(attempt, routeBrowserBug(bug, route), bot)
+			if promptErr != nil {
+				coordinatorResult := browserCoordinatorFailure(BrowserCoordinatorResult{}, "browser_execution_interrupted")
+				coordinated = &coordinatorResult
+			} else {
+				prompt = boundPrompt + evidenceStagingPrompt(staging.Path())
 			}
 		}
-		coordinated = &coordinatorResult
-		result = PhaseExecutionResult{FinalYAML: coordinatorResult.FinalYAML, Usage: coordinatorResult.Usage}
-	} else {
-		result, runErr = r.executor.ExecutePhase(ctx, attempt.ID, bot, prompt, emit)
+	}
+	if coordinated == nil && runErr == nil {
+		if route.Assisted {
+			browserBug := routeBrowserBug(bug, route)
+			coordinatorResult, executeErr := (BrowserCoordinator{Executor: r.executor, Verifier: browserVerifier}).Execute(ctx, BrowserCoordinatorRequest{Attempt: attempt, Bug: browserBug, Bot: bot, BasePrompt: prompt, Policy: route.Policy, StagingDir: staging.Path(), Emit: emit, FreezeArtifacts: freezeBrowserArtifacts})
+			coordinated = &coordinatorResult
+			runErr = executeErr
+			result = PhaseExecutionResult{FinalYAML: coordinatorResult.FinalYAML, Usage: coordinatorResult.Usage}
+		} else {
+			result, runErr = r.executor.ExecutePhase(ctx, attempt.ID, bot, prompt, emit)
+		}
+	} else if coordinated != nil {
+		result = PhaseExecutionResult{FinalYAML: coordinated.FinalYAML, Usage: coordinated.Usage}
 	}
 	if runErr != nil && coordinated == nil && attempt.Phase != PhaseFix && ctx.Err() == nil {
 		r.projectEvent(attempt, InvestigationEvent{Type: "retry", Message: "read-only phase process retry"})
@@ -394,18 +410,10 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incide
 	command := CompleteAttemptCommand{CaseID: attempt.CaseID, AttemptID: attempt.ID, IdempotencyKey: "agent-phase:" + attempt.ID, ActorID: firstNonEmpty(bot.Key, attempt.BotKey, "agent"), Usage: result.Usage}
 	command.Usage.Duration = time.Since(started)
 	if coordinated != nil && coordinated.ErrorCode != "" && runErr == nil {
-		command.Outcome = failureOutcome(attempt.Phase)
+		command.Outcome = browserFailureOutcome(attempt.Phase, coordinated.ErrorCode)
 		command.OutputJSON = browserStopOutput(*coordinated)
 		command.ErrorCode = coordinated.ErrorCode
 		command.ErrorMessage = coordinated.ErrorMessage
-		if len(coordinated.BrowserArtifacts) != 0 {
-			if err := r.registerArtifacts(ctx, attempt, staging, browserArtifactReferences(coordinated.BrowserArtifacts)); err != nil {
-				command.Outcome = failureOutcome(attempt.Phase)
-				command.OutputJSON = mustJSON(map[string]any{"error_code": artifactErrorCode(err), "error_message": browserPublicErrorMessage("browser_verifier_failed"), "evidence_limitation": true})
-				command.ErrorCode = artifactErrorCode(err)
-				command.ErrorMessage = browserPublicErrorMessage("browser_verifier_failed")
-			}
-		}
 	} else if runErr != nil {
 		command.Outcome = failureOutcome(attempt.Phase)
 		command.OutputJSON = mustJSON(map[string]any{"error_code": "agent_process_failed", "error_message": runErr.Error()})
@@ -436,7 +444,12 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incide
 				command.OutputJSON = mustJSON(map[string]any{"error_code": "regression_evidence_invalid", "error_message": err.Error(), "evidence_limitation": true})
 				command.ErrorCode = "regression_evidence_invalid"
 				command.ErrorMessage = err.Error()
-			} else if err := r.registerArtifacts(ctx, attempt, staging, parsed.ArtifactInputs); err != nil {
+			} else if err := func() error {
+				if coordinated != nil {
+					return nil
+				}
+				return r.registerArtifacts(ctx, attempt, staging, parsed.ArtifactInputs)
+			}(); err != nil {
 				command.Outcome = failureOutcome(attempt.Phase)
 				command.OutputJSON = mustJSON(map[string]any{"error_code": artifactErrorCode(err), "error_message": err.Error(), "evidence_limitation": true})
 				command.ErrorCode = artifactErrorCode(err)
@@ -449,16 +462,6 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incide
 			}
 		}
 	}
-	if attempt.Phase != PhaseFix {
-		cleanupErr := staging.Cleanup()
-		if cleanupErr != nil {
-			command.Outcome = failureOutcome(attempt.Phase)
-			command.OutputJSON = mustJSON(map[string]any{"error_code": "evidence_staging_cleanup_failed", "error_message": cleanupErr.Error(), "evidence_limitation": true})
-			command.ErrorCode = "evidence_staging_cleanup_failed"
-			command.ErrorMessage = cleanupErr.Error()
-		}
-		cleaned = cleanupErr == nil
-	}
 	if completionContainsSensitiveData(command) {
 		command.Outcome = failureOutcome(attempt.Phase)
 		command.OutputJSON = mustJSON(map[string]any{"error_code": "sensitive_phase_output", "evidence_limitation": true})
@@ -467,6 +470,7 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incide
 		command.CodeChanges = nil
 	}
 	command.ExpectedVersion = expectedVersion
+	preserveStaging = true
 	if err := r.store.SaveCompletionIntentIfRunning(ctx, command); err != nil {
 		releaseClaim()
 		r.finishLegacy(attempt.ID, InvestigationFailed, safeLegacyPhaseText(result.FinalYAML), safeLegacyPhaseText(err.Error()))
@@ -500,21 +504,24 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incide
 			// The completion boundary performs the authoritative remote-ref check.
 			// Preserve the durable checkpoint for bounded startup recovery when that
 			// external read is temporarily unavailable or reports a mismatch.
-			cleaned = true
+			preserveStaging = true
 		}
 		r.finishLegacy(attempt.ID, InvestigationFailed, safeLegacyPhaseText(result.FinalYAML), safeLegacyPhaseText(completionErr.Error()))
 		return
 	}
-	if attempt.Phase == PhaseFix {
-		if cleanupErr := staging.Cleanup(); cleanupErr == nil {
-			cleaned = true
-		}
+	preserveStaging = false
+	if cleanupErr := staging.Cleanup(); cleanupErr == nil {
+		cleaned = true
 	}
 	status := InvestigationSucceeded
 	if command.ErrorCode != "" {
 		status = InvestigationFailed
 	}
 	r.finishLegacy(attempt.ID, status, safeLegacyPhaseText(result.FinalYAML), safeLegacyPhaseText(command.ErrorMessage))
+}
+
+func evidenceStagingPrompt(path string) string {
+	return "\n## Studio evidence staging (mandatory)\n\nSTUDIO_EVIDENCE_STAGING_DIR=" + path + "\nWrite every evidence file beneath this exact directory. In final YAML, `path` must be a clean relative path from this directory; absolute paths and `..` are rejected. Studio derives timestamps and redaction status from securely opened file bytes.\n"
 }
 
 func (r *AgentPhaseRunner) validateFixCheckpoint(staging attemptEvidenceStaging, attempt PhaseAttempt, result PhaseResult) error {
@@ -758,6 +765,40 @@ func (r *AgentPhaseRunner) registerArtifacts(ctx context.Context, attempt PhaseA
 	return nil
 }
 
+func (r *AgentPhaseRunner) freezeBrowserArtifacts(ctx context.Context, attempt PhaseAttempt, staging attemptEvidenceStaging, references []BrowserArtifactReference) error {
+	registered, err := r.store.ListEvidenceArtifacts(ctx, attempt.CaseID)
+	if err != nil {
+		return err
+	}
+	priorDigests := make([]string, 0, len(registered))
+	if attempt.Phase == PhaseRegression {
+		for _, artifact := range registered {
+			if artifact.AttemptID != attempt.ID {
+				priorDigests = append(priorDigests, artifact.SHA256)
+			}
+		}
+	}
+	for _, reference := range references {
+		if strings.TrimSpace(reference.Path) == "" || strings.TrimSpace(reference.Kind) == "" || strings.TrimSpace(reference.Environment) == "" || len(reference.SHA256) != sha256.Size*2 || reference.SHA256 != strings.ToLower(reference.SHA256) || reference.Size < 0 {
+			return errors.New("verified browser artifact metadata is invalid")
+		}
+		if _, err := hex.DecodeString(reference.SHA256); err != nil {
+			return errors.New("verified browser artifact digest is invalid")
+		}
+		captured, err := staging.Capture(reference.Path)
+		if err != nil {
+			return err
+		}
+		if captured.SHA256 != reference.SHA256 || int64(len(captured.Content)) != reference.Size {
+			return errors.New("verified browser artifact changed before registration")
+		}
+		if _, err := registerCapturedArtifact(ctx, r.store, ArtifactInput{ArtifactsRoot: r.artifactsRoot, SourcePath: filepath.Join(staging.Path(), reference.Path), CaseID: attempt.CaseID, AttemptID: attempt.ID, Kind: reference.Kind, CapturedAt: captured.CapturedAt, Environment: reference.Environment, Version: reference.Version, RequestID: reference.RequestID, TraceID: reference.TraceID, RedactionStatus: RedactionStatusNotRequired, RejectSHA256: priorDigests, RejectSensitive: true}, captured); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r *AgentPhaseRunner) validateRegressionEvidence(_ context.Context, attempt PhaseAttempt, result PhaseResult) error {
 	if attempt.Phase != PhaseRegression || (result.Outcome != PhaseOutcomeFixedVerified && result.Outcome != PhaseOutcomeStillReproduces) {
 		return nil
@@ -862,6 +903,16 @@ func failureOutcome(phase Phase) PhaseOutcome {
 		return PhaseOutcomeFixFailed
 	}
 	return PhaseOutcomeNeedsEvidence
+}
+
+func browserFailureOutcome(phase Phase, code string) PhaseOutcome {
+	if phase == PhaseFix || !strings.HasPrefix(code, "browser_") {
+		return failureOutcome(phase)
+	}
+	if browserBusinessEvidenceFailure(code) {
+		return PhaseOutcomeNeedsEvidence
+	}
+	return PhaseOutcomeSystemFailed
 }
 
 func artifactErrorCode(err error) string {

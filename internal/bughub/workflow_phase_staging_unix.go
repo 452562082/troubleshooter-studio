@@ -50,6 +50,12 @@ func openAttemptEvidenceStaging(root, attemptID string) (attemptEvidenceStaging,
 	if err := unix.Fchmod(stagingFD, 0o700); err != nil {
 		return nil, fmt.Errorf("secure evidence staging root: %w", err)
 	}
+	if err := unix.Fsync(stagingFD); err != nil {
+		return nil, fmt.Errorf("sync evidence staging root: %w", err)
+	}
+	if err := unix.Fsync(rootFD); err != nil {
+		return nil, fmt.Errorf("sync evidence root: %w", err)
+	}
 	for tries := 0; tries < 100; tries++ {
 		var nonce [12]byte
 		if _, err := rand.Read(nonce[:]); err != nil {
@@ -68,6 +74,14 @@ func openAttemptEvidenceStaging(root, attemptID string) (attemptEvidenceStaging,
 		if err := unix.Fchmod(fd, 0o700); err != nil {
 			_ = unix.Close(fd)
 			return nil, err
+		}
+		if err := unix.Fsync(fd); err != nil {
+			_ = unix.Close(fd)
+			return nil, fmt.Errorf("sync attempt evidence staging: %w", err)
+		}
+		if err := unix.Fsync(stagingFD); err != nil {
+			_ = unix.Close(fd)
+			return nil, fmt.Errorf("sync evidence staging root: %w", err)
 		}
 		duplicate, err := unix.Dup(fd)
 		if err != nil {

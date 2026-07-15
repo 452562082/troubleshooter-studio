@@ -593,6 +593,34 @@ func TestOrchestratorReproducedCannotAdvanceWithoutRegisteredEvidence(t *testing
 	}
 }
 
+func TestOrchestratorPersistsBrowserSystemFailureWithoutEvidenceRequiredEvent(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-browser-system-failure", CaseValidating)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
+	output := []byte(`{"error_code":"browser_runtime_broken","system_failure":true}`)
+	completed, err := NewCaseOrchestrator(store, nil, nil, nil).CompleteAttempt(ctx, CompleteAttemptCommand{
+		CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version,
+		IdempotencyKey: "browser-system-failure", ActorID: "validator", Outcome: PhaseOutcomeSystemFailed,
+		OutputJSON: output, ErrorCode: "browser_runtime_broken", ErrorMessage: "browser verification runtime failed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := store.GetAttempt(ctx, attempt.ID)
+	if err != nil || completed.Status != CaseWaitingEvidence || persisted.Status != AttemptStatusFailed {
+		t.Fatalf("case=%+v attempt=%+v err=%v", completed, persisted, err)
+	}
+	events, err := store.ListEvents(ctx, incident.ID)
+	if err != nil || len(events) == 0 {
+		t.Fatalf("events=%+v err=%v", events, err)
+	}
+	last := events[len(events)-1]
+	if last.EventType != "phase_system_failed" || last.ActorType != "studio" || string(last.PayloadJSON) != string(output) {
+		t.Fatalf("event=%+v", last)
+	}
+}
+
 func TestOrchestratorRejectsStaleCommandBeforeScheduling(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-stale", CasePendingValidation)

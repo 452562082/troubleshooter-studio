@@ -49,6 +49,9 @@ type BrowserCoordinatorRequest struct {
 	Policy     BrowserSecurityPolicy
 	StagingDir string
 	Emit       func(InvestigationEvent)
+	// FreezeArtifacts must synchronously capture and register the exact bytes
+	// bound by HostVerifier before any later agent call can mutate staging.
+	FreezeArtifacts func(context.Context, []BrowserArtifactReference) error
 }
 
 type BrowserCoordinatorResult struct {
@@ -85,6 +88,9 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 	}
 	if c.Verifier == nil {
 		return browserCoordinatorFailure(result, "browser_verifier_unavailable"), nil
+	}
+	if request.FreezeArtifacts == nil {
+		return browserCoordinatorFailure(result, "browser_artifact_freezer_unavailable"), nil
 	}
 
 	plan, found, err := loadBrowserCoordinatorPlan(request, browserPrimaryExecution)
@@ -227,6 +233,9 @@ func (c BrowserCoordinator) executeBrowser(ctx context.Context, request BrowserC
 	if err := validateBrowserArtifactBinding(rebased.Artifacts, environment, version); err != nil {
 		return BrowserVerificationResult{}, err
 	}
+	if err := request.FreezeArtifacts(ctx, append([]BrowserArtifactReference(nil), rebased.Artifacts...)); err != nil {
+		return BrowserVerificationResult{}, fmt.Errorf("browser_artifact_invalid: freeze verified browser artifacts: %w", err)
+	}
 	return rebased, nil
 }
 
@@ -290,6 +299,8 @@ func browserPublicErrorMessage(code string) string {
 		return "验证机器人执行失败"
 	case "browser_verifier_unavailable", "browser_verifier_failed":
 		return "验证浏览器执行器不可用"
+	case "browser_artifact_freezer_unavailable":
+		return "验证浏览器证据冻结器不可用"
 	default:
 		return "浏览器验证失败"
 	}
@@ -297,15 +308,23 @@ func browserPublicErrorMessage(code string) string {
 
 func browserStopOutput(result BrowserCoordinatorResult) json.RawMessage {
 	envelope := map[string]any{
-		"error_code":          result.ErrorCode,
-		"error_message":       result.ErrorMessage,
-		"failed_action_id":    safeBoundedBrowserText(result.BrowserResult.FailedActionID, 128),
-		"evidence_limitation": true,
+		"error_code":       result.ErrorCode,
+		"error_message":    result.ErrorMessage,
+		"failed_action_id": safeBoundedBrowserText(result.BrowserResult.FailedActionID, 128),
+	}
+	if browserBusinessEvidenceFailure(result.ErrorCode) {
+		envelope["evidence_limitation"] = true
+	} else {
+		envelope["system_failure"] = true
 	}
 	if result.ErrorCode == "browser_login_required" {
 		envelope["login_origin"] = safeBoundedBrowserText(result.BrowserResult.LoginOrigin, 4096)
 	}
 	return mustJSON(envelope)
+}
+
+func browserBusinessEvidenceFailure(code string) bool {
+	return strings.HasPrefix(code, "browser_login_") || code == "browser_locator_failed" || code == "browser_assertion_failed" || code == "browser_url_required"
 }
 
 func browserVerifierErrorCode(err error) string {
@@ -551,7 +570,7 @@ func validateDurableBrowserPlan(plan BrowserPlan) error {
 		if action.Action != "fill" {
 			continue
 		}
-		fields := []string{action.Value}
+		fields := []string{action.ID, action.Value}
 		if action.Locator != nil {
 			fields = append(fields, action.Locator.Kind, action.Locator.Value, action.Locator.Name)
 		}
@@ -566,22 +585,52 @@ func validateDurableBrowserPlan(plan BrowserPlan) error {
 
 func browserCredentialSemantic(value string) bool {
 	lower := strings.ToLower(value)
-	for _, fragment := range []string{"password", "passwd", "密码", "口令", "token", "secret", "auth", "cookie", "apikey", "api_key", "api-key", "accesskey", "access_key", "access-key", "privatekey", "private_key", "private-key", "密钥"} {
+	for _, fragment := range []string{"密码", "口令", "验证码", "账号", "用户名", "密钥"} {
 		if strings.Contains(lower, fragment) {
 			return true
 		}
 	}
-	for _, token := range strings.FieldsFunc(lower, func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
-	}) {
-		if token == "key" {
+	var normalized strings.Builder
+	var previous rune
+	for _, current := range value {
+		if unicode.IsLetter(current) || unicode.IsDigit(current) {
+			if unicode.IsUpper(current) && (unicode.IsLower(previous) || unicode.IsDigit(previous)) {
+				normalized.WriteByte(' ')
+			}
+			normalized.WriteRune(unicode.ToLower(current))
+		} else {
+			normalized.WriteByte(' ')
+		}
+		previous = current
+	}
+	tokens := strings.Fields(normalized.String())
+	for _, token := range tokens {
+		switch token {
+		case "password", "passwd", "pwd", "passcode", "pin", "otp", "mfa", "secret", "token", "auth", "cookie", "key", "login", "account", "username":
+			return true
+		}
+		for _, prefix := range []string{"password", "passwd", "passcode", "secret", "token", "auth", "cookie", "login", "account", "username"} {
+			if strings.HasPrefix(token, prefix) || strings.HasSuffix(token, prefix) {
+				return true
+			}
+		}
+	}
+	compact := strings.Join(tokens, "")
+	for _, semantic := range []string{"password", "passwd", "passcode", "apikey", "accesskey", "privatekey", "login", "account", "username"} {
+		if strings.Contains(compact, semantic) {
 			return true
 		}
 	}
 	return false
 }
 
+var browserDurabilitySync = syncBrowserDirectory
+
 func syncBrowserCoordinatorDirectory(path string) error {
+	return browserDurabilitySync(path)
+}
+
+func syncBrowserDirectory(path string) error {
 	directory, err := os.Open(path)
 	if err != nil {
 		if runtime.GOOS == "windows" {
@@ -598,9 +647,20 @@ func syncBrowserCoordinatorDirectory(path string) error {
 }
 
 func openOrCreateBrowserAttemptStaging(root, attemptID string) (attemptEvidenceStaging, error) {
+	staging, found, err := openExistingBrowserAttemptStaging(root, attemptID)
+	if err != nil || found {
+		return staging, err
+	}
+	return openAttemptEvidenceStaging(root, attemptID)
+}
+
+func openExistingBrowserAttemptStaging(root, attemptID string) (attemptEvidenceStaging, bool, error) {
 	entries, err := os.ReadDir(filepath.Join(root, ".staging"))
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
 	}
 	var locator string
 	for _, entry := range entries {
@@ -608,25 +668,37 @@ func openOrCreateBrowserAttemptStaging(root, attemptID string) (attemptEvidenceS
 			continue
 		}
 		if locator != "" {
-			return nil, errors.New("multiple browser staging directories exist for one attempt")
+			return nil, false, errors.New("multiple browser staging directories exist for one attempt")
 		}
 		locator = entry.Name()
 	}
 	if locator != "" {
-		return openExistingAttemptEvidenceStaging(root, attemptID, locator)
+		staging, err := openExistingAttemptEvidenceStaging(root, attemptID, locator)
+		return staging, err == nil, err
 	}
-	return openAttemptEvidenceStaging(root, attemptID)
+	return nil, false, nil
 }
 
 func ensureOwnedBrowserDirectory(path string) error {
-	if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-		return err
+	if err := os.Mkdir(path, 0o700); err != nil {
+		if !errors.Is(err, os.ErrExist) {
+			return err
+		}
 	}
 	info, err := os.Lstat(path)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return errors.New("browser execution staging directory is unsafe")
 	}
-	return os.Chmod(path, 0o700)
+	if err := os.Chmod(path, 0o700); err != nil {
+		return err
+	}
+	if err := syncBrowserCoordinatorDirectory(path); err != nil {
+		return err
+	}
+	if err := syncBrowserCoordinatorDirectory(filepath.Dir(path)); err != nil {
+		return err
+	}
+	return nil
 }
 
 func rebaseBrowserResult(result BrowserVerificationResult, execution string) (BrowserVerificationResult, error) {

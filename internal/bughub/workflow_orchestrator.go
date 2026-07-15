@@ -323,6 +323,7 @@ const (
 	PhaseOutcomeReproduced      PhaseOutcome = "reproduced"
 	PhaseOutcomeNotReproduced   PhaseOutcome = "not_reproduced"
 	PhaseOutcomeNeedsEvidence   PhaseOutcome = "needs_evidence"
+	PhaseOutcomeSystemFailed    PhaseOutcome = "system_failed"
 	PhaseOutcomeRootCauseReady  PhaseOutcome = "root_cause_ready"
 	PhaseOutcomeFixPushed       PhaseOutcome = "fix_pushed"
 	PhaseOutcomeFixFailed       PhaseOutcome = "fix_failed"
@@ -1679,7 +1680,7 @@ func (o *CaseOrchestrator) CompleteAttempt(ctx context.Context, cmd CompleteAtte
 		return IncidentCase{}, err
 	}
 	attempt.OutputJSON, attempt.ErrorCode, attempt.ErrorMessage, attempt.Usage = CloneRawMessage(cmd.OutputJSON), cmd.ErrorCode, cmd.ErrorMessage, cmd.Usage
-	if cmd.Outcome == PhaseOutcomeFixFailed || cmd.Outcome == PhaseOutcomeNeedsEvidence {
+	if cmd.Outcome == PhaseOutcomeFixFailed || cmd.Outcome == PhaseOutcomeNeedsEvidence || cmd.Outcome == PhaseOutcomeSystemFailed {
 		attempt.Status = AttemptStatusFailed
 	} else {
 		attempt.Status = AttemptStatusSucceeded
@@ -1728,6 +1729,7 @@ func (o *CaseOrchestrator) rebuildCommittedCompletion(ctx context.Context, repla
 		"validation_reproduced":     PhaseOutcomeReproduced,
 		"validation_not_reproduced": PhaseOutcomeNotReproduced,
 		"evidence_required":         PhaseOutcomeNeedsEvidence,
+		"phase_system_failed":       PhaseOutcomeSystemFailed,
 		"root_cause_ready":          PhaseOutcomeRootCauseReady,
 		"fix_pushed":                PhaseOutcomeFixPushed,
 		"fix_failed":                PhaseOutcomeFixFailed,
@@ -1805,6 +1807,8 @@ func (o *CaseOrchestrator) applyOutcome(ctx context.Context, incident IncidentCa
 		add(CaseNotReproduced, "validation_not_reproduced", "agent", actor, cmd.OutputJSON)
 	case PhaseOutcomeNeedsEvidence:
 		add(CaseWaitingEvidence, "evidence_required", "agent", actor, cmd.OutputJSON)
+	case PhaseOutcomeSystemFailed:
+		add(CaseWaitingEvidence, "phase_system_failed", "studio", "orchestrator", cmd.OutputJSON)
 	case PhaseOutcomeRootCauseReady:
 		add(CaseRootCauseReady, "root_cause_ready", "agent", actor, cmd.OutputJSON)
 		add(CaseWaitingFixApproval, "fix_approval_requested", "studio", "orchestrator", map[string]string{"attempt_id": attempt.ID})

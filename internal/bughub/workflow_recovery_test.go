@@ -12,6 +12,18 @@ import (
 	"time"
 )
 
+type recordingDurableBrowserRouteRunner struct {
+	*recordingPhaseRunner
+	assisted  bool
+	routeErr  error
+	routeRead int
+}
+
+func (r *recordingDurableBrowserRouteRunner) BrowserRouteForRecovery(context.Context, PhaseAttempt) (bool, error) {
+	r.routeRead++
+	return r.assisted, r.routeErr
+}
+
 func persistFixCheckpointForTest(t *testing.T, store *CaseStore, root string, attempt PhaseAttempt, result FixResult, state string) string {
 	t.Helper()
 	staging, err := openAttemptEvidenceStaging(root, attempt.ID)
@@ -129,6 +141,37 @@ func TestRecoverInterruptedBrowserAttemptReplaysSameAttemptWithoutDuplicate(t *t
 	}))
 	if err := restarted.RecoverInterrupted(ctx); err != nil || restartedRunner.startCount() != 1 {
 		t.Fatalf("second-process replay starts=%d err=%v", restartedRunner.startCount(), err)
+	}
+}
+
+func TestRecoverInterruptedUsesDurableRouteInsteadOfCurrentBugURL(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		assisted   bool
+		currentURL string
+	}{
+		{name: "browser route survives cleared URL", assisted: true},
+		{name: "non browser route survives added URL", assisted: false, currentURL: "https://app.example.com/users"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := newOrchestratorStore(t)
+			incident, attempt := createRunningPhase(t, store, "recover-durable-route-"+strings.ReplaceAll(test.name, " ", "-"), CasePendingValidation, CaseValidating, PhaseValidation, AttemptReproduce, []byte(`{"mode":"reproduce"}`))
+			runner := &recordingDurableBrowserRouteRunner{recordingPhaseRunner: &recordingPhaseRunner{}, assisted: test.assisted}
+			orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+			orchestrator.SetRecoveryContextResolver(RecoveryContextResolverFunc(func(context.Context, IncidentCase, PhaseAttempt) (Bug, BotRef, error) {
+				return Bug{ID: incident.BugID, FrontendURL: test.currentURL}, installedPhaseRunnerBot(t, attempt.BotKey, attempt.AgentTarget), nil
+			}))
+			if err := orchestrator.RecoverInterrupted(ctx); err != nil {
+				t.Fatal(err)
+			}
+			runner.mu.Lock()
+			starts := append([]PhaseAttempt(nil), runner.starts...)
+			runner.mu.Unlock()
+			if runner.routeRead != 1 || len(starts) != 1 || starts[0].ID != attempt.ID {
+				t.Fatalf("route reads=%d starts=%+v", runner.routeRead, starts)
+			}
+		})
 	}
 }
 
@@ -944,6 +987,36 @@ func TestRecoverInterruptedAppliesPersistedCompletionIntentWithoutRerunningPhase
 	runner.mu.Unlock()
 	if len(starts) != 1 || starts[0].Phase != PhaseInvestigation {
 		t.Fatalf("recovery reran original phase: %+v", starts)
+	}
+}
+
+func TestRecoverInterruptedCleansBrowserStagingAfterPersistedIntentCompletes(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident, attempt := createRunningPhase(t, store, "recover-browser-intent-cleanup", CasePendingValidation, CaseValidating, PhaseValidation, AttemptReproduce, []byte(`{"mode":"reproduce"}`))
+	command := CompleteAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "agent-phase:" + attempt.ID, ActorID: "validator", Outcome: PhaseOutcomeNotReproduced, OutputJSON: []byte(`{"verification_status":"not_reproduced","environment":"test","evidence":[],"gaps":[]}`)}
+	if err := store.SaveCompletionIntentIfRunning(ctx, command); err != nil {
+		t.Fatal(err)
+	}
+	root := phaseArtifactsRoot(t)
+	staging, err := openOrCreateBrowserAttemptStaging(root, attempt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stagingPath := staging.Path()
+	if err := os.WriteFile(filepath.Join(stagingPath, "browser-route.json"), []byte(`{"durable":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := staging.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, root, func(context.Context, CompleteAttemptCommand) error { return nil })
+	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	if err := orchestrator.RecoverInterrupted(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stagingPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("completed intent staging remains: %v", err)
 	}
 }
 

@@ -120,6 +120,7 @@ type browserResultManifest struct {
 type manifestArtifactValidation struct {
 	FinalScreenshot string
 	SHA256          map[string]string
+	Size            map[string]int64
 }
 
 type verifierError struct {
@@ -222,7 +223,7 @@ func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerifi
 		if !artifactDigestsEqual(validation.SHA256, manifest.ArtifactSHA256) {
 			return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_artifact_invalid", cause: errors.New("browser artifact digest changed after completion")}
 		}
-		return manifest.Result, nil
+		return bindVerifiedBrowserArtifacts(manifest.Result, validation), nil
 	}
 
 	reservationPath := filepath.Join(browserDir, "reservation.json")
@@ -314,6 +315,7 @@ func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerifi
 	if result.FinalScreenshotPath == "" {
 		result.FinalScreenshotPath = validation.FinalScreenshot
 	}
+	result = bindVerifiedBrowserArtifacts(result, validation)
 	manifest := browserResultManifest{
 		CaseID: request.CaseID, CycleNumber: request.CycleNumber, AttemptID: request.AttemptID,
 		PlanSHA256: planSHA, ArtifactSHA256: validation.SHA256, Result: result,
@@ -866,6 +868,7 @@ func validateManifestArtifacts(stagingRoot string, identity browserDirectoryIden
 	}
 	declared := make(map[string]bughub.BrowserArtifactReference, len(artifacts))
 	digests := make(map[string]string, len(artifacts))
+	sizes := make(map[string]int64, len(artifacts))
 	var screenshots []string
 	for _, artifact := range artifacts {
 		if err := identity.Verify(); err != nil {
@@ -891,6 +894,7 @@ func validateManifestArtifacts(stagingRoot string, identity browserDirectoryIden
 		}
 		digest := sha256.Sum256(content)
 		digests[path] = hex.EncodeToString(digest[:])
+		sizes[path] = int64(len(content))
 		if artifact.Kind == "screenshot" {
 			if len(content) <= 8 || !bytes.HasPrefix(content, []byte("\x89PNG\r\n\x1a\n")) {
 				return manifestArtifactValidation{}, fmt.Errorf("browser screenshot %q is not a non-empty PNG", path)
@@ -941,7 +945,21 @@ func validateManifestArtifacts(stagingRoot string, identity browserDirectoryIden
 	default:
 		return manifestArtifactValidation{}, fmt.Errorf("unsupported browser result status %q", status)
 	}
-	return manifestArtifactValidation{FinalScreenshot: final, SHA256: digests}, nil
+	return manifestArtifactValidation{FinalScreenshot: final, SHA256: digests, Size: sizes}, nil
+}
+
+func bindVerifiedBrowserArtifacts(result bughub.BrowserVerificationResult, validation manifestArtifactValidation) bughub.BrowserVerificationResult {
+	bound := result
+	bound.Artifacts = append([]bughub.BrowserArtifactReference(nil), result.Artifacts...)
+	for index := range bound.Artifacts {
+		path, err := normalizeBrowserArtifactPath(bound.Artifacts[index].Path)
+		if err != nil {
+			continue
+		}
+		bound.Artifacts[index].SHA256 = validation.SHA256[path]
+		bound.Artifacts[index].Size = validation.Size[path]
+	}
+	return bound
 }
 
 func artifactDigestsEqual(first, second map[string]string) bool {

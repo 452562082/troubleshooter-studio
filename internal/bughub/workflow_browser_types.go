@@ -74,12 +74,14 @@ type BrowserProgress struct {
 }
 
 type BrowserArtifactReference struct {
-	Kind        string
-	Path        string
-	Environment string
-	Version     string
-	RequestID   string
-	TraceID     string
+	Kind        string `json:"kind"`
+	Path        string `json:"path"`
+	Environment string `json:"environment"`
+	Version     string `json:"version,omitempty"`
+	RequestID   string `json:"request_id,omitempty"`
+	TraceID     string `json:"trace_id,omitempty"`
+	SHA256      string `json:"sha256"`
+	Size        int64  `json:"size"`
 }
 
 type BrowserVerificationResult struct {

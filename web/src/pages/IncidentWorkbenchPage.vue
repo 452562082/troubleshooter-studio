@@ -26,7 +26,7 @@ import {
 } from '../lib/bridge'
 import { toast, toastError } from '../lib/toast'
 import { useBugTickets } from '../lib/useBugTickets'
-import { activeCaseForBug, botKeyForLegacyContinuation, casesForBug, continuationForDetail, terminalCaseStatuses, useIncidentCase } from '../lib/useIncidentCase'
+import { activeCaseForBug, continuationForDetail, terminalCaseStatuses, useIncidentCase } from '../lib/useIncidentCase'
 
 const route = useRoute()
 const router = useRouter()
@@ -73,20 +73,11 @@ let resetGeneration = 0
 const initialRequestedBugID = routeBugID()
 if (initialRequestedBugID) tickets.select(initialRequestedBugID)
 
-const selectedBugCases = computed(() => casesForBug(incidentWorkflow.cases.value, tickets.selectedID.value))
 const selectedActiveCase = computed(() => activeCaseForBug(incidentWorkflow.cases.value, tickets.selectedID.value))
-const newestSelectedCase = computed(() => selectedBugCases.value[0])
-const preferredCase = computed(() => selectedActiveCase.value || newestSelectedCase.value)
-const displayedCase = computed(() => selectedBugCases.value.find(item => item.id === incidentWorkflow.selectedCaseID.value) || preferredCase.value)
+const displayedCase = computed(() => selectedActiveCase.value)
 const displayedDetail = computed(() => incidentWorkflow.detail.value?.case.id === displayedCase.value?.id ? incidentWorkflow.detail.value : null)
-const allCasesTerminal = computed(() => selectedBugCases.value.length > 0 && !selectedActiveCase.value)
 const invalidURLBug = computed(() => Boolean(routeBugID() && !tickets.loading.value && tickets.bugs.value.length > 0 && !tickets.selectedBug.value))
-const pickerSelectedBotKey = computed(() => {
-  const detail = incidentWorkflow.detail.value?.case.id === preferredCase.value?.id ? incidentWorkflow.detail.value : null
-  const bug = tickets.selectedBug.value
-  if (!detail || !bug || detail.case.status !== 'legacy_archived') return selectedBotKey.value
-  return explicitlySelectedBots.value[bug.id] || botKeyForLegacyContinuation(detail, bug.id, '')
-})
+const pickerSelectedBotKey = computed(() => selectedBotKey.value)
 const selectedBot = computed(() => matches.value.find(match => match.bot.key === pickerSelectedBotKey.value)?.bot)
 const selectedBotSupportsStart = computed(() => Boolean(selectedBot.value && ['codex', 'claude-code', 'openclaw'].includes(selectedBot.value.target)))
 const writeActionPending = computed(() => matching.value || starting.value || resetting.value || restartPreparing.value || incidentWorkflow.pending.value)
@@ -101,9 +92,8 @@ const writeActionDisabledReason = computed(() => {
   return ''
 })
 const botActionStatus = computed(() => {
-  const current = preferredCase.value
-  if (!current) return '尚未建立 Case'
-  return terminalCaseStatuses.has(current.status) ? `已有历史 Case · ${current.status}` : `已有进行中的 Case · ${current.status}`
+  const current = displayedCase.value
+  return current ? `已有进行中的 Case · ${current.status}` : '尚无进行中的 Case'
 })
 
 watch(() => tickets.selectedID.value, async bugID => {
@@ -223,7 +213,7 @@ async function rememberSelectedBot(botKey: string) {
 }
 
 async function openPreferredCase(refreshCurrent = false) {
-  const target = preferredCase.value
+  const target = displayedCase.value
   if (!target) return
   if (incidentWorkflow.selectedCaseID.value === target.id && incidentWorkflow.detail.value?.case.id === target.id) {
     if (refreshCurrent) {
@@ -259,7 +249,7 @@ async function focusIncidentCase(caseID: string) {
 }
 
 async function enterIncidentCase() {
-  const target = preferredCase.value
+  const target = displayedCase.value
   if (!target) return
   pendingEnterCaseID.value = target.id
   if (incidentWorkflow.selectedCaseID.value !== target.id) await selectWorkflowCase(target.id)
@@ -267,7 +257,7 @@ async function enterIncidentCase() {
 }
 
 async function restartIncidentCase(targetOverride?: IncidentCase) {
-  const target = targetOverride || preferredCase.value
+  const target = targetOverride || displayedCase.value
   if (!target) return
   const choice = startBotChoice()
   if (writeActionDisabled.value) {
@@ -282,7 +272,7 @@ async function restartIncidentCase(targetOverride?: IncidentCase) {
   const targetIsCurrent = () => isCurrentBug(initiatingBugID) && (
     targetOverride
       ? displayedDetail.value?.case.id === target.id
-      : preferredCase.value?.id === target.id
+      : displayedCase.value?.id === target.id
   )
   restartPreparing.value = true
   incidentWorkflow.error.value = ''
@@ -469,7 +459,7 @@ async function confirmReset() {
       try {
         await incidentWorkflow.refreshCases()
         if (!isCurrentResetRequest()) return
-        const refreshed = activeCaseForBug(incidentWorkflow.cases.value, request.bugID) || casesForBug(incidentWorkflow.cases.value, request.bugID)[0]
+        const refreshed = activeCaseForBug(incidentWorkflow.cases.value, request.bugID)
         if (refreshed) await incidentWorkflow.refreshDetail(refreshed.id)
       } catch (refreshError) {
         if (!isCurrentResetRequest()) return
@@ -614,7 +604,7 @@ async function startNewCase() {
       workflowNotice.value = '已打开现有闭环'
       toast.info('已打开现有闭环')
     } else {
-      workflowNotice.value = allCasesTerminal.value ? '新一轮故障闭环已启动' : '故障闭环已启动'
+      workflowNotice.value = '故障闭环已启动'
       toast.success(workflowNotice.value)
     }
   } catch (error) {
@@ -646,7 +636,7 @@ async function refreshCaseSnapshotIfCurrent(caseID: string, isCurrent: () => boo
 async function refreshIncidentWorkflow() {
   try {
     await incidentWorkflow.refreshCases()
-    await openPreferredCase()
+    await openPreferredCase(true)
   } catch (error) {
     toastError('刷新故障 Case', error)
   }
@@ -778,15 +768,18 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
     <div v-if="displayedCase" ref="lifecycleRegion" class="lifecycle-region">
       <BugCaseLifecycle
         v-if="displayedDetail"
-        :cases="selectedBugCases"
         :detail="displayedDetail"
         :pending="incidentWorkflow.pending.value || starting"
         :error="incidentWorkflow.error.value"
-        @select="selectWorkflowCase"
         @refresh="refreshIncidentWorkflow"
         @primary="handleIncidentPrimary"
       />
-      <p v-else class="case-loading" role="status" aria-live="polite">正在加载 Case {{ displayedCase.id }}…</p>
+      <section v-else class="case-loading" aria-live="polite">
+        <p role="status">{{ incidentWorkflow.error.value ? `加载 Case 失败：${incidentWorkflow.error.value}` : `正在加载 Case ${displayedCase.id}…` }}</p>
+        <button v-if="incidentWorkflow.error.value" class="btn" type="button" data-action="retry-active-case" :disabled="incidentWorkflow.loading.value" @click="refreshIncidentWorkflow">
+          {{ incidentWorkflow.loading.value ? '重试中…' : '重试加载' }}
+        </button>
+      </section>
     </div>
 
     <div v-if="resetDialog" class="reset-dialog-backdrop" @click.self="closeResetDialog" @keydown.esc="closeResetDialog">
@@ -842,6 +835,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
 .invalid-bug-state, .case-loading, .support-note, .live-error, .workflow-notice { min-width: 0; margin: 0; padding: 10px 12px; overflow-wrap: anywhere; border-radius: var(--r-md); font-size: var(--fs-sm); line-height: 1.5; }
 .invalid-bug-state { border: 1px solid #fbbf24; background: #fffbeb; color: #92400e; }
 .case-loading { min-height: 64px; display: grid; place-items: center; border: 1px dashed var(--c-line-2); color: var(--c-muted); }
+.case-loading .btn { min-height: 44px; }
 .support-note { margin-top: var(--sp-2); background: var(--c-surf-2); color: var(--c-muted); }
 .live-error { margin-top: var(--sp-2); border: 1px solid #fecaca; background: #fef2f2; color: #b91c1c; }
 .workflow-notice { border: 1px solid #bbf7d0; background: #f0fdf4; color: #166534; }

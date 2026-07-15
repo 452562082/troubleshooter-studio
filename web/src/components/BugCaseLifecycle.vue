@@ -275,7 +275,7 @@ function dialogTitle(): string {
           <header class="timeline-heading">
             <div>
               <h3 id="timeline-title">过程时间线</h3>
-              <span aria-label="时间线事件总数">· 共 {{ detail.events.length }} 条</span>
+              <span class="timeline-count">· 共 {{ detail.events.length }} 条</span>
             </div>
             <button
               v-if="timelineCanExpand"
@@ -402,7 +402,7 @@ h2, h3, p { margin: 0; }
 .timeline-heading { min-width: 0; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--sp-2); margin-bottom: var(--sp-3); }
 .timeline-heading > div { min-width: 0; display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px; }
 .timeline-heading h3 { margin: 0; color: var(--c-ink); font-size: var(--fs-base); }
-.timeline-heading span { color: var(--c-muted); font-size: var(--fs-xs); }
+.timeline-count { color: var(--c-muted); font-size: var(--fs-xs); }
 .timeline-toggle { min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 8px 10px; border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf); color: var(--c-text); font: inherit; font-size: var(--fs-sm); font-weight: 600; cursor: pointer; }
 .timeline-toggle:hover { border-color: #93c5fd; background: #eff6ff; color: #1d4ed8; }
 .timeline-toggle:focus-visible { outline: 3px solid rgba(37, 99, 235, .55); outline-offset: 2px; }

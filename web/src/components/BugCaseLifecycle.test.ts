@@ -349,6 +349,24 @@ describe('BugCaseLifecycle', () => {
     expect(source).toMatch(/@media \(prefers-reduced-motion: reduce\)/)
   })
 
+  it('scopes timeline count styling away from the toggle label without replacing visible count text', () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.events = timelineEvents(6)
+    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+    const source = readFileSync('src/components/BugCaseLifecycle.vue', 'utf8')
+
+    expect.soft(source).not.toMatch(/\.timeline-heading span \{/)
+    expect.soft(source).toMatch(/\.timeline-count \{[^}]*color: var\(--c-muted\);[^}]*font-size: var\(--fs-xs\);/)
+
+    const count = wrapper.find('.timeline-count')
+    expect.soft(count.exists()).toBe(true)
+    if (count.exists()) {
+      expect.soft(count.text()).toBe('· 共 6 条')
+      expect.soft(count.attributes('aria-label')).toBeUndefined()
+    }
+    expect.soft(wrapper.get('.timeline-toggle > span').classes()).not.toContain('timeline-count')
+  })
+
   it('wraps a long unbroken event label in collapsed and expanded timelines', async () => {
     const longEventType = `event_${'x'.repeat(160)}`
     const snapshot = detail('waiting_evidence')

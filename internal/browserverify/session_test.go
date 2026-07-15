@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -74,6 +75,108 @@ type deleteFailingSecretStore struct {
 }
 
 func (s *deleteFailingSecretStore) Delete(string) error { return s.deleteErr }
+
+type blockingDeleteSecretStore struct {
+	*memorySecretStore
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *blockingDeleteSecretStore) Delete(key string) error {
+	s.once.Do(func() { close(s.started) })
+	<-s.release
+	return s.memorySecretStore.Delete(key)
+}
+
+func TestSessionStoreSerializesTwoStoreSaveTransactions(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	secrets := newMemorySecretStore()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	secrets.beforeGet = func() {
+		once.Do(func() { close(entered) })
+		<-release
+	}
+	first := NewSessionStore(root, secrets)
+	second := NewSessionStore(root, secrets)
+	key := SessionKey{SystemID: "base", Environment: "test", Origin: "https://app.test"}
+	firstState := []byte(`{"cookies":[{"value":"first"}]}`)
+	secondState := []byte(`{"cookies":[{"value":"second"}]}`)
+
+	firstResult := make(chan error, 1)
+	go func() { firstResult <- first.Save(key, firstState) }()
+	<-entered
+	if err := second.Save(key, secondState); !errors.Is(err, ErrSessionStoreBusy) {
+		t.Fatalf("concurrent Save error = %v, want busy", err)
+	}
+	close(release)
+	if err := <-firstResult; err != nil {
+		t.Fatal(err)
+	}
+	secrets.beforeGet = nil
+	loaded, ok, err := second.Load(key)
+	if err != nil || !ok || !bytes.Equal(loaded, firstState) {
+		t.Fatalf("loaded=%q ok=%v err=%v", loaded, ok, err)
+	}
+}
+
+func TestSessionStoreClearExcludesConcurrentSaveAcrossStores(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	secrets := &blockingDeleteSecretStore{
+		memorySecretStore: newMemorySecretStore(),
+		started:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+	first := NewSessionStore(root, secrets)
+	second := NewSessionStore(root, secrets)
+	key := SessionKey{SystemID: "base", Environment: "test", Origin: "https://app.test"}
+	if err := first.Save(key, []byte(`{"cookies":[{"value":"old"}]}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	clearResult := make(chan error, 1)
+	go func() { clearResult <- first.Clear(key) }()
+	<-secrets.started
+	if err := second.Save(key, []byte(`{"cookies":[{"value":"must-not-reappear"}]}`)); !errors.Is(err, ErrSessionStoreBusy) {
+		t.Fatalf("Save during Clear error = %v, want busy", err)
+	}
+	close(secrets.release)
+	if err := <-clearResult; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(first.encryptedPath(key)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ciphertext reappeared after Clear: %v", err)
+	}
+	if _, ok, err := second.Load(key); err != nil || ok {
+		t.Fatalf("load after Clear: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestSessionFileLockReleaseDoesNotDeleteReplacementOwnedByAnotherProcess(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	identifier := strings.Repeat("a", 64)
+	lock, err := acquireSessionFileLock(root, identifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	displaced := lock.path + ".displaced"
+	if err := os.Rename(lock.path, displaced); err != nil {
+		t.Fatal(err)
+	}
+	foreign := []byte("foreign-owner\n")
+	if err := os.WriteFile(lock.path, foreign, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := lock.release(); !errors.Is(err, errSessionLockOwnershipLost) {
+		t.Fatalf("release error = %v, want ownership loss", err)
+	}
+	contents, err := os.ReadFile(lock.path)
+	if err != nil || !bytes.Equal(contents, foreign) {
+		t.Fatalf("replacement lock deleted or changed: contents=%q err=%v", contents, err)
+	}
+}
 
 func TestSessionStorePersistsOnlyCiphertext(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "sessions")

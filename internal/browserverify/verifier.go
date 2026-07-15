@@ -16,7 +16,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -83,6 +82,7 @@ type HostVerifier struct {
 	sessions           *SessionStore
 	mu                 sync.Mutex
 	cleanupInterrupted func(browserDirectoryIdentity, string) error
+	removePlaintext    func(string) error
 }
 
 type BrowserLoginRequest struct {
@@ -143,7 +143,11 @@ func NewHostVerifier(runtime *RuntimeManager, worker WorkerRunner, resolver IPRe
 	if worker == nil {
 		worker = nodeWorkerRunner{}
 	}
-	return &HostVerifier{runtime: runtime, worker: worker, resolver: resolver, cleanupInterrupted: cleanupInterruptedBrowserOutputs}
+	return &HostVerifier{
+		runtime: runtime, worker: worker, resolver: resolver,
+		cleanupInterrupted: cleanupInterruptedBrowserOutputs,
+		removePlaintext:    os.Remove,
+	}
 }
 
 func (v *HostVerifier) SetSessionStore(store *SessionStore) {
@@ -320,7 +324,7 @@ func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerifi
 	return result, nil
 }
 
-func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) error {
+func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) (returnedErr error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.sessions == nil {
@@ -362,22 +366,29 @@ func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) e
 	if err != nil {
 		return &verifierError{code: "browser_session_unavailable", cause: errors.New("load encrypted browser session")}
 	}
-	path, err := createPlaintextSessionTemp(key, existing, found)
+	path, err := createPlaintextSessionTemp(key, existing, found, v.removePlaintext)
 	if err != nil {
+		if errors.Is(err, errPlaintextSessionCleanup) {
+			return &verifierError{code: "browser_session_cleanup_failed", cause: errPlaintextSessionCleanup}
+		}
 		return &verifierError{code: "browser_session_temp_failed", cause: errors.New("create temporary browser session")}
 	}
 	cleanupPath := path
 	defer func() {
 		if cleanupPath != "" {
-			_ = os.Remove(cleanupPath)
+			if err := v.cleanupPlaintextSession(cleanupPath); err != nil {
+				returnedErr = &verifierError{code: "browser_session_cleanup_failed", cause: errPlaintextSessionCleanup}
+			}
 		}
 	}()
 
 	output, err := v.worker.Run(loginCtx, runtimePaths, workerRequest{
 		Mode: "login",
 		Plan: bughub.BrowserPlan{
-			Version:  1,
-			StartURL: canonicalOrigin,
+			Version:    1,
+			StartURL:   canonicalOrigin,
+			Actions:    []bughub.BrowserAction{},
+			Assertions: []bughub.BrowserAssertion{},
 		},
 		Policy:           request.Policy,
 		StorageStatePath: path,
@@ -399,7 +410,7 @@ func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) e
 	if err != nil {
 		return &verifierError{code: "browser_session_invalid", cause: err}
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := v.cleanupPlaintextSession(path); err != nil {
 		return &verifierError{code: "browser_session_cleanup_failed", cause: errPlaintextSessionCleanup}
 	}
 	cleanupPath = ""
@@ -419,13 +430,13 @@ func (v *HostVerifier) runWorkerWithSession(
 	found bool,
 ) (result workerResult, returnedErr error) {
 	if found {
-		path, err := createPlaintextSessionTemp(key, state, true)
+		path, err := createPlaintextSessionTemp(key, state, true, v.removePlaintext)
 		if err != nil {
 			return workerResult{}, err
 		}
 		request.StorageStatePath = path
 		defer func() {
-			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := v.cleanupPlaintextSession(path); err != nil {
 				returnedErr = errors.Join(returnedErr, errPlaintextSessionCleanup)
 			}
 		}()
@@ -433,7 +444,21 @@ func (v *HostVerifier) runWorkerWithSession(
 	return v.worker.Run(ctx, paths, request, emit)
 }
 
-func createPlaintextSessionTemp(key SessionKey, state []byte, writeState bool) (string, error) {
+func (v *HostVerifier) cleanupPlaintextSession(path string) error {
+	return cleanupPlaintextSessionWith(v.removePlaintext, path)
+}
+
+func cleanupPlaintextSessionWith(remove func(string) error, path string) error {
+	if remove == nil {
+		remove = os.Remove
+	}
+	if err := remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return errPlaintextSessionCleanup
+	}
+	return nil
+}
+
+func createPlaintextSessionTemp(key SessionKey, state []byte, writeState bool, removeFile func(string) error) (_ string, returnedErr error) {
 	identifier, err := sessionIdentifier(key)
 	if err != nil {
 		return "", err
@@ -447,7 +472,7 @@ func createPlaintextSessionTemp(key SessionKey, state []byte, writeState bool) (
 	defer func() {
 		_ = temporary.Close()
 		if remove {
-			_ = os.Remove(path)
+			returnedErr = errors.Join(returnedErr, cleanupPlaintextSessionWith(removeFile, path))
 		}
 	}()
 	if err := temporary.Chmod(0o600); err != nil {
@@ -1144,28 +1169,7 @@ func (nodeWorkerRunner) Run(ctx context.Context, paths RuntimePaths, request wor
 		return workerResult{}, err
 	}
 	command := exec.CommandContext(ctx, "node", paths.WorkerPath, "--mode", request.Mode)
-	processDone := make(chan struct{})
-	defer close(processDone)
-	if runtime.GOOS != "windows" {
-		command.Cancel = func() error {
-			if command.Process == nil {
-				return os.ErrProcessDone
-			}
-			if err := command.Process.Signal(os.Interrupt); err != nil {
-				return err
-			}
-			go func(process *os.Process) {
-				timer := time.NewTimer(2 * time.Second)
-				defer timer.Stop()
-				select {
-				case <-timer.C:
-					_ = process.Kill()
-				case <-processDone:
-				}
-			}(command.Process)
-			return nil
-		}
-	}
+	processController := configureWorkerProcess(command)
 	command.Dir = paths.Root
 	command.Env = mergeCommandEnvironment(os.Environ(), []string{"PLAYWRIGHT_BROWSERS_PATH=" + paths.BrowsersPath})
 	command.Stdin = bytes.NewReader(append(encoded, '\n'))
@@ -1183,9 +1187,7 @@ func (nodeWorkerRunner) Run(ctx context.Context, paths RuntimePaths, request wor
 	var killOnce sync.Once
 	kill := func() {
 		killOnce.Do(func() {
-			if command.Process != nil {
-				_ = command.Process.Kill()
-			}
+			_ = processController.kill(command)
 		})
 	}
 	stdoutDone := make(chan workerStdoutRead, 1)
@@ -1199,11 +1201,15 @@ func (nodeWorkerRunner) Run(ctx context.Context, paths RuntimePaths, request wor
 	stdoutResult := <-stdoutDone
 	stderrErr := <-stderrDone
 	waitErr := command.Wait()
+	processCleanupErr := processController.finish()
 	if errors.Is(stdoutResult.err, ErrBrowserWorkerOutputTooLarge) || errors.Is(stderrErr, ErrBrowserWorkerOutputTooLarge) {
 		return workerResult{}, ErrBrowserWorkerOutputTooLarge
 	}
 	if waitErr != nil || stdoutResult.err != nil || stderrErr != nil {
-		return workerResult{}, errors.Join(waitErr, stdoutResult.err, stderrErr)
+		return workerResult{}, errors.Join(waitErr, stdoutResult.err, stderrErr, processCleanupErr)
+	}
+	if processCleanupErr != nil {
+		return workerResult{}, processCleanupErr
 	}
 	var result workerResult
 	decoder := json.NewDecoder(bytes.NewReader(stdoutResult.content))

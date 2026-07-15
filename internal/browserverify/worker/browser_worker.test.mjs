@@ -16,7 +16,7 @@ import {
   EVIDENCE_MAX_RECORDS,
   EVIDENCE_TRUNCATION_MARKER,
   hasVisiblePasswordField,
-  loginSessionReady,
+  observeLoginState,
   saveLoginStorageState,
   validateWorkerRequest,
 } from './browser_worker.mjs';
@@ -318,21 +318,51 @@ test('login detection checks every password field, including a visible field aft
   assert.equal(await hasVisiblePasswordField(page), true);
 });
 
-test('login completes only after leaving auth origin with no visible password field', async () => {
-  const page = (url, passwordVisible) => ({
-    url: () => url,
-    locator: (selector) => {
-      assert.equal(selector, 'input[type="password"]');
-      return {
-        count: async () => 1,
-        nth: () => ({ isVisible: async () => passwordVisible }),
-      };
-    },
-  });
+const loginPage = (url, passwordVisible = false) => ({
+  url: () => url,
+  locator: (selector) => {
+    assert.equal(selector, 'input[type="password"]');
+    return {
+      count: async () => 1,
+      nth: () => ({ isVisible: async () => passwordVisible }),
+    };
+  },
+});
+
+test('login does not complete on a public shell before a delayed auth redirect', async () => {
   const policy = baseLoginRequest().policy;
-  assert.equal(await loginSessionReady(page('https://login.test/sso', false), policy), false);
-  assert.equal(await loginSessionReady(page('https://app.test/login', true), policy), false);
-  assert.equal(await loginSessionReady(page('https://app.test/users', false), policy), true);
+  const initial = await observeLoginState([loginPage('https://app.test')], policy, false, false);
+  assert.deepEqual(initial, { started: false, ready: false });
+
+  const redirected = await observeLoginState([loginPage('https://login.test/sso')], policy, initial.started, false);
+  assert.deepEqual(redirected, { started: true, ready: false });
+
+  const knownRoute = await observeLoginState([loginPage('https://app.test/sign-in')], policy, false, false);
+  assert.deepEqual(knownRoute, { started: true, ready: false });
+
+  const forbidden = await observeLoginState([loginPage('https://app.test')], policy, false, true);
+  assert.deepEqual(forbidden, { started: true, ready: false });
+});
+
+test('login completes only after password or auth UI returns to the app', async () => {
+  const policy = baseLoginRequest().policy;
+  const prompted = await observeLoginState([loginPage('https://app.test/login', true)], policy, false, false);
+  assert.deepEqual(prompted, { started: true, ready: false });
+
+  const completed = await observeLoginState([loginPage('https://app.test/users')], policy, prompted.started, false);
+  assert.deepEqual(completed, { started: true, ready: true });
+});
+
+test('login waits for an OAuth popup and completes after the auth popup closes', async () => {
+  const policy = baseLoginRequest().policy;
+  const popup = await observeLoginState([
+    loginPage('https://app.test'),
+    loginPage('https://login.test/oauth/authorize'),
+  ], policy, false, false);
+  assert.deepEqual(popup, { started: true, ready: false });
+
+  const closed = await observeLoginState([loginPage('https://app.test/users')], policy, popup.started, false);
+  assert.deepEqual(closed, { started: true, ready: true });
 });
 
 test('login storageState atomically replaces a pre-created 0600 target', async () => {

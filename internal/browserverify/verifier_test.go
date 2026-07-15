@@ -3,6 +3,7 @@ package browserverify
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -257,6 +258,39 @@ func TestHostVerifierLoginReplacesEncryptedSessionOnlyAfterWorkerSuccess(t *test
 	assertTreeExcludesBytes(t, root, oldState, newState, []byte(plaintextPath))
 }
 
+func TestHostVerifierLoginSerializesEmptyPlanCollectionsAsArrays(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions"), newMemorySecretStore())
+	worker := &fakeWorker{Result: workerResult{Status: "completed"}}
+	worker.Inspect = func(_ context.Context, request workerRequest) error {
+		encoded, err := json.Marshal(request)
+		if err != nil {
+			return err
+		}
+		var protocol struct {
+			Plan struct {
+				Actions    json.RawMessage `json:"actions"`
+				Assertions json.RawMessage `json:"assertions"`
+			} `json:"plan"`
+		}
+		if err := json.Unmarshal(encoded, &protocol); err != nil {
+			return err
+		}
+		if string(protocol.Plan.Actions) != "[]" || string(protocol.Plan.Assertions) != "[]" {
+			t.Fatalf("login protocol plan=%s", encoded)
+		}
+		return os.WriteFile(request.StorageStatePath, []byte(`{"cookies":[],"origins":[]}`), 0o600)
+	}
+	verifier := newTestHostVerifier(t, worker)
+	verifier.SetSessionStore(store)
+	if err := verifier.Login(context.Background(), BrowserLoginRequest{
+		SystemID: "shop", Environment: "test", Origin: "https://app.test",
+		Policy:  bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test"}},
+		Timeout: time.Minute,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestHostVerifierLoginFailurePreservesPreviousEncryptedSession(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions"), newMemorySecretStore())
 	key := SessionKey{SystemID: "shop", Environment: "test", Origin: "https://app.test"}
@@ -303,6 +337,137 @@ func TestHostVerifierLoginFailurePreservesPreviousEncryptedSession(t *testing.T)
 	if _, err := os.Stat(plaintextPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("failed login plaintext remains: %v", err)
 	}
+}
+
+func TestHostVerifierLoginReportsPlaintextCleanupFailureOnEveryExitPath(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		result     workerResult
+		workerErr  error
+		writeState []byte
+		cancel     bool
+	}{
+		{name: "worker error", workerErr: errors.New("password=worker-secret")},
+		{name: "cancellation", workerErr: context.Canceled, cancel: true},
+		{name: "protocol error", result: workerResult{Status: "completed", FinalURL: "https://app.test/?token=protocol-secret"}},
+		{name: "state read error", result: workerResult{Status: "completed"}, writeState: []byte(`{"cookies":[`)},
+		{name: "successful worker before save", result: workerResult{Status: "completed"}, writeState: []byte(`{"cookies":[{"value":"new-secret"}]}`)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := NewSessionStore(filepath.Join(t.TempDir(), "sessions"), newMemorySecretStore())
+			key := SessionKey{SystemID: "shop", Environment: "test", Origin: "https://app.test"}
+			oldState := []byte(`{"cookies":[{"value":"preserved-secret"}]}`)
+			if err := store.Save(key, oldState); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(store.encryptedPath(key))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var plaintextPath string
+			worker := &fakeWorker{Result: test.result, Errors: []error{test.workerErr}}
+			worker.Inspect = func(_ context.Context, request workerRequest) error {
+				plaintextPath = request.StorageStatePath
+				if test.writeState != nil {
+					if err := os.WriteFile(plaintextPath, test.writeState, 0o600); err != nil {
+						return err
+					}
+				}
+				if test.cancel {
+					cancel()
+				}
+				return nil
+			}
+			verifier := newTestHostVerifier(t, worker)
+			verifier.SetSessionStore(store)
+			verifier.removePlaintext = func(path string) error {
+				if path != plaintextPath {
+					t.Fatalf("removed path %q, want %q", path, plaintextPath)
+				}
+				return errors.New("remove " + path + " password=cleanup-secret")
+			}
+			err = verifier.Login(ctx, BrowserLoginRequest{
+				SystemID: "shop", Environment: "test", Origin: "https://app.test",
+				Policy:  bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test"}},
+				Timeout: time.Minute,
+			})
+			if err == nil || err.Error() != "browser_session_cleanup_failed: temporary browser session cleanup failed" {
+				t.Fatalf("cleanup error = %v", err)
+			}
+			for _, secret := range []string{plaintextPath, "cleanup-secret", "worker-secret", "protocol-secret"} {
+				if secret != "" && strings.Contains(err.Error(), secret) {
+					t.Fatalf("cleanup error exposed %q: %v", secret, err)
+				}
+			}
+			after, readErr := os.ReadFile(store.encryptedPath(key))
+			if readErr != nil || !bytes.Equal(before, after) {
+				t.Fatalf("encrypted session changed: equal=%v err=%v", bytes.Equal(before, after), readErr)
+			}
+			if plaintextPath != "" {
+				t.Cleanup(func() { _ = os.Remove(plaintextPath) })
+			}
+		})
+	}
+}
+
+func TestHostVerifierExecuteReportsPlaintextCleanupFailureAfterWorkerError(t *testing.T) {
+	request := validBrowserRequest(t)
+	state := []byte(`{"cookies":[{"value":"execute-secret"}]}`)
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions"), newMemorySecretStore())
+	if err := store.Save(SessionKey{SystemID: request.SystemID, Environment: request.Environment, Origin: request.Plan.StartURL}, state); err != nil {
+		t.Fatal(err)
+	}
+	var plaintextPath string
+	worker := &fakeWorker{Errors: []error{errors.New("password=worker-secret")}}
+	worker.Inspect = func(_ context.Context, request workerRequest) error {
+		plaintextPath = request.StorageStatePath
+		return nil
+	}
+	verifier := newTestHostVerifier(t, worker)
+	verifier.SetSessionStore(store)
+	verifier.removePlaintext = func(path string) error {
+		return errors.New("remove " + path + " password=cleanup-secret")
+	}
+	_, err := verifier.Execute(context.Background(), request)
+	if err == nil || err.Error() != "browser_session_cleanup_failed: temporary browser session cleanup failed" {
+		t.Fatalf("cleanup error = %v", err)
+	}
+	for _, secret := range []string{plaintextPath, "cleanup-secret", "worker-secret"} {
+		if secret != "" && strings.Contains(err.Error(), secret) {
+			t.Fatalf("cleanup error exposed %q: %v", secret, err)
+		}
+	}
+	if plaintextPath != "" {
+		t.Cleanup(func() { _ = os.Remove(plaintextPath) })
+	}
+}
+
+func TestCreatePlaintextSessionTempPropagatesCleanupFailureAfterCreationError(t *testing.T) {
+	var plaintextPath string
+	_, err := createPlaintextSessionTemp(
+		SessionKey{SystemID: "shop", Environment: "test", Origin: "https://app.test"},
+		bytes.Repeat([]byte{'x'}, maxBrowserSessionBytes+1),
+		true,
+		func(path string) error {
+			plaintextPath = path
+			return errors.New("remove " + path + " password=cleanup-secret")
+		},
+	)
+	if !errors.Is(err, errPlaintextSessionCleanup) {
+		t.Fatalf("create cleanup error = %v", err)
+	}
+	if plaintextPath == "" {
+		t.Fatal("cleanup remover was not called")
+	}
+	for _, secret := range []string{plaintextPath, "cleanup-secret"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("cleanup error exposed %q: %v", secret, err)
+		}
+	}
+	t.Cleanup(func() { _ = os.Remove(plaintextPath) })
 }
 
 func TestHostVerifierLoginRejectsWorkerArtifactsWithoutSavingState(t *testing.T) {
@@ -850,6 +1015,60 @@ setInterval(() => {}, 1000);
 	content, readErr := os.ReadFile(markerPath)
 	if readErr != nil || string(content) != "closed" {
 		t.Fatalf("browser cleanup marker=%q err=%v", content, readErr)
+	}
+}
+
+func TestNodeWorkerRunnerCancellationTerminatesWorkerProcessGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows uses direct process termination")
+	}
+	temporary := t.TempDir()
+	workerPath := filepath.Join(temporary, "worker-with-grandchild.mjs")
+	readyPath := filepath.Join(temporary, "grandchild-started")
+	markerPath := filepath.Join(temporary, "grandchild-survived")
+	source := `
+import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+const childSource = ` + "`" + `
+  const { writeFileSync } = require('node:fs');
+  setTimeout(() => writeFileSync(process.env.TSHOOT_TEST_GRANDCHILD_MARKER, 'alive'), 600);
+  setTimeout(() => process.exit(0), 800);
+` + "`" + `;
+spawn(process.execPath, ['-e', childSource], { env: process.env, stdio: 'ignore' });
+writeFileSync(process.env.TSHOOT_TEST_GRANDCHILD_READY, 'ready');
+process.on('SIGINT', () => process.exit(130));
+setInterval(() => {}, 1000);
+`
+	if err := os.WriteFile(workerPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TSHOOT_TEST_GRANDCHILD_READY", readyPath)
+	t.Setenv("TSHOOT_TEST_GRANDCHILD_MARKER", markerPath)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := (nodeWorkerRunner{}).Run(ctx, RuntimePaths{
+			Root: temporary, BrowsersPath: filepath.Join(temporary, "browsers"), WorkerPath: workerPath,
+		}, workerRequest{Mode: "login"}, nil)
+		result <- err
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(readyPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("worker did not start its grandchild")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	if err := <-result; err == nil {
+		t.Fatal("expected canceled worker error")
+	}
+	time.Sleep(900 * time.Millisecond)
+	if _, err := os.Stat(markerPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("worker grandchild survived cancellation: %v", err)
 	}
 }
 

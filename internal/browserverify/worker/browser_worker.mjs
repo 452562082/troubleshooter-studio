@@ -351,20 +351,33 @@ export async function hasVisiblePasswordField(page) {
   return false;
 }
 
-export async function loginSessionReady(page, policy) {
-  return !knownAuthOrigin(page.url(), policy) && !(await hasVisiblePasswordField(page));
-}
-
 async function loginPageState(page, policy, authFailure) {
   const passwordVisible = await hasVisiblePasswordField(page);
   let knownRoute = false;
+  let httpPage = false;
   try {
     const parsed = new URL(page.url());
+    httpPage = parsed.protocol === 'http:' || parsed.protocol === 'https:';
     knownRoute = /\/(?:login|sign-in|signin|sso)(?:\/|$)/i.test(parsed.pathname);
   } catch {
     // about:blank before a failed navigation is not a login page.
   }
-  return { required: passwordVisible || knownRoute || knownAuthOrigin(page.url(), policy) || authFailure, passwordVisible };
+  return {
+    required: passwordVisible || knownRoute || knownAuthOrigin(page.url(), policy) || authFailure,
+    passwordVisible,
+    httpPage,
+  };
+}
+
+export async function observeLoginState(pages, policy, previouslyStarted = false, authFailure = false) {
+  const states = [];
+  for (const page of pages) states.push(await loginPageState(page, policy, false));
+  const activeLogin = states.some((state) => state.required);
+  const started = previouslyStarted || authFailure || activeLogin;
+  const ready = previouslyStarted
+    && pages.length > 0
+    && states.every((state) => state.httpPage && !state.required);
+  return { started, ready };
 }
 
 export async function captureSafePNG(page, request, name, getAuthFailure, capture = capturePNG) {
@@ -715,6 +728,10 @@ async function loginWorker(request) {
       serviceWorkers: 'block',
     });
     let blockedRequest = false;
+    let authFailure = false;
+    context.on('response', (response) => {
+      if (response.status() === 401 || response.status() === 403) authFailure = true;
+    });
     await context.route('**/*', async (route) => {
       try {
         await assertAllowedURL(route.request().url(), request.policy);
@@ -734,10 +751,18 @@ async function loginWorker(request) {
     emitProgress('browser_login_opened', 'Complete login in the visible validation browser');
     await assertAllowedURL(request.plan.start_url, request.policy);
     await page.goto(request.plan.start_url, { waitUntil: 'domcontentloaded' });
+    let loginStarted = false;
     while (true) {
       if (blockedRequest) throw new Error('browser destination was blocked');
-      await assertAllowedURL(page.url(), request.policy);
-      if (await loginSessionReady(page, request.policy)) {
+      const pages = context.pages();
+      for (const currentPage of pages) {
+        const currentURL = currentPage.url();
+        if (currentURL && currentURL !== 'about:blank') await assertAllowedURL(currentURL, request.policy);
+      }
+      const observed = await observeLoginState(pages, request.policy, loginStarted, authFailure);
+      authFailure = false;
+      loginStarted = observed.started;
+      if (observed.ready) {
         await saveLoginStorageState(context, request.storage_state_path);
         emitProgress('browser_login_completed', 'Browser login session saved');
         return { status: 'completed' };

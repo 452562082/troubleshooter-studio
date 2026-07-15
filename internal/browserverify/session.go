@@ -25,7 +25,10 @@ const maxEncryptedBrowserSessionBytes = ((maxBrowserSessionBytes + aes.BlockSize
 
 var ErrSecretNotFound = errors.New("browser session key not found")
 
+var ErrSessionStoreBusy = errors.New("browser session store is busy")
+
 var errSecretStoreUnavailable = errors.New("browser session key store unavailable")
+var errSessionLockOwnershipLost = errors.New("browser session transaction lock ownership was lost")
 
 type SecretStore interface {
 	Get(string) (string, error)
@@ -52,6 +55,12 @@ type encryptedSessionEnvelope struct {
 	Ciphertext string `json:"ciphertext"`
 }
 
+type sessionFileLock struct {
+	path string
+	file *os.File
+	info os.FileInfo
+}
+
 func NewSessionStore(root string, secrets SecretStore) *SessionStore {
 	return &SessionStore{
 		root:    root,
@@ -60,16 +69,23 @@ func NewSessionStore(root string, secrets SecretStore) *SessionStore {
 	}
 }
 
-func (s *SessionStore) Load(key SessionKey) ([]byte, bool, error) {
+func (s *SessionStore) Load(key SessionKey) (state []byte, found bool, returnedErr error) {
 	identifier, err := sessionIdentifier(key)
 	if err != nil {
 		return nil, false, err
 	}
 
+	// Every operation takes locks in the same order: the instance mutex first,
+	// then the cross-process identifier lock.
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if state, ok := s.memory[identifier]; ok {
-		return bytes.Clone(state), true, nil
+	lock, err := acquireSessionFileLockForLoad(s.root, identifier)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { returnedErr = errors.Join(returnedErr, lock.release()) }()
+	if cached, ok := s.memory[identifier]; ok {
+		return bytes.Clone(cached), true, nil
 	}
 
 	path := filepath.Join(s.root, identifier+".json")
@@ -91,14 +107,14 @@ func (s *SessionStore) Load(key SessionKey) ([]byte, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	state, err := decryptSessionState(identifier, aesKey, envelope)
+	state, err = decryptSessionState(identifier, aesKey, envelope)
 	if err != nil {
 		return nil, false, err
 	}
 	return bytes.Clone(state), true, nil
 }
 
-func (s *SessionStore) Save(key SessionKey, state []byte) error {
+func (s *SessionStore) Save(key SessionKey, state []byte) (returnedErr error) {
 	identifier, err := sessionIdentifier(key)
 	if err != nil {
 		return err
@@ -109,6 +125,11 @@ func (s *SessionStore) Save(key SessionKey, state []byte) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	lock, err := acquireSessionFileLock(s.root, identifier)
+	if err != nil {
+		return err
+	}
+	defer func() { returnedErr = errors.Join(returnedErr, lock.release()) }()
 	if s.secrets == nil {
 		s.memory[identifier] = bytes.Clone(state)
 		return nil
@@ -146,7 +167,7 @@ func (s *SessionStore) Save(key SessionKey, state []byte) error {
 	return nil
 }
 
-func (s *SessionStore) Clear(key SessionKey) error {
+func (s *SessionStore) Clear(key SessionKey) (returnedErr error) {
 	identifier, err := sessionIdentifier(key)
 	if err != nil {
 		return err
@@ -154,6 +175,11 @@ func (s *SessionStore) Clear(key SessionKey) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	lock, err := acquireSessionFileLock(s.root, identifier)
+	if err != nil {
+		return err
+	}
+	defer func() { returnedErr = errors.Join(returnedErr, lock.release()) }()
 	delete(s.memory, identifier)
 	path := filepath.Join(s.root, identifier+".json")
 	removed := false
@@ -174,6 +200,110 @@ func (s *SessionStore) Clear(key SessionKey) error {
 	}
 	if err := s.secrets.Delete(identifier); err != nil && !errors.Is(err, ErrSecretNotFound) {
 		return errSecretStoreUnavailable
+	}
+	return nil
+}
+
+func acquireSessionFileLock(root, identifier string) (_ *sessionFileLock, returnedErr error) {
+	return acquireSessionFileLockWithDirectoryPolicy(root, identifier, true)
+}
+
+func acquireSessionFileLockForLoad(root, identifier string) (_ *sessionFileLock, returnedErr error) {
+	return acquireSessionFileLockWithDirectoryPolicy(root, identifier, false)
+}
+
+func acquireSessionFileLockWithDirectoryPolicy(root, identifier string, protectDirectory bool) (_ *sessionFileLock, returnedErr error) {
+	if err := prepareSessionLockDirectory(root, protectDirectory); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(root, "."+identifier+".lock")
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, fs.ErrExist) {
+		return nil, ErrSessionStoreBusy
+	}
+	if err != nil {
+		return nil, errors.New("create browser session transaction lock")
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return nil, errors.New("inspect browser session transaction lock")
+	}
+	lock := &sessionFileLock{path: path, file: file, info: info}
+	remove := true
+	defer func() {
+		if remove {
+			returnedErr = errors.Join(returnedErr, lock.release())
+		}
+	}()
+	token := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, token); err != nil {
+		return nil, errors.New("generate browser session transaction token")
+	}
+	if err := file.Chmod(0o600); err != nil {
+		return nil, errors.New("protect browser session transaction lock")
+	}
+	if err := writeAll(file, append([]byte(hex.EncodeToString(token)), '\n')); err != nil {
+		return nil, errors.New("write browser session transaction lock")
+	}
+	if err := file.Sync(); err != nil {
+		return nil, errors.New("sync browser session transaction lock")
+	}
+	if err := syncRuntimeDirectory(root); err != nil {
+		return nil, errors.New("sync browser session directory")
+	}
+	remove = false
+	return lock, nil
+}
+
+func (lock *sessionFileLock) release() error {
+	if lock == nil || lock.file == nil {
+		return nil
+	}
+	openedInfo, openedErr := lock.file.Stat()
+	pathInfo, pathErr := os.Lstat(lock.path)
+	if openedErr != nil || pathErr != nil || !os.SameFile(lock.info, openedInfo) || !os.SameFile(openedInfo, pathInfo) {
+		_ = lock.file.Close()
+		lock.file = nil
+		return errSessionLockOwnershipLost
+	}
+	closeErr := lock.file.Close()
+	lock.file = nil
+	if closeErr != nil {
+		return errors.New("close browser session transaction lock")
+	}
+	if err := os.Remove(lock.path); err != nil {
+		return errors.New("remove browser session transaction lock")
+	}
+	if err := syncRuntimeDirectory(filepath.Dir(lock.path)); err != nil {
+		return errors.New("sync browser session directory")
+	}
+	return nil
+}
+
+func prepareSessionLockDirectory(root string, protect bool) error {
+	if strings.TrimSpace(root) == "" || !filepath.IsAbs(root) {
+		return errors.New("browser session directory must be absolute")
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return errors.New("create browser session directory")
+	}
+	info, err := os.Lstat(root)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return errors.New("browser session directory is unsafe")
+	}
+	if protect {
+		if err := os.Chmod(root, 0o700); err != nil {
+			return errors.New("protect browser session directory")
+		}
+		info, err = os.Lstat(root)
+	}
+	if err != nil || info.Mode().Perm()&0o077 != 0 {
+		return errors.New("browser session directory is unsafe")
+	}
+	if info.Mode().Perm()&0o700 != 0o700 {
+		return errors.New("protect browser session directory")
 	}
 	return nil
 }

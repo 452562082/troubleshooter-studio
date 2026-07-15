@@ -412,7 +412,7 @@ h2, h3, p { margin: 0; }
 .timeline-events.is-expanded { max-height: clamp(280px, 38vh, 520px); padding-right: var(--sp-1); overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .timeline li { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: var(--sp-2); padding-bottom: var(--sp-3); }
 .timeline-dot { width: 9px; height: 9px; margin-top: 4px; border: 2px solid #93c5fd; border-radius: 50%; background: var(--c-surf); box-shadow: 0 0 0 3px #eff6ff; }
-.timeline li > div { min-width: 0; display: grid; gap: 2px; }
+.timeline li > div { min-width: 0; display: grid; gap: 2px; overflow-wrap: anywhere; }
 .timeline strong { color: var(--c-ink); font-size: var(--fs-sm); }
 .timeline li span, .timeline li small { color: var(--c-muted); font-size: var(--fs-xs); }
 .empty-state { padding: var(--sp-4); border: 1px dashed var(--c-line-2); border-radius: var(--r-md); color: var(--c-muted); text-align: center; font-size: var(--fs-sm); }

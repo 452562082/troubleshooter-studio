@@ -348,4 +348,20 @@ describe('BugCaseLifecycle', () => {
     expect(source).toMatch(/\.timeline-toggle-icon \{[^}]*transition: transform 180ms ease;/)
     expect(source).toMatch(/@media \(prefers-reduced-motion: reduce\)/)
   })
+
+  it('wraps a long unbroken event label in collapsed and expanded timelines', async () => {
+    const longEventType = `event_${'x'.repeat(160)}`
+    const snapshot = detail('waiting_evidence')
+    snapshot.events = timelineEvents(6)
+    snapshot.events[5].event_type = longEventType
+    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+
+    expect(wrapper.get('#case-timeline-events li strong').text()).toBe(longEventType)
+    const source = readFileSync('src/components/BugCaseLifecycle.vue', 'utf8')
+    expect(source).toMatch(/\.timeline li > div \{[^}]*overflow-wrap: anywhere;/)
+
+    await wrapper.get('.timeline-toggle').trigger('click')
+    expect(wrapper.get('#case-timeline-events').classes()).toContain('is-expanded')
+    expect(wrapper.get('#case-timeline-events li strong').text()).toBe(longEventType)
+  })
 })

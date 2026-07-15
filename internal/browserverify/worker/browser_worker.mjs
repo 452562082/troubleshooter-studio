@@ -373,11 +373,26 @@ export async function observeLoginState(pages, policy, previouslyStarted = false
   const states = [];
   for (const page of pages) states.push(await loginPageState(page, policy, false));
   const activeLogin = states.some((state) => state.required);
-  const started = previouslyStarted || authFailure || activeLogin;
-  const ready = previouslyStarted
+  const started = previouslyStarted || activeLogin;
+  const ready = started
+    && !authFailure
     && pages.length > 0
     && states.every((state) => state.httpPage && !state.required);
   return { started, ready };
+}
+
+export function createLoginAuthFailureTracker(now = Date.now, quietWindowMs = 1_000) {
+  let lastAuthFailureAt = null;
+  return {
+    observeStatus(status) {
+      if (status === 401 || status === 403) lastAuthFailureAt = now();
+    },
+    active() {
+      if (lastAuthFailureAt === null) return false;
+      const elapsed = now() - lastAuthFailureAt;
+      return elapsed >= 0 && elapsed <= quietWindowMs;
+    },
+  };
 }
 
 export async function captureSafePNG(page, request, name, getAuthFailure, capture = capturePNG) {
@@ -683,6 +698,29 @@ async function loginStorageStateInput(path) {
   return { storageState: path };
 }
 
+export async function createGuardedLoginContext(browser, storageStateInput) {
+  const context = await browser.newContext({
+    ...storageStateInput,
+    serviceWorkers: 'block',
+    acceptDownloads: false,
+  });
+  const guardedPages = new WeakSet();
+  const guardPage = (page) => {
+    if (guardedPages.has(page)) return;
+    guardedPages.add(page);
+    page.setDefaultTimeout(15_000);
+    page.setDefaultNavigationTimeout(30_000);
+    page.on('dialog', (dialog) => dialog.dismiss().catch(() => {}));
+    page.on('download', (download) => download.cancel().catch(() => {}));
+  };
+  context.on('page', guardPage);
+  for (const page of context.pages()) guardPage(page);
+  await context.routeWebSocket('**/*', (webSocketRoute) => webSocketRoute.close());
+  const page = await context.newPage();
+  guardPage(page);
+  return { context, page };
+}
+
 export async function saveLoginStorageState(context, path) {
   const temporary = join(dirname(path), `.${basename(path)}-${randomUUID()}`);
   try {
@@ -723,14 +761,13 @@ async function loginWorker(request) {
   process.once('SIGTERM', closeForInterrupt);
   try {
     browser = await chromium.launch({ headless: false });
-    context = await browser.newContext({
-      ...(await loginStorageStateInput(request.storage_state_path)),
-      serviceWorkers: 'block',
-    });
+    const guarded = await createGuardedLoginContext(browser, await loginStorageStateInput(request.storage_state_path));
+    context = guarded.context;
+    const page = guarded.page;
     let blockedRequest = false;
-    let authFailure = false;
+    const authFailures = createLoginAuthFailureTracker();
     context.on('response', (response) => {
-      if (response.status() === 401 || response.status() === 403) authFailure = true;
+      authFailures.observeStatus(response.status());
     });
     await context.route('**/*', async (route) => {
       try {
@@ -741,13 +778,6 @@ async function loginWorker(request) {
         await route.abort('blockedbyclient');
       }
     });
-    const page = await context.newPage();
-    await page.routeWebSocket('**/*', (webSocket) => webSocket.close());
-    page.setDefaultTimeout(15_000);
-    page.setDefaultNavigationTimeout(30_000);
-    page.on('dialog', (dialog) => dialog.dismiss().catch(() => {}));
-    page.on('download', (download) => download.cancel().catch(() => {}));
-
     emitProgress('browser_login_opened', 'Complete login in the visible validation browser');
     await assertAllowedURL(request.plan.start_url, request.policy);
     await page.goto(request.plan.start_url, { waitUntil: 'domcontentloaded' });
@@ -759,8 +789,7 @@ async function loginWorker(request) {
         const currentURL = currentPage.url();
         if (currentURL && currentURL !== 'about:blank') await assertAllowedURL(currentURL, request.policy);
       }
-      const observed = await observeLoginState(pages, request.policy, loginStarted, authFailure);
-      authFailure = false;
+      const observed = await observeLoginState(pages, request.policy, loginStarted, authFailures.active());
       loginStarted = observed.started;
       if (observed.ready) {
         await saveLoginStorageState(context, request.storage_state_path);

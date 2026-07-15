@@ -11,6 +11,8 @@ import {
   assertAllowedURL,
   buildLocator,
   captureSafePNG,
+  createGuardedLoginContext,
+  createLoginAuthFailureTracker,
   createBoundedRecordCollector,
   EVIDENCE_MAX_BYTES,
   EVIDENCE_MAX_RECORDS,
@@ -339,9 +341,127 @@ test('login does not complete on a public shell before a delayed auth redirect',
 
   const knownRoute = await observeLoginState([loginPage('https://app.test/sign-in')], policy, false, false);
   assert.deepEqual(knownRoute, { started: true, ready: false });
+});
 
+test('401 or 403 never starts login and blocks completion during its quiet window', async () => {
+  const policy = baseLoginRequest().policy;
   const forbidden = await observeLoginState([loginPage('https://app.test')], policy, false, true);
-  assert.deepEqual(forbidden, { started: true, ready: false });
+  assert.deepEqual(forbidden, { started: false, ready: false });
+
+  const publicShell = await observeLoginState([loginPage('https://app.test')], policy, forbidden.started, false);
+  assert.deepEqual(publicShell, { started: false, ready: false });
+
+  const authPage = await observeLoginState([loginPage('https://login.test/sso')], policy, false, false);
+  assert.deepEqual(authPage, { started: true, ready: false });
+
+  const recentFailure = await observeLoginState([loginPage('https://app.test/users')], policy, authPage.started, true);
+  assert.deepEqual(recentFailure, { started: true, ready: false });
+
+  const quiet = await observeLoginState([loginPage('https://app.test/users')], policy, recentFailure.started, false);
+  assert.deepEqual(quiet, { started: true, ready: true });
+});
+
+test('auth failure activity stays active until responses are quiet for the stability window', () => {
+  let now = 10_000;
+  const tracker = createLoginAuthFailureTracker(() => now);
+  assert.equal(tracker.active(), false);
+
+  tracker.observeStatus(401);
+  assert.equal(tracker.active(), true);
+  now += 999;
+  assert.equal(tracker.active(), true);
+
+  tracker.observeStatus(403);
+  now += 999;
+  assert.equal(tracker.active(), true);
+  now += 2;
+  assert.equal(tracker.active(), false);
+
+  tracker.observeStatus(200);
+  assert.equal(tracker.active(), false);
+});
+
+test('guarded login context protects the initial page and every popup before use', async () => {
+  const calls = [];
+  let pageListener;
+  let webSocketHandler;
+  const fakePage = (name) => {
+    const handlers = new Map();
+    return {
+      name,
+      handlers,
+      timeout: 0,
+      navigationTimeout: 0,
+      setDefaultTimeout(value) {
+        calls.push(`${name}:timeout`);
+        this.timeout = value;
+      },
+      setDefaultNavigationTimeout(value) {
+        calls.push(`${name}:navigation-timeout`);
+        this.navigationTimeout = value;
+      },
+      on(event, handler) {
+        calls.push(`${name}:on:${event}`);
+        assert.equal(handlers.has(event), false, `${name} ${event} guard installed twice`);
+        handlers.set(event, handler);
+      },
+    };
+  };
+  const initialPage = fakePage('initial');
+  const context = {
+    pages: () => [],
+    on(event, handler) {
+      calls.push(`context:on:${event}`);
+      assert.equal(event, 'page');
+      pageListener = handler;
+    },
+    async routeWebSocket(pattern, handler) {
+      calls.push('context:websocket');
+      assert.equal(pattern, '**/*');
+      webSocketHandler = handler;
+    },
+    async newPage() {
+      calls.push('context:new-page');
+      pageListener(initialPage);
+      return initialPage;
+    },
+  };
+  let contextOptions;
+  const browser = {
+    async newContext(options) {
+      contextOptions = options;
+      return context;
+    },
+  };
+
+  const guarded = await createGuardedLoginContext(browser, { storageState: '/opaque/state.json' });
+  assert.equal(guarded.context, context);
+  assert.equal(guarded.page, initialPage);
+  assert.deepEqual(contextOptions, {
+    storageState: '/opaque/state.json',
+    serviceWorkers: 'block',
+    acceptDownloads: false,
+  });
+  assert.ok(calls.indexOf('context:on:page') < calls.indexOf('context:new-page'));
+  assert.ok(calls.indexOf('context:websocket') < calls.indexOf('context:new-page'));
+
+  const popup = fakePage('popup');
+  pageListener(popup);
+  for (const page of [initialPage, popup]) {
+    assert.equal(page.timeout, 15_000);
+    assert.equal(page.navigationTimeout, 30_000);
+    let dismissed = false;
+    page.handlers.get('dialog')({ dismiss: async () => { dismissed = true; } });
+    let canceled = false;
+    page.handlers.get('download')({ cancel: async () => { canceled = true; } });
+    await Promise.resolve();
+    assert.equal(dismissed, true);
+    assert.equal(canceled, true);
+  }
+
+  let webSocketClosed = false;
+  webSocketHandler({ close: () => { webSocketClosed = true; } });
+  assert.equal(webSocketClosed, true);
 });
 
 test('login completes only after password or auth UI returns to the app', async () => {

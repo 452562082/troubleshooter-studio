@@ -19,6 +19,9 @@ const PROGRESS_PREFIX = 'TSHOOT_BROWSER_PROGRESS ';
 const ALLOWED_ACTIONS = new Set(['goto', 'click', 'fill', 'press', 'select', 'wait_for', 'screenshot']);
 const ALLOWED_LOCATORS = new Set(['role', 'label', 'text', 'placeholder', 'test_id', 'css']);
 const READ_ONLY_PROD_ACTIONS = new Set(['goto', 'wait_for', 'screenshot']);
+export const EVIDENCE_MAX_RECORDS = 1000;
+export const EVIDENCE_MAX_BYTES = 1 << 20;
+export const EVIDENCE_TRUNCATION_MARKER = Object.freeze({ type: 'truncated', reason: 'record_or_byte_limit' });
 const METADATA_HOSTS = new Set([
   'metadata',
   'metadata.google.internal',
@@ -46,6 +49,66 @@ function requiredString(value, label, maxBytes = 4096) {
   }
   if (Buffer.byteLength(value, 'utf8') > maxBytes) throw new Error(`${label} is too long`);
   return value;
+}
+
+export function createBoundedRecordCollector({ maxRecords = EVIDENCE_MAX_RECORDS, maxBytes = EVIDENCE_MAX_BYTES } = {}) {
+  const markerBytes = Buffer.byteLength(JSON.stringify(EVIDENCE_TRUNCATION_MARKER), 'utf8');
+  if (!Number.isInteger(maxRecords) || maxRecords < 1 || !Number.isInteger(maxBytes) || maxBytes < markerBytes + 2) {
+    throw new Error('evidence collector limits are invalid');
+  }
+  const records = [];
+  let serializedBytes = 2;
+  let stopped = false;
+
+  const stopWithMarker = () => {
+    if (stopped) return;
+    const separatorBytes = records.length === 0 ? 0 : 1;
+    if (records.length >= maxRecords || serializedBytes + separatorBytes + markerBytes > maxBytes) {
+      records.length = 0;
+      serializedBytes = 2;
+    }
+    records.push({ ...EVIDENCE_TRUNCATION_MARKER });
+    serializedBytes += (records.length === 1 ? 0 : 1) + markerBytes;
+    stopped = true;
+  };
+
+  return {
+    add(record) {
+      if (stopped) return false;
+      let encoded;
+      try {
+        encoded = JSON.stringify(record);
+      } catch {
+        stopWithMarker();
+        return false;
+      }
+      if (typeof encoded !== 'string') {
+        stopWithMarker();
+        return false;
+      }
+      const recordBytes = Buffer.byteLength(encoded, 'utf8');
+      const separatorBytes = records.length === 0 ? 0 : 1;
+      const markerSeparatorBytes = 1;
+      const exceedsRecords = records.length + 2 > maxRecords;
+      const exceedsBytes = serializedBytes + separatorBytes + recordBytes + markerSeparatorBytes + markerBytes > maxBytes;
+      if (exceedsRecords || exceedsBytes) {
+        stopWithMarker();
+        return false;
+      }
+      records.push(record);
+      serializedBytes += separatorBytes + recordBytes;
+      return true;
+    },
+    isStopped() {
+      return stopped;
+    },
+    truncate() {
+      stopWithMarker();
+    },
+    snapshot() {
+      return records.map((record) => ({ ...record }));
+    },
+  };
 }
 
 function normalizeOrigin(raw) {
@@ -265,10 +328,17 @@ function knownAuthOrigin(rawURL, policy) {
   }
 }
 
-async function loginPageState(page, policy, authFailure) {
-  let passwordVisible = false;
+export async function hasVisiblePasswordField(page) {
   const password = page.locator('input[type="password"]');
-  if (await password.count()) passwordVisible = await password.first().isVisible().catch(() => false);
+  const count = await password.count().catch(() => 0);
+  for (let index = 0; index < count; index += 1) {
+    if (await password.nth(index).isVisible().catch(() => false)) return true;
+  }
+  return false;
+}
+
+async function loginPageState(page, policy, authFailure) {
+  const passwordVisible = await hasVisiblePasswordField(page);
   let knownRoute = false;
   try {
     const parsed = new URL(page.url());
@@ -277,6 +347,18 @@ async function loginPageState(page, policy, authFailure) {
     // about:blank before a failed navigation is not a login page.
   }
   return { required: passwordVisible || knownRoute || knownAuthOrigin(page.url(), policy) || authFailure, passwordVisible };
+}
+
+export async function captureSafePNG(page, request, name, authFailure, capture = capturePNG) {
+  if ((await loginPageState(page, request.policy, authFailure)).required) {
+    return { loginRequired: true, path: '' };
+  }
+  const path = await capture(page, request.staging_dir, name);
+  if ((await loginPageState(page, request.policy, authFailure)).required) {
+    await rm(join(request.staging_dir, path.replace(/^browser\//, '')), { force: true });
+    return { loginRequired: true, path: '' };
+  }
+  return { loginRequired: false, path };
 }
 
 async function accessibilitySummary(page) {
@@ -302,14 +384,14 @@ async function accessibilitySummary(page) {
   return result;
 }
 
-async function executeAction(page, action, request, index) {
+async function executeAction(page, action, request, index, captureScreenshot) {
   switch (action.action) {
     case 'goto':
       await assertAllowedURL(action.url, request.policy);
       await page.goto(action.url, { waitUntil: 'domcontentloaded' });
-      return '';
+      return { loginRequired: false, path: '' };
     case 'screenshot':
-      return capturePNG(page, request.staging_dir, `action-${String(index + 1).padStart(2, '0')}-${safeFilePart(action.id)}.png`);
+      return captureScreenshot(`action-${String(index + 1).padStart(2, '0')}-${safeFilePart(action.id)}.png`);
     default: {
       const locator = buildLocator(page, action.locator).first();
       if (action.action === 'click') await locator.click();
@@ -320,7 +402,7 @@ async function executeAction(page, action, request, index) {
       } else if (action.action === 'press') await locator.press(action.key);
       else if (action.action === 'select') await locator.selectOption(action.value);
       else if (action.action === 'wait_for') await locator.waitFor({ state: 'visible' });
-      return '';
+      return { loginRequired: false, path: '' };
     }
   }
 }
@@ -330,11 +412,24 @@ function responseHeadersPromise(response) {
   return Promise.all(names.map(async (name) => [name, await response.headerValue(name)]));
 }
 
-async function writeEvidenceFiles(request, network, consoleRecords, actions) {
-  await atomicWrite(join(request.staging_dir, 'network.json'), `${JSON.stringify(network, null, 2)}\n`);
+function checkedEvidenceContent(content, label) {
+  if (Buffer.byteLength(content, 'utf8') > EVIDENCE_MAX_BYTES) throw new Error(`${label} evidence exceeds its byte limit`);
+  return content;
+}
+
+async function writeEvidenceFiles(request, networkCollector, consoleCollector, actions) {
+  const network = networkCollector.snapshot();
+  const consoleRecords = consoleCollector.snapshot();
+  if (network.length > EVIDENCE_MAX_RECORDS || consoleRecords.length > EVIDENCE_MAX_RECORDS || actions.length > 40) {
+    throw new Error('browser evidence exceeds its record limit');
+  }
+  const networkJSON = checkedEvidenceContent(`${JSON.stringify(network)}\n`, 'network');
   const consoleJSONL = consoleRecords.map((record) => JSON.stringify(record)).join('\n');
-  await atomicWrite(join(request.staging_dir, 'console.jsonl'), consoleJSONL ? `${consoleJSONL}\n` : '');
-  await atomicWrite(join(request.staging_dir, 'browser-actions.json'), `${JSON.stringify(actions, null, 2)}\n`);
+  const consoleContent = checkedEvidenceContent(consoleJSONL ? `${consoleJSONL}\n` : '', 'console');
+  const actionJSON = checkedEvidenceContent(`${JSON.stringify(actions)}\n`, 'browser action');
+  await atomicWrite(join(request.staging_dir, 'network.json'), networkJSON);
+  await atomicWrite(join(request.staging_dir, 'console.jsonl'), consoleContent);
+  await atomicWrite(join(request.staging_dir, 'browser-actions.json'), actionJSON);
   const firstRequest = network.find((record) => record.request_id || record.trace_id) ?? {};
   return [
     { kind: 'network', path: 'browser/network.json', request_id: firstRequest.request_id || '', trace_id: firstRequest.trace_id || '' },
@@ -350,8 +445,8 @@ async function executeWorker(request) {
   const browser = await chromium.launch({ headless: request.headless });
   let context;
   const screenshots = [];
-  const network = [];
-  const consoleRecords = [];
+  const network = createBoundedRecordCollector();
+  const consoleRecords = createBoundedRecordCollector();
   const actions = [];
   const pendingResponses = new Set();
   const requestStarted = new WeakMap();
@@ -379,14 +474,20 @@ async function executeWorker(request) {
     page.on('download', (download) => download.cancel().catch(() => {}));
     page.on('request', (browserRequest) => requestStarted.set(browserRequest, Date.now()));
     page.on('console', (message) => {
-      consoleRecords.push({ type: String(message.type()).slice(0, 32), text: redactConsoleText(message.text()), timestamp: new Date().toISOString() });
+      if (consoleRecords.isStopped()) return;
+      consoleRecords.add({ type: String(message.type()).slice(0, 32), text: redactConsoleText(message.text()), timestamp: new Date().toISOString() });
     });
     page.on('response', (response) => {
+      if (response.status() === 401 || response.status() === 403) authFailure = true;
+      if (network.isStopped()) return;
+      if (pendingResponses.size >= EVIDENCE_MAX_RECORDS) {
+        network.truncate();
+        return;
+      }
       const pending = (async () => {
         const browserRequest = response.request();
-        if (response.status() === 401 || response.status() === 403) authFailure = true;
         const headers = Object.fromEntries((await responseHeadersPromise(response)).filter(([, value]) => value !== null));
-        network.push(safeResponseRecord({
+        network.add(safeResponseRecord({
           method: browserRequest.method(),
           url: response.url(),
           status: response.status(),
@@ -397,6 +498,7 @@ async function executeWorker(request) {
       pendingResponses.add(pending);
     });
 
+    const captureScreenshot = (name) => captureSafePNG(page, request, name, authFailure);
     const finishLogin = async () => {
       for (const screenshot of screenshots) await rm(join(request.staging_dir, screenshot.replace('browser/', '')), { force: true });
       await Promise.allSettled([...pendingResponses]);
@@ -420,7 +522,9 @@ async function executeWorker(request) {
     } catch {
       const login = await loginPageState(page, request.policy, authFailure);
       if (login.required) return finishLogin();
-      const failure = await capturePNG(page, request.staging_dir, 'failure.png');
+      const captured = await captureScreenshot('failure.png');
+      if (captured.loginRequired) return finishLogin();
+      const failure = captured.path;
       screenshots.push(failure);
       actions.push({ id: 'start_url', action: 'goto', locator_kind: '', started_at: new Date().toISOString(), duration_ms: 0, result: 'failed', error_code: blockedRequest ? 'browser_destination_blocked' : 'navigation_failed' });
       await Promise.allSettled([...pendingResponses]);
@@ -446,8 +550,12 @@ async function executeWorker(request) {
       const started = Date.now();
       emitProgress('browser_action_started', `Executing browser action ${index + 1}/${request.plan.actions.length}`, action.id, index + 1, request.plan.actions.length);
       try {
-        const screenshot = await executeAction(page, action, request, index);
-        if (screenshot) screenshots.push(screenshot);
+        const captured = await executeAction(page, action, request, index, captureScreenshot);
+        if (captured.loginRequired) {
+          actions.push({ id: action.id, action: action.action, locator_kind: action.locator?.kind || '', started_at: new Date(started).toISOString(), duration_ms: Date.now() - started, result: 'login_required', error_code: 'browser_login_required' });
+          return finishLogin();
+        }
+        if (captured.path) screenshots.push(captured.path);
         if (blockedRequest) throw new Error('browser destination was blocked');
         if (page.url().startsWith('http:') || page.url().startsWith('https:')) await assertAllowedURL(page.url(), request.policy);
         const login = await loginPageState(page, request.policy, authFailure);
@@ -455,14 +563,23 @@ async function executeWorker(request) {
           actions.push({ id: action.id, action: action.action, locator_kind: action.locator?.kind || '', started_at: new Date(started).toISOString(), duration_ms: Date.now() - started, result: 'login_required', error_code: 'browser_login_required' });
           return finishLogin();
         }
-        if (action.screenshot_after) screenshots.push(await capturePNG(page, request.staging_dir, `after-${String(index + 1).padStart(2, '0')}-${safeFilePart(action.id)}.png`));
+        if (action.screenshot_after) {
+          const after = await captureScreenshot(`after-${String(index + 1).padStart(2, '0')}-${safeFilePart(action.id)}.png`);
+          if (after.loginRequired) {
+            actions.push({ id: action.id, action: action.action, locator_kind: action.locator?.kind || '', started_at: new Date(started).toISOString(), duration_ms: Date.now() - started, result: 'login_required', error_code: 'browser_login_required' });
+            return finishLogin();
+          }
+          screenshots.push(after.path);
+        }
         actions.push({ id: action.id, action: action.action, locator_kind: action.locator?.kind || '', started_at: new Date(started).toISOString(), duration_ms: Date.now() - started, result: 'completed', error_code: '' });
         emitProgress('browser_action_completed', `Completed browser action ${index + 1}/${request.plan.actions.length}`, action.id, index + 1, request.plan.actions.length);
       } catch {
         actions.push({ id: action.id, action: action.action, locator_kind: action.locator?.kind || '', started_at: new Date(started).toISOString(), duration_ms: Date.now() - started, result: 'failed', error_code: blockedRequest ? 'browser_destination_blocked' : 'locator_failed' });
         const login = await loginPageState(page, request.policy, authFailure);
         if (login.required) return finishLogin();
-        const failure = await capturePNG(page, request.staging_dir, 'failure.png');
+        const captured = await captureScreenshot('failure.png');
+        if (captured.loginRequired) return finishLogin();
+        const failure = captured.path;
         screenshots.push(failure);
         await Promise.allSettled([...pendingResponses]);
         const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions))];
@@ -486,7 +603,9 @@ async function executeWorker(request) {
       } catch {
         const login = await loginPageState(page, request.policy, authFailure);
         if (login.required) return finishLogin();
-        const failure = await capturePNG(page, request.staging_dir, 'failure.png');
+        const captured = await captureScreenshot('failure.png');
+        if (captured.loginRequired) return finishLogin();
+        const failure = captured.path;
         screenshots.push(failure);
         await Promise.allSettled([...pendingResponses]);
         const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions))];
@@ -505,7 +624,9 @@ async function executeWorker(request) {
 
     const login = await loginPageState(page, request.policy, authFailure);
     if (login.required) return finishLogin();
-    const finalScreenshot = await capturePNG(page, request.staging_dir, 'final.png');
+    const captured = await captureScreenshot('final.png');
+    if (captured.loginRequired) return finishLogin();
+    const finalScreenshot = captured.path;
     screenshots.push(finalScreenshot);
     await Promise.allSettled([...pendingResponses]);
     const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions))];

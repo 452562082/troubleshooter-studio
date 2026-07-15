@@ -60,10 +60,11 @@ type CommandRunner interface {
 }
 
 type RuntimeManager struct {
-	managementRoot string
-	runner         CommandRunner
-	mu             sync.Mutex
-	status         RuntimeStatus
+	managementRoot    string
+	runner            CommandRunner
+	mu                sync.Mutex
+	status            RuntimeStatus
+	beforeInstallLock func()
 }
 
 type execCommandRunner struct{}
@@ -121,6 +122,9 @@ func (m *RuntimeManager) ensureLocked(ctx context.Context, emit func(bughub.Brow
 	if err := os.Chmod(m.runtimeRoot(), 0o700); err != nil {
 		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_install_failed", "secure browser runtime root", err)
 	}
+	if m.beforeInstallLock != nil {
+		m.beforeInstallLock()
+	}
 	releaseLock, err := m.acquireInstallLock()
 	if err != nil {
 		if errors.Is(err, fs.ErrExist) {
@@ -129,14 +133,30 @@ func (m *RuntimeManager) ensureLocked(ctx context.Context, emit func(bughub.Brow
 		}
 		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_install_failed", "acquire browser runtime install lock", err)
 	}
+	publishedByThisCall := false
 	defer func() {
 		if err := releaseLock(); err != nil && returnedErr == nil {
-			_ = os.RemoveAll(m.currentDir())
-			_ = syncRuntimeDirectory(m.runtimeRoot())
+			if publishedByThisCall {
+				_ = os.RemoveAll(m.currentDir())
+				_ = syncRuntimeDirectory(m.runtimeRoot())
+			}
 			returnedErr = m.setBrokenLocked("browser_runtime_install_failed", "release browser runtime install lock", err)
 			paths = RuntimePaths{}
 		}
 	}()
+
+	if info, err := os.Lstat(paths.Root); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return RuntimePaths{}, m.setBrokenLocked("browser_runtime_broken", "browser runtime path is not a regular directory", errors.New("browser runtime path is unsafe"))
+		}
+		if err := validatePublishedRuntime(paths); err != nil {
+			return RuntimePaths{}, m.setBrokenLocked("browser_runtime_broken", "browser runtime validation failed after install lock", err)
+		}
+		m.status = RuntimeStatus{State: RuntimeReady, Version: browserRuntimeVersion}
+		return paths, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_broken", "browser runtime cannot be inspected after install lock", err)
+	}
 
 	m.status = RuntimeStatus{State: RuntimeInstalling, Version: browserRuntimeVersion}
 	emitRuntimeProgress(emit, "browser_runtime_installing", "Installing pinned Playwright browser runtime")
@@ -211,6 +231,7 @@ func (m *RuntimeManager) ensureLocked(ctx context.Context, emit func(bughub.Brow
 		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_install_failed", "sync published browser runtime", err)
 	}
 	published = true
+	publishedByThisCall = true
 	paths = m.pathsFor(m.currentDir())
 	m.status = RuntimeStatus{State: RuntimeReady, Version: browserRuntimeVersion}
 	emitRuntimeProgress(emit, "browser_runtime_ready", "Browser runtime is ready")

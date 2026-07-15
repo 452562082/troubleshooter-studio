@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,6 +10,12 @@ import { redactConsoleText, sanitizeURL, safeResponseRecord } from './sanitize.m
 import {
   assertAllowedURL,
   buildLocator,
+  captureSafePNG,
+  createBoundedRecordCollector,
+  EVIDENCE_MAX_BYTES,
+  EVIDENCE_MAX_RECORDS,
+  EVIDENCE_TRUNCATION_MARKER,
+  hasVisiblePasswordField,
   validateWorkerRequest,
 } from './browser_worker.mjs';
 
@@ -258,6 +264,70 @@ test('buildLocator maps only the six declared locator types', () => {
   }
   assert.deepEqual(calls.map(([kind]) => kind), ['role', 'label', 'text', 'placeholder', 'test_id', 'css']);
   assert.throws(() => buildLocator(page, { kind: 'xpath', value: '//button' }), /locator/);
+});
+
+test('login detection checks every password field, including a visible field after a hidden one', async () => {
+  const visibility = [false, true];
+  const page = {
+    locator: (selector) => {
+      assert.equal(selector, 'input[type="password"]');
+      return {
+        count: async () => visibility.length,
+        nth: (index) => ({ isVisible: async () => visibility[index] }),
+      };
+    },
+  };
+  assert.equal(await hasVisiblePasswordField(page), true);
+});
+
+test('safe screenshot deletes the PNG when a password field appears during capture', async () => {
+  const temporary = mkdtempSync(join(tmpdir(), 'tshoot-safe-screenshot-'));
+  const output = join(temporary, 'transient.png');
+  const visibility = [false, false];
+  const page = {
+    url: () => 'https://app.test/users',
+    locator: () => ({
+      count: async () => visibility.length,
+      nth: (index) => ({ isVisible: async () => visibility[index] }),
+    }),
+  };
+  const request = baseRequest();
+  request.staging_dir = temporary;
+  try {
+    const captured = await captureSafePNG(page, request, 'transient.png', false, async () => {
+      writeFileSync(output, Buffer.from('png bytes'));
+      visibility[1] = true;
+      return 'browser/transient.png';
+    });
+    assert.deepEqual(captured, { loginRequired: true, path: '' });
+    assert.equal(existsSync(output), false);
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test('console and response collectors stop at fixed record and byte limits', () => {
+  for (const makeRecord of [
+    (index) => ({ type: 'log', text: `safe console ${index}`, timestamp: '2026-07-15T00:00:00.000Z' }),
+    (index) => safeResponseRecord({ method: 'GET', url: `https://app.test/api/${index}`, status: 200, duration_ms: 1, headers: {} }),
+  ]) {
+    const collector = createBoundedRecordCollector();
+    for (let index = 0; index < EVIDENCE_MAX_RECORDS + 500; index += 1) collector.add(makeRecord(index));
+    collector.add({ text: 'must-never-be-appended-after-truncation' });
+    const records = collector.snapshot();
+    assert.ok(records.length <= EVIDENCE_MAX_RECORDS);
+    assert.ok(Buffer.byteLength(JSON.stringify(records), 'utf8') <= EVIDENCE_MAX_BYTES);
+    assert.deepEqual(records.at(-1), EVIDENCE_TRUNCATION_MARKER);
+    assert.equal(JSON.stringify(records).includes('must-never-be-appended-after-truncation'), false);
+  }
+});
+
+test('bounded evidence collector reserves space for its safe marker at the byte limit', () => {
+  const collector = createBoundedRecordCollector({ maxRecords: 10, maxBytes: 256 });
+  for (let index = 0; index < 20; index += 1) collector.add({ text: 'x'.repeat(80), index });
+  const records = collector.snapshot();
+  assert.deepEqual(records.at(-1), EVIDENCE_TRUNCATION_MARKER);
+  assert.ok(Buffer.byteLength(JSON.stringify(records), 'utf8') <= 256);
 });
 
 test('worker source has no arbitrary script, upload, HAR, trace, body, or raw-header escape hatch', () => {

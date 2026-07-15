@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 )
@@ -238,6 +239,43 @@ func TestHostVerifierReplaysInterruptedReadOnlyPlanAtMostOnce(t *testing.T) {
 	}
 }
 
+func TestHostVerifierPersistsReadOnlyRerunBeforeInterruptedCleanup(t *testing.T) {
+	worker := &fakeWorker{Result: completedWorkerResult(), Errors: []error{errors.New("first crash")}}
+	verifier := newTestHostVerifier(t, worker)
+	request := validBrowserRequest(t)
+	request.Plan.Actions = []bughub.BrowserAction{
+		{ID: "goto", Action: "goto", URL: "https://app.test/users"},
+		{ID: "wait", Action: "wait_for", Locator: &bughub.BrowserLocator{Kind: "text", Value: "Users"}},
+		{ID: "shot", Action: "screenshot"},
+	}
+	if _, err := verifier.Execute(context.Background(), request); err == nil {
+		t.Fatal("expected initial worker crash")
+	}
+	cleanupCalls := 0
+	verifier.cleanupInterrupted = func(_ browserDirectoryIdentity, _ string) error {
+		cleanupCalls++
+		return errors.New("simulated crash during cleanup")
+	}
+	if _, err := verifier.Execute(context.Background(), request); !errors.Is(err, ErrBrowserExecutionInterrupted) {
+		t.Fatalf("cleanup interruption error = %v", err)
+	}
+	var reservation browserReservation
+	found, err := readStrictBrowserJSON(filepath.Join(request.StagingDir, "browser", "reservation.json"), &reservation)
+	if err != nil || !found {
+		t.Fatalf("read reservation: found=%v err=%v", found, err)
+	}
+	if reservation.RerunCount != 1 || cleanupCalls != 1 {
+		t.Fatalf("reservation=%+v cleanup calls=%d", reservation, cleanupCalls)
+	}
+	verifier.cleanupInterrupted = cleanupInterruptedBrowserOutputs
+	if _, err := verifier.Execute(context.Background(), request); !errors.Is(err, ErrBrowserExecutionInterrupted) {
+		t.Fatalf("post-crash retry error = %v", err)
+	}
+	if worker.Calls != 1 {
+		t.Fatalf("worker calls = %d, cleanup crash must consume the only replay", worker.Calls)
+	}
+}
+
 func TestHostVerifierRejectsUnsafeOrUnmanifestedArtifacts(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -252,6 +290,9 @@ func TestHostVerifierRejectsUnsafeOrUnmanifestedArtifacts(t *testing.T) {
 		}},
 		{name: "oversized", result: completedWorkerResult(), worker: func(worker *fakeWorker, _ bughub.BrowserVerificationRequest) {
 			worker.ArtifactBytes = map[string][]byte{"browser/final.png": make([]byte, maxBrowserArtifactBytes+1)}
+		}},
+		{name: "oversized evidence", result: completedWorkerResult(), worker: func(worker *fakeWorker, _ bughub.BrowserVerificationRequest) {
+			worker.ArtifactBytes = map[string][]byte{"browser/network.json": make([]byte, (1<<20)+1)}
 		}},
 	}
 	for _, tc := range cases {
@@ -287,6 +328,29 @@ func TestHostVerifierRejectsSymlinkArtifact(t *testing.T) {
 	verifier := newTestHostVerifier(t, worker)
 	if _, err := verifier.Execute(context.Background(), request); err == nil {
 		t.Fatal("expected symlink artifact rejection")
+	}
+}
+
+func TestHostVerifierRejectsReplacedBrowserRootWithoutWritingOutsideResult(t *testing.T) {
+	request := validBrowserRequest(t)
+	outside := t.TempDir()
+	worker := WorkerRunnerFunc(func(_ context.Context, _ RuntimePaths, workerRequest workerRequest, _ func(bughub.BrowserProgress)) (workerResult, error) {
+		moved := workerRequest.StagingDir + "-original"
+		if err := os.Rename(workerRequest.StagingDir, moved); err != nil {
+			return workerResult{}, err
+		}
+		if err := os.Symlink(outside, workerRequest.StagingDir); err != nil {
+			return workerResult{}, err
+		}
+		return completedWorkerResult(), nil
+	})
+
+	_, err := newTestHostVerifier(t, worker).Execute(context.Background(), request)
+	if err == nil || !strings.Contains(err.Error(), "browser staging directory identity changed") {
+		t.Fatalf("error = %v, want changed staging-directory identity rejection", err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "result.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("result.json escaped through replaced browser root: %v", err)
 	}
 }
 
@@ -410,6 +474,60 @@ func TestHostVerifierDoesNotMistakeActionErrorCodeForCredential(t *testing.T) {
 	}
 	if _, err := newTestHostVerifier(t, worker).Execute(context.Background(), validBrowserRequest(t)); err != nil {
 		t.Fatalf("safe action trace was rejected: %v", err)
+	}
+}
+
+func TestHostVerifierReturnsStableCodeForOversizedWorkerOutput(t *testing.T) {
+	worker := WorkerRunnerFunc(func(context.Context, RuntimePaths, workerRequest, func(bughub.BrowserProgress)) (workerResult, error) {
+		return workerResult{}, ErrBrowserWorkerOutputTooLarge
+	})
+	_, err := newTestHostVerifier(t, worker).Execute(context.Background(), validBrowserRequest(t))
+	if err == nil || !strings.HasPrefix(err.Error(), "browser_worker_output_too_large:") {
+		t.Fatalf("error = %v, want stable oversized-output code", err)
+	}
+}
+
+func TestHostVerifierRejectsOversizedWorkerResultCollections(t *testing.T) {
+	result := completedWorkerResult()
+	result.Artifacts = make([]workerArtifact, 129)
+	for index := range result.Artifacts {
+		result.Artifacts[index] = workerArtifact{Kind: "network", Path: "browser/network.json"}
+	}
+	_, err := newTestHostVerifier(t, &fakeWorker{Result: result}).Execute(context.Background(), validBrowserRequest(t))
+	if err == nil || !strings.HasPrefix(err.Error(), "browser_worker_protocol_invalid:") {
+		t.Fatalf("error = %v, want bounded worker protocol rejection", err)
+	}
+}
+
+func TestNodeWorkerRunnerKillsAndReapsChildAfterStdoutLimit(t *testing.T) {
+	temporary := t.TempDir()
+	workerPath := filepath.Join(temporary, "oversized-worker.mjs")
+	markerPath := filepath.Join(temporary, "child-survived")
+	source := `
+import { writeFileSync } from 'node:fs';
+process.stdout.write('x'.repeat((1 << 20) + (64 << 10)));
+setTimeout(() => writeFileSync(process.env.TSHOOT_TEST_CHILD_MARKER, 'alive'), 500);
+setInterval(() => {}, 1000);
+`
+	if err := os.WriteFile(workerPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TSHOOT_TEST_CHILD_MARKER", markerPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	started := time.Now()
+	_, err := (nodeWorkerRunner{}).Run(ctx, RuntimePaths{
+		Root: temporary, BrowsersPath: filepath.Join(temporary, "browsers"), WorkerPath: workerPath,
+	}, workerRequest{Mode: "execute"}, nil)
+	if !errors.Is(err, ErrBrowserWorkerOutputTooLarge) {
+		t.Fatalf("error = %v, want ErrBrowserWorkerOutputTooLarge", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("oversized child was not terminated promptly: %s", elapsed)
+	}
+	time.Sleep(700 * time.Millisecond)
+	if _, err := os.Stat(markerPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("worker child survived after runner returned: %v", err)
 	}
 }
 

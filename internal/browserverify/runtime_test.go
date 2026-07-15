@@ -31,6 +31,11 @@ type recordingCommandRunner struct {
 	ProbeSHA        string
 }
 
+type runtimeEnsureResult struct {
+	paths RuntimePaths
+	err   error
+}
+
 func (r *recordingCommandRunner) Run(ctx context.Context, executable string, args, env []string, dir string, _ io.Reader, stdout, _ io.Writer) error {
 	record := commandRecord{Executable: executable, Args: append([]string(nil), args...), Env: append([]string(nil), env...), Dir: dir}
 	r.mu.Lock()
@@ -263,6 +268,44 @@ func TestRuntimeManagerReusesReadyRuntimeWithoutCommands(t *testing.T) {
 	}
 	if first != second || len(runner.CommandSummaries()) != commandCount {
 		t.Fatalf("first=%+v second=%+v commands=%v", first, second, runner.CommandSummaries())
+	}
+}
+
+func TestRuntimeManagerRevalidatesPublishedRuntimeAfterCrossProcessLockRace(t *testing.T) {
+	root := t.TempDir()
+	winnerRunner := &recordingCommandRunner{}
+	loserRunner := &recordingCommandRunner{}
+	winner := NewRuntimeManager(root, winnerRunner)
+	loser := NewRuntimeManager(root, loserRunner)
+	loserReachedLock := make(chan struct{})
+	releaseLoser := make(chan struct{})
+	loser.beforeInstallLock = func() {
+		close(loserReachedLock)
+		<-releaseLoser
+	}
+	loserResult := make(chan runtimeEnsureResult, 1)
+	go func() {
+		paths, err := loser.Ensure(context.Background(), nil)
+		loserResult <- runtimeEnsureResult{paths: paths, err: err}
+	}()
+	<-loserReachedLock
+	winnerPaths, err := winner.Ensure(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(releaseLoser)
+	result := <-loserResult
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	if result.paths != winnerPaths {
+		t.Fatalf("loser paths = %+v, winner paths = %+v", result.paths, winnerPaths)
+	}
+	if commands := loserRunner.CommandSummaries(); len(commands) != 0 {
+		t.Fatalf("loser repeated installation commands: %v", commands)
+	}
+	if status := loser.Status(); status.State != RuntimeReady || status.ErrorCode != "" {
+		t.Fatalf("loser status = %+v", status)
 	}
 }
 

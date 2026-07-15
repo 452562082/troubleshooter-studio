@@ -23,10 +23,17 @@ import (
 )
 
 const maxBrowserArtifactBytes = 16 << 20
+const maxBrowserEvidenceBytes = 1 << 20
+const maxBrowserWorkerOutputBytes = 1 << 20
+const maxBrowserWorkerStderrBytes = 1 << 20
+const maxBrowserWorkerProgressLines = 1000
+const maxBrowserWorkerProgressLineBytes = 64 << 10
 
 const browserProgressPrefix = "TSHOOT_BROWSER_PROGRESS "
 
 var ErrBrowserExecutionInterrupted = errors.New("browser execution was interrupted")
+var ErrBrowserStagingIdentityChanged = errors.New("browser staging directory identity changed")
+var ErrBrowserWorkerOutputTooLarge = errors.New("browser worker output exceeds its limit")
 
 var verifierCredentialPattern = regexp.MustCompile(`(?i)(?:["']?(?:authorization|proxy-authorization|set-cookie|cookie)["']?\s*:)|\bbearer\s+[A-Za-z0-9._~+/=-]{3,}|(?:^|[?&;,\s{])["']?(?:password|passwd|access[_-]?token|token|api[_-]?key|client[_-]?secret|secret|session|authorization|auth|cookie|code|key)["']?\s*[:=]\s*["']?[^\s&,;}"']+`)
 var verifierSensitiveQueryKey = regexp.MustCompile(`(?i)token|password|secret|code|session|auth|cookie|key`)
@@ -66,10 +73,16 @@ type workerResult struct {
 }
 
 type HostVerifier struct {
-	runtime  *RuntimeManager
-	worker   WorkerRunner
-	resolver IPResolver
-	mu       sync.Mutex
+	runtime            *RuntimeManager
+	worker             WorkerRunner
+	resolver           IPResolver
+	mu                 sync.Mutex
+	cleanupInterrupted func(browserDirectoryIdentity, string) error
+}
+
+type browserDirectoryIdentity struct {
+	path string
+	info os.FileInfo
 }
 
 type browserReservation struct {
@@ -116,7 +129,7 @@ func NewHostVerifier(runtime *RuntimeManager, worker WorkerRunner, resolver IPRe
 	if worker == nil {
 		worker = nodeWorkerRunner{}
 	}
-	return &HostVerifier{runtime: runtime, worker: worker, resolver: resolver}
+	return &HostVerifier{runtime: runtime, worker: worker, resolver: resolver, cleanupInterrupted: cleanupInterruptedBrowserOutputs}
 }
 
 func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerificationRequest) (bughub.BrowserVerificationResult, error) {
@@ -134,18 +147,25 @@ func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerifi
 	if err != nil {
 		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_artifact_invalid", cause: err}
 	}
-	identity := browserReservation{
+	browserIdentity, err := pinBrowserDirectory(browserDir)
+	if err != nil {
+		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_artifact_invalid", cause: err}
+	}
+	reservationIdentity := browserReservation{
 		CaseID: request.CaseID, CycleNumber: request.CycleNumber, AttemptID: request.AttemptID,
 		PlanSHA256: planSHA, State: "running",
 	}
 	resultPath := filepath.Join(browserDir, "result.json")
+	if err := browserIdentity.Verify(); err != nil {
+		return bughub.BrowserVerificationResult{}, unsafeBrowserJournalError(err)
+	}
 	if manifest, found, err := readBrowserResultManifest(resultPath); err != nil {
 		return bughub.BrowserVerificationResult{}, interruptedError("completed browser result manifest is invalid")
 	} else if found {
-		if !manifestMatches(manifest.CaseID, manifest.CycleNumber, manifest.AttemptID, manifest.PlanSHA256, identity) {
+		if !manifestMatches(manifest.CaseID, manifest.CycleNumber, manifest.AttemptID, manifest.PlanSHA256, reservationIdentity) {
 			return bughub.BrowserVerificationResult{}, interruptedError("completed browser result belongs to a different attempt or plan")
 		}
-		validation, err := validateManifestArtifacts(request.StagingDir, browserDir, manifest.Result.Artifacts, manifest.Result.Status, manifest.Result.FinalScreenshotPath)
+		validation, err := validateManifestArtifacts(request.StagingDir, browserIdentity, manifest.Result.Artifacts, manifest.Result.Status, manifest.Result.FinalScreenshotPath)
 		if err != nil {
 			return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_artifact_invalid", cause: err}
 		}
@@ -156,13 +176,16 @@ func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerifi
 	}
 
 	reservationPath := filepath.Join(browserDir, "reservation.json")
+	if err := browserIdentity.Verify(); err != nil {
+		return bughub.BrowserVerificationResult{}, unsafeBrowserJournalError(err)
+	}
 	reservation, hasReservation, err := readBrowserReservation(reservationPath)
 	if err != nil {
 		return bughub.BrowserVerificationResult{}, interruptedError("browser reservation is invalid")
 	}
 	rerunCount := 0
 	if hasReservation {
-		if !reservationMatches(reservation, identity) || reservation.State != "running" {
+		if !reservationMatches(reservation, reservationIdentity) || reservation.State != "running" {
 			return bughub.BrowserVerificationResult{}, interruptedError("browser reservation belongs to a different attempt or plan")
 		}
 		if !browserPlanCanReplay(request.Plan) || reservation.RerunCount >= 1 {
@@ -178,17 +201,21 @@ func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerifi
 	if err != nil {
 		return bughub.BrowserVerificationResult{}, err
 	}
+	reservationIdentity.RerunCount = rerunCount
 	if hasReservation {
-		if err := resetInterruptedBrowserDirectory(request.StagingDir, browserDir); err != nil {
+		if err := writeAtomicBrowserJSON(browserIdentity, reservationPath, reservationIdentity); err != nil {
+			return bughub.BrowserVerificationResult{}, browserJournalWriteError("browser_reservation_write_failed", err)
+		}
+		if err := v.cleanupInterrupted(browserIdentity, reservationPath); err != nil {
+			if errors.Is(err, ErrBrowserStagingIdentityChanged) {
+				return bughub.BrowserVerificationResult{}, unsafeBrowserJournalError(err)
+			}
 			return bughub.BrowserVerificationResult{}, interruptedError("clean interrupted browser evidence")
 		}
-		browserDir = filepath.Join(request.StagingDir, "browser")
-		reservationPath = filepath.Join(browserDir, "reservation.json")
-		resultPath = filepath.Join(browserDir, "result.json")
-	}
-	identity.RerunCount = rerunCount
-	if err := writeAtomicBrowserJSON(reservationPath, identity); err != nil {
-		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_reservation_write_failed", cause: err}
+	} else {
+		if err := writeAtomicBrowserJSON(browserIdentity, reservationPath, reservationIdentity); err != nil {
+			return bughub.BrowserVerificationResult{}, browserJournalWriteError("browser_reservation_write_failed", err)
+		}
 	}
 
 	workerOutput, err := v.worker.Run(ctx, runtimePaths, workerRequest{
@@ -202,14 +229,23 @@ func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerifi
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_worker_interrupted", cause: ctxErr}
 		}
+		if errors.Is(err, ErrBrowserWorkerOutputTooLarge) {
+			return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_worker_output_too_large", cause: ErrBrowserWorkerOutputTooLarge}
+		}
 		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_worker_failed", cause: errors.New("browser worker exited before producing a result")}
+	}
+	if err := browserIdentity.Verify(); err != nil {
+		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_artifact_invalid", cause: err}
+	}
+	if err := validateWorkerResultBounds(workerOutput); err != nil {
+		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_worker_protocol_invalid", cause: err}
 	}
 	workerOutput = sanitizeWorkerResult(workerOutput)
 	if err := validateWorkerResultURLs(ctx, v.resolver, request.Policy, workerOutput); err != nil {
 		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_worker_protocol_invalid", cause: err}
 	}
 	result := browserVerificationResult(request, workerOutput)
-	validation, err := validateManifestArtifacts(request.StagingDir, browserDir, result.Artifacts, result.Status, result.FinalScreenshotPath)
+	validation, err := validateManifestArtifacts(request.StagingDir, browserIdentity, result.Artifacts, result.Status, result.FinalScreenshotPath)
 	if err != nil {
 		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_artifact_invalid", cause: err}
 	}
@@ -220,8 +256,8 @@ func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerifi
 		CaseID: request.CaseID, CycleNumber: request.CycleNumber, AttemptID: request.AttemptID,
 		PlanSHA256: planSHA, ArtifactSHA256: validation.SHA256, Result: result,
 	}
-	if err := writeAtomicBrowserJSON(resultPath, manifest); err != nil {
-		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_result_write_failed", cause: err}
+	if err := writeAtomicBrowserJSON(browserIdentity, resultPath, manifest); err != nil {
+		return bughub.BrowserVerificationResult{}, browserJournalWriteError("browser_result_write_failed", err)
 	}
 	return result, nil
 }
@@ -313,22 +349,48 @@ func ensureBrowserStagingDirectory(stagingRoot string) (string, error) {
 	return browserDir, nil
 }
 
-func resetInterruptedBrowserDirectory(stagingRoot, browserDir string) error {
-	want := filepath.Join(stagingRoot, "browser")
-	if browserDir != want {
+func pinBrowserDirectory(path string) (browserDirectoryIdentity, error) {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return browserDirectoryIdentity{}, fmt.Errorf("%w: browser root is unsafe", ErrBrowserStagingIdentityChanged)
+	}
+	return browserDirectoryIdentity{path: path, info: info}, nil
+}
+
+func (identity browserDirectoryIdentity) Verify() error {
+	info, err := os.Lstat(identity.path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || identity.info == nil || !os.SameFile(identity.info, info) {
+		return fmt.Errorf("%w: pinned browser root was replaced", ErrBrowserStagingIdentityChanged)
+	}
+	return nil
+}
+
+func cleanupInterruptedBrowserOutputs(identity browserDirectoryIdentity, reservationPath string) error {
+	if reservationPath != filepath.Join(identity.path, "reservation.json") {
 		return errors.New("browser directory is not bound to staging root")
 	}
-	info, err := os.Lstat(browserDir)
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return errors.New("interrupted browser directory is unsafe")
-	}
-	if err := os.RemoveAll(browserDir); err != nil {
+	if err := identity.Verify(); err != nil {
 		return err
 	}
-	if err := os.Mkdir(browserDir, 0o700); err != nil {
+	entries, err := os.ReadDir(identity.path)
+	if err != nil {
 		return err
 	}
-	return syncRuntimeDirectory(stagingRoot)
+	for _, entry := range entries {
+		if entry.Name() == "reservation.json" {
+			continue
+		}
+		if err := identity.Verify(); err != nil {
+			return err
+		}
+		if err := os.RemoveAll(filepath.Join(identity.path, entry.Name())); err != nil {
+			return err
+		}
+	}
+	if err := identity.Verify(); err != nil {
+		return err
+	}
+	return syncRuntimeDirectory(identity.path)
 }
 
 func readBrowserReservation(path string) (browserReservation, bool, error) {
@@ -389,7 +451,24 @@ func interruptedError(message string) error {
 	return &verifierError{code: "browser_execution_interrupted", cause: fmt.Errorf("%w: %s", ErrBrowserExecutionInterrupted, message)}
 }
 
-func writeAtomicBrowserJSON(path string, value any) error {
+func unsafeBrowserJournalError(err error) error {
+	return &verifierError{code: "browser_journal_unsafe", cause: err}
+}
+
+func browserJournalWriteError(defaultCode string, err error) error {
+	if errors.Is(err, ErrBrowserStagingIdentityChanged) {
+		return unsafeBrowserJournalError(err)
+	}
+	return &verifierError{code: defaultCode, cause: err}
+}
+
+func writeAtomicBrowserJSON(identity browserDirectoryIdentity, path string, value any) error {
+	if filepath.Dir(path) != identity.path {
+		return errors.New("browser journal path is outside the pinned browser root")
+	}
+	if err := identity.Verify(); err != nil {
+		return err
+	}
 	encoded, err := json.Marshal(value)
 	if err != nil {
 		return err
@@ -402,6 +481,10 @@ func writeAtomicBrowserJSON(path string, value any) error {
 	}
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
+	if err := identity.Verify(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
 	if err := temporary.Chmod(0o600); err != nil {
 		_ = temporary.Close()
 		return err
@@ -410,6 +493,9 @@ func writeAtomicBrowserJSON(path string, value any) error {
 	syncErr := temporary.Sync()
 	closeErr := temporary.Close()
 	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+		return err
+	}
+	if err := identity.Verify(); err != nil {
 		return err
 	}
 	if err := os.Rename(temporaryPath, path); err != nil {
@@ -435,6 +521,29 @@ func sanitizeWorkerResult(result workerResult) workerResult {
 		result.Artifacts[index].TraceID = safeVerifierIdentifier(result.Artifacts[index].TraceID, 128)
 	}
 	return result
+}
+
+func validateWorkerResultBounds(result workerResult) error {
+	if len(result.Artifacts) > 128 {
+		return errors.New("browser worker returned too many artifacts")
+	}
+	if len(result.AccessibilitySummary) > 50 {
+		return errors.New("browser worker returned too many accessibility nodes")
+	}
+	for label, value := range map[string]string{
+		"status": result.Status, "final URL": result.FinalURL, "login origin": result.LoginOrigin,
+		"final screenshot": result.FinalScreenshotPath,
+	} {
+		if len(value) > 4096 {
+			return fmt.Errorf("browser worker %s is too long", label)
+		}
+	}
+	for _, artifact := range result.Artifacts {
+		if len(artifact.Kind) > 128 || len(artifact.Path) > 4096 || len(artifact.RequestID) > 4096 || len(artifact.TraceID) > 4096 {
+			return errors.New("browser worker artifact field is too long")
+		}
+	}
+	return nil
 }
 
 func validateWorkerResultURLs(ctx context.Context, resolver IPResolver, policy bughub.BrowserSecurityPolicy, result workerResult) error {
@@ -476,11 +585,17 @@ func browserVerificationResult(request bughub.BrowserVerificationRequest, worker
 	return result
 }
 
-func validateManifestArtifacts(stagingRoot, browserDir string, artifacts []bughub.BrowserArtifactReference, status, declaredFinal string) (manifestArtifactValidation, error) {
+func validateManifestArtifacts(stagingRoot string, identity browserDirectoryIdentity, artifacts []bughub.BrowserArtifactReference, status, declaredFinal string) (manifestArtifactValidation, error) {
+	if err := identity.Verify(); err != nil {
+		return manifestArtifactValidation{}, err
+	}
 	declared := make(map[string]bughub.BrowserArtifactReference, len(artifacts))
 	digests := make(map[string]string, len(artifacts))
 	var screenshots []string
 	for _, artifact := range artifacts {
+		if err := identity.Verify(); err != nil {
+			return manifestArtifactValidation{}, err
+		}
 		if !validBrowserArtifactKind(artifact.Kind) {
 			return manifestArtifactValidation{}, fmt.Errorf("unsupported browser artifact kind %q", artifact.Kind)
 		}
@@ -496,6 +611,9 @@ func validateManifestArtifacts(stagingRoot, browserDir string, artifacts []bughu
 		if err != nil {
 			return manifestArtifactValidation{}, err
 		}
+		if err := identity.Verify(); err != nil {
+			return manifestArtifactValidation{}, err
+		}
 		digest := sha256.Sum256(content)
 		digests[path] = hex.EncodeToString(digest[:])
 		if artifact.Kind == "screenshot" {
@@ -503,11 +621,22 @@ func validateManifestArtifacts(stagingRoot, browserDir string, artifacts []bughu
 				return manifestArtifactValidation{}, fmt.Errorf("browser screenshot %q is not a non-empty PNG", path)
 			}
 			screenshots = append(screenshots, path)
-		} else if containsForbiddenBrowserEvidence(content) {
-			return manifestArtifactValidation{}, fmt.Errorf("browser artifact %q contains forbidden credential material", path)
+		} else {
+			if len(content) > maxBrowserEvidenceBytes {
+				return manifestArtifactValidation{}, fmt.Errorf("browser evidence %q exceeds %d bytes", path, maxBrowserEvidenceBytes)
+			}
+			if containsForbiddenBrowserEvidence(content) {
+				return manifestArtifactValidation{}, fmt.Errorf("browser artifact %q contains forbidden credential material", path)
+			}
 		}
 	}
-	if err := rejectUndeclaredBrowserOutputs(stagingRoot, browserDir, declared); err != nil {
+	if err := identity.Verify(); err != nil {
+		return manifestArtifactValidation{}, err
+	}
+	if err := rejectUndeclaredBrowserOutputs(stagingRoot, identity.path, declared); err != nil {
+		return manifestArtifactValidation{}, err
+	}
+	if err := identity.Verify(); err != nil {
 		return manifestArtifactValidation{}, err
 	}
 	final := declaredFinal
@@ -698,6 +827,67 @@ func sanitizeVerifierURL(raw string) string {
 
 type nodeWorkerRunner struct{}
 
+type workerStdoutRead struct {
+	content []byte
+	err     error
+}
+
+func readBoundedWorkerStdout(stdout io.Reader, kill func()) workerStdoutRead {
+	limited := &io.LimitedReader{R: stdout, N: maxBrowserWorkerOutputBytes + 1}
+	content, err := io.ReadAll(limited)
+	if len(content) > maxBrowserWorkerOutputBytes || limited.N == 0 {
+		kill()
+		return workerStdoutRead{err: ErrBrowserWorkerOutputTooLarge}
+	}
+	if err != nil {
+		return workerStdoutRead{err: err}
+	}
+	return workerStdoutRead{content: content}
+}
+
+func consumeBoundedWorkerStderr(stderr io.Reader, emit func(bughub.BrowserProgress), kill func()) error {
+	limited := &io.LimitedReader{R: stderr, N: maxBrowserWorkerStderrBytes + 1}
+	scanner := bufio.NewScanner(limited)
+	scanner.Buffer(make([]byte, 4096), maxBrowserWorkerProgressLineBytes)
+	lineCount := 0
+	for scanner.Scan() {
+		lineCount++
+		if lineCount > maxBrowserWorkerProgressLines {
+			kill()
+			return ErrBrowserWorkerOutputTooLarge
+		}
+		line := scanner.Text()
+		if !strings.HasPrefix(line, browserProgressPrefix) {
+			continue
+		}
+		var progress struct {
+			Code     string `json:"code"`
+			Message  string `json:"message"`
+			ActionID string `json:"action_id"`
+			Current  int    `json:"current"`
+			Total    int    `json:"total"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, browserProgressPrefix)), &progress); err != nil || emit == nil {
+			continue
+		}
+		progress.Code = safeVerifierIdentifier(progress.Code, 128)
+		progress.Message = redactVerifierText(progress.Message, 1024)
+		progress.ActionID = safeVerifierIdentifier(progress.ActionID, 256)
+		if progress.Current < 0 || progress.Current > 40 {
+			progress.Current = 0
+		}
+		if progress.Total < 0 || progress.Total > 40 {
+			progress.Total = 0
+		}
+		emit(bughub.BrowserProgress{Code: progress.Code, Message: progress.Message, ActionID: progress.ActionID, Current: progress.Current, Total: progress.Total})
+	}
+	if scanner.Err() != nil || limited.N == 0 {
+		kill()
+		return ErrBrowserWorkerOutputTooLarge
+	}
+	return nil
+}
+
 func (nodeWorkerRunner) Run(ctx context.Context, paths RuntimePaths, request workerRequest, emit func(bughub.BrowserProgress)) (workerResult, error) {
 	encoded, err := json.Marshal(request)
 	if err != nil {
@@ -707,8 +897,10 @@ func (nodeWorkerRunner) Run(ctx context.Context, paths RuntimePaths, request wor
 	command.Dir = paths.Root
 	command.Env = mergeCommandEnvironment(os.Environ(), []string{"PLAYWRIGHT_BROWSERS_PATH=" + paths.BrowsersPath})
 	command.Stdin = bytes.NewReader(append(encoded, '\n'))
-	var stdout bytes.Buffer
-	command.Stdout = &stdout
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		return workerResult{}, err
+	}
 	stderr, err := command.StderrPipe()
 	if err != nil {
 		return workerResult{}, err
@@ -716,35 +908,33 @@ func (nodeWorkerRunner) Run(ctx context.Context, paths RuntimePaths, request wor
 	if err := command.Start(); err != nil {
 		return workerResult{}, err
 	}
-	progressDone := make(chan error, 1)
+	var killOnce sync.Once
+	kill := func() {
+		killOnce.Do(func() {
+			if command.Process != nil {
+				_ = command.Process.Kill()
+			}
+		})
+	}
+	stdoutDone := make(chan workerStdoutRead, 1)
 	go func() {
-		scanner := bufio.NewScanner(stderr)
-		scanner.Buffer(make([]byte, 4096), 64<<10)
-		for scanner.Scan() {
-			line := scanner.Text()
-			if !strings.HasPrefix(line, browserProgressPrefix) {
-				continue
-			}
-			var progress struct {
-				Code     string `json:"code"`
-				Message  string `json:"message"`
-				ActionID string `json:"action_id"`
-				Current  int    `json:"current"`
-				Total    int    `json:"total"`
-			}
-			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, browserProgressPrefix)), &progress); err == nil && emit != nil {
-				emit(bughub.BrowserProgress{Code: progress.Code, Message: progress.Message, ActionID: progress.ActionID, Current: progress.Current, Total: progress.Total})
-			}
-		}
-		progressDone <- scanner.Err()
+		stdoutDone <- readBoundedWorkerStdout(stdout, kill)
 	}()
+	stderrDone := make(chan error, 1)
+	go func() {
+		stderrDone <- consumeBoundedWorkerStderr(stderr, emit, kill)
+	}()
+	stdoutResult := <-stdoutDone
+	stderrErr := <-stderrDone
 	waitErr := command.Wait()
-	scanErr := <-progressDone
-	if waitErr != nil || scanErr != nil {
-		return workerResult{}, errors.Join(waitErr, scanErr)
+	if errors.Is(stdoutResult.err, ErrBrowserWorkerOutputTooLarge) || errors.Is(stderrErr, ErrBrowserWorkerOutputTooLarge) {
+		return workerResult{}, ErrBrowserWorkerOutputTooLarge
+	}
+	if waitErr != nil || stdoutResult.err != nil || stderrErr != nil {
+		return workerResult{}, errors.Join(waitErr, stdoutResult.err, stderrErr)
 	}
 	var result workerResult
-	decoder := json.NewDecoder(&stdout)
+	decoder := json.NewDecoder(bytes.NewReader(stdoutResult.content))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&result); err != nil {
 		return workerResult{}, err

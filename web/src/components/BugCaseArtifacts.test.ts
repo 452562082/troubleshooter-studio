@@ -199,7 +199,7 @@ describe('BugCaseArtifacts', () => {
     expect(wrapper.find('.legacy-final').text()).toContain('jav&#x61;script:alert(6)')
   })
 
-  it('renders both reset relations as read-only navigable Case references', async () => {
+  it('does not expose reset archives even when persisted relations are present', () => {
     const resetDetail = {
       ...detail,
       case: {
@@ -210,14 +210,11 @@ describe('BugCaseArtifacts', () => {
     }
     const wrapper = mount(BugCaseArtifacts, { props: { detail: resetDetail } })
 
-    expect(wrapper.get('[aria-labelledby="reset-relations-title"]').text()).toContain('重置关系')
-    const links = wrapper.findAll<HTMLAnchorElement>('[data-case-reference]')
-    expect(links.map(link => link.text())).toEqual(['case-before-reset', 'case-after-reset'])
-    expect(links.map(link => link.attributes('href'))).toEqual(['#case-before-reset', '#case-after-reset'])
-
-    await links[0].trigger('click')
-    await links[1].trigger('click')
-    expect(wrapper.emitted('select-case')).toEqual([['case-before-reset'], ['case-after-reset']])
-    expect(wrapper.find('[aria-labelledby="reset-relations-title"] button').exists()).toBe(false)
+    expect(wrapper.find('[aria-labelledby="reset-relations-title"]').exists()).toBe(false)
+    expect(wrapper.find('[data-case-reference]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('重置关系')
+    expect(wrapper.text()).not.toContain('case-before-reset')
+    expect(wrapper.text()).not.toContain('case-after-reset')
+    expect(wrapper.emitted('select-case')).toBeUndefined()
   })
 })

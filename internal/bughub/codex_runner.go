@@ -100,6 +100,37 @@ func BuildCodexValidationPrompt(b Bug, bot BotRef) string {
 	return sb.String()
 }
 
+func buildCodexDurableValidationContinuePrompt(b Bug, bot BotRef, userInputs []string, structuredInput, previousResult string) string {
+	var sb strings.Builder
+	sb.WriteString("你是 Bug 验证 Agent。\n")
+	sb.WriteString("目标：基于用户持续补充的信息继续实际取证验证，不做根因判断，不给修复方案。\n")
+	sb.WriteString("最新一条用户补充是本轮优先执行指令；如果用户明确要求通过 Web 页面或接口复现，必须实际尝试该路径，不能只复述历史附件。\n")
+	sb.WriteString("请重新核对上一轮 gaps：已经被本轮或历史补充满足的项目不得继续原样索要；只有实际执行仍被阻塞时才能保留。\n")
+	sb.WriteString("边界：只复现场景和收集证据；不要读取业务源码定位函数/行号，不要输出\"代码根因/最可能原因/修复建议/候选原因\"。如需代码分析，交给后续排障 Agent。\n")
+	sb.WriteString(validationAgentExecutionGuidance())
+	sb.WriteString("\n")
+	if len(userInputs) > 0 {
+		sb.WriteString("## 用户补充信息（按提交顺序，最后一条优先）\n\n")
+		for index, input := range userInputs {
+			sb.WriteString(fmt.Sprintf("%d. %s\n", index+1, strings.TrimSpace(input)))
+		}
+		sb.WriteString("\n")
+	}
+	if strings.TrimSpace(structuredInput) != "" {
+		sb.WriteString("## 本轮结构化验证信息\n\n```json\n")
+		sb.WriteString(strings.TrimSpace(structuredInput))
+		sb.WriteString("\n```\n\n")
+	}
+	if strings.TrimSpace(previousResult) != "" {
+		sb.WriteString("## 上一轮验证结果（仅作为待复核上下文）\n\n```json\n")
+		sb.WriteString(strings.TrimSpace(previousResult))
+		sb.WriteString("\n```\n\n")
+	}
+	sb.WriteString(GenerateContext(b, bot))
+	sb.WriteString(validationOutputContract())
+	return sb.String()
+}
+
 func BuildCodexInvestigationPromptWithValidation(b Bug, bot BotRef, validationReport string) string {
 	var sb strings.Builder
 	sb.WriteString("请作为选定的 AI 排障机器人开始排障。\n")

@@ -506,7 +506,14 @@ func (r *AgentPhaseRunner) promptForAttempt(attempt PhaseAttempt, bug Bug, bot B
 		if attempt.Mode != AttemptReproduce {
 			return "", fmt.Errorf("validation phase requires reproduce mode")
 		}
-		return BuildCodexValidationPrompt(bug, bot), nil
+		continuation, err := r.validationPromptContext(context.Background(), attempt)
+		if err != nil {
+			return "", err
+		}
+		if len(continuation.UserInputs) == 0 && continuation.StructuredInput == "" && continuation.PreviousResult == "" {
+			return BuildCodexValidationPrompt(bug, bot), nil
+		}
+		return buildCodexDurableValidationContinuePrompt(bug, bot, continuation.UserInputs, continuation.StructuredInput, continuation.PreviousResult), nil
 	case PhaseRegression:
 		if attempt.Mode != AttemptRegression {
 			return "", fmt.Errorf("regression phase requires regression mode")
@@ -534,6 +541,101 @@ func (r *AgentPhaseRunner) promptForAttempt(attempt PhaseAttempt, bug Bug, bot B
 	default:
 		return "", fmt.Errorf("unsupported phase %q", attempt.Phase)
 	}
+}
+
+type validationPromptContext struct {
+	UserInputs      []string
+	StructuredInput string
+	PreviousResult  string
+}
+
+func (r *AgentPhaseRunner) validationPromptContext(ctx context.Context, attempt PhaseAttempt) (validationPromptContext, error) {
+	chain := []PhaseAttempt{attempt.Clone()}
+	seen := map[string]struct{}{attempt.ID: {}}
+	current := attempt
+	for strings.TrimSpace(current.ParentAttemptID) != "" {
+		parentID := strings.TrimSpace(current.ParentAttemptID)
+		if _, duplicate := seen[parentID]; duplicate {
+			return validationPromptContext{}, errors.New("validation continuation chain contains a cycle")
+		}
+		if r == nil || r.store == nil {
+			return validationPromptContext{}, errors.New("validation continuation requires a workflow store")
+		}
+		parent, err := r.store.GetAttempt(ctx, parentID)
+		if err != nil {
+			return validationPromptContext{}, fmt.Errorf("load validation continuation parent %s: %w", parentID, err)
+		}
+		if parent.CaseID != attempt.CaseID || parent.CycleNumber != attempt.CycleNumber || parent.Phase != PhaseValidation || parent.Mode != AttemptReproduce {
+			return validationPromptContext{}, errors.New("validation continuation parent does not match the current case, cycle, phase, and mode")
+		}
+		seen[parentID] = struct{}{}
+		chain = append(chain, parent)
+		current = parent
+	}
+
+	result := validationPromptContext{}
+	for index := len(chain) - 1; index >= 0; index-- {
+		userInput, _, err := validationPromptInput(chain[index].InputJSON)
+		if err != nil {
+			return validationPromptContext{}, err
+		}
+		if userInput != "" {
+			result.UserInputs = append(result.UserInputs, userInput)
+		}
+	}
+	_, structuredInput, err := validationPromptInput(attempt.InputJSON)
+	if err != nil {
+		return validationPromptContext{}, err
+	}
+	result.StructuredInput = structuredInput
+	if len(chain) > 1 {
+		result.PreviousResult, err = formattedPromptJSON(chain[1].OutputJSON)
+		if err != nil {
+			return validationPromptContext{}, fmt.Errorf("format previous validation result: %w", err)
+		}
+	}
+	return result, nil
+}
+
+func validationPromptInput(input json.RawMessage) (string, string, error) {
+	var fields map[string]any
+	if err := json.Unmarshal(input, &fields); err != nil {
+		return "", "", fmt.Errorf("decode validation input: %w", err)
+	}
+	userInput := ""
+	if raw, exists := fields["user_input"]; exists {
+		value, ok := raw.(string)
+		if !ok {
+			return "", "", errors.New("validation input user_input must be a string")
+		}
+		userInput = strings.TrimSpace(value)
+	}
+	delete(fields, "user_input")
+	delete(fields, "mode")
+	delete(fields, "target_environment")
+	if len(fields) == 0 {
+		return userInput, "", nil
+	}
+	encoded, err := json.MarshalIndent(fields, "", "  ")
+	if err != nil {
+		return "", "", fmt.Errorf("encode structured validation input: %w", err)
+	}
+	return userInput, string(encoded), nil
+}
+
+func formattedPromptJSON(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 || string(raw) == "{}" {
+		return "", nil
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", err
+	}
+	encoded, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
 }
 
 func (r *AgentPhaseRunner) validateRegressionInputBinding(ctx context.Context, attempt PhaseAttempt, input RegressionValidationInput) error {

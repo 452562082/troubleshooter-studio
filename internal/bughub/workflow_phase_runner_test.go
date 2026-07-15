@@ -1113,6 +1113,77 @@ func TestAgentPhaseRunnerFixPromptIncludesAuthorizedStructuredInput(t *testing.T
 	}
 }
 
+func TestAgentPhaseRunnerValidationPromptIncludesDurableContinuationContext(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-validation-continuation-prompt", CaseWaitingEvidence)
+	now := time.Now().UTC()
+	first := PhaseAttempt{
+		ID:          "attempt-validation-first",
+		CaseID:      incident.ID,
+		CycleNumber: incident.CycleNumber,
+		Phase:       PhaseValidation,
+		Mode:        AttemptReproduce,
+		Status:      AttemptStatusFailed,
+		AgentTarget: "codex",
+		BotKey:      "bot",
+		InputJSON:   []byte(`{"mode":"reproduce","user_input":"打开 Web 用户搜索页"}`),
+		OutputJSON:  []byte(`{"verification_status":"insufficient_info","environment":"test","evidence":[],"gaps":["missing-first-route"]}`),
+		StartedAt:   now.Add(-2 * time.Minute),
+		FinishedAt:  &now,
+	}
+	if err := store.CreateAttempt(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	second := PhaseAttempt{
+		ID:              "attempt-validation-second",
+		CaseID:          incident.ID,
+		CycleNumber:     incident.CycleNumber,
+		Phase:           PhaseValidation,
+		Mode:            AttemptReproduce,
+		Status:          AttemptStatusFailed,
+		AgentTarget:     "codex",
+		BotKey:          "bot",
+		InputJSON:       []byte(`{"mode":"reproduce","user_input":"测试账号已在安全凭据中配置"}`),
+		OutputJSON:      []byte(`{"verification_status":"insufficient_info","environment":"test","evidence":[],"gaps":["latest-gap-from-parent"]}`),
+		ParentAttemptID: first.ID,
+		StartedAt:       now.Add(-time.Minute),
+		FinishedAt:      &now,
+	}
+	if err := store.CreateAttempt(context.Background(), second); err != nil {
+		t.Fatal(err)
+	}
+	current := PhaseAttempt{
+		ID:              "attempt-validation-current",
+		CaseID:          incident.ID,
+		CycleNumber:     incident.CycleNumber,
+		Phase:           PhaseValidation,
+		Mode:            AttemptReproduce,
+		Status:          AttemptStatusRunning,
+		AgentTarget:     "codex",
+		BotKey:          "bot",
+		InputJSON:       []byte(`{"mode":"reproduce","target_environment":"test","frontend_url":"https://test.example.invalid/users","user_input":"请用 Web 环境复现"}`),
+		OutputJSON:      []byte(`{}`),
+		ParentAttemptID: second.ID,
+		StartedAt:       now,
+	}
+	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error { return nil })
+	prompt, err := runner.promptForAttempt(current, Bug{ID: incident.BugID}, BotRef{Key: "bot", Target: "codex", Env: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"打开 Web 用户搜索页",
+		"测试账号已在安全凭据中配置",
+		"请用 Web 环境复现",
+		"https://test.example.invalid/users",
+		"latest-gap-from-parent",
+	} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("validation continuation prompt lost %q:\n%s", required, prompt)
+		}
+	}
+}
+
 func TestAgentPhaseRunnerFixCheckpointIsConsumedBeforeStagingCleanup(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-fix-checkpoint-normal", CaseFixing)

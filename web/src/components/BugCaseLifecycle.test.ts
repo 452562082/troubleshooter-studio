@@ -49,7 +49,7 @@ describe('BugCaseLifecycle', () => {
     const snapshot = detail('investigating')
     snapshot.case.cycle_number = 2
     snapshot.events.push({ id: 'regression-failed', case_id: 'case-1', from_status: 'regression_validating', to_status: 'still_reproduces', event_type: 'regression_failed', actor_type: 'agent', actor_id: 'validator', idempotency_key: 'regression-failed', payload_json: {}, created_at: '2026-07-11T12:00:00Z' })
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
 
     expect(wrapper.find('.current-action-card').text()).toContain('回归仍复现')
     expect(wrapper.find('.current-action-card').text()).toContain('新证据和差分')
@@ -66,26 +66,36 @@ describe('BugCaseLifecycle', () => {
     expect(primaryActionFor(incident(status))?.kind).toBe(kind)
   })
 
-  it('renders Cases and the current Case above a full-width detail region', () => {
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [incident('waiting_fix_approval')], detail: detail('waiting_fix_approval') } })
+  it('renders one full-width current Case and refreshes from its heading', async () => {
+    const snapshot = detail('waiting_fix_approval')
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
     const columns = wrapper.findAll('.case-column')
     const source = readFileSync('src/components/BugCaseLifecycle.vue', 'utf8')
 
-    expect(columns).toHaveLength(3)
-    expect(columns[0].classes()).toContain('case-list-column')
-    expect(columns[1].classes()).toContain('case-main-column')
-    expect(columns[2].classes()).toContain('case-detail-column')
-    expect(source).toMatch(/\.case-lifecycle \{[^}]*grid-template-columns: minmax\(210px, \.72fr\) minmax\(0, 1\.65fr\);/)
-    expect(source).toMatch(/\.case-detail-column \{[^}]*grid-column: 1 \/ -1;/)
+    expect(columns).toHaveLength(2)
+    expect(columns[0].classes()).toContain('case-main-column')
+    expect(columns[1].classes()).toContain('case-detail-column')
+    expect(wrapper.find('.case-list-column').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('故障 Cases')
+    expect('cases' in wrapper.props()).toBe(false)
+    expect(wrapper.find('.case-heading-copy').exists()).toBe(true)
+    expect(wrapper.find('.case-heading-actions').exists()).toBe(true)
+    expect(source).toMatch(/\.case-lifecycle \{[^}]*grid-template-columns: minmax\(0, 1fr\);/)
+    expect(source).not.toContain('.case-row')
     expect(wrapper.findAll('.lifecycle-stage')).toHaveLength(6)
     expect(wrapper.find('[aria-label="故障处理阶段"]').exists()).toBe(true)
     expect(wrapper.find('[aria-label="Case 时间线"]').text()).toContain('transition')
     expect(wrapper.findAll('.current-action-card .primary-action')).toHaveLength(1)
+
+    const refresh = wrapper.get<HTMLButtonElement>('[aria-label="刷新当前 Case"]')
+    expect(refresh.classes()).toContain('icon-button')
+    await refresh.trigger('click')
+    expect(wrapper.emitted('refresh')).toEqual([[]])
   })
 
   it('keeps the current-stage primary action without exposing a duplicate reset action', () => {
     const snapshot = detail('waiting_fix_approval')
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
 
     expect(wrapper.findAll('.current-action-card .primary-action')).toHaveLength(1)
     expect(wrapper.find('.reset-action').exists()).toBe(false)
@@ -93,17 +103,17 @@ describe('BugCaseLifecycle', () => {
   })
 
   it.each(['fixed_verified', 'legacy_archived', 'reset_archived'] as CaseStatus[])('does not offer reset for terminal state %s', status => {
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [incident(status)], detail: detail(status) } })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: detail(status) } })
     expect(wrapper.find('.reset-action').exists()).toBe(false)
   })
 
-  it('makes the Case heading a programmatic terminal focus target', () => {
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [incident('fixed_verified')], detail: detail('fixed_verified') } })
+  it('makes the current Case heading a programmatic focus target', () => {
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: detail('validating') } })
     expect(wrapper.get('.case-heading').attributes('tabindex')).toBe('-1')
   })
 
   it('opens an accessible approval dialog before emitting approval', async () => {
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [incident('waiting_merge_approval')], detail: detail('waiting_merge_approval') } })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: detail('waiting_merge_approval') } })
 
     await wrapper.find('.primary-action').trigger('click')
     const dialog = wrapper.find('[role="dialog"]')
@@ -119,7 +129,7 @@ describe('BugCaseLifecycle', () => {
     snapshot.case.version = 7
     snapshot.case.current_attempt_id = 'investigation-7'
     snapshot.attempts = [{ id: 'investigation-7', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { investigation_status: 'root_cause_ready', confidence: 'high', gaps: [] }, parent_attempt_id: '', started_at: '2026-07-11T10:00:00Z', error_code: '', error_message: '', usage: {} }]
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
 
     await wrapper.find('.primary-action').trigger('click')
     await wrapper.setProps({ detail: { ...snapshot, case: { ...snapshot.case, version: 8 } } })
@@ -133,7 +143,7 @@ describe('BugCaseLifecycle', () => {
     snapshot.case.current_attempt_id = 'fix-1'
     snapshot.code_changes = [{ id: 'change-1', case_id: 'case-1', attempt_id: 'fix-1', repo: 'api', base_branch: 'main', fix_branch: 'fix/1', fix_commit: 'fix-abc', test_evidence: [], target_environment_branch: 'test', merge_base_head: 'base', merge_commit: 'merge-def', push_remote: 'origin', push_status: 'pushed' }]
     snapshot.deployment_observations = [{ id: 'observation-1', case_id: 'case-1', environment: 'test', expected_commits: { api: 'merge-def' }, observed_version: '', observed_images: {}, observed_commits: {}, verification_source: 'version endpoint', result: 'unavailable' }]
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
 
     await wrapper.find('.primary-action').trigger('click')
 
@@ -150,7 +160,7 @@ describe('BugCaseLifecycle', () => {
       { id: 'api', case_id: 'case-1', attempt_id: 'fix-1', repo: 'api', base_branch: 'main', fix_branch: 'fix/1', fix_commit: 'fix-api', test_evidence: [], target_environment_branch: 'test', merge_base_head: 'base', merge_commit: 'merge-api', push_remote: 'origin', push_status: 'pushed' },
       { id: 'worker', case_id: 'case-1', attempt_id: 'fix-1', repo: 'worker', base_branch: 'main', fix_branch: 'fix/1', fix_commit: 'fix-worker', test_evidence: [], target_environment_branch: 'test', merge_base_head: 'base', merge_commit: 'merge-worker', push_remote: 'origin', push_status: 'pushed' },
     ]
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
 
     await wrapper.find('.primary-action').trigger('click')
     await wrapper.find('#observed-version').setValue('build-42')
@@ -165,7 +175,7 @@ describe('BugCaseLifecycle', () => {
   it('starts automatic HTTP verification without manual proof fields', async () => {
     const snapshot = detail('waiting_deployment')
     snapshot.deployment_verification = { provider: 'http', available: true, hint: 'HTTP 版本接口自动验证 · /git/commit' }
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
     await wrapper.find('.primary-action').trigger('click')
     expect(wrapper.find('#observed-version').exists()).toBe(false)
     expect(wrapper.find('[role="dialog"]').text()).toContain('HTTP 版本接口自动验证')
@@ -183,7 +193,7 @@ describe('BugCaseLifecycle', () => {
       { id: 'new', case_id: 'case-1', attempt_id: 'fix-2', repo: 'api', base_branch: 'main', fix_branch: 'fix/new', fix_commit: 'fix-new', test_evidence: [], target_environment_branch: 'test', merge_base_head: 'base-2', merge_commit: 'merge-new', push_remote: 'origin', push_status: 'pushed' },
     ]
     snapshot.deployment_observations = [{ id: 'old-observation', case_id: 'case-1', environment: 'test', expected_commits: { api: 'merge-old' }, observed_version: 'old', observed_images: {}, observed_commits: { api: 'merge-old' }, verification_source: 'old source', result: 'matched' }]
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
 
     await wrapper.find('.primary-action').trigger('click')
 
@@ -196,7 +206,7 @@ describe('BugCaseLifecycle', () => {
     const snapshot = detail('waiting_fix_approval')
     snapshot.case.current_attempt_id = 'investigation-focus'
     snapshot.attempts = [{ id: 'investigation-focus', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { investigation_status: 'root_cause_ready', confidence: 'high', gaps: [] }, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }]
-    const wrapper = mount(BugCaseLifecycle, { attachTo: document.body, props: { cases: [snapshot.case], detail: snapshot } })
+    const wrapper = mount(BugCaseLifecycle, { attachTo: document.body, props: { detail: snapshot } })
     const trigger = wrapper.find<HTMLButtonElement>('.primary-action')
     await trigger.trigger('click')
     expect(document.activeElement).toBe(wrapper.find('[data-confirm]').element)
@@ -208,38 +218,16 @@ describe('BugCaseLifecycle', () => {
     wrapper.unmount()
   })
 
-  it('shows archived Cases as read-only and continues through a new Case action', () => {
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [incident('legacy_archived')], detail: detail('legacy_archived') } })
-
-    expect(wrapper.text()).toContain('历史记录只读')
-    expect(wrapper.find('.primary-action').text()).toBe('从新一轮验证继续')
-  })
-
-  it('shows reset archives as terminal read-only history', () => {
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [incident('reset_archived')], detail: detail('reset_archived') } })
-
-    expect(wrapper.text()).toContain('已重置归档')
-    expect(wrapper.text()).toContain('历史记录只读')
-    expect(wrapper.find('.primary-action').exists()).toBe(false)
-    expect(wrapper.findAll('.lifecycle-stage').every(stage => stage.attributes('data-state') === 'archived')).toBe(true)
-    expect(wrapper.find('.terminal-copy').text()).toBe('已归档，由新 Case 接替')
-    expect(wrapper.text()).not.toContain('当前阶段自动推进')
-  })
-
   it('contains responsive no-overflow contracts for all supported viewport fixtures', () => {
-    const css = (BugCaseLifecycle as any).__cssModules ? '' : String((BugCaseLifecycle as any).__scopeId || '')
-    expect(css).not.toContain('emoji')
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [incident('validating')], detail: detail('validating') } })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: detail('validating') } })
     expect(wrapper.find('.case-lifecycle').attributes('data-responsive-viewports')).toBe('375,768,1024,1440')
     expect(wrapper.find('.case-lifecycle').attributes('data-overflow-safe')).toBe('true')
     const source = readFileSync('src/components/BugCaseLifecycle.vue', 'utf8')
-    expect(source).toContain('@media (max-width: 899px)')
-    expect(source).not.toContain('@media (max-width: 1180px)')
-    expect(source).toMatch(/@media \(max-width: 899px\)[\s\S]*?\.case-lifecycle \{ grid-template-columns: minmax\(0, 1fr\); \}/)
-    expect(source).toMatch(/@media \(max-width: 899px\)[\s\S]*?\.case-detail-column \{ grid-column: auto; \}/)
-    expect(source).toContain('@media (max-width: 560px)')
-    expect(source).toMatch(/\.case-lifecycle \{[^}]*min-width: 0;/)
+    expect(source).toMatch(/\.case-lifecycle \{[^}]*min-width: 0;[^}]*grid-template-columns: minmax\(0, 1fr\);/)
     expect(source).toMatch(/\.case-column \{[^}]*min-width: 0;/)
+    expect(source).not.toContain('.case-list-column')
+    expect(source).not.toContain('.case-row')
+    expect(source).toContain('@media (max-width: 560px)')
   })
 
   it('allows all six stage columns to shrink until the 560px two-column breakpoint', () => {
@@ -252,7 +240,7 @@ describe('BugCaseLifecycle', () => {
   it('previews the newest three timeline events and expands or collapses the full history', async () => {
     const snapshot = detail('waiting_evidence')
     snapshot.events = timelineEvents(6)
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
 
     expect(wrapper.find('.timeline-heading').text()).toContain('共 6 条')
     expect(wrapper.findAll('#case-timeline-events li').map(item => item.find('strong').text())).toEqual([
@@ -280,7 +268,7 @@ describe('BugCaseLifecycle', () => {
   it.each([1, 3])('does not show a timeline toggle for %i events', count => {
     const snapshot = detail('waiting_evidence')
     snapshot.events = timelineEvents(count)
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
 
     expect(wrapper.find('.timeline-heading').text()).toContain(`共 ${count} 条`)
     expect(wrapper.find('.timeline-toggle').exists()).toBe(false)
@@ -290,7 +278,7 @@ describe('BugCaseLifecycle', () => {
   it('keeps the timeline empty state without an unnecessary toggle', () => {
     const snapshot = detail('waiting_evidence')
     snapshot.events = []
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
 
     expect(wrapper.find('.timeline-heading').text()).toContain('共 0 条')
     expect(wrapper.find('.timeline-toggle').exists()).toBe(false)
@@ -301,7 +289,7 @@ describe('BugCaseLifecycle', () => {
   it('preserves expansion for same-Case updates and collapses when the Case changes', async () => {
     const caseA = detail('waiting_evidence')
     caseA.events = timelineEvents(6, 'case-1')
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [caseA.case], detail: caseA } })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: caseA } })
 
     await wrapper.get('.timeline-toggle').trigger('click')
     const updatedCaseA = { ...caseA, events: timelineEvents(7, 'case-1') }
@@ -310,7 +298,7 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.findAll('#case-timeline-events li')).toHaveLength(7)
 
     const caseB = { ...detail('waiting_evidence'), case: incident('waiting_evidence', 'case-2'), events: timelineEvents(6, 'case-2') }
-    await wrapper.setProps({ cases: [caseB.case], detail: caseB })
+    await wrapper.setProps({ detail: caseB })
     expect(wrapper.get('.timeline-toggle').attributes('aria-expanded')).toBe('false')
     expect(wrapper.findAll('#case-timeline-events li').map(item => item.find('strong').text())).toEqual([
       'event_6', 'event_5', 'event_4',
@@ -320,7 +308,7 @@ describe('BugCaseLifecycle', () => {
   it('clears stale expansion when the event count no longer needs a toggle', async () => {
     const snapshot = detail('waiting_evidence')
     snapshot.events = timelineEvents(6)
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
 
     await wrapper.get('.timeline-toggle').trigger('click')
     await wrapper.setProps({ detail: { ...snapshot, events: timelineEvents(3) } })
@@ -352,7 +340,7 @@ describe('BugCaseLifecycle', () => {
   it('scopes timeline count styling away from the toggle label without replacing visible count text', () => {
     const snapshot = detail('waiting_evidence')
     snapshot.events = timelineEvents(6)
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
     const source = readFileSync('src/components/BugCaseLifecycle.vue', 'utf8')
 
     expect.soft(source).not.toMatch(/\.timeline-heading span \{/)
@@ -372,7 +360,7 @@ describe('BugCaseLifecycle', () => {
     const snapshot = detail('waiting_evidence')
     snapshot.events = timelineEvents(6)
     snapshot.events[5].event_type = longEventType
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
 
     expect(wrapper.get('#case-timeline-events li strong').text()).toBe(longEventType)
     const source = readFileSync('src/components/BugCaseLifecycle.vue', 'utf8')

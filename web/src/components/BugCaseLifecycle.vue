@@ -34,13 +34,11 @@ import type { CaseStatus, IncidentCaseDetail } from '../lib/bridge/bugWorkflow'
 import BugCaseArtifacts from './BugCaseArtifacts.vue'
 
 const props = defineProps<{
-  cases: IncidentCase[]
   detail: IncidentCaseDetail | null
   pending?: boolean
   error?: string
 }>()
 const emit = defineEmits<{
-  select: [caseID: string]
   refresh: []
   primary: [payload: { kind: CasePrimaryAction['kind']; input?: string; observedVersion?: string; observedCommits?: Record<string, string>; versionSource?: string; rootCauseAttemptID?: string; caseVersion?: number }]
 }>()
@@ -221,27 +219,17 @@ function dialogTitle(): string {
 
 <template>
   <section class="case-lifecycle" data-responsive-viewports="375,768,1024,1440" data-overflow-safe="true">
-    <aside class="case-column case-list-column" aria-labelledby="case-list-title">
-      <div class="column-head">
-        <div><h2 id="case-list-title">故障 Cases</h2><span>{{ cases.length }} 条</span></div>
-        <button class="icon-button" type="button" aria-label="刷新 Case 列表" :disabled="pending" @click="emit('refresh')">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 5v6h-6" /></svg>
-        </button>
-      </div>
-      <p v-if="cases.length === 0" class="empty-state">暂无持久化 Case</p>
-      <button v-for="incident in cases" :key="incident.id" type="button" class="case-row" :class="{ active: currentCase?.id === incident.id }" @click="emit('select', incident.id)">
-        <strong>{{ incident.bug_id || incident.id }}</strong>
-        <span class="status-text" :data-status="incident.status">{{ statusLabel(incident.status) }}</span>
-        <small>{{ incident.environment || '环境未知' }} · 第 {{ incident.cycle_number }} 轮</small>
-      </button>
-    </aside>
-
     <main class="case-column case-main-column">
       <div v-if="!detail" class="empty-state">选择一个 Case 查看生命周期</div>
       <template v-else>
         <header class="case-heading" tabindex="-1">
-          <div><span>Case {{ detail.case.id }}</span><h2>{{ detail.case.bug_id }}</h2></div>
-          <span class="status-pill" :data-status="detail.case.status">{{ statusLabel(detail.case.status) }}</span>
+          <div class="case-heading-copy"><span>Case {{ detail.case.id }}</span><h2>{{ detail.case.bug_id }}</h2></div>
+          <div class="case-heading-actions">
+            <span class="status-pill" :data-status="detail.case.status">{{ statusLabel(detail.case.status) }}</span>
+            <button class="icon-button" type="button" aria-label="刷新当前 Case" :disabled="pending" @click="emit('refresh')">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 5v6h-6" /></svg>
+            </button>
+          </div>
         </header>
 
         <ol class="stage-progress" aria-label="故障处理阶段">
@@ -309,7 +297,7 @@ function dialogTitle(): string {
     </main>
 
     <aside class="case-column case-detail-column" aria-label="Case 证据与详情">
-      <BugCaseArtifacts v-if="detail" :detail="detail" @select-case="emit('select', $event)" />
+      <BugCaseArtifacts v-if="detail" :detail="detail" />
       <p v-else class="empty-state">证据与变更将在这里显示</p>
     </aside>
 
@@ -353,30 +341,23 @@ function dialogTitle(): string {
 </template>
 
 <style scoped>
-.case-lifecycle { width: 100%; min-width: 0; display: grid; grid-template-columns: minmax(210px, .72fr) minmax(0, 1.65fr); align-items: start; gap: var(--sp-3); color: var(--c-text); }
+.case-lifecycle { width: 100%; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: var(--sp-3); color: var(--c-text); }
 .case-column { min-width: 0; border: 1px solid var(--c-line); border-radius: var(--r-lg); background: var(--c-surf-2); padding: var(--sp-3); overflow-wrap: anywhere; }
-.case-list-column { display: flex; flex-direction: column; gap: var(--sp-2); }
-.column-head, .column-head > div, .case-heading, .current-action-card { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
-.column-head > div { align-items: baseline; justify-content: flex-start; }
+.case-heading, .current-action-card { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
+.case-heading-copy { min-width: 0; }
+.case-heading-copy > span { display: block; margin-bottom: 2px; }
+.case-heading-actions { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: var(--sp-2); }
 h2, h3, p { margin: 0; }
-.column-head h2, .case-heading h2 { color: var(--c-ink); font-size: var(--fs-lg); }
-.column-head span, .case-heading span, .current-action-card span { color: var(--c-muted); font-size: var(--fs-sm); }
+.case-heading h2 { color: var(--c-ink); font-size: var(--fs-lg); }
+.case-heading span, .current-action-card span { color: var(--c-muted); font-size: var(--fs-sm); }
 .icon-button { width: 44px; height: 44px; display: grid; place-items: center; border: 1px solid var(--c-line-2); border-radius: var(--r-md); background: var(--c-surf); color: var(--c-text); cursor: pointer; }
 .icon-button svg { width: 19px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.case-row { width: 100%; min-height: 62px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; padding: 10px; text-align: left; border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf); color: var(--c-text); font: inherit; cursor: pointer; }
-.case-row:hover { border-color: #93c5fd; background: #eff6ff; }
-.case-row.active { border-color: var(--c-accent); box-shadow: inset 3px 0 var(--c-accent); }
-.case-row strong { min-width: 0; color: var(--c-ink); font-size: var(--fs-base); }
-.case-row small { grid-column: 1 / -1; color: var(--c-muted); font-size: var(--fs-xs); }
-.status-text, .status-pill { display: inline-flex; align-items: center; gap: 5px; color: var(--c-muted); font-size: var(--fs-xs); }
-.status-text::before, .status-pill::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: #94a3b8; }
+.status-pill { display: inline-flex; align-items: center; gap: 5px; color: var(--c-muted); font-size: var(--fs-xs); }
+.status-pill::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: #94a3b8; }
 [data-status="fixed_verified"]::before, [data-status="deployment_verified"]::before { background: #15803d; }
 [data-status="waiting_evidence"]::before, [data-status="fix_failed"]::before, [data-status="merge_conflict"]::before, [data-status="deployment_unverified"]::before { background: #c2410c; }
 [data-status="validating"]::before, [data-status="investigating"]::before, [data-status="fixing"]::before, [data-status="merging"]::before, [data-status="regression_validating"]::before { background: #2563eb; }
 .case-main-column { display: flex; flex-direction: column; gap: var(--sp-4); background: var(--c-surf); }
-.case-detail-column { grid-column: 1 / -1; }
-.case-heading > div { min-width: 0; }
-.case-heading > div > span { display: block; margin-bottom: 2px; }
 .status-pill { flex: 0 0 auto; padding: 6px 9px; border: 1px solid var(--c-line); border-radius: 999px; background: var(--c-surf-2); }
 .stage-progress { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 5px; margin: 0; padding: 0; list-style: none; }
 .lifecycle-stage { min-width: 0; display: flex; align-items: center; gap: 6px; padding: 8px 5px; border-top: 3px solid var(--c-line-2); }
@@ -434,9 +415,6 @@ h2, h3, p { margin: 0; }
 .approval-dialog footer .btn { min-height: 44px; min-width: 88px; justify-content: center; }
 button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px solid rgba(37, 99, 235, .55); outline-offset: 2px; }
 @media (max-width: 899px) {
-  .case-lifecycle { grid-template-columns: minmax(0, 1fr); }
-  .case-detail-column { grid-column: auto; }
-  .case-list-column { max-height: 310px; overflow-y: auto; }
   .current-action-card { align-items: stretch; flex-direction: column; }
   .current-action-controls { width: 100%; flex-direction: column; }
   .primary-action { width: 100%; justify-content: center; }

@@ -25,7 +25,7 @@ HTTP verifier 默认拒绝 loopback、内网、link-local 和云 metadata 地址
 
 回归复用首次验证使用的验证 Agent，但使用独立的 `regression` attempt 和本轮新证据。验证通过后 Case 进入 `fixed_verified`；仍复现时保留本轮部署版本和证据，cycle 加一后回到排障阶段。旧 `runs.json` 只导入为只读 `legacy_archived` Case，用户明确“从新一轮验证继续”时才创建新的活动 Case。
 
-完整状态和证据规则见 [排障链路](docs/troubleshooting-flow.md#studio-故障闭环状态机)。
+完整的页面入口、状态、Agent 分工、授权和恢复规则见[故障闭环与 Agent 工作流](docs/incident-workflow.md)；排障 Agent 内部的七步取证法见[排障链路](docs/troubleshooting-flow.md)。
 
 ## 从哪里开始
 
@@ -33,6 +33,7 @@ HTTP verifier 默认拒绝 loopback、内网、link-local 和云 metadata 地址
 |---|---|
 | 第一次跑通 | [下载与安装](#下载与安装) → [入口](#入口) → [部署目标](#部署目标) |
 | 看机器人能力 | [机器人能力](#机器人能力) → [排障链路](docs/troubleshooting-flow.md) |
+| 看故障闭环实现 | [故障闭环与 Agent 工作流](docs/incident-workflow.md) |
 | 建模新系统 | [适配范围](#适配范围) → [Monorepo / Umbrella](#monorepo--umbrella) → [示例](examples/shop-troubleshooter.yaml) |
 | 维护代码 | [贡献指南](CONTRIBUTING.md) → [决策记录](docs/decisions.md) |
 | 配 CI / 发版 | [CI / Release](docs/CI-RELEASE.md) |

@@ -12,6 +12,8 @@
 
 生成物中的 `incident-investigator` 负责单次排障取证；Studio 桌面工作台负责把验证、排障、修复、合并、人工部署和回归组成可恢复的完整 Case。SQLite 是 Case 快照和追加式事件的真源，Agent 只执行一个阶段，Wails/UI、Agent 回调和恢复任务都不能绕过 `CaseOrchestrator` 改状态。
 
+完整的产品入口、活动 Case 规则、各 Agent 输入输出、页面动作、授权和恢复机制见[故障闭环与 Agent 工作流](incident-workflow.md)。本节保留状态机摘要，后文重点说明排障 Agent 内部的七步取证流程。
+
 主成功路径如下：
 
 ```text

@@ -78,6 +78,10 @@ export function ClearBugPlatformLogin(arg1) {
   return window['go']['main']['App']['ClearBugPlatformLogin'](arg1);
 }
 
+export function ClearIncidentBrowserSession(arg1) {
+  return window['go']['main']['App']['ClearIncidentBrowserSession'](arg1);
+}
+
 export function ContinueBugInvestigation(arg1) {
   return window['go']['main']['App']['ContinueBugInvestigation'](arg1);
 }
@@ -148,6 +152,10 @@ export function GenPreview(arg1) {
 
 export function GenerateBugContext(arg1) {
   return window['go']['main']['App']['GenerateBugContext'](arg1);
+}
+
+export function GetIncidentArtifactPreview(arg1, arg2) {
+  return window['go']['main']['App']['GetIncidentArtifactPreview'](arg1, arg2);
 }
 
 export function GetIncidentCase(arg1) {
@@ -282,6 +290,10 @@ export function OpenDir(arg1) {
   return window['go']['main']['App']['OpenDir'](arg1);
 }
 
+export function OpenIncidentBrowserLogin(arg1) {
+  return window['go']['main']['App']['OpenIncidentBrowserLogin'](arg1);
+}
+
 export function OpenYAML() {
   return window['go']['main']['App']['OpenYAML']();
 }
@@ -338,6 +350,10 @@ export function ReindexCodeGraph(arg1, arg2) {
   return window['go']['main']['App']['ReindexCodeGraph'](arg1, arg2);
 }
 
+export function RepairIncidentBrowserRuntime(arg1) {
+  return window['go']['main']['App']['RepairIncidentBrowserRuntime'](arg1);
+}
+
 export function ResetIncidentCase(arg1) {
   return window['go']['main']['App']['ResetIncidentCase'](arg1);
 }
@@ -360,6 +376,10 @@ export function SaveBugPlatform(arg1) {
 
 export function SaveBugSelectedBot(arg1) {
   return window['go']['main']['App']['SaveBugSelectedBot'](arg1);
+}
+
+export function SaveIncidentArtifact(arg1, arg2) {
+  return window['go']['main']['App']['SaveIncidentArtifact'](arg1, arg2);
 }
 
 export function SaveInfraCred(arg1, arg2) {

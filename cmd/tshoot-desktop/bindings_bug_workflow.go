@@ -241,6 +241,7 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 		_ = store.Close()
 		return statErr
 	}
+	a.initializeIncidentBrowser(root)
 	runtime := incidentWorkflowRuntime{}
 	if a.workflowRuntimeFactory != nil {
 		runtime = a.workflowRuntimeFactory(store, legacy)
@@ -286,6 +287,9 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 		a.workflowInitErr = runtimeErr
 		_ = store.Close()
 		return runtimeErr
+	}
+	if runtime.runner != nil {
+		runtime.runner.SetBrowserVerifier(a.workflowBrowser, caseBrowserPolicyResolver{app: a})
 	}
 	runtime.orchestrator.SetRecoveryContextResolver(bughub.RecoveryContextResolverFunc(a.resolveIncidentRecoveryContext))
 	a.workflowStore = store

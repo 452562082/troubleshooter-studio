@@ -52,6 +52,8 @@ export function ChatSaveProviderKey(arg1:string,arg2:string):Promise<void>;
 
 export function ClearBugPlatformLogin(arg1:main.BugLoginInput):Promise<main.BugLoginResult>;
 
+export function ClearIncidentBrowserSession(arg1:main.IncidentBrowserCommandInput):Promise<void>;
+
 export function ContinueBugInvestigation(arg1:main.BugInvestigationContinueInput):Promise<bughub.InvestigationRun>;
 
 export function ContinueIncidentCase(arg1:main.ContinueIncidentCaseInput):Promise<bughub.IncidentCase>;
@@ -87,6 +89,8 @@ export function Gen(arg1:string,arg2:string):Promise<generator.GenSummary>;
 export function GenPreview(arg1:string):Promise<main.GenPreviewResult>;
 
 export function GenerateBugContext(arg1:main.BugContextInput):Promise<string>;
+
+export function GetIncidentArtifactPreview(arg1:string,arg2:string):Promise<main.IncidentArtifactPreview>;
 
 export function GetIncidentCase(arg1:string):Promise<main.IncidentCaseDetail>;
 
@@ -154,6 +158,8 @@ export function One2AllListResources(arg1:string,arg2:string,arg3:boolean):Promi
 
 export function OpenDir(arg1:string):Promise<string>;
 
+export function OpenIncidentBrowserLogin(arg1:main.IncidentBrowserCommandInput):Promise<bughub.IncidentCase>;
+
 export function OpenYAML():Promise<main.OpenYAMLResult>;
 
 export function PathExists(arg1:string):Promise<boolean>;
@@ -182,6 +188,8 @@ export function RecommendRoleForRepo(arg1:string,arg2:string,arg3:string):Promis
 
 export function ReindexCodeGraph(arg1:string,arg2:Record<string, string>):Promise<agent.CodeGraphIndexReport>;
 
+export function RepairIncidentBrowserRuntime(arg1:main.IncidentBrowserCommandInput):Promise<bughub.IncidentCase>;
+
 export function ResetIncidentCase(arg1:main.ResetIncidentCaseInput):Promise<bughub.IncidentCase>;
 
 export function ResetIncidentCaseWithWarnings(arg1:main.ResetIncidentCaseInput):Promise<bughub.ResetCaseOutcome>;
@@ -193,6 +201,8 @@ export function RunInstall(arg1:string,arg2:Record<string, string>):Promise<main
 export function SaveBugPlatform(arg1:main.BugPlatformInput):Promise<bughub.PlatformConfig>;
 
 export function SaveBugSelectedBot(arg1:main.BugSelectedBotInput):Promise<bughub.Bug>;
+
+export function SaveIncidentArtifact(arg1:string,arg2:string):Promise<string>;
 
 export function SaveInfraCred(arg1:string,arg2:string):Promise<void>;
 

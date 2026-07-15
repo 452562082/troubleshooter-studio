@@ -124,6 +124,21 @@ func createPendingBindingCase(t *testing.T, store *bughub.CaseStore, id string) 
 	return got
 }
 
+func TestInitializeIncidentWorkflowOwnsBrowserController(t *testing.T) {
+	app := &App{workflowRoot: t.TempDir()}
+	t.Cleanup(func() { _ = app.closeIncidentWorkflow() })
+	if err := app.initializeIncidentWorkflow(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if app.workflowBrowser == nil || app.workflowRunner == nil {
+		t.Fatalf("browser=%T runner=%p", app.workflowBrowser, app.workflowRunner)
+	}
+	status := app.workflowBrowser.Status()
+	if status.ErrorCode != "browser_runtime_missing" {
+		t.Fatalf("browser status = %+v", status)
+	}
+}
+
 func TestListIncidentCasesWorksWithoutWailsContext(t *testing.T) {
 	app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
 	createPendingBindingCase(t, store, "case-nil-context")

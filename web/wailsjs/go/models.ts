@@ -2624,6 +2624,44 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class IncidentArtifactPreview {
+	    artifact_id: string;
+	    mime_type: string;
+	    base64_data: string;
+	    size: number;
+
+	    static createFrom(source: any = {}) {
+	        return new IncidentArtifactPreview(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.artifact_id = source["artifact_id"];
+	        this.mime_type = source["mime_type"];
+	        this.base64_data = source["base64_data"];
+	        this.size = source["size"];
+	    }
+	}
+	export class IncidentBrowserCommandInput {
+	    case_id: string;
+	    attempt_id: string;
+	    expected_version: number;
+	    idempotency_key: string;
+	    actor_id: string;
+
+	    static createFrom(source: any = {}) {
+	        return new IncidentBrowserCommandInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.case_id = source["case_id"];
+	        this.attempt_id = source["attempt_id"];
+	        this.expected_version = source["expected_version"];
+	        this.idempotency_key = source["idempotency_key"];
+	        this.actor_id = source["actor_id"];
+	    }
+	}
 	export class IncidentDeploymentVerification {
 	    provider: string;
 	    available: boolean;

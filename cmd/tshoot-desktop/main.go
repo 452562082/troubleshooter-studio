@@ -94,11 +94,14 @@ type App struct {
 	workflowStore                *bughub.CaseStore
 	workflowOrchestrator         *bughub.CaseOrchestrator
 	workflowRunner               *bughub.AgentPhaseRunner
+	workflowBrowserMu            sync.Mutex
+	workflowBrowser              incidentBrowserController
 	workflowInitErr              error
 	workflowLoadBug              func(string) (bughub.Bug, error)
 	workflowLoadBot              func(string) (bughub.BotRef, error)
 	workflowLoadDeploymentConfig func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error)
 	workflowK8sReaderFactory     func(context.Context, *config.SystemConfig, config.Environment) (bughub.K8sDeploymentReader, error)
+	workflowSaveArtifact         func(string, string, context.Context) (string, error)
 	workflowEmit                 func(string, any)
 	workflowRuntimeFactory       func(*bughub.CaseStore, *bughub.InvestigationStore) incidentWorkflowRuntime
 }

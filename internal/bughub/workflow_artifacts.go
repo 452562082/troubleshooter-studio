@@ -2,7 +2,9 @@ package bughub
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -25,6 +27,35 @@ type ArtifactInput struct {
 	RejectSHA256    []string
 	RejectSensitive bool
 	captured        *capturedArtifactSource
+}
+
+type EvidenceArtifactContent struct {
+	Artifact EvidenceArtifact
+	Content  []byte
+}
+
+func ReadEvidenceArtifact(ctx context.Context, store *CaseStore, caseID, artifactID string) (EvidenceArtifactContent, error) {
+	if store == nil {
+		return EvidenceArtifactContent{}, errors.New("case store is required")
+	}
+	artifacts, err := store.ListEvidenceArtifacts(ctx, caseID)
+	if err != nil {
+		return EvidenceArtifactContent{}, err
+	}
+	for _, artifact := range artifacts {
+		if artifact.ID != artifactID {
+			continue
+		}
+		captured, err := captureArtifactSource(artifact.PathOrReference)
+		if err != nil {
+			return EvidenceArtifactContent{}, err
+		}
+		if captured.SHA256 != artifact.SHA256 {
+			return EvidenceArtifactContent{}, errors.New("registered artifact digest changed")
+		}
+		return EvidenceArtifactContent{Artifact: artifact, Content: captured.Content}, nil
+	}
+	return EvidenceArtifactContent{}, os.ErrNotExist
 }
 
 func registerCapturedArtifact(ctx context.Context, store *CaseStore, input ArtifactInput, captured capturedArtifactSource) (EvidenceArtifact, error) {

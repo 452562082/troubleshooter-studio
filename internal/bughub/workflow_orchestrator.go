@@ -1907,9 +1907,14 @@ func (o *CaseOrchestrator) beginPhaseWithUpdateAndPayload(ctx context.Context, i
 }
 
 func (o *CaseOrchestrator) phaseScheduleFailure(ctx context.Context, incident IncidentCase, attempt PhaseAttempt, key string, cause error) (IncidentCase, error) {
-	attempt.Status, attempt.OutputJSON, attempt.ErrorCode, attempt.ErrorMessage = AttemptStatusFailed, []byte(`{}`), "schedule_failed", cause.Error()
+	errorCode := phaseScheduleErrorCode(cause)
+	errorMessage := phaseScheduleErrorMessage(cause)
+	attempt.Status = AttemptStatusFailed
+	attempt.OutputJSON = mustJSON(map[string]string{"error_code": errorCode, "error_message": errorMessage})
+	attempt.ErrorCode = errorCode
+	attempt.ErrorMessage = errorMessage
 	failureKey := key + ":schedule-failed"
-	request := mustJSON(map[string]string{"error": cause.Error(), "attempt_id": attempt.ID})
+	request := mustJSON(map[string]string{"error_code": errorCode, "error_message": errorMessage, "attempt_id": attempt.ID})
 	failureCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	mutationRequest := CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: failureKey, RequestJSON: request, FinishAttempts: []PhaseAttempt{attempt}, Steps: []CaseMutationStep{{To: failureStateForPhase(attempt.Phase), Event: TransitionEvent{ID: stableID("event", failureKey), EventType: "phase_schedule_failed", ActorType: "studio", ActorID: "orchestrator", PayloadJSON: request}}}}
@@ -1917,11 +1922,38 @@ func (o *CaseOrchestrator) phaseScheduleFailure(ctx context.Context, incident In
 		mutationRequest.DeleteFixCheckpointAttemptID = attempt.ID
 	}
 	mutation, err := o.store.ApplyCaseMutation(failureCtx, mutationRequest)
+	scheduleErr := &phaseScheduleStartError{phase: attempt.Phase, message: errorMessage, cause: cause}
 	if err != nil {
-		return IncidentCase{}, errors.Join(cause, err)
+		return IncidentCase{}, errors.Join(scheduleErr, err)
 	}
-	return mutation.Case, fmt.Errorf("schedule phase %s: %w", attempt.Phase, cause)
+	return mutation.Case, scheduleErr
 }
+
+func phaseScheduleErrorCode(cause error) string {
+	if errors.Is(cause, ErrValidatorNotInstalled) {
+		return "validator_not_installed"
+	}
+	return "schedule_failed"
+}
+
+func phaseScheduleErrorMessage(cause error) string {
+	if errors.Is(cause, ErrValidatorNotInstalled) {
+		return "验证机器人未安装，请重新部署当前机器人"
+	}
+	return cause.Error()
+}
+
+type phaseScheduleStartError struct {
+	phase   Phase
+	message string
+	cause   error
+}
+
+func (e *phaseScheduleStartError) Error() string {
+	return fmt.Sprintf("schedule phase %s: %s", e.phase, e.message)
+}
+
+func (e *phaseScheduleStartError) Unwrap() error { return e.cause }
 
 func mustJSON(value any) json.RawMessage { encoded, _ := json.Marshal(value); return encoded }
 

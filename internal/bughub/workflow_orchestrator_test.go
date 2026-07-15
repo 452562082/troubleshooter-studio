@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -687,6 +688,58 @@ func TestOrchestratorSchedulingFailureRecordsExplicitFailureAfterCommit(t *testi
 		t.Fatal(err)
 	}
 	if len(events) != 2 || events[1].EventType != "phase_schedule_failed" {
+		t.Fatalf("events=%+v", events)
+	}
+}
+
+func TestOrchestratorMissingValidatorReturnsWaitingEvidenceWithStableSafeFailure(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-validator-not-installed", CasePendingValidation)
+	privateDetail := filepath.Join(t.TempDir(), "private", "base-validator")
+	runner := &recordingPhaseRunner{startErr: fmt.Errorf("%w: validator workspace %q is unavailable", ErrValidatorNotInstalled, privateDetail)}
+	o := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
+
+	got, err := o.StartCase(ctx, StartCaseCommand{
+		CaseID:          incident.ID,
+		ExpectedVersion: incident.Version,
+		IdempotencyKey:  "start:validator-not-installed",
+		Bug:             Bug{ID: incident.BugID},
+		Bot:             BotRef{Key: "base|codex", Target: "codex"},
+		InputJSON:       []byte(`{}`),
+		ActorID:         "alice",
+	})
+	if err == nil || got.Status != CaseWaitingEvidence || got.SelectedBotKey != "base|codex" {
+		t.Fatalf("case=%+v err=%v", got, err)
+	}
+	attempt, loadErr := store.GetAttempt(ctx, got.CurrentAttemptID)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if attempt.BotKey != "base|codex" || attempt.Status != AttemptStatusFailed || attempt.ErrorCode != "validator_not_installed" {
+		t.Fatalf("attempt=%+v", attempt)
+	}
+	for name, value := range map[string]string{
+		"returned error":  err.Error(),
+		"attempt message": attempt.ErrorMessage,
+		"attempt output":  string(attempt.OutputJSON),
+	} {
+		if strings.Contains(value, privateDetail) || strings.Contains(value, "workspace") {
+			t.Fatalf("%s leaked private detail: %q", name, value)
+		}
+	}
+	var output struct {
+		ErrorCode    string `json:"error_code"`
+		ErrorMessage string `json:"error_message"`
+	}
+	if json.Unmarshal(attempt.OutputJSON, &output) != nil || output.ErrorCode != "validator_not_installed" || output.ErrorMessage != "验证机器人未安装，请重新部署当前机器人" {
+		t.Fatalf("output=%+v raw=%s", output, attempt.OutputJSON)
+	}
+	events, listErr := store.ListEvents(ctx, incident.ID)
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(events) != 2 || strings.Contains(string(events[1].PayloadJSON), privateDetail) || !strings.Contains(string(events[1].PayloadJSON), "validator_not_installed") {
 		t.Fatalf("events=%+v", events)
 	}
 }

@@ -187,7 +187,11 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 	} else if found {
 		return fail(errors.New("phase attempt already has a persisted completion intent"))
 	}
-	prompt, err := r.promptForAttempt(attempt, bug, bot)
+	executionBot, err := ExecutionBotForPhase(attempt.Phase, bot)
+	if err != nil {
+		return fail(err)
+	}
+	prompt, err := r.promptForAttempt(attempt, bug, executionBot)
 	if err != nil {
 		return fail(err)
 	}
@@ -234,8 +238,8 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 	if attempt.Phase == PhaseFix {
 		prompt += "\n## Durable fix checkpoint (mandatory)\n\nBefore the first repository push, atomically write `" + fixCheckpointManifestName + "` in the Studio staging directory (write a temporary sibling, fsync, then rename) with state=`prepared`; include every planned repository commit/branch/remote/test. After all pushes succeed, atomically replace it with the same manifest and state=`pushed` before reporting completion. JSON fields: kind=`" + fixCheckpointManifestKind + "`, version=1, case_id=`" + attempt.CaseID + "`, attempt_id=`" + attempt.ID + "`, state=`prepared|pushed`, result=<the exact structured FixResult also returned as final YAML>. Never include credentials. Recovery treats the SSH remote branch as truth, so a crash after push but before the state update remains recoverable while a pre-push crash cannot be misreported.\n"
 	}
-	r.startLegacyProjection(attempt, bug, bot)
-	go r.run(runCtx, attempt.Clone(), bug, bot, prompt, staging, incident.Version, claimToken, complete)
+	r.startLegacyProjection(attempt, bug, executionBot)
+	go r.run(runCtx, attempt.Clone(), bug, executionBot, prompt, staging, incident.Version, claimToken, complete)
 	return nil
 }
 

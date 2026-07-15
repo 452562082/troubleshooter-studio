@@ -30,6 +30,23 @@ test('redactConsoleText redacts whole credential-bearing records', () => {
   assert.equal(redactConsoleText('render completed for user list'), 'render completed for user list');
 });
 
+test('redactConsoleText redacts structured records with quoted credential keys', () => {
+  const credentials = [
+    ['password', 'PaSsWoRd', 'hunter2'],
+    ['Authorization', 'aUtHoRiZaTiOn', 'Basic dXNlcjpwYXNz'],
+    ['Cookie', 'cOoKiE', 'sid=cookie-secret'],
+  ];
+  for (const [key, mixedCaseKey, value] of credentials) {
+    for (const message of [
+      `{"${key}":"${value}"}`,
+      `{ "${mixedCaseKey}" : "${value}" }`,
+      `{'${key}' : '${value}'}`,
+    ]) {
+      assert.equal(redactConsoleText(message), '[REDACTED]', message);
+    }
+  }
+});
+
 test('redactConsoleText processes at most 8 KiB', () => {
   const sanitized = redactConsoleText('汤圆'.repeat(5000));
   assert.ok(Buffer.byteLength(sanitized, 'utf8') <= 8 * 1024);

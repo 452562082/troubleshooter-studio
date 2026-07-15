@@ -10,7 +10,7 @@ const TRACE_ID_HEADERS = ['x-trace-id', 'trace-id', 'traceparent'];
 const credentialPatterns = [
   /\b(?:proxy-authorization|authorization|set-cookie|cookie|www-authenticate|proxy-authenticate)\s*:/i,
   /\bbearer\s+[A-Za-z0-9._~+/=-]{3,}/i,
-  /(?:^|[?&;,\s{"'])(?:[A-Za-z0-9_.-]+[._-])?(?:password|passwd|access[_-]?token|token|api[_-]?key|client[_-]?secret|secret[_-]?access[_-]?key|access[_-]?key|private[_-]?key|authorization|auth|cookie|secret)\s*[:=]\s*["']?[^\s&,;}"']+/i,
+  /(?:^|[?&;,\s{])["']?(?:[A-Za-z0-9_.-]+[._-])?(?:password|passwd|access[_-]?token|token|api[_-]?key|client[_-]?secret|secret[_-]?access[_-]?key|access[_-]?key|private[_-]?key|authorization|auth|cookie|secret)["']?\s*[:=]\s*["']?[^\s&,;}"']+/i,
   /-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----/i,
   /\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|(?:AKIA|ASIA|A3T[A-Z0-9])[A-Z0-9]{12,})\b/i,
 ];

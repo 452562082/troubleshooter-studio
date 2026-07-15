@@ -16,8 +16,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 )
@@ -34,6 +36,8 @@ const browserProgressPrefix = "TSHOOT_BROWSER_PROGRESS "
 var ErrBrowserExecutionInterrupted = errors.New("browser execution was interrupted")
 var ErrBrowserStagingIdentityChanged = errors.New("browser staging directory identity changed")
 var ErrBrowserWorkerOutputTooLarge = errors.New("browser worker output exceeds its limit")
+
+var errPlaintextSessionCleanup = errors.New("temporary browser session cleanup failed")
 
 var verifierCredentialPattern = regexp.MustCompile(`(?i)(?:["']?(?:authorization|proxy-authorization|set-cookie|cookie)["']?\s*:)|\bbearer\s+[A-Za-z0-9._~+/=-]{3,}|(?:^|[?&;,\s{])["']?(?:password|passwd|access[_-]?token|token|api[_-]?key|client[_-]?secret|secret|session|authorization|auth|cookie|code|key)["']?\s*[:=]\s*["']?[^\s&,;}"']+`)
 var verifierSensitiveQueryKey = regexp.MustCompile(`(?i)token|password|secret|code|session|auth|cookie|key`)
@@ -76,8 +80,18 @@ type HostVerifier struct {
 	runtime            *RuntimeManager
 	worker             WorkerRunner
 	resolver           IPResolver
+	sessions           *SessionStore
 	mu                 sync.Mutex
 	cleanupInterrupted func(browserDirectoryIdentity, string) error
+}
+
+type BrowserLoginRequest struct {
+	SystemID    string
+	Environment string
+	Origin      string
+	Policy      bughub.BrowserSecurityPolicy
+	Timeout     time.Duration
+	Emit        func(bughub.BrowserProgress)
 }
 
 type browserDirectoryIdentity struct {
@@ -130,6 +144,38 @@ func NewHostVerifier(runtime *RuntimeManager, worker WorkerRunner, resolver IPRe
 		worker = nodeWorkerRunner{}
 	}
 	return &HostVerifier{runtime: runtime, worker: worker, resolver: resolver, cleanupInterrupted: cleanupInterruptedBrowserOutputs}
+}
+
+func (v *HostVerifier) SetSessionStore(store *SessionStore) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.sessions = store
+}
+
+func (v *HostVerifier) Repair(ctx context.Context, emit func(bughub.BrowserProgress)) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.runtime == nil {
+		return &verifierError{code: "browser_runtime_missing", cause: errors.New("browser runtime manager is required")}
+	}
+	_, err := v.runtime.Repair(ctx, emit)
+	return err
+}
+
+func (v *HostVerifier) Status() RuntimeStatus {
+	if v.runtime == nil {
+		return RuntimeStatus{State: RuntimeBroken, Version: browserRuntimeVersion, ErrorCode: "browser_runtime_missing", Message: "browser runtime manager is required"}
+	}
+	return v.runtime.Status()
+}
+
+func (v *HostVerifier) ClearSession(_ context.Context, key SessionKey) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.sessions == nil {
+		return nil
+	}
+	return v.sessions.Clear(key)
 }
 
 func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerificationRequest) (bughub.BrowserVerificationResult, error) {
@@ -201,6 +247,15 @@ func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerifi
 	if err != nil {
 		return bughub.BrowserVerificationResult{}, err
 	}
+	var sessionState []byte
+	hasSession := false
+	sessionKey := SessionKey{SystemID: request.SystemID, Environment: request.Environment, Origin: request.Plan.StartURL}
+	if v.sessions != nil {
+		sessionState, hasSession, err = v.sessions.Load(sessionKey)
+		if err != nil {
+			return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_session_unavailable", cause: errors.New("load encrypted browser session")}
+		}
+	}
 	reservationIdentity.RerunCount = rerunCount
 	if hasReservation {
 		if err := writeAtomicBrowserJSON(browserIdentity, reservationPath, reservationIdentity); err != nil {
@@ -218,14 +273,17 @@ func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerifi
 		}
 	}
 
-	workerOutput, err := v.worker.Run(ctx, runtimePaths, workerRequest{
+	workerOutput, err := v.runWorkerWithSession(ctx, runtimePaths, workerRequest{
 		Mode:       "execute",
 		Plan:       request.Plan,
 		Policy:     request.Policy,
 		StagingDir: browserDir,
 		Headless:   true,
-	}, request.Emit)
+	}, request.Emit, sessionKey, sessionState, hasSession)
 	if err != nil {
+		if errors.Is(err, errPlaintextSessionCleanup) {
+			return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_session_cleanup_failed", cause: errPlaintextSessionCleanup}
+		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_worker_interrupted", cause: ctxErr}
 		}
@@ -260,6 +318,198 @@ func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerifi
 		return bughub.BrowserVerificationResult{}, browserJournalWriteError("browser_result_write_failed", err)
 	}
 	return result, nil
+}
+
+func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.sessions == nil {
+		return &verifierError{code: "browser_session_store_missing", cause: errors.New("browser session store is required")}
+	}
+	if v.runtime == nil {
+		return &verifierError{code: "browser_runtime_missing", cause: errors.New("browser runtime manager is required")}
+	}
+	timeout := request.Timeout
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
+	}
+	if timeout > 15*time.Minute {
+		return &verifierError{code: "browser_login_request_invalid", cause: errors.New("browser login timeout exceeds its limit")}
+	}
+	loginCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	canonicalOrigin, err := canonicalSessionOrigin(request.Origin)
+	if err != nil || strings.TrimSpace(request.SystemID) == "" || strings.TrimSpace(request.Environment) == "" {
+		return &verifierError{code: "browser_login_request_invalid", cause: errors.New("browser login identity or origin is invalid")}
+	}
+	_, allowedOrigin, _, err := parseBrowserURL(canonicalOrigin)
+	if err != nil {
+		return &verifierError{code: "browser_login_request_invalid", cause: errors.New("browser login origin is invalid")}
+	}
+	if _, allowed := normalizedOriginSet(request.Policy.AllowedOrigins)[allowedOrigin]; !allowed {
+		return &verifierError{code: "browser_login_request_invalid", cause: errors.New("browser login must start at a configured application origin")}
+	}
+	if err := AllowedURL(loginCtx, v.resolver, request.Policy, canonicalOrigin); err != nil {
+		return &verifierError{code: "browser_login_request_invalid", cause: errors.New("browser login origin is blocked")}
+	}
+
+	runtimePaths, err := v.runtime.Ensure(loginCtx, request.Emit)
+	if err != nil {
+		return err
+	}
+	key := SessionKey{SystemID: request.SystemID, Environment: request.Environment, Origin: canonicalOrigin}
+	existing, found, err := v.sessions.Load(key)
+	if err != nil {
+		return &verifierError{code: "browser_session_unavailable", cause: errors.New("load encrypted browser session")}
+	}
+	path, err := createPlaintextSessionTemp(key, existing, found)
+	if err != nil {
+		return &verifierError{code: "browser_session_temp_failed", cause: errors.New("create temporary browser session")}
+	}
+	cleanupPath := path
+	defer func() {
+		if cleanupPath != "" {
+			_ = os.Remove(cleanupPath)
+		}
+	}()
+
+	output, err := v.worker.Run(loginCtx, runtimePaths, workerRequest{
+		Mode: "login",
+		Plan: bughub.BrowserPlan{
+			Version:  1,
+			StartURL: canonicalOrigin,
+		},
+		Policy:           request.Policy,
+		StorageStatePath: path,
+		Headless:         false,
+	}, request.Emit)
+	if err != nil {
+		if loginCtx.Err() != nil {
+			return &verifierError{code: "browser_login_interrupted", cause: errors.New("browser login was interrupted")}
+		}
+		if errors.Is(err, ErrBrowserWorkerOutputTooLarge) {
+			return &verifierError{code: "browser_worker_output_too_large", cause: ErrBrowserWorkerOutputTooLarge}
+		}
+		return &verifierError{code: "browser_login_failed", cause: errors.New("browser login worker failed")}
+	}
+	if err := validateLoginWorkerResult(output); err != nil {
+		return &verifierError{code: "browser_worker_protocol_invalid", cause: err}
+	}
+	state, err := readPlaintextSessionState(path)
+	if err != nil {
+		return &verifierError{code: "browser_session_invalid", cause: err}
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return &verifierError{code: "browser_session_cleanup_failed", cause: errPlaintextSessionCleanup}
+	}
+	cleanupPath = ""
+	if err := v.sessions.Save(key, state); err != nil {
+		return &verifierError{code: "browser_session_save_failed", cause: errors.New("save encrypted browser session")}
+	}
+	return nil
+}
+
+func (v *HostVerifier) runWorkerWithSession(
+	ctx context.Context,
+	paths RuntimePaths,
+	request workerRequest,
+	emit func(bughub.BrowserProgress),
+	key SessionKey,
+	state []byte,
+	found bool,
+) (result workerResult, returnedErr error) {
+	if found {
+		path, err := createPlaintextSessionTemp(key, state, true)
+		if err != nil {
+			return workerResult{}, err
+		}
+		request.StorageStatePath = path
+		defer func() {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				returnedErr = errors.Join(returnedErr, errPlaintextSessionCleanup)
+			}
+		}()
+	}
+	return v.worker.Run(ctx, paths, request, emit)
+}
+
+func createPlaintextSessionTemp(key SessionKey, state []byte, writeState bool) (string, error) {
+	identifier, err := sessionIdentifier(key)
+	if err != nil {
+		return "", err
+	}
+	temporary, err := os.CreateTemp("", ".tshoot-browser-session-"+identifier+"-*")
+	if err != nil {
+		return "", err
+	}
+	path := temporary.Name()
+	remove := true
+	defer func() {
+		_ = temporary.Close()
+		if remove {
+			_ = os.Remove(path)
+		}
+	}()
+	if err := temporary.Chmod(0o600); err != nil {
+		return "", err
+	}
+	if writeState {
+		if len(state) > maxBrowserSessionBytes {
+			return "", errors.New("browser session plaintext exceeds its limit")
+		}
+		if err := writeAll(temporary, state); err != nil {
+			return "", err
+		}
+	}
+	if err := temporary.Sync(); err != nil {
+		return "", err
+	}
+	if err := temporary.Close(); err != nil {
+		return "", err
+	}
+	remove = false
+	return path, nil
+}
+
+func validateLoginWorkerResult(result workerResult) error {
+	if err := validateWorkerResultBounds(result); err != nil {
+		return err
+	}
+	if result.Status != "completed" || result.ErrorCode != "" || result.ErrorMessage != "" ||
+		result.FailedActionID != "" || result.FinalURL != "" || result.Title != "" || result.LoginOrigin != "" ||
+		result.FinalScreenshotPath != "" || len(result.AccessibilitySummary) != 0 || len(result.Artifacts) != 0 {
+		return errors.New("browser login worker returned forbidden result fields")
+	}
+	return nil
+}
+
+func readPlaintextSessionState(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Size() < 2 || info.Size() > maxBrowserSessionBytes {
+		return nil, errors.New("browser login state file is unsafe")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, errors.New("open browser login state")
+	}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil || !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
+		return nil, errors.New("browser login state changed while opening")
+	}
+	state, err := io.ReadAll(io.LimitReader(file, maxBrowserSessionBytes+1))
+	if err != nil || len(state) > maxBrowserSessionBytes {
+		return nil, errors.New("read browser login state")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(state))
+	var object map[string]json.RawMessage
+	if err := decoder.Decode(&object); err != nil || object == nil {
+		return nil, errors.New("browser login state is invalid")
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return nil, errors.New("browser login state is invalid")
+	}
+	return state, nil
 }
 
 func validateVerificationRequest(ctx context.Context, resolver IPResolver, request bughub.BrowserVerificationRequest) error {
@@ -894,6 +1144,28 @@ func (nodeWorkerRunner) Run(ctx context.Context, paths RuntimePaths, request wor
 		return workerResult{}, err
 	}
 	command := exec.CommandContext(ctx, "node", paths.WorkerPath, "--mode", request.Mode)
+	processDone := make(chan struct{})
+	defer close(processDone)
+	if runtime.GOOS != "windows" {
+		command.Cancel = func() error {
+			if command.Process == nil {
+				return os.ErrProcessDone
+			}
+			if err := command.Process.Signal(os.Interrupt); err != nil {
+				return err
+			}
+			go func(process *os.Process) {
+				timer := time.NewTimer(2 * time.Second)
+				defer timer.Stop()
+				select {
+				case <-timer.C:
+					_ = process.Kill()
+				case <-processDone:
+				}
+			}(command.Process)
+			return nil
+		}
+	}
 	command.Dir = paths.Root
 	command.Env = mergeCommandEnvironment(os.Environ(), []string{"PLAYWRIGHT_BROWSERS_PATH=" + paths.BrowsersPath})
 	command.Stdin = bytes.NewReader(append(encoded, '\n'))

@@ -6,6 +6,7 @@ import { isIP } from 'node:net';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  chmod,
   mkdir,
   open,
   readFile,
@@ -148,11 +149,8 @@ function validateLocator(locator, label) {
 export function validateWorkerRequest(request) {
   if (!request || typeof request !== 'object' || Array.isArray(request)) throw new Error('worker request must be an object');
   ownKeys(request, new Set(['mode', 'plan', 'policy', 'staging_dir', 'storage_state_path', 'headless']), 'request');
-  if (request.mode !== 'execute') throw new Error('worker request mode is not supported');
-  if (!isAbsolute(requiredString(request.staging_dir, 'staging_dir'))) throw new Error('staging_dir must be absolute');
-  if (request.storage_state_path !== undefined && !isAbsolute(requiredString(request.storage_state_path, 'storage_state_path'))) {
-    throw new Error('storage_state_path must be absolute');
-  }
+
+  if (request.mode !== 'execute' && request.mode !== 'login') throw new Error('worker request mode is not supported');
   if (typeof request.headless !== 'boolean') throw new Error('headless must be boolean');
   validatePolicy(request.policy);
 
@@ -160,7 +158,23 @@ export function validateWorkerRequest(request) {
   if (!plan || typeof plan !== 'object' || Array.isArray(plan)) throw new Error('plan must be an object');
   ownKeys(plan, new Set(['version', 'start_url', 'actions', 'assertions']), 'plan');
   if (plan.version !== 1) throw new Error('plan version must be 1');
-  parseHTTPURL(plan.start_url);
+  const start = parseHTTPURL(plan.start_url).parsed;
+  if (request.mode === 'login') {
+    if (request.headless !== false) throw new Error('login browser must be visible');
+    if (request.staging_dir !== '') throw new Error('login must not use evidence staging');
+    if (!isAbsolute(requiredString(request.storage_state_path, 'storage_state_path'))) throw new Error('storage_state_path must be absolute');
+    if (!Array.isArray(plan.actions) || plan.actions.length !== 0) throw new Error('login plan actions are forbidden');
+    if (!Array.isArray(plan.assertions) || plan.assertions.length !== 0) throw new Error('login plan assertions are forbidden');
+    if (start.pathname !== '/' || start.search || start.hash) throw new Error('login must start at an application origin');
+    const applicationOrigins = new Set(request.policy.allowed_origins.map(normalizeOrigin));
+    if (!applicationOrigins.has(start.origin)) throw new Error('login must start at a configured application origin');
+    return;
+  }
+
+  if (!isAbsolute(requiredString(request.staging_dir, 'staging_dir'))) throw new Error('staging_dir must be absolute');
+  if (request.storage_state_path !== undefined && !isAbsolute(requiredString(request.storage_state_path, 'storage_state_path'))) {
+    throw new Error('storage_state_path must be absolute');
+  }
   if (!Array.isArray(plan.actions) || plan.actions.length < 1 || plan.actions.length > 40) throw new Error('plan actions must contain 1 to 40 entries');
   if (!Array.isArray(plan.assertions) || plan.assertions.length < 1) throw new Error('plan assertions are required');
 
@@ -335,6 +349,10 @@ export async function hasVisiblePasswordField(page) {
     if (await password.nth(index).isVisible().catch(() => false)) return true;
   }
   return false;
+}
+
+export async function loginSessionReady(page, policy) {
+  return !knownAuthOrigin(page.url(), policy) && !(await hasVisiblePasswordField(page));
 }
 
 async function loginPageState(page, policy, authFailure) {
@@ -644,6 +662,96 @@ async function executeWorker(request) {
   }
 }
 
+async function loginStorageStateInput(path) {
+  const content = await readFile(path);
+  if (content.length === 0) return {};
+  if (content.length > 16 << 20) throw new Error('existing login state exceeds its limit');
+  JSON.parse(content.toString('utf8'));
+  return { storageState: path };
+}
+
+export async function saveLoginStorageState(context, path) {
+  const temporary = join(dirname(path), `.${basename(path)}-${randomUUID()}`);
+  try {
+    const reserved = await open(temporary, 'wx', 0o600);
+    await reserved.close();
+    await context.storageState({ path: temporary });
+    await chmod(temporary, 0o600);
+    const handle = await open(temporary, 'r');
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(temporary, path);
+    await syncDirectory(dirname(path));
+  } catch (error) {
+    await rm(temporary, { force: true });
+    throw error;
+  }
+}
+
+async function loginWorker(request) {
+  validateWorkerRequest(request);
+  const { chromium } = await import('playwright');
+  let browser;
+  let context;
+  let interrupting = false;
+  const closeForInterrupt = () => {
+    if (interrupting) return;
+    interrupting = true;
+    void (async () => {
+      if (context) await context.close().catch(() => {});
+      if (browser) await browser.close().catch(() => {});
+      process.exit(130);
+    })();
+  };
+  process.once('SIGINT', closeForInterrupt);
+  process.once('SIGTERM', closeForInterrupt);
+  try {
+    browser = await chromium.launch({ headless: false });
+    context = await browser.newContext({
+      ...(await loginStorageStateInput(request.storage_state_path)),
+      serviceWorkers: 'block',
+    });
+    let blockedRequest = false;
+    await context.route('**/*', async (route) => {
+      try {
+        await assertAllowedURL(route.request().url(), request.policy);
+        await route.continue();
+      } catch {
+        blockedRequest = true;
+        await route.abort('blockedbyclient');
+      }
+    });
+    const page = await context.newPage();
+    await page.routeWebSocket('**/*', (webSocket) => webSocket.close());
+    page.setDefaultTimeout(15_000);
+    page.setDefaultNavigationTimeout(30_000);
+    page.on('dialog', (dialog) => dialog.dismiss().catch(() => {}));
+    page.on('download', (download) => download.cancel().catch(() => {}));
+
+    emitProgress('browser_login_opened', 'Complete login in the visible validation browser');
+    await assertAllowedURL(request.plan.start_url, request.policy);
+    await page.goto(request.plan.start_url, { waitUntil: 'domcontentloaded' });
+    while (true) {
+      if (blockedRequest) throw new Error('browser destination was blocked');
+      await assertAllowedURL(page.url(), request.policy);
+      if (await loginSessionReady(page, request.policy)) {
+        await saveLoginStorageState(context, request.storage_state_path);
+        emitProgress('browser_login_completed', 'Browser login session saved');
+        return { status: 'completed' };
+      }
+      await page.waitForTimeout(250);
+    }
+  } finally {
+    process.off('SIGINT', closeForInterrupt);
+    process.off('SIGTERM', closeForInterrupt);
+    if (context) await context.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
+  }
+}
+
 async function probeWorker(outputPath) {
   const { chromium } = await import('playwright');
   const server = createServer((_request, response) => {
@@ -697,6 +805,10 @@ async function main() {
     const request = await readSingleRequest();
     if (request.mode !== mode) throw new Error('worker request mode does not match CLI mode');
     result = await executeWorker(request);
+  } else if (mode === 'login') {
+    const request = await readSingleRequest();
+    if (request.mode !== mode) throw new Error('worker request mode does not match CLI mode');
+    result = await loginWorker(request);
   } else {
     throw new Error('worker mode is not supported');
   }

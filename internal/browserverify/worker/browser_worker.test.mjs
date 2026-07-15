@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,6 +16,8 @@ import {
   EVIDENCE_MAX_RECORDS,
   EVIDENCE_TRUNCATION_MARKER,
   hasVisiblePasswordField,
+  loginSessionReady,
+  saveLoginStorageState,
   validateWorkerRequest,
 } from './browser_worker.mjs';
 
@@ -149,8 +151,44 @@ const baseRequest = () => ({
   headless: true,
 });
 
+const baseLoginRequest = () => ({
+  mode: 'login',
+  plan: {
+    version: 1,
+    start_url: 'https://app.test',
+    actions: [],
+    assertions: [],
+  },
+  policy: {
+    allowed_origins: ['https://app.test'],
+    private_origins: [],
+    auth_origins: ['https://login.test'],
+    is_prod: false,
+  },
+  staging_dir: '',
+  storage_state_path: '/tmp/7f83b1657ff1fc53b92dc18148a1d65dfa13514b9c01d44f9205940f8c80f54f.json',
+  headless: false,
+});
+
 test('browser worker loads and validates offline without importing Playwright', () => {
   assert.doesNotThrow(() => validateWorkerRequest(baseRequest()));
+});
+
+test('login worker requires visible mode, one absolute state path, and an application origin', () => {
+  assert.doesNotThrow(() => validateWorkerRequest(baseLoginRequest()));
+
+  for (const mutate of [
+    (request) => { request.headless = true; },
+    (request) => { request.storage_state_path = 'relative/state.json'; },
+    (request) => { request.staging_dir = '/evidence/browser'; },
+    (request) => { request.plan.actions = [{ id: 'shot', action: 'screenshot' }]; },
+    (request) => { request.plan.assertions = [{ kind: 'visible_text', value: 'secret' }]; },
+    (request) => { request.plan.start_url = 'https://login.test'; },
+  ]) {
+    const invalid = baseLoginRequest();
+    mutate(invalid);
+    assert.throws(() => validateWorkerRequest(invalid));
+  }
 });
 
 test('browser worker accepts exactly seven actions and six locator kinds', () => {
@@ -280,6 +318,43 @@ test('login detection checks every password field, including a visible field aft
   assert.equal(await hasVisiblePasswordField(page), true);
 });
 
+test('login completes only after leaving auth origin with no visible password field', async () => {
+  const page = (url, passwordVisible) => ({
+    url: () => url,
+    locator: (selector) => {
+      assert.equal(selector, 'input[type="password"]');
+      return {
+        count: async () => 1,
+        nth: () => ({ isVisible: async () => passwordVisible }),
+      };
+    },
+  });
+  const policy = baseLoginRequest().policy;
+  assert.equal(await loginSessionReady(page('https://login.test/sso', false), policy), false);
+  assert.equal(await loginSessionReady(page('https://app.test/login', true), policy), false);
+  assert.equal(await loginSessionReady(page('https://app.test/users', false), policy), true);
+});
+
+test('login storageState atomically replaces a pre-created 0600 target', async () => {
+  const temporary = mkdtempSync(join(tmpdir(), 'tshoot-login-state-'));
+  const target = join(temporary, 'hashed-session.json');
+  writeFileSync(target, '{"cookies":[{"value":"old"}]}', { mode: 0o600 });
+  const context = {
+    storageState: async ({ path }) => {
+      assert.equal(statSync(path).mode & 0o777, 0o600);
+      assert.equal(readFileSync(target, 'utf8').includes('old'), true);
+      writeFileSync(path, '{"cookies":[{"value":"new"}]}');
+    },
+  };
+  try {
+    await saveLoginStorageState(context, target);
+    assert.equal(readFileSync(target, 'utf8').includes('new'), true);
+    assert.equal(statSync(target).mode & 0o777, 0o600);
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
 test('safe screenshot deletes the PNG when a password field appears during capture', async () => {
   const temporary = mkdtempSync(join(tmpdir(), 'tshoot-safe-screenshot-'));
   const output = join(temporary, 'transient.png');
@@ -370,14 +445,14 @@ test('worker source has no arbitrary script, upload, HAR, trace, body, or raw-he
   ]) {
     assert.equal(source.includes(forbidden), false, forbidden);
   }
-  assert.equal((source.match(/import\('playwright'\)/g) ?? []).length, 2);
+  assert.equal((source.match(/import\('playwright'\)/g) ?? []).length, 3);
   assert.equal(source.includes("from 'playwright'"), false);
   assert.equal(source.includes("context.route('**/*'"), true);
 });
 
 test('unsupported CLI mode emits exactly one final JSON object and no progress on stdout', () => {
   const workerPath = fileURLToPath(new URL('./browser_worker.mjs', import.meta.url));
-  const run = spawnSync(process.execPath, [workerPath, '--mode', 'login'], { encoding: 'utf8' });
+  const run = spawnSync(process.execPath, [workerPath, '--mode', 'unsupported'], { encoding: 'utf8' });
   assert.notEqual(run.status, 0);
   const lines = run.stdout.trim().split(/\r?\n/);
   assert.equal(lines.length, 1);

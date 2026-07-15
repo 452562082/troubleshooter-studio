@@ -1,6 +1,7 @@
 package browserverify
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -22,15 +24,23 @@ type fakeWorker struct {
 	Calls         int
 	ArtifactBytes map[string][]byte
 	ExtraFiles    map[string][]byte
+	Requests      []workerRequest
+	Inspect       func(context.Context, workerRequest) error
 }
 
-func (w *fakeWorker) Run(_ context.Context, _ RuntimePaths, request workerRequest, _ func(bughub.BrowserProgress)) (workerResult, error) {
+func (w *fakeWorker) Run(ctx context.Context, _ RuntimePaths, request workerRequest, _ func(bughub.BrowserProgress)) (workerResult, error) {
 	w.Calls++
+	w.Requests = append(w.Requests, request)
+	if w.Inspect != nil {
+		if err := w.Inspect(ctx, request); err != nil {
+			return workerResult{}, err
+		}
+	}
 	if w.Calls <= len(w.Errors) && w.Errors[w.Calls-1] != nil {
 		return workerResult{}, w.Errors[w.Calls-1]
 	}
 	for _, artifact := range w.Result.Artifacts {
-		if filepath.IsAbs(artifact.Path) || !strings.HasPrefix(artifact.Path, "browser/") {
+		if request.StagingDir == "" || filepath.IsAbs(artifact.Path) || !strings.HasPrefix(artifact.Path, "browser/") {
 			continue
 		}
 		relative := strings.TrimPrefix(artifact.Path, "browser/")
@@ -115,6 +125,285 @@ func completedWorkerResult() workerResult {
 			{Kind: "screenshot", Path: "browser/final.png"},
 			{Kind: "network", Path: "browser/network.json", RequestID: "req-1", TraceID: "trace-1"},
 		},
+	}
+}
+
+func TestHostVerifierExecuteUsesEncryptedSessionOnlyForWorkerLifetime(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		workerErr  error
+		cancel     bool
+		wantErr    bool
+		wantResult bool
+	}{
+		{name: "success", wantResult: true},
+		{name: "worker failure", workerErr: errors.New("password=worker-secret"), wantErr: true},
+		{name: "cancellation", cancel: true, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := validBrowserRequest(t)
+			state := []byte(`{"cookies":[{"name":"sid","value":"execute-cookie-secret"}]}`)
+			store := NewSessionStore(filepath.Join(t.TempDir(), "sessions"), newMemorySecretStore())
+			if err := store.Save(SessionKey{SystemID: request.SystemID, Environment: request.Environment, Origin: request.Plan.StartURL}, state); err != nil {
+				t.Fatal(err)
+			}
+			var plaintextPath string
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			worker := &fakeWorker{Result: completedWorkerResult(), Errors: []error{test.workerErr}}
+			worker.Inspect = func(_ context.Context, got workerRequest) error {
+				plaintextPath = got.StorageStatePath
+				if got.Mode != "execute" || !got.Headless || plaintextPath == "" || !filepath.IsAbs(plaintextPath) {
+					t.Fatalf("worker request = %+v", got)
+				}
+				if relative, err := filepath.Rel(request.StagingDir, plaintextPath); err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+					t.Fatalf("plaintext session is inside evidence staging: %q", plaintextPath)
+				}
+				if mode := mustFileMode(t, plaintextPath); mode != 0o600 {
+					t.Fatalf("plaintext session mode = %o", mode)
+				}
+				loaded, err := os.ReadFile(plaintextPath)
+				if err != nil || !bytes.Equal(loaded, state) {
+					t.Fatalf("worker state=%q err=%v", loaded, err)
+				}
+				if test.cancel {
+					cancel()
+					return ctx.Err()
+				}
+				return nil
+			}
+			verifier := newTestHostVerifier(t, worker)
+			verifier.SetSessionStore(store)
+			result, err := verifier.Execute(ctx, request)
+			if test.wantErr != (err != nil) {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			if test.wantResult && result.Status != "completed" {
+				t.Fatalf("result=%+v", result)
+			}
+			if plaintextPath == "" {
+				t.Fatal("worker did not receive a plaintext state path")
+			}
+			if _, err := os.Stat(plaintextPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("plaintext session remains after Execute: %v", err)
+			}
+			assertTreeExcludesBytes(t, request.StagingDir, state, []byte(plaintextPath))
+		})
+	}
+}
+
+func TestHostVerifierLoginReplacesEncryptedSessionOnlyAfterWorkerSuccess(t *testing.T) {
+	root := t.TempDir()
+	secrets := newMemorySecretStore()
+	store := NewSessionStore(filepath.Join(root, "sessions"), secrets)
+	key := SessionKey{SystemID: "shop", Environment: "test", Origin: "https://app.test"}
+	oldState := []byte(`{"cookies":[{"value":"old-cookie-secret"}]}`)
+	newState := []byte(`{"cookies":[{"value":"new-cookie-secret"}]}`)
+	if err := store.Save(key, oldState); err != nil {
+		t.Fatal(err)
+	}
+	var plaintextPath string
+	worker := &fakeWorker{Result: workerResult{Status: "completed"}}
+	worker.Inspect = func(_ context.Context, request workerRequest) error {
+		plaintextPath = request.StorageStatePath
+		if request.Mode != "login" || request.Headless || request.StagingDir != "" || request.Plan.StartURL != "https://app.test" {
+			t.Fatalf("login request = %+v", request)
+		}
+		if mode := mustFileMode(t, plaintextPath); mode != 0o600 {
+			t.Fatalf("login state mode = %o", mode)
+		}
+		state, err := os.ReadFile(plaintextPath)
+		if err != nil || !bytes.Equal(state, oldState) {
+			t.Fatalf("existing state=%q err=%v", state, err)
+		}
+		return os.WriteFile(plaintextPath, newState, 0o600)
+	}
+	secrets.beforeGet = func() {
+		if plaintextPath == "" {
+			return
+		}
+		if _, err := os.Stat(plaintextPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("plaintext session still exists while encrypted Save begins: %v", err)
+		}
+	}
+	verifier := newTestHostVerifier(t, worker)
+	verifier.SetSessionStore(store)
+	if err := verifier.Login(context.Background(), BrowserLoginRequest{
+		SystemID: "shop", Environment: "test", Origin: "https://app.test",
+		Policy: bughub.BrowserSecurityPolicy{
+			AllowedOrigins: []string{"https://app.test"},
+			AuthOrigins:    []string{"https://login.test"},
+		},
+		Timeout: time.Minute,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(plaintextPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("login plaintext remains: %v", err)
+	}
+	loaded, ok, err := store.Load(key)
+	if err != nil || !ok || !bytes.Equal(loaded, newState) {
+		t.Fatalf("loaded=%q ok=%v err=%v", loaded, ok, err)
+	}
+	ciphertext, err := os.ReadFile(store.encryptedPath(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range [][]byte{oldState, newState, []byte("old-cookie-secret"), []byte("new-cookie-secret"), []byte(plaintextPath)} {
+		if bytes.Contains(ciphertext, secret) {
+			t.Fatalf("ciphertext exposes %q", secret)
+		}
+	}
+	assertTreeExcludesBytes(t, root, oldState, newState, []byte(plaintextPath))
+}
+
+func TestHostVerifierLoginFailurePreservesPreviousEncryptedSession(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions"), newMemorySecretStore())
+	key := SessionKey{SystemID: "shop", Environment: "test", Origin: "https://app.test"}
+	oldState := []byte(`{"cookies":[{"value":"preserved-cookie-secret"}]}`)
+	if err := store.Save(key, oldState); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(store.encryptedPath(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plaintextPath string
+	worker := &fakeWorker{
+		Result: workerResult{Status: "completed"},
+		Errors: []error{errors.New("password=hunter2 URL=https://app.test/?token=secret")},
+		Inspect: func(_ context.Context, request workerRequest) error {
+			plaintextPath = request.StorageStatePath
+			return os.WriteFile(plaintextPath, []byte(`{"cookies":[{"value":"untrusted-new-secret"}]}`), 0o600)
+		},
+	}
+	verifier := newTestHostVerifier(t, worker)
+	verifier.SetSessionStore(store)
+	err = verifier.Login(context.Background(), BrowserLoginRequest{
+		SystemID: "shop", Environment: "test", Origin: "https://app.test",
+		Policy:  bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test"}},
+		Timeout: time.Minute,
+	})
+	if err == nil {
+		t.Fatal("expected login failure")
+	}
+	for _, secret := range []string{"hunter2", "token=secret", "untrusted-new-secret", plaintextPath} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("login error exposed %q: %v", secret, err)
+		}
+	}
+	after, err := os.ReadFile(store.encryptedPath(key))
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("encrypted session changed after failed login: equal=%v err=%v", bytes.Equal(before, after), err)
+	}
+	loaded, ok, err := store.Load(key)
+	if err != nil || !ok || !bytes.Equal(loaded, oldState) {
+		t.Fatalf("loaded=%q ok=%v err=%v", loaded, ok, err)
+	}
+	if _, err := os.Stat(plaintextPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed login plaintext remains: %v", err)
+	}
+}
+
+func TestHostVerifierLoginRejectsWorkerArtifactsWithoutSavingState(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions"), newMemorySecretStore())
+	worker := &fakeWorker{Result: workerResult{
+		Status:    "completed",
+		Artifacts: []workerArtifact{{Kind: "screenshot", Path: "browser/login.png"}},
+	}}
+	worker.Inspect = func(_ context.Context, request workerRequest) error {
+		return os.WriteFile(request.StorageStatePath, []byte(`{"cookies":[]}`), 0o600)
+	}
+	verifier := newTestHostVerifier(t, worker)
+	verifier.SetSessionStore(store)
+	err := verifier.Login(context.Background(), BrowserLoginRequest{
+		SystemID: "shop", Environment: "test", Origin: "https://app.test",
+		Policy:  bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test"}},
+		Timeout: time.Minute,
+	})
+	if err == nil {
+		t.Fatal("expected login artifact rejection")
+	}
+	if _, ok, loadErr := store.Load(SessionKey{SystemID: "shop", Environment: "test", Origin: "https://app.test"}); loadErr != nil || ok {
+		t.Fatalf("login state saved after artifact rejection: ok=%v err=%v", ok, loadErr)
+	}
+}
+
+type contextBlockingResolver struct{}
+
+func (contextBlockingResolver) LookupIPAddr(ctx context.Context, _ string) ([]net.IPAddr, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestHostVerifierLoginTimeoutBoundsPolicyResolution(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions"), newMemorySecretStore())
+	verifier := NewHostVerifier(NewRuntimeManager(t.TempDir(), &recordingCommandRunner{}), &fakeWorker{}, contextBlockingResolver{})
+	verifier.SetSessionStore(store)
+	outer, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err := verifier.Login(outer, BrowserLoginRequest{
+		SystemID: "shop", Environment: "test", Origin: "https://app.test",
+		Policy:  bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test"}},
+		Timeout: 20 * time.Millisecond,
+	})
+	if err == nil {
+		t.Fatal("expected login timeout")
+	}
+	if elapsed := time.Since(started); elapsed >= 150*time.Millisecond {
+		t.Fatalf("login timeout did not bound policy resolution: %s", elapsed)
+	}
+}
+
+func TestHostVerifierClearSessionRepairAndStatus(t *testing.T) {
+	runtime := NewRuntimeManager(t.TempDir(), &recordingCommandRunner{})
+	verifier := NewHostVerifier(runtime, &fakeWorker{}, publicResolver("app.test"))
+	if status := verifier.Status(); status.State != RuntimeBroken {
+		t.Fatalf("initial status = %+v", status)
+	}
+	if err := verifier.Repair(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if status := verifier.Status(); status.State != RuntimeReady {
+		t.Fatalf("repaired status = %+v", status)
+	}
+
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions"), newMemorySecretStore())
+	key := SessionKey{SystemID: "shop", Environment: "test", Origin: "https://app.test"}
+	if err := store.Save(key, []byte(`{"cookies":[]}`)); err != nil {
+		t.Fatal(err)
+	}
+	verifier.SetSessionStore(store)
+	if err := verifier.ClearSession(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifier.ClearSession(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.Load(key); err != nil || ok {
+		t.Fatalf("cleared state: ok=%v err=%v", ok, err)
+	}
+}
+
+func assertTreeExcludesBytes(t *testing.T, root string, forbidden ...[]byte) {
+	t.Helper()
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return walkErr
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, value := range forbidden {
+			if len(value) > 0 && bytes.Contains(content, value) {
+				t.Fatalf("%s contains forbidden plaintext %q", path, value)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -528,6 +817,39 @@ setInterval(() => {}, 1000);
 	time.Sleep(700 * time.Millisecond)
 	if _, err := os.Stat(markerPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("worker child survived after runner returned: %v", err)
+	}
+}
+
+func TestNodeWorkerRunnerInterruptsWorkerForGracefulBrowserCleanup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not implement os.Interrupt for child processes")
+	}
+	temporary := t.TempDir()
+	workerPath := filepath.Join(temporary, "interruptible-worker.mjs")
+	markerPath := filepath.Join(temporary, "browser-closed")
+	source := `
+import { writeFileSync } from 'node:fs';
+process.on('SIGINT', () => {
+  writeFileSync(process.env.TSHOOT_TEST_CLEANUP_MARKER, 'closed');
+  process.exit(130);
+});
+setInterval(() => {}, 1000);
+`
+	if err := os.WriteFile(workerPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TSHOOT_TEST_CLEANUP_MARKER", markerPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_, err := (nodeWorkerRunner{}).Run(ctx, RuntimePaths{
+		Root: temporary, BrowsersPath: filepath.Join(temporary, "browsers"), WorkerPath: workerPath,
+	}, workerRequest{Mode: "login"}, nil)
+	if err == nil {
+		t.Fatal("expected canceled worker error")
+	}
+	content, readErr := os.ReadFile(markerPath)
+	if readErr != nil || string(content) != "closed" {
+		t.Fatalf("browser cleanup marker=%q err=%v", content, readErr)
 	}
 }
 

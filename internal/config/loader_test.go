@@ -85,6 +85,41 @@ func TestValidate_DuplicateEnvID(t *testing.T) {
 	}
 }
 
+func TestValidateBrowserAuthOrigins(t *testing.T) {
+	for _, origin := range []string{
+		"https://login.example.com",
+		"http://localhost:8080",
+	} {
+		t.Run("valid_"+origin, func(t *testing.T) {
+			cfg := minimalValid()
+			cfg.Environments[0].BrowserAuthOrigins = []string{origin}
+			if err := Validate(&cfg); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
+	invalid := []string{
+		"login.example.com",
+		"ftp://login.example.com",
+		"https://user:pass@login.example.com/path",
+		"https://login.example.com/",
+		"https://login.example.com/path",
+		"https://login.example.com?next=/users",
+		"https://login.example.com#form",
+	}
+	for _, origin := range invalid {
+		t.Run("invalid_"+origin, func(t *testing.T) {
+			cfg := minimalValid()
+			cfg.Environments[0].BrowserAuthOrigins = []string{origin}
+			err := Validate(&cfg)
+			if err == nil || !strings.Contains(err.Error(), "browser_auth_origins") {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+}
+
 func TestValidate_RepoReferencesUnknownEnv(t *testing.T) {
 	c := minimalValid()
 	c.Repos = []Repo{{

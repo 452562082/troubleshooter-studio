@@ -59,6 +59,11 @@ func Validate(c *SystemConfig) error {
 			return fmt.Errorf("duplicate environment id: %s", env.ID)
 		}
 		envIDs[env.ID] = true
+		for j, origin := range env.BrowserAuthOrigins {
+			if err := validateBrowserAuthOrigin(origin); err != nil {
+				return fmt.Errorf("environments[%s].browser_auth_origins[%d]: %w", env.ID, j, err)
+			}
+		}
 	}
 
 	if c.CodeIntelligence.Enabled && c.CodeIntelligence.Provider == "" {
@@ -170,6 +175,32 @@ func Validate(c *SystemConfig) error {
 
 	if c.Meta.SchemaVersion == "" {
 		return fmt.Errorf("meta.schema_version required")
+	}
+	return nil
+}
+
+func validateBrowserAuthOrigin(raw string) error {
+	if raw == "" || raw != strings.TrimSpace(raw) {
+		return fmt.Errorf("must be an absolute HTTP(S) origin")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.Hostname() == "" || parsed.Opaque != "" {
+		return fmt.Errorf("must be an absolute HTTP(S) origin")
+	}
+	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
+		return fmt.Errorf("must use http or https")
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("must not contain userinfo")
+	}
+	if parsed.Path != "" || parsed.RawPath != "" {
+		return fmt.Errorf("must not contain a path")
+	}
+	if parsed.RawQuery != "" || parsed.ForceQuery {
+		return fmt.Errorf("must not contain a query")
+	}
+	if parsed.Fragment != "" || strings.Contains(raw, "#") {
+		return fmt.Errorf("must not contain a fragment")
 	}
 	return nil
 }

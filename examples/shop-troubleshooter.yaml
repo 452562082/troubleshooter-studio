@@ -25,6 +25,8 @@ environments:
   - id: prod
     api_domain: api.shop.example.com
     web_domain: www.shop.example.com
+    browser_auth_origins:
+      - https://login.shop.example.com
     is_prod: true
 
 repos:

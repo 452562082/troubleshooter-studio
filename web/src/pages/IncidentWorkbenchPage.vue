@@ -93,7 +93,7 @@ const writeActionDisabledReason = computed(() => {
 })
 const botActionStatus = computed(() => {
   const current = displayedCase.value
-  return current ? `已有进行中的 Case · ${current.status}` : '尚无进行中的 Case'
+  return current ? '故障闭环进行中' : '尚未开启故障闭环'
 })
 
 watch(() => tickets.selectedID.value, async bugID => {
@@ -762,12 +762,9 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
             <button v-if="!displayedCase" class="btn primary" type="button" data-action="start-case" :disabled="writeActionDisabled" @click="startNewCase()">
               {{ starting ? '开启中…' : '开启故障闭环' }}
             </button>
-            <template v-else>
-              <button class="btn primary" type="button" data-action="enter-case" @click="enterIncidentCase">进入故障闭环</button>
-              <button class="btn danger-secondary" type="button" data-action="restart-case" :disabled="writeActionDisabled" @click="restartIncidentCase()">
-                {{ starting || resetting || restartPreparing ? '处理中…' : '重新开始故障闭环' }}
-              </button>
-            </template>
+            <button v-else class="btn danger-secondary" type="button" data-action="restart-case" :disabled="writeActionDisabled" @click="restartIncidentCase()">
+              {{ starting || resetting || restartPreparing ? '处理中…' : '重新开始故障闭环' }}
+            </button>
           </div>
           <p v-if="writeActionDisabledReason" class="bot-action-disabled-reason" role="status">{{ writeActionDisabledReason }}</p>
           <p v-if="workflowNotice" class="workflow-notice" role="status" aria-live="polite">{{ workflowNotice }}</p>
@@ -779,13 +776,14 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
       <BugCaseLifecycle
         v-if="displayedDetail"
         :detail="displayedDetail"
+        :bug-title="tickets.selectedBug.value?.title || ''"
         :pending="incidentWorkflow.pending.value || starting"
         :error="incidentWorkflow.error.value"
         @refresh="refreshIncidentWorkflow"
         @primary="handleIncidentPrimary"
       />
       <section v-else class="case-loading" aria-live="polite">
-        <p role="status">{{ incidentWorkflow.error.value ? `加载 Case 失败：${incidentWorkflow.error.value}` : `正在加载 Case ${displayedCase.id}…` }}</p>
+        <p role="status">{{ incidentWorkflow.error.value ? `加载故障闭环失败：${incidentWorkflow.error.value}` : '正在加载故障闭环…' }}</p>
         <button v-if="incidentWorkflow.error.value" class="btn" type="button" data-action="retry-active-case" :disabled="incidentWorkflow.loading.value" @click="refreshIncidentWorkflow">
           {{ incidentWorkflow.loading.value ? '重试中…' : '重试加载' }}
         </button>

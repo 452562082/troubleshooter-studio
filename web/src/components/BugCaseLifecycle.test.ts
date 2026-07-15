@@ -68,7 +68,7 @@ describe('BugCaseLifecycle', () => {
 
   it('renders one full-width current Case and refreshes from its heading', async () => {
     const snapshot = detail('waiting_fix_approval')
-    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot, bugTitle: '支付页超时' } })
     const columns = wrapper.findAll('.case-column')
     const source = readFileSync('src/components/BugCaseLifecycle.vue', 'utf8')
 
@@ -80,6 +80,11 @@ describe('BugCaseLifecycle', () => {
     expect('cases' in wrapper.props()).toBe(false)
     expect(wrapper.find('.case-heading-copy').exists()).toBe(true)
     expect(wrapper.find('.case-heading-actions').exists()).toBe(true)
+    expect(wrapper.get('.case-heading-copy').text()).toContain('故障闭环进度')
+    expect(wrapper.get('.case-heading-copy').text()).toContain('支付页超时')
+    expect(wrapper.get('.case-heading-copy').text()).toContain('第 1 轮 · test')
+    expect(wrapper.get('.case-heading-copy').text()).not.toContain(snapshot.case.id)
+    expect(wrapper.get('.case-heading-copy').text()).not.toContain(snapshot.case.bug_id)
     expect(source).toMatch(/\.case-lifecycle \{[^}]*grid-template-columns: minmax\(0, 1fr\);/)
     expect(source).not.toContain('.case-row')
     expect(wrapper.findAll('.lifecycle-stage')).toHaveLength(6)
@@ -87,7 +92,7 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.find('[aria-label="Case 时间线"]').text()).toContain('transition')
     expect(wrapper.findAll('.current-action-card .primary-action')).toHaveLength(1)
 
-    const refresh = wrapper.get<HTMLButtonElement>('[aria-label="刷新当前 Case"]')
+    const refresh = wrapper.get<HTMLButtonElement>('[aria-label="刷新故障闭环"]')
     expect(refresh.classes()).toContain('icon-button')
     await refresh.trigger('click')
     expect(wrapper.emitted('refresh')).toEqual([[]])

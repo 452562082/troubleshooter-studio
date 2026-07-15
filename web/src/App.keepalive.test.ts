@@ -92,7 +92,8 @@ describe('App keep-alive incident route synchronization', () => {
 
     expect(wrapper.get('[data-ticket-id="bug-b"]').attributes('aria-pressed')).toBe('true')
     expect(wrapper.get('.incident-bug-summary h2').text()).toBe('缓存命中下降')
-    expect(wrapper.get('.case-heading').text()).toContain('case-b')
+    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe('case-b')
+    expect(wrapper.get('.case-heading').text()).toContain('缓存命中下降')
     expect(router.currentRoute.value.query.bug_id).toBe('bug-b')
     wrapper.unmount()
   })
@@ -128,7 +129,8 @@ describe('App keep-alive incident route synchronization', () => {
     await flushRouteWork()
 
     expect(wrapper.get('[data-ticket-id="bug-a"]').attributes('aria-pressed')).toBe('true')
-    expect(wrapper.get('.case-heading').text()).toContain('case-a')
+    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe('case-a')
+    expect(wrapper.get('.case-heading').text()).toContain('支付页超时')
 
     await router.push('/bugs')
     await flushRouteWork()
@@ -140,7 +142,8 @@ describe('App keep-alive incident route synchronization', () => {
     expect(wrapper.get('[data-ticket-id="bug-b"]').attributes('aria-pressed')).toBe('true')
     expect(wrapper.get('[data-ticket-id="bug-a"]').attributes('aria-pressed')).toBe('false')
     expect(wrapper.get('.incident-bug-summary h2').text()).toBe('缓存命中下降')
-    expect(wrapper.get('.case-heading').text()).toContain('case-b')
+    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe('case-b')
+    expect(wrapper.get('.case-heading').text()).toContain('缓存命中下降')
     expect(router.currentRoute.value.query.bug_id).toBe('bug-b')
     wrapper.unmount()
   })

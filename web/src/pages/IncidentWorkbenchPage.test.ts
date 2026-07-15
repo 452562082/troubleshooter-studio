@@ -264,6 +264,26 @@ describe('IncidentWorkbenchPage', () => {
     expect(wrapper.get('.incident-bug-summary h2').text()).toBe('缓存命中下降')
   })
 
+  it('switches the displayed workflow directly when another Bug is selected', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA, bugB])
+    const caseA = incident('case-a', 'waiting_evidence', '2026-07-13T00:00:00Z')
+    const caseB = incident('case-b', 'waiting_fix_approval', '2026-07-13T00:01:00Z', { bug_id: 'bug-b' })
+    vi.mocked(listIncidentCases).mockResolvedValue([caseA, caseB])
+    mockCaseDetails(detail(caseA), detail(caseB))
+    const wrapper = await mountedPage()
+
+    await wrapper.get('[data-ticket-id="bug-b"]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe(caseB.id)
+    expect(wrapper.get('.case-heading').text()).toContain(bugB.title)
+    expect(wrapper.get('.case-heading').text()).not.toContain(caseB.id)
+    expect(wrapper.find('[data-action="enter-case"]').exists()).toBe(false)
+    expect(wrapper.get('[data-action="restart-case"]').text()).toContain('重新开始故障闭环')
+  })
+
   it('opens the newest active Case without calling Start', async () => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])
@@ -275,7 +295,9 @@ describe('IncidentWorkbenchPage', () => {
 
     const wrapper = await mountedPage()
 
-    expect(wrapper.get('.case-heading').text()).toContain('case-active-new')
+    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe('case-active-new')
+    expect(wrapper.get('.case-heading').text()).toContain(bugA.title)
+    expect(wrapper.get('.case-heading').text()).not.toContain('case-active-new')
     expect(wrapper.text()).toContain('允许修复')
     expect(startIncidentCase).not.toHaveBeenCalled()
     expect(wrapper.find('[data-action="start-case"]').exists()).toBe(false)
@@ -299,7 +321,7 @@ describe('IncidentWorkbenchPage', () => {
     expect(wrapper.find('.start-card').exists()).toBe(false)
   })
 
-  it('shows enter and restart only for an active Case', async () => {
+  it('shows the active workflow directly and keeps only restart in the Bot action panel', async () => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])
     const item = incident('case-waiting_evidence', 'waiting_evidence', '2026-07-13T00:00:00Z')
@@ -309,11 +331,13 @@ describe('IncidentWorkbenchPage', () => {
     const wrapper = await mountedPage()
     const panel = wrapper.get('.bot-action-panel')
 
-    expect(panel.get('.bot-action-status').text()).toContain('已有进行中的 Case')
-    expect(panel.get('[data-action="enter-case"]').text()).toContain('进入故障闭环')
+    expect(panel.get('.bot-action-status').text()).toBe('故障闭环进行中')
+    expect(panel.find('[data-action="enter-case"]').exists()).toBe(false)
     expect(panel.get('[data-action="restart-case"]').text()).toContain('重新开始故障闭环')
     expect(panel.find('[data-action="start-case"]').exists()).toBe(false)
     expect(wrapper.find('.lifecycle-region').exists()).toBe(true)
+    expect(wrapper.get('.case-heading').text()).toContain(bugA.title)
+    expect(wrapper.get('.case-heading').text()).not.toContain(item.id)
   })
 
   it.each(['fixed_verified', 'legacy_archived', 'reset_archived'] as const)('hides a %s Case and offers only a fresh start', async status => {
@@ -326,7 +350,7 @@ describe('IncidentWorkbenchPage', () => {
     const wrapper = await mountedPage()
     const panel = wrapper.get('.bot-action-panel')
 
-    expect(panel.get('.bot-action-status').text()).toBe('尚无进行中的 Case')
+    expect(panel.get('.bot-action-status').text()).toBe('尚未开启故障闭环')
     expect(panel.get('[data-action="start-case"]').text()).toContain('开启故障闭环')
     expect(panel.find('[data-action="enter-case"]').exists()).toBe(false)
     expect(panel.find('[data-action="restart-case"]').exists()).toBe(false)
@@ -351,7 +375,7 @@ describe('IncidentWorkbenchPage', () => {
     await flushPromises()
 
     expect(wrapper.find('.lifecycle-region').exists()).toBe(false)
-    expect(wrapper.get('.bot-action-status').text()).toBe('尚无进行中的 Case')
+    expect(wrapper.get('.bot-action-status').text()).toBe('尚未开启故障闭环')
     expect(wrapper.find('[data-action="start-case"]').exists()).toBe(true)
     expect(wrapper.text()).not.toContain(terminal.id)
   })
@@ -376,7 +400,7 @@ describe('IncidentWorkbenchPage', () => {
 
     expect(wrapper.find('.lifecycle-region').exists()).toBe(false)
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
-    expect(wrapper.get('.bot-action-status').text()).toBe('尚无进行中的 Case')
+    expect(wrapper.get('.bot-action-status').text()).toBe('尚未开启故障闭环')
     expect(wrapper.find('[data-action="start-case"]').exists()).toBe(true)
     expect(wrapper.find('[data-action="enter-case"]').exists()).toBe(false)
     expect(wrapper.find('[data-action="restart-case"]').exists()).toBe(false)
@@ -436,7 +460,7 @@ describe('IncidentWorkbenchPage', () => {
 
     expect(wrapper.find('.lifecycle-region').exists()).toBe(false)
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
-    expect(wrapper.get('.bot-action-status').text()).toBe('尚无进行中的 Case')
+    expect(wrapper.get('.bot-action-status').text()).toBe('尚未开启故障闭环')
     expect(wrapper.find('[data-action="start-case"]').exists()).toBe(true)
     expect(wrapper.find('[data-action="enter-case"]').exists()).toBe(false)
     expect(wrapper.find('[data-action="restart-case"]').exists()).toBe(false)
@@ -466,7 +490,7 @@ describe('IncidentWorkbenchPage', () => {
     }))
     expect(resetIncidentCaseWithWarnings).not.toHaveBeenCalled()
     expect(wrapper.find('[data-reset-confirm]').exists()).toBe(false)
-    expect(wrapper.get('.case-heading').text()).toContain(opened.id)
+    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe(opened.id)
   })
 
   it('retries an initial active Case detail failure without revealing terminal history', async () => {
@@ -484,7 +508,7 @@ describe('IncidentWorkbenchPage', () => {
     await wrapper.get('[data-action="retry-active-case"]').trigger('click')
     await flushPromises()
 
-    expect(wrapper.get('.case-heading').text()).toContain(active.id)
+    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe(active.id)
     expect(wrapper.find('[data-action="retry-active-case"]').exists()).toBe(false)
   })
 
@@ -499,7 +523,7 @@ describe('IncidentWorkbenchPage', () => {
 
     vi.mocked(getIncidentCase).mockClear()
     vi.mocked(getIncidentCase).mockResolvedValue(detail(refreshed))
-    await wrapper.get('[aria-label="刷新当前 Case"]').trigger('click')
+    await wrapper.get('[aria-label="刷新故障闭环"]').trigger('click')
     await flushPromises()
 
     expect(getIncidentCase).toHaveBeenCalledWith(active.id)
@@ -520,7 +544,7 @@ describe('IncidentWorkbenchPage', () => {
     ['no selected Bot', [], '请选择排障机器人'],
     ['unsupported target', [{ bot: { ...botMatch.bot, key: 'base|cursor', target: 'cursor' }, score: 8, reasons: [] }], '暂不支持由 Studio 后台启动'],
     ['empty environment', [{ bot: { ...botMatch.bot, env: '' }, score: 8, reasons: [] }], '缺少目标环境'],
-  ] as const)('keeps enter enabled but disables restart for %s', async (_label, availableMatches, reason) => {
+  ] as const)('keeps the active workflow visible but disables restart for %s', async (_label, availableMatches, reason) => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])
     vi.mocked(matchBugBots).mockResolvedValue(availableMatches as any)
@@ -530,7 +554,8 @@ describe('IncidentWorkbenchPage', () => {
 
     const wrapper = await mountedPage()
 
-    expect(wrapper.get<HTMLButtonElement>('[data-action="enter-case"]').element.disabled).toBe(false)
+    expect(wrapper.find('[data-action="enter-case"]').exists()).toBe(false)
+    expect(wrapper.find('.lifecycle-region').exists()).toBe(true)
     expect(wrapper.get<HTMLButtonElement>('[data-action="restart-case"]').element.disabled).toBe(true)
     expect(wrapper.get('.bot-action-disabled-reason').text()).toContain(reason)
   })
@@ -595,49 +620,20 @@ describe('IncidentWorkbenchPage', () => {
     wrapper.unmount()
   })
 
-  it('scrolls smoothly to an active Case and focuses its current-stage action', async () => {
-    const scrollIntoView = vi.fn()
-    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView
-    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: scrollIntoView })
-    vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({ matches: false }))
+  it('loads and displays an active workflow without a separate entry action', async () => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])
-    const item = incident('case-enter-active', 'waiting_evidence', '2026-07-13T00:00:00Z')
-    vi.mocked(listIncidentCases).mockResolvedValue([item])
-    mockCaseDetails(detail(item))
-    const wrapper = mount(IncidentWorkbenchPage, { attachTo: document.body })
-    await flushPromises()
-    await flushPromises()
-    await flushPromises()
-
-    await wrapper.get('[data-action="enter-case"]').trigger('click')
-    await wrapper.vm.$nextTick()
-
-    expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' })
-    expect(document.activeElement).toBe(wrapper.get('.primary-action').element)
-
-    wrapper.unmount()
-    if (originalScrollIntoView) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: originalScrollIntoView })
-    else delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView
-    vi.unstubAllGlobals()
-  })
-
-  it('finishes a loading Enter by focusing after the requested Case detail resolves', async () => {
-    const scrollIntoView = stubIncidentEntry()
-    route.query = { bug_id: 'bug-a' }
-    vi.mocked(listBugs).mockResolvedValue([bugA])
-    const item = incident('case-loading-enter', 'waiting_evidence', '2026-07-13T00:00:00Z')
+    const item = incident('case-loading-active', 'waiting_evidence', '2026-07-13T00:00:00Z')
     const pendingDetail = deferred<IncidentCaseDetail>()
     vi.mocked(listIncidentCases).mockResolvedValue([item])
     vi.mocked(getIncidentCase).mockReturnValue(pendingDetail.promise)
-    const wrapper = mount(IncidentWorkbenchPage, { attachTo: document.body })
+    const wrapper = mount(IncidentWorkbenchPage)
     await flushPromises()
     await flushPromises()
     await flushPromises()
 
     expect(wrapper.find('.case-loading').exists()).toBe(true)
-    await wrapper.get('[data-action="enter-case"]').trigger('click')
-    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('[data-action="enter-case"]').exists()).toBe(false)
     expect(wrapper.find('.primary-action').exists()).toBe(false)
 
     pendingDetail.resolve(detail(item))
@@ -645,10 +641,10 @@ describe('IncidentWorkbenchPage', () => {
     await flushPromises()
     await flushPromises()
 
-    expect(scrollIntoView).toHaveBeenCalledTimes(2)
-    expect(scrollIntoView).toHaveBeenLastCalledWith({ behavior: 'smooth', block: 'start' })
-    expect(document.activeElement).toBe(wrapper.get('.primary-action').element)
-    wrapper.unmount()
+    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe(item.id)
+    expect(wrapper.get('.case-heading').text()).toContain(bugA.title)
+    expect(wrapper.find('[data-action="enter-case"]').exists()).toBe(false)
+    expect(wrapper.find('.primary-action').exists()).toBe(true)
   })
 
   it('uses an existing Case returned by the backend', async () => {
@@ -793,7 +789,7 @@ describe('IncidentWorkbenchPage', () => {
     }))
     expect(startIncidentCase).not.toHaveBeenCalled()
     expect(continueIncidentCase).not.toHaveBeenCalled()
-    expect(wrapper.get('.case-heading').text()).toContain('case-reset-replacement')
+    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe('case-reset-replacement')
     expect(getIncidentCase).toHaveBeenLastCalledWith('case-reset-replacement')
     expect(scrollIntoView).toHaveBeenLastCalledWith({ behavior: 'smooth', block: 'start' })
     const primary = wrapper.get<HTMLButtonElement>('.primary-action')
@@ -959,7 +955,7 @@ describe('IncidentWorkbenchPage', () => {
     eventHandler?.({ kind: 'snapshot', case: replacement, snapshot: detail(replacement) })
     await flushPromises()
     await flushPromises()
-    expect(wrapper.get('.case-heading').text()).toContain(replacement.id)
+    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe(replacement.id)
     expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
 
     pendingReset.resolve({ case: replacement, warnings: [] })
@@ -968,7 +964,7 @@ describe('IncidentWorkbenchPage', () => {
     await flushPromises()
 
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
-    expect(wrapper.get('.case-heading').text()).toContain(replacement.id)
+    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe(replacement.id)
     expect(listIncidentCases).toHaveBeenCalledTimes(2)
     expect(getIncidentCase).toHaveBeenLastCalledWith(replacement.id)
     expect(notifications.success).toHaveBeenCalledWith('Case 已重置，接替 Case 已创建')
@@ -1005,7 +1001,7 @@ describe('IncidentWorkbenchPage', () => {
     eventHandler?.({ kind: 'snapshot', case: replacement, snapshot: detail(replacement) })
     await flushPromises()
     await flushPromises()
-    expect(wrapper.get('.case-heading').text()).toContain(replacement.id)
+    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe(replacement.id)
 
     pendingReset.reject(new Error('validation phase schedule failed'))
     await flushPromises()
@@ -1013,7 +1009,7 @@ describe('IncidentWorkbenchPage', () => {
     await flushPromises()
 
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
-    expect(wrapper.get('.case-heading').text()).toContain(replacement.id)
+    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe(replacement.id)
     expect(listIncidentCases).toHaveBeenCalledTimes(2)
     expect(vi.mocked(getIncidentCase).mock.calls.filter(([caseID]) => caseID === replacement.id)).toHaveLength(2)
     expect(wrapper.get('.live-error').text()).toContain('接替 Case 已创建，但新阶段启动失败')
@@ -1084,7 +1080,7 @@ describe('IncidentWorkbenchPage', () => {
     expect(wrapper.get<HTMLButtonElement>('[data-reset-cancel]').element.disabled).toBe(true)
     expect(wrapper.get<HTMLButtonElement>('[data-reset-confirm]').element.disabled).toBe(true)
     expect(wrapper.get<HTMLButtonElement>('[data-action="restart-case"]').element.disabled).toBe(true)
-    expect(wrapper.get<HTMLButtonElement>('[data-action="enter-case"]').element.disabled).toBe(false)
+    expect(wrapper.find('[data-action="enter-case"]').exists()).toBe(false)
     expect(wrapper.get('.bot-action-disabled-reason').text()).toContain('处理中')
     const dialog = wrapper.get<HTMLElement>('[role="dialog"]')
     expect(wrapper.get('[data-reset-error]').attributes('aria-live')).toBe('assertive')
@@ -1132,7 +1128,7 @@ describe('IncidentWorkbenchPage', () => {
     await flushPromises()
     await flushPromises()
 
-    expect(wrapper.get('.case-heading').text()).toContain('case-b')
+    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe('case-b')
     expect(getIncidentCase).not.toHaveBeenCalled()
     expect(notifications.success).not.toHaveBeenCalled()
   })
@@ -1158,7 +1154,7 @@ describe('IncidentWorkbenchPage', () => {
     await flushPromises()
     await flushPromises()
 
-    expect(wrapper.get('.case-heading').text()).toContain('case-b')
+    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe('case-b')
     expect(wrapper.text()).not.toContain('stale reset failed')
     expect(notifications.toastError).not.toHaveBeenCalled()
   })
@@ -1183,7 +1179,7 @@ describe('IncidentWorkbenchPage', () => {
     await wrapper.get('[data-ticket-id="bug-b"]').trigger('click')
     await flushPromises()
     await flushPromises()
-    expect(wrapper.get('.case-heading').text()).toContain('case-b')
+    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe('case-b')
     vi.mocked(getIncidentCase).mockClear()
     notifications.success.mockClear()
 
@@ -1192,7 +1188,7 @@ describe('IncidentWorkbenchPage', () => {
     await flushPromises()
 
     expect(getIncidentCase).not.toHaveBeenCalled()
-    expect(wrapper.get('.case-heading').text()).toContain('case-b')
+    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe('case-b')
     expect(notifications.success).not.toHaveBeenCalled()
   })
 
@@ -1221,7 +1217,7 @@ describe('IncidentWorkbenchPage', () => {
     await flushPromises()
     await flushPromises()
 
-    expect(wrapper.get('.case-heading').text()).toContain('case-b')
+    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe('case-b')
     expect(wrapper.text()).not.toContain('stale approval failed')
     expect(notifications.toastError).not.toHaveBeenCalled()
   })

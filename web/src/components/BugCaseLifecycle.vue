@@ -35,6 +35,7 @@ import BugCaseArtifacts from './BugCaseArtifacts.vue'
 
 const props = defineProps<{
   detail: IncidentCaseDetail | null
+  bugTitle?: string
   pending?: boolean
   error?: string
 }>()
@@ -222,11 +223,15 @@ function dialogTitle(): string {
     <main class="case-column case-main-column">
       <div v-if="!detail" class="empty-state">选择一个 Case 查看生命周期</div>
       <template v-else>
-        <header class="case-heading" tabindex="-1">
-          <div class="case-heading-copy"><span>Case {{ detail.case.id }}</span><h2>{{ detail.case.bug_id }}</h2></div>
+        <header class="case-heading" :data-case-id="detail.case.id" tabindex="-1">
+          <div class="case-heading-copy">
+            <span>故障闭环进度</span>
+            <h2>{{ bugTitle?.trim() || '当前 Bug' }}</h2>
+            <p>第 {{ detail.case.cycle_number }} 轮 · {{ detail.case.environment || '环境未知' }}</p>
+          </div>
           <div class="case-heading-actions">
             <span class="status-pill" :data-status="detail.case.status">{{ statusLabel(detail.case.status) }}</span>
-            <button class="icon-button" type="button" aria-label="刷新当前 Case" :disabled="pending" @click="emit('refresh')">
+            <button class="icon-button" type="button" aria-label="刷新故障闭环" :disabled="pending" @click="emit('refresh')">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 5v6h-6" /></svg>
             </button>
           </div>
@@ -346,6 +351,7 @@ function dialogTitle(): string {
 .case-heading, .current-action-card { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
 .case-heading-copy { min-width: 0; }
 .case-heading-copy > span { display: block; margin-bottom: 2px; }
+.case-heading-copy p { margin-top: 3px; color: var(--c-muted); font-size: var(--fs-xs); }
 .case-heading-actions { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: var(--sp-2); }
 h2, h3, p { margin: 0; }
 .case-heading h2 { color: var(--c-ink); font-size: var(--fs-lg); }

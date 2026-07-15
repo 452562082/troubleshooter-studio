@@ -1,7 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { copyFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { redactConsoleText, sanitizeURL, safeResponseRecord } from './sanitize.mjs';
+import {
+  assertAllowedURL,
+  buildLocator,
+  validateWorkerRequest,
+} from './browser_worker.mjs';
 
 test('sanitizeURL removes userinfo and redacts every repeated sensitive query value', () => {
   assert.equal(
@@ -113,4 +123,190 @@ test('safeResponseRecord protects overlong and credential-bearing IDs', () => {
   assert.equal(record.trace_id, '[REDACTED]');
   assert.equal(JSON.stringify(record).includes('request-secret'), false);
   assert.equal(JSON.stringify(record).includes('url-secret'), false);
+});
+
+const baseRequest = () => ({
+  mode: 'execute',
+  plan: {
+    version: 1,
+    start_url: 'https://app.test/users',
+    actions: [{ id: 'shot', action: 'screenshot' }],
+    assertions: [{ kind: 'visible_text', value: 'Users' }],
+  },
+  policy: {
+    allowed_origins: ['https://app.test'],
+    private_origins: [],
+    auth_origins: ['https://login.test'],
+    is_prod: false,
+  },
+  staging_dir: '/opaque/browser',
+  headless: true,
+});
+
+test('browser worker loads and validates offline without importing Playwright', () => {
+  assert.doesNotThrow(() => validateWorkerRequest(baseRequest()));
+});
+
+test('browser worker accepts exactly seven actions and six locator kinds', () => {
+  const actions = [
+    { id: 'goto', action: 'goto', url: 'https://app.test/next' },
+    { id: 'click', action: 'click', locator: { kind: 'role', value: 'button', name: 'Search' } },
+    { id: 'fill', action: 'fill', locator: { kind: 'label', value: 'Keyword' }, value: 'soup' },
+    { id: 'press', action: 'press', locator: { kind: 'text', value: 'Search' }, key: 'Enter' },
+    { id: 'select', action: 'select', locator: { kind: 'placeholder', value: 'Status' }, value: 'open' },
+    { id: 'wait', action: 'wait_for', locator: { kind: 'test_id', value: 'results' } },
+    { id: 'shot', action: 'screenshot' },
+    { id: 'css', action: 'wait_for', locator: { kind: 'css', value: '.rendered' } },
+  ];
+  const request = baseRequest();
+  request.plan.actions = actions;
+  assert.doesNotThrow(() => validateWorkerRequest(request));
+
+  for (const action of ['evaluate', 'upload', 'shell', 'xpath']) {
+    const invalid = baseRequest();
+    invalid.plan.actions = [{ id: 'bad', action }];
+    assert.throws(() => validateWorkerRequest(invalid), /not supported/);
+  }
+  for (const kind of ['xpath', 'javascript', 'file']) {
+    const invalid = baseRequest();
+    invalid.plan.actions = [{ id: 'bad', action: 'click', locator: { kind, value: '//button' } }];
+    assert.throws(() => validateWorkerRequest(invalid), /locator/);
+  }
+});
+
+test('browser worker rejects production interaction before browser launch', () => {
+  for (const action of ['click', 'fill', 'press', 'select']) {
+    const request = baseRequest();
+    request.policy.is_prod = true;
+    request.plan.actions = [{
+      id: 'write',
+      action,
+      locator: { kind: 'text', value: 'Submit' },
+      ...(action === 'fill' || action === 'select' ? { value: 'x' } : {}),
+      ...(action === 'press' ? { key: 'Enter' } : {}),
+    }];
+    assert.throws(() => validateWorkerRequest(request), /production/);
+  }
+});
+
+test('assertAllowedURL re-resolves every navigation and request', async () => {
+  const policy = baseRequest().policy;
+  let calls = 0;
+  const lookup = async () => {
+    calls += 1;
+    return calls === 1
+      ? [{ address: '203.0.113.10', family: 4 }]
+      : [{ address: '127.0.0.1', family: 4 }];
+  };
+  await assertAllowedURL('https://app.test/users', policy, lookup);
+  await assert.rejects(assertAllowedURL('https://app.test/api', policy, lookup), /private/);
+  assert.equal(calls, 2);
+});
+
+test('assertAllowedURL rejects schemes, origins, metadata, and private addresses', async () => {
+  const policy = baseRequest().policy;
+  const publicLookup = async () => [{ address: '203.0.113.10', family: 4 }];
+  for (const raw of [
+    'file:///etc/passwd',
+    'data:text/plain,secret',
+    'javascript:alert(1)',
+    'https://evil.test/users',
+    'https://user:pass@app.test/users',
+  ]) {
+    await assert.rejects(assertAllowedURL(raw, policy, publicLookup));
+  }
+
+  const metadataPolicy = { ...policy, allowed_origins: ['http://169.254.169.254'] };
+  await assert.rejects(
+    assertAllowedURL('http://169.254.169.254/latest/meta-data', metadataPolicy, async () => [{ address: '169.254.169.254', family: 4 }]),
+    /link-local|metadata/,
+  );
+  await assert.rejects(
+    assertAllowedURL('https://app.test/users', policy, async () => [{ address: '10.0.0.8', family: 4 }]),
+    /private/,
+  );
+});
+
+test('private destinations require exact configured origin', async () => {
+  const lookup = async () => [{ address: '10.0.0.8', family: 4 }];
+  const allowed = baseRequest().policy;
+  allowed.allowed_origins = ['https://app.internal:8443'];
+  allowed.private_origins = ['https://app.internal:8443'];
+  await assertAllowedURL('https://app.internal:8443/users', allowed, lookup);
+  await assert.rejects(assertAllowedURL('https://app.internal/users', allowed, lookup), /origin/);
+});
+
+test('buildLocator maps only the six declared locator types', () => {
+  const calls = [];
+  const page = {
+    getByRole: (...args) => calls.push(['role', ...args]),
+    getByLabel: (...args) => calls.push(['label', ...args]),
+    getByText: (...args) => calls.push(['text', ...args]),
+    getByPlaceholder: (...args) => calls.push(['placeholder', ...args]),
+    getByTestId: (...args) => calls.push(['test_id', ...args]),
+    locator: (...args) => calls.push(['css', ...args]),
+  };
+  for (const locator of [
+    { kind: 'role', value: 'button', name: 'Search' },
+    { kind: 'label', value: 'Keyword' },
+    { kind: 'text', value: 'Results' },
+    { kind: 'placeholder', value: 'Search' },
+    { kind: 'test_id', value: 'results' },
+    { kind: 'css', value: '.results' },
+  ]) {
+    buildLocator(page, locator);
+  }
+  assert.deepEqual(calls.map(([kind]) => kind), ['role', 'label', 'text', 'placeholder', 'test_id', 'css']);
+  assert.throws(() => buildLocator(page, { kind: 'xpath', value: '//button' }), /locator/);
+});
+
+test('worker source has no arbitrary script, upload, HAR, trace, body, or raw-header escape hatch', () => {
+  const workerPath = fileURLToPath(new URL('./browser_worker.mjs', import.meta.url));
+  const source = readFileSync(workerPath, 'utf8');
+  for (const forbidden of [
+    '.evaluate(',
+    'setInputFiles',
+    'addScriptTag',
+    'recordHar',
+    'tracing.start',
+    'postData(',
+    'allHeaders(',
+    'request.headers(',
+  ]) {
+    assert.equal(source.includes(forbidden), false, forbidden);
+  }
+  assert.equal((source.match(/import\('playwright'\)/g) ?? []).length, 2);
+  assert.equal(source.includes("from 'playwright'"), false);
+  assert.equal(source.includes("context.route('**/*'"), true);
+});
+
+test('unsupported CLI mode emits exactly one final JSON object and no progress on stdout', () => {
+  const workerPath = fileURLToPath(new URL('./browser_worker.mjs', import.meta.url));
+  const run = spawnSync(process.execPath, [workerPath, '--mode', 'login'], { encoding: 'utf8' });
+  assert.notEqual(run.status, 0);
+  const lines = run.stdout.trim().split(/\r?\n/);
+  assert.equal(lines.length, 1);
+  assert.deepEqual(JSON.parse(lines[0]), {
+    status: 'worker_failed',
+    error_code: 'browser_worker_failed',
+    error_message: 'browser worker failed',
+  });
+  assert.equal(run.stderr, '');
+});
+
+test('CLI entrypoint survives a lexical temp path whose canonical path differs', () => {
+  const sourceWorker = fileURLToPath(new URL('./browser_worker.mjs', import.meta.url));
+  const sourceSanitizer = fileURLToPath(new URL('./sanitize.mjs', import.meta.url));
+  const temporary = mkdtempSync(join(tmpdir(), 'tshoot-browser-worker-'));
+  try {
+    const workerPath = join(temporary, 'browser_worker.mjs');
+    copyFileSync(sourceWorker, workerPath);
+    copyFileSync(sourceSanitizer, join(temporary, 'sanitize.mjs'));
+    const run = spawnSync(process.execPath, [workerPath, '--mode', 'unsupported'], { encoding: 'utf8' });
+    assert.notEqual(run.status, 0);
+    assert.equal(run.stdout.trim().split(/\r?\n/).length, 1);
+    assert.equal(JSON.parse(run.stdout).error_code, 'browser_worker_failed');
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
 });

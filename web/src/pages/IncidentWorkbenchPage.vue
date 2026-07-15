@@ -115,6 +115,12 @@ watch(incidentWorkflow.cases, () => {
   void openPreferredCase()
 })
 
+watch(displayedCase, current => {
+  const request = resetDialog.value
+  if (!request || request.mode !== 'active_reset' || resetting.value || current?.id === request.caseID) return
+  discardResetDialog()
+})
+
 watch(displayedDetail, detail => {
   if (detail?.case.id === pendingEnterCaseID.value) void focusIncidentCase(detail.case.id)
 })
@@ -501,6 +507,10 @@ async function confirmReset() {
 async function confirmRestart() {
   const request = resetDialog.value
   if (!request || resetting.value || !request.newBotKey) return
+  if (request.mode === 'active_reset' && (displayedCase.value?.id !== request.caseID || displayedCase.value.bug_id !== request.bugID)) {
+    discardResetDialog()
+    return
+  }
   if (request.mode === 'active_reset') {
     await confirmReset()
     return

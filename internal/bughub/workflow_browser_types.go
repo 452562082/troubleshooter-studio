@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 const maxBrowserPlanStringBytes = 4096
@@ -109,13 +111,13 @@ type browserPlanYAML struct {
 }
 
 type browserActionYAML struct {
-	ID              string          `yaml:"id"`
-	Action          string          `yaml:"action"`
-	Locator         *BrowserLocator `yaml:"locator,omitempty"`
-	URL             *string         `yaml:"url,omitempty"`
-	Value           *string         `yaml:"value,omitempty"`
-	Key             *string         `yaml:"key,omitempty"`
-	ScreenshotAfter *bool           `yaml:"screenshot_after,omitempty"`
+	ID              string    `yaml:"id"`
+	Action          string    `yaml:"action"`
+	Locator         yaml.Node `yaml:"locator,omitempty"`
+	URL             yaml.Node `yaml:"url,omitempty"`
+	Value           yaml.Node `yaml:"value,omitempty"`
+	Key             yaml.Node `yaml:"key,omitempty"`
+	ScreenshotAfter yaml.Node `yaml:"screenshot_after,omitempty"`
 }
 
 type browserActionFieldPresence struct {
@@ -181,28 +183,14 @@ func validateBrowserAction(index int, raw browserActionYAML) (BrowserAction, err
 	if err := validateBrowserPlanString(prefix+".action", raw.Action, true); err != nil {
 		return BrowserAction{}, err
 	}
-	for _, field := range []struct {
-		name  string
-		value *string
-	}{
-		{name: "url", value: raw.URL},
-		{name: "value", value: raw.Value},
-		{name: "key", value: raw.Key},
-	} {
-		if field.value != nil {
-			if err := validateBrowserPlanString(prefix+"."+field.name, *field.value, false); err != nil {
-				return BrowserAction{}, err
-			}
-		}
-	}
-	if raw.Locator != nil {
-		if err := validateBrowserLocator(prefix+".locator", raw.Locator); err != nil {
-			return BrowserAction{}, err
-		}
-	}
+	locatorPresent := browserYAMLFieldPresent(raw.Locator)
+	urlPresent := browserYAMLFieldPresent(raw.URL)
+	valuePresent := browserYAMLFieldPresent(raw.Value)
+	keyPresent := browserYAMLFieldPresent(raw.Key)
+	screenshotAfterPresent := browserYAMLFieldPresent(raw.ScreenshotAfter)
 
-	require := func(field string, present bool, value *string) error {
-		if !present || (value != nil && strings.TrimSpace(*value) == "") {
+	require := func(field string, present bool) error {
+		if !present {
 			return fmt.Errorf("browser plan %s.%s is required", prefix, field)
 		}
 		return nil
@@ -224,99 +212,147 @@ func validateBrowserAction(index int, raw browserActionYAML) (BrowserAction, err
 
 	switch raw.Action {
 	case "goto":
-		if err := require("url", raw.URL != nil, raw.URL); err != nil {
+		if err := require("url", urlPresent); err != nil {
 			return BrowserAction{}, err
 		}
 		if err := forbidFields(
-			browserActionFieldPresence{"locator", raw.Locator != nil},
-			browserActionFieldPresence{"value", raw.Value != nil},
-			browserActionFieldPresence{"key", raw.Key != nil},
+			browserActionFieldPresence{"locator", locatorPresent},
+			browserActionFieldPresence{"value", valuePresent},
+			browserActionFieldPresence{"key", keyPresent},
 		); err != nil {
 			return BrowserAction{}, err
 		}
 	case "click", "wait_for":
-		if err := require("locator", raw.Locator != nil, nil); err != nil {
+		if err := require("locator", locatorPresent); err != nil {
 			return BrowserAction{}, err
 		}
 		if err := forbidFields(
-			browserActionFieldPresence{"url", raw.URL != nil},
-			browserActionFieldPresence{"value", raw.Value != nil},
-			browserActionFieldPresence{"key", raw.Key != nil},
+			browserActionFieldPresence{"url", urlPresent},
+			browserActionFieldPresence{"value", valuePresent},
+			browserActionFieldPresence{"key", keyPresent},
 		); err != nil {
 			return BrowserAction{}, err
 		}
 	case "fill", "select":
-		if err := require("locator", raw.Locator != nil, nil); err != nil {
+		if err := require("locator", locatorPresent); err != nil {
 			return BrowserAction{}, err
 		}
-		if err := require("value", raw.Value != nil, raw.Value); err != nil {
+		if err := require("value", valuePresent); err != nil {
 			return BrowserAction{}, err
 		}
 		if err := forbidFields(
-			browserActionFieldPresence{"url", raw.URL != nil},
-			browserActionFieldPresence{"key", raw.Key != nil},
+			browserActionFieldPresence{"url", urlPresent},
+			browserActionFieldPresence{"key", keyPresent},
 		); err != nil {
 			return BrowserAction{}, err
 		}
 	case "press":
-		if err := require("locator", raw.Locator != nil, nil); err != nil {
+		if err := require("locator", locatorPresent); err != nil {
 			return BrowserAction{}, err
 		}
-		if err := require("key", raw.Key != nil, raw.Key); err != nil {
+		if err := require("key", keyPresent); err != nil {
 			return BrowserAction{}, err
 		}
 		if err := forbidFields(
-			browserActionFieldPresence{"url", raw.URL != nil},
-			browserActionFieldPresence{"value", raw.Value != nil},
+			browserActionFieldPresence{"url", urlPresent},
+			browserActionFieldPresence{"value", valuePresent},
 		); err != nil {
 			return BrowserAction{}, err
 		}
 	case "screenshot":
 		if err := forbidFields(
-			browserActionFieldPresence{"locator", raw.Locator != nil},
-			browserActionFieldPresence{"url", raw.URL != nil},
-			browserActionFieldPresence{"value", raw.Value != nil},
-			browserActionFieldPresence{"key", raw.Key != nil},
+			browserActionFieldPresence{"locator", locatorPresent},
+			browserActionFieldPresence{"url", urlPresent},
+			browserActionFieldPresence{"value", valuePresent},
+			browserActionFieldPresence{"key", keyPresent},
 		); err != nil {
 			return BrowserAction{}, err
-		}
-		if raw.ScreenshotAfter != nil && *raw.ScreenshotAfter {
-			return BrowserAction{}, fmt.Errorf("browser plan %s.screenshot_after=true is forbidden for screenshot", prefix)
 		}
 	default:
 		return BrowserAction{}, fmt.Errorf("browser plan %s.action %q is not supported", prefix, raw.Action)
 	}
 
+	locator, err := decodeBrowserLocatorYAML(prefix+".locator", raw.Locator)
+	if err != nil {
+		return BrowserAction{}, err
+	}
+	urlValue, err := decodeBrowserPlanYAMLString(prefix+".url", raw.URL, raw.Action == "goto")
+	if err != nil {
+		return BrowserAction{}, err
+	}
+	value, err := decodeBrowserPlanYAMLString(prefix+".value", raw.Value, raw.Action == "fill" || raw.Action == "select")
+	if err != nil {
+		return BrowserAction{}, err
+	}
+	key, err := decodeBrowserPlanYAMLString(prefix+".key", raw.Key, raw.Action == "press")
+	if err != nil {
+		return BrowserAction{}, err
+	}
+	screenshotAfter, err := decodeBrowserPlanYAMLBool(prefix+".screenshot_after", raw.ScreenshotAfter)
+	if err != nil {
+		return BrowserAction{}, err
+	}
+	if raw.Action == "screenshot" && screenshotAfterPresent && screenshotAfter {
+		return BrowserAction{}, fmt.Errorf("browser plan %s.screenshot_after=true is forbidden for screenshot", prefix)
+	}
+
 	return BrowserAction{
 		ID:              raw.ID,
 		Action:          raw.Action,
-		Locator:         raw.Locator,
-		URL:             browserStringValue(raw.URL),
-		Value:           browserStringValue(raw.Value),
-		Key:             browserStringValue(raw.Key),
-		ScreenshotAfter: raw.ScreenshotAfter != nil && *raw.ScreenshotAfter,
+		Locator:         locator,
+		URL:             urlValue,
+		Value:           value,
+		Key:             key,
+		ScreenshotAfter: screenshotAfter,
 	}, nil
 }
 
-func validateBrowserLocator(field string, locator *BrowserLocator) error {
-	if err := validateBrowserPlanString(field+".kind", locator.Kind, true); err != nil {
-		return err
+func decodeBrowserLocatorYAML(field string, node yaml.Node) (*BrowserLocator, error) {
+	if !browserYAMLFieldPresent(node) {
+		return nil, nil
 	}
-	if err := validateBrowserPlanString(field+".value", locator.Value, true); err != nil {
-		return err
+	node = resolveBrowserYAMLAlias(node)
+	if node.Tag == "!!null" || node.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("browser plan %s must be a locator mapping", field)
 	}
-	if err := validateBrowserPlanString(field+".name", locator.Name, false); err != nil {
-		return err
+	fields := make(map[string]yaml.Node, len(node.Content)/2)
+	for i := 0; i < len(node.Content); i += 2 {
+		key := node.Content[i]
+		if key.Kind != yaml.ScalarNode {
+			return nil, fmt.Errorf("browser plan %s has a non-scalar field name", field)
+		}
+		switch key.Value {
+		case "kind", "value", "name":
+		default:
+			return nil, fmt.Errorf("browser plan %s has unknown field %q", field, key.Value)
+		}
+		if _, exists := fields[key.Value]; exists {
+			return nil, fmt.Errorf("browser plan %s field %q is duplicated", field, key.Value)
+		}
+		fields[key.Value] = *node.Content[i+1]
 	}
-	switch locator.Kind {
+	kind, err := decodeBrowserPlanYAMLString(field+".kind", fields["kind"], true)
+	if err != nil {
+		return nil, err
+	}
+	value, err := decodeBrowserPlanYAMLString(field+".value", fields["value"], true)
+	if err != nil {
+		return nil, err
+	}
+	nameNode, namePresent := fields["name"]
+	if kind != "role" && namePresent {
+		return nil, fmt.Errorf("browser plan %s.name is only allowed for role locators", field)
+	}
+	name, err := decodeBrowserPlanYAMLString(field+".name", nameNode, false)
+	if err != nil {
+		return nil, err
+	}
+	switch kind {
 	case "role", "label", "text", "placeholder", "test_id", "css":
 	default:
-		return fmt.Errorf("browser plan %s.kind %q is not supported", field, locator.Kind)
+		return nil, fmt.Errorf("browser plan %s.kind %q is not supported", field, kind)
 	}
-	if locator.Kind != "role" && strings.TrimSpace(locator.Name) != "" {
-		return fmt.Errorf("browser plan %s.name is only allowed for role locators", field)
-	}
-	return nil
+	return &BrowserLocator{Kind: kind, Value: value, Name: name}, nil
 }
 
 func validateBrowserPlanString(field, value string, required bool) error {
@@ -329,9 +365,49 @@ func validateBrowserPlanString(field, value string, required bool) error {
 	return nil
 }
 
-func browserStringValue(value *string) string {
-	if value == nil {
-		return ""
+func decodeBrowserPlanYAMLString(field string, node yaml.Node, required bool) (string, error) {
+	if !browserYAMLFieldPresent(node) {
+		if required {
+			return "", fmt.Errorf("browser plan %s is required", field)
+		}
+		return "", nil
 	}
-	return *value
+	node = resolveBrowserYAMLAlias(node)
+	if node.Tag == "!!null" {
+		return "", fmt.Errorf("browser plan %s must be a string", field)
+	}
+	var value string
+	if err := node.Decode(&value); err != nil {
+		return "", fmt.Errorf("browser plan %s must be a string: %w", field, err)
+	}
+	if err := validateBrowserPlanString(field, value, required); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+func decodeBrowserPlanYAMLBool(field string, node yaml.Node) (bool, error) {
+	if !browserYAMLFieldPresent(node) {
+		return false, nil
+	}
+	node = resolveBrowserYAMLAlias(node)
+	if node.Tag == "!!null" {
+		return false, fmt.Errorf("browser plan %s must be a boolean", field)
+	}
+	var value bool
+	if err := node.Decode(&value); err != nil {
+		return false, fmt.Errorf("browser plan %s must be a boolean: %w", field, err)
+	}
+	return value, nil
+}
+
+func browserYAMLFieldPresent(node yaml.Node) bool {
+	return node.Kind != 0
+}
+
+func resolveBrowserYAMLAlias(node yaml.Node) yaml.Node {
+	for node.Kind == yaml.AliasNode && node.Alias != nil {
+		node = *node.Alias
+	}
+	return node
 }

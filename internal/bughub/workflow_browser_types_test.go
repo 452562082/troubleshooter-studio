@@ -123,6 +123,37 @@ func TestParseBrowserPlanRejectsInvalidActionFields(t *testing.T) {
 	}
 }
 
+func TestParseBrowserPlanRejectsExplicitForbiddenFieldPresence(t *testing.T) {
+	cases := map[string]string{
+		"non-role empty name": `  - id: step
+    action: click
+    locator: {kind: text, value: 用户, name: ""}`,
+		"non-role null name": `  - id: step
+    action: click
+    locator: {kind: text, value: 用户, name: null}`,
+		"click null url": `  - id: step
+    action: click
+    locator: {kind: text, value: 用户}
+    url: null`,
+		"screenshot null locator": `  - id: step
+    action: screenshot
+    locator: null`,
+		"required goto url null": `  - id: step
+    action: goto
+    url: null`,
+		"required click locator null": `  - id: step
+    action: click
+    locator: null`,
+	}
+	for name, actionYAML := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseBrowserPlan(browserPlanWithAction(actionYAML)); err == nil {
+				t.Fatal("expected explicit null or forbidden field presence to be rejected")
+			}
+		})
+	}
+}
+
 func TestParseBrowserPlanStrictlyValidatesStructureAndAllowlists(t *testing.T) {
 	valid := browserPlanWithAction(`  - id: open-users
     action: click
@@ -130,6 +161,8 @@ func TestParseBrowserPlanStrictlyValidatesStructureAndAllowlists(t *testing.T) {
     screenshot_after: true`)
 	cases := map[string]string{
 		"unknown field":         strings.Replace(string(valid), "version: 1", "version: 1\nevaluate: alert(1)", 1),
+		"unknown action field":  strings.Replace(string(valid), "screenshot_after: true", "screenshot_after: true\n    timeout: 1", 1),
+		"unknown locator field": strings.Replace(string(valid), "name: 用户}", "name: 用户, xpath: //button}", 1),
 		"unknown action":        strings.Replace(string(valid), "action: click", "action: evaluate", 1),
 		"xpath":                 strings.Replace(string(valid), "kind: role", "kind: xpath", 1),
 		"duplicate id":          strings.Replace(string(valid), "assertions:", "  - id: open-users\n    action: screenshot\nassertions:", 1),

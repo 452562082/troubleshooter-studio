@@ -120,6 +120,15 @@ func TestValidateBrowserAuthOrigins(t *testing.T) {
 	}
 }
 
+func TestValidateBrowserAuthOriginsRejectsUserinfoWithoutPath(t *testing.T) {
+	cfg := minimalValid()
+	cfg.Environments[0].BrowserAuthOrigins = []string{"https://user:pass@login.example.com"}
+	err := Validate(&cfg)
+	if err == nil || !strings.Contains(err.Error(), "browser_auth_origins") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestValidate_RepoReferencesUnknownEnv(t *testing.T) {
 	c := minimalValid()
 	c.Repos = []Repo{{

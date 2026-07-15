@@ -80,6 +80,8 @@ type AgentPhaseRunner struct {
 	artifactsRoot               string
 	complete                    PhaseCompletionFunc
 	eventSink                   InvestigationEventSink
+	browserVerifier             BrowserVerifier
+	browserPolicyResolver       BrowserPolicyResolver
 	openStaging                 func(string, string) (attemptEvidenceStaging, error)
 	completionReconcileAttempts int
 	completionReconcileDelay    time.Duration
@@ -99,7 +101,7 @@ func (r *AgentPhaseRunner) SetEventSink(sink InvestigationEventSink) {
 }
 
 func NewAgentPhaseRunner(store *CaseStore, executor PhaseAgentExecutor, legacy *InvestigationStore, artifactsRoot string, complete PhaseCompletionFunc) *AgentPhaseRunner {
-	return &AgentPhaseRunner{store: store, executor: executor, legacy: legacy, artifactsRoot: artifactsRoot, complete: complete, openStaging: openAttemptEvidenceStaging, completionReconcileAttempts: 6, completionReconcileDelay: 2 * time.Second, active: make(map[string]context.CancelFunc), scheduled: make(map[string]struct{})}
+	return &AgentPhaseRunner{store: store, executor: executor, legacy: legacy, artifactsRoot: artifactsRoot, complete: complete, completionReconcileAttempts: 6, completionReconcileDelay: 2 * time.Second, active: make(map[string]context.CancelFunc), scheduled: make(map[string]struct{})}
 }
 
 func (r *AgentPhaseRunner) SetCompletionCallback(complete PhaseCompletionFunc) {
@@ -109,6 +111,16 @@ func (r *AgentPhaseRunner) SetCompletionCallback(complete PhaseCompletionFunc) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.complete = complete
+}
+
+func (r *AgentPhaseRunner) SetBrowserVerifier(verifier BrowserVerifier, resolver BrowserPolicyResolver) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.browserVerifier = verifier
+	r.browserPolicyResolver = resolver
 }
 
 func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug Bug, bot BotRef) error {
@@ -138,6 +150,8 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 	r.scheduled[attempt.ID] = struct{}{}
 	r.active[attempt.ID] = cancel
 	complete := r.complete
+	browserVerifier := r.browserVerifier
+	browserPolicyResolver := r.browserPolicyResolver
 	r.mu.Unlock()
 	releaseReservation := func() {
 		cancel()
@@ -197,7 +211,11 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 	}
 	openStaging := r.openStaging
 	if openStaging == nil {
-		openStaging = openAttemptEvidenceStaging
+		if browserAssistedAttempt(bug, attempt) {
+			openStaging = openOrCreateBrowserAttemptStaging
+		} else {
+			openStaging = openAttemptEvidenceStaging
+		}
 	}
 	staging, err := openStaging(r.artifactsRoot, attempt.ID)
 	if err != nil {
@@ -239,7 +257,7 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 		prompt += "\n## Durable fix checkpoint (mandatory)\n\nBefore the first repository push, atomically write `" + fixCheckpointManifestName + "` in the Studio staging directory (write a temporary sibling, fsync, then rename) with state=`prepared`; include every planned repository commit/branch/remote/test. After all pushes succeed, atomically replace it with the same manifest and state=`pushed` before reporting completion. JSON fields: kind=`" + fixCheckpointManifestKind + "`, version=1, case_id=`" + attempt.CaseID + "`, attempt_id=`" + attempt.ID + "`, state=`prepared|pushed`, result=<the exact structured FixResult also returned as final YAML>. Never include credentials. Recovery treats the SSH remote branch as truth, so a crash after push but before the state update remains recoverable while a pre-push crash cannot be misreported.\n"
 	}
 	r.startLegacyProjection(attempt, bug, executionBot)
-	go r.run(runCtx, attempt.Clone(), bug, executionBot, prompt, staging, incident.Version, claimToken, complete)
+	go r.run(runCtx, attempt.Clone(), incident.Clone(), bug, executionBot, prompt, staging, incident.Version, claimToken, complete, browserVerifier, browserPolicyResolver)
 	return nil
 }
 
@@ -287,7 +305,7 @@ func (r *AgentPhaseRunner) Cancel(ctx context.Context, attemptID string) error {
 	return err
 }
 
-func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, _ Bug, bot BotRef, prompt string, staging attemptEvidenceStaging, expectedVersion int64, claimToken string, complete PhaseCompletionFunc) {
+func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incident IncidentCase, bug Bug, bot BotRef, prompt string, staging attemptEvidenceStaging, expectedVersion int64, claimToken string, complete PhaseCompletionFunc, browserVerifier BrowserVerifier, browserPolicyResolver BrowserPolicyResolver) {
 	started := time.Now()
 	cleaned := false
 	releaseClaim := func() {
@@ -325,8 +343,37 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, _ Bug,
 		releaseClaim()
 		return
 	}
-	result, runErr := r.executor.ExecutePhase(ctx, attempt.ID, bot, prompt, emit)
-	if runErr != nil && attempt.Phase != PhaseFix && ctx.Err() == nil {
+	var result PhaseExecutionResult
+	var runErr error
+	var coordinated *BrowserCoordinatorResult
+	if browserAssistedAttempt(bug, attempt) {
+		browserBug := bug
+		browserBug.Env = incident.Environment
+		browserBug.BotEnv = incident.Environment
+		browserBug.SystemID = incident.SystemID
+		coordinatorResult := BrowserCoordinatorResult{}
+		if strings.TrimSpace(bug.FrontendURL) == "" {
+			coordinatorResult, runErr = (BrowserCoordinator{Executor: r.executor, Verifier: browserVerifier}).Execute(ctx, BrowserCoordinatorRequest{Attempt: attempt, Bug: browserBug, Bot: bot, BasePrompt: prompt, StagingDir: staging.Path(), Emit: emit})
+		} else if browserPolicyResolver == nil {
+			coordinatorResult = browserCoordinatorFailure(coordinatorResult, "browser_policy_unavailable")
+		} else {
+			policy, policyErr := browserPolicyResolver.ResolveBrowserPolicy(ctx, incident, browserBug)
+			if policyErr != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					runErr = ctxErr
+				} else {
+					coordinatorResult = browserCoordinatorFailure(coordinatorResult, "browser_policy_unavailable")
+				}
+			} else {
+				coordinatorResult, runErr = (BrowserCoordinator{Executor: r.executor, Verifier: browserVerifier}).Execute(ctx, BrowserCoordinatorRequest{Attempt: attempt, Bug: browserBug, Bot: bot, BasePrompt: prompt, Policy: policy, StagingDir: staging.Path(), Emit: emit})
+			}
+		}
+		coordinated = &coordinatorResult
+		result = PhaseExecutionResult{FinalYAML: coordinatorResult.FinalYAML, Usage: coordinatorResult.Usage}
+	} else {
+		result, runErr = r.executor.ExecutePhase(ctx, attempt.ID, bot, prompt, emit)
+	}
+	if runErr != nil && coordinated == nil && attempt.Phase != PhaseFix && ctx.Err() == nil {
 		r.projectEvent(attempt, InvestigationEvent{Type: "retry", Message: "read-only phase process retry"})
 		firstUsage := result.Usage
 		result, runErr = r.executor.ExecutePhase(ctx, attempt.ID, bot, prompt, emit)
@@ -346,7 +393,20 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, _ Bug,
 	}
 	command := CompleteAttemptCommand{CaseID: attempt.CaseID, AttemptID: attempt.ID, IdempotencyKey: "agent-phase:" + attempt.ID, ActorID: firstNonEmpty(bot.Key, attempt.BotKey, "agent"), Usage: result.Usage}
 	command.Usage.Duration = time.Since(started)
-	if runErr != nil {
+	if coordinated != nil && coordinated.ErrorCode != "" && runErr == nil {
+		command.Outcome = failureOutcome(attempt.Phase)
+		command.OutputJSON = browserStopOutput(*coordinated)
+		command.ErrorCode = coordinated.ErrorCode
+		command.ErrorMessage = coordinated.ErrorMessage
+		if len(coordinated.BrowserArtifacts) != 0 {
+			if err := r.registerArtifacts(ctx, attempt, staging, browserArtifactReferences(coordinated.BrowserArtifacts)); err != nil {
+				command.Outcome = failureOutcome(attempt.Phase)
+				command.OutputJSON = mustJSON(map[string]any{"error_code": artifactErrorCode(err), "error_message": browserPublicErrorMessage("browser_verifier_failed"), "evidence_limitation": true})
+				command.ErrorCode = artifactErrorCode(err)
+				command.ErrorMessage = browserPublicErrorMessage("browser_verifier_failed")
+			}
+		}
+	} else if runErr != nil {
 		command.Outcome = failureOutcome(attempt.Phase)
 		command.OutputJSON = mustJSON(map[string]any{"error_code": "agent_process_failed", "error_message": runErr.Error()})
 		command.ErrorCode = "agent_process_failed"
@@ -719,6 +779,7 @@ func (r *AgentPhaseRunner) validateRegressionEvidence(_ context.Context, attempt
 	if len(result.ArtifactInputs) == 0 {
 		return errors.New("regression result requires fresh evidence from the current attempt")
 	}
+	hasCorrelation := false
 	for _, artifact := range result.ArtifactInputs {
 		if artifact.Environment != input.TargetEnvironment {
 			return errors.New("regression evidence environment does not match the target environment")
@@ -726,9 +787,10 @@ func (r *AgentPhaseRunner) validateRegressionEvidence(_ context.Context, attempt
 		if artifact.Version != input.ObservedDeploymentVersion {
 			return errors.New("regression evidence version does not match the observed deployment version")
 		}
-		if strings.TrimSpace(artifact.RequestID) == "" && strings.TrimSpace(artifact.TraceID) == "" {
-			return errors.New("regression evidence requires a fresh request_id or trace_id")
-		}
+		hasCorrelation = hasCorrelation || strings.TrimSpace(artifact.RequestID) != "" || strings.TrimSpace(artifact.TraceID) != ""
+	}
+	if !hasCorrelation {
+		return errors.New("regression evidence requires a fresh request_id or trace_id")
 	}
 	return nil
 }
@@ -841,29 +903,44 @@ type RegressionValidationInput struct {
 }
 
 func ParseValidationResult(data []byte) (ValidationResult, error) {
+	result, err := decodeValidationResultStrict(data)
+	if err != nil {
+		return ValidationResult{}, err
+	}
+	if err := validateValidationResult(result); err != nil {
+		return ValidationResult{}, err
+	}
+	return result, nil
+}
+
+func decodeValidationResultStrict(data []byte) (ValidationResult, error) {
 	var result ValidationResult
 	if err := decodeStrictYAML(data, &result); err != nil {
 		return ValidationResult{}, fmt.Errorf("parse validation result: %w", err)
 	}
+	return result, nil
+}
+
+func validateValidationResult(result ValidationResult) error {
 	status, err := validationCaseStatus(result.VerificationStatus)
 	if err != nil {
-		return ValidationResult{}, err
+		return err
 	}
 	if strings.TrimSpace(result.Environment) == "" {
-		return ValidationResult{}, errors.New("validation environment is required")
+		return errors.New("validation environment is required")
 	}
 	if status != CaseWaitingEvidence && len(result.Gaps) != 0 {
-		return ValidationResult{}, errors.New("terminal validation result must not contain blocking gaps")
+		return errors.New("terminal validation result must not contain blocking gaps")
 	}
 	if status == CaseReproduced {
 		if strings.TrimSpace(result.ObservedBehavior) == "" || strings.TrimSpace(result.ExpectedBehavior) == "" {
-			return ValidationResult{}, errors.New("reproduced validation requires observed_behavior and expected_behavior")
+			return errors.New("reproduced validation requires observed_behavior and expected_behavior")
 		}
 		if len(result.Evidence) == 0 {
-			return ValidationResult{}, errors.New("reproduced validation requires at least one evidence artifact")
+			return errors.New("reproduced validation requires at least one evidence artifact")
 		}
 	}
-	return result, nil
+	return nil
 }
 
 func ParseInvestigationResult(data []byte) (InvestigationResult, error) {

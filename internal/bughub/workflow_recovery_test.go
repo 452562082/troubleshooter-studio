@@ -89,6 +89,79 @@ func TestRecoverInterruptedReadOnlyPhaseRetriesAtMostOnceAndIsDeterministic(t *t
 	}
 }
 
+func TestRecoverInterruptedBrowserAttemptReplaysSameAttemptWithoutDuplicate(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-browser-recovery", CaseValidating)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
+	runner := &recordingPhaseRunner{}
+	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	orchestrator.SetRecoveryContextResolver(RecoveryContextResolverFunc(func(_ context.Context, got IncidentCase, recovered PhaseAttempt) (Bug, BotRef, error) {
+		if got.ID != incident.ID || recovered.ID != attempt.ID {
+			t.Fatalf("context incident=%+v attempt=%+v", got, recovered)
+		}
+		return Bug{ID: incident.BugID, Env: "test", FrontendURL: "https://app.example.com/users"}, installedPhaseRunnerBot(t, attempt.BotKey, attempt.AgentTarget), nil
+	}))
+	if err := orchestrator.RecoverInterrupted(ctx); err != nil {
+		t.Fatal(err)
+	}
+	runner.mu.Lock()
+	starts := append([]PhaseAttempt(nil), runner.starts...)
+	runner.mu.Unlock()
+	if len(starts) != 1 || starts[0].ID != attempt.ID {
+		t.Fatalf("recovery starts=%+v", starts)
+	}
+	current, err := store.GetCase(ctx, incident.ID)
+	if err != nil || current.CurrentAttemptID != attempt.ID || current.Status != CaseValidating {
+		t.Fatalf("case=%+v err=%v", current, err)
+	}
+	attempts, err := store.ListAttempts(ctx, AttemptFilter{CaseID: incident.ID})
+	if err != nil || len(attempts) != 1 {
+		t.Fatalf("attempts=%+v err=%v", attempts, err)
+	}
+	if err := orchestrator.RecoverInterrupted(ctx); err != nil || runner.startCount() != 1 {
+		t.Fatalf("duplicate recovery starts=%d err=%v", runner.startCount(), err)
+	}
+	restartedRunner := &recordingPhaseRunner{}
+	restarted := NewCaseOrchestrator(store, restartedRunner, nil, nil)
+	restarted.SetRecoveryContextResolver(RecoveryContextResolverFunc(func(context.Context, IncidentCase, PhaseAttempt) (Bug, BotRef, error) {
+		return Bug{ID: incident.BugID, Env: "test", FrontendURL: "https://app.example.com/users"}, installedPhaseRunnerBot(t, attempt.BotKey, attempt.AgentTarget), nil
+	}))
+	if err := restarted.RecoverInterrupted(ctx); err != nil || restartedRunner.startCount() != 1 {
+		t.Fatalf("second-process replay starts=%d err=%v", restartedRunner.startCount(), err)
+	}
+}
+
+func TestBrowserRecoveryReopensOriginalAttemptStaging(t *testing.T) {
+	root := phaseArtifactsRoot(t)
+	first, err := openOrCreateBrowserAttemptStaging(root, "attempt-browser-staging")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := first.Path()
+	if err := os.MkdirAll(filepath.Join(path, "browser-executions", "primary", "browser"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "browser-executions", "primary", "browser", "reservation.json"), []byte(`{"state":"running"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := openOrCreateBrowserAttemptStaging(root, "attempt-browser-staging")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	defer reopened.Cleanup()
+	if reopened.Path() != path {
+		t.Fatalf("reopened=%q original=%q", reopened.Path(), path)
+	}
+	if _, err := reopened.Capture("browser-executions/primary/browser/reservation.json"); err != nil {
+		t.Fatalf("durable browser journal was not reopened: %v", err)
+	}
+}
+
 func TestRecoveryIgnoresResetArchiveAndRecoversReplacement(t *testing.T) {
 	ctx := context.Background()
 	store := newOrchestratorStore(t)

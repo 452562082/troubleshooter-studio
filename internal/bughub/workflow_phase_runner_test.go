@@ -82,6 +82,18 @@ func (fn phaseExecutorFunc) ExecutePhase(ctx context.Context, id string, bot Bot
 }
 func (phaseExecutorFunc) CancelPhase(context.Context, string) error { return nil }
 
+type browserVerifierFunc func(context.Context, BrowserVerificationRequest) (BrowserVerificationResult, error)
+
+func (fn browserVerifierFunc) Execute(ctx context.Context, request BrowserVerificationRequest) (BrowserVerificationResult, error) {
+	return fn(ctx, request)
+}
+
+type browserPolicyResolverFunc func(context.Context, IncidentCase, Bug) (BrowserSecurityPolicy, error)
+
+func (fn browserPolicyResolverFunc) ResolveBrowserPolicy(ctx context.Context, incident IncidentCase, bug Bug) (BrowserSecurityPolicy, error) {
+	return fn(ctx, incident, bug)
+}
+
 type flakyCleanupStaging struct {
 	attemptEvidenceStaging
 	calls int
@@ -382,6 +394,158 @@ func TestAgentPhaseRunnerRetriesReadOnlyOnceButNeverFix(t *testing.T) {
 				t.Fatalf("calls = %d, want %d", calls, tc.calls)
 			}
 		})
+	}
+}
+
+func TestAgentPhaseRunnerCoordinatesBrowserAndRegistersCurrentAttemptArtifacts(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-browser-runner", CaseValidating)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
+		{FinalYAML: validBrowserPlanYAML(), Usage: AgentUsage{InputTokens: 10, OutputTokens: 5}},
+		{FinalYAML: reproducedValidationYAML("browser/final.png"), Usage: AgentUsage{InputTokens: 7, OutputTokens: 3}},
+	}}
+	verifier := browserVerifierFunc(func(_ context.Context, request BrowserVerificationRequest) (BrowserVerificationResult, error) {
+		browserDir := filepath.Join(request.StagingDir, "browser")
+		if err := os.MkdirAll(browserDir, 0o700); err != nil {
+			return BrowserVerificationResult{}, err
+		}
+		if err := os.WriteFile(filepath.Join(browserDir, "final.png"), append([]byte("\x89PNG\r\n\x1a\n"), []byte("rendered")...), 0o600); err != nil {
+			return BrowserVerificationResult{}, err
+		}
+		if err := os.WriteFile(filepath.Join(browserDir, "network.json"), []byte(`{"status":200,"request_id":"req-browser"}`), 0o600); err != nil {
+			return BrowserVerificationResult{}, err
+		}
+		if request.Emit != nil {
+			request.Emit(BrowserProgress{Code: "action_started", Message: "执行 1/1：打开页面", ActionID: "open-users", Current: 1, Total: 1})
+		}
+		return BrowserVerificationResult{
+			Status: "completed", FinalScreenshotPath: "browser/final.png",
+			Artifacts: []BrowserArtifactReference{
+				{Kind: "screenshot", Path: "browser/final.png", Environment: "test"},
+				{Kind: "network", Path: "browser/network.json", Environment: "test", RequestID: "req-browser"},
+			},
+		}, nil
+	})
+	completed := make(chan CompleteAttemptCommand, 1)
+	events := make(chan InvestigationEvent, 4)
+	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(_ context.Context, command CompleteAttemptCommand) error {
+		completed <- command
+		return nil
+	})
+	runner.SetEventSink(func(_ InvestigationRun, event InvestigationEvent) { events <- event })
+	runner.SetBrowserVerifier(verifier, browserPolicyResolverFunc(func(_ context.Context, got IncidentCase, bug Bug) (BrowserSecurityPolicy, error) {
+		if got.ID != incident.ID || bug.FrontendURL == "" {
+			t.Fatalf("policy context incident=%+v bug=%+v", got, bug)
+		}
+		return BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.example.com"}}, nil
+	}))
+	bug := Bug{ID: incident.BugID, SystemID: "stale-system", Env: "prod", FrontendURL: "https://app.example.com/users", Steps: "打开用户页"}
+	if err := runner.Start(context.Background(), attempt, bug, installedPhaseRunnerBot(t, "bot", "codex")); err != nil {
+		t.Fatal(err)
+	}
+	command := <-completed
+	if command.Outcome != PhaseOutcomeReproduced || command.ErrorCode != "" || command.Usage.InputTokens != 17 || command.Usage.OutputTokens != 8 {
+		t.Fatalf("completion=%+v", command)
+	}
+	artifacts, err := store.ListEvidenceArtifacts(context.Background(), incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 2 || artifacts[0].AttemptID != attempt.ID || artifacts[1].AttemptID != attempt.ID {
+		t.Fatalf("artifacts=%+v", artifacts)
+	}
+	select {
+	case event := <-events:
+		if event.Type != "browser_progress" || event.Meta["attempt_id"] != attempt.ID || event.Meta["browser_code"] != "action_started" {
+			t.Fatalf("event=%+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("browser progress event was not projected")
+	}
+}
+
+func TestAgentPhaseRunnerBrowserStopsUseBoundedEnvelopeAndKeepFailureScreenshot(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-browser-stop", CaseValidating)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{{FinalYAML: validBrowserPlanYAML()}}}
+	verifier := browserVerifierFunc(func(_ context.Context, request BrowserVerificationRequest) (BrowserVerificationResult, error) {
+		browserDir := filepath.Join(request.StagingDir, "browser")
+		if err := os.MkdirAll(browserDir, 0o700); err != nil {
+			return BrowserVerificationResult{}, err
+		}
+		if err := os.WriteFile(filepath.Join(browserDir, "failed.png"), append([]byte("\x89PNG\r\n\x1a\n"), []byte("failed")...), 0o600); err != nil {
+			return BrowserVerificationResult{}, err
+		}
+		return BrowserVerificationResult{
+			Status: "assertion_failed", FailedActionID: "wait-results", ErrorMessage: "Authorization: Bearer raw-worker-secret",
+			FinalScreenshotPath: "browser/failed.png",
+			Artifacts:           []BrowserArtifactReference{{Kind: "screenshot", Path: "browser/failed.png", Environment: "test"}},
+		}, nil
+	})
+	completed := make(chan CompleteAttemptCommand, 1)
+	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(_ context.Context, command CompleteAttemptCommand) error { completed <- command; return nil })
+	runner.SetBrowserVerifier(verifier, browserPolicyResolverFunc(func(context.Context, IncidentCase, Bug) (BrowserSecurityPolicy, error) {
+		return BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.example.com"}}, nil
+	}))
+	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID, Env: "test", FrontendURL: "https://app.example.com/users"}, installedPhaseRunnerBot(t, "bot", "codex")); err != nil {
+		t.Fatal(err)
+	}
+	command := <-completed
+	if command.Outcome != PhaseOutcomeNeedsEvidence || command.ErrorCode != "browser_assertion_failed" || strings.Contains(string(command.OutputJSON), "raw-worker-secret") || strings.Contains(command.ErrorMessage, "raw-worker-secret") {
+		t.Fatalf("completion=%+v output=%s", command, command.OutputJSON)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(command.OutputJSON, &envelope); err != nil || envelope["failed_action_id"] != "wait-results" || envelope["evidence_limitation"] != true {
+		t.Fatalf("envelope=%+v err=%v", envelope, err)
+	}
+	artifacts, err := store.ListEvidenceArtifacts(context.Background(), incident.ID)
+	if err != nil || len(artifacts) != 1 || artifacts[0].Kind != "screenshot" {
+		t.Fatalf("artifacts=%+v err=%v", artifacts, err)
+	}
+}
+
+func TestAgentPhaseRunnerExplicitWebWithoutURLDoesNotCallAgentOrBrowser(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-browser-no-url", CaseValidating)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
+	attempt.InputJSON = []byte(`{"mode":"reproduce","target_environment":"test","user_input":"请用浏览器复现页面"}`)
+	if _, err := store.db.Exec(`UPDATE phase_attempts SET input_json=? WHERE id=?`, string(attempt.InputJSON), attempt.ID); err != nil {
+		t.Fatal(err)
+	}
+	executor := &scriptedPhaseExecutor{}
+	verifierCalls := 0
+	verifier := browserVerifierFunc(func(context.Context, BrowserVerificationRequest) (BrowserVerificationResult, error) {
+		verifierCalls++
+		return BrowserVerificationResult{}, nil
+	})
+	completed := make(chan CompleteAttemptCommand, 1)
+	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(_ context.Context, command CompleteAttemptCommand) error { completed <- command; return nil })
+	runner.SetBrowserVerifier(verifier, browserPolicyResolverFunc(func(context.Context, IncidentCase, Bug) (BrowserSecurityPolicy, error) {
+		t.Fatal("policy resolver called without a usable URL")
+		return BrowserSecurityPolicy{}, nil
+	}))
+	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID, Env: "test"}, installedPhaseRunnerBot(t, "bot", "codex")); err != nil {
+		t.Fatal(err)
+	}
+	command := <-completed
+	if command.ErrorCode != "browser_url_required" || executor.Calls != 0 || verifierCalls != 0 {
+		t.Fatalf("agent=%d browser=%d command=%+v", executor.Calls, verifierCalls, command)
+	}
+}
+
+func TestRegressionEvidenceCorrelationMayComeFromAnyCurrentArtifact(t *testing.T) {
+	attempt := PhaseAttempt{Phase: PhaseRegression, InputJSON: mustJSON(RegressionValidationInput{OriginalScenarioHash: "scenario", TargetEnvironment: "test", ObservedDeploymentVersion: "version-1"})}
+	validation := ValidationResult{VerificationStatus: "fixed_verified", Environment: "test", ScenarioHash: "scenario"}
+	output, _ := json.Marshal(validation)
+	result := PhaseResult{Outcome: PhaseOutcomeFixedVerified, OutputJSON: output, ArtifactInputs: []ArtifactReference{
+		{Kind: "screenshot", Path: "browser/final.png", Environment: "test", Version: "version-1"},
+		{Kind: "network", Path: "browser/network.json", Environment: "test", Version: "version-1", RequestID: "req-1"},
+	}}
+	runner := &AgentPhaseRunner{}
+	if err := runner.validateRegressionEvidence(context.Background(), attempt, result); err != nil {
+		t.Fatalf("correlation on one current artifact was rejected: %v", err)
 	}
 }
 
@@ -726,7 +890,7 @@ func TestAgentPhaseRunnerDeferredCleanupRetriesAfterFirstFailure(t *testing.T) {
 	if err := store.ClaimRunnableAttempt(context.Background(), AttemptRunClaim{Attempt: attempt, ClaimToken: claimToken}); err != nil {
 		t.Fatal(err)
 	}
-	runner.run(context.Background(), attempt, Bug{ID: incident.BugID}, installedPhaseRunnerBot(t, "bot", "codex"), "prompt", staging, incident.Version, claimToken, func(context.Context, CompleteAttemptCommand) error { return nil })
+	runner.run(context.Background(), attempt, incident, Bug{ID: incident.BugID}, installedPhaseRunnerBot(t, "bot", "codex"), "prompt", staging, incident.Version, claimToken, func(context.Context, CompleteAttemptCommand) error { return nil }, nil, nil)
 	if staging.calls != 2 {
 		t.Fatalf("cleanup calls = %d, want initial failure plus deferred retry", staging.calls)
 	}

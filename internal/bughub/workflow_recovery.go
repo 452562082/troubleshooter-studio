@@ -318,6 +318,15 @@ func (o *CaseOrchestrator) recoverAttempt(ctx context.Context, attempt PhaseAtte
 		}
 		return err
 	}
+	if attempt.Phase == PhaseValidation || attempt.Phase == PhaseRegression {
+		bug, bot, contextErr := o.resolveRecoveryContext(ctx, incident, attempt)
+		if contextErr != nil {
+			return fmt.Errorf("resolve browser recovery context: %w", contextErr)
+		}
+		if browserAssistedAttempt(bug, attempt) {
+			return o.recoverBrowserAttempt(ctx, incident, attempt, bug, bot)
+		}
+	}
 	attempt.Status = AttemptStatusInterrupted
 	attempt.OutputJSON = []byte(`{}`)
 	attempt.ErrorCode = "studio_restarted"
@@ -352,6 +361,42 @@ func (o *CaseOrchestrator) recoverAttempt(ctx context.Context, attempt PhaseAtte
 	default:
 		return nil
 	}
+}
+
+func (o *CaseOrchestrator) recoverBrowserAttempt(ctx context.Context, incident IncidentCase, attempt PhaseAttempt, bug Bug, bot BotRef) error {
+	if err := o.store.releaseBrowserRecoveryRunClaim(ctx, attempt); err != nil {
+		return err
+	}
+	key := "recovery:" + attempt.ID + ":browser-replay"
+	if o.runner == nil {
+		_, scheduleErr := o.phaseScheduleFailure(ctx, incident, attempt, key, errors.New("phase runner is unavailable"))
+		return scheduleErr
+	}
+	if err := o.startPhase(attempt, bug, bot); err != nil {
+		current, loadErr := o.store.GetCase(ctx, incident.ID)
+		if loadErr != nil {
+			return errors.Join(err, loadErr)
+		}
+		_, scheduleErr := o.phaseScheduleFailure(ctx, current, attempt, key, err)
+		return scheduleErr
+	}
+	o.markRecoveryStarted(attempt.ID)
+	return nil
+}
+
+func (s *CaseStore) releaseBrowserRecoveryRunClaim(ctx context.Context, attempt PhaseAttempt) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE phase_attempts SET run_claim_token='' WHERE id=? AND case_id=? AND status=?`, attempt.ID, attempt.CaseID, AttemptStatusRunning)
+	if err != nil {
+		return fmt.Errorf("release interrupted browser run claim: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return ErrAttemptRunClaimConflict
+	}
+	return nil
 }
 
 func (o *CaseOrchestrator) reserveInspectionOnly(ctx context.Context, incident IncidentCase, attempt PhaseAttempt) error {

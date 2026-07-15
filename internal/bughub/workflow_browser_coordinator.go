@@ -590,6 +590,9 @@ func browserCredentialSemantic(value string) bool {
 			return true
 		}
 	}
+	if at := strings.IndexByte(lower, '@'); at > 0 && at == strings.LastIndexByte(lower, '@') && at+1 < len(lower) && strings.Contains(lower[at+1:], ".") && !strings.ContainsAny(lower, " \t\r\n") {
+		return true
+	}
 	var normalized strings.Builder
 	var previous rune
 	for _, current := range value {
@@ -606,17 +609,17 @@ func browserCredentialSemantic(value string) bool {
 	tokens := strings.Fields(normalized.String())
 	for _, token := range tokens {
 		switch token {
-		case "password", "passwd", "pwd", "passcode", "pin", "otp", "mfa", "secret", "token", "auth", "cookie", "key", "login", "account", "username":
+		case "password", "passwd", "pwd", "passcode", "pin", "otp", "mfa", "secret", "token", "auth", "cookie", "key", "login", "account", "username", "signin", "credential", "credentials", "userid", "email", "captcha":
 			return true
 		}
-		for _, prefix := range []string{"password", "passwd", "passcode", "secret", "token", "auth", "cookie", "login", "account", "username"} {
+		for _, prefix := range []string{"password", "passwd", "passcode", "secret", "token", "auth", "cookie", "login", "account", "username", "signin", "credential", "userid", "email", "captcha"} {
 			if strings.HasPrefix(token, prefix) || strings.HasSuffix(token, prefix) {
 				return true
 			}
 		}
 	}
 	compact := strings.Join(tokens, "")
-	for _, semantic := range []string{"password", "passwd", "passcode", "apikey", "accesskey", "privatekey", "login", "account", "username"} {
+	for _, semantic := range []string{"password", "passwd", "passcode", "apikey", "accesskey", "privatekey", "login", "account", "username", "signin", "credential", "userid", "email", "captcha", "verificationcode"} {
 		if strings.Contains(compact, semantic) {
 			return true
 		}
@@ -648,11 +651,25 @@ func syncBrowserDirectory(path string) error {
 
 func openOrCreateBrowserAttemptStaging(root, attemptID string) (attemptEvidenceStaging, error) {
 	staging, found, err := openExistingBrowserAttemptStaging(root, attemptID)
-	if err != nil || found {
-		return staging, err
+	if err != nil {
+		return nil, err
 	}
-	return openAttemptEvidenceStaging(root, attemptID)
+	if found {
+		return &openedBrowserAttemptStaging{attemptEvidenceStaging: staging, created: false}, nil
+	}
+	staging, err = openAttemptEvidenceStaging(root, attemptID)
+	if err != nil {
+		return nil, err
+	}
+	return &openedBrowserAttemptStaging{attemptEvidenceStaging: staging, created: true}, nil
 }
+
+type openedBrowserAttemptStaging struct {
+	attemptEvidenceStaging
+	created bool
+}
+
+func (s *openedBrowserAttemptStaging) CreatedForCurrentOpen() bool { return s != nil && s.created }
 
 func openExistingBrowserAttemptStaging(root, attemptID string) (attemptEvidenceStaging, bool, error) {
 	entries, err := os.ReadDir(filepath.Join(root, ".staging"))

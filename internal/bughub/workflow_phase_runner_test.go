@@ -1473,6 +1473,73 @@ func TestAgentPhaseRunnerAvoidsStagingForPreflightFailures(t *testing.T) {
 	}
 }
 
+func TestAgentPhaseRunnerPreflightFailureNeverDeletesReusedBrowserStaging(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		setup func(*testing.T, *AgentPhaseRunner, *CaseStore, PhaseAttempt, context.CancelFunc)
+	}{
+		{name: "cancel after reopen", setup: func(t *testing.T, runner *AgentPhaseRunner, _ *CaseStore, _ PhaseAttempt, cancel context.CancelFunc) {
+			runner.openStaging = func(root, attemptID string) (attemptEvidenceStaging, error) {
+				staging, err := openOrCreateBrowserAttemptStaging(root, attemptID)
+				cancel()
+				return staging, err
+			}
+		}},
+		{name: "claim conflict", setup: func(t *testing.T, _ *AgentPhaseRunner, store *CaseStore, attempt PhaseAttempt, _ context.CancelFunc) {
+			if _, err := store.db.Exec(`UPDATE phase_attempts SET run_claim_token='another-runner' WHERE id=?`, attempt.ID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "claim storage error", setup: func(t *testing.T, _ *AgentPhaseRunner, store *CaseStore, attempt PhaseAttempt, _ context.CancelFunc) {
+			if _, err := store.db.Exec(`CREATE TRIGGER fail_reused_browser_claim BEFORE UPDATE OF run_claim_token ON phase_attempts WHEN NEW.id='` + attempt.ID + `' BEGIN SELECT RAISE(ABORT, 'injected claim failure'); END`); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newOrchestratorStore(t)
+			incident := createWorkflowCase(t, store, "case-reused-preflight-"+strings.ReplaceAll(test.name, " ", "-"), CaseValidating)
+			attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
+			root := phaseArtifactsRoot(t)
+			staging, err := openOrCreateBrowserAttemptStaging(root, attempt.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sentinels := []string{
+				browserRouteJournalName,
+				filepath.Join("browser-executions", "primary", browserCoordinatorPlanJournalName),
+				filepath.Join("browser-executions", "primary", "browser", "result.json"),
+			}
+			for _, relative := range sentinels {
+				path := filepath.Join(staging.Path(), relative)
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("durable-journal"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stagingPath := staging.Path()
+			if err := staging.Close(); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, root, func(context.Context, CompleteAttemptCommand) error { return nil })
+			test.setup(t, runner, store, attempt, cancel)
+			if err := runner.Start(ctx, attempt, Bug{ID: incident.BugID}, installedPhaseRunnerBot(t, "bot", "codex")); err == nil {
+				t.Fatal("Start succeeded")
+			}
+			for _, relative := range sentinels {
+				content, err := os.ReadFile(filepath.Join(stagingPath, relative))
+				if err != nil || string(content) != "durable-journal" {
+					t.Fatalf("reused journal %q was not preserved: content=%q err=%v", relative, content, err)
+				}
+			}
+		})
+	}
+}
+
 func TestAgentPhaseRunnerConcurrentFixStartCreatesOneCheckpointStaging(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-start-cleanup-race", CaseFixing)

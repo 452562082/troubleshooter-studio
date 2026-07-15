@@ -274,6 +274,9 @@ func releaseUntransferredStaging(staging attemptEvidenceStaging, cause error) er
 	if staging == nil {
 		return cause
 	}
+	if ownership, ok := staging.(interface{ CreatedForCurrentOpen() bool }); ok && !ownership.CreatedForCurrentOpen() {
+		return errors.Join(cause, staging.Close())
+	}
 	cleanupErr := staging.Cleanup()
 	closeErr := staging.Close()
 	return errors.Join(cause, cleanupErr, closeErr)

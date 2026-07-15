@@ -161,6 +161,15 @@ func (o *CaseOrchestrator) recoveryAttemptNeedsPhaseContext(ctx context.Context,
 	if found {
 		return completion.Outcome == PhaseOutcomeReproduced || completion.Outcome == PhaseOutcomeStillReproduces, nil
 	}
+	if attempt.Status == AttemptStatusRunning && (attempt.Phase == PhaseValidation || attempt.Phase == PhaseRegression) {
+		if routeReader, ok := o.runner.(BrowserRouteRecoveryReader); ok {
+			if _, routeErr := routeReader.BrowserRouteForRecovery(ctx, attempt); routeErr != nil {
+				// Invalid durable route state is completed fail-closed by recoverAttempt
+				// and must not be masked by an unrelated recovery-context failure.
+				return false, nil
+			}
+		}
+	}
 	switch incident.Status {
 	case CaseValidating, CaseInvestigating:
 		return o.recoveryRetryAvailable(ctx, incident, attempt)
@@ -324,21 +333,25 @@ func (o *CaseOrchestrator) recoverAttempt(ctx context.Context, attempt PhaseAtte
 	}
 	if attempt.Phase == PhaseValidation || attempt.Phase == PhaseRegression {
 		if routeReader, ok := o.runner.(BrowserRouteRecoveryReader); ok {
-			if _, routeErr := routeReader.BrowserRouteForRecovery(ctx, attempt); routeErr != nil {
-				return fmt.Errorf("read durable browser recovery route: %w", routeErr)
+			assisted, routeErr := routeReader.BrowserRouteForRecovery(ctx, attempt)
+			if routeErr != nil {
+				return o.finishBrowserRouteRecoveryFailure(ctx, incident, attempt)
 			}
+			if assisted {
+				bug, bot, contextErr := o.resolveRecoveryContext(ctx, incident, attempt)
+				if contextErr != nil {
+					return fmt.Errorf("resolve durable route recovery context: %w", contextErr)
+				}
+				return o.recoverBrowserAttempt(ctx, incident, attempt, bug, bot)
+			}
+		} else {
 			bug, bot, contextErr := o.resolveRecoveryContext(ctx, incident, attempt)
 			if contextErr != nil {
-				return fmt.Errorf("resolve durable route recovery context: %w", contextErr)
+				return fmt.Errorf("resolve browser recovery context: %w", contextErr)
 			}
-			return o.recoverBrowserAttempt(ctx, incident, attempt, bug, bot)
-		}
-		bug, bot, contextErr := o.resolveRecoveryContext(ctx, incident, attempt)
-		if contextErr != nil {
-			return fmt.Errorf("resolve browser recovery context: %w", contextErr)
-		}
-		if browserAssistedAttempt(bug, attempt) {
-			return o.recoverBrowserAttempt(ctx, incident, attempt, bug, bot)
+			if browserAssistedAttempt(bug, attempt) {
+				return o.recoverBrowserAttempt(ctx, incident, attempt, bug, bot)
+			}
 		}
 	}
 	attempt.Status = AttemptStatusInterrupted
@@ -395,6 +408,23 @@ func (o *CaseOrchestrator) recoverBrowserAttempt(ctx context.Context, incident I
 		return scheduleErr
 	}
 	o.markRecoveryStarted(attempt.ID)
+	return nil
+}
+
+func (o *CaseOrchestrator) finishBrowserRouteRecoveryFailure(ctx context.Context, incident IncidentCase, attempt PhaseAttempt) error {
+	failure := browserCoordinatorFailure(BrowserCoordinatorResult{}, "browser_execution_interrupted")
+	command := CompleteAttemptCommand{
+		CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version,
+		IdempotencyKey: "recovery:" + attempt.ID + ":browser-route-invalid", ActorID: "recovery",
+		Outcome: PhaseOutcomeSystemFailed, OutputJSON: browserStopOutput(failure),
+		ErrorCode: failure.ErrorCode, ErrorMessage: failure.ErrorMessage,
+	}
+	if _, err := o.CompleteAttempt(ctx, command); err != nil {
+		return err
+	}
+	if cleaner, ok := o.runner.(AttemptStagingCleaner); ok {
+		_ = cleaner.CleanupAttemptStaging(ctx, attempt)
+	}
 	return nil
 }
 

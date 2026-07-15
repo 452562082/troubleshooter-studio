@@ -285,6 +285,14 @@ func TestBrowserCoordinatorRejectsCredentialBearingPlanBeforeJournal(t *testing.
 		{name: "mfa locator", id: "enter-code", locator: "[name=mfa-code]", value: "123456"},
 		{name: "chinese verification code", id: "enter-code", locator: "验证码", value: "123456"},
 		{name: "chinese account", id: "填写账号", locator: "#user", value: "alice"},
+		{name: "signin action", id: "signin", locator: "#identity", value: "alice"},
+		{name: "sign in locator", id: "enter-identity", locator: "#sign-in", value: "alice"},
+		{name: "credential action", id: "enter-credential", locator: "#identity", value: "alice"},
+		{name: "user id locator", id: "enter-identity", locator: "#user-id", value: "alice"},
+		{name: "email login action", id: "email-login", locator: "#identity", value: "alice"},
+		{name: "captcha locator", id: "enter-code", locator: "#captcha", value: "123456"},
+		{name: "verification code action", id: "verification-code", locator: "#code", value: "123456"},
+		{name: "email value", id: "enter-identity", locator: "#identity", value: "alice@example.com"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -168,8 +168,76 @@ func TestRecoverInterruptedUsesDurableRouteInsteadOfCurrentBugURL(t *testing.T) 
 			runner.mu.Lock()
 			starts := append([]PhaseAttempt(nil), runner.starts...)
 			runner.mu.Unlock()
-			if runner.routeRead != 1 || len(starts) != 1 || starts[0].ID != attempt.ID {
+			if runner.routeRead != 2 || len(starts) != 1 {
 				t.Fatalf("route reads=%d starts=%+v", runner.routeRead, starts)
+			}
+			if test.assisted && starts[0].ID != attempt.ID {
+				t.Fatalf("browser route did not replay the same attempt: %+v", starts)
+			}
+			if !test.assisted {
+				persisted, err := store.GetAttempt(ctx, attempt.ID)
+				attempts, listErr := store.ListAttempts(ctx, AttemptFilter{CaseID: incident.ID})
+				if starts[0].ID == attempt.ID || err != nil || listErr != nil || persisted.Status != AttemptStatusInterrupted || len(attempts) != 2 {
+					t.Fatalf("non-browser recovery start=%+v original=%+v attempts=%+v err=%v listErr=%v", starts[0], persisted, attempts, err, listErr)
+				}
+			}
+		})
+	}
+}
+
+func TestRecoverInterruptedPersistsBrokenBrowserRouteAsSystemFailure(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		setup func(*testing.T, string)
+	}{
+		{name: "missing", setup: func(t *testing.T, root string) {
+			if err := os.MkdirAll(filepath.Join(root, "browser-executions", "primary"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "malformed", setup: func(t *testing.T, root string) {
+			if err := os.WriteFile(filepath.Join(root, browserRouteJournalName), []byte(`{"kind":"wrong"}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := newOrchestratorStore(t)
+			incident, attempt := createRunningPhase(t, store, "recover-invalid-route-"+test.name, CasePendingValidation, CaseValidating, PhaseValidation, AttemptReproduce, []byte(`{"mode":"reproduce"}`))
+			root := phaseArtifactsRoot(t)
+			staging, err := openOrCreateBrowserAttemptStaging(root, attempt.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.setup(t, staging.Path())
+			if err := staging.Close(); err != nil {
+				t.Fatal(err)
+			}
+			executor := &scriptedPhaseExecutor{}
+			hostCalls := 0
+			runner := NewAgentPhaseRunner(store, executor, nil, root, nil)
+			runner.SetBrowserVerifier(browserVerifierFunc(func(context.Context, BrowserVerificationRequest) (BrowserVerificationResult, error) {
+				hostCalls++
+				return BrowserVerificationResult{}, nil
+			}), browserPolicyResolverFunc(func(context.Context, IncidentCase, Bug) (BrowserSecurityPolicy, error) {
+				return BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.example.com"}}, nil
+			}))
+			orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+			orchestrator.SetRecoveryContextResolver(RecoveryContextResolverFunc(func(context.Context, IncidentCase, PhaseAttempt) (Bug, BotRef, error) {
+				return Bug{}, BotRef{}, errors.New("recovery context must not mask an invalid durable route")
+			}))
+			if err := orchestrator.RecoverInterrupted(ctx); err != nil {
+				t.Fatal(err)
+			}
+			current, err := store.GetCase(ctx, incident.ID)
+			persisted, attemptErr := store.GetAttempt(ctx, attempt.ID)
+			events, eventErr := store.ListEvents(ctx, incident.ID)
+			if err != nil || attemptErr != nil || eventErr != nil || current.Status != CaseWaitingEvidence || persisted.Status != AttemptStatusFailed || persisted.ErrorCode != "browser_execution_interrupted" {
+				t.Fatalf("case=%+v attempt=%+v events=%+v err=%v attemptErr=%v eventErr=%v", current, persisted, events, err, attemptErr, eventErr)
+			}
+			if len(events) == 0 || events[len(events)-1].EventType != "phase_system_failed" || executor.Calls != 0 || hostCalls != 0 {
+				t.Fatalf("events=%+v planner=%d host=%d", events, executor.Calls, hostCalls)
 			}
 		})
 	}

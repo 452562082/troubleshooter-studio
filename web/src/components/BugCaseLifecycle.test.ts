@@ -1,7 +1,7 @@
 import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
-import type { CaseStatus, IncidentCase, IncidentCaseDetail } from '../lib/bridge/bugWorkflow'
+import type { CaseStatus, IncidentCase, IncidentCaseDetail, TransitionEvent } from '../lib/bridge/bugWorkflow'
 import BugCaseLifecycle, { primaryActionFor } from './BugCaseLifecycle.vue'
 
 function incident(status: CaseStatus, id = 'case-1'): IncidentCase {
@@ -13,6 +13,21 @@ function detail(status: CaseStatus): IncidentCaseDetail {
     case: incident(status), attempts: [], artifacts: [], approvals: [], code_changes: [], deployment_observations: [],
     events: [{ id: 'event-1', case_id: 'case-1', from_status: 'root_cause_ready', to_status: status, event_type: 'transition', actor_type: 'studio', actor_id: 'studio', idempotency_key: 'event-1', payload_json: {}, created_at: '2026-07-11T11:00:00Z' }],
   }
+}
+
+function timelineEvents(count: number, caseID = 'case-1'): TransitionEvent[] {
+  return Array.from({ length: count }, (_, index) => ({
+    id: `${caseID}-event-${index + 1}`,
+    case_id: caseID,
+    from_status: 'validating',
+    to_status: 'waiting_evidence',
+    event_type: `event_${index + 1}`,
+    actor_type: 'agent',
+    actor_id: 'validator',
+    idempotency_key: `${caseID}-event-${index + 1}`,
+    payload_json: {},
+    created_at: `2026-07-11T${String(index + 10).padStart(2, '0')}:00:00Z`,
+  }))
 }
 
 describe('BugCaseLifecycle', () => {
@@ -232,5 +247,105 @@ describe('BugCaseLifecycle', () => {
 
     expect(source).toMatch(/\.stage-progress \{[^}]*grid-template-columns: repeat\(6, minmax\(0, 1fr\)\);/)
     expect(source).toMatch(/@media \(max-width: 560px\)[\s\S]*?\.stage-progress \{ grid-template-columns: repeat\(2, minmax\(0, 1fr\)\); \}/)
+  })
+
+  it('previews the newest three timeline events and expands or collapses the full history', async () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.events = timelineEvents(6)
+    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+
+    expect(wrapper.find('.timeline-heading').text()).toContain('共 6 条')
+    expect(wrapper.findAll('#case-timeline-events li').map(item => item.find('strong').text())).toEqual([
+      'event_6', 'event_5', 'event_4',
+    ])
+
+    const toggle = wrapper.get<HTMLButtonElement>('.timeline-toggle')
+    expect(toggle.text()).toContain('展开全部')
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    expect(toggle.attributes('aria-controls')).toBe('case-timeline-events')
+
+    await toggle.trigger('click')
+    expect(wrapper.findAll('#case-timeline-events li')).toHaveLength(6)
+    expect(wrapper.get('.timeline-toggle').text()).toContain('收起')
+    expect(wrapper.get('.timeline-toggle').attributes('aria-expanded')).toBe('true')
+    expect(wrapper.get('#case-timeline-events').classes()).toContain('is-expanded')
+
+    await wrapper.get('.timeline-toggle').trigger('click')
+    expect(wrapper.findAll('#case-timeline-events li').map(item => item.find('strong').text())).toEqual([
+      'event_6', 'event_5', 'event_4',
+    ])
+    expect(wrapper.get('.timeline-toggle').attributes('aria-expanded')).toBe('false')
+  })
+
+  it.each([1, 3])('does not show a timeline toggle for %i events', count => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.events = timelineEvents(count)
+    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+
+    expect(wrapper.find('.timeline-heading').text()).toContain(`共 ${count} 条`)
+    expect(wrapper.find('.timeline-toggle').exists()).toBe(false)
+    expect(wrapper.findAll('#case-timeline-events li')).toHaveLength(count)
+  })
+
+  it('keeps the timeline empty state without an unnecessary toggle', () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.events = []
+    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+
+    expect(wrapper.find('.timeline-heading').text()).toContain('共 0 条')
+    expect(wrapper.find('.timeline-toggle').exists()).toBe(false)
+    expect(wrapper.find('#case-timeline-events').exists()).toBe(false)
+    expect(wrapper.find('.timeline .empty-state').text()).toBe('暂无状态事件')
+  })
+
+  it('preserves expansion for same-Case updates and collapses when the Case changes', async () => {
+    const caseA = detail('waiting_evidence')
+    caseA.events = timelineEvents(6, 'case-1')
+    const wrapper = mount(BugCaseLifecycle, { props: { cases: [caseA.case], detail: caseA } })
+
+    await wrapper.get('.timeline-toggle').trigger('click')
+    const updatedCaseA = { ...caseA, events: timelineEvents(7, 'case-1') }
+    await wrapper.setProps({ detail: updatedCaseA })
+    expect(wrapper.get('.timeline-toggle').attributes('aria-expanded')).toBe('true')
+    expect(wrapper.findAll('#case-timeline-events li')).toHaveLength(7)
+
+    const caseB = { ...detail('waiting_evidence'), case: incident('waiting_evidence', 'case-2'), events: timelineEvents(6, 'case-2') }
+    await wrapper.setProps({ cases: [caseB.case], detail: caseB })
+    expect(wrapper.get('.timeline-toggle').attributes('aria-expanded')).toBe('false')
+    expect(wrapper.findAll('#case-timeline-events li').map(item => item.find('strong').text())).toEqual([
+      'event_6', 'event_5', 'event_4',
+    ])
+  })
+
+  it('clears stale expansion when the event count no longer needs a toggle', async () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.events = timelineEvents(6)
+    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
+
+    await wrapper.get('.timeline-toggle').trigger('click')
+    await wrapper.setProps({ detail: { ...snapshot, events: timelineEvents(3) } })
+    expect(wrapper.find('.timeline-toggle').exists()).toBe(false)
+    expect(wrapper.findAll('#case-timeline-events li')).toHaveLength(3)
+
+    await wrapper.setProps({ detail: { ...snapshot, events: timelineEvents(6) } })
+    expect(wrapper.get('.timeline-toggle').attributes('aria-expanded')).toBe('false')
+    expect(wrapper.findAll('#case-timeline-events li').map(item => item.find('strong').text())).toEqual([
+      'event_6', 'event_5', 'event_4',
+    ])
+  })
+
+  it('contains bounded timeline scrolling and accessible toggle style contracts', () => {
+    const source = readFileSync('src/components/BugCaseLifecycle.vue', 'utf8')
+
+    expect(source).toMatch(/\.timeline-events\.is-expanded \{[^}]*max-height: clamp\(280px, 38vh, 520px\);/)
+    expect(source).toMatch(/\.timeline-events\.is-expanded \{[^}]*overflow-y: auto;/)
+    expect(source).toMatch(/\.timeline-events\.is-expanded \{[^}]*overflow-x: hidden;/)
+    expect(source).toMatch(/\.timeline-events\.is-expanded \{[^}]*overscroll-behavior: contain;/)
+    expect(source).toMatch(/\.timeline-events\.is-expanded \{[^}]*scrollbar-gutter: stable;/)
+    expect(source).toMatch(/\.timeline-heading \{[^}]*flex-wrap: wrap;/)
+    expect(source).toMatch(/\.timeline-toggle \{[^}]*min-width: 44px;[^}]*min-height: 44px;/)
+    expect(source).toMatch(/\.timeline-toggle:focus-visible \{[^}]*outline:/)
+    expect(source).toMatch(/\.timeline-toggle-icon \{[^}]*transition: transform 180ms ease;/)
+    expect(source).toMatch(/@media \(prefers-reduced-motion: reduce\)/)
   })
 })

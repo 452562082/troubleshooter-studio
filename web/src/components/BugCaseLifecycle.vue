@@ -29,7 +29,7 @@ export function primaryActionFor(incident: IncidentCase): CasePrimaryAction | un
 </script>
 
 <script setup lang="ts">
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import type { CaseStatus, IncidentCaseDetail } from '../lib/bridge/bugWorkflow'
 import BugCaseArtifacts from './BugCaseArtifacts.vue'
 
@@ -54,6 +54,22 @@ const actionTrigger = ref<HTMLElement | null>(null)
 const dialogCaseVersion = ref<number>()
 const dialogRootCauseAttemptID = ref('')
 const currentCase = computed(() => props.detail?.case)
+const TIMELINE_PREVIEW_COUNT = 3
+const timelineExpanded = ref(false)
+const timelineEvents = computed(() => [...(props.detail?.events ?? [])].reverse())
+const timelineCanExpand = computed(() => timelineEvents.value.length > TIMELINE_PREVIEW_COUNT)
+const visibleTimelineEvents = computed(() => {
+  if (timelineExpanded.value && timelineCanExpand.value) return timelineEvents.value
+  return timelineEvents.value.slice(0, TIMELINE_PREVIEW_COUNT)
+})
+
+watch(() => props.detail?.case.id, () => {
+  timelineExpanded.value = false
+})
+
+watch(() => props.detail?.events.length ?? 0, count => {
+  if (count <= TIMELINE_PREVIEW_COUNT) timelineExpanded.value = false
+})
 const action = computed(() => currentCase.value ? primaryActionFor(currentCase.value) : undefined)
 const expectedDeploymentCommits = computed(() => {
   const currentAttemptID = props.detail?.case.current_attempt_id || ''
@@ -256,14 +272,38 @@ function dialogTitle(): string {
         <p class="live-error" role="status" aria-live="assertive">{{ error }}</p>
 
         <section class="timeline" aria-labelledby="timeline-title">
-          <h3 id="timeline-title">过程时间线</h3>
-          <ol aria-label="Case 时间线">
-            <li v-for="event in [...detail.events].reverse()" :key="event.id">
+          <header class="timeline-heading">
+            <div>
+              <h3 id="timeline-title">过程时间线</h3>
+              <span aria-label="时间线事件总数">· 共 {{ detail.events.length }} 条</span>
+            </div>
+            <button
+              v-if="timelineCanExpand"
+              class="timeline-toggle"
+              type="button"
+              :aria-expanded="timelineExpanded"
+              aria-controls="case-timeline-events"
+              @click="timelineExpanded = !timelineExpanded"
+            >
+              <span>{{ timelineExpanded ? '收起' : '展开全部' }}</span>
+              <svg class="timeline-toggle-icon" :class="{ 'is-expanded': timelineExpanded }" viewBox="0 0 20 20" aria-hidden="true">
+                <path d="m5 7.5 5 5 5-5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" />
+              </svg>
+            </button>
+          </header>
+          <ol
+            v-if="detail.events.length > 0"
+            id="case-timeline-events"
+            class="timeline-events"
+            :class="{ 'is-expanded': timelineExpanded && timelineCanExpand }"
+            aria-label="Case 时间线"
+          >
+            <li v-for="event in visibleTimelineEvents" :key="event.id">
               <span class="timeline-dot" aria-hidden="true"></span>
               <div><strong>{{ event.event_type }}</strong><span>{{ statusLabel(event.from_status) }} → {{ statusLabel(event.to_status) }}</span><small>{{ fmtTime(event.created_at) }} · {{ event.actor_type }}</small></div>
             </li>
           </ol>
-          <p v-if="detail.events.length === 0" class="empty-state">暂无状态事件</p>
+          <p v-else class="empty-state">暂无状态事件</p>
         </section>
       </template>
     </main>
@@ -359,13 +399,22 @@ h2, h3, p { margin: 0; }
 .terminal-copy { padding: 8px 0; font-weight: 600; }
 .live-error { min-height: 1.5em; color: var(--c-danger); font-size: var(--fs-sm); }
 .live-error:empty { display: none; }
-.timeline h3 { margin-bottom: var(--sp-3); color: var(--c-ink); font-size: var(--fs-base); }
-.timeline ol { margin: 0; padding: 0; list-style: none; }
+.timeline-heading { min-width: 0; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--sp-2); margin-bottom: var(--sp-3); }
+.timeline-heading > div { min-width: 0; display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px; }
+.timeline-heading h3 { margin: 0; color: var(--c-ink); font-size: var(--fs-base); }
+.timeline-heading span { color: var(--c-muted); font-size: var(--fs-xs); }
+.timeline-toggle { min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 8px 10px; border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf); color: var(--c-text); font: inherit; font-size: var(--fs-sm); font-weight: 600; cursor: pointer; }
+.timeline-toggle:hover { border-color: #93c5fd; background: #eff6ff; color: #1d4ed8; }
+.timeline-toggle:focus-visible { outline: 3px solid rgba(37, 99, 235, .55); outline-offset: 2px; }
+.timeline-toggle-icon { width: 16px; height: 16px; flex: 0 0 auto; transition: transform 180ms ease; }
+.timeline-toggle-icon.is-expanded { transform: rotate(180deg); }
+.timeline-events { margin: 0; padding: 0; list-style: none; }
+.timeline-events.is-expanded { max-height: clamp(280px, 38vh, 520px); padding-right: var(--sp-1); overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .timeline li { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: var(--sp-2); padding-bottom: var(--sp-3); }
 .timeline-dot { width: 9px; height: 9px; margin-top: 4px; border: 2px solid #93c5fd; border-radius: 50%; background: var(--c-surf); box-shadow: 0 0 0 3px #eff6ff; }
 .timeline li > div { min-width: 0; display: grid; gap: 2px; }
 .timeline strong { color: var(--c-ink); font-size: var(--fs-sm); }
-.timeline span, .timeline small { color: var(--c-muted); font-size: var(--fs-xs); }
+.timeline li span, .timeline li small { color: var(--c-muted); font-size: var(--fs-xs); }
 .empty-state { padding: var(--sp-4); border: 1px dashed var(--c-line-2); border-radius: var(--r-md); color: var(--c-muted); text-align: center; font-size: var(--fs-sm); }
 .dialog-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: var(--sp-4); background: rgba(15, 23, 42, .56); }
 .approval-dialog { width: min(520px, 100%); max-height: calc(100vh - 32px); overflow: auto; box-sizing: border-box; display: grid; gap: var(--sp-3); padding: var(--sp-5); border: 1px solid var(--c-line-2); border-radius: var(--r-lg); background: var(--c-surf); box-shadow: 0 18px 50px rgba(15, 23, 42, .24); }

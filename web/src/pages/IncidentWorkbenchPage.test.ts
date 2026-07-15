@@ -356,10 +356,39 @@ describe('IncidentWorkbenchPage', () => {
     expect(wrapper.text()).not.toContain(terminal.id)
   })
 
-  it('closes and invalidates restart confirmation when the active Case becomes terminal', async () => {
+  it('automatically closes restart confirmation when the active Case becomes terminal', async () => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])
-    const active = incident('case-restart-terminal', 'waiting_evidence', '2026-07-13T00:00:00Z')
+    vi.mocked(matchBugBots).mockResolvedValue([botMatch])
+    const active = incident('case-watch-restart-terminal', 'waiting_evidence', '2026-07-13T00:00:00Z')
+    vi.mocked(listIncidentCases).mockResolvedValue([active])
+    mockCaseDetails(detail(active))
+    const wrapper = await mountedPage()
+
+    await wrapper.get('[data-action="restart-case"]').trigger('click')
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
+    const terminal = { ...active, status: 'fixed_verified' as const, version: active.version + 1, updated_at: '2026-07-13T00:01:00Z' }
+    const eventHandler = runtime.EventsOn.mock.calls.find(call => call[0] === 'incident-case:event')?.[1]
+    expect(eventHandler).toBeTypeOf('function')
+
+    eventHandler?.({ kind: 'snapshot', case: terminal, snapshot: detail(terminal) })
+    await flushPromises()
+
+    expect(wrapper.find('.lifecycle-region').exists()).toBe(false)
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(wrapper.get('.bot-action-status').text()).toBe('尚无进行中的 Case')
+    expect(wrapper.find('[data-action="start-case"]').exists()).toBe(true)
+    expect(wrapper.find('[data-action="enter-case"]').exists()).toBe(false)
+    expect(wrapper.find('[data-action="restart-case"]').exists()).toBe(false)
+    expect(resetIncidentCaseWithWarnings).not.toHaveBeenCalled()
+    expect(startIncidentCase).not.toHaveBeenCalled()
+  })
+
+  it('rejects a captured restart confirmation after the active Case becomes terminal', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    vi.mocked(matchBugBots).mockResolvedValue([botMatch])
+    const active = incident('case-guard-restart-terminal', 'waiting_evidence', '2026-07-13T00:00:00Z')
     vi.mocked(listIncidentCases).mockResolvedValue([active])
     mockCaseDetails(detail(active))
     const wrapper = await mountedPage()
@@ -372,16 +401,11 @@ describe('IncidentWorkbenchPage', () => {
 
     eventHandler?.({ kind: 'snapshot', case: terminal, snapshot: detail(terminal) })
     staleConfirm.element.click()
-    await flushPromises()
 
-    expect(wrapper.find('.lifecycle-region').exists()).toBe(false)
-    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
-    expect(wrapper.get('.bot-action-status').text()).toBe('尚无进行中的 Case')
-    expect(wrapper.find('[data-action="start-case"]').exists()).toBe(true)
-    expect(wrapper.find('[data-action="enter-case"]').exists()).toBe(false)
-    expect(wrapper.find('[data-action="restart-case"]').exists()).toBe(false)
     expect(resetIncidentCaseWithWarnings).not.toHaveBeenCalled()
     expect(startIncidentCase).not.toHaveBeenCalled()
+    await flushPromises()
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
   })
 
   it('starts directly when only terminal records exist', async () => {

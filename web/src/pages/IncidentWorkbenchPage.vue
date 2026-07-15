@@ -115,9 +115,9 @@ watch(incidentWorkflow.cases, () => {
   void openPreferredCase()
 })
 
-watch(displayedCase, current => {
+watch([displayedCase, resetting], ([current, isResetting]) => {
   const request = resetDialog.value
-  if (!request || request.mode !== 'active_reset' || resetting.value || current?.id === request.caseID) return
+  if (!request || request.mode !== 'active_reset' || isResetting || current?.id === request.caseID) return
   discardResetDialog()
 })
 

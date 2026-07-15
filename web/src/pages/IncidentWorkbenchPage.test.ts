@@ -408,6 +408,45 @@ describe('IncidentWorkbenchPage', () => {
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
   })
 
+  it('invalidates a submitted reset after its active Case becomes terminal and the request fails', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    vi.mocked(matchBugBots).mockResolvedValue([botMatch])
+    const active = incident('case-pending-reset-terminal', 'waiting_evidence', '2026-07-13T00:00:00Z')
+    vi.mocked(listIncidentCases).mockResolvedValue([active])
+    mockCaseDetails(detail(active))
+    const pendingReset = deferred<{ case: IncidentCase; warnings: [] }>()
+    vi.mocked(resetIncidentCaseWithWarnings).mockReturnValue(pendingReset.promise)
+    const wrapper = await mountedPage()
+
+    await wrapper.get('[data-action="restart-case"]').trigger('click')
+    const submittedConfirm = wrapper.get<HTMLButtonElement>('[data-reset-confirm]')
+    await submittedConfirm.trigger('click')
+    expect(resetIncidentCaseWithWarnings).toHaveBeenCalledTimes(1)
+
+    const terminal = { ...active, status: 'fixed_verified' as const, version: active.version + 1, updated_at: '2026-07-13T00:01:00Z' }
+    const eventHandler = runtime.EventsOn.mock.calls.find(call => call[0] === 'incident-case:event')?.[1]
+    expect(eventHandler).toBeTypeOf('function')
+    eventHandler?.({ kind: 'snapshot', case: terminal, snapshot: detail(terminal) })
+    await flushPromises()
+
+    pendingReset.reject(new Error('reset bridge unavailable'))
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.find('.lifecycle-region').exists()).toBe(false)
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(wrapper.get('.bot-action-status').text()).toBe('尚无进行中的 Case')
+    expect(wrapper.find('[data-action="start-case"]').exists()).toBe(true)
+    expect(wrapper.find('[data-action="enter-case"]').exists()).toBe(false)
+    expect(wrapper.find('[data-action="restart-case"]').exists()).toBe(false)
+
+    submittedConfirm.element.click()
+    await flushPromises()
+    expect(resetIncidentCaseWithWarnings).toHaveBeenCalledTimes(1)
+    expect(startIncidentCase).not.toHaveBeenCalled()
+  })
+
   it('starts directly when only terminal records exist', async () => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])

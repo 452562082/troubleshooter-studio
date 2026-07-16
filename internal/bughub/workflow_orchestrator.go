@@ -2027,7 +2027,7 @@ func phaseScheduleErrorMessage(cause error) string {
 	if errors.Is(cause, ErrValidatorNotInstalled) {
 		return "验证机器人未安装，请重新部署当前机器人"
 	}
-	return cause.Error()
+	return "阶段 Agent 启动失败，请检查运行环境后重试"
 }
 
 type phaseScheduleStartError struct {

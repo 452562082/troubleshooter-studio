@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -258,7 +260,27 @@ func browserRecoveryOperationRequest(input IncidentBrowserCommandInput, attempt 
 	return bughub.BrowserRecoveryOperationRequest{
 		Operation: operation, CaseID: input.CaseID, AttemptID: input.AttemptID,
 		ExpectedErrorCode: expectedCode, CycleNumber: attempt.CycleNumber,
-		ExpectedVersion: input.ExpectedVersion, ActorID: input.ActorID, IdempotencyKey: input.IdempotencyKey,
+		ExpectedVersion: input.ExpectedVersion, ActorID: input.ActorID, IdempotencyKey: browserRecoveryOpaqueKeyForTest(operation, input.IdempotencyKey),
+	}
+}
+
+func browserRecoveryOpaqueKeyForTest(operation bughub.BrowserRecoveryOperationKind, callerKey string) string {
+	digest := sha256.Sum256([]byte("tshoot:incident-browser-recovery:idempotency:v1\x00" + string(operation) + "\x00" + strings.TrimSpace(callerKey)))
+	return "incident-browser-recovery:" + hex.EncodeToString(digest[:])
+}
+
+func assertBrowserRecoveryValuesDoNotContain(t *testing.T, forbidden []string, values map[string]any) {
+	t.Helper()
+	for name, value := range values {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", name, err)
+		}
+		for _, secret := range forbidden {
+			if bytes.Contains(encoded, []byte(secret)) {
+				t.Fatalf("%s exposed %q: %s", name, secret, encoded)
+			}
+		}
 	}
 }
 
@@ -309,6 +331,63 @@ func TestOpenIncidentBrowserLoginContinuesOnceAndReplaysWithoutSecondLogin(t *te
 	}
 }
 
+func TestIncidentBrowserRecoverySuccessNeverPersistsOrEmitsCallerKey(t *testing.T) {
+	app, store, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "https://login.test")
+	callerKey := "Cookie=session-raw-abc Authorization=Bearer-raw-def password=raw-ghi storageState=raw-jkl"
+	input := browserCommandInput(incident, attempt, callerKey)
+	loginKey := incidentBrowserRecoveryIdempotencyKey(bughub.BrowserRecoveryLogin, callerKey)
+	repairKey := incidentBrowserRecoveryIdempotencyKey(bughub.BrowserRecoveryRepair, callerKey)
+	if loginKey != browserRecoveryOpaqueKeyForTest(bughub.BrowserRecoveryLogin, callerKey) || repairKey != browserRecoveryOpaqueKeyForTest(bughub.BrowserRecoveryRepair, callerKey) || loginKey == repairKey {
+		t.Fatalf("browser recovery keys are not stable and operation-separated: login=%q repair=%q", loginKey, repairKey)
+	}
+	var emitted []any
+	app.workflowEmit = func(name string, payload any) {
+		if name == incidentCaseEvent {
+			emitted = append(emitted, payload)
+		}
+	}
+
+	continued, err := app.OpenIncidentBrowserLogin(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := app.OpenIncidentBrowserLogin(input)
+	if err != nil || replayed.CurrentAttemptID != continued.CurrentAttemptID {
+		t.Fatalf("replayed=%+v err=%v", replayed, err)
+	}
+	logins, _, _ := controller.snapshot()
+	if len(logins) != 1 || runner.count() != 1 {
+		t.Fatalf("logins=%d starts=%d", len(logins), runner.count())
+	}
+
+	internalRequest := browserRecoveryOperationRequest(input, attempt, bughub.BrowserRecoveryLogin, "browser_login_required")
+	rawRequest := internalRequest
+	rawRequest.IdempotencyKey = callerKey
+	if operation, found, loadErr := store.GetBrowserRecoveryOperation(context.Background(), rawRequest); loadErr != nil || found {
+		t.Fatalf("raw caller key addressed durable operation: found=%v operation=%+v err=%v", found, operation, loadErr)
+	}
+	operation, found, err := store.GetBrowserRecoveryOperation(context.Background(), internalRequest)
+	if err != nil || !found || operation.Status != bughub.BrowserRecoveryContinued || operation.IdempotencyKey != internalRequest.IdempotencyKey {
+		t.Fatalf("operation=%+v found=%v err=%v", operation, found, err)
+	}
+	attempts, err := store.ListAttempts(context.Background(), bughub.AttemptFilter{CaseID: incident.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := store.ListEvents(context.Background(), incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, err := app.GetIncidentCase(incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertBrowserRecoveryValuesDoNotContain(t,
+		[]string{callerKey, "session-raw-abc", "Bearer-raw-def", "raw-ghi", "raw-jkl", "Cookie", "Authorization", "password", "storageState"},
+		map[string]any{"operation row": operation, "attempt rows": attempts, "event rows": events, "returned Case": continued, "Case detail": detail, "incident-case:event": emitted},
+	)
+}
+
 func TestIncidentBrowserRecoveryRejectsWrongAttemptAndErrorCode(t *testing.T) {
 	app, _, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "https://login.test")
 	wrongAttempt := browserCommandInput(incident, attempt, "browser-login:wrong-attempt")
@@ -323,6 +402,35 @@ func TestIncidentBrowserRecoveryRejectsWrongAttemptAndErrorCode(t *testing.T) {
 	if len(logins) != 0 || len(clears) != 0 || repairs != 0 || runner.count() != 0 {
 		t.Fatalf("logins=%d clears=%d repairs=%d starts=%d", len(logins), len(clears), repairs, runner.count())
 	}
+}
+
+func TestIncidentBrowserRecoveryRejectsSensitiveActorBeforeEffectOrEvent(t *testing.T) {
+	app, store, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "https://login.test")
+	input := browserCommandInput(incident, attempt, "browser-login:sensitive-actor")
+	input.ActorID = "Cookie=session-secret Authorization=Bearer-secret password=hunter2 storageState=private"
+	var emitted []any
+	app.workflowEmit = func(name string, payload any) {
+		if name == incidentCaseEvent {
+			emitted = append(emitted, payload)
+		}
+	}
+
+	_, err := app.OpenIncidentBrowserLogin(input)
+	if err == nil {
+		t.Fatal("browser recovery accepted a sensitive actor identifier")
+	}
+	events, loadErr := store.ListEvents(context.Background(), incident.ID)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	logins, _, _ := controller.snapshot()
+	if len(logins) != 0 || runner.count() != 0 || len(events) != 0 || len(emitted) != 0 {
+		t.Fatalf("logins=%d starts=%d events=%+v emitted=%+v", len(logins), runner.count(), events, emitted)
+	}
+	assertBrowserRecoveryValuesDoNotContain(t,
+		[]string{"session-secret", "Bearer-secret", "hunter2", "private", "Cookie", "Authorization", "password", "storageState"},
+		map[string]any{"returned error": err.Error(), "event rows": events, "incident-case:event": emitted},
+	)
 }
 
 func TestRepairIncidentBrowserRuntimeContinuesOnceAndReplaysWithoutSecondRepair(t *testing.T) {
@@ -442,8 +550,8 @@ func TestIncidentBrowserRecoveryDoesNotMistakeOrdinaryEvidenceContinuationForRep
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.OpenIncidentBrowserLogin(input); !errors.Is(err, bughub.ErrIdempotencyConflict) {
-		t.Fatalf("browser recovery accepted ordinary continuation: %v", err)
+	if _, err := app.OpenIncidentBrowserLogin(input); err == nil {
+		t.Fatal("browser recovery mistook an ordinary continuation for its own replay")
 	}
 	logins, _, _ := controller.snapshot()
 	if len(logins) != 0 || runner.count() != 1 {
@@ -652,18 +760,35 @@ func TestIncidentBrowserLoginRedactsIncidentContextFailure(t *testing.T) {
 }
 
 func TestIncidentBrowserLoginRedactsContinuationRunnerFailure(t *testing.T) {
-	app, _, runner, _, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "https://login.test")
+	app, store, runner, _, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "https://login.test")
 	secret := "storageState Cookie: sid=secret Authorization: Bearer abc.def.ghi password=hunter2"
 	runner.startErr = errors.New(secret)
-	_, err := app.OpenIncidentBrowserLogin(browserCommandInput(incident, attempt, "browser-login:runner-redaction"))
+	var emitted []any
+	app.workflowEmit = func(name string, payload any) {
+		if name == incidentCaseEvent {
+			emitted = append(emitted, payload)
+		}
+	}
+	continued, err := app.OpenIncidentBrowserLogin(browserCommandInput(incident, attempt, "browser-login:runner-redaction"))
 	if err == nil {
 		t.Fatal("expected continuation failure")
 	}
-	for _, forbidden := range []string{"storageState", "Cookie", "Authorization", "hunter2", "abc.def.ghi"} {
-		if strings.Contains(err.Error(), forbidden) {
-			t.Fatalf("secret %q leaked in %q", forbidden, err)
-		}
+	attempts, loadErr := store.ListAttempts(context.Background(), bughub.AttemptFilter{CaseID: incident.ID})
+	if loadErr != nil {
+		t.Fatal(loadErr)
 	}
+	events, loadErr := store.ListEvents(context.Background(), incident.ID)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	detail, loadErr := app.GetIncidentCase(incident.ID)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	assertBrowserRecoveryValuesDoNotContain(t,
+		[]string{secret, "storageState", "Cookie", "Authorization", "hunter2", "abc.def.ghi"},
+		map[string]any{"returned error": err.Error(), "returned Case": continued, "attempt rows": attempts, "event rows": events, "Case detail": detail, "incident-case:event": emitted},
+	)
 }
 
 func TestIncidentBrowserKeyringStoreUsesDedicatedServiceAndMapsMissingKeys(t *testing.T) {

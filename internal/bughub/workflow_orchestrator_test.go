@@ -705,18 +705,34 @@ func TestOrchestratorSchedulingFailureRecordsExplicitFailureAfterCommit(t *testi
 	ctx := context.Background()
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-schedule-fail", CasePendingValidation)
-	runner := &recordingPhaseRunner{startErr: errors.New("runner unavailable")}
+	secret := "Cookie: session=runner-secret Authorization: Bearer runner.token password=runner-pass storageState=runner-state"
+	runner := &recordingPhaseRunner{startErr: errors.New(secret)}
 	o := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
 	got, err := o.StartCase(ctx, StartCaseCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "start:fail", Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "bot", Target: "codex"}, InputJSON: []byte(`{}`), ActorID: "alice"})
 	if err == nil || got.Status != CaseWaitingEvidence {
 		t.Fatalf("case=%+v err=%v", got, err)
 	}
+	scheduleErr := err
 	events, err := store.ListEvents(ctx, incident.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(events) != 2 || events[1].EventType != "phase_schedule_failed" {
 		t.Fatalf("events=%+v", events)
+	}
+	attempt, loadErr := store.GetAttempt(ctx, got.CurrentAttemptID)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	for name, value := range map[string]string{
+		"returned error": scheduleErr.Error(), "attempt message": attempt.ErrorMessage,
+		"attempt output": string(attempt.OutputJSON), "failure event": string(events[1].PayloadJSON),
+	} {
+		for _, forbidden := range []string{secret, "runner-secret", "runner.token", "runner-pass", "runner-state"} {
+			if strings.Contains(value, forbidden) {
+				t.Fatalf("%s exposed %q: %q", name, forbidden, value)
+			}
+		}
 	}
 }
 

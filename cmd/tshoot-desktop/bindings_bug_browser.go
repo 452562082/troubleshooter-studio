@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -17,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/browserverify"
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
@@ -50,6 +53,8 @@ type incidentBrowserController interface {
 }
 
 const incidentBrowserKeyringService = "tshoot-studio-browser-session"
+
+const incidentBrowserRecoveryIdempotencyDomain = "tshoot:incident-browser-recovery:idempotency:v1"
 
 type incidentBrowserKeyringStore struct {
 	get    func(string, string) (string, error)
@@ -459,6 +464,10 @@ func (a *App) incidentBrowserBlockedAttempt(input IncidentBrowserCommandInput, o
 	if input.AttemptID == "" {
 		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, bughub.BrowserRecoveryOperationRequest{}, nil, errors.New("attempt_id is required")
 	}
+	if err := validateIncidentBrowserActorID(input.ActorID); err != nil {
+		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, bughub.BrowserRecoveryOperationRequest{}, nil, err
+	}
+	input.IdempotencyKey = incidentBrowserRecoveryIdempotencyKey(operationKind, input.IdempotencyKey)
 	store, _, err := a.workflowComponents()
 	if err != nil {
 		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, bughub.BrowserRecoveryOperationRequest{}, nil, err
@@ -494,6 +503,30 @@ func (a *App) incidentBrowserBlockedAttempt(input IncidentBrowserCommandInput, o
 		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, request, nil, errors.New("incident browser command requires the current blocked attempt")
 	}
 	return incident, attempt, request, nil, nil
+}
+
+func incidentBrowserRecoveryIdempotencyKey(operation bughub.BrowserRecoveryOperationKind, callerKey string) string {
+	digest := sha256.Sum256([]byte(incidentBrowserRecoveryIdempotencyDomain + "\x00" + string(operation) + "\x00" + strings.TrimSpace(callerKey)))
+	return "incident-browser-recovery:" + hex.EncodeToString(digest[:])
+}
+
+func validateIncidentBrowserActorID(actorID string) error {
+	if utf8.RuneCountInString(actorID) > 128 {
+		return errors.New("incident browser actor_id is invalid")
+	}
+	lower := strings.ToLower(actorID)
+	for _, marker := range []string{"authorization", "cookie", "password", "storagestate"} {
+		if strings.Contains(lower, marker) {
+			return errors.New("incident browser actor_id is invalid")
+		}
+	}
+	for _, character := range actorID {
+		if unicode.IsLetter(character) || unicode.IsDigit(character) || strings.ContainsRune("._@+-", character) {
+			continue
+		}
+		return errors.New("incident browser actor_id is invalid")
+	}
+	return nil
 }
 
 type incidentBrowserRecoveryMarker struct {
@@ -563,8 +596,8 @@ func (a *App) continueIncidentBrowserRecovery(input IncidentBrowserCommandInput,
 		}
 	}
 	continued, continueErr := orchestrator.ContinueBrowserRecoveryWithEvidence(a.workflowCommandContext(), bughub.ContinueWithEvidenceCommand{
-		CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion,
-		IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID),
+		CaseID: request.CaseID, ExpectedVersion: request.ExpectedVersion,
+		IdempotencyKey: request.IdempotencyKey, ActorID: request.ActorID,
 		Phase: attempt.Phase, Bug: bug, Bot: bot, InputJSON: inputJSON,
 	}, operation)
 	a.emitIncidentResult(continued, continueErr)

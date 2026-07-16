@@ -84,6 +84,11 @@ type sessionFileLock struct {
 	info os.FileInfo
 }
 
+var sessionProcessLocks = struct {
+	sync.Mutex
+	paths map[string]struct{}
+}{paths: make(map[string]struct{})}
+
 func NewSessionStore(root string, secrets SecretStore) *SessionStore {
 	return &SessionStore{
 		root:    root,
@@ -299,69 +304,97 @@ func acquireSessionFileLockWithDirectoryPolicy(root, identifier string, protectD
 		return nil, err
 	}
 	path := filepath.Join(root, "."+identifier+".lock")
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if errors.Is(err, fs.ErrExist) {
+	if !reserveSessionProcessLock(path) {
 		return nil, ErrSessionStoreBusy
 	}
-	if err != nil {
-		return nil, errors.New("create browser session transaction lock")
-	}
-	info, err := file.Stat()
-	if err != nil {
-		_ = file.Close()
-		_ = os.Remove(path)
-		return nil, errors.New("inspect browser session transaction lock")
-	}
-	lock := &sessionFileLock{path: path, file: file, info: info}
-	remove := true
+	reserved := true
 	defer func() {
-		if remove {
-			returnedErr = errors.Join(returnedErr, lock.release())
+		if reserved {
+			releaseSessionProcessLock(path)
 		}
 	}()
-	token := make([]byte, 32)
-	if _, err := io.ReadFull(rand.Reader, token); err != nil {
-		return nil, errors.New("generate browser session transaction token")
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || !sessionModeIsPrivate(info.Mode()) {
+			return nil, errors.New("browser session transaction lock is unsafe")
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return nil, errors.New("inspect browser session transaction lock")
+	}
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, errors.New("open browser session transaction lock")
+	}
+	closeFile := true
+	defer func() {
+		if closeFile {
+			returnedErr = errors.Join(returnedErr, file.Close())
+		}
+	}()
+	info, err := file.Stat()
+	pathInfo, pathErr := os.Lstat(path)
+	if err != nil || pathErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || !os.SameFile(info, pathInfo) {
+		return nil, errors.New("inspect browser session transaction lock")
 	}
 	if err := file.Chmod(0o600); err != nil {
 		return nil, errors.New("protect browser session transaction lock")
 	}
-	if err := writeAll(file, append([]byte(hex.EncodeToString(token)), '\n')); err != nil {
-		return nil, errors.New("write browser session transaction lock")
+	busy, err := trySessionFileAdvisoryLock(file)
+	if err != nil {
+		return nil, errors.New("lock browser session transaction")
+	}
+	if busy {
+		return nil, ErrSessionStoreBusy
 	}
 	if err := file.Sync(); err != nil {
+		_ = unlockSessionFileAdvisoryLock(file)
 		return nil, errors.New("sync browser session transaction lock")
 	}
 	if err := syncRuntimeDirectory(root); err != nil {
+		_ = unlockSessionFileAdvisoryLock(file)
 		return nil, errors.New("sync browser session directory")
 	}
-	remove = false
-	return lock, nil
+	reserved = false
+	closeFile = false
+	return &sessionFileLock{path: path, file: file, info: info}, nil
 }
 
 func (lock *sessionFileLock) release() error {
 	if lock == nil || lock.file == nil {
 		return nil
 	}
+	defer releaseSessionProcessLock(lock.path)
 	openedInfo, openedErr := lock.file.Stat()
 	pathInfo, pathErr := os.Lstat(lock.path)
+	ownershipErr := error(nil)
 	if openedErr != nil || pathErr != nil || !os.SameFile(lock.info, openedInfo) || !os.SameFile(openedInfo, pathInfo) {
-		_ = lock.file.Close()
-		lock.file = nil
-		return errSessionLockOwnershipLost
+		ownershipErr = errSessionLockOwnershipLost
 	}
+	unlockErr := unlockSessionFileAdvisoryLock(lock.file)
 	closeErr := lock.file.Close()
 	lock.file = nil
+	if unlockErr != nil {
+		unlockErr = errors.New("unlock browser session transaction")
+	}
 	if closeErr != nil {
-		return errors.New("close browser session transaction lock")
+		closeErr = errors.New("close browser session transaction lock")
 	}
-	if err := os.Remove(lock.path); err != nil {
-		return errors.New("remove browser session transaction lock")
+	return errors.Join(ownershipErr, unlockErr, closeErr)
+}
+
+func reserveSessionProcessLock(path string) bool {
+	sessionProcessLocks.Lock()
+	defer sessionProcessLocks.Unlock()
+	if _, exists := sessionProcessLocks.paths[path]; exists {
+		return false
 	}
-	if err := syncRuntimeDirectory(filepath.Dir(lock.path)); err != nil {
-		return errors.New("sync browser session directory")
-	}
-	return nil
+	sessionProcessLocks.paths[path] = struct{}{}
+	return true
+}
+
+func releaseSessionProcessLock(path string) {
+	sessionProcessLocks.Lock()
+	delete(sessionProcessLocks.paths, path)
+	sessionProcessLocks.Unlock()
 }
 
 func prepareSessionLockDirectory(root string, protect bool) error {
@@ -381,10 +414,10 @@ func prepareSessionLockDirectory(root string, protect bool) error {
 		}
 		info, err = os.Lstat(root)
 	}
-	if err != nil || info.Mode().Perm()&0o077 != 0 {
+	if err != nil || !sessionModeIsPrivate(info.Mode()) {
 		return errors.New("browser session directory is unsafe")
 	}
-	if info.Mode().Perm()&0o700 != 0o700 {
+	if !sessionDirectoryModeHasOwnerAccess(info.Mode()) {
 		return errors.New("protect browser session directory")
 	}
 	return nil
@@ -677,11 +710,11 @@ func readSecureSessionFile(path string, maximumBytes int64, label string) ([]byt
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, false, nil
 	}
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Size() > maximumBytes {
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || !sessionModeIsPrivate(info.Mode()) || info.Size() > maximumBytes {
 		return nil, true, errors.New(label + " file is unsafe")
 	}
 	directoryInfo, err := os.Lstat(filepath.Dir(path))
-	if err != nil || directoryInfo.Mode()&os.ModeSymlink != 0 || !directoryInfo.IsDir() || directoryInfo.Mode().Perm()&0o077 != 0 {
+	if err != nil || directoryInfo.Mode()&os.ModeSymlink != 0 || !directoryInfo.IsDir() || !sessionModeIsPrivate(directoryInfo.Mode()) {
 		return nil, true, errors.New("browser session directory is unsafe")
 	}
 	file, err := os.Open(path)

@@ -9,10 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type memorySecretStore struct {
@@ -230,6 +232,73 @@ func TestSessionFileLockReleaseDoesNotDeleteReplacementOwnedByAnotherProcess(t *
 	contents, err := os.ReadFile(lock.path)
 	if err != nil || !bytes.Equal(contents, foreign) {
 		t.Fatalf("replacement lock deleted or changed: contents=%q err=%v", contents, err)
+	}
+}
+
+func TestSessionFileLockRecoversAfterOwnerProcessCrash(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	readyPath := filepath.Join(t.TempDir(), "lock-owner-ready")
+	identifier := strings.Repeat("b", 64)
+	owner := exec.Command(os.Args[0], "-test.run=^TestSessionFileLockCrashOwnerHelper$")
+	owner.Env = mergeCommandEnvironment(os.Environ(), []string{
+		"TSHOOT_SESSION_LOCK_CRASH_ROOT=" + root,
+		"TSHOOT_SESSION_LOCK_CRASH_ID=" + identifier,
+		"TSHOOT_SESSION_LOCK_CRASH_READY=" + readyPath,
+	})
+	owner.Stdout = os.Stdout
+	owner.Stderr = os.Stderr
+	if err := owner.Start(); err != nil {
+		t.Fatal(err)
+	}
+	ownerDone := false
+	t.Cleanup(func() {
+		if !ownerDone {
+			_ = owner.Process.Kill()
+			_, _ = owner.Process.Wait()
+		}
+	})
+	waitForRuntimeTestFile(t, readyPath, 5*time.Second, func() { _ = owner.Process.Kill() })
+	if lock, err := acquireSessionFileLock(root, identifier); !errors.Is(err, ErrSessionStoreBusy) {
+		if lock != nil {
+			_ = lock.release()
+		}
+		t.Fatalf("lock while owner is alive = %v, want busy", err)
+	}
+	if err := owner.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	state, err := owner.Process.Wait()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Success() {
+		t.Fatal("crash owner exited successfully")
+	}
+	ownerDone = true
+	lock, err := acquireSessionFileLock(root, identifier)
+	if err != nil {
+		t.Fatalf("acquire after owner crash = %v, want recovered lock", err)
+	}
+	if err := lock.release(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSessionFileLockCrashOwnerHelper(t *testing.T) {
+	root := os.Getenv("TSHOOT_SESSION_LOCK_CRASH_ROOT")
+	if root == "" {
+		return
+	}
+	lock, err := acquireSessionFileLock(root, os.Getenv("TSHOOT_SESSION_LOCK_CRASH_ID"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.release()
+	if err := os.WriteFile(os.Getenv("TSHOOT_SESSION_LOCK_CRASH_READY"), []byte("ready"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		time.Sleep(time.Hour)
 	}
 }
 

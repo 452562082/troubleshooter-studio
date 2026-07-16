@@ -565,7 +565,7 @@ func createPlaintextSessionTemp(key SessionKey, state []byte, writeState bool, r
 		return "", err
 	}
 	info, err := os.Lstat(directory)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !sessionModeIsPrivate(info.Mode()) || !sessionDirectoryModeHasOwnerAccess(info.Mode()) {
 		_ = os.Remove(directory)
 		return "", errors.New("browser session plaintext directory is unsafe")
 	}
@@ -643,7 +643,7 @@ func validateLoginWorkerResult(result workerResult) error {
 
 func readPlaintextSessionState(path string) ([]byte, error) {
 	info, err := os.Lstat(path)
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Size() < 2 || info.Size() > maxBrowserSessionBytes {
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || !sessionModeIsPrivate(info.Mode()) || info.Size() < 2 || info.Size() > maxBrowserSessionBytes {
 		return nil, errors.New("browser login state file is unsafe")
 	}
 	file, err := os.Open(path)

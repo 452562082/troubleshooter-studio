@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -33,6 +35,28 @@ func TestConfigureWorkerProcessUsesKillOnCloseJobWrapper(t *testing.T) {
 	}
 	if len(command.Args) < 4 || command.Args[1] != windowsJobWrapperArgument || command.Args[3] != originalPath {
 		t.Fatalf("wrapped command args = %q", command.Args)
+	}
+}
+
+func TestConfigureWorkerProcessPassesManagedPlaintextToWrapper(t *testing.T) {
+	path, err := createPlaintextSessionTemp(
+		SessionKey{SystemID: "shop", Environment: "test", Origin: "https://app.test"},
+		nil,
+		false,
+		os.Remove,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(path)) })
+	command := exec.CommandContext(context.Background(), "cmd.exe", "/c", "exit", "0")
+	controller, err := configureWorkerProcess(context.Background(), command, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.finish()
+	if !slices.Contains(command.Args, path) {
+		t.Fatalf("wrapped command does not carry managed plaintext path: %q", command.Args)
 	}
 }
 
@@ -219,5 +243,128 @@ func TestWindowsRuntimeProcessTreeHelper(t *testing.T) {
 		}
 	default:
 		t.Fatalf("unknown Windows process-tree helper mode %q", os.Getenv("TSHOOT_WINDOWS_PROCESS_HELPER"))
+	}
+}
+
+func TestWindowsWorkerParentCrashRemovesPlaintextSession(t *testing.T) {
+	temporary := t.TempDir()
+	readyPath := filepath.Join(temporary, "target-ready")
+	locatorPath := filepath.Join(temporary, "plaintext-path")
+	survivalPath := filepath.Join(temporary, "target-survived")
+	parent := exec.Command(os.Args[0], "-test.run=^TestWindowsPlaintextParentCrashHelper$")
+	parent.Env = mergeCommandEnvironment(os.Environ(), []string{
+		"TSHOOT_WINDOWS_PLAINTEXT_HELPER=parent",
+		"TSHOOT_WINDOWS_PLAINTEXT_READY=" + readyPath,
+		"TSHOOT_WINDOWS_PLAINTEXT_LOCATOR=" + locatorPath,
+		"TSHOOT_WINDOWS_PLAINTEXT_SURVIVAL=" + survivalPath,
+	})
+	parent.Stdout = os.Stdout
+	parent.Stderr = os.Stderr
+	if err := parent.Start(); err != nil {
+		t.Fatal(err)
+	}
+	parentDone := false
+	var plaintextDirectory string
+	t.Cleanup(func() {
+		if !parentDone {
+			_ = parent.Process.Kill()
+			_, _ = parent.Process.Wait()
+		}
+		if plaintextDirectory != "" {
+			_ = os.RemoveAll(plaintextDirectory)
+		}
+	})
+	waitForRuntimeTestFile(t, readyPath, 5*time.Second, func() { _ = parent.Process.Kill() })
+	encodedPath, err := os.ReadFile(locatorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintextPath := strings.TrimSpace(string(encodedPath))
+	plaintextDirectory, ok := plaintextSessionWorkspace(plaintextPath)
+	if !ok {
+		t.Fatalf("unmanaged plaintext path %q", plaintextPath)
+	}
+	state, err := os.ReadFile(plaintextPath)
+	if err != nil || !strings.Contains(string(state), "parent-crash-secret") {
+		t.Fatalf("plaintext before parent crash=%q err=%v", state, err)
+	}
+	if err := parent.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parent.Process.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	parentDone = true
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Lstat(plaintextDirectory); errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := os.Lstat(plaintextDirectory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("plaintext workspace survived parent crash: %v", err)
+	}
+	time.Sleep(1200 * time.Millisecond)
+	if _, err := os.Stat(survivalPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("target survived parent crash cleanup: %v", err)
+	}
+}
+
+func TestWindowsPlaintextParentCrashHelper(t *testing.T) {
+	switch os.Getenv("TSHOOT_WINDOWS_PLAINTEXT_HELPER") {
+	case "":
+		return
+	case "parent":
+		path, err := createPlaintextSessionTemp(
+			SessionKey{SystemID: "shop", Environment: "test", Origin: "https://app.test"},
+			nil,
+			false,
+			os.Remove,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(os.Getenv("TSHOOT_WINDOWS_PLAINTEXT_LOCATOR"), []byte(path), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		command := exec.Command(os.Args[0], "-test.run=^TestWindowsPlaintextParentCrashHelper$")
+		command.Env = mergeCommandEnvironment(os.Environ(), []string{
+			"TSHOOT_WINDOWS_PLAINTEXT_HELPER=target",
+			"TSHOOT_WINDOWS_PLAINTEXT_PATH=" + path,
+		})
+		command.Stdout = os.Stdout
+		command.Stderr = os.Stderr
+		controller, err := configureWorkerProcess(context.Background(), command, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer controller.finish()
+		if err := command.Start(); err != nil {
+			t.Fatal(err)
+		}
+		if err := controller.afterStart(command); err != nil {
+			t.Fatal(err)
+		}
+		if err := controller.wait(command); err != nil {
+			t.Fatal(err)
+		}
+	case "target":
+		path := os.Getenv("TSHOOT_WINDOWS_PLAINTEXT_PATH")
+		if err := os.WriteFile(path, []byte(`{"cookies":[{"value":"parent-crash-secret"}]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(os.Getenv("TSHOOT_WINDOWS_PLAINTEXT_READY"), []byte("ready"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(time.Second)
+		if err := os.WriteFile(os.Getenv("TSHOOT_WINDOWS_PLAINTEXT_SURVIVAL"), []byte("alive"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for {
+			time.Sleep(time.Hour)
+		}
+	default:
+		t.Fatalf("unknown plaintext helper mode %q", os.Getenv("TSHOOT_WINDOWS_PLAINTEXT_HELPER"))
 	}
 }

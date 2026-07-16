@@ -638,8 +638,9 @@ async function refreshCaseSnapshotIfCurrent(caseID: string, isCurrent: () => boo
   try {
     const snapshot = await getIncidentCase(caseID)
     if (!isCurrent()) return false
-    incidentWorkflow.applySnapshot(snapshot)
-    return true
+    if (snapshot.case.id !== caseID) return false
+    incidentWorkflow.selectedCaseID.value = caseID
+    return incidentWorkflow.applyAuthoritativeDetail(snapshot)
   } catch (error) {
     if (!isCurrent()) return false
     throw error

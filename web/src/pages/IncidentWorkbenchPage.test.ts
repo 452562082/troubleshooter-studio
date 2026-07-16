@@ -1315,7 +1315,10 @@ describe('IncidentWorkbenchPage', () => {
       attempts: [{ id: 'attempt-login', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_login_required', application_origin: 'https://app.test', login_origin: 'https://login.test' }, parent_attempt_id: '', started_at: '', error_code: 'browser_login_required', error_message: '', usage: {} }],
     })
     const continued = { ...item, status: 'validating' as const, version: 8, current_attempt_id: 'attempt-login-next' }
-    const refreshed = detail(continued, { attempts: [{ ...blocked.attempts[0], id: 'attempt-login-next', status: 'running', error_code: '', output_json: {}, parent_attempt_id: 'attempt-login' }] })
+    const refreshed = detail(continued, {
+      attempts: [{ ...blocked.attempts[0], id: 'attempt-login-next', status: 'running', error_code: '', output_json: {}, parent_attempt_id: 'attempt-login' }],
+      artifacts: [{ id: 'recovery-evidence', case_id: item.id, attempt_id: 'attempt-login-next', kind: 'log', path_or_reference: 'opaque', sha256: 'a', captured_at: '', environment: 'test', version: '8', request_id: '', trace_id: '', redaction_status: 'redacted' }],
+    })
     vi.mocked(listIncidentCases).mockResolvedValue([item])
     let recoveryCompleted = false
     vi.mocked(getIncidentCase).mockImplementation(async () => recoveryCompleted ? refreshed : blocked)
@@ -1342,6 +1345,7 @@ describe('IncidentWorkbenchPage', () => {
 
     expect(getIncidentCase).toHaveBeenLastCalledWith(item.id)
     expect(wrapper.get('.status-pill').text()).toBe('验证中')
+    expect(wrapper.find('[data-artifact-id="recovery-evidence"]').exists()).toBe(true)
   })
 
   it('repairs the browser runtime with the exact key and refreshes only the current Case', async () => {

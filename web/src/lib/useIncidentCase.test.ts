@@ -59,6 +59,81 @@ describe('incident Case controller', () => {
     expect(controller.cases.value[0]).toMatchObject({ status: 'validating', current_attempt_id: 'attempt-2', version: 8 })
   })
 
+  it('authoritatively replaces an equal-version partial Case shell with full detail', () => {
+    const controller = createIncidentCaseController()
+    const blocked = detail(7)
+    blocked.case.status = 'waiting_evidence'
+    blocked.attempts = [{ id: 'attempt-old', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: 'browser_login_required', error_message: '', usage: {} }]
+    controller.applySnapshot(blocked)
+    controller.applyCase({ ...blocked.case, status: 'validating', current_attempt_id: 'attempt-2', version: 8 })
+    const authoritative = detail(8)
+    authoritative.case.current_attempt_id = 'attempt-2'
+    authoritative.attempts = [{ ...blocked.attempts[0], id: 'attempt-2', status: 'running', error_code: '' }]
+    authoritative.artifacts = [{ id: 'evidence-v8', case_id: 'case-1', attempt_id: 'attempt-2', kind: 'log', path_or_reference: 'opaque', sha256: 'a', captured_at: '', environment: 'test', version: '8', request_id: '', trace_id: '', redaction_status: 'redacted' }]
+
+    expect(controller.applyAuthoritativeDetail(authoritative)).toBe(true)
+
+    expect(controller.detail.value?.attempts.map(item => item.id)).toEqual(['attempt-2'])
+    expect(controller.detail.value?.artifacts.map(item => item.id)).toEqual(['evidence-v8'])
+  })
+
+  it('rejects older and unselected authoritative detail', () => {
+    const controller = createIncidentCaseController()
+    const current = detail(8)
+    current.artifacts = [{ id: 'current', case_id: 'case-1', attempt_id: 'attempt-1', kind: 'log', path_or_reference: 'opaque', sha256: 'a', captured_at: '', environment: 'test', version: '8', request_id: '', trace_id: '', redaction_status: 'redacted' }]
+    controller.applySnapshot(current)
+
+    expect(controller.applyAuthoritativeDetail(detail(7))).toBe(false)
+    expect(controller.applyAuthoritativeDetail(detail(9, 'case-other'))).toBe(false)
+    expect(controller.detail.value?.case).toMatchObject({ id: 'case-1', version: 8 })
+    expect(controller.detail.value?.artifacts.map(item => item.id)).toEqual(['current'])
+  })
+
+  it('retains live progress for an authoritative equal-version running attempt and clears it when the full detail changes attempt or stops running', () => {
+    const controller = createIncidentCaseController()
+    const running = detail(8)
+    running.case.current_attempt_id = 'attempt-2'
+    controller.applySnapshot(running)
+    controller.acceptEvent({
+      kind: 'snapshot', case: running.case, snapshot: running,
+      phase_event: { type: 'browser_progress', meta: { case_id: 'case-1', attempt_id: 'attempt-2', browser_code: 'browser_starting' } },
+    })
+
+    expect(controller.applyAuthoritativeDetail({ ...running, attempts: [{ id: 'attempt-2', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'running', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }] })).toBe(true)
+    expect(controller.phaseEvents.value['attempt-2']).toHaveLength(1)
+
+    const nextAttempt = detail(8)
+    nextAttempt.case.current_attempt_id = 'attempt-3'
+    expect(controller.applyAuthoritativeDetail(nextAttempt)).toBe(true)
+    expect(controller.phaseEvents.value).toEqual({})
+
+    controller.acceptEvent({
+      kind: 'snapshot', case: nextAttempt.case, snapshot: nextAttempt,
+      phase_event: { type: 'browser_progress', meta: { case_id: 'case-1', attempt_id: 'attempt-3', browser_code: 'browser_starting' } },
+    })
+    expect(controller.phaseEvents.value['attempt-3']).toHaveLength(1)
+    const stopped = detail(8)
+    stopped.case.current_attempt_id = 'attempt-3'
+    stopped.case.status = 'waiting_evidence'
+    expect(controller.applyAuthoritativeDetail(stopped)).toBe(true)
+    expect(controller.phaseEvents.value).toEqual({})
+  })
+
+  it('uses authoritative detail application for an equal-version refresh', async () => {
+    const blocked = detail(7)
+    blocked.case.status = 'waiting_evidence'
+    const full = detail(8)
+    full.case.current_attempt_id = 'attempt-2'
+    full.artifacts = [{ id: 'fresh', case_id: 'case-1', attempt_id: 'attempt-2', kind: 'log', path_or_reference: 'opaque', sha256: 'a', captured_at: '', environment: 'test', version: '8', request_id: '', trace_id: '', redaction_status: 'redacted' }]
+    const controller = createIncidentCaseController({ getCase: vi.fn().mockResolvedValue(full) })
+    controller.applySnapshot(blocked)
+    controller.applyCase({ ...blocked.case, status: 'validating', current_attempt_id: 'attempt-2', version: 8 })
+
+    await controller.refreshDetail('case-1')
+
+    expect(controller.detail.value?.artifacts.map(item => item.id)).toEqual(['fresh'])
+  })
+
   it('retains browser progress even when the Case snapshot version is unchanged', () => {
     const controller = createIncidentCaseController()
     const snapshot = detail(3)

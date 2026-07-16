@@ -107,6 +107,17 @@ export function createIncidentCaseController(dependencies: Dependencies = {}) {
     return true
   }
 
+  function applyAuthoritativeDetail(snapshot: IncidentCaseDetail) {
+    if (!selectedCaseID.value || snapshot.case.id !== selectedCaseID.value) return false
+    const current = detail.value
+    if (current?.case.id === snapshot.case.id && snapshot.case.version < current.case.version) return false
+    reconcilePhaseEvents(snapshot)
+    detail.value = snapshot
+    upsertCase(snapshot.case)
+    error.value = ''
+    return true
+  }
+
   function appendPhaseEvent(payloadCaseID: string, event?: IncidentPhaseEvent) {
     const current = detail.value
     if (!current || !event || event.type !== 'browser_progress' || !browserRunningCaseStatuses.has(current.case.status)) return
@@ -170,7 +181,7 @@ export function createIncidentCaseController(dependencies: Dependencies = {}) {
     loading.value = true
     try {
       const snapshot = await getCase(caseID)
-      if (generation === detailGeneration && selectedCaseID.value === caseID) applySnapshot(snapshot)
+      if (generation === detailGeneration && selectedCaseID.value === caseID) applyAuthoritativeDetail(snapshot)
       return snapshot
     } catch (cause) {
       if (generation === detailGeneration) error.value = errorMessage(cause)
@@ -204,7 +215,7 @@ export function createIncidentCaseController(dependencies: Dependencies = {}) {
     return promise
   }
 
-  return { cases, detail, selectedCaseID, loading, error, phaseEvents, pending: computed(() => pendingKeys.value.size > 0), applyCase, applySnapshot, acceptEvent, refreshCases, refreshDetail, selectCase, runOnce }
+  return { cases, detail, selectedCaseID, loading, error, phaseEvents, pending: computed(() => pendingKeys.value.size > 0), applyAuthoritativeDetail, applyCase, applySnapshot, acceptEvent, refreshCases, refreshDetail, selectCase, runOnce }
 }
 
 export function useIncidentCase(dependencies: Dependencies = {}) {

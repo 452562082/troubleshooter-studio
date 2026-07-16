@@ -22,6 +22,14 @@ import (
 
 const maxBrowserSessionBytes = 16 << 20
 const maxEncryptedBrowserSessionBytes = ((maxBrowserSessionBytes + aes.BlockSize + 2) / 3 * 4) + 4096
+const maxBrowserSessionGenerationBytes = 4096
+
+const (
+	sessionGenerationPending = "pending"
+	sessionGenerationActive  = "active"
+	sessionGenerationMemory  = "memory"
+	sessionGenerationRevoked = "revoked"
+)
 
 var ErrSecretNotFound = errors.New("browser session key not found")
 
@@ -46,10 +54,22 @@ type SessionStore struct {
 	root    string
 	secrets SecretStore
 	mu      sync.Mutex
-	memory  map[string][]byte
+	memory  map[string]memorySessionState
 	// afterPublish is a test-only fault injection point after ciphertext rename
 	// and before the remaining durability/cleanup steps.
 	afterPublish func(string) error
+}
+
+type memorySessionState struct {
+	Generation string
+	State      []byte
+}
+
+type sessionGenerationRecord struct {
+	Version      int    `json:"version"`
+	Generation   string `json:"generation"`
+	State        string `json:"state"`
+	CipherSHA256 string `json:"cipher_sha256,omitempty"`
 }
 
 type encryptedSessionEnvelope struct {
@@ -68,7 +88,7 @@ func NewSessionStore(root string, secrets SecretStore) *SessionStore {
 	return &SessionStore{
 		root:    root,
 		secrets: secrets,
-		memory:  make(map[string][]byte),
+		memory:  make(map[string]memorySessionState),
 	}
 }
 
@@ -87,14 +107,37 @@ func (s *SessionStore) Load(key SessionKey) (state []byte, found bool, returnedE
 		return nil, false, err
 	}
 	defer func() { returnedErr = errors.Join(returnedErr, lock.release()) }()
+	generation, found, err := readSessionGeneration(filepath.Join(s.root, identifier+".generation.json"))
+	if err != nil {
+		return nil, false, err
+	}
+	if !found {
+		delete(s.memory, identifier)
+		if _, err := os.Lstat(filepath.Join(s.root, identifier+".json")); err == nil || !errors.Is(err, fs.ErrNotExist) {
+			return nil, false, errors.New("encrypted browser session has no generation record")
+		}
+		return nil, false, nil
+	}
 	if cached, ok := s.memory[identifier]; ok {
-		return bytes.Clone(cached), true, nil
+		if generation.State == sessionGenerationMemory && cached.Generation == generation.Generation {
+			return bytes.Clone(cached.State), true, nil
+		}
+		delete(s.memory, identifier)
+	}
+	if generation.State != sessionGenerationActive {
+		return nil, false, nil
 	}
 
 	path := filepath.Join(s.root, identifier+".json")
-	envelope, found, err := readEncryptedSessionEnvelope(path)
+	envelope, cipherSHA256, found, err := readEncryptedSessionEnvelope(path)
 	if err != nil || !found {
+		if err == nil {
+			err = errors.New("active browser session ciphertext is missing")
+		}
 		return nil, false, err
+	}
+	if cipherSHA256 != generation.CipherSHA256 {
+		return nil, false, errors.New("browser session generation does not match ciphertext")
 	}
 	if s.secrets == nil {
 		return nil, false, errSecretStoreUnavailable
@@ -133,14 +176,22 @@ func (s *SessionStore) Save(key SessionKey, state []byte) (returnedErr error) {
 		return err
 	}
 	defer func() { returnedErr = errors.Join(returnedErr, lock.release()) }()
+	generation, err := newSessionGeneration()
+	if err != nil {
+		return err
+	}
+	if err := persistSessionGeneration(s.root, identifier, sessionGenerationRecord{Version: 1, Generation: generation, State: sessionGenerationPending}); err != nil {
+		return err
+	}
+	delete(s.memory, identifier)
 	if s.secrets == nil {
-		return s.saveMemoryFallback(identifier, state)
+		return s.saveMemoryFallback(identifier, generation, state)
 	}
 
 	encodedKey, err := s.secrets.Get(identifier)
 	if err != nil {
 		if !errors.Is(err, ErrSecretNotFound) {
-			return s.saveMemoryFallback(identifier, state)
+			return s.saveMemoryFallback(identifier, generation, state)
 		}
 		aesKey := make([]byte, 32)
 		if _, err := io.ReadFull(rand.Reader, aesKey); err != nil {
@@ -148,7 +199,7 @@ func (s *SessionStore) Save(key SessionKey, state []byte) (returnedErr error) {
 		}
 		encodedKey = base64.StdEncoding.EncodeToString(aesKey)
 		if err := s.secrets.Set(identifier, encodedKey); err != nil {
-			return s.saveMemoryFallback(identifier, state)
+			return s.saveMemoryFallback(identifier, generation, state)
 		}
 	}
 
@@ -160,18 +211,27 @@ func (s *SessionStore) Save(key SessionKey, state []byte) (returnedErr error) {
 	if err != nil {
 		return err
 	}
-	if err := s.persist(identifier, envelope); err != nil {
-		return err
+	cipherSHA256, persistErr := s.persist(identifier, envelope)
+	if cipherSHA256 == "" {
+		return persistErr
 	}
-	delete(s.memory, identifier)
-	return nil
+	generationErr := persistSessionGeneration(s.root, identifier, sessionGenerationRecord{
+		Version:      1,
+		Generation:   generation,
+		State:        sessionGenerationActive,
+		CipherSHA256: cipherSHA256,
+	})
+	return errors.Join(persistErr, generationErr)
 }
 
-func (s *SessionStore) saveMemoryFallback(identifier string, state []byte) error {
+func (s *SessionStore) saveMemoryFallback(identifier, generation string, state []byte) error {
+	if err := persistSessionGeneration(s.root, identifier, sessionGenerationRecord{Version: 1, Generation: generation, State: sessionGenerationMemory}); err != nil {
+		return err
+	}
 	if err := retireEncryptedSession(s.root, identifier); err != nil {
 		return err
 	}
-	s.memory[identifier] = bytes.Clone(state)
+	s.memory[identifier] = memorySessionState{Generation: generation, State: bytes.Clone(state)}
 	return nil
 }
 
@@ -209,17 +269,21 @@ func (s *SessionStore) Clear(key SessionKey) (returnedErr error) {
 		return err
 	}
 	defer func() { returnedErr = errors.Join(returnedErr, lock.release()) }()
-	delete(s.memory, identifier)
-	if err := retireEncryptedSession(s.root, identifier); err != nil {
+	generation, err := newSessionGeneration()
+	if err != nil {
 		return err
 	}
+	if err := persistSessionGeneration(s.root, identifier, sessionGenerationRecord{Version: 1, Generation: generation, State: sessionGenerationRevoked}); err != nil {
+		return err
+	}
+	delete(s.memory, identifier)
+	var secretErr error
 	if s.secrets == nil {
-		return errSecretStoreUnavailable
+		secretErr = errSecretStoreUnavailable
+	} else if err := s.secrets.Delete(identifier); err != nil && !errors.Is(err, ErrSecretNotFound) {
+		secretErr = errSecretStoreUnavailable
 	}
-	if err := s.secrets.Delete(identifier); err != nil && !errors.Is(err, ErrSecretNotFound) {
-		return errSecretStoreUnavailable
-	}
-	return nil
+	return errors.Join(secretErr, retireEncryptedSession(s.root, identifier))
 }
 
 func acquireSessionFileLock(root, identifier string) (_ *sessionFileLock, returnedErr error) {
@@ -430,47 +494,127 @@ func newSessionGCM(key []byte) (cipher.AEAD, error) {
 	return gcm, nil
 }
 
-func (s *SessionStore) persist(identifier string, envelope encryptedSessionEnvelope) error {
+func (s *SessionStore) persist(identifier string, envelope encryptedSessionEnvelope) (string, error) {
 	if err := ensureSessionDirectory(s.root); err != nil {
-		return err
+		return "", err
 	}
 	encoded, err := json.Marshal(envelope)
 	if err != nil {
-		return errors.New("encode encrypted browser session")
+		return "", errors.New("encode encrypted browser session")
 	}
 	encoded = append(encoded, '\n')
+	digest := sha256.Sum256(encoded)
+	cipherSHA256 := hex.EncodeToString(digest[:])
 	temporary, err := os.CreateTemp(s.root, "."+identifier+".json-*")
 	if err != nil {
-		return errors.New("create encrypted browser session")
+		return "", errors.New("create encrypted browser session")
 	}
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
 	if err := temporary.Chmod(0o600); err != nil {
 		_ = temporary.Close()
-		return errors.New("protect encrypted browser session")
+		return "", errors.New("protect encrypted browser session")
 	}
 	writeErr := writeAll(temporary, encoded)
 	syncErr := temporary.Sync()
 	closeErr := temporary.Close()
 	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
-		return errors.New("write encrypted browser session")
+		return "", errors.New("write encrypted browser session")
 	}
 	path := filepath.Join(s.root, identifier+".json")
 	if err := os.Rename(temporaryPath, path); err != nil {
-		return errors.New("publish encrypted browser session")
+		return "", errors.New("publish encrypted browser session")
 	}
+	var publishErr error
 	if s.afterPublish != nil {
-		if err := s.afterPublish(path); err != nil {
-			return err
-		}
+		publishErr = s.afterPublish(path)
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
-		return errors.New("protect encrypted browser session")
+		return "", errors.Join(publishErr, errors.New("protect encrypted browser session"))
 	}
 	if err := syncRuntimeDirectory(s.root); err != nil {
+		return "", errors.Join(publishErr, errors.New("sync browser session directory"))
+	}
+	return cipherSHA256, publishErr
+}
+
+func newSessionGeneration() (string, error) {
+	generation := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, generation); err != nil {
+		return "", errors.New("generate browser session generation")
+	}
+	return hex.EncodeToString(generation), nil
+}
+
+func persistSessionGeneration(root, identifier string, record sessionGenerationRecord) error {
+	if err := validateSessionGeneration(record); err != nil {
+		return err
+	}
+	if err := ensureSessionDirectory(root); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		return errors.New("encode browser session generation")
+	}
+	encoded = append(encoded, '\n')
+	if len(encoded) > maxBrowserSessionGenerationBytes {
+		return errors.New("browser session generation exceeds its limit")
+	}
+	temporary, err := os.CreateTemp(root, "."+identifier+".generation.json-*")
+	if err != nil {
+		return errors.New("create browser session generation")
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return errors.New("protect browser session generation")
+	}
+	writeErr := writeAll(temporary, encoded)
+	syncErr := temporary.Sync()
+	closeErr := temporary.Close()
+	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+		return errors.New("write browser session generation")
+	}
+	path := filepath.Join(root, identifier+".generation.json")
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return errors.New("publish browser session generation")
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return errors.New("protect browser session generation")
+	}
+	if err := syncRuntimeDirectory(root); err != nil {
 		return errors.New("sync browser session directory")
 	}
 	return nil
+}
+
+func validateSessionGeneration(record sessionGenerationRecord) error {
+	if record.Version != 1 || !isLowerHexDigest(record.Generation) {
+		return errors.New("browser session generation record is invalid")
+	}
+	switch record.State {
+	case sessionGenerationPending, sessionGenerationMemory, sessionGenerationRevoked:
+		if record.CipherSHA256 != "" {
+			return errors.New("browser session generation record is invalid")
+		}
+	case sessionGenerationActive:
+		if !isLowerHexDigest(record.CipherSHA256) {
+			return errors.New("browser session generation record is invalid")
+		}
+	default:
+		return errors.New("browser session generation record is invalid")
+	}
+	return nil
+}
+
+func isLowerHexDigest(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && hex.EncodeToString(decoded) == value
 }
 
 func ensureSessionDirectory(root string) error {
@@ -490,37 +634,78 @@ func ensureSessionDirectory(root string) error {
 	return nil
 }
 
-func readEncryptedSessionEnvelope(path string) (encryptedSessionEnvelope, bool, error) {
+func readEncryptedSessionEnvelope(path string) (encryptedSessionEnvelope, string, bool, error) {
+	encoded, found, err := readSecureSessionFile(path, maxEncryptedBrowserSessionBytes, "encrypted browser session")
+	if err != nil || !found {
+		return encryptedSessionEnvelope{}, "", found, err
+	}
+	var envelope encryptedSessionEnvelope
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&envelope); err != nil {
+		return encryptedSessionEnvelope{}, "", true, errors.New("encrypted browser session envelope is invalid")
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return encryptedSessionEnvelope{}, "", true, errors.New("encrypted browser session envelope is invalid")
+	}
+	digest := sha256.Sum256(encoded)
+	return envelope, hex.EncodeToString(digest[:]), true, nil
+}
+
+func readSessionGeneration(path string) (sessionGenerationRecord, bool, error) {
+	encoded, found, err := readSecureSessionFile(path, maxBrowserSessionGenerationBytes, "browser session generation")
+	if err != nil || !found {
+		return sessionGenerationRecord{}, found, err
+	}
+	var record sessionGenerationRecord
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&record); err != nil {
+		return sessionGenerationRecord{}, true, errors.New("browser session generation record is invalid")
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return sessionGenerationRecord{}, true, errors.New("browser session generation record is invalid")
+	}
+	if err := validateSessionGeneration(record); err != nil {
+		return sessionGenerationRecord{}, true, err
+	}
+	return record, true, nil
+}
+
+func readSecureSessionFile(path string, maximumBytes int64, label string) ([]byte, bool, error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return encryptedSessionEnvelope{}, false, nil
+		return nil, false, nil
 	}
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Size() > maxEncryptedBrowserSessionBytes {
-		return encryptedSessionEnvelope{}, true, errors.New("encrypted browser session file is unsafe")
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Size() > maximumBytes {
+		return nil, true, errors.New(label + " file is unsafe")
 	}
 	directoryInfo, err := os.Lstat(filepath.Dir(path))
 	if err != nil || directoryInfo.Mode()&os.ModeSymlink != 0 || !directoryInfo.IsDir() || directoryInfo.Mode().Perm()&0o077 != 0 {
-		return encryptedSessionEnvelope{}, true, errors.New("encrypted browser session directory is unsafe")
+		return nil, true, errors.New("browser session directory is unsafe")
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return encryptedSessionEnvelope{}, true, errors.New("open encrypted browser session")
+		return nil, true, errors.New("open " + label)
 	}
 	defer file.Close()
 	openedInfo, err := file.Stat()
 	if err != nil || !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
-		return encryptedSessionEnvelope{}, true, errors.New("encrypted browser session changed while opening")
+		return nil, true, errors.New(label + " changed while opening")
 	}
-	var envelope encryptedSessionEnvelope
-	decoder := json.NewDecoder(io.LimitReader(file, maxEncryptedBrowserSessionBytes+1))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&envelope); err != nil {
-		return encryptedSessionEnvelope{}, true, errors.New("encrypted browser session envelope is invalid")
+	encoded, err := io.ReadAll(io.LimitReader(file, maximumBytes+1))
+	if err != nil {
+		return nil, true, errors.New("read " + label)
 	}
-	if err := requireJSONEOF(decoder); err != nil {
-		return encryptedSessionEnvelope{}, true, errors.New("encrypted browser session envelope is invalid")
+	if int64(len(encoded)) > maximumBytes {
+		return nil, true, errors.New(label + " file is unsafe")
 	}
-	return envelope, true, nil
+	afterReadInfo, statErr := file.Stat()
+	pathInfo, pathErr := os.Lstat(path)
+	if statErr != nil || pathErr != nil || !os.SameFile(openedInfo, afterReadInfo) || !os.SameFile(afterReadInfo, pathInfo) {
+		return nil, true, errors.New(label + " changed while reading")
+	}
+	return encoded, true, nil
 }
 
 func writeAll(writer io.Writer, content []byte) error {

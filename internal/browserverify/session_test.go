@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,8 +16,9 @@ import (
 )
 
 type memorySecretStore struct {
-	values    map[string]string
-	beforeGet func()
+	values       map[string]string
+	beforeGet    func()
+	beforeDelete func()
 }
 
 func newMemorySecretStore() *memorySecretStore {
@@ -40,6 +42,9 @@ func (s *memorySecretStore) Set(key, value string) error {
 }
 
 func (s *memorySecretStore) Delete(key string) error {
+	if s.beforeDelete != nil {
+		s.beforeDelete()
+	}
 	delete(s.values, key)
 	return nil
 }
@@ -56,6 +61,32 @@ func (failingSecretStore) Set(string, string) error {
 
 func (failingSecretStore) Delete(string) error {
 	return errors.New("keyring unavailable")
+}
+
+type switchableSecretStore struct {
+	delegate    *memorySecretStore
+	unavailable bool
+}
+
+func (s *switchableSecretStore) Get(key string) (string, error) {
+	if s.unavailable {
+		return "", errors.New("keyring unavailable")
+	}
+	return s.delegate.Get(key)
+}
+
+func (s *switchableSecretStore) Set(key, value string) error {
+	if s.unavailable {
+		return errors.New("keyring unavailable")
+	}
+	return s.delegate.Set(key, value)
+}
+
+func (s *switchableSecretStore) Delete(key string) error {
+	if s.unavailable {
+		return errors.New("keyring unavailable")
+	}
+	return s.delegate.Delete(key)
 }
 
 type setFailingSecretStore struct {
@@ -351,6 +382,132 @@ func TestSessionStoreMemoryFallbackRetiresOldCiphertextBeforeRestart(t *testing.
 	}
 }
 
+func TestSessionStoreCrossStoreClearInvalidatesMemoryFallback(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	key := SessionKey{SystemID: "base", Environment: "test", Origin: "https://app.test"}
+	memoryStore := NewSessionStore(root, failingSecretStore{})
+	if err := memoryStore.Save(key, []byte(`{"cookies":[{"value":"memory-session"}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewSessionStore(root, newMemorySecretStore()).Clear(key); err != nil {
+		t.Fatal(err)
+	}
+	if loaded, found, err := memoryStore.Load(key); err != nil || found || loaded != nil {
+		t.Fatalf("cleared memory session revived: loaded=%q found=%v err=%v", loaded, found, err)
+	}
+}
+
+func TestSessionStoreCrossStoreDurableSaveSupersedesMemoryFallback(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	key := SessionKey{SystemID: "base", Environment: "test", Origin: "https://app.test"}
+	secrets := &switchableSecretStore{delegate: newMemorySecretStore(), unavailable: true}
+	first := NewSessionStore(root, secrets)
+	if err := first.Save(key, []byte(`{"cookies":[{"value":"memory-session"}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	secrets.unavailable = false
+	durableState := []byte(`{"cookies":[{"value":"new-durable-session"}]}`)
+	if err := NewSessionStore(root, secrets).Save(key, durableState); err != nil {
+		t.Fatal(err)
+	}
+	loaded, found, err := first.Load(key)
+	if err != nil || !found || !bytes.Equal(loaded, durableState) {
+		t.Fatalf("load after durable replacement=%q found=%v err=%v", loaded, found, err)
+	}
+}
+
+func TestSessionStoreDurableGenerationRejectsRestoredCiphertext(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	key := SessionKey{SystemID: "base", Environment: "test", Origin: "https://app.test"}
+	store := NewSessionStore(root, newMemorySecretStore())
+	if err := store.Save(key, []byte(`{"cookies":[{"value":"old-session"}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	path := store.encryptedPath(key)
+	oldCiphertext, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(key, []byte(`{"cookies":[{"value":"new-session"}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, oldCiphertext, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if loaded, found, err := store.Load(key); err == nil || found || loaded != nil {
+		t.Fatalf("superseded ciphertext loaded: loaded=%q found=%v err=%v", loaded, found, err)
+	}
+}
+
+func TestSessionStoreClearFailureCannotReviveOldCiphertext(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	key := SessionKey{SystemID: "base", Environment: "test", Origin: "https://app.test"}
+	secrets := newMemorySecretStore()
+	store := NewSessionStore(root, secrets)
+	oldState := []byte(`{"cookies":[{"value":"old-session"}]}`)
+	if err := store.Save(key, oldState); err != nil {
+		t.Fatal(err)
+	}
+	path := store.encryptedPath(key)
+	oldEnvelope, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "block-removal"), oldEnvelope, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Clear(key); err == nil {
+		t.Fatal("Clear succeeded although ciphertext cleanup failed")
+	}
+	if err := os.RemoveAll(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, oldEnvelope, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if loaded, found, err := NewSessionStore(root, failingSecretStore{}).Load(key); err != nil || found || loaded != nil {
+		t.Fatalf("old ciphertext revived after failed Clear: loaded=%q found=%v err=%v", loaded, found, err)
+	}
+}
+
+func TestSessionStoreClearPublishesRevocationBeforeCleanup(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	key := SessionKey{SystemID: "base", Environment: "test", Origin: "https://app.test"}
+	secrets := newMemorySecretStore()
+	store := NewSessionStore(root, secrets)
+	if err := store.Save(key, []byte(`{"cookies":[{"value":"old-session"}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	identifier := sessionIdentifierForTest(key)
+	generationPath := filepath.Join(root, identifier+".generation.json")
+	ciphertextPath := store.encryptedPath(key)
+	var inspectionErr error
+	inspected := false
+	secrets.beforeDelete = func() {
+		inspected = true
+		record, found, err := readSessionGeneration(generationPath)
+		if err != nil || !found || record.State != sessionGenerationRevoked {
+			inspectionErr = fmt.Errorf("generation before key cleanup: record=%+v found=%v err=%v", record, found, err)
+			return
+		}
+		if _, err := os.Stat(ciphertextPath); err != nil {
+			inspectionErr = fmt.Errorf("ciphertext was cleaned before revocation inspection: %w", err)
+		}
+	}
+	if err := store.Clear(key); err != nil {
+		t.Fatal(err)
+	}
+	if !inspected || inspectionErr != nil {
+		t.Fatalf("revocation was not durable before cleanup: inspected=%v err=%v", inspected, inspectionErr)
+	}
+}
+
 func TestSessionStoreAmbiguousKeyringSetRetiresOldCiphertext(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "sessions")
 	key := SessionKey{SystemID: "base", Environment: "test", Origin: "https://app.test"}
@@ -407,7 +564,7 @@ func TestSessionStoreMemoryFallbackFailsWhenOldCiphertextCannotBeRetired(t *test
 	}
 	identifier := sessionIdentifierForTest(key)
 	if cached, ok := degraded.memory[identifier]; ok {
-		t.Fatalf("failed Save cached new session: %q", cached)
+		t.Fatalf("failed Save cached new session: %q", cached.State)
 	}
 
 	if err := os.RemoveAll(path); err != nil {
@@ -417,8 +574,8 @@ func TestSessionStoreMemoryFallbackFailsWhenOldCiphertextCannotBeRetired(t *test
 		t.Fatal(err)
 	}
 	loaded, found, err := NewSessionStore(root, durableSecrets).Load(key)
-	if err != nil || !found || !bytes.Equal(loaded, oldState) {
-		t.Fatalf("failed fallback changed durable state: loaded=%q found=%v err=%v", loaded, found, err)
+	if err != nil || found || loaded != nil {
+		t.Fatalf("failed fallback revived superseded durable state: loaded=%q found=%v err=%v", loaded, found, err)
 	}
 }
 

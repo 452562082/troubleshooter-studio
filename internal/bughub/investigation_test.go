@@ -802,6 +802,35 @@ func TestValidationSkillTemplateMatchesRuntimeOutputContract(t *testing.T) {
 	}
 }
 
+func TestValidatorTemplateUsesStudioBrowserVerifierAsPrimary(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "templates", "workspace", "skills", "bug-verifier", "SKILL.md.tmpl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	for _, required := range []string{"Studio BrowserVerifier", "渲染截图", "browser_login_required", "不得直接启动 Playwright"} {
+		if !strings.Contains(content, required) {
+			t.Fatalf("missing %q", required)
+		}
+	}
+	if strings.Contains(content, "后台运行时不保证有 in-app browser") {
+		t.Fatal("obsolete browser downgrade guidance remains")
+	}
+}
+
+func TestFrontendReproTemplateTreatsBrowserCollectAsManualCompatibilityOnly(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "templates", "workspace", "skills", "frontend-repro-investigator", "SKILL.md.tmpl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	for _, required := range []string{"Studio BrowserVerifier", "手动兼容路径", "不属于持久化 Case 证据协议"} {
+		if !strings.Contains(content, required) {
+			t.Fatalf("missing %q", required)
+		}
+	}
+}
+
 func TestFixerSkillTemplateMatchesRuntimeOutputContract(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "templates", "workspace", "skills", "bug-fixer", "SKILL.md.tmpl"))
 	if err != nil {

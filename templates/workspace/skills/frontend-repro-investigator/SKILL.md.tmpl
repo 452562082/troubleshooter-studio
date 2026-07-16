@@ -39,9 +39,11 @@ description: 从前端复现证据开始排障。读取 HAR、console、RUM/Sent
 
 优先使用 `backend_handoff.trace_ids`。没有 trace id 时，用 `backend_handoff.candidate_endpoints` 结合 `routing/references/frontend-entry-map.yaml` 选择候选后端服务，再查日志。
 
-## 可选浏览器采集
+## Studio Case 与手动兼容浏览器采集
 
-如果用户提供可复现 URL，且生成工作区有 Node.js，先展示采集计划，不立即启动浏览器：
+Studio 故障闭环中的 Web validation / regression 由 **Studio BrowserVerifier** 在宿主进程执行 BrowserPlan，生成渲染截图、脱敏 Network / console 和 action trace，并把精确 artifact 引用注入 validator。此时本 skill 只归一化 Studio 已冻结的证据，不得运行本目录的采集器替代宿主结果。
+
+`browser_collect.mjs` 只是脱离 Studio Case 时的**手动兼容路径**，不属于持久化 Case 证据协议：它不具备 HostVerifier 的 URL/生产动作策略、加密登录 session、attempt staging journal、artifact 冻结与截图成功 gate，产物不能冒充 Studio 的权威浏览器证据。只有用户明确要求手动兼容采集、提供可复现 URL，且生成工作区有 Node.js 时，才先展示采集计划，不立即启动浏览器：
 
 ```bash
 node skills/frontend-repro-investigator/scripts/browser_collect.mjs --url <page-url> --out /tmp/tshoot-artifacts --plan
@@ -61,6 +63,8 @@ node skills/frontend-repro-investigator/scripts/browser_collect.mjs --url <page-
 - `trace.zip`
 
 Playwright 是可选依赖，默认不内置。缺失时脚本会返回 error code `3`、`install_hint` 和计划产物路径。用户已有 HAR、console、RUM/Sentry、trace id 或 request id 证据时，不要把缺少 Playwright 当成阻塞。
+
+手动兼容采集的 `trace.zip` 可能包含 DOM、Cookie 或请求体，不得登记到持久化 Case；进入 Studio 闭环时仍以 HostVerifier 生成并二次扫描的脱敏 artifact 为准。
 
 ## HAR 流程
 

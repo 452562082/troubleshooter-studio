@@ -106,13 +106,13 @@ go test ./internal/generator -run TestGenerate_Nacos_Shop
 make audit
 ```
 
-`scripts/test-skill-scripts.sh` 需要 `pytest`、`PyYAML` 和 `uv`（Nacos MCP 专项测试用 `uv` 隔离安装 `mcp/httpx/respx/pytest-asyncio`）。真实 Playwright 采集链路不进默认测试，本地手动跑：
+`scripts/test-skill-scripts.sh` 需要 `pytest`、`PyYAML` 和 `uv`（Nacos MCP 专项测试用 `uv` 隔离安装 `mcp/httpx/respx/pytest-asyncio`），并会通过 `scripts/test-browser-worker.sh` 运行不下载浏览器的 Node worker 离线测试。固定 Playwright/Chromium 的真实宿主链路不进默认测试；有 Node/npm 网络访问的机器只显式运行一次：
 
 ```bash
-npm install --no-save --no-package-lock playwright
-npx playwright install chromium
-scripts/test-browser-smoke.sh
+TSHOOT_BROWSER_SMOKE=1 scripts/test-browser-worker.sh
 ```
+
+真实 smoke 会让 Studio runtime manager 安装固定版本 Playwright/Chromium 并执行 launch + 本地页面截图 probe，然后验证最终 PNG、脱敏 Network/console 和 `browser-actions.json`。不得让默认测试下载浏览器、访问业务环境或修改真实登录态；发布前该 smoke 未通过时必须保留为明确 release gate，不能用离线 worker 测试替代。
 
 覆盖率门槛：
 
@@ -142,6 +142,8 @@ scripts/test-browser-smoke.sh
 - 部署测试只能使用 fake verifier、`httptest` 或 fake K8s reader；测试和 Studio 都不得执行真实应用部署。
 - 证据、事件、迁移和 verifier 错误测试必须包含 token、Cookie、Authorization、password 和 URL userinfo 等脱敏 fixture，并断言数据库及 artifact 中不含原值。
 - 完整闭环至少覆盖两次独立授权、部署版本 gate、新鲜回归证据、多仓库部分完成、重复通知以及重启后继续。
+- Web validation / regression 必须覆盖 planner → fake HostVerifier → evaluator、一次 locator 修正上限、最终截图 gate、登录父链 continuation、加密 session/内存降级、runtime 系统错误和 reservation/result manifest 重启恢复；默认测试只能使用 fake runtime 或离线 worker。
+- 浏览器安全测试必须断言禁止动作、生产交互、越权/重绑定 URL、password 截图、原始 trace/HAR 和秘密 artifact 被拒绝；真实 Chromium 只通过上面的显式 smoke 命令执行，不得访问业务环境或真实登录态。
 
 跨仓库服务拓扑还有以下回归要求：
 

@@ -49,4 +49,7 @@ python3 -m pytest \
 echo "▶ scripts/test-nacos-mcp.sh"
 scripts/test-nacos-mcp.sh
 
+echo "▶ scripts/test-browser-worker.sh"
+scripts/test-browser-worker.sh
+
 echo "✓ workspace skill script tests passed"

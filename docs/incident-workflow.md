@@ -14,6 +14,7 @@
 - Agent 一次只执行一个阶段并返回结构化结果，不能通过自由文本自行跨阶段。
 - 验证、排障、修复和回归由 Agent 执行；合并由 Studio Git service 执行；应用部署由人或外部平台执行。
 - 修复和合并分别需要一次独立用户授权；“已部署”还必须经过只读版本验证，不能只相信按钮或文本通知。
+- Web validation / regression 的浏览器由 Studio 宿主持有；validator 只规划受限动作并判断宿主证据，不在 Agent CLI 沙箱中启动 Chromium。
 - 所有外部副作用都以幂等、可恢复和可审计为前提，不能把未知结果当作成功。
 
 ## 2. 产品入口与活动 Case
@@ -46,6 +47,10 @@ flowchart LR
     Orchestrator <--> DB[(SQLite)]
     Orchestrator --> Runner[AgentPhaseRunner]
     Runner --> Adapter[Codex / Claude Code / OpenClaw]
+    Runner --> Browser[BrowserCoordinator]
+    Browser --> HostVerifier[Studio HostVerifier]
+    HostVerifier --> Runtime[固定 Playwright / Chromium]
+    HostVerifier --> Staging[Attempt evidence staging]
     Orchestrator --> Git[Studio Git service]
     Orchestrator --> Verifier[manual / HTTP / K8s verifier]
     Runner --> Orchestrator
@@ -63,11 +68,12 @@ flowchart LR
 | `CaseOrchestrator` | 校验命令、执行状态迁移、持久化审计、调度阶段 | 自己分析 Bug 或修改业务代码 |
 | `AgentPhaseRunner` | 为单个 attempt 生成阶段 Prompt、启动 CLI、解析结构化输出 | 自行决定跨到下一阶段 |
 | Agent CLI adapter | 在选定工作区运行 Codex、Claude Code 或 OpenClaw | 写闭环数据库 |
+| Browser coordinator / HostVerifier | 编排 BrowserPlan、执行宿主 Chromium、脱敏并冻结浏览器证据 | 接收任意脚本、替 Agent 判断业务结论 |
 | Git service | 在隔离 worktree 中合并并推送环境分支 | 部署应用 |
 | Deployment verifier | 只读确认目标环境包含预期 commit | 相信未经验证的“已部署”声明 |
 | SQLite store | 保存快照、attempt、证据、授权、副作用检查点和事件 | 编排业务流程 |
 
-用户选择的机器人决定 Agent target 和工作区。验证、排障、修复、回归是四个逻辑 Agent 角色，当前持久化闭环会在同一个选定 target 上使用不同的阶段 Prompt；这不等于一定启动四个独立安装的机器人实例。
+用户选择的基础机器人决定 Agent target。`validation` 和 `regression` 必须通过同一 phase resolver 切换到该安装的 validator 角色和工作区；`investigation` 和 `fix` 保持所选基础机器人。旧安装缺少 validator 时 attempt 以 `validator_not_installed` 失败并提示重新部署，不能静默退回排障工作区伪装验证。
 
 ### 3.1 Agent 单次执行协议
 
@@ -105,6 +111,46 @@ sequenceDiagram
 7. `CaseOrchestrator.CompleteAttempt` 再次验证 attempt 归属和结果门槛，在一个事务中保存结果、证据索引、代码变更、时间线和下一状态。
 
 只读阶段的 Agent 进程异常时最多受控重试一次；修复阶段因为可能已经产生 commit 或 push，绝不盲目重跑。无效 YAML、环境不匹配或证据登记失败不会推进为成功：验证、排障和回归回到等待证据，修复进入 `fix_failed`。
+
+### 3.2 Web validation / regression 的宿主浏览器协议
+
+有 `frontend_url`，或最新补充明确要求 Web / 页面 / 浏览器复现时，validation / regression 在同一个 `PhaseAttempt` 内由 `BrowserCoordinator` 执行三段式协议：
+
+```mermaid
+sequenceDiagram
+    participant V as Validator 角色 Agent
+    participant C as BrowserCoordinator
+    participant H as Studio HostVerifier
+    participant P as 固定 Playwright / Chromium
+    participant S as Attempt staging
+
+    C->>V: Bug、步骤、环境策略；请求 BrowserPlan
+    V-->>C: 严格声明式 BrowserPlan
+    C->>H: 已校验的 plan + origin policy
+    H->>P: 宿主执行受限页面动作
+    P-->>H: screenshot / Network / console / action result
+    H->>S: 脱敏、摘要、journal、冻结 artifact
+    alt locator 首次失败
+        C->>V: 失败步骤 + 脱敏 accessibility 摘要
+        V-->>C: 仅修正失败及后续 locator 一次
+        C->>H: 执行修正 plan
+    end
+    C->>V: 权威 artifact refs + 安全执行报告
+    V-->>C: 严格 ValidationResult
+```
+
+简写为：
+
+```text
+validator 规划 BrowserPlan
+  → Studio 宿主执行并脱敏取证
+  → 最多一次 locator 修正
+  → validator 基于截图/Network/console 给出 ValidationResult
+```
+
+BrowserPlan 只允许 `goto`、`click`、`fill`、`press`、`select`、`wait_for` 和 `screenshot`，禁止任意 JavaScript、XPath、文件上传、Cookie、Authorization 和凭据输入。HostVerifier 按正式配置校验 origin、DNS/IP 和生产限制；`is_prod=true` 只允许导航、等待和截图。宿主 artifact 在最终 evaluator 调用前冻结，evaluator 只能解释证据，不能改写路径。Web 结论要推进为 `reproduced`、`not_reproduced`、`fixed_verified` 或 `still_reproduces`，必须存在 HostVerifier 确认的最终 PNG 渲染截图。
+
+检测到 auth origin、password 输入、关键 401/403 或已知登录 route 时，当前 attempt 以 `browser_login_required` 进入 `waiting_evidence`，且不截登录表单。用户点击“打开验证浏览器完成登录”，在 Studio 打开的可见浏览器中自行完成 SSO/MFA；Studio 加密保存 `storageState` 后创建同 Case / cycle、父链明确的新 attempt。账号、密码、Cookie 和 storageState 不进入 Case 输入或 artifact。
 
 ## 4. 端到端主流程
 
@@ -177,9 +223,12 @@ pending_validation -> validating -> reproduced -> investigating
 执行规则：
 
 1. 优先执行用户最新的明确指令；例如用户要求通过 Web 验证时，不能只重复读取旧截图。
-2. 后台 Agent 不保证拥有桌面内嵌浏览器能力。没有可用浏览器时，应明确说明，并退化到附件、HAR、API、`curl`、trace 或日志证据。
-3. Web 复现至少需要可访问的 URL/路由、测试账号或有效登录态，以及目标 Agent 实际具备的浏览器能力。
-4. `reproduced` 必须同时提供实际表现、预期表现，以及至少一份属于当前 attempt 的已登记证据。
+2. Web attempt 先由 validator 输出 BrowserPlan，Studio HostVerifier 在宿主执行；validator 不得直接启动 Playwright、Chromium 或工作区兼容采集脚本。
+3. locator 失败只允许在同 attempt 内修正失败步骤及后续步骤一次；第二次失败保留失败现场截图并进入 `waiting_evidence`。
+4. `browser_login_required` 由 Studio 可见浏览器处理，不向 Case 索要账号、密码或 Cookie；运行时损坏、validator 缺失和策略拒绝属于系统错误，不能伪装成业务 `gaps`。
+5. 最终 evaluator 基于 Studio 冻结的渲染截图、脱敏 Network / console / action trace 输出 `ValidationResult`；不能发明或修改 artifact 引用。
+6. `reproduced` 必须同时提供实际表现、预期表现，以及至少一份属于当前 attempt 的已登记证据；Web 成功结论还必须有最终渲染截图。
+7. 非 Web 场景继续使用附件、HAR、API、`curl`、trace 或日志证据，不强制启动浏览器。
 
 结构化输出核心字段：
 
@@ -276,6 +325,8 @@ pending_validation -> validating -> reproduced -> investigating
 - request ID 或 trace ID 不能沿用历史值。
 - 文件 SHA256 不能复用首次验证证据冒充新结果。
 
+Web 回归使用与首次验证完全相同的 validator → HostVerifier → evaluator 协议和一次 locator 修正上限，但绑定的是已验证部署版本。原始截图只作对照；`fixed_verified` / `still_reproduces` 必须引用本次 regression attempt 的新最终渲染截图和宿主冻结的当前证据。
+
 结果流转：
 
 - `fixed_verified`：闭环完成，Case 终止。
@@ -356,6 +407,9 @@ HTTP verifier 默认禁用系统代理，并拒绝 loopback、RFC1918/ULA、link
 |---|---|---|---|
 | 开启故障闭环 / 开始验证 | `StartIncidentCase` | `CreateAndStartCase` 或 `StartCase` | 创建 validation attempt 并进入 `validating` |
 | 补充证据并继续 | `ContinueIncidentCase` | `ContinueWithEvidence` | Agent 阶段创建父链 attempt；合并/部署补充返回对应 gate |
+| 打开验证浏览器完成登录 | `OpenIncidentBrowserLogin` | 持久化 browser recovery operation 后继续原阶段 | 可见浏览器手动登录并创建父链 continuation attempt |
+| 清除此环境登录态 | `ClearIncidentBrowserSession` | HostVerifier session clear | 清除当前 system / environment / application origin 的 session |
+| 修复浏览器环境并重试 | `RepairIncidentBrowserRuntime` | 固定 runtime repair + probe 后继续原阶段 | 仅在 `browser_runtime_broken` 下创建 continuation attempt |
 | 允许修复 | `ApproveIncidentFix` | `ApproveFix` | 保存第一次授权并启动 fix attempt |
 | 允许合并环境分支 | `ApproveIncidentMerge` | `ApproveMerge` | 保存第二次授权并由 Git service 合并 |
 | 已部署，开始验证 | `NotifyIncidentDeployed` | `NotifyDeployed` | 保存部署 reservation，运行只读 verifier |
@@ -419,6 +473,9 @@ HTTP verifier 默认禁用系统代理，并拒绝 loopback、RFC1918/ULA、link
 - 大证据文件保存在 Studio 管理的 artifact 目录，SQLite 只保存元数据和摘要。
 - artifact 统一限制为 16 MiB，并防目录穿越、符号链接替换和读取过程中的文件变化。
 - 捕获时计算 SHA256，并扫描 token、Cookie、Authorization、password 和 URL userinfo 等秘密。
+- 浏览器不保存原始 Playwright trace；HostVerifier 只登记最终/步骤 PNG、脱敏 Network、console 和 `browser-actions.json`，Runner 仍执行第二道敏感信息扫描。
+- 登录 `storageState` 使用 system / environment / application origin 绑定的 AES-GCM key；密钥进入系统 keyring，加密文件权限仅限当前用户。keyring 不可用时只保留内存 session，不落明文。
+- 截图预览通过 Case ID + artifact ID 的安全 binding 重新校验归属、路径、大小和 PNG 类型；页面不把内部 `path_or_reference` 直接作为图片 URL。
 - 证据严格绑定 Case、cycle 和 attempt；回归新鲜度由时间、环境、部署版本、请求标识和摘要共同校验。
 - Agent 的自然语言输出不是状态真源，只有通过结构校验并持久化后的结果才能推进 Case。
 
@@ -444,11 +501,13 @@ Case 变化后，Studio 通过 `incident-case:event` 通知前端，页面自动
 | 合法状态迁移 | `internal/bughub/workflow_transition.go` |
 | 命令、授权、调度和结果编排 | `internal/bughub/workflow_orchestrator.go` |
 | 阶段 Prompt 和结构化结果解析 | `internal/bughub/workflow_phase_runner.go` |
+| phase validator 角色与 BrowserCoordinator | `internal/bughub/workflow_phase_bot.go`、`internal/bughub/workflow_browser_coordinator.go` |
+| 宿主 runtime、HostVerifier、session 和 worker | `internal/browserverify/` |
 | Codex/Claude Code/OpenClaw CLI 执行 | `internal/bughub/codex_runner.go` |
 | Git 合并和统一恢复 | `internal/bughub/workflow_git.go`、`internal/bughub/workflow_recovery.go` |
 | 部署验证和回归输入 | `internal/bughub/workflow_deployment.go`、`internal/bughub/workflow_regression.go` |
 | SQLite schema/store | `internal/bughub/workflow_store.go`、`internal/bughub/workflow_store_schema.go` |
-| 桌面 binding | `cmd/tshoot-desktop/bindings_bug_workflow.go` |
+| 桌面 binding | `cmd/tshoot-desktop/bindings_bug_workflow.go`、`cmd/tshoot-desktop/bindings_bug_browser.go` |
 | 页面入口和 Bug/Case 自动切换 | `web/src/pages/IncidentWorkbenchPage.vue` |
 | Case 详情、按钮和阶段输出 | `web/src/components/BugCaseLifecycle.vue`、`web/src/components/BugCaseArtifacts.vue` |
 | 前端命令和实时事件 | `web/src/lib/useIncidentCase.ts` |

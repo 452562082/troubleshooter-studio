@@ -788,10 +788,10 @@ test('supervised context installs request, response, console, page, download, di
   let contextOptions;
   const browser = { async newContext(options) { contextOptions = options; return context; } };
   const hooks = {
+    onPage: () => calls.push('hook:page'),
     onRequest: () => calls.push('hook:request'),
     onResponse: () => calls.push('hook:response'),
     onConsole: () => calls.push('hook:console'),
-    onFrameNavigated: () => calls.push('hook:frame'),
   };
   const policy = baseRequest().policy;
   const supervised = await createSupervisedBrowserContext(browser, {
@@ -808,7 +808,8 @@ test('supervised context installs request, response, console, page, download, di
     acceptDownloads: false,
     viewport: { width: 1280, height: 720 },
   });
-  for (const required of ['page', 'request', 'response', 'console', 'framenavigated', 'dialog', 'download']) assert.equal(typeof contextHandlers.get(required), 'function', required);
+  for (const required of ['page', 'request', 'response', 'console', 'dialog', 'download']) assert.equal(typeof contextHandlers.get(required), 'function', required);
+  assert.equal(contextHandlers.has('framenavigated'), false);
   assert.ok(calls.indexOf('context:on:dialog') < calls.indexOf('context:route'));
   assert.ok(calls.indexOf('context:on:download') < calls.indexOf('context:route'));
   assert.ok(calls.indexOf('context:on:page') < calls.indexOf('context:new-page'));
@@ -845,11 +846,10 @@ test('supervised context installs request, response, console, page, download, di
   contextHandlers.get('request')();
   contextHandlers.get('response')();
   contextHandlers.get('console')();
-  contextHandlers.get('framenavigated')();
+  assert.ok(calls.includes('hook:page'));
   assert.ok(calls.includes('hook:request'));
   assert.ok(calls.includes('hook:response'));
   assert.ok(calls.includes('hook:console'));
-  assert.ok(calls.includes('hook:frame'));
 });
 
 test('assertAllowedURL rejects schemes, origins, metadata, and private addresses', async () => {
@@ -923,16 +923,39 @@ test('login detection checks every password field, including a visible field aft
   assert.equal(await hasVisiblePasswordField(page), true);
 });
 
-const loginPage = (url, passwordVisible = false) => ({
+const loginPage = (url, passwordVisible = false, loginUIVisible = false) => ({
   url: () => url,
   locator: (selector) => {
-    assert.equal(selector, 'input[type="password"]');
+    const visible = selector === 'input[type="password"]' ? passwordVisible : loginUIVisible;
     return {
       count: async () => 1,
-      nth: () => ({ isVisible: async () => passwordVisible }),
+      nth: () => ({ isVisible: async () => visible }),
     };
   },
 });
+
+function trackedLoginPage(initialURL, passwordVisible = false, loginUIVisible = false) {
+  const page = new EventEmitter();
+  let currentURL = initialURL;
+  const mainFrame = { page: () => page, url: () => currentURL };
+  page.url = () => currentURL;
+  page.mainFrame = () => mainFrame;
+  page.locator = loginPage(initialURL, passwordVisible, loginUIVisible).locator;
+  page.navigate = (nextURL) => {
+    currentURL = nextURL;
+    page.emit('framenavigated', mainFrame);
+  };
+  page.closeForTest = () => page.emit('close');
+  return page;
+}
+
+function loginBrowserRequest(page, rawURL, { navigation = true, frame = page.mainFrame() } = {}) {
+  return {
+    url: () => rawURL,
+    isNavigationRequest: () => navigation,
+    frame: () => frame,
+  };
+}
 
 test('login does not complete on a public shell before a delayed auth redirect', async () => {
   const policy = baseLoginRequest().policy;
@@ -944,6 +967,12 @@ test('login does not complete on a public shell before a delayed auth redirect',
 
   const knownRoute = await observeLoginState([loginPage('https://app.test/sign-in')], policy, false, false);
   assert.deepEqual(knownRoute, { started: true, ready: false });
+});
+
+test('visible non-password login UI starts login and blocks completion', async () => {
+  const policy = baseLoginRequest().policy;
+  const observed = await observeLoginState([loginPage('https://app.test/', false, true)], policy, false, false);
+  assert.deepEqual(observed, { started: true, ready: false });
 });
 
 test('401 or 403 never starts login and blocks completion during its quiet window', async () => {
@@ -984,14 +1013,111 @@ test('auth failure activity stays active until responses are quiet for the stabi
   assert.equal(tracker.active(), false);
 });
 
-test('login navigation history remembers a transient OAuth redirect completed before the first poll', async () => {
+test('login navigation history ignores auth subresources, status fetches, and subframe navigations', () => {
   const policy = baseLoginRequest().policy;
+  const page = trackedLoginPage('https://app.test/oauth/start?state=opaque');
   const tracker = createLoginNavigationTracker(policy);
-  tracker.observeURL('https://app.test/oauth/start?state=opaque');
-  tracker.observeURL('https://login.test/oauth/authorize');
-  tracker.observeURL('https://app.test/oauth/callback');
-  const observed = await observeLoginState([loginPage('https://app.test/users')], policy, tracker.started(), false);
+  tracker.trackPage(page);
+  tracker.observeRequest(loginBrowserRequest(page, 'https://login.test/oauth/pixel.png', { navigation: false }));
+  tracker.observeRequest(loginBrowserRequest(page, 'https://app.test/login/status', { navigation: false }));
+  const subframe = { page: () => page };
+  tracker.observeRequest(loginBrowserRequest(page, 'https://login.test/oauth/frame', { frame: subframe }));
+  assert.equal(tracker.started(), false);
+
+  tracker.observeRequest(loginBrowserRequest(page, 'https://login.test/oauth/authorize'));
+  assert.equal(tracker.started(), true);
+});
+
+test('login navigation history remembers a fast top-level auth redirect completed before the first poll', async () => {
+  let now = 10_000;
+  const policy = baseLoginRequest().policy;
+  const page = trackedLoginPage('https://app.test/oauth/start?state=opaque');
+  const tracker = createLoginNavigationTracker(policy, { now: () => now, stableWindowMs: 1_000 });
+  tracker.trackPage(page);
+  page.navigate('https://login.test/oauth/authorize');
+  page.navigate('https://app.test/oauth/callback');
+  const observed = await observeLoginState([page], policy, tracker.started(), false);
   assert.deepEqual(observed, { started: true, ready: true });
+  assert.equal(tracker.completionStable(observed.ready), false);
+  now += 1_001;
+  assert.equal(tracker.completionStable(observed.ready), true);
+});
+
+test('SPA OAuth callback waits for asynchronous session storage before completion can save', async () => {
+  let now = 20_000;
+  let tokenWritten = false;
+  let saves = 0;
+  const policy = baseLoginRequest().policy;
+  const page = trackedLoginPage('https://app.test/oauth/start?state=opaque');
+  const tracker = createLoginNavigationTracker(policy, { now: () => now, stableWindowMs: 1_000 });
+  tracker.trackPage(page);
+  page.navigate('https://login.test/oauth/authorize');
+  page.navigate('https://app.test/oauth/callback');
+  const maybeSave = async () => {
+    const observed = await observeLoginState([page], policy, tracker.started(), false);
+    if (tracker.completionStable(observed.ready)) {
+      assert.equal(tokenWritten, true);
+      saves += 1;
+    }
+  };
+  await maybeSave();
+  now += 999;
+  tokenWritten = true;
+  await maybeSave();
+  assert.equal(saves, 0);
+  now += 2;
+  await maybeSave();
+  assert.equal(saves, 1);
+});
+
+test('closing an auth popup resets OAuth completion stability and excludes the closed page', async () => {
+  let now = 30_000;
+  const policy = baseLoginRequest().policy;
+  const application = trackedLoginPage('https://app.test/users');
+  const popup = trackedLoginPage('about:blank');
+  const tracker = createLoginNavigationTracker(policy, { now: () => now, stableWindowMs: 1_000 });
+  tracker.trackPage(application);
+  tracker.trackPage(popup);
+  popup.navigate('https://login.test/oauth/authorize');
+  popup.closeForTest();
+  const observed = await observeLoginState([application], policy, tracker.started(), false);
+  assert.deepEqual(observed, { started: true, ready: true });
+  assert.equal(tracker.completionStable(observed.ready), false);
+  now += 1_001;
+  assert.equal(tracker.completionStable(observed.ready), true);
+});
+
+test('OAuth completion waits through auth failure quiet and stability windows', async () => {
+  let now = 40_000;
+  const policy = baseLoginRequest().policy;
+  const application = trackedLoginPage('https://app.test/users');
+  const tracker = createLoginNavigationTracker(policy, { now: () => now, stableWindowMs: 1_000 });
+  const failures = createLoginAuthFailureTracker(() => now, 1_000);
+  tracker.trackPage(application);
+  application.navigate('https://login.test/oauth/authorize');
+  application.navigate('https://app.test/users');
+  failures.observeStatus(401);
+  tracker.observeAuthFailure(401);
+
+  now += 999;
+  let observed = await observeLoginState([application], policy, tracker.started(), failures.active());
+  assert.equal(observed.ready, false);
+  assert.equal(tracker.completionStable(observed.ready), false);
+
+  now += 2;
+  observed = await observeLoginState([application], policy, tracker.started(), failures.active());
+  assert.equal(observed.ready, true);
+  assert.equal(tracker.completionStable(observed.ready), false);
+  now += 1_001;
+  assert.equal(tracker.completionStable(observed.ready), true);
+});
+
+test('login completion rejects every open HTTP page outside the application origin', async () => {
+  const policy = baseLoginRequest().policy;
+  const application = loginPage('https://app.test/users');
+  const openAuthPopup = loginPage('https://login.test/oauth/authorize');
+  const observed = await observeLoginState([application, openAuthPopup], policy, true, false);
+  assert.deepEqual(observed, { started: true, ready: false });
 });
 
 test('guarded login context protects the initial page and every popup before use', async () => {

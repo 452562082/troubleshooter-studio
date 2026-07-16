@@ -363,6 +363,25 @@ func TestBrowserCoordinatorRejectsAPIAndAuthenticationStartOriginsBeforeJournalA
 	}
 }
 
+func TestCanonicalBrowserURLNormalizesIPLiteralSpellingsAndDefaultPorts(t *testing.T) {
+	expandedURL, expandedOrigin, err := canonicalBrowserURL("https://[2001:0db8:0000:0000:0000:0000:0000:0001]:443/users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	compressedURL, compressedOrigin, err := canonicalBrowserURL("https://[2001:db8::1]/users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expandedURL != "https://[2001:db8::1]/users" || expandedURL != compressedURL || expandedOrigin != "https://[2001:db8::1]" || expandedOrigin != compressedOrigin {
+		t.Fatalf("expanded=(%q,%q) compressed=(%q,%q)", expandedURL, expandedOrigin, compressedURL, compressedOrigin)
+	}
+	for _, raw := range []string{"https://[fe80::1%25en0]/", "https://user:pass@[2001:db8::1]/"} {
+		if _, _, err := canonicalBrowserURL(raw); err == nil {
+			t.Fatalf("unsafe IP URL accepted: %q", raw)
+		}
+	}
+}
+
 func TestBrowserCoordinatorRejectsUnsafePlanJournalWithoutReplanning(t *testing.T) {
 	request := browserCoordinatorRequest(t)
 	directory := filepath.Join(request.StagingDir, "browser-executions", "primary")

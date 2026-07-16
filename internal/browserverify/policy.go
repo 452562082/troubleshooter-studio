@@ -153,6 +153,12 @@ func parseBrowserURL(raw string) (*url.URL, string, string, error) {
 	if host == "" || strings.Contains(host, "%") {
 		return nil, "", "", errors.New("URL host is invalid")
 	}
+	if address, addressErr := netip.ParseAddr(host); addressErr == nil {
+		if address.Zone() != "" {
+			return nil, "", "", errors.New("URL host is invalid")
+		}
+		host = address.String()
+	}
 	if strings.HasSuffix(parsed.Host, ":") {
 		return nil, "", "", errors.New("URL port is empty")
 	}

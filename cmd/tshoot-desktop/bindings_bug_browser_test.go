@@ -327,6 +327,29 @@ func TestCaseBrowserPolicyResolverCanonicalizesConfiguredOrigins(t *testing.T) {
 	}
 }
 
+func TestCanonicalIncidentBrowserOriginNormalizesIPLiteralSpellingsAndDefaultPorts(t *testing.T) {
+	expanded, err := canonicalIncidentBrowserOrigin("https://[2001:0db8:0000:0000:0000:0000:0000:0001]:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	compressed, err := canonicalIncidentBrowserOrigin("https://[2001:db8::1]")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expanded != "https://[2001:db8::1]" || expanded != compressed {
+		t.Fatalf("expanded=%q compressed=%q", expanded, compressed)
+	}
+	withDefaultPort, err := canonicalIncidentBrowserOrigin("http://192.0.2.10:80")
+	if err != nil || withDefaultPort != "http://192.0.2.10" {
+		t.Fatalf("IPv4 default port origin=%q err=%v", withDefaultPort, err)
+	}
+	for _, raw := range []string{"https://[fe80::1%25en0]", "https://user:pass@[2001:db8::1]"} {
+		if _, err := canonicalIncidentBrowserOrigin(raw); err == nil {
+			t.Fatalf("unsafe IP origin accepted: %q", raw)
+		}
+	}
+}
+
 func TestOpenIncidentBrowserLoginContinuesOnceAndReplaysWithoutSecondLogin(t *testing.T) {
 	app, store, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "https://login.test")
 	input := browserCommandInput(incident, attempt, "browser-login:case-browser-recovery")

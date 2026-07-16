@@ -60,6 +60,29 @@ func TestAllowedURLNormalizesConfiguredOriginUnion(t *testing.T) {
 	}
 }
 
+func TestBrowserPolicyCanonicalizesIPLiteralSpellingsAndDefaultPorts(t *testing.T) {
+	policy := bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://[2001:db8::1]"}}
+	if err := AllowedURL(context.Background(), nil, policy, "https://[2001:0db8:0000:0000:0000:0000:0000:0001]:443/users"); err != nil {
+		t.Fatal(err)
+	}
+	_, expandedOrigin, expandedHost, err := parseBrowserURL("https://[2001:0db8:0000:0000:0000:0000:0000:0001]:443/users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, compressedOrigin, compressedHost, err := parseBrowserURL("https://[2001:db8::1]/users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expandedOrigin != "https://[2001:db8::1]:443" || expandedOrigin != compressedOrigin || expandedHost != "2001:db8::1" || expandedHost != compressedHost {
+		t.Fatalf("expanded=(%q,%q) compressed=(%q,%q)", expandedOrigin, expandedHost, compressedOrigin, compressedHost)
+	}
+	for _, raw := range []string{"https://[fe80::1%25en0]/", "https://user:pass@[2001:db8::1]/"} {
+		if _, _, _, err := parseBrowserURL(raw); err == nil {
+			t.Fatalf("unsafe IP URL accepted: %q", raw)
+		}
+	}
+}
+
 func TestAllowedURLRejectsInvalidDestinations(t *testing.T) {
 	policy := bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.example.com"}}
 	for _, rawURL := range []string{

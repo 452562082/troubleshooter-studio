@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -180,6 +181,15 @@ func canonicalIncidentBrowserOrigin(raw string) (string, error) {
 		return "", errors.New("invalid browser origin")
 	}
 	hostname := strings.ToLower(strings.TrimRight(parsed.Hostname(), "."))
+	if strings.Contains(hostname, "%") {
+		return "", errors.New("invalid browser origin")
+	}
+	if address, addressErr := netip.ParseAddr(hostname); addressErr == nil {
+		if address.Zone() != "" {
+			return "", errors.New("invalid browser origin")
+		}
+		hostname = address.String()
+	}
 	port := parsed.Port()
 	if strings.HasSuffix(parsed.Host, ":") {
 		return "", errors.New("invalid browser origin")

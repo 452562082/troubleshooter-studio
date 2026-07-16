@@ -9,11 +9,13 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -894,7 +896,23 @@ func canonicalBrowserURL(raw string) (string, string, error) {
 		}
 	}
 	hostname := strings.ToLower(strings.TrimRight(parsed.Hostname(), "."))
+	if hostname == "" || strings.Contains(hostname, "%") || strings.HasSuffix(parsed.Host, ":") {
+		return "", "", errors.New("browser start URL host is invalid")
+	}
+	if address, addressErr := netip.ParseAddr(hostname); addressErr == nil {
+		if address.Zone() != "" {
+			return "", "", errors.New("browser start URL host is invalid")
+		}
+		hostname = address.String()
+	}
 	port := parsed.Port()
+	if port != "" {
+		numericPort, portErr := strconv.ParseUint(port, 10, 16)
+		if portErr != nil || numericPort == 0 {
+			return "", "", errors.New("browser start URL port is invalid")
+		}
+		port = strconv.FormatUint(numericPort, 10)
+	}
 	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
 		port = ""
 	}

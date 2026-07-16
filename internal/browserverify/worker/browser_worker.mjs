@@ -45,6 +45,7 @@ const PROXY_CONNECT_TIMEOUT_MS = 10_000;
 const PROXY_RESOLVE_TIMEOUT_MS = 5_000;
 const PROXY_CONNECTION_STAGGER_MS = 50;
 const PROXY_AUTHENTICATE_HEADER = 'Basic realm="tshoot-browser-proxy"';
+const LOGIN_COMPLETION_STABILITY_MS = 1_000;
 const NETWORK_PROTOCOLS = new Set(['http:', 'https:', 'ws:', 'wss:']);
 const BROWSER_LAUNCH_ARGS = Object.freeze([
   '--disable-quic',
@@ -829,13 +830,13 @@ export async function createSupervisedBrowserContext(browser, {
     guardedPages.add(page);
     page.setDefaultTimeout(15_000);
     page.setDefaultNavigationTimeout(30_000);
+    if (typeof hooks.onPage === 'function') hooks.onPage(page);
   };
   context.on('page', guardPage);
   for (const page of context.pages()) guardPage(page);
   if (typeof hooks.onRequest === 'function') context.on('request', hooks.onRequest);
   if (typeof hooks.onResponse === 'function') context.on('response', hooks.onResponse);
   if (typeof hooks.onConsole === 'function') context.on('console', hooks.onConsole);
-  if (typeof hooks.onFrameNavigated === 'function') context.on('framenavigated', hooks.onFrameNavigated);
   if (policy) {
     await context.route('**/*', async (route) => {
       try {
@@ -958,21 +959,50 @@ export async function hasVisiblePasswordField(page) {
   return false;
 }
 
+async function hasVisibleLoginUI(page) {
+  try {
+    const controls = page.locator([
+      'form[action*="login" i]',
+      'form[action*="signin" i]',
+      'form[action*="sign-in" i]',
+      '[data-testid*="login" i]',
+      '[data-testid*="signin" i]',
+      '[data-testid*="sign-in" i]',
+      '[aria-label*="log in" i]',
+      '[aria-label*="sign in" i]',
+      'button[name*="login" i]',
+      'input[type="submit"][value*="log in" i]',
+      'input[type="submit"][value*="sign in" i]',
+    ].join(','));
+    const count = Math.min(await controls.count().catch(() => 0), 20);
+    for (let index = 0; index < count; index += 1) {
+      if (await controls.nth(index).isVisible().catch(() => false)) return true;
+    }
+  } catch {
+    // Pages being closed during polling cannot establish visible login UI.
+  }
+  return false;
+}
+
 async function loginPageState(page, policy, authFailure) {
   const passwordVisible = await hasVisiblePasswordField(page);
+  const loginUIVisible = await hasVisibleLoginUI(page);
   let knownRoute = false;
   let httpPage = false;
+  let applicationPage = false;
   try {
     const parsed = new URL(page.url());
     httpPage = parsed.protocol === 'http:' || parsed.protocol === 'https:';
     knownRoute = /\/(?:login|sign-in|signin|sso)(?:\/|$)/i.test(parsed.pathname);
+    applicationPage = new Set(policy.application_origins.map(normalizeOrigin)).has(parsed.origin);
   } catch {
     // about:blank before a failed navigation is not a login page.
   }
   return {
-    required: passwordVisible || knownRoute || knownAuthOrigin(page.url(), policy) || authFailure,
+    required: passwordVisible || loginUIVisible || knownRoute || knownAuthOrigin(page.url(), policy) || authFailure,
     passwordVisible,
     httpPage,
+    applicationPage,
   };
 }
 
@@ -981,10 +1011,11 @@ export async function observeLoginState(pages, policy, previouslyStarted = false
   for (const page of pages) states.push(await loginPageState(page, policy, false));
   const activeLogin = states.some((state) => state.required);
   const started = previouslyStarted || activeLogin;
+  const relevantPages = states.filter((state) => state.httpPage);
   const ready = started
     && !authFailure
-    && pages.length > 0
-    && states.every((state) => state.httpPage && !state.required);
+    && relevantPages.length > 0
+    && relevantPages.every((state) => state.applicationPage && !state.required);
   return { started, ready };
 }
 
@@ -1016,21 +1047,67 @@ export function createLoginAuthFailureTracker(now = Date.now, quietWindowMs = 1_
   };
 }
 
-export function createLoginNavigationTracker(policy) {
+export function createLoginNavigationTracker(policy, {
+  now = Date.now,
+  stableWindowMs = LOGIN_COMPLETION_STABILITY_MS,
+} = {}) {
   validatePolicy(policy);
   let loginObserved = false;
+  let lastRelevantChangeAt = now();
+  let readySince = null;
+  const trackedPages = new WeakSet();
+  const changed = () => {
+    lastRelevantChangeAt = now();
+    readySince = null;
+  };
+  const observeTopLevelURL = (rawURL) => {
+    try {
+      const parsed = new URL(String(rawURL));
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return;
+      changed();
+      if (knownAuthOrigin(parsed.toString(), policy) || /\/(?:login|sign-in|signin|sso)(?:\/|$)/i.test(parsed.pathname)) {
+        loginObserved = true;
+      }
+    } catch {
+      // Invalid and non-network URLs cannot establish a login baseline.
+    }
+  };
+  const trackPage = (page) => {
+    if (!page || trackedPages.has(page)) return;
+    trackedPages.add(page);
+    changed();
+    page.on('framenavigated', (frame) => {
+      if (frame === page.mainFrame()) observeTopLevelURL(frame.url());
+    });
+    page.once('close', changed);
+  };
   return {
-    observeURL(rawURL) {
+    trackPage,
+    observeRequest(request) {
       try {
-        const parsed = new URL(String(rawURL));
-        if (knownAuthOrigin(parsed.toString(), policy) || /\/(?:login|sign-in|signin|sso)(?:\/|$)/i.test(parsed.pathname)) {
-          loginObserved = true;
-        }
+        if (!request.isNavigationRequest()) return;
+        const frame = request.frame();
+        const page = frame.page();
+        if (frame !== page.mainFrame()) return;
+        trackPage(page);
+        observeTopLevelURL(request.url());
       } catch {
-        // Invalid and non-network URLs cannot establish a login baseline.
+        // A request without a live top-level frame cannot establish login history.
       }
     },
+    observeAuthFailure(status) {
+      if (status === 401 || status === 403) changed();
+    },
     started: () => loginObserved,
+    completionStable(candidateReady) {
+      if (!candidateReady) {
+        readySince = null;
+        return false;
+      }
+      const current = now();
+      if (readySince === null) readySince = current;
+      return current - Math.max(readySince, lastRelevantChangeAt) >= stableWindowMs;
+    },
   };
 }
 
@@ -1389,9 +1466,13 @@ async function loginWorker(request) {
       await loginStorageStateInput(request.storage_state_path),
       request.policy,
       {
-        onRequest: (browserRequest) => navigationHistory.observeURL(browserRequest.url()),
-        onResponse: (response) => authFailures.observeStatus(response.status()),
-        onFrameNavigated: (frame) => navigationHistory.observeURL(frame.url()),
+        onPage: (currentPage) => navigationHistory.trackPage(currentPage),
+        onRequest: (browserRequest) => navigationHistory.observeRequest(browserRequest),
+        onResponse: (response) => {
+          const status = response.status();
+          authFailures.observeStatus(status);
+          navigationHistory.observeAuthFailure(status);
+        },
       },
     );
     context = guarded.context;
@@ -1409,7 +1490,7 @@ async function loginWorker(request) {
       }
       const observed = await observeLoginState(pages, request.policy, loginStarted || navigationHistory.started(), authFailures.active());
       loginStarted = observed.started;
-      if (observed.ready) {
+      if (navigationHistory.completionStable(observed.ready)) {
         await saveLoginStorageState(context, request.storage_state_path);
         emitProgress('browser_login_completed', 'Browser login session saved');
         return { status: 'completed' };

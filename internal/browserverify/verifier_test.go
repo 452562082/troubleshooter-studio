@@ -529,7 +529,7 @@ func TestHostVerifierLoginReportsPlaintextCleanupFailureOnEveryExitPath(t *testi
 				t.Fatalf("encrypted session changed: equal=%v err=%v", bytes.Equal(before, after), readErr)
 			}
 			if plaintextPath != "" {
-				t.Cleanup(func() { _ = os.Remove(plaintextPath) })
+				t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(plaintextPath)) })
 			}
 		})
 	}
@@ -563,7 +563,7 @@ func TestHostVerifierExecuteReportsPlaintextCleanupFailureAfterWorkerError(t *te
 		}
 	}
 	if plaintextPath != "" {
-		t.Cleanup(func() { _ = os.Remove(plaintextPath) })
+		t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(plaintextPath)) })
 	}
 }
 
@@ -589,7 +589,7 @@ func TestCreatePlaintextSessionTempPropagatesCleanupFailureAfterCreationError(t 
 			t.Fatalf("cleanup error exposed %q: %v", secret, err)
 		}
 	}
-	t.Cleanup(func() { _ = os.Remove(plaintextPath) })
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(plaintextPath)) })
 }
 
 func TestHostVerifierLoginRejectsWorkerArtifactsWithoutSavingState(t *testing.T) {

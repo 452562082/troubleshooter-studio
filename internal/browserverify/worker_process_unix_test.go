@@ -73,6 +73,34 @@ func TestWorkerProcessWaitRequestsWrapperCleanupBeforeWrapperReapAndPGIDReuse(t 
 	time.Sleep(50 * time.Millisecond)
 }
 
+func TestWorkerProcessWaitSurfacesWrapperCleanupFailure(t *testing.T) {
+	statusRead, statusWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.NewEncoder(statusWrite).Encode(unixTargetStatus{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := statusWrite.Close(); err != nil {
+		t.Fatal(err)
+	}
+	controlRead, controlWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controlRead.Close()
+	wrapperCleanupErr := errors.New("wrapper cleanup failed")
+	controller := &workerProcessController{
+		statusRead:       statusRead,
+		controlWrite:     controlWrite,
+		managedPlaintext: true,
+		waitWrapper:      func(*exec.Cmd) error { return wrapperCleanupErr },
+	}
+	if err := controller.wait(&exec.Cmd{}); !errors.Is(err, wrapperCleanupErr) {
+		t.Fatalf("wait error=%v, want wrapper cleanup failure", err)
+	}
+}
+
 func TestWorkerProcessCancelCannotSignalAfterOverlappingWaitReapsWrapper(t *testing.T) {
 	statusRead, statusWrite, err := os.Pipe()
 	if err != nil {
@@ -208,71 +236,166 @@ func TestWorkerProcessExpectedKillDoesNotRecordCanceledContext(t *testing.T) {
 	}
 }
 
+func TestManagedPlaintextKillRequestsWrapperOwnedTermination(t *testing.T) {
+	controlRead, controlWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controlRead.Close()
+	signaled := false
+	controller := &workerProcessController{
+		managedPlaintext: true,
+		controlWrite:     controlWrite,
+		signalProcessGroup: func(int, syscall.Signal) error {
+			signaled = true
+			return nil
+		},
+	}
+	if err := controller.kill(&exec.Cmd{Process: &os.Process{Pid: 4242}}); err != nil {
+		t.Fatal(err)
+	}
+	var command [1]byte
+	if _, err := io.ReadFull(controlRead, command[:]); err != nil {
+		t.Fatal(err)
+	}
+	if command[0] != unixWrapperCleanupCommand || signaled {
+		t.Fatalf("cleanup command=%q signaled=%v", command[0], signaled)
+	}
+}
+
 func TestUnixPlaintextCleanupRejectsUnmanagedAndReboundPaths(t *testing.T) {
 	victim := filepath.Join(t.TempDir(), "victim")
 	if err := os.WriteFile(victim, []byte("keep"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	symlink, err := os.CreateTemp(os.TempDir(), ".tshoot-browser-session-symlink-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	symlinkPath := symlink.Name()
-	if err := symlink.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(symlinkPath); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(victim, symlinkPath); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Remove(symlinkPath) })
-	if identity, err := openUnixPlaintextCleanupIdentity(symlinkPath); err == nil {
+	if identity, err := openUnixPlaintextCleanupIdentity(victim); err == nil {
 		_ = identity.Close()
-		t.Fatal("symlink plaintext cleanup path was accepted")
-	}
-	if content, err := os.ReadFile(victim); err != nil || string(content) != "keep" {
-		t.Fatalf("symlink victim changed: %q err=%v", content, err)
+		t.Fatal("unmanaged plaintext cleanup path was accepted")
 	}
 
-	original, err := os.CreateTemp(os.TempDir(), ".tshoot-browser-session-rebound-")
+	path, err := createPlaintextSessionTemp(
+		SessionKey{SystemID: "shop", Environment: "test", Origin: "https://app.test"},
+		[]byte(`{"cookies":[]}`), true, os.Remove,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	originalPath := original.Name()
-	if err := original.Chmod(0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := original.Close(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Remove(originalPath) })
-	identity, err := openUnixPlaintextCleanupIdentity(originalPath)
+	directory := filepath.Dir(path)
+	displaced := directory + ".displaced"
+	t.Cleanup(func() {
+		_ = os.RemoveAll(directory)
+		_ = os.RemoveAll(displaced)
+	})
+	identity, err := openUnixPlaintextCleanupIdentity(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	replacement, err := os.CreateTemp(os.TempDir(), ".tshoot-browser-session-replacement-")
-	if err != nil {
+	if err := os.Rename(directory, displaced); err != nil {
 		t.Fatal(err)
 	}
-	replacementPath := replacement.Name()
-	if _, err := replacement.WriteString("replacement-must-remain"); err != nil {
+	if err := os.Mkdir(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := replacement.Chmod(0o600); err != nil {
+	replacementPath := filepath.Join(directory, plaintextSessionFileName)
+	if err := os.WriteFile(replacementPath, []byte("replacement-must-remain"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := replacement.Close(); err != nil {
-		t.Fatal(err)
+	if err := cleanupUnixPlaintextSession(identity, path); err == nil {
+		t.Fatal("rebound plaintext cleanup directory was removed")
 	}
-	if err := os.Rename(replacementPath, originalPath); err != nil {
-		t.Fatal(err)
-	}
-	if err := cleanupUnixPlaintextSession(identity, originalPath); err == nil {
-		t.Fatal("rebound plaintext cleanup path was removed")
-	}
-	if content, err := os.ReadFile(originalPath); err != nil || string(content) != "replacement-must-remain" {
+	if content, err := os.ReadFile(replacementPath); err != nil || string(content) != "replacement-must-remain" {
 		t.Fatalf("rebound file changed: %q err=%v", content, err)
+	}
+	if content, err := os.ReadFile(victim); err != nil || string(content) != "keep" {
+		t.Fatalf("unmanaged victim changed: %q err=%v", content, err)
+	}
+}
+
+func TestUnixPlaintextCleanupAcceptsAtomicReplacementAndRemovesWorkerSiblings(t *testing.T) {
+	path, err := createPlaintextSessionTemp(
+		SessionKey{SystemID: "shop", Environment: "test", Origin: "https://app.test"},
+		[]byte(`{"cookies":[{"value":"old"}]}`), true, os.Remove,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Dir(path)
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	identity, err := openUnixPlaintextCleanupIdentity(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementPath := filepath.Join(directory, "."+plaintextSessionFileName+"-replacement")
+	if err := os.WriteFile(replacementPath, []byte(`{"cookies":[{"value":"new"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacementPath, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "."+plaintextSessionFileName+"-incomplete"), []byte(`{"cookies":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanupUnixPlaintextSession(identity, path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(directory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("plaintext workspace remains after cleanup: %v", err)
+	}
+}
+
+func TestUnixPlaintextCleanupRejectsUnsafeManagedEntries(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, string)
+	}{
+		{name: "symlink", mutate: func(t *testing.T, path string) {
+			victim := filepath.Join(t.TempDir(), "victim")
+			if err := os.WriteFile(victim, []byte("must-remain"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(victim, path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "over-permissive mode", mutate: func(t *testing.T, path string) {
+			if err := os.Chmod(path, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "multiple links", mutate: func(t *testing.T, path string) {
+			link := filepath.Join(t.TempDir(), "second-link")
+			if err := os.Link(path, link); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "oversized", mutate: func(t *testing.T, path string) {
+			if err := os.Truncate(path, maxBrowserSessionBytes+1); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path, err := createPlaintextSessionTemp(
+				SessionKey{SystemID: "shop", Environment: "test", Origin: "https://app.test"},
+				[]byte(`{"cookies":[]}`), true, os.Remove,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			directory := filepath.Dir(path)
+			t.Cleanup(func() { _ = os.RemoveAll(directory) })
+			identity, err := openUnixPlaintextCleanupIdentity(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(t, path)
+			if err := cleanupUnixPlaintextSession(identity, path); err == nil {
+				t.Fatal("unsafe managed plaintext entry was removed")
+			}
+		})
 	}
 }

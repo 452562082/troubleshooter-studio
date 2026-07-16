@@ -216,12 +216,24 @@ func TestNodeWorkerRunnerParentCrashRemovesPlaintextSession(t *testing.T) {
 	readyPath := filepath.Join(temporary, "parent-crash-worker-ready")
 	plaintextLocatorPath := filepath.Join(temporary, "parent-crash-plaintext-path")
 	workerSource := `
-import { writeFileSync } from 'node:fs';
-process.on('SIGTERM', () => {});
+import { readFileSync, writeFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const request = JSON.parse(readFileSync(0, 'utf8'));
+const { saveLoginStorageState } = await import(pathToFileURL(process.env.TSHOOT_RUNTIME_PROCESS_REAL_WORKER).href);
+await saveLoginStorageState({ storageState: async ({ path }) => {
+  writeFileSync(path, JSON.stringify({ cookies: [{ value: 'atomically-replaced-parent-crash-secret' }], origins: [] }));
+}}, request.storage_state_path);
+process.on('SIGTERM', () => {
+  writeFileSync(request.storage_state_path, JSON.stringify({ cookies: [{ value: 'recreated-during-termination' }], origins: [] }));
+});
 writeFileSync(process.env.TSHOOT_RUNTIME_PROCESS_READY, 'ready');
 setInterval(() => {}, 1000);
 `
 	if err := os.WriteFile(workerPath, []byte(workerSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	realWorkerPath, err := filepath.Abs(filepath.Join("worker", "browser_worker.mjs"))
+	if err != nil {
 		t.Fatal(err)
 	}
 	parent := exec.Command(os.Args[0], "-test.run=^TestRuntimeCommandProcessTreeHelper$")
@@ -229,6 +241,7 @@ setInterval(() => {}, 1000);
 		"TSHOOT_RUNTIME_PROCESS_HELPER=crash-worker-controller",
 		"TSHOOT_RUNTIME_PROCESS_READY=" + readyPath,
 		"TSHOOT_RUNTIME_PROCESS_WORKER=" + workerPath,
+		"TSHOOT_RUNTIME_PROCESS_REAL_WORKER=" + realWorkerPath,
 		"TSHOOT_RUNTIME_PROCESS_PLAINTEXT_PATH=" + plaintextLocatorPath,
 	})
 	parent.Dir = temporary
@@ -240,7 +253,7 @@ setInterval(() => {}, 1000);
 		_ = parent.Process.Kill()
 		_, _ = parent.Process.Wait()
 		if plaintextPath != "" {
-			_ = os.Remove(plaintextPath)
+			_ = os.RemoveAll(filepath.Dir(plaintextPath))
 		}
 	})
 	waitForRuntimeTestFile(t, readyPath, 5*time.Second, func() {
@@ -254,11 +267,11 @@ setInterval(() => {}, 1000);
 		t.Fatal(err)
 	}
 	plaintextPath = strings.TrimSpace(string(encodedPath))
-	if !filepath.IsAbs(plaintextPath) || filepath.Clean(filepath.Dir(plaintextPath)) != filepath.Clean(os.TempDir()) {
-		t.Fatalf("plaintext session path %q is not an absolute OS temp file", plaintextPath)
+	if directory, ok := plaintextSessionWorkspace(plaintextPath); !ok || filepath.Clean(filepath.Dir(directory)) != filepath.Clean(os.TempDir()) {
+		t.Fatalf("plaintext session path %q is not inside a managed private temp directory", plaintextPath)
 	}
 	state, err := os.ReadFile(plaintextPath)
-	if err != nil || string(state) != `{"cookies":[{"value":"parent-crash-secret"}]}` {
+	if err != nil || string(state) != `{"cookies":[{"value":"atomically-replaced-parent-crash-secret"}],"origins":[]}` {
 		t.Fatalf("plaintext session before crash=%q err=%v", state, err)
 	}
 	if err := parent.Process.Kill(); err != nil {
@@ -284,9 +297,11 @@ func TestNodeWorkerRunnerReturnsLoginStateAfterWrapperRemovesPlaintext(t *testin
 	temporary := t.TempDir()
 	workerPath := filepath.Join(temporary, "login-state-worker.mjs")
 	workerSource := `
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 const request = JSON.parse(readFileSync(0, 'utf8'));
-writeFileSync(request.storage_state_path, JSON.stringify({ cookies: [{ value: 'new-session-secret' }], origins: [] }));
+const replacement = request.storage_state_path + '.replacement';
+writeFileSync(replacement, JSON.stringify({ cookies: [{ value: 'new-session-secret' }], origins: [] }), { mode: 0o600 });
+renameSync(replacement, request.storage_state_path);
 process.stdout.write(JSON.stringify({ status: 'completed', artifacts: [] }));
 `
 	if err := os.WriteFile(workerPath, []byte(workerSource), 0o600); err != nil {
@@ -301,7 +316,7 @@ process.stdout.write(JSON.stringify({ status: 'completed', artifacts: [] }));
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Remove(path) })
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(path)) })
 	result, err := (nodeWorkerRunner{}).Run(context.Background(), RuntimePaths{
 		Root: temporary, BrowsersPath: filepath.Join(temporary, "browsers"), WorkerPath: workerPath,
 	}, workerRequest{Mode: "login", StorageStatePath: path}, nil)

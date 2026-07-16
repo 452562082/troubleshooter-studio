@@ -40,6 +40,7 @@ type workerProcessController struct {
 	controlRead        *os.File
 	controlWrite       *os.File
 	cleanupIdentity    *os.File
+	managedPlaintext   bool
 	signalProcessGroup func(int, syscall.Signal) error
 	sleep              func(time.Duration)
 	grace              time.Duration
@@ -107,6 +108,7 @@ func configureWorkerProcess(ctx context.Context, command *exec.Cmd, cleanupPaths
 			return nil, err
 		}
 		controller.cleanupIdentity = cleanupIdentity
+		controller.managedPlaintext = true
 		cleanupFD = "5"
 		cleanupPath = cleanupPaths[0]
 	}
@@ -152,14 +154,18 @@ func (controller *workerProcessController) wait(command *exec.Cmd) error {
 	controller.terminationMu.Lock()
 	controller.closed = true
 	contextErr := controller.contextErr
+	managedPlaintext := controller.managedPlaintext
 	controller.terminationMu.Unlock()
+	if !managedPlaintext {
+		wrapperErr = nil
+	}
 	if statusErr != nil {
 		return errors.Join(statusErr, beforeCleanupErr, controlErr, wrapperErr, contextErr)
 	}
 	if status.Error != "" {
-		return errors.Join(errors.New(status.Error), beforeCleanupErr, controlErr, contextErr)
+		return errors.Join(errors.New(status.Error), beforeCleanupErr, controlErr, wrapperErr, contextErr)
 	}
-	return errors.Join(beforeCleanupErr, controlErr, contextErr)
+	return errors.Join(beforeCleanupErr, controlErr, wrapperErr, contextErr)
 }
 
 func (controller *workerProcessController) cancel(command *exec.Cmd) error {
@@ -174,6 +180,9 @@ func (controller *workerProcessController) cancel(command *exec.Cmd) error {
 	if command.Process == nil {
 		return os.ErrProcessDone
 	}
+	if controller.managedPlaintext {
+		return controller.requestWrapperCleanup()
+	}
 	return controller.terminateProcessGroupLocked(command.Process.Pid)
 }
 
@@ -185,6 +194,9 @@ func (controller *workerProcessController) kill(command *exec.Cmd) error {
 	}
 	if command.Process == nil {
 		return os.ErrProcessDone
+	}
+	if controller.managedPlaintext {
+		return controller.requestWrapperCleanup()
 	}
 	err := controller.processGroupSignal(command.Process.Pid, syscall.SIGKILL)
 	if errors.Is(err, syscall.ESRCH) {
@@ -351,6 +363,9 @@ func runUnixProcessWrapper(statusFD, controlFD, cleanupFD uintptr, cleanupPath, 
 	command.Stdin = os.Stdin
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
+	if cleanupIdentity != nil {
+		command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
 	if err := command.Start(); err != nil {
 		status := unixTargetStatus{Error: err.Error()}
 		_ = writeUnixTargetStatus(statusWriter, status)
@@ -358,6 +373,7 @@ func runUnixProcessWrapper(statusFD, controlFD, cleanupFD uintptr, cleanupPath, 
 		_ = cleanupUnixPlaintextSession(cleanupIdentity, cleanupPath)
 		return 1
 	}
+	targetProcessGroup := command.Process.Pid
 	targetDone := make(chan error, 1)
 	go func() { targetDone <- command.Wait() }()
 	controlDone := make(chan bool, 1)
@@ -377,19 +393,19 @@ func runUnixProcessWrapper(statusFD, controlFD, cleanupFD uintptr, cleanupPath, 
 			}
 			if err := writeUnixTargetStatus(statusWriter, status); err != nil {
 				_, _ = fmt.Fprintf(os.Stderr, "browser process wrapper status failed: %v\n", err)
-				return cleanupAndTerminateUnixProcessGroup(cleanupIdentity, cleanupPath, targetDone, true)
+				return cleanupAndTerminateUnixProcessGroup(cleanupIdentity, cleanupPath, targetProcessGroup, targetDone, true)
 			}
 			statusWriter = nil
 		case <-controlDone:
 			if statusWriter != nil {
 				_ = statusWriter.Close()
 			}
-			return cleanupAndTerminateUnixProcessGroup(cleanupIdentity, cleanupPath, targetDone, targetFinished)
+			return cleanupAndTerminateUnixProcessGroup(cleanupIdentity, cleanupPath, targetProcessGroup, targetDone, targetFinished)
 		case <-terminationSignals:
 			if statusWriter != nil {
 				_ = statusWriter.Close()
 			}
-			return cleanupAndTerminateUnixProcessGroup(cleanupIdentity, cleanupPath, targetDone, targetFinished)
+			return cleanupAndTerminateUnixProcessGroup(cleanupIdentity, cleanupPath, targetProcessGroup, targetDone, targetFinished)
 		}
 	}
 }
@@ -398,8 +414,21 @@ func writeUnixTargetStatus(statusWriter *os.File, status unixTargetStatus) error
 	return errors.Join(json.NewEncoder(statusWriter).Encode(status), statusWriter.Close())
 }
 
-func cleanupAndTerminateUnixProcessGroup(cleanupIdentity *os.File, cleanupPath string, targetDone <-chan error, targetFinished bool) int {
-	_ = cleanupUnixPlaintextSession(cleanupIdentity, cleanupPath)
+func cleanupAndTerminateUnixProcessGroup(cleanupIdentity *os.File, cleanupPath string, targetProcessGroup int, targetDone <-chan error, targetFinished bool) int {
+	if cleanupIdentity == nil {
+		return terminateUnixWrapperProcessGroup(targetDone, targetFinished)
+	}
+	if terminateAndWaitUnixTargetGroup(targetProcessGroup, targetDone, targetFinished) != nil {
+		_ = cleanupIdentity.Close()
+		return 1
+	}
+	if cleanupUnixPlaintextSession(cleanupIdentity, cleanupPath) != nil {
+		return 1
+	}
+	return 0
+}
+
+func terminateUnixWrapperProcessGroup(targetDone <-chan error, targetFinished bool) int {
 	processGroup := os.Getpid()
 	if unix.Getpgrp() != processGroup {
 		return 1
@@ -421,17 +450,74 @@ func cleanupAndTerminateUnixProcessGroup(cleanupIdentity *os.File, cleanupPath s
 	return 1
 }
 
+func terminateAndWaitUnixTargetGroup(processGroup int, targetDone <-chan error, targetFinished bool) error {
+	if processGroup <= 0 || processGroup == os.Getpid() || unix.Getpgrp() == processGroup {
+		return errors.New("browser target process group is unsafe")
+	}
+	if err := syscall.Kill(-processGroup, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	deadline := time.Now().Add(processGroupTerminationGrace)
+	for time.Now().Before(deadline) {
+		if !targetFinished {
+			select {
+			case <-targetDone:
+				targetFinished = true
+			default:
+			}
+		}
+		if err := syscall.Kill(-processGroup, 0); errors.Is(err, syscall.ESRCH) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		time.Sleep(processGroupPollInterval)
+	}
+	if err := syscall.Kill(-processGroup, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	if !targetFinished {
+		timer := time.NewTimer(processGroupTerminationGrace)
+		select {
+		case <-targetDone:
+			targetFinished = true
+		case <-timer.C:
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		if !targetFinished {
+			return errors.New("browser target did not exit after termination")
+		}
+	}
+	deadline = time.Now().Add(processGroupTerminationGrace)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(-processGroup, 0); errors.Is(err, syscall.ESRCH) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		time.Sleep(processGroupPollInterval)
+	}
+	return errors.New("browser target process group remained after termination")
+}
+
 func openUnixPlaintextCleanupIdentity(path string) (*os.File, error) {
 	if err := validateUnixPlaintextCleanupPath(path); err != nil {
 		return nil, err
 	}
-	info, err := os.Lstat(path)
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
-		return nil, errors.New("browser plaintext cleanup path is unsafe")
-	}
-	identity, err := os.Open(path)
+	directory := filepath.Dir(path)
+	fd, err := unix.Open(directory, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
-		return nil, errors.New("open browser plaintext cleanup identity")
+		return nil, errors.New("open browser plaintext cleanup directory identity")
+	}
+	identity := os.NewFile(uintptr(fd), "tshoot-browser-plaintext-cleanup-directory")
+	if identity == nil {
+		_ = unix.Close(fd)
+		return nil, errors.New("open browser plaintext cleanup directory identity")
 	}
 	if err := validateUnixPlaintextCleanupIdentity(identity, path); err != nil {
 		_ = identity.Close()
@@ -441,7 +527,7 @@ func openUnixPlaintextCleanupIdentity(path string) (*os.File, error) {
 }
 
 func validateUnixPlaintextCleanupPath(path string) error {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path || filepath.Clean(filepath.Dir(path)) != filepath.Clean(os.TempDir()) || !strings.HasPrefix(filepath.Base(path), ".tshoot-browser-session-") {
+	if directory, ok := plaintextSessionWorkspace(path); !ok || filepath.Clean(filepath.Dir(directory)) != filepath.Clean(os.TempDir()) || !strings.HasPrefix(filepath.Base(directory), plaintextSessionDirectoryPrefix) {
 		return errors.New("browser plaintext cleanup path is not a managed temporary file")
 	}
 	return nil
@@ -454,13 +540,18 @@ func validateUnixPlaintextCleanupIdentity(identity *os.File, path string) error 
 	if err := validateUnixPlaintextCleanupPath(path); err != nil {
 		return err
 	}
-	pathInfo, err := os.Lstat(path)
-	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() {
-		return errors.New("browser plaintext cleanup path is unsafe")
+	directory := filepath.Dir(path)
+	pathInfo, err := os.Lstat(directory)
+	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.IsDir() || pathInfo.Mode().Perm() != 0o700 {
+		return errors.New("browser plaintext cleanup directory is unsafe")
 	}
 	identityInfo, err := identity.Stat()
-	if err != nil || !identityInfo.Mode().IsRegular() || !os.SameFile(pathInfo, identityInfo) {
+	if err != nil || !identityInfo.IsDir() || identityInfo.Mode().Perm() != 0o700 || !os.SameFile(pathInfo, identityInfo) {
 		return errors.New("browser plaintext cleanup identity changed")
+	}
+	var identityStat unix.Stat_t
+	if err := unix.Fstat(int(identity.Fd()), &identityStat); err != nil || uint32(identityStat.Uid) != uint32(os.Geteuid()) {
+		return errors.New("browser plaintext cleanup directory ownership is unsafe")
 	}
 	return nil
 }
@@ -476,8 +567,42 @@ func cleanupUnixPlaintextSession(identity *os.File, path string) error {
 		}
 		return err
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	names, err := identity.Readdirnames(-1)
+	if err != nil {
+		return errors.New("list browser plaintext cleanup directory")
+	}
+	for _, name := range names {
+		if name != plaintextSessionFileName && !strings.HasPrefix(name, "."+plaintextSessionFileName+"-") {
+			return errors.New("browser plaintext cleanup directory contains an unmanaged entry")
+		}
+	}
+	for _, name := range names {
+		fd, err := unix.Openat(int(identity.Fd()), name, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		if err != nil {
+			return errors.New("open browser plaintext cleanup entry")
+		}
+		var stat unix.Stat_t
+		statErr := unix.Fstat(fd, &stat)
+		closeErr := unix.Close(fd)
+		if statErr != nil || closeErr != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0o777 != 0o600 || uint64(stat.Nlink) != 1 || uint32(stat.Uid) != uint32(os.Geteuid()) || stat.Size < 0 || stat.Size > maxBrowserSessionBytes {
+			return errors.New("browser plaintext cleanup entry is unsafe")
+		}
+		if err := unix.Unlinkat(int(identity.Fd()), name, 0); err != nil {
+			return errors.New("remove browser plaintext cleanup entry")
+		}
+	}
+	if err := unix.Fsync(int(identity.Fd())); err != nil {
+		return errors.New("sync browser plaintext cleanup directory")
+	}
+	if err := validateUnixPlaintextCleanupIdentity(identity, path); err != nil {
 		return err
+	}
+	directory := filepath.Dir(path)
+	if err := os.Remove(directory); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return errors.New("remove browser plaintext cleanup directory")
+	}
+	if err := syncRuntimeDirectory(os.TempDir()); err != nil {
+		return errors.New("sync browser plaintext cleanup parent directory")
 	}
 	return nil
 }

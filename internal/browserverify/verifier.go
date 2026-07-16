@@ -33,6 +33,8 @@ const maxBrowserWorkerProgressLines = 1000
 const maxBrowserWorkerProgressLineBytes = 64 << 10
 
 const browserProgressPrefix = "TSHOOT_BROWSER_PROGRESS "
+const plaintextSessionFileName = "state.json"
+const plaintextSessionDirectoryPrefix = ".tshoot-browser-session-"
 
 var ErrBrowserExecutionInterrupted = errors.New("browser execution was interrupted")
 var ErrBrowserStagingIdentityChanged = errors.New("browser staging directory identity changed")
@@ -541,6 +543,11 @@ func cleanupPlaintextSessionWith(remove func(string) error, path string) error {
 	if err := remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return errPlaintextSessionCleanup
 	}
+	if directory, ok := plaintextSessionWorkspace(path); ok {
+		if err := os.Remove(directory); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return errPlaintextSessionCleanup
+		}
+	}
 	return nil
 }
 
@@ -549,11 +556,25 @@ func createPlaintextSessionTemp(key SessionKey, state []byte, writeState bool, r
 	if err != nil {
 		return "", err
 	}
-	temporary, err := os.CreateTemp("", ".tshoot-browser-session-"+identifier+"-*")
+	directory, err := os.MkdirTemp("", plaintextSessionDirectoryPrefix+identifier+"-")
 	if err != nil {
 		return "", err
 	}
-	path := temporary.Name()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		_ = os.Remove(directory)
+		return "", err
+	}
+	info, err := os.Lstat(directory)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
+		_ = os.Remove(directory)
+		return "", errors.New("browser session plaintext directory is unsafe")
+	}
+	path := filepath.Join(directory, plaintextSessionFileName)
+	temporary, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+	if err != nil {
+		_ = os.Remove(directory)
+		return "", err
+	}
 	remove := true
 	defer func() {
 		_ = temporary.Close()
@@ -578,8 +599,34 @@ func createPlaintextSessionTemp(key SessionKey, state []byte, writeState bool, r
 	if err := temporary.Close(); err != nil {
 		return "", err
 	}
+	if err := syncRuntimeDirectory(directory); err != nil {
+		return "", err
+	}
 	remove = false
 	return path, nil
+}
+
+func plaintextSessionWorkspace(path string) (string, bool) {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || filepath.Base(path) != plaintextSessionFileName {
+		return "", false
+	}
+	directory := filepath.Dir(path)
+	if filepath.Clean(filepath.Dir(directory)) != filepath.Clean(os.TempDir()) || !validPlaintextSessionDirectoryName(filepath.Base(directory)) {
+		return "", false
+	}
+	return directory, true
+}
+
+func validPlaintextSessionDirectoryName(name string) bool {
+	suffix := strings.TrimPrefix(name, plaintextSessionDirectoryPrefix)
+	if suffix == name || len(suffix) <= sha256.Size*2 || suffix[sha256.Size*2] != '-' {
+		return false
+	}
+	if _, err := hex.DecodeString(suffix[:sha256.Size*2]); err != nil || suffix[:sha256.Size*2] != strings.ToLower(suffix[:sha256.Size*2]) {
+		return false
+	}
+	random := suffix[sha256.Size*2+1:]
+	return random != "" && strings.IndexFunc(random, func(r rune) bool { return r < '0' || r > '9' }) < 0
 }
 
 func validateLoginWorkerResult(result workerResult) error {

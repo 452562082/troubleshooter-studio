@@ -333,9 +333,9 @@ func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerifi
 func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) (returnedErr error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	effectMayBeDurable := false
+	effectOutcomeUncertain := false
 	defer func() {
-		if returnedErr != nil && !effectMayBeDurable {
+		if returnedErr != nil && !effectOutcomeUncertain {
 			returnedErr = KnownFailedRecoveryEffect(returnedErr)
 		}
 	}()
@@ -396,6 +396,7 @@ func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) (
 	path, err := createPlaintextSessionTemp(key, existing, found, v.removePlaintext)
 	if err != nil {
 		if errors.Is(err, errPlaintextSessionCleanup) {
+			effectOutcomeUncertain = true
 			return &verifierError{code: "browser_session_cleanup_failed", cause: errPlaintextSessionCleanup}
 		}
 		return &verifierError{code: "browser_session_temp_failed", cause: errors.New("create temporary browser session")}
@@ -404,6 +405,7 @@ func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) (
 	defer func() {
 		if cleanupPath != "" {
 			if err := v.cleanupPlaintextSession(cleanupPath); err != nil {
+				effectOutcomeUncertain = true
 				returnedErr = &verifierError{code: "browser_session_cleanup_failed", cause: errPlaintextSessionCleanup}
 			}
 		}
@@ -430,6 +432,7 @@ func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) (
 		}
 		return &verifierError{code: "browser_login_failed", cause: errors.New("browser login worker failed")}
 	}
+	effectOutcomeUncertain = true
 	if err := validateLoginWorkerResult(output); err != nil {
 		return &verifierError{code: "browser_worker_protocol_invalid", cause: err}
 	}
@@ -441,7 +444,6 @@ func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) (
 		return &verifierError{code: "browser_session_cleanup_failed", cause: errPlaintextSessionCleanup}
 	}
 	cleanupPath = ""
-	effectMayBeDurable = true
 	if err := v.sessions.Save(key, state); err != nil {
 		return &verifierError{code: "browser_session_save_failed", cause: errors.New("save encrypted browser session")}
 	}

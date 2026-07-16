@@ -483,6 +483,9 @@ func TestHostVerifierLoginReportsPlaintextCleanupFailureOnEveryExitPath(t *testi
 			if err == nil || err.Error() != "browser_session_cleanup_failed: temporary browser session cleanup failed" {
 				t.Fatalf("cleanup error = %v", err)
 			}
+			if outcome := RecoveryEffectOutcomeOf(err); outcome != RecoveryEffectOutcomeUnknown {
+				t.Fatalf("cleanup outcome=%q", outcome)
+			}
 			for _, secret := range []string{plaintextPath, "cleanup-secret", "worker-secret", "protocol-secret"} {
 				if secret != "" && strings.Contains(err.Error(), secret) {
 					t.Fatalf("cleanup error exposed %q: %v", secret, err)

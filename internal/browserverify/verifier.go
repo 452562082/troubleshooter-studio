@@ -25,6 +25,8 @@ import (
 
 const maxBrowserArtifactBytes = 16 << 20
 const maxBrowserEvidenceBytes = 1 << 20
+const maxBrowserAttemptArtifactBytes = 32 << 20
+const maxBrowserAttemptArtifactFiles = 128
 const maxBrowserWorkerOutputBytes = 1 << 20
 const maxBrowserWorkerStderrBytes = 1 << 20
 const maxBrowserWorkerProgressLines = 1000
@@ -88,6 +90,7 @@ type HostVerifier struct {
 type BrowserLoginRequest struct {
 	SystemID          string
 	Environment       string
+	ApplicationURL    string
 	ApplicationOrigin string
 	LoginOrigin       string
 	// Origin is retained for same-origin internal callers. New recovery callers
@@ -354,17 +357,25 @@ func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) (
 	}
 	loginCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	applicationURL := strings.TrimSpace(request.ApplicationURL)
 	applicationOrigin := strings.TrimSpace(request.ApplicationOrigin)
 	loginOrigin := strings.TrimSpace(request.LoginOrigin)
+	if applicationURL == "" {
+		applicationURL = firstNonEmptyVerifierOrigin(applicationOrigin, strings.TrimSpace(request.Origin))
+	}
 	if applicationOrigin == "" {
-		applicationOrigin = strings.TrimSpace(request.Origin)
+		applicationOrigin = applicationURL
 	}
 	if loginOrigin == "" {
 		loginOrigin = firstNonEmptyVerifierOrigin(strings.TrimSpace(request.Origin), applicationOrigin)
 	}
-	canonicalApplicationOrigin, err := canonicalSessionOrigin(applicationOrigin)
+	canonicalApplicationURL, derivedApplicationOrigin, err := canonicalBrowserLoginApplicationURL(applicationURL)
 	if err != nil || strings.TrimSpace(request.SystemID) == "" || strings.TrimSpace(request.Environment) == "" {
 		return &verifierError{code: "browser_login_request_invalid", cause: errors.New("browser login identity or origin is invalid")}
+	}
+	canonicalApplicationOrigin, err := canonicalSessionOrigin(applicationOrigin)
+	if err != nil || canonicalApplicationOrigin != derivedApplicationOrigin {
+		return &verifierError{code: "browser_login_request_invalid", cause: errors.New("browser application URL and origin do not match")}
 	}
 	canonicalLoginOrigin, err := canonicalSessionOrigin(loginOrigin)
 	if err != nil {
@@ -377,7 +388,7 @@ func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) (
 	if _, allowed := normalizedOriginSet(request.Policy.AllowedOrigins)[allowedApplicationOrigin]; !allowed {
 		return &verifierError{code: "browser_login_request_invalid", cause: errors.New("browser login must start at a configured application origin")}
 	}
-	if err := AllowedURL(loginCtx, v.resolver, request.Policy, canonicalApplicationOrigin); err != nil {
+	if err := AllowedURL(loginCtx, v.resolver, request.Policy, canonicalApplicationURL); err != nil {
 		return &verifierError{code: "browser_login_request_invalid", cause: errors.New("browser application origin is blocked")}
 	}
 	if err := AllowedURL(loginCtx, v.resolver, request.Policy, canonicalLoginOrigin); err != nil {
@@ -415,7 +426,7 @@ func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) (
 		Mode: "login",
 		Plan: bughub.BrowserPlan{
 			Version:    1,
-			StartURL:   canonicalLoginOrigin,
+			StartURL:   canonicalApplicationURL,
 			Actions:    []bughub.BrowserAction{},
 			Assertions: []bughub.BrowserAssertion{},
 		},
@@ -457,6 +468,36 @@ func firstNonEmptyVerifierOrigin(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func canonicalBrowserLoginApplicationURL(raw string) (string, string, error) {
+	parsed, _, _, err := parseBrowserURL(raw)
+	if err != nil || parsed.Fragment != "" || parsed.RawFragment != "" || len(raw) > 4096 {
+		return "", "", errors.New("browser application URL is invalid")
+	}
+	for key, values := range parsed.Query() {
+		if verifierSensitiveQueryKey.MatchString(key) {
+			return "", "", errors.New("browser application URL contains credential material")
+		}
+		for _, value := range values {
+			if verifierCredentialPattern.MatchString(value) || verifierSensitiveQueryKey.MatchString(value) {
+				return "", "", errors.New("browser application URL contains credential material")
+			}
+		}
+	}
+	origin, err := canonicalSessionOrigin(raw)
+	if err != nil {
+		return "", "", errors.New("browser application URL origin is invalid")
+	}
+	canonicalOrigin, err := url.Parse(origin)
+	if err != nil {
+		return "", "", errors.New("browser application URL origin is invalid")
+	}
+	parsed.Scheme = canonicalOrigin.Scheme
+	parsed.Host = canonicalOrigin.Host
+	parsed.Fragment = ""
+	parsed.RawFragment = ""
+	return parsed.String(), origin, nil
 }
 
 func (v *HostVerifier) runWorkerWithSession(
@@ -903,10 +944,14 @@ func validateManifestArtifacts(stagingRoot string, identity browserDirectoryIden
 	if err := identity.Verify(); err != nil {
 		return manifestArtifactValidation{}, err
 	}
+	if len(artifacts) > maxBrowserAttemptArtifactFiles {
+		return manifestArtifactValidation{}, fmt.Errorf("browser attempt declares more than %d artifacts", maxBrowserAttemptArtifactFiles)
+	}
 	declared := make(map[string]bughub.BrowserArtifactReference, len(artifacts))
 	digests := make(map[string]string, len(artifacts))
 	sizes := make(map[string]int64, len(artifacts))
 	var screenshots []string
+	var totalBytes int64
 	for _, artifact := range artifacts {
 		if err := identity.Verify(); err != nil {
 			return manifestArtifactValidation{}, err
@@ -928,6 +973,10 @@ func validateManifestArtifacts(stagingRoot string, identity browserDirectoryIden
 		}
 		if err := identity.Verify(); err != nil {
 			return manifestArtifactValidation{}, err
+		}
+		totalBytes += int64(len(content))
+		if totalBytes > maxBrowserAttemptArtifactBytes {
+			return manifestArtifactValidation{}, fmt.Errorf("browser attempt artifacts exceed %d bytes", maxBrowserAttemptArtifactBytes)
 		}
 		digest := sha256.Sum256(content)
 		digests[path] = hex.EncodeToString(digest[:])

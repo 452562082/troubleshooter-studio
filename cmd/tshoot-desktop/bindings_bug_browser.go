@@ -197,6 +197,50 @@ func canonicalIncidentBrowserOrigin(raw string) (string, error) {
 	return scheme + "://" + host, nil
 }
 
+func canonicalIncidentBrowserApplicationURL(raw string) (string, string, error) {
+	if raw == "" || strings.TrimSpace(raw) != raw || len(raw) > 4096 {
+		return "", "", errors.New("invalid browser application URL")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || !parsed.IsAbs() || parsed.Opaque != "" || parsed.User != nil || parsed.Hostname() == "" || parsed.Fragment != "" || parsed.RawFragment != "" {
+		return "", "", errors.New("invalid browser application URL")
+	}
+	origin, err := canonicalIncidentBrowserOrigin(parsed.Scheme + "://" + parsed.Host)
+	if err != nil {
+		return "", "", errors.New("invalid browser application URL")
+	}
+	query, err := url.ParseQuery(parsed.RawQuery)
+	if err != nil {
+		return "", "", errors.New("invalid browser application URL")
+	}
+	for key, values := range query {
+		if incidentBrowserURLCredentialMarker(key) {
+			return "", "", errors.New("browser application URL contains credential material")
+		}
+		for _, value := range values {
+			if incidentBrowserURLCredentialMarker(value) {
+				return "", "", errors.New("browser application URL contains credential material")
+			}
+		}
+	}
+	canonicalOrigin, _ := url.Parse(origin)
+	parsed.Scheme = canonicalOrigin.Scheme
+	parsed.Host = canonicalOrigin.Host
+	return parsed.String(), origin, nil
+}
+
+func incidentBrowserURLCredentialMarker(value string) bool {
+	lower := strings.ToLower(value)
+	for _, marker := range []string{
+		"authorization", "bearer ", "password", "passwd", "secret", "token", "session", "cookie", "api_key", "apikey", "access_key", "private_key", "credential", "client_secret",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return lower == "auth" || lower == "code" || lower == "key"
+}
+
 func (a *App) GetIncidentArtifactPreview(caseID, artifactID string) (IncidentArtifactPreview, error) {
 	caseID = strings.TrimSpace(caseID)
 	artifactID = strings.TrimSpace(artifactID)
@@ -291,7 +335,7 @@ func (a *App) OpenIncidentBrowserLogin(input IncidentBrowserCommandInput) (bughu
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
-	applicationOrigin, loginOrigin, err := incidentBrowserLoginOrigins(attempt)
+	applicationURL, applicationOrigin, loginOrigin, err := incidentBrowserLoginIdentity(attempt)
 	if err != nil || !incidentBrowserOriginAllowed(applicationOrigin, policy.AllowedOrigins) || !incidentBrowserOriginAllowed(loginOrigin, policy.AllowedOrigins) {
 		return bughub.IncidentCase{}, errors.New("browser login origin is unavailable")
 	}
@@ -311,7 +355,7 @@ func (a *App) OpenIncidentBrowserLogin(input IncidentBrowserCommandInput) (bughu
 		return a.resumeIncidentBrowserRecovery(input, attempt, request, claimed)
 	}
 	if err := controller.Login(a.workflowCommandContext(), browserverify.BrowserLoginRequest{
-		SystemID: incident.SystemID, Environment: incident.Environment, ApplicationOrigin: applicationOrigin, LoginOrigin: loginOrigin, Policy: policy,
+		SystemID: incident.SystemID, Environment: incident.Environment, ApplicationURL: applicationURL, ApplicationOrigin: applicationOrigin, LoginOrigin: loginOrigin, Policy: policy,
 		Emit: func(progress bughub.BrowserProgress) { a.emitIncidentBrowserProgress(input.CaseID, progress) },
 	}); err != nil {
 		if browserverify.RecoveryEffectOutcomeOf(err) == browserverify.RecoveryEffectKnownFailedNoDurableEffect {
@@ -416,7 +460,7 @@ func (a *App) ClearIncidentBrowserSession(input IncidentBrowserCommandInput) err
 	if controller == nil {
 		return errors.New("incident browser is unavailable")
 	}
-	applicationOrigin, loginOrigin, err := incidentBrowserLoginOrigins(attempt)
+	_, applicationOrigin, loginOrigin, err := incidentBrowserLoginIdentity(attempt)
 	if err != nil {
 		return errors.New("browser login origin is unavailable")
 	}
@@ -622,24 +666,38 @@ func (a *App) continueIncidentBrowserRecovery(input IncidentBrowserCommandInput,
 	return continued, nil
 }
 
-func incidentBrowserLoginOrigins(attempt bughub.PhaseAttempt) (string, string, error) {
+func incidentBrowserLoginIdentity(attempt bughub.PhaseAttempt) (string, string, string, error) {
 	var output struct {
 		ErrorCode         string `json:"error_code"`
+		ApplicationURL    string `json:"application_url"`
 		ApplicationOrigin string `json:"application_origin"`
 		LoginOrigin       string `json:"login_origin"`
 	}
-	if json.Unmarshal(attempt.OutputJSON, &output) != nil || output.ErrorCode != "browser_login_required" || strings.TrimSpace(output.ApplicationOrigin) == "" || strings.TrimSpace(output.LoginOrigin) == "" {
-		return "", "", errors.New("browser login origin is unavailable")
-	}
-	applicationOrigin, err := canonicalIncidentBrowserOrigin(strings.TrimSpace(output.ApplicationOrigin))
-	if err != nil {
-		return "", "", err
+	if json.Unmarshal(attempt.OutputJSON, &output) != nil || output.ErrorCode != "browser_login_required" || strings.TrimSpace(output.LoginOrigin) == "" {
+		return "", "", "", errors.New("browser login origin is unavailable")
 	}
 	loginOrigin, err := canonicalIncidentBrowserOrigin(strings.TrimSpace(output.LoginOrigin))
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
-	return applicationOrigin, loginOrigin, nil
+	if strings.TrimSpace(output.ApplicationURL) == "" {
+		applicationOrigin, legacyErr := canonicalIncidentBrowserOrigin(strings.TrimSpace(output.ApplicationOrigin))
+		if legacyErr != nil || applicationOrigin != loginOrigin {
+			return "", "", "", errors.New("browser login application URL is unavailable")
+		}
+		return applicationOrigin, applicationOrigin, loginOrigin, nil
+	}
+	applicationURL, applicationOrigin, err := canonicalIncidentBrowserApplicationURL(strings.TrimSpace(output.ApplicationURL))
+	if err != nil {
+		return "", "", "", err
+	}
+	if strings.TrimSpace(output.ApplicationOrigin) != "" {
+		declaredOrigin, originErr := canonicalIncidentBrowserOrigin(strings.TrimSpace(output.ApplicationOrigin))
+		if originErr != nil || declaredOrigin != applicationOrigin {
+			return "", "", "", errors.New("browser login application identity is inconsistent")
+		}
+	}
+	return applicationURL, applicationOrigin, loginOrigin, nil
 }
 
 func incidentBrowserOriginAllowed(origin string, allowed []string) bool {

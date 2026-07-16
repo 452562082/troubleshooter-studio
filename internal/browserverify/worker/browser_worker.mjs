@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { realpathSync } from 'node:fs';
-import { createServer } from 'node:http';
-import { isIP } from 'node:net';
+import { Agent as HTTPAgent, createServer, request as createHTTPRequest } from 'node:http';
+import { connect as createNetworkConnection, isIP } from 'node:net';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -12,6 +12,7 @@ import {
   readFile,
   rename,
   rm,
+  stat,
 } from 'node:fs/promises';
 
 import { redactConsoleText, safeResponseRecord } from './sanitize.mjs';
@@ -23,6 +24,9 @@ const READ_ONLY_PROD_ACTIONS = new Set(['goto', 'wait_for', 'screenshot']);
 export const EVIDENCE_MAX_RECORDS = 1000;
 export const EVIDENCE_MAX_BYTES = 1 << 20;
 export const EVIDENCE_TRUNCATION_MARKER = Object.freeze({ type: 'truncated', reason: 'record_or_byte_limit' });
+export const ARTIFACT_MAX_FILES = 128;
+export const ARTIFACT_MAX_TOTAL_BYTES = 32 << 20;
+export const SCREENSHOT_MAX_BYTES = 16 << 20;
 const METADATA_HOSTS = new Set([
   'metadata',
   'metadata.google.internal',
@@ -37,6 +41,17 @@ const METADATA_HOSTS = new Set([
   'metadata.tencentyun.internal',
 ]);
 const METADATA_ADDRESSES = new Set(['100.100.100.200', 'fd00:ec2::254']);
+const PROXY_CONNECT_TIMEOUT_MS = 30_000;
+const NETWORK_PROTOCOLS = new Set(['http:', 'https:', 'ws:', 'wss:']);
+const BROWSER_LAUNCH_ARGS = Object.freeze([
+  '--disable-quic',
+  '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
+  '--host-resolver-rules=MAP * ~NOTFOUND',
+  '--disable-features=AsyncDns,DnsOverHttps,DnsPrefetching,HappyEyeballsV3',
+  '--disable-background-networking',
+  '--disable-component-update',
+  '--no-pings',
+]);
 
 function ownKeys(value, allowed, label) {
   for (const key of Object.keys(value ?? {})) {
@@ -112,6 +127,23 @@ export function createBoundedRecordCollector({ maxRecords = EVIDENCE_MAX_RECORDS
   };
 }
 
+export function createArtifactBudget({ maxFiles = ARTIFACT_MAX_FILES, maxBytes = ARTIFACT_MAX_TOTAL_BYTES } = {}) {
+  if (!Number.isInteger(maxFiles) || maxFiles < 1 || !Number.isInteger(maxBytes) || maxBytes < 1) {
+    throw new Error('browser artifact budget is invalid');
+  }
+  let files = 0;
+  let bytes = 0;
+  return {
+    reserve(size) {
+      if (!Number.isInteger(size) || size < 0 || files + 1 > maxFiles || bytes + size > maxBytes) return false;
+      files += 1;
+      bytes += size;
+      return true;
+    },
+    snapshot: () => ({ files, bytes }),
+  };
+}
+
 function normalizeOrigin(raw) {
   const parsed = new URL(requiredString(raw, 'origin'));
   if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
@@ -127,6 +159,29 @@ function parseHTTPURL(raw) {
   const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
   if (!host || METADATA_HOSTS.has(host)) throw new Error('URL metadata host is blocked');
   return { parsed, host };
+}
+
+function parseNetworkURL(raw, allowedProtocols = NETWORK_PROTOCOLS) {
+  const parsed = new URL(requiredString(raw, 'URL'));
+  if (!allowedProtocols.has(parsed.protocol)) throw new Error('URL scheme is blocked');
+  if (parsed.username || parsed.password) throw new Error('URL userinfo is blocked');
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (!host || METADATA_HOSTS.has(host)) throw new Error('URL metadata host is blocked');
+  return { parsed, host };
+}
+
+function policyOriginForNetworkURL(parsed) {
+  const protocol = parsed.protocol === 'ws:' ? 'http:' : parsed.protocol === 'wss:' ? 'https:' : parsed.protocol;
+  const port = parsed.port || ((protocol === 'https:') ? '443' : '80');
+  const defaultPort = (protocol === 'https:' && port === '443') || (protocol === 'http:' && port === '80');
+  const hostname = parsed.hostname.includes(':') ? `[${parsed.hostname.replace(/^\[|\]$/g, '')}]` : parsed.hostname;
+  return `${protocol}//${hostname.toLowerCase()}${defaultPort ? '' : `:${port}`}`;
+}
+
+function normalizedAddress(rawAddress) {
+  const address = String(rawAddress).toLowerCase().split('%')[0];
+  if (address.startsWith('::ffff:') && isIP(address.slice('::ffff:'.length)) === 4) return address.slice('::ffff:'.length);
+  return address;
 }
 
 function validatePolicy(policy) {
@@ -165,9 +220,14 @@ export function validateWorkerRequest(request) {
     if (!isAbsolute(requiredString(request.storage_state_path, 'storage_state_path'))) throw new Error('storage_state_path must be absolute');
     if (!Array.isArray(plan.actions) || plan.actions.length !== 0) throw new Error('login plan actions are forbidden');
     if (!Array.isArray(plan.assertions) || plan.assertions.length !== 0) throw new Error('login plan assertions are forbidden');
-    if (start.pathname !== '/' || start.search || start.hash) throw new Error('login must start at an application origin');
+    if (start.hash) throw new Error('login application URL fragment is forbidden');
+    for (const [name, value] of start.searchParams) {
+      if (/(?:token|password|secret|code|session|auth|cookie|key)/i.test(name) || redactConsoleText(value) === '[REDACTED]') {
+        throw new Error('login application URL contains credential material');
+      }
+    }
     const applicationOrigins = new Set(request.policy.allowed_origins.map(normalizeOrigin));
-    if (!applicationOrigins.has(start.origin)) throw new Error('login must start at a configured application origin');
+    if (!applicationOrigins.has(start.origin)) throw new Error('login must start at a configured application URL');
     return;
   }
 
@@ -242,10 +302,15 @@ function classifyAddress(rawAddress) {
 }
 
 export async function assertAllowedURL(raw, policy, lookup = dnsLookup) {
+  return (await resolvePinnedTarget(raw, policy, lookup, new Set(['http:', 'https:']))).parsed;
+}
+
+export async function resolvePinnedTarget(raw, policy, lookup = dnsLookup, allowedProtocols = NETWORK_PROTOCOLS) {
   validatePolicy(policy);
-  const { parsed, host } = parseHTTPURL(raw);
+  const { parsed, host } = parseNetworkURL(raw, allowedProtocols);
+  const policyOrigin = policyOriginForNetworkURL(parsed);
   const allowedOrigins = new Set([...policy.allowed_origins, ...policy.auth_origins].map(normalizeOrigin));
-  if (!allowedOrigins.has(parsed.origin)) throw new Error('URL origin is not allowed');
+  if (!allowedOrigins.has(policyOrigin)) throw new Error('URL origin is not allowed');
   const privateOrigins = new Set(policy.private_origins.map(normalizeOrigin));
   let addresses;
   if (isIP(host)) addresses = [{ address: host, family: isIP(host) }];
@@ -256,11 +321,260 @@ export async function assertAllowedURL(raw, policy, lookup = dnsLookup) {
     if (classification === 'metadata' || classification === 'link-local' || classification === 'non-routable' || classification === 'invalid') {
       throw new Error(`URL ${classification} address is blocked`);
     }
-    if (classification === 'private' && !privateOrigins.has(parsed.origin)) {
+    if (classification === 'private' && !privateOrigins.has(policyOrigin)) {
       throw new Error('URL private address requires exact configured origin');
     }
   }
-  return parsed;
+  const selected = addresses[0];
+  const port = Number(parsed.port || (parsed.protocol === 'https:' || parsed.protocol === 'wss:' ? 443 : 80));
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('URL port is invalid');
+  return {
+    parsed,
+    host,
+    port,
+    address: normalizedAddress(selected.address),
+    family: Number(selected.family) || isIP(selected.address),
+    policyOrigin,
+  };
+}
+
+export async function dialPinnedTarget(target, dial = createNetworkConnection) {
+  return new Promise((resolveConnection, reject) => {
+    let settled = false;
+    const socket = dial({ host: target.address, port: target.port, family: target.family });
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      reject(error instanceof Error ? error : new Error('proxy upstream connection failed'));
+    };
+    socket.setTimeout?.(PROXY_CONNECT_TIMEOUT_MS, () => fail(new Error('proxy upstream connection timed out')));
+    socket.once('error', fail);
+    socket.once('connect', () => {
+      if (settled) return;
+      if (normalizedAddress(socket.remoteAddress) !== normalizedAddress(target.address) || Number(socket.remotePort) !== target.port) {
+        fail(new Error('proxy upstream peer did not match the pinned destination'));
+        return;
+      }
+      settled = true;
+      socket.removeListener('error', fail);
+      socket.setTimeout?.(0);
+      resolveConnection(socket);
+    });
+  });
+}
+
+function proxyHeaders(headers, target, { websocket = false } = {}) {
+  if (headers['proxy-authorization'] !== undefined) throw new Error('proxy credentials are forbidden');
+  const result = {};
+  for (const [name, value] of Object.entries(headers)) {
+    const lower = name.toLowerCase();
+    if (lower === 'proxy-authorization' || lower === 'proxy-connection' || lower === 'host') continue;
+    if (!websocket && (lower === 'connection' || lower === 'keep-alive')) continue;
+    result[lower] = value;
+  }
+  result.host = target.parsed.host;
+  if (!websocket) result.connection = 'close';
+  return result;
+}
+
+function proxyFailure(response, statusCode = 403) {
+  if (response.headersSent) {
+    response.destroy();
+    return;
+  }
+  response.writeHead(statusCode, { connection: 'close', 'content-type': 'text/plain; charset=utf-8' });
+  response.end('browser proxy request blocked');
+}
+
+function socketProxyFailure(socket, statusCode = 403) {
+  if (!socket.destroyed) socket.end(`HTTP/1.1 ${statusCode} Browser Proxy Blocked\r\nConnection: close\r\n\r\n`);
+}
+
+function requestPath(parsed) {
+  return `${parsed.pathname || '/'}${parsed.search}`;
+}
+
+function agentForPinnedSocket(socket) {
+  const agent = new HTTPAgent({ keepAlive: false });
+  agent.createConnection = () => socket;
+  return agent;
+}
+
+function serializeUpgradeRequest(request, target) {
+  const headers = proxyHeaders(request.headers, target, { websocket: true });
+  const lines = [`${request.method || 'GET'} ${requestPath(target.parsed)} HTTP/${request.httpVersion || '1.1'}`];
+  for (const [name, value] of Object.entries(headers)) {
+    if (Array.isArray(value)) {
+      for (const item of value) lines.push(`${name}: ${item}`);
+    } else if (value !== undefined) {
+      lines.push(`${name}: ${value}`);
+    }
+  }
+  return Buffer.from(`${lines.join('\r\n')}\r\n\r\n`, 'latin1');
+}
+
+export async function startPinnedProxy(policy, { lookup = dnsLookup, dial = createNetworkConnection } = {}) {
+  validatePolicy(policy);
+  const sockets = new Set();
+  const counts = { http: 0, connect: 0, websocket: 0 };
+  let closed = false;
+  const track = (socket) => {
+    sockets.add(socket);
+    socket.on('error', () => socket.destroy());
+    socket.once('close', () => sockets.delete(socket));
+    return socket;
+  };
+  const server = createServer((request, response) => {
+    void (async () => {
+      const target = await resolvePinnedTarget(request.url, policy, lookup, new Set(['http:']));
+      const socket = track(await dialPinnedTarget(target, dial));
+      counts.http += 1;
+      const upstream = createHTTPRequest({
+        method: request.method,
+        path: requestPath(target.parsed),
+        headers: proxyHeaders(request.headers, target),
+        agent: agentForPinnedSocket(socket),
+      }, (upstreamResponse) => {
+        response.writeHead(upstreamResponse.statusCode || 502, upstreamResponse.statusMessage, upstreamResponse.headers);
+        upstreamResponse.pipe(response);
+      });
+      upstream.once('error', () => proxyFailure(response, 502));
+      request.pipe(upstream);
+    })().catch(() => proxyFailure(response));
+  });
+  server.on('connection', track);
+  server.on('connect', (request, clientSocket, head) => {
+    void (async () => {
+      if (request.headers['proxy-authorization'] !== undefined) throw new Error('proxy credentials are forbidden');
+      if (!request.url || request.url.includes('/') || request.url.includes('@')) throw new Error('CONNECT authority is invalid');
+      const target = await resolvePinnedTarget(`https://${request.url}/`, policy, lookup, new Set(['https:']));
+      const upstream = track(await dialPinnedTarget(target, dial));
+      counts.connect += 1;
+      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      if (head.length > 0) upstream.write(head);
+      clientSocket.pipe(upstream);
+      upstream.pipe(clientSocket);
+    })().catch(() => socketProxyFailure(clientSocket));
+  });
+  server.on('upgrade', (request, clientSocket, head) => {
+    void (async () => {
+      const target = await resolvePinnedTarget(request.url, policy, lookup, new Set(['http:', 'ws:']));
+      const upstream = track(await dialPinnedTarget(target, dial));
+      counts.websocket += 1;
+      upstream.write(serializeUpgradeRequest(request, target));
+      if (head.length > 0) upstream.write(head);
+      clientSocket.pipe(upstream);
+      upstream.pipe(clientSocket);
+    })().catch(() => socketProxyFailure(clientSocket));
+  });
+  server.on('clientError', (_error, socket) => socketProxyFailure(socket, 400));
+  await new Promise((resolveListen, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolveListen);
+  });
+  const address = server.address();
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    port: address.port,
+    stats: () => ({ ...counts }),
+    async close() {
+      if (closed) return;
+      closed = true;
+      for (const socket of sockets) socket.destroy();
+      await new Promise((resolveClose, reject) => server.close((error) => (error ? reject(error) : resolveClose())));
+    },
+  };
+}
+
+export function chromiumLaunchOptions(headless, proxyURL) {
+  const proxy = new URL(proxyURL);
+  if (proxy.protocol !== 'http:' || proxy.hostname !== '127.0.0.1' || proxy.username || proxy.password || !proxy.port || proxy.pathname !== '/' || proxy.search || proxy.hash) {
+    throw new Error('browser proxy endpoint is invalid');
+  }
+  return {
+    headless,
+    proxy: { server: proxy.origin, bypass: '<-loopback>' },
+    args: [...BROWSER_LAUNCH_ARGS],
+  };
+}
+
+export async function launchPinnedBrowser(chromium, policy, headless, startProxy = startPinnedProxy) {
+  const proxy = await startProxy(policy);
+  let browser;
+  let closed = false;
+  try {
+    browser = await chromium.launch(chromiumLaunchOptions(headless, proxy.url));
+  } catch (error) {
+    await proxy.close().catch(() => {});
+    throw error;
+  }
+  return {
+    browser,
+    proxy,
+    async close() {
+      if (closed) return;
+      closed = true;
+      await browser.close().catch(() => {});
+      await proxy.close();
+    },
+  };
+}
+
+export async function createSupervisedBrowserContext(browser, {
+  storageStateInput = {},
+  policy,
+  hooks = {},
+  lookup = dnsLookup,
+} = {}) {
+  const context = await browser.newContext({
+    ...storageStateInput,
+    serviceWorkers: 'block',
+    acceptDownloads: false,
+    viewport: { width: 1280, height: 720 },
+  });
+  let blockedRequest = false;
+  const guardedPages = new WeakSet();
+  const guardPage = (page) => {
+    if (guardedPages.has(page)) return;
+    guardedPages.add(page);
+    page.setDefaultTimeout(15_000);
+    page.setDefaultNavigationTimeout(30_000);
+    page.on('dialog', (dialog) => dialog.dismiss().catch(() => {}));
+    page.on('download', (download) => download.cancel().catch(() => {}));
+  };
+  context.on('page', guardPage);
+  for (const page of context.pages()) guardPage(page);
+  if (typeof hooks.onRequest === 'function') context.on('request', hooks.onRequest);
+  if (typeof hooks.onResponse === 'function') context.on('response', hooks.onResponse);
+  if (typeof hooks.onConsole === 'function') context.on('console', hooks.onConsole);
+  if (policy) {
+    await context.route('**/*', async (route) => {
+      try {
+        await assertAllowedURL(route.request().url(), policy, lookup);
+        await route.continue();
+      } catch {
+        blockedRequest = true;
+        await route.abort('blockedbyclient');
+      }
+    });
+  }
+  await context.routeWebSocket('**/*', async (webSocketRoute) => {
+    try {
+      if (!policy) {
+        webSocketRoute.close();
+        return;
+      }
+      await resolvePinnedTarget(webSocketRoute.url(), policy, lookup, new Set(['ws:', 'wss:']));
+      webSocketRoute.connectToServer();
+    } catch {
+      blockedRequest = true;
+      webSocketRoute.close();
+    }
+  });
+  const page = await context.newPage();
+  guardPage(page);
+  return { context, page, blocked: () => blockedRequest };
 }
 
 export function buildLocator(page, locator) {
@@ -308,11 +622,16 @@ async function atomicWrite(path, content) {
   }
 }
 
-async function capturePNG(page, stagingDir, name) {
+export async function capturePNG(page, stagingDir, name, artifactBudget = createArtifactBudget()) {
   const finalPath = join(stagingDir, name);
   const temporary = join(stagingDir, `.${name}-${randomUUID()}.png`);
   try {
-    await page.screenshot({ path: temporary, fullPage: true, type: 'png' });
+    await page.screenshot({ path: temporary, fullPage: false, type: 'png' });
+    const info = await stat(temporary);
+    if (!info.isFile() || info.size > SCREENSHOT_MAX_BYTES || !artifactBudget.reserve(info.size)) {
+      await rm(temporary, { force: true });
+      throw new Error('browser screenshot exceeds the artifact budget');
+    }
     const handle = await open(temporary, 'r');
     try {
       await handle.sync();
@@ -381,6 +700,20 @@ export async function observeLoginState(pages, policy, previouslyStarted = false
   return { started, ready };
 }
 
+async function pagesRequireLogin(pages, policy, authFailure = false) {
+  for (const page of pages) {
+    if ((await loginPageState(page, policy, authFailure)).required) return true;
+  }
+  return false;
+}
+
+async function activeLoginPage(pages, policy, authFailure = false) {
+  for (const page of pages) {
+    if ((await loginPageState(page, policy, authFailure)).required) return page;
+  }
+  return pages[0];
+}
+
 export function createLoginAuthFailureTracker(now = Date.now, quietWindowMs = 1_000) {
   let lastAuthFailureAt = null;
   return {
@@ -395,12 +728,12 @@ export function createLoginAuthFailureTracker(now = Date.now, quietWindowMs = 1_
   };
 }
 
-export async function captureSafePNG(page, request, name, getAuthFailure, capture = capturePNG) {
-  if ((await loginPageState(page, request.policy, getAuthFailure())).required) {
+export async function captureSafePNG(page, request, name, getAuthFailure, capture = capturePNG, getPages = () => [page]) {
+  if (await pagesRequireLogin(getPages(), request.policy, getAuthFailure())) {
     return { loginRequired: true, path: '' };
   }
   const path = await capture(page, request.staging_dir, name);
-  if ((await loginPageState(page, request.policy, getAuthFailure())).required) {
+  if (await pagesRequireLogin(getPages(), request.policy, getAuthFailure())) {
     await rm(join(request.staging_dir, path.replace(/^browser\//, '')), { force: true });
     return { loginRequired: true, path: '' };
   }
@@ -463,7 +796,7 @@ function checkedEvidenceContent(content, label) {
   return content;
 }
 
-async function writeEvidenceFiles(request, networkCollector, consoleCollector, actions) {
+async function writeEvidenceFiles(request, networkCollector, consoleCollector, actions, artifactBudget) {
   const network = networkCollector.snapshot();
   const consoleRecords = consoleCollector.snapshot();
   if (network.length > EVIDENCE_MAX_RECORDS || consoleRecords.length > EVIDENCE_MAX_RECORDS || actions.length > 40) {
@@ -473,6 +806,9 @@ async function writeEvidenceFiles(request, networkCollector, consoleCollector, a
   const consoleJSONL = consoleRecords.map((record) => JSON.stringify(record)).join('\n');
   const consoleContent = checkedEvidenceContent(consoleJSONL ? `${consoleJSONL}\n` : '', 'console');
   const actionJSON = checkedEvidenceContent(`${JSON.stringify(actions)}\n`, 'browser action');
+  for (const content of [networkJSON, consoleContent, actionJSON]) {
+    if (!artifactBudget.reserve(Buffer.byteLength(content, 'utf8'))) throw new Error('browser evidence exceeds the artifact budget');
+  }
   await atomicWrite(join(request.staging_dir, 'network.json'), networkJSON);
   await atomicWrite(join(request.staging_dir, 'console.jsonl'), consoleContent);
   await atomicWrite(join(request.staging_dir, 'browser-actions.json'), actionJSON);
@@ -488,74 +824,74 @@ async function executeWorker(request) {
   validateWorkerRequest(request);
   await mkdir(request.staging_dir, { recursive: true, mode: 0o700 });
   const { chromium } = await import('playwright');
-  const browser = await chromium.launch({ headless: request.headless });
+  const launched = await launchPinnedBrowser(chromium, request.policy, request.headless);
+  const browser = launched.browser;
   let context;
+  let supervised;
   const screenshots = [];
   const network = createBoundedRecordCollector();
   const consoleRecords = createBoundedRecordCollector();
+  const artifactBudget = createArtifactBudget();
   const actions = [];
   const pendingResponses = new Set();
   const requestStarted = new WeakMap();
   let authFailure = false;
-  let blockedRequest = false;
+  const onResponse = (response) => {
+    if (response.status() === 401 || response.status() === 403) authFailure = true;
+    if (network.isStopped()) return;
+    if (pendingResponses.size >= EVIDENCE_MAX_RECORDS) {
+      network.truncate();
+      return;
+    }
+    const pending = (async () => {
+      const browserRequest = response.request();
+      const headers = Object.fromEntries((await responseHeadersPromise(response)).filter(([, value]) => value !== null));
+      network.add(safeResponseRecord({
+        method: browserRequest.method(),
+        url: response.url(),
+        status: response.status(),
+        duration_ms: Math.max(0, Date.now() - (requestStarted.get(browserRequest) ?? Date.now())),
+        headers,
+      }));
+    })().finally(() => pendingResponses.delete(pending));
+    pendingResponses.add(pending);
+  };
   try {
-    context = await browser.newContext({
-      ...(request.storage_state_path ? { storageState: request.storage_state_path } : {}),
-      serviceWorkers: 'block',
+    supervised = await createSupervisedBrowserContext(browser, {
+      storageStateInput: request.storage_state_path ? { storageState: request.storage_state_path } : {},
+      policy: request.policy,
+      hooks: {
+        onRequest: (browserRequest) => requestStarted.set(browserRequest, Date.now()),
+        onResponse,
+        onConsole: (message) => {
+          if (consoleRecords.isStopped()) return;
+          consoleRecords.add({ type: String(message.type()).slice(0, 32), text: redactConsoleText(message.text()), timestamp: new Date().toISOString() });
+        },
+      },
     });
-    await context.route('**/*', async (route) => {
-      try {
-        await assertAllowedURL(route.request().url(), request.policy);
-        await route.continue();
-      } catch {
-        blockedRequest = true;
-        await route.abort('blockedbyclient');
-      }
-    });
-    const page = await context.newPage();
-    await page.routeWebSocket('**/*', (webSocket) => webSocket.close());
-    page.setDefaultTimeout(15_000);
-    page.setDefaultNavigationTimeout(30_000);
-    page.on('dialog', (dialog) => dialog.dismiss().catch(() => {}));
-    page.on('download', (download) => download.cancel().catch(() => {}));
-    page.on('request', (browserRequest) => requestStarted.set(browserRequest, Date.now()));
-    page.on('console', (message) => {
-      if (consoleRecords.isStopped()) return;
-      consoleRecords.add({ type: String(message.type()).slice(0, 32), text: redactConsoleText(message.text()), timestamp: new Date().toISOString() });
-    });
-    page.on('response', (response) => {
-      if (response.status() === 401 || response.status() === 403) authFailure = true;
-      if (network.isStopped()) return;
-      if (pendingResponses.size >= EVIDENCE_MAX_RECORDS) {
-        network.truncate();
-        return;
-      }
-      const pending = (async () => {
-        const browserRequest = response.request();
-        const headers = Object.fromEntries((await responseHeadersPromise(response)).filter(([, value]) => value !== null));
-        network.add(safeResponseRecord({
-          method: browserRequest.method(),
-          url: response.url(),
-          status: response.status(),
-          duration_ms: Math.max(0, Date.now() - (requestStarted.get(browserRequest) ?? Date.now())),
-          headers,
-        }));
-      })().finally(() => pendingResponses.delete(pending));
-      pendingResponses.add(pending);
-    });
+    context = supervised.context;
+    const page = supervised.page;
 
-    const captureScreenshot = (name) => captureSafePNG(page, request, name, () => authFailure);
+    const captureScreenshot = (name) => captureSafePNG(
+      page,
+      request,
+      name,
+      () => authFailure,
+      (currentPage, stagingDir, screenshotName) => capturePNG(currentPage, stagingDir, screenshotName, artifactBudget),
+      () => context.pages(),
+    );
     const finishLogin = async () => {
       for (const screenshot of screenshots) await rm(join(request.staging_dir, screenshot.replace('browser/', '')), { force: true });
       await Promise.allSettled([...pendingResponses]);
-      const artifacts = await writeEvidenceFiles(request, network, consoleRecords, actions);
+      const artifacts = await writeEvidenceFiles(request, network, consoleRecords, actions, artifactBudget);
+      const loginPage = await activeLoginPage(context.pages(), request.policy, authFailure);
       return {
         status: 'login_required',
         error_code: 'browser_login_required',
-        final_url: page.url(),
-        title: redactConsoleText(await page.title().catch(() => '')),
-        login_origin: new URL(page.url()).origin,
-        accessibility_summary: await accessibilitySummary(page),
+        final_url: loginPage?.url() || '',
+        title: redactConsoleText(await loginPage?.title().catch(() => '') || ''),
+        login_origin: loginPage?.url() ? new URL(loginPage.url()).origin : '',
+        accessibility_summary: loginPage ? await accessibilitySummary(loginPage) : [],
         artifacts,
       };
     };
@@ -563,22 +899,21 @@ async function executeWorker(request) {
     try {
       await assertAllowedURL(request.plan.start_url, request.policy);
       await page.goto(request.plan.start_url, { waitUntil: 'domcontentloaded' });
-      if (blockedRequest) throw new Error('browser destination was blocked');
+      if (supervised.blocked()) throw new Error('browser destination was blocked');
       await assertAllowedURL(page.url(), request.policy);
     } catch {
-      const login = await loginPageState(page, request.policy, authFailure);
-      if (login.required) return finishLogin();
+      if (await pagesRequireLogin(context.pages(), request.policy, authFailure)) return finishLogin();
       const captured = await captureScreenshot('failure.png');
       if (captured.loginRequired) return finishLogin();
       const failure = captured.path;
       screenshots.push(failure);
-      actions.push({ id: 'start_url', action: 'goto', locator_kind: '', started_at: new Date().toISOString(), duration_ms: 0, result: 'failed', error_code: blockedRequest ? 'browser_destination_blocked' : 'navigation_failed' });
+      actions.push({ id: 'start_url', action: 'goto', locator_kind: '', started_at: new Date().toISOString(), duration_ms: 0, result: 'failed', error_code: supervised.blocked() ? 'browser_destination_blocked' : 'navigation_failed' });
       await Promise.allSettled([...pendingResponses]);
-      const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions))];
+      const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, artifactBudget))];
       const finalURL = page.url().startsWith('http:') || page.url().startsWith('https:') ? page.url() : '';
       return {
         status: 'locator_failed',
-        error_code: blockedRequest ? 'browser_destination_blocked' : 'navigation_failed',
+        error_code: supervised.blocked() ? 'browser_destination_blocked' : 'navigation_failed',
         error_message: 'browser navigation failed',
         failed_action_id: 'start_url',
         final_url: finalURL,
@@ -588,11 +923,11 @@ async function executeWorker(request) {
         artifacts,
       };
     }
-    if ((await loginPageState(page, request.policy, authFailure)).required) return finishLogin();
+    if (await pagesRequireLogin(context.pages(), request.policy, authFailure)) return finishLogin();
 
     for (let index = 0; index < request.plan.actions.length; index += 1) {
       const action = request.plan.actions[index];
-      if ((await loginPageState(page, request.policy, authFailure)).required) return finishLogin();
+      if (await pagesRequireLogin(context.pages(), request.policy, authFailure)) return finishLogin();
       const started = Date.now();
       emitProgress('browser_action_started', `Executing browser action ${index + 1}/${request.plan.actions.length}`, action.id, index + 1, request.plan.actions.length);
       try {
@@ -602,10 +937,9 @@ async function executeWorker(request) {
           return finishLogin();
         }
         if (captured.path) screenshots.push(captured.path);
-        if (blockedRequest) throw new Error('browser destination was blocked');
+        if (supervised.blocked()) throw new Error('browser destination was blocked');
         if (page.url().startsWith('http:') || page.url().startsWith('https:')) await assertAllowedURL(page.url(), request.policy);
-        const login = await loginPageState(page, request.policy, authFailure);
-        if (login.required) {
+        if (await pagesRequireLogin(context.pages(), request.policy, authFailure)) {
           actions.push({ id: action.id, action: action.action, locator_kind: action.locator?.kind || '', started_at: new Date(started).toISOString(), duration_ms: Date.now() - started, result: 'login_required', error_code: 'browser_login_required' });
           return finishLogin();
         }
@@ -620,18 +954,17 @@ async function executeWorker(request) {
         actions.push({ id: action.id, action: action.action, locator_kind: action.locator?.kind || '', started_at: new Date(started).toISOString(), duration_ms: Date.now() - started, result: 'completed', error_code: '' });
         emitProgress('browser_action_completed', `Completed browser action ${index + 1}/${request.plan.actions.length}`, action.id, index + 1, request.plan.actions.length);
       } catch {
-        actions.push({ id: action.id, action: action.action, locator_kind: action.locator?.kind || '', started_at: new Date(started).toISOString(), duration_ms: Date.now() - started, result: 'failed', error_code: blockedRequest ? 'browser_destination_blocked' : 'locator_failed' });
-        const login = await loginPageState(page, request.policy, authFailure);
-        if (login.required) return finishLogin();
+        actions.push({ id: action.id, action: action.action, locator_kind: action.locator?.kind || '', started_at: new Date(started).toISOString(), duration_ms: Date.now() - started, result: 'failed', error_code: supervised.blocked() ? 'browser_destination_blocked' : 'locator_failed' });
+        if (await pagesRequireLogin(context.pages(), request.policy, authFailure)) return finishLogin();
         const captured = await captureScreenshot('failure.png');
         if (captured.loginRequired) return finishLogin();
         const failure = captured.path;
         screenshots.push(failure);
         await Promise.allSettled([...pendingResponses]);
-        const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions))];
+        const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, artifactBudget))];
         return {
           status: 'locator_failed',
-          error_code: blockedRequest ? 'browser_destination_blocked' : 'locator_failed',
+          error_code: supervised.blocked() ? 'browser_destination_blocked' : 'locator_failed',
           error_message: 'browser action failed',
           failed_action_id: action.id,
           final_url: page.url(),
@@ -647,14 +980,13 @@ async function executeWorker(request) {
       try {
         await page.getByText(assertion.value, { exact: false }).first().waitFor({ state: 'visible' });
       } catch {
-        const login = await loginPageState(page, request.policy, authFailure);
-        if (login.required) return finishLogin();
+        if (await pagesRequireLogin(context.pages(), request.policy, authFailure)) return finishLogin();
         const captured = await captureScreenshot('failure.png');
         if (captured.loginRequired) return finishLogin();
         const failure = captured.path;
         screenshots.push(failure);
         await Promise.allSettled([...pendingResponses]);
-        const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions))];
+        const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, artifactBudget))];
         return {
           status: 'assertion_failed',
           error_code: 'assertion_failed',
@@ -668,14 +1000,13 @@ async function executeWorker(request) {
       }
     }
 
-    const login = await loginPageState(page, request.policy, authFailure);
-    if (login.required) return finishLogin();
+    if (await pagesRequireLogin(context.pages(), request.policy, authFailure)) return finishLogin();
     const captured = await captureScreenshot('final.png');
     if (captured.loginRequired) return finishLogin();
     const finalScreenshot = captured.path;
     screenshots.push(finalScreenshot);
     await Promise.allSettled([...pendingResponses]);
-    const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions))];
+    const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, artifactBudget))];
     return {
       status: 'completed',
       final_url: page.url(),
@@ -686,7 +1017,7 @@ async function executeWorker(request) {
     };
   } finally {
     if (context) await context.close().catch(() => {});
-    await browser.close().catch(() => {});
+    await launched.close().catch(() => {});
   }
 }
 
@@ -698,27 +1029,8 @@ async function loginStorageStateInput(path) {
   return { storageState: path };
 }
 
-export async function createGuardedLoginContext(browser, storageStateInput) {
-  const context = await browser.newContext({
-    ...storageStateInput,
-    serviceWorkers: 'block',
-    acceptDownloads: false,
-  });
-  const guardedPages = new WeakSet();
-  const guardPage = (page) => {
-    if (guardedPages.has(page)) return;
-    guardedPages.add(page);
-    page.setDefaultTimeout(15_000);
-    page.setDefaultNavigationTimeout(30_000);
-    page.on('dialog', (dialog) => dialog.dismiss().catch(() => {}));
-    page.on('download', (download) => download.cancel().catch(() => {}));
-  };
-  context.on('page', guardPage);
-  for (const page of context.pages()) guardPage(page);
-  await context.routeWebSocket('**/*', (webSocketRoute) => webSocketRoute.close());
-  const page = await context.newPage();
-  guardPage(page);
-  return { context, page };
+export async function createGuardedLoginContext(browser, storageStateInput, policy, hooks = {}) {
+  return createSupervisedBrowserContext(browser, { storageStateInput, policy, hooks });
 }
 
 export async function saveLoginStorageState(context, path) {
@@ -745,6 +1057,7 @@ export async function saveLoginStorageState(context, path) {
 async function loginWorker(request) {
   validateWorkerRequest(request);
   const { chromium } = await import('playwright');
+  let launched;
   let browser;
   let context;
   let interrupting = false;
@@ -753,37 +1066,31 @@ async function loginWorker(request) {
     interrupting = true;
     void (async () => {
       if (context) await context.close().catch(() => {});
-      if (browser) await browser.close().catch(() => {});
+      if (launched) await launched.close().catch(() => {});
+      else if (browser) await browser.close().catch(() => {});
       process.exit(130);
     })();
   };
   process.once('SIGINT', closeForInterrupt);
   process.once('SIGTERM', closeForInterrupt);
   try {
-    browser = await chromium.launch({ headless: false });
-    const guarded = await createGuardedLoginContext(browser, await loginStorageStateInput(request.storage_state_path));
+    launched = await launchPinnedBrowser(chromium, request.policy, false);
+    browser = launched.browser;
+    const authFailures = createLoginAuthFailureTracker();
+    const guarded = await createGuardedLoginContext(
+      browser,
+      await loginStorageStateInput(request.storage_state_path),
+      request.policy,
+      { onResponse: (response) => authFailures.observeStatus(response.status()) },
+    );
     context = guarded.context;
     const page = guarded.page;
-    let blockedRequest = false;
-    const authFailures = createLoginAuthFailureTracker();
-    context.on('response', (response) => {
-      authFailures.observeStatus(response.status());
-    });
-    await context.route('**/*', async (route) => {
-      try {
-        await assertAllowedURL(route.request().url(), request.policy);
-        await route.continue();
-      } catch {
-        blockedRequest = true;
-        await route.abort('blockedbyclient');
-      }
-    });
     emitProgress('browser_login_opened', 'Complete login in the visible validation browser');
     await assertAllowedURL(request.plan.start_url, request.policy);
     await page.goto(request.plan.start_url, { waitUntil: 'domcontentloaded' });
     let loginStarted = false;
     while (true) {
-      if (blockedRequest) throw new Error('browser destination was blocked');
+      if (guarded.blocked()) throw new Error('browser destination was blocked');
       const pages = context.pages();
       for (const currentPage of pages) {
         const currentURL = currentPage.url();
@@ -802,7 +1109,8 @@ async function loginWorker(request) {
     process.off('SIGINT', closeForInterrupt);
     process.off('SIGTERM', closeForInterrupt);
     if (context) await context.close().catch(() => {});
-    if (browser) await browser.close().catch(() => {});
+    if (launched) await launched.close().catch(() => {});
+    else if (browser) await browser.close().catch(() => {});
   }
 }
 
@@ -817,18 +1125,23 @@ async function probeWorker(outputPath) {
     server.listen(0, '127.0.0.1', resolveListen);
   });
   const address = server.address();
-  const browser = await chromium.launch({ headless: true });
+  const origin = `http://127.0.0.1:${address.port}`;
+  const policy = { allowed_origins: [origin], private_origins: [origin], auth_origins: [], is_prod: false };
+  const launched = await launchPinnedBrowser(chromium, policy, true);
+  const browser = launched.browser;
   try {
-    const context = await browser.newContext();
+    const supervised = await createSupervisedBrowserContext(browser, { policy });
+    const context = supervised.context;
     try {
-      const page = await context.newPage();
-      await page.goto(`http://127.0.0.1:${address.port}/`, { waitUntil: 'domcontentloaded' });
+      const page = supervised.page;
+      await page.goto(`${origin}/`, { waitUntil: 'domcontentloaded' });
       await page.screenshot({ path: outputPath, type: 'png' });
+      if (launched.proxy.stats().http < 1) throw new Error('runtime probe bypassed the pinned browser proxy');
     } finally {
       await context.close();
     }
   } finally {
-    await browser.close();
+    await launched.close();
     await new Promise((resolveClose) => server.close(resolveClose));
   }
   const content = await readFile(outputPath);

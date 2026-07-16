@@ -258,7 +258,7 @@ func TestHostVerifierLoginReplacesEncryptedSessionOnlyAfterWorkerSuccess(t *test
 	assertTreeExcludesBytes(t, root, oldState, newState, []byte(plaintextPath))
 }
 
-func TestHostVerifierLoginNavigatesToAuthOriginAndStoresApplicationSession(t *testing.T) {
+func TestHostVerifierLoginNavigatesToOriginalApplicationURLAndStoresApplicationOriginSession(t *testing.T) {
 	root := t.TempDir()
 	store := NewSessionStore(filepath.Join(root, "sessions"), newMemorySecretStore())
 	applicationKey := SessionKey{SystemID: "shop", Environment: "test", Origin: "https://app.test"}
@@ -266,7 +266,7 @@ func TestHostVerifierLoginNavigatesToAuthOriginAndStoresApplicationSession(t *te
 	state := []byte(`{"cookies":[{"domain":".test","value":"sso-session"}]}`)
 	worker := &fakeWorker{Result: workerResult{Status: "completed"}}
 	worker.Inspect = func(_ context.Context, request workerRequest) error {
-		if request.Plan.StartURL != "https://login.test" {
+		if request.Plan.StartURL != "https://app.test/oauth/start?state=opaque" {
 			t.Fatalf("login navigation URL = %q", request.Plan.StartURL)
 		}
 		return os.WriteFile(request.StorageStatePath, state, 0o600)
@@ -274,7 +274,7 @@ func TestHostVerifierLoginNavigatesToAuthOriginAndStoresApplicationSession(t *te
 	verifier := newTestHostVerifier(t, worker)
 	verifier.SetSessionStore(store)
 	if err := verifier.Login(context.Background(), BrowserLoginRequest{
-		SystemID: "shop", Environment: "test", ApplicationOrigin: "https://app.test", LoginOrigin: "https://login.test",
+		SystemID: "shop", Environment: "test", ApplicationURL: "https://app.test/oauth/start?state=opaque", ApplicationOrigin: "https://app.test", LoginOrigin: "https://login.test",
 		Policy: bughub.BrowserSecurityPolicy{
 			AllowedOrigins: []string{"https://app.test", "https://login.test"},
 			AuthOrigins:    []string{"https://login.test"},
@@ -289,6 +289,38 @@ func TestHostVerifierLoginNavigatesToAuthOriginAndStoresApplicationSession(t *te
 	}
 	if _, found, err := store.Load(authKey); err != nil || found {
 		t.Fatalf("auth-origin session found=%v err=%v", found, err)
+	}
+}
+
+func TestHostVerifierLoginRejectsUnsafeOrInconsistentApplicationURLBeforeWorker(t *testing.T) {
+	for _, test := range []struct {
+		name, applicationURL, applicationOrigin string
+	}{
+		{name: "userinfo", applicationURL: "https://user:pass@app.test/start", applicationOrigin: "https://app.test"},
+		{name: "fragment", applicationURL: "https://app.test/start#secret", applicationOrigin: "https://app.test"},
+		{name: "sensitive query key", applicationURL: "https://app.test/start?token=secret", applicationOrigin: "https://app.test"},
+		{name: "credential query value", applicationURL: "https://app.test/start?state=Bearer+credential", applicationOrigin: "https://app.test"},
+		{name: "origin mismatch", applicationURL: "https://app.test/start", applicationOrigin: "https://other.test"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := NewSessionStore(filepath.Join(t.TempDir(), "sessions"), newMemorySecretStore())
+			worker := &fakeWorker{Result: workerResult{Status: "completed"}}
+			verifier := newTestHostVerifier(t, worker)
+			verifier.SetSessionStore(store)
+			err := verifier.Login(context.Background(), BrowserLoginRequest{
+				SystemID: "shop", Environment: "test", ApplicationURL: test.applicationURL, ApplicationOrigin: test.applicationOrigin, LoginOrigin: "https://login.test",
+				Policy:  bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test", "https://login.test", "https://other.test"}, AuthOrigins: []string{"https://login.test"}},
+				Timeout: time.Minute,
+			})
+			if err == nil || worker.Calls != 0 {
+				t.Fatalf("err=%v worker calls=%d", err, worker.Calls)
+			}
+			for _, secret := range []string{"user:pass", "secret", "Bearer", "other.test"} {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatalf("login error exposed %q: %v", secret, err)
+				}
+			}
+		})
 	}
 }
 
@@ -890,6 +922,32 @@ func TestHostVerifierRejectsUnsafeOrUnmanifestedArtifacts(t *testing.T) {
 	}
 }
 
+func TestHostVerifierRejectsAttemptArtifactTotalBeforePublishingResult(t *testing.T) {
+	request := validBrowserRequest(t)
+	result := workerResult{
+		Status:              "completed",
+		FinalScreenshotPath: "browser/three.png",
+		Artifacts: []workerArtifact{
+			{Kind: "screenshot", Path: "browser/one.png"},
+			{Kind: "screenshot", Path: "browser/two.png"},
+			{Kind: "screenshot", Path: "browser/three.png"},
+		},
+	}
+	artifactBytes := make(map[string][]byte, len(result.Artifacts))
+	for _, artifact := range result.Artifacts {
+		content := make([]byte, maxBrowserAttemptArtifactBytes/3+1)
+		copy(content, []byte("\x89PNG\r\n\x1a\n"))
+		artifactBytes[artifact.Path] = content
+	}
+	worker := &fakeWorker{Result: result, ArtifactBytes: artifactBytes}
+	if _, err := newTestHostVerifier(t, worker).Execute(context.Background(), request); err == nil {
+		t.Fatal("expected aggregate browser artifact budget rejection")
+	}
+	if _, err := os.Stat(filepath.Join(request.StagingDir, "browser", "result.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("oversized aggregate result was published: %v", err)
+	}
+}
+
 func TestHostVerifierRejectsSymlinkArtifact(t *testing.T) {
 	request := validBrowserRequest(t)
 	outside := filepath.Join(t.TempDir(), "outside.png")
@@ -1276,8 +1334,21 @@ document.getElementById('search').addEventListener('click', async () => {
 				t.Fatalf("console evidence was not redacted: %s", encoded)
 			}
 		case "browser_actions":
+			var actions []struct {
+				ID     string `json:"id"`
+				Result string `json:"result"`
+			}
+			if err := json.Unmarshal(content, &actions); err != nil {
+				t.Fatalf("action trace is not valid JSON: %v", err)
+			}
+			completed := make(map[string]bool, len(actions))
+			for _, action := range actions {
+				if action.Result == "completed" {
+					completed[action.ID] = true
+				}
+			}
 			for _, actionID := range []string{"fill", "click", "wait", "shot"} {
-				if !strings.Contains(encoded, `"id": "`+actionID+`"`) {
+				if !completed[actionID] {
 					t.Fatalf("action trace is missing %q: %s", actionID, encoded)
 				}
 			}

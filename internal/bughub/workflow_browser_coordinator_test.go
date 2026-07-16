@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -309,6 +310,29 @@ func TestBrowserCoordinatorRejectsCredentialBearingPlanBeforeJournal(t *testing.
 			}
 			if _, err := os.Stat(filepath.Join(request.StagingDir, "browser-executions", "primary", "coordinator-plan.json")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("credential-bearing plan was journaled: %v", err)
+			}
+		})
+	}
+}
+
+func TestBrowserCoordinatorRejectsUnsafeDurableApplicationURLBeforeHost(t *testing.T) {
+	for _, startURL := range []string{
+		"https://user:pass@app.example.com/users",
+		"https://app.example.com/users#fragment",
+		"https://app.example.com/users?token=secret",
+		"https://app.example.com/users?state=Bearer%20credential",
+	} {
+		t.Run(url.QueryEscape(startURL), func(t *testing.T) {
+			request := browserCoordinatorRequest(t)
+			plan := strings.Replace(validBrowserPlanYAML(), "https://app.example.com/users", fmt.Sprintf("%q", startURL), 1)
+			executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{{FinalYAML: plan}}}
+			verifier := &fakeBrowserVerifier{}
+			result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.ErrorCode != "browser_validator_plan_invalid" || verifier.Calls != 0 || strings.Contains(result.ErrorMessage, startURL) {
+				t.Fatalf("browser=%d result=%+v", verifier.Calls, result)
 			}
 		})
 	}

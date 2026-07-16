@@ -607,11 +607,12 @@ func TestAgentPhaseRunnerBrowserStopsUseBoundedEnvelopeAndKeepFailureScreenshot(
 	}
 }
 
-func TestAgentPhaseRunnerBrowserLoginStopPersistsApplicationAndAuthenticationOrigins(t *testing.T) {
+func TestAgentPhaseRunnerBrowserLoginStopPersistsOriginalApplicationURLAndAuthenticationOrigin(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-browser-login-origins", CaseValidating)
 	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
-	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{{FinalYAML: validBrowserPlanYAML()}}}
+	planYAML := strings.Replace(validBrowserPlanYAML(), "https://app.example.com/users", "https://app.example.com/oauth/start?state=opaque", 1)
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{{FinalYAML: planYAML}}}
 	verifier := browserVerifierFunc(func(_ context.Context, request BrowserVerificationRequest) (BrowserVerificationResult, error) {
 		return BrowserVerificationResult{Status: "login_required", LoginOrigin: "https://login.example.com"}, nil
 	})
@@ -625,13 +626,13 @@ func TestAgentPhaseRunnerBrowserLoginStopPersistsApplicationAndAuthenticationOri
 	}
 	command := <-completed
 	var envelope struct {
-		ApplicationOrigin string `json:"application_origin"`
-		LoginOrigin       string `json:"login_origin"`
+		ApplicationURL string `json:"application_url"`
+		LoginOrigin    string `json:"login_origin"`
 	}
 	if err := json.Unmarshal(command.OutputJSON, &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if command.ErrorCode != "browser_login_required" || envelope.ApplicationOrigin != "https://app.example.com" || envelope.LoginOrigin != "https://login.example.com" {
+	if command.ErrorCode != "browser_login_required" || envelope.ApplicationURL != "https://app.example.com/oauth/start?state=opaque" || envelope.LoginOrigin != "https://login.example.com" {
 		t.Fatalf("command=%+v envelope=%+v", command, envelope)
 	}
 }

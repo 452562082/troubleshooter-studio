@@ -230,12 +230,13 @@ func (c BrowserCoordinator) executeBrowser(ctx context.Context, request BrowserC
 	if err != nil {
 		return BrowserVerificationResult{}, err
 	}
-	_, applicationOrigin, err := canonicalBrowserURL(plan.StartURL)
+	applicationURL, applicationOrigin, err := canonicalBrowserURL(plan.StartURL)
 	if err != nil {
 		return BrowserVerificationResult{}, err
 	}
 	// The application/session origin is derived from the durable validated plan,
 	// never from a worker redirect or the mutable Bug URL used by a later retry.
+	rebased.ApplicationURL = applicationURL
 	rebased.ApplicationOrigin = applicationOrigin
 	if err := validateBrowserArtifactBinding(rebased.Artifacts, environment, version); err != nil {
 		return BrowserVerificationResult{}, err
@@ -325,6 +326,7 @@ func browserStopOutput(result BrowserCoordinatorResult) json.RawMessage {
 		envelope["system_failure"] = true
 	}
 	if result.ErrorCode == "browser_login_required" {
+		envelope["application_url"] = safeBoundedBrowserText(result.BrowserResult.ApplicationURL, 4096)
 		envelope["application_origin"] = safeBoundedBrowserText(result.BrowserResult.ApplicationOrigin, 4096)
 		envelope["login_origin"] = safeBoundedBrowserText(result.BrowserResult.LoginOrigin, 4096)
 	}
@@ -733,6 +735,7 @@ func rebaseBrowserResult(result BrowserVerificationResult, execution string) (Br
 	rebased.FailedActionID = safeBoundedBrowserText(result.FailedActionID, 128)
 	rebased.FinalURL = safeBoundedBrowserText(result.FinalURL, 4096)
 	rebased.Title = safeBoundedBrowserText(result.Title, 512)
+	rebased.ApplicationURL = safeBoundedBrowserText(result.ApplicationURL, 4096)
 	rebased.ApplicationOrigin = safeBoundedBrowserText(result.ApplicationOrigin, 4096)
 	rebased.LoginOrigin = safeBoundedBrowserText(result.LoginOrigin, 4096)
 	rebased.AccessibilitySummary = boundedBrowserAccessibility(result.AccessibilitySummary)
@@ -866,10 +869,27 @@ func validateBrowserRepair(original BrowserPlan, failedActionID string, repaired
 
 func canonicalBrowserURL(raw string) (string, string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || !parsed.IsAbs() || parsed.User != nil {
+	if err != nil || !parsed.IsAbs() || parsed.User != nil || parsed.Fragment != "" || parsed.RawFragment != "" {
 		return "", "", errors.New("browser start URL is invalid")
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", "", errors.New("browser start URL is invalid")
+	}
+	query, err := url.ParseQuery(parsed.RawQuery)
+	if err != nil {
+		return "", "", errors.New("browser start URL query is invalid")
+	}
+	for key, values := range query {
+		if browserCredentialSemantic(key) || strings.EqualFold(key, "code") || strings.EqualFold(key, "session") {
+			return "", "", errors.New("browser start URL contains credential material")
+		}
+		for _, value := range values {
+			if browserCredentialSemantic(value) || containsSensitiveData([]byte(value)) {
+				return "", "", errors.New("browser start URL contains credential material")
+			}
+		}
+	}
 	hostname := strings.ToLower(strings.TrimRight(parsed.Hostname(), "."))
 	port := parsed.Port()
 	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
@@ -882,7 +902,6 @@ func canonicalBrowserURL(raw string) (string, string, error) {
 	} else {
 		parsed.Host = hostname
 	}
-	parsed.Fragment = ""
 	origin := parsed.Scheme + "://" + parsed.Host
 	return parsed.String(), origin, nil
 }

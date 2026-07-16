@@ -235,7 +235,9 @@ func newBrowserRecoveryBindingApp(t *testing.T, phase bughub.Phase, errorCode, l
 		t.Fatal(err)
 	}
 	finished := time.Now().UTC()
-	output, err := json.Marshal(map[string]any{"error_code": errorCode, "application_origin": "https://app.test", "login_origin": loginOrigin})
+	output, err := json.Marshal(map[string]any{
+		"error_code": errorCode, "application_url": "https://app.test/oauth/start?state=opaque", "application_origin": "https://app.test", "login_origin": loginOrigin,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +330,7 @@ func TestOpenIncidentBrowserLoginContinuesOnceAndReplaysWithoutSecondLogin(t *te
 	if continued.Status != bughub.CaseValidating || continued.CycleNumber != incident.CycleNumber || child.ParentAttemptID != attempt.ID || child.Phase != attempt.Phase || runner.count() != 1 || len(logins) != 1 {
 		t.Fatalf("continued=%+v child=%+v starts=%d logins=%d", continued, child, runner.count(), len(logins))
 	}
-	if logins[0].ApplicationOrigin != "https://app.test" || logins[0].LoginOrigin != "https://login.test" || logins[0].SystemID != incident.SystemID || logins[0].Environment != incident.Environment {
+	if logins[0].ApplicationURL != "https://app.test/oauth/start?state=opaque" || logins[0].ApplicationOrigin != "https://app.test" || logins[0].LoginOrigin != "https://login.test" || logins[0].SystemID != incident.SystemID || logins[0].Environment != incident.Environment {
 		t.Fatalf("login request = %+v", logins[0])
 	}
 
@@ -339,6 +341,37 @@ func TestOpenIncidentBrowserLoginContinuesOnceAndReplaysWithoutSecondLogin(t *te
 	logins, _, _ = controller.snapshot()
 	if replayed.CurrentAttemptID != continued.CurrentAttemptID || runner.count() != 1 || len(logins) != 1 {
 		t.Fatalf("replayed=%+v starts=%d logins=%d", replayed, runner.count(), len(logins))
+	}
+}
+
+func TestIncidentBrowserLoginIdentityValidatesDurableApplicationURL(t *testing.T) {
+	validOutput, _ := json.Marshal(map[string]any{
+		"error_code": "browser_login_required", "application_url": "https://app.test/oauth/start?state=opaque", "application_origin": "https://app.test", "login_origin": "https://login.test",
+	})
+	applicationURL, applicationOrigin, loginOrigin, err := incidentBrowserLoginIdentity(bughub.PhaseAttempt{OutputJSON: validOutput})
+	if err != nil || applicationURL != "https://app.test/oauth/start?state=opaque" || applicationOrigin != "https://app.test" || loginOrigin != "https://login.test" {
+		t.Fatalf("url=%q origin=%q login=%q err=%v", applicationURL, applicationOrigin, loginOrigin, err)
+	}
+
+	legacySameOrigin, _ := json.Marshal(map[string]any{
+		"error_code": "browser_login_required", "application_origin": "https://app.test", "login_origin": "https://app.test",
+	})
+	if gotURL, gotOrigin, _, err := incidentBrowserLoginIdentity(bughub.PhaseAttempt{OutputJSON: legacySameOrigin}); err != nil || gotURL != gotOrigin || gotOrigin != "https://app.test" {
+		t.Fatalf("safe legacy identity url=%q origin=%q err=%v", gotURL, gotOrigin, err)
+	}
+
+	for _, output := range []map[string]any{
+		{"error_code": "browser_login_required", "application_origin": "https://app.test", "login_origin": "https://login.test"},
+		{"error_code": "browser_login_required", "application_url": "https://user:pass@app.test/start", "login_origin": "https://login.test"},
+		{"error_code": "browser_login_required", "application_url": "https://app.test/start#fragment", "login_origin": "https://login.test"},
+		{"error_code": "browser_login_required", "application_url": "https://app.test/start?token=secret", "login_origin": "https://login.test"},
+		{"error_code": "browser_login_required", "application_url": "https://app.test/start?state=Bearer+credential", "login_origin": "https://login.test"},
+		{"error_code": "browser_login_required", "application_url": "https://app.test/start", "application_origin": "https://other.test", "login_origin": "https://login.test"},
+	} {
+		encoded, _ := json.Marshal(output)
+		if _, _, _, err := incidentBrowserLoginIdentity(bughub.PhaseAttempt{OutputJSON: encoded}); err == nil {
+			t.Fatalf("unsafe browser login identity was accepted: %s", encoded)
+		}
 	}
 }
 

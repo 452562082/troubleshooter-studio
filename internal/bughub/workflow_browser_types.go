@@ -91,6 +91,7 @@ type BrowserVerificationResult struct {
 	FailedActionID       string
 	FinalURL             string
 	Title                string
+	ApplicationURL       string
 	ApplicationOrigin    string
 	LoginOrigin          string
 	FinalScreenshotPath  string

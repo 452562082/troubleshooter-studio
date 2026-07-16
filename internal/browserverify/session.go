@@ -134,15 +134,13 @@ func (s *SessionStore) Save(key SessionKey, state []byte) (returnedErr error) {
 	}
 	defer func() { returnedErr = errors.Join(returnedErr, lock.release()) }()
 	if s.secrets == nil {
-		s.memory[identifier] = bytes.Clone(state)
-		return nil
+		return s.saveMemoryFallback(identifier, state)
 	}
 
 	encodedKey, err := s.secrets.Get(identifier)
 	if err != nil {
 		if !errors.Is(err, ErrSecretNotFound) {
-			s.memory[identifier] = bytes.Clone(state)
-			return nil
+			return s.saveMemoryFallback(identifier, state)
 		}
 		aesKey := make([]byte, 32)
 		if _, err := io.ReadFull(rand.Reader, aesKey); err != nil {
@@ -150,8 +148,7 @@ func (s *SessionStore) Save(key SessionKey, state []byte) (returnedErr error) {
 		}
 		encodedKey = base64.StdEncoding.EncodeToString(aesKey)
 		if err := s.secrets.Set(identifier, encodedKey); err != nil {
-			s.memory[identifier] = bytes.Clone(state)
-			return nil
+			return s.saveMemoryFallback(identifier, state)
 		}
 	}
 
@@ -170,6 +167,35 @@ func (s *SessionStore) Save(key SessionKey, state []byte) (returnedErr error) {
 	return nil
 }
 
+func (s *SessionStore) saveMemoryFallback(identifier string, state []byte) error {
+	if err := retireEncryptedSession(s.root, identifier); err != nil {
+		return err
+	}
+	s.memory[identifier] = bytes.Clone(state)
+	return nil
+}
+
+func retireEncryptedSession(root, identifier string) error {
+	path := filepath.Join(root, identifier+".json")
+	removed := false
+	if err := os.Remove(path); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			return errors.New("remove encrypted browser session")
+		}
+	} else {
+		removed = true
+	}
+	if removed {
+		if err := syncRuntimeDirectory(root); err != nil {
+			return errors.New("sync browser session directory")
+		}
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
+		return errors.New("verify encrypted browser session removal")
+	}
+	return nil
+}
+
 func (s *SessionStore) Clear(key SessionKey) (returnedErr error) {
 	identifier, err := sessionIdentifier(key)
 	if err != nil {
@@ -184,19 +210,8 @@ func (s *SessionStore) Clear(key SessionKey) (returnedErr error) {
 	}
 	defer func() { returnedErr = errors.Join(returnedErr, lock.release()) }()
 	delete(s.memory, identifier)
-	path := filepath.Join(s.root, identifier+".json")
-	removed := false
-	if err := os.Remove(path); err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			return errors.New("remove encrypted browser session")
-		}
-	} else {
-		removed = true
-	}
-	if removed {
-		if err := syncRuntimeDirectory(s.root); err != nil {
-			return errors.New("sync browser session directory")
-		}
+	if err := retireEncryptedSession(s.root, identifier); err != nil {
+		return err
 	}
 	if s.secrets == nil {
 		return errSecretStoreUnavailable

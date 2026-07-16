@@ -69,6 +69,30 @@ func (s *setFailingSecretStore) Set(string, string) error {
 }
 func (*setFailingSecretStore) Delete(string) error { return nil }
 
+type ambiguousSetFailingSecretStore struct {
+	values   map[string]string
+	setCalls int
+}
+
+func (s *ambiguousSetFailingSecretStore) Get(key string) (string, error) {
+	value, ok := s.values[key]
+	if !ok {
+		return "", ErrSecretNotFound
+	}
+	return value, nil
+}
+
+func (s *ambiguousSetFailingSecretStore) Set(key, value string) error {
+	s.setCalls++
+	s.values[key] = value
+	return errors.New("keyring write outcome is unknown")
+}
+
+func (s *ambiguousSetFailingSecretStore) Delete(key string) error {
+	delete(s.values, key)
+	return nil
+}
+
 type deleteFailingSecretStore struct {
 	*memorySecretStore
 	deleteErr error
@@ -283,6 +307,121 @@ func TestSessionStoreSetFailureUsesMemoryWithoutCiphertext(t *testing.T) {
 	}
 }
 
+func TestSessionStoreMemoryFallbackRetiresOldCiphertextBeforeRestart(t *testing.T) {
+	testCases := []struct {
+		name     string
+		degraded func() SecretStore
+	}{
+		{name: "keyring get unavailable", degraded: func() SecretStore { return failingSecretStore{} }},
+		{name: "keyring set unavailable", degraded: func() SecretStore { return &setFailingSecretStore{} }},
+		{name: "no keyring", degraded: func() SecretStore { return nil }},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "sessions")
+			key := SessionKey{SystemID: "base", Environment: "test", Origin: "https://app.test"}
+			oldState := []byte(`{"cookies":[{"value":"old-session"}]}`)
+			newState := []byte(`{"cookies":[{"value":"new-memory-session"}]}`)
+			durableSecrets := newMemorySecretStore()
+			if err := NewSessionStore(root, durableSecrets).Save(key, oldState); err != nil {
+				t.Fatal(err)
+			}
+			identifier := sessionIdentifierForTest(key)
+			oldKey := durableSecrets.values[identifier]
+
+			degraded := NewSessionStore(root, testCase.degraded())
+			if err := degraded.Save(key, newState); err != nil {
+				t.Fatalf("memory fallback Save error = %v", err)
+			}
+			if _, err := os.Stat(degraded.encryptedPath(key)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("old ciphertext survived memory fallback: %v", err)
+			}
+			loaded, found, err := degraded.Load(key)
+			if err != nil || !found || !bytes.Equal(loaded, newState) {
+				t.Fatalf("same-process memory load=%q found=%v err=%v", loaded, found, err)
+			}
+
+			recoveredSecrets := newMemorySecretStore()
+			recoveredSecrets.values[identifier] = oldKey
+			loaded, found, err = NewSessionStore(root, recoveredSecrets).Load(key)
+			if err != nil || found || loaded != nil {
+				t.Fatalf("old session revived after restart: loaded=%q found=%v err=%v", loaded, found, err)
+			}
+		})
+	}
+}
+
+func TestSessionStoreAmbiguousKeyringSetRetiresOldCiphertext(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	key := SessionKey{SystemID: "base", Environment: "test", Origin: "https://app.test"}
+	durableSecrets := newMemorySecretStore()
+	if err := NewSessionStore(root, durableSecrets).Save(key, []byte(`{"cookies":[{"value":"old-session"}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	secrets := &ambiguousSetFailingSecretStore{values: map[string]string{}}
+	store := NewSessionStore(root, secrets)
+	newState := []byte(`{"cookies":[{"value":"new-memory-session"}]}`)
+	if err := store.Save(key, newState); err != nil {
+		t.Fatal(err)
+	}
+	if secrets.setCalls != 1 {
+		t.Fatalf("Set calls = %d, want 1", secrets.setCalls)
+	}
+	if _, err := os.Stat(store.encryptedPath(key)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old ciphertext survived ambiguous Set outcome: %v", err)
+	}
+	loaded, found, err := NewSessionStore(root, secrets).Load(key)
+	if err != nil || found || loaded != nil {
+		t.Fatalf("restart after ambiguous Set loaded=%q found=%v err=%v", loaded, found, err)
+	}
+}
+
+func TestSessionStoreMemoryFallbackFailsWhenOldCiphertextCannotBeRetired(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	key := SessionKey{SystemID: "base", Environment: "test", Origin: "https://app.test"}
+	durableSecrets := newMemorySecretStore()
+	oldState := []byte(`{"cookies":[{"value":"old-session"}]}`)
+	durable := NewSessionStore(root, durableSecrets)
+	if err := durable.Save(key, oldState); err != nil {
+		t.Fatal(err)
+	}
+	path := durable.encryptedPath(key)
+	oldEnvelope, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "block-removal"), oldEnvelope, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	degraded := NewSessionStore(root, failingSecretStore{})
+	newState := []byte(`{"cookies":[{"value":"must-not-be-cached"}]}`)
+	if err := degraded.Save(key, newState); err == nil {
+		t.Fatal("Save succeeded without reliably retiring persistent state")
+	}
+	identifier := sessionIdentifierForTest(key)
+	if cached, ok := degraded.memory[identifier]; ok {
+		t.Fatalf("failed Save cached new session: %q", cached)
+	}
+
+	if err := os.RemoveAll(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, oldEnvelope, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, found, err := NewSessionStore(root, durableSecrets).Load(key)
+	if err != nil || !found || !bytes.Equal(loaded, oldState) {
+		t.Fatalf("failed fallback changed durable state: loaded=%q found=%v err=%v", loaded, found, err)
+	}
+}
+
 func TestSessionStoreLoadsMaximumSizedEncryptedState(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions"), newMemorySecretStore())
 	key := SessionKey{SystemID: "base", Environment: "test", Origin: "https://app.test"}
@@ -389,8 +528,9 @@ func TestSessionStoreClearDeletesCiphertextBeforeReportingKeyringFailure(t *test
 	if _, err := os.Stat(store.encryptedPath(key)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("ciphertext remains after clear: %v", err)
 	}
-	if _, ok, err := store.Load(key); err != nil || ok {
-		t.Fatalf("load after unavailable keyring clear: ok=%v err=%v", ok, err)
+	restarted := NewSessionStore(root, secrets.memorySecretStore)
+	if loaded, ok, err := restarted.Load(key); err != nil || ok || loaded != nil {
+		t.Fatalf("restart after unavailable keyring clear: loaded=%q ok=%v err=%v", loaded, ok, err)
 	}
 }
 

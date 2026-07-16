@@ -61,10 +61,11 @@ func TestConfigureWorkerProcessPassesManagedPlaintextToWrapper(t *testing.T) {
 }
 
 func TestWindowsPlaintextCleanupFailsClosedAfterDirectoryRebound(t *testing.T) {
+	originalState := []byte(`{"cookies":[{"value":"original-secret"}]}`)
 	path, err := createPlaintextSessionTemp(
 		SessionKey{SystemID: "shop", Environment: "test", Origin: "https://app.test"},
-		nil,
-		false,
+		originalState,
+		true,
 		os.Remove,
 	)
 	if err != nil {
@@ -109,6 +110,10 @@ func TestWindowsPlaintextCleanupFailsClosedAfterDirectoryRebound(t *testing.T) {
 	}
 	if string(got) != string(replacementState) {
 		t.Fatalf("replacement state = %q, want %q", got, replacementState)
+	}
+	detachedStatePath := filepath.Join(detachedDirectory, plaintextSessionFileName)
+	if _, statErr := os.Stat(detachedStatePath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("original state bound to cleanup identity survived: %v", statErr)
 	}
 }
 

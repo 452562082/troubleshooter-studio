@@ -82,7 +82,11 @@ func roleBotFor(selected BotRef, role string, suffix string) BotRef {
 	out.Role = role
 	out.AgentID = agentID
 	if strings.TrimSpace(out.Target) == "openclaw" {
-		out.AgentID = firstNonEmpty(strings.TrimSpace(agentID), internalAgentIDForRole(selected, role), strings.TrimSpace(selected.AgentID), internalAgentIDForRole(selected, "troubleshooter"), strings.TrimSpace(selected.SystemID))
+		// OpenClaw installs one configured top-level agent; validator/fixer are
+		// internal prompt/skill roles in that agent's workspace. Passing the
+		// internal role ID to `openclaw agent --agent` targets a non-existent
+		// configured agent and prevents every validation call from starting.
+		out.AgentID = firstNonEmpty(strings.TrimSpace(selected.AgentID), internalAgentIDForRole(selected, "troubleshooter"), strings.TrimSpace(selected.SystemID))
 	}
 	out.Key = strings.TrimSpace(selected.Key)
 	if out.Key != "" {

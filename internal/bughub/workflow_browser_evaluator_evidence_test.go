@@ -138,7 +138,10 @@ func TestPrepareBrowserEvaluatorEvidenceUsesStrictRedactedBoundedContent(t *test
 	if !filepath.IsAbs(path) {
 		t.Fatalf("screenshot path=%q is not absolute", path)
 	}
-	prompt := frozenBrowserEvidencePrompt(path, structured)
+	prompt := frozenBrowserEvidencePrompt(structured, path != "")
+	if strings.Contains(prompt, path) || strings.Contains(prompt, filepath.Dir(path)) {
+		t.Fatalf("evaluator prompt leaked ephemeral screenshot path: %s", prompt)
+	}
 	if strings.Contains(prompt, secret) || !strings.Contains(prompt, redactedValue) || !strings.Contains(prompt, "req-safe") || !strings.Contains(prompt, `"id":"open-users"`) || !strings.Contains(prompt, `"truncated_kinds":["network"]`) {
 		t.Fatalf("unexpected evaluator evidence: %s", prompt)
 	}

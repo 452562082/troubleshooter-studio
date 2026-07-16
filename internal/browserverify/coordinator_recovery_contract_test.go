@@ -56,6 +56,10 @@ gaps: []
 
 func (*durableCoordinatorExecutor) CancelPhase(context.Context, string) error { return nil }
 
+func (e *durableCoordinatorExecutor) ExecutePhaseWithAttachments(ctx context.Context, id string, bot bughub.BotRef, prompt string, _ []bughub.PhaseAttachment, emit func(bughub.InvestigationEvent)) (bughub.PhaseExecutionResult, error) {
+	return e.ExecutePhase(ctx, id, bot, prompt, emit)
+}
+
 func durableCoordinatorRequest(t *testing.T) bughub.BrowserCoordinatorRequest {
 	t.Helper()
 	stagingDir := t.TempDir()

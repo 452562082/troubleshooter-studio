@@ -16,10 +16,11 @@ import (
 )
 
 type scriptedPhaseExecutor struct {
-	Results []PhaseExecutionResult
-	Errors  []error
-	Prompts []string
-	Calls   int
+	Results     []PhaseExecutionResult
+	Errors      []error
+	Prompts     []string
+	Attachments [][]PhaseAttachment
+	Calls       int
 }
 
 func (s *scriptedPhaseExecutor) ExecutePhase(_ context.Context, _ string, _ BotRef, prompt string, _ func(InvestigationEvent)) (PhaseExecutionResult, error) {
@@ -39,6 +40,11 @@ func (s *scriptedPhaseExecutor) ExecutePhase(_ context.Context, _ string, _ BotR
 }
 
 func (s *scriptedPhaseExecutor) CancelPhase(context.Context, string) error { return nil }
+
+func (s *scriptedPhaseExecutor) ExecutePhaseWithAttachments(ctx context.Context, id string, bot BotRef, prompt string, attachments []PhaseAttachment, emit func(InvestigationEvent)) (PhaseExecutionResult, error) {
+	s.Attachments = append(s.Attachments, append([]PhaseAttachment(nil), attachments...))
+	return s.ExecutePhase(ctx, id, bot, prompt, emit)
+}
 
 type fakeBrowserVerifier struct {
 	Results  []BrowserVerificationResult

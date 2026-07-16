@@ -395,6 +395,10 @@ func fixOutputContract() string {
 }
 
 func BuildCodexExecCommand(codexBin, workspace, prompt string) (*exec.Cmd, error) {
+	return buildCodexExecCommand(codexBin, workspace, prompt, nil)
+}
+
+func buildCodexExecCommand(codexBin, workspace, prompt string, imagePaths []string) (*exec.Cmd, error) {
 	codexBin = strings.TrimSpace(codexBin)
 	if codexBin == "" {
 		codexBin = "codex"
@@ -413,12 +417,21 @@ func BuildCodexExecCommand(codexBin, workspace, prompt string) (*exec.Cmd, error
 	if !info.IsDir() {
 		return nil, fmt.Errorf("workspace %q is not a directory", workspace)
 	}
-	cmd := exec.Command(codexBin, "exec", "--json", "--sandbox", "workspace-write", "--cd", workspace, "--skip-git-repo-check", prompt)
+	args := []string{"exec", "--json", "--sandbox", "workspace-write", "--cd", workspace, "--skip-git-repo-check"}
+	for _, path := range imagePaths {
+		args = append(args, "--image", path)
+	}
+	args = append(args, prompt)
+	cmd := exec.Command(codexBin, args...)
 	cmd.Dir = workspace
 	return cmd, nil
 }
 
 func BuildClaudeInvestigationCommand(claudeBin, workspace, agentPath, prompt string) (*exec.Cmd, error) {
+	return buildClaudeInvestigationCommand(claudeBin, workspace, agentPath, prompt, nil)
+}
+
+func buildClaudeInvestigationCommand(claudeBin, workspace, agentPath, prompt string, attachmentDirs []string) (*exec.Cmd, error) {
 	claudeBin = strings.TrimSpace(claudeBin)
 	if claudeBin == "" {
 		claudeBin = "claude"
@@ -438,7 +451,12 @@ func BuildClaudeInvestigationCommand(claudeBin, workspace, agentPath, prompt str
 	if agentName == "" {
 		return nil, errors.New("claude agent is required")
 	}
-	cmd := exec.Command(claudeBin, "-p", "--dangerously-skip-permissions", "--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--verbose", "--agent", agentName, prompt)
+	args := []string{"-p", "--dangerously-skip-permissions", "--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--verbose", "--agent", agentName}
+	for _, directory := range attachmentDirs {
+		args = append(args, "--add-dir", directory)
+	}
+	args = append(args, prompt)
+	cmd := exec.Command(claudeBin, args...)
 	cmd.Dir = workspace
 	return cmd, nil
 }
@@ -1267,6 +1285,80 @@ func (i *CodexInvestigator) ExecutePhase(parent context.Context, attemptID strin
 	if err != nil {
 		return PhaseExecutionResult{}, err
 	}
+	return i.executePreparedPhase(parent, attemptID, cmd, parser, emit)
+}
+
+// ExecutePhaseWithAttachments transports trusted host evidence through the
+// target-specific mechanism: Codex receives --image, Claude receives a
+// read-authorized directory, and OpenClaw receives a short-lived file inside
+// its configured workspace so its Read tool can load the rendered PNG.
+func (i *CodexInvestigator) ExecutePhaseWithAttachments(parent context.Context, attemptID string, bot BotRef, prompt string, attachments []PhaseAttachment, emit func(InvestigationEvent)) (PhaseExecutionResult, error) {
+	if i == nil {
+		return PhaseExecutionResult{}, errors.New("agent executor is required")
+	}
+	validated, err := validatePhaseAttachments(attachments)
+	if err != nil {
+		return PhaseExecutionResult{}, err
+	}
+	target := strings.TrimSpace(bot.Target)
+	paths := make([]string, 0, len(validated))
+	for _, attachment := range validated {
+		paths = append(paths, attachment.Path)
+	}
+	var cmd *exec.Cmd
+	var parser investigationEventParser
+	cleanup := func() error { return nil }
+	i.mu.Lock()
+	codexBin := firstNonEmpty(i.binaries["codex"], i.codexBin, "codex")
+	claudeBin := firstNonEmpty(i.binaries["claude-code"], "claude")
+	openclawBin := firstNonEmpty(i.binaries["openclaw"], "openclaw")
+	i.mu.Unlock()
+	switch target {
+	case "codex":
+		cmd, err = buildCodexExecCommand(codexBin, bot.Path, prompt+phaseAttachmentPrompt(nil), paths)
+		parser = ParseCodexJSONLEvent
+	case "claude-code":
+		directories := make([]string, 0, len(paths))
+		for _, path := range paths {
+			directories = append(directories, filepath.Dir(path))
+		}
+		cmd, err = buildClaudeInvestigationCommand(claudeBin, claudeWorkspace(bot.Path), bot.Path, prompt+phaseAttachmentPrompt(paths), directories)
+		parser = ParseClaudeStreamJSONEvent
+	case "openclaw":
+		if len(validated) != 1 {
+			return PhaseExecutionResult{}, errors.New("OpenClaw browser evaluation requires exactly one screenshot")
+		}
+		workspacePath, removeView, viewErr := createBrowserEvaluatorScreenshotViewAt(bot.Path, validated[0].Content)
+		if viewErr != nil {
+			return PhaseExecutionResult{}, viewErr
+		}
+		cleanup = removeView
+		paths = append(paths, workspacePath)
+		cmd, err = BuildOpenClawInvestigationCommand(openclawBin, openClawAgentID(bot), prompt+phaseAttachmentPrompt([]string{workspacePath}))
+		parser = ParseOpenClawJSONEvent
+	default:
+		return PhaseExecutionResult{}, fmt.Errorf("暂不支持 %s 后台直启", firstNonEmpty(target, "unknown"))
+	}
+	if err != nil {
+		_ = cleanup()
+		return PhaseExecutionResult{}, err
+	}
+	result, executeErr := i.executePreparedPhase(parent, attemptID, cmd, parser, emit)
+	cleanupErr := cleanup()
+	if cleanupErr != nil {
+		return PhaseExecutionResult{}, cleanupErr
+	}
+	attachmentTokens := make([]PhaseAttachment, 0, len(paths))
+	for _, path := range paths {
+		attachmentTokens = append(attachmentTokens, PhaseAttachment{Path: path})
+	}
+	if phaseResultContainsAttachmentPath(result.FinalYAML, attachmentTokens) {
+		return PhaseExecutionResult{}, errPhaseAttachmentPathEcho
+	}
+	return result, executeErr
+}
+
+func (i *CodexInvestigator) executePreparedPhase(parent context.Context, attemptID string, cmd *exec.Cmd, parser investigationEventParser, emit func(InvestigationEvent)) (PhaseExecutionResult, error) {
 	ctx, cancel := context.WithCancel(parent)
 	active := &activeCodexRun{cancel: cancel, done: make(chan struct{})}
 	i.mu.Lock()

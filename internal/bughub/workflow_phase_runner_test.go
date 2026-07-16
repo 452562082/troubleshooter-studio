@@ -82,6 +82,12 @@ type phaseExecutorFunc func(context.Context, string, BotRef, string, func(Invest
 func (fn phaseExecutorFunc) ExecutePhase(ctx context.Context, id string, bot BotRef, prompt string, emit func(InvestigationEvent)) (PhaseExecutionResult, error) {
 	return fn(ctx, id, bot, prompt, emit)
 }
+func (fn phaseExecutorFunc) ExecutePhaseWithAttachments(ctx context.Context, id string, bot BotRef, prompt string, attachments []PhaseAttachment, emit func(InvestigationEvent)) (PhaseExecutionResult, error) {
+	for _, attachment := range attachments {
+		prompt += "\nFrozen final screenshot local path (read-only, original bytes): " + attachment.Path + "\n"
+	}
+	return fn(ctx, id, bot, prompt, emit)
+}
 func (phaseExecutorFunc) CancelPhase(context.Context, string) error { return nil }
 
 type browserVerifierFunc func(context.Context, BrowserVerificationRequest) (BrowserVerificationResult, error)
@@ -179,6 +185,10 @@ func (s *phaseExecutorStub) CancelPhase(_ context.Context, attemptID string) err
 	defer s.mu.Unlock()
 	s.cancelID = attemptID
 	return nil
+}
+
+func (s *phaseExecutorStub) ExecutePhaseWithAttachments(ctx context.Context, attemptID string, bot BotRef, prompt string, _ []PhaseAttachment, emit func(InvestigationEvent)) (PhaseExecutionResult, error) {
+	return s.ExecutePhase(ctx, attemptID, bot, prompt, emit)
 }
 
 func TestAgentPhaseRunnerUsesDerivedValidatorWithoutChangingPersistedBaseBot(t *testing.T) {

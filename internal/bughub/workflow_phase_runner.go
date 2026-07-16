@@ -67,9 +67,26 @@ type PhaseExecutionResult struct {
 	Usage     AgentUsage
 }
 
+// PhaseAttachment is immutable, host-provided evidence for one phase call.
+// Path is an ephemeral local view and must never be persisted in agent output.
+type PhaseAttachment struct {
+	Kind     string
+	MIMEType string
+	Path     string
+	SHA256   string
+	Size     int64
+}
+
 type PhaseAgentExecutor interface {
 	ExecutePhase(context.Context, string, BotRef, string, func(InvestigationEvent)) (PhaseExecutionResult, error)
 	CancelPhase(context.Context, string) error
+}
+
+// PhaseAttachmentExecutor is implemented by target adapters that can make
+// host evidence available to the model, rather than merely mentioning a host
+// filesystem path in the prompt.
+type PhaseAttachmentExecutor interface {
+	ExecutePhaseWithAttachments(context.Context, string, BotRef, string, []PhaseAttachment, func(InvestigationEvent)) (PhaseExecutionResult, error)
 }
 
 type PhaseCompletionFunc func(context.Context, CompleteAttemptCommand) error

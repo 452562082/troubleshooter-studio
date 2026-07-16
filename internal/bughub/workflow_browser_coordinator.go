@@ -194,7 +194,7 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 		return browserCoordinatorFailure(result, code), nil
 	}
 
-	evaluatorPrompt, cleanupEvaluatorEvidence, err := browserEvaluatorPrompt(result.BrowserResult, result.BrowserArtifacts, frozenArtifacts)
+	evaluatorPrompt, evaluatorAttachments, cleanupEvaluatorEvidence, err := browserEvaluatorPrompt(result.BrowserResult, result.BrowserArtifacts, frozenArtifacts)
 	if err != nil {
 		return browserCoordinatorFailure(result, "browser_artifact_invalid"), nil
 	}
@@ -204,7 +204,14 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 			_ = cleanupEvaluatorEvidence()
 		}
 	}()
-	evaluation, err := c.Executor.ExecutePhase(ctx, request.Attempt.ID, request.Bot, evaluatorPrompt, request.Emit)
+	var evaluation PhaseExecutionResult
+	if len(evaluatorAttachments) == 0 {
+		evaluation, err = c.Executor.ExecutePhase(ctx, request.Attempt.ID, request.Bot, evaluatorPrompt, request.Emit)
+	} else if attachmentExecutor, ok := c.Executor.(PhaseAttachmentExecutor); ok {
+		evaluation, err = attachmentExecutor.ExecutePhaseWithAttachments(ctx, request.Attempt.ID, request.Bot, evaluatorPrompt, evaluatorAttachments, request.Emit)
+	} else {
+		err = errors.New("phase executor does not support browser evidence attachments")
+	}
 	cleanupErr := cleanupEvaluatorEvidence()
 	cleanedEvaluatorEvidence = true
 	if cleanupErr != nil {
@@ -215,7 +222,18 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return result, ctxErr
 		}
+		if errors.Is(err, errPhaseAttachmentPathEcho) {
+			return browserCoordinatorFailure(result, "browser_evaluator_result_invalid"), nil
+		}
+		if len(evaluatorAttachments) != 0 {
+			if _, ok := c.Executor.(PhaseAttachmentExecutor); !ok {
+				return browserCoordinatorFailure(result, "browser_evaluator_attachment_unsupported"), nil
+			}
+		}
 		return browserCoordinatorFailure(result, "browser_validator_failed"), nil
+	}
+	if phaseResultContainsAttachmentPath(evaluation.FinalYAML, evaluatorAttachments) {
+		return browserCoordinatorFailure(result, "browser_evaluator_result_invalid"), nil
 	}
 	validation, err := decodeValidationResultStrict([]byte(evaluation.FinalYAML))
 	if err != nil {
@@ -344,6 +362,8 @@ func browserPublicErrorMessage(code string) string {
 		return "验证机器人返回了无效的浏览器计划"
 	case "browser_evaluator_result_invalid":
 		return "验证机器人返回了无效的验证结果"
+	case "browser_evaluator_attachment_unsupported":
+		return "当前验证机器人无法读取本次 Web 截图"
 	case "browser_validator_unavailable", "browser_validator_failed":
 		return "验证机器人执行失败"
 	case "browser_verifier_unavailable", "browser_verifier_failed":
@@ -1019,10 +1039,19 @@ func browserRepairPrompt(original BrowserPlan, failed BrowserVerificationResult)
 		"Sanitized failure report:\n" + safeBoundedBrowserJSON(report, 16<<10) + "\n"
 }
 
-func browserEvaluatorPrompt(result BrowserVerificationResult, artifacts []BrowserArtifactReference, frozen []browserFrozenArtifact) (string, func() error, error) {
+func browserEvaluatorPrompt(result BrowserVerificationResult, artifacts []BrowserArtifactReference, frozen []browserFrozenArtifact) (string, []PhaseAttachment, func() error, error) {
 	screenshotPath, structuredEvidence, cleanup, err := prepareBrowserEvaluatorEvidence(result, frozen)
 	if err != nil {
-		return "", func() error { return nil }, err
+		return "", nil, func() error { return nil }, err
+	}
+	attachments := make([]PhaseAttachment, 0, 1)
+	if screenshotPath != "" {
+		for _, item := range frozen {
+			if item.Kind == "screenshot" && item.ReferencePath == result.FinalScreenshotPath {
+				attachments = append(attachments, PhaseAttachment{Kind: "screenshot", MIMEType: "image/png", Path: screenshotPath, SHA256: item.SHA256, Size: item.Size})
+				break
+			}
+		}
 	}
 	report := map[string]any{
 		"status": result.Status, "final_url": result.FinalURL, "title": result.Title,
@@ -1032,9 +1061,9 @@ func browserEvaluatorPrompt(result BrowserVerificationResult, artifacts []Browse
 		"Sanitized execution report:\n" + safeBoundedBrowserJSON(report, 12<<10) + "\n" +
 		"Bounded accessibility summary:\n" + safeBoundedBrowserJSON(boundedBrowserAccessibility(result.AccessibilitySummary), 16<<10) + "\n" +
 		"Exact host artifact relative references (authoritative; do not invent or alter paths):\n" + safeBoundedBrowserJSON(boundedBrowserArtifacts(artifacts), 24<<10) + "\n" +
-		frozenBrowserEvidencePrompt(screenshotPath, structuredEvidence) +
+		frozenBrowserEvidencePrompt(structuredEvidence, len(attachments) != 0) +
 		validationOutputContract()
-	return prompt, cleanup, nil
+	return prompt, attachments, cleanup, nil
 }
 
 func boundedBrowserAccessibility(nodes []BrowserAccessibilityNode) []BrowserAccessibilityNode {

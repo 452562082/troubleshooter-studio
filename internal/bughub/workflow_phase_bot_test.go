@@ -48,6 +48,24 @@ func TestExecutionBotForPhaseKeepsSelectedBotForInvestigationAndFix(t *testing.T
 	}
 }
 
+func TestExecutionBotForPhaseUsesConfiguredOpenClawAgentForInternalValidator(t *testing.T) {
+	selected := BotRef{
+		Key: "base|openclaw", Target: "openclaw", Path: t.TempDir(), SystemID: "base",
+		AgentID: "base-troubleshooter", Role: "troubleshooter",
+		InternalAgents: []BotInternalAgent{
+			{ID: "base-troubleshooter", Role: "troubleshooter"},
+			{ID: "base-validator", Role: "validator"},
+		},
+	}
+	got, err := ExecutionBotForPhase(PhaseValidation, selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Role != "validator" || got.AgentID != "base-troubleshooter" || got.Path != selected.Path {
+		t.Fatalf("OpenClaw validator execution bot = %+v", got)
+	}
+}
+
 func TestExecutionBotForPhaseRejectsMissingValidator(t *testing.T) {
 	selected := BotRef{Key: "base|codex", Target: "codex", Path: t.TempDir(), SystemID: "base", Role: "troubleshooter"}
 	_, err := ExecutionBotForPhase(PhaseValidation, selected)

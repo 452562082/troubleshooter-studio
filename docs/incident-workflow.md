@@ -135,7 +135,7 @@ sequenceDiagram
         V-->>C: 仅修正失败及后续 locator 一次
         C->>H: 执行修正 plan
     end
-    C->>V: 权威 artifact refs + 安全执行报告
+    C->>V: 权威 artifact refs + 安全执行报告 + 冻结 PNG 附件
     V-->>C: 严格 ValidationResult
 ```
 
@@ -148,7 +148,7 @@ validator 规划 BrowserPlan
   → validator 基于截图/Network/console 给出 ValidationResult
 ```
 
-BrowserPlan 只允许 `goto`、`click`、`fill`、`press`、`select`、`wait_for` 和 `screenshot`，禁止任意 JavaScript、XPath、文件上传、Cookie、Authorization 和凭据输入。HostVerifier 按正式配置校验 origin、DNS/IP 和生产限制；`is_prod=true` 只允许导航、等待和截图。宿主 artifact 在最终 evaluator 调用前冻结，evaluator 只能解释证据，不能改写路径。Web 结论要推进为 `reproduced`、`not_reproduced`、`fixed_verified` 或 `still_reproduces`，必须存在 HostVerifier 确认的最终 PNG 渲染截图。
+BrowserPlan 只允许 `goto`、`click`、`fill`、`press`、`select`、`wait_for` 和 `screenshot`，禁止任意 JavaScript、XPath、文件上传、Cookie、Authorization 和凭据输入。HostVerifier 按正式配置校验 origin、DNS/IP 和生产限制；`is_prod=true` 只允许导航、等待和截图。宿主 artifact 在最终 evaluator 调用前冻结，evaluator 只能解释证据，不能改写路径。最终 PNG 不是只以路径写进 prompt：Codex 通过 `--image` 接收，Claude Code 通过只读目录和 Read 能力接收，OpenClaw 通过工作区内的短期只读 PNG 触发原生 prompt image load；调用结束即清除临时视图。临时绝对路径不得写入 `ValidationResult` 或 Case。Web 结论要推进为 `reproduced`、`not_reproduced`、`fixed_verified` 或 `still_reproduces`，必须存在 HostVerifier 确认的最终 PNG 渲染截图。
 
 检测到 auth origin、password 输入、关键 401/403 或已知登录 route 时，当前 attempt 以 `browser_login_required` 进入 `waiting_evidence`，且不截登录表单。用户点击“打开验证浏览器完成登录”，在 Studio 打开的可见浏览器中自行完成 SSO/MFA；Studio 加密保存 `storageState` 后创建同 Case / cycle、父链明确的新 attempt。账号、密码、Cookie 和 storageState 不进入 Case 输入或 artifact。
 
@@ -226,7 +226,7 @@ pending_validation -> validating -> reproduced -> investigating
 2. Web attempt 先由 validator 输出 BrowserPlan，Studio HostVerifier 在宿主执行；validator 不得直接启动 Playwright、Chromium 或工作区兼容采集脚本。
 3. locator 失败只允许在同 attempt 内修正失败步骤及后续步骤一次；第二次失败保留失败现场截图并进入 `waiting_evidence`。
 4. `browser_login_required` 由 Studio 可见浏览器处理，不向 Case 索要账号、密码或 Cookie；运行时损坏、validator 缺失和策略拒绝属于系统错误，不能伪装成业务 `gaps`。
-5. 最终 evaluator 基于 Studio 冻结的渲染截图、脱敏 Network / console / action trace 输出 `ValidationResult`；不能发明或修改 artifact 引用。
+5. 最终 evaluator 必须实际读取 Studio 作为附件交付的冻结渲染截图，并结合脱敏 Network / console / action trace 输出 `ValidationResult`；不能发明或修改 artifact 引用，也不能把临时附件路径写入结果。
 6. `reproduced` 必须同时提供实际表现、预期表现，以及至少一份属于当前 attempt 的已登记证据；Web 成功结论还必须有最终渲染截图。
 7. 非 Web 场景继续使用附件、HAR、API、`curl`、trace 或日志证据，不强制启动浏览器。
 

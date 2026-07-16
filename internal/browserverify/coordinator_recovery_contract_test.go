@@ -3,6 +3,8 @@ package browserverify
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -56,6 +58,8 @@ func (*durableCoordinatorExecutor) CancelPhase(context.Context, string) error { 
 
 func durableCoordinatorRequest(t *testing.T) bughub.BrowserCoordinatorRequest {
 	t.Helper()
+	stagingDir := t.TempDir()
+	frozenDir := t.TempDir()
 	return bughub.BrowserCoordinatorRequest{
 		Attempt: bughub.PhaseAttempt{
 			ID: "attempt-durable-contract", CaseID: "case-durable-contract", CycleNumber: 1,
@@ -66,9 +70,24 @@ func durableCoordinatorRequest(t *testing.T) bughub.BrowserCoordinatorRequest {
 		Bot:        bughub.BotRef{Key: "shop|codex#validator", SystemID: "shop", Target: "codex", Role: "validator", Env: "test"},
 		BasePrompt: "durable browser recovery contract",
 		Policy:     bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test"}, ApplicationOrigins: []string{"https://app.test"}, StartOrigins: []string{"https://app.test"}},
-		StagingDir: t.TempDir(),
-		FreezeArtifacts: func(context.Context, []bughub.BrowserArtifactReference) error {
-			return nil
+		StagingDir: stagingDir,
+		FreezeArtifacts: func(_ context.Context, references []bughub.BrowserArtifactReference) ([]bughub.BrowserFrozenArtifact, error) {
+			frozen := make([]bughub.BrowserFrozenArtifact, 0, len(references))
+			for _, reference := range references {
+				content, err := os.ReadFile(filepath.Join(stagingDir, filepath.FromSlash(reference.Path)))
+				if err != nil {
+					return nil, err
+				}
+				publishedPath := filepath.Join(frozenDir, reference.SHA256)
+				if err := os.WriteFile(publishedPath, content, 0o600); err != nil {
+					return nil, err
+				}
+				frozen = append(frozen, bughub.BrowserFrozenArtifact{
+					ReferencePath: reference.Path, Kind: reference.Kind, SHA256: reference.SHA256, Size: reference.Size,
+					PathOrReference: publishedPath, Content: append([]byte(nil), content...),
+				})
+			}
+			return frozen, nil
 		},
 	}
 }

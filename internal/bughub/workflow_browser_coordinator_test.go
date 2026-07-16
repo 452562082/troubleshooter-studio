@@ -2,6 +2,7 @@ package bughub
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -123,20 +124,27 @@ func reproducedValidationYAML(path string) string {
 }
 
 func completedBrowserResult(path string) BrowserVerificationResult {
+	screenshot := append([]byte("\x89PNG\r\n\x1a\n"), []byte("coordinator-screenshot")...)
+	network := []byte(`[{"method":"GET","url":"https://app.example.com/users","status":200,"duration_ms":1,"content_type":"application/json","content_length":2,"request_id":"req-1","trace_id":""}]`)
 	return BrowserVerificationResult{
 		Status:              "completed",
 		FinalURL:            "https://app.example.com/users",
 		Title:               "用户管理",
 		FinalScreenshotPath: path,
 		Artifacts: []BrowserArtifactReference{
-			{Kind: "screenshot", Path: path, Environment: "test"},
-			{Kind: "network", Path: "browser/network.json", Environment: "test", RequestID: "req-1"},
+			verifiedBrowserArtifact("screenshot", path, "test", screenshot),
+			func() BrowserArtifactReference {
+				artifact := verifiedBrowserArtifact("network", "browser/network.json", "test", network)
+				artifact.RequestID = "req-1"
+				return artifact
+			}(),
 		},
 	}
 }
 
 func browserCoordinatorRequest(t *testing.T) BrowserCoordinatorRequest {
 	t.Helper()
+	frozenRoot := t.TempDir()
 	return BrowserCoordinatorRequest{
 		Attempt: PhaseAttempt{
 			ID: "attempt-browser", CaseID: "case-browser", CycleNumber: 1,
@@ -152,8 +160,33 @@ func browserCoordinatorRequest(t *testing.T) BrowserCoordinatorRequest {
 			AllowedOrigins: []string{"https://app.example.com"}, ApplicationOrigins: []string{"https://app.example.com"}, StartOrigins: []string{"https://app.example.com"},
 		},
 		StagingDir: t.TempDir(),
-		FreezeArtifacts: func(context.Context, []BrowserArtifactReference) error {
-			return nil
+		FreezeArtifacts: func(_ context.Context, references []BrowserArtifactReference) ([]browserFrozenArtifact, error) {
+			result := make([]browserFrozenArtifact, 0, len(references))
+			for _, reference := range references {
+				var content []byte
+				switch reference.Kind {
+				case "screenshot":
+					content = append([]byte("\x89PNG\r\n\x1a\n"), []byte("coordinator-screenshot")...)
+				case "network":
+					content = []byte(`[{"method":"GET","url":"https://app.example.com/users","status":200,"duration_ms":1,"content_type":"application/json","content_length":2,"request_id":"req-1","trace_id":""}]`)
+				case "console":
+					content = []byte(`{"type":"log","text":"safe","timestamp":"2026-07-16T10:00:00Z"}` + "\n")
+				case "browser_actions":
+					content = []byte(`[{"id":"open-users","action":"click","locator_kind":"role","started_at":"2026-07-16T10:00:00Z","duration_ms":1,"result":"completed","error_code":""}]`)
+				default:
+					return nil, errors.New("unsupported frozen fixture kind")
+				}
+				digest := fmt.Sprintf("%x", sha256.Sum256(content))
+				if reference.SHA256 != digest || reference.Size != int64(len(content)) {
+					return nil, errors.New("frozen fixture does not match reference")
+				}
+				path := filepath.Join(frozenRoot, digest)
+				if err := os.WriteFile(path, content, 0o600); err != nil {
+					return nil, err
+				}
+				result = append(result, browserFrozenArtifact{ReferencePath: reference.Path, Kind: reference.Kind, SHA256: reference.SHA256, Size: reference.Size, PathOrReference: path, Content: append([]byte(nil), content...)})
+			}
+			return result, nil
 		},
 	}
 }
@@ -453,13 +486,14 @@ func TestBrowserCoordinatorExplicitWebWithoutURLNeedsEvidenceWithoutCalls(t *tes
 }
 
 func TestBrowserCoordinatorRejectsSuccessfulEvaluationWithoutHostFinalScreenshot(t *testing.T) {
+	network := []byte(`[{"method":"GET","url":"https://app.example.com/users","status":200,"duration_ms":1,"content_type":"application/json","content_length":2,"request_id":"req-1","trace_id":""}]`)
 	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
 		{FinalYAML: validBrowserPlanYAML()},
 		{FinalYAML: reproducedValidationYAML("browser/claimed.png")},
 	}}
 	verifier := &fakeBrowserVerifier{Results: []BrowserVerificationResult{{
 		Status:    "completed",
-		Artifacts: []BrowserArtifactReference{{Kind: "network", Path: "browser/network.json", Environment: "test"}},
+		Artifacts: []BrowserArtifactReference{verifiedBrowserArtifact("network", "browser/network.json", "test", network)},
 	}}}
 	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), browserCoordinatorRequest(t))
 	if err != nil {

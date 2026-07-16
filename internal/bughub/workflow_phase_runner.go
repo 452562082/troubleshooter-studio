@@ -351,7 +351,7 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incide
 	var result PhaseExecutionResult
 	var runErr error
 	var coordinated *BrowserCoordinatorResult
-	freezeBrowserArtifacts := func(ctx context.Context, references []BrowserArtifactReference) error {
+	freezeBrowserArtifacts := func(ctx context.Context, references []BrowserArtifactReference) ([]browserFrozenArtifact, error) {
 		return r.freezeBrowserArtifacts(ctx, attempt, staging, references)
 	}
 	route := browserRouteJournal{}
@@ -768,10 +768,10 @@ func (r *AgentPhaseRunner) registerArtifacts(ctx context.Context, attempt PhaseA
 	return nil
 }
 
-func (r *AgentPhaseRunner) freezeBrowserArtifacts(ctx context.Context, attempt PhaseAttempt, staging attemptEvidenceStaging, references []BrowserArtifactReference) error {
+func (r *AgentPhaseRunner) freezeBrowserArtifacts(ctx context.Context, attempt PhaseAttempt, staging attemptEvidenceStaging, references []BrowserArtifactReference) ([]browserFrozenArtifact, error) {
 	registered, err := r.store.ListEvidenceArtifacts(ctx, attempt.CaseID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	priorDigests := make([]string, 0, len(registered))
 	if attempt.Phase == PhaseRegression {
@@ -781,25 +781,35 @@ func (r *AgentPhaseRunner) freezeBrowserArtifacts(ctx context.Context, attempt P
 			}
 		}
 	}
+	frozen := make([]browserFrozenArtifact, 0, len(references))
 	for _, reference := range references {
 		if strings.TrimSpace(reference.Path) == "" || strings.TrimSpace(reference.Kind) == "" || strings.TrimSpace(reference.Environment) == "" || len(reference.SHA256) != sha256.Size*2 || reference.SHA256 != strings.ToLower(reference.SHA256) || reference.Size < 0 {
-			return errors.New("verified browser artifact metadata is invalid")
+			return nil, errors.New("verified browser artifact metadata is invalid")
 		}
 		if _, err := hex.DecodeString(reference.SHA256); err != nil {
-			return errors.New("verified browser artifact digest is invalid")
+			return nil, errors.New("verified browser artifact digest is invalid")
 		}
 		captured, err := staging.Capture(reference.Path)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if captured.SHA256 != reference.SHA256 || int64(len(captured.Content)) != reference.Size {
-			return errors.New("verified browser artifact changed before registration")
+			return nil, errors.New("verified browser artifact changed before registration")
 		}
-		if _, err := registerCapturedArtifact(ctx, r.store, ArtifactInput{ArtifactsRoot: r.artifactsRoot, SourcePath: filepath.Join(staging.Path(), reference.Path), CaseID: attempt.CaseID, AttemptID: attempt.ID, Kind: reference.Kind, CapturedAt: captured.CapturedAt, Environment: reference.Environment, Version: reference.Version, RequestID: reference.RequestID, TraceID: reference.TraceID, RedactionStatus: RedactionStatusNotRequired, RejectSHA256: priorDigests, RejectSensitive: true}, captured); err != nil {
-			return err
+		artifact, err := registerCapturedArtifact(ctx, r.store, ArtifactInput{ArtifactsRoot: r.artifactsRoot, SourcePath: filepath.Join(staging.Path(), reference.Path), CaseID: attempt.CaseID, AttemptID: attempt.ID, Kind: reference.Kind, CapturedAt: captured.CapturedAt, Environment: reference.Environment, Version: reference.Version, RequestID: reference.RequestID, TraceID: reference.TraceID, RedactionStatus: RedactionStatusNotRequired, RejectSHA256: priorDigests, RejectSensitive: true}, captured)
+		if err != nil {
+			return nil, err
 		}
+		published, err := captureRegisteredArtifact(artifact.PathOrReference, r.artifactsRoot, attempt.CaseID, reference.SHA256)
+		if err != nil || published.SHA256 != reference.SHA256 || int64(len(published.Content)) != reference.Size {
+			return nil, errors.New("registered browser artifact could not be verified")
+		}
+		frozen = append(frozen, browserFrozenArtifact{
+			ReferencePath: reference.Path, Kind: reference.Kind, SHA256: reference.SHA256, Size: reference.Size,
+			PathOrReference: artifact.PathOrReference, Content: append([]byte(nil), published.Content...),
+		})
 	}
-	return nil
+	return frozen, nil
 }
 
 func (r *AgentPhaseRunner) validateRegressionEvidence(_ context.Context, attempt PhaseAttempt, result PhaseResult) error {

@@ -53,8 +53,22 @@ type BrowserCoordinatorRequest struct {
 	Emit       func(InvestigationEvent)
 	// FreezeArtifacts must synchronously capture and register the exact bytes
 	// bound by HostVerifier before any later agent call can mutate staging.
-	FreezeArtifacts func(context.Context, []BrowserArtifactReference) error
+	FreezeArtifacts func(context.Context, []BrowserArtifactReference) ([]BrowserFrozenArtifact, error)
 }
+
+// BrowserFrozenArtifact is the host-owned immutable copy bound to a verifier
+// reference. It is consumed only inside the browser coordinator and is never
+// projected into workflow results, events, or public HTTP DTOs.
+type BrowserFrozenArtifact struct {
+	ReferencePath   string
+	Kind            string
+	SHA256          string
+	Size            int64
+	PathOrReference string
+	Content         []byte
+}
+
+type browserFrozenArtifact = BrowserFrozenArtifact
 
 type BrowserCoordinatorResult struct {
 	FinalYAML        string
@@ -79,6 +93,7 @@ type browserCoordinatorPlanJournal struct {
 
 func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordinatorRequest) (BrowserCoordinatorResult, error) {
 	var result BrowserCoordinatorResult
+	var frozenArtifacts []browserFrozenArtifact
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
@@ -120,7 +135,7 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 		return browserCoordinatorFailure(result, "browser_validator_plan_invalid"), nil
 	}
 
-	primary, err := c.executeBrowser(ctx, request, plan, browserPrimaryExecution)
+	primary, primaryFrozen, err := c.executeBrowser(ctx, request, plan, browserPrimaryExecution)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return result, ctxErr
@@ -129,6 +144,7 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 	}
 	result.BrowserResult = primary
 	result.BrowserArtifacts = appendBrowserArtifacts(result.BrowserArtifacts, primary.Artifacts)
+	frozenArtifacts = append(frozenArtifacts, primaryFrozen...)
 
 	if primary.Status == "locator_failed" {
 		repaired, repairFound, journalErr := loadBrowserCoordinatorPlan(request, browserRepairExecution)
@@ -158,7 +174,7 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 			}
 		}
 		result.RepairCount = 1
-		repairedResult, executeErr := c.executeBrowser(ctx, request, repaired, browserRepairExecution)
+		repairedResult, repairedFrozen, executeErr := c.executeBrowser(ctx, request, repaired, browserRepairExecution)
 		if executeErr != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return result, ctxErr
@@ -167,6 +183,7 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 		}
 		result.BrowserResult = repairedResult
 		result.BrowserArtifacts = appendBrowserArtifacts(result.BrowserArtifacts, repairedResult.Artifacts)
+		frozenArtifacts = append(frozenArtifacts, repairedFrozen...)
 	}
 
 	if result.BrowserResult.Status != "completed" {
@@ -177,7 +194,22 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 		return browserCoordinatorFailure(result, code), nil
 	}
 
-	evaluation, err := c.Executor.ExecutePhase(ctx, request.Attempt.ID, request.Bot, browserEvaluatorPrompt(result.BrowserResult, result.BrowserArtifacts), request.Emit)
+	evaluatorPrompt, cleanupEvaluatorEvidence, err := browserEvaluatorPrompt(result.BrowserResult, result.BrowserArtifacts, frozenArtifacts)
+	if err != nil {
+		return browserCoordinatorFailure(result, "browser_artifact_invalid"), nil
+	}
+	cleanedEvaluatorEvidence := false
+	defer func() {
+		if !cleanedEvaluatorEvidence {
+			_ = cleanupEvaluatorEvidence()
+		}
+	}()
+	evaluation, err := c.Executor.ExecutePhase(ctx, request.Attempt.ID, request.Bot, evaluatorPrompt, request.Emit)
+	cleanupErr := cleanupEvaluatorEvidence()
+	cleanedEvaluatorEvidence = true
+	if cleanupErr != nil {
+		return browserCoordinatorFailure(result, "browser_artifact_invalid"), nil
+	}
 	addAgentUsage(&result.Usage, evaluation.Usage)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -208,14 +240,14 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 	return result, nil
 }
 
-func (c BrowserCoordinator) executeBrowser(ctx context.Context, request BrowserCoordinatorRequest, plan BrowserPlan, execution string) (BrowserVerificationResult, error) {
+func (c BrowserCoordinator) executeBrowser(ctx context.Context, request BrowserCoordinatorRequest, plan BrowserPlan, execution string) (BrowserVerificationResult, []browserFrozenArtifact, error) {
 	stagingDir, err := browserExecutionStagingDir(request.StagingDir, execution)
 	if err != nil {
-		return BrowserVerificationResult{}, err
+		return BrowserVerificationResult{}, nil, err
 	}
 	environment, version, err := browserAttemptEnvironmentVersion(request.Attempt, request.Bug, request.Bot)
 	if err != nil {
-		return BrowserVerificationResult{}, err
+		return BrowserVerificationResult{}, nil, err
 	}
 	browserRequest := BrowserVerificationRequest{
 		CaseID: request.Attempt.CaseID, CycleNumber: request.Attempt.CycleNumber, AttemptID: request.Attempt.ID,
@@ -229,27 +261,31 @@ func (c BrowserCoordinator) executeBrowser(ctx context.Context, request BrowserC
 	}
 	result, err := c.Verifier.Execute(ctx, browserRequest)
 	if err != nil {
-		return BrowserVerificationResult{}, err
+		return BrowserVerificationResult{}, nil, err
 	}
 	rebased, err := rebaseBrowserResult(result, execution)
 	if err != nil {
-		return BrowserVerificationResult{}, err
+		return BrowserVerificationResult{}, nil, err
 	}
 	applicationURL, applicationOrigin, err := canonicalBrowserURL(plan.StartURL)
 	if err != nil {
-		return BrowserVerificationResult{}, err
+		return BrowserVerificationResult{}, nil, err
 	}
 	// The application/session origin is derived from the durable validated plan,
 	// never from a worker redirect or the mutable Bug URL used by a later retry.
 	rebased.ApplicationURL = applicationURL
 	rebased.ApplicationOrigin = applicationOrigin
 	if err := validateBrowserArtifactBinding(rebased.Artifacts, environment, version); err != nil {
-		return BrowserVerificationResult{}, err
+		return BrowserVerificationResult{}, nil, err
 	}
-	if err := request.FreezeArtifacts(ctx, append([]BrowserArtifactReference(nil), rebased.Artifacts...)); err != nil {
-		return BrowserVerificationResult{}, fmt.Errorf("browser_artifact_invalid: freeze verified browser artifacts: %w", err)
+	frozen, err := request.FreezeArtifacts(ctx, append([]BrowserArtifactReference(nil), rebased.Artifacts...))
+	if err != nil {
+		return BrowserVerificationResult{}, nil, fmt.Errorf("browser_artifact_invalid: freeze verified browser artifacts: %w", err)
 	}
-	return rebased, nil
+	if err := validateFrozenBrowserArtifacts(rebased.Artifacts, frozen); err != nil {
+		return BrowserVerificationResult{}, nil, fmt.Errorf("browser_artifact_invalid: validate frozen browser artifacts: %w", err)
+	}
+	return rebased, frozen, nil
 }
 
 func browserAssistedAttempt(bug Bug, attempt PhaseAttempt) bool {
@@ -983,16 +1019,22 @@ func browserRepairPrompt(original BrowserPlan, failed BrowserVerificationResult)
 		"Sanitized failure report:\n" + safeBoundedBrowserJSON(report, 16<<10) + "\n"
 }
 
-func browserEvaluatorPrompt(result BrowserVerificationResult, artifacts []BrowserArtifactReference) string {
+func browserEvaluatorPrompt(result BrowserVerificationResult, artifacts []BrowserArtifactReference, frozen []browserFrozenArtifact) (string, func() error, error) {
+	screenshotPath, structuredEvidence, cleanup, err := prepareBrowserEvaluatorEvidence(result, frozen)
+	if err != nil {
+		return "", func() error { return nil }, err
+	}
 	report := map[string]any{
 		"status": result.Status, "final_url": result.FinalURL, "title": result.Title,
 		"final_screenshot_path": result.FinalScreenshotPath,
 	}
-	return "Evaluate the completed browser verification. Output only the strict ValidationResult YAML contract below.\n" +
+	prompt := "Evaluate the completed browser verification. Output only the strict ValidationResult YAML contract below.\n" +
 		"Sanitized execution report:\n" + safeBoundedBrowserJSON(report, 12<<10) + "\n" +
 		"Bounded accessibility summary:\n" + safeBoundedBrowserJSON(boundedBrowserAccessibility(result.AccessibilitySummary), 16<<10) + "\n" +
 		"Exact host artifact relative references (authoritative; do not invent or alter paths):\n" + safeBoundedBrowserJSON(boundedBrowserArtifacts(artifacts), 24<<10) + "\n" +
+		frozenBrowserEvidencePrompt(screenshotPath, structuredEvidence) +
 		validationOutputContract()
+	return prompt, cleanup, nil
 }
 
 func boundedBrowserAccessibility(nodes []BrowserAccessibilityNode) []BrowserAccessibilityNode {

@@ -422,7 +422,7 @@ func TestAgentPhaseRunnerCoordinatesBrowserAndRegistersCurrentAttemptArtifacts(t
 		{FinalYAML: reproducedValidationYAML("browser/final.png"), Usage: AgentUsage{InputTokens: 7, OutputTokens: 3}},
 	}}
 	screenshot := append([]byte("\x89PNG\r\n\x1a\n"), []byte("rendered")...)
-	network := []byte(`{"status":200,"request_id":"req-browser"}`)
+	network := []byte(`[{"method":"GET","url":"https://app.example.com/users","status":200,"duration_ms":12,"content_type":"application/json","content_length":42,"request_id":"req-browser","trace_id":""}]`)
 	verifier := browserVerifierFunc(func(_ context.Context, request BrowserVerificationRequest) (BrowserVerificationResult, error) {
 		browserDir := filepath.Join(request.StagingDir, "browser")
 		if err := os.MkdirAll(browserDir, 0o700); err != nil {
@@ -532,28 +532,81 @@ func TestAgentPhaseRunnerFreezesBrowserArtifactBeforeEvaluatorMutation(t *testin
 	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
 	original := append([]byte("\x89PNG\r\n\x1a\n"), []byte("original")...)
 	replacement := append([]byte("\x89PNG\r\n\x1a\n"), []byte("tampered")...)
-	var stagedPath string
+	network := []byte(`[{"method":"GET","url":"https://app.example.com/users","status":200,"duration_ms":12,"content_type":"application/json","content_length":42,"request_id":"req-frozen-original","trace_id":"trace-1"}]`)
+	console := []byte(`{"type":"log","text":"console-frozen-original","timestamp":"2026-07-16T10:00:00Z"}` + "\n")
+	actions := []byte(`[{"id":"open-users","action":"click","locator_kind":"role","started_at":"2026-07-16T10:00:00Z","duration_ms":21,"result":"completed","error_code":""}]`)
+	var stagedPaths []string
+	var frozenScreenshotPath string
+	var evaluatorFailure error
 	var agentCalls int
-	executor := phaseExecutorFunc(func(context.Context, string, BotRef, string, func(InvestigationEvent)) (PhaseExecutionResult, error) {
+	executor := phaseExecutorFunc(func(_ context.Context, _ string, _ BotRef, prompt string, _ func(InvestigationEvent)) (PhaseExecutionResult, error) {
 		agentCalls++
 		if agentCalls == 1 {
 			return PhaseExecutionResult{FinalYAML: validBrowserPlanYAML()}, nil
 		}
-		if err := os.WriteFile(stagedPath, replacement, 0o600); err != nil {
+		for _, path := range stagedPaths {
+			if err := os.WriteFile(path, []byte(`{"tampered":true}`), 0o600); err != nil {
+				evaluatorFailure = err
+				return PhaseExecutionResult{}, err
+			}
+		}
+		if err := os.WriteFile(stagedPaths[0], replacement, 0o600); err != nil {
+			evaluatorFailure = err
 			return PhaseExecutionResult{}, err
+		}
+		const screenshotPrefix = "Frozen final screenshot local path (read-only, original bytes): "
+		start := strings.Index(prompt, screenshotPrefix)
+		if start < 0 {
+			evaluatorFailure = errors.New("evaluator prompt does not contain a frozen screenshot path")
+			return PhaseExecutionResult{}, evaluatorFailure
+		}
+		frozenScreenshotPath = strings.TrimSpace(strings.SplitN(prompt[start+len(screenshotPrefix):], "\n", 2)[0])
+		if !filepath.IsAbs(frozenScreenshotPath) || frozenScreenshotPath == stagedPaths[0] {
+			evaluatorFailure = fmt.Errorf("evaluator screenshot path is not a frozen absolute path: %q", frozenScreenshotPath)
+			return PhaseExecutionResult{}, evaluatorFailure
+		}
+		content, err := os.ReadFile(frozenScreenshotPath)
+		if err != nil || !bytes.Equal(content, original) {
+			evaluatorFailure = fmt.Errorf("evaluator screenshot=%q err=%v", content, err)
+			return PhaseExecutionResult{}, evaluatorFailure
+		}
+		viewInfo, err := os.Lstat(frozenScreenshotPath)
+		if err != nil || viewInfo.Mode().Perm() != 0o400 {
+			evaluatorFailure = fmt.Errorf("evaluator screenshot mode=%v err=%v, want 400", viewInfo, err)
+			return PhaseExecutionResult{}, evaluatorFailure
+		}
+		if err := os.WriteFile(frozenScreenshotPath, replacement, 0o600); err == nil {
+			evaluatorFailure = errors.New("evaluator could write the read-only screenshot view")
+			return PhaseExecutionResult{}, evaluatorFailure
+		}
+		for _, feature := range []string{"req-frozen-original", "console-frozen-original", `"id":"open-users"`} {
+			if !strings.Contains(prompt, feature) {
+				evaluatorFailure = fmt.Errorf("evaluator prompt is missing frozen structured evidence %q", feature)
+				return PhaseExecutionResult{}, evaluatorFailure
+			}
 		}
 		return PhaseExecutionResult{FinalYAML: reproducedValidationYAML("browser/final.png")}, nil
 	})
 	verifier := browserVerifierFunc(func(_ context.Context, request BrowserVerificationRequest) (BrowserVerificationResult, error) {
-		stagedPath = filepath.Join(request.StagingDir, "browser", "final.png")
-		if err := os.MkdirAll(filepath.Dir(stagedPath), 0o700); err != nil {
+		browserDir := filepath.Join(request.StagingDir, "browser")
+		if err := os.MkdirAll(browserDir, 0o700); err != nil {
 			return BrowserVerificationResult{}, err
 		}
-		if err := os.WriteFile(stagedPath, original, 0o600); err != nil {
-			return BrowserVerificationResult{}, err
+		fixtures := []struct {
+			kind    string
+			name    string
+			content []byte
+		}{{"screenshot", "final.png", original}, {"network", "network.json", network}, {"console", "console.jsonl", console}, {"browser_actions", "browser-actions.json", actions}}
+		artifacts := make([]BrowserArtifactReference, 0, len(fixtures))
+		for _, fixture := range fixtures {
+			path := filepath.Join(browserDir, fixture.name)
+			if err := os.WriteFile(path, fixture.content, 0o600); err != nil {
+				return BrowserVerificationResult{}, err
+			}
+			stagedPaths = append(stagedPaths, path)
+			artifacts = append(artifacts, verifiedBrowserArtifact(fixture.kind, "browser/"+fixture.name, "test", fixture.content))
 		}
-		artifact := verifiedBrowserArtifact("screenshot", "browser/final.png", "test", original)
-		return BrowserVerificationResult{Status: "completed", FinalScreenshotPath: artifact.Path, Artifacts: []BrowserArtifactReference{artifact}}, nil
+		return BrowserVerificationResult{Status: "completed", FinalScreenshotPath: artifacts[0].Path, Artifacts: artifacts}, nil
 	})
 	completed := make(chan CompleteAttemptCommand, 1)
 	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(_ context.Context, command CompleteAttemptCommand) error { completed <- command; return nil })
@@ -565,10 +618,23 @@ func TestAgentPhaseRunnerFreezesBrowserArtifactBeforeEvaluatorMutation(t *testin
 	}
 	command := <-completed
 	artifacts, err := store.ListEvidenceArtifacts(context.Background(), incident.ID)
-	if err != nil || command.ErrorCode != "" || len(artifacts) != 1 {
-		t.Fatalf("artifacts=%+v command=%+v err=%v", artifacts, command, err)
+	if err != nil || command.ErrorCode != "" || len(artifacts) != 4 {
+		t.Fatalf("artifacts=%+v command=%+v err=%v evaluator=%v", artifacts, command, err, evaluatorFailure)
 	}
-	published, err := os.ReadFile(artifacts[0].PathOrReference)
+	if frozenScreenshotPath == "" || bytes.Contains(command.OutputJSON, []byte(frozenScreenshotPath)) {
+		t.Fatalf("frozen evaluator path leaked into final output: path=%q output=%s", frozenScreenshotPath, command.OutputJSON)
+	}
+	if _, err := os.Lstat(frozenScreenshotPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("evaluator screenshot view remains after evaluator return: %v", err)
+	}
+	var screenshotArtifact EvidenceArtifact
+	for _, artifact := range artifacts {
+		if artifact.Kind == "screenshot" {
+			screenshotArtifact = artifact
+			break
+		}
+	}
+	published, err := os.ReadFile(screenshotArtifact.PathOrReference)
 	if err != nil || !bytes.Equal(published, original) {
 		t.Fatalf("published=%q want original=%q err=%v", published, original, err)
 	}

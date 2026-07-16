@@ -196,8 +196,16 @@ func TestSaveIncidentArtifactWritesOnlyVerifiedRegisteredBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved != destination || string(content) != "safe text" {
-		t.Fatalf("saved=%q content=%q", saved, content)
+	if savedBool, ok := any(saved).(bool); !ok || !savedBool || string(content) != "safe text" {
+		t.Fatalf("saved=%v (%T) content=%q", saved, saved, content)
+	}
+	app.workflowSaveArtifact = func(_, _ string, _ context.Context) (string, error) { return "", nil }
+	cancelled, err := app.SaveIncidentArtifact("case-a", artifact.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelledBool, ok := any(cancelled).(bool); !ok || cancelledBool {
+		t.Fatalf("cancelled=%v (%T)", cancelled, cancelled)
 	}
 	if _, err := app.SaveIncidentArtifact("case-other", artifact.ID); err == nil {
 		t.Fatal("cross-case save succeeded")

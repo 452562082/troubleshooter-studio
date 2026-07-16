@@ -266,19 +266,19 @@ func (a *App) GetIncidentArtifactPreview(caseID, artifactID string) (IncidentArt
 	}, nil
 }
 
-func (a *App) SaveIncidentArtifact(caseID, artifactID string) (string, error) {
+func (a *App) SaveIncidentArtifact(caseID, artifactID string) (bool, error) {
 	caseID = strings.TrimSpace(caseID)
 	artifactID = strings.TrimSpace(artifactID)
 	if caseID == "" || artifactID == "" {
-		return "", errors.New("case_id and artifact_id are required")
+		return false, errors.New("case_id and artifact_id are required")
 	}
 	store, _, err := a.workflowComponents()
 	if err != nil {
-		return "", err
+		return false, err
 	}
 	content, err := bughub.ReadEvidenceArtifactFromRoot(a.workflowCommandContext(), store, filepath.Join(a.workflowRoot, "artifacts"), caseID, artifactID)
 	if err != nil {
-		return "", err
+		return false, err
 	}
 	save := a.workflowSaveArtifact
 	if save == nil {
@@ -286,15 +286,15 @@ func (a *App) SaveIncidentArtifact(caseID, artifactID string) (string, error) {
 	}
 	destination, err := save("保存故障证据", incidentArtifactDefaultFilename(content.Artifact.Kind), a.getRuntimeContext())
 	if err != nil {
-		return "", errors.New("save artifact dialog failed")
+		return false, errors.New("save artifact dialog failed")
 	}
 	if destination == "" {
-		return "", nil
+		return false, nil
 	}
 	if err := os.WriteFile(destination, content.Content, 0o600); err != nil {
-		return "", errors.New("write saved artifact failed")
+		return false, errors.New("write saved artifact failed")
 	}
-	return destination, nil
+	return true, nil
 }
 
 func incidentArtifactDefaultFilename(kind string) string {

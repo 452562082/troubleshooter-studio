@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, useId, watch } from 'vue'
-import { getIncidentArtifactPreview, saveIncidentArtifact, type EvidenceArtifact, type IncidentCaseDetail, type PhaseAttempt } from '../lib/bridge/bugWorkflow'
+import { getIncidentArtifactPreview, saveIncidentArtifact, type IncidentArtifact, type IncidentCaseDetail, type PhaseAttempt } from '../lib/bridge/bugWorkflow'
 import BugStageAttemptOutput from './BugStageAttemptOutput.vue'
 
 const props = defineProps<{ detail: IncidentCaseDetail }>()
@@ -63,7 +63,7 @@ async function loadScreenshotPreviews(): Promise<void> {
   }))
 }
 
-async function openPreview(artifact: EvidenceArtifact, event: MouseEvent) {
+async function openPreview(artifact: IncidentArtifact, event: MouseEvent) {
   if (!previewURLs.value[artifact.id]) return
   previewTrigger = event.currentTarget instanceof HTMLButtonElement ? event.currentTarget : null
   selectedPreviewID.value = artifact.id
@@ -103,7 +103,7 @@ function finishPreviewClose() {
   })
 }
 
-async function saveArtifact(artifact: EvidenceArtifact): Promise<void> {
+async function saveArtifact(artifact: IncidentArtifact): Promise<void> {
   saveStates.value = { ...saveStates.value, [artifact.id]: 'saving' }
   try {
     const saved = await saveIncidentArtifact(props.detail.case.id, artifact.id)

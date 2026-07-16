@@ -69,7 +69,7 @@ describe('incident Case controller', () => {
     const authoritative = detail(8)
     authoritative.case.current_attempt_id = 'attempt-2'
     authoritative.attempts = [{ ...blocked.attempts[0], id: 'attempt-2', status: 'running', error_code: '' }]
-    authoritative.artifacts = [{ id: 'evidence-v8', case_id: 'case-1', attempt_id: 'attempt-2', kind: 'log', path_or_reference: 'opaque', sha256: 'a', captured_at: '', environment: 'test', version: '8', request_id: '', trace_id: '', redaction_status: 'redacted' }]
+    authoritative.artifacts = [{ id: 'evidence-v8', case_id: 'case-1', attempt_id: 'attempt-2', kind: 'log', sha256: 'a', size: 1, captured_at: '', environment: 'test', version: '8', request_id: '', trace_id: '' }]
 
     expect(controller.applyAuthoritativeDetail(authoritative)).toBe(true)
 
@@ -80,7 +80,7 @@ describe('incident Case controller', () => {
   it('rejects older and unselected authoritative detail', () => {
     const controller = createIncidentCaseController()
     const current = detail(8)
-    current.artifacts = [{ id: 'current', case_id: 'case-1', attempt_id: 'attempt-1', kind: 'log', path_or_reference: 'opaque', sha256: 'a', captured_at: '', environment: 'test', version: '8', request_id: '', trace_id: '', redaction_status: 'redacted' }]
+    current.artifacts = [{ id: 'current', case_id: 'case-1', attempt_id: 'attempt-1', kind: 'log', sha256: 'a', size: 1, captured_at: '', environment: 'test', version: '8', request_id: '', trace_id: '' }]
     controller.applySnapshot(current)
 
     expect(controller.applyAuthoritativeDetail(detail(7))).toBe(false)
@@ -124,7 +124,7 @@ describe('incident Case controller', () => {
     blocked.case.status = 'waiting_evidence'
     const full = detail(8)
     full.case.current_attempt_id = 'attempt-2'
-    full.artifacts = [{ id: 'fresh', case_id: 'case-1', attempt_id: 'attempt-2', kind: 'log', path_or_reference: 'opaque', sha256: 'a', captured_at: '', environment: 'test', version: '8', request_id: '', trace_id: '', redaction_status: 'redacted' }]
+    full.artifacts = [{ id: 'fresh', case_id: 'case-1', attempt_id: 'attempt-2', kind: 'log', sha256: 'a', size: 1, captured_at: '', environment: 'test', version: '8', request_id: '', trace_id: '' }]
     const controller = createIncidentCaseController({ getCase: vi.fn().mockResolvedValue(full) })
     controller.applySnapshot(blocked)
     controller.applyCase({ ...blocked.case, status: 'validating', current_attempt_id: 'attempt-2', version: 8 })
@@ -418,7 +418,7 @@ describe('incident Case controller', () => {
     controller.applySnapshot(detail(5))
     const refreshing = controller.refreshDetail('case-1')
     const newest = detail(7)
-    newest.artifacts = [{ id: 'new', case_id: 'case-1', attempt_id: 'attempt-1', kind: 'log', path_or_reference: 'new', sha256: 'a', captured_at: '', environment: 'test', version: '7', request_id: '', trace_id: '', redaction_status: 'redacted' }]
+    newest.artifacts = [{ id: 'new', case_id: 'case-1', attempt_id: 'attempt-1', kind: 'log', sha256: 'a', size: 1, captured_at: '', environment: 'test', version: '7', request_id: '', trace_id: '' }]
     controller.acceptEvent({ kind: 'snapshot', case: newest.case, snapshot: newest })
     controller.acceptEvent(event(7))
     resolveRefresh(detail(6))

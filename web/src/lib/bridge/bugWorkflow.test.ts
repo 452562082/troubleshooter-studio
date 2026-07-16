@@ -54,6 +54,29 @@ describe('incident workflow bridge', () => {
     expect(detail.events).toEqual([])
   })
 
+  it('projects artifacts onto the path-free public contract', async () => {
+    const privatePath = '/Users/alice/.troubleshooter/artifacts/case-1/private.png'
+    const get = vi.fn().mockResolvedValue({
+      case: { id: 'case-1', status: 'validating', version: 7 },
+      attempts: [], approvals: [], code_changes: [], deployment_observations: [], events: [],
+      artifacts: [{
+        id: 'shot-1', case_id: 'case-1', attempt_id: 'attempt-1', kind: 'screenshot',
+        path_or_reference: privatePath, sha256: 'abc', size: 8, captured_at: '2026-07-16T10:00:00Z',
+        environment: 'test', version: 'build-1', request_id: 'req-1', trace_id: 'trace-1', redaction_status: 'redacted',
+      }],
+    })
+    ;(window as any).go = { main: { App: { GetIncidentCase: get } } }
+
+    const detail = await getIncidentCase('case-1')
+
+    expect(detail.artifacts).toEqual([{
+      id: 'shot-1', case_id: 'case-1', attempt_id: 'attempt-1', kind: 'screenshot', sha256: 'abc', size: 8,
+      captured_at: '2026-07-16T10:00:00Z', environment: 'test', version: 'build-1', request_id: 'req-1', trace_id: 'trace-1',
+    }])
+    expect(JSON.stringify(detail)).not.toContain(privatePath)
+    expect(JSON.stringify(detail)).not.toContain('path_or_reference')
+  })
+
   it('returns an empty list in browser preview', async () => {
     await expect(listIncidentCases()).resolves.toEqual([])
     await expect(listPendingIncidentWorkflowReminders()).resolves.toEqual([])
@@ -109,13 +132,15 @@ describe('incident workflow bridge', () => {
 
   it('returns only strict PNG preview data and hides save destinations behind a boolean', async () => {
     const preview = vi.fn().mockResolvedValue({ artifact_id: 'shot-1', mime_type: 'image/png', base64_data: 'iVBORw0KGgo=', size: 8 })
-    const save = vi.fn().mockResolvedValue('/Users/alice/Desktop/private-screenshot.png')
+    const save = vi.fn().mockResolvedValue(true)
     ;(window as any).go = { main: { App: { GetIncidentArtifactPreview: preview, SaveIncidentArtifact: save } } }
 
     await expect(getIncidentArtifactPreview('case-1', 'shot-1')).resolves.toEqual({ artifact_id: 'shot-1', mime_type: 'image/png', base64_data: 'iVBORw0KGgo=', size: 8 })
     await expect(saveIncidentArtifact('case-1', 'shot-1')).resolves.toBe(true)
-    save.mockResolvedValueOnce('')
+    save.mockResolvedValueOnce(false)
     await expect(saveIncidentArtifact('case-1', 'shot-1')).resolves.toBe(false)
+    save.mockResolvedValueOnce('/Users/alice/Desktop/private-screenshot.png')
+    await expect(saveIncidentArtifact('case-1', 'shot-1')).rejects.toThrow(/保存故障证据/)
     expect(preview).toHaveBeenCalledWith('case-1', 'shot-1')
     expect(save).toHaveBeenCalledWith('case-1', 'shot-1')
   })

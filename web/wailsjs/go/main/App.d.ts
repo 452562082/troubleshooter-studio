@@ -202,7 +202,7 @@ export function SaveBugPlatform(arg1:main.BugPlatformInput):Promise<bughub.Platf
 
 export function SaveBugSelectedBot(arg1:main.BugSelectedBotInput):Promise<bughub.Bug>;
 
-export function SaveIncidentArtifact(arg1:string,arg2:string):Promise<string>;
+export function SaveIncidentArtifact(arg1:string,arg2:string):Promise<boolean>;
 
 export function SaveInfraCred(arg1:string,arg2:string):Promise<void>;
 

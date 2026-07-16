@@ -32,12 +32,26 @@ type incidentWorkflowRuntime struct {
 type IncidentCaseDetail struct {
 	Case                   bughub.IncidentCase            `json:"case"`
 	Attempts               []IncidentPhaseAttempt         `json:"attempts"`
-	Artifacts              []bughub.EvidenceArtifact      `json:"artifacts"`
+	Artifacts              []IncidentArtifact             `json:"artifacts"`
 	Approvals              []IncidentApproval             `json:"approvals"`
 	CodeChanges            []IncidentCodeChange           `json:"code_changes"`
 	DeploymentObservations []bughub.DeploymentObservation `json:"deployment_observations"`
 	Events                 []IncidentTransitionEvent      `json:"events"`
 	DeploymentVerification IncidentDeploymentVerification `json:"deployment_verification"`
+}
+
+type IncidentArtifact struct {
+	ID          string    `json:"id"`
+	CaseID      string    `json:"case_id"`
+	AttemptID   string    `json:"attempt_id"`
+	Kind        string    `json:"kind"`
+	SHA256      string    `json:"sha256"`
+	Size        int64     `json:"size"`
+	CapturedAt  time.Time `json:"captured_at"`
+	Environment string    `json:"environment"`
+	Version     string    `json:"version"`
+	RequestID   string    `json:"request_id"`
+	TraceID     string    `json:"trace_id"`
 }
 
 type IncidentDeploymentVerification struct {
@@ -504,7 +518,11 @@ func (a *App) GetIncidentCase(caseID string) (IncidentCaseDetail, error) {
 	if detail.Attempts, err = incidentPhaseAttempts(attempts); err != nil {
 		return IncidentCaseDetail{}, err
 	}
-	if detail.Artifacts, err = store.ListEvidenceArtifacts(ctx, caseID); err != nil {
+	artifacts, err := store.ListEvidenceArtifacts(ctx, caseID)
+	if err != nil {
+		return IncidentCaseDetail{}, err
+	}
+	if detail.Artifacts, err = incidentArtifacts(ctx, store, filepath.Join(a.workflowRoot, "artifacts"), caseID, artifacts); err != nil {
 		return IncidentCaseDetail{}, err
 	}
 	approvals, err := store.ListApprovals(ctx, caseID)
@@ -541,7 +559,7 @@ func normalizeIncidentCaseDetail(detail *IncidentCaseDetail) {
 		detail.Attempts = []IncidentPhaseAttempt{}
 	}
 	if detail.Artifacts == nil {
-		detail.Artifacts = []bughub.EvidenceArtifact{}
+		detail.Artifacts = []IncidentArtifact{}
 	}
 	if detail.Approvals == nil {
 		detail.Approvals = []IncidentApproval{}
@@ -573,6 +591,53 @@ func incidentJSONValue(raw json.RawMessage) (any, error) {
 	return value, nil
 }
 
+func incidentArtifacts(ctx context.Context, store *bughub.CaseStore, artifactsRoot, caseID string, items []bughub.EvidenceArtifact) ([]IncidentArtifact, error) {
+	out := make([]IncidentArtifact, 0, len(items))
+	for _, item := range items {
+		verified, err := bughub.ReadEvidenceArtifactFromRoot(ctx, store, artifactsRoot, caseID, item.ID)
+		if err != nil {
+			return nil, err
+		}
+		artifact := verified.Artifact
+		out = append(out, IncidentArtifact{
+			ID: artifact.ID, CaseID: artifact.CaseID, AttemptID: artifact.AttemptID,
+			Kind: artifact.Kind, SHA256: artifact.SHA256, Size: int64(len(verified.Content)),
+			CapturedAt: artifact.CapturedAt, Environment: artifact.Environment, Version: artifact.Version,
+			RequestID: artifact.RequestID, TraceID: artifact.TraceID,
+		})
+	}
+	return out, nil
+}
+
+func incidentPublicJSONValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, nested := range typed {
+			if key == "application_url" || key == "path_or_reference" {
+				continue
+			}
+			out[key] = incidentPublicJSONValue(nested)
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for index, nested := range typed {
+			out[index] = incidentPublicJSONValue(nested)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func incidentPublicJSONObject(value map[string]any) map[string]any {
+	if value == nil {
+		return nil
+	}
+	return incidentPublicJSONValue(value).(map[string]any)
+}
+
 func incidentPhaseAttempts(items []bughub.PhaseAttempt) ([]IncidentPhaseAttempt, error) {
 	out := make([]IncidentPhaseAttempt, 0, len(items))
 	for _, item := range items {
@@ -584,7 +649,7 @@ func incidentPhaseAttempts(items []bughub.PhaseAttempt) ([]IncidentPhaseAttempt,
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, IncidentPhaseAttempt{ID: item.ID, CaseID: item.CaseID, CycleNumber: item.CycleNumber, Phase: item.Phase, Mode: item.Mode, Status: item.Status, AgentTarget: item.AgentTarget, BotKey: item.BotKey, InputJSON: input, OutputJSON: output, ParentAttemptID: item.ParentAttemptID, StartedAt: item.StartedAt, FinishedAt: item.FinishedAt, ErrorCode: item.ErrorCode, ErrorMessage: item.ErrorMessage, Usage: item.Usage})
+		out = append(out, IncidentPhaseAttempt{ID: item.ID, CaseID: item.CaseID, CycleNumber: item.CycleNumber, Phase: item.Phase, Mode: item.Mode, Status: item.Status, AgentTarget: item.AgentTarget, BotKey: item.BotKey, InputJSON: input, OutputJSON: incidentPublicJSONObject(output), ParentAttemptID: item.ParentAttemptID, StartedAt: item.StartedAt, FinishedAt: item.FinishedAt, ErrorCode: item.ErrorCode, ErrorMessage: item.ErrorMessage, Usage: item.Usage})
 	}
 	return out, nil
 }
@@ -620,7 +685,7 @@ func incidentTransitionEvents(items []bughub.TransitionEvent) ([]IncidentTransit
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, IncidentTransitionEvent{ID: item.ID, CaseID: item.CaseID, FromStatus: item.FromStatus, ToStatus: item.ToStatus, EventType: item.EventType, ActorType: item.ActorType, ActorID: item.ActorID, IdempotencyKey: item.IdempotencyKey, PayloadJSON: payload, CreatedAt: item.CreatedAt})
+		out = append(out, IncidentTransitionEvent{ID: item.ID, CaseID: item.CaseID, FromStatus: item.FromStatus, ToStatus: item.ToStatus, EventType: item.EventType, ActorType: item.ActorType, ActorID: item.ActorID, IdempotencyKey: item.IdempotencyKey, PayloadJSON: incidentPublicJSONObject(payload), CreatedAt: item.CreatedAt})
 	}
 	return out, nil
 }
@@ -1044,6 +1109,8 @@ func (a *App) emitIncidentPhaseEvent(caseID string, event bughub.InvestigationEv
 		return
 	}
 	cloned := event
+	cloned.Raw = incidentPublicJSONValue(event.Raw)
+	cloned.Meta = incidentPublicJSONObject(event.Meta)
 	incident := detail.Case
 	a.emitWorkflowEvent(IncidentCaseEventPayload{Kind: "snapshot", Case: &incident, Snapshot: &detail, PhaseEvent: &cloned})
 }

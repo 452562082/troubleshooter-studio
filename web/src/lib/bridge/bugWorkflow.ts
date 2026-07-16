@@ -51,7 +51,7 @@ export interface PhaseAttempt {
   usage: { input_tokens?: number; output_tokens?: number; duration?: number }
 }
 
-export interface EvidenceArtifact { id: string; case_id: string; attempt_id: string; kind: string; path_or_reference: string; sha256: string; captured_at: string; environment: string; version: string; request_id: string; trace_id: string; redaction_status: string }
+export interface IncidentArtifact { id: string; case_id: string; attempt_id: string; kind: string; sha256: string; size: number; captured_at: string; environment: string; version: string; request_id: string; trace_id: string }
 export interface Approval { id: string; case_id: string; kind: string; actor: string; approved_at: string; case_version: number; scope_json: Record<string, unknown>; fix_commits: Record<string, string>; target_branches: Record<string, string> }
 export interface CodeChange { id: string; case_id: string; attempt_id: string; repo: string; base_branch: string; fix_branch: string; fix_commit: string; test_evidence: unknown; target_environment_branch: string; merge_base_head: string; merge_commit: string; push_remote: string; push_status: string }
 export interface DeploymentObservation { id: string; case_id: string; environment: string; expected_commits: Record<string, string>; observed_version: string; observed_images: Record<string, string>; observed_commits: Record<string, string>; verified_commit_ancestors?: Record<string, string>; observed_at?: string; diagnostic_code?: string; diagnostic_message?: string; verification_source: string; result: string }
@@ -76,7 +76,7 @@ export interface WorkflowReminder { case_id: string; bug_id: string; environment
 export interface IncidentCaseDetail {
   case: IncidentCase
   attempts: PhaseAttempt[]
-  artifacts: EvidenceArtifact[]
+  artifacts: IncidentArtifact[]
   approvals: Approval[]
   code_changes: CodeChange[]
   deployment_observations: DeploymentObservation[]
@@ -257,7 +257,9 @@ export async function getIncidentArtifactPreview(caseID: string, artifactID: str
 }
 export async function saveIncidentArtifact(caseID: string, artifactID: string): Promise<boolean> {
   if (!isDesktop()) throw new Error(desktopOnly)
-  return Boolean(await App.SaveIncidentArtifact(caseID, artifactID))
+  const saved = await App.SaveIncidentArtifact(caseID, artifactID)
+  if (typeof saved !== 'boolean') throw new Error('保存故障证据返回了无效结果')
+  return saved
 }
 
 function record(raw: unknown): Record<string, unknown> {
@@ -285,12 +287,29 @@ function normalizeCase(raw: unknown): IncidentCase {
   } as IncidentCase
 }
 
+function normalizeArtifact(raw: unknown): IncidentArtifact {
+  const source = record(raw)
+  return {
+    id: String(source.id ?? ''),
+    case_id: String(source.case_id ?? ''),
+    attempt_id: String(source.attempt_id ?? ''),
+    kind: String(source.kind ?? ''),
+    sha256: String(source.sha256 ?? ''),
+    size: typeof source.size === 'number' ? source.size : 0,
+    captured_at: String(source.captured_at ?? ''),
+    environment: String(source.environment ?? ''),
+    version: String(source.version ?? ''),
+    request_id: String(source.request_id ?? ''),
+    trace_id: String(source.trace_id ?? ''),
+  }
+}
+
 function normalizeDetail(raw: unknown): IncidentCaseDetail {
   const source = record(raw)
   return {
     case: normalizeCase(source.case),
     attempts: Array.isArray(source.attempts) ? source.attempts as PhaseAttempt[] : [],
-    artifacts: Array.isArray(source.artifacts) ? source.artifacts as EvidenceArtifact[] : [],
+    artifacts: Array.isArray(source.artifacts) ? source.artifacts.map(normalizeArtifact) : [],
     approvals: Array.isArray(source.approvals) ? source.approvals as Approval[] : [],
     code_changes: Array.isArray(source.code_changes) ? source.code_changes as CodeChange[] : [],
     deployment_observations: Array.isArray(source.deployment_observations) ? source.deployment_observations as DeploymentObservation[] : [],

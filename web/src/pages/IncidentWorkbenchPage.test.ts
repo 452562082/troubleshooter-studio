@@ -1317,7 +1317,7 @@ describe('IncidentWorkbenchPage', () => {
     const continued = { ...item, status: 'validating' as const, version: 8, current_attempt_id: 'attempt-login-next' }
     const refreshed = detail(continued, {
       attempts: [{ ...blocked.attempts[0], id: 'attempt-login-next', status: 'running', error_code: '', output_json: {}, parent_attempt_id: 'attempt-login' }],
-      artifacts: [{ id: 'recovery-evidence', case_id: item.id, attempt_id: 'attempt-login-next', kind: 'log', path_or_reference: 'opaque', sha256: 'a', captured_at: '', environment: 'test', version: '8', request_id: '', trace_id: '', redaction_status: 'redacted' }],
+      artifacts: [{ id: 'recovery-evidence', case_id: item.id, attempt_id: 'attempt-login-next', kind: 'log', sha256: 'a', size: 1, captured_at: '', environment: 'test', version: '8', request_id: '', trace_id: '' }],
     })
     vi.mocked(listIncidentCases).mockResolvedValue([item])
     let recoveryCompleted = false

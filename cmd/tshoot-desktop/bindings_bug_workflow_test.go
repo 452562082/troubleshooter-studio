@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +16,113 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 )
+
+func TestGetIncidentCaseAndEmittedSnapshotsHideArtifactPathsAndApplicationURLs(t *testing.T) {
+	app, store := newBrowserBindingTestApp(t)
+	artifact := registerTextArtifact(t, app, store, "case-a", "attempt-a")
+	const applicationURL = "https://app.test/oauth/start?state=oauth-query-sentinel"
+	finished := time.Now().UTC()
+	if err := store.CreateAttempt(context.Background(), bughub.PhaseAttempt{
+		ID: "attempt-public-projection", CaseID: "case-a", CycleNumber: 1,
+		Phase: bughub.PhaseValidation, Mode: bughub.AttemptReproduce, Status: bughub.AttemptStatusFailed,
+		AgentTarget: "codex", BotKey: "base|codex", InputJSON: []byte(`{}`),
+		OutputJSON: []byte(`{"error_code":"browser_login_required","application_url":"` + applicationURL + `","application_origin":"https://app.test","login_origin":"https://login.test","nested":{"application_url":"` + applicationURL + `","path_or_reference":"` + artifact.PathOrReference + `"}}`),
+		StartedAt:  finished.Add(-time.Second), FinishedAt: &finished,
+		ErrorCode: "browser_login_required", ErrorMessage: "login required",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(map[string]any{
+		"application_url":    applicationURL,
+		"application_origin": "https://app.test",
+		"login_origin":       "https://login.test",
+		"path_or_reference":  artifact.PathOrReference,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Transition(context.Background(), "case-a", 1, bughub.CaseWaitingEvidence, bughub.TransitionEvent{
+		ID: "event-public-projection", CaseID: "case-a", FromStatus: bughub.CaseValidating, ToStatus: bughub.CaseWaitingEvidence,
+		EventType: "phase_completed", ActorType: "agent", ActorID: "validator", IdempotencyKey: "event-public-projection",
+		PayloadJSON: payload, CreatedAt: finished,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	detail, err := app.GetIncidentCase("case-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Artifacts) != 1 {
+		t.Fatalf("artifacts = %+v", detail.Artifacts)
+	}
+	artifactType := reflect.TypeOf(detail.Artifacts[0])
+	if _, exposed := artifactType.FieldByName("PathOrReference"); exposed {
+		t.Fatalf("public artifact type exposes PathOrReference: %s", artifactType)
+	}
+	if _, present := artifactType.FieldByName("Size"); !present {
+		t.Fatalf("public artifact type has no Size: %s", artifactType)
+	}
+
+	assertPublic := func(name string, value any) {
+		t.Helper()
+		encoded, marshalErr := json.Marshal(value)
+		if marshalErr != nil {
+			t.Fatalf("marshal %s: %v", name, marshalErr)
+		}
+		text := string(encoded)
+		for _, forbidden := range []string{artifact.PathOrReference, applicationURL, "path_or_reference", "application_url"} {
+			if strings.Contains(text, forbidden) {
+				t.Fatalf("%s exposed %q: %s", name, forbidden, text)
+			}
+		}
+		for _, required := range []string{"application_origin", "https://app.test", "login_origin", "https://login.test", `"size":9`} {
+			if !strings.Contains(text, required) {
+				t.Fatalf("%s omitted %q: %s", name, required, text)
+			}
+		}
+	}
+	assertPublic("detail", detail)
+
+	var emitted []IncidentCaseEventPayload
+	app.workflowEmit = func(name string, value any) {
+		if name == incidentCaseEvent {
+			emitted = append(emitted, value.(IncidentCaseEventPayload))
+		}
+	}
+	app.emitIncidentCase("case-a")
+	app.emitIncidentPhaseEvent("case-a", bughub.InvestigationEvent{
+		Type: "browser_progress",
+		Raw:  map[string]any{"application_url": applicationURL, "path_or_reference": artifact.PathOrReference},
+		Meta: map[string]any{"case_id": "case-a", "attempt_id": "attempt-a", "browser_code": "browser_starting", "application_url": applicationURL},
+	})
+	if len(emitted) != 2 {
+		t.Fatalf("emitted = %+v", emitted)
+	}
+	for index, event := range emitted {
+		assertPublic(fmt.Sprintf("event %d", index), event)
+	}
+}
+
+func TestGeneratedWailsIncidentArtifactContractIsPathFree(t *testing.T) {
+	models, err := os.ReadFile(filepath.Join("..", "..", "web", "wailsjs", "go", "models.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	declarations, err := os.ReadFile(filepath.Join("..", "..", "web", "wailsjs", "go", "main", "App.d.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(models), "path_or_reference") || strings.Contains(string(models), "class EvidenceArtifact") {
+		t.Fatalf("generated models expose internal artifact paths")
+	}
+	if !strings.Contains(string(models), "class IncidentArtifact") || !strings.Contains(string(models), "size: number") {
+		t.Fatalf("generated models omit the path-free incident artifact DTO")
+	}
+	if !strings.Contains(string(declarations), "SaveIncidentArtifact(arg1:string,arg2:string):Promise<boolean>") {
+		t.Fatalf("generated SaveIncidentArtifact contract is not boolean")
+	}
+}
 
 type workflowBindingRunner struct {
 	mu        sync.Mutex

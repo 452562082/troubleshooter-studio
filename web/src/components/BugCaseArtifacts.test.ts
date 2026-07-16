@@ -1,7 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { reactive } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { getIncidentArtifactPreview, saveIncidentArtifact, type IncidentCaseDetail } from '../lib/bridge/bugWorkflow'
+import { getIncidentArtifactPreview, saveIncidentArtifact, type IncidentArtifact, type IncidentCaseDetail } from '../lib/bridge/bugWorkflow'
 import BugCaseArtifacts from './BugCaseArtifacts.vue'
 import artifactSource from './BugCaseArtifacts.vue?raw'
 
@@ -44,7 +44,7 @@ afterEach(() => {
 const detail: IncidentCaseDetail = {
   case: { id: 'case-1', bug_id: 'bug-1', source: 'zentao', system_id: 'base', environment: 'test', status: 'waiting_deployment', cycle_number: 1, current_attempt_id: 'fix-1', selected_bot_key: 'base|codex', version: 9, created_at: '', updated_at: '' },
   attempts: [{ id: 'investigate-1', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { summary: '根因是空指针' }, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }],
-  artifacts: [{ id: 'evidence-1', case_id: 'case-1', attempt_id: 'investigate-1', kind: 'screenshot', path_or_reference: '/artifact/screenshot.png', sha256: 'abc', captured_at: '2026-07-11T11:00:00Z', environment: 'test', version: 'build-1', request_id: 'req-1', trace_id: 'trace-1', redaction_status: 'redacted' }],
+  artifacts: [{ id: 'evidence-1', case_id: 'case-1', attempt_id: 'investigate-1', kind: 'screenshot', sha256: 'abc', size: 8, captured_at: '2026-07-11T11:00:00Z', environment: 'test', version: 'build-1', request_id: 'req-1', trace_id: 'trace-1' }],
   approvals: [{ id: 'approval-1', case_id: 'case-1', kind: 'merge_environment_branch', actor: 'alice', approved_at: '2026-07-11T12:00:00Z', case_version: 8, scope_json: {}, fix_commits: { api: 'abc' }, target_branches: { api: 'test' } }],
   code_changes: [{ id: 'change-1', case_id: 'case-1', attempt_id: 'fix-1', repo: 'api', base_branch: 'main', fix_branch: 'fix/bug-1', fix_commit: 'abc', test_evidence: ['go test ./...'], target_environment_branch: 'test', merge_base_head: 'base', merge_commit: 'merge', push_remote: 'origin', push_status: 'pushed' }],
   deployment_observations: [{ id: 'deploy-1', case_id: 'case-1', environment: 'test', expected_commits: { api: 'merge' }, observed_version: 'build-1', observed_images: { api: 'api:build-1' }, observed_commits: { api: 'merge' }, observed_at: '2026-07-11T12:05:00Z', diagnostic_code: 'commit_mismatch', diagnostic_message: '运行版本与期望提交不一致', verification_source: 'version endpoint', result: 'matched' }],
@@ -69,8 +69,9 @@ describe('BugCaseArtifacts', () => {
 
   it('previews screenshots from safe bytes and never exposes artifact paths in text or DOM URLs', async () => {
     const dialogMethods = installDialogStubs()
-    const privatePath = detail.artifacts[0].path_or_reference
-    const wrapper = mount(BugCaseArtifacts, { props: { detail } })
+    const privatePath = '/Users/alice/.troubleshooter/artifacts/case-1/private-screenshot.png'
+    const hostileArtifact = { ...detail.artifacts[0], path_or_reference: privatePath } as unknown as IncidentArtifact
+    const wrapper = mount(BugCaseArtifacts, { props: { detail: { ...detail, artifacts: [hostileArtifact] } } })
     await flushPromises()
 
     const image = wrapper.get<HTMLImageElement>('img[data-artifact-id="evidence-1"]')
@@ -153,10 +154,10 @@ describe('BugCaseArtifacts', () => {
   it('safely saves every artifact type without exposing the chosen destination', async () => {
     const artifacts = [
       detail.artifacts[0],
-      { ...detail.artifacts[0], id: 'network-1', kind: 'network', path_or_reference: '/private/network.json' },
-      { ...detail.artifacts[0], id: 'console-1', kind: 'console', path_or_reference: '/private/console.txt' },
-      { ...detail.artifacts[0], id: 'actions-1', kind: 'browser_actions', path_or_reference: '/private/browser-actions.json' },
-      { ...detail.artifacts[0], id: 'other-1', kind: 'log', path_or_reference: '/private/other.bin' },
+      { ...detail.artifacts[0], id: 'network-1', kind: 'network' },
+      { ...detail.artifacts[0], id: 'console-1', kind: 'console' },
+      { ...detail.artifacts[0], id: 'actions-1', kind: 'browser_actions' },
+      { ...detail.artifacts[0], id: 'other-1', kind: 'log' },
     ]
     const wrapper = mount(BugCaseArtifacts, { props: { detail: { ...detail, artifacts } } })
     await flushPromises()

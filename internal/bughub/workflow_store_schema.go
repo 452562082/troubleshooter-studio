@@ -90,7 +90,7 @@ CREATE INDEX IF NOT EXISTS idx_events_case_created ON transition_events(case_id,
 `
 
 const (
-	workflowStoreSchemaVersion   = 8
+	workflowStoreSchemaVersion   = 9
 	workflowStoreSchemaV1Key     = "workflow-schema-v1"
 	workflowStoreSchemaV1Upgrade = `
 ALTER TABLE transition_events ADD COLUMN request_fingerprint TEXT NOT NULL DEFAULT '';
@@ -164,6 +164,42 @@ CREATE TABLE browser_recovery_operations (
          (status = 'outcome_uncertain' AND outcome_code = 'unknown' AND result_case_json = '{}') OR
          (status = 'continued' AND outcome_code = 'continued' AND result_case_json <> '{}'))
 );
+CREATE INDEX idx_browser_recovery_status_updated ON browser_recovery_operations(status, updated_at);
+`
+	workflowStoreSchemaV9Upgrade = `
+DROP INDEX idx_browser_recovery_status_updated;
+ALTER TABLE browser_recovery_operations RENAME TO browser_recovery_operations_v8;
+CREATE TABLE browser_recovery_operations (
+  idempotency_key TEXT PRIMARY KEY,
+  operation TEXT NOT NULL CHECK (operation IN ('login','repair')),
+  case_id TEXT NOT NULL REFERENCES incident_cases(id),
+  attempt_id TEXT NOT NULL REFERENCES phase_attempts(id),
+  expected_error_code TEXT NOT NULL CHECK (expected_error_code LIKE 'browser_%'),
+  cycle_number INTEGER NOT NULL CHECK (cycle_number >= 1),
+  expected_version INTEGER NOT NULL CHECK (expected_version >= 1),
+  actor_id TEXT NOT NULL CHECK (actor_id <> ''),
+  request_fingerprint TEXT NOT NULL CHECK (length(request_fingerprint) = 64 AND request_fingerprint NOT GLOB '*[^0-9a-f]*'),
+  status TEXT NOT NULL CHECK (status IN ('claimed','effect_succeeded','effect_failed','outcome_uncertain','continued')),
+  claim_token TEXT NOT NULL CHECK (claim_token <> ''),
+  outcome_code TEXT NOT NULL DEFAULT '',
+  result_case_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(operation, case_id, attempt_id),
+  CHECK ((status = 'claimed' AND outcome_code = '' AND result_case_json = '{}') OR
+         (status = 'effect_succeeded' AND outcome_code = 'succeeded' AND result_case_json = '{}') OR
+         (status = 'effect_failed' AND outcome_code = 'failed' AND result_case_json = '{}') OR
+         (status = 'outcome_uncertain' AND outcome_code = 'unknown' AND result_case_json = '{}') OR
+         (status = 'continued' AND outcome_code = 'continued' AND result_case_json <> '{}'))
+);
+INSERT INTO browser_recovery_operations (
+  idempotency_key,operation,case_id,attempt_id,expected_error_code,cycle_number,expected_version,
+  actor_id,request_fingerprint,status,claim_token,outcome_code,result_case_json,created_at,updated_at
+) SELECT
+  idempotency_key,operation,case_id,attempt_id,expected_error_code,cycle_number,expected_version,
+  actor_id,request_fingerprint,status,claim_token,outcome_code,result_case_json,created_at,updated_at
+FROM browser_recovery_operations_v8;
+DROP TABLE browser_recovery_operations_v8;
 CREATE INDEX idx_browser_recovery_status_updated ON browser_recovery_operations(status, updated_at);
 `
 )

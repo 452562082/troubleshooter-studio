@@ -33,6 +33,7 @@ type fakeIncidentBrowserController struct {
 	clearErr      error
 	progress      bughub.BrowserProgress
 	afterLogin    func()
+	status        browserverify.RuntimeStatus
 }
 
 func (*fakeIncidentBrowserController) Execute(context.Context, bughub.BrowserVerificationRequest) (bughub.BrowserVerificationResult, error) {
@@ -74,8 +75,13 @@ func (f *fakeIncidentBrowserController) Repair(_ context.Context, emit func(bugh
 	return err
 }
 
-func (*fakeIncidentBrowserController) Status() browserverify.RuntimeStatus {
-	return browserverify.RuntimeStatus{State: browserverify.RuntimeReady, Version: "1.61.1"}
+func (f *fakeIncidentBrowserController) Status() browserverify.RuntimeStatus {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.status.State == "" {
+		return browserverify.RuntimeStatus{State: browserverify.RuntimeReady, Version: "1.61.1"}
+	}
+	return f.status
 }
 
 func (f *fakeIncidentBrowserController) snapshot() (logins []browserverify.BrowserLoginRequest, clears []browserverify.SessionKey, repairs int) {
@@ -527,6 +533,79 @@ func TestRepairIncidentBrowserRuntimeContinuesOnceAndReplaysWithoutSecondRepair(
 	_, _, repairs := controller.snapshot()
 	if repairs != 1 || runner.count() != 1 {
 		t.Fatalf("repairs=%d starts=%d", repairs, runner.count())
+	}
+}
+
+func TestIncidentBrowserKnownLoginFailuresRemainRetryable(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{name: "cancel", err: context.Canceled},
+		{name: "timeout", err: context.DeadlineExceeded},
+		{name: "runtime failure", err: errors.New("storageState Cookie: secret browser process failed")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app, store, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "https://login.test")
+			input := browserCommandInput(incident, attempt, "browser-known-login-failure:"+test.name)
+			controller.loginErr = test.err
+			if _, err := app.OpenIncidentBrowserLogin(input); err == nil || err.Error() != "incident browser login failed" {
+				t.Fatalf("fixed login error=%v", err)
+			}
+			request := browserRecoveryOperationRequest(input, attempt, bughub.BrowserRecoveryLogin, "browser_login_required")
+			operation, found, err := store.GetBrowserRecoveryOperation(context.Background(), request)
+			if err != nil || !found || operation.Status != bughub.BrowserRecoveryEffectFailed || operation.OutcomeCode != "failed" {
+				t.Fatalf("operation=%+v found=%v err=%v", operation, found, err)
+			}
+
+			controller.loginErr = nil
+			continued, err := app.OpenIncidentBrowserLogin(input)
+			if err != nil || continued.Status != bughub.CaseValidating {
+				t.Fatalf("continued=%+v err=%v", continued, err)
+			}
+			logins, _, _ := controller.snapshot()
+			if len(logins) != 2 || runner.count() != 1 {
+				t.Fatalf("logins=%d starts=%d", len(logins), runner.count())
+			}
+		})
+	}
+}
+
+func TestIncidentBrowserKnownRepairFailuresRemainRetryable(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		repairErr     error
+		status        browserverify.RuntimeStatus
+		expectedError string
+	}{
+		{name: "repair error", repairErr: errors.New("Authorization: Bearer secret repair failed"), expectedError: "incident browser runtime repair failed"},
+		{name: "runtime non-ready", status: browserverify.RuntimeStatus{State: browserverify.RuntimeBroken, ErrorCode: "runtime_secret"}, expectedError: "incident browser runtime is not ready"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app, store, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_runtime_broken", "")
+			input := browserCommandInput(incident, attempt, "browser-known-repair-failure:"+test.name)
+			controller.repairErr = test.repairErr
+			controller.status = test.status
+			if _, err := app.RepairIncidentBrowserRuntime(input); err == nil || err.Error() != test.expectedError {
+				t.Fatalf("fixed repair error=%v", err)
+			}
+			request := browserRecoveryOperationRequest(input, attempt, bughub.BrowserRecoveryRepair, "browser_runtime_broken")
+			operation, found, err := store.GetBrowserRecoveryOperation(context.Background(), request)
+			if err != nil || !found || operation.Status != bughub.BrowserRecoveryEffectFailed || operation.OutcomeCode != "failed" {
+				t.Fatalf("operation=%+v found=%v err=%v", operation, found, err)
+			}
+
+			controller.repairErr = nil
+			controller.status = browserverify.RuntimeStatus{State: browserverify.RuntimeReady, Version: "1.61.1"}
+			continued, err := app.RepairIncidentBrowserRuntime(input)
+			if err != nil || continued.Status != bughub.CaseValidating {
+				t.Fatalf("continued=%+v err=%v", continued, err)
+			}
+			_, _, repairs := controller.snapshot()
+			if repairs != 2 || runner.count() != 1 {
+				t.Fatalf("repairs=%d starts=%d", repairs, runner.count())
+			}
+		})
 	}
 }
 

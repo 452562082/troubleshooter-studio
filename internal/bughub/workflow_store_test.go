@@ -731,6 +731,15 @@ func TestCaseStoreInitializesAndMigratesVersionedSchema(t *testing.T) {
 		if err := store.db.QueryRow(`SELECT tbl_name FROM sqlite_master WHERE type='index' AND name='idx_browser_recovery_status_updated'`).Scan(&browserRecoveryIndexTable); err != nil || browserRecoveryIndexTable != "browser_recovery_operations" {
 			t.Fatalf("browser recovery index table=%q err=%v", browserRecoveryIndexTable, err)
 		}
+		var browserRecoveryDDL string
+		if err := store.db.QueryRow(`SELECT lower(sql) FROM sqlite_master WHERE type='table' AND name='browser_recovery_operations'`).Scan(&browserRecoveryDDL); err != nil {
+			t.Fatal(err)
+		}
+		for _, required := range []string{"effect_succeeded", "effect_failed", "outcome_uncertain", "continued"} {
+			if !strings.Contains(browserRecoveryDDL, required) {
+				t.Fatalf("browser recovery schema missing %q: %s", required, browserRecoveryDDL)
+			}
+		}
 	})
 
 	t.Run("pre-release unversioned schema with explicit event time is rejected without mutation", func(t *testing.T) {

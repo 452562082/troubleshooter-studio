@@ -24,6 +24,7 @@ type BrowserRecoveryOperationStatus string
 const (
 	BrowserRecoveryClaimed          BrowserRecoveryOperationStatus = "claimed"
 	BrowserRecoveryEffectSucceeded  BrowserRecoveryOperationStatus = "effect_succeeded"
+	BrowserRecoveryEffectFailed     BrowserRecoveryOperationStatus = "effect_failed"
 	BrowserRecoveryOutcomeUncertain BrowserRecoveryOperationStatus = "outcome_uncertain"
 	BrowserRecoveryContinued        BrowserRecoveryOperationStatus = "continued"
 )
@@ -152,6 +153,10 @@ func scanBrowserRecoveryOperation(scanner rowScanner) (BrowserRecoveryOperation,
 		if operation.ClaimToken == "" || operation.OutcomeCode != "succeeded" || resultJSON != "{}" {
 			return BrowserRecoveryOperation{}, false, errors.New("successful browser recovery effect is invalid")
 		}
+	case BrowserRecoveryEffectFailed:
+		if operation.ClaimToken == "" || operation.OutcomeCode != "failed" || resultJSON != "{}" {
+			return BrowserRecoveryOperation{}, false, errors.New("failed browser recovery effect is invalid")
+		}
 	case BrowserRecoveryOutcomeUncertain:
 		if operation.ClaimToken == "" || operation.OutcomeCode != "unknown" || resultJSON != "{}" {
 			return BrowserRecoveryOperation{}, false, errors.New("uncertain browser recovery operation is invalid")
@@ -203,27 +208,33 @@ func (s *CaseStore) ClaimBrowserRecoveryOperation(ctx context.Context, request B
 		return BrowserRecoveryOperation{}, false, fmt.Errorf("begin browser recovery claim: %w", err)
 	}
 	defer tx.Rollback()
+	retryFailedEffect := false
 	if existing, found, loadErr := getBrowserRecoveryOperation(ctx, tx, request.IdempotencyKey); loadErr != nil {
 		return BrowserRecoveryOperation{}, false, loadErr
 	} else if found {
 		if existing.RequestFingerprint != fingerprint {
 			return BrowserRecoveryOperation{}, false, ErrIdempotencyConflict
 		}
-		if err := tx.Commit(); err != nil {
-			return BrowserRecoveryOperation{}, false, err
+		if existing.Status != BrowserRecoveryEffectFailed {
+			if err := tx.Commit(); err != nil {
+				return BrowserRecoveryOperation{}, false, err
+			}
+			return existing, false, nil
 		}
-		return existing, false, nil
+		retryFailedEffect = true
 	}
-	var collision string
-	if queryErr := tx.QueryRowContext(ctx, `SELECT idempotency_key FROM transition_events WHERE idempotency_key=?`, request.IdempotencyKey).Scan(&collision); queryErr == nil {
-		return BrowserRecoveryOperation{}, false, ErrIdempotencyConflict
-	} else if !errors.Is(queryErr, sql.ErrNoRows) {
-		return BrowserRecoveryOperation{}, false, queryErr
-	}
-	if queryErr := tx.QueryRowContext(ctx, `SELECT idempotency_key FROM browser_recovery_operations WHERE operation=? AND case_id=? AND attempt_id=?`, request.Operation, request.CaseID, request.AttemptID).Scan(&collision); queryErr == nil {
-		return BrowserRecoveryOperation{}, false, ErrIdempotencyConflict
-	} else if !errors.Is(queryErr, sql.ErrNoRows) {
-		return BrowserRecoveryOperation{}, false, queryErr
+	if !retryFailedEffect {
+		var collision string
+		if queryErr := tx.QueryRowContext(ctx, `SELECT idempotency_key FROM transition_events WHERE idempotency_key=?`, request.IdempotencyKey).Scan(&collision); queryErr == nil {
+			return BrowserRecoveryOperation{}, false, ErrIdempotencyConflict
+		} else if !errors.Is(queryErr, sql.ErrNoRows) {
+			return BrowserRecoveryOperation{}, false, queryErr
+		}
+		if queryErr := tx.QueryRowContext(ctx, `SELECT idempotency_key FROM browser_recovery_operations WHERE operation=? AND case_id=? AND attempt_id=?`, request.Operation, request.CaseID, request.AttemptID).Scan(&collision); queryErr == nil {
+			return BrowserRecoveryOperation{}, false, ErrIdempotencyConflict
+		} else if !errors.Is(queryErr, sql.ErrNoRows) {
+			return BrowserRecoveryOperation{}, false, queryErr
+		}
 	}
 	attempt, err := getAttempt(ctx, tx, request.AttemptID)
 	if err != nil || !browserRecoveryAttemptEligible(attempt, request) {
@@ -234,7 +245,19 @@ func (s *CaseStore) ClaimBrowserRecoveryOperation(ctx context.Context, request B
 		return BrowserRecoveryOperation{}, false, ErrBrowserRecoveryNotEligible
 	}
 	now := formatStoreTime(time.Now().UTC())
-	if _, err := tx.ExecContext(ctx, `INSERT INTO browser_recovery_operations (idempotency_key,operation,case_id,attempt_id,expected_error_code,cycle_number,expected_version,actor_id,request_fingerprint,status,claim_token,outcome_code,result_case_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, request.IdempotencyKey, request.Operation, request.CaseID, request.AttemptID, request.ExpectedErrorCode, request.CycleNumber, request.ExpectedVersion, request.ActorID, fingerprint, BrowserRecoveryClaimed, claimToken, "", `{}`, now, now); err != nil {
+	if retryFailedEffect {
+		result, updateErr := tx.ExecContext(ctx, `UPDATE browser_recovery_operations SET status=?,claim_token=?,outcome_code='',updated_at=? WHERE idempotency_key=? AND request_fingerprint=? AND status=?`, BrowserRecoveryClaimed, claimToken, now, request.IdempotencyKey, fingerprint, BrowserRecoveryEffectFailed)
+		if updateErr != nil {
+			return BrowserRecoveryOperation{}, false, fmt.Errorf("reclaim browser recovery operation: %w", updateErr)
+		}
+		rows, rowsErr := result.RowsAffected()
+		if rowsErr != nil || rows != 1 {
+			if rowsErr != nil {
+				return BrowserRecoveryOperation{}, false, rowsErr
+			}
+			return BrowserRecoveryOperation{}, false, ErrIdempotencyConflict
+		}
+	} else if _, err := tx.ExecContext(ctx, `INSERT INTO browser_recovery_operations (idempotency_key,operation,case_id,attempt_id,expected_error_code,cycle_number,expected_version,actor_id,request_fingerprint,status,claim_token,outcome_code,result_case_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, request.IdempotencyKey, request.Operation, request.CaseID, request.AttemptID, request.ExpectedErrorCode, request.CycleNumber, request.ExpectedVersion, request.ActorID, fingerprint, BrowserRecoveryClaimed, claimToken, "", `{}`, now, now); err != nil {
 		return BrowserRecoveryOperation{}, false, fmt.Errorf("insert browser recovery operation: %w", err)
 	}
 	operation, found, err := getBrowserRecoveryOperation(ctx, tx, request.IdempotencyKey)
@@ -259,6 +282,8 @@ func (s *CaseStore) RecordBrowserRecoveryOutcome(ctx context.Context, request Br
 	switch status {
 	case BrowserRecoveryEffectSucceeded:
 		outcome = "succeeded"
+	case BrowserRecoveryEffectFailed:
+		outcome = "failed"
 	case BrowserRecoveryOutcomeUncertain:
 		outcome = "unknown"
 	default:

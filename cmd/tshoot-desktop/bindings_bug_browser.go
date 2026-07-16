@@ -314,7 +314,7 @@ func (a *App) OpenIncidentBrowserLogin(input IncidentBrowserCommandInput) (bughu
 		SystemID: incident.SystemID, Environment: incident.Environment, ApplicationOrigin: applicationOrigin, LoginOrigin: loginOrigin, Policy: policy,
 		Emit: func(progress bughub.BrowserProgress) { a.emitIncidentBrowserProgress(input.CaseID, progress) },
 	}); err != nil {
-		a.markIncidentBrowserRecoveryUncertain(store, request, claimToken)
+		a.markIncidentBrowserRecoveryFailed(store, request, claimToken)
 		return bughub.IncidentCase{}, errors.New("incident browser login failed")
 	}
 	if a.workflowBrowserRecoveryBeforeOutcome != nil {
@@ -362,11 +362,11 @@ func (a *App) RepairIncidentBrowserRuntime(input IncidentBrowserCommandInput) (b
 	if err := controller.Repair(a.workflowCommandContext(), func(progress bughub.BrowserProgress) {
 		a.emitIncidentBrowserProgress(input.CaseID, progress)
 	}); err != nil {
-		a.markIncidentBrowserRecoveryUncertain(store, request, claimToken)
+		a.markIncidentBrowserRecoveryFailed(store, request, claimToken)
 		return bughub.IncidentCase{}, errors.New("incident browser runtime repair failed")
 	}
 	if status := controller.Status(); status.State != browserverify.RuntimeReady {
-		a.markIncidentBrowserRecoveryUncertain(store, request, claimToken)
+		a.markIncidentBrowserRecoveryFailed(store, request, claimToken)
 		return bughub.IncidentCase{}, errors.New("incident browser runtime is not ready")
 	}
 	if a.workflowBrowserRecoveryBeforeOutcome != nil {
@@ -490,7 +490,7 @@ func (a *App) incidentBrowserBlockedAttempt(input IncidentBrowserCommandInput, o
 	}
 	if existing, found, err := store.GetBrowserRecoveryOperation(ctx, request); err != nil {
 		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, request, nil, err
-	} else if found {
+	} else if found && existing.Status != bughub.BrowserRecoveryEffectFailed {
 		return bughub.IncidentCase{}, attempt, request, &existing, nil
 	}
 	if _, found, err := store.GetCommittedCaseMutation(ctx, input.IdempotencyKey); err != nil {
@@ -558,10 +558,10 @@ func (a *App) resumeIncidentBrowserRecovery(input IncidentBrowserCommandInput, a
 	}
 }
 
-func (a *App) markIncidentBrowserRecoveryUncertain(store *bughub.CaseStore, request bughub.BrowserRecoveryOperationRequest, claimToken string) {
+func (a *App) markIncidentBrowserRecoveryFailed(store *bughub.CaseStore, request bughub.BrowserRecoveryOperationRequest, claimToken string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, _ = store.RecordBrowserRecoveryOutcome(ctx, request, claimToken, bughub.BrowserRecoveryOutcomeUncertain)
+	_, _ = store.RecordBrowserRecoveryOutcome(ctx, request, claimToken, bughub.BrowserRecoveryEffectFailed)
 }
 
 func (a *App) recordIncidentBrowserRecoverySucceeded(store *bughub.CaseStore, request bughub.BrowserRecoveryOperationRequest, claimToken string) (bughub.BrowserRecoveryOperation, error) {

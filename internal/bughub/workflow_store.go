@@ -251,6 +251,10 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		if err := verifyWorkflowSchemaMarker(ctx, tx, 7); err != nil {
 			return err
 		}
+	case 8:
+		if err := verifyWorkflowSchemaMarker(ctx, tx, 8); err != nil {
+			return err
+		}
 	case workflowStoreSchemaVersion:
 		// Verified below before the transaction is committed.
 	default:
@@ -389,7 +393,7 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: workflowStoreSchemaVersion, Fingerprint: fingerprint})
+		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: 8, Fingerprint: fingerprint})
 		if err != nil {
 			return fmt.Errorf("encode workflow schema v8 detail: %w", err)
 		}
@@ -398,6 +402,26 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		}
 		if _, err := tx.ExecContext(ctx, `PRAGMA user_version=8`); err != nil {
 			return fmt.Errorf("set workflow schema version 8: %w", err)
+		}
+		version = 8
+	}
+	if version == 8 {
+		if _, err := tx.ExecContext(ctx, workflowStoreSchemaV9Upgrade); err != nil {
+			return fmt.Errorf("apply workflow schema v9: %w", err)
+		}
+		fingerprint, err := workflowSchemaFingerprint(ctx, tx)
+		if err != nil {
+			return err
+		}
+		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: workflowStoreSchemaVersion, Fingerprint: fingerprint})
+		if err != nil {
+			return fmt.Errorf("encode workflow schema v9 detail: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE schema_migrations SET applied_at = ?, detail_json = ? WHERE key = ?`, formatStoreTime(time.Now().UTC()), string(detail), workflowStoreSchemaV1Key); err != nil {
+			return fmt.Errorf("record workflow schema v9: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `PRAGMA user_version=9`); err != nil {
+			return fmt.Errorf("set workflow schema version 9: %w", err)
 		}
 	}
 	tables, err := workflowTableColumns(ctx, tx)

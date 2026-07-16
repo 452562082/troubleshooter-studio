@@ -140,6 +140,113 @@ func TestBrowserRecoveryClaimSerializesWithSecondStoreCaseWriter(t *testing.T) {
 	}
 }
 
+func TestBrowserRecoveryEffectFailedCanBeReclaimedWithExactRequest(t *testing.T) {
+	store := openTestCaseStore(t)
+	ctx := context.Background()
+	_, _, request := eligibleBrowserRecoveryOperationFixture(t, store, "effect-failed-reclaim", BrowserRecoveryLogin)
+	operation, acquired, err := store.ClaimBrowserRecoveryOperation(ctx, request, "claim-before-failure")
+	if err != nil || !acquired {
+		t.Fatalf("operation=%+v acquired=%v err=%v", operation, acquired, err)
+	}
+	failed, err := store.RecordBrowserRecoveryOutcome(ctx, request, operation.ClaimToken, BrowserRecoveryEffectFailed)
+	if err != nil || failed.Status != BrowserRecoveryEffectFailed || failed.OutcomeCode != "failed" {
+		t.Fatalf("failed=%+v err=%v", failed, err)
+	}
+	changed := request
+	changed.ActorID = "different-user"
+	if _, _, err := store.ClaimBrowserRecoveryOperation(ctx, changed, "mismatched-retry"); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("mismatched retry error=%v", err)
+	}
+
+	reclaimed, acquired, err := store.ClaimBrowserRecoveryOperation(ctx, request, "claim-after-failure")
+	if err != nil || !acquired || reclaimed.Status != BrowserRecoveryClaimed || reclaimed.ClaimToken != "claim-after-failure" || reclaimed.OutcomeCode != "" {
+		t.Fatalf("reclaimed=%+v acquired=%v err=%v", reclaimed, acquired, err)
+	}
+	replayed, acquired, err := store.ClaimBrowserRecoveryOperation(ctx, request, "competing-claim")
+	if err != nil || acquired || replayed.ClaimToken != reclaimed.ClaimToken {
+		t.Fatalf("replayed=%+v acquired=%v err=%v", replayed, acquired, err)
+	}
+}
+
+func TestBrowserRecoveryEffectFailedReclaimRevalidatesCurrentCase(t *testing.T) {
+	store := openTestCaseStore(t)
+	ctx := context.Background()
+	incident, _, request := eligibleBrowserRecoveryOperationFixture(t, store, "effect-failed-current-state", BrowserRecoveryRepair)
+	operation, acquired, err := store.ClaimBrowserRecoveryOperation(ctx, request, "claim-before-generic")
+	if err != nil || !acquired {
+		t.Fatalf("operation=%+v acquired=%v err=%v", operation, acquired, err)
+	}
+	if _, err := store.RecordBrowserRecoveryOutcome(ctx, request, operation.ClaimToken, BrowserRecoveryEffectFailed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ApplyCaseMutation(ctx, CaseMutation{
+		CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "generic-after-known-browser-failure",
+		RequestJSON: []byte(`{"ordinary":true}`),
+		Steps: []CaseMutationStep{{To: CaseWaitingEvidence, AuditOnly: true, Event: TransitionEvent{
+			ID: "generic-after-known-browser-failure", EventType: "ordinary_evidence_noted", ActorType: "user", ActorID: "other-user", PayloadJSON: []byte(`{}`),
+		}}},
+	}); err != nil {
+		t.Fatalf("known browser failure blocked generic mutation: %v", err)
+	}
+	if _, acquired, err := store.ClaimBrowserRecoveryOperation(ctx, request, "claim-after-generic"); !errors.Is(err, ErrBrowserRecoveryNotEligible) || acquired {
+		t.Fatalf("stale retry acquired=%v err=%v", acquired, err)
+	}
+}
+
+func TestBrowserRecoveryEffectFailedReclaimSerializesAcrossStores(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "workflow.db")
+	first, err := OpenCaseStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := OpenCaseStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	_, _, request := eligibleBrowserRecoveryOperationFixture(t, first, "effect-failed-two-store", BrowserRecoveryLogin)
+	operation, acquired, err := first.ClaimBrowserRecoveryOperation(context.Background(), request, "initial-claim")
+	if err != nil || !acquired {
+		t.Fatalf("operation=%+v acquired=%v err=%v", operation, acquired, err)
+	}
+	if _, err := first.RecordBrowserRecoveryOutcome(context.Background(), request, operation.ClaimToken, BrowserRecoveryEffectFailed); err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	type result struct {
+		operation BrowserRecoveryOperation
+		acquired  bool
+		err       error
+	}
+	results := make(chan result, 2)
+	for index, store := range []*CaseStore{first, second} {
+		go func(index int, store *CaseStore) {
+			<-start
+			op, won, claimErr := store.ClaimBrowserRecoveryOperation(context.Background(), request, fmt.Sprintf("retry-claim-%d", index))
+			results <- result{operation: op, acquired: won, err: claimErr}
+		}(index, store)
+	}
+	close(start)
+	firstResult, secondResult := <-results, <-results
+	winners := 0
+	for _, candidate := range []result{firstResult, secondResult} {
+		if candidate.err != nil {
+			t.Fatalf("candidate=%+v", candidate)
+		}
+		if candidate.acquired {
+			winners++
+		}
+		if candidate.operation.Status != BrowserRecoveryClaimed {
+			t.Fatalf("candidate=%+v", candidate)
+		}
+	}
+	if winners != 1 || firstResult.operation.ClaimToken != secondResult.operation.ClaimToken {
+		t.Fatalf("first=%+v second=%+v winners=%d", firstResult, secondResult, winners)
+	}
+}
+
 func TestBrowserRecoveryReservationBlocksTransitionWriter(t *testing.T) {
 	store := openTestCaseStore(t)
 	ctx := context.Background()
@@ -457,15 +564,26 @@ func TestBrowserRecoveryOperationSchemaRejectsInvalidStates(t *testing.T) {
 	if err := store.CreateAttempt(context.Background(), attempt); err != nil {
 		t.Fatal(err)
 	}
-	_, err := store.db.Exec(`INSERT INTO browser_recovery_operations (
-		idempotency_key,operation,case_id,attempt_id,expected_error_code,cycle_number,expected_version,
-		actor_id,request_fingerprint,status,claim_token,outcome_code,result_case_json,created_at,updated_at
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		"invalid-browser-state", BrowserRecoveryLogin, attempt.CaseID, attempt.ID, "browser_login_required", 1, 1,
-		"desktop-user", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		BrowserRecoveryEffectSucceeded, "claim", "", `{}`, formatStoreTime(attempt.StartedAt), formatStoreTime(attempt.StartedAt))
-	if err == nil {
-		t.Fatal("invalid browser recovery state bypassed database constraints")
+	for _, test := range []struct {
+		name    string
+		status  BrowserRecoveryOperationStatus
+		outcome string
+	}{
+		{name: "succeeded without outcome", status: BrowserRecoveryEffectSucceeded, outcome: ""},
+		{name: "failed with unknown outcome", status: BrowserRecoveryEffectFailed, outcome: "unknown"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := store.db.Exec(`INSERT INTO browser_recovery_operations (
+				idempotency_key,operation,case_id,attempt_id,expected_error_code,cycle_number,expected_version,
+				actor_id,request_fingerprint,status,claim_token,outcome_code,result_case_json,created_at,updated_at
+			) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				"invalid-browser-state-"+test.name, BrowserRecoveryLogin, attempt.CaseID, attempt.ID, "browser_login_required", 1, 1,
+				"desktop-user", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				test.status, "claim", test.outcome, `{}`, formatStoreTime(attempt.StartedAt), formatStoreTime(attempt.StartedAt))
+			if err == nil {
+				t.Fatal("invalid browser recovery state bypassed database constraints")
+			}
+		})
 	}
 }
 
@@ -522,10 +640,92 @@ func TestBrowserRecoveryOperationSchemaMigratesV7AndRepeatedOpenIsIdempotent(t *
 		if err := store.db.QueryRow(`SELECT lower(sql) FROM sqlite_master WHERE type='table' AND name='browser_recovery_operations'`).Scan(&ddl); err != nil {
 			t.Fatalf("open %d schema: %v", open, err)
 		}
-		for _, required := range []string{"primary key", "unique(operation, case_id, attempt_id)", "outcome_uncertain", "request_fingerprint", "result_case_json"} {
+		for _, required := range []string{"primary key", "unique(operation, case_id, attempt_id)", "effect_failed", "outcome_uncertain", "request_fingerprint", "result_case_json"} {
 			if !strings.Contains(strings.ReplaceAll(ddl, "\n", " "), required) {
 				t.Fatalf("open %d schema missing %q: %s", open, required, ddl)
 			}
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestBrowserRecoveryOperationSchemaMigratesV8RowsAndRepeatedOpenIsIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "workflow.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		legacyWorkflowStoreSchema, workflowStoreSchemaV1Upgrade, workflowStoreSchemaV2Upgrade,
+		workflowStoreSchemaV3Upgrade, workflowStoreSchemaV4Upgrade, workflowStoreSchemaV5Upgrade,
+		workflowStoreSchemaV6Upgrade, workflowStoreSchemaV7Upgrade, workflowStoreSchemaV8Upgrade,
+	} {
+		if _, err := tx.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now().UTC()
+	request := BrowserRecoveryOperationRequest{
+		Operation: BrowserRecoveryLogin, CaseID: "case-v8-recovery", AttemptID: "attempt-v8-recovery",
+		ExpectedErrorCode: "browser_login_required", CycleNumber: 1, ExpectedVersion: 1,
+		ActorID: "desktop-user", IdempotencyKey: "browser-v8-recovery",
+	}
+	fingerprint, err := browserRecoveryOperationFingerprint(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`INSERT INTO incident_cases (id,bug_id,status,cycle_number,current_attempt_id,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`, request.CaseID, "bug-v8-recovery", CaseWaitingEvidence, request.CycleNumber, request.AttemptID, request.ExpectedVersion, formatStoreTime(now), formatStoreTime(now)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`INSERT INTO phase_attempts (id,case_id,cycle_number,phase,mode,status,input_json,output_json,started_at,finished_at,error_code,error_message) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, request.AttemptID, request.CaseID, request.CycleNumber, PhaseValidation, AttemptReproduce, AttemptStatusFailed, `{}`, `{"error_code":"browser_login_required"}`, formatStoreTime(now), formatStoreTime(now), request.ExpectedErrorCode, "safe browser stop"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`INSERT INTO browser_recovery_operations (idempotency_key,operation,case_id,attempt_id,expected_error_code,cycle_number,expected_version,actor_id,request_fingerprint,status,claim_token,outcome_code,result_case_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, request.IdempotencyKey, request.Operation, request.CaseID, request.AttemptID, request.ExpectedErrorCode, request.CycleNumber, request.ExpectedVersion, request.ActorID, fingerprint, BrowserRecoveryOutcomeUncertain, "v8-claim", "unknown", `{}`, formatStoreTime(now), formatStoreTime(now)); err != nil {
+		t.Fatal(err)
+	}
+	schemaFingerprint, err := workflowSchemaFingerprint(context.Background(), tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: 8, Fingerprint: schemaFingerprint})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`INSERT INTO schema_migrations (key,applied_at,detail_json) VALUES (?,?,?)`, workflowStoreSchemaV1Key, formatStoreTime(now), string(detail)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`PRAGMA user_version=8`); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	for open := 1; open <= 2; open++ {
+		store, err := OpenCaseStore(path)
+		if err != nil {
+			t.Fatalf("open %d: %v", open, err)
+		}
+		operation, found, loadErr := store.GetBrowserRecoveryOperation(context.Background(), request)
+		if loadErr != nil || !found || operation.Status != BrowserRecoveryOutcomeUncertain || operation.ClaimToken != "v8-claim" {
+			t.Fatalf("open %d operation=%+v found=%v err=%v", open, operation, found, loadErr)
+		}
+		var version int
+		var ddl string
+		if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != workflowStoreSchemaVersion {
+			t.Fatalf("open %d version=%d err=%v", open, version, err)
+		}
+		if err := store.db.QueryRow(`SELECT lower(sql) FROM sqlite_master WHERE type='table' AND name='browser_recovery_operations'`).Scan(&ddl); err != nil || !strings.Contains(ddl, "effect_failed") {
+			t.Fatalf("open %d schema=%q err=%v", open, ddl, err)
 		}
 		if err := store.Close(); err != nil {
 			t.Fatal(err)

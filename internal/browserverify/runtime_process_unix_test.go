@@ -120,6 +120,78 @@ func TestExecCommandRunnerCancellationTerminatesDescendantProcessGroup(t *testin
 	}
 }
 
+func TestExecCommandRunnerContextCancellationSurvivesTargetExitZero(t *testing.T) {
+	temporary := t.TempDir()
+	readyPath := filepath.Join(temporary, "term-zero-ready")
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- (execCommandRunner{}).Run(ctx, os.Args[0], []string{"-test.run=^TestRuntimeCommandProcessTreeHelper$"}, []string{
+			"TSHOOT_RUNTIME_PROCESS_HELPER=term-zero",
+			"TSHOOT_RUNTIME_PROCESS_READY=" + readyPath,
+		}, temporary, nil, io.Discard, io.Discard)
+	}()
+	waitForRuntimeTestFile(t, readyPath, 5*time.Second, cancel)
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("runtime cancellation error = %v, want context.Canceled", err)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("runtime command did not return after target handled SIGTERM with exit 0")
+	}
+}
+
+func TestExecCommandRunnerPostStartOutputCloseErrorIsBoundedAndClosesParentPipes(t *testing.T) {
+	var parentPipes []*os.File
+	runner := execCommandRunner{attachOutputs: attachOutputsWithInjectedCloseError(&parentPipes)}
+	temporary := t.TempDir()
+	result := make(chan error, 1)
+	go func() {
+		result <- runner.Run(context.Background(), os.Args[0], []string{
+			"-test.run=^TestRuntimeCommandProcessTreeHelper$",
+		}, []string{"TSHOOT_RUNTIME_PROCESS_HELPER=protocol"}, temporary, nil, io.Discard, io.Discard)
+	}()
+	select {
+	case err := <-result:
+		if !errors.Is(err, errInjectedOutputClose) {
+			t.Fatalf("runtime post-Start error = %v, want injected output close error", err)
+		}
+		assertFilesClosed(t, parentPipes)
+	case <-time.After(3 * time.Second):
+		t.Fatal("runtime post-Start output close error hung before wrapper wait")
+	}
+}
+
+var errInjectedOutputClose = errors.New("injected parent output close error")
+
+func attachOutputsWithInjectedCloseError(parentPipes *[]*os.File) commandOutputAttacher {
+	return func(command *exec.Cmd) (*ownedCommandOutputs, error) {
+		outputs, err := attachOwnedCommandOutputs(command)
+		if err != nil {
+			return nil, err
+		}
+		*parentPipes = []*os.File{outputs.stdoutRead, outputs.stdoutWrite, outputs.stderrRead, outputs.stderrWrite}
+		outputs.closeWrite = func(file *os.File) error {
+			return errors.Join(file.Close(), errInjectedOutputClose)
+		}
+		return outputs, nil
+	}
+}
+
+func assertFilesClosed(t *testing.T, files []*os.File) {
+	t.Helper()
+	if len(files) == 0 {
+		t.Fatal("no parent pipe files were captured")
+	}
+	for _, file := range files {
+		if _, err := file.Stat(); !errors.Is(err, os.ErrClosed) {
+			t.Errorf("parent pipe %q remains open: %v", file.Name(), err)
+		}
+	}
+}
+
 func TestRuntimeCommandProcessTreeHelper(t *testing.T) {
 	switch os.Getenv("TSHOOT_RUNTIME_PROCESS_HELPER") {
 	case "":
@@ -173,6 +245,15 @@ func TestRuntimeCommandProcessTreeHelper(t *testing.T) {
 		os.Exit(0)
 	case "exit":
 		os.Exit(23)
+	case "term-zero":
+		terminated := make(chan os.Signal, 1)
+		signal.Notify(terminated, syscall.SIGTERM)
+		defer signal.Stop(terminated)
+		if err := os.WriteFile(os.Getenv("TSHOOT_RUNTIME_PROCESS_READY"), []byte("ready"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		<-terminated
+		os.Exit(0)
 	default:
 		t.Fatalf("unknown process-tree helper mode %q", os.Getenv("TSHOOT_RUNTIME_PROCESS_HELPER"))
 	}

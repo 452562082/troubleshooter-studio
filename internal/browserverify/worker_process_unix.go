@@ -3,6 +3,7 @@
 package browserverify
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -26,6 +28,7 @@ type unixTargetStatus struct {
 }
 
 type workerProcessController struct {
+	ctx                context.Context
 	command            *exec.Cmd
 	statusRead         *os.File
 	statusWrite        *os.File
@@ -36,6 +39,12 @@ type workerProcessController struct {
 	grace              time.Duration
 	beforeGroupCleanup func()
 	waitWrapper        func(*exec.Cmd) error
+	terminationMu      sync.Mutex
+	reaping            bool
+	closed             bool
+	contextErr         error
+	parentEndsOnce     sync.Once
+	parentEndsErr      error
 }
 
 func init() {
@@ -49,7 +58,7 @@ func init() {
 	}
 }
 
-func configureWorkerProcess(command *exec.Cmd) (*workerProcessController, error) {
+func configureWorkerProcess(ctx context.Context, command *exec.Cmd) (*workerProcessController, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, err
@@ -65,6 +74,7 @@ func configureWorkerProcess(command *exec.Cmd) (*workerProcessController, error)
 		return nil, err
 	}
 	controller := &workerProcessController{
+		ctx:          ctx,
 		command:      command,
 		statusRead:   statusRead,
 		statusWrite:  statusWrite,
@@ -93,16 +103,7 @@ func configureWorkerProcess(command *exec.Cmd) (*workerProcessController, error)
 }
 
 func (controller *workerProcessController) afterStart(*exec.Cmd) error {
-	var statusErr, controlErr error
-	if controller.statusWrite != nil {
-		statusErr = controller.statusWrite.Close()
-		controller.statusWrite = nil
-	}
-	if controller.controlRead != nil {
-		controlErr = controller.controlRead.Close()
-		controller.controlRead = nil
-	}
-	return errors.Join(statusErr, controlErr)
+	return controller.closeParentEnds()
 }
 
 func (controller *workerProcessController) wait(command *exec.Cmd) error {
@@ -110,26 +111,46 @@ func (controller *workerProcessController) wait(command *exec.Cmd) error {
 	if controller.beforeGroupCleanup != nil {
 		controller.beforeGroupCleanup()
 	}
-	cleanupErr := controller.killOwnedProcessGroup(command)
+	controller.terminationMu.Lock()
+	cleanupErr := controller.killOwnedProcessGroupLocked(command)
+	controller.reaping = true
 	controlErr := controller.closeControlWriter()
+	controller.terminationMu.Unlock()
 	wrapperErr := controller.waitForWrapper(command)
+	controller.terminationMu.Lock()
+	controller.closed = true
+	contextErr := controller.contextErr
+	controller.terminationMu.Unlock()
 	if statusErr != nil {
-		return errors.Join(statusErr, cleanupErr, controlErr, wrapperErr)
+		return errors.Join(statusErr, cleanupErr, controlErr, wrapperErr, contextErr)
 	}
 	if status.Error != "" {
-		return errors.Join(errors.New(status.Error), cleanupErr, controlErr)
+		return errors.Join(errors.New(status.Error), cleanupErr, controlErr, contextErr)
 	}
-	return errors.Join(cleanupErr, controlErr)
+	return errors.Join(cleanupErr, controlErr, contextErr)
 }
 
 func (controller *workerProcessController) cancel(command *exec.Cmd) error {
+	controller.terminationMu.Lock()
+	defer controller.terminationMu.Unlock()
+	if controller.ctx != nil && controller.ctx.Err() != nil {
+		controller.contextErr = controller.ctx.Err()
+	}
+	if controller.reaping || controller.closed {
+		return os.ErrProcessDone
+	}
 	if command.Process == nil {
 		return os.ErrProcessDone
 	}
-	return controller.terminateProcessGroup(command.Process.Pid)
+	return controller.terminateProcessGroupLocked(command.Process.Pid)
 }
 
 func (controller *workerProcessController) kill(command *exec.Cmd) error {
+	controller.terminationMu.Lock()
+	defer controller.terminationMu.Unlock()
+	if controller.reaping || controller.closed {
+		return os.ErrProcessDone
+	}
 	if command.Process == nil {
 		return os.ErrProcessDone
 	}
@@ -142,11 +163,22 @@ func (controller *workerProcessController) kill(command *exec.Cmd) error {
 
 func (controller *workerProcessController) finish() error {
 	return errors.Join(
+		controller.closeParentEnds(),
 		controller.closeFile(&controller.statusRead),
 		controller.closeFile(&controller.statusWrite),
 		controller.closeFile(&controller.controlRead),
 		controller.closeFile(&controller.controlWrite),
 	)
+}
+
+func (controller *workerProcessController) closeParentEnds() error {
+	controller.parentEndsOnce.Do(func() {
+		controller.parentEndsErr = errors.Join(
+			controller.closeFile(&controller.statusWrite),
+			controller.closeFile(&controller.controlRead),
+		)
+	})
+	return controller.parentEndsErr
 }
 
 func (controller *workerProcessController) readTargetStatus() (unixTargetStatus, error) {
@@ -180,7 +212,7 @@ func requireUnixTargetStatusEOF(decoder *json.Decoder) error {
 	return errors.New("browser process wrapper returned more than one status value")
 }
 
-func (controller *workerProcessController) killOwnedProcessGroup(command *exec.Cmd) error {
+func (controller *workerProcessController) killOwnedProcessGroupLocked(command *exec.Cmd) error {
 	if command.Process == nil {
 		return os.ErrProcessDone
 	}
@@ -211,7 +243,7 @@ func (*workerProcessController) closeFile(file **os.File) error {
 	return err
 }
 
-func (controller *workerProcessController) terminateProcessGroup(processGroup int) error {
+func (controller *workerProcessController) terminateProcessGroupLocked(processGroup int) error {
 	if err := controller.processGroupSignal(processGroup, 0); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return os.ErrProcessDone

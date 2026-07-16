@@ -1204,7 +1204,9 @@ func sanitizeVerifierURL(raw string) string {
 	return parsed.String()
 }
 
-type nodeWorkerRunner struct{}
+type nodeWorkerRunner struct {
+	attachOutputs commandOutputAttacher
+}
 
 type workerStdoutRead struct {
 	content []byte
@@ -1267,17 +1269,21 @@ func consumeBoundedWorkerStderr(stderr io.Reader, emit func(bughub.BrowserProgre
 	return nil
 }
 
-func (nodeWorkerRunner) Run(ctx context.Context, paths RuntimePaths, request workerRequest, emit func(bughub.BrowserProgress)) (workerResult, error) {
+func (runner nodeWorkerRunner) Run(ctx context.Context, paths RuntimePaths, request workerRequest, emit func(bughub.BrowserProgress)) (workerResult, error) {
 	encoded, err := json.Marshal(request)
 	if err != nil {
 		return workerResult{}, err
 	}
 	command := exec.CommandContext(ctx, "node", paths.WorkerPath, "--mode", request.Mode)
-	processController, err := configureWorkerProcess(command)
+	processController, err := configureWorkerProcess(ctx, command)
 	if err != nil {
 		return workerResult{}, err
 	}
-	outputs, err := attachOwnedCommandOutputs(command)
+	attachOutputs := runner.attachOutputs
+	if attachOutputs == nil {
+		attachOutputs = attachOwnedCommandOutputs
+	}
+	outputs, err := attachOutputs(command)
 	if err != nil {
 		return workerResult{}, errors.Join(err, processController.finish())
 	}
@@ -1294,10 +1300,13 @@ func (nodeWorkerRunner) Run(ctx context.Context, paths RuntimePaths, request wor
 	if err := command.Start(); err != nil {
 		return workerResult{}, errors.Join(err, processController.finish())
 	}
-	if err := errors.Join(outputs.childStarted(), stdinRead.Close()); err != nil {
+	afterStartErr := processController.afterStart(command)
+	outputCloseErr := outputs.childStarted()
+	stdinCloseErr := stdinRead.Close()
+	if err := errors.Join(afterStartErr, outputCloseErr, stdinCloseErr); err != nil {
 		_ = processController.kill(command)
-		_ = processController.wait(command)
-		return workerResult{}, errors.Join(err, processController.finish())
+		waitErr := processController.wait(command)
+		return workerResult{}, errors.Join(err, waitErr, processController.finish())
 	}
 	stdinDone := make(chan error, 1)
 	go func() {
@@ -1318,14 +1327,6 @@ func (nodeWorkerRunner) Run(ctx context.Context, paths RuntimePaths, request wor
 	go func() {
 		stderrDone <- consumeBoundedWorkerStderr(outputs.stderrRead, emit, kill)
 	}()
-	if err := processController.afterStart(command); err != nil {
-		kill()
-		waitErr := processController.wait(command)
-		cleanupErr := processController.finish()
-		stdoutResult, stderrErr := waitWorkerOutputDrains(outputs, stdoutDone, stderrDone)
-		stdinErr := <-stdinDone
-		return workerResult{}, errors.Join(err, waitErr, cleanupErr, stdoutResult.err, stderrErr, stdinErr)
-	}
 	waitErr := processController.wait(command)
 	processCleanupErr := processController.finish()
 	stdoutResult, stderrErr := waitWorkerOutputDrains(outputs, stdoutDone, stderrDone)

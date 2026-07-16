@@ -19,7 +19,7 @@ import (
 func TestConfigureWorkerProcessUsesKillOnCloseJobWrapper(t *testing.T) {
 	command := exec.CommandContext(context.Background(), "cmd.exe", "/c", "exit", "0")
 	originalPath := command.Path
-	controller, err := configureWorkerProcess(command)
+	controller, err := configureWorkerProcess(context.Background(), command)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestWindowsJobGateCancellationNeverLeavesTarget(t *testing.T) {
 			command.Env = mergeCommandEnvironment(os.Environ(), []string{"TSHOOT_WINDOWS_GATED_TARGET_MARKER=" + markerPath})
 			command.Stdout = os.Stdout
 			command.Stderr = os.Stderr
-			controller, err := configureWorkerProcess(command)
+			controller, err := configureWorkerProcess(ctx, command)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -140,6 +140,31 @@ func TestCreateKillOnCloseJobSetsRequiredLimit(t *testing.T) {
 	}
 	if information.BasicLimitInformation.LimitFlags&windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE == 0 {
 		t.Fatalf("job limit flags = %#x, want JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE", information.BasicLimitInformation.LimitFlags)
+	}
+}
+
+func TestWindowsControllerDistinguishesContextCancelFromExpectedKill(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	controller := &workerProcessController{ctx: ctx, closed: true}
+	command := &exec.Cmd{}
+	if err := controller.kill(command); err != nil {
+		t.Fatal(err)
+	}
+	controller.mu.Lock()
+	expectedCleanupErr := controller.contextErr
+	controller.mu.Unlock()
+	if expectedCleanupErr != nil {
+		t.Fatalf("expected cleanup recorded context error %v", expectedCleanupErr)
+	}
+	cancel()
+	if err := controller.cancel(command); err != nil {
+		t.Fatal(err)
+	}
+	controller.mu.Lock()
+	contextErr := controller.contextErr
+	controller.mu.Unlock()
+	if !errors.Is(contextErr, context.Canceled) {
+		t.Fatalf("Cancel context error = %v, want context.Canceled", contextErr)
 	}
 }
 

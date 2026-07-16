@@ -3,6 +3,7 @@
 package browserverify
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +28,7 @@ const (
 )
 
 type workerProcessController struct {
+	ctx             context.Context
 	mu              sync.Mutex
 	job             windows.Handle
 	gateRead        *os.File
@@ -34,6 +36,7 @@ type workerProcessController struct {
 	closed          bool
 	stageHook       func(windowsProcessStage)
 	cancelRequested atomic.Bool
+	contextErr      error
 }
 
 const windowsJobWrapperArgument = "--tshoot-browser-job-wrapper"
@@ -48,7 +51,7 @@ func init() {
 	}
 }
 
-func configureWorkerProcess(command *exec.Cmd) (*workerProcessController, error) {
+func configureWorkerProcess(ctx context.Context, command *exec.Cmd) (*workerProcessController, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, err
@@ -68,7 +71,7 @@ func configureWorkerProcess(command *exec.Cmd) (*workerProcessController, error)
 		_ = windows.CloseHandle(job)
 		return nil, err
 	}
-	controller := &workerProcessController{job: job, gateRead: gateRead, gateWrite: gateWrite}
+	controller := &workerProcessController{ctx: ctx, job: job, gateRead: gateRead, gateWrite: gateWrite}
 	originalPath := command.Path
 	originalArgs := append([]string(nil), command.Args[1:]...)
 	command.Path = executable
@@ -142,7 +145,22 @@ func (controller *workerProcessController) reachedLocked(stage windowsProcessSta
 
 func (controller *workerProcessController) cancel(command *exec.Cmd) error {
 	controller.cancelRequested.Store(true)
+	controller.mu.Lock()
+	if controller.ctx != nil && controller.ctx.Err() != nil {
+		controller.contextErr = controller.ctx.Err()
+	}
+	controller.closeContainmentLocked()
+	controller.mu.Unlock()
+	return controller.killWrapper(command)
+}
+
+func (controller *workerProcessController) kill(command *exec.Cmd) error {
+	controller.cancelRequested.Store(true)
 	controller.closeContainment()
+	return controller.killWrapper(command)
+}
+
+func (*workerProcessController) killWrapper(command *exec.Cmd) error {
 	if command.Process == nil {
 		return nil
 	}
@@ -152,12 +170,12 @@ func (controller *workerProcessController) cancel(command *exec.Cmd) error {
 	return nil
 }
 
-func (controller *workerProcessController) kill(command *exec.Cmd) error {
-	return controller.cancel(command)
-}
-
-func (*workerProcessController) wait(command *exec.Cmd) error {
-	return command.Wait()
+func (controller *workerProcessController) wait(command *exec.Cmd) error {
+	waitErr := command.Wait()
+	controller.mu.Lock()
+	contextErr := controller.contextErr
+	controller.mu.Unlock()
+	return errors.Join(waitErr, contextErr)
 }
 
 func (controller *workerProcessController) finish() error {

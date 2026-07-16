@@ -66,9 +66,11 @@ type RuntimeManager struct {
 	beforeInstallLock func()
 }
 
-type execCommandRunner struct{}
+type execCommandRunner struct {
+	attachOutputs commandOutputAttacher
+}
 
-func (execCommandRunner) Run(ctx context.Context, executable string, args, env []string, dir string, stdin io.Reader, stdout, stderr io.Writer) error {
+func (runner execCommandRunner) Run(ctx context.Context, executable string, args, env []string, dir string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if stdout == nil {
 		stdout = io.Discard
 	}
@@ -76,11 +78,15 @@ func (execCommandRunner) Run(ctx context.Context, executable string, args, env [
 		stderr = io.Discard
 	}
 	command := exec.CommandContext(ctx, executable, args...)
-	processController, err := configureWorkerProcess(command)
+	processController, err := configureWorkerProcess(ctx, command)
 	if err != nil {
 		return err
 	}
-	outputs, err := attachOwnedCommandOutputs(command)
+	attachOutputs := runner.attachOutputs
+	if attachOutputs == nil {
+		attachOutputs = attachOwnedCommandOutputs
+	}
+	outputs, err := attachOutputs(command)
 	if err != nil {
 		return errors.Join(err, processController.finish())
 	}
@@ -91,19 +97,14 @@ func (execCommandRunner) Run(ctx context.Context, executable string, args, env [
 	if err := command.Start(); err != nil {
 		return errors.Join(err, processController.finish())
 	}
-	if err := outputs.childStarted(); err != nil {
-		_ = processController.kill(command)
-		_ = processController.wait(command)
-		return errors.Join(err, processController.finish())
-	}
-	stdoutDone, stderrDone := outputs.copyTo(stdout, stderr)
-	if err := processController.afterStart(command); err != nil {
+	afterStartErr := processController.afterStart(command)
+	outputCloseErr := outputs.childStarted()
+	if err := errors.Join(afterStartErr, outputCloseErr); err != nil {
 		_ = processController.kill(command)
 		waitErr := processController.wait(command)
-		cleanupErr := processController.finish()
-		copyErr := outputs.waitCopies(stdoutDone, stderrDone)
-		return errors.Join(err, waitErr, cleanupErr, copyErr)
+		return errors.Join(err, waitErr, processController.finish())
 	}
+	stdoutDone, stderrDone := outputs.copyTo(stdout, stderr)
 	waitErr := processController.wait(command)
 	cleanupErr := processController.finish()
 	copyErr := outputs.waitCopies(stdoutDone, stderrDone)

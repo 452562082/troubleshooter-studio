@@ -78,3 +78,29 @@ const ready = setInterval(() => {
 	}
 	cleanupNeeded = false
 }
+
+func TestNodeWorkerRunnerPostStartOutputCloseErrorIsBoundedAndClosesParentPipes(t *testing.T) {
+	temporary := t.TempDir()
+	workerPath := filepath.Join(temporary, "worker-output-close-error.mjs")
+	if err := os.WriteFile(workerPath, []byte(`process.stdout.write(JSON.stringify({ status: 'completed' }));`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var parentPipes []*os.File
+	runner := nodeWorkerRunner{attachOutputs: attachOutputsWithInjectedCloseError(&parentPipes)}
+	result := make(chan error, 1)
+	go func() {
+		_, err := runner.Run(context.Background(), RuntimePaths{
+			Root: temporary, BrowsersPath: filepath.Join(temporary, "browsers"), WorkerPath: workerPath,
+		}, workerRequest{Mode: "execute"}, nil)
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		if !errors.Is(err, errInjectedOutputClose) {
+			t.Fatalf("worker post-Start error = %v, want injected output close error", err)
+		}
+		assertFilesClosed(t, parentPipes)
+	case <-time.After(3 * time.Second):
+		t.Fatal("worker post-Start output close error hung before wrapper wait")
+	}
+}

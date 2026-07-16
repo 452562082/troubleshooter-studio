@@ -10,11 +10,14 @@ import (
 
 const commandOutputDrainTimeout = 2 * time.Second
 
+type commandOutputAttacher func(*exec.Cmd) (*ownedCommandOutputs, error)
+
 type ownedCommandOutputs struct {
 	stdoutRead  *os.File
 	stdoutWrite *os.File
 	stderrRead  *os.File
 	stderrWrite *os.File
+	closeWrite  func(*os.File) error
 }
 
 func attachOwnedCommandOutputs(command *exec.Cmd) (*ownedCommandOutputs, error) {
@@ -38,11 +41,18 @@ func attachOwnedCommandOutputs(command *exec.Cmd) (*ownedCommandOutputs, error) 
 }
 
 func (outputs *ownedCommandOutputs) childStarted() error {
-	stdoutErr := outputs.stdoutWrite.Close()
+	stdoutErr := outputs.closeWriter(outputs.stdoutWrite)
 	outputs.stdoutWrite = nil
-	stderrErr := outputs.stderrWrite.Close()
+	stderrErr := outputs.closeWriter(outputs.stderrWrite)
 	outputs.stderrWrite = nil
 	return errors.Join(stdoutErr, stderrErr)
+}
+
+func (outputs *ownedCommandOutputs) closeWriter(file *os.File) error {
+	if outputs.closeWrite != nil {
+		return outputs.closeWrite(file)
+	}
+	return file.Close()
 }
 
 func (outputs *ownedCommandOutputs) copyTo(stdout, stderr io.Writer) (<-chan error, <-chan error) {

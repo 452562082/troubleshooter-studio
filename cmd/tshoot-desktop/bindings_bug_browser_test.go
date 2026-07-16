@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -449,14 +451,15 @@ func TestIncidentBrowserRecoveryDoesNotMistakeOrdinaryEvidenceContinuationForRep
 	}
 }
 
-func TestIncidentBrowserLoginVersionConflictNeverRepeatsExternalEffect(t *testing.T) {
+func TestIncidentBrowserLoginReservationBlocksConcurrentCaseMutation(t *testing.T) {
 	app, store, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "https://login.test")
 	input := browserCommandInput(incident, attempt, "browser-version-conflict")
+	var concurrentErr error
 	controller.afterLogin = func() {
 		controller.mu.Lock()
 		controller.afterLogin = nil
 		controller.mu.Unlock()
-		_, err := store.ApplyCaseMutation(context.Background(), bughub.CaseMutation{
+		_, concurrentErr = store.ApplyCaseMutation(context.Background(), bughub.CaseMutation{
 			CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "concurrent-browser-audit",
 			RequestJSON: []byte(`{"reason":"concurrent update"}`),
 			Steps: []bughub.CaseMutationStep{{To: bughub.CaseWaitingEvidence, AuditOnly: true, Event: bughub.TransitionEvent{
@@ -464,19 +467,79 @@ func TestIncidentBrowserLoginVersionConflictNeverRepeatsExternalEffect(t *testin
 				PayloadJSON: []byte(`{"reason":"concurrent update"}`),
 			}}},
 		})
-		if err != nil {
-			t.Errorf("concurrent mutation: %v", err)
-		}
 	}
-	if _, err := app.OpenIncidentBrowserLogin(input); !errors.Is(err, bughub.ErrCaseVersionConflict) {
-		t.Fatalf("first error=%v", err)
+	first, err := app.OpenIncidentBrowserLogin(input)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := app.OpenIncidentBrowserLogin(input); !errors.Is(err, bughub.ErrCaseVersionConflict) {
-		t.Fatalf("retry error=%v", err)
+	if !errors.Is(concurrentErr, bughub.ErrBrowserRecoveryReserved) {
+		t.Fatalf("concurrent error=%v", concurrentErr)
+	}
+	replayed, err := app.OpenIncidentBrowserLogin(input)
+	if err != nil {
+		t.Fatal(err)
 	}
 	logins, _, _ := controller.snapshot()
-	if len(logins) != 1 || runner.count() != 0 {
+	if len(logins) != 1 || runner.count() != 1 || replayed.CurrentAttemptID != first.CurrentAttemptID {
+		t.Fatalf("first=%+v replayed=%+v logins=%d starts=%d", first, replayed, len(logins), runner.count())
+	}
+}
+
+func TestIncidentBrowserLoginDoesNotRunWhenCaseDriftsBeforeAtomicClaim(t *testing.T) {
+	app, store, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "https://login.test")
+	baseLoader := app.workflowLoadDeploymentConfig
+	mutated := false
+	app.workflowLoadDeploymentConfig = func(ctx context.Context, current bughub.IncidentCase) (*config.SystemConfig, error) {
+		if !mutated {
+			mutated = true
+			if _, err := store.ApplyCaseMutation(ctx, bughub.CaseMutation{
+				CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "advance-during-browser-policy",
+				RequestJSON: []byte(`{"advance":true}`),
+				Steps: []bughub.CaseMutationStep{{To: bughub.CaseWaitingEvidence, AuditOnly: true, Event: bughub.TransitionEvent{
+					ID: "advance-during-browser-policy", EventType: "ordinary_evidence_noted", ActorType: "user", ActorID: "other-user", PayloadJSON: []byte(`{}`),
+				}}},
+			}); err != nil {
+				return nil, err
+			}
+		}
+		return baseLoader(ctx, current)
+	}
+	if _, err := app.OpenIncidentBrowserLogin(browserCommandInput(incident, attempt, "browser-claim-state-drift")); err == nil {
+		t.Fatal("login accepted Case state drift before its durable claim")
+	}
+	logins, _, _ := controller.snapshot()
+	if len(logins) != 0 || runner.count() != 0 {
 		t.Fatalf("logins=%d starts=%d", len(logins), runner.count())
+	}
+}
+
+func TestIncidentBrowserRecoveryCollisionDoesNotExposeCallerKey(t *testing.T) {
+	app, store, _, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "https://login.test")
+	secretKey := "Cookie=session-secret Authorization=Bearer-secret password=hunter2 storageState=private"
+	input := browserCommandInput(incident, attempt, secretKey)
+	request := browserRecoveryOperationRequest(input, attempt, bughub.BrowserRecoveryLogin, "browser_login_required")
+	request.ActorID = "different-user"
+	if _, acquired, err := store.ClaimBrowserRecoveryOperation(context.Background(), request, "claim-secret-collision"); err != nil || !acquired {
+		t.Fatalf("acquired=%v err=%v", acquired, err)
+	}
+	var emitted []any
+	app.workflowEmit = func(_ string, payload any) { emitted = append(emitted, payload) }
+	_, err := app.OpenIncidentBrowserLogin(input)
+	if !errors.Is(err, bughub.ErrIdempotencyConflict) {
+		t.Fatalf("collision error=%v", err)
+	}
+	encoded, marshalErr := json.Marshal(map[string]any{"error": fmt.Sprint(err), "events": emitted})
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	for _, secret := range []string{"session-secret", "Bearer-secret", "hunter2", "storageState", "Cookie", "Authorization", "password"} {
+		if bytes.Contains(encoded, []byte(secret)) {
+			t.Fatalf("browser collision exposed %q: %s", secret, encoded)
+		}
+	}
+	logins, _, _ := controller.snapshot()
+	if len(logins) != 0 {
+		t.Fatalf("login calls=%d", len(logins))
 	}
 }
 

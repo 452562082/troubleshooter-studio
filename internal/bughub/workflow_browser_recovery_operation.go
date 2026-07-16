@@ -28,7 +28,11 @@ const (
 	BrowserRecoveryContinued        BrowserRecoveryOperationStatus = "continued"
 )
 
-var ErrBrowserRecoveryOutcomeUncertain = errors.New("incident browser recovery outcome is uncertain")
+var (
+	ErrBrowserRecoveryOutcomeUncertain = errors.New("incident browser recovery outcome is uncertain")
+	ErrBrowserRecoveryReserved         = errors.New("incident browser recovery reserves this Case")
+	ErrBrowserRecoveryNotEligible      = errors.New("incident browser recovery is not eligible")
+)
 
 type BrowserRecoveryOperationRequest struct {
 	Operation         BrowserRecoveryOperationKind
@@ -50,6 +54,19 @@ type BrowserRecoveryOperation struct {
 	ResultCase         IncidentCase
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
+}
+
+type browserRecoveryMutationConsume struct {
+	Request            BrowserRecoveryOperationRequest
+	RequestFingerprint string
+	ClaimToken         string
+}
+
+type browserRecoveryContinuationMarker struct {
+	Operation          BrowserRecoveryOperationKind `json:"operation"`
+	BlockedAttemptID   string                       `json:"blocked_attempt_id"`
+	ExpectedErrorCode  string                       `json:"expected_browser_error_code"`
+	RequestFingerprint string                       `json:"request_fingerprint"`
 }
 
 func browserRecoveryOperationFingerprint(request BrowserRecoveryOperationRequest) (string, error) {
@@ -76,7 +93,14 @@ func browserRecoveryOperationFingerprint(request BrowserRecoveryOperationRequest
 
 func validateBrowserRecoveryOperationRequest(request BrowserRecoveryOperationRequest) error {
 	switch request.Operation {
-	case BrowserRecoveryLogin, BrowserRecoveryRepair:
+	case BrowserRecoveryLogin:
+		if request.ExpectedErrorCode != "browser_login_required" {
+			return errors.New("browser login recovery error code is invalid")
+		}
+	case BrowserRecoveryRepair:
+		if request.ExpectedErrorCode != "browser_runtime_broken" {
+			return errors.New("browser runtime recovery error code is invalid")
+		}
 	default:
 		return errors.New("browser recovery operation is invalid")
 	}
@@ -161,7 +185,7 @@ func (s *CaseStore) GetBrowserRecoveryOperation(ctx context.Context, request Bro
 		return operation, found, err
 	}
 	if operation.RequestFingerprint != fingerprint {
-		return BrowserRecoveryOperation{}, false, fmt.Errorf("%w: browser recovery key %q", ErrIdempotencyConflict, request.IdempotencyKey)
+		return BrowserRecoveryOperation{}, false, ErrIdempotencyConflict
 	}
 	return operation, true, nil
 }
@@ -183,7 +207,7 @@ func (s *CaseStore) ClaimBrowserRecoveryOperation(ctx context.Context, request B
 		return BrowserRecoveryOperation{}, false, loadErr
 	} else if found {
 		if existing.RequestFingerprint != fingerprint {
-			return BrowserRecoveryOperation{}, false, fmt.Errorf("%w: browser recovery key %q", ErrIdempotencyConflict, request.IdempotencyKey)
+			return BrowserRecoveryOperation{}, false, ErrIdempotencyConflict
 		}
 		if err := tx.Commit(); err != nil {
 			return BrowserRecoveryOperation{}, false, err
@@ -192,18 +216,22 @@ func (s *CaseStore) ClaimBrowserRecoveryOperation(ctx context.Context, request B
 	}
 	var collision string
 	if queryErr := tx.QueryRowContext(ctx, `SELECT idempotency_key FROM transition_events WHERE idempotency_key=?`, request.IdempotencyKey).Scan(&collision); queryErr == nil {
-		return BrowserRecoveryOperation{}, false, fmt.Errorf("%w: browser recovery key %q is already a Case mutation", ErrIdempotencyConflict, request.IdempotencyKey)
+		return BrowserRecoveryOperation{}, false, ErrIdempotencyConflict
 	} else if !errors.Is(queryErr, sql.ErrNoRows) {
 		return BrowserRecoveryOperation{}, false, queryErr
 	}
 	if queryErr := tx.QueryRowContext(ctx, `SELECT idempotency_key FROM browser_recovery_operations WHERE operation=? AND case_id=? AND attempt_id=?`, request.Operation, request.CaseID, request.AttemptID).Scan(&collision); queryErr == nil {
-		return BrowserRecoveryOperation{}, false, fmt.Errorf("%w: browser recovery attempt already has operation %q", ErrIdempotencyConflict, request.Operation)
+		return BrowserRecoveryOperation{}, false, ErrIdempotencyConflict
 	} else if !errors.Is(queryErr, sql.ErrNoRows) {
 		return BrowserRecoveryOperation{}, false, queryErr
 	}
 	attempt, err := getAttempt(ctx, tx, request.AttemptID)
-	if err != nil || attempt.CaseID != request.CaseID || attempt.CycleNumber != request.CycleNumber {
-		return BrowserRecoveryOperation{}, false, errors.New("browser recovery attempt identity is invalid")
+	if err != nil || !browserRecoveryAttemptEligible(attempt, request) {
+		return BrowserRecoveryOperation{}, false, ErrBrowserRecoveryNotEligible
+	}
+	incident, err := getCase(ctx, tx, request.CaseID)
+	if err != nil || incident.Status != CaseWaitingEvidence || incident.Version != request.ExpectedVersion || incident.CurrentAttemptID != request.AttemptID || incident.CycleNumber != request.CycleNumber {
+		return BrowserRecoveryOperation{}, false, ErrBrowserRecoveryNotEligible
 	}
 	now := formatStoreTime(time.Now().UTC())
 	if _, err := tx.ExecContext(ctx, `INSERT INTO browser_recovery_operations (idempotency_key,operation,case_id,attempt_id,expected_error_code,cycle_number,expected_version,actor_id,request_fingerprint,status,claim_token,outcome_code,result_case_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, request.IdempotencyKey, request.Operation, request.CaseID, request.AttemptID, request.ExpectedErrorCode, request.CycleNumber, request.ExpectedVersion, request.ActorID, fingerprint, BrowserRecoveryClaimed, claimToken, "", `{}`, now, now); err != nil {
@@ -254,38 +282,113 @@ func (s *CaseStore) RecordBrowserRecoveryOutcome(ctx context.Context, request Br
 	if rows == 1 || operation.Status == status && operation.ClaimToken == claimToken {
 		return operation, nil
 	}
-	return BrowserRecoveryOperation{}, fmt.Errorf("%w: browser recovery outcome %q", ErrIdempotencyConflict, request.IdempotencyKey)
+	return BrowserRecoveryOperation{}, ErrIdempotencyConflict
 }
 
-func (s *CaseStore) CompleteBrowserRecoveryOperation(ctx context.Context, request BrowserRecoveryOperationRequest, claimToken string, resultCase IncidentCase) error {
-	fingerprint, err := browserRecoveryOperationFingerprint(request)
+func browserRecoveryAttemptEligible(attempt PhaseAttempt, request BrowserRecoveryOperationRequest) bool {
+	if attempt.CaseID != request.CaseID || attempt.CycleNumber != request.CycleNumber || attempt.Status != AttemptStatusFailed || attempt.FinishedAt == nil || attempt.ErrorCode != request.ExpectedErrorCode {
+		return false
+	}
+	switch attempt.Phase {
+	case PhaseValidation:
+		return attempt.Mode == AttemptReproduce
+	case PhaseRegression:
+		return attempt.Mode == AttemptRegression
+	default:
+		return false
+	}
+}
+
+func rejectUnresolvedBrowserRecovery(ctx context.Context, query caseQuery, caseID string) error {
+	var exists int
+	err := query.QueryRowContext(ctx, `SELECT 1 FROM browser_recovery_operations WHERE case_id=? AND status IN (?,?,?) LIMIT 1`, caseID, BrowserRecoveryClaimed, BrowserRecoveryEffectSucceeded, BrowserRecoveryOutcomeUncertain).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	if resultCase.ID != request.CaseID || resultCase.CycleNumber != request.CycleNumber || resultCase.Version < request.ExpectedVersion+1 || resultCase.Validate() != nil {
-		return errors.New("browser recovery continuation result is invalid")
+	return ErrBrowserRecoveryReserved
+}
+
+func newBrowserRecoveryMutationConsume(mutation CaseMutation, request BrowserRecoveryOperationRequest, claimToken string) (*browserRecoveryMutationConsume, error) {
+	fingerprint, err := browserRecoveryOperationFingerprint(request)
+	if err != nil {
+		return nil, err
 	}
+	if blank(claimToken) || mutation.CaseID != request.CaseID || mutation.ExpectedVersion != request.ExpectedVersion || mutation.IdempotencyKey != request.IdempotencyKey {
+		return nil, ErrIdempotencyConflict
+	}
+	return &browserRecoveryMutationConsume{Request: request, RequestFingerprint: fingerprint, ClaimToken: claimToken}, nil
+}
+
+func loadBrowserRecoveryMutationConsume(ctx context.Context, query caseQuery, consume *browserRecoveryMutationConsume) (BrowserRecoveryOperation, error) {
+	if consume == nil {
+		return BrowserRecoveryOperation{}, errors.New("browser recovery consume identity is required")
+	}
+	operation, found, err := getBrowserRecoveryOperation(ctx, query, consume.Request.IdempotencyKey)
+	if err != nil {
+		return BrowserRecoveryOperation{}, err
+	}
+	if !found || operation.RequestFingerprint != consume.RequestFingerprint || operation.ClaimToken != consume.ClaimToken {
+		return BrowserRecoveryOperation{}, ErrIdempotencyConflict
+	}
+	return operation, nil
+}
+
+func validateBrowserRecoveryContinuationMutation(mutation CaseMutation, request BrowserRecoveryOperationRequest, blocked PhaseAttempt) error {
+	if !browserRecoveryAttemptEligible(blocked, request) || len(mutation.Steps) != 1 || len(mutation.CreateAttempts) != 1 || len(mutation.FinishAttempts) != 0 || len(mutation.Approvals) != 0 || len(mutation.CodeChanges) != 0 || len(mutation.Observations) != 0 || len(mutation.ExpectedAttemptOutputs) != 0 || mutation.CompletionAttemptID != "" || mutation.CompletionIdentitySHA256 != "" || mutation.DeleteFixCheckpointAttemptID != "" {
+		return ErrIdempotencyConflict
+	}
+	child := mutation.CreateAttempts[0]
+	step := mutation.Steps[0]
+	expectedStatus := CaseValidating
+	if blocked.Phase == PhaseRegression {
+		expectedStatus = CaseRegressionValidating
+	}
+	if child.ID != stableID("attempt", request.IdempotencyKey) || child.CaseID != request.CaseID || child.CycleNumber != request.CycleNumber || child.ParentAttemptID != request.AttemptID || child.Phase != blocked.Phase || child.Mode != blocked.Mode || child.Status != AttemptStatusRunning || mutation.Snapshot.CurrentAttemptID == nil || *mutation.Snapshot.CurrentAttemptID != child.ID || mutation.Snapshot.CycleNumber != nil || mutation.Snapshot.ClosedAtSet || step.To != expectedStatus || step.AuditOnly || step.Event.ID != stableID("event", request.IdempotencyKey) || step.Event.EventType != "evidence_continued" || step.Event.ActorType != "user" || step.Event.ActorID != request.ActorID || step.Event.IdempotencyKey != "" && step.Event.IdempotencyKey != request.IdempotencyKey {
+		return ErrIdempotencyConflict
+	}
+	markerJSON := child.InputJSON
+	if blocked.Phase == PhaseRegression {
+		var regression RegressionValidationInput
+		if json.Unmarshal(child.InputJSON, &regression) != nil {
+			return ErrIdempotencyConflict
+		}
+		markerJSON = regression.SupplementalEvidence
+	}
+	var envelope struct {
+		BrowserRecovery browserRecoveryContinuationMarker `json:"browser_recovery"`
+	}
+	fingerprint, err := browserRecoveryOperationFingerprint(request)
+	if err != nil || json.Unmarshal(markerJSON, &envelope) != nil || envelope.BrowserRecovery.Operation != request.Operation || envelope.BrowserRecovery.BlockedAttemptID != request.AttemptID || envelope.BrowserRecovery.ExpectedErrorCode != request.ExpectedErrorCode || envelope.BrowserRecovery.RequestFingerprint != fingerprint {
+		return ErrIdempotencyConflict
+	}
+	return nil
+}
+
+func consumeBrowserRecoveryOperationTx(ctx context.Context, tx *sql.Tx, consume *browserRecoveryMutationConsume, resultCase IncidentCase) error {
 	encoded, err := json.Marshal(resultCase)
 	if err != nil {
 		return err
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE browser_recovery_operations SET status=?,outcome_code=?,result_case_json=?,updated_at=? WHERE idempotency_key=? AND request_fingerprint=? AND status=? AND claim_token=?`, BrowserRecoveryContinued, "continued", string(encoded), formatStoreTime(time.Now().UTC()), request.IdempotencyKey, fingerprint, BrowserRecoveryEffectSucceeded, claimToken)
+	result, err := tx.ExecContext(ctx, `UPDATE browser_recovery_operations SET status=?,outcome_code=?,result_case_json=?,updated_at=? WHERE idempotency_key=? AND request_fingerprint=? AND status=? AND claim_token=?`, BrowserRecoveryContinued, "continued", string(encoded), formatStoreTime(time.Now().UTC()), consume.Request.IdempotencyKey, consume.RequestFingerprint, BrowserRecoveryEffectSucceeded, consume.ClaimToken)
 	if err != nil {
-		return fmt.Errorf("complete browser recovery operation: %w", err)
+		return fmt.Errorf("consume browser recovery continuation: %w", err)
 	}
 	rows, err := result.RowsAffected()
 	if err != nil {
 		return err
 	}
-	operation, found, err := s.GetBrowserRecoveryOperation(ctx, request)
-	if err != nil || !found {
-		if err != nil {
-			return err
-		}
-		return errors.New("browser recovery operation is missing")
-	}
-	if rows == 1 || operation.Status == BrowserRecoveryContinued && operation.ClaimToken == claimToken && operation.ResultCase.ID == resultCase.ID && operation.ResultCase.Version == resultCase.Version && operation.ResultCase.CurrentAttemptID == resultCase.CurrentAttemptID {
+	if rows == 1 {
 		return nil
 	}
-	return fmt.Errorf("%w: browser recovery continuation %q", ErrIdempotencyConflict, request.IdempotencyKey)
+	operation, err := loadBrowserRecoveryMutationConsume(ctx, tx, consume)
+	if err != nil {
+		return err
+	}
+	if operation.Status == BrowserRecoveryContinued && operation.ResultCase.ID == resultCase.ID && operation.ResultCase.Version == resultCase.Version && operation.ResultCase.CurrentAttemptID == resultCase.CurrentAttemptID {
+		return nil
+	}
+	return ErrIdempotencyConflict
 }

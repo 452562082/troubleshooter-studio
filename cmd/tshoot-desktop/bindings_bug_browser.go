@@ -541,17 +541,9 @@ func (a *App) recordIncidentBrowserRecoverySucceeded(store *bughub.CaseStore, re
 }
 
 func (a *App) continueIncidentBrowserRecovery(input IncidentBrowserCommandInput, attempt bughub.PhaseAttempt, request bughub.BrowserRecoveryOperationRequest, operation bughub.BrowserRecoveryOperation) (bughub.IncidentCase, error) {
-	store, orchestrator, err := a.workflowComponents()
+	_, orchestrator, err := a.workflowComponents()
 	if err != nil {
 		return bughub.IncidentCase{}, err
-	}
-	if replayed, found, err := incidentBrowserCommittedContinuation(a.workflowCommandContext(), store, request, attempt, operation.RequestFingerprint); err != nil {
-		return bughub.IncidentCase{}, err
-	} else if found {
-		if err := completeIncidentBrowserRecovery(store, request, operation.ClaimToken, replayed); err != nil {
-			return bughub.IncidentCase{}, err
-		}
-		return replayed, nil
 	}
 	bug, bot, err := a.loadIncidentContext(request.CaseID)
 	if err != nil {
@@ -570,70 +562,16 @@ func (a *App) continueIncidentBrowserRecovery(input IncidentBrowserCommandInput,
 			return bughub.IncidentCase{}, errors.New("incident browser continuation failed")
 		}
 	}
-	continued, continueErr := orchestrator.ContinueWithEvidence(a.workflowCommandContext(), bughub.ContinueWithEvidenceCommand{
+	continued, continueErr := orchestrator.ContinueBrowserRecoveryWithEvidence(a.workflowCommandContext(), bughub.ContinueWithEvidenceCommand{
 		CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion,
 		IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID),
 		Phase: attempt.Phase, Bug: bug, Bot: bot, InputJSON: inputJSON,
-	})
+	}, operation)
 	a.emitIncidentResult(continued, continueErr)
-	replayed, found, reconcileErr := incidentBrowserCommittedContinuation(a.workflowCommandContext(), store, request, attempt, operation.RequestFingerprint)
-	if reconcileErr != nil {
-		return continued, reconcileErr
-	}
-	if !found {
-		if continueErr != nil {
-			return continued, incidentBrowserContinuationError(continueErr)
-		}
-		return continued, errors.New("incident browser continuation could not be reconciled")
-	}
-	if err := completeIncidentBrowserRecovery(store, request, operation.ClaimToken, replayed); err != nil {
-		return continued, err
-	}
 	if continueErr != nil {
 		return continued, incidentBrowserContinuationError(continueErr)
 	}
-	return replayed, nil
-}
-
-func completeIncidentBrowserRecovery(store *bughub.CaseStore, request bughub.BrowserRecoveryOperationRequest, claimToken string, result bughub.IncidentCase) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := store.CompleteBrowserRecoveryOperation(ctx, request, claimToken, result); err != nil {
-		return errors.New("incident browser recovery journal is unavailable")
-	}
-	return nil
-}
-
-func incidentBrowserCommittedContinuation(ctx context.Context, store *bughub.CaseStore, request bughub.BrowserRecoveryOperationRequest, blocked bughub.PhaseAttempt, fingerprint string) (bughub.IncidentCase, bool, error) {
-	replay, found, err := store.GetCommittedCaseMutation(ctx, request.IdempotencyKey)
-	if err != nil || !found {
-		return bughub.IncidentCase{}, found, err
-	}
-	validEvent := replay.Event.CaseID == request.CaseID && replay.Event.EventType == "evidence_continued" &&
-		replay.Event.FromStatus == bughub.CaseWaitingEvidence && replay.Event.ActorID == request.ActorID &&
-		replay.ResultCase.Version == request.ExpectedVersion+1 && replay.ResultCase.CycleNumber == request.CycleNumber
-	if !validEvent {
-		return bughub.IncidentCase{}, false, bughub.ErrIdempotencyConflict
-	}
-	child, err := store.GetAttempt(ctx, replay.ResultCase.CurrentAttemptID)
-	if err != nil || child.ParentAttemptID != blocked.ID || child.CaseID != blocked.CaseID || child.CycleNumber != blocked.CycleNumber || child.Phase != blocked.Phase {
-		return bughub.IncidentCase{}, false, bughub.ErrIdempotencyConflict
-	}
-	markerJSON := child.InputJSON
-	if child.Phase == bughub.PhaseRegression {
-		var regression bughub.RegressionValidationInput
-		if json.Unmarshal(child.InputJSON, &regression) != nil {
-			return bughub.IncidentCase{}, false, bughub.ErrIdempotencyConflict
-		}
-		markerJSON = regression.SupplementalEvidence
-	}
-	var envelope struct {
-		BrowserRecovery incidentBrowserRecoveryMarker `json:"browser_recovery"`
-	}
-	if json.Unmarshal(markerJSON, &envelope) != nil || envelope.BrowserRecovery.Operation != request.Operation || envelope.BrowserRecovery.BlockedAttemptID != request.AttemptID || envelope.BrowserRecovery.ExpectedErrorCode != request.ExpectedErrorCode || envelope.BrowserRecovery.RequestFingerprint != fingerprint {
-		return bughub.IncidentCase{}, false, bughub.ErrIdempotencyConflict
-	}
-	return replay.ResultCase.Clone(), true, nil
+	return continued, nil
 }
 
 func incidentBrowserLoginOrigins(attempt bughub.PhaseAttempt) (string, string, error) {

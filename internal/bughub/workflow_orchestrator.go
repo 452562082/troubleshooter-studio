@@ -796,6 +796,74 @@ func (o *CaseOrchestrator) ContinueWithEvidence(ctx context.Context, cmd Continu
 	return o.beginPhase(ctx, incident, to, attempt, cmd.Bug, cmd.Bot, cmd.IdempotencyKey, cmd.ActorID, "evidence_continued")
 }
 
+func (o *CaseOrchestrator) ContinueBrowserRecoveryWithEvidence(ctx context.Context, cmd ContinueWithEvidenceCommand, supplied BrowserRecoveryOperation) (IncidentCase, error) {
+	if err := validateCommand(cmd.CaseID, cmd.ExpectedVersion, cmd.IdempotencyKey, cmd.ActorID); err != nil {
+		return IncidentCase{}, err
+	}
+	request := supplied.BrowserRecoveryOperationRequest
+	if request.CaseID != cmd.CaseID || request.ExpectedVersion != cmd.ExpectedVersion || request.IdempotencyKey != cmd.IdempotencyKey || request.ActorID != cmd.ActorID || cmd.Phase != PhaseValidation && cmd.Phase != PhaseRegression {
+		return IncidentCase{}, ErrIdempotencyConflict
+	}
+	operation, found, err := o.store.GetBrowserRecoveryOperation(ctx, request)
+	if err != nil || !found {
+		if err != nil {
+			return IncidentCase{}, err
+		}
+		return IncidentCase{}, ErrIdempotencyConflict
+	}
+	if operation.ClaimToken != supplied.ClaimToken || operation.RequestFingerprint != supplied.RequestFingerprint {
+		return IncidentCase{}, ErrIdempotencyConflict
+	}
+	switch operation.Status {
+	case BrowserRecoveryContinued:
+		return operation.ResultCase.Clone(), nil
+	case BrowserRecoveryClaimed, BrowserRecoveryOutcomeUncertain:
+		return IncidentCase{}, ErrBrowserRecoveryOutcomeUncertain
+	case BrowserRecoveryEffectSucceeded:
+	default:
+		return IncidentCase{}, ErrIdempotencyConflict
+	}
+	incident, err := o.store.GetCase(ctx, request.CaseID)
+	if err != nil {
+		return IncidentCase{}, err
+	}
+	if incident.Status != CaseWaitingEvidence || incident.Version != request.ExpectedVersion || incident.CurrentAttemptID != request.AttemptID || incident.CycleNumber != request.CycleNumber {
+		return IncidentCase{}, ErrBrowserRecoveryNotEligible
+	}
+	blocked, err := o.store.GetAttempt(ctx, request.AttemptID)
+	if err != nil || !browserRecoveryAttemptEligible(blocked, request) || blocked.Phase != cmd.Phase {
+		return IncidentCase{}, ErrBrowserRecoveryNotEligible
+	}
+	to, mode, phase := continuationTarget(incident, cmd.Phase)
+	input := CloneRawMessage(cmd.InputJSON)
+	payload := json.RawMessage(nil)
+	if phase == PhaseRegression {
+		if blocked.Mode != AttemptRegression || blocked.BotKey != cmd.Bot.Key || blocked.AgentTarget != cmd.Bot.Target {
+			return IncidentCase{}, ErrRegressionBinding
+		}
+		var regression RegressionValidationInput
+		if json.Unmarshal(blocked.InputJSON, &regression) != nil || o.validatePersistedRegressionBinding(ctx, incident, regression) != nil {
+			return IncidentCase{}, ErrRegressionBinding
+		}
+		canonicalInput, inputErr := canonicalJSONObject(input)
+		if inputErr != nil {
+			return IncidentCase{}, inputErr
+		}
+		if containsSensitiveData(canonicalInput) {
+			return IncidentCase{}, errors.New("regression supplemental evidence contains sensitive data")
+		}
+		identity, inputErr := regressionContinuationIdentityDigest(cmd)
+		if inputErr != nil {
+			return IncidentCase{}, inputErr
+		}
+		regression.SupplementalEvidence = canonicalInput
+		input = mustJSON(regression)
+		payload = mustJSON(map[string]string{"attempt_id": stableID("attempt", cmd.IdempotencyKey), "continuation_identity_sha256": identity})
+	}
+	attempt := newAttempt(incident, phase, mode, cmd.IdempotencyKey, cmd.Bot, input, blocked.ID)
+	return o.beginBrowserRecoveryPhase(ctx, incident, to, attempt, cmd.Bug, cmd.Bot, cmd.IdempotencyKey, cmd.ActorID, payload, operation)
+}
+
 func (o *CaseOrchestrator) replayRegressionContinuation(ctx context.Context, cmd ContinueWithEvidenceCommand) (IncidentCase, bool, error) {
 	replay, found, err := o.store.GetCommittedCaseMutation(ctx, cmd.IdempotencyKey)
 	if err != nil || !found {
@@ -1882,6 +1950,14 @@ func (o *CaseOrchestrator) beginPhaseWithUpdate(ctx context.Context, incident In
 }
 
 func (o *CaseOrchestrator) beginPhaseWithUpdateAndPayload(ctx context.Context, incident IncidentCase, to CaseStatus, attempt PhaseAttempt, bug Bug, bot BotRef, key, actor, eventType string, update CaseSnapshotUpdate, payload json.RawMessage) (IncidentCase, error) {
+	return o.beginPhaseWithUpdatePayloadAndBrowserRecovery(ctx, incident, to, attempt, bug, bot, key, actor, eventType, update, payload, nil)
+}
+
+func (o *CaseOrchestrator) beginBrowserRecoveryPhase(ctx context.Context, incident IncidentCase, to CaseStatus, attempt PhaseAttempt, bug Bug, bot BotRef, key, actor string, payload json.RawMessage, operation BrowserRecoveryOperation) (IncidentCase, error) {
+	return o.beginPhaseWithUpdatePayloadAndBrowserRecovery(ctx, incident, to, attempt, bug, bot, key, actor, "evidence_continued", CaseSnapshotUpdate{}, payload, &operation)
+}
+
+func (o *CaseOrchestrator) beginPhaseWithUpdatePayloadAndBrowserRecovery(ctx context.Context, incident IncidentCase, to CaseStatus, attempt PhaseAttempt, bug Bug, bot BotRef, key, actor, eventType string, update CaseSnapshotUpdate, payload json.RawMessage, recovery *BrowserRecoveryOperation) (IncidentCase, error) {
 	update.CurrentAttemptID = workflowStringPtr(attempt.ID)
 	update.SelectedBotKey = workflowStringPtr(bot.Key)
 	request, _ := json.Marshal(map[string]any{"attempt": attempt, "to": to, "event_type": eventType, "actor": actor})
@@ -1894,7 +1970,14 @@ func (o *CaseOrchestrator) beginPhaseWithUpdateAndPayload(ctx context.Context, i
 	if len(payload) == 0 {
 		payload = mustJSON(map[string]string{"attempt_id": attempt.ID})
 	}
-	mutation, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: request, CreateAttempts: []PhaseAttempt{attempt}, Snapshot: update, Steps: []CaseMutationStep{{To: to, Event: TransitionEvent{ID: stableID("event", key), EventType: eventType, ActorType: actorType, ActorID: actor, PayloadJSON: payload}}}})
+	mutationRequest := CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: request, CreateAttempts: []PhaseAttempt{attempt}, Snapshot: update, Steps: []CaseMutationStep{{To: to, Event: TransitionEvent{ID: stableID("event", key), EventType: eventType, ActorType: actorType, ActorID: actor, PayloadJSON: payload}}}}
+	var mutation CaseMutationResult
+	var err error
+	if recovery == nil {
+		mutation, err = o.store.ApplyCaseMutation(ctx, mutationRequest)
+	} else {
+		mutation, err = o.store.ApplyBrowserRecoveryCaseMutation(ctx, mutationRequest, recovery.BrowserRecoveryOperationRequest, recovery.ClaimToken)
+	}
 	if err != nil {
 		return IncidentCase{}, err
 	}

@@ -910,6 +910,9 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 	} else if found {
 		return result, fmt.Errorf("%w: reset cancellation key %q", ErrIdempotencyConflict, reset.IdempotencyKey)
 	}
+	if err := rejectUnresolvedBrowserRecovery(ctx, tx, reset.CaseID); err != nil {
+		return result, err
+	}
 
 	incident, err := getCase(ctx, tx, reset.CaseID)
 	if err != nil {
@@ -2168,7 +2171,19 @@ func (m CaseMutation) clone() CaseMutation {
 	return cloned
 }
 
-func (s *CaseStore) ApplyCaseMutation(ctx context.Context, mutation CaseMutation) (result CaseMutationResult, err error) {
+func (s *CaseStore) ApplyCaseMutation(ctx context.Context, mutation CaseMutation) (CaseMutationResult, error) {
+	return s.applyCaseMutation(ctx, mutation, nil)
+}
+
+func (s *CaseStore) ApplyBrowserRecoveryCaseMutation(ctx context.Context, mutation CaseMutation, request BrowserRecoveryOperationRequest, claimToken string) (CaseMutationResult, error) {
+	consume, err := newBrowserRecoveryMutationConsume(mutation, request, claimToken)
+	if err != nil {
+		return CaseMutationResult{}, err
+	}
+	return s.applyCaseMutation(ctx, mutation, consume)
+}
+
+func (s *CaseStore) applyCaseMutation(ctx context.Context, mutation CaseMutation, consume *browserRecoveryMutationConsume) (result CaseMutationResult, err error) {
 	mutation = mutation.clone()
 	if blank(mutation.CaseID) || mutation.ExpectedVersion < 1 || blank(mutation.IdempotencyKey) {
 		return result, errors.New("compound Case mutation requires case ID, positive expected version, and idempotency key")
@@ -2212,10 +2227,34 @@ func (s *CaseStore) ApplyCaseMutation(ctx context.Context, mutation CaseMutation
 	queryErr := tx.QueryRowContext(ctx, `SELECT request_fingerprint, result_case_json FROM transition_events WHERE idempotency_key = ?`, mutation.IdempotencyKey).Scan(&existingFingerprint, &resultJSON)
 	if queryErr == nil {
 		if existingFingerprint != fingerprint {
-			return result, fmt.Errorf("%w: compound mutation key %q", ErrIdempotencyConflict, mutation.IdempotencyKey)
+			return result, ErrIdempotencyConflict
 		}
 		if err = json.Unmarshal([]byte(resultJSON), &result.Case); err != nil {
 			return result, fmt.Errorf("decode compound replay: %w", err)
+		}
+		if consume != nil {
+			operation, consumeErr := loadBrowserRecoveryMutationConsume(ctx, tx, consume)
+			if consumeErr != nil {
+				return result, consumeErr
+			}
+			blocked, blockedErr := getAttempt(ctx, tx, consume.Request.AttemptID)
+			if blockedErr != nil || validateBrowserRecoveryContinuationMutation(mutation, consume.Request, blocked) != nil {
+				return result, ErrIdempotencyConflict
+			}
+			switch operation.Status {
+			case BrowserRecoveryEffectSucceeded:
+				if consumeErr = consumeBrowserRecoveryOperationTx(ctx, tx, consume, result.Case); consumeErr != nil {
+					return result, consumeErr
+				}
+			case BrowserRecoveryContinued:
+				if operation.ResultCase.ID != result.Case.ID || operation.ResultCase.Version != result.Case.Version || operation.ResultCase.CurrentAttemptID != result.Case.CurrentAttemptID {
+					return result, ErrIdempotencyConflict
+				}
+			case BrowserRecoveryClaimed, BrowserRecoveryOutcomeUncertain:
+				return result, ErrBrowserRecoveryOutcomeUncertain
+			default:
+				return result, ErrIdempotencyConflict
+			}
 		}
 		result.Replay = true
 		if err = tx.Commit(); err != nil {
@@ -2226,12 +2265,36 @@ func (s *CaseStore) ApplyCaseMutation(ctx context.Context, mutation CaseMutation
 	if !errors.Is(queryErr, sql.ErrNoRows) {
 		return result, queryErr
 	}
+	var recoveryOperation BrowserRecoveryOperation
+	if consume == nil {
+		if err = rejectUnresolvedBrowserRecovery(ctx, tx, mutation.CaseID); err != nil {
+			return result, err
+		}
+	} else {
+		recoveryOperation, err = loadBrowserRecoveryMutationConsume(ctx, tx, consume)
+		if err != nil {
+			return result, err
+		}
+		switch recoveryOperation.Status {
+		case BrowserRecoveryEffectSucceeded:
+		case BrowserRecoveryClaimed, BrowserRecoveryOutcomeUncertain:
+			return result, ErrBrowserRecoveryOutcomeUncertain
+		default:
+			return result, ErrIdempotencyConflict
+		}
+	}
 	incident, err := getCase(ctx, tx, mutation.CaseID)
 	if err != nil {
 		return result, err
 	}
 	if incident.Version != mutation.ExpectedVersion {
 		return result, fmt.Errorf("%w: expected %d, current %d", ErrCaseVersionConflict, mutation.ExpectedVersion, incident.Version)
+	}
+	if consume != nil {
+		blocked, blockedErr := getAttempt(ctx, tx, consume.Request.AttemptID)
+		if blockedErr != nil || incident.Status != CaseWaitingEvidence || incident.CurrentAttemptID != consume.Request.AttemptID || incident.CycleNumber != consume.Request.CycleNumber || validateBrowserRecoveryContinuationMutation(mutation, consume.Request, blocked) != nil {
+			return result, ErrIdempotencyConflict
+		}
 	}
 	finishedIDs := map[string]struct{}{}
 	for _, attempt := range mutation.FinishAttempts {
@@ -2412,6 +2475,11 @@ func (s *CaseStore) ApplyCaseMutation(ctx context.Context, mutation CaseMutation
 		return result, err
 	}
 	resultJSONBytes, _ := json.Marshal(incident.Clone())
+	if consume != nil {
+		if err = consumeBrowserRecoveryOperationTx(ctx, tx, consume, incident); err != nil {
+			return result, err
+		}
+	}
 	updateResult, execErr := tx.ExecContext(ctx, `UPDATE incident_cases SET status=?,cycle_number=?,current_attempt_id=?,selected_bot_key=?,version=?,updated_at=?,closed_at=? WHERE id=? AND version=?`, incident.Status, incident.CycleNumber, incident.CurrentAttemptID, incident.SelectedBotKey, incident.Version, formatStoreTime(now), formatOptionalStoreTime(incident.ClosedAt), incident.ID, mutation.ExpectedVersion)
 	if execErr != nil {
 		return result, execErr
@@ -2656,6 +2724,9 @@ func (s *CaseStore) TransitionWithUpdate(ctx context.Context, caseID string, exp
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return IncidentCase{}, false, fmt.Errorf("check transition idempotency: %w", err)
+	}
+	if err = rejectUnresolvedBrowserRecovery(ctx, tx, caseID); err != nil {
+		return IncidentCase{}, false, err
 	}
 
 	updated, err = getCase(ctx, tx, caseID)

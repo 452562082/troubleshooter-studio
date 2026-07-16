@@ -1,6 +1,6 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { EventsOn } from '../../wailsjs/runtime/runtime'
-import { getIncidentCase, listIncidentCases, normalizeIncidentCaseEvent, type CaseStatus, type IncidentCase, type IncidentCaseDetail, type IncidentCaseEventPayload, type Phase } from './bridge/bugWorkflow'
+import { getIncidentCase, listIncidentCases, normalizeIncidentCaseEvent, type CaseStatus, type IncidentCase, type IncidentCaseDetail, type IncidentCaseEventPayload, type IncidentPhaseEvent, type Phase } from './bridge/bugWorkflow'
 
 type Dependencies = {
   listCases?: () => Promise<IncidentCase[]>
@@ -11,6 +11,8 @@ type Dependencies = {
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error)
 
 export const terminalCaseStatuses = new Set<CaseStatus>(['fixed_verified', 'legacy_archived', 'reset_archived'])
+const browserRunningCaseStatuses = new Set<CaseStatus>(['validating', 'regression_validating'])
+const maxPhaseEventsPerAttempt = 100
 
 export function casesForBug(cases: IncidentCase[], bugID: string): IncidentCase[] {
   return cases
@@ -52,6 +54,7 @@ export function createIncidentCaseController(dependencies: Dependencies = {}) {
   const selectedCaseID = ref('')
   const loading = ref(false)
   const error = ref('')
+  const phaseEvents = ref<Record<string, IncidentPhaseEvent[]>>({})
   const pendingKeys = ref(new Set<string>())
   const pendingPromises = new Map<string, Promise<unknown>>()
   let detailGeneration = 0
@@ -63,7 +66,14 @@ export function createIncidentCaseController(dependencies: Dependencies = {}) {
     cases.value = next.sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || '') || b.version - a.version)
   }
 
-  function applySnapshot(snapshot: IncidentCaseDetail) {
+  function reconcilePhaseEvents(snapshot: IncidentCaseDetail) {
+    const current = detail.value
+    const changedCase = Boolean(current && current.case.id !== snapshot.case.id)
+    const changedAttempt = Boolean(current?.case.id === snapshot.case.id && current.case.current_attempt_id !== snapshot.case.current_attempt_id)
+    if (changedCase || changedAttempt || !browserRunningCaseStatuses.has(snapshot.case.status)) phaseEvents.value = {}
+  }
+
+  function commitSnapshot(snapshot: IncidentCaseDetail) {
     const current = detail.value
     if (current?.case.id === snapshot.case.id && current.case.version >= snapshot.case.version) return false
     detail.value = snapshot
@@ -73,13 +83,56 @@ export function createIncidentCaseController(dependencies: Dependencies = {}) {
     return true
   }
 
+  function snapshotIsOlder(snapshot: IncidentCaseDetail): boolean {
+    const current = detail.value
+    return Boolean(current?.case.id === snapshot.case.id && current.case.version > snapshot.case.version)
+  }
+
+  function applySnapshot(snapshot: IncidentCaseDetail) {
+    if (snapshotIsOlder(snapshot)) return false
+    const current = detail.value
+    if (current?.case.id !== snapshot.case.id || current.case.version !== snapshot.case.version) reconcilePhaseEvents(snapshot)
+    return commitSnapshot(snapshot)
+  }
+
+  function appendPhaseEvent(snapshot: IncidentCaseDetail, event?: IncidentPhaseEvent) {
+    if (!event || !browserRunningCaseStatuses.has(snapshot.case.status)) return
+    const attemptID = String(event.meta.attempt_id ?? snapshot.case.current_attempt_id ?? '').trim()
+    if (!attemptID || attemptID !== snapshot.case.current_attempt_id) return
+    const identity = [
+      event.at || '',
+      event.type || '',
+      event.message || '',
+      String(event.meta.browser_code ?? ''),
+      String(event.meta.action_id ?? ''),
+    ].join('\u001f')
+    const existing = phaseEvents.value[attemptID] || []
+    const duplicate = existing.some(item => [
+      item.at || '',
+      item.type || '',
+      item.message || '',
+      String(item.meta.browser_code ?? ''),
+      String(item.meta.action_id ?? ''),
+    ].join('\u001f') === identity)
+    if (duplicate) return
+    phaseEvents.value = {
+      ...phaseEvents.value,
+      [attemptID]: [...existing, event].slice(-maxPhaseEventsPerAttempt),
+    }
+  }
+
   function acceptEvent(payload: IncidentCaseEventPayload) {
     if (payload.kind === 'startup_error') {
       error.value = payload.error.message
       return
     }
     upsertCase(payload.case)
-    if (!selectedCaseID.value || selectedCaseID.value === payload.case.id) applySnapshot(payload.snapshot)
+    if ((!selectedCaseID.value || selectedCaseID.value === payload.case.id) && !snapshotIsOlder(payload.snapshot)) {
+      const current = detail.value
+      if (current?.case.id !== payload.snapshot.case.id || current.case.version !== payload.snapshot.case.version) reconcilePhaseEvents(payload.snapshot)
+      appendPhaseEvent(payload.snapshot, payload.phase_event)
+      commitSnapshot(payload.snapshot)
+    }
   }
 
   async function refreshCases() {
@@ -135,7 +188,7 @@ export function createIncidentCaseController(dependencies: Dependencies = {}) {
     return promise
   }
 
-  return { cases, detail, selectedCaseID, loading, error, pending: computed(() => pendingKeys.value.size > 0), applySnapshot, acceptEvent, refreshCases, refreshDetail, selectCase, runOnce }
+  return { cases, detail, selectedCaseID, loading, error, phaseEvents, pending: computed(() => pendingKeys.value.size > 0), applySnapshot, acceptEvent, refreshCases, refreshDetail, selectCase, runOnce }
 }
 
 export function useIncidentCase(dependencies: Dependencies = {}) {

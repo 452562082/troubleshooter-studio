@@ -1,0 +1,66 @@
+import { mount } from '@vue/test-utils'
+import { describe, expect, it } from 'vitest'
+import type { IncidentPhaseEvent, PhaseAttempt } from '../lib/bridge/bugWorkflow'
+import BugBrowserProgress from './BugBrowserProgress.vue'
+
+function attempt(errorCode = '', output: Record<string, unknown> = {}): PhaseAttempt {
+  return {
+    id: 'attempt-1', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: errorCode ? 'failed' : 'running',
+    agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: output, parent_attempt_id: '', started_at: '',
+    error_code: errorCode, error_message: 'Playwright 未安装，请提供 HAR /Users/alice/private/trace.zip', usage: {},
+  }
+}
+
+const progress: IncidentPhaseEvent[] = [
+  { type: 'browser_progress', message: '准备验证浏览器', meta: { attempt_id: 'attempt-1', browser_code: 'runtime_preparing' } },
+  { type: 'browser_progress', message: '执行 2/4：切换到“用户”', meta: { attempt_id: 'attempt-1', browser_code: 'action_started', action_id: 'open-users', current: 2, total: 4 } },
+]
+
+describe('BugBrowserProgress', () => {
+  it('renders structured browser progress without exposing raw attempt errors', () => {
+    const wrapper = mount(BugBrowserProgress, { props: { attempt: attempt(), events: progress, systemID: 'base', environment: 'test' } })
+
+    expect(wrapper.text()).toContain('准备验证浏览器')
+    expect(wrapper.text()).toContain('执行 2/4：切换到“用户”')
+    expect(wrapper.text()).not.toContain('Playwright 未安装，请提供 HAR')
+    expect(wrapper.text()).not.toContain('/Users/alice/private/trace.zip')
+  })
+
+  it('offers visible login and session clearing without a credentials field', async () => {
+    const wrapper = mount(BugBrowserProgress, {
+      props: {
+        attempt: attempt('browser_login_required', { error_code: 'browser_login_required', application_origin: 'https://app.test', login_origin: 'https://login.test' }),
+        events: [], systemID: 'base', environment: 'test',
+      },
+    })
+
+    expect(wrapper.text()).toContain('base · test')
+    expect(wrapper.text()).toContain('https://login.test')
+    expect(wrapper.get('[data-browser-action="login"]').text()).toBe('打开验证浏览器完成登录')
+    expect(wrapper.get('[data-browser-action="clear-session"]').text()).toBe('清除此环境登录态')
+    expect(wrapper.find('input[type="password"]').exists()).toBe(false)
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    await wrapper.get('[data-browser-action="login"]').trigger('click')
+    await wrapper.get('[data-browser-action="clear-session"]').trigger('click')
+    expect(wrapper.emitted('action')).toEqual([['login'], ['clear-session']])
+  })
+
+  it('separates runtime repair, validator deployment, locator and business gaps', async () => {
+    const runtime = mount(BugBrowserProgress, { props: { attempt: attempt('browser_runtime_broken'), events: [], systemID: 'base', environment: 'test' } })
+    expect(runtime.text()).toContain('验证浏览器环境不可用')
+    expect(runtime.get('[data-browser-action="repair-runtime"]').text()).toBe('修复浏览器环境并重试')
+    expect(runtime.text()).not.toContain('Playwright 未安装，请提供 HAR')
+
+    const validator = mount(BugBrowserProgress, { props: { attempt: attempt('validator_not_installed'), events: [], systemID: 'base', environment: 'test' } })
+    expect(validator.text()).toContain('验证机器人尚未部署')
+    expect(validator.get('[data-browser-action="redeploy-validator"]').text()).toBe('重新部署验证机器人')
+
+    const locator = mount(BugBrowserProgress, { props: { attempt: attempt('browser_locator_failed'), events: [], systemID: 'base', environment: 'test' } })
+    expect(locator.text()).toContain('页面元素定位失败')
+    expect(locator.find('[data-browser-action="repair-runtime"]').exists()).toBe(false)
+
+    const business = mount(BugBrowserProgress, { props: { attempt: attempt('browser_url_required'), events: [], systemID: 'base', environment: 'test' } })
+    expect(business.text()).toContain('缺少可访问的页面地址')
+    expect(business.find('[data-browser-action="repair-runtime"]').exists()).toBe(false)
+  })
+})

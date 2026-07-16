@@ -47,6 +47,134 @@ describe('incident Case controller', () => {
     expect(controller.detail.value?.case.version).toBe(7)
   })
 
+  it('retains browser progress even when the Case snapshot version is unchanged', () => {
+    const controller = createIncidentCaseController()
+    const snapshot = detail(3)
+    snapshot.attempts = [{ id: 'attempt-1', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'running', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }]
+    controller.applySnapshot(snapshot)
+
+    controller.acceptEvent({
+      kind: 'snapshot',
+      case: snapshot.case,
+      snapshot,
+      phase_event: {
+        at: '2026-07-15T10:00:02Z',
+        type: 'browser_progress',
+        message: '执行 2/4：切换用户页',
+        meta: { case_id: 'case-1', attempt_id: 'attempt-1', browser_code: 'action_started', action_id: 'open-users', current: 2, total: 4 },
+      },
+    })
+
+    expect(controller.phaseEvents.value['attempt-1']).toHaveLength(1)
+    expect(controller.phaseEvents.value['attempt-1'][0].message).toContain('执行 2/4')
+    expect(controller.detail.value?.case.version).toBe(3)
+  })
+
+  it('deduplicates browser progress identity and caps each attempt at the newest 100 events', () => {
+    const controller = createIncidentCaseController()
+    const snapshot = detail(4)
+    snapshot.attempts = [{ id: 'attempt-1', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'running', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }]
+    controller.applySnapshot(snapshot)
+
+    for (let index = 0; index < 101; index++) {
+      controller.acceptEvent({
+        kind: 'snapshot',
+        case: snapshot.case,
+        snapshot,
+        phase_event: {
+          at: `2026-07-15T10:${String(index).padStart(2, '0')}:00Z`,
+          type: 'browser_progress',
+          message: `执行 ${index}`,
+          meta: { attempt_id: 'attempt-1', browser_code: 'action_started', action_id: `action-${index}` },
+        },
+      })
+    }
+    controller.acceptEvent({
+      kind: 'snapshot',
+      case: snapshot.case,
+      snapshot,
+      phase_event: {
+        at: '2026-07-15T10:100:00Z',
+        type: 'browser_progress',
+        message: '执行 100',
+        meta: { attempt_id: 'attempt-1', browser_code: 'action_started', action_id: 'action-100' },
+      },
+    })
+
+    expect(controller.phaseEvents.value['attempt-1']).toHaveLength(100)
+    expect(controller.phaseEvents.value['attempt-1'][0].message).toBe('执行 1')
+    expect(controller.phaseEvents.value['attempt-1'][99].message).toBe('执行 100')
+  })
+
+  it('clears stale browser progress for a new current attempt and when the Case stops running', () => {
+    const controller = createIncidentCaseController()
+    const first = detail(5)
+    first.attempts = [{ id: 'attempt-1', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'running', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }]
+    controller.applySnapshot(first)
+    controller.acceptEvent({ kind: 'snapshot', case: first.case, snapshot: first, phase_event: { type: 'browser_progress', message: '准备验证浏览器', meta: { attempt_id: 'attempt-1', browser_code: 'runtime_preparing' } } })
+    expect(controller.phaseEvents.value['attempt-1']).toHaveLength(1)
+
+    const second = detail(6)
+    second.case.current_attempt_id = 'attempt-2'
+    second.attempts = [{ ...first.attempts[0], id: 'attempt-2' }]
+    controller.acceptEvent({ kind: 'snapshot', case: second.case, snapshot: second, phase_event: { type: 'browser_progress', message: '执行 1/2：打开页面', meta: { attempt_id: 'attempt-2', browser_code: 'action_started', action_id: 'goto' } } })
+    expect(controller.phaseEvents.value['attempt-1']).toBeUndefined()
+    expect(controller.phaseEvents.value['attempt-2']).toHaveLength(1)
+
+    const stopped = detail(7)
+    stopped.case.status = 'waiting_evidence'
+    stopped.case.current_attempt_id = 'attempt-2'
+    stopped.attempts = [{ ...second.attempts[0], status: 'failed', error_code: 'browser_locator_failed' }]
+    controller.acceptEvent({ kind: 'snapshot', case: stopped.case, snapshot: stopped })
+    expect(controller.phaseEvents.value).toEqual({})
+  })
+
+  it('does not let an unselected Case event clear the selected Case browser progress', () => {
+    const controller = createIncidentCaseController()
+    const selected = detail(5, 'case-selected')
+    controller.selectedCaseID.value = selected.case.id
+    controller.applySnapshot(selected)
+    controller.acceptEvent({
+      kind: 'snapshot',
+      case: selected.case,
+      snapshot: selected,
+      phase_event: { type: 'browser_progress', message: '准备验证浏览器', meta: { attempt_id: 'attempt-1', browser_code: 'runtime_preparing' } },
+    })
+
+    const background = detail(8, 'case-background')
+    background.case.current_attempt_id = 'attempt-background'
+    controller.acceptEvent({
+      kind: 'snapshot',
+      case: background.case,
+      snapshot: background,
+      phase_event: { type: 'browser_progress', message: '后台 Case 进度', meta: { attempt_id: 'attempt-background', browser_code: 'runtime_preparing' } },
+    })
+
+    expect(controller.phaseEvents.value['attempt-1']?.map(item => item.message)).toEqual(['准备验证浏览器'])
+    expect(controller.phaseEvents.value['attempt-background']).toBeUndefined()
+  })
+
+  it('does not let an older snapshot clear newer-attempt browser progress', () => {
+    const controller = createIncidentCaseController()
+    const current = detail(7)
+    current.case.current_attempt_id = 'attempt-2'
+    controller.selectedCaseID.value = current.case.id
+    controller.applySnapshot(current)
+    controller.acceptEvent({
+      kind: 'snapshot',
+      case: current.case,
+      snapshot: current,
+      phase_event: { type: 'browser_progress', message: '执行 2/4：切换用户页', meta: { attempt_id: 'attempt-2', browser_code: 'action_started', action_id: 'open-users' } },
+    })
+
+    const stale = detail(6)
+    stale.case.status = 'waiting_evidence'
+    controller.acceptEvent({ kind: 'snapshot', case: stale.case, snapshot: stale })
+
+    expect(controller.detail.value?.case.version).toBe(7)
+    expect(controller.phaseEvents.value['attempt-2']?.map(item => item.message)).toEqual(['执行 2/4：切换用户页'])
+  })
+
   it.each([
     ['validation', 'reproduce'], ['investigation', undefined], ['fix', undefined], ['regression', 'regression'],
   ] as const)('continues waiting evidence from the exact latest %s attempt', (phase, expectedMode) => {

@@ -5,15 +5,20 @@ import {
   ackIncidentWorkflowReminder,
   cancelIncidentAttempt,
   continueIncidentCase,
+  clearIncidentBrowserSession,
+  getIncidentArtifactPreview,
   getIncidentCase,
   listIncidentCases,
   listPendingIncidentWorkflowReminders,
   notifyIncidentDeployed,
   normalizeIncidentCaseEvent,
+  openIncidentBrowserLogin,
+  repairIncidentBrowserRuntime,
   resetIncidentCase,
   resetIncidentCaseWithWarnings,
   IncidentWorkflowCommandError,
   isIncidentWorkflowConflict,
+  saveIncidentArtifact,
   startIncidentCase,
 } from './bugWorkflow'
 
@@ -75,6 +80,51 @@ describe('incident workflow bridge', () => {
     await expect(notifyIncidentDeployed({ ...base, observed_version: 'build-1' })).rejects.toThrow(/桌面 app/)
     await expect(cancelIncidentAttempt({ ...base, attempt_id: 'attempt-1' })).rejects.toThrow(/桌面 app/)
     await expect(resetIncidentCase({ ...base, new_case_id: 'case-2', bot_key: 'base|codex' })).rejects.toThrow(/桌面 app/)
+    const browser = { ...base, attempt_id: 'attempt-1' }
+    await expect(openIncidentBrowserLogin(browser)).rejects.toThrow(/桌面 app/)
+    await expect(repairIncidentBrowserRuntime(browser)).rejects.toThrow(/桌面 app/)
+    await expect(clearIncidentBrowserSession(browser)).rejects.toThrow(/桌面 app/)
+    await expect(getIncidentArtifactPreview('case-1', 'shot-1')).rejects.toThrow(/桌面 app/)
+    await expect(saveIncidentArtifact('case-1', 'shot-1')).rejects.toThrow(/桌面 app/)
+  })
+
+  it('forwards exact browser recovery inputs through the desktop bridge', async () => {
+    const login = vi.fn().mockResolvedValue({ id: 'case-1', status: 'validating', version: 8 })
+    const repair = vi.fn().mockResolvedValue({ id: 'case-1', status: 'validating', version: 9 })
+    const clear = vi.fn().mockResolvedValue(undefined)
+    ;(window as any).go = { main: { App: {
+      OpenIncidentBrowserLogin: login,
+      RepairIncidentBrowserRuntime: repair,
+      ClearIncidentBrowserSession: clear,
+    } } }
+    const input = { case_id: 'case-1', attempt_id: 'attempt-1', expected_version: 7, idempotency_key: 'browser-login:case-1:attempt-1:v7', actor_id: 'desktop-user' }
+
+    await expect(openIncidentBrowserLogin(input)).resolves.toMatchObject({ id: 'case-1', version: 8 })
+    await expect(repairIncidentBrowserRuntime(input)).resolves.toMatchObject({ id: 'case-1', version: 9 })
+    await expect(clearIncidentBrowserSession(input)).resolves.toBeUndefined()
+    expect(login).toHaveBeenCalledWith(input)
+    expect(repair).toHaveBeenCalledWith(input)
+    expect(clear).toHaveBeenCalledWith(input)
+  })
+
+  it('returns only strict PNG preview data and hides save destinations behind a boolean', async () => {
+    const preview = vi.fn().mockResolvedValue({ artifact_id: 'shot-1', mime_type: 'image/png', base64_data: 'iVBORw0KGgo=', size: 8 })
+    const save = vi.fn().mockResolvedValue('/Users/alice/Desktop/private-screenshot.png')
+    ;(window as any).go = { main: { App: { GetIncidentArtifactPreview: preview, SaveIncidentArtifact: save } } }
+
+    await expect(getIncidentArtifactPreview('case-1', 'shot-1')).resolves.toEqual({ artifact_id: 'shot-1', mime_type: 'image/png', base64_data: 'iVBORw0KGgo=', size: 8 })
+    await expect(saveIncidentArtifact('case-1', 'shot-1')).resolves.toBe(true)
+    save.mockResolvedValueOnce('')
+    await expect(saveIncidentArtifact('case-1', 'shot-1')).resolves.toBe(false)
+    expect(preview).toHaveBeenCalledWith('case-1', 'shot-1')
+    expect(save).toHaveBeenCalledWith('case-1', 'shot-1')
+  })
+
+  it('rejects malformed artifact preview payloads before they reach an image source', async () => {
+    const preview = vi.fn().mockResolvedValue({ artifact_id: 'shot-1', mime_type: 'text/html', base64_data: 'PHNjcmlwdD4=', size: 9 })
+    ;(window as any).go = { main: { App: { GetIncidentArtifactPreview: preview } } }
+
+    await expect(getIncidentArtifactPreview('case-1', 'shot-1')).rejects.toThrow(/PNG/)
   })
 
   it('forwards mutation inputs without coercing expected_version', async () => {

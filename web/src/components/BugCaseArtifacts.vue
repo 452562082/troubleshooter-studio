@@ -1,14 +1,28 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import type { IncidentCaseDetail, PhaseAttempt } from '../lib/bridge/bugWorkflow'
+import { getIncidentArtifactPreview, saveIncidentArtifact, type EvidenceArtifact, type IncidentCaseDetail, type PhaseAttempt } from '../lib/bridge/bugWorkflow'
 import BugStageAttemptOutput from './BugStageAttemptOutput.vue'
 
 const props = defineProps<{ detail: IncidentCaseDetail }>()
 
 const investigation = computed(() => [...props.detail.attempts].reverse().find(item => item.phase === 'investigation'))
-const currentAttempts = computed(() => props.detail.attempts.filter(item => item.phase !== 'legacy'))
+function safeAttemptForDisplay(attempt: PhaseAttempt): PhaseAttempt {
+  const outputCode = typeof attempt.output_json?.error_code === 'string' ? attempt.output_json.error_code.trim() : ''
+  const code = attempt.error_code?.trim() || outputCode
+  if (code === 'validator_not_installed' || code.startsWith('browser_')) {
+    return { ...attempt, error_message: '', output_json: code ? { error_code: code } : {} }
+  }
+  return attempt
+}
+
+const currentAttempts = computed(() => props.detail.attempts.filter(item => item.phase !== 'legacy').map(safeAttemptForDisplay))
 const latestCurrentAttemptID = computed(() => currentAttempts.value[currentAttempts.value.length - 1]?.id || '')
 const attemptOutputScroll = ref<HTMLElement | null>(null)
+const previewURLs = ref<Record<string, string>>({})
+const previewErrors = ref<Record<string, string>>({})
+const saveStates = ref<Record<string, 'saving' | 'saved' | 'cancelled' | 'failed'>>({})
+const selectedPreviewID = ref('')
+let previewGeneration = 0
 const legacyProjection = computed(() => props.detail.attempts.filter(attempt => attempt.phase === 'legacy').map(attempt => {
   const output = attempt.output_json || {}
   const events = Array.isArray(output.events) ? output.events.flatMap(event => {
@@ -20,6 +34,55 @@ const legacyProjection = computed(() => props.detail.attempts.filter(attempt => 
   const finalMessage = typeof output.final_message === 'string' ? output.final_message : ''
   return { attempt, events, finalBlocks: limitedMarkdown(finalMessage) }
 }))
+const selectedPreview = computed(() => props.detail.artifacts.find(artifact => artifact.id === selectedPreviewID.value && artifact.kind === 'screenshot'))
+
+function artifactLabel(kind: string): string {
+  return ({ screenshot: '渲染截图', network: 'Network 记录', console: 'Console 记录', browser_actions: '浏览器操作轨迹' } as Record<string, string>)[kind] || '验证证据'
+}
+
+async function loadScreenshotPreviews(): Promise<void> {
+  const generation = ++previewGeneration
+  previewURLs.value = {}
+  previewErrors.value = {}
+  selectedPreviewID.value = ''
+  const screenshots = props.detail.artifacts.filter(artifact => artifact.kind === 'screenshot')
+  await Promise.all(screenshots.map(async artifact => {
+    try {
+      const preview = await getIncidentArtifactPreview(props.detail.case.id, artifact.id)
+      if (generation !== previewGeneration) return
+      previewURLs.value = { ...previewURLs.value, [artifact.id]: `data:image/png;base64,${preview.base64_data}` }
+    } catch {
+      if (generation !== previewGeneration) return
+      previewErrors.value = { ...previewErrors.value, [artifact.id]: '无法预览截图，请稍后重试。' }
+    }
+  }))
+}
+
+function openPreview(artifact: EvidenceArtifact) {
+  if (previewURLs.value[artifact.id]) selectedPreviewID.value = artifact.id
+}
+
+function closePreview() {
+  selectedPreviewID.value = ''
+}
+
+async function saveArtifact(artifact: EvidenceArtifact): Promise<void> {
+  saveStates.value = { ...saveStates.value, [artifact.id]: 'saving' }
+  try {
+    const saved = await saveIncidentArtifact(props.detail.case.id, artifact.id)
+    saveStates.value = { ...saveStates.value, [artifact.id]: saved ? 'saved' : 'cancelled' }
+  } catch {
+    saveStates.value = { ...saveStates.value, [artifact.id]: 'failed' }
+  }
+}
+
+function saveStatus(artifactID: string): string {
+  const state = saveStates.value[artifactID]
+  if (state === 'saved') return '已保存副本'
+  if (state === 'cancelled') return '已取消保存'
+  if (state === 'failed') return '保存副本失败，请重试。'
+  return ''
+}
 
 type InlineToken = { kind: 'text' | 'strong' | 'code'; text: string }
 type MarkdownBlock =
@@ -108,6 +171,12 @@ watch(
   followLatestStageOutput,
   { immediate: true, deep: true },
 )
+
+watch(
+  () => [props.detail.case.id, props.detail.artifacts.map(artifact => `${artifact.id}:${artifact.kind}`).join('|')],
+  () => { saveStates.value = {}; void loadScreenshotPreviews() },
+  { immediate: true },
+)
 </script>
 
 <template>
@@ -115,14 +184,31 @@ watch(
     <section class="artifact-card" aria-labelledby="evidence-title">
       <h3 id="evidence-title">验证证据</h3>
       <p v-if="detail.artifacts.length === 0" class="empty-copy">尚无证据</p>
-      <article v-for="artifact in detail.artifacts" :key="artifact.id" class="artifact-item">
-        <strong>{{ artifact.kind || '证据' }}</strong>
-        <span>{{ artifact.environment || '-' }} · {{ artifact.version || '版本未知' }}</span>
-        <code>{{ artifact.path_or_reference }}</code>
+      <article v-for="artifact in detail.artifacts" :key="artifact.id" class="artifact-item evidence-item" :data-artifact-id="artifact.id">
+        <div class="artifact-item-heading">
+          <strong>{{ artifactLabel(artifact.kind) }}</strong>
+          <button class="btn artifact-save" type="button" :data-artifact-save="artifact.id" :disabled="saveStates[artifact.id] === 'saving'" @click="saveArtifact(artifact)">
+            {{ saveStates[artifact.id] === 'saving' ? '保存中…' : '保存副本' }}
+          </button>
+        </div>
+        <span>{{ artifact.captured_at || '采集时间未知' }} · {{ artifact.environment || '环境未知' }} · {{ artifact.version || '版本未知' }}</span>
         <small v-if="artifact.request_id">request {{ artifact.request_id }}</small>
         <small v-if="artifact.trace_id">trace {{ artifact.trace_id }}</small>
+        <button v-if="artifact.kind === 'screenshot' && previewURLs[artifact.id]" class="screenshot-preview" type="button" :data-artifact-preview="artifact.id" :aria-label="`打开${artifactLabel(artifact.kind)}原图`" @click="openPreview(artifact)">
+          <img :data-artifact-id="artifact.id" :src="previewURLs[artifact.id]" :alt="`${artifact.environment || '当前环境'}渲染截图缩略图`">
+        </button>
+        <p v-if="previewErrors[artifact.id]" class="artifact-local-error" role="status">{{ previewErrors[artifact.id] }}</p>
+        <p v-if="saveStatus(artifact.id)" :class="saveStates[artifact.id] === 'failed' ? 'artifact-local-error' : 'artifact-local-status'" role="status">{{ saveStatus(artifact.id) }}</p>
       </article>
     </section>
+
+    <dialog v-if="selectedPreview && previewURLs[selectedPreview.id]" class="screenshot-dialog" open aria-modal="true" aria-labelledby="screenshot-dialog-title" @cancel.prevent="closePreview">
+      <header>
+        <h2 id="screenshot-dialog-title">渲染截图预览</h2>
+        <button class="btn" type="button" aria-label="关闭截图预览" @click="closePreview">关闭</button>
+      </header>
+      <img :src="previewURLs[selectedPreview.id]" :alt="`${selectedPreview.environment || '当前环境'}渲染截图原图`">
+    </dialog>
 
     <section class="artifact-card" aria-labelledby="cause-title">
       <h3 id="cause-title">根因结论</h3>
@@ -214,6 +300,19 @@ watch(
 .artifact-item:first-of-type { border-top: 0; }
 .artifact-item strong { color: var(--c-ink); }
 .artifact-item span, .artifact-item small, .empty-copy { color: var(--c-muted); }
+.artifact-item-heading { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
+.artifact-save { min-height: 36px; flex: 0 0 auto; padding-inline: 10px; font-size: var(--fs-xs); }
+.screenshot-preview { display: block; width: 100%; min-height: 88px; padding: 0; overflow: hidden; border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf-2); cursor: zoom-in; }
+.screenshot-preview img { display: block; width: 100%; max-height: 240px; object-fit: contain; background: #0f172a; }
+.screenshot-preview:focus-visible, .artifact-save:focus-visible, .screenshot-dialog button:focus-visible { outline: 3px solid rgba(37, 99, 235, .55); outline-offset: 2px; }
+.artifact-local-error, .artifact-local-status { margin: 0; font-size: var(--fs-xs); line-height: 1.5; }
+.artifact-local-error { color: var(--c-danger); }
+.artifact-local-status { color: var(--c-success); }
+.screenshot-dialog { position: fixed; inset: 0; z-index: 80; width: min(1040px, calc(100vw - 32px)); max-height: calc(100vh - 32px); margin: auto; padding: var(--sp-4); overflow: auto; border: 1px solid var(--c-line-2); border-radius: var(--r-lg); background: var(--c-surf); color: var(--c-text); box-shadow: 0 24px 70px rgba(15, 23, 42, .35); }
+.screenshot-dialog::backdrop { background: rgba(15, 23, 42, .65); }
+.screenshot-dialog header { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); margin-bottom: var(--sp-3); }
+.screenshot-dialog h2 { margin: 0; color: var(--c-ink); font-size: var(--fs-lg); }
+.screenshot-dialog > img { display: block; width: 100%; max-height: calc(100vh - 130px); object-fit: contain; background: #0f172a; }
 code, pre { max-width: 100%; margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; color: var(--c-text); font: inherit; font-size: var(--fs-sm); line-height: 1.55; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .empty-copy { margin: 0; font-size: var(--fs-sm); }

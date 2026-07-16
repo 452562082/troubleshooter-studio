@@ -45,6 +45,47 @@ describe('BugCaseLifecycle', () => {
     expect(primaryActionFor(incident('fixed_verified'))).toBeUndefined()
   })
 
+  it.each(['browser_login_required', 'browser_runtime_broken', 'validator_not_installed', 'browser_verifier_failed'])('does not map browser system code %s to the generic evidence textarea', errorCode => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'validation-1'
+    snapshot.attempts = [{ id: 'validation-1', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: errorCode }, parent_attempt_id: '', started_at: '', error_code: errorCode, error_message: 'private runtime path', usage: {} }]
+
+    expect(primaryActionFor(snapshot)).toBeUndefined()
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    expect(wrapper.find('.primary-action').exists()).toBe(false)
+    expect(wrapper.find('#case-supplement').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('private runtime path')
+  })
+
+  it('renders login recovery controls and forwards exact browser actions', async () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'validation-login'
+    snapshot.attempts = [{ id: 'validation-login', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_login_required', application_origin: 'https://app.test', login_origin: 'https://login.test' }, parent_attempt_id: '', started_at: '', error_code: 'browser_login_required', error_message: '', usage: {} }]
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+
+    expect(wrapper.get('[data-browser-state="login"]').text()).toContain('需要登录')
+    await wrapper.get('[data-browser-action="login"]').trigger('click')
+    await wrapper.get('[data-browser-action="clear-session"]').trigger('click')
+    expect(wrapper.emitted('browser')).toEqual([['login'], ['clear-session']])
+  })
+
+  it.each([
+    ['browser_locator_failed', '补充页面定位信息并重试'],
+    ['browser_url_required', '补充页面地址并重试'],
+    ['browser_assertion_failed', '补充业务预期并重试'],
+  ])('keeps browser evidence gap %s distinct from system recovery', async (errorCode, expectedLabel) => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'validation-gap'
+    snapshot.attempts = [{ id: 'validation-gap', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: errorCode }, parent_attempt_id: '', started_at: '', error_code: errorCode, error_message: '', usage: {} }]
+
+    expect(primaryActionFor(snapshot)?.label).toBe(expectedLabel)
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    expect(wrapper.get('.primary-action').text()).toBe(expectedLabel)
+    await wrapper.get('.primary-action').trigger('click')
+    expect(wrapper.find('#case-supplement').exists()).toBe(true)
+    expect(wrapper.find('[data-browser-action="repair-runtime"]').exists()).toBe(false)
+  })
+
   it('explains that a failed regression carried fresh evidence into the next cycle', () => {
     const snapshot = detail('investigating')
     snapshot.case.cycle_number = 2

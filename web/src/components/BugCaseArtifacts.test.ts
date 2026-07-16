@@ -1,10 +1,20 @@
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { reactive } from 'vue'
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { IncidentCaseDetail } from '../lib/bridge/bugWorkflow'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { getIncidentArtifactPreview, saveIncidentArtifact, type IncidentCaseDetail } from '../lib/bridge/bugWorkflow'
 import BugCaseArtifacts from './BugCaseArtifacts.vue'
 import artifactSource from './BugCaseArtifacts.vue?raw'
 
+vi.mock('../lib/bridge/bugWorkflow', async importOriginal => ({
+  ...(await importOriginal<typeof import('../lib/bridge/bugWorkflow')>()),
+  getIncidentArtifactPreview: vi.fn(),
+  saveIncidentArtifact: vi.fn(),
+}))
+
+beforeEach(() => {
+  vi.mocked(getIncidentArtifactPreview).mockReset().mockResolvedValue({ artifact_id: 'evidence-1', mime_type: 'image/png', base64_data: 'iVBORw0KGgo=', size: 8 })
+  vi.mocked(saveIncidentArtifact).mockReset().mockResolvedValue(true)
+})
 afterEach(() => vi.restoreAllMocks())
 
 const detail: IncidentCaseDetail = {
@@ -31,6 +41,68 @@ describe('BugCaseArtifacts', () => {
     expect(wrapper.text()).toContain('build-1')
     expect(wrapper.text()).toContain('2026-07-11T12:05:00Z')
     expect(wrapper.text()).toContain('commit_mismatch')
+  })
+
+  it('previews screenshots from safe bytes and never exposes artifact paths in text or DOM URLs', async () => {
+    const privatePath = detail.artifacts[0].path_or_reference
+    const wrapper = mount(BugCaseArtifacts, { props: { detail } })
+    await flushPromises()
+
+    const image = wrapper.get<HTMLImageElement>('img[data-artifact-id="evidence-1"]')
+    expect(image.attributes('src')).toBe('data:image/png;base64,iVBORw0KGgo=')
+    expect(image.attributes('src')).not.toContain(privatePath)
+    expect(wrapper.text()).not.toContain(privatePath)
+    expect(wrapper.html()).not.toContain(privatePath)
+
+    await wrapper.get('[data-artifact-preview="evidence-1"]').trigger('click')
+    const dialog = wrapper.get('dialog[open]')
+    expect(dialog.attributes('aria-modal')).toBe('true')
+    expect(dialog.attributes('aria-labelledby')).toBeTruthy()
+    expect(dialog.get('img').attributes('src')).toBe('data:image/png;base64,iVBORw0KGgo=')
+  })
+
+  it('keeps screenshot preview failures local to their card', async () => {
+    vi.mocked(getIncidentArtifactPreview).mockRejectedValueOnce(new Error('/private/artifacts/shot.png is unreadable'))
+    const wrapper = mount(BugCaseArtifacts, { props: { detail } })
+    await flushPromises()
+
+    const card = wrapper.get('[data-artifact-id="evidence-1"]')
+    expect(card.text()).toContain('无法预览截图')
+    expect(card.text()).not.toContain('/private/artifacts/shot.png')
+    expect(wrapper.emitted()).toEqual({})
+  })
+
+  it('safely saves every artifact type without exposing the chosen destination', async () => {
+    const artifacts = [
+      detail.artifacts[0],
+      { ...detail.artifacts[0], id: 'network-1', kind: 'network', path_or_reference: '/private/network.json' },
+      { ...detail.artifacts[0], id: 'console-1', kind: 'console', path_or_reference: '/private/console.txt' },
+      { ...detail.artifacts[0], id: 'actions-1', kind: 'browser_actions', path_or_reference: '/private/browser-actions.json' },
+      { ...detail.artifacts[0], id: 'other-1', kind: 'log', path_or_reference: '/private/other.bin' },
+    ]
+    const wrapper = mount(BugCaseArtifacts, { props: { detail: { ...detail, artifacts } } })
+    await flushPromises()
+
+    const buttons = wrapper.findAll('[data-artifact-save]')
+    expect(buttons).toHaveLength(artifacts.length)
+    for (const button of buttons) await button.trigger('click')
+    await flushPromises()
+
+    expect(vi.mocked(saveIncidentArtifact).mock.calls).toEqual(artifacts.map(artifact => ['case-1', artifact.id]))
+    expect(wrapper.text()).not.toContain('/private/')
+    expect(wrapper.text()).toContain('已保存副本')
+  })
+
+  it('reports save failures only on the affected artifact card', async () => {
+    vi.mocked(saveIncidentArtifact).mockRejectedValueOnce(new Error('/Users/alice/Desktop denied'))
+    const wrapper = mount(BugCaseArtifacts, { props: { detail } })
+    await flushPromises()
+    await wrapper.get('[data-artifact-save="evidence-1"]').trigger('click')
+    await flushPromises()
+
+    const card = wrapper.get('[data-artifact-id="evidence-1"]')
+    expect(card.text()).toContain('保存副本失败')
+    expect(card.text()).not.toContain('/Users/alice/Desktop')
   })
 
   it('keeps the stage title outside a responsive keyboard-scrollable output region', () => {

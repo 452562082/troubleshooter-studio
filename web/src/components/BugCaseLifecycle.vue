@@ -1,5 +1,5 @@
 <script lang="ts">
-import type { IncidentCase } from '../lib/bridge/bugWorkflow'
+import type { IncidentCase, IncidentCaseDetail as ActionDetail } from '../lib/bridge/bugWorkflow'
 
 export type CasePrimaryAction = {
   kind: 'start_validation' | 'supply_evidence' | 'approve_fix' | 'continue_fix' | 'approve_merge' | 'supply_merge_decision' | 'notify_deployed' | 'supply_deployment_proof' | 'cancel_attempt' | 'continue_legacy'
@@ -7,7 +7,9 @@ export type CasePrimaryAction = {
   approval?: boolean
 }
 
-export function primaryActionFor(incident: IncidentCase): CasePrimaryAction | undefined {
+export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrimaryAction | undefined {
+  const detail = 'case' in subject ? subject : undefined
+  const incident = detail?.case || subject as IncidentCase
   const actions: Partial<Record<IncidentCase['status'], CasePrimaryAction>> = {
     pending_validation: { kind: 'start_validation', label: '开始验证' },
     validating: { kind: 'cancel_attempt', label: '停止当前验证' },
@@ -24,24 +26,39 @@ export function primaryActionFor(incident: IncidentCase): CasePrimaryAction | un
     regression_validating: { kind: 'cancel_attempt', label: '停止回归验证' },
     legacy_archived: { kind: 'continue_legacy', label: '从新一轮验证继续' },
   }
+  if (incident.status === 'waiting_evidence' && detail) {
+    const attempt = detail.attempts.find(item => item.id === incident.current_attempt_id)
+    const outputCode = typeof attempt?.output_json?.error_code === 'string' ? attempt.output_json.error_code.trim() : ''
+    const code = attempt?.error_code?.trim() || outputCode
+    const browserGapLabels: Record<string, string> = {
+      browser_locator_failed: '补充页面定位信息并重试',
+      browser_url_required: '补充页面地址并重试',
+      browser_assertion_failed: '补充业务预期并重试',
+    }
+    if (browserGapLabels[code]) return { kind: 'supply_evidence', label: browserGapLabels[code] }
+    if (code === 'validator_not_installed' || code.startsWith('browser_')) return undefined
+  }
   return actions[incident.status]
 }
 </script>
 
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import type { CaseStatus, IncidentCaseDetail } from '../lib/bridge/bugWorkflow'
+import type { CaseStatus, IncidentCaseDetail, IncidentPhaseEvent } from '../lib/bridge/bugWorkflow'
 import BugCaseArtifacts from './BugCaseArtifacts.vue'
+import BugBrowserProgress from './BugBrowserProgress.vue'
 
 const props = defineProps<{
   detail: IncidentCaseDetail | null
   bugTitle?: string
   pending?: boolean
   error?: string
+  phaseEvents?: IncidentPhaseEvent[]
 }>()
 const emit = defineEmits<{
   refresh: []
   primary: [payload: { kind: CasePrimaryAction['kind']; input?: string; observedVersion?: string; observedCommits?: Record<string, string>; versionSource?: string; rootCauseAttemptID?: string; caseVersion?: number }]
+  browser: [action: 'login' | 'clear-session' | 'repair-runtime' | 'redeploy-validator']
 }>()
 
 const dialogOpen = ref(false)
@@ -69,7 +86,8 @@ watch(() => props.detail?.case.id, () => {
 watch(() => props.detail?.events.length ?? 0, count => {
   if (count <= TIMELINE_PREVIEW_COUNT) timelineExpanded.value = false
 })
-const action = computed(() => currentCase.value ? primaryActionFor(currentCase.value) : undefined)
+const action = computed(() => props.detail ? primaryActionFor(props.detail) : undefined)
+const currentAttempt = computed(() => props.detail?.attempts.find(item => item.id === props.detail?.case.current_attempt_id) || null)
 const expectedDeploymentCommits = computed(() => {
   const currentAttemptID = props.detail?.case.current_attempt_id || ''
   const changes = (props.detail?.code_changes || []).filter(change => change.attempt_id === currentAttemptID && change.push_status === 'pushed')
@@ -261,6 +279,15 @@ function dialogTitle(): string {
             <span v-else class="terminal-copy">{{ detail.case.status === 'fixed_verified' ? '闭环完成' : detail.case.status === 'reset_archived' ? '已归档，由新 Case 接替' : '当前阶段自动推进' }}</span>
           </div>
         </section>
+
+        <BugBrowserProgress
+          :attempt="currentAttempt"
+          :events="phaseEvents || []"
+          :system-i-d="detail.case.system_id"
+          :environment="detail.case.environment"
+          :pending="pending"
+          @action="emit('browser', $event)"
+        />
 
         <p class="live-error" role="status" aria-live="assertive">{{ error }}</p>
 

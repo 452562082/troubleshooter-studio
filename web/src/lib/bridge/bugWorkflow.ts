@@ -102,7 +102,9 @@ export type IncidentCaseEventPayload = {
   error: { message: string; retryable: boolean }
 }
 
-interface WorkflowCommandInput { case_id: string; expected_version: number; idempotency_key: string; actor_id: string }
+export interface WorkflowCommandInput { case_id: string; expected_version: number; idempotency_key: string; actor_id: string }
+export interface IncidentBrowserCommandInput extends WorkflowCommandInput { attempt_id: string }
+export interface IncidentArtifactPreview { artifact_id: string; mime_type: 'image/png'; base64_data: string; size: number }
 export interface StartIncidentCaseInput extends WorkflowCommandInput { bug_id?: string; bot_key?: string; bot_environment?: string; input_json?: Record<string, unknown> }
 export interface ResetIncidentCaseInput extends WorkflowCommandInput { new_case_id: string; bot_key: string; bot_environment?: string; input_json?: Record<string, unknown> }
 export interface WorkflowWarning { code: string; message: string }
@@ -208,6 +210,32 @@ export async function notifyIncidentDeployed(input: NotifyIncidentDeployedInput)
 export async function cancelIncidentAttempt(input: CancelIncidentAttemptInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeCase(await App.CancelIncidentAttempt(input))
+}
+export async function openIncidentBrowserLogin(input: IncidentBrowserCommandInput): Promise<IncidentCase> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  return normalizeCase(await App.OpenIncidentBrowserLogin(input))
+}
+export async function repairIncidentBrowserRuntime(input: IncidentBrowserCommandInput): Promise<IncidentCase> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  return normalizeCase(await App.RepairIncidentBrowserRuntime(input))
+}
+export async function clearIncidentBrowserSession(input: IncidentBrowserCommandInput): Promise<void> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  await App.ClearIncidentBrowserSession(input)
+}
+export async function getIncidentArtifactPreview(caseID: string, artifactID: string): Promise<IncidentArtifactPreview> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  const raw = record(await App.GetIncidentArtifactPreview(caseID, artifactID))
+  const base64Data = typeof raw.base64_data === 'string' ? raw.base64_data : ''
+  const size = Number(raw.size)
+  if (raw.artifact_id !== artifactID || raw.mime_type !== 'image/png' || !Number.isSafeInteger(size) || size < 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64Data)) {
+    throw new Error('故障证据预览不是有效的 PNG 图片')
+  }
+  return { artifact_id: artifactID, mime_type: 'image/png', base64_data: base64Data, size }
+}
+export async function saveIncidentArtifact(caseID: string, artifactID: string): Promise<boolean> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  return Boolean(await App.SaveIncidentArtifact(caseID, artifactID))
 }
 
 function record(raw: unknown): Record<string, unknown> {

@@ -9,6 +9,7 @@ import {
   approveIncidentFix,
   approveIncidentMerge,
   cancelIncidentAttempt,
+  clearIncidentBrowserSession,
   continueIncidentCase,
   fetchBugByID,
   getIncidentCase,
@@ -16,6 +17,8 @@ import {
   listIncidentCases,
   matchBugBots,
   notifyIncidentDeployed,
+  openIncidentBrowserLogin,
+  repairIncidentBrowserRuntime,
   isIncidentWorkflowConflict,
   resetIncidentCaseWithWarnings,
   saveBugSelectedBot,
@@ -652,6 +655,56 @@ async function refreshIncidentWorkflow() {
   }
 }
 
+type IncidentBrowserAction = 'login' | 'clear-session' | 'repair-runtime' | 'redeploy-validator'
+
+const browserKey = (kind: string, detail: NonNullable<typeof displayedDetail.value>) =>
+  `${kind}:${detail.case.id}:${detail.case.current_attempt_id}:v${detail.case.version}`
+
+async function handleIncidentBrowser(action: IncidentBrowserAction) {
+  if (action === 'redeploy-validator') {
+    await router.push('/bots')
+    return
+  }
+  const detail = displayedDetail.value
+  if (!detail?.case.current_attempt_id) return
+  const incident = detail.case
+  const context = { bugID: tickets.selectedID.value, caseID: incident.id, attemptID: incident.current_attempt_id, version: incident.version }
+  const isSameCase = () => isCurrentBug(context.bugID) && displayedDetail.value?.case.id === context.caseID
+  const isSameBlockedAttempt = () => isSameCase() && displayedDetail.value?.case.current_attempt_id === context.attemptID && displayedDetail.value.case.version === context.version
+  const key = browserKey(action, detail)
+  const input = {
+    case_id: incident.id,
+    attempt_id: incident.current_attempt_id,
+    expected_version: incident.version,
+    idempotency_key: key,
+    actor_id: 'desktop-user',
+  }
+  try {
+    if (action === 'clear-session') {
+      await incidentWorkflow.runOnce(key, () => clearIncidentBrowserSession(input))
+      if (!isSameBlockedAttempt()) return
+      await incidentWorkflow.refreshDetail(incident.id)
+      if (isSameCase()) toast.success('已清除此环境登录态')
+      return
+    }
+    const updated = await incidentWorkflow.runOnce(key, () => action === 'login'
+      ? openIncidentBrowserLogin(input)
+      : repairIncidentBrowserRuntime(input))
+    if (!isSameCase()) return
+    await incidentWorkflow.refreshDetail(updated.id)
+    if (isSameCase()) toast.success(action === 'login' ? '登录完成，验证已继续' : '浏览器环境已修复，验证已继续')
+  } catch {
+    if (!isSameCase()) return
+    const message = action === 'login'
+      ? '无法完成验证浏览器登录，请刷新 Case 后重试。'
+      : action === 'repair-runtime'
+        ? '浏览器环境修复失败，请稍后重试。'
+        : '清除浏览器登录态失败，请稍后重试。'
+    incidentWorkflow.error.value = message
+    toast.error(message)
+  }
+}
+
 async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind']; input?: string; observedVersion?: string; observedCommits?: Record<string, string>; versionSource?: string; rootCauseAttemptID?: string; caseVersion?: number }) {
   const detail = displayedDetail.value
   if (!detail) return
@@ -779,8 +832,10 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
         :bug-title="tickets.selectedBug.value?.title || ''"
         :pending="incidentWorkflow.pending.value || starting"
         :error="incidentWorkflow.error.value"
+        :phase-events="incidentWorkflow.phaseEvents.value[displayedDetail.case.current_attempt_id] || []"
         @refresh="refreshIncidentWorkflow"
         @primary="handleIncidentPrimary"
+        @browser="handleIncidentBrowser"
       />
       <section v-else class="case-loading" aria-live="polite">
         <p role="status">{{ incidentWorkflow.error.value ? `加载故障闭环失败：${incidentWorkflow.error.value}` : '正在加载故障闭环…' }}</p>

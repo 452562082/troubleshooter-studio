@@ -4,12 +4,15 @@ import { readFileSync } from 'node:fs'
 import {
   approveIncidentFix,
   approveIncidentMerge,
+  clearIncidentBrowserSession,
   continueIncidentCase,
   getIncidentCase,
   listBugs,
   listIncidentCases,
   matchBugBots,
   notifyIncidentDeployed,
+  openIncidentBrowserLogin,
+  repairIncidentBrowserRuntime,
   IncidentWorkflowCommandError,
   resetIncidentCaseWithWarnings,
   saveBugSelectedBot,
@@ -21,7 +24,7 @@ import {
 import IncidentWorkbenchPage from './IncidentWorkbenchPage.vue'
 
 const route = vi.hoisted(() => ({ path: '/incidents', query: {} as Record<string, string> }))
-const router = vi.hoisted(() => ({ replace: vi.fn() }))
+const router = vi.hoisted(() => ({ replace: vi.fn(), push: vi.fn() }))
 const runtime = vi.hoisted(() => ({ EventsOn: vi.fn((_name: string, _handler: (payload: unknown) => void) => vi.fn()) }))
 const notifications = vi.hoisted(() => ({
   error: vi.fn(),
@@ -38,6 +41,7 @@ vi.mock('../lib/bridge', async importOriginal => ({
   approveIncidentFix: vi.fn(),
   approveIncidentMerge: vi.fn(),
   cancelIncidentAttempt: vi.fn(),
+  clearIncidentBrowserSession: vi.fn(),
   continueIncidentCase: vi.fn(),
   fetchBugByID: vi.fn(),
   getIncidentCase: vi.fn(),
@@ -45,6 +49,8 @@ vi.mock('../lib/bridge', async importOriginal => ({
   listIncidentCases: vi.fn().mockResolvedValue([]),
   matchBugBots: vi.fn().mockResolvedValue([]),
   notifyIncidentDeployed: vi.fn(),
+  openIncidentBrowserLogin: vi.fn(),
+  repairIncidentBrowserRuntime: vi.fn(),
   resetIncidentCaseWithWarnings: vi.fn(),
   saveBugSelectedBot: vi.fn(),
   startIncidentCase: vi.fn(),
@@ -156,6 +162,7 @@ afterEach(() => {
   route.path = '/incidents'
   route.query = {}
   router.replace.mockReset()
+  router.push.mockReset()
   runtime.EventsOn.mockClear()
   vi.mocked(listBugs).mockReset().mockResolvedValue([])
   vi.mocked(listIncidentCases).mockReset().mockResolvedValue([])
@@ -167,6 +174,9 @@ afterEach(() => {
   vi.mocked(approveIncidentFix).mockReset()
   vi.mocked(approveIncidentMerge).mockReset()
   vi.mocked(notifyIncidentDeployed).mockReset()
+  vi.mocked(openIncidentBrowserLogin).mockReset()
+  vi.mocked(repairIncidentBrowserRuntime).mockReset()
+  vi.mocked(clearIncidentBrowserSession).mockReset()
   vi.mocked(resetIncidentCaseWithWarnings).mockReset()
   notifications.error.mockReset()
   notifications.success.mockReset()
@@ -1267,6 +1277,151 @@ describe('IncidentWorkbenchPage', () => {
 
     expect(continueIncidentCase).toHaveBeenCalledWith(expect.objectContaining({ phase, input_json: expect.objectContaining({ decision, evidence: '人工确认已处理' }) }))
     expect(forbidden).not.toHaveBeenCalled()
+  })
+
+  it('renders same-version browser progress events without waiting for a Case version change', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-browser-progress', 'validating', '2026-07-15T10:00:00Z', { version: 3, current_attempt_id: 'attempt-browser' })
+    const snapshot = detail(item, {
+      attempts: [{ id: 'attempt-browser', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'running', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }],
+    })
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    mockCaseDetails(snapshot)
+    const wrapper = await mountedPage()
+    const eventHandler = runtime.EventsOn.mock.calls.find(call => call[0] === 'incident-case:event')?.[1]
+
+    eventHandler?.({
+      kind: 'snapshot', case: item, snapshot,
+      phase_event: { type: 'browser_progress', message: '准备验证浏览器', meta: { case_id: item.id, attempt_id: 'attempt-browser', browser_code: 'runtime_preparing' } },
+    })
+    eventHandler?.({
+      kind: 'snapshot', case: item, snapshot,
+      phase_event: { type: 'browser_progress', message: '执行 2/4：切换到“用户”', meta: { case_id: item.id, attempt_id: 'attempt-browser', browser_code: 'action_started', action_id: 'open-users', current: 2, total: 4 } },
+    })
+    await flushPromises()
+
+    expect(wrapper.get('[data-browser-state="progress"]').text()).toContain('准备验证浏览器')
+    expect(wrapper.get('[data-browser-state="progress"]').text()).toContain('执行 2/4：切换到“用户”')
+    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe(item.id)
+  })
+
+  it('runs login once with the exact browser identity, then refreshes the continued snapshot', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-browser-login', 'waiting_evidence', '2026-07-15T10:00:00Z', { version: 7, current_attempt_id: 'attempt-login' })
+    const blocked = detail(item, {
+      attempts: [{ id: 'attempt-login', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_login_required', application_origin: 'https://app.test', login_origin: 'https://login.test' }, parent_attempt_id: '', started_at: '', error_code: 'browser_login_required', error_message: '', usage: {} }],
+    })
+    const continued = { ...item, status: 'validating' as const, version: 8, current_attempt_id: 'attempt-login-next' }
+    const refreshed = detail(continued, { attempts: [{ ...blocked.attempts[0], id: 'attempt-login-next', status: 'running', error_code: '', output_json: {}, parent_attempt_id: 'attempt-login' }] })
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    let recoveryCompleted = false
+    vi.mocked(getIncidentCase).mockImplementation(async () => recoveryCompleted ? refreshed : blocked)
+    const pending = deferred<IncidentCase>()
+    vi.mocked(openIncidentBrowserLogin).mockReturnValue(pending.promise)
+    const wrapper = await mountedPage()
+
+    const login = wrapper.get<HTMLButtonElement>('[data-browser-action="login"]')
+    await login.trigger('click')
+    await login.trigger('click')
+    expect(openIncidentBrowserLogin).toHaveBeenCalledTimes(1)
+    expect(openIncidentBrowserLogin).toHaveBeenCalledWith({
+      case_id: item.id,
+      attempt_id: 'attempt-login',
+      expected_version: 7,
+      idempotency_key: 'login:case-browser-login:attempt-login:v7',
+      actor_id: 'desktop-user',
+    })
+
+    recoveryCompleted = true
+    pending.resolve(continued)
+    await flushPromises()
+    await flushPromises()
+
+    expect(getIncidentCase).toHaveBeenLastCalledWith(item.id)
+    expect(wrapper.get('.status-pill').text()).toBe('验证中')
+  })
+
+  it('repairs the browser runtime with the exact key and refreshes only the current Case', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-browser-runtime', 'waiting_evidence', '2026-07-15T10:00:00Z', { version: 11, current_attempt_id: 'attempt-runtime' })
+    const blocked = detail(item, {
+      attempts: [{ id: 'attempt-runtime', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_runtime_broken' }, parent_attempt_id: '', started_at: '', error_code: 'browser_runtime_broken', error_message: '', usage: {} }],
+    })
+    const continued = { ...item, status: 'validating' as const, version: 12, current_attempt_id: 'attempt-runtime-next' }
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    let recoveryCompleted = false
+    vi.mocked(getIncidentCase).mockImplementation(async () => recoveryCompleted ? detail(continued) : blocked)
+    vi.mocked(repairIncidentBrowserRuntime).mockImplementation(async () => {
+      recoveryCompleted = true
+      return continued
+    })
+    const wrapper = await mountedPage()
+
+    await wrapper.get('[data-browser-action="repair-runtime"]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+
+    expect(repairIncidentBrowserRuntime).toHaveBeenCalledWith({
+      case_id: item.id,
+      attempt_id: 'attempt-runtime',
+      expected_version: 11,
+      idempotency_key: 'repair-runtime:case-browser-runtime:attempt-runtime:v11',
+      actor_id: 'desktop-user',
+    })
+    expect(getIncidentCase).toHaveBeenLastCalledWith(item.id)
+  })
+
+  it('clears the exact blocked session idempotently and refreshes only after success', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-browser-clear', 'waiting_evidence', '2026-07-15T10:00:00Z', { version: 5, current_attempt_id: 'attempt-login' })
+    const blocked = detail(item, {
+      attempts: [{ id: 'attempt-login', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_login_required', application_origin: 'https://app.test', login_origin: 'https://login.test' }, parent_attempt_id: '', started_at: '', error_code: 'browser_login_required', error_message: '', usage: {} }],
+    })
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    vi.mocked(getIncidentCase).mockResolvedValue(blocked)
+    const pending = deferred<void>()
+    vi.mocked(clearIncidentBrowserSession).mockReturnValue(pending.promise)
+    const wrapper = await mountedPage()
+    const initialReads = vi.mocked(getIncidentCase).mock.calls.length
+
+    const clear = wrapper.get<HTMLButtonElement>('[data-browser-action="clear-session"]')
+    await clear.trigger('click')
+    await clear.trigger('click')
+    expect(clearIncidentBrowserSession).toHaveBeenCalledTimes(1)
+    expect(getIncidentCase).toHaveBeenCalledTimes(initialReads)
+    expect(clearIncidentBrowserSession).toHaveBeenCalledWith({
+      case_id: item.id,
+      attempt_id: 'attempt-login',
+      expected_version: 5,
+      idempotency_key: 'clear-session:case-browser-clear:attempt-login:v5',
+      actor_id: 'desktop-user',
+    })
+
+    pending.resolve()
+    await flushPromises()
+    await flushPromises()
+    expect(getIncidentCase).toHaveBeenCalledTimes(initialReads + 1)
+  })
+
+  it('routes validator recovery to deployed robot management without exposing backend errors', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-validator-missing', 'waiting_evidence', '2026-07-15T10:00:00Z', { current_attempt_id: 'attempt-validator' })
+    const snapshot = detail(item, {
+      attempts: [{ id: 'attempt-validator', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'validator_not_installed' }, parent_attempt_id: '', started_at: '', error_code: 'validator_not_installed', error_message: '/Users/alice/private/validator workspace', usage: {} }],
+    })
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    mockCaseDetails(snapshot)
+    const wrapper = await mountedPage()
+
+    await wrapper.get('[data-browser-action="redeploy-validator"]').trigger('click')
+
+    expect(router.push).toHaveBeenCalledWith('/bots')
+    expect(wrapper.text()).not.toContain('/Users/alice/private/validator workspace')
   })
 
 })

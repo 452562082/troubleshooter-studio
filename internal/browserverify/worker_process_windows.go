@@ -479,9 +479,27 @@ func openWindowsPlaintextCleanupIdentity(path string) (*os.File, error) {
 	if err := validateWindowsPlaintextCleanupPath(path); err != nil {
 		return nil, err
 	}
-	identity, err := os.Open(filepath.Dir(path))
+	directory := filepath.Dir(path)
+	encodedDirectory, err := windows.UTF16PtrFromString(directory)
+	if err != nil {
+		return nil, errors.New("encode browser plaintext cleanup directory identity")
+	}
+	handle, err := windows.CreateFile(
+		encodedDirectory,
+		windows.FILE_LIST_DIRECTORY|windows.FILE_READ_ATTRIBUTES|windows.DELETE|windows.SYNCHRONIZE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
 	if err != nil {
 		return nil, errors.New("open browser plaintext cleanup directory identity")
+	}
+	identity := os.NewFile(uintptr(handle), directory)
+	if identity == nil {
+		_ = windows.CloseHandle(handle)
+		return nil, errors.New("create browser plaintext cleanup directory identity")
 	}
 	if err := validateWindowsPlaintextCleanupIdentity(identity, path); err != nil {
 		_ = identity.Close()
@@ -525,7 +543,10 @@ func cleanupWindowsPlaintextSession(identity *os.File, path string) error {
 		_ = identity.Close()
 		return err
 	}
-	directory := filepath.Dir(path)
+	return cleanupWindowsPlaintextSessionAfterValidation(identity, path)
+}
+
+func cleanupWindowsPlaintextSessionAfterValidation(identity *os.File, path string) error {
 	entries, err := identity.ReadDir(-1)
 	if err != nil {
 		_ = identity.Close()
@@ -537,29 +558,77 @@ func cleanupWindowsPlaintextSession(identity *os.File, path string) error {
 			_ = identity.Close()
 			return errors.New("browser plaintext cleanup directory contains an unmanaged entry")
 		}
-		entryPath := filepath.Join(directory, name)
-		info, err := os.Lstat(entryPath)
-		reparsePoint, reparseErr := windowsPathIsReparsePoint(entryPath)
-		if err != nil || reparseErr != nil || reparsePoint || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() < 0 || info.Size() > maxBrowserSessionBytes {
+		if err := removeWindowsPlaintextCleanupEntry(identity, name); err != nil {
 			_ = identity.Close()
-			return errors.New("browser plaintext cleanup entry is unsafe")
-		}
-		if err := os.Remove(entryPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			_ = identity.Close()
-			return errors.New("remove browser plaintext cleanup entry")
+			return err
 		}
 	}
 	if err := validateWindowsPlaintextCleanupIdentity(identity, path); err != nil {
 		_ = identity.Close()
 		return err
 	}
+	if err := markWindowsHandleForDeletion(windows.Handle(identity.Fd())); err != nil {
+		_ = identity.Close()
+		return errors.New("remove browser plaintext cleanup directory")
+	}
 	if err := identity.Close(); err != nil {
 		return errors.New("close browser plaintext cleanup directory identity")
 	}
-	if err := os.Remove(directory); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return errors.New("remove browser plaintext cleanup directory")
+	return nil
+}
+
+func removeWindowsPlaintextCleanupEntry(directory *os.File, name string) error {
+	objectName, err := windows.NewNTUnicodeString(name)
+	if err != nil {
+		return errors.New("encode browser plaintext cleanup entry")
+	}
+	attributes := &windows.OBJECT_ATTRIBUTES{
+		Length:        uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
+		RootDirectory: windows.Handle(directory.Fd()),
+		ObjectName:    objectName,
+		Attributes:    windows.OBJ_CASE_INSENSITIVE,
+	}
+	var (
+		handle         windows.Handle
+		ioStatus       windows.IO_STATUS_BLOCK
+		allocationSize int64
+	)
+	if err := windows.NtCreateFile(
+		&handle,
+		windows.FILE_READ_ATTRIBUTES|windows.DELETE|windows.SYNCHRONIZE,
+		attributes,
+		&ioStatus,
+		&allocationSize,
+		0,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		windows.FILE_OPEN,
+		windows.FILE_NON_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT,
+		0,
+		0,
+	); err != nil {
+		return errors.New("open browser plaintext cleanup entry relative to directory identity")
+	}
+	var information windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &information); err != nil {
+		_ = windows.CloseHandle(handle)
+		return errors.New("inspect browser plaintext cleanup entry")
+	}
+	size := int64(information.FileSizeHigh)<<32 | int64(information.FileSizeLow)
+	if information.FileAttributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 || size < 0 || size > maxBrowserSessionBytes {
+		_ = windows.CloseHandle(handle)
+		return errors.New("browser plaintext cleanup entry is unsafe")
+	}
+	deleteErr := markWindowsHandleForDeletion(handle)
+	closeErr := windows.CloseHandle(handle)
+	if deleteErr != nil || closeErr != nil {
+		return errors.New("remove browser plaintext cleanup entry")
 	}
 	return nil
+}
+
+func markWindowsHandleForDeletion(handle windows.Handle) error {
+	deleteFile := byte(1)
+	return windows.SetFileInformationByHandle(handle, windows.FileDispositionInfo, &deleteFile, 1)
 }
 
 func windowsPathIsReparsePoint(path string) (bool, error) {

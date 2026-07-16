@@ -60,6 +60,58 @@ func TestConfigureWorkerProcessPassesManagedPlaintextToWrapper(t *testing.T) {
 	}
 }
 
+func TestWindowsPlaintextCleanupFailsClosedAfterDirectoryRebound(t *testing.T) {
+	path, err := createPlaintextSessionTemp(
+		SessionKey{SystemID: "shop", Environment: "test", Origin: "https://app.test"},
+		nil,
+		false,
+		os.Remove,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Dir(path)
+	detachedDirectory := directory + "-detached"
+	t.Cleanup(func() {
+		_ = os.RemoveAll(directory)
+		_ = os.RemoveAll(detachedDirectory)
+	})
+	identity, err := openWindowsPlaintextCleanupIdentity(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateWindowsPlaintextCleanupIdentity(identity, path); err != nil {
+		_ = identity.Close()
+		t.Fatal(err)
+	}
+	if err := os.Rename(directory, detachedDirectory); err != nil {
+		_ = identity.Close()
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		_ = identity.Close()
+		t.Fatal(err)
+	}
+	replacementPath := filepath.Join(directory, plaintextSessionFileName)
+	replacementState := []byte(`{"cookies":[{"value":"replacement-secret"}]}`)
+	if err := os.WriteFile(replacementPath, replacementState, 0o600); err != nil {
+		_ = identity.Close()
+		t.Fatal(err)
+	}
+
+	err = cleanupWindowsPlaintextSessionAfterValidation(identity, path)
+	if err == nil {
+		t.Fatal("cleanup after directory rebound unexpectedly succeeded")
+	}
+	got, readErr := os.ReadFile(replacementPath)
+	if readErr != nil {
+		t.Fatalf("replacement state was removed after directory rebound: %v", readErr)
+	}
+	if string(got) != string(replacementState) {
+		t.Fatalf("replacement state = %q, want %q", got, replacementState)
+	}
+}
+
 func TestWindowsJobGateCancellationNeverLeavesTarget(t *testing.T) {
 	stages := []windowsProcessStage{
 		windowsProcessStageWrapperStarted,

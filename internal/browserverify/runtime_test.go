@@ -9,11 +9,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type commandRecord struct {
@@ -183,15 +186,13 @@ func TestRuntimeManagerDoesNotPublishFailedInstall(t *testing.T) {
 	if _, err := os.Stat(manager.currentDir()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("published failed runtime: %v", err)
 	}
-	if _, err := os.Stat(manager.lockPath()); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("install lock remains: %v", err)
-	}
+	assertRuntimeInstallLockAvailable(t, manager)
 	entries, err := os.ReadDir(manager.runtimeRoot())
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), ".install-") {
+		if strings.HasPrefix(entry.Name(), ".install-") && entry.Name() != filepath.Base(manager.lockPath()) {
 			t.Fatalf("temporary install remains: %s", entry.Name())
 		}
 	}
@@ -208,33 +209,117 @@ func TestRuntimeManagerCancellationCleansLockAndTemporaryInstall(t *testing.T) {
 	if _, err := os.Stat(manager.currentDir()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("published cancelled runtime: %v", err)
 	}
-	if _, err := os.Stat(manager.lockPath()); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("install lock remains: %v", err)
+	assertRuntimeInstallLockAvailable(t, manager)
+}
+
+func TestRuntimeManagerLiveInstallLockFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	owner := NewRuntimeManager(root, &recordingCommandRunner{})
+	if err := os.MkdirAll(owner.runtimeRoot(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	release, err := owner.acquireInstallLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := release(); err != nil {
+			t.Errorf("release owner lock: %v", err)
+		}
+	}()
+
+	contender := NewRuntimeManager(root, &recordingCommandRunner{})
+	if _, err := contender.Ensure(context.Background(), nil); err == nil {
+		t.Fatal("expected concurrent install error")
+	}
+	if status := contender.Status(); status.State != RuntimeInstalling || status.ErrorCode != "browser_runtime_install_in_progress" {
+		t.Fatalf("status = %+v", status)
 	}
 }
 
-func TestRuntimeManagerExistingInstallLockFailsClosedWithoutDeletingOwnerLock(t *testing.T) {
-	root := t.TempDir()
-	manager := NewRuntimeManager(root, &recordingCommandRunner{})
+func TestRuntimeManagerRecoversExistingUnlockedInstallLockFile(t *testing.T) {
+	manager := NewRuntimeManager(t.TempDir(), &recordingCommandRunner{})
 	if err := os.MkdirAll(manager.runtimeRoot(), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	want := []byte("other-process-lock")
+	want := []byte("stale-owner-metadata\n")
 	if err := os.WriteFile(manager.lockPath(), want, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.Ensure(context.Background(), nil); err == nil {
-		t.Fatal("expected concurrent install error")
+
+	if _, err := manager.Ensure(context.Background(), nil); err != nil {
+		t.Fatalf("stale lock file blocked install: %v", err)
 	}
 	got, err := os.ReadFile(manager.lockPath())
 	if err != nil {
-		t.Fatalf("other process lock was removed: %v", err)
+		t.Fatal(err)
 	}
 	if !bytes.Equal(got, want) {
-		t.Fatalf("other process lock changed to %q", got)
+		t.Fatalf("advisory lock file changed: got %q want %q", got, want)
 	}
-	if status := manager.Status(); status.State != RuntimeInstalling || status.ErrorCode != "browser_runtime_install_in_progress" {
-		t.Fatalf("status = %+v", status)
+}
+
+func TestRuntimeInstallLockReleasedWhenOwnerProcessExits(t *testing.T) {
+	root := t.TempDir()
+	readyPath := filepath.Join(root, "lock-ready")
+	command := exec.Command(os.Args[0], "-test.run=^TestRuntimeInstallLockOwnerProcess$")
+	command.Env = append(os.Environ(),
+		"TSHOOT_RUNTIME_LOCK_HELPER=1",
+		"TSHOOT_RUNTIME_LOCK_ROOT="+root,
+		"TSHOOT_RUNTIME_LOCK_READY="+readyPath,
+	)
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitForRuntimeTestFile(t, readyPath, 5*time.Second, func() {
+		_ = command.Process.Kill()
+		_, _ = command.Process.Wait()
+	})
+
+	contender := NewRuntimeManager(root, &recordingCommandRunner{})
+	unexpectedRelease, err := contender.acquireInstallLock()
+	if err == nil {
+		_ = unexpectedRelease()
+	}
+	if !errors.Is(err, fs.ErrExist) {
+		_ = command.Process.Kill()
+		_, _ = command.Process.Wait()
+		t.Fatalf("live owner lock error = %v, want fs.ErrExist; helper stderr=%q", err, stderr.String())
+	}
+	if err := command.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	state, err := command.Process.Wait()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Success() {
+		t.Fatal("crashed lock owner unexpectedly exited successfully")
+	}
+
+	assertRuntimeInstallLockAvailable(t, contender)
+}
+
+func TestRuntimeInstallLockOwnerProcess(t *testing.T) {
+	if os.Getenv("TSHOOT_RUNTIME_LOCK_HELPER") != "1" {
+		return
+	}
+	manager := NewRuntimeManager(os.Getenv("TSHOOT_RUNTIME_LOCK_ROOT"), &recordingCommandRunner{})
+	if err := os.MkdirAll(manager.runtimeRoot(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	release, err := manager.acquireInstallLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = release() }()
+	if err := os.WriteFile(os.Getenv("TSHOOT_RUNTIME_LOCK_READY"), []byte("ready"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		time.Sleep(time.Hour)
 	}
 }
 
@@ -249,9 +334,7 @@ func TestRuntimeManagerRejectsProbeSHAMismatchWithoutPublishing(t *testing.T) {
 	if _, err := os.Stat(manager.currentDir()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("invalid probe runtime was published: %v", err)
 	}
-	if _, err := os.Stat(manager.lockPath()); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("install lock remains: %v", err)
-	}
+	assertRuntimeInstallLockAvailable(t, manager)
 }
 
 func TestRuntimeManagerReusesReadyRuntimeWithoutCommands(t *testing.T) {
@@ -369,5 +452,34 @@ func TestMergeCommandEnvironmentReplacesInheritedBrowserPath(t *testing.T) {
 	}
 	if !strings.Contains(joined, "PLAYWRIGHT_BROWSERS_PATH=/temporary/browsers") {
 		t.Fatalf("temporary browser path is missing: %v", merged)
+	}
+}
+
+func assertRuntimeInstallLockAvailable(t *testing.T, manager *RuntimeManager) {
+	t.Helper()
+	release, err := manager.acquireInstallLock()
+	if err != nil {
+		t.Fatalf("install lock is not recoverable: %v", err)
+	}
+	if err := release(); err != nil {
+		t.Fatalf("release recovered install lock: %v", err)
+	}
+}
+
+func waitForRuntimeTestFile(t *testing.T, path string, timeout time.Duration, cleanup func()) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		} else if !errors.Is(err, os.ErrNotExist) {
+			cleanup()
+			t.Fatalf("inspect runtime test file: %v", err)
+		}
+		if time.Now().After(deadline) {
+			cleanup()
+			t.Fatalf("timed out waiting for %s", filepath.Base(path))
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

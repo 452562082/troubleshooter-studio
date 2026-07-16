@@ -1031,7 +1031,7 @@ func TestNodeWorkerRunnerInterruptsWorkerForGracefulBrowserCleanup(t *testing.T)
 	markerPath := filepath.Join(temporary, "browser-closed")
 	source := `
 import { writeFileSync } from 'node:fs';
-process.on('SIGINT', () => {
+process.on('SIGTERM', () => {
   writeFileSync(process.env.TSHOOT_TEST_CLEANUP_MARKER, 'closed');
   process.exit(130);
 });
@@ -1073,7 +1073,7 @@ const childSource = ` + "`" + `
 ` + "`" + `;
 spawn(process.execPath, ['-e', childSource], { env: process.env, stdio: 'ignore' });
 writeFileSync(process.env.TSHOOT_TEST_GRANDCHILD_READY, 'ready');
-process.on('SIGINT', () => process.exit(130));
+process.on('SIGTERM', () => process.exit(143));
 setInterval(() => {}, 1000);
 `
 	if err := os.WriteFile(workerPath, []byte(source), 0o600); err != nil {

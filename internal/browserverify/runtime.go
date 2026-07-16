@@ -3,7 +3,6 @@ package browserverify
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
@@ -71,12 +70,14 @@ type execCommandRunner struct{}
 
 func (execCommandRunner) Run(ctx context.Context, executable string, args, env []string, dir string, stdin io.Reader, stdout, stderr io.Writer) error {
 	command := exec.CommandContext(ctx, executable, args...)
+	processController := configureWorkerProcess(command)
 	command.Dir = dir
 	command.Env = mergeCommandEnvironment(os.Environ(), env)
 	command.Stdin = stdin
 	command.Stdout = stdout
 	command.Stderr = stderr
-	return command.Run()
+	runErr := command.Run()
+	return errors.Join(runErr, processController.finish())
 }
 
 func NewRuntimeManager(managementRoot string, runner CommandRunner) *RuntimeManager {
@@ -324,36 +325,7 @@ func (m *RuntimeManager) pathsFor(root string) RuntimePaths {
 }
 
 func (m *RuntimeManager) acquireInstallLock() (func() error, error) {
-	lock, err := os.OpenFile(m.lockPath(), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	var token [32]byte
-	if _, err := rand.Read(token[:]); err != nil {
-		_ = releaseOwnedRuntimeLock(lock, m.lockPath())
-		return nil, err
-	}
-	if _, err := lock.WriteString(hex.EncodeToString(token[:]) + "\n"); err != nil {
-		_ = releaseOwnedRuntimeLock(lock, m.lockPath())
-		return nil, err
-	}
-	if err := lock.Sync(); err != nil {
-		_ = releaseOwnedRuntimeLock(lock, m.lockPath())
-		return nil, err
-	}
-	return func() error { return releaseOwnedRuntimeLock(lock, m.lockPath()) }, nil
-}
-
-func releaseOwnedRuntimeLock(lock *os.File, path string) error {
-	ownedInfo, ownedErr := lock.Stat()
-	pathInfo, pathErr := os.Lstat(path)
-	var removeErr error
-	if ownedErr == nil && pathErr == nil && pathInfo.Mode()&os.ModeSymlink == 0 && os.SameFile(ownedInfo, pathInfo) {
-		removeErr = os.Remove(path)
-	} else if pathErr != nil && !errors.Is(pathErr, os.ErrNotExist) {
-		removeErr = pathErr
-	}
-	return errors.Join(removeErr, lock.Close())
+	return acquireRuntimeAdvisoryLock(m.lockPath())
 }
 
 func mergeCommandEnvironment(base, overrides []string) []string {

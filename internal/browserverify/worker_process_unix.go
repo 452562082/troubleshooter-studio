@@ -13,20 +13,21 @@ import (
 
 type workerProcessController struct {
 	mu           sync.Mutex
-	processGroup int
+	command      *exec.Cmd
 	stopHardKill chan struct{}
 	hardKillDone chan struct{}
+	stopOnce     sync.Once
 }
 
 func configureWorkerProcess(command *exec.Cmd) *workerProcessController {
-	controller := &workerProcessController{}
+	controller := &workerProcessController{command: command}
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Cancel = func() error {
 		if command.Process == nil {
 			return os.ErrProcessDone
 		}
 		processGroup := command.Process.Pid
-		if err := syscall.Kill(-processGroup, syscall.SIGINT); err != nil {
+		if err := syscall.Kill(-processGroup, syscall.SIGTERM); err != nil {
 			if errors.Is(err, syscall.ESRCH) {
 				return os.ErrProcessDone
 			}
@@ -44,7 +45,6 @@ func (controller *workerProcessController) scheduleHardKill(processGroup int) {
 	if controller.hardKillDone != nil {
 		return
 	}
-	controller.processGroup = processGroup
 	controller.stopHardKill = make(chan struct{})
 	controller.hardKillDone = make(chan struct{})
 	go func(stop <-chan struct{}, done chan<- struct{}) {
@@ -71,17 +71,45 @@ func (controller *workerProcessController) kill(command *exec.Cmd) error {
 }
 
 func (controller *workerProcessController) finish() error {
-	controller.mu.Lock()
-	processGroup := controller.processGroup
-	stop := controller.stopHardKill
-	done := controller.hardKillDone
-	controller.mu.Unlock()
-	if done == nil {
+	if controller.command.Process == nil {
 		return nil
 	}
+	processGroup := controller.command.Process.Pid
+	groupErr := syscall.Kill(-processGroup, 0)
+	if errors.Is(groupErr, syscall.ESRCH) {
+		controller.stopScheduledHardKill()
+		return nil
+	}
+	var terminateErr error
+	controller.mu.Lock()
+	scheduled := controller.hardKillDone != nil
+	controller.mu.Unlock()
+	if !scheduled {
+		terminateErr = syscall.Kill(-processGroup, syscall.SIGTERM)
+		if errors.Is(terminateErr, syscall.ESRCH) {
+			return nil
+		}
+		controller.scheduleHardKill(processGroup)
+	}
+
+	controller.mu.Lock()
+	done := controller.hardKillDone
+	controller.mu.Unlock()
 	if err := syscall.Kill(-processGroup, 0); errors.Is(err, syscall.ESRCH) {
-		close(stop)
+		controller.stopScheduledHardKill()
 	}
 	<-done
-	return nil
+	if errors.Is(terminateErr, syscall.ESRCH) {
+		terminateErr = nil
+	}
+	return terminateErr
+}
+
+func (controller *workerProcessController) stopScheduledHardKill() {
+	controller.mu.Lock()
+	stop := controller.stopHardKill
+	controller.mu.Unlock()
+	if stop != nil {
+		controller.stopOnce.Do(func() { close(stop) })
+	}
 }

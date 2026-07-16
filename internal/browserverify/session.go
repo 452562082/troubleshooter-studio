@@ -47,6 +47,9 @@ type SessionStore struct {
 	secrets SecretStore
 	mu      sync.Mutex
 	memory  map[string][]byte
+	// afterPublish is a test-only fault injection point after ciphertext rename
+	// and before the remaining durability/cleanup steps.
+	afterPublish func(string) error
 }
 
 type encryptedSessionEnvelope struct {
@@ -440,6 +443,11 @@ func (s *SessionStore) persist(identifier string, envelope encryptedSessionEnvel
 	path := filepath.Join(s.root, identifier+".json")
 	if err := os.Rename(temporaryPath, path); err != nil {
 		return errors.New("publish encrypted browser session")
+	}
+	if s.afterPublish != nil {
+		if err := s.afterPublish(path); err != nil {
+			return err
+		}
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
 		return errors.New("protect encrypted browser session")

@@ -314,7 +314,11 @@ func (a *App) OpenIncidentBrowserLogin(input IncidentBrowserCommandInput) (bughu
 		SystemID: incident.SystemID, Environment: incident.Environment, ApplicationOrigin: applicationOrigin, LoginOrigin: loginOrigin, Policy: policy,
 		Emit: func(progress bughub.BrowserProgress) { a.emitIncidentBrowserProgress(input.CaseID, progress) },
 	}); err != nil {
-		a.markIncidentBrowserRecoveryFailed(store, request, claimToken)
+		if browserverify.RecoveryEffectOutcomeOf(err) == browserverify.RecoveryEffectKnownFailedNoDurableEffect {
+			a.markIncidentBrowserRecoveryFailed(store, request, claimToken)
+		} else {
+			a.markIncidentBrowserRecoveryUncertain(store, request, claimToken)
+		}
 		return bughub.IncidentCase{}, errors.New("incident browser login failed")
 	}
 	if a.workflowBrowserRecoveryBeforeOutcome != nil {
@@ -362,11 +366,15 @@ func (a *App) RepairIncidentBrowserRuntime(input IncidentBrowserCommandInput) (b
 	if err := controller.Repair(a.workflowCommandContext(), func(progress bughub.BrowserProgress) {
 		a.emitIncidentBrowserProgress(input.CaseID, progress)
 	}); err != nil {
-		a.markIncidentBrowserRecoveryFailed(store, request, claimToken)
+		if browserverify.RecoveryEffectOutcomeOf(err) == browserverify.RecoveryEffectKnownFailedNoDurableEffect {
+			a.markIncidentBrowserRecoveryFailed(store, request, claimToken)
+		} else {
+			a.markIncidentBrowserRecoveryUncertain(store, request, claimToken)
+		}
 		return bughub.IncidentCase{}, errors.New("incident browser runtime repair failed")
 	}
 	if status := controller.Status(); status.State != browserverify.RuntimeReady {
-		a.markIncidentBrowserRecoveryFailed(store, request, claimToken)
+		a.markIncidentBrowserRecoveryUncertain(store, request, claimToken)
 		return bughub.IncidentCase{}, errors.New("incident browser runtime is not ready")
 	}
 	if a.workflowBrowserRecoveryBeforeOutcome != nil {
@@ -562,6 +570,12 @@ func (a *App) markIncidentBrowserRecoveryFailed(store *bughub.CaseStore, request
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, _ = store.RecordBrowserRecoveryOutcome(ctx, request, claimToken, bughub.BrowserRecoveryEffectFailed)
+}
+
+func (a *App) markIncidentBrowserRecoveryUncertain(store *bughub.CaseStore, request bughub.BrowserRecoveryOperationRequest, claimToken string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _ = store.RecordBrowserRecoveryOutcome(ctx, request, claimToken, bughub.BrowserRecoveryOutcomeUncertain)
 }
 
 func (a *App) recordIncidentBrowserRecoverySucceeded(store *bughub.CaseStore, request bughub.BrowserRecoveryOperationRequest, claimToken string) (bughub.BrowserRecoveryOperation, error) {

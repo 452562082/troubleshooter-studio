@@ -249,7 +249,7 @@ func (m *RuntimeManager) Repair(ctx context.Context, emit func(bughub.BrowserPro
 	if err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			m.status = RuntimeStatus{State: RuntimeInstalling, Version: browserRuntimeVersion, ErrorCode: "browser_runtime_install_in_progress", Message: "another Studio process is installing or repairing the browser runtime"}
-			return RuntimePaths{}, fmt.Errorf("browser runtime repair is already in progress: %w", err)
+			return RuntimePaths{}, KnownFailedRecoveryEffect(fmt.Errorf("browser runtime repair is already in progress: %w", err))
 		}
 		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_repair_failed", "acquire browser runtime repair lock", err)
 	}

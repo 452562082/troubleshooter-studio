@@ -548,7 +548,7 @@ func TestIncidentBrowserKnownLoginFailuresRemainRetryable(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			app, store, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "https://login.test")
 			input := browserCommandInput(incident, attempt, "browser-known-login-failure:"+test.name)
-			controller.loginErr = test.err
+			controller.loginErr = browserverify.KnownFailedRecoveryEffect(test.err)
 			if _, err := app.OpenIncidentBrowserLogin(input); err == nil || err.Error() != "incident browser login failed" {
 				t.Fatalf("fixed login error=%v", err)
 			}
@@ -578,8 +578,7 @@ func TestIncidentBrowserKnownRepairFailuresRemainRetryable(t *testing.T) {
 		status        browserverify.RuntimeStatus
 		expectedError string
 	}{
-		{name: "repair error", repairErr: errors.New("Authorization: Bearer secret repair failed"), expectedError: "incident browser runtime repair failed"},
-		{name: "runtime non-ready", status: browserverify.RuntimeStatus{State: browserverify.RuntimeBroken, ErrorCode: "runtime_secret"}, expectedError: "incident browser runtime is not ready"},
+		{name: "repair error", repairErr: browserverify.KnownFailedRecoveryEffect(errors.New("Authorization: Bearer secret repair failed")), expectedError: "incident browser runtime repair failed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			app, store, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_runtime_broken", "")
@@ -606,6 +605,110 @@ func TestIncidentBrowserKnownRepairFailuresRemainRetryable(t *testing.T) {
 				t.Fatalf("repairs=%d starts=%d", repairs, runner.count())
 			}
 		})
+	}
+}
+
+func TestIncidentBrowserUntypedRecoveryFailuresRemainUncertain(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		errorCode   string
+		operation   bughub.BrowserRecoveryOperationKind
+		prepare     func(*fakeIncidentBrowserController)
+		run         func(*App, IncidentBrowserCommandInput) error
+		effectCount func(*fakeIncidentBrowserController) int
+	}{
+		{
+			name: "untyped login error", errorCode: "browser_login_required", operation: bughub.BrowserRecoveryLogin,
+			prepare: func(controller *fakeIncidentBrowserController) {
+				controller.loginErr = errors.New("ambiguous login failure")
+			},
+			run: func(app *App, input IncidentBrowserCommandInput) error {
+				_, err := app.OpenIncidentBrowserLogin(input)
+				return err
+			},
+			effectCount: func(controller *fakeIncidentBrowserController) int {
+				logins, _, _ := controller.snapshot()
+				return len(logins)
+			},
+		},
+		{
+			name: "untyped repair error", errorCode: "browser_runtime_broken", operation: bughub.BrowserRecoveryRepair,
+			prepare: func(controller *fakeIncidentBrowserController) {
+				controller.repairErr = errors.New("ambiguous repair failure")
+			},
+			run: func(app *App, input IncidentBrowserCommandInput) error {
+				_, err := app.RepairIncidentBrowserRuntime(input)
+				return err
+			},
+			effectCount: func(controller *fakeIncidentBrowserController) int {
+				_, _, repairs := controller.snapshot()
+				return repairs
+			},
+		},
+		{
+			name: "repair returned non-ready", errorCode: "browser_runtime_broken", operation: bughub.BrowserRecoveryRepair,
+			prepare: func(controller *fakeIncidentBrowserController) {
+				controller.status = browserverify.RuntimeStatus{State: browserverify.RuntimeBroken, ErrorCode: "runtime_broken"}
+			},
+			run: func(app *App, input IncidentBrowserCommandInput) error {
+				_, err := app.RepairIncidentBrowserRuntime(input)
+				return err
+			},
+			effectCount: func(controller *fakeIncidentBrowserController) int {
+				_, _, repairs := controller.snapshot()
+				return repairs
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app, store, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, test.errorCode, "https://login.test")
+			input := browserCommandInput(incident, attempt, "browser-ambiguous-recovery:"+test.name)
+			test.prepare(controller)
+			if err := test.run(app, input); err == nil {
+				t.Fatal("expected fixed recovery error")
+			}
+			request := browserRecoveryOperationRequest(input, attempt, test.operation, test.errorCode)
+			operation, found, err := store.GetBrowserRecoveryOperation(context.Background(), request)
+			if err != nil || !found || operation.Status != bughub.BrowserRecoveryOutcomeUncertain || runner.count() != 0 || test.effectCount(controller) != 1 {
+				t.Fatalf("operation=%+v found=%v err=%v effects=%d starts=%d", operation, found, err, test.effectCount(controller), runner.count())
+			}
+			if err := test.run(app, input); !errors.Is(err, bughub.ErrBrowserRecoveryOutcomeUncertain) {
+				t.Fatalf("retry error=%v", err)
+			}
+			if test.effectCount(controller) != 1 || runner.count() != 0 {
+				t.Fatalf("ambiguous retry repeated effects=%d starts=%d", test.effectCount(controller), runner.count())
+			}
+		})
+	}
+}
+
+func TestIncidentBrowserPostPublishLoginErrorNeverRepeatsVisibleLogin(t *testing.T) {
+	app, store, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "https://login.test")
+	input := browserCommandInput(incident, attempt, "browser-post-publish-login")
+	ciphertextPath := filepath.Join(t.TempDir(), "published-session.json")
+	controller.afterLogin = func() {
+		if err := os.WriteFile(ciphertextPath, []byte(`{"ciphertext":"published"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	controller.loginErr = errors.New("session Save failed after ciphertext publication")
+	if _, err := app.OpenIncidentBrowserLogin(input); err == nil || err.Error() != "incident browser login failed" {
+		t.Fatalf("login error=%v", err)
+	}
+	if _, err := os.Stat(ciphertextPath); err != nil {
+		t.Fatalf("published ciphertext missing: %v", err)
+	}
+	request := browserRecoveryOperationRequest(input, attempt, bughub.BrowserRecoveryLogin, "browser_login_required")
+	operation, found, err := store.GetBrowserRecoveryOperation(context.Background(), request)
+	if err != nil || !found || operation.Status != bughub.BrowserRecoveryOutcomeUncertain {
+		t.Fatalf("operation=%+v found=%v err=%v", operation, found, err)
+	}
+	if _, err := app.OpenIncidentBrowserLogin(input); !errors.Is(err, bughub.ErrBrowserRecoveryOutcomeUncertain) {
+		t.Fatalf("retry error=%v", err)
+	}
+	logins, _, _ := controller.snapshot()
+	if len(logins) != 1 || runner.count() != 0 {
+		t.Fatalf("logins=%d starts=%d", len(logins), runner.count())
 	}
 }
 

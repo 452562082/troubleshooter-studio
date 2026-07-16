@@ -373,6 +373,58 @@ func TestHostVerifierLoginFailurePreservesPreviousEncryptedSession(t *testing.T)
 	}
 }
 
+func TestHostVerifierLoginClassifiesWorkerFailureBeforeSessionPublication(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions"), newMemorySecretStore())
+	worker := &fakeWorker{Errors: []error{errors.New("login worker failed")}}
+	verifier := newTestHostVerifier(t, worker)
+	verifier.SetSessionStore(store)
+	err := verifier.Login(context.Background(), BrowserLoginRequest{
+		SystemID: "shop", Environment: "test", Origin: "https://app.test",
+		Policy: bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test"}}, Timeout: time.Minute,
+	})
+	if err == nil || RecoveryEffectOutcomeOf(err) != RecoveryEffectKnownFailedNoDurableEffect {
+		t.Fatalf("login error=%v outcome=%q", err, RecoveryEffectOutcomeOf(err))
+	}
+	if _, found, loadErr := store.Load(SessionKey{SystemID: "shop", Environment: "test", Origin: "https://app.test"}); loadErr != nil || found {
+		t.Fatalf("session found=%v err=%v", found, loadErr)
+	}
+}
+
+func TestHostVerifierLoginLeavesPostPublishSessionSaveFailureUncertain(t *testing.T) {
+	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions"), newMemorySecretStore())
+	key := SessionKey{SystemID: "shop", Environment: "test", Origin: "https://app.test"}
+	state := []byte(`{"cookies":[{"value":"published-session"}]}`)
+	var publishedPath string
+	store.afterPublish = func(path string) error {
+		publishedPath = path
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("ciphertext was not published before injected error: %v", err)
+		}
+		return errors.New("injected post-publication failure")
+	}
+	worker := &fakeWorker{Result: workerResult{Status: "completed"}}
+	worker.Inspect = func(_ context.Context, request workerRequest) error {
+		return os.WriteFile(request.StorageStatePath, state, 0o600)
+	}
+	verifier := newTestHostVerifier(t, worker)
+	verifier.SetSessionStore(store)
+	err := verifier.Login(context.Background(), BrowserLoginRequest{
+		SystemID: key.SystemID, Environment: key.Environment, Origin: key.Origin,
+		Policy: bughub.BrowserSecurityPolicy{AllowedOrigins: []string{key.Origin}}, Timeout: time.Minute,
+	})
+	if err == nil || RecoveryEffectOutcomeOf(err) != RecoveryEffectOutcomeUnknown {
+		t.Fatalf("login error=%v outcome=%q", err, RecoveryEffectOutcomeOf(err))
+	}
+	if publishedPath == "" || publishedPath != store.encryptedPath(key) {
+		t.Fatalf("published path=%q want=%q", publishedPath, store.encryptedPath(key))
+	}
+	store.afterPublish = nil
+	loaded, found, loadErr := store.Load(key)
+	if loadErr != nil || !found || !bytes.Equal(loaded, state) {
+		t.Fatalf("published session=%q found=%v err=%v", loaded, found, loadErr)
+	}
+}
+
 func TestHostVerifierLoginReportsPlaintextCleanupFailureOnEveryExitPath(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -582,6 +634,37 @@ func TestHostVerifierClearSessionRepairAndStatus(t *testing.T) {
 	}
 	if _, ok, err := store.Load(key); err != nil || ok {
 		t.Fatalf("cleared state: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestHostVerifierRepairClassifiesOnlyExplicitPreEffectFailures(t *testing.T) {
+	missing := NewHostVerifier(nil, &fakeWorker{}, publicResolver("app.test"))
+	if err := missing.Repair(context.Background(), nil); err == nil || RecoveryEffectOutcomeOf(err) != RecoveryEffectKnownFailedNoDurableEffect {
+		t.Fatalf("missing runtime error=%v outcome=%q", err, RecoveryEffectOutcomeOf(err))
+	}
+
+	root := t.TempDir()
+	busyRuntime := NewRuntimeManager(root, &recordingCommandRunner{})
+	if err := os.MkdirAll(busyRuntime.runtimeRoot(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	release, err := busyRuntime.acquireInstallLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	busy := NewHostVerifier(busyRuntime, &fakeWorker{}, publicResolver("app.test"))
+	if err := busy.Repair(context.Background(), nil); err == nil || RecoveryEffectOutcomeOf(err) != RecoveryEffectKnownFailedNoDurableEffect {
+		t.Fatalf("busy repair error=%v outcome=%q", err, RecoveryEffectOutcomeOf(err))
+	}
+
+	unsafeRoot := filepath.Join(t.TempDir(), "management-root-file")
+	if err := os.WriteFile(unsafeRoot, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ambiguous := NewHostVerifier(NewRuntimeManager(unsafeRoot, &recordingCommandRunner{}), &fakeWorker{}, publicResolver("app.test"))
+	if err := ambiguous.Repair(context.Background(), nil); err == nil || RecoveryEffectOutcomeOf(err) != RecoveryEffectOutcomeUnknown {
+		t.Fatalf("ambiguous repair error=%v outcome=%q", err, RecoveryEffectOutcomeOf(err))
 	}
 }
 

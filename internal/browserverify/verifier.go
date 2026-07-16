@@ -165,7 +165,7 @@ func (v *HostVerifier) Repair(ctx context.Context, emit func(bughub.BrowserProgr
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.runtime == nil {
-		return &verifierError{code: "browser_runtime_missing", cause: errors.New("browser runtime manager is required")}
+		return KnownFailedRecoveryEffect(&verifierError{code: "browser_runtime_missing", cause: errors.New("browser runtime manager is required")})
 	}
 	_, err := v.runtime.Repair(ctx, emit)
 	return err
@@ -333,6 +333,12 @@ func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerifi
 func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) (returnedErr error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	effectMayBeDurable := false
+	defer func() {
+		if returnedErr != nil && !effectMayBeDurable {
+			returnedErr = KnownFailedRecoveryEffect(returnedErr)
+		}
+	}()
 	if v.sessions == nil {
 		return &verifierError{code: "browser_session_store_missing", cause: errors.New("browser session store is required")}
 	}
@@ -435,6 +441,7 @@ func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) (
 		return &verifierError{code: "browser_session_cleanup_failed", cause: errPlaintextSessionCleanup}
 	}
 	cleanupPath = ""
+	effectMayBeDurable = true
 	if err := v.sessions.Save(key, state); err != nil {
 		return &verifierError{code: "browser_session_save_failed", cause: errors.New("save encrypted browser session")}
 	}

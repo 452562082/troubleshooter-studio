@@ -93,18 +93,18 @@ func (execCommandRunner) Run(ctx context.Context, executable string, args, env [
 	}
 	if err := outputs.childStarted(); err != nil {
 		_ = processController.kill(command)
-		_ = command.Wait()
+		_ = processController.wait(command)
 		return errors.Join(err, processController.finish())
 	}
 	stdoutDone, stderrDone := outputs.copyTo(stdout, stderr)
 	if err := processController.afterStart(command); err != nil {
 		_ = processController.kill(command)
-		waitErr := command.Wait()
+		waitErr := processController.wait(command)
 		cleanupErr := processController.finish()
 		copyErr := outputs.waitCopies(stdoutDone, stderrDone)
 		return errors.Join(err, waitErr, cleanupErr, copyErr)
 	}
-	waitErr := command.Wait()
+	waitErr := processController.wait(command)
 	cleanupErr := processController.finish()
 	copyErr := outputs.waitCopies(stdoutDone, stderrDone)
 	return errors.Join(waitErr, cleanupErr, copyErr)
@@ -367,14 +367,17 @@ func (m *RuntimeManager) pathsFor(root string) RuntimePaths {
 }
 
 func (m *RuntimeManager) acquireInstallLock() (func() error, error) {
-	release, err := acquireRuntimeAdvisoryLock(m.lockPath())
+	releaseV2, err := acquireRuntimeAdvisoryLock(m.lockPath())
 	if err != nil {
 		return nil, err
 	}
-	if err := ensureRuntimeInstallCompatibilityMarker(m.legacyLockPath()); err != nil {
-		return nil, errors.Join(err, release())
+	releaseHistorical, err := acquireRuntimeInstallCompatibilityLock(m.legacyLockPath())
+	if err != nil {
+		return nil, errors.Join(err, releaseV2())
 	}
-	return release, nil
+	return func() error {
+		return errors.Join(releaseHistorical(), releaseV2())
+	}, nil
 }
 
 func (m *RuntimeManager) setLegacyInstallLockStatusLocked() {

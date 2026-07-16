@@ -258,6 +258,95 @@ func TestRuntimeManagerLegacyInstallLockRequiresManualRecovery(t *testing.T) {
 	}
 }
 
+func TestRuntimeManagerEmptyOEXCLInstallLockRequiresManualRecovery(t *testing.T) {
+	manager := NewRuntimeManager(t.TempDir(), &recordingCommandRunner{})
+	if err := os.MkdirAll(manager.runtimeRoot(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manager.legacyLockPath(), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(manager.legacyLockPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.acquireInstallLock(); !errors.Is(err, errLegacyRuntimeInstallLock) {
+		t.Fatalf("empty O_EXCL lock error = %v, want errLegacyRuntimeInstallLock", err)
+	}
+	after, err := os.Stat(manager.legacyLockPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) || after.Size() != 0 {
+		t.Fatalf("empty O_EXCL lock was replaced or changed: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestRuntimeManagerBlocksLiveHistoricalAdvisoryOwner(t *testing.T) {
+	manager := NewRuntimeManager(t.TempDir(), &recordingCommandRunner{})
+	if err := os.MkdirAll(manager.runtimeRoot(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishRuntimeInstallCompatibilityMarker(manager.legacyLockPath()); err != nil {
+		t.Fatal(err)
+	}
+	historicalRelease, err := acquireRuntimeAdvisoryLock(manager.legacyLockPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer historicalRelease()
+	if _, err := manager.acquireInstallLock(); !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("new manager error with live historical advisory owner = %v, want fs.ErrExist", err)
+	}
+}
+
+func TestRuntimeInstallLockSerializesHistoricalV2AndCurrentContenders(t *testing.T) {
+	manager := NewRuntimeManager(t.TempDir(), &recordingCommandRunner{})
+	if err := os.MkdirAll(manager.runtimeRoot(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishRuntimeInstallCompatibilityMarker(manager.legacyLockPath()); err != nil {
+		t.Fatal(err)
+	}
+	historicalRelease, err := acquireRuntimeAdvisoryLock(manager.legacyLockPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2Release, err := acquireRuntimeAdvisoryLock(manager.lockPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.acquireInstallLock(); !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("current contender bypassed live v2 gate: %v", err)
+	}
+	if err := v2Release(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.acquireInstallLock(); !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("current contender bypassed historical advisory owner: %v", err)
+	}
+	if err := historicalRelease(); err != nil {
+		t.Fatal(err)
+	}
+	currentRelease, err := manager.acquireInstallLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer currentRelease()
+	if release, err := acquireRuntimeAdvisoryLock(manager.lockPath()); !errors.Is(err, fs.ErrExist) {
+		if err == nil {
+			_ = release()
+		}
+		t.Fatalf("current owner did not retain v2 gate: %v", err)
+	}
+	if release, err := acquireRuntimeAdvisoryLock(manager.legacyLockPath()); !errors.Is(err, fs.ErrExist) {
+		if err == nil {
+			_ = release()
+		}
+		t.Fatalf("current owner did not retain historical advisory lock: %v", err)
+	}
+}
+
 func TestRuntimeManagerMigratesAfterLegacyLockManualRemoval(t *testing.T) {
 	manager := NewRuntimeManager(t.TempDir(), &recordingCommandRunner{})
 	if err := os.MkdirAll(manager.runtimeRoot(), 0o700); err != nil {

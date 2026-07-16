@@ -13,6 +13,13 @@ const runtimeInstallLockV2Marker = "tshoot-browser-runtime-install-lock:v2\n"
 
 var errLegacyRuntimeInstallLock = errors.New("legacy browser runtime install lock requires manual recovery")
 
+func acquireRuntimeInstallCompatibilityLock(path string) (func() error, error) {
+	if err := ensureRuntimeInstallCompatibilityMarker(path); err != nil {
+		return nil, err
+	}
+	return acquireRuntimeAdvisoryLock(path)
+}
+
 func ensureRuntimeInstallCompatibilityMarker(path string) error {
 	for {
 		marker, err := os.ReadFile(path)

@@ -1247,7 +1247,7 @@ func (nodeWorkerRunner) Run(ctx context.Context, paths RuntimePaths, request wor
 	}
 	if err := errors.Join(outputs.childStarted(), stdinRead.Close()); err != nil {
 		_ = processController.kill(command)
-		_ = command.Wait()
+		_ = processController.wait(command)
 		return workerResult{}, errors.Join(err, processController.finish())
 	}
 	stdinDone := make(chan error, 1)
@@ -1271,13 +1271,13 @@ func (nodeWorkerRunner) Run(ctx context.Context, paths RuntimePaths, request wor
 	}()
 	if err := processController.afterStart(command); err != nil {
 		kill()
-		waitErr := command.Wait()
+		waitErr := processController.wait(command)
 		cleanupErr := processController.finish()
 		stdoutResult, stderrErr := waitWorkerOutputDrains(outputs, stdoutDone, stderrDone)
 		stdinErr := <-stdinDone
 		return workerResult{}, errors.Join(err, waitErr, cleanupErr, stdoutResult.err, stderrErr, stdinErr)
 	}
-	waitErr := command.Wait()
+	waitErr := processController.wait(command)
 	processCleanupErr := processController.finish()
 	stdoutResult, stderrErr := waitWorkerOutputDrains(outputs, stdoutDone, stderrDone)
 	stdinErr := <-stdinDone

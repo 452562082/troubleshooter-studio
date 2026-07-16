@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 	"unsafe"
@@ -37,7 +38,6 @@ func TestConfigureWorkerProcessUsesKillOnCloseJobWrapper(t *testing.T) {
 
 func TestWindowsJobGateCancellationNeverLeavesTarget(t *testing.T) {
 	stages := []windowsProcessStage{
-		windowsProcessStageBeforeStart,
 		windowsProcessStageWrapperStarted,
 		windowsProcessStageWrapperAssigned,
 		windowsProcessStageTargetReleased,
@@ -55,26 +55,50 @@ func TestWindowsJobGateCancellationNeverLeavesTarget(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer controller.finish()
+			stageEntered := make(chan struct{})
+			releaseStage := make(chan struct{})
+			var stageOnce sync.Once
 			controller.stageHook = func(got windowsProcessStage) {
 				if got == stage {
-					cancel()
-					_ = controller.cancel(command)
+					stageOnce.Do(func() { close(stageEntered) })
+					<-releaseStage
 				}
 			}
-			if stage == windowsProcessStageBeforeStart {
-				controller.stageHook(stage)
+			if err := command.Start(); err != nil {
+				t.Fatal(err)
 			}
-			startErr := command.Start()
-			if startErr == nil {
-				_ = controller.afterStart(command)
-				waitDone := make(chan error, 1)
-				go func() { waitDone <- command.Wait() }()
-				select {
-				case <-waitDone:
-				case <-time.After(3 * time.Second):
-					_ = controller.kill(command)
-					t.Fatal("gated Windows wrapper did not exit after cancellation")
-				}
+			afterStartDone := make(chan error, 1)
+			go func() { afterStartDone <- controller.afterStart(command) }()
+			select {
+			case <-stageEntered:
+			case <-time.After(3 * time.Second):
+				_ = controller.kill(command)
+				t.Fatalf("afterStart did not reach %s", stage)
+			}
+			cancel()
+			deadline := time.Now().Add(3 * time.Second)
+			for !controller.cancelRequested.Load() && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if !controller.cancelRequested.Load() {
+				close(releaseStage)
+				_ = controller.kill(command)
+				t.Fatal("cancellation did not overlap afterStart")
+			}
+			close(releaseStage)
+			select {
+			case <-afterStartDone:
+			case <-time.After(3 * time.Second):
+				_ = controller.kill(command)
+				t.Fatal("afterStart did not finish after overlapping cancellation")
+			}
+			waitDone := make(chan error, 1)
+			go func() { waitDone <- command.Wait() }()
+			select {
+			case <-waitDone:
+			case <-time.After(3 * time.Second):
+				_ = controller.kill(command)
+				t.Fatal("gated Windows wrapper did not exit after cancellation")
 			}
 			time.Sleep(1200 * time.Millisecond)
 			if _, err := os.Stat(markerPath); !errors.Is(err, os.ErrNotExist) {

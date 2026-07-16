@@ -3,6 +3,7 @@
 package browserverify
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -16,6 +17,34 @@ import (
 	"testing"
 	"time"
 )
+
+func TestExecCommandRunnerWrapperPreservesArgvEnvironmentStdinAndExit(t *testing.T) {
+	temporary := t.TempDir()
+	sideEffectPath := filepath.Join(temporary, "shell-interpolation-must-not-run")
+	literalArgument := "literal;touch " + sideEffectPath
+	var stdout bytes.Buffer
+	if err := (execCommandRunner{}).Run(context.Background(), os.Args[0], []string{
+		"-test.run=^TestRuntimeCommandProcessTreeHelper$", literalArgument,
+	}, []string{
+		"TSHOOT_RUNTIME_PROCESS_HELPER=protocol",
+		"TSHOOT_RUNTIME_PROTOCOL_ENV=environment-value",
+	}, temporary, strings.NewReader("stdin-value"), &stdout, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	want := literalArgument + "\nenvironment-value\nstdin-value"
+	if stdout.String() != want {
+		t.Fatalf("wrapped command protocol output = %q, want %q", stdout.String(), want)
+	}
+	if _, err := os.Stat(sideEffectPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("literal argv was interpreted by a shell: %v", err)
+	}
+	err := (execCommandRunner{}).Run(context.Background(), os.Args[0], []string{
+		"-test.run=^TestRuntimeCommandProcessTreeHelper$",
+	}, []string{"TSHOOT_RUNTIME_PROCESS_HELPER=exit"}, temporary, nil, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "exit status 23") {
+		t.Fatalf("wrapped target exit error = %v, want exit status 23", err)
+	}
+}
 
 func TestExecCommandRunnerDirectExitCleansDescendantHoldingOutputPipes(t *testing.T) {
 	temporary := t.TempDir()
@@ -135,6 +164,15 @@ func TestRuntimeCommandProcessTreeHelper(t *testing.T) {
 		for {
 			time.Sleep(time.Hour)
 		}
+	case "protocol":
+		content, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.WriteString(os.Stdout, os.Args[len(os.Args)-1]+"\n"+os.Getenv("TSHOOT_RUNTIME_PROTOCOL_ENV")+"\n"+string(content))
+		os.Exit(0)
+	case "exit":
+		os.Exit(23)
 	default:
 		t.Fatalf("unknown process-tree helper mode %q", os.Getenv("TSHOOT_RUNTIME_PROCESS_HELPER"))
 	}

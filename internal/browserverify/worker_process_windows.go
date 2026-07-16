@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"unsafe"
 
@@ -26,13 +27,13 @@ const (
 )
 
 type workerProcessController struct {
-	mu          sync.Mutex
-	job         windows.Handle
-	gateRead    *os.File
-	gateWrite   *os.File
-	closed      bool
-	stageHook   func(windowsProcessStage)
-	cleanupOnce sync.Once
+	mu              sync.Mutex
+	job             windows.Handle
+	gateRead        *os.File
+	gateWrite       *os.File
+	closed          bool
+	stageHook       func(windowsProcessStage)
+	cancelRequested atomic.Bool
 }
 
 const windowsJobWrapperArgument = "--tshoot-browser-job-wrapper"
@@ -85,54 +86,62 @@ func configureWorkerProcess(command *exec.Cmd) (*workerProcessController, error)
 }
 
 func (controller *workerProcessController) afterStart(command *exec.Cmd) error {
-	_ = controller.gateRead.Close()
-	controller.gateRead = nil
-	if controller.reached(windowsProcessStageWrapperStarted) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if controller.closed || controller.cancelRequested.Load() {
+		controller.closeContainmentLocked()
+		return errors.New("browser process wrapper canceled before Job assignment")
+	}
+	if controller.gateRead != nil {
+		_ = controller.gateRead.Close()
+		controller.gateRead = nil
+	}
+	if controller.reachedLocked(windowsProcessStageWrapperStarted) {
+		controller.closeContainmentLocked()
 		return errors.New("browser process wrapper canceled before Job assignment")
 	}
 	process, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(command.Process.Pid))
 	if err != nil {
-		_ = controller.cancel(command)
+		controller.closeContainmentLocked()
 		return err
 	}
 	assignErr := windows.AssignProcessToJobObject(controller.job, process)
 	closeErr := windows.CloseHandle(process)
 	if err := errors.Join(assignErr, closeErr); err != nil {
-		_ = controller.cancel(command)
+		controller.closeContainmentLocked()
 		return err
 	}
-	if controller.reached(windowsProcessStageWrapperAssigned) {
+	if controller.reachedLocked(windowsProcessStageWrapperAssigned) {
+		controller.closeContainmentLocked()
 		return errors.New("browser process wrapper canceled before target release")
 	}
-	controller.mu.Lock()
-	if controller.closed {
-		controller.mu.Unlock()
+	if controller.gateWrite == nil {
+		controller.closeContainmentLocked()
 		return errors.New("browser process wrapper canceled before target release")
 	}
 	_, writeErr := controller.gateWrite.Write([]byte{1})
 	closeGateErr := controller.gateWrite.Close()
 	controller.gateWrite = nil
-	controller.mu.Unlock()
 	if err := errors.Join(writeErr, closeGateErr); err != nil {
-		_ = controller.cancel(command)
+		controller.closeContainmentLocked()
 		return err
 	}
-	if controller.reached(windowsProcessStageTargetReleased) {
+	if controller.reachedLocked(windowsProcessStageTargetReleased) {
+		controller.closeContainmentLocked()
 		return errors.New("browser process target canceled after release")
 	}
 	return nil
 }
 
-func (controller *workerProcessController) reached(stage windowsProcessStage) bool {
+func (controller *workerProcessController) reachedLocked(stage windowsProcessStage) bool {
 	if controller.stageHook != nil {
 		controller.stageHook(stage)
 	}
-	controller.mu.Lock()
-	defer controller.mu.Unlock()
-	return controller.closed
+	return controller.closed || controller.cancelRequested.Load()
 }
 
 func (controller *workerProcessController) cancel(command *exec.Cmd) error {
+	controller.cancelRequested.Store(true)
 	controller.closeContainment()
 	if command.Process == nil {
 		return nil
@@ -147,29 +156,38 @@ func (controller *workerProcessController) kill(command *exec.Cmd) error {
 	return controller.cancel(command)
 }
 
+func (*workerProcessController) wait(command *exec.Cmd) error {
+	return command.Wait()
+}
+
 func (controller *workerProcessController) finish() error {
 	controller.closeContainment()
 	return nil
 }
 
 func (controller *workerProcessController) closeContainment() {
-	controller.cleanupOnce.Do(func() {
-		controller.mu.Lock()
-		defer controller.mu.Unlock()
-		controller.closed = true
-		if controller.gateWrite != nil {
-			_ = controller.gateWrite.Close()
-			controller.gateWrite = nil
-		}
-		if controller.gateRead != nil {
-			_ = controller.gateRead.Close()
-			controller.gateRead = nil
-		}
-		if controller.job != 0 {
-			_ = windows.CloseHandle(controller.job)
-			controller.job = 0
-		}
-	})
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	controller.closeContainmentLocked()
+}
+
+func (controller *workerProcessController) closeContainmentLocked() {
+	if controller.closed {
+		return
+	}
+	controller.closed = true
+	if controller.gateWrite != nil {
+		_ = controller.gateWrite.Close()
+		controller.gateWrite = nil
+	}
+	if controller.gateRead != nil {
+		_ = controller.gateRead.Close()
+		controller.gateRead = nil
+	}
+	if controller.job != 0 {
+		_ = windows.CloseHandle(controller.job)
+		controller.job = 0
+	}
 }
 
 func runWindowsJobWrappedCommand(gateHandle uintptr, executable string, args []string) int {

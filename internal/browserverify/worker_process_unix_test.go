@@ -3,75 +3,66 @@
 package browserverify
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
 )
 
-func TestWorkerProcessFinishCleansRemainingGroupSynchronously(t *testing.T) {
-	var mu sync.Mutex
+func TestWorkerProcessWaitCleansGroupBeforeWrapperReapAndPGIDReuse(t *testing.T) {
+	statusRead, statusWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.NewEncoder(statusWrite).Encode(unixTargetStatus{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := statusWrite.Close(); err != nil {
+		t.Fatal(err)
+	}
+	command := &exec.Cmd{Process: &os.Process{Pid: 4242}}
 	var signals []syscall.Signal
+	reaped := false
+	reused := false
 	controller := &workerProcessController{
-		command: &exec.Cmd{Process: &os.Process{Pid: 4242}},
-		signalProcessGroup: func(_ int, signal syscall.Signal) error {
-			mu.Lock()
-			defer mu.Unlock()
+		command:    command,
+		statusRead: statusRead,
+		signalProcessGroup: func(processGroup int, signal syscall.Signal) error {
+			if processGroup != 4242 {
+				t.Fatalf("process group = %d, want 4242", processGroup)
+			}
+			if reaped || reused {
+				t.Fatalf("reused process group received signal %v after wrapper reap", signal)
+			}
 			signals = append(signals, signal)
 			return nil
 		},
-		sleep: func(time.Duration) {},
-		grace: time.Second,
-	}
-	if err := controller.finish(); err != nil {
-		t.Fatal(err)
-	}
-	mu.Lock()
-	countAtReturn := len(signals)
-	got := append([]syscall.Signal(nil), signals...)
-	mu.Unlock()
-	time.Sleep(50 * time.Millisecond)
-	mu.Lock()
-	countAfterReturn := len(signals)
-	mu.Unlock()
-	if countAfterReturn != countAtReturn {
-		t.Fatalf("signals continued after finish returned: before=%v after=%v", countAtReturn, countAfterReturn)
-	}
-	want := []syscall.Signal{0, syscall.SIGKILL}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("finish signals = %v, want synchronous %v", got, want)
-	}
-}
-
-func TestWorkerProcessFinishDoesNotSignalReusedProcessGroupAfterIdentityDisappears(t *testing.T) {
-	var mu sync.Mutex
-	var signals []syscall.Signal
-	controller := &workerProcessController{
-		command: &exec.Cmd{Process: &os.Process{Pid: 4242}},
-		signalProcessGroup: func(_ int, signal syscall.Signal) error {
-			mu.Lock()
-			defer mu.Unlock()
-			signals = append(signals, signal)
-			return syscall.ESRCH
+		beforeGroupCleanup: func() {
+			time.Sleep(25 * time.Millisecond)
+			if reaped {
+				t.Fatal("wrapper was reaped during artificial cleanup delay")
+			}
+		},
+		waitWrapper: func(*exec.Cmd) error {
+			reaped = true
+			reused = true
+			return nil
 		},
 	}
+	if err := controller.wait(command); err != nil {
+		t.Fatal(err)
+	}
 	if err := controller.finish(); err != nil {
 		t.Fatal(err)
 	}
-	mu.Lock()
 	countAtReturn := len(signals)
-	got := append([]syscall.Signal(nil), signals...)
-	mu.Unlock()
 	time.Sleep(50 * time.Millisecond)
-	mu.Lock()
-	countAfterReturn := len(signals)
-	mu.Unlock()
-	if countAfterReturn != countAtReturn {
-		t.Fatalf("reused process group was signaled after finish returned: before=%v after=%v", countAtReturn, countAfterReturn)
+	if len(signals) != countAtReturn {
+		t.Fatalf("signals continued after wrapper reap: before=%d after=%d", countAtReturn, len(signals))
 	}
-	if len(got) != 1 || got[0] != 0 {
-		t.Fatalf("signals for disappeared process group = %v, want identity probe only", got)
+	if len(signals) != 1 || signals[0] != syscall.SIGKILL {
+		t.Fatalf("owned-group cleanup signals = %v, want synchronous SIGKILL", signals)
 	}
 }

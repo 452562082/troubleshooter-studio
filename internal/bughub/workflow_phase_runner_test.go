@@ -607,6 +607,35 @@ func TestAgentPhaseRunnerBrowserStopsUseBoundedEnvelopeAndKeepFailureScreenshot(
 	}
 }
 
+func TestAgentPhaseRunnerBrowserLoginStopPersistsApplicationAndAuthenticationOrigins(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-browser-login-origins", CaseValidating)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{{FinalYAML: validBrowserPlanYAML()}}}
+	verifier := browserVerifierFunc(func(_ context.Context, request BrowserVerificationRequest) (BrowserVerificationResult, error) {
+		return BrowserVerificationResult{Status: "login_required", LoginOrigin: "https://login.example.com"}, nil
+	})
+	completed := make(chan CompleteAttemptCommand, 1)
+	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(_ context.Context, command CompleteAttemptCommand) error { completed <- command; return nil })
+	runner.SetBrowserVerifier(verifier, browserPolicyResolverFunc(func(context.Context, IncidentCase, Bug) (BrowserSecurityPolicy, error) {
+		return BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.example.com", "https://login.example.com"}, AuthOrigins: []string{"https://login.example.com"}}, nil
+	}))
+	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID, Env: "test", FrontendURL: "https://app.example.com/users"}, installedPhaseRunnerBot(t, "bot", "codex")); err != nil {
+		t.Fatal(err)
+	}
+	command := <-completed
+	var envelope struct {
+		ApplicationOrigin string `json:"application_origin"`
+		LoginOrigin       string `json:"login_origin"`
+	}
+	if err := json.Unmarshal(command.OutputJSON, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if command.ErrorCode != "browser_login_required" || envelope.ApplicationOrigin != "https://app.example.com" || envelope.LoginOrigin != "https://login.example.com" {
+		t.Fatalf("command=%+v envelope=%+v", command, envelope)
+	}
+}
+
 func TestBrowserFailureOutcomeSeparatesSystemFailuresFromEvidenceGaps(t *testing.T) {
 	for _, code := range []string{
 		"browser_runtime_broken", "browser_policy_unavailable", "browser_policy_changed",

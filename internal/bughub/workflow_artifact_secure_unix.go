@@ -53,6 +53,77 @@ func captureArtifactSource(path string) (capturedArtifactSource, error) {
 	return capturedArtifactSource{Content: content, SHA256: digest, CapturedAt: after.ModTime().UTC()}, nil
 }
 
+func captureRegisteredArtifact(path, artifactsRoot, caseID, digest string) (capturedArtifactSource, error) {
+	if !filepath.IsAbs(path) || caseID == "" || digest == "" || filepath.Base(path) != digest || filepath.Base(filepath.Dir(path)) != caseID {
+		return capturedArtifactSource{}, errors.New("registered artifact path ownership is invalid")
+	}
+	registeredRoot := filepath.Dir(filepath.Dir(filepath.Clean(path)))
+	if strings.TrimSpace(artifactsRoot) != "" {
+		expectedRoot, err := filepath.Abs(artifactsRoot)
+		if err != nil || filepath.Clean(expectedRoot) != registeredRoot {
+			return capturedArtifactSource{}, errors.New("registered artifact does not belong to the configured artifact store")
+		}
+	}
+	volumeRoot := filepath.VolumeName(registeredRoot) + string(filepath.Separator)
+	if filepath.Clean(registeredRoot) == filepath.Clean(volumeRoot) {
+		return capturedArtifactSource{}, errors.New("registered artifact root must be a dedicated subdirectory")
+	}
+	rootFD, err := openDirectoryPath(registeredRoot)
+	if err != nil {
+		return capturedArtifactSource{}, err
+	}
+	defer unix.Close(rootFD)
+	caseFD, err := unix.Openat(rootFD, caseID, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return capturedArtifactSource{}, fmt.Errorf("open registered artifact case directory without following links: %w", err)
+	}
+	defer unix.Close(caseFD)
+	fd, err := unix.Openat(caseFD, digest, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return capturedArtifactSource{}, fmt.Errorf("open registered artifact without following links: %w", err)
+	}
+	file := os.NewFile(uintptr(fd), path)
+	if file == nil {
+		_ = unix.Close(fd)
+		return capturedArtifactSource{}, errors.New("open registered artifact descriptor")
+	}
+	defer file.Close()
+	beforeInfo, err := file.Stat()
+	if err != nil {
+		return capturedArtifactSource{}, fmt.Errorf("inspect registered artifact: %w", err)
+	}
+	var beforeStat unix.Stat_t
+	if err := unix.Fstat(fd, &beforeStat); err != nil {
+		return capturedArtifactSource{}, fmt.Errorf("inspect registered artifact descriptor: %w", err)
+	}
+	if !beforeInfo.Mode().IsRegular() || beforeStat.Nlink != 1 {
+		return capturedArtifactSource{}, errors.New("registered artifact must be a regular file with one link")
+	}
+	if beforeInfo.Size() < 0 || beforeInfo.Size() > maxEvidenceArtifactBytes {
+		return capturedArtifactSource{}, fmt.Errorf("%w: declared size %d exceeds maximum %d bytes", ErrEvidenceArtifactTooLarge, beforeInfo.Size(), maxEvidenceArtifactBytes)
+	}
+	content, actualDigest, err := readStagedEvidence(file)
+	if err != nil {
+		return capturedArtifactSource{}, fmt.Errorf("read registered artifact: %w", err)
+	}
+	afterInfo, err := file.Stat()
+	if err != nil {
+		return capturedArtifactSource{}, fmt.Errorf("reinspect registered artifact: %w", err)
+	}
+	var afterStat unix.Stat_t
+	if err := unix.Fstat(fd, &afterStat); err != nil {
+		return capturedArtifactSource{}, fmt.Errorf("reinspect registered artifact descriptor: %w", err)
+	}
+	if !os.SameFile(beforeInfo, afterInfo) || beforeInfo.Size() != afterInfo.Size() || !beforeInfo.ModTime().Equal(afterInfo.ModTime()) ||
+		beforeStat.Dev != afterStat.Dev || beforeStat.Ino != afterStat.Ino || beforeStat.Mode != afterStat.Mode || beforeStat.Nlink != afterStat.Nlink || beforeStat.Size != afterStat.Size {
+		return capturedArtifactSource{}, errors.New("registered artifact changed while being read")
+	}
+	if int64(len(content)) != beforeInfo.Size() || actualDigest != digest {
+		return capturedArtifactSource{}, errors.New("registered artifact digest changed or size changed")
+	}
+	return capturedArtifactSource{Content: content, SHA256: actualDigest, CapturedAt: afterInfo.ModTime().UTC()}, nil
+}
+
 type unixArtifactPublication struct {
 	rootPath string
 	caseID   string

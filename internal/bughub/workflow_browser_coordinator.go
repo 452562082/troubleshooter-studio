@@ -230,6 +230,13 @@ func (c BrowserCoordinator) executeBrowser(ctx context.Context, request BrowserC
 	if err != nil {
 		return BrowserVerificationResult{}, err
 	}
+	_, applicationOrigin, err := canonicalBrowserURL(plan.StartURL)
+	if err != nil {
+		return BrowserVerificationResult{}, err
+	}
+	// The application/session origin is derived from the durable validated plan,
+	// never from a worker redirect or the mutable Bug URL used by a later retry.
+	rebased.ApplicationOrigin = applicationOrigin
 	if err := validateBrowserArtifactBinding(rebased.Artifacts, environment, version); err != nil {
 		return BrowserVerificationResult{}, err
 	}
@@ -318,6 +325,7 @@ func browserStopOutput(result BrowserCoordinatorResult) json.RawMessage {
 		envelope["system_failure"] = true
 	}
 	if result.ErrorCode == "browser_login_required" {
+		envelope["application_origin"] = safeBoundedBrowserText(result.BrowserResult.ApplicationOrigin, 4096)
 		envelope["login_origin"] = safeBoundedBrowserText(result.BrowserResult.LoginOrigin, 4096)
 	}
 	return mustJSON(envelope)
@@ -725,6 +733,7 @@ func rebaseBrowserResult(result BrowserVerificationResult, execution string) (Br
 	rebased.FailedActionID = safeBoundedBrowserText(result.FailedActionID, 128)
 	rebased.FinalURL = safeBoundedBrowserText(result.FinalURL, 4096)
 	rebased.Title = safeBoundedBrowserText(result.Title, 512)
+	rebased.ApplicationOrigin = safeBoundedBrowserText(result.ApplicationOrigin, 4096)
 	rebased.LoginOrigin = safeBoundedBrowserText(result.LoginOrigin, 4096)
 	rebased.AccessibilitySummary = boundedBrowserAccessibility(result.AccessibilitySummary)
 	rebased.Artifacts = make([]BrowserArtifactReference, 0, len(result.Artifacts))

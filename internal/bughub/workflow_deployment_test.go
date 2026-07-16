@@ -90,8 +90,8 @@ func TestDeploymentProofSchemaMigratesV1Store(t *testing.T) {
 	}
 }
 
-func TestDeploymentProofSchemaMigratesV2ThroughV6Stores(t *testing.T) {
-	for _, initialVersion := range []int{2, 3, 4, 5, 6} {
+func TestDeploymentProofSchemaMigratesV2ThroughV7Stores(t *testing.T) {
+	for _, initialVersion := range []int{2, 3, 4, 5, 6, 7} {
 		t.Run(fmt.Sprintf("v%d", initialVersion), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "workflow.db")
 			db, err := sql.Open("sqlite", path)
@@ -124,6 +124,11 @@ func TestDeploymentProofSchemaMigratesV2ThroughV6Stores(t *testing.T) {
 			}
 			if initialVersion >= 6 {
 				if _, err = tx.Exec(workflowStoreSchemaV6Upgrade); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if initialVersion >= 7 {
+				if _, err = tx.Exec(workflowStoreSchemaV7Upgrade); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -177,6 +182,11 @@ func TestDeploymentProofSchemaMigratesV2ThroughV6Stores(t *testing.T) {
 			for _, required := range []string{"reset_key", "case_id", "attempt_id", "request_fingerprint", "status", "claim_token", "outcome_code", "created_at", "updated_at"} {
 				if !containsString(columns["reset_cancellation_operations"], required) {
 					t.Fatalf("missing reset cancellation operation %s columns=%v", required, columns["reset_cancellation_operations"])
+				}
+			}
+			for _, required := range []string{"idempotency_key", "operation", "case_id", "attempt_id", "expected_error_code", "cycle_number", "expected_version", "actor_id", "request_fingerprint", "status", "claim_token", "outcome_code", "result_case_json", "created_at", "updated_at"} {
+				if !containsString(columns["browser_recovery_operations"], required) {
+					t.Fatalf("missing browser recovery operation %s columns=%v", required, columns["browser_recovery_operations"])
 				}
 			}
 		})

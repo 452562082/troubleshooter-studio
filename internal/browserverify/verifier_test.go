@@ -258,6 +258,40 @@ func TestHostVerifierLoginReplacesEncryptedSessionOnlyAfterWorkerSuccess(t *test
 	assertTreeExcludesBytes(t, root, oldState, newState, []byte(plaintextPath))
 }
 
+func TestHostVerifierLoginNavigatesToAuthOriginAndStoresApplicationSession(t *testing.T) {
+	root := t.TempDir()
+	store := NewSessionStore(filepath.Join(root, "sessions"), newMemorySecretStore())
+	applicationKey := SessionKey{SystemID: "shop", Environment: "test", Origin: "https://app.test"}
+	authKey := SessionKey{SystemID: "shop", Environment: "test", Origin: "https://login.test"}
+	state := []byte(`{"cookies":[{"domain":".test","value":"sso-session"}]}`)
+	worker := &fakeWorker{Result: workerResult{Status: "completed"}}
+	worker.Inspect = func(_ context.Context, request workerRequest) error {
+		if request.Plan.StartURL != "https://login.test" {
+			t.Fatalf("login navigation URL = %q", request.Plan.StartURL)
+		}
+		return os.WriteFile(request.StorageStatePath, state, 0o600)
+	}
+	verifier := newTestHostVerifier(t, worker)
+	verifier.SetSessionStore(store)
+	if err := verifier.Login(context.Background(), BrowserLoginRequest{
+		SystemID: "shop", Environment: "test", ApplicationOrigin: "https://app.test", LoginOrigin: "https://login.test",
+		Policy: bughub.BrowserSecurityPolicy{
+			AllowedOrigins: []string{"https://app.test", "https://login.test"},
+			AuthOrigins:    []string{"https://login.test"},
+		},
+		Timeout: time.Minute,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := store.Load(applicationKey)
+	if err != nil || !found || !bytes.Equal(got, state) {
+		t.Fatalf("application session=%q found=%v err=%v", got, found, err)
+	}
+	if _, found, err := store.Load(authKey); err != nil || found {
+		t.Fatalf("auth-origin session found=%v err=%v", found, err)
+	}
+}
+
 func TestHostVerifierLoginSerializesEmptyPlanCollectionsAsArrays(t *testing.T) {
 	store := NewSessionStore(filepath.Join(t.TempDir(), "sessions"), newMemorySecretStore())
 	worker := &fakeWorker{Result: workerResult{Status: "completed"}}

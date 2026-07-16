@@ -224,6 +224,7 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 	if root == "" {
 		root = bughub.DefaultRoot()
 	}
+	a.workflowRoot = root
 	store, err := bughub.OpenCaseStore(filepath.Join(root, "workflows.db"))
 	if err != nil {
 		a.workflowInitErr = err

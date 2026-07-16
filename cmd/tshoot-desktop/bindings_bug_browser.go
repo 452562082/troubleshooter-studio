@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/browserverify"
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
@@ -197,7 +200,7 @@ func (a *App) GetIncidentArtifactPreview(caseID, artifactID string) (IncidentArt
 	if err != nil {
 		return IncidentArtifactPreview{}, err
 	}
-	content, err := bughub.ReadEvidenceArtifact(a.workflowCommandContext(), store, caseID, artifactID)
+	content, err := bughub.ReadEvidenceArtifactFromRoot(a.workflowCommandContext(), store, filepath.Join(a.workflowRoot, "artifacts"), caseID, artifactID)
 	if err != nil {
 		return IncidentArtifactPreview{}, err
 	}
@@ -222,7 +225,7 @@ func (a *App) SaveIncidentArtifact(caseID, artifactID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	content, err := bughub.ReadEvidenceArtifact(a.workflowCommandContext(), store, caseID, artifactID)
+	content, err := bughub.ReadEvidenceArtifactFromRoot(a.workflowCommandContext(), store, filepath.Join(a.workflowRoot, "artifacts"), caseID, artifactID)
 	if err != nil {
 		return "", err
 	}
@@ -262,12 +265,12 @@ func (a *App) OpenIncidentBrowserLogin(input IncidentBrowserCommandInput) (bughu
 	a.workflowBrowserMu.Lock()
 	defer a.workflowBrowserMu.Unlock()
 
-	incident, attempt, replayed, err := a.incidentBrowserBlockedAttempt(input, "browser_login_required")
+	incident, attempt, request, operation, err := a.incidentBrowserBlockedAttempt(input, bughub.BrowserRecoveryLogin, "browser_login_required")
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
-	if replayed != nil {
-		return replayed.Clone(), nil
+	if operation != nil {
+		return a.resumeIncidentBrowserRecovery(input, attempt, request, *operation)
 	}
 	controller := a.workflowBrowser
 	if controller == nil {
@@ -281,57 +284,94 @@ func (a *App) OpenIncidentBrowserLogin(input IncidentBrowserCommandInput) (bughu
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
-	loginOrigin, err := incidentBrowserLoginOrigin(attempt)
-	if err != nil || !incidentBrowserOriginAllowed(loginOrigin, policy.AllowedOrigins) {
+	applicationOrigin, loginOrigin, err := incidentBrowserLoginOrigins(attempt)
+	if err != nil || !incidentBrowserOriginAllowed(applicationOrigin, policy.AllowedOrigins) || !incidentBrowserOriginAllowed(loginOrigin, policy.AllowedOrigins) {
 		return bughub.IncidentCase{}, errors.New("browser login origin is unavailable")
 	}
+	store, _, err := a.workflowComponents()
+	if err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	claimToken, err := newIncidentBrowserClaimToken()
+	if err != nil {
+		return bughub.IncidentCase{}, errors.New("incident browser recovery journal is unavailable")
+	}
+	claimed, acquired, err := store.ClaimBrowserRecoveryOperation(a.workflowCommandContext(), request, claimToken)
+	if err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	if !acquired {
+		return a.resumeIncidentBrowserRecovery(input, attempt, request, claimed)
+	}
 	if err := controller.Login(a.workflowCommandContext(), browserverify.BrowserLoginRequest{
-		SystemID: incident.SystemID, Environment: incident.Environment, Origin: loginOrigin, Policy: policy,
+		SystemID: incident.SystemID, Environment: incident.Environment, ApplicationOrigin: applicationOrigin, LoginOrigin: loginOrigin, Policy: policy,
 		Emit: func(progress bughub.BrowserProgress) { a.emitIncidentBrowserProgress(input.CaseID, progress) },
 	}); err != nil {
+		a.markIncidentBrowserRecoveryUncertain(store, request, claimToken)
 		return bughub.IncidentCase{}, errors.New("incident browser login failed")
 	}
-	continued, err := a.ContinueIncidentCase(ContinueIncidentCaseInput{
-		CaseID: input.CaseID, ExpectedVersion: input.ExpectedVersion, IdempotencyKey: input.IdempotencyKey,
-		ActorID: input.ActorID, Phase: attempt.Phase,
-	})
-	if err != nil {
-		return continued, incidentBrowserContinuationError(err)
+	if a.workflowBrowserRecoveryBeforeOutcome != nil {
+		if err := a.workflowBrowserRecoveryBeforeOutcome(); err != nil {
+			return bughub.IncidentCase{}, errors.New("incident browser recovery journal is unavailable")
+		}
 	}
-	return continued, nil
+	claimed, err = a.recordIncidentBrowserRecoverySucceeded(store, request, claimToken)
+	if err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	return a.continueIncidentBrowserRecovery(input, attempt, request, claimed)
 }
 
 func (a *App) RepairIncidentBrowserRuntime(input IncidentBrowserCommandInput) (bughub.IncidentCase, error) {
 	a.workflowBrowserMu.Lock()
 	defer a.workflowBrowserMu.Unlock()
 
-	_, attempt, replayed, err := a.incidentBrowserBlockedAttempt(input, "browser_runtime_broken")
+	_, attempt, request, operation, err := a.incidentBrowserBlockedAttempt(input, bughub.BrowserRecoveryRepair, "browser_runtime_broken")
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
-	if replayed != nil {
-		return replayed.Clone(), nil
+	if operation != nil {
+		return a.resumeIncidentBrowserRecovery(input, attempt, request, *operation)
 	}
 	controller := a.workflowBrowser
 	if controller == nil {
 		return bughub.IncidentCase{}, errors.New("incident browser is unavailable")
 	}
+	store, _, err := a.workflowComponents()
+	if err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	claimToken, err := newIncidentBrowserClaimToken()
+	if err != nil {
+		return bughub.IncidentCase{}, errors.New("incident browser recovery journal is unavailable")
+	}
+	claimed, acquired, err := store.ClaimBrowserRecoveryOperation(a.workflowCommandContext(), request, claimToken)
+	if err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	if !acquired {
+		return a.resumeIncidentBrowserRecovery(input, attempt, request, claimed)
+	}
 	if err := controller.Repair(a.workflowCommandContext(), func(progress bughub.BrowserProgress) {
 		a.emitIncidentBrowserProgress(input.CaseID, progress)
 	}); err != nil {
+		a.markIncidentBrowserRecoveryUncertain(store, request, claimToken)
 		return bughub.IncidentCase{}, errors.New("incident browser runtime repair failed")
 	}
 	if status := controller.Status(); status.State != browserverify.RuntimeReady {
+		a.markIncidentBrowserRecoveryUncertain(store, request, claimToken)
 		return bughub.IncidentCase{}, errors.New("incident browser runtime is not ready")
 	}
-	continued, err := a.ContinueIncidentCase(ContinueIncidentCaseInput{
-		CaseID: input.CaseID, ExpectedVersion: input.ExpectedVersion, IdempotencyKey: input.IdempotencyKey,
-		ActorID: input.ActorID, Phase: attempt.Phase,
-	})
-	if err != nil {
-		return continued, incidentBrowserContinuationError(err)
+	if a.workflowBrowserRecoveryBeforeOutcome != nil {
+		if err := a.workflowBrowserRecoveryBeforeOutcome(); err != nil {
+			return bughub.IncidentCase{}, errors.New("incident browser recovery journal is unavailable")
+		}
 	}
-	return continued, nil
+	claimed, err = a.recordIncidentBrowserRecoverySucceeded(store, request, claimToken)
+	if err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	return a.continueIncidentBrowserRecovery(input, attempt, request, claimed)
 }
 
 func incidentBrowserContinuationError(err error) error {
@@ -353,18 +393,15 @@ func (a *App) ClearIncidentBrowserSession(input IncidentBrowserCommandInput) err
 	a.workflowBrowserMu.Lock()
 	defer a.workflowBrowserMu.Unlock()
 
-	incident, attempt, replayed, err := a.incidentBrowserBlockedAttempt(input, "browser_login_required")
+	incident, attempt, err := a.incidentBrowserClearAttempt(input)
 	if err != nil {
 		return err
-	}
-	if replayed != nil {
-		return errors.New("browser login continuation already completed")
 	}
 	controller := a.workflowBrowser
 	if controller == nil {
 		return errors.New("incident browser is unavailable")
 	}
-	loginOrigin, err := incidentBrowserLoginOrigin(attempt)
+	applicationOrigin, loginOrigin, err := incidentBrowserLoginOrigins(attempt)
 	if err != nil {
 		return errors.New("browser login origin is unavailable")
 	}
@@ -373,72 +410,250 @@ func (a *App) ClearIncidentBrowserSession(input IncidentBrowserCommandInput) err
 		return errors.New("incident browser Case context is unavailable")
 	}
 	policy, err := (caseBrowserPolicyResolver{app: a}).ResolveBrowserPolicy(a.workflowCommandContext(), incident, bug)
-	if err != nil || !incidentBrowserOriginAllowed(loginOrigin, policy.AllowedOrigins) {
+	if err != nil || !incidentBrowserOriginAllowed(applicationOrigin, policy.AllowedOrigins) || !incidentBrowserOriginAllowed(loginOrigin, policy.AllowedOrigins) {
 		return errors.New("browser login origin is unavailable")
 	}
 	if err := controller.ClearSession(a.workflowCommandContext(), browserverify.SessionKey{
-		SystemID: incident.SystemID, Environment: incident.Environment, Origin: loginOrigin,
+		SystemID: incident.SystemID, Environment: incident.Environment, Origin: applicationOrigin,
 	}); err != nil {
 		return errors.New("clear incident browser session failed")
 	}
 	return nil
 }
 
-func (a *App) incidentBrowserBlockedAttempt(input IncidentBrowserCommandInput, requiredCode string) (bughub.IncidentCase, bughub.PhaseAttempt, *bughub.IncidentCase, error) {
+func (a *App) incidentBrowserClearAttempt(input IncidentBrowserCommandInput) (bughub.IncidentCase, bughub.PhaseAttempt, error) {
 	if err := validateWorkflowCommandScalars(input.CaseID, input.ExpectedVersion, input.IdempotencyKey, input.ActorID); err != nil {
-		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, nil, err
+		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, err
+	}
+	input.CaseID = strings.TrimSpace(input.CaseID)
+	input.AttemptID = strings.TrimSpace(input.AttemptID)
+	if input.AttemptID == "" {
+		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, errors.New("attempt_id is required")
+	}
+	store, _, err := a.workflowComponents()
+	if err != nil {
+		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, err
+	}
+	attempt, err := store.GetAttempt(a.workflowCommandContext(), input.AttemptID)
+	if err != nil || attempt.CaseID != input.CaseID || attempt.Status != bughub.AttemptStatusFailed || attempt.ErrorCode != "browser_login_required" || attempt.Phase != bughub.PhaseValidation && attempt.Phase != bughub.PhaseRegression {
+		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, errors.New("incident browser attempt is not eligible for this command")
+	}
+	incident, err := store.GetCase(a.workflowCommandContext(), input.CaseID)
+	if err != nil {
+		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, err
+	}
+	if incident.Version != input.ExpectedVersion || incident.Status != bughub.CaseWaitingEvidence || incident.CurrentAttemptID != attempt.ID || incident.CycleNumber != attempt.CycleNumber {
+		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, errors.New("incident browser command requires the current blocked attempt")
+	}
+	return incident, attempt, nil
+}
+
+func (a *App) incidentBrowserBlockedAttempt(input IncidentBrowserCommandInput, operationKind bughub.BrowserRecoveryOperationKind, requiredCode string) (bughub.IncidentCase, bughub.PhaseAttempt, bughub.BrowserRecoveryOperationRequest, *bughub.BrowserRecoveryOperation, error) {
+	if err := validateWorkflowCommandScalars(input.CaseID, input.ExpectedVersion, input.IdempotencyKey, input.ActorID); err != nil {
+		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, bughub.BrowserRecoveryOperationRequest{}, nil, err
 	}
 	input.CaseID = strings.TrimSpace(input.CaseID)
 	input.AttemptID = strings.TrimSpace(input.AttemptID)
 	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
 	input.ActorID = strings.TrimSpace(input.ActorID)
 	if input.AttemptID == "" {
-		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, nil, errors.New("attempt_id is required")
+		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, bughub.BrowserRecoveryOperationRequest{}, nil, errors.New("attempt_id is required")
 	}
 	store, _, err := a.workflowComponents()
 	if err != nil {
-		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, nil, err
+		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, bughub.BrowserRecoveryOperationRequest{}, nil, err
 	}
 	ctx := a.workflowCommandContext()
 	attempt, err := store.GetAttempt(ctx, input.AttemptID)
 	if err != nil {
-		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, nil, errors.New("incident browser attempt is unavailable")
+		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, bughub.BrowserRecoveryOperationRequest{}, nil, errors.New("incident browser attempt is unavailable")
 	}
 	if attempt.CaseID != input.CaseID || attempt.Status != bughub.AttemptStatusFailed || attempt.ErrorCode != requiredCode || attempt.Phase != bughub.PhaseValidation && attempt.Phase != bughub.PhaseRegression {
-		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, nil, errors.New("incident browser attempt is not eligible for this command")
+		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, bughub.BrowserRecoveryOperationRequest{}, nil, errors.New("incident browser attempt is not eligible for this command")
 	}
-	if replay, found, err := store.GetCommittedCaseMutation(ctx, input.IdempotencyKey); err != nil {
-		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, nil, err
+	request := bughub.BrowserRecoveryOperationRequest{
+		Operation: operationKind, CaseID: input.CaseID, AttemptID: input.AttemptID,
+		ExpectedErrorCode: requiredCode, CycleNumber: attempt.CycleNumber, ExpectedVersion: input.ExpectedVersion,
+		ActorID: input.ActorID, IdempotencyKey: input.IdempotencyKey,
+	}
+	if existing, found, err := store.GetBrowserRecoveryOperation(ctx, request); err != nil {
+		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, request, nil, err
 	} else if found {
-		if replay.Event.CaseID != input.CaseID || replay.Event.EventType != "evidence_continued" || replay.Event.FromStatus != bughub.CaseWaitingEvidence || replay.Event.ActorID != input.ActorID || replay.ResultCase.Version != input.ExpectedVersion+1 || replay.ResultCase.CycleNumber != attempt.CycleNumber {
-			return bughub.IncidentCase{}, bughub.PhaseAttempt{}, nil, bughub.ErrIdempotencyConflict
-		}
-		child, childErr := store.GetAttempt(ctx, replay.ResultCase.CurrentAttemptID)
-		if childErr != nil || child.ParentAttemptID != attempt.ID || child.CaseID != attempt.CaseID || child.CycleNumber != attempt.CycleNumber || child.Phase != attempt.Phase {
-			return bughub.IncidentCase{}, bughub.PhaseAttempt{}, nil, bughub.ErrIdempotencyConflict
-		}
-		result := replay.ResultCase.Clone()
-		return result, attempt, &result, nil
+		return bughub.IncidentCase{}, attempt, request, &existing, nil
+	}
+	if _, found, err := store.GetCommittedCaseMutation(ctx, input.IdempotencyKey); err != nil {
+		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, request, nil, err
+	} else if found {
+		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, request, nil, bughub.ErrIdempotencyConflict
 	}
 	incident, err := store.GetCase(ctx, input.CaseID)
 	if err != nil {
-		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, nil, err
+		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, request, nil, err
 	}
 	if incident.Version != input.ExpectedVersion || incident.Status != bughub.CaseWaitingEvidence || incident.CurrentAttemptID != attempt.ID || incident.CycleNumber != attempt.CycleNumber {
-		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, nil, errors.New("incident browser command requires the current blocked attempt")
+		return bughub.IncidentCase{}, bughub.PhaseAttempt{}, request, nil, errors.New("incident browser command requires the current blocked attempt")
 	}
-	return incident, attempt, nil, nil
+	return incident, attempt, request, nil, nil
 }
 
-func incidentBrowserLoginOrigin(attempt bughub.PhaseAttempt) (string, error) {
+type incidentBrowserRecoveryMarker struct {
+	Operation          bughub.BrowserRecoveryOperationKind `json:"operation"`
+	BlockedAttemptID   string                              `json:"blocked_attempt_id"`
+	ExpectedErrorCode  string                              `json:"expected_browser_error_code"`
+	RequestFingerprint string                              `json:"request_fingerprint"`
+}
+
+func newIncidentBrowserClaimToken() (string, error) {
+	var random [32]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(random[:]), nil
+}
+
+func (a *App) resumeIncidentBrowserRecovery(input IncidentBrowserCommandInput, attempt bughub.PhaseAttempt, request bughub.BrowserRecoveryOperationRequest, operation bughub.BrowserRecoveryOperation) (bughub.IncidentCase, error) {
+	switch operation.Status {
+	case bughub.BrowserRecoveryClaimed, bughub.BrowserRecoveryOutcomeUncertain:
+		return bughub.IncidentCase{}, bughub.ErrBrowserRecoveryOutcomeUncertain
+	case bughub.BrowserRecoveryEffectSucceeded:
+		return a.continueIncidentBrowserRecovery(input, attempt, request, operation)
+	case bughub.BrowserRecoveryContinued:
+		return operation.ResultCase.Clone(), nil
+	default:
+		return bughub.IncidentCase{}, bughub.ErrIdempotencyConflict
+	}
+}
+
+func (a *App) markIncidentBrowserRecoveryUncertain(store *bughub.CaseStore, request bughub.BrowserRecoveryOperationRequest, claimToken string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _ = store.RecordBrowserRecoveryOutcome(ctx, request, claimToken, bughub.BrowserRecoveryOutcomeUncertain)
+}
+
+func (a *App) recordIncidentBrowserRecoverySucceeded(store *bughub.CaseStore, request bughub.BrowserRecoveryOperationRequest, claimToken string) (bughub.BrowserRecoveryOperation, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	operation, err := store.RecordBrowserRecoveryOutcome(ctx, request, claimToken, bughub.BrowserRecoveryEffectSucceeded)
+	if err != nil {
+		return bughub.BrowserRecoveryOperation{}, errors.New("incident browser recovery journal is unavailable")
+	}
+	return operation, nil
+}
+
+func (a *App) continueIncidentBrowserRecovery(input IncidentBrowserCommandInput, attempt bughub.PhaseAttempt, request bughub.BrowserRecoveryOperationRequest, operation bughub.BrowserRecoveryOperation) (bughub.IncidentCase, error) {
+	store, orchestrator, err := a.workflowComponents()
+	if err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	if replayed, found, err := incidentBrowserCommittedContinuation(a.workflowCommandContext(), store, request, attempt, operation.RequestFingerprint); err != nil {
+		return bughub.IncidentCase{}, err
+	} else if found {
+		if err := completeIncidentBrowserRecovery(store, request, operation.ClaimToken, replayed); err != nil {
+			return bughub.IncidentCase{}, err
+		}
+		return replayed, nil
+	}
+	bug, bot, err := a.loadIncidentContext(request.CaseID)
+	if err != nil {
+		return bughub.IncidentCase{}, errors.New("incident browser Case context is unavailable")
+	}
+	marker := incidentBrowserRecoveryMarker{
+		Operation: request.Operation, BlockedAttemptID: request.AttemptID,
+		ExpectedErrorCode: request.ExpectedErrorCode, RequestFingerprint: operation.RequestFingerprint,
+	}
+	inputJSON, err := json.Marshal(map[string]any{"browser_recovery": marker})
+	if err != nil {
+		return bughub.IncidentCase{}, errors.New("incident browser continuation is unavailable")
+	}
+	if a.workflowBrowserRecoveryBeforeContinuation != nil {
+		if err := a.workflowBrowserRecoveryBeforeContinuation(); err != nil {
+			return bughub.IncidentCase{}, errors.New("incident browser continuation failed")
+		}
+	}
+	continued, continueErr := orchestrator.ContinueWithEvidence(a.workflowCommandContext(), bughub.ContinueWithEvidenceCommand{
+		CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion,
+		IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID),
+		Phase: attempt.Phase, Bug: bug, Bot: bot, InputJSON: inputJSON,
+	})
+	a.emitIncidentResult(continued, continueErr)
+	replayed, found, reconcileErr := incidentBrowserCommittedContinuation(a.workflowCommandContext(), store, request, attempt, operation.RequestFingerprint)
+	if reconcileErr != nil {
+		return continued, reconcileErr
+	}
+	if !found {
+		if continueErr != nil {
+			return continued, incidentBrowserContinuationError(continueErr)
+		}
+		return continued, errors.New("incident browser continuation could not be reconciled")
+	}
+	if err := completeIncidentBrowserRecovery(store, request, operation.ClaimToken, replayed); err != nil {
+		return continued, err
+	}
+	if continueErr != nil {
+		return continued, incidentBrowserContinuationError(continueErr)
+	}
+	return replayed, nil
+}
+
+func completeIncidentBrowserRecovery(store *bughub.CaseStore, request bughub.BrowserRecoveryOperationRequest, claimToken string, result bughub.IncidentCase) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := store.CompleteBrowserRecoveryOperation(ctx, request, claimToken, result); err != nil {
+		return errors.New("incident browser recovery journal is unavailable")
+	}
+	return nil
+}
+
+func incidentBrowserCommittedContinuation(ctx context.Context, store *bughub.CaseStore, request bughub.BrowserRecoveryOperationRequest, blocked bughub.PhaseAttempt, fingerprint string) (bughub.IncidentCase, bool, error) {
+	replay, found, err := store.GetCommittedCaseMutation(ctx, request.IdempotencyKey)
+	if err != nil || !found {
+		return bughub.IncidentCase{}, found, err
+	}
+	validEvent := replay.Event.CaseID == request.CaseID && replay.Event.EventType == "evidence_continued" &&
+		replay.Event.FromStatus == bughub.CaseWaitingEvidence && replay.Event.ActorID == request.ActorID &&
+		replay.ResultCase.Version == request.ExpectedVersion+1 && replay.ResultCase.CycleNumber == request.CycleNumber
+	if !validEvent {
+		return bughub.IncidentCase{}, false, bughub.ErrIdempotencyConflict
+	}
+	child, err := store.GetAttempt(ctx, replay.ResultCase.CurrentAttemptID)
+	if err != nil || child.ParentAttemptID != blocked.ID || child.CaseID != blocked.CaseID || child.CycleNumber != blocked.CycleNumber || child.Phase != blocked.Phase {
+		return bughub.IncidentCase{}, false, bughub.ErrIdempotencyConflict
+	}
+	markerJSON := child.InputJSON
+	if child.Phase == bughub.PhaseRegression {
+		var regression bughub.RegressionValidationInput
+		if json.Unmarshal(child.InputJSON, &regression) != nil {
+			return bughub.IncidentCase{}, false, bughub.ErrIdempotencyConflict
+		}
+		markerJSON = regression.SupplementalEvidence
+	}
+	var envelope struct {
+		BrowserRecovery incidentBrowserRecoveryMarker `json:"browser_recovery"`
+	}
+	if json.Unmarshal(markerJSON, &envelope) != nil || envelope.BrowserRecovery.Operation != request.Operation || envelope.BrowserRecovery.BlockedAttemptID != request.AttemptID || envelope.BrowserRecovery.ExpectedErrorCode != request.ExpectedErrorCode || envelope.BrowserRecovery.RequestFingerprint != fingerprint {
+		return bughub.IncidentCase{}, false, bughub.ErrIdempotencyConflict
+	}
+	return replay.ResultCase.Clone(), true, nil
+}
+
+func incidentBrowserLoginOrigins(attempt bughub.PhaseAttempt) (string, string, error) {
 	var output struct {
-		ErrorCode   string `json:"error_code"`
-		LoginOrigin string `json:"login_origin"`
+		ErrorCode         string `json:"error_code"`
+		ApplicationOrigin string `json:"application_origin"`
+		LoginOrigin       string `json:"login_origin"`
 	}
-	if json.Unmarshal(attempt.OutputJSON, &output) != nil || output.ErrorCode != "browser_login_required" || strings.TrimSpace(output.LoginOrigin) == "" {
-		return "", errors.New("browser login origin is unavailable")
+	if json.Unmarshal(attempt.OutputJSON, &output) != nil || output.ErrorCode != "browser_login_required" || strings.TrimSpace(output.ApplicationOrigin) == "" || strings.TrimSpace(output.LoginOrigin) == "" {
+		return "", "", errors.New("browser login origin is unavailable")
 	}
-	return canonicalIncidentBrowserOrigin(strings.TrimSpace(output.LoginOrigin))
+	applicationOrigin, err := canonicalIncidentBrowserOrigin(strings.TrimSpace(output.ApplicationOrigin))
+	if err != nil {
+		return "", "", err
+	}
+	loginOrigin, err := canonicalIncidentBrowserOrigin(strings.TrimSpace(output.LoginOrigin))
+	if err != nil {
+		return "", "", err
+	}
+	return applicationOrigin, loginOrigin, nil
 }
 
 func incidentBrowserOriginAllowed(origin string, allowed []string) bool {

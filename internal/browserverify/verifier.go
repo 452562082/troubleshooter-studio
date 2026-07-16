@@ -86,12 +86,16 @@ type HostVerifier struct {
 }
 
 type BrowserLoginRequest struct {
-	SystemID    string
-	Environment string
-	Origin      string
-	Policy      bughub.BrowserSecurityPolicy
-	Timeout     time.Duration
-	Emit        func(bughub.BrowserProgress)
+	SystemID          string
+	Environment       string
+	ApplicationOrigin string
+	LoginOrigin       string
+	// Origin is retained for same-origin internal callers. New recovery callers
+	// must provide ApplicationOrigin and LoginOrigin separately.
+	Origin  string
+	Policy  bughub.BrowserSecurityPolicy
+	Timeout time.Duration
+	Emit    func(bughub.BrowserProgress)
 }
 
 type browserDirectoryIdentity struct {
@@ -344,18 +348,33 @@ func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) (
 	}
 	loginCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	canonicalOrigin, err := canonicalSessionOrigin(request.Origin)
+	applicationOrigin := strings.TrimSpace(request.ApplicationOrigin)
+	loginOrigin := strings.TrimSpace(request.LoginOrigin)
+	if applicationOrigin == "" {
+		applicationOrigin = strings.TrimSpace(request.Origin)
+	}
+	if loginOrigin == "" {
+		loginOrigin = firstNonEmptyVerifierOrigin(strings.TrimSpace(request.Origin), applicationOrigin)
+	}
+	canonicalApplicationOrigin, err := canonicalSessionOrigin(applicationOrigin)
 	if err != nil || strings.TrimSpace(request.SystemID) == "" || strings.TrimSpace(request.Environment) == "" {
 		return &verifierError{code: "browser_login_request_invalid", cause: errors.New("browser login identity or origin is invalid")}
 	}
-	_, allowedOrigin, _, err := parseBrowserURL(canonicalOrigin)
+	canonicalLoginOrigin, err := canonicalSessionOrigin(loginOrigin)
 	if err != nil {
 		return &verifierError{code: "browser_login_request_invalid", cause: errors.New("browser login origin is invalid")}
 	}
-	if _, allowed := normalizedOriginSet(request.Policy.AllowedOrigins)[allowedOrigin]; !allowed {
+	_, allowedApplicationOrigin, _, err := parseBrowserURL(canonicalApplicationOrigin)
+	if err != nil {
+		return &verifierError{code: "browser_login_request_invalid", cause: errors.New("browser application origin is invalid")}
+	}
+	if _, allowed := normalizedOriginSet(request.Policy.AllowedOrigins)[allowedApplicationOrigin]; !allowed {
 		return &verifierError{code: "browser_login_request_invalid", cause: errors.New("browser login must start at a configured application origin")}
 	}
-	if err := AllowedURL(loginCtx, v.resolver, request.Policy, canonicalOrigin); err != nil {
+	if err := AllowedURL(loginCtx, v.resolver, request.Policy, canonicalApplicationOrigin); err != nil {
+		return &verifierError{code: "browser_login_request_invalid", cause: errors.New("browser application origin is blocked")}
+	}
+	if err := AllowedURL(loginCtx, v.resolver, request.Policy, canonicalLoginOrigin); err != nil {
 		return &verifierError{code: "browser_login_request_invalid", cause: errors.New("browser login origin is blocked")}
 	}
 
@@ -363,7 +382,7 @@ func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) (
 	if err != nil {
 		return err
 	}
-	key := SessionKey{SystemID: request.SystemID, Environment: request.Environment, Origin: canonicalOrigin}
+	key := SessionKey{SystemID: request.SystemID, Environment: request.Environment, Origin: canonicalApplicationOrigin}
 	existing, found, err := v.sessions.Load(key)
 	if err != nil {
 		return &verifierError{code: "browser_session_unavailable", cause: errors.New("load encrypted browser session")}
@@ -388,7 +407,7 @@ func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) (
 		Mode: "login",
 		Plan: bughub.BrowserPlan{
 			Version:    1,
-			StartURL:   canonicalOrigin,
+			StartURL:   canonicalLoginOrigin,
 			Actions:    []bughub.BrowserAction{},
 			Assertions: []bughub.BrowserAssertion{},
 		},
@@ -420,6 +439,15 @@ func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) (
 		return &verifierError{code: "browser_session_save_failed", cause: errors.New("save encrypted browser session")}
 	}
 	return nil
+}
+
+func firstNonEmptyVerifierOrigin(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (v *HostVerifier) runWorkerWithSession(

@@ -713,6 +713,7 @@ func TestCaseStoreInitializesAndMigratesVersionedSchema(t *testing.T) {
 		assertTableColumns(t, store.db, "transition_events", "request_fingerprint", "result_case_json")
 		assertTableColumns(t, store.db, "incident_cases", "reset_from_case_id", "superseded_by_case_id")
 		assertTableColumns(t, store.db, "reset_cancellation_operations", "reset_key", "case_id", "attempt_id", "request_fingerprint", "status", "claim_token", "outcome_code", "created_at", "updated_at")
+		assertTableColumns(t, store.db, "browser_recovery_operations", "idempotency_key", "operation", "case_id", "attempt_id", "expected_error_code", "cycle_number", "expected_version", "actor_id", "request_fingerprint", "status", "claim_token", "outcome_code", "result_case_json", "created_at", "updated_at")
 		var cancellationDDL string
 		if err := store.db.QueryRow(`SELECT lower(sql) FROM sqlite_master WHERE type='table' AND name='reset_cancellation_operations'`).Scan(&cancellationDDL); err != nil {
 			t.Fatal(err)
@@ -725,6 +726,10 @@ func TestCaseStoreInitializesAndMigratesVersionedSchema(t *testing.T) {
 		var cancellationIndexTable string
 		if err := store.db.QueryRow(`SELECT tbl_name FROM sqlite_master WHERE type='index' AND name='idx_reset_cancellations_status_updated'`).Scan(&cancellationIndexTable); err != nil || cancellationIndexTable != "reset_cancellation_operations" {
 			t.Fatalf("reset cancellation index table=%q err=%v", cancellationIndexTable, err)
+		}
+		var browserRecoveryIndexTable string
+		if err := store.db.QueryRow(`SELECT tbl_name FROM sqlite_master WHERE type='index' AND name='idx_browser_recovery_status_updated'`).Scan(&browserRecoveryIndexTable); err != nil || browserRecoveryIndexTable != "browser_recovery_operations" {
+			t.Fatalf("browser recovery index table=%q err=%v", browserRecoveryIndexTable, err)
 		}
 	})
 

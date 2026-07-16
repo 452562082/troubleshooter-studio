@@ -28,6 +28,7 @@ type fakeIncidentBrowserController struct {
 	repairErr     error
 	clearErr      error
 	progress      bughub.BrowserProgress
+	afterLogin    func()
 }
 
 func (*fakeIncidentBrowserController) Execute(context.Context, bughub.BrowserVerificationRequest) (bughub.BrowserVerificationResult, error) {
@@ -39,9 +40,13 @@ func (f *fakeIncidentBrowserController) Login(_ context.Context, request browser
 	f.loginRequests = append(f.loginRequests, request)
 	err := f.loginErr
 	progress := f.progress
+	afterLogin := f.afterLogin
 	f.mu.Unlock()
 	if request.Emit != nil && progress.Code != "" {
 		request.Emit(progress)
+	}
+	if afterLogin != nil {
+		afterLogin()
 	}
 	return err
 }
@@ -78,6 +83,11 @@ func (f *fakeIncidentBrowserController) snapshot() (logins []browserverify.Brows
 func newBrowserBindingTestApp(t *testing.T) (*App, *bughub.CaseStore) {
 	t.Helper()
 	app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "browser-bindings.db"))
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.workflowRoot = root
 	incident := bughub.IncidentCase{
 		ID: "case-a", BugID: "bug-1", Source: "zentao", SystemID: "base", Environment: "test",
 		Status: bughub.CaseValidating, CycleNumber: 1, CurrentAttemptID: "attempt-a", SelectedBotKey: "base|codex",
@@ -96,33 +106,29 @@ func newBrowserBindingTestApp(t *testing.T) (*App, *bughub.CaseStore) {
 	return app, store
 }
 
-func registerPNGArtifact(t *testing.T, store *bughub.CaseStore, caseID, attemptID string) bughub.EvidenceArtifact {
+func registerPNGArtifact(t *testing.T, app *App, store *bughub.CaseStore, caseID, attemptID string) bughub.EvidenceArtifact {
 	t.Helper()
 	const onePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 	content, err := base64.StdEncoding.DecodeString(onePixelPNG)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return registerBrowserBindingArtifact(t, store, caseID, attemptID, "screenshot", content, ".png")
+	return registerBrowserBindingArtifact(t, app, store, caseID, attemptID, "screenshot", content, ".png")
 }
 
-func registerTextArtifact(t *testing.T, store *bughub.CaseStore, caseID, attemptID string) bughub.EvidenceArtifact {
+func registerTextArtifact(t *testing.T, app *App, store *bughub.CaseStore, caseID, attemptID string) bughub.EvidenceArtifact {
 	t.Helper()
-	return registerBrowserBindingArtifact(t, store, caseID, attemptID, "console", []byte("safe text"), ".txt")
+	return registerBrowserBindingArtifact(t, app, store, caseID, attemptID, "console", []byte("safe text"), ".txt")
 }
 
-func registerBrowserBindingArtifact(t *testing.T, store *bughub.CaseStore, caseID, attemptID, kind string, content []byte, suffix string) bughub.EvidenceArtifact {
+func registerBrowserBindingArtifact(t *testing.T, app *App, store *bughub.CaseStore, caseID, attemptID, kind string, content []byte, suffix string) bughub.EvidenceArtifact {
 	t.Helper()
 	source := filepath.Join(t.TempDir(), "source"+suffix)
 	if err := os.WriteFile(source, content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	artifactRoot, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
 	artifact, err := bughub.RegisterArtifact(context.Background(), store, bughub.ArtifactInput{
-		ArtifactsRoot: filepath.Join(artifactRoot, "artifacts"), SourcePath: source,
+		ArtifactsRoot: filepath.Join(app.workflowRoot, "artifacts"), SourcePath: source,
 		CaseID: caseID, AttemptID: attemptID, Kind: kind, CapturedAt: time.Now().UTC(),
 		Environment: "test", RedactionStatus: bughub.RedactionStatusNotRequired,
 	})
@@ -134,7 +140,7 @@ func registerBrowserBindingArtifact(t *testing.T, store *bughub.CaseStore, caseI
 
 func TestGetIncidentArtifactPreviewChecksCaseOwnershipAndPNGBytes(t *testing.T) {
 	app, store := newBrowserBindingTestApp(t)
-	artifact := registerPNGArtifact(t, store, "case-a", "attempt-a")
+	artifact := registerPNGArtifact(t, app, store, "case-a", "attempt-a")
 
 	preview, err := app.GetIncidentArtifactPreview("case-a", artifact.ID)
 	if err != nil {
@@ -150,12 +156,12 @@ func TestGetIncidentArtifactPreviewChecksCaseOwnershipAndPNGBytes(t *testing.T) 
 
 func TestGetIncidentArtifactPreviewRejectsNonScreenshotAndChangedBytes(t *testing.T) {
 	app, store := newBrowserBindingTestApp(t)
-	text := registerTextArtifact(t, store, "case-a", "attempt-a")
+	text := registerTextArtifact(t, app, store, "case-a", "attempt-a")
 	if _, err := app.GetIncidentArtifactPreview("case-a", text.ID); err == nil {
 		t.Fatal("text preview succeeded")
 	}
 
-	screenshot := registerPNGArtifact(t, store, "case-a", "attempt-a")
+	screenshot := registerPNGArtifact(t, app, store, "case-a", "attempt-a")
 	if err := os.WriteFile(screenshot.PathOrReference, []byte("changed"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +172,7 @@ func TestGetIncidentArtifactPreviewRejectsNonScreenshotAndChangedBytes(t *testin
 
 func TestSaveIncidentArtifactWritesOnlyVerifiedRegisteredBytes(t *testing.T) {
 	app, store := newBrowserBindingTestApp(t)
-	artifact := registerTextArtifact(t, store, "case-a", "attempt-a")
+	artifact := registerTextArtifact(t, app, store, "case-a", "attempt-a")
 	destination := filepath.Join(t.TempDir(), "saved-console.txt")
 	app.workflowSaveArtifact = func(_, _ string, _ context.Context) (string, error) {
 		return destination, nil
@@ -219,7 +225,7 @@ func newBrowserRecoveryBindingApp(t *testing.T, phase bughub.Phase, errorCode, l
 		t.Fatal(err)
 	}
 	finished := time.Now().UTC()
-	output, err := json.Marshal(map[string]any{"error_code": errorCode, "login_origin": loginOrigin})
+	output, err := json.Marshal(map[string]any{"error_code": errorCode, "application_origin": "https://app.test", "login_origin": loginOrigin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,6 +249,14 @@ func browserCommandInput(incident bughub.IncidentCase, attempt bughub.PhaseAttem
 	return IncidentBrowserCommandInput{
 		CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version,
 		IdempotencyKey: key, ActorID: "desktop-user",
+	}
+}
+
+func browserRecoveryOperationRequest(input IncidentBrowserCommandInput, attempt bughub.PhaseAttempt, operation bughub.BrowserRecoveryOperationKind, expectedCode string) bughub.BrowserRecoveryOperationRequest {
+	return bughub.BrowserRecoveryOperationRequest{
+		Operation: operation, CaseID: input.CaseID, AttemptID: input.AttemptID,
+		ExpectedErrorCode: expectedCode, CycleNumber: attempt.CycleNumber,
+		ExpectedVersion: input.ExpectedVersion, ActorID: input.ActorID, IdempotencyKey: input.IdempotencyKey,
 	}
 }
 
@@ -279,7 +293,7 @@ func TestOpenIncidentBrowserLoginContinuesOnceAndReplaysWithoutSecondLogin(t *te
 	if continued.Status != bughub.CaseValidating || continued.CycleNumber != incident.CycleNumber || child.ParentAttemptID != attempt.ID || child.Phase != attempt.Phase || runner.count() != 1 || len(logins) != 1 {
 		t.Fatalf("continued=%+v child=%+v starts=%d logins=%d", continued, child, runner.count(), len(logins))
 	}
-	if logins[0].Origin != "https://login.test" || logins[0].SystemID != incident.SystemID || logins[0].Environment != incident.Environment {
+	if logins[0].ApplicationOrigin != "https://app.test" || logins[0].LoginOrigin != "https://login.test" || logins[0].SystemID != incident.SystemID || logins[0].Environment != incident.Environment {
 		t.Fatalf("login request = %+v", logins[0])
 	}
 
@@ -328,6 +342,168 @@ func TestRepairIncidentBrowserRuntimeContinuesOnceAndReplaysWithoutSecondRepair(
 	}
 }
 
+func TestIncidentBrowserRecoveryFailsClosedWhenSafeOutcomeCannotBeRecorded(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		errorCode   string
+		operation   bughub.BrowserRecoveryOperationKind
+		run         func(*App, IncidentBrowserCommandInput) error
+		effectCount func(*fakeIncidentBrowserController) int
+	}{
+		{name: "login", errorCode: "browser_login_required", operation: bughub.BrowserRecoveryLogin, run: func(app *App, input IncidentBrowserCommandInput) error {
+			_, err := app.OpenIncidentBrowserLogin(input)
+			return err
+		}, effectCount: func(controller *fakeIncidentBrowserController) int {
+			logins, _, _ := controller.snapshot()
+			return len(logins)
+		}},
+		{name: "repair", errorCode: "browser_runtime_broken", operation: bughub.BrowserRecoveryRepair, run: func(app *App, input IncidentBrowserCommandInput) error {
+			_, err := app.RepairIncidentBrowserRuntime(input)
+			return err
+		}, effectCount: func(controller *fakeIncidentBrowserController) int {
+			_, _, repairs := controller.snapshot()
+			return repairs
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app, store, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, test.errorCode, "https://login.test")
+			input := browserCommandInput(incident, attempt, "browser-safe-outcome:"+test.name)
+			app.workflowBrowserRecoveryBeforeOutcome = func() error { return errors.New("injected outcome crash") }
+			if err := test.run(app, input); err == nil {
+				t.Fatal("expected durable outcome failure")
+			}
+			operation, found, err := store.GetBrowserRecoveryOperation(context.Background(), browserRecoveryOperationRequest(input, attempt, test.operation, test.errorCode))
+			if err != nil || !found || operation.Status != bughub.BrowserRecoveryClaimed || test.effectCount(controller) != 1 || runner.count() != 0 {
+				t.Fatalf("operation=%+v found=%v err=%v effects=%d starts=%d", operation, found, err, test.effectCount(controller), runner.count())
+			}
+			if err := test.run(app, input); !errors.Is(err, bughub.ErrBrowserRecoveryOutcomeUncertain) {
+				t.Fatalf("retry error=%v", err)
+			}
+			if test.effectCount(controller) != 1 || runner.count() != 0 {
+				t.Fatalf("retry repeated effect=%d starts=%d", test.effectCount(controller), runner.count())
+			}
+		})
+	}
+}
+
+func TestIncidentBrowserRecoveryRetriesOnlyContinuationAfterFailure(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		errorCode   string
+		operation   bughub.BrowserRecoveryOperationKind
+		run         func(*App, IncidentBrowserCommandInput) (bughub.IncidentCase, error)
+		effectCount func(*fakeIncidentBrowserController) int
+	}{
+		{name: "login", errorCode: "browser_login_required", operation: bughub.BrowserRecoveryLogin, run: func(app *App, input IncidentBrowserCommandInput) (bughub.IncidentCase, error) {
+			return app.OpenIncidentBrowserLogin(input)
+		}, effectCount: func(controller *fakeIncidentBrowserController) int {
+			logins, _, _ := controller.snapshot()
+			return len(logins)
+		}},
+		{name: "repair", errorCode: "browser_runtime_broken", operation: bughub.BrowserRecoveryRepair, run: func(app *App, input IncidentBrowserCommandInput) (bughub.IncidentCase, error) {
+			return app.RepairIncidentBrowserRuntime(input)
+		}, effectCount: func(controller *fakeIncidentBrowserController) int {
+			_, _, repairs := controller.snapshot()
+			return repairs
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app, store, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, test.errorCode, "https://login.test")
+			input := browserCommandInput(incident, attempt, "browser-continuation-retry:"+test.name)
+			app.workflowBrowserRecoveryBeforeContinuation = func() error { return errors.New("injected continuation failure") }
+			if _, err := test.run(app, input); err == nil {
+				t.Fatal("expected continuation failure")
+			}
+			operation, found, err := store.GetBrowserRecoveryOperation(context.Background(), browserRecoveryOperationRequest(input, attempt, test.operation, test.errorCode))
+			if err != nil || !found || operation.Status != bughub.BrowserRecoveryEffectSucceeded || test.effectCount(controller) != 1 || runner.count() != 0 {
+				t.Fatalf("operation=%+v found=%v err=%v effects=%d starts=%d", operation, found, err, test.effectCount(controller), runner.count())
+			}
+			app.workflowBrowserRecoveryBeforeContinuation = nil
+			continued, err := test.run(app, input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			operation, found, err = store.GetBrowserRecoveryOperation(context.Background(), browserRecoveryOperationRequest(input, attempt, test.operation, test.errorCode))
+			if err != nil || !found || operation.Status != bughub.BrowserRecoveryContinued || operation.ResultCase.CurrentAttemptID != continued.CurrentAttemptID || test.effectCount(controller) != 1 || runner.count() != 1 {
+				t.Fatalf("continued=%+v operation=%+v found=%v err=%v effects=%d starts=%d", continued, operation, found, err, test.effectCount(controller), runner.count())
+			}
+		})
+	}
+}
+
+func TestIncidentBrowserRecoveryDoesNotMistakeOrdinaryEvidenceContinuationForReplay(t *testing.T) {
+	app, _, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "https://login.test")
+	input := browserCommandInput(incident, attempt, "ordinary-evidence-key")
+	if _, err := app.ContinueIncidentCase(ContinueIncidentCaseInput{
+		CaseID: input.CaseID, ExpectedVersion: input.ExpectedVersion, IdempotencyKey: input.IdempotencyKey,
+		ActorID: input.ActorID, Phase: attempt.Phase, InputJSON: map[string]any{"ordinary": "evidence"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.OpenIncidentBrowserLogin(input); !errors.Is(err, bughub.ErrIdempotencyConflict) {
+		t.Fatalf("browser recovery accepted ordinary continuation: %v", err)
+	}
+	logins, _, _ := controller.snapshot()
+	if len(logins) != 0 || runner.count() != 1 {
+		t.Fatalf("logins=%d starts=%d", len(logins), runner.count())
+	}
+}
+
+func TestIncidentBrowserLoginVersionConflictNeverRepeatsExternalEffect(t *testing.T) {
+	app, store, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "https://login.test")
+	input := browserCommandInput(incident, attempt, "browser-version-conflict")
+	controller.afterLogin = func() {
+		controller.mu.Lock()
+		controller.afterLogin = nil
+		controller.mu.Unlock()
+		_, err := store.ApplyCaseMutation(context.Background(), bughub.CaseMutation{
+			CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "concurrent-browser-audit",
+			RequestJSON: []byte(`{"reason":"concurrent update"}`),
+			Steps: []bughub.CaseMutationStep{{To: bughub.CaseWaitingEvidence, AuditOnly: true, Event: bughub.TransitionEvent{
+				ID: "event-concurrent-browser-audit", EventType: "manual_evidence_noted", ActorType: "user", ActorID: "other-user",
+				PayloadJSON: []byte(`{"reason":"concurrent update"}`),
+			}}},
+		})
+		if err != nil {
+			t.Errorf("concurrent mutation: %v", err)
+		}
+	}
+	if _, err := app.OpenIncidentBrowserLogin(input); !errors.Is(err, bughub.ErrCaseVersionConflict) {
+		t.Fatalf("first error=%v", err)
+	}
+	if _, err := app.OpenIncidentBrowserLogin(input); !errors.Is(err, bughub.ErrCaseVersionConflict) {
+		t.Fatalf("retry error=%v", err)
+	}
+	logins, _, _ := controller.snapshot()
+	if len(logins) != 1 || runner.count() != 0 {
+		t.Fatalf("logins=%d starts=%d", len(logins), runner.count())
+	}
+}
+
+func TestIncidentBrowserLoginContextReloadFailureRetriesOnlyContinuation(t *testing.T) {
+	app, _, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "https://login.test")
+	input := browserCommandInput(incident, attempt, "browser-context-retry")
+	calls := 0
+	app.workflowLoadBug = func(id string) (bughub.Bug, error) {
+		calls++
+		if calls == 2 {
+			return bughub.Bug{}, errors.New("temporary context load failure")
+		}
+		return bughub.Bug{ID: id, Source: "zentao", Title: "checkout fails", Env: "test", SystemID: "base", FrontendURL: "https://app.test/users"}, nil
+	}
+	if _, err := app.OpenIncidentBrowserLogin(input); err == nil {
+		t.Fatal("expected context reload failure")
+	}
+	continued, err := app.OpenIncidentBrowserLogin(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logins, _, _ := controller.snapshot()
+	if len(logins) != 1 || runner.count() != 1 || continued.Status != bughub.CaseValidating {
+		t.Fatalf("continued=%+v logins=%d starts=%d context_calls=%d", continued, len(logins), runner.count(), calls)
+	}
+}
+
 func TestClearIncidentBrowserSessionIsIdempotentAndDoesNotMutateCase(t *testing.T) {
 	app, store, _, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "https://login.test")
 	before, err := json.Marshal(incident)
@@ -350,7 +526,7 @@ func TestClearIncidentBrowserSessionIsIdempotentAndDoesNotMutateCase(t *testing.
 		t.Fatal(err)
 	}
 	_, clears, _ := controller.snapshot()
-	if len(clears) != 2 || clears[0].Origin != "https://login.test" || string(before) != string(after) {
+	if len(clears) != 2 || clears[0].Origin != "https://app.test" || string(before) != string(after) {
 		t.Fatalf("clears=%+v before=%s after=%s", clears, before, after)
 	}
 }

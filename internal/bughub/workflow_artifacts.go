@@ -35,6 +35,14 @@ type EvidenceArtifactContent struct {
 }
 
 func ReadEvidenceArtifact(ctx context.Context, store *CaseStore, caseID, artifactID string) (EvidenceArtifactContent, error) {
+	return readEvidenceArtifact(ctx, store, "", caseID, artifactID)
+}
+
+func ReadEvidenceArtifactFromRoot(ctx context.Context, store *CaseStore, artifactsRoot, caseID, artifactID string) (EvidenceArtifactContent, error) {
+	return readEvidenceArtifact(ctx, store, artifactsRoot, caseID, artifactID)
+}
+
+func readEvidenceArtifact(ctx context.Context, store *CaseStore, artifactsRoot, caseID, artifactID string) (EvidenceArtifactContent, error) {
 	if store == nil {
 		return EvidenceArtifactContent{}, errors.New("case store is required")
 	}
@@ -46,7 +54,11 @@ func ReadEvidenceArtifact(ctx context.Context, store *CaseStore, caseID, artifac
 		if artifact.ID != artifactID {
 			continue
 		}
-		captured, err := captureArtifactSource(artifact.PathOrReference)
+		attempt, err := store.GetAttempt(ctx, artifact.AttemptID)
+		if err != nil || artifact.CaseID != caseID || attempt.CaseID != caseID {
+			return EvidenceArtifactContent{}, errors.New("registered artifact ownership is invalid")
+		}
+		captured, err := captureRegisteredArtifact(artifact.PathOrReference, artifactsRoot, caseID, artifact.SHA256)
 		if err != nil {
 			return EvidenceArtifactContent{}, err
 		}

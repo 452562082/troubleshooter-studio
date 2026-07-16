@@ -90,7 +90,7 @@ CREATE INDEX IF NOT EXISTS idx_events_case_created ON transition_events(case_id,
 `
 
 const (
-	workflowStoreSchemaVersion   = 7
+	workflowStoreSchemaVersion   = 8
 	workflowStoreSchemaV1Key     = "workflow-schema-v1"
 	workflowStoreSchemaV1Upgrade = `
 ALTER TABLE transition_events ADD COLUMN request_fingerprint TEXT NOT NULL DEFAULT '';
@@ -141,6 +141,31 @@ CREATE TABLE reset_cancellation_operations (
 );
 CREATE INDEX idx_reset_cancellations_status_updated ON reset_cancellation_operations(status, updated_at);
 `
+	workflowStoreSchemaV8Upgrade = `
+CREATE TABLE browser_recovery_operations (
+  idempotency_key TEXT PRIMARY KEY,
+  operation TEXT NOT NULL CHECK (operation IN ('login','repair')),
+  case_id TEXT NOT NULL REFERENCES incident_cases(id),
+  attempt_id TEXT NOT NULL REFERENCES phase_attempts(id),
+  expected_error_code TEXT NOT NULL CHECK (expected_error_code LIKE 'browser_%'),
+  cycle_number INTEGER NOT NULL CHECK (cycle_number >= 1),
+  expected_version INTEGER NOT NULL CHECK (expected_version >= 1),
+  actor_id TEXT NOT NULL CHECK (actor_id <> ''),
+  request_fingerprint TEXT NOT NULL CHECK (length(request_fingerprint) = 64 AND request_fingerprint NOT GLOB '*[^0-9a-f]*'),
+  status TEXT NOT NULL CHECK (status IN ('claimed','effect_succeeded','outcome_uncertain','continued')),
+  claim_token TEXT NOT NULL CHECK (claim_token <> ''),
+  outcome_code TEXT NOT NULL DEFAULT '',
+  result_case_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(operation, case_id, attempt_id),
+  CHECK ((status = 'claimed' AND outcome_code = '' AND result_case_json = '{}') OR
+         (status = 'effect_succeeded' AND outcome_code = 'succeeded' AND result_case_json = '{}') OR
+         (status = 'outcome_uncertain' AND outcome_code = 'unknown' AND result_case_json = '{}') OR
+         (status = 'continued' AND outcome_code = 'continued' AND result_case_json <> '{}'))
+);
+CREATE INDEX idx_browser_recovery_status_updated ON browser_recovery_operations(status, updated_at);
+`
 )
 
 var legacyWorkflowTableColumns = map[string][]string{
@@ -153,6 +178,7 @@ var legacyWorkflowTableColumns = map[string][]string{
 	"deployment_observations":       {"id", "case_id", "environment", "expected_commits_json", "user_notified_at", "verification_source", "observed_version", "observed_images_json", "observed_commits_json", "verified_at", "result", "idempotency_key"},
 	"schema_migrations":             {"key", "applied_at", "detail_json"},
 	"reset_cancellation_operations": {"reset_key", "case_id", "attempt_id", "request_fingerprint", "status", "claim_token", "outcome_code", "created_at", "updated_at"},
+	"browser_recovery_operations":   {"idempotency_key", "operation", "case_id", "attempt_id", "expected_error_code", "cycle_number", "expected_version", "actor_id", "request_fingerprint", "status", "claim_token", "outcome_code", "result_case_json", "created_at", "updated_at"},
 }
 
 var requiredWorkflowIndexes = map[string]string{
@@ -161,4 +187,5 @@ var requiredWorkflowIndexes = map[string]string{
 	"idx_attempts_case_started":              "phase_attempts",
 	"idx_events_case_created":                "transition_events",
 	"idx_reset_cancellations_status_updated": "reset_cancellation_operations",
+	"idx_browser_recovery_status_updated":    "browser_recovery_operations",
 }

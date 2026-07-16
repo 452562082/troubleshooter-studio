@@ -247,6 +247,10 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		if err := verifyWorkflowSchemaMarker(ctx, tx, 6); err != nil {
 			return err
 		}
+	case 7:
+		if err := verifyWorkflowSchemaMarker(ctx, tx, 7); err != nil {
+			return err
+		}
 	case workflowStoreSchemaVersion:
 		// Verified below before the transaction is committed.
 	default:
@@ -365,7 +369,7 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: workflowStoreSchemaVersion, Fingerprint: fingerprint})
+		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: 7, Fingerprint: fingerprint})
 		if err != nil {
 			return fmt.Errorf("encode workflow schema v7 detail: %w", err)
 		}
@@ -374,6 +378,26 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		}
 		if _, err := tx.ExecContext(ctx, `PRAGMA user_version=7`); err != nil {
 			return fmt.Errorf("set workflow schema version 7: %w", err)
+		}
+		version = 7
+	}
+	if version == 7 {
+		if _, err := tx.ExecContext(ctx, workflowStoreSchemaV8Upgrade); err != nil {
+			return fmt.Errorf("apply workflow schema v8: %w", err)
+		}
+		fingerprint, err := workflowSchemaFingerprint(ctx, tx)
+		if err != nil {
+			return err
+		}
+		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: workflowStoreSchemaVersion, Fingerprint: fingerprint})
+		if err != nil {
+			return fmt.Errorf("encode workflow schema v8 detail: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE schema_migrations SET applied_at = ?, detail_json = ? WHERE key = ?`, formatStoreTime(time.Now().UTC()), string(detail), workflowStoreSchemaV1Key); err != nil {
+			return fmt.Errorf("record workflow schema v8: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `PRAGMA user_version=8`); err != nil {
+			return fmt.Errorf("set workflow schema version 8: %w", err)
 		}
 	}
 	tables, err := workflowTableColumns(ctx, tx)
@@ -388,6 +412,7 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 	v1Columns["phase_attempts"] = append(v1Columns["phase_attempts"], "completion_identity_sha256")
 	v1Columns["phase_attempts"] = append(v1Columns["phase_attempts"], "run_claim_token")
 	v1Columns["reset_cancellation_operations"] = []string{"reset_key", "case_id", "attempt_id", "request_fingerprint", "status", "claim_token", "outcome_code", "created_at", "updated_at"}
+	v1Columns["browser_recovery_operations"] = []string{"idempotency_key", "operation", "case_id", "attempt_id", "expected_error_code", "cycle_number", "expected_version", "actor_id", "request_fingerprint", "status", "claim_token", "outcome_code", "result_case_json", "created_at", "updated_at"}
 	if err := verifyWorkflowColumns(tables, v1Columns); err != nil {
 		return err
 	}

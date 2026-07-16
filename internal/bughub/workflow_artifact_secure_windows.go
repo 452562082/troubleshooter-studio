@@ -12,6 +12,10 @@ func captureArtifactSource(string) (capturedArtifactSource, error) {
 	return capturedArtifactSource{}, fmt.Errorf("%w: Windows requires handle-relative NT traversal and restricted DACL support", ErrSecureArtifactStoreUnsupported)
 }
 
+func captureRegisteredArtifact(string, string, string, string) (capturedArtifactSource, error) {
+	return capturedArtifactSource{}, fmt.Errorf("%w: Windows requires handle-relative NT traversal and restricted DACL support", ErrSecureArtifactStoreUnsupported)
+}
+
 func publishArtifact(string, string, string, []byte) (artifactPublication, error) {
 	return nil, ErrSecureArtifactStoreUnsupported
 }

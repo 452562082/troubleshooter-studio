@@ -6,15 +6,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 )
 
-func TestWorkerProcessWaitCleansGroupBeforeWrapperReapAndPGIDReuse(t *testing.T) {
+func TestWorkerProcessWaitRequestsWrapperCleanupBeforeWrapperReapAndPGIDReuse(t *testing.T) {
 	statusRead, statusWrite, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -25,21 +27,22 @@ func TestWorkerProcessWaitCleansGroupBeforeWrapperReapAndPGIDReuse(t *testing.T)
 	if err := statusWrite.Close(); err != nil {
 		t.Fatal(err)
 	}
+	controlRead, controlWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controlRead.Close()
 	command := &exec.Cmd{Process: &os.Process{Pid: 4242}}
-	var signals []syscall.Signal
 	reaped := false
 	reused := false
 	controller := &workerProcessController{
-		command:    command,
-		statusRead: statusRead,
+		command:      command,
+		statusRead:   statusRead,
+		controlWrite: controlWrite,
 		signalProcessGroup: func(processGroup int, signal syscall.Signal) error {
-			if processGroup != 4242 {
-				t.Fatalf("process group = %d, want 4242", processGroup)
-			}
 			if reaped || reused {
 				t.Fatalf("reused process group received signal %v after wrapper reap", signal)
 			}
-			signals = append(signals, signal)
 			return nil
 		},
 		beforeGroupCleanup: func() {
@@ -49,6 +52,13 @@ func TestWorkerProcessWaitCleansGroupBeforeWrapperReapAndPGIDReuse(t *testing.T)
 			}
 		},
 		waitWrapper: func(*exec.Cmd) error {
+			command := make([]byte, 1)
+			if _, err := io.ReadFull(controlRead, command); err != nil {
+				t.Fatalf("read wrapper cleanup command: %v", err)
+			}
+			if command[0] != unixWrapperCleanupCommand {
+				t.Fatalf("wrapper cleanup command = %q, want %q", command[0], unixWrapperCleanupCommand)
+			}
 			reaped = true
 			reused = true
 			return nil
@@ -60,14 +70,7 @@ func TestWorkerProcessWaitCleansGroupBeforeWrapperReapAndPGIDReuse(t *testing.T)
 	if err := controller.finish(); err != nil {
 		t.Fatal(err)
 	}
-	countAtReturn := len(signals)
 	time.Sleep(50 * time.Millisecond)
-	if len(signals) != countAtReturn {
-		t.Fatalf("signals continued after wrapper reap: before=%d after=%d", countAtReturn, len(signals))
-	}
-	if len(signals) != 1 || signals[0] != syscall.SIGKILL {
-		t.Fatalf("owned-group cleanup signals = %v, want synchronous SIGKILL", signals)
-	}
 }
 
 func TestWorkerProcessCancelCannotSignalAfterOverlappingWaitReapsWrapper(t *testing.T) {
@@ -81,6 +84,11 @@ func TestWorkerProcessCancelCannotSignalAfterOverlappingWaitReapsWrapper(t *test
 	if err := statusWrite.Close(); err != nil {
 		t.Fatal(err)
 	}
+	controlRead, controlWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controlRead.Close()
 	command := &exec.Cmd{Process: &os.Process{Pid: 4242}}
 	firstProbeEntered := make(chan struct{})
 	releaseFirstProbe := make(chan struct{})
@@ -89,8 +97,9 @@ func TestWorkerProcessCancelCannotSignalAfterOverlappingWaitReapsWrapper(t *test
 	reaped := false
 	signaledAfterReap := false
 	controller := &workerProcessController{
-		command:    command,
-		statusRead: statusRead,
+		command:      command,
+		statusRead:   statusRead,
+		controlWrite: controlWrite,
 		signalProcessGroup: func(_ int, signal syscall.Signal) error {
 			stateMu.Lock()
 			if reaped {
@@ -178,10 +187,16 @@ func TestWorkerProcessExpectedKillDoesNotRecordCanceledContext(t *testing.T) {
 	if err := statusWrite.Close(); err != nil {
 		t.Fatal(err)
 	}
+	controlRead, controlWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controlRead.Close()
 	command := &exec.Cmd{Process: &os.Process{Pid: 4242}}
 	controller := &workerProcessController{
 		ctx:                ctx,
 		statusRead:         statusRead,
+		controlWrite:       controlWrite,
 		signalProcessGroup: func(int, syscall.Signal) error { return nil },
 		waitWrapper:        func(*exec.Cmd) error { return nil },
 	}
@@ -190,5 +205,74 @@ func TestWorkerProcessExpectedKillDoesNotRecordCanceledContext(t *testing.T) {
 	}
 	if err := controller.wait(command); err != nil {
 		t.Fatalf("expected cleanup became context cancellation: %v", err)
+	}
+}
+
+func TestUnixPlaintextCleanupRejectsUnmanagedAndReboundPaths(t *testing.T) {
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	symlink, err := os.CreateTemp(os.TempDir(), ".tshoot-browser-session-symlink-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	symlinkPath := symlink.Name()
+	if err := symlink.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(symlinkPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, symlinkPath); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(symlinkPath) })
+	if identity, err := openUnixPlaintextCleanupIdentity(symlinkPath); err == nil {
+		_ = identity.Close()
+		t.Fatal("symlink plaintext cleanup path was accepted")
+	}
+	if content, err := os.ReadFile(victim); err != nil || string(content) != "keep" {
+		t.Fatalf("symlink victim changed: %q err=%v", content, err)
+	}
+
+	original, err := os.CreateTemp(os.TempDir(), ".tshoot-browser-session-rebound-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalPath := original.Name()
+	if err := original.Chmod(0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := original.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(originalPath) })
+	identity, err := openUnixPlaintextCleanupIdentity(originalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := os.CreateTemp(os.TempDir(), ".tshoot-browser-session-replacement-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementPath := replacement.Name()
+	if _, err := replacement.WriteString("replacement-must-remain"); err != nil {
+		t.Fatal(err)
+	}
+	if err := replacement.Chmod(0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := replacement.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacementPath, originalPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanupUnixPlaintextSession(identity, originalPath); err == nil {
+		t.Fatal("rebound plaintext cleanup path was removed")
+	}
+	if content, err := os.ReadFile(originalPath); err != nil || string(content) != "replacement-must-remain" {
+		t.Fatalf("rebound file changed: %q err=%v", content, err)
 	}
 }

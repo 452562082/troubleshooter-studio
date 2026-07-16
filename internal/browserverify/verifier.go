@@ -75,6 +75,7 @@ type workerResult struct {
 	FinalScreenshotPath  string                            `json:"final_screenshot_path,omitempty"`
 	AccessibilitySummary []bughub.BrowserAccessibilityNode `json:"accessibility_summary,omitempty"`
 	Artifacts            []workerArtifact                  `json:"artifacts"`
+	sessionState         []byte
 }
 
 type HostVerifier struct {
@@ -449,9 +450,12 @@ func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) (
 	if err := validateLoginWorkerResult(output); err != nil {
 		return &verifierError{code: "browser_worker_protocol_invalid", cause: err}
 	}
-	state, err := readPlaintextSessionState(path)
-	if err != nil {
-		return &verifierError{code: "browser_session_invalid", cause: err}
+	state := output.sessionState
+	if state == nil {
+		state, err = readPlaintextSessionState(path)
+		if err != nil {
+			return &verifierError{code: "browser_session_invalid", cause: err}
+		}
 	}
 	if err := v.cleanupPlaintextSession(path); err != nil {
 		return &verifierError{code: "browser_session_cleanup_failed", cause: errPlaintextSessionCleanup}
@@ -608,15 +612,22 @@ func readPlaintextSessionState(path string) ([]byte, error) {
 	if err != nil || len(state) > maxBrowserSessionBytes {
 		return nil, errors.New("read browser login state")
 	}
+	if err := validatePlaintextSessionState(state); err != nil {
+		return nil, err
+	}
+	return state, nil
+}
+
+func validatePlaintextSessionState(state []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(state))
 	var object map[string]json.RawMessage
 	if err := decoder.Decode(&object); err != nil || object == nil {
-		return nil, errors.New("browser login state is invalid")
+		return errors.New("browser login state is invalid")
 	}
 	if err := requireJSONEOF(decoder); err != nil {
-		return nil, errors.New("browser login state is invalid")
+		return errors.New("browser login state is invalid")
 	}
-	return state, nil
+	return nil
 }
 
 func validateVerificationRequest(ctx context.Context, resolver IPResolver, request bughub.BrowserVerificationRequest) error {
@@ -1277,7 +1288,7 @@ func (runner nodeWorkerRunner) Run(ctx context.Context, paths RuntimePaths, requ
 		return workerResult{}, err
 	}
 	command := exec.CommandContext(ctx, "node", paths.WorkerPath, "--mode", request.Mode)
-	processController, err := configureWorkerProcess(ctx, command)
+	processController, err := configureWorkerProcess(ctx, command, request.StorageStatePath)
 	if err != nil {
 		return workerResult{}, err
 	}
@@ -1329,6 +1340,17 @@ func (runner nodeWorkerRunner) Run(ctx context.Context, paths RuntimePaths, requ
 	go func() {
 		stderrDone <- consumeBoundedWorkerStderr(outputs.stderrRead, emit, kill)
 	}()
+	var sessionState []byte
+	if request.Mode == "login" && request.StorageStatePath != "" {
+		processController.beforeCleanup = func() error {
+			state, err := readPlaintextSessionState(request.StorageStatePath)
+			if err != nil {
+				return err
+			}
+			sessionState = state
+			return nil
+		}
+	}
 	waitErr := processController.wait(command)
 	processCleanupErr := processController.finish()
 	stdoutResult, stderrErr := waitWorkerOutputDrains(outputs, stdoutDone, stderrDone)
@@ -1351,6 +1373,7 @@ func (runner nodeWorkerRunner) Run(ctx context.Context, paths RuntimePaths, requ
 	if err := requireJSONEOF(decoder); err != nil {
 		return workerResult{}, err
 	}
+	result.sessionState = sessionState
 	return result, nil
 }
 

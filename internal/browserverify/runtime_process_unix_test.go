@@ -5,6 +5,7 @@ package browserverify
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -16,7 +17,15 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
+
+type runtimeParentCrashProcessTree struct {
+	WrapperPID    int `json:"wrapper_pid"`
+	TargetPID     int `json:"target_pid"`
+	GrandchildPID int `json:"grandchild_pid"`
+}
 
 func TestExecCommandRunnerWrapperPreservesArgvEnvironmentStdinAndExit(t *testing.T) {
 	temporary := t.TempDir()
@@ -120,6 +129,193 @@ func TestExecCommandRunnerCancellationTerminatesDescendantProcessGroup(t *testin
 	}
 }
 
+func TestExecCommandRunnerParentCrashTerminatesOwnedProcessGroup(t *testing.T) {
+	temporary := t.TempDir()
+	readyPath := filepath.Join(temporary, "parent-crash-tree-ready")
+	grandchildReadyPath := filepath.Join(temporary, "parent-crash-grandchild-ready")
+	markerPath := filepath.Join(temporary, "parent-crash-grandchild-survived")
+	parent := exec.Command(os.Args[0], "-test.run=^TestRuntimeCommandProcessTreeHelper$")
+	parent.Env = mergeCommandEnvironment(os.Environ(), []string{
+		"TSHOOT_RUNTIME_PROCESS_HELPER=crash-controller",
+		"TSHOOT_RUNTIME_PROCESS_READY=" + readyPath,
+		"TSHOOT_RUNTIME_PROCESS_GRANDCHILD_READY=" + grandchildReadyPath,
+		"TSHOOT_RUNTIME_PROCESS_MARKER=" + markerPath,
+	})
+	parent.Dir = temporary
+	if err := parent.Start(); err != nil {
+		t.Fatal(err)
+	}
+	cleanupGroup := true
+	t.Cleanup(func() {
+		_ = parent.Process.Kill()
+		_, _ = parent.Process.Wait()
+		if !cleanupGroup {
+			return
+		}
+		info, err := readRuntimeParentCrashProcessTree(readyPath)
+		if err != nil {
+			return
+		}
+		if info.WrapperPID > 1 && info.WrapperPID != os.Getpid() && info.WrapperPID != parent.Process.Pid && info.WrapperPID != unix.Getpgrp() {
+			_ = syscall.Kill(-info.WrapperPID, syscall.SIGKILL)
+		}
+	})
+
+	waitForRuntimeTestFile(t, readyPath, 5*time.Second, func() {
+		_ = parent.Process.Kill()
+	})
+	info, err := readRuntimeParentCrashProcessTree(readyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.WrapperPID <= 1 || info.TargetPID <= 1 || info.GrandchildPID <= 1 {
+		t.Fatalf("invalid parent-crash process tree: %+v", info)
+	}
+	if info.WrapperPID == os.Getpid() || info.WrapperPID == parent.Process.Pid || info.WrapperPID == unix.Getpgrp() {
+		t.Fatalf("wrapper PGID %d is not isolated from test/parent processes", info.WrapperPID)
+	}
+	if got, err := unix.Getpgid(info.TargetPID); err != nil || got != info.WrapperPID {
+		t.Fatalf("target PGID = %d, %v; want wrapper-owned PGID %d", got, err, info.WrapperPID)
+	}
+	if got, err := unix.Getpgid(info.GrandchildPID); err != nil || got != info.WrapperPID {
+		t.Fatalf("grandchild PGID = %d, %v; want wrapper-owned PGID %d", got, err, info.WrapperPID)
+	}
+
+	crashedAt := time.Now()
+	if err := parent.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = parent.Process.Wait()
+	deadline := crashedAt.Add(processGroupTerminationGrace + 2*time.Second)
+	for time.Now().Before(deadline) {
+		err := syscall.Kill(-info.WrapperPID, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			cleanupGroup = false
+			break
+		}
+		if err != nil {
+			t.Fatalf("probe wrapper-owned PGID %d: %v", info.WrapperPID, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if cleanupGroup {
+		t.Fatalf("wrapper-owned PGID %d survived parent crash beyond bounded grace", info.WrapperPID)
+	}
+	markerDeadline := crashedAt.Add(3*time.Second + 500*time.Millisecond)
+	if remaining := time.Until(markerDeadline); remaining > 0 {
+		time.Sleep(remaining)
+	}
+	if _, err := os.Stat(markerPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("grandchild wrote delayed marker after parent crash cleanup: %v", err)
+	}
+}
+
+func TestNodeWorkerRunnerParentCrashRemovesPlaintextSession(t *testing.T) {
+	temporary := t.TempDir()
+	workerPath := filepath.Join(temporary, "parent-crash-worker.mjs")
+	readyPath := filepath.Join(temporary, "parent-crash-worker-ready")
+	plaintextLocatorPath := filepath.Join(temporary, "parent-crash-plaintext-path")
+	workerSource := `
+import { writeFileSync } from 'node:fs';
+process.on('SIGTERM', () => {});
+writeFileSync(process.env.TSHOOT_RUNTIME_PROCESS_READY, 'ready');
+setInterval(() => {}, 1000);
+`
+	if err := os.WriteFile(workerPath, []byte(workerSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parent := exec.Command(os.Args[0], "-test.run=^TestRuntimeCommandProcessTreeHelper$")
+	parent.Env = mergeCommandEnvironment(os.Environ(), []string{
+		"TSHOOT_RUNTIME_PROCESS_HELPER=crash-worker-controller",
+		"TSHOOT_RUNTIME_PROCESS_READY=" + readyPath,
+		"TSHOOT_RUNTIME_PROCESS_WORKER=" + workerPath,
+		"TSHOOT_RUNTIME_PROCESS_PLAINTEXT_PATH=" + plaintextLocatorPath,
+	})
+	parent.Dir = temporary
+	if err := parent.Start(); err != nil {
+		t.Fatal(err)
+	}
+	var plaintextPath string
+	t.Cleanup(func() {
+		_ = parent.Process.Kill()
+		_, _ = parent.Process.Wait()
+		if plaintextPath != "" {
+			_ = os.Remove(plaintextPath)
+		}
+	})
+	waitForRuntimeTestFile(t, readyPath, 5*time.Second, func() {
+		_ = parent.Process.Kill()
+	})
+	waitForRuntimeTestFile(t, plaintextLocatorPath, 5*time.Second, func() {
+		_ = parent.Process.Kill()
+	})
+	encodedPath, err := os.ReadFile(plaintextLocatorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintextPath = strings.TrimSpace(string(encodedPath))
+	if !filepath.IsAbs(plaintextPath) || filepath.Clean(filepath.Dir(plaintextPath)) != filepath.Clean(os.TempDir()) {
+		t.Fatalf("plaintext session path %q is not an absolute OS temp file", plaintextPath)
+	}
+	state, err := os.ReadFile(plaintextPath)
+	if err != nil || string(state) != `{"cookies":[{"value":"parent-crash-secret"}]}` {
+		t.Fatalf("plaintext session before crash=%q err=%v", state, err)
+	}
+	if err := parent.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = parent.Process.Wait()
+	deadline := time.Now().Add(processGroupTerminationGrace + 2*time.Second)
+	for time.Now().Before(deadline) {
+		_, err := os.Lstat(plaintextPath)
+		if errors.Is(err, os.ErrNotExist) {
+			plaintextPath = ""
+			return
+		}
+		if err != nil {
+			t.Fatalf("inspect plaintext session after parent crash: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("plaintext browser session remained after parent crash: %s", plaintextPath)
+}
+
+func TestNodeWorkerRunnerReturnsLoginStateAfterWrapperRemovesPlaintext(t *testing.T) {
+	temporary := t.TempDir()
+	workerPath := filepath.Join(temporary, "login-state-worker.mjs")
+	workerSource := `
+import { readFileSync, writeFileSync } from 'node:fs';
+const request = JSON.parse(readFileSync(0, 'utf8'));
+writeFileSync(request.storage_state_path, JSON.stringify({ cookies: [{ value: 'new-session-secret' }], origins: [] }));
+process.stdout.write(JSON.stringify({ status: 'completed', artifacts: [] }));
+`
+	if err := os.WriteFile(workerPath, []byte(workerSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path, err := createPlaintextSessionTemp(
+		SessionKey{SystemID: "shop", Environment: "test", Origin: "https://app.test"},
+		nil,
+		false,
+		os.Remove,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(path) })
+	result, err := (nodeWorkerRunner{}).Run(context.Background(), RuntimePaths{
+		Root: temporary, BrowsersPath: filepath.Join(temporary, "browsers"), WorkerPath: workerPath,
+	}, workerRequest{Mode: "login", StorageStatePath: path}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result.sessionState) != `{"cookies":[{"value":"new-session-secret"}],"origins":[]}` {
+		t.Fatalf("in-memory login state = %q", result.sessionState)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("wrapper left plaintext login state after normal completion: %v", err)
+	}
+}
+
 func TestExecCommandRunnerContextCancellationSurvivesTargetExitZero(t *testing.T) {
 	temporary := t.TempDir()
 	readyPath := filepath.Join(temporary, "term-zero-ready")
@@ -215,6 +411,65 @@ func TestRuntimeCommandProcessTreeHelper(t *testing.T) {
 		waitForRuntimeTestFile(t, os.Getenv("TSHOOT_RUNTIME_PROCESS_READY"), 5*time.Second, func() {
 			_ = command.Process.Kill()
 		})
+	case "crash-controller":
+		err := (execCommandRunner{}).Run(context.Background(), os.Args[0], []string{
+			"-test.run=^TestRuntimeCommandProcessTreeHelper$",
+		}, []string{"TSHOOT_RUNTIME_PROCESS_HELPER=crash-target"}, "", nil, io.Discard, io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+	case "crash-worker-controller":
+		key := SessionKey{SystemID: "shop", Environment: "test", Origin: "https://app.test"}
+		path, err := createPlaintextSessionTemp(key, []byte(`{"cookies":[{"value":"parent-crash-secret"}]}`), true, os.Remove)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(os.Getenv("TSHOOT_RUNTIME_PROCESS_PLAINTEXT_PATH"), []byte(path), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err = (nodeWorkerRunner{}).Run(context.Background(), RuntimePaths{
+			Root:         filepath.Dir(os.Getenv("TSHOOT_RUNTIME_PROCESS_WORKER")),
+			BrowsersPath: filepath.Join(filepath.Dir(os.Getenv("TSHOOT_RUNTIME_PROCESS_WORKER")), "browsers"),
+			WorkerPath:   os.Getenv("TSHOOT_RUNTIME_PROCESS_WORKER"),
+		}, workerRequest{Mode: "execute", StorageStatePath: path}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	case "crash-target":
+		signal.Ignore(syscall.SIGTERM)
+		command := exec.Command(os.Args[0], "-test.run=^TestRuntimeCommandProcessTreeHelper$")
+		command.Env = mergeCommandEnvironment(os.Environ(), []string{"TSHOOT_RUNTIME_PROCESS_HELPER=crash-grandchild"})
+		command.Stdout = os.Stdout
+		command.Stderr = os.Stderr
+		if err := command.Start(); err != nil {
+			t.Fatal(err)
+		}
+		waitForRuntimeTestFile(t, os.Getenv("TSHOOT_RUNTIME_PROCESS_GRANDCHILD_READY"), 5*time.Second, func() {
+			_ = command.Process.Kill()
+		})
+		info := runtimeParentCrashProcessTree{WrapperPID: os.Getppid(), TargetPID: os.Getpid(), GrandchildPID: command.Process.Pid}
+		encoded, err := json.Marshal(info)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(os.Getenv("TSHOOT_RUNTIME_PROCESS_READY"), encoded, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for {
+			time.Sleep(time.Hour)
+		}
+	case "crash-grandchild":
+		signal.Ignore(syscall.SIGTERM)
+		if err := os.WriteFile(os.Getenv("TSHOOT_RUNTIME_PROCESS_GRANDCHILD_READY"), []byte("ready"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(3 * time.Second)
+		if err := os.WriteFile(os.Getenv("TSHOOT_RUNTIME_PROCESS_MARKER"), []byte("alive"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for {
+			time.Sleep(time.Hour)
+		}
 	case "grandchild":
 		signal.Ignore(syscall.SIGTERM)
 		if err := os.WriteFile(os.Getenv("TSHOOT_RUNTIME_PROCESS_READY"), []byte("ready"), 0o600); err != nil {
@@ -257,6 +512,18 @@ func TestRuntimeCommandProcessTreeHelper(t *testing.T) {
 	default:
 		t.Fatalf("unknown process-tree helper mode %q", os.Getenv("TSHOOT_RUNTIME_PROCESS_HELPER"))
 	}
+}
+
+func readRuntimeParentCrashProcessTree(path string) (runtimeParentCrashProcessTree, error) {
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		return runtimeParentCrashProcessTree{}, err
+	}
+	var info runtimeParentCrashProcessTree
+	if err := json.Unmarshal(encoded, &info); err != nil {
+		return runtimeParentCrashProcessTree{}, err
+	}
+	return info, nil
 }
 
 func killRuntimeTestProcess(t *testing.T, path string) {

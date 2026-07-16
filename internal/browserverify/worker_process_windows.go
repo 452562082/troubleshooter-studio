@@ -37,6 +37,7 @@ type workerProcessController struct {
 	stageHook       func(windowsProcessStage)
 	cancelRequested atomic.Bool
 	contextErr      error
+	beforeCleanup   func() error
 }
 
 const windowsJobWrapperArgument = "--tshoot-browser-job-wrapper"
@@ -51,7 +52,7 @@ func init() {
 	}
 }
 
-func configureWorkerProcess(ctx context.Context, command *exec.Cmd) (*workerProcessController, error) {
+func configureWorkerProcess(ctx context.Context, command *exec.Cmd, _ ...string) (*workerProcessController, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, err
@@ -172,10 +173,14 @@ func (*workerProcessController) killWrapper(command *exec.Cmd) error {
 
 func (controller *workerProcessController) wait(command *exec.Cmd) error {
 	waitErr := command.Wait()
+	var beforeCleanupErr error
+	if controller.beforeCleanup != nil {
+		beforeCleanupErr = controller.beforeCleanup()
+	}
 	controller.mu.Lock()
 	contextErr := controller.contextErr
 	controller.mu.Unlock()
-	return errors.Join(waitErr, contextErr)
+	return errors.Join(waitErr, beforeCleanupErr, contextErr)
 }
 
 func (controller *workerProcessController) finish() error {

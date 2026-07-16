@@ -46,6 +46,8 @@ const PROXY_RESOLVE_TIMEOUT_MS = 5_000;
 const PROXY_CONNECTION_STAGGER_MS = 50;
 const PROXY_AUTHENTICATE_HEADER = 'Basic realm="tshoot-browser-proxy"';
 const LOGIN_COMPLETION_STABILITY_MS = 1_000;
+const EXECUTE_AUTH_FAILURE_QUIET_MS = 1_000;
+const AUTH_ATTRIBUTED_ACTIONS = new Set(['click', 'fill', 'press', 'select', 'wait_for']);
 const NETWORK_PROTOCOLS = new Set(['http:', 'https:', 'ws:', 'wss:']);
 const BROWSER_LAUNCH_ARGS = Object.freeze([
   '--disable-quic',
@@ -1037,6 +1039,114 @@ export function createLoginAuthFailureTracker(now = Date.now, quietWindowMs = 1_
   };
 }
 
+export function createExecuteAuthFailureTracker(policy, {
+  now = Date.now,
+  quietWindowMs = EXECUTE_AUTH_FAILURE_QUIET_MS,
+  sleep = (duration) => new Promise((resolveSleep) => setTimeout(resolveSleep, duration)),
+} = {}) {
+  validatePolicy(policy);
+  if (!Number.isInteger(quietWindowMs) || quietWindowMs < 1 || quietWindowMs > 10_000 || typeof now !== 'function' || typeof sleep !== 'function') {
+    throw new Error('execute authentication tracking options are invalid');
+  }
+  const criticalOrigins = new Set([...policy.application_origins, ...policy.allowed_origins].map(normalizeOrigin));
+  const requestClassifications = new WeakMap();
+  const pageIdentifiers = new WeakMap();
+  const documentFailures = new Set();
+  const apiFailures = new Map();
+  let nextPageIdentifier = 1;
+  let activeActionScopes = 0;
+
+  const pageKey = (page) => {
+    let identifier = pageIdentifiers.get(page);
+    if (!identifier) {
+      identifier = nextPageIdentifier;
+      nextPageIdentifier += 1;
+      pageIdentifiers.set(page, identifier);
+    }
+    return `document:${identifier}`;
+  };
+  const classifyRequest = (browserRequest) => {
+    try {
+      const resourceType = String(browserRequest.resourceType()).toLowerCase();
+      if (resourceType === 'document' && browserRequest.isNavigationRequest()) {
+        const frame = browserRequest.frame();
+        const page = frame.page();
+        if (frame === page.mainFrame()) return { kind: 'document', key: pageKey(page) };
+        return null;
+      }
+      if (activeActionScopes < 1 || (resourceType !== 'fetch' && resourceType !== 'xhr')) return null;
+      const parsed = new URL(browserRequest.url());
+      if (!criticalOrigins.has(parsed.origin)) return null;
+      const method = String(browserRequest.method()).toUpperCase().slice(0, 16);
+      const key = createHash('sha256').update(`${method}\0${parsed.origin}\0${parsed.pathname}`).digest('hex');
+      return { kind: 'action-api', key: `api:${key}` };
+    } catch {
+      return null;
+    }
+  };
+  const purgeExpiredAPIFailures = () => {
+    const current = now();
+    for (const [key, failedAt] of apiFailures) {
+      if (current - failedAt > quietWindowMs) apiFailures.delete(key);
+    }
+  };
+  const active = () => {
+    purgeExpiredAPIFailures();
+    return documentFailures.size > 0 || apiFailures.size > 0;
+  };
+  const settle = async () => {
+    purgeExpiredAPIFailures();
+    if (documentFailures.size > 0) return true;
+    let remaining = 0;
+    const current = now();
+    for (const failedAt of apiFailures.values()) remaining = Math.max(remaining, quietWindowMs - (current - failedAt) + 1);
+    if (remaining > 0) await sleep(remaining);
+    return active();
+  };
+
+  return {
+    beginAction(action) {
+      const tracked = AUTH_ATTRIBUTED_ACTIONS.has(action?.action);
+      if (tracked) activeActionScopes += 1;
+      let finished = false;
+      return () => {
+        if (finished) return;
+        finished = true;
+        if (tracked) activeActionScopes = Math.max(0, activeActionScopes - 1);
+      };
+    },
+    observeRequest(browserRequest) {
+      const classification = classifyRequest(browserRequest);
+      if (classification) requestClassifications.set(browserRequest, classification);
+      return classification?.kind || '';
+    },
+    observeResponse(response) {
+      let browserRequest;
+      let status;
+      try {
+        browserRequest = response.request();
+        status = response.status();
+      } catch {
+        return false;
+      }
+      const classification = requestClassifications.get(browserRequest);
+      if (!classification) return false;
+      if (status === 401 || status === 403) {
+        if (classification.kind === 'document') documentFailures.add(classification.key);
+        else apiFailures.set(classification.key, now());
+        return true;
+      }
+      if (Number.isInteger(status) && status >= 200 && status < 300) {
+        if (classification.kind === 'document') documentFailures.delete(classification.key);
+        else apiFailures.delete(classification.key);
+      }
+      return false;
+    },
+    active,
+    settle,
+  };
+}
+
 export function createLoginNavigationTracker(policy, {
   now = Date.now,
   stableWindowMs = LOGIN_COMPLETION_STABILITY_MS,
@@ -1136,26 +1246,31 @@ async function accessibilitySummary(page) {
   return result;
 }
 
-async function executeAction(page, action, request, index, captureScreenshot) {
-  switch (action.action) {
-    case 'goto':
-      await assertAllowedURL(action.url, request.policy);
-      await page.goto(action.url, { waitUntil: 'domcontentloaded' });
-      return { loginRequired: false, path: '' };
-    case 'screenshot':
-      return captureScreenshot(`action-${String(index + 1).padStart(2, '0')}-${safeFilePart(action.id)}.png`);
-    default: {
-      const locator = buildLocator(page, action.locator).first();
-      if (action.action === 'click') await locator.click();
-      else if (action.action === 'fill') {
-        const type = (await locator.getAttribute('type').catch(() => '')).toLowerCase();
-        if (type === 'password') throw new Error('password input is not allowed');
-        await locator.fill(action.value);
-      } else if (action.action === 'press') await locator.press(action.key);
-      else if (action.action === 'select') await locator.selectOption(action.value);
-      else if (action.action === 'wait_for') await locator.waitFor({ state: 'visible' });
-      return { loginRequired: false, path: '' };
+export async function executeAction(page, action, request, index, captureScreenshot, authFailures) {
+  const finishAuthScope = authFailures?.beginAction(action) ?? (() => {});
+  try {
+    switch (action.action) {
+      case 'goto':
+        await assertAllowedURL(action.url, request.policy);
+        await page.goto(action.url, { waitUntil: 'domcontentloaded' });
+        return { loginRequired: false, path: '' };
+      case 'screenshot':
+        return captureScreenshot(`action-${String(index + 1).padStart(2, '0')}-${safeFilePart(action.id)}.png`);
+      default: {
+        const locator = buildLocator(page, action.locator).first();
+        if (action.action === 'click') await locator.click();
+        else if (action.action === 'fill') {
+          const type = (await locator.getAttribute('type').catch(() => '')).toLowerCase();
+          if (type === 'password') throw new Error('password input is not allowed');
+          await locator.fill(action.value);
+        } else if (action.action === 'press') await locator.press(action.key);
+        else if (action.action === 'select') await locator.selectOption(action.value);
+        else if (action.action === 'wait_for') await locator.waitFor({ state: 'visible' });
+        return { loginRequired: false, path: '' };
+      }
     }
+  } finally {
+    finishAuthScope();
   }
 }
 
@@ -1208,9 +1323,9 @@ async function executeWorker(request) {
   const actions = [];
   const pendingResponses = new Set();
   const requestStarted = new WeakMap();
-  let authFailure = false;
+  const authFailures = createExecuteAuthFailureTracker(request.policy);
   const onResponse = (response) => {
-    if (response.status() === 401 || response.status() === 403) authFailure = true;
+    authFailures.observeResponse(response);
     if (network.isStopped()) return;
     if (pendingResponses.size >= EVIDENCE_MAX_RECORDS) {
       network.truncate();
@@ -1234,7 +1349,10 @@ async function executeWorker(request) {
       storageStateInput: request.storage_state_path ? { storageState: request.storage_state_path } : {},
       policy: request.policy,
       hooks: {
-        onRequest: (browserRequest) => requestStarted.set(browserRequest, Date.now()),
+        onRequest: (browserRequest) => {
+          requestStarted.set(browserRequest, Date.now());
+          authFailures.observeRequest(browserRequest);
+        },
         onResponse,
         onConsole: (message) => {
           if (consoleRecords.isStopped()) return;
@@ -1245,19 +1363,22 @@ async function executeWorker(request) {
     context = supervised.context;
     const page = supervised.page;
 
-    const captureScreenshot = (name) => captureSafePNG(
-      page,
-      request,
-      name,
-      () => authFailure,
-      (currentPage, stagingDir, screenshotName) => capturePNG(currentPage, stagingDir, screenshotName, artifactBudget),
-      () => context.pages(),
+    const requiresLogin = async () => pagesRequireLogin(context.pages(), request.policy, await authFailures.settle());
+    const captureScreenshotOnce = (name) => captureSafePNG(
+      page, request, name, () => authFailures.active(),
+      (currentPage, stagingDir, screenshotName) => capturePNG(currentPage, stagingDir, screenshotName, artifactBudget), () => context.pages(),
     );
+    const captureScreenshot = async (name) => {
+      await authFailures.settle();
+      const captured = await captureScreenshotOnce(name);
+      if (!captured.loginRequired || await requiresLogin()) return captured;
+      return captureScreenshotOnce(name);
+    };
     const finishLogin = async () => {
       for (const screenshot of screenshots) await rm(join(request.staging_dir, screenshot.replace('browser/', '')), { force: true });
       await Promise.allSettled([...pendingResponses]);
       const artifacts = await writeEvidenceFiles(request, network, consoleRecords, actions, artifactBudget);
-      const loginPage = await activeLoginPage(context.pages(), request.policy, authFailure);
+      const loginPage = await activeLoginPage(context.pages(), request.policy, authFailures.active());
       return {
         status: 'login_required',
         error_code: 'browser_login_required',
@@ -1275,7 +1396,7 @@ async function executeWorker(request) {
       if (supervised.blocked()) throw new Error('browser destination was blocked');
       await assertAllowedURL(page.url(), request.policy);
     } catch {
-      if (await pagesRequireLogin(context.pages(), request.policy, authFailure)) return finishLogin();
+      if (await requiresLogin()) return finishLogin();
       const captured = await captureScreenshot('failure.png');
       if (captured.loginRequired) return finishLogin();
       const failure = captured.path;
@@ -1296,15 +1417,15 @@ async function executeWorker(request) {
         artifacts,
       };
     }
-    if (await pagesRequireLogin(context.pages(), request.policy, authFailure)) return finishLogin();
+    if (await requiresLogin()) return finishLogin();
 
     for (let index = 0; index < request.plan.actions.length; index += 1) {
       const action = request.plan.actions[index];
-      if (await pagesRequireLogin(context.pages(), request.policy, authFailure)) return finishLogin();
+      if (await requiresLogin()) return finishLogin();
       const started = Date.now();
       emitProgress('browser_action_started', `Executing browser action ${index + 1}/${request.plan.actions.length}`, action.id, index + 1, request.plan.actions.length);
       try {
-        const captured = await executeAction(page, action, request, index, captureScreenshot);
+        const captured = await executeAction(page, action, request, index, captureScreenshot, authFailures);
         if (captured.loginRequired) {
           actions.push({ id: action.id, action: action.action, locator_kind: action.locator?.kind || '', started_at: new Date(started).toISOString(), duration_ms: Date.now() - started, result: 'login_required', error_code: 'browser_login_required' });
           return finishLogin();
@@ -1312,7 +1433,7 @@ async function executeWorker(request) {
         if (captured.path) screenshots.push(captured.path);
         if (supervised.blocked()) throw new Error('browser destination was blocked');
         if (page.url().startsWith('http:') || page.url().startsWith('https:')) await assertAllowedURL(page.url(), request.policy);
-        if (await pagesRequireLogin(context.pages(), request.policy, authFailure)) {
+        if (await requiresLogin()) {
           actions.push({ id: action.id, action: action.action, locator_kind: action.locator?.kind || '', started_at: new Date(started).toISOString(), duration_ms: Date.now() - started, result: 'login_required', error_code: 'browser_login_required' });
           return finishLogin();
         }
@@ -1328,7 +1449,7 @@ async function executeWorker(request) {
         emitProgress('browser_action_completed', `Completed browser action ${index + 1}/${request.plan.actions.length}`, action.id, index + 1, request.plan.actions.length);
       } catch {
         actions.push({ id: action.id, action: action.action, locator_kind: action.locator?.kind || '', started_at: new Date(started).toISOString(), duration_ms: Date.now() - started, result: 'failed', error_code: supervised.blocked() ? 'browser_destination_blocked' : 'locator_failed' });
-        if (await pagesRequireLogin(context.pages(), request.policy, authFailure)) return finishLogin();
+        if (await requiresLogin()) return finishLogin();
         const captured = await captureScreenshot('failure.png');
         if (captured.loginRequired) return finishLogin();
         const failure = captured.path;
@@ -1353,7 +1474,7 @@ async function executeWorker(request) {
       try {
         await page.getByText(assertion.value, { exact: false }).first().waitFor({ state: 'visible' });
       } catch {
-        if (await pagesRequireLogin(context.pages(), request.policy, authFailure)) return finishLogin();
+        if (await requiresLogin()) return finishLogin();
         const captured = await captureScreenshot('failure.png');
         if (captured.loginRequired) return finishLogin();
         const failure = captured.path;
@@ -1373,7 +1494,7 @@ async function executeWorker(request) {
       }
     }
 
-    if (await pagesRequireLogin(context.pages(), request.policy, authFailure)) return finishLogin();
+    if (await requiresLogin()) return finishLogin();
     const captured = await captureScreenshot('final.png');
     if (captured.loginRequired) return finishLogin();
     const finalScreenshot = captured.path;

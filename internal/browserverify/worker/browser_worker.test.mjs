@@ -991,6 +991,130 @@ function loginBrowserRequest(page, rawURL, { navigation = true, frame = page.mai
   };
 }
 
+async function newExecuteAuthFailureTracker(policy, options = {}) {
+  const worker = await import('./browser_worker.mjs');
+  assert.equal(typeof worker.createExecuteAuthFailureTracker, 'function');
+  return worker.createExecuteAuthFailureTracker(policy, options);
+}
+
+function executeBrowserRequest(page, rawURL, {
+  navigation = false,
+  resourceType = 'fetch',
+  method = 'GET',
+  frame = page.mainFrame(),
+} = {}) {
+  return {
+    url: () => rawURL,
+    method: () => method,
+    resourceType: () => resourceType,
+    isNavigationRequest: () => navigation,
+    frame: () => frame,
+  };
+}
+
+function executeBrowserResponse(request, status) {
+  return {
+    request: () => request,
+    status: () => status,
+    url: () => request.url(),
+  };
+}
+
+test('execute auth tracking ignores optional resources and action-unrelated fetch failures', async () => {
+  const policy = baseRequest().policy;
+  policy.allowed_origins.push('https://api.test');
+  const tracker = await newExecuteAuthFailureTracker(policy);
+  const page = trackedLoginPage('https://app.test/users');
+
+  const finishAction = tracker.beginAction({ action: 'click' });
+  const optionalImage = executeBrowserRequest(page, 'https://app.test/favicon.ico', { resourceType: 'image' });
+  tracker.observeRequest(optionalImage);
+  finishAction();
+  tracker.observeResponse(executeBrowserResponse(optionalImage, 403));
+
+  const finishUntrustedAction = tracker.beginAction({ action: 'click' });
+  const untrustedFetch = executeBrowserRequest(page, 'https://unconfigured.test/users');
+  tracker.observeRequest(untrustedFetch);
+  finishUntrustedAction();
+  tracker.observeResponse(executeBrowserResponse(untrustedFetch, 403));
+
+  for (const rawURL of ['https://app.test/analytics', 'https://api.test/optional']) {
+    const optionalFetch = executeBrowserRequest(page, rawURL);
+    tracker.observeRequest(optionalFetch);
+    tracker.observeResponse(executeBrowserResponse(optionalFetch, 403));
+  }
+  assert.equal(tracker.active(), false);
+});
+
+test('execute auth tracking keeps main-document failures until the same page loads successfully', async () => {
+  let now = 10_000;
+  const tracker = await newExecuteAuthFailureTracker(baseRequest().policy, { now: () => now, quietWindowMs: 1_000 });
+  const page = trackedLoginPage('https://app.test/users');
+  const failedDocument = executeBrowserRequest(page, 'https://app.test/users', { navigation: true, resourceType: 'document' });
+  tracker.observeRequest(failedDocument);
+  tracker.observeResponse(executeBrowserResponse(failedDocument, 401));
+  assert.equal(tracker.active(), true);
+  now += 10_000;
+  assert.equal(tracker.active(), true);
+  assert.equal(await tracker.settle(), true);
+
+  const recoveredDocument = executeBrowserRequest(page, 'https://app.test/users?retry=1', { navigation: true, resourceType: 'document' });
+  tracker.observeRequest(recoveredDocument);
+  tracker.observeResponse(executeBrowserResponse(recoveredDocument, 200));
+  assert.equal(tracker.active(), false);
+});
+
+test('executeAction scopes allowed fetch failures to the current controlled action', async () => {
+  const worker = await import('./browser_worker.mjs');
+  assert.equal(typeof worker.executeAction, 'function');
+  const policy = baseRequest().policy;
+  policy.allowed_origins.push('https://api.test');
+  const tracker = await newExecuteAuthFailureTracker(policy);
+  const page = trackedLoginPage('https://app.test/users');
+  const criticalRequest = executeBrowserRequest(page, 'https://api.test/users/search', { method: 'POST' });
+  page.getByRole = () => ({
+    first: () => ({
+      click: async () => {
+        tracker.observeRequest(criticalRequest);
+        tracker.observeResponse(executeBrowserResponse(criticalRequest, 403));
+      },
+    }),
+  });
+  const action = { id: 'search', action: 'click', locator: { kind: 'role', value: 'button', name: 'Search' } };
+  await worker.executeAction(page, action, { ...baseRequest(), policy }, 0, async () => ({ loginRequired: false, path: '' }), tracker);
+  assert.equal(tracker.active(), true);
+});
+
+test('execute auth tracking recovers a transient critical API failure after success or a quiet window', async () => {
+  let now = 20_000;
+  const sleep = async (duration) => { now += duration; };
+  const policy = baseRequest().policy;
+  policy.allowed_origins.push('https://api.test');
+  const tracker = await newExecuteAuthFailureTracker(policy, { now: () => now, quietWindowMs: 1_000, sleep });
+  const page = trackedLoginPage('https://app.test/users');
+  const failedRequest = executeBrowserRequest(page, 'https://api.test/users/search', { method: 'POST' });
+  let finishAction = tracker.beginAction({ action: 'press' });
+  tracker.observeRequest(failedRequest);
+  finishAction();
+  tracker.observeResponse(executeBrowserResponse(failedRequest, 401));
+  assert.equal(tracker.active(), true);
+  assert.equal(await tracker.settle(), false);
+  assert.equal(tracker.active(), false);
+
+  const retryFailure = executeBrowserRequest(page, 'https://api.test/users/search?attempt=2', { method: 'POST' });
+  finishAction = tracker.beginAction({ action: 'press' });
+  tracker.observeRequest(retryFailure);
+  finishAction();
+  tracker.observeResponse(executeBrowserResponse(retryFailure, 403));
+  assert.equal(tracker.active(), true);
+  const retrySuccess = executeBrowserRequest(page, 'https://api.test/users/search?attempt=3', { method: 'POST' });
+  finishAction = tracker.beginAction({ action: 'wait_for' });
+  tracker.observeRequest(retrySuccess);
+  finishAction();
+  tracker.observeResponse(executeBrowserResponse(retrySuccess, 200));
+  assert.equal(tracker.active(), false);
+});
+
 test('login does not complete on a public shell before a delayed auth redirect', async () => {
   const policy = baseLoginRequest().policy;
   const initial = await observeLoginState([loginPage('https://app.test')], policy, false, false);

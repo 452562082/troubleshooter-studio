@@ -961,22 +961,13 @@ export async function hasVisiblePasswordField(page) {
 
 async function hasVisibleLoginUI(page) {
   try {
-    const controls = page.locator([
-      'form[action*="login" i]',
-      'form[action*="signin" i]',
-      'form[action*="sign-in" i]',
-      '[data-testid*="login" i]',
-      '[data-testid*="signin" i]',
-      '[data-testid*="sign-in" i]',
-      '[aria-label*="log in" i]',
-      '[aria-label*="sign in" i]',
-      'button[name*="login" i]',
-      'input[type="submit"][value*="log in" i]',
-      'input[type="submit"][value*="sign in" i]',
-    ].join(','));
-    const count = Math.min(await controls.count().catch(() => 0), 20);
-    for (let index = 0; index < count; index += 1) {
-      if (await controls.nth(index).isVisible().catch(() => false)) return true;
+    const loginActionName = /^\s*(?:log\s*in|sign\s*in)\s*$/i;
+    for (const role of ['button', 'link']) {
+      const controls = page.getByRole(role, { name: loginActionName });
+      const count = Math.min(await controls.count().catch(() => 0), 10);
+      for (let index = 0; index < count; index += 1) {
+        if (await controls.nth(index).isVisible().catch(() => false)) return true;
+      }
     }
   } catch {
     // Pages being closed during polling cannot establish visible login UI.
@@ -1011,11 +1002,10 @@ export async function observeLoginState(pages, policy, previouslyStarted = false
   for (const page of pages) states.push(await loginPageState(page, policy, false));
   const activeLogin = states.some((state) => state.required);
   const started = previouslyStarted || activeLogin;
-  const relevantPages = states.filter((state) => state.httpPage);
   const ready = started
     && !authFailure
-    && relevantPages.length > 0
-    && relevantPages.every((state) => state.applicationPage && !state.required);
+    && states.length > 0
+    && states.every((state) => state.httpPage && state.applicationPage && !state.required);
   return { started, ready };
 }
 
@@ -1061,10 +1051,10 @@ export function createLoginNavigationTracker(policy, {
     readySince = null;
   };
   const observeTopLevelURL = (rawURL) => {
+    changed();
     try {
       const parsed = new URL(String(rawURL));
       if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return;
-      changed();
       if (knownAuthOrigin(parsed.toString(), policy) || /\/(?:login|sign-in|signin|sso)(?:\/|$)/i.test(parsed.pathname)) {
         loginObserved = true;
       }

@@ -926,13 +926,47 @@ test('login detection checks every password field, including a visible field aft
 const loginPage = (url, passwordVisible = false, loginUIVisible = false) => ({
   url: () => url,
   locator: (selector) => {
-    const visible = selector === 'input[type="password"]' ? passwordVisible : loginUIVisible;
+    const visible = selector === 'input[type="password"]' && passwordVisible;
     return {
       count: async () => 1,
       nth: () => ({ isVisible: async () => visible }),
     };
   },
+  getByRole: (role, { name } = {}) => {
+    const visible = loginUIVisible && role === 'button' && name instanceof RegExp && name.test('Sign in');
+    return {
+      count: async () => (visible ? 1 : 0),
+      nth: () => ({ isVisible: async () => visible }),
+    };
+  },
 });
+
+function accessibleLoginPage(url, { controls = [], testIDs = [] } = {}) {
+  const visibleLocator = (matches) => ({
+    count: async () => matches.length,
+    nth: (index) => ({ isVisible: async () => matches[index]?.visible !== false }),
+  });
+  return {
+    url: () => url,
+    locator: (selector) => {
+      if (selector === 'input[type="password"]') return visibleLocator([]);
+      const matches = testIDs
+        .filter(({ value }) => selector.includes('[data-testid*="login" i]') && value.toLowerCase().includes('login'));
+      return visibleLocator(matches);
+    },
+    getByRole: (role, options = {}) => {
+      const matches = controls.filter((control) => {
+        if (control.role !== role) return false;
+        if (options.name instanceof RegExp) {
+          options.name.lastIndex = 0;
+          return options.name.test(control.name);
+        }
+        return options.name === undefined || options.name === control.name;
+      });
+      return visibleLocator(matches);
+    },
+  };
+}
 
 function trackedLoginPage(initialURL, passwordVisible = false, loginUIVisible = false) {
   const page = new EventEmitter();
@@ -973,6 +1007,27 @@ test('visible non-password login UI starts login and blocks completion', async (
   const policy = baseLoginRequest().policy;
   const observed = await observeLoginState([loginPage('https://app.test/', false, true)], policy, false, false);
   assert.deepEqual(observed, { started: true, ready: false });
+});
+
+test('text-only Sign in and Log in actions block login completion by accessible role and name', async () => {
+  const policy = baseLoginRequest().policy;
+  for (const control of [
+    { role: 'button', name: 'Sign in' },
+    { role: 'link', name: 'Log in' },
+  ]) {
+    const observed = await observeLoginState([
+      accessibleLoginPage('https://app.test/users', { controls: [control] }),
+    ], policy, true, false);
+    assert.deepEqual(observed, { started: true, ready: false }, `${control.role} ${control.name}`);
+  }
+});
+
+test('unrelated login history test IDs do not masquerade as a visible login action', async () => {
+  const policy = baseLoginRequest().policy;
+  const observed = await observeLoginState([
+    accessibleLoginPage('https://app.test/users', { testIDs: [{ value: 'last-login' }] }),
+  ], policy, true, false);
+  assert.deepEqual(observed, { started: true, ready: true });
 });
 
 test('401 or 403 never starts login and blocks completion during its quiet window', async () => {
@@ -1085,6 +1140,50 @@ test('closing an auth popup resets OAuth completion stability and excludes the c
   assert.equal(tracker.completionStable(observed.ready), false);
   now += 1_001;
   assert.equal(tracker.completionStable(observed.ready), true);
+});
+
+test('an open about:blank OAuth popup blocks completion while it waits for delayed navigation', async () => {
+  let now = 35_000;
+  const policy = baseLoginRequest().policy;
+  const application = trackedLoginPage('https://app.test/users');
+  const popup = trackedLoginPage('about:blank');
+  const tracker = createLoginNavigationTracker(policy, { now: () => now, stableWindowMs: 1_000 });
+  tracker.trackPage(application);
+  application.navigate('https://login.test/oauth/authorize');
+  application.navigate('https://app.test/users');
+  tracker.trackPage(popup);
+
+  let observed = await observeLoginState([application, popup], policy, tracker.started(), false);
+  assert.deepEqual(observed, { started: true, ready: false });
+  now += 1_001;
+  assert.equal(tracker.completionStable(observed.ready), false);
+
+  popup.navigate('https://login.test/oauth/authorize');
+  observed = await observeLoginState([application, popup], policy, tracker.started(), false);
+  assert.deepEqual(observed, { started: true, ready: false });
+  assert.equal(tracker.completionStable(observed.ready), false);
+});
+
+test('a tracked page navigating to a non-HTTP URL resets stability and blocks completion', async () => {
+  let now = 37_000;
+  const policy = baseLoginRequest().policy;
+  const application = trackedLoginPage('https://app.test/users');
+  const auxiliary = trackedLoginPage('https://app.test/complete');
+  const tracker = createLoginNavigationTracker(policy, { now: () => now, stableWindowMs: 1_000 });
+  tracker.trackPage(application);
+  tracker.trackPage(auxiliary);
+  application.navigate('https://login.test/oauth/authorize');
+  application.navigate('https://app.test/users');
+  let observed = await observeLoginState([application, auxiliary], policy, tracker.started(), false);
+  assert.equal(observed.ready, true);
+  assert.equal(tracker.completionStable(observed.ready), false);
+  now += 1_001;
+  assert.equal(tracker.completionStable(observed.ready), true);
+
+  auxiliary.navigate('data:text/html,still-loading');
+  observed = await observeLoginState([application, auxiliary], policy, tracker.started(), false);
+  assert.deepEqual(observed, { started: true, ready: false });
+  assert.equal(tracker.completionStable(observed.ready), false);
 });
 
 test('OAuth completion waits through auth failure quiet and stability windows', async () => {

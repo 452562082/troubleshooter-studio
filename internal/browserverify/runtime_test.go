@@ -192,7 +192,7 @@ func TestRuntimeManagerDoesNotPublishFailedInstall(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), ".install-") && entry.Name() != filepath.Base(manager.lockPath()) {
+		if strings.HasPrefix(entry.Name(), ".install-") && entry.Name() != filepath.Base(manager.lockPath()) && entry.Name() != filepath.Base(manager.legacyLockPath()) {
 			t.Fatalf("temporary install remains: %s", entry.Name())
 		}
 	}
@@ -234,6 +234,171 @@ func TestRuntimeManagerLiveInstallLockFailsClosed(t *testing.T) {
 	}
 	if status := contender.Status(); status.State != RuntimeInstalling || status.ErrorCode != "browser_runtime_install_in_progress" {
 		t.Fatalf("status = %+v", status)
+	}
+}
+
+func TestRuntimeManagerLegacyInstallLockRequiresManualRecovery(t *testing.T) {
+	manager := NewRuntimeManager(t.TempDir(), &recordingCommandRunner{})
+	if err := os.MkdirAll(manager.runtimeRoot(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := []byte("old-studio-random-owner-token\n")
+	if err := os.WriteFile(manager.legacyLockPath(), legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Ensure(context.Background(), nil); !errors.Is(err, errLegacyRuntimeInstallLock) {
+		t.Fatalf("legacy lock error = %v, want errLegacyRuntimeInstallLock", err)
+	}
+	if status := manager.Status(); status.State != RuntimeInstalling || status.ErrorCode != "browser_runtime_legacy_install_lock" || !strings.Contains(status.Message, "manual") {
+		t.Fatalf("legacy lock status = %+v", status)
+	}
+	got, err := os.ReadFile(manager.legacyLockPath())
+	if err != nil || !bytes.Equal(got, legacy) {
+		t.Fatalf("legacy lock changed: got=%q err=%v", got, err)
+	}
+}
+
+func TestRuntimeManagerMigratesAfterLegacyLockManualRemoval(t *testing.T) {
+	manager := NewRuntimeManager(t.TempDir(), &recordingCommandRunner{})
+	if err := os.MkdirAll(manager.runtimeRoot(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manager.legacyLockPath(), []byte("legacy\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.acquireInstallLock(); !errors.Is(err, errLegacyRuntimeInstallLock) {
+		t.Fatalf("legacy lock error = %v", err)
+	}
+	if err := os.Remove(manager.legacyLockPath()); err != nil {
+		t.Fatal(err)
+	}
+	release, err := manager.acquireInstallLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := release(); err != nil {
+		t.Fatal(err)
+	}
+	marker, err := os.ReadFile(manager.legacyLockPath())
+	if err != nil || string(marker) != runtimeInstallLockV2Marker {
+		t.Fatalf("compatibility marker=%q err=%v", marker, err)
+	}
+	assertRuntimeInstallLockAvailable(t, manager)
+}
+
+func TestRuntimeManagerDoesNotOverwriteReplacedLegacyLock(t *testing.T) {
+	manager := NewRuntimeManager(t.TempDir(), &recordingCommandRunner{})
+	if err := os.MkdirAll(manager.runtimeRoot(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ownerRelease, err := manager.acquireInstallLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(manager.legacyLockPath()); err != nil {
+		t.Fatal(err)
+	}
+	replacement := []byte("replacement-legacy-owner\n")
+	if err := os.WriteFile(manager.legacyLockPath(), replacement, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	contender := NewRuntimeManager(manager.managementRoot, &recordingCommandRunner{})
+	if _, err := contender.acquireInstallLock(); !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("live advisory contender error=%v, want fs.ErrExist", err)
+	}
+	if err := ownerRelease(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := contender.acquireInstallLock(); !errors.Is(err, errLegacyRuntimeInstallLock) {
+		t.Fatalf("replacement legacy error=%v", err)
+	}
+	got, err := os.ReadFile(manager.legacyLockPath())
+	if err != nil || !bytes.Equal(got, replacement) {
+		t.Fatalf("replacement legacy lock changed: got=%q err=%v", got, err)
+	}
+}
+
+func TestRuntimeInstallLockAllowsOnlyOneOfThreeContenders(t *testing.T) {
+	root := t.TempDir()
+	manager := NewRuntimeManager(root, &recordingCommandRunner{})
+	if err := os.MkdirAll(manager.runtimeRoot(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	type lockResult struct {
+		err error
+	}
+	start := make(chan struct{})
+	releaseWinner := make(chan struct{})
+	results := make(chan lockResult, 3)
+	var wait sync.WaitGroup
+	for range 3 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			contender := NewRuntimeManager(root, &recordingCommandRunner{})
+			release, err := contender.acquireInstallLock()
+			results <- lockResult{err: err}
+			if err == nil {
+				<-releaseWinner
+				_ = release()
+			}
+		}()
+	}
+	close(start)
+	winners := 0
+	busy := 0
+	for range 3 {
+		result := <-results
+		switch {
+		case result.err == nil:
+			winners++
+		case errors.Is(result.err, fs.ErrExist):
+			busy++
+		default:
+			t.Fatalf("contender error=%v", result.err)
+		}
+	}
+	if winners != 1 || busy != 2 {
+		t.Fatalf("winners=%d busy=%d", winners, busy)
+	}
+	close(releaseWinner)
+	wait.Wait()
+	assertRuntimeInstallLockAvailable(t, manager)
+}
+
+func TestRuntimeFileLockRegistryUsesOpenedFileIdentity(t *testing.T) {
+	temporary := t.TempDir()
+	path := filepath.Join(temporary, "lock")
+	alias := filepath.Join(temporary, "lock-alias")
+	if err := os.WriteFile(path, []byte("lock"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(path, alias); err != nil {
+		t.Fatal(err)
+	}
+	originalInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliasInfo, err := os.Stat(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := &runtimeFileLockRegistry{}
+	releaseOriginal, acquired := registry.tryAcquire(originalInfo)
+	if !acquired {
+		t.Fatal("original file identity was not acquired")
+	}
+	if releaseAlias, acquired := registry.tryAcquire(aliasInfo); acquired {
+		releaseAlias()
+		t.Fatal("hardlink alias bypassed same-process file identity guard")
+	}
+	releaseOriginal()
+	if releaseAlias, acquired := registry.tryAcquire(aliasInfo); !acquired {
+		t.Fatal("alias identity remained locked after release")
+	} else {
+		releaseAlias()
 	}
 }
 

@@ -69,15 +69,45 @@ type RuntimeManager struct {
 type execCommandRunner struct{}
 
 func (execCommandRunner) Run(ctx context.Context, executable string, args, env []string, dir string, stdin io.Reader, stdout, stderr io.Writer) error {
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
 	command := exec.CommandContext(ctx, executable, args...)
-	processController := configureWorkerProcess(command)
+	processController, err := configureWorkerProcess(command)
+	if err != nil {
+		return err
+	}
+	outputs, err := attachOwnedCommandOutputs(command)
+	if err != nil {
+		return errors.Join(err, processController.finish())
+	}
+	defer outputs.closeAll()
 	command.Dir = dir
 	command.Env = mergeCommandEnvironment(os.Environ(), env)
 	command.Stdin = stdin
-	command.Stdout = stdout
-	command.Stderr = stderr
-	runErr := command.Run()
-	return errors.Join(runErr, processController.finish())
+	if err := command.Start(); err != nil {
+		return errors.Join(err, processController.finish())
+	}
+	if err := outputs.childStarted(); err != nil {
+		_ = processController.kill(command)
+		_ = command.Wait()
+		return errors.Join(err, processController.finish())
+	}
+	stdoutDone, stderrDone := outputs.copyTo(stdout, stderr)
+	if err := processController.afterStart(command); err != nil {
+		_ = processController.kill(command)
+		waitErr := command.Wait()
+		cleanupErr := processController.finish()
+		copyErr := outputs.waitCopies(stdoutDone, stderrDone)
+		return errors.Join(err, waitErr, cleanupErr, copyErr)
+	}
+	waitErr := command.Wait()
+	cleanupErr := processController.finish()
+	copyErr := outputs.waitCopies(stdoutDone, stderrDone)
+	return errors.Join(waitErr, cleanupErr, copyErr)
 }
 
 func NewRuntimeManager(managementRoot string, runner CommandRunner) *RuntimeManager {
@@ -128,6 +158,10 @@ func (m *RuntimeManager) ensureLocked(ctx context.Context, emit func(bughub.Brow
 	}
 	releaseLock, err := m.acquireInstallLock()
 	if err != nil {
+		if errors.Is(err, errLegacyRuntimeInstallLock) {
+			m.setLegacyInstallLockStatusLocked()
+			return RuntimePaths{}, fmt.Errorf("browser runtime install blocked by a legacy lock: %w", err)
+		}
 		if errors.Is(err, fs.ErrExist) {
 			m.status = RuntimeStatus{State: RuntimeInstalling, Version: browserRuntimeVersion, ErrorCode: "browser_runtime_install_in_progress", Message: "another Studio process is installing the browser runtime"}
 			return RuntimePaths{}, fmt.Errorf("browser runtime install is already in progress: %w", err)
@@ -247,6 +281,10 @@ func (m *RuntimeManager) Repair(ctx context.Context, emit func(bughub.BrowserPro
 	}
 	releaseLock, err := m.acquireInstallLock()
 	if err != nil {
+		if errors.Is(err, errLegacyRuntimeInstallLock) {
+			m.setLegacyInstallLockStatusLocked()
+			return RuntimePaths{}, KnownFailedRecoveryEffect(fmt.Errorf("browser runtime repair blocked by a legacy lock: %w", err))
+		}
 		if errors.Is(err, fs.ErrExist) {
 			m.status = RuntimeStatus{State: RuntimeInstalling, Version: browserRuntimeVersion, ErrorCode: "browser_runtime_install_in_progress", Message: "another Studio process is installing or repairing the browser runtime"}
 			return RuntimePaths{}, KnownFailedRecoveryEffect(fmt.Errorf("browser runtime repair is already in progress: %w", err))
@@ -311,6 +349,10 @@ func (m *RuntimeManager) currentDir() string {
 }
 
 func (m *RuntimeManager) lockPath() string {
+	return filepath.Join(m.runtimeRoot(), ".install-"+browserRuntimeVersion+".advisory-v2.lock")
+}
+
+func (m *RuntimeManager) legacyLockPath() string {
 	return filepath.Join(m.runtimeRoot(), ".install-"+browserRuntimeVersion+".lock")
 }
 
@@ -325,7 +367,23 @@ func (m *RuntimeManager) pathsFor(root string) RuntimePaths {
 }
 
 func (m *RuntimeManager) acquireInstallLock() (func() error, error) {
-	return acquireRuntimeAdvisoryLock(m.lockPath())
+	release, err := acquireRuntimeAdvisoryLock(m.lockPath())
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureRuntimeInstallCompatibilityMarker(m.legacyLockPath()); err != nil {
+		return nil, errors.Join(err, release())
+	}
+	return release, nil
+}
+
+func (m *RuntimeManager) setLegacyInstallLockStatusLocked() {
+	m.status = RuntimeStatus{
+		State:     RuntimeInstalling,
+		Version:   browserRuntimeVersion,
+		ErrorCode: "browser_runtime_legacy_install_lock",
+		Message:   "a legacy browser runtime install lock is present; manual removal is required after confirming no older Studio is running",
+	}
 }
 
 func mergeCommandEnvironment(base, overrides []string) []string {

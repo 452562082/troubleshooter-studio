@@ -1224,21 +1224,37 @@ func (nodeWorkerRunner) Run(ctx context.Context, paths RuntimePaths, request wor
 		return workerResult{}, err
 	}
 	command := exec.CommandContext(ctx, "node", paths.WorkerPath, "--mode", request.Mode)
-	processController := configureWorkerProcess(command)
+	processController, err := configureWorkerProcess(command)
+	if err != nil {
+		return workerResult{}, err
+	}
+	outputs, err := attachOwnedCommandOutputs(command)
+	if err != nil {
+		return workerResult{}, errors.Join(err, processController.finish())
+	}
+	defer outputs.closeAll()
+	stdinRead, stdinWrite, err := os.Pipe()
+	if err != nil {
+		return workerResult{}, errors.Join(err, processController.finish())
+	}
+	defer stdinRead.Close()
+	defer stdinWrite.Close()
 	command.Dir = paths.Root
 	command.Env = mergeCommandEnvironment(os.Environ(), []string{"PLAYWRIGHT_BROWSERS_PATH=" + paths.BrowsersPath})
-	command.Stdin = bytes.NewReader(append(encoded, '\n'))
-	stdout, err := command.StdoutPipe()
-	if err != nil {
-		return workerResult{}, err
-	}
-	stderr, err := command.StderrPipe()
-	if err != nil {
-		return workerResult{}, err
-	}
+	command.Stdin = stdinRead
 	if err := command.Start(); err != nil {
-		return workerResult{}, err
+		return workerResult{}, errors.Join(err, processController.finish())
 	}
+	if err := errors.Join(outputs.childStarted(), stdinRead.Close()); err != nil {
+		_ = processController.kill(command)
+		_ = command.Wait()
+		return workerResult{}, errors.Join(err, processController.finish())
+	}
+	stdinDone := make(chan error, 1)
+	go func() {
+		_, writeErr := io.Copy(stdinWrite, bytes.NewReader(append(encoded, '\n')))
+		stdinDone <- errors.Join(writeErr, stdinWrite.Close())
+	}()
 	var killOnce sync.Once
 	kill := func() {
 		killOnce.Do(func() {
@@ -1247,21 +1263,29 @@ func (nodeWorkerRunner) Run(ctx context.Context, paths RuntimePaths, request wor
 	}
 	stdoutDone := make(chan workerStdoutRead, 1)
 	go func() {
-		stdoutDone <- readBoundedWorkerStdout(stdout, kill)
+		stdoutDone <- readBoundedWorkerStdout(outputs.stdoutRead, kill)
 	}()
 	stderrDone := make(chan error, 1)
 	go func() {
-		stderrDone <- consumeBoundedWorkerStderr(stderr, emit, kill)
+		stderrDone <- consumeBoundedWorkerStderr(outputs.stderrRead, emit, kill)
 	}()
-	stdoutResult := <-stdoutDone
-	stderrErr := <-stderrDone
+	if err := processController.afterStart(command); err != nil {
+		kill()
+		waitErr := command.Wait()
+		cleanupErr := processController.finish()
+		stdoutResult, stderrErr := waitWorkerOutputDrains(outputs, stdoutDone, stderrDone)
+		stdinErr := <-stdinDone
+		return workerResult{}, errors.Join(err, waitErr, cleanupErr, stdoutResult.err, stderrErr, stdinErr)
+	}
 	waitErr := command.Wait()
 	processCleanupErr := processController.finish()
+	stdoutResult, stderrErr := waitWorkerOutputDrains(outputs, stdoutDone, stderrDone)
+	stdinErr := <-stdinDone
 	if errors.Is(stdoutResult.err, ErrBrowserWorkerOutputTooLarge) || errors.Is(stderrErr, ErrBrowserWorkerOutputTooLarge) {
 		return workerResult{}, ErrBrowserWorkerOutputTooLarge
 	}
-	if waitErr != nil || stdoutResult.err != nil || stderrErr != nil {
-		return workerResult{}, errors.Join(waitErr, stdoutResult.err, stderrErr, processCleanupErr)
+	if waitErr != nil || stdoutResult.err != nil || stderrErr != nil || stdinErr != nil {
+		return workerResult{}, errors.Join(waitErr, stdoutResult.err, stderrErr, stdinErr, processCleanupErr)
 	}
 	if processCleanupErr != nil {
 		return workerResult{}, processCleanupErr
@@ -1276,4 +1300,24 @@ func (nodeWorkerRunner) Run(ctx context.Context, paths RuntimePaths, request wor
 		return workerResult{}, err
 	}
 	return result, nil
+}
+
+func waitWorkerOutputDrains(outputs *ownedCommandOutputs, stdoutDone <-chan workerStdoutRead, stderrDone <-chan error) (workerStdoutRead, error) {
+	timer := time.NewTimer(commandOutputDrainTimeout)
+	defer timer.Stop()
+	timeout := timer.C
+	var stdoutResult workerStdoutRead
+	var stderrErr error
+	for stdoutDone != nil || stderrDone != nil {
+		select {
+		case stdoutResult = <-stdoutDone:
+			stdoutDone = nil
+		case stderrErr = <-stderrDone:
+			stderrDone = nil
+		case <-timeout:
+			_ = outputs.closeReaders()
+			timeout = nil
+		}
+	}
+	return stdoutResult, stderrErr
 }

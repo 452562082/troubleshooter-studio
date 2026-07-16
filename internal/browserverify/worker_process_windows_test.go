@@ -18,7 +18,11 @@ import (
 func TestConfigureWorkerProcessUsesKillOnCloseJobWrapper(t *testing.T) {
 	command := exec.CommandContext(context.Background(), "cmd.exe", "/c", "exit", "0")
 	originalPath := command.Path
-	configureWorkerProcess(command)
+	controller, err := configureWorkerProcess(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.finish()
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -26,8 +30,71 @@ func TestConfigureWorkerProcessUsesKillOnCloseJobWrapper(t *testing.T) {
 	if command.Path != executable {
 		t.Fatalf("wrapped command path = %q, want current executable %q", command.Path, executable)
 	}
-	if len(command.Args) < 3 || command.Args[1] != windowsJobWrapperArgument || command.Args[2] != originalPath {
+	if len(command.Args) < 4 || command.Args[1] != windowsJobWrapperArgument || command.Args[3] != originalPath {
 		t.Fatalf("wrapped command args = %q", command.Args)
+	}
+}
+
+func TestWindowsJobGateCancellationNeverLeavesTarget(t *testing.T) {
+	stages := []windowsProcessStage{
+		windowsProcessStageBeforeStart,
+		windowsProcessStageWrapperStarted,
+		windowsProcessStageWrapperAssigned,
+		windowsProcessStageTargetReleased,
+	}
+	for _, stage := range stages {
+		t.Run(string(stage), func(t *testing.T) {
+			markerPath := filepath.Join(t.TempDir(), "target-survived")
+			ctx, cancel := context.WithCancel(context.Background())
+			command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestWindowsGatedTargetHelper$")
+			command.Env = mergeCommandEnvironment(os.Environ(), []string{"TSHOOT_WINDOWS_GATED_TARGET_MARKER=" + markerPath})
+			command.Stdout = os.Stdout
+			command.Stderr = os.Stderr
+			controller, err := configureWorkerProcess(command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer controller.finish()
+			controller.stageHook = func(got windowsProcessStage) {
+				if got == stage {
+					cancel()
+					_ = controller.cancel(command)
+				}
+			}
+			if stage == windowsProcessStageBeforeStart {
+				controller.stageHook(stage)
+			}
+			startErr := command.Start()
+			if startErr == nil {
+				_ = controller.afterStart(command)
+				waitDone := make(chan error, 1)
+				go func() { waitDone <- command.Wait() }()
+				select {
+				case <-waitDone:
+				case <-time.After(3 * time.Second):
+					_ = controller.kill(command)
+					t.Fatal("gated Windows wrapper did not exit after cancellation")
+				}
+			}
+			time.Sleep(1200 * time.Millisecond)
+			if _, err := os.Stat(markerPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("target survived cancellation at %s: %v", stage, err)
+			}
+		})
+	}
+}
+
+func TestWindowsGatedTargetHelper(t *testing.T) {
+	markerPath := os.Getenv("TSHOOT_WINDOWS_GATED_TARGET_MARKER")
+	if markerPath == "" {
+		return
+	}
+	time.Sleep(time.Second)
+	if err := os.WriteFile(markerPath, []byte("alive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		time.Sleep(time.Hour)
 	}
 }
 

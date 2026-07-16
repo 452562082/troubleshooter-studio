@@ -6,64 +6,50 @@ import (
 	"errors"
 	"os"
 	"os/exec"
-	"sync"
 	"syscall"
 	"time"
 )
 
+const (
+	processGroupTerminationGrace = 2 * time.Second
+	processGroupPollInterval     = 20 * time.Millisecond
+)
+
 type workerProcessController struct {
-	mu           sync.Mutex
-	command      *exec.Cmd
-	stopHardKill chan struct{}
-	hardKillDone chan struct{}
-	stopOnce     sync.Once
+	command            *exec.Cmd
+	signalProcessGroup func(int, syscall.Signal) error
+	sleep              func(time.Duration)
+	grace              time.Duration
 }
 
-func configureWorkerProcess(command *exec.Cmd) *workerProcessController {
-	controller := &workerProcessController{command: command}
+func configureWorkerProcess(command *exec.Cmd) (*workerProcessController, error) {
+	controller := &workerProcessController{
+		command: command,
+		signalProcessGroup: func(processGroup int, signal syscall.Signal) error {
+			return syscall.Kill(-processGroup, signal)
+		},
+		sleep: time.Sleep,
+		grace: processGroupTerminationGrace,
+	}
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	command.Cancel = func() error {
-		if command.Process == nil {
-			return os.ErrProcessDone
-		}
-		processGroup := command.Process.Pid
-		if err := syscall.Kill(-processGroup, syscall.SIGTERM); err != nil {
-			if errors.Is(err, syscall.ESRCH) {
-				return os.ErrProcessDone
-			}
-			return err
-		}
-		controller.scheduleHardKill(processGroup)
-		return nil
-	}
-	return controller
+	command.Cancel = func() error { return controller.cancel(command) }
+	return controller, nil
 }
 
-func (controller *workerProcessController) scheduleHardKill(processGroup int) {
-	controller.mu.Lock()
-	defer controller.mu.Unlock()
-	if controller.hardKillDone != nil {
-		return
+func (*workerProcessController) afterStart(*exec.Cmd) error { return nil }
+
+func (controller *workerProcessController) cancel(command *exec.Cmd) error {
+	if command.Process == nil {
+		return os.ErrProcessDone
 	}
-	controller.stopHardKill = make(chan struct{})
-	controller.hardKillDone = make(chan struct{})
-	go func(stop <-chan struct{}, done chan<- struct{}) {
-		defer close(done)
-		timer := time.NewTimer(2 * time.Second)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-			_ = syscall.Kill(-processGroup, syscall.SIGKILL)
-		case <-stop:
-		}
-	}(controller.stopHardKill, controller.hardKillDone)
+	return controller.terminateProcessGroup(command.Process.Pid)
 }
 
 func (controller *workerProcessController) kill(command *exec.Cmd) error {
 	if command.Process == nil {
 		return os.ErrProcessDone
 	}
-	err := syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+	err := controller.processGroupSignal(command.Process.Pid, syscall.SIGKILL)
 	if errors.Is(err, syscall.ESRCH) {
 		return os.ErrProcessDone
 	}
@@ -74,42 +60,81 @@ func (controller *workerProcessController) finish() error {
 	if controller.command.Process == nil {
 		return nil
 	}
-	processGroup := controller.command.Process.Pid
-	groupErr := syscall.Kill(-processGroup, 0)
-	if errors.Is(groupErr, syscall.ESRCH) {
-		controller.stopScheduledHardKill()
+	err := controller.cleanupExitedProcessGroup(controller.command.Process.Pid)
+	if errors.Is(err, os.ErrProcessDone) {
 		return nil
 	}
-	var terminateErr error
-	controller.mu.Lock()
-	scheduled := controller.hardKillDone != nil
-	controller.mu.Unlock()
-	if !scheduled {
-		terminateErr = syscall.Kill(-processGroup, syscall.SIGTERM)
-		if errors.Is(terminateErr, syscall.ESRCH) {
-			return nil
-		}
-		controller.scheduleHardKill(processGroup)
-	}
-
-	controller.mu.Lock()
-	done := controller.hardKillDone
-	controller.mu.Unlock()
-	if err := syscall.Kill(-processGroup, 0); errors.Is(err, syscall.ESRCH) {
-		controller.stopScheduledHardKill()
-	}
-	<-done
-	if errors.Is(terminateErr, syscall.ESRCH) {
-		terminateErr = nil
-	}
-	return terminateErr
+	return err
 }
 
-func (controller *workerProcessController) stopScheduledHardKill() {
-	controller.mu.Lock()
-	stop := controller.stopHardKill
-	controller.mu.Unlock()
-	if stop != nil {
-		controller.stopOnce.Do(func() { close(stop) })
+// cleanupExitedProcessGroup runs only after the direct child has been reaped.
+// Any remaining members are descendants, so there is no reason to wait through
+// the graceful cancellation interval or schedule work after this call returns.
+func (controller *workerProcessController) cleanupExitedProcessGroup(processGroup int) error {
+	if err := controller.processGroupSignal(processGroup, 0); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
 	}
+	if err := controller.processGroupSignal(processGroup, syscall.SIGKILL); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	return nil
+}
+
+func (controller *workerProcessController) terminateProcessGroup(processGroup int) error {
+	if err := controller.processGroupSignal(processGroup, 0); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	if err := controller.processGroupSignal(processGroup, syscall.SIGTERM); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		return err
+	}
+	grace := controller.grace
+	if grace <= 0 {
+		grace = processGroupTerminationGrace
+	}
+	deadline := time.Now().Add(grace)
+	for time.Now().Before(deadline) {
+		remaining := time.Until(deadline)
+		pause := processGroupPollInterval
+		if remaining < pause {
+			pause = remaining
+		}
+		controller.processGroupSleep(pause)
+		if err := controller.processGroupSignal(processGroup, 0); err != nil {
+			if errors.Is(err, syscall.ESRCH) {
+				return nil
+			}
+			return err
+		}
+	}
+	if err := controller.processGroupSignal(processGroup, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
+}
+
+func (controller *workerProcessController) processGroupSignal(processGroup int, signal syscall.Signal) error {
+	if controller.signalProcessGroup != nil {
+		return controller.signalProcessGroup(processGroup, signal)
+	}
+	return syscall.Kill(-processGroup, signal)
+}
+
+func (controller *workerProcessController) processGroupSleep(duration time.Duration) {
+	if controller.sleep != nil {
+		controller.sleep(duration)
+		return
+	}
+	time.Sleep(duration)
 }

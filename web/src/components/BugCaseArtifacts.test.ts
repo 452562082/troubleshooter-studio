@@ -5,6 +5,27 @@ import { getIncidentArtifactPreview, saveIncidentArtifact, type IncidentCaseDeta
 import BugCaseArtifacts from './BugCaseArtifacts.vue'
 import artifactSource from './BugCaseArtifacts.vue?raw'
 
+const originalShowModal = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, 'showModal')
+const originalDialogClose = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, 'close')
+
+function installDialogStubs() {
+  const showModal = vi.fn(function (this: HTMLDialogElement) { this.setAttribute('open', '') })
+  const close = vi.fn(function (this: HTMLDialogElement) {
+    this.removeAttribute('open')
+    this.dispatchEvent(new Event('close'))
+  })
+  Object.defineProperty(HTMLDialogElement.prototype, 'showModal', { configurable: true, value: showModal })
+  Object.defineProperty(HTMLDialogElement.prototype, 'close', { configurable: true, value: close })
+  return { showModal, close }
+}
+
+function restoreDialogMethods() {
+  if (originalShowModal) Object.defineProperty(HTMLDialogElement.prototype, 'showModal', originalShowModal)
+  else delete (HTMLDialogElement.prototype as Partial<HTMLDialogElement>).showModal
+  if (originalDialogClose) Object.defineProperty(HTMLDialogElement.prototype, 'close', originalDialogClose)
+  else delete (HTMLDialogElement.prototype as Partial<HTMLDialogElement>).close
+}
+
 vi.mock('../lib/bridge/bugWorkflow', async importOriginal => ({
   ...(await importOriginal<typeof import('../lib/bridge/bugWorkflow')>()),
   getIncidentArtifactPreview: vi.fn(),
@@ -15,7 +36,10 @@ beforeEach(() => {
   vi.mocked(getIncidentArtifactPreview).mockReset().mockResolvedValue({ artifact_id: 'evidence-1', mime_type: 'image/png', base64_data: 'iVBORw0KGgo=', size: 8 })
   vi.mocked(saveIncidentArtifact).mockReset().mockResolvedValue(true)
 })
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => {
+  restoreDialogMethods()
+  vi.restoreAllMocks()
+})
 
 const detail: IncidentCaseDetail = {
   case: { id: 'case-1', bug_id: 'bug-1', source: 'zentao', system_id: 'base', environment: 'test', status: 'waiting_deployment', cycle_number: 1, current_attempt_id: 'fix-1', selected_bot_key: 'base|codex', version: 9, created_at: '', updated_at: '' },
@@ -44,6 +68,7 @@ describe('BugCaseArtifacts', () => {
   })
 
   it('previews screenshots from safe bytes and never exposes artifact paths in text or DOM URLs', async () => {
+    const dialogMethods = installDialogStubs()
     const privatePath = detail.artifacts[0].path_or_reference
     const wrapper = mount(BugCaseArtifacts, { props: { detail } })
     await flushPromises()
@@ -56,9 +81,62 @@ describe('BugCaseArtifacts', () => {
 
     await wrapper.get('[data-artifact-preview="evidence-1"]').trigger('click')
     const dialog = wrapper.get('dialog[open]')
+    expect(dialogMethods.showModal).toHaveBeenCalledTimes(1)
     expect(dialog.attributes('aria-modal')).toBe('true')
     expect(dialog.attributes('aria-labelledby')).toBeTruthy()
     expect(dialog.get('img').attributes('src')).toBe('data:image/png;base64,iVBORw0KGgo=')
+  })
+
+  it('opens screenshots in the modal top layer, handles cancel, and restores thumbnail focus', async () => {
+    const dialogMethods = installDialogStubs()
+    const wrapper = mount(BugCaseArtifacts, { attachTo: document.body, props: { detail } })
+    await flushPromises()
+    const thumbnail = wrapper.get<HTMLButtonElement>('[data-artifact-preview="evidence-1"]')
+
+    await thumbnail.trigger('click')
+    await wrapper.vm.$nextTick()
+    const dialog = wrapper.get<HTMLDialogElement>('dialog')
+    expect(dialogMethods.showModal).toHaveBeenCalledWith()
+    expect(dialog.element.open).toBe(true)
+    expect(document.activeElement).toBe(dialog.get<HTMLButtonElement>('[data-dialog-close]').element)
+
+    await dialog.trigger('cancel')
+    await wrapper.vm.$nextTick()
+    expect(dialogMethods.close).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('dialog').exists()).toBe(false)
+    expect(document.activeElement).toBe(thumbnail.element)
+    wrapper.unmount()
+  })
+
+  it('fails locally when the runtime has no modal dialog support', async () => {
+    delete (HTMLDialogElement.prototype as Partial<HTMLDialogElement>).showModal
+    const wrapper = mount(BugCaseArtifacts, { attachTo: document.body, props: { detail } })
+    await flushPromises()
+    const thumbnail = wrapper.get<HTMLButtonElement>('[data-artifact-preview="evidence-1"]')
+
+    await thumbnail.trigger('click')
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('dialog').exists()).toBe(false)
+    expect(wrapper.get('[data-artifact-id="evidence-1"]').text()).toContain('当前环境无法打开截图预览')
+    expect(document.activeElement).toBe(thumbnail.element)
+    wrapper.unmount()
+  })
+
+  it('closes an open modal through the dialog API when Case detail changes', async () => {
+    const dialogMethods = installDialogStubs()
+    const wrapper = mount(BugCaseArtifacts, { attachTo: document.body, props: { detail } })
+    await flushPromises()
+    await wrapper.get('[data-artifact-preview="evidence-1"]').trigger('click')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get<HTMLDialogElement>('dialog').element.open).toBe(true)
+
+    await wrapper.setProps({ detail: { ...detail, case: { ...detail.case, id: 'case-2' } } })
+    await wrapper.vm.$nextTick()
+
+    expect(dialogMethods.close).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('dialog').exists()).toBe(false)
+    wrapper.unmount()
   })
 
   it('keeps screenshot preview failures local to their card', async () => {

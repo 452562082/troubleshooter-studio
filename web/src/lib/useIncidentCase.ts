@@ -1,6 +1,6 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { EventsOn } from '../../wailsjs/runtime/runtime'
-import { getIncidentCase, listIncidentCases, normalizeIncidentCaseEvent, type CaseStatus, type IncidentCase, type IncidentCaseDetail, type IncidentCaseEventPayload, type IncidentPhaseEvent, type Phase } from './bridge/bugWorkflow'
+import { getIncidentCase, incidentBrowserProgressCodes, listIncidentCases, normalizeIncidentCaseEvent, type CaseStatus, type IncidentCase, type IncidentCaseDetail, type IncidentCaseEventPayload, type IncidentPhaseEvent, type Phase } from './bridge/bugWorkflow'
 
 type Dependencies = {
   listCases?: () => Promise<IncidentCase[]>
@@ -12,7 +12,9 @@ const errorMessage = (error: unknown) => error instanceof Error ? error.message 
 
 export const terminalCaseStatuses = new Set<CaseStatus>(['fixed_verified', 'legacy_archived', 'reset_archived'])
 const browserRunningCaseStatuses = new Set<CaseStatus>(['validating', 'regression_validating'])
+const browserProgressCodeAllowlist = new Set<string>(incidentBrowserProgressCodes)
 const maxPhaseEventsPerAttempt = 100
+const maxBrowserProgressStep = 100
 
 export function casesForBug(cases: IncidentCase[], bugID: string): IncidentCase[] {
   return cases
@@ -95,29 +97,43 @@ export function createIncidentCaseController(dependencies: Dependencies = {}) {
     return commitSnapshot(snapshot)
   }
 
-  function appendPhaseEvent(snapshot: IncidentCaseDetail, event?: IncidentPhaseEvent) {
-    if (!event || !browserRunningCaseStatuses.has(snapshot.case.status)) return
-    const attemptID = String(event.meta.attempt_id ?? snapshot.case.current_attempt_id ?? '').trim()
-    if (!attemptID || attemptID !== snapshot.case.current_attempt_id) return
-    const identity = [
-      event.at || '',
-      event.type || '',
-      event.message || '',
-      String(event.meta.browser_code ?? ''),
-      String(event.meta.action_id ?? ''),
-    ].join('\u001f')
+  function applyCase(incident: IncidentCase) {
+    upsertCase(incident)
+    const current = detail.value
+    if (!current || current.case.id !== incident.id || current.case.version > incident.version) return false
+    const snapshot = { ...current, case: incident }
+    reconcilePhaseEvents(snapshot)
+    detail.value = snapshot
+    return true
+  }
+
+  function appendPhaseEvent(payloadCaseID: string, event?: IncidentPhaseEvent) {
+    const current = detail.value
+    if (!current || !event || event.type !== 'browser_progress' || !browserRunningCaseStatuses.has(current.case.status)) return
+    if (payloadCaseID !== current.case.id || event.meta.case_id !== current.case.id || event.meta.attempt_id !== current.case.current_attempt_id) return
+    const code = typeof event.meta.browser_code === 'string' ? event.meta.browser_code : ''
+    if (!browserProgressCodeAllowlist.has(code)) return
+    const hasCurrent = event.meta.current !== undefined
+    const hasTotal = event.meta.total !== undefined
+    const validStep = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= maxBrowserProgressStep
+    if (hasCurrent !== hasTotal || hasCurrent && (!validStep(event.meta.current) || !validStep(event.meta.total) || Number(event.meta.current) > Number(event.meta.total))) return
+    const attemptID = current.case.current_attempt_id
+    const safeEvent: IncidentPhaseEvent = {
+      type: 'browser_progress',
+      meta: {
+        case_id: current.case.id,
+        attempt_id: attemptID,
+        browser_code: code,
+        ...(hasCurrent ? { current: event.meta.current as number, total: event.meta.total as number } : {}),
+      },
+    }
+    const identity = [code, String(safeEvent.meta.current ?? ''), String(safeEvent.meta.total ?? '')].join('\u001f')
     const existing = phaseEvents.value[attemptID] || []
-    const duplicate = existing.some(item => [
-      item.at || '',
-      item.type || '',
-      item.message || '',
-      String(item.meta.browser_code ?? ''),
-      String(item.meta.action_id ?? ''),
-    ].join('\u001f') === identity)
+    const duplicate = existing.some(item => [String(item.meta.browser_code ?? ''), String(item.meta.current ?? ''), String(item.meta.total ?? '')].join('\u001f') === identity)
     if (duplicate) return
     phaseEvents.value = {
       ...phaseEvents.value,
-      [attemptID]: [...existing, event].slice(-maxPhaseEventsPerAttempt),
+      [attemptID]: [...existing, safeEvent].slice(-maxPhaseEventsPerAttempt),
     }
   }
 
@@ -126,11 +142,11 @@ export function createIncidentCaseController(dependencies: Dependencies = {}) {
       error.value = payload.error.message
       return
     }
+    if (!selectedCaseID.value || selectedCaseID.value === payload.case.id) appendPhaseEvent(payload.case.id, payload.phase_event)
     upsertCase(payload.case)
     if ((!selectedCaseID.value || selectedCaseID.value === payload.case.id) && !snapshotIsOlder(payload.snapshot)) {
       const current = detail.value
       if (current?.case.id !== payload.snapshot.case.id || current.case.version !== payload.snapshot.case.version) reconcilePhaseEvents(payload.snapshot)
-      appendPhaseEvent(payload.snapshot, payload.phase_event)
       commitSnapshot(payload.snapshot)
     }
   }
@@ -188,7 +204,7 @@ export function createIncidentCaseController(dependencies: Dependencies = {}) {
     return promise
   }
 
-  return { cases, detail, selectedCaseID, loading, error, phaseEvents, pending: computed(() => pendingKeys.value.size > 0), applySnapshot, acceptEvent, refreshCases, refreshDetail, selectCase, runOnce }
+  return { cases, detail, selectedCaseID, loading, error, phaseEvents, pending: computed(() => pendingKeys.value.size > 0), applyCase, applySnapshot, acceptEvent, refreshCases, refreshDetail, selectCase, runOnce }
 }
 
 export function useIncidentCase(dependencies: Dependencies = {}) {

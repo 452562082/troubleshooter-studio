@@ -32,7 +32,6 @@ export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrim
     const code = attempt?.error_code?.trim() || outputCode
     const browserGapLabels: Record<string, string> = {
       browser_locator_failed: '补充页面定位信息并重试',
-      browser_url_required: '补充页面地址并重试',
       browser_assertion_failed: '补充业务预期并重试',
     }
     if (browserGapLabels[code]) return { kind: 'supply_evidence', label: browserGapLabels[code] }
@@ -58,7 +57,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   refresh: []
   primary: [payload: { kind: CasePrimaryAction['kind']; input?: string; observedVersion?: string; observedCommits?: Record<string, string>; versionSource?: string; rootCauseAttemptID?: string; caseVersion?: number }]
-  browser: [action: 'login' | 'clear-session' | 'repair-runtime' | 'redeploy-validator']
+  browser: [action: 'login' | 'clear-session' | 'repair-runtime' | 'redeploy-validator' | 'edit-bug-url']
 }>()
 
 const dialogOpen = ref(false)

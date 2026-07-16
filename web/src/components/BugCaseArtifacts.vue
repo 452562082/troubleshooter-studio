@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, ref, useId, watch } from 'vue'
 import { getIncidentArtifactPreview, saveIncidentArtifact, type EvidenceArtifact, type IncidentCaseDetail, type PhaseAttempt } from '../lib/bridge/bugWorkflow'
 import BugStageAttemptOutput from './BugStageAttemptOutput.vue'
 
@@ -22,6 +22,10 @@ const previewURLs = ref<Record<string, string>>({})
 const previewErrors = ref<Record<string, string>>({})
 const saveStates = ref<Record<string, 'saving' | 'saved' | 'cancelled' | 'failed'>>({})
 const selectedPreviewID = ref('')
+const previewDialog = ref<HTMLDialogElement | null>(null)
+const previewCloseButton = ref<HTMLButtonElement | null>(null)
+const previewDialogTitleID = useId()
+let previewTrigger: HTMLButtonElement | null = null
 let previewGeneration = 0
 const legacyProjection = computed(() => props.detail.attempts.filter(attempt => attempt.phase === 'legacy').map(attempt => {
   const output = attempt.output_json || {}
@@ -42,9 +46,10 @@ function artifactLabel(kind: string): string {
 
 async function loadScreenshotPreviews(): Promise<void> {
   const generation = ++previewGeneration
+  if (selectedPreviewID.value) closePreview()
+  else previewTrigger = null
   previewURLs.value = {}
   previewErrors.value = {}
-  selectedPreviewID.value = ''
   const screenshots = props.detail.artifacts.filter(artifact => artifact.kind === 'screenshot')
   await Promise.all(screenshots.map(async artifact => {
     try {
@@ -58,12 +63,44 @@ async function loadScreenshotPreviews(): Promise<void> {
   }))
 }
 
-function openPreview(artifact: EvidenceArtifact) {
-  if (previewURLs.value[artifact.id]) selectedPreviewID.value = artifact.id
+async function openPreview(artifact: EvidenceArtifact, event: MouseEvent) {
+  if (!previewURLs.value[artifact.id]) return
+  previewTrigger = event.currentTarget instanceof HTMLButtonElement ? event.currentTarget : null
+  selectedPreviewID.value = artifact.id
+  await nextTick()
+  const dialog = previewDialog.value
+  if (!dialog || selectedPreviewID.value !== artifact.id) return
+  if (typeof dialog.showModal !== 'function') {
+    previewErrors.value = { ...previewErrors.value, [artifact.id]: '当前环境无法打开截图预览，请保存副本后查看。' }
+    finishPreviewClose()
+    return
+  }
+  try {
+    dialog.showModal()
+    previewCloseButton.value?.focus()
+  } catch {
+    previewErrors.value = { ...previewErrors.value, [artifact.id]: '当前环境无法打开截图预览，请保存副本后查看。' }
+    finishPreviewClose()
+  }
 }
 
 function closePreview() {
+  const dialog = previewDialog.value
+  if (dialog?.open && typeof dialog.close === 'function') {
+    dialog.close()
+    finishPreviewClose()
+    return
+  }
+  finishPreviewClose()
+}
+
+function finishPreviewClose() {
+  const trigger = previewTrigger
+  previewTrigger = null
   selectedPreviewID.value = ''
+  void nextTick(() => {
+    if (trigger?.isConnected) trigger.focus()
+  })
 }
 
 async function saveArtifact(artifact: EvidenceArtifact): Promise<void> {
@@ -194,7 +231,7 @@ watch(
         <span>{{ artifact.captured_at || '采集时间未知' }} · {{ artifact.environment || '环境未知' }} · {{ artifact.version || '版本未知' }}</span>
         <small v-if="artifact.request_id">request {{ artifact.request_id }}</small>
         <small v-if="artifact.trace_id">trace {{ artifact.trace_id }}</small>
-        <button v-if="artifact.kind === 'screenshot' && previewURLs[artifact.id]" class="screenshot-preview" type="button" :data-artifact-preview="artifact.id" :aria-label="`打开${artifactLabel(artifact.kind)}原图`" @click="openPreview(artifact)">
+        <button v-if="artifact.kind === 'screenshot' && previewURLs[artifact.id]" class="screenshot-preview" type="button" :data-artifact-preview="artifact.id" :aria-label="`打开${artifactLabel(artifact.kind)}原图`" @click="openPreview(artifact, $event)">
           <img :data-artifact-id="artifact.id" :src="previewURLs[artifact.id]" :alt="`${artifact.environment || '当前环境'}渲染截图缩略图`">
         </button>
         <p v-if="previewErrors[artifact.id]" class="artifact-local-error" role="status">{{ previewErrors[artifact.id] }}</p>
@@ -202,10 +239,10 @@ watch(
       </article>
     </section>
 
-    <dialog v-if="selectedPreview && previewURLs[selectedPreview.id]" class="screenshot-dialog" open aria-modal="true" aria-labelledby="screenshot-dialog-title" @cancel.prevent="closePreview">
+    <dialog v-if="selectedPreview && previewURLs[selectedPreview.id]" ref="previewDialog" class="screenshot-dialog" aria-modal="true" :aria-labelledby="previewDialogTitleID" @cancel.prevent="closePreview" @close="finishPreviewClose">
       <header>
-        <h2 id="screenshot-dialog-title">渲染截图预览</h2>
-        <button class="btn" type="button" aria-label="关闭截图预览" @click="closePreview">关闭</button>
+        <h2 :id="previewDialogTitleID">渲染截图预览</h2>
+        <button ref="previewCloseButton" class="btn" type="button" data-dialog-close aria-label="关闭截图预览" @click="closePreview">关闭</button>
       </header>
       <img :src="previewURLs[selectedPreview.id]" :alt="`${selectedPreview.environment || '当前环境'}渲染截图原图`">
     </dialog>

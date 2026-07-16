@@ -12,8 +12,8 @@ function attempt(errorCode = '', output: Record<string, unknown> = {}): PhaseAtt
 }
 
 const progress: IncidentPhaseEvent[] = [
-  { type: 'browser_progress', message: '准备验证浏览器', meta: { attempt_id: 'attempt-1', browser_code: 'runtime_preparing' } },
-  { type: 'browser_progress', message: '执行 2/4：切换到“用户”', meta: { attempt_id: 'attempt-1', browser_code: 'action_started', action_id: 'open-users', current: 2, total: 4 } },
+  { type: 'browser_progress', message: 'Cookie: sid=secret /Users/alice/private/trace.zip', raw: { Authorization: 'Bearer secret', storageState: 'secret' }, meta: { attempt_id: 'attempt-1', browser_code: 'browser_starting' } },
+  { type: 'browser_progress', message: 'password=hunter2', meta: { attempt_id: 'attempt-1', browser_code: 'browser_action_started', action_id: '/private/open-users', current: 2, total: 4 } },
 ]
 
 describe('BugBrowserProgress', () => {
@@ -21,9 +21,28 @@ describe('BugBrowserProgress', () => {
     const wrapper = mount(BugBrowserProgress, { props: { attempt: attempt(), events: progress, systemID: 'base', environment: 'test' } })
 
     expect(wrapper.text()).toContain('准备验证浏览器')
-    expect(wrapper.text()).toContain('执行 2/4：切换到“用户”')
+    expect(wrapper.text()).toContain('执行 2/4：开始页面操作')
     expect(wrapper.text()).not.toContain('Playwright 未安装，请提供 HAR')
     expect(wrapper.text()).not.toContain('/Users/alice/private/trace.zip')
+    expect(wrapper.text()).not.toMatch(/Cookie|Authorization|password|storageState|hunter2|open-users/)
+    expect(wrapper.html()).not.toMatch(/Cookie|Authorization|password|storageState|hunter2|private/)
+  })
+
+  it('drops unknown progress codes and never uses invalid numeric metadata as copy', () => {
+    const wrapper = mount(BugBrowserProgress, {
+      props: {
+        attempt: attempt(),
+        events: [
+          { type: 'agent_text', message: 'Cookie: secret', meta: { browser_code: 'browser_starting' } },
+          { type: 'browser_progress', message: 'Authorization: secret', meta: { browser_code: 'browser_password_hunter2', current: 1, total: 2 } },
+          { type: 'browser_progress', message: 'event type is not a progress code', meta: { browser_code: 'browser_progress' } },
+          { type: 'browser_progress', message: 'storageState secret', meta: { browser_code: 'browser_action_started', current: '/private/2', total: 4 } },
+        ],
+      },
+    })
+
+    expect(wrapper.text()).toBe('')
+    expect(wrapper.html()).not.toMatch(/Cookie|Authorization|password|storageState|private/)
   })
 
   it('offers visible login and session clearing without a credentials field', async () => {
@@ -60,7 +79,10 @@ describe('BugBrowserProgress', () => {
     expect(locator.find('[data-browser-action="repair-runtime"]').exists()).toBe(false)
 
     const business = mount(BugBrowserProgress, { props: { attempt: attempt('browser_url_required'), events: [], systemID: 'base', environment: 'test' } })
-    expect(business.text()).toContain('缺少可访问的页面地址')
+    expect(business.text()).toContain('来源工单')
+    expect(business.text()).toContain('frontend_url')
+    expect(business.text()).toContain('重新同步')
+    expect(business.get('[data-browser-action="edit-bug-url"]').text()).toBe('前往 Bug 收件箱重新同步')
     expect(business.find('[data-browser-action="repair-runtime"]').exists()).toBe(false)
   })
 })

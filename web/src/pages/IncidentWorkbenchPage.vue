@@ -655,22 +655,48 @@ async function refreshIncidentWorkflow() {
   }
 }
 
-type IncidentBrowserAction = 'login' | 'clear-session' | 'repair-runtime' | 'redeploy-validator'
+type IncidentBrowserAction = 'login' | 'clear-session' | 'repair-runtime' | 'redeploy-validator' | 'edit-bug-url'
 
 const browserKey = (kind: string, detail: NonNullable<typeof displayedDetail.value>) =>
   `${kind}:${detail.case.id}:${detail.case.current_attempt_id}:v${detail.case.version}`
+
+type IncidentBrowserContext = { bugID: string; caseID: string; attemptID: string; version: number }
+
+function isSameBrowserCase(context: IncidentBrowserContext): boolean {
+  return isCurrentBug(context.bugID) && displayedDetail.value?.case.id === context.caseID
+}
+
+function isSameBlockedBrowserAttempt(context: IncidentBrowserContext): boolean {
+  const current = displayedDetail.value?.case
+  return isSameBrowserCase(context) && current?.current_attempt_id === context.attemptID && current.version === context.version
+}
+
+async function refreshBrowserCaseBestEffort(context: IncidentBrowserContext): Promise<boolean> {
+  try {
+    return await refreshCaseSnapshotIfCurrent(context.caseID, () => isSameBrowserCase(context))
+  } catch {
+    if (!isSameBrowserCase(context)) return false
+    const warning = '浏览器操作已完成，但 Case 详情刷新失败；请手动刷新。'
+    workflowNotice.value = warning
+    toast.info(warning)
+    return false
+  }
+}
 
 async function handleIncidentBrowser(action: IncidentBrowserAction) {
   if (action === 'redeploy-validator') {
     await router.push('/bots')
     return
   }
+  if (action === 'edit-bug-url') {
+    const bugID = tickets.selectedID.value
+    if (bugID) await router.push({ path: '/bugs', query: { bug_id: bugID } })
+    return
+  }
   const detail = displayedDetail.value
   if (!detail?.case.current_attempt_id) return
   const incident = detail.case
-  const context = { bugID: tickets.selectedID.value, caseID: incident.id, attemptID: incident.current_attempt_id, version: incident.version }
-  const isSameCase = () => isCurrentBug(context.bugID) && displayedDetail.value?.case.id === context.caseID
-  const isSameBlockedAttempt = () => isSameCase() && displayedDetail.value?.case.current_attempt_id === context.attemptID && displayedDetail.value.case.version === context.version
+  const context: IncidentBrowserContext = { bugID: tickets.selectedID.value, caseID: incident.id, attemptID: incident.current_attempt_id, version: incident.version }
   const key = browserKey(action, detail)
   const input = {
     case_id: incident.id,
@@ -679,22 +705,26 @@ async function handleIncidentBrowser(action: IncidentBrowserAction) {
     idempotency_key: key,
     actor_id: 'desktop-user',
   }
+  incidentWorkflow.error.value = ''
+  workflowNotice.value = ''
   try {
     if (action === 'clear-session') {
       await incidentWorkflow.runOnce(key, () => clearIncidentBrowserSession(input))
-      if (!isSameBlockedAttempt()) return
-      await incidentWorkflow.refreshDetail(incident.id)
-      if (isSameCase()) toast.success('已清除此环境登录态')
+      if (!isSameBlockedBrowserAttempt(context)) return
+      const refreshed = await refreshBrowserCaseBestEffort(context)
+      if (refreshed && isSameBrowserCase(context)) toast.success('已清除此环境登录态')
       return
     }
     const updated = await incidentWorkflow.runOnce(key, () => action === 'login'
       ? openIncidentBrowserLogin(input)
       : repairIncidentBrowserRuntime(input))
-    if (!isSameCase()) return
-    await incidentWorkflow.refreshDetail(updated.id)
-    if (isSameCase()) toast.success(action === 'login' ? '登录完成，验证已继续' : '浏览器环境已修复，验证已继续')
+    if (updated.id !== context.caseID) throw new Error('browser recovery returned another Case')
+    if (!isSameBlockedBrowserAttempt(context)) return
+    if (!incidentWorkflow.applyCase(updated)) throw new Error('browser recovery returned stale Case state')
+    const refreshed = await refreshBrowserCaseBestEffort(context)
+    if (refreshed && isSameBrowserCase(context)) toast.success(action === 'login' ? '登录完成，验证已继续' : '浏览器环境已修复，验证已继续')
   } catch {
-    if (!isSameCase()) return
+    if (!isSameBlockedBrowserAttempt(context)) return
     const message = action === 'login'
       ? '无法完成验证浏览器登录，请刷新 Case 后重试。'
       : action === 'repair-runtime'

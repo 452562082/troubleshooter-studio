@@ -71,7 +71,6 @@ describe('BugCaseLifecycle', () => {
 
   it.each([
     ['browser_locator_failed', '补充页面定位信息并重试'],
-    ['browser_url_required', '补充页面地址并重试'],
     ['browser_assertion_failed', '补充业务预期并重试'],
   ])('keeps browser evidence gap %s distinct from system recovery', async (errorCode, expectedLabel) => {
     const snapshot = detail('waiting_evidence')
@@ -84,6 +83,21 @@ describe('BugCaseLifecycle', () => {
     await wrapper.get('.primary-action').trigger('click')
     expect(wrapper.find('#case-supplement').exists()).toBe(true)
     expect(wrapper.find('[data-browser-action="repair-runtime"]').exists()).toBe(false)
+  })
+
+  it('routes a missing frontend URL to Bug synchronization without generic evidence input', async () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'validation-url'
+    snapshot.attempts = [{ id: 'validation-url', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_url_required' }, parent_attempt_id: '', started_at: '', error_code: 'browser_url_required', error_message: 'raw URL error /private/path', usage: {} }]
+
+    expect(primaryActionFor(snapshot)).toBeUndefined()
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    expect(wrapper.find('.primary-action').exists()).toBe(false)
+    expect(wrapper.find('#case-supplement').exists()).toBe(false)
+    expect(wrapper.text()).toContain('来源工单')
+    expect(wrapper.text()).not.toContain('/private/path')
+    await wrapper.get('[data-browser-action="edit-bug-url"]').trigger('click')
+    expect(wrapper.emitted('browser')).toEqual([['edit-bug-url']])
   })
 
   it('explains that a failed regression carried fresh evidence into the next cycle', () => {

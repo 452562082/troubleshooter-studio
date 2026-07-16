@@ -127,6 +127,24 @@ describe('incident workflow bridge', () => {
     await expect(getIncidentArtifactPreview('case-1', 'shot-1')).rejects.toThrow(/PNG/)
   })
 
+  it.each([
+    ['string size', { artifact_id: 'shot-1', mime_type: 'image/png', base64_data: 'iVBORw0KGgo=', size: '8' }],
+    ['boolean size', { artifact_id: 'shot-1', mime_type: 'image/png', base64_data: 'iVBORw0KGgo=', size: true }],
+    ['zero size', { artifact_id: 'shot-1', mime_type: 'image/png', base64_data: 'iVBORw0KGgo=', size: 0 }],
+    ['oversize', { artifact_id: 'shot-1', mime_type: 'image/png', base64_data: 'iVBORw0KGgo=', size: 16 * 1024 * 1024 + 1 }],
+    ['whitespace', { artifact_id: 'shot-1', mime_type: 'image/png', base64_data: 'iVBORw0K Ggo=', size: 8 }],
+    ['URL alphabet', { artifact_id: 'shot-1', mime_type: 'image/png', base64_data: 'iVBORw0KGg-_', size: 8 }],
+    ['bad padding', { artifact_id: 'shot-1', mime_type: 'image/png', base64_data: 'iVBORw0KGgo===', size: 8 }],
+    ['invalid length', { artifact_id: 'shot-1', mime_type: 'image/png', base64_data: 'AAAAA', size: 8 }],
+    ['empty data', { artifact_id: 'shot-1', mime_type: 'image/png', base64_data: '', size: 8 }],
+    ['non-canonical pad bits', { artifact_id: 'shot-1', mime_type: 'image/png', base64_data: 'iVBORw0KGgp=', size: 8 }],
+    ['wrong signature', { artifact_id: 'shot-1', mime_type: 'image/png', base64_data: 'bm90LXBuZw==', size: 7 }],
+    ['size mismatch', { artifact_id: 'shot-1', mime_type: 'image/png', base64_data: 'iVBORw0KGgo=', size: 9 }],
+  ])('rejects %s PNG preview payloads', async (_name, payload) => {
+    ;(window as any).go = { main: { App: { GetIncidentArtifactPreview: vi.fn().mockResolvedValue(payload) } } }
+    await expect(getIncidentArtifactPreview('case-1', 'shot-1')).rejects.toThrow(/PNG/)
+  })
+
   it('forwards mutation inputs without coercing expected_version', async () => {
     const start = vi.fn().mockResolvedValue({ id: 'case-1', status: 'validating', version: 8 })
     ;(window as any).go = { main: { App: { StartIncidentCase: start } } }

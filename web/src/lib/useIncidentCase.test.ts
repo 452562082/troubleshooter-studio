@@ -47,6 +47,18 @@ describe('incident Case controller', () => {
     expect(controller.detail.value?.case.version).toBe(7)
   })
 
+  it('applies a returned Case state before a detail refresh is available', () => {
+    const controller = createIncidentCaseController()
+    const blocked = detail(7)
+    blocked.case.status = 'waiting_evidence'
+    controller.applySnapshot(blocked)
+
+    controller.applyCase({ ...blocked.case, status: 'validating', current_attempt_id: 'attempt-2', version: 8 })
+
+    expect(controller.detail.value?.case).toMatchObject({ status: 'validating', current_attempt_id: 'attempt-2', version: 8 })
+    expect(controller.cases.value[0]).toMatchObject({ status: 'validating', current_attempt_id: 'attempt-2', version: 8 })
+  })
+
   it('retains browser progress even when the Case snapshot version is unchanged', () => {
     const controller = createIncidentCaseController()
     const snapshot = detail(3)
@@ -60,13 +72,18 @@ describe('incident Case controller', () => {
       phase_event: {
         at: '2026-07-15T10:00:02Z',
         type: 'browser_progress',
-        message: '执行 2/4：切换用户页',
-        meta: { case_id: 'case-1', attempt_id: 'attempt-1', browser_code: 'action_started', action_id: 'open-users', current: 2, total: 4 },
+        message: 'Cookie: sid=secret /Users/alice/private/trace.zip',
+        raw: { Authorization: 'Bearer secret', password: 'hunter2', storageState: 'secret' },
+        meta: { case_id: 'case-1', attempt_id: 'attempt-1', browser_code: 'browser_action_started', action_id: 'password=hunter2', current: 2, total: 4 },
       },
     })
 
     expect(controller.phaseEvents.value['attempt-1']).toHaveLength(1)
-    expect(controller.phaseEvents.value['attempt-1'][0].message).toContain('执行 2/4')
+    expect(controller.phaseEvents.value['attempt-1'][0]).toEqual({
+      type: 'browser_progress',
+      meta: { case_id: 'case-1', attempt_id: 'attempt-1', browser_code: 'browser_action_started', current: 2, total: 4 },
+    })
+    expect(JSON.stringify(controller.phaseEvents.value)).not.toMatch(/Cookie|Authorization|password|storageState|private/)
     expect(controller.detail.value?.case.version).toBe(3)
   })
 
@@ -85,7 +102,7 @@ describe('incident Case controller', () => {
           at: `2026-07-15T10:${String(index).padStart(2, '0')}:00Z`,
           type: 'browser_progress',
           message: `执行 ${index}`,
-          meta: { attempt_id: 'attempt-1', browser_code: 'action_started', action_id: `action-${index}` },
+          meta: { case_id: 'case-1', attempt_id: 'attempt-1', browser_code: 'browser_action_started', action_id: `action-${index}`, current: index, total: 100 },
         },
       })
     }
@@ -97,13 +114,13 @@ describe('incident Case controller', () => {
         at: '2026-07-15T10:100:00Z',
         type: 'browser_progress',
         message: '执行 100',
-        meta: { attempt_id: 'attempt-1', browser_code: 'action_started', action_id: 'action-100' },
+        meta: { case_id: 'case-1', attempt_id: 'attempt-1', browser_code: 'browser_action_started', action_id: 'action-100', current: 100, total: 100 },
       },
     })
 
     expect(controller.phaseEvents.value['attempt-1']).toHaveLength(100)
-    expect(controller.phaseEvents.value['attempt-1'][0].message).toBe('执行 1')
-    expect(controller.phaseEvents.value['attempt-1'][99].message).toBe('执行 100')
+    expect(controller.phaseEvents.value['attempt-1'][0].meta.current).toBe(1)
+    expect(controller.phaseEvents.value['attempt-1'][99].meta.current).toBe(100)
   })
 
   it('clears stale browser progress for a new current attempt and when the Case stops running', () => {
@@ -111,14 +128,16 @@ describe('incident Case controller', () => {
     const first = detail(5)
     first.attempts = [{ id: 'attempt-1', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'running', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }]
     controller.applySnapshot(first)
-    controller.acceptEvent({ kind: 'snapshot', case: first.case, snapshot: first, phase_event: { type: 'browser_progress', message: '准备验证浏览器', meta: { attempt_id: 'attempt-1', browser_code: 'runtime_preparing' } } })
+    controller.acceptEvent({ kind: 'snapshot', case: first.case, snapshot: first, phase_event: { type: 'browser_progress', message: '准备验证浏览器', meta: { case_id: 'case-1', attempt_id: 'attempt-1', browser_code: 'browser_starting' } } })
     expect(controller.phaseEvents.value['attempt-1']).toHaveLength(1)
 
     const second = detail(6)
     second.case.current_attempt_id = 'attempt-2'
     second.attempts = [{ ...first.attempts[0], id: 'attempt-2' }]
-    controller.acceptEvent({ kind: 'snapshot', case: second.case, snapshot: second, phase_event: { type: 'browser_progress', message: '执行 1/2：打开页面', meta: { attempt_id: 'attempt-2', browser_code: 'action_started', action_id: 'goto' } } })
+    controller.acceptEvent({ kind: 'snapshot', case: second.case, snapshot: second, phase_event: { type: 'browser_progress', message: '执行 1/2：打开页面', meta: { case_id: 'case-1', attempt_id: 'attempt-2', browser_code: 'browser_action_started', action_id: 'goto', current: 1, total: 2 } } })
     expect(controller.phaseEvents.value['attempt-1']).toBeUndefined()
+    expect(controller.phaseEvents.value['attempt-2']).toBeUndefined()
+    controller.acceptEvent({ kind: 'snapshot', case: second.case, snapshot: second, phase_event: { type: 'browser_progress', message: '执行 1/2：打开页面', meta: { case_id: 'case-1', attempt_id: 'attempt-2', browser_code: 'browser_action_started', action_id: 'goto', current: 1, total: 2 } } })
     expect(controller.phaseEvents.value['attempt-2']).toHaveLength(1)
 
     const stopped = detail(7)
@@ -138,7 +157,7 @@ describe('incident Case controller', () => {
       kind: 'snapshot',
       case: selected.case,
       snapshot: selected,
-      phase_event: { type: 'browser_progress', message: '准备验证浏览器', meta: { attempt_id: 'attempt-1', browser_code: 'runtime_preparing' } },
+      phase_event: { type: 'browser_progress', message: '准备验证浏览器', meta: { case_id: selected.case.id, attempt_id: 'attempt-1', browser_code: 'browser_starting' } },
     })
 
     const background = detail(8, 'case-background')
@@ -147,10 +166,10 @@ describe('incident Case controller', () => {
       kind: 'snapshot',
       case: background.case,
       snapshot: background,
-      phase_event: { type: 'browser_progress', message: '后台 Case 进度', meta: { attempt_id: 'attempt-background', browser_code: 'runtime_preparing' } },
+      phase_event: { type: 'browser_progress', message: '后台 Case 进度', meta: { case_id: background.case.id, attempt_id: 'attempt-background', browser_code: 'browser_starting' } },
     })
 
-    expect(controller.phaseEvents.value['attempt-1']?.map(item => item.message)).toEqual(['准备验证浏览器'])
+    expect(controller.phaseEvents.value['attempt-1']?.map(item => item.meta.browser_code)).toEqual(['browser_starting'])
     expect(controller.phaseEvents.value['attempt-background']).toBeUndefined()
   })
 
@@ -164,7 +183,7 @@ describe('incident Case controller', () => {
       kind: 'snapshot',
       case: current.case,
       snapshot: current,
-      phase_event: { type: 'browser_progress', message: '执行 2/4：切换用户页', meta: { attempt_id: 'attempt-2', browser_code: 'action_started', action_id: 'open-users' } },
+      phase_event: { type: 'browser_progress', message: '执行 2/4：切换用户页', meta: { case_id: 'case-1', attempt_id: 'attempt-2', browser_code: 'browser_action_started', action_id: 'open-users', current: 2, total: 4 } },
     })
 
     const stale = detail(6)
@@ -172,7 +191,56 @@ describe('incident Case controller', () => {
     controller.acceptEvent({ kind: 'snapshot', case: stale.case, snapshot: stale })
 
     expect(controller.detail.value?.case.version).toBe(7)
-    expect(controller.phaseEvents.value['attempt-2']?.map(item => item.message)).toEqual(['执行 2/4：切换用户页'])
+    expect(controller.phaseEvents.value['attempt-2']?.map(item => item.meta.current)).toEqual([2])
+  })
+
+  it('appends eligible progress before rejecting an older attached snapshot', () => {
+    const controller = createIncidentCaseController()
+    const current = detail(7)
+    current.case.current_attempt_id = 'attempt-2'
+    controller.selectedCaseID.value = current.case.id
+    controller.applySnapshot(current)
+    const stale = detail(6)
+    stale.case.current_attempt_id = 'attempt-2'
+
+    controller.acceptEvent({
+      kind: 'snapshot',
+      case: stale.case,
+      snapshot: stale,
+      phase_event: {
+        type: 'browser_progress',
+        message: 'Authorization: Bearer secret',
+        meta: { case_id: 'case-1', attempt_id: 'attempt-2', browser_code: 'browser_action_completed', action_id: '/private/action', current: 2, total: 4 },
+      },
+    })
+
+    expect(controller.detail.value?.case.version).toBe(7)
+    expect(controller.phaseEvents.value['attempt-2']).toEqual([{
+      type: 'browser_progress',
+      meta: { case_id: 'case-1', attempt_id: 'attempt-2', browser_code: 'browser_action_completed', current: 2, total: 4 },
+    }])
+  })
+
+  it('drops unknown, non-browser, mismatched and non-running progress events', () => {
+    const controller = createIncidentCaseController()
+    const current = detail(7)
+    controller.selectedCaseID.value = current.case.id
+    controller.applySnapshot(current)
+    const rejected = [
+      { type: 'agent_text', message: 'Cookie: secret', meta: { case_id: 'case-1', attempt_id: 'attempt-1', browser_code: 'browser_starting' } },
+      { type: 'browser_progress', message: 'password=hunter2', meta: { case_id: 'case-1', attempt_id: 'attempt-1', browser_code: 'browser_password_hunter2' } },
+      { type: 'browser_progress', message: 'event type is not a progress code', meta: { case_id: 'case-1', attempt_id: 'attempt-1', browser_code: 'browser_progress' } },
+      { type: 'browser_progress', message: 'storageState secret', meta: { case_id: 'case-other', attempt_id: 'attempt-1', browser_code: 'browser_starting' } },
+      { type: 'browser_progress', message: '/private/old', meta: { case_id: 'case-1', attempt_id: 'attempt-old', browser_code: 'browser_starting' } },
+    ]
+    for (const phase_event of rejected) controller.acceptEvent({ kind: 'snapshot', case: current.case, snapshot: current, phase_event })
+    expect(controller.phaseEvents.value).toEqual({})
+
+    const stopped = detail(8)
+    stopped.case.status = 'waiting_evidence'
+    controller.applySnapshot(stopped)
+    controller.acceptEvent({ kind: 'snapshot', case: stopped.case, snapshot: stopped, phase_event: { type: 'browser_progress', message: 'raw', meta: { case_id: 'case-1', attempt_id: 'attempt-1', browser_code: 'browser_starting' } } })
+    expect(controller.phaseEvents.value).toEqual({})
   })
 
   it.each([

@@ -92,6 +92,20 @@ export interface IncidentPhaseEvent {
   meta: Record<string, unknown>
 }
 
+export const incidentBrowserProgressCodes = [
+  'browser_starting',
+  'browser_action_started',
+  'browser_action_completed',
+  'browser_login_opened',
+  'browser_login_completed',
+  'browser_runtime_installing',
+  'browser_runtime_ready',
+  'action_started',
+  'action_completed',
+  'runtime_preparing',
+] as const
+export type IncidentBrowserProgressCode = typeof incidentBrowserProgressCodes[number]
+
 export type IncidentCaseEventPayload = {
   kind: 'snapshot'
   case: IncidentCase
@@ -227,8 +241,16 @@ export async function getIncidentArtifactPreview(caseID: string, artifactID: str
   if (!isDesktop()) throw new Error(desktopOnly)
   const raw = record(await App.GetIncidentArtifactPreview(caseID, artifactID))
   const base64Data = typeof raw.base64_data === 'string' ? raw.base64_data : ''
-  const size = Number(raw.size)
-  if (raw.artifact_id !== artifactID || raw.mime_type !== 'image/png' || !Number.isSafeInteger(size) || size < 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64Data)) {
+  const size = raw.size
+  const maxPreviewBytes = 16 * 1024 * 1024
+  const canonicalBase64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
+  if (raw.artifact_id !== artifactID || raw.mime_type !== 'image/png' || typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0 || size > maxPreviewBytes || base64Data.length !== Math.ceil(size / 3) * 4 || !canonicalBase64.test(base64Data)) {
+    throw new Error('故障证据预览不是有效的 PNG 图片')
+  }
+  let decoded = ''
+  try { decoded = atob(base64Data) } catch { throw new Error('故障证据预览不是有效的 PNG 图片') }
+  const signature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+  if (decoded.length !== size || btoa(decoded) !== base64Data || signature.some((byte, index) => decoded.charCodeAt(index) !== byte)) {
     throw new Error('故障证据预览不是有效的 PNG 图片')
   }
   return { artifact_id: artifactID, mime_type: 'image/png', base64_data: base64Data, size }

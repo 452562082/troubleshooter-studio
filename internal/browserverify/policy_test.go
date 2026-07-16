@@ -222,7 +222,7 @@ func TestAllowedURLReparsesAndResolvesEveryCall(t *testing.T) {
 func TestValidatePlanRejectsProdInteractions(t *testing.T) {
 	for _, action := range []string{"click", "fill", "press", "select"} {
 		t.Run(action, func(t *testing.T) {
-			policy := bughub.BrowserSecurityPolicy{IsProd: true, AllowedOrigins: []string{"https://app.example.com"}}
+			policy := bughub.BrowserSecurityPolicy{IsProd: true, AllowedOrigins: []string{"https://app.example.com"}, ApplicationOrigins: []string{"https://app.example.com"}, StartOrigins: []string{"https://app.example.com"}}
 			plan := bughub.BrowserPlan{
 				Version:  1,
 				StartURL: "https://app.example.com",
@@ -236,7 +236,7 @@ func TestValidatePlanRejectsProdInteractions(t *testing.T) {
 }
 
 func TestValidatePlanAllowsOnlyReadOnlyProdActionsAndRechecksGoto(t *testing.T) {
-	policy := bughub.BrowserSecurityPolicy{IsProd: true, AllowedOrigins: []string{"https://app.example.com"}}
+	policy := bughub.BrowserSecurityPolicy{IsProd: true, AllowedOrigins: []string{"https://app.example.com"}, ApplicationOrigins: []string{"https://app.example.com"}, StartOrigins: []string{"https://app.example.com"}}
 	plan := bughub.BrowserPlan{
 		Version:  1,
 		StartURL: "https://app.example.com/start",
@@ -256,7 +256,7 @@ func TestValidatePlanAllowsOnlyReadOnlyProdActionsAndRechecksGoto(t *testing.T) 
 }
 
 func TestValidatePlanChecksEveryGotoOrigin(t *testing.T) {
-	policy := bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.example.com"}}
+	policy := bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.example.com"}, ApplicationOrigins: []string{"https://app.example.com"}, StartOrigins: []string{"https://app.example.com"}}
 	plan := bughub.BrowserPlan{
 		Version:  1,
 		StartURL: "https://app.example.com/start",
@@ -269,8 +269,27 @@ func TestValidatePlanChecksEveryGotoOrigin(t *testing.T) {
 	}
 }
 
+func TestValidatePlanRejectsAPIAndAuthenticationOriginsAsStartOwners(t *testing.T) {
+	policy := bughub.BrowserSecurityPolicy{
+		AllowedOrigins:     []string{"https://app.example.com", "https://api.example.com", "https://login.example.com"},
+		ApplicationOrigins: []string{"https://app.example.com"},
+		StartOrigins:       []string{"https://app.example.com"},
+		AuthOrigins:        []string{"https://login.example.com"},
+	}
+	for _, startURL := range []string{"https://api.example.com/v1", "https://login.example.com/sso"} {
+		plan := bughub.BrowserPlan{Version: 1, StartURL: startURL, Actions: []bughub.BrowserAction{{ID: "capture", Action: "screenshot"}}}
+		resolver := publicResolver("app.example.com", "api.example.com", "login.example.com")
+		if err := ValidatePlan(context.Background(), resolver, policy, plan); !errors.Is(err, ErrBrowserOriginNotAllowed) {
+			t.Fatalf("start URL %q error = %v, want ErrBrowserOriginNotAllowed", startURL, err)
+		}
+		if len(resolver.calls) != 0 {
+			t.Fatalf("start URL %q reached DNS before start-origin rejection: %+v", startURL, resolver.calls)
+		}
+	}
+}
+
 func TestValidatePlanLeavesNonProdActionSchemaToParser(t *testing.T) {
-	policy := bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.example.com"}}
+	policy := bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.example.com"}, ApplicationOrigins: []string{"https://app.example.com"}, StartOrigins: []string{"https://app.example.com"}}
 	plan := bughub.BrowserPlan{
 		Version:  1,
 		StartURL: "https://app.example.com/start",

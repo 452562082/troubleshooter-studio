@@ -381,12 +381,14 @@ func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) (
 	if err != nil {
 		return &verifierError{code: "browser_login_request_invalid", cause: errors.New("browser login origin is invalid")}
 	}
-	_, allowedApplicationOrigin, _, err := parseBrowserURL(canonicalApplicationOrigin)
-	if err != nil {
+	if _, _, _, err := parseBrowserURL(canonicalApplicationOrigin); err != nil {
 		return &verifierError{code: "browser_login_request_invalid", cause: errors.New("browser application origin is invalid")}
 	}
-	if _, allowed := normalizedOriginSet(request.Policy.AllowedOrigins)[allowedApplicationOrigin]; !allowed {
+	if err := requireConfiguredBrowserOrigin(canonicalApplicationURL, request.Policy.ApplicationOrigins); err != nil {
 		return &verifierError{code: "browser_login_request_invalid", cause: errors.New("browser login must start at a configured application origin")}
+	}
+	if err := requireConfiguredBrowserOrigin(canonicalApplicationURL, request.Policy.StartOrigins); err != nil {
+		return &verifierError{code: "browser_login_request_invalid", cause: errors.New("browser login must start at a configured start origin")}
 	}
 	if err := AllowedURL(loginCtx, v.resolver, request.Policy, canonicalApplicationURL); err != nil {
 		return &verifierError{code: "browser_login_request_invalid", cause: errors.New("browser application origin is blocked")}

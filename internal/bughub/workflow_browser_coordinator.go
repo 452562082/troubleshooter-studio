@@ -107,12 +107,15 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 			return browserCoordinatorFailure(result, "browser_validator_failed"), nil
 		}
 		plan, err = ParseBrowserPlan([]byte(planning.FinalYAML))
-		if err != nil || validateDurableBrowserPlan(plan) != nil {
+		if err != nil || validateDurableBrowserPlan(plan) != nil || validateBrowserPlanStartOrigin(plan, request.Policy) != nil {
 			return browserCoordinatorFailure(result, "browser_validator_plan_invalid"), nil
 		}
 		if err := persistBrowserCoordinatorPlan(request, browserPrimaryExecution, plan); err != nil {
 			return browserCoordinatorFailure(result, "browser_execution_interrupted"), nil
 		}
+	}
+	if validateBrowserPlanStartOrigin(plan, request.Policy) != nil {
+		return browserCoordinatorFailure(result, "browser_validator_plan_invalid"), nil
 	}
 
 	primary, err := c.executeBrowser(ctx, request, plan, browserPrimaryExecution)
@@ -131,7 +134,7 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 			return browserCoordinatorFailure(result, "browser_execution_interrupted"), nil
 		}
 		if repairFound {
-			if validateBrowserRepair(plan, primary.FailedActionID, repaired) != nil {
+			if validateBrowserPlanStartOrigin(repaired, request.Policy) != nil || validateBrowserRepair(plan, primary.FailedActionID, repaired) != nil {
 				return browserCoordinatorFailure(result, "browser_execution_interrupted"), nil
 			}
 		} else {
@@ -145,7 +148,7 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 			}
 			var parseErr error
 			repaired, parseErr = ParseBrowserPlan([]byte(repairing.FinalYAML))
-			if parseErr != nil || validateDurableBrowserPlan(repaired) != nil || validateBrowserRepair(plan, primary.FailedActionID, repaired) != nil {
+			if parseErr != nil || validateDurableBrowserPlan(repaired) != nil || validateBrowserPlanStartOrigin(repaired, request.Policy) != nil || validateBrowserRepair(plan, primary.FailedActionID, repaired) != nil {
 				return browserCoordinatorFailure(result, "browser_validator_plan_invalid"), nil
 			}
 			if err := persistBrowserCoordinatorPlan(request, browserRepairExecution, repaired); err != nil {
@@ -904,6 +907,27 @@ func canonicalBrowserURL(raw string) (string, string, error) {
 	}
 	origin := parsed.Scheme + "://" + parsed.Host
 	return parsed.String(), origin, nil
+}
+
+func validateBrowserPlanStartOrigin(plan BrowserPlan, policy BrowserSecurityPolicy) error {
+	_, startOrigin, err := canonicalBrowserURL(plan.StartURL)
+	if err != nil {
+		return err
+	}
+	for _, configuredOrigins := range [][]string{policy.StartOrigins, policy.ApplicationOrigins} {
+		allowed := false
+		for _, configured := range configuredOrigins {
+			_, origin, originErr := canonicalBrowserURL(strings.TrimSpace(configured))
+			if originErr == nil && origin == startOrigin {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return errors.New("browser start origin is not configured")
+		}
+	}
+	return nil
 }
 
 func browserPlannerPrompt(request BrowserCoordinatorRequest) string {

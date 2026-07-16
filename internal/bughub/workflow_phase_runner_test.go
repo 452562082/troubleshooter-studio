@@ -96,6 +96,15 @@ func (fn browserPolicyResolverFunc) ResolveBrowserPolicy(ctx context.Context, in
 	return fn(ctx, incident, bug)
 }
 
+func testBrowserApplicationPolicy(applicationOrigin string, additionalAllowedOrigins ...string) BrowserSecurityPolicy {
+	allowedOrigins := append([]string{applicationOrigin}, additionalAllowedOrigins...)
+	return BrowserSecurityPolicy{
+		AllowedOrigins:     allowedOrigins,
+		ApplicationOrigins: []string{applicationOrigin},
+		StartOrigins:       []string{applicationOrigin},
+	}
+}
+
 func verifiedBrowserArtifact(kind, path, environment string, content []byte) BrowserArtifactReference {
 	digest := sha256.Sum256(content)
 	return BrowserArtifactReference{Kind: kind, Path: path, Environment: environment, SHA256: fmt.Sprintf("%x", digest[:]), Size: int64(len(content))}
@@ -451,7 +460,7 @@ func TestAgentPhaseRunnerCoordinatesBrowserAndRegistersCurrentAttemptArtifacts(t
 		if got.ID != incident.ID || bug.FrontendURL == "" {
 			t.Fatalf("policy context incident=%+v bug=%+v", got, bug)
 		}
-		return BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.example.com"}}, nil
+		return testBrowserApplicationPolicy("https://app.example.com"), nil
 	}))
 	bug := Bug{ID: incident.BugID, SystemID: "stale-system", Env: "prod", FrontendURL: "https://app.example.com/users", Steps: "打开用户页"}
 	if err := runner.Start(context.Background(), attempt, bug, installedPhaseRunnerBot(t, "bot", "codex")); err != nil {
@@ -502,7 +511,7 @@ func TestAgentPhaseRunnerRejectsBrowserArtifactReplacementBeforeFreeze(t *testin
 	completed := make(chan CompleteAttemptCommand, 1)
 	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(_ context.Context, command CompleteAttemptCommand) error { completed <- command; return nil })
 	runner.SetBrowserVerifier(verifier, browserPolicyResolverFunc(func(context.Context, IncidentCase, Bug) (BrowserSecurityPolicy, error) {
-		return BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.example.com"}}, nil
+		return testBrowserApplicationPolicy("https://app.example.com"), nil
 	}))
 	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID, FrontendURL: "https://app.example.com/users"}, installedPhaseRunnerBot(t, "bot", "codex")); err != nil {
 		t.Fatal(err)
@@ -549,7 +558,7 @@ func TestAgentPhaseRunnerFreezesBrowserArtifactBeforeEvaluatorMutation(t *testin
 	completed := make(chan CompleteAttemptCommand, 1)
 	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(_ context.Context, command CompleteAttemptCommand) error { completed <- command; return nil })
 	runner.SetBrowserVerifier(verifier, browserPolicyResolverFunc(func(context.Context, IncidentCase, Bug) (BrowserSecurityPolicy, error) {
-		return BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.example.com"}}, nil
+		return testBrowserApplicationPolicy("https://app.example.com"), nil
 	}))
 	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID, FrontendURL: "https://app.example.com/users"}, installedPhaseRunnerBot(t, "bot", "codex")); err != nil {
 		t.Fatal(err)
@@ -588,7 +597,7 @@ func TestAgentPhaseRunnerBrowserStopsUseBoundedEnvelopeAndKeepFailureScreenshot(
 	completed := make(chan CompleteAttemptCommand, 1)
 	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(_ context.Context, command CompleteAttemptCommand) error { completed <- command; return nil })
 	runner.SetBrowserVerifier(verifier, browserPolicyResolverFunc(func(context.Context, IncidentCase, Bug) (BrowserSecurityPolicy, error) {
-		return BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.example.com"}}, nil
+		return testBrowserApplicationPolicy("https://app.example.com"), nil
 	}))
 	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID, Env: "test", FrontendURL: "https://app.example.com/users"}, installedPhaseRunnerBot(t, "bot", "codex")); err != nil {
 		t.Fatal(err)
@@ -619,7 +628,9 @@ func TestAgentPhaseRunnerBrowserLoginStopPersistsOriginalApplicationURLAndAuthen
 	completed := make(chan CompleteAttemptCommand, 1)
 	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(_ context.Context, command CompleteAttemptCommand) error { completed <- command; return nil })
 	runner.SetBrowserVerifier(verifier, browserPolicyResolverFunc(func(context.Context, IncidentCase, Bug) (BrowserSecurityPolicy, error) {
-		return BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.example.com", "https://login.example.com"}, AuthOrigins: []string{"https://login.example.com"}}, nil
+		policy := testBrowserApplicationPolicy("https://app.example.com", "https://login.example.com")
+		policy.AuthOrigins = []string{"https://login.example.com"}
+		return policy, nil
 	}))
 	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID, Env: "test", FrontendURL: "https://app.example.com/users"}, installedPhaseRunnerBot(t, "bot", "codex")); err != nil {
 		t.Fatal(err)
@@ -735,7 +746,7 @@ func TestAgentPhaseRunnerBrowserRouteIsDurableAcrossBugURLChanges(t *testing.T) 
 			firstPolicyCalls := 0
 			firstRunner.SetBrowserVerifier(firstVerifier, browserPolicyResolverFunc(func(context.Context, IncidentCase, Bug) (BrowserSecurityPolicy, error) {
 				firstPolicyCalls++
-				return BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.example.com"}}, nil
+				return testBrowserApplicationPolicy("https://app.example.com"), nil
 			}))
 			if err := firstRunner.Start(context.Background(), attempt, Bug{ID: incident.BugID, FrontendURL: test.initialURL}, installedPhaseRunnerBot(t, "bot", "codex")); err != nil {
 				t.Fatal(err)
@@ -760,7 +771,7 @@ func TestAgentPhaseRunnerBrowserRouteIsDurableAcrossBugURLChanges(t *testing.T) 
 			recoveryPolicyCalls := 0
 			recoveryRunner.SetBrowserVerifier(recoveryVerifier, browserPolicyResolverFunc(func(context.Context, IncidentCase, Bug) (BrowserSecurityPolicy, error) {
 				recoveryPolicyCalls++
-				return BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.example.com"}}, nil
+				return testBrowserApplicationPolicy("https://app.example.com"), nil
 			}))
 			if err := recoveryRunner.Start(context.Background(), attempt, Bug{ID: incident.BugID, FrontendURL: test.recoveryURL}, installedPhaseRunnerBot(t, "bot", "codex")); err != nil {
 				t.Fatal(err)
@@ -794,7 +805,7 @@ func TestAgentPhaseRunnerBrowserRouteRejectsPolicyChangeBeforeAgentOrHost(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy := canonicalBrowserSecurityPolicy(BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.example.com"}})
+	policy := canonicalBrowserSecurityPolicy(testBrowserApplicationPolicy("https://app.example.com"))
 	policySHA, err := browserPolicySHA256(policy)
 	if err != nil {
 		t.Fatal(err)
@@ -814,7 +825,7 @@ func TestAgentPhaseRunnerBrowserRouteRejectsPolicyChangeBeforeAgentOrHost(t *tes
 		hostCalls++
 		return BrowserVerificationResult{}, nil
 	}), browserPolicyResolverFunc(func(context.Context, IncidentCase, Bug) (BrowserSecurityPolicy, error) {
-		return BrowserSecurityPolicy{AllowedOrigins: []string{"https://changed.example.com"}}, nil
+		return testBrowserApplicationPolicy("https://changed.example.com"), nil
 	}))
 	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID, FrontendURL: "https://app.example.com/users"}, installedPhaseRunnerBot(t, "bot", "codex")); err != nil {
 		t.Fatal(err)
@@ -866,7 +877,7 @@ func TestAgentPhaseRunnerBrowserRouteRejectsBadOrMissingMarkerBeforeAgentOrHost(
 				hostCalls++
 				return BrowserVerificationResult{}, nil
 			}), browserPolicyResolverFunc(func(context.Context, IncidentCase, Bug) (BrowserSecurityPolicy, error) {
-				return BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.example.com"}}, nil
+				return testBrowserApplicationPolicy("https://app.example.com"), nil
 			}))
 			if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID, FrontendURL: "https://app.example.com/users"}, installedPhaseRunnerBot(t, "bot", "codex")); err != nil {
 				t.Fatal(err)
@@ -893,7 +904,7 @@ func TestAgentPhaseRunnerBrowserDurabilitySyncFailurePreventsAgentAndHost(t *tes
 		hostCalls++
 		return BrowserVerificationResult{}, nil
 	}), browserPolicyResolverFunc(func(context.Context, IncidentCase, Bug) (BrowserSecurityPolicy, error) {
-		return BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.example.com"}}, nil
+		return testBrowserApplicationPolicy("https://app.example.com"), nil
 	}))
 	startErr := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID, FrontendURL: "https://app.example.com/users"}, installedPhaseRunnerBot(t, "bot", "codex"))
 	if startErr == nil {

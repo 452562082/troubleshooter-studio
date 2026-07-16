@@ -312,7 +312,12 @@ func TestCaseBrowserPolicyResolverCanonicalizesConfiguredOrigins(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantAllowed := []string{"http://127.0.0.1:3000", "https://app.test", "https://login.test"}
-	if !reflect.DeepEqual(policy.AllowedOrigins, wantAllowed) || !reflect.DeepEqual(policy.PrivateOrigins, wantAllowed) || !reflect.DeepEqual(policy.AuthOrigins, []string{"https://login.test"}) || policy.IsProd {
+	wantApplication := []string{"https://app.test"}
+	if !reflect.DeepEqual(policy.AllowedOrigins, wantAllowed) ||
+		!reflect.DeepEqual(policy.ApplicationOrigins, wantApplication) ||
+		!reflect.DeepEqual(policy.StartOrigins, wantApplication) ||
+		!reflect.DeepEqual(policy.PrivateOrigins, wantAllowed) ||
+		!reflect.DeepEqual(policy.AuthOrigins, []string{"https://login.test"}) || policy.IsProd {
 		t.Fatalf("policy = %+v", policy)
 	}
 	for _, origin := range policy.AllowedOrigins {

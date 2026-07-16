@@ -148,7 +148,9 @@ func browserCoordinatorRequest(t *testing.T) BrowserCoordinatorRequest {
 		Bug:        Bug{ID: "bug-browser", SystemID: "shop", Env: "test", FrontendURL: "https://app.example.com/users", Steps: "打开用户页并查看汤圆"},
 		Bot:        BotRef{Key: "shop|codex#validator", SystemID: "shop", Target: "codex", Role: "validator", Env: "test", Path: t.TempDir()},
 		BasePrompt: "bounded validation scope",
-		Policy:     BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.example.com"}},
+		Policy: BrowserSecurityPolicy{
+			AllowedOrigins: []string{"https://app.example.com"}, ApplicationOrigins: []string{"https://app.example.com"}, StartOrigins: []string{"https://app.example.com"},
+		},
 		StagingDir: t.TempDir(),
 		FreezeArtifacts: func(context.Context, []BrowserArtifactReference) error {
 			return nil
@@ -333,6 +335,29 @@ func TestBrowserCoordinatorRejectsUnsafeDurableApplicationURLBeforeHost(t *testi
 			}
 			if result.ErrorCode != "browser_validator_plan_invalid" || verifier.Calls != 0 || strings.Contains(result.ErrorMessage, startURL) {
 				t.Fatalf("browser=%d result=%+v", verifier.Calls, result)
+			}
+		})
+	}
+}
+
+func TestBrowserCoordinatorRejectsAPIAndAuthenticationStartOriginsBeforeJournalAndHost(t *testing.T) {
+	for _, startURL := range []string{"https://api.example.com/v1/users", "https://login.example.com/sso"} {
+		t.Run(url.QueryEscape(startURL), func(t *testing.T) {
+			request := browserCoordinatorRequest(t)
+			request.Policy.AllowedOrigins = []string{"https://app.example.com", "https://api.example.com", "https://login.example.com"}
+			request.Policy.AuthOrigins = []string{"https://login.example.com"}
+			plan := strings.Replace(validBrowserPlanYAML(), "https://app.example.com/users", startURL, 1)
+			executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{{FinalYAML: plan}}}
+			verifier := &fakeBrowserVerifier{}
+			result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.ErrorCode != "browser_validator_plan_invalid" || verifier.Calls != 0 {
+				t.Fatalf("browser=%d result=%+v", verifier.Calls, result)
+			}
+			if _, err := os.Stat(filepath.Join(request.StagingDir, "browser-executions", "primary", "coordinator-plan.json")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("invalid start-origin plan was journaled: %v", err)
 			}
 		})
 	}

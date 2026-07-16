@@ -171,6 +171,8 @@ func validateCurrentBrowserRoutePolicy(ctx context.Context, route browserRouteJo
 func canonicalBrowserSecurityPolicy(policy BrowserSecurityPolicy) BrowserSecurityPolicy {
 	canonical := policy
 	canonical.AllowedOrigins = canonicalBrowserPolicyOrigins(policy.AllowedOrigins)
+	canonical.ApplicationOrigins = canonicalBrowserPolicyOrigins(policy.ApplicationOrigins)
+	canonical.StartOrigins = canonicalBrowserPolicyOrigins(policy.StartOrigins)
 	canonical.PrivateOrigins = canonicalBrowserPolicyOrigins(policy.PrivateOrigins)
 	canonical.AuthOrigins = canonicalBrowserPolicyOrigins(policy.AuthOrigins)
 	return canonical
@@ -267,7 +269,7 @@ func loadBrowserRouteJournal(root string, incident IncidentCase, attempt PhaseAt
 	if err != nil || digest != route.PolicySHA256 {
 		return browserRouteJournal{}, false, errors.New("browser route policy digest mismatch")
 	}
-	if !route.Assisted && (route.PolicyResolved || len(route.Policy.AllowedOrigins) != 0 || len(route.Policy.PrivateOrigins) != 0 || len(route.Policy.AuthOrigins) != 0 || route.Policy.IsProd) {
+	if !route.Assisted && (route.PolicyResolved || len(route.Policy.AllowedOrigins) != 0 || len(route.Policy.ApplicationOrigins) != 0 || len(route.Policy.StartOrigins) != 0 || len(route.Policy.PrivateOrigins) != 0 || len(route.Policy.AuthOrigins) != 0 || route.Policy.IsProd) {
 		return browserRouteJournal{}, false, errors.New("non-browser route contains a browser policy")
 	}
 	return route, true, nil

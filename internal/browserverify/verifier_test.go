@@ -103,8 +103,7 @@ func validBrowserRequest(t *testing.T) bughub.BrowserVerificationRequest {
 		Environment: "test",
 		Version:     "v1",
 		Policy: bughub.BrowserSecurityPolicy{
-			AllowedOrigins: []string{"https://app.test"},
-			AuthOrigins:    []string{"https://login.test"},
+			AllowedOrigins: []string{"https://app.test"}, ApplicationOrigins: []string{"https://app.test"}, StartOrigins: []string{"https://app.test"}, AuthOrigins: []string{"https://login.test"},
 		},
 		Plan: bughub.BrowserPlan{
 			Version:    1,
@@ -232,8 +231,7 @@ func TestHostVerifierLoginReplacesEncryptedSessionOnlyAfterWorkerSuccess(t *test
 	if err := verifier.Login(context.Background(), BrowserLoginRequest{
 		SystemID: "shop", Environment: "test", Origin: "https://app.test",
 		Policy: bughub.BrowserSecurityPolicy{
-			AllowedOrigins: []string{"https://app.test"},
-			AuthOrigins:    []string{"https://login.test"},
+			AllowedOrigins: []string{"https://app.test"}, ApplicationOrigins: []string{"https://app.test"}, StartOrigins: []string{"https://app.test"}, AuthOrigins: []string{"https://login.test"},
 		},
 		Timeout: time.Minute,
 	}); err != nil {
@@ -276,8 +274,7 @@ func TestHostVerifierLoginNavigatesToOriginalApplicationURLAndStoresApplicationO
 	if err := verifier.Login(context.Background(), BrowserLoginRequest{
 		SystemID: "shop", Environment: "test", ApplicationURL: "https://app.test/oauth/start?state=opaque", ApplicationOrigin: "https://app.test", LoginOrigin: "https://login.test",
 		Policy: bughub.BrowserSecurityPolicy{
-			AllowedOrigins: []string{"https://app.test", "https://login.test"},
-			AuthOrigins:    []string{"https://login.test"},
+			AllowedOrigins: []string{"https://app.test", "https://login.test"}, ApplicationOrigins: []string{"https://app.test"}, StartOrigins: []string{"https://app.test"}, AuthOrigins: []string{"https://login.test"},
 		},
 		Timeout: time.Minute,
 	}); err != nil {
@@ -301,6 +298,8 @@ func TestHostVerifierLoginRejectsUnsafeOrInconsistentApplicationURLBeforeWorker(
 		{name: "sensitive query key", applicationURL: "https://app.test/start?token=secret", applicationOrigin: "https://app.test"},
 		{name: "credential query value", applicationURL: "https://app.test/start?state=Bearer+credential", applicationOrigin: "https://app.test"},
 		{name: "origin mismatch", applicationURL: "https://app.test/start", applicationOrigin: "https://other.test"},
+		{name: "API origin cannot own session", applicationURL: "https://api.test/start", applicationOrigin: "https://api.test"},
+		{name: "identity provider cannot own session", applicationURL: "https://login.test/start", applicationOrigin: "https://login.test"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store := NewSessionStore(filepath.Join(t.TempDir(), "sessions"), newMemorySecretStore())
@@ -309,7 +308,9 @@ func TestHostVerifierLoginRejectsUnsafeOrInconsistentApplicationURLBeforeWorker(
 			verifier.SetSessionStore(store)
 			err := verifier.Login(context.Background(), BrowserLoginRequest{
 				SystemID: "shop", Environment: "test", ApplicationURL: test.applicationURL, ApplicationOrigin: test.applicationOrigin, LoginOrigin: "https://login.test",
-				Policy:  bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test", "https://login.test", "https://other.test"}, AuthOrigins: []string{"https://login.test"}},
+				Policy: bughub.BrowserSecurityPolicy{
+					AllowedOrigins: []string{"https://app.test", "https://api.test", "https://login.test", "https://other.test"}, ApplicationOrigins: []string{"https://app.test"}, StartOrigins: []string{"https://app.test"}, AuthOrigins: []string{"https://login.test"},
+				},
 				Timeout: time.Minute,
 			})
 			if err == nil || worker.Calls != 0 {
@@ -350,7 +351,7 @@ func TestHostVerifierLoginSerializesEmptyPlanCollectionsAsArrays(t *testing.T) {
 	verifier.SetSessionStore(store)
 	if err := verifier.Login(context.Background(), BrowserLoginRequest{
 		SystemID: "shop", Environment: "test", Origin: "https://app.test",
-		Policy:  bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test"}},
+		Policy:  bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test"}, ApplicationOrigins: []string{"https://app.test"}, StartOrigins: []string{"https://app.test"}},
 		Timeout: time.Minute,
 	}); err != nil {
 		t.Fatal(err)
@@ -381,7 +382,7 @@ func TestHostVerifierLoginFailurePreservesPreviousEncryptedSession(t *testing.T)
 	verifier.SetSessionStore(store)
 	err = verifier.Login(context.Background(), BrowserLoginRequest{
 		SystemID: "shop", Environment: "test", Origin: "https://app.test",
-		Policy:  bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test"}},
+		Policy:  bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test"}, ApplicationOrigins: []string{"https://app.test"}, StartOrigins: []string{"https://app.test"}},
 		Timeout: time.Minute,
 	})
 	if err == nil {
@@ -412,7 +413,7 @@ func TestHostVerifierLoginClassifiesWorkerFailureBeforeSessionPublication(t *tes
 	verifier.SetSessionStore(store)
 	err := verifier.Login(context.Background(), BrowserLoginRequest{
 		SystemID: "shop", Environment: "test", Origin: "https://app.test",
-		Policy: bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test"}}, Timeout: time.Minute,
+		Policy: bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test"}, ApplicationOrigins: []string{"https://app.test"}, StartOrigins: []string{"https://app.test"}}, Timeout: time.Minute,
 	})
 	if err == nil || RecoveryEffectOutcomeOf(err) != RecoveryEffectKnownFailedNoDurableEffect {
 		t.Fatalf("login error=%v outcome=%q", err, RecoveryEffectOutcomeOf(err))
@@ -442,7 +443,7 @@ func TestHostVerifierLoginLeavesPostPublishSessionSaveFailureUncertain(t *testin
 	verifier.SetSessionStore(store)
 	err := verifier.Login(context.Background(), BrowserLoginRequest{
 		SystemID: key.SystemID, Environment: key.Environment, Origin: key.Origin,
-		Policy: bughub.BrowserSecurityPolicy{AllowedOrigins: []string{key.Origin}}, Timeout: time.Minute,
+		Policy: bughub.BrowserSecurityPolicy{AllowedOrigins: []string{key.Origin}, ApplicationOrigins: []string{key.Origin}, StartOrigins: []string{key.Origin}}, Timeout: time.Minute,
 	})
 	if err == nil || RecoveryEffectOutcomeOf(err) != RecoveryEffectOutcomeUnknown {
 		t.Fatalf("login error=%v outcome=%q", err, RecoveryEffectOutcomeOf(err))
@@ -509,7 +510,7 @@ func TestHostVerifierLoginReportsPlaintextCleanupFailureOnEveryExitPath(t *testi
 			}
 			err = verifier.Login(ctx, BrowserLoginRequest{
 				SystemID: "shop", Environment: "test", Origin: "https://app.test",
-				Policy:  bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test"}},
+				Policy:  bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test"}, ApplicationOrigins: []string{"https://app.test"}, StartOrigins: []string{"https://app.test"}},
 				Timeout: time.Minute,
 			})
 			if err == nil || err.Error() != "browser_session_cleanup_failed: temporary browser session cleanup failed" {
@@ -604,7 +605,7 @@ func TestHostVerifierLoginRejectsWorkerArtifactsWithoutSavingState(t *testing.T)
 	verifier.SetSessionStore(store)
 	err := verifier.Login(context.Background(), BrowserLoginRequest{
 		SystemID: "shop", Environment: "test", Origin: "https://app.test",
-		Policy:  bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test"}},
+		Policy:  bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test"}, ApplicationOrigins: []string{"https://app.test"}, StartOrigins: []string{"https://app.test"}},
 		Timeout: time.Minute,
 	})
 	if err == nil {
@@ -631,7 +632,7 @@ func TestHostVerifierLoginTimeoutBoundsPolicyResolution(t *testing.T) {
 	started := time.Now()
 	err := verifier.Login(outer, BrowserLoginRequest{
 		SystemID: "shop", Environment: "test", Origin: "https://app.test",
-		Policy:  bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test"}},
+		Policy:  bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test"}, ApplicationOrigins: []string{"https://app.test"}, StartOrigins: []string{"https://app.test"}},
 		Timeout: 20 * time.Millisecond,
 	})
 	if err == nil {
@@ -1286,8 +1287,7 @@ document.getElementById('search').addEventListener('click', async () => {
 		CaseID: "smoke-case", CycleNumber: 1, AttemptID: "smoke-attempt",
 		SystemID: "smoke", Environment: "test", Version: "smoke-v1",
 		Policy: bughub.BrowserSecurityPolicy{
-			AllowedOrigins: []string{server.URL},
-			PrivateOrigins: []string{server.URL},
+			AllowedOrigins: []string{server.URL}, ApplicationOrigins: []string{server.URL}, StartOrigins: []string{server.URL}, PrivateOrigins: []string{server.URL},
 		},
 		Plan: bughub.BrowserPlan{
 			Version: 1, StartURL: server.URL,

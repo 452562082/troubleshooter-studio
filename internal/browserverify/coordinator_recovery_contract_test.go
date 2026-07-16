@@ -65,7 +65,7 @@ func durableCoordinatorRequest(t *testing.T) bughub.BrowserCoordinatorRequest {
 		Bug:        bughub.Bug{ID: "bug-durable-contract", SystemID: "shop", Env: "test", FrontendURL: "https://app.test/users"},
 		Bot:        bughub.BotRef{Key: "shop|codex#validator", SystemID: "shop", Target: "codex", Role: "validator", Env: "test"},
 		BasePrompt: "durable browser recovery contract",
-		Policy:     bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test"}},
+		Policy:     bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test"}, ApplicationOrigins: []string{"https://app.test"}, StartOrigins: []string{"https://app.test"}},
 		StagingDir: t.TempDir(),
 		FreezeArtifacts: func(context.Context, []bughub.BrowserArtifactReference) error {
 			return nil

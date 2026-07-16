@@ -59,10 +59,12 @@ type BrowserVerificationRequest struct {
 }
 
 type BrowserSecurityPolicy struct {
-	AllowedOrigins []string `json:"allowed_origins"`
-	PrivateOrigins []string `json:"private_origins"`
-	AuthOrigins    []string `json:"auth_origins"`
-	IsProd         bool     `json:"is_prod"`
+	AllowedOrigins     []string `json:"allowed_origins"`
+	ApplicationOrigins []string `json:"application_origins"`
+	StartOrigins       []string `json:"start_origins"`
+	PrivateOrigins     []string `json:"private_origins"`
+	AuthOrigins        []string `json:"auth_origins"`
+	IsProd             bool     `json:"is_prod"`
 }
 
 type BrowserProgress struct {

@@ -43,6 +43,12 @@ var browserMetadataHosts = map[string]struct{}{
 }
 
 func ValidatePlan(ctx context.Context, resolver IPResolver, policy bughub.BrowserSecurityPolicy, plan bughub.BrowserPlan) error {
+	if err := requireConfiguredBrowserOrigin(plan.StartURL, policy.StartOrigins); err != nil {
+		return err
+	}
+	if err := requireConfiguredBrowserOrigin(plan.StartURL, policy.ApplicationOrigins); err != nil {
+		return err
+	}
 	if err := AllowedURL(ctx, resolver, policy, plan.StartURL); err != nil {
 		return err
 	}
@@ -55,6 +61,17 @@ func ValidatePlan(ctx context.Context, resolver IPResolver, policy bughub.Browse
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+func requireConfiguredBrowserOrigin(rawURL string, configured []string) error {
+	_, origin, _, err := parseBrowserURL(rawURL)
+	if err != nil {
+		return fmt.Errorf("%w: invalid URL", ErrBrowserDestinationBlocked)
+	}
+	if _, allowed := normalizedOriginSet(configured)[origin]; !allowed {
+		return fmt.Errorf("%w: start or application origin", ErrBrowserOriginNotAllowed)
 	}
 	return nil
 }

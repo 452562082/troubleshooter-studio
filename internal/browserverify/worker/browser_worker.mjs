@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { realpathSync } from 'node:fs';
 import { Agent as HTTPAgent, createServer, request as createHTTPRequest } from 'node:http';
@@ -41,7 +41,10 @@ const METADATA_HOSTS = new Set([
   'metadata.tencentyun.internal',
 ]);
 const METADATA_ADDRESSES = new Set(['100.100.100.200', 'fd00:ec2::254']);
-const PROXY_CONNECT_TIMEOUT_MS = 30_000;
+const PROXY_CONNECT_TIMEOUT_MS = 10_000;
+const PROXY_RESOLVE_TIMEOUT_MS = 5_000;
+const PROXY_CONNECTION_STAGGER_MS = 50;
+const PROXY_AUTHENTICATE_HEADER = 'Basic realm="tshoot-browser-proxy"';
 const NETWORK_PROTOCOLS = new Set(['http:', 'https:', 'ws:', 'wss:']);
 const BROWSER_LAUNCH_ARGS = Object.freeze([
   '--disable-quic',
@@ -185,8 +188,8 @@ function normalizedAddress(rawAddress) {
 }
 
 function validatePolicy(policy) {
-  ownKeys(policy, new Set(['allowed_origins', 'private_origins', 'auth_origins', 'is_prod']), 'policy');
-  for (const field of ['allowed_origins', 'private_origins', 'auth_origins']) {
+  ownKeys(policy, new Set(['allowed_origins', 'application_origins', 'start_origins', 'private_origins', 'auth_origins', 'is_prod']), 'policy');
+  for (const field of ['allowed_origins', 'application_origins', 'start_origins', 'private_origins', 'auth_origins']) {
     if (!Array.isArray(policy?.[field])) throw new Error(`policy ${field} must be an array`);
     for (const origin of policy[field]) normalizeOrigin(origin);
   }
@@ -214,7 +217,11 @@ export function validateWorkerRequest(request) {
   ownKeys(plan, new Set(['version', 'start_url', 'actions', 'assertions']), 'plan');
   if (plan.version !== 1) throw new Error('plan version must be 1');
   const start = parseHTTPURL(plan.start_url).parsed;
+  const applicationOrigins = new Set(request.policy.application_origins.map(normalizeOrigin));
+  const startOrigins = new Set(request.policy.start_origins.map(normalizeOrigin));
   if (request.mode === 'login') {
+    if (!applicationOrigins.has(start.origin)) throw new Error('browser application origin is not configured');
+    if (!startOrigins.has(start.origin)) throw new Error('browser start origin is not configured');
     if (request.headless !== false) throw new Error('login browser must be visible');
     if (request.staging_dir !== '') throw new Error('login must not use evidence staging');
     if (!isAbsolute(requiredString(request.storage_state_path, 'storage_state_path'))) throw new Error('storage_state_path must be absolute');
@@ -226,10 +233,11 @@ export function validateWorkerRequest(request) {
         throw new Error('login application URL contains credential material');
       }
     }
-    const applicationOrigins = new Set(request.policy.allowed_origins.map(normalizeOrigin));
-    if (!applicationOrigins.has(start.origin)) throw new Error('login must start at a configured application URL');
     return;
   }
+
+  if (!startOrigins.has(start.origin)) throw new Error('browser start origin is not configured');
+  if (!applicationOrigins.has(start.origin)) throw new Error('browser application origin is not configured');
 
   if (!isAbsolute(requiredString(request.staging_dir, 'staging_dir'))) throw new Error('staging_dir must be absolute');
   if (request.storage_state_path !== undefined && !isAbsolute(requiredString(request.storage_state_path, 'storage_state_path'))) {
@@ -305,8 +313,46 @@ export async function assertAllowedURL(raw, policy, lookup = dnsLookup) {
   return (await resolvePinnedTarget(raw, policy, lookup, new Set(['http:', 'https:']))).parsed;
 }
 
-export async function resolvePinnedTarget(raw, policy, lookup = dnsLookup, allowedProtocols = NETWORK_PROTOCOLS) {
+function proxyClosingError() {
+  const error = new Error('browser proxy is closing');
+  error.code = 'ABORT_ERR';
+  return error;
+}
+
+function throwIfProxyClosing(signal) {
+  if (signal?.aborted) throw proxyClosingError();
+}
+
+async function boundedProxyOperation(operation, { signal, timeoutMs, timeoutMessage }) {
+  throwIfProxyClosing(signal);
+  return new Promise((resolveOperation, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      callback(value);
+    };
+    const abort = () => finish(reject, proxyClosingError());
+    const timer = setTimeout(() => finish(reject, new Error(timeoutMessage)), timeoutMs);
+    signal?.addEventListener('abort', abort, { once: true });
+    Promise.resolve(operation).then(
+      (value) => finish(resolveOperation, value),
+      (error) => finish(reject, error),
+    );
+  });
+}
+
+export async function resolvePinnedTarget(
+  raw,
+  policy,
+  lookup = dnsLookup,
+  allowedProtocols = NETWORK_PROTOCOLS,
+  { signal, resolveTimeoutMs = PROXY_RESOLVE_TIMEOUT_MS } = {},
+) {
   validatePolicy(policy);
+  throwIfProxyClosing(signal);
   const { parsed, host } = parseNetworkURL(raw, allowedProtocols);
   const policyOrigin = policyOriginForNetworkURL(parsed);
   const allowedOrigins = new Set([...policy.allowed_origins, ...policy.auth_origins].map(normalizeOrigin));
@@ -314,58 +360,164 @@ export async function resolvePinnedTarget(raw, policy, lookup = dnsLookup, allow
   const privateOrigins = new Set(policy.private_origins.map(normalizeOrigin));
   let addresses;
   if (isIP(host)) addresses = [{ address: host, family: isIP(host) }];
-  else addresses = await lookup(host, { all: true, verbatim: true });
+  else addresses = await boundedProxyOperation(
+    Promise.resolve().then(() => lookup(host, { all: true, verbatim: true })),
+    { signal, timeoutMs: resolveTimeoutMs, timeoutMessage: 'URL DNS resolution timed out' },
+  );
+  throwIfProxyClosing(signal);
   if (!Array.isArray(addresses) || addresses.length === 0) throw new Error('URL DNS resolution returned no addresses');
+  const validatedAddresses = [];
+  const seenAddresses = new Set();
   for (const answer of addresses) {
-    const classification = classifyAddress(answer.address);
+    const address = normalizedAddress(answer.address);
+    const family = isIP(address);
+    if (!family || answer.family !== undefined && Number(answer.family) !== family) throw new Error('URL invalid address is blocked');
+    const classification = classifyAddress(address);
     if (classification === 'metadata' || classification === 'link-local' || classification === 'non-routable' || classification === 'invalid') {
       throw new Error(`URL ${classification} address is blocked`);
     }
     if (classification === 'private' && !privateOrigins.has(policyOrigin)) {
       throw new Error('URL private address requires exact configured origin');
     }
+    const key = `${family}:${address}`;
+    if (!seenAddresses.has(key)) {
+      seenAddresses.add(key);
+      validatedAddresses.push({ address, family });
+    }
   }
-  const selected = addresses[0];
   const port = Number(parsed.port || (parsed.protocol === 'https:' || parsed.protocol === 'wss:' ? 443 : 80));
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('URL port is invalid');
+  throwIfProxyClosing(signal);
   return {
     parsed,
     host,
     port,
-    address: normalizedAddress(selected.address),
-    family: Number(selected.family) || isIP(selected.address),
+    addresses: validatedAddresses,
     policyOrigin,
   };
 }
 
-export async function dialPinnedTarget(target, dial = createNetworkConnection) {
+function happyEyeballsCandidates(addresses) {
+  if (!Array.isArray(addresses) || addresses.length === 0) return [];
+  const firstFamily = addresses[0].family;
+  const preferred = addresses.filter((candidate) => candidate.family === firstFamily);
+  const alternate = addresses.filter((candidate) => candidate.family !== firstFamily);
+  const ordered = [];
+  while (preferred.length > 0 || alternate.length > 0) {
+    if (preferred.length > 0) ordered.push(preferred.shift());
+    if (alternate.length > 0) ordered.push(alternate.shift());
+  }
+  return ordered;
+}
+
+export async function dialPinnedTarget(target, dial = createNetworkConnection, {
+  signal,
+  onSocket = () => {},
+  staggerMs = PROXY_CONNECTION_STAGGER_MS,
+  connectTimeoutMs = PROXY_CONNECT_TIMEOUT_MS,
+} = {}) {
+  const candidates = happyEyeballsCandidates(target.addresses);
+  if (candidates.length === 0 || !Number.isInteger(target.port) || target.port < 1 || target.port > 65535) {
+    throw new Error('browser proxy connection target is invalid');
+  }
+  if (!Number.isInteger(staggerMs) || staggerMs < 0 || !Number.isInteger(connectTimeoutMs) || connectTimeoutMs < 1) {
+    throw new Error('browser proxy connection limits are invalid');
+  }
+  throwIfProxyClosing(signal);
   return new Promise((resolveConnection, reject) => {
     let settled = false;
-    const socket = dial({ host: target.address, port: target.port, family: target.family });
-    const fail = (error) => {
+    let failures = 0;
+    let peerMismatch = false;
+    const sockets = new Set();
+    const timers = new Set();
+    const cleanup = (winner) => {
+      clearTimeout(timeout);
+      for (const timer of timers) clearTimeout(timer);
+      timers.clear();
+      signal?.removeEventListener('abort', abort);
+      for (const socket of sockets) {
+        if (socket !== winner) socket.destroy();
+      }
+    };
+    const failAll = (error) => {
       if (settled) return;
       settled = true;
-      socket.destroy();
-      reject(error instanceof Error ? error : new Error('proxy upstream connection failed'));
+      cleanup();
+      reject(error);
     };
-    socket.setTimeout?.(PROXY_CONNECT_TIMEOUT_MS, () => fail(new Error('proxy upstream connection timed out')));
-    socket.once('error', fail);
-    socket.once('connect', () => {
-      if (settled) return;
-      if (normalizedAddress(socket.remoteAddress) !== normalizedAddress(target.address) || Number(socket.remotePort) !== target.port) {
-        fail(new Error('proxy upstream peer did not match the pinned destination'));
+    const candidateFailed = (mismatch = false) => {
+      peerMismatch ||= mismatch;
+      failures += 1;
+      if (failures === candidates.length) {
+        failAll(new Error(peerMismatch
+          ? 'browser proxy connection failed because a pinned peer did not match'
+          : 'browser proxy connection failed'));
+      }
+    };
+    const abort = () => failAll(proxyClosingError());
+    signal?.addEventListener('abort', abort, { once: true });
+    const timeout = setTimeout(() => failAll(new Error('browser proxy connection timed out')), connectTimeoutMs);
+    const effectiveStaggerMs = candidates.length > 1
+      ? Math.min(staggerMs, Math.max(0, Math.floor((connectTimeoutMs - 1) / candidates.length)))
+      : 0;
+    const startCandidate = (candidate) => {
+      if (settled || signal?.aborted) {
+        candidateFailed();
         return;
       }
-      settled = true;
-      socket.removeListener('error', fail);
-      socket.setTimeout?.(0);
-      resolveConnection(socket);
+      let socket;
+      try {
+        socket = dial({ host: candidate.address, port: target.port, family: candidate.family });
+        onSocket(socket);
+      } catch {
+        socket?.destroy?.();
+        candidateFailed();
+        return;
+      }
+      sockets.add(socket);
+      let finished = false;
+      const fail = (mismatch = false) => {
+        if (finished || settled) return;
+        finished = true;
+        socket.removeListener('connect', connected);
+        socket.removeListener('error', errored);
+        socket.destroy();
+        candidateFailed(mismatch);
+      };
+      const errored = () => fail(false);
+      const connected = () => {
+        if (finished || settled) return;
+        if (signal?.aborted || normalizedAddress(socket.remoteAddress) !== candidate.address || Number(socket.remotePort) !== target.port) {
+          fail(!signal?.aborted);
+          return;
+        }
+        finished = true;
+        settled = true;
+        socket.removeListener('error', errored);
+        socket.removeListener('connect', connected);
+        socket.setTimeout?.(0);
+        cleanup(socket);
+        resolveConnection(socket);
+      };
+      socket.once('error', errored);
+      socket.once('connect', connected);
+    };
+    candidates.forEach((candidate, index) => {
+      const delay = index * effectiveStaggerMs;
+      if (delay === 0) {
+        startCandidate(candidate);
+        return;
+      }
+      const timer = setTimeout(() => {
+        timers.delete(timer);
+        startCandidate(candidate);
+      }, delay);
+      timers.add(timer);
     });
   });
 }
 
 function proxyHeaders(headers, target, { websocket = false } = {}) {
-  if (headers['proxy-authorization'] !== undefined) throw new Error('proxy credentials are forbidden');
   const result = {};
   for (const [name, value] of Object.entries(headers)) {
     const lower = name.toLowerCase();
@@ -383,12 +535,16 @@ function proxyFailure(response, statusCode = 403) {
     response.destroy();
     return;
   }
-  response.writeHead(statusCode, { connection: 'close', 'content-type': 'text/plain; charset=utf-8' });
+  const headers = { connection: 'close', 'content-type': 'text/plain; charset=utf-8' };
+  if (statusCode === 407) headers['proxy-authenticate'] = PROXY_AUTHENTICATE_HEADER;
+  response.writeHead(statusCode, headers);
   response.end('browser proxy request blocked');
 }
 
 function socketProxyFailure(socket, statusCode = 403) {
-  if (!socket.destroyed) socket.end(`HTTP/1.1 ${statusCode} Browser Proxy Blocked\r\nConnection: close\r\n\r\n`);
+  if (socket.destroyed) return;
+  const authenticate = statusCode === 407 ? `Proxy-Authenticate: ${PROXY_AUTHENTICATE_HEADER}\r\n` : '';
+  socket.end(`HTTP/1.1 ${statusCode} Browser Proxy Blocked\r\n${authenticate}Connection: close\r\n\r\n`);
 }
 
 function requestPath(parsed) {
@@ -414,21 +570,98 @@ function serializeUpgradeRequest(request, target) {
   return Buffer.from(`${lines.join('\r\n')}\r\n\r\n`, 'latin1');
 }
 
-export async function startPinnedProxy(policy, { lookup = dnsLookup, dial = createNetworkConnection } = {}) {
+function proxyAuthorizationDigest(value) {
+  return createHash('sha256').update(String(value ?? ''), 'utf8').digest();
+}
+
+function proxyRequestAuthorized(headers, expectedDigest) {
+  const provided = headers?.['proxy-authorization'];
+  const normalized = Array.isArray(provided) ? provided.join(',') : provided;
+  return timingSafeEqual(proxyAuthorizationDigest(normalized), expectedDigest);
+}
+
+function waitForProxyStream(...streams) {
+  return new Promise((resolveStream) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      for (const stream of streams) {
+        stream.removeListener?.('close', finish);
+        stream.removeListener?.('finish', finish);
+        stream.removeListener?.('error', finish);
+      }
+      resolveStream();
+    };
+    for (const stream of streams) {
+      stream.once?.('close', finish);
+      stream.once?.('finish', finish);
+      stream.once?.('error', finish);
+    }
+  });
+}
+
+export async function startPinnedProxy(policy, {
+  lookup = dnsLookup,
+  dial = createNetworkConnection,
+  resolveTimeoutMs = PROXY_RESOLVE_TIMEOUT_MS,
+  connectTimeoutMs = PROXY_CONNECT_TIMEOUT_MS,
+  staggerMs = PROXY_CONNECTION_STAGGER_MS,
+} = {}) {
   validatePolicy(policy);
+  const username = randomBytes(18).toString('base64url');
+  const password = randomBytes(32).toString('base64url');
+  const expectedAuthorization = proxyAuthorizationDigest(`Basic ${Buffer.from(`${username}:${password}`, 'utf8').toString('base64')}`);
   const sockets = new Set();
+  const handlers = new Set();
   const counts = { http: 0, connect: 0, websocket: 0 };
-  let closed = false;
+  const shutdown = new AbortController();
+  let closing = false;
+  let closePromise;
   const track = (socket) => {
+    if (!socket || typeof socket.destroy !== 'function') throw new Error('browser proxy socket is invalid');
     sockets.add(socket);
     socket.on('error', () => socket.destroy());
     socket.once('close', () => sockets.delete(socket));
+    if (closing) socket.destroy();
     return socket;
   };
+  const assertOpen = () => {
+    if (closing || shutdown.signal.aborted) throw proxyClosingError();
+  };
+  const runHandler = (work, fail) => {
+    if (closing) {
+      fail(true);
+      return;
+    }
+    const handler = Promise.resolve().then(work).catch(() => fail(closing));
+    handlers.add(handler);
+    void handler.finally(() => handlers.delete(handler));
+  };
+  const resolveTarget = (raw, protocols) => resolvePinnedTarget(
+    raw,
+    policy,
+    lookup,
+    protocols,
+    { signal: shutdown.signal, resolveTimeoutMs },
+  );
+  const dialTarget = (target) => dialPinnedTarget(target, dial, {
+    signal: shutdown.signal,
+    onSocket: track,
+    staggerMs,
+    connectTimeoutMs,
+  });
   const server = createServer((request, response) => {
-    void (async () => {
-      const target = await resolvePinnedTarget(request.url, policy, lookup, new Set(['http:']));
-      const socket = track(await dialPinnedTarget(target, dial));
+    if (!proxyRequestAuthorized(request.headers, expectedAuthorization)) {
+      proxyFailure(response, 407);
+      return;
+    }
+    runHandler(async () => {
+      assertOpen();
+      const target = await resolveTarget(request.url, new Set(['http:']));
+      assertOpen();
+      const socket = await dialTarget(target);
+      assertOpen();
       counts.http += 1;
       const upstream = createHTTPRequest({
         method: request.method,
@@ -436,37 +669,74 @@ export async function startPinnedProxy(policy, { lookup = dnsLookup, dial = crea
         headers: proxyHeaders(request.headers, target),
         agent: agentForPinnedSocket(socket),
       }, (upstreamResponse) => {
+        if (closing) {
+          upstreamResponse.destroy();
+          response.destroy();
+          return;
+        }
         response.writeHead(upstreamResponse.statusCode || 502, upstreamResponse.statusMessage, upstreamResponse.headers);
         upstreamResponse.pipe(response);
       });
       upstream.once('error', () => proxyFailure(response, 502));
+      assertOpen();
       request.pipe(upstream);
-    })().catch(() => proxyFailure(response));
+      await waitForProxyStream(response, upstream);
+    }, (wasClosing) => {
+      if (wasClosing) response.destroy();
+      else proxyFailure(response);
+    });
   });
   server.on('connection', track);
   server.on('connect', (request, clientSocket, head) => {
-    void (async () => {
-      if (request.headers['proxy-authorization'] !== undefined) throw new Error('proxy credentials are forbidden');
+    if (!proxyRequestAuthorized(request.headers, expectedAuthorization)) {
+      socketProxyFailure(clientSocket, 407);
+      return;
+    }
+    runHandler(async () => {
+      assertOpen();
       if (!request.url || request.url.includes('/') || request.url.includes('@')) throw new Error('CONNECT authority is invalid');
-      const target = await resolvePinnedTarget(`https://${request.url}/`, policy, lookup, new Set(['https:']));
-      const upstream = track(await dialPinnedTarget(target, dial));
+      const target = await resolveTarget(`https://${request.url}/`, new Set(['https:']));
+      assertOpen();
+      const upstream = await dialTarget(target);
+      assertOpen();
       counts.connect += 1;
       clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      assertOpen();
       if (head.length > 0) upstream.write(head);
       clientSocket.pipe(upstream);
       upstream.pipe(clientSocket);
-    })().catch(() => socketProxyFailure(clientSocket));
+      await waitForProxyStream(clientSocket, upstream);
+      clientSocket.destroy();
+      upstream.destroy();
+    }, (wasClosing) => {
+      if (wasClosing) clientSocket.destroy();
+      else socketProxyFailure(clientSocket);
+    });
   });
   server.on('upgrade', (request, clientSocket, head) => {
-    void (async () => {
-      const target = await resolvePinnedTarget(request.url, policy, lookup, new Set(['http:', 'ws:']));
-      const upstream = track(await dialPinnedTarget(target, dial));
+    if (!proxyRequestAuthorized(request.headers, expectedAuthorization)) {
+      socketProxyFailure(clientSocket, 407);
+      return;
+    }
+    runHandler(async () => {
+      assertOpen();
+      const target = await resolveTarget(request.url, new Set(['http:', 'ws:']));
+      assertOpen();
+      const upstream = await dialTarget(target);
+      assertOpen();
       counts.websocket += 1;
       upstream.write(serializeUpgradeRequest(request, target));
+      assertOpen();
       if (head.length > 0) upstream.write(head);
       clientSocket.pipe(upstream);
       upstream.pipe(clientSocket);
-    })().catch(() => socketProxyFailure(clientSocket));
+      await waitForProxyStream(clientSocket, upstream);
+      clientSocket.destroy();
+      upstream.destroy();
+    }, (wasClosing) => {
+      if (wasClosing) clientSocket.destroy();
+      else socketProxyFailure(clientSocket);
+    });
   });
   server.on('clientError', (_error, socket) => socketProxyFailure(socket, 400));
   await new Promise((resolveListen, reject) => {
@@ -477,24 +747,41 @@ export async function startPinnedProxy(policy, { lookup = dnsLookup, dial = crea
   return {
     url: `http://127.0.0.1:${address.port}`,
     port: address.port,
+    playwrightProxy: () => ({
+      server: `http://127.0.0.1:${address.port}`,
+      username,
+      password,
+      bypass: '<-loopback>',
+    }),
     stats: () => ({ ...counts }),
     async close() {
-      if (closed) return;
-      closed = true;
-      for (const socket of sockets) socket.destroy();
-      await new Promise((resolveClose, reject) => server.close((error) => (error ? reject(error) : resolveClose())));
+      if (closePromise) return closePromise;
+      closing = true;
+      closePromise = (async () => {
+        const serverClosed = new Promise((resolveClose, reject) => {
+          server.close((error) => (error ? reject(error) : resolveClose()));
+        });
+        shutdown.abort();
+        for (const socket of sockets) socket.destroy();
+        while (handlers.size > 0) await Promise.allSettled([...handlers]);
+        for (const socket of sockets) socket.destroy();
+        await serverClosed;
+      })();
+      return closePromise;
     },
   };
 }
 
-export function chromiumLaunchOptions(headless, proxyURL) {
-  const proxy = new URL(proxyURL);
+export function chromiumLaunchOptions(headless, proxyOptions) {
+  const proxy = new URL(proxyOptions?.server);
   if (proxy.protocol !== 'http:' || proxy.hostname !== '127.0.0.1' || proxy.username || proxy.password || !proxy.port || proxy.pathname !== '/' || proxy.search || proxy.hash) {
     throw new Error('browser proxy endpoint is invalid');
   }
+  const username = requiredString(proxyOptions?.username, 'browser proxy username', 256);
+  const password = requiredString(proxyOptions?.password, 'browser proxy password', 256);
   return {
     headless,
-    proxy: { server: proxy.origin, bypass: '<-loopback>' },
+    proxy: { server: proxy.origin, username, password, bypass: '<-loopback>' },
     args: [...BROWSER_LAUNCH_ARGS],
   };
 }
@@ -504,7 +791,7 @@ export async function launchPinnedBrowser(chromium, policy, headless, startProxy
   let browser;
   let closed = false;
   try {
-    browser = await chromium.launch(chromiumLaunchOptions(headless, proxy.url));
+    browser = await chromium.launch(chromiumLaunchOptions(headless, proxy.playwrightProxy()));
   } catch (error) {
     await proxy.close().catch(() => {});
     throw error;
@@ -534,20 +821,21 @@ export async function createSupervisedBrowserContext(browser, {
     viewport: { width: 1280, height: 720 },
   });
   let blockedRequest = false;
+  context.on('dialog', (dialog) => dialog.dismiss().catch(() => {}));
+  context.on('download', (download) => download.cancel().catch(() => {}));
   const guardedPages = new WeakSet();
   const guardPage = (page) => {
     if (guardedPages.has(page)) return;
     guardedPages.add(page);
     page.setDefaultTimeout(15_000);
     page.setDefaultNavigationTimeout(30_000);
-    page.on('dialog', (dialog) => dialog.dismiss().catch(() => {}));
-    page.on('download', (download) => download.cancel().catch(() => {}));
   };
   context.on('page', guardPage);
   for (const page of context.pages()) guardPage(page);
   if (typeof hooks.onRequest === 'function') context.on('request', hooks.onRequest);
   if (typeof hooks.onResponse === 'function') context.on('response', hooks.onResponse);
   if (typeof hooks.onConsole === 'function') context.on('console', hooks.onConsole);
+  if (typeof hooks.onFrameNavigated === 'function') context.on('framenavigated', hooks.onFrameNavigated);
   if (policy) {
     await context.route('**/*', async (route) => {
       try {
@@ -725,6 +1013,24 @@ export function createLoginAuthFailureTracker(now = Date.now, quietWindowMs = 1_
       const elapsed = now() - lastAuthFailureAt;
       return elapsed >= 0 && elapsed <= quietWindowMs;
     },
+  };
+}
+
+export function createLoginNavigationTracker(policy) {
+  validatePolicy(policy);
+  let loginObserved = false;
+  return {
+    observeURL(rawURL) {
+      try {
+        const parsed = new URL(String(rawURL));
+        if (knownAuthOrigin(parsed.toString(), policy) || /\/(?:login|sign-in|signin|sso)(?:\/|$)/i.test(parsed.pathname)) {
+          loginObserved = true;
+        }
+      } catch {
+        // Invalid and non-network URLs cannot establish a login baseline.
+      }
+    },
+    started: () => loginObserved,
   };
 }
 
@@ -1077,18 +1383,23 @@ async function loginWorker(request) {
     launched = await launchPinnedBrowser(chromium, request.policy, false);
     browser = launched.browser;
     const authFailures = createLoginAuthFailureTracker();
+    const navigationHistory = createLoginNavigationTracker(request.policy);
     const guarded = await createGuardedLoginContext(
       browser,
       await loginStorageStateInput(request.storage_state_path),
       request.policy,
-      { onResponse: (response) => authFailures.observeStatus(response.status()) },
+      {
+        onRequest: (browserRequest) => navigationHistory.observeURL(browserRequest.url()),
+        onResponse: (response) => authFailures.observeStatus(response.status()),
+        onFrameNavigated: (frame) => navigationHistory.observeURL(frame.url()),
+      },
     );
     context = guarded.context;
     const page = guarded.page;
     emitProgress('browser_login_opened', 'Complete login in the visible validation browser');
     await assertAllowedURL(request.plan.start_url, request.policy);
     await page.goto(request.plan.start_url, { waitUntil: 'domcontentloaded' });
-    let loginStarted = false;
+    let loginStarted = navigationHistory.started();
     while (true) {
       if (guarded.blocked()) throw new Error('browser destination was blocked');
       const pages = context.pages();
@@ -1096,7 +1407,7 @@ async function loginWorker(request) {
         const currentURL = currentPage.url();
         if (currentURL && currentURL !== 'about:blank') await assertAllowedURL(currentURL, request.policy);
       }
-      const observed = await observeLoginState(pages, request.policy, loginStarted, authFailures.active());
+      const observed = await observeLoginState(pages, request.policy, loginStarted || navigationHistory.started(), authFailures.active());
       loginStarted = observed.started;
       if (observed.ready) {
         await saveLoginStorageState(context, request.storage_state_path);
@@ -1126,7 +1437,9 @@ async function probeWorker(outputPath) {
   });
   const address = server.address();
   const origin = `http://127.0.0.1:${address.port}`;
-  const policy = { allowed_origins: [origin], private_origins: [origin], auth_origins: [], is_prod: false };
+  const policy = {
+    allowed_origins: [origin], application_origins: [origin], start_origins: [origin], private_origins: [origin], auth_origins: [], is_prod: false,
+  };
   const launched = await launchPinnedBrowser(chromium, policy, true);
   const browser = launched.browser;
   try {

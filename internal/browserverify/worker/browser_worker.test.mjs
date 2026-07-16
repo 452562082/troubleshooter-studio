@@ -21,6 +21,7 @@ import {
   createSupervisedBrowserContext,
   createArtifactBudget,
   createLoginAuthFailureTracker,
+  createLoginNavigationTracker,
   createBoundedRecordCollector,
   EVIDENCE_MAX_BYTES,
   EVIDENCE_MAX_RECORDS,
@@ -157,6 +158,8 @@ const baseRequest = () => ({
   },
   policy: {
     allowed_origins: ['https://app.test'],
+    application_origins: ['https://app.test'],
+    start_origins: ['https://app.test'],
     private_origins: [],
     auth_origins: ['https://login.test'],
     is_prod: false,
@@ -175,6 +178,8 @@ const baseLoginRequest = () => ({
   },
   policy: {
     allowed_origins: ['https://app.test'],
+    application_origins: ['https://app.test'],
+    start_origins: ['https://app.test'],
     private_origins: [],
     auth_origins: ['https://login.test'],
     is_prod: false,
@@ -202,6 +207,20 @@ test('login worker requires visible mode, one absolute state path, and an origin
     const invalid = baseLoginRequest();
     mutate(invalid);
     assert.throws(() => validateWorkerRequest(invalid));
+  }
+});
+
+test('worker forbids API and identity-provider origins from owning execute or login starts', () => {
+  for (const origin of ['https://api.test', 'https://login.test']) {
+    const execute = baseRequest();
+    execute.policy.allowed_origins.push('https://api.test', 'https://login.test');
+    execute.plan.start_url = `${origin}/start`;
+    assert.throws(() => validateWorkerRequest(execute), /start origin/);
+
+    const login = baseLoginRequest();
+    login.policy.allowed_origins.push('https://api.test', 'https://login.test');
+    login.plan.start_url = `${origin}/start`;
+    assert.throws(() => validateWorkerRequest(login), /application origin/);
   }
 });
 
@@ -261,6 +280,156 @@ test('assertAllowedURL re-resolves every navigation and request', async () => {
   assert.equal(calls, 2);
 });
 
+function proxyAuthorization(proxy) {
+  const options = proxy.playwrightProxy();
+  return `Basic ${Buffer.from(`${options.username}:${options.password}`, 'utf8').toString('base64')}`;
+}
+
+function optionalProxyAuthorizationLine(proxy) {
+  return typeof proxy.playwrightProxy === 'function' ? `Proxy-Authorization: ${proxyAuthorization(proxy)}\r\n` : '';
+}
+
+test('pinned proxy requires per-launch Basic credentials before parsing or network activity', async () => {
+  let lookups = 0;
+  let dials = 0;
+  const policy = { allowed_origins: ['http://app.test'], application_origins: ['http://app.test'], start_origins: ['http://app.test'], private_origins: [], auth_origins: [], is_prod: false };
+  const proxyDependencies = {
+    lookup: async () => { lookups += 1; return [{ address: '203.0.113.10', family: 4 }]; },
+    dial: () => { dials += 1; throw new Error('unauthenticated proxy request reached dial'); },
+  };
+  const proxy = await startPinnedProxy(policy, proxyDependencies);
+  const otherProxy = await startPinnedProxy(policy, proxyDependencies);
+  try {
+    const launchProxy = proxy.playwrightProxy();
+    const otherLaunchProxy = otherProxy.playwrightProxy();
+    assert.ok(launchProxy.username.length >= 20);
+    assert.ok(launchProxy.password.length >= 32);
+    assert.notEqual(launchProxy.username, otherLaunchProxy.username);
+    assert.notEqual(launchProxy.password, otherLaunchProxy.password);
+    assert.equal(JSON.stringify(proxy).includes(launchProxy.username), false);
+    assert.equal(JSON.stringify(proxy).includes(launchProxy.password), false);
+
+    const httpResponse = await new Promise((resolveResponse, reject) => {
+      const request = httpRequest({ host: '127.0.0.1', port: proxy.port, path: 'http://invalid.test/blocked' }, (response) => {
+        response.resume();
+        response.on('end', () => resolveResponse({ status: response.statusCode, authenticate: response.headers['proxy-authenticate'] }));
+      });
+      request.once('error', reject);
+      request.end();
+    });
+    assert.deepEqual(httpResponse, { status: 407, authenticate: 'Basic realm="tshoot-browser-proxy"' });
+
+    for (const rawRequest of [
+      'CONNECT invalid.test:443 HTTP/1.1\r\nHost: invalid.test:443\r\n\r\n',
+      'GET ws://invalid.test/socket HTTP/1.1\r\nHost: invalid.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n',
+    ]) {
+      const client = connectTCP(proxy.port, '127.0.0.1');
+      await new Promise((resolveConnect, reject) => {
+        client.once('connect', resolveConnect);
+        client.once('error', reject);
+      });
+      client.write(rawRequest);
+      const response = await readSocketUntil(client, (content) => content.includes('\r\n\r\n'));
+      assert.match(response.toString('latin1'), /^HTTP\/1\.1 407/);
+      assert.match(response.toString('latin1'), /Proxy-Authenticate: Basic realm="tshoot-browser-proxy"/i);
+      client.destroy();
+    }
+    assert.equal(lookups, 0);
+    assert.equal(dials, 0);
+  } finally {
+    await Promise.all([proxy.close(), otherProxy.close()]);
+  }
+});
+
+test('pinned proxy close aborts delayed DNS and forbids every post-close dial', async () => {
+  let releaseLookup;
+  let announceLookup;
+  const lookupStarted = new Promise((resolveStarted) => { announceLookup = resolveStarted; });
+  const delayedLookup = new Promise((resolveLookup) => { releaseLookup = resolveLookup; });
+  let dials = 0;
+  const origin = 'http://app.test';
+  const proxy = await startPinnedProxy({ allowed_origins: [origin], application_origins: [origin], start_origins: [origin], private_origins: [], auth_origins: [], is_prod: false }, {
+    lookup: async () => { announceLookup(); return delayedLookup; },
+    dial: () => { dials += 1; throw new Error('dial happened after proxy close'); },
+    resolveTimeoutMs: 5_000,
+  });
+  const client = connectTCP(proxy.port, '127.0.0.1');
+  client.once('error', () => {});
+  await new Promise((resolveConnect) => client.once('connect', resolveConnect));
+  const clientClosed = new Promise((resolveClose) => client.once('close', resolveClose));
+  client.write(`GET ${origin}/delayed HTTP/1.1\r\nHost: app.test\r\n${optionalProxyAuthorizationLine(proxy)}\r\n`);
+  await lookupStarted;
+  await proxy.close();
+  releaseLookup([{ address: '203.0.113.10', family: 4 }]);
+  await new Promise((resolveTurn) => setImmediate(resolveTurn));
+  await clientClosed;
+  assert.equal(dials, 0);
+  assert.equal(client.destroyed, true);
+});
+
+test('pinned proxy bounds DNS resolution time and never dials after timeout', async () => {
+  let dials = 0;
+  const origin = 'http://app.test';
+  const policy = { allowed_origins: [origin], application_origins: [origin], start_origins: [origin], private_origins: [], auth_origins: [], is_prod: false };
+  const proxy = await startPinnedProxy(policy, {
+    lookup: async () => new Promise(() => {}),
+    dial: () => { dials += 1; throw new Error('dial happened after DNS timeout'); },
+    resolveTimeoutMs: 20,
+  });
+  const startedAt = Date.now();
+  try {
+    const status = await new Promise((resolveResponse, reject) => {
+      const request = httpRequest({
+        host: '127.0.0.1',
+        port: proxy.port,
+        path: `${origin}/timeout`,
+        headers: { 'proxy-authorization': proxyAuthorization(proxy) },
+      }, (response) => {
+        response.resume();
+        response.once('end', () => resolveResponse(response.statusCode));
+      });
+      request.once('error', reject);
+      request.end();
+    });
+    assert.equal(status, 403);
+    assert.equal(dials, 0);
+    assert.ok(Date.now() - startedAt < 1_000);
+  } finally {
+    await proxy.close();
+  }
+});
+
+test('pinned proxy close immediately destroys a connecting upstream and drains its handler', async () => {
+  let announceDial;
+  const dialStarted = new Promise((resolveStarted) => { announceDial = resolveStarted; });
+  let upstreamWrites = 0;
+  const upstream = new EventEmitter();
+  upstream.destroyed = false;
+  upstream.setTimeout = () => {};
+  upstream.write = () => { upstreamWrites += 1; };
+  upstream.destroy = () => {
+    if (upstream.destroyed) return;
+    upstream.destroyed = true;
+    queueMicrotask(() => upstream.emit('close'));
+  };
+  const origin = 'http://app.test';
+  const proxy = await startPinnedProxy({ allowed_origins: [origin], application_origins: [origin], start_origins: [origin], private_origins: [], auth_origins: [], is_prod: false }, {
+    lookup: async () => [{ address: '203.0.113.10', family: 4 }],
+    dial: () => { announceDial(); return upstream; },
+  });
+  const client = connectTCP(proxy.port, '127.0.0.1');
+  client.once('error', () => {});
+  await new Promise((resolveConnect) => client.once('connect', resolveConnect));
+  const clientClosed = new Promise((resolveClose) => client.once('close', resolveClose));
+  client.write(`GET ${origin}/connecting HTTP/1.1\r\nHost: app.test\r\n${optionalProxyAuthorizationLine(proxy)}\r\n`);
+  await dialStarted;
+  await proxy.close();
+  await clientClosed;
+  assert.equal(upstream.destroyed, true);
+  assert.equal(upstreamWrites, 0);
+  assert.equal(client.destroyed, true);
+});
+
 test('pinned proxy rejects mixed DNS answers and routes an allowed loopback target through the proxy', async () => {
   let upstreamHits = 0;
   let upstreamHost = '';
@@ -277,6 +446,8 @@ test('pinned proxy rejects mixed DNS answers and routes an allowed loopback targ
   const origin = `http://app.test:${upstreamAddress.port}`;
   const policy = {
     allowed_origins: [origin],
+    application_origins: [origin],
+    start_origins: [origin],
     private_origins: [origin],
     auth_origins: [],
     is_prod: false,
@@ -304,7 +475,7 @@ test('pinned proxy rejects mixed DNS answers and routes an allowed loopback targ
         port: proxy.port,
         method: 'GET',
         path: `${origin}/through-proxy`,
-        headers: { host: `app.test:${upstreamAddress.port}` },
+        headers: { host: `app.test:${upstreamAddress.port}`, 'proxy-authorization': proxyAuthorization(proxy) },
       }, (response) => {
         const chunks = [];
         response.on('data', (chunk) => chunks.push(chunk));
@@ -319,9 +490,11 @@ test('pinned proxy rejects mixed DNS answers and routes an allowed loopback targ
     assert.equal(lookups, 1);
     assert.deepEqual(proxy.stats(), { http: 1, connect: 0, websocket: 0 });
 
-    const launch = chromiumLaunchOptions(true, proxy.url);
+    const launch = chromiumLaunchOptions(true, proxy.playwrightProxy());
     assert.equal(launch.proxy.server, proxy.url);
     assert.equal(launch.proxy.bypass, '<-loopback>');
+    assert.equal(launch.proxy.username, proxy.playwrightProxy().username);
+    assert.equal(launch.proxy.password, proxy.playwrightProxy().password);
     for (const flag of [
       '--disable-quic',
       '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
@@ -348,10 +521,60 @@ test('pinned dial rejects a connected socket whose actual peer differs from the 
     return socket;
   };
   await assert.rejects(
-    dialPinnedTarget({ address: '203.0.113.10', port: 443, family: 4 }, dial),
+    dialPinnedTarget({ addresses: [{ address: '203.0.113.10', family: 4 }], port: 443 }, dial),
     /peer did not match/,
   );
   assert.equal(socket.destroyed, true);
+});
+
+test('pinned dial deterministically races every validated IPv6 and IPv4 candidate without resolving again', async () => {
+  const calls = [];
+  const dial = (options) => {
+    calls.push(options.host);
+    const socket = new EventEmitter();
+    socket.remoteAddress = options.host;
+    socket.remotePort = options.port;
+    socket.destroyed = false;
+    socket.setTimeout = () => {};
+    socket.destroy = () => { socket.destroyed = true; queueMicrotask(() => socket.emit('close')); };
+    queueMicrotask(() => socket.emit('error', new Error('candidate unavailable')));
+    return socket;
+  };
+  await assert.rejects(dialPinnedTarget({
+    addresses: [
+      { address: '2001:db8::1', family: 6 },
+      { address: '2001:db8::2', family: 6 },
+      { address: '203.0.113.10', family: 4 },
+      { address: '203.0.113.11', family: 4 },
+    ],
+    port: 443,
+  }, dial, { staggerMs: 1, connectTimeoutMs: 200 }), /failed/);
+  assert.deepEqual(calls, ['2001:db8::1', '203.0.113.10', '2001:db8::2', '203.0.113.11']);
+});
+
+test('pinned dial falls back across address families and returns only an exact connected peer', async () => {
+  const calls = [];
+  const dial = (options) => {
+    calls.push(options.host);
+    const socket = new EventEmitter();
+    socket.remoteAddress = options.host;
+    socket.remotePort = options.port;
+    socket.destroyed = false;
+    socket.setTimeout = () => {};
+    socket.destroy = () => { socket.destroyed = true; queueMicrotask(() => socket.emit('close')); };
+    queueMicrotask(() => {
+      if (options.family === 6) socket.emit('error', new Error('IPv6 unavailable'));
+      else socket.emit('connect');
+    });
+    return socket;
+  };
+  const socket = await dialPinnedTarget({
+    addresses: [{ address: '2001:db8::1', family: 6 }, { address: '203.0.113.10', family: 4 }],
+    port: 443,
+  }, dial, { staggerMs: 1, connectTimeoutMs: 200 });
+  assert.equal(socket.remoteAddress, '203.0.113.10');
+  assert.deepEqual(calls, ['2001:db8::1', '203.0.113.10']);
+  socket.destroy();
 });
 
 async function readSocketUntil(socket, predicate) {
@@ -380,7 +603,7 @@ async function readSocketUntil(socket, predicate) {
   });
 }
 
-test('pinned proxy enforces CONNECT origin and port, tunnels the exact peer, and rejects proxy credentials', async () => {
+test('pinned proxy enforces CONNECT authentication, origin, and exact port and peer', async () => {
   let upstreamConnections = 0;
   const upstream = createTCPServer((socket) => {
     upstreamConnections += 1;
@@ -392,7 +615,7 @@ test('pinned proxy enforces CONNECT origin and port, tunnels the exact peer, and
   });
   const { port } = upstream.address();
   const origin = `https://secure.test:${port}`;
-  const policy = { allowed_origins: [origin], private_origins: [origin], auth_origins: [], is_prod: false };
+  const policy = { allowed_origins: [origin], application_origins: [origin], start_origins: [origin], private_origins: [origin], auth_origins: [], is_prod: false };
   const proxy = await startPinnedProxy(policy, { lookup: async () => [{ address: '127.0.0.1', family: 4 }] });
   try {
     const client = connectTCP(proxy.port, '127.0.0.1');
@@ -400,7 +623,7 @@ test('pinned proxy enforces CONNECT origin and port, tunnels the exact peer, and
       client.once('connect', resolveConnect);
       client.once('error', reject);
     });
-    client.write(`CONNECT secure.test:${port} HTTP/1.1\r\nHost: secure.test:${port}\r\n\r\n`);
+    client.write(`CONNECT secure.test:${port} HTTP/1.1\r\nHost: secure.test:${port}\r\nProxy-Authorization: ${proxyAuthorization(proxy)}\r\n\r\n`);
     await readSocketUntil(client, (content) => content.includes('\r\n\r\n'));
     client.write('through-tunnel');
     const tunneled = await readSocketUntil(client, (content) => content.includes('through-tunnel'));
@@ -412,9 +635,9 @@ test('pinned proxy enforces CONNECT origin and port, tunnels the exact peer, and
       credentialed.once('connect', resolveConnect);
       credentialed.once('error', reject);
     });
-    credentialed.write(`CONNECT secure.test:${port} HTTP/1.1\r\nHost: secure.test:${port}\r\nProxy-Authorization: Basic secret\r\n\r\n`);
+    credentialed.write(`CONNECT secure.test:${port} HTTP/1.1\r\nHost: secure.test:${port}\r\nProxy-Authorization: Basic incorrect\r\n\r\n`);
     const credentialResponse = await readSocketUntil(credentialed, (content) => content.includes('\r\n\r\n'));
-    assert.match(credentialResponse.toString('latin1'), /^HTTP\/1\.1 403/);
+    assert.match(credentialResponse.toString('latin1'), /^HTTP\/1\.1 407/);
     credentialed.destroy();
 
     const wrongPort = connectTCP(proxy.port, '127.0.0.1');
@@ -422,7 +645,7 @@ test('pinned proxy enforces CONNECT origin and port, tunnels the exact peer, and
       wrongPort.once('connect', resolveConnect);
       wrongPort.once('error', reject);
     });
-    wrongPort.write(`CONNECT secure.test:${port + 1} HTTP/1.1\r\nHost: secure.test:${port + 1}\r\n\r\n`);
+    wrongPort.write(`CONNECT secure.test:${port + 1} HTTP/1.1\r\nHost: secure.test:${port + 1}\r\nProxy-Authorization: ${proxyAuthorization(proxy)}\r\n\r\n`);
     const blockedResponse = await readSocketUntil(wrongPort, (content) => content.includes('\r\n\r\n'));
     assert.match(blockedResponse.toString('latin1'), /^HTTP\/1\.1 403/);
     wrongPort.destroy();
@@ -453,7 +676,7 @@ test('pinned CONNECT preserves the original TLS SNI for HTTPS and WSS tunnels', 
   });
   const { port } = upstream.address();
   const origin = `https://secure.test:${port}`;
-  const policy = { allowed_origins: [origin], private_origins: [origin], auth_origins: [], is_prod: false };
+  const policy = { allowed_origins: [origin], application_origins: [origin], start_origins: [origin], private_origins: [origin], auth_origins: [], is_prod: false };
   const proxy = await startPinnedProxy(policy, { lookup: async () => [{ address: '127.0.0.1', family: 4 }] });
   let tlsClient;
   try {
@@ -462,7 +685,7 @@ test('pinned CONNECT preserves the original TLS SNI for HTTPS and WSS tunnels', 
       client.once('connect', resolveConnect);
       client.once('error', reject);
     });
-    client.write(`CONNECT secure.test:${port} HTTP/1.1\r\nHost: secure.test:${port}\r\n\r\n`);
+    client.write(`CONNECT secure.test:${port} HTTP/1.1\r\nHost: secure.test:${port}\r\nProxy-Authorization: ${proxyAuthorization(proxy)}\r\n\r\n`);
     await readSocketUntil(client, (content) => content.includes('\r\n\r\n'));
     tlsClient = connectTLS({ socket: client, servername: 'secure.test', rejectUnauthorized: false });
     tlsClient.once('error', () => {});
@@ -490,7 +713,7 @@ test('pinned proxy carries a WebSocket upgrade through the selected peer with th
   });
   const { port } = upstream.address();
   const origin = `http://ws.test:${port}`;
-  const policy = { allowed_origins: [origin], private_origins: [origin], auth_origins: [], is_prod: false };
+  const policy = { allowed_origins: [origin], application_origins: [origin], start_origins: [origin], private_origins: [origin], auth_origins: [], is_prod: false };
   const proxy = await startPinnedProxy(policy, { lookup: async () => [{ address: '127.0.0.1', family: 4 }] });
   try {
     const client = connectTCP(proxy.port, '127.0.0.1');
@@ -498,7 +721,7 @@ test('pinned proxy carries a WebSocket upgrade through the selected peer with th
       client.once('connect', resolveConnect);
       client.once('error', reject);
     });
-    client.write(`GET ws://ws.test:${port}/socket?state=opaque HTTP/1.1\r\nHost: ws.test:${port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: opaque\r\nSec-WebSocket-Version: 13\r\n\r\n`);
+    client.write(`GET ws://ws.test:${port}/socket?state=opaque HTTP/1.1\r\nHost: ws.test:${port}\r\nProxy-Authorization: ${proxyAuthorization(proxy)}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: opaque\r\nSec-WebSocket-Version: 13\r\n\r\n`);
     const response = await readSocketUntil(client, (content) => content.includes('\r\n\r\n'));
     assert.match(response.toString('latin1'), /^HTTP\/1\.1 101/);
     assert.match(upstreamRequest, /^GET \/socket\?state=opaque HTTP\/1\.1/m);
@@ -517,6 +740,7 @@ test('pinned browser launch owns proxy teardown on success and launch failure', 
   const events = [];
   const startProxy = async () => ({
     url: 'http://127.0.0.1:34567',
+    playwrightProxy: () => ({ server: 'http://127.0.0.1:34567', username: 'fixture-user', password: 'fixture-password', bypass: '<-loopback>' }),
     close: async () => { events.push('proxy:close'); },
   });
   const browser = { close: async () => { events.push('browser:close'); } };
@@ -537,6 +761,7 @@ test('pinned browser launch owns proxy teardown on success and launch failure', 
     launch: async () => { throw new Error('launch fixture secret'); },
   }, policy, false, async () => ({
     url: 'http://127.0.0.1:45678',
+    playwrightProxy: () => ({ server: 'http://127.0.0.1:45678', username: 'fixture-user', password: 'fixture-password', bypass: '<-loopback>' }),
     close: async () => { launchFailureEvents.push('proxy:close'); },
   })), /launch fixture secret/);
   assert.deepEqual(launchFailureEvents, ['proxy:close']);
@@ -566,6 +791,7 @@ test('supervised context installs request, response, console, page, download, di
     onRequest: () => calls.push('hook:request'),
     onResponse: () => calls.push('hook:response'),
     onConsole: () => calls.push('hook:console'),
+    onFrameNavigated: () => calls.push('hook:frame'),
   };
   const policy = baseRequest().policy;
   const supervised = await createSupervisedBrowserContext(browser, {
@@ -582,12 +808,22 @@ test('supervised context installs request, response, console, page, download, di
     acceptDownloads: false,
     viewport: { width: 1280, height: 720 },
   });
-  for (const required of ['page', 'request', 'response', 'console']) assert.equal(typeof contextHandlers.get(required), 'function', required);
+  for (const required of ['page', 'request', 'response', 'console', 'framenavigated', 'dialog', 'download']) assert.equal(typeof contextHandlers.get(required), 'function', required);
+  assert.ok(calls.indexOf('context:on:dialog') < calls.indexOf('context:route'));
+  assert.ok(calls.indexOf('context:on:download') < calls.indexOf('context:route'));
   assert.ok(calls.indexOf('context:on:page') < calls.indexOf('context:new-page'));
   assert.ok(calls.indexOf('context:route') < calls.indexOf('context:new-page'));
   assert.ok(calls.indexOf('context:websocket') < calls.indexOf('context:new-page'));
-  assert.equal(typeof pageHandlers.get('dialog'), 'function');
-  assert.equal(typeof pageHandlers.get('download'), 'function');
+  assert.equal(pageHandlers.has('dialog'), false);
+  assert.equal(pageHandlers.has('download'), false);
+
+  let dismissed = false;
+  let canceled = false;
+  contextHandlers.get('dialog')({ dismiss: async () => { dismissed = true; } });
+  contextHandlers.get('download')({ cancel: async () => { canceled = true; } });
+  await Promise.resolve();
+  assert.equal(dismissed, true);
+  assert.equal(canceled, true);
 
   let continued = false;
   await httpRoute({
@@ -609,9 +845,11 @@ test('supervised context installs request, response, console, page, download, di
   contextHandlers.get('request')();
   contextHandlers.get('response')();
   contextHandlers.get('console')();
+  contextHandlers.get('framenavigated')();
   assert.ok(calls.includes('hook:request'));
   assert.ok(calls.includes('hook:response'));
   assert.ok(calls.includes('hook:console'));
+  assert.ok(calls.includes('hook:frame'));
 });
 
 test('assertAllowedURL rejects schemes, origins, metadata, and private addresses', async () => {
@@ -746,10 +984,21 @@ test('auth failure activity stays active until responses are quiet for the stabi
   assert.equal(tracker.active(), false);
 });
 
+test('login navigation history remembers a transient OAuth redirect completed before the first poll', async () => {
+  const policy = baseLoginRequest().policy;
+  const tracker = createLoginNavigationTracker(policy);
+  tracker.observeURL('https://app.test/oauth/start?state=opaque');
+  tracker.observeURL('https://login.test/oauth/authorize');
+  tracker.observeURL('https://app.test/oauth/callback');
+  const observed = await observeLoginState([loginPage('https://app.test/users')], policy, tracker.started(), false);
+  assert.deepEqual(observed, { started: true, ready: true });
+});
+
 test('guarded login context protects the initial page and every popup before use', async () => {
   const calls = [];
   let pageListener;
   let webSocketHandler;
+  const contextHandlers = new Map();
   const fakePage = (name) => {
     const handlers = new Map();
     return {
@@ -777,8 +1026,8 @@ test('guarded login context protects the initial page and every popup before use
     pages: () => [],
     on(event, handler) {
       calls.push(`context:on:${event}`);
-      assert.equal(event, 'page');
-      pageListener = handler;
+      contextHandlers.set(event, handler);
+      if (event === 'page') pageListener = handler;
     },
     async routeWebSocket(pattern, handler) {
       calls.push('context:websocket');
@@ -809,20 +1058,24 @@ test('guarded login context protects the initial page and every popup before use
     viewport: { width: 1280, height: 720 },
   });
   assert.ok(calls.indexOf('context:on:page') < calls.indexOf('context:new-page'));
+  assert.ok(calls.indexOf('context:on:dialog') < calls.indexOf('context:new-page'));
+  assert.ok(calls.indexOf('context:on:download') < calls.indexOf('context:new-page'));
   assert.ok(calls.indexOf('context:websocket') < calls.indexOf('context:new-page'));
 
   const popup = fakePage('popup');
+  let dismissed = false;
+  let canceled = false;
+  contextHandlers.get('dialog')({ dismiss: async () => { dismissed = true; } });
+  contextHandlers.get('download')({ cancel: async () => { canceled = true; } });
+  await Promise.resolve();
+  assert.equal(dismissed, true);
+  assert.equal(canceled, true);
   pageListener(popup);
   for (const page of [initialPage, popup]) {
     assert.equal(page.timeout, 15_000);
     assert.equal(page.navigationTimeout, 30_000);
-    let dismissed = false;
-    page.handlers.get('dialog')({ dismiss: async () => { dismissed = true; } });
-    let canceled = false;
-    page.handlers.get('download')({ cancel: async () => { canceled = true; } });
-    await Promise.resolve();
-    assert.equal(dismissed, true);
-    assert.equal(canceled, true);
+    assert.equal(page.handlers.has('dialog'), false);
+    assert.equal(page.handlers.has('download'), false);
   }
 
   let webSocketClosed = false;

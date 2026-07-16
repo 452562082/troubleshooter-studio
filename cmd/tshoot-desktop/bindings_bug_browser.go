@@ -122,6 +122,10 @@ func (r caseBrowserPolicyResolver) ResolveBrowserPolicy(ctx context.Context, inc
 	if environment == nil {
 		return bughub.BrowserSecurityPolicy{}, errors.New("incident browser environment is unavailable")
 	}
+	application, err := canonicalIncidentBrowserOrigins([]string{environment.WebDomain})
+	if err != nil || len(application) != 1 {
+		return bughub.BrowserSecurityPolicy{}, errors.New("incident browser application origin is invalid")
+	}
 	allowed, err := canonicalIncidentBrowserOrigins(append([]string{environment.WebDomain, environment.APIDomain}, environment.BrowserAuthOrigins...))
 	if err != nil || len(allowed) == 0 {
 		return bughub.BrowserSecurityPolicy{}, errors.New("incident browser origins are invalid")
@@ -131,10 +135,12 @@ func (r caseBrowserPolicyResolver) ResolveBrowserPolicy(ctx context.Context, inc
 		return bughub.BrowserSecurityPolicy{}, errors.New("incident browser authentication origins are invalid")
 	}
 	return bughub.BrowserSecurityPolicy{
-		AllowedOrigins: allowed,
-		PrivateOrigins: append([]string(nil), allowed...),
-		AuthOrigins:    auth,
-		IsProd:         environment.IsProd,
+		AllowedOrigins:     allowed,
+		ApplicationOrigins: application,
+		StartOrigins:       append([]string(nil), application...),
+		PrivateOrigins:     append([]string(nil), allowed...),
+		AuthOrigins:        auth,
+		IsProd:             environment.IsProd,
 	}, nil
 }
 

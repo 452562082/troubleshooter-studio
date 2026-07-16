@@ -221,7 +221,7 @@ func TestRecoverInterruptedPersistsBrokenBrowserRouteAsSystemFailure(t *testing.
 				hostCalls++
 				return BrowserVerificationResult{}, nil
 			}), browserPolicyResolverFunc(func(context.Context, IncidentCase, Bug) (BrowserSecurityPolicy, error) {
-				return BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.example.com"}}, nil
+				return testBrowserApplicationPolicy("https://app.example.com"), nil
 			}))
 			orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
 			orchestrator.SetRecoveryContextResolver(RecoveryContextResolverFunc(func(context.Context, IncidentCase, PhaseAttempt) (Bug, BotRef, error) {

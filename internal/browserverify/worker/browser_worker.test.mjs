@@ -790,6 +790,8 @@ test('supervised context installs request, response, console, page, download, di
   const hooks = {
     onPage: () => calls.push('hook:page'),
     onRequest: () => calls.push('hook:request'),
+    onRequestFinished: () => calls.push('hook:requestfinished'),
+    onRequestFailed: () => calls.push('hook:requestfailed'),
     onResponse: () => calls.push('hook:response'),
     onConsole: () => calls.push('hook:console'),
   };
@@ -808,7 +810,7 @@ test('supervised context installs request, response, console, page, download, di
     acceptDownloads: false,
     viewport: { width: 1280, height: 720 },
   });
-  for (const required of ['page', 'request', 'response', 'console', 'dialog', 'download']) assert.equal(typeof contextHandlers.get(required), 'function', required);
+  for (const required of ['page', 'request', 'requestfinished', 'requestfailed', 'response', 'console', 'dialog', 'download']) assert.equal(typeof contextHandlers.get(required), 'function', required);
   assert.equal(contextHandlers.has('framenavigated'), false);
   assert.ok(calls.indexOf('context:on:dialog') < calls.indexOf('context:route'));
   assert.ok(calls.indexOf('context:on:download') < calls.indexOf('context:route'));
@@ -1012,11 +1014,13 @@ function executeBrowserRequest(page, rawURL, {
   };
 }
 
-function executeBrowserResponse(request, status) {
+function executeBrowserResponse(request, status, headers = {}) {
+  const normalizedHeaders = new Map(Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]));
   return {
     request: () => request,
     status: () => status,
     url: () => request.url(),
+    headerValue: async (name) => normalizedHeaders.get(name.toLowerCase()) ?? null,
   };
 }
 
@@ -1026,13 +1030,13 @@ test('execute auth tracking ignores optional resources and action-unrelated fetc
   const tracker = await newExecuteAuthFailureTracker(policy);
   const page = trackedLoginPage('https://app.test/users');
 
-  const finishAction = tracker.beginAction({ action: 'click' });
+  const finishAction = tracker.beginAction(page, { action: 'click' });
   const optionalImage = executeBrowserRequest(page, 'https://app.test/favicon.ico', { resourceType: 'image' });
   tracker.observeRequest(optionalImage);
   finishAction();
   tracker.observeResponse(executeBrowserResponse(optionalImage, 403));
 
-  const finishUntrustedAction = tracker.beginAction({ action: 'click' });
+  const finishUntrustedAction = tracker.beginAction(page, { action: 'click' });
   const untrustedFetch = executeBrowserRequest(page, 'https://unconfigured.test/users');
   tracker.observeRequest(untrustedFetch);
   finishUntrustedAction();
@@ -1048,7 +1052,7 @@ test('execute auth tracking ignores optional resources and action-unrelated fetc
 
 test('execute auth tracking keeps main-document failures until the same page loads successfully', async () => {
   let now = 10_000;
-  const tracker = await newExecuteAuthFailureTracker(baseRequest().policy, { now: () => now, quietWindowMs: 1_000 });
+  const tracker = await newExecuteAuthFailureTracker(baseRequest().policy, { now: () => now });
   const page = trackedLoginPage('https://app.test/users');
   const failedDocument = executeBrowserRequest(page, 'https://app.test/users', { navigation: true, resourceType: 'document' });
   tracker.observeRequest(failedDocument);
@@ -1076,7 +1080,7 @@ test('executeAction scopes allowed fetch failures to the current controlled acti
     first: () => ({
       click: async () => {
         tracker.observeRequest(criticalRequest);
-        tracker.observeResponse(executeBrowserResponse(criticalRequest, 403));
+        await tracker.observeResponse(executeBrowserResponse(criticalRequest, 403, { 'WWW-Authenticate': 'Bearer realm="test"' }));
       },
     }),
   });
@@ -1085,34 +1089,288 @@ test('executeAction scopes allowed fetch failures to the current controlled acti
   assert.equal(tracker.active(), true);
 });
 
-test('execute auth tracking recovers a transient critical API failure after success or a quiet window', async () => {
+test('execute auth tracking keeps API 401 active past quiet time until the same action and request semantic recovers', async () => {
   let now = 20_000;
-  const sleep = async (duration) => { now += duration; };
   const policy = baseRequest().policy;
   policy.allowed_origins.push('https://api.test');
-  const tracker = await newExecuteAuthFailureTracker(policy, { now: () => now, quietWindowMs: 1_000, sleep });
+  const tracker = await newExecuteAuthFailureTracker(policy, { now: () => now });
   const page = trackedLoginPage('https://app.test/users');
   const failedRequest = executeBrowserRequest(page, 'https://api.test/users/search', { method: 'POST' });
-  let finishAction = tracker.beginAction({ action: 'press' });
+  let finishAction = tracker.beginAction(page, { action: 'press' });
   tracker.observeRequest(failedRequest);
-  finishAction();
   tracker.observeResponse(executeBrowserResponse(failedRequest, 401));
   assert.equal(tracker.active(), true);
-  assert.equal(await tracker.settle(), false);
+  now += 10_000;
+  assert.equal(await tracker.settle(), true);
+  assert.equal(tracker.active(), true);
+
+  const retrySuccess = executeBrowserRequest(page, 'https://api.test/users/search', { method: 'POST' });
+  tracker.observeRequest(retrySuccess);
+  tracker.observeResponse(executeBrowserResponse(retrySuccess, 200));
+  finishAction();
+  assert.equal(tracker.active(), false);
+});
+
+test('execute auth scopes bind fetches to one page main frame and action token with bounded post-action grace', async () => {
+  let now = 30_000;
+  const policy = baseRequest().policy;
+  policy.allowed_origins.push('https://api.test');
+  const tracker = await newExecuteAuthFailureTracker(policy, {
+    now: () => now,
+    requestStartGraceMs: 100,
+  });
+  const page = trackedLoginPage('https://app.test/users');
+  const otherPage = trackedLoginPage('https://app.test/other');
+  const otherFrame = { page: () => page };
+
+  const finishAction = tracker.beginAction(page, { action: 'click' });
+  for (const request of [
+    executeBrowserRequest(otherPage, 'https://api.test/other-page'),
+    executeBrowserRequest(page, 'https://api.test/subframe', { frame: otherFrame }),
+    executeBrowserRequest(page, 'https://api.test/background', { frame: null }),
+  ]) {
+    tracker.observeRequest(request);
+    tracker.observeResponse(executeBrowserResponse(request, 401));
+  }
   assert.equal(tracker.active(), false);
 
-  const retryFailure = executeBrowserRequest(page, 'https://api.test/users/search?attempt=2', { method: 'POST' });
-  finishAction = tracker.beginAction({ action: 'press' });
-  tracker.observeRequest(retryFailure);
   finishAction();
-  tracker.observeResponse(executeBrowserResponse(retryFailure, 403));
+  now += 50;
+  const debounced = executeBrowserRequest(page, 'https://api.test/debounced');
+  tracker.observeRequest(debounced);
+  tracker.observeResponse(executeBrowserResponse(debounced, 401));
   assert.equal(tracker.active(), true);
-  const retrySuccess = executeBrowserRequest(page, 'https://api.test/users/search?attempt=3', { method: 'POST' });
-  finishAction = tracker.beginAction({ action: 'wait_for' });
-  tracker.observeRequest(retrySuccess);
-  finishAction();
-  tracker.observeResponse(executeBrowserResponse(retrySuccess, 200));
+
+  const recovery = executeBrowserRequest(page, 'https://app.test/users', { navigation: true, resourceType: 'document' });
+  tracker.observeRequest(recovery);
+  tracker.observeResponse(executeBrowserResponse(recovery, 200));
   assert.equal(tracker.active(), false);
+
+  now += 51;
+  const late = executeBrowserRequest(page, 'https://api.test/late');
+  tracker.observeRequest(late);
+  tracker.observeResponse(executeBrowserResponse(late, 401));
+  assert.equal(tracker.active(), false);
+
+  const finishWait = tracker.beginAction(page, { action: 'wait_for' });
+  const waitFetch = executeBrowserRequest(page, 'https://api.test/wait');
+  tracker.observeRequest(waitFetch);
+  finishWait();
+  tracker.observeResponse(executeBrowserResponse(waitFetch, 401));
+  assert.equal(tracker.active(), false);
+});
+
+test('execute auth action tokens prevent a later action from clearing an earlier action failure', async () => {
+  const policy = baseRequest().policy;
+  policy.allowed_origins.push('https://api.test');
+  const tracker = await newExecuteAuthFailureTracker(policy);
+  const page = trackedLoginPage('https://app.test/users');
+
+  const finishFirst = tracker.beginAction(page, { action: 'click' });
+  const failed = executeBrowserRequest(page, 'https://api.test/users/search', { method: 'POST' });
+  tracker.observeRequest(failed);
+  tracker.observeResponse(executeBrowserResponse(failed, 401));
+  finishFirst();
+
+  const finishSecond = tracker.beginAction(page, { action: 'press' });
+  const unrelatedSuccess = executeBrowserRequest(page, 'https://api.test/users/search', { method: 'POST' });
+  tracker.observeRequest(unrelatedSuccess);
+  tracker.observeResponse(executeBrowserResponse(unrelatedSuccess, 200));
+  finishSecond();
+  assert.equal(tracker.active(), true);
+});
+
+test('execute auth documents accept only the latest allowed main-frame navigation response and clear on page close', async () => {
+  const tracker = await newExecuteAuthFailureTracker(baseRequest().policy);
+  const page = trackedLoginPage('https://app.test/users');
+  const older = executeBrowserRequest(page, 'https://app.test/older', { navigation: true, resourceType: 'document' });
+  const latest = executeBrowserRequest(page, 'https://app.test/latest', { navigation: true, resourceType: 'document' });
+  tracker.observeRequest(older);
+  tracker.observeRequest(latest);
+  tracker.observeResponse(executeBrowserResponse(latest, 200));
+  tracker.observeResponse(executeBrowserResponse(older, 401));
+  assert.equal(tracker.active(), false);
+
+  const failedLatest = executeBrowserRequest(page, 'https://app.test/failing', { navigation: true, resourceType: 'document' });
+  const staleSuccess = executeBrowserRequest(page, 'https://app.test/stale', { navigation: true, resourceType: 'document' });
+  tracker.observeRequest(staleSuccess);
+  tracker.observeRequest(failedLatest);
+  tracker.observeResponse(executeBrowserResponse(failedLatest, 401));
+  tracker.observeResponse(executeBrowserResponse(staleSuccess, 200));
+  assert.equal(tracker.active(), true);
+  page.closeForTest();
+  assert.equal(tracker.active(), false);
+
+  const untrustedPage = trackedLoginPage('https://app.test/users');
+  const untrusted = executeBrowserRequest(untrustedPage, 'https://unconfigured.test/login', { navigation: true, resourceType: 'document' });
+  tracker.observeRequest(untrusted);
+  tracker.observeResponse(executeBrowserResponse(untrusted, 401));
+  assert.equal(tracker.active(), false);
+});
+
+test('execute auth API semantics include query and ignore stale concurrent responses', async () => {
+  const policy = baseRequest().policy;
+  policy.allowed_origins.push('https://api.test');
+  const tracker = await newExecuteAuthFailureTracker(policy);
+  const page = trackedLoginPage('https://app.test/users');
+  const finishAction = tracker.beginAction(page, { action: 'click' });
+
+  const queryFailure = executeBrowserRequest(page, 'https://api.test/users?q=one');
+  const otherQuerySuccess = executeBrowserRequest(page, 'https://api.test/users?q=two');
+  tracker.observeRequest(queryFailure);
+  tracker.observeRequest(otherQuerySuccess);
+  tracker.observeResponse(executeBrowserResponse(queryFailure, 401));
+  tracker.observeResponse(executeBrowserResponse(otherQuerySuccess, 200));
+  assert.equal(tracker.active(), true);
+
+  const older = executeBrowserRequest(page, 'https://api.test/session');
+  const latest = executeBrowserRequest(page, 'https://api.test/session');
+  tracker.observeRequest(older);
+  tracker.observeRequest(latest);
+  tracker.observeResponse(executeBrowserResponse(latest, 200));
+  tracker.observeResponse(executeBrowserResponse(older, 401));
+  assert.equal(tracker.active(), true, 'stale response must not disturb existing query failure');
+
+  const olderFailure = executeBrowserRequest(page, 'https://api.test/profile');
+  const latestRecovery = executeBrowserRequest(page, 'https://api.test/profile');
+  tracker.observeRequest(olderFailure);
+  tracker.observeRequest(latestRecovery);
+  tracker.observeResponse(executeBrowserResponse(olderFailure, 401));
+  tracker.observeResponse(executeBrowserResponse(latestRecovery, 200));
+
+  const queryRecovery = executeBrowserRequest(page, 'https://api.test/users?q=one');
+  tracker.observeRequest(queryRecovery);
+  tracker.observeResponse(executeBrowserResponse(queryRecovery, 200));
+  finishAction();
+  assert.equal(tracker.active(), false);
+});
+
+test('execute auth treats 403 as authentication only with an explicit challenge', async () => {
+  const policy = baseRequest().policy;
+  policy.allowed_origins.push('https://api.test');
+  const tracker = await newExecuteAuthFailureTracker(policy);
+  const page = trackedLoginPage('https://app.test/users');
+  const finishAction = tracker.beginAction(page, { action: 'click' });
+
+  const authorizationDenied = executeBrowserRequest(page, 'https://api.test/admin');
+  tracker.observeRequest(authorizationDenied);
+  await tracker.observeResponse(executeBrowserResponse(authorizationDenied, 403));
+  assert.equal(tracker.active(), false);
+
+  const authenticationDenied = executeBrowserRequest(page, 'https://api.test/session');
+  tracker.observeRequest(authenticationDenied);
+  await tracker.observeResponse(executeBrowserResponse(authenticationDenied, 403, { 'WWW-Authenticate': 'Bearer realm="test"' }));
+  finishAction();
+  assert.equal(tracker.active(), true);
+});
+
+test('execute auth bounds an unavailable 403 challenge header lookup', async () => {
+  const policy = baseRequest().policy;
+  policy.allowed_origins.push('https://api.test');
+  const tracker = await newExecuteAuthFailureTracker(policy, { responseCheckTimeoutMs: 1 });
+  const page = trackedLoginPage('https://app.test/users');
+  const finish = tracker.beginAction(page, { action: 'click' });
+  const request = executeBrowserRequest(page, 'https://api.test/forbidden');
+  tracker.observeRequest(request);
+  const response = executeBrowserResponse(request, 403);
+  response.headerValue = async () => new Promise(() => {});
+  const result = await Promise.race([
+    tracker.observeResponse(response),
+    new Promise((resolveTimeout) => setTimeout(() => resolveTimeout('unbounded'), 20)),
+  ]);
+  finish();
+  assert.equal(result, false);
+  assert.equal(await tracker.settle(), false);
+});
+
+test('execute auth tracking fails closed at fixed capacity and releases settled and closed entries', async () => {
+  const policy = baseRequest().policy;
+  policy.allowed_origins.push('https://api.test');
+  const page = trackedLoginPage('https://app.test/users');
+  const reusable = await newExecuteAuthFailureTracker(policy, {
+    maxTrackedPages: 1,
+    maxTrackedAPISemantics: 1,
+    maxActionScopes: 1,
+  });
+  const finish = reusable.beginAction(page, { action: 'click' });
+  const settled = executeBrowserRequest(page, 'https://api.test/settled');
+  reusable.observeRequest(settled);
+  reusable.observeResponse(executeBrowserResponse(settled, 200));
+  const replacement = executeBrowserRequest(page, 'https://api.test/replacement');
+  reusable.observeRequest(replacement);
+  reusable.observeResponse(executeBrowserResponse(replacement, 401));
+  finish();
+  assert.equal(reusable.active(), true, 'a settled semantic must release its slot for a later tracked failure');
+  page.closeForTest();
+  assert.equal(reusable.active(), false, 'closing a page must clear its failures and capacity');
+  const reusedPage = trackedLoginPage('https://app.test/reused');
+  const finishReused = reusable.beginAction(reusedPage, { action: 'click' });
+  const reusedFailure = executeBrowserRequest(reusedPage, 'https://api.test/reused');
+  reusable.observeRequest(reusedFailure);
+  reusable.observeResponse(executeBrowserResponse(reusedFailure, 401));
+  finishReused();
+  assert.equal(reusable.active(), true, 'a closed page must release its page and action slots');
+
+  const overflowing = await newExecuteAuthFailureTracker(policy, {
+    maxTrackedPages: 1,
+    maxTrackedAPISemantics: 1,
+    maxActionScopes: 1,
+  });
+  const overflowPage = trackedLoginPage('https://app.test/users');
+  const finishOverflow = overflowing.beginAction(overflowPage, { action: 'click' });
+  const first = executeBrowserRequest(overflowPage, 'https://api.test/first');
+  const second = executeBrowserRequest(overflowPage, 'https://api.test/second');
+  overflowing.observeRequest(first);
+  overflowing.observeRequest(second);
+  finishOverflow();
+  assert.equal(overflowing.active(), true, 'capacity overflow must set a fail-closed sentinel');
+
+  let now = 40_000;
+  const expiredScope = await newExecuteAuthFailureTracker(policy, {
+    now: () => now,
+    requestStartGraceMs: 10,
+    maxTrackedPages: 1,
+    maxTrackedAPISemantics: 1,
+    maxActionScopes: 1,
+  });
+  const scopePage = trackedLoginPage('https://app.test/users');
+  expiredScope.beginAction(scopePage, { action: 'click' })();
+  now += 11;
+  const finishReplacementScope = expiredScope.beginAction(scopePage, { action: 'press' });
+  const scopedFailure = executeBrowserRequest(scopePage, 'https://api.test/scoped');
+  expiredScope.observeRequest(scopedFailure);
+  expiredScope.observeResponse(executeBrowserResponse(scopedFailure, 401));
+  finishReplacementScope();
+  assert.equal(expiredScope.active(), true, 'an expired action scope must release its slot without overflowing');
+
+  const pageOverflow = await newExecuteAuthFailureTracker(policy, { maxTrackedPages: 1 });
+  const firstPage = trackedLoginPage('https://app.test/first');
+  const secondPage = trackedLoginPage('https://app.test/second');
+  pageOverflow.observeRequest(executeBrowserRequest(firstPage, 'https://app.test/first', { navigation: true, resourceType: 'document' }));
+  pageOverflow.observeRequest(executeBrowserRequest(secondPage, 'https://app.test/second', { navigation: true, resourceType: 'document' }));
+  assert.equal(pageOverflow.active(), true, 'page capacity overflow must fail closed');
+});
+
+test('execute auth tracking releases failed requests that never receive a response', async () => {
+  const policy = baseRequest().policy;
+  policy.allowed_origins.push('https://api.test');
+  const tracker = await newExecuteAuthFailureTracker(policy, {
+    maxTrackedPages: 1,
+    maxTrackedAPISemantics: 1,
+    maxActionScopes: 1,
+    maxPendingRequests: 1,
+  });
+  assert.equal(typeof tracker.observeRequestSettled, 'function');
+  const page = trackedLoginPage('https://app.test/users');
+  const finish = tracker.beginAction(page, { action: 'click' });
+  const failedTransport = executeBrowserRequest(page, 'https://api.test/transport-failure');
+  tracker.observeRequest(failedTransport);
+  tracker.observeRequestSettled(failedTransport);
+  const replacement = executeBrowserRequest(page, 'https://api.test/replacement');
+  tracker.observeRequest(replacement);
+  tracker.observeResponse(executeBrowserResponse(replacement, 401));
+  finish();
+  assert.equal(tracker.active(), true, 'request settlement must release classification and semantic capacity');
 });
 
 test('login does not complete on a public shell before a delayed auth redirect', async () => {

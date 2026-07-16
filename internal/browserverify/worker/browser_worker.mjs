@@ -46,8 +46,13 @@ const PROXY_RESOLVE_TIMEOUT_MS = 5_000;
 const PROXY_CONNECTION_STAGGER_MS = 50;
 const PROXY_AUTHENTICATE_HEADER = 'Basic realm="tshoot-browser-proxy"';
 const LOGIN_COMPLETION_STABILITY_MS = 1_000;
-const EXECUTE_AUTH_FAILURE_QUIET_MS = 1_000;
-const AUTH_ATTRIBUTED_ACTIONS = new Set(['click', 'fill', 'press', 'select', 'wait_for']);
+const EXECUTE_AUTH_REQUEST_START_GRACE_MS = 1_000;
+const EXECUTE_AUTH_RESPONSE_CHECK_TIMEOUT_MS = 1_000;
+const EXECUTE_AUTH_MAX_PAGES = 32;
+const EXECUTE_AUTH_MAX_API_SEMANTICS = 512;
+const EXECUTE_AUTH_MAX_ACTION_SCOPES = 64;
+const EXECUTE_AUTH_MAX_PENDING_REQUESTS = 2_048;
+const AUTH_ATTRIBUTED_ACTIONS = new Set(['click', 'fill', 'press', 'select']);
 const NETWORK_PROTOCOLS = new Set(['http:', 'https:', 'ws:', 'wss:']);
 const BROWSER_LAUNCH_ARGS = Object.freeze([
   '--disable-quic',
@@ -837,6 +842,8 @@ export async function createSupervisedBrowserContext(browser, {
   context.on('page', guardPage);
   for (const page of context.pages()) guardPage(page);
   if (typeof hooks.onRequest === 'function') context.on('request', hooks.onRequest);
+  if (typeof hooks.onRequestFinished === 'function') context.on('requestfinished', hooks.onRequestFinished);
+  if (typeof hooks.onRequestFailed === 'function') context.on('requestfailed', hooks.onRequestFailed);
   if (typeof hooks.onResponse === 'function') context.on('response', hooks.onResponse);
   if (typeof hooks.onConsole === 'function') context.on('console', hooks.onConsole);
   if (policy) {
@@ -1041,29 +1048,92 @@ export function createLoginAuthFailureTracker(now = Date.now, quietWindowMs = 1_
 
 export function createExecuteAuthFailureTracker(policy, {
   now = Date.now,
-  quietWindowMs = EXECUTE_AUTH_FAILURE_QUIET_MS,
-  sleep = (duration) => new Promise((resolveSleep) => setTimeout(resolveSleep, duration)),
+  requestStartGraceMs = EXECUTE_AUTH_REQUEST_START_GRACE_MS,
+  responseCheckTimeoutMs = EXECUTE_AUTH_RESPONSE_CHECK_TIMEOUT_MS,
+  maxTrackedPages = EXECUTE_AUTH_MAX_PAGES,
+  maxTrackedAPISemantics = EXECUTE_AUTH_MAX_API_SEMANTICS,
+  maxActionScopes = EXECUTE_AUTH_MAX_ACTION_SCOPES,
+  maxPendingRequests = EXECUTE_AUTH_MAX_PENDING_REQUESTS,
 } = {}) {
   validatePolicy(policy);
-  if (!Number.isInteger(quietWindowMs) || quietWindowMs < 1 || quietWindowMs > 10_000 || typeof now !== 'function' || typeof sleep !== 'function') {
+  const boundedPositiveInteger = (value, maximum) => Number.isInteger(value) && value >= 1 && value <= maximum;
+  if (!boundedPositiveInteger(requestStartGraceMs, 10_000)
+    || !boundedPositiveInteger(responseCheckTimeoutMs, 10_000)
+    || !boundedPositiveInteger(maxTrackedPages, EXECUTE_AUTH_MAX_PAGES)
+    || !boundedPositiveInteger(maxTrackedAPISemantics, EXECUTE_AUTH_MAX_API_SEMANTICS)
+    || !boundedPositiveInteger(maxActionScopes, EXECUTE_AUTH_MAX_ACTION_SCOPES)
+    || !boundedPositiveInteger(maxPendingRequests, EXECUTE_AUTH_MAX_PENDING_REQUESTS)
+    || typeof now !== 'function') {
     throw new Error('execute authentication tracking options are invalid');
   }
   const criticalOrigins = new Set([...policy.application_origins, ...policy.allowed_origins].map(normalizeOrigin));
-  const requestClassifications = new WeakMap();
-  const pageIdentifiers = new WeakMap();
-  const documentFailures = new Set();
-  const apiFailures = new Map();
-  let nextPageIdentifier = 1;
-  let activeActionScopes = 0;
+  const applicationOrigins = new Set(policy.application_origins.map(normalizeOrigin));
+  const requestClassifications = new Map();
+  const pageStates = new Map();
+  const apiStates = new Map();
+  const actionScopes = new Map();
+  const pendingResponseChecks = new Set();
+  let nextRequestSequence = 1;
+  let nextActionToken = 1;
+  let capacityExceeded = false;
 
-  const pageKey = (page) => {
-    let identifier = pageIdentifiers.get(page);
-    if (!identifier) {
-      identifier = nextPageIdentifier;
-      nextPageIdentifier += 1;
-      pageIdentifiers.set(page, identifier);
+  const clearPage = (page) => {
+    const state = pageStates.get(page);
+    if (!state) return;
+    state.closed = true;
+    pageStates.delete(page);
+    for (const [token, scope] of actionScopes) {
+      if (scope.pageState === state) actionScopes.delete(token);
     }
-    return `document:${identifier}`;
+    for (const [key, apiState] of apiStates) {
+      if (apiState.pageState === state) apiStates.delete(key);
+    }
+    for (const [browserRequest, classification] of requestClassifications) {
+      if (classification.pageState === state) requestClassifications.delete(browserRequest);
+    }
+  };
+  const pageStateFor = (page) => {
+    const existing = pageStates.get(page);
+    if (existing && !existing.closed) return existing;
+    if (!page || typeof page.mainFrame !== 'function' || typeof page.once !== 'function' || pageStates.size >= maxTrackedPages) {
+      capacityExceeded = true;
+      return null;
+    }
+    const state = {
+      page,
+      mainFrame: page.mainFrame(),
+      latestNavigationSequence: 0,
+      documentFailure: false,
+      closed: false,
+    };
+    pageStates.set(page, state);
+    page.once('close', () => clearPage(page));
+    return state;
+  };
+  const cleanupExpiredActionScopes = () => {
+    const current = now();
+    for (const [token, scope] of actionScopes) {
+      if (scope.pageState.closed || (scope.finishedAt !== null && current > scope.graceUntil)) actionScopes.delete(token);
+    }
+  };
+  const currentActionScope = (pageState, frame) => {
+    cleanupExpiredActionScopes();
+    const current = now();
+    let selected = null;
+    for (const scope of actionScopes.values()) {
+      if (scope.pageState !== pageState || scope.frame !== frame || current < scope.startedAt) continue;
+      if (scope.finishedAt !== null && current > scope.graceUntil) continue;
+      if (selected === null || scope.sequence > selected.sequence) selected = scope;
+    }
+    return selected;
+  };
+  const reserveClassification = (browserRequest, classification) => {
+    if (requestClassifications.size >= maxPendingRequests) {
+      capacityExceeded = true;
+      return '';
+    }
+    requestClassifications.set(browserRequest, classification);
+    return classification.kind;
   };
   const classifyRequest = (browserRequest) => {
     try {
@@ -1071,54 +1141,153 @@ export function createExecuteAuthFailureTracker(policy, {
       if (resourceType === 'document' && browserRequest.isNavigationRequest()) {
         const frame = browserRequest.frame();
         const page = frame.page();
-        if (frame === page.mainFrame()) return { kind: 'document', key: pageKey(page) };
-        return null;
+        if (frame !== page.mainFrame()) return null;
+        const parsed = new URL(browserRequest.url());
+        if (!criticalOrigins.has(parsed.origin)) return null;
+        const pageState = pageStateFor(page);
+        if (!pageState || pageState.mainFrame !== frame) return null;
+        const sequence = nextRequestSequence;
+        nextRequestSequence += 1;
+        pageState.latestNavigationSequence = sequence;
+        return { kind: 'document', pageState, sequence, origin: parsed.origin };
       }
-      if (activeActionScopes < 1 || (resourceType !== 'fetch' && resourceType !== 'xhr')) return null;
+      if (resourceType !== 'fetch' && resourceType !== 'xhr') return null;
+      const frame = browserRequest.frame();
+      if (!frame || typeof frame.page !== 'function') return null;
+      const page = frame.page();
+      const pageState = pageStates.get(page);
+      if (!pageState || pageState.closed || frame !== pageState.mainFrame) return null;
+      const scope = currentActionScope(pageState, frame);
+      if (!scope) return null;
       const parsed = new URL(browserRequest.url());
       if (!criticalOrigins.has(parsed.origin)) return null;
+      parsed.hash = '';
       const method = String(browserRequest.method()).toUpperCase().slice(0, 16);
-      const key = createHash('sha256').update(`${method}\0${parsed.origin}\0${parsed.pathname}`).digest('hex');
-      return { kind: 'action-api', key: `api:${key}` };
+      const digest = createHash('sha256').update(`${scope.token}\0${method}\0${parsed.href}`).digest('hex');
+      const key = `api:${digest}`;
+      let apiState = apiStates.get(key);
+      if (!apiState) {
+        if (apiStates.size >= maxTrackedAPISemantics) {
+          capacityExceeded = true;
+          return null;
+        }
+        apiState = { key, pageState, actionToken: scope.token, latestSequence: 0, pending: new Set(), failed: false };
+        apiStates.set(key, apiState);
+      }
+      const sequence = nextRequestSequence;
+      nextRequestSequence += 1;
+      apiState.latestSequence = sequence;
+      apiState.pending.add(sequence);
+      return { kind: 'action-api', pageState, apiState, sequence };
     } catch {
       return null;
     }
   };
-  const purgeExpiredAPIFailures = () => {
-    const current = now();
-    for (const [key, failedAt] of apiFailures) {
-      if (current - failedAt > quietWindowMs) apiFailures.delete(key);
+  const clearPageAPIFailures = (pageState) => {
+    for (const [key, apiState] of apiStates) {
+      if (apiState.pageState === pageState) apiStates.delete(key);
     }
   };
+  const responseHasAuthenticationChallenge = async (response) => {
+    let timeout;
+    try {
+      if (typeof response.headerValue !== 'function') return false;
+      const value = await Promise.race([
+        response.headerValue('www-authenticate'),
+        new Promise((resolveTimeout) => {
+          timeout = setTimeout(() => resolveTimeout(null), responseCheckTimeoutMs);
+        }),
+      ]);
+      return String(value ?? '').trim().length > 0;
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+  const updateFromResponse = (classification, status, authenticationFailure) => {
+    if (classification.pageState.closed || pageStates.get(classification.pageState.page) !== classification.pageState) return false;
+    if (classification.kind === 'document') {
+      if (classification.sequence !== classification.pageState.latestNavigationSequence) return false;
+      if (authenticationFailure) {
+        classification.pageState.documentFailure = true;
+        return true;
+      }
+      if (Number.isInteger(status) && status >= 200 && status < 300 && applicationOrigins.has(classification.origin)) {
+        classification.pageState.documentFailure = false;
+        clearPageAPIFailures(classification.pageState);
+      }
+      return false;
+    }
+    const apiState = apiStates.get(classification.apiState.key);
+    if (apiState !== classification.apiState) return false;
+    apiState.pending.delete(classification.sequence);
+    let detected = false;
+    if (classification.sequence === apiState.latestSequence) {
+      if (authenticationFailure) {
+        apiState.failed = true;
+        detected = true;
+      } else if (Number.isInteger(status) && status >= 200 && status < 300) {
+        apiState.failed = false;
+      }
+    }
+    if (!apiState.failed && apiState.pending.size === 0) apiStates.delete(apiState.key);
+    return detected;
+  };
   const active = () => {
-    purgeExpiredAPIFailures();
-    return documentFailures.size > 0 || apiFailures.size > 0;
+    cleanupExpiredActionScopes();
+    if (capacityExceeded) return true;
+    for (const pageState of pageStates.values()) {
+      if (pageState.documentFailure) return true;
+    }
+    for (const apiState of apiStates.values()) {
+      if (apiState.failed) return true;
+    }
+    return false;
   };
   const settle = async () => {
-    purgeExpiredAPIFailures();
-    if (documentFailures.size > 0) return true;
-    let remaining = 0;
-    const current = now();
-    for (const failedAt of apiFailures.values()) remaining = Math.max(remaining, quietWindowMs - (current - failedAt) + 1);
-    if (remaining > 0) await sleep(remaining);
+    while (pendingResponseChecks.size > 0) await Promise.all([...pendingResponseChecks]);
     return active();
+  };
+  const settleRequestWithoutResponse = (browserRequest) => {
+    const classification = requestClassifications.get(browserRequest);
+    if (!classification) return;
+    requestClassifications.delete(browserRequest);
+    if (classification.kind !== 'action-api') return;
+    const apiState = apiStates.get(classification.apiState.key);
+    if (apiState !== classification.apiState) return;
+    apiState.pending.delete(classification.sequence);
+    if (!apiState.failed && apiState.pending.size === 0) apiStates.delete(apiState.key);
   };
 
   return {
-    beginAction(action) {
+    beginAction(page, action) {
       const tracked = AUTH_ATTRIBUTED_ACTIONS.has(action?.action);
-      if (tracked) activeActionScopes += 1;
+      if (!tracked) return () => {};
+      cleanupExpiredActionScopes();
+      const pageState = pageStateFor(page);
+      if (!pageState) return () => {};
+      if (actionScopes.size >= maxActionScopes) {
+        capacityExceeded = true;
+        return () => {};
+      }
+      const sequence = nextActionToken;
+      nextActionToken += 1;
+      const token = `action:${sequence}`;
+      const scope = { token, sequence, pageState, frame: pageState.mainFrame, startedAt: now(), finishedAt: null, graceUntil: null };
+      actionScopes.set(token, scope);
       let finished = false;
       return () => {
         if (finished) return;
         finished = true;
-        if (tracked) activeActionScopes = Math.max(0, activeActionScopes - 1);
+        scope.finishedAt = now();
+        scope.graceUntil = scope.finishedAt + requestStartGraceMs;
       };
     },
     observeRequest(browserRequest) {
       const classification = classifyRequest(browserRequest);
-      if (classification) requestClassifications.set(browserRequest, classification);
-      return classification?.kind || '';
+      if (!classification) return '';
+      return reserveClassification(browserRequest, classification);
     },
     observeResponse(response) {
       let browserRequest;
@@ -1131,17 +1300,21 @@ export function createExecuteAuthFailureTracker(policy, {
       }
       const classification = requestClassifications.get(browserRequest);
       if (!classification) return false;
-      if (status === 401 || status === 403) {
-        if (classification.kind === 'document') documentFailures.add(classification.key);
-        else apiFailures.set(classification.key, now());
-        return true;
+      requestClassifications.delete(browserRequest);
+      if (status === 403) {
+        if (pendingResponseChecks.size >= maxPendingRequests) {
+          capacityExceeded = true;
+          return false;
+        }
+        const check = responseHasAuthenticationChallenge(response)
+          .then((challenged) => updateFromResponse(classification, status, challenged))
+          .finally(() => pendingResponseChecks.delete(check));
+        pendingResponseChecks.add(check);
+        return check;
       }
-      if (Number.isInteger(status) && status >= 200 && status < 300) {
-        if (classification.kind === 'document') documentFailures.delete(classification.key);
-        else apiFailures.delete(classification.key);
-      }
-      return false;
+      return updateFromResponse(classification, status, status === 401);
     },
+    observeRequestSettled: settleRequestWithoutResponse,
     active,
     settle,
   };
@@ -1247,7 +1420,7 @@ async function accessibilitySummary(page) {
 }
 
 export async function executeAction(page, action, request, index, captureScreenshot, authFailures) {
-  const finishAuthScope = authFailures?.beginAction(action) ?? (() => {});
+  const finishAuthScope = authFailures?.beginAction(page, action) ?? (() => {});
   try {
     switch (action.action) {
       case 'goto':
@@ -1353,6 +1526,8 @@ async function executeWorker(request) {
           requestStarted.set(browserRequest, Date.now());
           authFailures.observeRequest(browserRequest);
         },
+        onRequestFinished: (browserRequest) => authFailures.observeRequestSettled(browserRequest),
+        onRequestFailed: (browserRequest) => authFailures.observeRequestSettled(browserRequest),
         onResponse,
         onConsole: (message) => {
           if (consoleRecords.isStopped()) return;

@@ -95,6 +95,12 @@ describe('parseEnvironment', () => {
     expect(parseEnvironment({ deployment_verification: { provider: 'k8s', k8s: { cluster: 'c', namespace: 'n', deployments_by_repo: { repo: 'deploy' }, image_label: 'commit' } } }).deployment_verification)
       .toEqual({ provider: 'k8s', http: { url: '', json_pointer: '', allow_private: false }, k8s: { cluster: 'c', namespace: 'n', deployments_by_repo: { repo: 'deploy' }, commit_annotation: '', image_label: 'commit' } })
   })
+  it('drops an incomplete legacy HTTP deployment verification that the wizard can no longer edit', () => {
+    expect(parseEnvironment({
+      id: 'dev',
+      deployment_verification: { provider: 'http', http: { url: '', json_pointer: '/git/commit' } },
+    })).toEqual({ id: 'dev', api_domain: '', web_domain: '', is_prod: false })
+  })
 })
 
 describe('parseRepoCore', () => {

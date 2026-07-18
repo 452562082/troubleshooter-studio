@@ -235,7 +235,7 @@ export function generateYAML(ctx: YAMLGenContext): string {
     if (webD) lines.push(`    web_domain: ${yamlStr(webD)}     # 前端入口(同上)`)
     lines.push(`    is_prod: ${env.is_prod}         # 生产环境标记:true 时机器人默认更保守、查询前二次确认`)
     const verification = env.deployment_verification
-    if (verification?.provider === 'http') {
+    if (verification?.provider === 'http' && verification.http.url.trim() && verification.http.json_pointer.trim()) {
       lines.push('    deployment_verification:')
       lines.push('      provider: http')
       lines.push('      http:')

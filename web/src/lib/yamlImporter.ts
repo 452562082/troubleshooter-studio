@@ -95,16 +95,21 @@ export function parseEnvironment(e: unknown): ParsedEnv {
         if (typeof deployment === 'string') mappings[repo] = deployment
       }
     }
-    deploymentVerification = emptyDeploymentVerification()
-    deploymentVerification.provider = provider
-    deploymentVerification.http.url = typeof http.url === 'string' ? http.url : ''
-    deploymentVerification.http.json_pointer = typeof http.json_pointer === 'string' ? http.json_pointer : ''
-    deploymentVerification.http.allow_private = http.allow_private === true
-    deploymentVerification.k8s.cluster = typeof k8s.cluster === 'string' ? k8s.cluster : ''
-    deploymentVerification.k8s.namespace = typeof k8s.namespace === 'string' ? k8s.namespace : ''
-    deploymentVerification.k8s.deployments_by_repo = mappings
-    deploymentVerification.k8s.commit_annotation = typeof k8s.commit_annotation === 'string' ? k8s.commit_annotation : ''
-    deploymentVerification.k8s.image_label = typeof k8s.image_label === 'string' ? k8s.image_label : ''
+    const candidate = emptyDeploymentVerification()
+    candidate.provider = provider
+    candidate.http.url = typeof http.url === 'string' ? http.url : ''
+    candidate.http.json_pointer = typeof http.json_pointer === 'string' ? http.json_pointer : ''
+    candidate.http.allow_private = http.allow_private === true
+    candidate.k8s.cluster = typeof k8s.cluster === 'string' ? k8s.cluster : ''
+    candidate.k8s.namespace = typeof k8s.namespace === 'string' ? k8s.namespace : ''
+    candidate.k8s.deployments_by_repo = mappings
+    candidate.k8s.commit_annotation = typeof k8s.commit_annotation === 'string' ? k8s.commit_annotation : ''
+    candidate.k8s.image_label = typeof k8s.image_label === 'string' ? k8s.image_label : ''
+    // 旧草稿可能保存了用户尚未填完、现在又已从创建向导移除的 HTTP 版本证明。
+    // 这种半成品不能继续污染仓库扫描所用的临时 YAML；完整配置仍原样保留。
+    if (provider === 'k8s' || (provider === 'http' && candidate.http.url.trim() && candidate.http.json_pointer.trim())) {
+      deploymentVerification = candidate
+    }
   }
   return {
     id: typeof o.id === 'string' ? o.id : '',

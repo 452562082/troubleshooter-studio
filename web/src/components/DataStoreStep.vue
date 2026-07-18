@@ -5,8 +5,7 @@
 // props 形态对齐 InitPage 现有 reactive object / closure helper(同 ConfigSourceStep / ObservabilityStep
 // 的迁移取舍),不重新设计签名以最小化迁移风险。
 
-import { computed, inject, ref } from 'vue'
-import type { CredField } from '../lib/credFields'
+import { inject } from 'vue'
 import type { DSScanState, DSProbeState } from '../lib/dsTypes'
 import { WizardStoreKey } from '../lib/wizardStore'
 import CredsShareWarning from './CredsShareWarning.vue'
@@ -28,7 +27,6 @@ const props = defineProps<{
   scannedDS: Record<string, Record<string, Record<string, Record<string, string>>>>
   serviceConfigSel: Record<string, string>
   dsProbeResults: Record<string, DSProbeState>
-  dsToolSpecs: Array<{ key: string; label: string; fields: CredField[] }>
 
   // helper(Step 7 专属)
   scanStateOf: (envID: string, svc: string) => DSScanState | undefined
@@ -43,24 +41,7 @@ const emit = defineEmits<{
   probeAllAcrossEnvs: []
   removeDS: [envID: string, svc: string, dsKey: string]
   probeDS: [envID: string, svc: string, dsKey: string]
-  addDS: [envID: string, svc: string, dsKey: string, fieldKeys: string[]]
 }>()
-
-const manualEnv = ref('')
-const manualService = ref('')
-const manualType = ref('')
-const selectedManualSpec = computed(() => props.dsToolSpecs.find(s => s.key === manualType.value))
-
-function addManualDS() {
-  const envID = manualEnv.value || wizard.environments[0]?.id || ''
-  const svc = manualService.value || wizard.allServiceNames[0] || ''
-  const spec = selectedManualSpec.value || props.dsToolSpecs[0]
-  if (!envID || !svc || !spec) return
-  emit('addDS', envID, svc, spec.key, spec.fields.filter(f => !f.uiOnly).map(f => f.key))
-  manualEnv.value = envID
-  manualService.value = svc
-  manualType.value = ''
-}
 
 // 全部环境一键连通性测试按钮 disable 条件:scannedDS 全空 → 没东西可测
 const probeAllDisabled = () => {
@@ -85,31 +66,6 @@ const probeAllDisabled = () => {
       <li>密码、DSN/URI 等标记为 secret 的值仅保存到系统钥匙串。</li>
       <li>部署时由 Studio 注入对应环境变量，YAML 和浏览器草稿不保存明文。</li>
     </CredsShareWarning>
-
-    <section class="ds-manual-add" aria-label="手动补录数据组件">
-      <div>
-        <strong>自动识别不到？手动补录</strong>
-        <p>适用于环境变量、自定义配置格式或本机无权读取配置中心的服务。补录后仍需执行连通性测试。</p>
-      </div>
-      <select v-model="manualEnv" aria-label="补录环境">
-        <option value="">选择环境</option>
-        <option v-for="env in wizard.environments" :key="env.id" :value="env.id">{{ env.id }}</option>
-      </select>
-      <select v-model="manualService" aria-label="补录服务">
-        <option value="">选择服务</option>
-        <option v-for="svc in wizard.allServiceNames" :key="svc" :value="svc">{{ svc }}</option>
-      </select>
-      <select v-model="manualType" aria-label="数据组件类型">
-        <option value="">选择组件</option>
-        <option v-for="spec in dsToolSpecs" :key="spec.key" :value="spec.key">{{ spec.label }}</option>
-      </select>
-      <button
-        type="button"
-        class="btn"
-        :disabled="!manualType || wizard.environments.length === 0 || wizard.allServiceNames.length === 0"
-        @click="addManualDS"
-      >+ 添加组件</button>
-    </section>
 
     <div class="ds-autoimport-row">
       <!-- loading / idle 分别用独立 <button> + :key,避免 WebKit GPU layer 残影 -->
@@ -207,21 +163,3 @@ const probeAllDisabled = () => {
     </div>
   </div>
 </template>
-
-<style scoped>
-.ds-manual-add {
-  display: grid;
-  grid-template-columns: minmax(240px, 1.4fr) repeat(3, minmax(130px, .7fr)) auto;
-  gap: 10px;
-  align-items: end;
-  margin-bottom: 16px;
-  padding: 14px;
-  border: 1px dashed #93c5fd;
-  border-radius: 10px;
-  background: #f8fbff;
-}
-.ds-manual-add p { margin: 4px 0 0; color: #64748b; font-size: 12px; }
-@media (max-width: 1100px) {
-  .ds-manual-add { grid-template-columns: 1fr 1fr; }
-}
-</style>

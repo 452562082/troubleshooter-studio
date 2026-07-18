@@ -98,6 +98,18 @@ describe('generateYAML', () => {
     expect(generateYAML(manual)).toBe(generateYAML(legacy))
   })
 
+  it('does not emit an incomplete legacy HTTP deployment verification into scan YAML', () => {
+    const parsed = yaml.load(generateYAML(makeCtx({ environments: [{
+      id: 'dev', api_domain: '', web_domain: '', is_prod: false,
+      deployment_verification: {
+        provider: 'http',
+        http: { url: '', json_pointer: '/git/commit', allow_private: false },
+        k8s: { cluster: '', namespace: '', deployments_by_repo: {}, commit_annotation: '', image_label: '' },
+      },
+    }] }))) as any
+    expect(parsed.environments[0].deployment_verification).toBeUndefined()
+  })
+
   it('omits code_intelligence by default', () => {
     expect(generateYAML(makeCtx())).not.toContain('code_intelligence:')
   })

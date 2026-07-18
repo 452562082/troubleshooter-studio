@@ -44,7 +44,7 @@ import {
   type YAMLGenContext,
 } from '../lib/yamlGenerator'
 import { computeStepErrors as libComputeStepErrors, labelForErrorKey as libLabelForErrorKey, type ValidatorContext } from '../lib/yamlValidator'
-import type { ApplyImportContext } from '../lib/yamlImporter'
+import { parseEnvironment, type ApplyImportContext } from '../lib/yamlImporter'
 import { copyToClipboard } from '../lib/clipboard'
 import { useOpenClawDetect } from '../lib/useOpenClawDetect'
 import { useURLProbe } from '../lib/useURLProbe'
@@ -324,7 +324,7 @@ interface EnvItem {
 
 const environments = reactive<EnvItem[]>(
   Array.isArray(saved?.environments) && saved.environments.length
-    ? saved.environments
+    ? saved.environments.map(parseEnvironment)
     : [
         { id: 'dev', api_domain: '', web_domain: '', is_prod: false },
         { id: 'prod', api_domain: '', web_domain: '', is_prod: true },
@@ -814,6 +814,7 @@ function hasRepoSource(r: RepoItem): boolean {
   if (r._source === 'local') return !!r._localPath?.trim()
   return !!r.url?.trim()
 }
+const scannableRepoCount = computed(() => repos.filter(hasRepoSource).length)
 
 // service_names 当前在 yaml 里是逗号分隔的单字段(历史遗留);UI 里要渲染成 chip 列表
 // 让用户能点 ✕ 删。拆/合函数成对,保持 yaml 写回时的格式稳定。
@@ -2330,7 +2331,6 @@ const {
   scannedDS, dataStoreTypes, dataStoreType, dsScanState, dsProbeResults,
   scanStateKey, scanStateOf,
   removeScannedDS,
-  addManualDataStore,
   recomputeEnabledDataStoresFromScanned,
 } = useDataStoreState(
   {
@@ -3659,9 +3659,15 @@ provide(WizardStoreKey, {
           <span> · {{ repos.filter(r => r._scanned).length }} 已扫描</span>
           <span> · {{ repos.filter(r => r._scanError).length }} 异常</span>
         </div>
-        <button type="button" class="btn" :disabled="scanningAllRepos" @click="scanAllRepos">
+        <button
+          v-if="scannableRepoCount > 1"
+          type="button"
+          class="btn"
+          :disabled="scanningAllRepos"
+          @click="scanAllRepos"
+        >
           <span v-if="scanningAllRepos" class="cc-preload-spinner" aria-hidden="true"></span>
-          {{ scanningAllRepos ? `扫描中 ${scanAllRepoStats.done}/${scanAllRepoStats.total}` : '🔄 扫描全部仓库' }}
+          {{ scanningAllRepos ? `扫描中 ${scanAllRepoStats.done}/${scanAllRepoStats.total}` : `🔄 批量扫描 ${scannableRepoCount} 个仓库` }}
         </button>
       </div>
 
@@ -3818,7 +3824,6 @@ provide(WizardStoreKey, {
       :scanned-d-s="scannedDS"
       :service-config-sel="serviceConfigSel"
       :ds-probe-results="dsProbeResults"
-      :ds-tool-specs="DS_TOOL_SPECS"
       :scan-state-of="scanStateOf"
       :ds-label="dsLabel"
       :ds-field-label="dsFieldLabel"
@@ -3827,7 +3832,6 @@ provide(WizardStoreKey, {
       @auto-import-data-stores="autoImportDataStores"
       @probe-all-across-envs="probeAllAcrossEnvs"
       @remove-d-s="(envID, svc, dsKey) => removeScannedDS(envID, svc, dsKey)"
-      @add-d-s="(envID, svc, dsKey, fields) => addManualDataStore(envID, svc, dsKey, fields)"
       @probe-d-s="(envID, svc, dsKey) => probeOneDS(envID, svc, dsKey)"
     />
 

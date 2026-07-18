@@ -10,6 +10,7 @@ import {generator} from '../models';
 import {discover} from '../models';
 import {doctor} from '../models';
 import {cchub} from '../models';
+import {browserverify} from '../models';
 import {labelprobe} from '../models';
 import {dsprobe} from '../models';
 import {deploy} from '../models';
@@ -92,6 +93,8 @@ export function GenerateBugContext(arg1:main.BugContextInput):Promise<string>;
 
 export function GetIncidentArtifactPreview(arg1:string,arg2:string):Promise<main.IncidentArtifactPreview>;
 
+export function GetIncidentBrowserRuntimeStatus():Promise<browserverify.RuntimeStatus>;
+
 export function GetIncidentCase(arg1:string):Promise<main.IncidentCaseDetail>;
 
 export function GetIncidentWorkflowMetrics():Promise<bughub.WorkflowMetrics>;
@@ -169,6 +172,8 @@ export function Plan(arg1:string):Promise<generator.Plan>;
 export function PrefillCreds(arg1:string):Promise<Record<string, string>>;
 
 export function PreloadConfigCenter(arg1:main.CCHubPreloadInput):Promise<cchub.Result>;
+
+export function PrepareIncidentBrowserRuntime():Promise<void>;
 
 export function PreviewBugAttachment(arg1:main.BugAttachmentPreviewInput):Promise<main.BugAttachmentPreviewResult>;
 

@@ -47,6 +47,9 @@ export interface BugRecord {
   last_context?: string
   last_context_at?: string
   raw_preview?: string
+  inbox_state?: 'active' | 'history'
+  archived_at?: string
+  archive_reason?: 'source_resolved' | 'no_longer_assigned' | string
 }
 
 export interface BotRef {

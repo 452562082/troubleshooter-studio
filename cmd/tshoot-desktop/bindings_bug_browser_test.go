@@ -28,12 +28,26 @@ type fakeIncidentBrowserController struct {
 	loginRequests []browserverify.BrowserLoginRequest
 	clearKeys     []browserverify.SessionKey
 	repairs       int
+	prepares      int
+	prepareErr    error
 	loginErr      error
 	repairErr     error
 	clearErr      error
 	progress      bughub.BrowserProgress
 	afterLogin    func()
 	status        browserverify.RuntimeStatus
+}
+
+func (f *fakeIncidentBrowserController) Prepare(_ context.Context, emit func(bughub.BrowserProgress)) error {
+	f.mu.Lock()
+	f.prepares++
+	err := f.prepareErr
+	progress := f.progress
+	f.mu.Unlock()
+	if emit != nil && progress.Code != "" {
+		emit(progress)
+	}
+	return err
 }
 
 func (*fakeIncidentBrowserController) Execute(context.Context, bughub.BrowserVerificationRequest) (bughub.BrowserVerificationResult, error) {
@@ -225,7 +239,8 @@ func newBrowserRecoveryBindingApp(t *testing.T, phase bughub.Phase, errorCode, l
 			System: config.System{ID: "base"},
 			Environments: []config.Environment{{
 				ID: "test", WebDomain: "HTTPS://App.Test:443", APIDomain: "http://127.0.0.1:3000",
-				BrowserAuthOrigins: []string{"https://LOGIN.Test:443"}, IsProd: false,
+				BrowserAllowedOrigins: []string{"https://STATIC.Test:443"},
+				BrowserAuthOrigins:    []string{"https://LOGIN.Test:443"}, IsProd: false,
 			}},
 		}, nil
 	}
@@ -311,7 +326,7 @@ func TestCaseBrowserPolicyResolverCanonicalizesConfiguredOrigins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantAllowed := []string{"http://127.0.0.1:3000", "https://app.test", "https://login.test"}
+	wantAllowed := []string{"http://127.0.0.1:3000", "https://app.test", "https://login.test", "https://static.test"}
 	wantApplication := []string{"https://app.test"}
 	if !reflect.DeepEqual(policy.AllowedOrigins, wantAllowed) ||
 		!reflect.DeepEqual(policy.ApplicationOrigins, wantApplication) ||
@@ -1069,6 +1084,21 @@ func TestIncidentBrowserRecoveryRedactsControllerErrorsAndProgress(t *testing.T)
 	}
 }
 
+func TestIncidentBrowserRuntimeProgressCodesAreSafe(t *testing.T) {
+	for _, code := range []string{
+		"browser_launching",
+		"browser_context_preparing",
+		"browser_evidence_preparing",
+		"browser_runtime_dependencies_installing",
+		"browser_runtime_downloading",
+		"browser_runtime_probing",
+	} {
+		if !incidentBrowserProgressCodeSafe(code) {
+			t.Fatalf("runtime progress code %q was rejected", code)
+		}
+	}
+}
+
 func TestIncidentBrowserLoginRedactsIncidentContextFailure(t *testing.T) {
 	app, _, runner, _, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "https://login.test")
 	secret := "storageState Cookie: sid=secret Authorization: Bearer abc.def.ghi password=hunter2"
@@ -1152,5 +1182,20 @@ func TestIncidentBrowserKeyringStoreUsesDedicatedServiceAndMapsMissingKeys(t *te
 	}
 	if !reflect.DeepEqual(services, want) {
 		t.Fatalf("services = %v", services)
+	}
+}
+
+func TestPrepareIncidentBrowserRuntimeRepairsStudioRuntimeWithoutCase(t *testing.T) {
+	controller := &fakeIncidentBrowserController{
+		status: browserverify.RuntimeStatus{State: browserverify.RuntimeBroken, ErrorCode: "browser_runtime_missing"},
+	}
+	app := &App{workflowBrowser: controller}
+
+	if err := app.PrepareIncidentBrowserRuntime(); err != nil {
+		t.Fatal(err)
+	}
+	_, _, repairs := controller.snapshot()
+	if repairs != 1 {
+		t.Fatalf("repairs = %d, want 1", repairs)
 	}
 }

@@ -10,6 +10,7 @@
 #   BUNDLE_ID    bundle identifier（反向 DNS）
 #   VERSION      版本串
 #   ICON_SRC     1024x1024 PNG 源（可选；缺就没图标）
+#   BROWSER_RUNTIME_SRC 已完成真实 probe 的固定 Chromium 运行时目录
 set -euo pipefail
 
 : "${BIN:?BIN required}"
@@ -17,12 +18,26 @@ set -euo pipefail
 : "${BUNDLE_NAME:?BUNDLE_NAME required}"
 : "${BUNDLE_ID:?BUNDLE_ID required}"
 : "${VERSION:=dev}"
+: "${BROWSER_RUNTIME_SRC:?BROWSER_RUNTIME_SRC required}"
+
+if [[ ! -d "$BROWSER_RUNTIME_SRC" || -L "$BROWSER_RUNTIME_SRC" \
+   || ! -f "$BROWSER_RUNTIME_SRC/.runtime-ready.json" \
+   || ! -d "$BROWSER_RUNTIME_SRC/node_modules/playwright" \
+   || ! -d "$BROWSER_RUNTIME_SRC/browsers" ]]; then
+  echo "✗ BROWSER_RUNTIME_SRC 不是已就绪的固定浏览器运行时: $BROWSER_RUNTIME_SRC" >&2
+  exit 1
+fi
 
 rm -rf "$BUNDLE_DIR"
 mkdir -p "$BUNDLE_DIR/Contents/MacOS" "$BUNDLE_DIR/Contents/Resources"
 
 cp "$BIN" "$BUNDLE_DIR/Contents/MacOS/$BUNDLE_NAME"
 chmod +x "$BUNDLE_DIR/Contents/MacOS/$BUNDLE_NAME"
+
+# Chromium 在发布机构建/探测并随 App 交付。用户首次启动只从这里原子导入
+# ~/.tshoot，不再依赖现场网络；裸 desktop 二进制仍保留联网兜底。
+mkdir -p "$BUNDLE_DIR/Contents/Resources/browser-runtime"
+cp -R "$BROWSER_RUNTIME_SRC" "$BUNDLE_DIR/Contents/Resources/browser-runtime/"
 
 # 图标（可选）：把 1024x1024 PNG 转成多尺寸 .icns
 if [[ -n "${ICON_SRC:-}" && -f "$ICON_SRC" ]] \

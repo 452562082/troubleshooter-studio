@@ -261,6 +261,14 @@ function dialogTitle(): string {
           </li>
         </ol>
 
+        <div class="workflow-loop-hint" :data-loop-state="detail.case.status === 'fixed_verified' ? 'complete' : continuedAfterFailedRegression ? 'restarted' : 'active'">
+          <span class="workflow-loop-icon" aria-hidden="true">↺</span>
+          <p v-if="detail.case.status === 'fixed_verified' && detail.bug_ticket_resolution?.state === 'resolved'"><strong>回归通过</strong> → Bug 工单已转为已解决，故障闭环完成。</p>
+          <p v-else-if="detail.case.status === 'fixed_verified'"><strong>回归通过</strong> → 故障闭环已完成，正在将 Bug 工单同步为已解决。</p>
+          <p v-else-if="continuedAfterFailedRegression"><strong>回归仍复现</strong> → 已自动进入下一轮（第 {{ detail.case.cycle_number }} 轮）排障，随后继续修复、部署和回归。</p>
+          <p v-else><strong>循环规则</strong>：回归仍复现会自动进入下一轮排障；只有回归通过才会结束闭环并解决 Bug 工单。</p>
+        </div>
+
         <section class="current-action-card" aria-labelledby="current-action-title">
           <div>
             <span>当前状态</span>
@@ -403,6 +411,14 @@ h2, h3, p { margin: 0; }
 .lifecycle-stage[data-state="current"] .stage-marker { background: #eff6ff; color: #1d4ed8; }
 .lifecycle-stage[data-state="blocked"] { border-color: #ea580c; }
 .lifecycle-stage[data-state="blocked"] .stage-marker { background: #fff7ed; color: #c2410c; }
+.workflow-loop-hint { min-width: 0; display: flex; align-items: center; gap: var(--sp-2); margin-top: calc(var(--sp-3) * -1); padding: 9px 12px; border: 1px dashed #93c5fd; border-radius: var(--r-md); background: #f8fbff; color: var(--c-muted); }
+.workflow-loop-hint p { min-width: 0; font-size: var(--fs-xs); line-height: 1.5; }
+.workflow-loop-hint strong { color: var(--c-text); }
+.workflow-loop-icon { flex: 0 0 auto; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: #dbeafe; color: #1d4ed8; font-size: 16px; font-weight: 800; }
+.workflow-loop-hint[data-loop-state="restarted"] { border-color: #fdba74; background: #fff7ed; }
+.workflow-loop-hint[data-loop-state="restarted"] .workflow-loop-icon { background: #ffedd5; color: #c2410c; }
+.workflow-loop-hint[data-loop-state="complete"] { border-style: solid; border-color: #86efac; background: #f0fdf4; }
+.workflow-loop-hint[data-loop-state="complete"] .workflow-loop-icon { background: #dcfce7; color: #15803d; }
 .current-action-card { align-items: flex-end; padding: var(--sp-4); border: 1px solid var(--c-line); border-left: 3px solid var(--c-accent); border-radius: var(--r-lg); background: var(--c-surf-2); }
 .current-action-card > div { min-width: 0; }
 .current-action-card h3 { margin: 3px 0; color: var(--c-ink); font-size: var(--fs-lg); }

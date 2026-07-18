@@ -114,6 +114,8 @@ TSHOOT_BROWSER_SMOKE=1 scripts/test-browser-worker.sh
 
 真实 smoke 会让 Studio runtime manager 安装固定版本 Playwright/Chromium 并执行 launch + 本地页面截图 probe，然后验证最终 PNG、脱敏 Network/console 和 `browser-actions.json`。不得让默认测试下载浏览器、访问业务环境或修改真实登录态；发布前该 smoke 未通过时必须保留为明确 release gate，不能用离线 worker 测试替代。
 
+`make desktop-app` / `make desktop-dmg` 也是联网发布门禁：它们会把通过同一 RuntimeManager 真实 probe 的固定 Chromium runtime 缓存在 `.cache/desktop-browser-runtime`，并打入 App Resources。正式桌面包不得通过跳过该步骤来缩小产物；用户首次启动只做本地原子导入，开发用 `make desktop` 裸二进制才保留联网兜底。
+
 覆盖率门槛：
 
 | 包 | 门槛 |

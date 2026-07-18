@@ -51,8 +51,28 @@ type InvestigationResult struct {
 	Environment         string              `yaml:"environment" json:"environment"`
 	RootCause           string              `yaml:"root_cause,omitempty" json:"root_cause,omitempty"`
 	Confidence          string              `yaml:"confidence,omitempty" json:"confidence,omitempty"`
+	CallChain           []CallChainHop      `yaml:"call_chain" json:"call_chain"`
 	Evidence            []ArtifactReference `yaml:"evidence" json:"evidence"`
 	Gaps                []string            `yaml:"gaps" json:"gaps"`
+}
+
+// CallChainHop is one evidence-backed location in an investigation path. The
+// precision field is deliberately explicit so a static repository candidate
+// can never be displayed as an exact runtime source location.
+type CallChainHop struct {
+	Kind      string `yaml:"kind" json:"kind"`
+	Name      string `yaml:"name" json:"name"`
+	Service   string `yaml:"service,omitempty" json:"service,omitempty"`
+	Repo      string `yaml:"repo,omitempty" json:"repo,omitempty"`
+	Revision  string `yaml:"revision,omitempty" json:"revision,omitempty"`
+	Protocol  string `yaml:"protocol,omitempty" json:"protocol,omitempty"`
+	Operation string `yaml:"operation,omitempty" json:"operation,omitempty"`
+	File      string `yaml:"file,omitempty" json:"file,omitempty"`
+	Line      int    `yaml:"line,omitempty" json:"line,omitempty"`
+	Precision string `yaml:"precision" json:"precision"`
+	Evidence  string `yaml:"evidence,omitempty" json:"evidence,omitempty"`
+	RequestID string `yaml:"request_id,omitempty" json:"request_id,omitempty"`
+	TraceID   string `yaml:"trace_id,omitempty" json:"trace_id,omitempty"`
 }
 
 type PhaseResult struct {
@@ -100,6 +120,7 @@ type AgentPhaseRunner struct {
 	eventSink                   InvestigationEventSink
 	browserVerifier             BrowserVerifier
 	browserPolicyResolver       BrowserPolicyResolver
+	frontendRuntimeResolver     FrontendRuntimeResolver
 	openStaging                 func(string, string) (attemptEvidenceStaging, error)
 	completionReconcileAttempts int
 	completionReconcileDelay    time.Duration
@@ -170,6 +191,7 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 	complete := r.complete
 	browserVerifier := r.browserVerifier
 	browserPolicyResolver := r.browserPolicyResolver
+	frontendRuntimeResolver := r.frontendRuntimeResolver
 	r.mu.Unlock()
 	releaseReservation := func() {
 		cancel()
@@ -239,6 +261,16 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 	if err != nil {
 		return fail(fmt.Errorf("create Studio evidence staging: %w", err))
 	}
+	handoffPrompt, err := r.materializeInvestigationEvidence(ctx, attempt, staging)
+	if err != nil {
+		return fail(releaseUntransferredStaging(staging, fmt.Errorf("prepare validation evidence handoff: %w", err)))
+	}
+	prompt += handoffPrompt
+	frontendPrompt, err := r.materializeFrontendRuntime(ctx, attempt, incident, staging, frontendRuntimeResolver)
+	if err != nil {
+		return fail(releaseUntransferredStaging(staging, fmt.Errorf("prepare frontend runtime handoff: %w", err)))
+	}
+	prompt += frontendPrompt
 	checkpoint := (*FixCheckpoint)(nil)
 	if attempt.Phase == PhaseFix {
 		checkpoint = &FixCheckpoint{AttemptID: attempt.ID, CaseID: attempt.CaseID, StagingLocator: fixCheckpointLocator(staging)}
@@ -753,7 +785,7 @@ func buildStructuredInvestigationPrompt(bug Bug, bot BotRef) string {
 	sb.WriteString("请作为选定的 AI 排障机器人执行只读根因分析。先遵循 incident-investigator/SKILL.md 的取证流程。\n")
 	sb.WriteString(GenerateContext(bug, bot))
 	sb.WriteString("\n最终只输出严格 YAML，不得添加字段或解释性段落：\n")
-	sb.WriteString("investigation_status: root_cause_ready | insufficient_info\nenvironment: <env>\nroot_cause: <直接和深层根因；信息不足时为空>\nconfidence: high | medium | low\nevidence:\n  - kind: <trace|log|metric|code|config|data|command>\n    path: <Studio staging 目录内的相对路径>\n    captured_at: <RFC3339；仅兼容输出，Studio 以 fstat 为准>\n    environment: <env>\n    version: <可空>\n    request_id: <可空>\n    trace_id: <可空>\n    redaction_status: redacted | not_required # Studio 总会重新扫描\ngaps: []\n")
+	sb.WriteString("investigation_status: root_cause_ready | insufficient_info\nenvironment: <env>\nroot_cause: <直接和深层根因；信息不足时为空>\nconfidence: high | medium | low\ncall_chain:\n  - kind: <browser|frontend|gateway|service|queue|datastore|external>\n    name: <节点名称>\n    service: <可空>\n    repo: <可空>\n    revision: <可空；必须是实际部署版本>\n    protocol: <可空>\n    operation: <可空；HTTP method/path、RPC method、topic/queue 等>\n    file: <可空；仓库相对路径>\n    line: 0 # 未知时为 0\n    precision: runtime_verified | source_mapped | deployed_revision | static_candidate | unavailable\n    evidence: <可空；支持该跳的证据摘要>\n    request_id: <可空>\n    trace_id: <可空>\nevidence:\n  - kind: <trace|log|metric|code|config|data|command>\n    path: <Studio staging 目录内的相对路径>\n    captured_at: <RFC3339；仅兼容输出，Studio 以 fstat 为准>\n    environment: <env>\n    version: <可空>\n    request_id: <可空>\n    trace_id: <可空>\n    redaction_status: redacted | not_required # Studio 总会重新扫描\ngaps: []\n")
 	return sb.String()
 }
 
@@ -1046,6 +1078,41 @@ func ParseInvestigationResult(data []byte) (InvestigationResult, error) {
 	}
 	if result.Confidence != "high" && result.Confidence != "medium" && result.Confidence != "low" {
 		return InvestigationResult{}, fmt.Errorf("unsupported investigation confidence %q", result.Confidence)
+	}
+	if len(result.CallChain) > 64 {
+		return InvestigationResult{}, errors.New("investigation call_chain exceeds 64 hops")
+	}
+	for index, hop := range result.CallChain {
+		if strings.TrimSpace(hop.Kind) == "" || strings.TrimSpace(hop.Name) == "" {
+			return InvestigationResult{}, fmt.Errorf("investigation call_chain[%d] requires kind and name", index)
+		}
+		switch hop.Kind {
+		case "browser", "frontend", "gateway", "service", "queue", "datastore", "external":
+		default:
+			return InvestigationResult{}, fmt.Errorf("unsupported investigation call_chain[%d] kind %q", index, hop.Kind)
+		}
+		switch hop.Precision {
+		case "runtime_verified", "source_mapped", "deployed_revision", "static_candidate", "unavailable":
+		default:
+			return InvestigationResult{}, fmt.Errorf("unsupported investigation call_chain[%d] precision %q", index, hop.Precision)
+		}
+		if hop.Line < 0 {
+			return InvestigationResult{}, fmt.Errorf("investigation call_chain[%d] line must not be negative", index)
+		}
+		if hop.Precision == "source_mapped" && (strings.TrimSpace(hop.Repo) == "" || strings.TrimSpace(hop.Revision) == "" || strings.TrimSpace(hop.File) == "" || hop.Line == 0 || strings.TrimSpace(hop.Evidence) == "") {
+			return InvestigationResult{}, fmt.Errorf("investigation call_chain[%d] source_mapped precision requires repo, deployed revision, file, line, and evidence", index)
+		}
+		if hop.Precision == "deployed_revision" && (strings.TrimSpace(hop.Repo) == "" || strings.TrimSpace(hop.Revision) == "" || strings.TrimSpace(hop.Evidence) == "") {
+			return InvestigationResult{}, fmt.Errorf("investigation call_chain[%d] deployed_revision precision requires repo, revision, and evidence", index)
+		}
+		if (hop.Precision == "runtime_verified" || hop.Precision == "static_candidate") && strings.TrimSpace(hop.Evidence) == "" {
+			return InvestigationResult{}, fmt.Errorf("investigation call_chain[%d] %s precision requires evidence", index, hop.Precision)
+		}
+		for _, value := range []string{hop.Kind, hop.Name, hop.Service, hop.Repo, hop.Revision, hop.Protocol, hop.Operation, hop.File, hop.Evidence, hop.RequestID, hop.TraceID} {
+			if len(value) > 1000 {
+				return InvestigationResult{}, fmt.Errorf("investigation call_chain[%d] contains an oversized field", index)
+			}
+		}
 	}
 	return result, nil
 }

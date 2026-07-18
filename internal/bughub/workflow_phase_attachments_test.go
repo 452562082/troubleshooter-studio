@@ -42,6 +42,9 @@ func TestTargetCommandsTransportBrowserScreenshot(t *testing.T) {
 	if !strings.Contains(joined, "--image\n"+attachment.Path) || strings.Contains(codex.Args[len(codex.Args)-1], attachment.Path) {
 		t.Fatalf("Codex screenshot transport args = %#v", codex.Args)
 	}
+	if got := codex.Args[len(codex.Args)-2]; got != "--" {
+		t.Fatalf("Codex prompt delimiter = %q, want --; args = %#v", got, codex.Args)
+	}
 
 	agentPath := filepath.Join(workspace, "base-validator.md")
 	if err := os.WriteFile(agentPath, []byte("# validator"), 0o600); err != nil {

@@ -23,6 +23,7 @@ import {
   createLoginAuthFailureTracker,
   createLoginNavigationTracker,
   createBoundedRecordCollector,
+  createCDPNetworkEvidenceCollector,
   EVIDENCE_MAX_BYTES,
   EVIDENCE_MAX_RECORDS,
   EVIDENCE_TRUNCATION_MARKER,
@@ -85,12 +86,18 @@ test('redactConsoleText processes at most 8 KiB', () => {
   assert.ok(Buffer.byteLength(sanitized, 'utf8') <= 8 * 1024);
 });
 
-test('safeResponseRecord emits only the eight safe fields', () => {
+test('safeResponseRecord emits only the allowlisted causal network fields', () => {
   const record = safeResponseRecord({
+    action_id: 'click-search',
+    started_at: '2026-07-18T10:20:30.123Z',
     method: 'get',
     url: 'https://user:pass@app.test/api?code=abc&q=ok',
+    resource_type: 'fetch',
+    outcome: 'response',
     status: 200,
     duration_ms: 12.75,
+    initiator_type: 'script',
+    initiator_stack: [{ function_name: 'searchUsers', url: 'https://app.test/assets/index.js', source_map_url: 'https://app.test/assets/index.js.map?token=secret', line: 41, column: 9 }],
     headers: {
       'Set-Cookie': 'sid=response-secret',
       'Content-Type': 'application/json; charset=utf-8',
@@ -104,22 +111,54 @@ test('safeResponseRecord emits only the eight safe fields', () => {
   });
 
   assert.deepEqual(Object.keys(record), [
-    'method', 'url', 'status', 'duration_ms', 'content_type', 'content_length', 'request_id', 'trace_id',
+    'action_id', 'started_at', 'method', 'url', 'resource_type', 'outcome', 'failure_reason',
+    'status', 'duration_ms', 'content_type', 'content_length', 'request_id', 'trace_id',
+    'initiator_type', 'initiator_stack',
   ]);
   assert.deepEqual(record, {
+    action_id: 'click-search',
+    started_at: '2026-07-18T10:20:30.123Z',
     method: 'GET',
     url: 'https://app.test/api?code=%5BREDACTED%5D&q=ok',
+    resource_type: 'fetch',
+    outcome: 'response',
+    failure_reason: '',
     status: 200,
     duration_ms: 12.75,
     content_type: 'application/json; charset=utf-8',
     content_length: 321,
     request_id: 'req-1',
     trace_id: 'trace-1',
+    initiator_type: 'script',
+    initiator_stack: [{ function_name: 'searchUsers', url: 'https://app.test/assets/index.js', source_map_url: 'https://app.test/assets/index.js.map?token=%5BREDACTED%5D', line: 41, column: 9 }],
   });
   const encoded = JSON.stringify(record);
   for (const secret of ['response-secret', 'must-not-copy', 'raw-body-secret', 'arbitrary-secret', 'abc', 'user:pass']) {
     assert.equal(encoded.includes(secret), false, secret);
   }
+});
+
+test('safeResponseRecord bounds failed-request and initiator evidence without copying secrets', () => {
+  const record = safeResponseRecord({
+    action_id: 'submit-search',
+    started_at: 'invalid-time',
+    method: 'GET',
+    url: 'https://app.test/api/search',
+    resource_type: 'xhr',
+    outcome: 'failed',
+    failure_reason: 'net::ERR_CONNECTION_RESET',
+    initiator_type: 'script',
+    initiator_stack: [
+      { function_name: 'Authorization: Bearer stack-secret', url: 'https://app.test/app.js?token=stack-secret', line: 7, column: 2 },
+      ...Array.from({ length: 20 }, (_, index) => ({ function_name: `fn${index}`, url: `https://app.test/${index}.js`, line: index, column: 1 })),
+    ],
+  });
+  assert.equal(record.started_at, '');
+  assert.equal(record.outcome, 'failed');
+  assert.equal(record.failure_reason, 'net::ERR_CONNECTION_RESET');
+  assert.equal(record.initiator_stack.length, 12);
+  assert.equal(record.initiator_stack[0].function_name, '[REDACTED]');
+  assert.equal(record.initiator_stack[0].url.includes('stack-secret'), false);
 });
 
 test('safeResponseRecord protects overlong and credential-bearing IDs', () => {
@@ -146,6 +185,53 @@ test('safeResponseRecord protects overlong and credential-bearing IDs', () => {
   assert.equal(record.trace_id, '[REDACTED]');
   assert.equal(JSON.stringify(record).includes('request-secret'), false);
   assert.equal(JSON.stringify(record).includes('url-secret'), false);
+});
+
+test('CDP network collector binds action, initiator stack, response correlation, and failures', async () => {
+  const session = new EventEmitter();
+  const commands = [];
+  session.send = async (method) => { commands.push(method); };
+  const page = { context: () => ({ newCDPSession: async () => session }) };
+  const records = createBoundedRecordCollector();
+  let actionID = 'click-search';
+  const collector = await createCDPNetworkEvidenceCollector(page, records, () => actionID);
+  assert.ok(collector);
+  assert.deepEqual(commands, ['Network.enable', 'Debugger.enable']);
+
+  session.emit('Debugger.scriptParsed', {
+    url: 'https://app.test/assets/index.js',
+    sourceMapURL: 'index.js.map?build=42',
+  });
+
+  session.emit('Network.requestWillBeSent', {
+    requestId: 'cdp-1', wallTime: 1784341230.123, timestamp: 10,
+    type: 'Fetch',
+    request: { method: 'GET', url: 'https://app.test/api/users?q=%E6%B1%A4%E5%9C%86', headers: { traceparent: '00-abc-123-01' } },
+    initiator: { type: 'script', stack: { callFrames: [{ functionName: 'searchUsers', url: 'https://app.test/assets/index.js', lineNumber: 40, columnNumber: 8 }] } },
+  });
+  session.emit('Network.responseReceived', {
+    requestId: 'cdp-1', timestamp: 10.25,
+    response: { status: 200, headers: { 'content-type': 'application/json', 'x-request-id': 'req-1' } },
+  });
+
+  actionID = 'load-avatar';
+  session.emit('Network.requestWillBeSent', {
+    requestId: 'cdp-2', wallTime: 1784341231, timestamp: 11,
+    type: 'Image', request: { method: 'GET', url: 'https://app.test/avatar.png', headers: {} },
+    initiator: { type: 'parser' },
+  });
+  session.emit('Network.loadingFailed', { requestId: 'cdp-2', timestamp: 11.1, errorText: 'net::ERR_CONNECTION_RESET' });
+
+  const snapshot = records.snapshot();
+  assert.equal(snapshot.length, 2);
+  assert.equal(snapshot[0].action_id, 'click-search');
+  assert.equal(snapshot[0].outcome, 'response');
+  assert.equal(snapshot[0].request_id, 'req-1');
+  assert.equal(snapshot[0].trace_id, '00-abc-123-01');
+  assert.deepEqual(snapshot[0].initiator_stack, [{ function_name: 'searchUsers', url: 'https://app.test/assets/index.js', source_map_url: 'https://app.test/assets/index.js.map?build=42', line: 41, column: 9 }]);
+  assert.equal(snapshot[1].action_id, 'load-avatar');
+  assert.equal(snapshot[1].outcome, 'failed');
+  assert.equal(snapshot[1].failure_reason, 'net::ERR_CONNECTION_RESET');
 });
 
 const baseRequest = () => ({
@@ -498,7 +584,7 @@ test('pinned proxy rejects mixed DNS answers and routes an allowed loopback targ
     for (const flag of [
       '--disable-quic',
       '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
-      '--host-resolver-rules=MAP * ~NOTFOUND',
+      '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1',
     ]) {
       assert.ok(launch.args.includes(flag), flag);
     }
@@ -748,7 +834,7 @@ test('pinned browser launch owns proxy teardown on success and launch failure', 
     launch: async (options) => {
       events.push('chromium:launch');
       assert.equal(options.proxy.bypass, '<-loopback>');
-      assert.ok(options.args.includes('--host-resolver-rules=MAP * ~NOTFOUND'));
+      assert.ok(options.args.includes('--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1'));
       return browser;
     },
   };
@@ -806,7 +892,7 @@ test('supervised context installs request, response, console, page, download, di
   assert.equal(supervised.page, page);
   assert.deepEqual(contextOptions, {
     storageState: '/opaque/state.json',
-    serviceWorkers: 'block',
+    serviceWorkers: 'allow',
     acceptDownloads: false,
     viewport: { width: 1280, height: 720 },
   });
@@ -844,6 +930,43 @@ test('supervised context installs request, response, console, page, download, di
   });
   assert.equal(connected, true);
   assert.equal(supervised.blocked(), false);
+
+  let subresourceAborted = false;
+  await httpRoute({
+    request: () => ({
+      url: () => 'https://unapproved.test/optional-metric',
+      isNavigationRequest: () => false,
+    }),
+    continue: async () => { throw new Error('blocked subresource continued'); },
+    abort: async () => { subresourceAborted = true; },
+  });
+  assert.equal(subresourceAborted, true);
+  assert.equal(supervised.blocked(), false);
+
+  let webSocketClosed = false;
+  await webSocketRoute({
+    url: () => 'wss://unapproved.test/socket',
+    connectToServer: () => { throw new Error('blocked WebSocket connected'); },
+    close: () => { webSocketClosed = true; },
+  });
+  assert.equal(webSocketClosed, true);
+  assert.equal(supervised.blocked(), false);
+
+  const mainFrame = {};
+  const navigationPage = { mainFrame: () => mainFrame };
+  mainFrame.page = () => navigationPage;
+  let navigationAborted = false;
+  await httpRoute({
+    request: () => ({
+      url: () => 'https://unapproved.test/redirect',
+      isNavigationRequest: () => true,
+      frame: () => mainFrame,
+    }),
+    continue: async () => { throw new Error('blocked navigation continued'); },
+    abort: async () => { navigationAborted = true; },
+  });
+  assert.equal(navigationAborted, true);
+  assert.equal(supervised.blocked(), true);
 
   contextHandlers.get('request')();
   contextHandlers.get('response')();
@@ -889,13 +1012,14 @@ test('private destinations require exact configured origin', async () => {
 
 test('buildLocator maps only the six declared locator types', () => {
   const calls = [];
+	const result = { or: (other) => { calls.push(['or', other]); return result; } };
   const page = {
-    getByRole: (...args) => calls.push(['role', ...args]),
-    getByLabel: (...args) => calls.push(['label', ...args]),
-    getByText: (...args) => calls.push(['text', ...args]),
-    getByPlaceholder: (...args) => calls.push(['placeholder', ...args]),
-    getByTestId: (...args) => calls.push(['test_id', ...args]),
-    locator: (...args) => calls.push(['css', ...args]),
+	getByRole: (...args) => { calls.push(['role', ...args]); return result; },
+	getByLabel: (...args) => { calls.push(['label', ...args]); return result; },
+	getByText: (...args) => { calls.push(['text', ...args]); return result; },
+	getByPlaceholder: (...args) => { calls.push(['placeholder', ...args]); return result; },
+	getByTestId: (...args) => { calls.push(['test_id', ...args]); return result; },
+	locator: (...args) => { calls.push(['css', ...args]); return result; },
   };
   for (const locator of [
     { kind: 'role', value: 'button', name: 'Search' },
@@ -907,7 +1031,7 @@ test('buildLocator maps only the six declared locator types', () => {
   ]) {
     buildLocator(page, locator);
   }
-  assert.deepEqual(calls.map(([kind]) => kind), ['role', 'label', 'text', 'placeholder', 'test_id', 'css']);
+	assert.deepEqual(calls.map(([kind]) => kind), ['role', 'label', 'text', 'label', 'or', 'placeholder', 'label', 'or', 'test_id', 'css']);
   assert.throws(() => buildLocator(page, { kind: 'xpath', value: '//button' }), /locator/);
 });
 
@@ -1087,6 +1211,76 @@ test('executeAction scopes allowed fetch failures to the current controlled acti
   const action = { id: 'search', action: 'click', locator: { kind: 'role', value: 'button', name: 'Search' } };
   await worker.executeAction(page, action, { ...baseRequest(), policy }, 0, async () => ({ loginRequired: false, path: '' }), tracker);
   assert.equal(tracker.active(), true);
+});
+
+test('executeAction fills text inputs that omit the optional type attribute', async () => {
+	const worker = await import('./browser_worker.mjs');
+	let value = '';
+	const locator = {
+		getAttribute: async (name) => {
+			assert.equal(name, 'type');
+			return null;
+		},
+		fill: async (next) => { value = next; },
+	};
+	const page = { getByLabel: () => ({ first: () => locator }) };
+	await worker.executeAction(
+		page,
+		{ id: 'keyword', action: 'fill', locator: { kind: 'label', value: 'Search' }, value: '汤圆' },
+		baseRequest(),
+		0,
+		async () => ({ loginRequired: false, path: '' }),
+		null,
+	);
+	assert.equal(value, '汤圆');
+});
+
+test('executeAction canonicalizes case-insensitive named keys for Playwright', async () => {
+  const worker = await import('./browser_worker.mjs');
+  let pressed = '';
+  const locator = {
+    or: () => locator,
+    first: () => locator,
+    press: async (key) => { pressed = key; },
+  };
+  const page = { getByPlaceholder: () => locator, getByLabel: () => locator };
+  await worker.executeAction(
+    page,
+    { id: 'submit', action: 'press', locator: { kind: 'placeholder', value: '请输入搜索关键字' }, key: 'ENTER' },
+    baseRequest(),
+    0,
+    async () => ({ loginRequired: false, path: '' }),
+    null,
+  );
+  assert.equal(pressed, 'Enter');
+});
+
+test('application readiness waits for load and has a bounded network-idle fallback', async () => {
+  const worker = await import('./browser_worker.mjs');
+  const states = [];
+  let fallback = 0;
+  await worker.waitForApplicationReady({
+    waitForLoadState: async (state) => {
+      states.push(state);
+      if (state === 'networkidle') return new Promise(() => {});
+    },
+    waitForTimeout: async (milliseconds) => { fallback = milliseconds; },
+  });
+  assert.deepEqual(states, ['load', 'networkidle']);
+  assert.equal(fallback, 3_000);
+});
+
+test('SPA interaction settling yields after state-changing actions only', async () => {
+  const worker = await import('./browser_worker.mjs');
+  const waits = [];
+  const page = { waitForTimeout: async (milliseconds) => waits.push(milliseconds) };
+  for (const action of ['click', 'fill', 'press', 'select']) {
+    await worker.settleBrowserInteraction(page, { action });
+  }
+  for (const action of ['goto', 'wait_for', 'screenshot']) {
+    await worker.settleBrowserInteraction(page, { action });
+  }
+  assert.deepEqual(waits, [150, 150, 150, 150]);
 });
 
 test('execute auth tracking keeps API 401 active past quiet time until the same action and request semantic recovers', async () => {
@@ -1660,7 +1854,7 @@ test('guarded login context protects the initial page and every popup before use
   assert.equal(guarded.page, initialPage);
   assert.deepEqual(contextOptions, {
     storageState: '/opaque/state.json',
-    serviceWorkers: 'block',
+    serviceWorkers: 'allow',
     acceptDownloads: false,
     viewport: { width: 1280, height: 720 },
   });

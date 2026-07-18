@@ -311,6 +311,7 @@ func Run(ctx context.Context, cfg *config.SystemConfig, opts Options) (*Result, 
 		// 用户拿到种子改比从空白起强 10 倍。即使扫漏 50% 也比 0% 强,保守 best-effort。
 		ra.DownstreamCalls, ra.DataStoreUsages = analyzer.ScanDependenciesContext(ctx, effectiveStack, repoPath, repo.Analysis.IncludePaths)
 		ra.APIRoutes = analyzer.ScanAPIRoutesContext(ctx, effectiveStack, repoPath, repo.Analysis.IncludePaths)
+		ra.Messaging = analyzer.ScanMessagingEndpointsContext(ctx, effectiveStack, repoPath, repo.Analysis.IncludePaths)
 		// 扫"业务表 / collection / 缓存 prefix"——给 data-schema-map.yaml 自动填种子值,
 		// 多策略叠加(orm_annotation > orm_api_call > sql_literal > file_name)同 (name,kind) 去重保最高优先级。
 		ra.SchemaTables = analyzer.ScanSchemaContext(ctx, effectiveStack, repoPath, repo.Analysis.IncludePaths)

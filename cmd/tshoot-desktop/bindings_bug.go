@@ -134,9 +134,6 @@ func (a *App) SyncBugPlatform(platformID string) (bughub.SyncResult, error) {
 	result, err := runZentaoSyncWithSessionRecovery(platform, func(platform bughub.PlatformConfig) (bughub.SyncResult, error) {
 		return bughub.SyncZentaoAssigned(platform, bugStore(), nil)
 	})
-	if err == nil {
-		cleanupPrunedBugAttachmentCaches(result)
-	}
 	return result, err
 }
 
@@ -247,16 +244,6 @@ func cacheBugAttachment(bugID string, idx int, att bughub.Attachment, data []byt
 		att.Type = contentType
 	}
 	return att, nil
-}
-
-func cleanupPrunedBugAttachmentCaches(result bughub.SyncResult) {
-	for _, id := range result.PrunedIDs {
-		id = strings.TrimSpace(id)
-		if id == "" {
-			continue
-		}
-		_ = os.RemoveAll(filepath.Join(bughub.DefaultRoot(), "attachments", safePathSegment(id)))
-	}
 }
 
 func (a *App) LoginBugPlatform(input BugLoginInput) (BugLoginResult, error) {

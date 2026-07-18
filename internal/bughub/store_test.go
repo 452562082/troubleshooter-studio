@@ -97,7 +97,7 @@ func TestStoreListNormalizesLegacyZentaoHTMLSteps(t *testing.T) {
 	}
 }
 
-func TestStorePruneStaleIDsReturnsRemovedBugIDs(t *testing.T) {
+func TestStorePruneStaleIDsArchivesBugAndKeepsHistory(t *testing.T) {
 	store := NewStore(t.TempDir())
 	bugs := []Bug{
 		{ID: "zentao-keep", Source: "zentao", PlatformID: "zentao-main", Title: "keep"},
@@ -126,8 +126,45 @@ func TestStorePruneStaleIDsReturnsRemovedBugIDs(t *testing.T) {
 			t.Fatalf("Get %s ok=%v err=%v", id, ok, err)
 		}
 	}
-	if _, ok, err := store.Get("zentao-drop"); err != nil || ok {
-		t.Fatalf("Get zentao-drop ok=%v err=%v", ok, err)
+	archived, ok, err := store.Get("zentao-drop")
+	if err != nil || !ok {
+		t.Fatalf("Get archived zentao-drop ok=%v err=%v", ok, err)
+	}
+	if archived.InboxState != BugInboxHistory || archived.ArchivedAt == nil || archived.ArchiveReason != BugArchiveNoLongerAssigned {
+		t.Fatalf("archived bug = %+v", archived)
+	}
+	history, err := store.ListHistory()
+	if err != nil || len(history) != 1 || history[0].ID != "zentao-drop" {
+		t.Fatalf("history=%+v err=%v", history, err)
+	}
+	if inbox, err := store.ListInbox(); err != nil || len(inbox) != 3 {
+		t.Fatalf("inbox=%+v err=%v", inbox, err)
+	}
+
+	reopened := Bug{
+		ID: archived.ID, Source: archived.Source, PlatformID: archived.PlatformID,
+		Title: archived.Title, Status: "active", UpdatedAt: time.Now().UTC().Add(time.Minute),
+	}
+	if err := store.Upsert(reopened); err != nil {
+		t.Fatalf("reactivate archived bug: %v", err)
+	}
+	reactivated, ok, err := store.Get("zentao-drop")
+	if err != nil || !ok || reactivated.InboxState != BugInboxActive || reactivated.ArchivedAt != nil || reactivated.ArchiveReason != "" {
+		t.Fatalf("reactivated bug=%+v ok=%v err=%v", reactivated, ok, err)
+	}
+}
+
+func TestStoreResolvedBugIsListedAsHistory(t *testing.T) {
+	store := NewStore(t.TempDir())
+	if err := store.Upsert(Bug{ID: "zentao-840", Source: "zentao", Title: "search", Status: "resolved"}); err != nil {
+		t.Fatal(err)
+	}
+	if inbox, err := store.ListInbox(); err != nil || len(inbox) != 0 {
+		t.Fatalf("inbox=%+v err=%v", inbox, err)
+	}
+	history, err := store.ListHistory()
+	if err != nil || len(history) != 1 || history[0].ArchiveReason != BugArchiveSourceResolved {
+		t.Fatalf("history=%+v err=%v", history, err)
 	}
 }
 

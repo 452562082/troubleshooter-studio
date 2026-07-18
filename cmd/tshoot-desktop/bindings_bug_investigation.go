@@ -226,6 +226,13 @@ func platformForBugAttachments(bug bughub.Bug) (bughub.PlatformConfig, bool) {
 	if err != nil {
 		return bughub.PlatformConfig{}, false
 	}
+	if platformID := strings.TrimSpace(bug.PlatformID); platformID != "" {
+		for _, platform := range platforms {
+			if platform.Enabled && platform.ID == platformID {
+				return platform, true
+			}
+		}
+	}
 	source := strings.TrimSpace(strings.ToLower(bug.Source))
 	for _, platform := range platforms {
 		if !platform.Enabled {

@@ -158,6 +158,10 @@ export function GetIncidentArtifactPreview(arg1, arg2) {
   return window['go']['main']['App']['GetIncidentArtifactPreview'](arg1, arg2);
 }
 
+export function GetIncidentBrowserRuntimeStatus() {
+  return window['go']['main']['App']['GetIncidentBrowserRuntimeStatus']();
+}
+
 export function GetIncidentCase(arg1) {
   return window['go']['main']['App']['GetIncidentCase'](arg1);
 }
@@ -312,6 +316,10 @@ export function PrefillCreds(arg1) {
 
 export function PreloadConfigCenter(arg1) {
   return window['go']['main']['App']['PreloadConfigCenter'](arg1);
+}
+
+export function PrepareIncidentBrowserRuntime() {
+  return window['go']['main']['App']['PrepareIncidentBrowserRuntime']();
 }
 
 export function PreviewBugAttachment(arg1) {

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -24,16 +25,31 @@ const (
 var browserPNGSignature = []byte("\x89PNG\r\n\x1a\n")
 
 type browserNetworkEvidence struct {
-	Type          string  `json:"type,omitempty"`
-	Reason        string  `json:"reason,omitempty"`
-	Method        string  `json:"method,omitempty"`
-	URL           string  `json:"url,omitempty"`
-	Status        int64   `json:"status,omitempty"`
-	DurationMS    float64 `json:"duration_ms,omitempty"`
-	ContentType   string  `json:"content_type,omitempty"`
-	ContentLength int64   `json:"content_length,omitempty"`
-	RequestID     string  `json:"request_id,omitempty"`
-	TraceID       string  `json:"trace_id,omitempty"`
+	Type           string                  `json:"type,omitempty"`
+	Reason         string                  `json:"reason,omitempty"`
+	ActionID       string                  `json:"action_id,omitempty"`
+	StartedAt      string                  `json:"started_at,omitempty"`
+	Method         string                  `json:"method,omitempty"`
+	URL            string                  `json:"url,omitempty"`
+	ResourceType   string                  `json:"resource_type,omitempty"`
+	Outcome        string                  `json:"outcome,omitempty"`
+	FailureReason  string                  `json:"failure_reason,omitempty"`
+	Status         int64                   `json:"status,omitempty"`
+	DurationMS     float64                 `json:"duration_ms,omitempty"`
+	ContentType    string                  `json:"content_type,omitempty"`
+	ContentLength  int64                   `json:"content_length,omitempty"`
+	RequestID      string                  `json:"request_id,omitempty"`
+	TraceID        string                  `json:"trace_id,omitempty"`
+	InitiatorType  string                  `json:"initiator_type,omitempty"`
+	InitiatorStack []browserInitiatorFrame `json:"initiator_stack,omitempty"`
+}
+
+type browserInitiatorFrame struct {
+	FunctionName string `json:"function_name,omitempty"`
+	URL          string `json:"url,omitempty"`
+	SourceMapURL string `json:"source_map_url,omitempty"`
+	Line         int64  `json:"line,omitempty"`
+	Column       int64  `json:"column,omitempty"`
 }
 
 type browserConsoleEvidence struct {
@@ -239,7 +255,7 @@ func decodeStrictBrowserConsoleJSONL(content []byte) ([]browserConsoleEvidence, 
 
 func sanitizeBrowserNetworkEvidence(record *browserNetworkEvidence) error {
 	if record.Type != "" || record.Reason != "" {
-		if record.Type != "truncated" || record.Reason != "record_or_byte_limit" || record.Method != "" || record.URL != "" || record.Status != 0 || record.DurationMS != 0 || record.ContentType != "" || record.ContentLength != 0 || record.RequestID != "" || record.TraceID != "" {
+		if record.Type != "truncated" || record.Reason != "record_or_byte_limit" || record.ActionID != "" || record.StartedAt != "" || record.Method != "" || record.URL != "" || record.ResourceType != "" || record.Outcome != "" || record.FailureReason != "" || record.Status != 0 || record.DurationMS != 0 || record.ContentType != "" || record.ContentLength != 0 || record.RequestID != "" || record.TraceID != "" || record.InitiatorType != "" || len(record.InitiatorStack) != 0 {
 			return errors.New("frozen browser network truncation record is invalid")
 		}
 		return nil
@@ -247,8 +263,32 @@ func sanitizeBrowserNetworkEvidence(record *browserNetworkEvidence) error {
 	if record.Status < 0 || record.DurationMS < 0 || record.ContentLength < 0 {
 		return errors.New("frozen browser network evidence contains invalid numbers")
 	}
+	allowedResourceTypes := map[string]bool{"": true, "document": true, "stylesheet": true, "image": true, "media": true, "font": true, "script": true, "texttrack": true, "xhr": true, "fetch": true, "eventsource": true, "websocket": true, "manifest": true, "other": true}
+	allowedOutcomes := map[string]bool{"": true, "response": true, "failed": true, "redirected": true}
+	allowedInitiators := map[string]bool{"": true, "parser": true, "script": true, "preload": true, "signedexchange": true, "preflight": true, "other": true}
+	if !allowedResourceTypes[record.ResourceType] || !allowedOutcomes[record.Outcome] || !allowedInitiators[record.InitiatorType] || len(record.InitiatorStack) > 12 {
+		return errors.New("frozen browser network causal evidence is invalid")
+	}
+	for index := range record.InitiatorStack {
+		frame := &record.InitiatorStack[index]
+		if frame.Line < 0 || frame.Column < 0 {
+			return errors.New("frozen browser network initiator position is invalid")
+		}
+		frame.FunctionName = safeBoundedBrowserText(frame.FunctionName, 256)
+		frame.URL = safeBoundedBrowserText(frame.URL, 2048)
+		frame.SourceMapURL = safeBoundedBrowserText(frame.SourceMapURL, 2048)
+		if frame.SourceMapURL != "" {
+			parsed, err := url.Parse(frame.SourceMapURL)
+			if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https" && parsed.Scheme != "file") || ((parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host == "") {
+				return errors.New("frozen browser source map candidate URL is invalid")
+			}
+		}
+	}
+	record.ActionID = safeBoundedBrowserText(record.ActionID, 128)
+	record.StartedAt = safeBoundedBrowserText(record.StartedAt, 64)
 	record.Method = safeBoundedBrowserText(record.Method, 16)
 	record.URL = safeBoundedBrowserText(record.URL, 2048)
+	record.FailureReason = safeBoundedBrowserText(record.FailureReason, 512)
 	record.ContentType = safeBoundedBrowserText(record.ContentType, 256)
 	record.RequestID = safeBoundedBrowserText(record.RequestID, 128)
 	record.TraceID = safeBoundedBrowserText(record.TraceID, 128)

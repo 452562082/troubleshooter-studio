@@ -6,12 +6,14 @@ import {
   approveIncidentMerge,
   clearIncidentBrowserSession,
   continueIncidentCase,
+  getIncidentBrowserRuntimeStatus,
   getIncidentCase,
   listBugs,
   listIncidentCases,
   matchBugBots,
   notifyIncidentDeployed,
   openIncidentBrowserLogin,
+  prepareIncidentBrowserRuntime,
   repairIncidentBrowserRuntime,
   IncidentWorkflowCommandError,
   resetIncidentCaseWithWarnings,
@@ -44,12 +46,14 @@ vi.mock('../lib/bridge', async importOriginal => ({
   clearIncidentBrowserSession: vi.fn(),
   continueIncidentCase: vi.fn(),
   fetchBugByID: vi.fn(),
+  getIncidentBrowserRuntimeStatus: vi.fn().mockResolvedValue({ state: 'ready', version: '1.61.1', error_code: '', message: '' }),
   getIncidentCase: vi.fn(),
   listBugs: vi.fn().mockResolvedValue([]),
   listIncidentCases: vi.fn().mockResolvedValue([]),
   matchBugBots: vi.fn().mockResolvedValue([]),
   notifyIncidentDeployed: vi.fn(),
   openIncidentBrowserLogin: vi.fn(),
+  prepareIncidentBrowserRuntime: vi.fn(),
   repairIncidentBrowserRuntime: vi.fn(),
   resetIncidentCaseWithWarnings: vi.fn(),
   saveBugSelectedBot: vi.fn(),
@@ -167,6 +171,7 @@ afterEach(() => {
   vi.mocked(listBugs).mockReset().mockResolvedValue([])
   vi.mocked(listIncidentCases).mockReset().mockResolvedValue([])
   vi.mocked(getIncidentCase).mockReset()
+  vi.mocked(getIncidentBrowserRuntimeStatus).mockReset().mockResolvedValue({ state: 'ready', version: '1.61.1', error_code: '', message: '' })
   vi.mocked(matchBugBots).mockReset().mockResolvedValue([botMatch])
   vi.mocked(saveBugSelectedBot).mockReset().mockResolvedValue(bugA as any)
   vi.mocked(startIncidentCase).mockReset()
@@ -175,6 +180,7 @@ afterEach(() => {
   vi.mocked(approveIncidentMerge).mockReset()
   vi.mocked(notifyIncidentDeployed).mockReset()
   vi.mocked(openIncidentBrowserLogin).mockReset()
+  vi.mocked(prepareIncidentBrowserRuntime).mockReset().mockResolvedValue()
   vi.mocked(repairIncidentBrowserRuntime).mockReset()
   vi.mocked(clearIncidentBrowserSession).mockReset()
   vi.mocked(resetIncidentCaseWithWarnings).mockReset()
@@ -185,6 +191,69 @@ afterEach(() => {
 })
 
 describe('IncidentWorkbenchPage', () => {
+  it('prepares Chromium outside the Case, reports download progress, and blocks only Web starts until ready', async () => {
+    route.query = { bug_id: 'bug-a' }
+    const webBug = { ...bugA, frontend_url: 'https://test.example.com/search' }
+    vi.mocked(listBugs).mockResolvedValue([webBug])
+    vi.mocked(matchBugBots).mockResolvedValue([botMatch])
+    vi.mocked(getIncidentBrowserRuntimeStatus).mockResolvedValue({
+      state: 'installing', version: '1.61.1', error_code: 'browser_runtime_install_in_progress', message: '',
+    })
+
+    const wrapper = await mountedPage()
+
+    const start = wrapper.get<HTMLButtonElement>('[data-action="start-case"]')
+    expect(start.element.disabled).toBe(true)
+    expect(wrapper.get('[data-browser-runtime-summary]').text()).toContain('初始化验证浏览器基础工具')
+    expect(wrapper.text()).toContain('完成后才能启动 Web 验证')
+
+    const registration = runtime.EventsOn.mock.calls.find(call => call[0] === 'browser-runtime:status')
+    expect(registration).toBeTruthy()
+    registration?.[1]({
+      status: { state: 'installing', version: '1.61.1', error_code: 'browser_runtime_install_in_progress' },
+      code: 'browser_runtime_downloading', current: 40, total: 100,
+    })
+    await flushPromises()
+
+    expect(wrapper.get('[data-browser-runtime-summary]').text()).toContain('40%')
+    expect(wrapper.get('progress').attributes('value')).toBe('40')
+    await start.trigger('click')
+    expect(startIncidentCase).not.toHaveBeenCalled()
+  })
+
+  it('reports bundled Chromium import as a local first-launch step', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([{ ...bugA, frontend_url: 'https://test.example.com/search' }])
+    vi.mocked(matchBugBots).mockResolvedValue([botMatch])
+    vi.mocked(getIncidentBrowserRuntimeStatus).mockResolvedValue({
+      state: 'installing', version: '1.61.1', error_code: '', message: '',
+    })
+    const wrapper = await mountedPage()
+    const registration = runtime.EventsOn.mock.calls.find(call => call[0] === 'browser-runtime:status')
+    registration?.[1]({
+      status: { state: 'installing', version: '1.61.1' },
+      code: 'browser_runtime_importing', current: 0, total: 0,
+    })
+    await flushPromises()
+    expect(wrapper.get('[data-browser-runtime-summary]').text()).toContain('App 内置 Chromium')
+    expect(wrapper.get('[data-browser-runtime-summary]').text()).toContain('无需联网下载')
+  })
+
+  it('retries a broken Studio browser runtime without creating a Case', async () => {
+    vi.mocked(getIncidentBrowserRuntimeStatus)
+      .mockResolvedValueOnce({ state: 'broken', version: '1.61.1', error_code: 'browser_runtime_install_failed', message: '' })
+      .mockResolvedValue({ state: 'ready', version: '1.61.1', error_code: '', message: '' })
+
+    const wrapper = await mountedPage()
+    await wrapper.get('[data-action="prepare-browser-runtime"]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+
+    expect(prepareIncidentBrowserRuntime).toHaveBeenCalledTimes(1)
+    expect(startIncidentCase).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-browser-runtime-summary]').text()).toContain('Web 验证可直接执行')
+  })
+
   it('loads locally stored Bugs on mount without exposing a duplicate refresh action', async () => {
     vi.mocked(listBugs).mockResolvedValue([bugA])
 
@@ -367,6 +436,21 @@ describe('IncidentWorkbenchPage', () => {
     expect(wrapper.find('.lifecycle-region').exists()).toBe(false)
     expect(wrapper.find('.case-heading').exists()).toBe(false)
     expect(wrapper.text()).not.toContain(terminal.id)
+  })
+
+  it('shows the latest terminal Case when opened from Bug history', async () => {
+    route.query = { bug_id: 'bug-a', view: 'history' }
+    vi.mocked(listBugs).mockResolvedValue([{ ...bugA, inbox_state: 'history', status: 'resolved' }])
+    const terminal = incident('case-history-fixed', 'fixed_verified', '2026-07-13T00:00:00Z')
+    vi.mocked(listIncidentCases).mockResolvedValue([terminal])
+    mockCaseDetails(detail(terminal, { bug_ticket_resolution: { state: 'resolved', source_status: 'resolved' } }))
+
+    const wrapper = await mountedPage()
+
+    expect(wrapper.get('.bot-action-status').text()).toBe('历史故障闭环')
+    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe(terminal.id)
+    expect(wrapper.get('.workflow-loop-hint').text()).toContain('Bug 工单已转为已解决')
+    expect(wrapper.get('[data-action="restart-case"]').text()).toContain('重新开始故障闭环')
   })
 
   it('hides the lifecycle immediately when the active Case becomes terminal', async () => {

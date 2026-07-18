@@ -71,7 +71,7 @@ func SyncZentaoAssigned(platform PlatformConfig, store *Store, client *http.Clie
 			result.SelectedBugID = bugs[i].ID
 		}
 	}
-	// 清理本地存储中不在本次同步结果里的同平台旧 bug（已修复/关闭/重新指派）
+	// 移出收件箱，但保留历史快照和附件证据供闭环审计。
 	if prunedIDs, err := store.PruneStaleIDs("zentao", platform.ID, keepIDs); err == nil && len(prunedIDs) > 0 {
 		result.PrunedIDs = prunedIDs
 		result.Pruned = len(prunedIDs)

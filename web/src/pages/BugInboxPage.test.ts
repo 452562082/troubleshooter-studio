@@ -145,6 +145,7 @@ describe('BugInboxPage', () => {
     const source = readFileSync('src/pages/BugInboxPage.vue', 'utf8')
     expect(source).not.toMatch(/\.refresh-button\s*\{[^}]*position:\s*absolute/)
     expect(source).not.toContain('.ticket-list-panel :deep(.list-heading) { padding-right: 112px; }')
+    expect(source).toMatch(/\.ticket-list-panel \{[^}]*display: grid;[^}]*align-content: start;[^}]*gap: var\(--sp-3\);/)
   })
 
   it('declares concrete mobile touch-target and full-width save contracts', () => {
@@ -260,6 +261,28 @@ describe('BugInboxPage', () => {
 
     expect(wrapper.get('.ticket-detail h2').text()).toBe('缓存命中下降')
     expect(wrapper.text()).toContain('平台')
+  })
+
+  it('keeps resolved Bugs in a dedicated history view', async () => {
+    vi.mocked(listBugs).mockResolvedValue([
+      { ...bug, inbox_state: 'active', status: 'active' },
+      { ...bug, id: 'zentao-839', source_id: '839', title: '历史搜索故障', inbox_state: 'history', status: 'resolved', archive_reason: 'source_resolved' },
+    ])
+    const wrapper = await mountedInbox()
+
+    expect(wrapper.get('[data-ticket-view="inbox"]').attributes('aria-selected')).toBe('true')
+    expect(wrapper.find('[data-ticket-id="zentao-840"]').exists()).toBe(true)
+    expect(wrapper.find('[data-ticket-id="zentao-839"]').exists()).toBe(false)
+
+    await wrapper.get('[data-ticket-view="history"]').trigger('click')
+
+    expect(wrapper.get('[data-ticket-view="history"]').attributes('aria-selected')).toBe('true')
+    expect(wrapper.find('[data-ticket-id="zentao-840"]').exists()).toBe(false)
+    expect(wrapper.get('[data-ticket-id="zentao-839"]').text()).toContain('已解决')
+    expect(wrapper.get('.ticket-detail h2').text()).toBe('历史搜索故障')
+
+    await wrapper.get('[data-action="open-incident"]').trigger('click')
+    expect(router.push).toHaveBeenCalledWith({ path: '/incidents', query: { bug_id: 'zentao-839', view: 'history' } })
   })
 
   it('keeps platform configuration collapsed and saves mapped bots with their environment', async () => {

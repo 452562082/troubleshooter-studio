@@ -350,7 +350,7 @@ func TestBuildCodexExecCommandUsesSafeWorkspace(t *testing.T) {
 		t.Fatalf("BuildCodexExecCommand: %v", err)
 	}
 	got := strings.Join(cmd.Args, " ")
-	for _, want := range []string{"exec", "--json", "--cd " + workspace, "--sandbox workspace-write", "--skip-git-repo-check"} {
+	for _, want := range []string{"exec", "--json", "--enable respect_system_proxy", "-c suppress_unstable_features_warning=true", "--cd " + workspace, "--sandbox workspace-write", "--skip-git-repo-check"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("args %q missing %q", got, want)
 		}
@@ -360,6 +360,154 @@ func TestBuildCodexExecCommandUsesSafeWorkspace(t *testing.T) {
 	}
 	if cmd.Dir != workspace {
 		t.Fatalf("Dir = %q", cmd.Dir)
+	}
+}
+
+func TestExecutePhaseCommandPreservesPreparedEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell environment propagation regression is unix-specific")
+	}
+	root := t.TempDir()
+	bin := filepath.Join(root, "codex")
+	script := `#!/bin/sh
+if [ "$TSHOOT_CODEX_ENV_MARKER" != "expected" ]; then
+  echo "missing prepared environment" >&2
+  exit 7
+fi
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"OK"}}'
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(bin)
+	command.Dir = root
+	command.Env = append(os.Environ(), "TSHOOT_CODEX_ENV_MARKER=expected")
+
+	result, err := executePhaseCommand(context.Background(), command, ParseCodexJSONLEvent, &activeCodexRun{}, nil)
+	if err != nil {
+		t.Fatalf("executePhaseCommand: %v", err)
+	}
+	if result.FinalYAML != "OK" {
+		t.Fatalf("FinalYAML = %q, want OK", result.FinalYAML)
+	}
+}
+
+func TestExecutePhaseCommandPreservesExplicitEmptyEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell environment propagation regression is unix-specific")
+	}
+	t.Setenv("TSHOOT_CODEX_ENV_MARKER", "must-not-leak")
+	root := t.TempDir()
+	bin := filepath.Join(root, "codex")
+	script := `#!/bin/sh
+if [ -n "$TSHOOT_CODEX_ENV_MARKER" ]; then
+  echo "inherited parent environment" >&2
+  exit 7
+fi
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"OK"}}'
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(bin)
+	command.Dir = root
+	command.Env = []string{}
+
+	result, err := executePhaseCommand(context.Background(), command, ParseCodexJSONLEvent, &activeCodexRun{}, nil)
+	if err != nil {
+		t.Fatalf("executePhaseCommand: %v", err)
+	}
+	if result.FinalYAML != "OK" {
+		t.Fatalf("FinalYAML = %q, want OK", result.FinalYAML)
+	}
+}
+
+func TestExecutePhaseCommandAcceptsCompletedResultAfterRecoverableCodexError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fixture is unix-specific")
+	}
+	root := t.TempDir()
+	bin := filepath.Join(root, "codex")
+	script := `#!/bin/sh
+printf '%s\n' '{"type":"error","message":"Reconnecting... 5/5 (tls handshake eof)"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"version: 1"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":17,"output_tokens":9}}'
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := executePhaseCommand(context.Background(), exec.Command(bin), ParseCodexJSONLEvent, &activeCodexRun{}, nil)
+	if err != nil {
+		t.Fatalf("executePhaseCommand rejected recovered Codex stream: %v", err)
+	}
+	if result.FinalYAML != "version: 1" || result.Usage.InputTokens != 17 || result.Usage.OutputTokens != 9 {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestExecutePhaseCommandRejectsUnrecoveredCodexError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fixture is unix-specific")
+	}
+	root := t.TempDir()
+	bin := filepath.Join(root, "codex")
+	script := `#!/bin/sh
+printf '%s\n' '{"type":"error","message":"request timed out"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"partial result"}}'
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := executePhaseCommand(context.Background(), exec.Command(bin), ParseCodexJSONLEvent, &activeCodexRun{}, nil); err == nil || !strings.Contains(err.Error(), "request timed out") {
+		t.Fatalf("executePhaseCommand error = %v, want unrecovered transport error", err)
+	}
+}
+
+func TestExecutePhaseCommandDoesNotMaskTerminalCodexFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fixture is unix-specific")
+	}
+	root := t.TempDir()
+	bin := filepath.Join(root, "codex")
+	script := `#!/bin/sh
+printf '%s\n' '{"type":"turn.failed","error":{"message":"auth missing"}}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"stale result"}}'
+printf '%s\n' '{"type":"turn.completed"}'
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := executePhaseCommand(context.Background(), exec.Command(bin), ParseCodexJSONLEvent, &activeCodexRun{}, nil); err == nil || !strings.Contains(err.Error(), "auth missing") {
+		t.Fatalf("executePhaseCommand error = %v, want terminal failure", err)
+	}
+}
+
+func TestRunCommandStageAcceptsCompletedResultAfterRecoverableCodexError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fixture is unix-specific")
+	}
+	root := t.TempDir()
+	bin := filepath.Join(root, "codex")
+	script := `#!/bin/sh
+printf '%s\n' '{"type":"error","message":"stream disconnected before completion: tls handshake eof"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"recovered result"}}'
+printf '%s\n' '{"type":"turn.completed"}'
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := NewInvestigationStore(filepath.Join(root, "runs"))
+	if err := store.Upsert(InvestigationRun{ID: "run-recovered", BugID: "bug-1", Status: InvestigationRunning}); err != nil {
+		t.Fatal(err)
+	}
+	investigator := NewCodexInvestigator(store, bin)
+
+	final, status, err := investigator.runCommandStage(context.Background(), "run-recovered", exec.Command(bin), ParseCodexJSONLEvent, &activeCodexRun{}, "validation")
+	if err != nil || status != InvestigationSucceeded || final != "recovered result" {
+		t.Fatalf("final=%q status=%q err=%v", final, status, err)
 	}
 }
 

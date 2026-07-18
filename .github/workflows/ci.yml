@@ -80,6 +80,12 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
+      - name: cache pinned desktop Chromium runtime
+        uses: actions/cache@v4
+        with:
+          path: .cache/desktop-browser-runtime
+          key: desktop-browser-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('internal/browserverify/runtime.go', 'internal/browserverify/worker/*.mjs') }}
+
       - name: npm ci
         run: npm ci --ignore-scripts
 
@@ -164,6 +170,8 @@ jobs:
           test -f dist/TroubleshooterStudio.app/Contents/MacOS/TroubleshooterStudio
           test -f dist/TroubleshooterStudio.app/Contents/Info.plist
           test -f dist/TroubleshooterStudio.app/Contents/Resources/icon.icns
+          test -f dist/TroubleshooterStudio.app/Contents/Resources/browser-runtime/1.61.1-r9/.runtime-ready.json
+          test -d dist/TroubleshooterStudio.app/Contents/Resources/browser-runtime/1.61.1-r9/browsers
           file dist/TroubleshooterStudio.app/Contents/MacOS/TroubleshooterStudio
           echo "✓ .app bundle structure OK"
 

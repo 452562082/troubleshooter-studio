@@ -112,12 +112,12 @@ var (
 )
 
 type NextCycleInvestigationInput struct {
-	PreviousCycle                int      `json:"previous_cycle"`
-	RegressionAttemptID          string   `json:"regression_attempt_id"`
-	ScenarioHash                 string   `json:"scenario_hash"`
-	ObservedDeploymentVersion    string   `json:"observed_deployment_version"`
-	RegressionEvidenceReferences []string `json:"regression_evidence_refs"`
-	Delta                        string   `json:"delta"`
+	PreviousCycle                int                              `json:"previous_cycle"`
+	RegressionAttemptID          string                           `json:"regression_attempt_id"`
+	ScenarioHash                 string                           `json:"scenario_hash"`
+	ObservedDeploymentVersion    string                           `json:"observed_deployment_version"`
+	RegressionEvidenceReferences []InvestigationEvidenceReference `json:"regression_evidence_refs"`
+	Delta                        string                           `json:"delta"`
 }
 
 // StartRegression is the single entrypoint for scheduling a regression phase.
@@ -471,11 +471,20 @@ func (o *CaseOrchestrator) buildNextCycleInvestigationInput(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
-	refs := make([]string, 0, len(artifacts))
+	refs := make([]InvestigationEvidenceReference, 0, len(artifacts))
 	for _, artifact := range artifacts {
-		refs = append(refs, artifact.ID+":"+artifact.SHA256)
+		refs = append(refs, InvestigationEvidenceReference{
+			ArtifactID: artifact.ID, Kind: artifact.Kind, SHA256: artifact.SHA256,
+			Environment: artifact.Environment, Version: artifact.Version,
+			RequestID: artifact.RequestID, TraceID: artifact.TraceID,
+		})
 	}
-	sort.Strings(refs)
+	sort.Slice(refs, func(i, j int) bool {
+		if refs[i].Kind != refs[j].Kind {
+			return refs[i].Kind < refs[j].Kind
+		}
+		return refs[i].ArtifactID < refs[j].ArtifactID
+	})
 	delta := fmt.Sprintf("original observation remains unexplained: %s; regression observation after deployed fix: %s", regression.OriginalObservedBehavior, result.ObservedBehavior)
 	input := NextCycleInvestigationInput{PreviousCycle: attempt.CycleNumber, RegressionAttemptID: attempt.ID, ScenarioHash: regression.OriginalScenarioHash, ObservedDeploymentVersion: regression.ObservedDeploymentVersion, RegressionEvidenceReferences: refs, Delta: delta}
 	return json.Marshal(input)

@@ -15,13 +15,25 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 )
 
-const browserRuntimeVersion = "1.61.1"
+const browserRuntimeVersion = "1.61.1-r10"
+
+// BrowserRuntimeVersion is the immutable Playwright runtime version bundled by
+// desktop release artifacts. Packaging and runtime discovery must agree on it.
+const BrowserRuntimeVersion = browserRuntimeVersion
+
+const (
+	browserRuntimeDependencyInstallTimeout = 5 * time.Minute
+	browserRuntimeDownloadTimeout          = 90 * time.Minute
+	browserRuntimeProbeTimeout             = time.Minute
+)
 
 const browserRuntimePackageJSON = "{\n  \"name\": \"tshoot-browser-runtime\",\n  \"private\": true,\n  \"version\": \"1.61.1\",\n  \"dependencies\": { \"playwright\": \"1.61.1\" }\n}\n"
 
@@ -60,10 +72,23 @@ type CommandRunner interface {
 
 type RuntimeManager struct {
 	managementRoot    string
+	bundledRuntimeDir string
+	browserCacheRoot  string
 	runner            CommandRunner
-	mu                sync.Mutex
+	installMu         sync.Mutex
+	statusMu          sync.RWMutex
 	status            RuntimeStatus
 	beforeInstallLock func()
+	dependencyTimeout time.Duration
+	downloadTimeout   time.Duration
+	probeTimeout      time.Duration
+}
+
+// SetPlaywrightBrowserCache lets release tooling seed the isolated runtime
+// from Playwright's verified local cache before running `playwright install`.
+// The install command and real probe still run and remain authoritative.
+func (m *RuntimeManager) SetPlaywrightBrowserCache(root string) {
+	m.browserCacheRoot = strings.TrimSpace(root)
 }
 
 type execCommandRunner struct {
@@ -112,12 +137,23 @@ func (runner execCommandRunner) Run(ctx context.Context, executable string, args
 }
 
 func NewRuntimeManager(managementRoot string, runner CommandRunner) *RuntimeManager {
+	return NewRuntimeManagerWithBundle(managementRoot, "", runner)
+}
+
+// NewRuntimeManagerWithBundle configures an optional, release-provided runtime
+// directory. Ensure imports a valid bundle into the per-user management root
+// before considering any network installation.
+func NewRuntimeManagerWithBundle(managementRoot, bundledRuntimeDir string, runner CommandRunner) *RuntimeManager {
 	if runner == nil {
 		runner = execCommandRunner{}
 	}
-	return &RuntimeManager{
-		managementRoot: managementRoot,
-		runner:         runner,
+	manager := &RuntimeManager{
+		managementRoot:    managementRoot,
+		bundledRuntimeDir: strings.TrimSpace(bundledRuntimeDir),
+		runner:            runner,
+		dependencyTimeout: browserRuntimeDependencyInstallTimeout,
+		downloadTimeout:   browserRuntimeDownloadTimeout,
+		probeTimeout:      browserRuntimeProbeTimeout,
 		status: RuntimeStatus{
 			State:     RuntimeBroken,
 			Version:   browserRuntimeVersion,
@@ -125,11 +161,20 @@ func NewRuntimeManager(managementRoot string, runner CommandRunner) *RuntimeMana
 			Message:   "browser runtime is not installed",
 		},
 	}
+	paths := manager.pathsFor(manager.currentDir())
+	if info, err := os.Lstat(paths.Root); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+		if validatePublishedRuntime(paths) == nil {
+			manager.status = RuntimeStatus{State: RuntimeReady, Version: browserRuntimeVersion}
+		} else {
+			manager.status = RuntimeStatus{State: RuntimeBroken, Version: browserRuntimeVersion, ErrorCode: "browser_runtime_broken", Message: "browser runtime validation failed during Studio startup"}
+		}
+	}
+	return manager
 }
 
 func (m *RuntimeManager) Ensure(ctx context.Context, emit func(bughub.BrowserProgress)) (RuntimePaths, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.installMu.Lock()
+	defer m.installMu.Unlock()
 	return m.ensureLocked(ctx, emit)
 }
 
@@ -142,7 +187,7 @@ func (m *RuntimeManager) ensureLocked(ctx context.Context, emit func(bughub.Brow
 		if err := validatePublishedRuntime(paths); err != nil {
 			return RuntimePaths{}, m.setBrokenLocked("browser_runtime_broken", "browser runtime validation failed", err)
 		}
-		m.status = RuntimeStatus{State: RuntimeReady, Version: browserRuntimeVersion}
+		m.setStatus(RuntimeStatus{State: RuntimeReady, Version: browserRuntimeVersion})
 		return paths, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_broken", "browser runtime cannot be inspected", err)
@@ -164,7 +209,7 @@ func (m *RuntimeManager) ensureLocked(ctx context.Context, emit func(bughub.Brow
 			return RuntimePaths{}, fmt.Errorf("browser runtime install blocked by a legacy lock: %w", err)
 		}
 		if errors.Is(err, fs.ErrExist) {
-			m.status = RuntimeStatus{State: RuntimeInstalling, Version: browserRuntimeVersion, ErrorCode: "browser_runtime_install_in_progress", Message: "another Studio process is installing the browser runtime"}
+			m.setStatus(RuntimeStatus{State: RuntimeInstalling, Version: browserRuntimeVersion, ErrorCode: "browser_runtime_install_in_progress", Message: "another Studio process is installing the browser runtime"})
 			return RuntimePaths{}, fmt.Errorf("browser runtime install is already in progress: %w", err)
 		}
 		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_install_failed", "acquire browser runtime install lock", err)
@@ -188,13 +233,21 @@ func (m *RuntimeManager) ensureLocked(ctx context.Context, emit func(bughub.Brow
 		if err := validatePublishedRuntime(paths); err != nil {
 			return RuntimePaths{}, m.setBrokenLocked("browser_runtime_broken", "browser runtime validation failed after install lock", err)
 		}
-		m.status = RuntimeStatus{State: RuntimeReady, Version: browserRuntimeVersion}
+		m.setStatus(RuntimeStatus{State: RuntimeReady, Version: browserRuntimeVersion})
 		return paths, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_broken", "browser runtime cannot be inspected after install lock", err)
 	}
+	if m.bundledRuntimeDir != "" {
+		paths, err := m.importBundledRuntimeLocked(emit)
+		if err != nil {
+			return RuntimePaths{}, err
+		}
+		publishedByThisCall = true
+		return paths, nil
+	}
 
-	m.status = RuntimeStatus{State: RuntimeInstalling, Version: browserRuntimeVersion}
+	m.setStatus(RuntimeStatus{State: RuntimeInstalling, Version: browserRuntimeVersion})
 	emitRuntimeProgress(emit, "browser_runtime_installing", "Installing pinned Playwright browser runtime")
 	temporary, err := os.MkdirTemp(m.runtimeRoot(), ".install-"+browserRuntimeVersion+"-")
 	if err != nil {
@@ -222,23 +275,32 @@ func (m *RuntimeManager) ensureLocked(ctx context.Context, emit func(bughub.Brow
 	}
 
 	var stderr bytes.Buffer
-	if err := m.runner.Run(ctx, "npm", []string{"install", "--ignore-scripts", "--no-audit", "--no-fund"}, nil, temporary, nil, io.Discard, &stderr); err != nil {
+	emitRuntimeProgress(emit, "browser_runtime_dependencies_installing", "Installing pinned Playwright dependencies")
+	if err := m.runCommandWithTimeout(ctx, m.dependencyTimeout, "npm", []string{"install", "--ignore-scripts", "--no-audit", "--no-fund"}, nil, temporary, io.Discard, &stderr); err != nil {
 		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_install_failed", "npm install failed", errors.Join(err, boundedRuntimeStderr(&stderr)))
 	}
 	temporaryBrowsers := filepath.Join(temporary, "browsers")
 	if err := os.MkdirAll(temporaryBrowsers, 0o700); err != nil {
 		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_install_failed", "create temporary browser directory", err)
 	}
+	if m.browserCacheRoot != "" {
+		if err := seedPlaywrightBrowserCache(filepath.Join(temporary, "node_modules", "playwright-core", "browsers.json"), m.browserCacheRoot, temporaryBrowsers); err != nil {
+			return RuntimePaths{}, m.setBrokenLocked("browser_runtime_install_failed", "seed Playwright browser cache", err)
+		}
+	}
 	playwright := filepath.Join(temporary, "node_modules", ".bin", "playwright")
 	stderr.Reset()
-	if err := m.runner.Run(ctx, playwright, []string{"install", "chromium"}, []string{"PLAYWRIGHT_BROWSERS_PATH=" + temporaryBrowsers}, temporary, nil, io.Discard, &stderr); err != nil {
+	emitRuntimeProgressStep(emit, "browser_runtime_downloading", "Downloading pinned Chromium browser", 0, 100)
+	downloadProgress := newPlaywrightDownloadProgressWriter(emit)
+	if err := m.runCommandWithTimeout(ctx, m.downloadTimeout, playwright, []string{"install", "chromium"}, []string{"PLAYWRIGHT_BROWSERS_PATH=" + temporaryBrowsers}, temporary, downloadProgress, &stderr); err != nil {
 		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_install_failed", "Playwright Chromium install failed", errors.Join(err, boundedRuntimeStderr(&stderr)))
 	}
 
 	probePNG := filepath.Join(temporary, "probe.png")
 	var probeOutput bytes.Buffer
 	stderr.Reset()
-	if err := m.runner.Run(ctx, "node", []string{filepath.Join(temporary, "browser_worker.mjs"), "--mode", "probe", "--output", probePNG}, []string{"PLAYWRIGHT_BROWSERS_PATH=" + temporaryBrowsers}, temporary, nil, &probeOutput, &stderr); err != nil {
+	emitRuntimeProgress(emit, "browser_runtime_probing", "Starting Chromium runtime probe")
+	if err := m.runCommandWithTimeout(ctx, m.probeTimeout, "node", []string{filepath.Join(temporary, "browser_worker.mjs"), "--mode", "probe", "--output", probePNG}, []string{"PLAYWRIGHT_BROWSERS_PATH=" + temporaryBrowsers}, temporary, &probeOutput, &stderr); err != nil {
 		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_probe_failed", "browser runtime probe failed", errors.Join(err, boundedRuntimeStderr(&stderr)))
 	}
 	probe, err := validateRuntimeProbe(probeOutput.Bytes(), probePNG)
@@ -269,14 +331,234 @@ func (m *RuntimeManager) ensureLocked(ctx context.Context, emit func(bughub.Brow
 	published = true
 	publishedByThisCall = true
 	paths = m.pathsFor(m.currentDir())
-	m.status = RuntimeStatus{State: RuntimeReady, Version: browserRuntimeVersion}
+	m.setStatus(RuntimeStatus{State: RuntimeReady, Version: browserRuntimeVersion})
 	emitRuntimeProgress(emit, "browser_runtime_ready", "Browser runtime is ready")
 	return paths, nil
 }
 
+func (m *RuntimeManager) importBundledRuntimeLocked(emit func(bughub.BrowserProgress)) (RuntimePaths, error) {
+	source := m.pathsFor(filepath.Clean(m.bundledRuntimeDir))
+	if err := validatePublishedRuntime(source); err != nil {
+		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_bundle_invalid", "bundled browser runtime validation failed", err)
+	}
+	m.setStatus(RuntimeStatus{State: RuntimeInstalling, Version: browserRuntimeVersion})
+	emitRuntimeProgress(emit, "browser_runtime_importing", "Importing bundled Chromium runtime")
+	temporary, err := os.MkdirTemp(m.runtimeRoot(), ".import-"+browserRuntimeVersion+"-")
+	if err != nil {
+		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_import_failed", "create temporary bundled runtime directory", err)
+	}
+	if err := os.Chmod(temporary, 0o700); err != nil {
+		_ = os.RemoveAll(temporary)
+		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_import_failed", "secure temporary bundled runtime directory", err)
+	}
+	published := false
+	defer func() {
+		if !published {
+			_ = os.RemoveAll(temporary)
+		}
+	}()
+	if err := copyRuntimeTree(source.Root, temporary); err != nil {
+		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_import_failed", "copy bundled browser runtime", err)
+	}
+	imported := m.pathsFor(temporary)
+	if err := validatePublishedRuntime(imported); err != nil {
+		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_import_failed", "validate imported browser runtime", err)
+	}
+	if err := syncRuntimeTree(temporary); err != nil {
+		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_import_failed", "sync imported browser runtime", err)
+	}
+	if err := os.Rename(temporary, m.currentDir()); err != nil {
+		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_import_failed", "publish imported browser runtime", err)
+	}
+	if err := syncRuntimeDirectory(m.runtimeRoot()); err != nil {
+		_ = os.RemoveAll(m.currentDir())
+		_ = syncRuntimeDirectory(m.runtimeRoot())
+		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_import_failed", "sync published bundled runtime", err)
+	}
+	published = true
+	paths := m.pathsFor(m.currentDir())
+	m.setStatus(RuntimeStatus{State: RuntimeReady, Version: browserRuntimeVersion})
+	emitRuntimeProgress(emit, "browser_runtime_ready", "Browser runtime is ready")
+	return paths, nil
+}
+
+func copyRuntimeTree(source, destination string) error {
+	source = filepath.Clean(source)
+	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		if relative == "." {
+			return nil
+		}
+		target := filepath.Join(destination, relative)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			if filepath.IsAbs(link) {
+				return fmt.Errorf("bundled runtime contains absolute symlink: %s", relative)
+			}
+			resolved := filepath.Clean(filepath.Join(filepath.Dir(path), link))
+			inside, err := filepath.Rel(source, resolved)
+			if err != nil || inside == ".." || strings.HasPrefix(inside, ".."+string(filepath.Separator)) {
+				return fmt.Errorf("bundled runtime symlink escapes source: %s", relative)
+			}
+			return os.Symlink(link, target)
+		}
+		if info.IsDir() {
+			return os.Mkdir(target, 0o700)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("bundled runtime contains unsupported file: %s", relative)
+		}
+		mode := fs.FileMode(0o600)
+		if info.Mode().Perm()&0o111 != 0 {
+			mode = 0o700
+		}
+		input, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		output, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+		if err != nil {
+			_ = input.Close()
+			return err
+		}
+		_, copyErr := io.Copy(output, input)
+		return errors.Join(copyErr, output.Close(), input.Close())
+	})
+}
+
+func seedPlaywrightBrowserCache(manifestPath, cacheRoot, destination string) error {
+	var manifest struct {
+		Browsers []struct {
+			Name              string            `json:"name"`
+			Revision          string            `json:"revision"`
+			RevisionOverrides map[string]string `json:"revisionOverrides"`
+		} `json:"browsers"`
+	}
+	encoded, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(encoded, &manifest); err != nil {
+		return err
+	}
+	prefixes := map[string]string{
+		"chromium":                "chromium",
+		"chromium-headless-shell": "chromium_headless_shell",
+		"ffmpeg":                  "ffmpeg",
+	}
+	for _, browser := range manifest.Browsers {
+		prefix, wanted := prefixes[browser.Name]
+		if !wanted {
+			continue
+		}
+		revisions := map[string]struct{}{browser.Revision: {}}
+		for _, revision := range browser.RevisionOverrides {
+			revisions[revision] = struct{}{}
+		}
+		for revision := range revisions {
+			if strings.TrimSpace(revision) == "" {
+				continue
+			}
+			name := prefix + "-" + revision
+			source := filepath.Join(cacheRoot, name)
+			info, err := os.Lstat(source)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("unsafe Playwright cache entry: %s", name)
+			}
+			marker, err := os.Lstat(filepath.Join(source, "INSTALLATION_COMPLETE"))
+			if err != nil || !marker.Mode().IsRegular() || marker.Mode()&os.ModeSymlink != 0 {
+				continue
+			}
+			target := filepath.Join(destination, name)
+			if err := os.Mkdir(target, 0o700); err != nil {
+				return err
+			}
+			if err := copyRuntimeTree(source, target); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (m *RuntimeManager) runCommandWithTimeout(ctx context.Context, timeout time.Duration, executable string, args, env []string, dir string, stdout, stderr io.Writer) error {
+	commandContext, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	err := m.runner.Run(commandContext, executable, args, env, dir, nil, stdout, stderr)
+	if commandContextErr := commandContext.Err(); commandContextErr != nil {
+		return errors.Join(commandContextErr, err)
+	}
+	return err
+}
+
+type playwrightDownloadProgressWriter struct {
+	mu      sync.Mutex
+	pending []byte
+	last    int
+	emit    func(bughub.BrowserProgress)
+}
+
+func newPlaywrightDownloadProgressWriter(emit func(bughub.BrowserProgress)) *playwrightDownloadProgressWriter {
+	return &playwrightDownloadProgressWriter{last: 0, emit: emit}
+}
+
+func (w *playwrightDownloadProgressWriter) Write(content []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.pending = append(w.pending, content...)
+	for {
+		newline := bytes.IndexByte(w.pending, '\n')
+		if newline < 0 {
+			break
+		}
+		line := string(w.pending[:newline])
+		w.pending = w.pending[newline+1:]
+		percentage, ok := parsePlaywrightDownloadPercentage(line)
+		if !ok || percentage <= w.last {
+			continue
+		}
+		w.last = percentage
+		emitRuntimeProgressStep(w.emit, "browser_runtime_downloading", "Downloading pinned Chromium browser", percentage, 100)
+	}
+	return len(content), nil
+}
+
+func parsePlaywrightDownloadPercentage(line string) (int, bool) {
+	if !strings.Contains(line, "% of ") || !strings.Contains(line, "|") {
+		return 0, false
+	}
+	for _, field := range strings.Fields(line) {
+		if !strings.HasSuffix(field, "%") {
+			continue
+		}
+		percentage, err := strconv.Atoi(strings.TrimSuffix(field, "%"))
+		if err != nil || percentage < 0 || percentage > 100 {
+			return 0, false
+		}
+		return percentage, true
+	}
+	return 0, false
+}
+
 func (m *RuntimeManager) Repair(ctx context.Context, emit func(bughub.BrowserProgress)) (RuntimePaths, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.installMu.Lock()
+	defer m.installMu.Unlock()
 	if err := os.MkdirAll(m.runtimeRoot(), 0o700); err != nil {
 		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_repair_failed", "create browser runtime root before repair", err)
 	}
@@ -287,7 +569,7 @@ func (m *RuntimeManager) Repair(ctx context.Context, emit func(bughub.BrowserPro
 			return RuntimePaths{}, KnownFailedRecoveryEffect(fmt.Errorf("browser runtime repair blocked by a legacy lock: %w", err))
 		}
 		if errors.Is(err, fs.ErrExist) {
-			m.status = RuntimeStatus{State: RuntimeInstalling, Version: browserRuntimeVersion, ErrorCode: "browser_runtime_install_in_progress", Message: "another Studio process is installing or repairing the browser runtime"}
+			m.setStatus(RuntimeStatus{State: RuntimeInstalling, Version: browserRuntimeVersion, ErrorCode: "browser_runtime_install_in_progress", Message: "another Studio process is installing or repairing the browser runtime"})
 			return RuntimePaths{}, KnownFailedRecoveryEffect(fmt.Errorf("browser runtime repair is already in progress: %w", err))
 		}
 		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_repair_failed", "acquire browser runtime repair lock", err)
@@ -318,7 +600,7 @@ func (m *RuntimeManager) Repair(ctx context.Context, emit func(bughub.BrowserPro
 		if err := releaseForEnsure(); err != nil {
 			return RuntimePaths{}, err
 		}
-		m.status = RuntimeStatus{State: RuntimeReady, Version: browserRuntimeVersion}
+		m.setStatus(RuntimeStatus{State: RuntimeReady, Version: browserRuntimeVersion})
 		return paths, nil
 	}
 	if err := os.RemoveAll(paths.Root); err != nil {
@@ -336,9 +618,34 @@ func (m *RuntimeManager) Repair(ctx context.Context, emit func(bughub.BrowserPro
 }
 
 func (m *RuntimeManager) Status() RuntimeStatus {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.statusMu.RLock()
+	defer m.statusMu.RUnlock()
 	return m.status
+}
+
+// RequireReady returns the already prepared runtime without installing or
+// repairing anything. Validation and regression attempts use this boundary so
+// infrastructure setup never becomes part of Case execution.
+func (m *RuntimeManager) RequireReady() (RuntimePaths, error) {
+	status := m.Status()
+	if status.State != RuntimeReady {
+		code := strings.TrimSpace(status.ErrorCode)
+		if code == "" {
+			code = "browser_runtime_missing"
+		}
+		return RuntimePaths{}, fmt.Errorf("%s: browser runtime is not ready", code)
+	}
+	paths := m.pathsFor(m.currentDir())
+	if err := validatePublishedRuntime(paths); err != nil {
+		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_broken", "browser runtime validation failed before use", err)
+	}
+	return paths, nil
+}
+
+func (m *RuntimeManager) setStatus(status RuntimeStatus) {
+	m.statusMu.Lock()
+	m.status = status
+	m.statusMu.Unlock()
 }
 
 func (m *RuntimeManager) runtimeRoot() string {
@@ -382,12 +689,12 @@ func (m *RuntimeManager) acquireInstallLock() (func() error, error) {
 }
 
 func (m *RuntimeManager) setLegacyInstallLockStatusLocked() {
-	m.status = RuntimeStatus{
+	m.setStatus(RuntimeStatus{
 		State:     RuntimeInstalling,
 		Version:   browserRuntimeVersion,
 		ErrorCode: "browser_runtime_legacy_install_lock",
 		Message:   "a legacy browser runtime install lock is present; manual removal is required after confirming no older Studio is running",
-	}
+	})
 }
 
 func mergeCommandEnvironment(base, overrides []string) []string {
@@ -418,8 +725,8 @@ func commandEnvironmentKey(name string) string {
 }
 
 func (m *RuntimeManager) setBrokenLocked(code, message string, err error) error {
-	m.status = RuntimeStatus{State: RuntimeBroken, Version: browserRuntimeVersion, ErrorCode: code, Message: message}
-	return fmt.Errorf("%s: %w", message, err)
+	m.setStatus(RuntimeStatus{State: RuntimeBroken, Version: browserRuntimeVersion, ErrorCode: code, Message: message})
+	return fmt.Errorf("%s: %s: %w", code, message, err)
 }
 
 type runtimeProbeResult struct {
@@ -584,5 +891,11 @@ func boundedRuntimeStderr(stderr *bytes.Buffer) error {
 func emitRuntimeProgress(emit func(bughub.BrowserProgress), code, message string) {
 	if emit != nil {
 		emit(bughub.BrowserProgress{Code: code, Message: message})
+	}
+}
+
+func emitRuntimeProgressStep(emit func(bughub.BrowserProgress), code, message string, current, total int) {
+	if emit != nil {
+		emit(bughub.BrowserProgress{Code: code, Message: message, Current: current, Total: total})
 	}
 }

@@ -12,7 +12,10 @@ function attempt(errorCode = '', output: Record<string, unknown> = {}): PhaseAtt
 }
 
 const progress: IncidentPhaseEvent[] = [
-  { type: 'browser_progress', message: 'Cookie: sid=secret /Users/alice/private/trace.zip', raw: { Authorization: 'Bearer secret', storageState: 'secret' }, meta: { attempt_id: 'attempt-1', browser_code: 'browser_starting' } },
+  { type: 'browser_progress', message: 'Cookie: sid=secret /Users/alice/private/trace.zip', raw: { Authorization: 'Bearer secret', storageState: 'secret' }, meta: { attempt_id: 'attempt-1', browser_code: 'browser_launching' } },
+  { type: 'browser_progress', meta: { attempt_id: 'attempt-1', browser_code: 'browser_context_preparing' } },
+  { type: 'browser_progress', meta: { attempt_id: 'attempt-1', browser_code: 'browser_evidence_preparing' } },
+  { type: 'browser_progress', meta: { attempt_id: 'attempt-1', browser_code: 'browser_starting' } },
   { type: 'browser_progress', message: 'password=hunter2', meta: { attempt_id: 'attempt-1', browser_code: 'browser_action_started', action_id: '/private/open-users', current: 2, total: 4 } },
 ]
 
@@ -20,12 +23,34 @@ describe('BugBrowserProgress', () => {
   it('renders structured browser progress without exposing raw attempt errors', () => {
     const wrapper = mount(BugBrowserProgress, { props: { attempt: attempt(), events: progress, systemID: 'base', environment: 'test' } })
 
-    expect(wrapper.text()).toContain('准备验证浏览器')
+    expect(wrapper.text()).toContain('正在启动验证浏览器')
+    expect(wrapper.text()).toContain('正在准备隔离浏览器环境')
+    expect(wrapper.text()).toContain('正在接入页面与网络证据采集')
+    expect(wrapper.text()).toContain('正在打开待验证页面')
     expect(wrapper.text()).toContain('执行 2/4：开始页面操作')
     expect(wrapper.text()).not.toContain('Playwright 未安装，请提供 HAR')
     expect(wrapper.text()).not.toContain('/Users/alice/private/trace.zip')
     expect(wrapper.text()).not.toMatch(/Cookie|Authorization|password|storageState|hunter2|open-users/)
     expect(wrapper.html()).not.toMatch(/Cookie|Authorization|password|storageState|hunter2|private/)
+  })
+
+  it('shows the latest Chromium download percentage without rendering every prior update', () => {
+    const wrapper = mount(BugBrowserProgress, {
+      props: {
+        attempt: attempt(),
+        events: [
+          { type: 'browser_progress', meta: { browser_code: 'browser_runtime_dependencies_installing' } },
+          { type: 'browser_progress', meta: { browser_code: 'browser_runtime_downloading', current: 10, total: 100 } },
+          { type: 'browser_progress', meta: { browser_code: 'browser_runtime_downloading', current: 30, total: 100 } },
+          { type: 'browser_progress', meta: { browser_code: 'browser_runtime_probing' } },
+        ],
+      },
+    })
+
+    expect(wrapper.text()).toContain('正在安装 Playwright 依赖')
+    expect(wrapper.text()).toContain('正在下载 Chromium：30%')
+    expect(wrapper.text()).not.toContain('正在下载 Chromium：10%')
+    expect(wrapper.text()).toContain('正在启动 Chromium 自检')
   })
 
   it('drops unknown progress codes and never uses invalid numeric metadata as copy', () => {
@@ -67,12 +92,18 @@ describe('BugBrowserProgress', () => {
   it('separates runtime repair, validator deployment, locator and business gaps', async () => {
     const runtime = mount(BugBrowserProgress, { props: { attempt: attempt('browser_runtime_broken'), events: [], systemID: 'base', environment: 'test' } })
     expect(runtime.text()).toContain('验证浏览器环境不可用')
+    expect(runtime.get('[data-browser-error-code]').text()).toBe('错误码：browser_runtime_broken')
     expect(runtime.get('[data-browser-action="repair-runtime"]').text()).toBe('修复浏览器环境并重试')
     expect(runtime.text()).not.toContain('Playwright 未安装，请提供 HAR')
 
     const validator = mount(BugBrowserProgress, { props: { attempt: attempt('validator_not_installed'), events: [], systemID: 'base', environment: 'test' } })
     expect(validator.text()).toContain('验证机器人尚未部署')
     expect(validator.get('[data-browser-action="redeploy-validator"]').text()).toBe('重新部署验证机器人')
+
+    const quota = mount(BugBrowserProgress, { props: { attempt: attempt('browser_validator_usage_limited'), events: [], systemID: 'base', environment: 'test' } })
+    expect(quota.text()).toContain('验证机器人用量已达上限')
+    expect(quota.text()).toContain('恢复额度或切换到可用机器人')
+    expect(quota.find('[data-browser-action]').exists()).toBe(false)
 
     const locator = mount(BugBrowserProgress, { props: { attempt: attempt('browser_locator_failed'), events: [], systemID: 'base', environment: 'test' } })
     expect(locator.text()).toContain('页面元素定位失败')
@@ -84,5 +115,15 @@ describe('BugBrowserProgress', () => {
     expect(business.text()).toContain('重新同步')
     expect(business.get('[data-browser-action="edit-bug-url"]').text()).toBe('前往 Bug 收件箱重新同步')
     expect(business.find('[data-browser-action="repair-runtime"]').exists()).toBe(false)
+
+    const system = mount(BugBrowserProgress, { props: { attempt: attempt('browser_worker_failed'), events: [], systemID: 'base', environment: 'test' } })
+    expect(system.text()).toContain('浏览器验证遇到系统错误')
+    expect(system.get('[data-browser-error-code]').text()).toBe('错误码：browser_worker_failed')
+  })
+
+  it('never renders an untrusted error code as recovery copy', () => {
+    const wrapper = mount(BugBrowserProgress, { props: { attempt: attempt('browser_worker_failed Cookie_secret'), events: [] } })
+    expect(wrapper.text()).toBe('')
+    expect(wrapper.html()).not.toMatch(/Cookie|secret/)
   })
 })

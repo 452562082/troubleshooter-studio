@@ -27,6 +27,12 @@ import { useBugTickets } from '../lib/useBugTickets'
 
 const router = useRouter()
 const tickets = useBugTickets({ listBugs, fetchBugByID })
+const ticketView = ref<'inbox' | 'history'>('inbox')
+const inboxBugs = computed(() => tickets.bugs.value.filter(bug => bug.inbox_state !== 'history'))
+const historyBugs = computed(() => tickets.bugs.value.filter(bug => bug.inbox_state === 'history'))
+const visibleBugs = computed(() => tickets.filteredBugs.value.filter(bug => ticketView.value === 'history'
+  ? bug.inbox_state === 'history'
+  : bug.inbox_state !== 'history'))
 const platformConfigInstanceID = useId()
 const botSearchID = `${platformConfigInstanceID}-bot-search`
 const manualBugFieldID = `${platformConfigInstanceID}-manual-bug`
@@ -99,9 +105,20 @@ onMounted(async () => {
 async function loadTickets() {
   try {
     await tickets.load()
+    ensureVisibleTicketSelection()
   } catch (error) {
     toastError('读取 Bug 工单', error)
   }
+}
+
+function ensureVisibleTicketSelection() {
+  if (visibleBugs.value.some(bug => bug.id === tickets.selectedID.value)) return
+  tickets.select(visibleBugs.value[0]?.id || '')
+}
+
+function selectTicketView(view: 'inbox' | 'history') {
+  ticketView.value = view
+  ensureVisibleTicketSelection()
 }
 
 async function loadPlatforms() {
@@ -280,6 +297,7 @@ async function fetchManualBug() {
   fetchingBug.value = true
   try {
     await tickets.fetchByID({ platform_id: platform.id, bug_id: bugID })
+    ticketView.value = tickets.selectedBug.value?.inbox_state === 'history' ? 'history' : 'inbox'
     toast.success('Bug 已拉取')
   } catch (error) {
     toastError('拉取 Bug', error)
@@ -307,7 +325,10 @@ async function previewAttachment(index: number) {
 }
 
 function openIncident(bugID: string) {
-  void router.push({ path: '/incidents', query: { bug_id: bugID } })
+  void router.push({ path: '/incidents', query: {
+    bug_id: bugID,
+    ...(ticketView.value === 'history' ? { view: 'history' } : {}),
+  } })
 }
 
 function newPlatform() {
@@ -545,11 +566,17 @@ function eventValue(event: Event): string {
 
     <section class="inbox-workspace" data-overflow-safe="true">
       <aside class="ticket-list-panel" data-overflow-safe="true">
+        <div class="ticket-view-tabs" role="tablist" aria-label="Bug 工单范围">
+          <button type="button" role="tab" data-ticket-view="inbox" :aria-selected="ticketView === 'inbox'" :class="{ active: ticketView === 'inbox' }" @click="selectTicketView('inbox')">收件箱 <span>{{ inboxBugs.length }}</span></button>
+          <button type="button" role="tab" data-ticket-view="history" :aria-selected="ticketView === 'history'" :class="{ active: ticketView === 'history' }" @click="selectTicketView('history')">历史 <span>{{ historyBugs.length }}</span></button>
+        </div>
         <BugTicketList
-          :bugs="tickets.filteredBugs.value"
+          :bugs="visibleBugs"
           :selected-id="tickets.selectedID.value"
           :loading="tickets.loading.value"
           :query="tickets.query.value"
+          :title="ticketView === 'history' ? '历史工单' : 'Bug 收件箱'"
+          :empty-text="ticketView === 'history' ? '暂无历史工单' : '暂无待处理 Bug'"
           @select="tickets.select"
           @update:query="tickets.query.value = $event"
         >
@@ -590,6 +617,11 @@ function eventValue(event: Event): string {
 
 <style scoped>
 .bug-inbox-page { min-width: 0; display: grid; gap: var(--sp-3); color: var(--c-text); }
+.ticket-view-tabs { min-width: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf-2); }
+.ticket-view-tabs button { min-width: 0; min-height: 36px; padding: 0 10px; border: 0; border-radius: calc(var(--r-md) - 3px); background: transparent; color: var(--c-muted); font: inherit; font-weight: 700; cursor: pointer; }
+.ticket-view-tabs button span { margin-left: 4px; font-size: var(--fs-xs); }
+.ticket-view-tabs button.active { background: var(--c-surf); color: #1d4ed8; box-shadow: 0 1px 3px rgba(15, 23, 42, .12); }
+.ticket-view-tabs button:focus-visible { outline: 2px solid var(--c-accent-hover); outline-offset: 1px; }
 .bug-header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-3); }
 .bug-header h1 { margin: 0; color: var(--c-ink); font-size: 24px; }
 .bug-header p { margin: 4px 0 0; color: var(--c-muted); font-size: var(--fs-sm); }
@@ -686,7 +718,7 @@ function eventValue(event: Event): string {
 .danger-link:hover:not(:disabled) { color: #7f1d1d; text-decoration: underline; text-underline-offset: 3px; }
 .inbox-workspace { min-width: 0; display: grid; grid-template-columns: minmax(250px, 330px) minmax(0, 1fr); gap: var(--sp-3); }
 .ticket-list-panel, .ticket-detail-panel { min-width: 0; border: 1px solid var(--c-line); border-radius: var(--r-lg); background: var(--c-surf); }
-.ticket-list-panel { position: relative; padding: var(--sp-3); overflow: auto; }
+.ticket-list-panel { position: relative; min-height: 0; padding: var(--sp-3); display: grid; align-content: start; gap: var(--sp-3); overflow: auto; }
 .refresh-button svg { width: 16px; height: 16px; }
 .refresh-button svg.spinning { animation: refresh-spin 800ms linear infinite; }
 @keyframes refresh-spin { to { transform: rotate(360deg); } }

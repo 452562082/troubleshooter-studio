@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onMounted, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, nextTick, onActivated, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute, useRouter, type LocationQueryRaw } from 'vue-router'
+import { EventsOn } from '../../wailsjs/runtime/runtime'
 import BugBotPicker from '../components/BugBotPicker.vue'
 import BugCaseLifecycle, { type CasePrimaryAction } from '../components/BugCaseLifecycle.vue'
 import IncidentBugSummary from '../components/IncidentBugSummary.vue'
@@ -12,12 +13,14 @@ import {
   clearIncidentBrowserSession,
   continueIncidentCase,
   fetchBugByID,
+  getIncidentBrowserRuntimeStatus,
   getIncidentCase,
   listBugs,
   listIncidentCases,
   matchBugBots,
   notifyIncidentDeployed,
   openIncidentBrowserLogin,
+  prepareIncidentBrowserRuntime,
   repairIncidentBrowserRuntime,
   isIncidentWorkflowConflict,
   resetIncidentCaseWithWarnings,
@@ -25,11 +28,13 @@ import {
   startIncidentCase,
   type BotMatch,
   type BotRef,
+  type BugRecord,
+  type IncidentBrowserRuntimeStatus,
   type IncidentCase,
 } from '../lib/bridge'
 import { toast, toastError } from '../lib/toast'
 import { useBugTickets } from '../lib/useBugTickets'
-import { activeCaseForBug, continuationForDetail, terminalCaseStatuses, useIncidentCase } from '../lib/useIncidentCase'
+import { activeCaseForBug, casesForBug, continuationForDetail, terminalCaseStatuses, useIncidentCase } from '../lib/useIncidentCase'
 
 const route = useRoute()
 const router = useRouter()
@@ -42,6 +47,14 @@ const matching = ref(false)
 const botError = ref('')
 const starting = ref(false)
 const workflowNotice = ref('')
+const browserRuntimeStatus = ref<IncidentBrowserRuntimeStatus>({
+  state: 'installing',
+  version: '',
+  error_code: 'browser_runtime_install_in_progress',
+  message: '',
+})
+const browserRuntimeProgress = ref({ code: '', current: 0, total: 0 })
+const retryingBrowserRuntime = ref(false)
 const startCaseIDs = new Map<string, string>()
 type RestartMode = 'active_reset' | 'terminal_new_round'
 type ResetDialogSnapshot = {
@@ -77,18 +90,43 @@ const initialRequestedBugID = routeBugID()
 if (initialRequestedBugID) tickets.select(initialRequestedBugID)
 
 const selectedActiveCase = computed(() => activeCaseForBug(incidentWorkflow.cases.value, tickets.selectedID.value))
-const displayedCase = computed(() => selectedActiveCase.value)
+const selectedLatestCase = computed(() => casesForBug(incidentWorkflow.cases.value, tickets.selectedID.value)[0])
+const historyViewRequested = computed(() => route.query.view === 'history')
+const displayedCase = computed(() => selectedActiveCase.value || (historyViewRequested.value ? selectedLatestCase.value : undefined))
 const displayedDetail = computed(() => incidentWorkflow.detail.value?.case.id === displayedCase.value?.id ? incidentWorkflow.detail.value : null)
 const invalidURLBug = computed(() => Boolean(routeBugID() && !tickets.loading.value && tickets.bugs.value.length > 0 && !tickets.selectedBug.value))
 const pickerSelectedBotKey = computed(() => selectedBotKey.value)
 const selectedBot = computed(() => matches.value.find(match => match.bot.key === pickerSelectedBotKey.value)?.bot)
 const selectedBotSupportsStart = computed(() => Boolean(selectedBot.value && ['codex', 'claude-code', 'openclaw'].includes(selectedBot.value.target)))
+const selectedBugRequiresBrowser = computed(() => suggestsBrowserValidation(tickets.selectedBug.value))
+const browserRuntimeBlocksSelectedBug = computed(() => selectedBugRequiresBrowser.value && browserRuntimeStatus.value.state !== 'ready')
+const browserRuntimePercent = computed(() => {
+  const { current, total } = browserRuntimeProgress.value
+  if (total <= 0) return 0
+  return Math.max(0, Math.min(100, Math.round(current / total * 100)))
+})
+const browserRuntimeSummary = computed(() => {
+  if (browserRuntimeStatus.value.state === 'ready') return 'Chromium 已安装并通过启动探测，Web 验证可直接执行。'
+  if (browserRuntimeStatus.value.state === 'broken') return '基础工具准备失败。故障 Case 尚未启动，请先重新准备 Chromium。'
+  switch (browserRuntimeProgress.value.code) {
+    case 'browser_runtime_importing': return '正在初始化 App 内置 Chromium，无需联网下载…'
+    case 'browser_runtime_dependencies_installing': return '正在安装 Playwright 运行依赖…'
+    case 'browser_runtime_downloading': return browserRuntimePercent.value > 0 ? `正在下载 Chromium（${browserRuntimePercent.value}%）…` : '正在下载 Chromium…'
+    case 'browser_runtime_probing': return 'Chromium 已下载，正在执行启动探测…'
+    default: return 'Studio 正在初始化验证浏览器基础工具…'
+  }
+})
 const writeActionPending = computed(() => matching.value || starting.value || resetting.value || restartPreparing.value || incidentWorkflow.pending.value)
-const writeActionDisabled = computed(() => writeActionPending.value || !tickets.selectedBug.value || !selectedBot.value || !selectedBotSupportsStart.value || !selectedBot.value.env?.trim())
+const writeActionDisabled = computed(() => writeActionPending.value || browserRuntimeBlocksSelectedBug.value || !tickets.selectedBug.value || !selectedBot.value || !selectedBotSupportsStart.value || !selectedBot.value.env?.trim())
 const writeActionDisabledReason = computed(() => {
   if (matching.value) return '正在匹配排障机器人…'
   if (starting.value || resetting.value || restartPreparing.value || incidentWorkflow.pending.value) return '故障闭环操作正在处理中…'
   if (!tickets.selectedBug.value) return '请先选择一条 Bug。'
+  if (browserRuntimeBlocksSelectedBug.value) {
+    return browserRuntimeStatus.value.state === 'installing'
+      ? 'Studio 正在初始化验证浏览器基础工具；完成后才能启动 Web 验证。'
+      : '验证浏览器基础工具未就绪，请先重新准备 Chromium。'
+  }
   if (!selectedBot.value) return '请选择排障机器人后继续。'
   if (!selectedBotSupportsStart.value) return `${selectedBot.value.target} 暂不支持由 Studio 后台启动，请选择 Codex、Claude Code 或 OpenClaw。`
   if (!selectedBot.value.env?.trim()) return '所选机器人缺少目标环境，请先完善平台机器人映射。'
@@ -96,7 +134,8 @@ const writeActionDisabledReason = computed(() => {
 })
 const botActionStatus = computed(() => {
   const current = displayedCase.value
-  return current ? '故障闭环进行中' : '尚未开启故障闭环'
+  if (!current) return '尚未开启故障闭环'
+  return terminalCaseStatuses.has(current.status) ? '历史故障闭环' : '故障闭环进行中'
 })
 
 watch(() => tickets.selectedID.value, async bugID => {
@@ -128,11 +167,12 @@ watch(displayedDetail, detail => {
   if (detail?.case.id === pendingEnterCaseID.value) void focusIncidentCase(detail.case.id)
 })
 
-watch(() => [route.path, route.query.bug_id], () => {
+watch(() => [route.path, route.query.bug_id, route.query.view], () => {
   if (route.path === '/incidents') void syncRouteBugSelection(false)
 })
 
 let hasActivatedOnce = false
+let unlistenBrowserRuntime: (() => void) | undefined
 onActivated(() => {
   if (!hasActivatedOnce) {
     hasActivatedOnce = true
@@ -142,6 +182,8 @@ onActivated(() => {
 })
 
 onMounted(async () => {
+  unlistenBrowserRuntime = EventsOn('browser-runtime:status', applyBrowserRuntimeEvent)
+  await refreshBrowserRuntimeStatus()
   try {
     await tickets.load()
     if (tickets.selectedBug.value) {
@@ -154,6 +196,58 @@ onMounted(async () => {
     toastError('读取 Bug 工单', error)
   }
 })
+
+onUnmounted(() => unlistenBrowserRuntime?.())
+
+function suggestsBrowserValidation(bug?: BugRecord): boolean {
+  if (!bug) return false
+  if (bug.frontend_url?.trim() || bug.frontend_repo?.trim() || bug.browser?.trim()) return true
+  const text = [bug.title, bug.description, bug.steps, bug.expected, bug.actual].filter(Boolean).join(' ').toLocaleLowerCase()
+  if (['页面', '浏览器', '网页', '前端', '小程序'].some(marker => text.includes(marker))) return true
+  return text.split(/[^a-z0-9\u3400-\u9fff]+/).some(token => ['app', 'web', 'h5', 'ui', 'frontend'].includes(token))
+}
+
+function applyBrowserRuntimeEvent(raw: unknown) {
+  const payload = raw !== null && typeof raw === 'object' ? raw as Record<string, unknown> : {}
+  const status = payload.status !== null && typeof payload.status === 'object' ? payload.status as Record<string, unknown> : {}
+  const state = status.state === 'ready' || status.state === 'installing' || status.state === 'broken' ? status.state : 'broken'
+  browserRuntimeStatus.value = {
+    state,
+    version: typeof status.version === 'string' ? status.version : '',
+    error_code: typeof status.error_code === 'string' ? status.error_code : '',
+    message: '',
+  }
+  browserRuntimeProgress.value = {
+    code: typeof payload.code === 'string' ? payload.code : '',
+    current: typeof payload.current === 'number' && Number.isFinite(payload.current) && payload.current >= 0 ? payload.current : 0,
+    total: typeof payload.total === 'number' && Number.isFinite(payload.total) && payload.total >= 0 ? payload.total : 0,
+  }
+}
+
+async function refreshBrowserRuntimeStatus() {
+  try {
+    browserRuntimeStatus.value = await getIncidentBrowserRuntimeStatus()
+  } catch {
+    browserRuntimeStatus.value = { state: 'broken', version: '', error_code: 'browser_runtime_status_unavailable', message: '' }
+  }
+}
+
+async function retryBrowserRuntimePreparation() {
+  if (retryingBrowserRuntime.value || browserRuntimeStatus.value.state === 'installing') return
+  retryingBrowserRuntime.value = true
+  browserRuntimeStatus.value = { ...browserRuntimeStatus.value, state: 'installing', error_code: 'browser_runtime_install_in_progress', message: '' }
+  browserRuntimeProgress.value = { code: 'browser_runtime_dependencies_installing', current: 0, total: 0 }
+  try {
+    await prepareIncidentBrowserRuntime()
+    await refreshBrowserRuntimeStatus()
+    if (browserRuntimeStatus.value.state === 'ready') toast.success('验证浏览器基础工具已就绪')
+  } catch (error) {
+    await refreshBrowserRuntimeStatus()
+    toastError('准备验证浏览器基础工具', error)
+  } finally {
+    retryingBrowserRuntime.value = false
+  }
+}
 
 function routeBugID(): string {
   return typeof route.query.bug_id === 'string' ? route.query.bug_id : ''
@@ -185,7 +279,11 @@ async function syncRouteBugSelection(refreshCase: boolean) {
 
 async function selectBug(id: string) {
   tickets.select(id)
-  await router.replace({ query: { ...route.query, bug_id: id } })
+  const history = tickets.selectedBug.value?.inbox_state === 'history'
+  const query: LocationQueryRaw = { ...route.query, bug_id: id }
+  if (history) query.view = 'history'
+  else if (query.view === 'history') delete query.view
+  await router.replace({ query })
 }
 
 async function refreshMatches(bugID: string) {
@@ -817,6 +915,34 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
       </div>
     </header>
 
+    <section
+      class="browser-runtime-status"
+      :class="`is-${browserRuntimeStatus.state}`"
+      aria-labelledby="browser-runtime-title"
+      aria-live="polite"
+    >
+      <div>
+        <p class="browser-runtime-eyebrow">Studio 基础工具</p>
+        <h2 id="browser-runtime-title">验证浏览器</h2>
+        <p data-browser-runtime-summary>{{ browserRuntimeSummary }}</p>
+        <progress
+          v-if="browserRuntimeStatus.state === 'installing' && browserRuntimeProgress.total > 0"
+          :value="browserRuntimeProgress.current"
+          :max="browserRuntimeProgress.total"
+        >{{ browserRuntimePercent }}%</progress>
+      </div>
+      <span v-if="browserRuntimeStatus.state === 'ready'" class="browser-runtime-badge">已就绪</span>
+      <button
+        v-else-if="browserRuntimeStatus.state === 'broken'"
+        class="btn"
+        type="button"
+        data-action="prepare-browser-runtime"
+        :disabled="retryingBrowserRuntime"
+        @click="retryBrowserRuntimePreparation"
+      >{{ retryingBrowserRuntime ? '准备中…' : '重新准备' }}</button>
+      <span v-else class="browser-runtime-badge">准备中</span>
+    </section>
+
     <section class="selection-workspace" data-overflow-safe="true" aria-label="Bug 驱动的故障闭环选择">
       <aside class="selection-panel ticket-list-panel" data-overflow-safe="true">
         <BugTicketList
@@ -912,6 +1038,18 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
 .incident-header { min-width: 0; }
 .incident-header h1 { margin: 0; color: var(--c-ink); font-size: 24px; }
 .incident-header p { max-width: 760px; margin: 4px 0 0; color: var(--c-muted); font-size: var(--fs-sm); line-height: 1.55; }
+.browser-runtime-status { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); padding: var(--sp-3); border: 1px solid var(--c-line); border-radius: var(--r-lg); background: var(--c-surf); }
+.browser-runtime-status > div { min-width: 0; display: grid; gap: 3px; }
+.browser-runtime-status h2, .browser-runtime-status p { margin: 0; }
+.browser-runtime-status h2 { color: var(--c-ink); font-size: var(--fs-base); }
+.browser-runtime-status p { overflow-wrap: anywhere; color: var(--c-muted); font-size: var(--fs-sm); line-height: 1.5; }
+.browser-runtime-status .browser-runtime-eyebrow { color: var(--c-muted); font-size: var(--fs-xs); font-weight: 700; text-transform: uppercase; }
+.browser-runtime-status progress { width: min(420px, 100%); height: 8px; margin-top: var(--sp-1); accent-color: #2563eb; }
+.browser-runtime-status.is-installing { border-color: #bfdbfe; background: #eff6ff; }
+.browser-runtime-status.is-broken { border-color: #fecaca; background: #fef2f2; }
+.browser-runtime-badge { flex: 0 0 auto; padding: 4px 9px; border-radius: 999px; background: var(--c-surf-2); color: var(--c-muted); font-size: var(--fs-xs); font-weight: 700; }
+.is-ready .browser-runtime-badge { background: #dcfce7; color: #166534; }
+.is-installing .browser-runtime-badge { background: #dbeafe; color: #1d4ed8; }
 .btn { min-height: 44px; padding: 0 12px; border: 1px solid var(--c-line-2); border-radius: var(--r-md); background: var(--c-surf); color: var(--c-text); font: inherit; cursor: pointer; }
 .btn:hover:not(:disabled) { border-color: var(--c-accent); background: var(--c-surf-2); }
 .btn:focus-visible { outline: 2px solid var(--c-accent-hover); outline-offset: 2px; }
@@ -962,6 +1100,8 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
   .bot-panel { grid-column: 1 / -1; max-height: none; }
 }
 @media (max-width: 700px) {
+  .browser-runtime-status { align-items: stretch; flex-direction: column; }
+  .browser-runtime-status > .btn { width: 100%; }
   .selection-workspace { grid-template-columns: minmax(0, 1fr); }
   .bot-panel { grid-column: auto; }
   .ticket-list-panel, .bot-panel { max-height: none; }

@@ -67,6 +67,24 @@ describe('BugCaseArtifacts', () => {
     expect(wrapper.text()).toContain('commit_mismatch')
   })
 
+  it('renders an ordered structured call chain with explicit location precision', () => {
+    const attempts = [{ ...detail.attempts[0], output_json: {
+      root_cause: '前端请求命中错误后端分支',
+      call_chain: [
+        { kind: 'frontend', name: '用户搜索', service: 'admin-web', repo: 'admin-web', revision: 'abc123', operation: 'GET /api/users', file: 'src/search.ts', line: 42, precision: 'source_mapped', evidence: 'initiator stack + matching map' },
+        { kind: 'service', name: 'user-api', service: 'user-api', repo: 'backend', operation: 'GET /users', precision: 'runtime_verified', evidence: 'trace trace-1' },
+      ],
+    } }]
+    const wrapper = mount(BugCaseArtifacts, { props: { detail: { ...detail, attempts } } })
+
+    const hops = wrapper.findAll('.call-chain-hop')
+    expect(hops).toHaveLength(2)
+    expect(hops[0].text()).toContain('Source Map 精确定位')
+    expect(hops[0].text()).toContain('admin-web/src/search.ts:42')
+    expect(hops[0].text()).toContain('revision abc123')
+    expect(hops[1].text()).toContain('运行时已验证')
+  })
+
   it('previews screenshots from safe bytes and never exposes artifact paths in text or DOM URLs', async () => {
     const dialogMethods = installDialogStubs()
     const privatePath = '/Users/alice/.troubleshooter/artifacts/case-1/private-screenshot.png'

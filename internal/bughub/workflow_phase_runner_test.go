@@ -423,6 +423,52 @@ func TestAgentPhaseRunnerRetriesReadOnlyOnceButNeverFix(t *testing.T) {
 	}
 }
 
+func TestParseInvestigationResultAcceptsBoundedStructuredCallChain(t *testing.T) {
+	result, err := ParseInvestigationResult([]byte(`
+investigation_status: root_cause_ready
+environment: test
+root_cause: frontend called the wrong backend route
+confidence: high
+call_chain:
+  - kind: frontend
+    name: user search
+    service: admin-web
+    repo: admin-web
+    revision: abc123
+    protocol: http
+    operation: GET /api/users
+    file: src/search.ts
+    line: 42
+    precision: source_mapped
+    evidence: initiator stack and matching source map
+evidence: []
+gaps: []
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.CallChain) != 1 || result.CallChain[0].Repo != "admin-web" || result.CallChain[0].Line != 42 {
+		t.Fatalf("call chain = %+v", result.CallChain)
+	}
+}
+
+func TestParseInvestigationResultRejectsMisleadingCallChainPrecision(t *testing.T) {
+	_, err := ParseInvestigationResult([]byte(`
+investigation_status: insufficient_info
+environment: test
+confidence: low
+call_chain:
+  - kind: service
+    name: user-api
+    precision: exact
+evidence: []
+gaps: [missing deployed revision]
+`))
+	if err == nil || !strings.Contains(err.Error(), "precision") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestAgentPhaseRunnerCoordinatesBrowserAndRegistersCurrentAttemptArtifacts(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-browser-runner", CaseValidating)

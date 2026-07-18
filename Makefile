@@ -133,12 +133,16 @@ desktop-dev: web
 BUNDLE_NAME  := TroubleshooterStudio
 BUNDLE_DIR   := dist/$(BUNDLE_NAME).app
 BUNDLE_ID    := studio.troubleshooter.desktop
+BROWSER_RUNTIME_STAGE ?= .cache/desktop-browser-runtime
 .PHONY: desktop-app
 desktop-app: desktop
-	@icon_src="cmd/tshoot-desktop/build/appicon.png"; \
+	@echo "▶ preparing pinned Chromium for the desktop bundle"
+	@runtime_src="$$(go run ./cmd/tshoot-browser-runtime --root "$(BROWSER_RUNTIME_STAGE)")"; \
+	 icon_src="cmd/tshoot-desktop/build/appicon.png"; \
 	 [ -f "cmd/tshoot-desktop/build/appicon.macos.png" ] && icon_src="cmd/tshoot-desktop/build/appicon.macos.png"; \
 	 BIN=$(DESKTOP_BIN) BUNDLE_DIR=$(BUNDLE_DIR) BUNDLE_NAME=$(BUNDLE_NAME) \
 	 BUNDLE_ID=$(BUNDLE_ID) VERSION=$(VERSION) \
+	 BROWSER_RUNTIME_SRC="$$runtime_src" \
 	 ICON_SRC="$$icon_src" \
 	 bash scripts/package-macos.sh
 

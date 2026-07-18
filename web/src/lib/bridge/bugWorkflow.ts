@@ -72,6 +72,13 @@ export interface WorkflowMetrics {
   still_reproduces_rate: number
 }
 export interface WorkflowReminder { case_id: string; bug_id: string; environment: string; waiting_since: string; waiting_age: number; sequence: number; reservation_key: string; delivery_attempt: number }
+export type IncidentBrowserRuntimeState = 'ready' | 'installing' | 'broken'
+export interface IncidentBrowserRuntimeStatus {
+  state: IncidentBrowserRuntimeState
+  version: string
+  error_code: string
+  message: string
+}
 
 export interface IncidentCaseDetail {
   case: IncidentCase
@@ -82,6 +89,7 @@ export interface IncidentCaseDetail {
   deployment_observations: DeploymentObservation[]
   events: TransitionEvent[]
   deployment_verification?: { provider: 'manual' | 'http' | 'k8s' | 'unavailable'; available: boolean; hint: string }
+  bug_ticket_resolution?: { state: 'not_ready' | 'pending' | 'resolved' | 'unknown'; source_status?: string }
 }
 
 export interface IncidentPhaseEvent {
@@ -93,12 +101,19 @@ export interface IncidentPhaseEvent {
 }
 
 export const incidentBrowserProgressCodes = [
+  'browser_launching',
+  'browser_context_preparing',
+  'browser_evidence_preparing',
   'browser_starting',
   'browser_action_started',
   'browser_action_completed',
   'browser_login_opened',
   'browser_login_completed',
   'browser_runtime_installing',
+  'browser_runtime_importing',
+  'browser_runtime_dependencies_installing',
+  'browser_runtime_downloading',
+  'browser_runtime_probing',
   'browser_runtime_ready',
   'action_started',
   'action_completed',
@@ -166,6 +181,16 @@ export async function listPendingIncidentWorkflowReminders(): Promise<WorkflowRe
   if (!isDesktop()) return []
   const result = await App.ListPendingIncidentWorkflowReminders()
   return Array.isArray(result) ? result as WorkflowReminder[] : []
+}
+
+export async function getIncidentBrowserRuntimeStatus(): Promise<IncidentBrowserRuntimeStatus> {
+  if (!isDesktop()) return { state: 'ready', version: 'preview', error_code: '', message: '' }
+  return normalizeIncidentBrowserRuntimeStatus(await App.GetIncidentBrowserRuntimeStatus())
+}
+
+export async function prepareIncidentBrowserRuntime(): Promise<void> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  await App.PrepareIncidentBrowserRuntime()
 }
 
 export async function ackIncidentWorkflowReminder(input: { case_id: string; reservation_key: string; delivery_attempt: number; actor_id: string }): Promise<void> {
@@ -266,6 +291,19 @@ function record(raw: unknown): Record<string, unknown> {
   return raw !== null && typeof raw === 'object' ? raw as Record<string, unknown> : {}
 }
 
+export function normalizeIncidentBrowserRuntimeStatus(raw: unknown): IncidentBrowserRuntimeStatus {
+  const source = record(raw)
+  const state = source.state === 'ready' || source.state === 'installing' || source.state === 'broken'
+    ? source.state
+    : 'broken'
+  return {
+    state,
+    version: typeof source.version === 'string' ? source.version : '',
+    error_code: typeof source.error_code === 'string' ? source.error_code : '',
+    message: typeof source.message === 'string' ? source.message : '',
+  }
+}
+
 function emptyWorkflowMetrics(): WorkflowMetrics {
   return { completed_cases: 0, open_cases: 0, median_stage_duration: {}, oldest_waiting_deployment_age: 0, agent_execution_duration: 0, human_deployment_wait: 0, retry_count: 0, agent_input_tokens: 0, agent_output_tokens: 0, blocker_distribution: {}, automation_ratio: 0, first_regression_success_rate: 0, still_reproduces_rate: 0 }
 }
@@ -306,6 +344,7 @@ function normalizeArtifact(raw: unknown): IncidentArtifact {
 
 function normalizeDetail(raw: unknown): IncidentCaseDetail {
   const source = record(raw)
+  const deploymentVerification = record(source.deployment_verification)
   return {
     case: normalizeCase(source.case),
     attempts: Array.isArray(source.attempts) ? source.attempts as PhaseAttempt[] : [],
@@ -314,6 +353,19 @@ function normalizeDetail(raw: unknown): IncidentCaseDetail {
     code_changes: Array.isArray(source.code_changes) ? source.code_changes as CodeChange[] : [],
     deployment_observations: Array.isArray(source.deployment_observations) ? source.deployment_observations as DeploymentObservation[] : [],
     events: Array.isArray(source.events) ? source.events as TransitionEvent[] : [],
+    deployment_verification: {
+      provider: ['manual', 'http', 'k8s', 'unavailable'].includes(String(deploymentVerification.provider))
+        ? String(deploymentVerification.provider) as 'manual' | 'http' | 'k8s' | 'unavailable'
+        : 'unavailable',
+      available: deploymentVerification.available === true,
+      hint: String(deploymentVerification.hint ?? ''),
+    },
+    bug_ticket_resolution: {
+      state: ['not_ready', 'pending', 'resolved', 'unknown'].includes(String(record(source.bug_ticket_resolution).state))
+        ? String(record(source.bug_ticket_resolution).state) as 'not_ready' | 'pending' | 'resolved' | 'unknown'
+        : 'unknown',
+      source_status: String(record(source.bug_ticket_resolution).source_status ?? ''),
+    },
   }
 }
 

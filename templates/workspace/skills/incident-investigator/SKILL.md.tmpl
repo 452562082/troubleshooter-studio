@@ -477,11 +477,20 @@ conclusion: 业务参数校验早返回(parent.title 超 200 字)
 3. HAR 显示 `status: 200` 但 `response.body.error` 非空 → 跟 partial-success 接口同款陷阱,
    **不要因为 HTTP 200 就推"请求成功只是前端 render 出错"**;先按 `body.error` 看业务码失败原因。
 
-4. RUM 错误堆栈是 **minified**(变量名 a/b/c,行号在 bundle.js 几万行)→ 直接读 stack
-   推不出真实代码位置,**必须先 sourcemap 反推到仓库 src/ 行号** 再下结论;sourcemap 拿不到 →
-   confidence 锁 `低`,改写为 "疑似 X 模块,需要 sourcemap 或前端协助定位"。
+4. RUM/宿主浏览器堆栈是 **minified**(变量名 a/b/c,行号在 bundle.js 几万行)→ 直接读 stack
+   推不出真实代码位置。若 Studio 提供 `runtime-code-manifest.json`,先用其中 service/repo→Deployment→revision/image
+   绑定锁定实际部署版本,再按以下精度逐级降级:
+   - 匹配部署版本和 bundle URL 的 sourcemap → 可报告仓库 `src/` 文件和行列号(`exact source`)
+   - 无 sourcemap但有 deployed revision → 只在该 revision 搜请求 method/path、操作文本和 client wrapper(`deployed revision candidate`)
+   - 只有 image digest/tag → 作为构建版本候选(`image candidate`)
+   - 只有 repo/sub_path → 只报告仓库级候选(`repository candidate`)
 
-5. 用户加载的 **bundle hash / build version ≠ 仓库当前 build**(用户没强刷,CDN/浏览器缓存还在旧版)
+   **禁止**把 bundle 行列号、Deployment 映射、image tag 或静态 grep 命中写成精确源码位置。
+   sourcemap 拿不到时 confidence 锁 `低`,并在 gaps 写明当前定位精度和缺失的版本绑定。
+
+5. trace 在 Kafka/RabbitMQ 边界中断 → 读取 `routing/references/async-topology.yaml`,按已观测 topic/queue/exchange 找生产者和消费者候选；随后用 message id、trace link 或同窗口两侧日志验证。只有静态 destination 匹配时，`call_chain` precision 必须是 `static_candidate`，并把缺少的消息关联字段写入 gaps。
+
+6. 用户加载的 **bundle hash / build version ≠ 仓库当前 build**(用户没强刷,CDN/浏览器缓存还在旧版)
    → **禁止推 "代码 bug"**(代码已经修过了用户没拿到),改写为 "用户本地缓存旧版本,引导清缓存 / 硬刷";
    核对方式:HAR 里加载的 `bundle-<hash>.js` 文件名 vs 仓库当前 build 输出的 hash。
 

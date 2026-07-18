@@ -48,6 +48,7 @@ type Context struct {
 	DownstreamCallsByRepo map[string][]analyzer.DownstreamCall
 	DataStoreUsagesByRepo map[string][]analyzer.DataStoreUsage
 	APIRoutesByRepo       map[string][]analyzer.APIRoute
+	MessagingByRepo       map[string][]analyzer.MessagingEndpoint
 	// SchemaTablesByRepo 跟上面平行,给 data-schema-map.yaml 模板渲染用。
 	// agent 排障时 "order #xxx" → 直接知道查哪张表/collection/redis prefix。
 	SchemaTablesByRepo map[string][]analyzer.SchemaTable
@@ -113,6 +114,7 @@ func New(cfg *config.SystemConfig, templateRoot, outputDir string) *Generator {
 			DownstreamCallsByRepo:   map[string][]analyzer.DownstreamCall{},
 			DataStoreUsagesByRepo:   map[string][]analyzer.DataStoreUsage{},
 			APIRoutesByRepo:         map[string][]analyzer.APIRoute{},
+			MessagingByRepo:         map[string][]analyzer.MessagingEndpoint{},
 			SchemaTablesByRepo:      map[string][]analyzer.SchemaTable{},
 			FrontendEndpointsByRepo: map[string][]string{},
 			ServiceGraph:            topology.ProjectServiceGraph(topology.Snapshot{}),
@@ -171,6 +173,9 @@ func (g *Generator) LoadAnalysisReport(report analyzer.Report) {
 			}
 			if len(ra.APIRoutes) > 0 {
 				g.Ctx.APIRoutesByRepo[ra.Name] = ra.APIRoutes
+			}
+			if len(ra.Messaging) > 0 {
+				g.Ctx.MessagingByRepo[ra.Name] = ra.Messaging
 			}
 			if len(ra.SchemaTables) > 0 {
 				g.Ctx.SchemaTablesByRepo[ra.Name] = ra.SchemaTables

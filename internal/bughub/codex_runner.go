@@ -325,9 +325,15 @@ func validationAgentExecutionGuidance() string {
 }
 
 func validationOutputContract() string {
+	return validationOutputContractFor("reproduced | not_reproduced | insufficient_info | fixed_verified | still_reproduces")
+}
+
+func validationOutputContractFor(statuses string) string {
 	var sb strings.Builder
 	sb.WriteString("\n请只输出下面的严格 YAML，不得增加字段或解释性段落：\n")
-	sb.WriteString("verification_status: reproduced | not_reproduced | insufficient_info | fixed_verified | still_reproduces\n")
+	sb.WriteString("verification_status: ")
+	sb.WriteString(statuses)
+	sb.WriteByte('\n')
 	sb.WriteString("environment: \"<有效目标环境>\"\n")
 	sb.WriteString("observed_behavior: \"<what-was-observed-during-verification>\"\n")
 	sb.WriteString("expected_behavior: \"<expected>\"\n")
@@ -417,9 +423,22 @@ func buildCodexExecCommand(codexBin, workspace, prompt string, imagePaths []stri
 	if !info.IsDir() {
 		return nil, fmt.Errorf("workspace %q is not a directory", workspace)
 	}
-	args := []string{"exec", "--json", "--sandbox", "workspace-write", "--cd", workspace, "--skip-git-repo-check"}
+	args := []string{
+		"exec", "--json",
+		"--enable", "respect_system_proxy",
+		"-c", "suppress_unstable_features_warning=true",
+		"--sandbox", "workspace-write",
+		"--cd", workspace,
+		"--skip-git-repo-check",
+	}
 	for _, path := range imagePaths {
 		args = append(args, "--image", path)
+	}
+	// Codex defines --image as a variadic option (`--image <FILE>...`). Without
+	// the option terminator, the initial prompt is consumed as another image
+	// path and `codex exec` exits without starting the agent.
+	if len(imagePaths) != 0 {
+		args = append(args, "--")
 	}
 	args = append(args, prompt)
 	cmd := exec.Command(codexBin, args...)
@@ -1391,6 +1410,9 @@ func (i *CodexInvestigator) CancelPhase(ctx context.Context, attemptID string) e
 func executePhaseCommand(ctx context.Context, command *exec.Cmd, parser investigationEventParser, active *activeCodexRun, emit func(InvestigationEvent)) (PhaseExecutionResult, error) {
 	cmd := exec.CommandContext(ctx, command.Path, command.Args[1:]...)
 	cmd.Dir = command.Dir
+	if command.Env != nil {
+		cmd.Env = append([]string{}, command.Env...)
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return PhaseExecutionResult{}, err
@@ -1414,7 +1436,8 @@ func executePhaseCommand(ctx context.Context, command *exec.Cmd, parser investig
 		stderrDone <- strings.TrimSpace(string(data))
 	}()
 	var result PhaseExecutionResult
-	var failure string
+	var terminalFailure string
+	var recoverableFailure string
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	for scanner.Scan() {
@@ -1433,12 +1456,10 @@ func executePhaseCommand(ctx context.Context, command *exec.Cmd, parser investig
 		if strings.TrimSpace(final) != "" {
 			result.FinalYAML = final
 		}
-		if strings.TrimSpace(failed) != "" {
-			failure = failed
-		}
+		updateAgentCommandFailure(event, failed, strings.TrimSpace(result.FinalYAML) != "", &terminalFailure, &recoverableFailure)
 	}
-	if err := scanner.Err(); err != nil && failure == "" {
-		failure = err.Error()
+	if err := scanner.Err(); err != nil && terminalFailure == "" {
+		terminalFailure = err.Error()
 	}
 	waitErr := cmd.Wait()
 	active.setProcess(nil)
@@ -1447,8 +1468,10 @@ func executePhaseCommand(ctx context.Context, command *exec.Cmd, parser investig
 	switch {
 	case ctx.Err() != nil:
 		return result, ctx.Err()
-	case failure != "":
-		return result, errors.New(failure)
+	case terminalFailure != "":
+		return result, errors.New(terminalFailure)
+	case recoverableFailure != "":
+		return result, errors.New(recoverableFailure)
 	case waitErr != nil:
 		if stderrText == "" {
 			stderrText = waitErr.Error()
@@ -1458,6 +1481,26 @@ func executePhaseCommand(ctx context.Context, command *exec.Cmd, parser investig
 		return result, errors.New("agent returned no final structured result")
 	default:
 		return result, nil
+	}
+}
+
+// updateAgentCommandFailure keeps top-level stream errors provisional until the
+// same command emits a terminal success with a final result. Codex emits these
+// errors while reconnecting or falling back from WebSockets to HTTPS, so
+// treating the first one as irrevocable discards a later valid turn.completed.
+// Explicit terminal failures remain fatal even if malformed output follows.
+func updateAgentCommandFailure(event InvestigationEvent, failed string, hasFinal bool, terminalFailure, recoverableFailure *string) {
+	failed = strings.TrimSpace(failed)
+	if failed != "" {
+		switch event.Type {
+		case "turn_failed", "result":
+			*terminalFailure = failed
+		default:
+			*recoverableFailure = failed
+		}
+	}
+	if *terminalFailure == "" && hasFinal && (event.Type == "turn_completed" || event.Type == "result") {
+		*recoverableFailure = ""
 	}
 }
 
@@ -1560,7 +1603,8 @@ func (i *CodexInvestigator) runCommandStage(ctx context.Context, runID string, c
 	}()
 
 	var finalMessage string
-	var failure string
+	var terminalFailure string
+	var recoverableFailure string
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	for scanner.Scan() {
@@ -1589,12 +1633,10 @@ func (i *CodexInvestigator) runCommandStage(ctx context.Context, runID string, c
 		if strings.TrimSpace(final) != "" {
 			finalMessage = final
 		}
-		if strings.TrimSpace(failed) != "" {
-			failure = failed
-		}
+		updateAgentCommandFailure(event, failed, strings.TrimSpace(finalMessage) != "", &terminalFailure, &recoverableFailure)
 	}
-	if err := scanner.Err(); err != nil && failure == "" {
-		failure = err.Error()
+	if err := scanner.Err(); err != nil && terminalFailure == "" {
+		terminalFailure = err.Error()
 	}
 
 	waitErr := cmd.Wait()
@@ -1603,8 +1645,10 @@ func (i *CodexInvestigator) runCommandStage(ctx context.Context, runID string, c
 	switch {
 	case ctx.Err() != nil:
 		return finalMessage, InvestigationCancelled, ctx.Err()
-	case strings.TrimSpace(failure) != "":
-		return finalMessage, InvestigationFailed, errors.New(failure)
+	case strings.TrimSpace(terminalFailure) != "":
+		return finalMessage, InvestigationFailed, errors.New(terminalFailure)
+	case strings.TrimSpace(recoverableFailure) != "":
+		return finalMessage, InvestigationFailed, errors.New(recoverableFailure)
 	case waitErr != nil:
 		errorText := strings.TrimSpace(stderrText)
 		if errorText == "" {

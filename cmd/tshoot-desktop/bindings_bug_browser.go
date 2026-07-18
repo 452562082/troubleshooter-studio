@@ -22,6 +22,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
+
 	"github.com/xiaolong/troubleshooter-studio/internal/browserverify"
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
@@ -47,10 +49,58 @@ type IncidentBrowserCommandInput struct {
 
 type incidentBrowserController interface {
 	bughub.BrowserVerifier
+	Prepare(context.Context, func(bughub.BrowserProgress)) error
 	Login(context.Context, browserverify.BrowserLoginRequest) error
 	ClearSession(context.Context, browserverify.SessionKey) error
 	Repair(context.Context, func(bughub.BrowserProgress)) error
 	Status() browserverify.RuntimeStatus
+}
+
+func (a *App) GetIncidentBrowserRuntimeStatus() browserverify.RuntimeStatus {
+	controller := a.incidentBrowserController()
+	if controller == nil {
+		return browserverify.RuntimeStatus{
+			State:     browserverify.RuntimeBroken,
+			ErrorCode: "browser_runtime_missing",
+			Message:   "browser runtime controller is unavailable",
+		}
+	}
+	return controller.Status()
+}
+
+// PrepareIncidentBrowserRuntime retries Studio-owned browser preparation.
+// It is intentionally independent from any Incident Case or phase attempt.
+func (a *App) PrepareIncidentBrowserRuntime() error {
+	controller := a.incidentBrowserController()
+	if controller == nil {
+		return errors.New("browser_runtime_missing: Studio browser runtime is unavailable")
+	}
+	err := controller.Repair(a.workflowCommandContext(), func(progress bughub.BrowserProgress) {
+		a.emitIncidentBrowserRuntimeProgress(progress)
+	})
+	a.emitIncidentBrowserRuntimeProgress(bughub.BrowserProgress{Code: "browser_runtime_status"})
+	if err != nil {
+		return errors.New("browser_runtime_prepare_failed: Studio could not prepare the browser runtime")
+	}
+	return nil
+}
+
+func (a *App) requireIncidentBrowserRuntimeReady(bug bughub.Bug) error {
+	if !bughub.SuggestsBrowserValidation(bug) {
+		return nil
+	}
+	status := a.GetIncidentBrowserRuntimeStatus()
+	if status.State == browserverify.RuntimeReady {
+		return nil
+	}
+	code := strings.TrimSpace(status.ErrorCode)
+	if status.State == browserverify.RuntimeInstalling || code == "browser_runtime_install_in_progress" {
+		return errors.New("browser_runtime_preparing: Studio is preparing Chromium outside the Case; retry after the runtime is ready")
+	}
+	if code == "" {
+		code = "browser_runtime_missing"
+	}
+	return fmt.Errorf("%s: Studio browser runtime is not ready; retry preparation before starting a Web Case", code)
 }
 
 const incidentBrowserKeyringService = "tshoot-studio-browser-session"
@@ -90,13 +140,84 @@ func (s incidentBrowserKeyringStore) Delete(identifier string) error {
 }
 
 func (a *App) initializeIncidentBrowser(root string) {
+	a.workflowBrowserInitMu.Lock()
+	defer a.workflowBrowserInitMu.Unlock()
 	if a.workflowBrowser != nil {
 		return
 	}
-	runtimeManager := browserverify.NewRuntimeManager(root, nil)
+	runtimeManager := browserverify.NewRuntimeManagerWithBundle(root, resolveBundledBrowserRuntimeDir(), nil)
 	controller := browserverify.NewHostVerifier(runtimeManager, nil, net.DefaultResolver)
 	controller.SetSessionStore(browserverify.NewSessionStore(filepath.Join(root, "browser-sessions"), newIncidentBrowserKeyringStore()))
 	a.workflowBrowser = controller
+}
+
+func (a *App) incidentBrowserController() incidentBrowserController {
+	a.workflowBrowserInitMu.Lock()
+	if a.workflowBrowser != nil {
+		controller := a.workflowBrowser
+		a.workflowBrowserInitMu.Unlock()
+		return controller
+	}
+	a.workflowBrowserInitMu.Unlock()
+
+	root := strings.TrimSpace(a.workflowRoot)
+	if root == "" {
+		root = bughub.DefaultRoot()
+	}
+	a.initializeIncidentBrowser(root)
+	a.workflowBrowserInitMu.Lock()
+	defer a.workflowBrowserInitMu.Unlock()
+	return a.workflowBrowser
+}
+
+func (a *App) startIncidentBrowserPreparation(ctx context.Context) {
+	a.workflowBrowserPrepareOnce.Do(func() {
+		controller := a.incidentBrowserController()
+		if controller == nil {
+			return
+		}
+		a.workflowMu.Lock()
+		a.workflowBrowserPreparationStarted = true
+		a.workflowMu.Unlock()
+		prepare := a.workflowBrowserPrepare
+		if prepare == nil {
+			prepare = controller.Prepare
+		}
+		go func() {
+			err := prepare(workflowContext(ctx), func(progress bughub.BrowserProgress) {
+				a.emitIncidentBrowserRuntimeProgress(progress)
+			})
+			if err != nil && !errors.Is(err, context.Canceled) {
+				fmt.Fprintf(os.Stderr, "[warn] incident browser runtime preparation failed: %v\n", err)
+			}
+			a.emitIncidentBrowserRuntimeProgress(bughub.BrowserProgress{Code: "browser_runtime_status"})
+			a.workflowMu.Lock()
+			a.workflowBrowserPreparationFinished = true
+			resumeRecovery := a.workflowRecoveryPending
+			a.workflowMu.Unlock()
+			if resumeRecovery {
+				_ = a.startIncidentWorkflow(workflowContext(ctx))
+			}
+		}()
+	})
+}
+
+func (a *App) emitIncidentBrowserRuntimeProgress(progress bughub.BrowserProgress) {
+	ctx := a.getRuntimeContext()
+	if ctx == nil {
+		return
+	}
+	payload := map[string]any{
+		"status":  a.GetIncidentBrowserRuntimeStatus(),
+		"code":    strings.TrimSpace(progress.Code),
+		"current": progress.Current,
+		"total":   progress.Total,
+	}
+	if a.workflowEmit != nil {
+		a.workflowEmit("browser-runtime:status", payload)
+		return
+	}
+	wailsruntime.EventsEmit(ctx, "browser-runtime:status", payload)
 }
 
 type caseBrowserPolicyResolver struct{ app *App }
@@ -127,7 +248,8 @@ func (r caseBrowserPolicyResolver) ResolveBrowserPolicy(ctx context.Context, inc
 	if err != nil || len(application) != 1 {
 		return bughub.BrowserSecurityPolicy{}, errors.New("incident browser application origin is invalid")
 	}
-	allowed, err := canonicalIncidentBrowserOrigins(append([]string{environment.WebDomain, environment.APIDomain}, environment.BrowserAuthOrigins...))
+	configuredAllowed := append([]string{environment.WebDomain, environment.APIDomain}, environment.BrowserAllowedOrigins...)
+	allowed, err := canonicalIncidentBrowserOrigins(append(configuredAllowed, environment.BrowserAuthOrigins...))
 	if err != nil || len(allowed) == 0 {
 		return bughub.BrowserSecurityPolicy{}, errors.New("incident browser origins are invalid")
 	}
@@ -747,9 +869,10 @@ func (a *App) emitIncidentBrowserProgress(caseID string, progress bughub.Browser
 
 func incidentBrowserProgressCodeSafe(code string) bool {
 	switch code {
-	case "browser_starting", "browser_action_started", "browser_action_completed",
+	case "browser_launching", "browser_context_preparing", "browser_evidence_preparing", "browser_starting", "browser_action_started", "browser_action_completed",
 		"browser_login_opened", "browser_login_completed",
-		"browser_runtime_installing", "browser_runtime_ready":
+		"browser_runtime_installing", "browser_runtime_dependencies_installing",
+		"browser_runtime_downloading", "browser_runtime_probing", "browser_runtime_ready":
 		return true
 	default:
 		return false

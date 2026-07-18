@@ -515,6 +515,29 @@ export namespace analyzerpipe {
 
 }
 
+export namespace browserverify {
+
+	export class RuntimeStatus {
+	    state: string;
+	    version: string;
+	    error_code?: string;
+	    message?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new RuntimeStatus(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.state = source["state"];
+	        this.version = source["version"];
+	        this.error_code = source["error_code"];
+	        this.message = source["message"];
+	    }
+	}
+
+}
+
 export namespace bughub {
 
 	export class AgentUsage {
@@ -690,6 +713,10 @@ export namespace bughub {
 	    // Go type: time
 	    last_context_at?: any;
 	    raw_preview?: string;
+	    inbox_state?: string;
+	    // Go type: time
+	    archived_at?: any;
+	    archive_reason?: string;
 
 	    static createFrom(source: any = {}) {
 	        return new Bug(source);
@@ -733,6 +760,9 @@ export namespace bughub {
 	        this.last_context = source["last_context"];
 	        this.last_context_at = this.convertValues(source["last_context_at"], null);
 	        this.raw_preview = source["raw_preview"];
+	        this.inbox_state = source["inbox_state"];
+	        this.archived_at = this.convertValues(source["archived_at"], null);
+	        this.archive_reason = source["archive_reason"];
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -2660,6 +2690,20 @@ export namespace main {
 	        this.actor_id = source["actor_id"];
 	    }
 	}
+	export class IncidentBugTicketResolution {
+	    state: string;
+	    source_status?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new IncidentBugTicketResolution(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.state = source["state"];
+	        this.source_status = source["source_status"];
+	    }
+	}
 	export class IncidentDeploymentVerification {
 	    provider: string;
 	    available: boolean;
@@ -2832,6 +2876,7 @@ export namespace main {
 	    deployment_observations: bughub.DeploymentObservation[];
 	    events: IncidentTransitionEvent[];
 	    deployment_verification: IncidentDeploymentVerification;
+	    bug_ticket_resolution: IncidentBugTicketResolution;
 
 	    static createFrom(source: any = {}) {
 	        return new IncidentCaseDetail(source);
@@ -2847,6 +2892,7 @@ export namespace main {
 	        this.deployment_observations = this.convertValues(source["deployment_observations"], bughub.DeploymentObservation);
 	        this.events = this.convertValues(source["events"], IncidentTransitionEvent);
 	        this.deployment_verification = this.convertValues(source["deployment_verification"], IncidentDeploymentVerification);
+	        this.bug_ticket_resolution = this.convertValues(source["bug_ticket_resolution"], IncidentBugTicketResolution);
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

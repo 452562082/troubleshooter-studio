@@ -39,6 +39,7 @@ import (
 
 	tshoot "github.com/xiaolong/troubleshooter-studio"
 	"github.com/xiaolong/troubleshooter-studio/api"
+	"github.com/xiaolong/troubleshooter-studio/internal/browserverify"
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/webui"
@@ -90,18 +91,27 @@ type App struct {
 	// remain inside bughub's CaseStore and CaseOrchestrator.
 	workflowMu                                sync.Mutex
 	workflowReminderOnce                      sync.Once
+	workflowBugResolutionOnce                 sync.Once
+	workflowBugResolutionMu                   sync.Mutex
 	workflowRoot                              string
 	workflowStore                             *bughub.CaseStore
 	workflowOrchestrator                      *bughub.CaseOrchestrator
 	workflowRunner                            *bughub.AgentPhaseRunner
+	workflowBrowserInitMu                     sync.Mutex
 	workflowBrowserMu                         sync.Mutex
 	workflowBrowser                           incidentBrowserController
+	workflowBrowserPrepareOnce                sync.Once
+	workflowBrowserPrepare                    func(context.Context, func(bughub.BrowserProgress)) error
+	workflowBrowserPreparationStarted         bool
+	workflowBrowserPreparationFinished        bool
+	workflowRecoveryPending                   bool
 	workflowBrowserRecoveryBeforeOutcome      func() error
 	workflowBrowserRecoveryBeforeContinuation func() error
 	workflowInitErr                           error
 	workflowLoadBug                           func(string) (bughub.Bug, error)
 	workflowLoadBot                           func(string) (bughub.BotRef, error)
 	workflowLoadDeploymentConfig              func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error)
+	workflowResolveBug                        func(context.Context, bughub.IncidentCase) error
 	workflowK8sReaderFactory                  func(context.Context, *config.SystemConfig, config.Environment) (bughub.K8sDeploymentReader, error)
 	workflowSaveArtifact                      func(string, string, context.Context) (string, error)
 	workflowEmit                              func(string, any)
@@ -110,10 +120,12 @@ type App struct {
 
 var startDesktopTray = startTray
 var startDesktopBugPoller = startBugPoller
+var desktopExecutablePath = os.Executable
 
 // startup 由 Wails 在窗口创建完成时调用，注入 runtime ctx。私有也能被 Wails 识别。
 func (a *App) startup(ctx context.Context) {
 	a.setRuntimeContext(ctx)
+	a.startIncidentBrowserPreparation(workflowContext(ctx))
 	_ = a.startIncidentWorkflow(workflowContext(ctx))
 	a.trayOnce.Do(func() {
 		startDesktopTray(a)
@@ -301,6 +313,22 @@ func resolveTemplateDir() string {
 		return ""
 	}
 	return dst
+}
+
+// resolveBundledBrowserRuntimeDir returns the versioned runtime shipped inside
+// a desktop release. Development binaries and historical app bundles simply
+// return an empty path and retain the first-launch network fallback.
+func resolveBundledBrowserRuntimeDir() string {
+	executable, err := desktopExecutablePath()
+	if err != nil {
+		return ""
+	}
+	root := filepath.Clean(filepath.Join(filepath.Dir(executable), "..", "Resources", "browser-runtime", browserverify.BrowserRuntimeVersion))
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return ""
+	}
+	return root
 }
 
 // extractEmbedded 把 embed.FS 里 rootSub 下的内容平铺到 dst（跳过 .DS_Store，

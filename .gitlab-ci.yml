@@ -234,6 +234,14 @@ desktop:
   stage: build
   tags:
     - macos
+  cache:
+    key:
+      prefix: "desktop-browser-v1"
+      files:
+        - internal/browserverify/runtime.go
+        - internal/browserverify/worker/browser_worker.mjs
+    paths:
+      - .cache/desktop-browser-runtime
   # 复用 web 已 build 的 internal/webui/dist,跳过 npm ci + vite build(原来重复跑 ~2-3 min)
   needs:
     - job: web
@@ -260,6 +268,8 @@ desktop:
     - test -f dist/TroubleshooterStudio.app/Contents/MacOS/TroubleshooterStudio
     - test -f dist/TroubleshooterStudio.app/Contents/Info.plist
     - test -f dist/TroubleshooterStudio.app/Contents/Resources/icon.icns
+    - test -f dist/TroubleshooterStudio.app/Contents/Resources/browser-runtime/1.61.1-r9/.runtime-ready.json
+    - test -d dist/TroubleshooterStudio.app/Contents/Resources/browser-runtime/1.61.1-r9/browsers
     - file dist/TroubleshooterStudio.app/Contents/MacOS/TroubleshooterStudio
     - echo "✓ .app bundle structure OK"
   artifacts:

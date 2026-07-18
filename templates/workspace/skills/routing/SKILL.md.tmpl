@@ -69,6 +69,7 @@ create_annotation / create_folder / update_annotation / update_dashboard / gener
 | 前端复现入口 / 页面到 API 映射 | `references/frontend-entry-map.yaml` |
 | 正式服务拓扑(仅 automatic/confirmed/manual 边) | `references/service-topology.yaml` |
 | 端点、代码位置、候选/拒绝/过期边证据 | `references/endpoint-evidence.yaml` |
+| Kafka/RabbitMQ 生产者/消费者静态导航 | `references/async-topology.yaml` |
 | 兼容依赖图(正式拓扑投影的下游/数据层) | `references/service-dependency-map.yaml` |
 | 业务表 schema | `references/data-schema-map.yaml` |
 | 经典错误模式(模板内置) | `references/known-errors.yaml` |
@@ -82,6 +83,8 @@ create_annotation / create_folder / update_annotation / update_dashboard / gener
 upstream/downstream 由同一正式图投影，仅用于兼容现有 cascade/runtime 检查。需要解释某条边时再按
 `endpoint_edge` 去 `endpoint-evidence.yaml` 找位置、置信度和 reasons。candidate / rejected / stale
 只能作为待复核证据，不能当成真实调用关系。
+
+`async-topology.yaml` 只收录源码中的 literal topic/queue/exchange。trace 在消息边界中断时，可按 destination 导航到生产者/消费者仓库和代码位置；必须再用 message id、trace link 或同一时间窗口的生产/消费日志验证。动态 topic、路由转换和未埋 message id 的链路应写入 gaps，不得把静态匹配升级为运行时调用。
 
 ## 关键用法 4 条
 

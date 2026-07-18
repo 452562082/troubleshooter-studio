@@ -58,6 +58,7 @@ func TestGenerate_ServiceTopology(t *testing.T) {
 		Report: analyzer.Report{Repos: []analyzer.RepoAnalysis{{
 			Name:            "mall-web",
 			DownstreamCalls: []analyzer.DownstreamCall{{Target: "legacy-bff"}},
+			Messaging:       []analyzer.MessagingEndpoint{{Broker: "kafka", Direction: "producer", DestinationKind: "topic", Destination: "orders.created", Source: "src/events.ts", Line: 12, Strength: "scanned_literal"}},
 		}}},
 		Topology: topology.Snapshot{
 			SchemaVersion: topology.SchemaVersion,
@@ -122,6 +123,17 @@ func TestGenerate_ServiceTopology(t *testing.T) {
 	}
 	if strings.Index(evidence, `id: "mall-bff:in"`) > strings.Index(evidence, `id: "mall-web:out"`) {
 		t.Fatalf("endpoints are not sorted by id:\n%s", evidence)
+	}
+
+	asyncTopology := readFile(t, filepath.Join(refs, "async-topology.yaml"))
+	var asyncDocument map[string]any
+	if err := yaml.Unmarshal([]byte(asyncTopology), &asyncDocument); err != nil {
+		t.Fatalf("async topology is not valid yaml: %v\n%s", err, asyncTopology)
+	}
+	for _, want := range []string{`broker: "kafka"`, `destination: "orders.created"`, `location: "src/events.ts:12"`, `evidence_kind: "static_navigation"`} {
+		if !strings.Contains(asyncTopology, want) {
+			t.Fatalf("async topology missing %q:\n%s", want, asyncTopology)
+		}
 	}
 
 	deps := readFile(t, filepath.Join(refs, "service-dependency-map.yaml"))
@@ -1242,10 +1254,13 @@ func TestGenerate_FrontendReproArtifacts(t *testing.T) {
 	assertExists(t, root, []string{
 		"skills/frontend-repro-investigator/SKILL.md",
 		"skills/frontend-repro-investigator/scripts/har_analyzer.py",
+		"skills/frontend-repro-investigator/scripts/source_map_locator.py",
 		"skills/routing/references/frontend-entry-map.yaml",
+		"skills/routing/references/async-topology.yaml",
 	})
 	assertNotExists(t, root, []string{
 		"skills/frontend-repro-investigator/scripts/test_har_analyzer.py",
+		"skills/frontend-repro-investigator/scripts/test_source_map_locator.py",
 	})
 }
 

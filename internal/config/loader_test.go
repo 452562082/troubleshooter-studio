@@ -129,6 +129,20 @@ func TestValidateBrowserAuthOriginsRejectsUserinfoWithoutPath(t *testing.T) {
 	}
 }
 
+func TestValidateBrowserAllowedOrigins(t *testing.T) {
+	cfg := minimalValid()
+	cfg.Environments[0].BrowserAllowedOrigins = []string{"https://static.example.com"}
+	if err := Validate(&cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.Environments[0].BrowserAllowedOrigins = []string{"https://static.example.com/assets"}
+	err := Validate(&cfg)
+	if err == nil || !strings.Contains(err.Error(), "browser_allowed_origins") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestValidate_RepoReferencesUnknownEnv(t *testing.T) {
 	c := minimalValid()
 	c.Repos = []Repo{{

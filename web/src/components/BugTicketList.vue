@@ -5,7 +5,10 @@ let bugTicketListSequence = 0
 <script setup lang="ts">
 import type { BugRecord } from '../lib/bridge/bugs'
 
-defineProps<{ bugs: BugRecord[]; selectedId: string; loading?: boolean; query: string }>()
+withDefaults(defineProps<{ bugs: BugRecord[]; selectedId: string; loading?: boolean; query: string; title?: string; emptyText?: string }>(), {
+  title: 'Bug 收件箱',
+  emptyText: '暂无同步到的 Bug',
+})
 const emit = defineEmits<{ select: [id: string]; 'update:query': [value: string] }>()
 
 const listInstanceID = `bug-ticket-list-${++bugTicketListSequence}`
@@ -25,7 +28,7 @@ function inputValue(event: Event): string {
   <section class="ticket-list" :aria-labelledby="`${listInstanceID}-title`">
     <header class="list-heading">
       <div class="list-heading-summary">
-        <strong :id="`${listInstanceID}-title`">Bug 收件箱</strong>
+        <strong :id="`${listInstanceID}-title`">{{ title }}</strong>
         <span>{{ bugs.length }} 条</span>
       </div>
       <div v-if="$slots.actions" class="list-actions">
@@ -45,7 +48,7 @@ function inputValue(event: Event): string {
     </div>
 
     <p v-if="loading" class="empty-state" role="status" aria-live="polite">加载中...</p>
-    <p v-else-if="bugs.length === 0" class="empty-state" role="status">暂无同步到的 Bug</p>
+    <p v-else-if="bugs.length === 0" class="empty-state" role="status">{{ emptyText }}</p>
     <div v-else class="ticket-rows">
       <button
         v-for="bug in bugs"
@@ -62,6 +65,7 @@ function inputValue(event: Event): string {
           <span>{{ sourceLabel(bug) }}</span>
           <span v-if="bug.env || bug.bot_env">{{ bug.env || bug.bot_env }}</span>
           <span v-if="bug.severity">S{{ bug.severity }}</span>
+          <span v-if="bug.inbox_state === 'history'" class="history-status">{{ ['resolved', 'closed'].includes((bug.status || '').toLowerCase()) ? '已解决' : '历史' }}</span>
         </span>
         <span v-if="selectedId === bug.id" class="selection-copy">已选择</span>
       </button>
@@ -92,6 +96,7 @@ function inputValue(event: Event): string {
 .ticket-title { padding-right: 54px; overflow-wrap: anywhere; color: var(--c-ink); font-size: var(--fs-base); font-weight: 600; line-height: 1.45; }
 .ticket-meta { display: flex; flex-wrap: wrap; gap: 5px; color: var(--c-muted); font-size: var(--fs-xs); }
 .ticket-meta span { max-width: 100%; padding: 1px 6px; overflow-wrap: anywhere; border-radius: 999px; background: var(--c-surf-3); }
+.ticket-meta .history-status { background: #dcfce7; color: #166534; font-weight: 700; }
 .selection-copy { position: absolute; top: 10px; right: 10px; color: #1d4ed8; font-size: var(--fs-xs); font-weight: 700; }
 .empty-state { min-height: 44px; margin: 0; display: grid; place-items: center; color: var(--c-muted); font-size: var(--fs-sm); text-align: center; }
 @media (prefers-reduced-motion: reduce) { .ticket-row { transition: none; } }

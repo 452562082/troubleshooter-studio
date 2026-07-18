@@ -42,6 +42,8 @@ environments:
     aliases: [dev, develop]          # [optional] 用户口语里的叫法
     api_domain: api-dev.example.com  # [required if applicable] 主 API 入口
     web_domain: www-dev.example.com  # [optional]
+    browser_allowed_origins:         # [optional] Web 验证必需的额外绝对 HTTP(S) origin（如 CDN）
+      - https://static.shop.example.com
     browser_auth_origins:            # [optional] 允许人工登录的绝对 HTTP(S) origin；不得含路径/查询/凭据
       - https://login.shop.example.com
     is_prod: false                   # [required]

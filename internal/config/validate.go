@@ -59,6 +59,11 @@ func Validate(c *SystemConfig) error {
 			return fmt.Errorf("duplicate environment id: %s", env.ID)
 		}
 		envIDs[env.ID] = true
+		for j, origin := range env.BrowserAllowedOrigins {
+			if err := validateBrowserAuthOrigin(origin); err != nil {
+				return fmt.Errorf("environments[%s].browser_allowed_origins[%d]: %w", env.ID, j, err)
+			}
+		}
 		for j, origin := range env.BrowserAuthOrigins {
 			if err := validateBrowserAuthOrigin(origin); err != nil {
 				return fmt.Errorf("environments[%s].browser_auth_origins[%d]: %w", env.ID, j, err)

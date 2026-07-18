@@ -148,6 +148,8 @@ unset GITLAB_TOKEN    # 公开项目可直接匿名访问
 xattr -d com.apple.quarantine /Applications/TroubleshooterStudio.app
 ```
 
+正式 dmg 已内置经过启动探测的固定 Chromium runtime；首次打开只导入本地基础工具，不需要另外联网下载浏览器。
+
 ### CLI
 
 下载 `tshoot-vX.Y.Z-<os>-<arch>`，Windows 版本自带 `.exe`。
@@ -179,6 +181,8 @@ brew install go node
 make desktop-app
 open dist/TroubleshooterStudio.app
 ```
+
+`make desktop-app` 首次构建会联网下载并真实探测固定 Chromium，之后复用 `.cache/desktop-browser-runtime`；仅构建不含浏览器资源的开发裸二进制可使用 `make desktop`。
 
 CLI：
 

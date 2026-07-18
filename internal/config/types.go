@@ -93,6 +93,7 @@ type Environment struct {
 	Aliases                []string                     `yaml:"aliases"`
 	APIDomain              string                       `yaml:"api_domain"`
 	WebDomain              string                       `yaml:"web_domain"`
+	BrowserAllowedOrigins  []string                     `yaml:"browser_allowed_origins,omitempty"`
 	BrowserAuthOrigins     []string                     `yaml:"browser_auth_origins,omitempty"`
 	IsProd                 bool                         `yaml:"is_prod"`
 	DeploymentVerification DeploymentVerificationConfig `yaml:"deployment_verification,omitempty"`

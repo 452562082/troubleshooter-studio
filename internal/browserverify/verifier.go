@@ -167,6 +167,16 @@ func (v *HostVerifier) SetSessionStore(store *SessionStore) {
 	v.sessions = store
 }
 
+// Prepare installs and probes the pinned browser runtime outside any Case.
+// Callers should start it from the Studio lifecycle or deployment workflow.
+func (v *HostVerifier) Prepare(ctx context.Context, emit func(bughub.BrowserProgress)) error {
+	if v.runtime == nil {
+		return &verifierError{code: "browser_runtime_missing", cause: errors.New("browser runtime manager is required")}
+	}
+	_, err := v.runtime.Ensure(ctx, emit)
+	return err
+}
+
 func (v *HostVerifier) Repair(ctx context.Context, emit func(bughub.BrowserProgress)) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -198,6 +208,13 @@ func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerifi
 	defer v.mu.Unlock()
 
 	if err := validateVerificationRequest(ctx, v.resolver, request); err != nil {
+		return bughub.BrowserVerificationResult{}, err
+	}
+	if v.runtime == nil {
+		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_runtime_missing", cause: errors.New("browser runtime manager is required")}
+	}
+	runtimePaths, err := v.runtime.RequireReady()
+	if err != nil {
 		return bughub.BrowserVerificationResult{}, err
 	}
 	planSHA, err := browserPlanSHA256(request.Plan)
@@ -255,13 +272,6 @@ func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerifi
 		rerunCount = reservation.RerunCount + 1
 	}
 
-	if v.runtime == nil {
-		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_runtime_missing", cause: errors.New("browser runtime manager is required")}
-	}
-	runtimePaths, err := v.runtime.Ensure(ctx, request.Emit)
-	if err != nil {
-		return bughub.BrowserVerificationResult{}, err
-	}
 	var sessionState []byte
 	hasSession := false
 	sessionKey := SessionKey{SystemID: request.SystemID, Environment: request.Environment, Origin: request.Plan.StartURL}
@@ -303,7 +313,7 @@ func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerifi
 			return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_worker_interrupted", cause: ctxErr}
 		}
 		if errors.Is(err, ErrBrowserWorkerOutputTooLarge) {
-			return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_worker_output_too_large", cause: ErrBrowserWorkerOutputTooLarge}
+			return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_worker_output_too_large", cause: err}
 		}
 		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_worker_failed", cause: errors.New("browser worker exited before producing a result")}
 	}
@@ -444,7 +454,7 @@ func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) (
 			return &verifierError{code: "browser_login_interrupted", cause: errors.New("browser login was interrupted")}
 		}
 		if errors.Is(err, ErrBrowserWorkerOutputTooLarge) {
-			return &verifierError{code: "browser_worker_output_too_large", cause: ErrBrowserWorkerOutputTooLarge}
+			return &verifierError{code: "browser_worker_output_too_large", cause: err}
 		}
 		return &verifierError{code: "browser_login_failed", cause: errors.New("browser login worker failed")}
 	}
@@ -1295,7 +1305,7 @@ func consumeBoundedWorkerStderr(stderr io.Reader, emit func(bughub.BrowserProgre
 		lineCount++
 		if lineCount > maxBrowserWorkerProgressLines {
 			kill()
-			return ErrBrowserWorkerOutputTooLarge
+			return fmt.Errorf("%w: stderr line limit", ErrBrowserWorkerOutputTooLarge)
 		}
 		line := scanner.Text()
 		if !strings.HasPrefix(line, browserProgressPrefix) {
@@ -1322,9 +1332,13 @@ func consumeBoundedWorkerStderr(stderr io.Reader, emit func(bughub.BrowserProgre
 		}
 		emit(bughub.BrowserProgress{Code: progress.Code, Message: progress.Message, ActionID: progress.ActionID, Current: progress.Current, Total: progress.Total})
 	}
-	if scanner.Err() != nil || limited.N == 0 {
+	if scanner.Err() != nil {
 		kill()
-		return ErrBrowserWorkerOutputTooLarge
+		return fmt.Errorf("%w: stderr scanner limit", ErrBrowserWorkerOutputTooLarge)
+	}
+	if limited.N == 0 {
+		kill()
+		return fmt.Errorf("%w: stderr byte limit", ErrBrowserWorkerOutputTooLarge)
 	}
 	return nil
 }
@@ -1383,9 +1397,26 @@ func (runner nodeWorkerRunner) Run(ctx context.Context, paths RuntimePaths, requ
 	go func() {
 		stdoutDone <- readBoundedWorkerStdout(outputs.stdoutRead, kill)
 	}()
+	progressSink := emit
+	var progressQueue chan bughub.BrowserProgress
+	var progressDone chan struct{}
+	if emit != nil {
+		// Draining the child pipe must never wait on UI/database observers. The
+		// queue is bounded by the same maximum number of accepted stderr lines,
+		// so it cannot grow beyond the worker protocol budget.
+		progressQueue = make(chan bughub.BrowserProgress, maxBrowserWorkerProgressLines)
+		progressDone = make(chan struct{})
+		progressSink = func(progress bughub.BrowserProgress) { progressQueue <- progress }
+		go func() {
+			defer close(progressDone)
+			for progress := range progressQueue {
+				emit(progress)
+			}
+		}()
+	}
 	stderrDone := make(chan error, 1)
 	go func() {
-		stderrDone <- consumeBoundedWorkerStderr(outputs.stderrRead, emit, kill)
+		stderrDone <- consumeBoundedWorkerStderr(outputs.stderrRead, progressSink, kill)
 	}()
 	var sessionState []byte
 	if request.Mode == "login" && request.StorageStatePath != "" {
@@ -1401,9 +1432,16 @@ func (runner nodeWorkerRunner) Run(ctx context.Context, paths RuntimePaths, requ
 	waitErr := processController.wait(command)
 	processCleanupErr := processController.finish()
 	stdoutResult, stderrErr := waitWorkerOutputDrains(outputs, stdoutDone, stderrDone)
+	if progressQueue != nil {
+		close(progressQueue)
+		<-progressDone
+	}
 	stdinErr := <-stdinDone
-	if errors.Is(stdoutResult.err, ErrBrowserWorkerOutputTooLarge) || errors.Is(stderrErr, ErrBrowserWorkerOutputTooLarge) {
-		return workerResult{}, ErrBrowserWorkerOutputTooLarge
+	if errors.Is(stdoutResult.err, ErrBrowserWorkerOutputTooLarge) {
+		return workerResult{}, fmt.Errorf("%w: stdout", ErrBrowserWorkerOutputTooLarge)
+	}
+	if errors.Is(stderrErr, ErrBrowserWorkerOutputTooLarge) {
+		return workerResult{}, fmt.Errorf("%w: %v", ErrBrowserWorkerOutputTooLarge, stderrErr)
 	}
 	if waitErr != nil || stdoutResult.err != nil || stderrErr != nil || stdinErr != nil {
 		return workerResult{}, errors.Join(waitErr, stdoutResult.err, stderrErr, stdinErr, processCleanupErr)

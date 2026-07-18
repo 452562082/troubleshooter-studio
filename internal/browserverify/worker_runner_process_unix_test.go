@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 )
 
 func TestNodeWorkerRunnerDirectExitCleansDescendantHoldingOutputPipes(t *testing.T) {
@@ -77,6 +79,47 @@ const ready = setInterval(() => {
 		t.Fatalf("worker output-pipe grandchild survived cleanup: %v", err)
 	}
 	cleanupNeeded = false
+}
+
+func TestNodeWorkerRunnerSlowProgressObserverCannotBlockStderrDrain(t *testing.T) {
+	temporary := t.TempDir()
+	workerPath := filepath.Join(temporary, "worker-with-progress.mjs")
+	source := `
+process.stderr.write('TSHOOT_BROWSER_PROGRESS {"code":"browser_action_started","message":"running","action_id":"step","current":1,"total":1}\n');
+process.stdout.write(JSON.stringify({ status: 'completed' }));
+`
+	if err := os.WriteFile(workerPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	observerStarted := make(chan struct{})
+	releaseObserver := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		_, err := (nodeWorkerRunner{}).Run(context.Background(), RuntimePaths{
+			Root: temporary, BrowsersPath: filepath.Join(temporary, "browsers"), WorkerPath: workerPath,
+		}, workerRequest{Mode: "execute"}, func(bughub.BrowserProgress) {
+			close(observerStarted)
+			<-releaseObserver
+		})
+		result <- err
+	}()
+	select {
+	case <-observerStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("progress observer was not called")
+	}
+	// Keep the observer blocked beyond the child-output drain deadline. The
+	// worker pipe itself must still be consumed and remain valid.
+	time.Sleep(commandOutputDrainTimeout + 100*time.Millisecond)
+	close(releaseObserver)
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("slow progress observer caused worker failure: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("worker did not return after releasing progress observer")
+	}
 }
 
 func TestNodeWorkerRunnerPostStartOutputCloseErrorIsBoundedAndClosesParentPipes(t *testing.T) {

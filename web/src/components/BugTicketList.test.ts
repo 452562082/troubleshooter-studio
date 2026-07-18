@@ -72,4 +72,15 @@ describe('BugTicketList', () => {
     })
     expect(withoutAction.find('.list-actions').exists()).toBe(false)
   })
+
+  it('renders a historical status without relying on color', () => {
+    const wrapper = mount(BugTicketList, {
+      props: {
+        bugs: [{ ...bugs[0], inbox_state: 'history', status: 'resolved' }],
+        selectedId: '', query: '', title: '历史工单', emptyText: '暂无历史工单',
+      },
+    })
+    expect(wrapper.get('.list-heading-summary strong').text()).toBe('历史工单')
+    expect(wrapper.get('.history-status').text()).toBe('已解决')
+  })
 })

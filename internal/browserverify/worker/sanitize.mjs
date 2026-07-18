@@ -3,6 +3,8 @@ const INVALID_URL = '[INVALID_URL]';
 const MAX_CONSOLE_BYTES = 8 * 1024;
 const MAX_ID_BYTES = 128;
 const MAX_CONTENT_TYPE_BYTES = 256;
+const MAX_CAUSAL_TEXT_BYTES = 512;
+const MAX_INITIATOR_FRAMES = 12;
 const SENSITIVE_QUERY_KEY = /token|password|secret|code|session|auth|cookie|key/i;
 const REQUEST_ID_HEADERS = ['x-request-id', 'request-id', 'x-correlation-id', 'correlation-id', 'x-amzn-requestid'];
 const TRACE_ID_HEADERS = ['x-trace-id', 'trace-id', 'traceparent'];
@@ -88,6 +90,37 @@ function safeNonNegativeNumber(value, integerOnly = false) {
   return number;
 }
 
+function safeCausalText(value, maxBytes = MAX_CAUSAL_TEXT_BYTES) {
+  const text = boundedUTF8(value, maxBytes).trim();
+  if (!text) return '';
+  if (text.includes('\r') || text.includes('\n') || containsCredential(text)) return REDACTED;
+  return text;
+}
+
+function safeTimestamp(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return '';
+  const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString() !== text) return '';
+  return text;
+}
+
+function safeEnum(value, allowed) {
+  const text = String(value ?? '').trim().toLowerCase();
+  return allowed.has(text) ? text : '';
+}
+
+function safeInitiatorStack(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, MAX_INITIATOR_FRAMES).map((frame) => ({
+    function_name: safeCausalText(frame?.function_name, 256),
+    url: frame?.url ? sanitizeURL(frame.url) : '',
+    source_map_url: frame?.source_map_url ? sanitizeURL(frame.source_map_url) : '',
+    line: safeNonNegativeNumber(frame?.line, true),
+    column: safeNonNegativeNumber(frame?.column, true),
+  }));
+}
+
 export function sanitizeURL(rawURL) {
   try {
     const parsed = new URL(String(rawURL));
@@ -114,13 +147,20 @@ export function safeResponseRecord(input = {}) {
   const contentType = input.content_type ?? firstHeader(headers, ['content-type']);
   const contentLength = input.content_length ?? firstHeader(headers, ['content-length']);
   return {
+    action_id: safeIdentifier(input.action_id),
+    started_at: safeTimestamp(input.started_at),
     method: safeMethod(input.method),
     url: sanitizeURL(input.url),
+    resource_type: safeEnum(input.resource_type, new Set(['document', 'stylesheet', 'image', 'media', 'font', 'script', 'texttrack', 'xhr', 'fetch', 'eventsource', 'websocket', 'manifest', 'other'])),
+    outcome: safeEnum(input.outcome, new Set(['response', 'failed', 'redirected'])),
+    failure_reason: safeCausalText(input.failure_reason),
     status: safeNonNegativeNumber(input.status, true),
     duration_ms: safeNonNegativeNumber(input.duration_ms),
     content_type: safeContentType(contentType),
     content_length: safeNonNegativeNumber(contentLength, true),
     request_id: safeIdentifier(firstHeader(headers, REQUEST_ID_HEADERS)),
     trace_id: safeIdentifier(firstHeader(headers, TRACE_ID_HEADERS)),
+    initiator_type: safeEnum(input.initiator_type, new Set(['parser', 'script', 'preload', 'signedexchange', 'preflight', 'other'])),
+    initiator_stack: safeInitiatorStack(input.initiator_stack),
   };
 }

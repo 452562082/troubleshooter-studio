@@ -59,6 +59,20 @@ type DataStoreUsage struct {
 	Callsite string `json:"callsite,omitempty"`
 }
 
+// MessagingEndpoint is a conservative literal producer/consumer location.
+// It is static navigation evidence only; a runtime message id or same-window
+// logs are still required to prove that a particular incident crossed it.
+type MessagingEndpoint struct {
+	Broker          string `json:"broker"`
+	Direction       string `json:"direction"`
+	DestinationKind string `json:"destination_kind"`
+	Destination     string `json:"destination"`
+	RoutingKey      string `json:"routing_key,omitempty"`
+	Source          string `json:"source,omitempty"`
+	Line            int    `json:"line,omitempty"`
+	Strength        string `json:"strength,omitempty"`
+}
+
 // SchemaTable 单条业务表 / collection / 缓存 prefix 命中——"本仓库代码 / 注解 / SQL 字面量
 // 提到了哪个表"。schema_scan.go 各语言多策略扫产出。给 routing data-schema-map.yaml 用,
 // agent 看到 "order #xxx" 时知道去哪个表查。
@@ -94,6 +108,7 @@ type RepoAnalysis struct {
 	APIRoutes       []APIRoute          `json:"api_routes,omitempty"`
 	Endpoints       []topology.Endpoint `json:"endpoints,omitempty"`
 	DataStoreUsages []DataStoreUsage    `json:"data_store_usages,omitempty"`
+	Messaging       []MessagingEndpoint `json:"messaging_endpoints,omitempty"`
 	SchemaTables    []SchemaTable       `json:"schema_tables,omitempty"`
 	RoleHint        *RoleHint           `json:"role_hint,omitempty"` // 自动推断的角色 + 理由(用户可改)
 	Warnings        []string            `json:"warnings,omitempty"`

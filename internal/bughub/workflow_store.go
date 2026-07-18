@@ -63,6 +63,7 @@ type CaseReset struct {
 	ExpectedVersion        int64
 	SelectedBotKey         string
 	ReplacementBotTarget   string
+	ReplacementSystemID    string
 	ReplacementEnvironment string
 	RequestJSON            json.RawMessage
 	// replayOnlyLegacyEnvironment is the environment that the pre-selected-Bot
@@ -1000,11 +1001,15 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 		return result, ErrCaseVersionConflict
 	}
 
+	replacementSystemID := incident.SystemID
+	if blank(replacementSystemID) {
+		replacementSystemID = strings.TrimSpace(reset.ReplacementSystemID)
+	}
 	replacement := IncidentCase{
 		ID:              reset.NewCaseID,
 		BugID:           incident.BugID,
 		Source:          incident.Source,
-		SystemID:        incident.SystemID,
+		SystemID:        replacementSystemID,
 		Environment:     reset.ReplacementEnvironment,
 		Status:          CasePendingValidation,
 		CycleNumber:     1,
@@ -1205,6 +1210,9 @@ func caseResetBindingMatches(reset CaseReset, replacement IncidentCase, environm
 	if reset.SelectedBotKey != replacement.SelectedBotKey || environment != replacement.Environment {
 		return false
 	}
+	if systemID := strings.TrimSpace(reset.ReplacementSystemID); systemID != "" && systemID != replacement.SystemID {
+		return false
+	}
 	persistedTarget := incidentWorkflowTargetFromBotKey(replacement.SelectedBotKey)
 	if persistedTarget == "" {
 		return !requireDerivedTarget
@@ -1226,6 +1234,7 @@ func caseResetEventPayload(reset CaseReset, result CaseResetResult) (json.RawMes
 		"cancelled_attempt_id":    result.CancelledAttemptID,
 		"selected_bot_key":        reset.SelectedBotKey,
 		"replacement_bot_target":  reset.ReplacementBotTarget,
+		"replacement_system_id":   reset.ReplacementSystemID,
 		"replacement_environment": reset.ReplacementEnvironment,
 		"request":                 request,
 	})

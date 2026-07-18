@@ -56,7 +56,7 @@ func TestSyncBugPlatformStoresAssignedBugs(t *testing.T) {
 	}
 }
 
-func TestSyncBugPlatformRemovesPrunedBugAttachmentCache(t *testing.T) {
+func TestSyncBugPlatformArchivesStaleBugAndPreservesAttachmentCache(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", root)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -97,11 +97,12 @@ func TestSyncBugPlatformRemovesPrunedBugAttachmentCache(t *testing.T) {
 	if got.Pruned != 1 || len(got.PrunedIDs) != 1 || got.PrunedIDs[0] != "zentao-old" {
 		t.Fatalf("result = %+v", got)
 	}
-	if _, err := os.Stat(cacheDir); !os.IsNotExist(err) {
-		t.Fatalf("cache dir still exists or stat failed unexpectedly: %v", err)
+	if _, err := os.Stat(cacheDir); err != nil {
+		t.Fatalf("historical attachment cache was not preserved: %v", err)
 	}
-	if _, ok, err := bugStore().Get("zentao-old"); err != nil || ok {
-		t.Fatalf("stale bug ok=%v err=%v", ok, err)
+	archived, ok, err := bugStore().Get("zentao-old")
+	if err != nil || !ok || archived.InboxState != bughub.BugInboxHistory {
+		t.Fatalf("archived bug=%+v ok=%v err=%v", archived, ok, err)
 	}
 }
 

@@ -111,6 +111,23 @@ pbpaste | python3 skills/frontend-repro-investigator/scripts/console_analyzer.py
 2. 如果分析结果包含 API URL、HTTP status、request id 或 trace id，用 `backend_handoff` 继续交给后端取证。
 3. 如果只有 JS stack，用 `routing/references/frontend-entry-map.yaml` 识别前端仓库，再检查相关组件或 request wrapper。
 
+## Source Map 精确定位
+
+Studio 宿主 Network 证据中的 `initiator_stack[].source_map_url` 是 Chromium 从已执行脚本解析出的候选地址。它只是候选，不代表 map 已成功下载或与部署版本匹配。先核对：
+
+1. frame `url`、`source_map_url` 与复现时实际 bundle URL/build hash 一致；
+2. `runtime-code-manifest.json` 中仓库的 deployed revision/image 与该构建产物一致；
+3. 只读取已冻结的 `.map` 请求证据、用户提供的 map 或版本匹配的本地构建产物，不自行访问未批准的外部地址。
+
+拿到本地 Source Map v3 文件后，从 workspace root 用浏览器证据中的 1-based 行列号反解：
+
+```bash
+python3 skills/frontend-repro-investigator/scripts/source_map_locator.py \
+  --map <local-bundle.js.map> --line <initiator-line> --column <initiator-column>
+```
+
+只有同时通过上述版本绑定且脚本返回 `status: mapped`，才能把 hop precision 写成 `source_mapped`。只有 source map 候选、bundle 行列号或当前 HEAD 代码时，必须降级为 `deployed_revision` / `static_candidate`，并在 gaps 记录缺失项。
+
 ## Sentry 事件查询
 
 如果用户提供 Sentry event id，且工作区有 Sentry 权限，从 workspace root 拉取并归一化事件：

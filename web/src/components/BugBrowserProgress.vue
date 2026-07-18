@@ -16,21 +16,32 @@ defineEmits<{ action: [action: BrowserAction] }>()
 
 const progressCodeAllowlist = new Set<string>(incidentBrowserProgressCodes)
 const maxBrowserProgressStep = 100
-const safeEvents = computed(() => props.events.flatMap((event, index) => {
-  if (event.type !== 'browser_progress') return []
+const safeEvents = computed(() => props.events.reduce<Array<{ code: IncidentBrowserProgressCode; current?: number; total?: number; key: string }>>((result, event, index) => {
+  if (event.type !== 'browser_progress') return result
   const code = typeof event.meta.browser_code === 'string' ? event.meta.browser_code : ''
-  if (!progressCodeAllowlist.has(code)) return []
+  if (!progressCodeAllowlist.has(code)) return result
   const hasCurrent = event.meta.current !== undefined
   const hasTotal = event.meta.total !== undefined
   const validStep = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= maxBrowserProgressStep
-  if (hasCurrent !== hasTotal || hasCurrent && (!validStep(event.meta.current) || !validStep(event.meta.total) || Number(event.meta.current) > Number(event.meta.total))) return []
-  return [{ code: code as IncidentBrowserProgressCode, current: hasCurrent ? event.meta.current as number : undefined, total: hasTotal ? event.meta.total as number : undefined, key: `${code}:${String(event.meta.current ?? '')}:${String(event.meta.total ?? '')}:${index}` }]
-}))
+  if (hasCurrent !== hasTotal || hasCurrent && (!validStep(event.meta.current) || !validStep(event.meta.total) || Number(event.meta.current) > Number(event.meta.total))) return result
+  const parsed = { code: code as IncidentBrowserProgressCode, current: hasCurrent ? event.meta.current as number : undefined, total: hasTotal ? event.meta.total as number : undefined, key: `${code}:${String(event.meta.current ?? '')}:${String(event.meta.total ?? '')}:${index}` }
+  if (code === 'browser_runtime_downloading' && result[result.length - 1]?.code === code) result[result.length - 1] = parsed
+  else result.push(parsed)
+  return result
+}, []))
 
 function progressCopy(event: { code: IncidentBrowserProgressCode; current?: number; total?: number }): string {
   const count = event.current !== undefined && event.total !== undefined ? `${event.current}/${event.total}` : ''
-  if (event.code === 'browser_starting' || event.code === 'runtime_preparing') return '准备验证浏览器'
+  if (event.code === 'browser_launching') return '正在启动验证浏览器'
+  if (event.code === 'browser_context_preparing') return '正在准备隔离浏览器环境'
+  if (event.code === 'browser_evidence_preparing') return '正在接入页面与网络证据采集'
+  if (event.code === 'browser_starting') return '正在打开待验证页面'
+  if (event.code === 'runtime_preparing') return '准备验证浏览器'
   if (event.code === 'browser_runtime_installing') return '正在准备验证浏览器运行时'
+  if (event.code === 'browser_runtime_importing') return '正在初始化 App 内置 Chromium'
+  if (event.code === 'browser_runtime_dependencies_installing') return '正在安装 Playwright 依赖'
+  if (event.code === 'browser_runtime_downloading') return `正在下载 Chromium：${event.current ?? 0}%`
+  if (event.code === 'browser_runtime_probing') return '正在启动 Chromium 自检'
   if (event.code === 'browser_runtime_ready') return '验证浏览器运行时已就绪'
   if (event.code === 'browser_login_opened') return '验证浏览器已打开，请完成登录'
   if (event.code === 'browser_login_completed') return '浏览器登录会话已保存'
@@ -46,14 +57,22 @@ const errorCode = computed(() => {
   return typeof output.error_code === 'string' ? output.error_code.trim() : ''
 })
 
-const state = computed<'progress' | 'login' | 'runtime' | 'validator' | 'locator' | 'url' | 'business' | 'system' | ''>(() => {
-  if (errorCode.value === 'browser_login_required') return 'login'
-  if (errorCode.value === 'browser_runtime_broken') return 'runtime'
-  if (errorCode.value === 'validator_not_installed') return 'validator'
-  if (errorCode.value === 'browser_locator_failed') return 'locator'
-  if (errorCode.value === 'browser_url_required') return 'url'
-  if (errorCode.value === 'browser_assertion_failed') return 'business'
-  if (errorCode.value.startsWith('browser_')) return 'system'
+const stableErrorCode = computed(() => {
+  const value = errorCode.value
+  if (!/^[a-z0-9_]{1,128}$/.test(value)) return ''
+  return value.startsWith('browser_') || value === 'validator_not_installed' ? value : ''
+})
+
+const state = computed<'progress' | 'login' | 'runtime' | 'validator' | 'quota' | 'locator' | 'url' | 'business' | 'system' | ''>(() => {
+  const code = stableErrorCode.value
+  if (code === 'browser_login_required') return 'login'
+  if (code === 'browser_runtime_broken') return 'runtime'
+  if (code === 'validator_not_installed') return 'validator'
+  if (code === 'browser_validator_usage_limited') return 'quota'
+  if (code === 'browser_locator_failed') return 'locator'
+  if (code === 'browser_url_required') return 'url'
+  if (code === 'browser_assertion_failed') return 'business'
+  if (code.startsWith('browser_')) return 'system'
   return safeEvents.value.length > 0 ? 'progress' : ''
 })
 
@@ -70,6 +89,7 @@ const stateCopy = computed(() => ({
   login: '当前验证需要登录。请在 Studio 打开的验证浏览器中完成登录，不要在 Case 中粘贴账号、密码或 Cookie。',
   runtime: '验证浏览器环境不可用。修复并通过运行时探测后，Studio 会创建一次新的验证继续。',
   validator: '验证机器人尚未部署，浏览器验证不会退回普通排障机器人。请重新部署当前机器人的 validator 角色。',
+  quota: '验证机器人用量已达上限。恢复额度或切换到可用机器人后，请重新开始故障闭环。',
   locator: '页面元素定位失败。请补充失败步骤附近可见的控件名称或页面变化后重试。',
   url: '来源工单缺少 frontend_url。请先在来源工单平台补充页面地址，再前往 Bug 收件箱重新同步该 Bug。',
   business: '页面结果与预期不一致。请补充最小业务预期或测试数据后重试。',
@@ -98,6 +118,7 @@ const stateCopy = computed(() => ({
     <div v-if="stateCopy" class="browser-recovery-copy">
       <p>{{ stateCopy }}</p>
       <small v-if="state === 'login' && loginOrigin">登录入口：{{ loginOrigin }}</small>
+      <small v-if="stableErrorCode" data-browser-error-code>错误码：{{ stableErrorCode }}</small>
     </div>
 
     <div v-if="state === 'login'" class="browser-recovery-actions">
@@ -119,7 +140,7 @@ const stateCopy = computed(() => ({
 <style scoped>
 .browser-progress { display: grid; gap: var(--sp-3); padding: var(--sp-4); border: 1px solid #bfdbfe; border-left: 3px solid #2563eb; border-radius: var(--r-lg); background: #f8fbff; }
 .browser-progress[data-browser-state="login"], .browser-progress[data-browser-state="locator"], .browser-progress[data-browser-state="url"], .browser-progress[data-browser-state="business"] { border-color: #fed7aa; border-left-color: #ea580c; background: #fffaf5; }
-.browser-progress[data-browser-state="runtime"], .browser-progress[data-browser-state="validator"], .browser-progress[data-browser-state="system"] { border-color: #fecaca; border-left-color: #dc2626; background: #fffafa; }
+.browser-progress[data-browser-state="runtime"], .browser-progress[data-browser-state="validator"], .browser-progress[data-browser-state="quota"], .browser-progress[data-browser-state="system"] { border-color: #fecaca; border-left-color: #dc2626; background: #fffafa; }
 .browser-progress header { min-width: 0; display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: var(--sp-2); }
 .browser-progress header span, .browser-progress header small, .browser-recovery-copy small { color: var(--c-muted); font-size: var(--fs-xs); }
 .browser-progress h3, .browser-progress p { margin: 0; }

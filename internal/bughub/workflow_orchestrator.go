@@ -514,6 +514,7 @@ func (o *CaseOrchestrator) ResetCaseWithOutcome(ctx context.Context, cmd ResetCa
 		ExpectedVersion:             cmd.ExpectedVersion,
 		SelectedBotKey:              cmd.Bot.Key,
 		ReplacementBotTarget:        cmd.Bot.Target,
+		ReplacementSystemID:         cmd.Bug.SystemID,
 		ReplacementEnvironment:      environment,
 		RequestJSON:                 mustJSON(cmd),
 		replayOnlyLegacyEnvironment: resolveLegacyResetEnvironment(cmd.Bug, cmd.Bot),
@@ -655,6 +656,9 @@ func (o *CaseOrchestrator) CreateAndStartCase(ctx context.Context, cmd CreateAnd
 	}
 	if strings.TrimSpace(cmd.Bug.ID) == "" || strings.TrimSpace(cmd.Bot.Key) == "" || strings.TrimSpace(cmd.Bot.Target) == "" {
 		return IncidentCase{}, errors.New("Bug ID and Bot key/target are required")
+	}
+	if strings.TrimSpace(cmd.Bug.SystemID) == "" {
+		cmd.Bug.SystemID = strings.TrimSpace(cmd.Bot.SystemID)
 	}
 	if len(cmd.InputJSON) == 0 {
 		cmd.InputJSON = []byte(`{}`)
@@ -1866,9 +1870,13 @@ func (o *CaseOrchestrator) applyOutcome(ctx context.Context, incident IncidentCa
 	}
 	switch cmd.Outcome {
 	case PhaseOutcomeReproduced:
+		investigationInput, err := o.buildInitialInvestigationInput(ctx, attempt, cmd.OutputJSON)
+		if err != nil {
+			return IncidentCase{}, err
+		}
 		add(CaseReproduced, "validation_reproduced", "agent", actor, cmd.OutputJSON)
 		add(CaseInvestigating, "investigation_started", "studio", "orchestrator", map[string]string{"parent_attempt_id": attempt.ID})
-		created := newAttempt(incident, PhaseInvestigation, "", cmd.IdempotencyKey+":investigation", BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget}, []byte(`{}`), attempt.ID)
+		created := newAttempt(incident, PhaseInvestigation, "", cmd.IdempotencyKey+":investigation", BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget}, investigationInput, attempt.ID)
 		next = &created
 		update.CurrentAttemptID = workflowStringPtr(created.ID)
 	case PhaseOutcomeNotReproduced:

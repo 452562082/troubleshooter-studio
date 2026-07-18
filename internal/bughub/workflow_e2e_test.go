@@ -85,6 +85,13 @@ func TestWorkflowE2EFixedVerifiedSurvivesSQLiteReopen(t *testing.T) {
 		t.Fatalf("validation=%+v err=%v", incident, err)
 	}
 	investigation, _ := store.GetAttempt(ctx, incident.CurrentAttemptID)
+	var handoff InitialInvestigationInput
+	if err := json.Unmarshal(investigation.InputJSON, &handoff); err != nil {
+		t.Fatalf("decode validation evidence handoff: %v", err)
+	}
+	if handoff.ValidationAttemptID != validation.ID || handoff.ObservedBehavior != "timeout" || handoff.ExpectedBehavior != "checkout succeeds" || len(handoff.Evidence) != 1 || handoff.Evidence[0].ArtifactID != originalArtifact.ID || handoff.Evidence[0].SHA256 != originalArtifact.SHA256 {
+		t.Fatalf("validation evidence handoff = %+v", handoff)
+	}
 	rootOutput := []byte(`{"investigation_status":"root_cause_ready","environment":"test","root_cause":"checkout race","confidence":"high","evidence":[],"gaps":[]}`)
 	incident, err = orchestrator.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: incident.ID, AttemptID: investigation.ID, ExpectedVersion: incident.Version, IdempotencyKey: "e2e:investigation", ActorID: "investigator", Outcome: PhaseOutcomeRootCauseReady, OutputJSON: rootOutput})
 	if err != nil || incident.Status != CaseWaitingFixApproval {
@@ -449,6 +456,13 @@ func TestWorkflowE2EFailureAndRecoveryBoundaries(t *testing.T) {
 		next, err := o.CompleteAttempt(context.Background(), CompleteAttemptCommand{CaseID: current.ID, AttemptID: attempt.ID, ExpectedVersion: current.Version, IdempotencyKey: "e2e:still", ActorID: "validator", Outcome: PhaseOutcomeStillReproduces, OutputJSON: regressionOutput(t, attempt, "still_reproduces", "timeout remains")})
 		if err != nil || next.Status != CaseInvestigating || next.CycleNumber != 2 {
 			t.Fatalf("case=%+v err=%v", next, err)
+		}
+		if runner.startCount() != 2 {
+			t.Fatalf("runner starts=%d, want regression plus next-cycle investigation", runner.startCount())
+		}
+		nextAttempt, getErr := store.GetAttempt(context.Background(), next.CurrentAttemptID)
+		if getErr != nil || nextAttempt.Phase != PhaseInvestigation || nextAttempt.CycleNumber != 2 || nextAttempt.ParentAttemptID != attempt.ID {
+			t.Fatalf("next attempt=%+v err=%v", nextAttempt, getErr)
 		}
 	})
 

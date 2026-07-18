@@ -14,6 +14,14 @@ type Store struct {
 	root string
 }
 
+const (
+	BugInboxActive  = "active"
+	BugInboxHistory = "history"
+
+	BugArchiveNoLongerAssigned = "no_longer_assigned"
+	BugArchiveSourceResolved   = "source_resolved"
+)
+
 func NewStore(root string) *Store {
 	return &Store{root: root}
 }
@@ -32,6 +40,28 @@ func (s *Store) List() ([]Bug, error) {
 		return items[i].UpdatedAt.After(items[j].UpdatedAt)
 	})
 	return items, nil
+}
+
+func (s *Store) ListInbox() ([]Bug, error) {
+	return s.listByInboxState(BugInboxActive)
+}
+
+func (s *Store) ListHistory() ([]Bug, error) {
+	return s.listByInboxState(BugInboxHistory)
+}
+
+func (s *Store) listByInboxState(state string) ([]Bug, error) {
+	items, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]Bug, 0, len(items))
+	for _, item := range items {
+		if item.InboxState == state {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered, nil
 }
 
 func (s *Store) Get(id string) (Bug, bool, error) {
@@ -56,6 +86,22 @@ func (s *Store) Upsert(b Bug) error {
 		return errors.New("bug title is required")
 	}
 	now := time.Now().UTC()
+	if bugSourceResolutionComplete(b.Status) {
+		b.InboxState = BugInboxHistory
+		if b.ArchivedAt == nil {
+			b.ArchivedAt = &now
+		}
+		if strings.TrimSpace(b.ArchiveReason) == "" {
+			b.ArchiveReason = BugArchiveSourceResolved
+		}
+	} else if b.InboxState != BugInboxHistory {
+		// An assigned/open Bug returned by a later sync is active again. Clearing
+		// the archive fields makes reopen/reassignment reversible. Local edits
+		// loaded from history retain their explicit history marker.
+		b.InboxState = BugInboxActive
+		b.ArchivedAt = nil
+		b.ArchiveReason = ""
+	}
 	if b.UpdatedAt.IsZero() {
 		b.UpdatedAt = now
 	}
@@ -83,8 +129,33 @@ func (s *Store) Upsert(b Bug) error {
 	return s.writeAll(items)
 }
 
-// PruneStale 删除指定来源+平台的 bug 中不在 keepIDs 集合里的条目。
-// 用于同步后清理禅道上已修复/关闭/重新指派的 bug。
+func (s *Store) Archive(id, reason string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("bug id is required")
+	}
+	items, err := s.readAll()
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	for i := range items {
+		if items[i].ID != id {
+			continue
+		}
+		if items[i].InboxState == BugInboxHistory {
+			return nil
+		}
+		items[i].InboxState = BugInboxHistory
+		items[i].ArchivedAt = &now
+		items[i].ArchiveReason = strings.TrimSpace(reason)
+		return s.writeAll(items)
+	}
+	return os.ErrNotExist
+}
+
+// PruneStale 将指定来源+平台中不在 keepIDs 集合里的 Bug 移出收件箱。
+// 历史快照不会删除，解决/关闭/重新指派后的工单仍可审计和查看。
 // platformID 为空时退化为只按 source 匹配（兼容老数据没有 platform_id 的情况）。
 func (s *Store) PruneStale(source, platformID string, keepIDs []string) (int, error) {
 	prunedIDs, err := s.PruneStaleIDs(source, platformID, keepIDs)
@@ -94,7 +165,7 @@ func (s *Store) PruneStale(source, platformID string, keepIDs []string) (int, er
 	return len(prunedIDs), nil
 }
 
-// PruneStaleIDs is PruneStale 的可观测变体，返回被清理的 bug ID。
+// PruneStaleIDs is PruneStale 的可观测变体，返回本次新归档的 Bug ID。
 func (s *Store) PruneStaleIDs(source, platformID string, keepIDs []string) ([]string, error) {
 	items, err := s.readAll()
 	if err != nil {
@@ -105,22 +176,24 @@ func (s *Store) PruneStaleIDs(source, platformID string, keepIDs []string) ([]st
 		keep[id] = true
 	}
 	prunedIDs := []string{}
-	filtered := make([]Bug, 0, len(items))
-	for _, item := range items {
+	now := time.Now().UTC()
+	for i := range items {
+		item := &items[i]
 		if item.Source == source {
 			if platformID == "" || item.PlatformID == "" || item.PlatformID == platformID {
-				if !keep[item.ID] {
+				if !keep[item.ID] && item.InboxState != BugInboxHistory {
 					prunedIDs = append(prunedIDs, item.ID)
-					continue
+					item.InboxState = BugInboxHistory
+					item.ArchivedAt = &now
+					item.ArchiveReason = BugArchiveNoLongerAssigned
 				}
 			}
 		}
-		filtered = append(filtered, item)
 	}
 	if len(prunedIDs) == 0 {
 		return nil, nil
 	}
-	if err := s.writeAll(filtered); err != nil {
+	if err := s.writeAll(items); err != nil {
 		return nil, err
 	}
 	return prunedIDs, nil
@@ -149,12 +222,33 @@ func (s *Store) readAll() ([]Bug, error) {
 
 func normalizeStoredBugs(items []Bug) {
 	for i := range items {
+		if bugSourceResolutionComplete(items[i].Status) {
+			items[i].InboxState = BugInboxHistory
+			if items[i].ArchivedAt == nil && !items[i].UpdatedAt.IsZero() {
+				archivedAt := items[i].UpdatedAt
+				items[i].ArchivedAt = &archivedAt
+			}
+			if strings.TrimSpace(items[i].ArchiveReason) == "" {
+				items[i].ArchiveReason = BugArchiveSourceResolved
+			}
+		} else if items[i].InboxState != BugInboxHistory {
+			items[i].InboxState = BugInboxActive
+		}
 		if items[i].Source == "zentao" {
 			items[i].Steps = zentaoHTMLToText(items[i].Steps)
 			items[i].Description = zentaoHTMLToText(items[i].Description)
 			items[i].Expected = zentaoHTMLToText(items[i].Expected)
 			items[i].Actual = zentaoHTMLToText(items[i].Actual)
 		}
+	}
+}
+
+func bugSourceResolutionComplete(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "resolved", "closed":
+		return true
+	default:
+		return false
 	}
 }
 

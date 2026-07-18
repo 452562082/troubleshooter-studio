@@ -1,6 +1,32 @@
 package bughub
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
+
+func TestCanonicalBrowserSecurityPolicyEncodesEmptyOriginCollectionsAsArrays(t *testing.T) {
+	canonical := canonicalBrowserSecurityPolicy(BrowserSecurityPolicy{})
+	for name, values := range map[string][]string{
+		"allowed_origins":     canonical.AllowedOrigins,
+		"application_origins": canonical.ApplicationOrigins,
+		"start_origins":       canonical.StartOrigins,
+		"private_origins":     canonical.PrivateOrigins,
+		"auth_origins":        canonical.AuthOrigins,
+	} {
+		if values == nil {
+			t.Fatalf("%s is nil, want an empty JSON array", name)
+		}
+	}
+	encoded, err := json.Marshal(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"allowed_origins":[],"application_origins":[],"start_origins":[],"private_origins":[],"auth_origins":[],"is_prod":false}`
+	if string(encoded) != want {
+		t.Fatalf("canonical policy JSON = %s, want %s", encoded, want)
+	}
+}
 
 func TestBrowserPolicyDigestBindsCanonicalApplicationAndStartOrigins(t *testing.T) {
 	policy := BrowserSecurityPolicy{

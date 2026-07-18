@@ -179,7 +179,11 @@ func canonicalBrowserSecurityPolicy(policy BrowserSecurityPolicy) BrowserSecurit
 }
 
 func canonicalBrowserPolicyOrigins(origins []string) []string {
-	values := append([]string(nil), origins...)
+	// Keep the canonical empty value as an allocated slice. The browser worker
+	// protocol deliberately requires every origin collection to be a JSON
+	// array; a nil slice would otherwise be encoded as null and rejected before
+	// Chromium can start.
+	values := append([]string{}, origins...)
 	for index := range values {
 		values[index] = strings.TrimSpace(values[index])
 	}
@@ -192,7 +196,7 @@ func canonicalBrowserPolicyOrigins(origins []string) []string {
 		result = append(result, value)
 	}
 	if len(result) == 0 {
-		return nil
+		return []string{}
 	}
 	return result
 }

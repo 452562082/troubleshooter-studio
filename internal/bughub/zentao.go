@@ -806,6 +806,85 @@ func (c ZentaoClient) FetchByID(id string) (Bug, error) {
 	return NormalizeZentaoBug(raw), nil
 }
 
+// ResolveByID marks a Bug as fixed through Zentao's workflow action. It first
+// reads the current state and verifies the state again after the action. That
+// makes a repeated workflow callback safe, including the case where Zentao
+// committed the action but the original HTTP response was lost.
+func (c ZentaoClient) ResolveByID(id string, comment string) (Bug, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return Bug{}, fmt.Errorf("zentao bug id is required")
+	}
+	current, err := c.FetchByID(id)
+	if err != nil {
+		return Bug{}, err
+	}
+	if zentaoBugResolutionComplete(current.Status) {
+		return current, nil
+	}
+
+	base := strings.TrimRight(c.BaseURL, "/")
+	u, err := url.Parse(base + "/api.php/v1/bugs/" + url.PathEscape(id) + "/resolve")
+	if err != nil {
+		return Bug{}, err
+	}
+	payload, err := json.Marshal(map[string]any{
+		"status":        "resolved",
+		"resolution":    "fixed",
+		"resolvedBuild": "trunk",
+		"createBuild":   "off",
+		"comment":       strings.TrimSpace(comment),
+	})
+	if err != nil {
+		return Bug{}, err
+	}
+	client := c.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
+	req, err := http.NewRequest(http.MethodPost, u.String(), bytes.NewReader(payload))
+	if err != nil {
+		return Bug{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if err := c.applyAuth(req, client); err != nil {
+		return Bug{}, err
+	}
+	resp, requestErr := client.Do(req)
+	var actionErr error
+	if requestErr != nil {
+		actionErr = requestErr
+	} else {
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			actionErr = zentaoStatusError(resp, "zentao resolve returned")
+		} else {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		}
+		_ = resp.Body.Close()
+	}
+
+	verified, verifyErr := c.FetchByID(id)
+	if verifyErr == nil && zentaoBugResolutionComplete(verified.Status) {
+		return verified, nil
+	}
+	if actionErr != nil {
+		return Bug{}, actionErr
+	}
+	if verifyErr != nil {
+		return Bug{}, fmt.Errorf("verify resolved zentao bug %s: %w", id, verifyErr)
+	}
+	return Bug{}, fmt.Errorf("zentao bug %s remained in status %q after resolve", id, verified.Status)
+}
+
+func zentaoBugResolutionComplete(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "resolved", "closed":
+		return true
+	default:
+		return false
+	}
+}
+
 func (c ZentaoClient) HydrateBugDetails(bugs []Bug) []Bug {
 	out := make([]Bug, 0, len(bugs))
 	for _, bug := range bugs {

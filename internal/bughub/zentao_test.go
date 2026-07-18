@@ -2,8 +2,10 @@ package bughub
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -461,6 +463,76 @@ func TestZentaoClientFetchByIDSupportsTopLevelBugResponse(t *testing.T) {
 	}
 	if got.SourceID != "577" || len(got.Attachments) != 1 || got.Attachments[0].ID != "1129" {
 		t.Fatalf("bug = %+v attachments=%+v", got, got.Attachments)
+	}
+}
+
+func TestZentaoClientResolveByIDOnlyResolvesActiveBug(t *testing.T) {
+	status := "active"
+	postCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Token") != "secret" {
+			t.Fatalf("Token header = %q", r.Header.Get("Token"))
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api.php/v1/bugs/840":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"bug":{"id":"840","title":"搜索结果不完整","status":%q}}`, status)
+		case r.Method == http.MethodPost && r.URL.Path == "/api.php/v1/bugs/840/resolve":
+			postCount++
+			var input map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Fatalf("decode resolve request: %v", err)
+			}
+			if input["resolution"] != "fixed" || input["resolvedBuild"] != "trunk" {
+				t.Fatalf("resolve request = %#v", input)
+			}
+			if !strings.Contains(fmt.Sprint(input["comment"]), "case-840") {
+				t.Fatalf("resolve comment = %q", input["comment"])
+			}
+			status = "resolved"
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"result":"success"}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := ZentaoClient{BaseURL: srv.URL, Token: "secret", HTTPClient: srv.Client()}
+	resolved, err := client.ResolveByID("840", "Studio case-840 第 2 轮回归通过")
+	if err != nil {
+		t.Fatalf("ResolveByID: %v", err)
+	}
+	if resolved.Status != "resolved" || postCount != 1 {
+		t.Fatalf("resolved=%+v postCount=%d", resolved, postCount)
+	}
+	resolved, err = client.ResolveByID("840", "duplicate callback")
+	if err != nil || resolved.Status != "resolved" || postCount != 1 {
+		t.Fatalf("idempotent resolve=%+v postCount=%d err=%v", resolved, postCount, err)
+	}
+}
+
+func TestZentaoClientResolveByIDAcceptsCommittedResolveAfterUncertainResponse(t *testing.T) {
+	status := "active"
+	postCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"bug":{"id":"840","title":"搜索结果不完整","status":%q}}`, status)
+		case http.MethodPost:
+			postCount++
+			status = "resolved"
+			http.Error(w, "gateway lost response", http.StatusBadGateway)
+		default:
+			t.Fatalf("unexpected request %s", r.Method)
+		}
+	}))
+	defer srv.Close()
+
+	resolved, err := (ZentaoClient{BaseURL: srv.URL, Token: "secret", HTTPClient: srv.Client()}).ResolveByID("840", "verified")
+	if err != nil || resolved.Status != "resolved" || postCount != 1 {
+		t.Fatalf("resolved=%+v postCount=%d err=%v", resolved, postCount, err)
 	}
 }
 

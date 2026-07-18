@@ -17,21 +17,25 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 )
 
 type commandRecord struct {
-	Executable string
-	Args       []string
-	Env        []string
-	Dir        string
+	Executable  string
+	Args        []string
+	Env         []string
+	Dir         string
+	HasDeadline bool
 }
 
 type recordingCommandRunner struct {
-	mu              sync.Mutex
-	Records         []commandRecord
-	FailContaining  string
-	BlockContaining string
-	ProbeSHA        string
+	mu               sync.Mutex
+	Records          []commandRecord
+	FailContaining   string
+	BlockContaining  string
+	ProbeSHA         string
+	PlaywrightStdout string
 }
 
 type runtimeEnsureResult struct {
@@ -40,7 +44,8 @@ type runtimeEnsureResult struct {
 }
 
 func (r *recordingCommandRunner) Run(ctx context.Context, executable string, args, env []string, dir string, _ io.Reader, stdout, _ io.Writer) error {
-	record := commandRecord{Executable: executable, Args: append([]string(nil), args...), Env: append([]string(nil), env...), Dir: dir}
+	_, hasDeadline := ctx.Deadline()
+	record := commandRecord{Executable: executable, Args: append([]string(nil), args...), Env: append([]string(nil), env...), Dir: dir, HasDeadline: hasDeadline}
 	r.mu.Lock()
 	r.Records = append(r.Records, record)
 	r.mu.Unlock()
@@ -58,6 +63,11 @@ func (r *recordingCommandRunner) Run(ctx context.Context, executable string, arg
 		}
 	}
 	if strings.Contains(summary, "install chromium") {
+		if r.PlaywrightStdout != "" {
+			if _, err := io.WriteString(stdout, r.PlaywrightStdout); err != nil {
+				return err
+			}
+		}
 		for _, entry := range env {
 			if strings.HasPrefix(entry, "PLAYWRIGHT_BROWSERS_PATH=") {
 				if err := os.MkdirAll(strings.TrimPrefix(entry, "PLAYWRIGHT_BROWSERS_PATH="), 0o700); err != nil {
@@ -83,6 +93,41 @@ func (r *recordingCommandRunner) Run(ctx context.Context, executable string, arg
 		})
 	}
 	return nil
+}
+
+func TestRuntimeManagerEmitsInstallStagesAndDownloadProgress(t *testing.T) {
+	runner := &recordingCommandRunner{PlaywrightStdout: "Downloading Chromium\n|■■■■■■■■                        |  30% of 150 MiB\n|■■■■■■■■■■■■■■■■                |  50% of 150 MiB\n"}
+	manager := NewRuntimeManager(t.TempDir(), runner)
+	var progress []bughub.BrowserProgress
+	if _, err := manager.Ensure(context.Background(), func(event bughub.BrowserProgress) {
+		progress = append(progress, event)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var summaries []string
+	for _, event := range progress {
+		summaries = append(summaries, fmt.Sprintf("%s:%d/%d", event.Code, event.Current, event.Total))
+	}
+	got := strings.Join(summaries, "\n")
+	for _, want := range []string{
+		"browser_runtime_installing:0/0",
+		"browser_runtime_dependencies_installing:0/0",
+		"browser_runtime_downloading:0/100",
+		"browser_runtime_downloading:30/100",
+		"browser_runtime_downloading:50/100",
+		"browser_runtime_probing:0/0",
+		"browser_runtime_ready:0/0",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("progress = %q, want %q", got, want)
+		}
+	}
+	for _, record := range runner.Records {
+		if !record.HasDeadline {
+			t.Fatalf("command has no deadline: %+v", record)
+		}
+	}
 }
 
 func (r *recordingCommandRunner) CommandSummaries() []string {
@@ -120,7 +165,7 @@ func TestRuntimeManagerInstallsPinnedVersionAndRunsRealProbeCommand(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if paths.Version != "1.61.1" {
+	if paths.Version != "1.61.1-r10" {
 		t.Fatalf("version = %q", paths.Version)
 	}
 	got := strings.Join(runner.CommandSummaries(), "\n")
@@ -137,8 +182,123 @@ func TestRuntimeManagerInstallsPinnedVersionAndRunsRealProbeCommand(t *testing.T
 	if string(manifest) != wantManifest {
 		t.Fatalf("package.json = %q", manifest)
 	}
-	if status := manager.Status(); status.State != RuntimeReady || status.Version != "1.61.1" {
+	if status := manager.Status(); status.State != RuntimeReady || status.Version != "1.61.1-r10" {
 		t.Fatalf("status = %+v", status)
+	}
+}
+
+func TestRuntimeManagerImportsBundledRuntimeWithoutNetworkInstall(t *testing.T) {
+	bundleRunner := &recordingCommandRunner{}
+	bundleManager := NewRuntimeManager(t.TempDir(), bundleRunner)
+	bundle, err := bundleManager.Ensure(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(bundle.NodeModules, ".bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "playwright"), filepath.Join(binDir, "playwright")); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &recordingCommandRunner{FailContaining: "npm install"}
+	manager := NewRuntimeManagerWithBundle(t.TempDir(), bundle.Root, runner)
+	var progress []bughub.BrowserProgress
+	paths, err := manager.Ensure(context.Background(), func(event bughub.BrowserProgress) {
+		progress = append(progress, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commands := runner.CommandSummaries(); len(commands) != 0 {
+		t.Fatalf("bundled import unexpectedly ran commands: %v", commands)
+	}
+	if paths.Root == bundle.Root {
+		t.Fatal("bundled runtime was used in place instead of being imported atomically")
+	}
+	if err := validatePublishedRuntime(paths); err != nil {
+		t.Fatalf("imported runtime is invalid: %v", err)
+	}
+	link, err := os.Readlink(filepath.Join(paths.NodeModules, ".bin", "playwright"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if link != filepath.Join("..", "playwright") {
+		t.Fatalf("copied symlink = %q", link)
+	}
+	if status := manager.Status(); status.State != RuntimeReady {
+		t.Fatalf("status = %+v", status)
+	}
+	var codes []string
+	for _, event := range progress {
+		codes = append(codes, event.Code)
+	}
+	if got := strings.Join(codes, ","); !strings.Contains(got, "browser_runtime_importing") || !strings.Contains(got, "browser_runtime_ready") {
+		t.Fatalf("progress = %q", got)
+	}
+}
+
+func TestRuntimeManagerRejectsInvalidBundledRuntimeWithoutDownloading(t *testing.T) {
+	bundle := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bundle, "package.json"), []byte("tampered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingCommandRunner{}
+	manager := NewRuntimeManagerWithBundle(t.TempDir(), bundle, runner)
+	if _, err := manager.Ensure(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "browser_runtime_bundle_invalid") {
+		t.Fatalf("error = %v, want browser_runtime_bundle_invalid", err)
+	}
+	if commands := runner.CommandSummaries(); len(commands) != 0 {
+		t.Fatalf("invalid bundle unexpectedly triggered download: %v", commands)
+	}
+}
+
+func TestSeedPlaywrightBrowserCacheCopiesOnlyPinnedCompleteEntries(t *testing.T) {
+	root := t.TempDir()
+	manifest := filepath.Join(root, "browsers.json")
+	encoded := `{"browsers":[
+  {"name":"chromium","revision":"1228","installByDefault":true},
+  {"name":"chromium-headless-shell","revision":"1228","installByDefault":true},
+  {"name":"ffmpeg","revision":"1011","revisionOverrides":{"mac12":"1010"}},
+  {"name":"firefox","revision":"9999","installByDefault":true}
+]}`
+	if err := os.WriteFile(manifest, []byte(encoded), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cache := filepath.Join(root, "cache")
+	for _, name := range []string{"chromium-1228", "chromium_headless_shell-1228", "ffmpeg-1011", "firefox-9999"} {
+		directory := filepath.Join(cache, name)
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, "INSTALLATION_COMPLETE"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, "payload"), []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	incomplete := filepath.Join(cache, "ffmpeg-1010")
+	if err := os.MkdirAll(incomplete, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(root, "destination")
+	if err := os.Mkdir(destination, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedPlaywrightBrowserCache(manifest, cache, destination); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"chromium-1228", "chromium_headless_shell-1228", "ffmpeg-1011"} {
+		if _, err := os.Stat(filepath.Join(destination, name, "payload")); err != nil {
+			t.Fatalf("seeded entry %q: %v", name, err)
+		}
+	}
+	for _, name := range []string{"ffmpeg-1010", "firefox-9999"} {
+		if _, err := os.Stat(filepath.Join(destination, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("unexpected seeded entry %q: %v", name, err)
+		}
 	}
 }
 
@@ -163,7 +323,7 @@ func TestRuntimeManagerInstallsBrowsersInsideTemporaryVersionBeforePublish(t *te
 			browsersPath = strings.TrimPrefix(entry, "PLAYWRIGHT_BROWSERS_PATH=")
 		}
 	}
-	if browsersPath == "" || !strings.Contains(browsersPath, string(filepath.Separator)+".install-1.61.1-") {
+	if browsersPath == "" || !strings.Contains(browsersPath, string(filepath.Separator)+".install-1.61.1-r10-") {
 		t.Fatalf("install env did not use temporary browser path: %+v", install.Env)
 	}
 	if browsersPath == paths.BrowsersPath {
@@ -210,6 +370,66 @@ func TestRuntimeManagerCancellationCleansLockAndTemporaryInstall(t *testing.T) {
 		t.Fatalf("published cancelled runtime: %v", err)
 	}
 	assertRuntimeInstallLockAvailable(t, manager)
+}
+
+func TestRuntimeManagerDownloadTimeoutCleansLockAndTemporaryInstall(t *testing.T) {
+	runner := &recordingCommandRunner{BlockContaining: "playwright install chromium"}
+	manager := NewRuntimeManager(t.TempDir(), runner)
+	manager.downloadTimeout = time.Millisecond
+	if _, err := manager.Ensure(context.Background(), nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want context.DeadlineExceeded", err)
+	} else if !strings.Contains(err.Error(), "browser_runtime_install_failed") {
+		t.Fatalf("error = %v, want stable runtime error code", err)
+	}
+	if status := manager.Status(); status.State != RuntimeBroken || status.ErrorCode != "browser_runtime_install_failed" {
+		t.Fatalf("status = %+v", status)
+	}
+	if _, err := os.Stat(manager.currentDir()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("published timed-out runtime: %v", err)
+	}
+	assertRuntimeInstallLockAvailable(t, manager)
+}
+
+func TestRuntimeManagerStatusDoesNotBlockDuringInstall(t *testing.T) {
+	runner := &recordingCommandRunner{BlockContaining: "npm install"}
+	manager := NewRuntimeManager(t.TempDir(), runner)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan error, 1)
+	go func() {
+		_, err := manager.Ensure(ctx, nil)
+		done <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for len(runner.CommandSummaries()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+
+	statusDone := make(chan RuntimeStatus, 1)
+	go func() { statusDone <- manager.Status() }()
+	select {
+	case status := <-statusDone:
+		if status.State != RuntimeInstalling {
+			t.Fatalf("status = %+v", status)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Status blocked behind the runtime installation")
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Ensure error = %v, want context.Canceled", err)
+	}
+}
+
+func TestRuntimeManagerRequireReadyNeverInstalls(t *testing.T) {
+	runner := &recordingCommandRunner{}
+	manager := NewRuntimeManager(t.TempDir(), runner)
+	if _, err := manager.RequireReady(); err == nil || !strings.Contains(err.Error(), "browser_runtime_missing") {
+		t.Fatalf("error = %v, want browser_runtime_missing", err)
+	}
+	if commands := runner.CommandSummaries(); len(commands) != 0 {
+		t.Fatalf("RequireReady ran install commands: %v", commands)
+	}
 }
 
 func TestRuntimeManagerLiveInstallLockFailsClosed(t *testing.T) {
@@ -605,6 +825,24 @@ func TestRuntimeManagerReusesReadyRuntimeWithoutCommands(t *testing.T) {
 	}
 	if first != second || len(runner.CommandSummaries()) != commandCount {
 		t.Fatalf("first=%+v second=%+v commands=%v", first, second, runner.CommandSummaries())
+	}
+}
+
+func TestRuntimeManagerDiscoversPublishedRuntimeBeforeStartupRecovery(t *testing.T) {
+	root := t.TempDir()
+	if _, err := NewRuntimeManager(root, &recordingCommandRunner{}).Ensure(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingCommandRunner{}
+	restarted := NewRuntimeManager(root, runner)
+	if status := restarted.Status(); status.State != RuntimeReady {
+		t.Fatalf("status = %+v, want ready", status)
+	}
+	if _, err := restarted.RequireReady(); err != nil {
+		t.Fatal(err)
+	}
+	if commands := runner.CommandSummaries(); len(commands) != 0 {
+		t.Fatalf("restart readiness ran commands: %v", commands)
 	}
 }
 

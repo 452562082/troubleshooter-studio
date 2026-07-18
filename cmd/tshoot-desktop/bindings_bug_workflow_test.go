@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xiaolong/troubleshooter-studio/internal/browserverify"
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 )
@@ -104,6 +107,95 @@ func TestGetIncidentCaseAndEmittedSnapshotsHideArtifactPathsAndApplicationURLs(t
 	}
 }
 
+func TestSyncIncidentBugResolutionIsGatedBySuccessfulRegression(t *testing.T) {
+	calls := 0
+	app := &App{workflowResolveBug: func(_ context.Context, incident bughub.IncidentCase) error {
+		calls++
+		if incident.Status != bughub.CaseFixedVerified {
+			t.Fatalf("resolver received status %s", incident.Status)
+		}
+		return nil
+	}}
+
+	for _, status := range []bughub.CaseStatus{
+		bughub.CaseNotReproduced,
+		bughub.CaseInvestigating,
+		bughub.CaseStillReproduces,
+		bughub.CaseRegressionValidating,
+	} {
+		if err := app.syncIncidentBugResolution(context.Background(), bughub.IncidentCase{ID: "case-gate", Status: status}); err != nil {
+			t.Fatalf("status %s: %v", status, err)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("resolver calls before successful regression = %d", calls)
+	}
+	if err := app.syncIncidentBugResolution(context.Background(), bughub.IncidentCase{ID: "case-gate", Status: bughub.CaseFixedVerified}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("resolver calls after successful regression = %d, want 1", calls)
+	}
+}
+
+func TestReconcileIncidentBugResolutionsRecoversAndIsIdempotent(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	remoteStatus := "active"
+	postCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Token") != "secret" {
+			t.Fatalf("Token header = %q", r.Header.Get("Token"))
+		}
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"bug":{"id":"840","title":"搜索结果不完整","status":%q}}`, remoteStatus)
+		case http.MethodPost:
+			postCount++
+			remoteStatus = "resolved"
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"result":"success"}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	platform, err := bugPlatformStore().Upsert(bughub.PlatformConfig{
+		ID: "zentao-main", Name: "Zentao", Type: "zentao", BaseURL: srv.URL,
+		AuthMode: "api_token", Token: "secret", Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bugStore().Upsert(bughub.Bug{
+		ID: "zentao-840", Source: "zentao", SourceID: "840", PlatformID: platform.ID,
+		Title: "搜索结果不完整", Status: "active",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
+	incident := bughub.IncidentCase{
+		ID: "case-fixed-reconcile", BugID: "zentao-840", Source: "zentao", SystemID: "base",
+		Environment: "test", Status: bughub.CaseFixedVerified, CycleNumber: 2,
+	}
+	if err := store.CreateCase(context.Background(), incident); err != nil {
+		t.Fatal(err)
+	}
+
+	app.reconcileIncidentBugResolutions(context.Background())
+	app.reconcileIncidentBugResolutions(context.Background())
+	if postCount != 1 {
+		t.Fatalf("resolve POST count = %d, want 1", postCount)
+	}
+	stored, found, err := bugStore().Get("zentao-840")
+	if err != nil || !found || stored.Status != "resolved" || stored.InboxState != bughub.BugInboxHistory || stored.ArchivedAt == nil {
+		t.Fatalf("stored Bug = %+v found=%v err=%v", stored, found, err)
+	}
+}
+
 func TestGeneratedWailsIncidentArtifactContractIsPathFree(t *testing.T) {
 	models, err := os.ReadFile(filepath.Join("..", "..", "web", "wailsjs", "go", "models.ts"))
 	if err != nil {
@@ -128,6 +220,7 @@ type workflowBindingRunner struct {
 	mu        sync.Mutex
 	starts    int
 	cancels   int
+	bugs      []bughub.Bug
 	bots      []bughub.BotRef
 	startErr  error
 	cancelErr error
@@ -154,10 +247,11 @@ func (*workflowBindingGit) InspectFix(context.Context, bughub.FixInspectionReque
 	return bughub.FixInspection{}, nil
 }
 
-func (r *workflowBindingRunner) Start(_ context.Context, _ bughub.PhaseAttempt, _ bughub.Bug, bot bughub.BotRef) error {
+func (r *workflowBindingRunner) Start(_ context.Context, _ bughub.PhaseAttempt, bug bughub.Bug, bot bughub.BotRef) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.starts++
+	r.bugs = append(r.bugs, bug)
 	r.bots = append(r.bots, bot)
 	return r.startErr
 }
@@ -190,6 +284,15 @@ func (r *workflowBindingRunner) lastBot() bughub.BotRef {
 	return r.bots[len(r.bots)-1]
 }
 
+func (r *workflowBindingRunner) lastBug() bughub.Bug {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.bugs) == 0 {
+		return bughub.Bug{}
+	}
+	return r.bugs[len(r.bugs)-1]
+}
+
 func newWorkflowBindingApp(t *testing.T, dbPath string) (*App, *bughub.CaseStore, *workflowBindingRunner) {
 	t.Helper()
 	store, err := bughub.OpenCaseStore(dbPath)
@@ -202,6 +305,9 @@ func newWorkflowBindingApp(t *testing.T, dbPath string) (*App, *bughub.CaseStore
 	app := &App{
 		workflowStore:        store,
 		workflowOrchestrator: orchestrator,
+		workflowBrowser: &fakeIncidentBrowserController{
+			status: browserverify.RuntimeStatus{State: browserverify.RuntimeReady, Version: "1.61.1"},
+		},
 		workflowLoadBug: func(id string) (bughub.Bug, error) {
 			return bughub.Bug{ID: id, Source: "zentao", Title: "checkout fails", Env: "test", SystemID: "base"}, nil
 		},
@@ -692,6 +798,130 @@ func TestStartIncidentCaseCreatesFirstDurableCase(t *testing.T) {
 	second, err := app.StartIncidentCase(input)
 	if err != nil || second != first || runner.count() != 1 {
 		t.Fatalf("second=%+v starts=%d err=%v", second, runner.count(), err)
+	}
+}
+
+func TestStartIncidentCaseRejectsWebCaseUntilHostRuntimeIsReady(t *testing.T) {
+	app, store, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
+	app.workflowLoadBug = func(id string) (bughub.Bug, error) {
+		return bughub.Bug{ID: id, Source: "zentao", Title: "用户页面搜索失败", FrontendURL: "https://app.test/users", Env: "test", SystemID: "base"}, nil
+	}
+	app.workflowBrowser = &fakeIncidentBrowserController{status: browserverify.RuntimeStatus{
+		State: browserverify.RuntimeInstalling, Version: "1.61.1", ErrorCode: "browser_runtime_install_in_progress",
+	}}
+
+	_, err := app.StartIncidentCase(StartIncidentCaseInput{
+		CaseID: "case-runtime-preparing", BugID: "bug-runtime-preparing", BotKey: "base|codex", ExpectedVersion: 0,
+		IdempotencyKey: "create:runtime-preparing", ActorID: "user-1", InputJSON: map[string]any{"mode": "reproduce"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "browser_runtime_preparing") {
+		t.Fatalf("error = %v, want browser_runtime_preparing", err)
+	}
+	if runner.count() != 0 {
+		t.Fatalf("runner starts = %d", runner.count())
+	}
+	if cases, listErr := store.ListCases(context.Background()); listErr != nil {
+		t.Fatal(listErr)
+	} else if len(cases) != 0 {
+		t.Fatalf("Web Case was created while runtime prepared: %+v", cases)
+	}
+}
+
+func TestStartIncidentCaseHydratesUIBugFromSelectedBotEnvironment(t *testing.T) {
+	app, store, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
+	app.workflowLoadBug = func(id string) (bughub.Bug, error) {
+		return bughub.Bug{ID: id, Source: "zentao", Title: "【APP】用户昵称模糊搜索结果不完整", Env: "test"}, nil
+	}
+	app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) {
+		return &config.SystemConfig{
+			System:       config.System{ID: "base"},
+			Environments: []config.Environment{{ID: "test", WebDomain: "https://app.test"}},
+		}, nil
+	}
+
+	created, err := app.StartIncidentCase(StartIncidentCaseInput{
+		CaseID: "case-ui-context", BugID: "bug-ui-context", BotKey: "base|codex", ExpectedVersion: 0,
+		IdempotencyKey: "create:ui-context", ActorID: "user-1", InputJSON: map[string]any{"mode": "reproduce"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.SystemID != "base" {
+		t.Fatalf("created SystemID = %q, want base", created.SystemID)
+	}
+	persisted, err := store.GetCase(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.SystemID != "base" {
+		t.Fatalf("persisted SystemID = %q, want base", persisted.SystemID)
+	}
+	startedBug := runner.lastBug()
+	if startedBug.SystemID != "base" || startedBug.FrontendURL != "https://app.test" {
+		t.Fatalf("runner Bug = %+v, want hydrated system and configured Web URL", startedBug)
+	}
+}
+
+func TestStartIncidentCaseDoesNotRouteBackendBugThroughBrowser(t *testing.T) {
+	app, _, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
+	app.workflowLoadBug = func(id string) (bughub.Bug, error) {
+		return bughub.Bug{ID: id, Source: "zentao", Title: "数据库查询超时", Env: "test"}, nil
+	}
+	app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) {
+		return &config.SystemConfig{
+			System:       config.System{ID: "base"},
+			Environments: []config.Environment{{ID: "test", WebDomain: "https://app.test"}},
+		}, nil
+	}
+
+	_, err := app.StartIncidentCase(StartIncidentCaseInput{
+		CaseID: "case-backend-context", BugID: "bug-backend-context", BotKey: "base|codex", ExpectedVersion: 0,
+		IdempotencyKey: "create:backend-context", ActorID: "user-1", InputJSON: map[string]any{"mode": "reproduce"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if startedBug := runner.lastBug(); startedBug.SystemID != "base" || startedBug.FrontendURL != "" {
+		t.Fatalf("runner Bug = %+v, backend Bug must not be routed through browser", startedBug)
+	}
+}
+
+func TestResetIncidentCaseHydratesReplacementBrowserContext(t *testing.T) {
+	app, store, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
+	app.workflowLoadBug = func(id string) (bughub.Bug, error) {
+		return bughub.Bug{ID: id, Source: "zentao", Title: "【APP】用户昵称模糊搜索结果不完整", Env: "test"}, nil
+	}
+	app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) {
+		return &config.SystemConfig{
+			System:       config.System{ID: "base"},
+			Environments: []config.Environment{{ID: "test", WebDomain: "https://app.test"}},
+		}, nil
+	}
+	original := bughub.IncidentCase{
+		ID: "case-ui-old", BugID: "bug-ui-reset", Source: "zentao", Environment: "test",
+		Status: bughub.CaseWaitingEvidence, CycleNumber: 1, SelectedBotKey: "base|codex",
+	}
+	if err := store.CreateCase(context.Background(), original); err != nil {
+		t.Fatal(err)
+	}
+	original, err := store.GetCase(context.Background(), original.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := app.ResetIncidentCaseWithWarnings(ResetIncidentCaseInput{
+		CaseID: original.ID, NewCaseID: "case-ui-replacement", BotKey: "base|codex",
+		ExpectedVersion: original.Version, IdempotencyKey: "reset:ui-context", ActorID: "user-1",
+		InputJSON: map[string]any{"mode": "reproduce"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Case.SystemID != "base" || result.Case.Status != bughub.CaseValidating {
+		t.Fatalf("replacement Case = %+v, want browser-bound validating Case", result.Case)
+	}
+	if startedBug := runner.lastBug(); startedBug.SystemID != "base" || startedBug.FrontendURL != "https://app.test" {
+		t.Fatalf("runner Bug = %+v, want hydrated replacement browser context", startedBug)
 	}
 }
 

@@ -57,7 +57,9 @@ const NETWORK_PROTOCOLS = new Set(['http:', 'https:', 'ws:', 'wss:']);
 const BROWSER_LAUNCH_ARGS = Object.freeze([
   '--disable-quic',
   '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
-  '--host-resolver-rules=MAP * ~NOTFOUND',
+  // Chromium must resolve/connect to the Studio-owned loopback proxy itself;
+  // every business destination is still resolved and IP-pinned by that proxy.
+  '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1',
   '--disable-features=AsyncDns,DnsOverHttps,DnsPrefetching,HappyEyeballsV3',
   '--disable-background-networking',
   '--disable-component-update',
@@ -816,6 +818,17 @@ export async function launchPinnedBrowser(chromium, policy, headless, startProxy
   };
 }
 
+function isTopLevelNavigationRequest(browserRequest) {
+  try {
+    if (!browserRequest.isNavigationRequest()) return false;
+    const frame = browserRequest.frame();
+    const page = frame.page();
+    return frame === page.mainFrame();
+  } catch {
+    return false;
+  }
+}
+
 export async function createSupervisedBrowserContext(browser, {
   storageStateInput = {},
   policy,
@@ -824,11 +837,14 @@ export async function createSupervisedBrowserContext(browser, {
 } = {}) {
   const context = await browser.newContext({
     ...storageStateInput,
-    serviceWorkers: 'block',
+    // Service workers are required by some applications for basic navigation.
+    // They cannot bypass the authenticated, policy-enforcing browser proxy,
+    // which remains the network security boundary for every browser request.
+    serviceWorkers: 'allow',
     acceptDownloads: false,
     viewport: { width: 1280, height: 720 },
   });
-  let blockedRequest = false;
+  let blockedNavigation = false;
   context.on('dialog', (dialog) => dialog.dismiss().catch(() => {}));
   context.on('download', (download) => download.cancel().catch(() => {}));
   const guardedPages = new WeakSet();
@@ -848,11 +864,17 @@ export async function createSupervisedBrowserContext(browser, {
   if (typeof hooks.onConsole === 'function') context.on('console', hooks.onConsole);
   if (policy) {
     await context.route('**/*', async (route) => {
+      const browserRequest = route.request();
       try {
-        await assertAllowedURL(route.request().url(), policy, lookup);
+        await assertAllowedURL(browserRequest.url(), policy, lookup);
         await route.continue();
       } catch {
-        blockedRequest = true;
+        // Keep every unapproved request blocked, but only a denied top-level
+        // navigation invalidates the whole validation. Modern applications
+        // commonly issue optional CDN, telemetry, or endpoint-discovery
+        // requests; aborting one must not turn an otherwise usable page into
+        // a browser system failure.
+        if (isTopLevelNavigationRequest(browserRequest)) blockedNavigation = true;
         await route.abort('blockedbyclient');
       }
     });
@@ -866,13 +888,12 @@ export async function createSupervisedBrowserContext(browser, {
       await resolvePinnedTarget(webSocketRoute.url(), policy, lookup, new Set(['ws:', 'wss:']));
       webSocketRoute.connectToServer();
     } catch {
-      blockedRequest = true;
       webSocketRoute.close();
     }
   });
   const page = await context.newPage();
   guardPage(page);
-  return { context, page, blocked: () => blockedRequest };
+  return { context, page, blocked: () => blockedNavigation };
 }
 
 export function buildLocator(page, locator) {
@@ -880,8 +901,14 @@ export function buildLocator(page, locator) {
   switch (locator.kind) {
     case 'role': return page.getByRole(locator.value, locator.name ? { name: locator.name } : {});
     case 'label': return page.getByLabel(locator.value);
-    case 'text': return page.getByText(locator.value, { exact: false });
-    case 'placeholder': return page.getByPlaceholder(locator.value);
+    // Accessibility summaries expose aria-label names alongside visible text.
+    // A repair agent cannot otherwise distinguish the two, so a text hint may
+    // safely match either user-visible text or the same accessible label.
+    case 'text': return page.getByText(locator.value, { exact: false }).or(page.getByLabel(locator.value, { exact: false }));
+    // Search inputs often replace rotating placeholders after hydration while
+    // keeping a stable accessible label. Treat the declared placeholder text
+    // as an accessibility hint too, without expanding beyond native locators.
+    case 'placeholder': return page.getByPlaceholder(locator.value).or(page.getByLabel(locator.value, { exact: false }));
     case 'test_id': return page.getByTestId(locator.value);
     case 'css': return page.locator(`css=${locator.value}`);
     default: throw new Error('action locator kind is not supported');
@@ -1419,6 +1446,29 @@ async function accessibilitySummary(page) {
   return result;
 }
 
+const CANONICAL_PRESS_KEYS = new Map([
+  ['enter', 'Enter'],
+  ['escape', 'Escape'],
+  ['esc', 'Escape'],
+  ['tab', 'Tab'],
+  ['arrowup', 'ArrowUp'],
+  ['arrowdown', 'ArrowDown'],
+  ['arrowleft', 'ArrowLeft'],
+  ['arrowright', 'ArrowRight'],
+  ['backspace', 'Backspace'],
+  ['delete', 'Delete'],
+  ['home', 'Home'],
+  ['end', 'End'],
+  ['pageup', 'PageUp'],
+  ['pagedown', 'PageDown'],
+  ['space', 'Space'],
+]);
+
+function canonicalPressKey(rawKey) {
+  const key = requiredString(rawKey, 'press key', 128);
+  return CANONICAL_PRESS_KEYS.get(key.toLowerCase()) ?? key;
+}
+
 export async function executeAction(page, action, request, index, captureScreenshot, authFailures) {
   const finishAuthScope = authFailures?.beginAction(page, action) ?? (() => {});
   try {
@@ -1431,12 +1481,12 @@ export async function executeAction(page, action, request, index, captureScreens
         return captureScreenshot(`action-${String(index + 1).padStart(2, '0')}-${safeFilePart(action.id)}.png`);
       default: {
         const locator = buildLocator(page, action.locator).first();
-        if (action.action === 'click') await locator.click();
-        else if (action.action === 'fill') {
-          const type = (await locator.getAttribute('type').catch(() => '')).toLowerCase();
+		if (action.action === 'click') await locator.click();
+		else if (action.action === 'fill') {
+			const type = String(await locator.getAttribute('type').catch(() => '') ?? '').toLowerCase();
           if (type === 'password') throw new Error('password input is not allowed');
           await locator.fill(action.value);
-        } else if (action.action === 'press') await locator.press(action.key);
+        } else if (action.action === 'press') await locator.press(canonicalPressKey(action.key));
         else if (action.action === 'select') await locator.selectOption(action.value);
         else if (action.action === 'wait_for') await locator.waitFor({ state: 'visible' });
         return { loginRequired: false, path: '' };
@@ -1447,9 +1497,124 @@ export async function executeAction(page, action, request, index, captureScreens
   }
 }
 
+export async function waitForApplicationReady(page, maximumWaitMs = 3_000) {
+  await page.waitForLoadState('load').catch(() => {});
+  await Promise.race([
+    page.waitForLoadState('networkidle').catch(() => {}),
+    page.waitForTimeout(maximumWaitMs),
+  ]);
+}
+
+export async function settleBrowserInteraction(page, action, delayMs = 150) {
+  if (!['click', 'fill', 'press', 'select'].includes(action?.action)) return;
+  await page.waitForTimeout(delayMs);
+}
+
 function responseHeadersPromise(response) {
   const names = ['content-type', 'content-length', 'x-request-id', 'request-id', 'x-correlation-id', 'correlation-id', 'x-amzn-requestid', 'x-trace-id', 'trace-id', 'traceparent'];
   return Promise.all(names.map(async (name) => [name, await response.headerValue(name)]));
+}
+
+function resolvedSourceMapURL(scriptURL, sourceMapURL) {
+  const raw = String(sourceMapURL ?? '').trim();
+  if (!raw || raw.startsWith('data:') || raw.startsWith('blob:')) return '';
+  try {
+    const resolved = new URL(raw, scriptURL);
+    if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:' && resolved.protocol !== 'file:') return '';
+    return resolved.toString();
+  } catch {
+    return '';
+  }
+}
+
+function cdpInitiatorFrames(initiator, sourceMaps = new Map()) {
+  const frames = [];
+  let stack = initiator?.stack;
+  while (stack && frames.length < 12) {
+    for (const frame of stack.callFrames ?? []) {
+      if (frames.length >= 12) break;
+      frames.push({
+        function_name: frame.functionName ?? '',
+        url: frame.url ?? '',
+        source_map_url: sourceMaps.get(frame.url ?? '') ?? '',
+        line: Number.isInteger(frame.lineNumber) && frame.lineNumber >= 0 ? frame.lineNumber + 1 : 0,
+        column: Number.isInteger(frame.columnNumber) && frame.columnNumber >= 0 ? frame.columnNumber + 1 : 0,
+      });
+    }
+    stack = stack.parent;
+  }
+  return frames;
+}
+
+function cdpStartedAt(wallTime) {
+  if (!Number.isFinite(wallTime) || wallTime <= 0) return '';
+  return new Date(wallTime * 1000).toISOString();
+}
+
+function cdpDuration(start, end) {
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return 0;
+  return (end - start) * 1000;
+}
+
+// Chromium's CDP stream is the only browser-side source that exposes a
+// request initiator stack. It is deliberately reduced to bounded, redacted
+// causal fields before entering the Case artifact store.
+export async function createCDPNetworkEvidenceCollector(page, records, currentActionID = () => '') {
+  const context = page?.context?.();
+  if (!context || typeof context.newCDPSession !== 'function') return null;
+  let session;
+  try {
+    session = await context.newCDPSession(page);
+    await session.send('Network.enable');
+    await session.send('Debugger.enable').catch(() => {});
+  } catch {
+    return null;
+  }
+  const sourceMaps = new Map();
+  session.on('Debugger.scriptParsed', (event) => {
+    const scriptURL = String(event?.url ?? '');
+    const sourceMapURL = resolvedSourceMapURL(scriptURL, event?.sourceMapURL);
+    if (scriptURL && sourceMapURL && sourceMaps.size < 2048) sourceMaps.set(scriptURL, sourceMapURL);
+  });
+  const pending = new Map();
+  const finish = (requestId, outcome, timestamp, response = {}, failureReason = '') => {
+    const request = pending.get(requestId);
+    if (!request) return;
+    pending.delete(requestId);
+    records.add(safeResponseRecord({
+      action_id: request.actionID,
+      started_at: request.startedAt,
+      method: request.method,
+      url: request.url,
+      resource_type: request.resourceType,
+      outcome,
+      failure_reason: failureReason,
+      status: response.status ?? 0,
+      duration_ms: cdpDuration(request.timestamp, timestamp),
+      headers: { ...(request.headers ?? {}), ...(response.headers ?? {}) },
+      initiator_type: request.initiatorType,
+      initiator_stack: request.initiatorStack,
+    }));
+  };
+  session.on('Network.requestWillBeSent', (event) => {
+    if (event.redirectResponse && pending.has(event.requestId)) {
+      finish(event.requestId, 'redirected', event.timestamp, event.redirectResponse);
+    }
+    pending.set(event.requestId, {
+      actionID: currentActionID() || '',
+      startedAt: cdpStartedAt(event.wallTime),
+      timestamp: event.timestamp,
+      method: event.request?.method ?? '',
+      url: event.request?.url ?? '',
+      headers: event.request?.headers ?? {},
+      resourceType: String(event.type ?? '').toLowerCase(),
+      initiatorType: String(event.initiator?.type ?? '').toLowerCase(),
+      initiatorStack: cdpInitiatorFrames(event.initiator, sourceMaps),
+    });
+  });
+  session.on('Network.responseReceived', (event) => finish(event.requestId, 'response', event.timestamp, event.response));
+  session.on('Network.loadingFailed', (event) => finish(event.requestId, 'failed', event.timestamp, {}, event.errorText ?? 'request failed'));
+  return { session };
 }
 
 function checkedEvidenceContent(content, label) {
@@ -1485,6 +1650,7 @@ async function executeWorker(request) {
   validateWorkerRequest(request);
   await mkdir(request.staging_dir, { recursive: true, mode: 0o700 });
   const { chromium } = await import('playwright');
+  emitProgress('browser_launching', 'Launching the validation browser', '', 0, request.plan.actions.length);
   const launched = await launchPinnedBrowser(chromium, request.policy, request.headless);
   const browser = launched.browser;
   let context;
@@ -1496,6 +1662,8 @@ async function executeWorker(request) {
   const actions = [];
   const pendingResponses = new Set();
   const requestStarted = new WeakMap();
+  let activeActionID = 'start_url';
+  let cdpNetworkEvidence = null;
   const authFailures = createExecuteAuthFailureTracker(request.policy);
   const onResponse = (response) => {
     authFailures.observeResponse(response);
@@ -1506,28 +1674,51 @@ async function executeWorker(request) {
     }
     const pending = (async () => {
       const browserRequest = response.request();
+      const requestContext = requestStarted.get(browserRequest) ?? {};
       const headers = Object.fromEntries((await responseHeadersPromise(response)).filter(([, value]) => value !== null));
-      network.add(safeResponseRecord({
-        method: browserRequest.method(),
-        url: response.url(),
-        status: response.status(),
-        duration_ms: Math.max(0, Date.now() - (requestStarted.get(browserRequest) ?? Date.now())),
-        headers,
-      }));
+      if (!cdpNetworkEvidence) {
+        network.add(safeResponseRecord({
+          action_id: requestContext.actionID ?? '',
+          started_at: requestContext.startedAt ? new Date(requestContext.startedAt).toISOString() : '',
+          method: browserRequest.method(),
+          url: response.url(),
+          resource_type: browserRequest.resourceType?.() ?? '',
+          outcome: 'response',
+          status: response.status(),
+          duration_ms: Math.max(0, Date.now() - (requestContext.startedAt ?? Date.now())),
+          headers,
+        }));
+      }
     })().finally(() => pendingResponses.delete(pending));
     pendingResponses.add(pending);
   };
   try {
+    emitProgress('browser_context_preparing', 'Preparing the isolated browser context', '', 0, request.plan.actions.length);
     supervised = await createSupervisedBrowserContext(browser, {
       storageStateInput: request.storage_state_path ? { storageState: request.storage_state_path } : {},
       policy: request.policy,
       hooks: {
         onRequest: (browserRequest) => {
-          requestStarted.set(browserRequest, Date.now());
+          requestStarted.set(browserRequest, { startedAt: Date.now(), actionID: activeActionID });
           authFailures.observeRequest(browserRequest);
         },
         onRequestFinished: (browserRequest) => authFailures.observeRequestSettled(browserRequest),
-        onRequestFailed: (browserRequest) => authFailures.observeRequestSettled(browserRequest),
+        onRequestFailed: (browserRequest) => {
+          authFailures.observeRequestSettled(browserRequest);
+          if (cdpNetworkEvidence) return;
+          const requestContext = requestStarted.get(browserRequest) ?? {};
+          network.add(safeResponseRecord({
+            action_id: requestContext.actionID ?? '',
+            started_at: requestContext.startedAt ? new Date(requestContext.startedAt).toISOString() : '',
+            method: browserRequest.method?.() ?? '',
+            url: browserRequest.url?.() ?? '',
+            resource_type: browserRequest.resourceType?.() ?? '',
+            outcome: 'failed',
+            failure_reason: browserRequest.failure?.() ?? 'request failed',
+            duration_ms: Math.max(0, Date.now() - (requestContext.startedAt ?? Date.now())),
+            headers: {},
+          }));
+        },
         onResponse,
         onConsole: (message) => {
           if (consoleRecords.isStopped()) return;
@@ -1537,6 +1728,8 @@ async function executeWorker(request) {
     });
     context = supervised.context;
     const page = supervised.page;
+    emitProgress('browser_evidence_preparing', 'Attaching browser evidence collection', '', 0, request.plan.actions.length);
+    cdpNetworkEvidence = await createCDPNetworkEvidenceCollector(page, network, () => activeActionID);
 
     const requiresLogin = async () => pagesRequireLogin(context.pages(), request.policy, await authFailures.settle());
     const captureScreenshotOnce = (name) => captureSafePNG(
@@ -1570,6 +1763,7 @@ async function executeWorker(request) {
       await page.goto(request.plan.start_url, { waitUntil: 'domcontentloaded' });
       if (supervised.blocked()) throw new Error('browser destination was blocked');
       await assertAllowedURL(page.url(), request.policy);
+      await waitForApplicationReady(page);
     } catch {
       if (await requiresLogin()) return finishLogin();
       const captured = await captureScreenshot('failure.png');
@@ -1596,11 +1790,13 @@ async function executeWorker(request) {
 
     for (let index = 0; index < request.plan.actions.length; index += 1) {
       const action = request.plan.actions[index];
+      activeActionID = action.id;
       if (await requiresLogin()) return finishLogin();
       const started = Date.now();
       emitProgress('browser_action_started', `Executing browser action ${index + 1}/${request.plan.actions.length}`, action.id, index + 1, request.plan.actions.length);
       try {
         const captured = await executeAction(page, action, request, index, captureScreenshot, authFailures);
+		await settleBrowserInteraction(page, action);
         if (captured.loginRequired) {
           actions.push({ id: action.id, action: action.action, locator_kind: action.locator?.kind || '', started_at: new Date(started).toISOString(), duration_ms: Date.now() - started, result: 'login_required', error_code: 'browser_login_required' });
           return finishLogin();

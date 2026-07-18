@@ -109,6 +109,28 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.find('.current-action-card').text()).toContain('回归仍复现')
     expect(wrapper.find('.current-action-card').text()).toContain('新证据和差分')
     expect(wrapper.find('.current-action-card').text()).toContain('第 2 轮')
+    expect(wrapper.get('.workflow-loop-hint').text()).toContain('回归仍复现')
+    expect(wrapper.get('.workflow-loop-hint').text()).toContain('下一轮')
+    expect(wrapper.get('.workflow-loop-hint').text()).toContain('排障')
+  })
+
+  it('shows that only a successful regression resolves the source Bug ticket', () => {
+    const snapshot = detail('fixed_verified')
+    snapshot.bug_ticket_resolution = { state: 'resolved', source_status: 'resolved' }
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+
+    expect(wrapper.get('.workflow-loop-hint').text()).toContain('回归通过')
+    expect(wrapper.get('.workflow-loop-hint').text()).toContain('Bug 工单已转为已解决')
+    expect(wrapper.find('.primary-action').exists()).toBe(false)
+  })
+
+  it('does not claim the source Bug is resolved while status synchronization is pending', () => {
+    const snapshot = detail('fixed_verified')
+    snapshot.bug_ticket_resolution = { state: 'pending', source_status: 'active' }
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+
+    expect(wrapper.get('.workflow-loop-hint').text()).toContain('正在将 Bug 工单同步为已解决')
+    expect(wrapper.get('.workflow-loop-hint').text()).not.toContain('Bug 工单已转为已解决')
   })
 
   it.each([

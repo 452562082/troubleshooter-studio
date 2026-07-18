@@ -12,6 +12,7 @@ import (
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"github.com/xiaolong/troubleshooter-studio/internal/browserverify"
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 	"github.com/xiaolong/troubleshooter-studio/internal/userconfig"
 )
@@ -22,6 +23,7 @@ const (
 )
 
 var incidentWorkflowReminderPollInterval = time.Minute
+var incidentBugResolutionPollInterval = time.Minute
 
 type incidentWorkflowRuntime struct {
 	orchestrator *bughub.CaseOrchestrator
@@ -38,6 +40,12 @@ type IncidentCaseDetail struct {
 	DeploymentObservations []bughub.DeploymentObservation `json:"deployment_observations"`
 	Events                 []IncidentTransitionEvent      `json:"events"`
 	DeploymentVerification IncidentDeploymentVerification `json:"deployment_verification"`
+	BugTicketResolution    IncidentBugTicketResolution    `json:"bug_ticket_resolution"`
+}
+
+type IncidentBugTicketResolution struct {
+	State        string `json:"state"`
+	SourceStatus string `json:"source_status,omitempty"`
 }
 
 type IncidentArtifact struct {
@@ -221,7 +229,10 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 	a.workflowMu.Lock()
 	defer a.workflowMu.Unlock()
 	if a.workflowStore != nil && a.workflowOrchestrator != nil {
-		if a.workflowInitErr == nil {
+		if a.workflowInitErr == nil && !a.workflowRecoveryPending {
+			return nil
+		}
+		if a.workflowRecoveryPending && !a.incidentBrowserRecoveryMayRun() {
 			return nil
 		}
 		if recoverErr := a.workflowOrchestrator.RecoverInterrupted(workflowContext(ctx)); recoverErr != nil {
@@ -229,6 +240,7 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 			return recoverErr
 		}
 		a.workflowInitErr = nil
+		a.workflowRecoveryPending = false
 		return nil
 	}
 	// Initialization errors are observable but not sticky: a later command can
@@ -281,6 +293,19 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 			if incident.ID != "" {
 				a.emitIncidentCase(incident.ID)
 			}
+			if completeErr == nil && incident.Status == bughub.CaseFixedVerified {
+				syncCtx := a.getRuntimeContext()
+				if syncCtx == nil {
+					syncCtx = context.Background()
+				}
+				go func() {
+					if resolveErr := a.syncIncidentBugResolution(workflowContext(syncCtx), incident); resolveErr != nil {
+						fmt.Fprintf(os.Stderr, "[warn] Bug ticket status synchronization for Case %s failed; Studio will retry\n", incident.ID)
+						return
+					}
+					a.emitIncidentCase(incident.ID)
+				}()
+			}
 			if errors.Is(completeErr, bughub.ErrFixInspectionUnavailable) {
 				// Make the next workflow command run the same bounded durable recovery
 				// pass. This retries remote inspection without rerunning the fixer and
@@ -305,6 +330,7 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 	}
 	if runtime.runner != nil {
 		runtime.runner.SetBrowserVerifier(a.workflowBrowser, caseBrowserPolicyResolver{app: a})
+		runtime.runner.SetFrontendRuntimeResolver(caseFrontendRuntimeResolver{app: a})
 	}
 	runtime.orchestrator.SetRecoveryContextResolver(bughub.RecoveryContextResolverFunc(a.resolveIncidentRecoveryContext))
 	a.workflowStore = store
@@ -315,12 +341,29 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 		a.bugInvestigator = runtime.investigator
 		a.bugInvestigationMu.Unlock()
 	}
+	if !a.incidentBrowserRecoveryMayRun() {
+		a.workflowRecoveryPending = true
+		a.workflowInitErr = nil
+		return nil
+	}
 	if recoverErr := runtime.orchestrator.RecoverInterrupted(workflowContext(ctx)); recoverErr != nil {
 		a.workflowInitErr = recoverErr
 		return recoverErr
 	}
 	a.workflowInitErr = nil
+	a.workflowRecoveryPending = false
 	return nil
+}
+
+// incidentBrowserRecoveryMayRun is called with workflowMu held. A valid
+// published runtime can recover immediately. Otherwise recovery waits until
+// the independent startup preparation has completed, so an interrupted Web
+// attempt cannot mistake a normal Chromium download for a phase failure.
+func (a *App) incidentBrowserRecoveryMayRun() bool {
+	if !a.workflowBrowserPreparationStarted || a.workflowBrowserPreparationFinished {
+		return true
+	}
+	return a.GetIncidentBrowserRuntimeStatus().State == browserverify.RuntimeReady
 }
 
 func (a *App) startIncidentWorkflow(ctx context.Context) error {
@@ -328,12 +371,120 @@ func (a *App) startIncidentWorkflow(ctx context.Context) error {
 	if err == nil {
 		if runtimeCtx := a.getRuntimeContext(); runtimeCtx != nil {
 			a.startWorkflowReminderPoller(runtimeCtx)
+			a.startIncidentBugResolutionReconciler(runtimeCtx)
 		}
 		return nil
 	}
 	fmt.Fprintf(os.Stderr, "[warn] incident workflow startup failed: %v\n", err)
 	a.emitWorkflowEvent(IncidentCaseEventPayload{Kind: "startup_error", Error: &IncidentWorkflowStartupError{Message: err.Error(), Retryable: true}})
 	return err
+}
+
+func (a *App) startIncidentBugResolutionReconciler(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	a.workflowBugResolutionOnce.Do(func() {
+		go func() {
+			a.reconcileIncidentBugResolutions(ctx)
+			ticker := time.NewTicker(incidentBugResolutionPollInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					a.reconcileIncidentBugResolutions(ctx)
+				}
+			}
+		}()
+	})
+}
+
+func (a *App) reconcileIncidentBugResolutions(ctx context.Context) {
+	store, _, err := a.workflowComponents()
+	if err != nil {
+		return
+	}
+	items, err := store.ListCases(workflowContext(ctx))
+	if err != nil {
+		return
+	}
+	for _, incident := range items {
+		if incident.Status != bughub.CaseFixedVerified {
+			continue
+		}
+		if err := a.syncIncidentBugResolution(workflowContext(ctx), incident); err != nil {
+			fmt.Fprintf(os.Stderr, "[warn] Bug ticket status reconciliation for Case %s failed; Studio will retry\n", incident.ID)
+		}
+	}
+}
+
+func (a *App) syncIncidentBugResolution(ctx context.Context, incident bughub.IncidentCase) error {
+	if incident.Status != bughub.CaseFixedVerified {
+		return nil
+	}
+	a.workflowBugResolutionMu.Lock()
+	defer a.workflowBugResolutionMu.Unlock()
+	if a.workflowResolveBug != nil {
+		return a.workflowResolveBug(ctx, incident)
+	}
+
+	store := bugStore()
+	bug, found, err := store.Get(incident.BugID)
+	if err != nil || !found {
+		return err
+	}
+	if zentaoTicketResolutionComplete(bug.Status) {
+		return store.Archive(bug.ID, bughub.BugArchiveSourceResolved)
+	}
+	if !strings.EqualFold(strings.TrimSpace(bug.Source), "zentao") {
+		return nil
+	}
+	platform, ok := platformForBugAttachments(bug)
+	if !ok {
+		return fmt.Errorf("enabled Bug platform %q is unavailable", bug.PlatformID)
+	}
+	comment := fmt.Sprintf("Studio 故障闭环 Case %s 第 %d 轮回归通过，自动标记为已解决。", incident.ID, incident.CycleNumber)
+	sourceID := strings.TrimSpace(bug.SourceID)
+	if sourceID == "" {
+		sourceID = strings.TrimPrefix(strings.TrimSpace(bug.ID), "zentao-")
+	}
+	resolved, err := resolveZentaoBugWithSessionRecovery(platform, sourceID, comment)
+	if err != nil {
+		return err
+	}
+	bug.Status = resolved.Status
+	bug.UpdatedAt = time.Now().UTC()
+	return store.Upsert(bug)
+}
+
+func resolveZentaoBugWithSessionRecovery(platform bughub.PlatformConfig, sourceID string, comment string) (bughub.Bug, error) {
+	run := func(current bughub.PlatformConfig) (bughub.Bug, error) {
+		return (bughub.ZentaoClient{
+			BaseURL: current.BaseURL, Account: current.Account, AuthMode: current.AuthMode,
+			SessionHeader: current.SessionHeader, Password: current.Password, Token: current.Token,
+		}).ResolveByID(sourceID, comment)
+	}
+	resolved, err := run(platform)
+	if err != nil && shouldRecoverZentaoSession(platform, err) {
+		if refreshed, ok := refreshZentaoSession(platform); ok {
+			resolved, err = run(refreshed)
+		}
+	}
+	if err != nil && clearExpiredZentaoSession(platform, err) {
+		return bughub.Bug{}, zentaoSessionExpiredError(err)
+	}
+	return resolved, err
+}
+
+func zentaoTicketResolutionComplete(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "resolved", "closed":
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *App) resolveIncidentRecoveryContext(_ context.Context, incident bughub.IncidentCase, attempt bughub.PhaseAttempt) (bughub.Bug, bughub.BotRef, error) {
@@ -511,6 +662,7 @@ func (a *App) GetIncidentCase(caseID string) (IncidentCaseDetail, error) {
 		return IncidentCaseDetail{}, err
 	}
 	detail := IncidentCaseDetail{Case: incident}
+	detail.BugTicketResolution = a.incidentBugTicketResolution(incident)
 	attempts, err := store.ListAttempts(ctx, bughub.AttemptFilter{CaseID: caseID})
 	if err != nil {
 		return IncidentCaseDetail{}, err
@@ -552,6 +704,31 @@ func (a *App) GetIncidentCase(caseID string) (IncidentCaseDetail, error) {
 	}
 	normalizeIncidentCaseDetail(&detail)
 	return detail, nil
+}
+
+func (a *App) incidentBugTicketResolution(incident bughub.IncidentCase) IncidentBugTicketResolution {
+	if incident.Status != bughub.CaseFixedVerified {
+		return IncidentBugTicketResolution{State: "not_ready"}
+	}
+	var bug bughub.Bug
+	if a.workflowLoadBug != nil {
+		loaded, err := a.workflowLoadBug(incident.BugID)
+		if err != nil {
+			return IncidentBugTicketResolution{State: "unknown"}
+		}
+		bug = loaded
+	} else {
+		loaded, found, err := bugStore().Get(incident.BugID)
+		if err != nil || !found {
+			return IncidentBugTicketResolution{State: "unknown"}
+		}
+		bug = loaded
+	}
+	state := "pending"
+	if zentaoTicketResolutionComplete(bug.Status) {
+		state = "resolved"
+	}
+	return IncidentBugTicketResolution{State: state, SourceStatus: strings.TrimSpace(bug.Status)}
 }
 
 func normalizeIncidentCaseDetail(detail *IncidentCaseDetail) {
@@ -702,6 +879,9 @@ func (a *App) StartIncidentCase(input StartIncidentCaseInput) (bughub.IncidentCa
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
+	if err := a.requireIncidentBrowserRuntimeReady(bug); err != nil {
+		return bughub.IncidentCase{}, err
+	}
 	inputJSON, err := normalizeWorkflowInputEnvironment(input.InputJSON, bot.Env, strings.TrimSpace(input.BotEnvironment) != "")
 	if err != nil {
 		return bughub.IncidentCase{}, err
@@ -759,6 +939,9 @@ func (a *App) resetIncidentCaseWithWarnings(input ResetIncidentCaseInput) (bughu
 	if err != nil {
 		return bughub.ResetCaseOutcome{}, err
 	}
+	if err := a.requireIncidentBrowserRuntimeReady(bug); err != nil {
+		return bughub.ResetCaseOutcome{}, err
+	}
 	inputJSON, err := normalizeWorkflowInputEnvironment(input.InputJSON, bot.Env, strings.TrimSpace(input.BotEnvironment) != "")
 	if err != nil {
 		return bughub.ResetCaseOutcome{}, err
@@ -791,6 +974,11 @@ func (a *App) ContinueIncidentCase(input ContinueIncidentCaseInput) (bughub.Inci
 	bug, bot, err := a.loadIncidentContext(input.CaseID)
 	if err != nil {
 		return bughub.IncidentCase{}, err
+	}
+	if (input.Phase == bughub.PhaseValidation || input.Phase == bughub.PhaseRegression) && bughub.SuggestsBrowserValidation(bug) {
+		if err := a.requireIncidentBrowserRuntimeReady(bug); err != nil {
+			return bughub.IncidentCase{}, err
+		}
 	}
 	inputJSON, err := normalizeWorkflowJSON(input.InputJSON)
 	if err != nil {
@@ -852,6 +1040,9 @@ func (a *App) NotifyIncidentDeployed(input NotifyIncidentDeployedInput) (bughub.
 	}
 	bug, bot, err := a.loadIncidentContext(input.CaseID)
 	if err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	if err := a.requireIncidentBrowserRuntimeReady(bug); err != nil {
 		return bughub.IncidentCase{}, err
 	}
 	inputJSON, err := normalizeWorkflowJSON(input.InputJSON)
@@ -958,6 +1149,7 @@ func (a *App) loadIncidentContext(caseID string) (bughub.Bug, bughub.BotRef, err
 		return bughub.Bug{}, bughub.BotRef{}, err
 	}
 	bot.Env = strings.TrimSpace(incident.Environment)
+	bug = a.hydrateIncidentBrowserContext(bug, bot)
 	return bug, bot, nil
 }
 
@@ -998,6 +1190,7 @@ func (a *App) loadIncidentStartContext(input StartIncidentCaseInput) (bughub.Bug
 	}
 	if usePersistedEnvironment {
 		bot.Env = persistedEnvironment
+		bug = a.hydrateIncidentBrowserContext(bug, bot)
 		return bug, bot, nil
 	}
 	return a.applyFreshIncidentBotEnvironment(bug, bot, input.BotEnvironment)
@@ -1058,17 +1251,62 @@ func (a *App) applyFreshIncidentBotEnvironment(bug bughub.Bug, bot bughub.BotRef
 			return bughub.Bug{}, bughub.BotRef{}, err
 		}
 		bot.Env = environment
-		return bug, bot, nil
-	}
-	if strings.TrimSpace(bot.Env) != "" {
+	} else if strings.TrimSpace(bot.Env) != "" {
 		bot.Env = strings.TrimSpace(bot.Env)
-		return bug, bot, nil
+	} else {
+		resolved, err := a.applyStoredBugBotEnvironments(bug, []bughub.BotRef{bot})
+		if err != nil {
+			return bughub.Bug{}, bughub.BotRef{}, err
+		}
+		bot = resolved[0]
 	}
-	resolved, err := a.applyStoredBugBotEnvironments(bug, []bughub.BotRef{bot})
-	if err != nil {
-		return bughub.Bug{}, bughub.BotRef{}, err
+	bug = a.hydrateIncidentBrowserContext(bug, bot)
+	return bug, bot, nil
+}
+
+func (a *App) hydrateIncidentBrowserContext(bug bughub.Bug, bot bughub.BotRef) bughub.Bug {
+	if strings.TrimSpace(bug.SystemID) == "" {
+		bug.SystemID = strings.TrimSpace(bot.SystemID)
 	}
-	return bug, resolved[0], nil
+	if strings.TrimSpace(bug.FrontendURL) != "" || !bughub.SuggestsBrowserValidation(bug) {
+		return bug
+	}
+	environment := strings.TrimSpace(bot.Env)
+	if environment == "" {
+		environment = strings.TrimSpace(bug.BotEnv)
+	}
+	if environment == "" {
+		environment = strings.TrimSpace(bug.Env)
+	}
+	incident := bughub.IncidentCase{
+		SystemID: bug.SystemID, Environment: environment, SelectedBotKey: bot.Key,
+	}
+	loader := a.workflowLoadDeploymentConfig
+	if loader == nil {
+		loader = a.loadInstalledIncidentConfig
+	}
+	cfg, err := loader(a.workflowCommandContext(), incident)
+	if err != nil || cfg == nil || strings.TrimSpace(cfg.System.ID) != strings.TrimSpace(bug.SystemID) {
+		return bug
+	}
+	for _, candidate := range cfg.Environments {
+		if strings.TrimSpace(candidate.ID) != environment {
+			continue
+		}
+		frontendURL := strings.TrimSpace(candidate.WebDomain)
+		if frontendURL == "" {
+			return bug
+		}
+		if !strings.Contains(frontendURL, "://") {
+			frontendURL = "https://" + frontendURL
+		}
+		canonical, _, canonicalErr := canonicalIncidentBrowserApplicationURL(frontendURL)
+		if canonicalErr == nil {
+			bug.FrontendURL = canonical
+		}
+		return bug
+	}
+	return bug
 }
 
 func validateIncidentBotEnvironment(bot bughub.BotRef, environment string) error {

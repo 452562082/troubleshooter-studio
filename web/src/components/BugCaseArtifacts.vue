@@ -6,6 +6,35 @@ import BugStageAttemptOutput from './BugStageAttemptOutput.vue'
 const props = defineProps<{ detail: IncidentCaseDetail }>()
 
 const investigation = computed(() => [...props.detail.attempts].reverse().find(item => item.phase === 'investigation'))
+type DisplayCallChainHop = {
+  kind: string
+  name: string
+  service: string
+  repo: string
+  revision: string
+  operation: string
+  file: string
+  line: number
+  precision: string
+  evidence: string
+}
+const callChain = computed<DisplayCallChainHop[]>(() => {
+  const raw = investigation.value?.output_json?.call_chain
+  if (!Array.isArray(raw)) return []
+  return raw.slice(0, 64).flatMap(value => {
+    if (!value || typeof value !== 'object') return []
+    const hop = value as Record<string, unknown>
+    const text = (key: string) => typeof hop[key] === 'string' ? String(hop[key]).trim().slice(0, 1000) : ''
+    const name = text('name')
+    if (!name) return []
+    const line = typeof hop.line === 'number' && Number.isSafeInteger(hop.line) && hop.line > 0 ? hop.line : 0
+    return [{ kind: text('kind'), name, service: text('service'), repo: text('repo'), revision: text('revision'), operation: text('operation'), file: text('file'), line, precision: text('precision'), evidence: text('evidence') }]
+  })
+})
+
+function precisionLabel(precision: string): string {
+  return ({ runtime_verified: '运行时已验证', source_mapped: 'Source Map 精确定位', deployed_revision: '部署版本定位', static_candidate: '静态候选', unavailable: '暂不可定位' } as Record<string, string>)[precision] || '精度未知'
+}
 function safeAttemptForDisplay(attempt: PhaseAttempt): PhaseAttempt {
   const outputCode = typeof attempt.output_json?.error_code === 'string' ? attempt.output_json.error_code.trim() : ''
   const code = attempt.error_code?.trim() || outputCode
@@ -252,6 +281,20 @@ watch(
       <pre>{{ rootCause(investigation) }}</pre>
     </section>
 
+    <section class="artifact-card call-chain-card" aria-labelledby="call-chain-title">
+      <h3 id="call-chain-title">调用链定位</h3>
+      <p v-if="callChain.length === 0" class="empty-copy">尚无结构化调用链</p>
+      <ol v-else class="call-chain-list">
+        <li v-for="(hop, index) in callChain" :key="`${index}-${hop.kind}-${hop.name}`" class="call-chain-hop">
+          <div class="call-chain-heading"><strong>{{ hop.name }}</strong><span :data-precision="hop.precision">{{ precisionLabel(hop.precision) }}</span></div>
+          <small v-if="hop.service || hop.operation">{{ [hop.service, hop.operation].filter(Boolean).join(' · ') }}</small>
+          <code v-if="hop.repo || hop.file">{{ hop.repo }}{{ hop.file ? `/${hop.file}` : '' }}{{ hop.line ? `:${hop.line}` : '' }}</code>
+          <small v-if="hop.revision">revision {{ hop.revision }}</small>
+          <p v-if="hop.evidence">{{ hop.evidence }}</p>
+        </li>
+      </ol>
+    </section>
+
     <section class="artifact-card attempt-output-card" aria-labelledby="attempt-output-title">
       <h3 id="attempt-output-title">阶段输出</h3>
       <div ref="attemptOutputScroll" class="attempt-output-scroll" role="region" aria-label="阶段输出内容" aria-live="polite" aria-relevant="additions text" tabindex="0">
@@ -333,6 +376,13 @@ watch(
 .attempt-output-scroll:focus-visible { outline: 3px solid rgba(37, 99, 235, .55); outline-offset: 2px; border-radius: var(--r-md); }
 .artifact-card { min-width: 0; border: 1px solid var(--c-line); border-radius: var(--r-lg); background: var(--c-surf); padding: var(--sp-3); }
 .artifact-card h3 { margin: 0 0 var(--sp-2); color: var(--c-ink); font-size: var(--fs-base); }
+.call-chain-card { grid-column: 1 / -1; }
+.call-chain-list { display: grid; gap: var(--sp-2); margin: 0; padding: 0; list-style: none; counter-reset: call-chain; }
+.call-chain-hop { counter-increment: call-chain; display: grid; gap: 4px; min-width: 0; padding: 10px 12px; border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf-2); }
+.call-chain-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
+.call-chain-heading strong::before { content: counter(call-chain) '. '; color: var(--c-muted); }
+.call-chain-heading span { flex: 0 0 auto; color: var(--c-muted); font-size: var(--fs-xs); }
+.call-chain-hop p, .call-chain-hop small { margin: 0; color: var(--c-muted); overflow-wrap: anywhere; }
 .artifact-item { display: grid; gap: 4px; min-width: 0; padding: 9px 0; border-top: 1px solid var(--c-line); color: var(--c-text); font-size: var(--fs-sm); }
 .artifact-item:first-of-type { border-top: 0; }
 .artifact-item strong { color: var(--c-ink); }

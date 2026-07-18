@@ -121,9 +121,20 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return result, ctxErr
 			}
-			return browserCoordinatorFailure(result, "browser_validator_failed"), nil
+			return browserCoordinatorFailure(result, browserValidatorErrorCode(executeErr)), nil
 		}
 		plan, err = ParseBrowserPlan([]byte(planning.FinalYAML))
+		if err != nil {
+			planning, executeErr = c.Executor.ExecutePhase(ctx, request.Attempt.ID, request.Bot, browserPlannerRetryPrompt(request), request.Emit)
+			addAgentUsage(&result.Usage, planning.Usage)
+			if executeErr != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return result, ctxErr
+				}
+				return browserCoordinatorFailure(result, browserValidatorErrorCode(executeErr)), nil
+			}
+			plan, err = ParseBrowserPlan([]byte(planning.FinalYAML))
+		}
 		if err != nil || validateDurableBrowserPlan(plan) != nil || validateBrowserPlanStartOrigin(plan, request.Policy) != nil {
 			return browserCoordinatorFailure(result, "browser_validator_plan_invalid"), nil
 		}
@@ -152,6 +163,7 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 			return browserCoordinatorFailure(result, "browser_execution_interrupted"), nil
 		}
 		if repairFound {
+			repaired = normalizeBrowserRepairLocators(plan, primary.FailedActionID, repaired)
 			if validateBrowserPlanStartOrigin(repaired, request.Policy) != nil || validateBrowserRepair(plan, primary.FailedActionID, repaired) != nil {
 				return browserCoordinatorFailure(result, "browser_execution_interrupted"), nil
 			}
@@ -162,10 +174,11 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 				if ctxErr := ctx.Err(); ctxErr != nil {
 					return result, ctxErr
 				}
-				return browserCoordinatorFailure(result, "browser_validator_failed"), nil
+				return browserCoordinatorFailure(result, browserValidatorErrorCode(repairErr)), nil
 			}
 			var parseErr error
 			repaired, parseErr = ParseBrowserPlan([]byte(repairing.FinalYAML))
+			repaired = normalizeBrowserRepairLocators(plan, primary.FailedActionID, repaired)
 			if parseErr != nil || validateDurableBrowserPlan(repaired) != nil || validateBrowserPlanStartOrigin(repaired, request.Policy) != nil || validateBrowserRepair(plan, primary.FailedActionID, repaired) != nil {
 				return browserCoordinatorFailure(result, "browser_validator_plan_invalid"), nil
 			}
@@ -194,7 +207,7 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 		return browserCoordinatorFailure(result, code), nil
 	}
 
-	evaluatorPrompt, evaluatorAttachments, cleanupEvaluatorEvidence, err := browserEvaluatorPrompt(result.BrowserResult, result.BrowserArtifacts, frozenArtifacts)
+	evaluatorPrompt, evaluatorAttachments, cleanupEvaluatorEvidence, err := browserEvaluatorPrompt(request, result.BrowserResult, result.BrowserArtifacts, frozenArtifacts)
 	if err != nil {
 		return browserCoordinatorFailure(result, "browser_artifact_invalid"), nil
 	}
@@ -230,7 +243,7 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 				return browserCoordinatorFailure(result, "browser_evaluator_attachment_unsupported"), nil
 			}
 		}
-		return browserCoordinatorFailure(result, "browser_validator_failed"), nil
+		return browserCoordinatorFailure(result, browserValidatorErrorCode(err)), nil
 	}
 	if phaseResultContainsAttachmentPath(evaluation.FinalYAML, evaluatorAttachments) {
 		return browserCoordinatorFailure(result, "browser_evaluator_result_invalid"), nil
@@ -310,12 +323,33 @@ func browserAssistedAttempt(bug Bug, attempt PhaseAttempt) bool {
 	if attempt.Phase != PhaseValidation && attempt.Phase != PhaseRegression {
 		return false
 	}
-	if strings.TrimSpace(bug.FrontendURL) != "" {
+	if SuggestsBrowserValidation(bug) {
 		return true
 	}
 	userInput, _, _ := validationPromptInput(attempt.InputJSON)
 	text := strings.ToLower(userInput)
 	return strings.Contains(text, "web") || strings.Contains(text, "页面") || strings.Contains(text, "浏览器")
+}
+
+// SuggestsBrowserValidation identifies UI-facing Bugs before the Agent runs so
+// Studio can select the host browser path instead of silently degrading to curl.
+func SuggestsBrowserValidation(bug Bug) bool {
+	if strings.TrimSpace(bug.FrontendURL) != "" || strings.TrimSpace(bug.FrontendRepo) != "" || strings.TrimSpace(bug.Browser) != "" {
+		return true
+	}
+	text := strings.ToLower(strings.Join([]string{bug.Title, bug.Description, bug.Steps, bug.Expected, bug.Actual}, " "))
+	for _, marker := range []string{"页面", "浏览器", "网页", "前端", "小程序"} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	for _, token := range strings.FieldsFunc(text, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }) {
+		switch token {
+		case "app", "web", "h5", "ui", "frontend":
+			return true
+		}
+	}
+	return false
 }
 
 func browserProgressEvent(progress BrowserProgress) InvestigationEvent {
@@ -364,6 +398,8 @@ func browserPublicErrorMessage(code string) string {
 		return "验证机器人返回了无效的验证结果"
 	case "browser_evaluator_attachment_unsupported":
 		return "当前验证机器人无法读取本次 Web 截图"
+	case "browser_validator_usage_limited":
+		return "验证机器人用量已达上限，请恢复额度或切换到可用机器人后重试"
 	case "browser_validator_unavailable", "browser_validator_failed":
 		return "验证机器人执行失败"
 	case "browser_verifier_unavailable", "browser_verifier_failed":
@@ -373,6 +409,19 @@ func browserPublicErrorMessage(code string) string {
 	default:
 		return "浏览器验证失败"
 	}
+}
+
+func browserValidatorErrorCode(err error) string {
+	if err == nil {
+		return "browser_validator_failed"
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{"usage limit", "purchase more credits", "insufficient_quota"} {
+		if strings.Contains(message, marker) {
+			return "browser_validator_usage_limited"
+		}
+	}
+	return "browser_validator_failed"
 }
 
 func browserStopOutput(result BrowserCoordinatorResult) json.RawMessage {
@@ -909,7 +958,7 @@ func validateBrowserRepair(original BrowserPlan, failedActionID string, repaired
 		return err
 	}
 	repairedURL, repairedOrigin, err := canonicalBrowserURL(repaired.StartURL)
-	if err != nil || repairedURL != originalURL || repairedOrigin != originalOrigin {
+	if err != nil || !equivalentBrowserRepairURL(originalURL, repairedURL) || repairedOrigin != originalOrigin {
 		return errors.New("browser repair changed the start URL or origin")
 	}
 	want := original.Actions[failedIndex:]
@@ -926,6 +975,57 @@ func validateBrowserRepair(original BrowserPlan, failedActionID string, repaired
 		}
 	}
 	return nil
+}
+
+// A failed locator is commonly shared by a wait_for followed by the click or
+// fill that uses the same control. Repair agents sometimes fix only the failed
+// wait and leave the identical locator unchanged on the next action. Propagate
+// that replacement only to untouched, exactly matching occurrences; explicit
+// or unrelated locator edits remain authoritative.
+func normalizeBrowserRepairLocators(original BrowserPlan, failedActionID string, repaired BrowserPlan) BrowserPlan {
+	failedIndex := -1
+	for index, action := range original.Actions {
+		if action.ID == failedActionID {
+			failedIndex = index
+			break
+		}
+	}
+	if failedIndex < 0 || len(repaired.Actions) != len(original.Actions)-failedIndex || len(repaired.Actions) == 0 {
+		return repaired
+	}
+	originalFailed := original.Actions[failedIndex].Locator
+	replacement := repaired.Actions[0].Locator
+	if originalFailed == nil || replacement == nil || reflect.DeepEqual(originalFailed, replacement) {
+		return repaired
+	}
+	for offset := 1; offset < len(repaired.Actions); offset++ {
+		before := original.Actions[failedIndex+offset].Locator
+		after := repaired.Actions[offset].Locator
+		if before == nil || !reflect.DeepEqual(before, originalFailed) || !reflect.DeepEqual(after, before) {
+			continue
+		}
+		clone := *replacement
+		repaired.Actions[offset].Locator = &clone
+	}
+	return repaired
+}
+
+// Browsers and URL serializers treat an empty root path and "/" identically.
+// Locator-repair agents commonly preserve the origin while normalizing this
+// single representation detail; accepting it does not widen navigation scope
+// or permit query/path changes.
+func equivalentBrowserRepairURL(original, repaired string) bool {
+	canonicalRoot := func(raw string) string {
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			return ""
+		}
+		if parsed.Path == "" {
+			parsed.Path = "/"
+		}
+		return parsed.String()
+	}
+	return canonicalRoot(original) == canonicalRoot(repaired)
 }
 
 func canonicalBrowserURL(raw string) (string, string, error) {
@@ -1015,8 +1115,21 @@ func browserPlannerPrompt(request BrowserCoordinatorRequest) string {
 		"Allowed actions are exactly goto, click, fill, press, select, wait_for, screenshot. Never use JavaScript, evaluate, XPath, file upload, credentials, cookies, headers, or storageState. Login must use the already-visible host browser session; never plan credential entry.\n" +
 		"Current validation scope (redacted and bounded):\n" + safeBoundedBrowserJSON(contextFields, 24<<10) + "\n" +
 		"Current environment and configured browser policy (redacted and bounded):\n" + safeBoundedBrowserJSON(request.Policy, 12<<10) + "\n" +
-		"Exact schema:\nversion: 1\nstart_url: <absolute configured HTTP(S) URL>\nactions:\n  - id: <stable-id>\n    action: goto | click | fill | press | select | wait_for | screenshot\n    locator: {kind: role | label | text | placeholder | test_id | css, value: <value>, name: <optional accessible name>}\n    url: <goto only>\n    value: <fill/select only>\n    key: <press only>\n    screenshot_after: true | false\nassertions:\n  - kind: visible_text\n    value: <expected visible text>\n" +
+		"Strict action field matrix. Fields not listed for an action are forbidden:\n" +
+		"- goto: requires url; forbids locator, value, and key; screenshot_after is optional.\n" +
+		"- click or wait_for: requires locator; forbids url, value, and key; screenshot_after is optional.\n" +
+		"- fill or select: requires locator and value; forbids url and key; screenshot_after is optional.\n" +
+		"- press: requires locator and key; forbids url and value; screenshot_after is optional.\n" +
+		"- screenshot: output only id and action; omit locator, url, value, key, and screenshot_after.\n" +
+		"Locator schema: {kind: role | label | text | placeholder | test_id | css, value: <value>, name: <optional accessible name for role only>}.\n" +
+		"Valid shape example (replace placeholder values with current configured values):\n" +
+		"version: 1\nstart_url: <absolute configured HTTP(S) URL>\nactions:\n  - id: wait-ready\n    action: wait_for\n    locator: {kind: text, value: <expected visible text>}\n    screenshot_after: true\n  - id: capture-final\n    action: screenshot\nassertions:\n  - kind: visible_text\n    value: <expected visible text>\n" +
+		"Before responding, verify every action against the field matrix. " +
 		"Use the configured frontend_url as start_url. Respect is_prod and configured origins. Output BrowserPlan YAML only.\n"
+}
+
+func browserPlannerRetryPrompt(request BrowserCoordinatorRequest) string {
+	return "Your previous BrowserPlan was rejected by strict structural validation. Generate a new plan from scratch and check every action against the field matrix; do not repeat or quote the rejected output.\n" + browserPlannerPrompt(request)
 }
 
 func browserRepairPrompt(original BrowserPlan, failed BrowserVerificationResult) string {
@@ -1034,14 +1147,20 @@ func browserRepairPrompt(original BrowserPlan, failed BrowserVerificationResult)
 	}
 	return "Repair the locator once. Output BrowserPlan YAML only.\n" +
 		"The repaired plan must contain exactly the failed action and remaining actions in their original ID/order. It must not repeat completed actions.\n" +
+		"If the failed locator is reused by remaining actions for the same control, replace every matching occurrence consistently.\n" +
 		"Only locator fields may change. Keep version, normalized start_url/origin, action/url/value/key/screenshot_after fields, and assertions unchanged.\n" +
 		"Original plan (bounded):\n" + safeBoundedBrowserJSON(original, 24<<10) + "\n" +
 		"Sanitized failure report:\n" + safeBoundedBrowserJSON(report, 16<<10) + "\n"
 }
 
-func browserEvaluatorPrompt(result BrowserVerificationResult, artifacts []BrowserArtifactReference, frozen []browserFrozenArtifact) (string, []PhaseAttachment, func() error, error) {
+func browserEvaluatorPrompt(request BrowserCoordinatorRequest, result BrowserVerificationResult, artifacts []BrowserArtifactReference, frozen []browserFrozenArtifact) (string, []PhaseAttachment, func() error, error) {
 	screenshotPath, structuredEvidence, cleanup, err := prepareBrowserEvaluatorEvidence(result, frozen)
 	if err != nil {
+		return "", nil, func() error { return nil }, err
+	}
+	statuses, err := browserEvaluatorStatuses(request.Attempt)
+	if err != nil {
+		_ = cleanup()
 		return "", nil, func() error { return nil }, err
 	}
 	attachments := make([]PhaseAttachment, 0, 1)
@@ -1057,13 +1176,38 @@ func browserEvaluatorPrompt(result BrowserVerificationResult, artifacts []Browse
 		"status": result.Status, "final_url": result.FinalURL, "title": result.Title,
 		"final_screenshot_path": result.FinalScreenshotPath,
 	}
+	verificationContext := map[string]any{
+		"phase": request.Attempt.Phase,
+		"mode":  request.Attempt.Mode,
+		"bug": map[string]any{
+			"title":       request.Bug.Title,
+			"description": request.Bug.Description,
+			"steps":       request.Bug.Steps,
+			"expected":    request.Bug.Expected,
+			"actual":      request.Bug.Actual,
+			"environment": effectiveBugEnv(request.Bug, request.Bot),
+		},
+	}
 	prompt := "Evaluate the completed browser verification. Output only the strict ValidationResult YAML contract below.\n" +
+		"Verification context (sanitized and authoritative):\n" + safeBoundedBrowserJSON(verificationContext, 24<<10) + "\n" +
+		"A completed browser run only means the actions executed. It does not mean the Bug is fixed or absent. Compare the observed evidence with the original expected and actual behavior before choosing verification_status.\n" +
 		"Sanitized execution report:\n" + safeBoundedBrowserJSON(report, 12<<10) + "\n" +
 		"Bounded accessibility summary:\n" + safeBoundedBrowserJSON(boundedBrowserAccessibility(result.AccessibilitySummary), 16<<10) + "\n" +
 		"Exact host artifact relative references (authoritative; do not invent or alter paths):\n" + safeBoundedBrowserJSON(boundedBrowserArtifacts(artifacts), 24<<10) + "\n" +
 		frozenBrowserEvidencePrompt(structuredEvidence, len(attachments) != 0) +
-		validationOutputContract()
+		validationOutputContractFor(statuses)
 	return prompt, attachments, cleanup, nil
+}
+
+func browserEvaluatorStatuses(attempt PhaseAttempt) (string, error) {
+	switch {
+	case attempt.Phase == PhaseValidation && attempt.Mode == AttemptReproduce:
+		return "reproduced | not_reproduced | insufficient_info", nil
+	case attempt.Phase == PhaseRegression && attempt.Mode == AttemptRegression:
+		return "fixed_verified | still_reproduces | insufficient_info", nil
+	default:
+		return "", fmt.Errorf("browser evaluator does not support phase %q mode %q", attempt.Phase, attempt.Mode)
+	}
 }
 
 func boundedBrowserAccessibility(nodes []BrowserAccessibilityNode) []BrowserAccessibilityNode {

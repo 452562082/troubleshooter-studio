@@ -104,6 +104,32 @@ func TestCreateAndStartCaseCreatesFirstCaseAndReplaysExactly(t *testing.T) {
 	}
 }
 
+func TestCreateAndStartCaseFallsBackToSelectedBotSystem(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	runner := &recordingPhaseRunner{}
+	o := NewCaseOrchestrator(store, runner, &recordingGitIntegration{}, &recordingDeploymentVerifier{})
+	created, err := o.CreateAndStartCase(ctx, CreateAndStartCaseCommand{
+		CaseID: "case-bot-system", ExpectedVersion: 0, IdempotencyKey: "create:bot-system", ActorID: "alice",
+		Bug:       Bug{ID: "bug-bot-system", Source: "zentao", Env: "test"},
+		Bot:       BotRef{Key: "base|codex", SystemID: "base", Target: "codex", Path: "/workspace/base", Env: "test"},
+		InputJSON: []byte(`{"mode":"reproduce"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.SystemID != "base" {
+		t.Fatalf("created SystemID = %q, want selected Bot system base", created.SystemID)
+	}
+	persisted, err := store.GetCase(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.SystemID != "base" {
+		t.Fatalf("persisted SystemID = %q, want selected Bot system base", persisted.SystemID)
+	}
+}
+
 func TestCreateAndStartCaseContinuesLegacyArchiveAsNewCase(t *testing.T) {
 	ctx := context.Background()
 	store := newOrchestratorStore(t)

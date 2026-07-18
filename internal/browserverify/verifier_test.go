@@ -1287,7 +1287,7 @@ document.getElementById('search').addEventListener('click', async () => {
 		CaseID: "smoke-case", CycleNumber: 1, AttemptID: "smoke-attempt",
 		SystemID: "smoke", Environment: "test", Version: "smoke-v1",
 		Policy: bughub.BrowserSecurityPolicy{
-			AllowedOrigins: []string{server.URL}, ApplicationOrigins: []string{server.URL}, StartOrigins: []string{server.URL}, PrivateOrigins: []string{server.URL},
+			AllowedOrigins: []string{server.URL}, ApplicationOrigins: []string{server.URL}, StartOrigins: []string{server.URL}, PrivateOrigins: []string{server.URL}, AuthOrigins: []string{},
 		},
 		Plan: bughub.BrowserPlan{
 			Version: 1, StartURL: server.URL,
@@ -1300,8 +1300,18 @@ document.getElementById('search').addEventListener('click', async () => {
 			Assertions: []bughub.BrowserAssertion{{Kind: "visible_text", Value: "Rendered 汤圆"}},
 		},
 		StagingDir: t.TempDir(),
+		Emit: func(progress bughub.BrowserProgress) {
+			t.Logf("browser progress: code=%s action=%s current=%d total=%d message=%s", progress.Code, progress.ActionID, progress.Current, progress.Total, progress.Message)
+		},
 	}
-	verifier := NewHostVerifier(NewRuntimeManager(t.TempDir(), nil), nil, net.DefaultResolver)
+	runtimeManager := NewRuntimeManager(t.TempDir(), nil)
+	if cacheRoot := strings.TrimSpace(os.Getenv("TSHOOT_BROWSER_SMOKE_CACHE_ROOT")); cacheRoot != "" {
+		runtimeManager.SetPlaywrightBrowserCache(cacheRoot)
+	}
+	verifier := NewHostVerifier(runtimeManager, nil, net.DefaultResolver)
+	if err := verifier.Prepare(context.Background(), nil); err != nil {
+		t.Fatalf("prepare Studio browser runtime: %v", err)
+	}
 	result, err := verifier.Execute(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -1328,6 +1338,38 @@ document.getElementById('search').addEventListener('click', async () => {
 		case "network":
 			if !strings.Contains(encoded, "/api") || !strings.Contains(encoded, "%5BREDACTED%5D") {
 				t.Fatalf("network evidence is incomplete: %s", encoded)
+			}
+			var records []struct {
+				ActionID       string `json:"action_id"`
+				URL            string `json:"url"`
+				RequestID      string `json:"request_id"`
+				InitiatorStack []struct {
+					URL    string `json:"url"`
+					Line   int    `json:"line"`
+					Column int    `json:"column"`
+				} `json:"initiator_stack"`
+			}
+			if err := json.Unmarshal(content, &records); err != nil {
+				t.Fatalf("network evidence is not valid JSON: %v", err)
+			}
+			var apiRecord *struct {
+				ActionID       string `json:"action_id"`
+				URL            string `json:"url"`
+				RequestID      string `json:"request_id"`
+				InitiatorStack []struct {
+					URL    string `json:"url"`
+					Line   int    `json:"line"`
+					Column int    `json:"column"`
+				} `json:"initiator_stack"`
+			}
+			for index := range records {
+				if strings.Contains(records[index].URL, "/api") {
+					apiRecord = &records[index]
+					break
+				}
+			}
+			if apiRecord == nil || apiRecord.ActionID != "click" || apiRecord.RequestID != "smoke-request-1" || len(apiRecord.InitiatorStack) == 0 || apiRecord.InitiatorStack[0].URL == "" || apiRecord.InitiatorStack[0].Line == 0 || apiRecord.InitiatorStack[0].Column == 0 {
+				t.Fatalf("network evidence is missing its action/request/initiator binding: %+v", apiRecord)
 			}
 		case "console":
 			if !strings.Contains(encoded, "[REDACTED]") {

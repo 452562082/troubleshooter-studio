@@ -33,7 +33,7 @@ func resolveApplySource(baseOut, target string) (src, hint string) {
 		hint = "Cursor 下次打开 AI 侧栏时会重新扫 ~/.cursor/agents/<name>.md;新建对话即可选到更新后的 Custom Agent。"
 	case "codex":
 		src = baseOut + "-codex"
-		hint = "Codex CLI 下次启动会读 ~/.codex/AGENTS.md(用户级 system prompt;每台机器只能装一个排障机器人);正在开的 session 需要 `/clear` 或重启才能吃到新版 agent。"
+		hint = "Codex CLI 下次启动会重读 ~/.codex/agents/<name>.toml 和共享 tshoot-router；正在开的 session 需要 `/clear` 或重启才能吃到新版项目路由与 Agent 门禁。"
 	}
 	return
 }
@@ -110,25 +110,42 @@ func copyFile(src, dst string) error {
 	return os.WriteFile(dst, data, mode)
 }
 
-func writeTSFMeta(dir, target string, cfg *config.SystemConfig, yamlSrc []byte, version string) error {
+func writeTSFMeta(dir, target string, cfg *config.SystemConfig, yamlSrc []byte, version string, repoLocalPaths map[string]string) error {
 	primaryAgentID := cfg.ResolveID()
-	meta := map[string]any{
-		"schema_version":      1,
-		"tshoot_version":      version,
-		"system_id":           cfg.System.ID,
-		"system_name":         cfg.System.Name,
-		"agent_id":            primaryAgentID,
-		"role":                discover.RoleTroubleshooter,
-		"internal_agents":     internalAgentsForTSFMeta(cfg),
-		"target":              target,
-		"generated_at":        time.Now().UTC().Format(time.RFC3339),
-		"troubleshooter_yaml": string(yamlSrc),
+	meta := discover.Meta{
+		SchemaVersion:       2,
+		TshootVersion:       version,
+		SystemID:            cfg.System.ID,
+		SystemName:          cfg.System.Name,
+		AgentID:             primaryAgentID,
+		Role:                discover.RoleTroubleshooter,
+		InternalAgents:      internalAgentsForTSFMeta(cfg),
+		ProjectRepositories: projectRepositoriesForTSFMeta(cfg, repoLocalPaths),
+		Target:              target,
+		GeneratedAt:         time.Now().UTC().Format(time.RFC3339),
+		TroubleshooterYAML:  string(yamlSrc),
 	}
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, discover.MetaFilename), append(data, '\n'), 0o644)
+}
+
+func projectRepositoriesForTSFMeta(cfg *config.SystemConfig, repoLocalPaths map[string]string) []discover.ProjectRepository {
+	if cfg == nil {
+		return nil
+	}
+	repos := make([]discover.ProjectRepository, 0, len(cfg.Repos))
+	for _, repo := range cfg.Repos {
+		repos = append(repos, discover.ProjectRepository{
+			Name:      strings.TrimSpace(repo.Name),
+			URL:       strings.TrimSpace(repo.URL),
+			LocalPath: strings.TrimSpace(repoLocalPaths[repo.Name]),
+			SubPath:   strings.Trim(strings.TrimSpace(repo.SubPath), "/\\"),
+		})
+	}
+	return repos
 }
 
 func internalAgentsForTSFMeta(cfg *config.SystemConfig) []discover.InternalAgent {

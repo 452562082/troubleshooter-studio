@@ -552,9 +552,9 @@ func TestDeploymentVerifierRawFailureIsNeverPersisted(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident := addPushedWorkflowChange(t, store, createWorkflowCase(t, store, "secret-deployment", CaseWaitingDeployment))
 	o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, secretFailingDeploymentVerifier{})
-	_, err := o.NotifyDeployed(ctx, NotifyDeployedCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "secret-notice", ActorID: "alice"})
-	if err == nil {
-		t.Fatal("expected verifier failure")
+	got, err := o.NotifyDeployed(ctx, NotifyDeployedCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "secret-notice", ActorID: "alice"})
+	if err != nil || got.Status != CaseRegressionValidating {
+		t.Fatalf("case=%+v err=%v", got, err)
 	}
 	events, listErr := store.ListEvents(ctx, incident.ID)
 	if listErr != nil {
@@ -657,7 +657,7 @@ func TestNotifyDeployedManualProofPersistsResultAndReplaysExactly(t *testing.T) 
 	}
 }
 
-func TestNotifyDeployedPersistsMismatchedAndUnavailableWithoutRegression(t *testing.T) {
+func TestNotifyDeployedBlocksMismatchButAllowsUnavailableVersion(t *testing.T) {
 	for name, fixture := range map[string]struct {
 		version string
 		commit  string
@@ -674,7 +674,11 @@ func TestNotifyDeployedPersistsMismatchedAndUnavailableWithoutRegression(t *test
 			runner := &recordingPhaseRunner{}
 			orchestrator := NewCaseOrchestrator(store, runner, nil, NewCompositeDeploymentVerifier(map[string]DeploymentVerifier{"manual": ManualVersionVerifier{Environment: "test"}}))
 			got, err := orchestrator.NotifyDeployed(ctx, NotifyDeployedCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "notice-" + name, ActorID: "alice", ObservedVersion: fixture.version, ObservedCommits: map[string]string{"repo": fixture.commit}, Source: "manual"})
-			if err != nil || got.Status != CaseDeploymentUnverified || runner.startCount() != 0 {
+			wantStatus, wantStarts := CaseDeploymentUnverified, 0
+			if fixture.result == DeploymentResultUnavailable {
+				wantStatus, wantStarts = CaseRegressionValidating, 1
+			}
+			if err != nil || got.Status != wantStatus || runner.startCount() != wantStarts {
 				t.Fatalf("case=%+v starts=%d err=%v", got, runner.startCount(), err)
 			}
 			observations, listErr := store.ListDeploymentObservations(ctx, incident.ID)

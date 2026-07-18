@@ -762,8 +762,8 @@ func formattedPromptJSON(raw json.RawMessage) (string, error) {
 }
 
 func (r *AgentPhaseRunner) validateRegressionInputBinding(ctx context.Context, attempt PhaseAttempt, input RegressionValidationInput) error {
-	if strings.TrimSpace(input.OriginalValidationAttemptID) == "" || strings.TrimSpace(input.OriginalReproduction) == "" || strings.TrimSpace(input.ExpectedBehavior) == "" || strings.TrimSpace(input.OriginalObservedBehavior) == "" || strings.TrimSpace(input.OriginalScenarioHash) == "" || input.CycleNumber < 1 || strings.TrimSpace(input.DeploymentObservationID) == "" || strings.TrimSpace(input.DeploymentReservationID) == "" || strings.TrimSpace(input.ObservedDeploymentVersion) == "" || strings.TrimSpace(input.TargetEnvironment) == "" || len(input.ExpectedFixCommits) == 0 {
-		return errors.New("regression input requires original validation, reproduction, expected behavior, scenario hash, cycle, matched deployment, expected commits, observed deployment version, and target environment")
+	if strings.TrimSpace(input.OriginalValidationAttemptID) == "" || strings.TrimSpace(input.OriginalReproduction) == "" || strings.TrimSpace(input.ExpectedBehavior) == "" || strings.TrimSpace(input.OriginalObservedBehavior) == "" || strings.TrimSpace(input.OriginalScenarioHash) == "" || input.CycleNumber < 1 || strings.TrimSpace(input.DeploymentObservationID) == "" || strings.TrimSpace(input.DeploymentReservationID) == "" || strings.TrimSpace(input.TargetEnvironment) == "" || len(input.ExpectedFixCommits) == 0 {
+		return errors.New("regression input requires original validation, reproduction, expected behavior, scenario hash, cycle, deployment observation, expected commits, and target environment")
 	}
 	for repo, commit := range input.ExpectedFixCommits {
 		if strings.TrimSpace(repo) == "" || strings.TrimSpace(commit) == "" {
@@ -887,7 +887,7 @@ func (r *AgentPhaseRunner) validateRegressionEvidence(_ context.Context, attempt
 		if artifact.Environment != input.TargetEnvironment {
 			return errors.New("regression evidence environment does not match the target environment")
 		}
-		if artifact.Version != input.ObservedDeploymentVersion {
+		if input.ObservedDeploymentVersion != "" && artifact.Version != input.ObservedDeploymentVersion {
 			return errors.New("regression evidence version does not match the observed deployment version")
 		}
 		hasCorrelation = hasCorrelation || strings.TrimSpace(artifact.RequestID) != "" || strings.TrimSpace(artifact.TraceID) != ""
@@ -1197,7 +1197,11 @@ func BuildRegressionValidationPrompt(bug Bug, bot BotRef, input RegressionValida
 	var sb strings.Builder
 	sb.WriteString("你是 Bug 验证 Agent，当前 mode=regression。只复查原始场景，不得读取业务源码，不得分析根因，也不得提出修复建议。\n")
 	sb.WriteString("必须在目标环境重新执行相同场景，并采集 fresh evidence；旧证据只用于对照，不能作为本次结论。\n")
-	fmt.Fprintf(&sb, "original_validation_attempt_id: %s\noriginal_reproduction: %s\nexpected_behavior: %s\noriginal_observed_behavior: %s\nscenario_hash: %s\ncycle_number: %d\ntarget_environment: %s\ndeployment_observation_id: %s\ndeployment_reservation_id: %s\nobserved_deployment_version: %s\n", input.OriginalValidationAttemptID, input.OriginalReproduction, input.ExpectedBehavior, input.OriginalObservedBehavior, input.OriginalScenarioHash, input.CycleNumber, input.TargetEnvironment, input.DeploymentObservationID, input.DeploymentReservationID, input.ObservedDeploymentVersion)
+	observedVersion := strings.TrimSpace(input.ObservedDeploymentVersion)
+	if observedVersion == "" {
+		observedVersion = "<未采集；不要猜测，回归证据 version 可留空>"
+	}
+	fmt.Fprintf(&sb, "original_validation_attempt_id: %s\noriginal_reproduction: %s\nexpected_behavior: %s\noriginal_observed_behavior: %s\nscenario_hash: %s\ncycle_number: %d\ntarget_environment: %s\ndeployment_observation_id: %s\ndeployment_reservation_id: %s\nobserved_deployment_version: %s\n", input.OriginalValidationAttemptID, input.OriginalReproduction, input.ExpectedBehavior, input.OriginalObservedBehavior, input.OriginalScenarioHash, input.CycleNumber, input.TargetEnvironment, input.DeploymentObservationID, input.DeploymentReservationID, observedVersion)
 	sb.WriteString("expected_fix_commits:\n")
 	keys := make([]string, 0, len(input.ExpectedFixCommits))
 	for key := range input.ExpectedFixCommits {

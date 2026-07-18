@@ -235,7 +235,7 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.find('[role="dialog"]').text()).not.toContain('部署已确认')
   })
 
-  it('submits manual proof without a caller-controlled version source', async () => {
+  it('confirms deployment without asking the user for a version or commit', async () => {
     const snapshot = detail('waiting_deployment')
     snapshot.case.current_attempt_id = 'fix-1'
     snapshot.code_changes = [
@@ -245,13 +245,12 @@ describe('BugCaseLifecycle', () => {
     const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
 
     await wrapper.find('.primary-action').trigger('click')
-    await wrapper.find('#observed-version').setValue('build-42')
-    await wrapper.find('#observed-commit-api').setValue('merge-api')
+    expect(wrapper.find('#observed-version').exists()).toBe(false)
+    expect(wrapper.find('[id^="observed-commit-"]').exists()).toBe(false)
+    expect(wrapper.find('[role="dialog"]').text()).toContain('无需填写版本号或 commit')
     await wrapper.find('[data-confirm]').trigger('click')
 
-    expect(wrapper.emitted('primary')?.[0]).toEqual([{
-      kind: 'notify_deployed', observedVersion: 'build-42', observedCommits: { api: 'merge-api' },
-    }])
+    expect(wrapper.emitted('primary')?.[0]).toEqual([{ kind: 'notify_deployed' }])
   })
 
   it('starts automatic HTTP verification without manual proof fields', async () => {

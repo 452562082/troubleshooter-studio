@@ -58,7 +58,9 @@ func TestWriteTSFMetaIncludesInternalAgentContract(t *testing.T) {
 	cfg.System.ID = "base"
 	cfg.System.Name = "Base"
 	cfg.Agent.ID = "base-troubleshooter"
-	if err := writeTSFMeta(dir, "codex", cfg, []byte("system:\n  id: base\n"), "test-version"); err != nil {
+	cfg.Repos = []config.Repo{{Name: "base-api", URL: "git@github.com:acme/base.git", SubPath: "services/api"}}
+	repoPath := filepath.Join(dir, "base")
+	if err := writeTSFMeta(dir, "codex", cfg, []byte("system:\n  id: base\n"), "test-version", map[string]string{"base-api": repoPath}); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, discover.MetaFilename))
@@ -77,6 +79,12 @@ func TestWriteTSFMetaIncludesInternalAgentContract(t *testing.T) {
 	}
 	if meta.InternalAgents[1].ID != "base-validator" || meta.InternalAgents[2].ID != "base-fixer" {
 		t.Fatalf("internal agents wrong: %+v", meta.InternalAgents)
+	}
+	if meta.SchemaVersion != 2 || len(meta.ProjectRepositories) != 1 {
+		t.Fatalf("project ownership metadata missing: %+v", meta)
+	}
+	if got := meta.ProjectRepositories[0]; got.Name != "base-api" || got.LocalPath != repoPath || got.SubPath != "services/api" {
+		t.Fatalf("project repository wrong: %+v", got)
 	}
 }
 

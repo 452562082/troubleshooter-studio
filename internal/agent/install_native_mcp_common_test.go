@@ -783,6 +783,34 @@ func TestBuildMCPServers_DataStores_SingleURI_NoSourceSuffix(t *testing.T) {
 	}
 }
 
+func TestBuildMCPServers_DataStores_SameTypeInstancesUseStableIDs(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "test"}},
+		Infrastructure: config.Infrastructure{DataStores: []config.DataStore{
+			{ID: "redis", Type: "redis", Enabled: true},
+			{ID: "redis-2", Type: "redis", Enabled: true},
+		}},
+	}
+	creds := map[string]string{
+		"REDIS_URL_REDIS_TEST":   "redis://cache-a:6379/0",
+		"REDIS_URL_REDIS_2_TEST": "redis://cache-b:6379/0",
+	}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(k string) string { return creds[k] })
+
+	if got := envOf(servers["redis-test"])["OTEL_SDK_DISABLED"]; got != "true" {
+		t.Fatalf("first redis instance missing: %v", keysOf(servers))
+	}
+	if _, ok := servers["redis-redis-2-test"]; !ok {
+		t.Fatalf("second redis instance must use its stable ID, got: %v", keysOf(servers))
+	}
+	if got := servers["redis-test"].(map[string]any)["args"].([]any)[2]; got != "redis://cache-a:6379/0" {
+		t.Fatalf("first redis instance URL = %v, want cache-a", got)
+	}
+	if got := servers["redis-redis-2-test"].(map[string]any)["args"].([]any)[2]; got != "redis://cache-b:6379/0" {
+		t.Fatalf("second redis instance URL = %v, want cache-b", got)
+	}
+}
+
 // TestBuildMCPServers_DataStores_MultiURI_HostSourceID:
 // 多 cluster 场景 — 同 env 多条 endpoint 不同 URI,
 // 派生 sourceID = host 第一段,注册多个 MCP。

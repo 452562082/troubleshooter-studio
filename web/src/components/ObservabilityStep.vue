@@ -16,6 +16,8 @@ import CredsShareWarning from './CredsShareWarning.vue'
 import ObservabilityToolBlock from './ObservabilityToolBlock.vue'
 import K8sRuntimeBlock from './K8sRuntimeBlock.vue'
 import LokiMappingStep from './LokiMappingStep.vue'
+import ResourceCoveragePanel from './ResourceCoveragePanel.vue'
+import type { ResourceCoverage } from '../lib/resourceCoverage'
 
 interface ToolSpec { key: string; label: string; description: string; fields: CredField[] }
 interface WorkloadCacheEntry { status?: 'idle' | 'loading' | 'ok' | 'error' }
@@ -68,6 +70,8 @@ const props = defineProps<{
   grafanaDsUidByObsEnv: Record<string, string>
   obsGrafanaDsKey: (obsKey: string, envID: string) => string
   obsGrafanaDsTypes: Record<string, string[]>
+  k8sConnectionReuseLabel: (envID: string) => string
+  resourceCoverage: ResourceCoverage
 }>()
 
 const emit = defineEmits<{
@@ -92,6 +96,13 @@ function setLokiDsUid(envID: string, value: string) {
 function setGrafanaDsUid(obsKey: string, envID: string, value: string) {
   props.grafanaDsUidByObsEnv[props.obsGrafanaDsKey(obsKey, envID)] = value
 }
+
+function onToolToggle(tool: string, checked: boolean) {
+  props.enabledObservability[tool] = checked
+  if (checked && ['loki', 'prometheus', 'tempo'].includes(tool)) {
+    props.enabledObservability.grafana = true
+  }
+}
 </script>
 
 <template>
@@ -102,9 +113,9 @@ function setGrafanaDsUid(obsKey: string, envID: string, value: string) {
     </p>
 
     <CredsShareWarning :margin-bottom="18">
-      <li>本页填写字段(含密码、token 等凭证)将保存至 <code>troubleshooter.yaml</code>。</li>
-      <li>部署时,生成器把对应值注入目标 AI 平台的 MCP Server 环境变量。</li>
-      <li><strong>troubleshooter.yaml 含明文凭证</strong>,请仅在可信范围内分享。</li>
+      <li>URL、Datasource 和资源映射保存至 <code>troubleshooter.yaml</code>。</li>
+      <li>密码、Token 等 secret 仅保存到系统钥匙串，YAML 只保留环境变量引用。</li>
+      <li>部署时由 Studio 把钥匙串值注入目标 AI 平台的 MCP Server 环境变量。</li>
     </CredsShareWarning>
 
     <!-- 启用的可观测性组件:横排 chip 选择 -->
@@ -123,7 +134,11 @@ function setGrafanaDsUid(obsKey: string, envID: string, value: string) {
           ? spec.description + ' — 本系统通过 grafana MCP 的内置工具查询(无独立 MCP 包),启用后必须同时启用 grafana'
           : spec.description"
       >
-        <input type="checkbox" v-model="enabledObservability[spec.key]" />
+        <input
+          type="checkbox"
+          :checked="enabledObservability[spec.key]"
+          @change="(event) => onToolToggle(spec.key, (event.target as HTMLInputElement).checked)"
+        />
         {{ spec.label }}
       </label>
     </div>
@@ -184,11 +199,16 @@ function setGrafanaDsUid(obsKey: string, envID: string, value: string) {
             @toggle-reveal="(k) => wizard.toggleReveal(k)"
             @clear-input="(k) => emit('clearToolInput', k)"
           >
+            <div
+              v-if="spec.key === 'k8s_runtime' && k8sConnectionReuseLabel(env.id)"
+              class="cc-preload-summary"
+              style="margin: 8px 0; width: fit-content;"
+            >✓ {{ k8sConnectionReuseLabel(env.id) }}，部署产物会引用同一连接</div>
             <K8sRuntimeBlock
               v-if="spec.key === 'k8s_runtime'"
               :env-i-d="env.id"
               :provider="toolInputs[toolKeyFor('obs', 'k8s_runtime', env.id, 'provider')] || 'kuboard'"
-              :services="wizard.allServiceNames"
+              :services="wizard.runtimeWorkloadNames"
               :kuboard-state="wizard.kuboardStateByEnv[env.id]"
               :one2all-state="one2allStateByEnv[env.id]"
               :env-loc="k8sRuntimeEnvLoc[env.id]"
@@ -271,7 +291,7 @@ function setGrafanaDsUid(obsKey: string, envID: string, value: string) {
               v-if="spec.key === 'loki'"
               :env-i-d="env.id"
               :mapping="getLokiMapping(env.id)"
-              :services="wizard.allServiceNames"
+              :services="wizard.runtimeWorkloadNames"
               @load-labels="(envID) => emit('loadLokiLabels', envID)"
               @env-label-key-changed="(envID, key) => emit('envLabelKeyChanged', envID, key)"
               @service-label-key-changed="(envID, key) => emit('serviceLabelKeyChanged', envID, key)"
@@ -281,5 +301,6 @@ function setGrafanaDsUid(obsKey: string, envID: string, value: string) {
         </div>
       </div>
     </div>
+    <ResourceCoveragePanel :coverage="resourceCoverage" />
   </div>
 </template>

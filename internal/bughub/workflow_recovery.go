@@ -748,7 +748,7 @@ func (o *CaseOrchestrator) latestDeploymentMatched(ctx context.Context, caseID s
 		if observations[index].VerificationSource == "user-notification" {
 			continue
 		}
-		return observations[index].Result == DeploymentResultMatched, nil
+		return observations[index].Result == DeploymentResultMatched || observations[index].Result == DeploymentResultUnavailable, nil
 	}
 	return false, nil
 }

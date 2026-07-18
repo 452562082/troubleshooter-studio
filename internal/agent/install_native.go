@@ -69,6 +69,9 @@ func InstallNative(stagingDir, target string) error {
 			return err
 		}
 	}
+	if err := installProjectRouter(root, t); err != nil {
+		return err
+	}
 
 	return nil
 }

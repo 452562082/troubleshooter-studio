@@ -19,6 +19,7 @@ import type {
 } from './yamlGenerator'
 import { emptyDeploymentVerification } from './yamlGenerator'
 import { VIA_GRAFANA_ELIGIBLE } from './yamlShared'
+import type { ConfigSourceInstance } from './configSourceInstances'
 
 /** yaml 字段值是否为模板占位符 "{{XYZ}}";占位符不应当作真值反填。 */
 export function isPlaceholder(v: unknown): boolean {
@@ -179,8 +180,11 @@ export interface ApplyImportContext {
   repos: any[]
   enabledSourceTypes: Record<string, boolean>
   enabledSourceOrder: string[]
+  sourceInstances: ConfigSourceInstance[]
   sourceCreds: Record<string, { creds: Record<string, Record<string, string>>; rawExtra?: Record<string, unknown> }>
   serviceSourceMap: Record<string, string>
+  serviceSourceByEnv: Record<string, string>
+  sourceEnvNamespaces: Record<string, string>
   ccCredInputs: Record<string, string>
   envNamespaces: Record<string, string>
   serviceConfigSel: Record<string, string>
@@ -193,6 +197,7 @@ export interface ApplyImportContext {
   k8sRuntimeEnvLoc: Record<string, { cluster?: string; cluster_id?: string; namespace?: string }>
   k8sRuntimeSvcMap: Record<string, { workload?: string; label_selector?: string }>
   scannedDS: Record<string, Record<string, Record<string, Record<string, string>>>>
+  dataStoreTypes: Record<string, string>
   enabledDataStores: Record<string, boolean>
   dsAutoFilled: Record<string, boolean>
   dsScanState: Record<string, { status: string; reason?: string }>
@@ -368,27 +373,30 @@ export async function applyParsedYAMLToWizardState(
   ctx.enabledSourceTypes['none'] = false
   for (const t of ctx.ALL_SOURCE_TYPES) ctx.sourceCreds[t] = { creds: {} }
   ctx.enabledSourceOrder.splice(0, ctx.enabledSourceOrder.length)
+  ctx.sourceInstances.splice(0, ctx.sourceInstances.length)
 
   const ingestSource = (s: any, sourceID: string) => {
     if (!s || typeof s.type !== 'string') return
     const t = s.type
+    const id = sourceID || t
     ctx.enabledSourceTypes[t] = true
     if (!ctx.enabledSourceOrder.includes(t)) ctx.enabledSourceOrder.push(t)
-    if (!ctx.sourceCreds[t]) ctx.sourceCreds[t] = { creds: {} }
+    if (!ctx.sourceInstances.some(item => item.id === id)) ctx.sourceInstances.push({ id, type: t })
+    if (!ctx.sourceCreds[id]) ctx.sourceCreds[id] = { creds: {} }
     const fields = ctx.CC_FIELDS_BY_TYPE[t] || []
     if (Array.isArray(s.endpoints)) {
       for (const ep of s.endpoints) {
         if (!ep || typeof ep !== 'object') continue
         const envID = endpointEnvID(t, ep as Record<string, unknown>)
         if (!envID) continue
-        const envCreds: Record<string, string> = ctx.sourceCreds[t].creds[envID] || {}
+        const envCreds: Record<string, string> = ctx.sourceCreds[id].creds[envID] || {}
         for (const f of fields) {
           const v = endpointFieldValue(t, ep as Record<string, unknown>, f.key)
           if (isLiveString(v)) envCreds[f.key] = v
         }
         const mode = inferAuthMode(fields.find(f => f.key === 'auth_mode'), ep)
         if (mode) envCreds['auth_mode'] = mode
-        if (Object.keys(envCreds).length > 0) ctx.sourceCreds[t].creds[envID] = envCreds
+        if (Object.keys(envCreds).length > 0) ctx.sourceCreds[id].creds[envID] = envCreds
       }
     }
     if (t === 'kuboard' && s.service_map && typeof s.service_map === 'object') {
@@ -425,8 +433,7 @@ export async function applyParsedYAMLToWizardState(
       if (k === 'service_map') continue
       rawExtra[k] = v
     }
-    if (Object.keys(rawExtra).length > 0) ctx.sourceCreds[t].rawExtra = rawExtra
-    void sourceID
+    if (Object.keys(rawExtra).length > 0) ctx.sourceCreds[id].rawExtra = rawExtra
   }
 
   let primarySource: any = null
@@ -436,7 +443,10 @@ export async function applyParsedYAMLToWizardState(
     const defaultEntry = ccArray.find((s: any) => s?.id === 'default')
     primarySource = defaultEntry || ccArray[0]
   } else if (parsed.infrastructure?.config_center) {
-    ingestSource(parsed.infrastructure.config_center, 'default')
+    const legacyType = typeof parsed.infrastructure.config_center?.type === 'string'
+      ? parsed.infrastructure.config_center.type
+      : 'default'
+    ingestSource(parsed.infrastructure.config_center, legacyType)
     primarySource = parsed.infrastructure.config_center
   }
 
@@ -450,6 +460,19 @@ export async function applyParsedYAMLToWizardState(
         : (typeof r?.name === 'string' ? [r.name] : [])
       for (const svc of svcNames) {
         if (svc) ctx.serviceSourceMap[svc] = target
+      }
+    }
+  }
+
+  // Formal catalog overrides legacy repository-wide bindings and keeps the
+  // concrete source instance ID. Multiple same-type sources must not collapse.
+  const catalogServices = parsed.resource_catalog?.services
+  if (Array.isArray(catalogServices)) {
+    for (const item of catalogServices) {
+      if (typeof item?.id !== 'string' || !item?.config_sources || typeof item.config_sources !== 'object') continue
+      for (const [envID, sourceID] of Object.entries(item.config_sources as Record<string, unknown>)) {
+        if (typeof sourceID !== 'string' || !sourceID) continue
+        ctx.serviceSourceByEnv[ctx.svcKey(envID, item.id)] = sourceID
       }
     }
   }
@@ -472,16 +495,31 @@ export async function applyParsedYAMLToWizardState(
     }
   }
 
-  // service_map(nacos/apollo/consul):envNamespaces + serviceConfigSel + serviceConfigGroup + 合成 ccHubStateByEnv
-  const svcMap = (cc !== 'kuboard') ? primarySource?.service_map : null
-  if (svcMap && typeof svcMap === 'object') {
+  // service_map(nacos/apollo/consul):每个实例独立恢复 namespace、dataId 和预加载状态。
+  const primarySourceID = ctx.sourceInstances[0]?.id || 'default'
+  const importedSources: Array<{ id: string; type: string; source: any }> = Array.isArray(ccArray)
+    ? ccArray.filter((s: any) => s && typeof s.type === 'string').map((s: any) => ({ id: s.id || s.type, type: s.type, source: s }))
+    : (primarySource && typeof cc === 'string' ? [{ id: primarySourceID, type: cc, source: primarySource }] : [])
+  for (const imported of importedSources) {
+    if (!['nacos', 'apollo', 'consul'].includes(imported.type)) continue
+    const svcMap = imported.source?.service_map
+    if (!svcMap || typeof svcMap !== 'object') continue
     const synthByEnv: Record<string, { ns: Map<string, string>; entries: Map<string, { locator: string; group?: string; tenant?: string }> }> = {}
     for (const [envID, svcs] of Object.entries(svcMap)) {
       if (!svcs || typeof svcs !== 'object') continue
       for (const [svc, rec] of Object.entries(svcs as Record<string, unknown>)) {
         if (!rec || typeof rec !== 'object') continue
+        const bindingKey = ctx.svcKey(envID, svc)
+        const explicitBinding = ctx.serviceSourceByEnv[bindingKey]
+        if (explicitBinding && explicitBinding !== imported.id) continue
+        const legacyBinding = ctx.serviceSourceMap[svc]
+        if (!explicitBinding && legacyBinding && legacyBinding !== imported.id && legacyBinding !== imported.type) continue
+        if (!explicitBinding) ctx.serviceSourceByEnv[bindingKey] = imported.id
         const r = rec as { namespace?: string; group?: string; data_id?: string }
-        if (typeof r.namespace === 'string' && r.namespace) ctx.envNamespaces[envID] = r.namespace
+        if (typeof r.namespace === 'string' && r.namespace) {
+          if (imported.id === primarySourceID) ctx.envNamespaces[envID] = r.namespace
+          ctx.sourceEnvNamespaces[`${imported.id}::${envID}`] = r.namespace
+        }
         if (typeof r.data_id === 'string' && r.data_id) ctx.serviceConfigSel[ctx.svcKey(envID, svc)] = r.data_id
         if (typeof r.group === 'string' && r.group) ctx.serviceConfigGroup[ctx.svcKey(envID, svc)] = r.group
         if (!synthByEnv[envID]) synthByEnv[envID] = { ns: new Map(), entries: new Map() }
@@ -500,7 +538,8 @@ export async function applyParsedYAMLToWizardState(
     }
     for (const [envID, bucket] of Object.entries(synthByEnv)) {
       if (bucket.ns.size === 0 && bucket.entries.size === 0) continue
-      ctx.ccHubStateByEnv[envID] = {
+      const stateKey = imported.id === primarySourceID ? envID : `${imported.id}::${envID}`
+      ctx.ccHubStateByEnv[stateKey] = {
         status: 'ok',
         namespaces: Array.from(bucket.ns.entries()).map(([id, show]) => ({ id, show_name: show })),
         entries: Array.from(bucket.entries.values()),
@@ -609,9 +648,12 @@ export async function applyParsedYAMLToWizardState(
   const ds = parsed.infrastructure?.data_stores
   if (Array.isArray(ds)) {
     for (const key of Object.keys(ctx.scannedDS)) delete ctx.scannedDS[key]
+    for (const key of Object.keys(ctx.dataStoreTypes)) delete ctx.dataStoreTypes[key]
     for (const entry of ds) {
       const t = entry?.type
       if (typeof t !== 'string' || entry?.enabled === false) continue
+      const id = typeof entry?.id === 'string' && entry.id ? entry.id : t
+      ctx.dataStoreTypes[id] = t
       const spec = ctx.toolSpecByKey('ds', t)
       const dsEndpoints = entry?.endpoints
       if (!spec || !Array.isArray(dsEndpoints)) continue
@@ -629,7 +671,7 @@ export async function applyParsedYAMLToWizardState(
           fields[f.key] = v
         }
         if (Object.keys(fields).length > 0) {
-          ctx.scannedDS[envID][svc][t] = fields
+          ctx.scannedDS[envID][svc][id] = fields
           ctx.dsAutoFilled[t] = true
         }
       }

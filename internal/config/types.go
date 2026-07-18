@@ -133,6 +133,7 @@ type SystemConfig struct {
 	Agent            Agent            `yaml:"agent"`
 	Environments     []Environment    `yaml:"environments"`
 	Repos            []Repo           `yaml:"repos"`
+	ResourceCatalog  ResourceCatalog  `yaml:"resource_catalog,omitempty"`
 	CodeIntelligence CodeIntelligence `yaml:"code_intelligence,omitempty"`
 	ServiceTopology  ServiceTopology  `yaml:"service_topology,omitempty"`
 	Infrastructure   Infrastructure   `yaml:"infrastructure"`

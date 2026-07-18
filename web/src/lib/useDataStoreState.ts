@@ -41,12 +41,22 @@ export function useDataStoreState(
   dataStoreOptions: readonly string[],
   /** enabledDataStores: 上层 reactive,recomputeEnabledDataStoresFromScanned 会改它 */
   enabledDataStores: Record<string, boolean>,
+  initialTypes: Record<string, string> = {},
 ) {
   const dsImportStatus = ref<'idle' | 'loading' | 'ok' | 'error'>('idle')
   const dsImportStats = reactive<{ scanned: number; matched: number }>({ scanned: 0, matched: 0 })
   const dsAutoFilled = reactive<Record<string, boolean>>({}) // dsType → 是否本次自动识别过
 
   const scannedDS = reactive<Record<string, DSByService>>(initial.scannedDS ?? {})
+  const dataStoreTypes = reactive<Record<string, string>>({ ...initialTypes })
+  for (const services of Object.values(scannedDS)) {
+    for (const stores of Object.values(services)) {
+      for (const id of Object.keys(stores)) {
+        if (!dataStoreTypes[id]) dataStoreTypes[id] = id
+      }
+    }
+  }
+  const dataStoreType = (id: string) => dataStoreTypes[id] || id
 
   // 一次性迁移:旧版本 nacos 批拉对"未分配源"和"挂在副源"的服务都笼统报"未映射 dataId",
   // 这些 stale 状态会跨会话留在 localStorage 里。新版本对未分配源 / 跨源服务给的 reason 不一样,
@@ -85,7 +95,7 @@ export function useDataStoreState(
       for (const svc of Object.keys(scannedDS[envID] || {})) {
         for (const dsKey of Object.keys(scannedDS[envID]?.[svc] || {})) {
           if (Object.keys(scannedDS[envID]?.[svc]?.[dsKey] || {}).length > 0) {
-            live.add(dsKey)
+            live.add(dataStoreType(dsKey))
           }
         }
       }
@@ -95,8 +105,8 @@ export function useDataStoreState(
     }
   }
 
-  // 删掉某个 (env, service) 下识别出的某类数据层(用户手动:"这个我不要了")。
-  // 不改 scanState —— 用户主观删不算"没读取到",下一步校验仍视该 (env, svc) 通过。
+  // 排除某个 (env, service) 下识别出的某类数据层。重新读取配置会重新发现它；
+  // UI 使用“排除能力”文案,避免让用户误以为删除了真实运行时资源。
   function removeScannedDS(envID: string, svc: string, dsKey: string) {
     if (scannedDS[envID]?.[svc]?.[dsKey]) {
       delete scannedDS[envID][svc][dsKey]
@@ -106,11 +116,39 @@ export function useDataStoreState(
     recomputeEnabledDataStoresFromScanned()
   }
 
+  function addManualDataStore(envID: string, svc: string, dsType: string, fieldKeys: readonly string[]) {
+    if (!envID || !svc || !dsType) return
+    if (!scannedDS[envID]) scannedDS[envID] = {}
+    if (!scannedDS[envID][svc]) scannedDS[envID][svc] = {}
+    const usedIDs = new Set<string>()
+    for (const services of Object.values(scannedDS)) {
+      for (const stores of Object.values(services)) {
+        for (const id of Object.keys(stores)) usedIDs.add(id)
+      }
+    }
+    let dsKey = dsType
+    if (usedIDs.has(dsKey)) {
+      for (let n = 2; ; n++) {
+        const candidate = `${dsType}-${n}`
+        if (!usedIDs.has(candidate)) { dsKey = candidate; break }
+      }
+    }
+    dataStoreTypes[dsKey] = dsType
+    scannedDS[envID][svc][dsKey] = {}
+    for (const field of fieldKeys) {
+      if (!(field in scannedDS[envID][svc][dsKey])) scannedDS[envID][svc][dsKey][field] = ''
+    }
+    dsScanState[scanStateKey(envID, svc)] = { status: 'ok', reason: '包含人工补录的数据组件' }
+    delete dsProbeResults[probeKey(envID, svc, dsKey)]
+    recomputeEnabledDataStoresFromScanned()
+  }
+
   return {
     dsImportStatus, dsImportStats, dsAutoFilled,
-    scannedDS, dsScanState, dsProbeResults,
+    scannedDS, dataStoreTypes, dataStoreType, dsScanState, dsProbeResults,
     scanStateKey, scanStateOf,
     removeScannedDS,
+    addManualDataStore,
     recomputeEnabledDataStoresFromScanned,
   }
 }

@@ -68,11 +68,11 @@ func (a *App) deploymentVerificationPreview(ctx context.Context, caseID string) 
 	_ = json.Unmarshal(binding.Snapshot, &snapshot)
 	switch binding.Provider {
 	case "manual":
-		preview.Hint = "人工提供已部署版本和各仓库 commit"
+		preview.Hint = "仅确认已部署；不要求填写版本"
 	case "http":
-		preview.Hint = "HTTP 版本接口自动验证 · " + fmt.Sprint(snapshot["json_pointer"])
+		preview.Hint = "HTTP 版本接口自动采集 · " + fmt.Sprint(snapshot["json_pointer"])
 	case "k8s":
-		preview.Hint = "K8s Deployment 自动验证 · " + fmt.Sprint(snapshot["cluster"]) + "/" + fmt.Sprint(snapshot["namespace"])
+		preview.Hint = "复用可观测性 K8s 映射自动采集；采集不到不阻塞回归"
 	default:
 		preview.Provider = "unavailable"
 		preview.Hint = "无法读取当前 Case 的部署验证配置"
@@ -114,19 +114,23 @@ func k8sVerifierEndpointIdentity(cfg *config.SystemConfig, environmentID string)
 }
 
 func canonicalDeploymentVerifierBinding(cfg *config.SystemConfig, environment config.Environment) deploymentVerifierBinding {
-	provider := environment.DeploymentVerification.EffectiveProvider()
+	verification, err := cfg.DeploymentVerificationForEnvironment(environment.ID)
+	if err != nil {
+		return unavailableDeploymentBinding()
+	}
+	provider := verification.EffectiveProvider()
 	switch provider {
 	case config.DeploymentVerificationProviderManual:
-		return makeDeploymentBinding(provider, map[string]any{"provider": provider, "policy": "manual-v1"})
+		return makeDeploymentBinding(provider, map[string]any{"provider": provider, "policy": "manual-confirmation-v2-no-version-input"})
 	case config.DeploymentVerificationProviderHTTP:
-		return makeDeploymentBinding(provider, map[string]any{"provider": provider, "url": normalizedVerifierURL(environment.DeploymentVerification.HTTP.URL), "json_pointer": environment.DeploymentVerification.HTTP.JSONPointer, "allow_private": environment.DeploymentVerification.HTTP.AllowPrivate, "policy": "http-v2-ssrf-dialguard-timeout10s-body1m-samehost"})
+		return makeDeploymentBinding(provider, map[string]any{"provider": provider, "url": normalizedVerifierURL(verification.HTTP.URL), "json_pointer": verification.HTTP.JSONPointer, "allow_private": verification.HTTP.AllowPrivate, "policy": "http-v3-optional-version-ssrf-dialguard-timeout10s-body1m-samehost"})
 	case config.DeploymentVerificationProviderK8s:
 		endpointIdentity, _ := k8sVerifierEndpointIdentity(cfg, environment.ID)
 		endpointProvider := strings.ToLower(strings.TrimSpace(cfg.Infrastructure.Observability.K8sRuntime.Provider))
 		if endpointProvider == "" {
 			endpointProvider = "kuboard"
 		}
-		k := environment.DeploymentVerification.K8s
+		k := verification.K8s
 		repositories := make([]string, 0, len(k.DeploymentsByRepo))
 		for repo := range k.DeploymentsByRepo {
 			repositories = append(repositories, repo)
@@ -136,7 +140,7 @@ func canonicalDeploymentVerifierBinding(cfg *config.SystemConfig, environment co
 		for _, repo := range repositories {
 			mappings = append(mappings, deploymentRepositoryMapping{Repo: repo, Deployment: k.DeploymentsByRepo[repo]})
 		}
-		return makeDeploymentBinding(provider, map[string]any{"provider": provider, "cluster": k.Cluster, "namespace": k.Namespace, "deployments_by_repo": mappings, "commit_annotation": k.CommitAnnotation, "image_label": k.ImageLabel, "endpoint_provider": endpointProvider, "endpoint_identity": endpointIdentity, "policy": "k8s-readonly-v1"})
+		return makeDeploymentBinding(provider, map[string]any{"provider": provider, "cluster": k.Cluster, "namespace": k.Namespace, "deployments_by_repo": mappings, "commit_annotation": k.CommitAnnotation, "image_label": k.ImageLabel, "endpoint_provider": endpointProvider, "endpoint_identity": endpointIdentity, "policy": "k8s-readonly-v2-observability-map-optional-version"})
 	default:
 		return unavailableDeploymentBinding()
 	}
@@ -172,7 +176,11 @@ func (v *caseConfiguredDeploymentVerifier) Verify(ctx context.Context, request b
 	if environment == nil {
 		return v.unavailable(request, "environment_unknown", "机器人配置中不存在 Case 环境"), bughub.ErrDeploymentVerifierUnavailable
 	}
-	provider := environment.DeploymentVerification.EffectiveProvider()
+	verification, err := cfg.DeploymentVerificationForEnvironment(environment.ID)
+	if err != nil {
+		return v.unavailable(request, "environment_unknown", "机器人配置中不存在 Case 环境"), bughub.ErrDeploymentVerifierUnavailable
+	}
+	provider := verification.EffectiveProvider()
 	binding := canonicalDeploymentVerifierBinding(cfg, *environment)
 	// Source was resolved by the server before reservation. Re-reading the
 	// config here closes the TOCTOU window: a provider change between reserve
@@ -183,9 +191,13 @@ func (v *caseConfiguredDeploymentVerifier) Verify(ctx context.Context, request b
 	request.Source = provider
 	switch provider {
 	case config.DeploymentVerificationProviderManual:
-		return (bughub.ManualVersionVerifier{Environment: incident.Environment}).Verify(ctx, request)
+		return bughub.DeploymentObservation{
+			Environment: incident.Environment, ExpectedCommits: bughub.CloneStringMap(request.ExpectedCommits),
+			VerificationSource: "manual", ObservedAt: time.Now().UTC(), Result: bughub.DeploymentResultUnavailable,
+			DiagnosticCode: "version_not_collected", DiagnosticMessage: "已确认部署；未要求用户填写版本",
+		}, nil
 	case config.DeploymentVerificationProviderHTTP:
-		return (bughub.HTTPVersionVerifier{Environment: incident.Environment, Config: environment.DeploymentVerification.HTTP}).Verify(ctx, request)
+		return (bughub.HTTPVersionVerifier{Environment: incident.Environment, Config: verification.HTTP}).Verify(ctx, request)
 	case config.DeploymentVerificationProviderK8s:
 		if _, safe := k8sVerifierEndpointIdentity(cfg, environment.ID); !safe {
 			return v.unavailable(request, "k8s_endpoint_invalid", "K8s 只读运行时端点未配置或包含不安全 URL 字段"), bughub.ErrDeploymentVerifierUnavailable
@@ -198,7 +210,7 @@ func (v *caseConfiguredDeploymentVerifier) Verify(ctx context.Context, request b
 		if readerErr != nil || reader == nil {
 			return v.unavailable(request, "k8s_reader_unavailable", "K8s 只读运行时不可用"), bughub.ErrDeploymentVerifierUnavailable
 		}
-		return (bughub.K8sVersionVerifier{Environment: incident.Environment, Config: environment.DeploymentVerification.K8s, Reader: reader}).Verify(ctx, request)
+		return (bughub.K8sVersionVerifier{Environment: incident.Environment, Config: verification.K8s, Reader: reader}).Verify(ctx, request)
 	default:
 		return v.unavailable(request, "provider_unknown", "部署版本验证方式不受支持"), bughub.ErrDeploymentVerifierUnavailable
 	}

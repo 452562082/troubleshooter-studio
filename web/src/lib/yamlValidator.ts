@@ -17,6 +17,8 @@
 import { Target } from './constants'
 import { canonicalizeGitURL } from './canonicalGitURL'
 import type { CredField, KuboardResourceState } from './credFields'
+import { isEffectiveObsFieldHidden, resolveObsFieldValue } from './obsConnection'
+import { sourceStateKey, type ConfigSourceInstance } from './configSourceInstances'
 
 export interface ValidatorEnvironment {
   id: string
@@ -27,6 +29,8 @@ export interface ValidatorEnvironment {
 export interface ValidatorRepo {
   name: string
   url: string
+  stack?: string
+  service_names?: string
   _source?: 'local' | 'remote'
   _localPath?: string
   _cloneTarget?: string
@@ -69,6 +73,8 @@ export interface ValidatorContext {
   isMultiSource: boolean
   allServiceNames: string[]
   activeSourceTypes: string[]
+  sourceInstances?: ConfigSourceInstance[]
+  sourceEnvNamespaces?: Record<string, string>
   CC_FIELDS_BY_TYPE: Record<string, CredField[]>
   ccCredInputs: Record<string, string>
   sourceCreds: Record<string, { creds: Record<string, Record<string, string>> }>
@@ -84,11 +90,23 @@ export interface ValidatorContext {
   dsScanState?: Record<string, { status: string; reason?: string } | undefined>
   /** 跟 InitPage 同款 helper,内部 isFieldHidden 复用 */
   isFieldHidden(t: string, envID: string, f: CredField, getSibling: (k: string) => string): boolean
-  getServiceSource(svc: string): string
+  getServiceSource(svc: string, envID?: string): string
   /** 列出 Step 7 校验对象;InitPage 那边的 enumerateDataStoreProbeTargets() */
   enumerateDataStoreProbeTargets(): DSProbeTarget[]
   /** Step 8 用:可观测组件勾选 map(grafana/loki/prometheus/jaeger/elk/...) */
   enabledObservability: Record<string, boolean>
+  OBS_TOOL_SPECS?: Array<{ key: string; fields: CredField[] }>
+  toolInputs?: Record<string, string>
+  obsProbeResults?: Record<string, { status?: ProbeStatus } | undefined>
+  obsProbeKey?: (toolKey: string, envID: string) => string
+  toolKeyFor?: (cat: 'obs' | 'ds', tool: string, envID: string, field: string) => string
+  isObsFieldHidden?: (toolKey: string, envID: string, f: CredField) => boolean
+  getObsAccessMode?: (toolKey: string, envID: string) => 'via_grafana' | 'direct'
+  grafanaDsUidByObsEnv?: Record<string, string>
+  obsGrafanaDsKey?: (obsKey: string, envID: string) => string
+  lokiMappingByEnv?: Record<string, { dsUID?: string } | undefined>
+  k8sRuntimeEnvLoc?: Record<string, { cluster?: string; cluster_id?: string; namespace?: string } | undefined>
+  requireObsProbe?: boolean
 }
 
 // 共享 key 拼接收口在 yamlShared.ts;这里 re-export 让老调用方(只 import 本文件的)
@@ -143,6 +161,7 @@ export function computeStepErrors(ctx: ValidatorContext): Set<string> {
     //     _cloneTarget 也无需填,让 analyzerpipe 走 umbrella 继承编排。
     ctx.repos.forEach((r, i) => {
       if (!r.name.trim()) errs.add(`repo.${i}.name`)
+      if (!(r.stack || '').trim()) errs.add(`repo.${i}.stack`)
       if (r._source === 'local') {
         if (!(r._localPath || '').trim()) errs.add(`repo.${i}.localPath`)
       } else {
@@ -161,28 +180,47 @@ export function computeStepErrors(ctx: ValidatorContext): Set<string> {
   }
 
   if (step === 6) {
+    if (ctx.activeSourceTypes.length === 0) {
+      errs.add('cc.none.explicit')
+      return errs
+    }
     // 每个服务必须明确归属某源(多源强制;单源检查是否有显式取消)
     if (ctx.allServiceNames.length > 0) {
-      for (const svc of ctx.allServiceNames) {
-        if (!ctx.getServiceSource(svc)) {
-          errs.add(`cc.unassigned.${svc}`)
+      for (const env of ctx.environments) {
+        if (!env.id.trim()) continue
+        for (const svc of ctx.allServiceNames) {
+          if (!ctx.getServiceSource(svc, env.id)) {
+            errs.add(`cc.unassigned.${env.id}.${svc}`)
+          }
         }
       }
     }
-    const primary = ctx.activeSourceTypes[0] || ''
-    for (const t of ctx.activeSourceTypes) {
+    const instances = ctx.sourceInstances?.length
+      ? ctx.sourceInstances
+      : ctx.activeSourceTypes.map(type => ({ id: type, type }))
+    const instanceCounts = new Map<string, number>()
+    for (const instance of instances) instanceCounts.set(instance.type, (instanceCounts.get(instance.type) || 0) + 1)
+    for (const [type, count] of instanceCounts) {
+      if (count > 1 && !['nacos', 'apollo', 'consul'].includes(type)) {
+        errs.add(`cc.instance.unsupported.${type}`)
+      }
+    }
+    const primaryID = instances[0]?.id || ''
+    for (const instance of instances) {
+      const t = instance.type
+      const sourceID = instance.id
       const fields = ctx.CC_FIELDS_BY_TYPE[t] || []
       if (fields.length === 0) continue
       // 主源走 ccCredInputs,副源走 sourceCreds[t].creds
       const getField = (envID: string, fieldKey: string): string => {
-        if (t === primary) return (ctx.ccCredInputs[ccKeyFor(t, envID, fieldKey)] || '').trim()
-        return ((ctx.sourceCreds[t]?.creds?.[envID]?.[fieldKey]) || '').trim()
+        if (sourceID === primaryID) return (ctx.ccCredInputs[ccKeyFor(t, envID, fieldKey)] || '').trim()
+        return ((ctx.sourceCreds[sourceID]?.creds?.[envID]?.[fieldKey]) || '').trim()
       }
       const isKuboard = t === 'kuboard'
       const isOne2All = t === 'one2all'
       ctx.environments.forEach((e) => {
         if (!e.id.trim()) return
-        const svcsOnThisSource = ctx.allServiceNames.filter(svc => ctx.getServiceSource(svc) === t)
+        const svcsOnThisSource = ctx.allServiceNames.filter(svc => ctx.getServiceSource(svc, e.id) === sourceID)
         if (svcsOnThisSource.length === 0) return
         // 凭证字段必填:one2all 只查 _shared_ 一次,kuboard 跳过 cluster/ns/cm,其它 per-env
         if (isOne2All) {
@@ -232,12 +270,13 @@ export function computeStepErrors(ctx: ValidatorContext): Set<string> {
           }
         } else {
           // nacos / apollo / consul:走 ccHub 预加载 + namespace + per-svc dataId
-          const st = ctx.ccHubStateByEnv[e.id]
+          const st = ctx.ccHubStateByEnv[sourceStateKey(sourceID, e.id, primaryID)]
           if (!st || st.status !== 'ok') {
             errs.add(`cc.${t}.${e.id}.scan`)
             return
           }
-          if (!(e.id in ctx.envNamespaces)) {
+          const nsKey = `${sourceID}::${e.id}`
+          if (!(nsKey in (ctx.sourceEnvNamespaces || {})) && !(e.id in ctx.envNamespaces)) {
             errs.add(`cc.${t}.${e.id}.namespace`)
             return
           }
@@ -280,6 +319,65 @@ export function computeStepErrors(ctx: ValidatorContext): Set<string> {
         errs.add(`obs.${k}.needs_grafana`)
       }
     }
+    const specs = ctx.OBS_TOOL_SPECS || []
+    const toolInputs = ctx.toolInputs || {}
+    const toolKeyFor = ctx.toolKeyFor
+    if (!toolKeyFor || specs.length === 0) return errs
+    const valueCtx = { toolInputs, sourceCreds: ctx.sourceCreds, toolKeyFor }
+
+    if (ctx.enabledObservability.k8s_runtime) {
+      const providers = new Set(ctx.environments
+        .filter(env => env.id.trim())
+        .map(env => resolveObsFieldValue(valueCtx, 'k8s_runtime', env.id, 'provider') || 'kuboard'))
+      if (providers.size > 1) errs.add('obs.k8s_runtime.provider_mismatch')
+    }
+
+    for (const spec of specs) {
+      if (!ctx.enabledObservability[spec.key]) continue
+      for (const env of ctx.environments) {
+        if (!env.id.trim()) continue
+        const mode = ctx.getObsAccessMode?.(spec.key, env.id) || 'direct'
+        if (mode === 'via_grafana') {
+          const uid = spec.key === 'loki'
+            ? (ctx.lokiMappingByEnv?.[env.id]?.dsUID || '').trim()
+            : (ctx.grafanaDsUidByObsEnv?.[ctx.obsGrafanaDsKey?.(spec.key, env.id) || ''] || '').trim()
+          if (!uid) errs.add(`obs.${spec.key}.${env.id}.datasource`)
+          continue
+        }
+
+        for (const f of spec.fields) {
+          if (f.uiOnly || f.optional) continue
+          if (isEffectiveObsFieldHidden(
+            valueCtx,
+            spec.key,
+            env.id,
+            f,
+            ctx.isObsFieldHidden || (() => false),
+          )) continue
+          if (!resolveObsFieldValue(valueCtx, spec.key, env.id, f.key)) {
+            errs.add(`obs.${spec.key}.${env.id}.${f.key}`)
+          }
+        }
+
+        if (spec.key === 'k8s_runtime') {
+          const provider = resolveObsFieldValue(valueCtx, spec.key, env.id, 'provider') || 'kuboard'
+          const loc = ctx.k8sRuntimeEnvLoc?.[env.id]
+          if (!loc?.namespace || (provider === 'one2all' ? !loc.cluster_id : !loc.cluster)) {
+            errs.add(`obs.k8s_runtime.${env.id}.location`)
+          }
+          const resourceState = provider === 'one2all'
+            ? ctx.one2allStateByEnv?.[env.id]
+            : ctx.kuboardStateByEnv[env.id]
+          if (ctx.requireObsProbe && resourceState?.status !== 'ok') errs.add(`obs.k8s_runtime.${env.id}.probe`)
+          continue
+        }
+
+        const probeKeyForTool = ctx.obsProbeKey?.(spec.key, env.id)
+        if (ctx.requireObsProbe && probeKeyForTool && ctx.obsProbeResults?.[probeKeyForTool]?.status !== 'ok') {
+          errs.add(`obs.${spec.key}.${env.id}.probe`)
+        }
+      }
+    }
     return errs
   }
 
@@ -308,6 +406,7 @@ export function labelForErrorKey(k: string, repos: ValidatorRepo[]): string {
     const i = Number(parts[1]) + 1
     const f = parts[2]
     if (f === 'localPath') return `仓库 #${i} 本地目录`
+    if (f === 'stack') return `仓库 #${i} 技术栈(请完成扫描或手工选择)`
     if (f === 'url') {
       // 第 4 段是 'identity' = 身份锚定校验失败(URL 改成了不同仓库)
       if (parts[3] === 'identity') {
@@ -320,9 +419,19 @@ export function labelForErrorKey(k: string, repos: ValidatorRepo[]): string {
     return `仓库 #${i} ${f}`
   }
   if (k.startsWith('cc.')) {
+    if (k === 'cc.none.explicit') return '请选择配置源;系统确实没有配置源时请显式选择“无配置源”'
+    if (k === 'cc.multi_remote.unsupported') return '当前向导一次只支持一个 Nacos/Apollo/Consul;其它副源请选择 Kuboard/one2all'
+    if (k.startsWith('cc.instance.unsupported.')) return `${k.split('.').pop()} 当前只支持一个连接实例`
+    if (k.startsWith('cc.repo_mixed.')) {
+      const index = Number(k.split('.')[2])
+      return `仓库 "${repos[index]?.name || `#${index + 1}`}" 内服务分属多个配置源;当前 YAML 不能无损表达`
+    }
     if (k.startsWith('cc.unassigned.')) {
-      const svcName = k.substring('cc.unassigned.'.length)
-      return `服务 "${svcName}" 未分配源 —— 在某个源面板的"本环境包含的服务"里勾上`
+      const rest = k.substring('cc.unassigned.'.length).split('.')
+      const [envID, ...serviceParts] = rest
+      const svcName = serviceParts.length > 0 ? serviceParts.join('.') : envID
+      const envHint = serviceParts.length > 0 ? `环境 "${envID}" 的` : ''
+      return `${envHint}服务 "${svcName}" 未分配源 —— 在某个源面板的"本环境包含的服务"里勾上`
     }
     const parts = k.split('.')
     const source = parts[1]
@@ -361,6 +470,14 @@ export function labelForErrorKey(k: string, repos: ValidatorRepo[]): string {
       const tool = { loki: 'Loki', prometheus: 'Prometheus', tempo: 'Tempo' }[parts[1]] || parts[1]
       return `${tool} 启用但 Grafana 未启用(${tool} 通过 grafana MCP 内置工具查询,需先勾 Grafana)`
     }
+    const tool = parts[1]
+    const env = parts[2]
+    const kind = parts[3]
+    if (tool === 'k8s_runtime' && env === 'provider_mismatch') return 'K8s 运行时各环境必须使用同一种 Provider'
+    if (kind === 'datasource') return `${env} 环境 ${tool} 未选择 Grafana datasource`
+    if (kind === 'location') return `${env} 环境 K8s 运行时未选择集群和 Namespace`
+    if (kind === 'probe') return `${env} 环境 ${tool} 尚未连接成功`
+    return `${env} 环境 ${tool} 缺少 ${kind || '连接信息'}`
   }
   return k
 }

@@ -75,11 +75,8 @@ func TestDeploymentVerificationValidation(t *testing.T) {
 		"http pointer":      {`    deployment_verification: {provider: http, http: {url: https://x/version}}`, "http.json_pointer required"},
 		"http credentials":  {`    deployment_verification: {provider: http, http: {url: "https://user:secret@x/version", json_pointer: /commit}}`, "must not contain credentials"},
 		"http secret query": {`    deployment_verification: {provider: http, http: {url: "https://x/version?token=secret", json_pointer: /commit}}`, "must not contain a query"},
-		"k8s cluster":       {`    deployment_verification: {provider: k8s, k8s: {namespace: n, deployments_by_repo: {admin-web: d}, commit_annotation: commit}}`, "k8s.cluster required"},
-		"k8s namespace":     {`    deployment_verification: {provider: k8s, k8s: {cluster: c, deployments_by_repo: {admin-web: d}, commit_annotation: commit}}`, "k8s.namespace required"},
-		"k8s map":           {`    deployment_verification: {provider: k8s, k8s: {cluster: c, namespace: n, commit_annotation: commit}}`, "deployments_by_repo required"},
 		"unknown repo":      {`    deployment_verification: {provider: k8s, k8s: {cluster: c, namespace: n, deployments_by_repo: {ghost: d}, commit_annotation: commit}}`, "unknown repo"},
-		"missing selector":  {`    deployment_verification: {provider: k8s, k8s: {cluster: c, namespace: n, deployments_by_repo: {admin-web: d}}}`, "commit_annotation or image_label required"},
+		"mixed selectors":   {`    deployment_verification: {provider: k8s, k8s: {commit_annotation: commit, image_label: commit}}`, "mutually exclusive"},
 		"provider":          {`    deployment_verification: {provider: magic}`, "invalid"},
 	}
 	for name, tt := range tests {
@@ -90,6 +87,66 @@ func TestDeploymentVerificationValidation(t *testing.T) {
 				t.Fatalf("err=%v, want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestDeploymentVerificationK8sReusesObservabilityServiceMap(t *testing.T) {
+	cfg := deploymentVerificationConfig(t, `    deployment_verification:
+      provider: k8s
+      k8s:
+        cluster: stale-cluster
+        namespace: stale-namespace
+        deployments_by_repo: {admin-web: stale-deployment}`)
+	cfg.Repos[0].ServiceNames = []string{"admin-web-service"}
+	cfg.Infrastructure.Observability.K8sRuntime.ServiceMap = []K8sRuntimeServiceMapEntry{{
+		Env: "test", Service: "admin-web-service", Cluster: "test-cluster", Namespace: "admin-test", Workload: "admin-web",
+	}}
+	resolved, err := cfg.DeploymentVerificationForEnvironment("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.K8s.Cluster != "test-cluster" || resolved.K8s.Namespace != "admin-test" || resolved.K8s.DeploymentsByRepo["admin-web"] != "admin-web" {
+		t.Fatalf("resolved K8s mapping = %+v", resolved.K8s)
+	}
+	if raw := cfg.Environments[0].DeploymentVerification.K8s; raw.Cluster != "stale-cluster" || raw.DeploymentsByRepo["admin-web"] != "stale-deployment" {
+		t.Fatalf("resolver mutated legacy configuration: %+v", raw)
+	}
+}
+
+func TestDeploymentVerificationAutomaticallyUsesEnabledK8sObservability(t *testing.T) {
+	cfg := deploymentVerificationConfig(t, "")
+	cfg.Repos[0].ServiceNames = []string{"admin-web-service"}
+	cfg.Infrastructure.Observability.K8sRuntime.Enabled = true
+	cfg.Infrastructure.Observability.K8sRuntime.ServiceMap = []K8sRuntimeServiceMapEntry{{
+		Env: "test", Service: "admin-web-service", Cluster: "test-cluster", Namespace: "admin-test", Workload: "admin-web",
+	}}
+
+	resolved, err := cfg.DeploymentVerificationForEnvironment("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.EffectiveProvider() != DeploymentVerificationProviderK8s {
+		t.Fatalf("provider = %q, want k8s", resolved.EffectiveProvider())
+	}
+	if resolved.K8s.Cluster != "test-cluster" || resolved.K8s.Namespace != "admin-test" || resolved.K8s.DeploymentsByRepo["admin-web"] != "admin-web" {
+		t.Fatalf("resolved K8s mapping = %+v", resolved.K8s)
+	}
+}
+
+func TestDeploymentVerificationExplicitManualDisablesAutomaticK8sEvidence(t *testing.T) {
+	cfg := deploymentVerificationConfig(t, `    deployment_verification:
+      provider: manual`)
+	cfg.Infrastructure.Observability.K8sRuntime.Enabled = true
+	cfg.Infrastructure.Observability.K8sRuntime.ServiceMap = []K8sRuntimeServiceMapEntry{{
+		Env: "test", Service: "admin-web", Cluster: "test-cluster", Namespace: "admin-test", Workload: "admin-web",
+	}}
+
+	resolved, err := cfg.DeploymentVerificationForEnvironment("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.EffectiveProvider() != DeploymentVerificationProviderManual {
+		t.Fatalf("provider = %q, want explicit manual", resolved.EffectiveProvider())
 	}
 }
 

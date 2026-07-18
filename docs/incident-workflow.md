@@ -176,10 +176,10 @@ flowchart TD
     M -- 冲突 --> MC[提交合并处理决定]
     MC --> A2
     M -- 成功 --> DEP[人工或外部平台部署]
-    DEP --> V{版本验证包含全部预期 commit?}
-    V -- 否/不可确认 --> DP[补充部署证明]
+    DEP --> V{自动采集到明确不一致版本?}
+    V -- 是 --> DP[重新部署后再检查]
     DP --> V
-    V -- 是 --> R[回归验证 Agent]
+    V -- 否/版本不可得 --> R[回归验证 Agent]
     R -- 证据不足 --> W4[等待补充新鲜证据]
     W4 --> R
     R -- 已修复 --> DONE[fixed_verified]
@@ -205,7 +205,7 @@ pending_validation -> validating -> reproduced -> investigating
 | 验证 Agent | Case 开启或用户补证重试 | 复现、采集证据 | 是否进入排障 |
 | 排障 Agent | 已复现，或上一轮回归仍复现 | 只读取证和根因分析 | 是否开放修复授权 |
 | 修复 Agent | 用户批准根因对应的修复 | 改代码、测试、提交、推修复分支 | 是否开放合并授权 |
-| 回归验证 Agent | 部署版本已证明包含目标 commit | 按原场景重新验证并采集新证据 | 关闭 Case 或进入下一 cycle |
+| 回归验证 Agent | 外部部署已确认；运行版本若可自动采集则作为附加证据 | 按原场景重新验证并采集新证据 | 关闭 Case 或进入下一 cycle |
 
 ### 5.1 验证 Agent：首次复现
 
@@ -312,7 +312,7 @@ pending_validation -> validating -> reproduced -> investigating
 
 阶段标识：`regression`；attempt mode：`regression`。
 
-它复用验证 Agent 的逻辑角色，但输入被固定到原始复现场景和已验证部署版本：
+它复用验证 Agent 的逻辑角色，但输入被固定到原始复现场景、目标环境和本次部署观察。运行版本能自动采集时一并绑定；采集不到时版本为空，不能要求用户手工填写：
 
 - 原始 validation attempt、实际表现、预期表现和 `scenario_hash`。
 - 原始证据引用，但不能将其作为本次回归结果。
@@ -325,7 +325,7 @@ pending_validation -> validating -> reproduced -> investigating
 - request ID 或 trace ID 不能沿用历史值。
 - 文件 SHA256 不能复用首次验证证据冒充新结果。
 
-Web 回归使用与首次验证完全相同的 validator → HostVerifier → evaluator 协议和一次 locator 修正上限，但绑定的是已验证部署版本。原始截图只作对照；`fixed_verified` / `still_reproduces` 必须引用本次 regression attempt 的新最终渲染截图和宿主冻结的当前证据。
+Web 回归使用与首次验证完全相同的 validator → HostVerifier → evaluator 协议和一次 locator 修正上限，并绑定本次部署观察。原始截图只作对照；`fixed_verified` / `still_reproduces` 必须引用本次 regression attempt 的新最终渲染截图和宿主冻结的当前证据。没有自动采集到部署版本时，新鲜度仍由 attempt 启动时间、目标环境、请求/trace 标识和证据摘要保证。
 
 结果流转：
 
@@ -343,7 +343,7 @@ Web 回归使用与首次验证完全相同的 validator → HostVerifier → ev
 | 排障 → 修复 | 高置信根因、根因 attempt ID、证据和用户修复授权范围 |
 | 修复 → 合并 | 每个仓库的修复分支、精确 commit、目标环境分支和测试结果 |
 | 合并 → 部署验证 | merge approval scope、每个仓库的 merge commit 和目标分支 |
-| 部署验证 → 回归 | 原始复现场景、预期 commit、部署观察、目标环境和已观测版本 |
+| 部署确认 → 回归 | 原始复现场景、预期 commit、部署观察、目标环境，以及可选的自动采集版本 |
 | 回归仍复现 → 下一轮排障 | 新鲜回归证据、部署版本、实际表现和递增后的 cycle |
 
 同一阶段补证时，新 attempt 通过 `ParentAttemptID` 指向上一次 attempt。验证阶段会沿父链汇总所有用户补充，按时间排序，并明确以最新指令为最高优先级；回归补证则继续绑定原始场景和本轮已验证部署，不能换成另一个未经授权的验证目标。
@@ -364,11 +364,13 @@ Studio 在隔离 worktree 中合并并推送环境分支。目标 HEAD 已变化
 
 Studio 不执行应用部署。环境分支推送后进入 `waiting_deployment`，由人或发布平台完成部署。
 
-“已部署，开始验证”只是一条部署观察命令，不是成功证明。manual、HTTP 或 K8s verifier 必须确认所有仓库的预期 merge commit 都已运行：
+“已部署，开始验证”是一条人工部署确认和可选的运行版本采集命令。用户不填写版本号或 commit；Studio 按配置自动尝试采集：
 
-- 全部匹配：进入回归验证。
-- 不匹配、只匹配部分仓库或暂时无法读取：进入 `deployment_unverified`。
-- 用户补充版本或 commit 证明后，重新回到部署验证门。
+- 全部匹配：记录精确版本证据并进入回归验证。
+- 未配置采集方式、运行时未暴露版本、端点暂不可读或只能识别部分仓库：记录 `unavailable` 诊断，版本留空并进入回归验证。
+- 只有版本接口或显式 K8s revision 字段明确显示与期望 commit 不一致时，才进入 `deployment_unverified`；重新部署后再检查。
+
+K8s 采集复用 `observability.k8s_runtime.service_map` 中已有的环境、服务、集群、Namespace 和 Deployment 映射；创建机器人向导不再提供单独的版本确认配置。环境未显式配置 `deployment_verification` 且启用了 K8s 运行时可观测性时自动取证，取不到版本也不阻塞回归。旧 YAML 的 HTTP/K8s/manual 配置继续兼容。
 
 HTTP verifier 默认禁用系统代理，并拒绝 loopback、RFC1918/ULA、link-local、multicast、unspecified 和云 metadata。精确环境 URL 可用 `allow_private: true` 显式开放内网，但 metadata 地址始终禁止。
 
@@ -391,8 +393,8 @@ HTTP verifier 默认禁用系统代理，并拒绝 loopback、RFC1918/ULA、link
 | `merging` | Studio 正在合并/推送 | 等待完成 |
 | `merge_conflict` | 合并冲突或需要决定 | 提交合并处理决定 |
 | `waiting_deployment` | 等待外部部署 | 已部署，开始验证 |
-| `deployment_unverified` | 部署版本尚未证明 | 补充部署证明 |
-| `deployment_verified` | 已证明运行目标 commit | 自动启动回归 |
+| `deployment_unverified` | 明确检测到运行版本与期望 commit 不一致 | 重新部署后再检查 |
+| `deployment_verified` | 部署门已确认；版本证据可能已采集，也可能为空 | 自动启动回归 |
 | `regression_validating` | 回归 Agent 运行中 | 停止回归验证 |
 | `still_reproduces` | 修复后仍可复现 | cycle 加一并自动回到排障 |
 | `fixed_verified` | 回归确认已修复 | 终态 |
@@ -476,7 +478,7 @@ HTTP verifier 默认禁用系统代理，并拒绝 loopback、RFC1918/ULA、link
 - 浏览器不保存原始 Playwright trace；HostVerifier 只登记最终/步骤 PNG、脱敏 Network、console 和 `browser-actions.json`，Runner 仍执行第二道敏感信息扫描。
 - 登录 `storageState` 使用 system / environment / application origin 绑定的 AES-GCM key；密钥进入系统 keyring，加密文件权限仅限当前用户。keyring 不可用时只保留内存 session，不落明文。
 - 截图预览通过 Case ID + artifact ID 的安全 binding 重新校验归属、路径、大小和 PNG 类型；页面不把内部 `path_or_reference` 直接作为图片 URL。
-- 证据严格绑定 Case、cycle 和 attempt；回归新鲜度由时间、环境、部署版本、请求标识和摘要共同校验。
+- 证据严格绑定 Case、cycle 和 attempt；回归新鲜度由时间、环境、请求标识和摘要共同校验，自动采集到部署版本时再额外绑定版本。
 - Agent 的自然语言输出不是状态真源，只有通过结构校验并持久化后的结果才能推进 Case。
 
 ## 11. 页面刷新与实时更新

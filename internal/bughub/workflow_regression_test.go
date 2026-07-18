@@ -41,6 +41,29 @@ func TestRegressionStartBuildsDeterministicCurrentCycleInput(t *testing.T) {
 	}
 }
 
+func TestRegressionStartsAndRunnerAcceptsUnavailableDeploymentVersion(t *testing.T) {
+	store, incident, _, observation := prepareRegressionCase(t, 1)
+	if _, err := store.db.ExecContext(context.Background(), `UPDATE deployment_observations SET result=?, verified_at=NULL, observed_version='', observed_commits_json='{}' WHERE id=?`, DeploymentResultUnavailable, observation.ID); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingPhaseRunner{}
+	o := NewCaseOrchestrator(store, runner, nil, nil)
+	started, err := o.StartRegression(context.Background(), incident.ID, incident.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var input RegressionValidationInput
+	if err := json.Unmarshal(started.InputJSON, &input); err != nil {
+		t.Fatal(err)
+	}
+	if input.ObservedDeploymentVersion != "" || runner.startCount() != 1 {
+		t.Fatalf("input=%+v starts=%d", input, runner.startCount())
+	}
+	if err := (&AgentPhaseRunner{store: store}).validateRegressionInputBinding(context.Background(), started, input); err != nil {
+		t.Fatalf("runner rejected optional deployment version: %v", err)
+	}
+}
+
 func TestOriginalValidationSkipsLegacyAttemptWithoutEvidence(t *testing.T) {
 	store, incident, original, _ := prepareRegressionCase(t, 1)
 	if _, err := store.db.ExecContext(context.Background(), `DELETE FROM evidence_artifacts WHERE attempt_id=?`, original.ID); err != nil {

@@ -209,7 +209,7 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 	// 刷 tshoot.json(写到 workDir;Claude Code/Cursor 装步骤会再拷一份到 ag.Path 真实位置)
 	tsfUpdated := false
 	if !opts.DryRun {
-		if err := writeTSFMeta(workDir, ag.Meta.Target, cfg, opts.NewYAML, opts.TshootVersion); err != nil {
+		if err := writeTSFMeta(workDir, ag.Meta.Target, cfg, opts.NewYAML, opts.TshootVersion, opts.RepoLocalPaths); err != nil {
 			return nil, fmt.Errorf("refresh tshoot.json: %w", err)
 		}
 		tsfUpdated = true

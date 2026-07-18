@@ -22,7 +22,7 @@ export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrim
     waiting_merge_approval: { kind: 'approve_merge', label: '允许合并环境分支', approval: true },
     merge_conflict: { kind: 'supply_merge_decision', label: '提交合并处理决定' },
     waiting_deployment: { kind: 'notify_deployed', label: '已部署，开始验证', approval: true },
-    deployment_unverified: { kind: 'supply_deployment_proof', label: '补充部署证明' },
+    deployment_unverified: { kind: 'supply_deployment_proof', label: '重新部署后再检查' },
     regression_validating: { kind: 'cancel_attempt', label: '停止回归验证' },
     legacy_archived: { kind: 'continue_legacy', label: '从新一轮验证继续' },
   }
@@ -56,13 +56,12 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   refresh: []
-  primary: [payload: { kind: CasePrimaryAction['kind']; input?: string; observedVersion?: string; observedCommits?: Record<string, string>; versionSource?: string; rootCauseAttemptID?: string; caseVersion?: number }]
+  primary: [payload: { kind: CasePrimaryAction['kind']; input?: string; rootCauseAttemptID?: string; caseVersion?: number }]
   browser: [action: 'login' | 'clear-session' | 'repair-runtime' | 'redeploy-validator' | 'edit-bug-url']
 }>()
 
 const dialogOpen = ref(false)
 const dialogInput = ref('')
-const dialogObservedCommits = ref<Record<string, string>>({})
 const confirmButton = ref<HTMLButtonElement | null>(null)
 const dialogElement = ref<HTMLElement | null>(null)
 const actionTrigger = ref<HTMLElement | null>(null)
@@ -150,7 +149,7 @@ function statusLabel(status: CaseStatus): string {
     pending_validation: '等待验证', validating: '验证中', waiting_evidence: '等待证据', reproduced: '已复现', not_reproduced: '未复现',
     investigating: '排障中', root_cause_ready: '根因已确认', waiting_fix_approval: '等待修复授权', fixing: '修复中', fix_failed: '修复失败',
     fix_pushed: '修复已推送', waiting_merge_approval: '等待合并授权', merging: '合并中', merge_conflict: '合并冲突',
-    waiting_deployment: '等待人工部署', deployment_unverified: '部署版本未确认', deployment_verified: '部署已确认', regression_validating: '回归中',
+    waiting_deployment: '等待人工部署', deployment_unverified: '检测到版本不一致', deployment_verified: '部署已确认', regression_validating: '回归中',
     fixed_verified: '修复已验证', still_reproduces: '回归仍复现', legacy_archived: '历史归档', reset_archived: '已重置归档',
   }
   return labels[status] || status
@@ -164,7 +163,7 @@ function fmtTime(value?: string): string {
 
 async function openAction(event: MouseEvent) {
   if (!action.value || props.pending) return
-  if (!action.value.approval && !['supply_evidence', 'continue_fix', 'supply_merge_decision', 'supply_deployment_proof'].includes(action.value.kind)) {
+  if (!action.value.approval && !['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(action.value.kind)) {
     emit('primary', { kind: action.value.kind })
     return
   }
@@ -179,7 +178,6 @@ async function openAction(event: MouseEvent) {
     dialogRootCauseAttemptID.value = ''
   }
   dialogInput.value = ''
-  dialogObservedCommits.value = Object.fromEntries(Object.keys(expectedDeploymentCommits.value).map(repo => [repo, '']))
   dialogOpen.value = true
   await nextTick()
   confirmButton.value?.focus()
@@ -193,18 +191,12 @@ function closeDialog() {
 
 function confirmAction() {
   if (!action.value) return
-  const payload: { kind: CasePrimaryAction['kind']; input?: string; observedVersion?: string; observedCommits?: Record<string, string>; versionSource?: string; rootCauseAttemptID?: string; caseVersion?: number } = { kind: action.value.kind }
+  const payload: { kind: CasePrimaryAction['kind']; input?: string; rootCauseAttemptID?: string; caseVersion?: number } = { kind: action.value.kind }
   if (action.value.kind === 'approve_fix') {
     payload.rootCauseAttemptID = dialogRootCauseAttemptID.value
     payload.caseVersion = dialogCaseVersion.value
   }
-  if (['supply_evidence', 'continue_fix', 'supply_merge_decision', 'supply_deployment_proof'].includes(action.value.kind)) payload.input = dialogInput.value.trim()
-  if (action.value.kind === 'notify_deployed') {
-    if (!automaticDeploymentVerification.value) {
-      payload.observedVersion = dialogInput.value.trim()
-      payload.observedCommits = Object.fromEntries(Object.entries(dialogObservedCommits.value).filter(([, commit]) => commit.trim()).map(([repo, commit]) => [repo, commit.trim()]))
-    }
-  }
+  if (['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(action.value.kind)) payload.input = dialogInput.value.trim()
   emit('primary', payload)
   dialogOpen.value = false
   nextTick(() => actionTrigger.value?.focus())
@@ -229,8 +221,7 @@ function dialogTitle(): string {
   if (action.value?.kind === 'approve_fix') return '确认允许修复'
   if (action.value?.kind === 'approve_merge') return '确认合并环境分支'
   if (action.value?.kind === 'supply_merge_decision') return '提交合并冲突处理决定'
-  if (action.value?.kind === 'notify_deployed') return '确认部署并校验版本'
-  if (action.value?.kind === 'supply_deployment_proof') return '补充部署版本证明'
+  if (action.value?.kind === 'notify_deployed') return '确认业务版本已部署'
   return action.value?.label || '继续处理'
 }
 </script>
@@ -275,7 +266,7 @@ function dialogTitle(): string {
             <h3 id="current-action-title">{{ statusLabel(detail.case.status) }}</h3>
             <p v-if="detail.case.status === 'legacy_archived'">历史记录只读；继续时会通过 CreateAndStart 创建新的 Case，不修改归档 attempt。</p>
             <p v-else-if="detail.case.status === 'reset_archived'">历史记录只读；重置后的新 Case 已保留原闭环的证据和审计关系。</p>
-            <p v-else-if="detail.case.status === 'waiting_deployment'">环境分支已推送。人工部署后，Studio 将先核对运行版本，再启动回归验证。</p>
+            <p v-else-if="detail.case.status === 'waiting_deployment'">环境分支已推送。人工部署后，Studio 会尝试自动采集运行版本；采集不到也会直接启动回归验证。</p>
             <p v-else-if="continuedAfterFailedRegression">第 {{ detail.case.cycle_number }} 轮 · 回归仍复现，Studio 已把本轮新证据和差分带入排障。</p>
             <p v-else>第 {{ detail.case.cycle_number }} 轮 · {{ detail.case.environment || '环境未知' }}</p>
           </div>
@@ -351,28 +342,19 @@ function dialogTitle(): string {
           </dl>
         </template>
         <p v-else-if="action.kind === 'supply_merge_decision'">记录冲突处理结果并返回合并授权门，不会在这一步直接重新合并。</p>
-        <p v-else-if="action.kind === 'notify_deployed'">Studio 不执行部署；这里只记录人工部署通知，并核验运行版本是否包含目标 commit。</p>
-        <p v-else-if="action.kind === 'supply_deployment_proof'">补充可核验的部署证明并返回人工部署确认门，不会在这一步直接启动回归。</p>
-        <dl v-if="['notify_deployed', 'supply_deployment_proof'].includes(action.kind)" class="deployment-preview">
+        <p v-else-if="action.kind === 'notify_deployed'">Studio 不执行部署。确认后会尝试从运行环境自动采集版本；如果没有可靠版本信息，将留空并直接开始回归。</p>
+        <dl v-if="action.kind === 'notify_deployed'" class="deployment-preview">
           <div><dt>目标环境</dt><dd>{{ detail?.case.environment || '未知' }}</dd></div>
           <div><dt>期望 commits</dt><dd><code v-for="(commit, repo) in expectedDeploymentCommits" :key="repo">{{ repo }}: {{ commit }}</code><span v-if="Object.keys(expectedDeploymentCommits).length === 0">尚未记录</span></dd></div>
-          <div><dt>版本来源</dt><dd>{{ deploymentVersionSource }}<small v-if="detail?.deployment_verification?.hint"> · {{ detail.deployment_verification.hint }}</small></dd></div>
+          <div><dt>采集方式</dt><dd>{{ deploymentVersionSource }}<small v-if="detail?.deployment_verification?.hint"> · {{ detail.deployment_verification.hint }}</small></dd></div>
         </dl>
-        <p v-if="action.kind === 'notify_deployed' && automaticDeploymentVerification">确认后将按上述服务端配置自动读取运行版本，无需手工填写版本或 commit。</p>
-        <label v-if="action.kind === 'notify_deployed' && !automaticDeploymentVerification" for="observed-version">已部署版本</label>
-        <input v-if="action.kind === 'notify_deployed' && !automaticDeploymentVerification" id="observed-version" v-model="dialogInput" type="text" placeholder="例如 build-20260711 或 commit SHA">
-        <fieldset v-if="action.kind === 'notify_deployed' && !automaticDeploymentVerification" class="observed-commits">
-          <legend>各仓库观测 commit（可选；留空将无法确认该仓库）</legend>
-          <label v-for="(_, repo) in expectedDeploymentCommits" :key="repo" :for="`observed-commit-${repo}`">
-            <span>{{ repo }}</span>
-            <input :id="`observed-commit-${repo}`" v-model="dialogObservedCommits[repo]" type="text" :placeholder="`期望 ${expectedDeploymentCommits[repo]}`">
-          </label>
-        </fieldset>
-        <label v-if="['supply_evidence', 'continue_fix', 'supply_merge_decision', 'supply_deployment_proof'].includes(action.kind)" for="case-supplement">补充信息</label>
-        <textarea v-if="['supply_evidence', 'continue_fix', 'supply_merge_decision', 'supply_deployment_proof'].includes(action.kind)" id="case-supplement" v-model="dialogInput" rows="5" placeholder="输入新证据、处理决定、版本证明或测试信息"></textarea>
+        <p v-if="action.kind === 'notify_deployed' && automaticDeploymentVerification">无需手工填写版本号或 commit。只有明确检测到运行版本与本次修复不一致时，流程才会停下。</p>
+        <p v-else-if="action.kind === 'notify_deployed'">无需填写版本号或 commit；本次只记录部署确认，最终以回归结果为准。</p>
+        <label v-if="['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(action.kind)" for="case-supplement">补充信息</label>
+        <textarea v-if="['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(action.kind)" id="case-supplement" v-model="dialogInput" rows="5" placeholder="输入新证据、处理决定或测试信息"></textarea>
         <footer>
           <button class="btn" type="button" :disabled="pending" @click="closeDialog">取消</button>
-          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (action.kind === 'approve_fix' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined)) || (action.kind === 'notify_deployed' && !automaticDeploymentVerification && !dialogInput.trim()) || (['supply_evidence', 'continue_fix', 'supply_merge_decision', 'supply_deployment_proof'].includes(action.kind) && !dialogInput.trim())" @click="confirmAction">确认</button>
+          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (action.kind === 'approve_fix' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined)) || (['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(action.kind) && !dialogInput.trim())" @click="confirmAction">确认</button>
         </footer>
       </section>
     </div>
@@ -455,9 +437,6 @@ h2, h3, p { margin: 0; }
 .deployment-preview dt { color: var(--c-muted); font-size: var(--fs-sm); }
 .deployment-preview dd { min-width: 0; margin: 0; color: var(--c-ink); font-size: var(--fs-sm); overflow-wrap: anywhere; }
 .deployment-preview code { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.observed-commits { display: grid; gap: var(--sp-2); margin: 0; padding: var(--sp-3); border: 1px solid var(--c-line); border-radius: var(--r-md); }
-.observed-commits legend { padding: 0 4px; color: var(--c-muted); font-size: var(--fs-sm); }
-.observed-commits label { display: grid; grid-template-columns: minmax(90px, .35fr) minmax(0, 1fr); align-items: center; gap: var(--sp-2); }
 .approval-dialog input, .approval-dialog textarea { min-height: 44px; }
 .approval-dialog footer { display: flex; justify-content: flex-end; gap: var(--sp-2); }
 .approval-dialog footer .btn { min-height: 44px; min-width: 88px; justify-content: center; }

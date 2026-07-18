@@ -68,7 +68,7 @@ func runInstall(args []string) error {
 		}
 		if t == agent.TargetCodex {
 			fmt.Printf("[ok] %s 已装到用户级目录(~/%s/agents/<name>.toml + skills/scripts/<name>/);"+
-				"codex 启动后在主 chat 里说 \"spawn the <name> agent ...\" 调用(TOML subagent,见 https://developers.openai.com/codex/subagents)\n",
+				"通用排障请求先由共享 tshoot-router 按当前项目选择精确 subagent(TOML subagent,见 https://developers.openai.com/codex/subagents)\n",
 				*target, t.DirName())
 		} else {
 			fmt.Printf("[ok] %s 已装到用户级目录(~/%s/agents/<name>.md + skills/scripts/<name>/)\n",

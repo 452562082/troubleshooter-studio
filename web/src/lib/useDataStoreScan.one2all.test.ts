@@ -70,6 +70,7 @@ tasks:
     const dsScanState = reactive<Record<string, any>>({})
     const dsProbeResults = reactive<Record<string, any>>({})
     const enabledDataStores = reactive<Record<string, boolean>>({})
+    const dataStoreTypes = reactive<Record<string, string>>({})
     const dsAutoFilled = reactive<Record<string, boolean>>({})
 
     const scan = useDataStoreScan({
@@ -80,6 +81,8 @@ tasks:
       dsImportStats: { scanned: 0, matched: 0 },
       dsAutoFilled,
       enabledDataStores,
+      dataStoreTypes,
+      dataStoreType: id => dataStoreTypes[id] || id,
       scanStateKey: (envID, svc) => `${envID}::${svc}`,
       environments: [{ id: 'dev' }],
       allServiceNames: ref(['base-backend-base']),
@@ -87,10 +90,12 @@ tasks:
       svcKey: (envID, svc) => `${envID}::${svc}`,
       buildPreloadPayload: () => ({ type: 'none', addr: '', username: '', password: '', token: '', namespace: '', app_id: '', valid: false, missing: [] }),
       envNamespaces: {},
+      sourceEnvNamespaces: {},
       serviceConfigSel: {},
       serviceConfigGroup: {},
       enabledSourceTypes: { one2all: true, kuboard: false },
       activeSourceTypes: computed(() => ['one2all']),
+      sourceInstances: computed(() => [{ id: 'one2all', type: 'one2all' }]),
       ccCredInputs: {
         'cc:one2all:_shared_:mcp_url': 'http://one2all/mcp',
         'cc:one2all:_shared_:token': 'token',

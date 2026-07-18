@@ -163,7 +163,7 @@ export function isIncidentWorkflowConflict(error: unknown): boolean {
 export interface ContinueIncidentCaseInput extends WorkflowCommandInput { phase: Phase; input_json?: Record<string, unknown> }
 export interface ApproveIncidentFixInput extends WorkflowCommandInput { root_cause_attempt_id: string; input_json?: Record<string, unknown> }
 export interface ApproveIncidentMergeInput extends WorkflowCommandInput { fix_commits: Record<string, string>; target_branches: Record<string, string>; target_heads?: Record<string, string> }
-export interface NotifyIncidentDeployedInput extends WorkflowCommandInput { observed_version: string; observed_commits?: Record<string, string>; version_source?: string; notification_text?: string; input_json?: Record<string, unknown> }
+export interface NotifyIncidentDeployedInput extends WorkflowCommandInput { observed_version?: string; observed_commits?: Record<string, string>; version_source?: string; notification_text?: string; input_json?: Record<string, unknown> }
 export interface CancelIncidentAttemptInput extends WorkflowCommandInput { attempt_id: string }
 
 export async function listIncidentCases(): Promise<IncidentCase[]> {
@@ -244,7 +244,7 @@ export async function approveIncidentMerge(input: ApproveIncidentMergeInput): Pr
 }
 export async function notifyIncidentDeployed(input: NotifyIncidentDeployedInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)
-  return normalizeCase(await App.NotifyIncidentDeployed(input))
+  return normalizeCase(await App.NotifyIncidentDeployed({ ...input, observed_version: input.observed_version || '', observed_commits: input.observed_commits || {} }))
 }
 export async function cancelIncidentAttempt(input: CancelIncidentAttemptInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)

@@ -159,6 +159,9 @@ func Validate(c *SystemConfig) error {
 			return fmt.Errorf("repos[%s].config_source=%q references unknown config_centers[].id (有效 id: %v)", r.Name, r.ConfigSource, sortedKeys(sourceIDs))
 		}
 	}
+	if err := validateResourceCatalog(c, envIDs, repoNames, sourceIDs); err != nil {
+		return err
+	}
 
 	for i := range c.Environments {
 		if err := validateDeploymentVerification(c.Environments[i], repoNames); err != nil {
@@ -243,18 +246,6 @@ func validateDeploymentVerification(env Environment, repoNames map[string]bool) 
 	case DeploymentVerificationProviderK8s:
 		if !cfg.HTTP.IsZero() {
 			return fmt.Errorf("k8s provider must not include http block")
-		}
-		if strings.TrimSpace(cfg.K8s.Cluster) == "" {
-			return fmt.Errorf("k8s.cluster required")
-		}
-		if strings.TrimSpace(cfg.K8s.Namespace) == "" {
-			return fmt.Errorf("k8s.namespace required")
-		}
-		if len(cfg.K8s.DeploymentsByRepo) == 0 {
-			return fmt.Errorf("k8s.deployments_by_repo required")
-		}
-		if strings.TrimSpace(cfg.K8s.CommitAnnotation) == "" && strings.TrimSpace(cfg.K8s.ImageLabel) == "" {
-			return fmt.Errorf("k8s.commit_annotation or image_label required")
 		}
 		if strings.TrimSpace(cfg.K8s.CommitAnnotation) != "" && strings.TrimSpace(cfg.K8s.ImageLabel) != "" {
 			return fmt.Errorf("k8s.commit_annotation and image_label are mutually exclusive")

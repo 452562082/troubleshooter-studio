@@ -80,10 +80,11 @@ func buildCursorAgentMD(wsRoot string, ctx *Context, agentName string, role Agen
 	var sb strings.Builder
 	sb.WriteString("---\n")
 	fmt.Fprintf(&sb, "name: %s\n", agentName)
-	fmt.Fprintf(&sb, "description: %s\n", roleDisplayName(ctx, role))
+	fmt.Fprintf(&sb, "description: %s\n", projectBoundAgentDescription(ctx, agentName, role))
 	sb.WriteString("---\n\n")
 
 	fmt.Fprintf(&sb, "# %s\n\n", roleDisplayName(ctx, role))
+	sb.WriteString(cursorProjectOwnershipGate(ctx, agentName))
 
 	if role == AgentRoleValidator {
 		intro := "本 agent 在 Cursor IDE 内作为 Custom Agent 调用,负责 **验证 / 主动复现 / 修复后复查**,只输出验证报告,不做原因定位。\n\n" +

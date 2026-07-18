@@ -834,7 +834,7 @@ async function handleIncidentBrowser(action: IncidentBrowserAction) {
   }
 }
 
-async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind']; input?: string; observedVersion?: string; observedCommits?: Record<string, string>; versionSource?: string; rootCauseAttemptID?: string; caseVersion?: number }) {
+async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind']; input?: string; rootCauseAttemptID?: string; caseVersion?: number }) {
   const detail = displayedDetail.value
   if (!detail) return
   const incident = detail.case
@@ -866,7 +866,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
         return continueIncidentCase({ ...base, phase: 'fix', input_json: { decision: 'resolve_merge_conflict', evidence: payload.input || '' } })
       }
       if (payload.kind === 'supply_deployment_proof') {
-        return continueIncidentCase({ ...base, phase: 'regression', input_json: { decision: 'update_deployment_proof', evidence: payload.input || '' } })
+        return continueIncidentCase({ ...base, phase: 'regression', input_json: { decision: 'retry_deployment_check' } })
       }
       if (payload.kind === 'approve_fix') {
         if (!payload.rootCauseAttemptID || payload.caseVersion === undefined) throw new Error('修复授权缺少对话框中的根因或 Case 版本快照')
@@ -886,7 +886,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
         })
       }
       if (payload.kind === 'notify_deployed') {
-        return notifyIncidentDeployed({ ...base, observed_version: payload.observedVersion || '', observed_commits: payload.observedCommits || {} })
+        return notifyIncidentDeployed({ ...base })
       }
       if (payload.kind === 'cancel_attempt') {
         if (!incident.current_attempt_id) throw new Error('当前没有可停止的阶段')

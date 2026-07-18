@@ -73,7 +73,7 @@ describe('generateYAML', () => {
     })
   })
 
-  it('round-trips exact K8s deployment verification values after import restoration', () => {
+  it('does not regenerate duplicate K8s location or version fields from legacy imports', () => {
     const env = parseEnvironment({
       id: 'test', api_domain: '', web_domain: '', is_prod: false,
       deployment_verification: {
@@ -86,14 +86,7 @@ describe('generateYAML', () => {
       },
     })
     const parsed = yaml.load(generateYAML(makeCtx({ environments: [env] }))) as any
-    expect(parsed.environments[0].deployment_verification).toEqual({
-      provider: 'k8s',
-      k8s: {
-        cluster: 'test-cluster', namespace: 'admin-test',
-        deployments_by_repo: { 'admin-web': 'admin-web' },
-        commit_annotation: 'app.example.com/git-commit',
-      },
-    })
+    expect(parsed.environments[0].deployment_verification).toEqual({ provider: 'k8s' })
   })
 
   it('keeps legacy and explicit manual environment YAML byte-semantically identical', () => {
@@ -174,7 +167,7 @@ describe('generateYAML', () => {
     expect(parsed.agent.id).toBe('shop-troubleshooter') // 派生
     expect(parsed.environments[0].id).toBe('dev')
     expect(parsed.repos[0].name).toBe('order-service')
-    expect(parsed.infrastructure.config_center.type).toBe('nacos')
+    expect(parsed.infrastructure.config_centers[0]).toMatchObject({ id: 'nacos', type: 'nacos' })
     expect(parsed.generation.targets).toEqual(['openclaw'])
     // preserve_on_regenerate 已删除;SOUL/USER/CHECKLIST 是模板派生、必须跟模板走
     expect(parsed.generation.preserve_on_regenerate).toBeUndefined()
@@ -198,6 +191,57 @@ describe('generateYAML', () => {
     expect(parsed.infrastructure.config_center).toBeUndefined()
     const ids = parsed.infrastructure.config_centers.map((c: any) => c.id)
     expect(ids).toEqual(['nacos', 'apollo'])
+  })
+
+  it('keeps two same-type config source instances distinct', () => {
+    const parsed = yaml.load(generateYAML(makeCtx({
+      activeSourceTypes: ['nacos'],
+      sourceInstances: [{ id: 'nacos', type: 'nacos' }, { id: 'nacos-2', type: 'nacos' }],
+      isMultiSource: true,
+      sourceCreds: {
+        nacos: { creds: { dev: { addr: 'nacos-a:8848' } } },
+        'nacos-2': { creds: { dev: { addr: 'nacos-b:8848' } } },
+      },
+      getServiceSource: () => 'nacos-2',
+    }))) as any
+    expect(parsed.infrastructure.config_centers.map((item: any) => item.id)).toEqual(['nacos', 'nacos-2'])
+    expect(parsed.infrastructure.config_centers.map((item: any) => item.endpoints[0].addr))
+      .toEqual(['nacos-a:8848', 'nacos-b:8848'])
+    expect(parsed.resource_catalog.services[0].config_sources.dev).toBe('nacos-2')
+  })
+
+  it('emits stable IDs for multiple datastore instances of the same type', () => {
+    const parsed = yaml.load(generateYAML(makeCtx({
+      dataStoreTypes: { redis: 'redis', 'redis-2': 'redis' },
+      scannedDS: {
+        dev: { 'order-service': { redis: { url: 'redis://a' }, 'redis-2': { url: 'redis://b' } } },
+      },
+      toolSpecByKey: (_cat, key) => key === 'redis'
+        ? { key: 'redis', fields: [{ key: 'url', label: 'URL', secret: false, envVar: () => 'REDIS_URL_DEV' }] } as any
+        : undefined,
+    }))) as any
+    expect(parsed.infrastructure.data_stores.map((item: any) => [item.id, item.type]))
+      .toEqual([['redis', 'redis'], ['redis-2', 'redis']])
+    expect(parsed.resource_catalog.services[0].data_stores.dev).toEqual(['redis', 'redis-2'])
+  })
+
+  it('emits environment-specific service bindings in the formal resource catalog', () => {
+    const parsed = yaml.load(generateYAML(makeCtx({
+      environments: [
+        { id: 'dev', api_domain: 'dev', web_domain: '', is_prod: false },
+        { id: 'prod', api_domain: 'prod', web_domain: '', is_prod: true },
+      ],
+      activeSourceTypes: ['nacos', 'kuboard'],
+      isMultiSource: true,
+      sourceCreds: { nacos: { creds: {} }, kuboard: { creds: {} } },
+      CC_FIELDS_BY_TYPE: { nacos: [], kuboard: [] },
+      getServiceSource: (_svc, envID) => envID === 'prod' ? 'kuboard' : 'nacos',
+    }))) as any
+
+    const service = parsed.resource_catalog.services.find((item: any) => item.id === 'order-service')
+    expect(service.config_sources).toEqual({ dev: 'nacos', prod: 'kuboard' })
+    expect(parsed.repos[0].config_source).toBeUndefined()
+    expect(parsed.meta.schema_version).toBe('0.2')
   })
 
   it('never emits preserve_on_regenerate (field deleted; template-derived files always follow template)', () => {
@@ -261,9 +305,35 @@ describe('generateYAML', () => {
     const rt = parsed.infrastructure.observability.k8s_runtime
     expect(rt.provider).toBe('one2all')
     expect(rt.endpoints[0].url).toBe('http://one2all/mcp/hash')
-    expect(rt.endpoints[0].api_key).toBe('o2a_secret')
+    expect(rt.endpoints[0].api_key).toBe('{{ONE2ALL_TOKEN}}')
+    expect(out).not.toContain('o2a_secret')
     expect(rt.service_map[0].cluster_id).toBe('1')
     expect(rt.service_map[0].cluster).toBeUndefined()
+  })
+
+  it('emits the Kuboard config-source connection reused by K8s runtime', () => {
+    const out = generateYAML(makeCtx({
+      enabledObservability: { k8s_runtime: true },
+      deriveSkillsWhitelist: () => ['routing', 'k8s-runtime-query'],
+      activeSourceTypes: ['kuboard'],
+      sourceCreds: {
+        kuboard: { creds: { dev: { url: 'http://kuboard', access_key: 'shared-secret' } } },
+      },
+      OBS_TOOL_SPECS: [{
+        key: 'k8s_runtime',
+        fields: [
+          { key: 'provider', label: 'Provider', secret: false, envVar: () => '', uiOnly: true },
+          { key: 'url', label: 'URL', secret: false, envVar: () => 'KUBOARD_URL' },
+          { key: 'access_key', label: 'Access key', secret: true, envVar: () => 'KUBOARD_ACCESS_KEY' },
+        ],
+      }],
+      k8sRuntimeEnvLoc: { dev: { cluster: 'dev', namespace: 'default' } },
+      k8sRuntimeSvcMap: { 'dev::order-service': { workload: 'order-service' } },
+    }))
+    const parsed = yaml.load(out) as any
+    const endpoint = parsed.infrastructure.observability.k8s_runtime.endpoints[0]
+    expect(endpoint).toMatchObject({ env: 'dev', url: 'http://kuboard', access_key: '{{KUBOARD_ACCESS_KEY}}' })
+    expect(out).not.toContain('shared-secret')
   })
 
   it('emits Doris data store endpoints from scannedDS', () => {
@@ -289,7 +359,9 @@ describe('generateYAML', () => {
     const doris = parsed.infrastructure.data_stores.find((ds: any) => ds.type === 'doris')
     expect(doris.enabled).toBe(true)
     expect(doris.endpoints[0].service).toBe('order-service')
-    expect(doris.endpoints[0].dsn).toBe('user:pass@tcp(doris-fe:9030)/warehouse')
+    expect(doris.id).toBe('doris')
+    expect(doris.endpoints[0].dsn).toBe('{{DORIS_DSN_DEV}}')
+    expect(out).not.toContain('user:pass@tcp(doris-fe:9030)/warehouse')
     expect(parsed.generation.skills_whitelist).toContain('doris-runtime-query')
   })
 })

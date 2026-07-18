@@ -13,14 +13,12 @@
 //   - probe(kind, url) —— 用户在某字段输入时触发 800ms 防抖探测,父端接住
 //   - remove() —— 用户点 × 删除本行,父端按 index 删
 
-import { computed, useId } from 'vue'
 import type { URLProbeState } from '../lib/probeTypes'
-import { emptyDeploymentVerification, type DeploymentVerificationState } from '../lib/yamlGenerator'
 import URLProbeBadge from './URLProbeBadge.vue'
 
-const props = defineProps<{
+defineProps<{
   /** 本行的环境对象;reactive 直引,改字段不必 emit */
-  env: { id: string; api_domain: string; web_domain: string; is_prod: boolean; deployment_verification?: DeploymentVerificationState }
+  env: { id: string; api_domain: string; web_domain: string; is_prod: boolean }
   /** API 域名探测态;undefined / status='idle' 时不显示 badge */
   apiProbe: URLProbeState | undefined
   /** Web 域名探测态 */
@@ -33,24 +31,6 @@ const props = defineProps<{
   disableRemove: boolean
 }>()
 
-if (!props.env.deployment_verification) props.env.deployment_verification = emptyDeploymentVerification()
-const verification = computed(() => props.env.deployment_verification as DeploymentVerificationState)
-const fieldID = useId()
-const deploymentMapText = computed({
-  get: () => Object.entries(verification.value.k8s.deployments_by_repo).map(([repo, deployment]) => `${repo}=${deployment}`).join('\n'),
-  set: (value: string) => {
-    const mappings: Record<string, string> = {}
-    for (const line of value.split('\n')) {
-      const separator = line.indexOf('=')
-      if (separator <= 0) continue
-      const repo = line.slice(0, separator).trim()
-      const deployment = line.slice(separator + 1).trim()
-      if (repo && deployment) mappings[repo] = deployment
-    }
-    verification.value.k8s.deployments_by_repo = mappings
-  },
-})
-
 const emit = defineEmits<{
   probe: [kind: 'api' | 'web', url: string]
   remove: []
@@ -58,9 +38,9 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <div class="dynamic-row">
-    <div class="row-fields">
-      <div class="form-group compact" style="flex: 0 0 100px">
+  <article class="dynamic-row environment-card" data-test="environment-card">
+    <div class="row-fields environment-fields">
+      <div class="form-group compact environment-id-field">
         <label>环境 ID
           <span class="help-icon" title="环境短标识(dev/test/staging/prod)。每个 env 会注册一套独立的 MCP 实例:nacos-mcp-server-<ID>、grafana-mcp-server-<ID> 等。">?</span>
         </label>
@@ -71,7 +51,7 @@ const emit = defineEmits<{
           :class="{ error: hasIdError }"
         />
       </div>
-      <div class="form-group compact">
+      <div class="form-group compact environment-domain-field">
         <label>API 域名
           <span class="help-icon" title="后端接口域名,机器人做接口实测 / 日志查询时拼 URL 用。建议带 http/https 前缀明确协议(内部 dev 常 http,公网 prod 多 https);不带也行,下游按 https 兜底。">?</span>
           <URLProbeBadge :state="apiProbe" />
@@ -84,7 +64,7 @@ const emit = defineEmits<{
           @input="emit('probe', 'api', env.api_domain)"
         />
       </div>
-      <div class="form-group compact">
+      <div class="form-group compact environment-domain-field">
         <label>Web 域名
           <span class="auto-tag">选填</span>
           <span class="help-icon" title="前端入口域名(管理后台 / 用户站)。机器人排障时知道 '用户在哪个 URL 看到 bug' vs '后端哪个接口报错'。单域名系统留空即可。建议带 http/https 前缀。">?</span>
@@ -97,79 +77,84 @@ const emit = defineEmits<{
           @input="emit('probe', 'web', env.web_domain)"
         />
       </div>
-      <div class="form-group compact checkbox-group">
+      <div class="form-group compact checkbox-group environment-production-field">
         <label title="is_prod=true 时机器人更保守:执行写入/重启类动作前会二次确认;OpenClaw 客户端 UI 也会标红。">
           <input type="checkbox" v-model="env.is_prod" />
           生产环境
           <span class="help-icon">?</span>
         </label>
       </div>
-      <button class="btn-icon remove" @click="emit('remove')" :disabled="disableRemove" title="删除">
-        &times;
+      <button
+        class="btn-icon remove environment-remove"
+        type="button"
+        @click="emit('remove')"
+        :disabled="disableRemove"
+        :aria-label="`删除 ${env.id || '当前'} 环境`"
+        title="删除环境"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M6 6l12 12M18 6L6 18" />
+        </svg>
       </button>
     </div>
-    <fieldset class="deployment-verification-fields">
-      <legend>部署版本验证</legend>
-      <div class="form-group compact">
-        <label :for="`${fieldID}-provider`">验证方式</label>
-        <select :id="`${fieldID}-provider`" v-model="verification.provider">
-          <option value="manual">人工提供版本证明</option>
-          <option value="http">HTTP 版本接口</option>
-          <option value="k8s">K8s Deployment</option>
-        </select>
-      </div>
-      <template v-if="verification.provider === 'http'">
-        <div class="form-group compact">
-          <label :for="`${fieldID}-http-url`">版本接口 URL</label>
-          <input :id="`${fieldID}-http-url`" v-model="verification.http.url" type="url" placeholder="https://api-test.example.com/version" />
-        </div>
-        <div class="form-group compact">
-          <label :for="`${fieldID}-json-pointer`">JSON Pointer</label>
-          <input :id="`${fieldID}-json-pointer`" v-model="verification.http.json_pointer" type="text" placeholder="/git/commit" />
-        </div>
-		<label class="check-row" :for="`${fieldID}-allow-private`">
-		  <input :id="`${fieldID}-allow-private`" v-model="verification.http.allow_private" type="checkbox" />
-		  允许访问该环境明确配置的内网版本接口（云 metadata 始终禁止）
-		</label>
-      </template>
-      <template v-else-if="verification.provider === 'k8s'">
-        <div class="form-group compact">
-          <label :for="`${fieldID}-cluster`">集群</label>
-          <input :id="`${fieldID}-cluster`" v-model="verification.k8s.cluster" type="text" />
-        </div>
-        <div class="form-group compact">
-          <label :for="`${fieldID}-namespace`">Namespace</label>
-          <input :id="`${fieldID}-namespace`" v-model="verification.k8s.namespace" type="text" />
-        </div>
-        <div class="form-group compact">
-          <label :for="`${fieldID}-deployments`">仓库到 Deployment 映射（每行 repo=deployment）</label>
-          <textarea :id="`${fieldID}-deployments`" v-model="deploymentMapText" rows="2" placeholder="admin-web=admin-web" />
-        </div>
-        <div class="form-group compact">
-          <label :for="`${fieldID}-annotation`">Commit annotation</label>
-          <input :id="`${fieldID}-annotation`" v-model="verification.k8s.commit_annotation" type="text" placeholder="app.example.com/git-commit" @input="verification.k8s.image_label = ''" />
-        </div>
-        <div class="form-group compact">
-          <label :for="`${fieldID}-image-label`">或 image label</label>
-          <input :id="`${fieldID}-image-label`" v-model="verification.k8s.image_label" type="text" placeholder="git-commit" @input="verification.k8s.commit_annotation = ''" />
-        </div>
-      </template>
-    </fieldset>
-  </div>
+  </article>
 </template>
 
 <style scoped>
-.deployment-verification-fields {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 12px;
-  margin-top: 12px;
-  padding: 12px;
-  border: 1px solid var(--border-color, #d1d5db);
-  border-radius: 8px;
+.environment-card {
+  margin: 14px 0;
+  padding: 16px;
+  border: 1px solid var(--c-line);
+  border-radius: 10px;
+  background: var(--c-surf);
 }
-.deployment-verification-fields legend { padding: 0 6px; font-weight: 600; }
-.deployment-verification-fields input:focus-visible,
-.deployment-verification-fields select:focus-visible,
-.deployment-verification-fields textarea:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+.environment-card:last-of-type { border-bottom: 1px solid var(--c-line); }
+.environment-fields {
+  display: grid;
+  grid-template-columns: minmax(108px, 0.55fr) minmax(240px, 1.45fr) minmax(240px, 1.45fr) max-content 44px;
+  gap: 14px;
+  align-items: end;
+}
+.environment-fields > * { min-width: 0; }
+.environment-id-field,
+.environment-domain-field { width: 100%; }
+.environment-production-field {
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-md);
+  background: var(--c-surf-2);
+}
+.environment-remove {
+  width: 38px;
+  height: 38px;
+  margin: 0;
+}
+.environment-remove svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+@media (max-width: 1100px) {
+  .environment-fields {
+    grid-template-columns: minmax(100px, 0.6fr) minmax(220px, 1.4fr) minmax(220px, 1.4fr) 44px;
+  }
+  .environment-production-field {
+    grid-column: 1 / -2;
+    width: fit-content;
+  }
+  .environment-remove { grid-column: -2 / -1; }
+}
+
+@media (max-width: 760px) {
+  .environment-card { padding: 12px; }
+  .environment-fields { grid-template-columns: 1fr 44px; }
+  .environment-domain-field,
+  .environment-production-field { grid-column: 1 / -1; }
+  .environment-id-field { grid-column: 1; }
+  .environment-remove { grid-column: 2; grid-row: 1; justify-self: end; }
+}
 </style>

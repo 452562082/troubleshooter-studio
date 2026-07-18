@@ -29,6 +29,8 @@ import { pushLog } from './logStore'
 import { toast } from './toast'
 import type { CredField } from './credFields'
 import type { RepoScanItem } from './useRepoScan'
+import { resolveObsFieldValue } from './obsConnection'
+import type { ConfigSourceInstance } from './configSourceInstances'
 
 interface ToolSpecLike {
   key: string
@@ -49,9 +51,12 @@ export interface UseDeployFlowDeps {
 
   // 配置源 / 服务 / 环境
   activeSourceTypes: ComputedRef<readonly string[]>
+  sourceInstances: ComputedRef<readonly ConfigSourceInstance[]>
   sourceCreds: Record<string, { creds: Record<string, Record<string, string>>; rawExtra?: Record<string, unknown> }>
   environments: { id: string }[]
   enabledDataStores: Record<string, boolean>
+  scannedDS?: Record<string, Record<string, Record<string, Record<string, string>>>>
+  dataStoreTypes: Record<string, string>
 
   // 可观测性 + 数据层
   enabledObservability: Record<string, boolean>
@@ -142,13 +147,21 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
   // 这是把"已填一次"打通到"OpenClaw 部署即可跑"的关键 —— 不再去 BotsPage 二次输入。
   function buildOpenclawCreds(): Record<string, string> {
     const creds: Record<string, string> = {}
-    const isMulti = deps.activeSourceTypes.value.length > 1
+    const sourceInstances = deps.sourceInstances.value
+    const isMulti = sourceInstances.length > 1
 
     // ── 配置中心:每个激活源 × 每个 env ──
-    for (const t of deps.activeSourceTypes.value) {
-      const cc = deps.sourceCreds[t]
+    for (const instance of sourceInstances) {
+      const t = instance.type
+      const cc = deps.sourceCreds[instance.id] || deps.sourceCreds[t]
       if (!cc) continue
-      const sourceID = isMulti ? t : 'default'
+      const sourceID = isMulti ? instance.id : 'default'
+      if (t === 'one2all') {
+        const shared = cc.creds['_shared_'] || {}
+        if ((shared.mcp_url || '').trim()) creds.ONE2ALL_MCP_URL = shared.mcp_url.trim()
+        if ((shared.token || '').trim()) creds.ONE2ALL_TOKEN = shared.token.trim()
+        continue
+      }
       for (const env of deps.environments) {
         if (!env.id) continue
         const envCreds = cc.creds[env.id] || {}
@@ -202,7 +215,11 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
           // 用户填过又切换鉴权方式后残留的旧值灌进去)。
           if (field.uiOnly) continue
           if (deps.isObsFieldHidden(tool.key, env.id, f)) continue
-          const v = (deps.toolInputs[deps.toolKeyFor('obs', tool.key, env.id, field.key)] || '').trim()
+          const v = resolveObsFieldValue({
+            toolInputs: deps.toolInputs,
+            sourceCreds: deps.sourceCreds,
+            toolKeyFor: deps.toolKeyFor,
+          }, tool.key, env.id, field.key).trim()
           if (v) creds[field.envVar(env.id)] = v
         }
       }
@@ -213,14 +230,45 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
     //       env 段(MONGODB_URI_<env> / POSTGRES_DSN_<env> / ES_URL_<env> / ...)。
     // 之前漏了这块循环 → 用户在 wizard 填了 endpoint 但 install creds map 拿不到 →
     // 注册的 mcp server env 段全空 → mcp 启动失败。
-    for (const tool of deps.DS_TOOL_SPECS) {
-      if (!deps.enabledDataStores[tool.key]) continue
+    const dataStoreIDs = new Set<string>()
+    for (const byService of Object.values(deps.scannedDS || {})) {
+      for (const stores of Object.values(byService)) {
+        for (const id of Object.keys(stores)) dataStoreIDs.add(id)
+      }
+    }
+    const countsByType = new Map<string, number>()
+    for (const id of dataStoreIDs) {
+      const type = deps.dataStoreTypes[id] || id
+      countsByType.set(type, (countsByType.get(type) || 0) + 1)
+    }
+    for (const dsID of Array.from(dataStoreIDs).sort()) {
+      const dsType = deps.dataStoreTypes[dsID] || dsID
+      const tool = deps.DS_TOOL_SPECS.find(item => item.key === dsType)
+      if (!tool || !deps.enabledDataStores[dsType]) continue
+      const installSourceID = (countsByType.get(dsType) || 0) > 1 || dsID !== dsType ? dsID : 'default'
       for (const env of deps.environments) {
         if (!env.id) continue
         for (const f of tool.fields) {
           if (f.uiOnly) continue
-          const v = (deps.toolInputs[deps.toolKeyFor('ds', tool.key, env.id, f.key)] || '').trim()
-          if (v) creds[f.envVar(env.id)] = v
+          let v = (deps.toolInputs[deps.toolKeyFor('ds', dsID, env.id, f.key)]
+            || deps.toolInputs[deps.toolKeyFor('ds', dsType, env.id, f.key)] || '').trim()
+          if (!v) {
+            for (const serviceStores of Object.values(deps.scannedDS?.[env.id] || {})) {
+              const candidate = (serviceStores?.[dsID]?.[f.key] || '').trim()
+              if (candidate) {
+                v = candidate
+                break
+              }
+            }
+          }
+          if (v) {
+            const legacyName = f.envVar(env.id)
+            const envSuffix = `_${env.id.toUpperCase()}`
+            const prefix = legacyName.endsWith(envSuffix)
+              ? legacyName.slice(0, -envSuffix.length)
+              : legacyName
+            creds[installEnvVarName(prefix, installSourceID, env.id)] = v
+          }
         }
       }
     }

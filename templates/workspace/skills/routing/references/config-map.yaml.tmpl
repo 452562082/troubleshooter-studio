@@ -37,7 +37,7 @@ environments:
       {{- if not $serviceNames}}{{$serviceNames = list .Name}}{{end}}
       {{- range $serviceNames}}
         {{- $svc := .}}
-        {{- $sourceID := repoConfigSource $ctx $svc}}
+        {{- $sourceID := repoConfigSource $ctx $envID $svc}}
         {{- $src := configSourceByID $ctx $sourceID}}
         {{- $cc := $src.Type}}
         {{- $patterns := $src.DataIDPatterns}}

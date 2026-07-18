@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -169,7 +168,7 @@ func TestProductionWorkflowSelectsDeploymentProviderFromInstalledCaseConfig(t *t
 		app, incident := newProductionDeploymentApp(t, deploymentYAML(""), "test", factory)
 		app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) { return cfg, nil }
 		observations, err := notifyProductionDeployment(t, app, incident, "manual")
-		if !errors.Is(err, bughub.ErrDeploymentVerifierUnavailable) || factoryCalls != 0 || len(observations) != 1 || observations[0].DiagnosticCode != "k8s_endpoint_invalid" {
+		if err != nil || factoryCalls != 0 || len(observations) != 1 || observations[0].DiagnosticCode != "k8s_endpoint_invalid" {
 			t.Fatalf("factory=%d observations=%+v err=%v", factoryCalls, observations, err)
 		}
 		assertReservedProvider(t, app, incident, "k8s")
@@ -196,12 +195,12 @@ func TestProductionWorkflowSelectsDeploymentProviderFromInstalledCaseConfig(t *t
 			t.Fatalf("preview=%+v err=%v", detail.DeploymentVerification, detailErr)
 		}
 		observations, err := notifyProductionDeployment(t, app, incident, "http")
-		if err == nil || factoryCalls != 0 || len(observations) != 1 || observations[0].DiagnosticCode != "environment_unknown" {
+		if err != nil || factoryCalls != 0 || len(observations) != 1 || observations[0].DiagnosticCode != "environment_unknown" {
 			t.Fatalf("factory=%d observations=%+v err=%v", factoryCalls, observations, err)
 		}
 	})
 
-	t.Run("config change between reservation and execution fails closed", func(t *testing.T) {
+	t.Run("config change skips optional version collection", func(t *testing.T) {
 		serverCalls, factoryCalls, loads := 0, 0, 0
 		server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { serverCalls++ }))
 		defer server.Close()
@@ -220,7 +219,7 @@ func TestProductionWorkflowSelectsDeploymentProviderFromInstalledCaseConfig(t *t
 			return k8sCfg, nil
 		}
 		observations, err := notifyProductionDeployment(t, app, incident, "manual")
-		if err == nil || serverCalls != 0 || factoryCalls != 0 || len(observations) != 1 || observations[0].DiagnosticCode != "config_changed" {
+		if err != nil || serverCalls != 0 || factoryCalls != 0 || len(observations) != 1 || observations[0].DiagnosticCode != "config_changed" {
 			t.Fatalf("loads=%d http=%d factory=%d observations=%+v err=%v", loads, serverCalls, factoryCalls, observations, err)
 		}
 		assertReservedProvider(t, app, incident, "http")
@@ -243,7 +242,7 @@ func TestProductionWorkflowSelectsDeploymentProviderFromInstalledCaseConfig(t *t
 			return cfg2, nil
 		}
 		observations, err := notifyProductionDeployment(t, app, incident, "manual")
-		if err == nil || serverCalls != 0 || len(observations) != 1 || observations[0].DiagnosticCode != "config_changed" {
+		if err != nil || serverCalls != 0 || len(observations) != 1 || observations[0].DiagnosticCode != "config_changed" {
 			t.Fatalf("loads=%d calls=%d observations=%+v err=%v", loads, serverCalls, observations, err)
 		}
 	})
@@ -271,7 +270,7 @@ func TestCanonicalK8sDeploymentBindingIsSortedAndOmitsCredentials(t *testing.T) 
 	}
 }
 
-func TestDeploymentReservationRecoveryRejectsChangedConfigAfterRestart(t *testing.T) {
+func TestDeploymentReservationRecoveryRecordsChangedConfigAndContinues(t *testing.T) {
 	ctx := context.Background()
 	firstCalls, secondCalls := 0, 0
 	first := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { firstCalls++ }))
@@ -302,7 +301,7 @@ func TestDeploymentReservationRecoveryRejectsChangedConfigAfterRestart(t *testin
 		t.Fatal(err)
 	}
 	restarted := &App{workflowRoot: root, workflowLoadBug: loadBug, workflowLoadBot: loadBot, workflowLoadDeploymentConfig: func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) { return cfg2, nil }}
-	if err := restarted.initializeIncidentWorkflow(ctx); !errors.Is(err, bughub.ErrDeploymentVerifierUnavailable) {
+	if err := restarted.initializeIncidentWorkflow(ctx); err != nil {
 		t.Fatal(err)
 	}
 	defer restarted.closeIncidentWorkflow()

@@ -460,24 +460,10 @@ func funcMap() template.FuncMap {
 			}
 			return nil
 		},
-		// repoConfigSource 找到拥有 service 的 repo,返回它的 config_source。
-		// 没找到 / 没绑(单源场景):返回 "default"。
-		"repoConfigSource": func(ctx *Context, service string) string {
-			for _, r := range ctx.Repos {
-				names := r.ServiceNames
-				if len(names) == 0 {
-					names = []string{r.Name}
-				}
-				for _, sn := range names {
-					if sn == service {
-						if r.ConfigSource != "" {
-							return r.ConfigSource
-						}
-						return "default"
-					}
-				}
-			}
-			return "default"
+		// repoConfigSource resolves the formal (env, service) catalog binding
+		// first and falls back to legacy repos[].config_source.
+		"repoConfigSource": func(ctx *Context, env, service string) string {
+			return ctx.SystemConfig.ConfigSourceFor(env, service)
 		},
 		// configSourceByID 按 id 找 ConfigCenters[] 里的源;找不到返回主源(兜底,
 		// 避免 yaml 引用不存在 id 时模板崩),配 doctor 检查给用户预警。

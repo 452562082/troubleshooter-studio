@@ -53,7 +53,7 @@ function revealKey(envID: string, svc: string, dsKey: string, fKey: string) {
         :class="['ds-svc-status', 'status-' + scanState.status]"
       >
         <template v-if="scanState.status === 'ok'">✓ 已识别</template>
-        <template v-else-if="scanState.status === 'empty'">✓ 已读取 · 无数据层</template>
+        <template v-else-if="scanState.status === 'empty'">△ 已读取 · 未识别到数据层</template>
         <template v-else-if="scanState.status === 'skipped'">⊘ 跳过</template>
         <template v-else-if="scanState.status === 'error'">✗ 拉取失败</template>
       </span>
@@ -99,7 +99,7 @@ function revealKey(envID: string, svc: string, dsKey: string, fKey: string) {
           <button
             type="button"
             class="ds-item-delete"
-            :title="`删除本服务识别到的 ${dsLabel(dsKey)} —— 不影响下一步校验(扫描状态保留)`"
+            :title="`不把本服务识别到的 ${dsLabel(dsKey)} 纳入机器人能力；重新读取配置可恢复`"
             @click="emit('removeDS', dsKey)"
           >✕</button>
         </div>

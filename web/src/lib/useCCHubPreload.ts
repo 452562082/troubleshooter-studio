@@ -20,14 +20,19 @@ import { toast } from './toast'
 import { ccKeyFor, svcKey } from './yamlShared'
 import { serviceMatchKeys, startsAtBoundary } from './serviceMatchHelpers'
 import type { CCHubEnvState } from './useCCHubState'
+import { sourceStateKey } from './configSourceInstances'
 
 export interface UseCCHubPreloadDeps {
   /** useCCHubState 暴露的 reactive */
   ccHubStateByEnv: Record<string, CCHubEnvState>
   /** Step 5 凭证输入 map(key 走 ccKeyFor("cc:<type>:<env>:<field>")) */
   ccCredInputs: Record<string, string>
+  sourceCreds: Record<string, { creds: Record<string, Record<string, string>> }>
   /** 主源 type 的 computed.value 取值器(rerun 时实时拿 type) */
   getPrimaryConfigCenterType: () => string
+  getPrimarySourceID: () => string
+  getSourceType: (sourceID: string) => string
+  sourceEnvNamespaces: Record<string, string>
   /** Step 5 用户挑的 env → namespace */
   envNamespaces: Record<string, string>
   /** Step 5 用户挑的 service → dataId / group */
@@ -36,11 +41,11 @@ export interface UseCCHubPreloadDeps {
   /** 当前所有服务名(computed.value) */
   allServiceNames: { value: readonly string[] }
   /** 取服务对应的源 type;multi-source 下区分主源/副源 */
-  getServiceSource: (svc: string) => string
+  getServiceSource: (svc: string, envID?: string) => string
   /** 给 env 取可选 namespace 列表(autoFillSelections 用) */
-  namespacesFor: (envID: string) => CCHubNamespace[]
+  namespacesFor: (envID: string, sourceID?: string) => CCHubNamespace[]
   /** 给 env+namespace 取可选 entries(autoMatchDataID 用) */
-  entriesForNamespace: (envID: string, nsID: string) => CCHubEntry[]
+  entriesForNamespace: (envID: string, nsID: string, sourceID?: string) => CCHubEntry[]
 }
 
 interface PreloadPayload {
@@ -76,8 +81,8 @@ export function useCCHubPreload(deps: UseCCHubPreloadDeps) {
   // 自动匹配 service → dataId:给定环境 + 服务名,在该 namespace 下的 entries 里
   // 找 locator 含服务名的;优先同时含 env 名。
   // serviceMatchKeys 退化策略 + 3-pass(段对齐+env / 段对齐 / fuzzy)
-  function autoMatchDataID(envID: string, svc: string, nsID: string): { dataId: string, group: string } {
-    const entries = deps.entriesForNamespace(envID, nsID)
+  function autoMatchDataID(envID: string, svc: string, nsID: string, sourceID?: string): { dataId: string, group: string } {
+    const entries = deps.entriesForNamespace(envID, nsID, sourceID)
     if (entries.length === 0) return { dataId: '', group: '' }
     const candidates = serviceMatchKeys(svc)
     const envLower = envID.toLowerCase()
@@ -107,20 +112,20 @@ export function useCCHubPreload(deps: UseCCHubPreloadDeps) {
   }
 
   // 预加载成功后触发:帮用户把 namespace + 每个服务的 dataId 猜一遍 —— 只填还没填的。
-  function autoFillSelections(envID: string) {
-    const nsList = deps.namespacesFor(envID)
+  function autoFillSelections(envID: string, sourceID = deps.getPrimarySourceID()) {
+    const nsList = deps.namespacesFor(envID, sourceID)
     if (nsList.length === 0) return
-    if (!deps.envNamespaces[envID]) {
-      deps.envNamespaces[envID] = autoMatchNamespace(envID, nsList)
+    const nsKey = `${sourceID}::${envID}`
+    if (!deps.sourceEnvNamespaces[nsKey]) {
+      deps.sourceEnvNamespaces[nsKey] = autoMatchNamespace(envID, nsList)
     }
     // 只为"用户已勾选走当前 env 的源(主源)"的服务自动填 dataId;没勾选的服务跳过。
-    const nsID = deps.envNamespaces[envID] || ''
-    const primaryType = deps.getPrimaryConfigCenterType()
+    const nsID = deps.sourceEnvNamespaces[nsKey] || ''
     for (const svc of deps.allServiceNames.value) {
-      if (deps.getServiceSource(svc) !== primaryType) continue
+      if (deps.getServiceSource(svc, envID) !== sourceID) continue
       const k = svcKey(envID, svc)
       if (deps.serviceConfigSel[k]) continue // 已手挑 → 不覆盖
-      const { dataId, group } = autoMatchDataID(envID, svc, nsID)
+      const { dataId, group } = autoMatchDataID(envID, svc, nsID, sourceID)
       if (dataId) {
         deps.serviceConfigSel[k] = dataId
         deps.serviceConfigGroup[k] = group
@@ -129,10 +134,15 @@ export function useCCHubPreload(deps: UseCCHubPreloadDeps) {
   }
 
   // 按 env 取当前输入组合(从 ccCredInputs 抽)。kuboard / env-vars / none 不走远程预读。
-  function buildPreloadPayload(envID: string): PreloadPayload {
-    const type = deps.getPrimaryConfigCenterType()
+  function buildPreloadPayload(envID: string, sourceID = deps.getPrimarySourceID()): PreloadPayload {
+    const type = deps.getSourceType(sourceID) || deps.getPrimaryConfigCenterType()
     const miss: string[] = []
-    const get = (field: string) => (deps.ccCredInputs[ccKeyFor(type, envID, field)] || '').trim()
+    const get = (field: string) => {
+      if (sourceID === deps.getPrimarySourceID()) {
+        return (deps.ccCredInputs[ccKeyFor(type, envID, field)] || '').trim()
+      }
+      return (deps.sourceCreds[sourceID]?.creds?.[envID]?.[field] || '').trim()
+    }
 
     if (type !== 'nacos' && type !== 'apollo' && type !== 'consul') {
       return {
@@ -171,17 +181,18 @@ export function useCCHubPreload(deps: UseCCHubPreloadDeps) {
 
   // 两阶段预加载:Step 1 NamespacesOnly 列 namespaces;Step 2 按 env.id 启发式匹到 → 拉那个 namespace。
   // 匹不到就让用户在 UI 手选。
-  async function runCCHubPreload(envID: string) {
+  async function runCCHubPreload(envID: string, sourceID = deps.getPrimarySourceID()) {
     if (!isDesktop()) {
       toast.error('预加载只在桌面 app 可用')
       return
     }
-    const payload = buildPreloadPayload(envID)
+    const payload = buildPreloadPayload(envID, sourceID)
     if (!payload.valid) {
       toast.error(`先把这些字段填上再预加载:${payload.missing.join(', ')}`)
       return
     }
-    deps.ccHubStateByEnv[envID] = { status: 'loading' }
+    const stateKey = sourceStateKey(sourceID, envID, deps.getPrimarySourceID())
+    deps.ccHubStateByEnv[stateKey] = { status: 'loading' }
     try {
       // ── Step 1: 轻量列 namespaces ──
       const ns = await preloadConfigCenter({
@@ -203,7 +214,7 @@ export function useCCHubPreload(deps: UseCCHubPreloadDeps) {
       const matchedNs = autoMatchNamespace(envID, ns.namespaces || [])
       if (!matchedNs && (ns.namespaces?.length || 0) > 0) {
         // 有 namespace 列表但没匹到 → 让用户手选。先把 ns 列表存进 state,UI 展示下拉。
-        deps.ccHubStateByEnv[envID] = {
+        deps.ccHubStateByEnv[stateKey] = {
           status: 'ok',
           entries: [],
           namespaces: ns.namespaces || [],
@@ -215,10 +226,10 @@ export function useCCHubPreload(deps: UseCCHubPreloadDeps) {
         toast.info(`${envID}: 列到 ${ns.namespaces?.length} 个 namespace,但没一条含 "${envID}",请在下拉手选`)
         return
       }
-      await loadConfigsForEnv(envID, matchedNs, ns.namespaces || [], payload)
+      await loadConfigsForEnv(envID, matchedNs, ns.namespaces || [], payload, sourceID)
     } catch (e: any) {
       const msg = String(e?.message || e)
-      deps.ccHubStateByEnv[envID] = { status: 'error', error: '拉取失败,详见日志' }
+      deps.ccHubStateByEnv[stateKey] = { status: 'error', error: '拉取失败,详见日志' }
       pushLog('cchub', 'error', `[${envID}] 预加载失败: ${msg}`,
         { envID, type: payload.type, addr: payload.addr })
       toast.error(`${envID} 预加载失败,详见左侧「日志」`)
@@ -231,8 +242,10 @@ export function useCCHubPreload(deps: UseCCHubPreloadDeps) {
     nsID: string,
     allNamespaces: CCHubNamespace[],
     payload: PreloadPayload,
+    sourceID = deps.getPrimarySourceID(),
   ) {
-    deps.ccHubStateByEnv[envID] = { status: 'loading' }
+    const stateKey = sourceStateKey(sourceID, envID, deps.getPrimarySourceID())
+    deps.ccHubStateByEnv[stateKey] = { status: 'loading' }
     try {
       const r = await preloadConfigCenter({
         type: payload.type as 'nacos' | 'apollo' | 'consul',
@@ -244,7 +257,7 @@ export function useCCHubPreload(deps: UseCCHubPreloadDeps) {
         app_id: payload.app_id,
       })
       // 后端也会带回 namespaces 列表(跟 Step 1 一致),直接用 r.namespaces 覆盖
-      deps.ccHubStateByEnv[envID] = {
+      deps.ccHubStateByEnv[stateKey] = {
         status: 'ok',
         entries: r.entries || [],
         namespaces: r.namespaces || allNamespaces,
@@ -252,7 +265,8 @@ export function useCCHubPreload(deps: UseCCHubPreloadDeps) {
         loadedAt: Date.now(),
       }
       // 把匹到/选到的 namespace 写进 envNamespaces(autoFill 也需要它)
-      deps.envNamespaces[envID] = nsID
+      deps.sourceEnvNamespaces[`${sourceID}::${envID}`] = nsID
+      if (sourceID === deps.getPrimarySourceID()) deps.envNamespaces[envID] = nsID
       pushLog('cchub', 'info',
         `[${envID}] namespace=${nsID || 'public'} 拉到 ${r.entries?.length || 0} 条配置`,
         { envID, namespace: nsID })
@@ -268,11 +282,11 @@ export function useCCHubPreload(deps: UseCCHubPreloadDeps) {
         }
       }
       // 只对当前 env 跑自动匹配,其他 env 要他们自己扫
-      autoFillSelections(envID)
+      autoFillSelections(envID, sourceID)
       toast.success(`${envID}: 拉到 ${r.entries?.length || 0} 条配置`)
     } catch (e: any) {
       const msg = String(e?.message || e)
-      deps.ccHubStateByEnv[envID] = { status: 'error', error: '拉取失败,详见日志' }
+      deps.ccHubStateByEnv[stateKey] = { status: 'error', error: '拉取失败,详见日志' }
       pushLog('cchub', 'error',
         `[${envID}] namespace=${nsID} 拉取失败: ${msg}`, { envID, namespace: nsID })
       toast.error(`${envID} 拉取失败,详见左侧「日志」`)
@@ -280,44 +294,45 @@ export function useCCHubPreload(deps: UseCCHubPreloadDeps) {
   }
 
   // 用户在下拉手动切 namespace → 用新 namespace 重拉 configs。没凭证 / 没扫过的 env 忽略。
-  async function reloadEnvNamespace(envID: string, nsID: string) {
+  async function reloadEnvNamespace(envID: string, nsID: string, sourceID = deps.getPrimarySourceID()) {
     if (!isDesktop()) return
-    const payload = buildPreloadPayload(envID)
+    const payload = buildPreloadPayload(envID, sourceID)
     if (!payload.valid) {
       toast.error(`先把这些字段填上再切 namespace:${payload.missing.join(', ')}`)
       return
     }
-    const st = deps.ccHubStateByEnv[envID]
+    const st = deps.ccHubStateByEnv[sourceStateKey(sourceID, envID, deps.getPrimarySourceID())]
     const allNs = st?.namespaces || []
-    await loadConfigsForEnv(envID, nsID, allNs, payload)
+    await loadConfigsForEnv(envID, nsID, allNs, payload, sourceID)
   }
 
   // 用户切 namespace → 清空这个 env 下所有 service 的 dataId 选择。
   // 有凭证 → 精确重拉该 namespace 的 configs;没凭证 → 用已有数据重跑 autoFill。
-  function onNamespaceChanged(envID: string, newNsID: string) {
+  function onNamespaceChanged(envID: string, newNsID: string, sourceID = deps.getPrimarySourceID()) {
     for (const svc of deps.allServiceNames.value) {
       const k = svcKey(envID, svc)
       delete deps.serviceConfigSel[k]
       delete deps.serviceConfigGroup[k]
     }
-    deps.envNamespaces[envID] = newNsID
-    const payload = buildPreloadPayload(envID)
+    deps.sourceEnvNamespaces[`${sourceID}::${envID}`] = newNsID
+    if (sourceID === deps.getPrimarySourceID()) deps.envNamespaces[envID] = newNsID
+    const payload = buildPreloadPayload(envID, sourceID)
     if (payload.valid && isDesktop()) {
-      void reloadEnvNamespace(envID, newNsID)
+      void reloadEnvNamespace(envID, newNsID, sourceID)
     } else {
-      autoFillSelections(envID)
+      autoFillSelections(envID, sourceID)
     }
   }
 
   // 用户选 dataId → 同步记下对应的 group(生成 yaml 时要一起写)
-  function onDataIdChanged(envID: string, svc: string) {
-    const nsID = deps.envNamespaces[envID] || ''
+  function onDataIdChanged(envID: string, svc: string, sourceID = deps.getPrimarySourceID()) {
+    const nsID = deps.sourceEnvNamespaces[`${sourceID}::${envID}`] || deps.envNamespaces[envID] || ''
     const chosen = deps.serviceConfigSel[svcKey(envID, svc)]
     if (!chosen) {
       delete deps.serviceConfigGroup[svcKey(envID, svc)]
       return
     }
-    const entry = deps.entriesForNamespace(envID, nsID).find(e => e.locator === chosen)
+    const entry = deps.entriesForNamespace(envID, nsID, sourceID).find(e => e.locator === chosen)
     deps.serviceConfigGroup[svcKey(envID, svc)] = entry?.group || ''
   }
 

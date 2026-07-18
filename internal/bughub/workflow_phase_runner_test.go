@@ -1089,6 +1089,18 @@ func TestRegressionEvidenceCorrelationMayComeFromAnyCurrentArtifact(t *testing.T
 	}
 }
 
+func TestRegressionEvidenceAllowsVersionToBeAbsentWhenRuntimeDidNotExposeIt(t *testing.T) {
+	attempt := PhaseAttempt{Phase: PhaseRegression, InputJSON: mustJSON(RegressionValidationInput{OriginalScenarioHash: "scenario", TargetEnvironment: "test"})}
+	validation := ValidationResult{VerificationStatus: "fixed_verified", Environment: "test", ScenarioHash: "scenario"}
+	output, _ := json.Marshal(validation)
+	result := PhaseResult{Outcome: PhaseOutcomeFixedVerified, OutputJSON: output, ArtifactInputs: []ArtifactReference{{
+		Kind: "network", Path: "browser/network.json", Environment: "test", RequestID: "req-optional-version",
+	}}}
+	if err := (&AgentPhaseRunner{}).validateRegressionEvidence(context.Background(), attempt, result); err != nil {
+		t.Fatalf("versionless regression evidence was rejected: %v", err)
+	}
+}
+
 func TestAgentPhaseRunnerRegressionRequiresMatchedDeploymentAndFreshSameEnvironmentEvidence(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-regression-fresh", CaseRegressionValidating)

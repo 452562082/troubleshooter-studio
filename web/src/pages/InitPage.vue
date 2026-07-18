@@ -11,6 +11,8 @@ import {
   kuboardListResources,
   isDesktop,
   listBranchesForRepo,
+  loadInfraCred,
+  saveInfraCredBatch,
   validate as bridgeValidate,
 } from '../lib/bridge'
 import type { CCHubEntry, CCHubNamespace } from '../lib/bridge'
@@ -78,8 +80,16 @@ import { hasServiceTopologyWorkbenchRepos } from '../lib/serviceTopologyGate'
 import { useSourceTypeReset } from '../lib/useSourceTypeReset'
 import { useK8sRtAutoPick } from '../lib/useK8sRtAutoPick'
 import { one2allListDeployments, one2allListResources } from '../lib/bridge/one2all'
+import { obsConnectionReuseLabel } from '../lib/obsConnection'
+import { buildResourceCoverage } from '../lib/resourceCoverage'
 import type { One2AllClusterEntry as O2ACluster } from '../lib/bridge/one2all'
 import { one2allPreloadOptionsForPurpose, type One2AllPreloadOptions, type One2AllPreloadPurpose } from '../lib/one2allPreload'
+import {
+  nextSourceInstanceID,
+  sourceStateKey,
+  sourceTypeFor,
+  type ConfigSourceInstance,
+} from '../lib/configSourceInstances'
 
 const router = useRouter()
 
@@ -518,6 +528,8 @@ const repos = reactive<RepoItem[]>(
   // saved 真的存的是窄字符串,直接 cast 一下复用 reactive。yaml import / makeEmptyRepo 仍走窄类型。
   Array.isArray(saved?.repos) && saved.repos.length ? (saved.repos as RepoItem[]) : [makeEmptyRepo()]
 )
+const scanningAllRepos = ref(false)
+const scanAllRepoStats = reactive({ done: 0, total: 0, failed: 0 })
 
 // 从 URL 推导仓库名。支持三种常见格式:
 //   git@github.com:org/order-service.git    → order-service
@@ -1017,6 +1029,7 @@ function toggleSourceType(t: string, checked: boolean) {
     enabledSourceOrder.splice(0, enabledSourceOrder.length)
     enabledSourceTypes['none'] = true
     enabledSourceOrder.push('none')
+    sourceInstances.splice(0, sourceInstances.length, { id: 'none', type: 'none' })
     return
   }
   if (checked && t !== 'none' && enabledSourceTypes['none']) {
@@ -1034,8 +1047,16 @@ function toggleSourceType(t: string, checked: boolean) {
   const idx = enabledSourceOrder.indexOf(t)
   if (checked) {
     if (idx === -1) enabledSourceOrder.push(t) // 后勾的排到末尾
+    if (!sourceInstances.some(item => item.type === t)) {
+      const id = nextSourceInstanceID(t, sourceInstances)
+      sourceInstances.push({ id, type: t })
+      if (!sourceCreds[id]) sourceCreds[id] = { creds: {} }
+    }
   } else {
     if (idx !== -1) enabledSourceOrder.splice(idx, 1)
+    for (let i = sourceInstances.length - 1; i >= 0; i--) {
+      if (sourceInstances[i].type === t) sourceInstances.splice(i, 1)
+    }
   }
   if (willBeMulti && wasSingleSource && activeSourceTypes.value.length >= 2) {
     for (const svc of allServiceNames.value) {
@@ -1083,14 +1104,73 @@ if (saved?.ccCredInputs && (!saved?.sourceCreds || Object.keys(saved.sourceCreds
 const serviceSourceMap = reactive<Record<string, string>>(
   saved?.serviceSourceMap ?? {},
 )
+const serviceSourceByEnv = reactive<Record<string, string>>(
+  saved?.serviceSourceByEnv ?? {},
+)
+const sourceEnvNamespaces = reactive<Record<string, string>>(
+  saved?.sourceEnvNamespaces ?? {},
+)
+
+// 配置源实例与 type 分离。旧草稿按 type 派生同名实例；新草稿/导入 YAML
+// 可以同时保留 nacos、nacos-2 等多个同类型实例。
+const sourceInstances = reactive<ConfigSourceInstance[]>(
+  Array.isArray(saved?.sourceInstances) && saved.sourceInstances.length > 0
+    ? saved.sourceInstances.filter(item => item?.id && item?.type)
+    : enabledSourceOrder.filter(t => enabledSourceTypes[t]).map(type => ({ id: type, type })),
+)
+for (const type of enabledSourceOrder) {
+  if (enabledSourceTypes[type] && !sourceInstances.some(item => item.type === type)) {
+    sourceInstances.push({ id: nextSourceInstanceID(type, sourceInstances), type })
+  }
+}
+for (const instance of sourceInstances) {
+  enabledSourceTypes[instance.type] = true
+  if (!enabledSourceOrder.includes(instance.type)) enabledSourceOrder.push(instance.type)
+  if (!sourceCreds[instance.id]) sourceCreds[instance.id] = { creds: {} }
+}
 
 // 当前激活的源 types(按固定顺序展示)
 const activeSourceTypes = computed<string[]>(() =>
   enabledSourceOrder.filter(t => enabledSourceTypes[t]),
 )
+const activeSourceInstances = computed<ConfigSourceInstance[]>(() =>
+  sourceInstances.filter(item => enabledSourceTypes[item.type]),
+)
+const primarySourceID = computed(() => activeSourceInstances.value[0]?.id || '')
+function configSourceType(sourceID: string): string {
+  return sourceTypeFor(sourceID, activeSourceInstances.value)
+}
+function addSourceInstance(type: string) {
+  if (!['nacos', 'apollo', 'consul'].includes(type)) return
+  if (!type || type === 'none') return
+  const id = nextSourceInstanceID(type, sourceInstances)
+  sourceInstances.push({ id, type })
+  enabledSourceTypes[type] = true
+  if (!enabledSourceOrder.includes(type)) enabledSourceOrder.push(type)
+  if (!sourceCreds[id]) sourceCreds[id] = { creds: {} }
+}
+function removeSourceInstance(sourceID: string) {
+  const index = sourceInstances.findIndex(item => item.id === sourceID)
+  if (index < 0) return
+  const [{ type }] = sourceInstances.splice(index, 1)
+  delete sourceCreds[sourceID]
+  for (const [key, value] of Object.entries(serviceSourceByEnv)) {
+    if (value === sourceID) serviceSourceByEnv[key] = ''
+  }
+  for (const [key, value] of Object.entries(serviceSourceMap)) {
+    if (value === sourceID) serviceSourceMap[key] = ''
+  }
+  for (const key of Object.keys(sourceEnvNamespaces)) {
+    if (key.startsWith(`${sourceID}::`)) delete sourceEnvNamespaces[key]
+  }
+  for (const key of Object.keys(ccHubStateByEnv)) {
+    if (key.startsWith(`${sourceID}::`)) delete ccHubStateByEnv[key]
+  }
+  if (!sourceInstances.some(item => item.type === type)) toggleSourceType(type, false)
+}
 
 // 多源模式:激活源 > 1
-const isMultiSource = computed(() => activeSourceTypes.value.length > 1)
+const isMultiSource = computed(() => activeSourceInstances.value.length > 1)
 
 // ── Kuboard 资源探测(每 env 独立 state)──
 // 用户填了 URL+账密后点"📥 拉取资源"会调 bridge.kuboardListResources,把
@@ -1237,25 +1317,41 @@ async function runK8sRtPreload(envID: string) {
 // 服务 → 源 type 取值。语义:
 //   - 显式设过(包括 '' 空值)→ 用 map 里的(允许"显式取消"是有效状态)
 //   - 从未设过(svc 不在 map 里)→ 单源场景默认走唯一源;多源场景默认空(用户必须显式勾)
-function getServiceSource(svc: string): string {
+function getServiceSource(svc: string, envID?: string): string {
+  const liveIDs = new Set(activeSourceInstances.value.map(item => item.id))
+  if (envID) {
+    const key = svcKey(envID, svc)
+    if (key in serviceSourceByEnv) {
+      const source = serviceSourceByEnv[key]
+      if (source && liveIDs.has(source)) return source
+      // 0.1/早期 0.2 草稿把 type 当实例 ID；仅在该 type 唯一时迁移。
+      const byType = activeSourceInstances.value.filter(item => item.type === source)
+      if (source && byType.length === 1) return byType[0].id
+      return ''
+    }
+  }
   if (svc in serviceSourceMap) {
     const m = serviceSourceMap[svc]
-    if (m && enabledSourceTypes[m]) return m
+    if (m && liveIDs.has(m)) return m
+    const byType = activeSourceInstances.value.filter(item => item.type === m)
+    if (m && byType.length === 1) return byType[0].id
     return '' // 显式 '' 或 type 已被禁
   }
   // 从未被设过(全新仓库刚扫出来的服务)
-  if (activeSourceTypes.value.length === 1) return activeSourceTypes.value[0]
+  if (activeSourceInstances.value.length === 1) return activeSourceInstances.value[0].id
   return ''
 }
 // 服务勾选状态切换:t='' = 显式取消(写空字符串而不是 delete,这样 getServiceSource
 // 就知道用户主动取消过,不会再 fallback 到默认主源)
-function setServiceSource(svc: string, t: string) {
-  const prev = svc in serviceSourceMap ? serviceSourceMap[svc] : (activeSourceTypes.value.length === 1 ? activeSourceTypes.value[0] : '')
-  serviceSourceMap[svc] = t
+function setServiceSource(svc: string, t: string, envID?: string) {
+  const prev = getServiceSource(svc, envID)
+  if (envID) serviceSourceByEnv[svcKey(envID, svc)] = t
+  else serviceSourceMap[svc] = t
   // 切换源(包括取消勾)→ 清掉旧的 dataId 选择,数据不残留
   if (prev !== t) {
     for (const env of environments) {
       if (!env.id) continue
+      if (envID && env.id !== envID) continue
       const k = svcKey(env.id, svc)
       delete serviceConfigSel[k]
       delete serviceConfigGroup[k]
@@ -1268,7 +1364,7 @@ function setServiceSource(svc: string, t: string) {
 // 兼容 legacy 模板/代码用:configCenterType 仍然存在,反映"主源"(第一个激活的)。
 // 老 ccCredInputs 也保留(yaml 老 emit 用),由 watch 从 sourceCreds[primary] 同步过来。
 const configCenterType = computed<string>({
-  get: () => activeSourceTypes.value[0] || 'nacos',
+  get: () => activeSourceInstances.value[0]?.type || 'nacos',
   set: (v: string) => {
     // 单选模式 -> 多选模式过渡:setter 只清旧、设新(很少被用)
     for (const t of ALL_SOURCE_TYPES) enabledSourceTypes[t] = false
@@ -1276,6 +1372,8 @@ const configCenterType = computed<string>({
     enabledSourceOrder.splice(0, enabledSourceOrder.length)
     enabledSourceTypes[v] = true
     enabledSourceOrder.push(v)
+    sourceInstances.splice(0, sourceInstances.length, { id: v, type: v })
+    if (!sourceCreds[v]) sourceCreds[v] = { creds: {} }
   },
 })
 
@@ -1363,13 +1461,9 @@ function isObsFieldHidden(toolKey: string, envID: string, f: CredField): boolean
 function displayObsField(toolKey: string, envID: string, f: CredField): CredField {
   return resolveCredFieldDisplay(f, (k) => toolInputs[toolKeyFor('obs', toolKey, envID, k)] || '')
 }
-// ccCredInputs:所有配置中心字段的当前输入值(key = ccKeyFor)。
-// 流向:输入 → localStorage draft(持久) → troubleshooter.yaml → 部署时注入各 AI 平台的 MCP
-// server config(openclaw.json / ~/.claude/config.json / .cursor/mcp.json / embedded)。
-// **不再走 Studio 自己的钥匙串** —— 对 MCP 用途来说钥匙串是多余中间层,
-// 凭证最终要成为 AI 平台 MCP server 的 env 字段,yaml 是直接源。
-// UI 上 secret 字段仍用 type=password 做显示遮码(纯视觉)。
-// ⚠ yaml 带明文,分享时必须控制范围(团队私密频道 / 内网 git),不要 push 公网。
+// ccCredInputs:所有配置中心字段的当前输入值(key = ccKeyFor)。secret 字段只在
+// 当前页面内存中参与探测/部署，持久化时进入系统钥匙串；YAML 与 localStorage 只保留
+// 环境变量引用和非敏感连接信息。
 // ccCredInputs 已被 sourceCreds 替代为多源数据源,这里保留作为"主源镜像"读视图,
 // 喂给现存的 yaml emit / preload / 命名空间下拉等老逻辑(它们用 ccKeyFor 拼 key)。
 // 用 computed setter 让老代码写也能反向同步到 sourceCreds。
@@ -1385,15 +1479,15 @@ function syncCcCredInputsFromSource() {
   if (syncing) return
   syncing = true
   try {
-    for (const t of activeSourceTypes.value) {
-      const data = sourceCreds[t]
-      if (!data) continue
-      for (const env of Object.keys(data.creds)) {
-        for (const f of Object.keys(data.creds[env])) {
-          const k = `cc:${t}:${env}:${f}`
-          const v = data.creds[env][f]
-          if (ccCredInputs[k] !== v) ccCredInputs[k] = v
-        }
+    const instance = activeSourceInstances.value[0]
+    if (!instance) return
+    const data = sourceCreds[instance.id]
+    if (!data) return
+    for (const env of Object.keys(data.creds)) {
+      for (const f of Object.keys(data.creds[env])) {
+        const k = `cc:${instance.type}:${env}:${f}`
+        const v = data.creds[env][f]
+        if (ccCredInputs[k] !== v) ccCredInputs[k] = v
       }
     }
   } finally {
@@ -1416,11 +1510,13 @@ watch(
       for (const k of Object.keys(ccCredInputs)) {
         const m = k.match(/^cc:([^:]+):([^:]+):(.+)$/)
         if (!m) continue
-        const [, t, env, field] = m
-        if (!sourceCreds[t]) sourceCreds[t] = { creds: {} }
-        if (!sourceCreds[t].creds[env]) sourceCreds[t].creds[env] = {}
+        const [, , env, field] = m
+        const sourceID = primarySourceID.value
+        if (!sourceID) continue
+        if (!sourceCreds[sourceID]) sourceCreds[sourceID] = { creds: {} }
+        if (!sourceCreds[sourceID].creds[env]) sourceCreds[sourceID].creds[env] = {}
         const v = ccCredInputs[k] ?? ''
-        if (sourceCreds[t].creds[env][field] !== v) sourceCreds[t].creds[env][field] = v
+        if (sourceCreds[sourceID].creds[env][field] !== v) sourceCreds[sourceID].creds[env][field] = v
       }
     } finally {
       syncing = false
@@ -1429,9 +1525,7 @@ watch(
   { deep: true },
 )
 
-// (原本 refreshCCCredStatus / saveCCCreds / clearCCField + ccCredSaved 钥匙串
-// 中间层已删除 —— 用户意图是凭证直接进 yaml,最终由部署流程注入到各 AI 平台的 MCP
-// server config。Studio 自己的钥匙串对 MCP 场景无意义。)
+// secret 的持久化统一由下方 draft sanitizer + 系统钥匙串处理；这里仅清当前输入。
 function clearCCFieldInput(key: string) {
   ccCredInputs[key] = ''
 }
@@ -1567,31 +1661,44 @@ const allServiceNames = computed<string[]>(() => {
   return Array.from(set)
 })
 
+// 可观测性使用“运行时工作负载”而不是只使用配置中心服务。前端/移动端通常没有
+// Nacos dataId,但仍然需要映射 Deployment、容器日志和 Loki label。
+const runtimeWorkloadNames = computed<string[]>(() => {
+  const set = new Set(allServiceNames.value)
+  for (const r of repos) {
+    if (r.role === 'frontend' || r.role === 'mobile') {
+      const name = r.name.trim()
+      if (name) set.add(name)
+    }
+  }
+  return Array.from(set)
+})
+
 // useK8sRtAutoPick 实例化:allServiceNames + ensureK8sRtSvcLoc 都已 ready;
 // loadK8sRtWorkloads(还在下方)的 onLoaded 回调把 deployment 列表传过来,
 // composable 内部 lexical scope 解析时 callback 已注入。
 const { autoPickK8sRtWorkloads } = useK8sRtAutoPick({
-  allServiceNames,
+  allServiceNames: runtimeWorkloadNames,
   ensureK8sRtSvcLoc: (envID, svc) => ensureK8sRtSvcLoc(envID, svc),
 })
 
 // 每个 env 独立扫描独立展示。没扫过的 env 不显示映射块,不借用其他 env 的结果。
 // (需求变更:之前是"任何 env 扫过 = 全 env 显示下拉",会让用户误以为 prod 的扫描结果
 // 是基于 prod 凭证拉的;实际是 dev 的。改成严格自扫自显。)
-function envScanned(envID: string): boolean {
-  return ccHubStateByEnv[envID]?.status === 'ok'
+function envScanned(envID: string, sourceID = primarySourceID.value): boolean {
+  return ccHubStateByEnv[sourceStateKey(sourceID, envID, primarySourceID.value)]?.status === 'ok'
 }
 
 // 给某 env 取 namespace 列表:只看自己的扫描结果,没扫过返回空数组
-function namespacesFor(envID: string): CCHubNamespace[] {
-  const own = ccHubStateByEnv[envID]
+function namespacesFor(envID: string, sourceID = primarySourceID.value): CCHubNamespace[] {
+  const own = ccHubStateByEnv[sourceStateKey(sourceID, envID, primarySourceID.value)]
   if (own?.status === 'ok') return own.namespaces || []
   return []
 }
 
 // 给某 env+namespace 取可选 entries:只看自己的扫描结果
-function entriesSourceFor(envID: string): CCHubEntry[] {
-  const own = ccHubStateByEnv[envID]
+function entriesSourceFor(envID: string, sourceID = primarySourceID.value): CCHubEntry[] {
+  const own = ccHubStateByEnv[sourceStateKey(sourceID, envID, primarySourceID.value)]
   if (own?.status === 'ok') return own.entries || []
   return []
 }
@@ -1602,8 +1709,8 @@ function entriesSourceFor(envID: string): CCHubEntry[] {
 // (之前这里用 e.tenant === nsID 过滤,但后端给 entry.tenant 塞的是 namespace 的 show_name
 //  "go-truss-dev",而前端 envNamespaces[envID] 存的是 UUID,二者对不上,filter 全空,
 //  dataId 下拉看起来"读不出来"。) nsID 参数保留只为 API 形状一致 + 未来需要时扩展。
-function entriesForNamespace(envID: string, _nsID: string): CCHubEntry[] {
-  return entriesSourceFor(envID)
+function entriesForNamespace(envID: string, _nsID: string, sourceID = primarySourceID.value): CCHubEntry[] {
+  return entriesSourceFor(envID, sourceID)
 }
 
 
@@ -1640,7 +1747,11 @@ const {
 } = useCCHubPreload({
   ccHubStateByEnv,
   ccCredInputs,
+  sourceCreds,
   getPrimaryConfigCenterType: () => configCenterType.value,
+  getPrimarySourceID: () => primarySourceID.value,
+  getSourceType: configSourceType,
+  sourceEnvNamespaces,
   envNamespaces,
   serviceConfigSel,
   serviceConfigGroup,
@@ -1782,7 +1893,7 @@ const enabledDataStores = reactive<Record<string, boolean>>({
 // envVar 命名跟未来 install.sh 里 read_var 对齐,保证 wizard 填值 → 部署时直接可喂给
 // 各 AI 平台 MCP server 的 env 字段。
 //
-// 字段 secret 标:跟 Step 5 一致 —— UI 用 type=password,yaml 里也带明文(用户选了共享模式)。
+// 字段 secret 标:UI 用 type=password，持久化到系统钥匙串；YAML 只写环境引用。
 // optional 标:yaml 里填不填都行,install.sh 不会卡流程。
 
 interface ToolSpec {
@@ -1988,7 +2099,7 @@ function toolKeyFor(cat: 'obs' | 'ds', tool: string, envID: string, field: strin
   return `${cat}:${tool}:${envID}:${field}`
 }
 
-// 所有工具字段的输入值(含 secret);跟 ccCredInputs 同策略:进 localStorage draft + 写进 yaml
+// 所有工具字段的当前内存值；secret 在草稿持久化前会被剥离并写入系统钥匙串。
 const toolInputs = reactive<Record<string, string>>(saved?.toolInputs ?? {})
 
 // useK8sRtWorkloads 必须在 toolInputs 声明之后实例化(它会闭包持有这个 reactive)。
@@ -2035,6 +2146,10 @@ function clearToolFieldInput(k: string) {
   toolInputs[k] = ''
 }
 
+function k8sConnectionReuseLabel(envID: string): string {
+  return obsConnectionReuseLabel({ toolInputs, sourceCreds, toolKeyFor }, envID)
+}
+
 function toolSpecByKey(cat: 'obs' | 'ds', key: string): ToolSpec | undefined {
   const arr = cat === 'obs' ? OBS_TOOL_SPECS : DS_TOOL_SPECS
   return arr.find(s => s.key === key)
@@ -2070,7 +2185,7 @@ const triggerStep7Init = (s: number) => {
       const cacheKey = k8sRtWorkloadKey(envID, clusterKey, loc.namespace)
       const cached = k8sRtWorkloadCache[cacheKey]
       if (cached?.status === 'ok') {
-        const anyUnmatched = allServiceNames.value.some(svc => {
+        const anyUnmatched = runtimeWorkloadNames.value.some(svc => {
           const sloc = k8sRuntimeSvcMap[svcKey(envID, svc)]
           return !sloc?.workload
         })
@@ -2156,7 +2271,7 @@ const {
 } = useLokiLabels({
   getLokiMapping,
   lokiAuthFor,
-  allServiceNames,
+  allServiceNames: runtimeWorkloadNames,
 })
 // loadEnvLabelValues / loadServiceLabelValues / autoMatchLokiMapping 内部由 loadLokiLabels /
 // onEnvValueChanged 调,InitPage 模板没直接用
@@ -2212,9 +2327,10 @@ void _crossCheckImportedConfigSource; void _crossCheckImportedKuboard; void _cro
 // 多块状态交织,留在下方 InitPage,直接 mutate 暴露的 reactive。
 const {
   dsImportStatus, dsImportStats, dsAutoFilled,
-  scannedDS, dsScanState, dsProbeResults,
+  scannedDS, dataStoreTypes, dataStoreType, dsScanState, dsProbeResults,
   scanStateKey, scanStateOf,
   removeScannedDS,
+  addManualDataStore,
   recomputeEnabledDataStoresFromScanned,
 } = useDataStoreState(
   {
@@ -2223,6 +2339,7 @@ const {
   },
   dataStoreOptions,
   enabledDataStores,
+  saved?.dataStoreTypes ?? {},
 )
 // Step 7 数据层 runners 全收口在 lib/useDataStoreScan.ts:
 //   - autoImportDataStores  nacos/apollo/consul 凭证去重批拉 + kuboard 批拉 + DS_MATCHERS 识别
@@ -2241,15 +2358,16 @@ const {
   scannedDS, dsScanState, dsProbeResults,
   dsImportStatus, dsImportStats, dsAutoFilled,
   enabledDataStores,
+  dataStoreTypes, dataStoreType,
   scanStateKey,
   environments, allServiceNames, getServiceSource, svcKey,
-  buildPreloadPayload, envNamespaces, serviceConfigSel, serviceConfigGroup,
-  enabledSourceTypes, activeSourceTypes,
+  buildPreloadPayload, envNamespaces, sourceEnvNamespaces, serviceConfigSel, serviceConfigGroup,
+  enabledSourceTypes, activeSourceTypes, sourceInstances: activeSourceInstances,
   ccCredInputs, ccKeyFor, sourceCreds, kuboardSvcMap, one2allSvcMap,
 })
 // UI helper:DS_TOOL_SPECS 查 spec
 function dsSpecByKey(key: string) {
-  return DS_TOOL_SPECS.find(s => s.key === key)
+  return DS_TOOL_SPECS.find(s => s.key === dataStoreType(key))
 }
 function dsFieldIsSecret(dsKey: string, fKey: string): boolean {
   const spec = dsSpecByKey(dsKey)
@@ -2263,8 +2381,27 @@ function dsFieldLabel(dsKey: string, fKey: string): string {
   return f?.label || fKey
 }
 function dsLabel(dsKey: string): string {
-  return dsSpecByKey(dsKey)?.label || dsKey
+  const spec = dsSpecByKey(dsKey)
+  if (!spec) return dsKey
+  return dataStoreType(dsKey) === dsKey ? spec.label : `${spec.label} · ${dsKey}`
 }
+
+const resourceCoverage = computed(() => buildResourceCoverage({
+  environments,
+  repos,
+  businessServices: allServiceNames.value,
+  runtimeWorkloads: runtimeWorkloadNames.value,
+  activeSourceTypes: activeSourceTypes.value,
+  getServiceSource,
+  scannedDS,
+  dsProbeResults,
+  enabledObservability,
+  obsProbeResults,
+  k8sRuntimeEnvLoc,
+  k8sRuntimeSvcMap,
+  svcKey,
+  lokiMappingByEnv,
+}))
 
 
 // ── Step 7: 输出目标 ──
@@ -2396,7 +2533,14 @@ watch(() => environments.map(e => e.id).join('|'), () => {
   const valid = new Set(environments.map(e => e.id).filter(Boolean))
   // 所有 per-env map:key = env.id
   for (const k of Object.keys(envNamespaces))        if (!valid.has(k)) delete envNamespaces[k]
-  for (const k of Object.keys(ccHubStateByEnv))      if (!valid.has(k)) delete ccHubStateByEnv[k]
+  for (const k of Object.keys(ccHubStateByEnv)) {
+    const env = k.includes('::') ? k.slice(k.lastIndexOf('::') + 2) : k
+    if (!valid.has(env)) delete ccHubStateByEnv[k]
+  }
+  for (const k of Object.keys(sourceEnvNamespaces)) {
+    const env = k.slice(k.lastIndexOf('::') + 2)
+    if (!valid.has(env)) delete sourceEnvNamespaces[k]
+  }
   for (const k of Object.keys(scannedDS))            if (!valid.has(k)) delete scannedDS[k]
   for (const k of Object.keys(kuboardStateByEnv))    if (!valid.has(k)) delete kuboardStateByEnv[k]
   for (const k of Object.keys(k8sRuntimeEnvLoc))     if (!valid.has(k)) delete k8sRuntimeEnvLoc[k]
@@ -2452,6 +2596,141 @@ const lastSavedAt = ref<number | null>(saved ? Date.now() : null)
 // flush 保证页面切走时 pending payload 落地不丢。
 let persistTimer: ReturnType<typeof setTimeout> | null = null
 let lastPersistVal: any = null
+
+function infraSecretKey(kind: string, ...parts: string[]): string {
+  return [system.id.trim() || 'draft', kind, ...parts].join(':')
+}
+
+function collectInfraSecrets(val: any): Record<string, string> {
+  const entries: Record<string, string> = {}
+  for (const [sourceID, data] of Object.entries((val.sourceCreds || {}) as Record<string, any>)) {
+    const secretFields = new Set((CC_FIELDS_BY_TYPE.value[configSourceType(sourceID)] || []).filter(f => f.secret).map(f => f.key))
+    for (const [envID, fields] of Object.entries((data as any)?.creds || {})) {
+      for (const field of secretFields) {
+        const value = String((fields as any)?.[field] || '')
+        if (value) entries[infraSecretKey('source', sourceID, envID, field)] = value
+      }
+    }
+  }
+  for (const spec of [...OBS_TOOL_SPECS, ...DS_TOOL_SPECS]) {
+    const category = OBS_TOOL_SPECS.includes(spec) ? 'obs' : 'ds'
+    for (const env of environments) {
+      if (!env.id) continue
+      for (const field of spec.fields.filter(f => f.secret)) {
+        const value = String(val.toolInputs?.[toolKeyFor(category, spec.key, env.id, field.key)] || '')
+        if (value) entries[infraSecretKey(category, spec.key, env.id, field.key)] = value
+      }
+    }
+  }
+  for (const [envID, services] of Object.entries((val.scannedDS || {}) as Record<string, any>)) {
+    for (const [service, stores] of Object.entries(services as Record<string, any>)) {
+      for (const [store, fields] of Object.entries(stores as Record<string, any>)) {
+        const spec = DS_TOOL_SPECS.find(item => item.key === dataStoreType(store))
+        for (const field of spec?.fields.filter(f => f.secret) || []) {
+          const value = String((fields as any)?.[field.key] || '')
+          if (value) entries[infraSecretKey('datastore', envID, service, store, field.key)] = value
+        }
+      }
+    }
+  }
+  for (const key of ['msg:lark:app_secret', 'pt:feishu_project:user_token']) {
+    const value = String(val.toolInputs?.[key] || '')
+    if (value) entries[infraSecretKey('tool', key)] = value
+  }
+  return entries
+}
+
+function sanitizeDraftSecrets(val: any): any {
+  const clean = JSON.parse(JSON.stringify(val))
+  for (const [sourceID, data] of Object.entries((clean.sourceCreds || {}) as Record<string, any>)) {
+    const secretFields = new Set((CC_FIELDS_BY_TYPE.value[configSourceType(sourceID)] || []).filter(f => f.secret).map(f => f.key))
+    for (const fields of Object.values((data as any)?.creds || {}) as any[]) {
+      for (const field of secretFields) delete fields[field]
+    }
+  }
+  for (const key of Object.keys(clean.ccCredInputs || {})) {
+    const match = key.match(/^cc:([^:]+):[^:]+:(.+)$/)
+    if (!match) continue
+    const field = (CC_FIELDS_BY_TYPE.value[match[1]] || []).find(f => f.key === match[2])
+    if (field?.secret) delete clean.ccCredInputs[key]
+  }
+  for (const spec of [...OBS_TOOL_SPECS, ...DS_TOOL_SPECS]) {
+    const category = OBS_TOOL_SPECS.includes(spec) ? 'obs' : 'ds'
+    for (const env of environments) {
+      for (const field of spec.fields.filter(f => f.secret)) {
+        delete clean.toolInputs?.[toolKeyFor(category, spec.key, env.id, field.key)]
+      }
+    }
+  }
+  delete clean.toolInputs?.['msg:lark:app_secret']
+  delete clean.toolInputs?.['pt:feishu_project:user_token']
+  for (const services of Object.values((clean.scannedDS || {}) as Record<string, any>) as any[]) {
+    for (const stores of Object.values(services || {}) as any[]) {
+      for (const [store, fields] of Object.entries(stores || {}) as [string, any][]) {
+        const spec = DS_TOOL_SPECS.find(item => item.key === dataStoreType(store))
+        for (const field of spec?.fields.filter(f => f.secret) || []) delete fields[field.key]
+      }
+    }
+  }
+  return clean
+}
+
+async function hydrateInfraSecrets() {
+  if (!isDesktop()) return
+  const tasks: Promise<void>[] = []
+  const hydrate = (key: string, apply: (value: string) => void) => {
+    tasks.push(loadInfraCred(key).then(result => {
+      if (result.ok && result.api_key) apply(result.api_key)
+    }))
+  }
+  for (const sourceID of Object.keys(sourceCreds)) {
+    for (const env of [...environments.map(item => item.id), '_shared_']) {
+      if (!env) continue
+      for (const field of (CC_FIELDS_BY_TYPE.value[configSourceType(sourceID)] || []).filter(f => f.secret)) {
+        hydrate(infraSecretKey('source', sourceID, env, field.key), value => {
+          if (!sourceCreds[sourceID].creds[env]) sourceCreds[sourceID].creds[env] = {}
+          if (!sourceCreds[sourceID].creds[env][field.key]) sourceCreds[sourceID].creds[env][field.key] = value
+        })
+      }
+    }
+  }
+  for (const [category, specs] of [['obs', OBS_TOOL_SPECS], ['ds', DS_TOOL_SPECS]] as const) {
+    for (const spec of specs) {
+      for (const env of environments) {
+        for (const field of spec.fields.filter(f => f.secret)) {
+          hydrate(infraSecretKey(category, spec.key, env.id, field.key), value => {
+            const key = toolKeyFor(category, spec.key, env.id, field.key)
+            if (!toolInputs[key]) toolInputs[key] = value
+          })
+        }
+      }
+    }
+  }
+  for (const [envID, services] of Object.entries(scannedDS)) {
+    for (const [service, stores] of Object.entries(services)) {
+      for (const [store, fields] of Object.entries(stores)) {
+        const spec = DS_TOOL_SPECS.find(item => item.key === dataStoreType(store))
+        for (const field of spec?.fields.filter(f => f.secret) || []) {
+          hydrate(infraSecretKey('datastore', envID, service, store, field.key), value => {
+            if (!fields[field.key]) fields[field.key] = value
+          })
+        }
+      }
+    }
+  }
+  await Promise.all(tasks)
+}
+onMounted(() => { hydrateInfraSecrets().catch(error => pushLog('cchub', 'warn', `系统钥匙串读取失败: ${String(error)}`, {})) })
+let hydrateSecretTimer: ReturnType<typeof setTimeout> | null = null
+watch(() => system.id, () => {
+  if (!isDesktop()) return
+  if (hydrateSecretTimer != null) clearTimeout(hydrateSecretTimer)
+  hydrateSecretTimer = setTimeout(() => {
+    hydrateInfraSecrets().catch(error => pushLog('cchub', 'warn', `系统钥匙串读取失败: ${String(error)}`, {}))
+  }, 300)
+})
+onUnmounted(() => { if (hydrateSecretTimer != null) clearTimeout(hydrateSecretTimer) })
+
 function flushPersist() {
   if (persistTimer != null) {
     clearTimeout(persistTimer)
@@ -2461,7 +2740,14 @@ function flushPersist() {
   const val = lastPersistVal
   lastPersistVal = null
   const stringify = (v: any) => JSON.stringify(v)
-  let payload = stringify(val)
+  if (isDesktop()) {
+    const secrets = collectInfraSecrets(val)
+    if (Object.keys(secrets).length > 0) {
+      saveInfraCredBatch(secrets).catch(error => pushLog('cchub', 'warn', `系统钥匙串保存失败: ${String(error)}`, {}))
+    }
+  }
+  const safeVal = sanitizeDraftSecrets(val)
+  let payload = stringify(safeVal)
   try {
     localStorage.setItem(STORAGE_KEY, payload)
     lastSavedAt.value = Date.now()
@@ -2472,7 +2758,7 @@ function flushPersist() {
       {})
   }
   try {
-    const slim = { ...val } as any
+    const slim = { ...safeVal } as any
     // 把 Loki 的 labels / values / dsList 这类列表型大数据剥掉,只留 dsUID + 选好的 mapping。
     // 重进 Step 7 时会自动重新拉一次,体验上没差,但 quota 大幅下降。
     if (slim.lokiMappingByEnv && typeof slim.lokiMappingByEnv === 'object') {
@@ -2515,10 +2801,12 @@ watch(
     // serviceSourceMap(每服务选哪个源)
     enabledSourceTypes,
     enabledSourceOrder,
+    sourceInstances,
     sourceCreds,
     serviceSourceMap,
-    // 所有配置中心字段(含 secret)持久化到 draft —— 跟 yaml 策略对齐,
-    // 用户已选择"明文也 OK"的分享模式。
+    serviceSourceByEnv,
+    sourceEnvNamespaces,
+    // 配置中心当前内存值；flushPersist 会把 secret 拆到系统钥匙串。
     ccCredInputs,
     // env → namespace / (env,service) → dataId 用户手挑的映射(生成 yaml 的关键)
     envNamespaces,
@@ -2546,6 +2834,7 @@ watch(
     dsAutoFilled,
     // Step 7 每个服务识别出的数据层配置(env → service → dsKey → fields)
     scannedDS,
+    dataStoreTypes,
     // Step 7 每个 (env, service) 的扫描状态(ok/empty/skipped/error)
     dsScanState,
     // Step 7 Loki 标签映射(per-env:datasource UID + labels + values + 选中)
@@ -2678,12 +2967,12 @@ const {
   buildContext: (): ApplyImportContext => ({
     system, agent, targetModels, codeIntelligence, serviceTopology,
     environments, repos,
-    enabledSourceTypes, enabledSourceOrder, sourceCreds,
-    serviceSourceMap, ccCredInputs,
-    envNamespaces, serviceConfigSel, serviceConfigGroup, ccHubStateByEnv,
+    enabledSourceTypes, enabledSourceOrder, sourceInstances, sourceCreds,
+    serviceSourceMap, serviceSourceByEnv, ccCredInputs,
+    sourceEnvNamespaces, envNamespaces, serviceConfigSel, serviceConfigGroup, ccHubStateByEnv,
     enabledObservability, toolInputs, obsAccessModeMap, grafanaDsUidByObsEnv,
     k8sRuntimeEnvLoc, k8sRuntimeSvcMap,
-    scannedDS, enabledDataStores, dsAutoFilled, dsScanState,
+    scannedDS, dataStoreTypes, enabledDataStores, dsAutoFilled, dsScanState,
     ALL_SOURCE_TYPES,
     CC_FIELDS_BY_TYPE: CC_FIELDS_BY_TYPE.value,
     allServiceNames: allServiceNames.value,
@@ -2793,11 +3082,13 @@ function generateYAML(): string {
       env_branches: r.env_branches,
       _serviceEntries: r._serviceEntries,
     })),
-    sourceCreds, serviceConfigSel, serviceConfigGroup, envNamespaces,
+    sourceCreds, sourceInstances: activeSourceInstances.value, sourceEnvNamespaces,
+    serviceConfigSel, serviceConfigGroup, envNamespaces,
     kuboardSvcMap, one2allSvcMap, lokiMappingByEnv, toolInputs, grafanaDsUidByObsEnv,
-    k8sRuntimeEnvLoc, k8sRuntimeSvcMap, scannedDS,
+    k8sRuntimeEnvLoc, k8sRuntimeSvcMap, scannedDS, dataStoreTypes,
     activeSourceTypes: activeSourceTypes.value,
     allServiceNames: allServiceNames.value,
+    runtimeWorkloadNames: runtimeWorkloadNames.value,
     isMultiSource: isMultiSource.value,
     targetOptions, modelConsumingTargets,
     OBS_TOOL_SPECS, CC_FIELDS_BY_TYPE: CC_FIELDS_BY_TYPE.value,
@@ -2835,6 +3126,29 @@ const {
   generateYAML,
 })
 
+async function scanAllRepos() {
+  if (scanningAllRepos.value) return
+  const targets = repos.filter(r => hasRepoSource(r))
+  if (targets.length === 0) {
+    toast.info('还没有可扫描的代码仓库')
+    return
+  }
+  scanningAllRepos.value = true
+  Object.assign(scanAllRepoStats, { done: 0, total: targets.length, failed: 0 })
+  try {
+    // clone/分析共享磁盘和 git 凭据,串行比并发轰炸更稳定,同时持续更新进度。
+    for (const repo of targets) {
+      await scanSingleRepo(repo)
+      scanAllRepoStats.done++
+      if (!repo._scanned || repo._scanError) scanAllRepoStats.failed++
+    }
+    if (scanAllRepoStats.failed) toast.error(`${scanAllRepoStats.failed}/${scanAllRepoStats.total} 个仓库扫描失败，请查看对应仓库卡片`)
+    else toast.success(`${scanAllRepoStats.total} 个仓库全部扫描完成`)
+  } finally {
+    scanningAllRepos.value = false
+  }
+}
+
 // ── 校验 ─────────────────────────────────────────────────────────────
 // computed:每次字段变动立刻重算 errors,模板按 key 显示红框,按钮按 size 决定 disabled。
 // validate 规则:
@@ -2871,18 +3185,23 @@ function computeStepErrors(): Set<string> {
     anyTargetSelected: anyTargetSelected.value,
     environments: environments.map(e => ({ id: e.id, api_domain: e.api_domain, is_prod: e.is_prod })),
     repos: repos.map(r => ({
-      name: r.name, url: r.url,
+      name: r.name, url: r.url, stack: r.stack, service_names: r.service_names,
       _source: r._source, _localPath: r._localPath, _cloneTarget: r._cloneTarget,
       _fromYAML: r._fromYAML, _yamlOriginalURL: r._yamlOriginalURL,
     })),
     isMultiSource: isMultiSource.value,
     allServiceNames: allServiceNames.value,
     activeSourceTypes: activeSourceTypes.value,
+    sourceInstances: activeSourceInstances.value,
+    sourceEnvNamespaces,
     CC_FIELDS_BY_TYPE: CC_FIELDS_BY_TYPE.value,
     ccCredInputs, sourceCreds, envNamespaces, serviceConfigSel,
     kuboardStateByEnv, kuboardSvcMap, one2allStateByEnv, one2allSvcMap, ccHubStateByEnv, dsProbeResults, dsScanState,
     isFieldHidden, getServiceSource, enumerateDataStoreProbeTargets,
-    enabledObservability,
+    enabledObservability, OBS_TOOL_SPECS, toolInputs, obsProbeResults, obsProbeKey,
+    toolKeyFor, isObsFieldHidden, getObsAccessMode,
+    grafanaDsUidByObsEnv, obsGrafanaDsKey, lokiMappingByEnv, k8sRuntimeEnvLoc,
+    requireObsProbe: isDesktop(),
   }
   return libComputeStepErrors(ctx)
 }
@@ -3048,7 +3367,8 @@ const {
 } = useDeployFlow({
   agent, system, targetModels,
   enabledTargets, targetOptions, targetLabels, homeDir,
-  activeSourceTypes, sourceCreds, environments, enabledDataStores,
+  activeSourceTypes, sourceInstances: activeSourceInstances, sourceCreds, environments,
+  enabledDataStores, scannedDS, dataStoreTypes,
   enabledObservability, toolInputs, OBS_TOOL_SPECS, DS_TOOL_SPECS,
   toolKeyFor, isObsFieldHidden, displayObsField,
   yamlOutput, reposRootInput, resolvedReposRoot, repos, resolveCloneDest,
@@ -3146,6 +3466,7 @@ provide(WizardStoreKey, {
   // allServiceNames 是 ComputedRef,reactive proxy 不能直接放 — 这里取 .value,
   // 子组件每次访问时仍然走 reactive(因为 environments + repos 是 reactive 源)。
   get allServiceNames() { return allServiceNames.value },
+  get runtimeWorkloadNames() { return runtimeWorkloadNames.value },
   kuboardStateByEnv,
   hasError,
   svcKey,
@@ -3332,6 +3653,18 @@ provide(WizardStoreKey, {
         @save="saveAsGlobalDefault"
       />
 
+      <div class="repo-batch-toolbar">
+        <div>
+          <strong>{{ repos.length }} 个仓库</strong>
+          <span> · {{ repos.filter(r => r._scanned).length }} 已扫描</span>
+          <span> · {{ repos.filter(r => r._scanError).length }} 异常</span>
+        </div>
+        <button type="button" class="btn" :disabled="scanningAllRepos" @click="scanAllRepos">
+          <span v-if="scanningAllRepos" class="cc-preload-spinner" aria-hidden="true"></span>
+          {{ scanningAllRepos ? `扫描中 ${scanAllRepoStats.done}/${scanAllRepoStats.total}` : '🔄 扫描全部仓库' }}
+        </button>
+      </div>
+
       <RepoListItem
         v-for="(repo, i) in repos"
         :key="i"
@@ -3394,12 +3727,14 @@ provide(WizardStoreKey, {
       :config-type-descriptions="configTypeDescriptions"
       :enabled-source-types="enabledSourceTypes"
       :active-source-types="activeSourceTypes"
+      :source-instances="activeSourceInstances"
       :is-multi-source="isMultiSource"
       :config-center-type="configCenterType"
       :cc-fields-by-type="CC_FIELDS_BY_TYPE"
       :cc-cred-inputs="ccCredInputs"
       :source-creds="sourceCreds"
       :cc-hub-state-by-env="ccHubStateByEnv"
+      :source-env-namespaces="sourceEnvNamespaces"
       :env-namespaces="envNamespaces"
       :service-config-sel="serviceConfigSel"
       :service-config-group="serviceConfigGroup"
@@ -3412,12 +3747,17 @@ provide(WizardStoreKey, {
       :entries-for-namespace="entriesForNamespace"
       :get-service-source="getServiceSource"
       @toggle-source-type="toggleSourceType"
+      @add-source-instance="addSourceInstance"
+      @remove-source-instance="removeSourceInstance"
       @update-cred="(k, v) => (ccCredInputs[k] = v)"
       @clear-cred="clearCCFieldInput"
       @run-kuboard-preload="runKuboardPreload"
       @run-one2-all-preload="(envID, purpose) => runOne2AllPreload(envID, purpose)"
       @run-c-c-hub-preload="runCCHubPreload"
-      @set-service-source="(svc, src) => setServiceSource(svc, src)"
+      @preload-c-c-hub-instance="(envID, srcID) => runCCHubPreload(envID, srcID)"
+      @instance-namespace-changed="(envID, value, srcID) => onNamespaceChanged(envID, value, srcID)"
+      @instance-data-id-changed="(envID, svc, srcID) => onDataIdChanged(envID, svc, srcID)"
+      @set-service-source="(svc, src, envID) => setServiceSource(svc, src, envID)"
       @namespace-changed="onNamespaceChanged"
       @data-id-changed="onDataIdChanged"
       @set-kuboard-loc="setKuboardLoc"
@@ -3448,6 +3788,8 @@ provide(WizardStoreKey, {
       :grafana-ds-uid-by-obs-env="grafanaDsUidByObsEnv"
       :obs-grafana-ds-key="obsGrafanaDsKey"
       :obs-grafana-ds-types="OBS_GRAFANA_DS_TYPES"
+      :k8s-connection-reuse-label="k8sConnectionReuseLabel"
+      :resource-coverage="resourceCoverage"
       @set-obs-access-mode="setObsAccessMode"
       @update-tool-input="(k, v, toolKey, envID) => {
         toolInputs[k] = v
@@ -3476,6 +3818,7 @@ provide(WizardStoreKey, {
       :scanned-d-s="scannedDS"
       :service-config-sel="serviceConfigSel"
       :ds-probe-results="dsProbeResults"
+      :ds-tool-specs="DS_TOOL_SPECS"
       :scan-state-of="scanStateOf"
       :ds-label="dsLabel"
       :ds-field-label="dsFieldLabel"
@@ -3484,6 +3827,7 @@ provide(WizardStoreKey, {
       @auto-import-data-stores="autoImportDataStores"
       @probe-all-across-envs="probeAllAcrossEnvs"
       @remove-d-s="(envID, svc, dsKey) => removeScannedDS(envID, svc, dsKey)"
+      @add-d-s="(envID, svc, dsKey, fields) => addManualDataStore(envID, svc, dsKey, fields)"
       @probe-d-s="(envID, svc, dsKey) => probeOneDS(envID, svc, dsKey)"
     />
 
@@ -3535,6 +3879,21 @@ provide(WizardStoreKey, {
 </template>
 
 <style>
+.repo-batch-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin: 14px 0;
+  padding: 12px 14px;
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  background: #f8fbff;
+  color: #64748b;
+}
+@media (max-width: 720px) {
+  .repo-batch-toolbar { align-items: stretch; flex-direction: column; }
+}
 /* 注:本页 CSS 不加 scoped —— InitPage 抽出 18 个子组件后,子组件 template 引用的
    .dynamic-row / .cc-field / .ds-svc-block / .repo-block 等 ~140 个类全在这里定义,
    scoped 会让样式无法穿透到子组件 DOM。这些类名都是 InitPage 域专属(.repo-block /
@@ -4052,7 +4411,7 @@ input.path-readonly {
 }
 .cc-scope-tag.secret { color: #92400e; background: #fef3c7; }
 
-/* Step 5 顶部:提醒 yaml 含明文凭证,分享要限范围(正式文案 + 列表样式) */
+/* Step 5 顶部:说明钥匙串、YAML 引用与共享范围(正式文案 + 列表样式) */
 /* ── 顶部多选 checkbox 行(Step 5 配置源)── */
 .source-types-checkboxes {
   display: flex; flex-wrap: wrap; gap: 8px;

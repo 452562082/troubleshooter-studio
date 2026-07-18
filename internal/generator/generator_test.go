@@ -487,6 +487,8 @@ func TestWriteTshootMetaIncludesAgentRole(t *testing.T) {
 	tr := filepath.Join(projectRoot(t), "templates")
 	g := New(cfg, tr, out)
 	g.TroubleshooterYAMLSource = []byte("system:\n  id: shop\n")
+	repoPath := filepath.Join(t.TempDir(), "shop")
+	g.Ctx.RepoLocalPaths = map[string]string{cfg.Repos[0].Name: repoPath}
 
 	dir := filepath.Join(out, "meta")
 	if err := g.writeTshootMetaForRole(dir, "codex", AgentRoleValidator); err != nil {
@@ -498,6 +500,9 @@ func TestWriteTshootMetaIncludesAgentRole(t *testing.T) {
 	}
 	if !strings.Contains(data, `"role": "validator"`) {
 		t.Fatalf("role missing from meta:\n%s", data)
+	}
+	if !strings.Contains(data, `"project_repositories"`) || !strings.Contains(data, repoPath) {
+		t.Fatalf("project ownership missing from meta:\n%s", data)
 	}
 
 	troubleshooterDir := filepath.Join(out, "troubleshooter-meta")
@@ -567,6 +572,47 @@ func TestGenerate_MultiSource_ConfigMapRoutesPerService(t *testing.T) {
 	// 多源块 sources: 应被声明
 	if !strings.Contains(cm, "sources:") {
 		t.Errorf("多源场景 config-map 应有 sources: 块")
+	}
+}
+
+func TestGenerate_ResourceCatalogRoutesSameServicePerEnvironment(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
+	cfg.Infrastructure.ConfigCenters = append(cfg.Infrastructure.ConfigCenters, config.ConfigCenter{
+		ID: "prod-nacos", Type: "nacos",
+		Endpoints: []config.ConfigCenterEndpoint{{Env: "prod", Addr: "prod-nacos:8848"}},
+	})
+	found := false
+	for i := range cfg.ResourceCatalog.Services {
+		if cfg.ResourceCatalog.Services[i].ID != "product-service" {
+			continue
+		}
+		if cfg.ResourceCatalog.Services[i].ConfigSources == nil {
+			cfg.ResourceCatalog.Services[i].ConfigSources = map[string]string{}
+		}
+		cfg.ResourceCatalog.Services[i].ConfigSources["prod"] = "prod-nacos"
+		found = true
+	}
+	if !found {
+		t.Fatal("fixture should derive product-service resource")
+	}
+
+	out := t.TempDir()
+	if err := New(cfg, filepath.Join(projectRoot(t), "templates"), out).Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	cm := readFile(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/config-map.yaml"))
+	devStart := strings.Index(cm, "  dev:")
+	prodStart := strings.Index(cm, "  prod:")
+	if devStart < 0 || prodStart < 0 || prodStart <= devStart {
+		t.Fatalf("environment blocks missing:\n%s", cm)
+	}
+	devBlock := cm[devStart:prodStart]
+	prodBlock := cm[prodStart:]
+	if strings.Contains(devBlock, `config_source: "prod-nacos"`) {
+		t.Fatalf("dev must keep legacy/default source:\n%s", devBlock)
+	}
+	if !strings.Contains(prodBlock, `config_source: "prod-nacos"`) {
+		t.Fatalf("prod must use resource catalog source:\n%s", prodBlock)
 	}
 }
 

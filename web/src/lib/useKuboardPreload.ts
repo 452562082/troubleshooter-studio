@@ -35,7 +35,7 @@ export interface UseKuboardPreloadDeps {
   /** 当前所有服务名(computed.value) */
   allServiceNames: { value: readonly string[] }
   /** 取服务对应的源 type;multi-source 下区分主源/副源 */
-  getServiceSource: (svc: string) => string
+  getServiceSource: (svc: string, envID?: string) => string
 }
 
 export function useKuboardPreload(deps: UseKuboardPreloadDeps) {
@@ -87,7 +87,7 @@ export function useKuboardPreload(deps: UseKuboardPreloadDeps) {
     const state = deps.kuboardStateByEnv[envID]
     if (!state || state.status !== 'ok') return
     for (const svc of deps.allServiceNames.value) {
-      if (deps.getServiceSource(svc) !== sourceType) continue
+      if (deps.getServiceSource(svc, envID) !== sourceType) continue
       const k = svcKey(envID, svc)
       const cur = deps.kuboardSvcMap[k]
       if (cur && cur.cluster && cur.namespace && cur.configmap) continue // 三联齐了 → 不动

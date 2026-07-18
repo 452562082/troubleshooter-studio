@@ -27,6 +27,8 @@ export interface WizardStore {
   // 高频 reactive 数据(2+ Step 共用)
   environments: Environment[]
   allServiceNames: string[]
+  /** 配置中心服务 + 前端/移动端等只参与 K8s/日志映射的运行时工作负载。 */
+  runtimeWorkloadNames: string[]
   kuboardStateByEnv: Record<string, KuboardResourceState | undefined>
   one2allStateByEnv: Record<string, One2AllResourceState | undefined>
 

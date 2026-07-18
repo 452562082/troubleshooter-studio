@@ -37,8 +37,10 @@ import NamespaceServiceMap from './NamespaceServiceMap.vue'
 import KuboardServiceMap from './KuboardServiceMap.vue'
 import SecondarySourcePanel from './SecondarySourcePanel.vue'
 import CredsShareWarning from './CredsShareWarning.vue'
+import type { ConfigSourceInstance } from '../lib/configSourceInstances'
 
 const DATA_ID_CONFIG_TYPES = new Set(['nacos', 'apollo', 'consul'])
+const MULTI_INSTANCE_SOURCE_TYPES = DATA_ID_CONFIG_TYPES
 
 interface SourceCredsEntry { creds: Record<string, Record<string, string>>; rawExtra?: Record<string, unknown> }
 interface CCHubEnvState {
@@ -50,12 +52,13 @@ interface CCHubEnvState {
 // 通用 reactive + helper 走 inject(避免每个 prop 单独透传)
 const wizard = inject(WizardStoreKey)!
 
-defineProps<{
+const props = defineProps<{
   // Step 5 专属
   configTypeOptions: string[]
   configTypeDescriptions: Record<string, string>
   enabledSourceTypes: Record<string, boolean>
   activeSourceTypes: string[]
+  sourceInstances: ConfigSourceInstance[]
   isMultiSource: boolean
   configCenterType: string
   ccFieldsByType: Record<string, CredField[]>
@@ -64,6 +67,7 @@ defineProps<{
   ccCredInputs: Record<string, string>
   sourceCreds: Record<string, SourceCredsEntry>
   ccHubStateByEnv: Record<string, CCHubEnvState | undefined>
+  sourceEnvNamespaces: Record<string, string>
   envNamespaces: Record<string, string>
   serviceConfigSel: Record<string, string>
   serviceConfigGroup: Record<string, string>
@@ -74,24 +78,31 @@ defineProps<{
   ccKeyFor: (type: string, envID: string, field: string) => string
   isFieldHidden: (t: string, envID: string, f: CredField, getSibling: (k: string) => string) => boolean
   envScanned: (envID: string) => boolean
-  namespacesFor: (envID: string) => CCHubNamespace[]
-  entriesForNamespace: (envID: string, ns: string) => CCHubEntry[]
-  getServiceSource: (svc: string) => string
+  namespacesFor: (envID: string, sourceID?: string) => CCHubNamespace[]
+  entriesForNamespace: (envID: string, ns: string, sourceID?: string) => CCHubEntry[]
+  getServiceSource: (svc: string, envID?: string) => string
 }>()
+
+const primarySourceID = () => props.sourceInstances[0]?.id || props.configCenterType
 
 const emit = defineEmits<{
   toggleSourceType: [type: string, checked: boolean]
+  addSourceInstance: [type: string]
+  removeSourceInstance: [sourceID: string]
   updateCred: [key: string, value: string]
   clearCred: [key: string]
   runKuboardPreload: [envID: string]
   runOne2AllPreload: [envID: string, purpose: 'config_source']
   runCCHubPreload: [envID: string]
-  setServiceSource: [svc: string, source: string]
+  setServiceSource: [svc: string, source: string, envID: string]
   namespaceChanged: [envID: string, namespace: string]
   dataIdChanged: [envID: string, svc: string]
   setKuboardLoc: [envID: string, svc: string, field: 'cluster' | 'namespace' | 'configmap', value: string]
   setOne2AllLoc: [envID: string, svc: string, field: 'cluster_id' | 'namespace' | 'configmap', value: string]
   preloadKuboardFromSource: [sourceType: string, envID: string]
+  preloadCCHubInstance: [envID: string, sourceID: string]
+  instanceNamespaceChanged: [envID: string, namespace: string, sourceID: string]
+  instanceDataIdChanged: [envID: string, svc: string, sourceID: string]
 }>()
 </script>
 
@@ -104,7 +115,7 @@ const emit = defineEmits<{
       <label>
         系统用到的配置源(可多选)
         <span class="field-hint">
-          — 一种源勾一次(nacos / apollo / kuboard 等);多选会让你为每个服务挑走哪个源,单选则全员默认走它
+          — 勾选协议类型；Nacos / Apollo / Consul 可继续添加同类型实例，多源时按环境和服务分配实例
         </span>
       </label>
       <div class="source-types-checkboxes">
@@ -129,6 +140,23 @@ const emit = defineEmits<{
       <div v-else-if="isMultiSource" class="multi-source-mgr-hint">
         🔀 多源模式:每个源独立填写下面的连接信息;Step 6/7 数据层和可观测会按服务的源路由
       </div>
+      <div v-if="activeSourceTypes.length" class="source-instance-list">
+        <div v-for="instance in sourceInstances" :key="instance.id" class="source-instance-row">
+          <span><code>{{ instance.id }}</code> · {{ instance.type }}</span>
+          <button
+            v-if="MULTI_INSTANCE_SOURCE_TYPES.has(instance.type)"
+            type="button"
+            class="btn-link"
+            @click="emit('addSourceInstance', instance.type)"
+          >+ 同类型实例</button>
+          <button
+            v-if="sourceInstances.length > 1"
+            type="button"
+            class="btn-link danger"
+            @click="emit('removeSourceInstance', instance.id)"
+          >移除</button>
+        </div>
+      </div>
     </div>
 
     <!-- 凭证表单:主源(activeSourceTypes[0])完整功能(连接 + 预读 + namespace + 服务 dataId 选择)。
@@ -138,11 +166,11 @@ const emit = defineEmits<{
       <label>
         <code>{{ configCenterType }}</code> 连接配置
         <span v-if="isMultiSource" class="auto-tag" style="background:#dbeafe;color:#1e40af;">主源 · 完整 preload</span>
-        <span class="field-hint">— 按环境维度填写,保存后写入 troubleshooter.yaml(标 <code># ⚠ secret</code> 注释),部署时注入到目标平台的 MCP Server env</span>
+        <span class="field-hint">— 按环境维度填写；连接地址进入 YAML，secret 只存系统钥匙串并在部署时注入 MCP Server env</span>
       </label>
       <CredsShareWarning title="⚠ 凭证与共享提醒">
-        <li>这里填的账号密码会以明文写入 <code>troubleshooter.yaml</code>(每条带 <code># ⚠ secret</code> 注释),并部署时注入到机器人 MCP Server 的 env 块 + <code>~/.tshoot/&lt;agent-id&gt;-creds.json</code>。</li>
-        <li>分享 yaml 请限**团队内部 / 私有仓库**,<strong>不要提交到公开代码仓库</strong>。</li>
+        <li>账号、密码和 Token 保存到操作系统钥匙串；<code>troubleshooter.yaml</code> 只写 <code v-text="'{{ENV_VAR}}'"></code> 引用。</li>
+        <li>连接地址和资源名称仍会进入 YAML；分享前请确认其中不包含内部敏感拓扑。</li>
 
       </CredsShareWarning>
     <!-- one2all 专属:全局连接(单一 MCP server,不分 env) -->
@@ -213,10 +241,10 @@ const emit = defineEmits<{
         <ServiceChecklist
           v-if="wizard.allServiceNames.length > 0"
           :services="wizard.allServiceNames"
-          :source-i-d="configCenterType"
+          :source-i-d="primarySourceID()"
           :hint-html="`勾选要走 <code>${configCenterType}</code> 源的服务;点下面&quot;拉取配置&quot;会列出这些服务对应的配置项`"
-          :get-service-source="getServiceSource"
-          @toggle="(svc, checked) => emit('setServiceSource', svc, checked ? configCenterType : '')"
+          :get-service-source="(svc) => getServiceSource(svc, env.id)"
+          @toggle="(svc, checked) => emit('setServiceSource', svc, checked ? primarySourceID() : '', env.id)"
         />
 
         <!-- 真实预加载:nacos/apollo/consul 专属;one2all/kuboard 不适用 -->
@@ -235,10 +263,10 @@ const emit = defineEmits<{
         <NamespaceServiceMap
           v-if="DATA_ID_CONFIG_TYPES.has(configCenterType)
                 && envScanned(env.id)
-                && wizard.allServiceNames.filter(s => getServiceSource(s) === configCenterType).length > 0"
+                && wizard.allServiceNames.filter(s => getServiceSource(s, env.id) === primarySourceID()).length > 0"
           :env-i-d="env.id"
           :config-center-type="configCenterType"
-          :services="wizard.allServiceNames.filter(s => getServiceSource(s) === configCenterType)"
+          :services="wizard.allServiceNames.filter(s => getServiceSource(s, env.id) === primarySourceID())"
           :env-namespaces="envNamespaces"
           :service-config-sel="serviceConfigSel"
           :service-config-group="serviceConfigGroup"
@@ -270,9 +298,9 @@ const emit = defineEmits<{
         <KuboardServiceMap
           v-if="configCenterType === 'kuboard'
                 && wizard.kuboardStateByEnv[env.id]?.status === 'ok'
-                && wizard.allServiceNames.filter(s => getServiceSource(s) === configCenterType).length > 0"
+                && wizard.allServiceNames.filter(s => getServiceSource(s, env.id) === primarySourceID()).length > 0"
           :env-i-d="env.id"
-          :services="wizard.allServiceNames.filter(s => getServiceSource(s) === configCenterType)"
+          :services="wizard.allServiceNames.filter(s => getServiceSource(s, env.id) === primarySourceID())"
           :kuboard-svc-map="kuboardSvcMap"
           :clusters="wizard.kuboardClustersOf(env.id)"
           :svc-key="wizard.svcKey"
@@ -297,7 +325,7 @@ const emit = defineEmits<{
         <div
           v-if="configCenterType === 'one2all'
                 && wizard.one2allStateByEnv[env.id]?.status === 'ok'
-                && wizard.allServiceNames.filter(s => getServiceSource(s) === 'one2all').length > 0"
+                && wizard.allServiceNames.filter(s => getServiceSource(s, env.id) === 'one2all').length > 0"
           class="cc-map-block"
         >
           <div class="cc-map-head">
@@ -307,7 +335,7 @@ const emit = defineEmits<{
           </div>
           <div class="cc-map-svc-list">
             <div
-              v-for="svc in wizard.allServiceNames.filter(s => getServiceSource(s) === 'one2all')"
+              v-for="svc in wizard.allServiceNames.filter(s => getServiceSource(s, env.id) === 'one2all')"
               :key="'o2a-' + env.id + '-' + svc"
               class="cc-map-svc-row"
             >
@@ -383,13 +411,21 @@ const emit = defineEmits<{
 
     <!-- 副源连接表单:每个非主源 type 一份;主源在上面已渲染。 -->
     <SecondarySourcePanel
-      v-for="t in activeSourceTypes.slice(1).filter(t2 => ccFieldsByType[t2])"
-      :key="`secsrc-${t}`"
-      :source-type="t"
-      :fields="ccFieldsByType[t]"
+      v-for="instance in sourceInstances.slice(1).filter(item => ccFieldsByType[item.type])"
+      :key="`secsrc-${instance.id}`"
+      :source-i-d="instance.id"
+      :source-type="instance.type"
+      :fields="ccFieldsByType[instance.type]"
       :environments="wizard.environments"
       :all-service-names="wizard.allServiceNames"
       :source-creds="sourceCreds"
+      :cc-hub-state-by-env="ccHubStateByEnv"
+      :source-env-namespaces="sourceEnvNamespaces"
+      :service-config-sel="serviceConfigSel"
+      :service-config-group="serviceConfigGroup"
+      :namespaces-for="namespacesFor"
+      :entries-for-namespace="entriesForNamespace"
+      :has-error="wizard.hasError"
       :kuboard-state-by-env="wizard.kuboardStateByEnv"
       :kuboard-svc-map="kuboardSvcMap"
       :is-field-hidden="isFieldHidden"
@@ -397,9 +433,12 @@ const emit = defineEmits<{
       :svc-key="wizard.svcKey"
       :kuboard-namespaces-for="wizard.kuboardNamespacesFor"
       :kuboard-config-maps-for="wizard.kuboardConfigMapsFor"
-      @preload-kuboard="(srcType, envID) => emit('preloadKuboardFromSource', srcType, envID)"
-      @toggle-service-source="(svc, checked, srcType) => emit('setServiceSource', svc, checked ? srcType : '')"
+      @preload-kuboard="(srcID, envID) => emit('preloadKuboardFromSource', srcID, envID)"
+      @toggle-service-source="(svc, checked, srcID, envID) => emit('setServiceSource', svc, checked ? srcID : '', envID)"
       @set-kuboard-loc="(envID, svc, field, value) => emit('setKuboardLoc', envID, svc, field, value)"
+      @preload-c-c-hub="(envID, srcID) => emit('preloadCCHubInstance', envID, srcID)"
+      @namespace-changed="(envID, value, srcID) => emit('instanceNamespaceChanged', envID, value, srcID)"
+      @data-id-changed="(envID, svc, srcID) => emit('instanceDataIdChanged', envID, svc, srcID)"
     />
 
     <!-- env-vars 源(无远程连接,但每个 env 各数据层的静态连接串在 Step 6 数据层里按 data_store 维度填) -->
@@ -483,4 +522,23 @@ const emit = defineEmits<{
 }
 .cm-check-label:hover { background: #eff6ff; }
 .cm-check-label input[type="checkbox"] { margin: 0; accent-color: #3b82f6; }
+.source-instance-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  background: #f8fbff;
+}
+.source-instance-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 32px;
+  color: #475569;
+}
+.source-instance-row > span { margin-right: auto; }
+.source-instance-row code { color: #1d4ed8; font-weight: 700; }
+.btn-link.danger { color: #dc2626; }
 </style>

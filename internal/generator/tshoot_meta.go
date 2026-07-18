@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 )
 
@@ -23,16 +25,17 @@ func (g *Generator) writeTshootMeta(dir, target string) error {
 func (g *Generator) writeTshootMetaForRole(dir, target string, role AgentRole) error {
 	agentID := agentIDForRole(g.Ctx, role)
 	meta := discover.Meta{
-		SchemaVersion:      1,
-		TshootVersion:      g.TshootVersion,
-		SystemID:           g.Ctx.System.ID,
-		SystemName:         g.Ctx.System.Name,
-		AgentID:            agentID,
-		Role:               string(role),
-		InternalAgents:     internalAgentsForMeta(g.Ctx),
-		Target:             target,
-		GeneratedAt:        time.Now().UTC().Format(time.RFC3339),
-		TroubleshooterYAML: string(g.TroubleshooterYAMLSource),
+		SchemaVersion:       2,
+		TshootVersion:       g.TshootVersion,
+		SystemID:            g.Ctx.System.ID,
+		SystemName:          g.Ctx.System.Name,
+		AgentID:             agentID,
+		Role:                string(role),
+		InternalAgents:      internalAgentsForMeta(g.Ctx),
+		ProjectRepositories: projectRepositoriesForMeta(g.Ctx.SystemConfig, g.Ctx.RepoLocalPaths),
+		Target:              target,
+		GeneratedAt:         time.Now().UTC().Format(time.RFC3339),
+		TroubleshooterYAML:  string(g.TroubleshooterYAMLSource),
 	}
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
@@ -46,6 +49,22 @@ func (g *Generator) writeTshootMetaForRole(dir, target string, role AgentRole) e
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
+}
+
+func projectRepositoriesForMeta(cfg *config.SystemConfig, repoLocalPaths map[string]string) []discover.ProjectRepository {
+	if cfg == nil {
+		return nil
+	}
+	repos := make([]discover.ProjectRepository, 0, len(cfg.Repos))
+	for _, repo := range cfg.Repos {
+		repos = append(repos, discover.ProjectRepository{
+			Name:      strings.TrimSpace(repo.Name),
+			URL:       strings.TrimSpace(repo.URL),
+			LocalPath: strings.TrimSpace(repoLocalPaths[repo.Name]),
+			SubPath:   strings.Trim(strings.TrimSpace(repo.SubPath), "/\\"),
+		})
+	}
+	return repos
 }
 
 func (g *Generator) writeIDEAgentMetas(dir, target string) error {

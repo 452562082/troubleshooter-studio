@@ -60,6 +60,30 @@ func TestInstallNative_ClaudeCode(t *testing.T) {
 	if _, err := os.Stat(scriptFile); err != nil {
 		t.Errorf("scripts 没装到 namespaced 目录: %v", err)
 	}
+	routerSkill := filepath.Join(fakeHome, ".claude", "skills", projectRouterSkillName, "SKILL.md")
+	routerBody, err := os.ReadFile(routerSkill)
+	if err != nil {
+		t.Fatalf("shared project router missing: %v", err)
+	}
+	if !strings.Contains(string(routerBody), filepath.ToSlash(filepath.Join(fakeHome, ".claude", "skills", projectRouterSkillName, "scripts", "resolve.py"))) {
+		t.Fatalf("router does not reference installed resolver: %s", routerBody)
+	}
+}
+
+func TestUninstallNativeKeepsSharedProjectRouter(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	staging := setupClaudeStaging(t, "shop-bot")
+	if err := InstallNative(staging, "claude-code"); err != nil {
+		t.Fatal(err)
+	}
+	installed := filepath.Join(fakeHome, ".claude", "skills", "shop-bot")
+	if _, err := UninstallNative(installed, "claude-code"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(fakeHome, ".claude", "skills", projectRouterSkillName, "SKILL.md")); err != nil {
+		t.Fatalf("uninstalling one bot removed shared router: %v", err)
+	}
 }
 
 func TestInstallNative_Cursor(t *testing.T) {

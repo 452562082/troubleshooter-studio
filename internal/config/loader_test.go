@@ -284,6 +284,118 @@ repos:
 	}
 }
 
+func TestResourceCatalog_EnvironmentSpecificSourceAndStableDataStoreIDs(t *testing.T) {
+	yaml := `
+system: {id: shop, name: Shop}
+agent: {name: a, workspace_name: a, model: m}
+environments:
+  - {id: dev, api_domain: x, is_prod: false}
+  - {id: prod, api_domain: y, is_prod: true}
+generation: {target_host: openclaw}
+meta: {schema_version: "0.2"}
+repos:
+  - {name: monorepo, url: g, role: backend, stack: go, service_names: [order], env_branches: {dev: main, prod: main}}
+resource_catalog:
+  services:
+    - id: order
+      repository: monorepo
+      config_sources: {dev: nacos-dev, prod: nacos-prod}
+      data_stores: {dev: [redis], prod: [redis-2]}
+      workloads: {dev: order-web}
+  workloads:
+    - id: order-web
+      repository: monorepo
+      service: order
+      names: {dev: order-v2}
+infrastructure:
+  config_centers:
+    - {id: nacos-dev, type: nacos, endpoints: [{env: dev, addr: a:8848}]}
+    - {id: nacos-prod, type: nacos, endpoints: [{env: prod, addr: b:8848}]}
+  data_stores:
+    - {type: redis, enabled: true, readonly_enforced: true}
+    - {type: redis, enabled: true, readonly_enforced: true}
+`
+	cfg, err := LoadFromBytes([]byte(yaml))
+	if err != nil {
+		t.Fatalf("load resource catalog: %v", err)
+	}
+	if got := cfg.ConfigSourceFor("dev", "order"); got != "nacos-dev" {
+		t.Fatalf("dev source = %q, want nacos-dev", got)
+	}
+	if got := cfg.ConfigSourceFor("prod", "order"); got != "nacos-prod" {
+		t.Fatalf("prod source = %q, want nacos-prod", got)
+	}
+	if got := []string{cfg.Infrastructure.DataStores[0].ID, cfg.Infrastructure.DataStores[1].ID}; got[0] != "redis" || got[1] != "redis-2" {
+		t.Fatalf("derived datastore ids = %v, want [redis redis-2]", got)
+	}
+}
+
+func TestResourceCatalog_RejectsUnknownReferences(t *testing.T) {
+	yaml := `
+system: {id: shop, name: Shop}
+agent: {name: a, workspace_name: a, model: m}
+environments: [{id: dev, api_domain: x, is_prod: false}]
+generation: {target_host: openclaw}
+meta: {schema_version: "0.2"}
+repos: [{name: repo, url: g, role: backend, stack: go, service_names: [order], env_branches: {dev: main}}]
+resource_catalog:
+  services:
+    - {id: order, repository: repo, config_sources: {dev: missing}}
+infrastructure:
+  config_centers: [{id: real, type: nacos, endpoints: [{env: dev, addr: a:8848}]}]
+`
+	_, err := LoadFromBytes([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "unknown config_centers") {
+		t.Fatalf("unknown catalog reference should fail, got %v", err)
+	}
+}
+
+func TestResourceCatalog_RejectsConflictingRuntimeMappings(t *testing.T) {
+	base := minimalValid()
+	base.Repos = []Repo{{Name: "web", URL: "g", Stack: "node", Role: RoleFrontend}}
+	base.ResourceCatalog = ResourceCatalog{
+		Workloads: []WorkloadResource{{ID: "web", Repository: "web", Names: map[string]string{"dev": "web-v2"}}},
+	}
+	base.Infrastructure.Observability.K8sRuntime.ServiceMap = []K8sRuntimeServiceMapEntry{{
+		Env: "dev", Service: "web", Cluster: "c", Namespace: "n", Workload: "web-v1",
+	}}
+	if err := Validate(&base); err == nil || !strings.Contains(err.Error(), "runtime workload mismatch") {
+		t.Fatalf("conflicting runtime names should fail, got %v", err)
+	}
+}
+
+func TestResourceCatalog_RejectsUnknownLokiServiceIdentity(t *testing.T) {
+	base := minimalValid()
+	base.Repos = []Repo{{Name: "api", URL: "g", Stack: "go", Role: RoleBackend, ServiceNames: []string{"api"}}}
+	base.ResourceCatalog = ResourceCatalog{
+		Services: []ServiceResource{{ID: "api", Repository: "api"}},
+	}
+	base.Infrastructure.Observability.Loki.LabelMappingByEnv = map[string]LokiLabelMappingPerEnv{
+		"dev": {ServiceMap: map[string]map[string]string{"ghost": {"app": "ghost"}}},
+	}
+	if err := Validate(&base); err == nil || !strings.Contains(err.Error(), "unknown service/workload identity") {
+		t.Fatalf("unknown Loki service identity should fail, got %v", err)
+	}
+}
+
+func TestResourceCatalog_AcceptsConsistentRuntimeMappings(t *testing.T) {
+	base := minimalValid()
+	base.Repos = []Repo{{Name: "api", URL: "g", Stack: "go", Role: RoleBackend, ServiceNames: []string{"api"}}}
+	base.ResourceCatalog = ResourceCatalog{
+		Services:  []ServiceResource{{ID: "api", Repository: "api", Workloads: map[string]string{"dev": "api-workload"}}},
+		Workloads: []WorkloadResource{{ID: "api-workload", Repository: "api", Service: "api", Names: map[string]string{"dev": "api-v2"}}},
+	}
+	base.Infrastructure.Observability.K8sRuntime.ServiceMap = []K8sRuntimeServiceMapEntry{{
+		Env: "dev", Service: "api", Cluster: "c", Namespace: "n", Workload: "api-v2",
+	}}
+	base.Infrastructure.Observability.Loki.LabelMappingByEnv = map[string]LokiLabelMappingPerEnv{
+		"dev": {ServiceMap: map[string]map[string]string{"api": {"app": "api-v2"}}},
+	}
+	if err := Validate(&base); err != nil {
+		t.Fatalf("consistent resource mappings should pass: %v", err)
+	}
+}
+
 // one2all 是合法配置源:通过 streamable-http MCP 读 ConfigMap/Secret。
 func TestMigrate_One2AllConfigCenterSupported(t *testing.T) {
 	yaml := `

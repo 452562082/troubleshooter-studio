@@ -7,6 +7,7 @@ describe('ConfigSourceStep', () => {
   const wizard: WizardStore = {
     environments: [{ id: 'dev', is_prod: false }],
     allServiceNames: ['base-backend-base'],
+    runtimeWorkloadNames: ['base-backend-base'],
     kuboardStateByEnv: {},
     one2allStateByEnv: {
       dev: {
@@ -49,6 +50,7 @@ describe('ConfigSourceStep', () => {
         configTypeDescriptions: { one2all: 'one2all remote MCP' },
         enabledSourceTypes: { one2all: true },
         activeSourceTypes: ['one2all'],
+        sourceInstances: [{ id: 'one2all', type: 'one2all' }],
         isMultiSource: false,
         configCenterType: 'one2all',
         ccFieldsByType: {
@@ -62,6 +64,7 @@ describe('ConfigSourceStep', () => {
           'cc:one2all:_shared_:token': 'token',
         },
         sourceCreds: {},
+        sourceEnvNamespaces: {},
         // Simulates stale nacos/apollo/consul preload state left in draft.
         ccHubStateByEnv: {
           dev: { status: 'ok', entries: [{ locator: 'stale.yaml' }], namespaces: [{ id: 'base-dev', show_name: 'base-dev' }] },

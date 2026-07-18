@@ -14,12 +14,17 @@ import CredentialField from './CredentialField.vue'
 import PreloadStatusRow from './PreloadStatusRow.vue'
 import ServiceChecklist from './ServiceChecklist.vue'
 import KuboardServiceMap from './KuboardServiceMap.vue'
+import NamespaceServiceMap from './NamespaceServiceMap.vue'
+import type { CCHubEntry, CCHubNamespace } from '../lib/bridge'
+
+const DATA_ID_CONFIG_TYPES = new Set(['nacos', 'apollo', 'consul'])
 
 interface Environment { id: string; is_prod: boolean }
 interface SourceCredsEntry { creds: Record<string, Record<string, string>>; rawExtra?: Record<string, unknown> }
 
 const props = defineProps<{
-  /** 副源 type id(同时也是 source id;主源那条已在外层渲染,这里只跑 副源)*/
+  /** 稳定 source instance id；允许与 sourceType 不同。 */
+  sourceID: string
   sourceType: string
   fields: CredField[]
   environments: Environment[]
@@ -28,8 +33,15 @@ const props = defineProps<{
   sourceCreds: Record<string, SourceCredsEntry>
   kuboardStateByEnv: Record<string, KuboardResourceState | undefined>
   kuboardSvcMap: Record<string, KuboardSvcLocator>
+  ccHubStateByEnv: Record<string, { status: 'idle' | 'loading' | 'ok' | 'error'; entries?: CCHubEntry[]; namespaces?: CCHubNamespace[]; error?: string } | undefined>
+  sourceEnvNamespaces: Record<string, string>
+  serviceConfigSel: Record<string, string>
+  serviceConfigGroup: Record<string, string>
+  namespacesFor: (envID: string, sourceID?: string) => CCHubNamespace[]
+  entriesForNamespace: (envID: string, ns: string, sourceID?: string) => CCHubEntry[]
+  hasError: (key: string) => boolean
   isFieldHidden: (t: string, envID: string, f: CredField, getSibling: (k: string) => string) => boolean
-  getServiceSource: (svc: string) => string
+  getServiceSource: (svc: string, envID?: string) => string
   svcKey: (envID: string, svc: string) => string
   kuboardNamespacesFor: (envID: string, clusterName: string) => string[]
   kuboardConfigMapsFor: (envID: string, clusterName: string, nsName: string) => string[]
@@ -46,7 +58,10 @@ const endpointFields = computed<CredField[]>(() => {
 
 const emit = defineEmits<{
   preloadKuboard: [sourceType: string, envID: string]
-  toggleServiceSource: [svc: string, checked: boolean, sourceType: string]
+  preloadCCHub: [envID: string, sourceID: string]
+  namespaceChanged: [envID: string, namespace: string, sourceID: string]
+  dataIdChanged: [envID: string, svc: string, sourceID: string]
+  toggleServiceSource: [svc: string, checked: boolean, sourceType: string, envID: string]
   setKuboardLoc: [envID: string, svc: string, field: 'cluster' | 'namespace' | 'configmap', value: string]
 }>()
 
@@ -67,7 +82,7 @@ function kuboardErrorOf(envID: string): string {
 <template>
   <div class="form-group secondary-source-form">
     <label>
-      <code>{{ sourceType }}</code> 连接配置
+      <code>{{ sourceID }}</code> 连接配置 <span class="field-hint">({{ sourceType }})</span>
       <span class="auto-tag" style="background:#fef3c7;color:#92400e;">副源</span>
       <span class="field-hint">
         — 每个 env 一份连接凭证;下方"本环境包含的服务"勾选要走本副源的服务,然后给每个服务挑对应的配置定位
@@ -82,17 +97,17 @@ function kuboardErrorOf(envID: string): string {
         <CredentialField
           v-for="f in endpointFields"
           :key="f.key"
-          v-show="!isFieldHidden(sourceType, env.id, f, (k) => (sourceCreds[sourceType]?.creds?.[env.id] || {})[k] || '')"
+          v-show="!isFieldHidden(sourceType, env.id, f, (k) => (sourceCreds[sourceID]?.creds?.[env.id] || {})[k] || '')"
           :field="f"
           :env-i-d="env.id"
-          :model-value="(sourceCreds[sourceType]?.creds?.[env.id] || {})[f.key] || ''"
+          :model-value="(sourceCreds[sourceID]?.creds?.[env.id] || {})[f.key] || ''"
           :is-kuboard="sourceType === 'kuboard'"
           :kuboard-state="kuboardStateByEnv[env.id]"
-          :sibling-cluster-value="(sourceCreds[sourceType]?.creds?.[env.id] || {}).cluster || ''"
-          :sibling-namespace-value="(sourceCreds[sourceType]?.creds?.[env.id] || {}).namespace || ''"
+          :sibling-cluster-value="(sourceCreds[sourceID]?.creds?.[env.id] || {}).cluster || ''"
+          :sibling-namespace-value="(sourceCreds[sourceID]?.creds?.[env.id] || {}).namespace || ''"
           compact
-          :env-var-suffix="`_${sourceType.toUpperCase().replace(/-/g, '_')}`"
-          @update:model-value="(v: string) => { if (!sourceCreds[sourceType]?.creds?.[env.id]) sourceCreds[sourceType].creds[env.id] = {}; sourceCreds[sourceType].creds[env.id][f.key] = v }"
+          :env-var-suffix="`_${sourceID.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`"
+          @update:model-value="(v: string) => { if (!sourceCreds[sourceID]?.creds?.[env.id]) sourceCreds[sourceID].creds[env.id] = {}; sourceCreds[sourceID].creds[env.id][f.key] = v }"
         />
       </div>
 
@@ -103,20 +118,31 @@ function kuboardErrorOf(envID: string): string {
         idle-text="📥 从 Kuboard 读取可选项"
         ok-text="🔄 重新读取"
         :error-message="kuboardErrorOf(env.id)"
-        @click="emit('preloadKuboard', sourceType, env.id)"
+          @click="emit('preloadKuboard', sourceID, env.id)"
       >
         <template #ok>✓ {{ kuboardClusterCountOf(env.id) }} 个集群</template>
+      </PreloadStatusRow>
+
+      <PreloadStatusRow
+        v-if="DATA_ID_CONFIG_TYPES.has(sourceType)"
+        :status="ccHubStateByEnv[`${sourceID}::${env.id}`]?.status"
+        idle-text="📥 拉取本实例配置"
+        ok-text="🔄 重新拉取本实例配置"
+        :error-message="ccHubStateByEnv[`${sourceID}::${env.id}`]?.error || ''"
+        @click="emit('preloadCCHub', env.id, sourceID)"
+      >
+        <template #ok>✓ {{ ccHubStateByEnv[`${sourceID}::${env.id}`]?.entries?.length || 0 }} 条</template>
       </PreloadStatusRow>
 
       <!-- 服务勾选清单:只列"主源没勾走的"剩余服务 + 已经勾给本副源的服务。
            主源已勾走的服务不出现,避免一个服务同时被两个源认领。 -->
       <ServiceChecklist
-        v-if="allServiceNames.filter(s => !getServiceSource(s) || getServiceSource(s) === sourceType).length > 0"
-        :services="allServiceNames.filter(s => !getServiceSource(s) || getServiceSource(s) === sourceType)"
-        :source-i-d="sourceType"
+        v-if="allServiceNames.filter(s => !getServiceSource(s, env.id) || getServiceSource(s, env.id) === sourceID).length > 0"
+        :services="allServiceNames.filter(s => !getServiceSource(s, env.id) || getServiceSource(s, env.id) === sourceID)"
+        :source-i-d="sourceID"
         :hint-html="`主源已认领的服务在此不显示;勾选要走 <code>${sourceType}</code> 副源的服务`"
-        :get-service-source="getServiceSource"
-        @toggle="(svc, checked) => emit('toggleServiceSource', svc, checked, sourceType)"
+        :get-service-source="(svc) => getServiceSource(svc, env.id)"
+        @toggle="(svc, checked) => emit('toggleServiceSource', svc, checked, sourceID, env.id)"
       />
       <div v-else-if="allServiceNames.length > 0" class="cc-svc-checklist-empty">
         所有服务都已被其他源认领;若想让某个服务改走 <code>{{ sourceType }}</code> 源,先在对应源把它取消勾选。
@@ -126,15 +152,34 @@ function kuboardErrorOf(envID: string): string {
       <KuboardServiceMap
         v-if="sourceType === 'kuboard'
               && kuboardStateByEnv[env.id]?.status === 'ok'
-              && allServiceNames.filter(s => getServiceSource(s) === sourceType).length > 0"
+              && allServiceNames.filter(s => getServiceSource(s, env.id) === sourceID).length > 0"
         :env-i-d="env.id"
-        :services="allServiceNames.filter(s => getServiceSource(s) === sourceType)"
+        :services="allServiceNames.filter(s => getServiceSource(s, env.id) === sourceID)"
         :kuboard-svc-map="kuboardSvcMap"
         :clusters="kuboardClustersOf(env.id)"
         :svc-key="svcKey"
         :namespaces-for="kuboardNamespacesFor"
         :configmaps-for="kuboardConfigMapsFor"
         @set-loc="(envID, svc, field, value) => emit('setKuboardLoc', envID, svc, field, value)"
+      />
+
+      <NamespaceServiceMap
+        v-if="DATA_ID_CONFIG_TYPES.has(sourceType)
+              && ccHubStateByEnv[`${sourceID}::${env.id}`]?.status === 'ok'
+              && allServiceNames.filter(s => getServiceSource(s, env.id) === sourceID).length > 0"
+        :env-i-d="env.id"
+        :config-center-type="sourceID"
+        :services="allServiceNames.filter(s => getServiceSource(s, env.id) === sourceID)"
+        :env-namespaces="sourceEnvNamespaces"
+        :namespace-map-key="`${sourceID}::${env.id}`"
+        :service-config-sel="serviceConfigSel"
+        :service-config-group="serviceConfigGroup"
+        :namespaces="namespacesFor(env.id, sourceID)"
+        :entries="entriesForNamespace(env.id, sourceEnvNamespaces[`${sourceID}::${env.id}`] || '', sourceID)"
+        :svc-key="svcKey"
+        :has-error="hasError"
+        @namespace-changed="(_env, value) => emit('namespaceChanged', env.id, value, sourceID)"
+        @data-id-changed="(_env, svc) => emit('dataIdChanged', env.id, svc, sourceID)"
       />
     </div>
   </div>

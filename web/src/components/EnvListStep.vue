@@ -10,7 +10,6 @@ interface EnvItem {
   api_domain: string
   web_domain: string
   is_prod: boolean
-  deployment_verification?: import('../lib/yamlGenerator').DeploymentVerificationState
 }
 
 defineProps<{
@@ -31,7 +30,7 @@ defineEmits<{
   <div class="card lg">
     <h2>环境列表</h2>
     <p class="help-text">
-      填业务系统的运行环境(如 dev / test / prod),每个环境填后端 API 域名,可选填前端 Web 域名。建议带上 http/https 前缀。
+      填写业务系统的运行环境（如 dev / test / prod）及访问入口。运行时定位统一在“可观测性”步骤配置。
     </p>
     <EnvListItem
       v-for="(env, i) in environments"
@@ -45,6 +44,10 @@ defineEmits<{
       @probe="(kind, url) => $emit('probe', i, kind, url)"
       @remove="$emit('remove', i)"
     />
-    <button class="btn" @click="$emit('add')">+ 添加环境</button>
+    <button class="btn add-environment-button" type="button" @click="$emit('add')">+ 添加环境</button>
   </div>
 </template>
+
+<style scoped>
+.add-environment-button { margin-top: 2px; }
+</style>

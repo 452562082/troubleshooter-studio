@@ -64,6 +64,8 @@ HTTP verifier 默认拒绝 loopback、内网、link-local 和云 metadata 地址
 
 Codex 需要网络访问时，安装流程会自动 patch `~/.codex/config.toml` 的 `[sandbox_workspace_write].network_access` 并备份原文件。
 
+Claude Code、Cursor 和 Codex 的机器人安装在用户级目录，因此同一 IDE 可以同时看到多个系统的 Agent。Studio 会额外安装一份共享的 `tshoot-router` skill：它先用当前本地仓库路径和规范化 Git remote 唯一确定 `system_id`，再调用该系统精确的排障、验证或修复 Agent。找不到归属或多个系统同分时会停止并要求明确选择，不会按“报错/失败/慢”等通用关键词猜一台机器人。Studio 故障闭环本身已经持久化选定机器人，继续以 Case 的显式 `system_id/agent_id` 为准。
+
 ## 下载与安装
 
 ### 可选代码图谱（CodeGraph）

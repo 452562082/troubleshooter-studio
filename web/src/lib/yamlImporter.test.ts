@@ -150,8 +150,11 @@ describe('applyParsedYAMLToWizardState observability import', () => {
       repos: [],
       enabledSourceTypes: {},
       enabledSourceOrder: [],
+      sourceInstances: [],
       sourceCreds: {},
+      sourceEnvNamespaces: {},
       serviceSourceMap: {},
+      serviceSourceByEnv: {},
       ccCredInputs: {},
       envNamespaces: {},
       serviceConfigSel: {},
@@ -164,6 +167,7 @@ describe('applyParsedYAMLToWizardState observability import', () => {
       k8sRuntimeEnvLoc: {},
       k8sRuntimeSvcMap: {},
       scannedDS: {},
+      dataStoreTypes: {},
       enabledDataStores: {},
       dsAutoFilled: {},
       dsScanState: {},
@@ -306,6 +310,59 @@ describe('applyParsedYAMLToWizardState observability import', () => {
       namespace: 'default',
       configmap: 'order-config',
     })
+  })
+
+  it('restores environment-specific catalog bindings over legacy repo bindings', async () => {
+    const ctx = makeImportCtx({
+      ALL_SOURCE_TYPES: ['nacos', 'kuboard'],
+      CC_FIELDS_BY_TYPE: { nacos: [], kuboard: [] },
+    })
+    await applyParsedYAMLToWizardState({
+      environments: [{ id: 'dev' }, { id: 'prod' }],
+      repos: [{ name: 'order', service_names: ['order-service'], config_source: 'nacos' }],
+      resource_catalog: {
+        services: [{
+          id: 'order-service', repository: 'order',
+          config_sources: { dev: 'dev-nacos', prod: 'prod-kuboard' },
+        }],
+      },
+      infrastructure: {
+        config_centers: [
+          { id: 'dev-nacos', type: 'nacos' },
+          { id: 'prod-kuboard', type: 'kuboard' },
+        ],
+      },
+    }, ctx)
+
+    expect(ctx.serviceSourceMap['order-service']).toBe('nacos')
+    expect(ctx.serviceSourceByEnv['dev::order-service']).toBe('dev-nacos')
+    expect(ctx.serviceSourceByEnv['prod::order-service']).toBe('prod-kuboard')
+  })
+
+  it('restores preload state independently for same-type source instances', async () => {
+    const ctx = makeImportCtx({
+      allServiceNames: ['user', 'order'],
+      ALL_SOURCE_TYPES: ['nacos'],
+      CC_FIELDS_BY_TYPE: { nacos: [] },
+    })
+    await applyParsedYAMLToWizardState({
+      environments: [{ id: 'dev' }],
+      repos: [{ name: 'mono', service_names: ['user', 'order'] }],
+      resource_catalog: { services: [
+        { id: 'user', repository: 'mono', config_sources: { dev: 'nacos' } },
+        { id: 'order', repository: 'mono', config_sources: { dev: 'nacos-2' } },
+      ] },
+      infrastructure: { config_centers: [
+        { id: 'nacos', type: 'nacos', service_map: { dev: { user: { namespace: 'ns-a', data_id: 'user.yaml' } } } },
+        { id: 'nacos-2', type: 'nacos', service_map: { dev: { order: { namespace: 'ns-b', data_id: 'order.yaml' } } } },
+      ] },
+    }, ctx)
+
+    expect(ctx.sourceInstances).toEqual([{ id: 'nacos', type: 'nacos' }, { id: 'nacos-2', type: 'nacos' }])
+    expect(ctx.sourceEnvNamespaces).toMatchObject({ 'nacos::dev': 'ns-a', 'nacos-2::dev': 'ns-b' })
+    expect(ctx.ccHubStateByEnv.dev.status).toBe('ok')
+    expect(ctx.ccHubStateByEnv['nacos-2::dev'].status).toBe('ok')
+    expect(ctx.serviceConfigSel).toMatchObject({ 'dev::user': 'user.yaml', 'dev::order': 'order.yaml' })
   })
 
   it('restores k8s_runtime one2all cluster_id', async () => {

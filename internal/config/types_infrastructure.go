@@ -16,6 +16,9 @@ type DataStoreEndpoint struct {
 }
 
 type DataStore struct {
+	// ID is the stable instance identity referenced by resource_catalog. It is
+	// optional in legacy YAML; migration derives type, type-2, ... as needed.
+	ID               string              `yaml:"id,omitempty"`
 	Type             string              `yaml:"type"`
 	Enabled          bool                `yaml:"enabled"`
 	Discovery        string              `yaml:"discovery,omitempty"` // from_config_center / static / both

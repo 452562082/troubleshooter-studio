@@ -1498,24 +1498,32 @@ func (o *CaseOrchestrator) recordDeploymentResult(incident IncidentCase, reserva
 		observation.VerificationSource = "deployment-verifier"
 	}
 	key := reservation.ReservationKey + ":result"
-	steps := []CaseMutationStep{}
-	if observation.Result == DeploymentResultMatched && verifyErr == nil {
-		steps = append(steps, CaseMutationStep{To: CaseWaitingDeployment, Event: TransitionEvent{ID: stableID("event", key), EventType: "deployment_verification_completed", ActorType: "studio", ActorID: "deployment-verifier", PayloadJSON: mustJSON(observation)}}, CaseMutationStep{To: CaseDeploymentVerified, Event: TransitionEvent{ID: stableID("event", key+":verified"), EventType: "deployment_verified", ActorType: "studio", ActorID: "deployment-verifier", PayloadJSON: mustJSON(observation)}})
-	} else {
-		if verifyErr != nil {
-			observation.Result = DeploymentResultUnavailable
-			if observation.DiagnosticCode == "" {
-				observation.DiagnosticCode = "verifier_unavailable"
-				observation.DiagnosticMessage = "部署版本验证暂不可用"
-			}
+	if verifyErr != nil {
+		observation.Result = DeploymentResultUnavailable
+		if observation.DiagnosticCode == "" {
+			observation.DiagnosticCode = "verifier_unavailable"
+			observation.DiagnosticMessage = "运行环境未提供版本信息，已跳过版本采集"
 		}
-		steps = append(steps, CaseMutationStep{To: CaseDeploymentUnverified, AuditOnly: true, Event: TransitionEvent{ID: stableID("event", key), EventType: "deployment_unverified", ActorType: "studio", ActorID: "deployment-verifier", PayloadJSON: mustJSON(observation)}})
+	}
+	canStartRegression := observation.Result == DeploymentResultMatched || observation.Result == DeploymentResultUnavailable
+	steps := []CaseMutationStep{}
+	if canStartRegression {
+		eventType := "deployment_verification_completed"
+		if observation.Result == DeploymentResultUnavailable {
+			eventType = "deployment_version_unavailable"
+		}
+		steps = append(steps,
+			CaseMutationStep{To: CaseWaitingDeployment, Event: TransitionEvent{ID: stableID("event", key), EventType: eventType, ActorType: "studio", ActorID: "deployment-verifier", PayloadJSON: mustJSON(observation)}},
+			CaseMutationStep{To: CaseDeploymentVerified, Event: TransitionEvent{ID: stableID("event", key+":verified"), EventType: "deployment_confirmed", ActorType: "studio", ActorID: "deployment-verifier", PayloadJSON: mustJSON(observation)}},
+		)
+	} else {
+		steps = append(steps, CaseMutationStep{To: CaseDeploymentUnverified, AuditOnly: true, Event: TransitionEvent{ID: stableID("event", key), EventType: "deployment_version_mismatched", ActorType: "studio", ActorID: "deployment-verifier", PayloadJSON: mustJSON(observation)}})
 	}
 	mutation, err := o.store.ApplyCaseMutation(durable, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: mustJSON(map[string]any{"observation": observation, "error_code": observation.DiagnosticCode}), Observations: []DeploymentObservation{observation}, Steps: steps})
 	if err != nil {
 		return IncidentCase{}, errors.Join(verifyErr, err)
 	}
-	if observation.Result == DeploymentResultMatched && verifyErr == nil && !mutation.Replay {
+	if canStartRegression && !mutation.Replay {
 		if _, startErr := o.StartRegression(durable, mutation.Case.ID, mutation.Case.Version); startErr != nil {
 			current, _ := o.store.GetCase(durable, mutation.Case.ID)
 			if waiting, handled, readinessErr := o.failSafeRegressionReadiness(durable, current, startErr); handled {
@@ -1528,6 +1536,12 @@ func (o *CaseOrchestrator) recordDeploymentResult(incident IncidentCase, reserva
 			return IncidentCase{}, loadErr
 		}
 		return current, nil
+	}
+	// Version collection is optional evidence. An unavailable verifier is
+	// recorded above but must not turn a user-confirmed deployment into a
+	// workflow error. A positive mismatch remains blocking.
+	if canStartRegression {
+		return mutation.Case, nil
 	}
 	return mutation.Case, verifyErr
 }

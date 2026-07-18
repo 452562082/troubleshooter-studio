@@ -200,6 +200,29 @@ func TestPrefillCredsFromYAML_ObservabilityK8sRuntimeOne2All(t *testing.T) {
 	}
 }
 
+func TestPrefillCredsFromYAML_IgnoresSecretReferences(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Infrastructure: config.Infrastructure{
+			ConfigCenters: []config.ConfigCenter{{
+				ID: "default", Type: "nacos",
+				Endpoints: []config.ConfigCenterEndpoint{{
+					Env: "dev", Addr: "nacos:8848", User: "{{CC_USER_DEV}}", Pass: "{{CC_PASS_DEV}}",
+				}},
+			}},
+		},
+	}
+	got := PrefillCredsFromYAML(cfg)
+	if got["CC_ADDR_DEV"] != "nacos:8848" {
+		t.Fatalf("non-secret endpoint should remain available: %v", got)
+	}
+	if _, ok := got["CC_USER_DEV"]; ok {
+		t.Fatalf("secret reference must not be treated as a credential: %v", got)
+	}
+	if _, ok := got["CC_PASS_DEV"]; ok {
+		t.Fatalf("secret reference must not be treated as a credential: %v", got)
+	}
+}
+
 func TestDerivePrompts_Messaging(t *testing.T) {
 	cfg := mkCfg("nacos", []string{"dev"})
 	cfg.Infrastructure.Messaging = []config.Messaging{

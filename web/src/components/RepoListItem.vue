@@ -4,7 +4,7 @@
 //   - 来源切换(remote URL / local 已有目录)
 //   - 远程模式:URL 输入 + clone 父目录 + 同步扫描按钮
 //   - 本地模式:目录选择 + URL probe 反馈
-//   - 仓库名 + 技术栈展示(readonly,扫描自动填)
+//   - 仓库名 + 技术栈(扫描自动填,扫描不可用时允许人工确认)
 //   - <RepoMonorepoBanner>:monorepo 检测横幅(0/1/N 子模块,A 拆分 / B 合并)
 //   - 已合并 service_entries 展示
 //   - sub_path 编辑(monorepo 子目录)
@@ -303,22 +303,36 @@ const emit = defineEmits<{
       />
     </div>
 
-    <!-- 技术栈展示(readonly) -->
+    <!-- 技术栈:扫描自动填；离线/受限仓库允许人工确认，避免最后 Go validate 才报错。 -->
     <div v-if="hasRepoSource(repo)" class="form-group">
       <label>
         技术栈
-        <span class="field-hint">(扫描后自动填,只读)</span>
+        <span class="field-hint">(扫描后自动填，也可人工确认)</span>
       </label>
       <div v-if="repo._source === 'remote' && repo.url.trim() && !repo._scanned && !repo._scanning" class="auto-scan-hint">
         ⚠ 还没扫描 —
         <strong>点上方"🔄 同步到本地并扫描"按钮</strong>触发
       </div>
-      <div class="stack-display" :class="{ empty: !repo.stack }">
+      <div v-if="repo._scanning" class="stack-display">
         <span v-if="repo._scanning" class="auto-scanning">
           <span class="scan-spinner-mini"></span>扫描中…
         </span>
-        <span v-else>{{ repo.stack || '—' }}</span>
       </div>
+      <select
+        v-else
+        v-model="repo.stack"
+        class="stack-select"
+        :class="{ error: hasError(`repo.${index}.stack`) }"
+        aria-label="技术栈"
+      >
+        <option value="">— 请选择或先扫描 —</option>
+        <option v-if="repo.stack && !['go','java','node','php','python'].includes(repo.stack)" :value="repo.stack">{{ repo.stack }}（扫描结果）</option>
+        <option value="go">Go</option>
+        <option value="java">Java</option>
+        <option value="node">Node.js / 前端</option>
+        <option value="php">PHP</option>
+        <option value="python">Python</option>
+      </select>
     </div>
 
     <RepoMonorepoBanner

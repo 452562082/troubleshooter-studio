@@ -27,7 +27,8 @@ import (
 func PrefillCredsFromYAML(cfg *config.SystemConfig) map[string]string {
 	out := map[string]string{}
 	put := func(k, v string) {
-		if k == "" || v == "" {
+		trimmed := strings.TrimSpace(v)
+		if k == "" || trimmed == "" || (strings.HasPrefix(trimmed, "{{") && strings.HasSuffix(trimmed, "}}")) {
 			return
 		}
 		out[k] = v

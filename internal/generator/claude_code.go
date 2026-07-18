@@ -116,13 +116,14 @@ func buildClaudeAgentMD(wsRoot string, ctx *Context, agentName string, role Agen
 	var sb strings.Builder
 	sb.WriteString("---\n")
 	fmt.Fprintf(&sb, "name: %s\n", agentName)
-	fmt.Fprintf(&sb, "description: %s\n", roleDisplayName(ctx, role))
+	fmt.Fprintf(&sb, "description: %s\n", projectBoundAgentDescription(ctx, agentName, role))
 	if m := strings.TrimSpace(ctx.Agent.TargetModels["claude-code"]); m != "" {
 		fmt.Fprintf(&sb, "model: %s\n", m)
 	}
 	sb.WriteString("---\n\n")
 
 	fmt.Fprintf(&sb, "# %s\n\n", roleDisplayName(ctx, role))
+	sb.WriteString(claudeProjectOwnershipGate(ctx, agentName))
 
 	if role == AgentRoleValidator {
 		intro := "本 agent 在 Claude Code 通过 `@" + agentName + "` 调用 subagent,负责 **验证 / 主动复现 / 修复后复查**,只输出验证报告,不做原因定位。\n\n" +

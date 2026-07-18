@@ -13,7 +13,7 @@ function makeCtx(overrides: Partial<ValidatorContext> = {}): ValidatorContext {
     targetModels: { openclaw: 'anthropic/claude-sonnet-4-6' },
     anyTargetSelected: true,
     environments: [{ id: 'dev', api_domain: 'api-dev.shop' }],
-    repos: [{ name: 'order', url: 'git@github.com:shop/order.git', _source: 'remote', _cloneTarget: '/tmp/repos' }],
+    repos: [{ name: 'order', url: 'git@github.com:shop/order.git', stack: 'go', _source: 'remote', _cloneTarget: '/tmp/repos' }],
     isMultiSource: false,
     allServiceNames: ['order-service'],
     activeSourceTypes: ['nacos'],
@@ -96,10 +96,18 @@ describe('computeStepErrors', () => {
   it('step 5 local repo requires _localPath', () => {
     const errs = computeStepErrors(makeCtx({
       step: 5,
-      repos: [{ name: 'x', url: '', _source: 'local' }],
+      repos: [{ name: 'x', url: '', stack: 'go', _source: 'local' }],
     }))
     expect(errs.has('repo.0.localPath')).toBe(true)
     expect(errs.has('repo.0.url')).toBe(false)
+  })
+
+  it('step 5 requires a scanned or manually confirmed stack before advancing', () => {
+    const errs = computeStepErrors(makeCtx({
+      step: 5,
+      repos: [{ name: 'x', url: 'git@example.com:x.git', stack: '', _source: 'remote' }],
+    }))
+    expect(errs.has('repo.0.stack')).toBe(true)
   })
 
   it('step 6 multi-source flags unassigned services', () => {
@@ -109,11 +117,47 @@ describe('computeStepErrors', () => {
       getServiceSource: (svc) => svc === 'order-service' ? '' : 'nacos',
       CC_FIELDS_BY_TYPE: { nacos: [], apollo: [] },
     }))
-    expect(errs.has('cc.unassigned.order-service')).toBe(true)
+    expect(errs.has('cc.unassigned.dev.order-service')).toBe(true)
   })
 
   it('step 6 happy path no errors', () => {
     expect(computeStepErrors(makeCtx({ step: 6 })).size).toBe(0)
+  })
+
+  it('step 6 requires an explicit none selection instead of silently treating empty as none', () => {
+    const errs = computeStepErrors(makeCtx({ step: 6, activeSourceTypes: [] }))
+    expect(errs.has('cc.none.explicit')).toBe(true)
+  })
+
+  it('step 6 supports multiple remote config hub instances', () => {
+    const errs = computeStepErrors(makeCtx({
+      step: 6,
+      activeSourceTypes: ['nacos', 'apollo'],
+      CC_FIELDS_BY_TYPE: { nacos: [], apollo: [] },
+    }))
+    expect(errs.has('cc.multi_remote.unsupported')).toBe(false)
+  })
+
+  it('step 6 rejects duplicate one2all instances that share one global endpoint contract', () => {
+    const errs = computeStepErrors(makeCtx({
+      step: 6,
+      activeSourceTypes: ['one2all'],
+      sourceInstances: [{ id: 'one2all', type: 'one2all' }, { id: 'one2all-2', type: 'one2all' }],
+      CC_FIELDS_BY_TYPE: { one2all: [] },
+    }))
+    expect(errs.has('cc.instance.unsupported.one2all')).toBe(true)
+  })
+
+  it('step 6 allows a multi-service repo split across sources through the resource catalog', () => {
+    const errs = computeStepErrors(makeCtx({
+      step: 6,
+      repos: [{ name: 'mono', url: 'git@example.com:mono.git', stack: 'go', service_names: 'user,order' }],
+      allServiceNames: ['user', 'order'],
+      activeSourceTypes: ['nacos', 'kuboard'],
+      getServiceSource: svc => svc === 'user' ? 'nacos' : 'kuboard',
+      CC_FIELDS_BY_TYPE: { nacos: [], kuboard: [] },
+    }))
+    expect(errs.has('cc.repo_mixed.0')).toBe(false)
   })
 
   it('step 6 flags missing namespace when ccHub ok but no namespace selected', () => {
@@ -181,6 +225,73 @@ describe('computeStepErrors', () => {
       step: 8,
       enabledObservability: { jaeger: true, elk: true, grafana: false },
     })).size).toBe(0)
+  })
+
+  it('step 8 requires direct tool fields and a successful connection probe', () => {
+    const common = {
+      step: 8,
+      enabledObservability: { jaeger: true },
+      OBS_TOOL_SPECS: [{
+        key: 'jaeger',
+        fields: [{ key: 'url', label: 'URL', secret: false, envVar: () => 'JAEGER_URL' }],
+      }],
+      toolInputs: {},
+      toolKeyFor: (cat: 'obs' | 'ds', tool: string, env: string, field: string) => `${cat}:${tool}:${env}:${field}`,
+      obsProbeKey: (tool: string, env: string) => `${tool}::${env}`,
+      getObsAccessMode: () => 'direct' as const,
+      requireObsProbe: true,
+    }
+    const missing = computeStepErrors(makeCtx(common))
+    expect(missing.has('obs.jaeger.dev.url')).toBe(true)
+    expect(missing.has('obs.jaeger.dev.probe')).toBe(true)
+
+    expect(computeStepErrors(makeCtx({
+      ...common,
+      toolInputs: { 'obs:jaeger:dev:url': 'http://jaeger:16686' },
+      obsProbeResults: { 'jaeger::dev': { status: 'ok' } },
+    })).size).toBe(0)
+  })
+
+  it('step 8 accepts a K8s runtime connection reused from the Kuboard config source', () => {
+    const errs = computeStepErrors(makeCtx({
+      step: 8,
+      enabledObservability: { k8s_runtime: true },
+      OBS_TOOL_SPECS: [{
+        key: 'k8s_runtime',
+        fields: [
+          { key: 'provider', label: 'Provider', secret: false, envVar: () => '', uiOnly: true },
+          { key: 'url', label: 'URL', secret: false, envVar: () => 'KUBOARD_URL' },
+          { key: 'access_key', label: 'Key', secret: true, envVar: () => 'KUBOARD_KEY' },
+        ],
+      }],
+      toolInputs: {},
+      toolKeyFor: (cat, tool, env, field) => `${cat}:${tool}:${env}:${field}`,
+      getObsAccessMode: () => 'direct',
+      sourceCreds: { kuboard: { creds: { dev: { url: 'http://kuboard', access_key: 'secret' } } } },
+      kuboardStateByEnv: { dev: { status: 'ok', clusters: [] } },
+      k8sRuntimeEnvLoc: { dev: { cluster: 'dev', namespace: 'default' } },
+      requireObsProbe: true,
+    }))
+    expect(errs.size).toBe(0)
+  })
+
+  it('step 8 blocks mixed K8s runtime providers because YAML provider is global', () => {
+    const errs = computeStepErrors(makeCtx({
+      step: 8,
+      environments: [{ id: 'dev', api_domain: 'dev' }, { id: 'prod', api_domain: 'prod' }],
+      enabledObservability: { k8s_runtime: true },
+      OBS_TOOL_SPECS: [{ key: 'k8s_runtime', fields: [] }],
+      toolInputs: {
+        'obs:k8s_runtime:dev:provider': 'kuboard',
+        'obs:k8s_runtime:prod:provider': 'one2all',
+      },
+      toolKeyFor: (cat, tool, env, field) => `${cat}:${tool}:${env}:${field}`,
+      k8sRuntimeEnvLoc: {
+        dev: { cluster: 'dev', namespace: 'default' },
+        prod: { cluster_id: 'prod', namespace: 'default' },
+      },
+    }))
+    expect(errs.has('obs.k8s_runtime.provider_mismatch')).toBe(true)
   })
 })
 

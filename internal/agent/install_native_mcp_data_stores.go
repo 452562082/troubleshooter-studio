@@ -36,9 +36,19 @@ import (
 // PruneEmpty=true 模式下空 env 段会被剔,如果用户没填 endpoint(env-vars 模式没填 /
 // 走 from_config_center 模式),mcp server 启动时拿不到 URI 直接退出 — 不会污染 IDE。
 func (b *mcpBuilder) buildDataStores(servers map[string]any) {
+	typeCounts := map[string]int{}
+	for _, ds := range b.cfg.Infrastructure.DataStores {
+		if ds.Enabled {
+			typeCounts[ds.Type]++
+		}
+	}
 	for _, ds := range b.cfg.Infrastructure.DataStores {
 		if !ds.Enabled {
 			continue
+		}
+		instanceSourceID := ""
+		if typeCounts[ds.Type] > 1 || (ds.ID != "" && ds.ID != ds.Type) {
+			instanceSourceID = ds.ID
 		}
 		for _, e := range b.cfg.Environments {
 			// 按连接串 dedupe:同一 (env, type) 下,同 URI 视为同 cluster,共享一个 MCP;
@@ -47,9 +57,13 @@ func (b *mcpBuilder) buildDataStores(servers map[string]any) {
 			unique := dsEndpointsUnique(ds, e.ID)
 			single := len(unique) <= 1
 			for _, ep := range unique {
-				sourceID := ""
+				sourceID := instanceSourceID
 				if !single {
-					sourceID = ep.sourceID
+					if sourceID == "" {
+						sourceID = ep.sourceID
+					} else {
+						sourceID += "-" + ep.sourceID
+					}
 				}
 				switch ds.Type {
 				case "mongodb":
@@ -77,23 +91,23 @@ func (b *mcpBuilder) buildDataStores(servers map[string]any) {
 			if len(unique) == 0 {
 				switch ds.Type {
 				case "mongodb":
-					b.buildMongoDB(servers, nil, "", e.ID)
+					b.buildMongoDB(servers, nil, instanceSourceID, e.ID)
 				case "postgresql":
-					b.buildPostgreSQL(servers, nil, "", e.ID)
+					b.buildPostgreSQL(servers, nil, instanceSourceID, e.ID)
 				case "elasticsearch":
-					b.buildDataES(servers, nil, "", e.ID)
+					b.buildDataES(servers, nil, instanceSourceID, e.ID)
 				case "redis":
-					b.buildRedis(servers, nil, "", e.ID)
+					b.buildRedis(servers, nil, instanceSourceID, e.ID)
 				case "kafka":
-					b.buildKafka(servers, nil, "", e.ID)
+					b.buildKafka(servers, nil, instanceSourceID, e.ID)
 				case "rabbitmq":
-					b.buildRabbitMQ(servers, nil, "", e.ID)
+					b.buildRabbitMQ(servers, nil, instanceSourceID, e.ID)
 				case "mysql":
-					b.buildMySQL(servers, nil, "", e.ID)
+					b.buildMySQL(servers, nil, instanceSourceID, e.ID)
 				case "doris":
-					b.buildDoris(servers, nil, "", e.ID)
+					b.buildDoris(servers, nil, instanceSourceID, e.ID)
 				case "clickhouse":
-					b.buildClickHouse(servers, nil, "", e.ID)
+					b.buildClickHouse(servers, nil, instanceSourceID, e.ID)
 				}
 			}
 		}

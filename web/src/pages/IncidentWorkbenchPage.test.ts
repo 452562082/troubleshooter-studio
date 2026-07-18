@@ -1355,11 +1355,16 @@ describe('IncidentWorkbenchPage', () => {
     const wrapper = await mountedPage()
 
     await wrapper.get('.primary-action').trigger('click')
-    await wrapper.get('[role="dialog"] textarea').setValue('人工确认已处理')
-    await wrapper.get('[data-confirm]').trigger('click')
+    if (status === 'merge_conflict') {
+      await wrapper.get('[role="dialog"] textarea').setValue('人工确认已处理')
+      await wrapper.get('[data-confirm]').trigger('click')
+    }
     await flushPromises()
 
-    expect(continueIncidentCase).toHaveBeenCalledWith(expect.objectContaining({ phase, input_json: expect.objectContaining({ decision, evidence: '人工确认已处理' }) }))
+    const inputJSON = status === 'merge_conflict'
+      ? { decision, evidence: '人工确认已处理' }
+      : { decision: 'retry_deployment_check' }
+    expect(continueIncidentCase).toHaveBeenCalledWith(expect.objectContaining({ phase, input_json: inputJSON }))
     expect(forbidden).not.toHaveBeenCalled()
   })
 

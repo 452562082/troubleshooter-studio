@@ -59,9 +59,13 @@ func (r caseFrontendRuntimeResolver) ResolveFrontendRuntime(ctx context.Context,
 		return manifest, nil
 	}
 
-	k8sConfig := environment.DeploymentVerification.K8s
+	verification, verificationErr := cfg.DeploymentVerificationForEnvironment(environment.ID)
+	if verificationErr != nil {
+		manifest.Limitations = append(manifest.Limitations, "deployment runtime mapping is unavailable")
+	}
+	k8sConfig := verification.K8s
 	var reader bughub.K8sDeploymentReader
-	if environment.DeploymentVerification.EffectiveProvider() == config.DeploymentVerificationProviderK8s {
+	if verification.EffectiveProvider() == config.DeploymentVerificationProviderK8s {
 		if _, safe := k8sVerifierEndpointIdentity(cfg, environment.ID); safe {
 			factory := r.app.workflowK8sReaderFactory
 			if factory == nil {

@@ -217,7 +217,7 @@ func (o *CaseOrchestrator) buildRegressionInput(ctx context.Context, incident In
 			break
 		}
 	}
-	if observation.ID == "" || observation.Result != DeploymentResultMatched || observation.VerifiedAt == nil || observation.Environment != incident.Environment || strings.TrimSpace(observation.ObservedVersion) == "" || !equalStringMap(observation.ExpectedCommits, expected) || !observedCommitsCoverExpected(observation, expected) {
+	if observation.ID == "" || observation.Environment != incident.Environment || !equalStringMap(observation.ExpectedCommits, expected) || !deploymentObservationAllowsRegression(observation, expected) {
 		return RegressionValidationInput{}, DeploymentReservation{}, ErrRegressionBinding
 	}
 	original, validation, refs, err := o.originalValidation(ctx, incident.ID)
@@ -255,6 +255,19 @@ func observedCommitsCoverExpected(observation DeploymentObservation, expected ma
 		return false
 	}
 	return true
+}
+
+func deploymentObservationAllowsRegression(observation DeploymentObservation, expected map[string]string) bool {
+	switch observation.Result {
+	case DeploymentResultMatched:
+		return observation.VerifiedAt != nil && !observation.VerifiedAt.IsZero() && strings.TrimSpace(observation.ObservedVersion) != "" && observedCommitsCoverExpected(observation, expected)
+	case DeploymentResultUnavailable:
+		// Deployment was confirmed by the operator, but the runtime exposed no
+		// trustworthy version identity. Regression is the final business proof.
+		return true
+	default:
+		return false
+	}
 }
 
 func (o *CaseOrchestrator) expectedRegressionCommits(ctx context.Context, incident IncidentCase) (map[string]string, error) {
@@ -418,7 +431,7 @@ func (o *CaseOrchestrator) validatePersistedRegressionBinding(ctx context.Contex
 		return err
 	}
 	for _, observation := range observations {
-		if observation.ID == input.DeploymentObservationID && observation.ID == stableID("deployment", reservation.ReservationKey) && observation.Result == DeploymentResultMatched && observation.VerifiedAt != nil && observation.Environment == input.TargetEnvironment && observation.ObservedVersion == input.ObservedDeploymentVersion && equalStringMap(observation.ExpectedCommits, expected) && observedCommitsCoverExpected(observation, expected) {
+		if observation.ID == input.DeploymentObservationID && observation.ID == stableID("deployment", reservation.ReservationKey) && observation.Environment == input.TargetEnvironment && observation.ObservedVersion == input.ObservedDeploymentVersion && equalStringMap(observation.ExpectedCommits, expected) && deploymentObservationAllowsRegression(observation, expected) {
 			return nil
 		}
 	}
@@ -443,7 +456,7 @@ func (o *CaseOrchestrator) currentRegressionArtifacts(ctx context.Context, attem
 	}
 	current := make([]EvidenceArtifact, 0)
 	for _, artifact := range all {
-		if artifact.AttemptID != attempt.ID || !artifact.CapturedAt.After(attempt.StartedAt) || artifact.Environment != input.TargetEnvironment || artifact.Version != input.ObservedDeploymentVersion || (strings.TrimSpace(artifact.RequestID) == "" && strings.TrimSpace(artifact.TraceID) == "") {
+		if artifact.AttemptID != attempt.ID || !artifact.CapturedAt.After(attempt.StartedAt) || artifact.Environment != input.TargetEnvironment || (input.ObservedDeploymentVersion != "" && artifact.Version != input.ObservedDeploymentVersion) || (strings.TrimSpace(artifact.RequestID) == "" && strings.TrimSpace(artifact.TraceID) == "") {
 			continue
 		}
 		for _, identifier := range []string{artifact.RequestID, artifact.TraceID} {

@@ -57,16 +57,8 @@ environments:
     api_domain: api.example.com
     web_domain: www.example.com
     is_prod: true
-    # K8s 示例（与 http 互斥）：
-    # deployment_verification:
-    #   provider: k8s
-    #   k8s:
-    #     cluster: prod-cluster
-    #     namespace: my-system
-    #     deployments_by_repo:       # key 必须是 repos[].name
-    #       user-service: user-service
-    #     commit_annotation: app.example.com/git-commit
-    #     # image_label: git-commit  # 与 commit_annotation 二选一
+    # 新配置不再重复填写 K8s 版本定位；复用下方 observability.k8s_runtime.service_map。
+    # 旧 YAML 的 deployment_verification.provider=k8s 仍兼容读取。
 
 # ---------------------------------------------------------------------------
 # 4. 代码仓库清单 —— 生成 env-branch-map.yaml / repo-stack-map.yaml
@@ -82,6 +74,7 @@ repos:
     env_branches:                    # [required] 每个环境对应的分支或 tag
       dev: develop
       prod: main
+    # config_source: legacy-nacos    # [legacy optional] 仓库级回退；新配置使用 resource_catalog
     analysis:                        # [optional] 代码分析控制
       enabled: true
       shallow_depth: 50
@@ -104,6 +97,29 @@ service_topology:
   #     method: GET
   #     path: /api/users/:id
 
+# repository / service / workload / infrastructure instance 的唯一关系真源。
+# 连接详情仍归 infrastructure；这里仅保存稳定 ID 引用，不保存凭据。
+resource_catalog:
+  services:
+    - id: user-service
+      repository: user-service
+      config_sources:               # env -> infrastructure.config_centers[].id
+        dev: main-nacos
+        prod: prod-nacos
+      data_stores:                  # env -> infrastructure.data_stores[].id
+        dev: [redis]
+        prod: [redis-prod]
+      workloads:                    # env -> resource_catalog.workloads[].id
+        dev: user-service
+        prod: user-service
+  workloads:
+    - id: user-service
+      repository: user-service
+      service: user-service         # [optional] 纯前端/static workload 可不关联业务 service
+      names:                        # env -> 实际 Deployment/workload 名
+        dev: user-service-dev
+        prod: user-service
+
 # ---------------------------------------------------------------------------
 # 5. 基础组件 —— 决定 mcp.servers.json 和 skills/ 生成内容
 # 每类组件独立开关，按需生成对应 skill 与 MCP server
@@ -111,8 +127,9 @@ service_topology:
 infrastructure:
 
   # 5.1 配置源 —— 决定 config-executor skill 使用的后端协议
-  config_center:
-    type: nacos                      # [required] nacos / apollo / consul / kuboard / one2all / env-vars / none
+  config_centers:                    # 每个元素是独立实例；允许多个实例使用同一个 type
+  - id: main-nacos                   # [required] 稳定 kebab-case ID，被 resource_catalog 引用
+    type: nacos                      # nacos / apollo / consul / kuboard / one2all / env-vars / none
     endpoints:                       # [required for nacos/apollo/consul/kuboard/one2all] 每环境一套（env-vars 不需要）
       - env: dev
         addr: "{{CONFIG_CENTER_DEV_ADDR}}"
@@ -126,14 +143,20 @@ infrastructure:
     dataid_patterns:                 # [optional] 命名习惯，帮 AI 提升 config-map 准确率
       - "{service}.yaml"
       - "{service}-{env}.yaml"
-    service_map:                     # [optional] 向导 Step 5 的"预加载 + 下拉"产物：每个环境的每个服务对应哪条配置
+    service_map:                     # [optional] 只包含归属本实例的服务
       dev:                           # key = env.id
-        user:                        # key = service 名称（需与 repos[].service_names 对齐）
+        user-service:                # key = service 名称（需与 repos[].service_names 对齐）
           namespace: "go-truss-dev"  # nacos namespaceId / apollo envId / consul kv prefix
           group: "DEFAULT_GROUP"     # nacos 独有，其他类型留空
           data_id: "user.yaml"       # nacos dataId / consul 完整 kv key（apollo 用 app_id 字段）
+  - id: prod-nacos                  # 同类型第二实例不会与 main-nacos 共用凭据/预读缓存
+    type: nacos
+    endpoints:
+      - env: prod
+        addr: "{{CC_ADDR_PROD_PROD_NACOS}}"
+    service_map:
       prod:
-        user:
+        user-service:
           namespace: "go-truss-prod"
           group: "DEFAULT_GROUP"
           data_id: "user.yaml"
@@ -154,6 +177,12 @@ infrastructure:
       datasource_uid_by_env:         # [optional] via_grafana 模式记录每 env 选中的 Loki datasource UID
         dev: "<loki-ds-uid-dev>"
         prod: "<loki-ds-uid-prod>"
+      label_mapping_by_env:
+        dev:
+          env_label: environment
+          service_label: app
+          service_map:               # key 必须是 resource_catalog service/workload ID
+            user-service: {app: user-service-dev}
     prometheus:
       enabled: true
       via_grafana: true
@@ -194,6 +223,7 @@ infrastructure:
     # 跟"配置源 kuboard"正交,用户从 nacos 读配置仍可在这里查 K8s 运行时。
     k8s_runtime:
       enabled: false
+      provider: kuboard              # kuboard / one2all
       url_by_env:
         dev: "{{KUBOARD_DEV_URL}}"
         prod: "{{KUBOARD_PROD_URL}}"
@@ -202,10 +232,10 @@ infrastructure:
         password_placeholder: "{{KUBOARD_PASSWORD}}"
       service_map:                   # [optional] (env, service) → cluster/namespace/workload/label_selector
         - env: dev                   # routing skill 解析时用,workload+selector 至少有一个
-          service: user
+          service: user-service
           cluster: dev-cluster
           namespace: shop-dev
-          workload: user-service     # Deployment 名
+          workload: user-service-dev # Deployment 名；与 resource_catalog.workloads[].names.dev 一致
           label_selector: app=user-service  # 自动从 spec.selector.matchLabels 取
 
   # 5.3 数据层 —— 决定是否生成对应 runtime-query skill
@@ -215,6 +245,7 @@ infrastructure:
   #   - both: 优先 config_center，兜底 static
   data_stores:
     - type: redis                    # redis / mongodb / elasticsearch / mysql / doris / kafka / ...
+      id: redis                      # [required after migration] 稳定实例 ID
       enabled: true
       discovery: from_config_center
       readonly_enforced: true        # 必须 true，生成的 skill 禁止写
@@ -223,16 +254,25 @@ infrastructure:
         dev: "redis-dev:6379"
         prod: "redis-prod:6379"
     - type: mongodb
+      id: mongodb
+      enabled: true
+      discovery: from_config_center
+      readonly_enforced: true
+    - type: redis
+      id: redis-prod
       enabled: true
       discovery: from_config_center
       readonly_enforced: true
     - type: elasticsearch
+      id: elasticsearch
       enabled: true
       discovery: from_config_center
       readonly_enforced: true
     - type: mysql
+      id: mysql
       enabled: false
     - type: kafka
+      id: kafka
       enabled: false
 
   # 5.4 消息/IM 通道 —— 决定附件发送链路走哪个 MCP
@@ -267,7 +307,7 @@ generation:
 # 7. 元数据 —— 生成器自身的版本管理
 # ---------------------------------------------------------------------------
 meta:
-  schema_version: "0.1"              # [required] 随 tshoot 演进
+  schema_version: "0.2"              # [required] 0.2 固化 resource_catalog 与实例 ID
   tshoot_template_ref:               # [optional] 基于哪个骨架模板版本生成
     repo: troubleshooter-studio
     ref: main

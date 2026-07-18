@@ -21,6 +21,7 @@ import { toast } from './toast'
 import { probeKey } from './yamlShared'
 import { DS_MATCHERS, parseConfigContent, parseK8sConfigMapDataContents } from './dataStoreParser'
 import type { DSByService, DSScanState, DSProbeState } from './useDataStoreState'
+import type { ConfigSourceInstance } from './configSourceInstances'
 
 interface PreloadPayload {
   type: string
@@ -45,23 +46,27 @@ export interface UseDataStoreScanDeps {
   dsImportStats: { scanned: number; matched: number }
   dsAutoFilled: Record<string, boolean>
   enabledDataStores: Record<string, boolean>
+  dataStoreTypes: Record<string, string>
+  dataStoreType: (id: string) => string
   scanStateKey: (envID: string, svc: string) => string
 
   // 环境 / 服务
   environments: { id: string }[]
   allServiceNames: { value: readonly string[] }
-  getServiceSource: (svc: string) => string
+  getServiceSource: (svc: string, envID?: string) => string
   svcKey: (envID: string, svc: string) => string
 
   // 配置中心拉取(nacos/apollo/consul)
-  buildPreloadPayload: (envID: string) => PreloadPayload
+  buildPreloadPayload: (envID: string, sourceID?: string) => PreloadPayload
   envNamespaces: Record<string, string>
+  sourceEnvNamespaces: Record<string, string>
   serviceConfigSel: Record<string, string>
   serviceConfigGroup: Record<string, string>
 
   // kuboard 副源拉取
   enabledSourceTypes: Record<string, boolean>
   activeSourceTypes: ComputedRef<readonly string[]>
+  sourceInstances: ComputedRef<readonly ConfigSourceInstance[]>
   ccCredInputs: Record<string, string>
   ccKeyFor: (sourceType: string, envID: string, field: string) => string
   sourceCreds: Record<string, { creds: Record<string, Record<string, string>>; rawExtra?: Record<string, unknown> }>
@@ -118,7 +123,7 @@ export function useDataStoreScan(deps: UseDataStoreScanDeps) {
     const k = probeKey(envID, svc, dsKey)
     deps.dsProbeResults[k] = { status: 'loading' }
     try {
-      const r = await probeDataStore({ type: dsKey, fields: { ...fields } })
+      const r = await probeDataStore({ type: deps.dataStoreType(dsKey), fields: { ...fields } })
       if (r.ok) {
         deps.dsProbeResults[k] = { status: 'ok', latency: r.latency, detail: r.detail }
         pushLog('cchub', 'info',
@@ -252,6 +257,7 @@ export function useDataStoreScan(deps: UseDataStoreScanDeps) {
       // 命中数据层 → 同步把 enabledDataStores[dsKey] = true。否则 deriveSkillsWhitelist
       // 看到 enabledDataStores.redis 仍 false,就不会把 redis-runtime-query push 进白名单。
       deps.enabledDataStores[m.dsKey] = true
+      deps.dataStoreTypes[m.dsKey] = m.dsKey
       deps.dsAutoFilled[m.dsKey] = true
       matchedSet.add(`${env}:${m.dsKey}`)
       deps.scannedDS[env][svc][m.dsKey] = { ...hit }
@@ -298,68 +304,40 @@ export function useDataStoreScan(deps: UseDataStoreScanDeps) {
       const groups = new Map<string, { payload: PreloadPayload; items: BatchItem[] }>()
 
       const remotePreloadTypes = new Set(['nacos', 'apollo', 'consul'])
-      for (const env of deps.environments) {
-        if (!env.id) continue
-        const payload = deps.buildPreloadPayload(env.id)
-        const nsID = deps.envNamespaces[env.id]
-        // 主源不是 nacos/apollo/consul(比如 kuboard / env-vars / none) → 这一段不处理,
-        // 让后面的 kuboard 专项 pass 接管;只把"挂在 nacos/apollo/consul 但当前主源不支持"
-        // 的服务标 skipped(其实多源 + 主源是 kuboard 时这种组合罕见)。
-        if (!remotePreloadTypes.has(payload.type)) continue
-        if (!payload.valid) {
-          const reason = `凭证不完整(缺: ${payload.missing.join(', ')})`
-          pushLog('cchub', 'warn', `[${env.id}] ${reason},跳过本 env 的 nacos 类批拉`, { envID: env.id })
-          for (const svc of deps.allServiceNames.value) {
-            if (deps.getServiceSource(svc) !== payload.type) continue
-            deps.dsScanState[deps.scanStateKey(env.id, svc)] = { status: 'skipped', reason }
-          }
-          continue
-        }
-        if (nsID === undefined) {
-          const reason = '未选 namespace,先回 Step 5 扫一次'
-          pushLog('cchub', 'warn', `[${env.id}] ${reason}`, { envID: env.id })
-          for (const svc of deps.allServiceNames.value) {
-            if (deps.getServiceSource(svc) !== payload.type) continue
-            deps.dsScanState[deps.scanStateKey(env.id, svc)] = { status: 'skipped', reason }
-          }
-          continue
-        }
-        const credKey = [
-          payload.type, payload.addr, payload.username, payload.password,
-          payload.token, payload.app_id,
-        ].join('\x1f')
-        if (!groups.has(credKey)) {
-          groups.set(credKey, { payload, items: [] })
-        }
-        const g = groups.get(credKey)!
-        const primarySrcType = payload.type
-        for (const svc of deps.allServiceNames.value) {
-          const svcSource = deps.getServiceSource(svc)
-          if (!svcSource) {
-            deps.dsScanState[deps.scanStateKey(env.id, svc)] = {
-              status: 'skipped',
-              reason: '未分配源,回 Step 5 在某个源面板的"本环境包含的服务"里勾上',
-            }
+      for (const source of deps.sourceInstances.value) {
+        if (!remotePreloadTypes.has(source.type)) continue
+        for (const env of deps.environments) {
+          if (!env.id) continue
+          const payload = deps.buildPreloadPayload(env.id, source.id)
+          const nsID = deps.sourceEnvNamespaces[`${source.id}::${env.id}`]
+            ?? (source.id === deps.sourceInstances.value[0]?.id ? deps.envNamespaces[env.id] : undefined)
+          const assigned = deps.allServiceNames.value.filter(svc => deps.getServiceSource(svc, env.id) === source.id)
+          if (assigned.length === 0) continue
+          if (!payload.valid) {
+            const reason = `配置源 ${source.id} 凭证不完整(缺: ${payload.missing.join(', ')})`
+            for (const svc of assigned) deps.dsScanState[deps.scanStateKey(env.id, svc)] = { status: 'skipped', reason }
             continue
           }
-          if (svcSource !== primarySrcType) {
-            deps.dsScanState[deps.scanStateKey(env.id, svc)] = {
-              status: 'skipped',
-              reason: `挂在 ${svcSource} 源,自动扫只针对 ${primarySrcType} 源`,
-            }
+          if (nsID === undefined) {
+            const reason = `配置源 ${source.id} 未选 namespace,先回配置源步骤扫描`
+            for (const svc of assigned) deps.dsScanState[deps.scanStateKey(env.id, svc)] = { status: 'skipped', reason }
             continue
           }
-          const dataId = (deps.serviceConfigSel[deps.svcKey(env.id, svc)] || '').trim()
-          if (!dataId) {
-            deps.dsScanState[deps.scanStateKey(env.id, svc)] = {
-              status: 'skipped',
-              reason: '未映射 dataId,回 Step 5 为此服务挑一条',
+          const credKey = [source.id, payload.type, payload.addr, payload.username, payload.password,
+            payload.token, payload.app_id].join('\x1f')
+          if (!groups.has(credKey)) groups.set(credKey, { payload, items: [] })
+          const g = groups.get(credKey)!
+          for (const svc of assigned) {
+            const dataId = (deps.serviceConfigSel[deps.svcKey(env.id, svc)] || '').trim()
+            if (!dataId) {
+              deps.dsScanState[deps.scanStateKey(env.id, svc)] = {
+                status: 'skipped', reason: `配置源 ${source.id} 未映射 dataId`,
+              }
+              continue
             }
-            pushLog('cchub', 'warn', `[${env.id}/${svc}] 未映射 dataId`, { envID: env.id, svc })
-            continue
+            const group = (deps.serviceConfigGroup[deps.svcKey(env.id, svc)] || '').trim()
+            g.items.push({ key: `${source.id}::${env.id}::${svc}`, env: env.id, svc, dataId, group, nsID })
           }
-          const group = (deps.serviceConfigGroup[deps.svcKey(env.id, svc)] || '').trim()
-          g.items.push({ key: `${env.id}::${svc}`, env: env.id, svc, dataId, group, nsID })
         }
       }
 
@@ -444,7 +422,7 @@ export function useDataStoreScan(deps: UseDataStoreScanDeps) {
           if (!env.id) continue
           const kbItems: { key: string; env: string; svc: string; cluster: string; namespace: string; configmap: string }[] = []
           for (const svc of deps.allServiceNames.value) {
-            if (deps.getServiceSource(svc) !== 'kuboard') continue
+            if (deps.getServiceSource(svc, env.id) !== 'kuboard') continue
             const loc = deps.kuboardSvcMap[deps.svcKey(env.id, svc)]
             if (!loc?.cluster || !loc?.namespace || !loc?.configmap) {
               deps.dsScanState[deps.scanStateKey(env.id, svc)] = {
@@ -533,7 +511,7 @@ export function useDataStoreScan(deps: UseDataStoreScanDeps) {
             if (!env.id) continue
             const cfs: any[] = []
             for (const svc of deps.allServiceNames.value) {
-              if (deps.getServiceSource(svc) !== 'one2all') continue
+              if (deps.getServiceSource(svc, env.id) !== 'one2all') continue
               const loc = deps.one2allSvcMap?.[deps.svcKey(env.id, svc)]
               if (!loc?.cluster_id || !loc?.namespace || !loc?.configmap) continue
               for (const cm of loc.configmap.split(',').filter(Boolean))

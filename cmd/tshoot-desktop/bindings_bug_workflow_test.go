@@ -20,6 +20,46 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 )
 
+func TestLoadBugAndBotMaterializesAndPersistsIncidentEvidence(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api.php/v1/files/101/download" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(append([]byte("\x89PNG\r\n\x1a\n"), []byte("incident-evidence")...))
+	}))
+	defer server.Close()
+	if _, err := bugPlatformStore().Upsert(bughub.PlatformConfig{
+		ID: "zentao-main", Name: "禅道", Type: "zentao", BaseURL: server.URL, Token: "secret", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	bug := bughub.Bug{ID: "zentao-101", Source: "zentao", Title: "页面年份未展示", Attachments: []bughub.Attachment{{
+		ID: "101", Name: "页面证据.png", Type: "image/png", RemoteURL: "/data/upload/evidence",
+	}}}
+	if err := bugStore().Upsert(bug); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{workflowLoadBot: func(string) (bughub.BotRef, error) {
+		return bughub.BotRef{Key: "base|codex#validator", Target: "codex", Role: "validator"}, nil
+	}}
+
+	loaded, _, err := app.loadBugAndBot(bug.ID, "base|codex#validator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Attachments) != 1 || loaded.Attachments[0].LocalPath == "" {
+		t.Fatalf("incident evidence was not materialized: %+v", loaded.Attachments)
+	}
+	stored, found, err := bugStore().Get(bug.ID)
+	if err != nil || !found || stored.Attachments[0].LocalPath != loaded.Attachments[0].LocalPath {
+		t.Fatalf("materialized evidence was not persisted: found=%v stored=%+v err=%v", found, stored.Attachments, err)
+	}
+}
+
 func TestGetIncidentCaseAndEmittedSnapshotsHideArtifactPathsAndApplicationURLs(t *testing.T) {
 	app, store := newBrowserBindingTestApp(t)
 	artifact := registerTextArtifact(t, app, store, "case-a", "attempt-a")

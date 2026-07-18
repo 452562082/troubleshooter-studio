@@ -1425,8 +1425,24 @@ export async function captureSafePNG(page, request, name, getAuthFailure, captur
 
 async function accessibilitySummary(page) {
   const result = [];
+
+  // Keep a bounded snapshot of the visible document text before enumerating
+  // controls. Many SPA cards are clickable divs without an ARIA role, so the
+  // old control-only summary hid the exact content names that a locator repair
+  // needed and encouraged the agent to guess or paraphrase them.
+  const documentText = await page.locator('body').innerText().catch(() => '');
+  const normalizedDocumentText = redactConsoleText(documentText)
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(' · ')
+    .slice(0, 2048);
+  if (normalizedDocumentText) {
+    result.push({ role: 'document', name: normalizedDocumentText, visible: true, disabled: false });
+  }
+
   const nodes = page.locator('a,button,input,select,textarea,[role]');
-  const count = Math.min(await nodes.count().catch(() => 0), 25);
+  const count = Math.min(await nodes.count().catch(() => 0), 24);
   for (let index = 0; index < count; index += 1) {
     const node = nodes.nth(index);
     const visible = await node.isVisible().catch(() => false);

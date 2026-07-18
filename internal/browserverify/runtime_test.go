@@ -165,7 +165,7 @@ func TestRuntimeManagerInstallsPinnedVersionAndRunsRealProbeCommand(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if paths.Version != "1.61.1-r10" {
+	if paths.Version != "1.61.1-r11" {
 		t.Fatalf("version = %q", paths.Version)
 	}
 	got := strings.Join(runner.CommandSummaries(), "\n")
@@ -182,7 +182,7 @@ func TestRuntimeManagerInstallsPinnedVersionAndRunsRealProbeCommand(t *testing.T
 	if string(manifest) != wantManifest {
 		t.Fatalf("package.json = %q", manifest)
 	}
-	if status := manager.Status(); status.State != RuntimeReady || status.Version != "1.61.1-r10" {
+	if status := manager.Status(); status.State != RuntimeReady || status.Version != "1.61.1-r11" {
 		t.Fatalf("status = %+v", status)
 	}
 }
@@ -323,7 +323,7 @@ func TestRuntimeManagerInstallsBrowsersInsideTemporaryVersionBeforePublish(t *te
 			browsersPath = strings.TrimPrefix(entry, "PLAYWRIGHT_BROWSERS_PATH=")
 		}
 	}
-	if browsersPath == "" || !strings.Contains(browsersPath, string(filepath.Separator)+".install-1.61.1-r10-") {
+	if browsersPath == "" || !strings.Contains(browsersPath, string(filepath.Separator)+".install-1.61.1-r11-") {
 		t.Fatalf("install env did not use temporary browser path: %+v", install.Env)
 	}
 	if browsersPath == paths.BrowsersPath {

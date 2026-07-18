@@ -1198,6 +1198,7 @@ func (a *App) loadIncidentStartContext(input StartIncidentCaseInput) (bughub.Bug
 
 func (a *App) loadBugAndBot(bugID, botKey string) (bughub.Bug, bughub.BotRef, error) {
 	loadBug := a.workflowLoadBug
+	materializeAttachments := loadBug == nil
 	if loadBug == nil {
 		loadBug = func(id string) (bughub.Bug, error) {
 			bug, found, getErr := bugStore().Get(id)
@@ -1213,6 +1214,13 @@ func (a *App) loadBugAndBot(bugID, botKey string) (bughub.Bug, bughub.BotRef, er
 	bug, err := loadBug(bugID)
 	if err != nil {
 		return bughub.Bug{}, bughub.BotRef{}, fmt.Errorf("load incident bug: %w", err)
+	}
+	if materializeAttachments {
+		materialized := materializeBugAttachmentsForAgent(bug)
+		if bugAttachmentLocalPathsChanged(bug.Attachments, materialized.Attachments) {
+			bug = materialized
+			_ = bugStore().Upsert(bug)
+		}
 	}
 	loadBot := a.workflowLoadBot
 	if loadBot == nil {
@@ -1234,6 +1242,18 @@ func (a *App) loadBugAndBot(bugID, botKey string) (bughub.Bug, bughub.BotRef, er
 		return bughub.Bug{}, bughub.BotRef{}, fmt.Errorf("load incident bot: %w", err)
 	}
 	return bug, bot, nil
+}
+
+func bugAttachmentLocalPathsChanged(before, after []bughub.Attachment) bool {
+	if len(before) != len(after) {
+		return true
+	}
+	for index := range before {
+		if before[index].LocalPath != after[index].LocalPath || before[index].Type != after[index].Type {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) loadFreshBugAndBot(bugID, botKey, environment string) (bughub.Bug, bughub.BotRef, error) {

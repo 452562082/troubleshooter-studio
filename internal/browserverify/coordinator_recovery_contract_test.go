@@ -40,7 +40,7 @@ assertions:
   - kind: visible_text
     value: Users
 `}, nil
-	case strings.Contains(prompt, "Evaluate the completed browser verification"):
+	case strings.Contains(prompt, "Evaluate the browser verification evidence"):
 		e.evaluatorCalls++
 		return bughub.PhaseExecutionResult{FinalYAML: `verification_status: not_reproduced
 environment: test

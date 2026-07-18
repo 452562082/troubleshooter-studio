@@ -696,11 +696,14 @@ func TestAgentPhaseRunnerFreezesBrowserArtifactBeforeEvaluatorMutation(t *testin
 	}
 }
 
-func TestAgentPhaseRunnerBrowserStopsUseBoundedEnvelopeAndKeepFailureScreenshot(t *testing.T) {
+func TestAgentPhaseRunnerEvaluatesBrowserBusinessStopAndKeepsFailureScreenshot(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-browser-stop", CaseValidating)
 	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
-	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{{FinalYAML: validBrowserPlanYAML()}}}
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
+		{FinalYAML: validBrowserPlanYAML()},
+		{FinalYAML: reproducedValidationYAML("browser/failed.png")},
+	}}
 	failureScreenshot := append([]byte("\x89PNG\r\n\x1a\n"), []byte("failed")...)
 	verifier := browserVerifierFunc(func(_ context.Context, request BrowserVerificationRequest) (BrowserVerificationResult, error) {
 		browserDir := filepath.Join(request.StagingDir, "browser")
@@ -725,12 +728,12 @@ func TestAgentPhaseRunnerBrowserStopsUseBoundedEnvelopeAndKeepFailureScreenshot(
 		t.Fatal(err)
 	}
 	command := <-completed
-	if command.Outcome != PhaseOutcomeNeedsEvidence || command.ErrorCode != "browser_assertion_failed" || strings.Contains(string(command.OutputJSON), "raw-worker-secret") || strings.Contains(command.ErrorMessage, "raw-worker-secret") {
+	if command.Outcome != PhaseOutcomeReproduced || command.ErrorCode != "" || strings.Contains(string(command.OutputJSON), "raw-worker-secret") || strings.Contains(command.ErrorMessage, "raw-worker-secret") {
 		t.Fatalf("completion=%+v output=%s", command, command.OutputJSON)
 	}
-	var envelope map[string]any
-	if err := json.Unmarshal(command.OutputJSON, &envelope); err != nil || envelope["failed_action_id"] != "wait-results" || envelope["evidence_limitation"] != true {
-		t.Fatalf("envelope=%+v err=%v", envelope, err)
+	var output map[string]any
+	if err := json.Unmarshal(command.OutputJSON, &output); err != nil || output["verification_status"] != "reproduced" {
+		t.Fatalf("output=%+v err=%v", output, err)
 	}
 	artifacts, err := store.ListEvidenceArtifacts(context.Background(), incident.ID)
 	if err != nil || len(artifacts) != 1 || artifacts[0].Kind != "screenshot" {

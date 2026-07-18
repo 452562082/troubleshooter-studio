@@ -939,7 +939,7 @@ func sanitizeWorkerResult(result workerResult) workerResult {
 	}
 	for index := range result.AccessibilitySummary {
 		result.AccessibilitySummary[index].Role = redactVerifierText(result.AccessibilitySummary[index].Role, 128)
-		result.AccessibilitySummary[index].Name = redactVerifierText(result.AccessibilitySummary[index].Name, 512)
+		result.AccessibilitySummary[index].Name = redactVerifierText(result.AccessibilitySummary[index].Name, 2048)
 	}
 	for index := range result.Artifacts {
 		result.Artifacts[index].RequestID = safeVerifierIdentifier(result.Artifacts[index].RequestID, 128)

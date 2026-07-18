@@ -139,10 +139,51 @@ func TestBrowserPlannerPromptExplainsStrictScreenshotFieldMatrix(t *testing.T) {
 		"press: requires locator and key; forbids url and value",
 		"screenshot: output only id and action; omit locator, url, value, key, and screenshot_after",
 		"  - id: capture-final\n    action: screenshot\nassertions:",
+		"Plan actions for stable navigation and input needed to reach the observation page",
+		"put observable business checks in assertions",
+		"未展示/缺失/不显示",
+		"never wait_for the business element or value under test",
 	} {
 		if !strings.Contains(prompt, required) {
 			t.Fatalf("planner prompt does not explain strict action fields %q:\n%s", required, prompt)
 		}
+	}
+}
+
+func TestNormalizeBrowserOutcomeWaitsTurnsMissingAssertionTargetIntoScreenshot(t *testing.T) {
+	plan, err := ParseBrowserPlan([]byte(`version: 1
+start_url: https://app.example.com
+actions:
+  - id: wait-channel
+    action: wait_for
+    locator: {kind: text, value: 搞笑}
+  - id: open-channel
+    action: click
+    locator: {kind: text, value: 搞笑}
+  - id: wait-missing-card
+    action: wait_for
+    locator: {kind: text, value: 再次来寻找}
+    screenshot_after: true
+assertions:
+  - kind: visible_text
+    value: 再次来寻找
+  - kind: visible_text
+    value: "2022"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	normalized := normalizeBrowserOutcomeWaits(plan)
+	if normalized.Actions[0].Action != "wait_for" {
+		t.Fatalf("navigation wait needed by a later click was changed: %+v", normalized.Actions[0])
+	}
+	got := normalized.Actions[2]
+	if got.Action != "screenshot" || got.ID != "wait-missing-card" || got.Locator != nil || got.ScreenshotAfter {
+		t.Fatalf("outcome-gating wait was not converted to a screenshot: %+v", got)
+	}
+	if err := validateDurableBrowserPlan(normalized); err != nil {
+		t.Fatalf("normalized plan is not durable: %v", err)
 	}
 }
 
@@ -177,6 +218,14 @@ func completedBrowserResult(path string) BrowserVerificationResult {
 			}(),
 		},
 	}
+}
+
+func failedBrowserResult(status, failedActionID, path string) BrowserVerificationResult {
+	result := completedBrowserResult(path)
+	result.Status = status
+	result.ErrorCode = status
+	result.FailedActionID = failedActionID
+	return result
 }
 
 func browserCoordinatorRequest(t *testing.T) BrowserCoordinatorRequest {
@@ -276,7 +325,7 @@ func TestBrowserCoordinatorPlansExecutesAndEvaluatesInOneAttempt(t *testing.T) {
 		"用户昵称模糊搜索结果不完整",
 		"应展示两个匹配用户",
 		"只展示一个匹配用户",
-		"A completed browser run only means the actions executed",
+		"A stopped action is evidence, not automatically a system error",
 	} {
 		if !strings.Contains(evaluatorPrompt, required) {
 			t.Fatalf("evaluator prompt missing %q:\n%s", required, evaluatorPrompt)
@@ -291,6 +340,42 @@ func TestBrowserCoordinatorPlansExecutesAndEvaluatesInOneAttempt(t *testing.T) {
 	}
 	if len(parsed.ArtifactInputs) != 2 || parsed.ArtifactInputs[0].Environment != "test" || parsed.ArtifactInputs[0].Version != "" {
 		t.Fatalf("host artifacts were not authoritative: %+v", parsed.ArtifactInputs)
+	}
+}
+
+func TestBrowserCoordinatorAttachesOriginalBugScreenshotToEvaluator(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	content := append([]byte("\x89PNG\r\n\x1a\n"), []byte("original-bug-evidence")...)
+	sourcePath := filepath.Join(t.TempDir(), "bug-evidence.png")
+	if err := os.WriteFile(sourcePath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request.Bug.Attachments = []Attachment{{ID: "evidence-1", Name: "前端未展示年份.png", Type: "image/png", LocalPath: sourcePath}}
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
+		{FinalYAML: validBrowserPlanYAML()},
+		{FinalYAML: reproducedValidationYAML("browser/final.png")},
+	}}
+	verifier := &fakeBrowserVerifier{Results: []BrowserVerificationResult{completedBrowserResult("browser/final.png")}}
+
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), request)
+	if err != nil || result.ErrorCode != "" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if len(executor.Attachments) != 2 || len(executor.Attachments[0]) != 1 || len(executor.Attachments[1]) != 2 {
+		t.Fatalf("evaluator attachments=%+v", executor.Attachments)
+	}
+	if plannerPrompt := executor.Prompts[0]; !strings.Contains(plannerPrompt, "recover exact visible route segments") || !strings.Contains(plannerPrompt, "前端未展示年份.png") || strings.Contains(plannerPrompt, sourcePath) {
+		t.Fatalf("planner prompt did not describe original evidence safely:\n%s", plannerPrompt)
+	}
+	if prompt := executor.Prompts[1]; !strings.Contains(prompt, "前端未展示年份.png") || !strings.Contains(prompt, "historical Bug evidence") || strings.Contains(prompt, sourcePath) {
+		t.Fatalf("evaluator prompt did not describe original evidence safely:\n%s", prompt)
+	}
+	for _, call := range executor.Attachments {
+		for _, attachment := range call {
+			if _, err := os.Stat(attachment.Path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("ephemeral evaluator attachment was not cleaned up: %s err=%v", attachment.Path, err)
+			}
+		}
 	}
 }
 
@@ -364,6 +449,60 @@ func TestBrowserCoordinatorRepairsLocatorOnlyOnce(t *testing.T) {
 	}
 }
 
+func TestBrowserCoordinatorReplaysCompletedNavigationBeforeRepairedSuffix(t *testing.T) {
+	originalYAML := `version: 1
+start_url: https://app.example.com
+actions:
+  - id: open-channel
+    action: click
+    locator: {kind: text, value: 搞笑}
+  - id: wait-album
+    action: wait_for
+    locator: {kind: text, value: 再次来寻找}
+  - id: capture
+    action: screenshot
+assertions:
+  - kind: visible_text
+    value: "2022"
+`
+	repairedSuffixYAML := `version: 1
+start_url: https://app.example.com
+actions:
+  - id: wait-album
+    action: wait_for
+    locator: {kind: text, value: 再次来寻找}
+  - id: capture
+    action: screenshot
+assertions:
+  - kind: visible_text
+    value: "2022"
+`
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
+		{FinalYAML: originalYAML},
+		{FinalYAML: repairedSuffixYAML},
+		{FinalYAML: reproducedValidationYAML("browser/final.png")},
+	}}
+	verifier := &fakeBrowserVerifier{Results: []BrowserVerificationResult{
+		{Status: "locator_failed", ErrorCode: "locator_failed", FailedActionID: "wait-album", FinalURL: "https://app.example.com"},
+		completedBrowserResult("browser/final.png"),
+	}}
+
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), browserCoordinatorRequest(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ErrorCode != "" || len(verifier.Requests) != 2 {
+		t.Fatalf("result=%+v requests=%d", result, len(verifier.Requests))
+	}
+	replayed := verifier.Requests[1].Plan.Actions
+	if len(replayed) != 3 || replayed[0].ID != "open-channel" || replayed[1].ID != "wait-album" {
+		t.Fatalf("repair did not replay completed navigation: %+v", replayed)
+	}
+	if !reflect.DeepEqual(replayed[0], verifier.Requests[0].Plan.Actions[0]) {
+		t.Fatalf("completed navigation changed during repair: before=%+v after=%+v", verifier.Requests[0].Plan.Actions[0], replayed[0])
+	}
+}
+
 func TestValidateBrowserRepairAcceptsEquivalentRootSlashNormalization(t *testing.T) {
 	original, err := ParseBrowserPlan([]byte(strings.Replace(validBrowserPlanYAML(), "https://app.example.com/users", "https://app.example.com", 1)))
 	if err != nil {
@@ -373,6 +512,7 @@ func TestValidateBrowserRepairAcceptsEquivalentRootSlashNormalization(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	repaired = expandBrowserRepairForFreshContext(original, "open-users", repaired)
 	if err := validateBrowserRepair(original, "open-users", repaired); err != nil {
 		t.Fatalf("equivalent root URL repair was rejected: %v", err)
 	}
@@ -441,6 +581,7 @@ func TestBrowserCoordinatorRecoveryReusesDurablePrimaryAndRepairPlans(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	wantRepair = expandBrowserRepairForFreshContext(wantPrimary, "open-users", wantRepair)
 	if !reflect.DeepEqual(recoveryVerifier.Requests[0].Plan, wantPrimary) || !reflect.DeepEqual(recoveryVerifier.Requests[1].Plan, wantRepair) {
 		t.Fatalf("recovery plans changed: got=%+v want primary=%+v repair=%+v", recoveryVerifier.Requests, wantPrimary, wantRepair)
 	}
@@ -570,7 +711,7 @@ func TestBrowserCoordinatorRejectsUnsafePlanJournalWithoutReplanning(t *testing.
 	}
 }
 
-func TestBrowserCoordinatorMapsBrowserStopsWithoutEvaluator(t *testing.T) {
+func TestBrowserCoordinatorMapsNonEvidenceBrowserStopsWithoutEvaluator(t *testing.T) {
 	tests := []struct {
 		name       string
 		results    []BrowserVerificationResult
@@ -580,8 +721,6 @@ func TestBrowserCoordinatorMapsBrowserStopsWithoutEvaluator(t *testing.T) {
 	}{
 		{name: "login", results: []BrowserVerificationResult{{Status: "login_required", LoginOrigin: "https://login.example.com"}}, wantCode: "browser_login_required", wantCalls: 1},
 		{name: "runtime", results: []BrowserVerificationResult{{Status: "runtime_broken", ErrorMessage: "Authorization: Bearer must-not-persist"}}, wantCode: "browser_runtime_broken", wantCalls: 1},
-		{name: "assertion", results: []BrowserVerificationResult{{Status: "assertion_failed", FailedActionID: "wait-results"}}, wantCode: "browser_assertion_failed", wantCalls: 1},
-		{name: "second locator", results: []BrowserVerificationResult{{Status: "locator_failed", FailedActionID: "open-users"}, {Status: "locator_failed", FailedActionID: "open-users"}}, wantCode: "browser_locator_failed", wantCalls: 2, wantRepair: 1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -600,6 +739,49 @@ func TestBrowserCoordinatorMapsBrowserStopsWithoutEvaluator(t *testing.T) {
 			}
 			if strings.Contains(result.ErrorMessage, "must-not-persist") {
 				t.Fatalf("raw browser error escaped: %+v", result)
+			}
+		})
+	}
+}
+
+func TestBrowserCoordinatorEvaluatesAssertionAndRepeatedLocatorStopsFromCapturedEvidence(t *testing.T) {
+	tests := []struct {
+		name       string
+		results    []BrowserVerificationResult
+		plans      []PhaseExecutionResult
+		wantCalls  int
+		wantRepair int
+	}{
+		{
+			name:      "assertion evidence",
+			results:   []BrowserVerificationResult{failedBrowserResult("assertion_failed", "wait-results", "browser/failure.png")},
+			plans:     []PhaseExecutionResult{{FinalYAML: validBrowserPlanYAML()}, {FinalYAML: reproducedValidationYAML("browser/failure.png")}},
+			wantCalls: 1,
+		},
+		{
+			name: "repeated locator evidence",
+			results: []BrowserVerificationResult{
+				failedBrowserResult("locator_failed", "open-users", "browser/primary-failure.png"),
+				failedBrowserResult("locator_failed", "open-users", "browser/repair-failure.png"),
+			},
+			plans:      []PhaseExecutionResult{{FinalYAML: validBrowserPlanYAML()}, {FinalYAML: repairedRemainingPlanYAML()}, {FinalYAML: reproducedValidationYAML("browser/repair-failure.png")}},
+			wantCalls:  2,
+			wantRepair: 1,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			executor := &scriptedPhaseExecutor{Results: test.plans}
+			verifier := &fakeBrowserVerifier{Results: test.results}
+			result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), browserCoordinatorRequest(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.ErrorCode != "" || result.FinalYAML == "" || verifier.Calls != test.wantCalls || result.RepairCount != test.wantRepair {
+				t.Fatalf("calls=%d result=%+v", verifier.Calls, result)
+			}
+			if !strings.Contains(executor.Prompts[len(executor.Prompts)-1], "A stopped action is evidence") {
+				t.Fatalf("stopped execution did not reach evaluator: %s", executor.Prompts[len(executor.Prompts)-1])
 			}
 		})
 	}

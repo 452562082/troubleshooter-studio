@@ -99,7 +99,7 @@ func TestWorkflowE2EFixedVerifiedSurvivesSQLiteReopen(t *testing.T) {
 	}
 
 	fixKey := StartFixApprovalKey(incident.ID, investigation.ID, incident.Version)
-	incident, err = orchestrator.ApproveFix(ctx, ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: fixKey, ActorID: "alice", RootCauseAttemptID: investigation.ID, Bug: bug, Bot: BotRef{Key: "fixer", Target: "codex", Path: t.TempDir(), Env: "test"}, InputJSON: []byte(`{}`)})
+	incident, err = orchestrator.ApproveFix(ctx, ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: fixKey, ActorID: "alice", RootCauseAttemptID: investigation.ID, Bug: bug, Bot: BotRef{Key: "fixer", Target: "codex", Path: t.TempDir(), Env: "test"}, InputJSON: []byte(`{"source_baselines":{"api":"feature/work"}}`)})
 	if err != nil || incident.Status != CaseFixing {
 		t.Fatalf("fix approval=%+v err=%v", incident, err)
 	}
@@ -425,7 +425,7 @@ func TestWorkflowE2EFailureAndRecoveryBoundaries(t *testing.T) {
 
 	t.Run("stale fix authorization is rejected", func(t *testing.T) {
 		_, incident, root, runner, o := prepareFixApprovalCase(t, validRootCauseOutput())
-		cmd := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version + 1, ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{}`)}
+		cmd := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version + 1, ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{"source_baselines":{"api":"feature/work"}}`)}
 		cmd.IdempotencyKey = StartFixApprovalKey(cmd.CaseID, cmd.RootCauseAttemptID, cmd.ExpectedVersion)
 		if _, err := o.ApproveFix(context.Background(), cmd); !errors.Is(err, ErrCaseVersionConflict) || runner.startCount() != 0 {
 			t.Fatalf("starts=%d err=%v", runner.startCount(), err)

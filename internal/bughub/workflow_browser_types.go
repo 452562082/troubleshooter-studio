@@ -171,7 +171,7 @@ func ParseBrowserPlan(data []byte) (BrowserPlan, error) {
 		if err := validateBrowserPlanString(fmt.Sprintf("assertions[%d].kind", i), assertion.Kind, true); err != nil {
 			return BrowserPlan{}, err
 		}
-		if assertion.Kind != "visible_text" {
+		if assertion.Kind != "visible_text" && assertion.Kind != "not_visible_text" {
 			return BrowserPlan{}, fmt.Errorf("browser plan assertions[%d].kind %q is not supported", i, assertion.Kind)
 		}
 		if err := validateBrowserPlanString(fmt.Sprintf("assertions[%d].value", i), assertion.Value, true); err != nil {

@@ -933,6 +933,10 @@ func (o *CaseOrchestrator) ApproveFix(ctx context.Context, cmd ApproveFixCommand
 	if incident.Status != CaseWaitingFixApproval {
 		return IncidentCase{}, ErrApprovalNotReady
 	}
+	sourceBaselines, err := parseFixSourceBaselines(cmd.InputJSON)
+	if err != nil {
+		return IncidentCase{}, fmt.Errorf("invalid fix source baseline approval: %w", err)
+	}
 	if incident.CurrentAttemptID != cmd.RootCauseAttemptID {
 		if replay, replayErr := o.hasEvent(ctx, incident.ID, cmd.IdempotencyKey); replayErr != nil {
 			return IncidentCase{}, replayErr
@@ -943,7 +947,7 @@ func (o *CaseOrchestrator) ApproveFix(ctx context.Context, cmd ApproveFixCommand
 	if err := validateFixApprovalRootCause(ctx, o.store, incident, cmd.RootCauseAttemptID); err != nil {
 		return IncidentCase{}, err
 	}
-	attempt, request := buildFixApprovalMutation(cmd, incident.CycleNumber)
+	attempt, request := buildFixApprovalMutation(cmd, incident.CycleNumber, sourceBaselines)
 	mutation, err := o.store.ApplyCaseMutation(ctx, request)
 	if err != nil {
 		return IncidentCase{}, err
@@ -960,9 +964,9 @@ func (o *CaseOrchestrator) ApproveFix(ctx context.Context, cmd ApproveFixCommand
 	return mutation.Case, nil
 }
 
-func buildFixApprovalMutation(cmd ApproveFixCommand, cycleNumber int) (PhaseAttempt, CaseMutation) {
+func buildFixApprovalMutation(cmd ApproveFixCommand, cycleNumber int, sourceBaselines map[string]string) (PhaseAttempt, CaseMutation) {
 	incident := IncidentCase{ID: cmd.CaseID, CycleNumber: cycleNumber}
-	scope, _ := json.Marshal(map[string]string{"root_cause_attempt_id": cmd.RootCauseAttemptID})
+	scope, _ := json.Marshal(map[string]any{"root_cause_attempt_id": cmd.RootCauseAttemptID, "source_baselines": sourceBaselines})
 	approval := Approval{ID: stableID("approval", cmd.IdempotencyKey), CaseID: cmd.CaseID, Kind: ApprovalStartFix, Actor: cmd.ActorID, CaseVersion: cmd.ExpectedVersion, ScopeJSON: scope}
 	attempt := newAttempt(incident, PhaseFix, "", cmd.IdempotencyKey, cmd.Bot, cmd.InputJSON, cmd.RootCauseAttemptID)
 	update := CaseSnapshotUpdate{CurrentAttemptID: workflowStringPtr(attempt.ID), SelectedBotKey: workflowStringPtr(cmd.Bot.Key)}
@@ -976,7 +980,11 @@ func (o *CaseOrchestrator) replayFixApproval(ctx context.Context, cmd ApproveFix
 	if err != nil {
 		return IncidentCase{}, err
 	}
-	_, request := buildFixApprovalMutation(cmd, root.CycleNumber)
+	sourceBaselines, parseErr := parseFixSourceBaselines(cmd.InputJSON)
+	if parseErr != nil {
+		return IncidentCase{}, ErrIdempotencyConflict
+	}
+	_, request := buildFixApprovalMutation(cmd, root.CycleNumber, sourceBaselines)
 	result, err := o.store.ApplyCaseMutation(ctx, request)
 	if err != nil {
 		return IncidentCase{}, err

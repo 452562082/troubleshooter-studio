@@ -63,12 +63,8 @@ type ResetDialogSnapshot = {
   bugID: string
   caseID: string
   caseVersion: number
-  caseStatus: string
-  phase: string
-  attemptID: string
-  oldBotKey: string
-  oldEnvironment: string
   newBotKey: string
+  newBotName: string
   newBotTarget: string
   newEnvironment: string
   newCaseID: string
@@ -388,7 +384,7 @@ async function restartIncidentCase(targetOverride?: IncidentCase) {
     const snapshot = cached || await getIncidentCase(target.id)
     if (snapshot.case.id !== target.id) throw new Error(`读取到错误的重启目标 Case：期望 ${target.id}，实际 ${snapshot.case.id}`)
     if (!targetIsCurrent()) return
-    await openResetDialog(snapshot.case, snapshot, choice)
+    await openResetDialog(snapshot.case, choice)
   } catch (error) {
     if (!targetIsCurrent()) return
     const message = error instanceof Error ? error.message : String(error)
@@ -418,7 +414,7 @@ function freshResetCaseID(caseID: string): string {
   return `case-reset-${safeCaseID}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
 
-async function openResetDialog(incident: IncidentCase, detail: Awaited<ReturnType<typeof getIncidentCase>>, choice: StartBotChoice) {
+async function openResetDialog(incident: IncidentCase, choice: StartBotChoice) {
   if (resetting.value) return
   const bugID = tickets.selectedID.value
   const newBot = choice.bot
@@ -439,19 +435,14 @@ async function openResetDialog(incident: IncidentCase, detail: Awaited<ReturnTyp
   }
   resetTrigger.value = document.activeElement instanceof HTMLElement ? document.activeElement : null
   resetError.value = ''
-  const attempt = detail?.attempts.find(item => item.id === incident.current_attempt_id)
   resetDialog.value = {
     mode,
     generation: ++resetGeneration,
     bugID,
     caseID: incident.id,
     caseVersion: incident.version,
-    caseStatus: incident.status,
-    phase: attempt?.phase || '无活动阶段',
-    attemptID: incident.current_attempt_id || '无',
-    oldBotKey: incident.selected_bot_key,
-    oldEnvironment: incident.environment,
     newBotKey: choice.key,
+    newBotName: newBot.name?.trim() || newBot.system_id?.trim() || '排障机器人',
     newBotTarget: newBot.target,
     newEnvironment,
     ...request,
@@ -462,6 +453,15 @@ async function openResetDialog(incident: IncidentCase, detail: Awaited<ReturnTyp
 
 function resetRequestIdentity(mode: RestartMode, caseID: string, caseVersion: number, botKey: string, botTarget: string, environment: string): string {
   return `${mode}:${caseID}:v${caseVersion}:${botKey}:${botTarget}:${environment}`
+}
+
+function botTargetLabel(target: string): string {
+  switch (target) {
+    case 'claude-code': return 'Claude Code'
+    case 'openclaw': return 'OpenClaw'
+    case 'codex': return 'Codex'
+    default: return target
+  }
 }
 
 function discardResetDialog() {
@@ -834,7 +834,7 @@ async function handleIncidentBrowser(action: IncidentBrowserAction) {
   }
 }
 
-async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind']; input?: string; rootCauseAttemptID?: string; caseVersion?: number }) {
+async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind']; input?: string; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> }) {
   const detail = displayedDetail.value
   if (!detail) return
   const incident = detail.case
@@ -859,6 +859,9 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
         if (!incident.selected_bot_key) throw new Error('当前 Case 没有绑定排障机器人')
         return startIncidentCase({ ...base, bug_id: incident.bug_id, bot_key: incident.selected_bot_key, bot_environment: incident.environment, input_json: { mode: 'reproduce', target_environment: incident.environment } })
       }
+      if (payload.kind === 'retry_validation') {
+        return continueIncidentCase({ ...base, ...continuationForDetail(detail, '') })
+      }
       if (payload.kind === 'supply_evidence' || payload.kind === 'continue_fix') {
         return continueIncidentCase({ ...base, ...continuationForDetail(detail, payload.input || '') })
       }
@@ -875,6 +878,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
           expected_version: payload.caseVersion,
           idempotency_key: `start-fix:${incident.id}:${payload.rootCauseAttemptID}:${payload.caseVersion}`,
           root_cause_attempt_id: payload.rootCauseAttemptID,
+          input_json: { source_baselines: payload.sourceBaselines || {} },
         })
       }
       if (payload.kind === 'approve_merge') {
@@ -1006,26 +1010,21 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
       <section ref="resetDialogElement" role="dialog" aria-modal="true" aria-labelledby="reset-dialog-title" aria-describedby="reset-dialog-description" class="reset-dialog" data-overflow-safe="true" tabindex="-1" @keydown="trapResetDialogFocus">
         <header>
           <span>危险操作</span>
-          <h2 id="reset-dialog-title">{{ resetDialog.mode === 'active_reset' ? '重置并新建 Case' : '开启新一轮故障闭环' }}</h2>
+          <h2 id="reset-dialog-title">{{ resetDialog.mode === 'active_reset' ? '重新开始故障闭环' : '开启新一轮故障闭环' }}</h2>
         </header>
-        <p v-if="resetDialog.mode === 'active_reset'" id="reset-dialog-description">当前 Case 将归档为“已重置归档”，并用确认框快照的机器人和环境创建新 Case，从验证阶段重新开始。<strong>当前 Agent 将被停止。</strong></p>
-        <p v-else id="reset-dialog-description">原 Case 保持终态不变，并用确认框快照的机器人和环境创建全新 Case，从验证阶段开启新一轮。</p>
-        <p class="reset-warning" role="note"><strong>{{ resetDialog.mode === 'active_reset' ? '重置' : '开启新一轮' }}不会撤销已发生的提交、推送或部署。</strong>原 Case、证据和审计记录保持不可变；外部副作用需要人工另行处理。</p>
+        <p v-if="resetDialog.mode === 'active_reset'" id="reset-dialog-description">将停止当前 Agent，保留本轮记录，并使用以下设置从“验证”重新开始。</p>
+        <p v-else id="reset-dialog-description">原记录保持不变，并使用以下设置从“验证”开启新一轮。</p>
+        <p class="reset-warning" role="note">已发生的提交、推送或部署不会自动撤销；已有证据和审计记录会继续保留。</p>
         <dl class="reset-scope">
-          <div><dt>Bug ID</dt><dd>{{ resetDialog.bugID }}</dd></div>
-          <div><dt>原 Case</dt><dd>{{ resetDialog.caseID }} · v{{ resetDialog.caseVersion }}</dd></div>
-          <div><dt>状态</dt><dd>{{ resetDialog.caseStatus }}</dd></div>
-          <div><dt>阶段</dt><dd>{{ resetDialog.phase }}</dd></div>
-          <div><dt>当前 Attempt</dt><dd>{{ resetDialog.attemptID }}</dd></div>
-          <div><dt>旧绑定</dt><dd>{{ resetDialog.oldBotKey || '未绑定' }} · {{ resetDialog.oldEnvironment || '环境未知' }}</dd></div>
-          <div><dt>新绑定</dt><dd>{{ resetDialog.newBotTarget }} · {{ resetDialog.newBotKey }} · {{ resetDialog.newEnvironment }}</dd></div>
-          <div><dt>{{ resetDialog.mode === 'active_reset' ? '接替 Case' : '新 Case' }}</dt><dd>{{ resetDialog.newCaseID }}</dd></div>
+          <div><dt>开始阶段</dt><dd>验证</dd></div>
+          <div><dt>排障机器人</dt><dd>{{ resetDialog.newBotName }} · {{ botTargetLabel(resetDialog.newBotTarget) }}</dd></div>
+          <div><dt>目标环境</dt><dd>{{ resetDialog.newEnvironment }}</dd></div>
         </dl>
         <p data-reset-error class="reset-live-error" role="status" aria-live="assertive">{{ resetError }}</p>
         <footer>
           <button ref="resetCancelButton" class="btn" data-reset-cancel type="button" :disabled="resetting" @click="closeResetDialog">取消</button>
           <button class="btn danger" data-reset-confirm type="button" :disabled="resetting || !resetDialog.newBotKey" @click="confirmRestart">
-            {{ resetting ? (resetDialog.mode === 'active_reset' ? '重置中…' : '开启中…') : (resetDialog.mode === 'active_reset' ? '确认重置并新建' : '确认开启新一轮') }}
+            {{ resetting ? (resetDialog.mode === 'active_reset' ? '重新开始中…' : '开启中…') : (resetDialog.mode === 'active_reset' ? '确认重新开始' : '确认开启新一轮') }}
           </button>
         </footer>
       </section>

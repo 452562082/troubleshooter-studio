@@ -21,6 +21,24 @@ describe('presentStageAttempt', () => {
     expect(JSON.stringify(view)).not.toContain('scenario_hash')
   })
 
+  it('marks structured evidence groups for individually labelled rendering', () => {
+    const view = presentStageAttempt(attempt('validation', {
+      verification_status: 'reproduced', environment: 'test', gaps: [],
+      evidence: [{ kind: 'network', path: 'browser/network.json', captured_at: '2026-07-18T09:53:39Z', request_id: 'request-1' }],
+    }))
+
+    expect(view.sections[view.sections.length - 1]).toEqual({
+      title: '验证证据',
+      groupLabel: '证据',
+      groups: [[
+        { label: '类型', value: 'network' },
+        { label: '路径', value: 'browser/network.json', mono: true },
+        { label: '采集时间', value: '2026-07-18T09:53:39Z' },
+        { label: 'Request ID', value: 'request-1', mono: true },
+      ]],
+    })
+  })
+
   it('presents the nested phase result from the persisted completion-intent envelope', () => {
     const view = presentStageAttempt(attempt('validation', {
       kind: 'phase_completion_intent',

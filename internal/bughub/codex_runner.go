@@ -12,6 +12,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -252,15 +254,15 @@ func BuildCodexFixPrompt(b Bug, bot BotRef, prevRun InvestigationRun, userInput 
 	sb.WriteString("第一步：如果当前机器人 workspace 中存在 `bug-fixer/SKILL.md`，必须先 Read 它，并按其中流程执行。\n")
 	sb.WriteString("如果旧安装还没有该 skill，使用下面内置流程作为兼容兜底。\n\n")
 	sb.WriteString("## 强制流程\n\n")
-	sb.WriteString("1. 先确认当前代码仓库已经切到目标环境对应分支；不要从错误分支修复。\n")
-	sb.WriteString("2. 基于当前环境分支创建独立修复分支，分支名使用 `fix/bug-<source>-<id>-<short>` 风格。\n")
+	sb.WriteString("1. Studio 会同时提供用户批准的开发基线和 routing 确定的目标环境分支；两者是独立概念，当前 checkout 和环境分支都不得擅自替代开发基线。\n")
+	sb.WriteString("2. 必须只在 Studio locked fix workspace 中，从锁定的开发基线 commit 创建独立修复分支。缺少 locked workspace、仓库或开发基线绑定时停止并报告配置缺口；禁止自行从当前 HEAD 或环境分支兜底创建。\n")
 	sb.WriteString("3. 修复 Bug，只做最小必要改动，不做无关重构，不改无关文件。\n")
 	sb.WriteString("4. 运行相关测试、构建或最小验证命令；无法运行时说明具体原因。\n")
 	sb.WriteString("5. `git status` 确认只包含本次修复文件后提交，并推送修复分支。\n")
 	sb.WriteString("6. 最终输出分支名、commit、push 结果、测试结果，并明确通知用户部署该修复分支。\n\n")
 	sb.WriteString("## 停止条件\n\n")
 	sb.WriteString("- 如果工作区已有用户未提交改动或无法确认这些改动属于本次修复，停止并说明，不要覆盖。\n")
-	sb.WriteString("- 如果无法确认环境分支、无法创建分支、无法提交或无法推送，停止并说明阻塞点。\n")
+	sb.WriteString("- 如果无法确认开发基线或环境分支、无法创建分支、无法提交或无法推送，停止并说明阻塞点。\n")
 	sb.WriteString("- 不自行部署，不修改生产配置，不执行破坏性命令。\n\n")
 	if strings.TrimSpace(userInput) != "" {
 		sb.WriteString("## 用户补充修复要求\n\n")
@@ -374,7 +376,7 @@ func fixOutputContract() string {
 	sb.WriteString("environment: \"<env>\"\n")
 	sb.WriteString("branches:\n")
 	sb.WriteString("  - repo: \"<repo>\"\n")
-	sb.WriteString("    base_branch: \"<env-branch>\"\n")
+	sb.WriteString("    base_branch: \"<user-approved-source-baseline-branch>\"\n")
 	sb.WriteString("    fix_branch: \"<fix-branch>\"\n")
 	sb.WriteString("    commit: \"<sha-or-empty>\"\n")
 	sb.WriteString("    pushed: true\n")
@@ -396,7 +398,7 @@ func fixOutputContract() string {
 	sb.WriteString("blocked_reason: \"<only when blocked/failed>\"\n")
 	sb.WriteString("evidence: []\n")
 	sb.WriteString("```\n")
-	sb.WriteString("每个仓库的 base_branch 必须与 target_environment_branch 完全一致；fix_branch 必须是不同的专用修复分支，禁止直接在环境分支修复或推送。\n")
+	sb.WriteString("每个仓库的 base_branch 必须是 Studio 锁定的用户确认开发基线；target_environment_branch 是后续独立集成目标，两者允许不同。fix_branch 必须是不同的专用修复分支，禁止直接在基线分支或环境分支修复、提交或推送。\n")
 	return sb.String()
 }
 
@@ -423,11 +425,21 @@ func buildCodexExecCommand(codexBin, workspace, prompt string, imagePaths []stri
 	if !info.IsDir() {
 		return nil, fmt.Errorf("workspace %q is not a directory", workspace)
 	}
+	filesystemConfig, err := codexFilesystemPermissionConfig(workspace, prompt, imagePaths)
+	if err != nil {
+		return nil, err
+	}
 	args := []string{
 		"exec", "--json",
 		"--enable", "respect_system_proxy",
 		"-c", "suppress_unstable_features_warning=true",
-		"--sandbox", "workspace-write",
+		// Studio background Agents cannot answer an interactive approval dialog.
+		// More importantly, the named filesystem profile below gives Codex a
+		// host-generated allowlist, so a model command cannot traverse $HOME and
+		// trigger macOS App Data / Documents / Photos privacy prompts.
+		"-c", `approval_policy="never"`,
+		"-c", `permission_profile="studio_agent"`,
+		"-c", filesystemConfig,
 		"--cd", workspace,
 		"--skip-git-repo-check",
 	}
@@ -444,6 +456,84 @@ func buildCodexExecCommand(codexBin, workspace, prompt string, imagePaths []stri
 	cmd := exec.Command(codexBin, args...)
 	cmd.Dir = workspace
 	return cmd, nil
+}
+
+func codexFilesystemPermissionConfig(workspace, prompt string, imagePaths []string) (string, error) {
+	roots := map[string]string{filepath.Clean(workspace): "write"}
+	staging := codexStagingPathFromPrompt(prompt)
+	if staging != "" {
+		if !filepath.IsAbs(staging) {
+			return "", errors.New("Studio evidence staging path must be absolute")
+		}
+		staging = filepath.Clean(staging)
+		info, err := os.Stat(staging)
+		if err != nil || !info.IsDir() {
+			return "", fmt.Errorf("Studio evidence staging path is unavailable: %s", staging)
+		}
+		roots[staging] = "write"
+		manifestPath := filepath.Join(staging, repositoryAccessManifestName)
+		data, readErr := os.ReadFile(manifestPath)
+		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+			return "", fmt.Errorf("read repository access manifest: %w", readErr)
+		}
+		if readErr == nil {
+			var manifest repositoryAccessManifest
+			if err := json.Unmarshal(data, &manifest); err != nil {
+				return "", fmt.Errorf("parse repository access manifest: %w", err)
+			}
+			for _, root := range manifest.Roots {
+				path := filepath.Clean(strings.TrimSpace(root.Path))
+				if path == "." || !filepath.IsAbs(path) {
+					return "", fmt.Errorf("repository access path for %s must be absolute", root.Repo)
+				}
+				access := strings.TrimSpace(root.Access)
+				if access != "read" && access != "write" {
+					return "", fmt.Errorf("repository access mode for %s is invalid", root.Repo)
+				}
+				info, err := os.Stat(path)
+				if err != nil || !info.IsDir() {
+					return "", fmt.Errorf("repository access path for %s is unavailable", root.Repo)
+				}
+				roots[path] = access
+			}
+		}
+	}
+	for _, imagePath := range imagePaths {
+		path := filepath.Clean(strings.TrimSpace(imagePath))
+		if path == "." || !filepath.IsAbs(path) {
+			return "", errors.New("Codex attachment path must be absolute")
+		}
+		roots[path] = "read"
+	}
+
+	paths := make([]string, 0, len(roots))
+	for path := range roots {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	var config strings.Builder
+	config.WriteString(`permissions.studio_agent.filesystem={":minimal"="read"`)
+	for _, path := range paths {
+		config.WriteByte(',')
+		config.WriteString(strconv.Quote(path))
+		config.WriteByte('=')
+		config.WriteString(strconv.Quote(roots[path]))
+	}
+	config.WriteByte('}')
+	return config.String(), nil
+}
+
+func codexStagingPathFromPrompt(prompt string) string {
+	const marker = "STUDIO_EVIDENCE_STAGING_DIR="
+	index := strings.LastIndex(prompt, marker)
+	if index < 0 {
+		return ""
+	}
+	line := prompt[index+len(marker):]
+	if newline := strings.IndexByte(line, '\n'); newline >= 0 {
+		line = line[:newline]
+	}
+	return strings.TrimSpace(line)
 }
 
 func BuildClaudeInvestigationCommand(claudeBin, workspace, agentPath, prompt string) (*exec.Cmd, error) {
@@ -1661,14 +1751,24 @@ func (i *CodexInvestigator) runCommandStage(ctx context.Context, runID string, c
 }
 
 func normalizePhaseEvent(event *InvestigationEvent, phase string) {
-	if event == nil || phase != "validation" {
+	if event == nil {
+		return
+	}
+	labels := map[string][2]string{
+		"validation":    {"开始验证", "验证完成"},
+		"investigation": {"开始排障", "排障完成"},
+		"fix":           {"开始修复", "修复完成"},
+		"regression":    {"开始回归", "回归完成"},
+	}
+	label, ok := labels[phase]
+	if !ok {
 		return
 	}
 	switch event.Type {
 	case "turn_started":
-		event.Message = "开始验证"
+		event.Message = label[0]
 	case "turn_completed":
-		event.Message = "验证完成"
+		event.Message = label[1]
 	}
 }
 

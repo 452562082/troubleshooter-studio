@@ -1,1 +1,0 @@
-# Keep this directory present for //go:embed all:dist in fresh checkouts.

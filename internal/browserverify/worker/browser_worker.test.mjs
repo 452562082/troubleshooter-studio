@@ -30,6 +30,7 @@ import {
   hasVisiblePasswordField,
   observeLoginState,
   dialPinnedTarget,
+  executeAssertion,
   launchPinnedBrowser,
   resolvePinnedTarget,
   saveLoginStorageState,
@@ -277,6 +278,32 @@ const baseLoginRequest = () => ({
 
 test('browser worker loads and validates offline without importing Playwright', () => {
   assert.doesNotThrow(() => validateWorkerRequest(baseRequest()));
+});
+
+test('browser worker accepts and executes visible and negative text assertions', async () => {
+  const request = baseRequest();
+  request.plan.assertions = [
+    { kind: 'visible_text', value: '推荐' },
+    { kind: 'not_visible_text', value: '2022' },
+  ];
+  assert.doesNotThrow(() => validateWorkerRequest(request));
+
+  const waits = [];
+  const page = {
+    getByText(value, options) {
+      const locator = {
+        filter(filter) { return { first: () => ({ waitFor: async ({ state }) => waits.push({ value, options, filter, state }) }) }; },
+        first: () => ({ waitFor: async ({ state }) => waits.push({ value, options, state }) }),
+      };
+      return locator;
+    },
+  };
+  await executeAssertion(page, request.plan.assertions[0]);
+  await executeAssertion(page, request.plan.assertions[1]);
+  assert.deepEqual(waits, [
+    { value: '推荐', options: { exact: false }, state: 'visible' },
+    { value: '2022', options: { exact: false }, filter: { visible: true }, state: 'hidden' },
+  ]);
 });
 
 test('login worker requires visible mode, one absolute state path, and an original application URL', () => {

@@ -37,6 +37,32 @@ describe('BugStageAttemptOutput', () => {
     expect(wrapper.get('summary').attributes('aria-label')).toContain('验证')
   })
 
+  it('separates every validation evidence item into a labelled card', () => {
+    const attempt = {
+      ...validation,
+      output_json: {
+        verification_status: 'reproduced', environment: 'test', gaps: [],
+        evidence: [
+          { kind: 'screenshot', environment: 'test', path: 'browser-executions/primary/browser/action-02-wait-for-featured-card.png' },
+          { kind: 'screenshot', environment: 'test', path: 'browser-executions/primary/browser/action-03-capture-featured-card.png' },
+          { kind: 'screenshot', environment: 'test', path: 'browser-executions/primary/browser/failure.png' },
+          { kind: 'network', environment: 'test', path: 'browser-executions/primary/browser/network.json', request_id: 'request-123', trace_id: 'trace-456' },
+        ],
+      },
+    }
+    const wrapper = mount(BugStageAttemptOutput, { props: { attempt, latest: true } })
+    const cards = wrapper.findAll('[data-stage-group]')
+
+    expect(cards).toHaveLength(4)
+    expect(cards.map(card => card.get('.stage-group-heading strong').text())).toEqual(['证据 1', '证据 2', '证据 3', '证据 4'])
+    expect(cards[0].get('.stage-group-heading span').text()).toBe('截图')
+    expect(cards[0].text()).toContain('action-02-wait-for-featured-card.png')
+    expect(cards[0].text()).not.toContain('network.json')
+    expect(cards[3].get('.stage-group-heading span').text()).toBe('Network')
+    expect(cards[3].text()).toContain('request-123')
+    expect(cards[3].text()).toContain('trace-456')
+  })
+
   it('renders multiple unknown fields with Chinese fallback labels and stable keyed sections', async () => {
     const unknown = {
       ...validation,

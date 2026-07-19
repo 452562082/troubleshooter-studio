@@ -5,6 +5,15 @@ description: 排障主线 skill。固化"症状→时间轴→横向→纵向→
 
 # 事故排障主线（7 步排障图谱）
 
+## Studio 冻结复现证据优先级
+
+若提示中存在 `STUDIO_EVIDENCE_STAGING_DIR/validation-evidence-manifest.json`，说明验证 Agent 已经完成复现：
+
+- 步骤 1 直接读取 manifest 及其不可变证据文件，复现结论是本轮排障的既定输入。
+- 不调用 `bug-verifier`、`api-verifier`、`attachment-evidence-verifier`，不重新操作浏览器复现。
+- 证据缺失或损坏时记录精确 gap，不得回退到验证阶段。
+- 每进入一步，先按 Studio 提示中给出的 `[[TSHOOT_STEP ...]]` 固定标记单独发送进度；不得修改 index 或 key。
+
 ```
 步骤 1  收齐前提 + 症状先验证 + 历史 incident 复查
 步骤 2  timeline → ±5 分钟内变更(deploy / 配置 / git)+ diff_risks 自动分类

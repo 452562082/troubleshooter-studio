@@ -1447,7 +1447,7 @@ func TestAgentPhaseRunnerDeferredCleanupRetriesAfterFirstFailure(t *testing.T) {
 	if err := store.ClaimRunnableAttempt(context.Background(), AttemptRunClaim{Attempt: attempt, ClaimToken: claimToken}); err != nil {
 		t.Fatal(err)
 	}
-	runner.run(context.Background(), attempt, incident, Bug{ID: incident.BugID}, installedPhaseRunnerBot(t, "bot", "codex"), "prompt", staging, incident.Version, claimToken, func(context.Context, CompleteAttemptCommand) error { return nil }, nil, nil)
+	runner.run(context.Background(), attempt, incident, Bug{ID: incident.BugID}, installedPhaseRunnerBot(t, "bot", "codex"), "prompt", staging, nil, incident.Version, claimToken, func(context.Context, CompleteAttemptCommand) error { return nil }, nil, nil)
 	if staging.calls != 2 {
 		t.Fatalf("cleanup calls = %d, want initial failure plus deferred retry", staging.calls)
 	}
@@ -1472,7 +1472,7 @@ func TestAgentPhaseRunnerPreservesStagingWhenCompletionIntentSaveFails(t *testin
 		t.Fatal(err)
 	}
 	completionCalled := false
-	runner.run(context.Background(), attempt, incident, Bug{ID: incident.BugID}, installedPhaseRunnerBot(t, "bot", "codex"), "prompt", staging, incident.Version, claimToken, func(context.Context, CompleteAttemptCommand) error {
+	runner.run(context.Background(), attempt, incident, Bug{ID: incident.BugID}, installedPhaseRunnerBot(t, "bot", "codex"), "prompt", staging, nil, incident.Version, claimToken, func(context.Context, CompleteAttemptCommand) error {
 		completionCalled = true
 		return nil
 	}, nil, nil)
@@ -2065,6 +2065,28 @@ func TestAgentPhaseRunnerFixPromptIncludesAuthorizedStructuredInput(t *testing.T
 	}
 	if !strings.Contains(prompt, "authorized-race-in-cache") || !strings.Contains(prompt, "结构化阶段输入") {
 		t.Fatalf("fix prompt lost authorized input:\n%s", prompt)
+	}
+}
+
+func TestAgentPhaseRunnerInvestigationPromptConsumesFrozenEvidenceAndPublishesSevenSteps(t *testing.T) {
+	store := newOrchestratorStore(t)
+	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error { return nil })
+	attempt := PhaseAttempt{Phase: PhaseInvestigation, InputJSON: []byte(`{"validation_attempt_id":"validation-1","scenario_hash":"scenario-1"}`)}
+	prompt, err := runner.promptForAttempt(attempt, Bug{ID: "bug"}, BotRef{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"验证 Agent 完成复现并冻结证据",
+		"不得调用 bug-verifier、api-verifier、attachment-evidence-verifier",
+		"不得重新操作浏览器复现",
+		"[[TSHOOT_STEP phase=investigation index=1 key=evidence_handoff]]",
+		"[[TSHOOT_STEP phase=investigation index=7 key=knowledge_sink]]",
+		"validation-1",
+	} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("investigation prompt missing %q:\n%s", required, prompt)
+		}
 	}
 }
 

@@ -16,8 +16,6 @@ import CredsShareWarning from './CredsShareWarning.vue'
 import ObservabilityToolBlock from './ObservabilityToolBlock.vue'
 import K8sRuntimeBlock from './K8sRuntimeBlock.vue'
 import LokiMappingStep from './LokiMappingStep.vue'
-import ResourceCoveragePanel from './ResourceCoveragePanel.vue'
-import type { ResourceCoverage } from '../lib/resourceCoverage'
 
 interface ToolSpec { key: string; label: string; description: string; fields: CredField[] }
 interface WorkloadCacheEntry { status?: 'idle' | 'loading' | 'ok' | 'error' }
@@ -71,7 +69,6 @@ const props = defineProps<{
   obsGrafanaDsKey: (obsKey: string, envID: string) => string
   obsGrafanaDsTypes: Record<string, string[]>
   k8sConnectionReuseLabel: (envID: string) => string
-  resourceCoverage: ResourceCoverage
 }>()
 
 const emit = defineEmits<{
@@ -301,6 +298,5 @@ function onToolToggle(tool: string, checked: boolean) {
         </div>
       </div>
     </div>
-    <ResourceCoveragePanel :coverage="resourceCoverage" />
   </div>
 </template>

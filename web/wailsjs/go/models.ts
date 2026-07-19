@@ -293,6 +293,32 @@ export namespace analyzer {
 	        this.default_context = source["default_context"];
 	    }
 	}
+	export class MessagingEndpoint {
+	    broker: string;
+	    direction: string;
+	    destination_kind: string;
+	    destination: string;
+	    routing_key?: string;
+	    source?: string;
+	    line?: number;
+	    strength?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new MessagingEndpoint(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.broker = source["broker"];
+	        this.direction = source["direction"];
+	        this.destination_kind = source["destination_kind"];
+	        this.destination = source["destination"];
+	        this.routing_key = source["routing_key"];
+	        this.source = source["source"];
+	        this.line = source["line"];
+	        this.strength = source["strength"];
+	    }
+	}
 	export class RoleHint {
 	    role: string;
 	    reason: string;
@@ -341,6 +367,7 @@ export namespace analyzer {
 	    api_routes?: APIRoute[];
 	    endpoints?: topology.Endpoint[];
 	    data_store_usages?: DataStoreUsage[];
+	    messaging_endpoints?: MessagingEndpoint[];
 	    schema_tables?: SchemaTable[];
 	    role_hint?: RoleHint;
 	    warnings?: string[];
@@ -362,6 +389,7 @@ export namespace analyzer {
 	        this.api_routes = this.convertValues(source["api_routes"], APIRoute);
 	        this.endpoints = this.convertValues(source["endpoints"], topology.Endpoint);
 	        this.data_store_usages = this.convertValues(source["data_store_usages"], DataStoreUsage);
+	        this.messaging_endpoints = this.convertValues(source["messaging_endpoints"], MessagingEndpoint);
 	        this.schema_tables = this.convertValues(source["schema_tables"], SchemaTable);
 	        this.role_hint = this.convertValues(source["role_hint"], RoleHint);
 	        this.warnings = source["warnings"];
@@ -1462,6 +1490,24 @@ export namespace deploy {
 
 export namespace discover {
 
+	export class ProjectRepository {
+	    name: string;
+	    url?: string;
+	    local_path?: string;
+	    sub_path?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new ProjectRepository(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.url = source["url"];
+	        this.local_path = source["local_path"];
+	        this.sub_path = source["sub_path"];
+	    }
+	}
 	export class InternalAgent {
 	    id: string;
 	    role: string;
@@ -1484,6 +1530,7 @@ export namespace discover {
 	    agent_id?: string;
 	    role?: string;
 	    internal_agents?: InternalAgent[];
+	    project_repositories?: ProjectRepository[];
 	    target: string;
 	    generated_at: string;
 	    troubleshooter_yaml: string;
@@ -1502,6 +1549,7 @@ export namespace discover {
 	        this.agent_id = source["agent_id"];
 	        this.role = source["role"];
 	        this.internal_agents = this.convertValues(source["internal_agents"], InternalAgent);
+	        this.project_repositories = this.convertValues(source["project_repositories"], ProjectRepository);
 	        this.target = source["target"];
 	        this.generated_at = source["generated_at"];
 	        this.troubleshooter_yaml = source["troubleshooter_yaml"];
@@ -1574,6 +1622,7 @@ export namespace discover {
 		    return a;
 		}
 	}
+
 
 
 }
@@ -2870,6 +2919,7 @@ export namespace main {
 	export class IncidentCaseDetail {
 	    case: bughub.IncidentCase;
 	    attempts: IncidentPhaseAttempt[];
+	    phase_events: bughub.InvestigationEvent[];
 	    artifacts: IncidentArtifact[];
 	    approvals: IncidentApproval[];
 	    code_changes: IncidentCodeChange[];
@@ -2886,6 +2936,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.case = this.convertValues(source["case"], bughub.IncidentCase);
 	        this.attempts = this.convertValues(source["attempts"], IncidentPhaseAttempt);
+	        this.phase_events = this.convertValues(source["phase_events"], bughub.InvestigationEvent);
 	        this.artifacts = this.convertValues(source["artifacts"], IncidentArtifact);
 	        this.approvals = this.convertValues(source["approvals"], IncidentApproval);
 	        this.code_changes = this.convertValues(source["code_changes"], IncidentCodeChange);

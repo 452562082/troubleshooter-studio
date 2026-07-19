@@ -119,6 +119,11 @@ describe('BugBrowserProgress', () => {
     const system = mount(BugBrowserProgress, { props: { attempt: attempt('browser_worker_failed'), events: [], systemID: 'base', environment: 'test' } })
     expect(system.text()).toContain('浏览器验证遇到系统错误')
     expect(system.get('[data-browser-error-code]').text()).toBe('错误码：browser_worker_failed')
+
+    const plan = mount(BugBrowserProgress, { props: { attempt: attempt('browser_validator_plan_invalid'), events: [], systemID: 'base', environment: 'test' } })
+    expect(plan.get('[data-browser-state="plan"]').text()).toContain('未通过结构校验')
+    expect(plan.text()).toContain('当前 Case')
+    expect(plan.text()).toContain('无需重建故障闭环')
   })
 
   it('never renders an untrusted error code as recovery copy', () => {

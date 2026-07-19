@@ -651,3 +651,57 @@ Studio 故障闭环已经把选定机器人、system 和内部 role 持久化到
 后端校验同时把 `resource_catalog` 作为运行时身份真源：K8s service map 只能引用已知 service/workload，`(env, service)` 不得重复，显式 workload 名必须与目录一致；Loki service map 也只能引用目录身份。缺少可选映射允许降级，显式冲突则拒绝生成或部署。
 
 **后果**：同类型多实例从界面编辑到实际 MCP 注册形成完整闭环，资源目录、K8s 与日志路由不会静默分叉。自动扫描对无法从配置文本区分的同类型第二连接仍需要用户补录实例；这是证据精度限制，而不是把两个连接合并成一个虚假实例。此决策 supersede 上一条 Schema 0.2 决策中“图形向导远程预读仍按 type fail closed、数据层仅按 type 聚合”的边界描述。
+
+---
+
+## 2026-07-18 · 排障阶段消费冻结复现证据并发布可恢复的七步进度
+
+**背景**：验证 Agent 已经完成真实复现并把证据强绑定给排障 attempt，但生成的 Codex 顶层 skill 索引仍按工作区全部 skill 构建，会把验证专用的 `attachment-evidence-verifier`、`api-verifier` 和 `bug-verifier` 暴露给排障 Agent。Agent 因而可能再次进入验证流程，甚至读取安装后不存在的相对路径。同时工作台只展示命令和工具事件，用户看不到七步排障主线当前走到哪里；刷新页面后实时事件也会丢失。
+
+**决策**：排障提示和 `incident-investigator` 都把 Studio 的 `validation-evidence-manifest.json` 设为最高优先级输入：存在冻结证据时不得调用验证专用 skill 或重新操作浏览器，证据损坏或不足只能形成明确 gap。Codex 顶层 skill 索引按 troubleshooter role 过滤，与实际安装目录保持一致。排障 Agent 在进入七步主线的每一步前发送固定 `TSHOOT_STEP` 标记；Studio 只接受预定义 phase、序号和 key 的严格组合，把它解析为 `phase_step` 事件，本地映射可信展示名称，不把标记当作最终 YAML。事件继续写入 `runs.json` 兼容投影，Case 详情只恢复当前 attempt 最近 100 条经过类型、字段和长度白名单处理的事件，原始协议、工具参数和命令输出不进入页面。
+
+**后果**：复现和排障职责不再反复横跳，排障从同一份不可变事实开始；界面能明确显示“第 N/7 步”和已完成步骤，并在刷新后恢复，同时保留下面的命令/工具日志。旧 Agent 若尚未重新部署，Studio 阶段提示仍会阻止验证回退；重新部署后其根 skill 索引也会彻底移除错误入口。OpenClaw 当前只返回最终结果，无法提供同粒度实时步骤时不会伪造进度，仍以已有实时事件能力为准。
+
+---
+
+## 2026-07-19 · BrowserPlan 负向文本断言升级宿主运行时修订
+
+**背景**：缺失或“不应展示”类 Web Bug 需要表达文本不得可见。BrowserPlan 新增 `not_visible_text` 后，内嵌 browser worker 的协议和执行逻辑已经变化；若仍沿用 `1.61.1-r11`，打包工具会命中同名旧缓存，完整性校验正确地将新旧 worker 差异识别为运行时损坏，导致桌面 bundle 无法生成。
+
+**决策**：BrowserPlan 文本断言只允许 `visible_text` 与 `not_visible_text`，宿主对后者等待所有匹配文本均不可见。由于 worker 协议发生变化，browser runtime 身份升级为 `1.61.1-r12`；Playwright 与 Chromium 仍固定在 `1.61.1`。旧 `r11` 目录不删除、不原地修改，新版本通过独立目录安装、真实 Chromium probe 和原子发布生成 `r12`，继续保持 worker/sanitizer 字节完整性校验。
+
+**后果**：升级后的 Studio 和 macOS 打包流程不会把旧 worker 缓存误认为当前运行时，也不需要用户手动清缓存；首次准备 `r12` 会执行一次依赖准备和 Chromium probe，随后可复用。未来任何 worker、sanitizer、宿主协议或 probe 契约变化仍必须同步递增 `rN`。
+
+---
+
+## 2026-07-19 · 修复阶段由 Studio 锁定环境分支并使用专用 worktree（SUPERSEDED：见“修复基线与环境集成分离”）
+
+**背景**：环境路由已经把 `test` 映射到 `base-test`，但修复 Agent 过去仍在业务仓库当前 checkout 中执行无起点的 `git checkout -b` / `git switch -c`。当用户正位于功能分支时，新修复分支会继承功能分支基线；Agent 即使在结果中自报 `base_branch: base-test`，Studio 也只做字段间一致性检查，无法发现提交祖先实际来自错误基线，最终在合并环境分支时产生大量无关冲突。
+
+**决策**：修复阶段启动前，Studio 必须读取已部署机器人 `env-branch-map.yaml`，按目标环境解析每个仓库的明确环境分支，并通过用户配置解析对应本地仓库。Studio 精确 fetch `origin/<环境分支>`、锁定其 commit SHA，在 Studio 管理目录创建 detached 专用 worktree，再把仓库、worktree、环境分支、锁定 SHA 和 remote 作为强约束交给修复 Agent。Agent 只能在该 worktree 中从锁定 SHA 创建修复分支，不得修改原 checkout，也不得 merge/rebase 当前功能分支。
+
+修复结果进入后续合并前，Studio 以配置和 Git 图为准重新校验：仓库必须属于目标环境映射，声明的 base/target branch 必须等于配置分支，remote 必须匹配，`merge-base(锁定 SHA, fix commit)` 必须精确等于锁定 SHA，且锁定点之后的每个提交必须是单父线性提交。仅靠 Agent 自报字段不再构成基线证明。缺少映射、本地仓库、远端分支或 fetch 失败时 fail closed，不猜测当前分支；阶段结束后回收专用 worktree。
+
+**后果**：用户当前打开哪个功能分支都不会再影响修复基线，错误基线会在合并和推送到环境分支之前被拒绝，原业务 checkout 的未提交改动保持不变。代价是修复阶段启动需要访问远端并为目标环境映射的仓库准备临时 worktree；网络、映射或本地仓库配置不完整时会明确阻断修复，而不是生成表面成功但不可合并的分支。
+
+---
+
+## 2026-07-19 · Studio 后台 Codex 使用仓库白名单而非用户目录发现
+
+**背景**：机器人产物中的 `repo-path-map.yaml` 可能因旧部署或未重新生成而缺少 `local_path`。排障 Agent 曾以 `find /Users/<user>` 作为兜底寻找仓库，递归进入 `Library/Containers`、照片、文稿和下载目录，导致 macOS 把 Studio 识别为访问“其他 App 数据”并逐项弹出 TCC 授权。交互批准既不适合后台自动闭环，也扩大了排障源码读取边界。
+
+**决策**：故障闭环每个 attempt 由 Studio 在证据 staging 中生成不可变 `repository-access-manifest.json`。排障阶段只把当前 system 在本机配置的有效绝对仓库路径列为只读根；修复阶段只把 Studio 从环境分支锁定的专用 worktree 列为可写根。Codex 后台执行改用命名 permission profile：最小系统运行文件可读、机器人 workspace 与 staging 可写、清单仓库按声明读写，其余用户目录默认不可读，同时固定 `approval_policy=never`。路径缺失只能形成配置 gap，禁止用 `find`、`fd`、`locate`、glob 或递归 `ls` 扫描 `/Users`、`$HOME` 或其上级目录。
+
+**后果**：后台 Codex 不再需要用户逐项批准 App Data、照片、文稿等 macOS 权限；即使模型忽略提示并尝试扫描主目录，也会在 Codex 文件系统 sandbox 内先收到 `Operation not permitted`，不会触发系统隐私弹窗。已配置仓库、冻结证据和专用修复 worktree 保持可用。未配置路径时排障会明确提示回到 Studio 补仓库映射，宁可降低定位能力也不越权搜索。
+
+---
+
+## 2026-07-19 · 修复基线与环境集成分离（SUPERSEDES “修复阶段由 Studio 锁定环境分支并使用专用 worktree”）
+
+**背景**：把修复分支强制建立在环境分支上能避免误用当前 checkout，却破坏了长期 feature 分支的隔离语义：feature 可能刻意不包含 dev/test 的其他变更，环境分支也可能与开发基线长期分叉。修复 Agent 从环境分支创建修复会污染开发上下文，反过来从 feature 修复后直接要求 `base_branch == target_environment_branch` 又会错误拒绝合法结果。
+
+**决策**：开始修复的用户授权必须按受影响仓库明确给出 `source_baselines`。Studio 精确 fetch 并锁定 `origin/<source baseline>`，在 detached 专用 worktree 中让 Agent 创建修复分支；目标环境分支继续由已部署机器人的 `env-branch-map.yaml` 决定。`base_branch` 表示开发基线，`target_environment_branch` 表示后续环境集成目标，两者独立且都必须与锁定值一致。修复提交仍要求以锁定开发基线为 merge-base、保持单父线性历史。
+
+环境集成不创建或推送命名 integration 分支。Studio 从经授权的环境 HEAD 创建内部 detached 临时 worktree，在其中进行合并、测试和必要的冲突处理，得到合并提交后以 `<merge-commit>:refs/heads/<environment-branch>` 直推；用户当前 checkout 和环境分支工作区均不被切换或写入。目标 HEAD 变化会使授权失效，禁止 force push。
+
+**后果**：feature 分支可作为每个 Case 的真实开发基线，不再被 dev/test 历史污染；同一个修复提交可以独立进入开发基线和目标环境的集成流程。用户必须在修复授权弹窗确认仓库与开发基线，缺少或不存在的远端基线 fail closed。环境合并的临时状态只存在于 Studio 管理目录，不会在远端留下 `integration/*` 垃圾分支。

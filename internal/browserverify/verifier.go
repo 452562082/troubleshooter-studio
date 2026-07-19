@@ -725,7 +725,7 @@ func validateWorkerPlanShape(plan bughub.BrowserPlan) error {
 		}
 	}
 	for _, assertion := range plan.Assertions {
-		if assertion.Kind != "visible_text" || strings.TrimSpace(assertion.Value) == "" {
+		if (assertion.Kind != "visible_text" && assertion.Kind != "not_visible_text") || strings.TrimSpace(assertion.Value) == "" {
 			return errors.New("browser assertion is invalid")
 		}
 	}

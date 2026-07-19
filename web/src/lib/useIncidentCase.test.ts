@@ -162,6 +162,51 @@ describe('incident Case controller', () => {
     expect(controller.detail.value?.case.version).toBe(3)
   })
 
+  it('retains safe investigation and fix Agent progress while dropping protocol raw data', () => {
+    const controller = createIncidentCaseController()
+    const snapshot = detail(3)
+    snapshot.case.status = 'investigating'
+    snapshot.case.current_attempt_id = 'investigation-1'
+    snapshot.attempts = [{ id: 'investigation-1', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'running', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }]
+    controller.applySnapshot(snapshot)
+
+    for (const phase_event of [
+      { at: '2026-07-18T10:00:00Z', type: 'turn_started', message: '开始排障', raw: { password: 'secret' }, meta: { case_id: 'case-1', attempt_id: 'investigation-1', phase: 'investigation' } },
+      { at: '2026-07-18T10:00:01Z', type: 'command_execution', message: 'rg -n handler .', raw: { output: 'Authorization: Bearer secret' }, meta: { case_id: 'case-1', attempt_id: 'investigation-1', phase: 'investigation', state: 'started', status: 'in_progress', private_key: 'secret' } },
+      { at: '2026-07-18T10:00:02Z', type: 'mcp_tool_call', message: 'grafana/query', raw: { arguments: { token: 'secret' } }, meta: { case_id: 'case-1', attempt_id: 'investigation-1', phase: 'investigation', state: 'completed' } },
+      { at: '2026-07-18T10:00:03Z', type: 'agent_message', message: '已定位到推荐位布局计算', raw: { trace: 'private' }, meta: { case_id: 'case-1', attempt_id: 'investigation-1', phase: 'investigation' } },
+    ]) controller.acceptEvent({ kind: 'snapshot', case: snapshot.case, snapshot, phase_event })
+
+    expect(controller.phaseEvents.value['investigation-1']).toHaveLength(4)
+    expect(controller.phaseEvents.value['investigation-1'].map(item => item.type)).toEqual(['turn_started', 'command_execution', 'mcp_tool_call', 'agent_message'])
+    expect(controller.phaseEvents.value['investigation-1'][1]).toEqual({
+      at: '2026-07-18T10:00:01Z',
+      type: 'command_execution',
+      message: 'rg -n handler .',
+      meta: { case_id: 'case-1', attempt_id: 'investigation-1', phase: 'investigation', state: 'started', status: 'in_progress' },
+    })
+    expect(JSON.stringify(controller.phaseEvents.value)).not.toMatch(/Authorization|password|private_key|token|trace/)
+  })
+
+  it('restores trusted investigation step progress from an authoritative detail refresh', () => {
+    const controller = createIncidentCaseController()
+    const snapshot = detail(4)
+    snapshot.case.status = 'investigating'
+    snapshot.case.current_attempt_id = 'investigation-1'
+    snapshot.attempts = [{ id: 'investigation-1', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'running', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }]
+    snapshot.phase_events = [
+      { at: '2026-07-18T10:00:00Z', type: 'phase_step', message: 'forged', raw: { token: 'secret' }, meta: { case_id: 'case-1', attempt_id: 'investigation-1', phase: 'investigation', step_key: 'evidence_handoff', step_index: 1, step_total: 7, state: 'running' } },
+      { at: '2026-07-18T10:00:01Z', type: 'phase_step', message: 'forged', meta: { case_id: 'case-1', attempt_id: 'investigation-1', phase: 'investigation', step_key: 'timeline', step_index: 2, step_total: 7, state: 'running' } },
+      { at: '2026-07-18T10:00:02Z', type: 'phase_step', message: 'bad', meta: { case_id: 'case-1', attempt_id: 'investigation-1', phase: 'investigation', step_key: 'root_cause', step_index: 3, step_total: 7, state: 'running' } },
+    ]
+
+    controller.applySnapshot(snapshot)
+
+    expect(controller.phaseEvents.value['investigation-1']).toHaveLength(2)
+    expect(controller.phaseEvents.value['investigation-1'].map(item => item.message)).toEqual(['接收复现证据与上下文', '时间轴与最近变更'])
+    expect(JSON.stringify(controller.phaseEvents.value)).not.toMatch(/forged|secret|token/)
+  })
+
   it('deduplicates browser progress identity and caps each attempt at the newest 100 events', () => {
     const controller = createIncidentCaseController()
     const snapshot = detail(4)
@@ -296,7 +341,7 @@ describe('incident Case controller', () => {
     }])
   })
 
-  it('drops unknown, non-browser, mismatched and non-running progress events', () => {
+  it('drops unknown, mismatched and non-running progress events', () => {
     const controller = createIncidentCaseController()
     const current = detail(7)
     controller.selectedCaseID.value = current.case.id

@@ -2,7 +2,7 @@
 import type { IncidentCase, IncidentCaseDetail as ActionDetail } from '../lib/bridge/bugWorkflow'
 
 export type CasePrimaryAction = {
-  kind: 'start_validation' | 'supply_evidence' | 'approve_fix' | 'continue_fix' | 'approve_merge' | 'supply_merge_decision' | 'notify_deployed' | 'supply_deployment_proof' | 'cancel_attempt' | 'continue_legacy'
+  kind: 'start_validation' | 'retry_validation' | 'supply_evidence' | 'approve_fix' | 'continue_fix' | 'approve_merge' | 'supply_merge_decision' | 'notify_deployed' | 'supply_deployment_proof' | 'cancel_attempt' | 'continue_legacy'
   label: string
   approval?: boolean
 }
@@ -30,6 +30,7 @@ export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrim
     const attempt = detail.attempts.find(item => item.id === incident.current_attempt_id)
     const outputCode = typeof attempt?.output_json?.error_code === 'string' ? attempt.output_json.error_code.trim() : ''
     const code = attempt?.error_code?.trim() || outputCode
+    if (code === 'browser_validator_plan_invalid') return { kind: 'retry_validation', label: '重新生成验证计划并重试' }
     const browserGapLabels: Record<string, string> = {
       browser_locator_failed: '补充页面定位信息并重试',
       browser_assertion_failed: '补充业务预期并重试',
@@ -44,6 +45,7 @@ export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrim
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import type { CaseStatus, IncidentCaseDetail, IncidentPhaseEvent } from '../lib/bridge/bugWorkflow'
+import BugAgentProgress from './BugAgentProgress.vue'
 import BugCaseArtifacts from './BugCaseArtifacts.vue'
 import BugBrowserProgress from './BugBrowserProgress.vue'
 
@@ -56,7 +58,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   refresh: []
-  primary: [payload: { kind: CasePrimaryAction['kind']; input?: string; rootCauseAttemptID?: string; caseVersion?: number }]
+  primary: [payload: { kind: CasePrimaryAction['kind']; input?: string; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> }]
   browser: [action: 'login' | 'clear-session' | 'repair-runtime' | 'redeploy-validator' | 'edit-bug-url']
 }>()
 
@@ -67,6 +69,7 @@ const dialogElement = ref<HTMLElement | null>(null)
 const actionTrigger = ref<HTMLElement | null>(null)
 const dialogCaseVersion = ref<number>()
 const dialogRootCauseAttemptID = ref('')
+const dialogSourceBaselines = ref<Array<{ repo: string; branch: string }>>([])
 const currentCase = computed(() => props.detail?.case)
 const TIMELINE_PREVIEW_COUNT = 3
 const timelineExpanded = ref(false)
@@ -173,14 +176,27 @@ async function openAction(event: MouseEvent) {
     const currentAttemptID = props.detail?.case.current_attempt_id || ''
     const rootCause = props.detail?.attempts.find(attempt => attempt.id === currentAttemptID && attempt.phase === 'investigation' && attempt.status === 'succeeded')
     dialogRootCauseAttemptID.value = rootCause?.id || ''
+    const callChain = Array.isArray(rootCause?.output_json?.call_chain) ? rootCause.output_json.call_chain : []
+    const repos = [...new Set(callChain.map(item => {
+      if (!item || typeof item !== 'object') return ''
+      const repo = (item as Record<string, unknown>).repo
+      return typeof repo === 'string' ? repo.trim() : ''
+    }).filter(Boolean))]
+    dialogSourceBaselines.value = (repos.length > 0 ? repos : ['']).map(repo => ({ repo, branch: '' }))
   } else {
     dialogCaseVersion.value = undefined
     dialogRootCauseAttemptID.value = ''
+    dialogSourceBaselines.value = []
   }
   dialogInput.value = ''
   dialogOpen.value = true
   await nextTick()
-  confirmButton.value?.focus()
+  if (action.value.kind === 'approve_fix' && !sourceBaselinesValid.value) {
+    const firstEmpty = [...(dialogElement.value?.querySelectorAll<HTMLInputElement>('.source-baseline-row input') || [])].find(input => !input.value.trim())
+    setTimeout(() => firstEmpty?.focus(), 0)
+  } else {
+    confirmButton.value?.focus()
+  }
 }
 
 function closeDialog() {
@@ -191,16 +207,28 @@ function closeDialog() {
 
 function confirmAction() {
   if (!action.value) return
-  const payload: { kind: CasePrimaryAction['kind']; input?: string; rootCauseAttemptID?: string; caseVersion?: number } = { kind: action.value.kind }
+  const payload: { kind: CasePrimaryAction['kind']; input?: string; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> } = { kind: action.value.kind }
   if (action.value.kind === 'approve_fix') {
     payload.rootCauseAttemptID = dialogRootCauseAttemptID.value
     payload.caseVersion = dialogCaseVersion.value
+    payload.sourceBaselines = Object.fromEntries(dialogSourceBaselines.value.map(item => [item.repo.trim(), item.branch.trim()]).filter(([repo, branch]) => repo && branch))
   }
   if (['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(action.value.kind)) payload.input = dialogInput.value.trim()
   emit('primary', payload)
   dialogOpen.value = false
   nextTick(() => actionTrigger.value?.focus())
 }
+
+function addSourceBaseline() {
+  dialogSourceBaselines.value.push({ repo: '', branch: '' })
+}
+
+function removeSourceBaseline(index: number) {
+  if (dialogSourceBaselines.value.length <= 1) return
+  dialogSourceBaselines.value.splice(index, 1)
+}
+
+const sourceBaselinesValid = computed(() => dialogSourceBaselines.value.length > 0 && dialogSourceBaselines.value.every(item => item.repo.trim() && item.branch.trim()) && new Set(dialogSourceBaselines.value.map(item => item.repo.trim())).size === dialogSourceBaselines.value.length)
 
 function trapDialogFocus(event: KeyboardEvent) {
   if (event.key !== 'Tab' || !dialogElement.value) return
@@ -278,6 +306,11 @@ function dialogTitle(): string {
           </div>
         </section>
 
+        <BugAgentProgress
+          :attempt="currentAttempt"
+          :events="phaseEvents || []"
+        />
+
         <BugBrowserProgress
           :attempt="currentAttempt"
           :events="phaseEvents || []"
@@ -334,7 +367,20 @@ function dialogTitle(): string {
     <div v-if="dialogOpen && action" class="dialog-backdrop" @click.self="closeDialog" @keydown.esc="closeDialog">
       <section ref="dialogElement" role="dialog" aria-modal="true" aria-labelledby="case-action-dialog-title" class="approval-dialog" @keydown="trapDialogFocus">
         <header><h2 id="case-action-dialog-title">{{ dialogTitle() }}</h2></header>
-        <p v-if="action.kind === 'approve_fix'">将授权修复 Agent 基于当前根因和证据创建最小修复。授权范围：Case v{{ dialogCaseVersion }} / {{ dialogRootCauseAttemptID || '未找到根因 attempt' }}。</p>
+        <template v-if="action.kind === 'approve_fix'">
+          <p>将授权修复 Agent 基于当前根因和证据创建最小修复。请为每个受影响仓库确认开发基线；修复分支从该基线创建，环境分支仅在后续合并阶段使用。</p>
+          <p>授权范围：Case v{{ dialogCaseVersion }} / {{ dialogRootCauseAttemptID || '未找到根因 attempt' }}。</p>
+          <div class="source-baseline-editor">
+            <div v-for="(item, index) in dialogSourceBaselines" :key="index" class="source-baseline-row">
+              <label :for="`fix-repo-${index}`">代码仓库</label>
+              <input :id="`fix-repo-${index}`" v-model="item.repo" autocomplete="off" placeholder="例如 admin-web" />
+              <label :for="`fix-baseline-${index}`">开发基线分支</label>
+              <input :id="`fix-baseline-${index}`" v-model="item.branch" autocomplete="off" placeholder="例如 feature/new-navigation" />
+              <button class="btn" type="button" :disabled="dialogSourceBaselines.length <= 1" @click="removeSourceBaseline(index)">移除</button>
+            </div>
+            <button class="btn" type="button" @click="addSourceBaseline">+ 添加仓库</button>
+          </div>
+        </template>
         <template v-else-if="action.kind === 'approve_merge'">
           <p>将按以下精确 scope 合并并通过 SSH 推送；Studio 会重新检查目标 HEAD，任何变化都会使本次授权失效。</p>
           <dl class="deployment-preview">
@@ -354,7 +400,7 @@ function dialogTitle(): string {
         <textarea v-if="['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(action.kind)" id="case-supplement" v-model="dialogInput" rows="5" placeholder="输入新证据、处理决定或测试信息"></textarea>
         <footer>
           <button class="btn" type="button" :disabled="pending" @click="closeDialog">取消</button>
-          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (action.kind === 'approve_fix' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined)) || (['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(action.kind) && !dialogInput.trim())" @click="confirmAction">确认</button>
+          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (action.kind === 'approve_fix' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !sourceBaselinesValid)) || (['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(action.kind) && !dialogInput.trim())" @click="confirmAction">确认</button>
         </footer>
       </section>
     </div>
@@ -410,6 +456,11 @@ h2, h3, p { margin: 0; }
 .terminal-copy { padding: 8px 0; font-weight: 600; }
 .live-error { min-height: 1.5em; color: var(--c-danger); font-size: var(--fs-sm); }
 .live-error:empty { display: none; }
+.source-baseline-editor { display: grid; gap: var(--sp-2); margin-top: var(--sp-2); }
+.source-baseline-row { display: grid; grid-template-columns: minmax(120px, .8fr) minmax(180px, 1fr) auto; gap: 6px var(--sp-2); align-items: end; padding: var(--sp-2); border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf-2); }
+.source-baseline-row label { grid-row: 1; color: var(--c-muted); font-size: var(--fs-xs); }
+.source-baseline-row input { min-width: 0; min-height: 40px; padding: 8px 10px; border: 1px solid var(--c-line-2); border-radius: var(--r-sm); background: var(--c-surf); color: var(--c-text); font: inherit; }
+.source-baseline-row .btn { grid-column: 3; grid-row: 1 / span 2; }
 .timeline-heading { min-width: 0; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--sp-2); margin-bottom: var(--sp-3); }
 .timeline-heading > div { min-width: 0; display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px; }
 .timeline-heading h3 { margin: 0; color: var(--c-ink); font-size: var(--fs-base); }

@@ -83,6 +83,7 @@ export interface IncidentBrowserRuntimeStatus {
 export interface IncidentCaseDetail {
   case: IncidentCase
   attempts: PhaseAttempt[]
+  phase_events?: IncidentPhaseEvent[]
   artifacts: IncidentArtifact[]
   approvals: Approval[]
   code_changes: CodeChange[]
@@ -348,6 +349,15 @@ function normalizeDetail(raw: unknown): IncidentCaseDetail {
   return {
     case: normalizeCase(source.case),
     attempts: Array.isArray(source.attempts) ? source.attempts as PhaseAttempt[] : [],
+    phase_events: Array.isArray(source.phase_events) ? source.phase_events.map(item => {
+      const event = record(item)
+      return {
+        ...(typeof event.at === 'string' ? { at: event.at } : {}),
+        ...(typeof event.type === 'string' ? { type: event.type } : {}),
+        ...(typeof event.message === 'string' ? { message: event.message } : {}),
+        meta: record(event.meta),
+      }
+    }) : [],
     artifacts: Array.isArray(source.artifacts) ? source.artifacts.map(normalizeArtifact) : [],
     approvals: Array.isArray(source.approvals) ? source.approvals as Approval[] : [],
     code_changes: Array.isArray(source.code_changes) ? source.code_changes as CodeChange[] : [],

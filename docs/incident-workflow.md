@@ -148,7 +148,7 @@ validator 规划 BrowserPlan
   → validator 基于截图/Network/console 给出 ValidationResult
 ```
 
-BrowserPlan 只允许 `goto`、`click`、`fill`、`press`、`select`、`wait_for` 和 `screenshot`，禁止任意 JavaScript、XPath、文件上传、Cookie、Authorization 和凭据输入。HostVerifier 按正式配置校验 origin、DNS/IP 和生产限制；`is_prod=true` 只允许导航、等待和截图。宿主 artifact 在最终 evaluator 调用前冻结，evaluator 只能解释证据，不能改写路径。最终 PNG 不是只以路径写进 prompt：Codex 通过 `--image` 接收，Claude Code 通过只读目录和 Read 能力接收，OpenClaw 通过工作区内的短期只读 PNG 触发原生 prompt image load；调用结束即清除临时视图。临时绝对路径不得写入 `ValidationResult` 或 Case。Web 结论要推进为 `reproduced`、`not_reproduced`、`fixed_verified` 或 `still_reproduces`，必须存在 HostVerifier 确认的最终 PNG 渲染截图。
+BrowserPlan 只允许 `goto`、`click`、`fill`、`press`、`select`、`wait_for` 和 `screenshot`，文本断言只允许 `visible_text` 与 `not_visible_text`；后者由宿主确认匹配文本均不可见。禁止任意 JavaScript、XPath、文件上传、Cookie、Authorization 和凭据输入。HostVerifier 按正式配置校验 origin、DNS/IP 和生产限制；`is_prod=true` 只允许导航、等待和截图。宿主 artifact 在最终 evaluator 调用前冻结，evaluator 只能解释证据，不能改写路径。最终 PNG 不是只以路径写进 prompt：Codex 通过 `--image` 接收，Claude Code 通过只读目录和 Read 能力接收，OpenClaw 通过工作区内的短期只读 PNG 触发原生 prompt image load；调用结束即清除临时视图。临时绝对路径不得写入 `ValidationResult` 或 Case。Web 结论要推进为 `reproduced`、`not_reproduced`、`fixed_verified` 或 `still_reproduces`，必须存在 HostVerifier 确认的最终 PNG 渲染截图。BrowserPlan 结构校验失败停在 `waiting_evidence` 时，Studio 提供当前 Case 内的计划重试，不要求重置闭环。
 
 检测到 auth origin、password 输入、关键 401/403 或已知登录 route 时，当前 attempt 以 `browser_login_required` 进入 `waiting_evidence`，且不截登录表单。用户点击“打开验证浏览器完成登录”，在 Studio 打开的可见浏览器中自行完成 SSO/MFA；Studio 加密保存 `storageState` 后创建同 Case / cycle、父链明确的新 attempt。账号、密码、Cookie 和 storageState 不进入 Case 输入或 artifact。
 
@@ -281,12 +281,12 @@ pending_validation -> validating -> reproduced -> investigating
 
 修复 Agent 的工作流程：
 
-1. 从环境分支创建独立修复分支。
+1. 用户按受影响仓库确认开发基线；Studio 锁定远端基线 commit，并从该基线创建独立修复分支。
 2. 围绕已批准根因做最小改动。
 3. 运行与风险相称的测试。
 4. 提交修改。
-5. 推送修复分支，不直接修改环境分支。
-6. 返回每个仓库的 base branch、fix branch、commit、remote 和测试结果。
+5. 推送修复分支，不直接修改开发基线或环境分支。
+6. 返回每个仓库的开发基线、fix branch、commit、remote、目标环境分支和测试结果。
 
 结构化输出核心字段：
 
@@ -358,7 +358,7 @@ Web 回归使用与首次验证完全相同的 validator → HostVerifier → ev
 - 目标环境分支。
 - 授权时的目标分支 HEAD。
 
-Studio 在隔离 worktree 中合并并推送环境分支。目标 HEAD 已变化时旧授权失效，必须重新检查和授权；发生冲突时进入 `merge_conflict`，不会把半成品写入用户工作区或伪装成成功。远端结果不确定时先核对远端状态，再决定是否重试尚未完成的 push。
+Studio 从授权时的环境 HEAD 创建内部 detached 临时 worktree，在其中完成合并并把精确 merge commit 直推环境分支；不会创建远端 integration 分支，也不会切换用户 checkout。目标 HEAD 已变化时旧授权失效，必须重新检查和授权；发生冲突时进入 `merge_conflict`，不会把半成品写入用户工作区或伪装成成功。远端结果不确定时先核对远端状态，再决定是否重试尚未完成的 push。
 
 ### 6.2 部署：人工或外部平台
 

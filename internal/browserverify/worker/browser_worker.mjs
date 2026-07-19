@@ -20,6 +20,7 @@ import { redactConsoleText, safeResponseRecord } from './sanitize.mjs';
 const PROGRESS_PREFIX = 'TSHOOT_BROWSER_PROGRESS ';
 const ALLOWED_ACTIONS = new Set(['goto', 'click', 'fill', 'press', 'select', 'wait_for', 'screenshot']);
 const ALLOWED_LOCATORS = new Set(['role', 'label', 'text', 'placeholder', 'test_id', 'css']);
+const ALLOWED_ASSERTIONS = new Set(['visible_text', 'not_visible_text']);
 const READ_ONLY_PROD_ACTIONS = new Set(['goto', 'wait_for', 'screenshot']);
 export const EVIDENCE_MAX_RECORDS = 1000;
 export const EVIDENCE_MAX_BYTES = 1 << 20;
@@ -281,9 +282,16 @@ export function validateWorkerRequest(request) {
   for (const assertion of plan.assertions) {
     if (!assertion || typeof assertion !== 'object' || Array.isArray(assertion)) throw new Error('assertion must be an object');
     ownKeys(assertion, new Set(['kind', 'value']), 'assertion');
-    if (assertion.kind !== 'visible_text') throw new Error('assertion kind is not supported');
+    if (!ALLOWED_ASSERTIONS.has(assertion.kind)) throw new Error('assertion kind is not supported');
     requiredString(assertion.value, 'assertion value');
   }
+}
+
+export async function executeAssertion(page, assertion) {
+  const state = assertion.kind === 'not_visible_text' ? 'hidden' : 'visible';
+  const matches = page.getByText(assertion.value, { exact: false });
+  const target = assertion.kind === 'not_visible_text' ? matches.filter({ visible: true }) : matches;
+  await target.first().waitFor({ state });
 }
 
 function ipv4Number(address) {
@@ -1859,7 +1867,7 @@ async function executeWorker(request) {
 
     for (const assertion of request.plan.assertions) {
       try {
-        await page.getByText(assertion.value, { exact: false }).first().waitFor({ state: 'visible' });
+        await executeAssertion(page, assertion);
       } catch {
         if (await requiresLogin()) return finishLogin();
         const captured = await captureScreenshot('failure.png');

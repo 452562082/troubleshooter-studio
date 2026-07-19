@@ -72,6 +72,7 @@ import { useDataStoreState } from '../lib/useDataStoreState'
 import { useImportCrossCheck } from '../lib/useImportCrossCheck'
 import { useDeployFlow } from '../lib/useDeployFlow'
 import { migrateSavedStep } from '../lib/wizardStep'
+import { DATA_STORE_STEP, OBSERVABILITY_STEP, shouldInitializeObservability } from '../lib/wizardSteps'
 import { useImportFlow } from '../lib/useImportFlow'
 import { useDataStoreScan } from '../lib/useDataStoreScan'
 import { useMonorepoHints } from '../lib/useMonorepoHints'
@@ -2156,17 +2157,17 @@ function toolSpecByKey(cat: 'obs' | 'ds', key: string): ToolSpec | undefined {
   return arr.find(s => s.key === key)
 }
 
-// ── Step 7 可观测性自动连通性测试 ─────────────────────────────────────
+// ── Step 8 可观测性自动连通性测试 ─────────────────────────────────────
 // 完整逻辑(每工具按 url 字段 + auth_mode 选鉴权方式 + 800ms 防抖)在 lib/useObsProbe.ts。
-// 切到 Step 7 时主动重试的 triggerStep7Init 逻辑还跟 grafana DS / loki labels /
+// 切到可观测性步骤时主动重试的 triggerObservabilityInit 逻辑还跟 grafana DS / loki labels /
 // k8s_runtime workload 三个独立子流程交织,留在下面 InitPage 里。
 const { obsProbeResults, obsProbeKey, scheduleObsProbe } = useObsProbe(OBS_TOOL_SPECS, toolInputs, toolKeyFor)
-// 切到 Step 7 时主动跑一次(草稿恢复后立刻看状态,不等用户重新输入)。
+// 切到可观测性步骤时主动跑一次(草稿恢复后立刻看状态,不等用户重新输入)。
 // 注意:不能用 immediate:true,因为 callback 里会访问到声明在本 watch 之后的 const
 // (lokiMappingByEnv / OBS_GRAFANA_DS_TYPES 等),同步触发会撞 TDZ。
 // 改用 onMounted 兜底首次触发,确保所有 const 已初始化。
-const triggerStep7Init = (s: number) => {
-  if (s !== 7) return
+const triggerObservabilityInit = (s: number) => {
+  if (!shouldInitializeObservability(s)) return
   for (const spec of OBS_TOOL_SPECS) {
     if (!enabledObservability[spec.key]) continue
     for (const env of environments) {
@@ -2226,10 +2227,10 @@ const triggerStep7Init = (s: number) => {
     }
   }
 }
-watch(() => currentStep.value, triggerStep7Init)
-onMounted(() => triggerStep7Init(currentStep.value))
+watch(() => currentStep.value, triggerObservabilityInit)
+onMounted(() => triggerObservabilityInit(currentStep.value))
 
-// ── Loki 标签映射(Step 7 grafana/loki 子区,per-env) ──────────────────
+// ── Loki 标签映射(Step 8 grafana/loki 子区,per-env) ──────────────────
 // 每个 env 独立维护 grafana 凭证 → datasource 列表 → labels → values → 选中映射,
 // 因为 dev / prod 可能用不同 Grafana / Loki 实例,UID 和 label values 都不一样。
 // envLabelKey / serviceLabelKey 也 per-env(虽然通常 namespace/app 会一致,但允许差异)。
@@ -3771,9 +3772,9 @@ provide(WizardStoreKey, {
       @preload-kuboard-from-source="runKuboardPreloadFromSource"
     />
 
-    <!-- Step 7:可观测性 -->
+    <!-- Step 8:可观测性 -->
     <ObservabilityStep
-      v-if="currentStep === 8"
+      v-if="currentStep === OBSERVABILITY_STEP"
       :obs-tool-specs="OBS_TOOL_SPECS"
       :enabled-observability="enabledObservability"
       :obs-probe-results="obsProbeResults"
@@ -3795,7 +3796,6 @@ provide(WizardStoreKey, {
       :obs-grafana-ds-key="obsGrafanaDsKey"
       :obs-grafana-ds-types="OBS_GRAFANA_DS_TYPES"
       :k8s-connection-reuse-label="k8sConnectionReuseLabel"
-      :resource-coverage="resourceCoverage"
       @set-obs-access-mode="setObsAccessMode"
       @update-tool-input="(k, v, toolKey, envID) => {
         toolInputs[k] = v
@@ -3814,7 +3814,7 @@ provide(WizardStoreKey, {
     />
 
     <DataStoreStep
-      v-if="currentStep === 7"
+      v-if="currentStep === DATA_STORE_STEP"
       :ds-import-status="dsImportStatus"
       :ds-import-stats="dsImportStats"
       :can-auto-import-d-s="canAutoImportDS"
@@ -3845,6 +3845,7 @@ provide(WizardStoreKey, {
       :enabled-targets="enabledTargets"
       :target-labels="targetLabels"
       :any-target-selected="anyTargetSelected"
+      :resource-coverage="resourceCoverage"
       @validate="validateYAML"
       @copy="copyYAML"
       @download="downloadYAML"

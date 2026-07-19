@@ -2,7 +2,7 @@ import type { PhaseAttempt } from './bridge/bugWorkflow'
 
 export type StageTone = 'neutral' | 'success' | 'warning' | 'danger' | 'info'
 export interface StageField { label: string; value: string; mono?: boolean }
-export interface StageSection { title: string; tone?: StageTone; text?: string; fields?: StageField[]; items?: string[]; groups?: StageField[][]; emptyText?: string }
+export interface StageSection { title: string; tone?: StageTone; text?: string; fields?: StageField[]; items?: string[]; groups?: StageField[][]; groupLabel?: string; emptyText?: string }
 export interface StageAttemptPresentation {
   phaseLabel: string
   attemptStatusLabel: string
@@ -27,7 +27,7 @@ type DataRecord = Record<string, unknown>
 const confidenceLabels: Record<string, string> = { high: '高', medium: '中', low: '低' }
 const fieldLabels: Record<string, string> = {
   summary: '阶段结论', conclusion: '阶段结论', report: '阶段结论', notes: '备注', metadata: '元数据', owner: '负责人', retried: '是否重试',
-  kind: '类型', path: '路径', environment: '环境', version: '版本', request_id: 'Request ID', trace_id: 'Trace ID', repo: '仓库', summary_text: '变更',
+  kind: '类型', path: '路径', captured_at: '采集时间', environment: '环境', version: '版本', request_id: 'Request ID', trace_id: 'Trace ID', repo: '仓库', summary_text: '变更',
   command: '命令', result: '结果', note: '备注', skipped_reason: '跳过原因', base_branch: '基础分支', fix_branch: '修复分支', commit: '提交',
   pushed: '已推送', target_environment_branch: '目标环境分支', push_remote: '远端',
 }
@@ -97,9 +97,9 @@ function listSection(title: string, value: unknown, tone?: StageTone): StageSect
 }
 
 function evidenceSection(title: string, value: unknown): StageSection {
-  const groups = objectList(value).map(item => fieldsFromRecord(item).filter(field => ['类型', '路径', '环境', '版本', 'Request ID', 'Trace ID'].includes(field.label)))
+  const groups = objectList(value).map(item => fieldsFromRecord(item).filter(field => ['类型', '路径', '采集时间', '环境', '版本', 'Request ID', 'Trace ID'].includes(field.label)))
     .filter(group => group.length > 0)
-  return groups.length ? { title, groups } : { title, emptyText: '尚无有效证据' }
+  return groups.length ? { title, groups, groupLabel: '证据' } : { title, emptyText: '尚无有效证据' }
 }
 
 function presentValidation(attempt: PhaseAttempt, output: DataRecord): StageAttemptPresentation {

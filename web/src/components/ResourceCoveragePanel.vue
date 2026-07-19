@@ -14,7 +14,7 @@ const cellIcon = (cell: CoverageCell) => ({ ready: '✓', partial: '△', missin
     <header class="coverage-head">
       <div>
         <h3>部署能力覆盖</h3>
-        <p>按环境和服务汇总前面四步的真实可用能力；“部分”表示机器人会使用模糊匹配或降级路径。</p>
+        <p>生成前汇总代码仓库、配置源、数据层和可观测性的真实可用能力；“部分”表示机器人会使用模糊匹配或降级路径。</p>
       </div>
       <span class="coverage-level" :class="coverage.level">{{ levelLabel[coverage.level] }}</span>
     </header>

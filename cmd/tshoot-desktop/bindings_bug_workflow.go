@@ -34,6 +34,7 @@ type incidentWorkflowRuntime struct {
 type IncidentCaseDetail struct {
 	Case                   bughub.IncidentCase            `json:"case"`
 	Attempts               []IncidentPhaseAttempt         `json:"attempts"`
+	PhaseEvents            []bughub.InvestigationEvent    `json:"phase_events"`
 	Artifacts              []IncidentArtifact             `json:"artifacts"`
 	Approvals              []IncidentApproval             `json:"approvals"`
 	CodeChanges            []IncidentCodeChange           `json:"code_changes"`
@@ -275,7 +276,7 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 	} else {
 		investigator := bughub.NewCodexInvestigator(legacy, "codex")
 		runner := bughub.NewAgentPhaseRunner(store, investigator, legacy, filepath.Join(root, "artifacts"), nil)
-		gitService := bughub.NewGitIntegrationService(filepath.Join(root, "git-worktrees"), func(ctx context.Context, caseID, repo string) (string, error) {
+		resolveRepositoryPath := func(ctx context.Context, caseID, repo string) (string, error) {
 			incident, loadErr := store.GetCase(ctx, caseID)
 			if loadErr != nil {
 				return "", loadErr
@@ -285,7 +286,19 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 				return "", fmt.Errorf("repository %s has no configured local path for system %s", repo, incident.SystemID)
 			}
 			return filepath.Clean(path), nil
-		})
+		}
+		gitService := bughub.NewGitIntegrationService(filepath.Join(root, "git-worktrees"), resolveRepositoryPath)
+		runner.SetFixWorkspaceManager(bughub.NewFixWorkspaceManager(filepath.Join(root, "fix-worktrees"), resolveRepositoryPath))
+		runner.SetRepositoryAccessResolver(bughub.RepositoryAccessResolverFunc(func(_ context.Context, incident bughub.IncidentCase) (map[string]string, error) {
+			paths := userconfig.GetRepoPathsForSystem(incident.SystemID)
+			result := make(map[string]string, len(paths))
+			for repo, path := range paths {
+				if path = strings.TrimSpace(path); path != "" {
+					result[repo] = filepath.Clean(path)
+				}
+			}
+			return result, nil
+		}))
 		deploymentVerifier := &caseConfiguredDeploymentVerifier{app: a, store: store}
 		orchestrator := bughub.NewCaseOrchestrator(store, runner, gitService, deploymentVerifier)
 		runner.SetCompletionCallback(func(callbackCtx context.Context, command bughub.CompleteAttemptCommand) error {
@@ -670,6 +683,7 @@ func (a *App) GetIncidentCase(caseID string) (IncidentCaseDetail, error) {
 	if detail.Attempts, err = incidentPhaseAttempts(attempts); err != nil {
 		return IncidentCaseDetail{}, err
 	}
+	detail.PhaseEvents = incidentPhaseEventsForDetail(a.workflowRoot, incident)
 	artifacts, err := store.ListEvidenceArtifacts(ctx, caseID)
 	if err != nil {
 		return IncidentCaseDetail{}, err
@@ -734,6 +748,9 @@ func (a *App) incidentBugTicketResolution(incident bughub.IncidentCase) Incident
 func normalizeIncidentCaseDetail(detail *IncidentCaseDetail) {
 	if detail.Attempts == nil {
 		detail.Attempts = []IncidentPhaseAttempt{}
+	}
+	if detail.PhaseEvents == nil {
+		detail.PhaseEvents = []bughub.InvestigationEvent{}
 	}
 	if detail.Artifacts == nil {
 		detail.Artifacts = []IncidentArtifact{}
@@ -1366,11 +1383,79 @@ func (a *App) emitIncidentPhaseEvent(caseID string, event bughub.InvestigationEv
 	if err != nil {
 		return
 	}
-	cloned := event
-	cloned.Raw = incidentPublicJSONValue(event.Raw)
-	cloned.Meta = incidentPublicJSONObject(event.Meta)
+	cloned, ok := incidentPublicPhaseEvent(event)
+	if !ok {
+		return
+	}
 	incident := detail.Case
 	a.emitWorkflowEvent(IncidentCaseEventPayload{Kind: "snapshot", Case: &incident, Snapshot: &detail, PhaseEvent: &cloned})
+}
+
+var incidentPublicPhaseEventTypes = map[string]bool{
+	"browser_progress": true, "thread_started": true, "turn_started": true,
+	"turn_completed": true, "command_execution": true, "mcp_tool_call": true,
+	"agent_message": true, "phase_step": true, "retry": true, "error": true,
+	"turn_failed": true, "result": true,
+}
+
+func incidentPublicPhaseEvent(event bughub.InvestigationEvent) (bughub.InvestigationEvent, bool) {
+	if !incidentPublicPhaseEventTypes[event.Type] {
+		return bughub.InvestigationEvent{}, false
+	}
+	cloned := event
+	// Raw Agent protocol payloads may contain command output, tool arguments, or
+	// environment details. The workbench only needs the stable progress fields.
+	cloned.Raw = nil
+	cloned.Message = strings.TrimSpace(cloned.Message)
+	if runes := []rune(cloned.Message); len(runes) > 4000 {
+		cloned.Message = string(runes[:4000]) + "…"
+	}
+	cloned.Meta = incidentPublicPhaseEventMeta(event.Meta)
+	return cloned, true
+}
+
+func incidentPhaseEventsForDetail(root string, incident bughub.IncidentCase) []bughub.InvestigationEvent {
+	attemptID := strings.TrimSpace(incident.CurrentAttemptID)
+	if attemptID == "" || strings.TrimSpace(root) == "" {
+		return nil
+	}
+	run, err := bughub.NewInvestigationStore(root).Get(attemptID)
+	if err != nil {
+		// runs.json is a compatibility/progress projection. A missing or damaged
+		// projection must not make the durable Case detail unavailable.
+		return nil
+	}
+	const maxEvents = 100
+	start := 0
+	if len(run.Events) > maxEvents {
+		start = len(run.Events) - maxEvents
+	}
+	out := make([]bughub.InvestigationEvent, 0, len(run.Events)-start)
+	for _, event := range run.Events[start:] {
+		if safe, ok := incidentPublicPhaseEvent(event); ok {
+			out = append(out, safe)
+		}
+	}
+	return out
+}
+
+func incidentPublicPhaseEventMeta(meta map[string]any) map[string]any {
+	if meta == nil {
+		return nil
+	}
+	allowed := map[string]struct{}{
+		"case_id": {}, "attempt_id": {}, "cycle_number": {}, "phase": {},
+		"browser_code": {}, "current": {}, "total": {},
+		"state": {}, "status": {}, "exit_code": {},
+		"step_key": {}, "step_index": {}, "step_total": {},
+	}
+	out := make(map[string]any, len(allowed))
+	for key := range allowed {
+		if value, ok := meta[key]; ok {
+			out[key] = value
+		}
+	}
+	return out
 }
 
 func (a *App) emitWorkflowEvent(payload any) {

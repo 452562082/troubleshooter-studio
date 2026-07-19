@@ -63,7 +63,7 @@ const stableErrorCode = computed(() => {
   return value.startsWith('browser_') || value === 'validator_not_installed' ? value : ''
 })
 
-const state = computed<'progress' | 'login' | 'runtime' | 'validator' | 'quota' | 'locator' | 'url' | 'business' | 'system' | ''>(() => {
+const state = computed<'progress' | 'login' | 'runtime' | 'validator' | 'quota' | 'locator' | 'url' | 'business' | 'plan' | 'system' | ''>(() => {
   const code = stableErrorCode.value
   if (code === 'browser_login_required') return 'login'
   if (code === 'browser_runtime_broken') return 'runtime'
@@ -72,6 +72,7 @@ const state = computed<'progress' | 'login' | 'runtime' | 'validator' | 'quota' 
   if (code === 'browser_locator_failed') return 'locator'
   if (code === 'browser_url_required') return 'url'
   if (code === 'browser_assertion_failed') return 'business'
+  if (code === 'browser_validator_plan_invalid') return 'plan'
   if (code.startsWith('browser_')) return 'system'
   return safeEvents.value.length > 0 ? 'progress' : ''
 })
@@ -93,6 +94,7 @@ const stateCopy = computed(() => ({
   locator: '页面元素定位失败。请补充失败步骤附近可见的控件名称或页面变化后重试。',
   url: '来源工单缺少 frontend_url。请先在来源工单平台补充页面地址，再前往 Bug 收件箱重新同步该 Bug。',
   business: '页面结果与预期不一致。请补充最小业务预期或测试数据后重试。',
+  plan: '验证机器人生成的浏览器计划未通过结构校验。可以在当前 Case 内重新生成计划，无需重建故障闭环。',
   system: '浏览器验证遇到系统错误。请刷新 Case 后按稳定错误码处理，不要用附件补充来掩盖运行时故障。',
   progress: '',
   '': '',
@@ -140,7 +142,7 @@ const stateCopy = computed(() => ({
 <style scoped>
 .browser-progress { display: grid; gap: var(--sp-3); padding: var(--sp-4); border: 1px solid #bfdbfe; border-left: 3px solid #2563eb; border-radius: var(--r-lg); background: #f8fbff; }
 .browser-progress[data-browser-state="login"], .browser-progress[data-browser-state="locator"], .browser-progress[data-browser-state="url"], .browser-progress[data-browser-state="business"] { border-color: #fed7aa; border-left-color: #ea580c; background: #fffaf5; }
-.browser-progress[data-browser-state="runtime"], .browser-progress[data-browser-state="validator"], .browser-progress[data-browser-state="quota"], .browser-progress[data-browser-state="system"] { border-color: #fecaca; border-left-color: #dc2626; background: #fffafa; }
+.browser-progress[data-browser-state="runtime"], .browser-progress[data-browser-state="validator"], .browser-progress[data-browser-state="quota"], .browser-progress[data-browser-state="plan"], .browser-progress[data-browser-state="system"] { border-color: #fecaca; border-left-color: #dc2626; background: #fffafa; }
 .browser-progress header { min-width: 0; display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: var(--sp-2); }
 .browser-progress header span, .browser-progress header small, .browser-recovery-copy small { color: var(--c-muted); font-size: var(--fs-xs); }
 .browser-progress h3, .browser-progress p { margin: 0; }

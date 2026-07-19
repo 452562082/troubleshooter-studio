@@ -2,6 +2,8 @@ package bughub
 
 import (
 	"encoding/json"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -42,17 +44,29 @@ func ParseCodexJSONLEvent(line []byte) (InvestigationEvent, string, string) {
 	case "item.started", "item.completed":
 		item, _ := payload["item"].(map[string]any)
 		itemType := stringFromAny(item["type"])
+		event.Meta = map[string]any{"state": strings.TrimPrefix(eventType, "item.")}
 		switch itemType {
 		case "agent_message":
+			text := stringFromAny(item["text"])
+			if step, ok := parsePhaseStepMessage(text); ok {
+				step.Raw = payload
+				return step, "", ""
+			}
 			event.Type = "agent_message"
-			event.Message = stringFromAny(item["text"])
+			event.Message = text
 			return event, event.Message, ""
 		case "command_execution":
 			event.Type = "command_execution"
 			event.Message = stringFromAny(item["command"])
+			if status := stringFromAny(item["status"]); status != "" {
+				event.Meta["status"] = status
+			}
+			if exitCode, ok := item["exit_code"].(float64); ok {
+				event.Meta["exit_code"] = int(exitCode)
+			}
 		case "mcp_tool_call":
 			event.Type = "mcp_tool_call"
-			event.Message = firstNonEmpty(stringFromAny(item["name"]), "MCP tool call")
+			event.Message = firstNonEmpty(stringFromAny(item["name"]), stringFromAny(item["tool"]), "MCP tool call")
 		default:
 			event.Type = firstNonEmpty(itemType, eventType)
 			event.Message = firstNonEmpty(stringFromAny(item["text"]), event.Message)
@@ -82,6 +96,10 @@ func ParseClaudeStreamJSONEvent(line []byte) (InvestigationEvent, string, string
 		event.Message = ""
 	case "assistant":
 		text := claudeMessageText(payload)
+		if step, ok := parsePhaseStepMessage(text); ok {
+			step.Raw = payload
+			return step, "", ""
+		}
 		event.Type = "agent_message"
 		event.Message = text
 	case "result":
@@ -99,6 +117,50 @@ func ParseClaudeStreamJSONEvent(line []byte) (InvestigationEvent, string, string
 		return event, "", event.Message
 	}
 	return event, "", ""
+}
+
+var phaseStepPattern = regexp.MustCompile(`^\[\[TSHOOT_STEP phase=(investigation) index=([1-7]) key=([a-z_]+)\]\]$`)
+
+var investigationPhaseSteps = []struct {
+	Key   string
+	Label string
+}{
+	{Key: "evidence_handoff", Label: "接收复现证据与上下文"},
+	{Key: "timeline", Label: "时间轴与最近变更"},
+	{Key: "runtime_scope", Label: "横向运行时检查"},
+	{Key: "dependency_chain", Label: "依赖与调用链"},
+	{Key: "evidence_correlation", Label: "多维证据交叉"},
+	{Key: "root_cause", Label: "根因收敛"},
+	{Key: "knowledge_sink", Label: "沉淀与结果"},
+}
+
+// parsePhaseStepMessage accepts only the fixed Studio progress protocol. The
+// label is resolved locally instead of trusting arbitrary Agent output, so the
+// UI can safely render a stable seven-step workflow.
+func parsePhaseStepMessage(message string) (InvestigationEvent, bool) {
+	match := phaseStepPattern.FindStringSubmatch(strings.TrimSpace(message))
+	if len(match) != 4 {
+		return InvestigationEvent{}, false
+	}
+	index, err := strconv.Atoi(match[2])
+	if err != nil || index < 1 || index > len(investigationPhaseSteps) {
+		return InvestigationEvent{}, false
+	}
+	step := investigationPhaseSteps[index-1]
+	if match[3] != step.Key {
+		return InvestigationEvent{}, false
+	}
+	return InvestigationEvent{
+		Type:    "phase_step",
+		Message: step.Label,
+		Meta: map[string]any{
+			"phase":      match[1],
+			"step_key":   step.Key,
+			"step_index": index,
+			"step_total": len(investigationPhaseSteps),
+			"state":      "running",
+		},
+	}, true
 }
 
 func ParseOpenClawJSONEvent(line []byte) (InvestigationEvent, string, string) {

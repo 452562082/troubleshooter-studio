@@ -2,11 +2,14 @@ package bughub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -250,6 +253,64 @@ func TestParseCodexJSONLEvent(t *testing.T) {
 	if event.Type != "raw" || event.Message != "not-json" || final != "" || failed != "" {
 		t.Fatalf("malformed event=%+v final=%q failed=%q", event, final, failed)
 	}
+
+	event, _, _ = ParseCodexJSONLEvent([]byte(`{"type":"item.started","item":{"type":"command_execution","command":"go test ./...","status":"in_progress"}}`))
+	if event.Type != "command_execution" || event.Message != "go test ./..." || event.Meta["state"] != "started" || event.Meta["status"] != "in_progress" {
+		t.Fatalf("command started event = %+v", event)
+	}
+	event, _, _ = ParseCodexJSONLEvent([]byte(`{"type":"item.completed","item":{"type":"command_execution","command":"go test ./...","status":"completed","exit_code":0}}`))
+	if event.Meta["state"] != "completed" || event.Meta["exit_code"] != 0 {
+		t.Fatalf("command completed event = %+v", event)
+	}
+	event, _, _ = ParseCodexJSONLEvent([]byte(`{"type":"item.started","item":{"type":"mcp_tool_call","tool":"get_logs"}}`))
+	if event.Type != "mcp_tool_call" || event.Message != "get_logs" || event.Meta["state"] != "started" {
+		t.Fatalf("mcp event = %+v", event)
+	}
+}
+
+func TestParseCodexJSONLEventEmitsTrustedInvestigationStep(t *testing.T) {
+	event, final, failed := ParseCodexJSONLEvent([]byte(`{"type":"item.completed","item":{"type":"agent_message","text":"[[TSHOOT_STEP phase=investigation index=4 key=dependency_chain]]"}}`))
+	if event.Type != "phase_step" || event.Message != "依赖与调用链" || final != "" || failed != "" {
+		t.Fatalf("event=%+v final=%q failed=%q", event, final, failed)
+	}
+	if event.Meta["phase"] != "investigation" || event.Meta["step_key"] != "dependency_chain" || event.Meta["step_index"] != 4 || event.Meta["step_total"] != 7 {
+		t.Fatalf("step meta = %+v", event.Meta)
+	}
+
+	for _, marker := range []string{
+		"[[TSHOOT_STEP phase=investigation index=4 key=root_cause]]",
+		"[[TSHOOT_STEP phase=investigation index=8 key=knowledge_sink]]",
+		"prefix [[TSHOOT_STEP phase=investigation index=1 key=evidence_handoff]]",
+	} {
+		event, final, failed = ParseCodexJSONLEvent([]byte(fmt.Sprintf(`{"type":"item.completed","item":{"type":"agent_message","text":%q}}`, marker)))
+		if event.Type != "agent_message" || final != marker || failed != "" {
+			t.Fatalf("malformed marker %q was accepted: event=%+v final=%q failed=%q", marker, event, final, failed)
+		}
+	}
+}
+
+func TestParseClaudeStreamJSONEventEmitsInvestigationStep(t *testing.T) {
+	event, final, failed := ParseClaudeStreamJSONEvent([]byte(`{"type":"assistant","message":{"content":[{"type":"text","text":"[[TSHOOT_STEP phase=investigation index=2 key=timeline]]"}]}}`))
+	if event.Type != "phase_step" || event.Message != "时间轴与最近变更" || event.Meta["step_index"] != 2 || final != "" || failed != "" {
+		t.Fatalf("event=%+v final=%q failed=%q", event, final, failed)
+	}
+}
+
+func TestNormalizePhaseEventUsesCurrentWorkflowPhase(t *testing.T) {
+	for phase, labels := range map[string][2]string{
+		"validation":    {"开始验证", "验证完成"},
+		"investigation": {"开始排障", "排障完成"},
+		"fix":           {"开始修复", "修复完成"},
+		"regression":    {"开始回归", "回归完成"},
+	} {
+		started := InvestigationEvent{Type: "turn_started", Message: "开始排障"}
+		completed := InvestigationEvent{Type: "turn_completed", Message: "排障完成"}
+		normalizePhaseEvent(&started, phase)
+		normalizePhaseEvent(&completed, phase)
+		if started.Message != labels[0] || completed.Message != labels[1] {
+			t.Fatalf("phase %s = %q/%q", phase, started.Message, completed.Message)
+		}
+	}
 }
 
 func TestParseClaudeStreamJSONEventIgnoresProtocolNoise(t *testing.T) {
@@ -350,16 +411,48 @@ func TestBuildCodexExecCommandUsesSafeWorkspace(t *testing.T) {
 		t.Fatalf("BuildCodexExecCommand: %v", err)
 	}
 	got := strings.Join(cmd.Args, " ")
-	for _, want := range []string{"exec", "--json", "--enable respect_system_proxy", "-c suppress_unstable_features_warning=true", "--cd " + workspace, "--sandbox workspace-write", "--skip-git-repo-check"} {
+	for _, want := range []string{"exec", "--json", "--enable respect_system_proxy", "-c suppress_unstable_features_warning=true", `-c approval_policy="never"`, `-c permission_profile="studio_agent"`, `permissions.studio_agent.filesystem={":minimal"="read"`, "--cd " + workspace, "--skip-git-repo-check"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("args %q missing %q", got, want)
 		}
 	}
-	if strings.Contains(got, "ask-for-approval") {
-		t.Fatalf("args include unsupported approval flag: %q", got)
+	if strings.Contains(got, "--sandbox") || strings.Contains(got, "workspace-write") {
+		t.Fatalf("legacy broad-read sandbox remains enabled: %q", got)
 	}
 	if cmd.Dir != workspace {
 		t.Fatalf("Dir = %q", cmd.Dir)
+	}
+}
+
+func TestBuildCodexExecCommandUsesHostRepositoryAllowlist(t *testing.T) {
+	workspace := t.TempDir()
+	repository := t.TempDir()
+	staging := t.TempDir()
+	manifest := repositoryAccessManifest{Version: 1, Phase: PhaseInvestigation, Roots: []repositoryAccessRoot{{Repo: "base-backend", Path: repository, Access: "read"}}}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, repositoryAccessManifestName), data, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	prompt := "investigate\nSTUDIO_EVIDENCE_STAGING_DIR=" + staging + "\n"
+	cmd, err := BuildCodexExecCommand("codex", workspace, prompt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(cmd.Args, "\n")
+	for _, want := range []string{
+		strconv.Quote(workspace) + `="write"`,
+		strconv.Quote(staging) + `="write"`,
+		strconv.Quote(repository) + `="read"`,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("Codex permission profile missing %q:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, strconv.Quote(filepath.Dir(repository))+`="read"`) {
+		t.Fatalf("Codex profile granted a repository parent directory:\n%s", joined)
 	}
 }
 

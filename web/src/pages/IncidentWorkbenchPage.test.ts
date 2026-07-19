@@ -816,7 +816,7 @@ describe('IncidentWorkbenchPage', () => {
     vi.mocked(listBugs).mockResolvedValue([bugA])
     const item = incident('case-1', 'waiting_fix_approval', '2026-07-13T00:00:00Z')
     const snapshot = detail(item, {
-      attempts: [{ id: 'attempt-1', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { investigation_status: 'root_cause_ready' }, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }],
+      attempts: [{ id: 'attempt-1', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { investigation_status: 'root_cause_ready', call_chain: [{ repo: 'admin-web' }] }, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }],
     })
     vi.mocked(listIncidentCases).mockResolvedValue([item])
     mockCaseDetails(snapshot)
@@ -824,11 +824,13 @@ describe('IncidentWorkbenchPage', () => {
     const wrapper = await mountedPage()
 
     await wrapper.get('.primary-action').trigger('click')
+    await wrapper.get('#fix-baseline-0').setValue('feature/new-navigation')
     await wrapper.get('[data-confirm]').trigger('click')
     await flushPromises()
 
     expect(approveIncidentFix).toHaveBeenCalledWith(expect.objectContaining({
       case_id: 'case-1', expected_version: 7, root_cause_attempt_id: 'attempt-1', idempotency_key: 'start-fix:case-1:attempt-1:7', actor_id: 'desktop-user',
+      input_json: { source_baselines: { 'admin-web': 'feature/new-navigation' } },
     }))
   })
 
@@ -860,12 +862,14 @@ describe('IncidentWorkbenchPage', () => {
     expect(dialog.attributes('aria-modal')).toBe('true')
     expect(dialog.attributes('aria-labelledby')).toBeTruthy()
     expect(dialog.attributes('aria-describedby')).toBeTruthy()
-    expect(dialog.text()).toContain('不会撤销已发生的提交、推送或部署')
-    expect(dialog.text()).toContain('原 Case、证据和审计记录保持不可变')
-    expect(dialog.text()).toContain('base|codex')
-    expect(dialog.text()).toContain('test')
-    expect(dialog.text()).toContain('base-prod|claude-code')
+    expect(dialog.text()).toContain('已发生的提交、推送或部署不会自动撤销')
+    expect(dialog.text()).toContain('已有证据和审计记录会继续保留')
+    expect(dialog.text()).toContain('开始阶段验证')
+    expect(dialog.text()).toContain('排障机器人Base Prod · Claude Code')
     expect(dialog.text()).toContain('prod')
+    expect(dialog.text()).not.toContain('base|codex')
+    expect(dialog.text()).not.toContain('base-prod|claude-code')
+    expect(dialog.text()).not.toContain('/repo/')
     await wrapper.findAll('.bot-picker input[type="radio"]')[0].setValue(true)
     await dialog.get('[data-reset-confirm]').trigger('click')
     await flushPromises()
@@ -892,7 +896,7 @@ describe('IncidentWorkbenchPage', () => {
     wrapper.unmount()
   })
 
-  it('snapshots phase, status, current attempt and bound Agent before confirming reset', async () => {
+  it('keeps internal Case, attempt, status and binding details out of the reset confirmation', async () => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])
     const item = incident('case-reset-context', 'waiting_evidence', '2026-07-13T00:00:00Z', { current_attempt_id: 'attempt-investigation' })
@@ -905,12 +909,15 @@ describe('IncidentWorkbenchPage', () => {
     await wrapper.get('[data-action="restart-case"]').trigger('click')
     const dialog = wrapper.get('[role="dialog"]')
 
-    expect(dialog.text()).toContain('waiting_evidence')
-    expect(dialog.text()).toContain('investigation')
-    expect(dialog.text()).toContain('attempt-investigation')
-    expect(dialog.text()).toContain('base|codex')
-    expect(dialog.text()).toContain('bug-a')
-    expect(dialog.text()).toContain('当前 Agent 将被停止')
+    expect(dialog.text()).toContain('重新开始故障闭环')
+    expect(dialog.text()).toContain('将停止当前 Agent')
+    expect(dialog.text()).toContain('排障机器人Base · Codex')
+    expect(dialog.text()).toContain('目标环境test')
+    expect(dialog.text()).not.toContain('waiting_evidence')
+    expect(dialog.text()).not.toContain('investigation')
+    expect(dialog.text()).not.toContain('attempt-investigation')
+    expect(dialog.text()).not.toContain('base|codex')
+    expect(dialog.text()).not.toContain('bug-a')
   })
 
   it('refreshes after a v8 realtime snapshot arrives before the v7 reset conflict', async () => {
@@ -983,7 +990,9 @@ describe('IncidentWorkbenchPage', () => {
 
     await wrapper.get('[data-action="restart-case"]').trigger('click')
     const secondDialog = wrapper.get('[role="dialog"]')
-    expect(secondDialog.text()).toContain('v8')
+    expect(secondDialog.text()).toContain('从“验证”重新开始')
+    expect(secondDialog.text()).not.toContain('v8')
+    expect(secondDialog.text()).not.toContain('case-reset-conflict')
     expect(secondDialog.text()).not.toContain(firstReplacementID)
   })
 
@@ -1259,7 +1268,7 @@ describe('IncidentWorkbenchPage', () => {
     const caseA = incident('case-a', 'waiting_fix_approval', '2026-07-13T00:00:00Z')
     const caseB = incident('case-b', 'waiting_evidence', '2026-07-13T00:00:00Z', { bug_id: 'bug-b', version: 3 })
     const snapshotA = detail(caseA, {
-      attempts: [{ id: 'attempt-1', case_id: 'case-a', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }],
+      attempts: [{ id: 'attempt-1', case_id: 'case-a', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { call_chain: [{ repo: 'api' }] }, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }],
     })
     const snapshotB = detail(caseB)
     vi.mocked(listIncidentCases).mockResolvedValue([caseA, caseB])
@@ -1269,6 +1278,7 @@ describe('IncidentWorkbenchPage', () => {
     const wrapper = await mountedPage()
 
     await wrapper.get('.primary-action').trigger('click')
+    await wrapper.get('#fix-baseline-0').setValue('feature/work')
     await wrapper.get('[data-confirm]').trigger('click')
     await wrapper.get('[data-ticket-id="bug-b"]').trigger('click')
     await flushPromises()
@@ -1292,7 +1302,7 @@ describe('IncidentWorkbenchPage', () => {
     const caseA = incident('case-a', 'waiting_fix_approval', '2026-07-13T00:00:00Z')
     const caseB = incident('case-b', 'waiting_evidence', '2026-07-13T00:00:00Z', { bug_id: 'bug-b', version: 3 })
     const snapshotA = detail(caseA, {
-      attempts: [{ id: 'attempt-1', case_id: 'case-a', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }],
+      attempts: [{ id: 'attempt-1', case_id: 'case-a', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { call_chain: [{ repo: 'api' }] }, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }],
     })
     vi.mocked(listIncidentCases).mockResolvedValue([caseA, caseB])
     mockCaseDetails(snapshotA, detail(caseB))
@@ -1301,6 +1311,7 @@ describe('IncidentWorkbenchPage', () => {
     const wrapper = await mountedPage()
 
     await wrapper.get('.primary-action').trigger('click')
+    await wrapper.get('#fix-baseline-0').setValue('feature/work')
     await wrapper.get('[data-confirm]').trigger('click')
     await wrapper.get('[data-ticket-id="bug-b"]').trigger('click')
     await flushPromises()
@@ -1641,6 +1652,31 @@ describe('IncidentWorkbenchPage', () => {
     expect(router.push).toHaveBeenCalledWith({ path: '/bugs', query: { bug_id: 'bug-a' } })
     expect(continueIncidentCase).not.toHaveBeenCalled()
     expect(wrapper.text()).not.toContain('/private/raw URL error')
+  })
+
+  it('regenerates an invalid browser plan in the current Case instead of resetting the workflow', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-plan-invalid', 'waiting_evidence', '2026-07-15T10:00:00Z', { current_attempt_id: 'attempt-plan', version: 7 })
+    const snapshot = detail(item, {
+      attempts: [{ id: 'attempt-plan', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: { mode: 'reproduce', target_environment: 'test' }, output_json: { error_code: 'browser_validator_plan_invalid' }, parent_attempt_id: '', started_at: '', error_code: 'browser_validator_plan_invalid', error_message: 'rejected raw plan', usage: {} }],
+    })
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    mockCaseDetails(snapshot)
+    vi.mocked(continueIncidentCase).mockResolvedValue({ ...item, status: 'validating', version: 8 })
+    const wrapper = await mountedPage()
+
+    await wrapper.get('.primary-action').trigger('click')
+    await flushPromises()
+
+    expect(continueIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
+      case_id: item.id,
+      expected_version: 7,
+      phase: 'validation',
+      input_json: { mode: 'reproduce', target_environment: 'test', user_input: '' },
+    }))
+    expect(resetIncidentCaseWithWarnings).not.toHaveBeenCalled()
+    expect(wrapper.text()).not.toContain('rejected raw plan')
   })
 
 })

@@ -1439,6 +1439,33 @@ func TestSkillAllowedForAgentRoleScopesValidatorAndTroubleshooter(t *testing.T) 
 	}
 }
 
+func TestBuildCodexRootSkillIndexMatchesTroubleshooterRole(t *testing.T) {
+	root := t.TempDir()
+	for _, skill := range []string{"incident-investigator", "routing", "bug-verifier", "api-verifier", "attachment-evidence-verifier", "bug-fixer"} {
+		dir := filepath.Join(root, "skills", skill)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: "+skill+"\n---\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	content, err := buildCodexRootSkillMD(root, &Context{SystemConfig: &config.SystemConfig{System: config.System{ID: "base", Name: "Base"}}}, "base-troubleshooter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"incident-investigator/SKILL.md", "routing/SKILL.md", "子 skill 索引(共 2 个)"} {
+		if !strings.Contains(content, required) {
+			t.Fatalf("root skill missing %q:\n%s", required, content)
+		}
+	}
+	for _, forbidden := range []string{"bug-verifier/SKILL.md", "api-verifier/SKILL.md", "attachment-evidence-verifier/SKILL.md", "bug-fixer/SKILL.md"} {
+		if strings.Contains(content, forbidden) {
+			t.Fatalf("troubleshooter root skill indexed %q:\n%s", forbidden, content)
+		}
+	}
+}
+
 // assertExists 检查一组相对路径都存在于 base 下，否则报告缺失。
 func assertExists(t *testing.T, base string, rels []string) {
 	t.Helper()

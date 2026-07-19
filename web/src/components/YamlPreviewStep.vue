@@ -3,6 +3,8 @@
 // 父端把生成好的 yamlOutput 和按钮 loading 状态传进来,点击事件 emit 回去走原有逻辑。
 
 import type { TargetId } from '../lib/constants'
+import type { ResourceCoverage } from '../lib/resourceCoverage'
+import ResourceCoveragePanel from './ResourceCoveragePanel.vue'
 
 defineProps<{
   yamlOutput: string
@@ -13,6 +15,7 @@ defineProps<{
   enabledTargets: Record<string, boolean>
   targetLabels: Record<string, string>
   anyTargetSelected: boolean
+  resourceCoverage: ResourceCoverage
 }>()
 
 defineEmits<{
@@ -37,6 +40,7 @@ defineEmits<{
         Step 2 没勾选任何部署目标,无法生成产物
       </span>
     </div>
+    <ResourceCoveragePanel :coverage="resourceCoverage" />
     <div class="yaml-preview">
       <pre><code>{{ yamlOutput }}</code></pre>
     </div>

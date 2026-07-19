@@ -680,7 +680,7 @@ func TestOrchestratorRequiresSeparateScopeBoundFixAndMergeApprovals(t *testing.T
 	if _, err := o.ApproveMerge(ctx, ApproveMergeCommand{CaseID: root.ID, ExpectedVersion: root.Version, IdempotencyKey: "merge-too-early", ActorID: "alice"}); !errors.Is(err, ErrApprovalNotReady) {
 		t.Fatalf("early merge err=%v", err)
 	}
-	fixing, err := o.ApproveFix(ctx, ApproveFixCommand{CaseID: root.ID, ExpectedVersion: root.Version, IdempotencyKey: StartFixApprovalKey(root.ID, rootAttempt.ID, root.Version), ActorID: "alice", RootCauseAttemptID: rootAttempt.ID, Bug: Bug{ID: root.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{}`)})
+	fixing, err := o.ApproveFix(ctx, ApproveFixCommand{CaseID: root.ID, ExpectedVersion: root.Version, IdempotencyKey: StartFixApprovalKey(root.ID, rootAttempt.ID, root.Version), ActorID: "alice", RootCauseAttemptID: rootAttempt.ID, Bug: Bug{ID: root.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{"source_baselines":{"repo":"feature/work"}}`)})
 	if err != nil || fixing.Status != CaseFixing {
 		t.Fatalf("case=%+v err=%v", fixing, err)
 	}

@@ -166,7 +166,7 @@ func (r *AgentPhaseRunner) materializeInvestigationEvidence(ctx context.Context,
 	if err := writeImmutableInvestigationInput(manifestPath, append(encoded, '\n')); err != nil {
 		return "", err
 	}
-	return "\n## Frozen reproduction evidence (mandatory input)\n\nRead `STUDIO_EVIDENCE_STAGING_DIR/" + investigationEvidenceManifestName + "` before querying runtime systems or source code. The files listed by its `files[].path` are relative to STUDIO_EVIDENCE_STAGING_DIR and are immutable evidence from validation or regression reproduction. Reuse their action/network/console/request/trace facts; do not rerun the browser merely to rediscover them. Distinguish runtime facts from static inference.\n", nil
+	return "\n## Frozen reproduction evidence (mandatory input)\n\nValidation or regression reproduction is already complete. Read `STUDIO_EVIDENCE_STAGING_DIR/" + investigationEvidenceManifestName + "` before querying runtime systems or source code. The files listed by its `files[].path` are relative to STUDIO_EVIDENCE_STAGING_DIR and are immutable evidence from the completed reproduction. Reuse their action/network/console/request/trace facts. Do not invoke validator-only skills (`bug-verifier`, `api-verifier`, `attachment-evidence-verifier`) and do not rerun the browser. If an immutable file is missing or insufficient, report the exact gap instead of starting validation again. Distinguish runtime facts from static inference.\n", nil
 }
 
 func safeEvidenceFilenamePart(value string) string {

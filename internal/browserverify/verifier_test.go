@@ -115,6 +115,14 @@ func validBrowserRequest(t *testing.T) bughub.BrowserVerificationRequest {
 	}
 }
 
+func TestValidateWorkerPlanShapeAcceptsNegativeTextAssertion(t *testing.T) {
+	request := validBrowserRequest(t)
+	request.Plan.Assertions = []bughub.BrowserAssertion{{Kind: "not_visible_text", Value: "2022"}}
+	if err := validateWorkerPlanShape(request.Plan); err != nil {
+		t.Fatalf("negative assertion rejected: %v", err)
+	}
+}
+
 func completedWorkerResult() workerResult {
 	return workerResult{
 		Status:              "completed",

@@ -11,10 +11,22 @@ type Dependencies = {
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error)
 
 export const terminalCaseStatuses = new Set<CaseStatus>(['fixed_verified', 'legacy_archived', 'reset_archived'])
-const browserRunningCaseStatuses = new Set<CaseStatus>(['validating', 'regression_validating'])
+const phaseRunningCaseStatuses = new Set<CaseStatus>(['validating', 'investigating', 'fixing', 'regression_validating'])
 const browserProgressCodeAllowlist = new Set<string>(incidentBrowserProgressCodes)
+const agentProgressTypeAllowlist = new Set(['thread_started', 'turn_started', 'turn_completed', 'command_execution', 'mcp_tool_call', 'agent_message', 'phase_step', 'retry', 'error', 'turn_failed', 'result'])
 const maxPhaseEventsPerAttempt = 100
 const maxBrowserProgressStep = 100
+const maxAgentProgressMessageLength = 2000
+const investigationStepKeys = ['evidence_handoff', 'timeline', 'runtime_scope', 'dependency_chain', 'evidence_correlation', 'root_cause', 'knowledge_sink'] as const
+const investigationStepLabels: Record<(typeof investigationStepKeys)[number], string> = {
+  evidence_handoff: '接收复现证据与上下文',
+  timeline: '时间轴与最近变更',
+  runtime_scope: '横向运行时检查',
+  dependency_chain: '依赖与调用链',
+  evidence_correlation: '多维证据交叉',
+  root_cause: '根因收敛',
+  knowledge_sink: '沉淀与结果',
+}
 
 export function casesForBug(cases: IncidentCase[], bugID: string): IncidentCase[] {
   return cases
@@ -72,7 +84,12 @@ export function createIncidentCaseController(dependencies: Dependencies = {}) {
     const current = detail.value
     const changedCase = Boolean(current && current.case.id !== snapshot.case.id)
     const changedAttempt = Boolean(current?.case.id === snapshot.case.id && current.case.current_attempt_id !== snapshot.case.current_attempt_id)
-    if (changedCase || changedAttempt || !browserRunningCaseStatuses.has(snapshot.case.status)) phaseEvents.value = {}
+    if (changedCase || changedAttempt || !phaseRunningCaseStatuses.has(snapshot.case.status)) phaseEvents.value = {}
+  }
+
+  function restoreSnapshotPhaseEvents(snapshot: IncidentCaseDetail) {
+    if (!phaseRunningCaseStatuses.has(snapshot.case.status)) return
+    for (const event of snapshot.phase_events || []) appendPhaseEvent(snapshot.case.id, event)
   }
 
   function commitSnapshot(snapshot: IncidentCaseDetail) {
@@ -94,7 +111,9 @@ export function createIncidentCaseController(dependencies: Dependencies = {}) {
     if (snapshotIsOlder(snapshot)) return false
     const current = detail.value
     if (current?.case.id !== snapshot.case.id || current.case.version !== snapshot.case.version) reconcilePhaseEvents(snapshot)
-    return commitSnapshot(snapshot)
+    const committed = commitSnapshot(snapshot)
+    if (committed) restoreSnapshotPhaseEvents(snapshot)
+    return committed
   }
 
   function applyCase(incident: IncidentCase) {
@@ -104,6 +123,7 @@ export function createIncidentCaseController(dependencies: Dependencies = {}) {
     const snapshot = { ...current, case: incident }
     reconcilePhaseEvents(snapshot)
     detail.value = snapshot
+    restoreSnapshotPhaseEvents(snapshot)
     return true
   }
 
@@ -113,6 +133,7 @@ export function createIncidentCaseController(dependencies: Dependencies = {}) {
     if (current?.case.id === snapshot.case.id && snapshot.case.version < current.case.version) return false
     reconcilePhaseEvents(snapshot)
     detail.value = snapshot
+    restoreSnapshotPhaseEvents(snapshot)
     upsertCase(snapshot.case)
     error.value = ''
     return true
@@ -120,27 +141,59 @@ export function createIncidentCaseController(dependencies: Dependencies = {}) {
 
   function appendPhaseEvent(payloadCaseID: string, event?: IncidentPhaseEvent) {
     const current = detail.value
-    if (!current || !event || event.type !== 'browser_progress' || !browserRunningCaseStatuses.has(current.case.status)) return
+    if (!current || !event || !phaseRunningCaseStatuses.has(current.case.status)) return
     if (payloadCaseID !== current.case.id || event.meta.case_id !== current.case.id || event.meta.attempt_id !== current.case.current_attempt_id) return
-    const code = typeof event.meta.browser_code === 'string' ? event.meta.browser_code : ''
-    if (!browserProgressCodeAllowlist.has(code)) return
-    const hasCurrent = event.meta.current !== undefined
-    const hasTotal = event.meta.total !== undefined
-    const validStep = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= maxBrowserProgressStep
-    if (hasCurrent !== hasTotal || hasCurrent && (!validStep(event.meta.current) || !validStep(event.meta.total) || Number(event.meta.current) > Number(event.meta.total))) return
     const attemptID = current.case.current_attempt_id
-    const safeEvent: IncidentPhaseEvent = {
-      type: 'browser_progress',
-      meta: {
-        case_id: current.case.id,
-        attempt_id: attemptID,
-        browser_code: code,
-        ...(hasCurrent ? { current: event.meta.current as number, total: event.meta.total as number } : {}),
-      },
+    let safeEvent: IncidentPhaseEvent
+    let identity: string
+
+    if (event.type !== 'browser_progress') {
+      const type = typeof event.type === 'string' ? event.type : ''
+      if (!agentProgressTypeAllowlist.has(type)) return
+      const message = typeof event.message === 'string' ? event.message.trim().slice(0, maxAgentProgressMessageLength) : ''
+      if (!message && !['thread_started', 'turn_started', 'turn_completed'].includes(type)) return
+      const meta: Record<string, unknown> = { case_id: current.case.id, attempt_id: attemptID }
+      for (const key of ['cycle_number', 'phase', 'state', 'status', 'exit_code', 'step_key', 'step_index', 'step_total']) {
+        const value = event.meta[key]
+        if (typeof value === 'string' || typeof value === 'number') meta[key] = value
+      }
+      let safeMessage = message
+      if (type === 'phase_step') {
+        const stepIndex = meta.step_index
+        const stepTotal = meta.step_total
+        const stepKey = meta.step_key
+        if (meta.phase !== 'investigation' || typeof stepIndex !== 'number' || !Number.isSafeInteger(stepIndex) || stepIndex < 1 || stepIndex > investigationStepKeys.length || stepTotal !== investigationStepKeys.length || stepKey !== investigationStepKeys[stepIndex - 1]) return
+        safeMessage = investigationStepLabels[stepKey as (typeof investigationStepKeys)[number]]
+      }
+      safeEvent = {
+        ...(typeof event.at === 'string' ? { at: event.at } : {}),
+        type,
+        ...(safeMessage ? { message: safeMessage } : {}),
+        meta,
+      }
+      identity = [type, String(meta.state ?? ''), String(meta.step_key ?? ''), safeMessage, String(event.at ?? '')].join('\u001f')
+    } else {
+      const code = typeof event.meta.browser_code === 'string' ? event.meta.browser_code : ''
+      if (!browserProgressCodeAllowlist.has(code)) return
+      const hasCurrent = event.meta.current !== undefined
+      const hasTotal = event.meta.total !== undefined
+      const validStep = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= maxBrowserProgressStep
+      if (hasCurrent !== hasTotal || hasCurrent && (!validStep(event.meta.current) || !validStep(event.meta.total) || Number(event.meta.current) > Number(event.meta.total))) return
+      safeEvent = {
+        type: 'browser_progress',
+        meta: {
+          case_id: current.case.id,
+          attempt_id: attemptID,
+          browser_code: code,
+          ...(hasCurrent ? { current: event.meta.current as number, total: event.meta.total as number } : {}),
+        },
+      }
+      identity = [code, String(safeEvent.meta.current ?? ''), String(safeEvent.meta.total ?? '')].join('\u001f')
     }
-    const identity = [code, String(safeEvent.meta.current ?? ''), String(safeEvent.meta.total ?? '')].join('\u001f')
     const existing = phaseEvents.value[attemptID] || []
-    const duplicate = existing.some(item => [String(item.meta.browser_code ?? ''), String(item.meta.current ?? ''), String(item.meta.total ?? '')].join('\u001f') === identity)
+    const duplicate = existing.some(item => item.type === 'browser_progress'
+      ? [String(item.meta.browser_code ?? ''), String(item.meta.current ?? ''), String(item.meta.total ?? '')].join('\u001f') === identity
+      : [String(item.type ?? ''), String(item.meta.state ?? ''), String(item.meta.step_key ?? ''), String(item.message ?? ''), String(item.at ?? '')].join('\u001f') === identity)
     if (duplicate) return
     phaseEvents.value = {
       ...phaseEvents.value,
@@ -158,7 +211,7 @@ export function createIncidentCaseController(dependencies: Dependencies = {}) {
     if ((!selectedCaseID.value || selectedCaseID.value === payload.case.id) && !snapshotIsOlder(payload.snapshot)) {
       const current = detail.value
       if (current?.case.id !== payload.snapshot.case.id || current.case.version !== payload.snapshot.case.version) reconcilePhaseEvents(payload.snapshot)
-      commitSnapshot(payload.snapshot)
+      if (commitSnapshot(payload.snapshot)) restoreSnapshotPhaseEvents(payload.snapshot)
     }
   }
 

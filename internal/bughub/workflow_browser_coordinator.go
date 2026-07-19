@@ -126,7 +126,7 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 		}
 		plan, err = ParseBrowserPlan([]byte(planning.FinalYAML))
 		if err != nil {
-			planning, executeErr = c.executeBrowserPlanner(ctx, request, browserPlannerRetryPrompt(request))
+			planning, executeErr = c.executeBrowserPlanner(ctx, request, browserPlannerRetryPrompt(request, err))
 			addAgentUsage(&result.Usage, planning.Usage)
 			if executeErr != nil {
 				if ctxErr := ctx.Err(); ctxErr != nil {
@@ -736,7 +736,7 @@ func validateDurableBrowserPlan(plan BrowserPlan) error {
 func normalizeBrowserOutcomeWaits(plan BrowserPlan) BrowserPlan {
 	assertions := make(map[string]struct{}, len(plan.Assertions))
 	for _, assertion := range plan.Assertions {
-		if assertion.Kind == "visible_text" {
+		if assertion.Kind == "visible_text" || assertion.Kind == "not_visible_text" {
 			assertions[normalizedBrowserVisibleText(assertion.Value)] = struct{}{}
 		}
 	}
@@ -1240,6 +1240,7 @@ func browserPlannerPrompt(request BrowserCoordinatorRequest) string {
 		"- press: requires locator and key; forbids url and value; screenshot_after is optional.\n" +
 		"- screenshot: output only id and action; omit locator, url, value, key, and screenshot_after.\n" +
 		"Locator schema: {kind: role | label | text | placeholder | test_id | css, value: <value>, name: <optional accessible name for role only>}.\n" +
+		"Assertion schema: kind must be exactly visible_text or not_visible_text, and value is required. Use visible_text when text must appear; use not_visible_text only when the expected observation is that text must not appear.\n" +
 		"Valid shape example (replace placeholder values with current configured values):\n" +
 		"version: 1\nstart_url: <absolute configured HTTP(S) URL>\nactions:\n  - id: capture-final\n    action: screenshot\nassertions:\n  - kind: visible_text\n    value: <expected visible text>\n" +
 		"Before responding, verify every action against the field matrix. " +
@@ -1273,8 +1274,25 @@ func browserPlannerBugEvidencePrompt(evidence []map[string]string) string {
 		"Historical Bug evidence manifest:\n" + safeBoundedBrowserJSON(evidence, 8<<10) + "\n"
 }
 
-func browserPlannerRetryPrompt(request BrowserCoordinatorRequest) string {
-	return "Your previous BrowserPlan was rejected by strict structural validation. Generate a new plan from scratch and check every action against the field matrix; do not repeat or quote the rejected output.\n" + browserPlannerPrompt(request)
+func browserPlannerRetryPrompt(request BrowserCoordinatorRequest, validationErr error) string {
+	return "Your previous BrowserPlan was rejected by strict structural validation. " + browserPlanValidationHint(validationErr) +
+		" Generate a new plan from scratch and check every action against the field matrix; do not repeat or quote the rejected output.\n" + browserPlannerPrompt(request)
+}
+
+func browserPlanValidationHint(validationErr error) string {
+	message := strings.ToLower(validationErr.Error())
+	switch {
+	case strings.Contains(message, "assertions") && strings.Contains(message, "kind"):
+		return "Assertion kind must be exactly visible_text or not_visible_text."
+	case strings.Contains(message, "screenshot"):
+		return "A screenshot action may contain only id and action."
+	case strings.Contains(message, "locator"):
+		return "Re-check the locator allowlist and the action-specific locator field rules."
+	case strings.Contains(message, "forbidden"), strings.Contains(message, "required"):
+		return "Re-check required and forbidden fields for every action."
+	default:
+		return "Re-check all required fields, allowlists, bounds, and the single-document YAML shape."
+	}
 }
 
 func browserRepairPrompt(original BrowserPlan, failed BrowserVerificationResult) string {

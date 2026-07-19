@@ -121,6 +121,8 @@ type AgentPhaseRunner struct {
 	browserVerifier             BrowserVerifier
 	browserPolicyResolver       BrowserPolicyResolver
 	frontendRuntimeResolver     FrontendRuntimeResolver
+	repositoryAccessResolver    RepositoryAccessResolver
+	fixWorkspaceManager         *FixWorkspaceManager
 	openStaging                 func(string, string) (attemptEvidenceStaging, error)
 	completionReconcileAttempts int
 	completionReconcileDelay    time.Duration
@@ -162,6 +164,15 @@ func (r *AgentPhaseRunner) SetBrowserVerifier(verifier BrowserVerifier, resolver
 	r.browserPolicyResolver = resolver
 }
 
+func (r *AgentPhaseRunner) SetFixWorkspaceManager(manager *FixWorkspaceManager) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.fixWorkspaceManager = manager
+}
+
 func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug Bug, bot BotRef) error {
 	if r == nil || r.store == nil || r.executor == nil {
 		return errors.New("agent phase runner requires store and executor")
@@ -192,6 +203,8 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 	browserVerifier := r.browserVerifier
 	browserPolicyResolver := r.browserPolicyResolver
 	frontendRuntimeResolver := r.frontendRuntimeResolver
+	repositoryAccessResolver := r.repositoryAccessResolver
+	fixWorkspaceManager := r.fixWorkspaceManager
 	r.mu.Unlock()
 	releaseReservation := func() {
 		cancel()
@@ -302,12 +315,32 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 		releaseReservation()
 		return releaseUntransferredStaging(staging, err)
 	}
+	var fixWorkspace *FixWorkspaceLease
+	if attempt.Phase == PhaseFix && fixWorkspaceManager != nil {
+		fixWorkspace, err = fixWorkspaceManager.Prepare(ctx, attempt.CaseID, attempt.ID, incident.Environment, executionBot, attempt.InputJSON)
+		if err != nil {
+			releaseClaim()
+			releaseReservation()
+			return releaseUntransferredStaging(staging, fmt.Errorf("prepare locked source-baseline worktrees: %w", err))
+		}
+		prompt += fixWorkspace.Prompt()
+	}
+	repositoryPrompt, err := r.materializeRepositoryAccess(ctx, attempt, incident, staging, repositoryAccessResolver, fixWorkspace)
+	if err != nil {
+		releaseClaim()
+		releaseReservation()
+		if fixWorkspace != nil {
+			_ = fixWorkspace.Close(context.Background())
+		}
+		return releaseUntransferredStaging(staging, fmt.Errorf("prepare repository access boundary: %w", err))
+	}
+	prompt += repositoryPrompt
 	prompt += evidenceStagingPrompt(staging.Path())
 	if attempt.Phase == PhaseFix {
 		prompt += "\n## Durable fix checkpoint (mandatory)\n\nBefore the first repository push, atomically write `" + fixCheckpointManifestName + "` in the Studio staging directory (write a temporary sibling, fsync, then rename) with state=`prepared`; include every planned repository commit/branch/remote/test. After all pushes succeed, atomically replace it with the same manifest and state=`pushed` before reporting completion. JSON fields: kind=`" + fixCheckpointManifestKind + "`, version=1, case_id=`" + attempt.CaseID + "`, attempt_id=`" + attempt.ID + "`, state=`prepared|pushed`, result=<the exact structured FixResult also returned as final YAML>. Never include credentials. Recovery treats the SSH remote branch as truth, so a crash after push but before the state update remains recoverable while a pre-push crash cannot be misreported.\n"
 	}
 	r.startLegacyProjection(attempt, bug, executionBot)
-	go r.run(runCtx, attempt.Clone(), incident.Clone(), bug, executionBot, prompt, staging, incident.Version, claimToken, complete, browserVerifier, browserPolicyResolver)
+	go r.run(runCtx, attempt.Clone(), incident.Clone(), bug, executionBot, prompt, staging, fixWorkspace, incident.Version, claimToken, complete, browserVerifier, browserPolicyResolver)
 	return nil
 }
 
@@ -358,7 +391,7 @@ func (r *AgentPhaseRunner) Cancel(ctx context.Context, attemptID string) error {
 	return err
 }
 
-func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incident IncidentCase, bug Bug, bot BotRef, prompt string, staging attemptEvidenceStaging, expectedVersion int64, claimToken string, complete PhaseCompletionFunc, browserVerifier BrowserVerifier, browserPolicyResolver BrowserPolicyResolver) {
+func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incident IncidentCase, bug Bug, bot BotRef, prompt string, staging attemptEvidenceStaging, fixWorkspace *FixWorkspaceLease, expectedVersion int64, claimToken string, complete PhaseCompletionFunc, browserVerifier BrowserVerifier, browserPolicyResolver BrowserPolicyResolver) {
 	started := time.Now()
 	cleaned := false
 	preserveStaging := false
@@ -372,6 +405,14 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incide
 			_ = staging.Cleanup()
 		}
 		_ = staging.Close()
+	}()
+	defer func() {
+		if fixWorkspace == nil {
+			return
+		}
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cleanupCancel()
+		_ = fixWorkspace.Close(cleanupCtx)
 	}()
 	defer func() {
 		r.mu.Lock()
@@ -484,6 +525,12 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incide
 				command.Outcome = failureOutcome(attempt.Phase)
 				command.OutputJSON = mustJSON(map[string]any{"error_code": "fix_checkpoint_invalid", "error_message": err.Error()})
 				command.ErrorCode = "fix_checkpoint_invalid"
+				command.ErrorMessage = err.Error()
+				command.CodeChanges = nil
+			} else if err := fixWorkspace.ValidateResult(ctx, parsed); err != nil {
+				command.Outcome = failureOutcome(attempt.Phase)
+				command.OutputJSON = mustJSON(map[string]any{"error_code": "fix_base_mismatch", "error_message": err.Error()})
+				command.ErrorCode = "fix_base_mismatch"
 				command.ErrorMessage = err.Error()
 				command.CodeChanges = nil
 			} else if err := r.validateResultEnvironment(ctx, attempt, parsed); err != nil {
@@ -783,6 +830,11 @@ func (r *AgentPhaseRunner) validateRegressionInputBinding(ctx context.Context, a
 func buildStructuredInvestigationPrompt(bug Bug, bot BotRef) string {
 	var sb strings.Builder
 	sb.WriteString("请作为选定的 AI 排障机器人执行只读根因分析。先遵循 incident-investigator/SKILL.md 的取证流程。\n")
+	sb.WriteString("Studio 已由验证 Agent 完成复现并冻结证据；排障阶段只消费 Studio structured investigation input 与 validation-evidence-manifest.json，不得调用 bug-verifier、api-verifier、attachment-evidence-verifier，不得重新操作浏览器复现。若冻结证据损坏或关键字段不足，记录 gaps 并输出 insufficient_info，不要回退到验证流程。\n")
+	sb.WriteString("执行每一步前，必须单独发送且原样发送对应进度标记（标记不是最终结果）：\n")
+	for index, step := range investigationPhaseSteps {
+		fmt.Fprintf(&sb, "[[TSHOOT_STEP phase=investigation index=%d key=%s]]\n", index+1, step.Key)
+	}
 	sb.WriteString(GenerateContext(bug, bot))
 	sb.WriteString("\n最终只输出严格 YAML，不得添加字段或解释性段落：\n")
 	sb.WriteString("investigation_status: root_cause_ready | insufficient_info\nenvironment: <env>\nroot_cause: <直接和深层根因；信息不足时为空>\nconfidence: high | medium | low\ncall_chain:\n  - kind: <browser|frontend|gateway|service|queue|datastore|external>\n    name: <节点名称>\n    service: <可空>\n    repo: <可空>\n    revision: <可空；必须是实际部署版本>\n    protocol: <可空>\n    operation: <可空；HTTP method/path、RPC method、topic/queue 等>\n    file: <可空；仓库相对路径>\n    line: 0 # 未知时为 0\n    precision: runtime_verified | source_mapped | deployed_revision | static_candidate | unavailable\n    evidence: <可空；支持该跳的证据摘要>\n    request_id: <可空>\n    trace_id: <可空>\nevidence:\n  - kind: <trace|log|metric|code|config|data|command>\n    path: <Studio staging 目录内的相对路径>\n    captured_at: <RFC3339；仅兼容输出，Studio 以 fstat 为准>\n    environment: <env>\n    version: <可空>\n    request_id: <可空>\n    trace_id: <可空>\n    redaction_status: redacted | not_required # Studio 总会重新扫描\ngaps: []\n")

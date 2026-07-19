@@ -286,6 +286,11 @@ func buildCodexRootSkillMD(wsRoot string, ctx *Context, agentName string) (strin
 	if err != nil {
 		return "", err
 	}
+	// The workspace template contains the union of all internal Agent skills.
+	// This root entry belongs to the troubleshooter only, so its index must match
+	// the role-scoped directory that install will expose. Otherwise Codex is told
+	// to read validator-only skills which do not exist in this Agent directory.
+	subSkills = codexSubSkillsForRole(subSkills, AgentRoleTroubleshooter)
 	desc := fmt.Sprintf(
 		"%s 系统专属排障入口。仅在 tshoot-router 已解析到本项目，或用户明确点名 %s / %s 时使用；不得按通用故障词跨项目触发。",
 		ctx.System.Name, ctx.System.ID, agentName,

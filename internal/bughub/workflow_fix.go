@@ -148,11 +148,8 @@ func validateFixedPushedResult(result FixResult) error {
 		if _, exists := branches[branch.Repo]; exists {
 			return fmt.Errorf("fixed_pushed contains duplicate repository %q", branch.Repo)
 		}
-		if branch.BaseBranch != branch.TargetEnvironmentBranch {
-			return fmt.Errorf("fixed_pushed base branch for %s must equal target environment branch", branch.Repo)
-		}
 		if branch.FixBranch == branch.BaseBranch || branch.FixBranch == branch.TargetEnvironmentBranch {
-			return fmt.Errorf("fixed_pushed fix branch for %s must differ from the environment branch", branch.Repo)
+			return fmt.Errorf("fixed_pushed fix branch for %s must differ from the source baseline and environment branches", branch.Repo)
 		}
 		branches[branch.Repo] = branch
 	}

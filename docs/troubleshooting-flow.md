@@ -43,7 +43,7 @@ validator 规划 BrowserPlan
   → validator 基于截图/Network/console 给出 ValidationResult
 ```
 
-BrowserPlan 只描述 allowlist 内的导航、点击、填充、按键、选择、等待和截图；禁止 JavaScript、凭据、Cookie、任意 header、文件上传和生产写交互。HostVerifier 冻结截图、脱敏 Network / console 与 `browser-actions.json` 后再交给 evaluator，validator 不能重写 artifact 路径。登录缺失以 `browser_login_required` 停在 `waiting_evidence`，由用户在 Studio 可见浏览器完成登录；Studio 加密保存 session 并用父链 attempt 继续，不在 Case 文本中收账号密码。
+BrowserPlan 只描述 allowlist 内的导航、点击、填充、按键、选择、等待和截图；文本断言仅允许 `visible_text`（必须出现）和 `not_visible_text`（不得出现），用于同时覆盖“应展示”和“未展示/不应展示”类 Bug。禁止 JavaScript、凭据、Cookie、任意 header、文件上传和生产写交互。HostVerifier 冻结截图、脱敏 Network / console 与 `browser-actions.json` 后再交给 evaluator，validator 不能重写 artifact 路径。登录缺失以 `browser_login_required` 停在 `waiting_evidence`，由用户在 Studio 可见浏览器完成登录；Studio 加密保存 session 并用父链 attempt 继续，不在 Case 文本中收账号密码。结构校验失败时可在当前 Case 内重新生成 BrowserPlan，不需要重建故障闭环。
 
 “已部署”按钮和明确的自然语言通知走同一幂等 verifier 路径。`准备部署`、`还没部署`、`部署失败`等表达不会触发校验。manual、HTTP 或 K8s 版本来源返回不匹配、不可用或多仓库只匹配一部分时，Case 保持未验证，不能创建回归 attempt。
 

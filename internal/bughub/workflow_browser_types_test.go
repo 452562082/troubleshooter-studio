@@ -63,6 +63,26 @@ func TestParseBrowserPlanAcceptsExactActionMatrix(t *testing.T) {
 	}
 }
 
+func TestParseBrowserPlanAcceptsPositiveAndNegativeTextAssertions(t *testing.T) {
+	plan, err := ParseBrowserPlan([]byte(`version: 1
+start_url: https://test.example.com/users
+actions:
+  - id: capture-results
+    action: screenshot
+assertions:
+  - kind: visible_text
+    value: 推荐
+  - kind: not_visible_text
+    value: "2022"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Assertions) != 2 || plan.Assertions[1].Kind != "not_visible_text" {
+		t.Fatalf("plan assertions = %+v", plan.Assertions)
+	}
+}
+
 func TestParseBrowserPlanRejectsInvalidActionFields(t *testing.T) {
 	cases := map[string]string{
 		"goto missing url": `  - id: step

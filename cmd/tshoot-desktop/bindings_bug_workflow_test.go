@@ -135,15 +135,26 @@ func TestGetIncidentCaseAndEmittedSnapshotsHideArtifactPathsAndApplicationURLs(t
 	}
 	app.emitIncidentCase("case-a")
 	app.emitIncidentPhaseEvent("case-a", bughub.InvestigationEvent{
-		Type: "browser_progress",
-		Raw:  map[string]any{"application_url": applicationURL, "path_or_reference": artifact.PathOrReference},
-		Meta: map[string]any{"case_id": "case-a", "attempt_id": "attempt-a", "browser_code": "browser_starting", "application_url": applicationURL},
+		Type:    "command_execution",
+		Message: "  go test ./...  ",
+		Raw:     map[string]any{"application_url": applicationURL, "path_or_reference": artifact.PathOrReference},
+		Meta:    map[string]any{"case_id": "case-a", "attempt_id": "attempt-a", "phase": "investigation", "state": "completed", "exit_code": 0, "application_url": applicationURL},
 	})
 	if len(emitted) != 2 {
 		t.Fatalf("emitted = %+v", emitted)
 	}
 	for index, event := range emitted {
 		assertPublic(fmt.Sprintf("event %d", index), event)
+	}
+	phase := emitted[1].PhaseEvent
+	if phase == nil || phase.Raw != nil || phase.Message != "go test ./..." {
+		t.Fatalf("public phase event = %+v", phase)
+	}
+	if _, ok := phase.Meta["application_url"]; ok {
+		t.Fatalf("public phase event exposed private meta = %+v", phase.Meta)
+	}
+	if phase.Meta["state"] != "completed" || phase.Meta["exit_code"] != 0 {
+		t.Fatalf("public phase event omitted progress meta = %+v", phase.Meta)
 	}
 }
 
@@ -175,6 +186,34 @@ func TestSyncIncidentBugResolutionIsGatedBySuccessfulRegression(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("resolver calls after successful regression = %d, want 1", calls)
+	}
+}
+
+func TestIncidentPhaseEventsForDetailRestoresOnlySafeCurrentAttemptProgress(t *testing.T) {
+	root := t.TempDir()
+	store := bughub.NewInvestigationStore(root)
+	if err := store.Upsert(bughub.InvestigationRun{
+		ID: "attempt-current", BugID: "bug-1", Status: bughub.InvestigationRunning,
+		Events: []bughub.InvestigationEvent{
+			{Type: "phase_step", Message: "接收复现证据与上下文", Raw: map[string]any{"token": "secret"}, Meta: map[string]any{"case_id": "case-1", "attempt_id": "attempt-current", "phase": "investigation", "step_key": "evidence_handoff", "step_index": 1, "step_total": 7, "state": "running", "token": "secret"}},
+			{Type: "raw", Message: "Authorization: Bearer secret", Raw: map[string]any{"password": "secret"}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	events := incidentPhaseEventsForDetail(root, bughub.IncidentCase{ID: "case-1", CurrentAttemptID: "attempt-current"})
+	if len(events) != 1 || events[0].Type != "phase_step" || events[0].Raw != nil {
+		t.Fatalf("events = %+v", events)
+	}
+	if events[0].Meta["step_key"] != "evidence_handoff" || fmt.Sprint(events[0].Meta["step_index"]) != "1" || fmt.Sprint(events[0].Meta["step_total"]) != "7" {
+		t.Fatalf("step meta = %+v", events[0].Meta)
+	}
+	encoded, err := json.Marshal(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "secret") || strings.Contains(string(encoded), "Authorization") || strings.Contains(string(encoded), "token") {
+		t.Fatalf("restored progress exposed private data: %s", encoded)
 	}
 }
 

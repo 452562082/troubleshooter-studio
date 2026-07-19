@@ -5,6 +5,16 @@ import { presentStageAttempt } from '../lib/incidentStageOutput'
 
 const props = defineProps<{ attempt: PhaseAttempt; latest: boolean }>()
 const view = computed(() => presentStageAttempt(props.attempt))
+
+const evidenceTypeLabels: Record<string, string> = {
+  screenshot: '截图', network: 'Network', console: 'Console', browser_actions: '浏览器操作轨迹',
+  trace: '调用链', log: '日志', metric: '指标', command: '命令输出', code: '代码', config: '配置', data: '数据',
+}
+
+function groupTypeLabel(group: { label: string; value: string }[]): string {
+  const kind = group.find(field => field.label === '类型')?.value || ''
+  return evidenceTypeLabels[kind] || kind
+}
 </script>
 
 <template>
@@ -24,7 +34,15 @@ const view = computed(() => presentStageAttempt(props.attempt))
         <p v-if="section.text" class="stage-text">{{ section.text }}</p>
         <dl v-if="section.fields?.length" class="stage-fields"><div v-for="(field, fieldIndex) in section.fields" :key="fieldIndex"><dt>{{ field.label }}</dt><dd :class="{ mono: field.mono }">{{ field.value }}</dd></div></dl>
         <ul v-if="section.items?.length"><li v-for="(item, itemIndex) in section.items" :key="itemIndex">{{ item }}</li></ul>
-        <div v-if="section.groups?.length" class="stage-groups"><dl v-for="(group, index) in section.groups" :key="index"><div v-for="(field, fieldIndex) in group" :key="fieldIndex"><dt>{{ field.label }}</dt><dd :class="{ mono: field.mono }">{{ field.value }}</dd></div></dl></div>
+        <div v-if="section.groups?.length" class="stage-groups" :class="{ 'evidence-groups': section.groupLabel }">
+          <article v-for="(group, index) in section.groups" :key="index" class="stage-group-card" :data-stage-group="section.groupLabel ? index + 1 : undefined">
+            <header v-if="section.groupLabel" class="stage-group-heading">
+              <strong>{{ section.groupLabel }} {{ index + 1 }}</strong>
+              <span v-if="groupTypeLabel(group)">{{ groupTypeLabel(group) }}</span>
+            </header>
+            <dl><div v-for="(field, fieldIndex) in group" :key="fieldIndex" :class="{ 'wide-field': field.label === '路径' }"><dt>{{ field.label }}</dt><dd :class="{ mono: field.mono }">{{ field.value }}</dd></div></dl>
+          </article>
+        </div>
         <p v-if="section.emptyText" class="stage-empty">{{ section.emptyText }}</p>
       </section>
     </div>
@@ -63,9 +81,15 @@ time { margin-left: auto; overflow-wrap: anywhere; }
 .stage-section ul { margin: 0; padding-left: 20px; }
 .stage-section li { margin: 3px 0; line-height: 1.55; overflow-wrap: anywhere; }
 .stage-fields, .stage-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; }
-.stage-fields > div, .stage-groups > dl { min-width: 0; margin: 0; border-radius: var(--r-sm); padding: 8px 10px; background: var(--c-soft); }
-.stage-groups > dl { display: grid; gap: 5px; }
+.stage-fields > div { min-width: 0; margin: 0; border-radius: var(--r-sm); padding: 8px 10px; background: var(--c-soft); }
+.stage-group-card { min-width: 0; overflow: hidden; border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf); }
+.stage-group-card > dl { display: grid; gap: 7px; min-width: 0; margin: 0; padding: 10px 12px; }
+.stage-group-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 36px; padding: 7px 12px; border-bottom: 1px solid var(--c-line); background: var(--c-soft); }
+.stage-group-heading strong { color: var(--c-ink); font-size: var(--fs-sm); }
+.stage-group-heading span { border-radius: 999px; padding: 2px 8px; background: #dbeafe; color: #1d4ed8; font-size: var(--fs-xs); font-weight: 700; }
 .stage-groups dl > div { min-width: 0; display: grid; grid-template-columns: minmax(72px, auto) minmax(0, 1fr); gap: 8px; }
+.stage-groups dd { word-break: break-word; }
+.stage-groups .wide-field { grid-template-columns: minmax(72px, auto) minmax(0, 1fr); }
 dt { color: var(--c-muted); font-size: var(--fs-xs); }
 dd { min-width: 0; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }

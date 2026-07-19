@@ -57,6 +57,21 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.text()).not.toContain('private runtime path')
   })
 
+  it('retries an invalid browser plan inside the current Case without an evidence dialog', async () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'validation-plan'
+    snapshot.attempts = [{ id: 'validation-plan', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: { mode: 'reproduce' }, output_json: { error_code: 'browser_validator_plan_invalid' }, parent_attempt_id: '', started_at: '', error_code: 'browser_validator_plan_invalid', error_message: 'raw rejected output', usage: {} }]
+
+    expect(primaryActionFor(snapshot)).toEqual({ kind: 'retry_validation', label: '重新生成验证计划并重试' })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    expect(wrapper.get('[data-browser-state="plan"]').text()).toContain('当前 Case')
+    expect(wrapper.get('.primary-action').text()).toBe('重新生成验证计划并重试')
+    await wrapper.get('.primary-action').trigger('click')
+    expect(wrapper.emitted('primary')).toEqual([[{ kind: 'retry_validation' }]])
+    expect(wrapper.find('#case-supplement').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('raw rejected output')
+  })
+
   it('renders login recovery controls and forwards exact browser actions', async () => {
     const snapshot = detail('waiting_evidence')
     snapshot.case.current_attempt_id = 'validation-login'
@@ -112,6 +127,19 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.get('.workflow-loop-hint').text()).toContain('回归仍复现')
     expect(wrapper.get('.workflow-loop-hint').text()).toContain('下一轮')
     expect(wrapper.get('.workflow-loop-hint').text()).toContain('排障')
+  })
+
+  it('mounts live Agent progress for the current investigation attempt', () => {
+    const snapshot = detail('investigating')
+    snapshot.case.current_attempt_id = 'investigation-1'
+    snapshot.attempts = [{ id: 'investigation-1', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'running', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }]
+    const wrapper = mount(BugCaseLifecycle, { props: {
+      detail: snapshot,
+      phaseEvents: [{ type: 'command_execution', message: 'rg -n layout web/src', meta: { case_id: 'case-1', attempt_id: 'investigation-1', state: 'started' } }],
+    } })
+
+    expect(wrapper.get('[data-agent-phase="investigation"]').text()).toContain('排障 Agent 正在执行')
+    expect(wrapper.get('[data-agent-phase="investigation"]').text()).toContain('rg -n layout web/src')
   })
 
   it('shows that only a successful regression resolves the source Bug ticket', () => {
@@ -210,14 +238,17 @@ describe('BugCaseLifecycle', () => {
     const snapshot = detail('waiting_fix_approval')
     snapshot.case.version = 7
     snapshot.case.current_attempt_id = 'investigation-7'
-    snapshot.attempts = [{ id: 'investigation-7', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { investigation_status: 'root_cause_ready', confidence: 'high', gaps: [] }, parent_attempt_id: '', started_at: '2026-07-11T10:00:00Z', error_code: '', error_message: '', usage: {} }]
+    snapshot.attempts = [{ id: 'investigation-7', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { investigation_status: 'root_cause_ready', confidence: 'high', gaps: [], call_chain: [{ repo: 'admin-web' }] }, parent_attempt_id: '', started_at: '2026-07-11T10:00:00Z', error_code: '', error_message: '', usage: {} }]
     const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
 
     await wrapper.find('.primary-action').trigger('click')
+    const baselineInputs = wrapper.findAll('.source-baseline-row input')
+    expect((baselineInputs[0].element as HTMLInputElement).value).toBe('admin-web')
+    await baselineInputs[1].setValue('feature/new-navigation')
     await wrapper.setProps({ detail: { ...snapshot, case: { ...snapshot.case, version: 8 } } })
     await wrapper.find('[data-confirm]').trigger('click')
 
-    expect(wrapper.emitted('primary')?.[0]).toEqual([{ kind: 'approve_fix', rootCauseAttemptID: 'investigation-7', caseVersion: 7 }])
+    expect(wrapper.emitted('primary')?.[0]).toEqual([{ kind: 'approve_fix', rootCauseAttemptID: 'investigation-7', caseVersion: 7, sourceBaselines: { 'admin-web': 'feature/new-navigation' } }])
   })
 
   it('previews target environment, expected commits, and verifier before deployment validation', async () => {
@@ -290,7 +321,8 @@ describe('BugCaseLifecycle', () => {
     const wrapper = mount(BugCaseLifecycle, { attachTo: document.body, props: { detail: snapshot } })
     const trigger = wrapper.find<HTMLButtonElement>('.primary-action')
     await trigger.trigger('click')
-    expect(document.activeElement).toBe(wrapper.find('[data-confirm]').element)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(document.activeElement).toBe(wrapper.find('.source-baseline-row input').element)
 
     await wrapper.find('[role="dialog"] footer .btn').trigger('click')
     await wrapper.vm.$nextTick()

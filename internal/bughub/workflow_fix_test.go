@@ -41,7 +41,7 @@ func validRootCauseOutput() string {
 
 func TestApproveFixRequiresExactSnapshotBoundKey(t *testing.T) {
 	_, incident, root, runner, orchestrator := prepareFixApprovalCase(t, validRootCauseOutput())
-	base := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{}`)}
+	base := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{"source_baselines":{"api":"feature/work"}}`)}
 
 	base.IdempotencyKey = "approve-fix"
 	if _, err := orchestrator.ApproveFix(context.Background(), base); !errors.Is(err, ErrApprovalScope) {
@@ -59,6 +59,17 @@ func TestApproveFixRequiresExactSnapshotBoundKey(t *testing.T) {
 	}
 	if runner.startCount() != 0 {
 		t.Fatalf("stale dialog scheduled %d fix attempts", runner.startCount())
+	}
+}
+
+func TestApproveFixRequiresExplicitSourceBaselines(t *testing.T) {
+	_, incident, root, runner, orchestrator := prepareFixApprovalCase(t, validRootCauseOutput())
+	command := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version), ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{}`)}
+	if _, err := orchestrator.ApproveFix(context.Background(), command); err == nil || !strings.Contains(err.Error(), "source_baselines") {
+		t.Fatalf("missing source baseline approval err=%v", err)
+	}
+	if runner.startCount() != 0 {
+		t.Fatalf("runner started without a source baseline: %d", runner.startCount())
 	}
 }
 
@@ -81,7 +92,7 @@ func TestApproveFixRejectsStaleOrUnsafeRootCause(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			cmd := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version), ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{}`)}
+			cmd := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version), ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{"source_baselines":{"api":"feature/work"}}`)}
 			if _, err := orchestrator.ApproveFix(context.Background(), cmd); !errors.Is(err, ErrApprovalScope) {
 				t.Fatalf("ApproveFix err=%v", err)
 			}
@@ -95,7 +106,7 @@ func TestApproveFixRejectsStaleOrUnsafeRootCause(t *testing.T) {
 func TestApproveFixPersistsRootCauseAndSnapshotScope(t *testing.T) {
 	store, incident, root, runner, orchestrator := prepareFixApprovalCase(t, validRootCauseOutput())
 	key := StartFixApprovalKey(incident.ID, root.ID, incident.Version)
-	command := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{}`)}
+	command := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{"source_baselines":{"api":"feature/work"}}`)}
 	updated, err := orchestrator.ApproveFix(context.Background(), command)
 	if err != nil || updated.Status != CaseFixing || runner.startCount() != 1 {
 		t.Fatalf("case=%+v starts=%d err=%v", updated, runner.startCount(), err)
@@ -104,7 +115,7 @@ func TestApproveFixPersistsRootCauseAndSnapshotScope(t *testing.T) {
 	if err != nil || len(approvals) != 1 {
 		t.Fatalf("approvals=%+v err=%v", approvals, err)
 	}
-	if approvals[0].CaseVersion != incident.Version || string(approvals[0].ScopeJSON) != `{"root_cause_attempt_id":"investigation-root"}` {
+	if approvals[0].CaseVersion != incident.Version || string(approvals[0].ScopeJSON) != `{"root_cause_attempt_id":"investigation-root","source_baselines":{"api":"feature/work"}}` {
 		t.Fatalf("approval=%+v", approvals[0])
 	}
 	replayed, err := orchestrator.ApproveFix(context.Background(), command)
@@ -115,7 +126,7 @@ func TestApproveFixPersistsRootCauseAndSnapshotScope(t *testing.T) {
 
 func TestApproveFixReplaySurvivesLaterCycleAndRejectsDivergentPayload(t *testing.T) {
 	store, incident, root, runner, orchestrator := prepareFixApprovalCase(t, validRootCauseOutput())
-	command := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version), ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{"root_cause":"race"}`)}
+	command := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version), ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{"root_cause":"race","source_baselines":{"api":"feature/work"}}`)}
 	committed, err := orchestrator.ApproveFix(context.Background(), command)
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +146,7 @@ func TestApproveFixReplaySurvivesLaterCycleAndRejectsDivergentPayload(t *testing
 		t.Fatalf("replay=%+v committed=%+v starts=%d err=%v", replayed, committed, runner.startCount(), err)
 	}
 	divergent := command
-	divergent.InputJSON = []byte(`{"root_cause":"different"}`)
+	divergent.InputJSON = []byte(`{"root_cause":"different","source_baselines":{"api":"feature/work"}}`)
 	if _, err := orchestrator.ApproveFix(context.Background(), divergent); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("divergent replay err=%v", err)
 	}
@@ -143,7 +154,7 @@ func TestApproveFixReplaySurvivesLaterCycleAndRejectsDivergentPayload(t *testing
 
 func TestApproveFixConcurrentExactCommandSchedulesOnce(t *testing.T) {
 	store, incident, root, runner, _ := prepareFixApprovalCase(t, validRootCauseOutput())
-	command := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version), ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{}`)}
+	command := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version), ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{"source_baselines":{"api":"feature/work"}}`)}
 	orchestrators := []*CaseOrchestrator{NewCaseOrchestrator(store, runner, nil, nil), NewCaseOrchestrator(store, runner, nil, nil)}
 	results := make([]IncidentCase, len(orchestrators))
 	errs := make([]error, len(orchestrators))
@@ -257,10 +268,13 @@ evidence: []
 	if branch.Repo != "api" || branch.BaseBranch != "test" || branch.FixBranch != "fix/api" || branch.Commit != "aaa111" || branch.TargetEnvironmentBranch != "test" || branch.PushRemote != "origin" || parsed.Changes[0].Repo != "api" || parsed.Tests[0].Repo != "api" || parsed.Tests[0].Commit != "aaa111" {
 		t.Fatalf("result was not normalized: %+v", parsed)
 	}
+	differentBaseline := strings.Replace(base, `base_branch: " test "`, `base_branch: " feature/new-ui "`, 1)
+	if parsed, err := ParseFixResult([]byte(differentBaseline)); err != nil || parsed.Branches[0].BaseBranch != "feature/new-ui" || parsed.Branches[0].TargetEnvironmentBranch != "test" {
+		t.Fatalf("independent source baseline rejected: %+v, %v", parsed, err)
+	}
 	for name, document := range map[string]string{
-		"base differs from target": strings.Replace(base, `base_branch: " test "`, `base_branch: " main "`, 1),
-		"fix equals base":          strings.Replace(base, `fix_branch: " fix/api "`, `fix_branch: " test "`, 1),
-		"fix equals target":        strings.Replace(base, `fix_branch: " fix/api "`, `fix_branch: "test"`, 1),
+		"fix equals base":   strings.Replace(base, `fix_branch: " fix/api "`, `fix_branch: " test "`, 1),
+		"fix equals target": strings.Replace(base, `fix_branch: " fix/api "`, `fix_branch: "test"`, 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := ParseFixResult([]byte(document)); err == nil {
@@ -307,7 +321,7 @@ func TestParseFixResultCompletionPersistsChangesBeforeMergeApprovalWait(t *testi
 	approved, err := orchestrator.ApproveFix(context.Background(), ApproveFixCommand{
 		CaseID: incident.ID, ExpectedVersion: incident.Version,
 		IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version),
-		ActorID:        "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{}`),
+		ActorID:        "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{"source_baselines":{"api":"feature/work"}}`),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -466,7 +480,7 @@ func completeFixForReplayTest(t *testing.T) (*CaseStore, CompleteAttemptCommand,
 	fixture := newGitFixture(t)
 	commit := fixture.makeFix(t, "replay\n")
 	store, incident, root, _, orchestrator := prepareFixApprovalCase(t, validRootCauseOutput())
-	approved, err := orchestrator.ApproveFix(context.Background(), ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version), ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{}`)})
+	approved, err := orchestrator.ApproveFix(context.Background(), ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version), ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{"source_baselines":{"api":"feature/work"}}`)})
 	if err != nil {
 		t.Fatal(err)
 	}

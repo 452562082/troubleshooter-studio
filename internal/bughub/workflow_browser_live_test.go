@@ -38,7 +38,7 @@ func TestLiveCodexBrowserPlanner(t *testing.T) {
 	coordinator := BrowserCoordinator{Executor: executor}
 	for round := 1; round <= 3; round++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		result, runErr := coordinator.executeBrowserPlanner(ctx, request, browserPlannerPrompt(request))
+		result, runErr := coordinator.executeBrowserPlanner(ctx, request, browserPlannerPrompt(request, nil))
 		cancel()
 		if runErr != nil {
 			t.Fatalf("round %d: %v", round, runErr)

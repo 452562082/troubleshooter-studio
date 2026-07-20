@@ -789,7 +789,7 @@ func TestAgentPhaseRunnerBrowserLoginStopPersistsOriginalApplicationURLAndAuthen
 func TestBrowserFailureOutcomeSeparatesSystemFailuresFromEvidenceGaps(t *testing.T) {
 	for _, code := range []string{
 		"browser_runtime_broken", "browser_policy_unavailable", "browser_policy_changed",
-		"browser_verifier_failed", "browser_execution_interrupted", "browser_validator_plan_invalid",
+		"browser_verifier_failed", "browser_execution_interrupted", "browser_validator_plan_invalid", "browser_locator_repair_plan_invalid",
 		"browser_worker_protocol_invalid", "browser_artifact_invalid", "browser_validator_failed",
 		"browser_validator_attachment_failed", "browser_validator_no_output", "browser_validator_process_failed",
 	} {

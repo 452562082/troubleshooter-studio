@@ -20,7 +20,7 @@ import { redactConsoleText, safeResponseRecord } from './sanitize.mjs';
 const PROGRESS_PREFIX = 'TSHOOT_BROWSER_PROGRESS ';
 const ALLOWED_ACTIONS = new Set(['goto', 'click', 'fill', 'press', 'select', 'wait_for', 'screenshot']);
 const ALLOWED_LOCATORS = new Set(['role', 'label', 'text', 'placeholder', 'test_id', 'css']);
-const ALLOWED_ASSERTIONS = new Set(['visible_text', 'not_visible_text']);
+const ALLOWED_ASSERTIONS = new Set(['visible_text', 'not_visible_text', 'page_loaded']);
 const READ_ONLY_PROD_ACTIONS = new Set(['goto', 'wait_for', 'screenshot']);
 export const EVIDENCE_MAX_RECORDS = 1000;
 export const EVIDENCE_MAX_BYTES = 1 << 20;
@@ -212,10 +212,14 @@ function validatePolicy(policy) {
 
 function validateLocator(locator, label) {
   if (!locator || typeof locator !== 'object' || Array.isArray(locator)) throw new Error(`${label} locator is required`);
-  ownKeys(locator, new Set(['kind', 'value', 'name']), `${label} locator`);
+  ownKeys(locator, new Set(['kind', 'value', 'name', 'exact']), `${label} locator`);
   if (!ALLOWED_LOCATORS.has(locator.kind)) throw new Error(`${label} locator kind is not supported`);
   requiredString(locator.value, `${label} locator value`);
   if (locator.name !== undefined) requiredString(locator.name, `${label} locator name`);
+  if (locator.exact !== undefined && typeof locator.exact !== 'boolean') throw new Error(`${label} locator exact must be boolean`);
+  if (locator.exact !== undefined && (locator.kind === 'test_id' || locator.kind === 'css' || (locator.kind === 'role' && locator.name === undefined))) {
+    throw new Error(`${label} locator exact is not meaningful`);
+  }
 }
 
 export function validateWorkerRequest(request) {
@@ -229,7 +233,7 @@ export function validateWorkerRequest(request) {
   const plan = request.plan;
   if (!plan || typeof plan !== 'object' || Array.isArray(plan)) throw new Error('plan must be an object');
   ownKeys(plan, new Set(['version', 'start_url', 'actions', 'assertions']), 'plan');
-  if (plan.version !== 1) throw new Error('plan version must be 1');
+  if (plan.version !== 1 && plan.version !== 2) throw new Error('plan version must be 1 or 2');
   const start = parseHTTPURL(plan.start_url).parsed;
   const applicationOrigins = new Set(request.policy.application_origins.map(normalizeOrigin));
   const startOrigins = new Set(request.policy.start_origins.map(normalizeOrigin));
@@ -285,12 +289,16 @@ export function validateWorkerRequest(request) {
   for (const assertion of plan.assertions) {
     if (!assertion || typeof assertion !== 'object' || Array.isArray(assertion)) throw new Error('assertion must be an object');
     ownKeys(assertion, new Set(['kind', 'value']), 'assertion');
-    if (!ALLOWED_ASSERTIONS.has(assertion.kind)) throw new Error('assertion kind is not supported');
+    if (!ALLOWED_ASSERTIONS.has(assertion.kind) || (assertion.kind === 'page_loaded' && plan.version !== 2)) throw new Error('assertion kind is not supported');
     requiredString(assertion.value, 'assertion value');
   }
 }
 
 export async function executeAssertion(page, assertion) {
+  if (assertion.kind === 'page_loaded') {
+    await page.locator('body').waitFor({ state: 'visible' });
+    return;
+  }
   const state = assertion.kind === 'not_visible_text' ? 'hidden' : 'visible';
   const matches = page.getByText(assertion.value, { exact: false });
   const target = assertion.kind === 'not_visible_text' ? matches.filter({ visible: true }) : matches;
@@ -909,17 +917,22 @@ export async function createSupervisedBrowserContext(browser, {
 
 export function buildLocator(page, locator) {
   validateLocator(locator, 'action');
+  const exact = locator.exact === true;
   switch (locator.kind) {
-    case 'role': return page.getByRole(locator.value, locator.name ? { name: locator.name } : {});
-    case 'label': return page.getByLabel(locator.value);
+    case 'role': return page.getByRole(locator.value, locator.name ? { name: locator.name, exact } : {});
+    case 'label': return page.getByLabel(locator.value, { exact });
     // Accessibility summaries expose aria-label names alongside visible text.
     // A repair agent cannot otherwise distinguish the two, so a text hint may
     // safely match either user-visible text or the same accessible label.
-    case 'text': return page.getByText(locator.value, { exact: false }).or(page.getByLabel(locator.value, { exact: false }));
+    case 'text': return exact
+      ? page.getByText(locator.value, { exact: true })
+      : page.getByText(locator.value, { exact: false }).or(page.getByLabel(locator.value, { exact: false }));
     // Search inputs often replace rotating placeholders after hydration while
     // keeping a stable accessible label. Treat the declared placeholder text
     // as an accessibility hint too, without expanding beyond native locators.
-    case 'placeholder': return page.getByPlaceholder(locator.value).or(page.getByLabel(locator.value, { exact: false }));
+    case 'placeholder': return exact
+      ? page.getByPlaceholder(locator.value, { exact: true })
+      : page.getByPlaceholder(locator.value, { exact: false }).or(page.getByLabel(locator.value, { exact: false }));
     case 'test_id': return page.getByTestId(locator.value);
     case 'css': return page.locator(`css=${locator.value}`);
     default: throw new Error('action locator kind is not supported');
@@ -1702,6 +1715,7 @@ function interactionBindingKey(locatorSpec) {
     String(locatorSpec.kind || ''),
     String(locatorSpec.value || ''),
     String(locatorSpec.name || ''),
+    locatorSpec.exact === true,
   ]);
 }
 
@@ -1710,6 +1724,12 @@ async function reusableInteractionBinding(binding, action, index) {
   if (binding.index + 1 !== index || binding.key !== interactionBindingKey(action.locator)) return null;
   if (!await binding.locator.isVisible().catch(() => false)) return null;
   if (typeof binding.locator.isDisabled === 'function' && await binding.locator.isDisabled().catch(() => true)) return null;
+  if (typeof binding.locator.inputValue === 'function') {
+    const observed = await binding.locator.inputValue().catch(() => null);
+    if (observed !== null && observed !== binding.value) {
+      throw new BrowserInteractionError('input_value_not_persisted', 'filled value did not persist before submit');
+    }
+  }
   return binding.locator;
 }
 
@@ -1766,6 +1786,7 @@ export async function executeAction(page, action, request, index, captureScreens
               index,
               key: interactionBindingKey(action.locator),
               locator,
+              value: action.value,
             };
           }
         } else if (action.action === 'press') await locator.press(canonicalPressKey(action.key));
@@ -1786,9 +1807,16 @@ export async function waitForApplicationReady(page, maximumWaitMs = 3_000) {
   ]);
 }
 
-export async function settleBrowserInteraction(page, action, delayMs = 150) {
+export async function settleBrowserInteraction(page, action, delayMs = 150, interactionState = null, index = -1) {
   if (!['click', 'fill', 'press', 'select'].includes(action?.action)) return;
   await page.waitForTimeout(delayMs);
+  const binding = interactionState?.last;
+  if (action.action !== 'fill' || !binding || binding.index !== index || typeof binding.locator?.inputValue !== 'function') return;
+  const observed = await binding.locator.inputValue().catch(() => null);
+  if (observed !== null && observed !== binding.value) {
+    interactionState.last = null;
+    throw new BrowserInteractionError('input_value_not_persisted', 'filled value did not persist after the page settled');
+  }
 }
 
 function browserActionFailureCode(error, destinationBlocked = false) {
@@ -2112,7 +2140,7 @@ async function executeWorker(request) {
           undefined,
           interactionState,
         );
-        await settleBrowserInteraction(page, action);
+        await settleBrowserInteraction(page, action, 150, interactionState, index);
         if (captured.loginRequired) {
           actions.push({ id: action.id, action: action.action, locator_kind: action.locator?.kind || '', started_at: new Date(started).toISOString(), duration_ms: Date.now() - started, result: 'login_required', error_code: 'browser_login_required' });
           return finishLogin();

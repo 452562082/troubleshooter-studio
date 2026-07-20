@@ -31,7 +31,7 @@ export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrim
     const attempt = detail.attempts.find(item => item.id === incident.current_attempt_id)
     const outputCode = typeof attempt?.output_json?.error_code === 'string' ? attempt.output_json.error_code.trim() : ''
     const code = attempt?.error_code?.trim() || outputCode
-    if (code === 'browser_validator_plan_invalid') return { kind: 'retry_validation', label: '重新生成验证计划并重试' }
+    if (code === 'browser_validator_plan_invalid' || code === 'browser_locator_repair_plan_invalid') return { kind: 'retry_validation', label: '重新生成验证计划并重试' }
     if (['browser_validator_failed', 'browser_validator_attachment_failed', 'browser_validator_no_output', 'browser_validator_process_failed'].includes(code)) {
       return { kind: 'retry_validation', label: '重试当前验证' }
     }

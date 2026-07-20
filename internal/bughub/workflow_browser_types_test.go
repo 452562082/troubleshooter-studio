@@ -83,6 +83,69 @@ assertions:
 	}
 }
 
+func TestParseBrowserPlanV2PreservesExactLocatorAndObservationAssertion(t *testing.T) {
+	plan, err := ParseBrowserPlan([]byte(`version: 2
+start_url: https://test.example.com/users
+actions:
+  - id: open-search
+    action: click
+    locator: {kind: text, value: 搜索, exact: true}
+assertions:
+  - kind: page_loaded
+    value: document
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Version != BrowserPlanVersion || plan.Actions[0].Locator == nil || plan.Actions[0].Locator.Exact == nil || !*plan.Actions[0].Locator.Exact {
+		t.Fatalf("plan = %+v", plan)
+	}
+	if err := validateDurableBrowserPlan(plan); err != nil {
+		t.Fatalf("v2 plan is not durable: %v", err)
+	}
+}
+
+func TestParseBrowserPlanLegacyPlanAcceptsAdditiveExactLocator(t *testing.T) {
+	plan, err := ParseBrowserPlan([]byte(`version: 1
+start_url: https://test.example.com/users
+actions:
+  - id: open-search
+    action: click
+    locator: {kind: text, value: 搜索, exact: true}
+assertions:
+  - kind: visible_text
+    value: 搜索
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Actions[0].Locator.Exact == nil || !*plan.Actions[0].Locator.Exact {
+		t.Fatalf("legacy exact locator was lost: %+v", plan.Actions[0].Locator)
+	}
+}
+
+func TestParseBrowserPlanRejectsMeaninglessExactLocator(t *testing.T) {
+	for _, locator := range []string{
+		`{kind: test_id, value: search, exact: true}`,
+		`{kind: css, value: "#search", exact: true}`,
+		`{kind: role, value: button, exact: true}`,
+	} {
+		raw := fmt.Sprintf(`version: 2
+start_url: https://test.example.com/users
+actions:
+  - id: open-search
+    action: click
+    locator: %s
+assertions:
+  - kind: visible_text
+    value: 搜索
+`, locator)
+		if _, err := ParseBrowserPlan([]byte(raw)); err == nil {
+			t.Fatalf("expected exact locator %s to be rejected", locator)
+		}
+	}
+}
+
 func TestParseBrowserPlanRejectsInvalidActionFields(t *testing.T) {
 	cases := map[string]string{
 		"goto missing url": `  - id: step
@@ -186,7 +249,7 @@ func TestParseBrowserPlanStrictlyValidatesStructureAndAllowlists(t *testing.T) {
 		"unknown action":        strings.Replace(string(valid), "action: click", "action: evaluate", 1),
 		"xpath":                 strings.Replace(string(valid), "kind: role", "kind: xpath", 1),
 		"duplicate id":          strings.Replace(string(valid), "assertions:", "  - id: open-users\n    action: screenshot\nassertions:", 1),
-		"unsupported version":   strings.Replace(string(valid), "version: 1", "version: 2", 1),
+		"unsupported version":   strings.Replace(string(valid), "version: 1", "version: 3", 1),
 		"empty start_url":       strings.Replace(string(valid), "start_url: https://test.example.com/users", "start_url: ''", 1),
 		"empty action id":       strings.Replace(string(valid), "id: open-users", "id: ''", 1),
 		"non-role name":         strings.Replace(string(valid), "kind: role, value: tab, name: 用户", "kind: text, value: tab, name: 用户", 1),

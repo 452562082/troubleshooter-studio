@@ -10,6 +10,11 @@ import (
 
 const maxBrowserPlanStringBytes = 4096
 
+const (
+	BrowserPlanLegacyVersion = 1
+	BrowserPlanVersion       = 2
+)
+
 type BrowserPlan struct {
 	Version    int                `yaml:"version" json:"version"`
 	StartURL   string             `yaml:"start_url" json:"start_url"`
@@ -21,6 +26,7 @@ type BrowserLocator struct {
 	Kind  string `yaml:"kind" json:"kind"`
 	Value string `yaml:"value" json:"value"`
 	Name  string `yaml:"name,omitempty" json:"name,omitempty"`
+	Exact *bool  `yaml:"exact,omitempty" json:"exact,omitempty"`
 }
 
 type BrowserAction struct {
@@ -105,6 +111,13 @@ type BrowserVerifier interface {
 	Execute(context.Context, BrowserVerificationRequest) (BrowserVerificationResult, error)
 }
 
+// BrowserObserver is an optional capability implemented by the production
+// host verifier. Keeping it separate lets tests and alternate verifiers remain
+// compatible while new plans are grounded in a live page observation.
+type BrowserObserver interface {
+	Observe(context.Context, BrowserVerificationRequest) (BrowserVerificationResult, error)
+}
+
 type BrowserPolicyResolver interface {
 	ResolveBrowserPolicy(context.Context, IncidentCase, Bug) (BrowserSecurityPolicy, error)
 }
@@ -136,8 +149,8 @@ func ParseBrowserPlan(data []byte) (BrowserPlan, error) {
 	if err := decodeStrictYAML(data, &raw); err != nil {
 		return BrowserPlan{}, fmt.Errorf("parse browser plan: %w", err)
 	}
-	if raw.Version != 1 {
-		return BrowserPlan{}, fmt.Errorf("browser plan version must be 1, got %d", raw.Version)
+	if raw.Version != BrowserPlanLegacyVersion && raw.Version != BrowserPlanVersion {
+		return BrowserPlan{}, fmt.Errorf("browser plan version must be %d or %d, got %d", BrowserPlanLegacyVersion, BrowserPlanVersion, raw.Version)
 	}
 	if err := validateBrowserPlanString("start_url", raw.StartURL, true); err != nil {
 		return BrowserPlan{}, err
@@ -157,7 +170,7 @@ func ParseBrowserPlan(data []byte) (BrowserPlan, error) {
 	}
 	seenIDs := make(map[string]struct{}, len(raw.Actions))
 	for i, rawAction := range raw.Actions {
-		action, err := validateBrowserAction(i, rawAction)
+		action, err := validateBrowserAction(raw.Version, i, rawAction)
 		if err != nil {
 			return BrowserPlan{}, err
 		}
@@ -171,7 +184,7 @@ func ParseBrowserPlan(data []byte) (BrowserPlan, error) {
 		if err := validateBrowserPlanString(fmt.Sprintf("assertions[%d].kind", i), assertion.Kind, true); err != nil {
 			return BrowserPlan{}, err
 		}
-		if assertion.Kind != "visible_text" && assertion.Kind != "not_visible_text" {
+		if assertion.Kind != "visible_text" && assertion.Kind != "not_visible_text" && (raw.Version != BrowserPlanVersion || assertion.Kind != "page_loaded") {
 			return BrowserPlan{}, fmt.Errorf("browser plan assertions[%d].kind %q is not supported", i, assertion.Kind)
 		}
 		if err := validateBrowserPlanString(fmt.Sprintf("assertions[%d].value", i), assertion.Value, true); err != nil {
@@ -181,7 +194,7 @@ func ParseBrowserPlan(data []byte) (BrowserPlan, error) {
 	return plan, nil
 }
 
-func validateBrowserAction(index int, raw browserActionYAML) (BrowserAction, error) {
+func validateBrowserAction(version, index int, raw browserActionYAML) (BrowserAction, error) {
 	prefix := fmt.Sprintf("actions[%d]", index)
 	if err := validateBrowserPlanString(prefix+".id", raw.ID, true); err != nil {
 		return BrowserAction{}, err
@@ -278,7 +291,7 @@ func validateBrowserAction(index int, raw browserActionYAML) (BrowserAction, err
 		return BrowserAction{}, fmt.Errorf("browser plan %s.action %q is not supported", prefix, raw.Action)
 	}
 
-	locator, err := decodeBrowserLocatorYAML(prefix+".locator", raw.Locator)
+	locator, err := decodeBrowserLocatorYAML(version, prefix+".locator", raw.Locator)
 	if err != nil {
 		return BrowserAction{}, err
 	}
@@ -313,7 +326,7 @@ func validateBrowserAction(index int, raw browserActionYAML) (BrowserAction, err
 	}, nil
 }
 
-func decodeBrowserLocatorYAML(field string, node yaml.Node) (*BrowserLocator, error) {
+func decodeBrowserLocatorYAML(version int, field string, node yaml.Node) (*BrowserLocator, error) {
 	if !browserYAMLFieldPresent(node) {
 		return nil, nil
 	}
@@ -328,7 +341,7 @@ func decodeBrowserLocatorYAML(field string, node yaml.Node) (*BrowserLocator, er
 			return nil, fmt.Errorf("browser plan %s has a non-scalar field name", field)
 		}
 		switch key.Value {
-		case "kind", "value", "name":
+		case "kind", "value", "name", "exact":
 		default:
 			return nil, fmt.Errorf("browser plan %s has unknown field %q", field, key.Value)
 		}
@@ -358,7 +371,19 @@ func decodeBrowserLocatorYAML(field string, node yaml.Node) (*BrowserLocator, er
 	default:
 		return nil, fmt.Errorf("browser plan %s.kind %q is not supported", field, kind)
 	}
-	return &BrowserLocator{Kind: kind, Value: value, Name: name}, nil
+	exactNode, exactPresent := fields["exact"]
+	if exactPresent && (kind == "test_id" || kind == "css" || (kind == "role" && name == "")) {
+		return nil, fmt.Errorf("browser plan %s.exact is not meaningful for %s locator", field, kind)
+	}
+	var exact *bool
+	if exactPresent {
+		value, err := decodeBrowserPlanYAMLBool(field+".exact", exactNode)
+		if err != nil {
+			return nil, err
+		}
+		exact = &value
+	}
+	return &BrowserLocator{Kind: kind, Value: value, Name: name, Exact: exact}, nil
 }
 
 func validateBrowserPlanString(field, value string, required bool) error {

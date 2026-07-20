@@ -105,6 +105,17 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.text()).not.toContain('raw rejected output')
   })
 
+  it('retries an invalid locator repair plan inside the current Case', () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'repair-plan'
+    snapshot.attempts = [{ id: 'repair-plan', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_locator_repair_plan_invalid' }, parent_attempt_id: '', started_at: '', error_code: 'browser_locator_repair_plan_invalid', error_message: 'raw rejected repair', usage: {} }]
+
+    expect(primaryActionFor(snapshot)).toEqual({ kind: 'retry_validation', label: '重新生成验证计划并重试' })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    expect(wrapper.get('[data-browser-state="plan"]').text()).toContain('页面定位修复计划')
+    expect(wrapper.text()).not.toContain('raw rejected repair')
+  })
+
   it('retries a failed validation agent inside the current Case without rebuilding it', async () => {
     const snapshot = detail('waiting_evidence')
     snapshot.case.current_attempt_id = 'validation-agent-failed'

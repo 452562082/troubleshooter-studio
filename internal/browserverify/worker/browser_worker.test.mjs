@@ -1062,6 +1062,27 @@ test('buildLocator maps only the six declared locator types', () => {
   assert.throws(() => buildLocator(page, { kind: 'xpath', value: '//button' }), /locator/);
 });
 
+test('buildLocator honors exact locator semantics without broad accessibility unions', () => {
+  const calls = [];
+  const result = { or: () => { throw new Error('exact locator must not create a union'); } };
+  const page = {
+    getByRole: (...args) => { calls.push(['role', ...args]); return result; },
+    getByLabel: (...args) => { calls.push(['label', ...args]); return result; },
+    getByText: (...args) => { calls.push(['text', ...args]); return result; },
+    getByPlaceholder: (...args) => { calls.push(['placeholder', ...args]); return result; },
+  };
+  buildLocator(page, { kind: 'text', value: '搜索', exact: true });
+  buildLocator(page, { kind: 'label', value: '用户名称', exact: true });
+  buildLocator(page, { kind: 'placeholder', value: '请输入用户名称', exact: true });
+  buildLocator(page, { kind: 'role', value: 'button', name: '搜索', exact: true });
+  assert.deepEqual(calls, [
+    ['text', '搜索', { exact: true }],
+    ['label', '用户名称', { exact: true }],
+    ['placeholder', '请输入用户名称', { exact: true }],
+    ['role', 'button', { name: '搜索', exact: true }],
+  ]);
+});
+
 test('login detection checks every password field, including a visible field after a hidden one', async () => {
   const visibility = [false, true];
   const page = {
@@ -1491,6 +1512,7 @@ test('executeAction rejects a fill whose value was not applied to the resolved i
   const locator = {
     count: async () => 1,
     nth: () => locator,
+    or: () => locator,
     isVisible: async () => true,
     getAttribute: async () => 'text',
     fill: async () => {},
@@ -1565,6 +1587,61 @@ test('executeAction reuses the immediately filled control for Enter after an SPA
 
   assert.deepEqual(pressed, ['Enter']);
   assert.equal(state.last, null);
+});
+
+test('settled fill fails when a controlled SPA clears the value asynchronously', async () => {
+  const worker = await import('./browser_worker.mjs');
+  let filled = '';
+  const locator = {
+    count: async () => 1,
+    nth: () => locator,
+    or: () => locator,
+    isVisible: async () => true,
+    isDisabled: async () => false,
+    getAttribute: async () => 'search',
+    fill: async (value) => { filled = value; },
+    inputValue: async () => filled,
+  };
+  const page = {
+    getByPlaceholder: () => locator,
+    getByLabel: () => ({ count: async () => 0 }),
+    waitForTimeout: async () => { filled = ''; },
+  };
+  const state = { last: null };
+  const action = { id: 'fill-search', action: 'fill', locator: { kind: 'placeholder', value: '搜索' }, value: 'chengzi' };
+
+  await worker.executeAction(page, action, baseRequest(), 0, async () => ({ loginRequired: false, path: '' }), null, null, { timeoutMs: 0, pollMs: 1 }, state);
+  await assert.rejects(
+    worker.settleBrowserInteraction(page, action, 0, state, 0),
+    /did not persist after the page settled/,
+  );
+  assert.equal(state.last, null);
+});
+
+test('Enter refuses a fill binding whose value disappeared before submit', async () => {
+  const worker = await import('./browser_worker.mjs');
+  let filled = '';
+  const locator = {
+    count: async () => 1,
+    nth: () => locator,
+    or: () => locator,
+    isVisible: async () => true,
+    isDisabled: async () => false,
+    getAttribute: async () => 'search',
+    fill: async (value) => { filled = value; },
+    inputValue: async () => filled,
+    press: async () => assert.fail('Enter must not be sent with an empty value'),
+  };
+  const page = { getByPlaceholder: () => locator, getByLabel: () => ({ count: async () => 0 }) };
+  const state = { last: null };
+  const capture = async () => ({ loginRequired: false, path: '' });
+  await worker.executeAction(page, { id: 'fill-search', action: 'fill', locator: { kind: 'placeholder', value: '搜索' }, value: 'chengzi' }, baseRequest(), 0, capture, null, null, { timeoutMs: 0, pollMs: 1 }, state);
+  filled = '';
+
+  await assert.rejects(
+    worker.executeAction(page, { id: 'submit-search', action: 'press', locator: { kind: 'placeholder', value: '搜索' }, key: 'Enter' }, baseRequest(), 1, capture, null, null, { timeoutMs: 0, pollMs: 1 }, state),
+    /did not persist before submit/,
+  );
 });
 
 test('executeAction refuses a stale fill binding and still fails closed on selector ambiguity', async () => {

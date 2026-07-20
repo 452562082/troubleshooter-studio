@@ -72,7 +72,7 @@ const state = computed<'progress' | 'login' | 'runtime' | 'validator' | 'quota' 
   if (code === 'browser_locator_failed') return 'locator'
   if (code === 'browser_url_required') return 'url'
   if (code === 'browser_assertion_failed') return 'business'
-  if (code === 'browser_validator_plan_invalid') return 'plan'
+  if (code === 'browser_validator_plan_invalid' || code === 'browser_locator_repair_plan_invalid') return 'plan'
   if (code === 'browser_validator_attachment_failed') return 'attachment'
   if (code === 'browser_validator_no_output' || code === 'browser_validator_process_failed') return 'process'
   if (code === 'browser_validator_failed') return 'retry'
@@ -89,22 +89,27 @@ const loginOrigin = computed(() => {
   } catch { return '' }
 })
 
-const stateCopy = computed(() => ({
-  login: '当前验证需要登录。请在 Studio 打开的验证浏览器中完成登录，不要在 Case 中粘贴账号、密码或 Cookie。',
-  runtime: '验证浏览器环境不可用。修复并通过运行时探测后，Studio 会创建一次新的验证继续。',
-  validator: '验证机器人尚未部署，浏览器验证不会退回普通排障机器人。请重新部署当前机器人的 validator 角色。',
-  quota: '验证机器人用量已达上限。恢复额度或切换到可用机器人后，请重新开始故障闭环。',
-  locator: '页面元素定位失败。请补充失败步骤附近可见的控件名称或页面变化后重试。',
-  url: '来源工单缺少 frontend_url。请先在来源工单平台补充页面地址，再前往 Bug 收件箱重新同步该 Bug。',
-  business: '页面结果与预期不一致。请补充最小业务预期或测试数据后重试。',
-  plan: '验证机器人生成的浏览器计划未通过结构校验。可以在当前 Case 内重新生成计划，无需重建故障闭环。',
-  attachment: '验证机器人无法读取本次截图证据。Studio 会优先使用结构化页面与网络证据降级判定；仍失败时请检查 macOS 文件访问权限后在当前 Case 重试。',
-  process: '验证机器人进程异常退出或没有返回结构化结果。当前 Case 和浏览器证据均已保留，可以直接重试。',
-  retry: '验证机器人本次执行异常。可以在当前 Case 内重新运行验证，无需补附件或重建故障闭环。',
-  system: '浏览器验证遇到系统错误。请刷新 Case 后按稳定错误码处理，不要用附件补充来掩盖运行时故障。',
-  progress: '',
-  '': '',
-})[state.value])
+const stateCopy = computed(() => {
+  if (stableErrorCode.value === 'browser_locator_repair_plan_invalid') {
+    return '页面定位修复计划未通过协议校验。当前 Case、原计划与现场证据均已保留，可以直接重新生成计划并重试。'
+  }
+  return ({
+    login: '当前验证需要登录。请在 Studio 打开的验证浏览器中完成登录，不要在 Case 中粘贴账号、密码或 Cookie。',
+    runtime: '验证浏览器环境不可用。修复并通过运行时探测后，Studio 会创建一次新的验证继续。',
+    validator: '验证机器人尚未部署，浏览器验证不会退回普通排障机器人。请重新部署当前机器人的 validator 角色。',
+    quota: '验证机器人用量已达上限。恢复额度或切换到可用机器人后，请重新开始故障闭环。',
+    locator: '页面元素定位失败。请补充失败步骤附近可见的控件名称或页面变化后重试。',
+    url: '来源工单缺少 frontend_url。请先在来源工单平台补充页面地址，再前往 Bug 收件箱重新同步该 Bug。',
+    business: '页面结果与预期不一致。请补充最小业务预期或测试数据后重试。',
+    plan: '验证机器人生成的浏览器计划未通过结构校验。可以在当前 Case 内重新生成计划，无需重建故障闭环。',
+    attachment: '验证机器人无法读取本次截图证据。Studio 会优先使用结构化页面与网络证据降级判定；仍失败时请检查 macOS 文件访问权限后在当前 Case 重试。',
+    process: '验证机器人进程异常退出或没有返回结构化结果。当前 Case 和浏览器证据均已保留，可以直接重试。',
+    retry: '验证机器人本次执行异常。可以在当前 Case 内重新运行验证，无需补附件或重建故障闭环。',
+    system: '浏览器验证遇到系统错误。请刷新 Case 后按稳定错误码处理，不要用附件补充来掩盖运行时故障。',
+    progress: '',
+    '': '',
+  })[state.value]
+})
 </script>
 
 <template>

@@ -346,6 +346,14 @@ func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerifi
 	return result, nil
 }
 
+// Observe executes Studio's read-only observation plan through the same
+// security policy, session, runtime and artifact pipeline as normal browser
+// verification. It is a distinct capability so coordinator test doubles do
+// not accidentally pretend to provide live DOM evidence.
+func (v *HostVerifier) Observe(ctx context.Context, request bughub.BrowserVerificationRequest) (bughub.BrowserVerificationResult, error) {
+	return v.Execute(ctx, request)
+}
+
 func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) (returnedErr error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -701,7 +709,7 @@ func validateVerificationRequest(ctx context.Context, resolver IPResolver, reque
 }
 
 func validateWorkerPlanShape(plan bughub.BrowserPlan) error {
-	if plan.Version != 1 || strings.TrimSpace(plan.StartURL) == "" || len(plan.Actions) < 1 || len(plan.Actions) > 40 || len(plan.Assertions) < 1 {
+	if (plan.Version != bughub.BrowserPlanLegacyVersion && plan.Version != bughub.BrowserPlanVersion) || strings.TrimSpace(plan.StartURL) == "" || len(plan.Actions) < 1 || len(plan.Actions) > 40 || len(plan.Assertions) < 1 {
 		return errors.New("browser plan shape is invalid")
 	}
 	actions := map[string]struct{}{"goto": {}, "click": {}, "fill": {}, "press": {}, "select": {}, "wait_for": {}, "screenshot": {}}
@@ -722,10 +730,16 @@ func validateWorkerPlanShape(plan bughub.BrowserPlan) error {
 			if _, allowed := locators[action.Locator.Kind]; !allowed || strings.TrimSpace(action.Locator.Value) == "" {
 				return errors.New("browser locator is invalid")
 			}
+			if action.Locator.Exact != nil {
+				if action.Locator.Kind == "test_id" || action.Locator.Kind == "css" || (action.Locator.Kind == "role" && strings.TrimSpace(action.Locator.Name) == "") {
+					return errors.New("browser locator exact mode is invalid")
+				}
+			}
 		}
 	}
 	for _, assertion := range plan.Assertions {
-		if (assertion.Kind != "visible_text" && assertion.Kind != "not_visible_text") || strings.TrimSpace(assertion.Value) == "" {
+		allowed := assertion.Kind == "visible_text" || assertion.Kind == "not_visible_text" || (plan.Version == bughub.BrowserPlanVersion && assertion.Kind == "page_loaded")
+		if !allowed || strings.TrimSpace(assertion.Value) == "" {
 			return errors.New("browser assertion is invalid")
 		}
 	}

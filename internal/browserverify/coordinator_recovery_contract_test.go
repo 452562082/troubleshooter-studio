@@ -23,17 +23,18 @@ func (e *durableCoordinatorExecutor) ExecutePhase(_ context.Context, _ string, _
 		if e.plannerCalls > 1 {
 			return bughub.PhaseExecutionResult{}, errors.New("durable coordinator plan was regenerated")
 		}
-		return bughub.PhaseExecutionResult{FinalYAML: `version: 1
+		return bughub.PhaseExecutionResult{FinalYAML: `version: 2
 start_url: https://app.test/users
 actions:
   - id: goto
     action: goto
     url: https://app.test/users
-  - id: wait
-    action: wait_for
+  - id: open-users
+    action: click
     locator:
       kind: text
       value: Users
+      exact: true
   - id: shot
     action: screenshot
 assertions:
@@ -108,8 +109,15 @@ func TestCoordinatorRecoveryReusesDurablePlanWithRealHostManifest(t *testing.T) 
 				t.Fatalf("retry=%d result=%+v err=%v", retry, result, err)
 			}
 		}
-		if executor.plannerCalls != 1 || executor.evaluatorCalls != 2 || worker.Calls != 1 {
+		if executor.plannerCalls != 1 || executor.evaluatorCalls != 2 || worker.Calls != 2 {
 			t.Fatalf("planner=%d evaluator=%d worker=%d", executor.plannerCalls, executor.evaluatorCalls, worker.Calls)
+		}
+		if len(worker.Requests) != 2 || worker.Requests[0].Plan.Version != bughub.BrowserPlanVersion || len(worker.Requests[0].Plan.Assertions) != 1 || worker.Requests[0].Plan.Assertions[0].Kind != "page_loaded" {
+			t.Fatalf("observation request did not cross the real host boundary: %+v", worker.Requests)
+		}
+		primary := worker.Requests[1].Plan
+		if primary.Version != bughub.BrowserPlanVersion || len(primary.Actions) < 2 || primary.Actions[1].Locator == nil || primary.Actions[1].Locator.Exact == nil || !*primary.Actions[1].Locator.Exact {
+			t.Fatalf("agent v2 exact locator did not cross the real host boundary: %+v", primary)
 		}
 	})
 
@@ -126,7 +134,7 @@ func TestCoordinatorRecoveryReusesDurablePlanWithRealHostManifest(t *testing.T) 
 		if err != nil || second.ErrorCode != "" {
 			t.Fatalf("second result=%+v err=%v", second, err)
 		}
-		if executor.plannerCalls != 1 || executor.evaluatorCalls != 1 || worker.Calls != 2 {
+		if executor.plannerCalls != 1 || executor.evaluatorCalls != 1 || worker.Calls != 3 {
 			t.Fatalf("planner=%d evaluator=%d worker=%d", executor.plannerCalls, executor.evaluatorCalls, worker.Calls)
 		}
 	})
@@ -145,7 +153,7 @@ func TestCoordinatorRecoveryReusesDurablePlanWithRealHostManifest(t *testing.T) 
 				t.Fatalf("terminal result=%+v", result)
 			}
 		}
-		if executor.plannerCalls != 1 || executor.evaluatorCalls != 0 || worker.Calls != 2 {
+		if executor.plannerCalls != 0 || executor.evaluatorCalls != 0 || worker.Calls != 2 {
 			t.Fatalf("planner=%d evaluator=%d worker=%d", executor.plannerCalls, executor.evaluatorCalls, worker.Calls)
 		}
 	})

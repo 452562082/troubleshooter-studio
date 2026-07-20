@@ -157,6 +157,31 @@ func TestPrepareBrowserEvaluatorEvidenceUsesStrictRedactedBoundedContent(t *test
 	}
 }
 
+func TestBrowserEvaluatorAttachesCurrentSearchActionScreenshotsBeforeHistoricalEvidence(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	request.Bot.Target = "codex"
+	finalRef, finalFrozen := frozenBrowserFixture(t, "screenshot", "browser-executions/primary/browser/failure.png", append(append([]byte(nil), browserPNGSignature...), []byte("final")...))
+	fillRef, fillFrozen := frozenBrowserFixture(t, "screenshot", "browser-executions/primary/browser/after-02-enter-user-name.png", append(append([]byte(nil), browserPNGSignature...), []byte("filled")...))
+	submitRef, submitFrozen := frozenBrowserFixture(t, "screenshot", "browser-executions/primary/browser/after-03-submit-search.png", append(append([]byte(nil), browserPNGSignature...), []byte("submitted")...))
+	result := BrowserVerificationResult{Status: "locator_failed", FinalScreenshotPath: finalRef.Path}
+
+	prompt, attachments, cleanup, err := browserEvaluatorPrompt(request, result, []BrowserArtifactReference{fillRef, submitRef, finalRef}, []browserFrozenArtifact{fillFrozen, submitFrozen, finalFrozen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := cleanup(); err != nil {
+			t.Error(err)
+		}
+	}()
+	if len(attachments) != 3 {
+		t.Fatalf("attachments=%+v", attachments)
+	}
+	if !strings.Contains(prompt, fillRef.Path) || !strings.Contains(prompt, submitRef.Path) || !strings.Contains(prompt, "post-action screenshots attached after the final screenshot") {
+		t.Fatalf("prompt lacks ordered action screenshot manifest: %s", prompt)
+	}
+}
+
 func TestParseFrozenBrowserStructuredEvidenceRejectsUnknownOrMalformedRecords(t *testing.T) {
 	tests := []struct {
 		name    string

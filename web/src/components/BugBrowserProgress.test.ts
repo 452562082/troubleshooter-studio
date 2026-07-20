@@ -125,6 +125,10 @@ describe('BugBrowserProgress', () => {
     expect(plan.text()).toContain('当前 Case')
     expect(plan.text()).toContain('无需重建故障闭环')
 
+    const repairPlan = mount(BugBrowserProgress, { props: { attempt: attempt('browser_locator_repair_plan_invalid'), events: [], systemID: 'base', environment: 'test' } })
+    expect(repairPlan.get('[data-browser-state="plan"]').text()).toContain('页面定位修复计划')
+    expect(repairPlan.text()).toContain('现场证据均已保留')
+
     const attachment = mount(BugBrowserProgress, { props: { attempt: attempt('browser_validator_attachment_failed'), events: [], systemID: 'base', environment: 'test' } })
     expect(attachment.get('[data-browser-state="attachment"]').text()).toContain('无法读取本次截图证据')
     expect(attachment.text()).toContain('当前 Case 重试')

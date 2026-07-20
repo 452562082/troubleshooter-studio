@@ -779,3 +779,27 @@ Studio 故障闭环已经把选定机器人、system 和内部 role 持久化到
 修复分支推送后仍需要独立的合并授权。Studio 对开发基线和环境分支分别读取精确远端 HEAD、生成独立授权 key，并以修复分支为合并源分别推进两个目标。两个目标相同时只执行一次。基线推进完成后再推进环境分支；每次操作均使用 detached 临时 worktree、禁止 force push，并通过幂等检查恢复中断操作。旧的持久化合并授权没有基线字段时按历史环境单目标语义恢复，避免升级后卡死既有 Case。
 
 **后果**：用户可以显式选择 feature 作为开发基线，也可以不填而安全回退到环境分支；修复结果最终同时进入开发基线与运行环境分支。若两条分支长期分叉，环境合并仍可能产生冲突或包含修复提交所依赖的祖先变更，因此合并授权必须展示两个目标并由用户确认。目标 HEAD 在授权后变化会使授权失效并要求重新确认；任一目标冲突或推送结果不明确都会停在可审计状态，不会继续部署。
+
+---
+
+## 2026-07-20 · 浏览器动作完成必须有持久化页面证据
+
+**背景**：Playwright 的 `fill()` 或 `press()` 返回成功只表示浏览器自动化 API 已执行，不代表受控 SPA 接受并保留了输入，也不代表搜索请求已经发出。页面异步重渲染可能在 `fill()` 返回后清空输入；旧验证链路仍会把该动作记录为 `completed`，最终评估又可能据此声称“已输入并提交”，即使截图和 Network 都没有对应事实。
+
+**决策**：搜索输入在短暂稳定等待后必须再次读取控件值，值被清空或变化时以 `input_value_not_persisted` 失败；连续提交前还要校验复用控件仍保留预期值。搜索输入和提交动作强制采集 after 截图，并与最终截图一起交给评估 Agent。`completed` 只表示自动化调用成功，只有动作后页面状态或因果 Network 记录才能证明“已输入、已提交、已搜索”。当 Bug 步骤明确要求先进入搜索页时，验证计划不得跳过该导航步骤。worker 字节和宿主证据协议发生变化，browser runtime 身份升级为 `1.61.1-r17`。
+
+**后果**：验证 Agent 不再用动作日志替代页面事实；输入被 SPA 清空、提交未生效或计划跳步会在当前 Case 中给出可重试的明确失败，而不会生成虚假的复现报告。旧 r16 不原地覆盖，新构建会准备并校验独立 r17。
+
+---
+
+## 2026-07-20 · 浏览器验证采用版本化统一协议与执行前页面观察
+
+**背景**：浏览器计划长期由提示词、Go YAML 解码器和 Node Worker 三处分别维护。定位修复 Agent 已能根据现场证据生成 `exact: true`，但持久化计划协议不接受该字段，导致有效修复在执行前反复变成 `browser_validator_plan_invalid`。同时，初始 Agent 在看不到当前页面 DOM 的情况下规划完整交互，Studio 又用搜索页专用规则改写计划，形成“Agent 计划、宿主猜测、Worker 另行解释”的不稳定链路。单元测试分别伪造 Agent 或 Worker，没有覆盖真实 HostVerifier 边界，因此这些漂移可以长期通过测试。
+
+**决策**：BrowserPlan 协议升级为 v2，初始规划、定位修复、Go 严格解码和 Node Worker 共享同一 locator 语义：`role/label/text/placeholder` 支持可选布尔字段 `exact`，`test_id/css` 和无名称 role 禁止无意义的 `exact`。为避免既有 Case 必须重建，存量 v1 计划在 locator 修复时也增量接受该字段，但不会获得其他 v2 能力。`page_loaded` 仅作为 Studio 内部观察断言，不允许 Agent 生成。
+
+新 Case 在 Agent 规划前，先由真实 HostVerifier 在独立 observation execution 中打开配置的前端地址，采集最终 URL、标题和有界 accessibility 控件摘要，再把这份当前页面事实交给 Agent。v2 计划的交互意图不再被搜索页专用 click-to-Enter 规则改写；该规则只保留给旧 v1 计划，所有版本仍强制保留搜索填入和提交后的截图证据。初始计划无效与现场 locator 修复无效分别持久化为 `browser_validator_plan_invalid` 和 `browser_locator_repair_plan_invalid`，均可在当前 Case 内重试。Worker、宿主协议和 probe 字节发生变化，browser runtime 身份升级为 `1.61.1-r18`。
+
+**验证边界**：新增契约测试必须用真实 HostVerifier 串联协调器，证明 observation 计划先穿过 worker manifest，再证明 Agent 生成的 v2 `exact` locator 原样到达 Worker；Node 测试负责证明 exact 不再与 label 等宽泛 locator 合并。协议解析、修复兼容、错误恢复和前端重试入口分别测试，不能再用“真实 Agent + 假浏览器”或“真实浏览器 + 硬编码旧计划”单独代表完整链路。
+
+**后果**：结构合法但过去被三端解释不一致的计划不会再在执行前随机失败；新计划以页面实况为起点，旧 Case 仍可修复续跑。未来新增 locator/action/assertion 字段时必须同时修改版本化 Go 类型、共享 Agent 合同、Worker 校验与契约测试，并递增 runtime revision；禁止再用业务页面名称在 v2 宿主层改写 Agent 的交互语义。

@@ -16,10 +16,12 @@ const (
 )
 
 type BrowserPlan struct {
-	Version    int                `yaml:"version" json:"version"`
-	StartURL   string             `yaml:"start_url" json:"start_url"`
-	Actions    []BrowserAction    `yaml:"actions" json:"actions"`
-	Assertions []BrowserAssertion `yaml:"assertions" json:"assertions"`
+	Version            int                        `yaml:"version" json:"version"`
+	DeviceProfile      string                     `yaml:"device_profile,omitempty" json:"device_profile,omitempty"`
+	StartURL           string                     `yaml:"start_url" json:"start_url"`
+	Actions            []BrowserAction            `yaml:"actions" json:"actions"`
+	Assertions         []BrowserAssertion         `yaml:"assertions" json:"assertions"`
+	ResponseAssertions []BrowserResponseAssertion `yaml:"response_assertions,omitempty" json:"response_assertions,omitempty"`
 }
 
 type BrowserLocator struct {
@@ -42,6 +44,19 @@ type BrowserAction struct {
 type BrowserAssertion struct {
 	Kind  string `yaml:"kind" json:"kind"`
 	Value string `yaml:"value" json:"value"`
+}
+
+// BrowserResponseAssertion evaluates a narrow relationship between two JSON
+// fields in an XHR/fetch response caused by one browser action. The worker
+// never persists the response body or either field value; only comparison
+// counts are emitted as evidence.
+type BrowserResponseAssertion struct {
+	ID          string `yaml:"id" json:"id"`
+	ActionID    string `yaml:"action_id" json:"action_id"`
+	URLContains string `yaml:"url_contains,omitempty" json:"url_contains,omitempty"`
+	Kind        string `yaml:"kind" json:"kind"`
+	LeftField   string `yaml:"left_field" json:"left_field"`
+	RightField  string `yaml:"right_field" json:"right_field"`
 }
 
 type BrowserAccessibilityNode struct {
@@ -123,10 +138,12 @@ type BrowserPolicyResolver interface {
 }
 
 type browserPlanYAML struct {
-	Version    int                 `yaml:"version"`
-	StartURL   string              `yaml:"start_url"`
-	Actions    []browserActionYAML `yaml:"actions"`
-	Assertions []BrowserAssertion  `yaml:"assertions"`
+	Version            int                        `yaml:"version"`
+	DeviceProfile      string                     `yaml:"device_profile,omitempty"`
+	StartURL           string                     `yaml:"start_url"`
+	Actions            []browserActionYAML        `yaml:"actions"`
+	Assertions         []BrowserAssertion         `yaml:"assertions"`
+	ResponseAssertions []BrowserResponseAssertion `yaml:"response_assertions,omitempty"`
 }
 
 type browserActionYAML struct {
@@ -158,15 +175,23 @@ func ParseBrowserPlan(data []byte) (BrowserPlan, error) {
 	if len(raw.Actions) < 1 || len(raw.Actions) > 40 {
 		return BrowserPlan{}, fmt.Errorf("browser plan actions must contain 1 to 40 entries")
 	}
-	if len(raw.Assertions) == 0 {
-		return BrowserPlan{}, fmt.Errorf("browser plan requires at least one assertion")
+	if raw.Version == BrowserPlanLegacyVersion && (raw.DeviceProfile != "" || len(raw.ResponseAssertions) != 0) {
+		return BrowserPlan{}, fmt.Errorf("browser plan device_profile and response_assertions require version %d", BrowserPlanVersion)
+	}
+	if raw.DeviceProfile != "" && raw.DeviceProfile != "desktop" && raw.DeviceProfile != "mobile" {
+		return BrowserPlan{}, fmt.Errorf("browser plan device_profile %q is not supported", raw.DeviceProfile)
+	}
+	if len(raw.Assertions) == 0 && len(raw.ResponseAssertions) == 0 {
+		return BrowserPlan{}, fmt.Errorf("browser plan requires at least one UI or response assertion")
 	}
 
 	plan := BrowserPlan{
-		Version:    raw.Version,
-		StartURL:   raw.StartURL,
-		Actions:    make([]BrowserAction, 0, len(raw.Actions)),
-		Assertions: raw.Assertions,
+		Version:            raw.Version,
+		DeviceProfile:      raw.DeviceProfile,
+		StartURL:           raw.StartURL,
+		Actions:            make([]BrowserAction, 0, len(raw.Actions)),
+		Assertions:         raw.Assertions,
+		ResponseAssertions: raw.ResponseAssertions,
 	}
 	seenIDs := make(map[string]struct{}, len(raw.Actions))
 	for i, rawAction := range raw.Actions {
@@ -191,7 +216,58 @@ func ParseBrowserPlan(data []byte) (BrowserPlan, error) {
 			return BrowserPlan{}, err
 		}
 	}
+	seenAssertionIDs := make(map[string]struct{}, len(plan.ResponseAssertions))
+	for i, assertion := range plan.ResponseAssertions {
+		prefix := fmt.Sprintf("response_assertions[%d]", i)
+		for field, value := range map[string]string{
+			"id": assertion.ID, "action_id": assertion.ActionID, "kind": assertion.Kind,
+			"left_field": assertion.LeftField, "right_field": assertion.RightField,
+		} {
+			if err := validateBrowserPlanString(prefix+"."+field, value, true); err != nil {
+				return BrowserPlan{}, err
+			}
+		}
+		if err := validateBrowserPlanString(prefix+".url_contains", assertion.URLContains, false); err != nil {
+			return BrowserPlan{}, err
+		}
+		if _, duplicate := seenAssertionIDs[assertion.ID]; duplicate {
+			return BrowserPlan{}, fmt.Errorf("browser plan response assertion id %q is duplicated", assertion.ID)
+		}
+		seenAssertionIDs[assertion.ID] = struct{}{}
+		if _, exists := seenIDs[assertion.ActionID]; !exists {
+			return BrowserPlan{}, fmt.Errorf("browser plan %s.action_id %q does not reference an action", prefix, assertion.ActionID)
+		}
+		for _, action := range plan.Actions {
+			if action.ID == assertion.ActionID && (action.Action == "screenshot" || action.Action == "wait_for") {
+				return BrowserPlan{}, fmt.Errorf("browser plan %s.action_id %q does not reference a request-capable action", prefix, assertion.ActionID)
+			}
+		}
+		if assertion.Kind != "json_fields_not_equal" && assertion.Kind != "json_fields_equal" {
+			return BrowserPlan{}, fmt.Errorf("browser plan %s.kind %q is not supported", prefix, assertion.Kind)
+		}
+		if !validBrowserJSONFieldPath(assertion.LeftField) || !validBrowserJSONFieldPath(assertion.RightField) {
+			return BrowserPlan{}, fmt.Errorf("browser plan %s contains an invalid JSON field path", prefix)
+		}
+	}
 	return plan, nil
+}
+
+func validBrowserJSONFieldPath(value string) bool {
+	if value == "" || len(value) > 256 {
+		return false
+	}
+	for _, part := range strings.Split(value, ".") {
+		if part == "" || len(part) > 64 {
+			return false
+		}
+		for index, current := range part {
+			if (current >= 'a' && current <= 'z') || (current >= 'A' && current <= 'Z') || current == '_' || (index > 0 && current >= '0' && current <= '9') {
+				continue
+			}
+			return false
+		}
+	}
+	return true
 }
 
 func validateBrowserAction(version, index int, raw browserActionYAML) (BrowserAction, error) {

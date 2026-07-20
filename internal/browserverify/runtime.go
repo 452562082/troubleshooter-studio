@@ -23,7 +23,7 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 )
 
-const browserRuntimeVersion = "1.61.1-r18"
+const browserRuntimeVersion = "1.61.1-r19"
 
 // BrowserRuntimeVersion is the immutable Playwright runtime version bundled by
 // desktop release artifacts. Packaging and runtime discovery must agree on it.

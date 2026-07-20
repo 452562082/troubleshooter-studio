@@ -182,6 +182,61 @@ func TestBrowserEvaluatorAttachesCurrentSearchActionScreenshotsBeforeHistoricalE
 	}
 }
 
+func TestBrowserEvaluatorReservesEvidenceSlotsForLatestUserScreenshots(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	request.Bot.Target = "codex"
+	request.Bug.Expected = "每个用户名只展示一次"
+	request.UserClarifications = []string{"最新补充：当前问题是同一卡片的 nick_name 和 text 不一致"}
+
+	for index := 0; index < 3; index++ {
+		content := append(append([]byte(nil), browserPNGSignature...), []byte("supplemental-"+string(rune('a'+index)))...)
+		path := filepath.Join(t.TempDir(), "supplemental.png")
+		if err := os.WriteFile(path, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		request.Bug.Attachments = append(request.Bug.Attachments, Attachment{
+			ID:        "user-screenshot-" + string(rune('1'+index)),
+			Name:      "用户补充证据-" + string(rune('1'+index)) + ".png",
+			Type:      "image/png",
+			LocalPath: path,
+		})
+	}
+	finalRef, finalFrozen := frozenBrowserFixture(t, "screenshot", "browser-executions/primary/browser/failure.png", append(append([]byte(nil), browserPNGSignature...), []byte("final")...))
+	fillRef, fillFrozen := frozenBrowserFixture(t, "screenshot", "browser-executions/primary/browser/after-02-enter-user-name.png", append(append([]byte(nil), browserPNGSignature...), []byte("filled")...))
+	submitRef, submitFrozen := frozenBrowserFixture(t, "screenshot", "browser-executions/primary/browser/after-03-submit-search.png", append(append([]byte(nil), browserPNGSignature...), []byte("submitted")...))
+	result := BrowserVerificationResult{Status: "completed", FinalScreenshotPath: finalRef.Path}
+
+	prompt, attachments, cleanup, err := browserEvaluatorPrompt(request, result, []BrowserArtifactReference{fillRef, submitRef, finalRef}, []browserFrozenArtifact{fillFrozen, submitFrozen, finalFrozen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := cleanup(); err != nil {
+			t.Error(err)
+		}
+	}()
+	if len(attachments) != maxPhaseAttachments {
+		t.Fatalf("attachments=%+v", attachments)
+	}
+	if strings.Count(prompt, `"source":"user_supplemental"`) != 2 {
+		t.Fatalf("latest supplemental evidence did not retain two reserved slots:\n%s", prompt)
+	}
+	for _, required := range []string{
+		"最新补充：当前问题是同一卡片的 nick_name 和 text 不一致",
+		"authoritative current scenario definition",
+		"overrides conflicting stale expected/actual wording",
+		"source=user_supplemental is the newest user-provided visual evidence",
+	} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("evaluator prompt lost latest-evidence semantics %q:\n%s", required, prompt)
+		}
+	}
+	if !strings.Contains(prompt, `Additional current-execution post-action screenshots attached after the final screenshot, in this exact order (use them to verify that input persisted and submission changed the page; empty means none):
+["`+fillRef.Path+`"]`) || strings.Contains(prompt, `["`+fillRef.Path+`","`+submitRef.Path+`"]`) {
+		t.Fatalf("execution screenshots did not leave two supplemental slots:\n%s", prompt)
+	}
+}
+
 func TestParseFrozenBrowserStructuredEvidenceRejectsUnknownOrMalformedRecords(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -202,6 +257,23 @@ func TestParseFrozenBrowserStructuredEvidenceRejectsUnknownOrMalformedRecords(t 
 				t.Fatal("invalid structured browser evidence was accepted")
 			}
 		})
+	}
+}
+
+func TestPrepareBrowserEvaluatorEvidenceIncludesSanitizedResponseAssertions(t *testing.T) {
+	content := []byte(`[{"assertion_id":"nickname-and-signature-differ","action_id":"submit-search","kind":"json_fields_not_equal","url":"https://app.example.com/api/search","method":"GET","status":200,"left_field":"nick_name","right_field":"text","matched_objects":1,"violations":1,"passed":false,"failure_reason":""}]`)
+	_, structured, cleanup, err := prepareBrowserEvaluatorEvidence(BrowserVerificationResult{}, []browserFrozenArtifact{{Kind: "response_assertions", Content: content}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cleanup() }()
+	for _, expected := range []string{`"response_assertions"`, `"matched_objects":1`, `"violations":1`, `"left_field":"nick_name"`, `"right_field":"text"`} {
+		if !strings.Contains(structured, expected) {
+			t.Fatalf("structured response assertion evidence lacks %s: %s", expected, structured)
+		}
+	}
+	if strings.Contains(structured, "chengzi") {
+		t.Fatalf("structured response assertion leaked a field value: %s", structured)
 	}
 }
 

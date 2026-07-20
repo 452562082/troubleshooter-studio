@@ -526,6 +526,28 @@ func TestBrowserPlannerPromptDoesNotEmbedEvidenceStagingProtocolInScope(t *testi
 	}
 }
 
+func TestBrowserPlannerPromptUsesLatestUserClarificationOverStaleBugAssertion(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	request.Bug.Expected = "每个用户名只展示一次"
+	request.Bug.Actual = "用户名重复"
+	request.UserClarifications = []string{
+		"先检查搜索结果",
+		"最新补充：当前问题是同一卡片的 nick_name 和 text 不一致",
+	}
+
+	prompt := browserPlannerPrompt(request, nil)
+	for _, required := range []string{
+		`"user_clarifications"`,
+		"最新补充：当前问题是同一卡片的 nick_name 和 text 不一致",
+		"final non-empty entry is the current scenario definition",
+		"overrides conflicting stale expected/actual wording",
+	} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("planner prompt lost clarification precedence %q:\n%s", required, prompt)
+		}
+	}
+}
+
 func TestBrowserCoordinatorRetriesStructurallyInvalidPlannerOutputOnce(t *testing.T) {
 	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
 		{FinalYAML: invalidScreenshotBrowserPlanYAML(), Usage: AgentUsage{InputTokens: 3, OutputTokens: 2}},
@@ -557,6 +579,101 @@ func TestBrowserPlannerRetryPromptReportsAllowedAssertionsWithoutEchoingRejected
 	}
 	if strings.Contains(prompt, rejected) || strings.Contains(prompt, "/Users/alice/private/token") {
 		t.Fatalf("retry prompt echoed rejected content: %s", prompt)
+	}
+}
+
+func TestBrowserPlannerPromptSelectsMobileHybridEvidenceForAPIFieldClarification(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	request.Bug.Title = "H5 用户搜索字段展示错误"
+	request.UserClarifications = []string{"搜索 chengzi 后检查接口响应：同一对象的 nick_name 和 text 应不同"}
+	prompt := browserPlannerPrompt(request, nil)
+	for _, expected := range []string{"device_profile: mobile", "response_assertions", "json_fields_not_equal", "Do not replace an API field requirement with a visible_text assertion"} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("planner prompt lacks hybrid validation contract %q:\n%s", expected, prompt)
+		}
+	}
+}
+
+func TestValidateBrowserPlanScenarioEvidenceRequiresMobileResponseAssertion(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	request.Bug.Title = "H5 用户搜索字段展示错误"
+	request.UserClarifications = []string{"搜索 chengzi 后检查接口响应：同一对象的 nick_name 和 text 应不同"}
+
+	desktopVisualPlan, err := ParseBrowserPlan([]byte(`version: 2
+device_profile: desktop
+start_url: https://app.example.com/users
+actions:
+  - id: capture
+    action: screenshot
+assertions:
+  - kind: visible_text
+    value: chengzi
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateBrowserPlanScenarioEvidence(request, desktopVisualPlan); err == nil || !strings.Contains(err.Error(), "mobile device_profile") {
+		t.Fatalf("desktop-only plan was not rejected for H5 API comparison: %v", err)
+	}
+
+	desktopVisualPlan.DeviceProfile = "mobile"
+	if err := validateBrowserPlanScenarioEvidence(request, desktopVisualPlan); err == nil || !strings.Contains(err.Error(), "requires response_assertions") {
+		t.Fatalf("UI-only plan was not rejected for API comparison: %v", err)
+	}
+
+	desktopVisualPlan.Assertions = nil
+	desktopVisualPlan.Actions = []BrowserAction{{
+		ID: "submit-search", Action: "press", Locator: &BrowserLocator{Kind: "placeholder", Value: "请输入搜索关键字"}, Key: "Enter",
+	}}
+	desktopVisualPlan.ResponseAssertions = []BrowserResponseAssertion{{
+		ID: "compare-fields", ActionID: "submit-search", Kind: "json_fields_not_equal", LeftField: "nick_name", RightField: "text",
+	}}
+	if err := validateBrowserPlanScenarioEvidence(request, desktopVisualPlan); err != nil {
+		t.Fatalf("mobile response assertion plan was rejected: %v", err)
+	}
+}
+
+func TestEnforceBrowserResponseAssertionOutcomeOverridesVisualEvaluatorGuess(t *testing.T) {
+	tests := []struct {
+		name       string
+		attempt    PhaseAttempt
+		record     string
+		wantStatus string
+		wantGap    bool
+	}{
+		{
+			name:       "reproduced from field violation",
+			attempt:    PhaseAttempt{Phase: PhaseValidation, Mode: AttemptReproduce},
+			record:     `[{"assertion_id":"fields","action_id":"submit","kind":"json_fields_not_equal","url":"https://app.example.com/api/search","method":"POST","status":200,"left_field":"nick_name","right_field":"text","matched_objects":1,"violations":1,"passed":false,"failure_reason":""}]`,
+			wantStatus: "reproduced",
+		},
+		{
+			name:       "fixed from passing regression",
+			attempt:    PhaseAttempt{Phase: PhaseRegression, Mode: AttemptRegression},
+			record:     `[{"assertion_id":"fields","action_id":"submit","kind":"json_fields_not_equal","url":"https://app.example.com/api/search","method":"POST","status":200,"left_field":"nick_name","right_field":"text","matched_objects":2,"violations":0,"passed":true,"failure_reason":""}]`,
+			wantStatus: "fixed_verified",
+		},
+		{
+			name:       "insufficient when response shape is absent",
+			attempt:    PhaseAttempt{Phase: PhaseValidation, Mode: AttemptReproduce},
+			record:     `[{"assertion_id":"fields","action_id":"submit","kind":"json_fields_not_equal","url":"","method":"","status":0,"left_field":"nick_name","right_field":"text","matched_objects":0,"violations":0,"passed":false,"failure_reason":"no_matching_json_object"}]`,
+			wantStatus: "insufficient_info",
+			wantGap:    true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := "browser-executions/primary/browser/response-assertions.json"
+			current := BrowserVerificationResult{Artifacts: []BrowserArtifactReference{{Kind: "response_assertions", Path: path}}}
+			frozen := []browserFrozenArtifact{{Kind: "response_assertions", ReferencePath: path, Content: []byte(test.record)}}
+			validation := ValidationResult{VerificationStatus: "not_reproduced", ObservedBehavior: "页面看起来正常", Gaps: []string{"视觉证据不明确"}}
+			if err := enforceBrowserResponseAssertionOutcome(test.attempt, current, frozen, &validation); err != nil {
+				t.Fatal(err)
+			}
+			if validation.VerificationStatus != test.wantStatus || (len(validation.Gaps) > 0) != test.wantGap || strings.Contains(validation.ObservedBehavior, "页面看起来正常") {
+				t.Fatalf("validation = %+v", validation)
+			}
+		})
 	}
 }
 
@@ -1057,7 +1174,8 @@ func TestNormalizeBrowserSearchSubmissionsDoesNotRewriteVersionTwoIntent(t *test
 func TestBrowserCoordinatorRegeneratesPlanThatSkipsExplicitSearchPageEntry(t *testing.T) {
 	request := browserCoordinatorRequest(t)
 	request.Bug.Steps = "1. 打开 H5 并进入搜索页面\n2. 输入用户名称并执行搜索"
-	bad := `version: 1
+	bad := `version: 2
+device_profile: mobile
 start_url: https://app.example.com/users
 actions:
   - id: enter-user-name
@@ -1072,7 +1190,8 @@ assertions:
   - kind: visible_text
     value: chengzi
 `
-	good := `version: 1
+	good := `version: 2
+device_profile: mobile
 start_url: https://app.example.com/users
 actions:
   - id: open-search-page

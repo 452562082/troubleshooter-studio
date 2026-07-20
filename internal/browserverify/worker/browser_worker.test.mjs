@@ -31,6 +31,8 @@ import {
   observeLoginState,
   dialPinnedTarget,
   executeAssertion,
+  evaluateJSONResponseAssertion,
+  evaluateResponseAssertionsForResponse,
   launchPinnedBrowser,
   resolvePinnedTarget,
   saveLoginStorageState,
@@ -304,6 +306,81 @@ test('browser worker accepts and executes visible and negative text assertions',
     { value: '推荐', options: { exact: false }, state: 'visible' },
     { value: '2022', options: { exact: false }, filter: { visible: true }, state: 'hidden' },
   ]);
+});
+
+test('browser worker validates mobile response assertions without requiring a UI text assertion', () => {
+  const request = baseRequest();
+  request.plan.version = 2;
+  request.plan.device_profile = 'mobile';
+  request.plan.actions = [{
+    id: 'submit-search',
+    action: 'press',
+    locator: { kind: 'placeholder', value: '请输入搜索关键字', exact: true },
+    key: 'Enter',
+  }];
+  request.plan.assertions = [];
+  request.plan.response_assertions = [{
+    id: 'nickname-and-signature-differ',
+    action_id: 'submit-search',
+    url_contains: '/users',
+    kind: 'json_fields_not_equal',
+    left_field: 'nick_name',
+    right_field: 'text',
+  }];
+  assert.doesNotThrow(() => validateWorkerRequest(request));
+
+  const invalid = structuredClone(request);
+  invalid.plan.response_assertions[0].action_id = 'missing-action';
+  assert.throws(() => validateWorkerRequest(invalid), /action_id/);
+});
+
+test('JSON response assertions emit only bounded comparison counts and never raw values', () => {
+  const assertion = {
+    id: 'nickname-and-signature-differ',
+    action_id: 'submit-search',
+    kind: 'json_fields_not_equal',
+    left_field: 'nick_name',
+    right_field: 'text',
+  };
+  const failed = evaluateJSONResponseAssertion({ data: [{ nick_name: 'chengzi', text: 'chengzi' }] }, assertion);
+  assert.deepEqual(failed, { matched_objects: 1, violations: 1, passed: false });
+  assert.equal(JSON.stringify(failed).includes('chengzi'), false);
+
+  const passed = evaluateJSONResponseAssertion({ data: [{ nick_name: 'chengzi', text: 'personal signature' }] }, assertion);
+  assert.deepEqual(passed, { matched_objects: 1, violations: 0, passed: true });
+
+  const absent = evaluateJSONResponseAssertion({ data: [{ nickname: 'chengzi' }] }, assertion);
+  assert.deepEqual(absent, { matched_objects: 0, violations: 0, passed: false });
+});
+
+test('response assertion capture binds one causal JSON response without requiring content-type or leaking values', async () => {
+  const assertion = {
+    id: 'nickname-and-signature-differ',
+    action_id: 'submit-search',
+    url_contains: '/search',
+    kind: 'json_fields_not_equal',
+    left_field: 'nick_name',
+    right_field: 'text',
+  };
+  let bodyReads = 0;
+  const response = {
+    request: () => ({ resourceType: () => 'fetch', method: () => 'POST' }),
+    url: () => 'https://app.test/api/search?keyword=chengzi',
+    status: () => 200,
+    body: async () => {
+      bodyReads += 1;
+      return Buffer.from(JSON.stringify({ data: [{ nick_name: 'private-record-value', text: 'private-record-value' }] }));
+    },
+  };
+  const observations = await evaluateResponseAssertionsForResponse(response, { actionID: 'submit-search' }, [assertion], {});
+  assert.equal(bodyReads, 1);
+  assert.equal(observations.length, 1);
+  assert.deepEqual(observations[0].evaluation, { matched_objects: 1, violations: 1, passed: false });
+  assert.equal(JSON.stringify(observations).includes('private-record-value'), false);
+
+  const oversized = await evaluateResponseAssertionsForResponse(response, { actionID: 'submit-search' }, [assertion], { 'content-length': String((256 << 10) + 1) });
+  assert.deepEqual(oversized, []);
+  assert.equal(bodyReads, 1);
 });
 
 test('login worker requires visible mode, one absolute state path, and an original application URL', () => {
@@ -1002,6 +1079,25 @@ test('supervised context installs request, response, console, page, download, di
   assert.ok(calls.includes('hook:request'));
   assert.ok(calls.includes('hook:response'));
   assert.ok(calls.includes('hook:console'));
+});
+
+test('mobile device profile uses an H5 viewport and touch context', async () => {
+  const page = { setDefaultTimeout() {}, setDefaultNavigationTimeout() {} };
+  let contextOptions;
+  const handlers = new Map();
+  const context = {
+    pages: () => [page],
+    on(event, handler) { handlers.set(event, handler); },
+    async route() {},
+    async routeWebSocket() {},
+    async newPage() { handlers.get('page')?.(page); return page; },
+  };
+  const browser = { async newContext(options) { contextOptions = options; return context; } };
+  await createSupervisedBrowserContext(browser, { deviceProfile: 'mobile' });
+  assert.deepEqual(contextOptions.viewport, { width: 390, height: 844 });
+  assert.equal(contextOptions.isMobile, true);
+  assert.equal(contextOptions.hasTouch, true);
+  assert.equal(contextOptions.deviceScaleFactor, 2);
 });
 
 test('assertAllowedURL rejects schemes, origins, metadata, and private addresses', async () => {

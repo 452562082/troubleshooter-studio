@@ -105,6 +105,68 @@ assertions:
 	}
 }
 
+func TestParseBrowserPlanV2AcceptsMobileResponseFieldAssertion(t *testing.T) {
+	plan, err := ParseBrowserPlan([]byte(`version: 2
+device_profile: mobile
+start_url: https://test.example.com/search
+actions:
+  - id: submit-search
+    action: press
+    locator: {kind: placeholder, value: 请输入搜索关键字, exact: true}
+    key: Enter
+    screenshot_after: true
+assertions: []
+response_assertions:
+  - id: nickname-and-signature-differ
+    action_id: submit-search
+    url_contains: /search
+    kind: json_fields_not_equal
+    left_field: nick_name
+    right_field: text
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.DeviceProfile != "mobile" || len(plan.Assertions) != 0 || len(plan.ResponseAssertions) != 1 {
+		t.Fatalf("plan = %+v", plan)
+	}
+	assertion := plan.ResponseAssertions[0]
+	if assertion.ActionID != "submit-search" || assertion.Kind != "json_fields_not_equal" || assertion.LeftField != "nick_name" || assertion.RightField != "text" {
+		t.Fatalf("response assertion = %+v", assertion)
+	}
+}
+
+func TestParseBrowserPlanV2RejectsUnsafeResponseAssertions(t *testing.T) {
+	base := `version: 2
+device_profile: desktop
+start_url: https://test.example.com/search
+actions:
+  - id: submit-search
+    action: screenshot
+assertions: []
+response_assertions:
+  - id: compare-fields
+    action_id: %s
+    kind: %s
+    left_field: %s
+    right_field: text
+`
+	tests := []struct {
+		name, actionID, kind, left string
+	}{
+		{name: "unknown action", actionID: "missing", kind: "json_fields_not_equal", left: "nick_name"},
+		{name: "unknown kind", actionID: "submit-search", kind: "contains_secret", left: "nick_name"},
+		{name: "unsafe field", actionID: "submit-search", kind: "json_fields_not_equal", left: "users[0].nick_name"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := ParseBrowserPlan([]byte(fmt.Sprintf(base, test.actionID, test.kind, test.left))); err == nil {
+				t.Fatal("expected response assertion validation error")
+			}
+		})
+	}
+}
+
 func TestParseBrowserPlanLegacyPlanAcceptsAdditiveExactLocator(t *testing.T) {
 	plan, err := ParseBrowserPlan([]byte(`version: 1
 start_url: https://test.example.com/users

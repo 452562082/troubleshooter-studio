@@ -69,11 +69,27 @@ type browserActionEvidence struct {
 	ErrorCode   string  `json:"error_code"`
 }
 
+type browserResponseAssertionEvidence struct {
+	AssertionID    string `json:"assertion_id"`
+	ActionID       string `json:"action_id"`
+	Kind           string `json:"kind"`
+	URL            string `json:"url"`
+	Method         string `json:"method"`
+	Status         int64  `json:"status"`
+	LeftField      string `json:"left_field"`
+	RightField     string `json:"right_field"`
+	MatchedObjects int64  `json:"matched_objects"`
+	Violations     int64  `json:"violations"`
+	Passed         bool   `json:"passed"`
+	FailureReason  string `json:"failure_reason"`
+}
+
 type browserEvaluatorEvidence struct {
-	Network        []browserNetworkEvidence `json:"network,omitempty"`
-	Console        []browserConsoleEvidence `json:"console,omitempty"`
-	BrowserActions []browserActionEvidence  `json:"browser_actions,omitempty"`
-	TruncatedKinds []string                 `json:"truncated_kinds,omitempty"`
+	Network            []browserNetworkEvidence           `json:"network,omitempty"`
+	Console            []browserConsoleEvidence           `json:"console,omitempty"`
+	BrowserActions     []browserActionEvidence            `json:"browser_actions,omitempty"`
+	ResponseAssertions []browserResponseAssertionEvidence `json:"response_assertions,omitempty"`
+	TruncatedKinds     []string                           `json:"truncated_kinds,omitempty"`
 }
 
 func validateFrozenBrowserArtifacts(references []BrowserArtifactReference, frozen []browserFrozenArtifact) error {
@@ -107,7 +123,7 @@ func validateFrozenBrowserArtifacts(references []BrowserArtifactReference, froze
 			if item.Size > maxEvidenceArtifactBytes || !bytes.HasPrefix(item.Content, browserPNGSignature) {
 				return errors.New("frozen browser screenshot is not a bounded PNG")
 			}
-		case "network", "console", "browser_actions":
+		case "network", "console", "browser_actions", "response_assertions":
 			if item.Size > maxFrozenBrowserStructuredBytes {
 				return errors.New("frozen browser structured evidence exceeds its byte limit")
 			}
@@ -190,6 +206,17 @@ func parseFrozenBrowserStructuredEvidence(frozen []browserFrozenArtifact) (brows
 				}
 			}
 			result.BrowserActions = append(result.BrowserActions, records...)
+		case "response_assertions":
+			var records []browserResponseAssertionEvidence
+			if err := decodeStrictBrowserJSON(item.Content, &records); err != nil || len(records) > 40 {
+				return browserEvaluatorEvidence{}, errors.New("frozen browser response assertion evidence is invalid")
+			}
+			for index := range records {
+				if err := sanitizeBrowserResponseAssertionEvidence(&records[index]); err != nil {
+					return browserEvaluatorEvidence{}, err
+				}
+			}
+			result.ResponseAssertions = append(result.ResponseAssertions, records...)
 		}
 	}
 	if len(result.Network) > maxEvaluatorBrowserRecords {
@@ -203,6 +230,10 @@ func parseFrozenBrowserStructuredEvidence(frozen []browserFrozenArtifact) (brows
 	if len(result.BrowserActions) > maxEvaluatorBrowserRecords {
 		result.BrowserActions = result.BrowserActions[:maxEvaluatorBrowserRecords]
 		truncated["browser_actions"] = true
+	}
+	if len(result.ResponseAssertions) > 40 {
+		result.ResponseAssertions = result.ResponseAssertions[:40]
+		truncated["response_assertions"] = true
 	}
 	for kind := range truncated {
 		result.TruncatedKinds = append(result.TruncatedKinds, kind)
@@ -321,6 +352,29 @@ func sanitizeBrowserActionEvidence(record *browserActionEvidence) error {
 	record.LocatorKind = safeBoundedBrowserText(record.LocatorKind, 32)
 	record.StartedAt = safeBoundedBrowserText(record.StartedAt, 64)
 	record.ErrorCode = safeBoundedBrowserText(record.ErrorCode, 128)
+	return nil
+}
+
+func sanitizeBrowserResponseAssertionEvidence(record *browserResponseAssertionEvidence) error {
+	if strings.TrimSpace(record.AssertionID) == "" || strings.TrimSpace(record.ActionID) == "" || (record.Kind != "json_fields_not_equal" && record.Kind != "json_fields_equal") || record.Status < 0 || record.MatchedObjects < 0 || record.Violations < 0 || record.Violations > record.MatchedObjects {
+		return errors.New("frozen browser response assertion evidence is invalid")
+	}
+	if !validBrowserJSONFieldPath(record.LeftField) || !validBrowserJSONFieldPath(record.RightField) {
+		return errors.New("frozen browser response assertion field path is invalid")
+	}
+	if record.MatchedObjects == 0 {
+		if record.Passed || record.FailureReason != "no_matching_json_object" || record.URL != "" || record.Method != "" || record.Status != 0 {
+			return errors.New("frozen browser response assertion no-match evidence is invalid")
+		}
+	} else if record.FailureReason != "" || record.Passed != (record.Violations == 0) {
+		return errors.New("frozen browser response assertion result is inconsistent")
+	}
+	record.AssertionID = safeBoundedBrowserText(record.AssertionID, 128)
+	record.ActionID = safeBoundedBrowserText(record.ActionID, 128)
+	record.URL = safeBoundedBrowserText(record.URL, 2048)
+	record.Method = safeBoundedBrowserText(record.Method, 16)
+	record.LeftField = safeBoundedBrowserText(record.LeftField, 256)
+	record.RightField = safeBoundedBrowserText(record.RightField, 256)
 	return nil
 }
 

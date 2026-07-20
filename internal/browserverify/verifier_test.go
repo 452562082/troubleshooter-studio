@@ -79,6 +79,8 @@ func workerFixtureBytes(kind string) []byte {
 		return []byte("{\"type\":\"log\",\"text\":\"safe\"}\n")
 	case "browser_actions":
 		return []byte("[]\n")
+	case "response_assertions":
+		return []byte("[]\n")
 	default:
 		return []byte("fixture\n")
 	}

@@ -2165,6 +2165,13 @@ func TestAgentPhaseRunnerValidationPromptIncludesDurableContinuationContext(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
+	clarifications, err := runner.browserUserClarifications(context.Background(), current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff := strings.Join(clarifications, " | "); diff != "打开 Web 用户搜索页 | 测试账号已在安全凭据中配置 | 请用 Web 环境复现" {
+		t.Fatalf("browser clarifications lost durable order: %q", diff)
+	}
 	for _, required := range []string{
 		"打开 Web 用户搜索页",
 		"测试账号已在安全凭据中配置",

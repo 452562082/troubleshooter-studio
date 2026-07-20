@@ -580,10 +580,16 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incide
 	if coordinated == nil && runErr == nil {
 		if route.Assisted {
 			browserBug := routeBrowserBug(bug, route)
-			coordinatorResult, executeErr := (BrowserCoordinator{Executor: r.executor, Verifier: browserVerifier}).Execute(ctx, BrowserCoordinatorRequest{Attempt: attempt, Bug: browserBug, Bot: bot, BasePrompt: prompt, Policy: route.Policy, StagingDir: staging.Path(), Emit: emit, FreezeArtifacts: freezeBrowserArtifacts})
-			coordinated = &coordinatorResult
-			runErr = executeErr
-			result = PhaseExecutionResult{FinalYAML: coordinatorResult.FinalYAML, Usage: coordinatorResult.Usage}
+			clarifications, clarificationErr := r.browserUserClarifications(ctx, attempt)
+			if clarificationErr != nil {
+				coordinatorResult := browserCoordinatorFailure(BrowserCoordinatorResult{}, "browser_execution_interrupted")
+				coordinated = &coordinatorResult
+			} else {
+				coordinatorResult, executeErr := (BrowserCoordinator{Executor: r.executor, Verifier: browserVerifier}).Execute(ctx, BrowserCoordinatorRequest{Attempt: attempt, Bug: browserBug, Bot: bot, BasePrompt: prompt, UserClarifications: clarifications, Policy: route.Policy, StagingDir: staging.Path(), Emit: emit, FreezeArtifacts: freezeBrowserArtifacts})
+				coordinated = &coordinatorResult
+				runErr = executeErr
+				result = PhaseExecutionResult{FinalYAML: coordinatorResult.FinalYAML, Usage: coordinatorResult.Usage}
+			}
 		} else {
 			result, runErr = r.executor.ExecutePhase(ctx, attempt.ID, bot, prompt, emit)
 		}
@@ -899,6 +905,43 @@ func validationPromptInput(input json.RawMessage) (string, string, error) {
 		return "", "", fmt.Errorf("encode structured validation input: %w", err)
 	}
 	return userInput, string(encoded), nil
+}
+
+func (r *AgentPhaseRunner) browserUserClarifications(ctx context.Context, attempt PhaseAttempt) ([]string, error) {
+	switch attempt.Phase {
+	case PhaseValidation:
+		continuation, err := r.validationPromptContext(ctx, attempt)
+		if err != nil {
+			return nil, err
+		}
+		return append([]string(nil), continuation.UserInputs...), nil
+	case PhaseRegression:
+		var input RegressionValidationInput
+		if err := json.Unmarshal(attempt.InputJSON, &input); err != nil {
+			return nil, fmt.Errorf("decode regression clarification: %w", err)
+		}
+		if len(input.SupplementalEvidence) == 0 {
+			return nil, nil
+		}
+		userInput, structured, err := validationPromptInput(input.SupplementalEvidence)
+		if err == nil {
+			result := make([]string, 0, 2)
+			if userInput != "" {
+				result = append(result, userInput)
+			}
+			if structured != "" {
+				result = append(result, structured)
+			}
+			return result, nil
+		}
+		formatted, formatErr := formattedPromptJSON(input.SupplementalEvidence)
+		if formatErr != nil {
+			return nil, fmt.Errorf("decode regression supplemental evidence: %w", formatErr)
+		}
+		return []string{formatted}, nil
+	default:
+		return nil, nil
+	}
 }
 
 func formattedPromptJSON(raw json.RawMessage) (string, error) {

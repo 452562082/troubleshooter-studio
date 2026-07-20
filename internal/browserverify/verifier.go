@@ -709,12 +709,18 @@ func validateVerificationRequest(ctx context.Context, resolver IPResolver, reque
 }
 
 func validateWorkerPlanShape(plan bughub.BrowserPlan) error {
-	if (plan.Version != bughub.BrowserPlanLegacyVersion && plan.Version != bughub.BrowserPlanVersion) || strings.TrimSpace(plan.StartURL) == "" || len(plan.Actions) < 1 || len(plan.Actions) > 40 || len(plan.Assertions) < 1 {
+	if (plan.Version != bughub.BrowserPlanLegacyVersion && plan.Version != bughub.BrowserPlanVersion) || strings.TrimSpace(plan.StartURL) == "" || len(plan.Actions) < 1 || len(plan.Actions) > 40 || (len(plan.Assertions) < 1 && len(plan.ResponseAssertions) < 1) {
 		return errors.New("browser plan shape is invalid")
+	}
+	if plan.DeviceProfile != "" && plan.DeviceProfile != "desktop" && plan.DeviceProfile != "mobile" {
+		return errors.New("browser device profile is invalid")
+	}
+	if plan.Version == bughub.BrowserPlanLegacyVersion && (plan.DeviceProfile != "" || len(plan.ResponseAssertions) != 0) {
+		return errors.New("browser response extensions require plan version 2")
 	}
 	actions := map[string]struct{}{"goto": {}, "click": {}, "fill": {}, "press": {}, "select": {}, "wait_for": {}, "screenshot": {}}
 	locators := map[string]struct{}{"role": {}, "label": {}, "text": {}, "placeholder": {}, "test_id": {}, "css": {}}
-	seen := make(map[string]struct{}, len(plan.Actions))
+	seen := make(map[string]string, len(plan.Actions))
 	for _, action := range plan.Actions {
 		if strings.TrimSpace(action.ID) == "" {
 			return errors.New("browser action ID is required")
@@ -722,7 +728,7 @@ func validateWorkerPlanShape(plan bughub.BrowserPlan) error {
 		if _, duplicate := seen[action.ID]; duplicate {
 			return errors.New("browser action IDs must be unique")
 		}
-		seen[action.ID] = struct{}{}
+		seen[action.ID] = action.Action
 		if _, allowed := actions[action.Action]; !allowed {
 			return fmt.Errorf("browser action %q is not supported", action.Action)
 		}
@@ -741,6 +747,23 @@ func validateWorkerPlanShape(plan bughub.BrowserPlan) error {
 		allowed := assertion.Kind == "visible_text" || assertion.Kind == "not_visible_text" || (plan.Version == bughub.BrowserPlanVersion && assertion.Kind == "page_loaded")
 		if !allowed || strings.TrimSpace(assertion.Value) == "" {
 			return errors.New("browser assertion is invalid")
+		}
+	}
+	responseIDs := make(map[string]struct{}, len(plan.ResponseAssertions))
+	for _, assertion := range plan.ResponseAssertions {
+		if strings.TrimSpace(assertion.ID) == "" || strings.TrimSpace(assertion.ActionID) == "" || strings.TrimSpace(assertion.LeftField) == "" || strings.TrimSpace(assertion.RightField) == "" {
+			return errors.New("browser response assertion is invalid")
+		}
+		if _, duplicate := responseIDs[assertion.ID]; duplicate {
+			return errors.New("browser response assertion IDs must be unique")
+		}
+		responseIDs[assertion.ID] = struct{}{}
+		actionKind, exists := seen[assertion.ActionID]
+		if !exists || actionKind == "screenshot" || actionKind == "wait_for" {
+			return errors.New("browser response assertion action is invalid")
+		}
+		if assertion.Kind != "json_fields_not_equal" && assertion.Kind != "json_fields_equal" {
+			return errors.New("browser response assertion kind is invalid")
 		}
 	}
 	return nil
@@ -1146,7 +1169,7 @@ func artifactDigestsEqual(first, second map[string]string) bool {
 
 func validBrowserArtifactKind(kind string) bool {
 	switch kind {
-	case "screenshot", "network", "console", "browser_actions":
+	case "screenshot", "network", "console", "browser_actions", "response_assertions":
 		return true
 	default:
 		return false

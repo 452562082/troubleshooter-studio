@@ -445,6 +445,8 @@ func incidentArtifactDefaultFilename(kind string) string {
 		return "incident-console.txt"
 	case "browser_actions":
 		return "incident-browser-actions.json"
+	case "response_assertions":
+		return "incident-response-assertions.json"
 	default:
 		return "incident-evidence.bin"
 	}

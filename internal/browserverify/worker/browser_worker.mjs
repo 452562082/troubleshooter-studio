@@ -5,6 +5,7 @@ import { Agent as HTTPAgent, createServer, request as createHTTPRequest } from '
 import { connect as createNetworkConnection, isIP } from 'node:net';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import {
   chmod,
   mkdir,
@@ -21,6 +22,7 @@ const PROGRESS_PREFIX = 'TSHOOT_BROWSER_PROGRESS ';
 const ALLOWED_ACTIONS = new Set(['goto', 'click', 'fill', 'press', 'select', 'wait_for', 'screenshot']);
 const ALLOWED_LOCATORS = new Set(['role', 'label', 'text', 'placeholder', 'test_id', 'css']);
 const ALLOWED_ASSERTIONS = new Set(['visible_text', 'not_visible_text', 'page_loaded']);
+const ALLOWED_RESPONSE_ASSERTIONS = new Set(['json_fields_not_equal', 'json_fields_equal']);
 const READ_ONLY_PROD_ACTIONS = new Set(['goto', 'wait_for', 'screenshot']);
 export const EVIDENCE_MAX_RECORDS = 1000;
 export const EVIDENCE_MAX_BYTES = 1 << 20;
@@ -56,6 +58,8 @@ const EXECUTE_AUTH_MAX_PENDING_REQUESTS = 2_048;
 const INTERACTION_LOCATOR_TIMEOUT_MS = 15_000;
 const INTERACTION_LOCATOR_POLL_MS = 100;
 const INTERACTION_FALLBACK_MAX_CANDIDATES = 128;
+const RESPONSE_ASSERTION_BODY_MAX_BYTES = 256 << 10;
+const RESPONSE_ASSERTION_MAX_VISITED_NODES = 10_000;
 const AUTH_ATTRIBUTED_ACTIONS = new Set(['click', 'fill', 'press', 'select']);
 const NETWORK_PROTOCOLS = new Set(['http:', 'https:', 'ws:', 'wss:']);
 const BROWSER_LAUNCH_ARGS = Object.freeze([
@@ -232,8 +236,10 @@ export function validateWorkerRequest(request) {
 
   const plan = request.plan;
   if (!plan || typeof plan !== 'object' || Array.isArray(plan)) throw new Error('plan must be an object');
-  ownKeys(plan, new Set(['version', 'start_url', 'actions', 'assertions']), 'plan');
+  ownKeys(plan, new Set(['version', 'device_profile', 'start_url', 'actions', 'assertions', 'response_assertions']), 'plan');
   if (plan.version !== 1 && plan.version !== 2) throw new Error('plan version must be 1 or 2');
+  if (plan.device_profile !== undefined && !['desktop', 'mobile'].includes(plan.device_profile)) throw new Error('plan device_profile is not supported');
+  if (plan.version === 1 && (plan.device_profile !== undefined || plan.response_assertions !== undefined)) throw new Error('plan response extensions require version 2');
   const start = parseHTTPURL(plan.start_url).parsed;
   const applicationOrigins = new Set(request.policy.application_origins.map(normalizeOrigin));
   const startOrigins = new Set(request.policy.start_origins.map(normalizeOrigin));
@@ -262,15 +268,17 @@ export function validateWorkerRequest(request) {
     throw new Error('storage_state_path must be absolute');
   }
   if (!Array.isArray(plan.actions) || plan.actions.length < 1 || plan.actions.length > 40) throw new Error('plan actions must contain 1 to 40 entries');
-  if (!Array.isArray(plan.assertions) || plan.assertions.length < 1) throw new Error('plan assertions are required');
+  if (!Array.isArray(plan.assertions)) throw new Error('plan assertions must be an array');
+  if (plan.response_assertions !== undefined && !Array.isArray(plan.response_assertions)) throw new Error('plan response_assertions must be an array');
+  if (plan.assertions.length < 1 && (plan.response_assertions?.length ?? 0) < 1) throw new Error('plan UI or response assertions are required');
 
-  const ids = new Set();
+  const ids = new Map();
   for (const action of plan.actions) {
     if (!action || typeof action !== 'object' || Array.isArray(action)) throw new Error('browser action must be an object');
     ownKeys(action, new Set(['id', 'action', 'locator', 'url', 'value', 'key', 'screenshot_after']), 'action');
     requiredString(action.id, 'action id', 256);
     if (ids.has(action.id)) throw new Error('action id is duplicated');
-    ids.add(action.id);
+    ids.set(action.id, action.action);
     if (!ALLOWED_ACTIONS.has(action.action)) throw new Error(`action ${String(action.action)} is not supported`);
     if (request.policy.is_prod && !READ_ONLY_PROD_ACTIONS.has(action.action)) throw new Error('interaction action is blocked in production');
     if (action.screenshot_after !== undefined && typeof action.screenshot_after !== 'boolean') throw new Error('screenshot_after must be boolean');
@@ -292,6 +300,116 @@ export function validateWorkerRequest(request) {
     if (!ALLOWED_ASSERTIONS.has(assertion.kind) || (assertion.kind === 'page_loaded' && plan.version !== 2)) throw new Error('assertion kind is not supported');
     requiredString(assertion.value, 'assertion value');
   }
+  const responseAssertionIDs = new Set();
+  for (const assertion of plan.response_assertions ?? []) {
+    if (!assertion || typeof assertion !== 'object' || Array.isArray(assertion)) throw new Error('response assertion must be an object');
+    ownKeys(assertion, new Set(['id', 'action_id', 'url_contains', 'kind', 'left_field', 'right_field']), 'response assertion');
+    requiredString(assertion.id, 'response assertion id', 256);
+    if (responseAssertionIDs.has(assertion.id)) throw new Error('response assertion id is duplicated');
+    responseAssertionIDs.add(assertion.id);
+    requiredString(assertion.action_id, 'response assertion action_id', 256);
+    if (!ids.has(assertion.action_id)) throw new Error('response assertion action_id does not reference an action');
+    if (ids.get(assertion.action_id) === 'screenshot' || ids.get(assertion.action_id) === 'wait_for') throw new Error('response assertion action_id must reference a request-capable action');
+    if (assertion.url_contains !== undefined) requiredString(assertion.url_contains, 'response assertion url_contains', 2048);
+    if (!ALLOWED_RESPONSE_ASSERTIONS.has(assertion.kind)) throw new Error('response assertion kind is not supported');
+    for (const field of ['left_field', 'right_field']) {
+      const value = requiredString(assertion[field], `response assertion ${field}`, 256);
+      if (!value.split('.').every((part) => /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(part))) throw new Error(`response assertion ${field} is invalid`);
+    }
+  }
+}
+
+function jsonPathValue(value, fieldPath) {
+  let current = value;
+  for (const part of fieldPath.split('.')) {
+    if (!current || typeof current !== 'object' || Array.isArray(current) || !Object.hasOwn(current, part)) return { found: false };
+    current = current[part];
+  }
+  return { found: true, value: current };
+}
+
+export function evaluateJSONResponseAssertion(payload, assertion) {
+  let matchedObjects = 0;
+  let violations = 0;
+  let visited = 0;
+  const queue = [{ value: payload, depth: 0 }];
+  while (queue.length > 0 && visited < RESPONSE_ASSERTION_MAX_VISITED_NODES) {
+    const { value, depth } = queue.shift();
+    visited += 1;
+    if (!value || typeof value !== 'object' || depth > 32) continue;
+    if (!Array.isArray(value)) {
+      const left = jsonPathValue(value, assertion.left_field);
+      const right = jsonPathValue(value, assertion.right_field);
+      if (left.found && right.found) {
+        matchedObjects += 1;
+        const equal = isDeepStrictEqual(left.value, right.value);
+        if ((assertion.kind === 'json_fields_not_equal' && equal) || (assertion.kind === 'json_fields_equal' && !equal)) violations += 1;
+      }
+    }
+    for (const child of Array.isArray(value) ? value : Object.values(value)) {
+      if (child && typeof child === 'object') queue.push({ value: child, depth: depth + 1 });
+    }
+  }
+  return { matched_objects: matchedObjects, violations, passed: matchedObjects > 0 && violations === 0 };
+}
+
+function createResponseAssertionCollector(assertions = []) {
+  const states = new Map(assertions.map((assertion) => [assertion.id, {
+    assertion_id: assertion.id,
+    action_id: assertion.action_id,
+    kind: assertion.kind,
+    url: '', method: '', status: 0,
+    left_field: assertion.left_field,
+    right_field: assertion.right_field,
+    matched_objects: 0,
+    violations: 0,
+    passed: false,
+    failure_reason: 'no_matching_json_object',
+  }]));
+  return {
+    assertions,
+    observe(assertion, metadata, evaluation) {
+      const state = states.get(assertion.id);
+      if (!state || evaluation.matched_objects < 1) return;
+      if (state.matched_objects === 0) {
+        const safe = safeResponseRecord({ method: metadata.method, url: metadata.url, status: metadata.status, headers: {} });
+        state.url = safe.url;
+        state.method = safe.method;
+        state.status = safe.status;
+      }
+      state.matched_objects = Math.min(RESPONSE_ASSERTION_MAX_VISITED_NODES, state.matched_objects + evaluation.matched_objects);
+      state.violations = Math.min(RESPONSE_ASSERTION_MAX_VISITED_NODES, state.violations + evaluation.violations);
+      state.failure_reason = '';
+      state.passed = state.violations === 0;
+    },
+    snapshot() { return [...states.values()]; },
+  };
+}
+
+export async function evaluateResponseAssertionsForResponse(response, requestContext, assertions, headers = {}) {
+  const browserRequest = response.request();
+  const resourceType = String(browserRequest.resourceType?.() ?? '').toLowerCase();
+  if (resourceType !== 'xhr' && resourceType !== 'fetch') return [];
+  const matchingAssertions = assertions.filter((assertion) => (
+    assertion.action_id === requestContext.actionID
+    && (!assertion.url_contains || response.url().includes(assertion.url_contains))
+  ));
+  if (matchingAssertions.length === 0) return [];
+  const declaredLength = Number(headers['content-length'] ?? headers['Content-Length'] ?? 0);
+  if (Number.isFinite(declaredLength) && declaredLength > RESPONSE_ASSERTION_BODY_MAX_BYTES) return [];
+  let payload;
+  try {
+    const body = await response.body();
+    if (!Buffer.isBuffer(body) || body.length > RESPONSE_ASSERTION_BODY_MAX_BYTES) return [];
+    payload = JSON.parse(body.toString('utf8'));
+  } catch {
+    return [];
+  }
+  return matchingAssertions.map((assertion) => ({
+    assertion,
+    metadata: { method: browserRequest.method(), url: response.url(), status: response.status() },
+    evaluation: evaluateJSONResponseAssertion(payload, assertion),
+  }));
 }
 
 export async function executeAssertion(page, assertion) {
@@ -853,7 +971,11 @@ export async function createSupervisedBrowserContext(browser, {
   policy,
   hooks = {},
   lookup = dnsLookup,
+  deviceProfile = 'desktop',
 } = {}) {
+  const deviceOptions = deviceProfile === 'mobile'
+    ? { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 }
+    : { viewport: { width: 1280, height: 720 } };
   const context = await browser.newContext({
     ...storageStateInput,
     // Service workers are required by some applications for basic navigation.
@@ -861,7 +983,7 @@ export async function createSupervisedBrowserContext(browser, {
     // which remains the network security boundary for every browser request.
     serviceWorkers: 'allow',
     acceptDownloads: false,
-    viewport: { width: 1280, height: 720 },
+    ...deviceOptions,
   });
   let blockedNavigation = false;
   context.on('dialog', (dialog) => dialog.dismiss().catch(() => {}));
@@ -1949,28 +2071,35 @@ function checkedEvidenceContent(content, label) {
   return content;
 }
 
-async function writeEvidenceFiles(request, networkCollector, consoleCollector, actions, artifactBudget) {
+async function writeEvidenceFiles(request, networkCollector, consoleCollector, actions, responseAssertions, artifactBudget) {
   const network = networkCollector.snapshot();
   const consoleRecords = consoleCollector.snapshot();
-  if (network.length > EVIDENCE_MAX_RECORDS || consoleRecords.length > EVIDENCE_MAX_RECORDS || actions.length > 40) {
+  const responseAssertionRecords = responseAssertions.snapshot();
+  if (network.length > EVIDENCE_MAX_RECORDS || consoleRecords.length > EVIDENCE_MAX_RECORDS || actions.length > 40 || responseAssertionRecords.length > 40) {
     throw new Error('browser evidence exceeds its record limit');
   }
   const networkJSON = checkedEvidenceContent(`${JSON.stringify(network)}\n`, 'network');
   const consoleJSONL = consoleRecords.map((record) => JSON.stringify(record)).join('\n');
   const consoleContent = checkedEvidenceContent(consoleJSONL ? `${consoleJSONL}\n` : '', 'console');
   const actionJSON = checkedEvidenceContent(`${JSON.stringify(actions)}\n`, 'browser action');
-  for (const content of [networkJSON, consoleContent, actionJSON]) {
+  const responseAssertionJSON = responseAssertionRecords.length > 0
+    ? checkedEvidenceContent(`${JSON.stringify(responseAssertionRecords)}\n`, 'response assertion')
+    : '';
+  for (const content of [networkJSON, consoleContent, actionJSON, responseAssertionJSON].filter(Boolean)) {
     if (!artifactBudget.reserve(Buffer.byteLength(content, 'utf8'))) throw new Error('browser evidence exceeds the artifact budget');
   }
   await atomicWrite(join(request.staging_dir, 'network.json'), networkJSON);
   await atomicWrite(join(request.staging_dir, 'console.jsonl'), consoleContent);
   await atomicWrite(join(request.staging_dir, 'browser-actions.json'), actionJSON);
+  if (responseAssertionJSON) await atomicWrite(join(request.staging_dir, 'response-assertions.json'), responseAssertionJSON);
   const firstRequest = network.find((record) => record.request_id || record.trace_id) ?? {};
-  return [
+  const artifacts = [
     { kind: 'network', path: 'browser/network.json', request_id: firstRequest.request_id || '', trace_id: firstRequest.trace_id || '' },
     { kind: 'console', path: 'browser/console.jsonl' },
     { kind: 'browser_actions', path: 'browser/browser-actions.json' },
   ];
+  if (responseAssertionJSON) artifacts.push({ kind: 'response_assertions', path: 'browser/response-assertions.json' });
+  return artifacts;
 }
 
 async function executeWorker(request) {
@@ -1987,6 +2116,7 @@ async function executeWorker(request) {
   const consoleRecords = createBoundedRecordCollector();
   const artifactBudget = createArtifactBudget();
   const actions = [];
+  const responseAssertions = createResponseAssertionCollector(request.plan.response_assertions ?? []);
   const pendingResponses = new Set();
   const requestStarted = new WeakMap();
   let activeActionID = 'start_url';
@@ -1994,16 +2124,15 @@ async function executeWorker(request) {
   const authFailures = createExecuteAuthFailureTracker(request.policy);
   const onResponse = (response) => {
     authFailures.observeResponse(response);
-    if (network.isStopped()) return;
     if (pendingResponses.size >= EVIDENCE_MAX_RECORDS) {
-      network.truncate();
+      if (!network.isStopped()) network.truncate();
       return;
     }
     const pending = (async () => {
       const browserRequest = response.request();
       const requestContext = requestStarted.get(browserRequest) ?? {};
       const headers = Object.fromEntries((await responseHeadersPromise(response)).filter(([, value]) => value !== null));
-      if (!cdpNetworkEvidence) {
+      if (!cdpNetworkEvidence && !network.isStopped()) {
         network.add(safeResponseRecord({
           action_id: requestContext.actionID ?? '',
           started_at: requestContext.startedAt ? new Date(requestContext.startedAt).toISOString() : '',
@@ -2016,6 +2145,10 @@ async function executeWorker(request) {
           headers,
         }));
       }
+      const observations = await evaluateResponseAssertionsForResponse(response, requestContext, responseAssertions.assertions, headers);
+      for (const observation of observations) {
+        responseAssertions.observe(observation.assertion, observation.metadata, observation.evaluation);
+      }
     })().finally(() => pendingResponses.delete(pending));
     pendingResponses.add(pending);
   };
@@ -2024,6 +2157,7 @@ async function executeWorker(request) {
     supervised = await createSupervisedBrowserContext(browser, {
       storageStateInput: request.storage_state_path ? { storageState: request.storage_state_path } : {},
       policy: request.policy,
+      deviceProfile: request.plan.device_profile || 'desktop',
       hooks: {
         onRequest: (browserRequest) => {
           requestStarted.set(browserRequest, { startedAt: Date.now(), actionID: activeActionID });
@@ -2072,7 +2206,7 @@ async function executeWorker(request) {
     const finishLogin = async () => {
       for (const screenshot of screenshots) await rm(join(request.staging_dir, screenshot.replace('browser/', '')), { force: true });
       await Promise.allSettled([...pendingResponses]);
-      const artifacts = await writeEvidenceFiles(request, network, consoleRecords, actions, artifactBudget);
+      const artifacts = await writeEvidenceFiles(request, network, consoleRecords, actions, responseAssertions, artifactBudget);
       const loginPage = await activeLoginPage(context.pages(), request.policy, authFailures.active());
       return {
         status: 'login_required',
@@ -2099,7 +2233,7 @@ async function executeWorker(request) {
       screenshots.push(failure);
       actions.push({ id: 'start_url', action: 'goto', locator_kind: '', started_at: new Date().toISOString(), duration_ms: 0, result: 'failed', error_code: supervised.blocked() ? 'browser_destination_blocked' : 'navigation_failed' });
       await Promise.allSettled([...pendingResponses]);
-      const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, artifactBudget))];
+      const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, responseAssertions, artifactBudget))];
       const finalURL = page.url().startsWith('http:') || page.url().startsWith('https:') ? page.url() : '';
       return {
         status: 'locator_failed',
@@ -2171,7 +2305,7 @@ async function executeWorker(request) {
         const failure = captured.path;
         screenshots.push(failure);
         await Promise.allSettled([...pendingResponses]);
-        const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, artifactBudget))];
+        const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, responseAssertions, artifactBudget))];
         return {
           status: 'locator_failed',
           error_code: actionErrorCode,
@@ -2196,7 +2330,7 @@ async function executeWorker(request) {
         const failure = captured.path;
         screenshots.push(failure);
         await Promise.allSettled([...pendingResponses]);
-        const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, artifactBudget))];
+        const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, responseAssertions, artifactBudget))];
         return {
           status: 'assertion_failed',
           error_code: 'assertion_failed',
@@ -2216,7 +2350,7 @@ async function executeWorker(request) {
     const finalScreenshot = captured.path;
     screenshots.push(finalScreenshot);
     await Promise.allSettled([...pendingResponses]);
-    const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, artifactBudget))];
+    const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, responseAssertions, artifactBudget))];
     return {
       status: 'completed',
       final_url: page.url(),

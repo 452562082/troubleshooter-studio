@@ -730,7 +730,7 @@ func TestRecoverInterruptedFixRejectsInvalidInspectionScope(t *testing.T) {
 		name   string
 		mutate func(*CodeChange)
 	}{
-		{name: "base target mismatch", mutate: func(change *CodeChange) { change.BaseBranch = "main" }},
+		{name: "missing source baseline", mutate: func(change *CodeChange) { change.BaseBranch = "" }},
 		{name: "direct environment fix", mutate: func(change *CodeChange) { change.FixBranch = "test" }},
 		{name: "missing tests", mutate: func(change *CodeChange) { change.TestEvidence = []byte(`[]`) }},
 		{name: "skip without reason", mutate: func(change *CodeChange) {

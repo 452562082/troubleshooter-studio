@@ -5,6 +5,7 @@ const desktopOnly = 'Incident Case 工作流只在桌面 app 可用'
 
 export type CaseStatus = 'pending_validation' | 'validating' | 'waiting_evidence' | 'reproduced' |
   'not_reproduced' | 'investigating' | 'root_cause_ready' | 'waiting_fix_approval' |
+  'waiting_remediation' | 'remediation_applied' |
   'fixing' | 'fix_failed' | 'fix_pushed' | 'waiting_merge_approval' | 'merging' |
   'merge_conflict' | 'waiting_deployment' | 'deployment_unverified' |
   'deployment_verified' | 'regression_validating' | 'fixed_verified' |
@@ -163,6 +164,7 @@ export function isIncidentWorkflowConflict(error: unknown): boolean {
 }
 export interface ContinueIncidentCaseInput extends WorkflowCommandInput { phase: Phase; input_json?: Record<string, unknown> }
 export interface ApproveIncidentFixInput extends WorkflowCommandInput { root_cause_attempt_id: string; input_json?: Record<string, unknown> }
+export interface CompleteIncidentRemediationInput extends WorkflowCommandInput { root_cause_attempt_id: string; summary: string; evidence: string }
 export interface ApproveIncidentMergeInput extends WorkflowCommandInput { fix_commits: Record<string, string>; target_branches: Record<string, string>; target_heads?: Record<string, string> }
 export interface NotifyIncidentDeployedInput extends WorkflowCommandInput { observed_version?: string; observed_commits?: Record<string, string>; version_source?: string; notification_text?: string; input_json?: Record<string, unknown> }
 export interface CancelIncidentAttemptInput extends WorkflowCommandInput { attempt_id: string }
@@ -238,6 +240,10 @@ export async function continueIncidentCase(input: ContinueIncidentCaseInput): Pr
 export async function approveIncidentFix(input: ApproveIncidentFixInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeCase(await App.ApproveIncidentFix(input))
+}
+export async function completeIncidentRemediation(input: CompleteIncidentRemediationInput): Promise<IncidentCase> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  return normalizeCase(await App.CompleteIncidentRemediation(input))
 }
 export async function approveIncidentMerge(input: ApproveIncidentMergeInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)

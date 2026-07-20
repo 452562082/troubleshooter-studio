@@ -170,6 +170,23 @@ func routes(r *Router) {
 	}
 }
 
+func TestAssignTopologyEndpointServicesUsesMonorepoEntryOwnership(t *testing.T) {
+	endpoints := []topology.Endpoint{
+		{Repo: "base-frontend", Direction: topology.DirectionOutbound, Protocol: "http", Method: "GET", Path: "/api/main", Location: "frontend/base/service.ts:12"},
+		{Repo: "base-frontend", Direction: topology.DirectionOutbound, Protocol: "http", Method: "POST", Path: "/api/docs", Location: "packages/document/src/search.ts:8"},
+	}
+	got := assignTopologyEndpointServices(endpoints,
+		[]string{"base-frontend", "base-frontend-document"},
+		map[string]string{"base-frontend": ".", "base-frontend-document": "packages/document"},
+	)
+	if len(got) != 2 {
+		t.Fatalf("assigned endpoints=%#v, want exactly one owner per source endpoint", got)
+	}
+	if got[0].Service != "base-frontend" || got[1].Service != "base-frontend-document" {
+		t.Fatalf("entry ownership=%#v", got)
+	}
+}
+
 func serviceTopologyFixture(t *testing.T) (map[string]string, *config.SystemConfig) {
 	t.Helper()
 	root := t.TempDir()
@@ -177,7 +194,7 @@ func serviceTopologyFixture(t *testing.T) (map[string]string, *config.SystemConf
 	bff := filepath.Join(root, "mall-bff")
 	order := filepath.Join(root, "mall-order")
 	writeTopologyFixtureFile(t, filepath.Join(web, "package.json"), `{"name":"mall-web","dependencies":{"axios":"1.0.0"}}`)
-	writeTopologyFixtureFile(t, filepath.Join(web, "src", "orders.ts"), `axios.get("https://mall-bff/api/orders")`)
+	writeTopologyFixtureFile(t, filepath.Join(web, "src", "orders.ts"), `httpClient.request({url: "/api/orders", method: "GET"})`)
 	writeTopologyFixtureFile(t, filepath.Join(bff, "composer.json"), `{}`)
 	writeTopologyFixtureFile(t, filepath.Join(bff, "routes.php"), `
 <?php

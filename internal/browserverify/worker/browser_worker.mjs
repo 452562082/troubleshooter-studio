@@ -53,6 +53,9 @@ const EXECUTE_AUTH_MAX_PAGES = 32;
 const EXECUTE_AUTH_MAX_API_SEMANTICS = 512;
 const EXECUTE_AUTH_MAX_ACTION_SCOPES = 64;
 const EXECUTE_AUTH_MAX_PENDING_REQUESTS = 2_048;
+const INTERACTION_LOCATOR_TIMEOUT_MS = 15_000;
+const INTERACTION_LOCATOR_POLL_MS = 100;
+const INTERACTION_FALLBACK_MAX_CANDIDATES = 128;
 const AUTH_ATTRIBUTED_ACTIONS = new Set(['click', 'fill', 'press', 'select']);
 const NETWORK_PROTOCOLS = new Set(['http:', 'https:', 'ws:', 'wss:']);
 const BROWSER_LAUNCH_ARGS = Object.freeze([
@@ -923,6 +926,163 @@ export function buildLocator(page, locator) {
   }
 }
 
+class BrowserInteractionError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'BrowserInteractionError';
+    this.code = code;
+  }
+}
+
+function normalizedInteractionText(value) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim().toLocaleLowerCase();
+}
+
+function implicitInteractionRole(snapshot) {
+  if (snapshot.role) return snapshot.role;
+  if (snapshot.tag === 'button') return 'button';
+  if (snapshot.tag === 'a') return 'link';
+  if (snapshot.tag === 'select') return 'combobox';
+  if (snapshot.tag === 'textarea') return 'textbox';
+  if (snapshot.tag === 'input') {
+    if (snapshot.type === 'search') return 'searchbox';
+    if (['', 'text', 'email', 'url', 'tel', 'number'].includes(snapshot.type)) return 'textbox';
+  }
+  return '';
+}
+
+function interactionRoleCompatible(expected, observed) {
+  if (!expected) return true;
+  if (expected === observed) return true;
+  return (expected === 'searchbox' && observed === 'textbox')
+    || (expected === 'textbox' && observed === 'searchbox');
+}
+
+function interactionActionCompatible(action, snapshot) {
+  if (snapshot.disabled || snapshot.type === 'password' || snapshot.type === 'hidden') return false;
+  if (action.action === 'fill' || action.action === 'press') {
+    return snapshot.tag === 'textarea'
+      || snapshot.tag === 'input'
+      || snapshot.contentEditable
+      || snapshot.role === 'textbox'
+      || snapshot.role === 'searchbox';
+  }
+  if (action.action === 'select') return snapshot.tag === 'select' || snapshot.role === 'combobox';
+  if (action.action === 'click') {
+    return snapshot.tag === 'button'
+      || snapshot.tag === 'a'
+      || ['button', 'link', 'tab', 'option', 'menuitem'].includes(snapshot.role);
+  }
+  return action.action === 'wait_for';
+}
+
+function interactionLocatorHint(locator) {
+  if (!locator) return '';
+  if (locator.kind === 'role') return locator.name || '';
+  if (['label', 'text', 'placeholder'].includes(locator.kind)) return locator.value || '';
+  return '';
+}
+
+function interactionCandidateScore(action, snapshot) {
+  if (!interactionActionCompatible(action, snapshot)) return -1;
+  const expectedRole = action.locator?.kind === 'role' ? normalizedInteractionText(action.locator.value) : '';
+  const observedRole = normalizedInteractionText(implicitInteractionRole(snapshot));
+  if (expectedRole && !interactionRoleCompatible(expectedRole, observedRole)) return -1;
+
+  let score = expectedRole && expectedRole === observedRole ? 40 : (expectedRole ? 25 : 10);
+  const hint = normalizedInteractionText(interactionLocatorHint(action.locator));
+  if (!hint) return score;
+  const names = [snapshot.ariaLabel, snapshot.placeholder, snapshot.text, snapshot.name]
+    .map(normalizedInteractionText)
+    .filter(Boolean);
+  if (names.includes(hint)) return score + 60;
+  if (names.some((name) => name.includes(hint) || hint.includes(name))) return score + 25;
+  return -1;
+}
+
+async function interactionCandidateSnapshot(candidate, tagHint = '') {
+  const [type, role, ariaLabel, placeholder, name, contentEditable, ariaDisabled, text, disabled] = await Promise.all([
+    candidate.getAttribute('type').catch(() => ''),
+    candidate.getAttribute('role').catch(() => ''),
+    candidate.getAttribute('aria-label').catch(() => ''),
+    candidate.getAttribute('placeholder').catch(() => ''),
+    candidate.getAttribute('name').catch(() => ''),
+    candidate.getAttribute('contenteditable').catch(() => ''),
+    candidate.getAttribute('aria-disabled').catch(() => ''),
+    candidate.textContent().catch(() => ''),
+    candidate.isDisabled().catch(() => false),
+  ]);
+  return {
+    tag: String(tagHint || '').toLowerCase(),
+    type: String(type || '').toLowerCase(),
+    role: String(role || '').toLowerCase(),
+    ariaLabel: String(ariaLabel || ''),
+    placeholder: String(placeholder || ''),
+    name: String(name || ''),
+    text: String(text || ''),
+    contentEditable: String(contentEditable || '').toLowerCase() === 'true',
+    disabled: Boolean(disabled || String(ariaDisabled || '').toLowerCase() === 'true'),
+  };
+}
+
+// The model-provided locator is only a hint. When it resolves to nothing after
+// the bounded hydration wait, inspect the controls that actually exist in the
+// current document and recover only when one semantic candidate is strictly
+// better than every other candidate. This keeps the host deterministic and
+// refuses ambiguous state-changing actions instead of guessing with first().
+export async function resolveObservedInteractionLocator(page, action) {
+  if (!page || typeof page.locator !== 'function') {
+    throw new BrowserInteractionError('locator_not_found', 'interaction locator did not match a visible element');
+  }
+  const ranked = [];
+  const groups = [
+    ['input', 'input'],
+    ['textarea', 'textarea'],
+    ['select', 'select'],
+    ['button', 'button'],
+    ['a', 'a'],
+    ['[role]:not(input):not(textarea):not(select):not(button):not(a)', ''],
+    ['[contenteditable="true"]:not([role])', ''],
+  ];
+  let inspected = 0;
+  for (const [selector, tagHint] of groups) {
+    const controls = page.locator(selector);
+    const count = Math.min(await controls.count().catch(() => 0), INTERACTION_FALLBACK_MAX_CANDIDATES - inspected);
+    for (let index = 0; index < count; index += 1) {
+      inspected += 1;
+      const candidate = controls.nth(index);
+      if (!await candidate.isVisible().catch(() => false)) continue;
+      const snapshot = await interactionCandidateSnapshot(candidate, tagHint).catch(() => null);
+      if (!snapshot) continue;
+      const score = interactionCandidateScore(action, snapshot);
+      if (score >= 0) ranked.push({ candidate, score });
+    }
+    if (inspected >= INTERACTION_FALLBACK_MAX_CANDIDATES) break;
+  }
+  ranked.sort((left, right) => right.score - left.score);
+  if (ranked.length === 0) {
+    const textHint = interactionLocatorHint(action?.locator);
+    if (textHint && ['click', 'wait_for'].includes(String(action?.action || '').toLowerCase()) && typeof page.getByText === 'function') {
+      const textMatches = page.getByText(textHint, { exact: true });
+      const visible = [];
+      const count = Math.min(await textMatches.count().catch(() => 0), INTERACTION_FALLBACK_MAX_CANDIDATES);
+      for (let index = 0; index < count; index += 1) {
+        const candidate = textMatches.nth(index);
+        if (await candidate.isVisible().catch(() => false)) visible.push(candidate);
+      }
+      if (visible.length === 1) return visible[0];
+      if (visible.length > 1) {
+        throw new BrowserInteractionError('locator_ambiguous', 'interaction text matched multiple visible elements');
+      }
+    }
+    throw new BrowserInteractionError('locator_not_found', 'interaction locator did not match a visible element');
+  }
+  if (ranked.length > 1 && ranked[0].score === ranked[1].score) {
+    throw new BrowserInteractionError('locator_ambiguous', 'interaction locator matched multiple visible elements');
+  }
+  return ranked[0].candidate;
+}
+
 function emitProgress(code, message, actionId = '', current = 0, total = 0) {
   process.stderr.write(`${PROGRESS_PREFIX}${JSON.stringify({ code, message, action_id: actionId, current, total })}\n`);
 }
@@ -1493,8 +1653,75 @@ function canonicalPressKey(rawKey) {
   return CANONICAL_PRESS_KEYS.get(key.toLowerCase()) ?? key;
 }
 
-export async function executeAction(page, action, request, index, captureScreenshot, authFailures) {
+// Playwright's locator.first() turns an ambiguous selector into a mechanical
+// success. For state-changing actions that is dangerous: a broad `input`
+// selector can fill a hidden or unrelated field while the intended search
+// control remains untouched. The locator itself is live, but count() and
+// isVisible() are immediate snapshots, so poll while an SPA hydrates instead
+// of treating the first zero-count snapshot as a permanent locator failure.
+// Ambiguity still fails immediately: waiting must never choose one of several
+// visible state-changing targets for the agent.
+export async function resolveVisibleInteractionLocator(page, locatorSpec, {
+  timeoutMs = INTERACTION_LOCATOR_TIMEOUT_MS,
+  pollMs = INTERACTION_LOCATOR_POLL_MS,
+  now = Date.now,
+  wait = (milliseconds) => page.waitForTimeout(milliseconds),
+} = {}) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || !Number.isFinite(pollMs) || pollMs <= 0) {
+    throw new Error('interaction locator wait options are invalid');
+  }
+  const candidates = buildLocator(page, locatorSpec);
+  const startedAt = now();
+  while (true) {
+    const count = await candidates.count();
+    if (count > 64) throw new Error('interaction locator must resolve to exactly one visible element');
+    let resolved = null;
+    let visibleCount = 0;
+    for (let index = 0; index < count; index += 1) {
+      const candidate = candidates.nth(index);
+      if (!await candidate.isVisible().catch(() => false)) continue;
+      visibleCount += 1;
+      if (visibleCount === 1) resolved = candidate;
+      if (visibleCount > 1) break;
+    }
+    if (visibleCount === 1 && resolved) return resolved;
+    if (visibleCount > 1 || now() - startedAt >= timeoutMs) {
+      if (visibleCount > 1) {
+        throw new BrowserInteractionError('locator_ambiguous', 'interaction locator must resolve to exactly one visible element');
+      }
+      throw new BrowserInteractionError('locator_not_found', 'interaction locator must resolve to exactly one visible element');
+    }
+    const remainingMs = timeoutMs - (now() - startedAt);
+    await wait(Math.min(pollMs, Math.max(1, remainingMs)));
+  }
+}
+
+function interactionBindingKey(locatorSpec) {
+  if (!locatorSpec || typeof locatorSpec !== 'object') return '';
+  return JSON.stringify([
+    String(locatorSpec.kind || ''),
+    String(locatorSpec.value || ''),
+    String(locatorSpec.name || ''),
+  ]);
+}
+
+async function reusableInteractionBinding(binding, action, index) {
+  if (!binding || binding.action !== 'fill' || action.action !== 'press') return null;
+  if (binding.index + 1 !== index || binding.key !== interactionBindingKey(action.locator)) return null;
+  if (!await binding.locator.isVisible().catch(() => false)) return null;
+  if (typeof binding.locator.isDisabled === 'function' && await binding.locator.isDisabled().catch(() => true)) return null;
+  return binding.locator;
+}
+
+export async function executeAction(page, action, request, index, captureScreenshot, authFailures, onLocatorRecovered = null, locatorOptions = undefined, interactionState = null) {
   const finishAuthScope = authFailures?.beginAction(page, action) ?? (() => {});
+  // A locator is a live handle. Preserve only the immediately preceding
+  // successful fill target so a following Enter is delivered to the exact
+  // control that accepted the value. Re-querying the whole SPA here is unsafe:
+  // autocomplete overlays commonly add a second element with the same
+  // placeholder after fill, making an originally unique selector ambiguous.
+  const previousBinding = interactionState?.last ?? null;
+  if (interactionState) interactionState.last = null;
   try {
     switch (action.action) {
       case 'goto':
@@ -1504,15 +1731,45 @@ export async function executeAction(page, action, request, index, captureScreens
       case 'screenshot':
         return captureScreenshot(`action-${String(index + 1).padStart(2, '0')}-${safeFilePart(action.id)}.png`);
       default: {
-        const locator = buildLocator(page, action.locator).first();
-		if (action.action === 'click') await locator.click();
-		else if (action.action === 'fill') {
-			const type = String(await locator.getAttribute('type').catch(() => '') ?? '').toLowerCase();
+        if (action.action === 'wait_for') {
+          await buildLocator(page, action.locator).first().waitFor({ state: 'visible' });
+          return { loginRequired: false, path: '' };
+        }
+        let locator = await reusableInteractionBinding(previousBinding, action, index);
+        if (!locator) {
+          try {
+            locator = await resolveVisibleInteractionLocator(page, action.locator, locatorOptions);
+          } catch (error) {
+            // Ambiguity is never auto-recovered because choosing a different
+            // control could mutate the wrong business state. A zero-match result
+            // may safely use the observed-document resolver below.
+            if (error?.code !== 'locator_not_found') throw error;
+            locator = await resolveObservedInteractionLocator(page, action);
+            if (typeof onLocatorRecovered === 'function') onLocatorRecovered(action);
+          }
+        }
+        if (action.action === 'click') await locator.click();
+        else if (action.action === 'fill') {
+          const type = String(await locator.getAttribute('type').catch(() => '') ?? '').toLowerCase();
           if (type === 'password') throw new Error('password input is not allowed');
           await locator.fill(action.value);
+          if (typeof locator.inputValue === 'function') {
+            const observed = await locator.inputValue().catch(() => null);
+            const stableTextTypes = new Set(['', 'text', 'search', 'email', 'url', 'tel']);
+            if (observed !== null && stableTextTypes.has(type) && observed !== action.value) {
+              throw new BrowserInteractionError('input_value_not_persisted', 'filled value did not persist on the resolved input');
+            }
+          }
+          if (interactionState) {
+            interactionState.last = {
+              action: 'fill',
+              index,
+              key: interactionBindingKey(action.locator),
+              locator,
+            };
+          }
         } else if (action.action === 'press') await locator.press(canonicalPressKey(action.key));
         else if (action.action === 'select') await locator.selectOption(action.value);
-        else if (action.action === 'wait_for') await locator.waitFor({ state: 'visible' });
         return { loginRequired: false, path: '' };
       }
     }
@@ -1532,6 +1789,24 @@ export async function waitForApplicationReady(page, maximumWaitMs = 3_000) {
 export async function settleBrowserInteraction(page, action, delayMs = 150) {
   if (!['click', 'fill', 'press', 'select'].includes(action?.action)) return;
   await page.waitForTimeout(delayMs);
+}
+
+function browserActionFailureCode(error, destinationBlocked = false) {
+  if (destinationBlocked) return 'browser_destination_blocked';
+  if (error?.code === 'locator_ambiguous') return 'locator_ambiguous';
+  if (error?.code === 'locator_not_found') return 'locator_not_found';
+  if (error?.code === 'input_value_not_persisted') return 'input_value_not_persisted';
+  return 'browser_action_failed';
+}
+
+function browserActionFailureMessage(code) {
+  switch (code) {
+    case 'locator_ambiguous': return 'browser action matched multiple visible controls';
+    case 'locator_not_found': return 'browser action did not match a visible control';
+    case 'input_value_not_persisted': return 'browser input value did not persist';
+    case 'browser_destination_blocked': return 'browser destination was blocked';
+    default: return 'browser action failed';
+  }
 }
 
 function responseHeadersPromise(response) {
@@ -1812,6 +2087,7 @@ async function executeWorker(request) {
     }
     if (await requiresLogin()) return finishLogin();
 
+    const interactionState = { last: null };
     for (let index = 0; index < request.plan.actions.length; index += 1) {
       const action = request.plan.actions[index];
       activeActionID = action.id;
@@ -1819,8 +2095,24 @@ async function executeWorker(request) {
       const started = Date.now();
       emitProgress('browser_action_started', `Executing browser action ${index + 1}/${request.plan.actions.length}`, action.id, index + 1, request.plan.actions.length);
       try {
-        const captured = await executeAction(page, action, request, index, captureScreenshot, authFailures);
-		await settleBrowserInteraction(page, action);
+        const captured = await executeAction(
+          page,
+          action,
+          request,
+          index,
+          captureScreenshot,
+          authFailures,
+          () => emitProgress(
+            'browser_locator_auto_recovered',
+            `Recovered browser action ${index + 1}/${request.plan.actions.length} from observed controls`,
+            action.id,
+            index + 1,
+            request.plan.actions.length,
+          ),
+          undefined,
+          interactionState,
+        );
+        await settleBrowserInteraction(page, action);
         if (captured.loginRequired) {
           actions.push({ id: action.id, action: action.action, locator_kind: action.locator?.kind || '', started_at: new Date(started).toISOString(), duration_ms: Date.now() - started, result: 'login_required', error_code: 'browser_login_required' });
           return finishLogin();
@@ -1842,8 +2134,9 @@ async function executeWorker(request) {
         }
         actions.push({ id: action.id, action: action.action, locator_kind: action.locator?.kind || '', started_at: new Date(started).toISOString(), duration_ms: Date.now() - started, result: 'completed', error_code: '' });
         emitProgress('browser_action_completed', `Completed browser action ${index + 1}/${request.plan.actions.length}`, action.id, index + 1, request.plan.actions.length);
-      } catch {
-        actions.push({ id: action.id, action: action.action, locator_kind: action.locator?.kind || '', started_at: new Date(started).toISOString(), duration_ms: Date.now() - started, result: 'failed', error_code: supervised.blocked() ? 'browser_destination_blocked' : 'locator_failed' });
+      } catch (error) {
+        const actionErrorCode = browserActionFailureCode(error, supervised.blocked());
+        actions.push({ id: action.id, action: action.action, locator_kind: action.locator?.kind || '', started_at: new Date(started).toISOString(), duration_ms: Date.now() - started, result: 'failed', error_code: actionErrorCode });
         if (await requiresLogin()) return finishLogin();
         const captured = await captureScreenshot('failure.png');
         if (captured.loginRequired) return finishLogin();
@@ -1853,8 +2146,8 @@ async function executeWorker(request) {
         const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, artifactBudget))];
         return {
           status: 'locator_failed',
-          error_code: supervised.blocked() ? 'browser_destination_blocked' : 'locator_failed',
-          error_message: 'browser action failed',
+          error_code: actionErrorCode,
+          error_message: browserActionFailureMessage(actionErrorCode),
           failed_action_id: action.id,
           final_url: page.url(),
           title: redactConsoleText(await page.title().catch(() => '')),

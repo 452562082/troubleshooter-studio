@@ -52,4 +52,7 @@ func TestLiveFunhubRepairWorker(t *testing.T) {
 		}
 		t.Logf("%s artifact: %s", artifact.Kind, content)
 	}
+	if result.Status != "completed" {
+		t.Fatalf("live browser validation did not complete: status=%s code=%s failed_action=%s", result.Status, result.ErrorCode, result.FailedActionID)
+	}
 }

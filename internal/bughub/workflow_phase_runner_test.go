@@ -469,6 +469,19 @@ gaps: [missing deployed revision]
 	}
 }
 
+func TestParseInvestigationResultRoutesNonCodeRootCauseToOperatorAction(t *testing.T) {
+	result, err := ParseInvestigationResult(nonCodeRootCauseOutput(RootCauseConfiguration, RemediationOperatorAction))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RootCauseType != RootCauseConfiguration || result.Remediation.Mode != RemediationOperatorAction || result.UsesCodeFixWorkflow() {
+		t.Fatalf("result=%+v", result)
+	}
+	if _, err := ParseInvestigationResult(nonCodeRootCauseOutput(RootCauseNetwork, RemediationCodeChange)); err == nil || !strings.Contains(err.Error(), "operator_action") {
+		t.Fatalf("invalid root-cause/remediation mapping err=%v", err)
+	}
+}
+
 func TestAgentPhaseRunnerCoordinatesBrowserAndRegistersCurrentAttemptArtifacts(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-browser-runner", CaseValidating)
@@ -777,7 +790,8 @@ func TestBrowserFailureOutcomeSeparatesSystemFailuresFromEvidenceGaps(t *testing
 	for _, code := range []string{
 		"browser_runtime_broken", "browser_policy_unavailable", "browser_policy_changed",
 		"browser_verifier_failed", "browser_execution_interrupted", "browser_validator_plan_invalid",
-		"browser_worker_protocol_invalid", "browser_artifact_invalid",
+		"browser_worker_protocol_invalid", "browser_artifact_invalid", "browser_validator_failed",
+		"browser_validator_attachment_failed", "browser_validator_no_output", "browser_validator_process_failed",
 	} {
 		if got := browserFailureOutcome(PhaseValidation, code); got != PhaseOutcomeSystemFailed {
 			t.Errorf("code=%s outcome=%s", code, got)
@@ -1727,6 +1741,9 @@ func TestAgentPhaseRunnerConcurrentFixStartCreatesOneCheckpointStaging(t *testin
 	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{result: PhaseExecutionResult{FinalYAML: "invalid"}}, nil, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error { return nil })
 	runner.openStaging = func(string, string) (attemptEvidenceStaging, error) {
 		staging := &lifecycleStaging{path: filepath.Join(t.TempDir(), attempt.ID+"-owned")}
+		if err := os.MkdirAll(staging.path, 0o700); err != nil {
+			return nil, err
+		}
 		created <- staging
 		<-release
 		return staging, nil

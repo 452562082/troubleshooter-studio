@@ -20,6 +20,7 @@ import type {
 import { emptyDeploymentVerification } from './yamlGenerator'
 import { VIA_GRAFANA_ELIGIBLE } from './yamlShared'
 import type { ConfigSourceInstance } from './configSourceInstances'
+import { serviceNamesForRole, supportsRuntimeServiceNames } from './repoServiceIdentity'
 
 /** yaml 字段值是否为模板占位符 "{{XYZ}}";占位符不应当作真值反填。 */
 export function isPlaceholder(v: unknown): boolean {
@@ -241,6 +242,17 @@ export function importServiceTopologyOverrides(rawOverrides: unknown): ServiceTo
     if (!raw || typeof raw !== 'object') return []
     const value = raw as Record<string, unknown>
     if (value.action !== 'confirm' && value.action !== 'reject' && value.action !== 'add') return []
+    const scope = typeof value.scope === 'string' ? value.scope.trim().toLowerCase() : ''
+    if (scope === 'service') {
+      if (typeof value.from_service !== 'string' || typeof value.to_service !== 'string') return []
+      return [{
+        action: value.action,
+        fromService: value.from_service,
+        toService: value.to_service,
+        scope: 'service',
+      }]
+    }
+    if (scope) return []
     const protocol = typeof value.protocol === 'string' ? value.protocol.trim().toLowerCase() : ''
     if (protocol !== 'http' && protocol !== 'grpc') return []
     if (typeof value.from_service !== 'string' || typeof value.to_service !== 'string') return []
@@ -343,13 +355,12 @@ export async function applyParsedYAMLToWizardState(
     //    → 必须尊重,不能 import 时就被清掉
     //
     // **但**:role 跟 service_names 必须一致(syncServiceNamesWithRole 的 yaml-side
-    // 镜像)。非业务服务角色(common-lib / docs / infra / frontend / mobile)即便
-    // yaml 里有 service_names 也清掉 —— allServiceNames 就不会出 "frontend 仓的
-    // 名字当成服务" 这种噪音。常见场景:用户改 role=docs 后导出 yaml,但 service_names
-    // 残留(比如老版本 wizard 没自动清,或手编辑 yaml 漏)。
-    const NON_SERVICE_ROLES = new Set(['common-lib', 'docs', 'infra', 'frontend', 'mobile'])
+    // 镜像)。frontend 的值是运行时身份，必须保留；common-lib/docs/infra/mobile
+    // 没有可编辑的运行时服务名，导入时清理老版本残留。
     for (const r of ctx.repos as any[]) {
-      if (NON_SERVICE_ROLES.has((r.role || '').trim())) {
+      if (r.role === 'frontend') {
+        r.service_names = serviceNamesForRole(r.role, r.name, r.service_names)
+      } else if (!supportsRuntimeServiceNames(r.role)) {
         r.service_names = ''
       }
     }

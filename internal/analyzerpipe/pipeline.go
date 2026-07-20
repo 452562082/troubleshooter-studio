@@ -336,7 +336,7 @@ func Run(ctx context.Context, cfg *config.SystemConfig, opts Options) (*Result, 
 				})
 				progress(fmt.Sprintf("[warn] endpoint scan %s failed: %v", repo.Name, endpointErr))
 			} else {
-				endpoints = assignTopologyEndpointServices(endpoints, services)
+				endpoints = assignTopologyEndpointServices(endpoints, services, repo.ServiceEntries)
 				ra.Endpoints = endpoints
 				topologySnapshot.Endpoints = append(topologySnapshot.Endpoints, endpoints...)
 				topologySnapshot.Repositories = append(topologySnapshot.Repositories, topology.RepositoryStatus{
@@ -456,10 +456,16 @@ func topologyServiceAliases(repo config.Repo, service string, serviceMap []confi
 	return sortedNonEmptyStrings(aliases)
 }
 
-func assignTopologyEndpointServices(endpoints []topology.Endpoint, services []string) []topology.Endpoint {
+func assignTopologyEndpointServices(endpoints []topology.Endpoint, services []string, serviceEntries map[string]string) []topology.Endpoint {
 	result := make([]topology.Endpoint, 0, len(endpoints)*max(1, len(services)))
 	for _, endpoint := range endpoints {
 		if strings.TrimSpace(endpoint.Service) != "" || len(services) == 0 {
+			endpoint.ID = endpoint.SemanticID()
+			result = append(result, endpoint)
+			continue
+		}
+		if service := endpointServiceFromEntry(endpoint.Location, services, serviceEntries); service != "" {
+			endpoint.Service = service
 			endpoint.ID = endpoint.SemanticID()
 			result = append(result, endpoint)
 			continue
@@ -472,6 +478,59 @@ func assignTopologyEndpointServices(endpoints []topology.Endpoint, services []st
 		}
 	}
 	return result
+}
+
+func endpointServiceFromEntry(location string, services []string, serviceEntries map[string]string) string {
+	if len(serviceEntries) == 0 {
+		return ""
+	}
+	validServices := make(map[string]struct{}, len(services))
+	for _, service := range services {
+		validServices[strings.TrimSpace(service)] = struct{}{}
+	}
+
+	sourcePath := filepath.ToSlash(strings.TrimSpace(location))
+	if colon := strings.LastIndexByte(sourcePath, ':'); colon >= 0 && decimalDigits(sourcePath[colon+1:]) {
+		sourcePath = sourcePath[:colon]
+	}
+	sourcePath = strings.TrimPrefix(filepath.ToSlash(filepath.Clean(sourcePath)), "./")
+
+	bestService := ""
+	bestLength := -1
+	for rawService, rawEntry := range serviceEntries {
+		service := strings.TrimSpace(rawService)
+		if _, exists := validServices[service]; !exists {
+			continue
+		}
+		entry := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(strings.TrimSpace(rawEntry))), "./")
+		if entry == "" || entry == "." {
+			if bestLength < 0 {
+				bestService = service
+				bestLength = 0
+			}
+			continue
+		}
+		if sourcePath != entry && !strings.HasPrefix(sourcePath, entry+"/") {
+			continue
+		}
+		if len(entry) > bestLength {
+			bestService = service
+			bestLength = len(entry)
+		}
+	}
+	return bestService
+}
+
+func decimalDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func topologyServiceHosts(role string, environments []config.Environment) []string {
@@ -519,6 +578,7 @@ func topologyOverrides(configured []config.ServiceTopologyOverride) []topology.O
 			Action:      override.Action,
 			FromService: override.FromService,
 			ToService:   override.ToService,
+			Scope:       override.Scope,
 			Protocol:    override.Protocol,
 			Method:      override.Method,
 			Path:        override.Path,

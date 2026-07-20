@@ -1227,14 +1227,14 @@ test('executeAction scopes allowed fetch failures to the current controlled acti
   const tracker = await newExecuteAuthFailureTracker(policy);
   const page = trackedLoginPage('https://app.test/users');
   const criticalRequest = executeBrowserRequest(page, 'https://api.test/users/search', { method: 'POST' });
-  page.getByRole = () => ({
-    first: () => ({
-      click: async () => {
-        tracker.observeRequest(criticalRequest);
-        await tracker.observeResponse(executeBrowserResponse(criticalRequest, 403, { 'WWW-Authenticate': 'Bearer realm="test"' }));
-      },
-    }),
-  });
+  const locator = {
+    isVisible: async () => true,
+    click: async () => {
+      tracker.observeRequest(criticalRequest);
+      await tracker.observeResponse(executeBrowserResponse(criticalRequest, 403, { 'WWW-Authenticate': 'Bearer realm="test"' }));
+    },
+  };
+  page.getByRole = () => ({ count: async () => 1, nth: () => locator });
   const action = { id: 'search', action: 'click', locator: { kind: 'role', value: 'button', name: 'Search' } };
   await worker.executeAction(page, action, { ...baseRequest(), policy }, 0, async () => ({ loginRequired: false, path: '' }), tracker);
   assert.equal(tracker.active(), true);
@@ -1244,13 +1244,17 @@ test('executeAction fills text inputs that omit the optional type attribute', as
 	const worker = await import('./browser_worker.mjs');
 	let value = '';
 	const locator = {
+		count: async () => 1,
+		nth: () => locator,
+		isVisible: async () => true,
 		getAttribute: async (name) => {
 			assert.equal(name, 'type');
 			return null;
 		},
 		fill: async (next) => { value = next; },
+		inputValue: async () => value,
 	};
-	const page = { getByLabel: () => ({ first: () => locator }) };
+	const page = { getByLabel: () => locator };
 	await worker.executeAction(
 		page,
 		{ id: 'keyword', action: 'fill', locator: { kind: 'label', value: 'Search' }, value: '汤圆' },
@@ -1267,7 +1271,9 @@ test('executeAction canonicalizes case-insensitive named keys for Playwright', a
   let pressed = '';
   const locator = {
     or: () => locator,
-    first: () => locator,
+    count: async () => 1,
+    nth: () => locator,
+    isVisible: async () => true,
     press: async (key) => { pressed = key; },
   };
   const page = { getByPlaceholder: () => locator, getByLabel: () => locator };
@@ -1280,6 +1286,323 @@ test('executeAction canonicalizes case-insensitive named keys for Playwright', a
     null,
   );
   assert.equal(pressed, 'Enter');
+});
+
+test('executeAction rejects an interaction locator with multiple visible matches', async () => {
+  const worker = await import('./browser_worker.mjs');
+  const nodes = [
+    { isVisible: async () => true, click: async () => assert.fail('ambiguous locator must not click') },
+    { isVisible: async () => true, click: async () => assert.fail('ambiguous locator must not click') },
+  ];
+  const candidates = {
+    count: async () => nodes.length,
+    nth: (index) => nodes[index],
+  };
+  const page = { getByRole: () => candidates };
+
+  await assert.rejects(
+    worker.executeAction(
+      page,
+      { id: 'search', action: 'click', locator: { kind: 'role', value: 'button', name: 'Search' } },
+      baseRequest(),
+      0,
+      async () => ({ loginRequired: false, path: '' }),
+      null,
+    ),
+    /exactly one visible element/,
+  );
+});
+
+test('interaction locator waits for a uniquely visible control rendered after SPA hydration', async () => {
+  const worker = await import('./browser_worker.mjs');
+  let countCalls = 0;
+  let waitCalls = 0;
+  const locator = { isVisible: async () => true };
+  const candidates = {
+    count: async () => {
+      countCalls += 1;
+      return countCalls >= 3 ? 1 : 0;
+    },
+    nth: (index) => {
+      assert.equal(index, 0);
+      return locator;
+    },
+  };
+  const page = { getByRole: () => candidates };
+
+  const resolved = await worker.resolveVisibleInteractionLocator(
+    page,
+    { kind: 'role', value: 'searchbox' },
+    {
+      timeoutMs: 1_000,
+      pollMs: 10,
+      wait: async () => { waitCalls += 1; },
+    },
+  );
+
+  assert.equal(resolved, locator);
+  assert.equal(countCalls, 3);
+  assert.equal(waitCalls, 2);
+});
+
+test('interaction locator stops its hydration wait at the configured deadline', async () => {
+  const worker = await import('./browser_worker.mjs');
+  let clock = 0;
+  let countCalls = 0;
+  const candidates = {
+    count: async () => {
+      countCalls += 1;
+      return 0;
+    },
+    nth: () => assert.fail('a zero-count locator must not inspect candidates'),
+  };
+  const page = { getByRole: () => candidates };
+
+  await assert.rejects(
+    worker.resolveVisibleInteractionLocator(
+      page,
+      { kind: 'role', value: 'searchbox' },
+      {
+        timeoutMs: 20,
+        pollMs: 10,
+        now: () => clock,
+        wait: async (milliseconds) => { clock += milliseconds; },
+      },
+    ),
+    /exactly one visible element/,
+  );
+  assert.equal(clock, 20);
+  assert.equal(countCalls, 3);
+});
+
+test('observed-document recovery selects the only compatible hydrated search input', async () => {
+  const worker = await import('./browser_worker.mjs');
+  const makeCandidate = (snapshot) => ({
+    isVisible: async () => true,
+    getAttribute: async (name) => ({
+      type: snapshot.type,
+      role: snapshot.role,
+      'aria-label': snapshot.ariaLabel,
+      placeholder: snapshot.placeholder,
+      name: snapshot.name,
+      contenteditable: snapshot.contentEditable ? 'true' : '',
+      'aria-disabled': snapshot.disabled ? 'true' : '',
+    })[name] ?? '',
+    textContent: async () => snapshot.text,
+    isDisabled: async () => snapshot.disabled,
+  });
+  const candidates = [
+    makeCandidate({ tag: 'a', type: '', role: '', ariaLabel: '', placeholder: '', name: '', text: '首页', contentEditable: false, disabled: false }),
+    makeCandidate({ tag: 'input', type: 'text', role: '', ariaLabel: '查找用户', placeholder: '请输入用户名', name: '', text: '', contentEditable: false, disabled: false }),
+  ];
+  const controls = {
+    count: async () => candidates.length,
+    nth: (index) => candidates[index],
+  };
+  const empty = { count: async () => 0, nth: () => assert.fail('empty locator') };
+  const resolved = await worker.resolveObservedInteractionLocator(
+    { locator: (selector) => selector === 'input' ? { count: async () => 1, nth: () => candidates[1] } : (selector === 'a' ? { count: async () => 1, nth: () => candidates[0] } : empty) },
+    { action: 'fill', locator: { kind: 'role', value: 'searchbox' }, value: 'test' },
+  );
+  assert.equal(resolved, candidates[1]);
+});
+
+test('observed-document recovery refuses equally plausible state-changing controls', async () => {
+  const worker = await import('./browser_worker.mjs');
+  const candidates = ['用户', '作品'].map((placeholder) => ({
+    isVisible: async () => true,
+    getAttribute: async (name) => name === 'type' ? 'text' : (name === 'placeholder' ? placeholder : ''),
+    textContent: async () => '',
+    isDisabled: async () => false,
+  }));
+  const controls = {
+    count: async () => candidates.length,
+    nth: (index) => candidates[index],
+  };
+  await assert.rejects(
+    worker.resolveObservedInteractionLocator(
+      { locator: (selector) => selector === 'input' ? controls : { count: async () => 0, nth: () => assert.fail('empty locator') } },
+      { action: 'fill', locator: { kind: 'role', value: 'searchbox' }, value: 'test' },
+    ),
+    /multiple visible elements/,
+  );
+});
+
+test('observed-document recovery supports one exact visible custom tab and rejects duplicate text', async () => {
+  const worker = await import('./browser_worker.mjs');
+  const customTab = { isVisible: async () => true };
+  const empty = { count: async () => 0, nth: () => assert.fail('empty locator') };
+  const page = {
+    locator: () => empty,
+    getByText: (text, options) => {
+      assert.equal(text, '用户');
+      assert.deepEqual(options, { exact: true });
+      return { count: async () => 1, nth: () => customTab };
+    },
+  };
+  assert.equal(
+    await worker.resolveObservedInteractionLocator(page, { action: 'click', locator: { kind: 'role', value: 'tab', name: '用户' } }),
+    customTab,
+  );
+
+  await assert.rejects(
+    worker.resolveObservedInteractionLocator(
+      { ...page, getByText: () => ({ count: async () => 2, nth: () => customTab }) },
+      { action: 'click', locator: { kind: 'text', value: '用户' } },
+    ),
+    /multiple visible elements/,
+  );
+});
+
+test('executeAction falls back to the observed control and reports automatic recovery', async () => {
+  const worker = await import('./browser_worker.mjs');
+  let filled = '';
+  let recovered = 0;
+  const missing = { count: async () => 0, nth: () => assert.fail('missing locator has no candidates') };
+  const input = {
+    isVisible: async () => true,
+    getAttribute: async (name) => ({ type: 'text', 'aria-label': '查找用户', placeholder: '请输入用户名' })[name] ?? '',
+    textContent: async () => '',
+    isDisabled: async () => false,
+    fill: async (value) => { filled = value; },
+    inputValue: async () => filled,
+  };
+  const controls = { count: async () => 1, nth: () => input };
+  const page = {
+    getByRole: () => missing,
+    locator: (selector) => selector === 'input' ? controls : { count: async () => 0, nth: () => assert.fail('empty locator') },
+  };
+  await worker.executeAction(
+    page,
+    { id: 'keyword', action: 'fill', locator: { kind: 'role', value: 'searchbox' }, value: 'test' },
+    baseRequest(),
+    0,
+    async () => ({ loginRequired: false, path: '' }),
+    null,
+    () => { recovered += 1; },
+    { timeoutMs: 0, pollMs: 1 },
+  );
+  assert.equal(filled, 'test');
+  assert.equal(recovered, 1);
+});
+
+test('executeAction rejects a fill whose value was not applied to the resolved input', async () => {
+  const worker = await import('./browser_worker.mjs');
+  const locator = {
+    count: async () => 1,
+    nth: () => locator,
+    isVisible: async () => true,
+    getAttribute: async () => 'text',
+    fill: async () => {},
+    inputValue: async () => '自动执行',
+  };
+  const page = { getByTestId: () => locator };
+
+  await assert.rejects(
+    worker.executeAction(
+      page,
+      { id: 'keyword', action: 'fill', locator: { kind: 'test_id', value: 'user-search' }, value: 'chengzi' },
+      baseRequest(),
+      0,
+      async () => ({ loginRequired: false, path: '' }),
+      null,
+    ),
+    /filled value did not persist/,
+  );
+});
+
+test('executeAction reuses the immediately filled control for Enter after an SPA creates a duplicate selector', async () => {
+  const worker = await import('./browser_worker.mjs');
+  const pressed = [];
+  let candidateCount = 1;
+  let filled = '';
+  const input = {
+    isVisible: async () => true,
+    isDisabled: async () => false,
+    getAttribute: async () => 'search',
+    fill: async (value) => {
+      filled = value;
+      candidateCount = 2;
+    },
+    inputValue: async () => filled,
+    press: async (key) => pressed.push(key),
+  };
+  const duplicate = { isVisible: async () => true };
+  const candidates = {
+    count: async () => candidateCount,
+    nth: (index) => index === 0 ? input : duplicate,
+    or: () => candidates,
+  };
+  const page = {
+    getByPlaceholder: () => candidates,
+    getByLabel: () => ({ count: async () => 0 }),
+  };
+  const state = { last: null };
+  const capture = async () => ({ loginRequired: false, path: '' });
+
+  await worker.executeAction(
+    page,
+    { id: 'fill-search', action: 'fill', locator: { kind: 'placeholder', value: '搜索' }, value: '汤圆' },
+    baseRequest(),
+    3,
+    capture,
+    null,
+    null,
+    { timeoutMs: 0, pollMs: 1 },
+    state,
+  );
+  await worker.executeAction(
+    page,
+    { id: 'submit-search', action: 'press', locator: { kind: 'placeholder', value: '搜索' }, key: 'Enter' },
+    baseRequest(),
+    4,
+    capture,
+    null,
+    null,
+    { timeoutMs: 0, pollMs: 1 },
+    state,
+  );
+
+  assert.deepEqual(pressed, ['Enter']);
+  assert.equal(state.last, null);
+});
+
+test('executeAction refuses a stale fill binding and still fails closed on selector ambiguity', async () => {
+  const worker = await import('./browser_worker.mjs');
+  const candidate = { isVisible: async () => true };
+  const candidates = {
+    count: async () => 2,
+    nth: () => candidate,
+    or: () => candidates,
+  };
+  const page = {
+    getByPlaceholder: () => candidates,
+    getByLabel: () => ({ count: async () => 0 }),
+  };
+  const state = {
+    last: {
+      action: 'fill',
+      index: 3,
+      key: JSON.stringify(['placeholder', '搜索', '']),
+      locator: { isVisible: async () => false },
+    },
+  };
+
+  await assert.rejects(
+    worker.executeAction(
+      page,
+      { id: 'submit-search', action: 'press', locator: { kind: 'placeholder', value: '搜索' }, key: 'Enter' },
+      baseRequest(),
+      4,
+      async () => ({ loginRequired: false, path: '' }),
+      null,
+      null,
+      { timeoutMs: 0, pollMs: 1 },
+      state,
+    ),
+    /exactly one visible element/,
+  );
+  assert.equal(state.last, null);
 });
 
 test('application readiness waits for load and has a bounded network-idle fallback', async () => {

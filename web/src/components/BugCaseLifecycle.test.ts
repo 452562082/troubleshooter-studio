@@ -45,6 +45,39 @@ describe('BugCaseLifecycle', () => {
     expect(primaryActionFor(incident('fixed_verified'))).toBeUndefined()
   })
 
+  it('uses a four-stage remediation flow and requires an audited action before regression', async () => {
+    const snapshot = detail('waiting_remediation')
+    snapshot.case.current_attempt_id = 'root-config'
+    snapshot.attempts = [{
+      id: 'root-config', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded',
+      agent_target: 'codex', bot_key: 'base|codex', input_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {},
+      output_json: {
+        investigation_status: 'root_cause_ready', root_cause_type: 'configuration',
+        remediation: { mode: 'operator_action', target: 'one2all/base-test', summary: '回滚错误配置', rollback: '恢复当前配置快照', verification: '重新执行原始场景' },
+      },
+    }]
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+
+    expect(primaryActionFor(snapshot)).toEqual({ kind: 'complete_remediation', label: '确认处置完成并回归', approval: true })
+    expect(wrapper.findAll('.lifecycle-stage')).toHaveLength(4)
+    expect(wrapper.get('.stage-progress').classes()).toContain('is-remediation')
+    expect(wrapper.get('.current-action-card').text()).toContain('根因不需要修改代码')
+
+    await wrapper.get('.primary-action').trigger('click')
+    const confirm = wrapper.get<HTMLButtonElement>('[data-confirm]')
+    expect(wrapper.get('[role="dialog"]').text()).toContain('one2all/base-test')
+    expect(wrapper.get('[role="dialog"]').text()).toContain('回滚错误配置')
+    expect(confirm.element.disabled).toBe(true)
+    await wrapper.get('#remediation-summary').setValue('已回滚 dataId base.yml 至版本 42')
+    await wrapper.get('#remediation-evidence').setValue('变更单 CFG-42，Grafana 告警已恢复')
+    expect(confirm.element.disabled).toBe(false)
+    await confirm.trigger('click')
+    expect(wrapper.emitted('primary')).toEqual([[{
+      kind: 'complete_remediation', rootCauseAttemptID: 'root-config', caseVersion: 2,
+      input: '已回滚 dataId base.yml 至版本 42', evidence: '变更单 CFG-42，Grafana 告警已恢复',
+    }]])
+  })
+
   it.each(['browser_login_required', 'browser_runtime_broken', 'validator_not_installed', 'browser_verifier_failed'])('does not map browser system code %s to the generic evidence textarea', errorCode => {
     const snapshot = detail('waiting_evidence')
     snapshot.case.current_attempt_id = 'validation-1'
@@ -70,6 +103,40 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.emitted('primary')).toEqual([[{ kind: 'retry_validation' }]])
     expect(wrapper.find('#case-supplement').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('raw rejected output')
+  })
+
+  it('retries a failed validation agent inside the current Case without rebuilding it', async () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'validation-agent-failed'
+    snapshot.attempts = [{ id: 'validation-agent-failed', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'claude-code', bot_key: 'base|claude-code', input_json: { mode: 'reproduce' }, output_json: { error_code: 'browser_validator_failed' }, parent_attempt_id: '', started_at: '', error_code: 'browser_validator_failed', error_message: 'private provider failure', usage: {} }]
+
+    expect(primaryActionFor(snapshot)).toEqual({ kind: 'retry_validation', label: '重试当前验证' })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    expect(wrapper.get('[data-browser-state="retry"]').text()).toContain('当前 Case')
+    expect(wrapper.get('.primary-action').text()).toBe('重试当前验证')
+    await wrapper.get('.primary-action').trigger('click')
+    expect(wrapper.emitted('primary')).toEqual([[{ kind: 'retry_validation' }]])
+    expect(wrapper.find('#case-supplement').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('private provider failure')
+  })
+
+  it.each([
+    ['browser_validator_attachment_failed', 'attachment'],
+    ['browser_validator_no_output', 'process'],
+    ['browser_validator_process_failed', 'process'],
+  ])('retries classified validation agent failure %s inside the current Case', async (errorCode, browserState) => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'validation-agent-classified'
+    snapshot.attempts = [{ id: 'validation-agent-classified', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'claude-code', bot_key: 'base|claude-code', input_json: { mode: 'reproduce' }, output_json: { error_code: errorCode }, parent_attempt_id: '', started_at: '', error_code: errorCode, error_message: 'private provider failure', usage: {} }]
+
+    expect(primaryActionFor(snapshot)).toEqual({ kind: 'retry_validation', label: '重试当前验证' })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    expect(wrapper.find(`[data-browser-state="${browserState}"]`).exists()).toBe(true)
+    expect(wrapper.get('.primary-action').text()).toBe('重试当前验证')
+    await wrapper.get('.primary-action').trigger('click')
+    expect(wrapper.emitted('primary')).toEqual([[{ kind: 'retry_validation' }]])
+    expect(wrapper.find('#case-supplement').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('private provider failure')
   })
 
   it('renders login recovery controls and forwards exact browser actions', async () => {

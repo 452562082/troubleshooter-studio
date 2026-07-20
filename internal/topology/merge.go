@@ -12,7 +12,8 @@ type Override struct {
 	Action      string `json:"action" yaml:"action"`
 	FromService string `json:"from_service" yaml:"from_service"`
 	ToService   string `json:"to_service" yaml:"to_service"`
-	Protocol    string `json:"protocol" yaml:"protocol"`
+	Scope       string `json:"scope,omitempty" yaml:"scope,omitempty"`
+	Protocol    string `json:"protocol,omitempty" yaml:"protocol,omitempty"`
 	Method      string `json:"method,omitempty" yaml:"method,omitempty"`
 	Path        string `json:"path,omitempty" yaml:"path,omitempty"`
 	RPCMethod   string `json:"rpc_method,omitempty" yaml:"rpc_method,omitempty"`
@@ -30,8 +31,13 @@ func Merge(edges []CandidateEdge, overrides []Override) []CandidateEdge {
 		candidate := cloneCandidateEdge(current)
 		key := candidateSemanticKey(candidate)
 		decision, ok := decisions[key]
+		decisionKey := key
+		if !ok {
+			decisionKey = serviceOverrideKey(candidate.FromService, candidate.ToService)
+			decision, ok = decisions[decisionKey]
+		}
 		if ok {
-			matched[key] = true
+			matched[decisionKey] = true
 			switch decision.Action {
 			case "reject":
 				candidate.Status = "rejected"
@@ -101,6 +107,14 @@ func normalizeOverride(override Override) Override {
 	override.Action = strings.ToLower(strings.TrimSpace(override.Action))
 	override.FromService = strings.TrimSpace(override.FromService)
 	override.ToService = strings.TrimSpace(override.ToService)
+	override.Scope = strings.ToLower(strings.TrimSpace(override.Scope))
+	if override.Scope == "service" {
+		override.Protocol = ""
+		override.Method = ""
+		override.Path = ""
+		override.RPCMethod = ""
+		return override
+	}
 	override.Protocol = normalizedProtocol(override.Protocol)
 	if override.Protocol == "http" {
 		override.Method = NormalizeHTTPMethod(override.Method)
@@ -115,6 +129,9 @@ func normalizeOverride(override Override) Override {
 }
 
 func overrideSemanticKey(override Override) string {
+	if override.Scope == "service" {
+		return serviceOverrideKey(override.FromService, override.ToService)
+	}
 	return semanticEdgeKey(
 		override.FromService,
 		override.ToService,
@@ -123,6 +140,10 @@ func overrideSemanticKey(override Override) string {
 		override.Path,
 		override.RPCMethod,
 	)
+}
+
+func serviceOverrideKey(from, to string) string {
+	return strings.Join([]string{"service", strings.TrimSpace(from), strings.TrimSpace(to)}, "\x1f")
 }
 
 func candidateSemanticKey(candidate CandidateEdge) string {

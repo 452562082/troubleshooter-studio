@@ -51,9 +51,47 @@ type InvestigationResult struct {
 	Environment         string              `yaml:"environment" json:"environment"`
 	RootCause           string              `yaml:"root_cause,omitempty" json:"root_cause,omitempty"`
 	Confidence          string              `yaml:"confidence,omitempty" json:"confidence,omitempty"`
+	RootCauseType       RootCauseType       `yaml:"root_cause_type,omitempty" json:"root_cause_type,omitempty"`
+	Remediation         RemediationPlan     `yaml:"remediation,omitempty" json:"remediation,omitempty"`
 	CallChain           []CallChainHop      `yaml:"call_chain" json:"call_chain"`
 	Evidence            []ArtifactReference `yaml:"evidence" json:"evidence"`
 	Gaps                []string            `yaml:"gaps" json:"gaps"`
+}
+
+type RootCauseType string
+
+const (
+	RootCauseCode               RootCauseType = "code"
+	RootCauseData               RootCauseType = "data"
+	RootCauseConfiguration      RootCauseType = "configuration"
+	RootCauseInfrastructure     RootCauseType = "infrastructure"
+	RootCauseNetwork            RootCauseType = "network"
+	RootCauseExternalDependency RootCauseType = "external_dependency"
+	RootCauseTransient          RootCauseType = "transient"
+)
+
+type RemediationMode string
+
+const (
+	RemediationCodeChange       RemediationMode = "code_change"
+	RemediationOperatorAction   RemediationMode = "operator_action"
+	RemediationExternalRecovery RemediationMode = "external_recovery"
+	RemediationObserveOnly      RemediationMode = "observe_only"
+)
+
+// RemediationPlan tells the orchestrator which workflow owns the next action.
+// It is deliberately descriptive: investigation remains read-only and never
+// grants permission to mutate data, configuration, or runtime resources.
+type RemediationPlan struct {
+	Mode         RemediationMode `yaml:"mode,omitempty" json:"mode,omitempty"`
+	Target       string          `yaml:"target,omitempty" json:"target,omitempty"`
+	Summary      string          `yaml:"summary,omitempty" json:"summary,omitempty"`
+	Rollback     string          `yaml:"rollback,omitempty" json:"rollback,omitempty"`
+	Verification string          `yaml:"verification,omitempty" json:"verification,omitempty"`
+}
+
+func (r InvestigationResult) UsesCodeFixWorkflow() bool {
+	return r.RootCauseType == RootCauseCode && r.Remediation.Mode == RemediationCodeChange
 }
 
 // CallChainHop is one evidence-backed location in an investigation path. The
@@ -809,7 +847,7 @@ func formattedPromptJSON(raw json.RawMessage) (string, error) {
 }
 
 func (r *AgentPhaseRunner) validateRegressionInputBinding(ctx context.Context, attempt PhaseAttempt, input RegressionValidationInput) error {
-	if strings.TrimSpace(input.OriginalValidationAttemptID) == "" || strings.TrimSpace(input.OriginalReproduction) == "" || strings.TrimSpace(input.ExpectedBehavior) == "" || strings.TrimSpace(input.OriginalObservedBehavior) == "" || strings.TrimSpace(input.OriginalScenarioHash) == "" || input.CycleNumber < 1 || strings.TrimSpace(input.DeploymentObservationID) == "" || strings.TrimSpace(input.DeploymentReservationID) == "" || strings.TrimSpace(input.TargetEnvironment) == "" || len(input.ExpectedFixCommits) == 0 {
+	if strings.TrimSpace(input.OriginalValidationAttemptID) == "" || strings.TrimSpace(input.OriginalReproduction) == "" || strings.TrimSpace(input.ExpectedBehavior) == "" || strings.TrimSpace(input.OriginalObservedBehavior) == "" || strings.TrimSpace(input.OriginalScenarioHash) == "" || input.CycleNumber < 1 || strings.TrimSpace(input.DeploymentObservationID) == "" || strings.TrimSpace(input.DeploymentReservationID) == "" || strings.TrimSpace(input.TargetEnvironment) == "" || (len(input.ExpectedFixCommits) == 0 && strings.TrimSpace(input.RemediationBindingID) == "") {
 		return errors.New("regression input requires original validation, reproduction, expected behavior, scenario hash, cycle, deployment observation, expected commits, and target environment")
 	}
 	for repo, commit := range input.ExpectedFixCommits {
@@ -837,7 +875,7 @@ func buildStructuredInvestigationPrompt(bug Bug, bot BotRef) string {
 	}
 	sb.WriteString(GenerateContext(bug, bot))
 	sb.WriteString("\n最终只输出严格 YAML，不得添加字段或解释性段落：\n")
-	sb.WriteString("investigation_status: root_cause_ready | insufficient_info\nenvironment: <env>\nroot_cause: <直接和深层根因；信息不足时为空>\nconfidence: high | medium | low\ncall_chain:\n  - kind: <browser|frontend|gateway|service|queue|datastore|external>\n    name: <节点名称>\n    service: <可空>\n    repo: <可空>\n    revision: <可空；必须是实际部署版本>\n    protocol: <可空>\n    operation: <可空；HTTP method/path、RPC method、topic/queue 等>\n    file: <可空；仓库相对路径>\n    line: 0 # 未知时为 0\n    precision: runtime_verified | source_mapped | deployed_revision | static_candidate | unavailable\n    evidence: <可空；支持该跳的证据摘要>\n    request_id: <可空>\n    trace_id: <可空>\nevidence:\n  - kind: <trace|log|metric|code|config|data|command>\n    path: <Studio staging 目录内的相对路径>\n    captured_at: <RFC3339；仅兼容输出，Studio 以 fstat 为准>\n    environment: <env>\n    version: <可空>\n    request_id: <可空>\n    trace_id: <可空>\n    redaction_status: redacted | not_required # Studio 总会重新扫描\ngaps: []\n")
+	sb.WriteString("investigation_status: root_cause_ready | insufficient_info\nenvironment: <env>\nroot_cause: <直接和深层根因；信息不足时为空>\nconfidence: high | medium | low\nroot_cause_type: code | data | configuration | infrastructure | network | external_dependency | transient\nremediation:\n  mode: code_change | operator_action | external_recovery | observe_only\n  target: <需要改动或等待恢复的具体对象>\n  summary: <最小处置建议；排障阶段不得执行写操作>\n  rollback: <operator_action 必填；其它模式可空>\n  verification: <处置后如何用原场景回归>\ncall_chain:\n  - kind: <browser|frontend|gateway|service|queue|datastore|external>\n    name: <节点名称>\n    service: <可空>\n    repo: <可空>\n    revision: <可空；必须是实际部署版本>\n    protocol: <可空>\n    operation: <可空；HTTP method/path、RPC method、topic/queue 等>\n    file: <可空；仓库相对路径>\n    line: 0 # 未知时为 0\n    precision: runtime_verified | source_mapped | deployed_revision | static_candidate | unavailable\n    evidence: <可空；支持该跳的证据摘要>\n    request_id: <可空>\n    trace_id: <可空>\nevidence:\n  - kind: <trace|log|metric|code|config|data|command>\n    path: <Studio staging 目录内的相对路径>\n    captured_at: <RFC3339；仅兼容输出，Studio 以 fstat 为准>\n    environment: <env>\n    version: <可空>\n    request_id: <可空>\n    trace_id: <可空>\n    redaction_status: redacted | not_required # Studio 总会重新扫描\ngaps: []\n")
 	return sb.String()
 }
 
@@ -1060,6 +1098,9 @@ type RegressionValidationInput struct {
 	OriginalScenarioHash        string            `json:"scenario_hash"`
 	CycleNumber                 int               `json:"cycle_number"`
 	ExpectedFixCommits          map[string]string `json:"expected_fix_commits"`
+	RemediationBindingID        string            `json:"remediation_binding_id,omitempty"`
+	RemediationType             RootCauseType     `json:"remediation_type,omitempty"`
+	RemediationSummary          string            `json:"remediation_summary,omitempty"`
 	DeploymentObservationID     string            `json:"deployment_observation_id"`
 	DeploymentReservationID     string            `json:"deployment_reservation_id"`
 	ObservedDeploymentVersion   string            `json:"observed_deployment_version"`
@@ -1121,6 +1162,16 @@ func ParseInvestigationResult(data []byte) (InvestigationResult, error) {
 		if len(result.Gaps) != 0 {
 			return InvestigationResult{}, errors.New("root_cause_ready must not contain blocking gaps")
 		}
+		// Results produced before remediation routing existed were necessarily
+		// code-fix results. Preserve those already-durable Cases while requiring
+		// every new prompt to emit the explicit fields below.
+		if result.RootCauseType == "" && result.Remediation.Mode == "" {
+			result.RootCauseType = RootCauseCode
+			result.Remediation = RemediationPlan{Mode: RemediationCodeChange, Target: "legacy investigation result", Summary: result.RootCause, Verification: "run regression validation"}
+		}
+		if err := validateRemediationPlan(result.RootCauseType, result.Remediation); err != nil {
+			return InvestigationResult{}, err
+		}
 	case "insufficient_info":
 	default:
 		return InvestigationResult{}, fmt.Errorf("unsupported investigation status %q", result.InvestigationStatus)
@@ -1167,6 +1218,44 @@ func ParseInvestigationResult(data []byte) (InvestigationResult, error) {
 		}
 	}
 	return result, nil
+}
+
+func validateRemediationPlan(rootCauseType RootCauseType, plan RemediationPlan) error {
+	switch rootCauseType {
+	case RootCauseCode:
+		if plan.Mode != RemediationCodeChange {
+			return errors.New("code root cause requires code_change remediation")
+		}
+	case RootCauseData, RootCauseConfiguration, RootCauseInfrastructure, RootCauseNetwork:
+		if plan.Mode != RemediationOperatorAction {
+			return fmt.Errorf("%s root cause requires operator_action remediation", rootCauseType)
+		}
+	case RootCauseExternalDependency:
+		if plan.Mode != RemediationExternalRecovery {
+			return errors.New("external_dependency root cause requires external_recovery remediation")
+		}
+	case RootCauseTransient:
+		if plan.Mode != RemediationObserveOnly {
+			return errors.New("transient root cause requires observe_only remediation")
+		}
+	default:
+		return fmt.Errorf("unsupported root_cause_type %q", rootCauseType)
+	}
+	for name, value := range map[string]string{"target": plan.Target, "summary": plan.Summary, "verification": plan.Verification} {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("remediation %s is required", name)
+		}
+		if len(value) > 2000 {
+			return fmt.Errorf("remediation %s is too large", name)
+		}
+	}
+	if plan.Mode == RemediationOperatorAction && strings.TrimSpace(plan.Rollback) == "" {
+		return errors.New("operator_action remediation requires rollback")
+	}
+	if len(plan.Rollback) > 2000 {
+		return errors.New("remediation rollback is too large")
+	}
+	return nil
 }
 
 func ParsePhaseResult(attempt PhaseAttempt, data []byte) (PhaseResult, error) {
@@ -1254,6 +1343,9 @@ func BuildRegressionValidationPrompt(bug Bug, bot BotRef, input RegressionValida
 		observedVersion = "<未采集；不要猜测，回归证据 version 可留空>"
 	}
 	fmt.Fprintf(&sb, "original_validation_attempt_id: %s\noriginal_reproduction: %s\nexpected_behavior: %s\noriginal_observed_behavior: %s\nscenario_hash: %s\ncycle_number: %d\ntarget_environment: %s\ndeployment_observation_id: %s\ndeployment_reservation_id: %s\nobserved_deployment_version: %s\n", input.OriginalValidationAttemptID, input.OriginalReproduction, input.ExpectedBehavior, input.OriginalObservedBehavior, input.OriginalScenarioHash, input.CycleNumber, input.TargetEnvironment, input.DeploymentObservationID, input.DeploymentReservationID, observedVersion)
+	if input.RemediationBindingID != "" {
+		fmt.Fprintf(&sb, "remediation_binding_id: %s\nremediation_type: %s\nremediation_summary: %s\n", input.RemediationBindingID, input.RemediationType, input.RemediationSummary)
+	}
 	sb.WriteString("expected_fix_commits:\n")
 	keys := make([]string, 0, len(input.ExpectedFixCommits))
 	for key := range input.ExpectedFixCommits {

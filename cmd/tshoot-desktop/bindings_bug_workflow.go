@@ -185,6 +185,16 @@ type ApproveIncidentFixInput struct {
 	InputJSON          map[string]any `json:"input_json,omitempty"`
 }
 
+type CompleteIncidentRemediationInput struct {
+	CaseID             string `json:"case_id"`
+	ExpectedVersion    int64  `json:"expected_version"`
+	IdempotencyKey     string `json:"idempotency_key"`
+	ActorID            string `json:"actor_id"`
+	RootCauseAttemptID string `json:"root_cause_attempt_id"`
+	Summary            string `json:"summary"`
+	Evidence           string `json:"evidence"`
+}
+
 type ApproveIncidentMergeInput struct {
 	CaseID          string            `json:"case_id"`
 	ExpectedVersion int64             `json:"expected_version"`
@@ -1030,6 +1040,36 @@ func (a *App) ApproveIncidentFix(input ApproveIncidentFixInput) (bughub.Incident
 		return bughub.IncidentCase{}, err
 	}
 	incident, err := orchestrator.ApproveFix(a.workflowCommandContext(), bughub.ApproveFixCommand{CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID), RootCauseAttemptID: strings.TrimSpace(input.RootCauseAttemptID), Bug: bug, Bot: bot, InputJSON: inputJSON})
+	a.emitIncidentResult(incident, err)
+	return incident, err
+}
+
+func (a *App) CompleteIncidentRemediation(input CompleteIncidentRemediationInput) (bughub.IncidentCase, error) {
+	if err := validateWorkflowCommandScalars(input.CaseID, input.ExpectedVersion, input.IdempotencyKey, input.ActorID); err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	if strings.TrimSpace(input.RootCauseAttemptID) == "" {
+		return bughub.IncidentCase{}, errors.New("root_cause_attempt_id is required")
+	}
+	expectedKey := bughub.CompleteRemediationKey(strings.TrimSpace(input.CaseID), strings.TrimSpace(input.RootCauseAttemptID), input.ExpectedVersion)
+	if strings.TrimSpace(input.IdempotencyKey) != expectedKey {
+		return bughub.IncidentCase{}, errors.New("remediation confirmation key does not match the dialog snapshot scope")
+	}
+	_, orchestrator, err := a.workflowComponents()
+	if err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	bug, bot, err := a.loadIncidentContext(input.CaseID)
+	if err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	if err := a.requireIncidentBrowserRuntimeReady(bug); err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	incident, err := orchestrator.CompleteRemediation(a.workflowCommandContext(), bughub.CompleteRemediationCommand{
+		CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID),
+		RootCauseAttemptID: strings.TrimSpace(input.RootCauseAttemptID), Summary: strings.TrimSpace(input.Summary), Evidence: strings.TrimSpace(input.Evidence), Bug: bug, Bot: bot,
+	})
 	a.emitIncidentResult(incident, err)
 	return incident, err
 }

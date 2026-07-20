@@ -80,7 +80,8 @@ export interface ServiceTopologyOverrideState {
   action: 'confirm' | 'reject' | 'add'
   fromService: string
   toService: string
-  protocol: 'http' | 'grpc'
+  scope?: 'service'
+  protocol?: 'http' | 'grpc'
   method?: string
   path?: string
   rpcMethod?: string
@@ -395,7 +396,8 @@ export function generateYAML(ctx: YAMLGenContext): string {
       lines.push(`    - action: ${override.action}`)
       lines.push(`      from_service: ${yamlStr(override.fromService)}`)
       lines.push(`      to_service: ${yamlStr(override.toService)}`)
-      lines.push(`      protocol: ${override.protocol}`)
+      if (override.scope) lines.push(`      scope: ${override.scope}`)
+      if (override.protocol) lines.push(`      protocol: ${override.protocol}`)
       if (override.method) lines.push(`      method: ${yamlStr(override.method)}`)
       if (override.path) lines.push(`      path: ${yamlStr(override.path)}`)
       if (override.rpcMethod) lines.push(`      rpc_method: ${yamlStr(override.rpcMethod)}`)

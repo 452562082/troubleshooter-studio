@@ -295,8 +295,24 @@ func validateServiceTopology(c *SystemConfig) error {
 		}
 
 		override.Protocol = strings.ToLower(override.Protocol)
+		override.Scope = strings.ToLower(strings.TrimSpace(override.Scope))
 		override.Method = strings.ToUpper(override.Method)
 		override.Path = topology.NormalizePath(override.Path)
+		if override.Scope == "service" {
+			if override.Protocol != "" || override.Method != "" || override.Path != "" || override.RPCMethod != "" {
+				return fmt.Errorf("%s: service scope only accepts from_service and to_service", field)
+			}
+			key := override.SemanticKey()
+			if semanticKeys[key] {
+				return fmt.Errorf("%s has duplicate semantic key", field)
+			}
+			semanticKeys[key] = true
+			c.ServiceTopology.Overrides[i] = override
+			continue
+		}
+		if override.Scope != "" {
+			return fmt.Errorf("%s.scope=%q invalid (valid: service)", field, override.Scope)
+		}
 		switch override.Protocol {
 		case "http":
 			if override.Method == "" || override.Path == "" || override.RPCMethod != "" {

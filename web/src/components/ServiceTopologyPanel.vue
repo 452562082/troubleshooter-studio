@@ -2,19 +2,17 @@
 import { computed, ref, watch } from 'vue'
 import { topology } from '../../wailsjs/go/models'
 import type { ServiceTopologyOverrideState } from '../lib/yamlGenerator'
-import {
-  overrideForEdge,
-  retargetTopologyOverride,
-  upsertTopologyOverride,
-} from '../lib/useServiceTopology'
+import { upsertTopologyOverride } from '../lib/useServiceTopology'
 
 const props = withDefaults(defineProps<{
   snapshot: topology.Snapshot | null
   overrides: ServiceTopologyOverrideState[]
+  configuredServices?: string[]
   loading: boolean
   disabled?: boolean
   error?: string
 }>(), {
+  configuredServices: () => [],
   disabled: false,
   error: '',
 })
@@ -24,36 +22,82 @@ const emit = defineEmits<{
   refresh: []
 }>()
 
-const selectedKey = ref('')
+const selectedRelationKey = ref('')
 const retargetService = ref('')
 const addFrom = ref('')
 const addTo = ref('')
-const addProtocol = ref<'http' | 'grpc'>('http')
-const addMethod = ref('GET')
-const addPath = ref('')
-const addRPCMethod = ref('')
 const retargetTouched = ref(false)
 const addTouched = ref(false)
 
 const locked = computed(() => props.loading || props.disabled)
-const edges = computed(() => {
+const evidenceEdges = computed(() => {
   const source = props.snapshot?.edges ?? []
   return [...source].sort((left, right) => {
     const priority = (status: string) => status === 'candidate' ? 0 : status === 'stale' ? 1 : 2
     return priority(left.status) - priority(right.status)
   })
 })
-const services = computed(() => [...new Set(
-  (props.snapshot?.services ?? []).map(service => service.service.trim()).filter(Boolean),
-)].sort((left, right) => left.localeCompare(right)))
+interface RelationGroup {
+  key: string
+  fromService: string
+  toService: string
+  edges: topology.CandidateEdge[]
+  status: string
+  confidence: number
+  candidateCount: number
+}
+function relationKey(fromService: string, toService: string): string {
+  return `${fromService.trim()}\u001f${toService.trim()}`
+}
+function relationStatus(edges: topology.CandidateEdge[]): string {
+  const priority = ['candidate', 'manual', 'confirmed', 'automatic', 'rejected', 'stale']
+  return priority.find(status => edges.some(edge => edge.status === status)) ?? edges[0]?.status ?? ''
+}
+const relationGroups = computed<RelationGroup[]>(() => {
+  const groups = new Map<string, RelationGroup>()
+  for (const edge of evidenceEdges.value) {
+    const key = relationKey(edge.from_service, edge.to_service)
+    let group = groups.get(key)
+    if (!group) {
+      group = {
+        key,
+        fromService: edge.from_service,
+        toService: edge.to_service,
+        edges: [],
+        status: '',
+        confidence: 0,
+        candidateCount: 0,
+      }
+      groups.set(key, group)
+    }
+    group.edges.push(edge)
+    group.confidence = Math.max(group.confidence, edge.confidence)
+    if (edge.status === 'candidate') group.candidateCount++
+  }
+  return [...groups.values()].map(group => ({ ...group, status: relationStatus(group.edges) })).sort((left, right) => {
+    const priority = (status: string) => status === 'candidate' ? 0 : status === 'stale' ? 1 : 2
+    return priority(left.status) - priority(right.status)
+      || left.fromService.localeCompare(right.fromService)
+      || left.toService.localeCompare(right.toService)
+  })
+})
+const services = computed(() => [...new Set([
+  ...props.configuredServices,
+  ...(props.snapshot?.services ?? []).map(service => service.service),
+].map(service => service.trim()).filter(Boolean))].sort((left, right) => left.localeCompare(right)))
+const endpoints = computed(() => props.snapshot?.endpoints ?? [])
+const repositories = computed(() => props.snapshot?.repositories ?? [])
+const scannedRepositoryCount = computed(() => repositories.value.filter(repo => repo.state === 'scanned').length)
+const outboundEndpointCount = computed(() => endpoints.value.filter(endpoint => endpoint.direction === 'outbound').length)
+const inboundEndpointCount = computed(() => endpoints.value.filter(endpoint => endpoint.direction === 'inbound').length)
 const serviceSet = computed(() => new Set(services.value))
 function serviceValue(value: string | undefined): string {
   return value?.trim() ?? ''
 }
 const retargetValid = computed(() => {
-  const edge = selectedEdge.value
+  const group = selectedRelation.value
   const target = serviceValue(retargetService.value)
-  return !!edge && serviceSet.value.has(target) && target !== edge.to_service.trim()
+  return !!group && serviceSet.value.has(target) && target !== group.toService.trim()
 })
 const manualServicesValid = computed(() => {
   const fromService = serviceValue(addFrom.value)
@@ -62,13 +106,10 @@ const manualServicesValid = computed(() => {
     && serviceSet.value.has(toService)
     && fromService !== toService
 })
-const manualRouteValid = computed(() => addProtocol.value === 'http'
-  ? !!addMethod.value.trim() && addPath.value.trim().startsWith('/')
-  : !!addRPCMethod.value.trim())
 const validationMessage = computed(() => {
   if (retargetTouched.value && !retargetValid.value) {
     const target = serviceValue(retargetService.value)
-    if (target && target === selectedEdge.value?.to_service.trim()) return '新目标服务不能与当前目标相同。'
+    if (target && target === selectedRelation.value?.toService.trim()) return '新目标服务不能与当前目标相同。'
     return '请选择快照中的有效服务作为新目标。'
   }
   if (addTouched.value && !manualServicesValid.value) {
@@ -93,32 +134,25 @@ function edgeKey(edge: topology.CandidateEdge): string {
   ].join('\u001f')
 }
 
-function edgeID(edge: topology.CandidateEdge): string {
-  const endpointID = edge.from_endpoint?.replace(/:out$/, '')
-  return endpointID || `${edge.from_service}-${edge.to_service}`
-}
-
-const selectedEdge = computed(() => (
-  edges.value.find(edge => edgeKey(edge) === selectedKey.value) ?? null
+const selectedRelation = computed(() => (
+  relationGroups.value.find(group => group.key === selectedRelationKey.value) ?? null
 ))
 
-watch(edges, (nextEdges) => {
-  if (nextEdges.some(edge => edgeKey(edge) === selectedKey.value)) return
-  const preferred = nextEdges.find(edge => edge.status === 'candidate') ?? nextEdges[0]
-  selectedKey.value = preferred ? edgeKey(preferred) : ''
+watch(relationGroups, (nextGroups) => {
+  if (nextGroups.some(group => group.key === selectedRelationKey.value)) return
+  const preferred = nextGroups.find(group => group.status === 'candidate') ?? nextGroups[0]
+  selectedRelationKey.value = preferred?.key ?? ''
 }, { immediate: true })
 
-watch(selectedEdge, (edge) => {
-  retargetService.value = edge?.to_service ?? ''
+watch(selectedRelation, (group) => {
+  retargetService.value = group?.toService ?? ''
   retargetTouched.value = false
 })
 
-const selectedEndpoints = computed(() => {
-  const edge = selectedEdge.value
-  if (!edge) return []
+function endpointsForEdge(edge: topology.CandidateEdge): topology.Endpoint[] {
   const ids = new Set([edge.from_endpoint, edge.to_endpoint].filter(Boolean))
   return (props.snapshot?.endpoints ?? []).filter(endpoint => ids.has(endpoint.id))
-})
+}
 
 const statusMeta: Record<string, { label: string, className: string }> = {
   automatic: { label: '自动采纳', className: 'status--automatic' },
@@ -133,43 +167,49 @@ function statusFor(status: string) {
   return statusMeta[status] ?? { label: status || '未知', className: 'status--unknown' }
 }
 
-function selectEdge(edge: topology.CandidateEdge) {
-  selectedKey.value = edgeKey(edge)
+function selectRelation(group: RelationGroup) {
+  selectedRelationKey.value = group.key
 }
 
 function emitDecision(action: 'confirm' | 'reject') {
-  const edge = selectedEdge.value
-  if (!edge || locked.value) return
-  emit('update:overrides', upsertTopologyOverride(props.overrides, overrideForEdge(action, edge)))
+  const group = selectedRelation.value
+  if (!group || locked.value) return
+  emit('update:overrides', upsertTopologyOverride(props.overrides, {
+    action,
+    scope: 'service',
+    fromService: group.fromService,
+    toService: group.toService,
+  }))
 }
 
 function emitRetarget() {
   retargetTouched.value = true
-  const edge = selectedEdge.value
+  const group = selectedRelation.value
   const target = serviceValue(retargetService.value)
-  if (!edge || !retargetValid.value || locked.value) return
-  emit('update:overrides', retargetTopologyOverride(props.overrides, edge, target))
+  if (!group || !retargetValid.value || locked.value) return
+  const rejected: ServiceTopologyOverrideState = {
+    action: 'reject', scope: 'service', fromService: group.fromService, toService: group.toService,
+  }
+  const replacement: ServiceTopologyOverrideState = {
+    action: 'add', scope: 'service', fromService: group.fromService, toService: target,
+  }
+  emit('update:overrides', upsertTopologyOverride(upsertTopologyOverride(props.overrides, rejected), replacement))
 }
 
 function emitAdd() {
   addTouched.value = true
   const fromService = serviceValue(addFrom.value)
   const toService = serviceValue(addTo.value)
-  if (!manualServicesValid.value || !manualRouteValid.value || locked.value) return
+  if (!manualServicesValid.value || locked.value) return
   const decision: ServiceTopologyOverrideState = {
     action: 'add',
+    scope: 'service',
     fromService,
     toService,
-    protocol: addProtocol.value,
-    ...(addProtocol.value === 'http'
-      ? { method: addMethod.value.trim().toUpperCase(), path: addPath.value.trim() }
-      : { rpcMethod: addRPCMethod.value.trim() }),
   }
   emit('update:overrides', upsertTopologyOverride(props.overrides, decision))
   addFrom.value = ''
   addTo.value = ''
-  addPath.value = ''
-  addRPCMethod.value = ''
   addTouched.value = false
 }
 
@@ -194,15 +234,19 @@ function requestRefresh() {
         data-action="refresh"
         :disabled="locked"
         @click="requestRefresh"
-      >{{ loading ? '分析中…' : '刷新拓扑' }}</button>
+      >{{ loading ? '扫描调用关系中…' : '重新扫描调用关系' }}</button>
     </header>
 
     <p v-if="error" class="topology-error" role="alert">{{ error }}</p>
     <p class="topology-feedback" data-feedback aria-live="polite">
       <template v-if="loading">正在分析仓库端点和跨服务调用关系，请稍候。</template>
       <template v-else-if="disabled">其他任务正在运行，拓扑操作暂时不可用。</template>
-      <template v-else-if="snapshot">已载入 {{ services.length }} 个服务、{{ edges.length }} 条证据边。</template>
-      <template v-else>点击“刷新拓扑”开始分析；编辑仓库字段不会自动触发扫描。</template>
+      <template v-else-if="snapshot">
+        已扫描 {{ scannedRepositoryCount }}/{{ repositories.length }} 个仓库，识别
+        {{ outboundEndpointCount }} 个调用出口、{{ inboundEndpointCount }} 个服务入口，形成
+        {{ evidenceEdges.length }} 条端点证据，聚合为 {{ relationGroups.length }} 条服务关系。
+      </template>
+      <template v-else>点击“重新扫描调用关系”开始分析；编辑仓库字段不会自动触发扫描。</template>
     </p>
 
     <div v-if="snapshot" class="topology-workbench">
@@ -212,70 +256,70 @@ function requestRefresh() {
             <h4 id="topology-graph-title">服务关系</h4>
             <p>待确认候选优先排列，其他高置信度关系仍可检查或拒绝。</p>
           </div>
-          <span class="queue-count">{{ edges.filter(edge => edge.status === 'candidate').length }} 条待确认</span>
+          <span class="queue-count">{{ relationGroups.filter(group => group.status === 'candidate').length }} 条关系待确认</span>
         </div>
 
-        <div v-if="edges.length" class="edge-list">
+        <div v-if="relationGroups.length" class="edge-list">
           <button
-            v-for="edge in edges"
-            :key="edgeKey(edge)"
+            v-for="group in relationGroups"
+            :key="group.key"
             class="edge-button"
-            :class="{ 'edge-button--selected': edgeKey(edge) === selectedKey }"
+            :class="{ 'edge-button--selected': group.key === selectedRelationKey }"
             type="button"
-            :data-edge="edgeID(edge)"
-            :aria-pressed="edgeKey(edge) === selectedKey"
-            :aria-label="`检查 ${edge.from_service} 到 ${edge.to_service} 的调用证据`"
-            @click="selectEdge(edge)"
+            :data-relation="group.key"
+            :data-from-service="group.fromService"
+            :data-to-service="group.toService"
+            :aria-pressed="group.key === selectedRelationKey"
+            :aria-label="`检查 ${group.fromService} 到 ${group.toService} 的调用证据`"
+            @click="selectRelation(group)"
           >
             <span class="edge-route">
-              <strong>{{ edge.from_service }}</strong>
+              <strong>{{ group.fromService }}</strong>
               <span aria-hidden="true" class="edge-arrow">→</span>
-              <strong>{{ edge.to_service }}</strong>
+              <strong>{{ group.toService }}</strong>
             </span>
             <span class="edge-meta">
               <span
                 data-status
                 class="status-badge"
-                :class="statusFor(edge.status).className"
-              >{{ statusFor(edge.status).label }}</span>
-              <span>{{ Math.round(edge.confidence * 100) }}%</span>
-              <span>{{ edge.protocol.toUpperCase() }}</span>
+                :class="statusFor(group.status).className"
+              >{{ statusFor(group.status).label }}</span>
+              <span>{{ group.edges.length }} 条端点证据</span>
+              <span>最高置信度 {{ Math.round(group.confidence * 100) }}%</span>
             </span>
           </button>
         </div>
-        <p v-else class="empty-state">当前扫描没有发现跨服务调用边。</p>
+        <div v-else class="empty-state topology-empty" data-topology-empty>
+          <strong v-if="endpoints.length">已找到端点，但没有形成跨仓调用关系。</strong>
+          <strong v-else>没有识别到可用于匹配的代码端点。</strong>
+          <p v-if="endpoints.length">
+            当前有 {{ outboundEndpointCount }} 个调用出口、{{ inboundEndpointCount }} 个服务入口；
+            方法、路径或服务别名未能唯一对应。同一仓库内的两个服务不会计为“跨仓”关系。
+          </p>
+          <p v-else>请先确认至少配置了两个不同仓库路径，并且仓库扫描状态正常。</p>
+          <ul v-if="repositories.length" class="repository-scan-list" aria-label="仓库端点扫描结果">
+            <li v-for="repo in repositories" :key="repo.repo">
+              <code>{{ repo.repo }}</code>
+              <span v-if="repo.state === 'scanned'">已识别 {{ repo.endpoint_count }} 个端点</span>
+              <span v-else>{{ repo.state }}<template v-if="repo.error">：{{ repo.error }}</template></span>
+            </li>
+          </ul>
+        </div>
       </section>
 
       <aside class="evidence-panel" aria-labelledby="topology-evidence-title">
-        <template v-if="selectedEdge">
+        <template v-if="selectedRelation">
           <div class="section-heading">
             <div>
-              <h4 id="topology-evidence-title">端点证据</h4>
-              <p>{{ selectedEdge.method || selectedEdge.rpc_method || selectedEdge.protocol }} {{ selectedEdge.path || '' }}</p>
+              <h4 id="topology-evidence-title">关系证据</h4>
+              <p>{{ selectedRelation.fromService }} → {{ selectedRelation.toService }} · {{ selectedRelation.edges.length }} 条端点证据</p>
             </div>
             <span
               data-status
               class="status-badge"
-              :class="statusFor(selectedEdge.status).className"
-            >{{ statusFor(selectedEdge.status).label }}</span>
+              :class="statusFor(selectedRelation.status).className"
+            >{{ statusFor(selectedRelation.status).label }}</span>
           </div>
-
-          <dl class="evidence-list">
-            <div v-for="endpoint in selectedEndpoints" :key="endpoint.id" class="evidence-row">
-              <dt>{{ endpoint.direction === 'outbound' ? '调用端' : '接收端' }}</dt>
-              <dd>
-                <strong>{{ endpoint.service }}</strong>
-                <code>{{ endpoint.location || '无源码位置' }}</code>
-              </dd>
-            </div>
-            <div class="evidence-row">
-              <dt>匹配理由</dt>
-              <dd class="reason-list">
-                <code v-for="reason in selectedEdge.reasons" :key="reason">{{ reason }}</code>
-                <code v-for="conflict in selectedEdge.conflicts" :key="conflict" class="reason-conflict">{{ conflict }}</code>
-              </dd>
-            </div>
-          </dl>
 
           <div class="decision-actions">
             <button
@@ -318,6 +362,31 @@ function requestRefresh() {
               >重定目标</button>
             </div>
           </div>
+
+          <div class="relation-evidence-list" aria-label="端点证据列表">
+            <article v-for="edge in selectedRelation.edges" :key="edgeKey(edge)" class="relation-evidence-card">
+              <header>
+                <strong>{{ edge.method || edge.rpc_method || edge.protocol || '服务级关系' }} {{ edge.path || '' }}</strong>
+                <span>{{ Math.round(edge.confidence * 100) }}%</span>
+              </header>
+              <dl class="evidence-list">
+                <div v-for="endpoint in endpointsForEdge(edge)" :key="endpoint.id" class="evidence-row">
+                  <dt>{{ endpoint.direction === 'outbound' ? '调用端' : '接收端' }}</dt>
+                  <dd>
+                    <strong>{{ endpoint.service }}</strong>
+                    <code>{{ endpoint.location || '无源码位置' }}</code>
+                  </dd>
+                </div>
+                <div v-if="edge.reasons?.length || edge.conflicts?.length" class="evidence-row">
+                  <dt>匹配理由</dt>
+                  <dd class="reason-list">
+                    <code v-for="reason in (edge.reasons ?? [])" :key="reason">{{ reason }}</code>
+                    <code v-for="conflict in (edge.conflicts ?? [])" :key="conflict" class="reason-conflict">{{ conflict }}</code>
+                  </dd>
+                </div>
+              </dl>
+            </article>
+          </div>
         </template>
         <p v-else id="topology-evidence-title" class="empty-state">选择一条关系查看代码位置与匹配理由。</p>
       </aside>
@@ -327,7 +396,7 @@ function requestRefresh() {
       <div class="section-heading">
         <div>
           <h4>人工新增关系</h4>
-          <p>用于补充静态扫描无法识别的动态调用。</p>
+          <p>只补充服务之间的方向关系；协议、方法和路径属于端点证据，无需人工填写。</p>
         </div>
       </div>
       <div class="manual-grid">
@@ -345,33 +414,17 @@ function requestRefresh() {
             <option v-for="service in services" :key="service" :value="service">{{ service }}</option>
           </select>
         </label>
-        <label>
-          协议
-          <select v-model="addProtocol" data-add-protocol>
-            <option value="http">HTTP</option>
-            <option value="grpc">gRPC</option>
-          </select>
-        </label>
-        <label v-if="addProtocol === 'http'">
-          HTTP 方法
-          <input v-model="addMethod" data-add-method type="text" autocomplete="off">
-        </label>
-        <label v-if="addProtocol === 'http'" class="manual-route-field">
-          HTTP 路径
-          <input v-model="addPath" data-add-path type="text" placeholder="/internal/orders" autocomplete="off">
-        </label>
-        <label v-else class="manual-route-field">
-          gRPC 方法
-          <input v-model="addRPCMethod" data-add-rpc-method type="text" placeholder="package.Service/Method" autocomplete="off">
-        </label>
-        <button
-          class="topology-button"
-          type="button"
-          data-action="add"
-          data-mutation
-          :disabled="locked || !manualServicesValid || !manualRouteValid"
-          @click="emitAdd"
-        >新增关系</button>
+        <div class="manual-action">
+          <span class="manual-control-label">操作</span>
+          <button
+            class="topology-button"
+            type="button"
+            data-action="add"
+            data-mutation
+            :disabled="locked || !manualServicesValid"
+            @click="emitAdd"
+          >新增关系</button>
+        </div>
       </div>
       <p class="topology-validation" data-validation role="alert" aria-live="polite">{{ validationMessage }}</p>
     </form>
@@ -478,7 +531,8 @@ function requestRefresh() {
 
 .topology-workbench {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(320px, .75fr) minmax(480px, 1.25fr);
+  align-items: start;
   gap: 16px;
   margin-top: 16px;
 }
@@ -491,6 +545,11 @@ function requestRefresh() {
   border: 1px solid var(--c-line);
   border-radius: var(--r-md);
   background: var(--c-surf);
+}
+
+.topology-graph,
+.evidence-panel {
+  align-self: start;
 }
 
 .queue-count {
@@ -506,7 +565,38 @@ function requestRefresh() {
 .edge-list {
   display: grid;
   gap: 8px;
+  max-height: min(560px, 60vh);
   margin-top: 14px;
+  padding-right: 4px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.topology-empty {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.topology-empty p { margin-bottom: 0; }
+
+.repository-scan-list {
+  display: grid;
+  gap: 6px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.repository-scan-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 9px;
+  border-radius: var(--r-sm);
+  background: var(--c-surf-2);
+  color: var(--c-muted);
+  font-size: 12px;
 }
 
 .edge-button {
@@ -550,7 +640,36 @@ function requestRefresh() {
 .status--unknown { border-color: #cbd5e1; background: #f1f5f9; color: #475569; }
 
 .evidence-list { margin: 14px 0 0; }
-.evidence-row { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 8px; padding: 10px 0; border-top: 1px solid var(--c-line); }
+.relation-evidence-list {
+  display: grid;
+  gap: 10px;
+  max-height: min(560px, 60vh);
+  margin-top: 16px;
+  padding-right: 4px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+.relation-evidence-card {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-md);
+  background: var(--c-surf-2);
+}
+.relation-evidence-card > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 24px;
+  color: var(--c-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.relation-evidence-card > header strong { min-width: 0; color: var(--c-text); overflow-wrap: anywhere; }
+.relation-evidence-card > header span { flex: 0 0 auto; }
+.relation-evidence-card .evidence-list { margin-top: 6px; }
+.evidence-row { display: grid; grid-template-columns: 72px minmax(0, 1fr); align-items: start; gap: 10px; padding: 10px 0; border-top: 1px solid var(--c-line); }
 .evidence-row dt { color: var(--c-muted); font-size: 12px; font-weight: 600; }
 .evidence-row dd { min-width: 0; margin: 0; }
 .evidence-row dd strong,
@@ -575,10 +694,13 @@ function requestRefresh() {
 .inline-controls select { flex: 1 1 160px; min-height: 44px; }
 
 .manual-edge { margin-top: 16px; }
-.manual-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)) 100px 100px; align-items: end; gap: 8px; margin-top: 12px; }
-.manual-route-field { grid-column: span 2; }
+.manual-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)) 144px; align-items: start; gap: 12px; margin-top: 12px; }
 .manual-grid input,
-.manual-grid select { min-height: 44px; }
+.manual-grid select,
+.manual-grid .topology-button { height: 44px; min-height: 44px; }
+.manual-action { display: grid; min-width: 0; gap: 6px; }
+.manual-control-label { color: #475569; font-size: 13px; font-weight: 600; }
+.manual-grid .topology-button { width: 100%; padding-block: 0; }
 .topology-validation { min-height: 21px; margin: 10px 0 0; color: var(--c-danger); font-size: 13px; line-height: 1.5; }
 .empty-state { margin: 16px 0 0; color: var(--c-muted); line-height: 1.5; }
 
@@ -588,9 +710,12 @@ function requestRefresh() {
   .section-heading { flex-direction: column; }
   .topology-header .topology-button { width: 100%; }
   .topology-workbench { grid-template-columns: minmax(0, 1fr); }
+  .edge-list,
+  .relation-evidence-list { max-height: min(480px, 60vh); }
   .manual-grid { grid-template-columns: minmax(0, 1fr); }
   .manual-route-field { grid-column: auto; }
   .manual-grid label,
+  .manual-control-label,
   .retarget-row label,
   .topology-description,
   .section-heading p,
@@ -605,9 +730,10 @@ function requestRefresh() {
   .manual-grid .topology-button { width: 100%; }
 }
 
-@media (min-width: 768px) and (max-width: 1023px) {
+@media (min-width: 768px) and (max-width: 1279px) {
   .topology-workbench { grid-template-columns: minmax(0, 1fr); }
   .manual-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .manual-action { grid-column: 1 / -1; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -91,6 +91,12 @@ import {
   sourceTypeFor,
   type ConfigSourceInstance,
 } from '../lib/configSourceInstances'
+import {
+  isConfigServiceRole,
+  runtimeOnlyServiceNames,
+  supportsRuntimeServiceNames,
+  serviceNamesForRole,
+} from '../lib/repoServiceIdentity'
 
 const router = useRouter()
 
@@ -386,13 +392,9 @@ type RepoRole =
   | 'infra'        // 基础设施(k8s/terraform);不入图
   | 'docs'         // 文档;不入图
 
-// 仅这 4 类角色对应"业务服务",需要识别 service_names 喂给配置中心 / 数据层
-// 扫描;其它角色(frontend / common-lib / mobile / infra / docs)不是服务,不参与
-// 服务名提取 —— 扫了也是噪音(前端没 nacos key、infra 仓没 service ID),反而
-// 误导用户后续步骤。
-function isServiceRole(role?: string): boolean {
-  return role === 'backend' || role === 'gateway' || role === 'middleware' || role === 'admin'
-}
+// 配置服务角色只喂给配置中心 / 数据层；frontend 的 service_names 是独立的运行时
+// 身份，只参与 Web 域名、K8s Deployment、日志和调用链映射。
+const isServiceRole = isConfigServiceRole
 
 // SourceSnapshot:_source 切换时打包暂存的"源相关字段集合"。
 // url / _localPath / _cloneTarget 三者按当前 _source 二选一在用,但都纳入 snapshot
@@ -529,6 +531,13 @@ const repos = reactive<RepoItem[]>(
   // saved 真的存的是窄字符串,直接 cast 一下复用 reactive。yaml import / makeEmptyRepo 仍走窄类型。
   Array.isArray(saved?.repos) && saved.repos.length ? (saved.repos as RepoItem[]) : [makeEmptyRepo()]
 )
+// 老草稿曾主动清掉 frontend.service_names。加载时一次性补成 repo.name，让用户无需
+// 删除草稿或重新扫描，就能立即看到并按真实 Deployment/app 标签修正运行时身份。
+for (const repo of repos) {
+  if (repo.role === 'frontend') {
+    repo.service_names = serviceNamesForRole(repo.role, repo.name, repo.service_names)
+  }
+}
 const scanningAllRepos = ref(false)
 const scanAllRepoStats = reactive({ done: 0, total: 0, failed: 0 })
 
@@ -671,17 +680,11 @@ function applyRoleHint(r: RepoItem) {
   }
 }
 
-// syncServiceNamesWithRole role 改变后,按"是不是业务服务"调 service_names:
-//   service → 留着已有值;空时回填 repo.name 兜底
-//   非 service → 清空(避免污染后续配置中心 / 数据层 / k8s_runtime 扫描)
+// syncServiceNamesWithRole role 改变后同步身份：
+//   配置服务 / frontend → 留着已有值，空时回填 repo.name；
+//   其它角色 → 清空。allServiceNames 仍会过滤 frontend，所以不会污染配置/数据扫描。
 function syncServiceNamesWithRole(r: RepoItem) {
-  if (isServiceRole(r.role)) {
-    if (!r.service_names.trim() && r.name) {
-      r.service_names = r.name
-    }
-  } else {
-    r.service_names = ''
-  }
+  r.service_names = serviceNamesForRole(r.role, r.name, r.service_names)
 }
 
 // onRepoSubPathInput sub_path 改了 → role hint 重算(后端会进入子目录读 package.json/pom.xml 等)
@@ -1646,12 +1649,9 @@ function setK8sRtSvcWorkload(envID: string, svc: string, workload: string) {
   sloc.label_selector = dep?.selector || ''
 }
 
-// 从 repos[].service_names 抽出去重的服务名列表 —— 下拉的每个 env 块都要遍历这一份。
-// **角色非业务服务**(common-lib / docs / infra / frontend / mobile)的 repo 直接跳:
-// 即便它的 service_names 残留了字符串(老 wizard 没清 / yaml 手编辑漏 / state 不一致),
-// 这里 runtime 兜底,Step 6 服务清单不会出现 'docs 仓的名字当成服务' 的噪音。
-// 跟 wizard syncServiceNamesWithRole + yamlImporter 的 role-based 清理三层联动,
-// 任何一层漏了 runtime 这层都能兜住。
+// 从 repos[].service_names 抽出去重的“配置服务名”列表。frontend 即使显式维护了
+// 运行时服务名也在这里跳过，确保配置中心/数据层不会扫描前端；它会在下方
+// runtimeWorkloadNames 单独加入。
 const allServiceNames = computed<string[]>(() => {
   const set = new Set<string>()
   for (const r of repos) {
@@ -1663,15 +1663,13 @@ const allServiceNames = computed<string[]>(() => {
   return Array.from(set)
 })
 
-// 可观测性使用“运行时工作负载”而不是只使用配置中心服务。前端/移动端通常没有
-// Nacos dataId,但仍然需要映射 Deployment、容器日志和 Loki label。
+// 可观测性使用“运行时工作负载”而不是只使用配置中心服务。前端允许显式维护
+// service_names（默认 repo.name），用于映射 Deployment、容器日志和调用链；移动端
+// 没有可编辑的工作负载名，仍用 repo.name 作为 RUM/调用发起方身份。
 const runtimeWorkloadNames = computed<string[]>(() => {
   const set = new Set(allServiceNames.value)
   for (const r of repos) {
-    if (r.role === 'frontend' || r.role === 'mobile') {
-      const name = r.name.trim()
-      if (name) set.add(name)
-    }
+    for (const name of runtimeOnlyServiceNames(r)) set.add(name)
   }
   return Array.from(set)
 })
@@ -3118,11 +3116,10 @@ const {
   repos,
   reposRootInput,
   resolvedReposRoot,
-  // pickBranchForEnv / isServiceRole 的 env 参数类型 InitPage 用的是含 api_domain
+  // pickBranchForEnv 的 env 参数类型 InitPage 用的是含 api_domain
   // 等更多字段的 EnvItem,composable 只用到 id + is_prod 子集 —— 入参用 any 桥过去,
   // 比把 RepoScanEnv 映射到 EnvItem 写一堆 cast 干净。
   pickBranchForEnv: (env, branches) => pickBranchForEnv(env as EnvItem, branches),
-  isServiceRole,
   deriveRepoName,
   generateYAML,
 })
@@ -3690,7 +3687,7 @@ provide(WizardStoreKey, {
         :resolve-clone-dest="resolveCloneDest"
         :submodule-path-for="submodulePathFor"
         :is-git-submodules-hints="isGitSubmodulesHints"
-        :is-service-role="isServiceRole"
+        :supports-runtime-service-names="supportsRuntimeServiceNames"
         :qualify-service-name="qualifyServiceName"
         :repo-service-names-list="repoServiceNamesList"
         :branch-has-options="branchHasOptions"
@@ -3719,6 +3716,7 @@ provide(WizardStoreKey, {
         v-if="showServiceTopology"
         :snapshot="serviceTopologySnapshot"
         :overrides="serviceTopology.overrides"
+        :configured-services="runtimeWorkloadNames"
         :loading="serviceTopologyLoading"
         :disabled="deployLoading || codeGraphRetrying"
         :error="serviceTopologyError"

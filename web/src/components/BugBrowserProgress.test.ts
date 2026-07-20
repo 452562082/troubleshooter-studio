@@ -124,6 +124,14 @@ describe('BugBrowserProgress', () => {
     expect(plan.get('[data-browser-state="plan"]').text()).toContain('未通过结构校验')
     expect(plan.text()).toContain('当前 Case')
     expect(plan.text()).toContain('无需重建故障闭环')
+
+    const attachment = mount(BugBrowserProgress, { props: { attempt: attempt('browser_validator_attachment_failed'), events: [], systemID: 'base', environment: 'test' } })
+    expect(attachment.get('[data-browser-state="attachment"]').text()).toContain('无法读取本次截图证据')
+    expect(attachment.text()).toContain('当前 Case 重试')
+
+    const process = mount(BugBrowserProgress, { props: { attempt: attempt('browser_validator_process_failed'), events: [], systemID: 'base', environment: 'test' } })
+    expect(process.get('[data-browser-state="process"]').text()).toContain('进程异常退出')
+    expect(process.text()).toContain('可以直接重试')
   })
 
   it('never renders an untrusted error code as recovery copy', () => {

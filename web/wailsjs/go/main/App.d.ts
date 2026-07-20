@@ -29,6 +29,8 @@ export function ApproveIncidentFix(arg1:main.ApproveIncidentFixInput):Promise<bu
 
 export function ApproveIncidentMerge(arg1:main.ApproveIncidentMergeInput):Promise<bughub.IncidentCase>;
 
+export function CompleteIncidentRemediation(arg1:main.CompleteIncidentRemediationInput):Promise<bughub.IncidentCase>;
+
 export function BugHookBaseURL():Promise<string>;
 
 export function CancelAnalyze():Promise<boolean>;

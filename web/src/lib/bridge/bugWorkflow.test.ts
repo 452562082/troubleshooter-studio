@@ -6,6 +6,7 @@ import {
   cancelIncidentAttempt,
   continueIncidentCase,
   clearIncidentBrowserSession,
+  completeIncidentRemediation,
   getIncidentArtifactPreview,
   getIncidentCase,
   listIncidentCases,
@@ -99,6 +100,7 @@ describe('incident workflow bridge', () => {
     await expect(startIncidentCase(base)).rejects.toThrow(/桌面 app/)
     await expect(continueIncidentCase({ ...base, phase: 'validation' })).rejects.toThrow(/桌面 app/)
     await expect(approveIncidentFix({ ...base, root_cause_attempt_id: 'attempt-1' })).rejects.toThrow(/桌面 app/)
+    await expect(completeIncidentRemediation({ ...base, root_cause_attempt_id: 'attempt-1', summary: 'rolled back config', evidence: 'ticket-42' })).rejects.toThrow(/桌面 app/)
     await expect(approveIncidentMerge({ ...base, fix_commits: { api: 'abc' }, target_branches: { api: 'test' } })).rejects.toThrow(/桌面 app/)
     await expect(notifyIncidentDeployed({ ...base, observed_version: 'build-1' })).rejects.toThrow(/桌面 app/)
     await expect(cancelIncidentAttempt({ ...base, attempt_id: 'attempt-1' })).rejects.toThrow(/桌面 app/)
@@ -179,6 +181,18 @@ describe('incident workflow bridge', () => {
 
     expect(start).toHaveBeenCalledWith(input)
     expect(result.version).toBe(8)
+  })
+
+  it('forwards the exact non-code remediation audit scope to Wails', async () => {
+    const complete = vi.fn().mockResolvedValue({ id: 'case-1', status: 'regression_validating', version: 9 })
+    ;(window as any).go = { main: { App: { CompleteIncidentRemediation: complete } } }
+    const input = { case_id: 'case-1', expected_version: 7, idempotency_key: 'complete-remediation:case-1:root-1:7', actor_id: 'user', root_cause_attempt_id: 'root-1', summary: 'rolled back config version 42', evidence: 'change ticket CFG-42' }
+
+    const result = await completeIncidentRemediation(input)
+
+    expect(complete).toHaveBeenCalledWith(input)
+    expect(result.status).toBe('regression_validating')
+    expect(result.version).toBe(9)
   })
 
   it('forwards resetIncidentCase to Wails', async () => {

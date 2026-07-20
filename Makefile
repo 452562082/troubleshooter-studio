@@ -137,7 +137,14 @@ BROWSER_RUNTIME_STAGE ?= .cache/desktop-browser-runtime
 .PHONY: desktop-app
 desktop-app: desktop
 	@echo "▶ preparing pinned Chromium for the desktop bundle"
-	@runtime_src="$$(go run ./cmd/tshoot-browser-runtime --root "$(BROWSER_RUNTIME_STAGE)")"; \
+	@runtime_src="$$(go run ./cmd/tshoot-browser-runtime --root "$(BROWSER_RUNTIME_STAGE)")" || { \
+	  echo "✗ pinned Chromium preparation failed; desktop bundle was not packaged" >&2; \
+	  exit 1; \
+	 }; \
+	 [ -n "$$runtime_src" ] || { \
+	  echo "✗ pinned Chromium preparation returned no runtime directory" >&2; \
+	  exit 1; \
+	 }; \
 	 icon_src="cmd/tshoot-desktop/build/appicon.png"; \
 	 [ -f "cmd/tshoot-desktop/build/appicon.macos.png" ] && icon_src="cmd/tshoot-desktop/build/appicon.macos.png"; \
 	 BIN=$(DESKTOP_BIN) BUNDLE_DIR=$(BUNDLE_DIR) BUNDLE_NAME=$(BUNDLE_NAME) \

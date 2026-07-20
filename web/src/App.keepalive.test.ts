@@ -16,6 +16,7 @@ vi.mock('./lib/bridge', () => ({
   approveIncidentMerge: vi.fn(),
   ackIncidentWorkflowReminder: vi.fn(),
   cancelIncidentAttempt: vi.fn(),
+  completeIncidentRemediation: vi.fn(),
   continueIncidentCase: vi.fn(),
   fetchBugByID: vi.fn(),
   getIncidentCase: vi.fn(),

@@ -198,6 +198,9 @@ type DeploymentReservation struct {
 	CycleNumber             int                           `json:"cycle_number"`
 	Environment             string                        `json:"environment"`
 	ExpectedCommits         map[string]string             `json:"expected_commits"`
+	RemediationBindingID    string                        `json:"remediation_binding_id,omitempty"`
+	RemediationType         RootCauseType                 `json:"remediation_type,omitempty"`
+	RemediationSummary      string                        `json:"remediation_summary,omitempty"`
 	Bug                     Bug                           `json:"bug"`
 	Bot                     BotRef                        `json:"bot"`
 	VerifierInput           DeploymentVerificationRequest `json:"verifier_input"`
@@ -281,6 +284,18 @@ type ApproveFixCommand struct {
 	Bug                Bug
 	Bot                BotRef
 	InputJSON          json.RawMessage
+}
+
+type CompleteRemediationCommand struct {
+	CaseID             string
+	ExpectedVersion    int64
+	IdempotencyKey     string
+	ActorID            string
+	RootCauseAttemptID string
+	Summary            string
+	Evidence           string
+	Bug                Bug
+	Bot                BotRef
 }
 
 type ApproveMergeCommand struct {
@@ -1561,7 +1576,7 @@ func (o *CaseOrchestrator) failSafeRegressionReadiness(ctx context.Context, inci
 	if incident.Status == CaseWaitingEvidence {
 		return incident, true, nil
 	}
-	if incident.Status != CaseDeploymentVerified {
+	if incident.Status != CaseDeploymentVerified && incident.Status != CaseRemediationApplied {
 		return IncidentCase{}, true, cause
 	}
 	reason := "original_validation_scenario_incomplete"
@@ -1908,8 +1923,16 @@ func (o *CaseOrchestrator) applyOutcome(ctx context.Context, incident IncidentCa
 	case PhaseOutcomeSystemFailed:
 		add(CaseWaitingEvidence, "phase_system_failed", "studio", "orchestrator", cmd.OutputJSON)
 	case PhaseOutcomeRootCauseReady:
+		result, err := ParseInvestigationResult(cmd.OutputJSON)
+		if err != nil {
+			return IncidentCase{}, err
+		}
 		add(CaseRootCauseReady, "root_cause_ready", "agent", actor, cmd.OutputJSON)
-		add(CaseWaitingFixApproval, "fix_approval_requested", "studio", "orchestrator", map[string]string{"attempt_id": attempt.ID})
+		if result.UsesCodeFixWorkflow() {
+			add(CaseWaitingFixApproval, "fix_approval_requested", "studio", "orchestrator", map[string]string{"attempt_id": attempt.ID})
+		} else {
+			add(CaseWaitingRemediation, "remediation_confirmation_requested", "studio", "orchestrator", map[string]string{"attempt_id": attempt.ID, "root_cause_type": string(result.RootCauseType), "remediation_mode": string(result.Remediation.Mode)})
+		}
 	case PhaseOutcomeFixPushed:
 		add(CaseFixPushed, "fix_pushed", "agent", actor, cmd.OutputJSON)
 		add(CaseWaitingMergeApproval, "merge_approval_requested", "studio", "orchestrator", map[string]string{"attempt_id": attempt.ID})

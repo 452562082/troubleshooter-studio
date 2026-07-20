@@ -215,11 +215,32 @@ describe('applyParsedYAMLToWizardState observability import', () => {
     expect(ctx.codeIntelligence).toEqual({ enabled: false, provider: 'codegraph' })
   })
 
+  it('preserves frontend runtime service identity without treating it as config data', async () => {
+    const ctx = makeImportCtx()
+    await applyParsedYAMLToWizardState({
+      repos: [
+        {
+          name: 'base-frontend', role: 'frontend', stack: 'node',
+          service_names: ['funhub-web'], env_branches: { test: 'test' },
+        },
+        {
+          name: 'admin-frontend', role: 'frontend', stack: 'node',
+          env_branches: { test: 'test' },
+        },
+      ],
+    }, ctx)
+
+    expect(ctx.repos[0].service_names).toBe('funhub-web')
+    expect(ctx.repos[0].role).toBe('frontend')
+    expect(ctx.repos[1].service_names).toBe('admin-frontend')
+  })
+
   it('imports all topology override actions and ignores scan data', async () => {
     const ctx = makeImportCtx()
     await applyParsedYAMLToWizardState({
       service_topology: {
         overrides: [
+          { action: 'add', scope: 'service', from_service: 'web', to_service: 'catalog' },
           { action: 'confirm', from_service: 'web', to_service: 'bff', protocol: 'http', method: 'GET', path: '/api/orders' },
           { action: 'reject', from_service: 'bff', to_service: 'legacy', protocol: 'grpc', rpc_method: 'legacy.Order/Get' },
           { action: 'add', from_service: 'bff', to_service: 'order', protocol: 'http', method: 'POST', path: '/internal/orders' },
@@ -231,6 +252,7 @@ describe('applyParsedYAMLToWizardState observability import', () => {
 
     expect(ctx.serviceTopology).toEqual({
       overrides: [
+        { action: 'add', scope: 'service', fromService: 'web', toService: 'catalog' },
         { action: 'confirm', fromService: 'web', toService: 'bff', protocol: 'http', method: 'GET', path: '/api/orders' },
         { action: 'reject', fromService: 'bff', toService: 'legacy', protocol: 'grpc', rpcMethod: 'legacy.Order/Get' },
         { action: 'add', fromService: 'bff', toService: 'order', protocol: 'http', method: 'POST', path: '/internal/orders' },

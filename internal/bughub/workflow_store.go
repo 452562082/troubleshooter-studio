@@ -2345,6 +2345,11 @@ func (s *CaseStore) applyCaseMutation(ctx context.Context, mutation CaseMutation
 			if json.Unmarshal(approval.ScopeJSON, &scope) != nil || scope.RootCauseAttemptID != incident.CurrentAttemptID {
 				return result, errors.New("fix approval is not bound to current attempt")
 			}
+		case ApprovalCompleteRemediation:
+			var scope RemediationApprovalScope
+			if json.Unmarshal(approval.ScopeJSON, &scope) != nil || scope.RootCauseAttemptID != incident.CurrentAttemptID || scope.CycleNumber != incident.CycleNumber || scope.BindingID == "" {
+				return result, errors.New("remediation approval is not bound to current cycle and root cause")
+			}
 		case ApprovalMergeEnvironmentBranch:
 			var scope MergeApprovalScope
 			if json.Unmarshal(approval.ScopeJSON, &scope) != nil || scope.CycleNumber != incident.CycleNumber || scope.FixAttemptID != incident.CurrentAttemptID || len(scope.CodeChanges) == 0 {
@@ -2982,7 +2987,7 @@ func (s *CaseStore) latestDeploymentReservationEvent(ctx context.Context, caseID
 	var event TransitionEvent
 	var payload string
 	err := s.db.QueryRowContext(ctx, `SELECT id,case_id,event_type,actor_type,actor_id,idempotency_key,payload_json
-		FROM transition_events WHERE case_id=? AND event_type='deployment_verification_reserved'
+		FROM transition_events WHERE case_id=? AND event_type IN ('deployment_verification_reserved','remediation_regression_reserved')
 		ORDER BY created_at DESC,id DESC LIMIT 1`, caseID).Scan(&event.ID, &event.CaseID, &event.EventType, &event.ActorType, &event.ActorID, &event.IdempotencyKey, &payload)
 	if errors.Is(err, sql.ErrNoRows) {
 		return TransitionEvent{}, false, nil

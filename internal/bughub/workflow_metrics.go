@@ -11,6 +11,7 @@ import (
 const (
 	WorkflowStageValidation     = "validation"
 	WorkflowStageInvestigation  = "investigation"
+	WorkflowStageRemediation    = "remediation"
 	WorkflowStageFix            = "fix"
 	WorkflowStageDeploymentWait = "deployment_wait"
 	WorkflowStageRegression     = "regression"
@@ -219,6 +220,8 @@ func metricStageForStatus(status CaseStatus) string {
 		return WorkflowStageValidation
 	case CaseInvestigating:
 		return WorkflowStageInvestigation
+	case CaseWaitingRemediation, CaseRemediationApplied:
+		return WorkflowStageRemediation
 	case CaseFixing:
 		return WorkflowStageFix
 	case CaseWaitingDeployment:

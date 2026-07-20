@@ -456,6 +456,25 @@ func TestBuildCodexExecCommandUsesHostRepositoryAllowlist(t *testing.T) {
 	}
 }
 
+func TestCodexStagingPathFromPromptRequiresStandaloneDeclaration(t *testing.T) {
+	staging := t.TempDir()
+	prompt := "planner scope: {\"scope\":\"STUDIO_EVIDENCE_STAGING_DIR=" + staging + "\\nWrite evidence here\\n\"}\n"
+	if got := codexStagingPathFromPrompt(prompt); got != "" {
+		t.Fatalf("escaped staging declaration was treated as a host path: %q", got)
+	}
+}
+
+func TestCodexStagingPathFromPromptUsesLastStandaloneDeclaration(t *testing.T) {
+	first := t.TempDir()
+	last := t.TempDir()
+	prompt := "STUDIO_EVIDENCE_STAGING_DIR=" + first + "\n" +
+		"scope={\"text\":\"STUDIO_EVIDENCE_STAGING_DIR=/not/a/real/path\\nignored\"}\n" +
+		"STUDIO_EVIDENCE_STAGING_DIR=" + last + "\n"
+	if got := codexStagingPathFromPrompt(prompt); got != last {
+		t.Fatalf("staging path = %q, want %q", got, last)
+	}
+}
+
 func TestExecutePhaseCommandPreservesPreparedEnvironment(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell environment propagation regression is unix-specific")

@@ -30,6 +30,10 @@ export function ApproveIncidentMerge(arg1) {
   return window['go']['main']['App']['ApproveIncidentMerge'](arg1);
 }
 
+export function CompleteIncidentRemediation(arg1) {
+  return window['go']['main']['App']['CompleteIncidentRemediation'](arg1);
+}
+
 export function BugHookBaseURL() {
   return window['go']['main']['App']['BugHookBaseURL']();
 }

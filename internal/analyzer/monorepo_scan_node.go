@@ -11,9 +11,19 @@ import (
 )
 
 func detectNodeWorkspaces(repoPath string) []SubmoduleHint {
+	patterns, source := readNodeWorkspacePatterns(repoPath)
+	if len(patterns) > 0 {
+		return expandWorkspacePatterns(repoPath, patterns, source)
+	}
+	return nil
+}
+
+// readNodeWorkspacePatterns 统一读取 workspace 声明，供普通 monorepo 提示和
+// “可部署应用”识别共用，避免两条扫描链路得出不同目录集合。
+func readNodeWorkspacePatterns(repoPath string) ([]string, string) {
 	// pnpm-workspace.yaml
 	if patterns := readPnpmWorkspace(repoPath); len(patterns) > 0 {
-		return expandWorkspacePatterns(repoPath, patterns, "pnpm-workspace.yaml")
+		return patterns, "pnpm-workspace.yaml"
 	}
 	// lerna.json
 	if data, err := os.ReadFile(filepath.Join(repoPath, "lerna.json")); err == nil {
@@ -21,7 +31,7 @@ func detectNodeWorkspaces(repoPath string) []SubmoduleHint {
 			Packages []string `json:"packages"`
 		}
 		if err := json.Unmarshal(data, &lerna); err == nil && len(lerna.Packages) > 0 {
-			return expandWorkspacePatterns(repoPath, lerna.Packages, "lerna.json")
+			return lerna.Packages, "lerna.json"
 		}
 	}
 	// turbo.json 不直接列 packages,但 turbo 项目几乎都配 workspaces 在 package.json
@@ -33,17 +43,72 @@ func detectNodeWorkspaces(repoPath string) []SubmoduleHint {
 		if err := json.Unmarshal(data, &pkg); err == nil && len(pkg.Workspaces) > 0 {
 			var arr []string
 			if json.Unmarshal(pkg.Workspaces, &arr) == nil && len(arr) > 0 {
-				return expandWorkspacePatterns(repoPath, arr, "package.json:workspaces")
+				return arr, "package.json:workspaces"
 			}
 			var obj struct {
 				Packages []string `json:"packages"`
 			}
 			if json.Unmarshal(pkg.Workspaces, &obj) == nil && len(obj.Packages) > 0 {
-				return expandWorkspacePatterns(repoPath, obj.Packages, "package.json:workspaces")
+				return obj.Packages, "package.json:workspaces"
 			}
 		}
 	}
-	return nil
+	return nil, ""
+}
+
+// detectDeployableNodeApps 从 workspace 中只挑真正可独立运行、独立构建镜像的应用。
+// package.json 里的包数量不是服务数量：SDK、组件库、eslint config 都不能进入
+// service_names。这里采用强信号“start 脚本 + 同目录 Dockerfile”，并把仓库根应用
+// 也作为一个入口计入。
+func detectDeployableNodeApps(repoPath string) []SubmoduleHint {
+	patterns, source := readNodeWorkspacePatterns(repoPath)
+	if len(patterns) == 0 {
+		return nil
+	}
+
+	hints := make([]SubmoduleHint, 0, 2)
+	if ok, reason := isDeployableNodeApp(repoPath); ok {
+		name := filepath.Base(filepath.Clean(repoPath))
+		role := RecommendRole("node", name, repoPath)
+		hints = append(hints, SubmoduleHint{
+			Name:    name,
+			SubPath: ".",
+			Stack:   "node",
+			Role:    role.Role,
+			Reason:  "仓库根应用: " + reason + " + " + role.Reason,
+		})
+	}
+
+	for _, hint := range expandWorkspacePatterns(repoPath, patterns, source) {
+		if hint.Stack != "node" {
+			continue
+		}
+		full := filepath.Join(repoPath, filepath.FromSlash(hint.SubPath))
+		ok, reason := isDeployableNodeApp(full)
+		if !ok {
+			continue
+		}
+		hint.Reason = hint.Reason + " + " + reason
+		hints = append(hints, hint)
+	}
+	return hints
+}
+
+func isDeployableNodeApp(dir string) (bool, string) {
+	data, err := os.ReadFile(filepath.Join(dir, "package.json"))
+	if err != nil {
+		return false, ""
+	}
+	var pkg struct {
+		Scripts map[string]string `json:"scripts"`
+	}
+	if json.Unmarshal(data, &pkg) != nil || strings.TrimSpace(pkg.Scripts["start"]) == "" {
+		return false, ""
+	}
+	if info, err := os.Stat(filepath.Join(dir, "Dockerfile")); err != nil || info.IsDir() {
+		return false, ""
+	}
+	return true, "package.json 含 start 且有独立 Dockerfile"
 }
 
 func readPnpmWorkspace(repoPath string) []string {

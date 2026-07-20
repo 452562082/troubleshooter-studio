@@ -52,12 +52,23 @@ func StartFixApprovalKey(caseID, rootCauseAttemptID string, caseVersion int64) s
 }
 
 func validateFixApprovalRootCause(ctx context.Context, store *CaseStore, incident IncidentCase, attemptID string) error {
-	if store == nil || strings.TrimSpace(attemptID) == "" || attemptID != incident.CurrentAttemptID {
+	result, err := validatedRootCauseResult(ctx, store, incident, attemptID)
+	if err != nil {
+		return err
+	}
+	if !result.UsesCodeFixWorkflow() {
 		return ErrApprovalScope
+	}
+	return nil
+}
+
+func validatedRootCauseResult(ctx context.Context, store *CaseStore, incident IncidentCase, attemptID string) (InvestigationResult, error) {
+	if store == nil || strings.TrimSpace(attemptID) == "" || attemptID != incident.CurrentAttemptID {
+		return InvestigationResult{}, ErrApprovalScope
 	}
 	attempts, err := store.ListAttempts(ctx, AttemptFilter{CaseID: incident.ID})
 	if err != nil {
-		return err
+		return InvestigationResult{}, err
 	}
 	var latest *PhaseAttempt
 	for index := range attempts {
@@ -68,13 +79,13 @@ func validateFixApprovalRootCause(ctx context.Context, store *CaseStore, inciden
 		}
 	}
 	if latest == nil || latest.ID != attemptID || latest.Status != AttemptStatusSucceeded {
-		return ErrApprovalScope
+		return InvestigationResult{}, ErrApprovalScope
 	}
 	result, err := ParseInvestigationResult(latest.OutputJSON)
 	if err != nil || result.InvestigationStatus != "root_cause_ready" || result.Confidence != "high" || len(result.Gaps) != 0 || result.Environment != incident.Environment {
-		return ErrApprovalScope
+		return InvestigationResult{}, ErrApprovalScope
 	}
-	return nil
+	return result, nil
 }
 
 func ParseFixResult(data []byte) (FixResult, error) {

@@ -74,7 +74,8 @@ defineProps<{
   resolveCloneDest: (r: any) => string
   submodulePathFor: (r: any, sub: string) => string
   isGitSubmodulesHints: (hints: { url?: string }[]) => boolean
-  isServiceRole: (role?: any) => boolean
+  /** 需要展示可编辑运行时身份的角色：配置服务 + frontend。 */
+  supportsRuntimeServiceNames: (role?: any) => boolean
   qualifyServiceName: (repoName: string, hintName: string) => string
   repoServiceNamesList: (r: any) => string[]
   branchHasOptions: (r: any) => boolean
@@ -433,7 +434,7 @@ const emit = defineEmits<{
     </div>
 
     <RepoServiceChips
-      v-if="hasRepoSource(repo) && isServiceRole(repo.role)"
+      v-if="hasRepoSource(repo) && supportsRuntimeServiceNames(repo.role)"
       :repo="repo"
       :index="index"
       :service-names="repoServiceNamesList(repo)"

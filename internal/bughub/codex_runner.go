@@ -525,15 +525,17 @@ func codexFilesystemPermissionConfig(workspace, prompt string, imagePaths []stri
 
 func codexStagingPathFromPrompt(prompt string) string {
 	const marker = "STUDIO_EVIDENCE_STAGING_DIR="
-	index := strings.LastIndex(prompt, marker)
-	if index < 0 {
-		return ""
+	var staging string
+	for _, line := range strings.Split(prompt, "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if !strings.HasPrefix(line, marker) {
+			continue
+		}
+		if candidate := strings.TrimSpace(strings.TrimPrefix(line, marker)); candidate != "" {
+			staging = candidate
+		}
 	}
-	line := prompt[index+len(marker):]
-	if newline := strings.IndexByte(line, '\n'); newline >= 0 {
-		line = line[:newline]
-	}
-	return strings.TrimSpace(line)
+	return staging
 }
 
 func BuildClaudeInvestigationCommand(claudeBin, workspace, agentPath, prompt string) (*exec.Cmd, error) {
@@ -563,6 +565,14 @@ func buildClaudeInvestigationCommand(claudeBin, workspace, agentPath, prompt str
 	args := []string{"-p", "--dangerously-skip-permissions", "--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--verbose", "--agent", agentName}
 	for _, directory := range attachmentDirs {
 		args = append(args, "--add-dir", directory)
+	}
+	// Claude defines --add-dir as a variadic option. Without the option
+	// terminator, the non-interactive prompt is consumed as one more directory
+	// and Claude exits before the phase agent starts. This affects every
+	// screenshot-assisted browser step: planning, locator repair, and final
+	// evidence evaluation.
+	if len(attachmentDirs) != 0 {
+		args = append(args, "--")
 	}
 	args = append(args, prompt)
 	cmd := exec.Command(claudeBin, args...)

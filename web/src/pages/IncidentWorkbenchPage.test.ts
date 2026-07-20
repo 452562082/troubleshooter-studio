@@ -5,6 +5,7 @@ import {
   approveIncidentFix,
   approveIncidentMerge,
   clearIncidentBrowserSession,
+  completeIncidentRemediation,
   continueIncidentCase,
   getIncidentBrowserRuntimeStatus,
   getIncidentCase,
@@ -44,6 +45,7 @@ vi.mock('../lib/bridge', async importOriginal => ({
   approveIncidentMerge: vi.fn(),
   cancelIncidentAttempt: vi.fn(),
   clearIncidentBrowserSession: vi.fn(),
+  completeIncidentRemediation: vi.fn(),
   continueIncidentCase: vi.fn(),
   fetchBugByID: vi.fn(),
   getIncidentBrowserRuntimeStatus: vi.fn().mockResolvedValue({ state: 'ready', version: '1.61.1', error_code: '', message: '' }),
@@ -183,6 +185,7 @@ afterEach(() => {
   vi.mocked(prepareIncidentBrowserRuntime).mockReset().mockResolvedValue()
   vi.mocked(repairIncidentBrowserRuntime).mockReset()
   vi.mocked(clearIncidentBrowserSession).mockReset()
+  vi.mocked(completeIncidentRemediation).mockReset()
   vi.mocked(resetIncidentCaseWithWarnings).mockReset()
   notifications.error.mockReset()
   notifications.success.mockReset()
@@ -832,6 +835,30 @@ describe('IncidentWorkbenchPage', () => {
       case_id: 'case-1', expected_version: 7, root_cause_attempt_id: 'attempt-1', idempotency_key: 'start-fix:case-1:attempt-1:7', actor_id: 'desktop-user',
       input_json: { source_baselines: { 'admin-web': 'feature/new-navigation' } },
     }))
+  })
+
+  it('submits a non-code remediation confirmation and immediately enters regression', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-remediation', 'waiting_remediation', '2026-07-13T00:00:00Z')
+    const snapshot = detail(item, {
+      attempts: [{ id: 'attempt-1', case_id: item.id, cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { investigation_status: 'root_cause_ready', root_cause_type: 'infrastructure', remediation: { mode: 'operator_action', target: 'K8s test/base-api', summary: 'restart unhealthy workload', rollback: 'restore replica set', verification: 'rerun original scenario' } }, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }],
+    })
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    mockCaseDetails(snapshot)
+    vi.mocked(completeIncidentRemediation).mockResolvedValue({ ...item, status: 'regression_validating', version: 9 })
+    const wrapper = await mountedPage()
+
+    await wrapper.get('.primary-action').trigger('click')
+    await wrapper.get('#remediation-summary').setValue('已重建异常 Pod，副本全部 Ready')
+    await wrapper.get('#remediation-evidence').setValue('K8s event UID 42')
+    await wrapper.get('[data-confirm]').trigger('click')
+    await flushPromises()
+
+    expect(completeIncidentRemediation).toHaveBeenCalledWith({
+      case_id: item.id, expected_version: 7, idempotency_key: `complete-remediation:${item.id}:attempt-1:7`, actor_id: 'desktop-user',
+      root_cause_attempt_id: 'attempt-1', summary: '已重建异常 Pod，副本全部 Ready', evidence: 'K8s event UID 42',
+    })
   })
 
   it('snapshots the old and selected replacement bindings before confirming reset', async () => {

@@ -55,10 +55,14 @@ type Repo struct {
 	//   - {name: shared,    url: <truss>, stack: go, role: common-lib, sub_path: shared}
 	// clone 时按 url dedup(同 url 只 clone 一次),analyzer / role-hint / dep-scan
 	// 都在 <clone-root>/<sub_path> 这个子目录里跑。空时整 repo 当一个服务对待(默认行为)。
-	SubPath      string            `yaml:"sub_path,omitempty"`
-	ServiceNames []string          `yaml:"service_names"`
-	EnvBranches  map[string]string `yaml:"env_branches"`
-	Analysis     RepoAnalysis      `yaml:"analysis"`
+	SubPath      string   `yaml:"sub_path,omitempty"`
+	ServiceNames []string `yaml:"service_names"`
+	// ServiceEntries records source ownership for multiple deployable services in
+	// one repository. Keys are service_names and values are repository-relative
+	// entry directories (for example "." and "packages/document").
+	ServiceEntries map[string]string `yaml:"service_entries,omitempty"`
+	EnvBranches    map[string]string `yaml:"env_branches"`
+	Analysis       RepoAnalysis      `yaml:"analysis"`
 	// ConfigSource 引用 infrastructure.config_centers[].id,标明本仓库的配置走哪个源。
 	// 多源场景必填(运行时 routing skill 据此选 MCP);空时 LoadFromBytes 自动绑到
 	// config_centers[0],兼容只有一个源的老 yaml。
@@ -100,12 +104,12 @@ func (r Repo) IsServiceNode() bool {
 }
 
 // RequiresServiceNames 返回是否需要 service_names。比 IsServiceNode 更严:只有
-// "业务服务"四类(backend / gateway / middleware / admin)需要 —— 它们对应 nacos
-// 配置 key、k8s deployment、loki app 标签。frontend / mobile 是"调用发起方"进图但
-// 没自己后端 endpoint(不挂在配置中心、不进 k8s 部署/不进日志聚合),没有 service_names
-// 概念;common-lib / infra / docs 干脆不进图。
+// "业务服务"四类(backend / gateway / middleware / admin)必须提供配置服务名 —— 它们
+// 对应 nacos 配置 key 和数据层归属。frontend 可选填写 service_names 作为独立的运行时
+// 身份（仓库 ↔ Deployment/日志/调用链），但不进入配置中心或数据层扫描；mobile 用
+// repo.name 标识调用发起方；common-lib / infra / docs 干脆不进图。
 //
-// 健康检查 / wizard auto-fill / 模板 emit 都按这个判定决定要不要为该 repo 喂 service_names。
+// 健康检查和配置/数据扫描按这个判定；运行时身份由调用方单独处理。
 func (r Repo) RequiresServiceNames() bool {
 	switch r.EffectiveRole() {
 	case RoleBackend, RoleGateway, RoleMiddleware, RoleAdmin:

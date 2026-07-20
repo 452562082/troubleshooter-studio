@@ -14,6 +14,9 @@ func TestServiceTopologyOverridesValidateAndNormalize(t *testing.T) {
 	}
 	cfg.ServiceTopology.Overrides = []ServiceTopologyOverride{
 		{
+			Action: "add", FromService: "mall-web", ToService: "mall-bff", Scope: "SERVICE",
+		},
+		{
 			Action: "confirm", FromService: "mall-web", ToService: "mall-bff",
 			Protocol: "HTTP", Method: "get", Path: "/api/orders/:id",
 		},
@@ -32,14 +35,17 @@ func TestServiceTopologyOverridesValidateAndNormalize(t *testing.T) {
 	}
 
 	got := cfg.ServiceTopology.Overrides
-	if got[0].Protocol != "http" || got[0].Method != "GET" || got[0].Path != "/api/orders/{param}" {
-		t.Fatalf("normalized confirm override = %#v", got[0])
+	if got[0].Scope != "service" || got[0].Protocol != "" {
+		t.Fatalf("normalized service override = %#v", got[0])
 	}
-	if got[1].Protocol != "grpc" || got[1].RPCMethod != "orders.v1.OrderService/GetOrder" {
-		t.Fatalf("normalized reject override = %#v", got[1])
+	if got[1].Protocol != "http" || got[1].Method != "GET" || got[1].Path != "/api/orders/{param}" {
+		t.Fatalf("normalized confirm override = %#v", got[1])
 	}
-	if got[2].Method != "POST" || got[2].Path != "/api/orders/{param}" {
-		t.Fatalf("normalized add override = %#v", got[2])
+	if got[2].Protocol != "grpc" || got[2].RPCMethod != "orders.v1.OrderService/GetOrder" {
+		t.Fatalf("normalized reject override = %#v", got[2])
+	}
+	if got[3].Method != "POST" || got[3].Path != "/api/orders/{param}" {
+		t.Fatalf("normalized add override = %#v", got[3])
 	}
 }
 
@@ -88,6 +94,19 @@ func TestServiceTopologyOverridesRejectInvalidContract(t *testing.T) {
 			override: ServiceTopologyOverride{
 				Action: "add", FromService: "mall-web", ToService: "mall-bff",
 				Protocol: "grpc", Method: "GET", Path: "/x", RPCMethod: "Service/Get",
+			},
+		},
+		{
+			name: "service scope with route fields",
+			override: ServiceTopologyOverride{
+				Action: "add", FromService: "mall-web", ToService: "mall-bff",
+				Scope: "service", Protocol: "http", Method: "GET", Path: "/x",
+			},
+		},
+		{
+			name: "unknown scope",
+			override: ServiceTopologyOverride{
+				Action: "add", FromService: "mall-web", ToService: "mall-bff", Scope: "repo",
 			},
 		},
 		{

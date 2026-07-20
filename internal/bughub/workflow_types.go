@@ -19,6 +19,8 @@ const (
 	CaseInvestigating        CaseStatus = "investigating"
 	CaseRootCauseReady       CaseStatus = "root_cause_ready"
 	CaseWaitingFixApproval   CaseStatus = "waiting_fix_approval"
+	CaseWaitingRemediation   CaseStatus = "waiting_remediation"
+	CaseRemediationApplied   CaseStatus = "remediation_applied"
 	CaseFixing               CaseStatus = "fixing"
 	CaseFixFailed            CaseStatus = "fix_failed"
 	CaseFixPushed            CaseStatus = "fix_pushed"
@@ -45,6 +47,8 @@ func (s CaseStatus) valid() bool {
 		CaseInvestigating,
 		CaseRootCauseReady,
 		CaseWaitingFixApproval,
+		CaseWaitingRemediation,
+		CaseRemediationApplied,
 		CaseFixing,
 		CaseFixFailed,
 		CaseFixPushed,
@@ -346,8 +350,23 @@ type ApprovalKind string
 
 const (
 	ApprovalStartFix               ApprovalKind = "start_fix"
+	ApprovalCompleteRemediation    ApprovalKind = "complete_remediation"
 	ApprovalMergeEnvironmentBranch ApprovalKind = "merge_environment_branch"
 )
+
+type RemediationApprovalScope struct {
+	RootCauseAttemptID string          `json:"root_cause_attempt_id"`
+	CycleNumber        int             `json:"cycle_number"`
+	RootCauseType      RootCauseType   `json:"root_cause_type"`
+	Mode               RemediationMode `json:"mode"`
+	Target             string          `json:"target"`
+	RecommendedAction  string          `json:"recommended_action"`
+	Rollback           string          `json:"rollback,omitempty"`
+	Verification       string          `json:"verification"`
+	Summary            string          `json:"summary"`
+	Evidence           string          `json:"evidence"`
+	BindingID          string          `json:"binding_id"`
+}
 
 type Approval struct {
 	ID             string            `json:"id"`
@@ -402,6 +421,17 @@ func (a Approval) Validate() error {
 		}
 		if blank(scope.RootCauseAttemptID) {
 			return fmt.Errorf("start-fix approval scope requires root_cause_attempt_id")
+		}
+	case ApprovalCompleteRemediation:
+		var scope RemediationApprovalScope
+		if err := json.Unmarshal(a.ScopeJSON, &scope); err != nil {
+			return fmt.Errorf("decode remediation approval scope: %w", err)
+		}
+		if blank(scope.RootCauseAttemptID) || scope.CycleNumber < 1 || blank(scope.Summary) || blank(scope.Evidence) || blank(scope.BindingID) {
+			return fmt.Errorf("remediation approval scope is incomplete")
+		}
+		if err := validateRemediationPlan(scope.RootCauseType, RemediationPlan{Mode: scope.Mode, Target: scope.Target, Summary: scope.RecommendedAction, Rollback: scope.Rollback, Verification: scope.Verification}); err != nil {
+			return fmt.Errorf("invalid remediation approval scope: %w", err)
 		}
 	case ApprovalMergeEnvironmentBranch:
 		if err := validateNonEmptyStringMap("approval fix commits", a.FixCommits); err != nil {
@@ -499,7 +529,11 @@ func (o DeploymentObservation) Validate() error {
 	if len(o.DiagnosticCode) > 64 || len(o.DiagnosticMessage) > 256 || strings.ContainsAny(o.DiagnosticCode+o.DiagnosticMessage, "\r\n") {
 		return fmt.Errorf("deployment observation diagnostics must be bounded single-line text")
 	}
-	if err := validateNonEmptyStringMap("deployment expected commits", o.ExpectedCommits); err != nil {
+	if len(o.ExpectedCommits) == 0 {
+		if o.VerificationSource != "manual-remediation" || o.DiagnosticCode != "remediation_completed" {
+			return fmt.Errorf("deployment expected commits are required")
+		}
+	} else if err := validateNonEmptyStringMap("deployment expected commits", o.ExpectedCommits); err != nil {
 		return err
 	}
 	if err := validateStringMapEntries("deployment observed images", o.ObservedImages); err != nil {

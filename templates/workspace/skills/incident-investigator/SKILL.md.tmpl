@@ -356,6 +356,19 @@ Codex 用户需要先在 `~/.codex/config.toml` 开 `[sandbox_workspace_write] n
 
 ## 步骤 6:根因标注 + 处置建议
 
+### Studio 根因类型与处置路由
+
+当 Studio phase prompt 要求结构化 `InvestigationResult` 时，故障快报中的结论还必须映射为下面唯一一组类型与处置方式；排障阶段只给建议和证据，**不得执行数据库写入、配置发布、工作负载重启、网络策略修改或外部系统操作**：
+
+| 根因类型 | remediation.mode | 后续闭环 |
+|---|---|---|
+| `code` | `code_change` | 进入修复 Agent、合并、部署、回归 |
+| `data` / `configuration` / `infrastructure` / `network` | `operator_action` | 等待操作人按审批范围处置并提交执行摘要与证据，然后直接启动新鲜回归 |
+| `external_dependency` | `external_recovery` | 等待外部依赖恢复或人工完成供应商处置，再提交恢复证据并回归 |
+| `transient` | `observe_only` | 记录恢复/观察证据后回归，不伪造代码改动 |
+
+`operator_action` 必须给出可回滚方案；所有类型都必须给出具体 target、最小处置建议和原业务场景的验证方式。无法确认类型时输出 `insufficient_info` 和最小关键 gap，不得为了推进流程猜成 `code`。
+
 ### 最终输出契约:故障快报
 
 步骤 6 的最终回答必须使用下面模板,不要改成普通过程列表。证据不足时也要输出故障快报,但把

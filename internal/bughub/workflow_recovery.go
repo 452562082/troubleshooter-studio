@@ -68,8 +68,15 @@ func (o *CaseOrchestrator) RecoverInterrupted(ctx context.Context) error {
 			}
 			continue
 		}
-		if incident.Status == CaseDeploymentVerified {
-			if _, recoveryErr := o.StartRegression(ctx, incident.ID, incident.Version); recoveryErr != nil && !errors.Is(recoveryErr, ErrRegressionDuplicate) {
+		if incident.Status == CaseDeploymentVerified || incident.Status == CaseRemediationApplied {
+			// StartRegression advances the Case and replaces CurrentAttemptID. Mark
+			// this snapshot as consumed so the terminal-attempt reconciliation pass
+			// below does not apply the stale pre-regression version a second time.
+			processedCases[incident.ID] = struct{}{}
+			regression, recoveryErr := o.StartRegression(ctx, incident.ID, incident.Version)
+			if recoveryErr == nil {
+				o.markRecoveryStarted(regression.ID)
+			} else if !errors.Is(recoveryErr, ErrRegressionDuplicate) {
 				if _, handled, readinessErr := o.failSafeRegressionReadiness(ctx, incident, recoveryErr); handled {
 					recoveredErr = errors.Join(recoveredErr, readinessErr)
 				} else {

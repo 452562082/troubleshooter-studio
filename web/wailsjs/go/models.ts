@@ -2027,6 +2027,30 @@ export namespace main {
 	        this.target_heads = source["target_heads"];
 	    }
 	}
+	export class CompleteIncidentRemediationInput {
+	    case_id: string;
+	    expected_version: number;
+	    idempotency_key: string;
+	    actor_id: string;
+	    root_cause_attempt_id: string;
+	    summary: string;
+	    evidence: string;
+
+	    static createFrom(source: any = {}) {
+	        return new CompleteIncidentRemediationInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.case_id = source["case_id"];
+	        this.expected_version = source["expected_version"];
+	        this.idempotency_key = source["idempotency_key"];
+	        this.actor_id = source["actor_id"];
+	        this.root_cause_attempt_id = source["root_cause_attempt_id"];
+	        this.summary = source["summary"];
+	        this.evidence = source["evidence"];
+	    }
+	}
 	export class BugAttachmentPreviewInput {
 	    platform_id: string;
 	    bug_id: string;

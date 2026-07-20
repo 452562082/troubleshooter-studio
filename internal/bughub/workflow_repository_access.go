@@ -52,6 +52,14 @@ func (r *AgentPhaseRunner) SetRepositoryAccessResolver(resolver RepositoryAccess
 // paths are reported as a gap; they are never replaced by a home-directory
 // search, which would trigger macOS App Data privacy prompts.
 func (r *AgentPhaseRunner) materializeRepositoryAccess(ctx context.Context, attempt PhaseAttempt, incident IncidentCase, staging attemptEvidenceStaging, resolver RepositoryAccessResolver, fixWorkspace *FixWorkspaceLease) (string, error) {
+	// Validation and regression own a stricter browser staging protocol: the
+	// durable browser route must be the first published entry. Those phases do
+	// not inspect source code, so do not create an empty repository manifest
+	// before the route journal. Other non-source phases likewise need no
+	// repository permission boundary.
+	if attempt.Phase != PhaseInvestigation && attempt.Phase != PhaseFix {
+		return "", nil
+	}
 	manifest := repositoryAccessManifest{Version: 1, Phase: attempt.Phase}
 	switch attempt.Phase {
 	case PhaseInvestigation:

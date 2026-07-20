@@ -136,7 +136,7 @@ func (o *CaseOrchestrator) StartRegression(ctx context.Context, caseID string, e
 	if incident.Version != expectedVersion {
 		return PhaseAttempt{}, ErrCaseVersionConflict
 	}
-	if incident.Status != CaseDeploymentVerified {
+	if incident.Status != CaseDeploymentVerified && incident.Status != CaseRemediationApplied {
 		if existing, found := o.currentRegressionAttempt(ctx, incident); found {
 			return existing, ErrRegressionDuplicate
 		}
@@ -205,6 +205,12 @@ func (o *CaseOrchestrator) buildRegressionInput(ctx context.Context, incident In
 	if reservation.CycleNumber != incident.CycleNumber || reservation.Environment != incident.Environment || !equalStringMap(reservation.ExpectedCommits, expected) {
 		return RegressionValidationInput{}, DeploymentReservation{}, ErrRegressionBinding
 	}
+	if len(expected) == 0 {
+		scope, scopeErr := o.currentRemediationScope(ctx, incident)
+		if scopeErr != nil || reservation.RemediationBindingID != scope.BindingID || reservation.RemediationType != scope.RootCauseType || reservation.RemediationSummary != scope.Summary {
+			return RegressionValidationInput{}, DeploymentReservation{}, errors.Join(ErrRegressionBinding, scopeErr)
+		}
+	}
 	observations, err := o.store.ListDeploymentObservations(ctx, incident.ID)
 	if err != nil || len(observations) == 0 {
 		return RegressionValidationInput{}, DeploymentReservation{}, errors.Join(ErrRegressionBinding, err)
@@ -240,6 +246,9 @@ func (o *CaseOrchestrator) buildRegressionInput(ctx context.Context, incident In
 		OriginalScenarioHash:        scenarioHash,
 		CycleNumber:                 incident.CycleNumber,
 		ExpectedFixCommits:          CloneStringMap(expected),
+		RemediationBindingID:        reservation.RemediationBindingID,
+		RemediationType:             reservation.RemediationType,
+		RemediationSummary:          reservation.RemediationSummary,
 		DeploymentObservationID:     observation.ID,
 		DeploymentReservationID:     reservation.ReservationID,
 		ObservedDeploymentVersion:   observation.ObservedVersion,
@@ -274,6 +283,15 @@ func (o *CaseOrchestrator) expectedRegressionCommits(ctx context.Context, incide
 	approvals, err := o.store.ListApprovals(ctx, incident.ID)
 	if err != nil {
 		return nil, err
+	}
+	for index := len(approvals) - 1; index >= 0; index-- {
+		if approvals[index].Kind != ApprovalCompleteRemediation {
+			continue
+		}
+		var remediation RemediationApprovalScope
+		if json.Unmarshal(approvals[index].ScopeJSON, &remediation) == nil && remediation.CycleNumber == incident.CycleNumber && remediation.BindingID != "" {
+			return map[string]string{}, nil
+		}
 	}
 	var scope MergeApprovalScope
 	found := false
@@ -310,6 +328,23 @@ func (o *CaseOrchestrator) expectedRegressionCommits(ctx context.Context, incide
 		return nil, ErrApprovalScope
 	}
 	return expected, nil
+}
+
+func (o *CaseOrchestrator) currentRemediationScope(ctx context.Context, incident IncidentCase) (RemediationApprovalScope, error) {
+	approvals, err := o.store.ListApprovals(ctx, incident.ID)
+	if err != nil {
+		return RemediationApprovalScope{}, err
+	}
+	for index := len(approvals) - 1; index >= 0; index-- {
+		if approvals[index].Kind != ApprovalCompleteRemediation {
+			continue
+		}
+		var scope RemediationApprovalScope
+		if json.Unmarshal(approvals[index].ScopeJSON, &scope) == nil && scope.CycleNumber == incident.CycleNumber && scope.BindingID != "" {
+			return scope, nil
+		}
+	}
+	return RemediationApprovalScope{}, ErrApprovalScope
 }
 
 func (o *CaseOrchestrator) originalValidation(ctx context.Context, caseID string) (PhaseAttempt, ValidationResult, []string, error) {
@@ -423,8 +458,14 @@ func (o *CaseOrchestrator) validatePersistedRegressionBinding(ctx context.Contex
 		return errors.Join(ErrRegressionBinding, err)
 	}
 	var reservation DeploymentReservation
-	if json.Unmarshal(reservationEvent.PayloadJSON, &reservation) != nil || validateDeploymentReservationIdentity(reservation, reservationEvent.IdempotencyKey, reservation.CallerIdempotencyKey, reservationEvent.ActorID) != nil || reservation.ReservationID != input.DeploymentReservationID || reservation.CycleNumber != input.CycleNumber || reservation.Environment != input.TargetEnvironment || !equalStringMap(reservation.ExpectedCommits, expected) {
+	if json.Unmarshal(reservationEvent.PayloadJSON, &reservation) != nil || validateDeploymentReservationIdentity(reservation, reservationEvent.IdempotencyKey, reservation.CallerIdempotencyKey, reservationEvent.ActorID) != nil || reservation.ReservationID != input.DeploymentReservationID || reservation.CycleNumber != input.CycleNumber || reservation.Environment != input.TargetEnvironment || !equalStringMap(reservation.ExpectedCommits, expected) || reservation.RemediationBindingID != input.RemediationBindingID || reservation.RemediationType != input.RemediationType || reservation.RemediationSummary != input.RemediationSummary {
 		return ErrRegressionBinding
+	}
+	if len(expected) == 0 {
+		scope, scopeErr := o.currentRemediationScope(ctx, incident)
+		if scopeErr != nil || scope.BindingID != input.RemediationBindingID || scope.RootCauseType != input.RemediationType || scope.Summary != input.RemediationSummary {
+			return errors.Join(ErrRegressionBinding, scopeErr)
+		}
 	}
 	observations, err := o.store.ListDeploymentObservations(ctx, incident.ID)
 	if err != nil {

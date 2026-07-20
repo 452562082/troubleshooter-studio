@@ -2,7 +2,7 @@
 import type { IncidentCase, IncidentCaseDetail as ActionDetail } from '../lib/bridge/bugWorkflow'
 
 export type CasePrimaryAction = {
-  kind: 'start_validation' | 'retry_validation' | 'supply_evidence' | 'approve_fix' | 'continue_fix' | 'approve_merge' | 'supply_merge_decision' | 'notify_deployed' | 'supply_deployment_proof' | 'cancel_attempt' | 'continue_legacy'
+  kind: 'start_validation' | 'retry_validation' | 'supply_evidence' | 'approve_fix' | 'complete_remediation' | 'continue_fix' | 'approve_merge' | 'supply_merge_decision' | 'notify_deployed' | 'supply_deployment_proof' | 'cancel_attempt' | 'continue_legacy'
   label: string
   approval?: boolean
 }
@@ -17,6 +17,7 @@ export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrim
     not_reproduced: { kind: 'supply_evidence', label: '补充证据并重试' },
     investigating: { kind: 'cancel_attempt', label: '停止当前排障' },
     waiting_fix_approval: { kind: 'approve_fix', label: '允许修复', approval: true },
+    waiting_remediation: { kind: 'complete_remediation', label: '确认处置完成并回归', approval: true },
     fixing: { kind: 'cancel_attempt', label: '停止当前修复' },
     fix_failed: { kind: 'continue_fix', label: '补充信息并继续修复' },
     waiting_merge_approval: { kind: 'approve_merge', label: '允许合并环境分支', approval: true },
@@ -31,6 +32,9 @@ export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrim
     const outputCode = typeof attempt?.output_json?.error_code === 'string' ? attempt.output_json.error_code.trim() : ''
     const code = attempt?.error_code?.trim() || outputCode
     if (code === 'browser_validator_plan_invalid') return { kind: 'retry_validation', label: '重新生成验证计划并重试' }
+    if (['browser_validator_failed', 'browser_validator_attachment_failed', 'browser_validator_no_output', 'browser_validator_process_failed'].includes(code)) {
+      return { kind: 'retry_validation', label: '重试当前验证' }
+    }
     const browserGapLabels: Record<string, string> = {
       browser_locator_failed: '补充页面定位信息并重试',
       browser_assertion_failed: '补充业务预期并重试',
@@ -58,12 +62,13 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   refresh: []
-  primary: [payload: { kind: CasePrimaryAction['kind']; input?: string; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> }]
+  primary: [payload: { kind: CasePrimaryAction['kind']; input?: string; evidence?: string; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> }]
   browser: [action: 'login' | 'clear-session' | 'repair-runtime' | 'redeploy-validator' | 'edit-bug-url']
 }>()
 
 const dialogOpen = ref(false)
 const dialogInput = ref('')
+const dialogEvidence = ref('')
 const confirmButton = ref<HTMLButtonElement | null>(null)
 const dialogElement = ref<HTMLElement | null>(null)
 const actionTrigger = ref<HTMLElement | null>(null)
@@ -113,7 +118,24 @@ const mergeApprovalScopes = computed(() => (props.detail?.code_changes || []).ma
   targetHead: change.merge_base_head,
 })))
 
-const stages = [
+const latestRootCauseAttempt = computed(() => [...(props.detail?.attempts || [])].reverse().find(attempt =>
+  attempt.cycle_number === props.detail?.case.cycle_number && attempt.phase === 'investigation' && attempt.status === 'succeeded',
+) || null)
+const rootCauseType = computed(() => {
+  const value = latestRootCauseAttempt.value?.output_json?.root_cause_type
+  return typeof value === 'string' && value.trim() ? value.trim() : 'code'
+})
+const remediationPlan = computed(() => {
+  const raw = latestRootCauseAttempt.value?.output_json?.remediation
+  return raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
+})
+const usesNonCodeRemediation = computed(() => Boolean(
+  ['waiting_remediation', 'remediation_applied'].includes(currentCase.value?.status || '') ||
+  rootCauseType.value !== 'code' ||
+  (remediationPlan.value.mode && remediationPlan.value.mode !== 'code_change'),
+))
+
+const codeStages = [
   { key: 'validation', label: '验证' },
   { key: 'investigation', label: '排障' },
   { key: 'fix', label: '修复' },
@@ -122,12 +144,33 @@ const stages = [
   { key: 'regression', label: '回归' },
 ] as const
 
+const remediationStages = [
+  { key: 'validation', label: '验证' },
+  { key: 'investigation', label: '排障' },
+  { key: 'remediation', label: '处置' },
+  { key: 'regression', label: '回归' },
+] as const
+const stages = computed(() => usesNonCodeRemediation.value ? remediationStages : codeStages)
+
 const statusPosition: Record<CaseStatus, number> = {
   pending_validation: 0, validating: 0, waiting_evidence: 0, reproduced: 1, not_reproduced: 0,
   investigating: 1, root_cause_ready: 2, waiting_fix_approval: 2, fixing: 2, fix_failed: 2,
+  waiting_remediation: 2, remediation_applied: 3,
   fix_pushed: 3, waiting_merge_approval: 3, merging: 3, merge_conflict: 3,
   waiting_deployment: 4, deployment_unverified: 4, deployment_verified: 5,
   regression_validating: 5, fixed_verified: 6, still_reproduces: 1, legacy_archived: -1, reset_archived: -1,
+}
+
+function statusStagePosition(status: CaseStatus): number {
+  if (!usesNonCodeRemediation.value) return statusPosition[status]
+  const positions: Partial<Record<CaseStatus, number>> = {
+    pending_validation: 0, validating: 0, waiting_evidence: 0, not_reproduced: 0,
+    reproduced: 1, investigating: 1, root_cause_ready: 2,
+    waiting_remediation: 2, remediation_applied: 3,
+    regression_validating: 3, fixed_verified: 4, still_reproduces: 1,
+    legacy_archived: -1, reset_archived: -1,
+  }
+  return positions[status] ?? statusPosition[status]
 }
 
 const activeStatuses = new Set<CaseStatus>(['validating', 'investigating', 'fixing', 'merging', 'regression_validating'])
@@ -136,8 +179,8 @@ const blockedStatuses = new Set<CaseStatus>(['waiting_evidence', 'not_reproduced
 function stageState(index: number): 'complete' | 'current' | 'blocked' | 'pending' | 'archived' {
   const status = currentCase.value?.status
   if (!status || status === 'legacy_archived' || status === 'reset_archived') return status ? 'archived' : 'pending'
-  const position = statusPosition[status]
-  if (index < position || position === 6) return 'complete'
+  const position = statusStagePosition(status)
+  if (index < position || position === stages.value.length) return 'complete'
   if (index > position) return 'pending'
   if (blockedStatuses.has(status)) return 'blocked'
   return 'current'
@@ -151,6 +194,7 @@ function statusLabel(status: CaseStatus): string {
   const labels: Partial<Record<CaseStatus, string>> = {
     pending_validation: '等待验证', validating: '验证中', waiting_evidence: '等待证据', reproduced: '已复现', not_reproduced: '未复现',
     investigating: '排障中', root_cause_ready: '根因已确认', waiting_fix_approval: '等待修复授权', fixing: '修复中', fix_failed: '修复失败',
+    waiting_remediation: '等待处置确认', remediation_applied: '处置已确认',
     fix_pushed: '修复已推送', waiting_merge_approval: '等待合并授权', merging: '合并中', merge_conflict: '合并冲突',
     waiting_deployment: '等待人工部署', deployment_unverified: '检测到版本不一致', deployment_verified: '部署已确认', regression_validating: '回归中',
     fixed_verified: '修复已验证', still_reproduces: '回归仍复现', legacy_archived: '历史归档', reset_archived: '已重置归档',
@@ -183,12 +227,17 @@ async function openAction(event: MouseEvent) {
       return typeof repo === 'string' ? repo.trim() : ''
     }).filter(Boolean))]
     dialogSourceBaselines.value = (repos.length > 0 ? repos : ['']).map(repo => ({ repo, branch: '' }))
+  } else if (action.value.kind === 'complete_remediation') {
+    dialogCaseVersion.value = props.detail?.case.version
+    dialogRootCauseAttemptID.value = latestRootCauseAttempt.value?.id || ''
+    dialogSourceBaselines.value = []
   } else {
     dialogCaseVersion.value = undefined
     dialogRootCauseAttemptID.value = ''
     dialogSourceBaselines.value = []
   }
   dialogInput.value = ''
+  dialogEvidence.value = ''
   dialogOpen.value = true
   await nextTick()
   if (action.value.kind === 'approve_fix' && !sourceBaselinesValid.value) {
@@ -207,11 +256,17 @@ function closeDialog() {
 
 function confirmAction() {
   if (!action.value) return
-  const payload: { kind: CasePrimaryAction['kind']; input?: string; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> } = { kind: action.value.kind }
+  const payload: { kind: CasePrimaryAction['kind']; input?: string; evidence?: string; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> } = { kind: action.value.kind }
   if (action.value.kind === 'approve_fix') {
     payload.rootCauseAttemptID = dialogRootCauseAttemptID.value
     payload.caseVersion = dialogCaseVersion.value
     payload.sourceBaselines = Object.fromEntries(dialogSourceBaselines.value.map(item => [item.repo.trim(), item.branch.trim()]).filter(([repo, branch]) => repo && branch))
+  }
+  if (action.value.kind === 'complete_remediation') {
+    payload.rootCauseAttemptID = dialogRootCauseAttemptID.value
+    payload.caseVersion = dialogCaseVersion.value
+    payload.input = dialogInput.value.trim()
+    payload.evidence = dialogEvidence.value.trim()
   }
   if (['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(action.value.kind)) payload.input = dialogInput.value.trim()
   emit('primary', payload)
@@ -247,6 +302,7 @@ function trapDialogFocus(event: KeyboardEvent) {
 
 function dialogTitle(): string {
   if (action.value?.kind === 'approve_fix') return '确认允许修复'
+  if (action.value?.kind === 'complete_remediation') return '确认非代码处置已完成'
   if (action.value?.kind === 'approve_merge') return '确认合并环境分支'
   if (action.value?.kind === 'supply_merge_decision') return '提交合并冲突处理决定'
   if (action.value?.kind === 'notify_deployed') return '确认业务版本已部署'
@@ -273,7 +329,7 @@ function dialogTitle(): string {
           </div>
         </header>
 
-        <ol class="stage-progress" aria-label="故障处理阶段">
+        <ol class="stage-progress" :class="{ 'is-remediation': usesNonCodeRemediation }" aria-label="故障处理阶段">
           <li v-for="(stage, index) in stages" :key="stage.key" class="lifecycle-stage" :data-state="stageState(index)">
             <span class="stage-marker" aria-hidden="true">{{ index + 1 }}</span>
             <span><strong>{{ stage.label }}</strong><small>{{ stageStateLabel(index) }}</small></span>
@@ -295,6 +351,7 @@ function dialogTitle(): string {
             <p v-if="detail.case.status === 'legacy_archived'">历史记录只读；继续时会通过 CreateAndStart 创建新的 Case，不修改归档 attempt。</p>
             <p v-else-if="detail.case.status === 'reset_archived'">历史记录只读；重置后的新 Case 已保留原闭环的证据和审计关系。</p>
             <p v-else-if="detail.case.status === 'waiting_deployment'">环境分支已推送。人工部署后，Studio 会尝试自动采集运行版本；采集不到也会直接启动回归验证。</p>
+            <p v-else-if="detail.case.status === 'waiting_remediation'">根因不需要修改代码。完成数据、配置、运行环境、网络或外部依赖处置后，提交实际结果与证据即可开始回归。</p>
             <p v-else-if="continuedAfterFailedRegression">第 {{ detail.case.cycle_number }} 轮 · 回归仍复现，Studio 已把本轮新证据和差分带入排障。</p>
             <p v-else>第 {{ detail.case.cycle_number }} 轮 · {{ detail.case.environment || '环境未知' }}</p>
           </div>
@@ -387,6 +444,20 @@ function dialogTitle(): string {
             <div v-for="scope in mergeApprovalScopes" :key="scope.repo"><dt>{{ scope.repo }}</dt><dd><code>{{ scope.fixCommit }} → {{ scope.targetBranch }} @ {{ scope.targetHead || '待重新检查' }}</code></dd></div>
           </dl>
         </template>
+        <template v-else-if="action.kind === 'complete_remediation'">
+          <p>Studio 不会自动修改业务数据、配置或运行资源。请在对应平台完成处置，再记录实际操作和可审计证据；提交后将直接启动全新的业务回归。</p>
+          <dl class="deployment-preview remediation-preview">
+            <div><dt>根因类型</dt><dd>{{ rootCauseType }}</dd></div>
+            <div><dt>处置目标</dt><dd>{{ remediationPlan.target || '未指定' }}</dd></div>
+            <div><dt>建议动作</dt><dd>{{ remediationPlan.summary || '按根因结论处置' }}</dd></div>
+            <div><dt>回滚方案</dt><dd>{{ remediationPlan.rollback || '按变更平台的既有回滚流程执行' }}</dd></div>
+            <div><dt>验证方式</dt><dd>{{ remediationPlan.verification || '重新执行业务回归' }}</dd></div>
+          </dl>
+          <label for="remediation-summary">实际处置结果</label>
+          <textarea id="remediation-summary" v-model="dialogInput" rows="4" placeholder="例如：已回滚配置 dataId xxx 至版本 42，服务已恢复"></textarea>
+          <label for="remediation-evidence">处置证据</label>
+          <textarea id="remediation-evidence" v-model="dialogEvidence" rows="3" placeholder="填写变更单号、配置版本、监控/工单链接或其他可核验信息"></textarea>
+        </template>
         <p v-else-if="action.kind === 'supply_merge_decision'">记录冲突处理结果并返回合并授权门，不会在这一步直接重新合并。</p>
         <p v-else-if="action.kind === 'notify_deployed'">Studio 不执行部署。确认后会尝试从运行环境自动采集版本；如果没有可靠版本信息，将留空并直接开始回归。</p>
         <dl v-if="action.kind === 'notify_deployed'" class="deployment-preview">
@@ -400,7 +471,7 @@ function dialogTitle(): string {
         <textarea v-if="['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(action.kind)" id="case-supplement" v-model="dialogInput" rows="5" placeholder="输入新证据、处理决定或测试信息"></textarea>
         <footer>
           <button class="btn" type="button" :disabled="pending" @click="closeDialog">取消</button>
-          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (action.kind === 'approve_fix' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !sourceBaselinesValid)) || (['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(action.kind) && !dialogInput.trim())" @click="confirmAction">确认</button>
+          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (action.kind === 'approve_fix' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !sourceBaselinesValid)) || (action.kind === 'complete_remediation' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim() || !dialogEvidence.trim())) || (['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(action.kind) && !dialogInput.trim())" @click="confirmAction">{{ action.kind === 'complete_remediation' ? '确认并开始回归' : '确认' }}</button>
         </footer>
       </section>
     </div>
@@ -428,6 +499,7 @@ h2, h3, p { margin: 0; }
 .case-main-column { display: flex; flex-direction: column; gap: var(--sp-4); background: var(--c-surf); }
 .status-pill { flex: 0 0 auto; padding: 6px 9px; border: 1px solid var(--c-line); border-radius: 999px; background: var(--c-surf-2); }
 .stage-progress { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 5px; margin: 0; padding: 0; list-style: none; }
+.stage-progress.is-remediation { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .lifecycle-stage { min-width: 0; display: flex; align-items: center; gap: 6px; padding: 8px 5px; border-top: 3px solid var(--c-line-2); }
 .stage-marker { flex: 0 0 25px; width: 25px; height: 25px; display: grid; place-items: center; border-radius: 50%; background: var(--c-surf-3); color: var(--c-muted); font-size: var(--fs-xs); font-weight: 700; }
 .lifecycle-stage > span:last-child { min-width: 0; display: grid; gap: 1px; }

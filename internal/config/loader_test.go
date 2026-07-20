@@ -28,6 +28,33 @@ func TestValidate_Minimal(t *testing.T) {
 	}
 }
 
+func TestLoadRepoServiceEntries(t *testing.T) {
+	yaml := `
+system: {id: shop, name: Shop}
+agent: {name: a, workspace_name: a, model: m}
+environments: [{id: dev, api_domain: x}]
+generation: {target_host: openclaw}
+meta: {schema_version: "0.1"}
+repos:
+  - name: base-frontend
+    url: git@example.test:base-frontend.git
+    stack: node
+    role: frontend
+    service_names: [base-frontend, base-frontend-document]
+    service_entries:
+      base-frontend: .
+      base-frontend-document: packages/document
+`
+	cfg, err := LoadFromBytes([]byte(yaml))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	want := "packages/document"
+	if got := cfg.Repos[0].ServiceEntries["base-frontend-document"]; got != want {
+		t.Fatalf("service entry=%q, want %q", got, want)
+	}
+}
+
 func TestValidate_MissingRequired(t *testing.T) {
 	cases := []struct {
 		name   string

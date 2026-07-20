@@ -120,9 +120,30 @@ describe('generateYAML', () => {
     expect(generateYAML(ctx)).toContain('code_intelligence:\n  enabled: true\n  provider: codegraph')
   })
 
+  it('emits frontend runtime identity as a workload without config-service bindings', () => {
+    const parsed = yaml.load(generateYAML(makeCtx({
+      repos: [{
+        name: 'base-frontend', url: 'git@example.com:base-frontend.git', role: 'frontend',
+        stack: 'node', framework: 'react', service_names: 'funhub-web', env_branches: { dev: 'dev' },
+      }],
+      allServiceNames: [],
+      runtimeWorkloadNames: ['funhub-web'],
+      activeSourceTypes: ['none'],
+    }))) as any
+
+    expect(parsed.repos[0].service_names).toEqual(['funhub-web'])
+    expect(parsed.resource_catalog.services).toBeUndefined()
+    expect(parsed.resource_catalog.workloads).toEqual([{
+      id: 'funhub-web',
+      repository: 'base-frontend',
+      names: { dev: 'funhub-web' },
+    }])
+  })
+
   it('emits only service topology overrides and excludes scan candidates', () => {
     const serviceTopology: ServiceTopologyState = {
       overrides: [
+        { action: 'add', scope: 'service', fromService: 'web', toService: 'catalog' },
         { action: 'confirm', fromService: 'web', toService: 'bff', protocol: 'http', method: 'GET', path: '/api/orders' },
         { action: 'reject', fromService: 'bff', toService: 'legacy', protocol: 'grpc', rpcMethod: 'legacy.Order/Get' },
         { action: 'add', fromService: 'bff', toService: 'order', protocol: 'http', method: 'POST', path: '/internal/orders' },
@@ -136,6 +157,7 @@ describe('generateYAML', () => {
     const parsed = yaml.load(generateYAML(makeCtx({ serviceTopology }))) as Record<string, any>
     expect(parsed.service_topology).toEqual({
       overrides: [
+        { action: 'add', scope: 'service', from_service: 'web', to_service: 'catalog' },
         { action: 'confirm', from_service: 'web', to_service: 'bff', protocol: 'http', method: 'GET', path: '/api/orders' },
         { action: 'reject', from_service: 'bff', to_service: 'legacy', protocol: 'grpc', rpc_method: 'legacy.Order/Get' },
         { action: 'add', from_service: 'bff', to_service: 'order', protocol: 'http', method: 'POST', path: '/internal/orders' },

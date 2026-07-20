@@ -99,7 +99,9 @@ func ProjectServiceGraph(snapshot Snapshot) ServiceGraph {
 				projected.Confidence = candidate.Confidence
 			}
 		}
-		projected.Routes = appendUniqueRouteReference(projected.Routes, routeReference(candidate))
+		if normalizedProtocol(candidate.Protocol) != "" {
+			projected.Routes = appendUniqueRouteReference(projected.Routes, routeReference(candidate))
+		}
 	}
 
 	graph.Edges = make([]ServiceEdge, 0, len(pairs))

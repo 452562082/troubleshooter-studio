@@ -11,6 +11,7 @@ import {
   approveIncidentMerge,
   cancelIncidentAttempt,
   clearIncidentBrowserSession,
+  completeIncidentRemediation,
   continueIncidentCase,
   fetchBugByID,
   getIncidentBrowserRuntimeStatus,
@@ -834,7 +835,7 @@ async function handleIncidentBrowser(action: IncidentBrowserAction) {
   }
 }
 
-async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind']; input?: string; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> }) {
+async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind']; input?: string; evidence?: string; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> }) {
   const detail = displayedDetail.value
   if (!detail) return
   const incident = detail.case
@@ -879,6 +880,17 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
           idempotency_key: `start-fix:${incident.id}:${payload.rootCauseAttemptID}:${payload.caseVersion}`,
           root_cause_attempt_id: payload.rootCauseAttemptID,
           input_json: { source_baselines: payload.sourceBaselines || {} },
+        })
+      }
+      if (payload.kind === 'complete_remediation') {
+        if (!payload.rootCauseAttemptID || payload.caseVersion === undefined) throw new Error('处置确认缺少根因或 Case 版本快照')
+        return completeIncidentRemediation({
+          ...base,
+          expected_version: payload.caseVersion,
+          idempotency_key: `complete-remediation:${incident.id}:${payload.rootCauseAttemptID}:${payload.caseVersion}`,
+          root_cause_attempt_id: payload.rootCauseAttemptID,
+          summary: payload.input || '',
+          evidence: payload.evidence || '',
         })
       }
       if (payload.kind === 'approve_merge') {

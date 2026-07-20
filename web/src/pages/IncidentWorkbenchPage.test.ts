@@ -20,10 +20,12 @@ import {
   resetIncidentCaseWithWarnings,
   saveBugSelectedBot,
   startIncidentCase,
+  uploadIncidentEvidenceImages,
   type CaseStatus,
   type IncidentCase,
   type IncidentCaseDetail,
 } from '../lib/bridge'
+import BugCaseLifecycle from '../components/BugCaseLifecycle.vue'
 import IncidentWorkbenchPage from './IncidentWorkbenchPage.vue'
 
 const route = vi.hoisted(() => ({ path: '/incidents', query: {} as Record<string, string> }))
@@ -60,6 +62,7 @@ vi.mock('../lib/bridge', async importOriginal => ({
   resetIncidentCaseWithWarnings: vi.fn(),
   saveBugSelectedBot: vi.fn(),
   startIncidentCase: vi.fn(),
+  uploadIncidentEvidenceImages: vi.fn(),
 }))
 vi.mock('../lib/toast', () => ({
   toast: { error: notifications.error, success: notifications.success, info: notifications.info },
@@ -177,6 +180,7 @@ afterEach(() => {
   vi.mocked(matchBugBots).mockReset().mockResolvedValue([botMatch])
   vi.mocked(saveBugSelectedBot).mockReset().mockResolvedValue(bugA as any)
   vi.mocked(startIncidentCase).mockReset()
+  vi.mocked(uploadIncidentEvidenceImages).mockReset()
   vi.mocked(continueIncidentCase).mockReset()
   vi.mocked(approveIncidentFix).mockReset()
   vi.mocked(approveIncidentMerge).mockReset()
@@ -1679,6 +1683,44 @@ describe('IncidentWorkbenchPage', () => {
     expect(router.push).toHaveBeenCalledWith({ path: '/bugs', query: { bug_id: 'bug-a' } })
     expect(continueIncidentCase).not.toHaveBeenCalled()
     expect(wrapper.text()).not.toContain('/private/raw URL error')
+  })
+
+  it('uploads supplemental screenshots before retrying the current validation Attempt', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-image-evidence', 'not_reproduced', '2026-07-15T10:00:00Z', { current_attempt_id: 'attempt-validation', version: 7 })
+    const snapshot = detail(item, {
+      attempts: [{ id: 'attempt-validation', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: { mode: 'reproduce', target_environment: 'test' }, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }],
+    })
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    mockCaseDetails(snapshot)
+    vi.mocked(uploadIncidentEvidenceImages).mockResolvedValue([{ artifact_id: 'artifact-shot-1', name: 'search-result.png', mime_type: 'image/png', size: 128 }])
+    vi.mocked(continueIncidentCase).mockResolvedValue({ ...item, status: 'validating', version: 8 })
+    const wrapper = await mountedPage()
+
+    wrapper.getComponent(BugCaseLifecycle).vm.$emit('primary', {
+      kind: 'supply_evidence',
+      input: '',
+      images: [{ name: 'search-result.png', mime_type: 'image/png', data_base64: 'aW1hZ2U=' }],
+    })
+    await flushPromises()
+    await flushPromises()
+
+    expect(uploadIncidentEvidenceImages).toHaveBeenCalledWith({
+      case_id: item.id,
+      attempt_id: 'attempt-validation',
+      expected_version: 7,
+      images: [{ name: 'search-result.png', mime_type: 'image/png', data_base64: 'aW1hZ2U=' }],
+    })
+    expect(continueIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
+      case_id: item.id,
+      expected_version: 7,
+      phase: 'validation',
+      input_json: expect.objectContaining({
+        user_input: expect.stringContaining('artifact-shot-1'),
+      }),
+    }))
+    expect(vi.mocked(uploadIncidentEvidenceImages).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(continueIncidentCase).mock.invocationCallOrder[0])
   })
 
   it('regenerates an invalid browser plan in the current Case instead of resetting the workflow', async () => {

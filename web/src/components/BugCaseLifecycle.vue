@@ -1,5 +1,5 @@
 <script lang="ts">
-import type { IncidentCase, IncidentCaseDetail as ActionDetail } from '../lib/bridge/bugWorkflow'
+import type { IncidentCase, IncidentCaseDetail as ActionDetail, IncidentEvidenceImageInput } from '../lib/bridge/bugWorkflow'
 
 export type CasePrimaryAction = {
   kind: 'start_validation' | 'retry_validation' | 'supply_evidence' | 'approve_fix' | 'complete_remediation' | 'continue_fix' | 'approve_merge' | 'supply_merge_decision' | 'notify_deployed' | 'supply_deployment_proof' | 'cancel_attempt' | 'continue_legacy'
@@ -62,13 +62,16 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   refresh: []
-  primary: [payload: { kind: CasePrimaryAction['kind']; input?: string; evidence?: string; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> }]
+  primary: [payload: { kind: CasePrimaryAction['kind']; input?: string; evidence?: string; images?: IncidentEvidenceImageInput[]; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> }]
   browser: [action: 'login' | 'clear-session' | 'repair-runtime' | 'redeploy-validator' | 'edit-bug-url']
 }>()
 
 const dialogOpen = ref(false)
 const dialogInput = ref('')
 const dialogEvidence = ref('')
+type PendingEvidenceImage = IncidentEvidenceImageInput & { size: number; preview: string }
+const dialogImages = ref<PendingEvidenceImage[]>([])
+const dialogImageError = ref('')
 const confirmButton = ref<HTMLButtonElement | null>(null)
 const dialogElement = ref<HTMLElement | null>(null)
 const actionTrigger = ref<HTMLElement | null>(null)
@@ -239,6 +242,8 @@ async function openAction(event: MouseEvent) {
   }
   dialogInput.value = ''
   dialogEvidence.value = ''
+  dialogImages.value = []
+  dialogImageError.value = ''
   dialogOpen.value = true
   await nextTick()
   if (action.value.kind === 'approve_fix' && !sourceBaselinesValid.value) {
@@ -257,7 +262,7 @@ function closeDialog() {
 
 function confirmAction() {
   if (!action.value) return
-  const payload: { kind: CasePrimaryAction['kind']; input?: string; evidence?: string; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> } = { kind: action.value.kind }
+  const payload: { kind: CasePrimaryAction['kind']; input?: string; evidence?: string; images?: IncidentEvidenceImageInput[]; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> } = { kind: action.value.kind }
   if (action.value.kind === 'approve_fix') {
     payload.rootCauseAttemptID = dialogRootCauseAttemptID.value
     payload.caseVersion = dialogCaseVersion.value
@@ -270,9 +275,72 @@ function confirmAction() {
     payload.evidence = dialogEvidence.value.trim()
   }
   if (['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(action.value.kind)) payload.input = dialogInput.value.trim()
+  if (action.value.kind === 'supply_evidence' && dialogImages.value.length > 0) {
+    payload.images = dialogImages.value.map(({ name, mime_type, base64_data }) => ({ name, mime_type, base64_data }))
+  }
   emit('primary', payload)
   dialogOpen.value = false
   nextTick(() => actionTrigger.value?.focus())
+}
+
+const evidenceSupplementMissing = computed(() => {
+  if (!action.value || !['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(action.value.kind)) return false
+  if (action.value.kind === 'supply_evidence') return !dialogInput.value.trim() && dialogImages.value.length === 0
+  return !dialogInput.value.trim()
+})
+
+function readEvidenceImage(file: File): Promise<PendingEvidenceImage> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(new Error('读取图片失败'))
+    reader.onload = () => {
+      const preview = typeof reader.result === 'string' ? reader.result : ''
+      const separator = preview.indexOf(',')
+      const base64Data = separator >= 0 ? preview.slice(separator + 1) : ''
+      if (!base64Data) {
+        reject(new Error('图片内容为空'))
+        return
+      }
+      resolve({ name: file.name, mime_type: file.type as 'image/png' | 'image/jpeg', base64_data: base64Data, size: file.size, preview })
+    }
+    reader.readAsDataURL(file)
+  })
+}
+
+async function selectEvidenceImages(event: Event) {
+  const input = event.currentTarget as HTMLInputElement
+  const files = Array.from(input.files || [])
+  input.value = ''
+  dialogImageError.value = ''
+  if (dialogImages.value.length + files.length > 4) {
+    dialogImageError.value = '最多上传 4 张图片。'
+    return
+  }
+  for (const file of files) {
+    if (!['image/png', 'image/jpeg'].includes(file.type)) {
+      dialogImageError.value = '仅支持 PNG 或 JPEG 图片。'
+      return
+    }
+    if (file.size <= 0 || file.size > 16 * 1024 * 1024) {
+      dialogImageError.value = '每张图片必须小于 16 MB。'
+      return
+    }
+  }
+  try {
+    dialogImages.value.push(...await Promise.all(files.map(readEvidenceImage)))
+  } catch (error) {
+    dialogImageError.value = error instanceof Error ? error.message : '读取图片失败。'
+  }
+}
+
+function removeEvidenceImage(index: number) {
+  dialogImages.value.splice(index, 1)
+  dialogImageError.value = ''
+}
+
+function formatEvidenceImageSize(size: number): string {
+  if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))} KB`
+  return `${(size / 1024 / 1024).toFixed(1)} MB`
 }
 
 function addSourceBaseline() {
@@ -469,10 +537,28 @@ function dialogTitle(): string {
         <p v-if="action.kind === 'notify_deployed' && automaticDeploymentVerification">无需手工填写版本号或 commit。只有明确检测到运行版本与本次修复不一致时，流程才会停下。</p>
         <p v-else-if="action.kind === 'notify_deployed'">无需填写版本号或 commit；本次只记录部署确认，最终以回归结果为准。</p>
         <label v-if="['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(action.kind)" for="case-supplement">补充信息</label>
-        <textarea v-if="['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(action.kind)" id="case-supplement" v-model="dialogInput" rows="5" placeholder="输入新证据、处理决定或测试信息"></textarea>
+        <textarea v-if="['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(action.kind)" id="case-supplement" v-model="dialogInput" rows="5" :placeholder="action.kind === 'supply_evidence' ? '描述图片中的页面状态、操作位置或业务预期（可选）' : '输入新证据、处理决定或测试信息'"></textarea>
+        <section v-if="action.kind === 'supply_evidence'" class="evidence-image-upload">
+          <div class="evidence-image-heading">
+            <div>
+              <strong>补充截图</strong>
+              <small>PNG / JPEG，单张不超过 16 MB，最多 4 张；重试时会直接交给验证 Agent。</small>
+            </div>
+            <input id="case-evidence-images" type="file" accept="image/png,image/jpeg" multiple @change="selectEvidenceImages">
+            <label class="btn evidence-image-picker" for="case-evidence-images">选择图片</label>
+          </div>
+          <p v-if="dialogImageError" class="evidence-image-error" role="alert">{{ dialogImageError }}</p>
+          <ul v-if="dialogImages.length" class="evidence-image-list" aria-label="待上传图片">
+            <li v-for="(image, index) in dialogImages" :key="`${image.name}-${index}`">
+              <img :src="image.preview" alt="">
+              <span><strong>{{ image.name }}</strong><small>{{ formatEvidenceImageSize(image.size) }}</small></span>
+              <button type="button" class="evidence-image-remove" :aria-label="`移除 ${image.name}`" @click="removeEvidenceImage(index)">×</button>
+            </li>
+          </ul>
+        </section>
         <footer>
           <button class="btn" type="button" :disabled="pending" @click="closeDialog">取消</button>
-          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (action.kind === 'approve_fix' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !sourceBaselinesValid)) || (action.kind === 'complete_remediation' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim() || !dialogEvidence.trim())) || (['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(action.kind) && !dialogInput.trim())" @click="confirmAction">{{ action.kind === 'complete_remediation' ? '确认并开始回归' : '确认' }}</button>
+          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (action.kind === 'approve_fix' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !sourceBaselinesValid)) || (action.kind === 'complete_remediation' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim() || !dialogEvidence.trim())) || evidenceSupplementMissing" @click="confirmAction">{{ action.kind === 'complete_remediation' ? '确认并开始回归' : action.kind === 'supply_evidence' ? '保存证据并重试' : '确认' }}</button>
         </footer>
       </section>
     </div>
@@ -562,6 +648,22 @@ h2, h3, p { margin: 0; }
 .deployment-preview dd { min-width: 0; margin: 0; color: var(--c-ink); font-size: var(--fs-sm); overflow-wrap: anywhere; }
 .deployment-preview code { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .approval-dialog input, .approval-dialog textarea { min-height: 44px; }
+.evidence-image-upload { display: grid; gap: var(--sp-2); padding: var(--sp-3); border: 1px dashed #93c5fd; border-radius: var(--r-md); background: #f8fbff; }
+.evidence-image-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
+.evidence-image-heading > div { min-width: 0; display: grid; gap: 2px; }
+.evidence-image-heading strong { color: var(--c-ink); font-size: var(--fs-sm); }
+.evidence-image-heading small { color: var(--c-muted); font-size: var(--fs-xs); line-height: 1.45; }
+.evidence-image-picker { flex: 0 0 auto; min-height: 40px; cursor: pointer; }
+#case-evidence-images { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+#case-evidence-images:focus-visible + .evidence-image-picker { outline: 3px solid rgba(37, 99, 235, .55); outline-offset: 2px; }
+.evidence-image-error { color: var(--c-danger) !important; font-size: var(--fs-xs) !important; }
+.evidence-image-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-2); margin: 0; padding: 0; list-style: none; }
+.evidence-image-list li { min-width: 0; display: grid; grid-template-columns: 52px minmax(0, 1fr) 32px; align-items: center; gap: var(--sp-2); padding: 6px; border: 1px solid var(--c-line); border-radius: var(--r-sm); background: var(--c-surf); }
+.evidence-image-list img { width: 52px; height: 42px; border-radius: 5px; object-fit: cover; background: var(--c-surf-3); }
+.evidence-image-list span { min-width: 0; display: grid; gap: 2px; }
+.evidence-image-list span strong { overflow: hidden; color: var(--c-text); font-size: var(--fs-xs); text-overflow: ellipsis; white-space: nowrap; }
+.evidence-image-list span small { color: var(--c-muted); font-size: 10px; }
+.evidence-image-remove { width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 50%; background: #fee2e2; color: #b91c1c; font-size: 19px; cursor: pointer; }
 .approval-dialog footer { display: flex; justify-content: flex-end; gap: var(--sp-2); }
 .approval-dialog footer .btn { min-height: 44px; min-width: 88px; justify-content: center; }
 button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px solid rgba(37, 99, 235, .55); outline-offset: 2px; }
@@ -575,6 +677,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px
   .case-heading { align-items: flex-start; flex-direction: column; }
   .approval-dialog footer { flex-direction: column-reverse; }
   .approval-dialog footer .btn { width: 100%; }
+  .evidence-image-heading { align-items: stretch; flex-direction: column; }
+  .evidence-image-list { grid-template-columns: minmax(0, 1fr); }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }

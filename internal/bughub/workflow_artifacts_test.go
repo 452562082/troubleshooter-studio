@@ -61,6 +61,39 @@ func TestRegisterArtifactCopiesHashesSecuresAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestRegisterArtifactBytesCopiesAndPublishesHostEvidence(t *testing.T) {
+	ctx := context.Background()
+	store := openTestCaseStore(t)
+	createTestCase(t, store, "case-host-evidence")
+	attempt := validRunningAttempt("attempt-host-evidence", "case-host-evidence")
+	if err := store.CreateAttempt(ctx, attempt); err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("safe uploaded evidence")
+	root := filepath.Join(resolvedTempDir(t), "host-evidence")
+	input := ArtifactInput{
+		ArtifactsRoot: root, CaseID: attempt.CaseID, AttemptID: attempt.ID,
+		Kind: "user_screenshot", Environment: "test", RedactionStatus: RedactionStatusNotRequired,
+	}
+
+	artifact, err := RegisterArtifactBytes(ctx, store, input, content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content[0] = 'X'
+	stored, err := ReadEvidenceArtifactFromRoot(ctx, store, root, attempt.CaseID, artifact.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stored.Content) != "safe uploaded evidence" || artifact.Kind != "user_screenshot" {
+		t.Fatalf("stored = %+v content=%q", artifact, stored.Content)
+	}
+	second, err := RegisterArtifactBytes(ctx, store, input, []byte("safe uploaded evidence"))
+	if err != nil || second.ID != artifact.ID {
+		t.Fatalf("idempotent artifact = %+v err=%v", second, err)
+	}
+}
+
 func TestReadEvidenceArtifactChecksCaseOwnershipAndRegisteredDigest(t *testing.T) {
 	ctx := context.Background()
 	store := openTestCaseStore(t)

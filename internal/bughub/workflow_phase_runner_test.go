@@ -2178,6 +2178,45 @@ func TestAgentPhaseRunnerValidationPromptIncludesDurableContinuationContext(t *t
 	}
 }
 
+func TestAgentPhaseRunnerCarriesUploadedScreenshotsIntoValidationRetry(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-validation-upload", CaseNotReproduced)
+	now := time.Now().UTC()
+	blocked := PhaseAttempt{
+		ID: "attempt-validation-blocked", CaseID: incident.ID, CycleNumber: incident.CycleNumber,
+		Phase: PhaseValidation, Mode: AttemptReproduce, Status: AttemptStatusFailed,
+		AgentTarget: "codex", BotKey: "bot", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`),
+		StartedAt: now.Add(-time.Minute), FinishedAt: &now,
+	}
+	if err := store.CreateAttempt(context.Background(), blocked); err != nil {
+		t.Fatal(err)
+	}
+	root := phaseArtifactsRoot(t)
+	image := append([]byte(nil), browserPNGSignature...)
+	image = append(image, []byte("safe-image")...)
+	artifact, err := RegisterArtifactBytes(context.Background(), store, ArtifactInput{
+		ArtifactsRoot: root, CaseID: incident.ID, AttemptID: blocked.ID,
+		Kind: "user_screenshot", Environment: "test", RedactionStatus: RedactionStatusNotRequired,
+	}, image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry := PhaseAttempt{
+		ID: "attempt-validation-retry", CaseID: incident.ID, CycleNumber: incident.CycleNumber,
+		Phase: PhaseValidation, Mode: AttemptReproduce, Status: AttemptStatusRunning,
+		AgentTarget: "codex", BotKey: "bot", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`),
+		ParentAttemptID: blocked.ID, StartedAt: now,
+	}
+	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, root, nil)
+	got, err := runner.withSupplementalValidationScreenshots(context.Background(), retry, Bug{ID: incident.BugID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Attachments) != 1 || got.Attachments[0].ID != artifact.ID || got.Attachments[0].Type != "image/png" || got.Attachments[0].LocalPath != artifact.PathOrReference {
+		t.Fatalf("attachments = %+v", got.Attachments)
+	}
+}
+
 func TestAgentPhaseRunnerFixCheckpointIsConsumedBeforeStagingCleanup(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-fix-checkpoint-normal", CaseFixing)

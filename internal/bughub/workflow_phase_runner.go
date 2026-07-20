@@ -296,6 +296,12 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 	if err != nil {
 		return fail(err)
 	}
+	if attempt.Phase == PhaseValidation || attempt.Phase == PhaseRegression {
+		bug, err = r.withSupplementalValidationScreenshots(ctx, attempt, bug)
+		if err != nil {
+			return fail(fmt.Errorf("prepare supplemental validation screenshots: %w", err))
+		}
+	}
 	prompt, err := r.promptForAttempt(attempt, bug, executionBot)
 	if err != nil {
 		return fail(err)
@@ -380,6 +386,70 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 	r.startLegacyProjection(attempt, bug, executionBot)
 	go r.run(runCtx, attempt.Clone(), incident.Clone(), bug, executionBot, prompt, staging, fixWorkspace, incident.Version, claimToken, complete, browserVerifier, browserPolicyResolver)
 	return nil
+}
+
+// withSupplementalValidationScreenshots resolves immutable screenshots that a
+// user uploaded while the Case was blocked. The paths never enter prompts or
+// persisted Agent output; BrowserCoordinator converts them into bounded host
+// attachments for both planning and evaluation.
+func (r *AgentPhaseRunner) withSupplementalValidationScreenshots(ctx context.Context, attempt PhaseAttempt, bug Bug) (Bug, error) {
+	if r == nil || r.store == nil || strings.TrimSpace(attempt.ParentAttemptID) == "" {
+		return bug, nil
+	}
+	ancestorIDs := make(map[string]struct{})
+	parentID := strings.TrimSpace(attempt.ParentAttemptID)
+	for parentID != "" {
+		if _, duplicate := ancestorIDs[parentID]; duplicate {
+			return Bug{}, errors.New("validation evidence ancestry contains a cycle")
+		}
+		parent, err := r.store.GetAttempt(ctx, parentID)
+		if err != nil {
+			return Bug{}, err
+		}
+		if parent.CaseID != attempt.CaseID || parent.CycleNumber != attempt.CycleNumber {
+			return Bug{}, errors.New("validation evidence ancestor does not belong to the current Case cycle")
+		}
+		ancestorIDs[parent.ID] = struct{}{}
+		parentID = strings.TrimSpace(parent.ParentAttemptID)
+	}
+	registered, err := r.store.ListEvidenceArtifacts(ctx, attempt.CaseID)
+	if err != nil {
+		return Bug{}, err
+	}
+	candidates := make([]EvidenceArtifact, 0)
+	for _, artifact := range registered {
+		if artifact.Kind != "user_screenshot" {
+			continue
+		}
+		if _, belongs := ancestorIDs[artifact.AttemptID]; belongs {
+			candidates = append(candidates, artifact)
+		}
+	}
+	sort.SliceStable(candidates, func(left, right int) bool {
+		if candidates[left].CapturedAt.Equal(candidates[right].CapturedAt) {
+			return candidates[left].ID > candidates[right].ID
+		}
+		return candidates[left].CapturedAt.After(candidates[right].CapturedAt)
+	})
+	if len(candidates) > maxPhaseAttachments {
+		candidates = candidates[:maxPhaseAttachments]
+	}
+	for index, candidate := range candidates {
+		content, err := ReadEvidenceArtifactFromRoot(ctx, r.store, r.artifactsRoot, attempt.CaseID, candidate.ID)
+		if err != nil {
+			return Bug{}, err
+		}
+		if !bytes.HasPrefix(content.Content, browserPNGSignature) {
+			return Bug{}, errors.New("supplemental validation screenshot is not a PNG image")
+		}
+		bug.Attachments = append(bug.Attachments, Attachment{
+			ID:        candidate.ID,
+			Name:      fmt.Sprintf("用户补充证据-%d.png", index+1),
+			Type:      "image/png",
+			LocalPath: content.Artifact.PathOrReference,
+		})
+	}
+	return bug, nil
 }
 
 func newAttemptRunClaimToken() (string, error) {

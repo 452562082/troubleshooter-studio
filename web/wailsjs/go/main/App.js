@@ -30,10 +30,6 @@ export function ApproveIncidentMerge(arg1) {
   return window['go']['main']['App']['ApproveIncidentMerge'](arg1);
 }
 
-export function CompleteIncidentRemediation(arg1) {
-  return window['go']['main']['App']['CompleteIncidentRemediation'](arg1);
-}
-
 export function BugHookBaseURL() {
   return window['go']['main']['App']['BugHookBaseURL']();
 }
@@ -84,6 +80,10 @@ export function ClearBugPlatformLogin(arg1) {
 
 export function ClearIncidentBrowserSession(arg1) {
   return window['go']['main']['App']['ClearIncidentBrowserSession'](arg1);
+}
+
+export function CompleteIncidentRemediation(arg1) {
+  return window['go']['main']['App']['CompleteIncidentRemediation'](arg1);
 }
 
 export function ContinueBugInvestigation(arg1) {
@@ -452,6 +452,10 @@ export function UninstallAgent(arg1) {
 
 export function UninstallBot(arg1, arg2) {
   return window['go']['main']['App']['UninstallBot'](arg1, arg2);
+}
+
+export function UploadIncidentEvidenceImages(arg1) {
+  return window['go']['main']['App']['UploadIncidentEvidenceImages'](arg1);
 }
 
 export function Validate(arg1) {

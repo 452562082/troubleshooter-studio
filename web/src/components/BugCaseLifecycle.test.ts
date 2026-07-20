@@ -1,5 +1,5 @@
-import { mount } from '@vue/test-utils'
-import { describe, expect, it } from 'vitest'
+import { flushPromises, mount } from '@vue/test-utils'
+import { describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import type { CaseStatus, IncidentCase, IncidentCaseDetail, TransitionEvent } from '../lib/bridge/bugWorkflow'
 import BugCaseLifecycle, { primaryActionFor } from './BugCaseLifecycle.vue'
@@ -247,6 +247,45 @@ describe('BugCaseLifecycle', () => {
     ['regression_validating', 'cancel_attempt'],
   ] as Array<[CaseStatus, string]>)('keeps exactly one action for actionable state %s', (status, kind) => {
     expect(primaryActionFor(incident(status))?.kind).toBe(kind)
+  })
+
+  it('accepts screenshots as supplemental evidence without requiring text', async () => {
+    const snapshot = detail('not_reproduced')
+    snapshot.case.current_attempt_id = 'validation-1'
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+
+    class EvidenceFileReader {
+      result: string | ArrayBuffer | null = null
+      onload: null | (() => void) = null
+      onerror: null | (() => void) = null
+      readAsDataURL() {
+        this.result = 'data:image/png;base64,iVBORw=='
+        queueMicrotask(() => this.onload?.())
+      }
+    }
+    vi.stubGlobal('FileReader', EvidenceFileReader)
+
+    await wrapper.get('.primary-action').trigger('click')
+    const confirm = wrapper.get<HTMLButtonElement>('[data-confirm]')
+    expect(confirm.element.disabled).toBe(true)
+    const fileInput = wrapper.get<HTMLInputElement>('#case-evidence-images')
+    const file = new File([new Uint8Array([137, 80, 78, 71])], '搜索结果.png', { type: 'image/png' })
+    Object.defineProperty(fileInput.element, 'files', { configurable: true, value: [file] })
+    await fileInput.trigger('change')
+    await flushPromises()
+
+    expect(wrapper.get('.evidence-image-list').text()).toContain('搜索结果.png')
+    expect(confirm.element.disabled).toBe(false)
+    await confirm.trigger('click')
+    const emitted = wrapper.emitted('primary')
+    expect(emitted).toHaveLength(1)
+    expect(emitted?.[0]?.[0]).toMatchObject({
+      kind: 'supply_evidence',
+      input: '',
+      images: [{ name: '搜索结果.png', mime_type: 'image/png' }],
+    })
+    expect((emitted?.[0]?.[0] as { images: Array<{ base64_data: string }> }).images[0].base64_data).toBe('iVBORw==')
+    vi.unstubAllGlobals()
   })
 
   it('renders one full-width current Case and refreshes from its heading', async () => {

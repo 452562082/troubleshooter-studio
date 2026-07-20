@@ -1,4 +1,5 @@
 import * as App from '../../../wailsjs/go/main/App'
+import { main as WailsMain } from '../../../wailsjs/go/models'
 import { isDesktop } from './shared'
 
 const desktopOnly = 'Incident Case 工作流只在桌面 app 可用'
@@ -163,6 +164,9 @@ export function isIncidentWorkflowConflict(error: unknown): boolean {
   return incidentWorkflowConflictCode(error) !== ''
 }
 export interface ContinueIncidentCaseInput extends WorkflowCommandInput { phase: Phase; input_json?: Record<string, unknown> }
+export interface IncidentEvidenceImageInput { name: string; mime_type: 'image/png' | 'image/jpeg'; base64_data: string }
+export interface UploadIncidentEvidenceImagesInput { case_id: string; attempt_id: string; expected_version: number; images: IncidentEvidenceImageInput[] }
+export interface IncidentEvidenceImage { artifact_id: string; name: string; mime_type: 'image/png'; size: number }
 export interface ApproveIncidentFixInput extends WorkflowCommandInput { root_cause_attempt_id: string; input_json?: Record<string, unknown> }
 export interface CompleteIncidentRemediationInput extends WorkflowCommandInput { root_cause_attempt_id: string; summary: string; evidence: string }
 export interface ApproveIncidentMergeInput extends WorkflowCommandInput { fix_commits: Record<string, string>; target_branches: Record<string, string>; target_heads?: Record<string, string> }
@@ -236,6 +240,19 @@ export async function resetIncidentCaseWithWarnings(input: ResetIncidentCaseInpu
 export async function continueIncidentCase(input: ContinueIncidentCaseInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeCase(await App.ContinueIncidentCase(input))
+}
+export async function uploadIncidentEvidenceImages(input: UploadIncidentEvidenceImagesInput): Promise<IncidentEvidenceImage[]> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  const raw = await App.UploadIncidentEvidenceImages(new WailsMain.UploadIncidentEvidenceImagesInput(input))
+  if (!Array.isArray(raw)) throw new Error('补充证据上传返回了无效结果')
+  return raw.map(item => {
+    const value = record(item)
+    const size = value.size
+    if (typeof value.artifact_id !== 'string' || !value.artifact_id || typeof value.name !== 'string' || value.mime_type !== 'image/png' || typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0) {
+      throw new Error('补充证据上传返回了无效图片')
+    }
+    return { artifact_id: value.artifact_id, name: value.name, mime_type: 'image/png', size }
+  })
 }
 export async function approveIncidentFix(input: ApproveIncidentFixInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)

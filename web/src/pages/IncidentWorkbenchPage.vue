@@ -27,11 +27,13 @@ import {
   resetIncidentCaseWithWarnings,
   saveBugSelectedBot,
   startIncidentCase,
+  uploadIncidentEvidenceImages,
   type BotMatch,
   type BotRef,
   type BugRecord,
   type IncidentBrowserRuntimeStatus,
   type IncidentCase,
+  type IncidentEvidenceImageInput,
 } from '../lib/bridge'
 import { toast, toastError } from '../lib/toast'
 import { useBugTickets } from '../lib/useBugTickets'
@@ -835,7 +837,7 @@ async function handleIncidentBrowser(action: IncidentBrowserAction) {
   }
 }
 
-async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind']; input?: string; evidence?: string; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> }) {
+async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind']; input?: string; evidence?: string; images?: IncidentEvidenceImageInput[]; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> }) {
   const detail = displayedDetail.value
   if (!detail) return
   const incident = detail.case
@@ -864,7 +866,20 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
         return continueIncidentCase({ ...base, ...continuationForDetail(detail, '') })
       }
       if (payload.kind === 'supply_evidence' || payload.kind === 'continue_fix') {
-        return continueIncidentCase({ ...base, ...continuationForDetail(detail, payload.input || '') })
+        let supplemental = payload.input?.trim() || ''
+        if (payload.kind === 'supply_evidence' && payload.images?.length) {
+          const attemptID = incident.current_attempt_id
+          if (!attemptID) throw new Error('当前 Case 没有可绑定补充证据的验证 Attempt')
+          const uploaded = await uploadIncidentEvidenceImages({
+            case_id: incident.id,
+            attempt_id: attemptID,
+            expected_version: incident.version,
+            images: payload.images,
+          })
+          const imageEvidence = `用户补充了 ${uploaded.length} 张页面截图（EvidenceArtifact: ${uploaded.map(item => item.artifact_id).join(', ')}），重试时必须结合图片核对复现步骤和页面状态。`
+          supplemental = [supplemental, imageEvidence].filter(Boolean).join('\n')
+        }
+        return continueIncidentCase({ ...base, ...continuationForDetail(detail, supplemental) })
       }
       if (payload.kind === 'supply_merge_decision') {
         return continueIncidentCase({ ...base, phase: 'fix', input_json: { decision: 'resolve_merge_conflict', evidence: payload.input || '' } })

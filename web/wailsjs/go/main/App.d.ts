@@ -29,8 +29,6 @@ export function ApproveIncidentFix(arg1:main.ApproveIncidentFixInput):Promise<bu
 
 export function ApproveIncidentMerge(arg1:main.ApproveIncidentMergeInput):Promise<bughub.IncidentCase>;
 
-export function CompleteIncidentRemediation(arg1:main.CompleteIncidentRemediationInput):Promise<bughub.IncidentCase>;
-
 export function BugHookBaseURL():Promise<string>;
 
 export function CancelAnalyze():Promise<boolean>;
@@ -56,6 +54,8 @@ export function ChatSaveProviderKey(arg1:string,arg2:string):Promise<void>;
 export function ClearBugPlatformLogin(arg1:main.BugLoginInput):Promise<main.BugLoginResult>;
 
 export function ClearIncidentBrowserSession(arg1:main.IncidentBrowserCommandInput):Promise<void>;
+
+export function CompleteIncidentRemediation(arg1:main.CompleteIncidentRemediationInput):Promise<bughub.IncidentCase>;
 
 export function ContinueBugInvestigation(arg1:main.BugInvestigationContinueInput):Promise<bughub.InvestigationRun>;
 
@@ -240,6 +240,8 @@ export function SyncBugPlatform(arg1:string):Promise<bughub.SyncResult>;
 export function UninstallAgent(arg1:string):Promise<agent.UninstallOpenclawResult>;
 
 export function UninstallBot(arg1:string,arg2:string):Promise<main.UninstallBotResult>;
+
+export function UploadIncidentEvidenceImages(arg1:main.UploadIncidentEvidenceImagesInput):Promise<Array<main.IncidentEvidenceImage>>;
 
 export function Validate(arg1:string):Promise<main.ValidateResult>;
 

@@ -64,7 +64,6 @@ export namespace agent {
 		    return a;
 		}
 	}
-
 	export class Result {
 	    agent_path: string;
 	    target: string;
@@ -2027,30 +2026,6 @@ export namespace main {
 	        this.target_heads = source["target_heads"];
 	    }
 	}
-	export class CompleteIncidentRemediationInput {
-	    case_id: string;
-	    expected_version: number;
-	    idempotency_key: string;
-	    actor_id: string;
-	    root_cause_attempt_id: string;
-	    summary: string;
-	    evidence: string;
-
-	    static createFrom(source: any = {}) {
-	        return new CompleteIncidentRemediationInput(source);
-	    }
-
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.case_id = source["case_id"];
-	        this.expected_version = source["expected_version"];
-	        this.idempotency_key = source["idempotency_key"];
-	        this.actor_id = source["actor_id"];
-	        this.root_cause_attempt_id = source["root_cause_attempt_id"];
-	        this.summary = source["summary"];
-	        this.evidence = source["evidence"];
-	    }
-	}
 	export class BugAttachmentPreviewInput {
 	    platform_id: string;
 	    bug_id: string;
@@ -2491,6 +2466,30 @@ export namespace main {
 	        this.api_key = source["api_key"];
 	        this.ok = source["ok"];
 	        this.err = source["err"];
+	    }
+	}
+	export class CompleteIncidentRemediationInput {
+	    case_id: string;
+	    expected_version: number;
+	    idempotency_key: string;
+	    actor_id: string;
+	    root_cause_attempt_id: string;
+	    summary: string;
+	    evidence: string;
+
+	    static createFrom(source: any = {}) {
+	        return new CompleteIncidentRemediationInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.case_id = source["case_id"];
+	        this.expected_version = source["expected_version"];
+	        this.idempotency_key = source["idempotency_key"];
+	        this.actor_id = source["actor_id"];
+	        this.root_cause_attempt_id = source["root_cause_attempt_id"];
+	        this.summary = source["summary"];
+	        this.evidence = source["evidence"];
 	    }
 	}
 	export class ContinueIncidentCaseInput {
@@ -2990,6 +2989,40 @@ export namespace main {
 	}
 
 
+	export class IncidentEvidenceImage {
+	    artifact_id: string;
+	    name: string;
+	    mime_type: string;
+	    size: number;
+
+	    static createFrom(source: any = {}) {
+	        return new IncidentEvidenceImage(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.artifact_id = source["artifact_id"];
+	        this.name = source["name"];
+	        this.mime_type = source["mime_type"];
+	        this.size = source["size"];
+	    }
+	}
+	export class IncidentEvidenceImageInput {
+	    name: string;
+	    mime_type: string;
+	    base64_data: string;
+
+	    static createFrom(source: any = {}) {
+	        return new IncidentEvidenceImageInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.mime_type = source["mime_type"];
+	        this.base64_data = source["base64_data"];
+	    }
+	}
 
 
 	export class InfraCredBatchInput {
@@ -3963,6 +3996,42 @@ export namespace main {
 	        this.mcp_removed = source["mcp_removed"];
 	        this.log = source["log"];
 	    }
+	}
+	export class UploadIncidentEvidenceImagesInput {
+	    case_id: string;
+	    attempt_id: string;
+	    expected_version: number;
+	    images: IncidentEvidenceImageInput[];
+
+	    static createFrom(source: any = {}) {
+	        return new UploadIncidentEvidenceImagesInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.case_id = source["case_id"];
+	        this.attempt_id = source["attempt_id"];
+	        this.expected_version = source["expected_version"];
+	        this.images = this.convertValues(source["images"], IncidentEvidenceImageInput);
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class UserConfigResult {
 	    default_repos_root: string;

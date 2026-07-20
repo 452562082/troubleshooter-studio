@@ -2,6 +2,8 @@ package bughub
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -77,6 +79,33 @@ func registerCapturedArtifact(ctx context.Context, store *CaseStore, input Artif
 
 func RegisterArtifact(ctx context.Context, store *CaseStore, input ArtifactInput) (EvidenceArtifact, error) {
 	return registerArtifactWithHooks(ctx, store, input, artifactHooks{})
+}
+
+// RegisterArtifactBytes publishes evidence supplied by a trusted host UI
+// without first exposing a caller-controlled temporary path. The same size,
+// credential, ownership and content-addressed idempotency checks used by
+// RegisterArtifact still apply.
+func RegisterArtifactBytes(ctx context.Context, store *CaseStore, input ArtifactInput, content []byte) (EvidenceArtifact, error) {
+	if len(content) == 0 {
+		return EvidenceArtifact{}, errors.New("artifact content is required")
+	}
+	if int64(len(content)) > maxEvidenceArtifactBytes {
+		return EvidenceArtifact{}, fmt.Errorf("%w: declared size %d exceeds maximum %d bytes", ErrEvidenceArtifactTooLarge, len(content), maxEvidenceArtifactBytes)
+	}
+	digest := sha256.Sum256(content)
+	capturedAt := input.CapturedAt.UTC()
+	if capturedAt.IsZero() {
+		capturedAt = time.Now().UTC()
+	}
+	// registerArtifactWithHooks requires a non-empty source label even when a
+	// pre-captured immutable byte slice is supplied. This value is never stored.
+	input.SourcePath = "host-upload"
+	captured := capturedArtifactSource{
+		Content:    append([]byte(nil), content...),
+		SHA256:     hex.EncodeToString(digest[:]),
+		CapturedAt: capturedAt,
+	}
+	return registerCapturedArtifact(ctx, store, input, captured)
 }
 
 func registerArtifactWithHooks(ctx context.Context, store *CaseStore, input ArtifactInput, hooks artifactHooks) (EvidenceArtifact, error) {

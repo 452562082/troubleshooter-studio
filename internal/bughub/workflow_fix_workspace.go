@@ -72,7 +72,7 @@ func (m *FixWorkspaceManager) Prepare(ctx context.Context, caseID, attemptID, en
 	if len(targetBranches) == 0 {
 		return nil, fmt.Errorf("environment %q has no repository branch mappings", environment)
 	}
-	sourceBaselines, err := parseFixSourceBaselines(inputJSON)
+	sourceBaselines, err := resolveFixSourceBaselines(bot.Path, environment, inputJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +208,7 @@ func parseFixSourceBaselines(inputJSON []byte) (map[string]string, error) {
 		SourceBaselines map[string]string `json:"source_baselines"`
 	}
 	if len(strings.TrimSpace(string(inputJSON))) == 0 {
-		return nil, errors.New("fix approval input requires source_baselines")
+		return map[string]string{}, nil
 	}
 	if err := json.Unmarshal(inputJSON, &input); err != nil {
 		return nil, fmt.Errorf("parse fix approval input: %w", err)
@@ -216,18 +216,71 @@ func parseFixSourceBaselines(inputJSON []byte) (map[string]string, error) {
 	result := make(map[string]string, len(input.SourceBaselines))
 	for repo, branch := range input.SourceBaselines {
 		repo, branch = strings.TrimSpace(repo), strings.TrimSpace(branch)
-		if repo == "" || branch == "" {
-			return nil, errors.New("source_baselines requires non-empty repository and branch names")
+		if repo == "" {
+			return nil, errors.New("source_baselines requires non-empty repository names")
 		}
 		if _, exists := result[repo]; exists {
 			return nil, fmt.Errorf("source_baselines contains duplicate repository %q", repo)
 		}
 		result[repo] = branch
 	}
-	if len(result) == 0 {
-		return nil, errors.New("fix approval input requires source_baselines")
-	}
 	return result, nil
+}
+
+// resolveFixSourceBaselines applies the product default at the trusted host
+// boundary. A blank branch means "use this repository's branch for the Case
+// environment". An entirely absent mapping selects every repository mapped to
+// that environment, which keeps CLI/API callers safe when they do not provide
+// the desktop dialog's narrower affected-repository scope.
+func resolveFixSourceBaselines(botPath, environment string, inputJSON []byte) (map[string]string, error) {
+	requested, err := parseFixSourceBaselines(inputJSON)
+	if err != nil {
+		return nil, err
+	}
+	needsDefaults := len(requested) == 0
+	for _, branch := range requested {
+		needsDefaults = needsDefaults || strings.TrimSpace(branch) == ""
+	}
+	if !needsDefaults {
+		return requested, nil
+	}
+	targets, err := loadEnvironmentBranches(botPath, environment)
+	if err != nil {
+		return nil, fmt.Errorf("resolve default fix baselines: %w", err)
+	}
+	if len(requested) == 0 {
+		requested = make(map[string]string, len(targets))
+		for repo, branch := range targets {
+			requested[strings.TrimSpace(repo)] = strings.TrimSpace(branch)
+		}
+		return requested, nil
+	}
+	for repo, branch := range requested {
+		if strings.TrimSpace(branch) != "" {
+			continue
+		}
+		target := strings.TrimSpace(targets[repo])
+		if target == "" {
+			return nil, fmt.Errorf("repository %q has no target branch mapping for environment %q", repo, environment)
+		}
+		requested[repo] = target
+	}
+	return requested, nil
+}
+
+func withFixSourceBaselines(inputJSON []byte, sourceBaselines map[string]string) (json.RawMessage, error) {
+	input := map[string]any{}
+	if len(strings.TrimSpace(string(inputJSON))) != 0 {
+		if err := json.Unmarshal(inputJSON, &input); err != nil {
+			return nil, fmt.Errorf("parse fix approval input: %w", err)
+		}
+	}
+	input["source_baselines"] = sourceBaselines
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("encode resolved fix approval input: %w", err)
+	}
+	return encoded, nil
 }
 
 func validateLinearFixAncestry(ctx context.Context, repoPath, baseCommit, fixCommit string) error {

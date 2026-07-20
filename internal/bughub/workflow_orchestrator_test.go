@@ -727,6 +727,45 @@ func TestOrchestratorRequiresSeparateScopeBoundFixAndMergeApprovals(t *testing.T
 	}
 }
 
+func TestApproveMergeIntegratesFixIntoConfirmedBaselineThenEnvironment(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident := IncidentCase{ID: "case-dual-merge", BugID: "bug", Status: CaseWaitingMergeApproval, CycleNumber: 1, CurrentAttemptID: "dual-fix", Version: 1}
+	if err := store.CreateCase(ctx, incident); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	attempt := PhaseAttempt{ID: incident.CurrentAttemptID, CaseID: incident.ID, CycleNumber: 1, Phase: PhaseFix, Status: AttemptStatusSucceeded, InputJSON: []byte(`{"source_baselines":{"repo":"feature/work"}}`), OutputJSON: []byte(`{}`), FinishedAt: &now}
+	if err := store.CreateAttempt(ctx, attempt); err != nil {
+		t.Fatal(err)
+	}
+	change := CodeChange{ID: "dual-change", CaseID: incident.ID, AttemptID: attempt.ID, Repo: "repo", BaseBranch: "feature/work", FixBranch: "fix/bug", FixCommit: "fix-1", TestEvidence: []byte(`{}`), TargetEnvironmentBranch: "test", PushRemote: "origin", PushStatus: "pushed"}
+	if err := store.RecordCodeChange(ctx, change); err != nil {
+		t.Fatal(err)
+	}
+	git := &recordingGitIntegration{result: MergeResult{Repositories: map[string]MergeRepositoryResult{"repo": {MergeCommit: "merged-fix", Pushed: true}}}}
+	o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, git, &recordingDeploymentVerifier{})
+	merged, err := o.ApproveMerge(ctx, ApproveMergeCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "approve-dual-merge", ActorID: "alice", TargetHeads: map[string]string{"repo": "head-repo"}})
+	if err != nil || merged.Status != CaseWaitingDeployment {
+		t.Fatalf("case=%+v err=%v", merged, err)
+	}
+	if len(git.merges) != 2 || git.merges[0].TargetBranches["repo"] != "feature/work" || git.merges[1].TargetBranches["repo"] != "test" {
+		t.Fatalf("merge order=%+v, want feature/work then test", git.merges)
+	}
+	approvals, err := store.ListApprovals(ctx, incident.ID)
+	if err != nil || len(approvals) != 1 {
+		t.Fatalf("approvals=%+v err=%v", approvals, err)
+	}
+	var scope MergeApprovalScope
+	if err := json.Unmarshal(approvals[0].ScopeJSON, &scope); err != nil || len(scope.CodeChanges) != 1 {
+		t.Fatalf("scope=%+v err=%v", scope, err)
+	}
+	approved := scope.CodeChanges[0]
+	if approved.BaselineBranch != "feature/work" || approved.BaselineHead != "head-repo" || approved.TargetBranch != "test" || approved.TargetHead != "head-repo" {
+		t.Fatalf("approved=%+v", approved)
+	}
+}
+
 func TestOrchestratorSchedulingFailureRecordsExplicitFailureAfterCommit(t *testing.T) {
 	ctx := context.Background()
 	store := newOrchestratorStore(t)
@@ -1228,7 +1267,7 @@ func TestContinueWithEvidenceReopensDeploymentAndMergeAuthorizationGates(t *test
 		if err := store.CreateAttempt(ctx, attempt); err != nil {
 			t.Fatal(err)
 		}
-		change := CodeChange{ID: "merge-retry-change", CaseID: incident.ID, AttemptID: attempt.ID, Repo: "repo", BaseBranch: "main", FixBranch: "fix/bug", FixCommit: "fix-1", TestEvidence: []byte(`{}`), TargetEnvironmentBranch: "test", PushStatus: "pushed"}
+		change := CodeChange{ID: "merge-retry-change", CaseID: incident.ID, AttemptID: attempt.ID, Repo: "repo", BaseBranch: "test", FixBranch: "fix/bug", FixCommit: "fix-1", TestEvidence: []byte(`{}`), TargetEnvironmentBranch: "test", PushStatus: "pushed"}
 		if err := store.RecordCodeChange(ctx, change); err != nil {
 			t.Fatal(err)
 		}
@@ -1269,7 +1308,7 @@ func TestApproveMergePersistsPartialPerRepoAndGlobalPushedCannotOverride(t *test
 		t.Fatal(err)
 	}
 	for _, repo := range []string{"a", "b"} {
-		change := CodeChange{ID: "change-" + repo, CaseID: incident.ID, AttemptID: attempt.ID, Repo: repo, BaseBranch: "main", FixBranch: "fix/" + repo, FixCommit: "fix-" + repo, TestEvidence: []byte(`{}`), TargetEnvironmentBranch: "test", PushStatus: "pushed"}
+		change := CodeChange{ID: "change-" + repo, CaseID: incident.ID, AttemptID: attempt.ID, Repo: repo, BaseBranch: "test", FixBranch: "fix/" + repo, FixCommit: "fix-" + repo, TestEvidence: []byte(`{}`), TargetEnvironmentBranch: "test", PushStatus: "pushed"}
 		if err := store.RecordCodeChange(ctx, change); err != nil {
 			t.Fatal(err)
 		}

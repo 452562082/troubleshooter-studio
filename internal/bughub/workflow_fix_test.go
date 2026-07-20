@@ -62,14 +62,23 @@ func TestApproveFixRequiresExactSnapshotBoundKey(t *testing.T) {
 	}
 }
 
-func TestApproveFixRequiresExplicitSourceBaselines(t *testing.T) {
-	_, incident, root, runner, orchestrator := prepareFixApprovalCase(t, validRootCauseOutput())
-	command := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version), ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{}`)}
-	if _, err := orchestrator.ApproveFix(context.Background(), command); err == nil || !strings.Contains(err.Error(), "source_baselines") {
-		t.Fatalf("missing source baseline approval err=%v", err)
+func TestApproveFixDefaultsMissingSourceBaselineToEnvironmentBranch(t *testing.T) {
+	store, incident, root, runner, orchestrator := prepareFixApprovalCase(t, validRootCauseOutput())
+	botPath := writeFixWorkspaceBranchMap(t, "test", "api", "test")
+	command := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version), ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex", Path: botPath}, InputJSON: []byte(`{}`)}
+	updated, err := orchestrator.ApproveFix(context.Background(), command)
+	if err != nil || updated.Status != CaseFixing || runner.startCount() != 1 {
+		t.Fatalf("case=%+v starts=%d err=%v", updated, runner.startCount(), err)
 	}
-	if runner.startCount() != 0 {
-		t.Fatalf("runner started without a source baseline: %d", runner.startCount())
+	var input struct {
+		SourceBaselines map[string]string `json:"source_baselines"`
+	}
+	if err := json.Unmarshal(runner.starts[0].InputJSON, &input); err != nil || !reflect.DeepEqual(input.SourceBaselines, map[string]string{"api": "test"}) {
+		t.Fatalf("attempt input=%s parsed=%+v err=%v", runner.starts[0].InputJSON, input, err)
+	}
+	approvals, err := store.ListApprovals(context.Background(), incident.ID)
+	if err != nil || len(approvals) != 1 || !strings.Contains(string(approvals[0].ScopeJSON), `"source_baselines":{"api":"test"}`) {
+		t.Fatalf("approvals=%+v err=%v", approvals, err)
 	}
 }
 

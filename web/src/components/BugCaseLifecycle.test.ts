@@ -33,7 +33,7 @@ function timelineEvents(count: number, caseID = 'case-1'): TransitionEvent[] {
 describe('BugCaseLifecycle', () => {
   it.each([
     ['waiting_fix_approval', '允许修复'],
-    ['waiting_merge_approval', '允许合并环境分支'],
+    ['waiting_merge_approval', '允许合并基线和环境分支'],
     ['waiting_deployment', '已部署，开始验证'],
     ['waiting_evidence', '补充证据并继续'],
     ['legacy_archived', '从新一轮验证继续'],
@@ -316,6 +316,21 @@ describe('BugCaseLifecycle', () => {
     await wrapper.find('[data-confirm]').trigger('click')
 
     expect(wrapper.emitted('primary')?.[0]).toEqual([{ kind: 'approve_fix', rootCauseAttemptID: 'investigation-7', caseVersion: 7, sourceBaselines: { 'admin-web': 'feature/new-navigation' } }])
+  })
+
+  it('allows an empty baseline and delegates the environment-branch default to the host', async () => {
+    const snapshot = detail('waiting_fix_approval')
+    snapshot.case.current_attempt_id = 'investigation-default'
+    snapshot.attempts = [{ id: 'investigation-default', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { investigation_status: 'root_cause_ready', confidence: 'high', gaps: [], call_chain: [{ repo: 'admin-web' }] }, parent_attempt_id: '', started_at: '2026-07-11T10:00:00Z', error_code: '', error_message: '', usage: {} }]
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+
+    await wrapper.find('.primary-action').trigger('click')
+    const confirm = wrapper.get<HTMLButtonElement>('[data-confirm]')
+    expect(confirm.element.disabled).toBe(false)
+    expect(wrapper.get('[role="dialog"]').text()).toContain('留空时默认使用当前环境对应的分支')
+    await confirm.trigger('click')
+
+    expect(wrapper.emitted('primary')?.[0]).toEqual([{ kind: 'approve_fix', rootCauseAttemptID: 'investigation-default', caseVersion: 2, sourceBaselines: { 'admin-web': '' } }])
   })
 
   it('previews target environment, expected commits, and verifier before deployment validation', async () => {

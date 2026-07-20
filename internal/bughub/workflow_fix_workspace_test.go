@@ -108,14 +108,35 @@ func TestFixWorkspaceLeaseRejectsSelfReportedWrongBranchAndMergeHistory(t *testi
 	}
 }
 
-func TestFixWorkspaceManagerRequiresExplicitSourceBaselines(t *testing.T) {
+func TestFixWorkspaceManagerDefaultsMissingSourceBaselineToEnvironmentBranch(t *testing.T) {
 	fixture := newGitFixture(t)
 	botPath := writeFixWorkspaceBranchMap(t, "test", "api", "test")
 	manager := NewFixWorkspaceManager(filepath.Join(t.TempDir(), "fix-worktrees"), func(context.Context, string, string) (string, error) {
 		return fixture.repo, nil
 	})
-	if _, err := manager.Prepare(context.Background(), "case-3", "attempt-3", "test", BotRef{Path: botPath}, []byte(`{}`)); err == nil || !strings.Contains(err.Error(), "source_baselines") {
-		t.Fatalf("missing explicit source baseline accepted: %v", err)
+	lease, err := manager.Prepare(context.Background(), "case-3", "attempt-3", "test", BotRef{Path: botPath}, []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lease.Close(context.Background()) }()
+	if len(lease.bindings) != 1 || lease.bindings[0].Repo != "api" || lease.bindings[0].BaseBranch != "test" || lease.bindings[0].TargetEnvironmentBranch != "test" {
+		t.Fatalf("bindings=%+v, want api test -> test", lease.bindings)
+	}
+}
+
+func TestFixWorkspaceManagerDefaultsBlankApprovedBaselineToEnvironmentBranch(t *testing.T) {
+	fixture := newGitFixture(t)
+	botPath := writeFixWorkspaceBranchMap(t, "test", "api", "test")
+	manager := NewFixWorkspaceManager(filepath.Join(t.TempDir(), "fix-worktrees"), func(context.Context, string, string) (string, error) {
+		return fixture.repo, nil
+	})
+	lease, err := manager.Prepare(context.Background(), "case-blank", "attempt-blank", "test", BotRef{Path: botPath}, []byte(`{"source_baselines":{"api":""}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lease.Close(context.Background()) }()
+	if len(lease.bindings) != 1 || lease.bindings[0].BaseBranch != "test" {
+		t.Fatalf("bindings=%+v, want blank approval resolved to test", lease.bindings)
 	}
 }
 

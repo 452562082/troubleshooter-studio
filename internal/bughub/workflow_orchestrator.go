@@ -130,15 +130,17 @@ func (r MergeRequest) Clone() MergeRequest {
 }
 
 type MergeResult struct {
-	Pushed       bool                             `json:"pushed"`
-	Conflict     bool                             `json:"conflict"`
-	MergeCommits map[string]string                `json:"merge_commits"`
-	Repositories map[string]MergeRepositoryResult `json:"repositories,omitempty"`
-	ErrorMessage string                           `json:"error_message,omitempty"`
+	Pushed               bool                             `json:"pushed"`
+	Conflict             bool                             `json:"conflict"`
+	MergeCommits         map[string]string                `json:"merge_commits"`
+	BaselineMergeCommits map[string]string                `json:"baseline_merge_commits,omitempty"`
+	Repositories         map[string]MergeRepositoryResult `json:"repositories,omitempty"`
+	ErrorMessage         string                           `json:"error_message,omitempty"`
 }
 
 func (r MergeResult) Clone() MergeResult {
 	r.MergeCommits = CloneStringMap(r.MergeCommits)
+	r.BaselineMergeCommits = CloneStringMap(r.BaselineMergeCommits)
 	if r.Repositories != nil {
 		cloned := make(map[string]MergeRepositoryResult, len(r.Repositories))
 		for repo, result := range r.Repositories {
@@ -948,9 +950,13 @@ func (o *CaseOrchestrator) ApproveFix(ctx context.Context, cmd ApproveFixCommand
 	if incident.Status != CaseWaitingFixApproval {
 		return IncidentCase{}, ErrApprovalNotReady
 	}
-	sourceBaselines, err := parseFixSourceBaselines(cmd.InputJSON)
+	sourceBaselines, err := resolveFixSourceBaselines(cmd.Bot.Path, incident.Environment, cmd.InputJSON)
 	if err != nil {
 		return IncidentCase{}, fmt.Errorf("invalid fix source baseline approval: %w", err)
+	}
+	cmd.InputJSON, err = withFixSourceBaselines(cmd.InputJSON, sourceBaselines)
+	if err != nil {
+		return IncidentCase{}, fmt.Errorf("canonicalize fix source baseline approval: %w", err)
 	}
 	if incident.CurrentAttemptID != cmd.RootCauseAttemptID {
 		if replay, replayErr := o.hasEvent(ctx, incident.ID, cmd.IdempotencyKey); replayErr != nil {
@@ -995,7 +1001,15 @@ func (o *CaseOrchestrator) replayFixApproval(ctx context.Context, cmd ApproveFix
 	if err != nil {
 		return IncidentCase{}, err
 	}
-	sourceBaselines, parseErr := parseFixSourceBaselines(cmd.InputJSON)
+	incident, incidentErr := o.store.GetCase(ctx, cmd.CaseID)
+	if incidentErr != nil {
+		return IncidentCase{}, incidentErr
+	}
+	sourceBaselines, parseErr := resolveFixSourceBaselines(cmd.Bot.Path, incident.Environment, cmd.InputJSON)
+	if parseErr != nil {
+		return IncidentCase{}, ErrIdempotencyConflict
+	}
+	cmd.InputJSON, parseErr = withFixSourceBaselines(cmd.InputJSON, sourceBaselines)
 	if parseErr != nil {
 		return IncidentCase{}, ErrIdempotencyConflict
 	}
@@ -1036,7 +1050,7 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 	if err != nil {
 		return IncidentCase{}, err
 	}
-	fixes, targets := map[string]string{}, map[string]string{}
+	fixes, targets, baselines := map[string]string{}, map[string]string{}, map[string]string{}
 	selected := []CodeChange{}
 	var scopeValue MergeApprovalScope
 	if hasReservation {
@@ -1069,6 +1083,11 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 			}
 			fixes[change.Repo] = change.FixCommit
 			targets[change.Repo] = change.TargetEnvironmentBranch
+			baseline := strings.TrimSpace(approved.BaselineBranch)
+			if baseline == "" { // Backward-compatible recovery for pre-dual-target approvals.
+				baseline = change.TargetEnvironmentBranch
+			}
+			baselines[change.Repo] = baseline
 			selected = append(selected, change)
 		}
 	} else {
@@ -1081,16 +1100,19 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 			if change.AttemptID == incident.CurrentAttemptID && change.FixCommit != "" && change.TargetEnvironmentBranch != "" {
 				fixes[change.Repo] = change.FixCommit
 				targets[change.Repo] = change.TargetEnvironmentBranch
+				baselines[change.Repo] = change.BaseBranch
 				selected = append(selected, change)
 			}
 		}
 	}
-	if len(selected) == 0 || !sameStringMapKeys(fixes, targets) {
+	if len(selected) == 0 || !sameStringMapKeys(fixes, targets) || !sameStringMapKeys(fixes, baselines) {
 		return IncidentCase{}, ErrApprovalScope
 	}
 	approvedChanges := make([]ApprovedCodeChange, 0, len(selected))
 	request := MergeRequest{CaseID: incident.ID, FixCommits: fixes, TargetBranches: targets, Changes: selected}
 	targetHeads := map[string]string{}
+	baselineRequest := buildBaselineMergeRequest(incident.ID, selected, baselines)
+	baselineHeads := map[string]string{}
 	if !hasReservation && o.git != nil {
 		inspection, inspectErr := o.git.Inspect(ctx, request)
 		if inspectErr != nil {
@@ -1110,6 +1132,19 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 		if !reflect.DeepEqual(targetHeads, cmd.TargetHeads) {
 			return o.recordStaleMergeApproval(incident, cmd.IdempotencyKey, selected, targetHeads)
 		}
+		if len(baselineRequest.Changes) > 0 {
+			baselineInspection, baselineErr := o.git.Inspect(ctx, baselineRequest)
+			if baselineErr != nil {
+				return incident, baselineErr
+			}
+			for _, change := range baselineRequest.Changes {
+				repoResult, ok := baselineInspection.Repositories[change.Repo]
+				if !ok || strings.TrimSpace(repoResult.TargetHead) == "" || repoResult.ApprovalKey != MergeApprovalKey(incident.ID, change.Repo, change.FixCommit, change.TargetEnvironmentBranch, repoResult.TargetHead) {
+					return IncidentCase{}, ErrApprovalScope
+				}
+				baselineHeads[change.Repo] = repoResult.TargetHead
+			}
+		}
 	}
 	if hasReservation {
 		for _, approved := range scopeValue.CodeChanges {
@@ -1117,6 +1152,12 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 				return IncidentCase{}, ErrApprovalScope
 			}
 			targetHeads[approved.Repo] = approved.TargetHead
+			if approved.BaselineBranch != "" && approved.BaselineBranch != approved.TargetBranch {
+				if approved.BaselineHead == "" || approved.BaselineApprovalKey != MergeApprovalKey(incident.ID, approved.Repo, approved.FixCommit, approved.BaselineBranch, approved.BaselineHead) {
+					return IncidentCase{}, ErrApprovalScope
+				}
+				baselineHeads[approved.Repo] = approved.BaselineHead
+			}
 		}
 		if len(targetHeads) != len(selected) {
 			return IncidentCase{}, ErrApprovalScope
@@ -1124,9 +1165,15 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 	}
 	request.Changes = selected
 	request.TargetHeads = targetHeads
+	baselineRequest.TargetHeads = baselineHeads
 	for _, change := range selected {
 		head := targetHeads[change.Repo]
-		approvedChanges = append(approvedChanges, ApprovedCodeChange{ID: change.ID, Repo: change.Repo, FixCommit: change.FixCommit, TargetBranch: change.TargetEnvironmentBranch, TargetHead: head, ApprovalKey: MergeApprovalKey(incident.ID, change.Repo, change.FixCommit, change.TargetEnvironmentBranch, head)})
+		baselineBranch := baselines[change.Repo]
+		baselineHead := baselineHeads[change.Repo]
+		if baselineBranch == change.TargetEnvironmentBranch {
+			baselineHead = head
+		}
+		approvedChanges = append(approvedChanges, ApprovedCodeChange{ID: change.ID, Repo: change.Repo, FixCommit: change.FixCommit, BaselineBranch: baselineBranch, BaselineHead: baselineHead, BaselineApprovalKey: MergeApprovalKey(incident.ID, change.Repo, change.FixCommit, baselineBranch, baselineHead), TargetBranch: change.TargetEnvironmentBranch, TargetHead: head, ApprovalKey: MergeApprovalKey(incident.ID, change.Repo, change.FixCommit, change.TargetEnvironmentBranch, head)})
 	}
 	sort.Slice(approvedChanges, func(i, j int) bool { return approvedChanges[i].Repo < approvedChanges[j].Repo })
 	if !hasReservation {
@@ -1144,9 +1191,34 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 		if loadErr != nil || current.Status != CaseMerging {
 			return current, loadErr
 		}
-		return o.recoverReservedMerge(ctx, current, cmd.IdempotencyKey, selected, request)
+		return o.recoverReservedMerge(ctx, current, cmd.IdempotencyKey, selected, baselineRequest, request)
+	}
+	baselineResult := MergeResult{Pushed: true, MergeCommits: map[string]string{}}
+	if len(baselineRequest.Changes) > 0 {
+		baselineResult, err = o.git.MergeAndPush(ctx, baselineRequest)
+		if err != nil {
+			if errors.Is(err, ErrMergeApprovalStale) {
+				return o.recordStaleMergeApproval(reserved.Case, cmd.IdempotencyKey, selected, nil)
+			}
+			if baselineResult.Conflict || errors.Is(err, ErrGitMergeConflict) {
+				for i := range selected {
+					if repoResult, ok := baselineResult.Repositories[selected[i].Repo]; ok && repoResult.Conflict {
+						selected[i].PushStatus = "conflict"
+					}
+				}
+				return o.recordMergeConflict(reserved.Case, cmd.IdempotencyKey, selected, fmt.Errorf("merge fix into confirmed baseline: %w", err))
+			}
+			return o.recordMergeAmbiguous(reserved.Case, cmd.IdempotencyKey, selected, fmt.Errorf("push confirmed baseline: %w", err))
+		}
+		for _, change := range baselineRequest.Changes {
+			repoResult, ok := baselineResult.Repositories[change.Repo]
+			if !ok || !repoResult.Pushed || repoResult.MergeCommit == "" {
+				return o.recordMergeAmbiguous(reserved.Case, cmd.IdempotencyKey, selected, fmt.Errorf("confirmed baseline push is incomplete for %s", change.Repo))
+			}
+		}
 	}
 	result, callErr := o.git.MergeAndPush(ctx, request)
+	result.BaselineMergeCommits = CloneStringMap(baselineResult.MergeCommits)
 	allPushed := len(result.Repositories) == len(selected)
 	for index := range selected {
 		repoResult, ok := result.Repositories[selected[index].Repo]
@@ -1213,6 +1285,24 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 	return done.Case, nil
 }
 
+func buildBaselineMergeRequest(caseID string, changes []CodeChange, baselines map[string]string) MergeRequest {
+	request := MergeRequest{CaseID: caseID, FixCommits: map[string]string{}, TargetBranches: map[string]string{}}
+	for _, original := range changes {
+		baseline := strings.TrimSpace(baselines[original.Repo])
+		if baseline == "" || baseline == strings.TrimSpace(original.TargetEnvironmentBranch) {
+			continue
+		}
+		change := original.Clone()
+		change.TargetEnvironmentBranch = baseline
+		change.MergeBaseHead = ""
+		change.MergeCommit = ""
+		request.Changes = append(request.Changes, change)
+		request.FixCommits[change.Repo] = change.FixCommit
+		request.TargetBranches[change.Repo] = baseline
+	}
+	return request
+}
+
 func (o *CaseOrchestrator) recordStaleMergeApproval(incident IncidentCase, key string, changes []CodeChange, heads map[string]string) (IncidentCase, error) {
 	k := key + ":target-head-changed"
 	payload := mustJSON(map[string]any{"target_heads": heads, "changes": changes})
@@ -1223,9 +1313,27 @@ func (o *CaseOrchestrator) recordStaleMergeApproval(incident IncidentCase, key s
 	return mutation.Case, ErrMergeApprovalStale
 }
 
-func (o *CaseOrchestrator) recoverReservedMerge(ctx context.Context, incident IncidentCase, key string, changes []CodeChange, request MergeRequest) (IncidentCase, error) {
+func (o *CaseOrchestrator) recoverReservedMerge(ctx context.Context, incident IncidentCase, key string, changes []CodeChange, baselineRequest, request MergeRequest) (IncidentCase, error) {
 	if o.git == nil {
 		return incident, nil
+	}
+	if len(baselineRequest.Changes) > 0 {
+		baselineResult, baselineErr := o.git.MergeAndPush(ctx, baselineRequest)
+		if baselineErr != nil {
+			if errors.Is(baselineErr, ErrMergeApprovalStale) {
+				return o.recordStaleMergeApproval(incident, key, changes, nil)
+			}
+			if baselineResult.Conflict || errors.Is(baselineErr, ErrGitMergeConflict) {
+				return o.recordMergeConflict(incident, key, changes, fmt.Errorf("recover confirmed baseline merge: %w", baselineErr))
+			}
+			return o.recordMergeAmbiguous(incident, key, changes, fmt.Errorf("recover confirmed baseline push: %w", baselineErr))
+		}
+		for _, change := range baselineRequest.Changes {
+			repoResult, ok := baselineResult.Repositories[change.Repo]
+			if !ok || !repoResult.Pushed || repoResult.MergeCommit == "" {
+				return o.recordMergeAmbiguous(incident, key, changes, fmt.Errorf("recovered baseline push is incomplete for %s", change.Repo))
+			}
+		}
 	}
 	inspection, err := o.git.Inspect(ctx, request)
 	if err != nil {

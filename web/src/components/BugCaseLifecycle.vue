@@ -20,7 +20,7 @@ export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrim
     waiting_remediation: { kind: 'complete_remediation', label: '确认处置完成并回归', approval: true },
     fixing: { kind: 'cancel_attempt', label: '停止当前修复' },
     fix_failed: { kind: 'continue_fix', label: '补充信息并继续修复' },
-    waiting_merge_approval: { kind: 'approve_merge', label: '允许合并环境分支', approval: true },
+    waiting_merge_approval: { kind: 'approve_merge', label: '允许合并基线和环境分支', approval: true },
     merge_conflict: { kind: 'supply_merge_decision', label: '提交合并处理决定' },
     waiting_deployment: { kind: 'notify_deployed', label: '已部署，开始验证', approval: true },
     deployment_unverified: { kind: 'supply_deployment_proof', label: '重新部署后再检查' },
@@ -114,6 +114,7 @@ const continuedAfterFailedRegression = computed(() => currentCase.value?.status 
 const mergeApprovalScopes = computed(() => (props.detail?.code_changes || []).map(change => ({
   repo: change.repo,
   fixCommit: change.fix_commit,
+  baseBranch: change.base_branch,
   targetBranch: change.target_environment_branch,
   targetHead: change.merge_base_head,
 })))
@@ -260,7 +261,7 @@ function confirmAction() {
   if (action.value.kind === 'approve_fix') {
     payload.rootCauseAttemptID = dialogRootCauseAttemptID.value
     payload.caseVersion = dialogCaseVersion.value
-    payload.sourceBaselines = Object.fromEntries(dialogSourceBaselines.value.map(item => [item.repo.trim(), item.branch.trim()]).filter(([repo, branch]) => repo && branch))
+    payload.sourceBaselines = Object.fromEntries(dialogSourceBaselines.value.map(item => [item.repo.trim(), item.branch.trim()]).filter(([repo]) => repo))
   }
   if (action.value.kind === 'complete_remediation') {
     payload.rootCauseAttemptID = dialogRootCauseAttemptID.value
@@ -283,7 +284,7 @@ function removeSourceBaseline(index: number) {
   dialogSourceBaselines.value.splice(index, 1)
 }
 
-const sourceBaselinesValid = computed(() => dialogSourceBaselines.value.length > 0 && dialogSourceBaselines.value.every(item => item.repo.trim() && item.branch.trim()) && new Set(dialogSourceBaselines.value.map(item => item.repo.trim())).size === dialogSourceBaselines.value.length)
+const sourceBaselinesValid = computed(() => dialogSourceBaselines.value.length > 0 && dialogSourceBaselines.value.every(item => item.repo.trim()) && new Set(dialogSourceBaselines.value.map(item => item.repo.trim())).size === dialogSourceBaselines.value.length)
 
 function trapDialogFocus(event: KeyboardEvent) {
   if (event.key !== 'Tab' || !dialogElement.value) return
@@ -303,7 +304,7 @@ function trapDialogFocus(event: KeyboardEvent) {
 function dialogTitle(): string {
   if (action.value?.kind === 'approve_fix') return '确认允许修复'
   if (action.value?.kind === 'complete_remediation') return '确认非代码处置已完成'
-  if (action.value?.kind === 'approve_merge') return '确认合并环境分支'
+  if (action.value?.kind === 'approve_merge') return '确认合并基线和环境分支'
   if (action.value?.kind === 'supply_merge_decision') return '提交合并冲突处理决定'
   if (action.value?.kind === 'notify_deployed') return '确认业务版本已部署'
   return action.value?.label || '继续处理'
@@ -425,23 +426,23 @@ function dialogTitle(): string {
       <section ref="dialogElement" role="dialog" aria-modal="true" aria-labelledby="case-action-dialog-title" class="approval-dialog" @keydown="trapDialogFocus">
         <header><h2 id="case-action-dialog-title">{{ dialogTitle() }}</h2></header>
         <template v-if="action.kind === 'approve_fix'">
-          <p>将授权修复 Agent 基于当前根因和证据创建最小修复。请为每个受影响仓库确认开发基线；修复分支从该基线创建，环境分支仅在后续合并阶段使用。</p>
+          <p>将授权修复 Agent 基于当前根因和证据创建最小修复。请为每个受影响仓库确认开发基线；留空时默认使用当前环境对应的分支。修复分支会从确认后的基线创建，后续分别合并并推送到开发基线和环境分支。</p>
           <p>授权范围：Case v{{ dialogCaseVersion }} / {{ dialogRootCauseAttemptID || '未找到根因 attempt' }}。</p>
           <div class="source-baseline-editor">
             <div v-for="(item, index) in dialogSourceBaselines" :key="index" class="source-baseline-row">
               <label :for="`fix-repo-${index}`">代码仓库</label>
               <input :id="`fix-repo-${index}`" v-model="item.repo" autocomplete="off" placeholder="例如 admin-web" />
               <label :for="`fix-baseline-${index}`">开发基线分支</label>
-              <input :id="`fix-baseline-${index}`" v-model="item.branch" autocomplete="off" placeholder="例如 feature/new-navigation" />
+              <input :id="`fix-baseline-${index}`" v-model="item.branch" autocomplete="off" placeholder="留空则使用当前环境分支" />
               <button class="btn" type="button" :disabled="dialogSourceBaselines.length <= 1" @click="removeSourceBaseline(index)">移除</button>
             </div>
             <button class="btn" type="button" @click="addSourceBaseline">+ 添加仓库</button>
           </div>
         </template>
         <template v-else-if="action.kind === 'approve_merge'">
-          <p>将按以下精确 scope 合并并通过 SSH 推送；Studio 会重新检查目标 HEAD，任何变化都会使本次授权失效。</p>
+          <p>将把修复提交分别合并并通过 SSH 推送到已确认的开发基线和环境分支；两者相同时只执行一次。Studio 会重新检查目标 HEAD，任何变化都会使本次授权失效。</p>
           <dl class="deployment-preview">
-            <div v-for="scope in mergeApprovalScopes" :key="scope.repo"><dt>{{ scope.repo }}</dt><dd><code>{{ scope.fixCommit }} → {{ scope.targetBranch }} @ {{ scope.targetHead || '待重新检查' }}</code></dd></div>
+            <div v-for="scope in mergeApprovalScopes" :key="scope.repo"><dt>{{ scope.repo }}</dt><dd><code>{{ scope.fixCommit }} → 基线 {{ scope.baseBranch }}；环境 {{ scope.targetBranch }} @ {{ scope.targetHead || '待重新检查' }}</code></dd></div>
           </dl>
         </template>
         <template v-else-if="action.kind === 'complete_remediation'">

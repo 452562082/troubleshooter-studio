@@ -1422,7 +1422,7 @@ func TestCodexInvestigatorStartFixUsesFixerBot(t *testing.T) {
 	if !strings.Contains(string(calls), fixerWorkspace) || !strings.Contains(string(calls), "你是 Bug 修复 Agent") {
 		t.Fatalf("fix call should use fixer workspace and prompt:\n%s", calls)
 	}
-	for _, want := range []string{"创建独立修复分支", "提交", "推送修复分支", "部署该修复分支", "root cause: counter ignores content type"} {
+	for _, want := range []string{"创建独立修复分支", "提交", "推送修复分支", "等待 Studio 单独授权后把修复提交分别合入开发基线与环境分支", "root cause: counter ignores content type"} {
 		if !strings.Contains(string(calls), want) {
 			t.Fatalf("fix prompt missing %q:\n%s", want, calls)
 		}

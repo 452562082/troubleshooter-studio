@@ -149,6 +149,33 @@ describe('App keep-alive incident route synchronization', () => {
     wrapper.unmount()
   })
 
+  it('reloads the cached Bug list and moves archived Bugs out of the current view', async () => {
+    vi.mocked(listBugs)
+      .mockResolvedValueOnce([bugA, bugB] as any)
+      .mockResolvedValue([{ ...bugA, inbox_state: 'active' }, { ...bugB, inbox_state: 'history', status: 'resolved' }] as any)
+    vi.mocked(listIncidentCases).mockResolvedValue([caseA, caseB] as any)
+    vi.mocked(getIncidentCase).mockImplementation(async id => detail(id === 'case-b' ? caseB : caseA) as any)
+    const router = testRouter()
+    await router.push('/incidents?bug_id=bug-a')
+    const wrapper = mountTestApp(router)
+    await router.isReady()
+    await flushRouteWork()
+
+    expect(wrapper.find('[data-ticket-id="bug-b"]').exists()).toBe(true)
+
+    await router.push('/bugs')
+    await flushRouteWork()
+    await router.push('/incidents?bug_id=bug-a')
+    await flushRouteWork()
+
+    expect(listBugs).toHaveBeenCalledTimes(2)
+    expect(wrapper.get('[data-ticket-view="active"]').text()).toContain('1')
+    expect(wrapper.get('[data-ticket-view="history"]').text()).toContain('1')
+    expect(wrapper.find('[data-ticket-id="bug-b"]').exists()).toBe(false)
+    expect(wrapper.get('[data-ticket-id="bug-a"]').attributes('aria-pressed')).toBe('true')
+    wrapper.unmount()
+  })
+
   it('reactivates an invalid query as a recoverable empty selection without guessing', async () => {
     vi.mocked(listBugs).mockResolvedValue([bugA, bugB] as any)
     vi.mocked(listIncidentCases).mockResolvedValue([caseA, caseB] as any)

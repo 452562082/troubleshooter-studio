@@ -9,7 +9,7 @@
 //
 //	mongodb        npx mcp-mongo-server --read-only       8 tools(--read-only 运行时拦截写)
 //	postgresql     npx @henkey/postgres-mcp-server        19 tools(2 写 + 1 任意 SQL 软约束禁)
-//	elasticsearch  npx @elastic/mcp-server-elasticsearch  4 tools(README 写的 esql 上游 v0.3.1 未注册)
+//	elasticsearch  npx @elastic/mcp-server-elasticsearch@0.1.1  4 tools(ES 8 client)
 //	redis          npx @gongrzhe/server-redis-mcp@1.0.0   4 tools(无 scan/TTL,需 redis-cli fallback)
 //	mysql          npx @benborla29/mcp-server-mysql       1 tool(单 mysql_query 入口,内部 env 限制写)
 //	doris          npx @benborla29/mcp-server-mysql       1 tool(走 Doris FE MySQL 协议)
@@ -180,7 +180,7 @@ func (b *mcpBuilder) buildDataES(servers map[string]any, ep *config.DataStoreEnd
 	}
 	servers[b.keyFor("elasticsearch", sourceID, envID)] = map[string]any{
 		"command": "npx",
-		"args":    []any{"-y", "@elastic/mcp-server-elasticsearch"},
+		"args":    []any{"-y", elasticsearchMCPPackage},
 		"env": b.envBlock(map[string]any{
 			"ES_URL":      esURL,
 			"ES_USERNAME": firstNonEmpty(b.get(envVar("ES_USER", sourceID, envID)), epUser),

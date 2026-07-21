@@ -990,6 +990,32 @@ func TestStartIncidentCaseHydratesUIBugFromSelectedBotEnvironment(t *testing.T) 
 	}
 }
 
+func TestResolveIncidentRecoveryContextHydratesConfiguredFrontendURL(t *testing.T) {
+	app := &App{}
+	app.workflowLoadBug = func(id string) (bughub.Bug, error) {
+		return bughub.Bug{ID: id, Source: "zentao", Title: "【H5】用户名称重复展示"}, nil
+	}
+	app.workflowLoadBot = func(key string) (bughub.BotRef, error) {
+		return bughub.BotRef{Key: key, Target: "codex", Path: t.TempDir(), SystemID: "base"}, nil
+	}
+	app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) {
+		return &config.SystemConfig{
+			System:       config.System{ID: "base"},
+			Environments: []config.Environment{{ID: "test", WebDomain: "https://app.test"}},
+		}, nil
+	}
+	incident := bughub.IncidentCase{ID: "case-1", BugID: "bug-1", SystemID: "base", Environment: "test"}
+	attempt := bughub.PhaseAttempt{ID: "attempt-refresh", BotKey: "base|codex", AgentTarget: "codex"}
+
+	bug, bot, err := app.resolveIncidentRecoveryContext(context.Background(), incident, attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bot.Env != "test" || bug.SystemID != "base" || bug.FrontendURL != "https://app.test" {
+		t.Fatalf("recovery context did not hydrate deployed browser config: bug=%+v bot=%+v", bug, bot)
+	}
+}
+
 func TestStartIncidentCaseDoesNotRouteBackendBugThroughBrowser(t *testing.T) {
 	app, _, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
 	app.workflowLoadBug = func(id string) (bughub.Bug, error) {

@@ -21,11 +21,13 @@ package agent
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,6 +46,131 @@ type MCPProbeResult struct {
 // probeMCPFunc 是 probe 入口的 package var,测试时可 monkey patch 避免真起子进程
 // (CI 上没 npx/uvx/docker,直接调真 probe 会全 FAIL)。生产用默认 doProbeMCPServer。
 var probeMCPFunc = doProbeMCPServer
+
+// HTTP MCPs cannot be validated by starting a local command. Keep a separate
+// injectable probe so self-test exercises the same initialize + tools/list
+// contract for Streamable HTTP servers (notably one2all) without tests making
+// real network calls.
+var probeMCPHTTPFunc = doProbeMCPHTTPServer
+
+func doProbeMCPHTTPServer(ctx context.Context, rawURL string, headers map[string]string, timeout time.Duration) MCPProbeResult {
+	pctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	client := &http.Client{Timeout: timeout}
+	sessionID := ""
+	post := func(method string, id any, expectResponse bool) (map[string]any, error) {
+		message := map[string]any{"jsonrpc": "2.0", "method": method}
+		if id != nil {
+			message["id"] = id
+		}
+		switch method {
+		case "initialize":
+			message["params"] = map[string]any{
+				"protocolVersion": "2024-11-05",
+				"capabilities":    map[string]any{},
+				"clientInfo":      map[string]any{"name": "tshoot-self-test", "version": "0"},
+			}
+		case "notifications/initialized":
+			message["params"] = map[string]any{}
+		}
+		encoded, err := json.Marshal(message)
+		if err != nil {
+			return nil, err
+		}
+		req, err := http.NewRequestWithContext(pctx, http.MethodPost, rawURL, bytes.NewReader(encoded))
+		if err != nil {
+			return nil, err
+		}
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if req.Header.Get("Accept") == "" {
+			req.Header.Set("Accept", "application/json, text/event-stream")
+		}
+		if sessionID != "" {
+			req.Header.Set("Mcp-Session-Id", sessionID)
+			req.Header.Set("MCP-Protocol-Version", "2024-11-05")
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			// Do not include the response body: gateways may echo request or
+			// credential material in authentication diagnostics.
+			return nil, fmt.Errorf("%s HTTP %d", method, resp.StatusCode)
+		}
+		if value := strings.TrimSpace(resp.Header.Get("Mcp-Session-Id")); value != "" {
+			sessionID = value
+		}
+		if !expectResponse {
+			return nil, nil
+		}
+		return readMCPHTTPResponse(resp.Body)
+	}
+
+	initialized, err := post("initialize", 1, true)
+	if err != nil {
+		return MCPProbeResult{Err: fmt.Errorf("initialize: %w", err)}
+	}
+	if rpcErr, ok := initialized["error"].(map[string]any); ok {
+		return MCPProbeResult{Err: fmt.Errorf("initialize RPC error: %v", rpcErr)}
+	}
+	if _, err := post("notifications/initialized", nil, false); err != nil {
+		return MCPProbeResult{Err: fmt.Errorf("initialized notification: %w", err)}
+	}
+	listed, err := post("tools/list", 2, true)
+	if err != nil {
+		return MCPProbeResult{Err: fmt.Errorf("tools/list: %w", err)}
+	}
+	if rpcErr, ok := listed["error"].(map[string]any); ok {
+		return MCPProbeResult{Err: fmt.Errorf("tools/list RPC error: %v", rpcErr)}
+	}
+	return MCPProbeResult{Tools: mcpToolNames(listed)}
+}
+
+func readMCPHTTPResponse(body io.Reader) (map[string]any, error) {
+	data, err := io.ReadAll(io.LimitReader(body, 2<<20))
+	if err != nil {
+		return nil, err
+	}
+	var direct map[string]any
+	if json.Unmarshal(data, &direct) == nil {
+		return direct, nil
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		if json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data:"))), &direct) == nil {
+			return direct, nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return nil, errors.New("response did not contain a JSON-RPC message")
+}
+
+func mcpToolNames(response map[string]any) []string {
+	var tools []string
+	if result, ok := response["result"].(map[string]any); ok {
+		if values, ok := result["tools"].([]any); ok {
+			for _, value := range values {
+				if tool, ok := value.(map[string]any); ok {
+					if name, ok := tool["name"].(string); ok && strings.TrimSpace(name) != "" {
+						tools = append(tools, name)
+					}
+				}
+			}
+		}
+	}
+	return tools
+}
 
 // doProbeMCPServer 起一个 mcp 子进程,跑完整的 stdio JSON-RPC 握手:
 //
@@ -151,20 +278,7 @@ func doProbeMCPServer(ctx context.Context, command string, args, env []string, t
 		return MCPProbeResult{Err: fmt.Errorf("tools/list error: %v", e), StderrTail: tailStderr()}
 	}
 
-	// 提取工具名
-	var tools []string
-	if result, ok := toolsResp["result"].(map[string]any); ok {
-		if arr, ok := result["tools"].([]any); ok {
-			for _, t := range arr {
-				if m, ok := t.(map[string]any); ok {
-					if name, ok := m["name"].(string); ok {
-						tools = append(tools, name)
-					}
-				}
-			}
-		}
-	}
-	return MCPProbeResult{Tools: tools}
+	return MCPProbeResult{Tools: mcpToolNames(toolsResp)}
 }
 
 func writeJSONLine(w io.Writer, msg map[string]any) error {
@@ -278,6 +392,29 @@ func probeMCPServersFromConfig(ctx context.Context, servers map[string]any, add 
 			continue
 		}
 		command, _ := specMap["command"].(string)
+		rawURL, _ := specMap["url"].(string)
+		if command == "" && strings.TrimSpace(rawURL) != "" {
+			headers := mcpHTTPHeaders(specMap["headers"])
+			wg.Add(1)
+			go func(probeName, endpoint string, requestHeaders map[string]string) {
+				defer wg.Done()
+				r := probeMCPHTTPFunc(ctx, endpoint, requestHeaders, probeTimeout)
+				switch {
+				case r.Err != nil:
+					detail := fmt.Sprintf("鉴权或初始化失败: %v", r.Err)
+					if isTransientMCPProbeStartupTimeout(r.Err) {
+						safeAdd("mcp probe "+probeName, "WARN", detail+"\nHTTP MCP 已注册,但本次初始化超时。")
+					} else {
+						safeAdd("mcp probe "+probeName, "FAIL", detail)
+					}
+				case len(r.Tools) == 0:
+					safeAdd("mcp probe "+probeName, "WARN", "HTTP MCP 初始化成功但 tools/list 返空")
+				default:
+					safeAdd("mcp probe "+probeName, "PASS", fmt.Sprintf("%d 工具: %s", len(r.Tools), strings.Join(r.Tools, ", ")))
+				}
+			}(name, rawURL, headers)
+			continue
+		}
 		if command == "" || (isCodeGraphMCP(name, command) && strings.TrimSpace(command) == "") {
 			if isCodeGraphMCP(name, command) {
 				safeAdd("mcp probe "+name, "FAIL", "CodeGraph MCP spec 缺 command,无法验证 codegraph_explore")
@@ -336,6 +473,23 @@ func probeMCPServersFromConfig(ctx context.Context, servers map[string]any, add 
 		}(name, command, args, env)
 	}
 	wg.Wait()
+}
+
+func mcpHTTPHeaders(raw any) map[string]string {
+	headers := map[string]string{}
+	switch values := raw.(type) {
+	case map[string]string:
+		for key, value := range values {
+			headers[key] = value
+		}
+	case map[string]any:
+		for key, value := range values {
+			if text, ok := value.(string); ok {
+				headers[key] = text
+			}
+		}
+	}
+	return headers
 }
 
 func isCodeGraphMCP(name, command string) bool {

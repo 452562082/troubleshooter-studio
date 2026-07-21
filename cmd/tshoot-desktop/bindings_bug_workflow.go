@@ -516,6 +516,13 @@ func (a *App) resolveIncidentRecoveryContext(_ context.Context, incident bughub.
 		return bughub.Bug{}, bughub.BotRef{}, err
 	}
 	bot.Env = strings.TrimSpace(incident.Environment)
+	// Automatic phase transitions (validation -> investigation -> validation
+	// evidence refresh) resolve their context through this recovery path rather
+	// than the user-facing StartIncidentCase path. Keep the same deployment
+	// config hydration here, otherwise a source ticket without frontend_url can
+	// reproduce successfully once and then immediately lose the configured
+	// environments[].web_domain during automatic evidence refresh.
+	bug = a.hydrateIncidentBrowserContext(bug, bot)
 	return bug, bot, nil
 }
 

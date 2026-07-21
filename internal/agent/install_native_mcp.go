@@ -518,7 +518,11 @@ func renderCodexMCPSection(servers map[string]any) string {
 					hdrKeys = append(hdrKeys, k)
 				}
 				sort.Strings(hdrKeys)
-				fmt.Fprintf(&sb, "[%s.headers]\n", header)
+				// Codex names the Streamable HTTP header table http_headers.
+				// Writing the shared builder key literally as `.headers` parses as
+				// valid TOML but Codex ignores it, so authenticated MCPs initialize
+				// without Authorization and disappear from the tool surface after 401.
+				fmt.Fprintf(&sb, "[%s.http_headers]\n", header)
 				for _, k := range hdrKeys {
 					sb.WriteString(k)
 					sb.WriteString(" = ")

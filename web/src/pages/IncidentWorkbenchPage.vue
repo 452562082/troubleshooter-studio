@@ -43,6 +43,13 @@ const route = useRoute()
 const router = useRouter()
 const tickets = useBugTickets({ listBugs, fetchBugByID })
 const incidentWorkflow = useIncidentCase({ listCases: listIncidentCases, getCase: getIncidentCase })
+type TicketView = 'active' | 'history'
+const ticketView = ref<TicketView>(route.query.view === 'history' ? 'history' : 'active')
+const activeBugs = computed(() => tickets.bugs.value.filter(bug => bug.inbox_state !== 'history'))
+const historyBugs = computed(() => tickets.bugs.value.filter(bug => bug.inbox_state === 'history'))
+const visibleBugs = computed(() => tickets.filteredBugs.value.filter(bug => ticketView.value === 'history'
+  ? bug.inbox_state === 'history'
+  : bug.inbox_state !== 'history'))
 const matches = ref<BotMatch[]>([])
 const selectedBotKey = ref('')
 const explicitlySelectedBots = ref<Record<string, string>>({})
@@ -90,7 +97,7 @@ if (initialRequestedBugID) tickets.select(initialRequestedBugID)
 
 const selectedActiveCase = computed(() => activeCaseForBug(incidentWorkflow.cases.value, tickets.selectedID.value))
 const selectedLatestCase = computed(() => casesForBug(incidentWorkflow.cases.value, tickets.selectedID.value)[0])
-const historyViewRequested = computed(() => route.query.view === 'history')
+const historyViewRequested = computed(() => ticketView.value === 'history')
 const displayedCase = computed(() => selectedActiveCase.value || (historyViewRequested.value ? selectedLatestCase.value : undefined))
 const displayedDetail = computed(() => incidentWorkflow.detail.value?.case.id === displayedCase.value?.id ? incidentWorkflow.detail.value : null)
 const invalidURLBug = computed(() => Boolean(routeBugID() && !tickets.loading.value && tickets.bugs.value.length > 0 && !tickets.selectedBug.value))
@@ -177,7 +184,7 @@ onActivated(() => {
     hasActivatedOnce = true
     return
   }
-  void syncRouteBugSelection(true)
+  void refreshActivatedWorkbench()
 })
 
 onMounted(async () => {
@@ -185,11 +192,9 @@ onMounted(async () => {
   await refreshBrowserRuntimeStatus()
   try {
     await tickets.load()
+    await reconcileTicketSelectionAfterLoad()
     if (tickets.selectedBug.value) {
       await Promise.all([refreshMatches(tickets.selectedBug.value.id), openPreferredCase()])
-    }
-    if (!routeBugID() && tickets.selectedID.value) {
-      await router.replace({ query: { ...route.query, bug_id: tickets.selectedID.value } })
     }
   } catch (error) {
     toastError('读取 Bug 工单', error)
@@ -252,18 +257,70 @@ function routeBugID(): string {
   return typeof route.query.bug_id === 'string' ? route.query.bug_id : ''
 }
 
+function viewForBug(bug?: BugRecord): TicketView {
+  return bug?.inbox_state === 'history' ? 'history' : 'active'
+}
+
+async function replaceTicketRoute(bugID: string, view: TicketView) {
+  const query: LocationQueryRaw = { ...route.query }
+  if (bugID) query.bug_id = bugID
+  else delete query.bug_id
+  if (view === 'history') query.view = 'history'
+  else if (query.view === 'history') delete query.view
+  const currentBugID = routeBugID()
+  const currentViewMatches = view === 'history' ? route.query.view === 'history' : route.query.view !== 'history'
+  if (currentBugID === bugID && currentViewMatches) return
+  await router.replace({ query })
+}
+
+async function reconcileTicketSelectionAfterLoad() {
+  const requestedBugID = routeBugID()
+  if (requestedBugID) {
+    const requestedBug = tickets.bugs.value.find(bug => bug.id === requestedBugID)
+    if (!requestedBug) {
+      tickets.clearSelection()
+      return
+    }
+    tickets.select(requestedBug.id)
+    ticketView.value = viewForBug(requestedBug)
+    await replaceTicketRoute(requestedBug.id, ticketView.value)
+    return
+  }
+  ticketView.value = 'active'
+  const selectedActiveBug = activeBugs.value.find(bug => bug.id === tickets.selectedID.value)
+  const nextBug = selectedActiveBug || activeBugs.value[0]
+  if (!nextBug) {
+    tickets.clearSelection()
+    return
+  }
+  tickets.select(nextBug.id)
+  await replaceTicketRoute(nextBug.id, 'active')
+}
+
+async function refreshActivatedWorkbench() {
+  try {
+    await tickets.load()
+    await reconcileTicketSelectionAfterLoad()
+  } catch (error) {
+    toastError('刷新 Bug 工单', error)
+    return
+  }
+  await syncRouteBugSelection(true)
+}
+
 async function syncRouteBugSelection(refreshCase: boolean) {
   if (route.path !== '/incidents') return
   const bugID = routeBugID()
   if (!bugID) return
-  const valid = tickets.bugs.value.some(bug => bug.id === bugID)
-  if (!valid) {
+  const bug = tickets.bugs.value.find(item => item.id === bugID)
+  if (!bug) {
     if (!tickets.selectedID.value) return
     tickets.clearSelection()
     matches.value = []
     selectedBotKey.value = ''
     return
   }
+  ticketView.value = viewForBug(bug)
   const selectionChanged = tickets.selectedID.value !== bugID
   if (selectionChanged) tickets.select(bugID)
   if (!refreshCase) return
@@ -278,11 +335,19 @@ async function syncRouteBugSelection(refreshCase: boolean) {
 
 async function selectBug(id: string) {
   tickets.select(id)
-  const history = tickets.selectedBug.value?.inbox_state === 'history'
-  const query: LocationQueryRaw = { ...route.query, bug_id: id }
-  if (history) query.view = 'history'
-  else if (query.view === 'history') delete query.view
-  await router.replace({ query })
+  ticketView.value = viewForBug(tickets.selectedBug.value)
+  await replaceTicketRoute(id, ticketView.value)
+}
+
+async function selectTicketView(view: TicketView) {
+  ticketView.value = view
+  const nextBug = visibleBugs.value.find(bug => bug.id === tickets.selectedID.value) || visibleBugs.value[0]
+  if (!nextBug) {
+    tickets.clearSelection()
+    await replaceTicketRoute('', view)
+    return
+  }
+  await selectBug(nextBug.id)
 }
 
 async function refreshMatches(bugID: string) {
@@ -974,11 +1039,17 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
 
     <section class="selection-workspace" data-overflow-safe="true" aria-label="Bug 驱动的故障闭环选择">
       <aside class="selection-panel ticket-list-panel" data-overflow-safe="true">
+        <div class="ticket-view-tabs" role="tablist" aria-label="故障闭环 Bug 范围">
+          <button type="button" role="tab" data-ticket-view="active" :aria-selected="ticketView === 'active'" :class="{ active: ticketView === 'active' }" @click="selectTicketView('active')">当前未修复 <span>{{ activeBugs.length }}</span></button>
+          <button type="button" role="tab" data-ticket-view="history" :aria-selected="ticketView === 'history'" :class="{ active: ticketView === 'history' }" @click="selectTicketView('history')">历史 <span>{{ historyBugs.length }}</span></button>
+        </div>
         <BugTicketList
-          :bugs="tickets.filteredBugs.value"
+          :bugs="visibleBugs"
           :selected-id="tickets.selectedID.value"
           :loading="tickets.loading.value"
           :query="tickets.query.value"
+          :title="ticketView === 'history' ? '历史 Bug' : '当前未修复'"
+          :empty-text="ticketView === 'history' ? '暂无历史 Bug' : '暂无未修复 Bug'"
           @select="selectBug"
           @update:query="tickets.query.value = $event"
         />
@@ -1085,7 +1156,12 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
 .danger-secondary:hover:not(:disabled) { border-color: #dc2626; background: #fef2f2; }
 .selection-workspace { min-width: 0; display: grid; grid-template-columns: minmax(220px, .8fr) minmax(300px, 1.35fr) minmax(240px, .9fr); align-items: start; gap: var(--sp-3); }
 .selection-panel { min-width: 0; padding: var(--sp-3); border: 1px solid var(--c-line); border-radius: var(--r-lg); background: var(--c-surf); }
-.ticket-list-panel { max-height: min(560px, 58vh); overflow: auto; }
+.ticket-list-panel { max-height: min(560px, 58vh); overflow: auto; display: grid; gap: var(--sp-2); }
+.ticket-view-tabs { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, .65fr); gap: 4px; padding: 4px; border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf-2); }
+.ticket-view-tabs button { min-width: 0; min-height: 36px; padding: 0 8px; border: 0; border-radius: calc(var(--r-md) - 3px); background: transparent; color: var(--c-muted); font: inherit; font-size: var(--fs-sm); font-weight: 700; cursor: pointer; }
+.ticket-view-tabs button span { margin-left: 3px; font-size: var(--fs-xs); }
+.ticket-view-tabs button.active { background: var(--c-surf); color: #1d4ed8; box-shadow: 0 1px 3px rgba(15, 23, 42, .12); }
+.ticket-view-tabs button:focus-visible { outline: 2px solid var(--c-accent-hover); outline-offset: 1px; }
 .ticket-summary-panel { display: grid; gap: var(--sp-3); }
 .bot-panel { max-height: min(560px, 58vh); overflow: auto; }
 .invalid-bug-state, .case-loading, .support-note, .live-error, .workflow-notice { min-width: 0; margin: 0; padding: 10px 12px; overflow-wrap: anywhere; border-radius: var(--r-md); font-size: var(--fs-sm); line-height: 1.5; }

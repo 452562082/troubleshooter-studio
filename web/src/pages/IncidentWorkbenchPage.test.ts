@@ -271,6 +271,30 @@ describe('IncidentWorkbenchPage', () => {
     expect(wrapper.get('.incident-header p').text()).toContain('Bug 工单')
   })
 
+  it('separates current unresolved Bugs from history', async () => {
+    vi.mocked(listBugs).mockResolvedValue([
+      { ...bugA, inbox_state: 'active' },
+      { ...bugB, inbox_state: 'history', status: 'resolved' },
+    ] as any)
+
+    const wrapper = await mountedPage()
+
+    expect(wrapper.get('[data-ticket-view="active"]').attributes('aria-selected')).toBe('true')
+    expect(wrapper.get('[data-ticket-view="active"]').text()).toContain('1')
+    expect(wrapper.get('[data-ticket-view="history"]').text()).toContain('1')
+    expect(wrapper.find('[data-ticket-id="bug-a"]').exists()).toBe(true)
+    expect(wrapper.find('[data-ticket-id="bug-b"]').exists()).toBe(false)
+    expect(wrapper.get('.ticket-list-panel').text()).toContain('当前未修复')
+
+    await wrapper.get('[data-ticket-view="history"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-ticket-view="history"]').attributes('aria-selected')).toBe('true')
+    expect(wrapper.find('[data-ticket-id="bug-a"]').exists()).toBe(false)
+    expect(wrapper.get('[data-ticket-id="bug-b"]').text()).toContain('已解决')
+    expect(router.replace).toHaveBeenCalledWith({ query: { bug_id: 'bug-b', view: 'history' } })
+  })
+
   it('renders the selected Bug as a compact incident summary', async () => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])

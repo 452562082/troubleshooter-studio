@@ -27,6 +27,11 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 )
 
+// v0.1.1 is the last Elastic MCP release backed by @elastic/elasticsearch 8.x.
+// v0.2.0+ moved to the 9.x client, which sends compatible-with=9 and is rejected
+// by the ES 7/8 clusters this project supports.
+const elasticsearchMCPPackage = "@elastic/mcp-server-elasticsearch@0.1.1"
+
 // normalizeMongoURI 修复 mongodb URI 密码段含保留字符但未 URL-encode 的常见情况。
 //
 // MongoDB 官方文档明确要求 username/password 里的 `@ / ? # [ ] %` 必须 URL-encode,

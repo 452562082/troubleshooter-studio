@@ -596,8 +596,8 @@ func TestBuildMCPServers_ELK(t *testing.T) {
 			t.Errorf("%s expected command=npx, got %v", k, spec["command"])
 		}
 		args := spec["args"].([]any)
-		if len(args) != 2 || args[0] != "-y" || args[1] != "@elastic/mcp-server-elasticsearch" {
-			t.Errorf("%s expected args=[-y @elastic/mcp-server-elasticsearch], got %v", k, args)
+		if len(args) != 2 || args[0] != "-y" || args[1] != "@elastic/mcp-server-elasticsearch@0.1.1" {
+			t.Errorf("%s expected ES 8 compatible package pin, got %v", k, args)
 		}
 		env := envOf(spec)
 		if env["ES_USERNAME"] != "elastic" || env["ES_PASSWORD"] != "espw" {
@@ -615,6 +615,47 @@ func TestBuildMCPServers_ELK(t *testing.T) {
 	servers2 := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(k string) string { return "" })
 	if _, ok := servers2["elk-dev"]; ok {
 		t.Errorf("expected elk-dev pruned when ELK_ES_URL_DEV missing under PruneEmpty=true")
+	}
+}
+
+func TestRenderCodexMCPSectionUsesCodexHTTPHeaders(t *testing.T) {
+	body := renderCodexMCPSection(map[string]any{
+		"base-one2all": map[string]any{
+			"type": "streamable-http",
+			"url":  "https://one2all.example.test/mcp",
+			"headers": map[string]string{
+				"Authorization": "Bearer secret",
+				"Accept":        "application/json, text/event-stream",
+			},
+		},
+	})
+	if !strings.Contains(body, "[mcp_servers.base-one2all.http_headers]") {
+		t.Fatalf("Codex HTTP MCP credentials must use http_headers: %s", body)
+	}
+	if strings.Contains(body, "[mcp_servers.base-one2all.headers]") {
+		t.Fatalf("generic headers table is ignored by Codex: %s", body)
+	}
+}
+
+func TestBuildMCPServersDataElasticsearchPinsES8CompatibleClient(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "test"}},
+		Infrastructure: config.Infrastructure{DataStores: []config.DataStore{{
+			Type: "elasticsearch", Enabled: true,
+		}}},
+	}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(key string) string {
+		if key == "ES_URL_TEST" {
+			return "https://es.test"
+		}
+		return ""
+	})
+	spec, ok := servers["elasticsearch-test"].(map[string]any)
+	if !ok {
+		t.Fatalf("elasticsearch-test not registered: %v", keysOf(servers))
+	}
+	if args := spec["args"].([]any); !reflect.DeepEqual(args, []any{"-y", "@elastic/mcp-server-elasticsearch@0.1.1"}) {
+		t.Fatalf("data Elasticsearch must use ES 8 compatible MCP client, got %v", args)
 	}
 }
 

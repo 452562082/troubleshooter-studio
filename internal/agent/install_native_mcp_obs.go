@@ -102,8 +102,8 @@ func (b *mcpBuilder) buildJaeger(servers map[string]any) {
 // OTEL_SDK_DISABLED=true 防 elastic-otel-node 自动注入往 stdout 打 banner JSON 污染
 // stdio JSON-RPC(同数据层 ES 那条注释)。
 //
-// 2026-05-15 runtime probe 后已知:v0.3.1 实际暴露 4 个工具(list_indices/get_mappings/
-// search/get_shards),上游 README 写的 `esql` 未注册 — SKILL 文档已对齐。
+// v0.1.1 使用 Elasticsearch 8.x client,可连接 ES 7/8 集群;v0.2.0+ 改用 9.x
+// client 并发送 compatible-with=9,会被现有 ES 7/8 环境拒绝。
 func (b *mcpBuilder) buildELK(servers map[string]any) {
 	if !b.cfg.Infrastructure.Observability.ELK.Enabled {
 		return
@@ -116,7 +116,7 @@ func (b *mcpBuilder) buildELK(servers map[string]any) {
 		}
 		servers[b.keyFor("elk", "", e.ID)] = map[string]any{
 			"command": "npx",
-			"args":    []any{"-y", "@elastic/mcp-server-elasticsearch"},
+			"args":    []any{"-y", elasticsearchMCPPackage},
 			"env": b.envBlock(map[string]any{
 				"ES_URL":            esURL,
 				"ES_USERNAME":       b.get("ELK_USERNAME"),

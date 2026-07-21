@@ -2,11 +2,56 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestDoProbeMCPHTTPServerInitializesSessionAndListsTools(t *testing.T) {
+	const token = "Bearer test-token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != token {
+			http.Error(w, "api key required", http.StatusUnauthorized)
+			return
+		}
+		var message map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&message); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		switch message["method"] {
+		case "initialize":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Mcp-Session-Id", "session-1")
+			_, _ = w.Write([]byte("event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}}}}\n\n"))
+		case "notifications/initialized":
+			if request.Header.Get("Mcp-Session-Id") != "session-1" {
+				http.Error(w, "session required", http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			if request.Header.Get("Mcp-Session-Id") != "session-1" || request.Header.Get("MCP-Protocol-Version") != "2024-11-05" {
+				http.Error(w, "protocol session required", http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"list_deployments"}]}}`))
+		default:
+			http.Error(w, "unknown method", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	result := doProbeMCPHTTPServer(context.Background(), server.URL, map[string]string{"Authorization": token}, 5*time.Second)
+	if result.Err != nil || len(result.Tools) != 1 || result.Tools[0] != "list_deployments" {
+		t.Fatalf("HTTP MCP probe result=%+v", result)
+	}
+}
 
 func TestProbeMCPServersFromConfig_InheritsEnvironmentAndSpecOverrides(t *testing.T) {
 	t.Setenv("TSHOOT_PARENT_ENV", "parent")
@@ -46,6 +91,57 @@ func TestProbeMCPServersFromConfig_InheritsEnvironmentAndSpecOverrides(t *testin
 	}
 	if len(checks) != 1 || !strings.Contains(checks[0], "PASS") {
 		t.Fatalf("unexpected checks: %v", checks)
+	}
+}
+
+func TestProbeMCPServersFromConfigProbesStreamableHTTPWithHeaders(t *testing.T) {
+	old := probeMCPHTTPFunc
+	var capturedURL string
+	var capturedHeaders map[string]string
+	probeMCPHTTPFunc = func(_ context.Context, rawURL string, headers map[string]string, _ time.Duration) MCPProbeResult {
+		capturedURL = rawURL
+		capturedHeaders = headers
+		return MCPProbeResult{Tools: []string{"list_deployments"}}
+	}
+	t.Cleanup(func() { probeMCPHTTPFunc = old })
+
+	servers := map[string]any{
+		"base-one2all": map[string]any{
+			"type": "streamable-http",
+			"url":  "https://one2all.example.test/mcp",
+			"headers": map[string]any{
+				"Authorization": "Bearer secret",
+			},
+		},
+	}
+	var checks []SelfTestCheck
+	probeMCPServersFromConfig(context.Background(), servers, func(name, status, detail string) {
+		checks = append(checks, SelfTestCheck{Name: name, Status: status, Detail: detail})
+	})
+	if capturedURL != "https://one2all.example.test/mcp" || capturedHeaders["Authorization"] != "Bearer secret" {
+		t.Fatalf("HTTP MCP probe did not receive configured auth: url=%q headers=%v", capturedURL, capturedHeaders)
+	}
+	if len(checks) != 1 || checks[0].Status != "PASS" || !strings.Contains(checks[0].Detail, "list_deployments") {
+		t.Fatalf("unexpected HTTP MCP checks: %#v", checks)
+	}
+}
+
+func TestProbeMCPServersFromConfigReportsHTTPAuthenticationFailure(t *testing.T) {
+	old := probeMCPHTTPFunc
+	probeMCPHTTPFunc = func(context.Context, string, map[string]string, time.Duration) MCPProbeResult {
+		return MCPProbeResult{Err: errors.New("initialize HTTP 401: api key required")}
+	}
+	t.Cleanup(func() { probeMCPHTTPFunc = old })
+
+	servers := map[string]any{
+		"base-one2all": map[string]any{"type": "streamable-http", "url": "https://one2all.example.test/mcp"},
+	}
+	var checks []SelfTestCheck
+	probeMCPServersFromConfig(context.Background(), servers, func(name, status, detail string) {
+		checks = append(checks, SelfTestCheck{Name: name, Status: status, Detail: detail})
+	})
+	if len(checks) != 1 || checks[0].Status != "FAIL" || !strings.Contains(checks[0].Detail, "鉴权或初始化失败") {
+		t.Fatalf("HTTP MCP auth failure must be explicit: %#v", checks)
 	}
 }
 

@@ -116,6 +116,12 @@ actions:
     key: Enter
     screenshot_after: true
 assertions: []
+request_captures:
+  - id: search-request
+    action_id: submit-search
+    url_contains: /search
+    source: query
+    fields: [target_user_id]
 response_assertions:
   - id: nickname-and-signature-differ
     action_id: submit-search
@@ -136,14 +142,93 @@ response_assertions:
 	}
 }
 
+func TestParseBrowserPlanV2AcceptsBoundedRequestCaptures(t *testing.T) {
+	plan, err := ParseBrowserPlan([]byte(`version: 2
+device_profile: desktop
+start_url: https://test.example.com/search
+actions:
+  - id: submit-search
+    action: press
+    locator: {kind: placeholder, value: 请输入搜索关键字, exact: true}
+    key: Enter
+assertions:
+  - kind: visible_text
+    value: 搜索结果
+request_captures:
+  - id: search-parameters
+    action_id: submit-search
+    url_contains: /api/search
+    method: POST
+    source: json
+    fields: [target_user_id, filters.category]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.RequestCaptures) != 1 || plan.RequestCaptures[0].Fields[1] != "filters.category" {
+		t.Fatalf("request captures=%+v", plan.RequestCaptures)
+	}
+}
+
+func TestParseBrowserPlanV2RejectsSensitiveRequestCaptureFields(t *testing.T) {
+	for _, field := range []string{"password", "access_token", "headers.authorization", "session-id"} {
+		plan := fmt.Sprintf(`version: 2
+start_url: https://test.example.com/search
+actions:
+  - id: submit-search
+    action: press
+    locator: {kind: placeholder, value: 搜索, exact: true}
+    key: Enter
+assertions:
+  - kind: visible_text
+    value: 搜索结果
+request_captures:
+  - id: unsafe
+    action_id: submit-search
+    source: json
+    fields: [%s]
+`, field)
+		if _, err := ParseBrowserPlan([]byte(plan)); err == nil {
+			t.Fatalf("accepted sensitive request field %q", field)
+		}
+	}
+}
+
+func TestParseBrowserPlanV2RejectsRequestCaptureOnNonRequestAction(t *testing.T) {
+	plan := `version: 2
+start_url: https://test.example.com/search
+actions:
+  - id: snapshot
+    action: screenshot
+assertions:
+  - kind: visible_text
+    value: 搜索结果
+request_captures:
+  - id: impossible
+    action_id: snapshot
+    source: query
+    fields: [target_user_id]
+`
+	if _, err := ParseBrowserPlan([]byte(plan)); err == nil || !strings.Contains(err.Error(), "request-capable action") {
+		t.Fatalf("non-request capture error=%v", err)
+	}
+}
+
 func TestParseBrowserPlanV2RejectsUnsafeResponseAssertions(t *testing.T) {
 	base := `version: 2
 device_profile: desktop
 start_url: https://test.example.com/search
 actions:
   - id: submit-search
-    action: screenshot
+    action: press
+    locator: {kind: placeholder, value: 搜索, exact: true}
+    key: Enter
 assertions: []
+request_captures:
+  - id: search-request
+    action_id: submit-search
+    source: query
+    fields: [target_user_id]
 response_assertions:
   - id: compare-fields
     action_id: %s

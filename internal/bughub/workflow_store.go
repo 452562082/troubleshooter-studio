@@ -256,6 +256,10 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		if err := verifyWorkflowSchemaMarker(ctx, tx, 8); err != nil {
 			return err
 		}
+	case 9:
+		if err := verifyWorkflowSchemaMarker(ctx, tx, 9); err != nil {
+			return err
+		}
 	case workflowStoreSchemaVersion:
 		// Verified below before the transaction is committed.
 	default:
@@ -414,7 +418,7 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: workflowStoreSchemaVersion, Fingerprint: fingerprint})
+		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: 9, Fingerprint: fingerprint})
 		if err != nil {
 			return fmt.Errorf("encode workflow schema v9 detail: %w", err)
 		}
@@ -423,6 +427,26 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		}
 		if _, err := tx.ExecContext(ctx, `PRAGMA user_version=9`); err != nil {
 			return fmt.Errorf("set workflow schema version 9: %w", err)
+		}
+		version = 9
+	}
+	if version == 9 {
+		if _, err := tx.ExecContext(ctx, workflowStoreSchemaV10Upgrade); err != nil {
+			return fmt.Errorf("apply workflow schema v10: %w", err)
+		}
+		fingerprint, err := workflowSchemaFingerprint(ctx, tx)
+		if err != nil {
+			return err
+		}
+		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: workflowStoreSchemaVersion, Fingerprint: fingerprint})
+		if err != nil {
+			return fmt.Errorf("encode workflow schema v10 detail: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE schema_migrations SET applied_at = ?, detail_json = ? WHERE key = ?`, formatStoreTime(time.Now().UTC()), string(detail), workflowStoreSchemaV1Key); err != nil {
+			return fmt.Errorf("record workflow schema v10: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `PRAGMA user_version=10`); err != nil {
+			return fmt.Errorf("set workflow schema version 10: %w", err)
 		}
 	}
 	tables, err := workflowTableColumns(ctx, tx)
@@ -438,6 +462,7 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 	v1Columns["phase_attempts"] = append(v1Columns["phase_attempts"], "run_claim_token")
 	v1Columns["reset_cancellation_operations"] = []string{"reset_key", "case_id", "attempt_id", "request_fingerprint", "status", "claim_token", "outcome_code", "created_at", "updated_at"}
 	v1Columns["browser_recovery_operations"] = []string{"idempotency_key", "operation", "case_id", "attempt_id", "expected_error_code", "cycle_number", "expected_version", "actor_id", "request_fingerprint", "status", "claim_token", "outcome_code", "result_case_json", "created_at", "updated_at"}
+	v1Columns["validation_recipes"] = []string{"case_id", "scenario_sha256", "plan_sha256", "plan_json", "source_attempt_id", "created_at", "updated_at"}
 	if err := verifyWorkflowColumns(tables, v1Columns); err != nil {
 		return err
 	}
@@ -1030,6 +1055,12 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO incident_cases (id,bug_id,source,system_id,environment,status,cycle_number,current_attempt_id,selected_bot_key,reset_from_case_id,superseded_by_case_id,version,created_at,updated_at,closed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, replacement.ID, replacement.BugID, replacement.Source, replacement.SystemID, replacement.Environment, replacement.Status, replacement.CycleNumber, replacement.CurrentAttemptID, replacement.SelectedBotKey, replacement.ResetFromCaseID, replacement.SupersededByCaseID, replacement.Version, formatStoreTime(now), formatStoreTime(now), nil); err != nil {
 		return result, fmt.Errorf("insert reset replacement Case: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO validation_recipes (
+		case_id,scenario_sha256,plan_sha256,plan_json,source_attempt_id,created_at,updated_at
+	) SELECT ?,scenario_sha256,plan_sha256,plan_json,source_attempt_id,?,?
+	  FROM validation_recipes WHERE case_id=?`, replacement.ID, formatStoreTime(now), formatStoreTime(now), incident.ID); err != nil {
+		return result, fmt.Errorf("inherit reset Case validation recipe: %w", err)
 	}
 
 	result.Archived = archived.Clone()

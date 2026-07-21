@@ -106,7 +106,8 @@ describe('BugBrowserProgress', () => {
     expect(quota.find('[data-browser-action]').exists()).toBe(false)
 
     const locator = mount(BugBrowserProgress, { props: { attempt: attempt('browser_locator_failed'), events: [], systemID: 'base', environment: 'test' } })
-    expect(locator.text()).toContain('页面元素定位失败')
+    expect(locator.text()).toContain('一次现场修复均失败')
+    expect(locator.text()).toContain('无需补充业务证据')
     expect(locator.find('[data-browser-action="repair-runtime"]').exists()).toBe(false)
 
     const business = mount(BugBrowserProgress, { props: { attempt: attempt('browser_url_required'), events: [], systemID: 'base', environment: 'test' } })

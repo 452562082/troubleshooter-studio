@@ -32,11 +32,11 @@ export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrim
     const outputCode = typeof attempt?.output_json?.error_code === 'string' ? attempt.output_json.error_code.trim() : ''
     const code = attempt?.error_code?.trim() || outputCode
     if (code === 'browser_validator_plan_invalid' || code === 'browser_locator_repair_plan_invalid') return { kind: 'retry_validation', label: '重新生成验证计划并重试' }
-    if (['browser_validator_failed', 'browser_validator_attachment_failed', 'browser_validator_no_output', 'browser_validator_process_failed'].includes(code)) {
+    if (code === 'browser_locator_failed') return { kind: 'retry_validation', label: '重新观察页面并生成验证计划' }
+    if (['browser_validator_failed', 'browser_validator_attachment_failed', 'browser_validator_no_output', 'browser_validator_process_failed', 'browser_worker_protocol_invalid'].includes(code)) {
       return { kind: 'retry_validation', label: '重试当前验证' }
     }
     const browserGapLabels: Record<string, string> = {
-      browser_locator_failed: '补充页面定位信息并重试',
       browser_assertion_failed: '补充业务预期并重试',
     }
     if (browserGapLabels[code]) return { kind: 'supply_evidence', label: browserGapLabels[code] }
@@ -170,6 +170,7 @@ const statusPosition: Record<CaseStatus, number> = {
 }
 
 function statusStagePosition(status: CaseStatus): number {
+  if (validationEvidenceRefresh.value) return 1
   if (status === 'waiting_evidence') {
     const phase = currentAttempt.value?.phase
     if (phase === 'investigation') return 1
@@ -202,7 +203,7 @@ function stageState(index: number): 'complete' | 'current' | 'blocked' | 'pendin
 }
 
 function stageStateLabel(index: number): string {
-  if (validationEvidenceRefresh.value && index === 1) return '补采后继续'
+  if (validationEvidenceRefresh.value && index === 1) return '自动补采中'
   return { complete: '已完成', current: activeStatuses.has(currentCase.value?.status as CaseStatus) ? '进行中' : '等待操作', blocked: '需处理', pending: '未开始', archived: '历史' }[stageState(index)]
 }
 
@@ -215,7 +216,7 @@ function statusLabel(status: CaseStatus): string {
     waiting_deployment: '等待人工部署', deployment_unverified: '检测到版本不一致', deployment_verified: '部署已确认', regression_validating: '回归中',
     fixed_verified: '修复已验证', still_reproduces: '回归仍复现', legacy_archived: '历史归档', reset_archived: '已重置归档',
   }
-  if (status === 'validating' && validationEvidenceRefresh.value) return '验证补采中'
+  if (status === 'validating' && validationEvidenceRefresh.value) return '排障中 · 自动补采'
   return labels[status] || status
 }
 
@@ -414,7 +415,7 @@ function dialogTitle(): string {
         <ol class="stage-progress" :class="{ 'is-remediation': usesNonCodeRemediation }" aria-label="故障处理阶段">
           <li v-for="(stage, index) in stages" :key="stage.key" class="lifecycle-stage" :data-state="stageState(index)">
             <span class="stage-marker" aria-hidden="true">{{ index + 1 }}</span>
-            <span><strong>{{ validationEvidenceRefresh && index === 0 ? '验证补采' : stage.label }}</strong><small>{{ stageStateLabel(index) }}</small></span>
+            <span><strong>{{ stage.label }}</strong><small>{{ stageStateLabel(index) }}</small></span>
           </li>
         </ol>
 

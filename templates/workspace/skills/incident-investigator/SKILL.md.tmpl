@@ -286,7 +286,7 @@ grep -rn "<关键报错串|关键业务字段名>" <repo_root>/<service>/ --incl
 **触发**:5 维表第 1/2 行命中(数据/状态类 或 逻辑/计算类)。
 性能/可用性/环境类此节直接跳过,不绕路。
 
-**取证内容**：优先消费 Studio 冻结的 `response_assertions`（字段路径、命中对象数、违反数、passed）与因果 Network 元数据。它们已证明字段关系，不需要、也不允许重新索要或持久化原始 response body / request body。
+**取证内容**：优先消费 Studio 冻结的 `request_facts`（动作、请求方法/路径、白名单业务字段和值）以及 `response_assertions`（字段路径、命中对象数、违反数、passed）与因果 Network 元数据。`request_facts` 中的实体 ID / 搜索条件必须直接用于 trace、日志和数据库只读查询；不得要求用户重复提供。它们已证明请求事实和字段关系，不需要、也不允许重新索要或持久化原始 response body / request body。
 
 如需 partial-success 统计，使用网关/业务日志已脱敏的聚合字段（总数、成功数、失败数、错误码分组），只落盘统计与字段关系，不落盘原始对象值。
 

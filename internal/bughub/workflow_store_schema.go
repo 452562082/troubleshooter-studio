@@ -90,7 +90,7 @@ CREATE INDEX IF NOT EXISTS idx_events_case_created ON transition_events(case_id,
 `
 
 const (
-	workflowStoreSchemaVersion   = 9
+	workflowStoreSchemaVersion   = 10
 	workflowStoreSchemaV1Key     = "workflow-schema-v1"
 	workflowStoreSchemaV1Upgrade = `
 ALTER TABLE transition_events ADD COLUMN request_fingerprint TEXT NOT NULL DEFAULT '';
@@ -202,6 +202,18 @@ FROM browser_recovery_operations_v8;
 DROP TABLE browser_recovery_operations_v8;
 CREATE INDEX idx_browser_recovery_status_updated ON browser_recovery_operations(status, updated_at);
 `
+	workflowStoreSchemaV10Upgrade = `
+CREATE TABLE validation_recipes (
+  case_id TEXT PRIMARY KEY REFERENCES incident_cases(id) ON DELETE CASCADE,
+  scenario_sha256 TEXT NOT NULL CHECK (length(scenario_sha256) = 64 AND scenario_sha256 NOT GLOB '*[^0-9a-f]*'),
+  plan_sha256 TEXT NOT NULL CHECK (length(plan_sha256) = 64 AND plan_sha256 NOT GLOB '*[^0-9a-f]*'),
+  plan_json TEXT NOT NULL,
+  source_attempt_id TEXT NOT NULL REFERENCES phase_attempts(id),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_validation_recipes_scenario ON validation_recipes(scenario_sha256);
+`
 )
 
 var legacyWorkflowTableColumns = map[string][]string{
@@ -215,6 +227,7 @@ var legacyWorkflowTableColumns = map[string][]string{
 	"schema_migrations":             {"key", "applied_at", "detail_json"},
 	"reset_cancellation_operations": {"reset_key", "case_id", "attempt_id", "request_fingerprint", "status", "claim_token", "outcome_code", "created_at", "updated_at"},
 	"browser_recovery_operations":   {"idempotency_key", "operation", "case_id", "attempt_id", "expected_error_code", "cycle_number", "expected_version", "actor_id", "request_fingerprint", "status", "claim_token", "outcome_code", "result_case_json", "created_at", "updated_at"},
+	"validation_recipes":            {"case_id", "scenario_sha256", "plan_sha256", "plan_json", "source_attempt_id", "created_at", "updated_at"},
 }
 
 var requiredWorkflowIndexes = map[string]string{
@@ -224,4 +237,5 @@ var requiredWorkflowIndexes = map[string]string{
 	"idx_events_case_created":                "transition_events",
 	"idx_reset_cancellations_status_updated": "reset_cancellation_operations",
 	"idx_browser_recovery_status_updated":    "browser_recovery_operations",
+	"idx_validation_recipes_scenario":        "validation_recipes",
 }

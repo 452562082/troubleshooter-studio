@@ -135,6 +135,7 @@ describe('BugCaseLifecycle', () => {
     ['browser_validator_attachment_failed', 'attachment'],
     ['browser_validator_no_output', 'process'],
     ['browser_validator_process_failed', 'process'],
+    ['browser_worker_protocol_invalid', 'system'],
   ])('retries classified validation agent failure %s inside the current Case', async (errorCode, browserState) => {
     const snapshot = detail('waiting_evidence')
     snapshot.case.current_attempt_id = 'validation-agent-classified'
@@ -163,7 +164,6 @@ describe('BugCaseLifecycle', () => {
   })
 
   it.each([
-    ['browser_locator_failed', '补充页面定位信息并重试'],
     ['browser_assertion_failed', '补充业务预期并重试'],
   ])('keeps browser evidence gap %s distinct from system recovery', async (errorCode, expectedLabel) => {
     const snapshot = detail('waiting_evidence')
@@ -176,6 +176,18 @@ describe('BugCaseLifecycle', () => {
     await wrapper.get('.primary-action').trigger('click')
     expect(wrapper.find('#case-supplement').exists()).toBe(true)
     expect(wrapper.find('[data-browser-action="repair-runtime"]').exists()).toBe(false)
+  })
+
+  it('retries live observation after the single locator repair is exhausted', async () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'validation-locator'
+    snapshot.attempts = [{ id: 'validation-locator', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_locator_failed' }, parent_attempt_id: '', started_at: '', error_code: 'browser_locator_failed', error_message: '', usage: {} }]
+
+    expect(primaryActionFor(snapshot)).toEqual({ kind: 'retry_validation', label: '重新观察页面并生成验证计划' })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    await wrapper.get('.primary-action').trigger('click')
+    expect(wrapper.emitted('primary')).toEqual([[{ kind: 'retry_validation' }]])
+    expect(wrapper.find('#case-supplement').exists()).toBe(false)
   })
 
   it('routes a missing frontend URL to Bug synchronization without generic evidence input', async () => {
@@ -249,10 +261,10 @@ describe('BugCaseLifecycle', () => {
     }]
     const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
 
-    expect(wrapper.get('.status-pill').text()).toBe('验证补采中')
-    expect(wrapper.get('.current-action-card').text()).toContain('验证补采中')
+    expect(wrapper.get('.status-pill').text()).toBe('排障中 · 自动补采')
+    expect(wrapper.get('.current-action-card').text()).toContain('排障中 · 自动补采')
     expect(wrapper.findAll('.lifecycle-stage').slice(0, 2).map(stage => stage.text())).toEqual([
-      '1验证补采进行中', '2排障补采后继续',
+      '1验证已完成', '2排障自动补采中',
     ])
   })
 

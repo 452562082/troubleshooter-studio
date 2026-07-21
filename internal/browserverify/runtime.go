@@ -23,7 +23,8 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 )
 
-const browserRuntimeVersion = "1.61.1-r20"
+const browserRuntimeVersion = "1.61.1-r24"
+const browserRuntimeProtocolProbeVersion = 1
 
 // BrowserRuntimeVersion is the immutable Playwright runtime version bundled by
 // desktop release artifacts. Packaging and runtime discovery must agree on it.
@@ -308,9 +309,10 @@ func (m *RuntimeManager) ensureLocked(ctx context.Context, emit func(bughub.Brow
 		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_probe_failed", "browser runtime probe output is invalid", err)
 	}
 	ready, err := json.Marshal(struct {
-		Version string `json:"version"`
-		SHA256  string `json:"probe_sha256"`
-	}{Version: browserRuntimeVersion, SHA256: probe.SHA256})
+		Version         string `json:"version"`
+		SHA256          string `json:"probe_sha256"`
+		ProtocolVersion int    `json:"protocol_probe_version"`
+	}{Version: browserRuntimeVersion, SHA256: probe.SHA256, ProtocolVersion: probe.ProtocolVersion})
 	if err != nil {
 		return RuntimePaths{}, m.setBrokenLocked("browser_runtime_install_failed", "encode browser runtime marker", err)
 	}
@@ -730,8 +732,10 @@ func (m *RuntimeManager) setBrokenLocked(code, message string, err error) error 
 }
 
 type runtimeProbeResult struct {
-	Status string `json:"status"`
-	SHA256 string `json:"sha256"`
+	Status          string       `json:"status"`
+	SHA256          string       `json:"sha256"`
+	ProtocolVersion int          `json:"protocol_version"`
+	WorkerResult    workerResult `json:"worker_result"`
 }
 
 func validateRuntimeProbe(encoded []byte, screenshotPath string) (runtimeProbeResult, error) {
@@ -747,6 +751,12 @@ func validateRuntimeProbe(encoded []byte, screenshotPath string) (runtimeProbeRe
 	if probe.Status != "ready" || len(probe.SHA256) != sha256.Size*2 {
 		return runtimeProbeResult{}, errors.New("probe did not report ready with a SHA256")
 	}
+	if probe.ProtocolVersion != browserRuntimeProtocolProbeVersion {
+		return runtimeProbeResult{}, errors.New("probe protocol version is incompatible")
+	}
+	if err := validateRuntimeProbeWorkerResult(probe.WorkerResult); err != nil {
+		return runtimeProbeResult{}, fmt.Errorf("probe worker result is incompatible: %w", err)
+	}
 	content, err := os.ReadFile(screenshotPath)
 	if err != nil {
 		return runtimeProbeResult{}, fmt.Errorf("read probe screenshot: %w", err)
@@ -759,6 +769,29 @@ func validateRuntimeProbe(encoded []byte, screenshotPath string) (runtimeProbeRe
 		return runtimeProbeResult{}, errors.New("probe screenshot SHA256 mismatch")
 	}
 	return probe, nil
+}
+
+func validateRuntimeProbeWorkerResult(result workerResult) error {
+	if err := validateWorkerResultBounds(result); err != nil {
+		return err
+	}
+	if result.Status != "completed" || result.ErrorCode != "" || result.FinalURL == "" || result.Title != "tshoot browser runtime probe" || len(result.Artifacts) != 0 {
+		return errors.New("probe worker result shape is invalid")
+	}
+	documentFound := false
+	searchFound := false
+	for _, node := range result.AccessibilitySummary {
+		switch {
+		case node.Role == "document" && node.Visible && strings.Contains(node.Name, "中文页面") && len(node.Name) >= 1024:
+			documentFound = true
+		case (node.Role == "textbox" || node.Role == "searchbox") && node.Name == "请输入搜索关键字" && node.LocatorKind == "placeholder" && node.Visible && !node.Disabled:
+			searchFound = true
+		}
+	}
+	if !documentFound || !searchFound {
+		return errors.New("probe worker result lacks multilingual document or search control semantics")
+	}
+	return nil
 }
 
 func requireJSONEOF(decoder *json.Decoder) error {
@@ -798,11 +831,12 @@ func validatePublishedRuntime(paths RuntimePaths) error {
 		}
 	}
 	var marker struct {
-		Version string `json:"version"`
-		SHA256  string `json:"probe_sha256"`
+		Version         string `json:"version"`
+		SHA256          string `json:"probe_sha256"`
+		ProtocolVersion int    `json:"protocol_probe_version"`
 	}
 	encoded, err := os.ReadFile(filepath.Join(paths.Root, ".runtime-ready.json"))
-	if err != nil || json.Unmarshal(encoded, &marker) != nil || marker.Version != browserRuntimeVersion || len(marker.SHA256) != sha256.Size*2 {
+	if err != nil || json.Unmarshal(encoded, &marker) != nil || marker.Version != browserRuntimeVersion || marker.ProtocolVersion != browserRuntimeProtocolProbeVersion || len(marker.SHA256) != sha256.Size*2 {
 		return errors.New("runtime readiness marker is invalid")
 	}
 	probe, err := os.ReadFile(filepath.Join(paths.Root, "probe.png"))

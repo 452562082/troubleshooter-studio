@@ -574,6 +574,30 @@ func TestStructuredInvestigationPromptExplainsRootCauseReadinessGate(t *testing.
 	}
 }
 
+func TestInvestigationDatastoreReceiptGateUsesFrozenRequestFacts(t *testing.T) {
+	input := mustJSON(InitialInvestigationInput{
+		ValidationAttemptID: "validation-1",
+		Evidence:            []InvestigationEvidenceReference{{Kind: "request_facts"}},
+	})
+	if !investigationInputRequiresDatastoreRead(input) {
+		t.Fatal("request facts did not require a datastore read")
+	}
+	if investigationInputRequiresDatastoreRead(mustJSON(InitialInvestigationInput{ValidationAttemptID: "validation-1", Evidence: []InvestigationEvidenceReference{{Kind: "network"}}})) {
+		t.Fatal("network metadata alone incorrectly required a datastore read")
+	}
+	for _, event := range []InvestigationEvent{
+		{Type: "mcp_tool_call", Message: "query", Raw: map[string]any{"server": "mongodb-test", "tool": "query"}},
+		{Type: "command_execution", Message: "mongosh --quiet"},
+	} {
+		if !eventProvesDatastoreRead(event) {
+			t.Fatalf("datastore receipt was not recognized: %+v", event)
+		}
+	}
+	if eventProvesDatastoreRead(InvestigationEvent{Type: "mcp_tool_call", Message: "query", Raw: map[string]any{"server": "grafana-test"}}) {
+		t.Fatal("observability query was accepted as datastore evidence")
+	}
+}
+
 func TestParseInvestigationResultRejectsMisleadingCallChainPrecision(t *testing.T) {
 	_, err := ParseInvestigationResult([]byte(`
 investigation_status: insufficient_info
@@ -953,7 +977,7 @@ func TestAgentPhaseRunnerBrowserLoginStopPersistsOriginalApplicationURLAndAuthen
 func TestBrowserFailureOutcomeSeparatesSystemFailuresFromEvidenceGaps(t *testing.T) {
 	for _, code := range []string{
 		"browser_runtime_broken", "browser_policy_unavailable", "browser_policy_changed",
-		"browser_verifier_failed", "browser_execution_interrupted", "browser_validator_plan_invalid", "browser_locator_repair_plan_invalid",
+		"browser_verifier_failed", "browser_execution_interrupted", "browser_validator_plan_invalid", "browser_locator_repair_plan_invalid", "browser_locator_failed",
 		"browser_worker_protocol_invalid", "browser_artifact_invalid", "browser_artifact_staging_invalid", "browser_artifact_identity_changed",
 		"browser_artifact_manifest_invalid", "browser_artifact_digest_changed", "browser_artifact_sensitive", "browser_artifact_freeze_failed",
 		"browser_artifact_frozen_invalid", "browser_artifact_repair_evidence_invalid", "browser_artifact_repair_cleanup_failed",
@@ -965,7 +989,7 @@ func TestBrowserFailureOutcomeSeparatesSystemFailuresFromEvidenceGaps(t *testing
 			t.Errorf("code=%s outcome=%s", code, got)
 		}
 	}
-	for _, code := range []string{"browser_login_required", "browser_login_failed", "browser_locator_failed", "browser_assertion_failed", "browser_url_required"} {
+	for _, code := range []string{"browser_login_required", "browser_login_failed", "browser_assertion_failed", "browser_url_required"} {
 		if got := browserFailureOutcome(PhaseValidation, code); got != PhaseOutcomeNeedsEvidence {
 			t.Errorf("code=%s outcome=%s", code, got)
 		}

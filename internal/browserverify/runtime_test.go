@@ -30,12 +30,13 @@ type commandRecord struct {
 }
 
 type recordingCommandRunner struct {
-	mu               sync.Mutex
-	Records          []commandRecord
-	FailContaining   string
-	BlockContaining  string
-	ProbeSHA         string
-	PlaywrightStdout string
+	mu                sync.Mutex
+	Records           []commandRecord
+	FailContaining    string
+	BlockContaining   string
+	ProbeSHA          string
+	ProbeWorkerResult *workerResult
+	PlaywrightStdout  string
 }
 
 type runtimeEnsureResult struct {
@@ -87,12 +88,31 @@ func (r *recordingCommandRunner) Run(ctx context.Context, executable string, arg
 		if r.ProbeSHA != "" {
 			probeSHA = r.ProbeSHA
 		}
-		return json.NewEncoder(stdout).Encode(map[string]string{
-			"status": "ready",
-			"sha256": probeSHA,
+		workerResult := runtimeProbeWorkerResultFixture()
+		if r.ProbeWorkerResult != nil {
+			workerResult = *r.ProbeWorkerResult
+		}
+		return json.NewEncoder(stdout).Encode(map[string]any{
+			"status":           "ready",
+			"sha256":           probeSHA,
+			"protocol_version": browserRuntimeProtocolProbeVersion,
+			"worker_result":    workerResult,
 		})
 	}
 	return nil
+}
+
+func runtimeProbeWorkerResultFixture() workerResult {
+	return workerResult{
+		Status:   "completed",
+		FinalURL: "http://127.0.0.1:12345/",
+		Title:    "tshoot browser runtime probe",
+		AccessibilitySummary: []bughub.BrowserAccessibilityNode{
+			{Role: "document", Name: strings.Repeat("中文页面", 170), Visible: true},
+			{Role: "searchbox", Name: "请输入搜索关键字", LocatorKind: "placeholder", Visible: true},
+		},
+		Artifacts: []workerArtifact{},
+	}
 }
 
 func TestRuntimeManagerEmitsInstallStagesAndDownloadProgress(t *testing.T) {
@@ -165,7 +185,7 @@ func TestRuntimeManagerInstallsPinnedVersionAndRunsRealProbeCommand(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if paths.Version != "1.61.1-r20" {
+	if paths.Version != "1.61.1-r24" {
 		t.Fatalf("version = %q", paths.Version)
 	}
 	got := strings.Join(runner.CommandSummaries(), "\n")
@@ -182,7 +202,7 @@ func TestRuntimeManagerInstallsPinnedVersionAndRunsRealProbeCommand(t *testing.T
 	if string(manifest) != wantManifest {
 		t.Fatalf("package.json = %q", manifest)
 	}
-	if status := manager.Status(); status.State != RuntimeReady || status.Version != "1.61.1-r20" {
+	if status := manager.Status(); status.State != RuntimeReady || status.Version != "1.61.1-r24" {
 		t.Fatalf("status = %+v", status)
 	}
 }
@@ -323,7 +343,7 @@ func TestRuntimeManagerInstallsBrowsersInsideTemporaryVersionBeforePublish(t *te
 			browsersPath = strings.TrimPrefix(entry, "PLAYWRIGHT_BROWSERS_PATH=")
 		}
 	}
-	if browsersPath == "" || !strings.Contains(browsersPath, string(filepath.Separator)+".install-1.61.1-r20-") {
+	if browsersPath == "" || !strings.Contains(browsersPath, string(filepath.Separator)+".install-1.61.1-r24-") {
 		t.Fatalf("install env did not use temporary browser path: %+v", install.Env)
 	}
 	if browsersPath == paths.BrowsersPath {
@@ -811,6 +831,22 @@ func TestRuntimeManagerRejectsProbeSHAMismatchWithoutPublishing(t *testing.T) {
 	assertRuntimeInstallLockAvailable(t, manager)
 }
 
+func TestRuntimeManagerRejectsProbeWorkerProtocolMismatchWithoutPublishing(t *testing.T) {
+	invalid := runtimeProbeWorkerResultFixture()
+	invalid.AccessibilitySummary[1].LocatorKind = "xpath"
+	manager := NewRuntimeManager(t.TempDir(), &recordingCommandRunner{ProbeWorkerResult: &invalid})
+	if _, err := manager.Ensure(context.Background(), nil); err == nil {
+		t.Fatal("expected worker protocol mismatch")
+	}
+	if status := manager.Status(); status.State != RuntimeBroken || status.ErrorCode != "browser_runtime_probe_failed" {
+		t.Fatalf("status = %+v", status)
+	}
+	if _, err := os.Stat(manager.currentDir()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("protocol-incompatible runtime was published: %v", err)
+	}
+	assertRuntimeInstallLockAvailable(t, manager)
+}
+
 func TestRuntimeManagerReusesReadyRuntimeWithoutCommands(t *testing.T) {
 	runner := &recordingCommandRunner{}
 	manager := NewRuntimeManager(t.TempDir(), runner)
@@ -825,6 +861,38 @@ func TestRuntimeManagerReusesReadyRuntimeWithoutCommands(t *testing.T) {
 	}
 	if first != second || len(runner.CommandSummaries()) != commandCount {
 		t.Fatalf("first=%+v second=%+v commands=%v", first, second, runner.CommandSummaries())
+	}
+}
+
+func TestRuntimeManagerRejectsReadyMarkerWithoutSemanticProbeVersion(t *testing.T) {
+	root := t.TempDir()
+	manager := NewRuntimeManager(root, &recordingCommandRunner{})
+	paths, err := manager.Ensure(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe, err := os.ReadFile(filepath.Join(paths.Root, "probe.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(probe)
+	legacyMarker, err := json.Marshal(map[string]string{
+		"version":      browserRuntimeVersion,
+		"probe_sha256": hex.EncodeToString(digest[:]),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(paths.Root, ".runtime-ready.json"), append(legacyMarker, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := NewRuntimeManager(root, &recordingCommandRunner{})
+	if status := restarted.Status(); status.State == RuntimeReady {
+		t.Fatalf("runtime without semantic probe version was reused: %+v", status)
+	}
+	if _, err := restarted.RequireReady(); err == nil {
+		t.Fatal("runtime without semantic probe version passed readiness")
 	}
 }
 

@@ -805,6 +805,43 @@ func TestResetCaseWithReplacementPreservesRelatedRecords(t *testing.T) {
 	}
 }
 
+func TestResetCaseWithReplacementInheritsFrozenValidationRecipe(t *testing.T) {
+	store := openTestCaseStore(t)
+	incident, _ := prepareResetCase(t, store, "case-reset-recipe")
+	finishedAt := time.Now().UTC()
+	sourceAttempt := PhaseAttempt{
+		ID: "case-reset-recipe-validation", CaseID: incident.ID, CycleNumber: incident.CycleNumber,
+		Phase: PhaseValidation, Mode: AttemptReproduce, Status: AttemptStatusSucceeded,
+		AgentTarget: "codex", BotKey: "original|codex", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`),
+		StartedAt: finishedAt, FinishedAt: &finishedAt,
+	}
+	if err := store.CreateAttempt(context.Background(), sourceAttempt); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := ParseBrowserPlan([]byte(validBrowserPlanYAML()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	planSHA, err := durableBrowserPlanSHA256(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.StoreValidationRecipe(context.Background(), ValidationRecipe{
+		CaseID: incident.ID, ScenarioSHA256: strings.Repeat("c", 64), PlanSHA256: planSHA,
+		Plan: plan, SourceAttemptID: sourceAttempt.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.ResetCaseWithReplacement(context.Background(), resetCommand(incident, "case-reset-recipe-next", "reset-recipe"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inherited, found, err := store.GetValidationRecipe(context.Background(), result.Replacement.ID)
+	if err != nil || !found || inherited.PlanSHA256 != planSHA || inherited.SourceAttemptID != sourceAttempt.ID {
+		t.Fatalf("inherited=%+v found=%v err=%v", inherited, found, err)
+	}
+}
+
 func TestResetCaseWithReplacementRollsBackInjectedFailure(t *testing.T) {
 	store := openTestCaseStore(t)
 	incident, attempt := prepareResetCase(t, store, "case-reset-rollback")

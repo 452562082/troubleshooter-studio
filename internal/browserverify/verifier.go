@@ -986,6 +986,7 @@ func sanitizeWorkerResult(result workerResult) workerResult {
 	for index := range result.AccessibilitySummary {
 		result.AccessibilitySummary[index].Role = redactVerifierText(result.AccessibilitySummary[index].Role, 128)
 		result.AccessibilitySummary[index].Name = redactVerifierText(result.AccessibilitySummary[index].Name, 2048)
+		result.AccessibilitySummary[index].LocatorKind = redactVerifierText(result.AccessibilitySummary[index].LocatorKind, 32)
 	}
 	for index := range result.Artifacts {
 		result.Artifacts[index].RequestID = safeVerifierIdentifier(result.Artifacts[index].RequestID, 128)
@@ -1000,6 +1001,16 @@ func validateWorkerResultBounds(result workerResult) error {
 	}
 	if len(result.AccessibilitySummary) > 50 {
 		return errors.New("browser worker returned too many accessibility nodes")
+	}
+	for _, node := range result.AccessibilitySummary {
+		if len(node.Role) > 128 || len(node.Name) > 2048 || len(node.LocatorKind) > 32 {
+			return errors.New("browser worker accessibility field is too long")
+		}
+		switch node.LocatorKind {
+		case "", "role", "label", "text", "placeholder":
+		default:
+			return errors.New("browser worker accessibility locator kind is invalid")
+		}
 	}
 	for label, value := range map[string]string{
 		"status": result.Status, "final URL": result.FinalURL, "login origin": result.LoginOrigin,
@@ -1178,7 +1189,7 @@ func artifactDigestsEqual(first, second map[string]string) bool {
 
 func validBrowserArtifactKind(kind string) bool {
 	switch kind {
-	case "screenshot", "network", "console", "browser_actions", "response_assertions":
+	case "screenshot", "network", "console", "browser_actions", "request_facts", "response_assertions":
 		return true
 	default:
 		return false

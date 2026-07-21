@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 
 import { redactConsoleText, sanitizeURL, safeResponseRecord } from './sanitize.mjs';
 import {
+  accessibilitySummary,
   assertAllowedURL,
   buildLocator,
   capturePNG,
@@ -32,6 +33,7 @@ import {
   dialPinnedTarget,
   executeAssertion,
   evaluateJSONResponseAssertion,
+  evaluateRequestCapturesForRequest,
   evaluateResponseAssertionsForResponse,
   launchPinnedBrowser,
   resolvePinnedTarget,
@@ -39,6 +41,35 @@ import {
   startPinnedProxy,
   validateWorkerRequest,
 } from './browser_worker.mjs';
+
+test('accessibilitySummary infers native search inputs as searchable text controls', async () => {
+  const attributes = { role: '', type: 'search', 'aria-label': '', placeholder: '请输入搜索关键字' };
+  const node = {
+    isVisible: async () => true,
+    getAttribute: async (name) => attributes[name] || '',
+    textContent: async () => '',
+    isDisabled: async () => false,
+  };
+  const page = {
+    locator: (selector) => selector === 'body'
+      ? { innerText: async () => '搜索' }
+      : { count: async () => 1, nth: () => node },
+  };
+  const summary = await accessibilitySummary(page);
+  assert.deepEqual(summary[1], { role: 'searchbox', name: '请输入搜索关键字', locator_kind: 'placeholder', visible: true, disabled: false });
+});
+
+test('accessibilitySummary bounds multibyte document text by the host UTF-8 byte contract', async () => {
+  const page = {
+    locator: (selector) => selector === 'body'
+      ? { innerText: async () => '中文页面'.repeat(1024) }
+      : { count: async () => 0 },
+  };
+  const summary = await accessibilitySummary(page);
+  assert.equal(summary.length, 1);
+  assert.ok(Buffer.byteLength(summary[0].name, 'utf8') <= 2048);
+  assert.equal(summary[0].name.includes('\ufffd'), false);
+});
 
 test('sanitizeURL removes userinfo and redacts every repeated sensitive query value', () => {
   assert.equal(
@@ -319,6 +350,13 @@ test('browser worker validates mobile response assertions without requiring a UI
     key: 'Enter',
   }];
   request.plan.assertions = [];
+	request.plan.request_captures = [{
+		id: 'search-parameters',
+		action_id: 'submit-search',
+		url_contains: '/users',
+		source: 'query',
+		fields: ['target_user_id'],
+	}];
   request.plan.response_assertions = [{
     id: 'nickname-and-signature-differ',
     action_id: 'submit-search',
@@ -332,6 +370,88 @@ test('browser worker validates mobile response assertions without requiring a UI
   const invalid = structuredClone(request);
   invalid.plan.response_assertions[0].action_id = 'missing-action';
   assert.throws(() => validateWorkerRequest(invalid), /action_id/);
+});
+
+test('browser worker validates request captures and rejects credential field paths', () => {
+  const request = baseRequest();
+  request.plan.version = 2;
+  request.plan.actions = [{ id: 'submit-search', action: 'press', locator: { kind: 'placeholder', value: '搜索', exact: true }, key: 'Enter' }];
+  request.plan.request_captures = [{
+    id: 'search-parameters', action_id: 'submit-search',
+    url_contains: '/users', method: 'POST', source: 'json',
+    fields: ['target_user_id', 'filters.category'],
+  }];
+  assert.doesNotThrow(() => validateWorkerRequest(request));
+
+  const sensitive = structuredClone(request);
+  sensitive.plan.request_captures[0].fields = ['access_token'];
+  assert.throws(() => validateWorkerRequest(sensitive), /sensitive/);
+});
+
+test('request captures emit only declared query and JSON fields', async () => {
+  const captures = [{
+    id: 'query-facts', action_id: 'submit-search', method: 'GET',
+    url_contains: '/search', source: 'query', fields: ['target_user_id', 'category'],
+  }];
+  const queryRecords = await evaluateRequestCapturesForRequest({
+    method: () => 'GET',
+    url: () => 'https://app.test/search?target_user_id=6971db29146ed54034889f22&category=users&ignored=secret-value',
+    headers: () => ({}),
+  }, { actionID: 'submit-search' }, captures);
+  assert.equal(queryRecords.length, 1);
+  assert.deepEqual(queryRecords[0].fields.map(({ path, value }) => ({ path, value })), [
+    { path: 'target_user_id', value: '6971db29146ed54034889f22' },
+    { path: 'category', value: 'users' },
+  ]);
+  assert.equal(JSON.stringify(queryRecords).includes('ignored'), false);
+  assert.equal(queryRecords[0].passed, true);
+
+  const jsonRecords = await evaluateRequestCapturesForRequest({
+    method: () => 'POST',
+    url: () => 'https://app.test/api/search',
+    headers: () => ({ 'content-type': 'application/json' }),
+    postDataBuffer: () => Buffer.from(JSON.stringify({ target_user_id: 'user-42', filters: { category: 'users' }, ignored: 'do-not-persist' })),
+  }, { actionID: 'submit-search' }, [{ ...captures[0], id: 'json-facts', method: 'POST', source: 'json', fields: ['target_user_id', 'filters.category'] }]);
+  assert.deepEqual(jsonRecords[0].fields.map(({ path, value }) => ({ path, value })), [
+    { path: 'target_user_id', value: 'user-42' },
+    { path: 'filters.category', value: 'users' },
+  ]);
+  assert.equal(JSON.stringify(jsonRecords).includes('do-not-persist'), false);
+});
+
+test('request capture parse failures use a stable bounded reason', async () => {
+	const capture = {
+		id: 'search-json', action_id: 'submit-search',
+		url_contains: '/users', method: 'POST', source: 'json', fields: ['target_user_id'],
+	};
+	const records = await evaluateRequestCapturesForRequest({
+		method: () => 'POST',
+		url: () => 'https://app.test/users',
+		postDataBuffer: async () => Buffer.from('{invalid-json'),
+		headers: () => ({ 'content-type': 'application/json' }),
+	}, { actionID: 'submit-search' }, [capture]);
+	assert.equal(records[0].passed, false);
+	assert.equal(records[0].failure_reason, 'request_body_invalid');
+	assert.equal(records[0].fields[0].value, '');
+});
+
+test('request captures parse form and GraphQL variables without persisting raw bodies', async () => {
+  const form = await evaluateRequestCapturesForRequest({
+    method: () => 'POST', url: () => 'https://app.test/api/search',
+    headers: () => ({ 'content-type': 'application/x-www-form-urlencoded' }),
+    postDataBuffer: () => Buffer.from('target_user_id=user-42&ignored=private'),
+  }, { actionID: 'submit-search' }, [{ id: 'form', action_id: 'submit-search', source: 'form', fields: ['target_user_id'] }]);
+  assert.equal(form[0].fields[0].value, 'user-42');
+  assert.equal(JSON.stringify(form).includes('private'), false);
+
+  const graphql = await evaluateRequestCapturesForRequest({
+    method: () => 'POST', url: () => 'https://app.test/graphql',
+    headers: () => ({ 'content-type': 'application/json' }),
+    postDataBuffer: () => Buffer.from(JSON.stringify({ operationName: 'FindUser', variables: { target_user_id: 'user-42' }, query: 'ignored' })),
+  }, { actionID: 'submit-search' }, [{ id: 'graphql', action_id: 'submit-search', source: 'graphql_variables', fields: ['target_user_id'] }]);
+  assert.equal(graphql[0].fields[0].value, 'user-42');
+  assert.equal(JSON.stringify(graphql).includes('FindUser'), false);
+  assert.equal(JSON.stringify(graphql).includes('ignored'), false);
 });
 
 test('JSON response assertions emit only bounded comparison counts and never raw values', () => {

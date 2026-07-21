@@ -1177,6 +1177,15 @@ func TestHostVerifierRejectsOversizedWorkerResultCollections(t *testing.T) {
 	}
 }
 
+func TestHostVerifierRejectsUnknownAccessibilityLocatorKind(t *testing.T) {
+	result := completedWorkerResult()
+	result.AccessibilitySummary = []bughub.BrowserAccessibilityNode{{Role: "textbox", Name: "搜索", LocatorKind: "xpath", Visible: true}}
+	_, err := newTestHostVerifier(t, &fakeWorker{Result: result}).Execute(context.Background(), validBrowserRequest(t))
+	if err == nil || !strings.HasPrefix(err.Error(), "browser_worker_protocol_invalid:") {
+		t.Fatalf("error = %v, want invalid accessibility locator kind rejection", err)
+	}
+}
+
 func TestNodeWorkerRunnerKillsAndReapsChildAfterStdoutLimit(t *testing.T) {
 	temporary := t.TempDir()
 	workerPath := filepath.Join(temporary, "oversized-worker.mjs")

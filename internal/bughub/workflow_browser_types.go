@@ -21,6 +21,7 @@ type BrowserPlan struct {
 	StartURL           string                     `yaml:"start_url" json:"start_url"`
 	Actions            []BrowserAction            `yaml:"actions" json:"actions"`
 	Assertions         []BrowserAssertion         `yaml:"assertions" json:"assertions"`
+	RequestCaptures    []BrowserRequestCapture    `yaml:"request_captures,omitempty" json:"request_captures,omitempty"`
 	ResponseAssertions []BrowserResponseAssertion `yaml:"response_assertions,omitempty" json:"response_assertions,omitempty"`
 }
 
@@ -59,11 +60,24 @@ type BrowserResponseAssertion struct {
 	RightField  string `yaml:"right_field" json:"right_field"`
 }
 
+// BrowserRequestCapture declares the minimum request parameters that the
+// worker may persist as structured facts. Unlisted body fields never leave the
+// worker, and credential-like field paths are rejected before execution.
+type BrowserRequestCapture struct {
+	ID          string   `yaml:"id" json:"id"`
+	ActionID    string   `yaml:"action_id" json:"action_id"`
+	URLContains string   `yaml:"url_contains,omitempty" json:"url_contains,omitempty"`
+	Method      string   `yaml:"method,omitempty" json:"method,omitempty"`
+	Source      string   `yaml:"source" json:"source"`
+	Fields      []string `yaml:"fields" json:"fields"`
+}
+
 type BrowserAccessibilityNode struct {
-	Role     string `json:"role"`
-	Name     string `json:"name"`
-	Visible  bool   `json:"visible"`
-	Disabled bool   `json:"disabled"`
+	Role        string `json:"role"`
+	Name        string `json:"name"`
+	LocatorKind string `json:"locator_kind,omitempty"`
+	Visible     bool   `json:"visible"`
+	Disabled    bool   `json:"disabled"`
 }
 
 type BrowserVerificationRequest struct {
@@ -143,6 +157,7 @@ type browserPlanYAML struct {
 	StartURL           string                     `yaml:"start_url"`
 	Actions            []browserActionYAML        `yaml:"actions"`
 	Assertions         []BrowserAssertion         `yaml:"assertions"`
+	RequestCaptures    []BrowserRequestCapture    `yaml:"request_captures,omitempty"`
 	ResponseAssertions []BrowserResponseAssertion `yaml:"response_assertions,omitempty"`
 }
 
@@ -175,8 +190,8 @@ func ParseBrowserPlan(data []byte) (BrowserPlan, error) {
 	if len(raw.Actions) < 1 || len(raw.Actions) > 40 {
 		return BrowserPlan{}, fmt.Errorf("browser plan actions must contain 1 to 40 entries")
 	}
-	if raw.Version == BrowserPlanLegacyVersion && (raw.DeviceProfile != "" || len(raw.ResponseAssertions) != 0) {
-		return BrowserPlan{}, fmt.Errorf("browser plan device_profile and response_assertions require version %d", BrowserPlanVersion)
+	if raw.Version == BrowserPlanLegacyVersion && (raw.DeviceProfile != "" || len(raw.RequestCaptures) != 0 || len(raw.ResponseAssertions) != 0) {
+		return BrowserPlan{}, fmt.Errorf("browser plan device_profile, request_captures, and response_assertions require version %d", BrowserPlanVersion)
 	}
 	if raw.DeviceProfile != "" && raw.DeviceProfile != "desktop" && raw.DeviceProfile != "mobile" {
 		return BrowserPlan{}, fmt.Errorf("browser plan device_profile %q is not supported", raw.DeviceProfile)
@@ -191,6 +206,7 @@ func ParseBrowserPlan(data []byte) (BrowserPlan, error) {
 		StartURL:           raw.StartURL,
 		Actions:            make([]BrowserAction, 0, len(raw.Actions)),
 		Assertions:         raw.Assertions,
+		RequestCaptures:    raw.RequestCaptures,
 		ResponseAssertions: raw.ResponseAssertions,
 	}
 	seenIDs := make(map[string]struct{}, len(raw.Actions))
@@ -217,6 +233,54 @@ func ParseBrowserPlan(data []byte) (BrowserPlan, error) {
 		}
 	}
 	seenAssertionIDs := make(map[string]struct{}, len(plan.ResponseAssertions))
+	seenCaptureIDs := make(map[string]struct{}, len(plan.RequestCaptures))
+	for i, capture := range plan.RequestCaptures {
+		prefix := fmt.Sprintf("request_captures[%d]", i)
+		for field, value := range map[string]string{"id": capture.ID, "action_id": capture.ActionID, "source": capture.Source} {
+			if err := validateBrowserPlanString(prefix+"."+field, value, true); err != nil {
+				return BrowserPlan{}, err
+			}
+		}
+		if err := validateBrowserPlanString(prefix+".url_contains", capture.URLContains, false); err != nil {
+			return BrowserPlan{}, err
+		}
+		if err := validateBrowserPlanString(prefix+".method", capture.Method, false); err != nil {
+			return BrowserPlan{}, err
+		}
+		if _, duplicate := seenCaptureIDs[capture.ID]; duplicate {
+			return BrowserPlan{}, fmt.Errorf("browser plan request capture id %q is duplicated", capture.ID)
+		}
+		seenCaptureIDs[capture.ID] = struct{}{}
+		if _, exists := seenIDs[capture.ActionID]; !exists {
+			return BrowserPlan{}, fmt.Errorf("browser plan %s.action_id %q does not reference an action", prefix, capture.ActionID)
+		}
+		for _, action := range plan.Actions {
+			if action.ID == capture.ActionID && (action.Action == "screenshot" || action.Action == "wait_for") {
+				return BrowserPlan{}, fmt.Errorf("browser plan %s.action_id %q does not reference a request-capable action", prefix, capture.ActionID)
+			}
+		}
+		if capture.Method != "" && capture.Method != strings.ToUpper(capture.Method) {
+			return BrowserPlan{}, fmt.Errorf("browser plan %s.method must be uppercase", prefix)
+		}
+		switch capture.Source {
+		case "query", "json", "form", "graphql_variables":
+		default:
+			return BrowserPlan{}, fmt.Errorf("browser plan %s.source %q is not supported", prefix, capture.Source)
+		}
+		if len(capture.Fields) < 1 || len(capture.Fields) > 16 {
+			return BrowserPlan{}, fmt.Errorf("browser plan %s.fields must contain 1 to 16 entries", prefix)
+		}
+		seenFields := make(map[string]struct{}, len(capture.Fields))
+		for fieldIndex, fieldPath := range capture.Fields {
+			if !validBrowserRequestFieldPath(fieldPath) || browserRequestFieldSensitive(fieldPath) {
+				return BrowserPlan{}, fmt.Errorf("browser plan %s.fields[%d] is invalid or sensitive", prefix, fieldIndex)
+			}
+			if _, duplicate := seenFields[fieldPath]; duplicate {
+				return BrowserPlan{}, fmt.Errorf("browser plan %s field %q is duplicated", prefix, fieldPath)
+			}
+			seenFields[fieldPath] = struct{}{}
+		}
+	}
 	for i, assertion := range plan.ResponseAssertions {
 		prefix := fmt.Sprintf("response_assertions[%d]", i)
 		for field, value := range map[string]string{
@@ -237,6 +301,16 @@ func ParseBrowserPlan(data []byte) (BrowserPlan, error) {
 		if _, exists := seenIDs[assertion.ActionID]; !exists {
 			return BrowserPlan{}, fmt.Errorf("browser plan %s.action_id %q does not reference an action", prefix, assertion.ActionID)
 		}
+		pairedCapture := false
+		for _, capture := range plan.RequestCaptures {
+			if capture.ActionID == assertion.ActionID {
+				pairedCapture = true
+				break
+			}
+		}
+		if !pairedCapture {
+			return BrowserPlan{}, fmt.Errorf("browser plan %s.action_id %q requires a request capture for the same action", prefix, assertion.ActionID)
+		}
 		for _, action := range plan.Actions {
 			if action.ID == assertion.ActionID && (action.Action == "screenshot" || action.Action == "wait_for") {
 				return BrowserPlan{}, fmt.Errorf("browser plan %s.action_id %q does not reference a request-capable action", prefix, assertion.ActionID)
@@ -250,6 +324,34 @@ func ParseBrowserPlan(data []byte) (BrowserPlan, error) {
 		}
 	}
 	return plan, nil
+}
+
+func validBrowserRequestFieldPath(value string) bool {
+	if value == "" || len(value) > 256 {
+		return false
+	}
+	for _, part := range strings.Split(value, ".") {
+		if part == "" || len(part) > 64 {
+			return false
+		}
+		for index, char := range part {
+			if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || char == '_' || (index > 0 && ((char >= '0' && char <= '9') || char == '-')) {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+func browserRequestFieldSensitive(value string) bool {
+	normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(value, "-", "_"), ".", "_"))
+	for _, token := range []string{"password", "passwd", "secret", "token", "authorization", "auth", "cookie", "session", "api_key", "apikey", "private_key", "access_key", "captcha", "otp"} {
+		if strings.Contains(normalized, token) {
+			return true
+		}
+	}
+	return false
 }
 
 func validBrowserJSONFieldPath(value string) bool {

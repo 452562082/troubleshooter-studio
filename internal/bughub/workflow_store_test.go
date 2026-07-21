@@ -358,6 +358,61 @@ func TestCaseStoreAttemptLifecycleAndCloning(t *testing.T) {
 	}
 }
 
+func TestCaseStorePersistsAndReplacesValidationRecipe(t *testing.T) {
+	store := openTestCaseStore(t)
+	ctx := context.Background()
+	createTestCase(t, store, "case-recipe")
+	attempt := PhaseAttempt{
+		ID: "attempt-recipe", CaseID: "case-recipe", CycleNumber: 1, Phase: PhaseValidation,
+		Mode: AttemptReproduce, Status: AttemptStatusRunning, AgentTarget: "codex", BotKey: "bot-a",
+		InputJSON: json.RawMessage(`{}`), OutputJSON: json.RawMessage(`{}`), StartedAt: time.Now().UTC(),
+	}
+	if err := store.CreateAttempt(ctx, attempt); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := ParseBrowserPlan([]byte(validBrowserPlanYAML()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	planSHA, err := durableBrowserPlanSHA256(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenarioOne := strings.Repeat("a", 64)
+	stored, err := store.StoreValidationRecipe(ctx, ValidationRecipe{
+		CaseID: attempt.CaseID, ScenarioSHA256: scenarioOne, PlanSHA256: planSHA,
+		Plan: plan, SourceAttemptID: attempt.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.CaseID != attempt.CaseID || stored.ScenarioSHA256 != scenarioOne || stored.PlanSHA256 != planSHA || stored.CreatedAt.IsZero() || stored.UpdatedAt.IsZero() {
+		t.Fatalf("stored recipe=%+v", stored)
+	}
+
+	loaded, found, err := store.GetValidationRecipe(ctx, attempt.CaseID)
+	if err != nil || !found || loaded.PlanSHA256 != planSHA || loaded.Plan.StartURL != plan.StartURL {
+		t.Fatalf("loaded=%+v found=%v err=%v", loaded, found, err)
+	}
+	scenarioTwo := strings.Repeat("b", 64)
+	stored.ScenarioSHA256 = scenarioTwo
+	stored.UpdatedAt = stored.UpdatedAt.Add(time.Second)
+	replaced, err := store.StoreValidationRecipe(ctx, stored)
+	if err != nil || replaced.ScenarioSHA256 != scenarioTwo || !replaced.CreatedAt.Equal(stored.CreatedAt) {
+		t.Fatalf("replaced=%+v err=%v", replaced, err)
+	}
+	if _, err := store.StoreValidationRecipe(ctx, ValidationRecipe{CaseID: attempt.CaseID, ScenarioSHA256: "bad", PlanSHA256: planSHA, Plan: plan, SourceAttemptID: attempt.ID}); err == nil {
+		t.Fatal("StoreValidationRecipe accepted an invalid scenario digest")
+	}
+	createTestCase(t, store, "case-recipe-other")
+	if _, err := store.StoreValidationRecipe(ctx, ValidationRecipe{
+		CaseID: "case-recipe-other", ScenarioSHA256: scenarioOne, PlanSHA256: planSHA,
+		Plan: plan, SourceAttemptID: attempt.ID,
+	}); err == nil || !strings.Contains(err.Error(), "same case") {
+		t.Fatalf("StoreValidationRecipe cross-case source error=%v", err)
+	}
+}
+
 func TestCaseStoreRecordsValidatedStructuredRecords(t *testing.T) {
 	store := openTestCaseStore(t)
 	ctx := context.Background()
@@ -714,6 +769,7 @@ func TestCaseStoreInitializesAndMigratesVersionedSchema(t *testing.T) {
 		assertTableColumns(t, store.db, "incident_cases", "reset_from_case_id", "superseded_by_case_id")
 		assertTableColumns(t, store.db, "reset_cancellation_operations", "reset_key", "case_id", "attempt_id", "request_fingerprint", "status", "claim_token", "outcome_code", "created_at", "updated_at")
 		assertTableColumns(t, store.db, "browser_recovery_operations", "idempotency_key", "operation", "case_id", "attempt_id", "expected_error_code", "cycle_number", "expected_version", "actor_id", "request_fingerprint", "status", "claim_token", "outcome_code", "result_case_json", "created_at", "updated_at")
+		assertTableColumns(t, store.db, "validation_recipes", "case_id", "scenario_sha256", "plan_sha256", "plan_json", "source_attempt_id", "created_at", "updated_at")
 		var cancellationDDL string
 		if err := store.db.QueryRow(`SELECT lower(sql) FROM sqlite_master WHERE type='table' AND name='reset_cancellation_operations'`).Scan(&cancellationDDL); err != nil {
 			t.Fatal(err)
@@ -730,6 +786,10 @@ func TestCaseStoreInitializesAndMigratesVersionedSchema(t *testing.T) {
 		var browserRecoveryIndexTable string
 		if err := store.db.QueryRow(`SELECT tbl_name FROM sqlite_master WHERE type='index' AND name='idx_browser_recovery_status_updated'`).Scan(&browserRecoveryIndexTable); err != nil || browserRecoveryIndexTable != "browser_recovery_operations" {
 			t.Fatalf("browser recovery index table=%q err=%v", browserRecoveryIndexTable, err)
+		}
+		var validationRecipeIndexTable string
+		if err := store.db.QueryRow(`SELECT tbl_name FROM sqlite_master WHERE type='index' AND name='idx_validation_recipes_scenario'`).Scan(&validationRecipeIndexTable); err != nil || validationRecipeIndexTable != "validation_recipes" {
+			t.Fatalf("validation recipe index table=%q err=%v", validationRecipeIndexTable, err)
 		}
 		var browserRecoveryDDL string
 		if err := store.db.QueryRow(`SELECT lower(sql) FROM sqlite_master WHERE type='table' AND name='browser_recovery_operations'`).Scan(&browserRecoveryDDL); err != nil {

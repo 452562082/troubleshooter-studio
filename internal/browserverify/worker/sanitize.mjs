@@ -17,7 +17,7 @@ const credentialPatterns = [
   /\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|(?:AKIA|ASIA|A3T[A-Z0-9])[A-Z0-9]{12,})\b/i,
 ];
 
-function boundedUTF8(value, maxBytes) {
+export function boundedUTF8(value, maxBytes) {
   const bytes = new TextEncoder().encode(String(value ?? ''));
   if (bytes.length <= maxBytes) return new TextDecoder().decode(bytes);
   for (let end = maxBytes; end > 0; end -= 1) {

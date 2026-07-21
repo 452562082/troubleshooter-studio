@@ -23,6 +23,30 @@ type scriptedPhaseExecutor struct {
 	Calls       int
 }
 
+type memoryValidationRecipeStore struct {
+	recipes map[string]ValidationRecipe
+}
+
+func (s *memoryValidationRecipeStore) GetValidationRecipe(_ context.Context, caseID string) (ValidationRecipe, bool, error) {
+	if s.recipes == nil {
+		return ValidationRecipe{}, false, nil
+	}
+	recipe, found := s.recipes[caseID]
+	return recipe, found, nil
+}
+
+func (s *memoryValidationRecipeStore) StoreValidationRecipe(_ context.Context, recipe ValidationRecipe) (ValidationRecipe, error) {
+	if s.recipes == nil {
+		s.recipes = make(map[string]ValidationRecipe)
+	}
+	if recipe.CreatedAt.IsZero() {
+		recipe.CreatedAt = time.Now().UTC()
+	}
+	recipe.UpdatedAt = time.Now().UTC()
+	s.recipes[recipe.CaseID] = recipe
+	return recipe, nil
+}
+
 func (s *scriptedPhaseExecutor) ExecutePhase(_ context.Context, _ string, _ BotRef, prompt string, _ func(InvestigationEvent)) (PhaseExecutionResult, error) {
 	s.Calls++
 	s.Prompts = append(s.Prompts, prompt)
@@ -51,6 +75,18 @@ type fakeBrowserVerifier struct {
 	Requests []BrowserVerificationRequest
 	Errors   []error
 	Calls    int
+}
+
+type observingBrowserVerifier struct {
+	fakeBrowserVerifier
+	Observation  BrowserVerificationResult
+	ObserveError error
+	ObserveCalls int
+}
+
+func (f *observingBrowserVerifier) Observe(_ context.Context, _ BrowserVerificationRequest) (BrowserVerificationResult, error) {
+	f.ObserveCalls++
+	return f.Observation, f.ObserveError
 }
 
 func (f *fakeBrowserVerifier) Execute(_ context.Context, request BrowserVerificationRequest) (BrowserVerificationResult, error) {
@@ -280,6 +316,10 @@ func browserCoordinatorRequest(t *testing.T) BrowserCoordinatorRequest {
 					content = []byte(`{"type":"log","text":"safe","timestamp":"2026-07-16T10:00:00Z"}` + "\n")
 				case "browser_actions":
 					content = []byte(`[{"id":"open-users","action":"click","locator_kind":"role","started_at":"2026-07-16T10:00:00Z","duration_ms":1,"result":"completed","error_code":""}]`)
+				case "request_facts":
+					content = []byte(`[{"capture_id":"search-request","action_id":"submit-search","method":"POST","url":"https://app.example.com/api/search","source":"json","matched_requests":1,"fields":[{"path":"target_user_id","present":true,"value_type":"string","value":"6971db29146ed54034889f22","redacted":false,"count":0}],"passed":true,"failure_reason":""}]`)
+				case "response_assertions":
+					content = []byte(`[{"assertion_id":"compare-fields","action_id":"submit-search","kind":"json_fields_not_equal","url":"https://app.example.com/api/search","method":"POST","status":200,"left_field":"nick_name","right_field":"text","matched_objects":1,"violations":1,"passed":false,"failure_reason":""}]`)
 				default:
 					return nil, errors.New("unsupported frozen fixture kind")
 				}
@@ -587,7 +627,7 @@ func TestBrowserPlannerPromptSelectsMobileHybridEvidenceForAPIFieldClarification
 	request.Bug.Title = "H5 用户搜索字段展示错误"
 	request.UserClarifications = []string{"搜索 chengzi 后检查接口响应：同一对象的 nick_name 和 text 应不同"}
 	prompt := browserPlannerPrompt(request, nil)
-	for _, expected := range []string{"device_profile: mobile", "response_assertions", "json_fields_not_equal", "Do not replace an API field requirement with a visible_text assertion"} {
+	for _, expected := range []string{"device_profile: mobile", "request_captures", "response_assertions", "json_fields_not_equal", "Do not replace an API field requirement with a visible_text assertion"} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("planner prompt lacks hybrid validation contract %q:\n%s", expected, prompt)
 		}
@@ -627,6 +667,12 @@ assertions:
 	}}
 	desktopVisualPlan.ResponseAssertions = []BrowserResponseAssertion{{
 		ID: "compare-fields", ActionID: "submit-search", Kind: "json_fields_not_equal", LeftField: "nick_name", RightField: "text",
+	}}
+	if err := validateBrowserPlanScenarioEvidence(request, desktopVisualPlan); err == nil || !strings.Contains(err.Error(), "requires request_captures") {
+		t.Fatalf("response-only plan was not rejected without request facts: %v", err)
+	}
+	desktopVisualPlan.RequestCaptures = []BrowserRequestCapture{{
+		ID: "search-request", ActionID: "submit-search", URLContains: "/search", Method: "POST", Source: "json", Fields: []string{"target_user_id"},
 	}}
 	if err := validateBrowserPlanScenarioEvidence(request, desktopVisualPlan); err != nil {
 		t.Fatalf("mobile response assertion plan was rejected: %v", err)
@@ -674,6 +720,78 @@ func TestEnforceBrowserResponseAssertionOutcomeOverridesVisualEvaluatorGuess(t *
 				t.Fatalf("validation = %+v", validation)
 			}
 		})
+	}
+}
+
+func TestEnforceBrowserRequestFactCompletenessBlocksMissingParameters(t *testing.T) {
+	path := "browser-executions/primary/browser/request-facts.json"
+	current := BrowserVerificationResult{Artifacts: []BrowserArtifactReference{{Kind: "request_facts", Path: path}}}
+	complete := []byte(`[{"capture_id":"search","action_id":"submit","method":"POST","url":"https://app.example.com/api/search","source":"json","matched_requests":1,"fields":[{"path":"target_user_id","present":true,"value_type":"string","value":"6971db29146ed54034889f22","redacted":false,"count":0}],"passed":true,"failure_reason":""}]`)
+	validation := ValidationResult{VerificationStatus: "reproduced", ObservedBehavior: "字段关系异常"}
+	if err := enforceBrowserRequestFactCompleteness(current, []browserFrozenArtifact{{Kind: "request_facts", ReferencePath: path, Content: complete}}, &validation); err != nil {
+		t.Fatal(err)
+	}
+	if validation.VerificationStatus != "reproduced" || len(validation.Gaps) != 0 {
+		t.Fatalf("complete request facts changed result: %+v", validation)
+	}
+
+	missing := []byte(`[{"capture_id":"search","action_id":"submit","method":"POST","url":"","source":"json","matched_requests":0,"fields":[{"path":"target_user_id","present":false,"value_type":"","value":"","redacted":false,"count":0}],"passed":false,"failure_reason":"no_matching_request"}]`)
+	validation = ValidationResult{VerificationStatus: "reproduced", ObservedBehavior: "字段关系异常"}
+	if err := enforceBrowserRequestFactCompleteness(current, []browserFrozenArtifact{{Kind: "request_facts", ReferencePath: path, Content: missing}}, &validation); err != nil {
+		t.Fatal(err)
+	}
+	if validation.VerificationStatus != "insufficient_info" || len(validation.Gaps) != 1 || !strings.Contains(validation.Gaps[0], "search") {
+		t.Fatalf("missing request facts did not block result: %+v", validation)
+	}
+}
+
+func TestBrowserCoordinatorAPIEvidenceUsesMachineVerdictWithoutEvaluator(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	request.Bug.Expected = "nick_name 与 text 不相等"
+	plan := `version: 2
+device_profile: desktop
+start_url: https://app.example.com/users
+actions:
+  - id: submit-search
+    action: press
+    locator: {kind: placeholder, value: 搜索用户, exact: true}
+    key: Enter
+    screenshot_after: true
+assertions: []
+request_captures:
+  - id: search-request
+    action_id: submit-search
+    url_contains: /api/search
+    method: POST
+    source: json
+    fields: [target_user_id]
+response_assertions:
+  - id: compare-fields
+    action_id: submit-search
+    url_contains: /api/search
+    kind: json_fields_not_equal
+    left_field: nick_name
+    right_field: text
+`
+	requestFacts := []byte(`[{"capture_id":"search-request","action_id":"submit-search","method":"POST","url":"https://app.example.com/api/search","source":"json","matched_requests":1,"fields":[{"path":"target_user_id","present":true,"value_type":"string","value":"6971db29146ed54034889f22","redacted":false,"count":0}],"passed":true,"failure_reason":""}]`)
+	responseAssertions := []byte(`[{"assertion_id":"compare-fields","action_id":"submit-search","kind":"json_fields_not_equal","url":"https://app.example.com/api/search","method":"POST","status":200,"left_field":"nick_name","right_field":"text","matched_objects":1,"violations":1,"passed":false,"failure_reason":""}]`)
+	browserResult := completedBrowserResult("browser/final.png")
+	browserResult.Artifacts = append(browserResult.Artifacts,
+		verifiedBrowserArtifact("request_facts", "browser/request-facts.json", "test", requestFacts),
+		verifiedBrowserArtifact("response_assertions", "browser/response-assertions.json", "test", responseAssertions),
+	)
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{{FinalYAML: plan}}}
+	verifier := &fakeBrowserVerifier{Results: []BrowserVerificationResult{browserResult}}
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), request)
+	if err != nil || result.ErrorCode != "" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if executor.Calls != 1 || verifier.Calls != 1 {
+		t.Fatalf("API verification called evaluator: agent=%d browser=%d", executor.Calls, verifier.Calls)
+	}
+	validation, err := ParseValidationResult([]byte(result.FinalYAML))
+	if err != nil || validation.VerificationStatus != "reproduced" || !strings.Contains(validation.ObservedBehavior, "机器校验") {
+		t.Fatalf("validation=%+v err=%v", validation, err)
 	}
 }
 
@@ -762,20 +880,123 @@ func TestBrowserRepairPromptExplainsSemanticSubmissionRecovery(t *testing.T) {
 		{ID: "submit-search", Action: "press", Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索"}, Key: "Enter"},
 		{ID: "wait-user-tab", Action: "wait_for", Locator: &BrowserLocator{Kind: "role", Value: "tab", Name: "用户"}},
 	}}
-	prompt := browserRepairPrompt(original, BrowserVerificationResult{FailedActionID: "wait-user-tab", ErrorCode: "locator_failed"}, browserEvaluatorEvidence{})
-	for _, required := range []string{"mechanically completed", "expected business request", "press to become click", "ambiguous Search/搜索 click", "must become Enter", "fill-keyword", "exact is also accepted when repairing a stored version 1 plan"} {
+	prompt := browserRepairPrompt(original, BrowserVerificationResult{FailedActionID: "wait-user-tab", ErrorCode: "locator_failed"}, browserEvaluatorEvidence{}, &BrowserVerificationResult{FinalURL: "https://app.example.com", AccessibilitySummary: []BrowserAccessibilityNode{{Role: "textbox", Name: "请输入搜索关键字", Visible: true}}}, []string{"failed_final:browser/failure.png", "initial_page:browser/initial.png"})
+	for _, required := range []string{"mechanically completed", "expected business request", "press to become click", "ambiguous Search/搜索 click", "must become Enter", "initial_page_observation", "failed_final:browser/failure.png", "never invent a placeholder", "fill-keyword", "exact is also accepted when repairing a stored version 1 plan"} {
 		if !strings.Contains(prompt, required) {
 			t.Fatalf("repair prompt is missing %q: %s", required, prompt)
 		}
 	}
 }
 
+func TestBrowserRepairEvidenceAttachesFailedAndInitialPageScreenshots(t *testing.T) {
+	failurePNG := append([]byte("\x89PNG\r\n\x1a\n"), []byte("failure-page")...)
+	initialPNG := append([]byte("\x89PNG\r\n\x1a\n"), []byte("initial-page")...)
+	failureDigest := fmt.Sprintf("%x", sha256.Sum256(failurePNG))
+	initialDigest := fmt.Sprintf("%x", sha256.Sum256(initialPNG))
+	failed := BrowserVerificationResult{FailedActionID: "wait-search", ErrorCode: "locator_failed", FinalScreenshotPath: "browser/failure.png"}
+	observation := &BrowserVerificationResult{
+		FinalScreenshotPath:  "browser/initial.png",
+		AccessibilitySummary: []BrowserAccessibilityNode{{Role: "textbox", Name: "请输入搜索关键字", Visible: true}},
+	}
+	prompt, attachments, cleanup, err := browserRepairEvidence(
+		BrowserPlan{Version: 1, StartURL: "https://app.example.com", Actions: []BrowserAction{{ID: "wait-search", Action: "wait_for", Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索内容"}}}},
+		failed,
+		[]browserFrozenArtifact{{Kind: "screenshot", ReferencePath: failed.FinalScreenshotPath, SHA256: failureDigest, Size: int64(len(failurePNG)), Content: failurePNG}},
+		observation,
+		[]browserFrozenArtifact{{Kind: "screenshot", ReferencePath: observation.FinalScreenshotPath, SHA256: initialDigest, Size: int64(len(initialPNG)), Content: initialPNG}},
+		5,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attachments) != 2 || !strings.Contains(prompt, "failed_final:browser/failure.png") || !strings.Contains(prompt, "initial_page:browser/initial.png") {
+		t.Fatalf("attachments=%+v prompt=%s", attachments, prompt)
+	}
+	paths := []string{attachments[0].Path, attachments[1].Path}
+	if err := cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range paths {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("repair evidence view was not cleaned: path=%s err=%v", path, err)
+		}
+	}
+}
+
 func TestBrowserPlannerPromptRequiresDeterministicSearchSubmission(t *testing.T) {
 	prompt := browserPlannerPrompt(browserCoordinatorRequest(t), nil)
-	for _, required := range []string{"Follow every numbered Bug reproduction step in order", "Do not skip an explicit open/enter/switch-page step", "explicit accessible name or test id", "Never click generic Search/搜索 text", "press Enter on the same input locator", "Every search fill and its immediately following submit action must set screenshot_after: true"} {
+	for _, required := range []string{"Follow every numbered Bug reproduction step in order", "Do not skip an explicit open/enter/switch-page step", "copy both its locator_kind and exact observed name", "explicit accessible name or test id", "Never click generic Search/搜索 text", "press Enter on the same input locator", "Every search fill and its immediately following submit action must set screenshot_after: true"} {
 		if !strings.Contains(prompt, required) {
 			t.Fatalf("planner prompt is missing %q: %s", required, prompt)
 		}
+	}
+}
+
+func TestValidateBrowserPlanObservationGroundingRejectsInventedSearchEntry(t *testing.T) {
+	exact := true
+	bug := Bug{Steps: "1. 打开 H5 并进入搜索页面\n2. 输入用户名称并执行搜索"}
+	observation := &BrowserVerificationResult{AccessibilitySummary: []BrowserAccessibilityNode{
+		{Role: "textbox", Name: "请输入搜索关键字", LocatorKind: "placeholder", Visible: true},
+	}}
+	plan := BrowserPlan{Version: 2, StartURL: "https://app.example.com", Actions: []BrowserAction{
+		{ID: "enter-search-page", Action: "click", Locator: &BrowserLocator{Kind: "text", Value: "搜索", Exact: &exact}},
+		{ID: "fill-search", Action: "fill", Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索内容", Exact: &exact}, Value: "chengzi"},
+	}}
+	if err := validateBrowserPlanObservationGrounding(bug, plan, observation); err == nil {
+		t.Fatal("invented search navigation ignored the observed search input")
+	}
+	plan.Actions[0].Locator = &BrowserLocator{Kind: "placeholder", Value: "请输入搜索关键字", Exact: &exact}
+	if err := validateBrowserPlanObservationGrounding(bug, plan, observation); err != nil {
+		t.Fatalf("observed search input locator was rejected: %v", err)
+	}
+}
+
+func TestBrowserCoordinatorRegeneratesPlanUsingObservedSearchInput(t *testing.T) {
+	badPlan := `version: 2
+device_profile: mobile
+start_url: https://app.example.com/users
+actions:
+  - id: enter-search-page
+    action: click
+    locator: {kind: text, value: "搜索", exact: true}
+  - id: fill-search
+    action: fill
+    locator: {kind: placeholder, value: "搜索内容", exact: true}
+    value: chengzi
+assertions:
+  - kind: visible_text
+    value: chengzi
+`
+	goodPlan := strings.Replace(badPlan,
+		`locator: {kind: text, value: "搜索", exact: true}`,
+		`locator: {kind: placeholder, value: "请输入搜索关键字", exact: true}`, 1)
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
+		{FinalYAML: badPlan},
+		{FinalYAML: goodPlan},
+		{FinalYAML: reproducedValidationYAML("browser/final.png")},
+	}}
+	observation := completedBrowserResult("browser/initial.png")
+	observation.AccessibilitySummary = []BrowserAccessibilityNode{{Role: "textbox", Name: "请输入搜索关键字", LocatorKind: "placeholder", Visible: true}}
+	verifier := &observingBrowserVerifier{
+		fakeBrowserVerifier: fakeBrowserVerifier{Results: []BrowserVerificationResult{completedBrowserResult("browser/final.png")}},
+		Observation:         observation,
+	}
+	request := browserCoordinatorRequest(t)
+	request.Bug.Title = "H5 用户搜索"
+	request.Bug.Steps = "1. 打开 H5 并进入搜索页面\n2. 输入用户名称并执行搜索"
+
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), request)
+	if err != nil || result.ErrorCode != "" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if verifier.ObserveCalls != 1 || verifier.Calls != 1 || executor.Calls != 3 {
+		t.Fatalf("observe=%d execute=%d agent=%d", verifier.ObserveCalls, verifier.Calls, executor.Calls)
+	}
+	if got := verifier.Requests[0].Plan.Actions[0].Locator; got == nil || got.Kind != "placeholder" || got.Value != "请输入搜索关键字" {
+		t.Fatalf("executed plan was not grounded in observation: %+v", verifier.Requests[0].Plan)
+	}
+	if !strings.Contains(executor.Prompts[1], "exact visible search textbox from initial_page_observation") {
+		t.Fatalf("retry prompt lacks observation grounding: %s", executor.Prompts[1])
 	}
 }
 
@@ -915,7 +1136,7 @@ start_url: https://app.example.com
 actions:
   - id: wait-album
     action: wait_for
-    locator: {kind: text, value: 再次来寻找}
+    locator: {kind: text, value: 再来寻找}
   - id: capture
     action: screenshot
 assertions:
@@ -1029,6 +1250,38 @@ func TestBrowserCoordinatorRecoveryReusesDurablePrimaryAndRepairPlans(t *testing
 	wantRepair = expandBrowserRepairForFreshContext(wantPrimary, "open-users", wantRepair)
 	if !reflect.DeepEqual(recoveryVerifier.Requests[0].Plan, wantPrimary) || !reflect.DeepEqual(recoveryVerifier.Requests[1].Plan, wantRepair) {
 		t.Fatalf("recovery plans changed: got=%+v want primary=%+v repair=%+v", recoveryVerifier.Requests, wantPrimary, wantRepair)
+	}
+}
+
+func TestBrowserCoordinatorReusesFrozenRecipeAcrossAttemptsWithoutPlanner(t *testing.T) {
+	recipes := &memoryValidationRecipeStore{}
+	firstRequest := browserCoordinatorRequest(t)
+	firstExecutor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
+		{FinalYAML: validBrowserPlanYAML()},
+		{FinalYAML: reproducedValidationYAML("browser/final.png")},
+	}}
+	firstVerifier := &fakeBrowserVerifier{Results: []BrowserVerificationResult{completedBrowserResult("browser/final.png")}}
+	first, err := (BrowserCoordinator{Executor: firstExecutor, Verifier: firstVerifier, Recipes: recipes}).Execute(context.Background(), firstRequest)
+	if err != nil || first.ErrorCode != "" || firstExecutor.Calls != 2 || firstVerifier.Calls != 1 {
+		t.Fatalf("first=%+v agent=%d browser=%d err=%v", first, firstExecutor.Calls, firstVerifier.Calls, err)
+	}
+	if _, found := recipes.recipes[firstRequest.Attempt.CaseID]; !found {
+		t.Fatal("completed plan was not frozen as a Case recipe")
+	}
+
+	secondRequest := browserCoordinatorRequest(t)
+	secondRequest.Attempt.ID = "attempt-browser-replay"
+	secondRequest.Attempt.CaseID = firstRequest.Attempt.CaseID
+	secondExecutor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{{FinalYAML: reproducedValidationYAML("browser/final.png")}}}
+	secondVerifier := &fakeBrowserVerifier{Results: []BrowserVerificationResult{completedBrowserResult("browser/final.png")}}
+	events := make([]InvestigationEvent, 0)
+	secondRequest.Emit = func(event InvestigationEvent) { events = append(events, event) }
+	second, err := (BrowserCoordinator{Executor: secondExecutor, Verifier: secondVerifier, Recipes: recipes}).Execute(context.Background(), secondRequest)
+	if err != nil || second.ErrorCode != "" || secondExecutor.Calls != 1 || secondVerifier.Calls != 1 {
+		t.Fatalf("second=%+v agent=%d browser=%d err=%v", second, secondExecutor.Calls, secondVerifier.Calls, err)
+	}
+	if len(events) == 0 || events[0].Type != "browser_recipe_replayed" {
+		t.Fatalf("events=%+v", events)
 	}
 }
 
@@ -1449,27 +1702,32 @@ func TestBrowserCoordinatorMapsNonEvidenceBrowserStopsWithoutEvaluator(t *testin
 	}
 }
 
-func TestBrowserCoordinatorEvaluatesAssertionAndRepeatedLocatorStopsFromCapturedEvidence(t *testing.T) {
+func TestBrowserCoordinatorEvaluatesAssertionButRepeatedLocatorIsSystemRetry(t *testing.T) {
 	tests := []struct {
 		name       string
 		results    []BrowserVerificationResult
 		plans      []PhaseExecutionResult
+		wantCode   string
+		wantAgents int
 		wantCalls  int
 		wantRepair int
 	}{
 		{
-			name:      "assertion evidence",
-			results:   []BrowserVerificationResult{failedBrowserResult("assertion_failed", "wait-results", "browser/failure.png")},
-			plans:     []PhaseExecutionResult{{FinalYAML: validBrowserPlanYAML()}, {FinalYAML: reproducedValidationYAML("browser/failure.png")}},
-			wantCalls: 1,
+			name:       "assertion evidence",
+			results:    []BrowserVerificationResult{failedBrowserResult("assertion_failed", "wait-results", "browser/failure.png")},
+			plans:      []PhaseExecutionResult{{FinalYAML: validBrowserPlanYAML()}, {FinalYAML: reproducedValidationYAML("browser/failure.png")}},
+			wantAgents: 2,
+			wantCalls:  1,
 		},
 		{
-			name: "repeated locator evidence",
+			name: "repeated locator system retry",
 			results: []BrowserVerificationResult{
 				failedBrowserResult("locator_failed", "open-users", "browser/primary-failure.png"),
 				failedBrowserResult("locator_failed", "open-users", "browser/repair-failure.png"),
 			},
-			plans:      []PhaseExecutionResult{{FinalYAML: validBrowserPlanYAML()}, {FinalYAML: repairedRemainingPlanYAML()}, {FinalYAML: reproducedValidationYAML("browser/repair-failure.png")}},
+			plans:      []PhaseExecutionResult{{FinalYAML: validBrowserPlanYAML()}, {FinalYAML: repairedRemainingPlanYAML()}},
+			wantCode:   "browser_locator_failed",
+			wantAgents: 2,
 			wantCalls:  2,
 			wantRepair: 1,
 		},
@@ -1482,11 +1740,14 @@ func TestBrowserCoordinatorEvaluatesAssertionAndRepeatedLocatorStopsFromCaptured
 			if err != nil {
 				t.Fatal(err)
 			}
-			if result.ErrorCode != "" || result.FinalYAML == "" || verifier.Calls != test.wantCalls || result.RepairCount != test.wantRepair {
+			if result.ErrorCode != test.wantCode || executor.Calls != test.wantAgents || verifier.Calls != test.wantCalls || result.RepairCount != test.wantRepair {
 				t.Fatalf("calls=%d result=%+v", verifier.Calls, result)
 			}
-			if !strings.Contains(executor.Prompts[len(executor.Prompts)-1], "A stopped action is evidence") {
-				t.Fatalf("stopped execution did not reach evaluator: %s", executor.Prompts[len(executor.Prompts)-1])
+			if test.wantCode == "" && !strings.Contains(executor.Prompts[len(executor.Prompts)-1], "A stopped action is evidence") {
+				t.Fatalf("assertion evidence did not reach evaluator: %s", executor.Prompts[len(executor.Prompts)-1])
+			}
+			if test.wantCode != "" && strings.Contains(executor.Prompts[len(executor.Prompts)-1], "A stopped action is evidence") {
+				t.Fatalf("repeated locator failure incorrectly reached evaluator: %s", executor.Prompts[len(executor.Prompts)-1])
 			}
 		})
 	}

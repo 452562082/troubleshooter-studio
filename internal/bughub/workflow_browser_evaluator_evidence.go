@@ -84,10 +84,32 @@ type browserResponseAssertionEvidence struct {
 	FailureReason  string `json:"failure_reason"`
 }
 
+type browserRequestFactFieldEvidence struct {
+	Path      string `json:"path"`
+	Present   bool   `json:"present"`
+	ValueType string `json:"value_type"`
+	Value     string `json:"value"`
+	Redacted  bool   `json:"redacted"`
+	Count     int64  `json:"count"`
+}
+
+type browserRequestFactEvidence struct {
+	CaptureID       string                            `json:"capture_id"`
+	ActionID        string                            `json:"action_id"`
+	Method          string                            `json:"method"`
+	URL             string                            `json:"url"`
+	Source          string                            `json:"source"`
+	MatchedRequests int64                             `json:"matched_requests"`
+	Fields          []browserRequestFactFieldEvidence `json:"fields"`
+	Passed          bool                              `json:"passed"`
+	FailureReason   string                            `json:"failure_reason"`
+}
+
 type browserEvaluatorEvidence struct {
 	Network            []browserNetworkEvidence           `json:"network,omitempty"`
 	Console            []browserConsoleEvidence           `json:"console,omitempty"`
 	BrowserActions     []browserActionEvidence            `json:"browser_actions,omitempty"`
+	RequestFacts       []browserRequestFactEvidence       `json:"request_facts,omitempty"`
 	ResponseAssertions []browserResponseAssertionEvidence `json:"response_assertions,omitempty"`
 	TruncatedKinds     []string                           `json:"truncated_kinds,omitempty"`
 }
@@ -123,7 +145,7 @@ func validateFrozenBrowserArtifacts(references []BrowserArtifactReference, froze
 			if item.Size > maxEvidenceArtifactBytes || !bytes.HasPrefix(item.Content, browserPNGSignature) {
 				return errors.New("frozen browser screenshot is not a bounded PNG")
 			}
-		case "network", "console", "browser_actions", "response_assertions":
+		case "network", "console", "browser_actions", "request_facts", "response_assertions":
 			if item.Size > maxFrozenBrowserStructuredBytes {
 				return errors.New("frozen browser structured evidence exceeds its byte limit")
 			}
@@ -206,6 +228,17 @@ func parseFrozenBrowserStructuredEvidence(frozen []browserFrozenArtifact) (brows
 				}
 			}
 			result.BrowserActions = append(result.BrowserActions, records...)
+		case "request_facts":
+			var records []browserRequestFactEvidence
+			if err := decodeStrictBrowserJSON(item.Content, &records); err != nil || len(records) > 40 {
+				return browserEvaluatorEvidence{}, errors.New("frozen browser request facts are invalid")
+			}
+			for index := range records {
+				if err := sanitizeBrowserRequestFactEvidence(&records[index]); err != nil {
+					return browserEvaluatorEvidence{}, err
+				}
+			}
+			result.RequestFacts = append(result.RequestFacts, records...)
 		case "response_assertions":
 			var records []browserResponseAssertionEvidence
 			if err := decodeStrictBrowserJSON(item.Content, &records); err != nil || len(records) > 40 {
@@ -234,6 +267,10 @@ func parseFrozenBrowserStructuredEvidence(frozen []browserFrozenArtifact) (brows
 	if len(result.ResponseAssertions) > 40 {
 		result.ResponseAssertions = result.ResponseAssertions[:40]
 		truncated["response_assertions"] = true
+	}
+	if len(result.RequestFacts) > 40 {
+		result.RequestFacts = result.RequestFacts[:40]
+		truncated["request_facts"] = true
 	}
 	for kind := range truncated {
 		result.TruncatedKinds = append(result.TruncatedKinds, kind)
@@ -375,6 +412,41 @@ func sanitizeBrowserResponseAssertionEvidence(record *browserResponseAssertionEv
 	record.Method = safeBoundedBrowserText(record.Method, 16)
 	record.LeftField = safeBoundedBrowserText(record.LeftField, 256)
 	record.RightField = safeBoundedBrowserText(record.RightField, 256)
+	return nil
+}
+
+func sanitizeBrowserRequestFactEvidence(record *browserRequestFactEvidence) error {
+	allowedSources := map[string]bool{"query": true, "json": true, "form": true, "graphql_variables": true}
+	allowedFailureReasons := map[string]bool{"": true, "no_matching_request": true, "request_field_missing": true, "request_body_unavailable_or_too_large": true, "request_content_type_not_supported": true, "request_body_invalid": true}
+	if strings.TrimSpace(record.CaptureID) == "" || strings.TrimSpace(record.ActionID) == "" || !allowedSources[record.Source] || !allowedFailureReasons[record.FailureReason] || record.MatchedRequests < 0 || record.MatchedRequests > 1 || len(record.Fields) < 1 || len(record.Fields) > 16 {
+		return errors.New("frozen browser request fact evidence is invalid")
+	}
+	if record.MatchedRequests == 0 {
+		if record.Passed || record.FailureReason != "no_matching_request" || record.URL != "" {
+			return errors.New("frozen browser request fact no-match evidence is invalid")
+		}
+	} else if record.Passed != (record.FailureReason == "") {
+		return errors.New("frozen browser request fact result is inconsistent")
+	}
+	for index := range record.Fields {
+		field := &record.Fields[index]
+		if !validBrowserRequestFieldPath(field.Path) || browserRequestFieldSensitive(field.Path) || field.Count < 0 {
+			return errors.New("frozen browser request fact field is invalid")
+		}
+		allowedTypes := map[string]bool{"": true, "null": true, "string": true, "number": true, "boolean": true, "array": true, "object": true, "file": true}
+		if !allowedTypes[field.ValueType] || (!field.Present && (field.ValueType != "" || field.Value != "" || field.Redacted || field.Count != 0)) {
+			return errors.New("frozen browser request fact field state is invalid")
+		}
+		field.Path = safeBoundedBrowserText(field.Path, 256)
+		field.Value = safeBoundedBrowserText(field.Value, 512)
+		if field.Redacted && field.Value != "[REDACTED]" {
+			return errors.New("frozen browser request fact redaction is invalid")
+		}
+	}
+	record.CaptureID = safeBoundedBrowserText(record.CaptureID, 128)
+	record.ActionID = safeBoundedBrowserText(record.ActionID, 128)
+	record.Method = safeBoundedBrowserText(record.Method, 16)
+	record.URL = safeBoundedBrowserText(record.URL, 2048)
 	return nil
 }
 

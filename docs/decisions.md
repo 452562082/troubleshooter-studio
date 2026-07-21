@@ -867,3 +867,47 @@ Studio 故障闭环已经把选定机器人、system 和内部 role 持久化到
 **决策**：Codex install 在保留 agent TOML 内联 MCP 的同时，为排障、验证、修复三个内部 Agent 生成独立 `~/.codex/tshoot-<agent>.config.toml`，只包含同一组 MCP 配置，文件权限固定为 `0600`。Studio 后台启动原生安装目录 `~/.codex/skills/<agent>` 时，改为 `codex exec --profile tshoot-<agent>` 并绑定对应 `CODEX_HOME`；旧安装首次运行时可从 agent TOML 的受管 MCP region 安全回填 profile。原生安装缺少或损坏受管配置时 fail closed，不再静默降级成“无工具”；测试或嵌入调用显式注入的非标准独立 workspace 无法安全推导 `CODEX_HOME`，继续沿用无 profile 的兼容执行路径。
 
 **后果**：Studio 后台与交互式 subagent 共用同一套机器人 MCP 能力，但不把业务 MCP 注入全局 Codex 主会话。卸载必须同步删除三个 `tshoot-*.config.toml`；install E2E 和后台命令测试必须同时验证 agent TOML、runtime profile、`--profile` 参数与 `0600` 权限。
+
+---
+
+## 2026-07-21 · 浏览器验证计划必须绑定现场控件且重复定位失败归系统重试
+
+**背景**：执行前页面观察已经能看到首页真实搜索框，但计划校验只检查“填入前存在一个搜索语义动作”。验证 Agent 因而可以用泛化的“搜索”文本点击满足结构校验，并继续编造页面上不存在的 placeholder。第一次执行进入错误页面后，定位修复只看到失败终态，可能原样保留错误 locator；第二次定位失败仍被交给业务判定 Agent，最终错误地生成 `insufficient_info` 并要求用户补充本应由系统自行采集的页面信息。
+
+**决策**：worker 的 accessibility 摘要为原生可交互控件补充受限 `locator_kind`，搜索输入至少区分 `placeholder`、`label` 与显式 `role`，规划 Agent 必须同时复制初始观察中的 locator kind、完整名称和 `exact: true`。当工单明确要求进入搜索页且初始页已经观测到唯一搜索文本框时，宿主在执行前拒绝泛化搜索文本、错误 locator kind 和未观察名称，并使用现有一次计划重生成机会修正。
+
+定位修复继续维持一次自动修正上限，但修复 Agent 同时接收失败终态、初始页结构化观察、失败页截图和有界动作后截图；修复计划必须真实修改失败因果链，原样返回不再视为修复成功。若修正后的执行仍为 `locator_failed`，协调器在业务判定前终止，持久化系统失败并允许“重新观察页面并生成验证计划”，不得转成用户证据缺口。worker 协议字节发生变化，browser runtime 身份升级为 `1.61.1-r21`。
+
+**后果**：验证 Agent 不能再用语义相近但现场不存在的控件凑齐复现步骤；错误导航可结合初始页与因果截图修正。一次现场修复仍失败时，Case 保留证据并从实时观察重新规划，用户无需解释 DOM 或重复提交业务证据。未来新增现场定位约束时必须优先扩展受限观察协议与宿主校验，不得只追加提示词。
+
+---
+
+## 2026-07-21 · 浏览器 accessibility 文本长度统一按 UTF-8 字节计量
+
+**背景**：r21 为 accessibility 节点增加宿主协议边界时，Go 按 UTF-8 字节限制名称为 2048 bytes，但 worker 仍用 JavaScript `slice` 截取 2048 个字符。中文首页正文在字符数合法时可能达到 6 KiB，导致初始页面观察被错误拒绝为 `browser_worker_protocol_invalid`，验证计划尚未生成就停止。
+
+**决策**：worker 和宿主的 accessibility role、name 长度统一按 UTF-8 字节计量；worker 复用安全的 code-point 边界截断，禁止产生半个 UTF-8 字符或替换字符。新增长中文页面契约测试，确保 worker 输出不超过宿主上限。worker 字节修订为 browser runtime `1.61.1-r22`，不得复用已安装的 r21。
+
+**后果**：长中文、emoji 或其他多字节页面不会再因字符/字节单位漂移而触发协议错误，同时宿主边界保持不放宽。未来跨 Go/JavaScript 的字符串限制必须在字段合同中明确为 UTF-8 bytes，并用多字节样本测试。
+
+---
+
+## 2026-07-21 · Browser runtime 发布前必须通过 Worker→Host 语义合同
+
+**背景**：旧 runtime probe 只证明 Chromium 可以经受控代理打开本地页面并生成 PNG。它不输出正式 `workerResult`，也不经过 Go 的严格 JSON 解码和 `validateWorkerResultBounds`。因此 Worker 字段、长度单位或枚举与宿主漂移时，安装仍被标记为 ready，首个真实 Case 才暴露 `browser_worker_protocol_invalid`。分层单测都通过也无法覆盖这个发布缝隙。
+
+**决策**：runtime probe 页面固定包含长中文正文和一个原生 search input。Worker 除截图摘要外必须输出与正式执行同形的 `worker_result`，包含最终 URL、标题、accessibility summary、`locator_kind` 和 artifacts。安装器使用正式 Go `workerResult` 类型严格解码，并复用正式宿主边界校验；只有同时识别到有界多字节 document 与精确 placeholder searchbox 才允许原子发布。`.runtime-ready.json` 增加独立 `protocol_probe_version`，启动复用时必须匹配，缺失或过期 marker 不得被视为 ready。该发布合同升级为 browser runtime `1.61.1-r23`。
+
+**后果**：Worker 与宿主的协议漂移会在 runtime 临时目录中失败，Case、状态机和用户数据均不会被触达；已发布目录也不能绕过语义 probe 版本检查。新增 worker 输出字段、枚举或边界时，必须同步更新正式宿主校验和 semantic probe，错误会在测试或安装阶段暴露，而不是由验证 Agent 或用户发现。
+
+---
+
+## 2026-07-21 · 浏览器验证改为 Case 固定配方、白名单请求事实与机器判定
+
+**背景**：同一 Case 的每轮验证都由 Agent 重新生成浏览器步骤和解释证据，导致相同工单可能这次成功、下次定位失败；验证阶段已经拿到 Network 请求和响应关系，排障阶段仍可能重复要求用户提供 response body、请求参数或 MongoDB 数据。验证失败后的自动补采沿用 `validating` 状态，进度条又把当前阶段画回“验证”，进一步造成流程倒退的错觉。
+
+**决策**：首次成功执行的浏览器计划以 `ValidationRecipe` 按 Case 持久化，绑定业务场景摘要、计划摘要和同一 Case 的验证/回归来源尝试；后续尝试和回归在场景未变化时直接重放，只有现场协议或定位系统错误才重新观察和编译。API 类场景由 Worker 输出的结构化 response assertion 结果直接机器判定，不再交给 Agent 二次解释。
+
+BrowserPlan v2 增加 `request_captures`：只允许声明 action、URL/method、query/json/form/GraphQL variables 来源及最多 16 个非敏感字段路径。Worker 只持久化声明字段形成 `request-facts.json`，禁止保存原始 request/response body、认证字段和未声明参数；response assertion 必须与同一触发动作的 request capture 成对。该 Worker 合同升级 browser runtime 为 `1.61.1-r24`。排障输入冻结该证据；Codex 排障收到请求事实且已配置数据层能力时必须产生实际只读数据源工具调用收据，否则宿主自动追问一次并拒绝接受无查询的根因结论。前端把验证证据自动补采显示为“排障中 · 自动补采”，但不伪造已经完成的后端阶段。
+
+**后果**：相同场景的执行逻辑、请求参数证据和 API 判定变为可重放、可审计的确定性合同；排障 Agent 可直接用实体 ID 关联 trace、日志和 MongoDB 等数据，不得把已知信息重新推给用户。UI 阶段不会在自动补采时倒退。UI 视觉类断言暂时仍需 Agent 解释，但它只能消费冻结证据；后续若扩展机器判定，必须先定义新的结构化 assertion，而不是增加自由文本提示词。

@@ -16,7 +16,7 @@ import {
   stat,
 } from 'node:fs/promises';
 
-import { redactConsoleText, safeResponseRecord } from './sanitize.mjs';
+import { boundedUTF8, redactConsoleText, safeResponseRecord } from './sanitize.mjs';
 
 const PROGRESS_PREFIX = 'TSHOOT_BROWSER_PROGRESS ';
 const ALLOWED_ACTIONS = new Set(['goto', 'click', 'fill', 'press', 'select', 'wait_for', 'screenshot']);
@@ -109,6 +109,8 @@ const DOM_OBSTRUCTION_SAFE_NAMES = Object.freeze([
 const DOM_OBSTRUCTION_RISKY_NAME = /(同意|接受|确认|继续|提交|登录|注册|支付|购买|删除|移除|授权|accept|agree|confirm|continue|submit|sign[ -]?in|log[ -]?in|register|pay|purchase|delete|remove|allow)/i;
 const RESPONSE_ASSERTION_BODY_MAX_BYTES = 256 << 10;
 const RESPONSE_ASSERTION_MAX_VISITED_NODES = 10_000;
+const REQUEST_FACT_BODY_MAX_BYTES = 64 << 10;
+const REQUEST_FACT_MAX_FIELDS = 16;
 const AUTH_ATTRIBUTED_ACTIONS = new Set(['click', 'fill', 'press', 'select']);
 const NETWORK_PROTOCOLS = new Set(['http:', 'https:', 'ws:', 'wss:']);
 const BROWSER_LAUNCH_ARGS = Object.freeze([
@@ -285,10 +287,10 @@ export function validateWorkerRequest(request) {
 
   const plan = request.plan;
   if (!plan || typeof plan !== 'object' || Array.isArray(plan)) throw new Error('plan must be an object');
-  ownKeys(plan, new Set(['version', 'device_profile', 'start_url', 'actions', 'assertions', 'response_assertions']), 'plan');
+  ownKeys(plan, new Set(['version', 'device_profile', 'start_url', 'actions', 'assertions', 'request_captures', 'response_assertions']), 'plan');
   if (plan.version !== 1 && plan.version !== 2) throw new Error('plan version must be 1 or 2');
   if (plan.device_profile !== undefined && !['desktop', 'mobile'].includes(plan.device_profile)) throw new Error('plan device_profile is not supported');
-  if (plan.version === 1 && (plan.device_profile !== undefined || plan.response_assertions !== undefined)) throw new Error('plan response extensions require version 2');
+  if (plan.version === 1 && (plan.device_profile !== undefined || plan.request_captures !== undefined || plan.response_assertions !== undefined)) throw new Error('plan request and response extensions require version 2');
   const start = parseHTTPURL(plan.start_url).parsed;
   const applicationOrigins = new Set(request.policy.application_origins.map(normalizeOrigin));
   const startOrigins = new Set(request.policy.start_origins.map(normalizeOrigin));
@@ -318,6 +320,7 @@ export function validateWorkerRequest(request) {
   }
   if (!Array.isArray(plan.actions) || plan.actions.length < 1 || plan.actions.length > 40) throw new Error('plan actions must contain 1 to 40 entries');
   if (!Array.isArray(plan.assertions)) throw new Error('plan assertions must be an array');
+  if (plan.request_captures !== undefined && !Array.isArray(plan.request_captures)) throw new Error('plan request_captures must be an array');
   if (plan.response_assertions !== undefined && !Array.isArray(plan.response_assertions)) throw new Error('plan response_assertions must be an array');
   if (plan.assertions.length < 1 && (plan.response_assertions?.length ?? 0) < 1) throw new Error('plan UI or response assertions are required');
 
@@ -349,6 +352,31 @@ export function validateWorkerRequest(request) {
     if (!ALLOWED_ASSERTIONS.has(assertion.kind) || (assertion.kind === 'page_loaded' && plan.version !== 2)) throw new Error('assertion kind is not supported');
     requiredString(assertion.value, 'assertion value');
   }
+  const requestCaptureIDs = new Set();
+	const requestCaptureActionIDs = new Set();
+  for (const capture of plan.request_captures ?? []) {
+    if (!capture || typeof capture !== 'object' || Array.isArray(capture)) throw new Error('request capture must be an object');
+    ownKeys(capture, new Set(['id', 'action_id', 'url_contains', 'method', 'source', 'fields']), 'request capture');
+    requiredString(capture.id, 'request capture id', 256);
+    if (requestCaptureIDs.has(capture.id)) throw new Error('request capture id is duplicated');
+    requestCaptureIDs.add(capture.id);
+    requiredString(capture.action_id, 'request capture action_id', 256);
+    if (!ids.has(capture.action_id)) throw new Error('request capture action_id does not reference an action');
+    if (ids.get(capture.action_id) === 'screenshot' || ids.get(capture.action_id) === 'wait_for') throw new Error('request capture action_id must reference a request-capable action');
+		requestCaptureActionIDs.add(capture.action_id);
+    if (capture.url_contains !== undefined) requiredString(capture.url_contains, 'request capture url_contains', 2048);
+    if (capture.method !== undefined && !/^[A-Z][A-Z0-9!#$%&'*+.^_`|~-]{0,15}$/.test(capture.method)) throw new Error('request capture method is invalid');
+    if (!['query', 'json', 'form', 'graphql_variables'].includes(capture.source)) throw new Error('request capture source is not supported');
+    if (!Array.isArray(capture.fields) || capture.fields.length < 1 || capture.fields.length > REQUEST_FACT_MAX_FIELDS) throw new Error('request capture fields must contain 1 to 16 entries');
+    const fields = new Set();
+    for (const field of capture.fields) {
+      const value = requiredString(field, 'request capture field', 256);
+      if (!value.split('.').every((part) => /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/.test(part))) throw new Error('request capture field is invalid');
+      if (/(?:password|passwd|secret|token|authorization|auth|cookie|session|api[_-]?key|private[_-]?key|access[_-]?key|captcha|otp)/i.test(value)) throw new Error('request capture field is sensitive');
+      if (fields.has(value)) throw new Error('request capture field is duplicated');
+      fields.add(value);
+    }
+  }
   const responseAssertionIDs = new Set();
   for (const assertion of plan.response_assertions ?? []) {
     if (!assertion || typeof assertion !== 'object' || Array.isArray(assertion)) throw new Error('response assertion must be an object');
@@ -359,6 +387,7 @@ export function validateWorkerRequest(request) {
     requiredString(assertion.action_id, 'response assertion action_id', 256);
     if (!ids.has(assertion.action_id)) throw new Error('response assertion action_id does not reference an action');
     if (ids.get(assertion.action_id) === 'screenshot' || ids.get(assertion.action_id) === 'wait_for') throw new Error('response assertion action_id must reference a request-capable action');
+		if (!requestCaptureActionIDs.has(assertion.action_id)) throw new Error('response assertion action_id requires a request capture for the same action');
     if (assertion.url_contains !== undefined) requiredString(assertion.url_contains, 'response assertion url_contains', 2048);
     if (!ALLOWED_RESPONSE_ASSERTIONS.has(assertion.kind)) throw new Error('response assertion kind is not supported');
     for (const field of ['left_field', 'right_field']) {
@@ -459,6 +488,151 @@ export async function evaluateResponseAssertionsForResponse(response, requestCon
     metadata: { method: browserRequest.method(), url: response.url(), status: response.status() },
     evaluation: evaluateJSONResponseAssertion(payload, assertion),
   }));
+}
+
+function requestFactPathValue(value, fieldPath) {
+  let current = value;
+  for (const part of fieldPath.split('.')) {
+    if (!current || typeof current !== 'object' || Array.isArray(current) || !Object.hasOwn(current, part)) return { found: false };
+    current = current[part];
+  }
+  return { found: true, value: current };
+}
+
+function safeRequestFactField(path, found, rawValue) {
+  if (!found) return { path, present: false, value_type: '', value: '', redacted: false, count: 0 };
+  if (rawValue === null) return { path, present: true, value_type: 'null', value: 'null', redacted: false, count: 0 };
+  if (Array.isArray(rawValue)) return { path, present: true, value_type: 'array', value: '', redacted: false, count: rawValue.length };
+  if (typeof rawValue === 'object') {
+    if (typeof rawValue.name === 'string' && Number.isFinite(rawValue.size)) {
+      const fileName = redactConsoleText(boundedUTF8(rawValue.name, 512));
+      return { path, present: true, value_type: 'file', value: fileName, redacted: fileName === '[REDACTED]', count: Math.max(0, Number(rawValue.size)) };
+    }
+    return { path, present: true, value_type: 'object', value: '', redacted: false, count: Object.keys(rawValue).length };
+  }
+  const valueType = typeof rawValue;
+  if (!['string', 'number', 'boolean'].includes(valueType)) return { path, present: true, value_type: valueType, value: '', redacted: true, count: 0 };
+  const bounded = boundedUTF8(String(rawValue), 512);
+  const safe = redactConsoleText(bounded);
+  return { path, present: true, value_type: valueType, value: safe, redacted: safe === '[REDACTED]', count: 0 };
+}
+
+async function requestCapturePayload(browserRequest, source) {
+  if (source === 'query') {
+    const parsed = new URL(browserRequest.url());
+    const payload = {};
+    for (const [name, value] of parsed.searchParams) {
+      if (!Object.hasOwn(payload, name)) payload[name] = value;
+      else if (Array.isArray(payload[name])) payload[name].push(value);
+      else payload[name] = [payload[name], value];
+    }
+    return payload;
+  }
+  const body = await browserRequest.postDataBuffer?.();
+  if (!Buffer.isBuffer(body) || body.length === 0 || body.length > REQUEST_FACT_BODY_MAX_BYTES) throw new Error('request_body_unavailable_or_too_large');
+  const headers = browserRequest.headers?.() ?? {};
+  const contentType = String(headers['content-type'] ?? headers['Content-Type'] ?? '').toLowerCase();
+  if (source === 'json' || source === 'graphql_variables') {
+    const payload = JSON.parse(body.toString('utf8'));
+    return source === 'graphql_variables' ? payload?.variables : payload;
+  }
+  if (source === 'form' && contentType.includes('application/x-www-form-urlencoded')) {
+    const payload = {};
+    for (const [name, value] of new URLSearchParams(body.toString('utf8'))) {
+      if (!Object.hasOwn(payload, name)) payload[name] = value;
+      else if (Array.isArray(payload[name])) payload[name].push(value);
+      else payload[name] = [payload[name], value];
+    }
+    return payload;
+  }
+  if (source === 'form' && contentType.includes('multipart/form-data')) {
+    const form = await new Response(body, { headers: { 'content-type': contentType } }).formData();
+    const payload = {};
+    for (const [name, value] of form.entries()) {
+      const normalized = typeof value === 'string' ? value : { name: value.name, size: value.size, type: value.type };
+      if (!Object.hasOwn(payload, name)) payload[name] = normalized;
+      else if (Array.isArray(payload[name])) payload[name].push(normalized);
+      else payload[name] = [payload[name], normalized];
+    }
+    return payload;
+  }
+  throw new Error('request_content_type_not_supported');
+}
+
+function requestCaptureFailureReason(error) {
+  const reason = String(error?.message ?? '');
+  if (['request_body_unavailable_or_too_large', 'request_content_type_not_supported'].includes(reason)) return reason;
+  return 'request_body_invalid';
+}
+
+export async function evaluateRequestCapturesForRequest(browserRequest, requestContext, captures = []) {
+  const method = String(browserRequest.method?.() ?? '').toUpperCase();
+  const url = String(browserRequest.url?.() ?? '');
+  const actionID = String(requestContext?.actionID ?? '');
+  const matching = captures.filter((capture) => (
+    capture.action_id === actionID
+    && (!capture.url_contains || url.includes(capture.url_contains))
+    && (!capture.method || method === capture.method)
+  ));
+  const records = [];
+  for (const capture of matching) {
+    let payload;
+    let failureReason = '';
+    try {
+      payload = await requestCapturePayload(browserRequest, capture.source);
+    } catch (error) {
+      failureReason = requestCaptureFailureReason(error);
+    }
+    const fields = capture.fields.map((path) => {
+      const located = failureReason ? { found: false } : requestFactPathValue(payload, path);
+      return safeRequestFactField(path, located.found, located.value);
+    });
+    const safe = safeResponseRecord({ method, url, status: 0, headers: {} });
+    let factURL = safe.url;
+    try {
+      const parsedFactURL = new URL(factURL);
+      parsedFactURL.search = '';
+      parsedFactURL.hash = '';
+      factURL = parsedFactURL.toString();
+    } catch {
+      factURL = '[INVALID_URL]';
+    }
+    records.push({
+      capture_id: capture.id,
+      action_id: capture.action_id,
+      method: safe.method,
+      url: factURL,
+      source: capture.source,
+      matched_requests: 1,
+      fields,
+      passed: !failureReason && fields.every((field) => field.present),
+      failure_reason: failureReason || (fields.every((field) => field.present) ? '' : 'request_field_missing'),
+    });
+  }
+  return records;
+}
+
+function createRequestFactCollector(captures = []) {
+  const observations = new Map();
+  return {
+    captures,
+    observe(record) {
+      if (!observations.has(record.capture_id)) observations.set(record.capture_id, record);
+    },
+    snapshot() {
+      return captures.map((capture) => observations.get(capture.id) ?? {
+        capture_id: capture.id,
+        action_id: capture.action_id,
+        method: capture.method || '',
+        url: '',
+        source: capture.source,
+        matched_requests: 0,
+        fields: capture.fields.map((path) => ({ path, present: false, value_type: '', value: '', redacted: false, count: 0 })),
+        passed: false,
+        failure_reason: 'no_matching_request',
+      });
+    },
+  };
 }
 
 export async function executeAssertion(page, assertion) {
@@ -2025,7 +2199,7 @@ export async function captureSafePNG(page, request, name, getAuthFailure, captur
   return { loginRequired: false, path };
 }
 
-async function accessibilitySummary(page) {
+export async function accessibilitySummary(page) {
   const result = [];
 
   // Keep a bounded snapshot of the visible document text before enumerating
@@ -2033,12 +2207,11 @@ async function accessibilitySummary(page) {
   // old control-only summary hid the exact content names that a locator repair
   // needed and encouraged the agent to guess or paraphrase them.
   const documentText = await page.locator('body').innerText().catch(() => '');
-  const normalizedDocumentText = redactConsoleText(documentText)
+  const normalizedDocumentText = boundedUTF8(redactConsoleText(documentText)
     .split(/\n+/)
     .map((line) => line.trim())
     .filter(Boolean)
-    .join(' · ')
-    .slice(0, 2048);
+    .join(' · '), 2048);
   if (normalizedDocumentText) {
     result.push({ role: 'document', name: normalizedDocumentText, visible: true, disabled: false });
   }
@@ -2049,14 +2222,25 @@ async function accessibilitySummary(page) {
     const node = nodes.nth(index);
     const visible = await node.isVisible().catch(() => false);
     if (!visible) continue;
-    const role = (await node.getAttribute('role').catch(() => '')) || 'element';
-    const name = (await node.getAttribute('aria-label').catch(() => ''))
-      || (await node.getAttribute('placeholder').catch(() => ''))
+    const explicitRole = await node.getAttribute('role').catch(() => '');
+    const href = await node.getAttribute('href').catch(() => '');
+    const placeholder = await node.getAttribute('placeholder').catch(() => '');
+    const ariaLabel = await node.getAttribute('aria-label').catch(() => '');
+    const inputType = ((await node.getAttribute('type').catch(() => '')) || '').toLowerCase();
+    let role = explicitRole || 'element';
+    if (!explicitRole) {
+      if (href) role = 'link';
+      else if (placeholder || ['text', 'search', 'email', 'tel', 'url', 'number', 'password'].includes(inputType)) role = inputType === 'search' ? 'searchbox' : 'textbox';
+    }
+    const name = ariaLabel
+      || placeholder
       || (await node.textContent().catch(() => ''))
       || '';
+    const locatorKind = explicitRole && name ? 'role' : ariaLabel ? 'label' : placeholder ? 'placeholder' : name ? 'text' : '';
     result.push({
-      role: redactConsoleText(role).slice(0, 128),
-      name: redactConsoleText(name.trim()).slice(0, 512),
+      role: boundedUTF8(redactConsoleText(role), 128),
+      name: boundedUTF8(redactConsoleText(name.trim()), 2048),
+      locator_kind: locatorKind,
       visible: true,
       disabled: await node.isDisabled().catch(() => false),
     });
@@ -2399,26 +2583,31 @@ function checkedEvidenceContent(content, label) {
   return content;
 }
 
-async function writeEvidenceFiles(request, networkCollector, consoleCollector, actions, responseAssertions, artifactBudget) {
+async function writeEvidenceFiles(request, networkCollector, consoleCollector, actions, requestFacts, responseAssertions, artifactBudget) {
   const network = networkCollector.snapshot();
   const consoleRecords = consoleCollector.snapshot();
+  const requestFactRecords = requestFacts.snapshot();
   const responseAssertionRecords = responseAssertions.snapshot();
-  if (network.length > EVIDENCE_MAX_RECORDS || consoleRecords.length > EVIDENCE_MAX_RECORDS || actions.length > 40 || responseAssertionRecords.length > 40) {
+  if (network.length > EVIDENCE_MAX_RECORDS || consoleRecords.length > EVIDENCE_MAX_RECORDS || actions.length > 40 || requestFactRecords.length > 40 || responseAssertionRecords.length > 40) {
     throw new Error('browser evidence exceeds its record limit');
   }
   const networkJSON = checkedEvidenceContent(`${JSON.stringify(network)}\n`, 'network');
   const consoleJSONL = consoleRecords.map((record) => JSON.stringify(record)).join('\n');
   const consoleContent = checkedEvidenceContent(consoleJSONL ? `${consoleJSONL}\n` : '', 'console');
   const actionJSON = checkedEvidenceContent(`${JSON.stringify(actions)}\n`, 'browser action');
+  const requestFactJSON = requestFactRecords.length > 0
+    ? checkedEvidenceContent(`${JSON.stringify(requestFactRecords)}\n`, 'request fact')
+    : '';
   const responseAssertionJSON = responseAssertionRecords.length > 0
     ? checkedEvidenceContent(`${JSON.stringify(responseAssertionRecords)}\n`, 'response assertion')
     : '';
-  for (const content of [networkJSON, consoleContent, actionJSON, responseAssertionJSON].filter(Boolean)) {
+  for (const content of [networkJSON, consoleContent, actionJSON, requestFactJSON, responseAssertionJSON].filter(Boolean)) {
     if (!artifactBudget.reserve(Buffer.byteLength(content, 'utf8'))) throw new Error('browser evidence exceeds the artifact budget');
   }
   await atomicWrite(join(request.staging_dir, 'network.json'), networkJSON);
   await atomicWrite(join(request.staging_dir, 'console.jsonl'), consoleContent);
   await atomicWrite(join(request.staging_dir, 'browser-actions.json'), actionJSON);
+  if (requestFactJSON) await atomicWrite(join(request.staging_dir, 'request-facts.json'), requestFactJSON);
   if (responseAssertionJSON) await atomicWrite(join(request.staging_dir, 'response-assertions.json'), responseAssertionJSON);
   const firstRequest = network.find((record) => record.request_id || record.trace_id) ?? {};
   const artifacts = [
@@ -2426,6 +2615,7 @@ async function writeEvidenceFiles(request, networkCollector, consoleCollector, a
     { kind: 'console', path: 'browser/console.jsonl' },
     { kind: 'browser_actions', path: 'browser/browser-actions.json' },
   ];
+  if (requestFactJSON) artifacts.push({ kind: 'request_facts', path: 'browser/request-facts.json' });
   if (responseAssertionJSON) artifacts.push({ kind: 'response_assertions', path: 'browser/response-assertions.json' });
   return artifacts;
 }
@@ -2444,8 +2634,10 @@ async function executeWorker(request) {
   const consoleRecords = createBoundedRecordCollector();
   const artifactBudget = createArtifactBudget();
   const actions = [];
+  const requestFacts = createRequestFactCollector(request.plan.request_captures ?? []);
   const responseAssertions = createResponseAssertionCollector(request.plan.response_assertions ?? []);
   const pendingResponses = new Set();
+  const pendingRequestFacts = new Set();
   const requestStarted = new WeakMap();
   let activeActionID = 'start_url';
   let cdpNetworkEvidence = null;
@@ -2488,8 +2680,15 @@ async function executeWorker(request) {
       deviceProfile: request.plan.device_profile || 'desktop',
       hooks: {
         onRequest: (browserRequest) => {
-          requestStarted.set(browserRequest, { startedAt: Date.now(), actionID: activeActionID });
+          const requestContext = { startedAt: Date.now(), actionID: activeActionID };
+          requestStarted.set(browserRequest, requestContext);
           authFailures.observeRequest(browserRequest);
+          if (pendingRequestFacts.size < EVIDENCE_MAX_RECORDS) {
+            const pending = evaluateRequestCapturesForRequest(browserRequest, requestContext, requestFacts.captures)
+              .then((records) => { for (const record of records) requestFacts.observe(record); })
+              .finally(() => pendingRequestFacts.delete(pending));
+            pendingRequestFacts.add(pending);
+          }
         },
         onRequestFinished: (browserRequest) => authFailures.observeRequestSettled(browserRequest),
         onRequestFailed: (browserRequest) => {
@@ -2533,8 +2732,8 @@ async function executeWorker(request) {
     };
     const finishLogin = async () => {
       for (const screenshot of screenshots) await rm(join(request.staging_dir, screenshot.replace('browser/', '')), { force: true });
-      await Promise.allSettled([...pendingResponses]);
-      const artifacts = await writeEvidenceFiles(request, network, consoleRecords, actions, responseAssertions, artifactBudget);
+      await Promise.allSettled([...pendingResponses, ...pendingRequestFacts]);
+      const artifacts = await writeEvidenceFiles(request, network, consoleRecords, actions, requestFacts, responseAssertions, artifactBudget);
       const loginPage = await activeLoginPage(context.pages(), request.policy, authFailures.active());
       return {
         status: 'login_required',
@@ -2560,8 +2759,8 @@ async function executeWorker(request) {
       const failure = captured.path;
       screenshots.push(failure);
       actions.push({ id: 'start_url', action: 'goto', locator_kind: '', started_at: new Date().toISOString(), duration_ms: 0, result: 'failed', error_code: supervised.blocked() ? 'browser_destination_blocked' : 'navigation_failed' });
-      await Promise.allSettled([...pendingResponses]);
-      const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, responseAssertions, artifactBudget))];
+      await Promise.allSettled([...pendingResponses, ...pendingRequestFacts]);
+      const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, requestFacts, responseAssertions, artifactBudget))];
       const finalURL = page.url().startsWith('http:') || page.url().startsWith('https:') ? page.url() : '';
       return {
         status: 'locator_failed',
@@ -2639,8 +2838,8 @@ async function executeWorker(request) {
         if (captured.loginRequired) return finishLogin();
         const failure = captured.path;
         screenshots.push(failure);
-        await Promise.allSettled([...pendingResponses]);
-        const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, responseAssertions, artifactBudget))];
+        await Promise.allSettled([...pendingResponses, ...pendingRequestFacts]);
+        const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, requestFacts, responseAssertions, artifactBudget))];
         return {
           status: 'locator_failed',
           error_code: actionErrorCode,
@@ -2664,8 +2863,8 @@ async function executeWorker(request) {
         if (captured.loginRequired) return finishLogin();
         const failure = captured.path;
         screenshots.push(failure);
-        await Promise.allSettled([...pendingResponses]);
-        const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, responseAssertions, artifactBudget))];
+        await Promise.allSettled([...pendingResponses, ...pendingRequestFacts]);
+        const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, requestFacts, responseAssertions, artifactBudget))];
         return {
           status: 'assertion_failed',
           error_code: 'assertion_failed',
@@ -2684,8 +2883,8 @@ async function executeWorker(request) {
     if (captured.loginRequired) return finishLogin();
     const finalScreenshot = captured.path;
     screenshots.push(finalScreenshot);
-    await Promise.allSettled([...pendingResponses]);
-    const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, responseAssertions, artifactBudget))];
+    await Promise.allSettled([...pendingResponses, ...pendingRequestFacts]);
+    const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, requestFacts, responseAssertions, artifactBudget))];
     return {
       status: 'completed',
       final_url: page.url(),
@@ -2804,9 +3003,10 @@ async function loginWorker(request) {
 
 async function probeWorker(outputPath) {
   const { chromium } = await import('playwright');
+  const multibyteText = '中文页面'.repeat(1024);
   const server = createServer((_request, response) => {
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    response.end('<!doctype html><html><body><main><h1>tshoot browser runtime probe</h1></main></body></html>');
+    response.end(`<!doctype html><html><head><title>tshoot browser runtime probe</title></head><body><main><p>${multibyteText}</p><input type="search" placeholder="请输入搜索关键字"></main></body></html>`);
   });
   await new Promise((resolveListen, reject) => {
     server.once('error', reject);
@@ -2819,6 +3019,7 @@ async function probeWorker(outputPath) {
   };
   const launched = await launchPinnedBrowser(chromium, policy, true);
   const browser = launched.browser;
+  let workerResult;
   try {
     const supervised = await createSupervisedBrowserContext(browser, { policy });
     const context = supervised.context;
@@ -2826,6 +3027,13 @@ async function probeWorker(outputPath) {
       const page = supervised.page;
       await page.goto(`${origin}/`, { waitUntil: 'domcontentloaded' });
       await page.screenshot({ path: outputPath, type: 'png' });
+      workerResult = {
+        status: 'completed',
+        final_url: page.url(),
+        title: await page.title(),
+        accessibility_summary: await accessibilitySummary(page),
+        artifacts: [],
+      };
       if (launched.proxy.stats().http < 1) throw new Error('runtime probe bypassed the pinned browser proxy');
     } finally {
       await context.close();
@@ -2836,7 +3044,12 @@ async function probeWorker(outputPath) {
   }
   const content = await readFile(outputPath);
   if (content.length <= 8) throw new Error('probe screenshot is empty');
-  return { status: 'ready', sha256: createHash('sha256').update(content).digest('hex') };
+  return {
+    status: 'ready',
+    sha256: createHash('sha256').update(content).digest('hex'),
+    protocol_version: 1,
+    worker_result: workerResult,
+  };
 }
 
 async function readSingleRequest() {

@@ -1,5 +1,5 @@
 import { mount } from '@vue/test-utils'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { topology } from '../../wailsjs/go/models'
 import type { ServiceTopologyOverrideState } from '../lib/yamlGenerator'
 import ServiceTopologyPanel from './ServiceTopologyPanel.vue'
@@ -103,6 +103,8 @@ function mountPanel(overrides: Partial<{
 }
 
 describe('ServiceTopologyPanel', () => {
+  afterEach(() => vi.restoreAllMocks())
+
   it('shows text and color statuses and exposes selected endpoint evidence', async () => {
     const wrapper = mountPanel()
 
@@ -283,6 +285,24 @@ describe('ServiceTopologyPanel', () => {
     }
     expect(wrapper.get('[data-action="refresh"]').attributes('disabled')).toBeDefined()
     expect(wrapper.get('[data-feedback]').attributes('aria-live')).toBe('polite')
+  })
+
+  it('prevents and clears refresh-button text selection across the loading label change', async () => {
+    const removeAllRanges = vi.fn()
+    vi.spyOn(window, 'getSelection').mockReturnValue({ removeAllRanges } as unknown as Selection)
+    const wrapper = mountPanel()
+    const refresh = wrapper.get('[data-action="refresh"]')
+    const selectStart = new Event('selectstart', { bubbles: true, cancelable: true })
+
+    refresh.element.dispatchEvent(selectStart)
+    expect(selectStart.defaultPrevented).toBe(true)
+    await refresh.trigger('click')
+    expect(removeAllRanges).toHaveBeenCalledTimes(1)
+    expect(wrapper.emitted('refresh')).toHaveLength(1)
+
+    await wrapper.setProps({ loading: true })
+    expect(removeAllRanges).toHaveBeenCalledTimes(2)
+    expect(refresh.text()).toContain('扫描调用关系中')
   })
 
   it('announces errors and disables refresh when an external operation is active', async () => {

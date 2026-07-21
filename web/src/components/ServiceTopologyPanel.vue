@@ -233,8 +233,14 @@ function emitAdd() {
 }
 
 function requestRefresh() {
-  if (!locked.value) emit('refresh')
+  if (locked.value) return
+  window.getSelection?.()?.removeAllRanges()
+  emit('refresh')
 }
+
+watch(() => props.loading, (loading) => {
+  if (loading) window.getSelection?.()?.removeAllRanges()
+}, { flush: 'post' })
 </script>
 
 <template>
@@ -252,6 +258,7 @@ function requestRefresh() {
         type="button"
         data-action="refresh"
         :disabled="locked"
+        @selectstart.prevent
         @click="requestRefresh"
       >{{ loading ? '扫描调用关系中…' : '重新扫描调用关系' }}</button>
     </header>
@@ -556,13 +563,18 @@ function requestRefresh() {
   grid-template-columns: minmax(320px, .75fr) minmax(480px, 1.25fr);
   align-items: start;
   gap: 16px;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
   margin-top: 16px;
 }
 
 .topology-graph,
 .evidence-panel,
 .manual-edge {
+  box-sizing: border-box;
   min-width: 0;
+  max-width: 100%;
   padding: 16px;
   border: 1px solid var(--c-line);
   border-radius: var(--r-md);
@@ -667,6 +679,8 @@ function requestRefresh() {
 .relation-evidence-list {
   display: grid;
   gap: 10px;
+  min-width: 0;
+  max-width: 100%;
   max-height: min(560px, 60vh);
   margin-top: 16px;
   padding-right: 4px;
@@ -674,7 +688,9 @@ function requestRefresh() {
   scrollbar-gutter: stable;
 }
 .relation-evidence-card {
+  box-sizing: border-box;
   min-width: 0;
+  max-width: 100%;
   padding: 12px;
   border: 1px solid var(--c-line);
   border-radius: var(--r-md);
